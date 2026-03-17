@@ -7,7 +7,7 @@ A statically-typed functional programming language. The compiler is implemented 
 ## Design Decisions Made
 
 ### Type System
-- **Hindley-Milner inference with bidirectional type checking** at function boundaries — balances inference convenience with good error localization
+- **Hindley-Milmer inference with bidirectional type checking** at function boundaries — balances inference convenience with good error localization
 - **Type annotations optional** everywhere except where inference fails (recursive functions, ambiguous overloads)
 - **Linear and affine types** for ownership, safe mutation, actor message-passing isolation, and FFI safety
 - **Provenance-tracking types** — every type constraint carries a *reason* chain (not just a span), so errors explain *why* a type was expected
@@ -31,7 +31,7 @@ A statically-typed functional programming language. The compiler is implemented 
 - **Strings**: `String`, `Char`, `Rope` (stdlib), `Regex` (stdlib). String interpolation via `${}` desugared to `Interpolatable` interface.
 - **Collections**: `List(a)`, `Array(a)` (fixed-size contiguous), `Map(k, v)`, `Set(a)`, `Option(a)`, `Result(a, e)`
 - **Sized arrays**: `Vector(n, a)`, `Matrix(m, n, a)`, `NDArray(shape, a)` — dimension-checked at compile time via type-level naturals
-- **Concurrency**: `Pid(a)` (location-transparent), `Cap(a)`, `Future(a)`, `Stream(a)`, `Task(a)` (structured concurrency), `Node`
+- **Concurrency**: `Pid(a)`, `Cap(a)`, `Future(a)`, `Stream(a)`, `Task(a)` (structured concurrency), `Node`
 - **Constraints**: `Sendable(a)` — compiler-derived, marks types safe to cross node/thread boundaries
 - **FFI**: `linear Ptr(a)`, per-library `Cap(LibName)`
 
@@ -61,9 +61,9 @@ A statically-typed functional programming language. The compiler is implemented 
 ### Compiler Backend
 - **Whole-program monomorphization** — all polymorphic functions specialized to concrete types (like Rust/MLton)
 - **Defunctionalization** — closures become tagged unions + dispatch (no closure allocation, no indirect calls)
-- **Content-addressed code** — whole-definition hashing (SHA-256), names are aliases to hashes. Enables: reproducible builds, incremental compilation via hash caching, no dependency conflicts, safe distributed actor migration, semantic code search
+- **Content-addressed code** — whole-definition hashing (SHA-256), names are aliases to hashes
 - **Query-based/demand-driven compiler architecture** (not a pipeline) — incremental recompilation falls out naturally
-- **Compilation target**: LLVM
+- **Compilation target**: LLVM IR
 
 ### Compiler Pass Order
 1. Parse (with hole injection on error)
@@ -75,74 +75,66 @@ A statically-typed functional programming language. The compiler is implemented 
 7. Defunctionalize (closures → tagged unions)
 8. Code generation
 
-### Tooling / LLM Integration
-- LSP with type-at-cursor, go-to-definition via content-addressed lookup, type-directed completion
-- Typed holes as structured prompts for LLMs (compiler provides expected type + available bindings)
-- Canonical formatter (one true format)
-- MCP server for direct LLM-compiler integration
-- Content-addressed semantic search by type signature
-- Tree-sitter grammar planned
-
 ## Implementation Language
 - **OCaml 5.3.0** via opam switch named `march`
 - Dependencies: dune, menhir, ppx_deriving, alcotest, odoc
+- `opam` and `dune` are available directly in PATH
 
 ## Project Structure
 
 ```
 march/
+├── CLAUDE.md                # Build instructions and project map
 ├── specs/design.md          # Full language design spec
+├── specs/epochs-design.md
+├── specs/gc_design.md
 ├── progress.md              # This file
-├── dune-project             # Dune build config (menhir enabled)
+├── dune-project
 ├── .gitignore
 ├── .ocamlformat
 ├── bin/
 │   ├── dune
-│   └── main.ml              # Compiler entry point (stub)
+│   └── main.ml              # parse → desugar → typecheck → eval pipeline
 ├── lib/
-│   ├── ast/
-│   │   ├── dune
-│   │   └── ast.ml           # Full AST with spans, atoms, linear types,
-│   │                        # multi-head fn_def, actors, protocols
-│   ├── lexer/
-│   │   ├── dune
-│   │   └── lexer.mll        # ocamllex: atoms, pipes, do/end, when, etc.
-│   ├── parser/
-│   │   ├── dune
-│   │   └── parser.mly       # menhir: full expression grammar, fn head
-│   │                        # grouping, guards, operators, modules
-│   ├── typecheck/
-│   │   ├── dune
-│   │   └── typecheck.ml     # Type checker stub (HM + bidirectional)
-│   ├── effects/
-│   │   ├── dune
-│   │   └── effects.ml       # Capability system stub (replaced effects)
-│   ├── codegen/
-│   │   ├── dune
-│   │   └── codegen.ml       # Code generation stub
-│   └── errors/
-│       ├── dune
-│       └── errors.ml        # Diagnostic system (severity, spans, labels)
+│   ├── ast/ast.ml           # Full AST: spans, exprs, patterns, decls, actors
+│   ├── lexer/lexer.mll      # ocamllex: atoms, pipes, do/end, when, etc.
+│   ├── parser/parser.mly    # menhir: full expression grammar, fn head grouping
+│   ├── desugar/desugar.ml   # pipe desugar, multi-head fn → single EMatch clause
+│   ├── typecheck/typecheck.ml  # Bidirectional HM, constructor registry, error recovery
+│   ├── eval/eval.ml         # Tree-walking interpreter, base_env builtins
+│   ├── effects/effects.ml   # Placeholder
+│   ├── codegen/codegen.ml   # Placeholder
+│   └── errors/errors.ml     # Diagnostic type (Error/Warning/Hint + span)
 └── test/
     ├── dune
-    └── test_march.ml         # 21 passing tests (lexer, parser, module, AST)
+    └── test_march.ml        # 40 passing tests
 ```
 
 ## Current State
 
-- **Builds clean** (menhir warnings for unused tokens that are reserved for future features, 3 shift/reduce conflicts from lambda/expr overlap — harmless)
-- **21 tests passing**: lexer (12), AST (1), parser (5), module parsing (2), keywords (1)
-- **Git initialized** but no commits yet
-- The lexer and parser handle the full surface syntax including atoms, pipes, fn head matching, guards, type annotations, typed holes, operators, and do/end blocks
-- Type checker, capability system, and codegen are stubs
+- **Builds clean**
+- **40 tests passing**: lexer (12), AST (1), parser (5), module (2), keywords (1), desugar (3), typecheck (8), eval (8)
+- **Full pipeline working**: `march file.march` parses → desugars → typechecks → runs `main()` if present
+- Bidirectional HM type checker with constructor registry (`DType` → `ctor_info`), builtin `Some/None/Ok/Err`
+- Tree-walking interpreter: `value` type, pattern matching, `base_env` builtins, two-pass `eval_module_env` for mutual recursion
 
-## What to Do Next
+## Next Steps
 
-1. **Commit the initial project** — everything is staged
-2. **Implement the type checker** — HM unification with provenance, bidirectional checking, linearity enforcement, type-level naturals, error recovery via typed holes, exhaustiveness checking. Design is fully specified (see conversation history for Sections 1–5).
-3. **Build a simple evaluator/interpreter** — useful for testing before codegen exists
-4. **Update AST** to include `ERecordUpdate`, `EHole`, and type-level nat nodes
-5. **Update parser** for `{ state with ... }` record update syntax and `${}` string interpolation
+### Blocking real programs (do first)
+1. **Unary minus / negative literals** — `-5` currently parses as `0 - 5` binary subtraction at best; needs a `MINUS expr` unary rule in the parser or negation sugar
+2. **Top-level let bindings evaluate at module init** — currently `DLet` in `eval_decl` works, but hasn't been stress-tested with non-trivial expressions
+3. **Recursive closure bug** — a `VClosure` captures `env` at creation time; lambdas defined inside top-level fns won't see peer top-level fns defined after them. Fix: closures should look up names lazily via `env_ref`.
+4. **List literal syntax** — `[1, 2, 3]` desugars to `Cons(1, Cons(2, Cons(3, Nil)))`. Currently no list syntax; users must write constructors by hand.
+
+### REPL (next major feature)
+- `march` with no file argument drops into a read-eval-print loop
+- Reads one declaration or expression at a time
+- Maintains a running `env` across lines
+- Pretty-print values (needs a proper `value_to_string` for structured values)
+
+### IR / codegen (after REPL)
+- Decision needed: emit C, LLVM IR, or a custom bytecode first?
+- See briefing below (to be written once REPL is done)
 
 ## Resolved Open Questions
 
@@ -166,15 +158,3 @@ march/
 - **Unboxed types + linearity** — linearity checking must happen before representation decisions (on typed IR where all values are abstract).
 - **Provenance tracking + defunctionalization** — strip provenance after type checking, before backend passes, to avoid metadata bloat.
 - **Type-level nat solver complexity** — must keep it decidable. Only `Nat` in type-level positions, only `+`, `*`, equality. No general term dependency.
-
-## Setup Instructions
-
-```bash
-# The opam switch is already created
-eval $(opam env --switch=march)
-
-cd ~/code/march
-dune build      # builds everything
-dune runtest    # runs 21 tests
-dune exec march # prints "march 0.1.0 — not yet implemented"
-```

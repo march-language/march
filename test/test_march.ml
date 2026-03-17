@@ -275,6 +275,98 @@ let test_lexer_when () =
   Alcotest.(check bool) "lexes when keyword" true
     (match tok with March_parser.Parser.WHEN -> true | _ -> false)
 
+(* ── Eval helpers ───────────────────────────────────────────────────────── *)
+
+let eval_module src =
+  let m = parse_and_desugar src in
+  March_eval.Eval.eval_module_env m
+
+let call_fn env name args =
+  let fn_val = List.assoc name env in
+  March_eval.Eval.apply fn_val args
+
+(* ── Eval tests ─────────────────────────────────────────────────────────── *)
+
+let test_eval_literal () =
+  let env = eval_module {|mod Test do
+    fn answer() do 42 end
+  end|} in
+  let v = call_fn env "answer" [] in
+  Alcotest.(check int) "literal 42" 42
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+let test_eval_arithmetic () =
+  let env = eval_module {|mod Test do
+    fn add(x, y) do x + y end
+  end|} in
+  let v = call_fn env "add"
+      [March_eval.Eval.VInt 3; March_eval.Eval.VInt 4] in
+  Alcotest.(check int) "3 + 4 = 7" 7
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+let test_eval_recursion () =
+  let env = eval_module {|mod Test do
+    fn fib(0) do 0 end
+    fn fib(1) do 1 end
+    fn fib(n) do fib(n - 1) + fib(n - 2) end
+  end|} in
+  let v = call_fn env "fib" [March_eval.Eval.VInt 7] in
+  Alcotest.(check int) "fib(7) = 13" 13
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+let test_eval_if () =
+  let env = eval_module {|mod Test do
+    fn abs(x) do if x < 0 then negate(x) else x end
+  end|} in
+  let v = call_fn env "abs" [March_eval.Eval.VInt (-5)] in
+  Alcotest.(check int) "abs(-5) = 5" 5
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+let test_eval_match_adt () =
+  let env = eval_module {|mod Test do
+    type Shape = Circle(Int) | Square(Int)
+    fn area(s) do
+      match s with
+      | Circle(r) -> r * r
+      | Square(side) -> side * side
+      end
+    end
+  end|} in
+  let circle = March_eval.Eval.VCon ("Circle", [March_eval.Eval.VInt 3]) in
+  let v = call_fn env "area" [circle] in
+  Alcotest.(check int) "area(Circle(3)) = 9" 9
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+let test_eval_tuple () =
+  let env = eval_module {|mod Test do
+    fn swap(x, y) do (y, x) end
+  end|} in
+  let v = call_fn env "swap"
+      [March_eval.Eval.VInt 1; March_eval.Eval.VInt 2] in
+  match v with
+  | March_eval.Eval.VTuple [March_eval.Eval.VInt 2; March_eval.Eval.VInt 1] -> ()
+  | _ -> Alcotest.fail "expected VTuple [2; 1]"
+
+let test_eval_let_binding () =
+  let env = eval_module {|mod Test do
+    fn double(x) do
+      let y = x + x
+      y
+    end
+  end|} in
+  let v = call_fn env "double" [March_eval.Eval.VInt 5] in
+  Alcotest.(check int) "double(5) = 10" 10
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+let test_eval_closure () =
+  let env = eval_module {|mod Test do
+    fn make_adder(n) do fn x -> x + n end
+  end|} in
+  let adder = call_fn env "make_adder" [March_eval.Eval.VInt 10] in
+  let v = March_eval.Eval.apply adder [March_eval.Eval.VInt 5] in
+  Alcotest.(check int) "make_adder(10)(5) = 15" 15
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
 let () =
   Alcotest.run "march"
     [
@@ -330,5 +422,16 @@ let () =
           Alcotest.test_case "match expression"    `Quick test_tc_match;
           Alcotest.test_case "undefined variable"  `Quick test_tc_undefined_var;
           Alcotest.test_case "typed hole"          `Quick test_tc_hole;
+        ] );
+      ( "eval",
+        [
+          Alcotest.test_case "literal"             `Quick test_eval_literal;
+          Alcotest.test_case "arithmetic"          `Quick test_eval_arithmetic;
+          Alcotest.test_case "recursion"           `Quick test_eval_recursion;
+          Alcotest.test_case "if expression"       `Quick test_eval_if;
+          Alcotest.test_case "match ADT"           `Quick test_eval_match_adt;
+          Alcotest.test_case "tuple"               `Quick test_eval_tuple;
+          Alcotest.test_case "let binding"         `Quick test_eval_let_binding;
+          Alcotest.test_case "closure"             `Quick test_eval_closure;
         ] );
     ]

@@ -52,6 +52,14 @@ let () =
           d.message
       ) diags;
     if March_errors.Errors.has_errors errors then exit 1
+    else begin
+      try March_eval.Eval.run_module desugared
+      with
+      | March_eval.Eval.Eval_error msg ->
+        Printf.eprintf "%s: runtime error: %s\n" filename msg; exit 1
+      | March_eval.Eval.Match_failure msg ->
+        Printf.eprintf "%s: match failure: %s\n" filename msg; exit 1
+    end
   | _ ->
     Printf.eprintf "Usage: march <file.march>\n";
     exit 1
