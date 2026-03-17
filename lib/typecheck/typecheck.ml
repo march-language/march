@@ -235,16 +235,26 @@ type lin_entry = {
   le_used : bool ref;
 }
 
+(** Constructor info — populated from [DType] declarations.
+    Describes one variant of a sum type so we can give [ECon] and
+    [PatCon] real types instead of fresh variables. *)
+type ctor_info = {
+  ci_type    : string;        (** Parent type name, e.g. "Result" *)
+  ci_params  : string list;   (** Type param names in declaration order *)
+  ci_arg_tys : Ast.ty list;   (** Surface arg types of this constructor *)
+}
+
 type env = {
-  vars    : (string * scheme) list;   (** Term variable → scheme *)
-  types   : (string * int) list;      (** Type constructor name → arity *)
-  level   : int;                      (** Current generalization level *)
-  lin     : lin_entry list;           (** Linear/affine use tracking *)
+  vars    : (string * scheme) list;        (** Term variable → scheme *)
+  types   : (string * int) list;           (** Type constructor name → arity *)
+  ctors   : (string * ctor_info) list;     (** Data constructor name → info *)
+  level   : int;                           (** Current generalization level *)
+  lin     : lin_entry list;                (** Linear/affine use tracking *)
   errors  : Err.ctx;
 }
 
 let make_env errors = {
-  vars = []; types = []; level = 0; lin = []; errors
+  vars = []; types = []; ctors = []; level = 0; lin = []; errors
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -252,6 +262,7 @@ let leave_level env = { env with level = env.level - 1 }
 
 let lookup_var  name env = List.assoc_opt name env.vars
 let lookup_type name env = List.assoc_opt name env.types
+let lookup_ctor name env = List.assoc_opt name env.ctors
 
 let bind_var name sch env =
   { env with vars = (name, sch) :: env.vars }
@@ -372,10 +383,20 @@ let builtin_types : (string * int) list =
     ("Task",   1); ("Node",   0);
     ("Vector", 2); ("Matrix", 3); ("NDArray", 2); ]
 
+(** Built-in constructor table for Option and Result, which are
+    pre-registered types.  User-declared types are added via [DType]. *)
+let builtin_ctors : (string * ctor_info) list =
+  let mk_var s = Ast.TyVar { txt = s; span = Ast.dummy_span } in
+  [ ("Some", { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [mk_var "a"] });
+    ("None", { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [] });
+    ("Ok",   { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "a"] });
+    ("Err",  { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "e"] });
+  ]
+
 let base_env errors =
   let env = make_env errors in
   let env = bind_vars builtin_bindings env in
-  { env with types = builtin_types }
+  { env with types = builtin_types; ctors = builtin_ctors }
 
 (* =================================================================
    §10  Unification
@@ -514,6 +535,22 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
   | Ast.TyNatOp (op, a, b) ->
     TNatOp (op, surface_ty env ~tvars a, surface_ty env ~tvars b)
 
+(** Instantiate a constructor's type at the current level.
+    Creates fresh unification variables for each type parameter of the
+    parent type, then converts the constructor's argument surface-types
+    using those variables.  Returns [(arg_tys, result_ty)]:
+    - [arg_tys]   : the expected type of each constructor argument
+    - [result_ty] : the type the fully-applied constructor produces *)
+let instantiate_ctor env (ci : ctor_info) : ty list * ty =
+  (* One fresh unification variable per type parameter *)
+  let fresh_pairs = List.map (fun name -> (name, fresh_var env.level)) ci.ci_params in
+  let tvars = ref fresh_pairs in
+  (* Convert each argument's surface type, substituting the fresh vars *)
+  let arg_tys = List.map (surface_ty env ~tvars) ci.ci_arg_tys in
+  (* Build TCon(ParentType, [fresh_a; fresh_b; …]) *)
+  let result_ty = TCon (ci.ci_type, List.map snd fresh_pairs) in
+  (arg_tys, result_ty)
+
 (* =================================================================
    §12  Linearity tracking
    ================================================================= *)
@@ -583,11 +620,38 @@ let rec infer_pattern env (pat : Ast.pattern)
     bindings, TTuple tys
 
   | Ast.PatCon (name, ps) ->
-    (* Constructor pattern — proper resolution deferred to type-registry pass *)
-    let bs_tys   = List.map (infer_pattern env) ps in
-    let bindings  = List.concat_map fst bs_tys in
-    ignore name;
-    bindings, fresh_var env.level
+    (match lookup_ctor name.txt env with
+     | None ->
+       Err.error env.errors ~span:name.span
+         (Printf.sprintf
+            "I don't know a constructor called `%s`.\n\
+             Is this a typo, or did you forget to declare the type?" name.txt);
+       let bindings = List.concat_map fst (List.map (infer_pattern env) ps) in
+       bindings, TError
+     | Some ci ->
+       let arg_tys, result_ty = instantiate_ctor env ci in
+       let n_expected = List.length arg_tys in
+       let n_got      = List.length ps in
+       if n_expected <> n_got then begin
+         Err.error env.errors ~span:name.span
+           (Printf.sprintf
+              "Constructor `%s` expects %d argument(s) in a pattern but I got %d."
+              name.txt n_expected n_got);
+         let bindings = List.concat_map fst (List.map (infer_pattern env) ps) in
+         bindings, TError
+       end else begin
+         let all_bindings = ref [] in
+         List.iter2 (fun pat arg_ty ->
+             let bindings, pat_ty = infer_pattern env pat in
+             all_bindings := bindings @ !all_bindings;
+             unify env ~span:name.span
+               ~reason:(Some (RBuiltin
+                 (Printf.sprintf "I'm checking the pattern for constructor `%s`."
+                    name.txt)))
+               pat_ty arg_ty
+           ) ps arg_tys;
+         !all_bindings, result_ty
+       end)
 
   | Ast.PatAtom (_, ps, _) ->
     let bs_tys   = List.map (infer_pattern env) ps in
@@ -687,10 +751,34 @@ let rec infer_expr env (e : Ast.expr) : ty =
     infer_app env sp f_ty args 0
 
   (* ── Constructor application ──────────────────────────────────── *)
-  | Ast.ECon (_, args, _) ->
-    (* Proper resolution deferred to type-registry pass *)
-    List.iter (fun a -> ignore (infer_expr env a)) args;
-    fresh_var env.level
+  | Ast.ECon (name, args, sp) ->
+    (match lookup_ctor name.txt env with
+     | None ->
+       Err.error env.errors ~span:name.span
+         (Printf.sprintf
+            "I don't know a constructor called `%s`.\n\
+             Is this a typo, or did you forget to declare the type?" name.txt);
+       List.iter (fun a -> ignore (infer_expr env a)) args;
+       TError
+     | Some ci ->
+       let arg_tys, result_ty = instantiate_ctor env ci in
+       let n_expected = List.length arg_tys in
+       let n_got      = List.length args in
+       if n_expected <> n_got then begin
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "Constructor `%s` expects %d argument(s) but I got %d."
+              name.txt n_expected n_got);
+         List.iter (fun a -> ignore (infer_expr env a)) args;
+         TError
+       end else begin
+         List.iter2 (fun arg arg_ty ->
+             check_expr env arg arg_ty
+               ~reason:(Some (RBuiltin
+                 (Printf.sprintf "Argument to constructor `%s`." name.txt)))
+           ) args arg_tys;
+         result_ty
+       end)
 
   (* ── Lambdas ──────────────────────────────────────────────────── *)
   | Ast.ELam (params, body, _) ->
@@ -1079,8 +1167,18 @@ let rec check_decl env (d : Ast.decl) : env =
     in
     bind_vars bindings' env
 
-  | Ast.DType (name, params, _def, _sp) ->
-    { env with types = (name.txt, List.length params) :: env.types }
+  | Ast.DType (name, params, typedef, _sp) ->
+    let env1 = { env with types = (name.txt, List.length params) :: env.types } in
+    (match typedef with
+     | Ast.TDVariant variants ->
+       let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+       List.fold_left (fun e (v : Ast.variant) ->
+           let ci = { ci_type    = name.txt
+                    ; ci_params  = param_names
+                    ; ci_arg_tys = v.var_args } in
+           { e with ctors = (v.var_name.txt, ci) :: e.ctors }
+         ) env1 variants
+     | Ast.TDRecord _ | Ast.TDAlias _ -> env1)
 
   | Ast.DActor (name, actor, _sp) ->
     (* Check init expression and all message handlers *)
@@ -1128,13 +1226,23 @@ let rec check_decl env (d : Ast.decl) : env =
 
     Returns the [Err.ctx] containing all diagnostics. *)
 let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx =
-  (* Pass 1: forward-reference placeholders *)
+  (* Pass 1: forward-reference placeholders for functions and type/ctor names *)
   let pre_env = List.fold_left (fun env d ->
       match d with
       | Ast.DFn (def, _) ->
         bind_var def.fn_name.txt (Mono (fresh_var 0)) env
-      | Ast.DType (name, params, _, _) ->
-        { env with types = (name.txt, List.length params) :: env.types }
+      | Ast.DType (name, params, typedef, _) ->
+        let env1 = { env with types = (name.txt, List.length params) :: env.types } in
+        (match typedef with
+         | Ast.TDVariant variants ->
+           let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+           List.fold_left (fun e (v : Ast.variant) ->
+               let ci = { ci_type    = name.txt
+                        ; ci_params  = param_names
+                        ; ci_arg_tys = v.var_args } in
+               { e with ctors = (v.var_name.txt, ci) :: e.ctors }
+             ) env1 variants
+         | _ -> env1)
       | _ -> env
     ) (base_env errors) m.Ast.mod_decls
   in

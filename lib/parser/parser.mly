@@ -280,7 +280,7 @@ expr_atom:
   | a = ATOM
     { EAtom (a, [], mk_span ($loc)) }
   | id = LOWER_IDENT { EVar (mk_name id $loc) }
-  | id = UPPER_IDENT { EVar (mk_name id $loc) }
+  | con = UPPER_IDENT { ECon (mk_name con $loc, [], mk_span ($loc)) }
   | QUESTION; id = option(LOWER_IDENT)
     { EHole (Option.map (fun i -> mk_name i $loc) id, mk_span ($loc)) }
   | LPAREN; e = expr; RPAREN { e }
