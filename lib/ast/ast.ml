@@ -252,3 +252,10 @@ and extern_fn = {
 
 (** A module is a list of declarations. *)
 type module_ = { mod_name : name; mod_decls : decl list } [@@deriving show]
+
+(** Input to the REPL: a declaration, a bare expression, or EOF. *)
+type repl_input =
+  | ReplDecl of decl
+  | ReplExpr of expr
+  | ReplEOF
+[@@deriving show]

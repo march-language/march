@@ -133,24 +133,48 @@ let cmp_op op_i op_f op_s op_b name = VBuiltin (name, function
     | [VBool a;   VBool b]   -> VBool (op_b a b)
     | _ -> eval_error "builtin %s: incompatible operand types" name)
 
-let value_to_string = function
+(** Detect whether a VCon chain is a March list (Nil / Cons(h, t)). *)
+let rec is_list_value = function
+  | VCon ("Nil", []) -> true
+  | VCon ("Cons", [_; t]) -> is_list_value t
+  | _ -> false
+
+let rec list_elems acc = function
+  | VCon ("Nil", []) -> List.rev acc
+  | VCon ("Cons", [h; t]) -> list_elems (h :: acc) t
+  | v -> List.rev (v :: acc)  (* improper list — shouldn't happen *)
+
+let rec value_to_string v =
+  match v with
   | VInt n    -> string_of_int n
   | VFloat f  ->
     let s = string_of_float f in
-    (* Ensure there's always a decimal point *)
     if String.contains s '.' || String.contains s 'e' then s
     else s ^ ".0"
-  | VString s -> s
+  | VString s -> "\"" ^ String.escaped s ^ "\""
   | VBool b   -> string_of_bool b
   | VAtom a   -> ":" ^ a
   | VUnit     -> "()"
   | VTuple vs ->
-    "(" ^ String.concat ", " (List.map (fun _ -> "?") vs) ^ ")"
-  | VRecord _ -> "{...}"
+    "(" ^ String.concat ", " (List.map value_to_string vs) ^ ")"
+  | VRecord fields ->
+    "{ " ^ String.concat ", "
+      (List.map (fun (k, v) -> k ^ " = " ^ value_to_string v) fields)
+    ^ " }"
+  | VCon ("Nil", []) -> "[]"
+  | VCon ("Cons", _) as v when is_list_value v ->
+    "[" ^ String.concat ", " (List.map value_to_string (list_elems [] v)) ^ "]"
   | VCon (tag, []) -> tag
-  | VCon (tag, _)  -> tag ^ "(...)"
+  | VCon (tag, args) ->
+    tag ^ "(" ^ String.concat ", " (List.map value_to_string args) ^ ")"
   | VClosure _  -> "<fn>"
   | VBuiltin (n, _) -> "<builtin:" ^ n ^ ">"
+
+(** print/println use a display form (no quotes around strings). *)
+let value_display v =
+  match v with
+  | VString s -> s
+  | _         -> value_to_string v
 
 let base_env : env =
   [ (* Integer arithmetic *)
@@ -201,11 +225,11 @@ let base_env : env =
         | _ -> eval_error "builtin ++: expected two strings"))
     (* I/O *)
   ; ("print", VBuiltin ("print", function
-        | [v] -> print_string (value_to_string v); VUnit
-        | vs  -> List.iter (fun v -> print_string (value_to_string v)) vs; VUnit))
+        | [v] -> print_string (value_display v); VUnit
+        | vs  -> List.iter (fun v -> print_string (value_display v)) vs; VUnit))
   ; ("println", VBuiltin ("println", function
-        | [v] -> print_endline (value_to_string v); VUnit
-        | vs  -> List.iter (fun v -> print_string (value_to_string v)) vs;
+        | [v] -> print_endline (value_display v); VUnit
+        | vs  -> List.iter (fun v -> print_string (value_display v)) vs;
                  print_newline (); VUnit))
   ; ("print_int", VBuiltin ("print_int", function
         | [VInt n] -> print_int n; VUnit

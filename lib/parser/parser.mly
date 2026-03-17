@@ -63,6 +63,7 @@
 
 %start <March_ast.Ast.module_> module_
 %start <March_ast.Ast.expr> expr_eof
+%start <March_ast.Ast.repl_input> repl_input
 
 %%
 
@@ -253,8 +254,16 @@ expr_add:
   | e = expr_mul { e }
 
 expr_mul:
-  | a = expr_mul; STAR; b = expr_app { EApp (EVar (mk_name "*" $loc), [a; b], mk_span ($loc)) }
-  | a = expr_mul; SLASH; b = expr_app { EApp (EVar (mk_name "/" $loc), [a; b], mk_span ($loc)) }
+  | a = expr_mul; STAR; b = expr_unary { EApp (EVar (mk_name "*" $loc), [a; b], mk_span ($loc)) }
+  | a = expr_mul; SLASH; b = expr_unary { EApp (EVar (mk_name "/" $loc), [a; b], mk_span ($loc)) }
+  | e = expr_unary { e }
+
+(** Unary operators: -expr, !expr *)
+expr_unary:
+  | MINUS; e = expr_unary
+    { EApp (EVar (mk_name "negate" $loc), [e], mk_span ($loc)) }
+  | BANG; e = expr_unary
+    { EApp (EVar (mk_name "not" $loc), [e], mk_span ($loc)) }
   | e = expr_app { e }
 
 expr_app:
@@ -288,6 +297,15 @@ expr_atom:
     { ETuple (e :: es, mk_span ($loc)) }
   | LPAREN; RPAREN { ETuple ([], mk_span ($loc)) }
   | DO; body = block_body; END { body }
+  (* List literals: [1, 2, 3]  →  Cons(1, Cons(2, Cons(3, Nil))) *)
+  | LBRACKET; RBRACKET
+    { ECon (mk_name "Nil" $loc, [], mk_span ($loc)) }
+  | LBRACKET; elems = separated_nonempty_list(COMMA, expr); RBRACKET
+    { let sp = mk_span ($loc) in
+      List.fold_right
+        (fun e acc -> ECon (mk_name "Cons" $loc, [e; acc], sp))
+        elems
+        (ECon (mk_name "Nil" $loc, [], sp)) }
   (* Record literal: { x = 1, y = 2 } *)
   | LBRACE; fields = separated_nonempty_list(COMMA, record_field_expr); RBRACE
     { ERecord (fields, mk_span ($loc)) }
@@ -319,6 +337,9 @@ simple_pattern:
   | UNDERSCORE { PatWild (mk_span ($loc)) }
   | id = lower_name { PatVar id }
   | n = INT { PatLit (LitInt n, mk_span ($loc)) }
+  | MINUS; n = INT { PatLit (LitInt (-n), mk_span ($loc)) }
+  | f = FLOAT { PatLit (LitFloat f, mk_span ($loc)) }
+  | MINUS; f = FLOAT { PatLit (LitFloat (-.f), mk_span ($loc)) }
   | s = STRING { PatLit (LitString s, mk_span ($loc)) }
   | b = BOOL { PatLit (LitBool b, mk_span ($loc)) }
   | LPAREN; p = pattern; RPAREN { p }
@@ -335,3 +356,8 @@ upper_name:
 
 expr_eof:
   | e = expr; EOF { e }
+
+repl_input:
+  | d = decl; EOF { March_ast.Ast.ReplDecl d }
+  | e = expr; EOF { March_ast.Ast.ReplExpr e }
+  | EOF           { March_ast.Ast.ReplEOF }

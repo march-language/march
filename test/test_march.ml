@@ -367,6 +367,98 @@ let test_eval_closure () =
   Alcotest.(check int) "make_adder(10)(5) = 15" 15
     (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
 
+(* ── Parser gap tests ───────────────────────────────────────────────────── *)
+
+let test_parse_unary_minus () =
+  (* -x  parses as  negate(x) *)
+  let lexbuf = Lexing.from_string "-x" in
+  let expr = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  match expr with
+  | March_ast.Ast.EApp (March_ast.Ast.EVar n, [_], _) ->
+    Alcotest.(check string) "unary minus becomes negate" "negate" n.txt
+  | _ -> Alcotest.fail "expected EApp(negate, [x])"
+
+let test_parse_negative_lit_pattern () =
+  (* match n with | -1 -> ... should produce PatLit(LitInt(-1)) *)
+  let src = {|mod T do
+    fn f(n) do
+      match n with
+      | -1 -> true
+      | _  -> false
+      end
+    end
+  end|} in
+  let m = parse_and_desugar src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    let clause = List.hd def.fn_clauses in
+    (match clause.fc_body with
+     | March_ast.Ast.EMatch (_, branches, _) ->
+       (match branches with
+        | br :: _ ->
+          (match br.branch_pat with
+           | March_ast.Ast.PatLit (March_ast.Ast.LitInt (-1), _) -> ()
+           | _ -> Alcotest.fail "expected PatLit(LitInt(-1))")
+        | [] -> Alcotest.fail "no branches")
+     | _ -> Alcotest.fail "expected EMatch")
+  | _ -> Alcotest.fail "expected single DFn"
+
+let test_parse_list_literal () =
+  (* [1, 2, 3]  →  Cons(1, Cons(2, Cons(3, Nil))) *)
+  let lexbuf = Lexing.from_string "[1, 2, 3]" in
+  let expr = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  match expr with
+  | March_ast.Ast.ECon (n, [_; _], _) when n.txt = "Cons" -> ()
+  | _ -> Alcotest.fail "expected Cons(1, Cons(...))"
+
+let test_eval_unary_minus () =
+  let env = eval_module {|mod Test do
+    fn neg(x) do -x end
+  end|} in
+  let v = call_fn env "neg" [March_eval.Eval.VInt 5] in
+  Alcotest.(check int) "-5" (-5)
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+let test_eval_list_literal () =
+  (* [1, 2] should produce Cons(1, Cons(2, Nil)) at runtime *)
+  let env = eval_module {|mod Test do
+    fn make_list() do [1, 2, 3] end
+  end|} in
+  let v = call_fn env "make_list" [] in
+  match v with
+  | March_eval.Eval.VCon ("Cons", [March_eval.Eval.VInt 1; _]) -> ()
+  | _ -> Alcotest.fail "expected Cons(1, ...)"
+
+let test_eval_negative_pattern () =
+  let env = eval_module {|mod Test do
+    fn sign(n) do
+      match n with
+      | 0  -> 0
+      | -1 -> -1
+      | _  -> 1
+      end
+    end
+  end|} in
+  let v = call_fn env "sign" [March_eval.Eval.VInt (-1)] in
+  Alcotest.(check int) "sign(-1) = -1" (-1)
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+let test_value_to_string () =
+  Alcotest.(check string) "int"    "42"          (March_eval.Eval.value_to_string (March_eval.Eval.VInt 42));
+  Alcotest.(check string) "string" "\"hello\""   (March_eval.Eval.value_to_string (March_eval.Eval.VString "hello"));
+  Alcotest.(check string) "tuple"  "(1, 2)"      (March_eval.Eval.value_to_string
+                                                    (March_eval.Eval.VTuple [March_eval.Eval.VInt 1; March_eval.Eval.VInt 2]));
+  Alcotest.(check string) "con"    "Some(42)"    (March_eval.Eval.value_to_string
+                                                    (March_eval.Eval.VCon ("Some", [March_eval.Eval.VInt 42])));
+  Alcotest.(check string) "nil"    "[]"          (March_eval.Eval.value_to_string
+                                                    (March_eval.Eval.VCon ("Nil", [])));
+  Alcotest.(check string) "list"   "[1, 2]"      (March_eval.Eval.value_to_string
+                                                    (March_eval.Eval.VCon ("Cons",
+                                                      [March_eval.Eval.VInt 1;
+                                                       March_eval.Eval.VCon ("Cons",
+                                                         [March_eval.Eval.VInt 2;
+                                                          March_eval.Eval.VCon ("Nil", [])])])))
+
 let () =
   Alcotest.run "march"
     [
@@ -433,5 +525,15 @@ let () =
           Alcotest.test_case "tuple"               `Quick test_eval_tuple;
           Alcotest.test_case "let binding"         `Quick test_eval_let_binding;
           Alcotest.test_case "closure"             `Quick test_eval_closure;
+          Alcotest.test_case "unary minus"         `Quick test_eval_unary_minus;
+          Alcotest.test_case "list literal"        `Quick test_eval_list_literal;
+          Alcotest.test_case "negative pattern"    `Quick test_eval_negative_pattern;
+          Alcotest.test_case "value_to_string"     `Quick test_value_to_string;
+        ] );
+      ( "parser gaps",
+        [
+          Alcotest.test_case "unary minus"         `Quick test_parse_unary_minus;
+          Alcotest.test_case "negative lit pattern"`Quick test_parse_negative_lit_pattern;
+          Alcotest.test_case "list literal"        `Quick test_parse_list_literal;
         ] );
     ]
