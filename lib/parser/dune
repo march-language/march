@@ -1,0 +1,7 @@
+(menhir
+ (modules parser)
+ (flags --explain))
+
+(library
+ (name march_parser)
+ (libraries march_ast))

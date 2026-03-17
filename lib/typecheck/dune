@@ -1,0 +1,3 @@
+(library
+ (name march_typecheck)
+ (libraries march_ast march_errors))

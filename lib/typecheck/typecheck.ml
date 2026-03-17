@@ -1,0 +1,1143 @@
+(** March type checker — bidirectional Hindley-Milner with provenance.
+
+    Architecture:
+      §1   Provenance (reason chains for error messages)
+      §2   Internal type representation (ty, tvar, scheme)
+      §3   Fresh variable generation + level management
+      §4   Type utilities (repr, occurs, free_ids)
+      §5   Pretty-printing
+      §6   Elm-style error message parts
+      §7   Type environment
+      §8   Generalization and instantiation
+      §9   Built-in types + base environment
+      §10  Unification
+      §11  Surface-type → internal-type conversion
+      §12  Linearity tracking
+      §13  Pattern inference
+      §14  Expression checking (bidirectional: infer / check)
+      §15  Declaration checking
+      §16  Module entry point
+
+    Key design choices:
+    - Bidirectional: [infer_expr] synthesises a type; [check_expr] verifies
+      against a known expected type.  Annotations and fn return types drive
+      the "checking" direction; everything else is inferred.
+    - Provenance: every [unify] call carries a [reason] that explains *why*
+      the expected type was expected.  Errors say "I expected X because Y".
+    - Error recovery: unification failures record a diagnostic and return;
+      the [TError] sentinel unifies with anything so checking continues.
+    - Linearity: linear/affine vars are tracked via mutable [bool ref]
+      "used" flags in the environment. *)
+
+module Ast  = March_ast.Ast
+module Err  = March_errors.Errors
+
+(* =================================================================
+   §1  Provenance — why was this type expected?
+   ================================================================= *)
+
+(** A [reason] explains why an expected type was expected.
+    Carried through [unify] calls so errors can say more than
+    "I expected X but found Y". *)
+type reason =
+  | RAnnotation of Ast.span            (** User wrote `: T` *)
+  | RFnReturn   of string * Ast.span   (** Declared return of fn `name` *)
+  | RFnArg      of Ast.span * int      (** Argument #i at a call site *)
+  | RMatchArm   of Ast.span            (** All match arms must agree *)
+  | RLetBind    of Ast.span            (** Rhs of a let binding *)
+  | RBuiltin    of string              (** Invariant baked into the language *)
+  | RBecause    of reason * string     (** Chain: A because "..." *)
+
+let rec span_of_reason = function
+  | RAnnotation sp       -> Some sp
+  | RFnReturn (_, sp)    -> Some sp
+  | RFnArg (sp, _)       -> Some sp
+  | RMatchArm sp         -> Some sp
+  | RLetBind sp          -> Some sp
+  | RBuiltin _           -> None
+  | RBecause (r, _)      -> span_of_reason r
+
+let string_of_reason = function
+  | RAnnotation _        -> "I got this expectation from the type annotation."
+  | RFnReturn (name, _)  ->
+    Printf.sprintf "This is the declared return type of `%s`." name
+  | RFnArg (_, i)        ->
+    Printf.sprintf "This is argument #%d of a function call." (i + 1)
+  | RMatchArm _          -> "All branches of a match must have the same type."
+  | RLetBind _           -> "This is the right-hand side of a let binding."
+  | RBuiltin s           -> s
+  | RBecause (_, s)      -> s
+
+(* =================================================================
+   §2  Internal type representation
+   ================================================================= *)
+
+(** Internal (elaborated) type.  Richer than the surface [Ast.ty]:
+    carries unification variables with level information, and a [TError]
+    sentinel that unifies with anything for graceful error recovery. *)
+type ty =
+  | TCon    of string * ty list          (** Int, List(a), Map(k,v) *)
+  | TVar    of tvar ref                  (** Unification variable *)
+  | TArrow  of ty * ty                   (** a -> b *)
+  | TTuple  of ty list                   (** (a, b, c) — unit when empty *)
+  | TRecord of (string * ty) list        (** { x : Int, y : Float } (sorted) *)
+  | TLin    of Ast.linearity * ty        (** linear / affine wrapper *)
+  | TNat    of int                       (** Type-level natural literal *)
+  | TNatOp  of Ast.nat_op * ty * ty      (** n + m, n * m *)
+  | TError                               (** Error sentinel *)
+
+and tvar =
+  | Unbound of int * int   (** id, generalization level *)
+  | Link    of ty          (** Solved: points to this type *)
+
+(** A type scheme encodes Hindley-Milner polymorphism.
+    [Poly(ids, ty)] represents ∀(α₁ … αₙ). τ where the αᵢ are the
+    [Unbound] variable ids that are quantified. *)
+type scheme =
+  | Mono of ty
+  | Poly of int list * ty
+
+(* =================================================================
+   §3  Fresh variable generation + level management
+   ================================================================= *)
+
+let _counter = ref 0
+let fresh_id () = incr _counter; !_counter
+
+(** Create a fresh unification variable at [level]. *)
+let fresh_var level = TVar (ref (Unbound (fresh_id (), level)))
+
+(* =================================================================
+   §4  Type utilities
+   ================================================================= *)
+
+(** Follow a chain of [Link]s, applying path compression. *)
+let rec repr = function
+  | TVar r as t ->
+    (match !r with
+     | Link t' ->
+       let t'' = repr t' in
+       r := Link t'';     (* path compression *)
+       t''
+     | Unbound _ -> t)
+  | t -> t
+
+(** Does unification variable [id] at [level] appear free in [t]?
+    Also adjusts levels of encountered unbound vars (for correct
+    generalization — this is the standard Rémy/Damas-Milner trick). *)
+let rec occurs id level = function
+  | TVar r ->
+    (match !r with
+     | Unbound (id', l) ->
+       if id = id' then true
+       else (if l > level then r := Unbound (id', level); false)
+     | Link t -> occurs id level t)
+  | TCon   (_, args)    -> List.exists (occurs id level) args
+  | TArrow (a, b)       -> occurs id level a || occurs id level b
+  | TTuple ts           -> List.exists (occurs id level) ts
+  | TRecord flds        -> List.exists (fun (_, t) -> occurs id level t) flds
+  | TLin   (_, t)       -> occurs id level t
+  | TNatOp (_, a, b)    -> occurs id level a || occurs id level b
+  | TNat _ | TError     -> false
+
+(* =================================================================
+   §5  Pretty-printing (used in error messages)
+   ================================================================= *)
+
+(** Cache of tvar id → display name ("a", "b", … "z", "a1", …) *)
+let _tvar_names : (int, string) Hashtbl.t = Hashtbl.create 16
+let _tvar_ctr    = ref 0
+
+let tvar_display_name id =
+  match Hashtbl.find_opt _tvar_names id with
+  | Some n -> n
+  | None   ->
+    let i = !_tvar_ctr in
+    incr _tvar_ctr;
+    let n =
+      let base = String.make 1 (Char.chr (Char.code 'a' + i mod 26)) in
+      if i < 26 then base else base ^ string_of_int (i / 26)
+    in
+    Hashtbl.add _tvar_names id n; n
+
+let rec pp_ty ?(parens = false) t =
+  let t = repr t in
+  let s = match t with
+    | TError -> "<error>"
+    | TCon (name, []) -> name
+    | TCon (name, args) ->
+      Printf.sprintf "%s(%s)" name
+        (String.concat ", " (List.map (pp_ty ~parens:false) args))
+    | TVar r ->
+      (match !r with
+       | Unbound (id, _) -> tvar_display_name id
+       | Link t'         -> pp_ty t')
+    | TArrow (a, b) ->
+      let inner =
+        Printf.sprintf "%s -> %s" (pp_ty ~parens:true a) (pp_ty b)
+      in
+      if parens then Printf.sprintf "(%s)" inner else inner
+    | TTuple []  -> "()"
+    | TTuple ts  ->
+      Printf.sprintf "(%s)" (String.concat ", " (List.map (pp_ty ~parens:false) ts))
+    | TRecord [] -> "{}"
+    | TRecord flds ->
+      let fs = List.map (fun (n, t) -> n ^ " : " ^ pp_ty t) flds in
+      "{ " ^ String.concat ", " fs ^ " }"
+    | TLin (Ast.Linear,        t) -> "linear " ^ pp_ty ~parens:true t
+    | TLin (Ast.Affine,        t) -> "affine " ^ pp_ty ~parens:true t
+    | TLin (Ast.Unrestricted,  t) -> pp_ty t
+    | TNat n                      -> string_of_int n
+    | TNatOp (Ast.NatAdd, a, b)   ->
+      Printf.sprintf "%s + %s" (pp_ty a) (pp_ty b)
+    | TNatOp (Ast.NatMul, a, b)   ->
+      Printf.sprintf "%s * %s" (pp_ty a) (pp_ty b)
+  in s
+
+(* =================================================================
+   §6  Elm-style error message parts
+   ================================================================= *)
+
+(** Structured pieces of an error message.  The terminal / LSP renderer
+    decides how to colour each variant.  Compose them to build
+    conversational messages like Elm's. *)
+type message_part =
+  | MPText   of string          (** Prose text *)
+  | MPCode   of string          (** Inline code — rendered monospace *)
+  | MPType   of ty              (** A type — rendered via [pp_ty] *)
+  | MPBreak                     (** Paragraph break *)
+  | MPBullet of message_part list
+
+let render_parts parts =
+  let buf = Buffer.create 64 in
+  let rec go = function
+    | MPText s  -> Buffer.add_string buf s
+    | MPCode s  -> Buffer.add_char buf '`'; Buffer.add_string buf s;
+                   Buffer.add_char buf '`'
+    | MPType t  -> Buffer.add_char buf '`'; Buffer.add_string buf (pp_ty t);
+                   Buffer.add_char buf '`'
+    | MPBreak   -> Buffer.add_char buf '\n'
+    | MPBullet ps ->
+      Buffer.add_string buf "\n  - ";
+      List.iter go ps
+  in
+  List.iter go parts;
+  Buffer.contents buf
+
+(* =================================================================
+   §7  Type environment
+   ================================================================= *)
+
+(** Linear-use record: name, qualifier, "has been used" flag. *)
+type lin_entry = {
+  le_name : string;
+  le_lin  : Ast.linearity;
+  le_used : bool ref;
+}
+
+type env = {
+  vars    : (string * scheme) list;   (** Term variable → scheme *)
+  types   : (string * int) list;      (** Type constructor name → arity *)
+  level   : int;                      (** Current generalization level *)
+  lin     : lin_entry list;           (** Linear/affine use tracking *)
+  errors  : Err.ctx;
+}
+
+let make_env errors = {
+  vars = []; types = []; level = 0; lin = []; errors
+}
+
+let enter_level env = { env with level = env.level + 1 }
+let leave_level env = { env with level = env.level - 1 }
+
+let lookup_var  name env = List.assoc_opt name env.vars
+let lookup_type name env = List.assoc_opt name env.types
+
+let bind_var name sch env =
+  { env with vars = (name, sch) :: env.vars }
+
+let bind_vars bindings env =
+  List.fold_left (fun e (n, s) -> bind_var n s e) env bindings
+
+(** Extend env with a new linear/affine variable. *)
+let bind_linear name lin ty env =
+  let le = { le_name = name; le_lin = lin; le_used = ref false } in
+  { env with
+    vars = (name, Mono ty) :: env.vars;
+    lin  = le :: env.lin }
+
+(* =================================================================
+   §8  Generalization and instantiation
+   ================================================================= *)
+
+(** [generalize level ty] quantifies all [Unbound] vars at a level
+    strictly greater than [level].  Called after leaving a let-binding
+    level to achieve let-polymorphism. *)
+let generalize level ty =
+  let ids = ref [] in
+  let rec collect t = match repr t with
+    | TVar r ->
+      (match !r with
+       | Unbound (id, l) when l > level ->
+         if not (List.mem id !ids) then ids := id :: !ids
+       | _ -> ())
+    | TCon   (_, args)   -> List.iter collect args
+    | TArrow (a, b)      -> collect a; collect b
+    | TTuple ts          -> List.iter collect ts
+    | TRecord flds       -> List.iter (fun (_, t) -> collect t) flds
+    | TLin   (_, t)      -> collect t
+    | TNatOp (_, a, b)   -> collect a; collect b
+    | TNat _ | TError    -> ()
+  in
+  collect ty;
+  if !ids = [] then Mono ty else Poly (!ids, ty)
+
+(** [instantiate level sch] replaces each quantified variable in [sch]
+    with a fresh unification variable at [level]. *)
+let instantiate level = function
+  | Mono ty -> ty
+  | Poly (ids, ty) ->
+    let subst = List.map (fun id -> (id, fresh_var level)) ids in
+    let rec inst t = match repr t with
+      | TVar r ->
+        (match !r with
+         | Unbound (id, _) ->
+           (match List.assoc_opt id subst with
+            | Some t' -> t'
+            | None    -> t)
+         | Link t' -> inst t')
+      | TCon   (n, args)   -> TCon   (n, List.map inst args)
+      | TArrow (a, b)      -> TArrow (inst a, inst b)
+      | TTuple ts          -> TTuple (List.map inst ts)
+      | TRecord flds       -> TRecord (List.map (fun (n, t) -> (n, inst t)) flds)
+      | TLin   (l, t)      -> TLin   (l, inst t)
+      | TNatOp (op, a, b)  -> TNatOp (op, inst a, inst b)
+      | TNat _ | TError    -> t
+    in
+    inst ty
+
+(* =================================================================
+   §9  Built-in types + base environment
+   ================================================================= *)
+
+let t_int    = TCon ("Int",    [])
+let t_float  = TCon ("Float",  [])
+let t_bool   = TCon ("Bool",   [])
+let t_string = TCon ("String", [])
+let t_unit   = TTuple []
+let t_atom   = TCon ("Atom",   [])
+
+let t_list   a     = TCon ("List",   [a])
+let t_option a     = TCon ("Option", [a])
+let t_result a e   = TCon ("Result", [a; e])
+let t_pid    a     = TCon ("Pid",    [a])
+
+let _t_list   = t_list
+let _t_option = t_option
+let _t_result = t_result
+let _t_pid    = t_pid
+
+(** Built-in binary operator schemes.
+    We use level-0 fresh vars for polymorphic ops — they will be
+    properly instantiated each time [instantiate] is called. *)
+let builtin_bindings : (string * scheme) list =
+  let poly1 f =
+    let a = fresh_var 0 in
+    Poly ([match a with TVar r -> (match !r with Unbound (id,_) -> id | _ -> 0) | _ -> 0],
+          f a)
+  in
+  [
+    ("+",  Mono (TArrow (t_int,    TArrow (t_int,    t_int))));
+    ("-",  Mono (TArrow (t_int,    TArrow (t_int,    t_int))));
+    ("*",  Mono (TArrow (t_int,    TArrow (t_int,    t_int))));
+    ("/",  Mono (TArrow (t_int,    TArrow (t_int,    t_int))));
+    ("++", Mono (TArrow (t_string, TArrow (t_string, t_string))));
+    ("<",  Mono (TArrow (t_int,    TArrow (t_int,    t_bool))));
+    (">",  Mono (TArrow (t_int,    TArrow (t_int,    t_bool))));
+    ("<=", Mono (TArrow (t_int,    TArrow (t_int,    t_bool))));
+    (">=", Mono (TArrow (t_int,    TArrow (t_int,    t_bool))));
+    ("&&", Mono (TArrow (t_bool,   TArrow (t_bool,   t_bool))));
+    ("||", Mono (TArrow (t_bool,   TArrow (t_bool,   t_bool))));
+    (* Polymorphic equality: ==, != : ∀a. a -> a -> Bool *)
+    ("==", poly1 (fun a -> TArrow (a, TArrow (a, t_bool))));
+    ("!=", poly1 (fun a -> TArrow (a, TArrow (a, t_bool))));
+  ]
+
+let builtin_types : (string * int) list =
+  [ ("Int",    0); ("Float",  0); ("Bool",  0); ("String", 0);
+    ("Char",   0); ("Byte",   0); ("Atom",  0); ("Unit",   0);
+    ("List",   1); ("Option", 1); ("Array", 1); ("Set",    1);
+    ("Result", 2); ("Map",    2);
+    ("Pid",    1); ("Cap",    1); ("Future",1); ("Stream", 1);
+    ("Task",   1); ("Node",   0);
+    ("Vector", 2); ("Matrix", 3); ("NDArray", 2); ]
+
+let base_env errors =
+  let env = make_env errors in
+  let env = bind_vars builtin_bindings env in
+  { env with types = builtin_types }
+
+(* =================================================================
+   §10  Unification
+   ================================================================= *)
+
+(** Report a type mismatch with a conversational Elm-style message. *)
+let report_mismatch env ~span ~reason expected found =
+  let headline =
+    render_parts
+      [ MPText "I expected "; MPType expected;
+        MPText " but found "; MPType found; MPText "." ]
+  in
+  let why_note =
+    match reason with
+    | None   -> []
+    | Some r -> [ string_of_reason r ]
+  in
+  let labels =
+    match reason with
+    | Some r ->
+      (match span_of_reason r with
+       | Some rsp when rsp <> span ->
+         [ { Err.lbl_span = rsp;
+             lbl_message  = "the expected type comes from here" } ]
+       | _ -> [])
+    | None -> []
+  in
+  Err.report env.errors
+    { Err.severity = Error; span; message = headline;
+      labels; notes = why_note }
+
+(** Unify [t1] and [t2], reporting any mismatch to [env.errors].
+    Uses [TError] as a recovery sentinel — if either side is [TError]
+    the constraint is silently satisfied (the error was already reported). *)
+let rec unify env ~span ?(reason = None) t1 t2 =
+  let t1 = repr t1 and t2 = repr t2 in
+  match t1, t2 with
+  (* Error sentinel absorbs everything *)
+  | TError, _ | _, TError -> ()
+
+  (* Same variable — trivially unified *)
+  | TVar r1, TVar r2 when r1 == r2 -> ()
+
+  (* Bind a variable *)
+  | TVar r, t | t, TVar r ->
+    (match !r with
+     | Unbound (id, level) ->
+       if occurs id level t then begin
+         report_mismatch env ~span ~reason t1 t2;
+         r := Link TError
+       end else
+         r := Link t
+     | Link _ -> assert false)  (* repr should have resolved links *)
+
+  | TCon (n1, a1), TCon (n2, a2) ->
+    if n1 = n2 && List.length a1 = List.length a2 then
+      List.iter2 (unify env ~span ~reason) a1 a2
+    else
+      (report_mismatch env ~span ~reason t1 t2)
+
+  | TArrow (a1, b1), TArrow (a2, b2) ->
+    unify env ~span ~reason a1 a2;
+    unify env ~span ~reason b1 b2
+
+  | TTuple ts1, TTuple ts2 when List.length ts1 = List.length ts2 ->
+    List.iter2 (unify env ~span ~reason) ts1 ts2
+
+  | TRecord f1, TRecord f2 ->
+    let ns1 = List.map fst f1 and ns2 = List.map fst f2 in
+    if ns1 <> ns2 then
+      report_mismatch env ~span ~reason t1 t2
+    else
+      List.iter2
+        (fun (_, t1) (_, t2) -> unify env ~span ~reason t1 t2)
+        f1 f2
+
+  | TLin (l1, inner1), TLin (l2, inner2) when l1 = l2 ->
+    unify env ~span ~reason inner1 inner2
+
+  | TNat n1, TNat n2 when n1 = n2 -> ()
+
+  | TNatOp (op1, a1, b1), TNatOp (op2, a2, b2) when op1 = op2 ->
+    unify env ~span ~reason a1 a2;
+    unify env ~span ~reason b1 b2
+
+  | _ ->
+    report_mismatch env ~span ~reason t1 t2
+
+(* =================================================================
+   §11  Surface-type → internal-type conversion
+   ================================================================= *)
+
+(** Convert a surface [Ast.ty] to an internal [ty].
+    [tvars] accumulates a mapping from type-variable *names* to fresh
+    unification-variable ids (so that two mentions of [a] in the same
+    annotation get the same variable). *)
+let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
+  match s with
+  | Ast.TyCon (name, args) ->
+    let arity = match lookup_type name.txt env with
+      | Some a -> a
+      | None   ->
+        Err.error env.errors ~span:name.span
+          (Printf.sprintf "I don't know a type called `%s`." name.txt);
+        0
+    in
+    let args' = List.map (surface_ty env ~tvars) args in
+    if List.length args' <> arity then
+      Err.error env.errors ~span:name.span
+        (Printf.sprintf "`%s` expects %d type argument(s) but got %d."
+           name.txt arity (List.length args'));
+    TCon (name.txt, args')
+
+  | Ast.TyVar name ->
+    (match List.assoc_opt name.txt !tvars with
+     | Some t -> t
+     | None   ->
+       let t = fresh_var env.level in
+       tvars := (name.txt, t) :: !tvars;
+       t)
+
+  | Ast.TyArrow (a, b) ->
+    TArrow (surface_ty env ~tvars a, surface_ty env ~tvars b)
+
+  | Ast.TyTuple ts ->
+    TTuple (List.map (surface_ty env ~tvars) ts)
+
+  | Ast.TyRecord flds ->
+    let flds' = List.map (fun (n, t) -> (n.Ast.txt, surface_ty env ~tvars t)) flds in
+    TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) flds')
+
+  | Ast.TyLinear (lin, t) ->
+    TLin (lin, surface_ty env ~tvars t)
+
+  | Ast.TyNat n  -> TNat n
+  | Ast.TyNatOp (op, a, b) ->
+    TNatOp (op, surface_ty env ~tvars a, surface_ty env ~tvars b)
+
+(* =================================================================
+   §12  Linearity tracking
+   ================================================================= *)
+
+(** Record a use of variable [name].  Errors if a linear var is used
+    more than once. *)
+let record_use name span env =
+  match List.find_opt (fun e -> e.le_name = name) env.lin with
+  | None -> ()   (* unrestricted — no tracking needed *)
+  | Some le ->
+    (match le.le_lin with
+     | Ast.Linear when !(le.le_used) ->
+       Err.error env.errors ~span
+         (Printf.sprintf
+            "The linear value `%s` is used more than once here.\n\
+             Linear values must be consumed exactly once — they cannot \
+             be copied or ignored." name)
+     | Ast.Affine when !(le.le_used) ->
+       Err.error env.errors ~span
+         (Printf.sprintf
+            "The affine value `%s` is used more than once here.\n\
+             Affine values may be used at most once." name)
+     | (Ast.Linear | Ast.Affine) ->
+       le.le_used := true
+     | Ast.Unrestricted -> ())
+
+(** After a scope closes, check that every in-scope linear var was used. *)
+let check_linear_all_consumed env ~scope_span in_scope_names =
+  List.iter (fun le ->
+      if List.mem le.le_name in_scope_names
+      && le.le_lin = Ast.Linear
+      && not !(le.le_used) then
+        Err.error env.errors ~span:scope_span
+          (Printf.sprintf
+             "The linear value `%s` was never used.\n\
+              Linear values must be consumed exactly once — did you \
+              mean to pass it somewhere?" le.le_name)
+    ) env.lin
+
+(* =================================================================
+   §13  Pattern inference
+   ================================================================= *)
+
+(** Infer the type that a pattern *expects*, and return the list of
+    (name, scheme) bindings it introduces.
+
+    We don't yet resolve constructor types through a type registry —
+    ADT patterns produce fresh type variables.  That will be fixed
+    when [DType] declarations populate the type registry. *)
+let rec infer_pattern env (pat : Ast.pattern)
+    : (string * scheme) list * ty =
+  match pat with
+  | Ast.PatWild _ ->
+    [], fresh_var env.level
+
+  | Ast.PatVar name ->
+    let t = fresh_var env.level in
+    [(name.txt, Mono t)], t
+
+  | Ast.PatLit (lit, _) ->
+    [], ty_of_lit lit
+
+  | Ast.PatTuple (ps, _) ->
+    let bs_tys  = List.map (infer_pattern env) ps in
+    let bindings = List.concat_map fst bs_tys in
+    let tys      = List.map snd bs_tys in
+    bindings, TTuple tys
+
+  | Ast.PatCon (name, ps) ->
+    (* Constructor pattern — proper resolution deferred to type-registry pass *)
+    let bs_tys   = List.map (infer_pattern env) ps in
+    let bindings  = List.concat_map fst bs_tys in
+    ignore name;
+    bindings, fresh_var env.level
+
+  | Ast.PatAtom (_, ps, _) ->
+    let bs_tys   = List.map (infer_pattern env) ps in
+    let bindings  = List.concat_map fst bs_tys in
+    bindings, t_atom
+
+  | Ast.PatRecord (flds, _) ->
+    let bindings = ref [] in
+    let fld_tys = List.map (fun (name, pat) ->
+        let bs, t = infer_pattern env pat in
+        bindings := bs @ !bindings;
+        (name.Ast.txt, t)
+      ) flds
+    in
+    let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fld_tys in
+    !bindings, TRecord sorted
+
+  | Ast.PatAs (inner, name, _) ->
+    let bindings, t = infer_pattern env inner in
+    (name.txt, Mono t) :: bindings, t
+
+and ty_of_lit = function
+  | Ast.LitInt    _ -> t_int
+  | Ast.LitFloat  _ -> t_float
+  | Ast.LitBool   _ -> t_bool
+  | Ast.LitString _ -> t_string
+  | Ast.LitAtom   _ -> t_atom
+
+(* =================================================================
+   §14  Expression checking — bidirectional
+   ================================================================= *)
+
+(** Extract a source span from an expression (outermost node). *)
+let span_of_expr : Ast.expr -> Ast.span = function
+  | Ast.ELit  (_, sp)           -> sp
+  | Ast.EVar  name              -> name.span
+  | Ast.EApp  (_, _, sp)        -> sp
+  | Ast.ECon  (_, _, sp)        -> sp
+  | Ast.ELam  (_, _, sp)        -> sp
+  | Ast.EBlock (_, sp)          -> sp
+  | Ast.ELet  (_, sp)           -> sp
+  | Ast.EMatch (_, _, sp)       -> sp
+  | Ast.ETuple (_, sp)          -> sp
+  | Ast.ERecord (_, sp)         -> sp
+  | Ast.ERecordUpdate (_, _, sp) -> sp
+  | Ast.EField (_, _, sp)       -> sp
+  | Ast.EIf   (_, _, _, sp)     -> sp
+  | Ast.EPipe (_, _, sp)        -> sp
+  | Ast.EAnnot (_, _, sp)       -> sp
+  | Ast.EHole (_, sp)           -> sp
+  | Ast.EAtom (_, _, sp)        -> sp
+  | Ast.ESend (_, _, sp)        -> sp
+  | Ast.ESpawn (_, sp)          -> sp
+
+(** [infer_expr env e] synthesises the type of [e], accumulating any
+    errors into [env.errors]. *)
+let rec infer_expr env (e : Ast.expr) : ty =
+  match e with
+  (* ── Literals ─────────────────────────────────────────────────── *)
+  | Ast.ELit (lit, _) ->
+    ty_of_lit lit
+
+  (* ── Variables ────────────────────────────────────────────────── *)
+  | Ast.EVar name ->
+    record_use name.txt name.span env;
+    (match lookup_var name.txt env with
+     | Some sch -> instantiate env.level sch
+     | None     ->
+       Err.error env.errors ~span:name.span
+         (Printf.sprintf
+            "I cannot find a variable named `%s`.\n\
+             Is it defined above this point, or perhaps misspelled?"
+            name.txt);
+       TError)
+
+  (* ── Type annotations ─────────────────────────────────────────── *)
+  | Ast.EAnnot (e, ann, sp) ->
+    let tvars = ref [] in
+    let expected = surface_ty env ~tvars ann in
+    check_expr env e expected ~reason:(Some (RAnnotation sp));
+    expected
+
+  (* ── Typed holes ──────────────────────────────────────────────── *)
+  | Ast.EHole (name, sp) ->
+    let t = fresh_var env.level in
+    let label = match name with Some n -> "?" ^ n.txt | None -> "?" in
+    Err.report env.errors
+      { Err.severity = Hint; span = sp;
+        message = Printf.sprintf "Typed hole %s has type `%s`" label (pp_ty t);
+        labels  = [];
+        notes   = [ "Fill this hole with an expression of the type shown above." ] };
+    t
+
+  (* ── Function application ─────────────────────────────────────── *)
+  | Ast.EApp (f, args, sp) ->
+    let f_ty = infer_expr env f in
+    infer_app env sp f_ty args 0
+
+  (* ── Constructor application ──────────────────────────────────── *)
+  | Ast.ECon (_, args, _) ->
+    (* Proper resolution deferred to type-registry pass *)
+    List.iter (fun a -> ignore (infer_expr env a)) args;
+    fresh_var env.level
+
+  (* ── Lambdas ──────────────────────────────────────────────────── *)
+  | Ast.ELam (params, body, _) ->
+    let param_tys, env' = bind_lam_params env params in
+    let body_ty = infer_expr env' body in
+    List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty
+
+  (* ── do/end block ─────────────────────────────────────────────── *)
+  | Ast.EBlock (exprs, _) ->
+    infer_block env exprs
+
+  (* ── let binding (block-scoped) ───────────────────────────────── *)
+  | Ast.ELet (b, sp) ->
+    (* When ELet appears as the last expression in a block it's a
+       programmer error, but we give it type Unit and move on. *)
+    let rhs_ty = infer_expr env b.bind_expr in
+    let bindings, pat_ty = infer_pattern env b.bind_pat in
+    let reason = Some (RLetBind sp) in
+    unify env ~span:sp ~reason rhs_ty pat_ty;
+    ignore bindings;
+    t_unit
+
+  (* ── match ────────────────────────────────────────────────────── *)
+  | Ast.EMatch (scrut, branches, sp) ->
+    let scrut_ty = infer_expr env scrut in
+    infer_match env sp scrut_ty branches
+
+  (* ── Tuples ───────────────────────────────────────────────────── *)
+  | Ast.ETuple ([], _)  -> t_unit
+  | Ast.ETuple (es, _)  -> TTuple (List.map (infer_expr env) es)
+
+  (* ── Record literals ──────────────────────────────────────────── *)
+  | Ast.ERecord (flds, _) ->
+    let fld_tys = List.map (fun (n, e) -> (n.Ast.txt, infer_expr env e)) flds in
+    TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) fld_tys)
+
+  (* ── Record update: { base with f = e, … } ───────────────────── *)
+  | Ast.ERecordUpdate (base, updates, sp) ->
+    let base_ty   = infer_expr env base in
+    let update_tys =
+      List.map (fun (n, e) -> (n.Ast.txt, infer_expr env e)) updates
+    in
+    (match repr base_ty with
+     | TRecord all_flds ->
+       List.iter (fun (fname, uty) ->
+           match List.assoc_opt fname all_flds with
+           | Some fty ->
+             unify env ~span:sp
+               ~reason:(Some (RBuiltin
+                 (Printf.sprintf "field `%s` must keep its original type" fname)))
+               fty uty
+           | None ->
+             Err.error env.errors ~span:sp
+               (Printf.sprintf
+                  "This record does not have a field called `%s`.\n\
+                   The fields I know about are: %s"
+                  fname
+                  (String.concat ", " (List.map fst all_flds)))
+         ) update_tys;
+       base_ty
+     | TVar _ ->
+       (* Base type not yet known — build a partial record constraint *)
+       let partial =
+         TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b)
+                    update_tys) in
+       unify env ~span:sp base_ty partial;
+       base_ty
+     | other ->
+       Err.error env.errors ~span:sp
+         (Printf.sprintf
+            "I can only use `{ … with … }` on a record, but this \
+             expression has type `%s`." (pp_ty other));
+       TError)
+
+  (* ── Field access: e.name ─────────────────────────────────────── *)
+  | Ast.EField (e, name, sp) ->
+    let e_ty = infer_expr env e in
+    (match repr e_ty with
+     | TRecord flds ->
+       (match List.assoc_opt name.txt flds with
+        | Some t -> t
+        | None   ->
+          Err.error env.errors ~span:sp
+            (Printf.sprintf
+               "This record does not have a field called `%s`.\n\
+                The fields I see are: %s"
+               name.txt
+               (String.concat ", " (List.map fst flds)));
+          TError)
+     | TVar _ ->
+       (* Field-access on an unknown record type — return a fresh var for now.
+          A row-polymorphism extension would constrain this properly. *)
+       fresh_var env.level
+     | other ->
+       Err.error env.errors ~span:sp
+         (Printf.sprintf
+            "I cannot access field `%s` because this expression has \
+             type `%s`, which is not a record." name.txt (pp_ty other));
+       TError)
+
+  (* ── if/then/else ─────────────────────────────────────────────── *)
+  | Ast.EIf (cond, then_, else_, sp) ->
+    check_expr env cond t_bool
+      ~reason:(Some (RBuiltin "The condition of an if expression must be Bool."));
+    let t_ty = infer_expr env then_ in
+    let e_ty = infer_expr env else_ in
+    unify env ~span:sp ~reason:(Some (RMatchArm sp)) t_ty e_ty;
+    t_ty
+
+  (* ── Pipes — must be desugared before reaching us ─────────────── *)
+  | Ast.EPipe _ ->
+    failwith
+      "March type checker: encountered EPipe — \
+       the desugaring pass must run before type checking."
+
+  (* ── Atoms ────────────────────────────────────────────────────── *)
+  | Ast.EAtom (_, args, _) ->
+    List.iter (fun a -> ignore (infer_expr env a)) args;
+    t_atom
+
+  (* ── Actor messaging ──────────────────────────────────────────── *)
+  | Ast.ESend (cap, msg, _) ->
+    ignore (infer_expr env cap);
+    ignore (infer_expr env msg);
+    t_unit
+
+  | Ast.ESpawn (actor, _) ->
+    ignore (infer_expr env actor);
+    TCon ("Pid", [fresh_var env.level])
+
+(** [check_expr env e expected ~reason] verifies [e] has type [expected].
+    Uses the "checking" direction for lambdas (peels off arrows) and for
+    match expressions (checks each arm against [expected]).  Falls back
+    to infer + unify for everything else. *)
+and check_expr env (e : Ast.expr) (expected : ty) ~reason =
+  let sp = span_of_expr e in
+  match e, repr expected with
+
+  (* Lambda in check mode: peel arrow types one-by-one *)
+  | Ast.ELam (params, body, lsp), _ ->
+    let rec peel ps ty env =
+      match ps, repr ty with
+      | [], body_ty ->
+        check_expr env body body_ty ~reason
+      | p :: rest, TArrow (arg_ty, ret_ty) ->
+        let env' = bind_lam_param env lsp p (Some arg_ty) in
+        peel rest ret_ty env'
+      | _, _ ->
+        let inferred = infer_expr env (Ast.ELam (params, body, lsp)) in
+        unify env ~span:lsp ~reason inferred expected
+    in
+    peel params expected env
+
+  (* Match in check mode: check each arm against expected *)
+  | Ast.EMatch (scrut, branches, msp), _ ->
+    let scrut_ty = infer_expr env scrut in
+    List.iter (fun (br : Ast.branch) ->
+        let bindings, pat_ty = infer_pattern env br.branch_pat in
+        unify env ~span:msp ~reason:(Some (RMatchArm msp)) scrut_ty pat_ty;
+        let env' = bind_vars bindings env in
+        (match br.branch_guard with
+         | Some g ->
+           check_expr env' g t_bool
+             ~reason:(Some (RBuiltin "Match guards must be Bool."))
+         | None -> ());
+        check_expr env' br.branch_body expected ~reason
+      ) branches
+
+  (* All other expressions: infer then unify *)
+  | _ ->
+    let inferred = infer_expr env e in
+    unify env ~span:sp ~reason inferred expected
+
+(** Thread function application through argument list, tracking arg index. *)
+and infer_app env span f_ty args idx =
+  match args, repr f_ty with
+  | [], t -> t
+  | arg :: rest, TArrow (param_ty, ret_ty) ->
+    check_expr env arg param_ty
+      ~reason:(Some (RFnArg (span, idx)));
+    infer_app env span ret_ty rest (idx + 1)
+  | arg :: rest, TVar _ ->
+    (* f_ty not yet known — constrain it *)
+    let arg_ty = infer_expr env arg in
+    let ret_ty = fresh_var env.level in
+    unify env ~span
+      ~reason:(Some (RBuiltin "A value being applied like a function must have a function type."))
+      f_ty (TArrow (arg_ty, ret_ty));
+    infer_app env span ret_ty rest (idx + 1)
+  | _, TError ->
+    List.iter (fun a -> ignore (infer_expr env a)) args;
+    TError
+  | _, other ->
+    Err.error env.errors ~span
+      (Printf.sprintf
+         "This is not a function — it has type `%s`.\n\
+          I cannot apply it to arguments." (pp_ty other));
+    List.iter (fun a -> ignore (infer_expr env a)) args;
+    TError
+
+(** Infer the result type of a match expression. *)
+and infer_match env span scrut_ty branches =
+  let result_ty = fresh_var env.level in
+  List.iter (fun (br : Ast.branch) ->
+      let bindings, pat_ty = infer_pattern env br.branch_pat in
+      unify env ~span ~reason:(Some (RMatchArm span)) scrut_ty pat_ty;
+      let env' = bind_vars bindings env in
+      (match br.branch_guard with
+       | Some g ->
+         check_expr env' g t_bool
+           ~reason:(Some (RBuiltin "Match guards must be Bool."))
+       | None -> ());
+      check_expr env' br.branch_body result_ty
+        ~reason:(Some (RMatchArm span))
+    ) branches;
+  result_ty
+
+(** Infer types of all expressions in a block, threading [ELet] bindings. *)
+and infer_block env exprs =
+  match exprs with
+  | [] -> t_unit
+  | [ e ] -> infer_expr env e
+  | Ast.ELet (b, sp) :: rest ->
+    let rhs_ty  = infer_expr env b.bind_expr in
+    let bindings, pat_ty = infer_pattern env b.bind_pat in
+    unify env ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
+    (* Generalise the binding if it's a simple variable — let-polymorphism *)
+    let gen_binding bnd = match bnd with
+      | (name, Mono t) -> (name, generalize (env.level - 1) t)
+      | other          -> other
+    in
+    let bindings' = match b.bind_pat with
+      | Ast.PatVar _ -> List.map gen_binding bindings
+      | _            -> bindings
+    in
+    let env' = bind_vars bindings' env in
+    infer_block env' rest
+  | e :: rest ->
+    ignore (infer_expr env e);
+    infer_block env rest
+
+(** Bind lambda parameters into the environment, returning (types, env). *)
+and bind_lam_params env params =
+  List.fold_right
+    (fun p (tys, env) ->
+       let t = fresh_var env.level in
+       let env' = bind_lam_param env Ast.dummy_span p (Some t) in
+       (t :: tys, env'))
+    params ([], env)
+
+and bind_lam_param env _sp (p : Ast.param) ann_ty =
+  let t = match p.param_ty, ann_ty with
+    | Some ann, _ ->
+      let tvars = ref [] in
+      surface_ty env ~tvars ann
+    | None, Some t -> t
+    | None, None   -> fresh_var env.level
+  in
+  match p.param_lin with
+  | Ast.Unrestricted -> bind_var p.param_name.txt (Mono t) env
+  | lin              -> bind_linear p.param_name.txt lin t env
+
+(* =================================================================
+   §15  Declaration checking
+   ================================================================= *)
+
+(** Check a function definition.
+
+    Strategy:
+    1. Enter a fresh generalization level.
+    2. Add a monomorphic self-reference (allows recursion).
+    3. Bind each parameter into the env.
+    4. Infer/check the body.
+    5. Leave level and generalize the function type.
+    6. Return the scheme so the caller can update the env. *)
+let check_fn env (def : Ast.fn_def) fn_span : scheme =
+  let env'    = enter_level env in
+  (* Self-reference for recursion — a fresh var that will get unified
+     with the actual type as the body is checked. *)
+  let self_ty = fresh_var env'.level in
+  let env_rec = bind_var def.fn_name.txt (Mono self_ty) env' in
+
+  let sch = match def.fn_clauses with
+    | [] ->
+      Err.error env.errors ~span:fn_span
+        (Printf.sprintf "Function `%s` has no clauses." def.fn_name.txt);
+      Mono TError
+
+    | [clause] ->
+      (* Bind parameters *)
+      let param_tys, body_env =
+        List.fold_right (fun fp (tys, env) ->
+            match fp with
+            | Ast.FPNamed p ->
+              let t = match p.param_ty with
+                | Some ann ->
+                  let tvars = ref [] in
+                  surface_ty env' ~tvars ann
+                | None -> fresh_var env'.level
+              in
+              let env' = match p.param_lin with
+                | Ast.Unrestricted -> bind_var p.param_name.txt (Mono t) env
+                | lin              -> bind_linear p.param_name.txt lin t env
+              in
+              (t :: tys, env')
+            | Ast.FPPat (Ast.PatVar name) ->
+              (* Single variable pattern — trivially named; bind it directly *)
+              let t = fresh_var env'.level in
+              let env' = bind_var name.txt (Mono t) env in
+              (t :: tys, env')
+            | Ast.FPPat pat ->
+              (* Complex pattern parameter: should have been desugared into a
+                 match, but handle gracefully by binding inferred pattern vars *)
+              let t = fresh_var env'.level in
+              let pat_bindings, _ = infer_pattern env pat in
+              let env' = bind_vars pat_bindings env in
+              (t :: tys, env')
+          ) clause.fc_params ([], env_rec)
+      in
+
+      (* Check the guard if present *)
+      (match clause.fc_guard with
+       | Some g ->
+         check_expr body_env g t_bool
+           ~reason:(Some (RBuiltin "Function guards must be Bool."))
+       | None -> ());
+
+      (* Check or infer the body *)
+      let body_ty = match def.fn_ret_ty with
+        | Some ann ->
+          let tvars = ref [] in
+          let expected = surface_ty env' ~tvars ann in
+          check_expr body_env clause.fc_body expected
+            ~reason:(Some (RFnReturn (def.fn_name.txt, fn_span)));
+          expected
+        | None ->
+          infer_expr body_env clause.fc_body
+      in
+
+      (* Check linear params were all consumed *)
+      let param_names = List.filter_map (function
+          | Ast.FPNamed p -> Some p.param_name.txt
+          | Ast.FPPat _ -> None) clause.fc_params in
+      check_linear_all_consumed body_env ~scope_span:fn_span param_names;
+
+      let fn_ty =
+        List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty
+      in
+      (* Unify self_ty so recursive calls get the correct type *)
+      unify env' ~span:fn_span self_ty fn_ty;
+
+      generalize env.level fn_ty
+
+    | _ ->
+      (* Multi-clause fn — desugar pass should have eliminated these *)
+      Err.error env.errors ~span:fn_span
+        (Printf.sprintf
+           "Internal error: fn `%s` has multiple clauses after desugaring."
+           def.fn_name.txt);
+      Mono TError
+  in
+
+  ignore (leave_level env');
+  sch
+
+let rec check_decl env (d : Ast.decl) : env =
+  match d with
+  | Ast.DFn (def, sp) ->
+    let sch = check_fn env def sp in
+    bind_var def.fn_name.txt sch env
+
+  | Ast.DLet (b, sp) ->
+    let env' = enter_level env in
+    let rhs_ty = infer_expr env' b.bind_expr in
+    let bindings, pat_ty = infer_pattern env' b.bind_pat in
+    unify env' ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
+    ignore (leave_level env');
+    (* Generalise simple variable bindings at module level *)
+    let gen_bnd bnd = match bnd with
+      | (name, Mono t) -> (name, generalize env.level t)
+      | other          -> other
+    in
+    let bindings' = match b.bind_pat with
+      | Ast.PatVar _ -> List.map gen_bnd bindings
+      | _            -> bindings
+    in
+    bind_vars bindings' env
+
+  | Ast.DType (name, params, _def, _sp) ->
+    { env with types = (name.txt, List.length params) :: env.types }
+
+  | Ast.DActor (name, actor, _sp) ->
+    (* Check init expression and all message handlers *)
+    let _ = infer_expr env actor.actor_init in
+    List.iter (fun (h : Ast.actor_handler) ->
+        let handler_env =
+          List.fold_left (fun env p ->
+              bind_var p.Ast.param_name.txt
+                (Mono (match p.param_ty with
+                   | Some ann ->
+                     let tvars = ref [] in surface_ty env ~tvars ann
+                   | None     -> fresh_var env.level))
+                env
+            ) env h.ah_params
+        in
+        ignore (infer_expr handler_env h.ah_body)
+      ) actor.actor_handlers;
+    bind_var name.txt (Mono (TCon ("Actor", []))) env
+
+  | Ast.DMod (name, _vis, decls, _sp) ->
+    let inner_env = List.fold_left check_decl env decls in
+    (* Bring public names into the outer env under mod_name.name prefix
+       (simplified — proper namespacing deferred) *)
+    ignore (name, inner_env);
+    env
+
+  | Ast.DProtocol _ | Ast.DSig _
+  | Ast.DInterface _ | Ast.DImpl _
+  | Ast.DExtern _ ->
+    (* These will be elaborated in later passes *)
+    env
+
+(* =================================================================
+   §16  Module entry point
+   ================================================================= *)
+
+(** Type-check a whole module.
+
+    Pass 1: collect all top-level function names into the environment
+            as monomorphic placeholders.  This allows forward references
+            and simple mutual recursion (the placeholder is unified with
+            the actual type as the body is inferred).
+
+    Pass 2: check declarations in order, updating the environment.
+
+    Returns the [Err.ctx] containing all diagnostics. *)
+let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx =
+  (* Pass 1: forward-reference placeholders *)
+  let pre_env = List.fold_left (fun env d ->
+      match d with
+      | Ast.DFn (def, _) ->
+        bind_var def.fn_name.txt (Mono (fresh_var 0)) env
+      | Ast.DType (name, params, _, _) ->
+        { env with types = (name.txt, List.length params) :: env.types }
+      | _ -> env
+    ) (base_env errors) m.Ast.mod_decls
+  in
+  (* Pass 2: full checking *)
+  ignore (List.fold_left check_decl pre_env m.Ast.mod_decls);
+  errors

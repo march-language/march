@@ -1,0 +1,4 @@
+(executable
+ (name main)
+ (public_name march)
+ (libraries march_lexer march_parser march_ast march_typecheck march_codegen march_effects march_errors))
