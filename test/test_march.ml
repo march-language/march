@@ -1530,6 +1530,106 @@ let test_actor_handler_correct () =
   end|} in
   Alcotest.(check bool) "correct handler: no errors" false (has_errors ctx)
 
+(* ── Perceus RC tests ────────────────────────────────────────────────── *)
+
+(** Parse, desugar, typecheck, lower, mono, defun, then run perceus. *)
+let perceus_module src =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  March_tir.Perceus.perceus tir
+
+let test_perceus_no_ops_for_primitives () =
+  (* A function using only Int values should have no EIncRC/EDecRC/EFree/EReuse *)
+  let m = perceus_module {|mod Test do
+    fn double(x : Int) : Int do x + x end
+    fn main() : Int do double(21) end
+  end|} in
+  let rec has_rc_op = function
+    | March_tir.Tir.EIncRC _ | March_tir.Tir.EDecRC _
+    | March_tir.Tir.EFree _ | March_tir.Tir.EReuse _ -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> has_rc_op e1 || has_rc_op e2
+    | March_tir.Tir.ESeq (e1, e2) -> has_rc_op e1 || has_rc_op e2
+    | March_tir.Tir.ELetRec (fns, body) ->
+      List.exists (fun f -> has_rc_op f.March_tir.Tir.fn_body) fns || has_rc_op body
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> has_rc_op b.March_tir.Tir.br_body) brs ||
+      (match def with Some e -> has_rc_op e | None -> false)
+    | _ -> false
+  in
+  List.iter (fun fn ->
+    Alcotest.(check bool)
+      (Printf.sprintf "no RC op in %s (primitives only)" fn.March_tir.Tir.fn_name)
+      false (has_rc_op fn.March_tir.Tir.fn_body)
+  ) m.March_tir.Tir.tm_fns
+
+let test_perceus_dead_binding_decrc () =
+  (* A heap value created but never used should get EDecRC inserted *)
+  let m = perceus_module {|mod Test do
+    type Box = Box(Int)
+    fn make_unused() : Int do
+      let b = Box(42)
+      0
+    end
+  end|} in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "make_unused") m.March_tir.Tir.tm_fns in
+  let rec has_decrc = function
+    | March_tir.Tir.EDecRC _ -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> has_decrc e1 || has_decrc e2
+    | March_tir.Tir.ESeq (e1, e2) -> has_decrc e1 || has_decrc e2
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> has_decrc b.March_tir.Tir.br_body) brs ||
+      (match def with Some e -> has_decrc e | None -> false)
+    | _ -> false
+  in
+  Alcotest.(check bool) "dead heap binding gets EDecRC" true (has_decrc f.March_tir.Tir.fn_body)
+
+let test_perceus_no_rc_for_last_use () =
+  (* Constructing a value and immediately returning it (last use = ownership transfer)
+     should have no EDecRC *)
+  let m = perceus_module {|mod Test do
+    type Box = Box(Int)
+    fn wrap(x : Int) : Box do Box(x) end
+  end|} in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "wrap") m.March_tir.Tir.tm_fns in
+  let rec has_decrc = function
+    | March_tir.Tir.EDecRC _ -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> has_decrc e1 || has_decrc e2
+    | March_tir.Tir.ESeq (e1, e2) -> has_decrc e1 || has_decrc e2
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> has_decrc b.March_tir.Tir.br_body) brs ||
+      (match def with Some e -> has_decrc e | None -> false)
+    | _ -> false
+  in
+  Alcotest.(check bool) "last-use ownership transfer: no EDecRC" false (has_decrc f.March_tir.Tir.fn_body)
+
+let test_perceus_pipeline_no_crash () =
+  (* The full pipeline including perceus runs without exception *)
+  let m = perceus_module {|mod Test do
+    fn double(x : Int) : Int do x + x end
+    fn main() : Int do double(21) end
+  end|} in
+  Alcotest.(check bool) "perceus pipeline produced functions" true
+    (List.length m.March_tir.Tir.tm_fns >= 1)
+
+let test_perceus_needs_rc_tcon () =
+  (* needs_rc returns true for TCon, false for TInt *)
+  Alcotest.(check bool) "TCon needs RC" true
+    (March_tir.Perceus.needs_rc (March_tir.Tir.TCon ("List", [])));
+  Alcotest.(check bool) "TInt no RC" false
+    (March_tir.Perceus.needs_rc March_tir.Tir.TInt)
+
+let test_perceus_preserves_fn_count () =
+  (* After perceus, the number of functions is unchanged *)
+  let m = perceus_module {|mod Test do
+    fn a(x : Int) : Int do x end
+    fn b(x : Int) : Int do x end
+  end|} in
+  Alcotest.(check int) "perceus preserves fn count" 2
+    (List.length m.March_tir.Tir.tm_fns)
+
 let () =
   Alcotest.run "march"
     [
@@ -1704,5 +1804,13 @@ let () =
       ( "convert_ty", [
           Alcotest.test_case "Int" `Quick test_convert_ty_int;
           Alcotest.test_case "arrow uncurried" `Quick test_convert_ty_arrow;
+        ] );
+      ( "perceus", [
+          Alcotest.test_case "no RC ops for primitives"  `Quick test_perceus_no_ops_for_primitives;
+          Alcotest.test_case "dead binding gets EDecRC"  `Quick test_perceus_dead_binding_decrc;
+          Alcotest.test_case "last use no EDecRC"        `Quick test_perceus_no_rc_for_last_use;
+          Alcotest.test_case "pipeline no crash"         `Quick test_perceus_pipeline_no_crash;
+          Alcotest.test_case "needs_rc TCon/TInt"        `Quick test_perceus_needs_rc_tcon;
+          Alcotest.test_case "preserves fn count"        `Quick test_perceus_preserves_fn_count;
         ] );
     ]

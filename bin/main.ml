@@ -125,6 +125,7 @@ let compile filename =
     let tir = March_tir.Lower.lower_module ~type_map desugared in
     let tir = March_tir.Mono.monomorphize tir in
     let tir = March_tir.Defun.defunctionalize tir in
+    let tir = March_tir.Perceus.perceus tir in
     List.iter (fun td ->
         Printf.printf "%s\n\n" (March_tir.Pp.string_of_type_def td)
       ) tir.tm_types;
