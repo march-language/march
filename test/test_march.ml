@@ -978,6 +978,91 @@ let test_tc_mod_private () =
   end|} in
   Alcotest.(check bool) "private Foo.secret not accessible" true (has_errors ctx)
 
+(* Protocol declaration parsing *)
+let test_parse_protocol_decl () =
+  let src = {|mod Test do
+    protocol Transfer do
+      Client -> Server : String
+      Server -> Client : Int
+    end
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DProtocol (name, pdef, _)] ->
+    Alcotest.(check string) "protocol name" "Transfer" name.March_ast.Ast.txt;
+    Alcotest.(check int) "2 steps" 2 (List.length pdef.March_ast.Ast.proto_steps)
+  | _ -> Alcotest.fail "expected single DProtocol"
+
+let test_parse_protocol_loop () =
+  let src = {|mod Test do
+    protocol P do
+      loop do
+        A -> B : Int
+      end
+    end
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DProtocol (_, pdef, _)] ->
+    (match pdef.March_ast.Ast.proto_steps with
+     | [March_ast.Ast.ProtoLoop [_]] -> ()
+     | _ -> Alcotest.fail "expected ProtoLoop with one step")
+  | _ -> Alcotest.fail "expected single DProtocol"
+
+(* sig conformance *)
+let test_tc_sig_satisfied () =
+  let ctx = typecheck {|mod Test do
+    sig Foo do
+      fn bar : Int -> Int
+    end
+    mod Foo do
+      pub fn bar(x : Int) : Int do x end
+    end
+  end|} in
+  Alcotest.(check bool) "sig satisfied — no errors" false (has_errors ctx)
+
+let test_tc_sig_missing () =
+  let ctx = typecheck {|mod Test do
+    sig Foo do
+      fn bar : Int -> Int
+    end
+    mod Foo do
+      pub fn baz(x : Int) : Int do x end
+    end
+  end|} in
+  Alcotest.(check bool) "sig missing fn — has errors" true (has_errors ctx)
+
+(* impl validation *)
+let test_tc_impl_valid () =
+  let ctx = typecheck {|mod Test do
+    interface Stringify(a) do
+      fn to_s : a -> String
+    end
+    impl Stringify(Int) do
+      fn to_s(x : Int) : String do int_to_string(x) end
+    end
+  end|} in
+  Alcotest.(check bool) "valid impl — no errors" false (has_errors ctx)
+
+let test_tc_impl_unknown_iface () =
+  let ctx = typecheck {|mod Test do
+    impl NoSuchInterface(Int) do
+      fn foo(x : Int) : Int do x end
+    end
+  end|} in
+  Alcotest.(check bool) "impl unknown interface — has errors" true (has_errors ctx)
+
+let test_type_map_populated () =
+  let src = {|mod Test do
+    fn go(x : Int) do x end
+  end|} in
+  let m = March_desugar.Desugar.desugar_module
+    (let lexbuf = Lexing.from_string src in
+     March_parser.Parser.module_ March_lexer.Lexer.token lexbuf) in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  Alcotest.(check bool) "type map is non-empty" true
+    (Hashtbl.length type_map > 0)
+
 let () =
   Alcotest.run "march"
     [
@@ -1110,10 +1195,17 @@ let () =
           Alcotest.test_case "use names"            `Quick test_parse_use_names;
           Alcotest.test_case "mod typecheck"        `Quick test_tc_mod_typecheck;
           Alcotest.test_case "mod private"          `Quick test_tc_mod_private;
+          Alcotest.test_case "protocol decl"        `Quick test_parse_protocol_decl;
+          Alcotest.test_case "protocol loop"        `Quick test_parse_protocol_loop;
+          Alcotest.test_case "sig satisfied"        `Quick test_tc_sig_satisfied;
+          Alcotest.test_case "sig missing fn"       `Quick test_tc_sig_missing;
+          Alcotest.test_case "impl valid"           `Quick test_tc_impl_valid;
+          Alcotest.test_case "impl unknown iface"   `Quick test_tc_impl_unknown_iface;
         ] );
       ( "string interp",
         [
           Alcotest.test_case "parse interp"         `Quick test_parse_string_interp;
           Alcotest.test_case "eval interp"          `Quick test_eval_string_interp;
         ] );
+      ( "type_map", [ Alcotest.test_case "populated after check" `Quick test_type_map_populated ] );
     ]

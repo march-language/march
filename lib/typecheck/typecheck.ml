@@ -263,11 +263,14 @@ type env = {
   errors  : Err.ctx;
   pending_constraints : constraint_ list ref; (** Accumulated use-site constraints *)
   type_map : (Ast.span, ty) Hashtbl.t;
+  interfaces : (string * Ast.interface_def) list; (** Registered interfaces *)
+  sigs       : (string * Ast.sig_def) list;       (** Registered module signatures *)
 }
 
 let make_env errors type_map = {
   vars = []; types = []; ctors = []; records = []; level = 0; lin = [];
   errors; pending_constraints = ref []; type_map;
+  interfaces = []; sigs = [];
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -807,226 +810,230 @@ let span_of_expr : Ast.expr -> Ast.span = function
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
-  match e with
-  (* ── Literals ─────────────────────────────────────────────────── *)
-  | Ast.ELit (lit, _) ->
-    ty_of_lit lit
+  let result =
+    match e with
+    (* ── Literals ─────────────────────────────────────────────────── *)
+    | Ast.ELit (lit, _) ->
+      ty_of_lit lit
 
-  (* ── Variables ────────────────────────────────────────────────── *)
-  | Ast.EVar name ->
-    record_use name.txt name.span env;
-    (match lookup_var name.txt env with
-     | Some sch -> instantiate env.level env sch
-     | None     ->
-       Err.error env.errors ~span:name.span
-         (Printf.sprintf
-            "I cannot find a variable named `%s`.\n\
-             Is it defined above this point, or perhaps misspelled?"
-            name.txt);
-       TError)
-
-  (* ── Type annotations ─────────────────────────────────────────── *)
-  | Ast.EAnnot (e, ann, sp) ->
-    let tvars = ref [] in
-    let expected = surface_ty env ~tvars ann in
-    check_expr env e expected ~reason:(Some (RAnnotation sp));
-    expected
-
-  (* ── Typed holes ──────────────────────────────────────────────── *)
-  | Ast.EHole (name, sp) ->
-    let t = fresh_var env.level in
-    let label = match name with Some n -> "?" ^ n.txt | None -> "?" in
-    Err.report env.errors
-      { Err.severity = Hint; span = sp;
-        message = Printf.sprintf "Typed hole %s has type `%s`" label (pp_ty t);
-        labels  = [];
-        notes   = [ "Fill this hole with an expression of the type shown above." ] };
-    t
-
-  (* ── Function application ─────────────────────────────────────── *)
-  | Ast.EApp (f, args, sp) ->
-    let f_ty = infer_expr env f in
-    infer_app env sp f_ty args 0
-
-  (* ── Constructor application ──────────────────────────────────── *)
-  | Ast.ECon (name, args, sp) ->
-    (match lookup_ctor name.txt env with
-     | None ->
-       Err.error env.errors ~span:name.span
-         (Printf.sprintf
-            "I don't know a constructor called `%s`.\n\
-             Is this a typo, or did you forget to declare the type?" name.txt);
-       List.iter (fun a -> ignore (infer_expr env a)) args;
-       TError
-     | Some ci ->
-       let arg_tys, result_ty = instantiate_ctor env ci in
-       let n_expected = List.length arg_tys in
-       let n_got      = List.length args in
-       if n_expected <> n_got then begin
-         Err.error env.errors ~span:sp
+    (* ── Variables ────────────────────────────────────────────────── *)
+    | Ast.EVar name ->
+      record_use name.txt name.span env;
+      (match lookup_var name.txt env with
+       | Some sch -> instantiate env.level env sch
+       | None     ->
+         Err.error env.errors ~span:name.span
            (Printf.sprintf
-              "Constructor `%s` expects %d argument(s) but I got %d."
-              name.txt n_expected n_got);
+              "I cannot find a variable named `%s`.\n\
+               Is it defined above this point, or perhaps misspelled?"
+              name.txt);
+         TError)
+
+    (* ── Type annotations ─────────────────────────────────────────── *)
+    | Ast.EAnnot (e, ann, sp) ->
+      let tvars = ref [] in
+      let expected = surface_ty env ~tvars ann in
+      check_expr env e expected ~reason:(Some (RAnnotation sp));
+      expected
+
+    (* ── Typed holes ──────────────────────────────────────────────── *)
+    | Ast.EHole (name, sp) ->
+      let t = fresh_var env.level in
+      let label = match name with Some n -> "?" ^ n.txt | None -> "?" in
+      Err.report env.errors
+        { Err.severity = Hint; span = sp;
+          message = Printf.sprintf "Typed hole %s has type `%s`" label (pp_ty t);
+          labels  = [];
+          notes   = [ "Fill this hole with an expression of the type shown above." ] };
+      t
+
+    (* ── Function application ─────────────────────────────────────── *)
+    | Ast.EApp (f, args, sp) ->
+      let f_ty = infer_expr env f in
+      infer_app env sp f_ty args 0
+
+    (* ── Constructor application ──────────────────────────────────── *)
+    | Ast.ECon (name, args, sp) ->
+      (match lookup_ctor name.txt env with
+       | None ->
+         Err.error env.errors ~span:name.span
+           (Printf.sprintf
+              "I don't know a constructor called `%s`.\n\
+               Is this a typo, or did you forget to declare the type?" name.txt);
          List.iter (fun a -> ignore (infer_expr env a)) args;
          TError
-       end else begin
-         List.iter2 (fun arg arg_ty ->
-             check_expr env arg arg_ty
-               ~reason:(Some (RBuiltin
-                 (Printf.sprintf "Argument to constructor `%s`." name.txt)))
-           ) args arg_tys;
-         result_ty
-       end)
+       | Some ci ->
+         let arg_tys, result_ty = instantiate_ctor env ci in
+         let n_expected = List.length arg_tys in
+         let n_got      = List.length args in
+         if n_expected <> n_got then begin
+           Err.error env.errors ~span:sp
+             (Printf.sprintf
+                "Constructor `%s` expects %d argument(s) but I got %d."
+                name.txt n_expected n_got);
+           List.iter (fun a -> ignore (infer_expr env a)) args;
+           TError
+         end else begin
+           List.iter2 (fun arg arg_ty ->
+               check_expr env arg arg_ty
+                 ~reason:(Some (RBuiltin
+                   (Printf.sprintf "Argument to constructor `%s`." name.txt)))
+             ) args arg_tys;
+           result_ty
+         end)
 
-  (* ── Lambdas ──────────────────────────────────────────────────── *)
-  | Ast.ELam (params, body, _) ->
-    let param_tys, env' = bind_lam_params env params in
-    let body_ty = infer_expr env' body in
-    List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty
+    (* ── Lambdas ──────────────────────────────────────────────────── *)
+    | Ast.ELam (params, body, _) ->
+      let param_tys, env' = bind_lam_params env params in
+      let body_ty = infer_expr env' body in
+      List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty
 
-  (* ── do/end block ─────────────────────────────────────────────── *)
-  | Ast.EBlock (exprs, _) ->
-    infer_block env exprs
+    (* ── do/end block ─────────────────────────────────────────────── *)
+    | Ast.EBlock (exprs, _) ->
+      infer_block env exprs
 
-  (* ── let binding (block-scoped) ───────────────────────────────── *)
-  | Ast.ELet (b, sp) ->
-    (* When ELet appears as the last expression in a block it's a
-       programmer error, but we give it type Unit and move on. *)
-    let rhs_ty = infer_expr env b.bind_expr in
-    let bindings, pat_ty = infer_pattern env b.bind_pat in
-    let reason = Some (RLetBind sp) in
-    unify env ~span:sp ~reason rhs_ty pat_ty;
-    ignore bindings;
-    t_unit
+    (* ── let binding (block-scoped) ───────────────────────────────── *)
+    | Ast.ELet (b, sp) ->
+      (* When ELet appears as the last expression in a block it's a
+         programmer error, but we give it type Unit and move on. *)
+      let rhs_ty = infer_expr env b.bind_expr in
+      let bindings, pat_ty = infer_pattern env b.bind_pat in
+      let reason = Some (RLetBind sp) in
+      unify env ~span:sp ~reason rhs_ty pat_ty;
+      ignore bindings;
+      t_unit
 
-  (* ── match ────────────────────────────────────────────────────── *)
-  | Ast.EMatch (scrut, branches, sp) ->
-    let scrut_ty = infer_expr env scrut in
-    infer_match env sp scrut_ty branches
+    (* ── match ────────────────────────────────────────────────────── *)
+    | Ast.EMatch (scrut, branches, sp) ->
+      let scrut_ty = infer_expr env scrut in
+      infer_match env sp scrut_ty branches
 
-  (* ── Tuples ───────────────────────────────────────────────────── *)
-  | Ast.ETuple ([], _)  -> t_unit
-  | Ast.ETuple (es, _)  -> TTuple (List.map (infer_expr env) es)
+    (* ── Tuples ───────────────────────────────────────────────────── *)
+    | Ast.ETuple ([], _)  -> t_unit
+    | Ast.ETuple (es, _)  -> TTuple (List.map (infer_expr env) es)
 
-  (* ── Record literals ──────────────────────────────────────────── *)
-  | Ast.ERecord (flds, _) ->
-    let fld_tys = List.map (fun (n, e) -> (n.Ast.txt, infer_expr env e)) flds in
-    TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) fld_tys)
+    (* ── Record literals ──────────────────────────────────────────── *)
+    | Ast.ERecord (flds, _) ->
+      let fld_tys = List.map (fun (n, e) -> (n.Ast.txt, infer_expr env e)) flds in
+      TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) fld_tys)
 
-  (* ── Record update: { base with f = e, … } ───────────────────── *)
-  | Ast.ERecordUpdate (base, updates, sp) ->
-    let base_ty   = infer_expr env base in
-    let update_tys =
-      List.map (fun (n, e) -> (n.Ast.txt, infer_expr env e)) updates
-    in
-    (match expand_record env (repr base_ty) with
-     | Some (TRecord all_flds) ->
-       List.iter (fun (fname, uty) ->
-           match List.assoc_opt fname all_flds with
-           | Some fty ->
-             unify env ~span:sp
-               ~reason:(Some (RBuiltin
-                 (Printf.sprintf "field `%s` must keep its original type" fname)))
-               fty uty
-           | None ->
-             Err.error env.errors ~span:sp
-               (Printf.sprintf
-                  "This record does not have a field called `%s`.\n\
-                   The fields I know about are: %s"
-                  fname
-                  (String.concat ", " (List.map fst all_flds)))
-         ) update_tys;
-       base_ty
-     | _ ->
-     (match repr base_ty with
-     | TVar _ ->
-       (* Base type not yet known — build a partial record constraint *)
-       let partial =
-         TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b)
-                    update_tys) in
-       unify env ~span:sp base_ty partial;
-       base_ty
-     | other ->
-       Err.error env.errors ~span:sp
-         (Printf.sprintf
-            "I can only use `{ … with … }` on a record, but this \
-             expression has type `%s`." (pp_ty other));
-       TError))
+    (* ── Record update: { base with f = e, … } ───────────────────── *)
+    | Ast.ERecordUpdate (base, updates, sp) ->
+      let base_ty   = infer_expr env base in
+      let update_tys =
+        List.map (fun (n, e) -> (n.Ast.txt, infer_expr env e)) updates
+      in
+      (match expand_record env (repr base_ty) with
+       | Some (TRecord all_flds) ->
+         List.iter (fun (fname, uty) ->
+             match List.assoc_opt fname all_flds with
+             | Some fty ->
+               unify env ~span:sp
+                 ~reason:(Some (RBuiltin
+                   (Printf.sprintf "field `%s` must keep its original type" fname)))
+                 fty uty
+             | None ->
+               Err.error env.errors ~span:sp
+                 (Printf.sprintf
+                    "This record does not have a field called `%s`.\n\
+                     The fields I know about are: %s"
+                    fname
+                    (String.concat ", " (List.map fst all_flds)))
+           ) update_tys;
+         base_ty
+       | _ ->
+       (match repr base_ty with
+       | TVar _ ->
+         (* Base type not yet known — build a partial record constraint *)
+         let partial =
+           TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b)
+                      update_tys) in
+         unify env ~span:sp base_ty partial;
+         base_ty
+       | other ->
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "I can only use `{ … with … }` on a record, but this \
+               expression has type `%s`." (pp_ty other));
+         TError))
 
-  (* ── Field access: e.name ─────────────────────────────────────── *)
-  | Ast.EField (e, name, sp) ->
-    (* Module member access: if e is a bare uppercase identifier (module name),
-       try looking up "ModName.field" in env.vars before falling back to
-       record field access. *)
-    let mod_access =
-      match e with
-      | Ast.ECon (modname, [], _) ->
-        let qualified = modname.txt ^ "." ^ name.txt in
-        (match lookup_var qualified env with
-         | Some sch -> Some (instantiate env.level env sch)
-         | None     -> None)
-      | _ -> None
-    in
-    (match mod_access with
-     | Some ty -> ty
-     | None ->
-    let e_ty = infer_expr env e in
-    (match expand_record env (repr e_ty) with
-     | Some (TRecord flds) ->
-       (match List.assoc_opt name.txt flds with
-        | Some t -> t
-        | None   ->
-          Err.error env.errors ~span:sp
-            (Printf.sprintf
-               "This record does not have a field called `%s`.\n\
-                The fields I see are: %s"
-               name.txt
-               (String.concat ", " (List.map fst flds)));
-          TError)
-     | _ ->
-       (match repr e_ty with
-        | TVar _ ->
-          (* Field-access on an unknown record type — return a fresh var for now.
-             A row-polymorphism extension would constrain this properly. *)
-          fresh_var env.level
-        | other ->
-          Err.error env.errors ~span:sp
-            (Printf.sprintf
-               "I cannot access field `%s` because this expression has \
-                type `%s`, which is not a record." name.txt (pp_ty other));
-          TError))
-    (* close the None branch of mod_access match *)
-    )
+    (* ── Field access: e.name ─────────────────────────────────────── *)
+    | Ast.EField (e, name, sp) ->
+      (* Module member access: if e is a bare uppercase identifier (module name),
+         try looking up "ModName.field" in env.vars before falling back to
+         record field access. *)
+      let mod_access =
+        match e with
+        | Ast.ECon (modname, [], _) ->
+          let qualified = modname.txt ^ "." ^ name.txt in
+          (match lookup_var qualified env with
+           | Some sch -> Some (instantiate env.level env sch)
+           | None     -> None)
+        | _ -> None
+      in
+      (match mod_access with
+       | Some ty -> ty
+       | None ->
+      let e_ty = infer_expr env e in
+      (match expand_record env (repr e_ty) with
+       | Some (TRecord flds) ->
+         (match List.assoc_opt name.txt flds with
+          | Some t -> t
+          | None   ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "This record does not have a field called `%s`.\n\
+                  The fields I see are: %s"
+                 name.txt
+                 (String.concat ", " (List.map fst flds)));
+            TError)
+       | _ ->
+         (match repr e_ty with
+          | TVar _ ->
+            (* Field-access on an unknown record type — return a fresh var for now.
+               A row-polymorphism extension would constrain this properly. *)
+            fresh_var env.level
+          | other ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "I cannot access field `%s` because this expression has \
+                  type `%s`, which is not a record." name.txt (pp_ty other));
+            TError))
+      (* close the None branch of mod_access match *)
+      )
 
-  (* ── if/then/else ─────────────────────────────────────────────── *)
-  | Ast.EIf (cond, then_, else_, sp) ->
-    check_expr env cond t_bool
-      ~reason:(Some (RBuiltin "The condition of an if expression must be Bool."));
-    let t_ty = infer_expr env then_ in
-    let e_ty = infer_expr env else_ in
-    unify env ~span:sp ~reason:(Some (RMatchArm sp)) t_ty e_ty;
-    t_ty
+    (* ── if/then/else ─────────────────────────────────────────────── *)
+    | Ast.EIf (cond, then_, else_, sp) ->
+      check_expr env cond t_bool
+        ~reason:(Some (RBuiltin "The condition of an if expression must be Bool."));
+      let t_ty = infer_expr env then_ in
+      let e_ty = infer_expr env else_ in
+      unify env ~span:sp ~reason:(Some (RMatchArm sp)) t_ty e_ty;
+      t_ty
 
-  (* ── Pipes — must be desugared before reaching us ─────────────── *)
-  | Ast.EPipe _ ->
-    failwith
-      "March type checker: encountered EPipe — \
-       the desugaring pass must run before type checking."
+    (* ── Pipes — must be desugared before reaching us ─────────────── *)
+    | Ast.EPipe _ ->
+      failwith
+        "March type checker: encountered EPipe — \
+         the desugaring pass must run before type checking."
 
-  (* ── Atoms ────────────────────────────────────────────────────── *)
-  | Ast.EAtom (_, args, _) ->
-    List.iter (fun a -> ignore (infer_expr env a)) args;
-    t_atom
+    (* ── Atoms ────────────────────────────────────────────────────── *)
+    | Ast.EAtom (_, args, _) ->
+      List.iter (fun a -> ignore (infer_expr env a)) args;
+      t_atom
 
-  (* ── Actor messaging ──────────────────────────────────────────── *)
-  | Ast.ESend (cap, msg, _) ->
-    ignore (infer_expr env cap);
-    ignore (infer_expr env msg);
-    TCon ("Option", [t_unit])
+    (* ── Actor messaging ──────────────────────────────────────────── *)
+    | Ast.ESend (cap, msg, _) ->
+      ignore (infer_expr env cap);
+      ignore (infer_expr env msg);
+      TCon ("Option", [t_unit])
 
-  | Ast.ESpawn (actor, _) ->
-    ignore (infer_expr env actor);
-    TCon ("Pid", [fresh_var env.level])
+    | Ast.ESpawn (actor, _) ->
+      ignore (infer_expr env actor);
+      TCon ("Pid", [fresh_var env.level])
+  in
+  Hashtbl.replace env.type_map (span_of_expr e) (repr result);
+  result
 
 (** [check_expr env e expected ~reason] verifies [e] has type [expected].
     Uses the "checking" direction for lambdas (peels off arrows) and for
@@ -1034,6 +1041,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
     to infer + unify for everything else. *)
 and check_expr env (e : Ast.expr) (expected : ty) ~reason =
   let sp = span_of_expr e in
+  Hashtbl.replace env.type_map sp (repr expected);
   match e, repr expected with
 
   (* Lambda in check mode: peel arrow types one-by-one *)
@@ -1383,6 +1391,27 @@ let rec check_decl env (d : Ast.decl) : env =
         | _ -> None
       ) decls
     in
+    (* Check conformance against any matching sig declaration *)
+    (match List.assoc_opt name.txt env.sigs with
+     | None -> ()
+     | Some sdef ->
+       (* Verify all sig_fns are present in the module *)
+       List.iter (fun ((fname : Ast.name), _sig_ty) ->
+           if not (List.mem_assoc fname.txt inner_env.vars) then
+             Err.error env.errors ~span:name.span
+               (Printf.sprintf
+                  "Module `%s` does not implement `%s` required by `sig %s`."
+                  name.txt fname.txt name.txt)
+         ) sdef.sig_fns;
+       (* Verify all sig_types are declared in the module *)
+       List.iter (fun ((tname : Ast.name), _params) ->
+           if not (List.mem_assoc tname.txt inner_env.types) then
+             Err.error env.errors ~span:name.span
+               (Printf.sprintf
+                  "Module `%s` does not declare type `%s` required by `sig %s`."
+                  name.txt tname.txt name.txt)
+         ) sdef.sig_types
+    );
     (* Expose only public names as "ModName.name" in the outer env *)
     let new_names = List.filter_map (fun (k, sch) ->
         if not (List.mem_assoc k env.vars) && List.mem k pub_set
@@ -1393,24 +1422,55 @@ let rec check_decl env (d : Ast.decl) : env =
 
   | Ast.DProtocol _ -> env
 
-  | Ast.DSig _ ->
-    (* Signatures constrain module interfaces but don't introduce term bindings *)
-    env
+  | Ast.DSig (name, sdef, _sp) ->
+    (* Store the signature so DMod can check conformance later. *)
+    { env with sigs = (name.txt, sdef) :: env.sigs }
 
   | Ast.DInterface (idef, _sp) ->
-    (* Register each method as a polymorphic function binding,
-       with the interface type parameter in scope. *)
+    (* Register the interface definition for impl validation, and register
+       each method as a polymorphic function binding in scope. *)
+    let env' = { env with interfaces = (idef.iface_name.txt, idef) :: env.interfaces } in
     List.fold_left (fun env (m : Ast.method_decl) ->
         let tvars = ref [(idef.iface_param.txt, fresh_var env.level)] in
         let ty = surface_ty env ~tvars m.md_ty in
         bind_var m.md_name.txt (generalize env.level ty) env
-      ) env idef.iface_methods
+      ) env' idef.iface_methods
 
   | Ast.DImpl (idef, _sp) ->
-    (* Check each method body; impls don't export new term bindings. *)
-    List.iter (fun (_, (def : Ast.fn_def)) ->
-        ignore (check_fn env def _sp)
-      ) idef.impl_methods;
+    (* Validate each method against the interface declaration. *)
+    (match List.assoc_opt idef.impl_iface.txt env.interfaces with
+     | None ->
+       Err.error env.errors ~span:idef.impl_iface.span
+         (Printf.sprintf "Unknown interface `%s` — is it declared above this impl?"
+            idef.impl_iface.txt)
+     | Some interface ->
+       (* Instantiate the interface's type parameter with the concrete impl type *)
+       let inst_ty =
+         let tvars = ref [] in surface_ty env ~tvars idef.impl_ty
+       in
+       List.iter (fun ((mname : Ast.name), (def : Ast.fn_def)) ->
+           match List.find_opt
+                   (fun (m : Ast.method_decl) -> m.md_name.txt = mname.txt)
+                   interface.iface_methods with
+           | None ->
+             Err.error env.errors ~span:mname.span
+               (Printf.sprintf "Interface `%s` does not declare a method `%s`."
+                  idef.impl_iface.txt mname.txt)
+           | Some iface_method ->
+             (* Expected type: substitute interface param → concrete type *)
+             let expected_ty =
+               surface_ty env
+                 ~tvars:(ref [(interface.iface_param.txt, inst_ty)])
+                 iface_method.md_ty
+             in
+             (* Infer the method body's actual type *)
+             let actual_sch = check_fn env def _sp in
+             let actual_ty = instantiate env.level env actual_sch in
+             unify env ~span:mname.span actual_ty expected_ty
+               ~reason:(Some (RBuiltin
+                  (Printf.sprintf "`%s` in `impl %s` must match the interface signature"
+                     mname.txt idef.impl_iface.txt)))
+         ) idef.impl_methods);
     env
 
   | Ast.DExtern (edef, _sp) ->
@@ -1497,6 +1557,10 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
                        ci_arg_tys = arg_tys } in
             { acc_env with ctors = (h.ah_msg.txt, ci) :: acc_env.ctors }
           ) env1 actor.actor_handlers
+      | Ast.DSig (name, sdef, _) ->
+        { env with sigs = (name.txt, sdef) :: env.sigs }
+      | Ast.DInterface (idef, _) ->
+        { env with interfaces = (idef.iface_name.txt, idef) :: env.interfaces }
       | _ -> env
     ) (base_env errors type_map) m.Ast.mod_decls
   in
