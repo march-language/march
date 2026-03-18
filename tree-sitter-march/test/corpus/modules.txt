@@ -1,0 +1,27 @@
+================================================================================
+Module with declarations
+================================================================================
+mod MyMod do
+  type Foo = A | B
+  fn f() : Int do 1 end
+end
+--------------------------------------------------------------------------------
+(source_file
+  (module_def
+    name: (type_identifier)
+    (type_def name: (type_identifier)
+      (variant name: (type_identifier))
+      (variant name: (type_identifier)))
+    (function_def name: (identifier)
+      return_type: (type_constructor (type_constructor))
+      body: (block_body (integer)))))
+
+================================================================================
+Source file bare declarations (no mod wrapper)
+================================================================================
+fn f() : Int do 1 end
+--------------------------------------------------------------------------------
+(source_file
+  (function_def name: (identifier)
+    return_type: (type_constructor (type_constructor))
+    body: (block_body (integer))))

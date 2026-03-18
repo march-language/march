@@ -32,6 +32,7 @@ module.exports = grammar({
       'if', 'then', 'else',
       'send', 'spawn', 'respond',
       'actor', 'interface', 'impl', 'sig', 'extern', 'protocol', 'use',
+      'for', 'loop',
     ],
   },
 
@@ -195,13 +196,85 @@ module.exports = grammar({
       field('name', $.identifier), ':', field('type', $._type),
     ),
 
-    // Stubs — full implementation in Task 8
-    actor_def: $ => seq('actor', $.type_identifier, 'do', 'end'),
-    interface_def: $ => seq('interface', $.type_identifier, '(', $.type_variable, ')', 'do', 'end'),
-    impl_def: $ => seq('impl', $._type, 'do', 'end'),
-    sig_def: $ => seq('sig', $.type_identifier, 'do', 'end'),
-    extern_def: $ => seq('extern', $.string, ':', $._type, 'do', 'end'),
-    protocol_def: $ => seq('protocol', $.type_identifier, 'do', 'end'),
+    // Full actor, interface, impl, sig, extern, protocol implementations
+    actor_def: $ => seq(
+      'actor', field('name', $.type_identifier), 'do',
+      $.actor_state,
+      $.actor_init,
+      repeat($.actor_handler),
+      'end',
+    ),
+    actor_state: $ => seq('state', '{', commaSep($.record_type_field), '}'),
+    actor_init: $ => seq('init', $._expr),
+    actor_handler: $ => seq(
+      'on', field('name', $.type_identifier),
+      '(', optional(commaSep($.fn_param)), ')',
+      'do', $.block_body, 'end',
+    ),
+
+    interface_def: $ => seq(
+      'interface',
+      field('name', $.type_identifier),
+      '(', field('param', $.type_variable), ')',
+      optional(seq(':', commaSep1($.superclass_constraint))),
+      'do',
+      repeat(choice($.method_sig, $.function_def)),
+      'end',
+    ),
+    superclass_constraint: $ => seq(
+      $.type_identifier,
+      '(', commaSep1($._type), ')',
+    ),
+    method_sig: $ => seq('fn', field('name', $.identifier), ':', field('type', $._type)),
+
+    impl_def: $ => seq(
+      'impl',
+      field('interface', $.type_identifier),
+      '(',
+      field('type', $._type),
+      ')',
+      optional(seq('for', field('for_type', $._type))),
+      optional(seq('when', commaSep1($.superclass_constraint))),
+      'do',
+      repeat($.function_def),
+      'end',
+    ),
+
+    sig_def: $ => seq(
+      'sig', field('name', $.type_identifier), 'do',
+      repeat(choice($.method_sig, $.sig_type_decl)),
+      'end',
+    ),
+    sig_type_decl: $ => seq('type', $.type_identifier, optional($.type_params)),
+
+    extern_def: $ => seq(
+      'extern', $.string, ':', field('cap_type', $._type), 'do',
+      repeat($.extern_fn),
+      'end',
+    ),
+    extern_fn: $ => seq(
+      'fn', field('name', $.identifier),
+      '(', optional(commaSep($.fn_param)), ')',
+      ':', field('return_type', $._type),
+    ),
+
+    protocol_def: $ => seq(
+      'protocol', field('name', $.type_identifier), 'do',
+      repeat($.protocol_step),
+      'end',
+    ),
+    protocol_step: $ => choice(
+      $.protocol_message,
+      $.protocol_loop,
+    ),
+    protocol_message: $ => seq(
+      field('sender', $.type_identifier), '->',
+      field('receiver', $.type_identifier), ':',
+      $.type_identifier,
+      optional(seq('(', commaSep1($._type), ')')),
+    ),
+    protocol_loop: $ => seq('loop', 'do', repeat($.protocol_step), 'end'),
+
     use_declaration: $ => seq('use', $.type_identifier, '.', choice(
       seq('{', commaSep1($.identifier), '}'),
       '*',

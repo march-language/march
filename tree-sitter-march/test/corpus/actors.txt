@@ -1,0 +1,28 @@
+================================================================================
+Actor definition
+================================================================================
+mod Foo do
+actor Counter do
+  state { count : Int }
+  init { count = 0 }
+  on Increment() do
+    { state with count = state.count + 1 }
+  end
+end
+end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (actor_def
+    name: (type_identifier)
+    (actor_state
+      (record_type_field name: (identifier) type: (type_constructor (type_constructor))))
+    (actor_init (record_expression (record_field name: (identifier) value: (integer))))
+    (actor_handler
+      name: (type_identifier)
+      (block_body
+        (record_update
+          base: (identifier)
+          (record_field name: (identifier)
+            value: (additive_expression
+              left: (field_expression object: (identifier) field: (identifier))
+              right: (integer)))))))))

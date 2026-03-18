@@ -1,0 +1,40 @@
+================================================================================
+Interface definition
+================================================================================
+mod Foo do
+interface Eq(a) do
+  fn eq : a -> a -> Bool
+end
+end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (interface_def
+    name: (type_identifier)
+    param: (type_variable (type_variable))
+    (method_sig
+      name: (identifier)
+      type: (arrow_type
+        param: (type_variable (type_variable))
+        return: (arrow_type
+          param: (type_variable (type_variable))
+          return: (type_constructor (type_constructor))))))))
+
+================================================================================
+Impl definition
+================================================================================
+mod Foo do
+impl Eq(Int) do
+  fn eq(a : Int, b : Int) : Bool do a == b end
+end
+end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (impl_def
+    interface: (type_identifier)
+    type: (type_constructor (type_constructor))
+    (function_def
+      name: (identifier)
+      (fn_param (named_param name: (identifier) type: (type_constructor (type_constructor))))
+      (fn_param (named_param name: (identifier) type: (type_constructor (type_constructor))))
+      return_type: (type_constructor (type_constructor))
+      body: (block_body (comparison_expression left: (identifier) right: (identifier)))))))
