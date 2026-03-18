@@ -1,0 +1,17 @@
+{
+  "name": "tree-sitter-march",
+  "version": "0.0.1",
+  "description": "Tree-sitter grammar for the March language",
+  "main": "bindings/node",
+  "keywords": ["parser", "tree-sitter", "march"],
+  "dependencies": {
+    "nan": "*"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.march",
+      "file-types": ["march"],
+      "highlights": "queries/highlights.scm"
+    }
+  ]
+}
