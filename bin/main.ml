@@ -1,6 +1,7 @@
 (** March compiler entry point. *)
 
-let dump_tir = ref false
+let dump_tir  = ref false
+let emit_llvm = ref false
 
 (* ------------------------------------------------------------------ *)
 (* Multi-line REPL input                                              *)
@@ -254,18 +255,30 @@ let compile filename =
         ) d.notes
     ) diags;
   if March_errors.Errors.has_errors errors then exit 1
-  else if !dump_tir then begin
+  else if !dump_tir || !emit_llvm then begin
     let tir = March_tir.Lower.lower_module ~type_map desugared in
     let tir = March_tir.Mono.monomorphize tir in
     let tir = March_tir.Defun.defunctionalize tir in
     let tir = March_tir.Perceus.perceus tir in
     let tir = March_tir.Escape.escape_analysis tir in
-    List.iter (fun td ->
-        Printf.printf "%s\n\n" (March_tir.Pp.string_of_type_def td)
-      ) tir.tm_types;
-    List.iter (fun fn ->
-        Printf.printf "%s\n\n" (March_tir.Pp.string_of_fn_def fn)
-      ) tir.tm_fns
+    if !dump_tir then begin
+      List.iter (fun td ->
+          Printf.printf "%s\n\n" (March_tir.Pp.string_of_type_def td)
+        ) tir.tm_types;
+      List.iter (fun fn ->
+          Printf.printf "%s\n\n" (March_tir.Pp.string_of_fn_def fn)
+        ) tir.tm_fns
+    end else begin
+      (* --emit-llvm: write <basename>.ll *)
+      let ll_file =
+        (Filename.remove_extension filename) ^ ".ll"
+      in
+      let ir = March_tir.Llvm_emit.emit_module tir in
+      let oc = open_out ll_file in
+      output_string oc ir;
+      close_out oc;
+      Printf.printf "wrote %s\n" ll_file
+    end
   end
   else begin
     try March_eval.Eval.run_module desugared
@@ -279,7 +292,8 @@ let compile filename =
 let () =
   let files = ref [] in
   let specs = [
-    ("--dump-tir", Arg.Set dump_tir, " Print TIR instead of evaluating")
+    ("--dump-tir",   Arg.Set dump_tir,  " Print TIR instead of evaluating");
+    ("--emit-llvm",  Arg.Set emit_llvm, " Emit LLVM IR to <file>.ll");
   ] in
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
   match !files with
