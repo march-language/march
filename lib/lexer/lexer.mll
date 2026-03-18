@@ -78,6 +78,7 @@ rule token = parse
   | '-'           { MINUS }
   | '*'           { STAR }
   | '/'           { SLASH }
+  | '%'           { PERCENT }
   | '<'           { LT }
   | '>'           { GT }
   | "=="          { EQEQ }

@@ -411,6 +411,41 @@ let test_parse_list_literal () =
   | March_ast.Ast.ECon (n, [_; _], _) when n.txt = "Cons" -> ()
   | _ -> Alcotest.fail "expected Cons(1, Cons(...))"
 
+let test_lexer_percent () =
+  let lexbuf = Lexing.from_string "%" in
+  let tok = March_lexer.Lexer.token lexbuf in
+  Alcotest.(check bool) "lexes %" true
+    (match tok with March_parser.Parser.PERCENT -> true | _ -> false)
+
+let test_eval_modulo () =
+  let env = eval_module {|mod Test do
+    fn rem(a, b) do a % b end
+  end|} in
+  let v = call_fn env "rem" [March_eval.Eval.VInt 17; March_eval.Eval.VInt 5] in
+  Alcotest.(check int) "17 % 5 = 2" 2
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+let test_eval_multi_stmt_match_arm () =
+  (* Multi-statement match arm body — sequences two lets and returns result *)
+  let env = eval_module {|mod Test do
+    fn classify(n) do
+      match n with
+      | 0 ->
+        let tag = 0
+        tag
+      | _ ->
+        let tag = 1
+        tag
+      end
+    end
+  end|} in
+  let v0 = call_fn env "classify" [March_eval.Eval.VInt 0] in
+  let v1 = call_fn env "classify" [March_eval.Eval.VInt 7] in
+  Alcotest.(check int) "classify(0) = 0" 0
+    (match v0 with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt");
+  Alcotest.(check int) "classify(7) = 1" 1
+    (match v1 with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
 let test_eval_unary_minus () =
   let env = eval_module {|mod Test do
     fn neg(x) do -x end
@@ -535,5 +570,8 @@ let () =
           Alcotest.test_case "unary minus"         `Quick test_parse_unary_minus;
           Alcotest.test_case "negative lit pattern"`Quick test_parse_negative_lit_pattern;
           Alcotest.test_case "list literal"        `Quick test_parse_list_literal;
+          Alcotest.test_case "percent token"       `Quick test_lexer_percent;
+          Alcotest.test_case "modulo operator"     `Quick test_eval_modulo;
+          Alcotest.test_case "multi-stmt match arm"`Quick test_eval_multi_stmt_match_arm;
         ] );
     ]

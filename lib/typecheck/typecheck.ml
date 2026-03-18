@@ -248,13 +248,15 @@ type env = {
   vars    : (string * scheme) list;        (** Term variable → scheme *)
   types   : (string * int) list;           (** Type constructor name → arity *)
   ctors   : (string * ctor_info) list;     (** Data constructor name → info *)
+  records : (string * (string list * (string * Ast.ty) list)) list;
+    (** Named record type definitions: name → (type_params, [(field, surface_ty)]) *)
   level   : int;                           (** Current generalization level *)
   lin     : lin_entry list;                (** Linear/affine use tracking *)
   errors  : Err.ctx;
 }
 
 let make_env errors = {
-  vars = []; types = []; ctors = []; level = 0; lin = []; errors
+  vars = []; types = []; ctors = []; records = []; level = 0; lin = []; errors
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -362,7 +364,15 @@ let builtin_bindings : (string * scheme) list =
     ("-",  Mono (TArrow (t_int,    TArrow (t_int,    t_int))));
     ("*",  Mono (TArrow (t_int,    TArrow (t_int,    t_int))));
     ("/",  Mono (TArrow (t_int,    TArrow (t_int,    t_int))));
-    ("++", Mono (TArrow (t_string, TArrow (t_string, t_string))));
+    ("%",  Mono (TArrow (t_int,    TArrow (t_int,    t_int))));
+    ("++",             Mono (TArrow (t_string, TArrow (t_string, t_string))));
+    ("print",          Mono (TArrow (t_string, t_unit)));
+    ("println",        Mono (TArrow (t_string, t_unit)));
+    ("int_to_string",  Mono (TArrow (t_int,    t_string)));
+    ("float_to_string",Mono (TArrow (t_float,  t_string)));
+    ("bool_to_string", Mono (TArrow (t_bool,   t_string)));
+    ("string_to_int",  Mono (TArrow (t_string, t_int)));
+    ("negate",         Mono (TArrow (t_int,    t_int)));
     ("<",  Mono (TArrow (t_int,    TArrow (t_int,    t_bool))));
     (">",  Mono (TArrow (t_int,    TArrow (t_int,    t_bool))));
     ("<=", Mono (TArrow (t_int,    TArrow (t_int,    t_bool))));
@@ -508,7 +518,20 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
       Err.error env.errors ~span:name.span
         (Printf.sprintf "`%s` expects %d type argument(s) but got %d."
            name.txt arity (List.length args'));
-    TCon (name.txt, args')
+    (* If this is a named record type, expand it structurally so that
+       type annotations like `: Point` unify correctly with record literals. *)
+    (match List.assoc_opt name.txt env.records with
+     | Some (params, field_decls) when List.length params = List.length args' ->
+       let saved = !tvars in
+       List.iter2 (fun pname arg -> tvars := (pname, arg) :: !tvars) params args';
+       let flds = List.map (fun (fn, fty) -> (fn, surface_ty env ~tvars fty)) field_decls in
+       tvars := saved;
+       TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) flds)
+     | _ ->
+       (* Normalize built-in unit/bool so surface annotations unify with internal reps *)
+       match name.txt with
+       | "Unit" -> t_unit
+       | _ -> TCon (name.txt, args'))
 
   | Ast.TyVar name ->
     (match List.assoc_opt name.txt !tvars with
@@ -550,6 +573,20 @@ let instantiate_ctor env (ci : ctor_info) : ty list * ty =
   (* Build TCon(ParentType, [fresh_a; fresh_b; …]) *)
   let result_ty = TCon (ci.ci_type, List.map snd fresh_pairs) in
   (arg_tys, result_ty)
+
+(** Try to expand a [TCon] of a named record type to [TRecord].
+    Returns the [TRecord] type if the name is a known record def, else [None]. *)
+let expand_record env ty =
+  match repr ty with
+  | TRecord _ as t -> Some t
+  | TCon (name, args) ->
+    (match List.assoc_opt name env.records with
+     | Some (params, field_decls) when List.length params = List.length args ->
+       let tvars = ref (List.combine params args) in
+       let flds = List.map (fun (fn, fty) -> (fn, surface_ty env ~tvars fty)) field_decls in
+       Some (TRecord (List.sort (fun (a, _) (b, _) -> String.compare a b) flds))
+     | _ -> None)
+  | _ -> None
 
 (* =================================================================
    §12  Linearity tracking
@@ -821,8 +858,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
     let update_tys =
       List.map (fun (n, e) -> (n.Ast.txt, infer_expr env e)) updates
     in
-    (match repr base_ty with
-     | TRecord all_flds ->
+    (match expand_record env (repr base_ty) with
+     | Some (TRecord all_flds) ->
        List.iter (fun (fname, uty) ->
            match List.assoc_opt fname all_flds with
            | Some fty ->
@@ -839,6 +876,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
                   (String.concat ", " (List.map fst all_flds)))
          ) update_tys;
        base_ty
+     | _ ->
+     (match repr base_ty with
      | TVar _ ->
        (* Base type not yet known — build a partial record constraint *)
        let partial =
@@ -851,13 +890,13 @@ let rec infer_expr env (e : Ast.expr) : ty =
          (Printf.sprintf
             "I can only use `{ … with … }` on a record, but this \
              expression has type `%s`." (pp_ty other));
-       TError)
+       TError))
 
   (* ── Field access: e.name ─────────────────────────────────────── *)
   | Ast.EField (e, name, sp) ->
     let e_ty = infer_expr env e in
-    (match repr e_ty with
-     | TRecord flds ->
+    (match expand_record env (repr e_ty) with
+     | Some (TRecord flds) ->
        (match List.assoc_opt name.txt flds with
         | Some t -> t
         | None   ->
@@ -868,16 +907,18 @@ let rec infer_expr env (e : Ast.expr) : ty =
                name.txt
                (String.concat ", " (List.map fst flds)));
           TError)
-     | TVar _ ->
-       (* Field-access on an unknown record type — return a fresh var for now.
-          A row-polymorphism extension would constrain this properly. *)
-       fresh_var env.level
-     | other ->
-       Err.error env.errors ~span:sp
-         (Printf.sprintf
-            "I cannot access field `%s` because this expression has \
-             type `%s`, which is not a record." name.txt (pp_ty other));
-       TError)
+     | _ ->
+       (match repr e_ty with
+        | TVar _ ->
+          (* Field-access on an unknown record type — return a fresh var for now.
+             A row-polymorphism extension would constrain this properly. *)
+          fresh_var env.level
+        | other ->
+          Err.error env.errors ~span:sp
+            (Printf.sprintf
+               "I cannot access field `%s` because this expression has \
+                type `%s`, which is not a record." name.txt (pp_ty other));
+          TError))
 
   (* ── if/then/else ─────────────────────────────────────────────── *)
   | Ast.EIf (cond, then_, else_, sp) ->
@@ -1178,7 +1219,11 @@ let rec check_decl env (d : Ast.decl) : env =
                     ; ci_arg_tys = v.var_args } in
            { e with ctors = (v.var_name.txt, ci) :: e.ctors }
          ) env1 variants
-     | Ast.TDRecord _ | Ast.TDAlias _ -> env1)
+     | Ast.TDRecord fields ->
+       let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+       let field_pairs = List.map (fun (f : Ast.field) -> (f.fld_name.txt, f.fld_ty)) fields in
+       { env1 with records = (name.txt, (param_names, field_pairs)) :: env1.records }
+     | Ast.TDAlias _ -> env1)
 
   | Ast.DActor (name, actor, _sp) ->
     (* Check init expression and all message handlers *)
@@ -1242,6 +1287,10 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx =
                         ; ci_arg_tys = v.var_args } in
                { e with ctors = (v.var_name.txt, ci) :: e.ctors }
              ) env1 variants
+         | Ast.TDRecord fields ->
+           let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+           let field_pairs = List.map (fun (f : Ast.field) -> (f.fld_name.txt, f.fld_ty)) fields in
+           { env1 with records = (name.txt, (param_names, field_pairs)) :: env1.records }
          | _ -> env1)
       | _ -> env
     ) (base_env errors) m.Ast.mod_decls

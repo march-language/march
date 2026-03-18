@@ -6,15 +6,20 @@ March is a statically-typed functional language (ML/Elixir hybrid) compiled with
 
 The opam switch is `march`. `opam` and `dune` are available directly in PATH — no wrapper needed.
 
+**NEVER use `eval $(opam env ...)` or any opam env setup prefix.** Run `dune`, `opam`, etc. directly without any preamble.
+
 ```
 dune build          # build everything
-dune runtest        # run all 40 tests
+dune runtest        # run all 50 tests
 dune exec march -- file.march   # run the compiler
 ```
 
 ## Project layout
 
 ```
+specs/design.md             running design spec for the language
+specs/gc_design.md          design spec for the GC
+specs/progress.md           implementation progress so far
 bin/main.ml                 compiler entry point (parse→desugar→typecheck→eval)
 lib/ast/ast.ml              AST types (span, expr, pattern, decl, …)
 lib/lexer/lexer.mll         ocamllex lexer
@@ -27,6 +32,16 @@ lib/effects/effects.ml      (placeholder)
 lib/codegen/codegen.ml      (placeholder)
 test/test_march.ml          alcotest suite
 ```
+
+## Surface syntax notes
+
+- Module: `mod Name do ... end` (not `module`)
+- Type variants: `type Foo = A | B(Int)` — no leading `|`
+- Conditionals: `if cond then e1 else e2` (not `if/do/end`)
+- Block lets: `let x = expr` with no `in`; subsequent block exprs see the binding
+- Lambda multi-params: `fn (a, b) -> expr` (no `;` separator; or single `fn x -> expr`)
+- No `;` — use newlines to separate block expressions
+- Match arms use `block_body` — multi-statement arms are fine, no `do...end` wrapper needed
 
 ## Pipeline
 

@@ -1,0 +1,148 @@
+-- A linked-list library with map, filter, fold, and a small demo.
+-- Run: march examples/list_lib.march
+
+mod ListLib do
+
+type List(a) = Nil | Cons(a, List(a))
+
+type Option(a) = None | Some(a)
+
+fn length(lst : List(Int)) : Int do
+  match lst with
+  | Nil        -> 0
+  | Cons(_, t) -> 1 + length(t)
+  end
+end
+
+fn map(f : Int -> Int, lst : List(Int)) : List(Int) do
+  match lst with
+  | Nil        -> Nil
+  | Cons(h, t) -> Cons(f(h), map(f, t))
+  end
+end
+
+fn filter(pred : Int -> Bool, lst : List(Int)) : List(Int) do
+  match lst with
+  | Nil        -> Nil
+  | Cons(h, t) -> if pred(h) then Cons(h, filter(pred, t)) else filter(pred, t)
+  end
+end
+
+fn fold_left(f : Int -> Int -> Int, acc : Int, lst : List(Int)) : Int do
+  match lst with
+  | Nil        -> acc
+  | Cons(h, t) -> fold_left(f, f(acc, h), t)
+  end
+end
+
+fn sum(lst : List(Int)) : Int do
+  fold_left(fn (a, b) -> a + b, 0, lst)
+end
+
+fn product(lst : List(Int)) : Int do
+  fold_left(fn (a, b) -> a * b, 1, lst)
+end
+
+fn append(xs : List(Int), ys : List(Int)) : List(Int) do
+  match xs with
+  | Nil        -> ys
+  | Cons(h, t) -> Cons(h, append(t, ys))
+  end
+end
+
+fn reverse_acc(lst : List(Int), acc : List(Int)) : List(Int) do
+  match lst with
+  | Nil        -> acc
+  | Cons(h, t) -> reverse_acc(t, Cons(h, acc))
+  end
+end
+
+fn reverse(lst : List(Int)) : List(Int) do
+  reverse_acc(lst, Nil)
+end
+
+fn find(pred : Int -> Bool, lst : List(Int)) : Option(Int) do
+  match lst with
+  | Nil        -> None
+  | Cons(h, t) -> if pred(h) then Some(h) else find(pred, t)
+  end
+end
+
+fn range(lo : Int, hi : Int) : List(Int) do
+  if lo > hi then Nil else Cons(lo, range(lo + 1, hi))
+end
+
+-- Multi-statement match arm: print elements with separator
+fn print_list(lst : List(Int)) : Unit do
+  print("[")
+  match lst with
+  | Nil -> ()
+  | Cons(h, t) ->
+    print(int_to_string(h))
+    match t with
+    | Nil -> ()
+    | _   ->
+      print(", ")
+      print_list_tail(t)
+    end
+  end
+  print("]")
+end
+
+fn print_list_tail(lst : List(Int)) : Unit do
+  match lst with
+  | Nil        -> ()
+  | Cons(h, t) ->
+    print(int_to_string(h))
+    match t with
+    | Nil -> ()
+    | _   ->
+      print(", ")
+      print_list_tail(t)
+    end
+  end
+end
+
+fn option_to_string(o : Option(Int)) : String do
+  match o with
+  | None    -> "None"
+  | Some(x) -> "Some(" ++ int_to_string(x) ++ ")"
+  end
+end
+
+fn main() : Unit do
+  let nums = range(1, 10)
+  print_list(nums)
+  println("")
+
+  let doubled = map(fn x -> x * 2, nums)
+  print("doubled:   ")
+  print_list(doubled)
+  println("")
+
+  let evens = filter(fn x -> x % 2 == 0, nums)
+  print("evens:     ")
+  print_list(evens)
+  println("")
+
+  let s = sum(nums)
+  println("sum 1..10  = " ++ int_to_string(s))
+
+  let p = product(range(1, 5))
+  println("5!         = " ++ int_to_string(p))
+
+  let rev = reverse(range(1, 5))
+  print("reverse:   ")
+  print_list(rev)
+  println("")
+
+  let big = find(fn x -> x > 7, nums)
+  println("find >7:   " ++ option_to_string(big))
+
+  let none = find(fn x -> x > 100, nums)
+  println("find >100: " ++ option_to_string(none))
+
+  println("length:    " ++ int_to_string(length(nums)))
+end
+
+end

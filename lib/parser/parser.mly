@@ -55,7 +55,7 @@
 %token LPAREN RPAREN LBRACE RBRACE LBRACKET RBRACKET
 %token ARROW PIPE_ARROW
 %token EQUALS COLON COMMA PIPE DOT
-%token PLUSPLUS PLUS MINUS STAR SLASH
+%token PLUSPLUS PLUS MINUS STAR SLASH PERCENT
 %token LT GT EQEQ NEQ LEQ GEQ
 %token AND OR BANG
 %token UNDERSCORE QUESTION
@@ -254,8 +254,9 @@ expr_add:
   | e = expr_mul { e }
 
 expr_mul:
-  | a = expr_mul; STAR; b = expr_unary { EApp (EVar (mk_name "*" $loc), [a; b], mk_span ($loc)) }
-  | a = expr_mul; SLASH; b = expr_unary { EApp (EVar (mk_name "/" $loc), [a; b], mk_span ($loc)) }
+  | a = expr_mul; STAR;    b = expr_unary { EApp (EVar (mk_name "*"   $loc), [a; b], mk_span ($loc)) }
+  | a = expr_mul; SLASH;   b = expr_unary { EApp (EVar (mk_name "/"   $loc), [a; b], mk_span ($loc)) }
+  | a = expr_mul; PERCENT; b = expr_unary { EApp (EVar (mk_name "%"   $loc), [a; b], mk_span ($loc)) }
   | e = expr_unary { e }
 
 (** Unary operators: -expr, !expr *)
@@ -317,7 +318,7 @@ record_field_expr:
   | name = lower_name; EQUALS; e = expr { (name, e) }
 
 branch:
-  | p = pattern; guard = option(when_guard); ARROW; e = expr
+  | p = pattern; guard = option(when_guard); ARROW; e = block_body
     { { branch_pat = p; branch_guard = guard; branch_body = e } }
 
 (* ---- Patterns ---- *)
