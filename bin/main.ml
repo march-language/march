@@ -115,7 +115,10 @@ let compile filename =
         d.span.March_ast.Ast.start_line
         d.span.March_ast.Ast.start_col
         sev
-        d.message
+        d.message;
+      List.iter (fun note ->
+          Printf.printf "note: %s\n" note
+        ) d.notes
     ) diags;
   if March_errors.Errors.has_errors errors then exit 1
   else if !dump_tir then begin

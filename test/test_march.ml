@@ -1464,6 +1464,72 @@ let test_defun_e2e_no_hof_unchanged () =
   ) m.March_tir.Tir.tm_types) in
   Alcotest.(check int) "no TDClosure for non-HOF program" 0 closure_count
 
+let contains sub s =
+  let sl = String.length sub and tl = String.length s in
+  let rec go i = i <= tl - sl && (String.sub s i sl = sub || go (i + 1))
+  in go 0
+
+let test_actor_handler_extra_field () =
+  (* Handler returns an extra field not in state → error with note *)
+  let ctx = typecheck {|mod Test do
+    actor Counter do
+      state { value : Int }
+      init { value = 0 }
+      on Bad() do
+        { value = 0, extra = true }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "extra field: has error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  (match List.find_opt (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Error) diags with
+  | None -> Alcotest.fail "expected an Error diagnostic"
+  | Some d ->
+    Alcotest.(check bool) "message mentions handler 'Bad'" true
+      (contains "Bad" d.March_errors.Errors.message);
+    Alcotest.(check bool) "message mentions actor 'Counter'" true
+      (contains "Counter" d.March_errors.Errors.message);
+    Alcotest.(check bool) "has at least one note" true
+      (d.March_errors.Errors.notes <> []);
+    Alcotest.(check bool) "note mentions 'extra'" true
+      (List.exists (fun n -> contains "extra" n)
+        d.March_errors.Errors.notes))
+
+let test_actor_handler_missing_field () =
+  (* Handler omits a state field → error with missing-field note *)
+  let ctx = typecheck {|mod Test do
+    actor Widget do
+      state { value : Int, name : String }
+      init { value = 0, name = "x" }
+      on Reset() do
+        { value = 0 }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "missing field: has error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  (match List.find_opt (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Error) diags with
+  | None -> Alcotest.fail "expected an Error diagnostic"
+  | Some d ->
+    Alcotest.(check bool) "note mentions 'name'" true
+      (List.exists (fun n -> contains "name" n)
+        d.March_errors.Errors.notes))
+
+let test_actor_handler_correct () =
+  (* Correct handler → no errors *)
+  let ctx = typecheck {|mod Test do
+    actor Counter do
+      state { value : Int }
+      init { value = 0 }
+      on Inc() do
+        { value = state.value + 1 }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "correct handler: no errors" false (has_errors ctx)
+
 let () =
   Alcotest.run "march"
     [
@@ -1519,6 +1585,9 @@ let () =
           Alcotest.test_case "match expression"    `Quick test_tc_match;
           Alcotest.test_case "undefined variable"  `Quick test_tc_undefined_var;
           Alcotest.test_case "typed hole"          `Quick test_tc_hole;
+          Alcotest.test_case "actor handler extra field"   `Quick test_actor_handler_extra_field;
+          Alcotest.test_case "actor handler missing field" `Quick test_actor_handler_missing_field;
+          Alcotest.test_case "actor handler correct"       `Quick test_actor_handler_correct;
         ] );
       ( "eval",
         [

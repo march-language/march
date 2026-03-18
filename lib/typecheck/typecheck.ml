@@ -1307,6 +1307,41 @@ let discharge_constraints env span =
     ) !(env.pending_constraints);
   env.pending_constraints := []
 
+(** Structural equality after repr — works for concrete types; may give
+    false-positive wrong-type hints when two distinct unresolved TVars
+    happen not to be linked yet (acceptable in actor handler context). *)
+let types_equal a b = repr a = repr b
+
+(** Build hint strings explaining why an actor handler body has the wrong type.
+    state_ty and inferred_ty should both be repr-ed before calling. *)
+let actor_handler_hints state_ty inferred_ty =
+  match inferred_ty with
+  | TRecord inferred_fields ->
+    (match state_ty with
+     | TRecord [] ->
+       ["the state has no fields — return an empty record {}"]
+     | TRecord state_fields ->
+       let state_names    = List.map fst state_fields in
+       let inferred_names = List.map fst inferred_fields in
+       let extra   = List.filter (fun n -> not (List.mem n state_names)) inferred_names in
+       let missing = List.filter (fun n -> not (List.mem n inferred_names)) state_names in
+       let wrong_type = List.filter_map (fun (fname, st) ->
+           match List.assoc_opt fname inferred_fields with
+           | Some it when not (types_equal st it) ->
+             Some (Printf.sprintf
+               "field '%s' has type %s but state declares it as %s"
+               fname (pp_ty (repr it)) (pp_ty (repr st)))
+           | _ -> None) state_fields in
+       List.map (fun n -> Printf.sprintf
+         "field '%s' is not part of the actor state \
+          — remove it, or add it to the state declaration" n) extra
+       @ List.map (fun n -> Printf.sprintf
+         "field '%s' is missing from the returned record" n) missing
+       @ wrong_type
+     | _ -> [])
+  | t ->
+    [Printf.sprintf "handler must return a record matching the state, not %s" (pp_ty t)]
+
 let rec check_decl env (d : Ast.decl) : env =
   match d with
   | Ast.DFn (def, sp) ->
@@ -1380,9 +1415,25 @@ let rec check_decl env (d : Ast.decl) : env =
                 e
             ) handler_env h.ah_params
         in
-        (* Handler body must return the state record type *)
-        check_expr handler_env h.ah_body state_ty
-          ~reason:(Some (RBuiltin (Printf.sprintf "handler `%s` must return the state record" h.ah_msg.txt)))
+        (* Handler body must return the state record type — emit rich diagnostic *)
+        let inferred = infer_expr handler_env h.ah_body in
+        let shadow_env = { handler_env with errors = Err.create () } in
+        (* Note: pending_constraints and type_map are shared (shallow copy) —
+           intentional; only error reporting is isolated. *)
+        unify shadow_env ~span:h.ah_msg.span ~reason:None
+          (repr inferred) (repr state_ty);
+        if Err.has_errors shadow_env.errors then
+          Err.report handler_env.errors
+            { severity = Error;
+              span = h.ah_msg.span;
+              message = Printf.sprintf
+                "handler '%s' in actor '%s' must return the state type\
+                 \n  expected: %s\
+                 \n  got:      %s"
+                h.ah_msg.txt name.txt
+                (pp_ty (repr state_ty)) (pp_ty (repr inferred));
+              labels = [];
+              notes = actor_handler_hints (repr state_ty) (repr inferred) }
       ) actor.actor_handlers;
     bind_var name.txt (Mono (TCon ("Pid", [state_ty]))) env_with_ctors
 
