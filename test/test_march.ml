@@ -1362,9 +1362,9 @@ let test_defun_zero_capture_closure () =
     | _ -> None
   ) m.March_tir.Tir.tm_types in
   Alcotest.(check bool) "at least one closure" true (closures <> []);
-  (* zero-capture closure has no fields *)
+  (* zero-capture closure has exactly one field: the fn_ptr (TPtr TUnit) *)
   Alcotest.(check bool) "zero-capture closure has no fields" true
-    (List.exists (fun fields -> fields = []) closures)
+    (List.exists (fun fields -> fields = [March_tir.Tir.TPtr March_tir.Tir.TUnit]) closures)
 
 let test_defun_nested_lambda () =
   (* fn make_adder(n) = fn x -> x + n produces a nested closure.
@@ -1664,6 +1664,29 @@ let test_multiline_is_complete_open_block () =
   Alcotest.(check bool) "open block is not complete"
     false (March_repl.Multiline.is_complete "fn foo() do\n  x")
 
+(* --- complete tests --- *)
+
+let test_complete_command () =
+  let completions = March_repl.Complete.complete ":q" [] in
+  Alcotest.(check bool) ":q completes to :quit or :q"
+    true (List.mem ":quit" completions || List.mem ":q" completions)
+
+let test_complete_keyword () =
+  let completions = March_repl.Complete.complete "fn" [] in
+  Alcotest.(check bool) "fn is in keyword completions"
+    true (List.mem "fn" completions)
+
+let test_complete_in_scope () =
+  let scope = [("double", "Int -> Int"); ("x", "Int")] in
+  let completions = March_repl.Complete.complete "do" scope in
+  Alcotest.(check bool) "double completes from scope"
+    true (List.mem "double" completions)
+
+let test_complete_empty_all () =
+  let completions = March_repl.Complete.complete "" [] in
+  Alcotest.(check bool) "empty prefix returns at least one keyword"
+    true (List.length completions > 0)
+
 let () =
   Alcotest.run "march"
     [
@@ -1856,5 +1879,11 @@ let () =
         Alcotest.test_case "starts with pipe" `Quick test_multiline_starts_with_pipe;
         Alcotest.test_case "is_complete simple" `Quick test_multiline_is_complete_simple;
         Alcotest.test_case "is_complete open block" `Quick test_multiline_is_complete_open_block;
+      ];
+      "complete", [
+        Alcotest.test_case "command" `Quick test_complete_command;
+        Alcotest.test_case "keyword" `Quick test_complete_keyword;
+        Alcotest.test_case "in scope" `Quick test_complete_in_scope;
+        Alcotest.test_case "empty all" `Quick test_complete_empty_all;
       ];
     ]

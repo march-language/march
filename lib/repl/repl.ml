@@ -348,7 +348,26 @@ let run_tui () =
                              Input.cursor = String.length entry };
           render_frame ()
         | Input.Redraw | Input.Noop -> render_frame ()
-        | Input.Complete -> ()   (* Task 10 *)
+        | Input.Complete ->
+          let b = !inp.Input.buffer and c = !inp.Input.cursor in
+          let i = ref c in
+          while !i > 0 && b.[!i - 1] <> ' ' do decr i done;
+          let prefix = String.sub b !i (c - !i) in
+          let scope = List.filter_map (fun (name, v) ->
+            if List.mem_assoc name March_eval.Eval.base_env then None
+            else Some (name, March_eval.Eval.value_to_string v)
+          ) !env in
+          let completions = Complete.complete prefix scope in
+          (match completions with
+           | [] -> ()
+           | [single] ->
+             let suffix = String.sub single (String.length prefix)
+               (String.length single - String.length prefix) in
+             inp := Input.insert_at !inp suffix;
+             render_frame ()
+           | multiple ->
+             add_line Notty.A.empty (String.concat "  " multiple);
+             render_frame ())
         | Input.HistorySearch -> () (* Phase 2 *)
        ))
   done;
