@@ -30,9 +30,29 @@ type value =
   | VCon    of string * value list      (** Constructor: tag + payload *)
   | VClosure of env * string list * expr
   | VBuiltin of string * (value list -> value)
+  | VPid    of int                      (** Actor process id *)
 
 (** Association-list environment mapping names to values. *)
 and env = (string * value) list
+
+(* ------------------------------------------------------------------ *)
+(* Actor runtime                                                       *)
+(* ------------------------------------------------------------------ *)
+
+type actor_inst = {
+  ai_def     : actor_def;
+  ai_env_ref : env ref;         (** Module environment at spawn time *)
+  mutable ai_state : value;
+  mutable ai_alive : bool;
+}
+
+(** Actor definitions registered by [DActor] — reset per module eval. *)
+let actor_defs_tbl : (string, actor_def * env ref) Hashtbl.t = Hashtbl.create 8
+
+(** Live actor instances — reset per module eval. *)
+let actor_registry  : (int, actor_inst) Hashtbl.t = Hashtbl.create 16
+
+let next_pid : int ref = ref 0
 
 (* ------------------------------------------------------------------ *)
 (* Exceptions                                                          *)
@@ -169,6 +189,7 @@ let rec value_to_string v =
     tag ^ "(" ^ String.concat ", " (List.map value_to_string args) ^ ")"
   | VClosure _  -> "<fn>"
   | VBuiltin (n, _) -> "<builtin:" ^ n ^ ">"
+  | VPid pid -> "Pid(" ^ string_of_int pid ^ ")"
 
 (** print/println use a display form (no quotes around strings). *)
 let value_display v =
@@ -238,6 +259,9 @@ let base_env : env =
         | [VFloat f] -> print_float f; VUnit
         | _ -> eval_error "print_float: expected float"))
     (* Conversions *)
+  ; ("bool_to_string", VBuiltin ("bool_to_string", function
+        | [VBool b] -> VString (string_of_bool b)
+        | _ -> eval_error "bool_to_string: expected bool"))
   ; ("int_to_string",  VBuiltin ("int_to_string", function
         | [VInt n] -> VString (string_of_int n)
         | _ -> eval_error "int_to_string: expected int"))
@@ -252,6 +276,14 @@ let base_env : env =
   ; ("string_length", VBuiltin ("string_length", function
         | [VString s] -> VInt (String.length s)
         | _ -> eval_error "string_length: expected string"))
+  ; ("string_concat", VBuiltin ("string_concat", function
+        | [VString a; VString b] -> VString (a ^ b)
+        | _ -> eval_error "string_concat: expected two strings"))
+  ; ("read_line", VBuiltin ("read_line", function
+        | [VUnit] | [] ->
+          (try VString (input_line stdin)
+           with End_of_file -> VString "")
+        | _ -> eval_error "read_line: expected unit"))
     (* List helpers (using VCon "Cons"/"Nil") *)
   ; ("head", VBuiltin ("head", function
         | [VCon ("Cons", [h; _])] -> h
@@ -268,6 +300,19 @@ let base_env : env =
         | [VInt n]   -> VInt (~- n)
         | [VFloat f] -> VFloat (~-. f)
         | _ -> eval_error "negate: expected number"))
+    (* Actor builtins — operate on the global actor_registry *)
+  ; ("kill", VBuiltin ("kill", function
+        | [VPid pid] ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | Some inst -> inst.ai_alive <- false; VUnit
+           | None      -> VUnit)
+        | _ -> eval_error "kill: expected Pid"))
+  ; ("is_alive", VBuiltin ("is_alive", function
+        | [VPid pid] ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | Some inst -> VBool inst.ai_alive
+           | None      -> VBool false)
+        | _ -> eval_error "is_alive: expected Pid"))
   ]
 
 (* ------------------------------------------------------------------ *)
@@ -406,8 +451,59 @@ and eval_expr (env : env) (e : expr) : value =
     let arg_vals = List.map (eval_expr env) args in
     VCon (a, arg_vals)
 
-  | ESend _ | ESpawn _ ->
-    eval_error "actor primitives not yet supported by the interpreter"
+  | ESpawn (actor_expr, _) ->
+    let actor_name = match actor_expr with
+      | EVar n           -> n.txt
+      | ECon (n, [], _)  -> n.txt
+      | _ -> eval_error "spawn: expected actor name (got complex expression)"
+    in
+    (match Hashtbl.find_opt actor_defs_tbl actor_name with
+     | None -> eval_error "spawn: unknown actor '%s'" actor_name
+     | Some (def, env_ref) ->
+       let init_state = eval_expr !env_ref def.actor_init in
+       let pid = !next_pid in
+       next_pid := pid + 1;
+       let inst = { ai_def = def; ai_env_ref = env_ref;
+                    ai_state = init_state; ai_alive = true } in
+       Hashtbl.add actor_registry pid inst;
+       VPid pid)
+
+  | ESend (cap_expr, msg_expr, _) ->
+    let pid_val = eval_expr env cap_expr in
+    let msg_val = eval_expr env msg_expr in
+    (match pid_val with
+     | VPid pid ->
+       (match Hashtbl.find_opt actor_registry pid with
+        | None -> VCon ("None", [])
+        | Some inst when not inst.ai_alive -> VCon ("None", [])
+        | Some inst ->
+          let (msg_tag, msg_args) = match msg_val with
+            | VCon  (tag, args) -> (tag, args)
+            | VAtom tag         -> (tag, [])
+            | _ -> eval_error "send: message must be a constructor value, got %s"
+                     (value_to_string msg_val)
+          in
+          (match List.find_opt (fun h -> h.ah_msg.txt = msg_tag)
+                   inst.ai_def.actor_handlers with
+           | None ->
+             eval_error "send: actor has no handler for '%s'" msg_tag
+           | Some handler ->
+             if List.length handler.ah_params <> List.length msg_args then
+               eval_error "send: handler '%s' expects %d args, got %d"
+                 msg_tag (List.length handler.ah_params) (List.length msg_args);
+             let param_bindings =
+               List.map2 (fun p v -> (p.param_name.txt, v))
+                 handler.ah_params msg_args
+             in
+             let handler_env =
+               [("state", inst.ai_state)] @ param_bindings @ !(inst.ai_env_ref)
+             in
+             let new_state = eval_expr handler_env handler.ah_body in
+             inst.ai_state <- new_state;
+             VCon ("Some", [VUnit])))
+     | _ ->
+       eval_error "send: first argument must be a Pid, got %s"
+         (value_to_string pid_val))
 
 (** Evaluate a match expression: try each branch until one matches. *)
 and eval_match (env : env) (v : value) (branches : branch list) : value =
@@ -473,7 +569,11 @@ let rec eval_decl (env : env) (d : decl) : env =
 
   | DType _ -> env   (* No runtime effect *)
 
-  | DActor _ -> env  (* Actors not yet implemented *)
+  | DActor (name, def, _) ->
+    (* Register actor definition so spawn() can find it later *)
+    let env_ref = ref env in
+    Hashtbl.replace actor_defs_tbl name.txt (def, env_ref);
+    env
 
   | DMod (name, _, decls, _) ->
     (* Evaluate nested module; bindings are prefixed with "ModName." *)
@@ -500,6 +600,11 @@ and eval_decls (env : env) (decls : decl list) : env =
     Pass 2: Re-evaluate each [DFn] so that its closure captures the
             fully-populated environment (including all stubs). *)
 let eval_module_env (m : module_) : env =
+  (* Reset global actor state for this module run *)
+  Hashtbl.clear actor_defs_tbl;
+  Hashtbl.clear actor_registry;
+  next_pid := 0;
+
   (* Pass 1: stubs.  We use a ref cell shared across all stubs so that
      closures created in pass 2 can see the final environment. *)
   let env_ref : env ref = ref base_env in
@@ -549,6 +654,11 @@ let eval_module_env (m : module_) : env =
       in
       env_ref := env';
       make_recursive_env rest env'
+
+    | DActor (name, def, _) :: rest ->
+      (* Register actor with the shared env_ref so handlers can call module fns *)
+      Hashtbl.replace actor_defs_tbl name.txt (def, env_ref);
+      make_recursive_env rest env
 
     | _ :: rest -> make_recursive_env rest env
   in

@@ -368,11 +368,17 @@ let builtin_bindings : (string * scheme) list =
     ("++",             Mono (TArrow (t_string, TArrow (t_string, t_string))));
     ("print",          Mono (TArrow (t_string, t_unit)));
     ("println",        Mono (TArrow (t_string, t_unit)));
+    ("print_int",      Mono (TArrow (t_int,    t_unit)));
+    ("print_float",    Mono (TArrow (t_float,  t_unit)));
     ("int_to_string",  Mono (TArrow (t_int,    t_string)));
     ("float_to_string",Mono (TArrow (t_float,  t_string)));
     ("bool_to_string", Mono (TArrow (t_bool,   t_string)));
-    ("string_to_int",  Mono (TArrow (t_string, t_int)));
+    ("string_to_int",  Mono (TArrow (t_string, t_option t_int)));
+    ("string_length",  Mono (TArrow (t_string, t_int)));
+    ("string_concat",  Mono (TArrow (t_string, TArrow (t_string, t_string))));
+    ("read_line",      Mono (TArrow (t_unit,   t_string)));
     ("negate",         Mono (TArrow (t_int,    t_int)));
+    ("not",            Mono (TArrow (t_bool,   t_bool)));
     ("<",  Mono (TArrow (t_int,    TArrow (t_int,    t_bool))));
     (">",  Mono (TArrow (t_int,    TArrow (t_int,    t_bool))));
     ("<=", Mono (TArrow (t_int,    TArrow (t_int,    t_bool))));
@@ -382,6 +388,9 @@ let builtin_bindings : (string * scheme) list =
     (* Polymorphic equality: ==, != : ∀a. a -> a -> Bool *)
     ("==", poly1 (fun a -> TArrow (a, TArrow (a, t_bool))));
     ("!=", poly1 (fun a -> TArrow (a, TArrow (a, t_bool))));
+    (* Actor builtins *)
+    ("kill",     poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_unit)));
+    ("is_alive", poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_bool)));
   ]
 
 let builtin_types : (string * int) list =
@@ -944,7 +953,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
   | Ast.ESend (cap, msg, _) ->
     ignore (infer_expr env cap);
     ignore (infer_expr env msg);
-    t_unit
+    TCon ("Option", [t_unit])
 
   | Ast.ESpawn (actor, _) ->
     ignore (infer_expr env actor);
@@ -1226,22 +1235,37 @@ let rec check_decl env (d : Ast.decl) : env =
      | Ast.TDAlias _ -> env1)
 
   | Ast.DActor (name, actor, _sp) ->
-    (* Check init expression and all message handlers *)
-    let _ = infer_expr env actor.actor_init in
+    (* Build the state record type from field declarations *)
+    let state_ty =
+      let tvars = ref [] in
+      let flds = List.map (fun (f : Ast.field) ->
+          (f.fld_name.txt, surface_ty env ~tvars f.fld_ty)) actor.actor_state in
+      TRecord (List.sort (fun (a,_)(b,_) -> String.compare a b) flds)
+    in
+    (* Register message constructors so ECon lookups succeed *)
+    let env_with_ctors = List.fold_left (fun acc_env (h : Ast.actor_handler) ->
+        let arg_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
+        let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
+                   ci_arg_tys = arg_tys } in
+        { acc_env with ctors = (h.ah_msg.txt, ci) :: acc_env.ctors }
+      ) env actor.actor_handlers in
+    (* Check init expression *)
+    let _ = infer_expr env_with_ctors actor.actor_init in
+    (* Check handlers with state and message params in scope *)
     List.iter (fun (h : Ast.actor_handler) ->
+        let handler_env = bind_var "state" (Mono state_ty) env_with_ctors in
         let handler_env =
-          List.fold_left (fun env p ->
+          List.fold_left (fun e p ->
               bind_var p.Ast.param_name.txt
                 (Mono (match p.param_ty with
-                   | Some ann ->
-                     let tvars = ref [] in surface_ty env ~tvars ann
+                   | Some ann -> let tvars = ref [] in surface_ty env ~tvars ann
                    | None     -> fresh_var env.level))
-                env
-            ) env h.ah_params
+                e
+            ) handler_env h.ah_params
         in
         ignore (infer_expr handler_env h.ah_body)
       ) actor.actor_handlers;
-    bind_var name.txt (Mono (TCon ("Actor", []))) env
+    bind_var name.txt (Mono (TCon ("Pid", [state_ty]))) env_with_ctors
 
   | Ast.DMod (name, _vis, decls, _sp) ->
     let inner_env = List.fold_left check_decl env decls in
@@ -1292,6 +1316,17 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx =
            let field_pairs = List.map (fun (f : Ast.field) -> (f.fld_name.txt, f.fld_ty)) fields in
            { env1 with records = (name.txt, (param_names, field_pairs)) :: env1.records }
          | _ -> env1)
+      | Ast.DActor (name, actor, _) ->
+        (* Register actor name as a zero-arg constructor and message ctors *)
+        let env1 = { env with ctors =
+          (name.txt, { ci_type = name.txt; ci_params = []; ci_arg_tys = [] })
+          :: env.ctors } in
+        List.fold_left (fun acc_env (h : Ast.actor_handler) ->
+            let arg_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
+            let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
+                       ci_arg_tys = arg_tys } in
+            { acc_env with ctors = (h.ah_msg.txt, ci) :: acc_env.ctors }
+          ) env1 actor.actor_handlers
       | _ -> env
     ) (base_env errors) m.Ast.mod_decls
   in

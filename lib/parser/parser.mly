@@ -270,6 +270,8 @@ expr_unary:
 expr_app:
   | f = expr_field; LPAREN; args = separated_list(COMMA, expr); RPAREN
     { EApp (f, args, mk_span ($loc)) }
+  | con = UPPER_IDENT; LPAREN; RPAREN
+    { ECon (mk_name con $loc, [], mk_span ($loc)) }
   | con = UPPER_IDENT; LPAREN; args = separated_nonempty_list(COMMA, expr); RPAREN
     { ECon (mk_name con $loc, args, mk_span ($loc)) }
   | e = expr_field { e }
@@ -313,6 +315,13 @@ expr_atom:
   (* Record update: { state with count = state.count + 1 } *)
   | LBRACE; base = expr; WITH; updates = separated_nonempty_list(COMMA, record_field_expr); RBRACE
     { ERecordUpdate (base, updates, mk_span ($loc)) }
+  (* Actor primitives *)
+  | SPAWN; LPAREN; e = expr; RPAREN
+    { ESpawn (e, mk_span ($loc)) }
+  | SEND; LPAREN; cap = expr; COMMA; msg = expr; RPAREN
+    { ESend (cap, msg, mk_span ($loc)) }
+  (* Contextual keywords usable as variable names in expressions *)
+  | STATE { EVar (mk_name "state" $loc) }
 
 record_field_expr:
   | name = lower_name; EQUALS; e = expr { (name, e) }
