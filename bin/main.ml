@@ -3,6 +3,78 @@
 let dump_tir = ref false
 
 (* ------------------------------------------------------------------ *)
+(* Multi-line REPL input                                              *)
+(* ------------------------------------------------------------------ *)
+
+(** Count exact whole-word occurrences of [tok] in [buf].
+    Splits on non-identifier characters so "done" does not count as "do". *)
+let count_token tok buf =
+  let words = Str.split (Str.regexp "[^a-zA-Z0-9_']") buf in
+  List.length (List.filter (( = ) tok) words)
+
+(** Net depth of open do/end blocks in [buf].
+    Positive means we are inside an unclosed block.
+    Known limitation: `do` or `end` inside string literals are miscounted;
+    use a blank line to force-submit in that case. *)
+let do_end_depth buf =
+  count_token "do" buf - count_token "end" buf
+
+(** Last non-blank line in [buf], trimmed. *)
+let last_non_blank_line buf =
+  let lines = String.split_on_char '\n' buf in
+  match List.rev (List.filter (fun l -> String.trim l <> "") lines) with
+  | []    -> ""
+  | l :: _ -> String.trim l
+
+(** True if the last non-blank line ends with the token "with". *)
+let ends_with_with buf =
+  let l = last_non_blank_line buf in
+  let words = String.split_on_char ' ' (String.trim l) in
+  match List.rev words with
+  | "with" :: _ -> true
+  | _            -> false
+
+(** True if the last non-blank line starts with '|' (match arm continuation). *)
+let starts_with_pipe buf =
+  let l = last_non_blank_line buf in
+  String.length l > 0 && l.[0] = '|'
+
+(** Read one complete REPL input, possibly spanning multiple lines.
+    Returns [None] on EOF with empty buffer (exit signal),
+    [Some src] when the input is judged complete. *)
+let read_repl_input () =
+  let buf        = Buffer.create 64 in
+  let first_line = ref true in
+  let result     = ref None in
+  while !result = None do
+    Printf.printf "%s%!" (if !first_line then "march> " else "     | ");
+    first_line := false;
+    (match (try Some (input_line stdin) with End_of_file -> None) with
+     | None ->
+       (* EOF *)
+       let s = Buffer.contents buf in
+       result := Some (if s = "" then None else Some s)
+     | Some line ->
+       if Buffer.length buf > 0 then Buffer.add_char buf '\n';
+       Buffer.add_string buf line;
+       let contents = Buffer.contents buf in
+       if String.trim line = "" then
+         (* Blank line: force submit (escape hatch) *)
+         result := Some (Some contents)
+       else if do_end_depth contents > 0 then
+         ()   (* still inside an open block — keep accumulating *)
+       else if ends_with_with contents then
+         ()   (* match expression continues — keep accumulating *)
+       else if starts_with_pipe contents then
+         ()   (* match arm — keep accumulating *)
+       else
+         result := Some (Some contents))
+  done;
+  match !result with
+  | Some r -> r
+  | None   -> assert false
+
+(* ------------------------------------------------------------------ *)
 (* REPL                                                                *)
 (* ------------------------------------------------------------------ *)
 
@@ -11,12 +83,7 @@ let repl () =
   let env = ref March_eval.Eval.base_env in
   let running = ref true in
   while !running do
-    Printf.printf "march> %!";
-    let line =
-      try Some (input_line stdin)
-      with End_of_file -> None
-    in
-    match line with
+    match read_repl_input () with
     | None -> running := false
     | Some ":quit" | Some ":q" -> running := false
     | Some ":env" ->
