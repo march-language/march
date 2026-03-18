@@ -45,7 +45,8 @@ type expr =
   | ERecord  of (string * atom) list
   | EField   of atom * string                     (* record projection *)
   | EUpdate  of atom * (string * atom) list       (* record functional update *)
-  | EAlloc   of ty * atom list                    (* heap-allocate a constructor *)
+  | EAlloc      of ty * atom list                 (* heap-allocate a constructor *)
+  | EStackAlloc of ty * atom list                 (* stack-allocate — inserted by Escape analysis *)
   | EFree    of atom                              (* explicit dealloc — inserted by Perceus *)
   | EIncRC   of atom                              (* RC increment — inserted by Perceus *)
   | EDecRC   of atom                              (* RC decrement — inserted by Perceus *)

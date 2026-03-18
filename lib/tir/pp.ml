@@ -64,6 +64,8 @@ let rec string_of_expr = function
     String.concat ", " (List.map (fun (n, a) -> n ^ " = " ^ string_of_atom a) fields) ^ " }"
   | EAlloc (ty, args) ->
     "alloc " ^ string_of_ty ty ^ "(" ^ String.concat ", " (List.map string_of_atom args) ^ ")"
+  | EStackAlloc (ty, args) ->
+    "stack_alloc " ^ string_of_ty ty ^ "(" ^ String.concat ", " (List.map string_of_atom args) ^ ")"
   | EFree a -> "free " ^ string_of_atom a
   | EIncRC a -> "inc_rc " ^ string_of_atom a
   | EDecRC a -> "dec_rc " ^ string_of_atom a

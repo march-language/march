@@ -101,7 +101,7 @@ let rec live_before (e : Tir.expr) (live_after : live_set) : live_set =
     live_after
     |> StringSet.union (vars_of_atom a)
     |> StringSet.union (vars_of_atoms atoms)
-  | Tir.EAlloc (_, atoms) ->
+  | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) ->
     StringSet.union live_after (vars_of_atoms atoms)
   | Tir.EFree a ->
     StringSet.union live_after (vars_of_atom a)
@@ -271,6 +271,12 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     let lb = StringSet.union live_after (vars_of_atoms atoms) in
     (e', lb)
 
+  | Tir.EStackAlloc (ty, atoms) ->
+    let inc_vars = find_inc_vars atoms live_after in
+    let e' = wrap_incrcs inc_vars (Tir.EStackAlloc (ty, atoms)) in
+    let lb = StringSet.union live_after (vars_of_atoms atoms) in
+    (e', lb)
+
   | Tir.EFree a ->
     let lb = StringSet.union live_after (vars_of_atom a) in
     (e, lb)
@@ -333,7 +339,7 @@ let rec elide_expr (e : Tir.expr) : Tir.expr =
   (* Leaf forms — no sub-expressions to recurse into *)
   | Tir.EAtom _ | Tir.EApp _ | Tir.ECallPtr _
   | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _ | Tir.EUpdate _
-  | Tir.EAlloc _ | Tir.EFree _ | Tir.EIncRC _ | Tir.EDecRC _
+  | Tir.EAlloc _ | Tir.EStackAlloc _ | Tir.EFree _ | Tir.EIncRC _ | Tir.EDecRC _
   | Tir.EReuse _ ->
     e
 
@@ -378,7 +384,7 @@ let rec fbip_expr (e : Tir.expr) : Tir.expr =
     Tir.ECase (a, branches', default')
   | Tir.EAtom _ | Tir.EApp _ | Tir.ECallPtr _
   | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _ | Tir.EUpdate _
-  | Tir.EAlloc _ | Tir.EFree _ | Tir.EIncRC _ | Tir.EDecRC _
+  | Tir.EAlloc _ | Tir.EStackAlloc _ | Tir.EFree _ | Tir.EIncRC _ | Tir.EDecRC _
   | Tir.EReuse _ ->
     e
 
