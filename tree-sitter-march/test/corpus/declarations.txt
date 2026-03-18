@@ -1,0 +1,87 @@
+================================================================================
+Function definition with return type
+================================================================================
+mod Foo do
+fn greet(name : String) : String do
+  "hello"
+end
+end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (function_def
+    name: (identifier)
+    (fn_param (named_param name: (identifier) type: (type_constructor (type_constructor))))
+    return_type: (type_constructor (type_constructor))
+    body: (block_body (string)))))
+
+================================================================================
+Public function
+================================================================================
+mod Foo do pub fn add(a : Int, b : Int) : Int do a end end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (function_def
+    name: (identifier)
+    (fn_param (named_param name: (identifier) type: (type_constructor (type_constructor))))
+    (fn_param (named_param name: (identifier) type: (type_constructor (type_constructor))))
+    return_type: (type_constructor (type_constructor))
+    body: (block_body (identifier)))))
+
+================================================================================
+Function with guard
+================================================================================
+mod Foo do fn f(n : Int) : String when n < 0 do "neg" end end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (function_def
+    name: (identifier)
+    (fn_param (named_param name: (identifier) type: (type_constructor (type_constructor))))
+    return_type: (type_constructor (type_constructor))
+    (when_guard (comparison_expression left: (identifier) right: (integer)))
+    body: (block_body (string)))))
+
+================================================================================
+Function with pattern param
+================================================================================
+mod Foo do fn fact(0) : Int do 1 end end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (function_def
+    name: (identifier)
+    (fn_param (literal_pattern (integer)))
+    return_type: (type_constructor (type_constructor))
+    body: (block_body (integer)))))
+
+================================================================================
+Type definition variant
+================================================================================
+mod Foo do type Option(a) = Some(a) | None end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (type_def
+    name: (type_identifier)
+    (type_params (type_variable (type_variable)))
+    (variant name: (type_identifier) (type_variable (type_variable)))
+    (variant name: (type_identifier)))))
+
+================================================================================
+Type definition record
+================================================================================
+mod Foo do type Point = { x : Float, y : Float } end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (type_def
+    name: (type_identifier)
+    (record_type_field name: (identifier) type: (type_constructor (type_constructor)))
+    (record_type_field name: (identifier) type: (type_constructor (type_constructor))))))
+
+================================================================================
+Let declaration with type annotation
+================================================================================
+mod Foo do let x : Int = 42 end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (let_declaration
+    pattern: (variable_pattern (variable_pattern))
+    (type_annotation (type_constructor (type_constructor)))
+    value: (integer))))

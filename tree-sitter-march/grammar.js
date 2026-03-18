@@ -17,6 +17,10 @@ module.exports = grammar({
     [$.typed_hole],
     // atom optional args
     [$.atom],
+    // type_def: type_identifier can be variant name or type_constructor alias
+    [$.type_constructor, $.variant],
+    // type_def: type_application vs variant(args)
+    [$.type_application, $.variant],
   ],
 
   reserved: {
@@ -27,6 +31,7 @@ module.exports = grammar({
       'match', 'with',
       'if', 'then', 'else',
       'send', 'spawn', 'respond',
+      'actor', 'interface', 'impl', 'sig', 'extern', 'protocol', 'use',
     ],
   },
 
@@ -45,6 +50,13 @@ module.exports = grammar({
       $.function_def,
       $.let_declaration,
       $.type_def,
+      $.actor_def,
+      $.interface_def,
+      $.impl_def,
+      $.sig_def,
+      $.extern_def,
+      $.protocol_def,
+      $.use_declaration,
     ),
 
     function_def: $ => seq(
@@ -159,7 +171,41 @@ module.exports = grammar({
       '(', $._type, ',', commaSep1($._type), ')',
     ),
 
-    type_def: $ => seq('type', $.type_identifier, '=', $.type_identifier),
+    type_def: $ => seq(
+      'type',
+      field('name', $.type_identifier),
+      optional($.type_params),
+      '=',
+      choice(
+        seq($.variant, repeat(seq('|', $.variant))),  // variant/sum type
+        seq('{', commaSep1($.record_type_field), '}'), // record type
+        $._type,                                        // alias
+      ),
+    ),
+
+    type_params: $ => seq('(', commaSep1($.type_variable), ')'),
+
+    variant: $ => seq(
+      field('name', choice($.type_identifier, $.atom_literal)),
+      optional(seq('(', commaSep1($._type), ')')),
+    ),
+
+    record_type_field: $ => seq(
+      optional(choice('linear', 'affine')),
+      field('name', $.identifier), ':', field('type', $._type),
+    ),
+
+    // Stubs — full implementation in Task 8
+    actor_def: $ => seq('actor', $.type_identifier, 'do', 'end'),
+    interface_def: $ => seq('interface', $.type_identifier, '(', $.type_variable, ')', 'do', 'end'),
+    impl_def: $ => seq('impl', $._type, 'do', 'end'),
+    sig_def: $ => seq('sig', $.type_identifier, 'do', 'end'),
+    extern_def: $ => seq('extern', $.string, ':', $._type, 'do', 'end'),
+    protocol_def: $ => seq('protocol', $.type_identifier, 'do', 'end'),
+    use_declaration: $ => seq('use', $.type_identifier, '.', choice(
+      seq('{', commaSep1($.identifier), '}'),
+      '*',
+    )),
 
     // Full expression hierarchy
     _expr: $ => choice(
