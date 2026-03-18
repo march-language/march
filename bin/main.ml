@@ -1,205 +1,9 @@
 (** March compiler entry point. *)
 
-let dump_tir  = ref false
-let emit_llvm = ref false
-
-(* ------------------------------------------------------------------ *)
-(* Multi-line REPL input                                              *)
-(* ------------------------------------------------------------------ *)
-
-(** Count exact whole-word occurrences of [tok] in [buf].
-    Splits on non-identifier characters so "done" does not count as "do". *)
-let count_token tok buf =
-  let words = Str.split (Str.regexp "[^a-zA-Z0-9_']") buf in
-  List.length (List.filter (( = ) tok) words)
-
-(** Count lines whose last word is "with" — these are match expression openers.
-    Record-update `{ e with f = v }` never ends a line with "with", so this
-    heuristic is safe in practice. *)
-let count_match_with buf =
-  let lines = String.split_on_char '\n' buf in
-  List.length (List.filter (fun line ->
-      let words = Str.split (Str.regexp "[^a-zA-Z0-9_']") (String.trim line) in
-      match List.rev words with
-      | "with" :: _ -> true
-      | _           -> false
-    ) lines)
-
-(** Net depth of open blocks in [buf].
-    Counts "do" and end-of-line "with" (match openers) as openers; "end" as closer.
-    Positive means we are inside an unclosed block.
-    Known limitation: these tokens inside string literals are miscounted;
-    use a blank line to force-submit in that case. *)
-let do_end_depth buf =
-  count_token "do" buf + count_match_with buf - count_token "end" buf
-
-(** Last non-blank line in [buf], trimmed. *)
-let last_non_blank_line buf =
-  let lines = String.split_on_char '\n' buf in
-  match List.rev (List.filter (fun l -> String.trim l <> "") lines) with
-  | []    -> ""
-  | l :: _ -> String.trim l
-
-(** True if the last non-blank line ends with the token "with". *)
-let ends_with_with buf =
-  let l = last_non_blank_line buf in
-  let words = String.split_on_char ' ' (String.trim l) in
-  match List.rev words with
-  | "with" :: _ -> true
-  | _            -> false
-
-(** True if the last non-blank line starts with '|' (match arm continuation). *)
-let starts_with_pipe buf =
-  let l = last_non_blank_line buf in
-  String.length l > 0 && l.[0] = '|'
-
-(** Read one complete REPL input, possibly spanning multiple lines.
-    Returns [None] on EOF with empty buffer (exit signal),
-    [Some src] when the input is judged complete. *)
-let prompt_num = ref 1
-
-let read_repl_input () =
-  let buf        = Buffer.create 64 in
-  let first_line = ref true in
-  let result     = ref None in
-  let prompt     = Printf.sprintf "march(%d)> " !prompt_num in
-  let cont       = String.make (String.length prompt) ' ' in
-  while !result = None do
-    Printf.printf "%s%!" (if !first_line then prompt else cont);
-    first_line := false;
-    (match (try Some (input_line stdin) with End_of_file -> None) with
-     | None ->
-       (* EOF *)
-       let s = Buffer.contents buf in
-       result := Some (if s = "" then None else Some s)
-     | Some line ->
-       if Buffer.length buf > 0 then Buffer.add_char buf '\n';
-       Buffer.add_string buf line;
-       let contents = Buffer.contents buf in
-       if do_end_depth contents > 0 then
-         ()   (* inside an open block — keep accumulating, even blank lines *)
-       else if String.trim line = "" then
-         (* Blank line at depth 0: force submit (escape hatch for match arms etc.) *)
-         result := Some (Some contents)
-       else if ends_with_with contents then
-         ()   (* match expression continues — keep accumulating *)
-       else if starts_with_pipe contents then
-         ()   (* match arm — keep accumulating *)
-       else
-         result := Some (Some contents))
-  done;
-  incr prompt_num;
-  match !result with
-  | Some r -> r
-  | None   -> assert false
-
-(* ------------------------------------------------------------------ *)
-(* REPL                                                                *)
-(* ------------------------------------------------------------------ *)
-
-(** Print a diagnostic in REPL style (no file/line prefix — interactive context). *)
-let print_repl_diag (d : March_errors.Errors.diagnostic) =
-  let sev = match d.severity with
-    | March_errors.Errors.Error   -> "error"
-    | March_errors.Errors.Warning -> "warning"
-    | March_errors.Errors.Hint    -> "hint"
-  in
-  Printf.eprintf "%s: %s\n%!" sev d.message;
-  List.iter (fun note ->
-      Printf.eprintf "note: %s\n%!" note
-    ) d.notes
-
-let repl () =
-  Printf.printf "March REPL — :quit to exit, :env to list bindings\n%!";
-  let env = ref March_eval.Eval.base_env in
-  let type_map = Hashtbl.create 64 in
-  (* base_env (typecheck.ml) pre-populates built-in types, ctors,
-     and vars (Int, String, Bool, println, etc.) — unlike bare make_env. *)
-  let tc_env = ref
-    (March_typecheck.Typecheck.base_env
-       (March_errors.Errors.create ()) type_map) in
-  let running = ref true in
-  while !running do
-    (try
-       (match read_repl_input () with
-        | None -> running := false
-        | Some ":quit" | Some ":q" -> running := false
-        | Some ":env" ->
-          List.iter (fun (k, _) -> Printf.printf "  %s\n" k) !env
-        | Some src when String.trim src = "" -> ()
-        | Some src ->
-          let lexbuf = Lexing.from_string src in
-          (match
-             (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
-              with March_parser.Parser.Error ->
-                let pos = Lexing.lexeme_start_p lexbuf in
-                Printf.eprintf "parse error at col %d\n%!"
-                  (pos.Lexing.pos_cnum - pos.Lexing.pos_bol);
-                None)
-           with
-           | None -> ()
-           | Some March_ast.Ast.ReplEOF -> ()
-           | Some (March_ast.Ast.ReplDecl d) ->
-             let d' = March_desugar.Desugar.desugar_decl d in
-             let input_ctx = March_errors.Errors.create () in
-             let input_tc  = { !tc_env with errors = input_ctx } in
-             let new_tc    = March_typecheck.Typecheck.check_decl input_tc d' in
-             List.iter print_repl_diag (March_errors.Errors.sorted input_ctx);
-             if not (March_errors.Errors.has_errors input_ctx) then begin
-               (try
-                  env := March_eval.Eval.eval_decl !env d';
-                  (* Commit tc_env only after eval succeeds — keeps both envs in sync *)
-                  tc_env := { new_tc with errors = March_errors.Errors.create () };
-                  (* Print the name(s) that were just bound *)
-                  (match d' with
-                   | March_ast.Ast.DFn (def, _) ->
-                     Printf.printf "val %s = <fn>\n%!" def.fn_name.txt
-                   | March_ast.Ast.DLet (b, _) ->
-                     (match b.bind_pat with
-                      | March_ast.Ast.PatVar n ->
-                        let v = List.assoc n.txt !env in
-                        Printf.printf "val %s = %s\n%!" n.txt
-                          (March_eval.Eval.value_to_string v)
-                      | _ -> Printf.printf "val _ = ...\n%!")
-                   | March_ast.Ast.DActor (name, _, _) ->
-                     Printf.printf "val %s = <actor>\n%!" name.txt
-                   | _ -> ())
-                with
-                | March_eval.Eval.Eval_error msg ->
-                  Printf.eprintf "runtime error: %s\n%!" msg
-                | March_eval.Eval.Match_failure msg ->
-                  Printf.eprintf "match failure: %s\n%!" msg)
-             end
-           | Some (March_ast.Ast.ReplExpr e) ->
-             let e' = March_desugar.Desugar.desugar_expr e in
-             let input_ctx = March_errors.Errors.create () in
-             let input_tc  = { !tc_env with errors = input_ctx } in
-             let inferred  = March_typecheck.Typecheck.infer_expr input_tc e' in
-             let ty_str    = March_typecheck.Typecheck.pp_ty
-               (March_typecheck.Typecheck.repr inferred) in
-             List.iter print_repl_diag (March_errors.Errors.sorted input_ctx);
-             if March_errors.Errors.has_errors input_ctx then
-               Printf.eprintf "note: inferred type was %s\n%!" ty_str
-             else begin
-               (try
-                  let v = March_eval.Eval.eval_expr !env e' in
-                  Printf.printf "= %s\n%!" (March_eval.Eval.value_to_string v)
-                with
-                | March_eval.Eval.Eval_error msg ->
-                  Printf.eprintf "runtime error: %s\n%!" msg
-                | March_eval.Eval.Match_failure msg ->
-                  Printf.eprintf "match failure: %s\n%!" msg)
-             end))
-     with
-     | March_lexer.Lexer.Lexer_error msg ->
-       Printf.eprintf "lexer error: %s\n%!" msg
-     | March_eval.Eval.Eval_error msg ->
-       Printf.eprintf "runtime error: %s\n%!" msg
-     | March_eval.Eval.Match_failure msg ->
-       Printf.eprintf "match failure: %s\n%!" msg
-     | exn ->
-       Printf.eprintf "internal error: %s\n%!" (Printexc.to_string exn))
-  done
+let dump_tir    = ref false
+let emit_llvm   = ref false
+let do_compile  = ref false
+let output_file = ref ""
 
 (* ------------------------------------------------------------------ *)
 (* File compiler                                                       *)
@@ -255,7 +59,7 @@ let compile filename =
         ) d.notes
     ) diags;
   if March_errors.Errors.has_errors errors then exit 1
-  else if !dump_tir || !emit_llvm then begin
+  else if !dump_tir || !emit_llvm || !do_compile then begin
     let tir = March_tir.Lower.lower_module ~type_map desugared in
     let tir = March_tir.Mono.monomorphize tir in
     let tir = March_tir.Defun.defunctionalize tir in
@@ -269,15 +73,37 @@ let compile filename =
           Printf.printf "%s\n\n" (March_tir.Pp.string_of_fn_def fn)
         ) tir.tm_fns
     end else begin
-      (* --emit-llvm: write <basename>.ll *)
-      let ll_file =
-        (Filename.remove_extension filename) ^ ".ll"
-      in
+      let basename = Filename.remove_extension filename in
+      let ll_file  = basename ^ ".ll" in
       let ir = March_tir.Llvm_emit.emit_module tir in
       let oc = open_out ll_file in
       output_string oc ir;
       close_out oc;
-      Printf.printf "wrote %s\n" ll_file
+      if !do_compile then begin
+        (* Locate the runtime: try cwd-relative first (development), then
+           relative to the executable (installed). *)
+        let candidates = [
+          "runtime/march_runtime.c";
+          Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime.c";
+          Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.c";
+        ] in
+        let runtime = match List.find_opt Sys.file_exists candidates with
+          | Some p -> p
+          | None ->
+            Printf.eprintf "march: cannot find runtime/march_runtime.c\n"; exit 1
+        in
+        let out_bin =
+          if !output_file <> "" then !output_file
+          else basename
+        in
+        let cmd = Printf.sprintf "clang %s %s -o %s" runtime ll_file out_bin in
+        let rc = Sys.command cmd in
+        if rc <> 0 then begin
+          Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
+        end else
+          Printf.printf "compiled %s\n" out_bin
+      end else
+        Printf.printf "wrote %s\n" ll_file
     end
   end
   else begin
@@ -292,11 +118,13 @@ let compile filename =
 let () =
   let files = ref [] in
   let specs = [
-    ("--dump-tir",   Arg.Set dump_tir,  " Print TIR instead of evaluating");
-    ("--emit-llvm",  Arg.Set emit_llvm, " Emit LLVM IR to <file>.ll");
+    ("--dump-tir",   Arg.Set dump_tir,    " Print TIR instead of evaluating");
+    ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
+    ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
+    ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");
   ] in
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
   match !files with
-  | []  -> repl ()
+  | []  -> March_repl.Repl.run ()
   | [f] -> compile f
   | _   -> Printf.eprintf "Usage: march [options] [file.march]\n"; exit 1

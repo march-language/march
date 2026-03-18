@@ -2,6 +2,7 @@
  (name march_repl)
  (libraries
    str
+   unix
    notty
    notty.unix
    march_ast
