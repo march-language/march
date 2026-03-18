@@ -199,6 +199,9 @@ let run_tui () =
       scope;
       result_latest;
       status;
+      completions    = [];      (* stub — wired in Task 4 *)
+      completion_sel = 0;       (* stub *)
+      actors         = [];      (* stub — wired in Task 4 *)
     }
   in
 

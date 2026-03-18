@@ -20,6 +20,9 @@ type pane_content = {
   scope         : scope_entry list;
   result_latest : (string * string) option;
   status        : string;
+  completions    : string list;
+  completion_sel : int;
+  actors         : March_eval.Eval.actor_info list;
 }
 
 let create () =
@@ -58,7 +61,29 @@ let render tui content =
     let s = Printf.sprintf "%s : %s = %s" e.name e.type_str e.val_str in
     fit_width right_w (I.string A.empty s)
   ) content.scope in
-  let right_rows = [right_header; right_sep] @ v_rows @ scope_rows in
+  let actors_rows =
+    if content.actors = [] then []
+    else
+      let header = fit_width right_w (I.string (st bold) "Actors") in
+      let sep    = I.string A.empty (String.make right_w '-') in
+      let rows   = List.map (fun (a : March_eval.Eval.actor_info) ->
+        let bullet, attr =
+          if a.ai_alive
+          then ("\xe2\x97\x8f", A.(fg (rgb_888 ~r:255 ~g:152 ~b:0)))
+            (* \xe2\x97\x8f = ● orange *)
+          else ("\xe2\x9c\x95", A.(fg (rgb_888 ~r:100 ~g:100 ~b:100)))
+            (* \xe2\x9c\x95 = ✕ dark grey *)
+        in
+        let body =
+          if a.ai_alive
+          then Printf.sprintf "%s pid:%d  %s  %s" bullet a.ai_pid a.ai_name a.ai_state_str
+          else Printf.sprintf "%s pid:%d  %s  (dead)" bullet a.ai_pid a.ai_name
+        in
+        fit_width right_w (I.string attr body)
+      ) content.actors in
+      [header; sep] @ rows
+  in
+  let right_rows = [right_header; right_sep] @ v_rows @ scope_rows @ actors_rows in
   let right_visible =
     if List.length right_rows <= pane_h then right_rows
     else List.filteri (fun i _ -> i < pane_h) right_rows
@@ -71,7 +96,35 @@ let render tui content =
   (* Build left pane *)
   let prompt_img  = I.string (st bold ++ fg blue) content.prompt in
   let input_row   = I.(prompt_img <|> content.input_line) in
-  let all_rows    = content.history @ [input_row] in
+  let dropdown_rows =
+    let items = content.completions in
+    let n = List.length items in
+    if n = 0 then []
+    else
+      let max_show = 8 in
+      (* Viewport: keep selection visible *)
+      let win_size  = min n max_show in
+      let win_start = max 0 (min content.completion_sel (n - win_size)) in
+      let win_end   = win_start + win_size in
+      let overflow  = n - win_end in
+      let win_items = List.filteri (fun i _ -> i >= win_start && i < win_end) items in
+      let rows = List.mapi (fun rel item ->
+        let abs_i   = win_start + rel in
+        let selected = abs_i = content.completion_sel in
+        let prefix  = if selected then "\xe2\x96\xb6 " else "  " in
+        (* \xe2\x96\xb6 = ▶ in UTF-8 *)
+        let attr    = if selected
+                      then A.(bg (rgb_888 ~r:0 ~g:80 ~b:160) ++ fg white)
+                      else A.empty in
+        fit_width left_w (I.string attr (prefix ^ item))
+      ) win_items in
+      if overflow > 0 then
+        rows @ [fit_width left_w (I.string A.empty
+          (Printf.sprintf "  \xe2\x86\x93 %d more" overflow))]
+        (* \xe2\x86\x93 = ↓ in UTF-8 *)
+      else rows
+  in
+  let all_rows    = content.history @ [input_row] @ dropdown_rows in
   let all_rows_n  = List.length all_rows in
   let left_visible =
     if all_rows_n <= pane_h then all_rows

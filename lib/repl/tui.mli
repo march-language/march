@@ -20,6 +20,12 @@ type pane_content = {
   (** Most recent v: (type_str, val_str). *)
   status        : string;
   (** Status bar text. *)
+  completions    : string list;
+  (** Tab completion candidates. Empty = no dropdown shown. *)
+  completion_sel : int;
+  (** Index of the currently highlighted completion. *)
+  actors         : March_eval.Eval.actor_info list;
+  (** Live actor instances from the evaluator. *)
 }
 
 val create : unit -> t
