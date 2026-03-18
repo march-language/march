@@ -1,4 +1,4 @@
 (library
  (name march_tir)
- (libraries march_ast)
+ (libraries march_ast march_typecheck)
  (preprocess (pps ppx_deriving.show)))

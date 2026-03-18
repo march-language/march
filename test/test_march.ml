@@ -1074,6 +1074,22 @@ let test_type_map_fn_recorded () =
   Alcotest.(check bool) "type map has many entries" true
     (Hashtbl.length type_map >= 3)
 
+let test_convert_ty_int () =
+  let tc = March_typecheck.Typecheck.TCon ("Int", []) in
+  let result = March_tir.Lower.convert_ty tc in
+  Alcotest.(check string) "Int converts to TInt" "TInt"
+    (match result with March_tir.Tir.TInt -> "TInt" | _ -> "other")
+
+let test_convert_ty_arrow () =
+  let ti = March_typecheck.Typecheck.TCon ("Int", []) in
+  let tc = March_typecheck.Typecheck.TArrow (ti, March_typecheck.Typecheck.TArrow (ti, ti)) in
+  let result = March_tir.Lower.convert_ty tc in
+  Alcotest.(check string) "curried arrow uncurried" "TFn([TInt;TInt],TInt)"
+    (match result with
+     | March_tir.Tir.TFn ([March_tir.Tir.TInt; March_tir.Tir.TInt], March_tir.Tir.TInt) ->
+       "TFn([TInt;TInt],TInt)"
+     | _ -> "other")
+
 let () =
   Alcotest.run "march"
     [
@@ -1221,5 +1237,9 @@ let () =
       ( "type_map", [
           Alcotest.test_case "populated after check" `Quick test_type_map_populated;
           Alcotest.test_case "fn params recorded" `Quick test_type_map_fn_recorded;
+        ] );
+      ( "convert_ty", [
+          Alcotest.test_case "Int" `Quick test_convert_ty_int;
+          Alcotest.test_case "arrow uncurried" `Quick test_convert_ty_arrow;
         ] );
     ]

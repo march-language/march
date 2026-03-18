@@ -13,6 +13,7 @@
     arguments are atoms without dangling variable references. *)
 
 module Ast = March_ast.Ast
+module Typecheck = March_typecheck.Typecheck
 
 (* ── Fresh name generation ──────────────────────────────────────── *)
 
@@ -59,6 +60,38 @@ let lower_linearity : Ast.linearity -> Tir.linearity = function
   | Ast.Linear       -> Tir.Lin
   | Ast.Affine       -> Tir.Aff
   | Ast.Unrestricted -> Tir.Unr
+
+(* ── Type conversion: Typecheck.ty → Tir.ty ─────────────────── *)
+
+(** Convert an internal typechecker type to a TIR type.
+    [Typecheck.TArrow] is curried; we uncurry into [Tir.TFn]. *)
+let rec convert_ty (t : Typecheck.ty) : Tir.ty =
+  match Typecheck.repr t with
+  | Typecheck.TCon ("Int",    []) -> Tir.TInt
+  | Typecheck.TCon ("Float",  []) -> Tir.TFloat
+  | Typecheck.TCon ("Bool",   []) -> Tir.TBool
+  | Typecheck.TCon ("String", []) -> Tir.TString
+  | Typecheck.TCon ("Unit",   []) -> Tir.TUnit
+  | Typecheck.TCon (name, args)   -> Tir.TCon (name, List.map convert_ty args)
+  | Typecheck.TArrow _ as t ->
+    let rec collect acc = function
+      | Typecheck.TArrow (a, b) -> collect (convert_ty a :: acc) (Typecheck.repr b)
+      | ret -> (List.rev acc, convert_ty ret)
+    in
+    let (params, ret) = collect [] t in
+    Tir.TFn (params, ret)
+  | Typecheck.TTuple tys ->
+    Tir.TTuple (List.map convert_ty tys)
+  | Typecheck.TRecord fields ->
+    Tir.TRecord (List.map (fun (n, t) -> (n, convert_ty t)) fields)
+  | Typecheck.TVar r ->
+    (match !r with
+     | Typecheck.Unbound (id, _) -> Tir.TVar (Printf.sprintf "_%d" id)
+     | Typecheck.Link _ -> assert false)
+  | Typecheck.TLin (_, inner) -> convert_ty inner
+  | Typecheck.TNat n          -> Tir.TCon (Printf.sprintf "Nat_%d" n, [])
+  | Typecheck.TNatOp _        -> Tir.TVar "_natop"
+  | Typecheck.TError          -> Tir.TVar "_err"
 
 (* ── CPS-based ANF lowering ────────────────────────────────────── *)
 
