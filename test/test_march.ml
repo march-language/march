@@ -1412,6 +1412,58 @@ let test_defun_pp_type_def () =
   Alcotest.(check bool) "pp TDClosure contains 'Clo_foo'" true (contains "Clo_foo" s);
   Alcotest.(check bool) "pp TDClosure contains 'Int'" true (contains "Int" s)
 
+let test_defun_e2e_no_lambda_letrec () =
+  (* Full pipeline: lower → mono → defun produces no lambda ELetRec nodes *)
+  let m = defun_module {|mod Test do
+    fn apply_twice(f : Int -> Int, x : Int) : Int do f(f(x)) end
+    fn main() : Int do
+      let add3 = fn x -> x + 3
+      apply_twice(add3, 10)
+    end
+  end|} in
+  let rec has_letrec_lambda = function
+    | March_tir.Tir.ELetRec ([fn], March_tir.Tir.EAtom (March_tir.Tir.AVar ref))
+      when fn.March_tir.Tir.fn_name = ref.March_tir.Tir.v_name -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> has_letrec_lambda e1 || has_letrec_lambda e2
+    | March_tir.Tir.ELetRec (fns, body) ->
+      List.exists (fun f -> has_letrec_lambda f.March_tir.Tir.fn_body) fns
+      || has_letrec_lambda body
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> has_letrec_lambda b.March_tir.Tir.br_body) brs ||
+      (match def with Some e -> has_letrec_lambda e | None -> false)
+    | March_tir.Tir.ESeq (a, b) -> has_letrec_lambda a || has_letrec_lambda b
+    | _ -> false
+  in
+  List.iter (fun fn ->
+    Alcotest.(check bool)
+      (Printf.sprintf "no lambda ELetRec in %s" fn.March_tir.Tir.fn_name)
+      false (has_letrec_lambda fn.March_tir.Tir.fn_body)
+  ) m.March_tir.Tir.tm_fns
+
+let test_defun_e2e_closure_types_present () =
+  let m = defun_module {|mod Test do
+    fn apply_twice(f : Int -> Int, x : Int) : Int do f(f(x)) end
+    fn main() : Int do
+      let add3 = fn x -> x + 3
+      apply_twice(add3, 10)
+    end
+  end|} in
+  let closure_count = List.length (List.filter (function
+    | March_tir.Tir.TDClosure _ -> true | _ -> false
+  ) m.March_tir.Tir.tm_types) in
+  Alcotest.(check bool) "at least one TDClosure in tm_types" true (closure_count >= 1)
+
+let test_defun_e2e_no_hof_unchanged () =
+  (* A program with no lambdas/HOF should produce no TDClosure types *)
+  let m = defun_module {|mod Test do
+    fn double(x : Int) : Int do x + x end
+    fn main() : Int do double(21) end
+  end|} in
+  let closure_count = List.length (List.filter (function
+    | March_tir.Tir.TDClosure _ -> true | _ -> false
+  ) m.March_tir.Tir.tm_types) in
+  Alcotest.(check int) "no TDClosure for non-HOF program" 0 closure_count
+
 let () =
   Alcotest.run "march"
     [
@@ -1533,6 +1585,9 @@ let () =
           Alcotest.test_case "defun zero capture"    `Quick test_defun_zero_capture_closure;
           Alcotest.test_case "defun nested lambda"   `Quick test_defun_nested_lambda;
           Alcotest.test_case "defun pp type_def"     `Quick test_defun_pp_type_def;
+          Alcotest.test_case "defun e2e no lambda letrec"    `Quick test_defun_e2e_no_lambda_letrec;
+          Alcotest.test_case "defun e2e closure types"        `Quick test_defun_e2e_closure_types_present;
+          Alcotest.test_case "defun e2e no HOF unchanged"     `Quick test_defun_e2e_no_hof_unchanged;
         ] );
       ( "constraints",
         [

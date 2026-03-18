@@ -121,6 +121,10 @@ let compile filename =
   else if !dump_tir then begin
     let tir = March_tir.Lower.lower_module ~type_map desugared in
     let tir = March_tir.Mono.monomorphize tir in
+    let tir = March_tir.Defun.defunctionalize tir in
+    List.iter (fun td ->
+        Printf.printf "%s\n\n" (March_tir.Pp.string_of_type_def td)
+      ) tir.tm_types;
     List.iter (fun fn ->
         Printf.printf "%s\n\n" (March_tir.Pp.string_of_fn_def fn)
       ) tir.tm_fns
