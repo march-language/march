@@ -806,6 +806,7 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.EAtom (_, _, sp)        -> sp
   | Ast.ESend (_, _, sp)        -> sp
   | Ast.ESpawn (_, sp)          -> sp
+  | Ast.EResultRef _            -> Ast.dummy_span
 
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
@@ -1031,6 +1032,12 @@ let rec infer_expr env (e : Ast.expr) : ty =
     | Ast.ESpawn (actor, _) ->
       ignore (infer_expr env actor);
       TCon ("Pid", [fresh_var env.level])
+
+    (* ── REPL result reference ─────────────────────────────────────── *)
+    | Ast.EResultRef _ ->
+      (* Return a fresh unification variable — EResultRef is substituted
+         by the REPL loop before typechecking, so this is a fallback. *)
+      fresh_var env.level
   in
   Hashtbl.replace env.type_map (span_of_expr e) (repr result);
   result

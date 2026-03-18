@@ -92,6 +92,7 @@ type expr =
   | EAtom of string * expr list * span     (** Atom expression: :ok(x), :error *)
   | ESend of expr * expr * span            (** send(cap, msg) *)
   | ESpawn of expr * span                  (** spawn(Actor) *)
+  | EResultRef of int option               (** REPL magic: v or v(N) — last/Nth result *)
 [@@deriving show]
 
 and param = {

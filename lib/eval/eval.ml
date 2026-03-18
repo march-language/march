@@ -450,6 +450,9 @@ and eval_expr (env : env) (e : expr) : value =
   | EPipe _ ->
     eval_error "pipe expression reached evaluator (should be desugared)"
 
+  | EResultRef _ ->
+    raise (Eval_error "EResultRef reached evaluator — substitution missing")
+
   | EAnnot (ex, _, _) -> eval_expr env ex
 
   | EAtom (a, [], _) -> VAtom a

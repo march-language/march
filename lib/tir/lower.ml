@@ -264,6 +264,8 @@ and lower_expr (e : Ast.expr) : Tir.expr =
   (* --- Pipe should be desugared already --- *)
   | Ast.EPipe _ -> failwith "TIR lower: EPipe should have been desugared"
 
+  | Ast.EResultRef _ -> failwith "TIR lower: EResultRef is REPL-only and should be substituted before lowering"
+
   (* --- Send/Spawn (CPS for args) --- *)
   | Ast.ESend (cap, msg, _) ->
     lower_to_atom_k cap (fun cap' ->
