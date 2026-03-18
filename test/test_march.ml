@@ -617,6 +617,30 @@ let test_mono_two_instantiations () =
     ) fn.March_tir.Tir.fn_params
   ) m.March_tir.Tir.tm_fns
 
+let test_mono_pipeline_no_tvar () =
+  (* Full pipeline: lower with type_map + monomorphize.
+     Verify no TVar remains in a simple typed program. *)
+  let m = mono_module {|mod Test do
+    fn add(x : Int, y : Int) : Int do x + y end
+    fn main() : Int do add(1, 2) end
+  end|} in
+  let rec check_expr_no_tvar = function
+    | March_tir.Tir.EAtom (March_tir.Tir.AVar v) ->
+      Alcotest.(check bool)
+        (Printf.sprintf "var %s has no TVar" v.March_tir.Tir.v_name)
+        false (March_tir.Mono.has_tvar v.March_tir.Tir.v_ty)
+    | March_tir.Tir.ELet (v, e1, e2) ->
+      Alcotest.(check bool)
+        (Printf.sprintf "let %s has no TVar" v.March_tir.Tir.v_name)
+        false (March_tir.Mono.has_tvar v.March_tir.Tir.v_ty);
+      check_expr_no_tvar e1; check_expr_no_tvar e2
+    | March_tir.Tir.ESeq (e1, e2) ->
+      check_expr_no_tvar e1; check_expr_no_tvar e2
+    | _ -> ()
+  in
+  List.iter (fun fn -> check_expr_no_tvar fn.March_tir.Tir.fn_body)
+    m.March_tir.Tir.tm_fns
+
 let test_mono_subst_ty () =
   let open March_tir.Tir in
   let open March_tir.Mono in
@@ -1349,6 +1373,7 @@ let () =
           Alcotest.test_case "mono mangle_name"     `Quick test_mono_mangle;
           Alcotest.test_case "mono has_tvar"        `Quick test_mono_has_tvar;
           Alcotest.test_case "mono match_ty"        `Quick test_mono_match_ty;
+          Alcotest.test_case "mono pipeline"        `Quick test_mono_pipeline_no_tvar;
           Alcotest.test_case "mono identity"         `Quick test_mono_identity;
           Alcotest.test_case "mono no TVar after"    `Quick test_mono_no_tvar_after_mono;
           Alcotest.test_case "mono two instances"    `Quick test_mono_two_instantiations;

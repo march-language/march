@@ -101,7 +101,7 @@ let compile filename =
   (* Desugar *)
   let desugared = March_desugar.Desugar.desugar_module module_ast in
   (* Typecheck *)
-  let (errors, _type_map) = March_typecheck.Typecheck.check_module desugared in
+  let (errors, type_map) = March_typecheck.Typecheck.check_module desugared in
   (* Print diagnostics sorted by position *)
   let diags = March_errors.Errors.sorted errors in
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
@@ -119,7 +119,8 @@ let compile filename =
     ) diags;
   if March_errors.Errors.has_errors errors then exit 1
   else if !dump_tir then begin
-    let tir = March_tir.Lower.lower_module desugared in
+    let tir = March_tir.Lower.lower_module ~type_map desugared in
+    let tir = March_tir.Mono.monomorphize tir in
     List.iter (fun fn ->
         Printf.printf "%s\n\n" (March_tir.Pp.string_of_fn_def fn)
       ) tir.tm_fns
