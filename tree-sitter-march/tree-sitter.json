@@ -1,0 +1,18 @@
+{
+  "grammars": [
+    {
+      "name": "march",
+      "scope": "source.march",
+      "file-types": ["march"],
+      "highlights": "queries/highlights.scm"
+    }
+  ],
+  "metadata": {
+    "version": "0.0.1",
+    "description": "Tree-sitter grammar for the March language",
+    "authors": [],
+    "links": {
+      "repository": ""
+    }
+  }
+}

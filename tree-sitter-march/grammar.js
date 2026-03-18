@@ -13,6 +13,12 @@ module.exports = grammar({
 
   word: $ => $.identifier,
 
+  reserved: {
+    keyword: $ => [
+      'fn', 'let', 'do', 'end', 'type', 'mod', 'pub',
+    ],
+  },
+
   rules: {
     source_file: $ => choice(
       $.module_def,
