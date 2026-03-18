@@ -1,0 +1,64 @@
+================================================================================
+Type constructor bare
+================================================================================
+mod Foo do fn f() : Int do 1 end end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (function_def name: (identifier)
+    return_type: (type_constructor (type_constructor))
+    body: (block_body (integer)))))
+
+================================================================================
+Type application
+================================================================================
+mod Foo do fn f() : List(Int) do 1 end end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (function_def name: (identifier)
+    return_type: (type_application
+      name: (type_identifier) (type_constructor (type_constructor)))
+    body: (block_body (integer)))))
+
+================================================================================
+Arrow type
+================================================================================
+mod Foo do fn f() : Int -> Bool do 1 end end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (function_def name: (identifier)
+    return_type: (arrow_type
+      param: (type_constructor (type_constructor))
+      return: (type_constructor (type_constructor)))
+    body: (block_body (integer)))))
+
+================================================================================
+Tuple type
+================================================================================
+mod Foo do fn f() : (Int, Bool) do 1 end end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (function_def name: (identifier)
+    return_type: (tuple_type
+      (type_constructor (type_constructor))
+      (type_constructor (type_constructor)))
+    body: (block_body (integer)))))
+
+================================================================================
+Linear type
+================================================================================
+mod Foo do fn f() : linear Int do 1 end end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (function_def name: (identifier)
+    return_type: (linear_type type: (type_constructor (type_constructor)))
+    body: (block_body (integer)))))
+
+================================================================================
+Type variable
+================================================================================
+mod Foo do fn f() : a do 1 end end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (function_def name: (identifier)
+    return_type: (type_variable (type_variable))
+    body: (block_body (integer)))))

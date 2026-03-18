@@ -17,6 +17,7 @@ module.exports = grammar({
     keyword: $ => [
       'fn', 'let', 'do', 'end', 'type', 'mod', 'pub',
       'true', 'false',
+      'when', 'linear', 'affine',
     ],
   },
 
@@ -40,7 +41,33 @@ module.exports = grammar({
     function_def: $ => seq(
       optional('pub'), 'fn',
       field('name', $.identifier),
-      '(', ')', 'do', 'end',
+      '(', optional(commaSep($.fn_param)), ')',
+      optional(seq(':', field('return_type', $._type))),
+      optional($.when_guard),
+      'do', field('body', $.block_body), 'end',
+    ),
+
+    fn_param: $ => choice(
+      $.named_param,
+      $._pattern,
+    ),
+
+    named_param: $ => seq(
+      optional(choice('linear', 'affine')),
+      field('name', $.identifier),
+      ':', field('type', $._type),
+    ),
+
+    when_guard: $ => seq('when', $._expr),
+
+    block_body: $ => seq(
+      $._block_expr,
+      repeat($._block_expr),
+    ),
+
+    _block_expr: $ => choice(
+      $.let_declaration,
+      $._expr,
     ),
 
     let_declaration: $ => seq(
@@ -53,9 +80,41 @@ module.exports = grammar({
 
     type_annotation: $ => seq(':', $._type),
 
-    // Stub for _type — expands in Task 4
-    // Use string form alias() because $.type_constructor is not yet defined
-    _type: $ => alias($.type_identifier, 'type_constructor'),
+    // Full type rules
+    _type: $ => choice(
+      $.arrow_type,
+      $._type_atom,
+    ),
+
+    arrow_type: $ => prec.right(1, seq(
+      field('param', $._type_atom), '->', field('return', $._type),
+    )),
+
+    _type_atom: $ => choice(
+      $.type_application,
+      $.type_constructor,
+      $.type_variable,
+      $.linear_type,
+      $.tuple_type,
+    ),
+
+    type_application: $ => seq(
+      field('name', $.type_identifier),
+      '(', commaSep1($._type), ')',
+    ),
+
+    // alias() — NOT new regex — to avoid duplicate-terminal conflicts
+    type_constructor: $ => alias($.type_identifier, $.type_constructor),
+    type_variable: $ => alias($.identifier, $.type_variable),
+
+    linear_type: $ => seq(
+      choice('linear', 'affine'),
+      field('type', $._type_atom),
+    ),
+
+    tuple_type: $ => seq(
+      '(', $._type, ',', commaSep1($._type), ')',
+    ),
 
     type_def: $ => seq('type', $.type_identifier, '=', $.type_identifier),
 
