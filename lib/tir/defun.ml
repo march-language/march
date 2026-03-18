@@ -155,23 +155,36 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
 
 (* ── Phase 2: closure struct + lifted fn generation ──────────────── *)
 
-(** Build the new top-level lifted fn and TDClosure type def for a lambda. *)
+(** Build the new top-level lifted fn and TDClosure type def for a lambda.
+
+    Closure convention: field 0 of every closure struct is the apply fn ptr
+    (typed TPtr TUnit).  The apply fn takes (ptr $clo, original_params) and
+    loads its own free variables from $clo at entry.  This lets ECallPtr call
+    uniformly through field 0 without knowing the specific lambda statically. *)
 let lift_lambda (lam : lambda_info) : Tir.type_def * Tir.fn_def =
   let fn = lam.lam_fn in
   let fvs = lam.lam_fvs in
   let clo_name = "$Clo_" ^ fn.Tir.fn_name in
   let apply_name = fn.Tir.fn_name ^ "$apply" in
-  (* TDClosure struct *)
-  let td = Tir.TDClosure (clo_name, List.map snd fvs) in
-  (* Lifted function: free-var params ++ original params *)
-  let fv_params = List.map (fun (name, ty) ->
-      { Tir.v_name = name; v_ty = ty; v_lin = Tir.Unr }
-    ) fvs in
+  (* TDClosure struct: [fn_ptr: TPtr(TUnit), fv0_ty, fv1_ty, ...] *)
+  let td = Tir.TDClosure (clo_name, Tir.TPtr Tir.TUnit :: List.map snd fvs) in
+  (* $clo parameter — opaque pointer to the closure struct itself *)
+  let clo_param = { Tir.v_name = "$clo"; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
+  (* Wrap the original body with ELet bindings that load each free variable
+     from the closure struct.  Field indices: fn_ptr=0, fv[i]=i+1. *)
+  let wrapped_body =
+    List.fold_right (fun (i, (fv_name, fv_ty)) acc ->
+        let fv_var = { Tir.v_name = fv_name; v_ty = fv_ty; v_lin = Tir.Unr } in
+        let field_name = "$fv" ^ string_of_int (i + 1) in
+        let load_expr  = Tir.EField (Tir.AVar clo_param, field_name) in
+        Tir.ELet (fv_var, load_expr, acc)
+      ) (List.mapi (fun i fv -> (i, fv)) fvs) fn.Tir.fn_body
+  in
   let apply_fn : Tir.fn_def = {
     fn_name   = apply_name;
-    fn_params = fv_params @ fn.Tir.fn_params;
+    fn_params = clo_param :: fn.Tir.fn_params;
     fn_ret_ty = fn.Tir.fn_ret_ty;
-    fn_body   = fn.Tir.fn_body;
+    fn_body   = wrapped_body;
   } in
   (td, apply_fn)
 
@@ -188,10 +201,14 @@ let rewrite_expr (known_lambdas : (string * lambda_info) list)
       when fn.Tir.fn_name = ref_var.Tir.v_name ->
       (match List.assoc_opt fn.Tir.fn_name known_lambdas with
        | Some lam ->
+         let apply_name = fn.Tir.fn_name ^ "$apply" in
+         let fn_ptr_atom = Tir.AVar { Tir.v_name = apply_name;
+                                       v_ty = Tir.TPtr Tir.TUnit;
+                                       v_lin = Tir.Unr } in
          let fv_atoms = List.map (fun (name, ty) ->
              Tir.AVar { Tir.v_name = name; v_ty = ty; v_lin = Tir.Unr }
            ) lam.lam_fvs in
-         Tir.EAlloc (Tir.TCon ("$Clo_" ^ fn.Tir.fn_name, []), fv_atoms)
+         Tir.EAlloc (Tir.TCon ("$Clo_" ^ fn.Tir.fn_name, []), fn_ptr_atom :: fv_atoms)
        | None ->
          (* Not a known lambda — rewrite children *)
          Tir.ELetRec ([{ fn with Tir.fn_body = rw fn.Tir.fn_body }],
