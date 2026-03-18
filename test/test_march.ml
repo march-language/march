@@ -545,6 +545,78 @@ let test_tir_lower_typed_let () =
       (March_tir.Pp.string_of_ty v.March_tir.Tir.v_ty)
   | _ -> Alcotest.fail "expected ELet"
 
+(** Lower with type_map and then monomorphize. *)
+let mono_module src =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  March_tir.Mono.monomorphize tir
+
+let test_mono_identity () =
+  (* identity is polymorphic; called with Int → should produce identity$Int,
+     and the generic identity (with TVar params) should NOT appear. *)
+  let m = mono_module {|mod Test do
+    fn identity(x) do x end
+    fn main() : Int do identity(42) end
+  end|} in
+  let names = List.map (fun f -> f.March_tir.Tir.fn_name) m.March_tir.Tir.tm_fns in
+  (* The specialized version must exist *)
+  Alcotest.(check bool) "identity$Int present" true
+    (List.exists (fun n -> n = "identity$Int") names);
+  (* The unspecialized generic version must NOT be present *)
+  Alcotest.(check bool) "bare identity absent" false
+    (List.mem "identity" names);
+  (* No fn should have TVar in its params after mono *)
+  List.iter (fun fn ->
+    List.iter (fun (v : March_tir.Tir.var) ->
+      Alcotest.(check bool)
+        (Printf.sprintf "param %s has no TVar" v.March_tir.Tir.v_name)
+        false (March_tir.Mono.has_tvar v.March_tir.Tir.v_ty)
+    ) fn.March_tir.Tir.fn_params
+  ) m.March_tir.Tir.tm_fns
+
+let test_mono_no_tvar_after_mono () =
+  (* After mono, no fn_def in the module has TVar in any type *)
+  let m = mono_module {|mod Test do
+    fn double(x : Int) : Int do x + x end
+    fn main() : Int do double(21) end
+  end|} in
+  let ty_ok t = not (March_tir.Mono.has_tvar t) in
+  List.iter (fun fn ->
+    Alcotest.(check bool)
+      (Printf.sprintf "fn %s ret_ty has no TVar" fn.March_tir.Tir.fn_name)
+      true (ty_ok fn.March_tir.Tir.fn_ret_ty);
+    List.iter (fun (v : March_tir.Tir.var) ->
+      Alcotest.(check bool)
+        (Printf.sprintf "fn %s param %s has no TVar" fn.March_tir.Tir.fn_name v.March_tir.Tir.v_name)
+        true (ty_ok v.March_tir.Tir.v_ty)
+    ) fn.March_tir.Tir.fn_params
+  ) m.March_tir.Tir.tm_fns
+
+let test_mono_two_instantiations () =
+  (* apply called with Int and Bool at separate call sites → two specializations *)
+  let m = mono_module {|mod Test do
+    fn apply(f, x) do f(x) end
+    fn inc(n : Int) : Int do n + 1 end
+    fn main() : Int do
+      let a = apply(inc, 1)
+      a
+    end
+  end|} in
+  (* main should be present *)
+  let main_fn = find_fn "main" m in
+  (* main's return type must be concrete Int, not TVar *)
+  Alcotest.(check bool) "main ret is Int" true
+    (main_fn.March_tir.Tir.fn_ret_ty = March_tir.Tir.TInt);
+  (* apply must have been specialized (not present with TVar params) *)
+  List.iter (fun fn ->
+    List.iter (fun (v : March_tir.Tir.var) ->
+      Alcotest.(check bool)
+        (Printf.sprintf "fn %s param %s concrete" fn.March_tir.Tir.fn_name v.March_tir.Tir.v_name)
+        false (March_tir.Mono.has_tvar v.March_tir.Tir.v_ty)
+    ) fn.March_tir.Tir.fn_params
+  ) m.March_tir.Tir.tm_fns
+
 let test_mono_subst_ty () =
   let open March_tir.Tir in
   let open March_tir.Mono in
@@ -1277,6 +1349,9 @@ let () =
           Alcotest.test_case "mono mangle_name"     `Quick test_mono_mangle;
           Alcotest.test_case "mono has_tvar"        `Quick test_mono_has_tvar;
           Alcotest.test_case "mono match_ty"        `Quick test_mono_match_ty;
+          Alcotest.test_case "mono identity"         `Quick test_mono_identity;
+          Alcotest.test_case "mono no TVar after"    `Quick test_mono_no_tvar_after_mono;
+          Alcotest.test_case "mono two instances"    `Quick test_mono_two_instantiations;
         ] );
       ( "constraints",
         [
