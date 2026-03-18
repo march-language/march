@@ -1,0 +1,11 @@
+[package]
+id = "march"
+name = "March"
+version = "0.0.1"
+schema_version = 1
+authors = ["March Contributors"]
+description = "March language support for Zed"
+
+[grammars.march]
+repository = "file:///Users/80197052/code/march/tree-sitter-march"
+rev = ""
