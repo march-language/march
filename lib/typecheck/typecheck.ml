@@ -1226,6 +1226,14 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
           ) clause.fc_params ([], env_rec)
       in
 
+      (* Record each named parameter's type in the type map *)
+      List.iter2 (fun fp pty ->
+          match fp with
+          | Ast.FPNamed p ->
+            Hashtbl.replace env.type_map p.param_name.span (repr pty)
+          | Ast.FPPat _ -> ()
+        ) clause.fc_params param_tys;
+
       (* Check the guard if present *)
       (match clause.fc_guard with
        | Some g ->
@@ -1254,6 +1262,8 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       let fn_ty =
         List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty
       in
+      (* Record the function's overall type at the function name's span *)
+      Hashtbl.replace env.type_map def.fn_name.span (repr fn_ty);
       (* Unify self_ty so recursive calls get the correct type *)
       unify env' ~span:fn_span self_ty fn_ty;
 
@@ -1305,6 +1315,7 @@ let rec check_decl env (d : Ast.decl) : env =
   | Ast.DLet (b, sp) ->
     let env' = enter_level env in
     let rhs_ty = infer_expr env' b.bind_expr in
+    Hashtbl.replace env.type_map sp (repr rhs_ty);
     let bindings, pat_ty = infer_pattern env' b.bind_pat in
     unify env' ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
     discharge_constraints env sp;

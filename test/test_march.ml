@@ -1063,6 +1063,17 @@ let test_type_map_populated () =
   Alcotest.(check bool) "type map is non-empty" true
     (Hashtbl.length type_map > 0)
 
+let test_type_map_fn_recorded () =
+  let src = {|mod Test do
+    fn add(x : Int, y : Int) do x end
+  end|} in
+  let m = March_desugar.Desugar.desugar_module
+    (let lexbuf = Lexing.from_string src in
+     March_parser.Parser.module_ March_lexer.Lexer.token lexbuf) in
+  let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
+  Alcotest.(check bool) "type map has many entries" true
+    (Hashtbl.length type_map >= 3)
+
 let () =
   Alcotest.run "march"
     [
@@ -1207,5 +1218,8 @@ let () =
           Alcotest.test_case "parse interp"         `Quick test_parse_string_interp;
           Alcotest.test_case "eval interp"          `Quick test_eval_string_interp;
         ] );
-      ( "type_map", [ Alcotest.test_case "populated after check" `Quick test_type_map_populated ] );
+      ( "type_map", [
+          Alcotest.test_case "populated after check" `Quick test_type_map_populated;
+          Alcotest.test_case "fn params recorded" `Quick test_type_map_fn_recorded;
+        ] );
     ]
