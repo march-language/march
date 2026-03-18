@@ -262,11 +262,12 @@ type env = {
   lin     : lin_entry list;                (** Linear/affine use tracking *)
   errors  : Err.ctx;
   pending_constraints : constraint_ list ref; (** Accumulated use-site constraints *)
+  type_map : (Ast.span, ty) Hashtbl.t;
 }
 
-let make_env errors = {
+let make_env errors type_map = {
   vars = []; types = []; ctors = []; records = []; level = 0; lin = [];
-  errors; pending_constraints = ref [];
+  errors; pending_constraints = ref []; type_map;
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -463,8 +464,8 @@ let builtin_ctors : (string * ctor_info) list =
                ci_arg_tys = [mk_var "a"; mk_list_ty "a"] });
   ]
 
-let base_env errors =
-  let env = make_env errors in
+let base_env errors type_map =
+  let env = make_env errors type_map in
   let env = bind_vars builtin_bindings env in
   { env with types = builtin_types; ctors = builtin_ctors }
 
@@ -1343,8 +1344,9 @@ let rec check_decl env (d : Ast.decl) : env =
                    ci_arg_tys = arg_tys } in
         { acc_env with ctors = (h.ah_msg.txt, ci) :: acc_env.ctors }
       ) env actor.actor_handlers in
-    (* Check init expression *)
-    let _ = infer_expr env_with_ctors actor.actor_init in
+    (* Check init expression — must return the state record type *)
+    check_expr env_with_ctors actor.actor_init state_ty
+      ~reason:(Some (RBuiltin "actor init must return the initial state record"));
     (* Check handlers with state and message params in scope *)
     List.iter (fun (h : Ast.actor_handler) ->
         let handler_env = bind_var "state" (Mono state_ty) env_with_ctors in
@@ -1357,15 +1359,33 @@ let rec check_decl env (d : Ast.decl) : env =
                 e
             ) handler_env h.ah_params
         in
-        ignore (infer_expr handler_env h.ah_body)
+        (* Handler body must return the state record type *)
+        check_expr handler_env h.ah_body state_ty
+          ~reason:(Some (RBuiltin (Printf.sprintf "handler `%s` must return the state record" h.ah_msg.txt)))
       ) actor.actor_handlers;
     bind_var name.txt (Mono (TCon ("Pid", [state_ty]))) env_with_ctors
 
   | Ast.DMod (name, _vis, decls, _sp) ->
     let inner_env = List.fold_left check_decl env decls in
-    (* Expose names introduced inside the module as "ModName.name" in the outer env *)
+    (* Collect the names that are explicitly public within this module.
+       DFn respects fn_vis; DLet/DType/DActor have no visibility field and are
+       treated as public by default (visibility annotations for them are future work). *)
+    let pub_set =
+      List.filter_map (function
+        | Ast.DFn (def, _) when def.fn_vis = Ast.Public -> Some def.fn_name.txt
+        | Ast.DFn _ -> None
+        | Ast.DLet (b, _) ->
+          (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
+        | Ast.DType (n, _, _, _) -> Some n.txt
+        | Ast.DActor (n, _, _) -> Some n.txt
+        | Ast.DMod (n, Ast.Public, _, _) -> Some n.txt
+        | Ast.DMod _ -> None
+        | _ -> None
+      ) decls
+    in
+    (* Expose only public names as "ModName.name" in the outer env *)
     let new_names = List.filter_map (fun (k, sch) ->
-        if not (List.mem_assoc k env.vars)
+        if not (List.mem_assoc k env.vars) && List.mem k pub_set
         then Some (name.txt ^ "." ^ k, sch)
         else None
       ) inner_env.vars in
@@ -1443,7 +1463,8 @@ let rec check_decl env (d : Ast.decl) : env =
     Pass 2: check declarations in order, updating the environment.
 
     Returns the [Err.ctx] containing all diagnostics. *)
-let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx =
+let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
+  let type_map = Hashtbl.create 256 in
   (* Pass 1: forward-reference placeholders for functions and type/ctor names *)
   let pre_env = List.fold_left (fun env d ->
       match d with
@@ -1477,8 +1498,8 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx =
             { acc_env with ctors = (h.ah_msg.txt, ci) :: acc_env.ctors }
           ) env1 actor.actor_handlers
       | _ -> env
-    ) (base_env errors) m.Ast.mod_decls
+    ) (base_env errors type_map) m.Ast.mod_decls
   in
   (* Pass 2: full checking *)
   ignore (List.fold_left check_decl pre_env m.Ast.mod_decls);
-  errors
+  (errors, type_map)

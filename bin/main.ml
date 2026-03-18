@@ -101,7 +101,8 @@ let compile filename =
   (* Desugar *)
   let desugared = March_desugar.Desugar.desugar_module module_ast in
   (* Typecheck *)
-  let errors = March_typecheck.Typecheck.check_module desugared in
+  let (errors, type_map) = March_typecheck.Typecheck.check_module desugared in
+  let _ = type_map in
   (* Print diagnostics sorted by position *)
   let diags = March_errors.Errors.sorted errors in
   List.iter (fun (d : March_errors.Errors.diagnostic) ->

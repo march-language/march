@@ -150,7 +150,8 @@ let parse_and_desugar src =
 
 let typecheck src =
   let m = parse_and_desugar src in
-  March_typecheck.Typecheck.check_module m
+  let (errors, _type_map) = March_typecheck.Typecheck.check_module m in
+  errors
 
 let has_errors ctx = March_errors.Errors.has_errors ctx
 
@@ -497,6 +498,7 @@ let test_value_to_string () =
 (** Parse, desugar, and lower a March module to TIR. *)
 let lower_module src =
   let m = parse_and_desugar src in
+  let (_errors, _type_map) = March_typecheck.Typecheck.check_module m in
   March_tir.Lower.lower_module m
 
 let find_fn name (m : March_tir.Tir.tir_module) =
@@ -961,11 +963,20 @@ let test_eval_string_interp () =
 let test_tc_mod_typecheck () =
   let ctx = typecheck {|mod Test do
     mod Foo do
-      fn bar() do 42 end
+      pub fn bar() do 42 end
     end
     fn main() do Foo.bar() end
   end|} in
-  Alcotest.(check bool) "Foo.bar accessible after mod" false (has_errors ctx)
+  Alcotest.(check bool) "pub Foo.bar accessible after mod" false (has_errors ctx)
+
+let test_tc_mod_private () =
+  let ctx = typecheck {|mod Test do
+    mod Foo do
+      fn secret() do 42 end
+    end
+    fn main() do Foo.secret() end
+  end|} in
+  Alcotest.(check bool) "private Foo.secret not accessible" true (has_errors ctx)
 
 let () =
   Alcotest.run "march"
@@ -1098,6 +1109,7 @@ let () =
           Alcotest.test_case "use all"              `Quick test_parse_use_all;
           Alcotest.test_case "use names"            `Quick test_parse_use_names;
           Alcotest.test_case "mod typecheck"        `Quick test_tc_mod_typecheck;
+          Alcotest.test_case "mod private"          `Quick test_tc_mod_private;
         ] );
       ( "string interp",
         [
