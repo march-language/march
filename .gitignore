@@ -14,3 +14,4 @@ tree-sitter-march/src/tree_sitter/
 
 # Deciduous database (local)
 .deciduous/
+.superpowers/
