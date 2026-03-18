@@ -77,3 +77,19 @@ let string_of_fn_def fn =
   "fn " ^ fn.fn_name ^ "(" ^
   String.concat ", " (List.map string_of_var fn.fn_params) ^
   ") : " ^ string_of_ty fn.fn_ret_ty ^ " =\n  " ^ string_of_expr fn.fn_body
+
+let string_of_type_def = function
+  | TDVariant (name, ctors) ->
+    "type " ^ name ^ " = " ^
+    String.concat " | " (List.map (fun (tag, args) ->
+      if args = [] then tag
+      else tag ^ "(" ^ String.concat ", " (List.map string_of_ty args) ^ ")"
+    ) ctors)
+  | TDRecord (name, fields) ->
+    "record " ^ name ^ " { " ^
+    String.concat ", " (List.map (fun (n, t) -> n ^ " : " ^ string_of_ty t) fields) ^
+    " }"
+  | TDClosure (name, fields) ->
+    "closure " ^ name ^ "(" ^
+    String.concat ", " (List.map string_of_ty fields) ^
+    ")"

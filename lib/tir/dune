@@ -1,4 +1,5 @@
 (library
  (name march_tir)
+ (modules tir pp lower mono defun)
  (libraries march_ast march_typecheck)
  (preprocess (pps ppx_deriving.show)))

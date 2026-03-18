@@ -1263,6 +1263,123 @@ let test_convert_ty_arrow () =
        "TFn([TInt;TInt],TInt)"
      | _ -> "other")
 
+(* ── Defunctionalization tests ─────────────────────────────────────────── *)
+
+(** Parse, desugar, typecheck, lower with type_map, monomorphize, defunctionalize. *)
+let defun_module src =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  March_tir.Defun.defunctionalize tir
+
+let test_defun_free_vars () =
+  let m = defun_module {|mod Test do
+    fn make_adder(n : Int) : (Int -> Int) do
+      fn x -> x + n
+    end
+  end|} in
+  (* After defun, the lifted $lam_apply fn should have n as a param *)
+  let lifted = List.filter (fun f ->
+    String.length f.March_tir.Tir.fn_name > 6 &&
+    String.sub f.March_tir.Tir.fn_name (String.length f.March_tir.Tir.fn_name - 6) 6 = "_apply"
+  ) m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "lifted apply fn exists" true (List.length lifted >= 1);
+  (* The apply fn should have 2 params: captured n + original x *)
+  let apply_fn = List.hd lifted in
+  Alcotest.(check int) "apply fn has 2 params (1 captured + 1 original)" 2
+    (List.length apply_fn.March_tir.Tir.fn_params)
+
+let test_defun_closure_struct () =
+  let m = defun_module {|mod Test do
+    fn main() : Int do
+      let add1 = fn x -> x + 1
+      add1(41)
+    end
+  end|} in
+  let has_closure = List.exists (function
+    | March_tir.Tir.TDClosure _ -> true
+    | _ -> false
+  ) m.March_tir.Tir.tm_types in
+  Alcotest.(check bool) "TDClosure in tm_types" true has_closure
+
+let test_defun_no_letrec_lambda () =
+  (* After defun, lambda ELetRecs must be replaced with EAlloc *)
+  let m = defun_module {|mod Test do
+    fn main() : Int do
+      let add1 = fn x -> x + 1
+      add1(41)
+    end
+  end|} in
+  let rec has_letrec_lambda = function
+    | March_tir.Tir.ELetRec ([fn], March_tir.Tir.EAtom (March_tir.Tir.AVar ref))
+      when fn.March_tir.Tir.fn_name = ref.March_tir.Tir.v_name -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> has_letrec_lambda e1 || has_letrec_lambda e2
+    | March_tir.Tir.ELetRec (fns, body) ->
+      List.exists (fun f -> has_letrec_lambda f.March_tir.Tir.fn_body) fns || has_letrec_lambda body
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> has_letrec_lambda b.March_tir.Tir.br_body) brs ||
+      (match def with Some e -> has_letrec_lambda e | None -> false)
+    | March_tir.Tir.ESeq (a, b) -> has_letrec_lambda a || has_letrec_lambda b
+    | _ -> false
+  in
+  List.iter (fun fn ->
+    Alcotest.(check bool)
+      (Printf.sprintf "no lambda ELetRec in %s" fn.March_tir.Tir.fn_name)
+      false (has_letrec_lambda fn.March_tir.Tir.fn_body)
+  ) m.March_tir.Tir.tm_fns
+
+let test_defun_indirect_call_becomes_ecallptr () =
+  (* A call through a closure variable should become ECallPtr *)
+  let m = defun_module {|mod Test do
+    fn apply_fn(f : Int -> Int, x : Int) : Int do f(x) end
+    fn main() : Int do
+      let add1 = fn x -> x + 1
+      apply_fn(add1, 41)
+    end
+  end|} in
+  let apply_fn = List.find (fun f -> f.March_tir.Tir.fn_name = "apply_fn") m.March_tir.Tir.tm_fns in
+  let rec has_callptr = function
+    | March_tir.Tir.ECallPtr _ -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> has_callptr e1 || has_callptr e2
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> has_callptr b.March_tir.Tir.br_body) brs ||
+      (match def with Some e -> has_callptr e | None -> false)
+    | March_tir.Tir.ESeq (a, b) -> has_callptr a || has_callptr b
+    | _ -> false
+  in
+  Alcotest.(check bool) "apply_fn body has ECallPtr" true (has_callptr apply_fn.March_tir.Tir.fn_body)
+
+let test_defun_zero_capture_closure () =
+  let m = defun_module {|mod Test do
+    fn main() : Int do
+      let add1 = fn x -> x + 1
+      add1(41)
+    end
+  end|} in
+  let closures = List.filter_map (function
+    | March_tir.Tir.TDClosure (_, fields) -> Some fields
+    | _ -> None
+  ) m.March_tir.Tir.tm_types in
+  Alcotest.(check bool) "at least one closure" true (closures <> []);
+  (* zero-capture closure has no fields *)
+  Alcotest.(check bool) "zero-capture closure has no fields" true
+    (List.exists (fun fields -> fields = []) closures)
+
+let test_defun_pp_type_def () =
+  let td = March_tir.Tir.TDClosure ("Clo_foo", [March_tir.Tir.TInt; March_tir.Tir.TBool]) in
+  let s = March_tir.Pp.string_of_type_def td in
+  (* Should contain closure name and field types *)
+  let contains sub str =
+    let sub_len = String.length sub and str_len = String.length str in
+    let rec loop i = if i > str_len - sub_len then false
+      else if String.sub str i sub_len = sub then true
+      else loop (i+1)
+    in loop 0
+  in
+  Alcotest.(check bool) "pp TDClosure contains 'Clo_foo'" true (contains "Clo_foo" s);
+  Alcotest.(check bool) "pp TDClosure contains 'Int'" true (contains "Int" s)
+
 let () =
   Alcotest.run "march"
     [
@@ -1377,6 +1494,12 @@ let () =
           Alcotest.test_case "mono identity"         `Quick test_mono_identity;
           Alcotest.test_case "mono no TVar after"    `Quick test_mono_no_tvar_after_mono;
           Alcotest.test_case "mono two instances"    `Quick test_mono_two_instantiations;
+          Alcotest.test_case "defun free vars"       `Quick test_defun_free_vars;
+          Alcotest.test_case "defun closure struct"  `Quick test_defun_closure_struct;
+          Alcotest.test_case "defun no letrec lambda"`Quick test_defun_no_letrec_lambda;
+          Alcotest.test_case "defun indirect call"   `Quick test_defun_indirect_call_becomes_ecallptr;
+          Alcotest.test_case "defun zero capture"    `Quick test_defun_zero_capture_closure;
+          Alcotest.test_case "defun pp type_def"     `Quick test_defun_pp_type_def;
         ] );
       ( "constraints",
         [
