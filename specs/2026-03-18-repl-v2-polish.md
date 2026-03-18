@@ -96,7 +96,7 @@ Also register these in the `Alcotest.run` suite. Find the `"complete"` suite nea
       ];
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 ```bash
 /Users/80197052/.opam/march/bin/dune runtest 2>&1 | grep -A3 "actors"
@@ -104,7 +104,7 @@ Also register these in the `Alcotest.run` suite. Find the `"complete"` suite nea
 
 Expected: compile error or test failure (functions not yet defined).
 
-- [ ] **Step 3: Add `ai_name` to `actor_inst` in eval.ml**
+- [x] **Step 3: Add `ai_name` to `actor_inst` in eval.ml**
 
 Find `type actor_inst` (line 42) and change it from:
 
@@ -129,7 +129,7 @@ type actor_inst = {
 }
 ```
 
-- [ ] **Step 4: Update ESpawn handler to populate ai_name**
+- [x] **Step 4: Update ESpawn handler to populate ai_name**
 
 Find the `ESpawn` handler (around line 475), change the `actor_inst` construction from:
 
@@ -145,7 +145,7 @@ to:
                     ai_state = init_state; ai_alive = true } in
 ```
 
-- [ ] **Step 5: Add `actor_info` type and `list_actors`**
+- [x] **Step 5: Add `actor_info` type and `list_actors`**
 
 `value_to_string` is defined around line 270 in `eval.ml` — OCaml requires definitions before their uses. Place both new definitions **immediately after `value_to_string`**:
 
@@ -169,7 +169,7 @@ let list_actors () =
   |> List.sort (fun a b -> compare a.ai_pid b.ai_pid)
 ```
 
-- [ ] **Step 6: Build**
+- [x] **Step 6: Build**
 
 ```bash
 /Users/80197052/.opam/march/bin/dune build 2>&1
@@ -177,7 +177,7 @@ let list_actors () =
 
 Expected: clean build. If there are compile errors about missing `ai_name` fields in pattern matches, find every place that constructs or destructures `actor_inst` (search for `ai_def =` or `ai_alive`) and add `ai_name` as appropriate.
 
-- [ ] **Step 7: Run tests**
+- [x] **Step 7: Run tests**
 
 ```bash
 /Users/80197052/.opam/march/bin/dune runtest 2>&1 | grep -E "actors|FAIL|PASS|Error"
@@ -185,7 +185,7 @@ Expected: clean build. If there are compile errors about missing `ai_name` field
 
 Expected: 3 passing actor tests.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add lib/eval/eval.ml test/test_march.ml
@@ -246,13 +246,13 @@ Register in the test suite — add to `Alcotest.run`:
       ];
 ```
 
-- [ ] **Step 2: Run tests to confirm they fail**
+- [x] **Step 2: Run tests to confirm they fail**
 
 ```bash
 /Users/80197052/.opam/march/bin/dune runtest 2>&1 | grep -E "complete_replace|Error"
 ```
 
-- [ ] **Step 3: Add `complete_replace` to input.ml**
+- [x] **Step 3: Add `complete_replace` to input.ml**
 
 Add after `word_end_right` (after line 62):
 
@@ -273,7 +273,7 @@ let complete_replace s completion =
   { s with buffer = new_buf; cursor = new_cur }
 ```
 
-- [ ] **Step 4: Export in input.mli**
+- [x] **Step 4: Export in input.mli**
 
 Add after `val insert_at`:
 
@@ -283,7 +283,7 @@ val complete_replace : state -> string -> state
     Word boundaries are nearest spaces (or buffer start/end). *)
 ```
 
-- [ ] **Step 5: Build and test**
+- [x] **Step 5: Build and test**
 
 ```bash
 /Users/80197052/.opam/march/bin/dune build 2>&1 && /Users/80197052/.opam/march/bin/dune runtest 2>&1 | grep -E "complete_replace|FAIL"
@@ -291,7 +291,7 @@ val complete_replace : state -> string -> state
 
 Expected: 3 passing complete_replace tests.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add lib/repl/input.ml lib/repl/input.mli test/test_march.ml
@@ -309,7 +309,7 @@ git commit -m "feat(input): add complete_replace for word-boundary completion"
 
 No new tests (rendering is TUI-only, verified interactively).
 
-- [ ] **Step 1: Extend pane_content in tui.mli**
+- [x] **Step 1: Extend pane_content in tui.mli**
 
 Find the `pane_content` type in `lib/repl/tui.mli` and add three fields:
 
@@ -330,7 +330,7 @@ type pane_content = {
 }
 ```
 
-- [ ] **Step 2: Add dropdown rendering to tui.ml**
+- [x] **Step 2: Add dropdown rendering to tui.ml**
 
 In `lib/repl/tui.ml`, find the left-pane construction (around the `input_row`/`all_rows` section) and replace:
 
@@ -376,7 +376,7 @@ with:
   let all_rows    = content.history @ [input_row] @ dropdown_rows in
 ```
 
-- [ ] **Step 3: Add actors section to tui.ml right pane**
+- [x] **Step 3: Add actors section to tui.ml right pane**
 
 In `lib/repl/tui.ml`, find the right pane construction. After `scope_rows`, before assembling `right_rows`, add:
 
@@ -417,7 +417,7 @@ to:
   let right_rows = [right_header; right_sep] @ v_rows @ scope_rows @ actors_rows in
 ```
 
-- [ ] **Step 4: Update repl.ml to pass stub values for new pane_content fields**
+- [x] **Step 4: Update repl.ml to pass stub values for new pane_content fields**
 
 In `lib/repl/repl.ml`, find the `Tui.render tui Tui.{...}` call inside `render_frame` and add the three new stub fields:
 
@@ -435,7 +435,7 @@ In `lib/repl/repl.ml`, find the `Tui.render tui Tui.{...}` call inside `render_f
     }
 ```
 
-- [ ] **Step 5: Build**
+- [x] **Step 5: Build**
 
 ```bash
 /Users/80197052/.opam/march/bin/dune build 2>&1
@@ -443,7 +443,7 @@ In `lib/repl/repl.ml`, find the `Tui.render tui Tui.{...}` call inside `render_f
 
 Expected: clean build with no errors.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 ```bash
 /Users/80197052/.opam/march/bin/dune runtest 2>&1
@@ -451,7 +451,7 @@ Expected: clean build with no errors.
 
 Expected: all existing tests still pass (no regressions).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add lib/repl/tui.mli lib/repl/tui.ml lib/repl/repl.ml
@@ -467,7 +467,7 @@ git commit -m "feat(tui): add completion dropdown and actors panel rendering"
 
 No new tests (TUI-only; verify interactively).
 
-- [ ] **Step 1: Add `comp_state` type and `make_input_img` at the top of repl.ml**
+- [x] **Step 1: Add `comp_state` type and `make_input_img` at the top of repl.ml**
 
 Add after the opening comment (before `history_path`):
 
@@ -489,7 +489,7 @@ let make_input_img s cur =
      <|> string A.empty right)
 ```
 
-- [ ] **Step 2: Update render_frame to use make_input_img and real pane_content fields**
+- [x] **Step 2: Update render_frame to use make_input_img and real pane_content fields**
 
 Find `render_frame` in `run_tui`. Change:
 
@@ -529,7 +529,7 @@ and use them in the render call:
       actors;
 ```
 
-- [ ] **Step 3: Replace the Input.Complete handler with the new dropdown logic**
+- [x] **Step 3: Replace the Input.Complete handler with the new dropdown logic**
 
 Find the existing `| Input.Complete ->` case (around line 433-452) and replace it entirely with:
 
@@ -554,7 +554,7 @@ Find the existing `| Input.Complete ->` case (around line 433-452) and replace i
             render_frame ())
 ```
 
-- [ ] **Step 4: Add CompOn key interception before Input.handle_key**
+- [x] **Step 4: Add CompOn key interception before Input.handle_key**
 
 **Implementation:** Extract the existing action-dispatch block (the `(match action with ...)` content) into a local `dispatch_action` helper defined inside `run_tui`. Then rewrite the `| \`Key key ->` branch to check `!comp` first.
 
@@ -608,7 +608,7 @@ Then the event loop becomes:
 
 Also: when any key other than Tab/arrows is pressed while `CompOff`, `comp` should be reset to `CompOff` on `Submit` to ensure stale state doesn't linger. Add `comp := CompOff;` at the start of the `| Input.Submit src ->` branch in `dispatch_action`.
 
-- [ ] **Step 5: Build**
+- [x] **Step 5: Build**
 
 ```bash
 /Users/80197052/.opam/march/bin/dune build 2>&1
@@ -619,7 +619,7 @@ Expected: clean build. Common errors to watch for:
 - `comp_state` not recognized → ensure `type comp_state = ...` is at module level (not inside a function).
 - `This expression has type ... but an expression of type pane_content was expected` → the `Tui.{...}` record must have all fields.
 
-- [ ] **Step 6: Run tests**
+- [x] **Step 6: Run tests**
 
 ```bash
 /Users/80197052/.opam/march/bin/dune runtest 2>&1
@@ -627,7 +627,7 @@ Expected: clean build. Common errors to watch for:
 
 Expected: all tests pass (144+).
 
-- [ ] **Step 7: Manual smoke test**
+- [x] **Step 7: Manual smoke test**
 
 ```bash
 /Users/80197052/.opam/march/bin/dune exec march
@@ -641,7 +641,7 @@ Verify:
 - Escape dismisses dropdown
 - After `spawn(Counter)` (if Counter actor is defined), right pane shows actor info
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add lib/repl/repl.ml
