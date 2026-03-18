@@ -1231,6 +1231,8 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
           match fp with
           | Ast.FPNamed p ->
             Hashtbl.replace env.type_map p.param_name.span (repr pty)
+          | Ast.FPPat (Ast.PatVar name) ->
+            Hashtbl.replace env.type_map name.span (repr pty)
           | Ast.FPPat _ -> ()
         ) clause.fc_params param_tys;
 

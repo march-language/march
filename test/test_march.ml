@@ -504,6 +504,47 @@ let lower_module src =
 let find_fn name (m : March_tir.Tir.tir_module) =
   List.find (fun (f : March_tir.Tir.fn_def) -> f.fn_name = name) m.tm_fns
 
+(** Parse, desugar, typecheck, and lower a March module using the real type_map. *)
+let lower_module_typed src =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  March_tir.Lower.lower_module ~type_map m
+
+let test_tir_lower_typed_param () =
+  (* x has NO explicit annotation — type comes from type_map, not lower_ty.
+     Without type_map threading this would produce TVar "_". *)
+  let m = lower_module_typed {|mod Test do
+    fn identity(x) do x end
+  end|} in
+  (* The typechecker infers x : 'a (generic), but after lower_module_typed,
+     the param should have whatever the typechecker left for that span.
+     At minimum it must not crash — and for a concretely-called version the
+     type should flow through. Here we just check it does not remain unknown_ty
+     by verifying the ty round-trips through pp without crashing. *)
+  let f = find_fn "identity" m in
+  let p = List.hd f.March_tir.Tir.fn_params in
+  let _ = March_tir.Pp.string_of_ty p.March_tir.Tir.v_ty in
+  (* The param type must not be TVar "_" (the no-type-map fallback) —
+     it should now be TVar with an actual HM id, or TInt if fully resolved. *)
+  Alcotest.(check bool) "param not bare unknown" false
+    (p.March_tir.Tir.v_ty = March_tir.Tir.TVar "_")
+
+let test_tir_lower_typed_let () =
+  (* let y = x with no annotation: y's type should come from type_map
+     (the inferred type of x, which is Int here because of the return annotation). *)
+  let m = lower_module_typed {|mod Test do
+    fn double(x : Int) : Int do
+      let y = x
+      y
+    end
+  end|} in
+  let f = find_fn "double" m in
+  match f.March_tir.Tir.fn_body with
+  | March_tir.Tir.ELet (v, _, _) ->
+    Alcotest.(check string) "let binding has TInt" "Int"
+      (March_tir.Pp.string_of_ty v.March_tir.Tir.v_ty)
+  | _ -> Alcotest.fail "expected ELet"
+
 let test_tir_lower_literal () =
   let m = lower_module {|mod Test do
     fn answer() : Int do 42 end
@@ -1194,6 +1235,8 @@ let () =
           Alcotest.test_case "lower ty tuple"      `Quick test_tir_lower_ty_tuple;
           Alcotest.test_case "pp atom var"         `Quick test_tir_pp_atom;
           Alcotest.test_case "pp atom lit"          `Quick test_tir_pp_lit;
+          Alcotest.test_case "typed param annot"    `Quick test_tir_lower_typed_param;
+          Alcotest.test_case "typed let annot"      `Quick test_tir_lower_typed_let;
         ] );
       ( "constraints",
         [

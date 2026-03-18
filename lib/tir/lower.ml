@@ -93,6 +93,27 @@ let rec convert_ty (t : Typecheck.ty) : Tir.ty =
   | Typecheck.TNatOp _        -> Tir.TVar "_natop"
   | Typecheck.TError          -> Tir.TVar "_err"
 
+(* ── Type map reference (set by lower_module, used by lower_expr) ── *)
+
+(** Optional typechecker type_map threaded through lowering.
+    Looked up by expression span to produce concrete types instead
+    of [unknown_ty] placeholders. Set at [lower_module] entry. *)
+let _type_map_ref : (Ast.span, Typecheck.ty) Hashtbl.t option ref = ref None
+
+(** Look up the TIR type for an expression from the type_map.
+    Falls back to [unknown_ty] when no type_map is set or the span
+    is not present (e.g. spans introduced by desugaring). *)
+let ty_of_span (sp : Ast.span) : Tir.ty =
+  match !_type_map_ref with
+  | None -> unknown_ty
+  | Some tbl ->
+    (match Hashtbl.find_opt tbl sp with
+     | Some t -> convert_ty t
+     | None   -> unknown_ty)
+
+let ty_of_expr (e : Ast.expr) : Tir.ty =
+  ty_of_span (Typecheck.span_of_expr e)
+
 (* ── CPS-based ANF lowering ────────────────────────────────────── *)
 
 (** Lower an expression, ensuring the result is an atom.
@@ -105,11 +126,11 @@ let rec convert_ty (t : Typecheck.ty) : Tir.ty =
 let rec lower_to_atom_k (e : Ast.expr) (k : Tir.atom -> Tir.expr) : Tir.expr =
   match e with
   | Ast.ELit (lit, _) -> k (Tir.ALit lit)
-  | Ast.EVar { txt = name; _ } ->
-    k (Tir.AVar { v_name = name; v_ty = unknown_ty; v_lin = Tir.Unr })
+  | Ast.EVar { txt = name; span; _ } ->
+    k (Tir.AVar { v_name = name; v_ty = ty_of_span span; v_lin = Tir.Unr })
   | _ ->
     let rhs = lower_expr e in
-    let v = fresh_var unknown_ty in
+    let v = fresh_var (ty_of_expr e) in
     Tir.ELet (v, rhs, k (Tir.AVar v))
 
 (** Lower a list of expressions to atoms using CPS. *)
@@ -127,8 +148,8 @@ and lower_expr (e : Ast.expr) : Tir.expr =
   (* --- Atoms --- *)
   | Ast.ELit (lit, _) -> Tir.EAtom (Tir.ALit lit)
 
-  | Ast.EVar { txt = name; _ } ->
-    Tir.EAtom (Tir.AVar { v_name = name; v_ty = unknown_ty; v_lin = Tir.Unr })
+  | Ast.EVar { txt = name; span; _ } ->
+    Tir.EAtom (Tir.AVar { v_name = name; v_ty = ty_of_span span; v_lin = Tir.Unr })
 
   (* --- Let bindings --- *)
   | Ast.ELet (b, _) ->
@@ -145,7 +166,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
     in
     let v : Tir.var = {
       v_name = bind_name;
-      v_ty = (match b.bind_ty with Some t -> lower_ty t | None -> unknown_ty);
+      v_ty = (match b.bind_ty with Some t -> lower_ty t | None -> ty_of_expr b.bind_expr);
       v_lin = lower_linearity b.bind_lin;
     } in
     let body = lower_expr (Ast.EBlock (rest, sp)) in
@@ -320,11 +341,15 @@ let lower_fn_def (def : Ast.fn_def) : Tir.fn_def =
   let params = List.map (fun fp ->
       match fp with
       | Ast.FPNamed p ->
+        let ty = match p.param_ty with
+          | Some t -> lower_ty t
+          | None   -> ty_of_span p.param_name.span
+        in
         { Tir.v_name = p.param_name.txt;
-          v_ty = (match p.param_ty with Some t -> lower_ty t | None -> unknown_ty);
+          v_ty = ty;
           v_lin = lower_linearity p.param_lin }
       | Ast.FPPat (Ast.PatVar n) ->
-        { Tir.v_name = n.txt; v_ty = unknown_ty; v_lin = Tir.Unr }
+        { Tir.v_name = n.txt; v_ty = ty_of_span n.span; v_lin = Tir.Unr }
       | _ -> failwith "TIR lower: unexpected pattern param after desugaring"
     ) clause.fc_params in
   let ret_ty = match def.fn_ret_ty with
@@ -350,8 +375,9 @@ let lower_type_def (name : Ast.name) (_params : Ast.name list) (td : Ast.type_de
   | Ast.TDAlias _ -> None
 
 (** Lower a module. *)
-let lower_module (m : Ast.module_) : Tir.tir_module =
+let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
   reset_counter ();
+  _type_map_ref := type_map;
   let fns = ref [] in
   let types = ref [] in
   List.iter (fun d ->
@@ -367,6 +393,8 @@ let lower_module (m : Ast.module_) : Tir.tir_module =
       | Ast.DMod _ | Ast.DProtocol _ | Ast.DSig _ | Ast.DInterface _
       | Ast.DImpl _ | Ast.DExtern _ | Ast.DUse _ -> ()
     ) m.mod_decls;
-  { tm_name = m.mod_name.txt;
+  let result : Tir.tir_module = { tm_name = m.mod_name.txt;
     tm_fns = List.rev !fns;
-    tm_types = List.rev !types }
+    tm_types = List.rev !types } in
+  _type_map_ref := None;
+  result
