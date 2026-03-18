@@ -3,46 +3,46 @@ Integer literal
 ================================================================================
 mod Foo do let x = 42 end
 --------------------------------------------------------------------------------
-(source_file (module_def name: (type_identifier) (let_declaration value: (integer))))
+(source_file (module_def name: (type_identifier) (let_declaration pattern: (variable_pattern (variable_pattern)) value: (integer))))
 
 ================================================================================
 Float literal
 ================================================================================
 mod Foo do let x = 3.14 end
 --------------------------------------------------------------------------------
-(source_file (module_def name: (type_identifier) (let_declaration value: (float))))
+(source_file (module_def name: (type_identifier) (let_declaration pattern: (variable_pattern (variable_pattern)) value: (float))))
 
 ================================================================================
 String literal
 ================================================================================
 mod Foo do let x = "hello" end
 --------------------------------------------------------------------------------
-(source_file (module_def name: (type_identifier) (let_declaration value: (string))))
+(source_file (module_def name: (type_identifier) (let_declaration pattern: (variable_pattern (variable_pattern)) value: (string))))
 
 ================================================================================
 Boolean literals
 ================================================================================
 mod Foo do let x = true end
 --------------------------------------------------------------------------------
-(source_file (module_def name: (type_identifier) (let_declaration value: (boolean))))
+(source_file (module_def name: (type_identifier) (let_declaration pattern: (variable_pattern (variable_pattern)) value: (boolean))))
 
 ================================================================================
 Atom literal bare
 ================================================================================
 mod Foo do let x = :ok end
 --------------------------------------------------------------------------------
-(source_file (module_def name: (type_identifier) (let_declaration value: (atom (atom_literal)))))
+(source_file (module_def name: (type_identifier) (let_declaration pattern: (variable_pattern (variable_pattern)) value: (atom (atom_literal)))))
 
 ================================================================================
 Typed hole anonymous
 ================================================================================
 mod Foo do let x = ? end
 --------------------------------------------------------------------------------
-(source_file (module_def name: (type_identifier) (let_declaration value: (typed_hole))))
+(source_file (module_def name: (type_identifier) (let_declaration pattern: (variable_pattern (variable_pattern)) value: (typed_hole))))
 
 ================================================================================
 Typed hole named
 ================================================================================
 mod Foo do let x = ?parse_step end
 --------------------------------------------------------------------------------
-(source_file (module_def name: (type_identifier) (let_declaration value: (typed_hole (identifier)))))
+(source_file (module_def name: (type_identifier) (let_declaration pattern: (variable_pattern (variable_pattern)) value: (typed_hole (identifier)))))

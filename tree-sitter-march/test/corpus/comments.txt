@@ -14,6 +14,7 @@ end
     name: (type_identifier)
     (comment)
     (let_declaration
+      pattern: (variable_pattern (variable_pattern))
       value: (integer))))
 
 ================================================================================
@@ -32,6 +33,7 @@ end
     name: (type_identifier)
     (block_comment)
     (let_declaration
+      pattern: (variable_pattern (variable_pattern))
       value: (integer))))
 
 ================================================================================
@@ -50,4 +52,5 @@ end
     name: (type_identifier)
     (block_comment)
     (let_declaration
+      pattern: (variable_pattern (variable_pattern))
       value: (integer))))

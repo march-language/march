@@ -13,11 +13,16 @@ module.exports = grammar({
 
   word: $ => $.identifier,
 
+  conflicts: $ => [
+    [$.typed_hole],
+  ],
+
   reserved: {
     keyword: $ => [
       'fn', 'let', 'do', 'end', 'type', 'mod', 'pub',
       'true', 'false',
       'when', 'linear', 'affine',
+      'match', 'with',
     ],
   },
 
@@ -74,9 +79,43 @@ module.exports = grammar({
       'let', field('pattern', $._pattern), optional($.type_annotation), '=', field('value', $._expr),
     ),
 
-    // Stub for _pattern — expands in Task 5
-    // Use string form alias() because $.variable_pattern is not yet defined
-    _pattern: $ => alias($.identifier, 'variable_pattern'),
+    // Full pattern rules
+    _pattern: $ => choice(
+      $.wildcard_pattern,
+      $.variable_pattern,
+      $.constructor_pattern,
+      $.atom_pattern,
+      $.tuple_pattern,
+      $.literal_pattern,
+    ),
+
+    wildcard_pattern: _ => '_',
+
+    // alias() — not a new regex — to avoid duplicate-terminal conflict with identifier
+    variable_pattern: $ => alias($.identifier, $.variable_pattern),
+
+    constructor_pattern: $ => seq(
+      field('name', $.type_identifier),
+      optional(seq('(', commaSep1($._pattern), ')')),
+    ),
+
+    atom_pattern: $ => seq(
+      $.atom_literal,
+      optional(seq('(', commaSep1($._pattern), ')')),
+    ),
+
+    tuple_pattern: $ => seq(
+      '(', $._pattern, ',', commaSep1($._pattern), ')',
+    ),
+
+    literal_pattern: $ => choice(
+      $.integer,
+      $.float,
+      $.string,
+      $.boolean,
+      seq('-', $.integer),
+      seq('-', $.float),
+    ),
 
     type_annotation: $ => seq(':', $._type),
 
@@ -118,13 +157,29 @@ module.exports = grammar({
 
     type_def: $ => seq('type', $.type_identifier, '=', $.type_identifier),
 
+    // Full expression rules (stub with literals + match for Task 5)
     _expr: $ => choice(
+      $.match_expression,
       $.integer,
       $.float,
       $.string,
       $.boolean,
       $.atom,
       $.typed_hole,
+      $.identifier,
+    ),
+
+    match_expression: $ => seq(
+      'match', field('value', $._expr), 'with',
+      optional('|'), pipeSep1($.match_arm),
+      'end',
+    ),
+
+    match_arm: $ => seq(
+      field('pattern', $._pattern),
+      optional($.when_guard),
+      '->',
+      field('body', $.block_body),
     ),
 
     // Literals
@@ -144,7 +199,7 @@ module.exports = grammar({
 
     typed_hole: $ => seq('?', optional($.identifier)),
 
-    // Atom expression: :ok or :error(msg) — expands in Task 6
+    // Atom expression: :ok or :error(msg)
     atom: $ => seq(
       $.atom_literal,
       optional(seq('(', commaSep($._expr), ')')),
