@@ -15,6 +15,8 @@ module.exports = grammar({
 
   conflicts: $ => [
     [$.typed_hole],
+    // atom optional args
+    [$.atom],
   ],
 
   reserved: {
@@ -23,6 +25,8 @@ module.exports = grammar({
       'true', 'false',
       'when', 'linear', 'affine',
       'match', 'with',
+      'if', 'then', 'else',
+      'send', 'spawn', 'respond',
     ],
   },
 
@@ -157,17 +161,109 @@ module.exports = grammar({
 
     type_def: $ => seq('type', $.type_identifier, '=', $.type_identifier),
 
-    // Full expression rules (stub with literals + match for Task 5)
+    // Full expression hierarchy
     _expr: $ => choice(
+      $.pipe_expression,
+      $.or_expression,
+      $.and_expression,
+      $.comparison_expression,
+      $.additive_expression,
+      $.multiplicative_expression,
+      $.unary_expression,
+      $.call_expression,
+      $.constructor_expression,
+      $.field_expression,
+      $.lambda_expression,
+      $.if_expression,
       $.match_expression,
+      $.block_expression,
+      $.record_expression,
+      $.record_update,
+      $.tuple_expression,
+      $.list_expression,
+      $.send_expression,
+      $.spawn_expression,
+      $.respond_expression,
+      $.atom,
+      $.typed_hole,
       $.integer,
       $.float,
       $.string,
       $.boolean,
-      $.atom,
-      $.typed_hole,
       $.identifier,
     ),
+
+    pipe_expression: $ => prec.left(1, seq(
+      field('left', $._expr), '|>', field('right', $._expr),
+    )),
+    or_expression: $ => prec.left(2, seq(
+      field('left', $._expr), '||', field('right', $._expr),
+    )),
+    and_expression: $ => prec.left(3, seq(
+      field('left', $._expr), '&&', field('right', $._expr),
+    )),
+    comparison_expression: $ => prec.left(4, seq(
+      field('left', $._expr),
+      field('operator', choice('==', '!=', '<', '>', '<=', '>=')),
+      field('right', $._expr),
+    )),
+    additive_expression: $ => prec.left(5, seq(
+      field('left', $._expr),
+      field('operator', choice('+', '-', '++')),
+      field('right', $._expr),
+    )),
+    multiplicative_expression: $ => prec.left(6, seq(
+      field('left', $._expr),
+      field('operator', choice('*', '/', '%')),
+      field('right', $._expr),
+    )),
+    unary_expression: $ => prec.right(7, seq(
+      field('operator', choice('-', '!')),
+      field('operand', $._expr),
+    )),
+
+    call_expression: $ => prec(8, seq(
+      field('function', $._expr),
+      '(', optional(commaSep($._expr)), ')',
+    )),
+    constructor_expression: $ => prec(8, seq(
+      field('name', $.type_identifier),
+      '(', optional(commaSep($._expr)), ')',
+    )),
+    field_expression: $ => prec.left(9, seq(
+      field('object', $._expr), '.', field('field', $.identifier),
+    )),
+
+    lambda_expression: $ => seq(
+      'fn',
+      choice(
+        field('param', $.identifier),
+        seq('(', optional(commaSep($.fn_param)), ')'),
+      ),
+      '->',
+      field('body', $._expr),
+    ),
+    if_expression: $ => seq(
+      'if', field('condition', $._expr),
+      'then', field('then', $._expr),
+      'else', field('else', $._expr),
+    ),
+    block_expression: $ => seq('do', $.block_body, 'end'),
+    tuple_expression: $ => seq(
+      '(', $._expr, ',', commaSep1($._expr), ')',
+    ),
+    list_expression: $ => seq('[', optional(commaSep($._expr)), ']'),
+    record_expression: $ => seq(
+      '{', commaSep1($.record_field), '}',
+    ),
+    record_update: $ => seq(
+      '{', field('base', $._expr), 'with', commaSep1($.record_field), '}',
+    ),
+    record_field: $ => seq(field('name', $.identifier), '=', field('value', $._expr)),
+
+    send_expression: $ => seq('send', '(', $._expr, ',', $._expr, ')'),
+    spawn_expression: $ => seq('spawn', '(', $._expr, ')'),
+    respond_expression: $ => seq('respond', '(', $._expr, ')'),
 
     match_expression: $ => seq(
       'match', field('value', $._expr), 'with',
