@@ -1393,13 +1393,17 @@ let rec check_decl env (d : Ast.decl) : env =
           (f.fld_name.txt, surface_ty env ~tvars f.fld_ty)) actor.actor_state in
       TRecord (List.sort (fun (a,_)(b,_) -> String.compare a b) flds)
     in
-    (* Register message constructors so ECon lookups succeed *)
+    (* Register actor name as a zero-arg constructor (so spawn(ActorName) typechecks)
+       and message constructors so ECon lookups succeed *)
+    let env_with_actor_ctor = { env with ctors =
+      (name.txt, { ci_type = name.txt; ci_params = []; ci_arg_tys = [] })
+      :: env.ctors } in
     let env_with_ctors = List.fold_left (fun acc_env (h : Ast.actor_handler) ->
         let arg_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
         let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
                    ci_arg_tys = arg_tys } in
         { acc_env with ctors = (h.ah_msg.txt, ci) :: acc_env.ctors }
-      ) env actor.actor_handlers in
+      ) env_with_actor_ctor actor.actor_handlers in
     (* Check init expression — must return the state record type *)
     check_expr env_with_ctors actor.actor_init state_ty
       ~reason:(Some (RBuiltin "actor init must return the initial state record"));
