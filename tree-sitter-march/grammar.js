@@ -21,6 +21,8 @@ module.exports = grammar({
     [$.type_constructor, $.variant],
     // type_def: type_application vs variant(args)
     [$.type_application, $.variant],
+    // bare_constructor vs constructor_expression (resolved by lookahead on '(')
+    [$.bare_constructor, $.constructor_expression],
   ],
 
   reserved: {
@@ -291,6 +293,7 @@ module.exports = grammar({
       $.unary_expression,
       $.call_expression,
       $.constructor_expression,
+      $.bare_constructor,
       $.field_expression,
       $.lambda_expression,
       $.if_expression,
@@ -299,6 +302,7 @@ module.exports = grammar({
       $.record_expression,
       $.record_update,
       $.tuple_expression,
+      $.unit_expression,
       $.list_expression,
       $.send_expression,
       $.spawn_expression,
@@ -349,6 +353,8 @@ module.exports = grammar({
       field('name', $.type_identifier),
       '(', optional(commaSep($._expr)), ')',
     )),
+    // Bare constructor (nullary) used as expression, e.g. Nil, None, True
+    bare_constructor: $ => field('name', $.type_identifier),
     field_expression: $ => prec.left(9, seq(
       field('object', $._expr), '.', field('field', $.identifier),
     )),
@@ -368,6 +374,7 @@ module.exports = grammar({
       'else', field('else', $._expr),
     ),
     block_expression: $ => seq('do', $.block_body, 'end'),
+    unit_expression: _ => seq('(', ')'),
     tuple_expression: $ => seq(
       '(', $._expr, ',', commaSep1($._expr), ')',
     ),

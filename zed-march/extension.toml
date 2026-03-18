@@ -1,4 +1,3 @@
-[package]
 id = "march"
 name = "March"
 version = "0.0.1"
@@ -8,4 +7,4 @@ description = "March language support for Zed"
 
 [grammars.march]
 repository = "file:///Users/80197052/code/march/tree-sitter-march"
-rev = ""
+rev = "b11dfb7e75606f3918762f62b8284cec653f8c60"

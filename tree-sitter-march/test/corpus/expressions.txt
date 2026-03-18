@@ -103,3 +103,23 @@ mod Foo do let x = { s with count = 1 } end
     value: (record_update
       base: (identifier)
       (record_field name: (identifier) value: (integer))))))
+
+================================================================================
+Bare constructor expression (nullary)
+================================================================================
+mod Foo do let x = Nil end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (let_declaration
+    pattern: (variable_pattern (variable_pattern))
+    value: (bare_constructor name: (type_identifier)))))
+
+================================================================================
+Unit expression
+================================================================================
+mod Foo do let x = () end
+--------------------------------------------------------------------------------
+(source_file (module_def name: (type_identifier)
+  (let_declaration
+    pattern: (variable_pattern (variable_pattern))
+    value: (unit_expression))))

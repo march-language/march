@@ -1994,6 +1994,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "bare_constructor"
+        },
+        {
+          "type": "SYMBOL",
           "name": "field_expression"
         },
         {
@@ -2023,6 +2027,10 @@
         {
           "type": "SYMBOL",
           "name": "tuple_expression"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "unit_expression"
         },
         {
           "type": "SYMBOL",
@@ -2473,6 +2481,14 @@
         ]
       }
     },
+    "bare_constructor": {
+      "type": "FIELD",
+      "name": "name",
+      "content": {
+        "type": "SYMBOL",
+        "name": "type_identifier"
+      }
+    },
     "field_expression": {
       "type": "PREC_LEFT",
       "value": 9,
@@ -2645,6 +2661,19 @@
         {
           "type": "STRING",
           "value": "end"
+        }
+      ]
+    },
+    "unit_expression": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "STRING",
+          "value": ")"
         }
       ]
     },
@@ -3257,6 +3286,10 @@
     [
       "type_application",
       "variant"
+    ],
+    [
+      "bare_constructor",
+      "constructor_expression"
     ]
   ],
   "precedences": [],
