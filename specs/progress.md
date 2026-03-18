@@ -131,6 +131,7 @@ march/
 - **132 tests passing**: lexer (12), AST (1), parser (5), module (2), keywords (1), desugar (3), typecheck (8), eval (12), parser gaps (6), constraints (5), tir (83), list builtins (6), declarations (14), string interp (2), type_map (2), convert_ty (2), perceus (6)
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present
 - **`--dump-tir` flag**: prints TIR after full pipeline (Lower → Mono → Defun → Perceus → Escape); shows `stack_alloc` for promoted allocations
+- **`--emit-llvm` flag**: emits textual LLVM IR to `<basename>.ll`; links with `runtime/march_runtime.c` via `clang` to produce native binaries
 - **REPL working**: `dune exec march` with no args; `:quit`/`:env` commands; incremental env
 - **Bidirectional HM type checker**: constructor registry, builtin `Some/None/Ok/Err`, named record type expansion, `Unit`/`Bool`/etc. annotation normalization, builtins (`print`, `println`, `int_to_string`, `bool_to_string`, etc.) in scope; actor declarations register message ctors and bind `state` in handler envs
 - **Tree-walking interpreter**: `value` type (incl. `VPid`), pattern matching, `base_env` builtins, two-pass `eval_module_env` for mutual recursion; full synchronous actor runtime with `kill`/`is_alive`/drop semantics
@@ -140,6 +141,7 @@ march/
   - `defun.ml` — defunctionalization: lambda lifting, `$Clo_` struct generation, `ECallPtr` rewriting
   - `perceus.ml` — Perceus RC analysis: backwards liveness, `EIncRC`/`EDecRC`/`EFree` insertion, Inc/Dec cancel-pair elision, FBIP `EReuse` detection
   - `escape.ml` — Escape analysis: 3-phase intra-procedural stack promotion; `EAlloc` → `EStackAlloc` for non-escaping allocations; dead RC ops on stack vars removed
+  - `llvm_emit.ml` — TIR → textual LLVM IR; alloca+store+load for all let-bindings; ECase as switch+blocks+merge; arithmetic/cmp builtins to native ops; EAlloc→`@march_alloc`; EStackAlloc→`alloca`; EReuse→in-place write; March `main` → `@march_main` with C `@main` wrapper
   - `pp.ml` — pretty-printer for all TIR types and expressions (incl. `stack_alloc`, `reuse`)
 - **Two working examples**:
   - `examples/list_lib.march` — map, filter, fold, reverse, find, range (polymorphic list library)
@@ -175,7 +177,12 @@ march/
 ### TIR Pipeline (continuing)
 1. ~~**Perceus RC Analysis**~~ ✓ — `lib/tir/perceus.ml` complete. Spec at `specs/perceus.md`.
 2. ~~**Escape Analysis**~~ ✓ — `lib/tir/escape.ml` complete. Spec at `specs/escape.md`.
-3. **LLVM IR emission** — `lib/tir/llvm_emit.ml`: TIR → LLVM IR text. First native code output. Lowers `EStackAlloc` → `alloca`, `EAlloc` → `@march_alloc`, `EReuse` → in-place field write.
+3. ~~**LLVM IR emission**~~ ✓ — `lib/tir/llvm_emit.ml` + `runtime/march_runtime.{c,h}`. `march --emit-llvm file.march` produces `.ll`; link with `clang runtime/march_runtime.c file.ll -o bin`. Verified: `escape_test.march` compiles to native binary printing `7`.
+
+### Next milestones
+4. **Field-index map for records** — `EField`/`EUpdate` need a field→offset table (from type checker) to emit correct GEP offsets beyond field 0.
+5. **`llc` / `clang` invocation from compiler** — `march --compile` should call clang automatically rather than requiring manual linking step.
+6. **More test programs** — compile list operations, recursive functions, actors to LLVM.
 
 ### Frontend / Ergonomics
 4. **More tests** — actor spawning/send/kill, record operations, `Option`/`Result` pattern matching
