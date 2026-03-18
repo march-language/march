@@ -545,6 +545,42 @@ let test_tir_lower_typed_let () =
       (March_tir.Pp.string_of_ty v.March_tir.Tir.v_ty)
   | _ -> Alcotest.fail "expected ELet"
 
+let test_mono_subst_ty () =
+  let open March_tir.Tir in
+  let open March_tir.Mono in
+  let s = [("a", TInt); ("b", TBool)] in
+  Alcotest.(check string) "subst TVar a → Int" "Int"
+    (March_tir.Pp.string_of_ty (subst_ty s (TVar "a")));
+  Alcotest.(check string) "subst nested" "List(Int)"
+    (March_tir.Pp.string_of_ty (subst_ty s (TCon ("List", [TVar "a"]))));
+  Alcotest.(check string) "no TVar left" "Bool"
+    (March_tir.Pp.string_of_ty (subst_ty s (TVar "b")))
+
+let test_mono_mangle () =
+  let open March_tir.Mono in
+  Alcotest.(check string) "no args" "f" (mangle_name "f" []);
+  Alcotest.(check string) "one arg" "map$Int" (mangle_name "map" [March_tir.Tir.TInt]);
+  Alcotest.(check string) "two args" "map$Int$Bool"
+    (mangle_name "map" [March_tir.Tir.TInt; March_tir.Tir.TBool])
+
+let test_mono_has_tvar () =
+  let open March_tir.Tir in
+  let open March_tir.Mono in
+  Alcotest.(check bool) "TInt no tvar"   false (has_tvar TInt);
+  Alcotest.(check bool) "TVar has tvar"  true  (has_tvar (TVar "a"));
+  Alcotest.(check bool) "nested has tvar" true
+    (has_tvar (TCon ("List", [TVar "a"])))
+
+let test_mono_match_ty () =
+  let open March_tir.Tir in
+  let open March_tir.Mono in
+  let s = match_ty (TVar "a") TInt [] in
+  Alcotest.(check string) "matched TVar a = Int" "Int"
+    (March_tir.Pp.string_of_ty (subst_ty s (TVar "a")));
+  let s2 = match_ty (TCon ("List", [TVar "a"])) (TCon ("List", [TBool])) [] in
+  Alcotest.(check string) "matched nested TVar a = Bool" "Bool"
+    (March_tir.Pp.string_of_ty (subst_ty s2 (TVar "a")))
+
 let test_tir_lower_literal () =
   let m = lower_module {|mod Test do
     fn answer() : Int do 42 end
@@ -1237,6 +1273,10 @@ let () =
           Alcotest.test_case "pp atom lit"          `Quick test_tir_pp_lit;
           Alcotest.test_case "typed param annot"    `Quick test_tir_lower_typed_param;
           Alcotest.test_case "typed let annot"      `Quick test_tir_lower_typed_let;
+          Alcotest.test_case "mono subst_ty"        `Quick test_mono_subst_ty;
+          Alcotest.test_case "mono mangle_name"     `Quick test_mono_mangle;
+          Alcotest.test_case "mono has_tvar"        `Quick test_mono_has_tvar;
+          Alcotest.test_case "mono match_ty"        `Quick test_mono_match_ty;
         ] );
       ( "constraints",
         [
