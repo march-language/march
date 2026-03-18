@@ -12,12 +12,25 @@ let count_token tok buf =
   let words = Str.split (Str.regexp "[^a-zA-Z0-9_']") buf in
   List.length (List.filter (( = ) tok) words)
 
-(** Net depth of open do/end blocks in [buf].
+(** Count lines whose last word is "with" — these are match expression openers.
+    Record-update `{ e with f = v }` never ends a line with "with", so this
+    heuristic is safe in practice. *)
+let count_match_with buf =
+  let lines = String.split_on_char '\n' buf in
+  List.length (List.filter (fun line ->
+      let words = Str.split (Str.regexp "[^a-zA-Z0-9_']") (String.trim line) in
+      match List.rev words with
+      | "with" :: _ -> true
+      | _           -> false
+    ) lines)
+
+(** Net depth of open blocks in [buf].
+    Counts "do" and end-of-line "with" (match openers) as openers; "end" as closer.
     Positive means we are inside an unclosed block.
-    Known limitation: `do` or `end` inside string literals are miscounted;
+    Known limitation: these tokens inside string literals are miscounted;
     use a blank line to force-submit in that case. *)
 let do_end_depth buf =
-  count_token "do" buf - count_token "end" buf
+  count_token "do" buf + count_match_with buf - count_token "end" buf
 
 (** Last non-blank line in [buf], trimmed. *)
 let last_non_blank_line buf =
@@ -42,12 +55,16 @@ let starts_with_pipe buf =
 (** Read one complete REPL input, possibly spanning multiple lines.
     Returns [None] on EOF with empty buffer (exit signal),
     [Some src] when the input is judged complete. *)
+let prompt_num = ref 1
+
 let read_repl_input () =
   let buf        = Buffer.create 64 in
   let first_line = ref true in
   let result     = ref None in
+  let prompt     = Printf.sprintf "march(%d)> " !prompt_num in
+  let cont       = String.make (String.length prompt) ' ' in
   while !result = None do
-    Printf.printf "%s%!" (if !first_line then "march> " else ".. ");
+    Printf.printf "%s%!" (if !first_line then prompt else cont);
     first_line := false;
     (match (try Some (input_line stdin) with End_of_file -> None) with
      | None ->
@@ -70,6 +87,7 @@ let read_repl_input () =
        else
          result := Some (Some contents))
   done;
+  incr prompt_num;
   match !result with
   | Some r -> r
   | None   -> assert false
@@ -142,6 +160,8 @@ let repl () =
                         Printf.printf "val %s = %s\n%!" n.txt
                           (March_eval.Eval.value_to_string v)
                       | _ -> Printf.printf "val _ = ...\n%!")
+                   | March_ast.Ast.DActor (name, _, _) ->
+                     Printf.printf "val %s = <actor>\n%!" name.txt
                    | _ -> ())
                 with
                 | March_eval.Eval.Eval_error msg ->
