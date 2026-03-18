@@ -127,9 +127,10 @@ let repl () =
              let new_tc    = March_typecheck.Typecheck.check_decl input_tc d' in
              List.iter print_repl_diag (March_errors.Errors.sorted input_ctx);
              if not (March_errors.Errors.has_errors input_ctx) then begin
-               tc_env := { new_tc with errors = March_errors.Errors.create () };
                (try
                   env := March_eval.Eval.eval_decl !env d';
+                  (* Commit tc_env only after eval succeeds — keeps both envs in sync *)
+                  tc_env := { new_tc with errors = March_errors.Errors.create () };
                   (* Print the name(s) that were just bound *)
                   (match d' with
                    | March_ast.Ast.DFn (def, _) ->
