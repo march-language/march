@@ -2,6 +2,22 @@
     Dispatches to run_tui (notty two-pane) or run_simple (plain text)
     depending on whether stdin/stdout are a terminal. *)
 
+open Notty
+
+type comp_state = CompOff | CompOn of { items: string list; sel: int }
+
+(** Build the input line image with a block cursor at position [cur].
+    Uses plain text rendering (no syntax highlight) so the cursor character
+    is always correct. *)
+let make_input_img s cur =
+  let n = String.length s in
+  let left  = String.sub s 0 cur in
+  let cur_c = if cur < n then String.make 1 s.[cur] else " " in
+  let right = if cur < n then String.sub s (cur+1) (n - cur - 1) else "" in
+  I.(string A.empty left
+     <|> string A.(bg white ++ fg black) cur_c
+     <|> string A.empty right)
+
 let history_path () =
   match Sys.getenv_opt "MARCH_HISTORY_FILE" with
   | Some p -> p
@@ -177,6 +193,7 @@ let run_tui () =
   let result_h = Result_vars.create () in
   let tui       = Tui.create () in
   let inp       = ref Input.empty in
+  let comp      = ref CompOff in
   let hist_lines = ref [] in
   let prompt_num = ref 1 in
   let running    = ref true in
@@ -184,7 +201,7 @@ let run_tui () =
 
   let render_frame () =
     let prompt = Printf.sprintf "march(%d)> " !prompt_num in
-    let input_img = Highlight.highlight !inp.Input.buffer in
+    let input_img = make_input_img !inp.Input.buffer !inp.Input.cursor in
     (* Show accumulated continuation lines above current input *)
     let cont_imgs = List.map (fun line ->
       let pad_str = String.make (String.length prompt) ' ' in
@@ -192,6 +209,11 @@ let run_tui () =
     ) (List.rev !inp.Input.multiline_buf) in
     let transcript = !hist_lines @ cont_imgs in
     let (scope, result_latest) = user_scope !env !tc_env result_h in
+    let (comp_items, comp_sel) = match !comp with
+      | CompOff -> ([], 0)
+      | CompOn { items; sel } -> (items, sel)
+    in
+    let actors = March_eval.Eval.list_actors () in
     Tui.render tui Tui.{
       history       = transcript;
       input_line    = input_img;
@@ -199,9 +221,9 @@ let run_tui () =
       scope;
       result_latest;
       status;
-      completions    = [];      (* stub — wired in Task 4 *)
-      completion_sel = 0;       (* stub *)
-      actors         = [];      (* stub — wired in Task 4 *)
+      completions    = comp_items;
+      completion_sel = comp_sel;
+      actors;
     }
   in
 
@@ -293,6 +315,161 @@ let run_tui () =
            add_line Notty.A.(fg red) (Printf.sprintf "match failure: %s" msg)))
   in
 
+  let dispatch_action action =
+    (match action with
+     | Input.EOF -> running := false
+     | Input.Submit src ->
+       comp := CompOff;
+       (* Add submitted input to transcript *)
+       let prompt = Printf.sprintf "march(%d)> " !prompt_num in
+       let src_lines = String.split_on_char '\n' src in
+       List.iteri (fun i line ->
+         let pfx =
+           if i = 0 then Notty.I.string Notty.A.(st bold ++ fg blue) prompt
+           else Notty.I.string Notty.A.empty (String.make (String.length prompt) ' ')
+         in
+         hist_lines := !hist_lines @ [Notty.I.(pfx <|> Highlight.highlight line)]
+       ) src_lines;
+       History.add hist src;
+       History.reset_pos hist;
+       incr prompt_num;
+       inp := Input.empty;
+       (* Dispatch to command handler or process_src *)
+       (match String.trim src with
+        | ":quit" | ":q" -> running := false
+        | ":env" ->
+          let lines = List.filter_map (fun (k, v) ->
+            if List.mem_assoc k March_eval.Eval.base_env then None
+            else Some (Printf.sprintf "  %s = %s" k
+              (March_eval.Eval.value_to_string v))
+          ) !env in
+          List.iter (add_line Notty.A.empty) lines
+        | ":clear" -> hist_lines := []
+        | ":reset" ->
+          env := March_eval.Eval.base_env;
+          tc_env := March_typecheck.Typecheck.base_env
+            (March_errors.Errors.create ()) type_map;
+          hist_lines := []
+        | ":help" ->
+          List.iter (add_line Notty.A.empty) [
+            "Commands:";
+            "  :quit :q        — exit";
+            "  :env            — list bindings";
+            "  :type <expr>    — show type without evaluating";
+            "  :clear          — clear transcript (keeps bindings)";
+            "  :reset          — reset all bindings";
+            "  :load <file>    — load a .march file";
+            "  :help           — this message";
+            "";
+            "Keys: Tab: complete | Up/Down: history";
+            "      Ctrl+A/E: home/end | Ctrl+W: kill word | Ctrl+Y: yank";
+            "Magic: v = last result";
+          ]
+        | src when String.length src > 5 && String.sub src 0 5 = ":type" ->
+          let expr_src = String.trim (String.sub src 5 (String.length src - 5)) in
+          if expr_src = "" then
+            add_line Notty.A.(fg red) "usage: :type <expr>"
+          else begin
+            let lexbuf = Lexing.from_string expr_src in
+            (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+                    with _ -> None) with
+            | Some (March_ast.Ast.ReplExpr e) ->
+              let e' = March_desugar.Desugar.desugar_expr e in
+              let input_ctx = March_errors.Errors.create () in
+              let input_tc  = { !tc_env with errors = input_ctx } in
+              let inferred  = March_typecheck.Typecheck.infer_expr input_tc e' in
+              let ty_str    = March_typecheck.Typecheck.pp_ty
+                (March_typecheck.Typecheck.repr inferred) in
+              if March_errors.Errors.has_errors input_ctx then
+                add_line Notty.A.(fg red) "type error"
+              else
+                add_line Notty.A.(fg cyan) (Printf.sprintf "- : %s" ty_str)
+            | _ -> add_line Notty.A.(fg red) "parse error")
+          end
+        | src when String.length src > 5 && String.sub src 0 5 = ":load" ->
+          let path = String.trim (String.sub src 5 (String.length src - 5)) in
+          if path = "" then
+            add_line Notty.A.(fg red) "usage: :load <file>"
+          else
+            (match (try
+              let ic = open_in path in
+              let n  = in_channel_length ic in
+              let b  = Bytes.create n in
+              really_input ic b 0 n;
+              close_in ic;
+              Some (Bytes.to_string b)
+            with Sys_error msg -> add_line Notty.A.(fg red)
+              (Printf.sprintf "cannot open: %s" msg); None) with
+            | None -> ()
+            | Some file_src ->
+              let lexbuf = Lexing.from_string file_src in
+              (match (try
+                let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+                Some (March_desugar.Desugar.desugar_module m)
+              with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
+              | None -> ()
+              | Some desugared ->
+                List.iter (fun decl ->
+                  let input_ctx = March_errors.Errors.create () in
+                  let input_tc  = { !tc_env with errors = input_ctx } in
+                  let new_tc    = March_typecheck.Typecheck.check_decl input_tc decl in
+                  if not (March_errors.Errors.has_errors input_ctx) then begin
+                    (try
+                      env := March_eval.Eval.eval_decl !env decl;
+                      tc_env := { new_tc with errors = March_errors.Errors.create () }
+                    with _ -> ())
+                  end else
+                    List.iter (fun (d : March_errors.Errors.diagnostic) ->
+                      add_line Notty.A.(fg red)
+                        (Printf.sprintf "error: %s" d.message)
+                    ) (March_errors.Errors.sorted input_ctx)
+                ) desugared.March_ast.Ast.mod_decls;
+                add_line Notty.A.(fg green) (Printf.sprintf "loaded %s" path)))
+        | src when String.length src > 5 && String.sub src 0 5 = ":save" ->
+          let path = String.trim (String.sub src 5 (String.length src - 5)) in
+          if path = "" then
+            add_line Notty.A.(fg red) "usage: :save <file>"
+          else
+            add_line Notty.A.(fg yellow)
+              (Printf.sprintf ":save %s — session tracking not yet implemented" path)
+        | src when String.trim src = "" -> ()
+        | src -> process_src src);
+       render_frame ()
+     | Input.HistoryPrev ->
+       (match History.prev hist with
+        | None -> ()
+        | Some entry ->
+          inp := { !inp with Input.buffer = entry;
+                             Input.cursor = String.length entry };
+          render_frame ())
+     | Input.HistoryNext ->
+       let entry = match History.next hist with None -> "" | Some e -> e in
+       inp := { !inp with Input.buffer = entry;
+                          Input.cursor = String.length entry };
+       render_frame ()
+     | Input.Redraw | Input.Noop -> render_frame ()
+     | Input.Complete ->
+       let b = !inp.Input.buffer and c = !inp.Input.cursor in
+       let i = ref c in
+       while !i > 0 && b.[!i - 1] <> ' ' do decr i done;
+       let prefix = String.sub b !i (c - !i) in
+       let scope = List.filter_map (fun (name, _v) ->
+         if List.mem_assoc name March_eval.Eval.base_env then None
+         else Some (name, "")
+       ) !env in
+       let items = Complete.complete prefix scope in
+       (match items with
+       | [] -> ()
+       | [single] ->
+         inp := Input.complete_replace !inp single;
+         render_frame ()
+       | multiple ->
+         comp := CompOn { items = multiple; sel = 0 };
+         render_frame ())
+     | Input.HistorySearch -> () (* Phase 2 *)
+    )
+  in
+
   render_frame ();
 
   while !running do
@@ -300,161 +477,33 @@ let run_tui () =
      | `End -> running := false
      | `Resize _ -> render_frame ()
      | `Key key ->
-       let (inp', action) = Input.handle_key !inp key in
-       inp := inp';
-       (match action with
-        | Input.EOF -> running := false
-        | Input.Submit src ->
-          (* Add submitted input to transcript *)
-          let prompt = Printf.sprintf "march(%d)> " !prompt_num in
-          let src_lines = String.split_on_char '\n' src in
-          List.iteri (fun i line ->
-            let pfx =
-              if i = 0 then Notty.I.string Notty.A.(st bold ++ fg blue) prompt
-              else Notty.I.string Notty.A.empty (String.make (String.length prompt) ' ')
-            in
-            hist_lines := !hist_lines @ [Notty.I.(pfx <|> Highlight.highlight line)]
-          ) src_lines;
-          History.add hist src;
-          History.reset_pos hist;
-          incr prompt_num;
-          inp := Input.empty;
-          (* Dispatch to command handler or process_src *)
-          (match String.trim src with
-           | ":quit" | ":q" -> running := false
-           | ":env" ->
-             let lines = List.filter_map (fun (k, v) ->
-               if List.mem_assoc k March_eval.Eval.base_env then None
-               else Some (Printf.sprintf "  %s = %s" k
-                 (March_eval.Eval.value_to_string v))
-             ) !env in
-             List.iter (add_line Notty.A.empty) lines
-           | ":clear" -> hist_lines := []
-           | ":reset" ->
-             env := March_eval.Eval.base_env;
-             tc_env := March_typecheck.Typecheck.base_env
-               (March_errors.Errors.create ()) type_map;
-             hist_lines := []
-           | ":help" ->
-             List.iter (add_line Notty.A.empty) [
-               "Commands:";
-               "  :quit :q        — exit";
-               "  :env            — list bindings";
-               "  :type <expr>    — show type without evaluating";
-               "  :clear          — clear transcript (keeps bindings)";
-               "  :reset          — reset all bindings";
-               "  :load <file>    — load a .march file";
-               "  :help           — this message";
-               "";
-               "Keys: Tab: complete | Up/Down: history";
-               "      Ctrl+A/E: home/end | Ctrl+W: kill word | Ctrl+Y: yank";
-               "Magic: v = last result";
-             ]
-           | src when String.length src > 5 && String.sub src 0 5 = ":type" ->
-             let expr_src = String.trim (String.sub src 5 (String.length src - 5)) in
-             if expr_src = "" then
-               add_line Notty.A.(fg red) "usage: :type <expr>"
-             else begin
-               let lexbuf = Lexing.from_string expr_src in
-               (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
-                       with _ -> None) with
-               | Some (March_ast.Ast.ReplExpr e) ->
-                 let e' = March_desugar.Desugar.desugar_expr e in
-                 let input_ctx = March_errors.Errors.create () in
-                 let input_tc  = { !tc_env with errors = input_ctx } in
-                 let inferred  = March_typecheck.Typecheck.infer_expr input_tc e' in
-                 let ty_str    = March_typecheck.Typecheck.pp_ty
-                   (March_typecheck.Typecheck.repr inferred) in
-                 if March_errors.Errors.has_errors input_ctx then
-                   add_line Notty.A.(fg red) "type error"
-                 else
-                   add_line Notty.A.(fg cyan) (Printf.sprintf "- : %s" ty_str)
-               | _ -> add_line Notty.A.(fg red) "parse error")
-             end
-           | src when String.length src > 5 && String.sub src 0 5 = ":load" ->
-             let path = String.trim (String.sub src 5 (String.length src - 5)) in
-             if path = "" then
-               add_line Notty.A.(fg red) "usage: :load <file>"
-             else
-               (match (try
-                 let ic = open_in path in
-                 let n  = in_channel_length ic in
-                 let b  = Bytes.create n in
-                 really_input ic b 0 n;
-                 close_in ic;
-                 Some (Bytes.to_string b)
-               with Sys_error msg -> add_line Notty.A.(fg red)
-                 (Printf.sprintf "cannot open: %s" msg); None) with
-               | None -> ()
-               | Some file_src ->
-                 let lexbuf = Lexing.from_string file_src in
-                 (match (try
-                   let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
-                   Some (March_desugar.Desugar.desugar_module m)
-                 with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
-                 | None -> ()
-                 | Some desugared ->
-                   List.iter (fun decl ->
-                     let input_ctx = March_errors.Errors.create () in
-                     let input_tc  = { !tc_env with errors = input_ctx } in
-                     let new_tc    = March_typecheck.Typecheck.check_decl input_tc decl in
-                     if not (March_errors.Errors.has_errors input_ctx) then begin
-                       (try
-                         env := March_eval.Eval.eval_decl !env decl;
-                         tc_env := { new_tc with errors = March_errors.Errors.create () }
-                       with _ -> ())
-                     end else
-                       List.iter (fun (d : March_errors.Errors.diagnostic) ->
-                         add_line Notty.A.(fg red)
-                           (Printf.sprintf "error: %s" d.message)
-                       ) (March_errors.Errors.sorted input_ctx)
-                   ) desugared.March_ast.Ast.mod_decls;
-                   add_line Notty.A.(fg green) (Printf.sprintf "loaded %s" path)))
-           | src when String.length src > 5 && String.sub src 0 5 = ":save" ->
-             let path = String.trim (String.sub src 5 (String.length src - 5)) in
-             if path = "" then
-               add_line Notty.A.(fg red) "usage: :save <file>"
-             else
-               add_line Notty.A.(fg yellow)
-                 (Printf.sprintf ":save %s — session tracking not yet implemented" path)
-           | src when String.trim src = "" -> ()
-           | src -> process_src src);
-          render_frame ()
-        | Input.HistoryPrev ->
-          (match History.prev hist with
-           | None -> ()
-           | Some entry ->
-             inp := { !inp with Input.buffer = entry;
-                                Input.cursor = String.length entry };
-             render_frame ())
-        | Input.HistoryNext ->
-          let entry = match History.next hist with None -> "" | Some e -> e in
-          inp := { !inp with Input.buffer = entry;
-                             Input.cursor = String.length entry };
-          render_frame ()
-        | Input.Redraw | Input.Noop -> render_frame ()
-        | Input.Complete ->
-          let b = !inp.Input.buffer and c = !inp.Input.cursor in
-          let i = ref c in
-          while !i > 0 && b.[!i - 1] <> ' ' do decr i done;
-          let prefix = String.sub b !i (c - !i) in
-          let scope = List.filter_map (fun (name, v) ->
-            if List.mem_assoc name March_eval.Eval.base_env then None
-            else Some (name, March_eval.Eval.value_to_string v)
-          ) !env in
-          let completions = Complete.complete prefix scope in
-          (match completions with
-           | [] -> ()
-           | [single] ->
-             let suffix = String.sub single (String.length prefix)
-               (String.length single - String.length prefix) in
-             inp := Input.insert_at !inp suffix;
-             render_frame ()
-           | multiple ->
-             add_line Notty.A.empty (String.concat "  " multiple);
-             render_frame ())
-        | Input.HistorySearch -> () (* Phase 2 *)
-       ))
+       (match !comp with
+        | CompOn { items; sel } ->
+          let n = List.length items in
+          (match key with
+          | (`Tab, _) | (`Arrow `Down, _) ->
+            comp := CompOn { items; sel = (sel + 1) mod n };
+            render_frame ()
+          | (`Arrow `Up, _) ->
+            comp := CompOn { items; sel = (sel - 1 + n) mod n };
+            render_frame ()
+          | (`Enter, _) ->
+            let chosen = List.nth items sel in
+            inp := Input.complete_replace !inp chosen;
+            comp := CompOff;
+            render_frame ()
+          | (`Escape, _) ->
+            comp := CompOff;
+            render_frame ()
+          | _ ->
+            comp := CompOff;
+            let (inp', action) = Input.handle_key !inp key in
+            inp := inp';
+            dispatch_action action)
+        | CompOff ->
+          let (inp', action) = Input.handle_key !inp key in
+          inp := inp';
+          dispatch_action action))
   done;
   History.save hist (history_path ());
   Tui.close tui
