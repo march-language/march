@@ -332,6 +332,88 @@ let run_tui () =
              tc_env := March_typecheck.Typecheck.base_env
                (March_errors.Errors.create ()) type_map;
              hist_lines := []
+           | ":help" ->
+             List.iter (add_line Notty.A.empty) [
+               "Commands:";
+               "  :quit :q        — exit";
+               "  :env            — list bindings";
+               "  :type <expr>    — show type without evaluating";
+               "  :clear          — clear transcript (keeps bindings)";
+               "  :reset          — reset all bindings";
+               "  :load <file>    — load a .march file";
+               "  :help           — this message";
+               "";
+               "Keys: Tab: complete | Up/Down: history";
+               "      Ctrl+A/E: home/end | Ctrl+W: kill word | Ctrl+Y: yank";
+               "Magic: v = last result";
+             ]
+           | src when String.length src > 5 && String.sub src 0 5 = ":type" ->
+             let expr_src = String.trim (String.sub src 5 (String.length src - 5)) in
+             if expr_src = "" then
+               add_line Notty.A.(fg red) "usage: :type <expr>"
+             else begin
+               let lexbuf = Lexing.from_string expr_src in
+               (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+                       with _ -> None) with
+               | Some (March_ast.Ast.ReplExpr e) ->
+                 let e' = March_desugar.Desugar.desugar_expr e in
+                 let input_ctx = March_errors.Errors.create () in
+                 let input_tc  = { !tc_env with errors = input_ctx } in
+                 let inferred  = March_typecheck.Typecheck.infer_expr input_tc e' in
+                 let ty_str    = March_typecheck.Typecheck.pp_ty
+                   (March_typecheck.Typecheck.repr inferred) in
+                 if March_errors.Errors.has_errors input_ctx then
+                   add_line Notty.A.(fg red) "type error"
+                 else
+                   add_line Notty.A.(fg cyan) (Printf.sprintf "- : %s" ty_str)
+               | _ -> add_line Notty.A.(fg red) "parse error")
+             end
+           | src when String.length src > 5 && String.sub src 0 5 = ":load" ->
+             let path = String.trim (String.sub src 5 (String.length src - 5)) in
+             if path = "" then
+               add_line Notty.A.(fg red) "usage: :load <file>"
+             else
+               (match (try
+                 let ic = open_in path in
+                 let n  = in_channel_length ic in
+                 let b  = Bytes.create n in
+                 really_input ic b 0 n;
+                 close_in ic;
+                 Some (Bytes.to_string b)
+               with Sys_error msg -> add_line Notty.A.(fg red)
+                 (Printf.sprintf "cannot open: %s" msg); None) with
+               | None -> ()
+               | Some file_src ->
+                 let lexbuf = Lexing.from_string file_src in
+                 (match (try
+                   let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+                   Some (March_desugar.Desugar.desugar_module m)
+                 with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
+                 | None -> ()
+                 | Some desugared ->
+                   List.iter (fun decl ->
+                     let input_ctx = March_errors.Errors.create () in
+                     let input_tc  = { !tc_env with errors = input_ctx } in
+                     let new_tc    = March_typecheck.Typecheck.check_decl input_tc decl in
+                     if not (March_errors.Errors.has_errors input_ctx) then begin
+                       (try
+                         env := March_eval.Eval.eval_decl !env decl;
+                         tc_env := { new_tc with errors = March_errors.Errors.create () }
+                       with _ -> ())
+                     end else
+                       List.iter (fun (d : March_errors.Errors.diagnostic) ->
+                         add_line Notty.A.(fg red)
+                           (Printf.sprintf "error: %s" d.message)
+                       ) (March_errors.Errors.sorted input_ctx)
+                   ) desugared.March_ast.Ast.mod_decls;
+                   add_line Notty.A.(fg green) (Printf.sprintf "loaded %s" path)))
+           | src when String.length src > 5 && String.sub src 0 5 = ":save" ->
+             let path = String.trim (String.sub src 5 (String.length src - 5)) in
+             if path = "" then
+               add_line Notty.A.(fg red) "usage: :save <file>"
+             else
+               add_line Notty.A.(fg yellow)
+                 (Printf.sprintf ":save %s — session tracking not yet implemented" path)
            | src when String.trim src = "" -> ()
            | src -> process_src src);
           render_frame ()
