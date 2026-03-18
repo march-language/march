@@ -16,6 +16,7 @@ module.exports = grammar({
   reserved: {
     keyword: $ => [
       'fn', 'let', 'do', 'end', 'type', 'mod', 'pub',
+      'true', 'false',
     ],
   },
 
@@ -42,11 +43,53 @@ module.exports = grammar({
       '(', ')', 'do', 'end',
     ),
 
-    let_declaration: $ => seq('let', $.identifier, '=', $._expr),
+    let_declaration: $ => seq(
+      'let', field('pattern', $._pattern), optional($.type_annotation), '=', field('value', $._expr),
+    ),
+
+    // Stub for _pattern — expands in Task 5
+    // Use string form alias() because $.variable_pattern is not yet defined
+    _pattern: $ => alias($.identifier, 'variable_pattern'),
+
+    type_annotation: $ => seq(':', $._type),
+
+    // Stub for _type — expands in Task 4
+    // Use string form alias() because $.type_constructor is not yet defined
+    _type: $ => alias($.type_identifier, 'type_constructor'),
 
     type_def: $ => seq('type', $.type_identifier, '=', $.type_identifier),
 
-    _expr: $ => $.integer,
+    _expr: $ => choice(
+      $.integer,
+      $.float,
+      $.string,
+      $.boolean,
+      $.atom,
+      $.typed_hole,
+    ),
+
+    // Literals
+    float: _ => /[0-9]+\.[0-9]+/,
+    boolean: _ => choice('true', 'false'),
+
+    string: _ => seq(
+      '"',
+      repeat(choice(
+        /[^"\\]+/,
+        seq('\\', choice('n', 't', '\\', '"')),
+      )),
+      '"',
+    ),
+
+    atom_literal: _ => seq(':', /[a-z][a-zA-Z0-9_']*/),
+
+    typed_hole: $ => seq('?', optional($.identifier)),
+
+    // Atom expression: :ok or :error(msg) — expands in Task 6
+    atom: $ => seq(
+      $.atom_literal,
+      optional(seq('(', commaSep($._expr), ')')),
+    ),
 
     comment: _ => token(seq('--', /.*/)),
     integer: _ => /[0-9]+/,

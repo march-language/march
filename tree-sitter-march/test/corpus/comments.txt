@@ -14,8 +14,7 @@ end
     name: (type_identifier)
     (comment)
     (let_declaration
-      (identifier)
-      (integer))))
+      value: (integer))))
 
 ================================================================================
 Block comment simple
@@ -33,8 +32,7 @@ end
     name: (type_identifier)
     (block_comment)
     (let_declaration
-      (identifier)
-      (integer))))
+      value: (integer))))
 
 ================================================================================
 Block comment nested
@@ -52,5 +50,4 @@ end
     name: (type_identifier)
     (block_comment)
     (let_declaration
-      (identifier)
-      (integer))))
+      value: (integer))))
