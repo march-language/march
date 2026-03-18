@@ -1,0 +1,75 @@
+; Keywords — control flow
+["fn" "let" "do" "end" "if" "then" "else" "match" "with" "when"] @keyword
+
+; Keywords — declarations
+["type" "mod" "actor" "protocol" "interface" "impl" "sig" "extern"] @keyword
+
+; Keywords — modifiers
+["pub" "linear" "affine"] @keyword
+
+; Keywords — actor / concurrency
+["send" "spawn" "respond" "loop" "for" "use"] @keyword
+
+; Literals
+(integer) @number
+(float) @number
+(string) @string
+(boolean) @boolean
+
+; Atoms
+(atom_literal) @label
+(atom) @label
+
+; Typed holes
+(typed_hole) @string.special
+
+; Comments
+(comment) @comment
+(block_comment) @comment
+
+; Function definitions
+(function_def name: (identifier) @function)
+
+; Function calls
+(call_expression function: (identifier) @function.call)
+
+; Type names (in type position)
+(type_constructor) @type
+(type_application name: (type_identifier) @type)
+(type_variable) @type.parameter
+
+; Constructor expressions and patterns
+(constructor_expression name: (type_identifier) @constructor)
+(bare_constructor name: (type_identifier) @constructor)
+(constructor_pattern name: (type_identifier) @constructor)
+
+; Module names
+(module_def name: (type_identifier) @namespace)
+
+; Actor / interface / impl / sig / protocol names
+(actor_def name: (type_identifier) @type)
+(interface_def name: (type_identifier) @type)
+(type_def name: (type_identifier) @type)
+(impl_def interface: (type_identifier) @type)
+(sig_def name: (type_identifier) @type)
+(protocol_def name: (type_identifier) @type)
+
+; Parameters
+(named_param name: (identifier) @variable.parameter)
+
+; Record fields
+(record_field name: (identifier) @property)
+(record_type_field name: (identifier) @property)
+
+; Variable patterns (bound names in patterns)
+(variable_pattern) @variable
+
+; Variable references
+(identifier) @variable
+
+; Operators
+["+" "-" "*" "/" "%" "++" "==" "!=" "<" ">" "<=" ">=" "&&" "||" "!" "|>" "->" "="] @operator
+
+; Punctuation
+["(" ")" "[" "]" "{" "}"] @punctuation.bracket
+["," "." "|" ":"] @punctuation.delimiter
