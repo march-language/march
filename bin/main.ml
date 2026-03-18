@@ -58,11 +58,11 @@ let read_repl_input () =
        if Buffer.length buf > 0 then Buffer.add_char buf '\n';
        Buffer.add_string buf line;
        let contents = Buffer.contents buf in
-       if String.trim line = "" then
-         (* Blank line: force submit (escape hatch) *)
+       if do_end_depth contents > 0 then
+         ()   (* inside an open block — keep accumulating, even blank lines *)
+       else if String.trim line = "" then
+         (* Blank line at depth 0: force submit (escape hatch for match arms etc.) *)
          result := Some (Some contents)
-       else if do_end_depth contents > 0 then
-         ()   (* still inside an open block — keep accumulating *)
        else if ends_with_with contents then
          ()   (* match expression continues — keep accumulating *)
        else if starts_with_pipe contents then
