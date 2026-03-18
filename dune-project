@@ -19,4 +19,5 @@
   (dune (>= 3.0))
   (menhir (>= 20230608))
   (ppx_deriving (>= 6.0))
-  (alcotest (>= 1.7.0))))
+  (alcotest (>= 1.7.0))
+  (notty (>= 0.2.3))))

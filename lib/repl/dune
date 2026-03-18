@@ -1,0 +1,13 @@
+(library
+ (name march_repl)
+ (libraries
+   str
+   notty
+   notty.unix
+   march_ast
+   march_lexer
+   march_parser
+   march_desugar
+   march_typecheck
+   march_errors
+   march_eval))
