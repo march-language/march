@@ -383,8 +383,8 @@ and eval_expr (env : env) (e : expr) : value =
   | EVar n -> lookup n.txt env
 
   | EHole (name, _) ->
-    let label = match name with Some n -> n.txt | None -> "?" in
-    eval_error "typed hole ?%s evaluated at runtime" label
+    let label = match name with Some n -> "?" ^ n.txt | None -> "?" in
+    eval_error "typed hole `%s` reached the evaluator — the type checker should have caught this" label
 
   | EApp (f, args, _) ->
     let fn_val = eval_expr env f in

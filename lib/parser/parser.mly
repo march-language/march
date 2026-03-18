@@ -103,6 +103,7 @@ decl:
   | d = extern_decl    { d }
   | d = mod_decl       { d }
   | d = use_decl       { d }
+  | d = protocol_decl  { d }
 
 (** Each fn clause is parsed as its own DFn with a single clause.
     The group_fn_clauses pass merges consecutive same-name clauses. *)
@@ -168,6 +169,25 @@ actor_handler:
   | ON; msg = upper_name; LPAREN; params = separated_list(COMMA, param); RPAREN;
     DO; body = block_body; END
     { { ah_msg = msg; ah_params = params; ah_body = body } }
+
+(** Protocol (binary session type) declaration:
+    protocol Transfer do
+      Client -> Server : Request(String)
+      Server -> Client : Response(Int)
+      loop do
+        Client -> Server : More(String)
+        Server -> Client : Ack()
+      end
+    end *)
+protocol_decl:
+  | PROTOCOL; name = upper_name; DO; steps = list(protocol_step); END
+    { DProtocol (name, { proto_steps = steps }, mk_span ($loc)) }
+
+protocol_step:
+  | sender = upper_name; ARROW; receiver = upper_name; COLON; t = ty
+    { ProtoMsg (sender, receiver, t) }
+  | LOOP; DO; steps = list(protocol_step); END
+    { ProtoLoop steps }
 
 (** Nested module: mod Name do ... end *)
 mod_decl:
