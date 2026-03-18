@@ -1,0 +1,4 @@
+(library
+ (name march_tir)
+ (libraries march_ast)
+ (preprocess (pps ppx_deriving.show)))

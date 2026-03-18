@@ -1,5 +1,7 @@
 (** March compiler entry point. *)
 
+let dump_tir = ref false
+
 (* ------------------------------------------------------------------ *)
 (* REPL                                                                *)
 (* ------------------------------------------------------------------ *)
@@ -116,6 +118,12 @@ let compile filename =
         d.message
     ) diags;
   if March_errors.Errors.has_errors errors then exit 1
+  else if !dump_tir then begin
+    let tir = March_tir.Lower.lower_module desugared in
+    List.iter (fun fn ->
+        Printf.printf "%s\n\n" (March_tir.Pp.string_of_fn_def fn)
+      ) tir.tm_fns
+  end
   else begin
     try March_eval.Eval.run_module desugared
     with
@@ -126,9 +134,12 @@ let compile filename =
   end
 
 let () =
-  match Sys.argv with
-  | [| _ |]            -> repl ()
-  | [| _; filename |]  -> compile filename
-  | _ ->
-    Printf.eprintf "Usage: march [file.march]\n";
-    exit 1
+  let files = ref [] in
+  let specs = [
+    ("--dump-tir", Arg.Set dump_tir, " Print TIR instead of evaluating")
+  ] in
+  Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
+  match !files with
+  | []  -> repl ()
+  | [f] -> compile f
+  | _   -> Printf.eprintf "Usage: march [options] [file.march]\n"; exit 1

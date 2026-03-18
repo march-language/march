@@ -494,6 +494,283 @@ let test_value_to_string () =
                                                          [March_eval.Eval.VInt 2;
                                                           March_eval.Eval.VCon ("Nil", [])])])))
 
+(** Parse, desugar, and lower a March module to TIR. *)
+let lower_module src =
+  let m = parse_and_desugar src in
+  March_tir.Lower.lower_module m
+
+let find_fn name (m : March_tir.Tir.tir_module) =
+  List.find (fun (f : March_tir.Tir.fn_def) -> f.fn_name = name) m.tm_fns
+
+let test_tir_lower_literal () =
+  let m = lower_module {|mod Test do
+    fn answer() : Int do 42 end
+  end|} in
+  let f = find_fn "answer" m in
+  match f.fn_body with
+  | March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 42)) -> ()
+  | _ -> Alcotest.fail (Printf.sprintf "expected EAtom(42), got: %s"
+           (March_tir.Pp.string_of_expr f.fn_body))
+
+let test_tir_lower_let () =
+  let m = lower_module {|mod Test do
+    fn double(x : Int) : Int do
+      let y = x
+      y
+    end
+  end|} in
+  let f = find_fn "double" m in
+  match f.fn_body with
+  | March_tir.Tir.ELet (_, _, _) -> ()
+  | _ -> Alcotest.fail (Printf.sprintf "expected ELet, got: %s"
+           (March_tir.Pp.string_of_expr f.fn_body))
+
+let test_tir_lower_if () =
+  let m = lower_module {|mod Test do
+    fn pick(b : Bool) : Int do if b then 1 else 0 end
+  end|} in
+  let f = find_fn "pick" m in
+  let rec has_case = function
+    | March_tir.Tir.ECase _ -> true
+    | March_tir.Tir.ELet (_, _, body) -> has_case body
+    | _ -> false
+  in
+  Alcotest.(check bool) "if→case" true (has_case f.fn_body)
+
+let test_tir_anf_nested_call () =
+  (* f(g(x)) should produce an ELet for the inner g(x) call *)
+  let m = lower_module {|mod Test do
+    fn g(x : Int) : Int do x end
+    fn f(x : Int) : Int do x end
+    fn main() : Int do f(g(1)) end
+  end|} in
+  let f = find_fn "main" m in
+  let has_let = function
+    | March_tir.Tir.ELet (_, _, _) -> true
+    | _ -> false
+  in
+  Alcotest.(check bool) "nested call needs ELet" true (has_let f.fn_body)
+
+let test_tir_lower_constructor () =
+  let m = lower_module {|mod Test do
+    type Shape = Circle(Int) | Square(Int)
+    fn make() do Circle(42) end
+  end|} in
+  let f = find_fn "make" m in
+  let rec has_alloc = function
+    | March_tir.Tir.EAlloc _ -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> has_alloc e1 || has_alloc e2
+    | _ -> false
+  in
+  Alcotest.(check bool) "constructor→EAlloc" true (has_alloc f.fn_body)
+
+let test_tir_lower_lambda () =
+  let m = lower_module {|mod Test do
+    fn make_adder(n : Int) do fn x -> x end
+  end|} in
+  let f = find_fn "make_adder" m in
+  let rec has_letrec = function
+    | March_tir.Tir.ELetRec _ -> true
+    | March_tir.Tir.ELet (_, _, body) -> has_letrec body
+    | _ -> false
+  in
+  Alcotest.(check bool) "lambda→ELetRec" true (has_letrec f.fn_body)
+
+let test_tir_lower_match () =
+  let m = lower_module {|mod Test do
+    type Shape = Circle(Int) | Square(Int)
+    fn area(s) do
+      match s with
+      | Circle(r) -> r
+      | Square(side) -> side
+      end
+    end
+  end|} in
+  let f = find_fn "area" m in
+  let rec has_case = function
+    | March_tir.Tir.ECase _ -> true
+    | March_tir.Tir.ELet (_, _, body) -> has_case body
+    | _ -> false
+  in
+  Alcotest.(check bool) "match→ECase" true (has_case f.fn_body)
+
+let test_tir_lower_record () =
+  let m = lower_module {|mod Test do
+    fn make() do { x = 1, y = 2 } end
+  end|} in
+  let f = find_fn "make" m in
+  match f.fn_body with
+  | March_tir.Tir.ERecord _ -> ()
+  | _ -> Alcotest.fail (Printf.sprintf "expected ERecord, got: %s"
+           (March_tir.Pp.string_of_expr f.fn_body))
+
+let test_tir_lower_seq () =
+  let m = lower_module {|mod Test do
+    fn f() do
+      println("hi")
+      42
+    end
+  end|} in
+  let f = find_fn "f" m in
+  let rec has_seq = function
+    | March_tir.Tir.ESeq _ -> true
+    | March_tir.Tir.ELet (_, _, body) -> has_seq body
+    | _ -> false
+  in
+  Alcotest.(check bool) "block→ESeq" true (has_seq f.fn_body)
+
+let test_tir_lower_module () =
+  let m = lower_module {|mod Test do
+    fn add(x : Int, y : Int) : Int do x + y end
+    fn main() do add(1, 2) end
+  end|} in
+  Alcotest.(check int) "2 functions" 2 (List.length m.March_tir.Tir.tm_fns);
+  Alcotest.(check string) "first fn name" "add" (List.hd m.tm_fns).fn_name
+
+let test_tir_lower_type_def () =
+  let m = lower_module {|mod Test do
+    type Shape = Circle(Int) | Square(Int)
+    fn main() do 0 end
+  end|} in
+  Alcotest.(check int) "1 type def" 1 (List.length m.March_tir.Tir.tm_types)
+
+let test_tir_lower_fn_params () =
+  let m = lower_module {|mod Test do
+    fn add(x : Int, y : Int) : Int do x + y end
+  end|} in
+  let f = find_fn "add" m in
+  Alcotest.(check int) "2 params" 2 (List.length f.March_tir.Tir.fn_params);
+  Alcotest.(check string) "ret type" "Int"
+    (March_tir.Pp.string_of_ty f.fn_ret_ty)
+
+let test_tir_anf_invariant () =
+  (* Verify the core ANF property: all EApp arguments are atoms *)
+  let m = lower_module {|mod Test do
+    fn f(x : Int) : Int do x + x end
+  end|} in
+  let f = find_fn "f" m in
+  let rec check_anf = function
+    | March_tir.Tir.EApp (_, args) ->
+      List.for_all (function
+        | March_tir.Tir.AVar _ | March_tir.Tir.ALit _ -> true
+      ) args
+    | March_tir.Tir.ELet (_, e1, e2) -> check_anf e1 && check_anf e2
+    | March_tir.Tir.ESeq (e1, e2) -> check_anf e1 && check_anf e2
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.for_all (fun (br : March_tir.Tir.branch) -> check_anf br.br_body) brs &&
+      (match def with Some e -> check_anf e | None -> true)
+    | _ -> true
+  in
+  Alcotest.(check bool) "ANF invariant: all call args are atoms" true (check_anf f.fn_body)
+
+let test_tir_lower_patvar_default () =
+  (* PatVar in default arm should bind the scrutinee *)
+  let m = lower_module {|mod Test do
+    fn describe(n) do
+      match n with
+      | 0 -> 0
+      | other -> other
+      end
+    end
+  end|} in
+  let f = find_fn "describe" m in
+  (* The default arm should have an ELet binding "other" *)
+  let rec find_case = function
+    | March_tir.Tir.ECase (_, _, Some def) -> def
+    | March_tir.Tir.ELet (_, _, body) -> find_case body
+    | e -> e
+  in
+  match find_case f.fn_body with
+  | March_tir.Tir.ELet (v, _, _) ->
+    Alcotest.(check string) "PatVar binds scrutinee" "other" v.v_name
+  | _ -> Alcotest.fail "expected ELet in default arm for PatVar"
+
+let test_tir_lower_ty_int () =
+  let ast_ty = March_ast.Ast.TyCon ({ txt = "Int"; span = March_ast.Ast.dummy_span }, []) in
+  let tir_ty = March_tir.Lower.lower_ty ast_ty in
+  Alcotest.(check string) "Int → TInt" "Int" (March_tir.Pp.string_of_ty tir_ty)
+
+let test_tir_lower_ty_tuple () =
+  let open March_ast.Ast in
+  let ast_ty = TyTuple [
+    TyCon ({ txt = "Int"; span = dummy_span }, []);
+    TyCon ({ txt = "Bool"; span = dummy_span }, [])
+  ] in
+  let tir_ty = March_tir.Lower.lower_ty ast_ty in
+  Alcotest.(check string) "tuple" "(Int, Bool)" (March_tir.Pp.string_of_ty tir_ty)
+
+let test_tir_lower_polymorphic () =
+  (* Polymorphic functions should lower without crashing *)
+  let m = lower_module {|mod Test do
+    fn identity(x) do x end
+    fn apply(f, x) do f(x) end
+    fn compose(f, g, x) do f(g(x)) end
+  end|} in
+  Alcotest.(check int) "3 functions" 3 (List.length m.March_tir.Tir.tm_fns)
+
+let test_tir_lower_recursive () =
+  let m = lower_module {|mod Test do
+    fn fib(0) do 0 end
+    fn fib(1) do 1 end
+    fn fib(n) do fib(n - 1) + fib(n - 2) end
+  end|} in
+  let f = find_fn "fib" m in
+  (* Should have an ECase from the desugared multi-head *)
+  let rec has_case = function
+    | March_tir.Tir.ECase _ -> true
+    | March_tir.Tir.ELet (_, _, body) -> has_case body
+    | _ -> false
+  in
+  Alcotest.(check bool) "recursive fn lowers" true (has_case f.fn_body)
+
+let test_tir_lower_list_ops () =
+  let m = lower_module {|mod Test do
+    type List = Cons(Int, List) | Nil
+
+    fn map(f, xs) do
+      match xs with
+      | Nil -> Nil()
+      | Cons(h, t) -> Cons(f(h), map(f, t))
+      end
+    end
+
+    fn length(xs) do
+      match xs with
+      | Nil -> 0
+      | Cons(h, t) -> 1 + length(t)
+      end
+    end
+  end|} in
+  Alcotest.(check int) "2 functions" 2 (List.length m.March_tir.Tir.tm_fns);
+  Alcotest.(check int) "1 type def" 1 (List.length m.March_tir.Tir.tm_types)
+
+let test_tir_lower_closures_and_hof () =
+  let m = lower_module {|mod Test do
+    fn make_adder(n : Int) do
+      fn x -> x + n
+    end
+
+    fn twice(f, x) do f(f(x)) end
+
+    fn main() : Int do
+      let add5 = make_adder(5)
+      twice(add5, 10)
+    end
+  end|} in
+  Alcotest.(check int) "3 functions" 3 (List.length m.March_tir.Tir.tm_fns)
+
+let test_tir_pp_atom () =
+  let open March_tir.Tir in
+  let open March_tir.Pp in
+  let v = { v_name = "x"; v_ty = TInt; v_lin = Unr } in
+  let a = AVar v in
+  Alcotest.(check string) "atom var" "x" (string_of_atom a)
+
+let test_tir_pp_lit () =
+  let open March_tir.Pp in
+  let a = March_tir.Tir.ALit (March_ast.Ast.LitInt 42) in
+  Alcotest.(check string) "atom lit" "42" (string_of_atom a)
+
 let () =
   Alcotest.run "march"
     [
@@ -573,5 +850,30 @@ let () =
           Alcotest.test_case "percent token"       `Quick test_lexer_percent;
           Alcotest.test_case "modulo operator"     `Quick test_eval_modulo;
           Alcotest.test_case "multi-stmt match arm"`Quick test_eval_multi_stmt_match_arm;
+        ] );
+      ( "tir",
+        [
+          Alcotest.test_case "lower literal"       `Quick test_tir_lower_literal;
+          Alcotest.test_case "lower let"            `Quick test_tir_lower_let;
+          Alcotest.test_case "lower if→case"        `Quick test_tir_lower_if;
+          Alcotest.test_case "ANF nested call"      `Quick test_tir_anf_nested_call;
+          Alcotest.test_case "lower constructor"    `Quick test_tir_lower_constructor;
+          Alcotest.test_case "lower lambda"         `Quick test_tir_lower_lambda;
+          Alcotest.test_case "lower match"          `Quick test_tir_lower_match;
+          Alcotest.test_case "lower record"         `Quick test_tir_lower_record;
+          Alcotest.test_case "lower seq"            `Quick test_tir_lower_seq;
+          Alcotest.test_case "lower module"         `Quick test_tir_lower_module;
+          Alcotest.test_case "lower type def"       `Quick test_tir_lower_type_def;
+          Alcotest.test_case "lower fn params"      `Quick test_tir_lower_fn_params;
+          Alcotest.test_case "ANF invariant"        `Quick test_tir_anf_invariant;
+          Alcotest.test_case "PatVar default arm"   `Quick test_tir_lower_patvar_default;
+          Alcotest.test_case "lower polymorphic"   `Quick test_tir_lower_polymorphic;
+          Alcotest.test_case "lower recursive"     `Quick test_tir_lower_recursive;
+          Alcotest.test_case "lower list ops"      `Quick test_tir_lower_list_ops;
+          Alcotest.test_case "lower closures/HOF"  `Quick test_tir_lower_closures_and_hof;
+          Alcotest.test_case "lower ty Int"        `Quick test_tir_lower_ty_int;
+          Alcotest.test_case "lower ty tuple"      `Quick test_tir_lower_ty_tuple;
+          Alcotest.test_case "pp atom var"         `Quick test_tir_pp_atom;
+          Alcotest.test_case "pp atom lit"          `Quick test_tir_pp_lit;
         ] );
     ]
