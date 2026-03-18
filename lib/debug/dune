@@ -1,0 +1,6 @@
+(library
+ (name march_debug)
+ (libraries
+   march_ast
+   march_eval
+   march_repl))

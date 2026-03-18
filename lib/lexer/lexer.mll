@@ -48,6 +48,7 @@ let () =
       ("unsafe", UNSAFE);
       ("as", AS);
       ("use", USE);
+      ("dbg", DBG);
     ]
 }
 

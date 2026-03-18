@@ -1,9 +1,11 @@
 (** March compiler entry point. *)
 
-let dump_tir    = ref false
-let emit_llvm   = ref false
-let do_compile  = ref false
-let output_file = ref ""
+let dump_tir       = ref false
+let emit_llvm      = ref false
+let do_compile     = ref false
+let output_file    = ref ""
+let debug_mode     = ref false
+let debug_tui_mode = ref false
 
 (* ------------------------------------------------------------------ *)
 (* File compiler                                                       *)
@@ -107,12 +109,23 @@ let compile filename =
     end
   end
   else begin
-    try March_eval.Eval.run_module desugared
-    with
-    | March_eval.Eval.Eval_error msg ->
-      Printf.eprintf "%s: runtime error: %s\n" filename msg; exit 1
-    | March_eval.Eval.Match_failure msg ->
-      Printf.eprintf "%s: match failure: %s\n" filename msg; exit 1
+    (if !debug_mode || !debug_tui_mode then begin
+      let ctx = March_debug.Debug.make_debug_ctx
+        ~on_dbg:(fun env ->
+          March_debug.Debug_repl.run_simple_session
+            (Option.get !March_eval.Eval.debug_ctx) env)
+      in
+      March_debug.Debug.install ctx;
+      Printf.eprintf "[debug] Trace recording enabled (buffer: %d frames)\n%!"
+        ctx.March_eval.Eval.dc_trace.March_eval.Eval.rb_cap
+    end);
+    (try March_eval.Eval.run_module desugared
+     with
+     | March_eval.Eval.Eval_error msg ->
+       Printf.eprintf "%s: runtime error: %s\n" filename msg; exit 1
+     | March_eval.Eval.Match_failure msg ->
+       Printf.eprintf "%s: match failure: %s\n" filename msg; exit 1);
+    March_debug.Debug.uninstall ()
   end
 
 let () =
@@ -122,6 +135,8 @@ let () =
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");
+    ("--debug",     Arg.Set debug_mode,     " Enable time-travel debugger (simple mode)");
+    ("--debug-tui", Arg.Set debug_tui_mode, " Enable time-travel debugger (TUI mode)");
   ] in
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
   match !files with

@@ -65,6 +65,7 @@
 %token STATE INIT RESPOND PROTOCOL LOOP
 %token LINEAR AFFINE
 %token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS USE
+%token DBG
 %token <string> INTERP_START
 %token <string> INTERP_MID
 %token <string> INTERP_END
@@ -464,6 +465,9 @@ expr_atom:
     { ESpawn (e, mk_span ($loc)) }
   | SEND; LPAREN; cap = expr; COMMA; msg = expr; RPAREN
     { ESend (cap, msg, mk_span ($loc)) }
+  (* Debugger breakpoint *)
+  | DBG; LPAREN; RPAREN
+    { EDbg (mk_span ($loc)) }
   (* Contextual keywords usable as variable names in expressions *)
   | STATE { EVar (mk_name "state" $loc) }
 

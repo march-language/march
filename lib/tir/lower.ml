@@ -266,6 +266,9 @@ and lower_expr (e : Ast.expr) : Tir.expr =
 
   | Ast.EResultRef _ -> failwith "TIR lower: EResultRef is REPL-only and should be substituted before lowering"
 
+  | Ast.EDbg _ ->
+    failwith "TIR lower: EDbg is interpreter-only and cannot be lowered to TIR"
+
   (* --- Send/Spawn (CPS for args) --- *)
   | Ast.ESend (cap, msg, _) ->
     lower_to_atom_k cap (fun cap' ->

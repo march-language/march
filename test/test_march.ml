@@ -1764,6 +1764,194 @@ let test_list_actors_sorted () =
   Alcotest.(check int) "sorted second pid" 2
     (List.nth actors 1).March_eval.Eval.ai_pid
 
+(* ------------------------------------------------------------------ *)
+(* Debugger tests                                                     *)
+(* ------------------------------------------------------------------ *)
+
+let test_edbg_ast () =
+  let sp = March_ast.Ast.dummy_span in
+  let e = March_ast.Ast.EDbg sp in
+  Alcotest.(check bool) "EDbg is an expr" true
+    (match e with March_ast.Ast.EDbg _ -> true | _ -> false)
+
+let test_lexer_keyword_dbg () =
+  let lexbuf = Lexing.from_string "dbg" in
+  let tok = March_lexer.Lexer.token lexbuf in
+  Alcotest.(check bool) "lexes dbg keyword" true
+    (match tok with March_parser.Parser.DBG -> true | _ -> false)
+
+let test_parse_dbg () =
+  let lexbuf = Lexing.from_string "dbg()" in
+  let e = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  Alcotest.(check bool) "parses dbg() as EDbg" true
+    (match e with March_ast.Ast.EDbg _ -> true | _ -> false)
+
+let test_desugar_edbg () =
+  let sp = March_ast.Ast.dummy_span in
+  let e = March_ast.Ast.EDbg sp in
+  let e' = March_desugar.Desugar.desugar_expr e in
+  Alcotest.(check bool) "EDbg desugar passthrough" true
+    (match e' with March_ast.Ast.EDbg _ -> true | _ -> false)
+
+let test_typecheck_edbg () =
+  let type_map = Hashtbl.create 4 in
+  let env = March_typecheck.Typecheck.base_env
+    (March_errors.Errors.create ()) type_map in
+  let sp = March_ast.Ast.dummy_span in
+  let ty = March_typecheck.Typecheck.infer_expr env (March_ast.Ast.EDbg sp) in
+  let pp = March_typecheck.Typecheck.pp_ty (March_typecheck.Typecheck.repr ty) in
+  Alcotest.(check string) "EDbg typechecks as Unit" "()" pp
+
+let test_eval_edbg_noop () =
+  let v = March_eval.Eval.eval_expr March_eval.Eval.base_env
+    (March_ast.Ast.EDbg March_ast.Ast.dummy_span) in
+  Alcotest.(check bool) "EDbg evals to VUnit without debug mode" true
+    (match v with March_eval.Eval.VUnit -> true | _ -> false)
+
+let test_ring_buffer () =
+  let rb = March_eval.Eval.ring_create 3 in
+  March_eval.Eval.ring_push rb 10;
+  March_eval.Eval.ring_push rb 20;
+  March_eval.Eval.ring_push rb 30;
+  Alcotest.(check (option int)) "ring get 0 (most recent)" (Some 30)
+    (March_eval.Eval.ring_get rb 0);
+  Alcotest.(check (option int)) "ring get 2 (oldest)" (Some 10)
+    (March_eval.Eval.ring_get rb 2);
+  (* overflow: push 40, evicts 10 *)
+  March_eval.Eval.ring_push rb 40;
+  Alcotest.(check (option int)) "ring get 0 after overflow" (Some 40)
+    (March_eval.Eval.ring_get rb 0);
+  Alcotest.(check (option int)) "ring get 2 after overflow" (Some 20)
+    (March_eval.Eval.ring_get rb 2)
+
+let test_trace_recording () =
+  let cap = (match Sys.getenv_opt "MARCH_DEBUG_TRACE_SIZE" with
+     | Some s -> (try int_of_string s with _ -> 100000) | None -> 100000) in
+  let ctx = {
+    March_eval.Eval.dc_trace   = March_eval.Eval.ring_create cap;
+    dc_pos     = 0;
+    dc_enabled = true;
+    dc_depth   = 0;
+    dc_on_dbg  = None;
+  } in
+  March_eval.Eval.debug_ctx := Some ctx;
+  let src = "1 + 2" in
+  let lexbuf = Lexing.from_string src in
+  let e = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  let e' = March_desugar.Desugar.desugar_expr e in
+  let _v = March_eval.Eval.eval_expr March_eval.Eval.base_env e' in
+  let frames_recorded = ctx.March_eval.Eval.dc_trace.March_eval.Eval.rb_size in
+  March_eval.Eval.debug_ctx := None;
+  Alcotest.(check bool) "trace records frames" true (frames_recorded > 0)
+
+let test_trace_navigation () =
+  let ctx = March_debug.Debug.make_debug_ctx ~on_dbg:(fun _ -> ()) in
+  March_debug.Debug.install ctx;
+  let src = "1 + 2 + 3" in
+  let lexbuf = Lexing.from_string src in
+  let e = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  let e' = March_desugar.Desugar.desugar_expr e in
+  ignore (March_eval.Eval.eval_expr March_eval.Eval.base_env e');
+  let n = March_debug.Debug.frame_count ctx in
+  Alcotest.(check bool) "recorded some frames" true (n > 0);
+  let new_pos = March_debug.Trace.back ctx 1 in
+  Alcotest.(check int) "back 1 moves cursor" 1 new_pos;
+  let new_pos2 = March_debug.Trace.forward ctx 1 in
+  Alcotest.(check int) "forward 1 returns to 0" 0 new_pos2;
+  March_debug.Debug.uninstall ()
+
+let test_replay () =
+  let hit_dbg = ref false in
+  let captured_env = ref March_eval.Eval.base_env in
+  let ctx = March_debug.Debug.make_debug_ctx ~on_dbg:(fun env ->
+    hit_dbg := true;
+    captured_env := env
+  ) in
+  March_debug.Debug.install ctx;
+  let src = {|
+mod Test do
+  fn factorial(n) do
+    dbg()
+    if n <= 1 then 1
+    else n * factorial(n - 1)
+  end
+  fn main() do
+    factorial(3)
+  end
+end
+|} in
+  let lexbuf = Lexing.from_string src in
+  let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+  let m' = March_desugar.Desugar.desugar_module m in
+  (try March_eval.Eval.run_module m'
+   with
+   | March_eval.Eval.Eval_error _    -> ()
+   | March_eval.Eval.Match_failure _ -> ());
+  March_debug.Debug.uninstall ();
+  Alcotest.(check bool) "dbg() was hit" true !hit_dbg;
+  let frame_count_before = March_debug.Debug.frame_count ctx in
+  let new_env = ("n", March_eval.Eval.VInt 5) ::
+                (List.remove_assoc "n" !captured_env) in
+  March_debug.Debug.install ctx;
+  ignore (March_debug.Replay.replay_from ctx new_env);
+  March_debug.Debug.uninstall ();
+  let frame_count_after = March_debug.Debug.frame_count ctx in
+  Alcotest.(check bool) "replay adds new frames" true
+    (frame_count_after > frame_count_before)
+
+let test_debug_continue () =
+  let hit = ref false in
+  let ctx = March_debug.Debug.make_debug_ctx ~on_dbg:(fun _env ->
+    hit := true
+  ) in
+  March_debug.Debug.install ctx;
+  let src = {|
+mod DebugTest do
+  fn main() do
+    dbg()
+    42
+  end
+end
+|} in
+  let lexbuf = Lexing.from_string src in
+  let m  = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+  let m' = March_desugar.Desugar.desugar_module m in
+  (try March_eval.Eval.run_module m'
+   with
+   | March_eval.Eval.Eval_error _    -> ()
+   | March_eval.Eval.Match_failure _ -> ());
+  March_debug.Debug.uninstall ();
+  Alcotest.(check bool) "dbg() triggered on_dbg callback" true !hit
+
+let test_trace_overflow () =
+  let ctx = {
+    March_eval.Eval.dc_trace   = March_eval.Eval.ring_create 3;
+    dc_pos     = 0;
+    dc_enabled = true;
+    dc_depth   = 0;
+    dc_on_dbg  = None;
+  } in
+  March_debug.Debug.install ctx;
+  let src = "1 + 2 + 3 + 4" in
+  let lexbuf = Lexing.from_string src in
+  let e = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  let e' = March_desugar.Desugar.desugar_expr e in
+  ignore (March_eval.Eval.eval_expr March_eval.Eval.base_env e');
+  March_debug.Debug.uninstall ();
+  Alcotest.(check int) "ring buffer size capped at capacity" 3
+    ctx.March_eval.Eval.dc_trace.March_eval.Eval.rb_size
+
+let test_actor_snapshot () =
+  Hashtbl.reset March_eval.Eval.actor_registry;
+  Hashtbl.reset March_eval.Eval.actor_defs_tbl;
+  March_eval.Eval.next_pid := 0;
+  let snap = March_eval.Eval.snapshot_actors () in
+  Alcotest.(check int) "empty snapshot has 0 instances" 0
+    (List.length snap.March_eval.Eval.ass_instances);
+  March_eval.Eval.restore_actors snap;
+  Alcotest.(check int) "restore_actors leaves registry empty" 0
+    (Hashtbl.length March_eval.Eval.actor_registry)
+
 let () =
   Alcotest.run "march"
     [
@@ -1972,5 +2160,20 @@ let () =
         Alcotest.test_case "empty"  `Quick test_list_actors_empty;
         Alcotest.test_case "alive"  `Quick test_list_actors_alive;
         Alcotest.test_case "sorted" `Quick test_list_actors_sorted;
+      ];
+      "debugger", [
+        Alcotest.test_case "EDbg AST"               `Quick test_edbg_ast;
+        Alcotest.test_case "dbg keyword"            `Quick test_lexer_keyword_dbg;
+        Alcotest.test_case "parse dbg()"            `Quick test_parse_dbg;
+        Alcotest.test_case "desugar EDbg"           `Quick test_desugar_edbg;
+        Alcotest.test_case "typecheck EDbg"         `Quick test_typecheck_edbg;
+        Alcotest.test_case "eval EDbg no-op"        `Quick test_eval_edbg_noop;
+        Alcotest.test_case "ring buffer"            `Quick test_ring_buffer;
+        Alcotest.test_case "trace recording"        `Quick test_trace_recording;
+        Alcotest.test_case "trace navigation"       `Quick test_trace_navigation;
+        Alcotest.test_case "replay"                 `Quick test_replay;
+        Alcotest.test_case "debug continue"         `Quick test_debug_continue;
+        Alcotest.test_case "trace overflow"         `Quick test_trace_overflow;
+        Alcotest.test_case "actor snapshot"         `Quick test_actor_snapshot;
       ];
     ]

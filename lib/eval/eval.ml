@@ -56,6 +56,113 @@ let actor_registry  : (int, actor_inst) Hashtbl.t = Hashtbl.create 16
 let next_pid : int ref = ref 0
 
 (* ------------------------------------------------------------------ *)
+(* Ring buffer                                                         *)
+(* ------------------------------------------------------------------ *)
+
+type 'a ring = {
+  mutable rb_arr  : 'a option array;
+  mutable rb_head : int;   (* index of next write position *)
+  mutable rb_size : int;   (* number of entries stored *)
+  rb_cap          : int;
+}
+
+let ring_create cap =
+  { rb_arr = Array.make cap None; rb_head = 0; rb_size = 0; rb_cap = cap }
+
+let ring_push r x =
+  r.rb_arr.(r.rb_head) <- Some x;
+  r.rb_head <- (r.rb_head + 1) mod r.rb_cap;
+  if r.rb_size < r.rb_cap then r.rb_size <- r.rb_size + 1
+
+(** [ring_get r i] returns entry at logical index i (0 = most recent). *)
+let ring_get r i =
+  if i < 0 || i >= r.rb_size then None
+  else
+    let idx = ((r.rb_head - 1 - i) + r.rb_cap * 2) mod r.rb_cap in
+    r.rb_arr.(idx)
+
+(** [ring_drop_newest r n] drops the n most-recent entries (logical indices 0..n-1).
+    Used by replay to discard frames newer than the cursor.
+    Clamps: if n >= rb_size, clears the buffer. *)
+let ring_drop_newest r n =
+  if n <= 0 then ()
+  else if n >= r.rb_size then (r.rb_head <- 0; r.rb_size <- 0)
+  else begin
+    r.rb_head <- ((r.rb_head - n) + r.rb_cap * 2) mod r.rb_cap;
+    r.rb_size <- r.rb_size - n
+  end
+
+(* ------------------------------------------------------------------ *)
+(* Debug trace types                                                   *)
+(* ------------------------------------------------------------------ *)
+
+type actor_inst_snapshot = {
+  ais_name  : string;
+  ais_state : value;
+  ais_alive : bool;
+}
+
+type actor_state_snapshot = {
+  ass_defs      : (string * (actor_def * env ref)) list;
+  ass_instances : (int * actor_inst_snapshot) list;
+  ass_next_pid  : int;
+}
+
+type trace_frame = {
+  tf_expr   : expr;
+  tf_env    : env;
+  tf_result : value option;
+  tf_exn    : string option;
+  tf_actor  : actor_state_snapshot;
+  tf_span   : span;
+  tf_depth  : int;
+}
+
+type debug_ctx = {
+  dc_trace         : trace_frame ring;
+  mutable dc_pos   : int;       (* navigation cursor; 0 = most recent *)
+  mutable dc_enabled : bool;
+  mutable dc_depth : int;       (* current call depth *)
+  mutable dc_on_dbg : (env -> unit) option;
+}
+
+(** Snapshot the current actor state. Deep-copies mutable fields. *)
+let snapshot_actors () : actor_state_snapshot =
+  let defs = Hashtbl.fold (fun name (def, env_r) acc ->
+      (name, (def, ref !env_r)) :: acc
+    ) actor_defs_tbl [] in
+  let instances = Hashtbl.fold (fun pid (inst : actor_inst) acc ->
+      let snap = { ais_name  = inst.ai_name;
+                   ais_state = inst.ai_state;
+                   ais_alive = inst.ai_alive } in
+      (pid, snap) :: acc
+    ) actor_registry [] in
+  { ass_defs = defs; ass_instances = instances; ass_next_pid = !next_pid }
+
+(** Restore actor state from a snapshot. *)
+let restore_actors (snap : actor_state_snapshot) : unit =
+  Hashtbl.reset actor_defs_tbl;
+  List.iter (fun (name, (def, env_r)) ->
+      Hashtbl.add actor_defs_tbl name (def, env_r)
+    ) snap.ass_defs;
+  Hashtbl.reset actor_registry;
+  List.iter (fun (pid, s) ->
+      match Hashtbl.find_opt actor_defs_tbl s.ais_name with
+      | None -> ()
+      | Some (def, env_r) ->
+        let inst = { ai_name    = s.ais_name;
+                     ai_def     = def;
+                     ai_env_ref = env_r;
+                     ai_state   = s.ais_state;
+                     ai_alive   = s.ais_alive } in
+        Hashtbl.add actor_registry pid inst
+    ) snap.ass_instances;
+  next_pid := snap.ass_next_pid
+
+(** Module-level debug context. None = no overhead. *)
+let debug_ctx : debug_ctx option ref = ref None
+
+(* ------------------------------------------------------------------ *)
 (* Exceptions                                                          *)
 (* ------------------------------------------------------------------ *)
 
@@ -358,6 +465,19 @@ let clause_params (clause : fn_clause) : string list =
       | FPPat _         -> eval_error "unexpected pattern param after desugaring"
     ) clause.fc_params
 
+(** Extract span from an expression, or dummy_span if unavailable. *)
+let span_of_expr (e : expr) : span =
+  match e with
+  | ELit (_, sp) | EApp (_, _, sp) | ECon (_, _, sp)
+  | ELam (_, _, sp) | EBlock (_, sp) | ELet (_, sp)
+  | EMatch (_, _, sp) | ETuple (_, sp) | ERecord (_, sp)
+  | ERecordUpdate (_, _, sp) | EField (_, _, sp)
+  | EIf (_, _, _, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
+  | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
+  | ESpawn (_, sp) | EDbg sp -> sp
+  | EVar n -> n.span
+  | EResultRef _ -> dummy_span
+
 (** Evaluate a block: return the value of the last expression.
     [ELet] bindings extend the environment for subsequent expressions. *)
 let rec eval_block (env : env) (es : expr list) : value =
@@ -377,7 +497,7 @@ let rec eval_block (env : env) (es : expr list) : value =
     eval_block env rest
 
 (** Apply a callable value to a list of argument values. *)
-and apply (fn_val : value) (args : value list) : value =
+and apply_inner (fn_val : value) (args : value list) : value =
   match fn_val with
   | VClosure (closure_env, params, body) ->
     if List.length params <> List.length args then
@@ -390,8 +510,24 @@ and apply (fn_val : value) (args : value list) : value =
 
   | _ -> eval_error "applied non-function value: %s" (value_to_string fn_val)
 
-(** Main expression evaluator. *)
-and eval_expr (env : env) (e : expr) : value =
+(** Depth-tracking wrapper around [apply_inner]. *)
+and apply (fn_val : value) (args : value list) : value =
+  (match !debug_ctx with
+   | Some ctx -> ctx.dc_depth <- ctx.dc_depth + 1
+   | None -> ());
+  let result =
+    (try `Ok (apply_inner fn_val args)
+     with exn -> `Err exn)
+  in
+  (match !debug_ctx with
+   | Some ctx -> ctx.dc_depth <- max 0 (ctx.dc_depth - 1)
+   | None -> ());
+  match result with
+  | `Ok v    -> v
+  | `Err exn -> raise exn
+
+(** Main expression evaluator (inner, no tracing). *)
+and eval_expr_inner (env : env) (e : expr) : value =
   match e with
   | ELit (LitInt n, _)    -> VInt n
   | ELit (LitFloat f, _)  -> VFloat f
@@ -471,6 +607,15 @@ and eval_expr (env : env) (e : expr) : value =
 
   | EResultRef _ ->
     raise (Eval_error "EResultRef reached evaluator — substitution missing")
+
+  | EDbg _ ->
+    (match !debug_ctx with
+     | Some ctx when ctx.dc_enabled ->
+       (match ctx.dc_on_dbg with
+        | Some f -> f env
+        | None   -> ())
+     | _ -> ());
+    VUnit
 
   | EAnnot (ex, _, _) -> eval_expr env ex
 
@@ -556,6 +701,34 @@ and eval_match (env : env) (v : value) (branches : branch list) : value =
        if guard_ok
        then eval_expr env' br.branch_body
        else eval_match env v rest)
+
+(** Tracing wrapper around [eval_expr_inner].
+    When debug mode is active, records a [trace_frame] for every evaluation step.
+    When [!debug_ctx] is None, this is a single pointer deref — zero overhead. *)
+and eval_expr (env : env) (e : expr) : value =
+  match !debug_ctx with
+  | None | Some { dc_enabled = false; _ } ->
+    eval_expr_inner env e
+  | Some ctx ->
+    let outcome =
+      try `Ok (eval_expr_inner env e)
+      with exn -> `Err exn
+    in
+    let (result_v, exn_s) = match outcome with
+      | `Ok v  -> (Some v, None)
+      | `Err e -> (None, Some (Printexc.to_string e))
+    in
+    let frame = { tf_expr   = e;
+                  tf_env    = env;
+                  tf_result = result_v;
+                  tf_exn    = exn_s;
+                  tf_actor  = snapshot_actors ();
+                  tf_span   = span_of_expr e;
+                  tf_depth  = ctx.dc_depth } in
+    ring_push ctx.dc_trace frame;
+    (match outcome with
+     | `Ok v   -> v
+     | `Err exn -> raise exn)
 
 (* ------------------------------------------------------------------ *)
 (* Module evaluation                                                   *)

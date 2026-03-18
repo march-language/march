@@ -93,6 +93,7 @@ type expr =
   | ESend of expr * expr * span            (** send(cap, msg) *)
   | ESpawn of expr * span                  (** spawn(Actor) *)
   | EResultRef of int option               (** REPL magic: v or v(N) — last/Nth result *)
+  | EDbg of span                           (** Debugger breakpoint: dbg() — pauses, opens debug REPL *)
 [@@deriving show]
 
 and param = {
