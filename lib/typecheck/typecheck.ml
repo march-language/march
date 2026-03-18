@@ -90,12 +90,20 @@ and tvar =
   | Unbound of int * int   (** id, generalization level *)
   | Link    of ty          (** Solved: points to this type *)
 
+(** Lightweight type-class constraints.
+    [CNum t] asserts t must be Int or Float (arithmetic).
+    [COrd t] asserts t must be Int, Float, or String (ordered). *)
+type constraint_ =
+  | CNum of ty
+  | COrd of ty
+
 (** A type scheme encodes Hindley-Milner polymorphism.
-    [Poly(ids, ty)] represents ∀(α₁ … αₙ). τ where the αᵢ are the
-    [Unbound] variable ids that are quantified. *)
+    [Poly(ids, cs, ty)] represents ∀(α₁ … αₙ). τ where the αᵢ are the
+    [Unbound] variable ids that are quantified, and [cs] are class
+    constraints that must be discharged at each use site. *)
 type scheme =
   | Mono of ty
-  | Poly of int list * ty
+  | Poly of int list * constraint_ list * ty
 
 (* =================================================================
    §3  Fresh variable generation + level management
@@ -253,10 +261,12 @@ type env = {
   level   : int;                           (** Current generalization level *)
   lin     : lin_entry list;                (** Linear/affine use tracking *)
   errors  : Err.ctx;
+  pending_constraints : constraint_ list ref; (** Accumulated use-site constraints *)
 }
 
 let make_env errors = {
-  vars = []; types = []; ctors = []; records = []; level = 0; lin = []; errors
+  vars = []; types = []; ctors = []; records = []; level = 0; lin = [];
+  errors; pending_constraints = ref [];
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -303,13 +313,15 @@ let generalize level ty =
     | TNat _ | TError    -> ()
   in
   collect ty;
-  if !ids = [] then Mono ty else Poly (!ids, ty)
+  if !ids = [] then Mono ty else Poly (!ids, [], ty)
 
-(** [instantiate level sch] replaces each quantified variable in [sch]
-    with a fresh unification variable at [level]. *)
-let instantiate level = function
+(** [instantiate level env sch] replaces each quantified variable in [sch]
+    with a fresh unification variable at [level].  Any class constraints
+    carried by [sch] are instantiated and appended to [env.pending_constraints]
+    so they can be discharged at the enclosing declaration boundary. *)
+let instantiate level env = function
   | Mono ty -> ty
-  | Poly (ids, ty) ->
+  | Poly (ids, cs, ty) ->
     let subst = List.map (fun id -> (id, fresh_var level)) ids in
     let rec inst t = match repr t with
       | TVar r ->
@@ -327,6 +339,11 @@ let instantiate level = function
       | TNatOp (op, a, b)  -> TNatOp (op, inst a, inst b)
       | TNat _ | TError    -> t
     in
+    let inst_cs = List.map (function
+        | CNum t -> CNum (inst t)
+        | COrd t -> COrd (inst t)) cs
+    in
+    env.pending_constraints := inst_cs @ !(env.pending_constraints);
     inst ty
 
 (* =================================================================
@@ -354,17 +371,49 @@ let _t_pid    = t_pid
     We use level-0 fresh vars for polymorphic ops — they will be
     properly instantiated each time [instantiate] is called. *)
 let builtin_bindings : (string * scheme) list =
+  (* Extract the id from a fresh TVar (always succeeds for fresh vars) *)
+  let get_id = function
+    | TVar r -> (match !r with Unbound (id, _) -> id | _ -> 0)
+    | _ -> 0
+  in
+  (* ∀a. f(a) — unconstrained polymorphism *)
   let poly1 f =
     let a = fresh_var 0 in
-    Poly ([match a with TVar r -> (match !r with Unbound (id,_) -> id | _ -> 0) | _ -> 0],
-          f a)
+    Poly ([get_id a], [], f a)
+  in
+  (* ∀a:Num. f(a) — a must be Int or Float *)
+  let poly1_num f =
+    let a = fresh_var 0 in
+    Poly ([get_id a], [CNum a], f a)
+  in
+  (* ∀a:Ord. f(a) — a must be Int, Float, or String *)
+  let poly1_ord f =
+    let a = fresh_var 0 in
+    Poly ([get_id a], [COrd a], f a)
   in
   [
-    ("+",  Mono (TArrow (t_int,    TArrow (t_int,    t_int))));
-    ("-",  Mono (TArrow (t_int,    TArrow (t_int,    t_int))));
-    ("*",  Mono (TArrow (t_int,    TArrow (t_int,    t_int))));
-    ("/",  Mono (TArrow (t_int,    TArrow (t_int,    t_int))));
+    (* Arithmetic: Num-constrained so they work on Int and Float *)
+    ("+",  poly1_num (fun a -> TArrow (a, TArrow (a, a))));
+    ("-",  poly1_num (fun a -> TArrow (a, TArrow (a, a))));
+    ("*",  poly1_num (fun a -> TArrow (a, TArrow (a, a))));
+    ("/",  poly1_num (fun a -> TArrow (a, TArrow (a, a))));
     ("%",  Mono (TArrow (t_int,    TArrow (t_int,    t_int))));
+    ("negate", poly1_num (fun a -> TArrow (a, a)));
+    (* Float-specific operators — always monomorphic *)
+    ("+.", Mono (TArrow (t_float, TArrow (t_float, t_float))));
+    ("-.", Mono (TArrow (t_float, TArrow (t_float, t_float))));
+    ("*.", Mono (TArrow (t_float, TArrow (t_float, t_float))));
+    ("/.", Mono (TArrow (t_float, TArrow (t_float, t_float))));
+    (* Comparisons: Ord-constrained so they work on Int, Float, and String *)
+    ("<",  poly1_ord (fun a -> TArrow (a, TArrow (a, t_bool))));
+    (">",  poly1_ord (fun a -> TArrow (a, TArrow (a, t_bool))));
+    ("<=", poly1_ord (fun a -> TArrow (a, TArrow (a, t_bool))));
+    (">=", poly1_ord (fun a -> TArrow (a, TArrow (a, t_bool))));
+    ("&&", Mono (TArrow (t_bool,   TArrow (t_bool,   t_bool))));
+    ("||", Mono (TArrow (t_bool,   TArrow (t_bool,   t_bool))));
+    (* Polymorphic equality: ==, != : ∀a. a -> a -> Bool *)
+    ("==", poly1 (fun a -> TArrow (a, TArrow (a, t_bool))));
+    ("!=", poly1 (fun a -> TArrow (a, TArrow (a, t_bool))));
     ("++",             Mono (TArrow (t_string, TArrow (t_string, t_string))));
     ("print",          Mono (TArrow (t_string, t_unit)));
     ("println",        Mono (TArrow (t_string, t_unit)));
@@ -377,17 +426,15 @@ let builtin_bindings : (string * scheme) list =
     ("string_length",  Mono (TArrow (t_string, t_int)));
     ("string_concat",  Mono (TArrow (t_string, TArrow (t_string, t_string))));
     ("read_line",      Mono (TArrow (t_unit,   t_string)));
-    ("negate",         Mono (TArrow (t_int,    t_int)));
     ("not",            Mono (TArrow (t_bool,   t_bool)));
-    ("<",  Mono (TArrow (t_int,    TArrow (t_int,    t_bool))));
-    (">",  Mono (TArrow (t_int,    TArrow (t_int,    t_bool))));
-    ("<=", Mono (TArrow (t_int,    TArrow (t_int,    t_bool))));
-    (">=", Mono (TArrow (t_int,    TArrow (t_int,    t_bool))));
-    ("&&", Mono (TArrow (t_bool,   TArrow (t_bool,   t_bool))));
-    ("||", Mono (TArrow (t_bool,   TArrow (t_bool,   t_bool))));
-    (* Polymorphic equality: ==, != : ∀a. a -> a -> Bool *)
-    ("==", poly1 (fun a -> TArrow (a, TArrow (a, t_bool))));
-    ("!=", poly1 (fun a -> TArrow (a, TArrow (a, t_bool))));
+    (* List helpers: ∀a. ... *)
+    ("head",   poly1 (fun a -> TArrow (t_list a, a)));
+    ("tail",   poly1 (fun a -> TArrow (t_list a, t_list a)));
+    ("is_nil", poly1 (fun a -> TArrow (t_list a, t_bool)));
+    (* Generic to_string: ∀a. a -> String *)
+    ("to_string", poly1 (fun a -> TArrow (a, t_string)));
+    (* Actor/respond: ∀a. a -> Unit *)
+    ("respond", poly1 (fun a -> TArrow (a, t_unit)));
     (* Actor builtins *)
     ("kill",     poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_unit)));
     ("is_alive", poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_bool)));
@@ -402,14 +449,18 @@ let builtin_types : (string * int) list =
     ("Task",   1); ("Node",   0);
     ("Vector", 2); ("Matrix", 3); ("NDArray", 2); ]
 
-(** Built-in constructor table for Option and Result, which are
+(** Built-in constructor table for Option, Result, and List, which are
     pre-registered types.  User-declared types are added via [DType]. *)
 let builtin_ctors : (string * ctor_info) list =
   let mk_var s = Ast.TyVar { txt = s; span = Ast.dummy_span } in
+  let mk_list_ty s = Ast.TyCon ({ txt = "List"; span = Ast.dummy_span }, [mk_var s]) in
   [ ("Some", { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [mk_var "a"] });
     ("None", { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [] });
     ("Ok",   { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "a"] });
     ("Err",  { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "e"] });
+    ("Nil",  { ci_type = "List";   ci_params = ["a"];      ci_arg_tys = [] });
+    ("Cons", { ci_type = "List";   ci_params = ["a"];
+               ci_arg_tys = [mk_var "a"; mk_list_ty "a"] });
   ]
 
 let base_env errors =
@@ -764,7 +815,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
   | Ast.EVar name ->
     record_use name.txt name.span env;
     (match lookup_var name.txt env with
-     | Some sch -> instantiate env.level sch
+     | Some sch -> instantiate env.level env sch
      | None     ->
        Err.error env.errors ~span:name.span
          (Printf.sprintf
@@ -903,6 +954,21 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
   (* ── Field access: e.name ─────────────────────────────────────── *)
   | Ast.EField (e, name, sp) ->
+    (* Module member access: if e is a bare uppercase identifier (module name),
+       try looking up "ModName.field" in env.vars before falling back to
+       record field access. *)
+    let mod_access =
+      match e with
+      | Ast.ECon (modname, [], _) ->
+        let qualified = modname.txt ^ "." ^ name.txt in
+        (match lookup_var qualified env with
+         | Some sch -> Some (instantiate env.level env sch)
+         | None     -> None)
+      | _ -> None
+    in
+    (match mod_access with
+     | Some ty -> ty
+     | None ->
     let e_ty = infer_expr env e in
     (match expand_record env (repr e_ty) with
      | Some (TRecord flds) ->
@@ -928,6 +994,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
                "I cannot access field `%s` because this expression has \
                 type `%s`, which is not a record." name.txt (pp_ty other));
           TError))
+    (* close the None branch of mod_access match *)
+    )
 
   (* ── if/then/else ─────────────────────────────────────────────── *)
   | Ast.EIf (cond, then_, else_, sp) ->
@@ -1194,10 +1262,35 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
   ignore (leave_level env');
   sch
 
+(** Discharge all pending Num/Ord constraints accumulated during inference.
+    Called at each declaration boundary (DFn, DLet) to verify that constrained
+    type variables were unified with a compatible concrete type. *)
+let discharge_constraints env span =
+  List.iter (fun c ->
+      let ty, kind = match c with
+        | CNum t -> (repr t, "Num")
+        | COrd t -> (repr t, "Ord")
+      in
+      match ty with
+      | TCon ("Int",   []) | TCon ("Float", []) -> ()   (* Num + Ord *)
+      | TCon ("String",[]) ->
+        (match c with
+         | COrd _ -> ()   (* String is Ord *)
+         | CNum _ ->
+           Err.error env.errors ~span
+             "String does not implement Num (only Int and Float do).")
+      | TVar _ -> ()   (* Unresolved — will be polymorphic, constraint preserved *)
+      | _ ->
+        Err.error env.errors ~span
+          (Printf.sprintf "`%s` does not implement %s." (pp_ty ty) kind)
+    ) !(env.pending_constraints);
+  env.pending_constraints := []
+
 let rec check_decl env (d : Ast.decl) : env =
   match d with
   | Ast.DFn (def, sp) ->
     let sch = check_fn env def sp in
+    discharge_constraints env sp;
     bind_var def.fn_name.txt sch env
 
   | Ast.DLet (b, sp) ->
@@ -1205,6 +1298,7 @@ let rec check_decl env (d : Ast.decl) : env =
     let rhs_ty = infer_expr env' b.bind_expr in
     let bindings, pat_ty = infer_pattern env' b.bind_pat in
     unify env' ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
+    discharge_constraints env sp;
     ignore (leave_level env');
     (* Generalise simple variable bindings at module level *)
     let gen_bnd bnd = match bnd with
@@ -1269,16 +1363,71 @@ let rec check_decl env (d : Ast.decl) : env =
 
   | Ast.DMod (name, _vis, decls, _sp) ->
     let inner_env = List.fold_left check_decl env decls in
-    (* Bring public names into the outer env under mod_name.name prefix
-       (simplified — proper namespacing deferred) *)
-    ignore (name, inner_env);
+    (* Expose names introduced inside the module as "ModName.name" in the outer env *)
+    let new_names = List.filter_map (fun (k, sch) ->
+        if not (List.mem_assoc k env.vars)
+        then Some (name.txt ^ "." ^ k, sch)
+        else None
+      ) inner_env.vars in
+    bind_vars new_names env
+
+  | Ast.DProtocol _ -> env
+
+  | Ast.DSig _ ->
+    (* Signatures constrain module interfaces but don't introduce term bindings *)
     env
 
-  | Ast.DProtocol _ | Ast.DSig _
-  | Ast.DInterface _ | Ast.DImpl _
-  | Ast.DExtern _ ->
-    (* These will be elaborated in later passes *)
+  | Ast.DInterface (idef, _sp) ->
+    (* Register each method as a polymorphic function binding,
+       with the interface type parameter in scope. *)
+    List.fold_left (fun env (m : Ast.method_decl) ->
+        let tvars = ref [(idef.iface_param.txt, fresh_var env.level)] in
+        let ty = surface_ty env ~tvars m.md_ty in
+        bind_var m.md_name.txt (generalize env.level ty) env
+      ) env idef.iface_methods
+
+  | Ast.DImpl (idef, _sp) ->
+    (* Check each method body; impls don't export new term bindings. *)
+    List.iter (fun (_, (def : Ast.fn_def)) ->
+        ignore (check_fn env def _sp)
+      ) idef.impl_methods;
     env
+
+  | Ast.DExtern (edef, _sp) ->
+    (* Register each foreign function as a monomorphic binding. *)
+    List.fold_left (fun env (ef : Ast.extern_fn) ->
+        let tvars = ref [] in
+        let param_tys = List.map (fun (_, t) -> surface_ty env ~tvars t) ef.ef_params in
+        let ret_ty = surface_ty env ~tvars ef.ef_ret_ty in
+        let ty = List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys ret_ty in
+        bind_var ef.ef_name.txt (Mono ty) env
+      ) env edef.ext_fns
+
+  | Ast.DUse (ud, _sp) ->
+    let prefix = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) ^ "." in
+    (match ud.use_sel with
+     | Ast.UseSingle ->
+       (* Import the module path as an accessible prefix — no new bindings needed *)
+       env
+     | Ast.UseAll ->
+       (* Find all vars with "Prefix.name" and rebind them as plain "name" *)
+       let matching = List.filter_map (fun (k, sch) ->
+           let plen = String.length prefix in
+           if String.length k > plen
+              && String.sub k 0 plen = prefix
+           then Some (String.sub k plen (String.length k - plen), sch)
+           else None) env.vars in
+       bind_vars matching env
+     | Ast.UseNames names ->
+       List.fold_left (fun env n ->
+           match List.assoc_opt (prefix ^ n.Ast.txt) env.vars with
+           | Some sch -> bind_var n.Ast.txt sch env
+           | None ->
+             Err.error env.errors ~span:n.Ast.span
+               (Printf.sprintf "Module `%s` does not export `%s`."
+                  (String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path))
+                  n.Ast.txt);
+             env) env names)
 
 (* =================================================================
    §16  Module entry point

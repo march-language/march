@@ -4,6 +4,12 @@ open March_parser.Parser
 
 exception Lexer_error of string
 
+(** Brace depth inside a string interpolation expression `${ ... }`.
+    0 means we are NOT inside an interpolation.  When `${` is seen in a
+    string literal, depth is set to 1; each `{` increments it; `}` that
+    would bring it below 1 closes the interpolation. *)
+let interp_depth = ref 0
+
 let keyword_table = Hashtbl.create 32
 let () =
   List.iter
@@ -41,6 +47,7 @@ let () =
       ("extern", EXTERN);
       ("unsafe", UNSAFE);
       ("as", AS);
+      ("use", USE);
     ]
 }
 
@@ -62,8 +69,18 @@ rule token = parse
   | ':' (atom_name as a) { ATOM a }
   | '('           { LPAREN }
   | ')'           { RPAREN }
-  | '{'           { LBRACE }
-  | '}'           { RBRACE }
+  | '{'           { if !interp_depth > 0 then incr interp_depth; LBRACE }
+  | '}'           {
+      if !interp_depth > 0 then begin
+        decr interp_depth;
+        if !interp_depth = 0 then
+          (* Closing brace of interpolation — resume reading the string *)
+          read_string_interp (Buffer.create 16) lexbuf
+        else
+          RBRACE
+      end else
+        RBRACE
+    }
   | '['           { LBRACKET }
   | ']'           { RBRACKET }
   | "->"          { ARROW }
@@ -74,6 +91,10 @@ rule token = parse
   | '|'           { PIPE }
   | '.'           { DOT }
   | "++"          { PLUSPLUS }
+  | "+."          { PLUSDOT }
+  | "-."          { MINUSDOT }
+  | "*."          { STARDOT }
+  | "/."          { SLASHDOT }
   | '+'           { PLUS }
   | '-'           { MINUS }
   | '*'           { STAR }
@@ -115,9 +136,29 @@ and block_comment depth = parse
 
 and read_string buf = parse
   | '"'           { STRING (Buffer.contents buf) }
+  | "${"          {
+      (* Begin a string interpolation: emit INTERP_START carrying the prefix *)
+      interp_depth := 1;
+      INTERP_START (Buffer.contents buf)
+    }
   | "\\n"         { Buffer.add_char buf '\n'; read_string buf lexbuf }
   | "\\t"         { Buffer.add_char buf '\t'; read_string buf lexbuf }
   | "\\\\"        { Buffer.add_char buf '\\'; read_string buf lexbuf }
   | "\\\""        { Buffer.add_char buf '"'; read_string buf lexbuf }
   | eof           { raise (Lexer_error "Unterminated string literal") }
   | _ as c        { Buffer.add_char buf c; read_string buf lexbuf }
+
+(** Resume reading a string literal after the closing `}` of an interpolation. *)
+and read_string_interp buf = parse
+  | '"'           { INTERP_END (Buffer.contents buf) }
+  | "${"          {
+      (* Another interpolation segment *)
+      interp_depth := 1;
+      INTERP_MID (Buffer.contents buf)
+    }
+  | "\\n"         { Buffer.add_char buf '\n'; read_string_interp buf lexbuf }
+  | "\\t"         { Buffer.add_char buf '\t'; read_string_interp buf lexbuf }
+  | "\\\\"        { Buffer.add_char buf '\\'; read_string_interp buf lexbuf }
+  | "\\\""        { Buffer.add_char buf '"'; read_string_interp buf lexbuf }
+  | eof           { raise (Lexer_error "Unterminated string interpolation") }
+  | _ as c        { Buffer.add_char buf c; read_string_interp buf lexbuf }

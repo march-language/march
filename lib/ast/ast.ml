@@ -128,6 +128,19 @@ type decl =
   | DInterface of interface_def * span             (** Interface (typeclass) definition *)
   | DImpl of impl_def * span                       (** Interface implementation *)
   | DExtern of extern_def * span                   (** FFI extern block *)
+  | DUse of use_decl * span                        (** Import: use Mod.* or use Mod.{f} *)
+[@@deriving show]
+
+and use_decl = {
+  use_path : name list;        (** Module path, e.g. [Collections] *)
+  use_sel  : use_selector;
+}
+[@@deriving show]
+
+and use_selector =
+  | UseAll                     (** .* — import all public names *)
+  | UseNames of name list      (** .{f, g} — import named items *)
+  | UseSingle                  (** no selector — import the module itself *)
 [@@deriving show]
 
 (** A function is one or more clauses with the same name.

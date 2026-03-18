@@ -313,6 +313,12 @@ let base_env : env =
            | Some inst -> VBool inst.ai_alive
            | None      -> VBool false)
         | _ -> eval_error "is_alive: expected Pid"))
+  ; ("respond", VBuiltin ("respond", function
+        | [_] -> VUnit   (* stub: full async impl in future *)
+        | _ -> eval_error "respond: expected one argument"))
+  ; ("to_string", VBuiltin ("to_string", function
+        | [v] -> VString (value_display v)
+        | _ -> eval_error "to_string: expected one argument"))
   ]
 
 (* ------------------------------------------------------------------ *)
@@ -586,7 +592,7 @@ let rec eval_decl (env : env) (d : decl) : env =
       ) mod_env in
     prefixed @ env
 
-  | DProtocol _ | DSig _ | DInterface _ | DImpl _ | DExtern _ -> env
+  | DProtocol _ | DSig _ | DInterface _ | DImpl _ | DExtern _ | DUse _ -> env
 
 and eval_decls (env : env) (decls : decl list) : env =
   List.fold_left eval_decl env decls

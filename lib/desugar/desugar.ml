@@ -233,7 +233,7 @@ let rec desugar_decl (d : decl) : decl =
   | DMod (name, vis, decls, sp) ->
     DMod (name, vis, List.map desugar_decl decls, sp)
 
-  | DProtocol _ | DSig _ | DInterface _ | DImpl _ | DExtern _ ->
+  | DProtocol _ | DSig _ | DInterface _ | DImpl _ | DExtern _ | DUse _ ->
     (* These either contain no expressions or will be handled when their
        content types are enriched (e.g. default method bodies in DInterface). *)
     d

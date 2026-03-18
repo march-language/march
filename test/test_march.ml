@@ -771,6 +771,202 @@ let test_tir_pp_lit () =
   let a = March_tir.Tir.ALit (March_ast.Ast.LitInt 42) in
   Alcotest.(check string) "atom lit" "42" (string_of_atom a)
 
+(* ── New feature tests ─────────────────────────────────────────────────── *)
+
+(* Num/Ord constraint tests *)
+let test_tc_num_int () =
+  let ctx = typecheck {|mod Test do
+    fn f(x: Int) do x + 1 end
+  end|} in
+  Alcotest.(check bool) "Int + Int: no errors" false (has_errors ctx)
+
+let test_tc_num_string_error () =
+  let ctx = typecheck {|mod Test do
+    fn f(x: String) do x + x end
+  end|} in
+  Alcotest.(check bool) "String + String: Num error" true (has_errors ctx)
+
+let test_tc_ord_string () =
+  let ctx = typecheck {|mod Test do
+    fn f(a: String, b: String) do a < b end
+  end|} in
+  Alcotest.(check bool) "String < String: no errors (Ord)" false (has_errors ctx)
+
+let test_tc_ord_int () =
+  let ctx = typecheck {|mod Test do
+    fn f(a: Int, b: Int) do a > b end
+  end|} in
+  Alcotest.(check bool) "Int > Int: no errors (Ord)" false (has_errors ctx)
+
+let test_tc_float_ops () =
+  let ctx = typecheck {|mod Test do
+    fn f(x: Float) do x +. 1.0 end
+  end|} in
+  Alcotest.(check bool) "Float +. Float: no errors" false (has_errors ctx)
+
+(* Nil/Cons constructor tests *)
+let test_tc_nil_ctor () =
+  let ctx = typecheck {|mod Test do
+    fn empty() do [] end
+  end|} in
+  Alcotest.(check bool) "Nil: no errors" false (has_errors ctx)
+
+let test_tc_cons_ctor () =
+  let ctx = typecheck {|mod Test do
+    fn list123() do [1, 2, 3] end
+  end|} in
+  Alcotest.(check bool) "[1,2,3]: no errors" false (has_errors ctx)
+
+let test_tc_head_builtin () =
+  let ctx = typecheck {|mod Test do
+    fn first(xs) do head(xs) end
+  end|} in
+  Alcotest.(check bool) "head builtin: no errors" false (has_errors ctx)
+
+(* eval: head/tail/is_nil *)
+let test_eval_head () =
+  let env = eval_module {|mod Test do
+    fn first(xs) do head(xs) end
+  end|} in
+  let xs = March_eval.Eval.VCon ("Cons",
+    [March_eval.Eval.VInt 1;
+     March_eval.Eval.VCon ("Cons",
+       [March_eval.Eval.VInt 2; March_eval.Eval.VCon ("Nil", [])])]) in
+  let v = call_fn env "first" [xs] in
+  Alcotest.(check int) "head([1,2]) = 1" 1
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+let test_eval_tail () =
+  let env = eval_module {|mod Test do
+    fn rest(xs) do tail(xs) end
+  end|} in
+  let xs = March_eval.Eval.VCon ("Cons",
+    [March_eval.Eval.VInt 1;
+     March_eval.Eval.VCon ("Cons",
+       [March_eval.Eval.VInt 2; March_eval.Eval.VCon ("Nil", [])])]) in
+  let v = call_fn env "rest" [xs] in
+  match v with
+  | March_eval.Eval.VCon ("Cons", [March_eval.Eval.VInt 2; _]) -> ()
+  | _ -> Alcotest.fail "expected Cons(2, ...)"
+
+let test_eval_is_nil () =
+  let env = eval_module {|mod Test do
+    fn empty(xs) do is_nil(xs) end
+  end|} in
+  let nil = March_eval.Eval.VCon ("Nil", []) in
+  let cons = March_eval.Eval.VCon ("Cons", [March_eval.Eval.VInt 1; nil]) in
+  let v_nil = call_fn env "empty" [nil] in
+  let v_cons = call_fn env "empty" [cons] in
+  Alcotest.(check bool) "is_nil([]) = true" true
+    (match v_nil with March_eval.Eval.VBool b -> b | _ -> failwith "expected VBool");
+  Alcotest.(check bool) "is_nil([1]) = false" false
+    (match v_cons with March_eval.Eval.VBool b -> b | _ -> failwith "expected VBool")
+
+(* Parser: interface/impl/sig/extern/use *)
+let test_parse_interface_decl () =
+  let src = {|mod Test do
+    interface Eq(a) do
+      fn eq: a -> a -> Bool
+    end
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DInterface (idef, _)] ->
+    Alcotest.(check string) "interface name" "Eq" idef.iface_name.txt;
+    Alcotest.(check int) "1 method" 1 (List.length idef.iface_methods)
+  | _ -> Alcotest.fail "expected DInterface"
+
+let test_parse_impl_decl () =
+  let src = {|mod Test do
+    impl Eq(Int) do
+      fn eq(x, y) do x == y end
+    end
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DImpl (idef, _)] ->
+    Alcotest.(check string) "impl iface" "Eq" idef.impl_iface.txt;
+    Alcotest.(check int) "1 method" 1 (List.length idef.impl_methods)
+  | _ -> Alcotest.fail "expected DImpl"
+
+let test_parse_sig_decl () =
+  let src = {|mod Test do
+    sig Collections do
+      fn insert: Int -> Int
+    end
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DSig (name, sdef, _)] ->
+    Alcotest.(check string) "sig name" "Collections" name.txt;
+    Alcotest.(check int) "1 fn" 1 (List.length sdef.sig_fns)
+  | _ -> Alcotest.fail "expected DSig"
+
+let test_parse_extern_decl () =
+  let src = {|mod Test do
+    extern "libc": Cap(LibC) do
+      fn malloc(n: Int): Int
+    end
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DExtern (edef, _)] ->
+    Alcotest.(check string) "lib name" "libc" edef.ext_lib_name;
+    Alcotest.(check int) "1 extern fn" 1 (List.length edef.ext_fns)
+  | _ -> Alcotest.fail "expected DExtern"
+
+let test_parse_use_all () =
+  let src = {|mod Test do
+    use Collections.*
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DUse (ud, _)] ->
+    Alcotest.(check bool) "UseAll" true
+      (match ud.use_sel with March_ast.Ast.UseAll -> true | _ -> false)
+  | _ -> Alcotest.fail "expected DUse UseAll"
+
+let test_parse_use_names () =
+  let src = {|mod Test do
+    use Collections.{insert, lookup}
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DUse (ud, _)] ->
+    (match ud.use_sel with
+     | March_ast.Ast.UseNames names ->
+       Alcotest.(check int) "2 names" 2 (List.length names)
+     | _ -> Alcotest.fail "expected UseNames")
+  | _ -> Alcotest.fail "expected DUse UseNames"
+
+(* String interpolation *)
+let test_parse_string_interp () =
+  let lexbuf = Lexing.from_string {|"hi ${name}!"|} in
+  let expr = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  (* Should desugar to: "hi " ++ to_string(name) ++ "!" *)
+  match expr with
+  | March_ast.Ast.EApp (March_ast.Ast.EVar cat2, [_; _], _)
+    when cat2.txt = "++" -> ()
+  | _ -> Alcotest.fail "expected ++ desugaring from string interpolation"
+
+let test_eval_string_interp () =
+  let env = eval_module {|mod Test do
+    fn greet(name) do "Hello, ${name}!" end
+  end|} in
+  let v = call_fn env "greet" [March_eval.Eval.VString "World"] in
+  Alcotest.(check string) "string interpolation" "Hello, World!"
+    (match v with March_eval.Eval.VString s -> s | _ -> failwith "expected VString")
+
+(* mod typecheck: DMod exposes names with prefix *)
+let test_tc_mod_typecheck () =
+  let ctx = typecheck {|mod Test do
+    mod Foo do
+      fn bar() do 42 end
+    end
+    fn main() do Foo.bar() end
+  end|} in
+  Alcotest.(check bool) "Foo.bar accessible after mod" false (has_errors ctx)
+
 let () =
   Alcotest.run "march"
     [
@@ -875,5 +1071,37 @@ let () =
           Alcotest.test_case "lower ty tuple"      `Quick test_tir_lower_ty_tuple;
           Alcotest.test_case "pp atom var"         `Quick test_tir_pp_atom;
           Alcotest.test_case "pp atom lit"          `Quick test_tir_pp_lit;
+        ] );
+      ( "constraints",
+        [
+          Alcotest.test_case "Num: Int + Int"       `Quick test_tc_num_int;
+          Alcotest.test_case "Num: String + error"  `Quick test_tc_num_string_error;
+          Alcotest.test_case "Ord: String <"        `Quick test_tc_ord_string;
+          Alcotest.test_case "Ord: Int >"           `Quick test_tc_ord_int;
+          Alcotest.test_case "Float +."             `Quick test_tc_float_ops;
+        ] );
+      ( "list builtins",
+        [
+          Alcotest.test_case "Nil ctor"             `Quick test_tc_nil_ctor;
+          Alcotest.test_case "Cons ctor"            `Quick test_tc_cons_ctor;
+          Alcotest.test_case "head builtin"         `Quick test_tc_head_builtin;
+          Alcotest.test_case "eval head"            `Quick test_eval_head;
+          Alcotest.test_case "eval tail"            `Quick test_eval_tail;
+          Alcotest.test_case "eval is_nil"          `Quick test_eval_is_nil;
+        ] );
+      ( "declarations",
+        [
+          Alcotest.test_case "interface decl"       `Quick test_parse_interface_decl;
+          Alcotest.test_case "impl decl"            `Quick test_parse_impl_decl;
+          Alcotest.test_case "sig decl"             `Quick test_parse_sig_decl;
+          Alcotest.test_case "extern decl"          `Quick test_parse_extern_decl;
+          Alcotest.test_case "use all"              `Quick test_parse_use_all;
+          Alcotest.test_case "use names"            `Quick test_parse_use_names;
+          Alcotest.test_case "mod typecheck"        `Quick test_tc_mod_typecheck;
+        ] );
+      ( "string interp",
+        [
+          Alcotest.test_case "parse interp"         `Quick test_parse_string_interp;
+          Alcotest.test_case "eval interp"          `Quick test_eval_string_interp;
         ] );
     ]

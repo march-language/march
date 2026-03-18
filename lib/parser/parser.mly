@@ -19,6 +19,19 @@
   (** Group consecutive fn clauses with the same name into a single DFn.
       Clauses must be adjacent — interleaving with other decls is an error
       that we can catch later in a validation pass. *)
+  (* Desugar a string interpolation into concatenation + to_string calls.
+     desugar_interp prefix [(e1, s1); (e2, s2); ...] sp  produces:
+       prefix ++ to_string(e1) ++ s1 ++ to_string(e2) ++ s2 ++ ...
+     where to_string is the polymorphic builtin. *)
+  let desugar_interp prefix parts sp =
+    let cat a b = EApp (EVar { txt = "++"; span = sp }, [a; b], sp) in
+    let to_s e  = EApp (EVar { txt = "to_string"; span = sp }, [e], sp) in
+    List.fold_left (fun acc (e, seg) ->
+        let with_e = cat acc (to_s e) in
+        if seg = "" then with_e
+        else cat with_e (ELit (LitString seg, sp))
+      ) prefix parts
+
   let group_fn_clauses (decls : decl list) : decl list =
     let rec go acc = function
       | [] -> List.rev acc
@@ -51,11 +64,15 @@
 %token TYPE MOD ACTOR ON SEND SPAWN
 %token STATE INIT RESPOND PROTOCOL LOOP
 %token LINEAR AFFINE
-%token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS
+%token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS USE
+%token <string> INTERP_START
+%token <string> INTERP_MID
+%token <string> INTERP_END
 %token LPAREN RPAREN LBRACE RBRACE LBRACKET RBRACKET
 %token ARROW PIPE_ARROW
 %token EQUALS COLON COMMA PIPE DOT
 %token PLUSPLUS PLUS MINUS STAR SLASH PERCENT
+%token PLUSDOT MINUSDOT STARDOT SLASHDOT
 %token LT GT EQEQ NEQ LEQ GEQ
 %token AND OR BANG
 %token UNDERSCORE QUESTION
@@ -76,10 +93,16 @@ module_:
 (* ---- Declarations ---- *)
 
 decl:
-  | d = fn_decl    { d }
-  | d = let_decl   { d }
-  | d = type_decl  { d }
-  | d = actor_decl { d }
+  | d = fn_decl        { d }
+  | d = let_decl       { d }
+  | d = type_decl      { d }
+  | d = actor_decl     { d }
+  | d = interface_decl { d }
+  | d = impl_decl      { d }
+  | d = sig_decl       { d }
+  | d = extern_decl    { d }
+  | d = mod_decl       { d }
+  | d = use_decl       { d }
 
 (** Each fn clause is parsed as its own DFn with a single clause.
     The group_fn_clauses pass merges consecutive same-name clauses. *)
@@ -145,6 +168,99 @@ actor_handler:
   | ON; msg = upper_name; LPAREN; params = separated_list(COMMA, param); RPAREN;
     DO; body = block_body; END
     { { ah_msg = msg; ah_params = params; ah_body = body } }
+
+(** Nested module: mod Name do ... end *)
+mod_decl:
+  | MOD; name = upper_name; DO; decls = list(decl); END
+    { DMod (name, Private, group_fn_clauses decls, mk_span ($loc)) }
+  | PUB; MOD; name = upper_name; DO; decls = list(decl); END
+    { DMod (name, Public, group_fn_clauses decls, mk_span ($loc)) }
+
+(** Import declaration: use Mod.* or use Mod.{f, g} or use Mod
+    Single-level module paths to avoid shift/reduce conflicts with DOT. *)
+use_decl:
+  | USE; name = upper_name; DOT; sel = use_selector
+    { DUse ({ use_path = [name]; use_sel = sel }, mk_span ($loc)) }
+  | USE; name = upper_name
+    { DUse ({ use_path = [name]; use_sel = UseSingle }, mk_span ($loc)) }
+
+use_selector:
+  | STAR
+    { UseAll }
+  | LBRACE; names = separated_list(COMMA, lower_name); RBRACE
+    { UseNames names }
+
+(** Interface (typeclass) definition: interface Eq(a) do fn eq: a -> a -> Bool end *)
+interface_decl:
+  | INTERFACE; name = upper_name; LPAREN; param = lower_name; RPAREN; DO;
+    methods = list(method_sig); END
+    { DInterface ({
+        iface_name = name;
+        iface_param = param;
+        iface_superclasses = [];
+        iface_assoc_types = [];
+        iface_methods = methods;
+      }, mk_span ($loc)) }
+
+method_sig:
+  | FN; name = lower_name; COLON; t = ty;
+    default = option(preceded_by_do_end(expr))
+    { { md_name = name; md_ty = t; md_default = default } }
+
+%inline preceded_by_do_end(X):
+  | DO; x = X; END { x }
+
+(** Interface implementation: impl Eq(Int) do fn eq(x, y) do x == y end end *)
+impl_decl:
+  | IMPL; iface = upper_name; LPAREN; t = ty; RPAREN;
+    constraints = loption(preceded(WHEN, separated_nonempty_list(COMMA, constraint_expr)));
+    DO; methods = list(fn_decl); END
+    { DImpl ({
+        impl_iface = iface;
+        impl_ty = t;
+        impl_constraints = constraints;
+        impl_assoc_types = [];
+        impl_methods =
+          List.filter_map (function
+            | DFn (def, _) -> Some (def.fn_name, def)
+            | _ -> None) methods;
+      }, mk_span ($loc)) }
+
+constraint_expr:
+  | name = upper_name; LPAREN; t = ty; RPAREN { (name, [t]) }
+
+(** Module signature: sig Collections do fn insert: Int -> List -> Int end *)
+sig_decl:
+  | SIG; name = upper_name; DO; items = list(sig_item); END
+    { let types = List.filter_map fst items in
+      let fns   = List.filter_map snd items in
+      DSig (name, { sig_types = types; sig_fns = fns }, mk_span ($loc)) }
+
+(* Each sig_item returns (type_entry option, fn_entry option) *)
+sig_item:
+  | TYPE; name = upper_name; params = list(lower_name)
+    { (Some (name, params), None) }
+  | FN; name = lower_name; COLON; t = ty
+    { (None, Some (name, t)) }
+
+(** FFI extern block: extern "libc": Cap(LibC) do fn malloc(n: Int): Int end *)
+extern_decl:
+  | EXTERN; lib = STRING; COLON; cap = ty; DO;
+    fns = list(extern_fn_decl); END
+    { DExtern ({
+        ext_lib_name = lib;
+        ext_cap_ty = cap;
+        ext_fns = fns;
+      }, mk_span ($loc)) }
+
+extern_fn_decl:
+  | FN; name = lower_name;
+    LPAREN; params = separated_list(COMMA, typed_param); RPAREN;
+    COLON; ret = ty
+    { { ef_name = name; ef_params = params; ef_ret_ty = ret } }
+
+typed_param:
+  | name = lower_name; COLON; t = ty { (name, t) }
 
 (* ---- Types ---- *)
 
@@ -248,15 +364,19 @@ expr_cmp:
   | e = expr_add { e }
 
 expr_add:
-  | a = expr_add; PLUS; b = expr_mul { EApp (EVar (mk_name "+" $loc), [a; b], mk_span ($loc)) }
-  | a = expr_add; MINUS; b = expr_mul { EApp (EVar (mk_name "-" $loc), [a; b], mk_span ($loc)) }
+  | a = expr_add; PLUS;     b = expr_mul { EApp (EVar (mk_name "+"  $loc), [a; b], mk_span ($loc)) }
+  | a = expr_add; MINUS;    b = expr_mul { EApp (EVar (mk_name "-"  $loc), [a; b], mk_span ($loc)) }
   | a = expr_add; PLUSPLUS; b = expr_mul { EApp (EVar (mk_name "++" $loc), [a; b], mk_span ($loc)) }
+  | a = expr_add; PLUSDOT;  b = expr_mul { EApp (EVar (mk_name "+." $loc), [a; b], mk_span ($loc)) }
+  | a = expr_add; MINUSDOT; b = expr_mul { EApp (EVar (mk_name "-." $loc), [a; b], mk_span ($loc)) }
   | e = expr_mul { e }
 
 expr_mul:
-  | a = expr_mul; STAR;    b = expr_unary { EApp (EVar (mk_name "*"   $loc), [a; b], mk_span ($loc)) }
-  | a = expr_mul; SLASH;   b = expr_unary { EApp (EVar (mk_name "/"   $loc), [a; b], mk_span ($loc)) }
-  | a = expr_mul; PERCENT; b = expr_unary { EApp (EVar (mk_name "%"   $loc), [a; b], mk_span ($loc)) }
+  | a = expr_mul; STAR;     b = expr_unary { EApp (EVar (mk_name "*"  $loc), [a; b], mk_span ($loc)) }
+  | a = expr_mul; SLASH;    b = expr_unary { EApp (EVar (mk_name "/"  $loc), [a; b], mk_span ($loc)) }
+  | a = expr_mul; PERCENT;  b = expr_unary { EApp (EVar (mk_name "%"  $loc), [a; b], mk_span ($loc)) }
+  | a = expr_mul; STARDOT;  b = expr_unary { EApp (EVar (mk_name "*." $loc), [a; b], mk_span ($loc)) }
+  | a = expr_mul; SLASHDOT; b = expr_unary { EApp (EVar (mk_name "/." $loc), [a; b], mk_span ($loc)) }
   | e = expr_unary { e }
 
 (** Unary operators: -expr, !expr *)
@@ -286,6 +406,10 @@ expr_atom:
   | n = INT { ELit (LitInt n, mk_span ($loc)) }
   | f = FLOAT { ELit (LitFloat f, mk_span ($loc)) }
   | s = STRING { ELit (LitString s, mk_span ($loc)) }
+  (* String interpolation: "hello ${name}!" *)
+  | prefix = INTERP_START; parts = interp_parts
+    { let sp = mk_span ($loc) in
+      desugar_interp (ELit (LitString prefix, sp)) parts sp }
   | b = BOOL { ELit (LitBool b, mk_span ($loc)) }
   | a = ATOM; LPAREN; args = separated_list(COMMA, expr); RPAREN
     { EAtom (a, args, mk_span ($loc)) }
@@ -325,6 +449,11 @@ expr_atom:
 
 record_field_expr:
   | name = lower_name; EQUALS; e = expr { (name, e) }
+
+(** Interpolation parts after the opening INTERP_START. *)
+interp_parts:
+  | e = expr; suffix = INTERP_END         { [(e, suffix)] }
+  | e = expr; mid = INTERP_MID; rest = interp_parts { (e, mid) :: rest }
 
 branch:
   | p = pattern; guard = option(when_guard); ARROW; e = block_body

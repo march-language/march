@@ -332,7 +332,7 @@ let lower_module (m : Ast.module_) : Tir.tir_module =
       | Ast.DLet _ -> ()
       | Ast.DActor _ -> ()
       | Ast.DMod _ | Ast.DProtocol _ | Ast.DSig _ | Ast.DInterface _
-      | Ast.DImpl _ | Ast.DExtern _ -> ()
+      | Ast.DImpl _ | Ast.DExtern _ | Ast.DUse _ -> ()
     ) m.mod_decls;
   { tm_name = m.mod_name.txt;
     tm_fns = List.rev !fns;
