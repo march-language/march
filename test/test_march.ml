@@ -1703,7 +1703,7 @@ let test_complete_replace_prefix () =
   Alcotest.(check int)    "cur" 3     s'.March_repl.Input.cursor
 
 let test_complete_replace_midword () =
-  (* cursor mid-word: "fo|bar" → replace whole word "foobar" with "baz" *)
+  (* cursor mid-word: "fo|bar" → replace whole word with "foobar" *)
   let s = mk_inp "fobar" 2 in
   let s' = March_repl.Input.complete_replace s "foobar" in
   Alcotest.(check string) "buf" "foobar" s'.March_repl.Input.buffer;
