@@ -1282,7 +1282,7 @@ let test_defun_free_vars () =
   (* After defun, the lifted $lam_apply fn should have n as a param *)
   let lifted = List.filter (fun f ->
     String.length f.March_tir.Tir.fn_name > 6 &&
-    String.sub f.March_tir.Tir.fn_name (String.length f.March_tir.Tir.fn_name - 6) 6 = "_apply"
+    String.sub f.March_tir.Tir.fn_name (String.length f.March_tir.Tir.fn_name - 6) 6 = "$apply"
   ) m.March_tir.Tir.tm_fns in
   Alcotest.(check bool) "lifted apply fn exists" true (List.length lifted >= 1);
   (* The apply fn should have 2 params: captured n + original x *)
@@ -1365,6 +1365,38 @@ let test_defun_zero_capture_closure () =
   (* zero-capture closure has no fields *)
   Alcotest.(check bool) "zero-capture closure has no fields" true
     (List.exists (fun fields -> fields = []) closures)
+
+let test_defun_nested_lambda () =
+  (* fn make_adder(n) = fn x -> x + n produces a nested closure.
+     After defun, the outer lifted fn should have NO ELetRec-lambda nodes. *)
+  let m = defun_module {|mod Test do
+    fn make_adder(n : Int) : (Int -> Int) do
+      fn x -> x + n
+    end
+    fn main() : Int do
+      let add2 = make_adder(2)
+      add2(40)
+    end
+  end|} in
+  let rec has_letrec_lambda = function
+    | March_tir.Tir.ELetRec ([fn], March_tir.Tir.EAtom (March_tir.Tir.AVar ref))
+      when fn.March_tir.Tir.fn_name = ref.March_tir.Tir.v_name -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> has_letrec_lambda e1 || has_letrec_lambda e2
+    | March_tir.Tir.ELetRec (fns, body) ->
+      List.exists (fun f -> has_letrec_lambda f.March_tir.Tir.fn_body) fns
+      || has_letrec_lambda body
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> has_letrec_lambda b.March_tir.Tir.br_body) brs ||
+      (match def with Some e -> has_letrec_lambda e | None -> false)
+    | March_tir.Tir.ESeq (a, b) -> has_letrec_lambda a || has_letrec_lambda b
+    | _ -> false
+  in
+  (* check ALL fns including lifted ones *)
+  List.iter (fun fn ->
+    Alcotest.(check bool)
+      (Printf.sprintf "no lambda ELetRec in %s after defun" fn.March_tir.Tir.fn_name)
+      false (has_letrec_lambda fn.March_tir.Tir.fn_body)
+  ) m.March_tir.Tir.tm_fns
 
 let test_defun_pp_type_def () =
   let td = March_tir.Tir.TDClosure ("Clo_foo", [March_tir.Tir.TInt; March_tir.Tir.TBool]) in
@@ -1499,6 +1531,7 @@ let () =
           Alcotest.test_case "defun no letrec lambda"`Quick test_defun_no_letrec_lambda;
           Alcotest.test_case "defun indirect call"   `Quick test_defun_indirect_call_becomes_ecallptr;
           Alcotest.test_case "defun zero capture"    `Quick test_defun_zero_capture_closure;
+          Alcotest.test_case "defun nested lambda"   `Quick test_defun_nested_lambda;
           Alcotest.test_case "defun pp type_def"     `Quick test_defun_pp_type_def;
         ] );
       ( "constraints",

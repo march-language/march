@@ -159,8 +159,8 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
 let lift_lambda (lam : lambda_info) : Tir.type_def * Tir.fn_def =
   let fn = lam.lam_fn in
   let fvs = lam.lam_fvs in
-  let clo_name = "Clo_" ^ fn.Tir.fn_name in
-  let apply_name = fn.Tir.fn_name ^ "_apply" in
+  let clo_name = "$Clo_" ^ fn.Tir.fn_name in
+  let apply_name = fn.Tir.fn_name ^ "$apply" in
   (* TDClosure struct *)
   let td = Tir.TDClosure (clo_name, List.map snd fvs) in
   (* Lifted function: free-var params ++ original params *)
@@ -191,7 +191,7 @@ let rewrite_expr (known_lambdas : (string * lambda_info) list)
          let fv_atoms = List.map (fun (name, ty) ->
              Tir.AVar { Tir.v_name = name; v_ty = ty; v_lin = Tir.Unr }
            ) lam.lam_fvs in
-         Tir.EAlloc (Tir.TCon ("Clo_" ^ fn.Tir.fn_name, []), fv_atoms)
+         Tir.EAlloc (Tir.TCon ("$Clo_" ^ fn.Tir.fn_name, []), fv_atoms)
        | None ->
          (* Not a known lambda — rewrite children *)
          Tir.ELetRec ([{ fn with Tir.fn_body = rw fn.Tir.fn_body }],
@@ -231,21 +231,19 @@ let defunctionalize (m : Tir.tir_module) : Tir.tir_module =
   let known_lambdas = List.map (fun lam -> (lam.lam_fn.Tir.fn_name, lam)) lambdas in
 
   (* Phase 2: generate closure structs and lifted fns *)
-  let new_types = ref [] in
-  let new_fns = ref [] in
-  List.iter (fun lam ->
-    let (td, apply_fn) = lift_lambda lam in
-    new_types := td :: !new_types;
-    new_fns := apply_fn :: !new_fns
-  ) lambdas;
+  let (new_types, new_fns) = List.split (List.map lift_lambda lambdas) in
 
   (* Phase 3: rewrite all top-level fn bodies *)
   let rewritten_fns = List.map (fun fn ->
       { fn with Tir.fn_body = rewrite_expr known_lambdas top_level fn.Tir.fn_body }
     ) m.Tir.tm_fns in
+  (* Also rewrite lifted apply fns (to handle nested lambdas) *)
+  let rewritten_new_fns = List.map (fun fn ->
+      { fn with Tir.fn_body = rewrite_expr known_lambdas top_level fn.Tir.fn_body }
+    ) new_fns in
 
   {
     m with
-    Tir.tm_fns   = rewritten_fns @ List.rev !new_fns;
-    Tir.tm_types = m.Tir.tm_types @ List.rev !new_types;
+    Tir.tm_fns   = rewritten_fns @ rewritten_new_fns;
+    Tir.tm_types = m.Tir.tm_types @ new_types;
   }
