@@ -4,4 +4,3 @@ _build/
 *.byte
 *.native
 _opam/
-/specs/
