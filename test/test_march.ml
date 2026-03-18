@@ -1688,6 +1688,35 @@ let test_complete_empty_all () =
     true (List.length completions > 0)
 
 (* ------------------------------------------------------------------ *)
+(* complete_replace tests                                              *)
+(* ------------------------------------------------------------------ *)
+
+let mk_inp buf cur = { March_repl.Input.empty with
+  March_repl.Input.buffer = buf;
+  March_repl.Input.cursor = cur }
+
+let test_complete_replace_prefix () =
+  (* cursor at end of prefix "fo", no right side → replace "fo" with "foo" *)
+  let s = mk_inp "fo" 2 in
+  let s' = March_repl.Input.complete_replace s "foo" in
+  Alcotest.(check string) "buf" "foo" s'.March_repl.Input.buffer;
+  Alcotest.(check int)    "cur" 3     s'.March_repl.Input.cursor
+
+let test_complete_replace_midword () =
+  (* cursor mid-word: "fo|bar" → replace whole word "foobar" with "baz" *)
+  let s = mk_inp "fobar" 2 in
+  let s' = March_repl.Input.complete_replace s "foobar" in
+  Alcotest.(check string) "buf" "foobar" s'.March_repl.Input.buffer;
+  Alcotest.(check int)    "cur" 6        s'.March_repl.Input.cursor
+
+let test_complete_replace_with_suffix () =
+  (* context: "x = fo|bar + 1" → replace word "fobar" with "foobar", keep rest *)
+  let s = mk_inp "x = fobar + 1" 7 in
+  let s' = March_repl.Input.complete_replace s "foobar" in
+  Alcotest.(check string) "buf" "x = foobar + 1" s'.March_repl.Input.buffer;
+  Alcotest.(check int)    "cur" 10               s'.March_repl.Input.cursor
+
+(* ------------------------------------------------------------------ *)
 (* list_actors tests                                                   *)
 (* ------------------------------------------------------------------ *)
 
@@ -1933,6 +1962,11 @@ let () =
         Alcotest.test_case "keyword" `Quick test_complete_keyword;
         Alcotest.test_case "in scope" `Quick test_complete_in_scope;
         Alcotest.test_case "empty all" `Quick test_complete_empty_all;
+      ];
+      "complete_replace", [
+        Alcotest.test_case "prefix only"    `Quick test_complete_replace_prefix;
+        Alcotest.test_case "mid word"       `Quick test_complete_replace_midword;
+        Alcotest.test_case "with suffix"    `Quick test_complete_replace_with_suffix;
       ];
       "actors", [
         Alcotest.test_case "empty"  `Quick test_list_actors_empty;

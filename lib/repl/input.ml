@@ -61,6 +61,21 @@ let word_end_right s =
   while !i < len && b.[!i] <> ' ' do incr i done;
   !i
 
+(** Replace the word surrounding the cursor with [completion].
+    Word start: scan left from cursor to first space (or buffer start).
+    Word end: scan right from cursor to first space (or buffer end).
+    No space-skipping — spaces are hard boundaries. *)
+let complete_replace s completion =
+  let b = s.buffer and c = s.cursor in
+  let len = String.length b in
+  let ws = ref c in
+  while !ws > 0 && b.[!ws - 1] <> ' ' do decr ws done;
+  let we = ref c in
+  while !we < len && b.[!we] <> ' ' do incr we done;
+  let new_buf = String.sub b 0 !ws ^ completion ^ String.sub b !we (len - !we) in
+  let new_cur = !ws + String.length completion in
+  { s with buffer = new_buf; cursor = new_cur }
+
 let push_kill s killed =
   let ring = killed :: (if List.length s.kill_ring >= 8
                         then List.filteri (fun i _ -> i < 7) s.kill_ring
