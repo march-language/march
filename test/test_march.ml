@@ -1687,6 +1687,54 @@ let test_complete_empty_all () =
   Alcotest.(check bool) "empty prefix returns at least one keyword"
     true (List.length completions > 0)
 
+(* ------------------------------------------------------------------ *)
+(* list_actors tests                                                   *)
+(* ------------------------------------------------------------------ *)
+
+let dummy_actor_def = March_ast.Ast.{
+  actor_state    = [];
+  actor_init     = ELit (LitInt 0, dummy_span);
+  actor_handlers = [];
+}
+
+let mk_actor_inst name alive st = March_eval.Eval.{
+  ai_name    = name;
+  ai_def     = dummy_actor_def;
+  ai_env_ref = ref [];
+  ai_state   = st;
+  ai_alive   = alive;
+}
+
+let test_list_actors_empty () =
+  Hashtbl.clear March_eval.Eval.actor_registry;
+  Alcotest.(check int) "empty registry" 0
+    (List.length (March_eval.Eval.list_actors ()))
+
+let test_list_actors_alive () =
+  Hashtbl.clear March_eval.Eval.actor_registry;
+  Hashtbl.add March_eval.Eval.actor_registry 0
+    (mk_actor_inst "Counter" true (March_eval.Eval.VInt 5));
+  let actors = March_eval.Eval.list_actors () in
+  Alcotest.(check int) "one actor" 1 (List.length actors);
+  let a = List.hd actors in
+  Alcotest.(check int)    "pid"   0     a.March_eval.Eval.ai_pid;
+  Alcotest.(check string) "name"  "Counter" a.March_eval.Eval.ai_name;
+  Alcotest.(check bool)   "alive" true  a.March_eval.Eval.ai_alive;
+  Alcotest.(check string) "state" "5"   a.March_eval.Eval.ai_state_str
+
+let test_list_actors_sorted () =
+  Hashtbl.clear March_eval.Eval.actor_registry;
+  Hashtbl.add March_eval.Eval.actor_registry 2
+    (mk_actor_inst "A" true (March_eval.Eval.VInt 0));
+  Hashtbl.add March_eval.Eval.actor_registry 0
+    (mk_actor_inst "B" false (March_eval.Eval.VUnit));
+  let actors = March_eval.Eval.list_actors () in
+  Alcotest.(check int) "two actors" 2 (List.length actors);
+  Alcotest.(check int) "sorted first pid" 0
+    (List.nth actors 0).March_eval.Eval.ai_pid;
+  Alcotest.(check int) "sorted second pid" 2
+    (List.nth actors 1).March_eval.Eval.ai_pid
+
 let () =
   Alcotest.run "march"
     [
@@ -1885,5 +1933,10 @@ let () =
         Alcotest.test_case "keyword" `Quick test_complete_keyword;
         Alcotest.test_case "in scope" `Quick test_complete_in_scope;
         Alcotest.test_case "empty all" `Quick test_complete_empty_all;
+      ];
+      "actors", [
+        Alcotest.test_case "empty"  `Quick test_list_actors_empty;
+        Alcotest.test_case "alive"  `Quick test_list_actors_alive;
+        Alcotest.test_case "sorted" `Quick test_list_actors_sorted;
       ];
     ]

@@ -40,6 +40,7 @@ and env = (string * value) list
 (* ------------------------------------------------------------------ *)
 
 type actor_inst = {
+  ai_name    : string;           (** Actor type name, e.g. "Counter" *)
   ai_def     : actor_def;
   ai_env_ref : env ref;         (** Module environment at spawn time *)
   mutable ai_state : value;
@@ -196,6 +197,24 @@ let value_display v =
   match v with
   | VString s -> s
   | _         -> value_to_string v
+
+type actor_info = {
+  ai_pid       : int;
+  ai_name      : string;
+  ai_alive     : bool;
+  ai_state_str : string;
+  (** Distinct from actor_inst.ai_state which is a [value]. *)
+}
+
+let list_actors () =
+  Hashtbl.fold (fun pid (inst : actor_inst) acc ->
+    { ai_pid       = pid;
+      ai_name      = inst.ai_name;
+      ai_alive     = inst.ai_alive;
+      ai_state_str = value_to_string inst.ai_state }
+    :: acc
+  ) actor_registry []
+  |> List.sort (fun a b -> compare a.ai_pid b.ai_pid)
 
 let base_env : env =
   [ (* Integer arithmetic *)
@@ -472,7 +491,7 @@ and eval_expr (env : env) (e : expr) : value =
        let init_state = eval_expr !env_ref def.actor_init in
        let pid = !next_pid in
        next_pid := pid + 1;
-       let inst = { ai_def = def; ai_env_ref = env_ref;
+       let inst = { ai_name = actor_name; ai_def = def; ai_env_ref = env_ref;
                     ai_state = init_state; ai_alive = true } in
        Hashtbl.add actor_registry pid inst;
        VPid pid)
