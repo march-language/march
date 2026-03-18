@@ -47,7 +47,7 @@ let read_repl_input () =
   let first_line = ref true in
   let result     = ref None in
   while !result = None do
-    if !first_line then Printf.printf "march> %!";
+    Printf.printf "%s%!" (if !first_line then "march> " else ".. ");
     first_line := false;
     (match (try Some (input_line stdin) with End_of_file -> None) with
      | None ->
@@ -239,6 +239,7 @@ let compile filename =
     let tir = March_tir.Mono.monomorphize tir in
     let tir = March_tir.Defun.defunctionalize tir in
     let tir = March_tir.Perceus.perceus tir in
+    let tir = March_tir.Escape.escape_analysis tir in
     List.iter (fun td ->
         Printf.printf "%s\n\n" (March_tir.Pp.string_of_type_def td)
       ) tir.tm_types;
