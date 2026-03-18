@@ -1,0 +1,112 @@
+-- Two supervised actors passing messages back and forth.
+-- Demonstrates: spawn, send, kill, drop semantics, restart.
+-- Run: march examples/actors.march
+
+mod ActorDemo do
+
+-- ─── Counter actor ──────────────────────────────────────────────────────────
+-- Holds an integer value.  Supports Increment, Decrement, Reset, and Ping.
+-- Handlers return the new state record.
+
+actor Counter do
+  state { value : Int }
+  init { value = 0 }
+
+  on Increment(n : Int) do
+    { state with value = state.value + n }
+  end
+
+  on Decrement(n : Int) do
+    { state with value = state.value - n }
+  end
+
+  on Reset() do
+    { state with value = 0 }
+  end
+
+  on Ping(label : String) do
+    println("[Counter] ping from " ++ label ++ ", value = " ++ int_to_string(state.value))
+    state
+  end
+end
+
+-- ─── Logger actor ───────────────────────────────────────────────────────────
+-- Logs every message it receives and tracks a running count.
+
+actor Logger do
+  state { count : Int }
+  init { count = 0 }
+
+  on Log(msg : String) do
+    let n = state.count + 1
+    println("[LOG #" ++ int_to_string(n) ++ "] " ++ msg)
+    { state with count = n }
+  end
+
+  on Stats() do
+    println("[Logger] total messages logged: " ++ int_to_string(state.count))
+    state
+  end
+end
+
+-- ─── Supervisor helper ──────────────────────────────────────────────────────
+-- safe_send wraps every send and prints a notice when a message is dropped
+-- because the target actor is dead.
+
+fn safe_send(pid, msg, desc : String) : Unit do
+  let result = send(pid, msg)
+  match result with
+  | None    -> println("  !! DROP: " ++ desc ++ " — actor is dead")
+  | Some(_) -> ()
+  end
+end
+
+-- ─── Main ───────────────────────────────────────────────────────────────────
+
+fn main() : Unit do
+  println("=== Spawning actors ===")
+  let counter = spawn(Counter)
+  let logger  = spawn(Logger)
+  println("counter alive: " ++ bool_to_string(is_alive(counter)))
+  println("logger  alive: " ++ bool_to_string(is_alive(logger)))
+  println("")
+
+  println("=== Normal operation: counter ↔ logger ===")
+  safe_send(counter, Increment(10), "Increment(10)")
+  safe_send(logger,  Log("counter incremented by 10"), "Log")
+  safe_send(counter, Increment(5),  "Increment(5)")
+  safe_send(logger,  Log("counter incremented by 5"),  "Log")
+  safe_send(counter, Ping("logger"), "Ping")
+  safe_send(logger,  Stats(), "Stats")
+  println("")
+
+  println("=== Killing the logger ===")
+  kill(logger)
+  println("logger  alive: " ++ bool_to_string(is_alive(logger)))
+  println("")
+
+  println("=== Drop semantics: messages to dead logger ===")
+  safe_send(logger, Log("this will be dropped"),    "Log after kill")
+  safe_send(logger, Log("so will this one"),        "Log after kill")
+  safe_send(logger, Stats(), "Stats after kill")
+  println("")
+
+  println("=== Counter is still alive ===")
+  safe_send(counter, Decrement(3), "Decrement(3)")
+  safe_send(counter, Ping("supervisor"), "Ping")
+  safe_send(counter, Reset(), "Reset")
+  safe_send(counter, Ping("supervisor"), "Ping after reset")
+  println("")
+
+  println("=== Restarting the logger (spawn a fresh one) ===")
+  let logger2 = spawn(Logger)
+  println("logger2 alive: " ++ bool_to_string(is_alive(logger2)))
+  safe_send(logger2, Log("fresh logger is up"), "Log to logger2")
+  safe_send(logger2, Log("drop semantics apply only to killed actors"), "Log to logger2")
+  safe_send(logger2, Stats(), "Stats from logger2")
+  println("")
+
+  println("=== Done ===")
+end
+
+end
