@@ -78,60 +78,105 @@ let read_repl_input () =
 (* REPL                                                                *)
 (* ------------------------------------------------------------------ *)
 
+(** Print a diagnostic in REPL style (no file/line prefix — interactive context). *)
+let print_repl_diag (d : March_errors.Errors.diagnostic) =
+  let sev = match d.severity with
+    | March_errors.Errors.Error   -> "error"
+    | March_errors.Errors.Warning -> "warning"
+    | March_errors.Errors.Hint    -> "hint"
+  in
+  Printf.eprintf "%s: %s\n%!" sev d.message;
+  List.iter (fun note ->
+      Printf.eprintf "note: %s\n%!" note
+    ) d.notes
+
 let repl () =
   Printf.printf "March REPL — :quit to exit, :env to list bindings\n%!";
   let env = ref March_eval.Eval.base_env in
+  let type_map = Hashtbl.create 64 in
+  (* base_env (typecheck.ml) pre-populates built-in types, ctors,
+     and vars (Int, String, Bool, println, etc.) — unlike bare make_env. *)
+  let tc_env = ref
+    (March_typecheck.Typecheck.base_env
+       (March_errors.Errors.create ()) type_map) in
   let running = ref true in
   while !running do
-    match read_repl_input () with
-    | None -> running := false
-    | Some ":quit" | Some ":q" -> running := false
-    | Some ":env" ->
-      List.iter (fun (k, _) -> Printf.printf "  %s\n" k) !env
-    | Some src when String.trim src = "" -> ()
-    | Some src ->
-      let lexbuf = Lexing.from_string src in
-      (match
-         (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
-          with March_parser.Parser.Error ->
-            let pos = Lexing.lexeme_start_p lexbuf in
-            Printf.eprintf "parse error at col %d\n%!"
-              (pos.Lexing.pos_cnum - pos.Lexing.pos_bol);
-            None)
-       with
-       | None -> ()
-       | Some March_ast.Ast.ReplEOF -> ()
-       | Some (March_ast.Ast.ReplDecl d) ->
-         let d' = March_desugar.Desugar.desugar_decl d in
-         (try
-            env := March_eval.Eval.eval_decl !env d';
-            (* Print the name(s) that were just bound *)
-            (match d' with
-             | March_ast.Ast.DFn (def, _) ->
-               Printf.printf "val %s = <fn>\n%!" def.fn_name.txt
-             | March_ast.Ast.DLet (b, _) ->
-               (match b.bind_pat with
-                | March_ast.Ast.PatVar n ->
-                  let v = List.assoc n.txt !env in
-                  Printf.printf "val %s = %s\n%!" n.txt
-                    (March_eval.Eval.value_to_string v)
-                | _ -> Printf.printf "val _ = ...\n%!")
-             | _ -> ())
-          with
-          | March_eval.Eval.Eval_error msg ->
-            Printf.eprintf "runtime error: %s\n%!" msg
-          | March_eval.Eval.Match_failure msg ->
-            Printf.eprintf "match failure: %s\n%!" msg)
-       | Some (March_ast.Ast.ReplExpr e) ->
-         let e' = March_desugar.Desugar.desugar_expr e in
-         (try
-            let v = March_eval.Eval.eval_expr !env e' in
-            Printf.printf "= %s\n%!" (March_eval.Eval.value_to_string v)
-          with
-          | March_eval.Eval.Eval_error msg ->
-            Printf.eprintf "runtime error: %s\n%!" msg
-          | March_eval.Eval.Match_failure msg ->
-            Printf.eprintf "match failure: %s\n%!" msg))
+    (try
+       (match read_repl_input () with
+        | None -> running := false
+        | Some ":quit" | Some ":q" -> running := false
+        | Some ":env" ->
+          List.iter (fun (k, _) -> Printf.printf "  %s\n" k) !env
+        | Some src when String.trim src = "" -> ()
+        | Some src ->
+          let lexbuf = Lexing.from_string src in
+          (match
+             (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+              with March_parser.Parser.Error ->
+                let pos = Lexing.lexeme_start_p lexbuf in
+                Printf.eprintf "parse error at col %d\n%!"
+                  (pos.Lexing.pos_cnum - pos.Lexing.pos_bol);
+                None)
+           with
+           | None -> ()
+           | Some March_ast.Ast.ReplEOF -> ()
+           | Some (March_ast.Ast.ReplDecl d) ->
+             let d' = March_desugar.Desugar.desugar_decl d in
+             let input_ctx = March_errors.Errors.create () in
+             let input_tc  = { !tc_env with errors = input_ctx } in
+             let new_tc    = March_typecheck.Typecheck.check_decl input_tc d' in
+             List.iter print_repl_diag (March_errors.Errors.sorted input_ctx);
+             if not (March_errors.Errors.has_errors input_ctx) then begin
+               tc_env := { new_tc with errors = March_errors.Errors.create () };
+               (try
+                  env := March_eval.Eval.eval_decl !env d';
+                  (* Print the name(s) that were just bound *)
+                  (match d' with
+                   | March_ast.Ast.DFn (def, _) ->
+                     Printf.printf "val %s = <fn>\n%!" def.fn_name.txt
+                   | March_ast.Ast.DLet (b, _) ->
+                     (match b.bind_pat with
+                      | March_ast.Ast.PatVar n ->
+                        let v = List.assoc n.txt !env in
+                        Printf.printf "val %s = %s\n%!" n.txt
+                          (March_eval.Eval.value_to_string v)
+                      | _ -> Printf.printf "val _ = ...\n%!")
+                   | _ -> ())
+                with
+                | March_eval.Eval.Eval_error msg ->
+                  Printf.eprintf "runtime error: %s\n%!" msg
+                | March_eval.Eval.Match_failure msg ->
+                  Printf.eprintf "match failure: %s\n%!" msg)
+             end
+           | Some (March_ast.Ast.ReplExpr e) ->
+             let e' = March_desugar.Desugar.desugar_expr e in
+             let input_ctx = March_errors.Errors.create () in
+             let input_tc  = { !tc_env with errors = input_ctx } in
+             let inferred  = March_typecheck.Typecheck.infer_expr input_tc e' in
+             let ty_str    = March_typecheck.Typecheck.pp_ty
+               (March_typecheck.Typecheck.repr inferred) in
+             List.iter print_repl_diag (March_errors.Errors.sorted input_ctx);
+             if March_errors.Errors.has_errors input_ctx then
+               Printf.eprintf "note: inferred type was %s\n%!" ty_str
+             else begin
+               (try
+                  let v = March_eval.Eval.eval_expr !env e' in
+                  Printf.printf "= %s\n%!" (March_eval.Eval.value_to_string v)
+                with
+                | March_eval.Eval.Eval_error msg ->
+                  Printf.eprintf "runtime error: %s\n%!" msg
+                | March_eval.Eval.Match_failure msg ->
+                  Printf.eprintf "match failure: %s\n%!" msg)
+             end))
+     with
+     | March_lexer.Lexer.Lexer_error msg ->
+       Printf.eprintf "lexer error: %s\n%!" msg
+     | March_eval.Eval.Eval_error msg ->
+       Printf.eprintf "runtime error: %s\n%!" msg
+     | March_eval.Eval.Match_failure msg ->
+       Printf.eprintf "match failure: %s\n%!" msg
+     | exn ->
+       Printf.eprintf "internal error: %s\n%!" (Printexc.to_string exn))
   done
 
 (* ------------------------------------------------------------------ *)
