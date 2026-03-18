@@ -7,8 +7,9 @@ open Notty
 type comp_state = CompOff | CompOn of { items: string list; sel: int }
 
 (** Build the input line image with a block cursor at position [cur].
-    Uses plain text rendering (no syntax highlight) so the cursor character
-    is always correct. *)
+    Uses plain text rendering (no syntax highlight). [cur] and the buffer
+    are both byte-based (ASCII), so cursor placement is correct for ASCII
+    input; multi-byte UTF-8 characters may show a garbled cursor glyph. *)
 let make_input_img s cur =
   let n = String.length s in
   let left  = String.sub s 0 cur in
@@ -488,6 +489,7 @@ let run_tui () =
             comp := CompOn { items; sel = (sel - 1 + n) mod n };
             render_frame ()
           | (`Enter, _) ->
+            (* sel is always in [0, n) by the mod arithmetic in Tab/Up/Down *)
             let chosen = List.nth items sel in
             inp := Input.complete_replace !inp chosen;
             comp := CompOff;
