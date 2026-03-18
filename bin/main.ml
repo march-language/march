@@ -47,7 +47,7 @@ let read_repl_input () =
   let first_line = ref true in
   let result     = ref None in
   while !result = None do
-    Printf.printf "%s%!" (if !first_line then "march> " else "     | ");
+    if !first_line then Printf.printf "march> %!";
     first_line := false;
     (match (try Some (input_line stdin) with End_of_file -> None) with
      | None ->

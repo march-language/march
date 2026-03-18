@@ -58,7 +58,8 @@ let rec subst_expr (s : ty_subst) : Tir.expr -> Tir.expr = function
   | Tir.EField (a, n)     -> Tir.EField (subst_atom s a, n)
   | Tir.EUpdate (a, fs)   ->
     Tir.EUpdate (subst_atom s a, List.map (fun (n, a) -> (n, subst_atom s a)) fs)
-  | Tir.EAlloc (ty, args) -> Tir.EAlloc (subst_ty s ty, List.map (subst_atom s) args)
+  | Tir.EAlloc (ty, args)      -> Tir.EAlloc (subst_ty s ty, List.map (subst_atom s) args)
+  | Tir.EStackAlloc (ty, args) -> Tir.EStackAlloc (subst_ty s ty, List.map (subst_atom s) args)
   | Tir.EFree a           -> Tir.EFree (subst_atom s a)
   | Tir.EIncRC a          -> Tir.EIncRC (subst_atom s a)
   | Tir.EDecRC a          -> Tir.EDecRC (subst_atom s a)

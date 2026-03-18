@@ -97,7 +97,7 @@ let free_vars_of_expr (top_level : StringSet.t) (body : Tir.expr) (params : Tir.
     | Tir.EUpdate (a, fields) ->
       fv_atom a bound;
       List.iter (fun (_, a) -> fv_atom a bound) fields
-    | Tir.EAlloc (_, args) ->
+    | Tir.EAlloc (_, args) | Tir.EStackAlloc (_, args) ->
       List.iter (fun a -> fv_atom a bound) args
     | Tir.EFree a -> fv_atom a bound
     | Tir.EIncRC a -> fv_atom a bound
