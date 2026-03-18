@@ -1630,6 +1630,40 @@ let test_perceus_preserves_fn_count () =
   Alcotest.(check int) "perceus preserves fn count" 2
     (List.length m.March_tir.Tir.tm_fns)
 
+(* --- multiline tests --- *)
+
+let test_multiline_depth_zero () =
+  Alcotest.(check int) "single expression has depth 0"
+    0 (March_repl.Multiline.do_end_depth "x + 1")
+
+let test_multiline_depth_open () =
+  Alcotest.(check int) "open do block has depth 1"
+    1 (March_repl.Multiline.do_end_depth "fn foo() do\n  x + 1")
+
+let test_multiline_depth_closed () =
+  Alcotest.(check int) "closed do block has depth 0"
+    0 (March_repl.Multiline.do_end_depth "fn foo() do\n  x + 1\nend")
+
+let test_multiline_ends_with_with () =
+  Alcotest.(check bool) "match opener ends with with"
+    true (March_repl.Multiline.ends_with_with "match x with")
+
+let test_multiline_not_ends_with_with () =
+  Alcotest.(check bool) "record update does not trigger with heuristic"
+    false (March_repl.Multiline.ends_with_with "let y = { x with foo = 1 }")
+
+let test_multiline_starts_with_pipe () =
+  Alcotest.(check bool) "match arm starts with pipe"
+    true (March_repl.Multiline.starts_with_pipe "| Some(x) -> x")
+
+let test_multiline_is_complete_simple () =
+  Alcotest.(check bool) "simple expression is complete"
+    true (March_repl.Multiline.is_complete "x + 1")
+
+let test_multiline_is_complete_open_block () =
+  Alcotest.(check bool) "open block is not complete"
+    false (March_repl.Multiline.is_complete "fn foo() do\n  x")
+
 let () =
   Alcotest.run "march"
     [
@@ -1813,4 +1847,14 @@ let () =
           Alcotest.test_case "needs_rc TCon/TInt"        `Quick test_perceus_needs_rc_tcon;
           Alcotest.test_case "preserves fn count"        `Quick test_perceus_preserves_fn_count;
         ] );
+      "multiline", [
+        Alcotest.test_case "depth zero" `Quick test_multiline_depth_zero;
+        Alcotest.test_case "depth open" `Quick test_multiline_depth_open;
+        Alcotest.test_case "depth closed" `Quick test_multiline_depth_closed;
+        Alcotest.test_case "ends with with" `Quick test_multiline_ends_with_with;
+        Alcotest.test_case "not ends with with" `Quick test_multiline_not_ends_with_with;
+        Alcotest.test_case "starts with pipe" `Quick test_multiline_starts_with_pipe;
+        Alcotest.test_case "is_complete simple" `Quick test_multiline_is_complete_simple;
+        Alcotest.test_case "is_complete open block" `Quick test_multiline_is_complete_open_block;
+      ];
     ]
