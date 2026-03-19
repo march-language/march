@@ -3,7 +3,7 @@
 -- threshold, then fall back to sequential sum.
 --
 -- What this tests:
---   - spawn_task / await_all call overhead
+--   - task_spawn / task_await_unwrap call overhead
 --   - FBIP + parallelism interaction (each task holds an independent RC chain,
 --     so nodes in sibling subtrees never alias — in-place reuse is safe on both
 --     sides simultaneously with no synchronisation)
@@ -12,9 +12,9 @@
 --
 -- Expected output: 16777216
 --
--- Status: REQUIRES spawn_task / await_all / Task(a) — not yet implemented.
---         This file documents the target benchmark; it will not compile until
---         Task support lands.
+-- Status: REQUIRES true parallelism (OCaml 5 Domains) — not yet implemented.
+--         The task builtins exist but execute eagerly in Phase 1.
+--         This file documents the target benchmark.
 --
 -- Usage (future):
 --   march --compile bench/parallel.march -o bench/parallel
@@ -45,9 +45,10 @@ fn par_sum(t : Tree, depth : Int, threshold : Int) : Int do
   | Node(l, r) ->
     if depth >= threshold then sum(l) + sum(r)
     else
-      let tl       = spawn_task(fn -> par_sum(l, depth + 1, threshold))
-      let tr       = spawn_task(fn -> par_sum(r, depth + 1, threshold))
-      let (rl, rr) = await_all(tl, tr)
+      let tl = task_spawn(fn () -> par_sum(l, depth + 1, threshold))
+      let tr = task_spawn(fn () -> par_sum(r, depth + 1, threshold))
+      let rl = task_await_unwrap(tl)
+      let rr = task_await_unwrap(tr)
       rl + rr
   end
 end

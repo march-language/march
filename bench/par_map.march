@@ -1,0 +1,92 @@
+-- Parallel map benchmark (embarrassingly parallel).
+-- Splits a list into chunks and maps an expensive function over each chunk
+-- in a separate task, then concatenates results.
+--
+-- The mapped function (collatz_steps) is pure and independent per element —
+-- no communication between tasks. This is the "map-reduce without reduce"
+-- pattern: embarrassingly parallel with a trivial gather step.
+--
+-- What this tests:
+--   - task_spawn with closure captures (each task captures a list chunk)
+--   - Independent task execution with no shared state
+--   - Task overhead vs sequential map
+--   - List allocation under task boundaries
+--
+-- Expected output: 2660024  (sum of Collatz step counts for 1..100000)
+--
+-- Status: REQUIRES true parallelism (OCaml 5 Domains) for speedup.
+--         Phase 1 executes eagerly — measures task overhead only.
+--
+-- Usage (future):
+--   march --compile bench/par_map.march -o bench/par_map
+--   bench/par_map
+
+mod ParMap do
+
+-- Collatz conjecture step count: a pure, variable-cost function.
+-- Perfect for embarrassingly parallel workloads because each element
+-- is independent and the work per element varies widely.
+fn collatz_steps(n : Int, acc : Int) : Int do
+  if n == 1 then acc
+  else if n % 2 == 0 then collatz_steps(n / 2, acc + 1)
+  else collatz_steps(3 * n + 1, acc + 1)
+end
+
+-- Build a range as a list (tail-recursive with accumulator).
+fn range_acc(lo : Int, hi : Int, acc : List(Int)) : List(Int) do
+  if lo > hi then acc
+  else range_acc(lo, hi - 1, Cons(hi, acc))
+end
+
+fn range(lo : Int, hi : Int) : List(Int) do
+  range_acc(lo, hi, Nil)
+end
+
+-- Sum a list of integers.
+fn sum(xs : List(Int), acc : Int) : Int do
+  match xs with
+  | Nil -> acc
+  | Cons(x, rest) -> sum(rest, acc + x)
+  end
+end
+
+-- Map collatz_steps over a list, collecting step counts.
+fn map_collatz(xs : List(Int), acc : List(Int)) : List(Int) do
+  match xs with
+  | Nil -> acc
+  | Cons(x, rest) -> map_collatz(rest, Cons(collatz_steps(x, 0), acc))
+  end
+end
+
+-- Split a list into a chunk of size n and the remainder.
+fn take_drop(xs : List(Int), n : Int, acc : List(Int)) : (List(Int), List(Int)) do
+  if n == 0 then (acc, xs)
+  else match xs with
+    | Nil -> (acc, Nil)
+    | Cons(x, rest) -> take_drop(rest, n - 1, Cons(x, acc))
+    end
+end
+
+-- Spawn a task per chunk, await all, sum results.
+fn par_map_sum(xs : List(Int), chunk_size : Int) : Int do
+  match xs with
+  | Nil -> 0
+  | _ ->
+    let (chunk, rest) = take_drop(xs, chunk_size, Nil)
+    let t = task_spawn(fn () -> sum(map_collatz(chunk, Nil), 0))
+    let rest_sum = par_map_sum(rest, chunk_size)
+    let chunk_sum = task_await_unwrap(t)
+    chunk_sum + rest_sum
+  end
+end
+
+fn main() : Unit do
+  -- 100K elements, 1000 per chunk = 100 tasks
+  let n = 100000
+  let chunk_size = 1000
+  let xs = range(1, n)
+  let total = par_map_sum(xs, chunk_size)
+  println(int_to_string(total))
+end
+
+end

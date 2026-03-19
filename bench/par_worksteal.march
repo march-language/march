@@ -1,0 +1,48 @@
+-- Parallel work-stealing benchmark (embarrassingly parallel).
+-- Same as par_fib but uses task_spawn_steal with Cap(WorkPool) to exercise
+-- the work-stealing tier instead of the cooperative tier.
+--
+-- This demonstrates the two-tier scheduler: tasks explicitly opt in to the
+-- work-stealing pool via an unforgeable Cap(WorkPool) threaded from main().
+--
+-- What this tests:
+--   - task_spawn_steal with Cap(WorkPool) capability
+--   - Work-stealing deque submit/steal operations
+--   - Capability threading (pool passed through function signatures)
+--   - Tier 2 (work-stealing) vs Tier 1 (cooperative) task creation overhead
+--
+-- Expected output: 102334155  (fib(40))
+--
+-- Status: REQUIRES true parallelism (OCaml 5 Domains) for speedup.
+--         Phase 1 executes eagerly — measures task overhead only.
+--
+-- Usage (future):
+--   march --compile bench/par_worksteal.march -o bench/par_worksteal
+--   bench/par_worksteal
+
+mod ParWorkSteal do
+
+fn fib(n : Int) : Int do
+  if n < 2 then n
+  else fib(n - 1) + fib(n - 2)
+end
+
+-- Work-stealing parallel fib: pool capability threaded explicitly.
+fn par_fib(pool : WorkPool, n : Int, threshold : Int) : Int do
+  if n < 2 then n
+  else if n <= threshold then fib(n)
+  else
+    let t1 = task_spawn_steal(pool, fn () -> par_fib(pool, n - 1, threshold))
+    let t2 = task_spawn_steal(pool, fn () -> par_fib(pool, n - 2, threshold))
+    let r1 = task_await_unwrap(t1)
+    let r2 = task_await_unwrap(t2)
+    r1 + r2
+end
+
+-- main() receives the WorkPool capability from the runtime.
+fn main(pool : WorkPool) : Unit do
+  let result = par_fib(pool, 40, 20)
+  println(int_to_string(result))
+end
+
+end

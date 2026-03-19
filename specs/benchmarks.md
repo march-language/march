@@ -131,14 +131,14 @@ A large regression vs OCaml points to closure dispatch or intermediate-list GC o
 
 ## bench/parallel.march — Parallel tree sum (depth=24, threshold=10)
 
-**Status: NOT YET RUNNABLE** — requires `spawn_task` / `await_all` / `Task(a)`,
-which are designed but not implemented.
+**Status: PHASE 1 (eager)** — task builtins exist but execute eagerly in the
+single-threaded interpreter. True parallelism requires OCaml 5 Domains (Phase 2).
 
 **Expected output:** `16777216`
 
 | Feature exercised | Notes |
 |-------------------|-------|
-| `spawn_task` / `await_all` | Task spawning and join |
+| `task_spawn` / `task_await_unwrap` | Task spawning and join |
 | **FBIP + parallelism** | Sibling subtrees have independent RC chains → in-place reuse on both sides with no synchronisation |
 | Task granularity | Parallel to depth 10 (1024 tasks), then sequential |
 | OCaml 5 Domain scalability | One Domain per task up to GOMAXPROCS equivalent |
@@ -147,6 +147,71 @@ which are designed but not implemented.
 **What to watch:** Should show near-linear speedup up to `min(cores, 1024)` tasks.
 FBIP correctness in the parallel case: each task's sub-tree has RC=1 in its
 own context, so `inc_leaves`-style transforms remain safe without locking.
+
+---
+
+## bench/par_fib.march — Parallel Fibonacci (embarrassingly parallel)
+
+**Status: PHASE 1 (eager)** — task builtins exist but execute eagerly.
+
+**Command:** `par_fib(40, 20)`
+**Expected output:** `102334155`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `task_spawn` / `task_await_unwrap` | Fork/join with many small tasks |
+| Task creation throughput | Thousands of tasks spawned recursively |
+| No inter-task communication | Pure embarrassingly parallel — each subtask independent |
+| Threshold tuning | Sequential below depth 20 to avoid micro-task overhead |
+
+**Comparison baseline:** `bench/fib.march` (sequential), C with pthreads, Go goroutines.
+**What to watch:** Phase 1 (eager) overhead should be <5% vs sequential `fib`.
+With true parallelism, expect near-linear speedup. A regression vs sequential
+`fib` points to task_spawn/task_await_unwrap call overhead.
+
+---
+
+## bench/par_map.march — Parallel Collatz map (embarrassingly parallel)
+
+**Status: PHASE 1 (eager)** — task builtins exist but execute eagerly.
+
+**Command:** `par_map_sum(range(1, 100000), 1000)`
+**Expected output:** `2660024`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `task_spawn` with closure captures | Each task captures a list chunk |
+| Independent task execution | No shared state between tasks |
+| Variable-cost work items | Collatz step counts vary widely per element |
+| Chunked parallelism | 100 tasks of 1000 elements each |
+
+**Comparison baseline:** Sequential `map` + `fold` over same data, C with OpenMP parallel for.
+**What to watch:** Measures the "map-reduce without reduce" pattern. Task overhead
+should be small relative to the Collatz computation. A regression points to
+closure capture overhead or list allocation under task boundaries.
+
+---
+
+## bench/par_worksteal.march — Work-stealing Fibonacci (Tier 2)
+
+**Status: PHASE 1 (eager)** — `task_spawn_steal` exists but delegates to eager
+evaluation. True work-stealing requires OCaml 5 Domains (Phase 2).
+
+**Command:** `par_fib(pool, 40, 20)` with `Cap(WorkPool)` from `main()`
+**Expected output:** `102334155`
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `task_spawn_steal` | Work-stealing tier (Tier 2) task creation |
+| `Cap(WorkPool)` capability | Unforgeable capability threaded from `main()` |
+| Capability threading | Pool passed explicitly through function signatures |
+| Chase-Lev deque operations | Submit to worker deque, steal from others |
+
+**Comparison baseline:** `bench/par_fib.march` (cooperative tier), C with work-stealing.
+**What to watch:** Compare Tier 2 (work-stealing) vs Tier 1 (cooperative) overhead.
+With true parallelism, work-stealing should show better load balancing for
+uneven workloads. The `Cap(WorkPool)` threading should have zero runtime cost
+(it's a type-level capability, not a runtime check).
 
 ---
 
@@ -164,4 +229,6 @@ to the features it exercises. Quick reference:
 | Tail-call optimisation | `list_ops` + `fib` |
 | Codegen / `--opt` levels | all four |
 | `string_join` / `string_to_int` / `int_to_string` | `string_build` + `string_pipeline` |
-| Task / spawn_task | `parallel` (once implemented) |
+| Task / `task_spawn` / `task_await` | `parallel` + `par_fib` + `par_map` |
+| Work-stealing / `task_spawn_steal` / Chase-Lev | `par_worksteal` |
+| `Cap(WorkPool)` capability | `par_worksteal` |
