@@ -31,6 +31,7 @@ void *march_string_concat(void *a, void *b);
 int64_t march_string_eq(void *a, void *b);
 /* Extended string builtins used by the compiled stdlib. */
 int64_t march_string_byte_length(void *s);
+int64_t march_string_is_empty(void *s);
 void   *march_string_to_int(void *s);
 void   *march_string_join(void *list, void *sep);
 

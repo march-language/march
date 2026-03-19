@@ -116,7 +116,7 @@ let is_builtin_fn name =
                  "+."; "-."; "*."; "/.";
                  "=="; "!="; "<"; "<="; ">"; ">=";
                  "++"; "string_concat"; "string_eq";
-                 "string_byte_length"; "string_to_int"; "string_join";
+                 "string_byte_length"; "string_is_empty"; "string_to_int"; "string_join";
                  "println"; "print";
                  "int_to_string"; "float_to_string"; "bool_to_string";
                  "kill"; "is_alive"; "send"]
@@ -135,6 +135,7 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "string_concat" | "++"        -> Some Tir.TString
   | "string_eq"                   -> Some Tir.TInt
   | "string_byte_length"          -> Some Tir.TInt
+  | "string_is_empty"             -> Some Tir.TBool
   | "string_to_int"               -> Some (Tir.TCon ("Option", [Tir.TInt]))
   | "string_join"                 -> Some Tir.TString
   | "kill"                        -> Some Tir.TUnit
@@ -152,6 +153,7 @@ let mangle_extern : string -> string = function
   | "string_concat" | "++" -> "march_string_concat"
   | "string_eq"          -> "march_string_eq"
   | "string_byte_length" -> "march_string_byte_length"
+  | "string_is_empty"    -> "march_string_is_empty"
   | "string_to_int"      -> "march_string_to_int"
   | "string_join"        -> "march_string_join"
   | "kill"               -> "march_kill"
@@ -772,6 +774,7 @@ declare ptr  @march_bool_to_string(i64 %b)
 declare ptr  @march_string_concat(ptr %a, ptr %b)
 declare i64  @march_string_eq(ptr %a, ptr %b)
 declare i64  @march_string_byte_length(ptr %s)
+declare i64  @march_string_is_empty(ptr %s)
 declare ptr  @march_string_to_int(ptr %s)
 declare ptr  @march_string_join(ptr %list, ptr %sep)
 declare void @march_kill(ptr %actor)

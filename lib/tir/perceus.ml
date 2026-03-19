@@ -114,6 +114,44 @@ let rec live_before (e : Tir.expr) (live_after : live_set) : live_set =
     |> StringSet.union (vars_of_atom a)
     |> StringSet.union (vars_of_atoms atoms)
 
+(* ── name_free_in (shared by Phase 2 and Phase 4) ─────────────────────────── *)
+
+(** Returns true if [name] occurs free anywhere in [e]. *)
+let rec name_free_in (name : string) (e : Tir.expr) : bool =
+  let atom_uses a = match a with
+    | Tir.AVar v -> String.equal v.Tir.v_name name
+    | Tir.ALit _ -> false
+  in
+  let atoms_use = List.exists atom_uses in
+  match e with
+  | Tir.EAtom a                              -> atom_uses a
+  | Tir.EApp (f, args)                       -> String.equal f.Tir.v_name name || atoms_use args
+  | Tir.ECallPtr (a, args)                   -> atom_uses a || atoms_use args
+  | Tir.ELet (v, e1, e2)                     ->
+    name_free_in name e1
+    || (not (String.equal v.Tir.v_name name) && name_free_in name e2)
+  | Tir.ELetRec (fns, body)                  ->
+    let bound = List.exists (fun fd -> String.equal fd.Tir.fn_name name) fns in
+    (not bound && name_free_in name body)
+    || List.exists (fun fd ->
+         let param_bound = List.exists (fun p -> String.equal p.Tir.v_name name) fd.Tir.fn_params in
+         not param_bound && name_free_in name fd.Tir.fn_body) fns
+  | Tir.ECase (a, branches, default)         ->
+    atom_uses a
+    || List.exists (fun br ->
+         let bv_bound = List.exists (fun v -> String.equal v.Tir.v_name name) br.Tir.br_vars in
+         not bv_bound && name_free_in name br.Tir.br_body) branches
+    || Option.fold ~none:false ~some:(name_free_in name) default
+  | Tir.ESeq (e1, e2)                        -> name_free_in name e1 || name_free_in name e2
+  | Tir.ETuple atoms | Tir.EAlloc (_, atoms)
+  | Tir.EStackAlloc (_, atoms)               -> atoms_use atoms
+  | Tir.ERecord fields                       -> List.exists (fun (_, a) -> atom_uses a) fields
+  | Tir.EField (a, _)                        -> atom_uses a
+  | Tir.EUpdate (a, fields)                  ->
+    atom_uses a || List.exists (fun (_, a) -> atom_uses a) fields
+  | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a -> atom_uses a
+  | Tir.EReuse (a, _, atoms)                 -> atom_uses a || atoms_use atoms
+
 (* ── Phase 2: RC Insertion ────────────────────────────────────────────────── *)
 
 (** Wrap [inner] with EIncRC for each variable in [vars] that is Unr,
@@ -240,10 +278,13 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     ) branches in
     let default' = Option.map (fun d ->
       let (d_rc, _) = insert_rc_expr d live_after in
-      (* Default branch: no constructor tag known, use original type *)
+      (* Default branch: no constructor tag known, use original type.
+         Only free the scrutinee if the branch body does NOT use it directly —
+         if the body uses it, ownership transfers into the body. *)
       (match a with
        | Tir.AVar v when needs_rc v.Tir.v_ty
-                      && not (StringSet.mem v.Tir.v_name live_after) ->
+                      && not (StringSet.mem v.Tir.v_name live_after)
+                      && not (name_free_in v.Tir.v_name d) ->
          Tir.ESeq (Tir.EDecRC (Tir.AVar v), d_rc)
        | _ -> d_rc)
     ) default in
@@ -369,43 +410,6 @@ let elide_cancel_pairs (fn : Tir.fn_def) : Tir.fn_def =
   { fn with Tir.fn_body = elide_expr fn.Tir.fn_body }
 
 (* ── Phase 4: FBIP Reuse Detection ──────────────────────────────────────── *)
-
-(** Returns true if [name] occurs free anywhere in [e].  Used by FBIP to
-    check that sinking a DecRC past an ELet is safe. *)
-let rec name_free_in (name : string) (e : Tir.expr) : bool =
-  let atom_uses a = match a with
-    | Tir.AVar v -> String.equal v.Tir.v_name name
-    | Tir.ALit _ -> false
-  in
-  let atoms_use = List.exists atom_uses in
-  match e with
-  | Tir.EAtom a                              -> atom_uses a
-  | Tir.EApp (f, args)                       -> String.equal f.Tir.v_name name || atoms_use args
-  | Tir.ECallPtr (a, args)                   -> atom_uses a || atoms_use args
-  | Tir.ELet (v, e1, e2)                     ->
-    name_free_in name e1
-    || (not (String.equal v.Tir.v_name name) && name_free_in name e2)
-  | Tir.ELetRec (fns, body)                  ->
-    let bound = List.exists (fun fd -> String.equal fd.Tir.fn_name name) fns in
-    (not bound && name_free_in name body)
-    || List.exists (fun fd ->
-         let param_bound = List.exists (fun p -> String.equal p.Tir.v_name name) fd.Tir.fn_params in
-         not param_bound && name_free_in name fd.Tir.fn_body) fns
-  | Tir.ECase (a, branches, default)         ->
-    atom_uses a
-    || List.exists (fun br ->
-         let bv_bound = List.exists (fun v -> String.equal v.Tir.v_name name) br.Tir.br_vars in
-         not bv_bound && name_free_in name br.Tir.br_body) branches
-    || Option.fold ~none:false ~some:(name_free_in name) default
-  | Tir.ESeq (e1, e2)                        -> name_free_in name e1 || name_free_in name e2
-  | Tir.ETuple atoms | Tir.EAlloc (_, atoms)
-  | Tir.EStackAlloc (_, atoms)               -> atoms_use atoms
-  | Tir.ERecord fields                       -> List.exists (fun (_, a) -> atom_uses a) fields
-  | Tir.EField (a, _)                        -> atom_uses a
-  | Tir.EUpdate (a, fields)                  ->
-    atom_uses a || List.exists (fun (_, a) -> atom_uses a) fields
-  | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a -> atom_uses a
-  | Tir.EReuse (a, _, atoms)                 -> atom_uses a || atoms_use atoms
 
 (** Try to sink [EDecRC(dec_v)] into [body] through a chain of ELet
     bindings, stopping when we find an EAlloc of matching shape.  Safe

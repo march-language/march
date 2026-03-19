@@ -399,6 +399,53 @@ and lower_match (scrut : Tir.atom) (branches : Ast.branch list) : Tir.expr =
     ) branches in
   Tir.ECase (scrut, tir_branches, default)
 
+(* ── TIR renaming ───────────────────────────────────────────────── *)
+
+(** Rename [AVar] atoms whose [v_name] appears in [names] by prefixing with
+    [prefix].  Used when lowering [DMod] inner functions to rewrite unqualified
+    intra-module call sites (e.g. [from_string] → [IOList.from_string]).
+
+    Safe because TIR ANF let-bindings use fresh names ($t42, $lam5 …) and
+    module function names are conventionally distinct from local variable names
+    in stdlib code. *)
+let rename_tir_vars (prefix : string) (names : string list) (fn : Tir.fn_def) : Tir.fn_def =
+  let rename_var (v : Tir.var) : Tir.var =
+    if List.mem v.Tir.v_name names
+    then { v with Tir.v_name = prefix ^ v.Tir.v_name }
+    else v
+  in
+  let rename_atom = function
+    | Tir.AVar v -> Tir.AVar (rename_var v)
+    | a -> a
+  in
+  let rec rename_expr = function
+    | Tir.EAtom a        -> Tir.EAtom (rename_atom a)
+    | Tir.EApp (v, args) -> Tir.EApp (rename_var v, List.map rename_atom args)
+    | Tir.ECallPtr (f, args) -> Tir.ECallPtr (rename_atom f, List.map rename_atom args)
+    | Tir.ELet (v, e1, e2) -> Tir.ELet (v, rename_expr e1, rename_expr e2)
+    | Tir.ELetRec (fns, body) ->
+      Tir.ELetRec (List.map rename_fn fns, rename_expr body)
+    | Tir.ECase (scrut, branches, def) ->
+      Tir.ECase (rename_atom scrut,
+                 List.map (fun br -> { br with Tir.br_body = rename_expr br.Tir.br_body }) branches,
+                 Option.map rename_expr def)
+    | Tir.ETuple atoms   -> Tir.ETuple (List.map rename_atom atoms)
+    | Tir.ERecord fields -> Tir.ERecord (List.map (fun (k, a) -> (k, rename_atom a)) fields)
+    | Tir.EField (a, f)  -> Tir.EField (rename_atom a, f)
+    | Tir.EUpdate (a, fields) ->
+      Tir.EUpdate (rename_atom a, List.map (fun (k, v) -> (k, rename_atom v)) fields)
+    | Tir.EAlloc (ty, args)      -> Tir.EAlloc (ty, List.map rename_atom args)
+    | Tir.EStackAlloc (ty, args) -> Tir.EStackAlloc (ty, List.map rename_atom args)
+    | Tir.EFree a   -> Tir.EFree (rename_atom a)
+    | Tir.EIncRC a  -> Tir.EIncRC (rename_atom a)
+    | Tir.EDecRC a  -> Tir.EDecRC (rename_atom a)
+    | Tir.EReuse (a, ty, args) -> Tir.EReuse (rename_atom a, ty, List.map rename_atom args)
+    | Tir.ESeq (e1, e2) -> Tir.ESeq (rename_expr e1, rename_expr e2)
+  and rename_fn (f : Tir.fn_def) : Tir.fn_def =
+    { f with Tir.fn_body = rename_expr f.Tir.fn_body }
+  in
+  rename_fn fn
+
 (* ── Declaration lowering ───────────────────────────────────────── *)
 
 (** Lower a single function definition (post-desugaring: exactly 1 clause). *)
@@ -733,7 +780,29 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
         let (new_types, new_fns) = lower_actor name.txt actor_def in
         types := List.rev_append new_types !types;
         fns   := List.rev_append new_fns   !fns
-      | Ast.DMod _ | Ast.DProtocol _ | Ast.DSig _ | Ast.DInterface _
+      | Ast.DMod (mod_name, _, inner_decls, _) ->
+        (* Lower inner DFn/DType declarations, prefixing function names with
+           "ModName." to produce the qualified names that call sites use.
+           Intra-module calls are lowered with unqualified names (typecheck
+           needs them that way), so after lowering we rename AVar references
+           that match inner function names to their qualified form. *)
+        let prefix = mod_name.txt ^ "." in
+        let inner_fn_names = List.filter_map (function
+            | Ast.DFn (def, _) -> Some def.fn_name.txt
+            | _ -> None) inner_decls in
+        List.iter (fun d ->
+            match d with
+            | Ast.DFn (def, _) ->
+              let fn = lower_fn_def def in
+              let fn = rename_tir_vars prefix inner_fn_names fn in
+              fns := { fn with fn_name = prefix ^ fn.fn_name } :: !fns
+            | Ast.DType (tname, params, td, _) ->
+              (match lower_type_def tname params td with
+               | Some td' -> types := td' :: !types
+               | None -> ())
+            | _ -> ()
+          ) inner_decls
+      | Ast.DProtocol _ | Ast.DSig _ | Ast.DInterface _
       | Ast.DImpl _ | Ast.DExtern _ | Ast.DUse _ -> ()
     ) m.mod_decls;
   let result : Tir.tir_module = { tm_name = m.mod_name.txt;

@@ -86,6 +86,10 @@ int64_t march_string_byte_length(void *s) {
     return s ? ((march_string *)s)->len : 0;
 }
 
+int64_t march_string_is_empty(void *s) {
+    return (!s || ((march_string *)s)->len == 0) ? 1 : 0;
+}
+
 /* Returns Option(Int): None(tag=0) on failure, Some(n)(tag=1,field=n) on success.
  * Option follows declaration order: type Option = None | Some('a)
  * Heap layout for Some(n): [rc:i64][tag=1:i32][pad:i32][n:i64] = 24 bytes. */
