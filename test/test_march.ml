@@ -2395,6 +2395,60 @@ let test_inline_mutual_recursion_not_inlined () =
   let _ = March_tir.Inline.run ~changed m in
   Alcotest.(check bool) "not changed (mutually recursive)" false !changed
 
+(* ── Dead code elimination ───────────────────────────────────────── *)
+
+let test_dce_dead_pure_let () =
+  (* let x = 5 in 42 → 42, because x is unused and rhs is pure *)
+  let changed = ref false in
+  let x_var = mk_var "x" March_tir.Tir.TInt in
+  let body = March_tir.Tir.ELet (x_var, March_tir.Tir.EAtom (ilit 5), March_tir.Tir.EAtom (ilit 42)) in
+  let m = mk_module [mk_fn "f" body] in
+  let m' = March_tir.Dce.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "dead let removed" "(Tir.EAtom (Tir.ALit (Ast.LitInt 42)))"
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_dce_impure_let_kept () =
+  (* let x = println("hi") in 42 → println("hi"); 42 (rhs is impure, must keep) *)
+  let changed = ref false in
+  let x_var = mk_var "x" March_tir.Tir.TInt in
+  let body = March_tir.Tir.ELet (x_var,
+               app "println" [March_tir.Tir.ALit (March_ast.Ast.LitString "hi")],
+               March_tir.Tir.EAtom (ilit 42)) in
+  let m = mk_module [mk_fn "f" body] in
+  let m' = March_tir.Dce.run ~changed m in
+  (* result should be ESeq, not the original ELet, but the print must be present *)
+  (match first_body m' with
+   | March_tir.Tir.ESeq _ -> ()  (* impure effect sequenced *)
+   | March_tir.Tir.ELet _ -> ()  (* or kept as let — both acceptable *)
+   | _ -> Alcotest.fail "impure rhs must be preserved")
+
+let test_dce_used_let_kept () =
+  (* let x = 5 in x + 1 → unchanged *)
+  let changed = ref false in
+  let x_var = mk_var "x" March_tir.Tir.TInt in
+  let body = March_tir.Tir.ELet (x_var, March_tir.Tir.EAtom (ilit 5),
+               app "+" [March_tir.Tir.AVar x_var; ilit 1]) in
+  let m = mk_module [mk_fn "f" body] in
+  let _ = March_tir.Dce.run ~changed m in
+  Alcotest.(check bool) "not changed (used)" false !changed
+
+let test_dce_unreachable_top_fn () =
+  (* fn unused() = 99 is not reachable from main → removed *)
+  let changed = ref false in
+  let unused_fn = { March_tir.Tir.fn_name = "unused"; fn_params = [];
+                    fn_ret_ty = March_tir.Tir.TInt;
+                    fn_body = March_tir.Tir.EAtom (ilit 99) } in
+  let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = [];
+                  fn_ret_ty = March_tir.Tir.TInt;
+                  fn_body = March_tir.Tir.EAtom (ilit 0) } in
+  let m = mk_module [unused_fn; main_fn] in
+  let m' = March_tir.Dce.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  let fn_names = List.map (fun fd -> fd.March_tir.Tir.fn_name) m'.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "unused removed" false (List.mem "unused" fn_names);
+  Alcotest.(check bool) "main kept"      true  (List.mem "main" fn_names)
+
 let () =
   Alcotest.run "march"
     [
@@ -2670,5 +2724,11 @@ let () =
         Alcotest.test_case "impure_not_inlined"    `Quick test_inline_impure_not_inlined;
         Alcotest.test_case "recursive_not_inlined" `Quick test_inline_recursive_not_inlined;
         Alcotest.test_case "mutual_recursion_not_inlined" `Quick test_inline_mutual_recursion_not_inlined;
+      ]);
+      ("dce", [
+        Alcotest.test_case "dead_pure_let"       `Quick test_dce_dead_pure_let;
+        Alcotest.test_case "impure_let_kept"     `Quick test_dce_impure_let_kept;
+        Alcotest.test_case "used_let_kept"       `Quick test_dce_used_let_kept;
+        Alcotest.test_case "unreachable_top_fn"  `Quick test_dce_unreachable_top_fn;
       ]);
     ]
