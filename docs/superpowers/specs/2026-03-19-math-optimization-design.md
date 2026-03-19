@@ -30,13 +30,34 @@ The new `Opt` stage runs between Escape Analysis and LLVM emit:
 Lower → Mono → Defun → Perceus → Escape → Opt → LLVM emit
 ```
 
-`--no-opt` skips the entire stage. Useful for debugging generated IR or bisecting optimization bugs.
+`--no-opt` skips the entire stage. In `bin/main.ml`, an `opt_enabled` ref cell defaults to `true`; `--no-opt` sets it to `false`. The conditional gates the call to `March_tir.Opt.run` between the `Escape.escape_analysis` call and the dump/emit branch. This is useful for debugging generated IR or bisecting optimization bugs.
+
+---
+
+## TIR Representation of Arithmetic
+
+All arithmetic in the TIR is encoded as `EApp` nodes using string-named built-in functions, not as first-class binary operator constructors. Pattern matching in the optimization passes must use `EApp` with the appropriate `v_name`.
+
+**Integer operators:** `"+"`, `"-"`, `"*"`, `"/"`, `"%"`
+**Float operators:** `"+."`, `"-."`, `"*."`, `"/."`
+**Integer comparisons:** `"<"`, `"<="`, `">"`, `">="`, `"=="`, `"!="`
+**Boolean operators:** `"&&"`, `"||"`, `"not"`
+**Negation:** `"~-"` (integer), `"~-."` (float)
+
+Example pattern for integer addition of two literals:
+
+```ocaml
+EApp ({v_name = "+"}, [ALit (LitInt a); ALit (LitInt b)])
+```
+
+The passes must match on `v_name` strings, exactly as `llvm_emit.ml` does in its `is_int_arith`, `is_float_arith`, and `is_int_cmp` dispatch.
 
 ---
 
 ## New Files
 
 ```
+lib/tir/purity.ml     Shared purity oracle used by all passes
 lib/tir/inline.ml     Function inlining pass
 lib/tir/fold.ml       Constant folding pass
 lib/tir/simplify.ml   Algebraic simplification pass
@@ -45,6 +66,23 @@ lib/tir/opt.ml        Coordinator: fixed-point loop over all passes
 ```
 
 `lib/tir/llvm_emit.ml` gains a `fast_math:bool` config field threading through all FP emit functions.
+
+---
+
+## Shared Purity Oracle (`purity.ml`)
+
+All passes that need to determine whether an expression is pure use a single shared function:
+
+```ocaml
+val is_pure : Tir.expr -> bool
+```
+
+An expression is pure if it contains no:
+- `ESend` (actor message — effectful)
+- `EApp` to known-impure builtins: `"print"`, `"println"`, and other IO operations
+- Calls to functions that themselves fail the purity check (transitive)
+
+When uncertain (e.g. an indirect call whose target is unknown), `is_pure` returns `false` conservatively. False negatives (treating a pure expression as impure) are safe; false positives are not.
 
 ---
 
@@ -62,20 +100,26 @@ Inline → Fold → Simplify → DCE
 - Simplification catches algebraic patterns on the folded tree
 - DCE removes bindings and branches that the other passes rendered dead
 
-The coordinator runs all four passes in a loop until the program is unchanged (structural equality) or 5 iterations are reached, whichever comes first.
+The coordinator uses a `changed` boolean flag threaded through each pass rather than structural equality, to avoid expensive deep comparisons on large programs. Each pass sets `changed := true` whenever it rewrites a node. The loop runs until a full iteration completes with `changed` still `false`, or 5 iterations are reached:
 
 ```ocaml
 let run program =
   let passes = [Inline.run; Fold.run; Simplify.run; Dce.run] in
-  let apply p = List.fold_left (fun acc pass -> pass acc) p passes in
+  let changed = ref false in
+  let apply p =
+    changed := false;
+    List.fold_left (fun acc pass -> pass ~changed acc) p passes
+  in
   let rec loop p n =
     if n = 0 then p
     else let p' = apply p in
-         if p' = p then p
+         if not !changed then p
          else loop p' (n - 1)
   in
   loop program 5
 ```
+
+Each pass receives a `~changed` ref it sets to `true` on any rewrite.
 
 ---
 
@@ -85,12 +129,7 @@ let run program =
 
 Inline call sites whose callee meets both criteria:
 
-**Purity check** — walk the callee body for:
-- `ESend` (actor message — effectful)
-- Calls to known-impure builtins (`print`, `println`, IO operations)
-- Calls to other impure functions (transitively)
-
-If uncertain, conservatively skip. Purity is an over-approximation — false negatives (not inlining a pure function) are safe; false positives are not.
+**Purity check** — uses `Purity.is_pure` on the callee body. If impure, skip.
 
 **Size check** — count TIR nodes in the callee body. Threshold: 15 nodes. This is a named constant (`inline_size_threshold`) so it can be tuned.
 
@@ -99,66 +138,145 @@ If uncertain, conservatively skip. Purity is an over-approximation — false neg
 - No self-referential bodies
 - One level of inlining per iteration (chains are handled by fixed-point)
 
-**Substitution** — alpha-rename the callee body with fresh variable names before substituting arguments, to avoid variable capture.
+**Substitution** — alpha-rename the callee body with fresh variable names before substituting arguments, to avoid variable capture. The substituted result must remain in ANF: if the inlined body introduces new computations, they must be bound to fresh let-names, not embedded as nested `EApp` arguments.
 
 ---
 
 ### `fold.ml` — Constant Folding
 
-Evaluate expressions whose operands are all literals at compile time.
+Evaluate expressions whose operands are all literals at compile time. All patterns match on `EApp` with `v_name` strings as described above.
 
-**Arithmetic:**
-- `ELit(Int a) + ELit(Int b)` → `ELit(Int (a + b))` (and `-`, `*`, `/`, `%`)
-- `ELit(Float a) + ELit(Float b)` → `ELit(Float (a +. b))` (and `-`, `*`, `/`)
-- Integer division/modulo by zero: leave as-is (runtime error, not compile-time)
+**Integer arithmetic (operator `"+"`, `"-"`, `"*"`, `"/"`, `"%"`):**
 
-**Boolean:**
-- `ELit(Bool false) && _` → `ELit(Bool false)` (short-circuit, drop RHS if pure)
-- `ELit(Bool true) || _` → `ELit(Bool true)` (short-circuit, drop RHS if pure)
-- `not (ELit(Bool b))` → `ELit(Bool (not b))`
+```
+EApp("+",  [ALit(LitInt a); ALit(LitInt b)]) → ALit(LitInt (a + b))
+EApp("-",  [ALit(LitInt a); ALit(LitInt b)]) → ALit(LitInt (a - b))
+EApp("*",  [ALit(LitInt a); ALit(LitInt b)]) → ALit(LitInt (a * b))
+EApp("/",  [ALit(LitInt a); ALit(LitInt b)]) → ALit(LitInt (a / b))  -- only when b ≠ 0
+EApp("%",  [ALit(LitInt a); ALit(LitInt b)]) → ALit(LitInt (a mod b)) -- only when b ≠ 0
+```
+
+Division or modulo by zero is left as-is (runtime error, not a compile-time fold).
+
+**Float arithmetic (operators `"+."`, `"-."`, `"*."`, `"/."`)**
+
+```
+EApp("+.", [ALit(LitFloat a); ALit(LitFloat b)]) → ALit(LitFloat (a +. b))
+EApp("-.", [ALit(LitFloat a); ALit(LitFloat b)]) → ALit(LitFloat (a -. b))
+EApp("*.", [ALit(LitFloat a); ALit(LitFloat b)]) → ALit(LitFloat (a *. b))
+EApp("/.", [ALit(LitFloat a); ALit(LitFloat b)]) → ALit(LitFloat (a /. b))  -- only when b ≠ 0.0
+```
+
+**Boolean (operators `"&&"`, `"||"`, `"not"`):**
+
+```
+EApp("&&", [ALit(LitBool false); rhs]) when is_pure(rhs) → ALit(LitBool false)
+EApp("||", [ALit(LitBool true);  rhs]) when is_pure(rhs) → ALit(LitBool true)
+EApp("not",[ALit(LitBool b)])                            → ALit(LitBool (not b))
+```
+
+The `when is_pure(rhs)` guard is required: if `rhs` has side effects, it must still be evaluated even though the logical result is determined. When `rhs` is impure, leave the expression as-is.
 
 **Conditionals:**
-- `if ELit(Bool true) then e1 else e2` → `e1`
-- `if ELit(Bool false) then e1 else e2` → `e2`
+
+```
+if ALit(LitBool true)  then e1 else e2 → e1
+if ALit(LitBool false) then e1 else e2 → e2
+```
 
 **Match on literal constructor:**
-- `match ELit(...) | EConstructor(...)` — reduce to the single matching arm, drop others
+
+When the scrutinee of a `match` expression is a literal or known constructor, reduce to the single matching arm and discard the rest. This is the only location in the spec where match reduction is defined; `dce.ml` does not duplicate it.
 
 ---
 
 ### `simplify.ml` — Algebraic Simplification
 
-Peephole rewrites on expression shape, independent of literal values.
+Peephole rewrites on expression shape, matching on `EApp` with `v_name` strings. All rewrites must produce results that remain in ANF. If a rewrite introduces a new operation (e.g. strength reduction), the new operation is bound to a fresh `let` variable before being returned, not embedded as a nested argument.
 
-**Arithmetic identities:**
-- `x + ELit(Int 0)` → `x`
-- `ELit(Int 0) + x` → `x`
-- `x - ELit(Int 0)` → `x`
-- `x * ELit(Int 1)` → `x`
-- `ELit(Int 1) * x` → `x`
-- `x * ELit(Int 0)` → `ELit(Int 0)` (only when `x` is pure)
-- `ELit(Int 0) * x` → `ELit(Int 0)` (only when `x` is pure)
-- `x / ELit(Int 1)` → `x`
-- `x - x` → `ELit(Int 0)` (only when `x` is pure and has no side effects; uses structural equality)
+The simplifier operates on fully ANF-normalized trees (guaranteed by the time it runs in the pipeline). Strength reduction and any other rewrites that produce new `EApp` nodes must be accompanied by fresh `let` bindings.
 
-Same rules apply symmetrically for `Float` variants where mathematically valid.
+**Integer arithmetic identities (operator `"+"`):**
 
-**Strength reduction (integers only — avoids FP rounding change):**
-- `x * ELit(Int 2)` → `x + x`
+```
+EApp("+", [x; ALit(LitInt 0)]) → x
+EApp("+", [ALit(LitInt 0); x]) → x
+```
 
-**Double negation:**
-- `EUnary(Neg, EUnary(Neg, x))` → `x`
-- `EUnary(Not, EUnary(Not, x))` → `x`
+**Subtraction (operator `"-"`):**
 
-**Boolean identities:**
-- `x && ELit(Bool true)` → `x`
-- `ELit(Bool true) && x` → `x`
-- `x || ELit(Bool false)` → `x`
-- `ELit(Bool false) || x` → `x`
+```
+EApp("-", [x; ALit(LitInt 0)]) → x
+EApp("-", [AVar a; AVar b])    → ALit(LitInt 0)  when a.v_name = b.v_name
+```
+
+The `x - x → 0` rule matches only when both operands are the same `AVar` by `v_name` (not general structural equality), to avoid false matches in the presence of Perceus RC-inserted variables. **This rule is intentionally integer-only**: under IEEE 754, `NaN -. NaN = NaN`, not `0.0`.
+
+**Multiplication (operator `"*"`):**
+
+```
+EApp("*", [x; ALit(LitInt 1)]) → x
+EApp("*", [ALit(LitInt 1); x]) → x
+EApp("*", [x; ALit(LitInt 0)]) → ALit(LitInt 0)  when is_pure(x)
+EApp("*", [ALit(LitInt 0); x]) → ALit(LitInt 0)  when is_pure(x)
+```
+
+**Division (operator `"/"`):**
+
+```
+EApp("/", [x;            ALit(LitInt 1)]) → x
+EApp("/", [ALit(LitInt 0); x])           → ALit(LitInt 0)  when is_pure(x)
+```
+
+**Float arithmetic identities (operators `"+."`, `"-."`, `"*."`, `"/."`)**
+
+The following rules are safe for floats (IEEE 754 compliant; do not require `--fast-math`):
+
+```
+EApp("+.", [x; ALit(LitFloat 0.0)]) → x
+EApp("+.", [ALit(LitFloat 0.0); x]) → x
+EApp("-.", [x; ALit(LitFloat 0.0)]) → x
+EApp("*.", [x; ALit(LitFloat 1.0)]) → x
+EApp("*.", [ALit(LitFloat 1.0); x]) → x
+EApp("/.", [x; ALit(LitFloat 1.0)]) → x
+```
+
+The `x -. x → 0.0` rewrite is **not** applied for floats (unsound when `x = NaN`).
+
+**Strength reduction (integer only):**
+
+```
+EApp("*", [x; ALit(LitInt 2)]) → let t = x + x in t
+EApp("*", [ALit(LitInt 2); x]) → let t = x + x in t
+```
+
+The result introduces a fresh `let` binding to maintain ANF. Float strength reduction is skipped — it would change rounding behavior.
+
+**Double negation (integer `"~-"`, float `"~-."`, boolean `"not"`):**
+
+```
+EApp("~-",  [AVar v])  where v is bound to EApp("~-",  [y]) → y
+EApp("~-.", [AVar v])  where v is bound to EApp("~-.", [y]) → y
+EApp("not", [AVar v])  where v is bound to EApp("not", [y]) → y
+```
+
+In ANF, negation of a negation requires looking through the let-binding of the inner variable.
+
+**Boolean identities (operators `"&&"`, `"||"`):**
+
+```
+EApp("&&", [x; ALit(LitBool true)])  → x
+EApp("&&", [ALit(LitBool true);  x]) → x
+EApp("||", [x; ALit(LitBool false)]) → x
+EApp("||", [ALit(LitBool false); x]) → x
+```
 
 **Boolean normalization:**
-- `if b then ELit(Bool true) else ELit(Bool false)` → `b`
-- `if b then ELit(Bool false) else ELit(Bool true)` → `EUnary(Not, b)`
+
+```
+if b then ALit(LitBool true) else ALit(LitBool false) → b
+if b then ALit(LitBool false) else ALit(LitBool true) → EApp("not", [b])
+```
 
 ---
 
@@ -170,15 +288,13 @@ Same rules apply symmetrically for `Float` variants where mathematically valid.
 let x = e in body
 ```
 
-If `x` is not free in `body` and `e` is pure (no side effects), drop the entire binding. If `e` is impure (e.g. has observable effects), keep `e` but drop the binding name.
-
-**Unreachable match arms:**
-
-After folding, a `match` expression on a known literal or constructor can be reduced to its single matching arm. All other arms are dead and removed.
+If `x` is not free in `body` and `Purity.is_pure e`, drop the entire binding. If `x` is not free in `body` but `e` is impure, keep `e` as a statement (sequenced effect) but drop the binding name.
 
 **Unreachable top-level functions:**
 
 Functions not reachable from `main` or any `pub`-exported declaration are removed from the program. Reachability is computed via a call graph walk from entry points.
+
+Note: `dce.ml` does **not** implement match-on-literal reduction. That is handled exclusively in `fold.ml`.
 
 ---
 
@@ -192,7 +308,7 @@ When `--fast-math` is passed, `llvm_emit.ml` emits the `fast` attribute on all f
 %r = fadd fast double %a, %b
 ```
 
-This is more precise than passing `-ffast-math` to clang (which applies to the whole compilation unit) — it annotates at the instruction level in our IR.
+This is more precise than passing `-ffast-math` to clang — it annotates at the instruction level in the IR, so only March-emitted FP operations are affected (not the runtime C code).
 
 `fast` is shorthand for all of: `nnan`, `ninf`, `nsz`, `arcp`, `contract`, `afn`, `reassoc`. This enables LLVM to: reassociate FP expressions, replace division with reciprocal multiplication, fuse multiply-add, and assume no NaN/Inf inputs.
 
@@ -200,10 +316,12 @@ This is more precise than passing `-ffast-math` to clang (which applies to the w
 
 Passed through to clang when compiling the `.ll` file:
 
-- `--opt=0` → `clang -O0` (no optimization, fastest compile)
+- `--opt=0` → `clang -O0`
 - `--opt=1` → `clang -O1`
-- `--opt=2` → `clang -O2` (default when `--compile` is used)
+- `--opt=2` → `clang -O2`
 - `--opt=3` → `clang -O3`
+
+**Behavioral note:** The current `--compile` invocation in `bin/main.ml` passes no `-O` flag, which means clang defaults to `-O0`. Adding `--opt=2` as the default for `--compile` changes this existing behavior. The implementation must make this explicit: either document the change in the commit, or keep the existing default as `-O0` and require `--opt=N` to be passed explicitly. This decision is left to the implementer.
 
 LLVM at `-O2`/`-O3` performs: auto-vectorization (SLP and loop), instruction scheduling, register allocation improvements, and additional inlining beyond what our TIR pass does.
 
@@ -215,7 +333,7 @@ LLVM at `-O2`/`-O3` performs: auto-vectorization (SLP and loop), instruction sch
 |------|--------|
 | `--no-opt` | Skip TIR optimization passes entirely |
 | `--fast-math` | Emit `fast` on all FP LLVM instructions |
-| `--opt=N` | Pass `-ON` to clang (default: 2) |
+| `--opt=N` | Pass `-ON` to clang |
 
 ---
 
@@ -223,15 +341,17 @@ LLVM at `-O2`/`-O3` performs: auto-vectorization (SLP and loop), instruction sch
 
 Each pass gets a dedicated test section in `test/test_march.ml`.
 
-**Fold tests:** Construct specific TIR trees with literal operands; assert the folded result matches the expected literal.
+**Fold tests:** Construct specific TIR trees with `EApp` and `ALit` literal operands; assert the folded result matches the expected `ALit`. Include: integer arithmetic, float arithmetic, boolean short-circuit (pure and impure RHS), conditional on `LitBool`, match on literal constructor.
 
-**Simplify tests:** Construct TIR with identity patterns (e.g. `x * 1`); assert the result is structurally equal to the simplified form.
+**Simplify tests:** Construct TIR with identity patterns using `EApp` and `AVar`/`ALit`; assert the result is structurally equal to the simplified form. Include: each arithmetic identity, `x - x` for integers (same `v_name`), strength reduction produces valid ANF (a `let` binding), double-negation via let-binding lookup, boolean normalization.
 
-**Inline tests:** Define a small pure function and a call site; assert the call is replaced by the inlined body with correct substitution. Verify that impure and recursive functions are not inlined.
+**Inline tests:** Define a small pure function and a call site; assert the call site is replaced by the inlined body with correct substitution and fresh variable names. Verify that impure functions (containing `ESend`) are not inlined. Verify that recursive functions are not inlined.
 
-**DCE tests:** Construct TIR with unused pure bindings and unreachable arms; assert they are removed. Verify impure unused bindings are kept.
+**DCE tests:** Construct TIR with unused pure `let` bindings; assert they are removed. Verify that impure unused bindings are kept as sequenced effects. Verify that unreachable top-level functions are eliminated by call graph analysis.
 
-**Integration tests:** End-to-end `.march` programs that compile with `--emit-llvm` and produce correct output; verify IR contains expected patterns (e.g. folded constants, no trivial identity operations).
+**`--fast-math` IR test:** Compile a March program with `--emit-llvm --fast-math`; assert the emitted `.ll` file contains `fadd fast` (or `fmul fast`, etc.) rather than plain `fadd`. Compile the same program without `--fast-math`; assert plain `fadd` is emitted.
+
+**Integration tests:** End-to-end `.march` programs that compile with `--emit-llvm` and produce correct output; verify IR contains expected patterns (e.g. folded constants appear as LLVM literals, no trivial `x * 1` operations remain in the IR).
 
 ---
 
