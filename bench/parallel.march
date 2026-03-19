@@ -44,12 +44,13 @@ fn par_sum(t : Tree, depth : Int, threshold : Int) : Int do
   | Leaf(n) -> n
   | Node(l, r) ->
     if depth >= threshold then sum(l) + sum(r)
-    else
+    else do
       let tl = task_spawn(fn () -> par_sum(l, depth + 1, threshold))
       let tr = task_spawn(fn () -> par_sum(r, depth + 1, threshold))
       let rl = task_await_unwrap(tl)
       let rr = task_await_unwrap(tr)
       rl + rr
+    end
   end
 end
 
