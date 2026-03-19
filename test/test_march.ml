@@ -2325,6 +2325,62 @@ let test_simplify_bool_and_true () =
     (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
     (March_tir.Tir.show_expr (first_body m'))
 
+(* ── Function inlining ───────────────────────────────────────────── *)
+
+let test_inline_pure_small () =
+  (* fn double(x) = x + x; fn main() = double(5) → call gets inlined *)
+  let changed = ref false in
+  let x_param = mk_var "x" March_tir.Tir.TInt in
+  let double_body = app "+" [March_tir.Tir.AVar x_param; March_tir.Tir.AVar x_param] in
+  let double_fn = { March_tir.Tir.fn_name = "double"; fn_params = [x_param];
+                    fn_ret_ty = March_tir.Tir.TInt; fn_body = double_body } in
+  let call = March_tir.Tir.EApp (mk_var "double"
+               (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [ilit 5]) in
+  let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = [];
+                  fn_ret_ty = March_tir.Tir.TInt; fn_body = call } in
+  let m = mk_module [double_fn; main_fn] in
+  let m' = March_tir.Inline.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (* main body should no longer be a bare EApp to "double" *)
+  let main_body = (List.find (fun fd -> fd.March_tir.Tir.fn_name = "main") m'.March_tir.Tir.tm_fns).March_tir.Tir.fn_body in
+  (match main_body with
+   | March_tir.Tir.EApp (f, _) when f.March_tir.Tir.v_name = "double" ->
+     Alcotest.fail "call was not inlined"
+   | _ -> ())
+
+let test_inline_impure_not_inlined () =
+  let changed = ref false in
+  let x_param = mk_var "x" March_tir.Tir.TInt in
+  let bad_body = March_tir.Tir.ESeq (
+    app "println" [March_tir.Tir.ALit (March_ast.Ast.LitString "hi")],
+    March_tir.Tir.EAtom (March_tir.Tir.AVar x_param)) in
+  let bad_fn = { March_tir.Tir.fn_name = "bad"; fn_params = [x_param];
+                 fn_ret_ty = March_tir.Tir.TInt; fn_body = bad_body } in
+  let call = March_tir.Tir.EApp (mk_var "bad"
+               (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [ilit 1]) in
+  let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = [];
+                  fn_ret_ty = March_tir.Tir.TInt; fn_body = call } in
+  let m = mk_module [bad_fn; main_fn] in
+  let _ = March_tir.Inline.run ~changed m in
+  Alcotest.(check bool) "not changed (impure)" false !changed
+
+let test_inline_recursive_not_inlined () =
+  let changed = ref false in
+  let n_param = mk_var "n" March_tir.Tir.TInt in
+  (* self-calling fn — must not inline *)
+  let fact_body = March_tir.Tir.EApp (mk_var "fact"
+                    (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)),
+                    [March_tir.Tir.AVar n_param]) in
+  let fact_fn = { March_tir.Tir.fn_name = "fact"; fn_params = [n_param];
+                  fn_ret_ty = March_tir.Tir.TInt; fn_body = fact_body } in
+  let call = March_tir.Tir.EApp (mk_var "fact"
+               (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [ilit 5]) in
+  let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = [];
+                  fn_ret_ty = March_tir.Tir.TInt; fn_body = call } in
+  let m = mk_module [fact_fn; main_fn] in
+  let _ = March_tir.Inline.run ~changed m in
+  Alcotest.(check bool) "not changed (recursive)" false !changed
+
 let () =
   Alcotest.run "march"
     [
@@ -2594,5 +2650,10 @@ let () =
         Alcotest.test_case "strength_reduce"   `Quick test_simplify_strength_reduce;
         Alcotest.test_case "float_add_zero"    `Quick test_simplify_float_add_zero;
         Alcotest.test_case "bool_and_true"     `Quick test_simplify_bool_and_true;
+      ]);
+      ("inline", [
+        Alcotest.test_case "pure_small"            `Quick test_inline_pure_small;
+        Alcotest.test_case "impure_not_inlined"    `Quick test_inline_impure_not_inlined;
+        Alcotest.test_case "recursive_not_inlined" `Quick test_inline_recursive_not_inlined;
       ]);
     ]
