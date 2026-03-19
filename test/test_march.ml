@@ -2980,6 +2980,29 @@ let test_eval_workpool_threading () =
   let v = call_fn env "main" [March_eval.Eval.VWorkPool] in
   Alcotest.(check int) "threaded pool works" 55 (vint v)
 
+let test_eval_task_sends_to_actor () =
+  let src = {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+
+      on Increment(n) do
+        { count = state.count + n }
+      end
+    end
+
+    fn main() do
+      let pid = spawn(Counter)
+      let t = task_spawn(fn () -> send(pid, Increment(10)))
+      task_await_unwrap(t)
+      send(pid, Increment(0))
+    end
+  end|} in
+  let env = eval_module src in
+  let _v = call_fn env "main" [] in
+  (* If we get here without error, cross-tier messaging works *)
+  ()
+
 let test_eval_reduction_count () =
   let src = {|mod Test do
     fn countdown(n) do
@@ -3347,5 +3370,6 @@ let () =
           Alcotest.test_case "spawn_steal requires pool" `Quick test_eval_spawn_steal_requires_pool;
           Alcotest.test_case "spawn_steal with pool"     `Quick test_eval_spawn_steal_with_pool;
           Alcotest.test_case "workpool threading"        `Quick test_eval_workpool_threading;
+          Alcotest.test_case "task sends to actor"       `Quick test_eval_task_sends_to_actor;
         ] );
     ]
