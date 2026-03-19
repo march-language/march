@@ -1009,3 +1009,88 @@ end
 ```
 
 This means library code can panic on true invariant violations, and actor boundaries provide natural recovery points — consistent with the Erlang "let it crash" philosophy.
+
+---
+
+## 13. Implementation Split: OCaml/C Runtime vs March Source
+
+The stdlib is designed to be implemented primarily in March itself, bottoming out at a thin layer of OCaml/C runtime intrinsics. The codegen pipeline (TIR → LLVM → native) already supports closures, ADTs, pattern matching, and generic functions — enough to self-host the pure logic.
+
+### Must be OCaml/C runtime intrinsics (~40 primitives)
+
+These bottom out at machine instructions, LLVM ops, or syscalls:
+
+| Category | Primitives | Why |
+|----------|-----------|-----|
+| **Arithmetic** | `Int.add`, `Int.sub`, `Int.mul`, `Int.div`, `Int.mod`, `Float.*` ops | LLVM native arithmetic instructions |
+| **Comparison** | Primitive `eq`, `lt` for Int, Float, Bool, Char | Machine compare instructions |
+| **String primitives** | `alloc`, `concat`, `eq`, `slice`, `length`, `byte_length` | Raw memory ops on string representation |
+| **Conversions** | `int_to_string`, `string_to_int`, `float_to_string`, `int_to_float`, `char_to_int` | Already in `march_runtime.c` |
+| **Array primitives** | `create`, `get`, `set`, `length` | Raw indexed memory access |
+| **Memory** | `alloc`, `free`, `incrc`, `decrc` | Reference counting runtime (already exists) |
+| **IO — console** | `print`, `read_line` | Syscalls (`write(2)`, `read(2)`) |
+| **IO — filesystem** | `open`, `read`, `write`, `stat`, `unlink`, `readdir`, `mkdir` | POSIX syscalls |
+| **IO — process** | `args`, `env`, `exit`, `cwd` | Syscalls / libc |
+| **Time** | `clock_gettime` (monotonic + wall), `nanosleep` | Syscalls |
+| **Regex engine** | `compile`, `exec`, `free` | Wraps a C regex library (PCRE2 or similar) |
+| **Actor runtime** | `spawn`, `send`, `mailbox_recv`, scheduler loop | C runtime for green threads + message queues |
+| **Math — transcendental** | `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`, `sqrt`, `pow` | `libm` C functions |
+| **Random — entropy** | `getrandom` / `/dev/urandom` | Syscall for seeding |
+| **Hash** | Primitive hash for Int, String, Atom | SipHash or similar in C |
+
+### Implemented in March (~300 functions)
+
+Everything that's pure logic over the primitives above. This is the vast majority of the stdlib by function count:
+
+**Core types (high-level ops):**
+- `Int.abs`, `Int.pow`, `Int.div_euclid`, `Int.mod_euclid`
+- `Float.is_nan`, `Float.is_infinite`, `Float.floor`/`ceil`/`round` (call intrinsic, wrap result)
+- `Bool.to_string`, `Char.is_alpha`, `Char.is_digit`, `Char.to_uppercase`, etc.
+- `String.split`, `String.join`, `String.trim`, `String.replace`, `String.starts_with`, `String.pad_left`, etc. (built on `slice` + `concat` + `length` primitives)
+
+**Option & Result — all of it:**
+- `map`, `flat_map`, `unwrap_or`, `filter`, `zip`, `to_result`, `collect`, etc.
+
+**List — all of it:**
+- `map`, `filter`, `fold_left`, `fold_right`, `reverse`, `sort`, `zip`, `take`, `drop`, `partition`, `find`, `any`, `all`, `sum`, `unique`, etc.
+
+**Map & Set — all of it:**
+- HAMT (hash array mapped trie) implementation is pure data structure code
+- `insert`, `get`, `remove`, `merge`, `fold`, `filter`, `keys`, `values`, etc.
+
+**Array (high-level ops):**
+- `map`, `fold_left`, `to_list`, `slice`, `sort`, `from_list`, `init` (built on `create`/`get`/`set` primitives)
+
+**Vector & NDArray — all of it:**
+- `dot`, `scale`, `zip_with`, `reshape`, `matmul`, `transpose` (built on Array primitives)
+
+**Iterator — all of it:**
+- Entirely closure-based: `map`, `filter`, `take`, `chain`, `enumerate`, `fold`, `to_list`, etc.
+
+**Math (pure):**
+- `min`, `max`, `clamp`, `lerp` (transcendentals are C intrinsics)
+
+**Time (pure logic):**
+- `Duration` constructors and arithmetic (just Int wrappers)
+- `DateTime` field accessors (`year`, `month`, `day`, etc.)
+- `format` and `parse` (string manipulation over a struct)
+
+**Regex (wrappers):**
+- `find_all`, `replace_with`, `split` (March logic over C `compile`/`exec`)
+
+**Concurrency (wrappers):**
+- `Task.parallel`, `Task.race`, `Stream.map`, `Stream.filter` (March logic over runtime `spawn`/`send`)
+
+**All typeclass impls for compound types:**
+- Eq, Ord, Show for Option, Result, List, Map, Set, tuples, etc.
+
+**Prelude combinators:**
+- `identity`, `compose`, `flip`, `const`
+
+### The ratio
+
+Roughly **~40 C/OCaml primitives** and **~300 March functions**. The stdlib is ~90% March, ~10% intrinsic — consistent with how Rust, Haskell, and OCaml structure their own standard libraries.
+
+### Migration path
+
+Functions start as OCaml builtins in the tree-walking interpreter. As the codegen matures, they migrate to March source one module at a time. The spec is implementation-language-agnostic — nothing in the API signatures changes when a function moves from OCaml to March.
