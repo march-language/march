@@ -1357,6 +1357,16 @@ and eval_expr (env : env) (e : expr) : value =
     [eval_with_reduction_tracking]. *)
 let last_reduction_count : int ref = ref 0
 
+(** Reset all scheduler/task state. Call between test runs. *)
+let reset_scheduler_state () : unit =
+  Hashtbl.clear task_registry;
+  next_task_id := 0;
+  Hashtbl.clear actor_registry;
+  Hashtbl.clear actor_defs_tbl;
+  next_pid := 0;
+  reduction_ctx := None;
+  last_reduction_count := 0
+
 (** Task builtins: spawn, await, await_unwrap, yield.
     Placed after [apply] because [task_spawn] calls [apply] to eagerly
     execute the thunk (Phase 1: single-threaded cooperative scheduler). *)

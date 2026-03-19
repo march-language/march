@@ -328,6 +328,10 @@ let vint = function March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt"
 let vstr = function March_eval.Eval.VString s -> s | _ -> failwith "expected VString"
 let vbool = function March_eval.Eval.VBool b -> b | _ -> failwith "expected VBool"
 
+let with_reset f () =
+  March_eval.Eval.reset_scheduler_state ();
+  f ()
+
 (** Convert a March VCon-linked-list to an OCaml list. *)
 let rec vlist = function
   | March_eval.Eval.VCon ("Nil", []) -> []
@@ -3402,28 +3406,28 @@ let () =
       ]);
       ( "scheduler",
         [
-          Alcotest.test_case "reduction counter ticks"     `Quick test_reduction_counter_ticks;
-          Alcotest.test_case "reduction counter exhausts"  `Quick test_reduction_counter_exhausts;
-          Alcotest.test_case "eval yields after budget"    `Quick test_eval_yields_after_budget;
-          Alcotest.test_case "eval no yield when disabled" `Quick test_eval_no_yield_when_disabled;
-          Alcotest.test_case "reduction count"             `Quick test_eval_reduction_count;
+          Alcotest.test_case "reduction counter ticks"     `Quick (with_reset test_reduction_counter_ticks);
+          Alcotest.test_case "reduction counter exhausts"  `Quick (with_reset test_reduction_counter_exhausts);
+          Alcotest.test_case "eval yields after budget"    `Quick (with_reset test_eval_yields_after_budget);
+          Alcotest.test_case "eval no yield when disabled" `Quick (with_reset test_eval_no_yield_when_disabled);
+          Alcotest.test_case "reduction count"             `Quick (with_reset test_eval_reduction_count);
         ] );
       ( "tasks",
         [
-          Alcotest.test_case "spawn and await"     `Quick test_eval_task_spawn_await;
-          Alcotest.test_case "await unwrap"        `Quick test_eval_task_await_unwrap;
-          Alcotest.test_case "multiple tasks"      `Quick test_eval_task_multiple;
-          Alcotest.test_case "task captures env"   `Quick test_eval_task_captures_env;
-          Alcotest.test_case "spawn_steal requires pool" `Quick test_eval_spawn_steal_requires_pool;
-          Alcotest.test_case "spawn_steal with pool"     `Quick test_eval_spawn_steal_with_pool;
-          Alcotest.test_case "workpool threading"        `Quick test_eval_workpool_threading;
-          Alcotest.test_case "task sends to actor"       `Quick test_eval_task_sends_to_actor;
+          Alcotest.test_case "spawn and await"     `Quick (with_reset test_eval_task_spawn_await);
+          Alcotest.test_case "await unwrap"        `Quick (with_reset test_eval_task_await_unwrap);
+          Alcotest.test_case "multiple tasks"      `Quick (with_reset test_eval_task_multiple);
+          Alcotest.test_case "task captures env"   `Quick (with_reset test_eval_task_captures_env);
+          Alcotest.test_case "spawn_steal requires pool" `Quick (with_reset test_eval_spawn_steal_requires_pool);
+          Alcotest.test_case "spawn_steal with pool"     `Quick (with_reset test_eval_spawn_steal_with_pool);
+          Alcotest.test_case "workpool threading"        `Quick (with_reset test_eval_workpool_threading);
+          Alcotest.test_case "task sends to actor"       `Quick (with_reset test_eval_task_sends_to_actor);
         ] );
       ( "work_stealing",
         [
-          Alcotest.test_case "deque push/pop"     `Quick test_deque_push_pop;
-          Alcotest.test_case "deque steal"        `Quick test_deque_steal;
-          Alcotest.test_case "deque size"         `Quick test_deque_size;
-          Alcotest.test_case "pool submit/steal"  `Quick test_pool_submit_steal;
+          Alcotest.test_case "deque push/pop"     `Quick (with_reset test_deque_push_pop);
+          Alcotest.test_case "deque steal"        `Quick (with_reset test_deque_steal);
+          Alcotest.test_case "deque size"         `Quick (with_reset test_deque_size);
+          Alcotest.test_case "pool submit/steal"  `Quick (with_reset test_pool_submit_steal);
         ] );
     ]
