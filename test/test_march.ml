@@ -2066,6 +2066,25 @@ let test_purity_let_impure () =
   Alcotest.(check bool) "let with impure rhs is impure" false
     (March_tir.Purity.is_pure expr)
 
+let test_purity_callptr () =
+  let f = March_tir.Tir.ALit (March_ast.Ast.LitInt 0) in  (* dummy closure *)
+  Alcotest.(check bool) "indirect call is impure" false
+    (March_tir.Purity.is_pure (March_tir.Tir.ECallPtr (f, [])))
+
+let test_purity_kill () =
+  Alcotest.(check bool) "kill is impure" false
+    (March_tir.Purity.is_pure (app "kill" [ilit 0]))
+
+let test_purity_incrc () =
+  let v = March_tir.Tir.AVar (mk_var "x" March_tir.Tir.TInt) in
+  Alcotest.(check bool) "EIncRC is impure" false
+    (March_tir.Purity.is_pure (March_tir.Tir.EIncRC v))
+
+let test_purity_free () =
+  let v = March_tir.Tir.AVar (mk_var "x" March_tir.Tir.TInt) in
+  Alcotest.(check bool) "EFree is impure" false
+    (March_tir.Purity.is_pure (March_tir.Tir.EFree v))
+
 let () =
   Alcotest.run "march"
     [
@@ -2306,5 +2325,9 @@ let () =
         Alcotest.test_case "send"         `Quick test_purity_send;
         Alcotest.test_case "let_pure"     `Quick test_purity_let_pure;
         Alcotest.test_case "let_impure"   `Quick test_purity_let_impure;
+        Alcotest.test_case "callptr"    `Quick test_purity_callptr;
+        Alcotest.test_case "kill"       `Quick test_purity_kill;
+        Alcotest.test_case "incrc"      `Quick test_purity_incrc;
+        Alcotest.test_case "free"       `Quick test_purity_free;
       ]);
     ]

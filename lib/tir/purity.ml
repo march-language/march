@@ -11,7 +11,7 @@ let rec is_pure : Tir.expr -> bool = function
   | Tir.EField _               -> true
   | Tir.EAlloc _               -> true   (* allocation is pure, side-effect-free *)
   | Tir.EStackAlloc _          -> true
-  | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EFree _ | Tir.EReuse _ -> true
+  | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EFree _ | Tir.EReuse _ -> false
   | Tir.EApp (f, _)            ->
     not (List.mem f.Tir.v_name impure_builtins)
   | Tir.ECallPtr _             -> false  (* indirect call — unknown target *)
