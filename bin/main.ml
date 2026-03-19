@@ -86,6 +86,7 @@ let output_file    = ref ""
 let debug_mode     = ref false
 let debug_tui_mode = ref false
 let opt_enabled    = ref true
+let fast_math      = ref false
 
 (* ------------------------------------------------------------------ *)
 (* File compiler                                                       *)
@@ -164,7 +165,7 @@ let compile filename =
     end else begin
       let basename = Filename.remove_extension filename in
       let ll_file  = basename ^ ".ll" in
-      let ir = March_tir.Llvm_emit.emit_module tir in
+      let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math tir in
       let oc = open_out ll_file in
       output_string oc ir;
       close_out oc;
@@ -223,6 +224,7 @@ let () =
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");
     ("--no-opt",    Arg.Clear opt_enabled,  " Skip TIR optimization passes");
+    ("--fast-math",  Arg.Set fast_math,  " Emit 'fast' on all FP LLVM instructions");
     ("--debug",     Arg.Set debug_mode,     " Enable time-travel debugger (simple mode)");
     ("--debug-tui", Arg.Set debug_tui_mode, " Enable time-travel debugger (TUI mode)");
   ] in

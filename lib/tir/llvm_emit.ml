@@ -34,9 +34,10 @@ type ctx = {
   top_fns   : (string, bool) Hashtbl.t;
   field_map : (string, (string * Tir.ty) list) Hashtbl.t;
   mutable ret_ty  : Tir.ty;
+  fast_math : bool;
 }
 
-let make_ctx () = {
+let make_ctx ?(fast_math=false) () = {
   buf      = Buffer.create 4096;
   preamble = Buffer.create 1024;
   ctr      = 0; blk = 0; str_ctr = 0;
@@ -44,6 +45,7 @@ let make_ctx () = {
   top_fns   = Hashtbl.create 64;
   field_map = Hashtbl.create 16;
   ret_ty   = Tir.TUnit;
+  fast_math;
 }
 
 (* ── Helpers ─────────────────────────────────────────────────────────── *)
@@ -372,7 +374,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let va = emit_atom_val ctx a in
     let vb = emit_atom_val ctx b in
     let r  = fresh ctx "ar" in
-    emit ctx (Printf.sprintf "%s = %s double %s, %s" r (float_arith_op f.Tir.v_name) va vb);
+    let op = float_arith_op f.Tir.v_name in
+    let op_str = if ctx.fast_math then op ^ " fast" else op in
+    emit ctx (Printf.sprintf "%s = %s double %s, %s" r op_str va vb);
     ("double", r)
 
   (* ── General function call ─────────────────────────────────────────── *)
@@ -762,8 +766,8 @@ let emit_main_wrapper (buf : Buffer.t) =
   Buffer.add_string buf
     "\ndefine i32 @main() {\nentry:\n  call void @march_main()\n  ret i32 0\n}\n"
 
-let emit_module (m : Tir.tir_module) : string =
-  let ctx = make_ctx () in
+let emit_module ?(fast_math=false) (m : Tir.tir_module) : string =
+  let ctx = make_ctx ~fast_math () in
   build_ctor_info ctx m;
   List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true)
     m.Tir.tm_fns;

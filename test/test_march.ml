@@ -2475,6 +2475,25 @@ let test_opt_no_infinite_loop () =
   Alcotest.(check string) "stable" "(Tir.EAtom (Tir.ALit (Ast.LitInt 42)))"
     (March_tir.Tir.show_expr (first_body m'))
 
+(* ── fast-math IR attribute ──────────────────────────────────────── *)
+
+let test_fast_math_emits_fast_attr () =
+  let x = mk_var "x" March_tir.Tir.TFloat in
+  let y = mk_var "y" March_tir.Tir.TFloat in
+  let fn_var name = mk_var name (March_tir.Tir.TFn ([], March_tir.Tir.TFloat)) in
+  let body = March_tir.Tir.EApp (fn_var "+.", [March_tir.Tir.AVar x; March_tir.Tir.AVar y]) in
+  let fd = { March_tir.Tir.fn_name = "fadd_test"; fn_params = [x; y];
+             fn_ret_ty = March_tir.Tir.TFloat; fn_body = body } in
+  let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fd]; tm_types = [] } in
+  let ir_fast   = March_tir.Llvm_emit.emit_module ~fast_math:true  m in
+  let ir_normal = March_tir.Llvm_emit.emit_module ~fast_math:false m in
+  Alcotest.(check bool) "fast_math IR contains 'fadd fast'" true
+    (let re = Str.regexp "fadd fast" in
+     (try ignore (Str.search_forward re ir_fast 0); true with Not_found -> false));
+  Alcotest.(check bool) "normal IR does not contain 'fadd fast'" false
+    (let re = Str.regexp "fadd fast" in
+     (try ignore (Str.search_forward re ir_normal 0); true with Not_found -> false))
+
 let () =
   Alcotest.run "march"
     [
@@ -2760,5 +2779,8 @@ let () =
       ("opt", [
         Alcotest.test_case "fixpoint"         `Quick test_opt_fixpoint;
         Alcotest.test_case "no_infinite_loop" `Quick test_opt_no_infinite_loop;
+      ]);
+      ("fast_math", [
+        Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;
       ]);
     ]
