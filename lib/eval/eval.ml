@@ -55,6 +55,16 @@ let actor_defs_tbl : (string, actor_def * env ref) Hashtbl.t = Hashtbl.create 8
 (** Live actor instances — reset per module eval. *)
 let actor_registry  : (int, actor_inst) Hashtbl.t = Hashtbl.create 16
 
+(** Task registry — maps task IDs to their result. *)
+type task_entry = {
+  te_id     : int;
+  mutable te_result : value option;
+  te_thunk  : value;  (** The closure to execute *)
+}
+
+let task_registry : (int, task_entry) Hashtbl.t = Hashtbl.create 16
+let next_task_id : int ref = ref 0
+
 (** Doc registry: fully-qualified name → doc string.
     Populated when [eval_decl] encounters a [DFn] with [fn_doc = Some s]. *)
 let doc_registry : (string, string) Hashtbl.t = Hashtbl.create 32
@@ -1339,6 +1349,60 @@ and eval_expr (env : env) (e : expr) : value =
      | `Err exn -> raise exn)
 
 (* ------------------------------------------------------------------ *)
+(* Task builtins                                                       *)
+(* These are defined after [apply] so they can call it directly.      *)
+(* ------------------------------------------------------------------ *)
+
+(** Task builtins: spawn, await, await_unwrap, yield.
+    Placed after [apply] because [task_spawn] calls [apply] to eagerly
+    execute the thunk (Phase 1: single-threaded cooperative scheduler). *)
+let task_builtins : env =
+  [ ("task_spawn", VBuiltin ("task_spawn", function
+      | [thunk] ->
+        let tid = !next_task_id in
+        next_task_id := tid + 1;
+        (* Phase 1: eagerly evaluate the thunk.
+           Phase 2 will enqueue on the run queue instead. *)
+        let result = apply thunk [] in
+        let entry = { te_id = tid; te_result = Some result; te_thunk = thunk } in
+        Hashtbl.add task_registry tid entry;
+        VTask tid
+      | _ -> eval_error "task_spawn: expected 1 argument (a function)"))
+
+  ; ("task_await", VBuiltin ("task_await", function
+      | [VTask tid] ->
+        (match Hashtbl.find_opt task_registry tid with
+         | Some entry ->
+           (match entry.te_result with
+            | Some v -> VCon ("Ok", [v])
+            | None -> VCon ("Err", [VString "task not completed"]))
+         | None -> VCon ("Err", [VString (Printf.sprintf "unknown task %d" tid)]))
+      | _ -> eval_error "task_await: expected 1 argument (a Task)"))
+
+  ; ("task_await_unwrap", VBuiltin ("task_await_unwrap", function
+      | [VTask tid] ->
+        (match Hashtbl.find_opt task_registry tid with
+         | Some entry ->
+           (match entry.te_result with
+            | Some v -> v
+            | None -> eval_error "task_await!: task %d not completed" tid)
+         | None -> eval_error "task_await!: unknown task %d" tid)
+      | _ -> eval_error "task_await!: expected 1 argument (a Task)"))
+
+  ; ("task_yield", VBuiltin ("task_yield", function
+      | [] ->
+        (* Voluntary yield — exhaust the budget so check_reductions raises Yield.
+           When reduction counting is disabled this is a no-op. *)
+        (match !reduction_ctx with
+         | Some ctx ->
+           ctx.March_scheduler.Scheduler.remaining <- 0;
+           ignore (March_scheduler.Scheduler.tick ctx)
+         | None -> ());
+        VUnit
+      | _ -> eval_error "task_yield: expected 0 arguments"))
+  ]
+
+(* ------------------------------------------------------------------ *)
 (* Module evaluation                                                   *)
 (* ------------------------------------------------------------------ *)
 
@@ -1432,14 +1496,16 @@ and eval_decls (env : env) (decls : decl list) : env =
     Pass 2: Re-evaluate each [DFn] so that its closure captures the
             fully-populated environment (including all stubs). *)
 let eval_module_env (m : module_) : env =
-  (* Reset global actor state for this module run *)
+  (* Reset global actor and task state for this module run *)
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.clear actor_registry;
   next_pid := 0;
+  Hashtbl.clear task_registry;
+  next_task_id := 0;
 
   (* Pass 1: stubs.  We use a ref cell shared across all stubs so that
      closures created in pass 2 can see the final environment. *)
-  let env_ref : env ref = ref base_env in
+  let env_ref : env ref = ref (task_builtins @ base_env) in
 
   (* Install a placeholder for every top-level fn *)
   let install_stub = function

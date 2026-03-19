@@ -2892,6 +2892,56 @@ let test_eval_no_yield_when_disabled () =
   let v = call_fn env "countdown" [March_eval.Eval.VInt 100_000] in
   Alcotest.(check int) "completes without yield" 0 (vint v)
 
+(* ── Task tests ──────────────────────────────────────────────────── *)
+
+let test_eval_task_spawn_await () =
+  let src = {|mod Test do
+    fn main() do
+      let t = task_spawn(fn () -> 42)
+      task_await_unwrap(t)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check int) "task returns 42" 42 (vint v)
+
+let test_eval_task_await_unwrap () =
+  let src = {|mod Test do
+    fn main() do
+      let t = task_spawn(fn () -> 99)
+      task_await_unwrap(t)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check int) "task unwrap returns 99" 99 (vint v)
+
+let test_eval_task_multiple () =
+  let src = {|mod Test do
+    fn main() do
+      let t1 = task_spawn(fn () -> 10)
+      let t2 = task_spawn(fn () -> 20)
+      let r1 = task_await_unwrap(t1)
+      let r2 = task_await_unwrap(t2)
+      r1 + r2
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check int) "two tasks sum to 30" 30 (vint v)
+
+let test_eval_task_captures_env () =
+  let src = {|mod Test do
+    fn main() do
+      let x = 5
+      let t = task_spawn(fn () -> x * x)
+      task_await_unwrap(t)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check int) "task captures outer x" 25 (vint v)
+
 let () =
   Alcotest.run "march"
     [
@@ -3228,5 +3278,12 @@ let () =
           Alcotest.test_case "reduction counter exhausts"  `Quick test_reduction_counter_exhausts;
           Alcotest.test_case "eval yields after budget"    `Quick test_eval_yields_after_budget;
           Alcotest.test_case "eval no yield when disabled" `Quick test_eval_no_yield_when_disabled;
+        ] );
+      ( "tasks",
+        [
+          Alcotest.test_case "spawn and await"     `Quick test_eval_task_spawn_await;
+          Alcotest.test_case "await unwrap"        `Quick test_eval_task_await_unwrap;
+          Alcotest.test_case "multiple tasks"      `Quick test_eval_task_multiple;
+          Alcotest.test_case "task captures env"   `Quick test_eval_task_captures_env;
         ] );
     ]
