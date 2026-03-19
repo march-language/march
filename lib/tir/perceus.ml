@@ -217,12 +217,16 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
        consumed by the match.  Free its header in every branch.  Branch-bound
        variables (br_vars) take over ownership of the children, so we only
        need to free the allocation header — EDecRC handles both the unique
-       case (RC→0 → free) and the shared case (RC>1 → just decrement). *)
-    let add_scrutinee_free body =
+       case (RC→0 → free) and the shared case (RC>1 → just decrement).
+       We tag the DecRC var with the CONCRETE constructor type (br.br_tag)
+       so that the FBIP pass can match it against same-constructor EAllocs. *)
+    let add_scrutinee_free_for ctor_tag body =
       match a with
       | Tir.AVar v when needs_rc v.Tir.v_ty
                      && not (StringSet.mem v.Tir.v_name live_after) ->
-        Tir.ESeq (Tir.EDecRC (Tir.AVar v), body)
+        (* Use the concrete ctor type so shape_matches works in FBIP. *)
+        let ctor_v = { v with Tir.v_ty = Tir.TCon (ctor_tag, []) } in
+        Tir.ESeq (Tir.EDecRC (Tir.AVar ctor_v), body)
       | _ -> body
     in
     let branches' = List.map (fun br ->
@@ -232,11 +236,16 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
       in
       let la = StringSet.diff live_after bound in
       let (body', _) = insert_rc_expr br.Tir.br_body la in
-      { br with Tir.br_body = add_scrutinee_free body' }
+      { br with Tir.br_body = add_scrutinee_free_for br.Tir.br_tag body' }
     ) branches in
     let default' = Option.map (fun d ->
-      let (d', _) = insert_rc_expr d live_after in
-      add_scrutinee_free d'
+      let (d_rc, _) = insert_rc_expr d live_after in
+      (* Default branch: no constructor tag known, use original type *)
+      (match a with
+       | Tir.AVar v when needs_rc v.Tir.v_ty
+                      && not (StringSet.mem v.Tir.v_name live_after) ->
+         Tir.ESeq (Tir.EDecRC (Tir.AVar v), d_rc)
+       | _ -> d_rc)
     ) default in
     (* Compute live_before from the original liveness *)
     let lb = live_before e live_after in
@@ -361,6 +370,63 @@ let elide_cancel_pairs (fn : Tir.fn_def) : Tir.fn_def =
 
 (* ── Phase 4: FBIP Reuse Detection ──────────────────────────────────────── *)
 
+(** Returns true if [name] occurs free anywhere in [e].  Used by FBIP to
+    check that sinking a DecRC past an ELet is safe. *)
+let rec name_free_in (name : string) (e : Tir.expr) : bool =
+  let atom_uses a = match a with
+    | Tir.AVar v -> String.equal v.Tir.v_name name
+    | Tir.ALit _ -> false
+  in
+  let atoms_use = List.exists atom_uses in
+  match e with
+  | Tir.EAtom a                              -> atom_uses a
+  | Tir.EApp (f, args)                       -> String.equal f.Tir.v_name name || atoms_use args
+  | Tir.ECallPtr (a, args)                   -> atom_uses a || atoms_use args
+  | Tir.ELet (v, e1, e2)                     ->
+    name_free_in name e1
+    || (not (String.equal v.Tir.v_name name) && name_free_in name e2)
+  | Tir.ELetRec (fns, body)                  ->
+    let bound = List.exists (fun fd -> String.equal fd.Tir.fn_name name) fns in
+    (not bound && name_free_in name body)
+    || List.exists (fun fd ->
+         let param_bound = List.exists (fun p -> String.equal p.Tir.v_name name) fd.Tir.fn_params in
+         not param_bound && name_free_in name fd.Tir.fn_body) fns
+  | Tir.ECase (a, branches, default)         ->
+    atom_uses a
+    || List.exists (fun br ->
+         let bv_bound = List.exists (fun v -> String.equal v.Tir.v_name name) br.Tir.br_vars in
+         not bv_bound && name_free_in name br.Tir.br_body) branches
+    || Option.fold ~none:false ~some:(name_free_in name) default
+  | Tir.ESeq (e1, e2)                        -> name_free_in name e1 || name_free_in name e2
+  | Tir.ETuple atoms | Tir.EAlloc (_, atoms)
+  | Tir.EStackAlloc (_, atoms)               -> atoms_use atoms
+  | Tir.ERecord fields                       -> List.exists (fun (_, a) -> atom_uses a) fields
+  | Tir.EField (a, _)                        -> atom_uses a
+  | Tir.EUpdate (a, fields)                  ->
+    atom_uses a || List.exists (fun (_, a) -> atom_uses a) fields
+  | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a -> atom_uses a
+  | Tir.EReuse (a, _, atoms)                 -> atom_uses a || atoms_use atoms
+
+(** Try to sink [EDecRC(dec_v)] into [body] through a chain of ELet
+    bindings, stopping when we find an EAlloc of matching shape.  Safe
+    only when [dec_v] does not appear in any RHS along the chain. *)
+let rec try_fbip_sink (dec_v : Tir.var) (body : Tir.expr) : Tir.expr option =
+  match body with
+  (* EAlloc in tail position — reuse directly *)
+  | Tir.EAlloc (ty, args)
+    when shape_matches dec_v.Tir.v_ty ty ->
+    Some (Tir.EReuse (Tir.AVar dec_v, ty, args))
+  (* EAlloc bound to a result variable *)
+  | Tir.ELet (result, Tir.EAlloc (ty, args), rest)
+    when shape_matches dec_v.Tir.v_ty ty ->
+    Some (Tir.ELet (result, Tir.EReuse (Tir.AVar dec_v, ty, args), rest))
+  (* dec_v not used in rhs — safe to sink past this binding *)
+  | Tir.ELet (v, rhs, inner)
+    when not (name_free_in dec_v.Tir.v_name rhs) ->
+    Option.map (fun inner' -> Tir.ELet (v, rhs, inner'))
+               (try_fbip_sink dec_v inner)
+  | _ -> None
+
 (** Detect DecRC + Alloc of matching shape and replace with Reuse. *)
 let rec fbip_expr (e : Tir.expr) : Tir.expr =
   match e with
@@ -372,12 +438,12 @@ let rec fbip_expr (e : Tir.expr) : Tir.expr =
     when shape_matches dec_v.Tir.v_ty ty ->
     let rest' = fbip_expr rest in
     Tir.ELet (result, Tir.EReuse (Tir.AVar dec_v, ty, args), rest')
-  (* Also handle ESeq form: ESeq(EDecRC v, ELet(result, EAlloc ...)) *)
-  | Tir.ESeq (Tir.EDecRC (Tir.AVar dec_v),
-              Tir.ELet (result, Tir.EAlloc (ty, args), rest))
-    when shape_matches dec_v.Tir.v_ty ty ->
-    let rest' = fbip_expr rest in
-    Tir.ELet (result, Tir.EReuse (Tir.AVar dec_v, ty, args), rest')
+  (* ESeq(EDecRC v, body): try to sink the decrc to be adjacent to an
+     EAlloc of matching shape anywhere down the let-chain. *)
+  | Tir.ESeq (Tir.EDecRC (Tir.AVar dec_v), body) ->
+    (match try_fbip_sink dec_v body with
+     | Some body' -> fbip_expr body'
+     | None       -> Tir.ESeq (Tir.EDecRC (Tir.AVar dec_v), fbip_expr body))
   (* Recurse into sub-expressions *)
   | Tir.ESeq (e1, e2) ->
     Tir.ESeq (fbip_expr e1, fbip_expr e2)

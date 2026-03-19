@@ -1,0 +1,74 @@
+-- Higher-order function pipeline benchmark.
+-- Runs map -> filter -> fold_left over a list of 1_000_000 integers.
+-- Tests closure call overhead, list allocation, and chained HOF performance.
+-- All list operations are tail-recursive (accumulator + reverse).
+--
+-- Usage: march --compile bench/list_ops.march -o bench/list_ops
+--        bench/list_ops
+
+mod ListOps do
+
+type IntList = INil | ICons(Int, IntList)
+
+-- Tail-recursive reverse
+fn irev(xs : IntList, acc : IntList) : IntList do
+  match xs with
+  | INil        -> acc
+  | ICons(h, t) -> irev(t, ICons(h, acc))
+  end
+end
+
+-- Tail-recursive range (builds reversed, then reverses)
+fn irange_acc(lo : Int, hi : Int, acc : IntList) : IntList do
+  if lo > hi then acc
+  else irange_acc(lo + 1, hi, ICons(lo, acc))
+end
+
+fn irange(lo : Int, hi : Int) : IntList do
+  irev(irange_acc(lo, hi, INil), INil)
+end
+
+-- Tail-recursive map (builds reversed, then reverses)
+fn imap_acc(xs : IntList, f : Int -> Int, acc : IntList) : IntList do
+  match xs with
+  | INil        -> acc
+  | ICons(h, t) -> imap_acc(t, f, ICons(f(h), acc))
+  end
+end
+
+fn imap(xs : IntList, f : Int -> Int) : IntList do
+  irev(imap_acc(xs, f, INil), INil)
+end
+
+-- Tail-recursive filter (builds reversed, then reverses)
+fn ifilter_acc(xs : IntList, pred : Int -> Bool, acc : IntList) : IntList do
+  match xs with
+  | INil        -> acc
+  | ICons(h, t) ->
+    if pred(h) then ifilter_acc(t, pred, ICons(h, acc))
+    else ifilter_acc(t, pred, acc)
+  end
+end
+
+fn ifilter(xs : IntList, pred : Int -> Bool) : IntList do
+  irev(ifilter_acc(xs, pred, INil), INil)
+end
+
+-- Fold is already tail-recursive
+fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+  match xs with
+  | INil        -> acc
+  | ICons(h, t) -> ifold(t, f(acc, h), f)
+  end
+end
+
+fn main() : Unit do
+  let n     = 1000000
+  let xs    = irange(1, n)
+  let ys    = imap(xs, fn x -> x * 2)
+  let zs    = ifilter(ys, fn x -> x % 3 == 0)
+  let total = ifold(zs, 0, fn (a, b) -> a + b)
+  println(int_to_string(total))
+end
+
+end

@@ -1,0 +1,47 @@
+-- Tree transform benchmark: FBIP (Functional But In-Place) showcase.
+-- inc_leaves maps over a tree incrementing every leaf value.
+-- With Perceus FBIP, March detects at compile time that the input tree is
+-- the unique owner and rewrites every node in-place (zero allocation after
+-- the first pass).  OCaml/C/Rust must allocate a fresh tree each pass.
+--
+-- Usage: march --compile bench/tree_transform.march -o bench/tree_transform
+--        bench/tree_transform   (hard-coded: depth=20, 100 passes)
+
+mod TreeTransform do
+
+type Tree = Leaf(Int) | Node(Tree, Tree)
+
+fn make(d : Int) : Tree do
+  if d == 0 then Leaf(0)
+  else Node(make(d - 1), make(d - 1))
+end
+
+-- FBIP: each pass reuses every node in-place when RC=1.
+fn inc_leaves(t : Tree) : Tree do
+  match t with
+  | Leaf(n)    -> Leaf(n + 1)
+  | Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
+  end
+end
+
+fn sum_leaves(t : Tree) : Int do
+  match t with
+  | Leaf(n)    -> n
+  | Node(l, r) -> sum_leaves(l) + sum_leaves(r)
+  end
+end
+
+fn repeat(t : Tree, n : Int) : Tree do
+  if n == 0 then t
+  else repeat(inc_leaves(t), n - 1)
+end
+
+fn main() : Unit do
+  let depth  = 20
+  let passes = 100
+  let t  = make(depth)
+  let t2 = repeat(t, passes)
+  println(int_to_string(sum_leaves(t2)))
+end
+
+end

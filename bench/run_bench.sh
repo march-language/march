@@ -67,6 +67,163 @@ func main() { fmt.Println(fib(40)) }
 EOF
 
 # ============================================================================
+# TREE-TRANSFORM SOURCE: depth=20 tree, inc_leaves x100 (FBIP showcase)
+# March rewrites nodes in-place (RC=1); other langs allocate fresh nodes.
+# ============================================================================
+
+# --- C -----------------------------------------------------------------------
+cat > "$TMP/tt.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+typedef struct T { int is_leaf; long val; struct T *l, *r; } T;
+T* mk(int d) {
+    T* n = malloc(sizeof(T));
+    if (d==0) { n->is_leaf=1; n->val=0; n->l=NULL; n->r=NULL; }
+    else { n->is_leaf=0; n->val=0; n->l=mk(d-1); n->r=mk(d-1); }
+    return n;
+}
+T* inc(T* t) {
+    T* n = malloc(sizeof(T));
+    if (t->is_leaf) { n->is_leaf=1; n->val=t->val+1; n->l=NULL; n->r=NULL; }
+    else { n->is_leaf=0; n->val=0; n->l=inc(t->l); n->r=inc(t->r); }
+    return n;
+}
+void fr(T* t) { if (!t->is_leaf) { fr(t->l); fr(t->r); } free(t); }
+long sm(T* t) { return t->is_leaf ? t->val : sm(t->l)+sm(t->r); }
+int main() {
+    T* t = mk(20);
+    for (int i=0; i<100; i++) { T* t2=inc(t); fr(t); t=t2; }
+    printf("%ld\n", sm(t)); fr(t);
+    return 0;
+}
+EOF
+
+# --- OCaml -------------------------------------------------------------------
+cat > "$TMP/tt.ml" <<'EOF'
+type t = Leaf of int | Node of t * t
+let rec mk d = if d=0 then Leaf 0 else Node(mk(d-1), mk(d-1))
+let rec inc = function Leaf n -> Leaf(n+1) | Node(l,r) -> Node(inc l, inc r)
+let rec sum = function Leaf n -> n | Node(l,r) -> sum l + sum r
+let () =
+  let t = ref (mk 20) in
+  for _ = 1 to 100 do t := inc !t done;
+  Printf.printf "%d\n" (sum !t)
+EOF
+
+# --- Python ------------------------------------------------------------------
+cat > "$TMP/tt.py" <<'EOF'
+import sys; sys.setrecursionlimit(2000000)
+class L:
+    __slots__=['v']
+    def __init__(self,v): self.v=v
+class N:
+    __slots__=['l','r']
+    def __init__(self,l,r): self.l=l; self.r=r
+def mk(d): return L(0) if d==0 else N(mk(d-1),mk(d-1))
+def inc(t):
+    if isinstance(t,L): return L(t.v+1)
+    return N(inc(t.l),inc(t.r))
+def sm(t): return t.v if isinstance(t,L) else sm(t.l)+sm(t.r)
+t=mk(20)
+for _ in range(100): t=inc(t)
+print(sm(t))
+EOF
+
+# --- Rust --------------------------------------------------------------------
+cat > "$TMP/tt.rs" <<'EOF'
+enum T { L(i64), N(Box<T>,Box<T>) }
+fn mk(d:u32)->T { if d==0{T::L(0)}else{T::N(Box::new(mk(d-1)),Box::new(mk(d-1)))} }
+fn inc(t:T)->T { match t { T::L(n)=>T::L(n+1), T::N(l,r)=>T::N(Box::new(inc(*l)),Box::new(inc(*r))) } }
+fn sm(t:&T)->i64 { match t { T::L(n)=>*n, T::N(l,r)=>sm(l)+sm(r) } }
+fn main() {
+    let mut t=mk(20);
+    for _ in 0..100 { t=inc(t); }
+    println!("{}",sm(&t));
+}
+EOF
+
+# --- Go ----------------------------------------------------------------------
+cat > "$TMP/tt.go" <<'EOF'
+package main
+import "fmt"
+type T struct{ isLeaf bool; val int64; l,r *T }
+func mk(d int)*T {
+    if d==0 { return &T{isLeaf:true} }
+    return &T{l:mk(d-1),r:mk(d-1)}
+}
+func inc(t *T)*T {
+    if t.isLeaf { return &T{isLeaf:true,val:t.val+1} }
+    return &T{l:inc(t.l),r:inc(t.r)}
+}
+func sm(t *T) int64 { if t.isLeaf { return t.val }; return sm(t.l)+sm(t.r) }
+func main() {
+    t:=mk(20)
+    for i:=0;i<100;i++ { t=inc(t) }
+    fmt.Println(sm(t))
+}
+EOF
+
+# ============================================================================
+# LIST-OPS SOURCE: range(1..1M) |> map(*2) |> filter(%3=0) |> fold(+,0)
+# Tests closure call overhead and HOF pipeline performance.
+# ============================================================================
+
+# --- C (arrays) --------------------------------------------------------------
+cat > "$TMP/lo.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+int main() {
+    int n=1000000;
+    long *buf = malloc(n*sizeof(long));
+    int m=0;
+    for(int i=1;i<=n;i++){ long v=i*2; if(v%3==0) buf[m++]=v; }
+    long total=0;
+    for(int i=0;i<m;i++) total+=buf[i];
+    printf("%ld\n",total);
+    free(buf);
+    return 0;
+}
+EOF
+
+# --- OCaml (List) ------------------------------------------------------------
+cat > "$TMP/lo.ml" <<'EOF'
+let () =
+  let xs = List.init 1000000 (fun i -> (i+1)*2) in
+  let zs = List.filter (fun x -> x mod 3 = 0) xs in
+  let total = List.fold_left (+) 0 zs in
+  Printf.printf "%d\n" total
+EOF
+
+# --- Python ------------------------------------------------------------------
+cat > "$TMP/lo.py" <<'EOF'
+xs = range(1,1000001)
+ys = (x*2 for x in xs)
+zs = [y for y in ys if y%3==0]
+print(sum(zs))
+EOF
+
+# --- Rust (iterators) --------------------------------------------------------
+cat > "$TMP/lo.rs" <<'EOF'
+fn main() {
+    let total:i64=(1i64..=1000000).map(|x|x*2).filter(|x|x%3==0).sum();
+    println!("{}",total);
+}
+EOF
+
+# --- Go ----------------------------------------------------------------------
+cat > "$TMP/lo.go" <<'EOF'
+package main
+import "fmt"
+func main() {
+    total:=int64(0)
+    for i:=int64(1);i<=1000000;i++{
+        v:=i*2; if v%3==0 { total+=v }
+    }
+    fmt.Println(total)
+}
+EOF
+
+# ============================================================================
 # BINARY-TREES SOURCE: depth=15
 # ============================================================================
 
@@ -197,13 +354,17 @@ bold "Compiling..."
 
 # March
 DUNE=/Users/80197052/.opam/march/bin/dune
-(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/fib.march -o "$TMP/march_fib" 2>/dev/null)
-(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/binary_trees.march -o "$TMP/march_bt" 2>/dev/null)
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/fib.march            -o "$TMP/march_fib" 2>/dev/null)
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/binary_trees.march   -o "$TMP/march_bt"  2>/dev/null)
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/tree_transform.march -o "$TMP/march_tt"  2>/dev/null)
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/list_ops.march       -o "$TMP/march_lo"  2>/dev/null)
 
 # C
 if has clang; then
   clang -O2 -o "$TMP/c_fib" "$TMP/fib.c"
   clang -O2 -o "$TMP/c_bt"  "$TMP/bt.c"
+  clang -O2 -o "$TMP/c_tt"  "$TMP/tt.c"
+  clang -O2 -o "$TMP/c_lo"  "$TMP/lo.c"
 fi
 
 # OCaml
@@ -211,21 +372,29 @@ OCAMLOPT=/Users/80197052/.opam/march/bin/ocamlopt
 if [ -x "$OCAMLOPT" ]; then
   "$OCAMLOPT" "$TMP/fib.ml" -o "$TMP/ocaml_fib" 2>/dev/null
   "$OCAMLOPT" "$TMP/bt.ml"  -o "$TMP/ocaml_bt"  2>/dev/null
+  "$OCAMLOPT" "$TMP/tt.ml"  -o "$TMP/ocaml_tt"  2>/dev/null
+  "$OCAMLOPT" "$TMP/lo.ml"  -o "$TMP/ocaml_lo"  2>/dev/null
 elif has ocamlopt; then
   ocamlopt "$TMP/fib.ml" -o "$TMP/ocaml_fib" 2>/dev/null
   ocamlopt "$TMP/bt.ml"  -o "$TMP/ocaml_bt"  2>/dev/null
+  ocamlopt "$TMP/tt.ml"  -o "$TMP/ocaml_tt"  2>/dev/null
+  ocamlopt "$TMP/lo.ml"  -o "$TMP/ocaml_lo"  2>/dev/null
 fi
 
 # Rust
 if has rustc; then
   rustc -O "$TMP/fib.rs" -o "$TMP/rust_fib" 2>/dev/null
   rustc -O "$TMP/bt.rs"  -o "$TMP/rust_bt"  2>/dev/null
+  rustc -O "$TMP/tt.rs"  -o "$TMP/rust_tt"  2>/dev/null
+  rustc -O "$TMP/lo.rs"  -o "$TMP/rust_lo"  2>/dev/null
 fi
 
 # Go
 if has go; then
   go build -o "$TMP/go_fib" "$TMP/fib.go" 2>/dev/null
   go build -o "$TMP/go_bt"  "$TMP/bt.go"  2>/dev/null
+  go build -o "$TMP/go_tt"  "$TMP/tt.go"  2>/dev/null
+  go build -o "$TMP/go_lo"  "$TMP/lo.go"  2>/dev/null
 fi
 
 # ============================================================================
@@ -273,5 +442,29 @@ run_if      "$TMP/ocaml_bt"  "OCaml"
 run_if_interp python3 "$TMP/bt.py"  "Python"
 run_if      "$TMP/rust_bt"   "Rust"
 run_if      "$TMP/go_bt"     "Go"
+
+echo ""
+bold "═══ tree-transform: depth=20, inc_leaves x100 (FBIP) ═══"
+printf '  March rewrites in-place (RC=1); others always alloc fresh nodes.\n'
+printf '  %-10s %-12s\n' "Language" "Time"
+printf '  %-10s %-12s\n' "--------" "----"
+run_if      "$TMP/march_tt"  "March"
+run_if      "$TMP/c_tt"      "C"
+run_if      "$TMP/ocaml_tt"  "OCaml"
+run_if_interp python3 "$TMP/tt.py"  "Python"
+run_if      "$TMP/rust_tt"   "Rust"
+run_if      "$TMP/go_tt"     "Go"
+
+echo ""
+bold "═══ list-ops: range(1M) |> map(*2) |> filter(%3=0) |> fold(+) ═══"
+printf '  Tests closure call overhead. C/Go/Rust use direct loops (best case).\n'
+printf '  %-10s %-12s\n' "Language" "Time"
+printf '  %-10s %-12s\n' "--------" "----"
+run_if      "$TMP/march_lo"  "March"
+run_if      "$TMP/c_lo"      "C"
+run_if      "$TMP/ocaml_lo"  "OCaml"
+run_if_interp python3 "$TMP/lo.py"  "Python"
+run_if      "$TMP/rust_lo"   "Rust"
+run_if      "$TMP/go_lo"     "Go"
 
 echo ""
