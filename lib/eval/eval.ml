@@ -985,6 +985,152 @@ let base_env : env =
         | _ -> eval_error "todo: not yet implemented"))
   ; ("unreachable_", VBuiltin ("unreachable_", function
         | _ -> eval_error "unreachable: reached unreachable code"))
+    (* ---- TCP socket builtins ---- *)
+  ; ("tcp_connect", VBuiltin ("tcp_connect", function
+        | [VString host; VInt port] ->
+          (try
+             let open Unix in
+             let addrs = getaddrinfo host (string_of_int port)
+               [AI_FAMILY PF_INET; AI_SOCKTYPE SOCK_STREAM] in
+             (match addrs with
+              | [] -> VCon ("Err", [VString ("cannot resolve " ^ host)])
+              | ai :: _ ->
+                let fd = socket ai.ai_family ai.ai_socktype ai.ai_protocol in
+                (try
+                   connect fd ai.ai_addr;
+                   VCon ("Ok", [VInt (Obj.magic fd : int)])
+                 with Unix_error (err, _, _) ->
+                   close fd;
+                   VCon ("Err", [VString (error_message err)])))
+           with
+           | Unix.Unix_error (err, _, _) ->
+             VCon ("Err", [VString (Unix.error_message err)])
+           | exn ->
+             VCon ("Err", [VString (Printexc.to_string exn)]))
+        | _ -> eval_error "tcp_connect(host, port)"))
+  ; ("tcp_send_all", VBuiltin ("tcp_send_all", function
+        | [VInt fd; VString data] ->
+          let sock = (Obj.magic fd : Unix.file_descr) in
+          let buf = Bytes.of_string data in
+          let total = Bytes.length buf in
+          let rec loop off =
+            if off >= total then VCon ("Ok", [VUnit])
+            else
+              try
+                let n = Unix.send sock buf off (total - off) [] in
+                loop (off + n)
+              with Unix.Unix_error (err, _, _) ->
+                VCon ("Err", [VString (Unix.error_message err)])
+          in
+          loop 0
+        | _ -> eval_error "tcp_send_all(fd, data)"))
+  ; ("tcp_recv_all", VBuiltin ("tcp_recv_all", function
+        | [VInt fd; VInt max_bytes; VInt _timeout_ms] ->
+          let sock = (Obj.magic fd : Unix.file_descr) in
+          let buf = Buffer.create 4096 in
+          let chunk = Bytes.create 4096 in
+          let rec loop total =
+            if total >= max_bytes then
+              VCon ("Ok", [VString (Buffer.contents buf)])
+            else
+              try
+                let to_read = min 4096 (max_bytes - total) in
+                let n = Unix.recv sock chunk 0 to_read [] in
+                if n = 0 then VCon ("Ok", [VString (Buffer.contents buf)])
+                else begin
+                  Buffer.add_subbytes buf chunk 0 n;
+                  loop (total + n)
+                end
+              with Unix.Unix_error (err, _, _) ->
+                VCon ("Err", [VString (Unix.error_message err)])
+          in
+          loop 0
+        | _ -> eval_error "tcp_recv_all(fd, max_bytes, timeout_ms)"))
+  ; ("tcp_close", VBuiltin ("tcp_close", function
+        | [VInt fd] ->
+          (try Unix.close (Obj.magic fd : Unix.file_descr) with _ -> ());
+          VUnit
+        | _ -> eval_error "tcp_close(fd)"))
+    (* ---- HTTP serialization builtins ---- *)
+  ; ("http_serialize_request", VBuiltin ("http_serialize_request", function
+        | [VString meth; VString host; VString path; query_opt; header_list; VString body] ->
+          let buf = Buffer.create 256 in
+          let query_str = match query_opt with
+            | VCon ("Some", [VString q]) -> "?" ^ q
+            | _ -> ""
+          in
+          Buffer.add_string buf meth;
+          Buffer.add_char buf ' ';
+          Buffer.add_string buf path;
+          Buffer.add_string buf query_str;
+          Buffer.add_string buf " HTTP/1.1\r\n";
+          Buffer.add_string buf "Host: ";
+          Buffer.add_string buf host;
+          Buffer.add_string buf "\r\n";
+          let rec add_headers = function
+            | VCon ("Nil", []) -> ()
+            | VCon ("Cons", [VCon ("Header", [VString n; VString v]); rest]) ->
+              Buffer.add_string buf n;
+              Buffer.add_string buf ": ";
+              Buffer.add_string buf v;
+              Buffer.add_string buf "\r\n";
+              add_headers rest
+            | _ -> ()
+          in
+          add_headers header_list;
+          if body <> "" then begin
+            Buffer.add_string buf "Content-Length: ";
+            Buffer.add_string buf (string_of_int (String.length body));
+            Buffer.add_string buf "\r\n"
+          end;
+          Buffer.add_string buf "\r\n";
+          Buffer.add_string buf body;
+          VString (Buffer.contents buf)
+        | _ -> eval_error "http_serialize_request(method, host, path, query_opt, headers, body)"))
+  ; ("http_parse_response", VBuiltin ("http_parse_response", function
+        | [VString raw] ->
+          let header_end =
+            let rec find i =
+              if i + 3 >= String.length raw then String.length raw
+              else if raw.[i] = '\r' && raw.[i+1] = '\n' && raw.[i+2] = '\r' && raw.[i+3] = '\n' then i
+              else find (i + 1)
+            in find 0
+          in
+          let header_section = String.sub raw 0 header_end in
+          let body =
+            if header_end + 4 <= String.length raw then
+              String.sub raw (header_end + 4) (String.length raw - header_end - 4)
+            else ""
+          in
+          let lines = String.split_on_char '\n' header_section in
+          (match lines with
+           | [] -> VCon ("Err", [VString "empty response"])
+           | status_line :: rest ->
+             let trimmed_status = String.trim status_line in
+             let parts = String.split_on_char ' ' trimmed_status in
+             (match parts with
+              | _ :: code_str :: _ ->
+                (try
+                   let code = int_of_string code_str in
+                   let hdrs = List.filter_map (fun line ->
+                     let t = String.trim line in
+                     if t = "" then None
+                     else match String.index_opt t ':' with
+                       | Some i ->
+                         let name = String.trim (String.sub t 0 i) in
+                         let value = String.trim (String.sub t (i+1) (String.length t - i - 1)) in
+                         Some (name, value)
+                       | None -> None
+                   ) rest in
+                   let header_list = List.fold_right (fun (n, v) acc ->
+                     VCon ("Cons", [VCon ("Header", [VString n; VString v]); acc])
+                   ) hdrs (VCon ("Nil", [])) in
+                   VCon ("Ok", [VTuple [VInt code; header_list; VString body]])
+                 with _ ->
+                   VCon ("Err", [VString ("bad status code: " ^ code_str)]))
+              | _ ->
+                VCon ("Err", [VString ("bad status line: " ^ (List.hd lines))])))
+        | _ -> eval_error "http_parse_response(raw_string)"))
   ]
 
 (* ------------------------------------------------------------------ *)
@@ -1433,6 +1579,10 @@ let task_builtins : env =
   ; ("task_reductions", VBuiltin ("task_reductions", function
     | [] -> VInt !last_reduction_count
     | _ -> eval_error "task_reductions: expected 0 arguments"))
+
+  ; ("get_work_pool", VBuiltin ("get_work_pool", function
+    | [] -> VWorkPool
+    | _ -> eval_error "get_work_pool: expected 0 arguments"))
   ]
 
 (** Run [thunk] (a zero-argument closure) while counting reductions.

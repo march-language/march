@@ -374,6 +374,64 @@ let _t_option = t_option
 let _t_result = t_result
 let _t_pid    = t_pid
 
+(* =================================================================
+   Capability hierarchy for needs / Cap checking.
+   Each entry: (cap_path, parent_path option).
+   Paths are dot-joined strings, e.g. "IO.FileRead".
+   FFI caps like "LibC" are valid but not in this table — they are
+   their own roots and have no subtyping relationship.
+   ================================================================= *)
+
+let io_cap_hierarchy : (string * string option) list = [
+  ("IO",            None);
+  ("IO.Console",    Some "IO");
+  ("IO.FileSystem", Some "IO");
+  ("IO.FileRead",   Some "IO.FileSystem");
+  ("IO.FileWrite",  Some "IO.FileSystem");
+  ("IO.Network",    Some "IO");
+  ("IO.NetConnect", Some "IO.Network");
+  ("IO.NetListen",  Some "IO.Network");
+  ("IO.Process",    Some "IO");
+  ("IO.Clock",      Some "IO");
+]
+
+(** [cap_ancestors cap] returns [cap] and all its ancestors, most-specific first.
+    E.g., "IO.FileRead" → ["IO.FileRead"; "IO.FileSystem"; "IO"].
+    FFI caps not in the table return just themselves. *)
+let cap_ancestors cap =
+  let rec go c acc =
+    let acc' = c :: acc in
+    match List.assoc_opt c io_cap_hierarchy with
+    | Some (Some parent) -> go parent acc'
+    | _ -> acc'
+  in
+  List.rev (go cap [])
+
+(** [cap_subsumes parent child] — true if [parent] is an ancestor of (or equal to) [child].
+    E.g., cap_subsumes "IO" "IO.FileRead" = true. *)
+let cap_subsumes parent child =
+  List.mem parent (cap_ancestors child)
+
+(** [cap_path_of_names names] joins AST name list to dot-string. *)
+let cap_path_of_names names =
+  String.concat "." (List.map (fun (n : Ast.name) -> n.txt) names)
+
+(** [cap_paths_in_surface_ty ty] returns all Cap(X) paths referenced in [ty]. *)
+let rec cap_paths_in_surface_ty (ty : Ast.ty) : string list =
+  match ty with
+  | Ast.TyCon (con, [arg]) when con.txt = "Cap" ->
+    (match arg with
+     | Ast.TyCon (name, []) -> [name.txt]
+     | _ -> [])
+  | Ast.TyCon (_, args) -> List.concat_map cap_paths_in_surface_ty args
+  | Ast.TyArrow (a, b) ->
+    cap_paths_in_surface_ty a @ cap_paths_in_surface_ty b
+  | Ast.TyTuple ts -> List.concat_map cap_paths_in_surface_ty ts
+  | Ast.TyRecord fields ->
+    List.concat_map (fun (_, t) -> cap_paths_in_surface_ty t) fields
+  | Ast.TyLinear (_, t) -> cap_paths_in_surface_ty t
+  | _ -> []
+
 (** Built-in binary operator schemes.
     We use level-0 fresh vars for polymorphic ops — they will be
     properly instantiated each time [instantiate] is called. *)
@@ -534,6 +592,16 @@ let builtin_bindings : (string * scheme) list =
     ("panic",       poly1 (fun a -> TArrow (t_string, a)));
     ("todo_",       poly1 (fun a -> TArrow (t_string, a)));
     ("unreachable_",poly1 (fun a -> TArrow (t_unit,   a)));
+    (* Task builtins — fn () -> expr is a zero-param lambda (type = expr_ty),
+       so task_spawn takes the thunk as a generic value, not Unit -> a.
+       The thunk is a closure at runtime; the typechecker sees it as 'a'. *)
+    ("task_spawn",         poly1 (fun a -> TArrow (a, TCon ("Task", [a]))));
+    ("task_await",         poly1 (fun a -> TArrow (TCon ("Task", [a]), t_result a t_string)));
+    ("task_await_unwrap",  poly1 (fun a -> TArrow (TCon ("Task", [a]), a)));
+    ("task_yield",         Mono (TArrow (t_unit, t_unit)));
+    ("task_spawn_steal",   poly1 (fun a -> TArrow (TCon ("WorkPool", []), TArrow (a, TCon ("Task", [a])))));
+    ("task_reductions",    Mono (TArrow (t_unit, t_int)));
+    ("get_work_pool",      Mono (TArrow (t_unit, TCon ("WorkPool", []))));
   ]
 
 let builtin_types : (string * int) list =
@@ -542,8 +610,13 @@ let builtin_types : (string * int) list =
     ("List",   1); ("Option", 1); ("Array", 1); ("Set",    1);
     ("Result", 2); ("Map",    2);
     ("Pid",    1); ("Cap",    1); ("Future",1); ("Stream", 1);
-    ("Task",   1); ("Node",   0);
-    ("Vector", 2); ("Matrix", 3); ("NDArray", 2); ]
+    ("Task",   1); ("WorkPool", 0); ("Node",   0);
+    ("Vector", 2); ("Matrix", 3); ("NDArray", 2);
+    (* Capability token types — used as arguments to Cap(X) *)
+    ("IO",            0); ("IO.Console",    0); ("IO.FileSystem", 0);
+    ("IO.FileRead",   0); ("IO.FileWrite",  0); ("IO.Network",    0);
+    ("IO.NetConnect", 0); ("IO.NetListen",  0); ("IO.Process",    0);
+    ("IO.Clock",      0); ]
 
 (** Built-in constructor table for Option, Result, and List, which are
     pre-registered types.  User-declared types are added via [DType]. *)
@@ -1488,6 +1561,65 @@ let actor_handler_hints state_ty inferred_ty =
   | t ->
     [Printf.sprintf "handler must return a record matching the state, not %s" (pp_ty t)]
 
+(** [check_module_needs env mod_name decls] validates capability declarations for a module:
+    1. Every Cap(X) in any function signature must be covered by a [needs] declaration.
+    2. Every [needs X] must be used by at least one function.
+    3. Hint when Cap(IO) (root) is used — narrower caps may be more appropriate. *)
+let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list) =
+  let declared_needs = List.concat_map (function
+    | Ast.DNeeds (caps, _) -> List.map cap_path_of_names caps
+    | _ -> []
+  ) decls in
+  let used_caps : (string * Ast.span) list = List.concat_map (function
+    | Ast.DFn (def, sp) ->
+      let param_tys = List.filter_map (fun p ->
+        match p with
+        | Ast.FPNamed { param_ty = Some t; _ } -> Some t
+        | _ -> None
+      ) (List.concat_map (fun c -> c.Ast.fc_params) def.fn_clauses) in
+      let ret_tys = Option.to_list def.fn_ret_ty in
+      List.concat_map (fun t ->
+        List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty t)
+      ) (param_tys @ ret_tys)
+    | _ -> []
+  ) decls in
+  (* Check 1: every Cap(X) must be covered by a declared need *)
+  List.iter (fun (cap_path, sp) ->
+    let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
+    if not covered then
+      Err.error env.errors ~span:sp
+        (Printf.sprintf
+           "capability `Cap(%s)` used in module `%s` but `%s` is not declared in `needs`.\n\
+            help: add `needs %s` to the module body."
+           cap_path mod_name.txt cap_path cap_path)
+  ) used_caps;
+  (* Check 2: every needs declaration must be used *)
+  List.iter (fun need ->
+    let need_sp =
+      let rec find_span = function
+        | [] -> mod_name.span
+        | Ast.DNeeds (caps, s) :: _
+          when List.exists (fun names -> cap_path_of_names names = need) caps -> s
+        | _ :: rest -> find_span rest
+      in
+      find_span decls
+    in
+    let used = List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) used_caps in
+    if not used then
+      Err.warning env.errors ~span:need_sp
+        (Printf.sprintf
+           "module `%s` declares `needs %s` but no function requires `Cap(%s)` or a sub-capability.\n\
+            help: remove the unused capability declaration."
+           mod_name.txt need need)
+  ) declared_needs;
+  (* Check 3 (hint): Cap(IO) root — suggest narrowing *)
+  List.iter (fun (cap_path, sp) ->
+    if cap_path = "IO" then
+      Err.hint env.errors ~span:sp
+        "this function takes `Cap(IO)` (the root capability); \
+         consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege."
+  ) used_caps
+
 let rec check_decl env (d : Ast.decl) : env =
   match d with
   | Ast.DFn (def, sp) ->
@@ -1637,6 +1769,8 @@ let rec check_decl env (d : Ast.decl) : env =
                   name.txt tname.txt name.txt)
          ) sdef.sig_types
     );
+    (* Validate capability declarations for this module *)
+    check_module_needs env name decls;
     (* Expose only public names as "ModName.name" in the outer env *)
     let new_names = List.filter_map (fun (k, sch) ->
         if List.mem k pub_set
@@ -1800,5 +1934,7 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
     ) (base_env errors type_map) m.Ast.mod_decls
   in
   (* Pass 2: full checking *)
-  ignore (List.fold_left check_decl pre_env m.Ast.mod_decls);
+  let final_env = List.fold_left check_decl pre_env m.Ast.mod_decls in
+  (* Validate capability declarations for the top-level module *)
+  check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;
   (errors, type_map)

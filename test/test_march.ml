@@ -2854,6 +2854,138 @@ let test_iolist_byte_size () =
   Alcotest.(check int) "IOList.byte_size" 5
     (vint (call_fn env "f" []))
 
+(* ── Http stdlib module tests ──────────────────────────────────────────── *)
+
+let eval_with_http src =
+  let string_decl = load_stdlib_file_for_test "string.march" in
+  let http_decl = load_stdlib_file_for_test "http.march" in
+  eval_with_stdlib [string_decl; http_decl] src
+
+let test_http_parse_url () =
+  let env = eval_with_http {|mod Test do
+    fn f() do
+      match Http.parse_url("https://example.com/path?q=1") with
+      | Ok(req) -> Http.host(req)
+      | Err(_) -> "fail"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "parse_url host" "example.com" (vstr (call_fn env "f" []))
+
+let test_http_parse_url_scheme () =
+  let env = eval_with_http {|mod Test do
+    fn f() do
+      match Http.parse_url("http://localhost:8080/api") with
+      | Ok(req) ->
+        match Http.scheme(req) with
+        | SchemeHttp -> "http"
+        | SchemeHttps -> "https"
+        end
+      | Err(_) -> "fail"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "parse_url scheme" "http" (vstr (call_fn env "f" []))
+
+let test_http_parse_url_path () =
+  let env = eval_with_http {|mod Test do
+    fn f() do
+      match Http.parse_url("https://example.com/api/v1") with
+      | Ok(req) -> Http.path(req)
+      | Err(_) -> "fail"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "parse_url path" "/api/v1" (vstr (call_fn env "f" []))
+
+let test_http_parse_url_port () =
+  let env = eval_with_http {|mod Test do
+    fn f() do
+      match Http.parse_url("http://localhost:3000/") with
+      | Ok(req) ->
+        match Http.port(req) with
+        | Some(p) -> p
+        | None -> 0
+        end
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "parse_url port" 3000 (vint (call_fn env "f" []))
+
+let test_http_parse_url_invalid () =
+  let env = eval_with_http {|mod Test do
+    fn f() do
+      match Http.parse_url("ftp://bad") with
+      | Ok(_) -> "ok"
+      | Err(InvalidScheme(_)) -> "invalid_scheme"
+      | Err(_) -> "other_error"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "parse_url invalid scheme" "invalid_scheme" (vstr (call_fn env "f" []))
+
+let test_http_set_header () =
+  let env = eval_with_http {|mod Test do
+    fn f() do
+      match Http.get("https://example.com") with
+      | Ok(req) ->
+        let req = Http.set_header(req, "Accept", "application/json")
+        match Http.get_request_header(req, "accept") with
+        | Some(v) -> v
+        | None -> "none"
+        end
+      | Err(_) -> "error"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "set_header" "application/json" (vstr (call_fn env "f" []))
+
+let test_http_method_to_string () =
+  let env = eval_with_http {|mod Test do
+    fn f() do
+      match Http.post("https://example.com", ()) with
+      | Ok(req) -> Http.method_to_string(Http.method(req))
+      | Err(_) -> "fail"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "method_to_string" "POST" (vstr (call_fn env "f" []))
+
+let test_http_status_helpers () =
+  let env = eval_with_http {|mod Test do
+    fn f() do Http.is_success(Http.status_ok()) end
+  end|} in
+  Alcotest.(check bool) "status_ok is success" true (vbool (call_fn env "f" []))
+
+let test_http_post_constructor () =
+  let env = eval_with_http {|mod Test do
+    fn f() do
+      match Http.post("https://example.com/api", "body data") with
+      | Ok(req) -> Http.method_to_string(Http.method(req))
+      | Err(_) -> "fail"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "post method" "POST" (vstr (call_fn env "f" []))
+
+let test_http_encode_query () =
+  let env = eval_with_http {|mod Test do
+    fn f() do
+      Http.encode_query(Cons(("key", "value"), Cons(("foo", "bar"), Nil)))
+    end
+  end|} in
+  Alcotest.(check string) "encode_query" "key=value&foo=bar" (vstr (call_fn env "f" []))
+
+let test_http_response_helpers () =
+  let env = eval_with_http {|mod Test do
+    fn f() do
+      let resp = Response(Status(404), Nil, "Not Found")
+      Http.response_status_code(resp)
+    end
+  end|} in
+  Alcotest.(check int) "response status code" 404 (vint (call_fn env "f" []))
+
 (* ── Scheduler tests ───────────────────────────────────────────────── *)
 
 let test_reduction_counter_ticks () =
@@ -3073,6 +3205,105 @@ let test_pool_submit_steal () =
   March_scheduler.Work_pool.submit pool 0 "task_b";
   let stolen = March_scheduler.Work_pool.Deque.steal pool.workers.(0) in
   Alcotest.(check (option string)) "stole task_a" (Some "task_a") stolen
+
+(* ── Capability security tests ─────────────────────────────────────────── *)
+
+(* Pure module with no Cap usage and no needs — should be clean *)
+let test_cap_needs_pure_ok () =
+  let ctx = typecheck {|mod Test do
+    fn add(x, y) do x + y end
+  end|} in
+  Alcotest.(check bool) "pure module: no errors" false (has_errors ctx)
+
+(* Module declares needs and uses Cap in a function signature — should be clean *)
+let test_cap_needs_declared_ok () =
+  let ctx = typecheck {|mod Test do
+    needs IO
+    fn greet(cap : Cap(IO)) do
+      cap
+    end
+  end|} in
+  Alcotest.(check bool) "declared needs with Cap: no errors" false (has_errors ctx)
+
+(* Module uses Cap(IO) in a signature without declaring needs IO — should error *)
+let test_cap_missing_needs_error () =
+  let ctx = typecheck {|mod Test do
+    fn greet(cap : Cap(IO)) do
+      cap
+    end
+  end|} in
+  Alcotest.(check bool) "undeclared Cap is an error" true (has_errors ctx)
+
+(* Module declares needs IO but never uses Cap(IO) anywhere — should warn *)
+let test_cap_unused_needs_warning () =
+  let ctx = typecheck {|mod Test do
+    needs IO
+    fn add(x, y) do x + y end
+  end|} in
+  Alcotest.(check bool) "unused needs produces a diagnostic" true
+    (March_errors.Errors.has_diagnostics ctx)
+
+(* Cap(IO) as supertype covers Cap(IO.Network) usage *)
+let test_cap_supertype_covers_subtype () =
+  let ctx = typecheck {|mod Test do
+    needs IO
+    fn connect(cap : Cap(IO.Network)) do
+      cap
+    end
+  end|} in
+  Alcotest.(check bool) "needs IO covers Cap(IO.Network): no errors" false (has_errors ctx)
+
+(* Cap(IO.Network) does NOT cover Cap(IO.FileRead) *)
+let test_cap_needs_wrong_subtype () =
+  let ctx = typecheck {|mod Test do
+    needs IO.Network
+    fn read_file(cap : Cap(IO.FileRead)) do
+      cap
+    end
+  end|} in
+  Alcotest.(check bool) "needs IO.Network does not cover Cap(IO.FileRead): error" true
+    (has_errors ctx)
+
+(* Multiple needs declarations are supported *)
+let test_cap_multiple_needs () =
+  let ctx = typecheck {|mod Test do
+    needs IO.Network, IO.FileRead
+    fn connect(cap : Cap(IO.Network)) do cap end
+    fn read_file(cap : Cap(IO.FileRead)) do cap end
+  end|} in
+  Alcotest.(check bool) "multiple needs: no errors" false (has_errors ctx)
+
+(* needs IO is parsed correctly *)
+let test_cap_parse_needs () =
+  let src = {|mod Test do
+    needs IO
+    fn f(x) do x end
+  end|} in
+  let m = parse_and_desugar src in
+  let has_needs = List.exists (fun d ->
+    match d with
+    | March_ast.Ast.DNeeds _ -> true
+    | _ -> false
+  ) m.March_ast.Ast.mod_decls in
+  Alcotest.(check bool) "DNeeds present in AST" true has_needs
+
+(* needs with dotted path is parsed correctly *)
+let test_cap_parse_needs_dotted () =
+  let src = {|mod Test do
+    needs IO.Network
+    fn f(x) do x end
+  end|} in
+  let m = parse_and_desugar src in
+  let cap_paths = List.filter_map (fun d ->
+    match d with
+    | March_ast.Ast.DNeeds (caps, _) ->
+      Some (List.map (fun names ->
+        String.concat "." (List.map (fun (n : March_ast.Ast.name) -> n.txt) names)
+      ) caps)
+    | _ -> None
+  ) m.March_ast.Ast.mod_decls in
+  Alcotest.(check bool) "IO.Network parsed as DNeeds" true
+    (List.exists (fun paths -> List.mem "IO.Network" paths) cap_paths)
 
 let () =
   Alcotest.run "march"
@@ -3404,6 +3635,19 @@ let () =
         Alcotest.test_case "append"        `Quick test_iolist_append;
         Alcotest.test_case "byte_size"     `Quick test_iolist_byte_size;
       ]);
+      ("http stdlib", [
+        Alcotest.test_case "parse_url"          `Quick test_http_parse_url;
+        Alcotest.test_case "parse_url scheme"    `Quick test_http_parse_url_scheme;
+        Alcotest.test_case "parse_url path"      `Quick test_http_parse_url_path;
+        Alcotest.test_case "parse_url port"      `Quick test_http_parse_url_port;
+        Alcotest.test_case "parse_url invalid"   `Quick test_http_parse_url_invalid;
+        Alcotest.test_case "set_header"          `Quick test_http_set_header;
+        Alcotest.test_case "method_to_string"    `Quick test_http_method_to_string;
+        Alcotest.test_case "status helpers"      `Quick test_http_status_helpers;
+        Alcotest.test_case "post constructor"    `Quick test_http_post_constructor;
+        Alcotest.test_case "encode_query"        `Quick test_http_encode_query;
+        Alcotest.test_case "response helpers"    `Quick test_http_response_helpers;
+      ]);
       ( "scheduler",
         [
           Alcotest.test_case "reduction counter ticks"     `Quick (with_reset test_reduction_counter_ticks);
@@ -3429,5 +3673,17 @@ let () =
           Alcotest.test_case "deque steal"        `Quick (with_reset test_deque_steal);
           Alcotest.test_case "deque size"         `Quick (with_reset test_deque_size);
           Alcotest.test_case "pool submit/steal"  `Quick (with_reset test_pool_submit_steal);
+        ] );
+      ( "capabilities",
+        [
+          Alcotest.test_case "pure module ok"            `Quick test_cap_needs_pure_ok;
+          Alcotest.test_case "declared needs ok"         `Quick test_cap_needs_declared_ok;
+          Alcotest.test_case "missing needs error"       `Quick test_cap_missing_needs_error;
+          Alcotest.test_case "unused needs warning"      `Quick test_cap_unused_needs_warning;
+          Alcotest.test_case "supertype covers subtype"  `Quick test_cap_supertype_covers_subtype;
+          Alcotest.test_case "wrong subtype error"       `Quick test_cap_needs_wrong_subtype;
+          Alcotest.test_case "multiple needs"            `Quick test_cap_multiple_needs;
+          Alcotest.test_case "parse needs"               `Quick test_cap_parse_needs;
+          Alcotest.test_case "parse needs dotted"        `Quick test_cap_parse_needs_dotted;
         ] );
     ]

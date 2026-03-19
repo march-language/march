@@ -36,8 +36,17 @@ let warning ctx ~span message =
   report ctx
     { severity = Warning; span; message; labels = []; notes = [] }
 
+let hint ctx ~span message =
+  report ctx
+    { severity = Hint; span; message; labels = []; notes = [] }
+
 let has_errors ctx =
   List.exists (fun d -> d.severity = Error) ctx.diagnostics
+
+let has_diagnostics ctx = ctx.diagnostics <> []
+
+let has_hints ctx =
+  List.exists (fun d -> d.severity = Hint) ctx.diagnostics
 
 let sorted ctx =
   List.sort

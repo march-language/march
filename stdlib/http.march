@@ -1,0 +1,338 @@
+-- Http module: pure HTTP protocol types, constructors, and transforms.
+--
+-- This is Layer 1 of March's HTTP library. It contains no I/O — only
+-- data types and functions for building and inspecting HTTP requests
+-- and responses. Libraries that work with HTTP types depend on this alone.
+
+mod Http do
+
+  type Method = Get | Post | Put | Patch | Delete | Head | Options | Trace | Connect | Other(String)
+
+  type Scheme = SchemeHttp | SchemeHttps
+
+  type Status = Status(Int)
+
+  type Header = Header(String, String)
+
+  type UrlError = InvalidScheme(String) | MissingHost | InvalidPort(String) | MalformedUrl(String)
+
+  type Request(body) = Request(Method, Scheme, String, Option(Int), String, Option(String), List(Header), body)
+
+  type Response(body) = Response(Status, List(Header), body)
+
+  -- Method helpers
+
+  pub fn method_to_string(m : Method) : String do
+    match m with
+    | Get     -> "GET"
+    | Post    -> "POST"
+    | Put     -> "PUT"
+    | Patch   -> "PATCH"
+    | Delete  -> "DELETE"
+    | Head    -> "HEAD"
+    | Options -> "OPTIONS"
+    | Trace   -> "TRACE"
+    | Connect -> "CONNECT"
+    | Other(s) -> s
+    end
+  end
+
+  -- Status helpers
+
+  pub fn status_code(s : Status) : Int do
+    match s with | Status(n) -> n end
+  end
+
+  pub fn status_ok() : Status do Status(200) end
+  pub fn status_created() : Status do Status(201) end
+  pub fn status_no_content() : Status do Status(204) end
+  pub fn status_moved() : Status do Status(301) end
+  pub fn status_found() : Status do Status(302) end
+  pub fn status_bad_request() : Status do Status(400) end
+  pub fn status_unauthorized() : Status do Status(401) end
+  pub fn status_forbidden() : Status do Status(403) end
+  pub fn status_not_found() : Status do Status(404) end
+  pub fn status_server_error() : Status do Status(500) end
+
+  pub fn is_informational(s : Status) : Bool do
+    let c = status_code(s)
+    c >= 100 && c < 200
+  end
+
+  pub fn is_success(s : Status) : Bool do
+    let c = status_code(s)
+    c >= 200 && c < 300
+  end
+
+  pub fn is_redirect(s : Status) : Bool do
+    let c = status_code(s)
+    c >= 300 && c < 400
+  end
+
+  pub fn is_client_error(s : Status) : Bool do
+    let c = status_code(s)
+    c >= 400 && c < 500
+  end
+
+  pub fn is_server_error(s : Status) : Bool do
+    let c = status_code(s)
+    c >= 500 && c < 600
+  end
+
+  -- Request accessors
+
+  pub fn method(req : Request(b)) : Method do
+    match req with | Request(m, _, _, _, _, _, _, _) -> m end
+  end
+
+  pub fn scheme(req : Request(b)) : Scheme do
+    match req with | Request(_, s, _, _, _, _, _, _) -> s end
+  end
+
+  pub fn host(req : Request(b)) : String do
+    match req with | Request(_, _, h, _, _, _, _, _) -> h end
+  end
+
+  pub fn port(req : Request(b)) : Option(Int) do
+    match req with | Request(_, _, _, p, _, _, _, _) -> p end
+  end
+
+  pub fn path(req : Request(b)) : String do
+    match req with | Request(_, _, _, _, p, _, _, _) -> p end
+  end
+
+  pub fn query(req : Request(b)) : Option(String) do
+    match req with | Request(_, _, _, _, _, q, _, _) -> q end
+  end
+
+  pub fn headers(req : Request(b)) : List(Header) do
+    match req with | Request(_, _, _, _, _, _, h, _) -> h end
+  end
+
+  pub fn body(req : Request(b)) : b do
+    match req with | Request(_, _, _, _, _, _, _, b) -> b end
+  end
+
+  -- Request transforms
+
+  pub fn set_method(req : Request(b), m : Method) : Request(b) do
+    match req with
+    | Request(_, sc, h, p, pa, q, hd, bd) -> Request(m, sc, h, p, pa, q, hd, bd)
+    end
+  end
+
+  pub fn set_scheme(req : Request(b), s : Scheme) : Request(b) do
+    match req with
+    | Request(m, _, h, p, pa, q, hd, bd) -> Request(m, s, h, p, pa, q, hd, bd)
+    end
+  end
+
+  pub fn set_host(req : Request(b), new_host : String) : Request(b) do
+    match req with
+    | Request(m, sc, _, p, pa, q, hd, bd) -> Request(m, sc, new_host, p, pa, q, hd, bd)
+    end
+  end
+
+  pub fn set_port(req : Request(b), new_port : Int) : Request(b) do
+    match req with
+    | Request(m, sc, h, _, pa, q, hd, bd) -> Request(m, sc, h, Some(new_port), pa, q, hd, bd)
+    end
+  end
+
+  pub fn set_path(req : Request(b), new_path : String) : Request(b) do
+    match req with
+    | Request(m, sc, h, p, _, q, hd, bd) -> Request(m, sc, h, p, new_path, q, hd, bd)
+    end
+  end
+
+  pub fn set_body(req : Request(a), new_body : b) : Request(b) do
+    match req with
+    | Request(m, sc, h, p, pa, q, hd, _) -> Request(m, sc, h, p, pa, q, hd, new_body)
+    end
+  end
+
+  pub fn set_header(req : Request(b), name : String, value : String) : Request(b) do
+    match req with
+    | Request(m, sc, h, p, pa, q, hd, bd) ->
+      Request(m, sc, h, p, pa, q, Cons(Header(name, value), hd), bd)
+    end
+  end
+
+  -- Response accessors
+
+  pub fn response_status(resp : Response(b)) : Status do
+    match resp with | Response(s, _, _) -> s end
+  end
+
+  pub fn response_headers(resp : Response(b)) : List(Header) do
+    match resp with | Response(_, h, _) -> h end
+  end
+
+  pub fn response_body(resp : Response(b)) : b do
+    match resp with | Response(_, _, b) -> b end
+  end
+
+  pub fn response_status_code(resp : Response(b)) : Int do
+    status_code(response_status(resp))
+  end
+
+  pub fn response_is_success(resp : Response(b)) : Bool do
+    is_success(response_status(resp))
+  end
+
+  pub fn response_is_redirect(resp : Response(b)) : Bool do
+    is_redirect(response_status(resp))
+  end
+
+  -- Header lookup (case-insensitive)
+
+  pub fn get_header(resp : Response(b), name : String) : Option(String) do
+    let lower_name = string_to_lowercase(name)
+    fn find(hs : List(Header)) : Option(String) do
+      match hs with
+      | Nil -> None
+      | Cons(Header(n, v), rest) ->
+        if string_to_lowercase(n) == lower_name then Some(v)
+        else find(rest)
+      end
+    end
+    find(response_headers(resp))
+  end
+
+  pub fn get_request_header(req : Request(b), name : String) : Option(String) do
+    let lower_name = string_to_lowercase(name)
+    fn find(hs : List(Header)) : Option(String) do
+      match hs with
+      | Nil -> None
+      | Cons(Header(n, v), rest) ->
+        if string_to_lowercase(n) == lower_name then Some(v)
+        else find(rest)
+      end
+    end
+    find(headers(req))
+  end
+
+  -- URL parsing
+
+  pub fn parse_url(url : String) : Result(Request(Unit), UrlError) do
+    let has_https = string_starts_with(url, "https://")
+    let has_http = string_starts_with(url, "http://")
+    if not(has_https) && not(has_http) then
+      Err(InvalidScheme(url))
+    else do
+      let url_scheme = if has_https then SchemeHttps else SchemeHttp
+      let prefix_len = if has_https then 8 else 7
+      let rest = string_slice(url, prefix_len, string_byte_length(url) - prefix_len)
+      let path_idx = string_index_of(rest, "/")
+      let host_part = match path_idx with
+        | Some(i) -> string_slice(rest, 0, i)
+        | None -> rest
+        end
+      let path_and_query = match path_idx with
+        | Some(i) -> string_slice(rest, i, string_byte_length(rest) - i)
+        | None -> "/"
+        end
+      let query_idx = string_index_of(path_and_query, "?")
+      let url_path = match query_idx with
+        | Some(i) -> string_slice(path_and_query, 0, i)
+        | None -> path_and_query
+        end
+      let url_query = match query_idx with
+        | Some(i) -> Some(string_slice(path_and_query, i + 1, string_byte_length(path_and_query) - i - 1))
+        | None -> None
+        end
+      let port_idx = string_index_of(host_part, ":")
+      let url_host = match port_idx with
+        | Some(i) -> string_slice(host_part, 0, i)
+        | None -> host_part
+        end
+      let url_port = match port_idx with
+        | Some(i) ->
+          let port_str = string_slice(host_part, i + 1, string_byte_length(host_part) - i - 1)
+          match string_to_int(port_str) with
+          | Some(p) -> Some(p)
+          | None -> Some(-1)
+          end
+        | None -> None
+        end
+      if string_is_empty(url_host) then
+        Err(MissingHost)
+      else match url_port with
+        | Some(-1) -> Err(InvalidPort(host_part))
+        | _ -> Ok(Request(Get, url_scheme, url_host, url_port, url_path, url_query, Nil, ()))
+        end
+    end
+  end
+
+  -- Convenience constructors
+
+  pub fn get(url : String) : Result(Request(Unit), UrlError) do
+    parse_url(url)
+  end
+
+  pub fn post(url : String, bdy : b) : Result(Request(b), UrlError) do
+    match parse_url(url) with
+    | Ok(req) -> Ok(set_method(set_body(req, bdy), Post))
+    | Err(e) -> Err(e)
+    end
+  end
+
+  pub fn put(url : String, bdy : b) : Result(Request(b), UrlError) do
+    match parse_url(url) with
+    | Ok(req) -> Ok(set_method(set_body(req, bdy), Put))
+    | Err(e) -> Err(e)
+    end
+  end
+
+  pub fn patch(url : String, bdy : b) : Result(Request(b), UrlError) do
+    match parse_url(url) with
+    | Ok(req) -> Ok(set_method(set_body(req, bdy), Patch))
+    | Err(e) -> Err(e)
+    end
+  end
+
+  pub fn delete(url : String) : Result(Request(Unit), UrlError) do
+    match parse_url(url) with
+    | Ok(req) -> Ok(set_method(req, Delete))
+    | Err(e) -> Err(e)
+    end
+  end
+
+  pub fn head(url : String) : Result(Request(Unit), UrlError) do
+    match parse_url(url) with
+    | Ok(req) -> Ok(set_method(req, Head))
+    | Err(e) -> Err(e)
+    end
+  end
+
+  pub fn options(url : String) : Result(Request(Unit), UrlError) do
+    match parse_url(url) with
+    | Ok(req) -> Ok(set_method(req, Options))
+    | Err(e) -> Err(e)
+    end
+  end
+
+  -- Query string encoding
+
+  pub fn encode_query(params : List((String, String))) : String do
+    fn encode_pair(k : String, v : String) : String do
+      k ++ "=" ++ v
+    end
+    fn go(ps : List((String, String))) : List(String) do
+      match ps with
+      | Nil -> Nil
+      | Cons((k, v), rest) -> Cons(encode_pair(k, v), go(rest))
+      end
+    end
+    string_join(go(params), "&")
+  end
+
+  pub fn set_query(req : Request(b), params : List((String, String))) : Request(b) do
+    match req with
+    | Request(m, sc, h, p, pa, _, hd, bd) ->
+      let q = if is_nil(params) then None else Some(encode_query(params))
+      Request(m, sc, h, p, pa, q, hd, bd)
+    end
+  end
+
+end
