@@ -56,6 +56,7 @@ let user_scope eval_env tc_env result_h ~baseline_env =
     || name = "v"
     || (String.length name > 0 && name.[0] = '_')
     || Hashtbl.mem seen name
+    || (match v with March_eval.Eval.VClosure _ | March_eval.Eval.VBuiltin _ -> true | _ -> false)
     then None
     else begin
       Hashtbl.add seen name ();
@@ -462,10 +463,9 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
       Notty.I.(Notty.I.string Notty.A.empty pad_str <|> Highlight.highlight line)
     ) (List.rev !inp.Input.multiline_buf) in
     let transcript = !hist_lines @ cont_imgs in
-    (* In debug mode use base_e as baseline so program vars show in the scope panel.
-       In normal mode use e0 (base + stdlib) to hide stdlib from the panel. *)
-    let scope_baseline = if is_debug then base_e else e0 in
-    let (scope, result_latest) = user_scope !env !tc_env result_h ~baseline_env:scope_baseline in
+    (* Hide stdlib and all other names present at REPL startup from the scope panel.
+       Functions (VClosure/VBuiltin) are also filtered — we only show data bindings. *)
+    let (scope, result_latest) = user_scope !env !tc_env result_h ~baseline_env:e0 in
     let (comp_items, comp_sel) = match !comp with
       | CompOff -> ([], 0)
       | CompOn { items; sel } -> (items, sel)
