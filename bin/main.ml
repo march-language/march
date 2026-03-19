@@ -87,6 +87,7 @@ let debug_mode     = ref false
 let debug_tui_mode = ref false
 let opt_enabled    = ref true
 let fast_math      = ref false
+let opt_level      = ref (-1)   (* -1 = not set; 0..3 = explicit clang -ON *)
 
 (* ------------------------------------------------------------------ *)
 (* File compiler                                                       *)
@@ -186,7 +187,12 @@ let compile filename =
           if !output_file <> "" then !output_file
           else basename
         in
-        let cmd = Printf.sprintf "clang %s %s -o %s" runtime ll_file out_bin in
+        let opt_flag =
+          if !opt_level >= 0 && !opt_level <= 3
+          then Printf.sprintf " -O%d" !opt_level
+          else ""
+        in
+        let cmd = Printf.sprintf "clang%s %s %s -o %s" opt_flag runtime ll_file out_bin in
         let rc = Sys.command cmd in
         if rc <> 0 then begin
           Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
@@ -225,6 +231,7 @@ let () =
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");
     ("--no-opt",    Arg.Clear opt_enabled,  " Skip TIR optimization passes");
     ("--fast-math",  Arg.Set fast_math,  " Emit 'fast' on all FP LLVM instructions");
+    ("--opt",        Arg.Set_int opt_level, "<N>  Optimization level passed to clang (0-3)");
     ("--debug",     Arg.Set debug_mode,     " Enable time-travel debugger (simple mode)");
     ("--debug-tui", Arg.Set debug_tui_mode, " Enable time-travel debugger (TUI mode)");
   ] in
