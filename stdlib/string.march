@@ -1,0 +1,352 @@
+-- String module: functions for working with UTF-8 encoded strings.
+--
+-- March strings are immutable UTF-8 byte sequences.  The runtime uses a
+-- fat-pointer representation with small-string optimisation (SSO): strings
+-- of 15 bytes or fewer are stored inline without a heap allocation.
+--
+-- Key naming conventions:
+-- - Functions with `byte_` in their name operate on raw byte offsets (O(1)).
+-- - Functions without a prefix count graphemes (human-perceived characters).
+-- - Use `byte_size` for performance-critical paths; use `grapheme_count` when
+--   the result must match what a user sees on screen.
+
+mod String do
+
+  doc """
+  Return the number of bytes in the UTF-8 encoding of `s`.
+
+      String.byte_size("hello")  -- 5
+      String.byte_size("é")      -- 2  (2-byte UTF-8 sequence)
+      String.byte_size("")       -- 0
+
+  Cost: O(1) — reads a stored length field.
+  """
+  pub fn byte_size(s) do string_byte_length(s) end
+
+  doc """
+  Return a byte-indexed substring of `s` starting at byte offset `start`
+  with length `len` bytes.
+
+      String.slice_bytes("hello world", 6, 5)  -- "world"
+      String.slice_bytes("hello", 0, 100)       -- "hello"  (clamped)
+
+  Both `start` and `len` are clamped to valid byte ranges; no exception is
+  raised for out-of-bounds values.  The returned string is a copy (the
+  interpreter does not yet implement GC slices).
+
+  Cost: O(len) for the copy.
+  """
+  pub fn slice_bytes(s, start, len) do string_slice(s, start, len) end
+
+  doc """
+  Return `true` if `substring` appears anywhere in `s`.
+
+      String.contains("hello world", "world")  -- true
+      String.contains("hello world", "xyz")    -- false
+      String.contains("abc", "")               -- true  (empty is always found)
+
+  Cost: O(n * m) worst case, where n = byte_size(s) and m = byte_size(substring).
+  """
+  pub fn contains(s, substring) do string_contains(s, substring) end
+
+  doc """
+  Return `true` if `s` begins with `prefix`.
+
+      String.starts_with("hello", "he")  -- true
+      String.starts_with("hello", "lo")  -- false
+      String.starts_with("hello", "")    -- true
+
+  Cost: O(|prefix|).
+  """
+  pub fn starts_with(s, prefix) do string_starts_with(s, prefix) end
+
+  doc """
+  Return `true` if `s` ends with `suffix`.
+
+      String.ends_with("hello", "lo")  -- true
+      String.ends_with("hello", "he")  -- false
+      String.ends_with("hello", "")    -- true
+
+  Cost: O(|suffix|).
+  """
+  pub fn ends_with(s, suffix) do string_ends_with(s, suffix) end
+
+  doc """
+  Concatenate two strings.
+
+      String.concat("foo", "bar")  -- "foobar"
+
+  Prefer the `++` operator for inline concatenation.  Use `IOList` when
+  building many string segments to avoid O(n²) copying.
+
+  Cost: O(|a| + |b|) — allocates a new string.
+  """
+  pub fn concat(a, b) do string_concat(a, b) end
+
+  doc """
+  Replace the **first** occurrence of `old` in `s` with `new`.
+
+      String.replace("aabbaa", "a", "x")  -- "xabbaa"
+      String.replace("hello", "xyz", "!")  -- "hello"  (no match)
+
+  If `old` is the empty string, `s` is returned unchanged.
+  See `replace_all` to replace every occurrence.
+
+  Cost: O(n) scan + O(n) for the result string.
+  """
+  pub fn replace(s, old, new) do string_replace(s, old, new) end
+
+  doc """
+  Replace **every** non-overlapping occurrence of `old` in `s` with `new`.
+
+      String.replace_all("aabbaa", "a", "x")  -- "xxbbxx"
+      String.replace_all("hello", "l", "r")   -- "herro"
+
+  If `old` is the empty string, `s` is returned unchanged.
+
+  Cost: O(n) where n = byte_size(s).
+  """
+  pub fn replace_all(s, old, new) do string_replace_all(s, old, new) end
+
+  doc """
+  Split `s` on every occurrence of `sep`, returning a `List(String)`.
+
+      String.split("a,b,c", ",")   -- ["a", "b", "c"]
+      String.split("hello", "")    -- ["hello"]  (empty sep returns whole string)
+      String.split("aXbXc", "X")   -- ["a", "b", "c"]
+
+  Adjacent separators produce empty strings in the result list.
+
+  Cost: O(n) where n = byte_size(s).
+  """
+  pub fn split(s, sep) do string_split(s, sep) end
+
+  doc """
+  Split `s` on the **first** occurrence of `sep`.
+  Returns `Some(head, tail)` if `sep` is found, or `None` if not found.
+
+      String.split_first("a:b:c", ":")  -- Some("a", "b:c")
+      String.split_first("hello", ":")  -- None
+      String.split_first("key=val", "=") -- Some("key", "val")
+
+  Useful for parsing key-value pairs or protocols where only the first
+  delimiter matters.
+
+  Cost: O(n) scan.
+  """
+  pub fn split_first(s, sep) do string_split_first(s, sep) end
+
+  doc """
+  Join a list of strings with a separator inserted between each element.
+
+      String.join(["a", "b", "c"], "-")  -- "a-b-c"
+      String.join([], ",")               -- ""
+      String.join(["solo"], ",")         -- "solo"
+
+  Cost: O(total bytes in list + (n-1) * |sep|).
+  """
+  pub fn join(xs, sep) do string_join(xs, sep) end
+
+  doc """
+  Remove leading and trailing ASCII whitespace (spaces, tabs, newlines, CR).
+
+      String.trim("  hello  ")   -- "hello"
+      String.trim("\thello\n")   -- "hello"
+      String.trim("hello")       -- "hello"
+
+  Cost: O(n).
+  """
+  pub fn trim(s) do string_trim(s) end
+
+  doc """
+  Remove leading ASCII whitespace only.
+
+      String.trim_start("  hello  ")  -- "hello  "
+
+  Cost: O(n).
+  """
+  pub fn trim_start(s) do string_trim_start(s) end
+
+  doc """
+  Remove trailing ASCII whitespace only.
+
+      String.trim_end("  hello  ")  -- "  hello"
+
+  Cost: O(n).
+  """
+  pub fn trim_end(s) do string_trim_end(s) end
+
+  doc """
+  Convert all ASCII letters in `s` to uppercase.
+
+      String.to_uppercase("Hello World")  -- "HELLO WORLD"
+
+  Only ASCII letters (A–Z, a–z) are affected.  For full Unicode case mapping
+  use an external library.
+
+  Cost: O(n).
+  """
+  pub fn to_uppercase(s) do string_to_uppercase(s) end
+
+  doc """
+  Convert all ASCII letters in `s` to lowercase.
+
+      String.to_lowercase("HELLO WORLD")  -- "hello world"
+
+  Only ASCII letters are affected.
+
+  Cost: O(n).
+  """
+  pub fn to_lowercase(s) do string_to_lowercase(s) end
+
+  doc """
+  Repeat `s` exactly `n` times.
+
+      String.repeat("ab", 3)  -- "ababab"
+      String.repeat("x", 0)   -- ""
+      String.repeat("x", 1)   -- "x"
+
+  Cost: O(n * |s|) — allocates a new string.
+  """
+  pub fn repeat(s, n) do string_repeat(s, n) end
+
+  doc """
+  Return `s` with its **bytes** reversed.
+
+      String.reverse("hello")   -- "olleh"
+      String.reverse("racecar") -- "racecar"
+
+  Note: byte-reversal is not the same as grapheme-reversal for multi-byte
+  UTF-8 codepoints.  This function is primarily useful for ASCII strings.
+
+  Cost: O(n).
+  """
+  pub fn reverse(s) do string_reverse(s) end
+
+  doc """
+  Pad `s` on the left with `fill` until the byte length reaches `width`.
+  If `byte_size(s) >= width`, `s` is returned unchanged.
+
+      String.pad_left("hi", 5, "0")   -- "000hi"
+      String.pad_left("hello", 3, "0") -- "hello"  (already long enough)
+
+  `fill` must be a single-byte string (single ASCII character).
+
+  Cost: O(width).
+  """
+  pub fn pad_left(s, width, fill) do string_pad_left(s, width, fill) end
+
+  doc """
+  Pad `s` on the right with `fill` until the byte length reaches `width`.
+  If `byte_size(s) >= width`, `s` is returned unchanged.
+
+      String.pad_right("hi", 5, ".")  -- "hi..."
+      String.pad_right("hello", 3, ".") -- "hello"
+
+  `fill` must be a single-byte string (single ASCII character).
+
+  Cost: O(width).
+  """
+  pub fn pad_right(s, width, fill) do string_pad_right(s, width, fill) end
+
+  doc """
+  Return `true` if `s` contains no bytes.
+
+      String.is_empty("")      -- true
+      String.is_empty("x")    -- false
+      String.is_empty("  ")   -- false
+
+  Cost: O(1).
+  """
+  pub fn is_empty(s) do string_is_empty(s) end
+
+  doc """
+  Count the number of Unicode **codepoints** in the UTF-8 string `s`.
+
+  For ASCII strings this equals the number of visible characters.
+  For strings with multi-byte UTF-8 sequences, this counts codepoints
+  (not grapheme clusters, which may span multiple codepoints).
+
+      String.grapheme_count("hello")  -- 5
+      String.grapheme_count("é")      -- 1  (one codepoint, two bytes)
+      String.grapheme_count("")       -- 0
+
+  For most practical purposes (non-combining characters), codepoint count
+  equals grapheme count.  Use a dedicated Unicode library for full grapheme
+  cluster segmentation.
+
+  Cost: O(n) — scans the byte sequence.
+  """
+  pub fn grapheme_count(s) do string_grapheme_count(s) end
+
+  doc """
+  Find the byte offset of the first occurrence of `substring` in `s`.
+  Returns `Some(offset)` if found, `None` if not found.
+
+      String.index_of("hello", "ll")   -- Some(2)
+      String.index_of("hello", "xyz")  -- None
+      String.index_of("hello", "")     -- Some(0)
+
+  Cost: O(n * m) worst case.
+  """
+  pub fn index_of(s, substring) do string_index_of(s, substring) end
+
+  doc """
+  Parse `s` as a decimal integer.
+  Returns `Ok(n)` on success, `Err(msg)` if the string is not a valid integer.
+
+      String.to_int("42")   -- Ok(42)
+      String.to_int("-7")   -- Ok(-7)
+      String.to_int("abc")  -- Err("not a valid integer")
+
+  Cost: O(n).
+  """
+  pub fn to_int(s) do
+    match string_to_int(s) with
+    | Some(n) -> Ok(n)
+    | None    -> Err("not a valid integer: " ++ s)
+    end
+  end
+
+  doc """
+  Parse `s` as a floating-point number.
+  Returns `Ok(f)` on success, `Err(msg)` if the string is not a valid float.
+
+      String.to_float("3.14")  -- Ok(3.14)
+      String.to_float("1e10")  -- Ok(10000000000.0)
+      String.to_float("abc")   -- Err("not a valid float")
+
+  Cost: O(n).
+  """
+  pub fn to_float(s) do
+    match string_to_float(s) with
+    | Some(f) -> Ok(f)
+    | None    -> Err("not a valid float: " ++ s)
+    end
+  end
+
+  doc """
+  Convert an integer to its decimal string representation.
+
+      String.from_int(42)   -- "42"
+      String.from_int(-7)   -- "-7"
+      String.from_int(0)    -- "0"
+
+  Equivalent to `${n}` in a string interpolation.
+  Cost: O(digits).
+  """
+  pub fn from_int(n) do int_to_string(n) end
+
+  doc """
+  Convert a float to a string using OCaml's default float formatting.
+
+      String.from_float(3.14)  -- "3.14"
+      String.from_float(1.0)   -- "1."
+      String.from_float(1e10)  -- "10000000000."
+
+  The exact format matches OCaml's `string_of_float`.
+  Cost: O(1).
+  """
+  pub fn from_float(f) do float_to_string(f) end
+
+end

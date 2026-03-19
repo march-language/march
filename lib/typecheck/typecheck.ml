@@ -426,8 +426,9 @@ let builtin_bindings : (string * scheme) list =
     ("int_to_string",  Mono (TArrow (t_int,    t_string)));
     ("float_to_string",Mono (TArrow (t_float,  t_string)));
     ("bool_to_string", Mono (TArrow (t_bool,   t_string)));
-    ("string_to_int",  Mono (TArrow (t_string, t_option t_int)));
-    ("string_length",  Mono (TArrow (t_string, t_int)));
+    ("string_to_int",   Mono (TArrow (t_string, t_option t_int)));
+    ("string_to_float", Mono (TArrow (t_string, t_option t_float)));
+    ("string_length",   Mono (TArrow (t_string, t_int)));
     ("string_concat",  Mono (TArrow (t_string, TArrow (t_string, t_string))));
     ("read_line",      Mono (TArrow (t_unit,   t_string)));
     ("not",            Mono (TArrow (t_bool,   t_bool)));
@@ -496,7 +497,7 @@ let builtin_bindings : (string * scheme) list =
     ("string_replace",      Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string)))));
     ("string_replace_all",  Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string)))));
     ("string_split",        Mono (TArrow (t_string, TArrow (t_string, t_list t_string))));
-    ("string_join",         Mono (TArrow (t_string, TArrow (t_list t_string, t_string))));
+    ("string_join",         Mono (TArrow (t_list t_string, TArrow (t_string, t_string))));
     ("string_trim",         Mono (TArrow (t_string, t_string)));
     ("string_trim_start",   Mono (TArrow (t_string, t_string)));
     ("string_trim_end",     Mono (TArrow (t_string, t_string)));
@@ -509,6 +510,8 @@ let builtin_bindings : (string * scheme) list =
     ("string_pad_left",     Mono (TArrow (t_string, TArrow (t_int, TArrow (t_string, t_string)))));
     ("string_pad_right",    Mono (TArrow (t_string, TArrow (t_int, TArrow (t_string, t_string)))));
     ("string_byte_length",  Mono (TArrow (t_string, t_int)));
+    ("string_split_first",   Mono (TArrow (t_string, TArrow (t_string, t_option (TTuple [t_string; t_string])))));
+    ("string_grapheme_count",Mono (TArrow (t_string, t_int)));
     (* Char primitives *)
     ("char_is_alpha",        Mono (TArrow (TCon ("Char", []), t_bool)));
     ("char_is_digit",        Mono (TArrow (TCon ("Char", []), t_bool)));
