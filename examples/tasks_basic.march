@@ -1,0 +1,63 @@
+-- Basic task examples: spawn, await, and compose.
+-- Demonstrates how tasks work as lightweight units of concurrent work.
+--
+-- Run interpreted:  march examples/tasks_basic.march
+-- Run compiled:     march --compile examples/tasks_basic.march -o /tmp/tasks_basic && /tmp/tasks_basic
+
+mod TasksBasic do
+
+-- A pure, expensive function: count Collatz steps.
+fn collatz(n : Int, steps : Int) : Int do
+  if n == 1 then steps
+  else if n % 2 == 0 then collatz(n / 2, steps + 1)
+  else collatz(3 * n + 1, steps + 1)
+end
+
+-- Spawn two independent tasks and combine results.
+fn two_tasks() : Int do
+  let t1 = task_spawn(fn x -> collatz(27, 0))
+  let t2 = task_spawn(fn x -> collatz(871, 0))
+  let r1 = task_await_unwrap(t1)
+  let r2 = task_await_unwrap(t2)
+  r1 + r2
+end
+
+-- Chain tasks: result of one feeds into the next.
+fn chained_tasks() : Int do
+  let t1 = task_spawn(fn x -> 10 + 20)
+  let v1 = task_await_unwrap(t1)
+  let t2 = task_spawn(fn x -> v1 * 3)
+  task_await_unwrap(t2)
+end
+
+-- Fan-out: spawn N tasks from a loop, collect results.
+fn fan_out_inner(n : Int, acc : Int) : Int do
+  if n == 0 then acc
+  else do
+    let t = task_spawn(fn x -> collatz(n, 0))
+    let r = task_await_unwrap(t)
+    fan_out_inner(n - 1, acc + r)
+  end
+end
+
+fn fan_out(n : Int) : Int do
+  fan_out_inner(n, 0)
+end
+
+fn main() : Unit do
+  println("--- Task basics ---")
+
+  -- Two independent tasks
+  let r = two_tasks()
+  println("collatz(27) + collatz(871) = " ++ int_to_string(r))
+
+  -- Chained tasks
+  let c = chained_tasks()
+  println("chained: (10 + 20) * 3 = " ++ int_to_string(c))
+
+  -- Fan-out over 1..100
+  let f = fan_out(100)
+  println("sum of collatz(1..100) = " ++ int_to_string(f))
+end
+
+end
