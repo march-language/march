@@ -2085,6 +2085,110 @@ let test_purity_free () =
   Alcotest.(check bool) "EFree is impure" false
     (March_tir.Purity.is_pure (March_tir.Tir.EFree v))
 
+(* ── Constant folding ────────────────────────────────────────────── *)
+
+let mk_fn name body =
+  { March_tir.Tir.fn_name = name; fn_params = [];
+    fn_ret_ty = March_tir.Tir.TInt; fn_body = body }
+let mk_module fns = { March_tir.Tir.tm_name = "test"; tm_fns = fns; tm_types = [] }
+let avar name ty = March_tir.Tir.AVar (mk_var name ty)
+let flit f = March_tir.Tir.ALit (March_ast.Ast.LitFloat f)
+let fapp op args =
+  March_tir.Tir.EApp (mk_var op (March_tir.Tir.TFn ([], March_tir.Tir.TFloat)), args)
+let blit b = March_tir.Tir.ALit (March_ast.Ast.LitBool b)
+let first_body m = (List.hd m.March_tir.Tir.tm_fns).March_tir.Tir.fn_body
+
+let test_fold_int_add () =
+  let changed = ref false in
+  let m = mk_module [mk_fn "f" (app "+" [ilit 2; ilit 3])] in
+  let m' = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "2+3=5" "(Tir.EAtom (Tir.ALit (Ast.LitInt 5)))"
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_fold_int_mul () =
+  let changed = ref false in
+  let m = mk_module [mk_fn "f" (app "*" [ilit 6; ilit 7])] in
+  let m' = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "6*7=42" "(Tir.EAtom (Tir.ALit (Ast.LitInt 42)))"
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_fold_int_div_by_zero () =
+  let changed = ref false in
+  let m = mk_module [mk_fn "f" (app "/" [ilit 5; ilit 0])] in
+  let _ = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "not changed" false !changed
+
+let test_fold_float_add () =
+  let changed = ref false in
+  let m = mk_module [mk_fn "f" (fapp "+." [flit 1.5; flit 2.5])] in
+  let m' = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "1.5+.2.5=4.0" "(Tir.EAtom (Tir.ALit (Ast.LitFloat 4.)))"
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_fold_bool_not () =
+  let changed = ref false in
+  let bapp op args =
+    March_tir.Tir.EApp (mk_var op (March_tir.Tir.TFn ([], March_tir.Tir.TBool)), args) in
+  let m = mk_module [mk_fn "f" (bapp "not" [blit true])] in
+  let m' = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "not true = false" "(Tir.EAtom (Tir.ALit (Ast.LitBool false)))"
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_fold_and_shortcircuit_pure () =
+  let changed = ref false in
+  let bapp op args =
+    March_tir.Tir.EApp (mk_var op (March_tir.Tir.TFn ([], March_tir.Tir.TBool)), args) in
+  let m = mk_module [mk_fn "f" (bapp "&&" [blit false; blit true])] in
+  let m' = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "false && true = false" "(Tir.EAtom (Tir.ALit (Ast.LitBool false)))"
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_fold_and_shortcircuit_impure () =
+  (* false && <var bound to impure> must NOT be folded *)
+  let changed = ref false in
+  let bapp op args =
+    March_tir.Tir.EApp (mk_var op (March_tir.Tir.TFn ([], March_tir.Tir.TBool)), args) in
+  let impure = app "println" [March_tir.Tir.ALit (March_ast.Ast.LitString "hi")] in
+  let print_var = mk_var "p" March_tir.Tir.TBool in
+  let body = March_tir.Tir.ELet (print_var, impure,
+               bapp "&&" [blit false; March_tir.Tir.AVar print_var]) in
+  let m = mk_module [mk_fn "f" body] in
+  let _ = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "not changed (impure rhs)" false !changed
+
+let test_fold_if_true () =
+  let changed = ref false in
+  let then_e = March_tir.Tir.EAtom (ilit 1) in
+  let else_e = March_tir.Tir.EAtom (ilit 2) in
+  let body = March_tir.Tir.ECase (blit true,
+               [{ March_tir.Tir.br_tag = "True"; br_vars = []; br_body = then_e }],
+               Some else_e) in
+  let m = mk_module [mk_fn "f" body] in
+  let m' = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "if true → then" "(Tir.EAtom (Tir.ALit (Ast.LitInt 1)))"
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_fold_if_false () =
+  let changed = ref false in
+  let then_e = March_tir.Tir.EAtom (ilit 1) in
+  let else_e = March_tir.Tir.EAtom (ilit 2) in
+  let body = March_tir.Tir.ECase (blit false,
+               [{ March_tir.Tir.br_tag = "True"; br_vars = []; br_body = then_e }],
+               Some else_e) in
+  let m = mk_module [mk_fn "f" body] in
+  let m' = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "if false → else" "(Tir.EAtom (Tir.ALit (Ast.LitInt 2)))"
+    (March_tir.Tir.show_expr (first_body m'))
+
+let _ = avar  (* suppress unused warning *)
+
 let () =
   Alcotest.run "march"
     [
@@ -2329,5 +2433,16 @@ let () =
         Alcotest.test_case "kill"       `Quick test_purity_kill;
         Alcotest.test_case "incrc"      `Quick test_purity_incrc;
         Alcotest.test_case "free"       `Quick test_purity_free;
+      ]);
+      ("fold", [
+        Alcotest.test_case "int_add"                 `Quick test_fold_int_add;
+        Alcotest.test_case "int_mul"                 `Quick test_fold_int_mul;
+        Alcotest.test_case "int_div_by_zero"         `Quick test_fold_int_div_by_zero;
+        Alcotest.test_case "float_add"               `Quick test_fold_float_add;
+        Alcotest.test_case "bool_not"                `Quick test_fold_bool_not;
+        Alcotest.test_case "and_shortcircuit_pure"   `Quick test_fold_and_shortcircuit_pure;
+        Alcotest.test_case "and_shortcircuit_impure" `Quick test_fold_and_shortcircuit_impure;
+        Alcotest.test_case "if_true"                 `Quick test_fold_if_true;
+        Alcotest.test_case "if_false"                `Quick test_fold_if_false;
       ]);
     ]
