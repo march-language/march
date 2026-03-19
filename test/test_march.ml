@@ -2381,6 +2381,20 @@ let test_inline_recursive_not_inlined () =
   let _ = March_tir.Inline.run ~changed m in
   Alcotest.(check bool) "not changed (recursive)" false !changed
 
+let test_inline_mutual_recursion_not_inlined () =
+  (* fn f(x) = g(x); fn g(x) = f(x) — mutually recursive, neither should inline *)
+  let changed = ref false in
+  let x_param = mk_var "x" March_tir.Tir.TInt in
+  let g_call = March_tir.Tir.EApp (mk_var "g" (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [March_tir.Tir.AVar x_param]) in
+  let f_fn = { March_tir.Tir.fn_name = "f"; fn_params = [x_param]; fn_ret_ty = March_tir.Tir.TInt; fn_body = g_call } in
+  let f_call = March_tir.Tir.EApp (mk_var "f" (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [March_tir.Tir.AVar x_param]) in
+  let g_fn = { March_tir.Tir.fn_name = "g"; fn_params = [x_param]; fn_ret_ty = March_tir.Tir.TInt; fn_body = f_call } in
+  let call_f = March_tir.Tir.EApp (mk_var "f" (March_tir.Tir.TFn ([March_tir.Tir.TInt], March_tir.Tir.TInt)), [ilit 1]) in
+  let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = []; fn_ret_ty = March_tir.Tir.TInt; fn_body = call_f } in
+  let m = mk_module [f_fn; g_fn; main_fn] in
+  let _ = March_tir.Inline.run ~changed m in
+  Alcotest.(check bool) "not changed (mutually recursive)" false !changed
+
 let () =
   Alcotest.run "march"
     [
@@ -2655,5 +2669,6 @@ let () =
         Alcotest.test_case "pure_small"            `Quick test_inline_pure_small;
         Alcotest.test_case "impure_not_inlined"    `Quick test_inline_impure_not_inlined;
         Alcotest.test_case "recursive_not_inlined" `Quick test_inline_recursive_not_inlined;
+        Alcotest.test_case "mutual_recursion_not_inlined" `Quick test_inline_mutual_recursion_not_inlined;
       ]);
     ]

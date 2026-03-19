@@ -61,13 +61,21 @@ let alpha_rename (params : Tir.var list) (body : Tir.expr)
     | Tir.EApp (f, args)     -> Tir.EApp (subst_var f, List.map subst_atom args)
     | Tir.ECallPtr (f, args) -> Tir.ECallPtr (subst_atom f, List.map subst_atom args)
     | Tir.ELet (v, rhs, body) ->
+      let rhs' = subst_expr rhs in          (* process rhs with OLD tbl *)
       let fresh = gensym v.Tir.v_name in
       Hashtbl.replace tbl v.Tir.v_name fresh;
       let v' = { v with Tir.v_name = fresh } in
-      Tir.ELet (v', subst_expr rhs, subst_expr body)
+      Tir.ELet (v', rhs', subst_expr body)
     | Tir.ELetRec (fns, b) ->
+      (* Freshen all locally-bound function names first *)
+      let fns_renamed = List.map (fun fd ->
+        let fresh = gensym fd.Tir.fn_name in
+        Hashtbl.replace tbl fd.Tir.fn_name fresh;
+        { fd with Tir.fn_name = fresh }
+      ) fns in
+      (* Then process each body with the updated tbl *)
       Tir.ELetRec (List.map (fun fd ->
-        { fd with Tir.fn_body = subst_expr fd.Tir.fn_body }) fns,
+        { fd with Tir.fn_body = subst_expr fd.Tir.fn_body }) fns_renamed,
         subst_expr b)
     | Tir.ECase (a, branches, default) ->
       Tir.ECase (subst_atom a,
@@ -99,6 +107,10 @@ let alpha_rename (params : Tir.var list) (body : Tir.expr)
 
 (** Substitute parameters for call arguments, wrapped in ANF lets. *)
 let subst_args params args body =
+  if List.length params <> List.length args then
+    failwith (Printf.sprintf
+      "inline: arity mismatch: %d params vs %d args"
+      (List.length params) (List.length args));
   List.fold_right2 (fun param arg acc ->
     Tir.ELet (param, Tir.EAtom arg, acc)
   ) params args body
@@ -136,6 +148,32 @@ let run ~changed (m : Tir.tir_module) : Tir.tir_module =
     if is_pure && is_small && is_nonrec then
       Hashtbl.add fn_env fd.Tir.fn_name fd
   ) m.Tir.tm_fns;
+  (* Conservative mutual-recursion filter:
+     Remove any candidate that calls another candidate to prevent infinite
+     fixed-point loops. Chains (f→g→h non-circular) still work correctly:
+     only g/h are inlined in this pass; f gains their bodies and becomes
+     eligible in subsequent fixed-point iterations. *)
+  let candidate_names = Hashtbl.fold (fun k _ acc -> k :: acc) fn_env [] in
+  List.iter (fun name ->
+    match Hashtbl.find_opt fn_env name with
+    | None -> ()  (* already removed *)
+    | Some fd ->
+      let calls_other =
+        let rec check = function
+          | Tir.EApp (f, _) -> List.mem f.Tir.v_name candidate_names && f.Tir.v_name <> name
+          | Tir.ELet (_, rhs, body) -> check rhs || check body
+          | Tir.ELetRec (fns, body) ->
+            List.exists (fun nfd -> check nfd.Tir.fn_body) fns || check body
+          | Tir.ECase (_, branches, default) ->
+            List.exists (fun b -> check b.Tir.br_body) branches
+            || Option.fold ~none:false ~some:check default
+          | Tir.ESeq (e1, e2) -> check e1 || check e2
+          | _ -> false
+        in
+        check fd.Tir.fn_body
+      in
+      if calls_other then Hashtbl.remove fn_env name
+  ) candidate_names;
   { m with Tir.tm_fns = List.map (fun fd ->
       { fd with Tir.fn_body = inline_expr ~changed fn_env fd.Tir.fn_body }
     ) m.Tir.tm_fns }
