@@ -115,7 +115,8 @@ let is_builtin_fn name =
                  "=="; "!="; "<"; "<="; ">"; ">=";
                  "++"; "string_concat"; "string_eq";
                  "println"; "print";
-                 "int_to_string"; "float_to_string"; "bool_to_string"]
+                 "int_to_string"; "float_to_string"; "bool_to_string";
+                 "kill"; "is_alive"; "send"]
 
 let atom_is_builtin (atom : Tir.atom) =
   match atom with
@@ -130,6 +131,9 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "bool_to_string"              -> Some Tir.TString
   | "string_concat" | "++"        -> Some Tir.TString
   | "string_eq"                   -> Some Tir.TInt
+  | "kill"                        -> Some Tir.TUnit
+  | "is_alive"                    -> Some Tir.TBool
+  | "send"                        -> Some (Tir.TCon ("Option", [Tir.TUnit]))
   | _ -> None
 
 (** Mangle a March builtin name to the C runtime function name. *)
@@ -141,6 +145,9 @@ let mangle_extern : string -> string = function
   | "bool_to_string"  -> "march_bool_to_string"
   | "string_concat" | "++" -> "march_string_concat"
   | "string_eq"     -> "march_string_eq"
+  | "kill"          -> "march_kill"
+  | "is_alive"      -> "march_is_alive"
+  | "send"          -> "march_send"
   | "main"          -> "march_main"   (* March main → march_main in LLVM *)
   | other           -> other
 
@@ -494,19 +501,31 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("ptr", rv)
 
   (* ── RC ops ────────────────────────────────────────────────────────── *)
-  | Tir.EIncRC atom when atom_is_builtin atom -> ("i64", "0")
+  (* Skip RC ops on builtins AND on top-level function references.
+     Function addresses live in the code segment, not the heap, so calling
+     march_incrc/decrc/free on them would corrupt memory or crash. *)
+  | Tir.EIncRC atom
+    when atom_is_builtin atom ||
+         (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false) ->
+    ("i64", "0")
   | Tir.EIncRC atom ->
     let (_, v) = emit_atom ctx atom in
     emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" v);
     ("i64", "0")
 
-  | Tir.EDecRC atom when atom_is_builtin atom -> ("i64", "0")
+  | Tir.EDecRC atom
+    when atom_is_builtin atom ||
+         (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false) ->
+    ("i64", "0")
   | Tir.EDecRC atom ->
     let (_, v) = emit_atom ctx atom in
     emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" v);
     ("i64", "0")
 
-  | Tir.EFree atom when atom_is_builtin atom -> ("i64", "0")
+  | Tir.EFree atom
+    when atom_is_builtin atom ||
+         (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false) ->
+    ("i64", "0")
   | Tir.EFree atom ->
     let (_, v) = emit_atom ctx atom in
     emit ctx (Printf.sprintf "call void @march_free(ptr %s)" v);
@@ -733,6 +752,9 @@ declare ptr  @march_float_to_string(double %f)
 declare ptr  @march_bool_to_string(i64 %b)
 declare ptr  @march_string_concat(ptr %a, ptr %b)
 declare i64  @march_string_eq(ptr %a, ptr %b)
+declare void @march_kill(ptr %actor)
+declare i64  @march_is_alive(ptr %actor)
+declare ptr  @march_send(ptr %actor, ptr %msg)
 
 |}
 

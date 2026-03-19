@@ -807,7 +807,8 @@ let test_tir_lower_type_def () =
     type Shape = Circle(Int) | Square(Int)
     fn main() do 0 end
   end|} in
-  Alcotest.(check int) "1 type def" 1 (List.length m.March_tir.Tir.tm_types)
+  (* 3 built-in types (Option, Result, List) + 1 user type = 4 *)
+  Alcotest.(check int) "type defs include Shape" 4 (List.length m.March_tir.Tir.tm_types)
 
 let test_tir_lower_fn_params () =
   let m = lower_module {|mod Test do
@@ -917,7 +918,8 @@ let test_tir_lower_list_ops () =
     end
   end|} in
   Alcotest.(check int) "2 functions" 2 (List.length m.March_tir.Tir.tm_fns);
-  Alcotest.(check int) "1 type def" 1 (List.length m.March_tir.Tir.tm_types)
+  (* 3 built-in types + 1 user List type = 4 *)
+  Alcotest.(check int) "type defs include List" 4 (List.length m.March_tir.Tir.tm_types)
 
 let test_tir_lower_closures_and_hof () =
   let m = lower_module {|mod Test do

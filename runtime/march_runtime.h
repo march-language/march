@@ -29,3 +29,14 @@ void *march_float_to_string(double f);
 void *march_bool_to_string(int64_t b);
 void *march_string_concat(void *a, void *b);
 int64_t march_string_eq(void *a, void *b);
+
+/* Actor builtins.
+ * Actor object layout (on top of the standard 16-byte header):
+ *   offset 16: ptr     dispatch fn  (field 0)
+ *   offset 24: int64_t alive flag   (field 1; 1=alive, 0=dead)
+ *   offset 32+: state fields        (fields 2+, alphabetical order)
+ * As int64_t array: [0]=rc [1]=tag+pad [2]=dispatch [3]=alive [4+]=state */
+void  march_kill(void *actor);
+int64_t march_is_alive(void *actor);
+/* Returns Option(Unit): None (tag 0) if dead, Some(()) (tag 1) if dispatch ran. */
+void *march_send(void *actor, void *msg);
