@@ -1,0 +1,178 @@
+-- Debugger feature showcase.
+-- Demonstrates: dbg(), dbg(expr), dbg(bool_expr), and the full suite of
+-- debug REPL commands (:back, :forward, :goto, :diff, :find, :watch,
+-- :tsave/:tload, :actors/:actor).
+--
+-- Run: march examples/debugger.march
+-- When the REPL opens at a dbg() breakpoint, try the commands listed in each
+-- section comment below.
+
+mod DebuggerDemo do
+
+-- ─── 1. Basic numeric trace ──────────────────────────────────────────────────
+-- A simple iterative accumulator.  Each step leaves a trace frame.
+-- At the breakpoint, try:
+--   :trace 10        -- show last 10 frames
+--   :back 3          -- step back 3 frames  (auto-shows :where + env)
+--   :forward 2       -- step forward
+--   :goto 0          -- jump to very first frame
+--   :diff 5          -- show what changed in the last 5 frames
+
+fn sum_to(n : Int) : Int do
+  let acc = 0
+  let i   = 1
+  let acc = acc + i
+  let acc = acc + (i + 1)
+  let acc = acc + (i + 2)
+  let acc = acc + (i + 3)
+  let acc = acc + (i + 4)
+  dbg()
+  acc
+end
+
+-- ─── 2. dbg(expr) — value trace point ────────────────────────────────────────
+-- dbg(expr) logs the value to stderr and returns it, so you can wrap any
+-- sub-expression without changing its meaning.
+-- The log line looks like:  [dbg] file:line:col = <value>
+-- No REPL is launched; execution continues uninterrupted.
+
+fn factorial(n : Int) : Int do
+  if n <= 1
+  then 1
+  else dbg(n) * factorial(n - 1)
+end
+
+-- ─── 3. dbg(bool_expr) — conditional breakpoint ──────────────────────────────
+-- The REPL only opens when the expression evaluates to true.
+-- Here we break only when the list element exceeds a threshold.
+-- Try:  :where      -- see exactly which iteration triggered
+
+type IntList = INil | ICons(Int, IntList)
+
+fn find_large(lst : IntList, threshold : Int) : Int do
+  match lst with
+  | INil        -> 0
+  | ICons(h, t) ->
+    dbg(h > threshold)
+    h + find_large(t, threshold)
+  end
+end
+
+-- ─── 4. :find — search trace for a condition ─────────────────────────────────
+-- After hitting a breakpoint, try:
+--   :find acc > 10   -- jump back to the first frame where acc exceeded 10
+-- This parses and evaluates March expressions against each recorded frame.
+
+fn running_sum(limit : Int) : Int do
+  let a = 1
+  let b = a + 2
+  let c = b + 3
+  let d = c + 4
+  let acc = a + b + c + d
+  dbg()
+  acc
+end
+
+-- ─── 5. :watch — watch expressions (TUI only) ────────────────────────────────
+-- When the REPL launches, type:
+--   :watch n          -- show 'n' after every navigation command
+--   :watch n * n      -- computed expressions work too
+--   :watches          -- list all active watches
+--   :unwatch n        -- remove a watch
+-- Then navigate with :back/:forward to see the watched value update.
+
+fn count_down(n : Int) : Int do
+  let n = n - 1
+  let n = n - 1
+  let n = n - 1
+  let n = n - 1
+  let n = n - 1
+  dbg()
+  n
+end
+
+-- ─── 6. Trace save / load ─────────────────────────────────────────────────────
+-- At any breakpoint, save the full trace to a file and reload it later:
+--   :tsave /tmp/demo.mtr
+-- In a subsequent run, load it back with:
+--   :tload /tmp/demo.mtr
+-- After loading you can navigate the entire saved trace offline.
+
+fn build_trace(n : Int) : Int do
+  let x = n + 1
+  let y = x * 2
+  let z = y - 3
+  dbg()
+  z
+end
+
+-- ─── 7. Actor message history ────────────────────────────────────────────────
+-- Two actors exchange messages.  After hitting the breakpoint, try:
+--   :actors           -- list all actors and their message counts
+--   :actor 0          -- show full message history for actor 0
+--   :actor 0 2        -- show history and jump to message #2
+-- This lets you replay exactly what each actor received and how its state
+-- evolved over time.
+
+actor Counter do
+  state { value : Int }
+  init { value = 0 }
+
+  on Add(n : Int) do
+    { state with value = state.value + n }
+  end
+
+  on Reset() do
+    { state with value = 0 }
+  end
+end
+
+actor Logger do
+  state { count : Int }
+  init { count = 0 }
+
+  on Record(msg : String) do
+    println("[log] " ++ msg)
+    { state with count = state.count + 1 }
+  end
+end
+
+-- ─── Main ────────────────────────────────────────────────────────────────────
+
+fn main() : Unit do
+  -- Section 1: basic trace + :diff demo
+  println("--- sum_to(5) = " ++ int_to_string(sum_to(5)))
+
+  -- Section 2: dbg(expr) logs to stderr, no REPL
+  println("--- factorial(6) = " ++ int_to_string(factorial(6)))
+
+  -- Section 3: conditional breakpoint (triggers when element > 4)
+  let lst = ICons(1, ICons(3, ICons(7, ICons(2, INil))))
+  println("--- find_large result = " ++ int_to_string(find_large(lst, 4)))
+
+  -- Section 4: :find demo
+  println("--- running_sum(10) = " ++ int_to_string(running_sum(10)))
+
+  -- Section 5: :watch demo
+  println("--- count_down(10) = " ++ int_to_string(count_down(10)))
+
+  -- Section 6: :tsave/:tload demo
+  println("--- build_trace(7) = " ++ int_to_string(build_trace(7)))
+
+  -- Section 7: actor history (:actors / :actor)
+  let c = spawn(Counter)
+  let l = spawn(Logger)
+  send(c, Add(10))
+  send(l, Record("counter += 10"))
+  send(c, Add(5))
+  send(l, Record("counter += 5"))
+  send(c, Reset())
+  send(l, Record("counter reset"))
+  send(c, Add(3))
+  send(l, Record("counter += 3"))
+  dbg()
+
+  println("--- done")
+end
+
+end
