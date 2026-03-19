@@ -120,8 +120,9 @@ let free_vars_of_expr (top_level : StringSet.t) (body : Tir.expr) (params : Tir.
 
 (** A detected lambda with its free variables. *)
 type lambda_info = {
-  lam_fn   : Tir.fn_def;           (* the original fn_def inside ELetRec *)
-  lam_fvs  : (string * Tir.ty) list;  (* free variables, sorted by name *)
+  lam_fn           : Tir.fn_def;           (* the original fn_def inside ELetRec *)
+  lam_fvs          : (string * Tir.ty) list;  (* free variables, sorted by name *)
+  lam_is_recursive : bool;                 (* body refers to fn's own name *)
 }
 
 (** Collect all lambdas from all top-level fn bodies. *)
@@ -132,9 +133,20 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
     match e with
     | Tir.ELetRec ([fn], Tir.EAtom (Tir.AVar ref_var))
       when fn.Tir.fn_name = ref_var.Tir.v_name ->
-      (* This is a lambda *)
-      let fvs = free_vars_of_expr top_level fn.Tir.fn_body fn.Tir.fn_params in
-      lambdas := { lam_fn = fn; lam_fvs = fvs } :: !lambdas;
+      (* Check for self-recursion before excluding self from free vars. *)
+      let fvs_raw = free_vars_of_expr top_level fn.Tir.fn_body fn.Tir.fn_params in
+      let is_recursive = List.exists (fun (name, _) -> name = fn.Tir.fn_name) fvs_raw in
+      (* Exclude the function's own name from free variables: recursive
+         calls use $clo in the lifted apply fn, so self-capture would
+         create a circular allocation. *)
+      let self_var : Tir.var = { Tir.v_name = fn.Tir.fn_name;
+                                  v_ty = Tir.TPtr Tir.TUnit;
+                                  v_lin = Tir.Unr } in
+      let fvs = if is_recursive
+                then free_vars_of_expr top_level fn.Tir.fn_body
+                       (self_var :: fn.Tir.fn_params)
+                else fvs_raw in
+      lambdas := { lam_fn = fn; lam_fvs = fvs; lam_is_recursive = is_recursive } :: !lambdas;
       (* Recurse into the lambda body too *)
       collect_expr fn.Tir.fn_body
     | Tir.ELetRec (fns, body) ->
@@ -171,14 +183,29 @@ let lift_lambda (lam : lambda_info) : Tir.type_def * Tir.fn_def =
   (* $clo parameter — opaque pointer to the closure struct itself *)
   let clo_param = { Tir.v_name = "$clo"; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
   (* Wrap the original body with ELet bindings that load each free variable
-     from the closure struct.  Field indices: fn_ptr=0, fv[i]=i+1. *)
+     from the closure struct.  Field indices: fn_ptr=0, fv[i]=i+1.
+     Prepend a binding [let fn_name = $clo] so that recursive self-calls
+     inside the body (rewritten to ECallPtr by phase 3) dispatch correctly
+     through the closure pointer without capturing self as a free variable. *)
+  (* For recursive lambdas, bind fn_name = $clo so that self-calls in the
+     body (converted to ECallPtr by phase 3) dispatch through the closure. *)
+  let add_self_binding body =
+    if lam.lam_is_recursive then
+      let self_var = { Tir.v_name = fn.Tir.fn_name;
+                       v_ty = Tir.TFn (List.map (fun v -> v.Tir.v_ty) fn.Tir.fn_params,
+                                       fn.Tir.fn_ret_ty);
+                       v_lin = Tir.Unr } in
+      Tir.ELet (self_var, Tir.EAtom (Tir.AVar clo_param), body)
+    else body
+  in
   let wrapped_body =
-    List.fold_right (fun (i, (fv_name, fv_ty)) acc ->
-        let fv_var = { Tir.v_name = fv_name; v_ty = fv_ty; v_lin = Tir.Unr } in
-        let field_name = "$fv" ^ string_of_int (i + 1) in
-        let load_expr  = Tir.EField (Tir.AVar clo_param, field_name) in
-        Tir.ELet (fv_var, load_expr, acc)
-      ) (List.mapi (fun i fv -> (i, fv)) fvs) fn.Tir.fn_body
+    add_self_binding (
+      List.fold_right (fun (i, (fv_name, fv_ty)) acc ->
+          let fv_var = { Tir.v_name = fv_name; v_ty = fv_ty; v_lin = Tir.Unr } in
+          let field_name = "$fv" ^ string_of_int (i + 1) in
+          let load_expr  = Tir.EField (Tir.AVar clo_param, field_name) in
+          Tir.ELet (fv_var, load_expr, acc)
+        ) (List.mapi (fun i fv -> (i, fv)) fvs) fn.Tir.fn_body)
   in
   let apply_fn : Tir.fn_def = {
     fn_name   = apply_name;

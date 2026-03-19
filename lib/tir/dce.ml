@@ -63,10 +63,13 @@ let rec called_fns : Tir.expr -> StringSet.t = function
   | Tir.ESeq (e1, e2)       -> StringSet.union (called_fns e1) (called_fns e2)
   | _                        -> StringSet.empty
 
-(** Transitive reachability from entry points. *)
+(** Transitive reachability from entry points.
+    Uses [free_vars] (not [called_fns]) so that closure apply-function
+    pointers stored in EAlloc args are also treated as references. *)
 let reachable_fns (m : Tir.tir_module) : StringSet.t =
   let fn_map : (string, Tir.fn_def) Hashtbl.t = Hashtbl.create 16 in
   List.iter (fun fd -> Hashtbl.add fn_map fd.Tir.fn_name fd) m.Tir.tm_fns;
+  let fn_names = StringSet.of_list (List.map (fun fd -> fd.Tir.fn_name) m.Tir.tm_fns) in
   let visited = ref StringSet.empty in
   let queue = Queue.create () in
   (* Seed with main; if no main, seed with all functions *)
@@ -80,7 +83,11 @@ let reachable_fns (m : Tir.tir_module) : StringSet.t =
       match Hashtbl.find_opt fn_map name with
       | None -> ()
       | Some fd ->
-        StringSet.iter (fun callee -> Queue.push callee queue) (called_fns fd.Tir.fn_body)
+        (* Intersect all free variable names with known top-level function
+           names — this covers both direct EApp calls and closure fn-ptr
+           references stored in EAlloc args. *)
+        let refs = StringSet.inter (free_vars fd.Tir.fn_body) fn_names in
+        StringSet.iter (fun callee -> Queue.push callee queue) refs
     end
   done;
   !visited

@@ -565,7 +565,15 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Tir.AVar v -> v.Tir.v_ty
       | Tir.ALit _ -> Tir.TVar "_"
     in
-    let (idx, field_ty) = field_index_for ctx obj_ty field_name in
+    let (idx, field_ty) =
+      (* Closure free-variable fields: "$fvN" — parse index from name directly
+         since the closure pointer is opaque (TPtr TUnit) with no field_map. *)
+      if String.length field_name > 3 && String.sub field_name 0 3 = "$fv" then
+        let i = int_of_string (String.sub field_name 3 (String.length field_name - 3)) in
+        (i, Tir.TPtr Tir.TUnit)   (* field type is opaque; let alloca use v_ty *)
+      else
+        field_index_for ctx obj_ty field_name
+    in
     let (_, obj_val) = emit_atom ctx obj_atom in
     let fv = emit_load_field ctx obj_val idx (llvm_ty field_ty) in
     (llvm_ty field_ty, fv)

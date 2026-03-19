@@ -171,6 +171,27 @@ and lower_expr (e : Ast.expr) : Tir.expr =
     } in
     let body = lower_expr (Ast.EBlock (rest, sp)) in
     Tir.ELet (v, rhs, body)
+  (* --- ELetFn as block statement → bind function name in rest of block --- *)
+  | Ast.EBlock (Ast.ELetFn (name, params, ret_ty_ann, fn_body, _) :: rest, sp) ->
+    let fn_name = name.Ast.txt in
+    let params' = List.map (fun (p : Ast.param) ->
+        { Tir.v_name = p.param_name.txt;
+          v_ty = (match p.param_ty with Some t -> lower_ty t | None -> ty_of_span p.param_name.span);
+          v_lin = lower_linearity p.param_lin }
+      ) params in
+    let fn_body' = lower_expr fn_body in
+    let ret_ty = match ret_ty_ann with Some t -> lower_ty t | None -> ty_of_expr fn_body in
+    let fn : Tir.fn_def = {
+      fn_name; fn_params = params'; fn_ret_ty = ret_ty; fn_body = fn_body'
+    } in
+    let fn_var : Tir.var = {
+      v_name = fn_name;
+      v_ty = Tir.TFn (List.map (fun v -> v.Tir.v_ty) params', ret_ty);
+      v_lin = Tir.Unr
+    } in
+    let fn_expr = Tir.ELetRec ([fn], Tir.EAtom (Tir.AVar fn_var)) in
+    let block_body = lower_expr (Ast.EBlock (rest, sp)) in
+    Tir.ELet (fn_var, fn_expr, block_body)
   | Ast.EBlock (e :: rest, sp) ->
     let e' = lower_expr e in
     let body = lower_expr (Ast.EBlock (rest, sp)) in
@@ -223,15 +244,23 @@ and lower_expr (e : Ast.expr) : Tir.expr =
       Tir.EAlloc (Tir.TCon (tag, []), arg_atoms))
 
   (* --- Lambda → ELetRec with a single fn_def --- *)
-  | Ast.ELam (params, body, _) ->
+  | Ast.ELam (params, body, lam_span) ->
     let fn_name = fresh_name "lam" in
-    let params' = List.map (fun (p : Ast.param) ->
+    (* Extract param types from the lambda's inferred type when no annotation. *)
+    let lam_ty = ty_of_span lam_span in
+    let inferred_param_tys = match lam_ty with
+      | Tir.TFn (ps, _) -> ps
+      | _ -> List.map (fun _ -> unknown_ty) params
+    in
+    let params' = List.mapi (fun i (p : Ast.param) ->
         { Tir.v_name = p.param_name.txt;
-          v_ty = (match p.param_ty with Some t -> lower_ty t | None -> unknown_ty);
+          v_ty = (match p.param_ty with Some t -> lower_ty t
+                  | None -> List.nth_opt inferred_param_tys i
+                            |> Option.value ~default:unknown_ty);
           v_lin = lower_linearity p.param_lin }
       ) params in
     let body' = lower_expr body in
-    let ret_ty = unknown_ty in
+    let ret_ty = ty_of_expr body in
     let fn : Tir.fn_def = {
       fn_name; fn_params = params'; fn_ret_ty = ret_ty; fn_body = body'
     } in
@@ -294,8 +323,28 @@ and lower_expr (e : Ast.expr) : Tir.expr =
   | Ast.ESpawn _ ->
     failwith "TIR lower: ESpawn argument must be a plain actor name"
 
-  | Ast.ELetFn _ ->
-    failwith "TIR lower: ELetFn (local recursive fn) is interpreter-only and cannot be lowered to TIR"
+  (* --- Local named recursive fn → ELetRec with a single fn_def ---
+     fn go(params) : ret do body end  is like ELam but the fn knows its own name,
+     enabling recursion.  Defun lifts it and computes free-variable captures. *)
+  | Ast.ELetFn (name, params, ret_ty_ann, body, _) ->
+    let fn_name = name.Ast.txt in
+    let params' = List.map (fun (p : Ast.param) ->
+        { Tir.v_name = p.param_name.txt;
+          v_ty = (match p.param_ty with Some t -> lower_ty t
+                  | None -> ty_of_span p.param_name.span);
+          v_lin = lower_linearity p.param_lin }
+      ) params in
+    let body' = lower_expr body in
+    let ret_ty = match ret_ty_ann with Some t -> lower_ty t | None -> ty_of_expr body in
+    let fn : Tir.fn_def = {
+      fn_name; fn_params = params'; fn_ret_ty = ret_ty; fn_body = body'
+    } in
+    let fn_var : Tir.var = {
+      v_name = fn_name;
+      v_ty = Tir.TFn (List.map (fun v -> v.Tir.v_ty) params', ret_ty);
+      v_lin = Tir.Unr
+    } in
+    Tir.ELetRec ([fn], Tir.EAtom (Tir.AVar fn_var))
 
 (* ── Match lowering ─────────────────────────────────────────────── *)
 
@@ -375,7 +424,7 @@ let lower_fn_def (def : Ast.fn_def) : Tir.fn_def =
     ) clause.fc_params in
   let ret_ty = match def.fn_ret_ty with
     | Some t -> lower_ty t
-    | None -> unknown_ty
+    | None -> ty_of_expr clause.fc_body
   in
   let body = lower_expr clause.fc_body in
   { fn_name = def.fn_name.txt; fn_params = params; fn_ret_ty = ret_ty; fn_body = body }
