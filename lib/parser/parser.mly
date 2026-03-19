@@ -318,6 +318,9 @@ ty:
 ty_app:
   | id = upper_name; LPAREN; args = separated_nonempty_list(COMMA, ty); RPAREN
     { TyCon (id, args) }
+  | id = upper_name; DOT; rest = dotted_upper_tail; LPAREN; args = separated_nonempty_list(COMMA, ty); RPAREN
+    { let joined = id.txt ^ "." ^ String.concat "." (List.map (fun (n : March_ast.Ast.name) -> n.txt) rest) in
+      TyCon (mk_name joined $loc, args) }
   | t = ty_atom { t }
 
 ty_atom:

@@ -592,16 +592,18 @@ let builtin_bindings : (string * scheme) list =
     ("panic",       poly1 (fun a -> TArrow (t_string, a)));
     ("todo_",       poly1 (fun a -> TArrow (t_string, a)));
     ("unreachable_",poly1 (fun a -> TArrow (t_unit,   a)));
-    (* Task builtins — fn () -> expr is a zero-param lambda (type = expr_ty),
-       so task_spawn takes the thunk as a generic value, not Unit -> a.
-       The thunk is a closure at runtime; the typechecker sees it as 'a'. *)
-    ("task_spawn",         poly1 (fun a -> TArrow (a, TCon ("Task", [a]))));
+    (* Task builtins — thunks use fn x -> expr (single Int param, ignored).
+       task_spawn calls the thunk with 0, wraps result in Task(a). *)
+    ("task_spawn",         poly1 (fun a -> TArrow (TArrow (t_int, a), TCon ("Task", [a]))));
     ("task_await",         poly1 (fun a -> TArrow (TCon ("Task", [a]), t_result a t_string)));
     ("task_await_unwrap",  poly1 (fun a -> TArrow (TCon ("Task", [a]), a)));
     ("task_yield",         Mono (TArrow (t_unit, t_unit)));
-    ("task_spawn_steal",   poly1 (fun a -> TArrow (TCon ("WorkPool", []), TArrow (a, TCon ("Task", [a])))));
+    ("task_spawn_steal",   poly1 (fun a -> TArrow (TCon ("WorkPool", []), TArrow (TArrow (t_int, a), TCon ("Task", [a])))));
     ("task_reductions",    Mono (TArrow (t_unit, t_int)));
-    ("get_work_pool",      Mono (TArrow (t_unit, TCon ("WorkPool", []))));
+    ("get_work_pool",      Mono (TCon ("WorkPool", [])));
+    (* Capability builtins *)
+    ("root_cap",   Mono (TCon ("Cap", [TCon ("IO", [])])));
+    ("cap_narrow", poly1 (fun a -> TArrow (TCon ("Cap", [TCon ("IO", [])]), TCon ("Cap", [a]))));
   ]
 
 let builtin_types : (string * int) list =
@@ -1777,7 +1779,13 @@ let rec check_decl env (d : Ast.decl) : env =
         then Some (name.txt ^ "." ^ k, sch)
         else None
       ) inner_env.vars in
-    bind_vars new_names env
+    (* Also export type names and constructors from public DMod into outer scope.
+       Types defined in a module (e.g. IOList, Option) are referred to by their
+       bare name throughout user code, not prefixed. *)
+    let new_types = List.filter (fun (k, _) -> List.mem k pub_set) inner_env.types in
+    let new_ctors = List.filter (fun (k, _) -> List.mem k pub_set) inner_env.ctors in
+    let env' = bind_vars new_names env in
+    { env' with types = new_types @ env'.types; ctors = new_ctors @ env'.ctors }
 
   | Ast.DProtocol _ -> env
 

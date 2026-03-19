@@ -1523,7 +1523,8 @@ let task_builtins : env =
         next_task_id := tid + 1;
         (* Phase 1: eagerly evaluate the thunk.
            Phase 2 will enqueue on the run queue instead. *)
-        let result = apply thunk [] in
+        (* Thunks are (Int -> a) — pass dummy 0 arg. *)
+        let result = apply thunk [VInt 0] in
         let entry = { te_id = tid; te_result = Some result; te_thunk = thunk } in
         Hashtbl.add task_registry tid entry;
         VTask tid
@@ -1568,7 +1569,8 @@ let task_builtins : env =
          but validates the capability requirement. *)
       let tid = !next_task_id in
       next_task_id := tid + 1;
-      let result = apply thunk [] in
+      (* Thunks are (Int -> a) — pass dummy 0 arg. *)
+      let result = apply thunk [VInt 0] in
       let entry = { te_id = tid; te_result = Some result; te_thunk = thunk } in
       Hashtbl.add task_registry tid entry;
       VTask tid
@@ -1580,9 +1582,12 @@ let task_builtins : env =
     | [] -> VInt !last_reduction_count
     | _ -> eval_error "task_reductions: expected 0 arguments"))
 
-  ; ("get_work_pool", VBuiltin ("get_work_pool", function
-    | [] -> VWorkPool
-    | _ -> eval_error "get_work_pool: expected 0 arguments"))
+  ; ("get_work_pool", VWorkPool)
+  (* Capability builtins — at runtime caps are opaque unit sentinels *)
+  ; ("root_cap",   VUnit)
+  ; ("cap_narrow", VBuiltin ("cap_narrow", function
+    | [_cap] -> VUnit   (* attenuation is a compile-time check; runtime is a no-op *)
+    | _ -> eval_error "cap_narrow: expected 1 argument"))
   ]
 
 (** Run [thunk] (a zero-argument closure) while counting reductions.

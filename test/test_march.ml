@@ -2986,6 +2986,176 @@ let test_http_response_helpers () =
   end|} in
   Alcotest.(check int) "response status code" 404 (vint (call_fn env "f" []))
 
+(* ── Http builtin tests ───────────────────────────────────────────── *)
+
+let test_http_serialize_request () =
+  let env = eval_with_http {|mod Test do
+    fn f() do
+      http_serialize_request("GET", "example.com", "/path", None, Nil, "")
+    end
+  end|} in
+  let raw = vstr (call_fn env "f" []) in
+  Alcotest.(check bool) "starts with GET /path"
+    true (String.length raw > 0 && String.sub raw 0 14 = "GET /path HTTP")
+
+let test_http_serialize_request_with_body () =
+  let env = eval_with_http {|mod Test do
+    fn f() do
+      http_serialize_request("POST", "example.com", "/api", None,
+        Cons(Header("Content-Type", "text/plain"), Nil), "hello")
+    end
+  end|} in
+  let raw = vstr (call_fn env "f" []) in
+  Alcotest.(check bool) "contains body" true (
+    let lines = String.split_on_char '\n' raw in
+    List.exists (fun l -> String.trim l = "hello") lines)
+
+let test_http_parse_response () =
+  let raw = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello world" in
+  let open March_eval.Eval in
+  let result = List.assoc "http_parse_response" base_env in
+  match result with
+  | VBuiltin (_, f) ->
+    (match f [VString raw] with
+     | VCon ("Ok", [VTuple [VInt code; _; VString _body]]) ->
+       Alcotest.(check int) "status code" 200 code
+     | _ -> Alcotest.fail "expected Ok tuple")
+  | _ -> Alcotest.fail "expected builtin"
+
+let test_http_parse_response_body () =
+  (* Build the raw HTTP response with actual \r\n in OCaml, pass to builtin directly *)
+  let raw = "HTTP/1.1 404 Not Found\r\nX-Foo: bar\r\n\r\nnot here" in
+  let open March_eval.Eval in
+  let result = List.assoc "http_parse_response" base_env in
+  match result with
+  | VBuiltin (_, f) ->
+    (match f [VString raw] with
+     | VCon ("Ok", [VTuple [VInt code; _; VString body]]) ->
+       Alcotest.(check int) "status code" 404 code;
+       Alcotest.(check string) "body" "not here" body
+     | _ -> Alcotest.fail "expected Ok tuple")
+  | _ -> Alcotest.fail "expected builtin"
+
+(* ── Http.Client tests ───────────────────────────────────────────── *)
+
+let eval_with_http_client src =
+  let string_decl = load_stdlib_file_for_test "string.march" in
+  let http_decl = load_stdlib_file_for_test "http.march" in
+  let transport_decl = load_stdlib_file_for_test "http_transport.march" in
+  let client_decl = load_stdlib_file_for_test "http_client.march" in
+  eval_with_stdlib [string_decl; http_decl; transport_decl; client_decl] src
+
+let test_http_client_new () =
+  let env = eval_with_http_client {|mod Test do
+    fn f() do
+      let c = HttpClient.new_client()
+      c
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  match v with
+  | March_eval.Eval.VCon ("Client", _) -> ()
+  | _ -> Alcotest.fail (Printf.sprintf "expected Client, got %s"
+    (March_eval.Eval.value_to_string v))
+
+let test_http_client_add_steps () =
+  let env = eval_with_http_client {|mod Test do
+    fn f() do
+      let c = HttpClient.new_client()
+      let c = HttpClient.add_request_step(c, "auth", HttpClient.step_bearer_auth("tok"))
+      let c = HttpClient.add_request_step(c, "headers", HttpClient.step_default_headers)
+      fn count(xs) do
+        match xs with
+        | Nil -> 0
+        | Cons(_, t) -> 1 + count(t)
+        end
+      end
+      count(HttpClient.list_steps(c))
+    end
+  end|} in
+  Alcotest.(check int) "two request steps" 2 (vint (call_fn env "f" []))
+
+let test_http_client_request_step_transforms () =
+  let env = eval_with_http_client {|mod Test do
+    fn f() do
+      match Http.get("http://example.com") with
+      | Err(_) -> "fail"
+      | Ok(req) ->
+        let step = HttpClient.step_bearer_auth("my-token")
+        match step(req) with
+        | Err(_) -> "fail"
+        | Ok(transformed) ->
+          match Http.get_request_header(transformed, "authorization") with
+          | Some(v) -> v
+          | None -> "none"
+          end
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check string) "bearer auth header" "Bearer my-token" (vstr (call_fn env "f" []))
+
+let test_http_client_raise_on_error_status () =
+  let env = eval_with_http_client {|mod Test do
+    fn f() do
+      match Http.get("http://example.com") with
+      | Err(_) -> "url_fail"
+      | Ok(req) ->
+        let resp = Response(Status(500), Nil, "Internal Server Error")
+        match HttpClient.step_raise_on_error(req, resp) with
+        | Ok(_) -> "ok"
+        | Err(StepError(name, code)) -> name ++ ":" ++ code
+        | Err(_) -> "other_error"
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check string) "raise on 500" "step_raise_on_error:500" (vstr (call_fn env "f" []))
+
+let test_http_client_with_redirects () =
+  let env = eval_with_http_client {|mod Test do
+    fn f() do
+      let c = HttpClient.new_client()
+      let c = HttpClient.with_redirects(c, 5)
+      match HttpClient.list_steps(c) with
+      | Nil -> "empty"
+      | _ -> "has_steps"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "redirects config" "empty" (vstr (call_fn env "f" []))
+
+let test_http_client_base_url_step () =
+  let env = eval_with_http_client {|mod Test do
+    fn f() do
+      let step = HttpClient.step_base_url("http://api.example.com")
+      -- Create a request with just a path
+      let req = Request(Get, SchemeHttp, "", None, "/users", None, Nil, "")
+      match step(req) with
+      | Ok(transformed) -> Http.host(transformed)
+      | Err(_) -> "fail"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "base url sets host" "api.example.com" (vstr (call_fn env "f" []))
+
+let test_http_client_content_type_step () =
+  let env = eval_with_http_client {|mod Test do
+    fn f() do
+      let step = HttpClient.step_content_type("application/json")
+      let req = Request(Post, SchemeHttp, "example.com", None, "/api", None, Nil, "{}")
+      match step(req) with
+      | Ok(transformed) ->
+        match Http.get_request_header(transformed, "content-type") with
+        | Some(v) -> v
+        | None -> "none"
+        end
+      | Err(_) -> "fail"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "content type header" "application/json" (vstr (call_fn env "f" []))
+
 (* ── Scheduler tests ───────────────────────────────────────────────── *)
 
 let test_reduction_counter_ticks () =
@@ -3033,7 +3203,7 @@ let test_eval_no_yield_when_disabled () =
 let test_eval_task_spawn_await () =
   let src = {|mod Test do
     fn main() do
-      let t = task_spawn(fn () -> 42)
+      let t = task_spawn(fn x -> 42)
       task_await_unwrap(t)
     end
   end|} in
@@ -3044,7 +3214,7 @@ let test_eval_task_spawn_await () =
 let test_eval_task_await_unwrap () =
   let src = {|mod Test do
     fn main() do
-      let t = task_spawn(fn () -> 99)
+      let t = task_spawn(fn x -> 99)
       task_await_unwrap(t)
     end
   end|} in
@@ -3055,8 +3225,8 @@ let test_eval_task_await_unwrap () =
 let test_eval_task_multiple () =
   let src = {|mod Test do
     fn main() do
-      let t1 = task_spawn(fn () -> 10)
-      let t2 = task_spawn(fn () -> 20)
+      let t1 = task_spawn(fn x -> 10)
+      let t2 = task_spawn(fn x -> 20)
       let r1 = task_await_unwrap(t1)
       let r2 = task_await_unwrap(t2)
       r1 + r2
@@ -3070,7 +3240,7 @@ let test_eval_task_captures_env () =
   let src = {|mod Test do
     fn main() do
       let x = 5
-      let t = task_spawn(fn () -> x * x)
+      let t = task_spawn(fn u -> x * x)
       task_await_unwrap(t)
     end
   end|} in
@@ -3081,7 +3251,7 @@ let test_eval_task_captures_env () =
 let test_eval_spawn_steal_requires_pool () =
   let src = {|mod Test do
     fn main() do
-      task_spawn_steal(42, fn () -> 1)
+      task_spawn_steal(42, fn x -> 1)
     end
   end|} in
   let env = eval_module src in
@@ -3093,7 +3263,7 @@ let test_eval_spawn_steal_requires_pool () =
 let test_eval_spawn_steal_with_pool () =
   let src = {|mod Test do
     fn run(pool) do
-      let t = task_spawn_steal(pool, fn () -> 77)
+      let t = task_spawn_steal(pool, fn x -> 77)
       task_await_unwrap(t)
     end
   end|} in
@@ -3104,7 +3274,7 @@ let test_eval_spawn_steal_with_pool () =
 let test_eval_workpool_threading () =
   let src = {|mod Test do
     fn helper(pool) do
-      let t = task_spawn_steal(pool, fn () -> 55)
+      let t = task_spawn_steal(pool, fn x -> 55)
       task_await_unwrap(t)
     end
 
@@ -3129,7 +3299,7 @@ let test_eval_task_sends_to_actor () =
 
     fn main() do
       let pid = spawn(Counter)
-      let t = task_spawn(fn () -> send(pid, Increment(10)))
+      let t = task_spawn(fn x -> send(pid, Increment(10)))
       task_await_unwrap(t)
       send(pid, Increment(0))
     end
@@ -3647,6 +3817,21 @@ let () =
         Alcotest.test_case "post constructor"    `Quick test_http_post_constructor;
         Alcotest.test_case "encode_query"        `Quick test_http_encode_query;
         Alcotest.test_case "response helpers"    `Quick test_http_response_helpers;
+      ]);
+      ("http builtins", [
+        Alcotest.test_case "serialize request"       `Quick test_http_serialize_request;
+        Alcotest.test_case "serialize with body"     `Quick test_http_serialize_request_with_body;
+        Alcotest.test_case "parse response"          `Quick test_http_parse_response;
+        Alcotest.test_case "parse response body"     `Quick test_http_parse_response_body;
+      ]);
+      ("http client", [
+        Alcotest.test_case "new client"              `Quick test_http_client_new;
+        Alcotest.test_case "add steps"               `Quick test_http_client_add_steps;
+        Alcotest.test_case "bearer auth transform"   `Quick test_http_client_request_step_transforms;
+        Alcotest.test_case "raise on error status"   `Quick test_http_client_raise_on_error_status;
+        Alcotest.test_case "with redirects"          `Quick test_http_client_with_redirects;
+        Alcotest.test_case "base url step"           `Quick test_http_client_base_url_step;
+        Alcotest.test_case "content type step"       `Quick test_http_client_content_type_step;
       ]);
       ( "scheduler",
         [

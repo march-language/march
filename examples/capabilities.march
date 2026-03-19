@@ -1,0 +1,131 @@
+-- Capability security showcase.
+-- Demonstrates how March enforces that modules declare the IO capabilities
+-- they use, and how capabilities are threaded explicitly through functions.
+--
+-- Run: march examples/capabilities.march
+--
+-- The capability system works as follows:
+--   - `needs X` declares which capabilities a module requires
+--   - `Cap(X)` in a function signature makes the requirement explicit
+--   - The compiler rejects Cap(X) without a matching `needs X` declaration
+--   - The compiler warns when `needs X` is declared but never used
+--   - `Cap(IO)` covers all sub-capabilities (IO.Console, IO.Network, etc.)
+
+mod CapDemo do
+
+needs IO
+
+-- ─── Pure functions ────────────────────────────────────────────────────────
+-- These do no IO and need no capability. Calling them is always safe.
+
+fn add(x : Int, y : Int) : Int do x + y end
+
+fn format_greeting(name : String) : String do
+  "Hello, " ++ name ++ "!"
+end
+
+fn square(n : Int) : Int do n * n end
+
+-- ─── Console IO ───────────────────────────────────────────────────────────
+-- Functions that perform console IO take Cap(IO.Console).
+-- They cannot be called from untrusted code unless the caller holds the cap.
+
+fn greet(cap : Cap(IO.Console), name : String) : Unit do
+  -- cap is passed explicitly — the caller must hold Cap(IO.Console)
+  println(format_greeting(name))
+end
+
+fn print_result(cap : Cap(IO.Console), label : String, value : Int) : Unit do
+  println(label ++ ": " ++ int_to_string(value))
+end
+
+-- ─── Network IO ───────────────────────────────────────────────────────────
+-- A separate sub-capability governs network access.
+-- Holding Cap(IO.Console) does NOT grant Cap(IO.Network).
+
+fn simulate_fetch(cap : Cap(IO.Network), url : String) : String do
+  -- In a real implementation this would make an HTTP call.
+  -- The cap parameter proves the caller authorised this operation.
+  "[simulated response from " ++ url ++ "]"
+end
+
+-- ─── Capability narrowing ─────────────────────────────────────────────────
+-- cap_narrow(root_cap) attenuates Cap(IO) down to a sub-capability.
+-- This is the standard way to hand a restricted token to a sub-module.
+
+-- cap_narrow(root_cap) downcasts Cap(IO) to any sub-capability.
+-- Note: demo_narrowing itself takes Cap(IO) intentionally to show narrowing.
+-- The hint below (if any) is the compiler suggesting least-privilege — correct
+-- behaviour for a function that explicitly demonstrates attenuation.
+fn demo_narrowing(cap : Cap(IO)) : Unit do
+  let console_cap = cap_narrow(cap)
+  let net_cap     = cap_narrow(cap)
+  greet(console_cap, "narrowed-cap user")
+  let resp = simulate_fetch(net_cap, "https://example.com/api")
+  println("fetch result: " ++ resp)
+end
+
+-- ─── Higher-order capability passing ──────────────────────────────────────
+-- Capabilities compose naturally with HOF. The capability is just a value
+-- that flows through the call graph — closures can capture it freely.
+
+fn run_with_logging(cap : Cap(IO.Console), items : List(Int), label : String) : Unit do
+  if is_nil(items)
+  then println(label ++ ": empty")
+  else print_result(cap, label ++ " first", head(items))
+end
+
+-- ─── Main — receives the root capability from the runtime ─────────────────
+
+fn main() : Unit do
+  -- root_cap is the ambient IO capability provided by the runtime.
+  -- In production code this would be passed as a parameter to main().
+  let cap = root_cap
+
+  println("=== Capability Security Demo ===")
+  println("")
+
+  -- Pure functions need no capability
+  println("--- Pure functions (no capability needed) ---")
+  let sum = add(3, 4)
+  println("add(3, 4) = " ++ int_to_string(sum))
+  let msg = format_greeting("March")
+  println("greeting  = " ++ msg)
+  let sq  = square(7)
+  println("square(7) = " ++ int_to_string(sq))
+  println("")
+
+  -- Attenuate root cap to sub-capabilities for least-privilege passing
+  let console_cap = cap_narrow(cap)
+  let net_cap     = cap_narrow(cap)
+
+  -- Console IO
+  println("--- Console capability ---")
+  greet(console_cap, "Alice")
+  greet(console_cap, "Bob")
+  print_result(console_cap, "square(12)", square(12))
+  println("")
+
+  -- Network IO
+  println("--- Network capability ---")
+  let resp1 = simulate_fetch(net_cap, "https://api.example.com/users")
+  println("response: " ++ resp1)
+  let resp2 = simulate_fetch(net_cap, "https://api.example.com/posts")
+  println("response: " ++ resp2)
+  println("")
+
+  -- Narrowing demo
+  println("--- Capability narrowing ---")
+  demo_narrowing(cap)
+  println("")
+
+  -- HOF with capability
+  println("--- Higher-order capability passing ---")
+  let nums = Cons(10, Cons(20, Cons(30, Nil)))
+  run_with_logging(console_cap, nums, "nums")
+  println("")
+
+  println("=== Done ===")
+end
+
+end
