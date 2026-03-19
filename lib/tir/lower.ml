@@ -294,6 +294,9 @@ and lower_expr (e : Ast.expr) : Tir.expr =
   | Ast.ESpawn _ ->
     failwith "TIR lower: ESpawn argument must be a plain actor name"
 
+  | Ast.ELetFn _ ->
+    failwith "TIR lower: ELetFn (local recursive fn) is interpreter-only and cannot be lowered to TIR"
+
 (* ── Match lowering ─────────────────────────────────────────────── *)
 
 (** Lower match branches to [ECase].

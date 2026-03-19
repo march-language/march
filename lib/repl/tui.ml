@@ -14,19 +14,22 @@ type scope_entry = {
 }
 
 type pane_content = {
-  history       : I.t list;
-  input_line    : I.t;
-  prompt        : string;
-  scope         : scope_entry list;
-  result_latest : (string * string) option;
-  status        : string;
+  history        : I.t list;
+  input_line     : I.t;
+  prompt         : string;
+  scope          : scope_entry list;
+  result_latest  : (string * string) option;
+  status         : string;
   completions    : string list;
   completion_sel : int;
   actors         : March_eval.Eval.actor_info list;
+  scroll_offset  : int;
 }
 
 let create () =
-  let term = Notty_unix.Term.create () in
+  (* Disable Notty's mouse tracking so the terminal handles selection natively.
+     Scroll is handled via PgUp/PgDn keyboard shortcuts instead. *)
+  let term = Notty_unix.Term.create ~mouse:false () in
   let (w, h) = Notty_unix.Term.size term in
   { term; w; h }
 
@@ -126,9 +129,14 @@ let render tui content =
   in
   let all_rows    = content.history @ [input_row] @ dropdown_rows in
   let all_rows_n  = List.length all_rows in
+  let scroll_offset = content.scroll_offset in
+  let start =
+    if all_rows_n <= pane_h then 0
+    else max 0 (all_rows_n - pane_h - scroll_offset)
+  in
   let left_visible =
     if all_rows_n <= pane_h then all_rows
-    else List.filteri (fun i _ -> i >= all_rows_n - pane_h) all_rows
+    else List.filteri (fun i _ -> i >= start && i < start + pane_h) all_rows
   in
   let left_rows_fitted = List.map (fit_width left_w) left_visible in
   let left_fill = max 0 (pane_h - List.length left_rows_fitted) in
@@ -147,8 +155,10 @@ let render tui content =
 
 let rec next_event tui =
   match Notty_unix.Term.event tui.term with
-  | `Key key         -> `Key key
-  | `Resize (w, h)   -> tui.w <- w; tui.h <- h; `Resize (w, h)
-  | `Mouse _         -> next_event tui
-  | `Paste _         -> next_event tui
-  | `End             -> `End
+  | `Key key                              -> `Key key
+  | `Resize (w, h)                        -> tui.w <- w; tui.h <- h; `Resize (w, h)
+  | `Mouse (`Press (`Scroll `Up),   _, _) -> `Scroll `Up
+  | `Mouse (`Press (`Scroll `Down), _, _) -> `Scroll `Down
+  | `Mouse _                              -> next_event tui
+  | `Paste _                              -> next_event tui
+  | `End                                  -> `End

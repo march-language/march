@@ -94,6 +94,8 @@ type expr =
   | ESpawn of expr * span                  (** spawn(Actor) *)
   | EResultRef of int option               (** REPL magic: v or v(N) — last/Nth result *)
   | EDbg of span                           (** Debugger breakpoint: dbg() — pauses, opens debug REPL *)
+  | ELetFn of name * param list * ty option * expr * span
+      (** Local named recursive function: fn go(params) : ret_ty do body end *)
 [@@deriving show]
 
 and param = {
@@ -152,6 +154,7 @@ and use_selector =
 and fn_def = {
   fn_name : name;
   fn_vis : visibility;
+  fn_doc : string option;       (** Optional doc comment: doc "..." or doc """...""" *)
   fn_ret_ty : ty option;        (** Return type (need only appear on one clause) *)
   fn_clauses : fn_clause list;  (** One or more pattern-matching heads *)
 }

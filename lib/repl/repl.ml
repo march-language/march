@@ -2,6 +2,16 @@
     Dispatches to run_tui (notty two-pane) or run_simple (plain text)
     depending on whether stdin/stdout are a terminal. *)
 
+type debug_hooks = {
+  dh_back      : int -> int;
+  dh_forward   : int -> int;
+  dh_where     : unit -> string list;
+  dh_stack     : unit -> string list;
+  dh_trace     : int -> string list;
+  dh_replay    : March_eval.Eval.env -> March_eval.Eval.value option;
+  dh_frame_env : unit -> March_eval.Eval.env option;
+}
+
 open Notty
 
 type comp_state = CompOff | CompOn of { items: string list; sel: int }
@@ -29,15 +39,19 @@ let history_size () =
   | Some s -> (try int_of_string s with _ -> 1000)
   | None   -> 1000
 
-(** Build scope panel entries from eval env + typecheck env. *)
-let user_scope eval_env tc_env result_h =
-  let builtin_names = List.map fst March_eval.Eval.base_env in
+(** Build scope panel entries from eval env + typecheck env.
+    [baseline_env] is the env after stdlib loading — names present there are hidden. *)
+let user_scope eval_env tc_env result_h ~baseline_env =
+  let baseline_names = List.map fst baseline_env in
+  let seen = Hashtbl.create 16 in
   let scope = List.filter_map (fun (name, v) ->
-    if List.mem name builtin_names
+    if List.mem name baseline_names
     || name = "v"
     || (String.length name > 0 && name.[0] = '_')
+    || Hashtbl.mem seen name
     then None
-    else
+    else begin
+      Hashtbl.add seen name ();
       let vs = March_eval.Eval.value_to_string v in
       let ty_str =
         match List.assoc_opt name tc_env.March_typecheck.Typecheck.vars with
@@ -48,6 +62,7 @@ let user_scope eval_env tc_env result_h =
           March_typecheck.Typecheck.pp_ty (March_typecheck.Typecheck.repr ty)
       in
       Some Tui.{ name; type_str = ty_str; val_str = vs }
+    end
   ) eval_env in
   let result_latest = match Result_vars.get result_h 0 with
     | None       -> None
@@ -55,13 +70,34 @@ let user_scope eval_env tc_env result_h =
   in
   (scope, result_latest)
 
+(** Load a list of pre-desugared declarations into the eval/typecheck envs silently. *)
+let load_decls_into_env env tc_env decls =
+  List.fold_left (fun (e, tc) decl ->
+    let ctx = March_errors.Errors.create () in
+    let tc' = March_typecheck.Typecheck.check_decl { tc with errors = ctx } decl in
+    if March_errors.Errors.has_errors ctx then (e, tc)
+    else
+      let e' = (try March_eval.Eval.eval_decl e decl with _ -> e) in
+      (e', { tc' with errors = March_errors.Errors.create () })
+  ) (env, tc_env) decls
+
 (** Non-TUI fallback REPL. *)
-let run_simple () =
-  Printf.printf "March REPL — :quit to exit, :env to list bindings\n%!";
-  let env      = ref March_eval.Eval.base_env in
+let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
+  let is_debug = debug_hooks <> None in
+  if is_debug then
+    Printf.printf "\n[debug] Breakpoint hit — :continue to resume, :help for commands\n%!"
+  else
+    Printf.printf "March REPL — :quit to exit, :env to list bindings\n%!";
   let type_map = Hashtbl.create 64 in
-  let tc_env   = ref (March_typecheck.Typecheck.base_env
-    (March_errors.Errors.create ()) type_map) in
+  let base_e  = March_eval.Eval.base_env in
+  let base_tc = March_typecheck.Typecheck.base_env
+    (March_errors.Errors.create ()) type_map in
+  let (e0, tc0) = match initial_env with
+    | Some e -> (e, base_tc)
+    | None   -> load_decls_into_env base_e base_tc stdlib_decls
+  in
+  let env      = ref e0 in
+  let tc_env   = ref tc0 in
   let result_h = Result_vars.create () in
   let hist     = History.create ~max_size:(history_size ()) in
   History.load hist (history_path ());
@@ -82,7 +118,10 @@ let run_simple () =
 
   while !running do
     (try
-       let prompt = Printf.sprintf "march(%d)> " !prompt_num in
+       let prompt =
+         if is_debug then Printf.sprintf "dbg(%d)> " !prompt_num
+         else Printf.sprintf "march(%d)> " !prompt_num
+       in
        let cont   = String.make (String.length prompt) ' ' in
        Printf.printf "%s%!" (if !first_line then prompt else cont);
        first_line := false;
@@ -107,11 +146,80 @@ let run_simple () =
             History.add hist src;
             (match String.trim src with
              | ":quit" | ":q" -> running := false
+             | ":continue" | ":c" when is_debug -> running := false
+             | ":where" | ":w" when is_debug ->
+               (match debug_hooks with
+                | Some h -> List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_where ())
+                | None -> ())
+             | ":stack" | ":sk" when is_debug ->
+               (match debug_hooks with
+                | Some h -> List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_stack ())
+                | None -> ())
+             | ":trace" | ":t" when is_debug ->
+               (match debug_hooks with
+                | Some h -> List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_trace 10)
+                | None -> ())
+             | ":replay" | ":r" when is_debug ->
+               (match debug_hooks with
+                | Some h ->
+                  (match h.dh_replay !env with
+                   | None   -> Printf.printf "[replay] Done (exception or no frame).\n%!"
+                   | Some v -> Printf.printf "[replay] Result: %s\n%!"
+                                 (March_eval.Eval.value_to_string v))
+                | None -> ())
+             | s when is_debug && String.length s >= 6 && String.sub s 0 6 = ":back" ->
+               (match debug_hooks with
+                | Some h ->
+                  let n = (try int_of_string (String.trim (String.sub s 5 (String.length s - 5)))
+                           with _ -> 1) in
+                  let pos = h.dh_back n in
+                  Printf.printf "Moved to frame %d.\n%!" pos;
+                  (match h.dh_frame_env () with Some e -> env := e | None -> ())
+                | None -> ())
+             | s when is_debug && String.length s >= 8 && String.sub s 0 8 = ":forward" ->
+               (match debug_hooks with
+                | Some h ->
+                  let n = (try int_of_string (String.trim (String.sub s 7 (String.length s - 7)))
+                           with _ -> 1) in
+                  let pos = h.dh_forward n in
+                  Printf.printf "Moved to frame %d.\n%!" pos;
+                  (match h.dh_frame_env () with Some e -> env := e | None -> ())
+                | None -> ())
+             | ":step" | ":s" when is_debug ->
+               (match debug_hooks with
+                | Some h ->
+                  let pos = h.dh_forward 1 in
+                  Printf.printf "Moved to frame %d.\n%!" pos;
+                  (match h.dh_frame_env () with Some e -> env := e | None -> ())
+                | None -> ())
+             | s when is_debug && String.length s >= 7 && String.sub s 0 7 = ":trace " ->
+               (match debug_hooks with
+                | Some h ->
+                  let n = (try int_of_string (String.trim (String.sub s 6 (String.length s - 6)))
+                           with _ -> 10) in
+                  List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_trace n)
+                | None -> ())
              | ":env" ->
                List.iter (fun (k, _) ->
                  if not (List.mem_assoc k March_eval.Eval.base_env) then
                    Printf.printf "  %s\n" k
                ) !env
+             | ":help" when is_debug ->
+               List.iter (fun s -> Printf.printf "%s\n" s) [
+                 "Debug commands:";
+                 "  :continue :c        — resume execution";
+                 "  :back [n] :b [n]    — step back n frames (default 1)";
+                 "  :forward [n] :f [n] — step forward n frames (default 1)";
+                 "  :step :s            — step forward 1 frame";
+                 "  :trace [n] :t [n]   — show last n trace frames (default 10)";
+                 "  :where :w           — show current position";
+                 "  :stack :sk          — show call stack";
+                 "  :replay :r          — replay from current frame";
+                 "  :env                — list bindings";
+                 "  :quit :q            — exit program";
+                 "";
+                 "Any other input is evaluated as a March expression.";
+               ]
              | src when String.trim src = "" -> ()
              | src ->
                let lexbuf = Lexing.from_string src in
@@ -151,6 +259,29 @@ let run_simple () =
                     | March_eval.Eval.Match_failure msg ->
                       Printf.eprintf "match failure: %s\n%!" msg)
                | Some (March_ast.Ast.ReplExpr e) ->
+                 (* Intercept h(name) before typecheck — h is a REPL-only doc lookup *)
+                 let rec doc_key_of = function
+                   | March_ast.Ast.EVar { txt; _ } -> Some txt
+                   | March_ast.Ast.ECon ({ txt; _ }, [], _) -> Some txt
+                   | March_ast.Ast.EField (inner, { txt = field; _ }, _) ->
+                     Option.map (fun prefix -> prefix ^ "." ^ field) (doc_key_of inner)
+                   | _ -> None
+                 in
+                 let handled_as_h = match e with
+                   | March_ast.Ast.EApp (March_ast.Ast.EVar { txt = "h"; _ }, [arg], _) ->
+                     (match doc_key_of arg with
+                      | None ->
+                        Printf.printf "h: expected a name or qualified name\n%!"; true
+                      | Some key ->
+                        let result =
+                          match March_eval.Eval.lookup_doc key with
+                          | Some s -> s
+                          | None   -> Printf.sprintf "No documentation for %s" key
+                        in
+                        Printf.printf "%s\n%!" result; true)
+                   | _ -> false
+                 in
+                 if not handled_as_h then
                  let e' = March_desugar.Desugar.desugar_expr e in
                  let input_ctx = March_errors.Errors.create () in
                  let input_tc  = { !tc_env with errors = input_ctx } in
@@ -184,24 +315,38 @@ let run_simple () =
   History.save hist (history_path ())
 
 (** Full TUI REPL loop using notty two-pane layout. *)
-let run_tui () =
+let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
+  let is_debug = debug_hooks <> None in
   let hist     = History.create ~max_size:(history_size ()) in
   History.load hist (history_path ());
-  let env      = ref March_eval.Eval.base_env in
   let type_map = Hashtbl.create 64 in
-  let tc_env   = ref (March_typecheck.Typecheck.base_env
-    (March_errors.Errors.create ()) type_map) in
+  let base_e  = March_eval.Eval.base_env in
+  let base_tc = March_typecheck.Typecheck.base_env
+    (March_errors.Errors.create ()) type_map in
+  let (e0, tc0) = match initial_env with
+    | Some e -> (e, base_tc)
+    | None   -> load_decls_into_env base_e base_tc stdlib_decls
+  in
+  let env      = ref e0 in
+  let tc_env   = ref tc0 in
   let result_h = Result_vars.create () in
-  let tui       = Tui.create () in
-  let inp       = ref Input.empty in
-  let comp      = ref CompOff in
-  let hist_lines = ref [] in
-  let prompt_num = ref 1 in
-  let running    = ref true in
-  let status     = "March REPL  :help  Tab: complete  Up/Down: history" in
+  let tui          = Tui.create () in
+  let inp          = ref Input.empty in
+  let comp         = ref CompOff in
+  let hist_lines   = ref [] in
+  let prompt_num   = ref 1 in
+  let running      = ref true in
+  let scroll_offset = ref 0 in
+  let base_status  =
+    if is_debug then "dbg  :continue  :back/:forward  :where  :trace  :help"
+    else "march  :help  Tab  ↑↓: hist  wheel/PgUp: scroll"
+  in
 
   let render_frame () =
-    let prompt = Printf.sprintf "march(%d)> " !prompt_num in
+    let prompt =
+      if is_debug then Printf.sprintf "dbg(%d)> " !prompt_num
+      else Printf.sprintf "march(%d)> " !prompt_num
+    in
     let input_img = make_input_img !inp.Input.buffer !inp.Input.cursor in
     (* Show accumulated continuation lines above current input *)
     let cont_imgs = List.map (fun line ->
@@ -209,15 +354,22 @@ let run_tui () =
       Notty.I.(Notty.I.string Notty.A.empty pad_str <|> Highlight.highlight line)
     ) (List.rev !inp.Input.multiline_buf) in
     let transcript = !hist_lines @ cont_imgs in
-    let (scope, result_latest) = user_scope !env !tc_env result_h in
+    let (scope, result_latest) = user_scope !env !tc_env result_h ~baseline_env:e0 in
     let (comp_items, comp_sel) = match !comp with
       | CompOff -> ([], 0)
       | CompOn { items; sel } -> (items, sel)
     in
     let actors = March_eval.Eval.list_actors () in
+    (* Scroll indicator at the FRONT so it is visible even on narrow terminals *)
+    let status =
+      if !scroll_offset > 0
+      then Printf.sprintf "[↑%d scrolled  PgDn/wheel↓: return  Shift+drag: select]  %s"
+             !scroll_offset base_status
+      else base_status
+    in
     Tui.render tui Tui.{
-      history       = transcript;
-      input_line    = input_img;
+      history        = transcript;
+      input_line     = input_img;
       prompt;
       scope;
       result_latest;
@@ -225,11 +377,14 @@ let run_tui () =
       completions    = comp_items;
       completion_sel = comp_sel;
       actors;
+      scroll_offset  = !scroll_offset;
     }
   in
 
   let add_line attr s =
-    hist_lines := !hist_lines @ [Notty.I.string attr s]
+    List.iter (fun line ->
+      hist_lines := !hist_lines @ [Notty.I.string attr line]
+    ) (String.split_on_char '\n' s)
   in
 
   let process_src src =
@@ -281,6 +436,29 @@ let run_tui () =
          | March_eval.Eval.Match_failure msg ->
            add_line Notty.A.(fg red) (Printf.sprintf "match failure: %s" msg))
     | Some (March_ast.Ast.ReplExpr e) ->
+      (* Intercept h(name) before typecheck — h is a REPL-only doc lookup *)
+      let rec doc_key_of = function
+        | March_ast.Ast.EVar { txt; _ } -> Some txt
+        | March_ast.Ast.ECon ({ txt; _ }, [], _) -> Some txt
+        | March_ast.Ast.EField (inner, { txt = field; _ }, _) ->
+          Option.map (fun prefix -> prefix ^ "." ^ field) (doc_key_of inner)
+        | _ -> None
+      in
+      let handled_as_h = match e with
+        | March_ast.Ast.EApp (March_ast.Ast.EVar { txt = "h"; _ }, [arg], _) ->
+          (match doc_key_of arg with
+           | None ->
+             add_line Notty.A.(fg yellow) "h: expected a name or qualified name"; true
+           | Some key ->
+             let result =
+               match March_eval.Eval.lookup_doc key with
+               | Some s -> s
+               | None   -> Printf.sprintf "No documentation for %s" key
+             in
+             add_line Notty.A.empty result; true)
+        | _ -> false
+      in
+      if not handled_as_h then
       let e' = March_desugar.Desugar.desugar_expr e in
       let input_ctx = March_errors.Errors.create () in
       let input_tc  = { !tc_env with errors = input_ctx } in
@@ -321,6 +499,7 @@ let run_tui () =
      | Input.EOF -> running := false
      | Input.Submit src ->
        comp := CompOff;
+       scroll_offset := 0;
        (* Add submitted input to transcript *)
        let prompt = Printf.sprintf "march(%d)> " !prompt_num in
        let src_lines = String.split_on_char '\n' src in
@@ -338,6 +517,65 @@ let run_tui () =
        (* Dispatch to command handler or process_src *)
        (match String.trim src with
         | ":quit" | ":q" -> running := false
+        | ":continue" | ":c" when is_debug -> running := false
+        | ":where" | ":w" when is_debug ->
+          (match debug_hooks with
+           | Some h ->
+             let lines = h.dh_where () in
+             (match lines with
+              | [] -> ()
+              | header :: rest ->
+                add_line Notty.A.(fg cyan) header;
+                List.iter (add_line Notty.A.empty) rest)
+           | None -> ())
+        | ":stack" | ":sk" when is_debug ->
+          (match debug_hooks with
+           | Some h -> List.iter (add_line Notty.A.empty) (h.dh_stack ())
+           | None -> ())
+        | ":trace" | ":t" when is_debug ->
+          (match debug_hooks with
+           | Some h -> List.iter (add_line Notty.A.empty) (h.dh_trace 10)
+           | None -> ())
+        | ":replay" | ":r" when is_debug ->
+          (match debug_hooks with
+           | Some h ->
+             (match h.dh_replay !env with
+              | None   -> add_line Notty.A.(fg yellow) "[replay] Done (exception or no frame)."
+              | Some v -> add_line Notty.A.(fg green)
+                            (Printf.sprintf "[replay] Result: %s" (March_eval.Eval.value_to_string v)))
+           | None -> ())
+        | s when is_debug && String.length s >= 6 && String.sub s 0 5 = ":back" ->
+          (match debug_hooks with
+           | Some h ->
+             let n = (try int_of_string (String.trim (String.sub s 5 (String.length s - 5)))
+                      with _ -> 1) in
+             let pos = h.dh_back n in
+             add_line Notty.A.empty (Printf.sprintf "Moved to frame %d." pos);
+             (match h.dh_frame_env () with Some e -> env := e | None -> ())
+           | None -> ())
+        | ":step" | ":s" when is_debug ->
+          (match debug_hooks with
+           | Some h ->
+             let pos = h.dh_forward 1 in
+             add_line Notty.A.empty (Printf.sprintf "Moved to frame %d." pos);
+             (match h.dh_frame_env () with Some e -> env := e | None -> ())
+           | None -> ())
+        | s when is_debug && String.length s >= 9 && String.sub s 0 8 = ":forward" ->
+          (match debug_hooks with
+           | Some h ->
+             let n = (try int_of_string (String.trim (String.sub s 8 (String.length s - 8)))
+                      with _ -> 1) in
+             let pos = h.dh_forward n in
+             add_line Notty.A.empty (Printf.sprintf "Moved to frame %d." pos);
+             (match h.dh_frame_env () with Some e -> env := e | None -> ())
+           | None -> ())
+        | s when is_debug && String.length s >= 7 && String.sub s 0 7 = ":trace " ->
+          (match debug_hooks with
+           | Some h ->
+             let n = (try int_of_string (String.trim (String.sub s 6 (String.length s - 6)))
+                      with _ -> 10) in
+             List.iter (add_line Notty.A.empty) (h.dh_trace n)
+           | None -> ())
         | ":env" ->
           let lines = List.filter_map (fun (k, v) ->
             if List.mem_assoc k March_eval.Eval.base_env then None
@@ -346,12 +584,30 @@ let run_tui () =
           ) !env in
           List.iter (add_line Notty.A.empty) lines
         | ":clear" -> hist_lines := []
-        | ":reset" ->
-          env := March_eval.Eval.base_env;
-          tc_env := March_typecheck.Typecheck.base_env
-            (March_errors.Errors.create ()) type_map;
+        | ":reset" when not is_debug ->
+          let (e', tc') = load_decls_into_env March_eval.Eval.base_env
+            (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map)
+            stdlib_decls in
+          env := e'; tc_env := tc';
           hist_lines := []
         | ":help" ->
+          if is_debug then
+            List.iter (add_line Notty.A.empty) [
+              "Debug commands:";
+              "  :continue :c        — resume execution";
+              "  :back [n] :b [n]    — step back n frames (default 1)";
+              "  :forward [n] :f [n] — step forward n frames (default 1)";
+              "  :step :s            — step forward 1 frame";
+              "  :trace [n] :t [n]   — show last n trace frames (default 10)";
+              "  :where :w           — show current position";
+              "  :stack :sk          — show call stack";
+              "  :replay :r          — replay from current frame";
+              "  :env                — list bindings";
+              "  :quit :q            — exit program";
+              "";
+              "Any other input is evaluated as a March expression.";
+            ]
+          else
           List.iter (add_line Notty.A.empty) [
             "Commands:";
             "  :quit :q        — exit";
@@ -363,7 +619,9 @@ let run_tui () =
             "  :help           — this message";
             "";
             "Keys: Tab: complete | Up/Down: history";
+            "      PgUp/PgDn or mouse wheel: scroll history";
             "      Ctrl+A/E: home/end | Ctrl+W: kill word | Ctrl+Y: yank";
+            "Copy: Shift+drag to select, then Cmd+C (NOT Ctrl+C) to copy";
             "Magic: v = last result";
           ]
         | src when String.length src > 5 && String.sub src 0 5 = ":type" ->
@@ -454,10 +712,7 @@ let run_tui () =
        let i = ref c in
        while !i > 0 && b.[!i - 1] <> ' ' do decr i done;
        let prefix = String.sub b !i (c - !i) in
-       let scope = List.filter_map (fun (name, _v) ->
-         if List.mem_assoc name March_eval.Eval.base_env then None
-         else Some (name, "")
-       ) !env in
+       let scope = List.map (fun (name, _v) -> (name, "")) !env in
        let items = Complete.complete prefix scope in
        (match items with
        | [] -> ()
@@ -477,6 +732,20 @@ let run_tui () =
     (match Tui.next_event tui with
      | `End -> running := false
      | `Resize _ -> render_frame ()
+     | `Scroll `Up ->
+       scroll_offset := !scroll_offset + 3;
+       render_frame ()
+     | `Scroll `Down ->
+       scroll_offset := max 0 (!scroll_offset - 3);
+       render_frame ()
+     | `Key (`Page `Up, _) ->
+       let (_, h) = Tui.size tui in
+       scroll_offset := !scroll_offset + (h - 2);
+       render_frame ()
+     | `Key (`Page `Down, _) ->
+       let (_, h) = Tui.size tui in
+       scroll_offset := max 0 (!scroll_offset - (h - 2));
+       render_frame ()
      | `Key key ->
        (match !comp with
         | CompOn { items; sel } ->
@@ -510,7 +779,7 @@ let run_tui () =
   History.save hist (history_path ());
   Tui.close tui
 
-let run () =
+let run ?(stdlib_decls = []) ?(debug_hooks = None) ?(initial_env = None) () =
   if Unix.isatty Unix.stdin && Unix.isatty Unix.stdout
-  then run_tui ()
-  else run_simple ()
+  then run_tui ~stdlib_decls ~debug_hooks ~initial_env ()
+  else run_simple ~stdlib_decls ~debug_hooks ~initial_env ()

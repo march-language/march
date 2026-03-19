@@ -47,7 +47,7 @@
           | rest' -> (ret_acc, clauses_acc, rest')
         in
         let (final_ret, all_clauses, rest') = collect_same ret clauses rest in
-        go (DFn ({ fn_name = def.fn_name; fn_vis = vis; fn_ret_ty = final_ret; fn_clauses = all_clauses }, span) :: acc) rest'
+        go (DFn ({ fn_name = def.fn_name; fn_vis = vis; fn_doc = def.fn_doc; fn_ret_ty = final_ret; fn_clauses = all_clauses }, span) :: acc) rest'
       | d :: rest -> go (d :: acc) rest
     in
     go [] decls
@@ -65,7 +65,7 @@
 %token STATE INIT RESPOND PROTOCOL LOOP
 %token LINEAR AFFINE
 %token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS USE
-%token DBG
+%token DBG DOC
 %token <string> INTERP_START
 %token <string> INTERP_MID
 %token <string> INTERP_END
@@ -94,6 +94,10 @@ module_:
 (* ---- Declarations ---- *)
 
 decl:
+  | DOC; s = STRING; d = fn_decl
+    { match d with
+      | DFn (def, span) -> DFn ({ def with fn_doc = Some s }, span)
+      | d -> d }
   | d = fn_decl        { d }
   | d = let_decl       { d }
   | d = type_decl      { d }
@@ -113,6 +117,7 @@ fn_decl:
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Private;
+             fn_doc = None;
              fn_ret_ty = ret;
              fn_clauses = [{ fc_params = params;
                              fc_guard = guard;
@@ -123,6 +128,7 @@ fn_decl:
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Public;
+             fn_doc = None;
              fn_ret_ty = ret;
              fn_clauses = [{ fc_params = params;
                              fc_guard = guard;
@@ -308,6 +314,7 @@ ty_atom:
   | id = upper_name { TyCon (id, []) }
   | LINEAR; t = ty_atom { TyLinear (Linear, t) }
   | AFFINE; t = ty_atom { TyLinear (Affine, t) }
+  | LPAREN; RPAREN { TyTuple [] }
   | LPAREN; t = ty; RPAREN { t }
   | LPAREN; t = ty; COMMA; ts = separated_nonempty_list(COMMA, ty); RPAREN
     { TyTuple (t :: ts) }
@@ -346,6 +353,14 @@ block_expr:
   | LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
     { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Unrestricted; bind_expr = e },
             mk_span ($loc)) }
+  | FN; name = lower_name; LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
+    ret = option(ret_annot); DO; body = block_body; END
+    { let simple_params = List.filter_map (function
+        | FPNamed fp ->
+          Some { param_name = fp.param_name; param_ty = fp.param_ty;
+                 param_lin = fp.param_lin }
+        | FPPat _ -> None) params in
+      ELetFn (name, simple_params, ret, body, mk_span ($loc)) }
   | e = expr { e }
 
 expr:
@@ -359,6 +374,7 @@ expr:
 
 lambda_params:
   | name = lower_name { [{ param_name = name; param_ty = None; param_lin = Unrestricted }] }
+  | UNDERSCORE { [{ param_name = mk_name "_" $loc; param_ty = None; param_lin = Unrestricted }] }
   | LPAREN; ps = separated_list(COMMA, param); RPAREN
     { ps }
 

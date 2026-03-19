@@ -124,7 +124,13 @@ let rec desugar_expr (e : expr) : expr =
                    sp)
 
   | EField (ex, name, sp) ->
-    EField (desugar_expr ex, name, sp)
+    (* Desugar module member access: Mod.fn(...) → EVar "Mod.fn"
+       When the base is a bare upper-case constructor with no args,
+       it is a module namespace reference rather than a value. *)
+    (match ex with
+     | ECon (mod_name, [], _) ->
+       EVar { txt = mod_name.txt ^ "." ^ name.txt; span = sp }
+     | _ -> EField (desugar_expr ex, name, sp))
 
   | EIf (cond, t, f, sp) ->
     EIf (desugar_expr cond, desugar_expr t, desugar_expr f, sp)
@@ -140,6 +146,9 @@ let rec desugar_expr (e : expr) : expr =
 
   | ESpawn (actor, sp) ->
     ESpawn (desugar_expr actor, sp)
+
+  | ELetFn (name, params, ret_ty, body, sp) ->
+    ELetFn (name, params, ret_ty, desugar_expr body, sp)
 
 (* ---- Multi-head fn desugaring ---- *)
 

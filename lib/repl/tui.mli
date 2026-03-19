@@ -26,6 +26,8 @@ type pane_content = {
   (** Index of the currently highlighted completion. *)
   actors         : March_eval.Eval.actor_info list;
   (** Live actor instances from the evaluator. *)
+  scroll_offset  : int;
+  (** Lines scrolled back from the bottom (0 = pinned to bottom). *)
 }
 
 val create : unit -> t
@@ -37,8 +39,8 @@ val close : t -> unit
 val render : t -> pane_content -> unit
 (** Compose and display a full screen frame. *)
 
-val next_event : t -> [ `Key of Notty.Unescape.key | `Resize of int * int | `End ]
-(** Block until next terminal event. Returns [`Key], [`Resize], or [`End] (EOF/signal). *)
+val next_event : t -> [ `Key of Notty.Unescape.key | `Resize of int * int | `Scroll of [`Up | `Down] | `End ]
+(** Block until next terminal event. Returns [`Key], [`Resize], [`Scroll], or [`End] (EOF/signal). *)
 
 val size : t -> int * int
 (** Current terminal (width, height). *)

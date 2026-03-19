@@ -442,6 +442,92 @@ let builtin_bindings : (string * scheme) list =
     (* Actor builtins *)
     ("kill",     poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_unit)));
     ("is_alive", poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_bool)));
+    (* Int primitives *)
+    ("int_abs",         Mono (TArrow (t_int,   t_int)));
+    ("int_pow",         Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    ("int_div",         Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    ("int_mod",         Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    ("int_div_euclid",  Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    ("int_mod_euclid",  Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    ("int_to_float",    Mono (TArrow (t_int,   t_float)));
+    ("int_max_value",   Mono (TArrow (t_unit,  t_int)));
+    ("int_min_value",   Mono (TArrow (t_unit,  t_int)));
+    (* Float primitives *)
+    ("float_abs",       Mono (TArrow (t_float, t_float)));
+    ("float_floor",     Mono (TArrow (t_float, t_int)));
+    ("float_ceil",      Mono (TArrow (t_float, t_int)));
+    ("float_round",     Mono (TArrow (t_float, t_int)));
+    ("float_truncate",  Mono (TArrow (t_float, t_int)));
+    ("float_to_int",    Mono (TArrow (t_float, t_int)));
+    ("float_is_nan",    Mono (TArrow (t_float, t_bool)));
+    ("float_is_infinite",Mono (TArrow (t_float, t_bool)));
+    ("float_infinity",  Mono (TArrow (t_unit,  t_float)));
+    ("float_neg_infinity",Mono (TArrow (t_unit, t_float)));
+    ("float_nan",       Mono (TArrow (t_unit,  t_float)));
+    ("float_epsilon",   Mono (TArrow (t_unit,  t_float)));
+    ("float_from_string",Mono (TArrow (t_string, t_option t_float)));
+    ("float_to_string", Mono (TArrow (t_float,  t_string)));
+    (* Math primitives *)
+    ("math_sqrt",   Mono (TArrow (t_float, t_float)));
+    ("math_cbrt",   Mono (TArrow (t_float, t_float)));
+    ("math_pow",    Mono (TArrow (t_float, TArrow (t_float, t_float))));
+    ("math_exp",    Mono (TArrow (t_float, t_float)));
+    ("math_exp2",   Mono (TArrow (t_float, t_float)));
+    ("math_log",    Mono (TArrow (t_float, t_float)));
+    ("math_log2",   Mono (TArrow (t_float, t_float)));
+    ("math_log10",  Mono (TArrow (t_float, t_float)));
+    ("math_sin",    Mono (TArrow (t_float, t_float)));
+    ("math_cos",    Mono (TArrow (t_float, t_float)));
+    ("math_tan",    Mono (TArrow (t_float, t_float)));
+    ("math_asin",   Mono (TArrow (t_float, t_float)));
+    ("math_acos",   Mono (TArrow (t_float, t_float)));
+    ("math_atan",   Mono (TArrow (t_float, t_float)));
+    ("math_atan2",  Mono (TArrow (t_float, TArrow (t_float, t_float))));
+    ("math_sinh",   Mono (TArrow (t_float, t_float)));
+    ("math_cosh",   Mono (TArrow (t_float, t_float)));
+    ("math_tanh",   Mono (TArrow (t_float, t_float)));
+    (* String primitives *)
+    ("string_is_empty",     Mono (TArrow (t_string, t_bool)));
+    ("string_slice",        Mono (TArrow (t_string, TArrow (t_int, TArrow (t_int, t_string)))));
+    ("string_contains",     Mono (TArrow (t_string, TArrow (t_string, t_bool))));
+    ("string_starts_with",  Mono (TArrow (t_string, TArrow (t_string, t_bool))));
+    ("string_ends_with",    Mono (TArrow (t_string, TArrow (t_string, t_bool))));
+    ("string_index_of",     Mono (TArrow (t_string, TArrow (t_string, t_option t_int))));
+    ("string_replace",      Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string)))));
+    ("string_replace_all",  Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string, t_string)))));
+    ("string_split",        Mono (TArrow (t_string, TArrow (t_string, t_list t_string))));
+    ("string_join",         Mono (TArrow (t_string, TArrow (t_list t_string, t_string))));
+    ("string_trim",         Mono (TArrow (t_string, t_string)));
+    ("string_trim_start",   Mono (TArrow (t_string, t_string)));
+    ("string_trim_end",     Mono (TArrow (t_string, t_string)));
+    ("string_to_uppercase", Mono (TArrow (t_string, t_string)));
+    ("string_to_lowercase", Mono (TArrow (t_string, t_string)));
+    ("string_chars",        Mono (TArrow (t_string, t_list (TCon ("Char", [])))));
+    ("string_from_chars",   Mono (TArrow (t_list (TCon ("Char", [])), t_string)));
+    ("string_repeat",       Mono (TArrow (t_string, TArrow (t_int, t_string))));
+    ("string_reverse",      Mono (TArrow (t_string, t_string)));
+    ("string_pad_left",     Mono (TArrow (t_string, TArrow (t_int, TArrow (t_string, t_string)))));
+    ("string_pad_right",    Mono (TArrow (t_string, TArrow (t_int, TArrow (t_string, t_string)))));
+    ("string_byte_length",  Mono (TArrow (t_string, t_int)));
+    (* Char primitives *)
+    ("char_is_alpha",        Mono (TArrow (TCon ("Char", []), t_bool)));
+    ("char_is_digit",        Mono (TArrow (TCon ("Char", []), t_bool)));
+    ("char_is_alphanumeric", Mono (TArrow (TCon ("Char", []), t_bool)));
+    ("char_is_whitespace",   Mono (TArrow (TCon ("Char", []), t_bool)));
+    ("char_is_uppercase",    Mono (TArrow (TCon ("Char", []), t_bool)));
+    ("char_is_lowercase",    Mono (TArrow (TCon ("Char", []), t_bool)));
+    ("char_to_uppercase",    Mono (TArrow (TCon ("Char", []), TCon ("Char", []))));
+    ("char_to_lowercase",    Mono (TArrow (TCon ("Char", []), TCon ("Char", []))));
+    ("char_to_int",          Mono (TArrow (TCon ("Char", []), t_int)));
+    ("char_from_int",        Mono (TArrow (t_int, TCon ("Char", []))));
+    (* Comparison primitives *)
+    ("compare_int",    Mono (TArrow (t_int,    TArrow (t_int,    t_int))));
+    ("compare_float",  Mono (TArrow (t_float,  TArrow (t_float,  t_int))));
+    ("compare_string", Mono (TArrow (t_string, TArrow (t_string, t_int))));
+    (* Diverging primitives *)
+    ("panic",       poly1 (fun a -> TArrow (t_string, a)));
+    ("todo_",       poly1 (fun a -> TArrow (t_string, a)));
+    ("unreachable_",poly1 (fun a -> TArrow (t_unit,   a)));
   ]
 
 let builtin_types : (string * int) list =
@@ -808,6 +894,7 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.ESpawn (_, sp)          -> sp
   | Ast.EResultRef _            -> Ast.dummy_span
   | Ast.EDbg sp                 -> sp
+  | Ast.ELetFn (_, _, _, _, sp) -> sp
 
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
@@ -1042,6 +1129,27 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     (* ── Debugger breakpoint ───────────────────────────────────────── *)
     | Ast.EDbg _ -> t_unit
+
+    (* ── Local recursive named function (block-scoped) ─────────────── *)
+    | Ast.ELetFn (name, params, ret_ann, body, sp) ->
+      (* Typecheck the local fn and return the type of its closure.
+         When appearing as a standalone expression (last in block), return
+         the function type; the binding is only in effect for block context. *)
+      let fn_ty = fresh_var env.level in
+      let env_with_self = bind_var name.txt (Mono fn_ty) env in
+      let param_tys, env_inner = bind_lam_params env_with_self params in
+      let body_ty = infer_block env_inner [body] in
+      let ret_ty  = match ret_ann with
+        | None -> body_ty
+        | Some ann ->
+          let tvars = ref [] in
+          let expected = surface_ty env ~tvars ann in
+          unify env ~span:sp ~reason:None body_ty expected;
+          expected
+      in
+      let arrow_ty = List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys ret_ty in
+      unify env ~span:sp ~reason:None fn_ty arrow_ty;
+      arrow_ty
   in
   Hashtbl.replace env.type_map (span_of_expr e) (repr result);
   result
@@ -1153,6 +1261,26 @@ and infer_block env exprs =
       | _            -> bindings
     in
     let env' = bind_vars bindings' env in
+    infer_block env' rest
+  (* Local named recursive function: fn go(params) : ret_ty do body end *)
+  | Ast.ELetFn (name, params, ret_ann, body, sp) :: rest ->
+    (* Introduce a fresh type for the function, check recursively *)
+    let fn_ty = fresh_var env.level in
+    let env_with_self = bind_var name.txt (Mono fn_ty) env in
+    let param_tys, env_inner = bind_lam_params env_with_self params in
+    let body_ty = infer_block env_inner [body] in
+    let ret_ty  = match ret_ann with
+      | None -> body_ty
+      | Some ann ->
+        let tvars = ref [] in
+        let expected = surface_ty env ~tvars ann in
+        unify env ~span:sp ~reason:None body_ty expected;
+        expected
+    in
+    let arrow_ty = List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys ret_ty in
+    unify env ~span:sp ~reason:None fn_ty arrow_ty;
+    let gen_ty = generalize (env.level - 1) arrow_ty in
+    let env' = bind_var name.txt gen_ty env in
     infer_block env' rest
   | e :: rest ->
     ignore (infer_expr env e);
@@ -1453,7 +1581,18 @@ let rec check_decl env (d : Ast.decl) : env =
     bind_var name.txt (Mono (TCon ("Pid", [state_ty]))) env_with_ctors
 
   | Ast.DMod (name, _vis, decls, _sp) ->
-    let inner_env = List.fold_left check_decl env decls in
+    (* Pass 1: pre-bind all inner DFn names as mono forward refs so that
+       functions within the module can reference each other regardless of
+       declaration order (same logic as check_module's pass 1).
+       Unlike check_module's pass 1, we always pre-bind here — outer-scope
+       names with the same identifier should not block intra-module refs. *)
+    let pre_env = List.fold_left (fun e d ->
+        match d with
+        | Ast.DFn (def, _) ->
+          bind_var def.fn_name.txt (Mono (fresh_var 0)) e
+        | _ -> e
+      ) env decls in
+    let inner_env = List.fold_left check_decl pre_env decls in
     (* Collect the names that are explicitly public within this module.
        DFn respects fn_vis; DLet/DType/DActor have no visibility field and are
        treated as public by default (visibility annotations for them are future work). *)
@@ -1493,7 +1632,7 @@ let rec check_decl env (d : Ast.decl) : env =
     );
     (* Expose only public names as "ModName.name" in the outer env *)
     let new_names = List.filter_map (fun (k, sch) ->
-        if not (List.mem_assoc k env.vars) && List.mem k pub_set
+        if List.mem k pub_set
         then Some (name.txt ^ "." ^ k, sch)
         else None
       ) inner_env.vars in
@@ -1608,7 +1747,9 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
   let pre_env = List.fold_left (fun env d ->
       match d with
       | Ast.DFn (def, _) ->
-        bind_var def.fn_name.txt (Mono (fresh_var 0)) env
+        (* Don't shadow existing bindings (e.g., builtins) with mono forward refs *)
+        if List.mem_assoc def.fn_name.txt env.vars then env
+        else bind_var def.fn_name.txt (Mono (fresh_var 0)) env
       | Ast.DType (name, params, typedef, _) ->
         let env1 = { env with types = (name.txt, List.length params) :: env.types } in
         (match typedef with

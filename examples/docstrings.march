@@ -1,0 +1,69 @@
+-- docstrings.march — demonstrates doc annotation syntax
+--
+-- Run in the REPL and use h(fn_name) to read any doc string:
+--   h(greet)
+--   h(Stack.push)
+
+mod DocExample do
+
+-- ---- Single-line doc strings ----
+
+doc "Returns a greeting string for the given name."
+pub fn greet(name : String) : String do
+  "Hello, " ++ name ++ "!"
+end
+
+doc "Returns true if n is even."
+pub fn even(n : Int) : Bool do
+  n % 2 == 0
+end
+
+doc "Computes the factorial of n. Undefined for negative n."
+pub fn factorial(0) : Int do 1 end
+pub fn factorial(n) : Int do n * factorial(n - 1) end
+
+-- ---- Triple-quoted doc strings (for multi-line docs) ----
+
+doc """
+Computes the nth Fibonacci number.
+
+  fib(0) = 0
+  fib(1) = 1
+  fib(n) = fib(n-1) + fib(n-2)
+
+Not suitable for large n — no memoisation.
+"""
+pub fn fib(0) : Int do 0 end
+pub fn fib(1) : Int do 1 end
+pub fn fib(n) : Int do fib(n - 1) + fib(n - 2) end
+
+-- ---- Nested module with its own docs ----
+
+mod Stack do
+
+  doc "Pushes a value onto the front of the list, returning the new stack."
+  pub fn push(stack, value) do
+    Cons(value, stack)
+  end
+
+  doc "Pops the top value. Returns Ok(value) or Err(:empty)."
+  pub fn pop(Nil) do
+    Err(:empty)
+  end
+  pub fn pop(Cons(x, rest)) do
+    Ok(x, rest)
+  end
+
+  doc "Returns true if the stack has no elements."
+  pub fn is_empty(Nil) do true end
+  pub fn is_empty(_)   do false end
+
+end
+
+fn main() do
+  println(greet("world"))
+  println(int_to_string(factorial(5)))
+  println(int_to_string(fib(10)))
+end
+
+end

@@ -79,7 +79,7 @@ fn main() : Unit do
   safe_send(counter, Ping("logger"), "Ping")
   safe_send(logger,  Stats(), "Stats")
   println("")
-
+  dbg()
   println("=== Killing the logger ===")
   kill(logger)
   println("logger  alive: " ++ bool_to_string(is_alive(logger)))

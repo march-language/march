@@ -45,19 +45,39 @@ let show_trace (ctx : Eval.debug_ctx) (n : int) : string list =
     | None   -> Printf.sprintf "Frame %d: <empty>" i
     | Some f -> format_frame i f)
 
-(** Show where we are in the trace. *)
-let show_where (ctx : Eval.debug_ctx) : string =
+(** Read [n] lines of context around [target_line] (1-indexed) from [file].
+    Returns formatted lines with a [→] marker on the target line. *)
+let source_context (file : string) (target_line : int) (n : int) : string list =
+  try
+    let ic   = open_in file in
+    let acc  = ref [] in
+    (try while true do acc := input_line ic :: !acc done with End_of_file -> ());
+    close_in ic;
+    let arr   = Array.of_list (List.rev !acc) in
+    let len   = Array.length arr in
+    let lo    = max 0 (target_line - 1 - n) in
+    let hi    = min (len - 1) (target_line - 1 + n) in
+    List.init (hi - lo + 1) (fun i ->
+      let lineno = lo + i + 1 in
+      let marker = if lineno = target_line then "→" else " " in
+      Printf.sprintf "%s %4d │ %s" marker lineno arr.(lo + i))
+  with _ -> []
+
+(** Show where we are in the trace, including surrounding source lines. *)
+let show_where (ctx : Eval.debug_ctx) : string list =
   let total = ctx.dc_trace.Eval.rb_size in
-  if total = 0 then "No frames recorded yet."
+  if total = 0 then ["No frames recorded yet."]
   else
     match current_frame ctx with
-    | None   -> Printf.sprintf "Frame %d of %d (out of range)" ctx.dc_pos total
+    | None   -> [Printf.sprintf "Frame %d of %d (out of range)" ctx.dc_pos total]
     | Some f ->
-      let sp = f.tf_span in
-      Printf.sprintf "Frame %d of %d | %s:%d:%d | depth %d"
+      let sp     = f.tf_span in
+      let header = Printf.sprintf "Frame %d of %d | %s:%d:%d | depth %d"
         ctx.dc_pos total
         sp.March_ast.Ast.file sp.March_ast.Ast.start_line
         sp.March_ast.Ast.start_col f.tf_depth
+      in
+      header :: source_context sp.March_ast.Ast.file sp.March_ast.Ast.start_line 2
 
 (** Show call stack: frames at each depth level up to current position. *)
 let show_stack (ctx : Eval.debug_ctx) : string list =

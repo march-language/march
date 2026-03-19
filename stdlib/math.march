@@ -1,0 +1,193 @@
+-- Math module: mathematical functions and constants.
+--
+-- Transcendental functions (sin, cos, exp, etc.) delegate to
+-- the math_* builtins which wrap libm.
+-- Pure functions (min, max, clamp, lerp) are implemented in March.
+
+mod Math do
+
+-- ---- Constants ----
+
+doc "The mathematical constant pi (3.14159...)."
+pub fn pi() : Float do
+  3.14159265358979323846
+end
+
+doc "Euler's number e (2.71828...)."
+pub fn e() : Float do
+  2.71828182845904523536
+end
+
+doc "Tau = 2*pi (6.28318...)."
+pub fn tau() : Float do
+  6.28318530717958647692
+end
+
+-- ---- Basic ----
+
+doc "Absolute value of a float."
+pub fn abs(x : Float) : Float do
+  float_abs(x)
+end
+
+doc "Returns the smaller of two values."
+pub fn min_int(a : Int, b : Int) : Int do
+  if a < b then a else b
+end
+
+doc "Returns the larger of two values."
+pub fn max_int(a : Int, b : Int) : Int do
+  if a > b then a else b
+end
+
+doc "Returns the smaller of two floats."
+pub fn min_float(a : Float, b : Float) : Float do
+  if a < b then a else b
+end
+
+doc "Returns the larger of two floats."
+pub fn max_float(a : Float, b : Float) : Float do
+  if a > b then a else b
+end
+
+doc "Clamps `x` to the range [low, high]."
+pub fn clamp_int(x : Int, low : Int, high : Int) : Int do
+  if x < low then low else if x > high then high else x
+end
+
+doc "Clamps `x` to the range [low, high]."
+pub fn clamp_float(x : Float, low : Float, high : Float) : Float do
+  if x < low then low else if x > high then high else x
+end
+
+-- ---- Powers & roots ----
+
+doc "Square root."
+pub fn sqrt(x : Float) : Float do
+  math_sqrt(x)
+end
+
+doc "Cube root."
+pub fn cbrt(x : Float) : Float do
+  math_cbrt(x)
+end
+
+doc "Raises `base` to the power `exp` (both Float)."
+pub fn pow(base : Float, exp : Float) : Float do
+  math_pow(base, exp)
+end
+
+doc "e raised to the power `x`."
+pub fn exp(x : Float) : Float do
+  math_exp(x)
+end
+
+doc "2 raised to the power `x`."
+pub fn exp2(x : Float) : Float do
+  math_exp2(x)
+end
+
+-- ---- Logarithms ----
+
+doc "Natural logarithm (base e)."
+pub fn log(x : Float) : Float do
+  math_log(x)
+end
+
+doc "Logarithm base 2."
+pub fn log2(x : Float) : Float do
+  math_log2(x)
+end
+
+doc "Logarithm base 10."
+pub fn log10(x : Float) : Float do
+  math_log10(x)
+end
+
+-- ---- Trigonometry ----
+
+doc "Sine of `x` (in radians)."
+pub fn sin(x : Float) : Float do
+  math_sin(x)
+end
+
+doc "Cosine of `x` (in radians)."
+pub fn cos(x : Float) : Float do
+  math_cos(x)
+end
+
+doc "Tangent of `x` (in radians)."
+pub fn tan(x : Float) : Float do
+  math_tan(x)
+end
+
+doc "Arc sine, returns radians in [-pi/2, pi/2]."
+pub fn asin(x : Float) : Float do
+  math_asin(x)
+end
+
+doc "Arc cosine, returns radians in [0, pi]."
+pub fn acos(x : Float) : Float do
+  math_acos(x)
+end
+
+doc "Arc tangent, returns radians in (-pi/2, pi/2)."
+pub fn atan(x : Float) : Float do
+  math_atan(x)
+end
+
+doc "Arc tangent of y/x, using signs to determine the quadrant."
+pub fn atan2(y : Float, x : Float) : Float do
+  math_atan2(y, x)
+end
+
+-- ---- Hyperbolic ----
+
+doc "Hyperbolic sine."
+pub fn sinh(x : Float) : Float do
+  math_sinh(x)
+end
+
+doc "Hyperbolic cosine."
+pub fn cosh(x : Float) : Float do
+  math_cosh(x)
+end
+
+doc "Hyperbolic tangent."
+pub fn tanh(x : Float) : Float do
+  math_tanh(x)
+end
+
+-- ---- Rounding ----
+
+doc "Largest integer not greater than x (returns Float)."
+pub fn floor(x : Float) : Float do
+  int_to_float(float_floor(x))
+end
+
+doc "Smallest integer not less than x (returns Float)."
+pub fn ceil(x : Float) : Float do
+  int_to_float(float_ceil(x))
+end
+
+doc "Rounds to the nearest integer (returns Float)."
+pub fn round(x : Float) : Float do
+  int_to_float(float_round(x))
+end
+
+doc "Rounds toward zero (returns Float)."
+pub fn truncate(x : Float) : Float do
+  int_to_float(float_truncate(x))
+end
+
+-- ---- Interpolation ----
+
+doc """
+Linear interpolation: lerp(a, b, t) = a + t*(b-a).
+Returns `a` when t=0, `b` when t=1.
+"""
+pub fn lerp(a : Float, b : Float, t : Float) : Float do
+  a +. (t *. (b -. a))
+end
+
+end

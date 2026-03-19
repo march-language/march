@@ -10,6 +10,11 @@
 ; Keywords — actor / concurrency
 ["send" "spawn" "respond" "loop" "for" "use"] @keyword
 
+; Doc annotations
+(doc_annotation "doc" @keyword.documentation)
+(doc_annotation content: (string) @comment.documentation)
+(doc_annotation content: (triple_string) @comment.documentation)
+
 ; Literals
 (integer) @number
 (float) @number

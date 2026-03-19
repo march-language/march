@@ -53,6 +53,22 @@ let actor_defs_tbl : (string, actor_def * env ref) Hashtbl.t = Hashtbl.create 8
 (** Live actor instances — reset per module eval. *)
 let actor_registry  : (int, actor_inst) Hashtbl.t = Hashtbl.create 16
 
+(** Doc registry: fully-qualified name → doc string.
+    Populated when [eval_decl] encounters a [DFn] with [fn_doc = Some s]. *)
+let doc_registry : (string, string) Hashtbl.t = Hashtbl.create 32
+
+(** Module stack for tracking the current module path during eval.
+    Updated when entering/leaving [DMod]. Top of stack = innermost module. *)
+let module_stack : string list ref = ref []
+
+let current_doc_prefix () =
+  match !module_stack with
+  | []    -> ""
+  | parts -> String.concat "." (List.rev parts) ^ "."
+
+let lookup_doc (key : string) : string option =
+  Hashtbl.find_opt doc_registry key
+
 let next_pid : int ref = ref 0
 
 (* ------------------------------------------------------------------ *)
@@ -445,6 +461,404 @@ let base_env : env =
   ; ("to_string", VBuiltin ("to_string", function
         | [v] -> VString (value_display v)
         | _ -> eval_error "to_string: expected one argument"))
+
+    (* ---- Int primitives ---- *)
+  ; ("int_abs", VBuiltin ("int_abs", function
+        | [VInt n] -> VInt (abs n)
+        | _ -> eval_error "int_abs: expected int"))
+  ; ("int_pow", VBuiltin ("int_pow", function
+        | [VInt base; VInt exp] ->
+          if exp < 0 then eval_error "int_pow: negative exponent"
+          else
+            let rec go acc b e = if e = 0 then acc else go (acc * b) b (e - 1)
+            in VInt (go 1 base exp)
+        | _ -> eval_error "int_pow: expected two ints"))
+  ; ("int_div", VBuiltin ("int_div", function
+        | [VInt a; VInt b] ->
+          if b = 0 then eval_error "int_div: division by zero"
+          else VInt (a / b)
+        | _ -> eval_error "int_div: expected two ints"))
+  ; ("int_mod", VBuiltin ("int_mod", function
+        | [VInt a; VInt b] ->
+          if b = 0 then eval_error "int_mod: division by zero"
+          else VInt (a mod b)
+        | _ -> eval_error "int_mod: expected two ints"))
+  ; ("int_div_euclid", VBuiltin ("int_div_euclid", function
+        | [VInt a; VInt b] ->
+          if b = 0 then eval_error "int_div_euclid: division by zero"
+          else
+            let q = a / b in
+            let r = a - q * b in
+            VInt (if r < 0 then (if b > 0 then q - 1 else q + 1) else q)
+        | _ -> eval_error "int_div_euclid: expected two ints"))
+  ; ("int_mod_euclid", VBuiltin ("int_mod_euclid", function
+        | [VInt a; VInt b] ->
+          if b = 0 then eval_error "int_mod_euclid: division by zero"
+          else
+            let r = a mod b in
+            VInt (if r < 0 then r + abs b else r)
+        | _ -> eval_error "int_mod_euclid: expected two ints"))
+  ; ("int_to_float", VBuiltin ("int_to_float", function
+        | [VInt n] -> VFloat (float_of_int n)
+        | _ -> eval_error "int_to_float: expected int"))
+  ; ("int_max_value", VBuiltin ("int_max_value", function
+        | [] | [VUnit] -> VInt max_int
+        | _ -> eval_error "int_max_value: no arguments"))
+  ; ("int_min_value", VBuiltin ("int_min_value", function
+        | [] | [VUnit] -> VInt min_int
+        | _ -> eval_error "int_min_value: no arguments"))
+
+    (* ---- Float primitives ---- *)
+  ; ("float_abs", VBuiltin ("float_abs", function
+        | [VFloat f] -> VFloat (abs_float f)
+        | _ -> eval_error "float_abs: expected float"))
+  ; ("float_floor", VBuiltin ("float_floor", function
+        | [VFloat f] -> VInt (int_of_float (floor f))
+        | _ -> eval_error "float_floor: expected float"))
+  ; ("float_ceil", VBuiltin ("float_ceil", function
+        | [VFloat f] -> VInt (int_of_float (ceil f))
+        | _ -> eval_error "float_ceil: expected float"))
+  ; ("float_round", VBuiltin ("float_round", function
+        | [VFloat f] -> VInt (Float.to_int (Float.round f))
+        | _ -> eval_error "float_round: expected float"))
+  ; ("float_truncate", VBuiltin ("float_truncate", function
+        | [VFloat f] -> VInt (Float.to_int f)
+        | _ -> eval_error "float_truncate: expected float"))
+  ; ("float_to_int", VBuiltin ("float_to_int", function
+        | [VFloat f] -> VInt (Float.to_int f)
+        | _ -> eval_error "float_to_int: expected float"))
+  ; ("float_is_nan", VBuiltin ("float_is_nan", function
+        | [VFloat f] -> VBool (Float.is_nan f)
+        | _ -> eval_error "float_is_nan: expected float"))
+  ; ("float_is_infinite", VBuiltin ("float_is_infinite", function
+        | [VFloat f] -> VBool (Float.is_infinite f)
+        | _ -> eval_error "float_is_infinite: expected float"))
+  ; ("float_infinity",     VBuiltin ("float_infinity", function
+        | [] | [VUnit] -> VFloat Float.infinity
+        | _ -> eval_error "float_infinity: no arguments"))
+  ; ("float_neg_infinity", VBuiltin ("float_neg_infinity", function
+        | [] | [VUnit] -> VFloat Float.neg_infinity
+        | _ -> eval_error "float_neg_infinity: no arguments"))
+  ; ("float_nan", VBuiltin ("float_nan", function
+        | [] | [VUnit] -> VFloat Float.nan
+        | _ -> eval_error "float_nan: no arguments"))
+  ; ("float_epsilon", VBuiltin ("float_epsilon", function
+        | [] | [VUnit] -> VFloat epsilon_float
+        | _ -> eval_error "float_epsilon: no arguments"))
+  ; ("float_from_string", VBuiltin ("float_from_string", function
+        | [VString s] ->
+          (try VCon ("Some", [VFloat (float_of_string s)])
+           with Failure _ -> VCon ("None", []))
+        | _ -> eval_error "float_from_string: expected string"))
+  ; ("string_to_float", VBuiltin ("string_to_float", function
+        | [VString s] ->
+          (try VCon ("Some", [VFloat (float_of_string s)])
+           with Failure _ -> VCon ("None", []))
+        | _ -> eval_error "string_to_float: expected string"))
+  ; ("float_to_string", VBuiltin ("float_to_string", function
+        | [VFloat f] -> VString (string_of_float f)
+        | _ -> eval_error "float_to_string: expected float"))
+
+    (* ---- Math / transcendentals ---- *)
+  ; ("math_sqrt",  VBuiltin ("math_sqrt",  function
+        | [VFloat f] -> VFloat (sqrt f) | _ -> eval_error "math_sqrt: expected float"))
+  ; ("math_cbrt",  VBuiltin ("math_cbrt",  function
+        | [VFloat f] -> VFloat (Float.cbrt f) | _ -> eval_error "math_cbrt: expected float"))
+  ; ("math_pow",   VBuiltin ("math_pow",   function
+        | [VFloat b; VFloat e] -> VFloat (b ** e) | _ -> eval_error "math_pow: expected two floats"))
+  ; ("math_exp",   VBuiltin ("math_exp",   function
+        | [VFloat f] -> VFloat (exp f) | _ -> eval_error "math_exp: expected float"))
+  ; ("math_exp2",  VBuiltin ("math_exp2",  function
+        | [VFloat f] -> VFloat (2.0 ** f) | _ -> eval_error "math_exp2: expected float"))
+  ; ("math_log",   VBuiltin ("math_log",   function
+        | [VFloat f] -> VFloat (log f) | _ -> eval_error "math_log: expected float"))
+  ; ("math_log2",  VBuiltin ("math_log2",  function
+        | [VFloat f] -> VFloat (log f /. log 2.0) | _ -> eval_error "math_log2: expected float"))
+  ; ("math_log10", VBuiltin ("math_log10", function
+        | [VFloat f] -> VFloat (log10 f) | _ -> eval_error "math_log10: expected float"))
+  ; ("math_sin",   VBuiltin ("math_sin",   function
+        | [VFloat f] -> VFloat (sin f) | _ -> eval_error "math_sin: expected float"))
+  ; ("math_cos",   VBuiltin ("math_cos",   function
+        | [VFloat f] -> VFloat (cos f) | _ -> eval_error "math_cos: expected float"))
+  ; ("math_tan",   VBuiltin ("math_tan",   function
+        | [VFloat f] -> VFloat (tan f) | _ -> eval_error "math_tan: expected float"))
+  ; ("math_asin",  VBuiltin ("math_asin",  function
+        | [VFloat f] -> VFloat (asin f) | _ -> eval_error "math_asin: expected float"))
+  ; ("math_acos",  VBuiltin ("math_acos",  function
+        | [VFloat f] -> VFloat (acos f) | _ -> eval_error "math_acos: expected float"))
+  ; ("math_atan",  VBuiltin ("math_atan",  function
+        | [VFloat f] -> VFloat (atan f) | _ -> eval_error "math_atan: expected float"))
+  ; ("math_atan2", VBuiltin ("math_atan2", function
+        | [VFloat y; VFloat x] -> VFloat (atan2 y x)
+        | _ -> eval_error "math_atan2: expected two floats"))
+  ; ("math_sinh",  VBuiltin ("math_sinh",  function
+        | [VFloat f] -> VFloat (sinh f) | _ -> eval_error "math_sinh: expected float"))
+  ; ("math_cosh",  VBuiltin ("math_cosh",  function
+        | [VFloat f] -> VFloat (cosh f) | _ -> eval_error "math_cosh: expected float"))
+  ; ("math_tanh",  VBuiltin ("math_tanh",  function
+        | [VFloat f] -> VFloat (tanh f) | _ -> eval_error "math_tanh: expected float"))
+
+    (* ---- String primitives ---- *)
+  ; ("string_is_empty", VBuiltin ("string_is_empty", function
+        | [VString s] -> VBool (s = "")
+        | _ -> eval_error "string_is_empty: expected string"))
+  ; ("string_slice", VBuiltin ("string_slice", function
+        | [VString s; VInt start; VInt len] ->
+          let slen = String.length s in
+          let start' = max 0 (min start slen) in
+          let len' = max 0 (min len (slen - start')) in
+          VString (String.sub s start' len')
+        | _ -> eval_error "string_slice: expected string, int, int"))
+  ; ("string_contains", VBuiltin ("string_contains", function
+        | [VString s; VString sub] ->
+          let ls = String.length s and lsub = String.length sub in
+          if lsub = 0 then VBool true
+          else if ls < lsub then VBool false
+          else
+            let found = ref false in
+            for i = 0 to ls - lsub do
+              if String.sub s i lsub = sub then found := true
+            done;
+            VBool !found
+        | _ -> eval_error "string_contains: expected two strings"))
+  ; ("string_starts_with", VBuiltin ("string_starts_with", function
+        | [VString s; VString prefix] ->
+          let lp = String.length prefix in
+          VBool (String.length s >= lp && String.sub s 0 lp = prefix)
+        | _ -> eval_error "string_starts_with: expected two strings"))
+  ; ("string_ends_with", VBuiltin ("string_ends_with", function
+        | [VString s; VString suffix] ->
+          let ls = String.length s and lsuf = String.length suffix in
+          VBool (ls >= lsuf && String.sub s (ls - lsuf) lsuf = suffix)
+        | _ -> eval_error "string_ends_with: expected two strings"))
+  ; ("string_index_of", VBuiltin ("string_index_of", function
+        | [VString s; VString sub] ->
+          let ls = String.length s and lsub = String.length sub in
+          if lsub = 0 then VCon ("Some", [VInt 0])
+          else begin
+            let result = ref None in
+            (try
+               for i = 0 to ls - lsub do
+                 if String.sub s i lsub = sub then
+                   (result := Some i; raise Exit)
+               done
+             with Exit -> ());
+            match !result with
+            | Some i -> VCon ("Some", [VInt i])
+            | None   -> VCon ("None", [])
+          end
+        | _ -> eval_error "string_index_of: expected two strings"))
+  ; ("string_replace", VBuiltin ("string_replace", function
+        | [VString s; VString old_; VString new_] ->
+          let lold = String.length old_ in
+          if lold = 0 then VString s
+          else begin
+            let ls = String.length s in
+            let idx = ref (-1) in
+            (try
+               for i = 0 to ls - lold do
+                 if String.sub s i lold = old_ then
+                   (idx := i; raise Exit)
+               done
+             with Exit -> ());
+            if !idx = -1 then VString s
+            else VString (String.sub s 0 !idx ^ new_ ^
+                          String.sub s (!idx + lold) (ls - !idx - lold))
+          end
+        | _ -> eval_error "string_replace: expected three strings"))
+  ; ("string_replace_all", VBuiltin ("string_replace_all", function
+        | [VString s; VString old_; VString new_] ->
+          if old_ = "" then VString s
+          else begin
+            let buf = Buffer.create (String.length s) in
+            let lold = String.length old_ in
+            let ls = String.length s in
+            let i = ref 0 in
+            while !i <= ls - lold do
+              if String.sub s !i lold = old_ then begin
+                Buffer.add_string buf new_;
+                i := !i + lold
+              end else begin
+                Buffer.add_char buf s.[!i];
+                incr i
+              end
+            done;
+            while !i < ls do
+              Buffer.add_char buf s.[!i];
+              incr i
+            done;
+            VString (Buffer.contents buf)
+          end
+        | _ -> eval_error "string_replace_all: expected three strings"))
+  ; ("string_split", VBuiltin ("string_split", function
+        | [VString s; VString sep] ->
+          let parts =
+            if sep = "" then
+              List.init (String.length s) (fun i -> String.make 1 s.[i])
+            else begin
+              let ls = String.length s and lsep = String.length sep in
+              let result = ref [] and start = ref 0 in
+              (try
+                 for i = 0 to ls - lsep do
+                   if String.sub s i lsep = sep then begin
+                     result := String.sub s !start (i - !start) :: !result;
+                     start := i + lsep
+                   end
+                 done
+               with _ -> ());
+              result := String.sub s !start (ls - !start) :: !result;
+              List.rev !result
+            end
+          in
+          List.fold_right (fun p acc -> VCon ("Cons", [VString p; acc]))
+            parts (VCon ("Nil", []))
+        | _ -> eval_error "string_split: expected two strings"))
+  ; ("string_join", VBuiltin ("string_join", function
+        | [lst; VString sep] ->
+          let rec to_strings = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [VString s; rest]) -> s :: to_strings rest
+            | _ -> eval_error "string_join: list must contain strings"
+          in
+          VString (String.concat sep (to_strings lst))
+        | _ -> eval_error "string_join: expected list and string separator"))
+  ; ("string_trim", VBuiltin ("string_trim", function
+        | [VString s] -> VString (String.trim s)
+        | _ -> eval_error "string_trim: expected string"))
+  ; ("string_trim_start", VBuiltin ("string_trim_start", function
+        | [VString s] ->
+          let i = ref 0 in
+          while !i < String.length s &&
+                (s.[!i] = ' ' || s.[!i] = '\t' || s.[!i] = '\n' || s.[!i] = '\r') do
+            incr i
+          done;
+          VString (String.sub s !i (String.length s - !i))
+        | _ -> eval_error "string_trim_start: expected string"))
+  ; ("string_trim_end", VBuiltin ("string_trim_end", function
+        | [VString s] ->
+          let i = ref (String.length s - 1) in
+          while !i >= 0 &&
+                (s.[!i] = ' ' || s.[!i] = '\t' || s.[!i] = '\n' || s.[!i] = '\r') do
+            decr i
+          done;
+          VString (String.sub s 0 (!i + 1))
+        | _ -> eval_error "string_trim_end: expected string"))
+  ; ("string_to_uppercase", VBuiltin ("string_to_uppercase", function
+        | [VString s] -> VString (String.uppercase_ascii s)
+        | _ -> eval_error "string_to_uppercase: expected string"))
+  ; ("string_to_lowercase", VBuiltin ("string_to_lowercase", function
+        | [VString s] -> VString (String.lowercase_ascii s)
+        | _ -> eval_error "string_to_lowercase: expected string"))
+  ; ("string_chars", VBuiltin ("string_chars", function
+        | [VString s] ->
+          let chars = List.init (String.length s) (fun i -> VString (String.make 1 s.[i])) in
+          List.fold_right (fun c acc -> VCon ("Cons", [c; acc])) chars (VCon ("Nil", []))
+        | _ -> eval_error "string_chars: expected string"))
+  ; ("string_from_chars", VBuiltin ("string_from_chars", function
+        | [lst] ->
+          let buf = Buffer.create 8 in
+          let rec go = function
+            | VCon ("Nil", []) -> ()
+            | VCon ("Cons", [VString c; rest]) -> Buffer.add_string buf c; go rest
+            | _ -> eval_error "string_from_chars: list must contain single-char strings"
+          in
+          go lst; VString (Buffer.contents buf)
+        | _ -> eval_error "string_from_chars: expected list of chars"))
+  ; ("string_repeat", VBuiltin ("string_repeat", function
+        | [VString s; VInt n] ->
+          let buf = Buffer.create (String.length s * max 0 n) in
+          for _ = 1 to n do Buffer.add_string buf s done;
+          VString (Buffer.contents buf)
+        | _ -> eval_error "string_repeat: expected string and int"))
+  ; ("string_reverse", VBuiltin ("string_reverse", function
+        | [VString s] ->
+          let n = String.length s in
+          VString (String.init n (fun i -> s.[n - 1 - i]))
+        | _ -> eval_error "string_reverse: expected string"))
+  ; ("string_pad_left", VBuiltin ("string_pad_left", function
+        | [VString s; VInt width; VString fill] when String.length fill = 1 ->
+          let ls = String.length s in
+          if ls >= width then VString s
+          else VString (String.make (width - ls) fill.[0] ^ s)
+        | _ -> eval_error "string_pad_left: expected string, int, char-string"))
+  ; ("string_pad_right", VBuiltin ("string_pad_right", function
+        | [VString s; VInt width; VString fill] when String.length fill = 1 ->
+          let ls = String.length s in
+          if ls >= width then VString s
+          else VString (s ^ String.make (width - ls) fill.[0])
+        | _ -> eval_error "string_pad_right: expected string, int, char-string"))
+  ; ("string_byte_length", VBuiltin ("string_byte_length", function
+        | [VString s] -> VInt (String.length s)
+        | _ -> eval_error "string_byte_length: expected string"))
+
+    (* ---- Char primitives (chars represented as single-char strings) ---- *)
+  ; ("char_is_alpha", VBuiltin ("char_is_alpha", function
+        | [VString c] when String.length c = 1 ->
+          let ch = c.[0] in VBool ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z'))
+        | _ -> eval_error "char_is_alpha: expected single-char string"))
+  ; ("char_is_digit", VBuiltin ("char_is_digit", function
+        | [VString c] when String.length c = 1 ->
+          VBool (c.[0] >= '0' && c.[0] <= '9')
+        | _ -> eval_error "char_is_digit: expected single-char string"))
+  ; ("char_is_alphanumeric", VBuiltin ("char_is_alphanumeric", function
+        | [VString c] when String.length c = 1 ->
+          let ch = c.[0] in
+          VBool ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9'))
+        | _ -> eval_error "char_is_alphanumeric: expected single-char string"))
+  ; ("char_is_whitespace", VBuiltin ("char_is_whitespace", function
+        | [VString c] when String.length c = 1 ->
+          VBool (c.[0] = ' ' || c.[0] = '\t' || c.[0] = '\n' || c.[0] = '\r')
+        | _ -> eval_error "char_is_whitespace: expected single-char string"))
+  ; ("char_is_uppercase", VBuiltin ("char_is_uppercase", function
+        | [VString c] when String.length c = 1 ->
+          VBool (c.[0] >= 'A' && c.[0] <= 'Z')
+        | _ -> eval_error "char_is_uppercase: expected single-char string"))
+  ; ("char_is_lowercase", VBuiltin ("char_is_lowercase", function
+        | [VString c] when String.length c = 1 ->
+          VBool (c.[0] >= 'a' && c.[0] <= 'z')
+        | _ -> eval_error "char_is_lowercase: expected single-char string"))
+  ; ("char_to_uppercase", VBuiltin ("char_to_uppercase", function
+        | [VString c] when String.length c = 1 ->
+          VString (String.make 1 (Char.uppercase_ascii c.[0]))
+        | _ -> eval_error "char_to_uppercase: expected single-char string"))
+  ; ("char_to_lowercase", VBuiltin ("char_to_lowercase", function
+        | [VString c] when String.length c = 1 ->
+          VString (String.make 1 (Char.lowercase_ascii c.[0]))
+        | _ -> eval_error "char_to_lowercase: expected single-char string"))
+  ; ("char_to_int", VBuiltin ("char_to_int", function
+        | [VString c] when String.length c = 1 -> VInt (Char.code c.[0])
+        | _ -> eval_error "char_to_int: expected single-char string"))
+  ; ("char_from_int", VBuiltin ("char_from_int", function
+        | [VInt n] ->
+          if n >= 0 && n <= 127 then VCon ("Some", [VString (String.make 1 (Char.chr n))])
+          else VCon ("None", [])
+        | _ -> eval_error "char_from_int: expected int"))
+
+    (* ---- Comparison helpers ---- *)
+  ; ("compare_int", VBuiltin ("compare_int", function
+        | [VInt a; VInt b] ->
+          VCon ((if a < b then "Less" else if a > b then "Greater" else "Equal"), [])
+        | _ -> eval_error "compare_int: expected two ints"))
+  ; ("compare_float", VBuiltin ("compare_float", function
+        | [VFloat a; VFloat b] ->
+          VCon ((if a < b then "Less" else if a > b then "Greater" else "Equal"), [])
+        | _ -> eval_error "compare_float: expected two floats"))
+  ; ("compare_string", VBuiltin ("compare_string", function
+        | [VString a; VString b] ->
+          let c = String.compare a b in
+          VCon ((if c < 0 then "Less" else if c > 0 then "Greater" else "Equal"), [])
+        | _ -> eval_error "compare_string: expected two strings"))
+
+    (* ---- Panic / diverging functions ---- *)
+  ; ("panic", VBuiltin ("panic", function
+        | [VString msg] -> eval_error "panic: %s" msg
+        | [v] -> eval_error "panic: %s" (value_display v)
+        | _ -> eval_error "panic"))
+  ; ("todo_", VBuiltin ("todo_", function
+        | [VString msg] -> eval_error "todo: %s" msg
+        | _ -> eval_error "todo: not yet implemented"))
+  ; ("unreachable_", VBuiltin ("unreachable_", function
+        | _ -> eval_error "unreachable: reached unreachable code"))
   ]
 
 (* ------------------------------------------------------------------ *)
@@ -474,7 +888,7 @@ let span_of_expr (e : expr) : span =
   | ERecordUpdate (_, _, sp) | EField (_, _, sp)
   | EIf (_, _, _, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
   | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
-  | ESpawn (_, sp) | EDbg sp -> sp
+  | ESpawn (_, sp) | EDbg sp | ELetFn (_, _, _, _, sp) -> sp
   | EVar n -> n.span
   | EResultRef _ -> dummy_span
 
@@ -492,6 +906,17 @@ let rec eval_block (env : env) (es : expr list) : value =
                             (Printf.sprintf "let binding pattern failed"))
     in
     eval_block (bindings @ env) rest
+  (* Local named recursive function: fn go(params) do body end *)
+  | ELetFn (name, params, _, body, _) :: rest ->
+    let param_names = List.map (fun p -> p.param_name.txt) params in
+    (* Use the env_ref trick so the function can call itself recursively. *)
+    let env_ref = ref env in
+    let rec_v = VBuiltin ("<rec:" ^ name.txt ^ ">", fun args ->
+      let call_env = !env_ref in
+      apply (VClosure (call_env, param_names, body)) args) in
+    let env' = (name.txt, rec_v) :: env in
+    env_ref := env';
+    eval_block env' rest
   | e :: rest ->
     let _ = eval_expr env e in
     eval_block env rest
@@ -594,6 +1019,12 @@ and eval_expr_inner (env : env) (e : expr) : value =
        (match List.assoc_opt field.txt fields with
         | Some v -> v
         | None   -> eval_error "record has no field '%s'" field.txt)
+     | VCon (mod_name, []) ->
+       (* Module member access: Mod.member — look up "Mod.member" in env *)
+       let key = mod_name ^ "." ^ field.txt in
+       (match List.assoc_opt key env with
+        | Some v -> v
+        | None   -> eval_error "no member '%s' in module '%s'" field.txt mod_name)
      | _ -> eval_error "field access on non-record value")
 
   | EIf (cond, then_, else_, _) ->
@@ -678,6 +1109,17 @@ and eval_expr_inner (env : env) (e : expr) : value =
        eval_error "send: first argument must be a Pid, got %s"
          (value_to_string pid_val))
 
+  | ELetFn (name, params, _, body, _) ->
+    (* ELetFn as a standalone expression: return the closure (for e.g. last expr in block) *)
+    let param_names = List.map (fun p -> p.param_name.txt) params in
+    let env_ref = ref env in
+    let rec_v = VBuiltin ("<rec:" ^ name.txt ^ ">", fun args ->
+      let call_env = !env_ref in
+      apply (VClosure (call_env, param_names, body)) args) in
+    let env' = (name.txt, rec_v) :: env in
+    env_ref := env';
+    rec_v
+
 (** Evaluate a match expression: try each branch until one matches. *)
 and eval_match (env : env) (v : value) (branches : branch list) : value =
   match branches with
@@ -743,6 +1185,10 @@ type stub = { mutable sv : value }
 let rec eval_decl (env : env) (d : decl) : env =
   match d with
   | DFn (def, _) ->
+    (* Register doc string if present *)
+    (match def.fn_doc with
+     | Some s -> Hashtbl.replace doc_registry (current_doc_prefix () ^ def.fn_name.txt) s
+     | None   -> ());
     let clause = match def.fn_clauses with
       | [c] -> c
       | _   -> eval_error "fn %s: expected exactly one clause after desugaring"
@@ -778,7 +1224,9 @@ let rec eval_decl (env : env) (d : decl) : env =
 
   | DMod (name, _, decls, _) ->
     (* Evaluate nested module; bindings are prefixed with "ModName." *)
+    module_stack := name.txt :: !module_stack;
     let mod_env = eval_decls env decls in
+    module_stack := List.tl !module_stack;
     (* Expose all bindings from the nested module prefixed by module name *)
     let prefixed = List.filter_map (fun (k, v) ->
         (* Only expose names that are new relative to the outer env *)
@@ -829,6 +1277,9 @@ let eval_module_env (m : module_) : env =
     match decls with
     | [] -> env
     | DFn (def, _) :: rest ->
+      (match def.fn_doc with
+       | Some s -> Hashtbl.replace doc_registry (current_doc_prefix () ^ def.fn_name.txt) s
+       | None   -> ());
       let clause = match def.fn_clauses with
         | [c] -> c
         | _   -> eval_error "fn %s: expected one clause after desugaring"
@@ -860,6 +1311,14 @@ let eval_module_env (m : module_) : env =
       (* Register actor with the shared env_ref so handlers can call module fns *)
       Hashtbl.replace actor_defs_tbl name.txt (def, env_ref);
       make_recursive_env rest env
+
+    | DMod _ as d :: rest ->
+      (* Evaluate nested module via eval_decl (which handles module_stack push/pop
+         and exposes prefixed bindings). Docs inside nested modules are registered
+         as a side effect of eval_decl → eval_decls → eval_decl(DFn). *)
+      let env' = eval_decl env d in
+      env_ref := env';
+      make_recursive_env rest env'
 
     | _ :: rest -> make_recursive_env rest env
   in

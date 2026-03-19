@@ -49,6 +49,7 @@ let () =
       ("as", AS);
       ("use", USE);
       ("dbg", DBG);
+      ("doc", DOC);
     ]
 }
 
@@ -66,6 +67,7 @@ rule token = parse
   | "{-"          { block_comment 0 lexbuf }
   | digit+ '.' digit+ as f { FLOAT (float_of_string f) }
   | digit+ as n   { INT (int_of_string n) }
+  | "\"\"\""      { read_triple_string (Buffer.create 64) lexbuf }
   | '"'           { read_string (Buffer.create 16) lexbuf }
   | ':' (atom_name as a) { ATOM a }
   | '('           { LPAREN }
@@ -150,6 +152,13 @@ and read_string buf = parse
   | _ as c        { Buffer.add_char buf c; read_string buf lexbuf }
 
 (** Resume reading a string literal after the closing `}` of an interpolation. *)
+(** Triple-quoted string: """..."""  — no interpolation, newlines preserved. *)
+and read_triple_string buf = parse
+  | "\"\"\""      { STRING (Buffer.contents buf) }
+  | newline       { Lexing.new_line lexbuf; Buffer.add_char buf '\n'; read_triple_string buf lexbuf }
+  | eof           { raise (Lexer_error "Unterminated triple-quoted string") }
+  | _ as c        { Buffer.add_char buf c; read_triple_string buf lexbuf }
+
 and read_string_interp buf = parse
   | '"'           { INTERP_END (Buffer.contents buf) }
   | "${"          {
