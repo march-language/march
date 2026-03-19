@@ -197,6 +197,34 @@ let debug_ctx : debug_ctx option ref = ref None
 exception Match_failure of string
 exception Eval_error of string
 
+(** Raised when an actor/task's reduction budget is exhausted. *)
+exception Yield
+
+(** Global reduction context — None means reduction counting is disabled. *)
+let reduction_ctx : March_scheduler.Scheduler.reduction_ctx option ref = ref None
+
+(** Enable/disable reduction counting for the evaluator. *)
+let set_reduction_counting (enabled : bool) : unit =
+  if enabled then
+    reduction_ctx := Some (March_scheduler.Scheduler.create_reduction_ctx ())
+  else
+    reduction_ctx := None
+
+(** Reset the reduction budget (call between scheduling quanta). *)
+let reset_reduction_budget () : unit =
+  match !reduction_ctx with
+  | Some ctx -> March_scheduler.Scheduler.reset_budget ctx
+  | None -> ()
+
+(** Check the reduction counter and raise Yield if exhausted.
+    Called at every yield point: EApp, EMatch, ESend. *)
+let check_reductions () : unit =
+  match !reduction_ctx with
+  | Some ctx ->
+    if March_scheduler.Scheduler.tick ctx then
+      raise Yield
+  | None -> ()
+
 let eval_error fmt = Printf.ksprintf (fun s -> raise (Eval_error s)) fmt
 
 (* ------------------------------------------------------------------ *)
@@ -1055,6 +1083,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
     eval_error "typed hole `%s` reached the evaluator — the type checker should have caught this" label
 
   | EApp (f, args, _) ->
+    check_reductions ();
     let fn_val = eval_expr env f in
     let arg_vals = List.map (eval_expr env) args in
     apply fn_val arg_vals
@@ -1075,6 +1104,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
     eval_expr env b.bind_expr
 
   | EMatch (scrut, branches, _) ->
+    check_reductions ();
     let v = eval_expr env scrut in
     eval_match env v branches
 
@@ -1178,6 +1208,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
        VPid pid)
 
   | ESend (cap_expr, msg_expr, _) ->
+    check_reductions ();
     let pid_val = eval_expr env cap_expr in
     let msg_val = eval_expr env msg_expr in
     (match pid_val with

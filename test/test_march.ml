@@ -2850,6 +2850,48 @@ let test_iolist_byte_size () =
   Alcotest.(check int) "IOList.byte_size" 5
     (vint (call_fn env "f" []))
 
+(* ── Scheduler tests ───────────────────────────────────────────────── *)
+
+let test_reduction_counter_ticks () =
+  let ctx = March_scheduler.Scheduler.create_reduction_ctx () in
+  let initial = ctx.remaining in
+  let exhausted = March_scheduler.Scheduler.tick ctx in
+  Alcotest.(check bool) "first tick not exhausted" false exhausted;
+  Alcotest.(check int) "decremented by 1" (initial - 1) ctx.remaining
+
+let test_reduction_counter_exhausts () =
+  let ctx = March_scheduler.Scheduler.create_reduction_ctx () in
+  let count = ref 0 in
+  while not (March_scheduler.Scheduler.tick ctx) do
+    incr count
+  done;
+  Alcotest.(check int) "exhausts after max_reductions - 1 ticks"
+    (March_scheduler.Scheduler.max_reductions - 1) !count;
+  Alcotest.(check bool) "yielded flag set" true ctx.yielded
+
+let test_eval_yields_after_budget () =
+  let src = {|mod Test do
+    fn countdown(n) do if n <= 0 then 0 else countdown(n - 1) end
+  end|} in
+  let env = eval_module src in
+  March_eval.Eval.set_reduction_counting true;
+  let yielded = ref false in
+  (try
+     ignore (call_fn env "countdown" [March_eval.Eval.VInt 100_000])
+   with March_eval.Eval.Yield ->
+     yielded := true);
+  March_eval.Eval.set_reduction_counting false;
+  Alcotest.(check bool) "countdown yields after budget" true !yielded
+
+let test_eval_no_yield_when_disabled () =
+  March_eval.Eval.set_reduction_counting false;
+  let src = {|mod Test do
+    fn countdown(n) do if n <= 0 then 0 else countdown(n - 1) end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "countdown" [March_eval.Eval.VInt 100_000] in
+  Alcotest.(check int) "completes without yield" 0 (vint v)
+
 let () =
   Alcotest.run "march"
     [
@@ -3180,4 +3222,11 @@ let () =
         Alcotest.test_case "append"        `Quick test_iolist_append;
         Alcotest.test_case "byte_size"     `Quick test_iolist_byte_size;
       ]);
+      ( "scheduler",
+        [
+          Alcotest.test_case "reduction counter ticks"     `Quick test_reduction_counter_ticks;
+          Alcotest.test_case "reduction counter exhausts"  `Quick test_reduction_counter_exhausts;
+          Alcotest.test_case "eval yields after budget"    `Quick test_eval_yields_after_budget;
+          Alcotest.test_case "eval no yield when disabled" `Quick test_eval_no_yield_when_disabled;
+        ] );
     ]
