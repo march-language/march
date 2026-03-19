@@ -1,6 +1,9 @@
 (** Dead code elimination pass.
     - Removes pure unused let bindings (converts impure ones to ESeq)
-    - Removes top-level functions not reachable from main or pub exports *)
+    - Removes top-level functions not reachable from main (seeds all fns if no main)
+    Precondition: must run after Defun. ECallPtr post-Defun dispatches through
+    apply-functions that are themselves reachable via EApp; running before Defun
+    could eliminate lambda-lifted functions that ECallPtr would have reached. *)
 
 module StringSet = Set.Make (String)
 
@@ -44,7 +47,9 @@ and free_atom : Tir.atom -> StringSet.t = function
   | Tir.AVar v -> StringSet.singleton v.Tir.v_name
   | Tir.ALit _ -> StringSet.empty
 
-(** Collect all function names called from an expression. *)
+(** Collect all function names called from an expression.
+    ECallPtr (indirect closure dispatch) is not tracked — post-Defun its targets
+    are apply-functions already reachable via EApp from the closure constructor. *)
 let rec called_fns : Tir.expr -> StringSet.t = function
   | Tir.EApp (f, _)         -> StringSet.singleton f.Tir.v_name
   | Tir.ELet (_, rhs, body) -> StringSet.union (called_fns rhs) (called_fns body)
