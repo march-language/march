@@ -893,7 +893,7 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.ESend (_, _, sp)        -> sp
   | Ast.ESpawn (_, sp)          -> sp
   | Ast.EResultRef _            -> Ast.dummy_span
-  | Ast.EDbg sp                 -> sp
+  | Ast.EDbg (_, sp)            -> sp
   | Ast.ELetFn (_, _, _, _, sp) -> sp
 
 (** [infer_expr env e] synthesises the type of [e], accumulating any
@@ -1127,8 +1127,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
          by the REPL loop before typechecking, so this is a fallback. *)
       fresh_var env.level
 
-    (* ── Debugger breakpoint ───────────────────────────────────────── *)
-    | Ast.EDbg _ -> t_unit
+    (* ── Debugger breakpoint / value trace ────────────────────────── *)
+    | Ast.EDbg (None, _) -> t_unit
+    | Ast.EDbg (Some inner, _) -> infer_expr env inner
 
     (* ── Local recursive named function (block-scoped) ─────────────── *)
     | Ast.ELetFn (name, params, ret_ann, body, sp) ->

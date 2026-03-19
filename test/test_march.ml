@@ -286,6 +286,58 @@ let call_fn env name args =
   let fn_val = List.assoc name env in
   March_eval.Eval.apply fn_val args
 
+(** Load a stdlib file by name and return its declarations as a single DMod.
+    Searches paths relative to the project root (for development builds). *)
+let load_stdlib_file_for_test name =
+  let candidates = [
+    Filename.concat "stdlib" name;
+    Filename.concat "../../../stdlib" name;
+    Filename.concat "../../stdlib" name;
+  ] in
+  match List.find_opt Sys.file_exists candidates with
+  | None ->
+    Alcotest.failf "Cannot find stdlib/%s (searched: %s)" name
+      (String.concat ", " candidates)
+  | Some path ->
+    let src =
+      let ic = open_in path in
+      let n = in_channel_length ic in
+      let buf = Bytes.create n in
+      really_input ic buf 0 n;
+      close_in ic;
+      Bytes.to_string buf
+    in
+    let lexbuf = Lexing.from_string src in
+    lexbuf.Lexing.lex_curr_p <-
+      { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
+    let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+    let m = March_desugar.Desugar.desugar_module m in
+    (* Wrap as DMod so names are accessible as Module.name *)
+    March_ast.Ast.DMod (m.March_ast.Ast.mod_name,
+                        March_ast.Ast.Public,
+                        m.March_ast.Ast.mod_decls,
+                        March_ast.Ast.dummy_span)
+
+(** Evaluate a module source with the given stdlib DMod declarations prepended. *)
+let eval_with_stdlib decls src =
+  let m = parse_and_desugar src in
+  let m = { m with March_ast.Ast.mod_decls = decls @ m.March_ast.Ast.mod_decls } in
+  March_eval.Eval.eval_module_env m
+
+let vint = function March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt"
+let vstr = function March_eval.Eval.VString s -> s | _ -> failwith "expected VString"
+let vbool = function March_eval.Eval.VBool b -> b | _ -> failwith "expected VBool"
+
+(** Convert a March VCon-linked-list to an OCaml list. *)
+let rec vlist = function
+  | March_eval.Eval.VCon ("Nil", []) -> []
+  | March_eval.Eval.VCon ("Cons", [h; t]) -> h :: vlist t
+  | _ -> failwith "expected list value"
+
+let vcon tag = function
+  | March_eval.Eval.VCon (t, args) when t = tag -> args
+  | _ -> failwith ("expected VCon " ^ tag)
+
 (* ── Eval tests ─────────────────────────────────────────────────────────── *)
 
 let test_eval_literal () =
@@ -1772,7 +1824,7 @@ let test_list_actors_sorted () =
 
 let test_edbg_ast () =
   let sp = March_ast.Ast.dummy_span in
-  let e = March_ast.Ast.EDbg sp in
+  let e = March_ast.Ast.EDbg (None, sp) in
   Alcotest.(check bool) "EDbg is an expr" true
     (match e with March_ast.Ast.EDbg _ -> true | _ -> false)
 
@@ -1790,7 +1842,7 @@ let test_parse_dbg () =
 
 let test_desugar_edbg () =
   let sp = March_ast.Ast.dummy_span in
-  let e = March_ast.Ast.EDbg sp in
+  let e = March_ast.Ast.EDbg (None, sp) in
   let e' = March_desugar.Desugar.desugar_expr e in
   Alcotest.(check bool) "EDbg desugar passthrough" true
     (match e' with March_ast.Ast.EDbg _ -> true | _ -> false)
@@ -1800,13 +1852,13 @@ let test_typecheck_edbg () =
   let env = March_typecheck.Typecheck.base_env
     (March_errors.Errors.create ()) type_map in
   let sp = March_ast.Ast.dummy_span in
-  let ty = March_typecheck.Typecheck.infer_expr env (March_ast.Ast.EDbg sp) in
+  let ty = March_typecheck.Typecheck.infer_expr env (March_ast.Ast.EDbg (None, sp)) in
   let pp = March_typecheck.Typecheck.pp_ty (March_typecheck.Typecheck.repr ty) in
   Alcotest.(check string) "EDbg typechecks as Unit" "()" pp
 
 let test_eval_edbg_noop () =
   let v = March_eval.Eval.eval_expr March_eval.Eval.base_env
-    (March_ast.Ast.EDbg March_ast.Ast.dummy_span) in
+    (March_ast.Ast.EDbg (None, March_ast.Ast.dummy_span)) in
   Alcotest.(check bool) "EDbg evals to VUnit without debug mode" true
     (match v with March_eval.Eval.VUnit -> true | _ -> false)
 
@@ -1831,10 +1883,11 @@ let test_trace_recording () =
      | Some s -> (try int_of_string s with _ -> 100000) | None -> 100000) in
   let ctx = {
     March_eval.Eval.dc_trace   = March_eval.Eval.ring_create cap;
-    dc_pos     = 0;
-    dc_enabled = true;
-    dc_depth   = 0;
-    dc_on_dbg  = None;
+    dc_pos       = 0;
+    dc_enabled   = true;
+    dc_depth     = 0;
+    dc_on_dbg    = None;
+    dc_actor_log = [];
   } in
   March_eval.Eval.debug_ctx := Some ctx;
   let src = "1 + 2" in
@@ -1928,10 +1981,11 @@ end
 let test_trace_overflow () =
   let ctx = {
     March_eval.Eval.dc_trace   = March_eval.Eval.ring_create 3;
-    dc_pos     = 0;
-    dc_enabled = true;
-    dc_depth   = 0;
-    dc_on_dbg  = None;
+    dc_pos       = 0;
+    dc_enabled   = true;
+    dc_depth     = 0;
+    dc_on_dbg    = None;
+    dc_actor_log = [];
   } in
   March_debug.Debug.install ctx;
   let src = "1 + 2 + 3 + 4" in
@@ -2494,6 +2548,298 @@ let test_fast_math_emits_fast_attr () =
     (let re = Str.regexp "fadd fast" in
      (try ignore (Str.search_forward re ir_normal 0); true with Not_found -> false))
 
+(* ── String stdlib module tests ─────────────────────────────────────────── *)
+
+(** Helper: load string.march and evaluate [src] with it in scope. *)
+let eval_with_string src =
+  let string_decl = load_stdlib_file_for_test "string.march" in
+  eval_with_stdlib [string_decl] src
+
+let test_string_byte_size () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.byte_size("hello") end
+  end|} in
+  Alcotest.(check int) "byte_size(\"hello\") = 5" 5
+    (vint (call_fn env "f" []))
+
+let test_string_byte_size_empty () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.byte_size("") end
+  end|} in
+  Alcotest.(check int) "byte_size(\"\") = 0" 0
+    (vint (call_fn env "f" []))
+
+let test_string_byte_size_unicode () =
+  (* UTF-8: "é" is 2 bytes *)
+  let env = eval_with_string {|mod Test do
+    fn f() do String.byte_size("é") end
+  end|} in
+  Alcotest.(check int) "byte_size(\"é\") = 2" 2
+    (vint (call_fn env "f" []))
+
+let test_string_slice_bytes () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.slice_bytes("hello world", 6, 5) end
+  end|} in
+  Alcotest.(check string) "slice_bytes(\"hello world\", 6, 5) = \"world\"" "world"
+    (vstr (call_fn env "f" []))
+
+let test_string_slice_bytes_clamp () =
+  (* slice beyond end should clamp, not raise *)
+  let env = eval_with_string {|mod Test do
+    fn f() do String.slice_bytes("hi", 0, 100) end
+  end|} in
+  Alcotest.(check string) "slice_bytes clamps to string length" "hi"
+    (vstr (call_fn env "f" []))
+
+let test_string_contains () =
+  let env = eval_with_string {|mod Test do
+    fn yes() do String.contains("hello world", "world") end
+    fn no()  do String.contains("hello world", "xyz") end
+  end|} in
+  Alcotest.(check bool) "contains: true"  true  (vbool (call_fn env "yes" []));
+  Alcotest.(check bool) "contains: false" false (vbool (call_fn env "no"  []))
+
+let test_string_starts_with () =
+  let env = eval_with_string {|mod Test do
+    fn yes() do String.starts_with("hello", "he") end
+    fn no()  do String.starts_with("hello", "lo") end
+  end|} in
+  Alcotest.(check bool) "starts_with: true"  true  (vbool (call_fn env "yes" []));
+  Alcotest.(check bool) "starts_with: false" false (vbool (call_fn env "no"  []))
+
+let test_string_ends_with () =
+  let env = eval_with_string {|mod Test do
+    fn yes() do String.ends_with("hello", "lo") end
+    fn no()  do String.ends_with("hello", "he") end
+  end|} in
+  Alcotest.(check bool) "ends_with: true"  true  (vbool (call_fn env "yes" []));
+  Alcotest.(check bool) "ends_with: false" false (vbool (call_fn env "no"  []))
+
+let test_string_concat () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.concat("foo", "bar") end
+  end|} in
+  Alcotest.(check string) "concat" "foobar"
+    (vstr (call_fn env "f" []))
+
+let test_string_replace () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.replace("hello world", "world", "there") end
+  end|} in
+  Alcotest.(check string) "replace first" "hello there"
+    (vstr (call_fn env "f" []))
+
+let test_string_replace_all () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.replace_all("aabbaa", "a", "x") end
+  end|} in
+  Alcotest.(check string) "replace_all" "xxbbxx"
+    (vstr (call_fn env "f" []))
+
+let test_string_split () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.split("a,b,c", ",") end
+  end|} in
+  let xs = vlist (call_fn env "f" []) in
+  Alcotest.(check int) "split length" 3 (List.length xs);
+  Alcotest.(check string) "split[0]" "a" (vstr (List.nth xs 0));
+  Alcotest.(check string) "split[1]" "b" (vstr (List.nth xs 1));
+  Alcotest.(check string) "split[2]" "c" (vstr (List.nth xs 2))
+
+let test_string_split_first () =
+  (* split_first("a:b:c", ":") = Some("a", "b:c") *)
+  let env = eval_with_string {|mod Test do
+    fn f() do String.split_first("a:b:c", ":") end
+  end|} in
+  let args = vcon "Some" (call_fn env "f" []) in
+  let pair = (match List.nth args 0 with
+    | March_eval.Eval.VTuple [a; b] -> (a, b)
+    | _ -> failwith "expected tuple") in
+  Alcotest.(check string) "split_first head" "a"   (vstr (fst pair));
+  Alcotest.(check string) "split_first tail" "b:c" (vstr (snd pair))
+
+let test_string_split_first_no_sep () =
+  (* split_first("hello", ":") = None *)
+  let env = eval_with_string {|mod Test do
+    fn f() do String.split_first("hello", ":") end
+  end|} in
+  let _ = vcon "None" (call_fn env "f" []) in
+  ()  (* Just checking it returns None *)
+
+let test_string_join () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.join(["a", "b", "c"], "-") end
+  end|} in
+  Alcotest.(check string) "join" "a-b-c"
+    (vstr (call_fn env "f" []))
+
+let test_string_trim () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.trim("  hello  ") end
+  end|} in
+  Alcotest.(check string) "trim" "hello"
+    (vstr (call_fn env "f" []))
+
+let test_string_trim_start () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.trim_start("  hello  ") end
+  end|} in
+  Alcotest.(check string) "trim_start" "hello  "
+    (vstr (call_fn env "f" []))
+
+let test_string_trim_end () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.trim_end("  hello  ") end
+  end|} in
+  Alcotest.(check string) "trim_end" "  hello"
+    (vstr (call_fn env "f" []))
+
+let test_string_to_uppercase () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.to_uppercase("hello") end
+  end|} in
+  Alcotest.(check string) "to_uppercase" "HELLO"
+    (vstr (call_fn env "f" []))
+
+let test_string_to_lowercase () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.to_lowercase("HELLO") end
+  end|} in
+  Alcotest.(check string) "to_lowercase" "hello"
+    (vstr (call_fn env "f" []))
+
+let test_string_repeat () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.repeat("ab", 3) end
+  end|} in
+  Alcotest.(check string) "repeat" "ababab"
+    (vstr (call_fn env "f" []))
+
+let test_string_reverse () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.reverse("hello") end
+  end|} in
+  Alcotest.(check string) "reverse" "olleh"
+    (vstr (call_fn env "f" []))
+
+let test_string_pad_left () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.pad_left("hi", 5, "0") end
+  end|} in
+  Alcotest.(check string) "pad_left" "000hi"
+    (vstr (call_fn env "f" []))
+
+let test_string_pad_right () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.pad_right("hi", 5, ".") end
+  end|} in
+  Alcotest.(check string) "pad_right" "hi..."
+    (vstr (call_fn env "f" []))
+
+let test_string_is_empty () =
+  let env = eval_with_string {|mod Test do
+    fn yes() do String.is_empty("") end
+    fn no()  do String.is_empty("x") end
+  end|} in
+  Alcotest.(check bool) "is_empty: true"  true  (vbool (call_fn env "yes" []));
+  Alcotest.(check bool) "is_empty: false" false (vbool (call_fn env "no"  []))
+
+let test_string_grapheme_count () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.grapheme_count("hello") end
+  end|} in
+  Alcotest.(check int) "grapheme_count(\"hello\") = 5" 5
+    (vint (call_fn env "f" []))
+
+let test_string_index_of () =
+  let env = eval_with_string {|mod Test do
+    fn found()     do String.index_of("hello", "ll") end
+    fn not_found() do String.index_of("hello", "xyz") end
+  end|} in
+  let some_args = vcon "Some" (call_fn env "found" []) in
+  Alcotest.(check int) "index_of found at 2" 2
+    (vint (List.nth some_args 0));
+  let _ = vcon "None" (call_fn env "not_found" []) in
+  ()
+
+let test_string_to_int () =
+  let env = eval_with_string {|mod Test do
+    fn ok()  do String.to_int("42") end
+    fn err() do String.to_int("abc") end
+  end|} in
+  let ok_args = vcon "Ok" (call_fn env "ok" []) in
+  Alcotest.(check int) "to_int Ok(42)" 42 (vint (List.nth ok_args 0));
+  let _ = vcon "Err" (call_fn env "err" []) in
+  ()
+
+let test_string_to_float () =
+  let env = eval_with_string {|mod Test do
+    fn ok()  do String.to_float("3.14") end
+    fn err() do String.to_float("abc") end
+  end|} in
+  let ok_args = vcon "Ok" (call_fn env "ok" []) in
+  Alcotest.(check (float 0.001)) "to_float Ok(3.14)" 3.14
+    (match List.nth ok_args 0 with
+     | March_eval.Eval.VFloat f -> f
+     | _ -> failwith "expected VFloat");
+  let _ = vcon "Err" (call_fn env "err" []) in
+  ()
+
+let test_string_from_int () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.from_int(42) end
+  end|} in
+  Alcotest.(check string) "from_int(42)" "42"
+    (vstr (call_fn env "f" []))
+
+let test_string_from_float () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.from_float(3.14) end
+  end|} in
+  let s = vstr (call_fn env "f" []) in
+  Alcotest.(check bool) "from_float contains dot" true
+    (String.contains s '.')
+
+(* ── IOList stdlib module tests ─────────────────────────────────────────── *)
+
+let eval_with_iolist src =
+  let string_decl = load_stdlib_file_for_test "string.march" in
+  let iolist_decl = load_stdlib_file_for_test "iolist.march" in
+  eval_with_stdlib [string_decl; iolist_decl] src
+
+let test_iolist_empty () =
+  let env = eval_with_iolist {|mod Test do
+    fn f() do IOList.to_string(IOList.empty()) end
+  end|} in
+  Alcotest.(check string) "IOList.empty flattens to \"\"" ""
+    (vstr (call_fn env "f" []))
+
+let test_iolist_from_string () =
+  let env = eval_with_iolist {|mod Test do
+    fn f() do IOList.to_string(IOList.from_string("hello")) end
+  end|} in
+  Alcotest.(check string) "IOList.from_string round-trips" "hello"
+    (vstr (call_fn env "f" []))
+
+let test_iolist_append () =
+  let env = eval_with_iolist {|mod Test do
+    fn f() do
+      IOList.to_string(IOList.append(IOList.from_string("foo"), IOList.from_string("bar")))
+    end
+  end|} in
+  Alcotest.(check string) "IOList.append" "foobar"
+    (vstr (call_fn env "f" []))
+
+let test_iolist_byte_size () =
+  let env = eval_with_iolist {|mod Test do
+    fn f() do
+      IOList.byte_size(IOList.from_string("hello"))
+    end
+  end|} in
+  Alcotest.(check int) "IOList.byte_size" 5
+    (vint (call_fn env "f" []))
+
 let () =
   Alcotest.run "march"
     [
@@ -2782,5 +3128,44 @@ let () =
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;
+      ]);
+      ("string stdlib", [
+        Alcotest.test_case "byte_size"           `Quick test_string_byte_size;
+        Alcotest.test_case "byte_size empty"     `Quick test_string_byte_size_empty;
+        Alcotest.test_case "byte_size unicode"   `Quick test_string_byte_size_unicode;
+        Alcotest.test_case "slice_bytes"         `Quick test_string_slice_bytes;
+        Alcotest.test_case "slice_bytes clamp"   `Quick test_string_slice_bytes_clamp;
+        Alcotest.test_case "contains"            `Quick test_string_contains;
+        Alcotest.test_case "starts_with"         `Quick test_string_starts_with;
+        Alcotest.test_case "ends_with"           `Quick test_string_ends_with;
+        Alcotest.test_case "concat"              `Quick test_string_concat;
+        Alcotest.test_case "replace"             `Quick test_string_replace;
+        Alcotest.test_case "replace_all"         `Quick test_string_replace_all;
+        Alcotest.test_case "split"               `Quick test_string_split;
+        Alcotest.test_case "split_first"         `Quick test_string_split_first;
+        Alcotest.test_case "split_first no sep"  `Quick test_string_split_first_no_sep;
+        Alcotest.test_case "join"                `Quick test_string_join;
+        Alcotest.test_case "trim"                `Quick test_string_trim;
+        Alcotest.test_case "trim_start"          `Quick test_string_trim_start;
+        Alcotest.test_case "trim_end"            `Quick test_string_trim_end;
+        Alcotest.test_case "to_uppercase"        `Quick test_string_to_uppercase;
+        Alcotest.test_case "to_lowercase"        `Quick test_string_to_lowercase;
+        Alcotest.test_case "repeat"              `Quick test_string_repeat;
+        Alcotest.test_case "reverse"             `Quick test_string_reverse;
+        Alcotest.test_case "pad_left"            `Quick test_string_pad_left;
+        Alcotest.test_case "pad_right"           `Quick test_string_pad_right;
+        Alcotest.test_case "is_empty"            `Quick test_string_is_empty;
+        Alcotest.test_case "grapheme_count"      `Quick test_string_grapheme_count;
+        Alcotest.test_case "index_of"            `Quick test_string_index_of;
+        Alcotest.test_case "to_int"              `Quick test_string_to_int;
+        Alcotest.test_case "to_float"            `Quick test_string_to_float;
+        Alcotest.test_case "from_int"            `Quick test_string_from_int;
+        Alcotest.test_case "from_float"          `Quick test_string_from_float;
+      ]);
+      ("iolist stdlib", [
+        Alcotest.test_case "empty"         `Quick test_iolist_empty;
+        Alcotest.test_case "from_string"   `Quick test_iolist_from_string;
+        Alcotest.test_case "append"        `Quick test_iolist_append;
+        Alcotest.test_case "byte_size"     `Quick test_iolist_byte_size;
       ]);
     ]

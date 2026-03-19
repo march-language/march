@@ -9,16 +9,23 @@ module Eval = March_eval.Eval
 (** Build the [debug_hooks] record wiring Trace/Replay functions into the REPL. *)
 let make_hooks (ctx : Eval.debug_ctx) : March_repl.Repl.debug_hooks =
   { March_repl.Repl.
-    dh_back      = (fun n -> Trace.back ctx n);
-    dh_forward   = (fun n -> Trace.forward ctx n);
-    dh_where     = (fun () -> Trace.show_where ctx);
-    dh_stack     = (fun () -> Trace.show_stack ctx);
-    dh_trace     = (fun n  -> Trace.show_trace ctx n);
-    dh_replay    = (fun env -> Replay.replay_from ctx env);
-    dh_frame_env = (fun () ->
+    dh_back       = (fun n -> Trace.back ctx n);
+    dh_forward    = (fun n -> Trace.forward ctx n);
+    dh_goto       = (fun n -> Trace.goto ctx n);
+    dh_where      = (fun () -> Trace.show_where ctx);
+    dh_stack      = (fun () -> Trace.show_stack ctx);
+    dh_trace      = (fun n  -> Trace.show_trace ctx n);
+    dh_diff       = (fun n baseline -> Trace.diff_frames ctx n baseline);
+    dh_find       = (fun pred -> Trace.find_frame ctx pred);
+    dh_replay     = (fun env -> Replay.replay_from ctx env);
+    dh_frame_env  = (fun () ->
       match Trace.current_frame ctx with
       | None   -> None
       | Some f -> Some f.Eval.tf_env);
+    dh_actors     = (fun () -> Trace.actors_summary ctx);
+    dh_actor      = (fun pid goto_msg -> Trace.actor_history ctx pid goto_msg);
+    dh_save_trace = (fun path -> Trace.save_trace ctx path);
+    dh_load_trace = (fun path -> Trace.load_trace ctx path);
   }
 
 (** Main debug REPL entry point. Called as the [on_dbg] callback. *)

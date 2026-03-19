@@ -3,13 +3,20 @@
     depending on whether stdin/stdout are a terminal. *)
 
 type debug_hooks = {
-  dh_back      : int -> int;
-  dh_forward   : int -> int;
-  dh_where     : unit -> string list;
-  dh_stack     : unit -> string list;
-  dh_trace     : int -> string list;
-  dh_replay    : March_eval.Eval.env -> March_eval.Eval.value option;
-  dh_frame_env : unit -> March_eval.Eval.env option;
+  dh_back       : int -> int;
+  dh_forward    : int -> int;
+  dh_goto       : int -> int;
+  dh_where      : unit -> string list;
+  dh_stack      : unit -> string list;
+  dh_trace      : int -> string list;
+  dh_diff       : int -> string list -> string list;
+  dh_find       : (March_eval.Eval.env -> bool) -> int option;
+  dh_replay     : March_eval.Eval.env -> March_eval.Eval.value option;
+  dh_frame_env  : unit -> March_eval.Eval.env option;
+  dh_actors     : unit -> string list;
+  dh_actor      : int -> int option -> string list;
+  dh_save_trace : string -> (unit, string) result;
+  dh_load_trace : string -> (unit, string) result;
 }
 
 open Notty
@@ -167,30 +174,58 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
                    | Some v -> Printf.printf "[replay] Result: %s\n%!"
                                  (March_eval.Eval.value_to_string v))
                 | None -> ())
-             | s when is_debug && String.length s >= 6 && String.sub s 0 6 = ":back" ->
+             | ":actors" when is_debug ->
+               (match debug_hooks with
+                | Some h -> List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_actors ())
+                | None -> ())
+             | s when is_debug && String.length s >= 7 && String.sub s 0 7 = ":actor " ->
+               (match debug_hooks with
+                | Some h ->
+                  let rest = String.trim (String.sub s 7 (String.length s - 7)) in
+                  let (pid, goto_msg) =
+                    match String.split_on_char ' ' rest with
+                    | [p] -> (int_of_string p, None)
+                    | [p; m] -> (int_of_string p, Some (int_of_string m))
+                    | _ -> raise (Failure "bad :actor args")
+                  in
+                  List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_actor pid goto_msg);
+                  (match goto_msg with
+                   | Some _ -> (match h.dh_frame_env () with Some e -> env := e | None -> ())
+                   | None -> ())
+                | None -> ())
+             | s when is_debug && String.length s >= 6 && String.sub s 0 5 = ":back" ->
                (match debug_hooks with
                 | Some h ->
                   let n = (try int_of_string (String.trim (String.sub s 5 (String.length s - 5)))
                            with _ -> 1) in
-                  let pos = h.dh_back n in
-                  Printf.printf "Moved to frame %d.\n%!" pos;
-                  (match h.dh_frame_env () with Some e -> env := e | None -> ())
+                  let _pos = h.dh_back n in
+                  (match h.dh_frame_env () with Some e -> env := e | None -> ());
+                  List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_where ())
                 | None -> ())
              | s when is_debug && String.length s >= 8 && String.sub s 0 8 = ":forward" ->
                (match debug_hooks with
                 | Some h ->
-                  let n = (try int_of_string (String.trim (String.sub s 7 (String.length s - 7)))
+                  let n = (try int_of_string (String.trim (String.sub s 8 (String.length s - 8)))
                            with _ -> 1) in
-                  let pos = h.dh_forward n in
-                  Printf.printf "Moved to frame %d.\n%!" pos;
-                  (match h.dh_frame_env () with Some e -> env := e | None -> ())
+                  let _pos = h.dh_forward n in
+                  (match h.dh_frame_env () with Some e -> env := e | None -> ());
+                  List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_where ())
                 | None -> ())
              | ":step" | ":s" when is_debug ->
                (match debug_hooks with
                 | Some h ->
-                  let pos = h.dh_forward 1 in
-                  Printf.printf "Moved to frame %d.\n%!" pos;
-                  (match h.dh_frame_env () with Some e -> env := e | None -> ())
+                  let _pos = h.dh_forward 1 in
+                  (match h.dh_frame_env () with Some e -> env := e | None -> ());
+                  List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_where ())
+                | None -> ())
+             | s when is_debug && String.length s >= 6 && String.sub s 0 6 = ":goto " ->
+               (match debug_hooks with
+                | Some h ->
+                  let n = (try int_of_string (String.trim (String.sub s 6 (String.length s - 6)))
+                           with _ -> 0) in
+                  let _pos = h.dh_goto n in
+                  (match h.dh_frame_env () with Some e -> env := e | None -> ());
+                  List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_where ())
                 | None -> ())
              | s when is_debug && String.length s >= 7 && String.sub s 0 7 = ":trace " ->
                (match debug_hooks with
@@ -198,6 +233,69 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
                   let n = (try int_of_string (String.trim (String.sub s 6 (String.length s - 6)))
                            with _ -> 10) in
                   List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_trace n)
+                | None -> ())
+             | s when is_debug && String.trim s = ":diff" ->
+               (match debug_hooks with
+                | Some h ->
+                  let baseline = List.map fst e0 in
+                  List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_diff 1 baseline)
+                | None -> ())
+             | s when is_debug && String.length s >= 6 && String.sub s 0 6 = ":diff " ->
+               (match debug_hooks with
+                | Some h ->
+                  let n = (try int_of_string (String.trim (String.sub s 6 (String.length s - 6)))
+                           with _ -> 1) in
+                  let baseline = List.map fst e0 in
+                  List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_diff n baseline)
+                | None -> ())
+             | s when is_debug && String.length s > 6 && String.sub s 0 6 = ":find " ->
+               (match debug_hooks with
+                | Some h ->
+                  let expr_src = String.trim (String.sub s 6 (String.length s - 6)) in
+                  let lexbuf = Lexing.from_string expr_src in
+                  (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+                          with _ -> None) with
+                   | Some (March_ast.Ast.ReplExpr e) ->
+                     let e' = March_desugar.Desugar.desugar_expr e in
+                     Printf.printf "Searching...\n%!";
+                     let pred frame_env =
+                       match March_eval.Eval.eval_expr frame_env e' with
+                       | March_eval.Eval.VBool b -> b
+                       | _ -> false
+                     in
+                     (match h.dh_find pred with
+                      | None -> Printf.printf "Not found.\n%!"
+                      | Some idx ->
+                        Printf.printf "Found at frame %d.\n%!" idx;
+                        (match h.dh_frame_env () with Some e -> env := e | None -> ());
+                        List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_where ()))
+                   | _ -> Printf.eprintf "parse error in :find expression\n%!")
+                | None -> ())
+             | s when is_debug && String.length s > 7 && String.sub s 0 7 = ":watch " ->
+               let expr_src = String.trim (String.sub s 7 (String.length s - 7)) in
+               Printf.printf "watch: %s (use :watches to list, :unwatch to remove)\n%!" expr_src;
+               (* Watches are TUI-only in simple mode — just acknowledge *)
+             | s when is_debug && (s = ":watches") ->
+               Printf.printf "(watch expressions only available in TUI mode)\n%!"
+             | s when is_debug && String.length s > 9 && String.sub s 0 9 = ":unwatch " ->
+               Printf.printf "(watch expressions only available in TUI mode)\n%!"
+             | s when is_debug && String.length s > 7 && String.sub s 0 7 = ":tsave " ->
+               (match debug_hooks with
+                | Some h ->
+                  let path = String.trim (String.sub s 7 (String.length s - 7)) in
+                  (match h.dh_save_trace path with
+                   | Ok () -> Printf.printf "Trace saved to %s.\n%!" path
+                   | Error msg -> Printf.eprintf "error: %s\n%!" msg)
+                | None -> ())
+             | s when is_debug && String.length s > 7 && String.sub s 0 7 = ":tload " ->
+               (match debug_hooks with
+                | Some h ->
+                  let path = String.trim (String.sub s 7 (String.length s - 7)) in
+                  (match h.dh_load_trace path with
+                   | Ok () ->
+                     Printf.printf "Trace loaded from %s.\n%!" path;
+                     List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_where ())
+                   | Error msg -> Printf.eprintf "error: %s\n%!" msg)
                 | None -> ())
              | ":env" ->
                let env_baseline = if is_debug then e0 else March_eval.Eval.base_env in
@@ -209,13 +307,20 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
                List.iter (fun s -> Printf.printf "%s\n" s) [
                  "Debug commands:";
                  "  :continue :c        — resume execution";
-                 "  :back [n] :b [n]    — step back n frames (default 1)";
-                 "  :forward [n] :f [n] — step forward n frames (default 1)";
+                 "  :back [n]           — step back n frames (default 1)";
+                 "  :forward [n]        — step forward n frames (default 1)";
                  "  :step :s            — step forward 1 frame";
+                 "  :goto N             — jump to absolute frame N";
                  "  :trace [n] :t [n]   — show last n trace frames (default 10)";
                  "  :where :w           — show current position";
                  "  :stack :sk          — show call stack";
-                 "  :replay :r          — replay from current frame";
+                 "  :diff [n]           — env diff vs n frames back (default 1)";
+                 "  :find <expr>        — find frame where expr is true";
+                 "  :replay :r          — replay from current frame with current env";
+                 "  :actors             — list actors with message counts";
+                 "  :actor <pid> [n]    — show actor message history (jump to msg n)";
+                 "  :tsave <path>       — save trace to file";
+                 "  :tload <path>       — load trace from file";
                  "  :env                — list bindings";
                  "  :quit :q            — exit program";
                  "";
@@ -295,7 +400,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
                  else
                    (try
                       let v = March_eval.Eval.eval_expr !env e' in
-                      let vs = March_eval.Eval.value_to_string v in
+                      let vs = March_eval.Eval.value_to_string_pretty v in
                       Printf.printf "= %s\n%!" vs;
                       Result_vars.push result_h v ty_str;
                       env    := ("v", v)
@@ -338,8 +443,10 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
   let prompt_num   = ref 1 in
   let running      = ref true in
   let scroll_offset = ref 0 in
+  (* Watch expressions: (display_string * parsed_expr) list *)
+  let watch_list   : (string * March_ast.Ast.expr) list ref = ref [] in
   let base_status  =
-    if is_debug then "dbg  :continue  :back/:forward  :where  :trace  :help"
+    if is_debug then "dbg  :continue  :back/:forward  :where  :goto  :diff  :find  :help"
     else "march  :help  Tab  ↑↓: hist  wheel/PgUp: scroll"
   in
 
@@ -389,6 +496,26 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
     List.iter (fun line ->
       hist_lines := !hist_lines @ [Notty.I.string attr line]
     ) (String.split_on_char '\n' s)
+  in
+
+  (* After any navigation, show :where and update env + watches. *)
+  let [@warning "-26"] nav_context h =
+    (match h.dh_frame_env () with Some e -> env := e | None -> ());
+    let lines = h.dh_where () in
+    (match lines with
+     | [] -> ()
+     | header :: rest ->
+       add_line Notty.A.(fg cyan) header;
+       List.iter (add_line Notty.A.empty) rest);
+    (* Show watch values *)
+    List.iter (fun (label, we) ->
+      try
+        let v = March_eval.Eval.eval_expr !env we in
+        add_line Notty.A.(fg magenta)
+          (Printf.sprintf "  ◉ %s = %s" label (March_eval.Eval.value_to_string v))
+      with _ ->
+        add_line Notty.A.(fg magenta) (Printf.sprintf "  ◉ %s = <not in scope>" label)
+    ) !watch_list
   in
 
   let process_src src =
@@ -484,7 +611,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
       else
         (try
            let v = March_eval.Eval.eval_expr !env e' in
-           let vs = March_eval.Eval.value_to_string v in
+           let vs = March_eval.Eval.value_to_string_pretty v in
            add_line Notty.A.(fg green) (Printf.sprintf "= %s" vs);
            Result_vars.push result_h v ty_str;
            env    := ("v", v) :: (List.remove_assoc "v" !env);
@@ -546,32 +673,85 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
              (match h.dh_replay !env with
               | None   -> add_line Notty.A.(fg yellow) "[replay] Done (exception or no frame)."
               | Some v -> add_line Notty.A.(fg green)
-                            (Printf.sprintf "[replay] Result: %s" (March_eval.Eval.value_to_string v)))
+                            (Printf.sprintf "[replay] Result: %s"
+                               (March_eval.Eval.value_to_string_pretty v)))
+           | None -> ())
+        | ":actors" when is_debug ->
+          (match debug_hooks with
+           | Some h -> List.iter (add_line Notty.A.empty) (h.dh_actors ())
+           | None -> ())
+        | ":watches" when is_debug ->
+          if !watch_list = [] then
+            add_line Notty.A.(fg yellow) "(no watch expressions)"
+          else
+            List.iter (fun (label, _) ->
+              add_line Notty.A.(fg magenta) (Printf.sprintf "  ◉ %s" label)
+            ) !watch_list
+        | s when is_debug && String.length s > 7 && String.sub s 0 7 = ":watch " ->
+          let expr_src = String.trim (String.sub s 7 (String.length s - 7)) in
+          let lexbuf = Lexing.from_string expr_src in
+          (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+                  with _ -> None) with
+           | Some (March_ast.Ast.ReplExpr e) ->
+             let e' = March_desugar.Desugar.desugar_expr e in
+             watch_list := !watch_list @ [(expr_src, e')];
+             add_line Notty.A.(fg magenta) (Printf.sprintf "Watch added: %s" expr_src)
+           | _ -> add_line Notty.A.(fg red) "parse error in watch expression")
+        | s when is_debug && String.length s > 9 && String.sub s 0 9 = ":unwatch " ->
+          let label = String.trim (String.sub s 9 (String.length s - 9)) in
+          let before = List.length !watch_list in
+          watch_list := List.filter (fun (l, _) -> l <> label) !watch_list;
+          if List.length !watch_list < before then
+            add_line Notty.A.(fg magenta) (Printf.sprintf "Removed watch: %s" label)
+          else
+            add_line Notty.A.(fg yellow) (Printf.sprintf "No watch named: %s" label)
+        | s when is_debug && String.length s > 7 && String.sub s 0 7 = ":actor " ->
+          (match debug_hooks with
+           | Some h ->
+             let rest = String.trim (String.sub s 7 (String.length s - 7)) in
+             (try
+               let parts = List.filter (fun x -> x <> "")
+                 (String.split_on_char ' ' rest) in
+               let (pid, goto_msg) = match parts with
+                 | [p] -> (int_of_string p, None)
+                 | [p; m] -> (int_of_string p, Some (int_of_string m))
+                 | _ -> raise (Failure "")
+               in
+               List.iter (add_line Notty.A.empty) (h.dh_actor pid goto_msg);
+               (match goto_msg with
+                | Some _ -> nav_context h
+                | None -> ())
+             with _ -> add_line Notty.A.(fg red) "usage: :actor <pid> [msg_n]")
            | None -> ())
         | s when is_debug && String.length s >= 6 && String.sub s 0 5 = ":back" ->
           (match debug_hooks with
            | Some h ->
              let n = (try int_of_string (String.trim (String.sub s 5 (String.length s - 5)))
                       with _ -> 1) in
-             let pos = h.dh_back n in
-             add_line Notty.A.empty (Printf.sprintf "Moved to frame %d." pos);
-             (match h.dh_frame_env () with Some e -> env := e | None -> ())
+             let _pos = h.dh_back n in
+             nav_context h
            | None -> ())
         | ":step" | ":s" when is_debug ->
           (match debug_hooks with
            | Some h ->
-             let pos = h.dh_forward 1 in
-             add_line Notty.A.empty (Printf.sprintf "Moved to frame %d." pos);
-             (match h.dh_frame_env () with Some e -> env := e | None -> ())
+             let _pos = h.dh_forward 1 in
+             nav_context h
            | None -> ())
         | s when is_debug && String.length s >= 9 && String.sub s 0 8 = ":forward" ->
           (match debug_hooks with
            | Some h ->
              let n = (try int_of_string (String.trim (String.sub s 8 (String.length s - 8)))
                       with _ -> 1) in
-             let pos = h.dh_forward n in
-             add_line Notty.A.empty (Printf.sprintf "Moved to frame %d." pos);
-             (match h.dh_frame_env () with Some e -> env := e | None -> ())
+             let _pos = h.dh_forward n in
+             nav_context h
+           | None -> ())
+        | s when is_debug && String.length s >= 6 && String.sub s 0 6 = ":goto " ->
+          (match debug_hooks with
+           | Some h ->
+             let n = (try int_of_string (String.trim (String.sub s 6 (String.length s - 6)))
+                      with _ -> 0) in
+             let _pos = h.dh_goto n in
+             nav_context h
            | None -> ())
         | s when is_debug && String.length s >= 7 && String.sub s 0 7 = ":trace " ->
           (match debug_hooks with
@@ -579,6 +759,63 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
              let n = (try int_of_string (String.trim (String.sub s 6 (String.length s - 6)))
                       with _ -> 10) in
              List.iter (add_line Notty.A.empty) (h.dh_trace n)
+           | None -> ())
+        | s when is_debug && String.trim s = ":diff" ->
+          (match debug_hooks with
+           | Some h ->
+             let baseline = List.map fst e0 in
+             List.iter (add_line Notty.A.empty) (h.dh_diff 1 baseline)
+           | None -> ())
+        | s when is_debug && String.length s >= 6 && String.sub s 0 6 = ":diff " ->
+          (match debug_hooks with
+           | Some h ->
+             let n = (try int_of_string (String.trim (String.sub s 6 (String.length s - 6)))
+                      with _ -> 1) in
+             let baseline = List.map fst e0 in
+             List.iter (add_line Notty.A.empty) (h.dh_diff n baseline)
+           | None -> ())
+        | s when is_debug && String.length s > 6 && String.sub s 0 6 = ":find " ->
+          (match debug_hooks with
+           | Some h ->
+             let expr_src = String.trim (String.sub s 6 (String.length s - 6)) in
+             let lexbuf = Lexing.from_string expr_src in
+             (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+                     with _ -> None) with
+              | Some (March_ast.Ast.ReplExpr e) ->
+                let e' = March_desugar.Desugar.desugar_expr e in
+                add_line Notty.A.(fg yellow) "Searching...";
+                let pred frame_env =
+                  match March_eval.Eval.eval_expr frame_env e' with
+                  | March_eval.Eval.VBool b -> b
+                  | _ -> false
+                in
+                (match h.dh_find pred with
+                 | None -> add_line Notty.A.(fg yellow) "Not found."
+                 | Some idx ->
+                   add_line Notty.A.(fg green) (Printf.sprintf "Found at frame %d." idx);
+                   nav_context h)
+              | _ -> add_line Notty.A.(fg red) "parse error in :find expression")
+           | None -> ())
+        | s when is_debug && String.length s > 7 && String.sub s 0 7 = ":tsave " ->
+          (match debug_hooks with
+           | Some h ->
+             let path = String.trim (String.sub s 7 (String.length s - 7)) in
+             (match h.dh_save_trace path with
+              | Ok () ->
+                add_line Notty.A.(fg green) (Printf.sprintf "Trace saved to %s." path)
+              | Error msg ->
+                add_line Notty.A.(fg red) (Printf.sprintf "error: %s" msg))
+           | None -> ())
+        | s when is_debug && String.length s > 7 && String.sub s 0 7 = ":tload " ->
+          (match debug_hooks with
+           | Some h ->
+             let path = String.trim (String.sub s 7 (String.length s - 7)) in
+             (match h.dh_load_trace path with
+              | Ok () ->
+                add_line Notty.A.(fg green) (Printf.sprintf "Trace loaded from %s." path);
+                nav_context h
+              | Error msg ->
+                add_line Notty.A.(fg red) (Printf.sprintf "error: %s" msg))
            | None -> ())
         | ":env" ->
           (* In debug mode filter by e0 (the breakpoint env) so we only show
@@ -608,13 +845,23 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
             List.iter (add_line Notty.A.empty) [
               "Debug commands:";
               "  :continue :c        — resume execution";
-              "  :back [n] :b [n]    — step back n frames (default 1)";
-              "  :forward [n] :f [n] — step forward n frames (default 1)";
+              "  :back [n]           — step back n frames (default 1)";
+              "  :forward [n]        — step forward n frames (default 1)";
               "  :step :s            — step forward 1 frame";
+              "  :goto N             — jump to absolute frame N";
               "  :trace [n] :t [n]   — show last n trace frames (default 10)";
               "  :where :w           — show current position";
               "  :stack :sk          — show call stack";
-              "  :replay :r          — replay from current frame";
+              "  :diff [n]           — env diff vs n frames back (default 1)";
+              "  :find <expr>        — find frame where expr is true";
+              "  :replay :r          — replay from current frame with current env";
+              "  :watch <expr>       — add watch expression";
+              "  :unwatch <expr>     — remove watch expression";
+              "  :watches            — list watch expressions";
+              "  :actors             — list actors with message counts";
+              "  :actor <pid> [n]    — show actor message history (jump to msg n)";
+              "  :tsave <path>       — save trace to .mtr file";
+              "  :tload <path>       — load trace from .mtr file";
               "  :env                — list bindings";
               "  :quit :q            — exit program";
               "";

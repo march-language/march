@@ -481,9 +481,11 @@ expr_atom:
     { ESpawn (e, mk_span ($loc)) }
   | SEND; LPAREN; cap = expr; COMMA; msg = expr; RPAREN
     { ESend (cap, msg, mk_span ($loc)) }
-  (* Debugger breakpoint *)
+  (* Debugger: dbg() unconditional pause; dbg(expr) conditional/trace *)
   | DBG; LPAREN; RPAREN
-    { EDbg (mk_span ($loc)) }
+    { EDbg (None, mk_span ($loc)) }
+  | DBG; LPAREN; e = expr; RPAREN
+    { EDbg (Some e, mk_span ($loc)) }
   (* Contextual keywords usable as variable names in expressions *)
   | STATE { EVar (mk_name "state" $loc) }
 

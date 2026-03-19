@@ -79,6 +79,146 @@ let show_where (ctx : Eval.debug_ctx) : string list =
       in
       header :: source_context sp.March_ast.Ast.file sp.March_ast.Ast.start_line 2
 
+(** Jump to an absolute frame index. Clamps to valid range. Returns new position. *)
+let goto (ctx : Eval.debug_ctx) (n : int) : int =
+  let max_pos = ctx.dc_trace.Eval.rb_size - 1 in
+  let new_pos = max 0 (min n max_pos) in
+  ctx.dc_pos <- new_pos;
+  new_pos
+
+(** Diff the env at the current frame vs the env [n] frames earlier.
+    Returns formatted diff lines.  [baseline_names] are names to exclude
+    (stdlib / pre-debug session names). *)
+let diff_frames (ctx : Eval.debug_ctx) (n : int) (baseline_names : string list) : string list =
+  let cur_pos = ctx.dc_pos in
+  let ref_pos = min (cur_pos + n) (ctx.dc_trace.Eval.rb_size - 1) in
+  match Eval.ring_get ctx.dc_trace cur_pos, Eval.ring_get ctx.dc_trace ref_pos with
+  | None, _ | _, None -> ["(no frames to compare)"]
+  | Some cur_f, Some ref_f ->
+    let filter env =
+      let seen = Hashtbl.create 16 in
+      List.filter_map (fun (name, v) ->
+        if List.mem name baseline_names || Hashtbl.mem seen name then None
+        else begin Hashtbl.add seen name (); Some (name, v) end
+      ) env
+    in
+    let cur_env = filter cur_f.Eval.tf_env in
+    let ref_env = filter ref_f.Eval.tf_env in
+    let lines = ref [] in
+    (* Bindings in current frame *)
+    List.iter (fun (name, cur_v) ->
+      match List.assoc_opt name ref_env with
+      | None ->
+        lines := (Printf.sprintf "  + %s = %s" name (Eval.value_to_string cur_v)) :: !lines
+      | Some ref_v ->
+        let cv = Eval.value_to_string cur_v in
+        let rv = Eval.value_to_string ref_v in
+        if cv <> rv then
+          lines := (Printf.sprintf "  ~ %s : %s -> %s" name rv cv) :: !lines
+    ) cur_env;
+    (* Bindings only in reference frame (dropped) *)
+    List.iter (fun (name, ref_v) ->
+      if not (List.mem_assoc name cur_env) then
+        lines := (Printf.sprintf "  - %s = %s" name (Eval.value_to_string ref_v)) :: !lines
+    ) ref_env;
+    if !lines = [] then ["(no changes)"]
+    else List.rev !lines
+
+(** Search backward from current position for a frame where [pred env] returns true.
+    On success moves cursor to that frame and returns [Some new_pos].
+    On failure returns [None] and leaves cursor unchanged. *)
+let find_frame (ctx : Eval.debug_ctx) (pred : Eval.env -> bool) : int option =
+  let n = ctx.dc_trace.Eval.rb_size in
+  let start = ctx.dc_pos + 1 in  (* start searching one frame behind current *)
+  let result = ref None in
+  let i = ref start in
+  while !i < n && !result = None do
+    (match Eval.ring_get ctx.dc_trace !i with
+     | Some f ->
+       (try if pred f.Eval.tf_env then result := Some !i
+        with _ -> ())
+     | None -> ());
+    incr i
+  done;
+  (match !result with
+   | Some idx -> ctx.dc_pos <- idx
+   | None -> ());
+  !result
+
+(** Summary of all actors with message counts. *)
+let actors_summary (ctx : Eval.debug_ctx) : string list =
+  if ctx.dc_actor_log = [] then ["(no actor messages recorded)"]
+  else begin
+    let counts = Hashtbl.create 8 in
+    List.iter (fun (evt : Eval.actor_msg_event) ->
+      let key = (evt.ame_pid, evt.ame_actor_name) in
+      let n = try Hashtbl.find counts key with Not_found -> 0 in
+      Hashtbl.replace counts key (n + 1)
+    ) ctx.dc_actor_log;
+    let entries = Hashtbl.fold (fun (pid, name) count acc ->
+      (pid, name, count) :: acc
+    ) counts [] in
+    let entries = List.sort (fun (a, _, _) (b, _, _) -> compare a b) entries in
+    List.map (fun (pid, name, count) ->
+      Printf.sprintf "  PID %d (%s): %d message%s"
+        pid name count (if count = 1 then "" else "s")
+    ) entries
+  end
+
+(** Per-actor message history for [pid].
+    Optionally, if [goto_msg] is Some n, jump to the trace frame of message n. *)
+let actor_history (ctx : Eval.debug_ctx) (pid : int) (goto_msg : int option) : string list =
+  let events = List.filter (fun e -> e.Eval.ame_pid = pid) ctx.dc_actor_log in
+  if events = [] then
+    [Printf.sprintf "(no messages recorded for PID %d)" pid]
+  else begin
+    (match goto_msg with
+     | Some n when n >= 1 && n <= List.length events ->
+       let evt = List.nth events (n - 1) in
+       ctx.dc_pos <- max 0 evt.Eval.ame_frame_idx
+     | _ -> ());
+    List.mapi (fun i (evt : Eval.actor_msg_event) ->
+      let state_after_s = match evt.ame_state_after with
+        | Some s -> Eval.value_to_string s
+        | None   -> "<exception>"
+      in
+      Printf.sprintf "  Msg %3d: %-24s  state: %s -> %s"
+        (i + 1)
+        (Eval.value_to_string evt.ame_msg)
+        (Eval.value_to_string evt.ame_state_before)
+        state_after_s
+    ) events
+  end
+
+(** Save the trace to a file using Marshal. *)
+let save_trace (ctx : Eval.debug_ctx) (path : string) : (unit, string) result =
+  try
+    let oc = open_out_bin path in
+    Marshal.to_channel oc ctx.dc_trace [];
+    close_out oc;
+    Ok ()
+  with Sys_error msg -> Error msg
+
+(** Load a trace from a file, replacing the context's trace contents.
+    The loaded trace's array is copied element-by-element to fit the
+    existing ring buffer capacity. *)
+let load_trace (ctx : Eval.debug_ctx) (path : string) : (unit, string) result =
+  try
+    let ic = open_in_bin path in
+    let t : Eval.trace_frame Eval.ring = Marshal.from_channel ic in
+    close_in ic;
+    let dst = ctx.dc_trace in
+    let copy_size = min t.Eval.rb_size dst.Eval.rb_cap in
+    Array.blit t.Eval.rb_arr 0 dst.Eval.rb_arr 0
+      (min (Array.length t.Eval.rb_arr) (Array.length dst.Eval.rb_arr));
+    dst.Eval.rb_head <- t.Eval.rb_head mod dst.Eval.rb_cap;
+    dst.Eval.rb_size <- copy_size;
+    ctx.dc_pos <- 0;
+    Ok ()
+  with
+  | Sys_error msg -> Error msg
+  | _ -> Error "invalid trace file (may be from a different compiler version)"
+
 (** Show call stack: frames at each depth level up to current position. *)
 let show_stack (ctx : Eval.debug_ctx) : string list =
   let stack = Hashtbl.create 8 in

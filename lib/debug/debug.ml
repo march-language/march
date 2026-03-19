@@ -13,11 +13,12 @@ let default_trace_size () =
 
 (** Create a fresh debug context with an empty trace buffer. *)
 let make_debug_ctx ~on_dbg : Eval.debug_ctx =
-  { Eval.dc_trace   = Eval.ring_create (default_trace_size ());
-    dc_pos          = 0;
-    dc_enabled      = true;
-    dc_depth        = 0;
-    dc_on_dbg       = Some on_dbg }
+  { Eval.dc_trace      = Eval.ring_create (default_trace_size ());
+    dc_pos             = 0;
+    dc_enabled         = true;
+    dc_depth           = 0;
+    dc_on_dbg          = Some on_dbg;
+    dc_actor_log       = [] }
 
 (** Install [ctx] as the active debug context. *)
 let install ctx =

@@ -89,7 +89,9 @@ let rec desugar_expr (e : expr) : expr =
     EApp (r', [l'], sp)
 
   (* --- Recurse into all other nodes --- *)
-  | ELit _ | EVar _ | EHole _ | EResultRef _ | EDbg _ -> e
+  | ELit _ | EVar _ | EHole _ | EResultRef _ -> e
+  | EDbg (None, _) -> e
+  | EDbg (Some inner, sp) -> EDbg (Some (desugar_expr inner), sp)
 
   | EApp (f, args, sp) ->
     EApp (desugar_expr f, List.map desugar_expr args, sp)

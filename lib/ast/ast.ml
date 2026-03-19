@@ -93,7 +93,9 @@ type expr =
   | ESend of expr * expr * span            (** send(cap, msg) *)
   | ESpawn of expr * span                  (** spawn(Actor) *)
   | EResultRef of int option               (** REPL magic: v or v(N) — last/Nth result *)
-  | EDbg of span                           (** Debugger breakpoint: dbg() — pauses, opens debug REPL *)
+  | EDbg of expr option * span
+      (** Debugger: dbg() pauses unconditionally; dbg(bool_expr) pauses when true;
+          dbg(val_expr) logs the value and returns it. *)
   | ELetFn of name * param list * ty option * expr * span
       (** Local named recursive function: fn go(params) : ret_ty do body end *)
 [@@deriving show]

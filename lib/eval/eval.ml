@@ -134,12 +134,22 @@ type trace_frame = {
   tf_depth  : int;
 }
 
+type actor_msg_event = {
+  ame_pid          : int;
+  ame_actor_name   : string;
+  ame_msg          : value;
+  ame_state_before : value;
+  ame_state_after  : value option;   (* None if handler raised *)
+  ame_frame_idx    : int;            (* trace ring index at time of dispatch *)
+}
+
 type debug_ctx = {
   dc_trace         : trace_frame ring;
   mutable dc_pos   : int;       (* navigation cursor; 0 = most recent *)
   mutable dc_enabled : bool;
   mutable dc_depth : int;       (* current call depth *)
   mutable dc_on_dbg : (env -> unit) option;
+  mutable dc_actor_log : actor_msg_event list;  (* per-actor message history *)
 }
 
 (** Snapshot the current actor state. Deep-copies mutable fields. *)
@@ -314,6 +324,45 @@ let rec value_to_string v =
   | VClosure _  -> "<fn>"
   | VBuiltin (n, _) -> "<builtin:" ^ n ^ ">"
   | VPid pid -> "Pid(" ^ string_of_int pid ^ ")"
+
+(** Pretty-print a value with indented multi-line layout when the flat
+    representation exceeds [width] characters. *)
+let value_to_string_pretty ?(width=80) v =
+  let flat = value_to_string v in
+  if String.length flat <= width then flat
+  else
+    let indent n = String.make n ' ' in
+    let rec pp depth v =
+      let flat_v = value_to_string v in
+      if String.length flat_v <= width - depth * 2 then flat_v
+      else match v with
+      | VRecord fields ->
+        let pad = indent (depth * 2 + 2) in
+        let close_pad = indent (depth * 2) in
+        "{ " ^ String.concat ("\n" ^ pad ^ ", ")
+          (List.map (fun (k, fv) -> k ^ " = " ^ pp (depth + 1) fv) fields)
+        ^ "\n" ^ close_pad ^ "}"
+      | VTuple vs ->
+        let pad = indent (depth * 2 + 2) in
+        let close_pad = indent (depth * 2) in
+        "( " ^ String.concat ("\n" ^ pad ^ ", ") (List.map (pp (depth + 1)) vs)
+        ^ "\n" ^ close_pad ^ ")"
+      | VCon ("Nil", []) -> "[]"
+      | VCon ("Cons", _) as lv when is_list_value lv ->
+        let elems = list_elems [] lv in
+        let pad = indent (depth * 2 + 2) in
+        let close_pad = indent (depth * 2) in
+        "[ " ^ String.concat ("\n" ^ pad ^ ", ") (List.map (pp (depth + 1)) elems)
+        ^ "\n" ^ close_pad ^ "]"
+      | VCon (tag, args) when args <> [] ->
+        let pad = indent (depth * 2 + 2) in
+        let close_pad = indent (depth * 2) in
+        tag ^ "(\n" ^ pad
+        ^ String.concat ("\n" ^ pad ^ ", ") (List.map (pp (depth + 1)) args)
+        ^ "\n" ^ close_pad ^ ")"
+      | _ -> flat_v
+    in
+    pp 0 v
 
 (** print/println use a display form (no quotes around strings). *)
 let value_display v =
@@ -790,6 +839,41 @@ let base_env : env =
   ; ("string_byte_length", VBuiltin ("string_byte_length", function
         | [VString s] -> VInt (String.length s)
         | _ -> eval_error "string_byte_length: expected string"))
+  ; ("string_split_first", VBuiltin ("string_split_first", function
+        (* Split on the first occurrence of [sep].
+           Returns Some(head, tail) if found, None otherwise.
+           Cost: O(n) scan for separator. *)
+        | [VString s; VString sep] ->
+          let ls = String.length s and lsep = String.length sep in
+          if lsep = 0 then VCon ("None", [])
+          else begin
+            let rec find i =
+              if i + lsep > ls then VCon ("None", [])
+              else if String.sub s i lsep = sep then
+                VCon ("Some", [VTuple [VString (String.sub s 0 i);
+                                       VString (String.sub s (i + lsep) (ls - i - lsep))]])
+              else find (i + 1)
+            in find 0
+          end
+        | _ -> eval_error "string_split_first: expected two strings"))
+  ; ("string_grapheme_count", VBuiltin ("string_grapheme_count", function
+        (* Count Unicode codepoints (not grapheme clusters) in a UTF-8 string.
+           For ASCII strings this equals the character count.
+           Full grapheme-cluster segmentation is not available in the tree-walking
+           interpreter without an external library; we count codepoints as a
+           practical approximation.  Cost: O(n). *)
+        | [VString s] ->
+          let n = String.length s in
+          let count = ref 0 in
+          let i = ref 0 in
+          while !i < n do
+            let b = Char.code s.[!i] in
+            (* UTF-8 continuation bytes are 0x80..0xBF; skip them *)
+            if b land 0xC0 <> 0x80 then incr count;
+            incr i
+          done;
+          VInt !count
+        | _ -> eval_error "string_grapheme_count: expected string"))
 
     (* ---- Char primitives (chars represented as single-char strings) ---- *)
   ; ("char_is_alpha", VBuiltin ("char_is_alpha", function
@@ -888,7 +972,7 @@ let span_of_expr (e : expr) : span =
   | ERecordUpdate (_, _, sp) | EField (_, _, sp)
   | EIf (_, _, _, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
   | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
-  | ESpawn (_, sp) | EDbg sp | ELetFn (_, _, _, _, sp) -> sp
+  | ESpawn (_, sp) | EDbg (_, sp) | ELetFn (_, _, _, _, sp) -> sp
   | EVar n -> n.span
   | EResultRef _ -> dummy_span
 
@@ -1039,7 +1123,8 @@ and eval_expr_inner (env : env) (e : expr) : value =
   | EResultRef _ ->
     raise (Eval_error "EResultRef reached evaluator — substitution missing")
 
-  | EDbg _ ->
+  | EDbg (None, _) ->
+    (* Unconditional breakpoint: pause and open debug REPL. *)
     (match !debug_ctx with
      | Some ctx when ctx.dc_enabled ->
        (match ctx.dc_on_dbg with
@@ -1047,6 +1132,22 @@ and eval_expr_inner (env : env) (e : expr) : value =
         | None   -> ())
      | _ -> ());
     VUnit
+
+  | EDbg (Some inner, sp) ->
+    let v = eval_expr env inner in
+    (match !debug_ctx with
+     | Some ctx when ctx.dc_enabled ->
+       (match v with
+        | VBool b ->
+          (* Conditional breakpoint: pause only when true. *)
+          if b then (match ctx.dc_on_dbg with Some f -> f env | None -> ())
+        | _ ->
+          (* Value trace: print to stderr and return the value. *)
+          Printf.eprintf "[dbg] %s:%d:%d = %s\n%!"
+            sp.March_ast.Ast.file sp.March_ast.Ast.start_line
+            sp.March_ast.Ast.start_col (value_to_string v))
+     | _ -> ());
+    v
 
   | EAnnot (ex, _, _) -> eval_expr env ex
 
@@ -1102,7 +1203,37 @@ and eval_expr_inner (env : env) (e : expr) : value =
              let handler_env =
                [("state", inst.ai_state)] @ param_bindings @ !(inst.ai_env_ref)
              in
-             let new_state = eval_expr handler_env handler.ah_body in
+             let state_before = inst.ai_state in
+             let frame_idx = match !debug_ctx with
+               | Some ctx -> ctx.dc_trace.rb_size - 1
+               | None -> -1
+             in
+             let new_state =
+               (try let s = eval_expr handler_env handler.ah_body in
+                    (match !debug_ctx with
+                     | Some ctx when ctx.dc_enabled ->
+                       let evt = { ame_pid          = pid;
+                                   ame_actor_name   = inst.ai_name;
+                                   ame_msg          = msg_val;
+                                   ame_state_before = state_before;
+                                   ame_state_after  = Some s;
+                                   ame_frame_idx    = frame_idx } in
+                       ctx.dc_actor_log <- ctx.dc_actor_log @ [evt]
+                     | _ -> ());
+                    s
+                with exn ->
+                  (match !debug_ctx with
+                   | Some ctx when ctx.dc_enabled ->
+                     let evt = { ame_pid          = pid;
+                                 ame_actor_name   = inst.ai_name;
+                                 ame_msg          = msg_val;
+                                 ame_state_before = state_before;
+                                 ame_state_after  = None;
+                                 ame_frame_idx    = frame_idx } in
+                     ctx.dc_actor_log <- ctx.dc_actor_log @ [evt]
+                   | _ -> ());
+                  raise exn)
+             in
              inst.ai_state <- new_state;
              VCon ("Some", [VUnit])))
      | _ ->
