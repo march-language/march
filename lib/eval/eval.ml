@@ -1353,6 +1353,10 @@ and eval_expr (env : env) (e : expr) : value =
 (* These are defined after [apply] so they can call it directly.      *)
 (* ------------------------------------------------------------------ *)
 
+(** The number of reductions consumed during the most recent call to
+    [eval_with_reduction_tracking]. *)
+let last_reduction_count : int ref = ref 0
+
 (** Task builtins: spawn, await, await_unwrap, yield.
     Placed after [apply] because [task_spawn] calls [apply] to eagerly
     execute the thunk (Phase 1: single-threaded cooperative scheduler). *)
@@ -1415,7 +1419,23 @@ let task_builtins : env =
     | [_; _] ->
       eval_error "task_spawn_steal: first argument must be a Cap(WorkPool)"
     | _ -> eval_error "task_spawn_steal: expected 2 arguments (pool, function)"))
+
+  ; ("task_reductions", VBuiltin ("task_reductions", function
+    | [] -> VInt !last_reduction_count
+    | _ -> eval_error "task_reductions: expected 0 arguments"))
   ]
+
+(** Run [thunk] (a zero-argument closure) while counting reductions.
+    Returns [(result, reductions_consumed)].  The count is also stored in
+    [last_reduction_count] so that the [task_reductions] builtin can read it. *)
+let eval_with_reduction_tracking (thunk : value) : value * int =
+  let ctx = March_scheduler.Scheduler.create_reduction_ctx () in
+  reduction_ctx := Some ctx;
+  let result = apply thunk [] in
+  let consumed = March_scheduler.Scheduler.max_reductions - ctx.March_scheduler.Scheduler.remaining in
+  reduction_ctx := None;
+  last_reduction_count := consumed;
+  (result, consumed)
 
 (* ------------------------------------------------------------------ *)
 (* Module evaluation                                                   *)

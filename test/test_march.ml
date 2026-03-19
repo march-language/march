@@ -2980,6 +2980,26 @@ let test_eval_workpool_threading () =
   let v = call_fn env "main" [March_eval.Eval.VWorkPool] in
   Alcotest.(check int) "threaded pool works" 55 (vint v)
 
+let test_eval_reduction_count () =
+  let src = {|mod Test do
+    fn countdown(n) do
+      if n <= 0 then 0
+      else countdown(n - 1)
+    end
+
+    fn main() do
+      countdown(100)
+    end
+  end|} in
+  let env = eval_module src in
+  let thunk = List.assoc "main" env in
+  let (_result, reductions) =
+    March_eval.Eval.eval_with_reduction_tracking thunk in
+  (* Each iteration: EApp(countdown) + EMatch(if) = 2 reductions.
+     Plus the initial EApp(main). Should be roughly 200+. *)
+  Alcotest.(check bool) "reductions > 100" true (reductions > 100);
+  Alcotest.(check bool) "reductions < 1000" true (reductions < 1000)
+
 let () =
   Alcotest.run "march"
     [
@@ -3316,6 +3336,7 @@ let () =
           Alcotest.test_case "reduction counter exhausts"  `Quick test_reduction_counter_exhausts;
           Alcotest.test_case "eval yields after budget"    `Quick test_eval_yields_after_budget;
           Alcotest.test_case "eval no yield when disabled" `Quick test_eval_no_yield_when_disabled;
+          Alcotest.test_case "reduction count"             `Quick test_eval_reduction_count;
         ] );
       ( "tasks",
         [
