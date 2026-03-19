@@ -64,7 +64,7 @@
 %token TYPE MOD ACTOR ON SEND SPAWN
 %token STATE INIT RESPOND PROTOCOL LOOP
 %token LINEAR AFFINE
-%token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS USE
+%token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS USE NEEDS
 %token DBG DOC
 %token <string> INTERP_START
 %token <string> INTERP_MID
@@ -109,6 +109,7 @@ decl:
   | d = mod_decl       { d }
   | d = use_decl       { d }
   | d = protocol_decl  { d }
+  | d = needs_decl     { d }
 
 (** Each fn clause is parsed as its own DFn with a single clause.
     The group_fn_clauses pass merges consecutive same-name clauses. *)
@@ -217,6 +218,16 @@ use_selector:
   | LBRACE; names = separated_list(COMMA, lower_name); RBRACE
     { UseNames names }
 
+(** Capability manifest: needs IO.Network, IO.Clock
+    Each path is a dot-separated sequence of uppercase names stored as a name list. *)
+needs_decl:
+  | NEEDS; caps = separated_nonempty_list(COMMA, cap_path)
+    { DNeeds (caps, mk_span ($loc)) }
+
+cap_path:
+  | id = upper_name { [id] }
+  | id = upper_name; DOT; rest = cap_path { id :: rest }
+
 (** Interface (typeclass) definition: interface Eq(a) do fn eq: a -> a -> Bool end *)
 interface_decl:
   | INTERFACE; name = upper_name; LPAREN; param = lower_name; RPAREN; DO;
@@ -311,6 +322,10 @@ ty_app:
 
 ty_atom:
   | id = LOWER_IDENT { TyVar (mk_name id $loc) }
+  | id = upper_name; DOT; rest = dotted_upper_tail
+    { (* Dotted type name: IO.Network → TyCon("IO.Network", []) *)
+      let joined = id.txt ^ "." ^ String.concat "." (List.map (fun (n : March_ast.Ast.name) -> n.txt) rest) in
+      TyCon (mk_name joined $loc, []) }
   | id = upper_name { TyCon (id, []) }
   | LINEAR; t = ty_atom { TyLinear (Linear, t) }
   | AFFINE; t = ty_atom { TyLinear (Affine, t) }
@@ -318,6 +333,10 @@ ty_atom:
   | LPAREN; t = ty; RPAREN { t }
   | LPAREN; t = ty; COMMA; ts = separated_nonempty_list(COMMA, ty); RPAREN
     { TyTuple (t :: ts) }
+
+dotted_upper_tail:
+  | id = upper_name { [id] }
+  | id = upper_name; DOT; rest = dotted_upper_tail { id :: rest }
 
 variant:
   | name = upper_name; LPAREN; args = separated_nonempty_list(COMMA, ty); RPAREN
