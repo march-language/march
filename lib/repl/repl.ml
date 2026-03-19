@@ -200,8 +200,9 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
                   List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_trace n)
                 | None -> ())
              | ":env" ->
+               let env_baseline = if is_debug then e0 else March_eval.Eval.base_env in
                List.iter (fun (k, _) ->
-                 if not (List.mem_assoc k March_eval.Eval.base_env) then
+                 if not (List.mem_assoc k env_baseline) then
                    Printf.printf "  %s\n" k
                ) !env
              | ":help" when is_debug ->
@@ -354,7 +355,10 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
       Notty.I.(Notty.I.string Notty.A.empty pad_str <|> Highlight.highlight line)
     ) (List.rev !inp.Input.multiline_buf) in
     let transcript = !hist_lines @ cont_imgs in
-    let (scope, result_latest) = user_scope !env !tc_env result_h ~baseline_env:e0 in
+    (* In debug mode use base_e as baseline so program vars show in the scope panel.
+       In normal mode use e0 (base + stdlib) to hide stdlib from the panel. *)
+    let scope_baseline = if is_debug then base_e else e0 in
+    let (scope, result_latest) = user_scope !env !tc_env result_h ~baseline_env:scope_baseline in
     let (comp_items, comp_sel) = match !comp with
       | CompOff -> ([], 0)
       | CompOn { items; sel } -> (items, sel)
@@ -577,12 +581,21 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
              List.iter (add_line Notty.A.empty) (h.dh_trace n)
            | None -> ())
         | ":env" ->
+          (* In debug mode filter by e0 (the breakpoint env) so we only show
+             bindings added in this REPL session, not the entire program state.
+             The scope panel already shows all program variables. *)
+          let env_baseline = if is_debug then e0 else March_eval.Eval.base_env in
           let lines = List.filter_map (fun (k, v) ->
-            if List.mem_assoc k March_eval.Eval.base_env then None
+            if List.mem_assoc k env_baseline then None
             else Some (Printf.sprintf "  %s = %s" k
               (March_eval.Eval.value_to_string v))
           ) !env in
-          List.iter (add_line Notty.A.empty) lines
+          if lines = [] then
+            add_line Notty.A.(fg yellow)
+              (if is_debug then "(no new bindings in this debug session)"
+               else "(no user bindings)")
+          else
+            List.iter (add_line Notty.A.empty) lines
         | ":clear" -> hist_lines := []
         | ":reset" when not is_debug ->
           let (e', tc') = load_decls_into_env March_eval.Eval.base_env
@@ -729,7 +742,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
   render_frame ();
 
   while !running do
-    (match Tui.next_event tui with
+    (try match Tui.next_event tui with
      | `End -> running := false
      | `Resize _ -> render_frame ()
      | `Scroll `Up ->
@@ -774,7 +787,11 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
         | CompOff ->
           let (inp', action) = Input.handle_key !inp key in
           inp := inp';
-          dispatch_action action))
+          dispatch_action action)
+     with exn ->
+       add_line Notty.A.(fg red)
+         (Printf.sprintf "internal error: %s" (Printexc.to_string exn));
+       render_frame ())
   done;
   History.save hist (history_path ());
   Tui.close tui
