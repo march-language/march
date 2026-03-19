@@ -3023,6 +3023,53 @@ let test_eval_reduction_count () =
   Alcotest.(check bool) "reductions > 100" true (reductions > 100);
   Alcotest.(check bool) "reductions < 1000" true (reductions < 1000)
 
+(* ── Work-stealing deque tests ────────────────────────────────────── *)
+
+let test_deque_push_pop () =
+  let d = March_scheduler.Work_pool.Deque.create 16 in
+  March_scheduler.Work_pool.Deque.push d 1;
+  March_scheduler.Work_pool.Deque.push d 2;
+  March_scheduler.Work_pool.Deque.push d 3;
+  (* Pop is LIFO from the bottom *)
+  Alcotest.(check (option int)) "pop 3" (Some 3)
+    (March_scheduler.Work_pool.Deque.pop d);
+  Alcotest.(check (option int)) "pop 2" (Some 2)
+    (March_scheduler.Work_pool.Deque.pop d);
+  Alcotest.(check (option int)) "pop 1" (Some 1)
+    (March_scheduler.Work_pool.Deque.pop d);
+  Alcotest.(check (option int)) "pop empty" None
+    (March_scheduler.Work_pool.Deque.pop d)
+
+let test_deque_steal () =
+  let d = March_scheduler.Work_pool.Deque.create 16 in
+  March_scheduler.Work_pool.Deque.push d 1;
+  March_scheduler.Work_pool.Deque.push d 2;
+  March_scheduler.Work_pool.Deque.push d 3;
+  (* Steal is FIFO from the top *)
+  Alcotest.(check (option int)) "steal 1" (Some 1)
+    (March_scheduler.Work_pool.Deque.steal d);
+  Alcotest.(check (option int)) "steal 2" (Some 2)
+    (March_scheduler.Work_pool.Deque.steal d)
+
+let test_deque_size () =
+  let d = March_scheduler.Work_pool.Deque.create 16 in
+  Alcotest.(check int) "empty size" 0
+    (March_scheduler.Work_pool.Deque.size d);
+  March_scheduler.Work_pool.Deque.push d 1;
+  March_scheduler.Work_pool.Deque.push d 2;
+  Alcotest.(check int) "size 2" 2
+    (March_scheduler.Work_pool.Deque.size d);
+  ignore (March_scheduler.Work_pool.Deque.pop d);
+  Alcotest.(check int) "size after pop" 1
+    (March_scheduler.Work_pool.Deque.size d)
+
+let test_pool_submit_steal () =
+  let pool = March_scheduler.Work_pool.create 2 in
+  March_scheduler.Work_pool.submit pool 0 "task_a";
+  March_scheduler.Work_pool.submit pool 0 "task_b";
+  let stolen = March_scheduler.Work_pool.Deque.steal pool.workers.(0) in
+  Alcotest.(check (option string)) "stole task_a" (Some "task_a") stolen
+
 let () =
   Alcotest.run "march"
     [
@@ -3371,5 +3418,12 @@ let () =
           Alcotest.test_case "spawn_steal with pool"     `Quick test_eval_spawn_steal_with_pool;
           Alcotest.test_case "workpool threading"        `Quick test_eval_workpool_threading;
           Alcotest.test_case "task sends to actor"       `Quick test_eval_task_sends_to_actor;
+        ] );
+      ( "work_stealing",
+        [
+          Alcotest.test_case "deque push/pop"     `Quick test_deque_push_pop;
+          Alcotest.test_case "deque steal"        `Quick test_deque_steal;
+          Alcotest.test_case "deque size"         `Quick test_deque_size;
+          Alcotest.test_case "pool submit/steal"  `Quick test_pool_submit_steal;
         ] );
     ]
