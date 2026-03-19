@@ -153,7 +153,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
             incr prompt_num;
             History.add hist src;
             (match String.trim src with
-             | ":quit" | ":q" -> running := false
+             | ":quit" | ":q" -> if is_debug then exit 0 else running := false
              | ":continue" | ":c" when is_debug -> running := false
              | ":where" | ":w" when is_debug ->
                (match debug_hooks with
@@ -647,7 +647,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
        inp := Input.empty;
        (* Dispatch to command handler or process_src *)
        (match String.trim src with
-        | ":quit" | ":q" -> running := false
+        | ":quit" | ":q" -> if is_debug then exit 0 else running := false
         | ":continue" | ":c" when is_debug -> running := false
         | ":where" | ":w" when is_debug ->
           (match debug_hooks with
