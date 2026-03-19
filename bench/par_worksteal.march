@@ -32,8 +32,8 @@ fn par_fib(pool : WorkPool, n : Int, threshold : Int) : Int do
   if n < 2 then n
   else if n <= threshold then fib(n)
   else do
-    let t1 = task_spawn_steal(pool, fn () -> par_fib(pool, n - 1, threshold))
-    let t2 = task_spawn_steal(pool, fn () -> par_fib(pool, n - 2, threshold))
+    let t1 = task_spawn_steal(pool, fn x -> par_fib(pool, n - 1, threshold))
+    let t2 = task_spawn_steal(pool, fn x -> par_fib(pool, n - 2, threshold))
     let r1 = task_await_unwrap(t1)
     let r2 = task_await_unwrap(t2)
     r1 + r2
@@ -42,7 +42,7 @@ end
 
 -- main() acquires the WorkPool capability from the runtime.
 fn main() : Unit do
-  let pool = get_work_pool()
+  let pool = get_work_pool
   let result = par_fib(pool, 40, 20)
   println(int_to_string(result))
 end

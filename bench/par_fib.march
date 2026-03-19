@@ -32,8 +32,8 @@ fn par_fib(n : Int, threshold : Int) : Int do
   if n < 2 then n
   else if n <= threshold then fib(n)
   else do
-    let t1 = task_spawn(fn () -> par_fib(n - 1, threshold))
-    let t2 = task_spawn(fn () -> par_fib(n - 2, threshold))
+    let t1 = task_spawn(fn x -> par_fib(n - 1, threshold))
+    let t2 = task_spawn(fn x -> par_fib(n - 2, threshold))
     let r1 = task_await_unwrap(t1)
     let r2 = task_await_unwrap(t2)
     r1 + r2

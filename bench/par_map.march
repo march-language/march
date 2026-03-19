@@ -12,7 +12,7 @@
 --   - Task overhead vs sequential map
 --   - List allocation under task boundaries
 --
--- Expected output: 2660024  (sum of Collatz step counts for 1..100000)
+-- Expected output: 849666  (sum of Collatz step counts for 1..10000)
 --
 -- Status: REQUIRES true parallelism (OCaml 5 Domains) for speedup.
 --         Phase 1 executes eagerly — measures task overhead only.
@@ -58,31 +58,40 @@ fn map_collatz(xs : List(Int), acc : List(Int)) : List(Int) do
   end
 end
 
--- Split a list into a chunk of size n and the remainder.
-fn take_drop(xs : List(Int), n : Int, acc : List(Int)) : (List(Int), List(Int)) do
-  if n == 0 then (acc, xs)
-  else match xs with
-    | Nil -> (acc, Nil)
-    | Cons(x, rest) -> take_drop(rest, n - 1, Cons(x, acc))
+-- Process a list in chunks, spawning a task per chunk.
+-- chunk_acc accumulates the current chunk's elements.
+-- chunk_left counts remaining elements in the current chunk.
+fn par_map_inner(xs : List(Int), chunk_size : Int,
+                 chunk_acc : List(Int), chunk_left : Int) : Int do
+  match xs with
+  | Nil ->
+    -- Process final partial chunk
+    if chunk_left == chunk_size then 0
+    else do
+      let t = task_spawn(fn x -> sum(map_collatz(chunk_acc, Nil), 0))
+      task_await_unwrap(t)
     end
+  | Cons(h, tl) ->
+    if chunk_left == 0 then do
+      -- Chunk full — spawn task, continue with next chunk
+      let t = task_spawn(fn x -> sum(map_collatz(chunk_acc, Nil), 0))
+      let rest_sum = par_map_inner(tl, chunk_size, Cons(h, Nil), chunk_size - 1)
+      let chunk_sum = task_await_unwrap(t)
+      chunk_sum + rest_sum
+    end
+    else par_map_inner(tl, chunk_size, Cons(h, chunk_acc), chunk_left - 1)
+  end
 end
 
 -- Spawn a task per chunk, await all, sum results.
 fn par_map_sum(xs : List(Int), chunk_size : Int) : Int do
-  match xs with
-  | Nil -> 0
-  | _ ->
-    let (chunk, rest) = take_drop(xs, chunk_size, Nil)
-    let t = task_spawn(fn () -> sum(map_collatz(chunk, Nil), 0))
-    let rest_sum = par_map_sum(rest, chunk_size)
-    let chunk_sum = task_await_unwrap(t)
-    chunk_sum + rest_sum
-  end
+  par_map_inner(xs, chunk_size, Nil, chunk_size)
 end
 
 fn main() : Unit do
-  -- 100K elements, 1000 per chunk = 100 tasks
-  let n = 100000
+  -- 10K elements, 1000 per chunk = 10 tasks
+  -- (100K overflows the C stack in compiled mode until TCO is improved)
+  let n = 10000
   let chunk_size = 1000
   let xs = range(1, n)
   let total = par_map_sum(xs, chunk_size)

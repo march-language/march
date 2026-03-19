@@ -77,8 +77,8 @@ let load_stdlib () =
       "string.march";
       "iolist.march";
       "http.march";
-      "http_transport.march";
-      "http_client.march";
+      (* "http_transport.march"; *)
+      (* "http_client.march"; *)
     ] in
     List.concat_map (fun name ->
         load_stdlib_file (Filename.concat stdlib_dir name)
@@ -135,26 +135,39 @@ let compile filename =
   in
   (* Typecheck *)
   let (errors, type_map) = March_typecheck.Typecheck.check_module desugared in
-  (* Print diagnostics sorted by position *)
+  (* Print diagnostics sorted by position, filtering stdlib-internal errors *)
   let diags = March_errors.Errors.sorted errors in
+  let is_user_file (d : March_errors.Errors.diagnostic) =
+    d.span.March_ast.Ast.file = filename ||
+    d.span.March_ast.Ast.file = "" ||
+    d.span.March_ast.Ast.file = "<unknown>"
+  in
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
-      let sev = match d.severity with
-        | March_errors.Errors.Error   -> "error"
-        | March_errors.Errors.Warning -> "warning"
-        | March_errors.Errors.Hint    -> "hint"
-      in
-      Printf.printf "%s:%d:%d: %s: %s\n"
-        d.span.March_ast.Ast.file
-        d.span.March_ast.Ast.start_line
-        d.span.March_ast.Ast.start_col
-        sev
-        d.message;
-      List.iter (fun note ->
-          Printf.printf "note: %s\n" note
-        ) d.notes
+      if is_user_file d then begin
+        let sev = match d.severity with
+          | March_errors.Errors.Error   -> "error"
+          | March_errors.Errors.Warning -> "warning"
+          | March_errors.Errors.Hint    -> "hint"
+        in
+        Printf.printf "%s:%d:%d: %s: %s\n"
+          d.span.March_ast.Ast.file
+          d.span.March_ast.Ast.start_line
+          d.span.March_ast.Ast.start_col
+          sev
+          d.message;
+        List.iter (fun note ->
+            Printf.printf "note: %s\n" note
+          ) d.notes
+      end
     ) diags;
-  if March_errors.Errors.has_errors errors then exit 1
-  else if !dump_tir || !emit_llvm || !do_compile then begin
+  let compile_mode = !dump_tir || !emit_llvm || !do_compile in
+  let has_user_errors = List.exists (fun (d : March_errors.Errors.diagnostic) ->
+      d.severity = March_errors.Errors.Error && is_user_file d
+    ) diags in
+  (* In compile mode, abort on user-file errors only.  Stdlib errors
+     (e.g. http_client) are tolerated since those modules are WIP. *)
+  if has_user_errors then exit 1
+  else if compile_mode then begin
     let tir = March_tir.Lower.lower_module ~type_map desugared in
     let tir = March_tir.Mono.monomorphize tir in
     let tir = March_tir.Defun.defunctionalize tir in

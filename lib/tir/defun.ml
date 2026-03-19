@@ -24,7 +24,10 @@ let builtin_names : StringSet.t =
       "read_line"; "not";
       "head"; "tail"; "is_nil";
       "to_string"; "respond"; "kill"; "is_alive";
-      "send"; "spawn" ]
+      "send"; "spawn";
+      "task_spawn"; "task_await"; "task_await_unwrap";
+      "task_yield"; "task_spawn_steal"; "task_reductions";
+      "get_work_pool" ]
 
 (* ── Phase 0: collect top-level names ────────────────────────────── *)
 

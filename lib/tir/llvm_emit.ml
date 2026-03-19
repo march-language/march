@@ -35,6 +35,14 @@ type ctx = {
   field_map : (string, (string * Tir.ty) list) Hashtbl.t;
   mutable ret_ty  : Tir.ty;
   fast_math : bool;
+  (* Maps each TIR variable name to its current LLVM alloca slot name.
+     Updated when a new ELet binding is created; loads look up the current
+     slot here.  When a name is shadowed (let x = ...; let x = ...), the
+     second alloca is given a unique suffix (x_1, x_2, ...) and the map is
+     updated so loads in the inner body use the right slot. *)
+  var_slot  : (string, string) Hashtbl.t;
+  (* Counts alloca name uses for uniquification. *)
+  local_names : (string, int) Hashtbl.t;
 }
 
 let make_ctx ?(fast_math=false) () = {
@@ -46,6 +54,8 @@ let make_ctx ?(fast_math=false) () = {
   field_map = Hashtbl.create 16;
   ret_ty   = Tir.TUnit;
   fast_math;
+  var_slot    = Hashtbl.create 32;
+  local_names = Hashtbl.create 32;
 }
 
 (* ── Helpers ─────────────────────────────────────────────────────────── *)
@@ -119,7 +129,10 @@ let is_builtin_fn name =
                  "string_byte_length"; "string_is_empty"; "string_to_int"; "string_join";
                  "println"; "print";
                  "int_to_string"; "float_to_string"; "bool_to_string";
-                 "kill"; "is_alive"; "send"]
+                 "kill"; "is_alive"; "send";
+                 "task_spawn"; "task_await"; "task_await_unwrap";
+                 "task_yield"; "task_spawn_steal"; "task_reductions";
+                 "get_work_pool"]
 
 let atom_is_builtin (atom : Tir.atom) =
   match atom with
@@ -227,6 +240,23 @@ let intern_string ctx s =
        name (len + 1) (llvm_escape_string s));
   name
 
+(* ── Alloca slot uniquification ──────────────────────────────────────── *)
+
+(** Return a unique alloca slot name for TIR variable [base] and update
+    var_slot so subsequent loads of [base] use this slot.
+    First use returns [base] unchanged; shadowing gives [base_1], [base_2], ... *)
+let alloca_name ctx (base : string) : string =
+  let slot = match Hashtbl.find_opt ctx.local_names base with
+    | None ->
+      Hashtbl.replace ctx.local_names base 1;
+      base
+    | Some n ->
+      Hashtbl.replace ctx.local_names base (n + 1);
+      base ^ "_" ^ string_of_int n
+  in
+  Hashtbl.replace ctx.var_slot base slot;
+  slot
+
 (* ── Atom emission ───────────────────────────────────────────────────── *)
 
 (** Emit code for [atom], returning (llvm_type, llvm_value). *)
@@ -242,13 +272,21 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     emit ctx (Printf.sprintf "%s = call ptr @march_string_lit(ptr %s, i64 %d)"
                 tmp gname (String.length s));
     ("ptr", tmp)
+  | Tir.AVar v when v.Tir.v_name = "get_work_pool" ->
+    (* Phase 1: work pool is a null sentinel *)
+    ("ptr", "null")
   | Tir.AVar v when Hashtbl.mem ctx.top_fns v.Tir.v_name ->
     (* Top-level function reference — emit its address directly *)
     ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
   | Tir.AVar v ->
     let ty = llvm_ty v.Tir.v_ty in
     let tmp = fresh ctx "ld" in
-    emit ctx (Printf.sprintf "%s = load %s, ptr %%%s.addr" tmp ty (llvm_name v.Tir.v_name));
+    let base = llvm_name v.Tir.v_name in
+    let slot = match Hashtbl.find_opt ctx.var_slot base with
+      | Some s -> s
+      | None   -> base
+    in
+    emit ctx (Printf.sprintf "%s = load %s, ptr %%%s.addr" tmp ty slot);
     (ty, tmp)
 
 let emit_atom_val ctx a = snd (emit_atom ctx a)
@@ -342,9 +380,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let (_, obj_val) = emit_atom ctx obj_atom in
     let field_ty = llvm_ty v.Tir.v_ty in
     let fv = emit_load_field ctx obj_val field_idx field_ty in
-    let vn = llvm_name v.Tir.v_name in
-    emit ctx (Printf.sprintf "%%%s.addr = alloca %s" vn field_ty);
-    emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" field_ty fv vn);
+    let slot = alloca_name ctx (llvm_name v.Tir.v_name) in
+    emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot field_ty);
+    emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" field_ty fv slot);
     emit_expr ctx body
 
   (* ── Let binding ───────────────────────────────────────────────────── *)
@@ -352,9 +390,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let (rhs_ty, rhs_val) = emit_expr ctx rhs in
     let slot_ty  = llvm_ty v.Tir.v_ty in
     let final_val = coerce ctx rhs_ty rhs_val slot_ty in
-    let vn = llvm_name v.Tir.v_name in
-    emit ctx (Printf.sprintf "%%%s.addr = alloca %s" vn slot_ty);
-    emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" slot_ty final_val vn);
+    let slot = alloca_name ctx (llvm_name v.Tir.v_name) in
+    emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot slot_ty);
+    emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" slot_ty final_val slot);
     emit_expr ctx body
 
   (* ── Sequence ──────────────────────────────────────────────────────── *)
@@ -387,6 +425,91 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let op_str = if ctx.fast_math then op ^ " fast" else op in
     emit ctx (Printf.sprintf "%s = %s double %s, %s" r op_str va vb);
     ("double", r)
+
+  (* ── Task builtins (Phase 1: inline LLVM IR, no C runtime) ────────── *)
+  (* Thunks are fn x -> expr (Int -> a).  task_spawn calls the closure
+     with dummy arg 0, boxes result into a Task heap object.
+     task_await_unwrap unboxes field 0 from the Task. *)
+
+  (* task_spawn(thunk_closure) → call thunk(0), box result *)
+  | Tir.EApp (f, [clo_atom]) when f.Tir.v_name = "task_spawn" ->
+    let (_, clo_ptr) = emit_atom ctx clo_atom in
+    (* Load apply fn from closure field 0 (offset 16 from header) *)
+    let fn_ptr = emit_load_field ctx clo_ptr 0 "ptr" in
+    (* Determine result type from thunk signature Int -> a *)
+    let ret_ty = (match clo_atom with
+      | Tir.AVar v ->
+        (match v.Tir.v_ty with
+         | Tir.TFn (_, ret) -> llvm_ty ret
+         | _ -> "ptr")
+      | _ -> "ptr")
+    in
+    (* Call apply(closure, 0) — defun convention: closure as 1st arg *)
+    let result = fresh ctx "tsres" in
+    emit ctx (Printf.sprintf "%s = call %s %s(ptr %s, i64 0)"
+                result ret_ty fn_ptr clo_ptr);
+    (* Box result into Task heap object *)
+    let task_ptr = emit_heap_alloc ctx 0 1 in
+    emit_store_field ctx task_ptr 0 ret_ty result;
+    ("ptr", task_ptr)
+
+  (* task_await_unwrap(task_ptr) → unbox field 0 *)
+  | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await_unwrap" ->
+    let (_, task_ptr) = emit_atom ctx a in
+    let inner_ty = match a with
+      | Tir.AVar v ->
+        (match v.Tir.v_ty with
+         | Tir.TCon ("Task", [inner]) -> llvm_ty inner
+         | _ -> "ptr")
+      | _ -> "ptr"
+    in
+    let r = emit_load_field ctx task_ptr 0 inner_ty in
+    (inner_ty, r)
+
+  (* task_await(task_ptr) → always Ok in Phase 1; unbox + rebox as Ok *)
+  | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await" ->
+    let (_, task_ptr) = emit_atom ctx a in
+    let inner_ty = match a with
+      | Tir.AVar v ->
+        (match v.Tir.v_ty with
+         | Tir.TCon ("Task", [inner]) -> llvm_ty inner
+         | _ -> "ptr")
+      | _ -> "ptr"
+    in
+    let val_v = emit_load_field ctx task_ptr 0 inner_ty in
+    let ok_ptr = emit_heap_alloc ctx 1 1 in
+    emit_store_field ctx ok_ptr 0 inner_ty val_v;
+    ("ptr", ok_ptr)
+
+  (* task_yield() → no-op in Phase 1 *)
+  | Tir.EApp (f, []) when f.Tir.v_name = "task_yield" ->
+    ("i64", "0")
+
+  (* task_spawn_steal(pool, thunk_closure) → call thunk(0), box result *)
+  | Tir.EApp (f, [_pool; clo_atom]) when f.Tir.v_name = "task_spawn_steal" ->
+    let (_, clo_ptr) = emit_atom ctx clo_atom in
+    let fn_ptr = emit_load_field ctx clo_ptr 0 "ptr" in
+    let ret_ty = (match clo_atom with
+      | Tir.AVar v ->
+        (match v.Tir.v_ty with
+         | Tir.TFn (_, ret) -> llvm_ty ret
+         | _ -> "ptr")
+      | _ -> "ptr")
+    in
+    let result = fresh ctx "tsres" in
+    emit ctx (Printf.sprintf "%s = call %s %s(ptr %s, i64 0)"
+                result ret_ty fn_ptr clo_ptr);
+    let task_ptr = emit_heap_alloc ctx 0 1 in
+    emit_store_field ctx task_ptr 0 ret_ty result;
+    ("ptr", task_ptr)
+
+  (* task_reductions() → 0 in Phase 1 *)
+  | Tir.EApp (f, []) when f.Tir.v_name = "task_reductions" ->
+    ("i64", "0")
+
+  (* get_work_pool() → null sentinel in Phase 1 *)
+  | Tir.EApp (f, []) when f.Tir.v_name = "get_work_pool" ->
+    ("ptr", "null")
 
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->
@@ -677,9 +800,9 @@ and emit_case ctx scrut_atom branches default_opt =
         let field_ty = match List.nth_opt entry.ce_fields i with
           | Some t -> llvm_ty t | None -> llvm_ty v.Tir.v_ty in
         let fv = emit_load_field ctx scrut_val i field_ty in
-        let vn = llvm_name v.Tir.v_name in
-        emit ctx (Printf.sprintf "%%%s.addr = alloca %s" vn field_ty);
-        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" field_ty fv vn)
+        let slot = alloca_name ctx (llvm_name v.Tir.v_name) in
+        emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot field_ty);
+        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" field_ty fv slot)
       ) br.Tir.br_vars
     end;
     let (br_ty, br_val) = emit_expr ctx br.Tir.br_body in
@@ -706,6 +829,8 @@ and emit_case ctx scrut_atom branches default_opt =
 (* ── Function emitter ────────────────────────────────────────────────── *)
 
 let emit_fn ctx (fn : Tir.fn_def) =
+  Hashtbl.clear ctx.local_names;
+  Hashtbl.clear ctx.var_slot;
   ctx.ret_ty <- fn.Tir.fn_ret_ty;
   let fn_llvm_name = mangle_extern fn.Tir.fn_name in
   let ret_ty       = llvm_ret_ty fn.Tir.fn_ret_ty in
@@ -721,9 +846,9 @@ let emit_fn ctx (fn : Tir.fn_def) =
   (* Alloca + store for each parameter *)
   List.iter (fun (v : Tir.var) ->
     let ty = llvm_ty v.Tir.v_ty in
-    let vn = llvm_name v.Tir.v_name in
-    emit ctx (Printf.sprintf "%%%s.addr = alloca %s" vn ty);
-    emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty vn vn)
+    let slot = alloca_name ctx (llvm_name v.Tir.v_name) in
+    emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot ty);
+    emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty (llvm_name v.Tir.v_name) slot)
   ) fn.Tir.fn_params;
 
   let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in

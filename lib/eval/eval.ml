@@ -1181,10 +1181,12 @@ let rec eval_block (env : env) (es : expr list) : value =
   (* Local named recursive function: fn go(params) do body end *)
   | ELetFn (name, params, _, body, _) :: rest ->
     let param_names = List.map (fun p -> p.param_name.txt) params in
+    Printf.eprintf "[DBG-LETFN] %s params=[%s]\n%!" name.txt (String.concat "," param_names);
     (* Use the env_ref trick so the function can call itself recursively. *)
     let env_ref = ref env in
     let rec_v = VBuiltin ("<rec:" ^ name.txt ^ ">", fun args ->
       let call_env = !env_ref in
+      Printf.eprintf "[DBG-LETFN-CALL] %s args=%d params=[%s]\n%!" name.txt (List.length args) (String.concat "," param_names);
       apply (VClosure (call_env, param_names, body)) args) in
     let env' = (name.txt, rec_v) :: env in
     env_ref := env';
@@ -1197,9 +1199,20 @@ let rec eval_block (env : env) (es : expr list) : value =
 and apply_inner (fn_val : value) (args : value list) : value =
   match fn_val with
   | VClosure (closure_env, params, body) ->
-    if List.length params <> List.length args then
+    if List.length params <> List.length args then begin
+      let names = List.filter_map (fun (k, _) -> if String.length k < 30 then Some k else None) closure_env in
+      let span_str = match body with
+        | EBlock (_, sp) | EMatch (_, _, sp) | ELetFn (_, _, _, _, sp) | EApp (_, _, sp) | EVar { span = sp; _ } -> Printf.sprintf "%s:%d" sp.file sp.start_line
+        | _ -> "??" in
+      Printf.eprintf "[DBG-ARITY] closure params=[%s] args=%d (%s), body=%s at %s, env has: %s\n%!"
+        (String.concat "," params) (List.length args)
+        (String.concat "," (List.map value_to_string args))
+        (match body with EBlock _ -> "EBlock" | EMatch _ -> "EMatch" | ELetFn _ -> "ELetFn" | EApp _ -> "EApp" | EVar _ -> "EVar" | _ -> "other")
+        span_str
+        (String.concat ", " (List.filteri (fun i _ -> i < 10) names));
       eval_error "arity mismatch: expected %d args, got %d"
-        (List.length params) (List.length args);
+        (List.length params) (List.length args)
+    end;
     let env' = List.combine params args @ closure_env in
     eval_expr env' body
 
@@ -1655,7 +1668,45 @@ let rec eval_decl (env : env) (d : decl) : env =
   | DMod (name, _, decls, _) ->
     (* Evaluate nested module; bindings are prefixed with "ModName." *)
     module_stack := name.txt :: !module_stack;
-    let mod_env = eval_decls env decls in
+    (* Two-pass evaluation for inner decls so recursive/mutual fns work *)
+    let inner_ref = ref env in
+    List.iter (function
+      | DFn (def, _) ->
+        let stub = VBuiltin ("<stub:" ^ def.fn_name.txt ^ ">",
+                             fun _ -> eval_error "stub %s called before initialisation"
+                                 def.fn_name.txt) in
+        inner_ref := (def.fn_name.txt, stub) :: !inner_ref
+      | _ -> ()
+    ) decls;
+    let rec eval_mod_decls ds e =
+      match ds with
+      | [] -> e
+      | DFn (def, _) :: rest ->
+        (match def.fn_doc with
+         | Some s -> Hashtbl.replace doc_registry (current_doc_prefix () ^ def.fn_name.txt) s
+         | None   -> ());
+        let clause = match def.fn_clauses with
+          | [c] -> c
+          | _   -> eval_error "fn %s: expected one clause after desugaring"
+                       def.fn_name.txt
+        in
+        let params = clause_params clause in
+        let rec_closure = VBuiltin ("<rec:" ^ def.fn_name.txt ^ ">",
+                                    fun args ->
+                                      let call_env = !inner_ref in
+                                      let fn_v = VClosure (call_env, params, clause.fc_body) in
+                                      Printf.eprintf "[DBG] calling %s with %d args, closure has %d params\n%!" def.fn_name.txt (List.length args) (List.length params);
+                                      apply fn_v args) in
+        let e' = (def.fn_name.txt, rec_closure)
+                   :: List.remove_assoc def.fn_name.txt e in
+        inner_ref := e';
+        eval_mod_decls rest e'
+      | d :: rest ->
+        let e' = eval_decl e d in
+        inner_ref := e';
+        eval_mod_decls rest e'
+    in
+    let mod_env = eval_mod_decls decls !inner_ref in
     module_stack := List.tl !module_stack;
     (* Collect names actually defined by this module's declarations
        (DFn, DLet top bindings, nested DMod names).  We only expose
