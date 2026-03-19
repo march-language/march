@@ -1954,6 +1954,118 @@ let test_actor_snapshot () =
   Alcotest.(check int) "restore_actors leaves registry empty" 0
     (Hashtbl.length March_eval.Eval.actor_registry)
 
+(* ── Docstring tests ──────────────────────────────────────────────────────── *)
+
+let test_doc_parse_fn () =
+  let m = parse_module {|mod Test do
+    doc "Adds two numbers."
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    Alcotest.(check (option string)) "doc string" (Some "Adds two numbers.") def.fn_doc
+  | _ -> Alcotest.fail "expected single DFn"
+
+let test_doc_triple_quoted () =
+  let m = parse_module {|mod Test do
+    doc """
+Adds two numbers.
+Returns their sum.
+"""
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    (match def.fn_doc with
+     | Some s ->
+       Alcotest.(check bool) "multiline content present"
+         true (String.length s > 10)
+     | None -> Alcotest.fail "expected Some doc")
+  | _ -> Alcotest.fail "expected single DFn"
+
+let test_doc_desugar () =
+  let m = parse_and_desugar {|mod Test do
+    doc "Computes factorial."
+    fn factorial(0) do 1 end
+    fn factorial(n) do n * factorial(n - 1) end
+  end|} in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    Alcotest.(check (option string)) "doc preserved after desugar"
+      (Some "Computes factorial.") def.fn_doc
+  | _ -> Alcotest.fail "expected single DFn after group_fn_clauses"
+
+let test_doc_eval_registry () =
+  Hashtbl.reset March_eval.Eval.doc_registry;
+  let _env = eval_module {|mod Test do
+    doc "Adds two numbers."
+    fn add(a : Int, b : Int) : Int do a + b end
+  end|} in
+  Alcotest.(check (option string)) "doc registered"
+    (Some "Adds two numbers.")
+    (March_eval.Eval.lookup_doc "add")
+
+let test_doc_nested_module () =
+  Hashtbl.reset March_eval.Eval.doc_registry;
+  let _env = eval_module {|mod Test do
+    mod Math do
+      doc "Adds two numbers."
+      pub fn add(a : Int, b : Int) : Int do a + b end
+    end
+  end|} in
+  Alcotest.(check (option string)) "nested doc registered with prefix"
+    (Some "Adds two numbers.")
+    (March_eval.Eval.lookup_doc "Math.add")
+
+let test_doc_none () =
+  Hashtbl.reset March_eval.Eval.doc_registry;
+  let _env = eval_module {|mod Test do
+    fn undocumented() : Int do 42 end
+  end|} in
+  Alcotest.(check (option string)) "no doc is None"
+    None
+    (March_eval.Eval.lookup_doc "undocumented")
+
+(* ── Purity oracle ───────────────────────────────────────────────── *)
+
+let mk_var name ty = { March_tir.Tir.v_name = name; v_ty = ty; v_lin = March_tir.Tir.Unr }
+let app op args = March_tir.Tir.EApp (mk_var op (March_tir.Tir.TFn ([], March_tir.Tir.TInt)), args)
+let ilit n = March_tir.Tir.ALit (March_ast.Ast.LitInt n)
+let _blit b = March_tir.Tir.ALit (March_ast.Ast.LitBool b)
+
+let test_purity_atom () =
+  Alcotest.(check bool) "literal is pure" true
+    (March_tir.Purity.is_pure (March_tir.Tir.EAtom (ilit 5)))
+
+let test_purity_arith () =
+  Alcotest.(check bool) "int add is pure" true
+    (March_tir.Purity.is_pure (app "+" [ilit 1; ilit 2]))
+
+let test_purity_println () =
+  Alcotest.(check bool) "println is impure" false
+    (March_tir.Purity.is_pure (app "println" [March_tir.Tir.ALit (March_ast.Ast.LitString "hi")]))
+
+let test_purity_print () =
+  Alcotest.(check bool) "print is impure" false
+    (March_tir.Purity.is_pure (app "print" [March_tir.Tir.ALit (March_ast.Ast.LitString "hi")]))
+
+let test_purity_send () =
+  Alcotest.(check bool) "send is impure" false
+    (March_tir.Purity.is_pure (app "send" [March_tir.Tir.ALit (March_ast.Ast.LitString "msg")]))
+
+let test_purity_let_pure () =
+  let body = March_tir.Tir.EAtom (ilit 1) in
+  let expr = March_tir.Tir.ELet (mk_var "x" March_tir.Tir.TInt, app "+" [ilit 2; ilit 3], body) in
+  Alcotest.(check bool) "let with pure rhs is pure" true
+    (March_tir.Purity.is_pure expr)
+
+let test_purity_let_impure () =
+  let body = March_tir.Tir.EAtom (ilit 1) in
+  let expr = March_tir.Tir.ELet (mk_var "x" March_tir.Tir.TInt,
+               app "println" [March_tir.Tir.ALit (March_ast.Ast.LitString "hi")], body) in
+  Alcotest.(check bool) "let with impure rhs is impure" false
+    (March_tir.Purity.is_pure expr)
+
 let () =
   Alcotest.run "march"
     [
@@ -2178,4 +2290,21 @@ let () =
         Alcotest.test_case "trace overflow"         `Quick test_trace_overflow;
         Alcotest.test_case "actor snapshot"         `Quick test_actor_snapshot;
       ];
+      "docstrings", [
+        Alcotest.test_case "parse fn doc"         `Quick test_doc_parse_fn;
+        Alcotest.test_case "triple-quoted doc"    `Quick test_doc_triple_quoted;
+        Alcotest.test_case "doc preserved after desugar" `Quick test_doc_desugar;
+        Alcotest.test_case "doc registered in eval" `Quick test_doc_eval_registry;
+        Alcotest.test_case "doc in nested module" `Quick test_doc_nested_module;
+        Alcotest.test_case "no doc is None"       `Quick test_doc_none;
+      ];
+      ("purity", [
+        Alcotest.test_case "atom"         `Quick test_purity_atom;
+        Alcotest.test_case "arith"        `Quick test_purity_arith;
+        Alcotest.test_case "println"      `Quick test_purity_println;
+        Alcotest.test_case "print"        `Quick test_purity_print;
+        Alcotest.test_case "send"         `Quick test_purity_send;
+        Alcotest.test_case "let_pure"     `Quick test_purity_let_pure;
+        Alcotest.test_case "let_impure"   `Quick test_purity_let_impure;
+      ]);
     ]
