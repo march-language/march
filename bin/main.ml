@@ -74,6 +74,8 @@ let load_stdlib () =
       "result.march";
       "list.march";
       "math.march";
+      "string.march";
+      "iolist.march";
     ] in
     List.concat_map (fun name ->
         load_stdlib_file (Filename.concat stdlib_dir name)
