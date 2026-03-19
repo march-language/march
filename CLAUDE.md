@@ -14,6 +14,8 @@ dune runtest        # run all 50 tests
 dune exec march -- file.march   # run the compiler
 ```
 
+After changing a feature, run the benchmark(s) that exercise it to catch regressions — see `specs/benchmarks.md` for the mapping. Quick reference: Perceus/FBIP changes → `bench/tree_transform.march`; closure/HOF changes → `bench/list_ops.march`; allocation/GC changes → `bench/binary_trees.march`.
+
 ## Project layout
 
 ```
