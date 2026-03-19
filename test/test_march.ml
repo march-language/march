@@ -2449,6 +2449,32 @@ let test_dce_unreachable_top_fn () =
   Alcotest.(check bool) "unused removed" false (List.mem "unused" fn_names);
   Alcotest.(check bool) "main kept"      true  (List.mem "main" fn_names)
 
+(* ── Optimizer coordinator ───────────────────────────────────────── *)
+
+let test_opt_fixpoint () =
+  (* let x = 1 + 1 in x * 1
+     → fold: let x = 2 in x * 1
+     → simplify: let x = 2 in x
+     At minimum x*1 should be simplified to x *)
+  let x_var = mk_var "x" March_tir.Tir.TInt in
+  let body = March_tir.Tir.ELet (x_var,
+               app "+" [ilit 1; ilit 1],
+               app "*" [March_tir.Tir.AVar x_var; ilit 1]) in
+  let m = mk_module [mk_fn "main" body] in
+  let m' = March_tir.Opt.run m in
+  (match first_body m' with
+   | March_tir.Tir.EAtom (March_tir.Tir.AVar _) -> ()
+   | March_tir.Tir.EAtom (March_tir.Tir.ALit _) -> ()
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom _) -> ()
+   | e -> Alcotest.failf "expected reduced form, got: %s" (March_tir.Tir.show_expr e))
+
+let test_opt_no_infinite_loop () =
+  (* A stable expression should not loop forever *)
+  let m = mk_module [mk_fn "main" (March_tir.Tir.EAtom (ilit 42))] in
+  let m' = March_tir.Opt.run m in
+  Alcotest.(check string) "stable" "(Tir.EAtom (Tir.ALit (Ast.LitInt 42)))"
+    (March_tir.Tir.show_expr (first_body m'))
+
 let () =
   Alcotest.run "march"
     [
@@ -2730,5 +2756,9 @@ let () =
         Alcotest.test_case "impure_let_kept"     `Quick test_dce_impure_let_kept;
         Alcotest.test_case "used_let_kept"       `Quick test_dce_used_let_kept;
         Alcotest.test_case "unreachable_top_fn"  `Quick test_dce_unreachable_top_fn;
+      ]);
+      ("opt", [
+        Alcotest.test_case "fixpoint"         `Quick test_opt_fixpoint;
+        Alcotest.test_case "no_infinite_loop" `Quick test_opt_no_infinite_loop;
       ]);
     ]
