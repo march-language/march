@@ -2217,7 +2217,9 @@ let test_fold_or_shortcircuit_pure () =
   let m = mk_module [mk_fn "f" (bapp "||" [blit true; blit false])] in
   let m' = March_tir.Fold.run ~changed m in
   Alcotest.(check bool) "changed" true !changed;
-  ignore m'  (* just check it doesn't crash and changed is set *)
+  Alcotest.(check string) "true || false = true"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (blit true)))
+    (March_tir.Tir.show_expr (first_body m'))
 
 let _ = avar  (* suppress unused warning *)
 

@@ -19,7 +19,7 @@ let fold_float_op op a b =
   | "+." -> Some (a +. b)
   | "-." -> Some (a -. b)
   | "*." -> Some (a *. b)
-  | "/." -> if b = 0.0 then None else Some (a /. b)
+  | "/." -> Some (a /. b)
   | _    -> None
 
 let mk_int n = Tir.EAtom (Tir.ALit (March_ast.Ast.LitInt n))
@@ -45,16 +45,15 @@ let rec fold_expr ~changed : Tir.expr -> Tir.expr = function
   | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool b)]) when f.Tir.v_name = "not" ->
     changed := true; mk_bool (not b)
 
-  (* false && <pure rhs> -> false *)
-  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool false); rhs])
-    when f.Tir.v_name = "&&"
-      && Purity.is_pure (Tir.EAtom rhs) ->
+  (* false && rhs → false
+     Safe to drop rhs: in ANF all EApp args are atoms, and atom evaluation is always pure. *)
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool false); _rhs])
+    when f.Tir.v_name = "&&" ->
     changed := true; mk_bool false
 
-  (* true || <pure rhs> -> true *)
-  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool true); rhs])
-    when f.Tir.v_name = "||"
-      && Purity.is_pure (Tir.EAtom rhs) ->
+  (* true || rhs → true (same reasoning) *)
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool true); _rhs])
+    when f.Tir.v_name = "||" ->
     changed := true; mk_bool true
 
   (* if true -> then branch; if false -> else branch *)
@@ -65,6 +64,9 @@ let rec fold_expr ~changed : Tir.expr -> Tir.expr = function
   | Tir.ECase (Tir.ALit (March_ast.Ast.LitBool false),
                [{ Tir.br_tag = "True"; _ }], Some else_e) ->
     changed := true; fold_expr ~changed else_e
+
+  (* ECase with LitBool false scrutinee and no default — unreachable in practice
+     (March lowering always emits a default branch for if/else), fall through to recurse *)
 
   (* Recurse into all other nodes *)
   | Tir.ELet (v, rhs, body) ->
