@@ -803,7 +803,7 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
             | _ -> ()
           ) inner_decls
       | Ast.DProtocol _ | Ast.DSig _ | Ast.DInterface _
-      | Ast.DImpl _ | Ast.DExtern _ | Ast.DUse _ -> ()
+      | Ast.DImpl _ | Ast.DExtern _ | Ast.DUse _ | Ast.DNeeds _ -> ()
     ) m.mod_decls;
   let result : Tir.tir_module = { tm_name = m.mod_name.txt;
     tm_fns = List.rev !fns;

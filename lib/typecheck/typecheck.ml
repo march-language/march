@@ -265,12 +265,15 @@ type env = {
   type_map : (Ast.span, ty) Hashtbl.t;
   interfaces : (string * Ast.interface_def) list; (** Registered interfaces *)
   sigs       : (string * Ast.sig_def) list;       (** Registered module signatures *)
+  mod_needs  : string list;
+  (** Capabilities declared via [needs] in the current module scope, as dot-joined paths *)
 }
 
 let make_env errors type_map = {
   vars = []; types = []; ctors = []; records = []; level = 0; lin = [];
   errors; pending_constraints = ref []; type_map;
   interfaces = []; sigs = [];
+  mod_needs = [];
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -1730,6 +1733,14 @@ let rec check_decl env (d : Ast.decl) : env =
                   (String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path))
                   n.Ast.txt);
              env) env names)
+
+  | Ast.DNeeds (caps, _sp) ->
+    (* Record declared capability paths in env for DMod validation.
+       Each path is a list of names e.g. ["IO"; "Network"] → "IO.Network" *)
+    let paths = List.map (fun names ->
+        String.concat "." (List.map (fun (n : Ast.name) -> n.txt) names)
+      ) caps in
+    { env with mod_needs = paths @ env.mod_needs }
 
 (* =================================================================
    §16  Module entry point

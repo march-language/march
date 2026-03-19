@@ -135,6 +135,9 @@ type decl =
   | DImpl of impl_def * span                       (** Interface implementation *)
   | DExtern of extern_def * span                   (** FFI extern block *)
   | DUse of use_decl * span                        (** Import: use Mod.* or use Mod.{f} *)
+  | DNeeds of name list list * span
+  (** Capability manifest: [needs IO.Network, IO.Clock]
+      Each [name list] is one capability path, e.g. [["IO";"Network"]; ["IO";"Clock"]] *)
 [@@deriving show]
 
 and use_decl = {

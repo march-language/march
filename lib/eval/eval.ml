@@ -1527,7 +1527,7 @@ let rec eval_decl (env : env) (d : decl) : env =
       ) mod_env in
     prefixed @ env
 
-  | DProtocol _ | DSig _ | DInterface _ | DImpl _ | DExtern _ | DUse _ -> env
+  | DProtocol _ | DSig _ | DInterface _ | DImpl _ | DExtern _ | DUse _ | DNeeds _ -> env
 
 and eval_decls (env : env) (decls : decl list) : env =
   List.fold_left eval_decl env decls
