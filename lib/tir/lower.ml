@@ -273,13 +273,26 @@ and lower_expr (e : Ast.expr) : Tir.expr =
   | Ast.ESend (cap, msg, _) ->
     lower_to_atom_k cap (fun cap' ->
       lower_to_atom_k msg (fun msg' ->
-        let send_var : Tir.var = { v_name = "send"; v_ty = unknown_ty; v_lin = Tir.Unr } in
+        let send_var : Tir.var = {
+          v_name = "send";
+          v_ty = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit],
+                           Tir.TCon ("Option", [Tir.TUnit]));
+          v_lin = Tir.Unr } in
         Tir.EApp (send_var, [cap'; msg'])))
 
-  | Ast.ESpawn (actor, _) ->
-    lower_to_atom_k actor (fun actor' ->
-      let spawn_var : Tir.var = { v_name = "spawn"; v_ty = unknown_ty; v_lin = Tir.Unr } in
-      Tir.EApp (spawn_var, [actor']))
+  (* Actor names are upper-case identifiers, parsed as ECon with no args.
+     Lower spawn(ActorName) → call to ActorName_spawn() *)
+  | Ast.ESpawn (Ast.ECon ({ txt = actor_name; _ }, [], _), _)
+  | Ast.ESpawn (Ast.EVar { txt = actor_name; _ }, _) ->
+    let spawn_fn : Tir.var = {
+      v_name = actor_name ^ "_spawn";
+      v_ty = Tir.TPtr Tir.TUnit;
+      v_lin = Tir.Unr
+    } in
+    Tir.EApp (spawn_fn, [])
+
+  | Ast.ESpawn _ ->
+    failwith "TIR lower: ESpawn argument must be a plain actor name"
 
 (* ── Match lowering ─────────────────────────────────────────────── *)
 
@@ -379,6 +392,276 @@ let lower_type_def (name : Ast.name) (_params : Ast.name list) (td : Ast.type_de
     Some (Tir.TDRecord (name.txt, fs))
   | Ast.TDAlias _ -> None
 
+(* ── Actor lowering ─────────────────────────────────────────────── *)
+
+(** Lower an actor declaration to TIR type defs + function defs.
+
+    For actor [Name] with state fields [f1:T1, ..., fn:Tn] (alphabetical) and
+    handlers [on H1(p...) body1, ...], we generate:
+
+    Types:
+      TDVariant("Name_Msg", [(H1, param_tys_1); ...])    -- in handler decl order
+      TDRecord ("Name_Actor", [("$dispatch",TPtr TUnit);
+                               ("$alive",TBool); f1:T1; ...fn:Tn])
+                                                          -- $dispatch first, $alive second,
+                                                          -- then state fields alphabetically
+
+    Functions:
+      Name_Hi(actor:ptr, p...) → Unit   -- one per handler
+      Name_dispatch(actor:ptr, msg:ptr) → Unit
+      Name_spawn() → ptr
+*)
+let lower_actor (name : string) (actor : Ast.actor_def) : Tir.type_def list * Tir.fn_def list =
+  (* State fields sorted alphabetically (matches TRecord ordering) *)
+  let state_fields_sorted : (string * Tir.ty) list =
+    List.sort (fun (a, _) (b, _) -> String.compare a b)
+      (List.map (fun (f : Ast.field) -> (f.fld_name.txt, lower_ty f.fld_ty))
+         actor.actor_state)
+  in
+
+  (* ── 1. Message variant type ─────────────────────────────── *)
+  let msg_type_name = name ^ "_Msg" in
+  let msg_ctors : (string * Tir.ty list) list =
+    List.map (fun (h : Ast.actor_handler) ->
+        let param_tys = List.map (fun (p : Ast.param) ->
+            match p.param_ty with Some t -> lower_ty t | None -> unknown_ty
+          ) h.ah_params in
+        (h.ah_msg.txt, param_tys)
+      ) actor.actor_handlers
+  in
+  let msg_variant = Tir.TDVariant (msg_type_name, msg_ctors) in
+
+  (* ── 2. Actor struct type ────────────────────────────────── *)
+  let actor_type_name = name ^ "_Actor" in
+  (* Layout order: $dispatch (field 0), $alive (field 1), state fields (fields 2+) *)
+  let actor_struct_fields : (string * Tir.ty) list =
+    [("$dispatch", Tir.TPtr Tir.TUnit); ("$alive", Tir.TBool)]
+    @ state_fields_sorted
+  in
+  let actor_record = Tir.TDRecord (actor_type_name, actor_struct_fields) in
+
+  (* ── 3. Handler functions ────────────────────────────────── *)
+  (* For handler "Hi" with params [(p1,T1);...]:
+       fn Name_Hi(actor: ptr, p1:T1, ...) : Unit =
+         let $sf1 = EField(actor, "sf1")    -- load each state field
+         ...
+         let state = ERecord [(sf1, $sf1); ...]
+         let $result = <body>
+         let $nf1 = EField($result, "sf1")  -- extract new state fields
+         ...
+         ESeq(EReuse(actor, Name_Actor, [$dispatch, $alive, $nf1, ...]), EAtom(unit))
+  *)
+  let actor_var (n : string) (ty : Tir.ty) : Tir.var =
+    { Tir.v_name = n; v_ty = ty; v_lin = Tir.Unr }
+  in
+  (* Using TCon(actor_type_name) (not TPtr TUnit) so that EField accesses on
+     the actor pointer resolve field indices correctly via field_map lookups.
+     All TCon → ptr in llvm_ty, so the LLVM function signatures are unaffected. *)
+  let actor_param = actor_var "$actor" (Tir.TCon (actor_type_name, [])) in
+  let actor_atom  = Tir.AVar actor_param in
+
+  let lower_handler (h : Ast.actor_handler) : Tir.fn_def =
+    let fn_name = name ^ "_" ^ h.ah_msg.txt in
+
+    (* Handler params (after the implicit $actor) *)
+    let params : Tir.var list =
+      actor_param ::
+      List.map (fun (p : Ast.param) ->
+          { Tir.v_name = p.param_name.txt;
+            v_ty = (match p.param_ty with Some t -> lower_ty t | None -> unknown_ty);
+            v_lin = Tir.Unr }
+        ) h.ah_params
+    in
+
+    (* Load each state field from actor struct and let-bind it.
+       Build the continuation bottom-up: first build inner body, wrap in lets. *)
+
+    (* Step 1: lower the handler body (uses `state` variable) *)
+    let body_tir = lower_expr h.ah_body in
+
+    let state_ty = Tir.TCon (name ^ "_State", []) in
+    (* Step 2: let $result = body_tir *)
+    let result_var = actor_var "$result" state_ty in
+
+    (* Step 3: load new state fields from $result *)
+    let new_field_vars : (string * Tir.var) list =
+      List.map (fun (fname, fty) ->
+          let v = actor_var ("$nf_" ^ fname) fty in
+          (fname, v)
+        ) state_fields_sorted
+    in
+
+    (* Step 4: build EReuse args: $dispatch, $alive, then new state fields *)
+    let dispatch_var = actor_var "$dispatch_v" (Tir.TPtr Tir.TUnit) in
+    let alive_var    = actor_var "$alive_v" Tir.TBool in
+
+    (* Build the innermost expression: ESeq(EReuse(...), unit) *)
+    let reuse_args : Tir.atom list =
+      [Tir.AVar dispatch_var; Tir.AVar alive_var]
+      @ List.map (fun (_, v) -> Tir.AVar v) new_field_vars
+    in
+    let reuse_expr =
+      Tir.ESeq (
+        Tir.EReuse (actor_atom, Tir.TCon (actor_type_name, []), reuse_args),
+        Tir.EAtom (Tir.ALit (Ast.LitAtom "unit"))
+      )
+    in
+
+    (* Wrap: let $nf_fi = EField($result, fi) for each state field *)
+    let inner_with_new_fields =
+      List.fold_right (fun (fname, nfv) acc ->
+          Tir.ELet (nfv, Tir.EField (Tir.AVar result_var, fname), acc)
+        ) new_field_vars reuse_expr
+    in
+
+    (* Wrap: let $result = body *)
+    let inner_with_result =
+      Tir.ELet (result_var, body_tir, inner_with_new_fields)
+    in
+
+    (* Wrap: let state = ERecord [(fname, AVar load_var); ...] *)
+    let state_field_vars : (string * Tir.var) list =
+      List.map (fun (fname, fty) ->
+          (fname, actor_var ("$sf_" ^ fname) fty)
+        ) state_fields_sorted
+    in
+    let state_record_fields : (string * Tir.atom) list =
+      List.map (fun (fname, v) -> (fname, Tir.AVar v)) state_field_vars
+    in
+    let state_var = actor_var "state" state_ty in
+    let inner_with_state =
+      Tir.ELet (state_var, Tir.ERecord state_record_fields, inner_with_result)
+    in
+
+    (* Wrap: let $sf_fi = EField(actor, fi) for each state field *)
+    let inner_with_state_loads =
+      List.fold_right (fun (fname, sfv) acc ->
+          Tir.ELet (sfv, Tir.EField (actor_atom, fname), acc)
+        ) state_field_vars inner_with_state
+    in
+
+    (* Wrap: let $alive_v = EField(actor, "$alive") *)
+    let inner_with_alive =
+      Tir.ELet (alive_var, Tir.EField (actor_atom, "$alive"), inner_with_state_loads)
+    in
+
+    (* Wrap: let $dispatch_v = EField(actor, "$dispatch") *)
+    let full_body =
+      Tir.ELet (dispatch_var, Tir.EField (actor_atom, "$dispatch"), inner_with_alive)
+    in
+
+    { Tir.fn_name; fn_params = params; fn_ret_ty = Tir.TUnit; fn_body = full_body }
+  in
+
+  let handler_fns = List.map lower_handler actor.actor_handlers in
+
+  (* ── 4. Dispatch function ────────────────────────────────── *)
+  (* fn Name_dispatch(actor:ptr, msg:ptr) : Unit =
+       ECase(AVar msg_as_msg_type, [
+         {br_tag=H1; br_vars=[p1,...]; br_body=EApp(Name_H1, [actor, p1,...])};
+         ...
+       ], None)
+  *)
+  let msg_var = actor_var "$msg" (Tir.TCon (msg_type_name, [])) in
+  let dispatch_branches : Tir.branch list =
+    List.map (fun (h : Ast.actor_handler) ->
+        (* Prefix each branch variable with the handler name to avoid name collisions
+           when multiple handlers have parameters with the same name (e.g. both
+           Increment(n) and Decrement(n) would otherwise both define %n.addr). *)
+        let br_vars : Tir.var list =
+          List.map (fun (p : Ast.param) ->
+              { Tir.v_name = "$" ^ h.ah_msg.txt ^ "_" ^ p.param_name.txt;
+                v_ty = (match p.param_ty with Some t -> lower_ty t | None -> unknown_ty);
+                v_lin = Tir.Unr }
+            ) h.ah_params
+        in
+        let handler_fn_var : Tir.var = {
+          v_name = name ^ "_" ^ h.ah_msg.txt;
+          v_ty = Tir.TFn (
+            [Tir.TPtr Tir.TUnit] @ List.map (fun v -> v.Tir.v_ty) br_vars,
+            Tir.TUnit);
+          v_lin = Tir.Unr
+        } in
+        let call_args : Tir.atom list =
+          actor_atom :: List.map (fun v -> Tir.AVar v) br_vars
+        in
+        { Tir.br_tag = h.ah_msg.txt;
+          br_vars;
+          br_body = Tir.EApp (handler_fn_var, call_args) }
+      ) actor.actor_handlers
+  in
+  let dispatch_fn : Tir.fn_def = {
+    fn_name   = name ^ "_dispatch";
+    fn_params = [actor_param; msg_var];
+    fn_ret_ty = Tir.TUnit;
+    fn_body   = Tir.ECase (Tir.AVar msg_var, dispatch_branches, None);
+  } in
+
+  (* ── 5. Spawn function ───────────────────────────────────── *)
+  (* fn Name_spawn() : ptr =
+       let $init_state = <lowered init expr>
+       let $sf1 = EField($init_state, "sf1")
+       ...
+       let $actor = EAlloc(Name_Actor, [AVar dispatch_fn_ptr, true, $sf1, ...])
+       EAtom($actor)
+  *)
+  let dispatch_fn_ptr_var : Tir.var = {
+    v_name = name ^ "_dispatch";
+    v_ty   = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TPtr Tir.TUnit], Tir.TUnit);
+    v_lin  = Tir.Unr;
+  } in
+  let state_ty = Tir.TCon (name ^ "_State", []) in
+  let init_var = actor_var "$init_state" state_ty in
+  let init_field_vars : (string * Tir.var) list =
+    List.map (fun (fname, fty) ->
+        (fname, actor_var ("$init_" ^ fname) fty)
+      ) state_fields_sorted
+  in
+  let alloc_args : Tir.atom list =
+    [Tir.AVar dispatch_fn_ptr_var; Tir.ALit (Ast.LitBool true)]
+    @ List.map (fun (_, v) -> Tir.AVar v) init_field_vars
+  in
+  let alloc_expr = Tir.EAlloc (Tir.TCon (actor_type_name, []), alloc_args) in
+  let actor_result_var = actor_var "$spawned" (Tir.TPtr Tir.TUnit) in
+  let spawn_inner =
+    Tir.ELet (actor_result_var, alloc_expr, Tir.EAtom (Tir.AVar actor_result_var))
+  in
+  let spawn_with_fields =
+    List.fold_right (fun (fname, ifv) acc ->
+        Tir.ELet (ifv, Tir.EField (Tir.AVar init_var, fname), acc)
+      ) init_field_vars spawn_inner
+  in
+  let spawn_body =
+    Tir.ELet (init_var, lower_expr actor.actor_init, spawn_with_fields)
+  in
+  let spawn_fn : Tir.fn_def = {
+    fn_name   = name ^ "_spawn";
+    fn_params = [];
+    fn_ret_ty = Tir.TPtr Tir.TUnit;
+    fn_body   = spawn_body;
+  } in
+
+  (* Also register a state record type so EField accesses on the init state
+     record resolve the correct field indices (needed when there are multiple
+     state fields). *)
+  let state_record = Tir.TDRecord (name ^ "_State", state_fields_sorted) in
+
+  let type_defs = [state_record; msg_variant; actor_record] in
+  let fn_defs   = handler_fns @ [dispatch_fn; spawn_fn] in
+  (type_defs, fn_defs)
+
+(** Built-in type definitions that must always be present in TIR so that
+    their constructors have stable tag assignments in the LLVM emitter.
+    These mirror the built-in constructor table in the typechecker. *)
+let builtin_type_defs : Tir.type_def list = [
+  (* Option a = None | Some(a) — None=tag0, Some=tag1 *)
+  Tir.TDVariant ("Option", [("None", []); ("Some", [Tir.TVar "a"])]);
+  (* Result a b = Ok(a) | Err(b) — Ok=tag0, Err=tag1 *)
+  Tir.TDVariant ("Result", [("Ok", [Tir.TVar "a"]); ("Err", [Tir.TVar "b"])]);
+  (* List a = Nil | Cons(a, List(a)) — Nil=tag0, Cons=tag1 *)
+  Tir.TDVariant ("List", [("Nil", []); ("Cons", [Tir.TVar "a"; Tir.TCon ("List", [Tir.TVar "a"])])]);
+]
+
 (** Lower a module. *)
 let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
   reset_counter ();
@@ -394,12 +677,15 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
          | Some td' -> types := td' :: !types
          | None -> ())
       | Ast.DLet _ -> ()
-      | Ast.DActor _ -> ()
+      | Ast.DActor (name, actor_def, _) ->
+        let (new_types, new_fns) = lower_actor name.txt actor_def in
+        types := List.rev_append new_types !types;
+        fns   := List.rev_append new_fns   !fns
       | Ast.DMod _ | Ast.DProtocol _ | Ast.DSig _ | Ast.DInterface _
       | Ast.DImpl _ | Ast.DExtern _ | Ast.DUse _ -> ()
     ) m.mod_decls;
   let result : Tir.tir_module = { tm_name = m.mod_name.txt;
     tm_fns = List.rev !fns;
-    tm_types = List.rev !types } in
+    tm_types = builtin_type_defs @ List.rev !types } in
   _type_map_ref := None;
   result

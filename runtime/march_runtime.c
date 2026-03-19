@@ -94,3 +94,41 @@ void march_println(void *s) {
     fwrite(ms->data, 1, (size_t)ms->len, stdout);
     putchar('\n');
 }
+
+/* ── Actor builtins ──────────────────────────────────────────────────────── */
+
+/* Actor layout as int64_t[]:
+ *   [0] rc, [1] tag+pad, [2] dispatch ptr, [3] alive flag, [4+] state fields */
+
+void march_kill(void *actor) {
+    int64_t *fields = (int64_t *)actor;
+    fields[3] = 0;   /* alive flag at byte offset 24 */
+}
+
+int64_t march_is_alive(void *actor) {
+    int64_t *fields = (int64_t *)actor;
+    return fields[3];
+}
+
+/* Returns Option(Unit): None (tag=0, no payload) or Some(()) (tag=1, unit payload).
+ * None and Some constructors follow declaration order: None first, Some second. */
+void *march_send(void *actor, void *msg) {
+    int64_t *a = (int64_t *)actor;
+    if (!a[3]) {
+        /* Actor is dead — return None (tag=0, no fields, just header) */
+        void *none = march_alloc(16);
+        /* tag is already 0 from calloc in march_alloc */
+        return none;
+    }
+    /* Dispatch: call the fn ptr at field[2] (offset 16) with (actor, msg) */
+    typedef void (*dispatch_fn_t)(void *, void *);
+    dispatch_fn_t dispatch = (dispatch_fn_t)a[2];
+    dispatch(actor, msg);
+    /* Return Some(()) — tag=1, one field = 0 (unit) */
+    void *some = march_alloc(16 + 8);
+    int32_t *hdr = (int32_t *)((char *)some + 8);
+    hdr[0] = 1;  /* tag = 1 for Some */
+    int64_t *fld = (int64_t *)((char *)some + 16);
+    fld[0] = 0;  /* () = 0 */
+    return some;
+}
