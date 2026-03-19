@@ -124,6 +124,11 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
     List.iter (fun note -> Printf.eprintf "note: %s\n%!" note) d.notes
   in
 
+  (* Show :where immediately on entry. *)
+  (match debug_hooks with
+   | Some h -> List.iter (fun s -> Printf.printf "%s\n%!" s) (h.dh_where ())
+   | None   -> ());
+
   while !running do
     (try
        let prompt =
@@ -986,6 +991,10 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
     )
   in
 
+  (* Show :where immediately on entry so the user knows where they are. *)
+  (match debug_hooks with
+   | Some h -> nav_context h
+   | None   -> ());
   render_frame ();
 
   while !running do
