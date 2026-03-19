@@ -547,6 +547,16 @@ let test_value_to_string () =
                                                          [March_eval.Eval.VInt 2;
                                                           March_eval.Eval.VCon ("Nil", [])])])))
 
+let test_value_task_to_string () =
+  let v = March_eval.Eval.VTask 42 in
+  let s = March_eval.Eval.value_to_string v in
+  Alcotest.(check string) "VTask prints" "<task:42>" s
+
+let test_value_workpool_to_string () =
+  let v = March_eval.Eval.VWorkPool in
+  let s = March_eval.Eval.value_to_string v in
+  Alcotest.(check string) "VWorkPool prints" "<work_pool>" s
+
 (** Parse, desugar, and lower a March module to TIR. *)
 let lower_module src =
   let m = parse_and_desugar src in
@@ -2913,6 +2923,8 @@ let () =
           Alcotest.test_case "list literal"        `Quick test_eval_list_literal;
           Alcotest.test_case "negative pattern"    `Quick test_eval_negative_pattern;
           Alcotest.test_case "value_to_string"     `Quick test_value_to_string;
+          Alcotest.test_case "task to_string"      `Quick test_value_task_to_string;
+          Alcotest.test_case "workpool to_string"  `Quick test_value_workpool_to_string;
         ] );
       ( "parser gaps",
         [

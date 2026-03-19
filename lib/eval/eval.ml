@@ -31,6 +31,8 @@ type value =
   | VClosure of env * string list * expr
   | VBuiltin of string * (value list -> value)
   | VPid    of int                      (** Actor process id *)
+  | VTask   of int                      (** Task handle *)
+  | VWorkPool                           (** Work-stealing pool capability *)
 
 (** Association-list environment mapping names to values. *)
 and env = (string * value) list
@@ -324,6 +326,8 @@ let rec value_to_string v =
   | VClosure _  -> "<fn>"
   | VBuiltin (n, _) -> "<builtin:" ^ n ^ ">"
   | VPid pid -> "Pid(" ^ string_of_int pid ^ ")"
+  | VTask id -> Printf.sprintf "<task:%d>" id
+  | VWorkPool -> "<work_pool>"
 
 (** Pretty-print a value with indented multi-line layout when the flat
     representation exceeds [width] characters. *)
@@ -1358,11 +1362,28 @@ let rec eval_decl (env : env) (d : decl) : env =
     module_stack := name.txt :: !module_stack;
     let mod_env = eval_decls env decls in
     module_stack := List.tl !module_stack;
-    (* Expose all bindings from the nested module prefixed by module name *)
+    (* Collect names actually defined by this module's declarations
+       (DFn, DLet top bindings, nested DMod names).  We only expose
+       these under the qualified prefix, not inherited outer bindings. *)
+    let rec declared_names acc = function
+      | [] -> acc
+      | DFn (def, _) :: rest -> declared_names (def.fn_name.txt :: acc) rest
+      | DLet (b, _) :: rest ->
+        let rec pat_names a = function
+          | PatVar n -> n.txt :: a
+          | PatTuple (ps, _) -> List.fold_left pat_names a ps
+          | PatCon (_, ps) -> List.fold_left pat_names a ps
+          | _ -> a
+        in
+        declared_names (pat_names acc b.bind_pat) rest
+      | DMod (n, _, _, _) :: rest -> declared_names (n.txt :: acc) rest
+      | _ :: rest -> declared_names acc rest
+    in
+    let own_names = declared_names [] decls in
     let prefixed = List.filter_map (fun (k, v) ->
-        (* Only expose names that are new relative to the outer env *)
-        if List.mem_assoc k env then None
-        else Some (name.txt ^ "." ^ k, v)
+        if List.mem k own_names
+        then Some (name.txt ^ "." ^ k, v)
+        else None
       ) mod_env in
     prefixed @ env
 
