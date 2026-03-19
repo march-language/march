@@ -56,6 +56,10 @@
       "members": [
         {
           "type": "SYMBOL",
+          "name": "doc_annotation"
+        },
+        {
+          "type": "SYMBOL",
           "name": "function_def"
         },
         {
@@ -93,6 +97,81 @@
         {
           "type": "SYMBOL",
           "name": "use_declaration"
+        }
+      ]
+    },
+    "doc_annotation": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "doc"
+        },
+        {
+          "type": "FIELD",
+          "name": "content",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "triple_string"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "string"
+              }
+            ]
+          }
+        },
+        {
+          "type": "FIELD",
+          "name": "decl",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "function_def"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "let_declaration"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "type_def"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "actor_def"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "interface_def"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "impl_def"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "sig_def"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "extern_def"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "protocol_def"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "use_declaration"
+              }
+            ]
+          }
         }
       ]
     },
@@ -3229,6 +3308,10 @@
         }
       ]
     },
+    "triple_string": {
+      "type": "PATTERN",
+      "value": "\"\"\"([^\"]|\"[^\"]|\"\"[^\"])*\"{0,2}\"\"\""
+    },
     "comment": {
       "type": "TOKEN",
       "content": {
@@ -3418,6 +3501,10 @@
       {
         "type": "STRING",
         "value": "loop"
+      },
+      {
+        "type": "STRING",
+        "value": "doc"
       }
     ]
   }

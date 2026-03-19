@@ -12,15 +12,16 @@ void tree_sitter_march_external_scanner_deserialize(void *p, const char *b, unsi
 bool tree_sitter_march_external_scanner_scan(
     void *payload, TSLexer *lexer, const bool *valid_symbols
 ) {
+  /* Block comments: {- ... -} (nestable)
+     In extras, so valid_symbols[BLOCK_COMMENT] is true in most states. */
   if (!valid_symbols[BLOCK_COMMENT]) return false;
 
-  /* Skip leading whitespace so we can be called before the internal lexer */
+  /* Skip leading whitespace */
   while (lexer->lookahead == ' ' || lexer->lookahead == '\t' ||
          lexer->lookahead == '\n' || lexer->lookahead == '\r') {
     lexer->advance(lexer, true);
   }
 
-  /* Must start with {- */
   if (lexer->lookahead != '{') return false;
   lexer->advance(lexer, false);
   if (lexer->lookahead != '-') return false;
@@ -28,7 +29,7 @@ bool tree_sitter_march_external_scanner_scan(
 
   int depth = 1;
   while (depth > 0) {
-    if (lexer->lookahead == 0) return false; /* EOF inside comment */
+    if (lexer->lookahead == 0) return false;
     if (lexer->lookahead == '{') {
       lexer->advance(lexer, false);
       if (lexer->lookahead == '-') { lexer->advance(lexer, false); depth++; }

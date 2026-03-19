@@ -34,7 +34,7 @@ module.exports = grammar({
       'if', 'then', 'else',
       'send', 'spawn', 'respond',
       'actor', 'interface', 'impl', 'sig', 'extern', 'protocol', 'use',
-      'for', 'loop',
+      'for', 'loop', 'doc',
     ],
   },
 
@@ -50,6 +50,7 @@ module.exports = grammar({
     ),
 
     _declaration: $ => choice(
+      $.doc_annotation,
       $.function_def,
       $.let_declaration,
       $.type_def,
@@ -60,6 +61,23 @@ module.exports = grammar({
       $.extern_def,
       $.protocol_def,
       $.use_declaration,
+    ),
+
+    doc_annotation: $ => seq(
+      'doc',
+      field('content', choice($.triple_string, $.string)),
+      field('decl', choice(
+        $.function_def,
+        $.let_declaration,
+        $.type_def,
+        $.actor_def,
+        $.interface_def,
+        $.impl_def,
+        $.sig_def,
+        $.extern_def,
+        $.protocol_def,
+        $.use_declaration,
+      )),
     ),
 
     function_def: $ => seq(
@@ -426,6 +444,10 @@ module.exports = grammar({
       $.atom_literal,
       optional(seq('(', commaSep($._expr), ')')),
     ),
+
+    // Triple-quoted doc string: """..."""  (content may span lines and contain " and "")
+    // Must be listed before string in doc_annotation choice so maximal-munch picks it.
+    triple_string: _ => /"""([^"]|"[^"]|""[^"])*"{0,2}"""/,
 
     comment: _ => token(seq('--', /.*/)),
     integer: _ => /[0-9]+/,

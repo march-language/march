@@ -1890,6 +1890,72 @@
     }
   },
   {
+    "type": "doc_annotation",
+    "named": true,
+    "fields": {
+      "content": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "triple_string",
+            "named": true
+          }
+        ]
+      },
+      "decl": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "actor_def",
+            "named": true
+          },
+          {
+            "type": "extern_def",
+            "named": true
+          },
+          {
+            "type": "function_def",
+            "named": true
+          },
+          {
+            "type": "impl_def",
+            "named": true
+          },
+          {
+            "type": "interface_def",
+            "named": true
+          },
+          {
+            "type": "let_declaration",
+            "named": true
+          },
+          {
+            "type": "protocol_def",
+            "named": true
+          },
+          {
+            "type": "sig_def",
+            "named": true
+          },
+          {
+            "type": "type_def",
+            "named": true
+          },
+          {
+            "type": "use_declaration",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "extern_def",
     "named": true,
     "fields": {
@@ -3543,6 +3609,10 @@
       "types": [
         {
           "type": "actor_def",
+          "named": true
+        },
+        {
+          "type": "doc_annotation",
           "named": true
         },
         {
@@ -5212,6 +5282,10 @@
           "named": true
         },
         {
+          "type": "doc_annotation",
+          "named": true
+        },
+        {
           "type": "extern_def",
           "named": true
         },
@@ -6322,6 +6396,10 @@
     "named": false
   },
   {
+    "type": "doc",
+    "named": false
+  },
+  {
     "type": "else",
     "named": false
   },
@@ -6436,6 +6514,10 @@
   {
     "type": "then",
     "named": false
+  },
+  {
+    "type": "triple_string",
+    "named": true
   },
   {
     "type": "true",
