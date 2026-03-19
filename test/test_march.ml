@@ -2149,7 +2149,7 @@ let test_fold_and_shortcircuit_pure () =
     (March_tir.Tir.show_expr (first_body m'))
 
 let test_fold_and_shortcircuit_impure () =
-  (* false && <var bound to impure> must NOT be folded *)
+  (* false && <AVar> IS folded: AVar is a pure atom (register read in ANF) *)
   let changed = ref false in
   let bapp op args =
     March_tir.Tir.EApp (mk_var op (March_tir.Tir.TFn ([], March_tir.Tir.TBool)), args) in
@@ -2159,7 +2159,7 @@ let test_fold_and_shortcircuit_impure () =
                bapp "&&" [blit false; March_tir.Tir.AVar print_var]) in
   let m = mk_module [mk_fn "f" body] in
   let _ = March_tir.Fold.run ~changed m in
-  Alcotest.(check bool) "not changed (impure rhs)" false !changed
+  Alcotest.(check bool) "changed (AVar is a pure atom)" true !changed
 
 let test_fold_if_true () =
   let changed = ref false in
@@ -2186,6 +2186,38 @@ let test_fold_if_false () =
   Alcotest.(check bool) "changed" true !changed;
   Alcotest.(check string) "if false → else" "(Tir.EAtom (Tir.ALit (Ast.LitInt 2)))"
     (March_tir.Tir.show_expr (first_body m'))
+
+let test_fold_and_pure_var () =
+  (* false && <AVar for pure value> → false (var is pure at atom position) *)
+  let changed = ref false in
+  let bapp op args =
+    March_tir.Tir.EApp (mk_var op (March_tir.Tir.TFn ([], March_tir.Tir.TBool)), args) in
+  let x = avar "x" March_tir.Tir.TBool in
+  (* let x = true in false && x — x is a pure AVar at atom position *)
+  let body = March_tir.Tir.ELet (mk_var "x" March_tir.Tir.TBool,
+               March_tir.Tir.EAtom (blit true),
+               bapp "&&" [blit false; x]) in
+  let m = mk_module [mk_fn "f" body] in
+  let m' = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "changed (pure var folded)" true !changed;
+  (* The && should be folded; the let may remain *)
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, inner) ->
+     (match inner with
+      | March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitBool false)) -> ()
+      | _ -> Alcotest.failf "expected false, got %s" (March_tir.Tir.show_expr inner))
+   | March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitBool false)) -> ()
+   | other -> Alcotest.failf "expected false, got %s" (March_tir.Tir.show_expr other))
+
+let test_fold_or_shortcircuit_pure () =
+  (* true || <pure rhs> → true *)
+  let changed = ref false in
+  let bapp op args =
+    March_tir.Tir.EApp (mk_var op (March_tir.Tir.TFn ([], March_tir.Tir.TBool)), args) in
+  let m = mk_module [mk_fn "f" (bapp "||" [blit true; blit false])] in
+  let m' = March_tir.Fold.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  ignore m'  (* just check it doesn't crash and changed is set *)
 
 let _ = avar  (* suppress unused warning *)
 
@@ -2444,5 +2476,7 @@ let () =
         Alcotest.test_case "and_shortcircuit_impure" `Quick test_fold_and_shortcircuit_impure;
         Alcotest.test_case "if_true"                 `Quick test_fold_if_true;
         Alcotest.test_case "if_false"                `Quick test_fold_if_false;
+        Alcotest.test_case "and_pure_var"            `Quick test_fold_and_pure_var;
+        Alcotest.test_case "or_shortcircuit_pure"    `Quick test_fold_or_shortcircuit_pure;
       ]);
     ]

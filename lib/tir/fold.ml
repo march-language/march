@@ -45,14 +45,14 @@ let rec fold_expr ~changed : Tir.expr -> Tir.expr = function
   | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool b)]) when f.Tir.v_name = "not" ->
     changed := true; mk_bool (not b)
 
-  (* false && <literal rhs> -> false (only safe for literal atoms, not vars) *)
-  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool false); Tir.ALit _ as rhs])
+  (* false && <pure rhs> -> false *)
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool false); rhs])
     when f.Tir.v_name = "&&"
       && Purity.is_pure (Tir.EAtom rhs) ->
     changed := true; mk_bool false
 
-  (* true || <literal rhs> -> true (only safe for literal atoms, not vars) *)
-  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool true); Tir.ALit _ as rhs])
+  (* true || <pure rhs> -> true *)
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool true); rhs])
     when f.Tir.v_name = "||"
       && Purity.is_pure (Tir.EAtom rhs) ->
     changed := true; mk_bool true
