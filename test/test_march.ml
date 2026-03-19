@@ -2223,6 +2223,108 @@ let test_fold_or_shortcircuit_pure () =
 
 let _ = avar  (* suppress unused warning *)
 
+(* ── Algebraic simplification ────────────────────────────────────── *)
+
+let test_simplify_add_zero () =
+  let changed = ref false in
+  let x = avar "x" March_tir.Tir.TInt in
+  let m = mk_module [mk_fn "f" (app "+" [x; ilit 0])] in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "x+0=x"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_simplify_mul_one () =
+  let changed = ref false in
+  let x = avar "x" March_tir.Tir.TInt in
+  let m = mk_module [mk_fn "f" (app "*" [x; ilit 1])] in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "x*1=x"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_simplify_mul_zero_pure () =
+  let changed = ref false in
+  let x = avar "x" March_tir.Tir.TInt in
+  let m = mk_module [mk_fn "f" (app "*" [x; ilit 0])] in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "x*0=0"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (ilit 0)))
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_simplify_sub_self () =
+  let changed = ref false in
+  let m = mk_module [mk_fn "f" (app "-" [avar "x" March_tir.Tir.TInt; avar "x" March_tir.Tir.TInt])] in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "x-x=0"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (ilit 0)))
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_simplify_sub_different () =
+  let changed = ref false in
+  let m = mk_module [mk_fn "f" (app "-" [avar "x" March_tir.Tir.TInt; avar "y" March_tir.Tir.TInt])] in
+  let _ = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "not changed" false !changed
+
+let test_simplify_div_one () =
+  let changed = ref false in
+  let x = avar "x" March_tir.Tir.TInt in
+  let m = mk_module [mk_fn "f" (app "/" [x; ilit 1])] in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "x/1=x"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_simplify_zero_div () =
+  let changed = ref false in
+  let x = avar "x" March_tir.Tir.TInt in
+  let m = mk_module [mk_fn "f" (app "/" [ilit 0; x])] in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "0/x=0"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom (ilit 0)))
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_simplify_strength_reduce () =
+  let changed = ref false in
+  let x = avar "x" March_tir.Tir.TInt in
+  let m = mk_module [mk_fn "f" (app "*" [x; ilit 2])] in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, March_tir.Tir.EApp (f, _), _) ->
+     Alcotest.(check string) "strength reduce to add" "+" f.March_tir.Tir.v_name
+   | _ -> Alcotest.fail "expected ELet wrapping EApp(+)")
+
+let test_simplify_float_add_zero () =
+  let changed = ref false in
+  let x = avar "x" March_tir.Tir.TFloat in
+  let fapp' op args =
+    March_tir.Tir.EApp (mk_var op (March_tir.Tir.TFn ([], March_tir.Tir.TFloat)), args) in
+  let m = mk_module [mk_fn "f" (fapp' "+." [x; flit 0.0])] in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "x+.0.0=x"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_simplify_bool_and_true () =
+  let changed = ref false in
+  let x = avar "x" March_tir.Tir.TBool in
+  let bapp op args =
+    March_tir.Tir.EApp (mk_var op (March_tir.Tir.TFn ([], March_tir.Tir.TBool)), args) in
+  let m = mk_module [mk_fn "f" (bapp "&&" [x; blit true])] in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  Alcotest.(check string) "x&&true=x"
+    (March_tir.Tir.show_expr (March_tir.Tir.EAtom x))
+    (March_tir.Tir.show_expr (first_body m'))
+
 let () =
   Alcotest.run "march"
     [
@@ -2480,5 +2582,17 @@ let () =
         Alcotest.test_case "if_false"                `Quick test_fold_if_false;
         Alcotest.test_case "and_pure_var"            `Quick test_fold_and_pure_var;
         Alcotest.test_case "or_shortcircuit_pure"    `Quick test_fold_or_shortcircuit_pure;
+      ]);
+      ("simplify", [
+        Alcotest.test_case "add_zero"          `Quick test_simplify_add_zero;
+        Alcotest.test_case "mul_one"           `Quick test_simplify_mul_one;
+        Alcotest.test_case "mul_zero_pure"     `Quick test_simplify_mul_zero_pure;
+        Alcotest.test_case "sub_self"          `Quick test_simplify_sub_self;
+        Alcotest.test_case "sub_different"     `Quick test_simplify_sub_different;
+        Alcotest.test_case "div_one"           `Quick test_simplify_div_one;
+        Alcotest.test_case "zero_div"          `Quick test_simplify_zero_div;
+        Alcotest.test_case "strength_reduce"   `Quick test_simplify_strength_reduce;
+        Alcotest.test_case "float_add_zero"    `Quick test_simplify_float_add_zero;
+        Alcotest.test_case "bool_and_true"     `Quick test_simplify_bool_and_true;
       ]);
     ]
