@@ -94,6 +94,41 @@ A large regression vs OCaml points to closure dispatch or intermediate-list GC o
 
 ---
 
+## bench/string_build.march — Join 500K integer strings
+
+**Command:** build List(String) of 1..500000, `string_join(list, "")`
+**Expected output:** `2888895` (sum of digit-lengths of integers 1..500000)
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `int_to_string` | 500K calls in a tail-recursive loop |
+| `string_join` | Single O(n) join via C runtime `march_string_join` |
+| Tail recursion | `build` is tail-recursive with List accumulator |
+| Reference counting | Cons cells freed after join |
+
+**Comparison baseline:** C (pre-allocated buffer, single sprintf loop), OCaml (Buffer.t), Rust (String::collect), Python (str.join), Go (strings.Builder).
+**What to watch:** March pays per-Cons-cell allocation; C/OCaml Buffer avoids it. A regression vs the prior March run points to RC overhead or codegen for `string_join`.
+
+---
+
+## bench/string_pipeline.march — Double and rejoin 100K integer strings
+
+**Command:** build list of 1..100000, `map double_str`, `string_join(list, ",")`
+**Expected output:** `644449` (byte length of "200000,199998,...,4,2")
+
+| Feature exercised | Notes |
+|-------------------|-------|
+| `string_to_int` | 100K calls inside `double_str` |
+| `int_to_string` | 100K calls to format doubled values |
+| `string_join` | O(n) join at the end |
+| Pattern match on `Option` | `Some(n)` / `None` branch in `double_str` |
+| Recursive list map | `map_strings` is non-tail-recursive (100K depth) |
+
+**Comparison baseline:** C (sprintf loop), OCaml (Buffer + atoi), Rust (map + join), Python (list comprehension), Go (strconv + strings.Join).
+**What to watch:** March uses a linked list; C/Rust use arrays. March should be within ~2× of OCaml. A regression vs OCaml points to Option allocation or string_to_int overhead.
+
+---
+
 ## bench/parallel.march — Parallel tree sum (depth=24, threshold=10)
 
 **Status: NOT YET RUNNABLE** — requires `spawn_task` / `await_all` / `Task(a)`,
@@ -128,4 +163,5 @@ to the features it exercises. Quick reference:
 | Closure / lambda eval | `list_ops` |
 | Tail-call optimisation | `list_ops` + `fib` |
 | Codegen / `--opt` levels | all four |
+| `string_join` / `string_to_int` / `int_to_string` | `string_build` + `string_pipeline` |
 | Task / spawn_task | `parallel` (once implemented) |

@@ -1,0 +1,26 @@
+-- String builder benchmark.
+-- Builds a List(String) of 500,000 integer strings, then joins with empty
+-- separator. Demonstrates O(n) total work via string_join.
+--
+-- Expected output: 2888895
+-- (sum of digit lengths of integers 1..500000)
+--
+-- Usage: march --compile bench/string_build.march -o bench/string_build
+--        bench/string_build
+
+mod StringBuild do
+
+-- Tail-recursive: build ["1","2",...,"n"] in reverse as a list accumulator,
+-- then join once with empty separator.
+fn build(n : Int, acc : List(String)) : List(String) do
+  if n == 0 then acc
+  else build(n - 1, Cons(int_to_string(n), acc))
+end
+
+fn main() : Unit do
+  let n = 500000
+  let s = string_join(build(n, Nil), "")
+  println(int_to_string(string_byte_length(s)))
+end
+
+end

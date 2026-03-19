@@ -82,6 +82,80 @@ int64_t march_string_eq(void *a, void *b) {
     return sa->len == sb->len && memcmp(sa->data, sb->data, (size_t)sa->len) == 0 ? 1 : 0;
 }
 
+int64_t march_string_byte_length(void *s) {
+    return s ? ((march_string *)s)->len : 0;
+}
+
+/* Returns Option(Int): None(tag=0) on failure, Some(n)(tag=1,field=n) on success.
+ * Option follows declaration order: type Option = None | Some('a)
+ * Heap layout for Some(n): [rc:i64][tag=1:i32][pad:i32][n:i64] = 24 bytes. */
+void *march_string_to_int(void *s) {
+    march_string *str = (march_string *)s;
+    char *end;
+    long long n = strtoll(str->data, &end, 10);
+    /* None if no digits consumed or trailing non-digit characters */
+    if (end == str->data || *end != '\0') {
+        void *none = march_alloc(16);   /* tag stays 0 = None */
+        return none;
+    }
+    void *some = march_alloc(16 + 8);  /* 24 bytes: header + one i64 field */
+    int32_t *tp = (int32_t *)((char *)some + 8);
+    tp[0] = 1;                         /* tag = 1 = Some */
+    int64_t *fp = (int64_t *)((char *)some + 16);
+    fp[0] = (int64_t)n;
+    return some;
+}
+
+/* Returns a new String by joining all String elements of a March List(String)
+ * with the given separator.
+ *
+ * March List(String) layout:
+ *   Nil  tag=0, no fields → 16 bytes
+ *   Cons tag=1, 2 ptr fields at offsets 16 (head String) and 24 (tail List)
+ */
+void *march_string_join(void *list, void *sep) {
+    march_string *sep_s = (march_string *)sep;
+    int64_t sep_len = sep_s ? sep_s->len : 0;
+    /* First pass: count elements and total byte length */
+    int64_t total = 0;
+    int64_t count = 0;
+    void *cur = list;
+    while (cur) {
+        int32_t tag = *(int32_t *)((char *)cur + 8);
+        if (tag == 0) break;           /* Nil */
+        void *head = *(void **)((char *)cur + 16);
+        total += ((march_string *)head)->len;
+        count++;
+        cur = *(void **)((char *)cur + 24);
+    }
+    if (count > 1) total += sep_len * (count - 1);
+    /* Allocate result string */
+    march_string *result = malloc(sizeof(march_string) + (size_t)total + 1);
+    if (!result) { fputs("march: out of memory\n", stderr); exit(1); }
+    result->rc  = 1;
+    result->len = total;
+    /* Second pass: fill */
+    char *dst = result->data;
+    int64_t first = 1;
+    cur = list;
+    while (cur) {
+        int32_t tag = *(int32_t *)((char *)cur + 8);
+        if (tag == 0) break;
+        void *head = *(void **)((char *)cur + 16);
+        march_string *hs = (march_string *)head;
+        if (!first && sep_len > 0) {
+            memcpy(dst, sep_s->data, (size_t)sep_len);
+            dst += sep_len;
+        }
+        memcpy(dst, hs->data, (size_t)hs->len);
+        dst += hs->len;
+        first = 0;
+        cur = *(void **)((char *)cur + 24);
+    }
+    *dst = '\0';
+    return result;
+}
+
 /* ── I/O ─────────────────────────────────────────────────────────────── */
 
 void march_print(void *s) {

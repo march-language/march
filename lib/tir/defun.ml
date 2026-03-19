@@ -20,6 +20,7 @@ let builtin_names : StringSet.t =
       "print"; "println"; "print_int"; "print_float";
       "int_to_string"; "float_to_string"; "bool_to_string";
       "string_to_int"; "string_length"; "string_concat";
+      "string_byte_length"; "string_join";
       "read_line"; "not";
       "head"; "tail"; "is_nil";
       "to_string"; "respond"; "kill"; "is_alive";

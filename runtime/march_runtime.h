@@ -29,6 +29,10 @@ void *march_float_to_string(double f);
 void *march_bool_to_string(int64_t b);
 void *march_string_concat(void *a, void *b);
 int64_t march_string_eq(void *a, void *b);
+/* Extended string builtins used by the compiled stdlib. */
+int64_t march_string_byte_length(void *s);
+void   *march_string_to_int(void *s);
+void   *march_string_join(void *list, void *sep);
 
 /* Actor builtins.
  * Actor object layout (on top of the standard 16-byte header):

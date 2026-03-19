@@ -348,6 +348,128 @@ func main() {
 EOF
 
 # ============================================================================
+# STRING BENCHMARKS: string_build (500K integers joined) and string_pipeline
+# ============================================================================
+
+# --- C (string_build) -------------------------------------------------------
+cat > "$TMP/sb.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+int main(void) {
+    /* allocate a buffer big enough for 500000 ints + null */
+    char *buf = malloc(4000000);
+    char *p = buf;
+    for (int i = 500000; i >= 1; i--) {
+        p += sprintf(p, "%d", i);
+    }
+    printf("%zu\n", (size_t)(p - buf));
+    free(buf);
+}
+EOF
+
+# --- C (string_pipeline) ----------------------------------------------------
+cat > "$TMP/sp.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+int main(void) {
+    /* Build list of 1..100000, double each, join with "," */
+    char *buf = malloc(8000000);
+    char *p = buf;
+    for (int i = 100000; i >= 1; i--) {
+        if (p != buf) *p++ = ',';
+        p += sprintf(p, "%d", i * 2);
+    }
+    printf("%zu\n", (size_t)(p - buf));
+    free(buf);
+}
+EOF
+
+# --- OCaml (string_build) ---------------------------------------------------
+cat > "$TMP/sb.ml" <<'EOF'
+let () =
+  let buf = Buffer.create (4 * 1024 * 1024) in
+  for i = 500000 downto 1 do
+    Buffer.add_string buf (string_of_int i)
+  done;
+  print_int (Buffer.length buf); print_newline ()
+EOF
+
+# --- OCaml (string_pipeline) ------------------------------------------------
+cat > "$TMP/sp.ml" <<'EOF'
+let () =
+  let buf = Buffer.create (8 * 1024 * 1024) in
+  for i = 100000 downto 1 do
+    if i < 100000 then Buffer.add_char buf ',';
+    Buffer.add_string buf (string_of_int (i * 2))
+  done;
+  print_int (Buffer.length buf); print_newline ()
+EOF
+
+# --- Python (string_build) --------------------------------------------------
+cat > "$TMP/sb.py" <<'EOF'
+import sys
+s = "".join(str(i) for i in range(500000, 0, -1))
+print(len(s))
+EOF
+
+# --- Python (string_pipeline) -----------------------------------------------
+cat > "$TMP/sp.py" <<'EOF'
+s = ",".join(str(i * 2) for i in range(100000, 0, -1))
+print(len(s))
+EOF
+
+# --- Rust (string_build) ----------------------------------------------------
+cat > "$TMP/sb.rs" <<'EOF'
+fn main() {
+    let s: String = (1..=500000_usize).rev().map(|i| i.to_string()).collect();
+    println!("{}", s.len());
+}
+EOF
+
+# --- Rust (string_pipeline) -------------------------------------------------
+cat > "$TMP/sp.rs" <<'EOF'
+fn main() {
+    let parts: Vec<String> = (1..=100000_i64).rev().map(|i| (i * 2).to_string()).collect();
+    let s = parts.join(",");
+    println!("{}", s.len());
+}
+EOF
+
+# --- Go (string_build) ------------------------------------------------------
+cat > "$TMP/sb.go" <<'EOF'
+package main
+import (
+    "fmt"
+    "strings"
+    "strconv"
+)
+func main() {
+    parts := make([]string, 500000)
+    for i := 0; i < 500000; i++ { parts[i] = strconv.Itoa(500000 - i) }
+    s := strings.Join(parts, "")
+    fmt.Println(len(s))
+}
+EOF
+
+# --- Go (string_pipeline) ---------------------------------------------------
+cat > "$TMP/sp.go" <<'EOF'
+package main
+import (
+    "fmt"
+    "strings"
+    "strconv"
+)
+func main() {
+    parts := make([]string, 100000)
+    for i := 0; i < 100000; i++ { parts[i] = strconv.FormatInt(int64(100000-i)*2, 10) }
+    s := strings.Join(parts, ",")
+    fmt.Println(len(s))
+}
+EOF
+
+# ============================================================================
 # COMPILE
 # ============================================================================
 bold "Compiling..."
@@ -357,7 +479,9 @@ DUNE=/Users/80197052/.opam/march/bin/dune
 (cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/fib.march            -o "$TMP/march_fib" 2>/dev/null)
 (cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/binary_trees.march   -o "$TMP/march_bt"  2>/dev/null)
 (cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/tree_transform.march -o "$TMP/march_tt"  2>/dev/null)
-(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/list_ops.march       -o "$TMP/march_lo"  2>/dev/null)
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/list_ops.march        -o "$TMP/march_lo"  2>/dev/null)
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/string_build.march    -o "$TMP/march_sb"  2>/dev/null)
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/string_pipeline.march -o "$TMP/march_sp"  2>/dev/null)
 
 # C
 if has clang; then
@@ -365,6 +489,8 @@ if has clang; then
   clang -O2 -o "$TMP/c_bt"  "$TMP/bt.c"
   clang -O2 -o "$TMP/c_tt"  "$TMP/tt.c"
   clang -O2 -o "$TMP/c_lo"  "$TMP/lo.c"
+  clang -O2 -o "$TMP/c_sb"  "$TMP/sb.c"
+  clang -O2 -o "$TMP/c_sp"  "$TMP/sp.c"
 fi
 
 # OCaml
@@ -374,11 +500,15 @@ if [ -x "$OCAMLOPT" ]; then
   "$OCAMLOPT" "$TMP/bt.ml"  -o "$TMP/ocaml_bt"  2>/dev/null
   "$OCAMLOPT" "$TMP/tt.ml"  -o "$TMP/ocaml_tt"  2>/dev/null
   "$OCAMLOPT" "$TMP/lo.ml"  -o "$TMP/ocaml_lo"  2>/dev/null
+  "$OCAMLOPT" "$TMP/sb.ml"  -o "$TMP/ocaml_sb"  2>/dev/null
+  "$OCAMLOPT" "$TMP/sp.ml"  -o "$TMP/ocaml_sp"  2>/dev/null
 elif has ocamlopt; then
   ocamlopt "$TMP/fib.ml" -o "$TMP/ocaml_fib" 2>/dev/null
   ocamlopt "$TMP/bt.ml"  -o "$TMP/ocaml_bt"  2>/dev/null
   ocamlopt "$TMP/tt.ml"  -o "$TMP/ocaml_tt"  2>/dev/null
   ocamlopt "$TMP/lo.ml"  -o "$TMP/ocaml_lo"  2>/dev/null
+  ocamlopt "$TMP/sb.ml"  -o "$TMP/ocaml_sb"  2>/dev/null
+  ocamlopt "$TMP/sp.ml"  -o "$TMP/ocaml_sp"  2>/dev/null
 fi
 
 # Rust
@@ -387,6 +517,8 @@ if has rustc; then
   rustc -O "$TMP/bt.rs"  -o "$TMP/rust_bt"  2>/dev/null
   rustc -O "$TMP/tt.rs"  -o "$TMP/rust_tt"  2>/dev/null
   rustc -O "$TMP/lo.rs"  -o "$TMP/rust_lo"  2>/dev/null
+  rustc -O "$TMP/sb.rs"  -o "$TMP/rust_sb"  2>/dev/null
+  rustc -O "$TMP/sp.rs"  -o "$TMP/rust_sp"  2>/dev/null
 fi
 
 # Go
@@ -395,6 +527,8 @@ if has go; then
   go build -o "$TMP/go_bt"  "$TMP/bt.go"  2>/dev/null
   go build -o "$TMP/go_tt"  "$TMP/tt.go"  2>/dev/null
   go build -o "$TMP/go_lo"  "$TMP/lo.go"  2>/dev/null
+  go build -o "$TMP/go_sb"  "$TMP/sb.go"  2>/dev/null
+  go build -o "$TMP/go_sp"  "$TMP/sp.go"  2>/dev/null
 fi
 
 # ============================================================================
@@ -466,5 +600,31 @@ run_if      "$TMP/ocaml_lo"  "OCaml"
 run_if_interp python3 "$TMP/lo.py"  "Python"
 run_if      "$TMP/rust_lo"   "Rust"
 run_if      "$TMP/go_lo"     "Go"
+
+echo ""
+bold "═══ string-build: join 500K int strings ═══"
+printf '  March uses string_join on List(String). C uses a pre-allocated buffer.\n'
+printf '  OCaml/Rust use Buffer/String::collect. Tests: int_to_string, string_join.\n'
+printf '  %-10s %-12s\n' "Language" "Time"
+printf '  %-10s %-12s\n' "--------" "----"
+run_if      "$TMP/march_sb" "March"
+run_if      "$TMP/c_sb"     "C"
+run_if      "$TMP/ocaml_sb" "OCaml"
+run_if_interp python3 "$TMP/sb.py" "Python"
+run_if      "$TMP/rust_sb"  "Rust"
+run_if      "$TMP/go_sb"    "Go"
+
+echo ""
+bold "═══ string-pipeline: build, double, rejoin 100K int strings ═══"
+printf '  March uses string_join + string_to_int + list map.\n'
+printf '  Tests: string_join, string_to_int, int_to_string, pattern match.\n'
+printf '  %-10s %-12s\n' "Language" "Time"
+printf '  %-10s %-12s\n' "--------" "----"
+run_if      "$TMP/march_sp" "March"
+run_if      "$TMP/c_sp"     "C"
+run_if      "$TMP/ocaml_sp" "OCaml"
+run_if_interp python3 "$TMP/sp.py" "Python"
+run_if      "$TMP/rust_sp"  "Rust"
+run_if      "$TMP/go_sp"    "Go"
 
 echo ""

@@ -116,6 +116,7 @@ let is_builtin_fn name =
                  "+."; "-."; "*."; "/.";
                  "=="; "!="; "<"; "<="; ">"; ">=";
                  "++"; "string_concat"; "string_eq";
+                 "string_byte_length"; "string_to_int"; "string_join";
                  "println"; "print";
                  "int_to_string"; "float_to_string"; "bool_to_string";
                  "kill"; "is_alive"; "send"]
@@ -133,6 +134,9 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "bool_to_string"              -> Some Tir.TString
   | "string_concat" | "++"        -> Some Tir.TString
   | "string_eq"                   -> Some Tir.TInt
+  | "string_byte_length"          -> Some Tir.TInt
+  | "string_to_int"               -> Some (Tir.TCon ("Option", [Tir.TInt]))
+  | "string_join"                 -> Some Tir.TString
   | "kill"                        -> Some Tir.TUnit
   | "is_alive"                    -> Some Tir.TBool
   | "send"                        -> Some (Tir.TCon ("Option", [Tir.TUnit]))
@@ -146,8 +150,11 @@ let mangle_extern : string -> string = function
   | "float_to_string" -> "march_float_to_string"
   | "bool_to_string"  -> "march_bool_to_string"
   | "string_concat" | "++" -> "march_string_concat"
-  | "string_eq"     -> "march_string_eq"
-  | "kill"          -> "march_kill"
+  | "string_eq"          -> "march_string_eq"
+  | "string_byte_length" -> "march_string_byte_length"
+  | "string_to_int"      -> "march_string_to_int"
+  | "string_join"        -> "march_string_join"
+  | "kill"               -> "march_kill"
   | "is_alive"      -> "march_is_alive"
   | "send"          -> "march_send"
   | "main"          -> "march_main"   (* March main → march_main in LLVM *)
@@ -764,6 +771,9 @@ declare ptr  @march_float_to_string(double %f)
 declare ptr  @march_bool_to_string(i64 %b)
 declare ptr  @march_string_concat(ptr %a, ptr %b)
 declare i64  @march_string_eq(ptr %a, ptr %b)
+declare i64  @march_string_byte_length(ptr %s)
+declare ptr  @march_string_to_int(ptr %s)
+declare ptr  @march_string_join(ptr %list, ptr %sep)
 declare void @march_kill(ptr %actor)
 declare i64  @march_is_alive(ptr %actor)
 declare ptr  @march_send(ptr %actor, ptr %msg)

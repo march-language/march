@@ -1,0 +1,44 @@
+-- String pipeline benchmark.
+-- Builds a list of 100,000 integer strings, doubles each value,
+-- then joins with ",".
+-- Tests: string_join, string_to_int, int_to_string, list map.
+--
+-- Expected output: 644449
+-- (byte length of "200000,199998,...,4,2")
+--
+-- Usage: march --compile bench/string_pipeline.march -o bench/string_pipeline
+--        bench/string_pipeline
+
+mod StringPipeline do
+
+-- Build ["n", "n-1", ..., "1"] as a list (reversed, but order doesn't
+-- affect byte-length of the result).
+fn build_list(lo : Int, hi : Int, acc : List(String)) : List(String) do
+  if lo > hi then acc
+  else build_list(lo + 1, hi, Cons(int_to_string(lo), acc))
+end
+
+-- Double the integer value of a decimal string.
+fn double_str(s : String) : String do
+  match string_to_int(s) with
+  | Some(n) -> int_to_string(n * 2)
+  | None    -> s
+  end
+end
+
+fn map_strings(xs : List(String)) : List(String) do
+  match xs with
+  | Nil        -> Nil
+  | Cons(h, t) -> Cons(double_str(h), map_strings(t))
+  end
+end
+
+fn main() : Unit do
+  let n       = 100000
+  let pieces  = build_list(1, n, Nil)
+  let doubled = map_strings(pieces)
+  let result  = string_join(doubled, ",")
+  println(int_to_string(string_byte_length(result)))
+end
+
+end
