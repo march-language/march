@@ -213,6 +213,18 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     (Tir.ELetRec (fns', body'), lb)
 
   | Tir.ECase (a, branches, default) ->
+    (* When the scrutinee is a heap value not live after the case, it is
+       consumed by the match.  Free its header in every branch.  Branch-bound
+       variables (br_vars) take over ownership of the children, so we only
+       need to free the allocation header — EDecRC handles both the unique
+       case (RC→0 → free) and the shared case (RC>1 → just decrement). *)
+    let add_scrutinee_free body =
+      match a with
+      | Tir.AVar v when needs_rc v.Tir.v_ty
+                     && not (StringSet.mem v.Tir.v_name live_after) ->
+        Tir.ESeq (Tir.EDecRC (Tir.AVar v), body)
+      | _ -> body
+    in
     let branches' = List.map (fun br ->
       let bound =
         List.fold_left (fun s v -> StringSet.add v.Tir.v_name s)
@@ -220,11 +232,11 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
       in
       let la = StringSet.diff live_after bound in
       let (body', _) = insert_rc_expr br.Tir.br_body la in
-      { br with Tir.br_body = body' }
+      { br with Tir.br_body = add_scrutinee_free body' }
     ) branches in
     let default' = Option.map (fun d ->
       let (d', _) = insert_rc_expr d live_after in
-      d'
+      add_scrutinee_free d'
     ) default in
     (* Compute live_before from the original liveness *)
     let lb = live_before e live_after in

@@ -1,0 +1,60 @@
+-- Binary Trees benchmark (Benchmarks Game).
+-- Allocates and walks complete binary trees to stress the allocator/GC.
+-- Usage: march --compile bench/binary_trees.march -o bench/binary_trees
+--        bench/binary_trees 15
+
+mod BinaryTrees do
+
+type Tree = Leaf | Node(Tree, Tree)
+
+fn make(d : Int) : Tree do
+  if d == 0 then Leaf
+  else Node(make(d - 1), make(d - 1))
+end
+
+fn check(t : Tree) : Int do
+  match t with
+  | Leaf       -> 1
+  | Node(l, r) -> check(l) + check(r) + 1
+  end
+end
+
+fn pow2(n : Int) : Int do
+  if n == 0 then 1 else 2 * pow2(n - 1)
+end
+
+fn sum_trees(iters : Int, depth : Int, acc : Int) : Int do
+  if iters == 0 then acc
+  else sum_trees(iters - 1, depth, acc + check(make(depth)))
+end
+
+fn run_depths(d : Int, max_depth : Int, min_depth : Int) : Unit do
+  if d > max_depth then ()
+  else do
+    let iters = pow2(max_depth - d + min_depth)
+    let s     = sum_trees(iters, d, 0)
+    println(int_to_string(iters) ++ " trees of depth " ++ int_to_string(d) ++ " check: " ++ int_to_string(s))
+    run_depths(d + 2, max_depth, min_depth)
+  end
+end
+
+fn main() : Unit do
+  let n         = 15
+  let min_depth = 4
+  let max_depth = if n > min_depth + 2 then n else min_depth + 2
+
+  -- stretch tree
+  let stretch = max_depth + 1
+  println("stretch tree of depth " ++ int_to_string(stretch) ++ " check: " ++ int_to_string(check(make(stretch))))
+
+  -- long-lived tree (kept alive across all iterations)
+  let long_lived = make(max_depth)
+
+  -- benchmark each depth
+  run_depths(min_depth, max_depth, min_depth)
+
+  -- verify long-lived tree
+  println("long lived tree of depth " ++ int_to_string(max_depth) ++ " check: " ++ int_to_string(check(long_lived)))
+end
+
+end

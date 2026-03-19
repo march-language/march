@@ -1,0 +1,16 @@
+-- Naive recursive Fibonacci benchmark.
+-- Benchmarks Game: "fibonacci" problem (naive exponential recursion).
+-- Usage: march --compile bench/fib.march -o bench/fib && bench/fib 40
+
+mod Fib do
+
+fn fib(n : Int) : Int do
+  if n < 2 then n
+  else fib(n - 1) + fib(n - 2)
+end
+
+fn main() : Unit do
+  println(int_to_string(fib(40)))
+end
+
+end
