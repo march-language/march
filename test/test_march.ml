@@ -2942,6 +2942,44 @@ let test_eval_task_captures_env () =
   let v = call_fn env "main" [] in
   Alcotest.(check int) "task captures outer x" 25 (vint v)
 
+let test_eval_spawn_steal_requires_pool () =
+  let src = {|mod Test do
+    fn main() do
+      task_spawn_steal(42, fn () -> 1)
+    end
+  end|} in
+  let env = eval_module src in
+  let raised = ref false in
+  (try ignore (call_fn env "main" [])
+   with March_eval.Eval.Eval_error _ -> raised := true);
+  Alcotest.(check bool) "rejects non-WorkPool" true !raised
+
+let test_eval_spawn_steal_with_pool () =
+  let src = {|mod Test do
+    fn run(pool) do
+      let t = task_spawn_steal(pool, fn () -> 77)
+      task_await_unwrap(t)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "run" [March_eval.Eval.VWorkPool] in
+  Alcotest.(check int) "steal task returns 77" 77 (vint v)
+
+let test_eval_workpool_threading () =
+  let src = {|mod Test do
+    fn helper(pool) do
+      let t = task_spawn_steal(pool, fn () -> 55)
+      task_await_unwrap(t)
+    end
+
+    fn main(pool) do
+      helper(pool)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [March_eval.Eval.VWorkPool] in
+  Alcotest.(check int) "threaded pool works" 55 (vint v)
+
 let () =
   Alcotest.run "march"
     [
@@ -3285,5 +3323,8 @@ let () =
           Alcotest.test_case "await unwrap"        `Quick test_eval_task_await_unwrap;
           Alcotest.test_case "multiple tasks"      `Quick test_eval_task_multiple;
           Alcotest.test_case "task captures env"   `Quick test_eval_task_captures_env;
+          Alcotest.test_case "spawn_steal requires pool" `Quick test_eval_spawn_steal_requires_pool;
+          Alcotest.test_case "spawn_steal with pool"     `Quick test_eval_spawn_steal_with_pool;
+          Alcotest.test_case "workpool threading"        `Quick test_eval_workpool_threading;
         ] );
     ]

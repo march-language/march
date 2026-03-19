@@ -1400,6 +1400,21 @@ let task_builtins : env =
          | None -> ());
         VUnit
       | _ -> eval_error "task_yield: expected 0 arguments"))
+
+  ; ("task_spawn_steal", VBuiltin ("task_spawn_steal", function
+    | [VWorkPool; thunk] ->
+      (* Cap(WorkPool) validated — spawn on the stealing pool.
+         In Phase 1 (single-threaded), this is equivalent to task_spawn
+         but validates the capability requirement. *)
+      let tid = !next_task_id in
+      next_task_id := tid + 1;
+      let result = apply thunk [] in
+      let entry = { te_id = tid; te_result = Some result; te_thunk = thunk } in
+      Hashtbl.add task_registry tid entry;
+      VTask tid
+    | [_; _] ->
+      eval_error "task_spawn_steal: first argument must be a Cap(WorkPool)"
+    | _ -> eval_error "task_spawn_steal: expected 2 arguments (pool, function)"))
   ]
 
 (* ------------------------------------------------------------------ *)
