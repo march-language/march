@@ -17,6 +17,7 @@ Build an HTTP/1.1 server into March's stdlib. Inspired by Plug/Bandit/Phoenix:
 - **Supervised connections** — the accept loop tracks all live connection threads. Enforces max connections, idle timeouts, and graceful shutdown. Like Bandit's `DynamicSupervisor` over connection processes, but using an atomic counter + socket timeouts instead of OTP supervision trees.
 - **WebSocket via upgrade** — a plug can upgrade an HTTP connection to WebSocket. After the pipeline, the runtime performs the handshake and enters a March message loop. The handler is a recursive function with pattern matching on frames — no callbacks, no traits, just tail recursion.
 - **Capabilities thread through closures** — handlers capture only the caps they need. The type signature is the security audit.
+- **Compiled from day 1** — the HTTP server compiles to native code via `march --compile`. The REPL uses compile-and-dlopen (LLVM IR → clang → .so) so HTTP builtins work everywhere. No dual implementation — builtins exist only as C runtime functions.
 
 ## Non-Goals (v1)
 
@@ -32,6 +33,14 @@ Build an HTTP/1.1 server into March's stdlib. Inspired by Plug/Bandit/Phoenix:
 ## Architecture
 
 Like Bandit: the accept loop runs in the main thread, each connection gets its own OS thread. Unlike fire-and-forget threading, the accept loop **supervises** all spawned threads — tracking active connections, enforcing limits, and supporting graceful shutdown.
+
+```
+Interpreter path:  march app.march            (eval.ml, OCaml builtins)
+Compiled path:     march --compile app.march  (LLVM IR → clang → native binary, C builtins)
+REPL path:         march                      (compile-and-dlopen, same C builtins)
+```
+
+Note: HTTP builtins (http_server_listen, ws_recv, etc.) only exist in the C runtime. Non-HTTP code works on both paths.
 
 ```
 HttpServer.listen(server)           -- builtin, implemented in OCaml
@@ -555,7 +564,7 @@ HttpServer.new(4000)
 
 ### Compiled Mode: LLVM IR (how the server works as native code)
 
-The interpreter (`eval.ml`) is the development path. For production, March compiles to native code:
+March compiles to native code for both development (REPL via compile-and-dlopen) and production (`march --compile`).
 
 ```
 March source → parse → desugar → typecheck → monomorphize → defunctionalize
@@ -1707,6 +1716,12 @@ string_split(s, sep)           — already implemented in eval.ml. Used for
 | `stdlib/websocket.march` | New file: `WsFrame`, `WsSocket`, `SelectResult(a)`, `WebSocket.upgrade`, `WebSocket.recv`, `WebSocket.send`, `WebSocket.close`, `WebSocket.select` |
 | `bin/main.ml` | Add `http_server.march` and `websocket.march` to stdlib load order (after `http.march` for `Header` type) |
 | `test/test_march.ml` | Tests for builtins and server module |
+| `runtime/march_http.c` | C implementations of HTTP/WS builtins for compiled mode |
+| `runtime/march_http.h` | HTTP/WS C function declarations |
+| `runtime/sha1.c` | Vendored SHA-1 for WebSocket handshake |
+| `runtime/base64.c` | Vendored Base64 for WebSocket handshake |
+| `lib/jit/jit.ml` | OCaml dlopen/dlsym stubs for compiled REPL |
+| `lib/jit/repl_jit.ml` | REPL compile-and-dlopen orchestrator |
 
 ## Testing Strategy
 
