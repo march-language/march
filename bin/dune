@@ -1,4 +1,4 @@
 (executable
  (name main)
  (public_name march)
- (libraries march_lexer march_parser march_ast march_desugar march_typecheck march_codegen march_effects march_errors march_eval march_tir march_repl march_debug))
+ (libraries march_lexer march_parser march_ast march_desugar march_typecheck march_codegen march_effects march_errors march_eval march_tir march_repl march_debug march_jit unix))

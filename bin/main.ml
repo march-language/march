@@ -89,6 +89,46 @@ let load_stdlib () =
         load_stdlib_file (Filename.concat stdlib_dir name)
       ) files
 
+(** Pre-compile the C runtime to a shared library.
+    Cached at ~/.cache/march/libmarch_runtime.so.
+    Returns the path to the .so. *)
+let ensure_runtime_so () =
+  let home = Sys.getenv "HOME" in
+  let dot_cache = Filename.concat home ".cache" in
+  let cache_dir = Filename.concat dot_cache "march" in
+  (* Create parent directories recursively *)
+  List.iter (fun d ->
+    try Unix.mkdir d 0o755
+    with Unix.Unix_error (Unix.EEXIST, _, _) -> ()
+  ) [dot_cache; cache_dir];
+  let so_path = Filename.concat cache_dir "libmarch_runtime.so" in
+  (* Find runtime source *)
+  let candidates = [
+    "runtime/march_runtime.c";
+    Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime.c";
+    Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.c";
+  ] in
+  let runtime_c = match List.find_opt Sys.file_exists candidates with
+    | Some p -> p
+    | None -> failwith "march: cannot find runtime/march_runtime.c"
+  in
+  let runtime_dir = Filename.dirname runtime_c in
+  (* Recompile if .so is missing or older than .c *)
+  let needs_compile =
+    not (Sys.file_exists so_path) ||
+    (Unix.stat runtime_c).st_mtime > (Unix.stat so_path).st_mtime
+  in
+  if needs_compile then begin
+    (* Note: -lpthread not needed on macOS (pthreads are in libSystem). *)
+    let cmd = Printf.sprintf
+      "clang -shared -O2 -fPIC -I%s %s -o %s 2>&1"
+      runtime_dir runtime_c so_path in
+    let rc = Sys.command cmd in
+    if rc <> 0 then
+      failwith (Printf.sprintf "march: failed to compile runtime .so (clang exit %d)" rc)
+  end;
+  so_path
+
 let dump_tir       = ref false
 let emit_llvm      = ref false
 let do_compile     = ref false
@@ -260,6 +300,12 @@ let () =
   ] in
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
   match !files with
-  | []  -> March_repl.Repl.run ~stdlib_decls:(load_stdlib ()) ()
+  | []  ->
+    let runtime_so = ensure_runtime_so () in
+    let jit_ctx = March_jit.Repl_jit.create ~runtime_so () in
+    Fun.protect
+      ~finally:(fun () -> March_jit.Repl_jit.cleanup jit_ctx)
+      (fun () ->
+        March_repl.Repl.run ~stdlib_decls:(load_stdlib ()) ~jit_ctx:(Some jit_ctx) ())
   | [f] -> compile f
   | _   -> Printf.eprintf "Usage: march [options] [file.march]\n"; exit 1

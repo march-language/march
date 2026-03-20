@@ -90,7 +90,8 @@ let load_decls_into_env env tc_env decls =
   ) (env, tc_env) decls
 
 (** Non-TUI fallback REPL. *)
-let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
+let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx=(None : March_jit.Repl_jit.t option)) () =
+  let _jit_ctx = jit_ctx in
   let is_debug = debug_hooks <> None in
   if is_debug then
     Printf.printf "\n[debug] Breakpoint hit — :continue to resume, :help for commands\n%!"
@@ -435,7 +436,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
   History.save hist (history_path ())
 
 (** Full TUI REPL loop using notty two-pane layout. *)
-let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
+let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx=(None : March_jit.Repl_jit.t option)) () =
+  let _jit_ctx = jit_ctx in
   let is_debug = debug_hooks <> None in
   let hist     = History.create ~max_size:(history_size ()) in
   History.load hist (history_path ());
@@ -1097,7 +1099,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
   History.save hist (history_path ());
   Tui.close tui
 
-let run ?(stdlib_decls = []) ?(debug_hooks = None) ?(initial_env = None) () =
+let run ?(stdlib_decls = []) ?(debug_hooks = None) ?(initial_env = None) ?(jit_ctx : March_jit.Repl_jit.t option = None) () =
   if Unix.isatty Unix.stdin && Unix.isatty Unix.stdout
-  then run_tui ~stdlib_decls ~debug_hooks ~initial_env ()
-  else run_simple ~stdlib_decls ~debug_hooks ~initial_env ()
+  then run_tui ~stdlib_decls ~debug_hooks ~initial_env ~jit_ctx ()
+  else run_simple ~stdlib_decls ~debug_hooks ~initial_env ~jit_ctx ()
