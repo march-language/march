@@ -43,8 +43,12 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
   let status = Unix.close_process_in ic in
   (match status with
    | Unix.WEXITED 0 -> ()
-   | _ -> failwith (Printf.sprintf "clang failed: %s"
-            (Buffer.contents output)));
+   | _ ->
+     (* Clean up temp files before raising so we don't leak on failure *)
+     (try Sys.remove ll_path with _ -> ());
+     (try Sys.remove so_path with _ -> ());
+     failwith (Printf.sprintf "clang failed: %s"
+       (Buffer.contents output)));
   (* dlopen the .so *)
   let handle = Jit.dlopen so_path in
   ctx.handles <- handle :: ctx.handles;
@@ -106,14 +110,44 @@ let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
   let user_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
   if is_fn_decl then begin
-    (* Function declaration: emit the function at top level *)
-    match user_fns with
-    | [fn] ->
+    (* Function declaration: emit the function at top level.
+       After defunctionalization a single user-defined function may produce
+       multiple lifted functions (primary + closure helpers).  Find the primary
+       by bind_name, emit helpers first (so their symbols are available via
+       RTLD_GLOBAL), then emit the primary.
+       NOTE: calling REPL-defined functions from later REPL expressions requires
+       proper LLVM `declare` infrastructure in emit_repl_fn/emit_repl_expr
+       (tracking fn signatures in ctx, not just data globals).  This is a known
+       v1 limitation — function-to-function calls across REPL fragments are
+       future work. *)
+    let primary_fn =
+      match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
+        f.fn_name = bind_name) user_fns with
+      | Some f -> f
+      | None ->
+        (match user_fns with
+         | f :: _ -> f
+         | [] -> failwith ("run_decl: no functions produced for " ^ bind_name))
+    in
+    let helper_fns = List.filter
+      (fun (f : March_tir.Tir.fn_def) -> f.fn_name <> primary_fn.fn_name)
+      user_fns in
+    (* Emit helpers first so the primary can reference them at link time *)
+    List.iter (fun helper ->
+      let hn = next_id ctx in
       let ir = March_tir.Llvm_emit.emit_repl_fn
-        ~n ~prev_globals:ctx.globals ~types:tir.March_tir.Tir.tm_types fn in
-      let _handle = compile_fragment ctx ir in
+        ~n:hn ~prev_globals:ctx.globals ~types:tir.March_tir.Tir.tm_types
+        helper in
+      let _h = compile_fragment ctx ir in
       ()
-    | _ -> failwith "expected exactly one user function in fn decl"
+    ) helper_fns;
+    (* Emit primary function *)
+    let pn = next_id ctx in
+    let ir = March_tir.Llvm_emit.emit_repl_fn
+      ~n:pn ~prev_globals:ctx.globals ~types:tir.March_tir.Tir.tm_types
+      primary_fn in
+    let _handle = compile_fragment ctx ir in
+    ()
   end else begin
     (* Let binding: find main, extract body, store in global *)
     let main_fn = List.find (fun (f : March_tir.Tir.fn_def) ->
