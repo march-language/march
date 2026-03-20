@@ -17,13 +17,18 @@ CAMLprim value march_dlopen(value v_path) {
     CAMLreturn(caml_copy_nativeint((intnat)handle));
 }
 
-/* dlsym(handle, symbol) -> function pointer (nativeint) */
+/* dlsym(handle, symbol) -> function pointer (nativeint)
+   Uses dlerror clear-then-check idiom: dlsym returning NULL is not always
+   an error (POSIX allows symbols at address 0), but we check dlerror() after
+   the call. If dlerror() returns non-NULL, that's a real error. */
 CAMLprim value march_dlsym(value v_handle, value v_sym) {
     CAMLparam2(v_handle, v_sym);
     void *handle = (void *)Nativeint_val(v_handle);
     const char *sym = String_val(v_sym);
+    dlerror();  /* clear any previous error */
     void *ptr = dlsym(handle, sym);
-    if (!ptr) caml_failwith(dlerror());
+    char *err = dlerror();  /* check for error */
+    if (err != NULL) caml_failwith(err);
     CAMLreturn(caml_copy_nativeint((intnat)ptr));
 }
 
