@@ -1,18 +1,5 @@
--- HTTP GET benchmark.
--- Compares connection-per-request vs keep-alive connection reuse.
---
--- Usage: march bench/http_get.march
-
-mod HttpGetBench do
-
-fn run_requests(n, client, url) do
-  if n == 0 then Ok(0)
-  else
-    match HttpClient.get(client, url) with
-    | Ok(_) -> run_requests(n - 1, client, url)
-    | Err(e) -> Err(e)
-    end
-end
+-- HTTP GET benchmark: keep-alive mode (connection reuse)
+mod HttpGetKeepalive do
 
 fn run_keepalive(n, do_request, req) do
   if n == 0 then Ok(0)
@@ -29,17 +16,7 @@ fn main() do
   let client = HttpClient.new_client()
   let client = HttpClient.add_request_step(client, "defaults",
     HttpClient.step_default_headers)
-
-  -- Mode 1: connection-per-request
-  print("March HTTP GET (connection-per-request): " ++ int_to_string(n) ++ " requests")
-  match run_requests(n, client, url) with
-  | Ok(_) -> print("done")
-  | Err(_) -> print("error")
-  end
-
-  -- Mode 2: keep-alive (single connection)
-  print("")
-  print("March HTTP GET (keep-alive): " ++ int_to_string(n) ++ " requests")
+  print("keep-alive: " ++ int_to_string(n) ++ " GETs")
   match Http.get(url) with
   | Err(_) -> print("error parsing url")
   | Ok(req) ->

@@ -5,6 +5,7 @@ target triple = "arm64-apple-macosx15.0.0"
 declare ptr  @march_alloc(i64 %sz)
 declare void @march_incrc(ptr %p)
 declare void @march_decrc(ptr %p)
+declare i64  @march_decrc_freed(ptr %p)
 declare void @march_free(ptr %p)
 declare void @march_print(ptr %s)
 declare void @march_println(ptr %s)
@@ -30,9 +31,9 @@ entry:
   %ld1 = load i64, ptr %n.addr
   %cmp2 = icmp slt i64 %ld1, 2
   %ar3 = zext i1 %cmp2 to i64
-  %$t492.addr = alloca i64
-  store i64 %ar3, ptr %$t492.addr
-  %ld4 = load i64, ptr %$t492.addr
+  %$t574.addr = alloca i64
+  store i64 %ar3, ptr %$t574.addr
+  %ld4 = load i64, ptr %$t574.addr
   %res_slot5 = alloca ptr
   switch i64 %ld4, label %case_default2 [
       i64 1, label %case_br3
@@ -45,22 +46,22 @@ case_br3:
 case_default2:
   %ld8 = load i64, ptr %n.addr
   %ar9 = sub i64 %ld8, 1
-  %$t493.addr = alloca i64
-  store i64 %ar9, ptr %$t493.addr
-  %ld10 = load i64, ptr %$t493.addr
+  %$t575.addr = alloca i64
+  store i64 %ar9, ptr %$t575.addr
+  %ld10 = load i64, ptr %$t575.addr
   %cr11 = call i64 @fib(i64 %ld10)
-  %$t494.addr = alloca i64
-  store i64 %cr11, ptr %$t494.addr
+  %$t576.addr = alloca i64
+  store i64 %cr11, ptr %$t576.addr
   %ld12 = load i64, ptr %n.addr
   %ar13 = sub i64 %ld12, 2
-  %$t495.addr = alloca i64
-  store i64 %ar13, ptr %$t495.addr
-  %ld14 = load i64, ptr %$t495.addr
+  %$t577.addr = alloca i64
+  store i64 %ar13, ptr %$t577.addr
+  %ld14 = load i64, ptr %$t577.addr
   %cr15 = call i64 @fib(i64 %ld14)
-  %$t496.addr = alloca i64
-  store i64 %cr15, ptr %$t496.addr
-  %ld16 = load i64, ptr %$t494.addr
-  %ld17 = load i64, ptr %$t496.addr
+  %$t578.addr = alloca i64
+  store i64 %cr15, ptr %$t578.addr
+  %ld16 = load i64, ptr %$t576.addr
+  %ld17 = load i64, ptr %$t578.addr
   %ar18 = add i64 %ld16, %ld17
   %cv19 = inttoptr i64 %ar18 to ptr
   store ptr %cv19, ptr %res_slot5
@@ -74,13 +75,13 @@ case_merge1:
 define void @march_main() {
 entry:
   %cr22 = call i64 @fib(i64 40)
-  %$t497.addr = alloca i64
-  store i64 %cr22, ptr %$t497.addr
-  %ld23 = load i64, ptr %$t497.addr
+  %$t579.addr = alloca i64
+  store i64 %cr22, ptr %$t579.addr
+  %ld23 = load i64, ptr %$t579.addr
   %cr24 = call ptr @march_int_to_string(i64 %ld23)
-  %$t498.addr = alloca ptr
-  store ptr %cr24, ptr %$t498.addr
-  %ld25 = load ptr, ptr %$t498.addr
+  %$t580.addr = alloca ptr
+  store ptr %cr24, ptr %$t580.addr
+  %ld25 = load ptr, ptr %$t580.addr
   call void @march_println(ptr %ld25)
   ret void
 }

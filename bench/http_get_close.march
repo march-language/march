@@ -1,0 +1,26 @@
+-- HTTP GET benchmark: connection-per-request mode (Connection: close)
+mod HttpGetClose do
+
+fn run_requests(n, client, url) do
+  if n == 0 then Ok(0)
+  else
+    match HttpClient.get(client, url) with
+    | Ok(_) -> run_requests(n - 1, client, url)
+    | Err(e) -> Err(e)
+    end
+end
+
+fn main() do
+  let n = 20
+  let url = "http://httpbin.org/get"
+  let client = HttpClient.new_client()
+  let client = HttpClient.add_request_step(client, "defaults",
+    HttpClient.step_default_headers)
+  print("connection-per-request: " ++ int_to_string(n) ++ " GETs")
+  match run_requests(n, client, url) with
+  | Ok(_) -> print("done")
+  | Err(_) -> print("error")
+  end
+end
+
+end
