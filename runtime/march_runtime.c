@@ -219,10 +219,13 @@ void *march_send(void *actor, void *msg) {
         /* tag is already 0 from calloc in march_alloc */
         return none;
     }
-    /* Dispatch: call the fn ptr at field[2] (offset 16) with (actor, msg) */
-    typedef void (*dispatch_fn_t)(void *, void *);
-    dispatch_fn_t dispatch = (dispatch_fn_t)a[2];
-    dispatch(actor, msg);
+    /* Dispatch: field[2] is a closure struct.
+     * Closure layout: header(16) + fn_ptr(8).  fn_ptr at offset 16.
+     * The closure wrapper takes (clo, actor, msg). */
+    char *closure = (char *)(void *)a[2];
+    typedef void *(*closure_fn_t)(void *, void *, void *);
+    closure_fn_t fn = *(closure_fn_t *)(closure + 16);
+    fn(closure, actor, msg);
     /* Return Some(()) — tag=1, one field = 0 (unit) */
     void *some = march_alloc(16 + 8);
     int32_t *hdr = (int32_t *)((char *)some + 8);

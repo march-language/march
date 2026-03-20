@@ -466,15 +466,22 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
       Hashtbl.add ctx.emitted_wraps wrap_name ();
       (* We'll generate the wrapper function at the end.  For now, declare it. *)
       let nparams = match v.Tir.v_ty with Tir.TFn (ps, _) -> List.length ps | _ -> 0 in
+      let ret_tir = fn_ret_tir v.Tir.v_ty in
+      let target_ret = llvm_ret_ty ret_tir in
       let param_tys = List.init nparams (fun _ -> "ptr") in
       let all_params = "ptr" :: param_tys in  (* clo + original params *)
       let arg_names = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
       let all_arg_decls = "%_clo" :: arg_names in
       let decl_str = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_arg_decls) in
       let call_args = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
-      Buffer.add_string ctx.extra_fns
-        (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call ptr @%s(%s)\n  ret ptr %%r\n}\n\n"
-           wrap_name decl_str fn_name call_args)
+      if target_ret = "void" then
+        Buffer.add_string ctx.extra_fns
+          (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n\n"
+             wrap_name decl_str fn_name call_args)
+      else
+        Buffer.add_string ctx.extra_fns
+          (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret ptr %%r\n}\n\n"
+             wrap_name decl_str target_ret fn_name call_args)
     end;
     (* Allocate closure: header(16) + fn_ptr(8) = 24 bytes *)
     let hp = fresh ctx "cwrap" in

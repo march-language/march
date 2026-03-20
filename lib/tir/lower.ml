@@ -671,7 +671,11 @@ let lower_actor (name : string) (actor : Ast.actor_def) : Tir.type_def list * Ti
   (* Using TCon(actor_type_name) (not TPtr TUnit) so that EField accesses on
      the actor pointer resolve field indices correctly via field_map lookups.
      All TCon → ptr in llvm_ty, so the LLVM function signatures are unaffected. *)
-  let actor_param = actor_var "$actor" (Tir.TCon (actor_type_name, [])) in
+  (* Mark actor param as Lin so Perceus won't add incrc for field loads.
+     The actor is uniquely owned — FBIP can safely mutate it in-place. *)
+  let actor_param = { Tir.v_name = "$actor";
+                      v_ty = Tir.TCon (actor_type_name, []);
+                      v_lin = Tir.Lin } in
   let actor_atom  = Tir.AVar actor_param in
 
   let lower_handler (h : Ast.actor_handler) : Tir.fn_def =
