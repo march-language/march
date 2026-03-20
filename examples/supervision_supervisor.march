@@ -6,10 +6,10 @@
 --   * strategy one_for_one        — only crashed child is restarted
 --   * max_restarts N within S     — escalation budget
 --   * pid_of_int(state.child)     — access child pids from supervisor state
+--   * run_until_idle()            — flush the async message queue
 --
 -- AppSupervisor manages a Worker child.  When Worker is killed, the
 -- supervisor automatically spawns a fresh Worker with a new pid.
--- send() now returns Some(handler_result) so callers can read state.
 --
 -- Run: march examples/supervision_supervisor.march
 
@@ -33,7 +33,6 @@ mod SupervisorDemo do
   end
 
   -- Supervisor: manages Worker under one_for_one strategy.
-  -- GetState() lets callers retrieve the current child pid.
   actor AppSupervisor do
     state { worker : Int }
     init { worker = 0 }
@@ -43,32 +42,13 @@ mod SupervisorDemo do
       max_restarts 5 within 60
       Worker worker
     end
-
-    -- Return state so callers can read state.worker (the child's pid as Int)
-    on GetState() do
-      state
-    end
-
-    -- Forward an Inc() to the managed Worker
-    on ForwardInc() do
-      send(pid_of_int(state.worker), Inc())
-      state
-    end
-
-    -- Forward a Ping() to the managed Worker
-    on ForwardPing() do
-      send(pid_of_int(state.worker), Ping())
-      state
-    end
   end
 
-  -- Helper: retrieve the current worker pid by asking the supervisor.
-  -- send() returns Some(state) when actor is alive, None if dead.
+  -- Helper: read the current worker pid from supervisor state directly.
   fn get_worker_pid(sup) do
-    let result = send(sup, GetState())
-    match result with
-    | None -> pid_of_int(-1)
-    | Some(s) -> pid_of_int(s.worker)
+    match get_actor_field(sup, "worker") with
+    | None    -> pid_of_int(-1)
+    | Some(n) -> pid_of_int(n)
     end
   end
 
@@ -82,18 +62,19 @@ mod SupervisorDemo do
     println("supervisor alive: " ++ bool_to_string(is_alive(sup)))
     println("")
 
-    -- Read initial child pid through GetState()
+    -- Read initial child pid directly from supervisor state (no send needed)
     let w1 = get_worker_pid(sup)
     println("initial worker pid:   " ++ to_string(w1))
     println("initial worker alive: " ++ bool_to_string(is_alive(w1)))
     println("")
 
-    -- Send some work to the worker via the supervisor
-    println("--- Sending work to worker (via supervisor) ---")
-    send(sup, ForwardInc())
-    send(sup, ForwardInc())
-    send(sup, ForwardInc())
-    send(sup, ForwardPing())
+    -- Send work directly to the worker, then flush
+    println("--- Sending work to worker ---")
+    send(w1, Inc())
+    send(w1, Inc())
+    send(w1, Inc())
+    send(w1, Ping())
+    run_until_idle()
     println("")
 
     -- Kill the worker directly.
@@ -104,17 +85,18 @@ mod SupervisorDemo do
     println("old worker alive after kill: " ++ bool_to_string(is_alive(w1)))
     println("")
 
-    -- Retrieve the new worker pid — the supervisor updated its state during restart
+    -- Read new worker pid from supervisor state (updated during restart)
     let w2 = get_worker_pid(sup)
     println("new worker pid after restart: " ++ to_string(w2))
     println("new worker alive:             " ++ bool_to_string(is_alive(w2)))
     println("(old pid was " ++ to_string(w1) ++ ", new pid is " ++ to_string(w2) ++ " — different!)")
     println("")
 
-    -- The new worker starts fresh (count = 0)
+    -- New worker starts fresh (count = 0)
     println("--- New worker responds with fresh state (count starts at 0) ---")
-    send(sup, ForwardInc())
-    send(sup, ForwardPing())
+    send(w2, Inc())
+    send(w2, Ping())
+    run_until_idle()
     println("")
 
     -- Supervisor remains healthy throughout

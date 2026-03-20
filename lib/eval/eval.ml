@@ -884,6 +884,21 @@ let base_env : env =
            | Some inst -> VInt (Queue.length inst.ai_mailbox)
            | None      -> VInt 0)
         | _ -> eval_error "mailbox_size: expected pid"))
+  ; ("get_actor_field", VBuiltin ("get_actor_field", function
+        (* Read a named field from an actor's current state record.
+           Returns Some(value) if the actor exists and has the field,
+           None otherwise. Useful for inspecting actor state from main(). *)
+        | [VPid pid; VString field] ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | Some inst ->
+             (match inst.ai_state with
+              | VRecord fields ->
+                (match List.assoc_opt field fields with
+                 | Some v -> VCon ("Some", [v])
+                 | None   -> VCon ("None", []))
+              | _ -> VCon ("None", []))
+           | None -> VCon ("None", []))
+        | _ -> eval_error "get_actor_field: expected (Pid, String)"))
   ; ("run_until_idle", VBuiltin ("run_until_idle", function
         | [] -> !run_scheduler_hook (); VUnit
         | _ -> eval_error "run_until_idle: expected 0 arguments"))

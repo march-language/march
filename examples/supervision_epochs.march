@@ -3,12 +3,9 @@
 --
 -- Demonstrates:
 --   * get_cap(pid)              — returns Some(Cap(pid, epoch)) while alive
---   * send_checked(cap, msg)    — delivers msg only if cap epoch matches actor
---   * After a supervisor restart, the old pid is dead; old cap is stale.
---
--- The epoch model prevents messages from reaching the WRONG actor instance
--- after a crash+restart.  The old Cap holds the old pid; since that pid
--- is now dead, send_checked returns :error (stale/dead cap).
+--   * send_checked(cap, msg)    — queues msg only if cap epoch matches actor
+--   * run_until_idle()          — flush async message queue after send_checked
+--   * After a supervisor restart, old cap is stale (old pid is dead).
 --
 -- Run: march examples/supervision_epochs.march
 
@@ -39,18 +36,13 @@ mod EpochDemo do
       max_restarts 5 within 60
       Service service
     end
-
-    on GetState() do
-      state
-    end
   end
 
-  -- Helper: retrieve the current service pid via supervisor
+  -- Helper: read current service pid directly from supervisor state.
   fn get_service_pid(sup) do
-    let result = send(sup, GetState())
-    match result with
+    match get_actor_field(sup, "service") with
     | None    -> pid_of_int(-1)
-    | Some(s) -> pid_of_int(s.service)
+    | Some(n) -> pid_of_int(n)
     end
   end
 
@@ -74,10 +66,11 @@ mod EpochDemo do
     | Some(cap) ->
       println("cap acquired: " ++ to_string(cap))
 
-      -- send_checked validates the cap epoch before delivering
+      -- send_checked validates the cap epoch before queuing
       println("")
       println("--- send_checked with fresh cap (expect :ok) ---")
       let r1 = send_checked(cap, GetValue())
+      run_until_idle()
       println("send_checked result: " ++ to_string(r1))
 
       println("")
@@ -105,6 +98,7 @@ mod EpochDemo do
         println("new cap acquired: " ++ to_string(cap2))
 
         let r3 = send_checked(cap2, GetValue())
+        run_until_idle()
         println("send_checked new cap result: " ++ to_string(r3))
         println("")
         println("New instance starts fresh (value = 42, reset to initial state)")
