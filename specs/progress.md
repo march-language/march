@@ -189,3 +189,11 @@ march/
 5. **Typechecker: actor handler return type checking** — handlers should be verified to return the state record type
 6. **String interpolation** — `${}` syntax, desugars to `Interpolatable` interface calls
 7. **Error recovery in REPL** — currently a type error halts the REPL session
+
+## Stdlib: File System (added 2026-03-20)
+- [x] Path module — pure path manipulation (join, basename, dirname, extension, normalize)
+- [x] Seq module — lazy church-encoded fold sequences (map, filter, take, drop, fold_while, etc.)
+- [x] File module — Result-based I/O (read, write, append, delete, copy, rename, with_lines, with_chunks)
+- [x] Dir module — directory operations (list, mkdir, mkdir_p, rmdir, rm_rf)
+- [x] FileError ADT — NotFound, Permission, IsDirectory, NotEmpty, IoError
+- [x] Step(a) type — Continue/Halt for fold_while early termination
