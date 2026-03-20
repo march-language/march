@@ -93,6 +93,16 @@
 module_:
   | MOD; name = upper_name; DO; decls = list(decl); END; EOF
     { { mod_name = name; mod_decls = group_fn_clauses decls } }
+  | MOD; _n = upper_name; error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `do` to start the module body here:",
+        Some "mod Name do\n    ...\nend",
+        $startpos($3))) }
+  | error
+    { raise (March_errors.Errors.ParseError (
+        "March programs must start with a module declaration:",
+        Some "mod Main do\n    fn main() do\n        ...\n    end\nend",
+        $startpos($1))) }
 
 (* ---- Declarations ---- *)
 
@@ -139,6 +149,16 @@ fn_decl:
                              fc_body = body;
                              fc_span = mk_span ($loc) }] },
            mk_span ($loc)) }
+  | FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `do` to start the function body here:",
+        Some "fn name(params) do\n    body\nend",
+        $startpos($6))) }
+  | PUB; FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `do` to start the function body here:",
+        Some "pub fn name(params) do\n    body\nend",
+        $startpos($7))) }
 
 when_guard:
   | WHEN; e = expr { e }
@@ -155,6 +175,11 @@ let_decl:
   | LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
     { DLet ({ bind_pat = p; bind_ty = ty; bind_lin = Unrestricted; bind_expr = e },
             mk_span ($loc)) }
+  | LET; _p = simple_pattern; _ty = option(type_annot); error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `=` in the let binding here:",
+        Some "let name = expr",
+        $startpos($4))) }
 
 type_decl:
   | TYPE; name = upper_name; tparams = option(type_params); EQUALS;
@@ -238,6 +263,16 @@ mod_decl:
     { DMod (name, Private, group_fn_clauses decls, mk_span ($loc)) }
   | PUB; MOD; name = upper_name; DO; decls = list(decl); END
     { DMod (name, Public, group_fn_clauses decls, mk_span ($loc)) }
+  | MOD; _n = upper_name; error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `do` after the module name here:",
+        Some "mod Name do\n    ...\nend",
+        $startpos($3))) }
+  | PUB; MOD; _n = upper_name; error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `do` after the module name here:",
+        Some "pub mod Name do\n    ...\nend",
+        $startpos($4))) }
 
 (** Import declaration: use Mod.* or use Mod.{f, g} or use Mod
     Single-level module paths to avoid shift/reduce conflicts with DOT. *)
@@ -410,6 +445,11 @@ block_expr:
   | LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
     { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Unrestricted; bind_expr = e },
             mk_span ($loc)) }
+  | LET; _p = simple_pattern; _ty = option(type_annot); error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `=` in the let binding here:",
+        Some "let name = expr",
+        $startpos($4))) }
   | FN; name = lower_name; LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
     ret = option(ret_annot); DO; body = block_body; END
     { let simple_params = List.filter_map (function
@@ -420,6 +460,11 @@ block_expr:
           Some { param_name = n; param_ty = None; param_lin = Unrestricted }
         | FPPat _ -> None) params in
       ELetFn (name, simple_params, ret, body, mk_span ($loc)) }
+  | FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `do` to start the function body here:",
+        Some "fn name(params) do\n    body\nend",
+        $startpos($6))) }
   | e = expr { e }
 
 expr:
@@ -435,8 +480,28 @@ expr:
         $startpos($3))) }
   | IF; cond = expr; THEN; t = expr; ELSE; f = expr
     { EIf (cond, t, f, mk_span ($loc)) }
+  | IF; _c = expr; THEN; _t = expr; error
+    { raise (March_errors.Errors.ParseError (
+        "March `if` expressions always need an `else` branch:",
+        Some "if cond then\n    expr1\nelse\n    expr2",
+        $startpos($5))) }
+  | IF; _c = expr; error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `then` after the condition here:",
+        Some "if cond then\n    expr1\nelse\n    expr2",
+        $startpos($3))) }
   | MATCH; e = expr; WITH; option(PIPE); bs = separated_nonempty_list(PIPE, branch); END
     { EMatch (e, bs, mk_span ($loc)) }
+  | MATCH; _e = expr; WITH; option(PIPE); _bs = separated_nonempty_list(PIPE, branch); error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `end` to close the match here:",
+        None,
+        $startpos($6))) }
+  | MATCH; _e = expr; error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `with` after the match expression here:",
+        Some "match expr with\n    | Pattern -> result\nend",
+        $startpos($3))) }
 
 lambda_params:
   | name = lower_name { [{ param_name = name; param_ty = None; param_lin = Unrestricted }] }
@@ -566,6 +631,11 @@ interp_parts:
 branch:
   | p = pattern; guard = option(when_guard); ARROW; e = block_body
     { { branch_pat = p; branch_guard = guard; branch_body = e } }
+  | _p = pattern; _guard = option(when_guard); error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `->` in the match arm here:",
+        Some "| Pattern -> result",
+        $startpos($3))) }
 
 (* ---- Patterns ---- *)
 

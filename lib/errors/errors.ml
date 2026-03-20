@@ -78,10 +78,12 @@ let render_parse_error ~src ?(filename = "") ?hint ~msg lexbuf =
   (* Gutter  "N | " *)
   let gutter = Printf.sprintf "%d | " line in
   let pad    = String.make (String.length gutter) ' ' in
-  (* Optional hint block *)
+  (* Optional hint block — each line gets 4-space indent *)
   let hint_block = match hint with
-    | Some h -> Printf.sprintf "\n    %s" h
-    | None   -> ""
+    | Some h ->
+      let lines = String.split_on_char '\n' h in
+      "\n" ^ String.concat "\n" (List.map (fun l -> "    " ^ l) lines)
+    | None -> ""
   in
   String.concat "\n"
     [ header; ""; msg; ""; gutter ^ src_line; pad ^ underline; hint_block ]
