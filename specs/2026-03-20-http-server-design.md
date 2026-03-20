@@ -15,6 +15,7 @@ Build an HTTP/1.1 server into March's stdlib. Inspired by Plug/Bandit/Phoenix:
 - **Concurrent by default** — each accepted connection spawns an OS thread (OCaml 5 `Thread.create`). Blocking I/O releases the domain lock, so threads waiting on `tcp_recv`/`tcp_send` don't block other connections. Like Bandit spawning an Erlang process per connection.
 - **Crash isolation without try/catch** — each connection thread has its own execution context. If a handler crashes, the thread catches it at the runtime level (OCaml, not March), sends a 500, closes the fd. Other connections and the accept loop are unaffected.
 - **Supervised connections** — the accept loop tracks all live connection threads. Enforces max connections, idle timeouts, and graceful shutdown. Like Bandit's `DynamicSupervisor` over connection processes, but using an atomic counter + socket timeouts instead of OTP supervision trees.
+- **WebSocket via upgrade** — a plug can upgrade an HTTP connection to WebSocket. After the pipeline, the runtime performs the handshake and enters a March message loop. The handler is a recursive function with pattern matching on frames — no callbacks, no traits, just tail recursion.
 - **Capabilities thread through closures** — handlers capture only the caps they need. The type signature is the security audit.
 
 ## Non-Goals (v1)
@@ -22,7 +23,6 @@ Build an HTTP/1.1 server into March's stdlib. Inspired by Plug/Bandit/Phoenix:
 - Linear Conn enforcement — type checker supports it, interpreter doesn't enforce at runtime; deferred
 - Typestate (`Conn(Pending)` vs `Conn(Sent)`) — needs phantom types, deferred
 - Streaming/chunked responses — deferred to v2
-- WebSockets — deferred to v2
 - HTTPS/TLS — deferred
 - HTTP/2 — deferred
 - March-level scheduler integration — concurrency is via OCaml threads, not the March scheduler
@@ -85,6 +85,11 @@ Modeled on `%Plug.Conn{}`. Holds everything about a request-response cycle.
 ```march
 type Method = Get | Post | Put | Patch | Delete | Head | Options
 
+type WsFrame = TextFrame(String) | BinaryFrame(String) | Ping | Pong | Close(Int, String)
+type WsSocket = WsSocket(Int)  -- wraps fd, opaque to March code
+
+type Upgrade = NoUpgrade | WebSocketUpgrade(WsSocket -> Unit)
+
 type Conn = Conn(
   Int,                   -- fd (TCP socket)
   Method,                -- request method
@@ -97,7 +102,8 @@ type Conn = Conn(
   List(Header),          -- response headers
   String,                -- response body
   Bool,                  -- halted? (true after send_resp)
-  List((String, String)) -- assigns (user-defined key-value store)
+  List((String, String)),-- assigns (user-defined key-value store)
+  Upgrade                -- websocket upgrade (NoUpgrade by default)
 )
 ```
 
@@ -107,7 +113,7 @@ Read fields from the Conn by destructuring and reconstructing. Since Conn is a p
 
 ```march
 pub fn method(conn) : Method do
-  match conn with | Conn(_, m, _, _, _, _, _, _, _, _, _, _) -> m end
+  match conn with | Conn(_, m, _, _, _, _, _, _, _, _, _, _, _) -> m end
 end
 
 pub fn path(conn)        : String
@@ -119,6 +125,7 @@ pub fn get_req_header(conn, name) : Option(String)
 pub fn halted(conn)      : Bool
 pub fn assigns(conn)     : List((String, String))
 pub fn get_assign(conn, key) : Option(String)
+pub fn upgrade(conn)     : Upgrade
 ```
 
 When linear Conn is added in v2, accessors will destructure-and-reconstruct to satisfy linearity (consuming the old Conn, returning both the extracted value and a new Conn), or we'll add a borrow mechanism to the type checker.
@@ -542,6 +549,306 @@ fn main(net : Cap(Net), db : Cap(Db)) do
 end
 ```
 
+## WebSocket Support
+
+### How Phoenix/Bandit Does It (for reference)
+
+In Phoenix, WebSocket flows through three layers:
+
+1. **Plug level** — `Plug.Conn` has an `upgrade` field. A plug sets it to `{:websocket, handler, opts}`
+2. **Bandit level** — after the plug pipeline returns, Bandit checks `conn.upgrade`. If websocket, it sends 101, then switches the connection process from HTTP mode to WebSocket frame mode. The process stays alive.
+3. **Phoenix level** — `Phoenix.Socket` and `Phoenix.Channel` provide a GenServer-based handler with `handle_in/3`, `handle_info/2` callbacks
+
+March doesn't need the Phoenix layer. We operate at the Plug/Bandit layer — upgrade detection, handshake, and a message loop.
+
+### The March Model: Upgrade + Recursive Handler
+
+WebSocket breaks `Conn -> Conn`. HTTP is one request, one response. WebSocket is a long-lived bidirectional stream. The solution: a plug marks the conn for upgrade, and the runtime enters a **March-level message loop** instead of closing the fd.
+
+The handler isn't a callback object. It's a function `WsSocket -> Unit` that uses tail recursion and pattern matching — the most natural March idiom for a long-lived loop.
+
+### Upgrade Flow
+
+```
+1. HTTP request arrives with Upgrade: websocket headers
+2. Normal plug pipeline runs (auth, logging, etc.)
+3. Router plug calls WebSocket.upgrade(conn, handler)
+   → stores handler in Conn's upgrade field, marks halted
+4. Pipeline returns to runtime
+5. Runtime checks conn.upgrade:
+   - NoUpgrade → normal HTTP response (existing path)
+   - WebSocketUpgrade(handler) → WebSocket handshake:
+     a. Validate Sec-WebSocket-Key header
+     b. Compute Sec-WebSocket-Accept (SHA-1 + base64)
+     c. Send "HTTP/1.1 101 Switching Protocols" response
+     d. Call handler(WsSocket(fd))
+     e. Handler runs until close/crash
+     f. Thread stays alive for WS lifetime
+     g. On return or crash: close fd, decr active count
+```
+
+The plug pipeline still runs for WebSocket connections. Auth, logging, rate limiting — all apply before the upgrade. This is the same design as Bandit: the upgrade is detected after the pipeline, not before.
+
+### Types
+
+```march
+type WsFrame = TextFrame(String)
+             | BinaryFrame(String)
+             | Ping
+             | Pong
+             | Close(Int, String)  -- status code + reason
+
+type WsSocket = WsSocket(Int)  -- opaque handle wrapping fd
+```
+
+### WebSocket API (March-side)
+
+```march
+-- Upgrade a conn to websocket. Handler is called after handshake.
+-- Validates upgrade headers, marks conn as halted.
+pub fn upgrade(conn, handler : WsSocket -> Unit) : Conn do
+  match Conn.get_req_header(conn, "upgrade") with
+  | Some("websocket") ->
+    match conn with
+    | Conn(fd, m, p, pi, qs, rh, rb, _, _, _, _, assigns, _) ->
+      Conn(fd, m, p, pi, qs, rh, rb, 101, [], "", true, assigns,
+           WebSocketUpgrade(handler))
+    end
+  | _ ->
+    conn |> Conn.text(400, "Not a WebSocket request")
+  end
+end
+
+-- Receive a frame (blocks until one arrives)
+-- Builtin: ws_recv(fd) -> WsFrame
+pub fn recv(socket) : WsFrame do
+  match socket with
+  | WsSocket(fd) -> ws_recv(fd)
+  end
+end
+
+-- Send a frame
+-- Builtin: ws_send(fd, frame) -> Unit
+pub fn send(socket, frame) : Unit do
+  match socket with
+  | WsSocket(fd) -> ws_send(fd, frame)
+  end
+end
+
+-- Send a close frame and close the connection
+pub fn close(socket, code, reason) : Unit do
+  send(socket, Close(code, reason))
+end
+```
+
+### Handler Pattern: Tail-Recursive Message Loop
+
+The idiomatic March WebSocket handler uses tail recursion with pattern matching. No callbacks, no GenServer — just a function that loops.
+
+```march
+fn echo_handler(socket) do
+  echo_loop(socket)
+end
+
+fn echo_loop(socket) do
+  match WebSocket.recv(socket) with
+  | TextFrame(msg) ->
+    WebSocket.send(socket, TextFrame("Echo: " ++ msg))
+    echo_loop(socket)
+  | BinaryFrame(data) ->
+    WebSocket.send(socket, BinaryFrame(data))
+    echo_loop(socket)
+  | Ping ->
+    WebSocket.send(socket, Pong)
+    echo_loop(socket)
+  | Close(_, _) ->
+    println("Client disconnected")
+  | Pong -> echo_loop(socket)
+  end
+end
+```
+
+### Stateful Handler: Thread State Through Recursion
+
+For handlers that maintain state (chat rooms, game sessions), thread it through the recursive call:
+
+```march
+fn chat_handler(socket) do
+  WebSocket.send(socket, TextFrame("Welcome to chat!"))
+  chat_loop(socket, [])
+end
+
+fn chat_loop(socket, history) do
+  match WebSocket.recv(socket) with
+  | TextFrame(msg) ->
+    let entry = (msg, history)
+    WebSocket.send(socket, TextFrame("You said: " ++ msg))
+    chat_loop(socket, Cons(msg, history))
+  | Close(_, _) ->
+    println("Client left. Messages: " ++ int_to_string(length(history)))
+  | Ping ->
+    WebSocket.send(socket, Pong)
+    chat_loop(socket, history)
+  | _ -> chat_loop(socket, history)
+  end
+end
+```
+
+### Broadcasting: WebSockets + Actors
+
+For multi-client scenarios (chat rooms, live updates), combine WebSocket handlers with March actors. Each WebSocket connection registers with a room actor:
+
+```march
+fn chat_handler(room_pid, socket) do
+  -- Register this connection with the room
+  Actor.send(room_pid, Join(socket))
+  chat_loop(room_pid, socket)
+end
+
+fn chat_loop(room_pid, socket) do
+  match WebSocket.recv(socket) with
+  | TextFrame(msg) ->
+    -- Tell the room to broadcast
+    Actor.send(room_pid, Broadcast(msg))
+    chat_loop(room_pid, socket)
+  | Close(_, _) ->
+    Actor.send(room_pid, Leave(socket))
+  | Ping ->
+    WebSocket.send(socket, Pong)
+    chat_loop(room_pid, socket)
+  | _ -> chat_loop(room_pid, socket)
+  end
+end
+
+-- Room actor: maintains list of connected sockets, broadcasts to all
+fn room_actor(sockets) do
+  receive do
+  | Join(socket) -> room_actor(Cons(socket, sockets))
+  | Leave(socket) -> room_actor(remove(sockets, socket))
+  | Broadcast(msg) ->
+    let frame = TextFrame(msg)
+    each(sockets, fn(s) do WebSocket.send(s, frame) end)
+    room_actor(sockets)
+  end
+end
+```
+
+This is the March equivalent of Phoenix Channels + PubSub. The room actor is the channel, `Actor.send` is the PubSub, and the WebSocket handler is the socket. No framework — just actors and functions.
+
+### Routing WebSocket Connections
+
+WebSocket routes are just plug branches that call `WebSocket.upgrade`:
+
+```march
+fn router(conn) do
+  match (Conn.method(conn), Conn.path_info(conn)) with
+  | (Get, ["ws", "echo"])  -> conn |> WebSocket.upgrade(echo_handler)
+  | (Get, ["ws", "chat"])  -> conn |> WebSocket.upgrade(chat_handler(room_pid))
+  | (Get, [])              -> conn |> Conn.text(200, "Hello!")
+  | _                      -> conn |> Conn.text(404, "Not found")
+  end
+end
+```
+
+Auth middleware runs before the router, so WebSocket connections go through the same auth pipeline as HTTP requests. If auth fails and halts the conn, the WebSocket upgrade never happens.
+
+### Runtime Implementation (OCaml side)
+
+After the plug pipeline returns, the runtime checks the upgrade field:
+
+```ocaml
+let handle_connection client_fd pipeline env =
+  let raw = tcp_recv_http client_fd in
+  let conn = build_conn client_fd raw in
+  let result_conn = eval_pipeline conn pipeline env in
+  match get_upgrade result_conn with
+  | NoUpgrade ->
+    (* Normal HTTP: write response, close *)
+    let response = serialize_response result_conn in
+    tcp_send_all client_fd response;
+    Unix.close client_fd
+  | WebSocketUpgrade handler ->
+    (* WebSocket: handshake, then enter handler *)
+    let key = get_header result_conn "sec-websocket-key" in
+    ws_send_handshake client_fd key;
+    (* Remove socket timeout — WS connections are long-lived *)
+    Unix.setsockopt_float client_fd Unix.SO_RCVTIMEO 0.0;
+    Unix.setsockopt_float client_fd Unix.SO_SNDTIMEO 0.0;
+    (* Call the March handler — blocks until it returns *)
+    eval_apply handler [VVariant ("WsSocket", [VInt (Obj.magic client_fd)])] env
+    (* Thread cleanup happens in Fun.protect ~finally *)
+```
+
+The WebSocket handshake (RFC 6455 §4.2.2):
+```ocaml
+let ws_send_handshake fd key =
+  let magic = "258EAFA5-E914-47DA-95CA-5AB5DC76E45B" in
+  let accept = Base64.encode (Sha1.string (key ^ magic)) in
+  let response = Printf.sprintf
+    "HTTP/1.1 101 Switching Protocols\r\n\
+     Upgrade: websocket\r\n\
+     Connection: Upgrade\r\n\
+     Sec-WebSocket-Accept: %s\r\n\r\n" accept in
+  tcp_send_all fd response
+```
+
+### WebSocket Frame Protocol (OCaml builtins)
+
+RFC 6455 frames — implemented as OCaml builtins, exposed to March:
+
+```
+ws_recv(fd : Int) -> WsFrame
+  Read one WebSocket frame from fd.
+  - Reads 2-byte header (FIN, opcode, MASK, payload length)
+  - Reads extended length if needed (16-bit or 64-bit)
+  - Reads 4-byte mask key (client→server frames are always masked)
+  - Reads and unmasks payload
+  - Maps opcode to WsFrame variant:
+    0x1 → TextFrame(payload)
+    0x2 → BinaryFrame(payload)
+    0x8 → Close(status_code, reason)
+    0x9 → Ping
+    0xA → Pong
+  - Handles continuation frames (opcode 0x0) by buffering
+
+ws_send(fd : Int, frame : WsFrame) -> Unit
+  Encode and send one WebSocket frame.
+  - Server→client frames are NOT masked (per RFC 6455)
+  - Maps WsFrame variant to opcode
+  - Writes header + payload length + payload
+  - Handles frames > 125 bytes (extended length encoding)
+```
+
+### Supervision for WebSocket Connections
+
+WebSocket connections are long-lived — they stay in the connection count and are subject to the same supervision as HTTP:
+
+- **Active count**: the thread stays alive (and counted) for the WS lifetime
+- **Max connections**: WS connections consume slots. A server with `max_connections(1000)` can hold at most 1000 concurrent HTTP + WS connections combined
+- **Idle timeout**: disabled after upgrade (WS connections are expected to be long-lived). Ping/pong provides liveness checking instead — the runtime auto-responds to pings at the OCaml level
+- **Crash recovery**: if the March handler crashes, `Fun.protect ~finally` still runs — fd closed, counter decremented
+- **Graceful shutdown**: WS handlers receive a `Close` frame when the server drains (the drain loop sends close frames to all upgraded connections before waiting)
+
+### Comparison: Phoenix Channels vs March WebSocket
+
+| Feature | Phoenix | March |
+|---------|---------|-------|
+| Handler model | GenServer callbacks (`handle_in`, `handle_info`) | Recursive function with pattern match on `recv` |
+| State | GenServer state (socket.assigns) | Function arguments (threaded through recursion) |
+| Broadcasting | PubSub (`broadcast/3`) | Actor that holds socket list + `each` |
+| Room/topic multiplexing | Built-in topic routing | Just function arguments + actors |
+| Presence tracking | `Phoenix.Presence` (CRDT) | Actor with join/leave messages (v1) |
+| Auth | Socket-level `connect/3` | Same plug pipeline as HTTP |
+| Transport | Configurable (WS, long-poll) | WebSocket only (v1) |
+
+### Non-Goals for WebSocket (v1)
+
+- **Per-message compression** (`permessage-deflate`) — deferred
+- **Subprotocol negotiation** (`Sec-WebSocket-Protocol`) — deferred
+- **Binary frame streaming** (fragmented frames > memory) — deferred
+- **Long-poll fallback** — WebSocket only
+- **Session types** — compile-time protocol verification is a v2 goal
+
 ## New Builtins Required
 
 Added to `base_env` in `lib/eval/eval.ml`:
@@ -583,6 +890,24 @@ http_serialize_response(status : Int, headers : List(Header), body : String) -> 
   Reason phrase derived from status code (200 → "OK", 404 → "Not Found", etc.)
 ```
 
+### WebSocket Builtins
+
+```
+ws_recv(fd : Int) -> WsFrame
+  Read and decode one WebSocket frame (RFC 6455).
+  Blocks until a frame arrives. Unmasks client payload.
+  Maps opcode → WsFrame variant. Handles continuation frames.
+
+ws_send(fd : Int, frame : WsFrame) -> Unit
+  Encode and send one WebSocket frame. No masking (server→client).
+  Maps WsFrame variant → opcode. Handles extended length encoding.
+
+ws_handshake(fd : Int, key : String) -> Unit
+  Send 101 Switching Protocols with computed Sec-WebSocket-Accept.
+  Called internally by the runtime after pipeline upgrade detection.
+  Also exposed as a builtin for custom server implementations.
+```
+
 ### Existing Builtins Reused
 
 ```
@@ -602,8 +927,9 @@ string_split(s, sep)           — already implemented in eval.ml. Used for
 | File | Changes |
 |------|---------|
 | `lib/eval/dune` | Add `threads` library dependency |
-| `lib/eval/eval.ml` | Add `http_server_listen`, `http_parse_request`, `http_serialize_response` builtins; add `Mutex.t` around actor globals; thread-local state via `Thread.key` |
-| `stdlib/http_server.march` | New file: `Conn` type, accessors, transforms, pipeline runner, `HttpServer.new`, `HttpServer.plug`, `HttpServer.listen` (calls builtin) |
+| `lib/eval/eval.ml` | Add `http_server_listen`, `http_parse_request`, `http_serialize_response`, `ws_recv`, `ws_send`, `ws_handshake` builtins; add `Mutex.t` around actor globals; thread-local state via `Thread.key`; WebSocket upgrade detection after pipeline |
+| `stdlib/http_server.march` | New file: `Conn` type (with Upgrade field), accessors, transforms, pipeline runner, `HttpServer.new`, `HttpServer.plug`, `HttpServer.listen` (calls builtin) |
+| `stdlib/websocket.march` | New file: `WsFrame`, `WsSocket`, `WebSocket.upgrade`, `WebSocket.recv`, `WebSocket.send`, `WebSocket.close` |
 | `bin/main.ml` | Add `http_server.march` to stdlib load order (after `http.march` for `Header` type) |
 | `test/test_march.ml` | Tests for builtins and server module |
 
@@ -617,6 +943,9 @@ string_split(s, sep)           — already implemented in eval.ml. Used for
 4. **Conn construction**: Build a Conn, read fields back
 5. **Conn transforms**: `put_resp_header`, `assign`, `send_resp` modify the right fields
 6. **Pipeline execution**: Pipeline stops at halted conn, runs all plugs when not halted
+7. **WebSocket handshake**: `ws_handshake` produces valid `Sec-WebSocket-Accept`
+8. **WebSocket framing**: `ws_recv` decodes masked text/binary/close/ping frames; `ws_send` encodes them
+9. **WebSocket upgrade detection**: Conn with `WebSocketUpgrade` triggers handshake path
 
 ### Integration Tests (March programs)
 
@@ -629,6 +958,9 @@ A test server that:
 6. Returns 503 when at max connections (set low, e.g., 2, then send 3+ concurrent)
 7. Closes idle connections after timeout (set low, e.g., 2s, connect and wait)
 8. Shuts down gracefully on SIGTERM (send requests, SIGTERM, verify in-flight complete)
+9. WebSocket echo: connect with wscat, send text, verify echo response
+10. WebSocket + auth: verify upgrade fails without auth header
+11. WebSocket broadcast: two clients connect to chat room, one sends, both receive
 
 Verified by running the server in the background and curling from the test harness.
 
@@ -658,6 +990,7 @@ mod MyApp do
     | (Get, ["health"])      -> conn |> Conn.text(200, "ok")
     | (Get, ["users", id])   -> conn |> show_user(id)
     | (Post, ["users"])      -> conn |> create_user()
+    | (Get, ["ws", "echo"])  -> conn |> WebSocket.upgrade(echo_handler)
     | _                      -> conn |> Conn.text(404, "Not Found")
     end
   end
@@ -669,6 +1002,20 @@ mod MyApp do
   fn create_user(conn) do
     let body = Conn.req_body(conn)
     conn |> Conn.json(201, body)
+  end
+
+  -- WebSocket echo handler
+  fn echo_handler(socket) do
+    match WebSocket.recv(socket) with
+    | TextFrame(msg) ->
+      WebSocket.send(socket, TextFrame("Echo: " ++ msg))
+      echo_handler(socket)
+    | Close(_, _) -> ()
+    | Ping ->
+      WebSocket.send(socket, Pong)
+      echo_handler(socket)
+    | _ -> echo_handler(socket)
+    end
   end
 
   fn main() do
