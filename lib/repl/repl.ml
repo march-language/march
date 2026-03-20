@@ -533,6 +533,35 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
     ) !watch_list
   in
 
+  (* Redirect stdout to a pipe during [f ()], add captured lines to transcript.
+     Notty already dup'd its terminal fd at create time, so redirecting fd 1
+     here does not interfere with rendering. *)
+  let capture_stdout f =
+    flush stdout;
+    let (pipe_r, pipe_w) = Unix.pipe () in
+    let saved_fd = Unix.dup Unix.stdout in
+    Unix.dup2 pipe_w Unix.stdout;
+    Unix.close pipe_w;
+    let result = (try Ok (f ()) with exn -> Error exn) in
+    flush stdout;
+    Unix.dup2 saved_fd Unix.stdout;
+    Unix.close saved_fd;
+    let buf = Buffer.create 256 in
+    let tmp = Bytes.create 4096 in
+    (try while true do
+      let n = Unix.read pipe_r tmp 0 (Bytes.length tmp) in
+      if n = 0 then raise Exit
+      else Buffer.add_subbytes buf tmp 0 n
+    done with Exit -> ());
+    Unix.close pipe_r;
+    let captured = Buffer.contents buf in
+    List.iter (fun line -> if line <> "" then add_line Notty.A.empty line)
+      (String.split_on_char '\n' captured);
+    match result with
+    | Ok v    -> v
+    | Error e -> raise e
+  in
+
   let process_src src =
     let lexbuf = Lexing.from_string src in
     (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
@@ -562,7 +591,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
         ) (March_errors.Errors.sorted input_ctx);
       if tc_ok || is_debug then
         (try
-           env := March_eval.Eval.eval_decl !env d';
+           env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
            if tc_ok then
              tc_env := { new_tc with errors = March_errors.Errors.create () };
            let out = match d' with
@@ -630,7 +659,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
         add_line Notty.A.empty (Printf.sprintf "note: inferred type was %s" ty_str)
       else
         (try
-           let v = March_eval.Eval.eval_expr !env e' in
+           let v = capture_stdout (fun () -> March_eval.Eval.eval_expr !env e') in
            let vs = March_eval.Eval.value_to_string_pretty v in
            add_line Notty.A.(fg green) (Printf.sprintf "= %s" vs);
            Result_vars.push result_h v ty_str;
