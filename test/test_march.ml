@@ -1811,6 +1811,7 @@ let mk_actor_inst name alive st = March_eval.Eval.{
   ai_supervisor    = None;
   ai_restart_count = [];
   ai_epoch         = 0;
+  ai_resources     = [];
 }
 
 let test_list_actors_empty () =
@@ -4511,6 +4512,51 @@ let test_supervision_task_spawn_link_crash_propagates () =
      | March_eval.Eval.VCon ("Err", _) -> true
      | _ -> false)
 
+(* ── Supervision Phase 6a: OS Resource Drop ─────────────────────────── *)
+
+(** Phase 6a: cleanup function is called when actor crashes. *)
+let test_resource_cleanup_on_crash () =
+  March_eval.Eval.reset_scheduler_state ();
+  let cleaned = ref false in
+  let _ = add_fresh_actor 0 "A" in
+  (* Register a cleanup thunk directly via OCaml API *)
+  March_eval.Eval.register_resource_ocaml 0 "test_resource"
+    (fun () -> cleaned := true);
+  March_eval.Eval.crash_actor 0 "test kill";
+  Alcotest.(check bool) "cleanup called on crash" true !cleaned
+
+(** Phase 6a: multiple resources are cleaned in reverse acquisition order. *)
+let test_resource_cleanup_reverse_order () =
+  March_eval.Eval.reset_scheduler_state ();
+  let order = ref [] in
+  let _ = add_fresh_actor 0 "A" in
+  March_eval.Eval.register_resource_ocaml 0 "first"
+    (fun () -> order := "first" :: !order);
+  March_eval.Eval.register_resource_ocaml 0 "second"
+    (fun () -> order := "second" :: !order);
+  March_eval.Eval.register_resource_ocaml 0 "third"
+    (fun () -> order := "third" :: !order);
+  March_eval.Eval.crash_actor 0 "test";
+  (* Cleanup should be: third, second, first (reverse acquisition) *)
+  Alcotest.(check (list string)) "reverse cleanup order"
+    ["third"; "second"; "first"] !order
+
+(** Phase 6a: resources of linked actor are also cleaned on link propagation. *)
+let test_resource_cleanup_on_link_crash () =
+  March_eval.Eval.reset_scheduler_state ();
+  let a_cleaned = ref false in
+  let b_cleaned = ref false in
+  let _ = add_fresh_actor 0 "A" in
+  let _ = add_fresh_actor 1 "B" in
+  March_eval.Eval.register_resource_ocaml 0 "a_res"
+    (fun () -> a_cleaned := true);
+  March_eval.Eval.register_resource_ocaml 1 "b_res"
+    (fun () -> b_cleaned := true);
+  March_eval.Eval.link_actors 0 1;
+  March_eval.Eval.crash_actor 0 "test";
+  Alcotest.(check bool) "A's resource cleaned" true !a_cleaned;
+  Alcotest.(check bool) "B's resource cleaned via link" true !b_cleaned
+
 let test_file_builtin_exists_false () =
   (* If file_exists builtin is missing, this will raise an eval error *)
   let env = eval_with_stdlib [] {|mod T do
@@ -5384,6 +5430,15 @@ let () =
         Alcotest.test_case "task_spawn_link completes"         `Quick (with_reset test_supervision_task_spawn_link_completes);
         Alcotest.test_case "task_spawn_link crash propagates"  `Quick (with_reset test_supervision_task_spawn_link_crash_propagates);
       ]);
+      Alcotest.test_group "supervision phase6a"
+        [
+          Alcotest.test_case "resource cleanup on crash"
+            `Quick (with_reset test_resource_cleanup_on_crash);
+          Alcotest.test_case "resource cleanup reverse order"
+            `Quick (with_reset test_resource_cleanup_reverse_order);
+          Alcotest.test_case "resource cleanup on link crash"
+            `Quick (with_reset test_resource_cleanup_on_link_crash);
+        ];
       ("eval phase 4", [
         Alcotest.test_case "async send queues not dispatches" `Quick
           (with_reset test_async_send_queues_not_dispatches);

@@ -58,6 +58,9 @@ type actor_inst = {
   mutable ai_restart_count : (float * int) list; (** (timestamp, count) restart history *)
   (* Phase 3: epoch-based capability tracking *)
   mutable ai_epoch    : int;                 (** monotonically increasing restart epoch *)
+  (* Phase 6a: OS resource cleanup *)
+  mutable ai_resources : (string * (unit -> unit)) list;
+  (** Named cleanup thunks acquired in order, cleaned in reverse on crash. *)
 }
 
 (** Actor definitions registered by [DActor] — reset per module eval. *)
@@ -214,7 +217,8 @@ let restore_actors (snap : actor_state_snapshot) : unit =
                      ai_mailbox  = Queue.create ();
                      ai_supervisor = None;
                      ai_restart_count = [];
-                     ai_epoch = 0 } in
+                     ai_epoch = 0;
+                     ai_resources = [] } in
         Hashtbl.add actor_registry pid inst
     ) snap.ass_instances;
   next_pid := snap.ass_next_pid
@@ -494,7 +498,8 @@ let spawn_child_actor (child_actor_name : string) (supervisor_pid : int) : int =
       ai_state = child_init_state; ai_alive = true;
       ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
       ai_supervisor = Some supervisor_pid;
-      ai_restart_count = []; ai_epoch = 0 } in
+      ai_restart_count = []; ai_epoch = 0;
+      ai_resources = [] } in
     Hashtbl.add actor_registry child_pid child_inst;
     child_pid
 
@@ -2280,7 +2285,8 @@ and eval_expr_inner (env : env) (e : expr) : value =
                  ai_state = child_init_state; ai_alive = true;
                  ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
                  ai_supervisor = Some pid;
-                 ai_restart_count = []; ai_epoch = 0 } in
+                 ai_restart_count = []; ai_epoch = 0;
+                 ai_resources = [] } in
                Hashtbl.add actor_registry child_pid child_inst;
                (sf.sf_name.txt, child_pid)
            ) sup_cfg.sc_fields in
@@ -2309,7 +2315,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
                     ai_state    = init_state; ai_alive = true;
                     ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
                     ai_supervisor = None; ai_restart_count = [];
-                    ai_epoch = 0 } in
+                    ai_epoch = 0; ai_resources = [] } in
        Hashtbl.add actor_registry pid inst;
        VPid pid)
 
