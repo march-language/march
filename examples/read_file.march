@@ -24,7 +24,7 @@ mod ReadFile do
       println("=== Line count ===")
       println(int_to_string(List.length(lines)) ++ " lines")
     end
-
+    -- dbg()
     -- Stream lines with with_lines, collect first 3
     println("=== First 3 lines (streaming) ===")
     match File.with_lines(path, fn(lines) -> Seq.to_list(Seq.take(lines, 3))) with

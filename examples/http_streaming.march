@@ -1,0 +1,67 @@
+-- Example: streaming HTTP responses in March.
+--
+-- Shows three streaming patterns:
+--   1. Print chunks as they arrive
+--   2. Count bytes without buffering
+--   3. Stream a larger chunked response
+--
+-- Run: dune exec march -- examples/http_streaming.march
+
+mod HttpStreaming do
+
+fn main() do
+  let client = HttpClient.new_client()
+  let client = HttpClient.add_request_step(client, "defaults",
+    HttpClient.step_default_headers)
+
+  -- Pattern 1: Print chunks as they arrive
+  print("=== Pattern 1: Print chunks ===")
+  print("Streaming 5 JSON objects from httpbin.org/stream/5...")
+  print("")
+
+  fn print_chunk(chunk) do
+    print("[chunk " ++ int_to_string(string_length(chunk)) ++ " bytes]")
+    print(chunk)
+  end
+
+  match HttpClient.stream_get(client, "http://httpbin.org/stream/5", print_chunk) with
+  | Ok((status, _, _)) ->
+    print("Status: " ++ int_to_string(status))
+  | Err(_) ->
+    print("Error!")
+  end
+
+  -- Pattern 2: Count bytes without keeping body in memory
+  print("")
+  print("=== Pattern 2: Byte counting ===")
+  print("Counting bytes from httpbin.org/bytes/8192...")
+
+  fn count_bytes(chunk) do
+    print("  received " ++ int_to_string(string_length(chunk)) ++ " bytes")
+  end
+
+  match HttpClient.stream_get(client, "http://httpbin.org/bytes/8192", count_bytes) with
+  | Ok((status, _, _)) ->
+    print("Status: " ++ int_to_string(status))
+  | Err(_) ->
+    print("Error!")
+  end
+
+  -- Pattern 3: Stream larger chunked response
+  print("")
+  print("=== Pattern 3: Chunked transfer (20 objects) ===")
+
+  fn show_chunk(chunk) do
+    print("  chunk: " ++ int_to_string(string_length(chunk)) ++ " bytes")
+  end
+
+  match HttpClient.stream_get(client, "http://httpbin.org/stream/20", show_chunk) with
+  | Ok((status, _, _)) ->
+    print("Status: " ++ int_to_string(status))
+    print("Done!")
+  | Err(_) ->
+    print("Error!")
+  end
+end
+
+end
