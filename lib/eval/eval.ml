@@ -95,6 +95,10 @@ let lookup_doc (key : string) : string option =
 let next_pid        : int ref = ref 0
 let next_monitor_id : int ref = ref 0
 
+(** Pid of the actor whose handler is currently executing.
+    Set by [run_scheduler] when entering a handler; used by [self] and [receive]. *)
+let current_pid : int option ref = ref None
+
 (* ------------------------------------------------------------------ *)
 (* Ring buffer                                                         *)
 (* ------------------------------------------------------------------ *)
@@ -469,6 +473,11 @@ let fresh_monitor_id () =
     is defined so that [crash_actor] can call it for supervisor restarts. *)
 let eval_expr_hook : (env -> expr -> value) ref =
   ref (fun _env _expr -> eval_error "eval_expr not yet initialized")
+
+(** Forward reference for running the scheduler — set after [run_scheduler]
+    is defined so that [base_env] builtins can call it. *)
+let run_scheduler_hook : (unit -> unit) ref =
+  ref (fun () -> eval_error "run_scheduler not yet initialized")
 
 (** Spawn a fresh child actor instance (for supervisor restarts).
     Returns the new pid. *)
@@ -875,6 +884,25 @@ let base_env : env =
            | Some inst -> VInt (Queue.length inst.ai_mailbox)
            | None      -> VInt 0)
         | _ -> eval_error "mailbox_size: expected pid"))
+  ; ("run_until_idle", VBuiltin ("run_until_idle", function
+        | [] -> !run_scheduler_hook (); VUnit
+        | _ -> eval_error "run_until_idle: expected 0 arguments"))
+  ; ("self", VBuiltin ("self", function
+        | [] ->
+          (match !current_pid with
+           | Some pid -> VPid pid
+           | None -> eval_error "self: called outside an actor handler")
+        | _ -> eval_error "self: expected 0 arguments"))
+  ; ("receive", VBuiltin ("receive", function
+        | [] ->
+          (match !current_pid with
+           | Some pid ->
+             (match Hashtbl.find_opt actor_registry pid with
+              | Some inst when not (Queue.is_empty inst.ai_mailbox) ->
+                Queue.pop inst.ai_mailbox
+              | _ -> eval_error "receive: mailbox is empty (async receive requires a non-empty mailbox)")
+           | None -> eval_error "receive: called outside an actor handler")
+        | _ -> eval_error "receive: expected 0 arguments"))
     (* Utility: convert Int to Pid (needed for supervisor state field access) *)
   ; ("pid_of_int", VBuiltin ("pid_of_int", function
         | [VInt n] -> VPid n
@@ -2385,8 +2413,73 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear actor_defs_tbl;
   next_pid := 0;
   next_monitor_id := 0;
+  current_pid := None;
   reduction_ctx := None;
   last_reduction_count := 0
+
+(* NOTE: debug_ctx actor event logging is intentionally not reproduced here.
+   The old ESend recorded ame_state_before/ame_state_after. When actor debug
+   tracing is needed, add the same pattern inside the handler dispatch block below. *)
+
+(** Drain all actor mailboxes cooperatively.
+    Each pass iterates over all live actors; for each with a non-empty mailbox
+    it pops one message, finds the matching [on Msg] handler, and runs it.
+    Repeats until a full pass produces no work (all mailboxes empty). *)
+let run_scheduler () =
+  let changed = ref true in
+  while !changed do
+    changed := false;
+    (* Snapshot current pids to avoid issues with new actors spawned mid-pass *)
+    let pids = Hashtbl.fold (fun pid _ acc -> pid :: acc) actor_registry [] in
+    List.iter (fun pid ->
+      match Hashtbl.find_opt actor_registry pid with
+      | None -> ()
+      | Some inst when not inst.ai_alive -> ()
+      | Some inst when Queue.is_empty inst.ai_mailbox -> ()
+      | Some inst ->
+        changed := true;
+        let msg = Queue.pop inst.ai_mailbox in
+        let (msg_tag, msg_args) = match msg with
+          | VCon (tag, args) -> (tag, args)
+          | VAtom tag        -> (tag, [])
+          | _ ->
+            Printf.eprintf "run_scheduler: dropping malformed message from actor %d: %s\n"
+              pid (value_to_string msg);
+            ("__drop__", [])
+        in
+        if msg_tag <> "__drop__" then
+          (match List.find_opt (fun h -> h.ah_msg.txt = msg_tag)
+                   inst.ai_def.actor_handlers with
+           | None ->
+             (* No handler for this message tag: silently drop *)
+             ()
+           | Some handler ->
+             if List.length handler.ah_params <> List.length msg_args then
+               Printf.eprintf "run_scheduler: handler '%s' arity mismatch for actor %d\n"
+                 msg_tag pid
+             else begin
+               let prev_pid = !current_pid in
+               current_pid := Some pid;
+               let param_bindings =
+                 List.map2 (fun p v -> (p.param_name.txt, v))
+                   handler.ah_params msg_args
+               in
+               let handler_env =
+                 [("state", inst.ai_state)] @ param_bindings @ !(inst.ai_env_ref)
+               in
+               (try
+                  let new_state = !eval_expr_hook handler_env handler.ah_body in
+                  inst.ai_state <- new_state
+                with exn ->
+                  (* Handler raised an exception: crash the actor *)
+                  current_pid := prev_pid;
+                  crash_actor pid (Printexc.to_string exn));
+               current_pid := prev_pid
+             end)
+    ) pids
+  done
+
+let () = run_scheduler_hook := run_scheduler
 
 (** Task builtins: spawn, await, await_unwrap, yield.
     Placed after [apply] because [task_spawn] calls [apply] to eagerly
@@ -2726,11 +2819,14 @@ let eval_module_env (m : module_) : env =
   env_ref := final_env;
   final_env
 
-(** Run the module: evaluate it, then call [main()] if it exists. *)
+(** Run the module: evaluate it, then call [main()] if it exists.
+    After [main()] returns, drain all actor mailboxes via the scheduler loop.
+    [main()] sets up actors and queues initial messages; the scheduler
+    processes them all before the program exits. *)
 let run_module (m : module_) : unit =
   let env = eval_module_env m in
   match List.assoc_opt "main" env with
-  | None   -> ()  (* Library module; no main to run *)
+  | None   -> ()
   | Some v ->
     let _ = apply v [] in
-    ()
+    run_scheduler ()

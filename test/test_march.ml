@@ -3343,6 +3343,98 @@ let test_async_send_queues_not_dispatches () =
   Alcotest.(check int) "mailbox has 1 queued message" 1
     (match v with March_eval.Eval.VInt n -> n | _ -> -1)
 
+(** Phase 4: run_scheduler() processes queued messages.
+    After run_until_idle(), counter state should be updated. *)
+let test_scheduler_drains_mailbox () =
+  let src = {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    fn main() do
+      let pid = spawn(Counter)
+      send(pid, Inc())
+      send(pid, Inc())
+      send(pid, Inc())
+      run_until_idle()
+      mailbox_size(pid)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check int) "mailbox empty after run_until_idle" 0
+    (match v with March_eval.Eval.VInt n -> n | _ -> -1)
+
+(** Phase 4: scheduler processes handler and updates actor state. *)
+let test_scheduler_updates_actor_state () =
+  let src = {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    fn main() do
+      let pid = spawn(Counter)
+      send(pid, Inc())
+      send(pid, Inc())
+      send(pid, Inc())
+      run_until_idle()
+      pid
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  let pid = match v with March_eval.Eval.VPid n -> n | _ -> failwith "expected pid" in
+  let state = match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
+    | Some inst -> inst.March_eval.Eval.ai_state
+    | None -> failwith "actor not found" in
+  Alcotest.(check int) "count = 3 after 3 Inc messages" 3
+    (match state with
+     | March_eval.Eval.VRecord fields ->
+       (match List.assoc_opt "count" fields with
+        | Some (March_eval.Eval.VInt n) -> n
+        | _ -> -1)
+     | _ -> -1)
+
+(** Phase 4: scheduler processes messages from multiple actors interleaved. *)
+let test_scheduler_round_robin () =
+  let src = {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    fn main() do
+      let p1 = spawn(Counter)
+      let p2 = spawn(Counter)
+      let p3 = spawn(Counter)
+      send(p1, Inc())
+      send(p2, Inc())
+      send(p2, Inc())
+      send(p3, Inc())
+      send(p3, Inc())
+      send(p3, Inc())
+      run_until_idle()
+      p3
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  let pid3 = match v with March_eval.Eval.VPid n -> n | _ -> failwith "expected pid" in
+  let count3 = match Hashtbl.find_opt March_eval.Eval.actor_registry pid3 with
+    | Some inst ->
+      (match inst.March_eval.Eval.ai_state with
+       | March_eval.Eval.VRecord fs ->
+         (match List.assoc_opt "count" fs with
+          | Some (March_eval.Eval.VInt n) -> n | _ -> -1)
+       | _ -> -1)
+    | None -> -1 in
+  Alcotest.(check int) "p3 received 3 Inc messages" 3 count3
+
 let test_eval_reduction_count () =
   let src = {|mod Test do
     fn countdown(n) do
@@ -5231,6 +5323,12 @@ let () =
       ("eval phase 4", [
         Alcotest.test_case "async send queues not dispatches" `Quick
           (with_reset test_async_send_queues_not_dispatches);
+        Alcotest.test_case "scheduler drains mailbox"         `Quick
+          (with_reset test_scheduler_drains_mailbox);
+        Alcotest.test_case "scheduler updates actor state"    `Quick
+          (with_reset test_scheduler_updates_actor_state);
+        Alcotest.test_case "scheduler round-robin"            `Quick
+          (with_reset test_scheduler_round_robin);
       ]);
       ("file builtins", [
         Alcotest.test_case "file_exists false" `Quick test_file_builtin_exists_false;
