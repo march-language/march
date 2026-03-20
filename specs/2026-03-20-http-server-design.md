@@ -12,7 +12,8 @@ Build an HTTP/1.1 server into March's stdlib. Inspired by Plug/Bandit/Phoenix:
 - **Conn is the unit of composition** — one value flows through the entire pipeline via `|>`. Holds request data, response state, and user assigns.
 - **Conn is a plain value (v1)** — threaded through pipe chains. Linear enforcement is a v2 goal (the type checker supports linear types, but the interpreter doesn't enforce them at runtime yet). For now, Conn is a regular ADT — the pipeline design is identical either way, and linearity can be added later without changing user code.
 - **Routing is pattern matching** — `match (conn.method, conn.path_info)`. No DSL, no macros, no framework. Just the language.
-- **Supervision without try/catch** — each connection spawns a supervised task. If the handler crashes, the monitor sends 500. Process isolation is the error boundary.
+- **Concurrent by default** — each accepted connection spawns an OS thread (OCaml 5 `Thread.create`). Blocking I/O releases the domain lock, so threads waiting on `tcp_recv`/`tcp_send` don't block other connections. Like Bandit spawning an Erlang process per connection.
+- **Crash isolation without try/catch** — each connection thread has its own execution context. If a handler crashes, the thread catches it at the runtime level (OCaml, not March), sends a 500, closes the fd. Other connections and the accept loop are unaffected.
 - **Capabilities thread through closures** — handlers capture only the caps they need. The type signature is the security audit.
 
 ## Non-Goals (v1)
@@ -23,30 +24,38 @@ Build an HTTP/1.1 server into March's stdlib. Inspired by Plug/Bandit/Phoenix:
 - WebSockets — deferred to v2
 - HTTPS/TLS — deferred
 - HTTP/2 — deferred
-- Async scheduler integration — uses synchronous model for now
+- March-level scheduler integration — concurrency is via OCaml threads, not the March scheduler
 - Session types on protocols — deferred
 - `Cap(Net)` gating on port binding — capabilities not wired into `main()` yet
 
 ## Architecture
 
+Like Bandit: the accept loop runs in the main thread, each connection gets its own OS thread.
+
 ```
-HttpServer.listen(port, pipeline)
+HttpServer.listen(server)           -- builtin, implemented in OCaml
   │
-  ├── Accept Loop (recursive function)
-  │     │
-  │     └── For each TCP connection:
-  │           │
-  │           ├── Spawn handler task
-  │           │     └── read_request(fd)
-  │           │         build Conn
-  │           │         run_pipeline(conn, plugs)
-  │           │         write_response(conn)
-  │           │
-  │           └── Monitor handler task
-  │                 └── On Down: send 500, close fd
+  ├── tcp_listen(port)              -- bind + listen
   │
-  └── (loop continues accepting)
+  └── Accept Loop (OCaml, main thread)
+        │
+        ├── Unix.accept → client_fd
+        │
+        ├── Thread.create → connection thread
+        │     │
+        │     ├── tcp_recv_http(fd)         -- blocks; releases domain lock
+        │     ├── http_parse_request(raw)
+        │     ├── build Conn
+        │     ├── eval March pipeline       -- run_pipeline(conn, plugs)
+        │     ├── write_response(fd, conn)
+        │     └── tcp_close(fd)
+        │     │
+        │     └── On crash: catch Eval_error → send 500 → close fd
+        │
+        └── (loop immediately accepts next connection)
 ```
+
+The accept loop never waits for handlers to finish. While one handler is blocked reading a request body, other connections are being accepted and processed. This is the same model as Bandit's connection process spawning.
 
 ## The Conn Type
 
@@ -258,77 +267,97 @@ end
 
 Auth only runs for `/api/*` routes because it's only called in that branch. No framework feature needed — it's just function calls.
 
-## Supervision: Connection Lifecycle
+## Concurrency: Thread-per-Connection
 
-### Reality Check: Synchronous Interpreter
+### How It Works
 
-The current March runtime is **synchronous and single-threaded**. `task_spawn` eagerly evaluates its function and returns the result. There is no concurrent accept loop — connections are handled one at a time, sequentially.
+`HttpServer.listen` is an **OCaml-level builtin** (not a March function). It:
 
-This is fine for v1. The design below works in the synchronous model and is structured so that swapping in async scheduling later requires no changes to user code.
+1. Calls `Unix.socket` + `Unix.bind` + `Unix.listen` with `SO_REUSEADDR`
+2. Enters a loop: `Unix.accept` → `Thread.create` → loop
+3. Each thread runs the March pipeline independently
+4. The accept loop returns to accepting immediately — never waits for handlers
 
-### The Accept Loop
+This uses OCaml 5's `Thread` module. When a thread calls `Unix.recv` (blocking I/O), the domain lock is released, letting other threads run. Multiple connections can be reading requests, running handlers, and writing responses simultaneously.
+
+### Connection Thread Lifecycle
+
+Each thread runs this sequence (implemented in OCaml inside `eval.ml`):
+
+```
+1. tcp_recv_http(fd)           -- read raw HTTP request (blocks, releases lock)
+2. http_parse_request(raw)     -- parse method, path, headers, body
+3. build Conn value            -- construct the March Conn ADT
+4. eval run_pipeline(conn, plugs)  -- run the March plug pipeline
+5. extract response from Conn  -- read status, headers, body from returned Conn
+6. http_serialize_response()   -- format HTTP response
+7. tcp_send_all(fd, response)  -- write response (blocks, releases lock)
+8. tcp_close(fd)               -- done
+```
+
+Steps 1 and 7 release the domain lock while blocked on I/O. Other threads make progress during these waits. Step 4 (running March code) holds the domain lock, but HTTP handlers are typically fast — the bottleneck is I/O, not computation.
+
+### Crash Recovery
+
+Each thread wraps steps 1-8 in an OCaml-level `try ... with`:
+
+```ocaml
+let connection_thread client_fd pipeline env =
+  try
+    (* steps 1-8 above *)
+    handle_connection client_fd pipeline env
+  with
+  | Eval_error msg ->
+    (* Handler crashed — send 500, log, close *)
+    send_500_response client_fd;
+    Unix.close client_fd;
+    Printf.eprintf "Handler crash: %s\n%!" msg
+  | exn ->
+    Unix.close client_fd;
+    Printf.eprintf "Unexpected: %s\n%!" (Printexc.to_string exn)
+```
+
+From the March programmer's perspective: **there is no try/catch.** If your plug pipeline crashes (division by zero, pattern match failure, etc.), the runtime catches it, sends a 500, and closes the connection. Other connections are unaffected. The accept loop never sees the crash.
+
+This is the same model as Bandit — if an Erlang process handling a connection crashes, the BEAM catches it and the acceptor keeps running. The difference is implementation (OS threads vs BEAM processes), not semantics.
+
+### Thread Safety
+
+**What's safe:**
+- Each connection thread operates on its own Conn value — no sharing
+- Plug functions (closures) are immutable values — safe to call from multiple threads
+- TCP operations use independent file descriptors per thread
+
+**What needs protection:**
+- `actor_registry`, `next_pid`, `next_monitor_id` — shared mutable state in eval.ml
+- Protected with a `Mutex.t` around actor operations
+- Pure handlers (no actor interaction) run with zero synchronization overhead
+
+**For v1:** handlers that interact with actors will serialize through the mutex. Pure `Conn -> Conn` handlers (the common case for HTTP) run fully in parallel.
+
+### The March-Side API
+
+From the March programmer's perspective, none of this is visible. The API is:
 
 ```march
-fn accept_loop(listen_fd, pipeline) do
-  match tcp_accept(listen_fd) with
-  | Ok(client_fd) ->
-    handle_connection(client_fd, pipeline)
-    accept_loop(listen_fd, pipeline)
-  | Err(_) ->
-    accept_loop(listen_fd, pipeline)
-  end
-end
+HttpServer.new(4000)
+|> HttpServer.plug(logger)
+|> HttpServer.plug(router)
+|> HttpServer.listen()
 ```
 
-### Connection Handler
+`listen()` blocks forever (it's the accept loop). Connections are handled concurrently in the background. If a handler crashes, a 500 is sent. The programmer writes pure `Conn -> Conn` functions and the runtime handles the rest.
 
-Handles a single connection: read request, build Conn, run pipeline, write response.
+### Required OCaml Changes
 
-```march
-fn handle_connection(fd, pipeline) do
-  match tcp_recv_http(fd, 65536) with
-  | Err(_) ->
-    tcp_close(fd)
-  | Ok(raw) ->
-    match http_parse_request(raw) with
-    | Err(_) ->
-      let resp = http_serialize_response(400, [], "Bad Request")
-      tcp_send_all(fd, resp)
-      tcp_close(fd)
-    | Ok((method, path, query, headers, body)) ->
-      let path_info = split_path(path)
-      let conn = Conn(fd, method, path, path_info, query, headers, body,
-                       0, Nil, "", false, Nil)
-      let conn = run_pipeline(conn, pipeline)
-      write_response(fd, conn)
-      tcp_close(fd)
-    end
-  end
-end
-```
+1. **Add `threads` library** to `lib/eval/dune` dependencies
+2. **Add `Mutex.t`** around `actor_registry` and global counters in eval.ml
+3. **Implement `http_server_listen` builtin** — the accept loop + Thread.create logic
+4. **Thread-local state** for `module_stack`, `reduction_ctx`, `debug_ctx` using `Thread.key`
 
-### Crash Recovery (Runtime-Level)
+### Future: March-Level Concurrency (v2)
 
-In the current interpreter, actor message handlers are already wrapped with OCaml-level exception handling — when an actor handler raises, `crash_actor` is called and monitors are notified. The server uses the same mechanism:
-
-**Implementation in eval.ml:** The `handle_connection` call in the accept loop is wrapped at the OCaml level (inside `eval`) with exception handling. If the March handler crashes (division by zero, pattern match failure, etc.), the OCaml evaluator catches the `Eval_error`, sends a 500 response on the fd, closes it, and the accept loop continues.
-
-From the March programmer's perspective, there is no try/catch. If your handler crashes, the server sends a 500 and moves on. This mirrors how Erlang's runtime catches process crashes — it's the VM's job, not user code.
-
-```
-Accept loop iteration:
-  1. tcp_accept → get fd
-  2. Call handle_connection(fd, pipeline)
-     a. Handler succeeds → response written, fd closed
-     b. Handler crashes → runtime catches, sends 500, closes fd
-  3. Loop back to accept
-```
-
-### Future: Actor-Based Concurrency (v2)
-
-When the async scheduler is wired in, the accept loop will spawn a Connection actor per request. The actor monitors a handler task. Crash recovery becomes process isolation — the Connection actor gets a `Down(ref, reason)` message (Erlang convention: reason is `"normal"` for clean exit, error string for crashes) and sends 500 on the fd it owns. The accept loop runs concurrently, never blocked by handler execution.
-
-The March user code (plugs, router, middleware) is identical in both models — only the accept loop internals change.
+When the March scheduler is wired in, `listen` can spawn lightweight March tasks instead of OS threads — matching Bandit's use of BEAM processes. The March user code doesn't change. The transition is purely internal to the runtime.
 
 ## Capability Security
 
@@ -371,17 +400,18 @@ end
 
 Added to `base_env` in `lib/eval/eval.ml`:
 
-### TCP Server Builtins
+### Server Builtin (the big one)
 
 ```
-tcp_listen(port : Int) -> Result(Int, String)
-  Unix.socket + Unix.bind + Unix.listen
-  SO_REUSEADDR for quick restarts
-  Returns Ok(listen_fd) or Err(message)
-
-tcp_accept(listen_fd : Int) -> Result(Int, String)
-  Unix.accept on the listening socket
-  Returns Ok(client_fd) or Err(message)
+http_server_listen(port : Int, pipeline : List(Conn -> Conn)) -> Unit
+  The entire accept loop + thread spawning, implemented in OCaml.
+  1. Unix.socket + Unix.bind(SO_REUSEADDR) + Unix.listen
+  2. Loop: Unix.accept → Thread.create(connection_thread) → loop
+  3. Each thread: tcp_recv_http → http_parse_request → build Conn →
+     eval pipeline → write response → close fd
+  4. On crash: catch Eval_error → send 500 → close fd
+  Blocks forever (the accept loop). Called from HttpServer.listen().
+  Prints "Listening on port {port}" on startup.
 ```
 
 ### HTTP Serialization Builtins
@@ -392,6 +422,8 @@ http_parse_request(raw : String) -> Result((Method, String, String, List(Header)
   Returns Ok((method_variant, path, query_string, headers, body)) or Err(msg)
   The builtin converts the method string to a Method variant (Get, Post, etc.)
   Unknown methods return Err.
+  Used internally by http_server_listen, but also exposed as a builtin
+  for testing and for users who want to build custom servers.
 
 http_serialize_response(status : Int, headers : List(Header), body : String) -> String
   Format "HTTP/1.1 {status} {reason}\r\n{headers}\r\nContent-Length: {len}\r\n\r\n{body}"
@@ -406,6 +438,8 @@ tcp_recv_http(fd, max_bytes)   — already implemented for HTTP client; reads un
                                   or chunked encoding. Works for reading requests too
                                   since HTTP/1.1 framing is symmetric.
 
+tcp_send_all(fd, data)         — already implemented; sends all bytes in a loop.
+
 string_split(s, sep)           — already implemented in eval.ml. Used for
                                   splitting path on "/" to produce path_info.
 ```
@@ -414,9 +448,10 @@ string_split(s, sep)           — already implemented in eval.ml. Used for
 
 | File | Changes |
 |------|---------|
-| `lib/eval/eval.ml` | Add `tcp_listen`, `tcp_accept`, `http_parse_request`, `http_serialize_response` builtins |
-| `stdlib/http_server.march` | New file: `Conn` type, accessors, transforms, pipeline runner, accept loop, convenience helpers |
-| `bin/main.ml` | Add `http_server.march` to stdlib load order |
+| `lib/eval/dune` | Add `threads` library dependency |
+| `lib/eval/eval.ml` | Add `http_server_listen`, `http_parse_request`, `http_serialize_response` builtins; add `Mutex.t` around actor globals; thread-local state via `Thread.key` |
+| `stdlib/http_server.march` | New file: `Conn` type, accessors, transforms, pipeline runner, `HttpServer.new`, `HttpServer.plug`, `HttpServer.listen` (calls builtin) |
+| `bin/main.ml` | Add `http_server.march` to stdlib load order (after `http.march` for `Header` type) |
 | `test/test_march.ml` | Tests for builtins and server module |
 
 ## Testing Strategy
@@ -432,14 +467,14 @@ string_split(s, sep)           — already implemented in eval.ml. Used for
 
 ### Integration Tests (March programs)
 
-A simple test server that:
+A test server that:
 1. Starts listening on a port
-2. Accepts one connection
-3. Runs it through a pipeline
-4. Sends a response
-5. Closes and exits
+2. Handles concurrent requests (verified by sending multiple curl requests simultaneously)
+3. Runs through a pipeline with middleware
+4. Sends correct responses per route
+5. Sends 500 on a route that deliberately crashes (e.g., division by zero)
 
-Verified by running the test and curling the port from the test harness.
+Verified by running the server in the background and curling from the test harness.
 
 ## Example: Complete Application
 
