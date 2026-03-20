@@ -389,7 +389,9 @@ let rec value_to_string v =
   | VCon (tag, args) ->
     tag ^ "(" ^ String.concat ", " (List.map value_to_string args) ^ ")"
   | VClosure _  -> "<fn>"
-  | VBuiltin (n, _) -> "<builtin:" ^ n ^ ">"
+  | VBuiltin (n, _) ->
+    let is_rec = String.length n >= 5 && String.sub n 0 5 = "<rec:" in
+    if is_rec then "<fn>" else "<builtin:" ^ n ^ ">"
   | VPid pid -> "Pid(" ^ string_of_int pid ^ ")"
   | VTask id -> Printf.sprintf "<task:%d>" id
   | VWorkPool -> "<work_pool>"
@@ -781,6 +783,178 @@ let register_resource_ocaml (pid : int) (name : string) (cleanup : unit -> unit)
   | None -> ()
   | Some inst ->
     inst.ai_resources <- inst.ai_resources @ [(name, cleanup)]
+
+(* ------------------------------------------------------------------ *)
+(* CSV parser state                                                    *)
+(* ------------------------------------------------------------------ *)
+
+(** Opaque CSV reader state stored in a module-level table.
+    The table maps integer handles to (in_channel, delimiter, mode, eof_flag). *)
+type csv_mode = CsvSimple | CsvRfc4180
+
+type csv_reader = {
+  csv_ic      : in_channel;
+  csv_delim   : char;
+  csv_mode    : csv_mode;
+  mutable csv_eof : bool;
+}
+
+let csv_table : (int, csv_reader) Hashtbl.t = Hashtbl.create 4
+let next_csv_id : int ref = ref 0
+
+(** Scan one complete CSV row from [r].
+    Returns [Some fields] or [None] on EOF (before any chars were read). *)
+let csv_scan_row (r : csv_reader) : string list option =
+  let ic    = r.csv_ic in
+  let delim = r.csv_delim in
+  if r.csv_eof then None
+  else
+    let fields      = ref [] in
+    let cur         = Buffer.create 64 in
+    let row_started = ref false in
+    let finished    = ref false in
+
+    (* Emit the current buffer as a field, clear the buffer. *)
+    let emit () =
+      fields := Buffer.contents cur :: !fields;
+      Buffer.clear cur
+    in
+
+    let next_char () = try Some (input_char ic) with End_of_file -> None in
+
+    (match r.csv_mode with
+     | CsvSimple ->
+       (* No quoting: split on delimiter, newline ends the row. *)
+       let rec loop () =
+         if !finished then ()
+         else match next_char () with
+           | None ->
+             r.csv_eof <- true;
+             if !row_started then emit ()
+           | Some c ->
+             row_started := true;
+             if c = delim then (emit (); loop ())
+             else if c = '\n' then (emit (); finished := true)
+             else if c = '\r' then begin
+               (match next_char () with
+                | Some '\n' | None -> ()
+                | Some c2 -> Buffer.add_char cur c2);
+               emit (); finished := true
+             end else (Buffer.add_char cur c; loop ())
+       in
+       loop ()
+
+     | CsvRfc4180 ->
+       (* 4-state FSM: FieldStart → Unquoted | Quoted → QuoteInQuoted. *)
+       (* State is encoded in two bools: in_quoted and after_close_quote. *)
+       let in_quoted       = ref false in
+       let after_close_q   = ref false in
+       let rec loop () =
+         if !finished then ()
+         else match next_char () with
+           | None ->
+             r.csv_eof <- true;
+             if !row_started || Buffer.length cur > 0 || !in_quoted then emit ()
+           | Some c ->
+             row_started := true;
+             if !after_close_q then begin
+               (* QuoteInQuoted state: previous char was '"' inside/after a quoted field *)
+               after_close_q := false;
+               if c = '"' then begin
+                 (* doubled-quote escape produces a literal quote *)
+                 Buffer.add_char cur '"';
+                 in_quoted := true;
+                 loop ()
+               end else if c = delim then begin
+                 emit (); loop ()
+               end else if c = '\n' then begin
+                 emit (); finished := true
+               end else if c = '\r' then begin
+                 (match next_char () with
+                  | Some '\n' | None -> ()
+                  | Some c2 -> Buffer.add_char cur c2);
+                 emit (); finished := true
+               end else begin
+                 (* Malformed: char after close-quote; treat literally *)
+                 Buffer.add_char cur c; loop ()
+               end
+             end else if !in_quoted then begin
+               if c = '"' then begin
+                 (* Might be end-of-field or "" escape; decide on next char *)
+                 in_quoted := false;
+                 after_close_q := true;
+                 loop ()
+               end else begin
+                 Buffer.add_char cur c; loop ()
+               end
+             end else begin
+               (* FieldStart / Unquoted *)
+               if c = '"' && Buffer.length cur = 0 then begin
+                 in_quoted := true; loop ()
+               end else if c = delim then begin
+                 emit (); loop ()
+               end else if c = '\n' then begin
+                 emit (); finished := true
+               end else if c = '\r' then begin
+                 (match next_char () with
+                  | Some '\n' | None -> ()
+                  | Some c2 -> Buffer.add_char cur c2);
+                 emit (); finished := true
+               end else begin
+                 Buffer.add_char cur c; loop ()
+               end
+             end
+       in
+       loop ());
+
+    if r.csv_eof && not !row_started && !fields = [] then None
+    else Some (List.rev !fields)
+
+(** Dispatch function for the csv_open builtin. *)
+let csv_open_impl : value list -> value = function
+  | [VString path; VString delim_str; VAtom mode_str] ->
+    let delim = if String.length delim_str > 0 then delim_str.[0] else ',' in
+    let mode  = if mode_str = "simple" then CsvSimple else CsvRfc4180 in
+    (try
+       let ic = open_in path in
+       let id = !next_csv_id in
+       incr next_csv_id;
+       Hashtbl.add csv_table id
+         { csv_ic = ic; csv_delim = delim; csv_mode = mode; csv_eof = false };
+       VCon ("Ok", [VInt id])
+     with Sys_error msg ->
+       VCon ("Err", [VCon ("FileError", [VString msg])]))
+  | _ -> eval_error "csv_open(path, delimiter, mode)"
+
+(** Dispatch function for the csv_next_row builtin. *)
+let csv_next_row_impl : value list -> value = function
+  | [VInt id] ->
+    (match Hashtbl.find_opt csv_table id with
+     | None -> eval_error "csv_next_row: invalid handle %d" id
+     | Some r ->
+       (match csv_scan_row r with
+        | None -> VAtom "eof"
+        | Some fields ->
+          let lst = List.fold_right
+            (fun f acc -> VCon ("Cons", [VString f; acc]))
+            fields (VCon ("Nil", [])) in
+          VCon ("Row", [lst])))
+  | _ -> eval_error "csv_next_row(handle)"
+
+(** Dispatch function for the csv_close builtin. *)
+let csv_close_impl : value list -> value = function
+  | [VInt id] ->
+    (match Hashtbl.find_opt csv_table id with
+     | None -> VAtom "ok"
+     | Some r ->
+       (try close_in r.csv_ic with _ -> ());
+       Hashtbl.remove csv_table id;
+       VAtom "ok")
+  | _ -> eval_error "csv_close(handle)"
+
+(* ------------------------------------------------------------------ *)
+(* Base environment                                                    *)
+(* ------------------------------------------------------------------ *)
 
 let base_env : env =
   [ (* Integer arithmetic *)
@@ -2071,6 +2245,11 @@ let base_env : env =
               | _ ->
                 VCon ("Err", [VString ("bad status line: " ^ (List.hd lines))])))
         | _ -> eval_error "http_parse_response(raw_string)"))
+
+  (* ── CSV parser ─────────────────────────────────────────────────── *)
+  ; ("csv_open",     VBuiltin ("csv_open",     csv_open_impl))
+  ; ("csv_next_row", VBuiltin ("csv_next_row", csv_next_row_impl))
+  ; ("csv_close",    VBuiltin ("csv_close",    csv_close_impl))
   ]
 
 (* ------------------------------------------------------------------ *)
@@ -2687,18 +2866,19 @@ let rec eval_decl (env : env) (d : decl) : env =
                   def.fn_name.txt
     in
     let params = clause_params clause in
-    (* Check if there's a stub already installed for this name *)
-    (match List.assoc_opt def.fn_name.txt env with
-     | Some (VClosure _) ->
-       (* Patch the environment entry; since assoc lists are immutable we
-          replace it.  For recursive stubs we rely on the stub mechanism. *)
-       let closure = VClosure (env, params, clause.fc_body) in
-       let env' = (def.fn_name.txt, closure)
-                  :: List.remove_assoc def.fn_name.txt env in
-       env'
-     | _ ->
-       let closure = VClosure (env, params, clause.fc_body) in
-       (def.fn_name.txt, closure) :: env)
+    (* Use a mutable env ref so the closure can call itself recursively.
+       When [rec_closure] is invoked, [env_ref] already contains the
+       function's own name, making self-recursion work in the REPL. *)
+    let env_ref = ref env in
+    let rec_closure = VBuiltin ("<rec:" ^ def.fn_name.txt ^ ">",
+                                fun args ->
+                                  let call_env = !env_ref in
+                                  let fn_v = VClosure (call_env, params, clause.fc_body) in
+                                  apply fn_v args) in
+    let env' = (def.fn_name.txt, rec_closure)
+               :: List.remove_assoc def.fn_name.txt env in
+    env_ref := env';
+    env'
 
   | DLet (b, _) ->
     let v = eval_expr env b.bind_expr in

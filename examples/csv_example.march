@@ -1,0 +1,134 @@
+-- csv_example.march
+--
+-- Demonstrates the Csv stdlib module.
+-- Run: dune exec march -- examples/csv_example.march
+
+mod Main do
+
+fn write_demo_csv(path) do
+  let content = "name,age,city\nAlice,30,\"New York\"\nBob,25,London\n\"Carol, Jr.\",42,\"Sao Paulo\"\nDave,35,Berlin"
+  File.write(path, content)
+end
+
+fn write_demo_tsv(path) do
+  let content = "product\tprice\tqty\nApple\t1.20\t50\nBanana\t0.50\t120\nCherry\t3.00\t30"
+  File.write(path, content)
+end
+
+-- ── Example 1: streaming with each_row ──────────────────────────────
+
+fn print_row(row) do
+  print(to_string(row))
+end
+
+fn demo_each_row(path) do
+  println("--- Example 1: each_row (streaming) ---")
+  match Csv.each_row(path, ",", :rfc4180, fn row -> print_row(row)) with
+  | Ok(:ok) -> println("Done.")
+  | Err(e) -> println("Error: " ++ to_string(e))
+  end
+end
+
+-- ── Example 2: read_all, count rows, find oldest ─────────────────────
+
+fn get_age(row) do
+  match row with
+  | Cons(_, Cons(age_str, _)) -> String.to_int(age_str)
+  | _ -> Err("no age")
+  end
+end
+
+fn get_name(row) do
+  match row with
+  | Cons(name, _) -> name
+  | _ -> ""
+  end
+end
+
+fn find_oldest_loop(rows, best_name, best_age) do
+  match rows with
+  | Nil -> best_name
+  | Cons(row, rest) ->
+    match get_age(row) with
+    | Err(_) -> find_oldest_loop(rest, best_name, best_age)
+    | Ok(age) ->
+      if age > best_age
+      then find_oldest_loop(rest, get_name(row), age)
+      else find_oldest_loop(rest, best_name, best_age)
+    end
+  end
+end
+
+fn demo_read_all(path) do
+  println("--- Example 2: read_all (eager) ---")
+  match Csv.read_all(path, ",", :rfc4180) with
+  | Err(e) -> println("Error: " ++ to_string(e))
+  | Ok(rows) ->
+    println("Total rows (incl. header): " ++ to_string(List.length(rows)))
+    match rows with
+    | Nil -> println("No data.")
+    | Cons(_, data_rows) ->
+      let oldest = find_oldest_loop(data_rows, "nobody", -1)
+      println("Oldest person: " ++ oldest)
+    end
+  end
+end
+
+-- ── Example 3: each_row_with_header ──────────────────────────────────
+
+fn get_field_loop(hs, rs, name) do
+  match hs with
+  | Nil -> None
+  | Cons(h, rh) ->
+    match rs with
+    | Nil -> None
+    | Cons(v, rv) ->
+      if h == name then Some(v) else get_field_loop(rh, rv, name)
+    end
+  end
+end
+
+fn get_field(header, row, name) do
+  get_field_loop(header, row, name)
+end
+
+fn print_name_city(header, row) do
+  let name = match get_field(header, row, "name") with
+  | Some(v) -> v
+  | None -> "?"
+  end
+  let city = match get_field(header, row, "city") with
+  | Some(v) -> v
+  | None -> "?"
+  end
+  println(name ++ " lives in " ++ city)
+end
+
+fn demo_with_header(path) do
+  println("--- Example 3: each_row_with_header ---")
+  Csv.each_row_with_header(path, ",", :rfc4180, fn (header, row) ->
+    print_name_city(header, row))
+end
+
+-- ── Example 4: TSV with Simple mode ──────────────────────────────────
+
+fn demo_tsv(path) do
+  println("--- Example 4: TSV with :simple mode ---")
+  Csv.each_row(path, "\t", :simple, fn row -> println(to_string(row)))
+end
+
+-- ── main ──────────────────────────────────────────────────────────────
+
+pub fn main() do
+  let csv_path = "/tmp/march_csv_demo.csv"
+  let tsv_path = "/tmp/march_tsv_demo.tsv"
+  write_demo_csv(csv_path)
+  write_demo_tsv(tsv_path)
+  demo_each_row(csv_path)
+  demo_read_all(csv_path)
+  demo_with_header(csv_path)
+  demo_tsv(tsv_path)
+  println("All demos complete.")
+end
+
+end

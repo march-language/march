@@ -1,0 +1,100 @@
+-- Csv module: streaming CSV parser.
+--
+-- Two consumption modes:
+--   each_row(path, delimiter, mode, callback) -- streaming; guaranteed cleanup
+--   read_all(path, delimiter, mode)           -- eager; for small files
+--
+-- Modes:
+--   :simple   -- split on delimiter only; no quoting
+--   :rfc4180  -- full RFC 4180: quoted fields, "" escapes, embedded newlines
+--
+-- Convenience:
+--   read_csv(path)      -- comma-delimited, :rfc4180, eager
+--   each_csv_row(path, callback) -- comma-delimited, :rfc4180, streaming
+
+mod Csv do
+
+type CsvError = FileError(String) | ParseError(String)
+
+-- Internal streaming loop: call callback(fields) for each row.
+fn each_row_loop(handle, callback) do
+  match csv_next_row(handle) with
+  | :eof -> :ok
+  | Row(fields) ->
+    callback(fields)
+    each_row_loop(handle, callback)
+  end
+end
+
+-- Stream rows from path one at a time.
+-- callback receives List(String) per row.
+-- File is always closed after all rows or on :eof.
+pub fn each_row(path, delimiter, mode, callback) do
+  match csv_open(path, delimiter, mode) with
+  | Err(e) -> Err(e)
+  | Ok(handle) ->
+    each_row_loop(handle, callback)
+    csv_close(handle)
+    Ok(:ok)
+  end
+end
+
+-- Internal accumulator loop for read_all.
+fn collect_loop(handle, acc) do
+  match csv_next_row(handle) with
+  | :eof -> List.reverse(acc)
+  | Row(fields) -> collect_loop(handle, Cons(fields, acc))
+  end
+end
+
+-- Eagerly read all rows into a List(List(String)).
+-- Only for small files.
+pub fn read_all(path, delimiter, mode) do
+  match csv_open(path, delimiter, mode) with
+  | Err(e) -> Err(e)
+  | Ok(handle) ->
+    let rows = collect_loop(handle, Nil)
+    csv_close(handle)
+    Ok(rows)
+  end
+end
+
+-- Internal loop for each_row_with_header: calls callback(header, fields) per row.
+fn with_header_loop(handle, header, callback) do
+  match csv_next_row(handle) with
+  | :eof -> :ok
+  | Row(fields) ->
+    callback(header, fields)
+    with_header_loop(handle, header, callback)
+  end
+end
+
+-- Stream rows with the first row separated as a header.
+-- callback receives (header : List(String), row : List(String)).
+pub fn each_row_with_header(path, delimiter, mode, callback) do
+  match csv_open(path, delimiter, mode) with
+  | Err(e) -> Err(e)
+  | Ok(handle) ->
+    match csv_next_row(handle) with
+    | :eof ->
+      csv_close(handle)
+      Ok(:ok)
+    | Row(header) ->
+      with_header_loop(handle, header, callback)
+      csv_close(handle)
+      Ok(:ok)
+    end
+  end
+end
+
+-- Convenience: comma-delimited, RFC 4180, eager.
+pub fn read_csv(path) do
+  read_all(path, ",", :rfc4180)
+end
+
+-- Convenience: comma-delimited, RFC 4180, streaming.
+pub fn each_csv_row(path, callback) do
+  each_row(path, ",", :rfc4180, callback)
+end
+
+end
