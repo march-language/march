@@ -17,8 +17,9 @@ let needs_rc : Tir.ty -> bool = function
 
 (** Returns the set of variable names referenced by an atom. *)
 let vars_of_atom : Tir.atom -> StringSet.t = function
-  | Tir.AVar v -> StringSet.singleton v.Tir.v_name
-  | Tir.ALit _ -> StringSet.empty
+  | Tir.AVar v    -> StringSet.singleton v.Tir.v_name
+  | Tir.ADefRef _ -> StringSet.empty  (* global/static ref, no RC needed *)
+  | Tir.ALit _    -> StringSet.empty
 
 (** Union of all variable sets from a list of atoms. *)
 let vars_of_atoms (atoms : Tir.atom list) : StringSet.t =
@@ -41,6 +42,8 @@ let rec live_before (e : Tir.expr) (live_after : live_set) : live_set =
   match e with
   | Tir.EAtom (Tir.AVar v) ->
     StringSet.add v.Tir.v_name live_after
+  | Tir.EAtom (Tir.ADefRef _) ->
+    live_after  (* global ref — no local liveness *)
   | Tir.EAtom (Tir.ALit _) ->
     live_after
   | Tir.EApp (f, args) ->
@@ -119,8 +122,9 @@ let rec live_before (e : Tir.expr) (live_after : live_set) : live_set =
 (** Returns true if [name] occurs free anywhere in [e]. *)
 let rec name_free_in (name : string) (e : Tir.expr) : bool =
   let atom_uses a = match a with
-    | Tir.AVar v -> String.equal v.Tir.v_name name
-    | Tir.ALit _ -> false
+    | Tir.AVar v    -> String.equal v.Tir.v_name name
+    | Tir.ADefRef _ -> false  (* global ref, not a local name *)
+    | Tir.ALit _    -> false
   in
   let atoms_use = List.exists atom_uses in
   match e with
@@ -187,6 +191,9 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
       (Tir.ESeq (Tir.EIncRC (Tir.AVar v), e), lb)
     else
       (e, lb)
+
+  | Tir.EAtom (Tir.ADefRef _) ->
+    (e, live_after)  (* global ref — no RC, no liveness change *)
 
   | Tir.EAtom (Tir.ALit _) ->
     (e, live_after)

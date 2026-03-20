@@ -446,6 +446,9 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     emit ctx (Printf.sprintf "%s = call ptr @march_string_lit(ptr %s, i64 %d)"
                 tmp gname (String.length s));
     ("ptr", tmp)
+  | Tir.ADefRef did ->
+    (* Reference to a top-level def by content hash — emit as a function pointer *)
+    ("ptr", "@" ^ llvm_name (mangle_extern did.Tir.did_name))
   | Tir.AVar v when v.Tir.v_name = "get_work_pool" ->
     (* Phase 1: work pool is a null sentinel *)
     ("ptr", "null")
@@ -1071,8 +1074,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   (* ── Field access ──────────────────────────────────────────────────── *)
   | Tir.EField (obj_atom, field_name) ->
     let obj_ty = match obj_atom with
-      | Tir.AVar v -> v.Tir.v_ty
-      | Tir.ALit _ -> Tir.TVar "_"
+      | Tir.AVar v    -> v.Tir.v_ty
+      | Tir.ADefRef _ -> Tir.TVar "_"
+      | Tir.ALit _    -> Tir.TVar "_"
     in
     let (idx, field_ty) =
       (* Closure free-variable fields: "$fvN" — parse index from name directly
@@ -1090,8 +1094,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   (* ── Record update ─────────────────────────────────────────────────── *)
   | Tir.EUpdate (base_atom, updates) ->
     let base_ty = match base_atom with
-      | Tir.AVar v -> v.Tir.v_ty
-      | Tir.ALit _ -> Tir.TVar "_"
+      | Tir.AVar v    -> v.Tir.v_ty
+      | Tir.ADefRef _ -> Tir.TVar "_"
+      | Tir.ALit _    -> Tir.TVar "_"
     in
     let all_fields = get_record_fields ctx base_ty in
     let n = List.length all_fields in

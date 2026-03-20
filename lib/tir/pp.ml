@@ -29,6 +29,7 @@ let string_of_var v =
 
 let string_of_atom = function
   | AVar v -> v.v_name
+  | ADefRef did -> "@" ^ did.did_name
   | ALit (March_ast.Ast.LitInt n) -> string_of_int n
   | ALit (March_ast.Ast.LitFloat f) -> string_of_float f
   | ALit (March_ast.Ast.LitString s) -> "\"" ^ String.escaped s ^ "\""

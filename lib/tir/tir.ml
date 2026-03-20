@@ -27,10 +27,20 @@ type var = {
 }
 [@@deriving show]
 
+(** A top-level definition identity: human-readable name + content hash.
+    The hash is the primary key; the name is for diagnostics only.
+    Produced by content-addressed lowering (Phase 5 of content-addressing). *)
+type def_id = {
+  did_name : string;   (** human-readable, for diagnostics *)
+  did_hash : string;   (** 64-char BLAKE3 hex impl_hash *)
+}
+[@@deriving show]
+
 (** Atoms — values that require no computation. *)
 type atom =
-  | AVar of var
-  | ALit of March_ast.Ast.literal
+  | AVar    of var
+  | ADefRef of def_id   (** reference to a top-level definition by content hash *)
+  | ALit    of March_ast.Ast.literal
 [@@deriving show]
 
 (** ANF expressions. *)

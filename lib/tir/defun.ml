@@ -85,6 +85,7 @@ let free_vars_of_expr (top_level : StringSet.t) (body : Tir.expr) (params : Tir.
   let fv_atom (a : Tir.atom) (bound : StringSet.t) =
     match a with
     | Tir.AVar v -> fv_var v bound
+    | Tir.ADefRef _ -> ()  (* global/top-level ref, not a local free var *)
     | Tir.ALit _ -> ()
   in
 

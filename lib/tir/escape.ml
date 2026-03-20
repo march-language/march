@@ -11,6 +11,7 @@ module StringSet = Set.Make (String)
 
 let vars_of_atom : Tir.atom -> StringSet.t = function
   | Tir.AVar v -> StringSet.singleton v.Tir.v_name
+  | Tir.ADefRef _ -> StringSet.empty  (* global/static ref, no local vars *)
   | Tir.ALit _ -> StringSet.empty
 
 let vars_of_atoms (atoms : Tir.atom list) : StringSet.t =

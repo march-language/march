@@ -41,8 +41,9 @@ let subst_var (s : ty_subst) (v : Tir.var) : Tir.var =
   { v with Tir.v_ty = subst_ty s v.Tir.v_ty }
 
 let subst_atom (s : ty_subst) : Tir.atom -> Tir.atom = function
-  | Tir.AVar v -> Tir.AVar (subst_var s v)
-  | a          -> a
+  | Tir.AVar v    -> Tir.AVar (subst_var s v)
+  | Tir.ADefRef _ as a -> a  (* global ref — no type vars to substitute *)
+  | a             -> a
 
 let rec subst_expr (s : ty_subst) : Tir.expr -> Tir.expr = function
   | Tir.EAtom a           -> Tir.EAtom (subst_atom s a)
@@ -148,6 +149,7 @@ let ensure_atom_fns fn_table done_set worklist atoms =
        | Some orig_fn when not (Hashtbl.mem done_set name) ->
          Queue.add (name, orig_fn, []) worklist
        | _ -> ())
+    | Tir.ADefRef _ -> ()  (* global def ref — not in fn_table, skip *)
     | _ -> ()
   ) atoms
 
@@ -189,6 +191,7 @@ let rec rewrite_calls
        in
        let arg_tys = List.map (function
            | Tir.AVar v -> v.Tir.v_ty
+           | Tir.ADefRef _ -> Tir.TPtr Tir.TUnit  (* global ref, treat as opaque ptr *)
            | Tir.ALit l -> lit_ty l
          ) args in
        let subst = build_subst orig_fn arg_tys in
@@ -221,6 +224,7 @@ let rec rewrite_calls
           in
           let arg_tys = List.map (function
               | Tir.AVar v -> v.Tir.v_ty
+              | Tir.ADefRef _ -> Tir.TPtr Tir.TUnit  (* global ref, treat as opaque ptr *)
               | Tir.ALit l -> lit_ty l
             ) args in
           (* Partial application: only first N params have concrete args *)

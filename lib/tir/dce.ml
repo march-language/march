@@ -9,8 +9,9 @@ module StringSet = Set.Make (String)
 
 (** Collect all variable names free in an expression. *)
 let rec free_vars : Tir.expr -> StringSet.t = function
-  | Tir.EAtom (Tir.AVar v)  -> StringSet.singleton v.Tir.v_name
-  | Tir.EAtom (Tir.ALit _)  -> StringSet.empty
+  | Tir.EAtom (Tir.AVar v)     -> StringSet.singleton v.Tir.v_name
+  | Tir.EAtom (Tir.ADefRef _) -> StringSet.empty  (* global ref — not a local binding *)
+  | Tir.EAtom (Tir.ALit _)    -> StringSet.empty
   | Tir.EApp (f, args)      ->
     List.fold_left (fun s a -> StringSet.union s (free_atom a))
       (StringSet.singleton f.Tir.v_name) args
@@ -44,8 +45,9 @@ let rec free_vars : Tir.expr -> StringSet.t = function
   | Tir.ESeq (e1, e2)        -> StringSet.union (free_vars e1) (free_vars e2)
 
 and free_atom : Tir.atom -> StringSet.t = function
-  | Tir.AVar v -> StringSet.singleton v.Tir.v_name
-  | Tir.ALit _ -> StringSet.empty
+  | Tir.AVar v    -> StringSet.singleton v.Tir.v_name
+  | Tir.ADefRef _ -> StringSet.empty  (* global ref — not a local binding *)
+  | Tir.ALit _    -> StringSet.empty
 
 (** Collect all function names called from an expression.
     ECallPtr (indirect closure dispatch) is not tracked — post-Defun its targets

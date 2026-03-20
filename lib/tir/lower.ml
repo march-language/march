@@ -313,6 +313,8 @@ and lower_expr (e : Ast.expr) : Tir.expr =
       lower_atoms_k args (fun arg_atoms ->
         let f_var = match f_atom with
           | Tir.AVar v -> v
+          | Tir.ADefRef did ->
+            { v_name = did.Tir.did_name; v_ty = unknown_ty; v_lin = Tir.Unr }
           | Tir.ALit _ ->
             { v_name = "<lit>"; v_ty = unknown_ty; v_lin = Tir.Unr }
         in

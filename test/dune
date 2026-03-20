@@ -5,3 +5,7 @@
 (test
  (name test_jit)
  (libraries march_jit alcotest))
+
+(test
+ (name test_cas)
+ (libraries march_tir march_ast march_cas alcotest unix))

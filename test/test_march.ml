@@ -894,7 +894,7 @@ let test_tir_anf_invariant () =
   let rec check_anf = function
     | March_tir.Tir.EApp (_, args) ->
       List.for_all (function
-        | March_tir.Tir.AVar _ | March_tir.Tir.ALit _ -> true
+        | March_tir.Tir.AVar _ | March_tir.Tir.ADefRef _ | March_tir.Tir.ALit _ -> true
       ) args
     | March_tir.Tir.ELet (_, e1, e2) -> check_anf e1 && check_anf e2
     | March_tir.Tir.ESeq (e1, e2) -> check_anf e1 && check_anf e2
@@ -2170,7 +2170,7 @@ let test_purity_free () =
 let mk_fn name body =
   { March_tir.Tir.fn_name = name; fn_params = [];
     fn_ret_ty = March_tir.Tir.TInt; fn_body = body }
-let mk_module fns = { March_tir.Tir.tm_name = "test"; tm_fns = fns; tm_types = [] }
+let mk_module fns = { March_tir.Tir.tm_name = "test"; tm_fns = fns; tm_types = []; tm_externs = [] }
 let avar name ty = March_tir.Tir.AVar (mk_var name ty)
 let flit f = March_tir.Tir.ALit (March_ast.Ast.LitFloat f)
 let fapp op args =
@@ -2564,7 +2564,7 @@ let test_fast_math_emits_fast_attr () =
   let body = March_tir.Tir.EApp (fn_var "+.", [March_tir.Tir.AVar x; March_tir.Tir.AVar y]) in
   let fd = { March_tir.Tir.fn_name = "fadd_test"; fn_params = [x; y];
              fn_ret_ty = March_tir.Tir.TFloat; fn_body = body } in
-  let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fd]; tm_types = [] } in
+  let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fd]; tm_types = []; tm_externs = [] } in
   let ir_fast   = March_tir.Llvm_emit.emit_module ~fast_math:true  m in
   let ir_normal = March_tir.Llvm_emit.emit_module ~fast_math:false m in
   Alcotest.(check bool) "fast_math IR contains 'fadd fast'" true
