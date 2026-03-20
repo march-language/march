@@ -897,7 +897,162 @@ March beats BEAM by 20-30× per connection because:
 4. **Compact headers** — 8-byte object headers vs BEAM's tagged word per value
 5. **Compiled native code** — no bytecode interpreter state per process
 
-The trade-off: BEAM processes are more flexible (arbitrary Erlang code, process dictionary, arbitrary mailbox patterns). March's stackless approach requires the handler to compile to a state machine, which works perfectly for the `recv → process → send → loop` pattern but limits what you can do inside a handler. Deep recursion or complex control flow may force fallback to a stackful coroutine (512B-2KB stack).
+#### What we give up for 92 bytes (tradeoffs)
+
+**1. Server-push is broken — the big one**
+
+The broadcasting example in the WebSocket section doesn't actually work:
+
+```march
+fn chat_loop(room_pid, socket) do
+  match WebSocket.recv(socket) with    -- blocked here forever
+  | TextFrame(msg) ->
+    Actor.send(room_pid, Broadcast(msg))  -- sends TO the room
+    chat_loop(room_pid, socket)
+  | ...
+```
+
+The handler suspends on `WebSocket.recv(socket)`. While suspended, the room actor calls `WebSocket.send(s, frame)` to push a message to this connection. But who executes that send? The handler process is parked. There's no way to wake it — it's waiting for a *client* frame, not an actor message.
+
+BEAM doesn't have this problem. Each Erlang process has a single mailbox that receives both network I/O and internal messages. `receive` can pattern-match on either. March's `recv` blocks on one fd.
+
+**Solutions, with memory impact:**
+
+**(a) `select` builtin — wait on fd OR mailbox**
+
+Add `WebSocket.select(socket, timeout)` that suspends until either a WebSocket frame arrives OR an actor message arrives:
+
+```march
+type SelectResult = WsData(WsFrame) | ActorMsg(Msg) | Timeout
+
+fn chat_loop(room_pid, socket) do
+  match WebSocket.select(socket, 30000) with
+  | WsData(TextFrame(msg)) ->
+    Actor.send(room_pid, Broadcast(msg))
+    chat_loop(room_pid, socket)
+  | ActorMsg(Push(frame)) ->
+    WebSocket.send(socket, frame)
+    chat_loop(room_pid, socket)
+  | WsData(Close(_, _)) ->
+    Actor.send(room_pid, Leave(socket))
+  | Timeout ->
+    WebSocket.send(socket, Ping)
+    chat_loop(room_pid, socket)
+  | _ -> chat_loop(room_pid, socket)
+  end
+end
+```
+
+Runtime implementation: the io_uring loop watches both the socket fd and the process mailbox (via an `eventfd` that the mailbox signals on enqueue). Wakes the process on whichever fires first.
+
+Memory cost: +8 bytes per process for the eventfd. Total: **~100 bytes/conn**. The mailbox pointer (already in the PCB) is no longer NULL — but the mailbox itself is a lock-free linked list head, so it's 8 bytes until the first message.
+
+This is the right answer. It's how Go's `select` works, how Erlang's `receive` works, and how every serious concurrent system handles multiplexed waiting. The cost is small and the capability is essential.
+
+**(b) Two processes per connection (reader + writer)**
+
+Split each WebSocket connection into a reader process (blocks on recv) and a writer process (blocks on mailbox). The room actor sends to the writer. The reader forwards client messages to the room.
+
+Memory cost: 2 × 92 = **~184 bytes/conn**. Doubles connection count toward max. More complex, no real advantage over (a).
+
+**(c) Non-blocking poll loop**
+
+`WebSocket.try_recv(socket) : Option(WsFrame)` returns immediately. Handler polls in a loop with a sleep. Wasteful — burns CPU proportional to connection count. Defeats the purpose of io_uring. Rejected.
+
+**Recommendation: option (a).** `select` is the primitive. It costs 8 bytes and enables the full pub/sub pattern. Without it, March WebSockets are read-only — fundamentally less capable than Phoenix Channels.
+
+**2. FBIP doesn't save as much as claimed**
+
+The spec says "a pure echo handler allocates nothing." Let's check:
+
+```march
+WebSocket.send(socket, TextFrame("Echo: " ++ msg))
+```
+
+- `"Echo: " ++ msg` — string concat. Output is longer than either input. Neither input string can be reused in-place. This **allocates a new string**.
+- `TextFrame(...)` — wraps the string. Perceus can reuse the incoming `TextFrame`'s memory (same size, RC=1). This is **zero-cost via FBIP**.
+
+So even the simplest echo handler allocates one string per message. The arena isn't zero — it's ~100 bytes per message processed. For an *idle* connection (no messages flowing), it's still zero. But under load, the lazy arena kicks in and grows.
+
+Real handlers allocate more: JSON serialization, string building, list manipulation. The arena will grow to 1-4KB for realistic workloads. Still much less than BEAM (which allocates per-word), but not zero.
+
+**Honest per-connection budget under moderate load:**
+
+| Component | Idle | Active (10 msg/s) |
+|-----------|------|-------------------|
+| Process control block | 48B | 48B |
+| Coroutine frame | 32B | 32B |
+| WsSocket | 12B | 12B |
+| eventfd (for select) | 8B | 8B |
+| Arena heap | 0B | 1-4 KB |
+| Mailbox | 8B (empty head) | 8B + messages |
+| **Total** | **~108B** | **~1-4 KB** |
+
+Active connections converge toward BEAM-like memory per connection. The win is that *idle* connections (the vast majority in a 2M-connection deployment) stay near 108 bytes.
+
+**3. Stackless coroutines limit handler complexity**
+
+LLVM's `@llvm.coro.*` transforms compile the handler into a state machine. Every `recv`/`send`/`select` call is a suspend point. The coroutine frame holds only the variables live across suspension.
+
+This works perfectly for:
+```march
+fn handler(socket) do
+  match WebSocket.recv(socket) with   -- suspend point
+  | ... -> WebSocket.send(socket, ...) -- suspend point
+  end
+  handler(socket)                      -- tail call, no stack growth
+end
+```
+
+This breaks for:
+- **Deep recursion inside a handler** — if you call a recursive function between suspend points, that recursion uses the coroutine's stack. But there is no stack — it's a state machine. LLVM would need to heap-allocate the recursive frames, which is expensive.
+- **Calling arbitrary library code** — a function 10 calls deep that does blocking I/O needs all 10 frames preserved across the suspend. The coroutine frame explodes.
+- **Multiple suspend points in complex control flow** — conditionals, loops, and nested matches with suspend points in different branches create large state machines with many live-variable sets. The coroutine frame grows.
+
+**Fallback**: handlers that exceed the stackless model fall back to stackful coroutines (512B-2KB initial stack, growable). The runtime detects this at compile time — if the coroutine frame would exceed a threshold (e.g., 256 bytes), use a stack instead. Memory per connection: ~600B-2KB instead of 92B. Still better than a full OS thread.
+
+**4. io_uring is Linux-only**
+
+`io_uring` requires Linux 5.1+. The shared buffer pool (`IORING_OP_PROVIDE_BUFFERS`) requires Linux 5.7+. There is no equivalent on macOS or Windows.
+
+Fallback:
+- **macOS**: `kqueue` + per-connection 4KB buffer (back to ~4KB/conn)
+- **Windows**: IOCP + per-connection buffer (same)
+- The optimization stack degrades gracefully: stackless coroutines and compact headers still work, only the zero-copy buffer pool is platform-specific
+
+**5. Shared buffer pool contention under burst**
+
+The pool has 1024 buffers. If 2000 connections receive data simultaneously, 976 of them must wait for a buffer to be released. Under sustained burst, this creates head-of-line blocking.
+
+Mitigation: size the pool for expected peak concurrency, not total connections. Most real workloads have <10% of connections active at any instant. For 2M connections with 5% active = 100K active, a 100K-buffer pool = 400MB. Still far below the naive 8GB.
+
+**6. Compact header is a pervasive change**
+
+Switching from 16-byte to 8-byte headers touches:
+- `march_runtime.c` — all allocation, RC, and field access
+- `llvm_emit.ml` — all `getelementptr` offsets, header stores, tag loads
+- `perceus.ml` — RC operation sizes
+- Every TIR pass that emits memory operations
+
+This is ~2 weeks of work and affects every benchmark. It should be done, but it's a separate project from the HTTP server.
+
+**7. Debugging stackless coroutines is hard**
+
+A crashed stackless handler has no stack trace — just a state number in the coroutine frame. "Crashed in state 7 of echo_handler" is not a useful error message. Need to emit a state→source-location map at compile time for diagnostics. BEAM doesn't have this problem because every process has a real call stack.
+
+#### Summary: what 92 bytes actually costs
+
+| Trade-off | Impact | Mitigation |
+|-----------|--------|------------|
+| No server-push | **Severe** — broadcasting broken | Add `select` builtin (+8B/conn) |
+| FBIP not zero under load | Moderate — 1-4KB active | Lazy arena, still < BEAM |
+| Stackless limits handler complexity | Moderate — simple handlers only | Fallback to stackful (512B-2KB) |
+| Linux-only buffer pools | Moderate — macOS/Win degrade | Graceful fallback to per-conn buffers |
+| Buffer pool contention | Low — size pool for peak active % | Tunable pool size |
+| Compact header is pervasive | Low — engineering cost, not design | Separate project |
+| No stack traces | Low — debugging only | State→location map |
+
+**The honest number**: ~108 bytes idle (with `select`), 1-4KB active. Still 2-3× better than BEAM idle, comparable active. The real advantage is that most connections in a 2M deployment are idle — and idle is where March dominates.
 
 A 64GB machine comfortably handles **2M active connections with room for application state**, or **10M+ idle connections** at the theoretical limit.
 
@@ -1120,6 +1275,17 @@ end
 pub fn close(socket, code, reason) : Unit do
   send(socket, Close(code, reason))
 end
+
+-- Multiplex: wait on socket OR actor mailbox OR timeout
+-- This is the key primitive for server-push and broadcasting.
+-- Without it, handlers can only react to client messages.
+type SelectResult = WsData(WsFrame) | ActorMsg(Any) | Timeout
+
+pub fn select(socket, timeout_ms) : SelectResult do
+  match socket with
+  | WsSocket(fd) -> ws_select(fd, timeout_ms)
+  end
+end
 ```
 
 ### Handler Pattern: Tail-Recursive Message Loop
@@ -1175,46 +1341,64 @@ fn chat_loop(socket, history) do
 end
 ```
 
-### Broadcasting: WebSockets + Actors
+### Broadcasting: WebSockets + Actors (using `select`)
 
-For multi-client scenarios (chat rooms, live updates), combine WebSocket handlers with March actors. Each WebSocket connection registers with a room actor:
+For multi-client scenarios (chat rooms, live updates), the handler must wait on *both* the WebSocket fd and actor messages simultaneously. This requires `WebSocket.select` — without it, server-push is impossible (see Tradeoffs section).
 
 ```march
+type ChatMsg = Push(WsFrame) | ServerClose
+
 fn chat_handler(room_pid, socket) do
-  -- Register this connection with the room
-  Actor.send(room_pid, Join(socket))
+  Actor.send(room_pid, Join(self()))
   chat_loop(room_pid, socket)
 end
 
 fn chat_loop(room_pid, socket) do
-  match WebSocket.recv(socket) with
-  | TextFrame(msg) ->
-    -- Tell the room to broadcast
+  match WebSocket.select(socket, 30000) with
+  | WsData(TextFrame(msg)) ->
+    -- Client sent a message — tell room to broadcast
     Actor.send(room_pid, Broadcast(msg))
     chat_loop(room_pid, socket)
-  | Close(_, _) ->
-    Actor.send(room_pid, Leave(socket))
-  | Ping ->
+  | WsData(Close(_, _)) ->
+    Actor.send(room_pid, Leave(self()))
+  | WsData(Ping) ->
     WebSocket.send(socket, Pong)
+    chat_loop(room_pid, socket)
+  | ActorMsg(Push(frame)) ->
+    -- Room pushed a message — forward to this client
+    WebSocket.send(socket, frame)
+    chat_loop(room_pid, socket)
+  | ActorMsg(ServerClose) ->
+    WebSocket.close(socket, 1000, "Server shutting down")
+  | Timeout ->
+    -- Keepalive
+    WebSocket.send(socket, Ping)
     chat_loop(room_pid, socket)
   | _ -> chat_loop(room_pid, socket)
   end
 end
 
--- Room actor: maintains list of connected sockets, broadcasts to all
-fn room_actor(sockets) do
+-- Room actor: maintains list of connected pids, broadcasts to all
+fn room_actor(members) do
   receive do
-  | Join(socket) -> room_actor(Cons(socket, sockets))
-  | Leave(socket) -> room_actor(remove(sockets, socket))
+  | Join(pid) -> room_actor(Cons(pid, members))
+  | Leave(pid) -> room_actor(remove(members, pid))
   | Broadcast(msg) ->
     let frame = TextFrame(msg)
-    each(sockets, fn(s) do WebSocket.send(s, frame) end)
-    room_actor(sockets)
+    each(members, fn(pid) do Actor.send(pid, Push(frame)) end)
+    room_actor(members)
   end
 end
 ```
 
-This is the March equivalent of Phoenix Channels + PubSub. The room actor is the channel, `Actor.send` is the PubSub, and the WebSocket handler is the socket. No framework — just actors and functions.
+`WebSocket.select(socket, timeout)` suspends the process until either:
+- A WebSocket frame arrives on the socket → returns `WsData(frame)`
+- An actor message arrives in the process mailbox → returns `ActorMsg(msg)`
+- The timeout expires → returns `Timeout`
+
+Under the hood: the io_uring loop watches the socket fd *and* the process's eventfd (signaled when the mailbox is non-empty). Whichever fires first wakes the process.
+
+This is the March equivalent of Phoenix Channels + PubSub. The room actor is the channel, `Actor.send` is the PubSub, and `select` multiplexes network + actor I/O like BEAM's `receive`. No framework — just actors, functions, and `select`.
 
 ### Routing WebSocket Connections
 
@@ -1387,6 +1571,13 @@ ws_handshake(fd : Int, key : String) -> Unit
   Send 101 Switching Protocols with computed Sec-WebSocket-Accept.
   Called internally by the runtime after pipeline upgrade detection.
   Also exposed as a builtin for custom server implementations.
+
+ws_select(fd : Int, timeout_ms : Int) -> SelectResult
+  Suspend until a WebSocket frame arrives on fd, an actor message
+  arrives in the current process's mailbox, or timeout expires.
+  Implementation: io_uring watches fd + process eventfd.
+  Returns WsData(frame), ActorMsg(msg), or Timeout.
+  This is the key primitive enabling server-push and pub/sub.
 ```
 
 ### Existing Builtins Reused
