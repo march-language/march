@@ -5430,15 +5430,14 @@ let () =
         Alcotest.test_case "task_spawn_link completes"         `Quick (with_reset test_supervision_task_spawn_link_completes);
         Alcotest.test_case "task_spawn_link crash propagates"  `Quick (with_reset test_supervision_task_spawn_link_crash_propagates);
       ]);
-      Alcotest.test_group "supervision phase6a"
-        [
-          Alcotest.test_case "resource cleanup on crash"
-            `Quick (with_reset test_resource_cleanup_on_crash);
-          Alcotest.test_case "resource cleanup reverse order"
-            `Quick (with_reset test_resource_cleanup_reverse_order);
-          Alcotest.test_case "resource cleanup on link crash"
-            `Quick (with_reset test_resource_cleanup_on_link_crash);
-        ];
+      ("supervision phase6a", [
+        Alcotest.test_case "resource cleanup on crash"
+          `Quick (with_reset test_resource_cleanup_on_crash);
+        Alcotest.test_case "resource cleanup reverse order"
+          `Quick (with_reset test_resource_cleanup_reverse_order);
+        Alcotest.test_case "resource cleanup on link crash"
+          `Quick (with_reset test_resource_cleanup_on_link_crash);
+      ]);
       ("eval phase 4", [
         Alcotest.test_case "async send queues not dispatches" `Quick
           (with_reset test_async_send_queues_not_dispatches);

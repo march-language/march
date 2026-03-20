@@ -483,6 +483,11 @@ let eval_expr_hook : (env -> expr -> value) ref =
 let run_scheduler_hook : (unit -> unit) ref =
   ref (fun () -> eval_error "run_scheduler not yet initialized")
 
+(** Forward reference for [apply] — set after [apply] is defined
+    so that [register_resource_ocaml] can call closures at crash time. *)
+let apply_hook : (value -> value list -> value) ref =
+  ref (fun _fn _args -> eval_error "apply not yet initialized")
+
 (** Spawn a fresh child actor instance (for supervisor restarts).
     Returns the new pid. *)
 let spawn_child_actor (child_actor_name : string) (supervisor_pid : int) : int =
@@ -700,6 +705,17 @@ and crash_actor (pid : int) (reason : string) : unit =
   | Some inst ->
     let supervisor = inst.ai_supervisor in
     inst.ai_alive <- false;
+    (* Phase 6a: run resource cleanup in reverse acquisition order.
+       This runs for the actor being crashed directly.
+       Linked actors are crashed by recursive calls to crash_actor below,
+       so each linked actor's cleanup runs inside its own crash_actor invocation. *)
+    List.iter (fun (_, cleanup) ->
+      try cleanup ()
+      with exn ->
+        Printf.eprintf "warn: resource cleanup failed for actor %d: %s\n"
+          pid (Printexc.to_string exn)
+    ) inst.ai_resources;
+    inst.ai_resources <- [];  (* clear so cleanup doesn't re-run on double-crash *)
     (* Deliver Down(mon_ref, reason) to each watcher's mailbox *)
     List.iter (fun (mon_ref, watcher_pid) ->
       match Hashtbl.find_opt actor_registry watcher_pid with
@@ -756,6 +772,15 @@ let link_actors (pid_a : int) (pid_b : int) : unit =
      if not (List.mem pid_a ib.ai_links) then
        ib.ai_links <- pid_a :: ib.ai_links
    | None -> ())
+
+(** Register an OS resource with an actor.
+    [cleanup] is called in reverse acquisition order when the actor crashes.
+    Safe to call on a dead or unknown actor (no-op). *)
+let register_resource_ocaml (pid : int) (name : string) (cleanup : unit -> unit) : unit =
+  match Hashtbl.find_opt actor_registry pid with
+  | None -> ()
+  | Some inst ->
+    inst.ai_resources <- inst.ai_resources @ [(name, cleanup)]
 
 let base_env : env =
   [ (* Integer arithmetic *)
@@ -904,6 +929,18 @@ let base_env : env =
               | _ -> VCon ("None", []))
            | None -> VCon ("None", []))
         | _ -> eval_error "get_actor_field: expected (Pid, String)"))
+  ; ("register_resource", VBuiltin ("register_resource", function
+        (* Register a cleanup thunk with an actor.
+           Calling convention: cleanup_thunk is (Unit -> Unit).
+           In March: register_resource(pid, "name", fn _ -> cleanup_expr)
+           The thunk is called at crash time in reverse acquisition order. *)
+        | [VPid pid; VString name; cleanup_thunk] ->
+          let cleanup () =
+            let _ = !apply_hook cleanup_thunk [VUnit] in ()
+          in
+          register_resource_ocaml pid name cleanup;
+          VUnit
+        | _ -> eval_error "register_resource: expected (Pid, String, fn _ -> ...)"))
   ; ("run_until_idle", VBuiltin ("run_until_idle", function
         | [] -> !run_scheduler_hook (); VUnit
         | _ -> eval_error "run_until_idle: expected 0 arguments"))
@@ -2410,6 +2447,7 @@ and eval_expr (env : env) (e : expr) : value =
 (* ------------------------------------------------------------------ *)
 
 let () = eval_expr_hook := eval_expr
+let () = apply_hook := apply
 
 (* ------------------------------------------------------------------ *)
 (* Task builtins                                                       *)
