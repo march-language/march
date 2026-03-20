@@ -4340,6 +4340,71 @@ let test_file_builtin_exists_false () =
   Alcotest.(check bool) "file_exists returns false" false
     (vbool (call_fn env "f" []))
 
+(* ── Seq stdlib tests ────────────────────────────────────────────────────── *)
+
+let load_seq () = load_stdlib_file_for_test "seq.march"
+
+let eval_with_seq src =
+  eval_with_stdlib [load_seq ()] src
+
+let test_seq_from_list () =
+  let env = eval_with_seq {|mod T do
+    fn f() do Seq.from_list([1, 2, 3]) |> Seq.to_list end
+  end|} in
+  Alcotest.(check (list int)) "from_list round trips"
+    [1; 2; 3]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+let test_seq_map () =
+  let env = eval_with_seq {|mod T do
+    fn f() do
+      let s = Seq.from_list([1, 2, 3])
+      Seq.to_list(Seq.map(s, fn x -> x * 2))
+    end
+  end|} in
+  Alcotest.(check (list int)) "map doubles" [2; 4; 6]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+let test_seq_filter () =
+  let env = eval_with_seq {|mod T do
+    fn f() do
+      let s = Seq.from_list([1,2,3,4,5])
+      Seq.to_list(Seq.filter(s, fn x -> x > 2))
+    end
+  end|} in
+  Alcotest.(check (list int)) "filter" [3; 4; 5]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+let test_seq_take () =
+  let env = eval_with_seq {|mod T do
+    fn f() do
+      let s = Seq.from_list([1,2,3,4,5])
+      Seq.to_list(Seq.take(s, 3))
+    end
+  end|} in
+  Alcotest.(check (list int)) "take 3" [1; 2; 3]
+    (List.map vint (vlist (call_fn env "f" [])))
+
+let test_seq_fold_while () =
+  let env = eval_with_seq {|mod T do
+    fn f() do
+      let s = Seq.from_list([1,2,3,4,5])
+      Seq.fold_while(s, 0, fn(sum, x) ->
+        if sum + x > 6 then Halt(sum)
+        else Continue(sum + x)
+      )
+    end
+  end|} in
+  Alcotest.(check int) "fold_while halts" 6
+    (vint (call_fn env "f" []))
+
+let test_seq_concat () =
+  let env = eval_with_seq {|mod T do
+    fn f() do Seq.concat(Seq.from_list([1,2]), Seq.from_list([3,4])) |> Seq.to_list end
+  end|} in
+  Alcotest.(check (list int)) "concat" [1; 2; 3; 4]
+    (List.map vint (vlist (call_fn env "f" [])))
+
 let () =
   Alcotest.run "march"
     [
@@ -4815,5 +4880,13 @@ let () =
       ]);
       ("file builtins", [
         Alcotest.test_case "file_exists false" `Quick test_file_builtin_exists_false;
+      ]);
+      ("seq stdlib", [
+        Alcotest.test_case "from_list round trips" `Quick test_seq_from_list;
+        Alcotest.test_case "map doubles"           `Quick test_seq_map;
+        Alcotest.test_case "filter"                `Quick test_seq_filter;
+        Alcotest.test_case "take 3"                `Quick test_seq_take;
+        Alcotest.test_case "fold_while halts"      `Quick test_seq_fold_while;
+        Alcotest.test_case "concat"                `Quick test_seq_concat;
       ]);
     ]
