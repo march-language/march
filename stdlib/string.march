@@ -349,4 +349,16 @@ mod String do
   """
   pub fn from_float(f) do float_to_string(f) end
 
+  doc """
+  Find the byte offset of the **last** occurrence of `substring` in `s`.
+  Returns `Some(offset)` if found, `None` if not found.
+
+      String.last_index_of("hello.world.txt", ".")  -- Some(11)
+      String.last_index_of("hello", "xyz")           -- None
+      String.last_index_of("hello", "")              -- Some(5)
+
+  Cost: O(n * m) worst case.
+  """
+  pub fn last_index_of(s, sub) do string_last_index_of(s, sub) end
+
 end

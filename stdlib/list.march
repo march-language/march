@@ -369,6 +369,14 @@ pub fn partition(xs : List(a), pred : a -> Bool) : (List(a), List(a)) do
   go(xs, Nil, Nil)
 end
 
+doc "Returns all elements except the last. Returns Nil for empty or singleton lists."
+pub fn drop_last(xs : List(a)) : List(a) do
+  match reverse(xs) with
+  | Nil -> Nil
+  | Cons(ig, rest) -> reverse(rest)
+  end
+end
+
 doc "Splits the list into consecutive chunks of at most `size` elements."
 pub fn chunks(xs : List(a), size : Int) : List(List(a)) do
   if is_empty(xs) then Nil

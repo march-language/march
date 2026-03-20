@@ -1,0 +1,85 @@
+-- Path module: pure path manipulation (no I/O).
+-- All operations are pure string functions.
+
+mod Path do
+
+pub fn join(a, b) do
+  if String.ends_with(a, "/") then a ++ b
+  else a ++ "/" ++ b
+end
+
+pub fn is_absolute(path) do
+  String.starts_with(path, "/")
+end
+
+pub fn components(path) do
+  let raw = String.split(path, "/")
+  List.filter(raw, fn s -> not (String.is_empty(s)))
+end
+
+pub fn basename(path) do
+  let parts = components(path)
+  match parts with
+  | Nil -> path
+  | _ -> List.last(parts)
+  end
+end
+
+pub fn dirname(path) do
+  let parts = components(path)
+  match List.drop_last(parts) with
+  | Nil -> if is_absolute(path) then "/" else "."
+  | dirs ->
+    let joined = String.join(dirs, "/")
+    if is_absolute(path) then "/" ++ joined else joined
+  end
+end
+
+pub fn extension(path) do
+  let base = basename(path)
+  match String.last_index_of(base, ".") with
+  | None -> ""
+  | Some(i) ->
+    let len = String.byte_size(base) - i - 1
+    String.slice_bytes(base, i + 1, len)
+  end
+end
+
+pub fn strip_extension(path) do
+  let base = basename(path)
+  let dir = dirname(path)
+  match String.last_index_of(base, ".") with
+  | None -> path
+  | Some(i) ->
+    let stem = String.slice_bytes(base, 0, i)
+    if dir == "." then stem else dir ++ "/" ++ stem
+  end
+end
+
+pub fn normalize(path) do
+  let abs = is_absolute(path)
+  let parts = components(path)
+  fn process(remaining, stack) do
+    match remaining with
+    | Nil -> stack
+    | Cons(".", rest) -> process(rest, stack)
+    | Cons("..", rest) ->
+      match stack with
+      | Nil ->
+        if abs then process(rest, Nil)
+        else process(rest, Cons("..", Nil))
+      | Cons("..", _) -> process(rest, Cons("..", stack))
+      | Cons(_, parent) -> process(rest, parent)
+      end
+    | Cons(seg, rest) -> process(rest, Cons(seg, stack))
+    end
+  end
+  let stack = process(parts, Nil)
+  let segs = List.reverse(stack)
+  let joined = String.join(segs, "/")
+  if abs then "/" ++ joined
+  else if String.is_empty(joined) then "."
+  else joined
+end
+
+end

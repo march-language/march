@@ -4405,6 +4405,68 @@ let test_seq_concat () =
   Alcotest.(check (list int)) "concat" [1; 2; 3; 4]
     (List.map vint (vlist (call_fn env "f" [])))
 
+let eval_with_path src =
+  let string_decl = load_stdlib_file_for_test "string.march" in
+  let list_decl   = load_stdlib_file_for_test "list.march" in
+  let path_decl   = load_stdlib_file_for_test "path.march" in
+  eval_with_stdlib [string_decl; list_decl; path_decl] src
+
+let test_path_join () =
+  let env = eval_with_path {|mod T do
+    fn f() do Path.join("foo/bar", "baz.txt") end
+  end|} in
+  Alcotest.(check string) "join" "foo/bar/baz.txt"
+    (vstr (call_fn env "f" []))
+
+let test_path_basename () =
+  let env = eval_with_path {|mod T do
+    fn f() do Path.basename("/foo/bar/baz.txt") end
+  end|} in
+  Alcotest.(check string) "basename" "baz.txt"
+    (vstr (call_fn env "f" []))
+
+let test_path_extension () =
+  let env = eval_with_path {|mod T do
+    fn f() do Path.extension("photo.png") end
+  end|} in
+  Alcotest.(check string) "extension" "png"
+    (vstr (call_fn env "f" []))
+
+let test_path_normalize () =
+  let env = eval_with_path {|mod T do
+    fn f() do Path.normalize("a/../b/./c") end
+  end|} in
+  Alcotest.(check string) "normalize" "b/c"
+    (vstr (call_fn env "f" []))
+
+let test_path_dirname () =
+  let env = eval_with_path {|mod T do
+    fn f() do Path.dirname("/foo/bar/baz.txt") end
+  end|} in
+  Alcotest.(check string) "dirname" "/foo/bar"
+    (vstr (call_fn env "f" []))
+
+let test_path_strip_extension () =
+  let env = eval_with_path {|mod T do
+    fn f() do Path.strip_extension("photo.png") end
+  end|} in
+  Alcotest.(check string) "strip_extension" "photo"
+    (vstr (call_fn env "f" []))
+
+let test_path_normalize_absolute () =
+  let env = eval_with_path {|mod T do
+    fn f() do Path.normalize("/a/../../../b") end
+  end|} in
+  Alcotest.(check string) "normalize absolute clamps at root" "/b"
+    (vstr (call_fn env "f" []))
+
+let test_path_is_absolute () =
+  let env = eval_with_path {|mod T do
+    fn f() do Path.is_absolute("/foo") end
+  end|} in
+  Alcotest.(check bool) "is_absolute" true
+    (vbool (call_fn env "f" []))
+
 let () =
   Alcotest.run "march"
     [
@@ -4888,5 +4950,15 @@ let () =
         Alcotest.test_case "take 3"                `Quick test_seq_take;
         Alcotest.test_case "fold_while halts"      `Quick test_seq_fold_while;
         Alcotest.test_case "concat"                `Quick test_seq_concat;
+      ]);
+      ("path stdlib", [
+        Alcotest.test_case "join"                    `Quick test_path_join;
+        Alcotest.test_case "basename"                `Quick test_path_basename;
+        Alcotest.test_case "extension"               `Quick test_path_extension;
+        Alcotest.test_case "normalize"               `Quick test_path_normalize;
+        Alcotest.test_case "dirname"                 `Quick test_path_dirname;
+        Alcotest.test_case "strip_extension"         `Quick test_path_strip_extension;
+        Alcotest.test_case "normalize absolute"      `Quick test_path_normalize_absolute;
+        Alcotest.test_case "is_absolute"             `Quick test_path_is_absolute;
       ]);
     ]
