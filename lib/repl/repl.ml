@@ -468,9 +468,11 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
       Notty.I.(Notty.I.string Notty.A.empty pad_str <|> Highlight.highlight line)
     ) (List.rev !inp.Input.multiline_buf) in
     let transcript = !hist_lines @ cont_imgs in
-    (* Hide stdlib and all other names present at REPL startup from the scope panel.
-       Functions (VClosure/VBuiltin) are also filtered — we only show data bindings. *)
-    let (scope, result_latest) = user_scope !env !tc_env result_h ~baseline_env:e0 in
+    (* In debug mode use base_e (primitive builtins only) as baseline so user vars
+       appear; in normal mode use e0 (base + stdlib) to hide stdlib.
+       VClosure/VBuiltin values are filtered separately in user_scope. *)
+    let scope_baseline = if is_debug then base_e else e0 in
+    let (scope, result_latest) = user_scope !env !tc_env result_h ~baseline_env:scope_baseline in
     let (comp_items, comp_sel) = match !comp with
       | CompOff -> ([], 0)
       | CompOn { items; sel } -> (items, sel)
