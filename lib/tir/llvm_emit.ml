@@ -1116,3 +1116,93 @@ let emit_module ?(fast_math=false) (m : Tir.tir_module) : string =
   if has_main then emit_main_wrapper out;
 
   Buffer.contents out
+
+(* ── REPL emission helpers ──────────────────────────────────────────────── *)
+
+(** Tracks REPL globals across fragments. Each entry:
+    (llvm_name, llvm_type_string).  Example: ("repl_x", "ptr") *)
+type repl_globals = (string * string) list ref
+
+let emit_repl_globals_decl (buf : Buffer.t) (globals : (string * string) list) =
+  List.iter (fun (name, ty) ->
+    Printf.bprintf buf "@%s = external global %s\n" name ty
+  ) globals
+
+(** Emit a REPL expression as a standalone .ll fragment.
+    Returns textual LLVM IR with a function [@repl_<n>] that computes
+    and returns the expression result.
+    [prev_globals] are (name, llvm_ty) pairs from earlier REPL inputs.
+    [fns] are any helper functions the expression depends on. *)
+let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
+    ~(prev_globals : (string * string) list)
+    ~(fns : Tir.fn_def list)
+    ~(types : Tir.type_def list)
+    (body : Tir.expr) : string =
+  let ctx = make_ctx ~fast_math () in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns } in
+  build_ctor_info ctx pseudo_mod;
+  List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true) fns;
+  List.iter (emit_fn ctx) fns;
+  let ret_llty = llvm_ty ret_ty in
+  let fname = Printf.sprintf "repl_%d" n in
+  Printf.bprintf ctx.buf "\ndefine %s @%s() {\nentry:\n" ret_llty fname;
+  let (_ty, result) = emit_expr ctx body in
+  Printf.bprintf ctx.buf "  ret %s %s\n}\n" ret_llty result;
+  let out = Buffer.create 4096 in
+  emit_preamble out;
+  emit_repl_globals_decl out prev_globals;
+  Buffer.add_buffer out ctx.preamble;
+  Buffer.add_buffer out ctx.buf;
+  Buffer.contents out
+
+(** Emit a REPL let-binding as a .ll fragment.
+    Creates a global [@repl_<name>] and an init function [@repl_<n>_init]
+    that computes the value and stores it in the global. *)
+let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
+    ~(val_ty : Tir.ty)
+    ~(prev_globals : (string * string) list)
+    ~(fns : Tir.fn_def list)
+    ~(types : Tir.type_def list)
+    (body : Tir.expr) : string =
+  let ctx = make_ctx ~fast_math () in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns } in
+  build_ctor_info ctx pseudo_mod;
+  List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true) fns;
+  List.iter (emit_fn ctx) fns;
+  let llty = llvm_ty val_ty in
+  let global_name = "repl_" ^ name in
+  let init_name = Printf.sprintf "repl_%d_init" n in
+  Printf.bprintf ctx.preamble "@%s = global %s zeroinitializer\n" global_name llty;
+  Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n" init_name;
+  let (_ty, result) = emit_expr ctx body in
+  Printf.bprintf ctx.buf "  store %s %s, ptr @%s\n" llty result global_name;
+  Printf.bprintf ctx.buf "  ret void\n}\n";
+  let out = Buffer.create 4096 in
+  emit_preamble out;
+  emit_repl_globals_decl out prev_globals;
+  Buffer.add_buffer out ctx.preamble;
+  Buffer.add_buffer out ctx.buf;
+  Buffer.contents out
+
+(** Emit a REPL function declaration as a .ll fragment.
+    The function is emitted at top level (callable by later fragments).
+    A no-op [@repl_<n>_init] is emitted so the REPL runner can call it uniformly. *)
+let emit_repl_fn ?(fast_math=false) ~(n : int)
+    ~(prev_globals : (string * string) list)
+    ~(types : Tir.type_def list)
+    (fn : Tir.fn_def) : string =
+  let ctx = make_ctx ~fast_math () in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn] } in
+  build_ctor_info ctx pseudo_mod;
+  Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
+  emit_fn ctx fn;
+  let init_name = Printf.sprintf "repl_%d_init" n in
+  Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n  ret void\n}\n" init_name;
+  let out = Buffer.create 4096 in
+  emit_preamble out;
+  emit_repl_globals_decl out prev_globals;
+  Buffer.add_buffer out ctx.preamble;
+  Buffer.add_buffer out ctx.buf;
+  Buffer.contents out
+
+let llvm_ty_of_tir = llvm_ty
