@@ -1,12 +1,20 @@
 (* lib/jit/repl_jit.ml *)
 
+let is_macos () =
+  Sys.os_type = "Unix" &&
+  (try let ic = Unix.open_process_in "uname -s" in
+       let s = input_line ic in ignore (Unix.close_process_in ic); s = "Darwin"
+   with _ -> false)
+
 type t = {
-  runtime_so  : string;
-  clang       : string;
-  tmp_dir     : string;
+  runtime_so   : string;
+  clang        : string;
+  tmp_dir      : string;
+  undef_flag   : string;  (* "-undefined dynamic_lookup" on macOS, "" elsewhere *)
   mutable counter : int;
   mutable globals : (string * string) list;  (* (llvm_name, llvm_ty) *)
   mutable handles : Jit.dl_handle list;      (* open dl handles *)
+  compiled_fns : (string, unit) Hashtbl.t;  (* fns already compiled in prior fragments *)
 }
 
 let create ~runtime_so ?(clang="clang") () =
@@ -15,8 +23,10 @@ let create ~runtime_so ?(clang="clang") () =
   (try Unix.mkdir tmp_dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
   (* Load the runtime .so first so its symbols are globally available *)
   let rt_handle = Jit.dlopen runtime_so in
-  { runtime_so; clang; tmp_dir;
-    counter = 0; globals = []; handles = [rt_handle] }
+  let undef_flag = if is_macos () then " -undefined dynamic_lookup" else "" in
+  { runtime_so; clang; tmp_dir; undef_flag;
+    counter = 0; globals = []; handles = [rt_handle];
+    compiled_fns = Hashtbl.create 256 }
 
 let next_id ctx =
   let n = ctx.counter in
@@ -33,9 +43,11 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
   let oc = open_out ll_path in
   output_string oc ir;
   close_out oc;
-  (* Compile to .so *)
-  let cmd = Printf.sprintf "%s -shared -fPIC -O0 -o %s %s 2>&1"
-    ctx.clang so_path ll_path in
+  (* Compile to .so.
+     -undefined dynamic_lookup (macOS): undefined symbols resolve at dlopen time
+     from RTLD_GLOBAL, so later fragments can omit stdlib already compiled. *)
+  let cmd = Printf.sprintf "%s -shared -fPIC -O0%s -o %s %s 2>&1"
+    ctx.clang ctx.undef_flag so_path ll_path in
   let ic = Unix.open_process_in cmd in
   let output = Buffer.create 256 in
   (try while true do Buffer.add_char output (input_char ic) done
@@ -54,6 +66,14 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
   ctx.handles <- handle :: ctx.handles;
   handle
 
+(** Filter a function list to only those not yet compiled, and record the new ones. *)
+let filter_new_fns ctx (fns : March_tir.Tir.fn_def list) : March_tir.Tir.fn_def list =
+  let new_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
+    not (Hashtbl.mem ctx.compiled_fns f.fn_name)) fns in
+  List.iter (fun (f : March_tir.Tir.fn_def) ->
+    Hashtbl.replace ctx.compiled_fns f.fn_name ()) new_fns;
+  new_fns
+
 (** Lower a single-expression module through the TIR pipeline. *)
 let lower_module ~type_map (m : March_ast.Ast.module_) =
   let tir = March_tir.Lower.lower_module ~type_map m in
@@ -71,11 +91,15 @@ let run_expr ctx ~type_map m =
   let main_fn = List.find (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name = "main") tir.March_tir.Tir.tm_fns in
   let ret_ty = main_fn.fn_ret_ty in
+  let support_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
+    f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
+  (* Only emit functions not already compiled in a previous fragment.
+     The rest are already in the global symbol table via RTLD_GLOBAL. *)
+  let new_fns = filter_new_fns ctx support_fns in
   let ir = March_tir.Llvm_emit.emit_repl_expr
     ~n ~ret_ty
     ~prev_globals:ctx.globals
-    ~fns:(List.filter (fun (f : March_tir.Tir.fn_def) ->
-      f.fn_name <> "main") tir.March_tir.Tir.tm_fns)
+    ~fns:new_fns
     ~types:tir.March_tir.Tir.tm_types
     main_fn.fn_body in
   let handle = compile_fragment ctx ir in
@@ -109,8 +133,10 @@ let run_expr ctx ~type_map m =
 let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
   let n = next_id ctx in
   let tir = lower_module ~type_map m in
-  let user_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
+  let all_support_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
+  (* Split into new (to define) and previously compiled (already in global symbol table) *)
+  let user_fns = filter_new_fns ctx all_support_fns in
   if is_fn_decl then begin
     (* Function declaration: emit the function at top level.
        After defunctionalization a single user-defined function may produce
