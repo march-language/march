@@ -1,0 +1,333 @@
+-- HttpClient: high-level composable HTTP client with step pipeline.
+--
+-- This is Layer 3 of March's HTTP library. It provides a Req-style
+-- three-phase pipeline (request steps, response steps, error steps)
+-- built on top of HttpTransport.
+--
+-- Usage:
+--   let client = HttpClient.new_client()
+--     |> HttpClient.add_request_step("auth", HttpClient.Steps.bearer_auth("my-token"))
+--     |> HttpClient.with_redirects(5)
+--   let resp = HttpClient.get(client, "http://api.example.com/users")
+
+mod HttpClient do
+
+  type HttpError =
+    HttpTransportError(TransportError)
+    | StepError(String, String)
+    | TooManyRedirects(Int)
+
+  -- Step entry types: wrap a name + function
+  type RequestStepEntry = RequestStepEntry(String, a)
+  type ResponseStepEntry = ResponseStepEntry(String, a)
+  type ErrorRecovery = Recover(a) | Fail(HttpError)
+  type ErrorStepEntry = ErrorStepEntry(String, a)
+
+  -- Client: holds step lists and pipeline behavior config
+  type Client = Client(
+    List(RequestStepEntry),
+    List(ResponseStepEntry),
+    List(ErrorStepEntry),
+    Int,
+    Int,
+    Int
+  )
+  -- Fields: request_steps, response_steps, error_steps,
+  --         max_redirects (0=disabled), max_retries (0=disabled), retry_backoff_ms
+
+  -- -----------------------------------------------------------------------
+  -- Client construction
+  -- -----------------------------------------------------------------------
+
+  doc "Create a new bare client with no steps and no redirect/retry."
+  pub fn new_client() do
+    Client(Nil, Nil, Nil, 0, 0, 0)
+  end
+
+  -- -----------------------------------------------------------------------
+  -- Step registration (pipeable)
+  -- -----------------------------------------------------------------------
+
+  fn append_to_list(xs, x) do
+    match xs with
+    | Nil -> Cons(x, Nil)
+    | Cons(h, t) -> Cons(h, append_to_list(t, x))
+    end
+  end
+
+  pub fn add_request_step(client, name, step) do
+    match client with
+    | Client(req_steps, resp_steps, err_steps, redir, retries, backoff) ->
+      Client(append_to_list(req_steps, RequestStepEntry(name, step)), resp_steps, err_steps, redir, retries, backoff)
+    end
+  end
+
+  pub fn add_response_step(client, name, step) do
+    match client with
+    | Client(req_steps, resp_steps, err_steps, redir, retries, backoff) ->
+      Client(req_steps, append_to_list(resp_steps, ResponseStepEntry(name, step)), err_steps, redir, retries, backoff)
+    end
+  end
+
+  pub fn add_error_step(client, name, step) do
+    match client with
+    | Client(req_steps, resp_steps, err_steps, redir, retries, backoff) ->
+      Client(req_steps, resp_steps, append_to_list(err_steps, ErrorStepEntry(name, step)), redir, retries, backoff)
+    end
+  end
+
+  -- -----------------------------------------------------------------------
+  -- Pipeline behaviors
+  -- -----------------------------------------------------------------------
+
+  pub fn with_redirects(client, max) do
+    match client with
+    | Client(rq, rs, es, _, retries, backoff) ->
+      Client(rq, rs, es, max, retries, backoff)
+    end
+  end
+
+  pub fn with_retry(client, max_attempts, backoff_ms) do
+    match client with
+    | Client(rq, rs, es, redir, _, _) ->
+      Client(rq, rs, es, redir, max_attempts, backoff_ms)
+    end
+  end
+
+  -- -----------------------------------------------------------------------
+  -- Step introspection
+  -- -----------------------------------------------------------------------
+
+  pub fn list_steps(client) do
+    fn list_concat(a, b) do
+      match a with
+      | Nil -> b
+      | Cons(h, t) -> Cons(h, list_concat(t, b))
+      end
+    end
+    fn req_names(xs) do
+      match xs with
+      | Nil -> Nil
+      | Cons(RequestStepEntry(n, _), rest) -> Cons("request:" ++ n, req_names(rest))
+      end
+    end
+    fn resp_names(xs) do
+      match xs with
+      | Nil -> Nil
+      | Cons(ResponseStepEntry(n, _), rest) -> Cons("response:" ++ n, resp_names(rest))
+      end
+    end
+    fn err_names(xs) do
+      match xs with
+      | Nil -> Nil
+      | Cons(ErrorStepEntry(n, _), rest) -> Cons("error:" ++ n, err_names(rest))
+      end
+    end
+    match client with
+    | Client(rq, rs, es, _, _, _) ->
+      list_concat(req_names(rq), list_concat(resp_names(rs), err_names(es)))
+    end
+  end
+
+  -- -----------------------------------------------------------------------
+  -- Internal pipeline execution
+  -- -----------------------------------------------------------------------
+
+  fn run_request_steps(steps, req) do
+    match steps with
+    | Nil -> Ok(req)
+    | Cons(RequestStepEntry(_, step_fn), rest) ->
+      match step_fn(req) with
+      | Err(e) -> Err(e)
+      | Ok(new_req) -> run_request_steps(rest, new_req)
+      end
+    end
+  end
+
+  fn run_response_steps(steps, req, resp) do
+    match steps with
+    | Nil -> Ok((req, resp))
+    | Cons(ResponseStepEntry(_, step_fn), rest) ->
+      match step_fn(req, resp) with
+      | Err(e) -> Err(e)
+      | Ok((new_req, new_resp)) -> run_response_steps(rest, new_req, new_resp)
+      end
+    end
+  end
+
+  fn run_error_steps(steps, req, err) do
+    match steps with
+    | Nil -> Err(err)
+    | Cons(ErrorStepEntry(_, step_fn), rest) ->
+      match step_fn(req, err) with
+      | Recover(resp) -> Ok(resp)
+      | Fail(new_err) -> run_error_steps(rest, req, new_err)
+      end
+    end
+  end
+
+  fn transport_with_retry(req, retries_left) do
+    match HttpTransport.request(req) with
+    | Ok(resp) -> Ok(resp)
+    | Err(e) ->
+      if retries_left > 0 then
+        transport_with_retry(req, retries_left - 1)
+      else
+        Err(e)
+    end
+  end
+
+  fn handle_redirects(req, resp, max, count) do
+    if max == 0 then Ok(resp)
+    else if not(Http.response_is_redirect(resp)) then Ok(resp)
+    else if count >= max then Err(TooManyRedirects(count))
+    else
+      match Http.get_header(resp, "location") with
+      | None -> Ok(resp)
+      | Some(location) ->
+        let redirect_req = match Http.parse_url(location) with
+          | Ok(parsed) ->
+            Request(Get, Http.scheme(parsed), Http.host(parsed), Http.port(parsed), Http.path(parsed), Http.query(parsed), Http.headers(req), "")
+          | Err(_) ->
+            Http.set_body(Http.set_method(Http.set_path(req, location), Get), "")
+          end
+        match HttpTransport.request(redirect_req) with
+        | Err(e) -> Err(HttpTransportError(e))
+        | Ok(new_resp) -> handle_redirects(redirect_req, new_resp, max, count + 1)
+        end
+      end
+  end
+
+  -- -----------------------------------------------------------------------
+  -- Public: run request through pipeline
+  -- -----------------------------------------------------------------------
+
+  doc """
+  Run a request through the full step pipeline.
+  1. Run request steps left-to-right
+  2. Send via HttpTransport.request (with retry if configured)
+  3. Handle redirects if configured
+  4. Run response steps left-to-right
+  5. On error, run error steps (first Recover wins)
+  """
+  pub fn run(client, req) do
+    match client with
+    | Client(req_steps, resp_steps, err_steps, max_redir, max_retries, _) ->
+      match run_request_steps(req_steps, req) with
+      | Err(e) -> run_error_steps(err_steps, req, e)
+      | Ok(transformed_req) ->
+        match transport_with_retry(transformed_req, max_retries) with
+        | Err(transport_err) ->
+          run_error_steps(err_steps, transformed_req, HttpTransportError(transport_err))
+        | Ok(resp) ->
+          match handle_redirects(transformed_req, resp, max_redir, 0) with
+          | Err(e) -> run_error_steps(err_steps, transformed_req, e)
+          | Ok(final_resp) ->
+            match run_response_steps(resp_steps, transformed_req, final_resp) with
+            | Err(e) -> run_error_steps(err_steps, transformed_req, e)
+            | Ok((_, response)) -> Ok(response)
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- -----------------------------------------------------------------------
+  -- Convenience methods
+  -- -----------------------------------------------------------------------
+
+  pub fn get(client, url) do
+    match Http.get(url) with
+    | Err(_) -> Err(StepError("url", "invalid url: " ++ url))
+    | Ok(req) -> run(client, Http.set_body(req, ""))
+    end
+  end
+
+  pub fn post(client, url, bdy) do
+    match Http.post(url, bdy) with
+    | Err(_) -> Err(StepError("url", "invalid url: " ++ url))
+    | Ok(req) -> run(client, req)
+    end
+  end
+
+  pub fn put_request(client, url, bdy) do
+    match Http.put(url, bdy) with
+    | Err(_) -> Err(StepError("url", "invalid url: " ++ url))
+    | Ok(req) -> run(client, req)
+    end
+  end
+
+  pub fn delete(client, url) do
+    match Http.delete(url) with
+    | Err(_) -> Err(StepError("url", "invalid url: " ++ url))
+    | Ok(req) -> run(client, Http.set_body(req, ""))
+    end
+  end
+
+  -- -----------------------------------------------------------------------
+  -- Built-in Steps (prefixed with step_ to avoid name collisions)
+  -- -----------------------------------------------------------------------
+
+  doc "Request step: add default User-Agent and Accept headers."
+  pub fn step_default_headers(req) do
+    let req = Http.set_header(req, "User-Agent", "march/0.1")
+    let req = Http.set_header(req, "Accept", "*/*")
+    Ok(req)
+  end
+
+  doc "Returns a request step that adds a Bearer token authorization header."
+  pub fn step_bearer_auth(token) do
+    fn step(req) do
+      Ok(Http.set_header(req, "Authorization", "Bearer " ++ token))
+    end
+    step
+  end
+
+  doc "Returns a request step that adds HTTP Basic authorization header."
+  pub fn step_basic_auth(user, pass) do
+    fn step(req) do
+      Ok(Http.set_header(req, "Authorization", "Basic " ++ user ++ ":" ++ pass))
+    end
+    step
+  end
+
+  doc "Returns a request step that sets a base URL on requests."
+  pub fn step_base_url(base) do
+    fn step(req) do
+      match Http.parse_url(base ++ Http.path(req)) with
+      | Err(_) -> Err(StepError("step_base_url", "invalid base url: " ++ base))
+      | Ok(parsed) ->
+        Ok(Request(
+          Http.method(req),
+          Http.scheme(parsed),
+          Http.host(parsed),
+          Http.port(parsed),
+          Http.path(parsed),
+          Http.query(req),
+          Http.headers(req),
+          Http.body(req)
+        ))
+      end
+    end
+    step
+  end
+
+  doc "Returns a request step that sets the Content-Type header."
+  pub fn step_content_type(ct) do
+    fn step(req) do
+      Ok(Http.set_header(req, "Content-Type", ct))
+    end
+    step
+  end
+
+  doc "Response step: return Err for 4xx/5xx status codes."
+  pub fn step_raise_on_error(req, resp) do
+    let code = Http.response_status_code(resp)
+    if code >= 400 then
+      Err(StepError("step_raise_on_error", int_to_string(code)))
+    else
+      Ok((req, resp))
+  end
+
+end

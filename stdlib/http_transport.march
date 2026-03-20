@@ -1,0 +1,86 @@
+-- HttpTransport: low-level HTTP transport layer.
+--
+-- Sends raw HTTP/1.1 requests over TCP sockets.
+-- This is Layer 2 of March's HTTP library — it handles connection
+-- management and raw request/response exchange.
+--
+-- Most users should use HttpClient (Layer 3) instead. Use this
+-- directly only when you need low-level control over connections.
+--
+-- NOTE: Only supports HTTP (not HTTPS/TLS) in this initial version.
+
+mod HttpTransport do
+
+  type TransportError =
+    ConnectionRefused(String)
+    | Timeout(String)
+    | SendError(String)
+    | RecvError(String)
+    | ParseError(String)
+    | Closed
+
+  doc """
+  Send an HTTP request and receive the response.
+  Opens a TCP connection, sends the serialized request, receives and
+  parses the response, then closes the connection.
+  """
+  pub fn request(req) do
+    let meth = Http.method_to_string(Http.method(req))
+    let req_host = Http.host(req)
+    let req_path = Http.path(req)
+    let req_query = Http.query(req)
+    let req_headers = Http.headers(req)
+    let req_body = Http.body(req)
+
+    -- Determine port
+    let req_port = match Http.port(req) with
+      | Some(p) -> p
+      | None -> 80
+      end
+
+    -- Serialize the request to a raw HTTP/1.1 string
+    let raw_request = http_serialize_request(meth, req_host, req_path, req_query, req_headers, req_body)
+
+    -- Connect via TCP
+    match tcp_connect(req_host, req_port) with
+    | Err(msg) -> Err(ConnectionRefused(msg))
+    | Ok(fd) ->
+      -- Send the request
+      match tcp_send_all(fd, raw_request) with
+      | Err(msg) ->
+        tcp_close(fd)
+        Err(SendError(msg))
+      | Ok(_) ->
+        -- Receive response (up to 1MB, 30s timeout)
+        match tcp_recv_all(fd, 1048576, 30000) with
+        | Err(msg) ->
+          tcp_close(fd)
+          Err(RecvError(msg))
+        | Ok(raw_response) ->
+          tcp_close(fd)
+          -- Parse the raw HTTP response
+          match http_parse_response(raw_response) with
+          | Err(msg) -> Err(ParseError(msg))
+          | Ok((status_code, resp_headers, resp_body)) ->
+            Ok(Response(Status(status_code), resp_headers, resp_body))
+          end
+        end
+      end
+    end
+  end
+
+  doc """
+  Convenience wrapper: parse a URL and send a GET request.
+  Returns a TransportError if the URL is invalid or the request fails.
+  """
+  pub fn simple_get(url) do
+    match Http.get(url) with
+    | Err(InvalidScheme(s)) -> Err(ParseError("invalid scheme: " ++ s))
+    | Err(MissingHost) -> Err(ParseError("missing host"))
+    | Err(InvalidPort(s)) -> Err(ParseError("invalid port: " ++ s))
+    | Err(MalformedUrl(s)) -> Err(ParseError("malformed url: " ++ s))
+    | Ok(req) -> request(Http.set_body(req, ""))
+    end
+  end
+
+end
