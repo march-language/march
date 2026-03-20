@@ -17,7 +17,7 @@ mod Sort do
 -- ---- Shared helpers ----
 
 doc "Reverses a list. O(n)."
-fn reverse_list(xs : List(a)) : List(a) do
+pub fn reverse_list(xs : List(a)) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst with
     | Nil        -> acc
@@ -28,7 +28,7 @@ fn reverse_list(xs : List(a)) : List(a) do
 end
 
 doc "Appends two lists. O(|xs|)."
-fn append_list(xs : List(a), ys : List(a)) : List(a) do
+pub fn append_list(xs : List(a), ys : List(a)) : List(a) do
   match xs with
   | Nil        -> ys
   | Cons(h, t) -> Cons(h, append_list(t, ys))
@@ -96,7 +96,7 @@ Top-down mergesort. Stable, O(n log n).
 Used as the fallback for sort_small_by when n > 8,
 and as the heapsort-free path for introsort on very small inputs.
 """
-fn mergesort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+pub fn mergesort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   -- Sequential split: take exactly k elements for the left half.
   fn take_k(lst : List(a), k : Int, acc : List(a)) : (List(a), List(a)) do
     if k == 0 then (reverse_list(acc), lst)
@@ -302,7 +302,7 @@ doc """
 Insertion sort. Stable, O(n²).
 Used for small sublists (n < 16) where quadratic cost is bounded.
 """
-fn insertion_sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+pub fn insertion_sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst with
     | Nil        -> acc
@@ -524,7 +524,7 @@ fn heap_drain(h : Heap(a), cmp : a -> a -> Bool, acc : List(a)) : List(a) do
   end
 end
 
-fn heapsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+pub fn heapsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   heap_drain(heap_build(xs, cmp), cmp, Nil)
 end
 

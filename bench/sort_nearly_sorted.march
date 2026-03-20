@@ -1,39 +1,15 @@
 -- Nearly-sorted benchmark: Timsort vs Mergesort on a nearly-sorted list.
 --
--- Timsort's defining advantage is adaptive performance on nearly-sorted input.
--- It detects existing ascending runs and harvests them in O(n) — the merge
--- phase only kicks in where the input is actually disordered.
+-- Input: 5000 pairs (0,1),(2,3),...,(9998,9999) — already globally sorted,
+-- but built as 5000 two-element ascending runs.  Timsort detects and harvests
+-- those runs in O(n); mergesort is blind to them.
 --
--- Input construction:
---   Generate two sorted runs: [0, 2, 4, …, 9998] and [1, 3, 5, …, 9999].
---   Interleave them: [0, 1, 2, 3, …, 9999] — but alternating source so the
---   list consists of 5000 two-element runs (0,1), (2,3), etc.
---   This is nearly sorted (sorted within runs) but has 5000 run boundaries.
---
--- Expected behaviour:
---   Timsort:   5000 runs of length 2 → 12 merge levels = O(n log n) with
---              very small constants (no wasted comparisons within runs).
---   Mergesort: O(n log n) with all comparisons, blind to run structure.
---
--- Both algorithms are run on the same input; results printed on two lines:
---   Line 1: minimum from timsort   (expected: 0)
---   Line 2: minimum from mergesort (expected: 0)
+-- Uses Sort.timsort_by and Sort.mergesort_by from stdlib/sort.march.
+-- Expected output: 0 (timsort), 0 (mergesort)
 
-mod NearlySorted do
+mod BenchNearlySorted do
 
-fn reverse_list(xs : List(Int)) : List(Int) do
-  fn go(lst : List(Int), acc : List(Int)) : List(Int) do
-    match lst with
-    | Nil        -> acc
-    | Cons(h, t) -> go(t, Cons(h, acc))
-    end
-  end
-  go(xs, Nil)
-end
-
--- Build interleaved list: [0, 1, 2, 3, …, 2n-2, 2n-1] as pairs (even, odd).
--- Result is already sorted overall, but built as consecutive (even, odd) pairs
--- so each adjacent pair is a natural run of length 2.
+-- Build [0,1,2,3,...,2n-1] as consecutive (even,odd) pairs.
 fn build_pairs(n : Int, acc : List(Int)) : List(Int) do
   if n < 0 then acc
   else do
@@ -43,111 +19,6 @@ fn build_pairs(n : Int, acc : List(Int)) : List(Int) do
   end
 end
 
--- ---- Mergesort ----
-
-fn merge_ms(xs : List(Int), ys : List(Int)) : List(Int) do
-  match xs with
-  | Nil -> ys
-  | Cons(x, xt) ->
-    match ys with
-    | Nil -> xs
-    | Cons(y, yt) ->
-      if x <= y then Cons(x, merge_ms(xt, ys))
-      else Cons(y, merge_ms(xs, yt))
-    end
-  end
-end
-
-fn take_k(lst : List(Int), k : Int, acc : List(Int)) : (List(Int), List(Int)) do
-  if k == 0 then (reverse_list(acc), lst)
-  else match lst with
-    | Nil        -> (reverse_list(acc), Nil)
-    | Cons(h, t) -> take_k(t, k - 1, Cons(h, acc))
-  end
-end
-
-fn list_len(xs : List(Int)) : Int do
-  fn go(lst : List(Int), acc : Int) : Int do
-    match lst with
-    | Nil        -> acc
-    | Cons(_, t) -> go(t, acc + 1)
-    end
-  end
-  go(xs, 0)
-end
-
-fn mergesort(xs : List(Int)) : List(Int) do
-  fn go(lst : List(Int), n : Int) : List(Int) do
-    if n <= 1 then lst
-    else do
-      let half = n / 2
-      let (l, r) = take_k(lst, half, Nil)
-      merge_ms(go(l, half), go(r, n - half))
-    end
-  end
-  go(xs, list_len(xs))
-end
-
--- ---- Timsort ----
-
-fn scan_asc(lst : List(Int), run : List(Int), run_len : Int) : (List(Int), Int, List(Int)) do
-  match lst with
-  | Nil -> (reverse_list(run), run_len, Nil)
-  | Cons(h, t) ->
-    match run with
-    | Nil -> scan_asc(t, Cons(h, Nil), 1)
-    | Cons(prev, _) ->
-      if prev <= h then scan_asc(t, Cons(h, run), run_len + 1)
-      else (reverse_list(run), run_len, lst)
-    end
-  end
-end
-
-fn enforce(stack : List((List(Int), Int))) : List((List(Int), Int)) do
-  match stack with
-  | Nil -> Nil
-  | Cons(_, Nil) -> stack
-  | Cons((x, xn), Cons((y, yn), Nil)) ->
-    if yn <= xn then do
-      let m = merge_ms(y, x)
-      Cons((m, xn + yn), Nil)
-    end else stack
-  | Cons((x, xn), Cons((y, yn), Cons((z, zn), rest))) ->
-    if yn <= xn then do
-      let m = merge_ms(y, x)
-      enforce(Cons((m, xn + yn), Cons((z, zn), rest)))
-    end else if zn <= yn + xn then do
-      let m = merge_ms(z, y)
-      enforce(Cons((x, xn), Cons((m, yn + zn), rest)))
-    end else stack
-  end
-end
-
-fn collapse(stack : List((List(Int), Int))) : List(Int) do
-  match stack with
-  | Nil -> Nil
-  | Cons((x, _), Nil) -> x
-  | Cons((x, xn), Cons((y, yn), rest)) ->
-    let m = merge_ms(y, x)
-    collapse(Cons((m, xn + yn), rest))
-  end
-end
-
-fn timsort(xs : List(Int)) : List(Int) do
-  fn run_pass(lst : List(Int), stack : List((List(Int), Int))) : List(Int) do
-    match lst with
-    | Nil -> collapse(stack)
-    | _ ->
-      let (run, rlen, rest) = scan_asc(lst, Nil, 0)
-      let new_stack = enforce(Cons((run, rlen), stack))
-      run_pass(rest, new_stack)
-    end
-  end
-  run_pass(xs, Nil)
-end
-
--- ---- Main ----
-
 fn head(xs : List(Int)) : Int do
   match xs with
   | Nil        -> 0
@@ -156,12 +27,12 @@ fn head(xs : List(Int)) : Int do
 end
 
 fn main() : Unit do
-  -- 5000 pairs: (0,1), (2,3), …, (9998,9999) — all pairs are ascending runs.
-  -- Build two independent lists (same content) so each sort exclusively owns its input.
-  -- Sharing a single list between two consuming functions requires deep RC tracking,
+  -- Build two independent lists so each sort exclusively owns its input.
+  -- Passing the same list to two consuming functions requires deep RC tracking,
   -- which Perceus does not yet support across the full tree.
-  let ts = timsort(build_pairs(4999, Nil))
-  let ms = mergesort(build_pairs(4999, Nil))
+  let cmp = fn x -> fn y -> x <= y
+  let ts  = Sort.timsort_by(build_pairs(4999, Nil), cmp)
+  let ms  = Sort.mergesort_by(build_pairs(4999, Nil), cmp)
   println(int_to_string(head(ts)))
   println(int_to_string(head(ms)))
 end

@@ -1,58 +1,8 @@
--- Mergesort benchmark: sort 10,000 pseudo-random integers.
---
--- Uses top-down mergesort on a linked List(Int).
--- Split is done in a single pass via alternating-element accumulation,
--- which avoids sharing the same list spine between two traversals and is
--- therefore compatible with Perceus shallow reference counting.
--- Merge benefits from FBIP: when input cons cells are uniquely owned
--- (RC=1), Perceus rewrites them in-place for the output list.
---
--- The LCG produces values in [0, 99999].  The sorted minimum is printed.
+-- Mergesort benchmark: sort 10,000 pseudo-random integers via Sort.mergesort_by.
 -- Expected output: 1423
 
-mod Sort do
+mod BenchMergesort do
 
-fn merge(xs : List(Int), ys : List(Int)) : List(Int) do
-  match xs with
-  | Nil -> ys
-  | Cons(x, xt) ->
-    match ys with
-    | Nil -> xs
-    | Cons(y, yt) ->
-      if x <= y then Cons(x, merge(xt, ys))
-      else Cons(y, merge(xs, yt))
-    end
-  end
-end
-
--- Split xs into two halves by alternating-element accumulation.
--- toggle=true => current element goes to left, toggle=false => goes to right.
--- Result is (left_half, right_half) in reversed-accumulation order, which
--- is fine since mergesort sorts them anyway.
-fn split(xs : List(Int), left : List(Int), right : List(Int), toggle : Bool) : (List(Int), List(Int)) do
-  match xs with
-  | Nil -> (left, right)
-  | Cons(h, t) ->
-    if toggle then split(t, Cons(h, left), right, false)
-    else split(t, left, Cons(h, right), true)
-  end
-end
-
-fn mergesort(xs : List(Int)) : List(Int) do
-  match xs with
-  | Nil -> Nil
-  | Cons(h, t) ->
-    match t with
-    | Nil -> Cons(h, Nil)
-    | _ ->
-      let xs2 = Cons(h, t)
-      let (l, r) = split(xs2, Nil, Nil, true)
-      merge(mergesort(l), mergesort(r))
-    end
-  end
-end
-
--- LCG: x_{n+1} = (1664525 * x_n + 1013904223) mod 1000000
 fn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
   if n == 0 then acc
   else do
@@ -70,7 +20,8 @@ end
 
 fn main() : Unit do
   let xs     = gen_list(10000, 42, Nil)
-  let sorted = mergesort(xs)
+  let cmp    = fn x -> fn y -> x <= y
+  let sorted = Sort.mergesort_by(xs, cmp)
   println(int_to_string(head(sorted)))
 end
 

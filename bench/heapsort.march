@@ -1,113 +1,8 @@
--- Heapsort benchmark: sort 10,000 pseudo-random integers using a leftist heap.
---
--- Algorithm: build a min-leftist-heap in O(n log n), drain it in O(n log n).
--- Leftist heaps maintain the leftist property: rank(left) >= rank(right),
--- where rank = length of rightmost path to an empty node.  This keeps the
--- rightmost spine short (O(log n)) so heap_merge is O(log n).
---
--- Properties:
---   Worst-case:  O(n log n) — guaranteed regardless of input order.
---   Best-case:   O(n log n) — no short-circuits on sorted input.
---   Space:       O(n) heap nodes; no auxiliary arrays.
---   Stability:   Unstable (equal keys may reorder during extraction).
---   FBIP:        Each heap_merge reuses the spine nodes it traverses
---                (RC=1 on uniquely-owned trees), making this effectively
---                in-place on the internal spine.
---
--- Compared to Timsort: Timsort exploits natural runs and can approach O(n)
--- on nearly-sorted data; Heapsort is blind to order but has no worst-case
--- cliff.  Prefer Heapsort when input order is adversarial.
---
--- Uses the same LCG as bench/mergesort.march: seed=42, modulus=1_000_000.
--- The sorted minimum is printed.
+-- Heapsort benchmark: sort 10,000 pseudo-random integers via Sort.heapsort_by.
+-- Uses a leftist min-heap from stdlib/sort.march.
 -- Expected output: 1423
 
-mod Heapsort do
-
--- ---- Leftist heap ----
--- HLeaf = empty; HNode(rank, value, left, right)
-type Heap = HLeaf | HNode(Int, Int, Heap, Heap)
-
-fn rank(h : Heap) : Int do
-  match h with
-  | HLeaf              -> 0
-  | HNode(r, _, _, _)  -> r
-  end
-end
-
--- Construct a node, keeping the higher-rank child on the left.
-fn make_node(v : Int, a : Heap, b : Heap) : Heap do
-  if rank(a) >= rank(b) then
-    HNode(rank(b) + 1, v, a, b)
-  else
-    HNode(rank(a) + 1, v, b, a)
-end
-
--- Merge two leftist heaps in O(min(log|h1|, log|h2|)) comparisons.
-fn heap_merge(h1 : Heap, h2 : Heap) : Heap do
-  match h1 with
-  | HLeaf -> h2
-  | HNode(_, x, l1, r1) ->
-    match h2 with
-    | HLeaf -> h1
-    | HNode(_, y, l2, r2) ->
-      if x <= y then make_node(x, l1, heap_merge(r1, h2))
-      else make_node(y, l2, heap_merge(h1, r2))
-    end
-  end
-end
-
-fn heap_insert(v : Int, h : Heap) : Heap do
-  heap_merge(HNode(1, v, HLeaf, HLeaf), h)
-end
-
-fn heap_min(h : Heap) : Int do
-  match h with
-  | HLeaf             -> 0
-  | HNode(_, v, _, _) -> v
-  end
-end
-
-fn heap_pop(h : Heap) : Heap do
-  match h with
-  | HLeaf             -> HLeaf
-  | HNode(_, _, l, r) -> heap_merge(l, r)
-  end
-end
-
--- Build heap by repeated insertion.  O(n log n).
--- (Floyd's O(n) construction requires random access; not possible on lists.)
-fn build_heap(xs : List(Int), h : Heap) : Heap do
-  match xs with
-  | Nil        -> h
-  | Cons(v, t) -> build_heap(t, heap_insert(v, h))
-  end
-end
-
--- Drain heap into a sorted list by repeated extract-min.  O(n log n).
-fn drain_heap(h : Heap, acc : List(Int)) : List(Int) do
-  match h with
-  | HLeaf -> reverse_list(acc)
-  | _     -> drain_heap(heap_pop(h), Cons(heap_min(h), acc))
-  end
-end
-
-fn reverse_list(xs : List(Int)) : List(Int) do
-  fn go(lst : List(Int), acc : List(Int)) : List(Int) do
-    match lst with
-    | Nil        -> acc
-    | Cons(h, t) -> go(t, Cons(h, acc))
-    end
-  end
-  go(xs, Nil)
-end
-
-fn heapsort(xs : List(Int)) : List(Int) do
-  let h = build_heap(xs, HLeaf)
-  drain_heap(h, Nil)
-end
-
--- ---- LCG and main ----
+mod BenchHeapsort do
 
 fn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
   if n == 0 then acc
@@ -126,7 +21,8 @@ end
 
 fn main() : Unit do
   let xs     = gen_list(10000, 42, Nil)
-  let sorted = heapsort(xs)
+  let cmp    = fn x -> fn y -> x <= y
+  let sorted = Sort.heapsort_by(xs, cmp)
   println(int_to_string(head(sorted)))
 end
 

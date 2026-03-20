@@ -1,113 +1,8 @@
--- Timsort benchmark: sort 10,000 pseudo-random integers using Timsort.
---
--- Timsort exploits natural runs in the input: ascending runs are gathered
--- and descending runs are reversed, then a merge stack merges runs while
--- maintaining the invariants |Z| > |Y|+|X| and |Y| > |X|.
---
--- For random data, runs average 2 elements (since LCG is near-random), so
--- performance degrades toward O(n log n) mergesort.  For nearly-sorted
--- data, Timsort approaches O(n) by harvesting long natural runs.
---
--- This benchmark omits the MIN_RUN insertion-sort padding for clarity.
--- For the full production Timsort see stdlib/sort.march.
---
--- Uses the same LCG as bench/mergesort.march: seed=42, modulus=1_000_000.
--- The sorted minimum is printed.
+-- Timsort benchmark: sort 10,000 pseudo-random integers via Sort.timsort_by.
 -- Expected output: 1423
 
-mod Timsort do
+mod BenchTimsort do
 
-fn reverse_list(xs : List(Int)) : List(Int) do
-  fn go(lst : List(Int), acc : List(Int)) : List(Int) do
-    match lst with
-    | Nil        -> acc
-    | Cons(h, t) -> go(t, Cons(h, acc))
-    end
-  end
-  go(xs, Nil)
-end
-
-fn merge(xs : List(Int), ys : List(Int)) : List(Int) do
-  match xs with
-  | Nil -> ys
-  | Cons(x, xt) ->
-    match ys with
-    | Nil -> xs
-    | Cons(y, yt) ->
-      if x <= y then Cons(x, merge(xt, ys))
-      else Cons(y, merge(xs, yt))
-    end
-  end
-end
-
--- Scan for an ascending run; returns (run_in_order, length, rest).
-fn scan_asc(lst : List(Int), run : List(Int), run_len : Int) : (List(Int), Int, List(Int)) do
-  match lst with
-  | Nil -> (reverse_list(run), run_len, Nil)
-  | Cons(h, t) ->
-    match run with
-    | Nil -> scan_asc(t, Cons(h, Nil), 1)
-    | Cons(prev, _) ->
-      if prev <= h then
-        scan_asc(t, Cons(h, run), run_len + 1)
-      else
-        (reverse_list(run), run_len, lst)
-    end
-  end
-end
-
--- Merge-stack invariant enforcement.
--- Stack entries are (sorted_run, run_length).
--- Top of stack = X, next = Y, next = Z.
--- Invariant: |Z| > |Y|+|X|  and  |Y| > |X|.
-fn enforce(stack : List((List(Int), Int))) : List((List(Int), Int)) do
-  match stack with
-  | Nil -> Nil
-  | Cons(_, Nil) -> stack
-  | Cons((x, xn), Cons((y, yn), Nil)) ->
-    if yn <= xn then do
-      let m = merge(y, x)
-      Cons((m, xn + yn), Nil)
-    end else
-      stack
-  | Cons((x, xn), Cons((y, yn), Cons((z, zn), rest))) ->
-    if yn <= xn then do
-      let m = merge(y, x)
-      enforce(Cons((m, xn + yn), Cons((z, zn), rest)))
-    end else if zn <= yn + xn then do
-      let m = merge(z, y)
-      enforce(Cons((x, xn), Cons((m, yn + zn), rest)))
-    end else
-      stack
-  end
-end
-
--- Collapse remaining stack by merging pairs until one run remains.
-fn collapse(stack : List((List(Int), Int))) : List(Int) do
-  match stack with
-  | Nil -> Nil
-  | Cons((x, _), Nil) -> x
-  | Cons((x, xn), Cons((y, yn), rest)) ->
-    let m = merge(y, x)
-    collapse(Cons((m, xn + yn), rest))
-  end
-end
-
--- Build runs and push to stack, then collapse.
-fn timsort(xs : List(Int)) : List(Int) do
-  fn run_pass(lst : List(Int), stack : List((List(Int), Int))) : List(Int) do
-    match lst with
-    | Nil -> collapse(stack)
-    | _ ->
-      let (run, rlen, rest) = scan_asc(lst, Nil, 0)
-      let new_stack = enforce(Cons((run, rlen), stack))
-      run_pass(rest, new_stack)
-    end
-  end
-  run_pass(xs, Nil)
-end
-
--- LCG: x_{n+1} = (1664525 * x_n + 1013904223) mod 1000000
 fn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
   if n == 0 then acc
   else do
@@ -125,7 +20,8 @@ end
 
 fn main() : Unit do
   let xs     = gen_list(10000, 42, Nil)
-  let sorted = timsort(xs)
+  let cmp    = fn x -> fn y -> x <= y
+  let sorted = Sort.timsort_by(xs, cmp)
   println(int_to_string(head(sorted)))
 end
 
