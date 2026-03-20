@@ -449,7 +449,138 @@ typedef struct {
     int   client_fd;
 } conn_thread_arg_t;
 
-/* Each connection thread: parse request, run pipeline, send response, close. */
+/* Convert a method string to a Method variant ADT value.
+ * Method = Get(0) | Post(1) | Put(2) | Patch(3) | Delete(4)
+ *        | Head(5) | Options(6) | Trace(7) | Connect(8) | Other(String)(9)
+ * Tags 0-8: 16-byte header only, no fields.
+ * Tag 9 (Other): 16-byte header + 1 field (String) at offset 16. */
+static void *method_string_to_variant(void *method_str) {
+    march_string *ms = (march_string *)method_str;
+    const char *s = ms->data;
+    int64_t len = ms->len;
+    int tag = -1;
+
+    if (len == 3 && memcmp(s, "GET", 3) == 0)          tag = 0;
+    else if (len == 4 && memcmp(s, "POST", 4) == 0)     tag = 1;
+    else if (len == 3 && memcmp(s, "PUT", 3) == 0)      tag = 2;
+    else if (len == 5 && memcmp(s, "PATCH", 5) == 0)    tag = 3;
+    else if (len == 6 && memcmp(s, "DELETE", 6) == 0)    tag = 4;
+    else if (len == 4 && memcmp(s, "HEAD", 4) == 0)      tag = 5;
+    else if (len == 7 && memcmp(s, "OPTIONS", 7) == 0)   tag = 6;
+    else if (len == 5 && memcmp(s, "TRACE", 5) == 0)     tag = 7;
+    else if (len == 7 && memcmp(s, "CONNECT", 7) == 0)   tag = 8;
+
+    if (tag >= 0) {
+        void *m = march_alloc(16);
+        *(int32_t *)((char *)m + 8) = (int32_t)tag;
+        return m;
+    }
+    /* Other(String) — tag 9, one field */
+    void *m = march_alloc(16 + 8);
+    *(int32_t *)((char *)m + 8) = 9;
+    *(void **)((char *)m + 16) = method_str;
+    return m;
+}
+
+/* Split a path string on "/" into a March List(String).
+ * Empty segments are filtered out: "/users/42" → ["users", "42"], "/" → [].
+ * Builds the list in forward order by collecting segments first. */
+static void *split_path_info(const char *path, size_t path_len) {
+    /* Collect segment start/length pairs on the stack */
+    const char *segs[256];
+    size_t seg_lens[256];
+    int seg_count = 0;
+
+    size_t i = 0;
+    while (i < path_len && seg_count < 256) {
+        /* Skip slashes */
+        while (i < path_len && path[i] == '/') i++;
+        if (i >= path_len) break;
+        /* Find end of segment */
+        size_t start = i;
+        while (i < path_len && path[i] != '/') i++;
+        size_t slen = i - start;
+        if (slen > 0) {
+            segs[seg_count] = path + start;
+            seg_lens[seg_count] = slen;
+            seg_count++;
+        }
+    }
+
+    /* Build list in reverse so Cons nesting is correct (forward order) */
+    void *list = make_nil();
+    for (int j = seg_count - 1; j >= 0; j--) {
+        void *s = march_string_lit(segs[j], (int64_t)seg_lens[j]);
+        list = make_cons(s, list);
+    }
+    return list;
+}
+
+/* Build a NoUpgrade value: tag=0, no fields. */
+static void *make_no_upgrade(void) {
+    return march_alloc(16);  /* tag defaults to 0 */
+}
+
+/* Build a March Bool value: tag=0 for False, tag=1 for True.
+ * March Bools are heap objects with just a header (no fields). */
+static void *make_bool(int value) {
+    void *b = march_alloc(16);
+    if (value) *(int32_t *)((char *)b + 8) = 1;
+    return b;
+}
+
+/* Build a March Int heap value: tag=0, one int64 field at offset 16. */
+static void *make_int(int64_t value) {
+    void *i = march_alloc(16 + 8);
+    *(int64_t *)((char *)i + 16) = value;
+    return i;
+}
+
+/* Build a full 13-field Conn heap object.
+ * Conn is a single-constructor ADT: tag=0, 13 fields at offsets 16..112.
+ * Total size: 16 (header) + 13*8 (fields) = 120 bytes. */
+static void *make_conn(int64_t fd, void *method, void *path, void *path_info,
+                        void *query_string, void *req_headers, void *req_body,
+                        int64_t resp_status, void *resp_headers, void *resp_body,
+                        void *halted, void *assigns, void *upgrade) {
+    void *c = march_alloc(16 + 13 * 8);
+    /* tag = 0 (single constructor), already zeroed by march_alloc */
+    char *base = (char *)c;
+    *(int64_t *)(base + 16)  = fd;             /* field 0: fd */
+    *(void **)(base + 24)    = method;         /* field 1: method */
+    *(void **)(base + 32)    = path;           /* field 2: path */
+    *(void **)(base + 40)    = path_info;      /* field 3: path_info */
+    *(void **)(base + 48)    = query_string;   /* field 4: query_string */
+    *(void **)(base + 56)    = req_headers;    /* field 5: request headers */
+    *(void **)(base + 64)    = req_body;       /* field 6: request body */
+    *(int64_t *)(base + 72)  = resp_status;    /* field 7: response status */
+    *(void **)(base + 80)    = resp_headers;   /* field 8: response headers */
+    *(void **)(base + 88)    = resp_body;      /* field 9: response body */
+    *(void **)(base + 96)    = halted;         /* field 10: halted? */
+    *(void **)(base + 104)   = assigns;        /* field 11: assigns */
+    *(void **)(base + 112)   = upgrade;        /* field 12: upgrade */
+    return c;
+}
+
+/* Find the Sec-WebSocket-Key header value from a March List(Header).
+ * Returns the march_string* value if found, NULL otherwise. */
+static void *find_ws_key_header(void *headers) {
+    void *cur = headers;
+    while (cur) {
+        int32_t tag = *(int32_t *)((char *)cur + 8);
+        if (tag == 0) break;  /* Nil */
+        void *hdr  = *(void **)((char *)cur + 16);
+        void *tail = *(void **)((char *)cur + 24);
+        march_string *hname = *(march_string **)((char *)hdr + 16);
+        if (hname->len == 17 && istrncmp(hname->data, "sec-websocket-key", 17) == 0) {
+            return *(void **)((char *)hdr + 24);  /* value */
+        }
+        cur = tail;
+    }
+    return NULL;
+}
+
+/* Each connection thread: parse request, build Conn, run pipeline, send response, close. */
 static void *connection_thread(void *arg) {
     conn_thread_arg_t *a = (conn_thread_arg_t *)arg;
     int fd = a->client_fd;
@@ -477,40 +608,120 @@ static void *connection_thread(void *arg) {
         return NULL;
     }
 
-    /* Ok(tuple(method, path, headers, body)) */
+    /* Ok(tuple(method_str, path_str, headers, body)) */
     void *tup = *(void **)((char *)parse_result + 16);
+    void *method_str  = *(void **)((char *)tup + 16);  /* field 0 */
+    void *full_path   = *(void **)((char *)tup + 24);  /* field 1 */
+    void *req_headers = *(void **)((char *)tup + 32);  /* field 2 */
+    void *req_body    = *(void **)((char *)tup + 40);  /* field 3 */
 
-    /* Build a minimal Conn value and call the pipeline.
-     *
-     * TODO: Full Conn construction requires knowing the exact March Conn
-     * type layout, which depends on how the codegen/compiler emits it.
-     * For v1, we call the pipeline with the raw parse tuple; the pipeline
-     * is expected to accept (method, path, headers, body) and return a
-     * response string directly.  When the full Conn ADT is wired up in
-     * the codegen, this should be updated to construct the Conn properly.
-     */
+    /* 1. Convert method string → Method variant */
+    void *method = method_string_to_variant(method_str);
+
+    /* 2. Split path and query string.
+     *    full_path may be "/users/42?page=1" — split on first '?' */
+    march_string *fp = (march_string *)full_path;
+    const char *qmark = memchr(fp->data, '?', (size_t)fp->len);
+    void *path_str;
+    void *query_str;
+    size_t path_len;
+    if (qmark) {
+        path_len = (size_t)(qmark - fp->data);
+        path_str = march_string_lit(fp->data, (int64_t)path_len);
+        query_str = march_string_lit(qmark + 1,
+                        (int64_t)(fp->len - (int64_t)path_len - 1));
+    } else {
+        path_len = (size_t)fp->len;
+        path_str = full_path;
+        query_str = march_string_lit("", 0);
+    }
+
+    /* 3. Split path on "/" to produce path_info List(String) */
+    void *path_info = split_path_info(fp->data, path_len);
+
+    /* 4. Build the full 13-field Conn heap object */
+    void *conn = make_conn(
+        (int64_t)fd,           /* fd */
+        method,                /* method (Method variant) */
+        path_str,              /* path (raw, without query) */
+        path_info,             /* path_info (split on "/") */
+        query_str,             /* query_string */
+        req_headers,           /* request headers */
+        req_body,              /* request body */
+        0,                     /* response status (0 = not set) */
+        make_nil(),            /* response headers (empty) */
+        march_string_lit("", 0), /* response body (empty) */
+        make_bool(0),          /* halted = false */
+        make_nil(),            /* assigns (empty) */
+        make_no_upgrade()      /* upgrade = NoUpgrade */
+    );
+
+    /* 5. Call the pipeline: Conn -> Conn */
     typedef void *(*pipeline_fn_t)(void *);
     pipeline_fn_t fn = (pipeline_fn_t)pipeline;
-    void *response_str = fn(tup);
+    void *result_conn = fn(conn);
 
-    if (response_str) {
-        /* If the pipeline returned a march_string, send it directly. */
-        int32_t resp_tag = *(int32_t *)((char *)response_str + 8);
-        (void)resp_tag;
-        march_tcp_send_all((int64_t)fd, response_str);
+    if (!result_conn) {
+        /* Pipeline returned NULL — send 500 */
+        void *resp = march_http_serialize_response(
+            500, make_nil(),
+            march_string_lit("Internal Server Error", 21));
+        march_tcp_send_all((int64_t)fd, resp);
+        close(fd);
+        return NULL;
     }
+
+    /* 6. Check upgrade field (field 12, offset 112) for WebSocket */
+    char *rc = (char *)result_conn;
+    void *upgrade_val = *(void **)(rc + 112);
+    int32_t upgrade_tag = *(int32_t *)((char *)upgrade_val + 8);
+
+    if (upgrade_tag == 1) {
+        /* WebSocketUpgrade(handler_fn) — tag=1, field at offset 16 is the fn */
+        void *ws_handler = *(void **)((char *)upgrade_val + 16);
+
+        /* Find Sec-WebSocket-Key from request headers (field 5, offset 56) */
+        void *hdrs = *(void **)(rc + 56);
+        void *ws_key = find_ws_key_header(hdrs);
+        if (ws_key) {
+            /* Perform WS handshake */
+            march_ws_handshake((int64_t)fd, ws_key);
+
+            /* Build a WsSocket(fd) value: tag=0, one Int field at offset 16 */
+            void *ws_sock = march_alloc(16 + 8);
+            *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
+
+            /* Call the handler: WsSocket -> Unit */
+            typedef void *(*ws_handler_fn_t)(void *);
+            ws_handler_fn_t ws_fn = (ws_handler_fn_t)ws_handler;
+            ws_fn(ws_sock);
+        }
+        /* fd stays open — the WS handler is responsible for the socket
+         * lifetime. When the handler returns, close. */
+        close(fd);
+        return NULL;
+    }
+
+    /* 7. Extract response fields from returned Conn and send HTTP response */
+    int64_t resp_status  = *(int64_t *)(rc + 72);   /* field 7 */
+    void   *resp_headers = *(void **)(rc + 80);      /* field 8 */
+    void   *resp_body    = *(void **)(rc + 88);      /* field 9 */
+
+    /* Default to 200 if pipeline didn't set a status */
+    if (resp_status == 0) resp_status = 200;
+
+    void *resp = march_http_serialize_response(resp_status, resp_headers, resp_body);
+    march_tcp_send_all((int64_t)fd, resp);
 
     close(fd);
     return NULL;
 }
 
-void march_http_server_listen(void *server_config, void *pipeline) {
-    if (!server_config || !pipeline) return;
-
-    int64_t port      = *(int64_t *)((char *)server_config + 16);
-    int64_t max_conns = *(int64_t *)((char *)server_config + 24);
-    /* int64_t timeout_ms = *(int64_t *)((char *)server_config + 32); */
-    (void)max_conns;  /* TODO: enforce max_conns with an atomic counter */
+void march_http_server_listen(int64_t port, int64_t max_conns,
+                               int64_t idle_timeout, void *pipeline) {
+    if (!pipeline) return;
+    (void)max_conns;    /* TODO: enforce max_conns with an atomic counter */
+    (void)idle_timeout; /* TODO: set SO_RCVTIMEO/SO_SNDTIMEO on accepted sockets */
 
     /* Ignore broken-pipe signals — we handle send errors explicitly */
     signal(SIGPIPE, SIG_IGN);

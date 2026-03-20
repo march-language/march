@@ -35,20 +35,20 @@ Build an HTTP/1.1 server into March's stdlib. Inspired by Plug/Bandit/Phoenix:
 Like Bandit: the accept loop runs in the main thread, each connection gets its own OS thread. Unlike fire-and-forget threading, the accept loop **supervises** all spawned threads — tracking active connections, enforcing limits, and supporting graceful shutdown.
 
 ```
-Interpreter path:  march app.march            (eval.ml, OCaml builtins)
+Interpreter path:  march app.march            (eval.ml, OCaml builtins — NO HTTP support)
 Compiled path:     march --compile app.march  (LLVM IR → clang → native binary, C builtins)
 REPL path:         march                      (compile-and-dlopen, same C builtins)
 ```
 
-Note: HTTP builtins (http_server_listen, ws_recv, etc.) only exist in the C runtime. Non-HTTP code works on both paths.
+Note: HTTP builtins (http_server_listen, ws_recv, etc.) only exist in the C runtime (`runtime/march_http.c`). Non-HTTP code works on all three paths. **To run HTTP servers, use the REPL (compiled by default) or `march --compile`.** The interpreter path (`march app.march` without `--compile`) falls through to eval.ml which does not have HTTP builtins.
 
 ```
-HttpServer.listen(server)           -- builtin, implemented in OCaml
+HttpServer.listen(server)           -- builtin, implemented in C (runtime/march_http.c)
   │
   ├── tcp_listen(port)              -- bind + listen
   ├── Install SIGTERM handler       -- sets shutdown flag
   │
-  └── Accept Loop (OCaml, main thread)
+  └── Accept Loop (C runtime, main thread)
         │
         ├── State:
         │     active : Atomic.t int     -- live connection count
@@ -352,18 +352,18 @@ Auth only runs for `/api/*` routes because it's only called in that branch. No f
 
 ### How It Works
 
-`HttpServer.listen` is an **OCaml-level builtin** (not a March function). It:
+`HttpServer.listen` is a **C runtime builtin** (not a March function). It:
 
-1. Calls `Unix.socket` + `Unix.bind` + `Unix.listen` with `SO_REUSEADDR`
-2. Enters a loop: `Unix.accept` → `Thread.create` → loop
+1. Calls `socket` + `bind` + `listen` with `SO_REUSEADDR`
+2. Enters a loop: `accept` → `pthread_create` → loop
 3. Each thread runs the March pipeline independently
 4. The accept loop returns to accepting immediately — never waits for handlers
 
-This uses OCaml 5's `Thread` module. When a thread calls `Unix.recv` (blocking I/O), the domain lock is released, letting other threads run. Multiple connections can be reading requests, running handlers, and writing responses simultaneously.
+This uses pthreads in the C runtime (`runtime/march_http.c`). When a thread calls `recv` (blocking I/O), other threads continue running. Multiple connections can be reading requests, running handlers, and writing responses simultaneously. Both the compiled REPL and `--compile` use this C runtime.
 
 ### Connection Thread Lifecycle
 
-Each thread runs this sequence (implemented in OCaml inside `eval.ml`):
+Each thread runs this sequence (implemented in C in `runtime/march_http.c`):
 
 ```
 1. tcp_recv_http(fd)           -- read raw HTTP request (blocks, releases lock)
@@ -549,11 +549,13 @@ HttpServer.new(4000)
 
 `listen()` blocks forever (it's the accept loop). Connections are handled concurrently in the background. If a handler crashes, a 500 is sent. If the server hits max connections, new clients get a 503. If a client is idle too long, the connection is closed. On `SIGTERM`, the server drains gracefully. The programmer writes pure `Conn -> Conn` functions and the runtime handles the rest.
 
-### Required OCaml Changes
+### Interpreter Path (deferred)
+
+> **Note:** v1 HTTP only works via the compiled path (REPL compile-and-dlopen or `--compile`). The notes below describe what would be needed IF the interpreter path (`eval.ml`) were to support HTTP in the future.
 
 1. **Add `threads` library** to `lib/eval/dune` dependencies
 2. **Add `Mutex.t`** around `actor_registry` and global counters in eval.ml
-3. **Implement `http_server_listen` builtin** — the supervised accept loop:
+3. **Implement `http_server_listen` builtin in eval.ml** — the supervised accept loop:
    - `Atomic.t` for active connection count and shutdown flag
    - `Unix.select` with 1s timeout for shutdown responsiveness
    - `SO_RCVTIMEO`/`SO_SNDTIMEO` on accepted sockets for idle timeout
@@ -1608,22 +1610,22 @@ WebSocket connections are long-lived — they stay in the connection count and a
 
 ## New Builtins Required
 
-Added to `base_env` in `lib/eval/eval.ml`:
+C runtime functions in `runtime/march_http.c`, called from compiled code via LLVM IR `extern` declarations. These are NOT in eval.ml.
 
 ### Server Builtin (the big one)
 
 ```
 http_server_listen(port : Int, pipeline : List(Conn -> Conn),
                    max_conns : Int, idle_timeout : Int) -> Unit
-  The entire accept loop + thread spawning + supervision, implemented in OCaml.
-  1. Unix.socket + Unix.bind(SO_REUSEADDR) + Unix.listen
+  The entire accept loop + thread spawning + supervision, implemented in C.
+  1. socket + bind(SO_REUSEADDR) + listen
   2. Install SIGTERM handler (sets shutdown flag)
-  3. Loop: Unix.select(1s timeout) → check shutdown → check max_conns →
-     Unix.accept → set SO_RCVTIMEO/SO_SNDTIMEO → ignore (Atomic.fetch_and_add active 1) →
-     Thread.create(connection_thread) → loop
+  3. Loop: select(1s timeout) → check shutdown → check max_conns →
+     accept → set SO_RCVTIMEO/SO_SNDTIMEO → atomic increment active →
+     pthread_create(connection_thread) → loop
   4. Each thread: tcp_recv_http → http_parse_request → build Conn →
-     eval pipeline → write response → close fd → ignore (Atomic.fetch_and_add active (-1))
-  5. On crash: catch Eval_error → send 500 → close fd (finally decrements active)
+     call pipeline → write response → close fd → atomic decrement active
+  5. On crash: send 500 → close fd (finally decrements active)
   6. On timeout: catch EAGAIN → close fd (finally decrements active)
   7. On max_conns: accept → send 503 → close fd (no thread spawned)
   8. On shutdown: stop accepting, drain (wait for active=0), close listen_fd
@@ -1706,22 +1708,20 @@ string_split(s, sep)           — already implemented in eval.ml. Used for
 
 ## File Layout
 
-| File | Changes |
-|------|---------|
-| `lib/parser/parser.mly` | Add list literal patterns (`[a, b]` sugar for `Cons(a, Cons(b, Nil))`) — prerequisite for readable routing |
-| `march.opam` | Add `digestif` (SHA-1) and `base64` opam dependencies for WebSocket handshake |
-| `lib/eval/dune` | Add `threads`, `digestif`, `base64` library dependencies |
-| `lib/eval/eval.ml` | Add `http_server_listen`, `http_parse_request`, `http_serialize_response`, `ws_recv`, `ws_send`, `ws_handshake`, `ws_select` builtins; add `Mutex.t` around actor globals; thread-local state via `Hashtbl` keyed by `Thread.id` (see Required OCaml Changes §4); WebSocket upgrade detection after pipeline |
-| `stdlib/http_server.march` | New file: `Conn` type (with Upgrade field), accessors, transforms, `method_to_string`, pipeline runner, `HttpServer.new`, `HttpServer.plug`, `HttpServer.listen` (calls builtin) |
-| `stdlib/websocket.march` | New file: `WsFrame`, `WsSocket`, `SelectResult(a)`, `WebSocket.upgrade`, `WebSocket.recv`, `WebSocket.send`, `WebSocket.close`, `WebSocket.select` |
-| `bin/main.ml` | Add `http_server.march` and `websocket.march` to stdlib load order (after `http.march` for `Header` type) |
-| `test/test_march.ml` | Tests for builtins and server module |
-| `runtime/march_http.c` | C implementations of HTTP/WS builtins for compiled mode |
-| `runtime/march_http.h` | HTTP/WS C function declarations |
-| `runtime/sha1.c` | Vendored SHA-1 for WebSocket handshake |
-| `runtime/base64.c` | Vendored Base64 for WebSocket handshake |
-| `lib/jit/jit.ml` | OCaml dlopen/dlsym stubs for compiled REPL |
-| `lib/jit/repl_jit.ml` | REPL compile-and-dlopen orchestrator |
+| File | Changes | Status |
+|------|---------|--------|
+| `lib/parser/parser.mly` | Add list literal patterns (`[a, b]` sugar for `Cons(a, Cons(b, Nil))`) — prerequisite for readable routing | |
+| `lib/eval/eval.ml` | Non-HTTP builtins only. HTTP builtins are NOT in eval.ml — they live in the C runtime. | |
+| `stdlib/http_server.march` | New file: `Conn` type (with Upgrade field), accessors, transforms, `method_to_string`, pipeline runner, `HttpServer.new`, `HttpServer.plug`, `HttpServer.listen` (calls builtin) | |
+| `stdlib/websocket.march` | New file: `WsFrame`, `WsSocket`, `SelectResult(a)`, `WebSocket.upgrade`, `WebSocket.recv`, `WebSocket.send`, `WebSocket.close`, `WebSocket.select` | |
+| `bin/main.ml` | Add `http_server.march` and `websocket.march` to stdlib load order (after `http.march` for `Header` type) | |
+| `test/test_march.ml` | Tests for builtins and server module | |
+| `runtime/march_http.c` | C implementations of all HTTP/WS builtins, called from compiled code via LLVM IR extern declarations | ✓ |
+| `runtime/march_http.h` | HTTP/WS C function declarations | ✓ |
+| `runtime/sha1.c` | Vendored SHA-1 (C) for WebSocket handshake — no opam dependency | ✓ |
+| `runtime/base64.c` | Vendored Base64 (C) for WebSocket handshake — no opam dependency | ✓ |
+| `lib/jit/jit.ml` | OCaml dlopen/dlsym stubs for compiled REPL | ✓ |
+| `lib/jit/repl_jit.ml` | REPL compile-and-dlopen orchestrator | ✓ |
 
 ## Testing Strategy
 

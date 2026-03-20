@@ -56,7 +56,10 @@ let user_scope eval_env tc_env result_h ~baseline_env =
     || name = "v"
     || (String.length name > 0 && name.[0] = '_')
     || Hashtbl.mem seen name
-    || (match v with March_eval.Eval.VClosure _ | March_eval.Eval.VBuiltin _ -> true | _ -> false)
+    || (match v with March_eval.Eval.VBuiltin (n, _) ->
+          let is_rec = String.length n >= 5 && String.sub n 0 5 = "<rec:" in
+          not is_rec
+        | _ -> false)
     then None
     else begin
       Hashtbl.add seen name ();
@@ -387,33 +390,17 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                  if tc_ok || is_debug then
                    (try
                       (match jit_ctx with
-                      | Some jit ->
-                        let (is_fn_decl, bind_name) = match d' with
-                          | March_ast.Ast.DFn (def, _) -> (true, def.fn_name.txt)
-                          | March_ast.Ast.DLet (b, _) ->
-                            let name = match b.bind_pat with
-                              | March_ast.Ast.PatVar n -> n.txt
-                              | _ -> "_v"
-                            in
-                            (false, name)
-                          | _ -> (false, "_v")
+                      | Some jit when (match d' with March_ast.Ast.DFn _ -> true | _ -> false) ->
+                        let bind_name = match d' with
+                          | March_ast.Ast.DFn (def, _) -> def.fn_name.txt
+                          | _ -> assert false
                         in
                         let m = wrap_decl_as_module ~stdlib_decls d' in
-                        March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl ~bind_name m;
+                        March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:true ~bind_name m;
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
-                        (match d' with
-                         | March_ast.Ast.DFn (def, _) ->
-                           Printf.printf "val %s = <fn>\n%!" def.fn_name.txt
-                         | March_ast.Ast.DLet (b, _) ->
-                           (match b.bind_pat with
-                            | March_ast.Ast.PatVar n ->
-                              Printf.printf "val %s = <bound>\n%!" n.txt
-                            | _ -> Printf.printf "val _ = ...\n%!")
-                         | March_ast.Ast.DActor (name, _, _) ->
-                           Printf.printf "val %s = <actor>\n%!" name.txt
-                         | _ -> ())
-                      | None ->
+                        Printf.printf "val %s = <fn>\n%!" bind_name
+                      | _ ->
                         env := March_eval.Eval.eval_decl !env d';
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
@@ -423,9 +410,11 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                          | March_ast.Ast.DLet (b, _) ->
                            (match b.bind_pat with
                             | March_ast.Ast.PatVar n ->
-                              let v = List.assoc n.txt !env in
-                              Printf.printf "val %s = %s\n%!" n.txt
-                                (March_eval.Eval.value_to_string v)
+                              let vstr = match List.assoc_opt n.txt !env with
+                                | Some v -> March_eval.Eval.value_to_string v
+                                | None -> "?"
+                              in
+                              Printf.printf "val %s = %s\n%!" n.txt vstr
                             | _ -> Printf.printf "val _ = ...\n%!")
                          | March_ast.Ast.DActor (name, _, _) ->
                            Printf.printf "val %s = <actor>\n%!" name.txt
@@ -670,35 +659,17 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
       if tc_ok || is_debug then
         (try
            (match jit_ctx with
-           | Some jit ->
-             let (is_fn_decl, bind_name) = match d' with
-               | March_ast.Ast.DFn (def, _) -> (true, def.fn_name.txt)
-               | March_ast.Ast.DLet (b, _) ->
-                 let name = match b.bind_pat with
-                   | March_ast.Ast.PatVar n -> n.txt
-                   | _ -> "_v"
-                 in
-                 (false, name)
-               | _ -> (false, "_v")
+           | Some jit when (match d' with March_ast.Ast.DFn _ -> true | _ -> false) ->
+             let bind_name = match d' with
+               | March_ast.Ast.DFn (def, _) -> def.fn_name.txt
+               | _ -> assert false
              in
              let m = wrap_decl_as_module ~stdlib_decls d' in
-             March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl ~bind_name m;
+             March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:true ~bind_name m;
              if tc_ok then
                tc_env := { new_tc with errors = March_errors.Errors.create () };
-             let out = match d' with
-               | March_ast.Ast.DFn (def, _) ->
-                 Printf.sprintf "val %s = <fn>" def.fn_name.txt
-               | March_ast.Ast.DLet (b, _) ->
-                 (match b.bind_pat with
-                  | March_ast.Ast.PatVar n ->
-                    Printf.sprintf "val %s = <bound>" n.txt
-                  | _ -> "val _ = ...")
-               | March_ast.Ast.DActor (name, _, _) ->
-                 Printf.sprintf "val %s = <actor>" name.txt
-               | _ -> ""
-             in
-             if out <> "" then add_line Notty.A.empty out
-           | None ->
+             add_line Notty.A.empty (Printf.sprintf "val %s = <fn>" bind_name)
+           | _ ->
              env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
              if tc_ok then
                tc_env := { new_tc with errors = March_errors.Errors.create () };
@@ -708,8 +679,11 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                | March_ast.Ast.DLet (b, _) ->
                  (match b.bind_pat with
                   | March_ast.Ast.PatVar n ->
-                    let v = List.assoc n.txt !env in
-                    Printf.sprintf "val %s = %s" n.txt (March_eval.Eval.value_to_string v)
+                    let vstr = match List.assoc_opt n.txt !env with
+                      | Some v -> March_eval.Eval.value_to_string v
+                      | None -> "?"
+                    in
+                    Printf.sprintf "val %s = %s" n.txt vstr
                   | _ -> "val _ = ...")
                | March_ast.Ast.DActor (name, _, _) ->
                  Printf.sprintf "val %s = <actor>" name.txt
@@ -1131,13 +1105,23 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
        (match History.prev hist with
         | None -> ()
         | Some entry ->
-          inp := { !inp with Input.buffer = entry;
-                             Input.cursor = String.length entry };
+          let (buf, mbuf) = match List.rev (String.split_on_char '\n' entry) with
+            | [] -> ("", [])
+            | last :: rest -> (last, rest)
+          in
+          inp := { !inp with Input.buffer = buf;
+                             Input.cursor = String.length buf;
+                             Input.multiline_buf = mbuf };
           render_frame ())
      | Input.HistoryNext ->
        let entry = match History.next hist with None -> "" | Some e -> e in
-       inp := { !inp with Input.buffer = entry;
-                          Input.cursor = String.length entry };
+       let (buf, mbuf) = match List.rev (String.split_on_char '\n' entry) with
+         | [] -> ("", [])
+         | last :: rest -> (last, rest)
+       in
+       inp := { !inp with Input.buffer = buf;
+                          Input.cursor = String.length buf;
+                          Input.multiline_buf = mbuf };
        render_frame ()
      | Input.Redraw | Input.Noop -> render_frame ()
      | Input.Complete ->

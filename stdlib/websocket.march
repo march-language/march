@@ -1,0 +1,52 @@
+-- WebSocket module: types and API for WebSocket connections.
+--
+-- WebSocket connections are upgraded from HTTP via WebSocket.upgrade(conn, handler).
+-- The handler is a function WsSocket -> Unit that uses tail recursion and
+-- pattern matching on received frames.
+
+mod WebSocket do
+
+  type WsFrame = TextFrame(String) | BinaryFrame(String) | Ping | Pong | Close(Int, String)
+
+  type WsSocket = WsSocket(Int)
+
+  type SelectResult = WsData(WsFrame) | ActorMsg | Timeout
+
+  -- Upgrade a conn to websocket. Handler is called after handshake.
+  -- Validates upgrade headers, marks conn as halted with WebSocketUpgrade.
+  pub fn upgrade(conn, handler) do
+    match conn with
+    | Conn(fd, m, p, pi, qs, rh, rb, _, _, _, _, assigns, _) ->
+      Conn(fd, m, p, pi, qs, rh, rb, 101, Nil, "", true, assigns,
+           WebSocketUpgrade(handler))
+    end
+  end
+
+  -- Receive a frame (blocks until one arrives)
+  pub fn recv(socket) do
+    match socket with
+    | WsSocket(fd) -> ws_recv(fd)
+    end
+  end
+
+  -- Send a frame
+  pub fn send(socket, frame) do
+    match socket with
+    | WsSocket(fd) -> ws_send(fd, frame)
+    end
+  end
+
+  -- Send a close frame
+  pub fn close(socket, code, reason) do
+    send(socket, Close(code, reason))
+  end
+
+  -- Multiplex: wait on socket OR actor mailbox OR timeout.
+  -- Returns WsData(frame), ActorMsg, or Timeout.
+  pub fn select(socket, timeout_ms) do
+    match socket with
+    | WsSocket(fd) -> ws_select(fd, 0, timeout_ms)
+    end
+  end
+
+end

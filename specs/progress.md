@@ -100,7 +100,7 @@ march/
 ├── .ocamlformat
 ├── bin/
 │   ├── dune
-│   └── main.ml              # parse → desugar → typecheck → eval + --dump-tir
+│   └── main.ml              # parse → desugar → typecheck → eval + --compile + REPL JIT bootstrap
 ├── lib/
 │   ├── ast/ast.ml           # Full AST: spans, exprs, patterns, decls, actors
 │   ├── lexer/lexer.mll      # ocamllex: atoms, pipes, do/end, when, etc.
@@ -111,6 +111,11 @@ march/
 │   ├── effects/effects.ml   # Placeholder
 │   ├── codegen/codegen.ml   # Placeholder
 │   ├── errors/errors.ml     # Diagnostic type (Error/Warning/Hint + span)
+│   ├── jit/
+│   │   ├── jit_stubs.c      # C stubs for dlopen/dlsym/dlclose + call stubs
+│   │   ├── jit.ml / jit.mli # OCaml externals wrapping C stubs
+│   │   ├── repl_jit.ml/mli  # Compile-and-dlopen REPL engine
+│   │   └── dune
 │   └── tir/
 │       ├── tir.ml           # ANF IR type definitions
 │       ├── lower.ml         # AST → TIR (ANF conversion, pattern flattening)
@@ -119,20 +124,26 @@ march/
 │       ├── pp.ml            # Pretty-printer
 │       ├── perceus.ml       # Perceus RC analysis ✓
 │       ├── escape.ml        # Escape analysis ✓
-│       └── llvm_emit.ml     # TIR → LLVM IR (planned)
+│       └── llvm_emit.ml     # TIR → LLVM IR + REPL emission + HTTP extern decls
+├── runtime/
+│   ├── march_runtime.c/h    # Core runtime: alloc, RC, strings, actors, value_to_string
+│   ├── march_http.c/h       # HTTP/WS runtime: TCP, HTTP parse/serialize, server, WebSocket
+│   ├── sha1.c               # SHA-1 for WebSocket handshake
+│   └── base64.c             # Base64 for WebSocket handshake
 └── test/
     ├── dune
-    └── test_march.ml        # 132 passing tests
+    ├── test_march.ml         # 132 passing tests
+    └── test_jit.ml           # JIT dlopen round-trip test
 ```
 
-## Current State (as of 2026-03-18)
+## Current State (as of 2026-03-20)
 
 - **Builds clean**
-- **132 tests passing**: lexer (12), AST (1), parser (5), module (2), keywords (1), desugar (3), typecheck (8), eval (12), parser gaps (6), constraints (5), tir (83), list builtins (6), declarations (14), string interp (2), type_map (2), convert_ty (2), perceus (6)
+- **132+ tests passing**: lexer (12), AST (1), parser (5), module (2), keywords (1), desugar (3), typecheck (8), eval (12), parser gaps (6), constraints (5), tir (83), list builtins (6), declarations (14), string interp (2), type_map (2), convert_ty (2), perceus (6), jit (1)
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present
 - **`--dump-tir` flag**: prints TIR after full pipeline (Lower → Mono → Defun → Perceus → Escape); shows `stack_alloc` for promoted allocations
 - **`--emit-llvm` flag**: emits textual LLVM IR to `<basename>.ll`; links with `runtime/march_runtime.c` via `clang` to produce native binaries
-- **REPL working**: `dune exec march` with no args; `:quit`/`:env` commands; incremental env
+- **Compiled REPL**: `dune exec march` with no args launches a compile-and-dlopen REPL — each expression goes through the full TIR pipeline → LLVM IR → `clang -shared` → `.so` → `dlopen` → `dlsym` → call. Bindings persist as LLVM globals with `RTLD_GLOBAL`. Falls back to interpreter if JIT unavailable. `:quit`/`:env` commands; incremental env
 - **Bidirectional HM type checker**: constructor registry, builtin `Some/None/Ok/Err`, named record type expansion, `Unit`/`Bool`/etc. annotation normalization, builtins (`print`, `println`, `int_to_string`, `bool_to_string`, etc.) in scope; actor declarations register message ctors and bind `state` in handler envs
 - **Tree-walking interpreter**: `value` type (incl. `VPid`), pattern matching, `base_env` builtins, two-pass `eval_module_env` for mutual recursion; full synchronous actor runtime with `kill`/`is_alive`/drop semantics
 - **TIR pipeline** (`lib/tir/`):
@@ -141,8 +152,17 @@ march/
   - `defun.ml` — defunctionalization: lambda lifting, `$Clo_` struct generation, `ECallPtr` rewriting
   - `perceus.ml` — Perceus RC analysis: backwards liveness, `EIncRC`/`EDecRC`/`EFree` insertion, Inc/Dec cancel-pair elision, FBIP `EReuse` detection
   - `escape.ml` — Escape analysis: 3-phase intra-procedural stack promotion; `EAlloc` → `EStackAlloc` for non-escaping allocations; dead RC ops on stack vars removed
-  - `llvm_emit.ml` — TIR → textual LLVM IR; alloca+store+load for all let-bindings; ECase as switch+blocks+merge; arithmetic/cmp builtins to native ops; EAlloc→`@march_alloc`; EStackAlloc→`alloca`; EReuse→in-place write; March `main` → `@march_main` with C `@main` wrapper
+  - `llvm_emit.ml` — TIR → textual LLVM IR; alloca+store+load for all let-bindings; ECase as switch+blocks+merge; arithmetic/cmp builtins to native ops; EAlloc→`@march_alloc`; EStackAlloc→`alloca`; EReuse→in-place write; March `main` → `@march_main` with C `@main` wrapper; REPL emission helpers (`emit_repl_expr`, `emit_repl_decl`, `emit_repl_fn`); HTTP/WS extern declarations
   - `pp.ml` — pretty-printer for all TIR types and expressions (incl. `stack_alloc`, `reuse`)
+- **JIT / compile-and-dlopen** (`lib/jit/`):
+  - `jit_stubs.c` — OCaml C stubs for POSIX `dlopen`/`dlsym`/`dlclose` + function pointer call stubs (void→ptr, void→void, void→i64, void→double, ptr→ptr)
+  - `jit.ml` / `jit.mli` — OCaml externals wrapping the C stubs
+  - `repl_jit.ml` / `repl_jit.mli` — Compiled REPL engine: TIR pipeline → LLVM IR → `clang -shared -fPIC` → `.so` → `dlopen` → call; tracks globals across fragments, deduplicates already-compiled functions, handles fn decls / let bindings / expressions
+- **HTTP/WS C runtime** (`runtime/`):
+  - `march_http.c` / `march_http.h` — TCP listen/accept/recv/send/close; HTTP request parsing and response serialization; thread-per-connection server accept loop; WebSocket handshake, frame recv/send, and select (with actor pipe support)
+  - `sha1.c` — Minimal RFC 3174 SHA-1 for WebSocket handshake
+  - `base64.c` — Minimal Base64 encoding for WebSocket handshake
+- **Pre-compiled runtime .so** — `ensure_runtime_so()` in `bin/main.ml` compiles `march_runtime.c` + `march_http.c` + `sha1.c` + `base64.c` to `~/.cache/march/libmarch_runtime.so`, cached and rebuilt only when sources change
 - **Two working examples**:
   - `examples/list_lib.march` — map, filter, fold, reverse, find, range (polymorphic list library)
   - `examples/actors.march` — Counter + Logger actors, normal messaging, kill, drop semantics, restart
@@ -181,8 +201,9 @@ march/
 
 ### Next milestones
 4. **Field-index map for records** — `EField`/`EUpdate` need a field→offset table (from type checker) to emit correct GEP offsets beyond field 0.
-5. **`llc` / `clang` invocation from compiler** — `march --compile` should call clang automatically rather than requiring manual linking step.
+5. ~~**`llc` / `clang` invocation from compiler**~~ ✓ — `march --compile` calls clang automatically; `ensure_runtime_so()` pre-compiles runtime to cached `.so`.
 6. **More test programs** — compile list operations, recursive functions, actors to LLVM.
+7. **HTTP server stdlib** — March-level HTTP server types, routing, and stdlib modules using the compiled HTTP/WS C runtime.
 
 ### Frontend / Ergonomics
 4. **More tests** — actor spawning/send/kill, record operations, `Option`/`Result` pattern matching

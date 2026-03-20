@@ -56,11 +56,13 @@ void *march_http_serialize_response(int64_t status, void *headers, void *body);
 /* ── HTTP server ───────────────────────────────────────────────────── */
 
 /* Start a blocking HTTP server accept loop.
- * server_config: a March heap value with fields [port, max_conns, idle_timeout]
- * pipeline:      a compiled March function pointer (Conn -> Conn) boxed as a
- *                March closure/function value.
+ * port:         TCP port to listen on
+ * max_conns:    maximum concurrent connections (TODO: enforce)
+ * idle_timeout: idle timeout in seconds (TODO: set SO_RCVTIMEO)
+ * pipeline:     a compiled March function pointer (Conn -> Conn)
  * This function does not return until the server is shut down. */
-void march_http_server_listen(void *server_config, void *pipeline);
+void march_http_server_listen(int64_t port, int64_t max_conns,
+                               int64_t idle_timeout, void *pipeline);
 
 /* ── WebSocket builtins ────────────────────────────────────────────── */
 

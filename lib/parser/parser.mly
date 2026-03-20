@@ -584,6 +584,14 @@ simple_pattern:
   | LPAREN; p = pattern; RPAREN { p }
   | LPAREN; p = pattern; COMMA; ps = separated_nonempty_list(COMMA, pattern); RPAREN
     { PatTuple (p :: ps, mk_span ($loc)) }
+  (* List literal patterns: []  →  Nil,  [a, b]  →  Cons(a, Cons(b, Nil)) *)
+  | LBRACKET; RBRACKET
+    { PatCon (mk_name "Nil" $loc, []) }
+  | LBRACKET; ps = separated_nonempty_list(COMMA, pattern); RBRACKET
+    { List.fold_right
+        (fun p acc -> PatCon (mk_name "Cons" $loc, [p; acc]))
+        ps
+        (PatCon (mk_name "Nil" $loc, [])) }
 
 (* ---- Names ---- *)
 
