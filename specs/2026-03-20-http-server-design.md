@@ -508,9 +508,289 @@ HttpServer.new(4000)
    - `SIGTERM` handler + drain loop for graceful shutdown
 4. **Thread-local state** for `module_stack`, `reduction_ctx`, `debug_ctx` using `Thread.key`
 
-### Future: March-Level Concurrency (v2)
+### Compiled Mode: LLVM IR (how the server works as native code)
 
-When the March scheduler is wired in, `listen` can spawn lightweight March tasks instead of OS threads — matching Bandit's use of BEAM processes. The March user code doesn't change. The transition is purely internal to the runtime.
+The interpreter (`eval.ml`) is the development path. For production, March compiles to native code:
+
+```
+March source → parse → desugar → typecheck → monomorphize → defunctionalize
+  → lower to TIR → Perceus RC → escape analysis → LLVM IR → clang → native binary
+```
+
+The server architecture is **identical** — but the implementation layer shifts from OCaml to C.
+
+#### What changes when compiled
+
+**Builtins become C runtime functions.** Currently builtins live in `eval.ml` as OCaml functions the interpreter calls. In compiled mode, they're C functions in `march_runtime.c` that the LLVM IR calls directly:
+
+```c
+// march_runtime.h additions:
+void  march_http_server_listen(void *server_config, void *pipeline);
+void *march_ws_recv(int64_t fd);
+void  march_ws_send(int64_t fd, void *frame);
+void  march_ws_handshake(int64_t fd, void *key);
+void *march_http_parse_request(void *raw);
+void *march_http_serialize_response(int64_t status, void *headers, void *body);
+```
+
+The LLVM emitter (`llvm_emit.ml`) already knows how to map March builtins to C names via `mangle_extern`. The HTTP/WS builtins follow the same pattern:
+
+```ocaml
+(* In llvm_emit.ml, extend mangle_extern: *)
+| "http_server_listen"     -> "march_http_server_listen"
+| "http_parse_request"     -> "march_http_parse_request"
+| "http_serialize_response"-> "march_http_serialize_response"
+| "ws_recv"                -> "march_ws_recv"
+| "ws_send"                -> "march_ws_send"
+| "ws_handshake"           -> "march_ws_handshake"
+```
+
+**Plug pipeline compiles to native function calls.** After defunctionalization (`lib/tir/defun.ml`), closures become tagged structs with a dispatch function pointer. The pipeline runner:
+
+```march
+fn run_pipeline(conn, plugs) do
+  match plugs with
+  | Nil -> conn
+  | Cons(plug, rest) ->
+    if Conn.halted(conn) then conn
+    else run_pipeline(plug(conn), rest)
+  end
+end
+```
+
+Compiles to: `switch` on list tag → load dispatch pointer from closure struct → indirect `call` → tail-recursive loop. With LLVM's optimization passes, this becomes a tight loop of indirect calls — no interpreter dispatch overhead, no value boxing for primitives.
+
+**Pattern matching compiles to native switch/compare.** The router:
+
+```march
+match (Conn.method(conn), Conn.path_info(conn)) with
+| (Get, ["users", id]) -> ...
+```
+
+Becomes: load tag field at offset 8 → `switch i32` on method tag → nested `switch` on list/string comparisons. LLVM optimizes this into jump tables.
+
+**Conn is a heap struct, not interpreted.** The 13-field Conn compiles to a 120-byte heap object (16-byte header + 13 × 8-byte fields). Accessors compile to `getelementptr` + `load`. Transforms compile to alloc + copy + mutate-field. With Perceus FBIP, the common `conn |> put_resp_header(...) |> send_resp(...)` chain reuses the Conn in-place when its RC = 1 (which it always is in a pipeline, since Conn flows linearly through pipes).
+
+**The accept loop is C code in the runtime.** `march_http_server_listen` in `march_runtime.c` is the same thread-per-connection accept loop, but calling compiled March functions instead of the interpreter:
+
+```c
+void march_http_server_listen(void *server_config, void *pipeline) {
+    // Extract port, max_conns, idle_timeout from server_config struct
+    int64_t port = *(int64_t *)((char *)server_config + 16);
+    // ... bind, listen, accept loop ...
+
+    while (!shutdown) {
+        int client_fd = accept(listen_fd, ...);
+        // Spawn thread, call compiled March pipeline
+        pthread_create(&tid, NULL, connection_thread, args);
+    }
+}
+
+static void *connection_thread(void *arg) {
+    // ... recv, parse, build Conn ...
+
+    // Call the compiled defunctionalized dispatch:
+    void *result_conn = march_dispatch_pipeline(pipeline, conn);
+
+    // ... serialize response, send, close ...
+}
+```
+
+**Build command:**
+```bash
+march --emit-llvm app.march              # produces app.ll
+clang -O2 runtime/march_runtime.c app.ll -lpthread -o server
+./server                                  # native binary, no interpreter
+```
+
+#### Performance impact of compilation
+
+| Component | Interpreted (eval.ml) | Compiled (LLVM) |
+|-----------|----------------------|-----------------|
+| Plug dispatch | Hashtbl lookup + pattern match on AST | Indirect function call (1 branch) |
+| Conn field access | Recursive match on 13-field constructor | `getelementptr` + `load` (1 instruction) |
+| Pipeline loop | Interpreter reduces ~50 AST nodes per plug | Tight loop, ~5 native instructions per plug |
+| String concat | Allocate March value + OCaml string ops | Direct `memcpy` via `march_string_concat` |
+| Pattern match routing | Interpreter walks pattern tree | Jump table via `switch i32` |
+| Conn transforms | Alloc new VVariant, copy fields | FBIP in-place rewrite (zero allocation) |
+| Per-request overhead | ~100μs interpreter dispatch | ~1-5μs native |
+
+The I/O cost (TCP recv/send) dominates either way. But for compute-heavy handlers (JSON parsing, template rendering, auth token validation), compiled mode is 20-100× faster.
+
+### Scaling to 2 Million Concurrent Connections
+
+Thread-per-connection (v1) tops out at ~10K-50K. Each OS thread costs ~8MB stack. For 2M connections, we need lightweight processes. March already has the infrastructure — it just needs to be wired in.
+
+#### Tier 1: v1 — Thread-per-connection (current spec)
+
+- `Thread.create` (interpreter) or `pthread_create` (compiled)
+- ~8MB stack per thread
+- Ceiling: ~10K-50K concurrent connections
+- Good enough for most applications
+
+#### Tier 2: Compiled + io_uring event loop
+
+Replace thread-per-connection with an event-driven reactor. The compiled runtime uses `io_uring` (Linux) or `kqueue` (macOS) to multiplex all connections onto a small thread pool:
+
+```
+N worker threads (= N CPU cores)
+  └── Each runs an io_uring event loop
+        ├── Accepts new connections (IORING_OP_ACCEPT)
+        ├── Reads requests  (IORING_OP_RECV)
+        ├── Writes responses (IORING_OP_SEND)
+        └── Dispatches to compiled March handlers
+              └── Handler runs to completion (non-blocking)
+              └── All I/O submitted as io_uring SQEs
+```
+
+Memory per connection: ~4KB (recv buffer + Conn struct + response buffer). 2M × 4KB = 8GB — feasible on a single machine.
+
+**The key constraint**: handlers must not block. In compiled mode, `tcp_recv`/`tcp_send` submit io_uring operations and suspend the handler. This requires **stackful coroutines** (see Tier 3).
+
+```c
+// march_runtime.c — io_uring reactor
+typedef struct {
+    int fd;
+    void *pipeline;        // compiled March pipeline (defunctionalized)
+    void *recv_buf;
+    int state;             // ACCEPTING, READING, PROCESSING, WRITING
+} march_connection;
+
+void march_io_loop(struct io_uring *ring, void *pipeline, int max_conns) {
+    march_connection *conns = calloc(max_conns, sizeof(march_connection));
+    // Submit initial accept
+    // On completion: submit recv for new fd
+    // On recv complete: run compiled pipeline, submit send
+    // On send complete: close fd, recycle slot
+}
+```
+
+#### Tier 3: March lightweight processes (the BEAM model)
+
+The full solution. Each connection is a **March process** — a stackful coroutine with:
+
+- ~2-4KB initial heap (per-process arena, per `specs/gc_design.md`)
+- Cooperative scheduling via reduction counting (already in `lib/scheduler/scheduler.ml`)
+- Lock-free mailbox for actor messages (already in `lib/scheduler/mailbox.ml`)
+- Work-stealing across CPU cores (already in `lib/scheduler/work_pool.ml`)
+
+```
+N Domains (= N CPU cores, via compiled Domain.spawn or pthread)
+  └── Each domain owns:
+        ├── io_uring instance (for async I/O)
+        ├── Run queue of March processes
+        ├── Work-stealing deque (Chase-Lev, already implemented)
+        └── Scheduler loop:
+              1. Poll io_uring completions → wake blocked processes
+              2. Pick process from run queue (or steal from another domain)
+              3. Run process for 4,000 reductions (already implemented)
+              4. If process blocks on I/O → submit io_uring SQE, park process
+              5. If process yields → re-queue
+              6. Loop
+```
+
+**Memory budget for 2M connections:**
+
+| Component | Per connection | × 2M |
+|-----------|---------------|-------|
+| Process heap (arena) | 2KB initial | 4 GB |
+| Conn struct | 120 bytes | 240 MB |
+| Recv buffer | 4KB | 8 GB |
+| Send buffer | 4KB (on demand) | 8 GB peak |
+| Process control block | 64 bytes | 128 MB |
+| **Total** | **~10KB** | **~20 GB** |
+
+A 64GB machine handles 2M connections with room for application state. This matches BEAM's documented capacity (Phoenix has demonstrated 2M WebSocket connections on a single machine).
+
+**How March processes suspend on I/O:**
+
+In compiled mode, `ws_recv(fd)` doesn't actually block. It:
+
+1. Submits an `IORING_OP_RECV` to the io_uring ring
+2. Sets the process state to `PWaiting`
+3. Yields to the scheduler (returns from the reduction loop)
+4. When the CQE arrives, the scheduler wakes the process
+5. The process resumes with the received data
+
+From the March programmer's perspective, `WebSocket.recv(socket)` still looks blocking. The compiled runtime makes it async under the hood — exactly how BEAM makes `receive` look blocking while multiplexing millions of processes.
+
+**Implementation in compiled C runtime:**
+
+```c
+// Process structure (compiled mode)
+typedef struct march_proc {
+    int64_t pid;
+    int status;                    // PReady, PRunning, PWaiting, PDone
+    void *stack;                   // coroutine stack (2KB initial, growable)
+    void *heap;                    // per-process arena
+    int64_t heap_size;
+    int64_t reductions;            // countdown, yields at 0
+    march_mailbox *mailbox;        // lock-free MPSC queue
+    struct march_proc *next;       // intrusive linked list for run queue
+} march_proc;
+
+// Suspend on I/O — called from compiled march_ws_recv
+void *march_ws_recv(int64_t fd) {
+    march_proc *self = march_current_proc();
+    // Submit io_uring recv
+    struct io_uring_sqe *sqe = io_uring_get_sqe(self->ring);
+    io_uring_prep_recv(sqe, fd, self->recv_buf, BUF_SIZE, 0);
+    io_uring_sqe_set_data(sqe, self);  // wake this process on completion
+    io_uring_submit(self->ring);
+    // Suspend
+    self->status = PWaiting;
+    march_yield();                     // longjmp back to scheduler
+    // Resumed here after CQE arrives
+    return march_build_ws_frame(self->recv_buf, self->recv_len);
+}
+```
+
+#### The March user code never changes
+
+This is the critical design property. All three tiers run the same March source:
+
+```march
+fn echo_handler(socket) do
+  match WebSocket.recv(socket) with
+  | TextFrame(msg) ->
+    WebSocket.send(socket, TextFrame("Echo: " ++ msg))
+    echo_handler(socket)
+  | Close(_, _) -> ()
+  | _ -> echo_handler(socket)
+  end
+end
+```
+
+| | v1 (interpreter) | v1 (compiled) | v2 (compiled + processes) |
+|---|---|---|---|
+| `WebSocket.recv` | OCaml `Unix.recv` blocks thread | C `recv()` blocks pthread | `io_uring_prep_recv` + yield |
+| Connection unit | OS thread (8MB) | OS thread (8MB) | March process (2KB) |
+| Max connections | ~50K | ~50K | ~2M+ |
+| Handler execution | Interpreter dispatch | Native instructions | Native instructions |
+| Scheduling | OS scheduler | OS scheduler | March scheduler (reduction-counted) |
+
+#### What already exists vs. what's needed
+
+**Already implemented:**
+- Reduction counter + cooperative scheduling (`lib/scheduler/scheduler.ml`)
+- Lock-free mailbox (`lib/scheduler/mailbox.ml`)
+- Chase-Lev work-stealing deques (`lib/scheduler/work_pool.ml`)
+- Per-actor arena design (`specs/gc_design.md`, Layer 3)
+- LLVM IR emission with builtin mangling (`lib/tir/llvm_emit.ml`)
+- C runtime with allocation, RC, actors (`runtime/march_runtime.c`)
+- Perceus RC with FBIP reuse (`lib/tir/perceus.ml`)
+
+**Needed for Tier 2 (event loop):**
+- `io_uring`/`kqueue` wrapper in `march_runtime.c`
+- Non-blocking I/O variants of TCP builtins
+- Connection state machine in C
+
+**Needed for Tier 3 (2M connections):**
+- Stackful coroutine implementation (setjmp/longjmp or platform asm)
+- Wire scheduler into compiled runtime (C port of `scheduler.ml`)
+- Per-process arena allocator in C (replaces `calloc` in `march_alloc`)
+- Process-aware io_uring integration
+- Growable stacks (guard page + mmap on fault)
 
 ## Capability Security
 
