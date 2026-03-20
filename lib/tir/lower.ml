@@ -160,17 +160,39 @@ and lower_expr (e : Ast.expr) : Tir.expr =
   | Ast.EBlock ([e], _) -> lower_expr e
   | Ast.EBlock (Ast.ELet (b, _) :: rest, sp) ->
     let rhs = lower_expr b.bind_expr in
-    let bind_name = match b.bind_pat with
-      | Ast.PatVar n -> n.txt
-      | _ -> fresh_name "p"
-    in
-    let v : Tir.var = {
-      v_name = bind_name;
-      v_ty = (match b.bind_ty with Some t -> lower_ty t | None -> ty_of_expr b.bind_expr);
-      v_lin = lower_linearity b.bind_lin;
-    } in
     let body = lower_expr (Ast.EBlock (rest, sp)) in
-    Tir.ELet (v, rhs, body)
+    (match b.bind_pat with
+     | Ast.PatVar n ->
+       let v : Tir.var = {
+         v_name = n.txt;
+         v_ty = (match b.bind_ty with Some t -> lower_ty t | None -> ty_of_expr b.bind_expr);
+         v_lin = lower_linearity b.bind_lin;
+       } in
+       Tir.ELet (v, rhs, body)
+     | Ast.PatTuple (pats, _) ->
+       (* let (a, b, ...) = rhs  →  let $p = rhs; let a = $p.$fv0; let b = $p.$fv1; … *)
+       let tname = fresh_name "p" in
+       let tv : Tir.var = { v_name = tname; v_ty = unknown_ty; v_lin = Tir.Lin } in
+       let tv_atom = Tir.AVar tv in
+       (* Build inner ELet chain: fold_right so field 0 is the outermost let *)
+       let body_with_fields =
+         List.fold_right (fun (i, pat) inner ->
+           match pat with
+           | Ast.PatVar n ->
+             let fv : Tir.var = { v_name = n.txt; v_ty = unknown_ty; v_lin = Tir.Lin } in
+             Tir.ELet (fv, Tir.EField (tv_atom, Printf.sprintf "$fv%d" i), inner)
+           | _ -> inner  (* wildcard / other → skip *)
+         ) (List.mapi (fun i p -> (i, p)) pats) body
+       in
+       Tir.ELet (tv, rhs, body_with_fields)
+     | _ ->
+       let bind_name = fresh_name "p" in
+       let v : Tir.var = {
+         v_name = bind_name;
+         v_ty = (match b.bind_ty with Some t -> lower_ty t | None -> ty_of_expr b.bind_expr);
+         v_lin = lower_linearity b.bind_lin;
+       } in
+       Tir.ELet (v, rhs, body))
   (* --- ELetFn as block statement → bind function name in rest of block --- *)
   | Ast.EBlock (Ast.ELetFn (name, params, ret_ty_ann, fn_body, _) :: rest, sp) ->
     let fn_name = name.Ast.txt in

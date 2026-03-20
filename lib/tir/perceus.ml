@@ -261,8 +261,12 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     let add_scrutinee_free_for ctor_tag body =
       match a with
       | Tir.AVar v when needs_rc v.Tir.v_ty
-                     && not (StringSet.mem v.Tir.v_name live_after) ->
-        (* Use the concrete ctor type so shape_matches works in FBIP. *)
+                     && not (StringSet.mem v.Tir.v_name live_after)
+                     && not (name_free_in v.Tir.v_name body) ->
+        (* Use the concrete ctor type so shape_matches works in FBIP.
+           Do not dec_rc if the branch body still uses the scrutinee (e.g.,
+           when the scrutinee is passed through as an argument after inspection
+           of one of its fields via a nested match). *)
         let ctor_v = { v with Tir.v_ty = Tir.TCon (ctor_tag, []) } in
         Tir.ESeq (Tir.EDecRC (Tir.AVar ctor_v), body)
       | _ -> body
