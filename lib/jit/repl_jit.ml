@@ -1,0 +1,144 @@
+(* lib/jit/repl_jit.ml *)
+
+type t = {
+  runtime_so  : string;
+  clang       : string;
+  tmp_dir     : string;
+  mutable counter : int;
+  mutable globals : (string * string) list;  (* (llvm_name, llvm_ty) *)
+  mutable handles : Jit.dl_handle list;      (* open dl handles *)
+}
+
+let create ~runtime_so ?(clang="clang") () =
+  let tmp_dir = Filename.concat
+    (Filename.get_temp_dir_name ()) "march_jit" in
+  (try Unix.mkdir tmp_dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  (* Load the runtime .so first so its symbols are globally available *)
+  let rt_handle = Jit.dlopen runtime_so in
+  { runtime_so; clang; tmp_dir;
+    counter = 0; globals = []; handles = [rt_handle] }
+
+let next_id ctx =
+  let n = ctx.counter in
+  ctx.counter <- n + 1;
+  n
+
+let compile_fragment ctx (ir : string) : Jit.dl_handle =
+  let n = ctx.counter - 1 in
+  let ll_path = Filename.concat ctx.tmp_dir
+    (Printf.sprintf "repl_%d.ll" n) in
+  let so_path = Filename.concat ctx.tmp_dir
+    (Printf.sprintf "repl_%d.so" n) in
+  (* Write .ll *)
+  let oc = open_out ll_path in
+  output_string oc ir;
+  close_out oc;
+  (* Compile to .so *)
+  let cmd = Printf.sprintf "%s -shared -fPIC -O0 -o %s %s 2>&1"
+    ctx.clang so_path ll_path in
+  let ic = Unix.open_process_in cmd in
+  let output = Buffer.create 256 in
+  (try while true do Buffer.add_char output (input_char ic) done
+   with End_of_file -> ());
+  let status = Unix.close_process_in ic in
+  (match status with
+   | Unix.WEXITED 0 -> ()
+   | _ -> failwith (Printf.sprintf "clang failed: %s"
+            (Buffer.contents output)));
+  (* dlopen the .so *)
+  let handle = Jit.dlopen so_path in
+  ctx.handles <- handle :: ctx.handles;
+  handle
+
+(** Lower a single-expression module through the TIR pipeline. *)
+let lower_module ~type_map (m : March_ast.Ast.module_) =
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Escape.escape_analysis tir in
+  tir
+
+let run_expr ctx ~type_map m =
+  let n = next_id ctx in
+  let tir = lower_module ~type_map m in
+  (* The last function in the module is the expression wrapper.
+     Extract its body and return type. *)
+  let main_fn = List.find (fun (f : March_tir.Tir.fn_def) ->
+    f.fn_name = "main") tir.March_tir.Tir.tm_fns in
+  let ret_ty = main_fn.fn_ret_ty in
+  let ir = March_tir.Llvm_emit.emit_repl_expr
+    ~n ~ret_ty
+    ~prev_globals:ctx.globals
+    ~fns:(List.filter (fun (f : March_tir.Tir.fn_def) ->
+      f.fn_name <> "main") tir.March_tir.Tir.tm_fns)
+    ~types:tir.March_tir.Tir.tm_types
+    main_fn.fn_body in
+  let handle = compile_fragment ctx ir in
+  let sym_name = Printf.sprintf "repl_%d" n in
+  let fptr = Jit.dlsym handle sym_name in
+  (* Call based on return type *)
+  let result_str = match ret_ty with
+    | March_tir.Tir.TInt ->
+      let v = Jit.call_void_to_int fptr in
+      Int64.to_string v
+    | March_tir.Tir.TFloat ->
+      let v = Jit.call_void_to_float fptr in
+      Printf.sprintf "%g" v
+    | March_tir.Tir.TBool ->
+      let v = Jit.call_void_to_int fptr in
+      if v = 0L then "false" else "true"
+    | March_tir.Tir.TUnit ->
+      Jit.call_void_to_void fptr;
+      "()"
+    | _ ->
+      (* Heap-allocated value: call, get pointer, format via address for now *)
+      let ptr = Jit.call_void_to_ptr fptr in
+      Printf.sprintf "#<value at 0x%Lx>" (Int64.of_nativeint ptr)
+  in
+  (ret_ty, result_str)
+
+(** Distinguish fn vs let at the AST level, not TIR.
+    [is_fn_decl] is true when the original REPL input was a DFn. *)
+let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
+  let n = next_id ctx in
+  let tir = lower_module ~type_map m in
+  let user_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
+    f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
+  if is_fn_decl then begin
+    (* Function declaration: emit the function at top level *)
+    match user_fns with
+    | [fn] ->
+      let ir = March_tir.Llvm_emit.emit_repl_fn
+        ~n ~prev_globals:ctx.globals ~types:tir.March_tir.Tir.tm_types fn in
+      let _handle = compile_fragment ctx ir in
+      ()
+    | _ -> failwith "expected exactly one user function in fn decl"
+  end else begin
+    (* Let binding: find main, extract body, store in global *)
+    let main_fn = List.find (fun (f : March_tir.Tir.fn_def) ->
+      f.fn_name = "main") tir.March_tir.Tir.tm_fns in
+    let ir = March_tir.Llvm_emit.emit_repl_decl
+      ~n ~name:bind_name
+      ~val_ty:main_fn.fn_ret_ty
+      ~prev_globals:ctx.globals
+      ~fns:user_fns
+      ~types:tir.March_tir.Tir.tm_types
+      main_fn.fn_body in
+    let handle = compile_fragment ctx ir in
+    let init_name = Printf.sprintf "repl_%d_init" n in
+    let fptr = Jit.dlsym handle init_name in
+    Jit.call_void_to_void fptr;
+    let global_name = "repl_" ^ bind_name in
+    let llty = March_tir.Llvm_emit.llvm_ty_of_tir main_fn.fn_ret_ty in
+    ctx.globals <- (global_name, llty) :: ctx.globals
+  end
+
+let cleanup ctx =
+  List.iter (fun h -> try Jit.dlclose h with _ -> ()) ctx.handles;
+  (* Remove tmp_dir contents *)
+  let entries = Sys.readdir ctx.tmp_dir in
+  Array.iter (fun f ->
+    try Sys.remove (Filename.concat ctx.tmp_dir f) with _ -> ()
+  ) entries;
+  (try Unix.rmdir ctx.tmp_dir with _ -> ())
