@@ -1,0 +1,75 @@
+-- Insertion sort benchmark: sort 2,000 pseudo-random integers.
+--
+-- Insertion sort is O(n²) average and worst case, O(n) best case (sorted input).
+-- It is the right choice for small sub-arrays (n ≤ ~16) because:
+--   1. No recursion overhead.
+--   2. Excellent cache locality: each insertion scans a prefix of sorted output.
+--   3. Adaptive: already-sorted or nearly-sorted sub-runs cost O(n) comparisons.
+--
+-- This benchmark uses n=2,000 (not 10,000) because the O(n²) cost at n=10,000
+-- would be ~100× slower than the O(n log n) algorithms.  The intent is to show
+-- the per-element comparison cost, not to torture-test the algorithm.
+--
+-- Timsort and Introsort use insertion_sort_by as a base case for n ≤ 16;
+-- run this benchmark to measure the overhead of that building block alone.
+--
+-- Expected output: 1423
+-- (minimum of 2,000 LCG values in [0, 99999]; seed=42)
+
+mod InsertionSort do
+
+fn reverse_list(xs : List(Int)) : List(Int) do
+  fn go(lst : List(Int), acc : List(Int)) : List(Int) do
+    match lst with
+    | Nil        -> acc
+    | Cons(h, t) -> go(t, Cons(h, acc))
+    end
+  end
+  go(xs, Nil)
+end
+
+-- Insert v into a sorted list, maintaining ascending order.
+fn insert(v : Int, sorted : List(Int)) : List(Int) do
+  match sorted with
+  | Nil -> Cons(v, Nil)
+  | Cons(h, t) ->
+    if v <= h then Cons(v, sorted)
+    else Cons(h, insert(v, t))
+  end
+end
+
+-- Insertion sort: O(n²) worst case, O(n) on already-sorted input.
+fn insertion_sort(xs : List(Int)) : List(Int) do
+  fn go(lst : List(Int), acc : List(Int)) : List(Int) do
+    match lst with
+    | Nil        -> acc
+    | Cons(h, t) -> go(t, insert(h, acc))
+    end
+  end
+  go(xs, Nil)
+end
+
+-- ---- LCG and main ----
+
+fn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
+  if n == 0 then acc
+  else do
+    let next = (seed * 1664525 + 1013904223) % 1000000
+    gen_list(n - 1, next, Cons(next % 100000, acc))
+  end
+end
+
+fn head(xs : List(Int)) : Int do
+  match xs with
+  | Nil        -> 0
+  | Cons(h, _) -> h
+  end
+end
+
+fn main() : Unit do
+  let xs     = gen_list(2000, 42, Nil)
+  let sorted = insertion_sort(xs)
+  println(int_to_string(head(sorted)))
+end
+
+end

@@ -127,7 +127,12 @@ type lambda_info = {
   lam_fn           : Tir.fn_def;           (* the original fn_def inside ELetRec *)
   lam_fvs          : (string * Tir.ty) list;  (* free variables, sorted by name *)
   lam_is_recursive : bool;                 (* body refers to fn's own name *)
+  lam_uid          : int;                  (* globally unique id — used to disambiguate
+                                              multiple lambdas with the same fn_name *)
 }
+
+let lambda_counter : int ref = ref 0
+let fresh_lambda_uid () = let n = !lambda_counter in incr lambda_counter; n
 
 (** Collect all lambdas from all top-level fn bodies. *)
 let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info list =
@@ -150,7 +155,8 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
                 then free_vars_of_expr top_level fn.Tir.fn_body
                        (self_var :: fn.Tir.fn_params)
                 else fvs_raw in
-      lambdas := { lam_fn = fn; lam_fvs = fvs; lam_is_recursive = is_recursive } :: !lambdas;
+      lambdas := { lam_fn = fn; lam_fvs = fvs; lam_is_recursive = is_recursive;
+                   lam_uid = fresh_lambda_uid () } :: !lambdas;
       (* Recurse into the lambda body too *)
       collect_expr fn.Tir.fn_body
     | Tir.ELetRec (fns, body) ->
@@ -180,8 +186,8 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
 let lift_lambda (lam : lambda_info) : Tir.type_def * Tir.fn_def =
   let fn = lam.lam_fn in
   let fvs = lam.lam_fvs in
-  let clo_name = "$Clo_" ^ fn.Tir.fn_name in
-  let apply_name = fn.Tir.fn_name ^ "$apply" in
+  let clo_name = Printf.sprintf "$Clo_%s$%d" fn.Tir.fn_name lam.lam_uid in
+  let apply_name = Printf.sprintf "%s$apply$%d" fn.Tir.fn_name lam.lam_uid in
   (* TDClosure struct: [fn_ptr: TPtr(TUnit), fv0_ty, fv1_ty, ...] *)
   let td = Tir.TDClosure (clo_name, Tir.TPtr Tir.TUnit :: List.map snd fvs) in
   (* $clo parameter — opaque pointer to the closure struct itself *)
@@ -230,16 +236,23 @@ let rewrite_expr (known_lambdas : (string * lambda_info) list)
     (* A. Lambda creation site *)
     | Tir.ELetRec ([fn], Tir.EAtom (Tir.AVar ref_var))
       when fn.Tir.fn_name = ref_var.Tir.v_name ->
-      (match List.assoc_opt fn.Tir.fn_name known_lambdas with
-       | Some lam ->
-         let apply_name = fn.Tir.fn_name ^ "$apply" in
+      (* Use physical equality to match the exact fn_def collected during phase 1.
+         This avoids confusing two inner functions with the same user-visible name
+         (e.g. multiple modules defining [fn go] — one in stdlib/list.march and
+         another in a user file).  The collect phase stores lam_fn = fn (the
+         actual OCaml value from the ELetRec), so [lam.lam_fn == fn] is true
+         only for the lambda that was collected from THIS exact ELetRec node. *)
+      (match List.find_opt (fun (_, lam) -> lam.lam_fn == fn) known_lambdas with
+       | Some (_, lam) ->
+         let apply_name = Printf.sprintf "%s$apply$%d" fn.Tir.fn_name lam.lam_uid in
          let fn_ptr_atom = Tir.AVar { Tir.v_name = apply_name;
                                        v_ty = Tir.TPtr Tir.TUnit;
                                        v_lin = Tir.Unr } in
          let fv_atoms = List.map (fun (name, ty) ->
              Tir.AVar { Tir.v_name = name; v_ty = ty; v_lin = Tir.Unr }
            ) lam.lam_fvs in
-         Tir.EAlloc (Tir.TCon ("$Clo_" ^ fn.Tir.fn_name, []), fn_ptr_atom :: fv_atoms)
+         let clo_name = Printf.sprintf "$Clo_%s$%d" fn.Tir.fn_name lam.lam_uid in
+         Tir.EAlloc (Tir.TCon (clo_name, []), fn_ptr_atom :: fv_atoms)
        | None ->
          (* Not a known lambda — rewrite children *)
          Tir.ELetRec ([{ fn with Tir.fn_body = rw fn.Tir.fn_body }],

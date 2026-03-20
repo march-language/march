@@ -370,56 +370,149 @@ and lower_expr (e : Ast.expr) : Tir.expr =
 
 (* ── Match lowering ─────────────────────────────────────────────── *)
 
-(** Lower match branches to [ECase].
-    - Constructor patterns → branches with bound variables
-    - Literal patterns → branches with tag = string representation
-    - Wildcard/var patterns → default arm
-    - PatVar default arms: wraps body in [ELet] binding the scrutinee to the variable name
-    - Guards: not yet supported (failwith if encountered) *)
+(** True if [pat] matches everything without discriminating (wildcard / var / as-var). *)
+and is_trivial_pat : Ast.pattern -> bool = function
+  | Ast.PatWild _ | Ast.PatVar _ -> true
+  | Ast.PatAs (p, _, _) -> is_trivial_pat p
+  | _ -> false
+
+(** Wrap [body] with bindings from a trivial pattern on [scrut].
+    Handles PatVar (bind), PatWild (no-op), PatAs (bind outer name + recurse). *)
+and bind_trivial_pat (scrut : Tir.atom) (pat : Ast.pattern) (body : Tir.expr) : Tir.expr =
+  match pat with
+  | Ast.PatWild _ -> body
+  | Ast.PatVar n ->
+    let v : Tir.var = { v_name = n.txt; v_ty = unknown_ty; v_lin = Tir.Unr } in
+    Tir.ELet (v, Tir.EAtom scrut, body)
+  | Ast.PatAs (inner, n, _) ->
+    let v : Tir.var = { v_name = n.txt; v_ty = unknown_ty; v_lin = Tir.Unr } in
+    let named_body = Tir.ELet (v, Tir.EAtom scrut, body) in
+    bind_trivial_pat scrut inner named_body
+  | _ -> body
+
+(** Return the string tag and sub-pattern list for a pattern that discriminates.
+    PatCon → (tag, subs); PatTuple → ("$Tuple", subs); PatLit → (repr, []).
+    Returns None for trivial patterns. *)
+and pat_tag_and_subs (pat : Ast.pattern) : (string * Ast.pattern list) option =
+  match pat with
+  | Ast.PatCon ({ txt = tag; _ }, subs) -> Some (tag, subs)
+  | Ast.PatTuple (subs, _) ->
+    Some (Printf.sprintf "$Tuple%d" (List.length subs), subs)
+  | Ast.PatLit (Ast.LitInt n, _)    -> Some (string_of_int n, [])
+  | Ast.PatLit (Ast.LitBool b, _)   -> Some (string_of_bool b, [])
+  | Ast.PatLit (Ast.LitString s, _) -> Some ("\"" ^ s ^ "\"", [])
+  | Ast.PatLit (Ast.LitAtom a, _)   -> Some (":" ^ a, [])
+  | _ -> None
+
+(** Compile a pattern matrix to a TIR expression (decision tree).
+
+    [scruts]   — list of TIR atoms currently under scrutiny (one per column).
+    [rows]     — list of (pattern list, body): each pattern list has exactly
+                 one element per scrutinee.  Rows are tried top-to-bottom; the
+                 first matching row wins.
+    [fallback] — optional expression used when no row matches (non-exhaustive). *)
+and compile_matrix
+    (scruts   : Tir.atom list)
+    (rows     : (Ast.pattern list * Tir.expr) list)
+    (fallback : Tir.expr option)
+  : Tir.expr =
+  match rows with
+  | [] ->
+    (match fallback with Some f -> f | None -> Tir.EAtom (Tir.ALit (Ast.LitInt 0)))
+  | ([], body) :: _ -> body   (* zero scrutinees remaining → first row wins *)
+  | _ ->
+    match scruts with
+    | [] ->
+      (match rows with (_, body) :: _ -> body | [] ->
+        (match fallback with Some f -> f | None -> Tir.EAtom (Tir.ALit (Ast.LitInt 0))))
+    | scrut :: rest_scruts ->
+      (* Split rows into a front block of non-trivial first-column rows and
+         a (possibly empty) suffix starting at the first trivial first-column
+         row.  The suffix becomes the default for all ECase branches. *)
+      let rec split_at_trivial acc = function
+        | [] -> (List.rev acc, [])
+        | ((fp :: _), _) as row :: rest ->
+          if is_trivial_pat fp then (List.rev acc, row :: rest)
+          else split_at_trivial (row :: acc) rest
+        | rows -> (List.rev acc, rows)  (* empty pattern list — treat as trivial *)
+      in
+      let (ctor_rows, default_rows) = split_at_trivial [] rows in
+
+      (* Build the fallback expression for rows at and after the first trivial row. *)
+      let default =
+        match default_rows with
+        | [] -> fallback
+        | (fp :: rest_pats, body) :: more ->
+          (* Bind the trivial first-column pattern on [scrut], then continue
+             matching remaining columns (rest_scruts) with remaining patterns
+             (rest_pats).  Any further rows (more) become the inner fallback. *)
+          let inner_fb = compile_matrix (scrut :: rest_scruts) more fallback in
+          let body_with_bindings = bind_trivial_pat scrut fp body in
+          (* If there are more columns, we still need to compile them.
+             For the trivial row itself, the remaining columns are rest_pats
+             matched against rest_scruts. *)
+          let full_body =
+            if rest_pats = [] || rest_scruts = [] then body_with_bindings
+            else
+              let inner_rows = [(rest_pats, body_with_bindings)] in
+              compile_matrix rest_scruts inner_rows (Some inner_fb)
+          in
+          (* The full default also handles any subsequent trivial rows via inner_fb *)
+          let _ = inner_fb in   (* inner_fb used above only as compile_matrix fallback *)
+          Some full_body
+        | ([], body) :: _ -> Some body
+      in
+
+      (* Group non-trivial ctor_rows by their first-column tag, preserving order. *)
+      (* tag_groups: assoc list of (tag, (arity, rows_rev ref)) *)
+      let tag_groups : (string * (int * (Ast.pattern list * Tir.expr) list ref)) list ref
+          = ref [] in
+      List.iter (fun (pats, body) ->
+          match pats with
+          | fp :: rest_pats ->
+            (match pat_tag_and_subs fp with
+             | None -> ()   (* trivial — should not appear here *)
+             | Some (tag, subs) ->
+               let arity = List.length subs in
+               let row_entry = (subs @ rest_pats, body) in
+               (match List.assoc_opt tag !tag_groups with
+                | Some (_, rows_ref) -> rows_ref := !rows_ref @ [row_entry]
+                | None ->
+                  tag_groups := !tag_groups @ [(tag, (arity, ref [row_entry]))]))
+          | [] -> ()
+        ) ctor_rows;
+
+      (* For each tag group, compile sub-pattern rows recursively. *)
+      let tir_branches =
+        List.filter_map (fun (tag, (arity, rows_ref)) ->
+            let sub_vars = List.init arity (fun _ ->
+                { Tir.v_name = fresh_name "f"; v_ty = unknown_ty; v_lin = Tir.Unr }
+              ) in
+            let sub_atoms = List.map (fun v -> Tir.AVar v) sub_vars in
+            let combined_scruts = sub_atoms @ rest_scruts in
+            let branch_body =
+              compile_matrix combined_scruts !rows_ref default
+            in
+            Some { Tir.br_tag = tag; br_vars = sub_vars; br_body = branch_body }
+          ) !tag_groups
+      in
+
+      (* If there are no ECase branches (all rows were trivial), the default
+         already covers everything — just return it. *)
+      if tir_branches = [] then
+        (match default with Some d -> d | None -> Tir.EAtom (Tir.ALit (Ast.LitInt 0)))
+      else
+        Tir.ECase (scrut, tir_branches, default)
+
+(** Lower a single-scrutinee match to a TIR decision tree. *)
 and lower_match (scrut : Tir.atom) (branches : Ast.branch list) : Tir.expr =
-  (* Check for guards — not supported yet *)
   List.iter (fun (br : Ast.branch) ->
       match br.branch_guard with
       | Some _ -> failwith "TIR lower: match guards are not yet supported"
       | None -> ()
     ) branches;
-  let tir_branches = List.filter_map (fun (br : Ast.branch) ->
-      match br.branch_pat with
-      | Ast.PatCon ({ txt = tag; _ }, sub_pats) ->
-        let vars = List.map (fun pat ->
-            let name = match pat with
-              | Ast.PatVar n -> n.txt
-              | Ast.PatWild _ -> fresh_name "w"
-              | _ -> fresh_name "p"
-            in
-            { Tir.v_name = name; v_ty = unknown_ty; v_lin = Tir.Unr }
-          ) sub_pats in
-        Some { Tir.br_tag = tag; br_vars = vars; br_body = lower_expr br.branch_body }
-      | Ast.PatLit (Ast.LitInt n, _) ->
-        Some { Tir.br_tag = string_of_int n; br_vars = [];
-               br_body = lower_expr br.branch_body }
-      | Ast.PatLit (Ast.LitBool b, _) ->
-        Some { Tir.br_tag = string_of_bool b; br_vars = [];
-               br_body = lower_expr br.branch_body }
-      | Ast.PatLit (Ast.LitString s, _) ->
-        Some { Tir.br_tag = "\"" ^ s ^ "\""; br_vars = [];
-               br_body = lower_expr br.branch_body }
-      | Ast.PatLit (Ast.LitAtom a, _) ->
-        Some { Tir.br_tag = ":" ^ a; br_vars = [];
-               br_body = lower_expr br.branch_body }
-      | _ -> None
-    ) branches in
-  (* Default arm: wildcard or var pattern *)
-  let default = List.find_map (fun (br : Ast.branch) ->
-      match br.branch_pat with
-      | Ast.PatWild _ -> Some (lower_expr br.branch_body)
-      | Ast.PatVar n ->
-        (* Bind the scrutinee to the variable name so the body can use it *)
-        let v : Tir.var = { v_name = n.txt; v_ty = unknown_ty; v_lin = Tir.Unr } in
-        Some (Tir.ELet (v, Tir.EAtom scrut, lower_expr br.branch_body))
-      | _ -> None
-    ) branches in
-  Tir.ECase (scrut, tir_branches, default)
+  let rows = List.map (fun (br : Ast.branch) -> ([br.branch_pat], lower_expr br.branch_body)) branches in
+  compile_matrix [scrut] rows None
 
 (* ── TIR renaming ───────────────────────────────────────────────── *)
 

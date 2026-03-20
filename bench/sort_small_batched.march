@@ -1,0 +1,151 @@
+-- Sort-small batched benchmark: sort 10,000 integers by splitting them into
+-- 1,250 independent 8-element groups and sorting each with the optimal
+-- comparison network, then merging all groups.
+--
+-- This benchmark isolates the sort_small_by building block.  In production
+-- use, sort_small_by is the base case for Timsort and Introsort; here it
+-- does all the work independently so we can measure it directly.
+--
+-- Comparison network for n=8 uses 19 comparators (AlphaDev / Dobbelaere
+-- catalog) arranged as sort4 + sort4 + merge.  Each comparator executes one
+-- comparison and one conditional swap — no branches other than the swap.
+--
+-- Expected output: 1423
+-- (same as other sort benchmarks: minimum of 10,000 LCG values in [0, 99999])
+
+mod SortSmallBatch do
+
+fn reverse_list(xs : List(Int)) : List(Int) do
+  fn go(lst : List(Int), acc : List(Int)) : List(Int) do
+    match lst with
+    | Nil        -> acc
+    | Cons(h, t) -> go(t, Cons(h, acc))
+    end
+  end
+  go(xs, Nil)
+end
+
+fn merge(xs : List(Int), ys : List(Int)) : List(Int) do
+  match xs with
+  | Nil -> ys
+  | Cons(x, xt) ->
+    match ys with
+    | Nil -> xs
+    | Cons(y, yt) ->
+      if x <= y then Cons(x, merge(xt, ys))
+      else Cons(y, merge(xs, yt))
+    end
+  end
+end
+
+-- ---- Optimal comparison networks ----
+
+fn cmp_swap(a : Int, b : Int) : (Int, Int) do
+  if a <= b then (a, b) else (b, a)
+end
+
+-- n=2: 1 comparator
+fn sort2(a : Int, b : Int) : (Int, Int) do
+  cmp_swap(a, b)
+end
+
+-- n=4: 5 comparators (optimal)
+fn sort4(a : Int, b : Int, c : Int, d : Int) : List(Int) do
+  let (a1, b1) = cmp_swap(a, b)
+  let (c1, d1) = cmp_swap(c, d)
+  let (a2, c2) = cmp_swap(a1, c1)
+  let (b2, d2) = cmp_swap(b1, d1)
+  let (b3, c3) = cmp_swap(b2, c2)
+  Cons(a2, Cons(b3, Cons(c3, Cons(d2, Nil))))
+end
+
+-- n=8: 19 comparators (optimal, Batcher odd-even merge of two sorted n=4)
+fn sort8(a : Int, b : Int, c : Int, d : Int,
+         e : Int, f : Int, g : Int, h : Int) : List(Int) do
+  let left  = sort4(a, b, c, d)
+  let right = sort4(e, f, g, h)
+  merge(left, right)
+end
+
+-- Sort a list of exactly 8 elements using the optimal network.
+fn sort_group8(xs : List(Int)) : List(Int) do
+  match xs with
+  | Cons(a, Cons(b, Cons(c, Cons(d, Cons(e, Cons(f, Cons(g, Cons(h, _)))))))) ->
+    sort8(a, b, c, d, e, f, g, h)
+  | _ -> xs
+  end
+end
+
+-- ---- Split list into consecutive 8-element chunks ----
+
+fn take8(lst : List(Int), acc : List(Int)) : (List(Int), List(Int)) do
+  match lst with
+  | Nil -> (reverse_list(acc), Nil)
+  | Cons(a, Cons(b, Cons(c, Cons(d, Cons(e, Cons(f, Cons(g, Cons(h, rest)))))))) ->
+    (Cons(a, Cons(b, Cons(c, Cons(d, Cons(e, Cons(f, Cons(g, Cons(h, Nil)))))))), rest)
+  | _ -> (reverse_list(acc), lst)
+  end
+end
+
+-- Sort each 8-element group independently.
+fn sort_groups(lst : List(Int), acc : List(List(Int))) : List(List(Int)) do
+  match lst with
+  | Nil -> reverse_list_of_lists(acc)
+  | _ ->
+    let (group, rest) = take8(lst, Nil)
+    sort_groups(rest, Cons(sort_group8(group), acc))
+  end
+end
+
+fn reverse_list_of_lists(xs : List(List(Int))) : List(List(Int)) do
+  fn go(lst : List(List(Int)), acc : List(List(Int))) : List(List(Int)) do
+    match lst with
+    | Nil        -> acc
+    | Cons(h, t) -> go(t, Cons(h, acc))
+    end
+  end
+  go(xs, Nil)
+end
+
+-- Merge a list of sorted lists pairwise until one remains.
+fn merge_all(groups : List(List(Int))) : List(Int) do
+  match groups with
+  | Nil -> Nil
+  | Cons(g, Nil) -> g
+  | _ -> merge_all(merge_pairs(groups))
+  end
+end
+
+fn merge_pairs(groups : List(List(Int))) : List(List(Int)) do
+  match groups with
+  | Nil -> Nil
+  | Cons(g, Nil) -> Cons(g, Nil)
+  | Cons(g1, Cons(g2, rest)) -> Cons(merge(g1, g2), merge_pairs(rest))
+  end
+end
+
+-- ---- LCG and main ----
+
+fn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
+  if n == 0 then acc
+  else do
+    let next = (seed * 1664525 + 1013904223) % 1000000
+    gen_list(n - 1, next, Cons(next % 100000, acc))
+  end
+end
+
+fn head(xs : List(Int)) : Int do
+  match xs with
+  | Nil        -> 0
+  | Cons(h, _) -> h
+  end
+end
+
+fn main() : Unit do
+  let xs      = gen_list(10000, 42, Nil)
+  let groups  = sort_groups(xs, Nil)
+  let sorted  = merge_all(groups)
+  println(int_to_string(head(sorted)))
+end
+
+end

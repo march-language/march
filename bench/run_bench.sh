@@ -470,6 +470,45 @@ func main() {
 EOF
 
 # ============================================================================
+# SORT SOURCE: sort 10k pseudo-random ints (LCG seed=42, same as March benchmarks)
+# ============================================================================
+
+# --- C (qsort) ---------------------------------------------------------------
+cat > "$TMP/sort.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+static int cmp_int(const void *a, const void *b) {
+    int x = *(const int *)a, y = *(const int *)b;
+    return (x > y) - (x < y);
+}
+int main(void) {
+    int n = 10000, arr[10000];
+    long long seed = 42;
+    for (int i = 0; i < n; i++) {
+        seed = (seed * 1664525LL + 1013904223LL) % 1000000LL;
+        arr[i] = (int)(seed % 100000);
+    }
+    qsort(arr, n, sizeof(int), cmp_int);
+    printf("%d\n", arr[0]);
+    return 0;
+}
+EOF
+
+# --- OCaml (List.sort) -------------------------------------------------------
+cat > "$TMP/sort.ml" <<'EOF'
+let () =
+  let rec gen n seed acc =
+    if n = 0 then acc
+    else
+      let next = (seed * 1664525 + 1013904223) mod 1000000 in
+      gen (n - 1) next (next mod 100000 :: acc)
+  in
+  let xs = gen 10000 42 [] in
+  let sorted = List.sort compare xs in
+  Printf.printf "%d\n" (List.hd sorted)
+EOF
+
+# ============================================================================
 # COMPILE
 # ============================================================================
 bold "Compiling..."
@@ -482,33 +521,45 @@ DUNE=/Users/80197052/.opam/march/bin/dune
 (cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/list_ops.march        -o "$TMP/march_lo"  2>/dev/null)
 (cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/string_build.march    -o "$TMP/march_sb"  2>/dev/null)
 (cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/string_pipeline.march -o "$TMP/march_sp"  2>/dev/null)
+# March sorting algorithms
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/timsort.march          -o "$TMP/march_timsort"   2>/dev/null) || true
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/introsort.march        -o "$TMP/march_introsort" 2>/dev/null) || true
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/heapsort.march         -o "$TMP/march_heapsort"  2>/dev/null) || true
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/mergesort.march        -o "$TMP/march_mergesort" 2>/dev/null) || true
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/alphadev_sort.march    -o "$TMP/march_alphadev"  2>/dev/null) || true
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/insertion_sort.march   -o "$TMP/march_insertion" 2>/dev/null) || true
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/sort_small_batched.march -o "$TMP/march_sortsmall" 2>/dev/null) || true
+(cd "$REPO_ROOT" && "$DUNE" exec march -- --compile --opt 2 bench/sort_nearly_sorted.march -o "$TMP/march_sortns"    2>/dev/null) || true
 
 # C
 if has clang; then
-  clang -O2 -o "$TMP/c_fib" "$TMP/fib.c"
-  clang -O2 -o "$TMP/c_bt"  "$TMP/bt.c"
-  clang -O2 -o "$TMP/c_tt"  "$TMP/tt.c"
-  clang -O2 -o "$TMP/c_lo"  "$TMP/lo.c"
-  clang -O2 -o "$TMP/c_sb"  "$TMP/sb.c"
-  clang -O2 -o "$TMP/c_sp"  "$TMP/sp.c"
+  clang -O2 -o "$TMP/c_fib"  "$TMP/fib.c"
+  clang -O2 -o "$TMP/c_bt"   "$TMP/bt.c"
+  clang -O2 -o "$TMP/c_tt"   "$TMP/tt.c"
+  clang -O2 -o "$TMP/c_lo"   "$TMP/lo.c"
+  clang -O2 -o "$TMP/c_sb"   "$TMP/sb.c"
+  clang -O2 -o "$TMP/c_sp"   "$TMP/sp.c"
+  clang -O2 -o "$TMP/c_sort" "$TMP/sort.c"
 fi
 
 # OCaml
 OCAMLOPT=/Users/80197052/.opam/march/bin/ocamlopt
 if [ -x "$OCAMLOPT" ]; then
-  "$OCAMLOPT" "$TMP/fib.ml" -o "$TMP/ocaml_fib" 2>/dev/null
-  "$OCAMLOPT" "$TMP/bt.ml"  -o "$TMP/ocaml_bt"  2>/dev/null
-  "$OCAMLOPT" "$TMP/tt.ml"  -o "$TMP/ocaml_tt"  2>/dev/null
-  "$OCAMLOPT" "$TMP/lo.ml"  -o "$TMP/ocaml_lo"  2>/dev/null
-  "$OCAMLOPT" "$TMP/sb.ml"  -o "$TMP/ocaml_sb"  2>/dev/null
-  "$OCAMLOPT" "$TMP/sp.ml"  -o "$TMP/ocaml_sp"  2>/dev/null
+  "$OCAMLOPT" "$TMP/fib.ml"  -o "$TMP/ocaml_fib"  2>/dev/null
+  "$OCAMLOPT" "$TMP/bt.ml"   -o "$TMP/ocaml_bt"   2>/dev/null
+  "$OCAMLOPT" "$TMP/tt.ml"   -o "$TMP/ocaml_tt"   2>/dev/null
+  "$OCAMLOPT" "$TMP/lo.ml"   -o "$TMP/ocaml_lo"   2>/dev/null
+  "$OCAMLOPT" "$TMP/sb.ml"   -o "$TMP/ocaml_sb"   2>/dev/null
+  "$OCAMLOPT" "$TMP/sp.ml"   -o "$TMP/ocaml_sp"   2>/dev/null
+  "$OCAMLOPT" "$TMP/sort.ml" -o "$TMP/ocaml_sort" 2>/dev/null
 elif has ocamlopt; then
-  ocamlopt "$TMP/fib.ml" -o "$TMP/ocaml_fib" 2>/dev/null
-  ocamlopt "$TMP/bt.ml"  -o "$TMP/ocaml_bt"  2>/dev/null
-  ocamlopt "$TMP/tt.ml"  -o "$TMP/ocaml_tt"  2>/dev/null
-  ocamlopt "$TMP/lo.ml"  -o "$TMP/ocaml_lo"  2>/dev/null
-  ocamlopt "$TMP/sb.ml"  -o "$TMP/ocaml_sb"  2>/dev/null
-  ocamlopt "$TMP/sp.ml"  -o "$TMP/ocaml_sp"  2>/dev/null
+  ocamlopt "$TMP/fib.ml"  -o "$TMP/ocaml_fib"  2>/dev/null
+  ocamlopt "$TMP/bt.ml"   -o "$TMP/ocaml_bt"   2>/dev/null
+  ocamlopt "$TMP/tt.ml"   -o "$TMP/ocaml_tt"   2>/dev/null
+  ocamlopt "$TMP/lo.ml"   -o "$TMP/ocaml_lo"   2>/dev/null
+  ocamlopt "$TMP/sb.ml"   -o "$TMP/ocaml_sb"   2>/dev/null
+  ocamlopt "$TMP/sp.ml"   -o "$TMP/ocaml_sp"   2>/dev/null
+  ocamlopt "$TMP/sort.ml" -o "$TMP/ocaml_sort" 2>/dev/null
 fi
 
 # Rust
@@ -626,5 +677,42 @@ run_if      "$TMP/ocaml_sp" "OCaml"
 run_if_interp python3 "$TMP/sp.py" "Python"
 run_if      "$TMP/rust_sp"  "Rust"
 run_if      "$TMP/go_sp"    "Go"
+
+echo ""
+bold "═══ sort: 10k random integers (LCG seed=42) ═══"
+printf '  All algorithms sort the same 10k pseudorandom integers.\n'
+printf '  C qsort and OCaml List.sort are array/stdlib baselines.\n'
+printf '  %-18s %-12s %s\n' "Algorithm" "Time" "Notes"
+printf '  %-18s %-12s %s\n' "---------" "----" "-----"
+run_if "$TMP/march_timsort"   "M:timsort"
+run_if "$TMP/march_introsort" "M:introsort"
+run_if "$TMP/march_heapsort"  "M:heapsort"
+run_if "$TMP/march_mergesort" "M:mergesort"
+run_if "$TMP/march_alphadev"  "M:alphadev"
+run_if "$TMP/c_sort"          "C:qsort"
+run_if "$TMP/ocaml_sort"      "OCaml:sort"
+
+echo ""
+bold "═══ sort: insertion sort, 2k integers (O(n²) base case study) ═══"
+printf '  n=2000 to avoid O(n²) wall time. Used as base case in Timsort/Introsort (n≤16).\n'
+printf '  %-18s %-12s\n' "Algorithm" "Time"
+printf '  %-18s %-12s\n' "---------" "----"
+run_if "$TMP/march_insertion" "M:insertion"
+
+echo ""
+bold "═══ sort: comparison networks batched, 1250×8 groups ═══"
+printf '  1250 independent sorts of 8 elements using 19-comparator AlphaDev network.\n'
+printf '  Pairwise merge collapses to sorted output of 10k integers.\n'
+printf '  %-18s %-12s\n' "Algorithm" "Time"
+printf '  %-18s %-12s\n' "---------" "----"
+run_if "$TMP/march_sortsmall" "M:sort-small"
+
+echo ""
+bold "═══ sort: nearly-sorted, Timsort vs Mergesort (5000 pairs) ═══"
+printf '  Input: [0,1,2,3,...,9999] as 5000 adjacent pairs — heavy run structure.\n'
+printf '  Timsort harvests runs in O(n); Mergesort is blind to order.\n'
+printf '  %-18s %-12s\n' "Algorithm" "Time"
+printf '  %-18s %-12s\n' "---------" "----"
+run_if "$TMP/march_sortns" "M:sort-ns"
 
 echo ""
