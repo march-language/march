@@ -17,16 +17,24 @@ mod ResourceDemo do
     run_until_idle()
 
     println("Worker spawned, pid = " ++ to_string(pid))
-    println("Registering cleanup resource...")
+
+    send(pid, Work())
+    run_until_idle()
+
+    println("Registering cleanup resources (reverse-order demo)...")
     register_resource(pid, "worker_connection",
       fn _ ->
-        println("[Cleanup] worker_connection released (pid was " ++ to_string(pid) ++ ")")
+        println("[Cleanup 1] worker_connection released (registered first, cleaned last)")
+    )
+    register_resource(pid, "worker_log",
+      fn _ ->
+        println("[Cleanup 2] worker_log flushed (registered second, cleaned first)")
     )
 
     println("Crashing worker...")
     kill(pid)
     println("Worker alive: " ++ to_string(is_alive(pid)))
-    println("(Cleanup should have run above, before this line)")
+    println("(Cleanup 2 ran before Cleanup 1 — reverse acquisition order)")
 
     println("=== Done ===")
   end

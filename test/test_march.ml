@@ -4537,9 +4537,11 @@ let test_resource_cleanup_reverse_order () =
   March_eval.Eval.register_resource_ocaml 0 "third"
     (fun () -> order := "third" :: !order);
   March_eval.Eval.crash_actor 0 "test";
-  (* Cleanup should be: third, second, first (reverse acquisition) *)
+  (* Cleanup executes in reverse acquisition order: third first, second second, first last.
+     Each thunk does (order := name :: !order), so the accumulated list is in execution-reversed
+     order. Execution order third→second→first gives list ["first"; "second"; "third"]. *)
   Alcotest.(check (list string)) "reverse cleanup order"
-    ["third"; "second"; "first"] !order
+    ["first"; "second"; "third"] !order
 
 (** Phase 6a: resources of linked actor are also cleaned on link propagation. *)
 let test_resource_cleanup_on_link_crash () =

@@ -714,7 +714,7 @@ and crash_actor (pid : int) (reason : string) : unit =
       with exn ->
         Printf.eprintf "warn: resource cleanup failed for actor %d: %s\n"
           pid (Printexc.to_string exn)
-    ) inst.ai_resources;
+    ) (List.rev inst.ai_resources);
     inst.ai_resources <- [];  (* clear so cleanup doesn't re-run on double-crash *)
     (* Deliver Down(mon_ref, reason) to each watcher's mailbox *)
     List.iter (fun (mon_ref, watcher_pid) ->
