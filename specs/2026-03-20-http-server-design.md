@@ -14,6 +14,7 @@ Build an HTTP/1.1 server into March's stdlib. Inspired by Plug/Bandit/Phoenix:
 - **Routing is pattern matching** — `match (conn.method, conn.path_info)`. No DSL, no macros, no framework. Just the language.
 - **Concurrent by default** — each accepted connection spawns an OS thread (OCaml 5 `Thread.create`). Blocking I/O releases the domain lock, so threads waiting on `tcp_recv`/`tcp_send` don't block other connections. Like Bandit spawning an Erlang process per connection.
 - **Crash isolation without try/catch** — each connection thread has its own execution context. If a handler crashes, the thread catches it at the runtime level (OCaml, not March), sends a 500, closes the fd. Other connections and the accept loop are unaffected.
+- **Supervised connections** — the accept loop tracks all live connection threads. Enforces max connections, idle timeouts, and graceful shutdown. Like Bandit's `DynamicSupervisor` over connection processes, but using an atomic counter + socket timeouts instead of OTP supervision trees.
 - **Capabilities thread through closures** — handlers capture only the caps they need. The type signature is the security audit.
 
 ## Non-Goals (v1)
@@ -30,32 +31,52 @@ Build an HTTP/1.1 server into March's stdlib. Inspired by Plug/Bandit/Phoenix:
 
 ## Architecture
 
-Like Bandit: the accept loop runs in the main thread, each connection gets its own OS thread.
+Like Bandit: the accept loop runs in the main thread, each connection gets its own OS thread. Unlike fire-and-forget threading, the accept loop **supervises** all spawned threads — tracking active connections, enforcing limits, and supporting graceful shutdown.
 
 ```
 HttpServer.listen(server)           -- builtin, implemented in OCaml
   │
   ├── tcp_listen(port)              -- bind + listen
+  ├── Install SIGTERM handler       -- sets shutdown flag
   │
   └── Accept Loop (OCaml, main thread)
         │
+        ├── State:
+        │     active : Atomic.t int     -- live connection count
+        │     shutdown : Atomic.t bool  -- graceful shutdown flag
+        │     max_conns : int           -- from Server config
+        │     idle_timeout : float      -- from Server config
+        │
+        ├── Unix.select [listen_fd] [] [] 1.0   -- 1s timeout for shutdown checks
+        │
+        ├── if shutdown → stop accepting, drain active connections, exit
+        │
+        ├── if active >= max_conns → accept, send 503, close (shed load)
+        │
         ├── Unix.accept → client_fd
+        │     ├── setsockopt SO_RCVTIMEO idle_timeout
+        │     └── setsockopt SO_SNDTIMEO idle_timeout
+        │
+        ├── Atomic.incr active
         │
         ├── Thread.create → connection thread
         │     │
         │     ├── tcp_recv_http(fd)         -- blocks; releases domain lock
+        │     │     └── timeout → close fd (idle client)
         │     ├── http_parse_request(raw)
         │     ├── build Conn
         │     ├── eval March pipeline       -- run_pipeline(conn, plugs)
         │     ├── write_response(fd, conn)
         │     └── tcp_close(fd)
         │     │
-        │     └── On crash: catch Eval_error → send 500 → close fd
+        │     ├── On crash: catch Eval_error → send 500 → close fd
+        │     ├── On timeout: catch Unix_error(EAGAIN) → close fd
+        │     └── finally: Atomic.decr active  -- ALWAYS runs
         │
         └── (loop immediately accepts next connection)
 ```
 
-The accept loop never waits for handlers to finish. While one handler is blocked reading a request body, other connections are being accepted and processed. This is the same model as Bandit's connection process spawning.
+The accept loop never waits for handlers to finish. While one handler is blocked reading a request body, other connections are being accepted and processed. This is the same model as Bandit's connection process spawning, with the supervision of ThousandIsland's `ConnectionsSupervisor`.
 
 ## The Conn Type
 
@@ -195,29 +216,45 @@ Once `send_resp` is called, the conn is halted and subsequent plugs are skipped.
 
 ```march
 HttpServer.new(4000)
+|> HttpServer.max_connections(500)
+|> HttpServer.idle_timeout(30)
 |> HttpServer.plug(log_plug)
 |> HttpServer.plug(auth_plug(auth_cap))
 |> HttpServer.plug(router)
 |> HttpServer.listen()
 ```
 
-`HttpServer.new` creates a server config. Each `plug` appends to the pipeline. `listen` starts the accept loop. The pipe order IS the execution order — first plug runs first.
+`HttpServer.new` creates a server config with defaults (1000 max connections, 60s idle timeout). `max_connections` and `idle_timeout` configure supervision. Each `plug` appends to the pipeline. `listen` starts the supervised accept loop. The pipe order IS the execution order — first plug runs first.
 
 ### The Server Config Type
 
 ```march
 type Server = Server(
-  Int,            -- port
-  List(Conn -> Conn)  -- pipeline (list of plugs)
+  Int,                -- port
+  List(Conn -> Conn), -- pipeline (list of plugs)
+  Int,                -- max_connections (default 1000)
+  Int                 -- idle_timeout_secs (default 60)
 )
 
 pub fn new(port) do
-  Server(port, Nil)
+  Server(port, Nil, 1000, 60)
 end
 
 pub fn plug(server, p) do
   match server with
-  | Server(port, plugs) -> Server(port, append(plugs, Cons(p, Nil)))
+  | Server(port, plugs, mc, it) -> Server(port, append(plugs, Cons(p, Nil)), mc, it)
+  end
+end
+
+pub fn max_connections(server, n) do
+  match server with
+  | Server(port, plugs, _, it) -> Server(port, plugs, n, it)
+  end
+end
+
+pub fn idle_timeout(server, secs) do
+  match server with
+  | Server(port, plugs, mc, _) -> Server(port, plugs, mc, secs)
   end
 end
 ```
@@ -297,29 +334,130 @@ Each thread runs this sequence (implemented in OCaml inside `eval.ml`):
 
 Steps 1 and 7 release the domain lock while blocked on I/O. Other threads make progress during these waits. Step 4 (running March code) holds the domain lock, but HTTP handlers are typically fast — the bottleneck is I/O, not computation.
 
-### Crash Recovery
+### Supervision
 
-Each thread wraps steps 1-8 in an OCaml-level `try ... with`:
+#### How Bandit/Phoenix Does It (for reference)
+
+Bandit runs on ThousandIsland, which structures connections as a supervision tree:
+
+```
+ThousandIsland.Supervisor
+  ├── Listener (GenServer — owns listen socket)
+  ├── AcceptorPoolSupervisor
+  │     └── N Acceptors (default 100, each calls :gen_tcp.accept)
+  └── ConnectionsSupervisor (DynamicSupervisor)
+        ├── Connection Process 1
+        ├── Connection Process 2
+        └── ...
+```
+
+Each connection is a **supervised process** under `DynamicSupervisor`. If a connection crashes, the supervisor cleans up — no resource leak. The supervisor tracks all live connections, enabling graceful shutdown (drain in-flight, refuse new), max connection enforcement, and idle timeouts.
+
+#### How March Does It
+
+We don't have OTP supervision trees, but we get the same properties with simpler machinery: an `Atomic.t` counter, socket timeouts, and a shutdown flag. The accept loop IS the supervisor.
+
+**Crash recovery** — each thread wraps the full request lifecycle in OCaml-level `try ... with`. The `finally` block always decrements the active counter, even on crash:
 
 ```ocaml
-let connection_thread client_fd pipeline env =
-  try
-    (* steps 1-8 above *)
-    handle_connection client_fd pipeline env
-  with
-  | Eval_error msg ->
-    (* Handler crashed — send 500, log, close *)
-    send_500_response client_fd;
-    Unix.close client_fd;
-    Printf.eprintf "Handler crash: %s\n%!" msg
-  | exn ->
-    Unix.close client_fd;
-    Printf.eprintf "Unexpected: %s\n%!" (Printexc.to_string exn)
+let connection_thread client_fd active pipeline env =
+  Fun.protect
+    ~finally:(fun () ->
+      Atomic.decr active;
+      (try Unix.close client_fd with _ -> ()))
+    (fun () ->
+      try
+        handle_connection client_fd pipeline env
+      with
+      | Eval_error msg ->
+        send_500_response client_fd;
+        Printf.eprintf "[march] Handler crash: %s\n%!" msg
+      | Unix.Unix_error (Unix.EAGAIN, _, _)
+      | Unix.Unix_error (Unix.EWOULDBLOCK, _, _) ->
+        (* Idle timeout — client took too long *)
+        Printf.eprintf "[march] Connection timed out\n%!"
+      | exn ->
+        Printf.eprintf "[march] Unexpected: %s\n%!" (Printexc.to_string exn))
 ```
 
 From the March programmer's perspective: **there is no try/catch.** If your plug pipeline crashes (division by zero, pattern match failure, etc.), the runtime catches it, sends a 500, and closes the connection. Other connections are unaffected. The accept loop never sees the crash.
 
-This is the same model as Bandit — if an Erlang process handling a connection crashes, the BEAM catches it and the acceptor keeps running. The difference is implementation (OS threads vs BEAM processes), not semantics.
+**Max connections** — the accept loop checks `Atomic.get active >= max_conns` before spawning a thread. If at capacity, it accepts the connection (to clear the kernel backlog) but immediately sends a 503 Service Unavailable and closes:
+
+```ocaml
+let client_fd, _addr = Unix.accept listen_fd in
+if Atomic.get active >= max_conns then begin
+  send_503_response client_fd;
+  Unix.close client_fd
+end else begin
+  Atomic.incr active;
+  ignore (Thread.create (connection_thread client_fd active pipeline) env)
+end
+```
+
+This prevents unbounded thread spawning under load. Bandit achieves the same via `num_connections` in ThousandIsland config.
+
+**Idle timeout** — set on each accepted socket via `SO_RCVTIMEO` and `SO_SNDTIMEO`:
+
+```ocaml
+let set_timeouts fd timeout =
+  Unix.setsockopt_float fd Unix.SO_RCVTIMEO timeout;
+  Unix.setsockopt_float fd Unix.SO_SNDTIMEO timeout
+```
+
+If a client is idle longer than the timeout, `Unix.recv` raises `Unix_error(EAGAIN, ...)`, caught by the connection thread. This kills slow-loris connections and prevents thread leaks. Bandit does the same via GenServer timeout on connection processes.
+
+**Graceful shutdown** — a `SIGTERM` handler sets a shutdown flag. The accept loop uses `Unix.select` with a 1-second timeout so it can check the flag between accepts:
+
+```ocaml
+let server_loop listen_fd pipeline env max_conns idle_timeout =
+  let active = Atomic.make 0 in
+  let shutdown = Atomic.make false in
+  Sys.set_signal Sys.sigterm
+    (Sys.Signal_handle (fun _ -> Atomic.set shutdown true));
+  Printf.printf "Listening on port %d (max_conns=%d, idle_timeout=%ds)\n%!"
+    port max_conns (int_of_float idle_timeout);
+  while not (Atomic.get shutdown) do
+    match Unix.select [listen_fd] [] [] 1.0 with
+    | (fd :: _, _, _) ->
+      let client_fd, _addr = Unix.accept fd in
+      set_timeouts client_fd idle_timeout;
+      if Atomic.get active >= max_conns then begin
+        send_503_response client_fd;
+        Unix.close client_fd
+      end else begin
+        Atomic.incr active;
+        ignore (Thread.create
+          (connection_thread client_fd active pipeline) env)
+      end
+    | _ -> () (* select timeout — check shutdown flag *)
+  done;
+  (* Drain: wait for in-flight connections to finish *)
+  Printf.eprintf "[march] Shutting down, draining %d connections...\n%!"
+    (Atomic.get active);
+  while Atomic.get active > 0 do
+    Unix.sleepf 0.1
+  done;
+  Unix.close listen_fd;
+  Printf.eprintf "[march] Server stopped.\n%!"
+```
+
+On `SIGTERM`: stop accepting, wait for all in-flight handlers to complete, then exit. Bandit achieves this via `DynamicSupervisor.stop` which sends shutdown to all child processes.
+
+#### Comparison: Bandit vs March Supervision
+
+| Property | Bandit (ThousandIsland) | March |
+|----------|------------------------|-------|
+| Connection tracking | `DynamicSupervisor` child list | `Atomic.t int` counter |
+| Max connections | `num_connections` config | `max_connections` config |
+| Idle timeout | GenServer timeout | `SO_RCVTIMEO`/`SO_SNDTIMEO` |
+| Crash cleanup | Supervisor traps exit, cleans up | `Fun.protect ~finally` always runs |
+| Graceful shutdown | `Supervisor.stop` drains children | `shutdown` flag + drain loop |
+| Load shedding | Acceptor pauses when at limit | Accept + 503 + close |
+| Restart policy | `:temporary` (no restart) | No restart (same — HTTP is stateless) |
+| Observability | `:telemetry` events | Print to stderr (v1), telemetry (v2) |
+
+Note: neither Bandit nor March **restarts** crashed connections. HTTP is stateless — if a request crashes, you send 500 and move on. There's nothing to restart. This is why Bandit uses `restart: :temporary` on connection processes. Our approach matches.
 
 ### Thread Safety
 
@@ -337,22 +475,30 @@ This is the same model as Bandit — if an Erlang process handling a connection 
 
 ### The March-Side API
 
-From the March programmer's perspective, none of this is visible. The API is:
+From the March programmer's perspective, supervision is invisible. The API is:
 
 ```march
 HttpServer.new(4000)
+|> HttpServer.max_connections(1000)   -- optional, default 1000
+|> HttpServer.idle_timeout(30)        -- optional, default 60s
 |> HttpServer.plug(logger)
 |> HttpServer.plug(router)
 |> HttpServer.listen()
 ```
 
-`listen()` blocks forever (it's the accept loop). Connections are handled concurrently in the background. If a handler crashes, a 500 is sent. The programmer writes pure `Conn -> Conn` functions and the runtime handles the rest.
+`listen()` blocks forever (it's the accept loop). Connections are handled concurrently in the background. If a handler crashes, a 500 is sent. If the server hits max connections, new clients get a 503. If a client is idle too long, the connection is closed. On `SIGTERM`, the server drains gracefully. The programmer writes pure `Conn -> Conn` functions and the runtime handles the rest.
 
 ### Required OCaml Changes
 
 1. **Add `threads` library** to `lib/eval/dune` dependencies
 2. **Add `Mutex.t`** around `actor_registry` and global counters in eval.ml
-3. **Implement `http_server_listen` builtin** — the accept loop + Thread.create logic
+3. **Implement `http_server_listen` builtin** — the supervised accept loop:
+   - `Atomic.t` for active connection count and shutdown flag
+   - `Unix.select` with 1s timeout for shutdown responsiveness
+   - `SO_RCVTIMEO`/`SO_SNDTIMEO` on accepted sockets for idle timeout
+   - Max connection enforcement (503 on overload)
+   - `Fun.protect ~finally` in connection threads for crash-safe cleanup
+   - `SIGTERM` handler + drain loop for graceful shutdown
 4. **Thread-local state** for `module_stack`, `reduction_ctx`, `debug_ctx` using `Thread.key`
 
 ### Future: March-Level Concurrency (v2)
@@ -403,15 +549,22 @@ Added to `base_env` in `lib/eval/eval.ml`:
 ### Server Builtin (the big one)
 
 ```
-http_server_listen(port : Int, pipeline : List(Conn -> Conn)) -> Unit
-  The entire accept loop + thread spawning, implemented in OCaml.
+http_server_listen(port : Int, pipeline : List(Conn -> Conn),
+                   max_conns : Int, idle_timeout : Int) -> Unit
+  The entire accept loop + thread spawning + supervision, implemented in OCaml.
   1. Unix.socket + Unix.bind(SO_REUSEADDR) + Unix.listen
-  2. Loop: Unix.accept → Thread.create(connection_thread) → loop
-  3. Each thread: tcp_recv_http → http_parse_request → build Conn →
-     eval pipeline → write response → close fd
-  4. On crash: catch Eval_error → send 500 → close fd
+  2. Install SIGTERM handler (sets shutdown flag)
+  3. Loop: Unix.select(1s timeout) → check shutdown → check max_conns →
+     Unix.accept → set SO_RCVTIMEO/SO_SNDTIMEO → Atomic.incr active →
+     Thread.create(connection_thread) → loop
+  4. Each thread: tcp_recv_http → http_parse_request → build Conn →
+     eval pipeline → write response → close fd → Atomic.decr active
+  5. On crash: catch Eval_error → send 500 → close fd → decr active
+  6. On timeout: catch EAGAIN → close fd → decr active
+  7. On max_conns: accept → send 503 → close fd (no thread spawned)
+  8. On shutdown: stop accepting, drain (wait for active=0), close listen_fd
   Blocks forever (the accept loop). Called from HttpServer.listen().
-  Prints "Listening on port {port}" on startup.
+  Prints "Listening on port {port} (max_conns=N, idle_timeout=Ns)" on startup.
 ```
 
 ### HTTP Serialization Builtins
@@ -473,6 +626,9 @@ A test server that:
 3. Runs through a pipeline with middleware
 4. Sends correct responses per route
 5. Sends 500 on a route that deliberately crashes (e.g., division by zero)
+6. Returns 503 when at max connections (set low, e.g., 2, then send 3+ concurrent)
+7. Closes idle connections after timeout (set low, e.g., 2s, connect and wait)
+8. Shuts down gracefully on SIGTERM (send requests, SIGTERM, verify in-flight complete)
 
 Verified by running the server in the background and curling from the test harness.
 
@@ -517,6 +673,8 @@ mod MyApp do
 
   fn main() do
     HttpServer.new(4000)
+    |> HttpServer.max_connections(500)
+    |> HttpServer.idle_timeout(30)
     |> HttpServer.plug(logger)
     |> HttpServer.plug(require_auth)
     |> HttpServer.plug(router)
