@@ -179,6 +179,18 @@ let mangle_extern : string -> string = function
   | "kill"               -> "march_kill"
   | "is_alive"      -> "march_is_alive"
   | "send"          -> "march_send"
+  | "tcp_listen"              -> "march_tcp_listen"
+  | "tcp_accept"              -> "march_tcp_accept"
+  | "tcp_recv_http"           -> "march_tcp_recv_http"
+  | "tcp_send_all"            -> "march_tcp_send_all"
+  | "tcp_close"               -> "march_tcp_close"
+  | "http_parse_request"      -> "march_http_parse_request"
+  | "http_serialize_response" -> "march_http_serialize_response"
+  | "http_server_listen"      -> "march_http_server_listen"
+  | "ws_handshake"            -> "march_ws_handshake"
+  | "ws_recv"                 -> "march_ws_recv"
+  | "ws_send"                 -> "march_ws_send"
+  | "ws_select"               -> "march_ws_select"
   | "main"          -> "march_main"   (* March main → march_main in LLVM *)
   | other           -> other
 
@@ -1092,6 +1104,18 @@ declare ptr  @march_string_join(ptr %list, ptr %sep)
 declare void @march_kill(ptr %actor)
 declare i64  @march_is_alive(ptr %actor)
 declare ptr  @march_send(ptr %actor, ptr %msg)
+declare i64  @march_tcp_listen(i64 %port)
+declare i64  @march_tcp_accept(i64 %fd)
+declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)
+declare void @march_tcp_send_all(i64 %fd, ptr %data)
+declare void @march_tcp_close(i64 %fd)
+declare ptr  @march_http_parse_request(ptr %raw)
+declare ptr  @march_http_serialize_response(i64 %status, ptr %headers, ptr %body)
+declare void @march_http_server_listen(ptr %config, ptr %pipeline)
+declare void @march_ws_handshake(i64 %fd, ptr %key)
+declare ptr  @march_ws_recv(i64 %fd)
+declare void @march_ws_send(i64 %fd, ptr %frame)
+declare ptr  @march_ws_select(i64 %fd, ptr %pipe, i64 %timeout)
 
 |}
 

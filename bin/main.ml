@@ -120,9 +120,17 @@ let ensure_runtime_so () =
   in
   if needs_compile then begin
     (* Note: -lpthread not needed on macOS (pthreads are in libSystem). *)
+    let http_c = Filename.concat runtime_dir "march_http.c" in
+    let extra_files =
+      if Sys.file_exists http_c then
+        let sha1_c = Filename.concat runtime_dir "sha1.c" in
+        let base64_c = Filename.concat runtime_dir "base64.c" in
+        Printf.sprintf " %s %s %s" http_c sha1_c base64_c
+      else ""
+    in
     let cmd = Printf.sprintf
-      "clang -shared -O2 -fPIC -I%s %s -o %s 2>&1"
-      runtime_dir runtime_c so_path in
+      "clang -shared -O2 -fPIC -I%s %s%s -o %s 2>&1"
+      runtime_dir runtime_c extra_files so_path in
     let rc = Sys.command cmd in
     if rc <> 0 then
       failwith (Printf.sprintf "march: failed to compile runtime .so (clang exit %d)" rc)
@@ -255,7 +263,17 @@ let compile filename =
           then Printf.sprintf " -O%d" !opt_level
           else ""
         in
-        let cmd = Printf.sprintf "clang%s %s %s -o %s" opt_flag runtime ll_file out_bin in
+        let runtime_dir = Filename.dirname runtime in
+        let http_c = Filename.concat runtime_dir "march_http.c" in
+        let extra_c_files =
+          if Sys.file_exists http_c then
+            let sha1_c = Filename.concat runtime_dir "sha1.c" in
+            let base64_c = Filename.concat runtime_dir "base64.c" in
+            Printf.sprintf " %s %s %s" http_c sha1_c base64_c
+          else ""
+        in
+        let cmd = Printf.sprintf "clang%s %s%s %s -o %s"
+          opt_flag runtime extra_c_files ll_file out_bin in
         let rc = Sys.command cmd in
         if rc <> 0 then begin
           Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
