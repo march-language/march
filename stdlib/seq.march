@@ -130,8 +130,6 @@ pub fn drop(seq, n) do
 end
 
 pub fn zip(s1, s2) do
-  -- Convert s2 to a list for indexed access, then zip
-  let lst2 = to_list(s2)
   fn step_zip(pair, x, f) do
     let (a, remaining) = pair
     match remaining with
@@ -146,7 +144,11 @@ pub fn zip(s1, s2) do
   end
   match s1 with
   | Seq(fold) ->
-    Seq(fn(acc, f) -> run_zip(fold, lst2, acc, f))
+    -- Defer materialization of s2 until consumption
+    Seq(fn(acc, f) do
+      let lst2 = to_list(s2)
+      run_zip(fold, lst2, acc, f)
+    end)
   end
 end
 
@@ -190,6 +192,10 @@ pub fn fold(seq, start, f) do
   end
 end
 
+-- Note: fold_while does NOT truly short-circuit iteration.
+-- With church-encoded folds, all elements are visited but accumulation
+-- is skipped after Halt. For file streaming, the file is read to EOF
+-- even after Halt. This is a known limitation of the fold-based model.
 pub fn fold_while(seq, start, f) do
   fn step_fold_while(step, x, f) do
     match step with
