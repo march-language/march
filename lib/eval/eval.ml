@@ -1360,6 +1360,241 @@ let base_env : env =
         | _ -> eval_error "todo: not yet implemented"))
   ; ("unreachable_", VBuiltin ("unreachable_", function
         | _ -> eval_error "unreachable: reached unreachable code"))
+    (* ── File I/O ──────────────────────────────────────────────────── *)
+  ; ("file_exists", VBuiltin ("file_exists", function
+      | [VString path] -> VBool (Sys.file_exists path)
+      | _ -> eval_error "file_exists(path)"))
+
+  ; ("file_read", VBuiltin ("file_read", function
+      | [VString path] ->
+        (try
+           let ic = open_in path in
+           let n = in_channel_length ic in
+           let s = Bytes.create n in
+           really_input ic s 0 n;
+           close_in ic;
+           VCon ("Ok", [VString (Bytes.to_string s)])
+         with
+         | Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+      | _ -> eval_error "file_read(path)"))
+
+  ; ("file_write", VBuiltin ("file_write", function
+      | [VString path; VString data] ->
+        (try
+           let oc = open_out path in
+           output_string oc data;
+           close_out oc;
+           VCon ("Ok", [VAtom "ok"])
+         with
+         | Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+      | _ -> eval_error "file_write(path, data)"))
+
+  ; ("file_append", VBuiltin ("file_append", function
+      | [VString path; VString data] ->
+        (try
+           let oc = open_out_gen [Open_append; Open_creat] 0o644 path in
+           output_string oc data;
+           close_out oc;
+           VCon ("Ok", [VAtom "ok"])
+         with
+         | Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+      | _ -> eval_error "file_append(path, data)"))
+
+  ; ("file_delete", VBuiltin ("file_delete", function
+      | [VString path] ->
+        (try Sys.remove path; VCon ("Ok", [VAtom "ok"])
+         with Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+      | _ -> eval_error "file_delete(path)"))
+
+  ; ("file_copy", VBuiltin ("file_copy", function
+      | [VString src; VString dst] ->
+        (try
+           let ic = open_in_bin src in
+           (try
+              let oc = open_out_bin dst in
+              (try
+                 let buf = Bytes.create 65536 in
+                 let rec loop () =
+                   let n = input ic buf 0 65536 in
+                   if n > 0 then (output oc buf 0 n; loop ())
+                 in
+                 loop ();
+                 close_in ic; close_out oc;
+                 VCon ("Ok", [VAtom "ok"])
+               with e -> close_in ic; close_out oc; raise e)
+            with e -> close_in ic; raise e)
+         with Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+      | _ -> eval_error "file_copy(src, dst)"))
+
+  ; ("file_rename", VBuiltin ("file_rename", function
+      | [VString src; VString dst] ->
+        (try Sys.rename src dst; VCon ("Ok", [VAtom "ok"])
+         with Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+      | _ -> eval_error "file_rename(src, dst)"))
+
+  ; ("file_stat", VBuiltin ("file_stat", function
+      | [VString path] ->
+        (try
+           let st = Unix.stat path in
+           let kind = match st.Unix.st_kind with
+             | Unix.S_REG  -> VCon ("RegularFile", [])
+             | Unix.S_DIR  -> VCon ("Directory", [])
+             | Unix.S_LNK  -> VCon ("Symlink", [])
+             | _           -> VCon ("Other", [])
+           in
+           (* FileStat is a positional constructor: FileStat(size, kind, modified, accessed) *)
+           VCon ("Ok", [VCon ("FileStat", [
+             VInt st.Unix.st_size;
+             kind;
+             VInt (int_of_float st.Unix.st_mtime);
+             VInt (int_of_float st.Unix.st_atime);
+           ])])
+         with
+         | Unix.Unix_error (Unix.ENOENT, _, _) ->
+           VCon ("Err", [VCon ("NotFound", [VString path])])
+         | Unix.Unix_error (err, _, _) ->
+           VCon ("Err", [VCon ("IoError", [VString (Unix.error_message err)])]))
+      | _ -> eval_error "file_stat(path)"))
+
+  ; ("file_open", VBuiltin ("file_open", function
+      | [VString path] ->
+        (try
+           let fd = Unix.openfile path [Unix.O_RDONLY] 0 in
+           let ic = Unix.in_channel_of_descr fd in
+           VCon ("Ok", [VInt (Obj.magic ic : int)])
+         with
+         | Unix.Unix_error (Unix.ENOENT, _, _) ->
+           VCon ("Err", [VCon ("NotFound", [VString path])])
+         | Unix.Unix_error (Unix.EACCES, _, _) ->
+           VCon ("Err", [VCon ("Permission", [VString path])])
+         | Unix.Unix_error (err, _, _) ->
+           VCon ("Err", [VCon ("IoError", [VString (Unix.error_message err)])]))
+      | _ -> eval_error "file_open(path)"))
+
+  ; ("file_read_line", VBuiltin ("file_read_line", function
+      | [VInt ic_int] ->
+        let ic : in_channel = Obj.magic ic_int in
+        (try VCon ("Some", [VString (input_line ic)])
+         with End_of_file -> VCon ("None", []))
+      | _ -> eval_error "file_read_line(fd)"))
+
+  ; ("file_read_chunk", VBuiltin ("file_read_chunk", function
+      | [VInt ic_int; VInt size] ->
+        let ic : in_channel = Obj.magic ic_int in
+        let buf = Bytes.create size in
+        (try
+           let n = input ic buf 0 size in
+           if n = 0 then VCon ("None", [])
+           else VCon ("Some", [VString (Bytes.sub_string buf 0 n)])
+         with End_of_file -> VCon ("None", []))
+      | _ -> eval_error "file_read_chunk(fd, size)"))
+
+  ; ("file_close", VBuiltin ("file_close", function
+      | [VInt ic_int] ->
+        let ic : in_channel = Obj.magic ic_int in
+        (try close_in ic with _ -> ());
+        VAtom "ok"
+      | _ -> eval_error "file_close(fd)"))
+
+  (* ── Dir I/O ───────────────────────────────────────────────────── *)
+  ; ("dir_exists", VBuiltin ("dir_exists", function
+      | [VString path] ->
+        VBool (Sys.file_exists path && Sys.is_directory path)
+      | _ -> eval_error "dir_exists(path)"))
+
+  ; ("dir_list", VBuiltin ("dir_list", function
+      | [VString path] ->
+        (try
+           let entries = Sys.readdir path in
+           Array.sort String.compare entries;
+           let lst = Array.fold_right
+             (fun e acc -> VCon ("Cons", [VString e; acc]))
+             entries (VCon ("Nil", [])) in
+           VCon ("Ok", [lst])
+         with
+         | Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+      | _ -> eval_error "dir_list(path)"))
+
+  ; ("dir_mkdir", VBuiltin ("dir_mkdir", function
+      | [VString path] ->
+        (try Unix.mkdir path 0o755; VCon ("Ok", [VAtom "ok"])
+         with
+         | Unix.Unix_error (Unix.EEXIST, _, _) ->
+           VCon ("Err", [VCon ("IoError", [VString (path ^ ": already exists")])])
+         | Unix.Unix_error (err, _, _) ->
+           VCon ("Err", [VCon ("IoError", [VString (Unix.error_message err)])]))
+      | _ -> eval_error "dir_mkdir(path)"))
+
+  ; ("dir_mkdir_p", VBuiltin ("dir_mkdir_p", function
+      | [VString path] ->
+        let parts = String.split_on_char '/' path
+          |> List.filter (fun s -> s <> "") in
+        let prefix = if String.length path > 0 && path.[0] = '/' then "/" else "" in
+        (try
+           List.fold_left (fun acc part ->
+             let p = if acc = "" || acc = "/" then acc ^ part else acc ^ "/" ^ part in
+             (* Ignore EEXIST: another process may have created the dir between check and mkdir *)
+             (try
+                if not (Sys.file_exists p) then Unix.mkdir p 0o755
+              with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+             p
+           ) prefix parts |> ignore;
+           VCon ("Ok", [VAtom "ok"])
+         with
+         | Unix.Unix_error (err, _, _) ->
+           VCon ("Err", [VCon ("IoError", [VString (Unix.error_message err)])]))
+      | _ -> eval_error "dir_mkdir_p(path)"))
+
+  ; ("dir_rmdir", VBuiltin ("dir_rmdir", function
+      | [VString path] ->
+        (try Unix.rmdir path; VCon ("Ok", [VAtom "ok"])
+         with
+         | Unix.Unix_error (Unix.ENOTEMPTY, _, _) ->
+           VCon ("Err", [VCon ("NotEmpty", [VString path])])
+         | Unix.Unix_error (Unix.ENOENT, _, _) ->
+           VCon ("Err", [VCon ("NotFound", [VString path])])
+         | Unix.Unix_error (err, _, _) ->
+           VCon ("Err", [VCon ("IoError", [VString (Unix.error_message err)])]))
+      | _ -> eval_error "dir_rmdir(path)"))
+
+  ; ("dir_rm_rf", VBuiltin ("dir_rm_rf", function
+      | [VString path] ->
+        if path = "" || path = "/" then
+          VCon ("Err", [VCon ("IoError", [VString "refusing to delete root"])])
+        else
+          let rec rm_rf p =
+            match Unix.lstat p with
+            | exception Unix.Unix_error (Unix.ENOENT, _, _) -> ()
+            | st ->
+              if st.Unix.st_kind = Unix.S_DIR then begin
+                let entries = Sys.readdir p in
+                Array.iter (fun e -> rm_rf (p ^ "/" ^ e)) entries;
+                Unix.rmdir p
+              end else
+                Sys.remove p
+          in
+          (try rm_rf path; VCon ("Ok", [VAtom "ok"])
+           with
+           | Unix.Unix_error (err, _, _) ->
+             VCon ("Err", [VCon ("IoError", [VString (Unix.error_message err)])]))
+      | _ -> eval_error "dir_rm_rf(path)"))
+
+  (* ── String extras ─────────────────────────────────────────────── *)
+  ; ("string_last_index_of", VBuiltin ("string_last_index_of", function
+      | [VString s; VString sub] ->
+        let slen = String.length s and sublen = String.length sub in
+        if sublen = 0 then VCon ("Some", [VInt slen])
+        else if sublen > slen then VCon ("None", [])
+        else
+          let result = ref None in
+          for i = 0 to slen - sublen do
+            if String.sub s i sublen = sub then result := Some i
+          done;
+          (match !result with
+           | None -> VCon ("None", [])
+           | Some i -> VCon ("Some", [VInt i]))
+      | _ -> eval_error "string_last_index_of(s, sub)"))
+
     (* ---- TCP socket builtins ---- *)
   ; ("tcp_connect", VBuiltin ("tcp_connect", function
         | [VString host; VInt port] ->

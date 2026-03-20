@@ -4332,6 +4332,14 @@ let test_supervision_task_spawn_link_crash_propagates () =
      | March_eval.Eval.VCon ("Err", _) -> true
      | _ -> false)
 
+let test_file_builtin_exists_false () =
+  (* If file_exists builtin is missing, this will raise an eval error *)
+  let env = eval_with_stdlib [] {|mod T do
+    fn f() do file_exists("/nonexistent_march_test_xyz") end
+  end|} in
+  Alcotest.(check bool) "file_exists returns false" false
+    (vbool (call_fn env "f" []))
+
 let () =
   Alcotest.run "march"
     [
@@ -4804,5 +4812,8 @@ let () =
       ("supervision phase5", [
         Alcotest.test_case "task_spawn_link completes"         `Quick (with_reset test_supervision_task_spawn_link_completes);
         Alcotest.test_case "task_spawn_link crash propagates"  `Quick (with_reset test_supervision_task_spawn_link_crash_propagates);
+      ]);
+      ("file builtins", [
+        Alcotest.test_case "file_exists false" `Quick test_file_builtin_exists_false;
       ]);
     ]

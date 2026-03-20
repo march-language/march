@@ -621,6 +621,28 @@ let builtin_bindings : (string * scheme) list =
     ("pid_of_int",   poly1 (fun a -> TArrow (t_int, TCon ("Pid", [a]))));
     (* Phase 5: task_spawn_link — like task_spawn but links to spawner *)
     ("task_spawn_link", poly1 (fun a -> TArrow (TArrow (t_int, a), TCon ("Task", [a]))));
+    (* File I/O builtins *)
+    ("file_exists",     Mono (TArrow (t_string, t_bool)));
+    ("file_read",       poly1 (fun e -> TArrow (t_string, t_result t_string e)));
+    ("file_write",      poly1 (fun e -> TArrow (t_string, TArrow (t_string, t_result t_unit e))));
+    ("file_append",     poly1 (fun e -> TArrow (t_string, TArrow (t_string, t_result t_unit e))));
+    ("file_delete",     poly1 (fun e -> TArrow (t_string, t_result t_unit e)));
+    ("file_copy",       poly1 (fun e -> TArrow (t_string, TArrow (t_string, t_result t_unit e))));
+    ("file_rename",     poly1 (fun e -> TArrow (t_string, TArrow (t_string, t_result t_unit e))));
+    ("file_stat",       poly1 (fun e -> TArrow (t_string, t_result t_int e)));
+    ("file_open",       poly1 (fun e -> TArrow (t_string, t_result t_int e)));
+    ("file_read_line",  Mono (TArrow (t_int, t_option t_string)));
+    ("file_read_chunk", Mono (TArrow (t_int, TArrow (t_int, t_option t_string))));
+    ("file_close",      Mono (TArrow (t_int, t_unit)));
+    (* Dir I/O builtins *)
+    ("dir_exists",      Mono (TArrow (t_string, t_bool)));
+    ("dir_list",        poly1 (fun e -> TArrow (t_string, t_result (t_list t_string) e)));
+    ("dir_mkdir",       poly1 (fun e -> TArrow (t_string, t_result t_unit e)));
+    ("dir_mkdir_p",     poly1 (fun e -> TArrow (t_string, t_result t_unit e)));
+    ("dir_rmdir",       poly1 (fun e -> TArrow (t_string, t_result t_unit e)));
+    ("dir_rm_rf",       poly1 (fun e -> TArrow (t_string, t_result t_unit e)));
+    (* String extra builtins *)
+    ("string_last_index_of", Mono (TArrow (t_string, TArrow (t_string, t_option t_int))));
   ]
 
 let builtin_types : (string * int) list =
