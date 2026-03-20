@@ -89,9 +89,40 @@ let load_decls_into_env env tc_env decls =
       (e', { tc' with errors = March_errors.Errors.create () })
   ) (env, tc_env) decls
 
+(** Wrap a REPL expression in a synthetic module for TIR lowering.
+    The expression becomes the body of fn main() -> expr. *)
+let wrap_expr_as_module ~(stdlib_decls : March_ast.Ast.decl list)
+    (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
+  let s = March_ast.Ast.dummy_span in
+  let main_clause = {
+    March_ast.Ast.fc_params = [];
+    fc_guard = None;
+    fc_body = e;
+    fc_span = s;
+  } in
+  let main_def = {
+    March_ast.Ast.fn_name = { txt = "main"; span = s };
+    fn_vis = March_ast.Ast.Public;
+    fn_doc = None;
+    fn_ret_ty = None;
+    fn_clauses = [main_clause];
+  } in
+  let main_decl = March_ast.Ast.DFn (main_def, s) in
+  { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
+    mod_decls = stdlib_decls @ [main_decl] }
+
+(** Wrap a REPL declaration in a synthetic module for TIR lowering. *)
+let wrap_decl_as_module ~(stdlib_decls : March_ast.Ast.decl list)
+    (d : March_ast.Ast.decl) : March_ast.Ast.module_ =
+  let s = March_ast.Ast.dummy_span in
+  { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
+    mod_decls = stdlib_decls @ [d] }
+
 (** Non-TUI fallback REPL. *)
 let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx=(None : March_jit.Repl_jit.t option)) () =
-  let _jit_ctx = jit_ctx in
+  let use_jit = jit_ctx <> None &&
+    Sys.getenv_opt "MARCH_REPL_INTERP" = None in
+  let jit_ctx = if use_jit then jit_ctx else None in
   let is_debug = debug_hooks <> None in
   if is_debug then
     Printf.printf "\n[debug] Breakpoint hit — :continue to resume, :help for commands\n%!"
@@ -355,27 +386,57 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                    List.iter print_diag (March_errors.Errors.sorted input_ctx);
                  if tc_ok || is_debug then
                    (try
-                      env := March_eval.Eval.eval_decl !env d';
-                      if tc_ok then
-                        tc_env := { new_tc with errors = March_errors.Errors.create () };
-                      (match d' with
-                       | March_ast.Ast.DFn (def, _) ->
-                         Printf.printf "val %s = <fn>\n%!" def.fn_name.txt
-                       | March_ast.Ast.DLet (b, _) ->
-                         (match b.bind_pat with
-                          | March_ast.Ast.PatVar n ->
-                            let v = List.assoc n.txt !env in
-                            Printf.printf "val %s = %s\n%!" n.txt
-                              (March_eval.Eval.value_to_string v)
-                          | _ -> Printf.printf "val _ = ...\n%!")
-                       | March_ast.Ast.DActor (name, _, _) ->
-                         Printf.printf "val %s = <actor>\n%!" name.txt
-                       | _ -> ())
+                      (match jit_ctx with
+                      | Some jit ->
+                        let (is_fn_decl, bind_name) = match d' with
+                          | March_ast.Ast.DFn (def, _) -> (true, def.fn_name.txt)
+                          | March_ast.Ast.DLet (b, _) ->
+                            let name = match b.bind_pat with
+                              | March_ast.Ast.PatVar n -> n.txt
+                              | _ -> "_v"
+                            in
+                            (false, name)
+                          | _ -> (false, "_v")
+                        in
+                        let m = wrap_decl_as_module ~stdlib_decls d' in
+                        March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl ~bind_name m;
+                        if tc_ok then
+                          tc_env := { new_tc with errors = March_errors.Errors.create () };
+                        (match d' with
+                         | March_ast.Ast.DFn (def, _) ->
+                           Printf.printf "val %s = <fn>\n%!" def.fn_name.txt
+                         | March_ast.Ast.DLet (b, _) ->
+                           (match b.bind_pat with
+                            | March_ast.Ast.PatVar n ->
+                              Printf.printf "val %s = <bound>\n%!" n.txt
+                            | _ -> Printf.printf "val _ = ...\n%!")
+                         | March_ast.Ast.DActor (name, _, _) ->
+                           Printf.printf "val %s = <actor>\n%!" name.txt
+                         | _ -> ())
+                      | None ->
+                        env := March_eval.Eval.eval_decl !env d';
+                        if tc_ok then
+                          tc_env := { new_tc with errors = March_errors.Errors.create () };
+                        (match d' with
+                         | March_ast.Ast.DFn (def, _) ->
+                           Printf.printf "val %s = <fn>\n%!" def.fn_name.txt
+                         | March_ast.Ast.DLet (b, _) ->
+                           (match b.bind_pat with
+                            | March_ast.Ast.PatVar n ->
+                              let v = List.assoc n.txt !env in
+                              Printf.printf "val %s = %s\n%!" n.txt
+                                (March_eval.Eval.value_to_string v)
+                            | _ -> Printf.printf "val _ = ...\n%!")
+                         | March_ast.Ast.DActor (name, _, _) ->
+                           Printf.printf "val %s = <actor>\n%!" name.txt
+                         | _ -> ()))
                     with
                     | March_eval.Eval.Eval_error msg ->
                       Printf.eprintf "runtime error: %s\n%!" msg
                     | March_eval.Eval.Match_failure msg ->
-                      Printf.eprintf "match failure: %s\n%!" msg)
+                      Printf.eprintf "match failure: %s\n%!" msg
+                    | Failure msg ->
+                      Printf.eprintf "jit error: %s\n%!" msg)
                | Some (March_ast.Ast.ReplExpr e) ->
                  (* Intercept h(name) before typecheck — h is a REPL-only doc lookup *)
                  let rec doc_key_of = function
@@ -413,21 +474,34 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                    Printf.eprintf "note: inferred type was %s\n%!" ty_str
                  else
                    (try
-                      let v = March_eval.Eval.eval_expr !env e' in
-                      let vs = March_eval.Eval.value_to_string_pretty v in
-                      Printf.printf "= %s\n%!" vs;
-                      Result_vars.push result_h v ty_str;
-                      env    := ("v", v)
-                               :: (List.remove_assoc "v" !env);
-                      if tc_ok then
-                        tc_env := { !tc_env with
-                          vars = ("v", March_typecheck.Typecheck.Mono inferred)
-                                 :: (List.remove_assoc "v" !tc_env.vars) }
+                      (match jit_ctx with
+                      | Some jit ->
+                        let m = wrap_expr_as_module ~stdlib_decls e' in
+                        let (_ty, result_str) =
+                          March_jit.Repl_jit.run_expr jit ~type_map m in
+                        Printf.printf "= %s\n%!" result_str;
+                        if tc_ok then
+                          tc_env := { !tc_env with
+                            vars = ("v", March_typecheck.Typecheck.Mono inferred)
+                                   :: (List.remove_assoc "v" !tc_env.vars) }
+                      | None ->
+                        let v = March_eval.Eval.eval_expr !env e' in
+                        let vs = March_eval.Eval.value_to_string_pretty v in
+                        Printf.printf "= %s\n%!" vs;
+                        Result_vars.push result_h v ty_str;
+                        env    := ("v", v)
+                                 :: (List.remove_assoc "v" !env);
+                        if tc_ok then
+                          tc_env := { !tc_env with
+                            vars = ("v", March_typecheck.Typecheck.Mono inferred)
+                                   :: (List.remove_assoc "v" !tc_env.vars) })
                     with
                     | March_eval.Eval.Eval_error msg ->
                       Printf.eprintf "runtime error: %s\n%!" msg
                     | March_eval.Eval.Match_failure msg ->
-                      Printf.eprintf "match failure: %s\n%!" msg)))
+                      Printf.eprintf "match failure: %s\n%!" msg
+                    | Failure msg ->
+                      Printf.eprintf "jit error: %s\n%!" msg)))
           end)
      with
      | March_lexer.Lexer.Lexer_error msg -> Printf.eprintf "lexer error: %s\n%!" msg
@@ -437,7 +511,9 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
 
 (** Full TUI REPL loop using notty two-pane layout. *)
 let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx=(None : March_jit.Repl_jit.t option)) () =
-  let _jit_ctx = jit_ctx in
+  let use_jit = jit_ctx <> None &&
+    Sys.getenv_opt "MARCH_REPL_INTERP" = None in
+  let jit_ctx = if use_jit then jit_ctx else None in
   let is_debug = debug_hooks <> None in
   let hist     = History.create ~max_size:(history_size ()) in
   History.load hist (history_path ());
@@ -593,28 +669,60 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
         ) (March_errors.Errors.sorted input_ctx);
       if tc_ok || is_debug then
         (try
-           env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
-           if tc_ok then
-             tc_env := { new_tc with errors = March_errors.Errors.create () };
-           let out = match d' with
-             | March_ast.Ast.DFn (def, _) ->
-               Printf.sprintf "val %s = <fn>" def.fn_name.txt
-             | March_ast.Ast.DLet (b, _) ->
-               (match b.bind_pat with
-                | March_ast.Ast.PatVar n ->
-                  let v = List.assoc n.txt !env in
-                  Printf.sprintf "val %s = %s" n.txt (March_eval.Eval.value_to_string v)
-                | _ -> "val _ = ...")
-             | March_ast.Ast.DActor (name, _, _) ->
-               Printf.sprintf "val %s = <actor>" name.txt
-             | _ -> ""
-           in
-           if out <> "" then add_line Notty.A.empty out
+           (match jit_ctx with
+           | Some jit ->
+             let (is_fn_decl, bind_name) = match d' with
+               | March_ast.Ast.DFn (def, _) -> (true, def.fn_name.txt)
+               | March_ast.Ast.DLet (b, _) ->
+                 let name = match b.bind_pat with
+                   | March_ast.Ast.PatVar n -> n.txt
+                   | _ -> "_v"
+                 in
+                 (false, name)
+               | _ -> (false, "_v")
+             in
+             let m = wrap_decl_as_module ~stdlib_decls d' in
+             March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl ~bind_name m;
+             if tc_ok then
+               tc_env := { new_tc with errors = March_errors.Errors.create () };
+             let out = match d' with
+               | March_ast.Ast.DFn (def, _) ->
+                 Printf.sprintf "val %s = <fn>" def.fn_name.txt
+               | March_ast.Ast.DLet (b, _) ->
+                 (match b.bind_pat with
+                  | March_ast.Ast.PatVar n ->
+                    Printf.sprintf "val %s = <bound>" n.txt
+                  | _ -> "val _ = ...")
+               | March_ast.Ast.DActor (name, _, _) ->
+                 Printf.sprintf "val %s = <actor>" name.txt
+               | _ -> ""
+             in
+             if out <> "" then add_line Notty.A.empty out
+           | None ->
+             env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
+             if tc_ok then
+               tc_env := { new_tc with errors = March_errors.Errors.create () };
+             let out = match d' with
+               | March_ast.Ast.DFn (def, _) ->
+                 Printf.sprintf "val %s = <fn>" def.fn_name.txt
+               | March_ast.Ast.DLet (b, _) ->
+                 (match b.bind_pat with
+                  | March_ast.Ast.PatVar n ->
+                    let v = List.assoc n.txt !env in
+                    Printf.sprintf "val %s = %s" n.txt (March_eval.Eval.value_to_string v)
+                  | _ -> "val _ = ...")
+               | March_ast.Ast.DActor (name, _, _) ->
+                 Printf.sprintf "val %s = <actor>" name.txt
+               | _ -> ""
+             in
+             if out <> "" then add_line Notty.A.empty out)
          with
          | March_eval.Eval.Eval_error msg ->
            add_line Notty.A.(fg red) (Printf.sprintf "runtime error: %s" msg)
          | March_eval.Eval.Match_failure msg ->
-           add_line Notty.A.(fg red) (Printf.sprintf "match failure: %s" msg))
+           add_line Notty.A.(fg red) (Printf.sprintf "match failure: %s" msg)
+         | Failure msg ->
+           add_line Notty.A.(fg red) (Printf.sprintf "jit error: %s" msg))
     | Some (March_ast.Ast.ReplExpr e) ->
       (* Intercept h(name) before typecheck — h is a REPL-only doc lookup *)
       let rec doc_key_of = function
@@ -661,20 +769,33 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
         add_line Notty.A.empty (Printf.sprintf "note: inferred type was %s" ty_str)
       else
         (try
-           let v = capture_stdout (fun () -> March_eval.Eval.eval_expr !env e') in
-           let vs = March_eval.Eval.value_to_string_pretty v in
-           add_line Notty.A.(fg green) (Printf.sprintf "= %s" vs);
-           Result_vars.push result_h v ty_str;
-           env    := ("v", v) :: (List.remove_assoc "v" !env);
-           if tc_ok then
-             tc_env := { !tc_env with
-               vars = ("v", March_typecheck.Typecheck.Mono inferred)
-                      :: (List.remove_assoc "v" !tc_env.vars) }
+           (match jit_ctx with
+           | Some jit ->
+             let m = wrap_expr_as_module ~stdlib_decls e' in
+             let (_ty, result_str) =
+               March_jit.Repl_jit.run_expr jit ~type_map m in
+             add_line Notty.A.(fg green) (Printf.sprintf "= %s" result_str);
+             if tc_ok then
+               tc_env := { !tc_env with
+                 vars = ("v", March_typecheck.Typecheck.Mono inferred)
+                        :: (List.remove_assoc "v" !tc_env.vars) }
+           | None ->
+             let v = capture_stdout (fun () -> March_eval.Eval.eval_expr !env e') in
+             let vs = March_eval.Eval.value_to_string_pretty v in
+             add_line Notty.A.(fg green) (Printf.sprintf "= %s" vs);
+             Result_vars.push result_h v ty_str;
+             env    := ("v", v) :: (List.remove_assoc "v" !env);
+             if tc_ok then
+               tc_env := { !tc_env with
+                 vars = ("v", March_typecheck.Typecheck.Mono inferred)
+                        :: (List.remove_assoc "v" !tc_env.vars) })
          with
          | March_eval.Eval.Eval_error msg ->
            add_line Notty.A.(fg red) (Printf.sprintf "runtime error: %s" msg)
          | March_eval.Eval.Match_failure msg ->
-           add_line Notty.A.(fg red) (Printf.sprintf "match failure: %s" msg)))
+           add_line Notty.A.(fg red) (Printf.sprintf "match failure: %s" msg)
+         | Failure msg ->
+           add_line Notty.A.(fg red) (Printf.sprintf "jit error: %s" msg)))
   in
 
   let dispatch_action action =
