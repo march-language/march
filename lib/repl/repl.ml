@@ -347,11 +347,16 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
                  let input_ctx = March_errors.Errors.create () in
                  let input_tc  = { !tc_env with errors = input_ctx } in
                  let new_tc    = March_typecheck.Typecheck.check_decl input_tc d' in
-                 List.iter print_diag (March_errors.Errors.sorted input_ctx);
-                 if not (March_errors.Errors.has_errors input_ctx) then
+                 let tc_ok = not (March_errors.Errors.has_errors input_ctx) in
+                 (* In debug mode, skip typecheck gate — the eval env has
+                    bindings the typechecker doesn't know about. *)
+                 if not is_debug then
+                   List.iter print_diag (March_errors.Errors.sorted input_ctx);
+                 if tc_ok || is_debug then
                    (try
                       env := March_eval.Eval.eval_decl !env d';
-                      tc_env := { new_tc with errors = March_errors.Errors.create () };
+                      if tc_ok then
+                        tc_env := { new_tc with errors = March_errors.Errors.create () };
                       (match d' with
                        | March_ast.Ast.DFn (def, _) ->
                          Printf.printf "val %s = <fn>\n%!" def.fn_name.txt
@@ -400,8 +405,10 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
                  let inferred  = March_typecheck.Typecheck.infer_expr input_tc e' in
                  let ty_str    = March_typecheck.Typecheck.pp_ty
                    (March_typecheck.Typecheck.repr inferred) in
-                 List.iter print_diag (March_errors.Errors.sorted input_ctx);
-                 if March_errors.Errors.has_errors input_ctx then
+                 let tc_ok = not (March_errors.Errors.has_errors input_ctx) in
+                 if not is_debug then
+                   List.iter print_diag (March_errors.Errors.sorted input_ctx);
+                 if (not tc_ok) && (not is_debug) then
                    Printf.eprintf "note: inferred type was %s\n%!" ty_str
                  else
                    (try
@@ -411,9 +418,10 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
                       Result_vars.push result_h v ty_str;
                       env    := ("v", v)
                                :: (List.remove_assoc "v" !env);
-                      tc_env := { !tc_env with
-                        vars = ("v", March_typecheck.Typecheck.Mono inferred)
-                               :: (List.remove_assoc "v" !tc_env.vars) }
+                      if tc_ok then
+                        tc_env := { !tc_env with
+                          vars = ("v", March_typecheck.Typecheck.Mono inferred)
+                                 :: (List.remove_assoc "v" !tc_env.vars) }
                     with
                     | March_eval.Eval.Eval_error msg ->
                       Printf.eprintf "runtime error: %s\n%!" msg
@@ -540,20 +548,23 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
       let input_ctx = March_errors.Errors.create () in
       let input_tc  = { !tc_env with errors = input_ctx } in
       let new_tc    = March_typecheck.Typecheck.check_decl input_tc d' in
-      List.iter (fun (diag : March_errors.Errors.diagnostic) ->
-        let (label, attr) = match diag.severity with
-          | March_errors.Errors.Error   -> ("error",   Notty.A.(fg red))
-          | March_errors.Errors.Warning -> ("warning", Notty.A.(fg yellow))
-          | March_errors.Errors.Hint    -> ("hint",    Notty.A.(fg blue))
-        in
-        add_line attr (Printf.sprintf "%s: %s" label diag.message);
-        List.iter (fun note ->
-          add_line Notty.A.empty (Printf.sprintf "note: %s" note)) diag.notes
-      ) (March_errors.Errors.sorted input_ctx);
-      if not (March_errors.Errors.has_errors input_ctx) then
+      let tc_ok = not (March_errors.Errors.has_errors input_ctx) in
+      if not is_debug then
+        List.iter (fun (diag : March_errors.Errors.diagnostic) ->
+          let (label, attr) = match diag.severity with
+            | March_errors.Errors.Error   -> ("error",   Notty.A.(fg red))
+            | March_errors.Errors.Warning -> ("warning", Notty.A.(fg yellow))
+            | March_errors.Errors.Hint    -> ("hint",    Notty.A.(fg blue))
+          in
+          add_line attr (Printf.sprintf "%s: %s" label diag.message);
+          List.iter (fun note ->
+            add_line Notty.A.empty (Printf.sprintf "note: %s" note)) diag.notes
+        ) (March_errors.Errors.sorted input_ctx);
+      if tc_ok || is_debug then
         (try
            env := March_eval.Eval.eval_decl !env d';
-           tc_env := { new_tc with errors = March_errors.Errors.create () };
+           if tc_ok then
+             tc_env := { new_tc with errors = March_errors.Errors.create () };
            let out = match d' with
              | March_ast.Ast.DFn (def, _) ->
                Printf.sprintf "val %s = <fn>" def.fn_name.txt

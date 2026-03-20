@@ -381,6 +381,8 @@ block_expr:
         | FPNamed fp ->
           Some { param_name = fp.param_name; param_ty = fp.param_ty;
                  param_lin = fp.param_lin }
+        | FPPat (PatVar n) ->
+          Some { param_name = n; param_ty = None; param_lin = Unrestricted }
         | FPPat _ -> None) params in
       ELetFn (name, simple_params, ret, body, mk_span ($loc)) }
   | e = expr { e }

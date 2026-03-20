@@ -15,6 +15,9 @@ void *march_alloc(int64_t sz);
 /* Reference counting. */
 void  march_incrc(void *p);
 void  march_decrc(void *p);
+/* Decrement RC and return 1 if the object was freed (RC hit 0), 0 if still alive.
+   Used when pattern-matching to conditionally IncRC extracted child pointers. */
+int64_t march_decrc_freed(void *p);
 void  march_free(void *p);
 
 /* I/O builtins. */

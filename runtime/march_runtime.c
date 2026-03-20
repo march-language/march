@@ -29,6 +29,13 @@ void march_decrc(void *p) {
     if (--h->rc <= 0) free(p);
 }
 
+int64_t march_decrc_freed(void *p) {
+    if (!p) return 1;
+    march_hdr *h = (march_hdr *)p;
+    if (--h->rc <= 0) { free(p); return 1; }
+    return 0;
+}
+
 void march_free(void *p) {
     free(p);
 }
