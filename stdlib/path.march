@@ -21,7 +21,10 @@ pub fn basename(path) do
   let parts = components(path)
   match parts with
   | Nil -> path
-  | _ -> List.last(parts)
+  | _ ->
+    -- fold_left to get the last element safely (List.last panics on empty)
+    -- List.fold_left(acc, list, f) — accumulator first
+    List.fold_left("", parts, fn(ig, s) -> s)
   end
 end
 
@@ -39,7 +42,9 @@ pub fn extension(path) do
   let base = basename(path)
   match String.last_index_of(base, ".") with
   | None -> ""
+  | Some(0) -> ""          -- leading dot is not an extension (e.g. .bashrc)
   | Some(i) ->
+    -- String.slice_bytes(s, start, len) — third arg is LENGTH not end index
     let len = String.byte_size(base) - i - 1
     String.slice_bytes(base, i + 1, len)
   end
@@ -50,6 +55,7 @@ pub fn strip_extension(path) do
   let dir = dirname(path)
   match String.last_index_of(base, ".") with
   | None -> path
+  | Some(0) -> path          -- leading dot is not an extension (e.g. .bashrc)
   | Some(i) ->
     let stem = String.slice_bytes(base, 0, i)
     if dir == "." then stem else dir ++ "/" ++ stem

@@ -4453,6 +4453,20 @@ let test_path_strip_extension () =
   Alcotest.(check string) "strip_extension" "photo"
     (vstr (call_fn env "f" []))
 
+let test_path_extension_dotfile () =
+  let env = eval_with_path {|mod T do
+    fn f() do Path.extension(".bashrc") end
+  end|} in
+  Alcotest.(check string) "dotfile has no extension" ""
+    (vstr (call_fn env "f" []))
+
+let test_path_strip_extension_dotfile () =
+  let env = eval_with_path {|mod T do
+    fn f() do Path.strip_extension(".bashrc") end
+  end|} in
+  Alcotest.(check string) "strip dotfile unchanged" ".bashrc"
+    (vstr (call_fn env "f" []))
+
 let test_path_normalize_absolute () =
   let env = eval_with_path {|mod T do
     fn f() do Path.normalize("/a/../../../b") end
@@ -4958,6 +4972,8 @@ let () =
         Alcotest.test_case "normalize"               `Quick test_path_normalize;
         Alcotest.test_case "dirname"                 `Quick test_path_dirname;
         Alcotest.test_case "strip_extension"         `Quick test_path_strip_extension;
+        Alcotest.test_case "extension dotfile"       `Quick test_path_extension_dotfile;
+        Alcotest.test_case "strip_extension dotfile" `Quick test_path_strip_extension_dotfile;
         Alcotest.test_case "normalize absolute"      `Quick test_path_normalize_absolute;
         Alcotest.test_case "is_absolute"             `Quick test_path_is_absolute;
       ]);
