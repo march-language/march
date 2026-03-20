@@ -96,7 +96,9 @@ let run_expr ctx ~type_map m =
       Jit.call_void_to_void fptr;
       "()"
     | _ ->
-      (* Heap-allocated value: call, get pointer, format via address for now *)
+      (* Heap-allocated value.
+         TODO: call march_value_to_string (via call_ptr_to_ptr) and read the
+         resulting march_string bytes back into OCaml for pretty-printing. *)
       let ptr = Jit.call_void_to_ptr fptr in
       Printf.sprintf "#<value at 0x%Lx>" (Int64.of_nativeint ptr)
   in

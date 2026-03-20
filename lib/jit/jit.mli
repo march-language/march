@@ -24,3 +24,6 @@ val call_void_to_int : nativeint -> int64
 
 (** Call a (void -> double) function pointer. *)
 val call_void_to_float : nativeint -> float
+
+(** Call a (ptr -> ptr) function pointer. *)
+val call_ptr_to_ptr : nativeint -> nativeint -> nativeint

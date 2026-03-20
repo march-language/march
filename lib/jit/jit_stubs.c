@@ -72,3 +72,12 @@ CAMLprim value march_call_void_to_float(value v_fptr) {
     double result = fn();
     CAMLreturn(caml_copy_double(result));
 }
+
+/* Call a ptr→ptr function (e.g., march_value_to_string). */
+CAMLprim value march_call_ptr_to_ptr(value v_fptr, value v_arg) {
+    CAMLparam2(v_fptr, v_arg);
+    void *(*fn)(void *) = (void *(*)(void *))Nativeint_val(v_fptr);
+    void *arg = (void *)Nativeint_val(v_arg);
+    void *result = fn(arg);
+    CAMLreturn(caml_copy_nativeint((intnat)result));
+}

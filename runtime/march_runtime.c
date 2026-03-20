@@ -217,3 +217,17 @@ void *march_send(void *actor, void *msg) {
     fld[0] = 0;  /* () = 0 */
     return some;
 }
+
+/* ── Value pretty-printing ───────────────────────────────────────────── */
+
+/* Format a March value as a human-readable string.
+   v1: prints scalars inline; heap objects as #<tag:N>.
+   Future: can use registered constructor name tables for better output. */
+void *march_value_to_string(void *v) {
+    if (!v) return march_string_lit("nil", 3);
+    march_hdr *h = (march_hdr *)v;
+    int32_t tag = h->tag;
+    char buf[128];
+    int n = snprintf(buf, sizeof(buf), "#<tag:%d>", tag);
+    return march_string_lit(buf, n);
+}

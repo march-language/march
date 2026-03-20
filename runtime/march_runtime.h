@@ -48,3 +48,6 @@ void  march_kill(void *actor);
 int64_t march_is_alive(void *actor);
 /* Returns Option(Unit): None (tag 0) if dead, Some(()) (tag 1) if dispatch ran. */
 void *march_send(void *actor, void *msg);
+
+/* Value pretty-printing. */
+void *march_value_to_string(void *v);
