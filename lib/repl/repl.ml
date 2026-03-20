@@ -614,17 +614,19 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
       let inferred  = March_typecheck.Typecheck.infer_expr input_tc e' in
       let ty_str    = March_typecheck.Typecheck.pp_ty
         (March_typecheck.Typecheck.repr inferred) in
-      List.iter (fun (diag : March_errors.Errors.diagnostic) ->
-        let (label, attr) = match diag.severity with
-          | March_errors.Errors.Error   -> ("error",   Notty.A.(fg red))
-          | March_errors.Errors.Warning -> ("warning", Notty.A.(fg yellow))
-          | March_errors.Errors.Hint    -> ("hint",    Notty.A.(fg blue))
-        in
-        add_line attr (Printf.sprintf "%s: %s" label diag.message);
-        List.iter (fun note ->
-          add_line Notty.A.empty (Printf.sprintf "note: %s" note)) diag.notes
-      ) (March_errors.Errors.sorted input_ctx);
-      if March_errors.Errors.has_errors input_ctx then
+      let tc_ok = not (March_errors.Errors.has_errors input_ctx) in
+      if not is_debug then
+        List.iter (fun (diag : March_errors.Errors.diagnostic) ->
+          let (label, attr) = match diag.severity with
+            | March_errors.Errors.Error   -> ("error",   Notty.A.(fg red))
+            | March_errors.Errors.Warning -> ("warning", Notty.A.(fg yellow))
+            | March_errors.Errors.Hint    -> ("hint",    Notty.A.(fg blue))
+          in
+          add_line attr (Printf.sprintf "%s: %s" label diag.message);
+          List.iter (fun note ->
+            add_line Notty.A.empty (Printf.sprintf "note: %s" note)) diag.notes
+        ) (March_errors.Errors.sorted input_ctx);
+      if (not tc_ok) && (not is_debug) then
         add_line Notty.A.empty (Printf.sprintf "note: inferred type was %s" ty_str)
       else
         (try
@@ -633,9 +635,10 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) () =
            add_line Notty.A.(fg green) (Printf.sprintf "= %s" vs);
            Result_vars.push result_h v ty_str;
            env    := ("v", v) :: (List.remove_assoc "v" !env);
-           tc_env := { !tc_env with
-             vars = ("v", March_typecheck.Typecheck.Mono inferred)
-                    :: (List.remove_assoc "v" !tc_env.vars) }
+           if tc_ok then
+             tc_env := { !tc_env with
+               vars = ("v", March_typecheck.Typecheck.Mono inferred)
+                      :: (List.remove_assoc "v" !tc_env.vars) }
          with
          | March_eval.Eval.Eval_error msg ->
            add_line Notty.A.(fg red) (Printf.sprintf "runtime error: %s" msg)
