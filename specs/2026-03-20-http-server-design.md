@@ -689,7 +689,7 @@ N Domains (= N CPU cores, via compiled Domain.spawn or pthread)
               6. Loop
 ```
 
-**Memory budget for 2M connections:**
+**Memory budget for 2M connections — naive:**
 
 | Component | Per connection | × 2M |
 |-----------|---------------|-------|
@@ -700,7 +700,206 @@ N Domains (= N CPU cores, via compiled Domain.spawn or pthread)
 | Process control block | 64 bytes | 128 MB |
 | **Total** | **~10KB** | **~20 GB** |
 
-A 64GB machine handles 2M connections with room for application state. This matches BEAM's documented capacity (Phoenix has demonstrated 2M WebSocket connections on a single machine).
+That's wasteful. Let's squeeze it.
+
+**Where the bytes actually go:**
+
+The current object header is 16 bytes: `{rc: i64, tag: i32, pad: i32}`. That means our 13-field Conn is `16 + 13×8 = 120 bytes`. But most of those 16 header bytes are waste — we don't need 64-bit refcounts, and the 4-byte pad is pure alignment slack.
+
+The recv/send buffers at 4KB each are the real killer — 16GB for buffers alone. Most idle WebSocket connections have nothing buffered.
+
+**Optimization 1: Compact object header — 16 bytes → 8 bytes**
+
+```c
+// Current: 16 bytes
+typedef struct { int64_t rc; int32_t tag; int32_t pad; } march_hdr;
+
+// Optimized: 8 bytes
+typedef struct {
+    uint32_t rc;     // 4 billion max refs — plenty
+    uint16_t tag;    // 65K constructors per type — plenty
+    uint16_t flags;  // GC flags, arena color, etc.
+} march_hdr_compact;
+```
+
+Saves 8 bytes per heap object. For Conn: `8 + 13×8 = 112 bytes`. For every WsFrame, every List cons cell, every Header pair. At 2M connections with ~20 objects average per connection, that's 320MB saved.
+
+But the real win is what this enables for field packing (see below).
+
+**Optimization 2: Conn field packing — 120 bytes → 64 bytes**
+
+The current Conn has 13 fields, all 8 bytes (uniform `i64/ptr` layout). But many fields are small:
+
+```
+Current Conn layout (120 bytes):
+  [header 16B] [fd:i64] [method:i64] [path:ptr] [path_info:ptr]
+  [query:ptr] [headers:ptr] [body:ptr] [status:i64] [resp_hdrs:ptr]
+  [resp_body:ptr] [halted:i64] [assigns:ptr] [upgrade:ptr]
+```
+
+With the compact header and field-type-aware layout:
+
+```
+Packed Conn layout (64 bytes):
+  [hdr 8B]
+  [fd:i32] [status:i16] [method:u8] [halted:u8]  -- 8 bytes (4 fields!)
+  [path:ptr] [path_info:ptr]                       -- 16 bytes
+  [query:ptr] [req_headers:ptr]                    -- 16 bytes
+  [req_body:ptr] [resp_headers:ptr]                -- 16 bytes  (upgrade tag packed into flags)
+```
+
+Wait — we can do better. For WebSocket connections, the Conn is only used during the upgrade handshake. After upgrade, only the `WsSocket(fd)` survives. The Conn gets freed (RC→0, Perceus). So Conn size doesn't matter for idle WS connections at all.
+
+What matters for idle WebSocket connections:
+
+```
+Per idle WS connection:
+  Process control block     48 bytes  (see below)
+  Coroutine stack          512 bytes  (see below)
+  WsSocket value             8 bytes  (compact header) + 4 bytes (fd) = 12 bytes
+  Handler state args        varies    (but minimal for echo/chat)
+  Recv buffer                0 bytes  (allocated on demand by io_uring)
+  Send buffer                0 bytes  (allocated on demand)
+  ─────────────────────────────────
+  Total                   ~580 bytes
+```
+
+**Optimization 3: Minimal coroutine stacks — 2KB → 512 bytes**
+
+A WebSocket handler in steady state has a tiny call depth:
+
+```
+echo_handler → WebSocket.recv → [suspended on io_uring]
+```
+
+That's 2-3 stack frames. Each frame: return address (8B) + saved registers (~48B) + locals. A 512-byte stack handles this easily. Guard page at the bottom catches overflow → `mmap` a bigger stack and copy (like Go's segmented/copyable stacks).
+
+```c
+// Growable stack: start tiny, grow on demand
+#define INITIAL_STACK_SIZE 512
+#define STACK_GUARD_SIZE   4096  // one page
+
+void *march_alloc_stack() {
+    // [guard page][512 bytes usable]
+    void *mem = mmap(NULL, STACK_GUARD_SIZE + INITIAL_STACK_SIZE,
+                     PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    mprotect(mem, STACK_GUARD_SIZE, PROT_NONE);  // guard page
+    return mem;
+}
+```
+
+But wait — 4KB guard page per connection defeats the purpose. Better: use **stackless coroutines**. The March handler compiles to a state machine (LLVM coroutine transform), so there's no stack at all — just a small frame on the process heap.
+
+```c
+// Stackless: handler state is a heap struct, not a stack
+typedef struct {
+    int state;        // resume point (switch label)
+    int64_t fd;       // captured from WsSocket
+    void *user_state; // handler's recursive args
+} march_ws_frame;    // ~24 bytes
+```
+
+With LLVM's coroutine lowering (`@llvm.coro.begin`, `@llvm.coro.suspend`), the tail-recursive `echo_handler` compiles to a state machine where `WebSocket.recv` is a suspend point. The "coroutine frame" is just the live variables across the suspend — typically 16-32 bytes.
+
+**Optimization 4: Process control block — 64 bytes → 48 bytes**
+
+```c
+typedef struct march_proc {
+    uint32_t pid;              // 4B (4 billion PIDs enough)
+    uint16_t status;           // 2B
+    uint16_t reductions;       // 2B (countdown from 4000, fits u16)
+    void *coro_frame;          // 8B (stackless coroutine state)
+    void *heap;                // 8B (arena pointer, NULL if no allocs)
+    uint32_t heap_used;        // 4B (arena offset)
+    uint32_t heap_size;        // 4B (arena capacity)
+    march_mailbox *mailbox;    // 8B (NULL if no actor interaction)
+    struct march_proc *next;   // 8B (run queue linkage)
+} march_proc;                  // = 48 bytes
+```
+
+Mailbox is NULL for pure WS handlers (most connections). Arena is NULL until the handler allocates — a simple echo handler allocates nothing (FBIP reuses the frame in-place).
+
+**Optimization 5: Zero-copy recv with io_uring — 0 bytes per idle connection**
+
+With `io_uring` provided buffers (`IORING_OP_PROVIDE_BUFFERS`), the kernel manages a shared buffer pool. Recv doesn't need a per-connection buffer — the kernel picks one from the pool when data arrives, and the connection releases it after processing.
+
+```c
+// Shared buffer pool: 1024 buffers × 4KB = 4MB total
+// Shared across ALL connections. Only active readers use a buffer.
+#define POOL_SIZE 1024
+#define BUF_SIZE  4096
+
+void setup_buffer_pool(struct io_uring *ring) {
+    void *pool = mmap(NULL, POOL_SIZE * BUF_SIZE, ...);
+    io_uring_register_buffers(ring, pool, POOL_SIZE);
+    // Submit PROVIDE_BUFFERS for the pool
+    struct io_uring_sqe *sqe = io_uring_get_sqe(ring);
+    io_uring_prep_provide_buffers(sqe, pool, BUF_SIZE, POOL_SIZE, 0, 0);
+}
+
+// recv uses pool buffer — no per-connection allocation
+io_uring_prep_recv(sqe, fd, NULL, 0, 0);
+sqe->flags |= IOSQE_BUFFER_SELECT;
+sqe->buf_group = 0;  // use the shared pool
+```
+
+With 1024 buffers shared across 2M connections: 4MB total instead of 8GB. Only connections actively receiving data consume a buffer, and it's returned to the pool immediately after processing.
+
+**Optimization 6: Lazy arena allocation — 0 bytes for simple handlers**
+
+The per-process arena (`heap` pointer) starts NULL. Allocation triggers arena creation. A pure WebSocket echo handler with FBIP reuse allocates nothing — the `TextFrame("Echo: " ++ msg)` reuses the incoming frame's memory. No arena needed.
+
+```c
+void *march_proc_alloc(march_proc *proc, int64_t sz) {
+    if (!proc->heap) {
+        // First allocation: create 1KB arena
+        proc->heap = mmap(NULL, 1024, ...);
+        proc->heap_size = 1024;
+        proc->heap_used = 0;
+    }
+    // Bump pointer
+    void *p = (char *)proc->heap + proc->heap_used;
+    proc->heap_used += sz;
+    return p;
+}
+```
+
+**Optimized memory budget:**
+
+| Component | Per idle WS conn | × 2M |
+|-----------|-----------------|-------|
+| Process control block | 48 bytes | 96 MB |
+| Coroutine frame (stackless) | 32 bytes | 64 MB |
+| WsSocket value | 12 bytes | 24 MB |
+| Arena heap | 0 bytes (lazy, none for echo) | 0 |
+| Recv buffer | 0 bytes (shared pool) | 4 MB pool |
+| Send buffer | 0 bytes (shared pool) | 4 MB pool |
+| Kernel fd | 0 bytes (kernel-side) | ~256 MB kernel |
+| **Userspace total** | **~92 bytes** | **~184 MB** |
+| **With kernel** | | **~440 MB** |
+
+**That's 2 million WebSocket connections in under 512MB.** On a 16GB machine. The kernel fd table (~128 bytes per fd) and socket buffers (~128 bytes per socket with `SO_RCVBUF` minimized) are the floor — everything else is squeezed to near-zero.
+
+**Comparison:**
+
+| Runtime | Per idle WS conn | 2M connections |
+|---------|-----------------|----------------|
+| Phoenix/BEAM | ~2-3 KB | ~4-6 GB |
+| Go (goroutine) | ~4-8 KB | ~8-16 GB |
+| March (naive) | ~10 KB | ~20 GB |
+| March (optimized) | **~92 bytes** | **~184 MB** |
+| Theoretical min (just fds) | ~128 bytes | ~256 MB |
+
+March beats BEAM by 20-30× per connection because:
+1. **Stackless coroutines** — no per-process stack (BEAM allocates ~2KB per process)
+2. **FBIP in-place reuse** — simple handlers allocate zero heap
+3. **io_uring buffer pools** — no per-connection recv buffer
+4. **Compact headers** — 8-byte object headers vs BEAM's tagged word per value
+5. **Compiled native code** — no bytecode interpreter state per process
+
+The trade-off: BEAM processes are more flexible (arbitrary Erlang code, process dictionary, arbitrary mailbox patterns). March's stackless approach requires the handler to compile to a state machine, which works perfectly for the `recv → process → send → loop` pattern but limits what you can do inside a handler. Deep recursion or complex control flow may force fallback to a stackful coroutine (512B-2KB stack).
+
+A 64GB machine comfortably handles **2M active connections with room for application state**, or **10M+ idle connections** at the theoretical limit.
 
 **How March processes suspend on I/O:**
 
@@ -786,11 +985,13 @@ end
 - Connection state machine in C
 
 **Needed for Tier 3 (2M connections):**
-- Stackful coroutine implementation (setjmp/longjmp or platform asm)
+- LLVM coroutine lowering for stackless suspend/resume (`@llvm.coro.*`)
 - Wire scheduler into compiled runtime (C port of `scheduler.ml`)
-- Per-process arena allocator in C (replaces `calloc` in `march_alloc`)
+- Per-process lazy arena allocator in C (replaces `calloc` in `march_alloc`)
+- `io_uring` provided buffers (shared buffer pool, zero per-connection buffers)
 - Process-aware io_uring integration
-- Growable stacks (guard page + mmap on fault)
+- Compact 8-byte object header (`{rc:u32, tag:u16, flags:u16}`)
+- Fallback: stackful coroutines for handlers with deep call stacks
 
 ## Capability Security
 
