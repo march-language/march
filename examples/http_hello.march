@@ -1,0 +1,17 @@
+-- examples/http_hello.march
+mod HttpHello do
+
+  fn router(conn) do
+    match (Conn.method(conn), Conn.path_info(conn)) with
+    | (Get, Nil) -> conn |> Conn.text(200, "Hello from compiled March!")
+    | _ -> conn |> Conn.text(404, "Not Found")
+    end
+  end
+
+  fn main() do
+    HttpServer.new(8080)
+    |> HttpServer.plug(router)
+    |> HttpServer.listen()
+  end
+
+end
