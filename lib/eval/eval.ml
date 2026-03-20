@@ -2267,65 +2267,12 @@ and eval_expr_inner (env : env) (e : expr) : value =
     (match pid_val with
      | VPid pid ->
        (match Hashtbl.find_opt actor_registry pid with
-        | None -> VCon ("None", [])
-        | Some inst when not inst.ai_alive -> VCon ("None", [])
+        | None -> VUnit
+        | Some inst when not inst.ai_alive -> VUnit
         | Some inst ->
-          let (msg_tag, msg_args) = match msg_val with
-            | VCon  (tag, args) -> (tag, args)
-            | VAtom tag         -> (tag, [])
-            | _ -> eval_error "send: message must be a constructor value, got %s"
-                     (value_to_string msg_val)
-          in
-          (match List.find_opt (fun h -> h.ah_msg.txt = msg_tag)
-                   inst.ai_def.actor_handlers with
-           | None ->
-             eval_error "send: actor has no handler for '%s'" msg_tag
-           | Some handler ->
-             if List.length handler.ah_params <> List.length msg_args then
-               eval_error "send: handler '%s' expects %d args, got %d"
-                 msg_tag (List.length handler.ah_params) (List.length msg_args);
-             let param_bindings =
-               List.map2 (fun p v -> (p.param_name.txt, v))
-                 handler.ah_params msg_args
-             in
-             let handler_env =
-               [("state", inst.ai_state)] @ param_bindings @ !(inst.ai_env_ref)
-             in
-             let state_before = inst.ai_state in
-             let frame_idx = match !debug_ctx with
-               | Some ctx -> ctx.dc_trace.rb_size - 1
-               | None -> -1
-             in
-             let new_state =
-               (try let s = eval_expr handler_env handler.ah_body in
-                    (match !debug_ctx with
-                     | Some ctx when ctx.dc_enabled ->
-                       let evt = { ame_pid          = pid;
-                                   ame_actor_name   = inst.ai_name;
-                                   ame_msg          = msg_val;
-                                   ame_state_before = state_before;
-                                   ame_state_after  = Some s;
-                                   ame_frame_idx    = frame_idx } in
-                       ctx.dc_actor_log <- ctx.dc_actor_log @ [evt]
-                     | _ -> ());
-                    s
-                with exn ->
-                  (match !debug_ctx with
-                   | Some ctx when ctx.dc_enabled ->
-                     let evt = { ame_pid          = pid;
-                                 ame_actor_name   = inst.ai_name;
-                                 ame_msg          = msg_val;
-                                 ame_state_before = state_before;
-                                 ame_state_after  = None;
-                                 ame_frame_idx    = frame_idx } in
-                     ctx.dc_actor_log <- ctx.dc_actor_log @ [evt]
-                   | _ -> ());
-                  raise exn)
-             in
-             inst.ai_state <- new_state;
-             (* Return Some(new_state) so callers can inspect the result.
-                Existing code uses Some(_) which matches any payload. *)
-             VCon ("Some", [new_state])))
+          (* Phase 4: async — push message to mailbox, do not dispatch inline *)
+          Queue.push msg_val inst.ai_mailbox;
+          VUnit)
      | _ ->
        eval_error "send: first argument must be a Pid, got %s"
          (value_to_string pid_val))

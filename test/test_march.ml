@@ -3320,6 +3320,29 @@ let test_eval_task_sends_to_actor () =
   (* If we get here without error, cross-tier messaging works *)
   ()
 
+(** Phase 4: send() should push to mailbox, NOT dispatch inline.
+    After send(), mailbox_size = 1 and state is unchanged. *)
+let test_async_send_queues_not_dispatches () =
+  let src = {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    fn main() do
+      let pid = spawn(Counter)
+      send(pid, Inc())
+      mailbox_size(pid)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  (* After send(), message is queued but not yet processed.
+     mailbox_size should be 1, NOT 0. *)
+  Alcotest.(check int) "mailbox has 1 queued message" 1
+    (match v with March_eval.Eval.VInt n -> n | _ -> -1)
+
 let test_eval_reduction_count () =
   let src = {|mod Test do
     fn countdown(n) do
@@ -5108,6 +5131,8 @@ let () =
           Alcotest.test_case "spawn_steal with pool"     `Quick (with_reset test_eval_spawn_steal_with_pool);
           Alcotest.test_case "workpool threading"        `Quick (with_reset test_eval_workpool_threading);
           Alcotest.test_case "task sends to actor"       `Quick (with_reset test_eval_task_sends_to_actor);
+          Alcotest.test_case "async send queues not dispatches" `Quick
+            (with_reset test_async_send_queues_not_dispatches);
         ] );
       ( "work_stealing",
         [
