@@ -1,0 +1,33 @@
+mod ResourceDemo do
+  actor Worker do
+    state { id : Int }
+    init { id = 0 }
+    on SetId(n : Int) do { id = n } end
+    on Work() do
+      println("[Worker] doing work, id = " ++ to_string(state.id))
+      state
+    end
+  end
+
+  fn main() do
+    println("=== OS Resource Drop Demo (Phase 6a) ===")
+
+    let pid = spawn(Worker)
+    send(pid, SetId(42))
+    run_until_idle()
+
+    println("Worker spawned, pid = " ++ to_string(pid))
+    println("Registering cleanup resource...")
+    register_resource(pid, "worker_connection",
+      fn _ ->
+        println("[Cleanup] worker_connection released (pid was " ++ to_string(pid) ++ ")")
+    )
+
+    println("Crashing worker...")
+    kill(pid)
+    println("Worker alive: " ++ to_string(is_alive(pid)))
+    println("(Cleanup should have run above, before this line)")
+
+    println("=== Done ===")
+  end
+end
