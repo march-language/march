@@ -1,6 +1,8 @@
 -- File module: filesystem I/O.
 -- All I/O functions return Result(value, FileError).
--- Use with_lines / with_chunks for streaming (resource cleanup guaranteed).
+-- Use with_lines / with_chunks for streaming (file handle closed after callback returns).
+-- Note: if the callback raises an unhandled exception, the handle may leak.
+-- March does not have try/finally semantics.
 
 mod File do
 
@@ -23,10 +25,15 @@ pub fn read_lines(path) do
   | Err(e) -> Err(e)
   | Ok(s) ->
     let lines = String.split(s, "\n")
-    match List.reverse(lines) with
-    | Cons("", rest) -> Ok(List.reverse(rest))
-    | ig -> Ok(lines)
+    -- Strip all trailing empty strings (from trailing newlines)
+    fn strip_trailing(xs) do
+      match List.reverse(xs) with
+      | Nil -> Nil
+      | Cons("", rest) -> strip_trailing(List.reverse(rest))
+      | ig -> xs
+      end
     end
+    Ok(strip_trailing(lines))
   end
 end
 
@@ -46,8 +53,11 @@ pub fn delete(path) do file_delete(path) end
 pub fn copy(src, dest) do file_copy(src, dest) end
 pub fn rename(src, dest) do file_rename(src, dest) end
 
--- Streaming (scoped, guarantees file handle cleanup)
+-- Streaming: closed after callback returns (not exception-safe)
 
+-- Streaming: opens path, creates a single-pass Seq(String) of lines, calls callback,
+-- then closes the file handle. The Seq is single-pass -- consuming it twice yields
+-- empty results on the second pass.
 pub fn with_lines(path, callback) do
   match file_open(path) with
   | Err(e) -> Err(e)
@@ -84,6 +94,7 @@ end
 
 -- Low-level callbacks (side-effect iteration)
 
+-- Internal helper: recursively reads lines. Used by each_line.
 fn each_line_loop(fd, f) do
   match file_read_line(fd) with
   | None -> :ok
@@ -103,6 +114,7 @@ pub fn each_line(path, f) do
   end
 end
 
+-- Internal helper: recursively reads chunks. Used by each_chunk.
 fn each_chunk_loop(fd, size, f) do
   match file_read_chunk(fd, size) with
   | None -> :ok
