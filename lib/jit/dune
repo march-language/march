@@ -1,0 +1,8 @@
+; lib/jit/dune
+; Note: -ldl is needed on Linux but not macOS (dlopen is in libSystem).
+; This project targets macOS, so no -ldl needed. For Linux, add
+; (c_library_flags (-ldl)) later.
+(library
+ (name march_jit)
+ (libraries unix)
+ (foreign_stubs (language c) (names jit_stubs)))
