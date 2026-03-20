@@ -2283,12 +2283,18 @@ and eval_expr_inner (env : env) (e : expr) : value =
     (match pid_val with
      | VPid pid ->
        (match Hashtbl.find_opt actor_registry pid with
-        | None -> VUnit
-        | Some inst when not inst.ai_alive -> VUnit
+        | None -> VUnit  (* dead/unknown actor: fire-and-forget, silently drop *)
+        | Some inst when not inst.ai_alive -> VUnit  (* actor was killed: drop *)
         | Some inst ->
-          (* Phase 4: async — push message to mailbox, do not dispatch inline *)
-          Queue.push msg_val inst.ai_mailbox;
-          VUnit)
+          (* Phase 4: async — push message to mailbox, do not dispatch inline.
+             Only constructor values (VCon/VAtom) are valid messages. *)
+          (match msg_val with
+           | VCon _ | VAtom _ ->
+             Queue.push msg_val inst.ai_mailbox;
+             VUnit
+           | _ ->
+             eval_error "send: message must be a constructor value, got %s"
+               (value_to_string msg_val)))
      | _ ->
        eval_error "send: first argument must be a Pid, got %s"
          (value_to_string pid_val))

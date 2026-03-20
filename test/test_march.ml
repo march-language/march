@@ -5131,8 +5131,6 @@ let () =
           Alcotest.test_case "spawn_steal with pool"     `Quick (with_reset test_eval_spawn_steal_with_pool);
           Alcotest.test_case "workpool threading"        `Quick (with_reset test_eval_workpool_threading);
           Alcotest.test_case "task sends to actor"       `Quick (with_reset test_eval_task_sends_to_actor);
-          Alcotest.test_case "async send queues not dispatches" `Quick
-            (with_reset test_async_send_queues_not_dispatches);
         ] );
       ( "work_stealing",
         [
@@ -5229,6 +5227,10 @@ let () =
       ("supervision phase5", [
         Alcotest.test_case "task_spawn_link completes"         `Quick (with_reset test_supervision_task_spawn_link_completes);
         Alcotest.test_case "task_spawn_link crash propagates"  `Quick (with_reset test_supervision_task_spawn_link_crash_propagates);
+      ]);
+      ("eval phase 4", [
+        Alcotest.test_case "async send queues not dispatches" `Quick
+          (with_reset test_async_send_queues_not_dispatches);
       ]);
       ("file builtins", [
         Alcotest.test_case "file_exists false" `Quick test_file_builtin_exists_false;
