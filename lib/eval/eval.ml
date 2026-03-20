@@ -1505,14 +1505,30 @@ let base_env : env =
   ; ("dir_list", VBuiltin ("dir_list", function
       | [VString path] ->
         (try
-           let entries = Sys.readdir path in
-           Array.sort String.compare entries;
-           let lst = Array.fold_right
+           let d = Unix.opendir path in
+           let entries = ref [] in
+           (try
+              while true do
+                let e = Unix.readdir d in
+                if e <> "." && e <> ".." then
+                  entries := e :: !entries
+              done
+            with End_of_file -> ());
+           Unix.closedir d;
+           let sorted = List.sort String.compare !entries in
+           let lst = List.fold_right
              (fun e acc -> VCon ("Cons", [VString e; acc]))
-             entries (VCon ("Nil", [])) in
+             sorted (VCon ("Nil", [])) in
            VCon ("Ok", [lst])
          with
-         | Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+         | Unix.Unix_error (Unix.ENOENT, _, _) ->
+           VCon ("Err", [VCon ("NotFound", [VString path])])
+         | Unix.Unix_error (Unix.EACCES, _, _) ->
+           VCon ("Err", [VCon ("Permission", [VString path])])
+         | Unix.Unix_error (Unix.ENOTDIR, _, _) ->
+           VCon ("Err", [VCon ("IsDirectory", [VString path])])
+         | Unix.Unix_error (err, _, _) ->
+           VCon ("Err", [VCon ("IoError", [VString (Unix.error_message err)])]))
       | _ -> eval_error "dir_list(path)"))
 
   ; ("dir_mkdir", VBuiltin ("dir_mkdir", function

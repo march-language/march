@@ -37,6 +37,8 @@ pub fn read_lines(path) do
   end
 end
 
+-- Returns true for any filesystem entry including directories.
+-- Use Dir.exists to test specifically for directories.
 pub fn exists(path) do
   file_exists(path)
 end
