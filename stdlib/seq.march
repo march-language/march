@@ -137,18 +137,16 @@ pub fn zip(s1, s2) do
     | Cons(y, rest) -> (f(a, (x, y)), rest)
     end
   end
-  fn run_zip(fold, lst, acc, f) do
-    let result = fold((acc, lst), fn(pair, x) -> step_zip(pair, x, f))
+  -- Takes s2_seq as a param so to_list is called at consumption time (deferred)
+  fn run_zip(fold, s2_seq, acc, f) do
+    let lst2 = to_list(s2_seq)
+    let result = fold((acc, lst2), fn(pair, x) -> step_zip(pair, x, f))
     let (a, ig) = result
     a
   end
   match s1 with
   | Seq(fold) ->
-    -- Defer materialization of s2 until consumption
-    Seq(fn(acc, f) do
-      let lst2 = to_list(s2)
-      run_zip(fold, lst2, acc, f)
-    end)
+    Seq(fn(acc, f) -> run_zip(fold, s2, acc, f))
   end
 end
 
