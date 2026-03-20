@@ -1,0 +1,314 @@
+-- Enum module: Elixir-style enumeration over List(a).
+--
+-- All functions operate on List(a). The Iterable interface (when runtime
+-- dispatch lands) will generalise these to any collection.
+--
+-- Comparator convention: cmp : a -> a -> Bool is curried; cmp(x)(y) = true
+-- means x should come before y (x is "less than or equal to" y).
+--
+-- See specs/2026-03-19-sorting-and-enum-design.md for design rationale.
+
+mod Enum do
+
+-- Internal helper: reverse a list. Avoids dependency on prelude's reverse.
+fn rev(xs : List(a)) : List(a) do
+  fn go(lst : List(a), acc : List(a)) : List(a) do
+    match lst with
+    | Nil        -> acc
+    | Cons(h, t) -> go(t, Cons(h, acc))
+    end
+  end
+  go(xs, Nil)
+end
+
+-- ---- Traversal ----
+
+doc """
+Applies f to each element and returns a new list of results. O(n).
+
+This is the primary way to transform a collection element-by-element.
+"""
+pub fn map(xs : List(a), f : a -> b) : List(b) do
+  fn go(lst : List(a), acc : List(b)) : List(b) do
+    match lst with
+    | Nil        -> rev(acc)
+    | Cons(h, t) -> go(t, Cons(f(h), acc))
+    end
+  end
+  go(xs, Nil)
+end
+
+doc """
+Applies f to each element (f returns a list) and concatenates all results.
+O(n * m) where m is average sublist length.
+
+Use when each element expands to zero or more output elements (e.g. tokenizing,
+expanding ranges). Equivalent to Haskell's concatMap.
+"""
+pub fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
+  -- append_list: append ys onto xs (xs ++ ys). O(|xs|).
+  fn append_list(left : List(b), right : List(b)) : List(b) do
+    match left with
+    | Nil        -> right
+    | Cons(x, r) -> Cons(x, append_list(r, right))
+    end
+  end
+  fn go(lst : List(a), acc : List(b)) : List(b) do
+    match lst with
+    | Nil        -> acc
+    | Cons(h, t) -> go(t, append_list(acc, f(h)))
+    end
+  end
+  go(xs, Nil)
+end
+
+doc """
+Returns only the elements for which pred returns true. O(n).
+
+Preserves order and is stable (equal elements stay in original relative order).
+"""
+pub fn filter(xs : List(a), pred : a -> Bool) : List(a) do
+  fn go(lst : List(a), acc : List(a)) : List(a) do
+    match lst with
+    | Nil        -> rev(acc)
+    | Cons(h, t) ->
+      if pred(h) then go(t, Cons(h, acc))
+      else go(t, acc)
+    end
+  end
+  go(xs, Nil)
+end
+
+doc """
+Left fold over a list. f is curried: f(acc)(x) returns the new accumulator.
+O(n).
+
+This is the primitive from which most other Enum functions can be derived.
+Use fold when you need to accumulate a single value from all elements.
+"""
+pub fn fold(zero : b, xs : List(a), f : b -> a -> b) : b do
+  fn go(lst : List(a), acc : b) : b do
+    match lst with
+    | Nil        -> acc
+    | Cons(h, t) ->
+      let g = f(acc)
+      go(t, g(h))
+    end
+  end
+  go(xs, zero)
+end
+
+doc """
+Like fold, but uses the first element as the initial accumulator.
+Returns None for empty lists, Some(result) otherwise. O(n).
+
+Prefer over fold when there is no natural zero value (e.g. max, min,
+string concatenation without a starting value).
+"""
+pub fn reduce(xs : List(a), f : a -> a -> a) : Option(a) do
+  match xs with
+  | Nil        -> None
+  | Cons(h, t) ->
+    fn go(lst : List(a), acc : a) : a do
+      match lst with
+      | Nil        -> acc
+      | Cons(x, r) ->
+        let g = f(acc)
+        go(r, g(x))
+      end
+    end
+    Some(go(t, h))
+  end
+end
+
+doc """
+Applies f to each element for side effects and returns Unit. O(n).
+
+Use when you want to perform an action (e.g. println) for each element
+and don't care about the result. Returns Unit regardless of f's return type.
+"""
+pub fn each(xs : List(a), f : a -> b) : Unit do
+  match xs with
+  | Nil        -> ()
+  | Cons(h, t) ->
+    let _ = f(h)
+    each(t, f)
+  end
+end
+
+-- ---- Predicates and queries ----
+
+doc """
+Returns the number of elements in the list. O(n).
+
+Prefer this over computing length inside a recursive helper when possible.
+"""
+pub fn count(xs : List(a)) : Int do
+  fn go(lst : List(a), acc : Int) : Int do
+    match lst with
+    | Nil        -> acc
+    | Cons(_, t) -> go(t, acc + 1)
+    end
+  end
+  go(xs, 0)
+end
+
+doc """
+Returns true if at least one element satisfies pred. Short-circuits. O(n).
+
+Use any instead of filter + count when you only need a yes/no answer —
+any stops at the first match.
+"""
+pub fn any(xs : List(a), pred : a -> Bool) : Bool do
+  match xs with
+  | Nil        -> false
+  | Cons(h, t) ->
+    if pred(h) then true
+    else any(t, pred)
+  end
+end
+
+doc """
+Returns true if all elements satisfy pred. Short-circuits on first failure. O(n).
+
+Use all to validate a collection without counting or filtering.
+"""
+pub fn all(xs : List(a), pred : a -> Bool) : Bool do
+  match xs with
+  | Nil        -> true
+  | Cons(h, t) ->
+    if pred(h) then all(t, pred)
+    else false
+  end
+end
+
+doc """
+Returns the first element satisfying pred, or None if none does. O(n).
+
+Use find when you need one element that matches a condition. If you
+need all matching elements, use filter instead.
+"""
+pub fn find(xs : List(a), pred : a -> Bool) : Option(a) do
+  match xs with
+  | Nil        -> None
+  | Cons(h, t) ->
+    if pred(h) then Some(h)
+    else find(t, pred)
+  end
+end
+
+-- ---- Grouping and zipping ----
+
+doc """
+Groups consecutive elements with the same key into (key, [elements]) pairs.
+O(n).
+
+Note: only CONSECUTIVE equal-key elements are grouped. If the same key
+appears non-consecutively, it produces multiple groups (unlike a hash-group-by).
+This matches Elixir's chunk_by semantics, not group_by.
+
+Design: consecutive-only grouping avoids the need for a map/hashtable,
+keeping this function pure and O(n) without sorting.
+"""
+pub fn group_by(xs : List(a), key : a -> k) : List((k, List(a))) do
+  fn go(lst : List(a), cur_key : k, cur_group : List(a), acc : List((k, List(a)))) : List((k, List(a))) do
+    match lst with
+    | Nil ->
+      let finished = Cons((cur_key, rev(cur_group)), acc)
+      rev(finished)
+    | Cons(h, t) ->
+      let k = key(h)
+      -- compare keys with structural equality (==)
+      if k == cur_key then
+        go(t, cur_key, Cons(h, cur_group), acc)
+      else do
+        let finished = Cons((cur_key, rev(cur_group)), acc)
+        go(t, k, Cons(h, Nil), finished)
+      end
+    end
+  end
+  match xs with
+  | Nil        -> Nil
+  | Cons(h, t) ->
+    let k = key(h)
+    go(t, k, Cons(h, Nil), Nil)
+  end
+end
+
+doc """
+Zips two lists together applying f to corresponding elements.
+Stops at the shorter list. O(min(|xs|, |ys|)).
+f is curried: f(x)(y) returns the combined value.
+
+Use zip_with when you want to combine two collections element-by-element.
+Equivalent to Haskell's zipWith.
+"""
+pub fn zip_with(xs : List(a), ys : List(b), f : a -> b -> c) : List(c) do
+  fn go(as_ : List(a), bs : List(b), acc : List(c)) : List(c) do
+    match as_ with
+    | Nil -> rev(acc)
+    | Cons(x, xt) ->
+      match bs with
+      | Nil -> rev(acc)
+      | Cons(y, yt) ->
+        let g = f(x)
+        go(xt, yt, Cons(g(y), acc))
+      end
+    end
+  end
+  go(xs, ys, Nil)
+end
+
+-- ---- Sorting wrappers ----
+
+doc """
+Sorts xs by cmp. Stable (preserves relative order of equal elements).
+Uses Timsort: O(n log n) worst-case, O(n) on already-sorted input.
+
+Prefer this for general-purpose sorting. The stability guarantee means
+that if you sort by key A and then by key B, elements with equal B
+remain in A order.
+
+cmp is curried: cmp(x)(y) = true means x should come before y.
+"""
+pub fn sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+  Sort.timsort_by(xs, cmp)
+end
+
+doc """
+Sorts xs using Timsort. Stable, O(n log n) worst-case, O(n) on sorted input.
+
+Explicitly names the algorithm for documentation clarity. Prefer sort_by
+for application code; use timsort_by when you specifically need stability
+and near-linear behavior on natural runs (e.g. merging pre-sorted logs).
+"""
+pub fn timsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+  Sort.timsort_by(xs, cmp)
+end
+
+doc """
+Sorts xs using Introsort. Unstable, O(n log n) worst-case guaranteed.
+
+Prefer over timsort_by when:
+  - worst-case O(n log n) is required (security-sensitive or adversarial input)
+  - stability is not needed and you want predictable worst-case behavior
+  - you are sorting data with no natural runs
+"""
+pub fn introsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+  Sort.introsort_by(xs, cmp)
+end
+
+doc """
+Sorts a small list (n <= 8) using optimal comparison networks.
+Falls back to mergesort for n > 8. Stable.
+
+Use sort_small_by when:
+  - you know the list has at most 8 elements (e.g. sorting tuples, fixed fields)
+  - you want provably minimal comparator count for the size
+For general sorting, prefer sort_by.
+"""
+pub fn sort_small_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+  Sort.sort_small_by(xs, cmp)
+end
+
+end

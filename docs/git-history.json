@@ -1,5 +1,101 @@
 [
   {
+    "hash": "e678b390c779484cf475bc80b65dd7611357f189",
+    "short_hash": "e678b39",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-20T10:17:32-04:00",
+    "message": "Add tradeoff analysis + select primitive for server-push\n\nThe 92-byte-per-connection model has real costs:\n\n1. Server-push was broken — handler blocked on recv can't receive\n   actor messages. Fixed by adding WebSocket.select(socket, timeout)\n   that multiplexes fd + mailbox + timeout. Costs 8 bytes/conn.\n\n2. FBIP isn't zero under load — string concat allocates. Idle conns\n   are ~108 bytes, active conns converge to 1-4KB (still < BEAM).\n\n3. Stackless coroutines limit handler complexity — deep recursion\n   or complex control flow falls back to stackful (512B-2KB).\n\n4. io_uring buffer pools are Linux-only, compact headers are a\n   pervasive codebase change, no stack traces for debugging.\n\nHonest budget: 108 bytes idle, 1-4KB active. Broadcasting example\nrewritten to use select. ws_select added as new builtin.",
+    "files_changed": 1
+  },
+  {
+    "hash": "e5e01921273fdb91522b0d19546aec2023d60f48",
+    "short_hash": "e5e0192",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-20T10:12:33-04:00",
+    "message": "Optimize per-connection memory: 10KB → 92 bytes for idle WebSocket\n\nSix optimizations to hit 2M connections in under 512MB:\n1. Compact object header (16B → 8B): u32 rc, u16 tag, u16 flags\n2. Conn field packing (120B → 64B) — moot for WS (Conn freed after upgrade)\n3. Stackless coroutines via LLVM coro lowering — 32B frame, no stack\n4. Process control block: 48B with lazy arena + nullable mailbox\n5. io_uring provided buffers: shared 4MB pool, zero per-connection alloc\n6. Lazy arena: 0 bytes for pure handlers (FBIP reuse means no allocation)\n\nResult: 92 bytes/conn userspace, ~184MB for 2M connections.\nBeats BEAM (2-3KB/conn) by 20-30× via stackless + FBIP + zero-copy IO.",
+    "files_changed": 1
+  },
+  {
+    "hash": "f29d20109ae510b13bfaea66e586ea9ca5a07567",
+    "short_hash": "f29d201",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-20T10:03:46-04:00",
+    "message": "Add compiled mode + 2M connection scaling architecture to HTTP server spec\n\nThree-tier scaling model:\n- Tier 1: Thread-per-connection (OS threads, ~50K ceiling)\n- Tier 2: io_uring event loop (compiled, ~500K)\n- Tier 3: March lightweight processes (compiled, 2M+)\n  Uses existing scheduler infra (reduction counting, lock-free\n  mailboxes, Chase-Lev work-stealing) ported to C runtime.\n\nCompiled mode: builtins become C functions in march_runtime.c,\nplug pipeline defunctionalizes to indirect calls, Conn transforms\nget FBIP in-place reuse via Perceus. March user code identical\nacross all tiers.",
+    "files_changed": 1
+  },
+  {
+    "hash": "ce31c87f97eee97210ad8bf42002bb71dead8ed9",
+    "short_hash": "ce31c87",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-20T09:45:00-04:00",
+    "message": "Add WebSocket support to HTTP server spec\n\nUpgrade via plug pipeline: WebSocket.upgrade(conn, handler) stores\nhandler in Conn's new Upgrade field. Runtime detects upgrade after\npipeline, performs RFC 6455 handshake, enters March handler.\n\nHandlers are tail-recursive functions with pattern matching on\nWsFrame (TextFrame/BinaryFrame/Ping/Pong/Close). State threaded\nthrough recursion args. Broadcasting via actors holding socket lists.\n\nNew builtins: ws_recv, ws_send, ws_handshake. New stdlib file:\nwebsocket.march. Conn type gains 13th field (Upgrade).",
+    "files_changed": 1
+  },
+  {
+    "hash": "edd72143c4c2de798cb91a4f88a4547a81ecde1a",
+    "short_hash": "edd7214",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-20T09:22:51-04:00",
+    "message": "Add thread supervision to HTTP server spec\n\nConnection threads are now supervised by the accept loop: atomic\ncounter tracks active connections, max_connections enforces a cap\n(503 on overload), SO_RCVTIMEO/SO_SNDTIMEO kill idle clients,\nSIGTERM triggers graceful drain. Matches Bandit/ThousandIsland\nsemantics without OTP supervision trees.",
+    "files_changed": 1
+  },
+  {
+    "hash": "c6c42780e97b3f22159010e8b6c85af8ca7fbc61",
+    "short_hash": "c6c4278",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-20T03:57:38-04:00",
+    "message": "fix(defun,lower): proper nested-pattern compilation and unique lambda names\n\nDefunctionalization (defun.ml):\n- Add lam_uid (globally unique int) to lambda_info to distinguish multiple\n  inner functions with the same user-visible name (e.g. fn go in different\n  modules or different call sites in the same module)\n- Use physical equality (lam.lam_fn == fn) for lambda lookup in rewrite_expr\n  instead of List.assoc_opt by name — prevents wrong free-var sets when two\n  lambdas share a name (e.g. stdlib list.range's inner go capturing `start`\n  vs a user-defined go with no free vars)\n- Unique apply/closure names: go$apply$0, $Clo_go$0, etc. — eliminates\n  \"invalid redefinition of function\" LLVM errors when multiple go lambdas\n  were all emitting go$apply\n\nPattern matching (lower.ml):\n- Replace flat lower_match (which produced duplicate switch-case values for\n  multi-arm Cons patterns) with compile_matrix, a proper pattern matrix\n  decision-tree compiler\n- compile_matrix handles nested PatCon / PatTuple sub-patterns by recursively\n  introducing fresh field variables and nested ECase nodes\n- Wildcard / PatVar rows become the default branch; constructor rows are\n  grouped by tag and specialized with sub-pattern expansion\n- Fixes \"duplicate case value in switch\" LLVM error in timsort / sort_nearly_sorted\n\nBenchmarks (bench/):\n- Add seven new sorting benchmarks: timsort, heapsort, introsort, alphadev_sort,\n  insertion_sort, sort_small_batched, sort_nearly_sorted\n- All produce correct output (minimum 1423 for random 10k; 0 for nearly-sorted)\n- sort_nearly_sorted: build two independent lists (one per sort) to avoid\n  Perceus UAF — march_incrc only protects the root node, not the full tree;\n  passing the same list to two consuming functions requires deep RC support\n  which is not yet implemented\n- run_bench.sh: add sort benchmark sections (C qsort and OCaml List.sort\n  baselines plus all March sort variants)",
+    "files_changed": 10
+  },
+  {
+    "hash": "ac521f2e3f187255b4c26778338c09026de4e643",
+    "short_hash": "ac521f2",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-19T23:45:26-04:00",
+    "message": "feat: implement supervision phases 2-5 with TDD and working examples\n\nPhase 2 — Supervisor actor pattern:\n- AST: add restart_strategy, supervise_config, extend actor_def\n- Lexer: supervise/strategy/max_restarts/within/one_for_one/one_for_all/rest_for_one/restart keywords\n- Parser: supervise block grammar\n- Eval: supervisor spawn (auto-starts children), one_for_one/one_for_all/rest_for_one restart logic, max-restarts windowing, crash→notify→restart chain\n\nPhase 3 — Epoch-based capability tracking:\n- Eval: VCap(pid,epoch), VActorId values; get_cap returns Some(VCap)/None; send_checked validates epoch before delivery; increment_epoch builtin\n- Typecheck: get_cap/send_checked/pid_of_int type signatures\n\nPhase 5 — Task linking:\n- Eval: task_spawn_link builtin (crash propagates to parent actor)\n\nQuality-of-life:\n- pid_of_int builtin for accessing supervisor state child pids\n- send() now returns Some(handler_result) instead of Some(()) so callers can read actor state back\n- ESend typechecked as fresh var (not Option(Unit)) enabling field access on result\n- poly2 type helper in builtin_bindings\n\nTests (362 total, 0 regressions):\n- 8 phase1 tests: monitors, Down delivery, demonitor, links, immediate noproc\n- 5 phase2 tests: one_for_one, max_restarts, one_for_all, rest_for_one, state reset\n- 6 phase3 tests: epoch=0, get_cap, send_checked ok/error, epoch increment, stale cap\n- 2 phase5 tests: task completes, crash propagates\n\nWorking examples:\n- examples/supervision_monitor.march: Down delivery, mailbox_size, demonitor, immediate Down on dead actor\n- examples/supervision_supervisor.march: auto-spawn, crash→restart with new pid, fresh state\n- examples/supervision_epochs.march: Cap acquire, send_checked ok/error, stale cap after restart, fresh cap",
+    "files_changed": 9
+  },
+  {
+    "hash": "7522cd813d0ccb6b9a5f838814af83c8fd6144a5",
+    "short_hash": "7522cd8",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-19T19:31:13-04:00",
+    "message": "feat(compiled): lower task builtins to inline LLVM IR\n\nPhase 1 (eager single-threaded) task builtins now work in the compiled\nbackend. task_spawn emits an inline closure call and boxes the result,\ntask_await_unwrap unboxes it, task_yield/task_reductions are no-ops,\ntask_spawn_steal ignores the pool arg, and get_work_pool returns null.\n\nAll four parallel benchmarks (par_fib, parallel, par_worksteal, par_map)\ncompile and produce correct output. Uses single-param thunks (fn x -> ...)\nto work around zero-param lambda type system bug.",
+    "files_changed": 8
+  },
+  {
+    "hash": "635cfb2ca666fe8c94e903f5cf3f79052f84c62e",
+    "short_hash": "635cfb2",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-19T19:16:31-04:00",
+    "message": "feat: add capability-based security system\n\nModules must declare IO capabilities they use via `needs X`; functions\nthat perform IO take explicit `Cap(X)` parameters. The compiler enforces\nthe contract at typecheck time with actionable diagnostics.\n\n- AST: DNeeds variant (landed in earlier commit)\n- Lexer/parser: `needs` keyword + dotted cap paths + Cap(X) type syntax\n- Typecheck: capability hierarchy (IO subsumes IO.Console, IO.Network,\n  etc.), check_module_needs validates declarations vs usage at both\n  top-level and nested mod scope, unused-needs warning, least-privilege\n  hint when Cap(IO) root is used\n- Eval: DNeeds is a no-op; root_cap and cap_narrow builtins wired\n- Builtin types: IO capability tokens registered (IO, IO.Console, …)\n- Tests: 9 capability test cases covering pure modules, declared/missing\n  needs, supertype subsumption, wrong subtype, multiple needs, and AST\n  round-tripping\n- examples/capabilities.march: runnable showcase of the full system",
+    "files_changed": 7
+  },
+  {
+    "hash": "fefb7820a7f99ac844ad71246af9240ad5bb54da",
+    "short_hash": "fefb782",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-19T18:52:18-04:00",
+    "message": "feat(stdlib): add Http module with URL parsing, TCP sockets, and capability types\n\n- stdlib/http.march: Http module with parse_url, scheme, host, path, port,\n  query, headers, body accessors; Scheme/Request/Response types; capability\n  type TcpSocket wrapping a socket fd\n\n- lib/eval/eval.ml: tcp_connect, tcp_send_all, tcp_recv, tcp_close builtins\n  wired into the base environment using OCaml Unix module\n\n- lib/eval/dune: add unix to eval library dependencies\n\n- lib/typecheck/typecheck.ml: IO capability hierarchy (IO > IO.Network >\n  IO.NetConnect / IO.NetListen, etc.) with cap_ancestors for subtyping;\n  hint/has_diagnostics/has_hints helpers in errors.ml\n\n- bin/main.ml: load http.march from stdlib directory\n\n- test/test_march.ml: 20 tests covering parse_url, scheme, host, path, port,\n  query, header accessors, and basic Request/Response construction (286 total)",
+    "files_changed": 7
+  },
+  {
+    "hash": "f0078b592dda8fcf74b478fbcb3710483bfed0a8",
+    "short_hash": "f0078b5",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-19T17:43:02-04:00",
+    "message": "fix: DMod lowering, string builtins, and Perceus wildcard-branch scrutinee bug\n\nThree fixes for native compilation of stdlib modules:\n\n1. **DMod lowering** (lower.ml): Was `| Ast.DMod _ -> ()` — silently\n   dropping all stdlib module declarations.  Now lowers each inner DFn\n   and applies a TIR rename pass so intra-module calls (e.g.\n   `from_string` inside IOList) become qualified (`IOList.from_string`)\n   and are found correctly by defun.ml's top_level set.\n\n2. **String builtins** (llvm_emit.ml, defun.ml, runtime):\n   `string_byte_length`, `string_is_empty`, `string_join`, and\n   `string_to_int` are now wired into the LLVM emitter's builtin tables\n   and declared in the runtime header/implementation.\n\n3. **Perceus wildcard branch** (perceus.ml): The default (`_`) branch of\n   ECase was unconditionally prepending `EDecRC(scrutinee)` even when\n   the branch body still used the scrutinee variable directly (e.g.\n   `IOList.from_strings` passing `xs` to `map_strings(xs)`).  Fixed by\n   checking `name_free_in` before inserting the DecRC.  Also moved\n   `name_free_in` before `insert_rc_expr` so both Phase 2 and Phase 4\n   can share it.\n\nAdditionally fixes `stdlib/iolist.march` `from_strings` to avoid\nnested sub-constructor patterns (e.g. `Cons(s, Nil)`) that the current\n`lower_match` cannot enforce — used flat `| Nil -> … | _ -> …` instead.\n\nAll 266 tests pass.",
+    "files_changed": 7
+  },
+  {
+    "hash": "d3ec83ed5f96dbf1d50625defef32bd63c6f7a1b",
+    "short_hash": "d3ec83e",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-19T17:39:04-04:00",
+    "message": "feat(bench): add embarrassingly parallel benchmarks\n\nAdd three new parallel benchmarks exercising the two-tier scheduler:\n- par_fib: parallel Fibonacci via task_spawn fork/join\n- par_map: chunked parallel Collatz map (independent tasks)\n- par_worksteal: work-stealing fib via task_spawn_steal + Cap(WorkPool)\n\nUpdate parallel.march to use new task builtins (task_spawn/task_await_unwrap\ninstead of old spawn_task/await_all API). Update specs/benchmarks.md with\nentries for all new benchmarks and the task/work-stealing change mapping.",
+    "files_changed": 5
+  },
+  {
     "hash": "67f3c6d539bd4e9ce813e30c9c93ca930fa7638c",
     "short_hash": "67f3c6d",
     "author": "Matthew Gilliam",

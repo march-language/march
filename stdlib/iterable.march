@@ -1,0 +1,28 @@
+-- Iterable interface: a placeholder for future runtime-dispatch generalisation.
+--
+-- Currently all Enum functions operate on List(a) directly.  When the
+-- runtime gains interface dispatch this module will expose an Iterable(a)
+-- interface that List, Array, Range, and other collections can implement,
+-- allowing Enum functions to work over any collection without specialisation.
+--
+-- Nothing here is callable yet; it exists to document the intended shape.
+
+mod Iterable do
+
+-- Placeholder: interface declaration syntax is not yet stable.
+-- The intended interface is:
+--
+--   interface Iterable(a) do
+--     fn next(self : Self) : Option((a, Self))
+--   end
+--
+-- impl Iterable(a) for List(a) do
+--   fn next(xs : List(a)) : Option((a, List(a))) do
+--     match xs with
+--     | Nil        -> None
+--     | Cons(h, t) -> Some((h, t))
+--     end
+--   end
+-- end
+
+end

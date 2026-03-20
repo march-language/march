@@ -66,6 +66,62 @@ mod HttpTransport do
   end
 
   doc """
+  Send a request on an existing fd and stream the response body.
+  Calls on_chunk(chunk_string) for each body chunk as it arrives.
+  Returns Ok((status_code, headers, last_chunk_result)) or Err.
+  Does NOT close the connection.
+  """
+  pub fn stream_request_on(fd, req, on_chunk) do
+    let meth = Http.method_to_string(Http.method(req))
+    let req_host = Http.host(req)
+    let req_path = Http.path(req)
+    let req_query = Http.query(req)
+    let req_headers = Http.headers(req)
+    let req_body = Http.body(req)
+
+    let raw_request = http_serialize_request(meth, req_host, req_path, req_query, req_headers, req_body)
+
+    match tcp_send_all(fd, raw_request) with
+    | Err(msg) -> Err(SendError(msg))
+    | Ok(_) ->
+      match tcp_recv_http_headers(fd) with
+      | Err(msg) -> Err(RecvError(msg))
+      | Ok((headers_str, content_length, is_chunked)) ->
+        match http_parse_response(headers_str) with
+        | Err(msg) -> Err(ParseError(msg))
+        | Ok((status_code, resp_headers, _)) ->
+          if is_chunked then
+            stream_chunked_body(fd, on_chunk, status_code, resp_headers)
+          else
+            stream_fixed_body(fd, content_length, on_chunk, status_code, resp_headers)
+        end
+      end
+    end
+  end
+
+  fn stream_chunked_body(fd, on_chunk, status_code, resp_headers) do
+    match tcp_recv_chunked_frame(fd) with
+    | Err(msg) -> Err(RecvError(msg))
+    | Ok("") -> Ok((status_code, resp_headers, ()))
+    | Ok(chunk) ->
+      on_chunk(chunk)
+      stream_chunked_body(fd, on_chunk, status_code, resp_headers)
+    end
+  end
+
+  fn stream_fixed_body(fd, remaining, on_chunk, status_code, resp_headers) do
+    if remaining == 0 then Ok((status_code, resp_headers, ()))
+    else
+      match tcp_recv_chunk(fd, remaining) with
+      | Err(msg) -> Err(RecvError(msg))
+      | Ok("") -> Ok((status_code, resp_headers, ()))
+      | Ok(chunk) ->
+        on_chunk(chunk)
+        stream_fixed_body(fd, remaining - string_length(chunk), on_chunk, status_code, resp_headers)
+      end
+  end
+
+  doc """
   Send an HTTP request and receive the response.
   Opens a TCP connection, sends the request with Connection: close,
   receives and parses the response, then closes the connection.

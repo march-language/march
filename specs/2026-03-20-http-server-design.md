@@ -44,6 +44,7 @@ HttpServer.listen(server)           -- builtin, implemented in OCaml
         ├── State:
         │     active : Atomic.t int     -- live connection count
         │     shutdown : Atomic.t bool  -- graceful shutdown flag
+        │     ws_fds : Mutex.t * fd list ref  -- WebSocket fds (for drain signaling)
         │     max_conns : int           -- from Server config
         │     idle_timeout : float      -- from Server config
         │
@@ -57,7 +58,7 @@ HttpServer.listen(server)           -- builtin, implemented in OCaml
         │     ├── setsockopt SO_RCVTIMEO idle_timeout
         │     └── setsockopt SO_SNDTIMEO idle_timeout
         │
-        ├── Atomic.incr active
+        ├── ignore (Atomic.fetch_and_add active 1)
         │
         ├── Thread.create → connection thread
         │     │
@@ -71,7 +72,7 @@ HttpServer.listen(server)           -- builtin, implemented in OCaml
         │     │
         │     ├── On crash: catch Eval_error → send 500 → close fd
         │     ├── On timeout: catch Unix_error(EAGAIN) → close fd
-        │     └── finally: Atomic.decr active  -- ALWAYS runs
+        │     └── finally: ignore (Atomic.fetch_and_add active (-1))  -- ALWAYS runs
         │
         └── (loop immediately accepts next connection)
 ```
@@ -94,7 +95,8 @@ type Conn = Conn(
   Int,                   -- fd (TCP socket)
   Method,                -- request method
   String,                -- request path (raw, e.g. "/users/42")
-  List(String),          -- path_info (split segments: ["users", "42"])
+  List(String),          -- path_info (split on "/", empty segments filtered:
+                         --   "/users/42" → ["users", "42"], "/" → [])
   String,                -- query_string (raw, e.g. "page=1&limit=10")
   List(Header),          -- request headers
   String,                -- request body
@@ -126,6 +128,14 @@ pub fn halted(conn)      : Bool
 pub fn assigns(conn)     : List((String, String))
 pub fn get_assign(conn, key) : Option(String)
 pub fn upgrade(conn)     : Upgrade
+
+-- Method → String conversion for logging
+pub fn method_to_string(m : Method) : String do
+  match m with
+  | Get -> "GET" | Post -> "POST" | Put -> "PUT" | Patch -> "PATCH"
+  | Delete -> "DELETE" | Head -> "HEAD" | Options -> "OPTIONS"
+  end
+end
 ```
 
 When linear Conn is added in v2, accessors will destructure-and-reconstruct to satisfy linearity (consuming the old Conn, returning both the extracted value and a new Conn), or we'll add a borrow mechanism to the type checker.
@@ -146,9 +156,11 @@ pub fn assign(conn, key, value) : Conn
 pub fn send_resp(conn, status, body) : Conn
 
 -- Mark as halted without setting a response
--- (used by middleware to short-circuit)
+-- (used by middleware to short-circuit — caller should call send_resp first)
 pub fn halt(conn) : Conn
 ```
+
+**Runtime behavior when halted with no response set:** If the pipeline returns a halted conn with `status = 0` (no `send_resp` was called), the runtime sends a `500 Internal Server Error` with an empty body. This catches the case where middleware calls `halt` without setting a response — a programming error, but one that shouldn't crash the server. In debug mode, log a warning: `"[march] Warning: pipeline halted without send_resp"`.
 
 ### Convenience Response Helpers
 
@@ -179,8 +191,14 @@ pub fn redirect(conn, url) : Conn do
   |> send_resp(302, "")
 end
 
-pub fn send_file(conn, status, path) : Conn
--- reads file, sets content-type from extension, sends
+pub fn send_file(conn, status, path) : Conn do
+  -- Reads file via File.read(path). On Err, returns conn |> send_resp(404, "Not found").
+  -- Sets content-type from extension using a builtin lookup:
+  --   .html → text/html, .json → application/json, .css → text/css,
+  --   .js → application/javascript, .png → image/png, .jpg → image/jpeg,
+  --   .svg → image/svg+xml, _ → application/octet-stream
+  -- Then calls send_resp(conn, status, file_contents).
+end
 ```
 
 ## Plugs and Pipelines
@@ -249,7 +267,7 @@ end
 
 pub fn plug(server, p) do
   match server with
-  | Server(port, plugs, mc, it) -> Server(port, append(plugs, Cons(p, Nil)), mc, it)
+  | Server(port, plugs, mc, it) -> Server(port, List.append(plugs, Cons(p, Nil)), mc, it)
   end
 end
 
@@ -269,6 +287,16 @@ end
 ## Routing
 
 Routing is not a special subsystem. It's a plug that pattern-matches.
+
+> **Parser prerequisite:** The examples below use list literal patterns (`["users", id]`).
+> Currently the parser only supports `[]`/`[a, b]` in expression position, not pattern position.
+> This is a small parser addition — extend the `pattern` rule in `parser.mly` with:
+> ```
+> | LBRACKET; RBRACKET                                          { PatCon (mk_name "Nil" $loc, []) }
+> | LBRACKET; ps = separated_nonempty_list(COMMA, pattern); RBRACKET { desugar_list_pat ps $loc }
+> ```
+> Where `desugar_list_pat` folds right into `PatCon("Cons", [p, PatCon("Nil", [])])`.
+> Without this, routes must use `Nil`/`Cons(...)` patterns directly (see Scoped Pipelines below for an example).
 
 ```march
 fn router(conn) do
@@ -332,6 +360,7 @@ Each thread runs this sequence (implemented in OCaml inside `eval.ml`):
 1. tcp_recv_http(fd)           -- read raw HTTP request (blocks, releases lock)
 2. http_parse_request(raw)     -- parse method, path, headers, body
 3. build Conn value            -- construct the March Conn ADT
+                               -- path_info = split path on "/", filter empty segments
 4. eval run_pipeline(conn, plugs)  -- run the March plug pipeline
 5. extract response from Conn  -- read status, headers, body from returned Conn
 6. http_serialize_response()   -- format HTTP response
@@ -367,14 +396,14 @@ We don't have OTP supervision trees, but we get the same properties with simpler
 **Crash recovery** — each thread wraps the full request lifecycle in OCaml-level `try ... with`. The `finally` block always decrements the active counter, even on crash:
 
 ```ocaml
-let connection_thread client_fd active pipeline env =
+let connection_thread client_fd active pipeline env ws_fds_mu ws_fds =
   Fun.protect
     ~finally:(fun () ->
-      Atomic.decr active;
+      ignore (Atomic.fetch_and_add active (-1));
       (try Unix.close client_fd with _ -> ()))
     (fun () ->
       try
-        handle_connection client_fd pipeline env
+        handle_connection client_fd pipeline env ws_fds_mu ws_fds
       with
       | Eval_error msg ->
         send_500_response client_fd;
@@ -397,8 +426,9 @@ if Atomic.get active >= max_conns then begin
   send_503_response client_fd;
   Unix.close client_fd
 end else begin
-  Atomic.incr active;
-  ignore (Thread.create (connection_thread client_fd active pipeline) env)
+  ignore (Atomic.fetch_and_add active 1);
+  ignore (Thread.create
+    (fun () -> connection_thread client_fd active pipeline env ws_fds_mu ws_fds) ())
 end
 ```
 
@@ -417,9 +447,11 @@ If a client is idle longer than the timeout, `Unix.recv` raises `Unix_error(EAGA
 **Graceful shutdown** — a `SIGTERM` handler sets a shutdown flag. The accept loop uses `Unix.select` with a 1-second timeout so it can check the flag between accepts:
 
 ```ocaml
-let server_loop listen_fd pipeline env max_conns idle_timeout =
+let server_loop listen_fd port pipeline env max_conns idle_timeout =
   let active = Atomic.make 0 in
   let shutdown = Atomic.make false in
+  let ws_fds_mu = Mutex.create () in
+  let ws_fds = ref [] in
   Sys.set_signal Sys.sigterm
     (Sys.Signal_handle (fun _ -> Atomic.set shutdown true));
   Printf.printf "Listening on port %d (max_conns=%d, idle_timeout=%ds)\n%!"
@@ -428,24 +460,36 @@ let server_loop listen_fd pipeline env max_conns idle_timeout =
     match Unix.select [listen_fd] [] [] 1.0 with
     | (fd :: _, _, _) ->
       let client_fd, _addr = Unix.accept fd in
-      set_timeouts client_fd idle_timeout;
       if Atomic.get active >= max_conns then begin
         send_503_response client_fd;
         Unix.close client_fd
       end else begin
-        Atomic.incr active;
+        set_timeouts client_fd idle_timeout;
+        ignore (Atomic.fetch_and_add active 1);
         ignore (Thread.create
-          (connection_thread client_fd active pipeline) env)
+          (fun () -> connection_thread client_fd active pipeline env ws_fds_mu ws_fds) ())
       end
     | _ -> () (* select timeout — check shutdown flag *)
   done;
-  (* Drain: wait for in-flight connections to finish *)
+  (* Drain: close listen socket, then wait for in-flight connections *)
+  Unix.close listen_fd;
   Printf.eprintf "[march] Shutting down, draining %d connections...\n%!"
     (Atomic.get active);
-  while Atomic.get active > 0 do
+  (* Signal WebSocket connections to close by shutting down their fds.
+     ws_recv/ws_select will raise Unix_error, caught by connection_thread. *)
+  let fds_snapshot =
+    Mutex.lock ws_fds_mu; let fds = !ws_fds in Mutex.unlock ws_fds_mu; fds in
+  List.iter (fun fd ->
+    (try Unix.shutdown fd Unix.SHUTDOWN_RD with _ -> ())
+  ) fds_snapshot;
+  (* Wait for all handlers to finish, with a hard timeout *)
+  let deadline = Unix.gettimeofday () +. 30.0 in
+  while Atomic.get active > 0 && Unix.gettimeofday () < deadline do
     Unix.sleepf 0.1
   done;
-  Unix.close listen_fd;
+  if Atomic.get active > 0 then
+    Printf.eprintf "[march] Warning: %d connections did not drain in 30s\n%!"
+      (Atomic.get active);
   Printf.eprintf "[march] Server stopped.\n%!"
 ```
 
@@ -475,10 +519,11 @@ Note: neither Bandit nor March **restarts** crashed connections. HTTP is statele
 
 **What needs protection:**
 - `actor_registry`, `next_pid`, `next_monitor_id` — shared mutable state in eval.ml
-- Protected with a `Mutex.t` around actor operations
+- `next_pid` and `next_monitor_id` use `Atomic.t int` (lock-free increment via `Atomic.fetch_and_add`)
+- `actor_registry` is protected with a `Mutex.t` — but only around registry mutations (`spawn`, `kill`, `monitor`, `link`). Message sends (`ESend`) only need to read the registry to find the target actor's mailbox, then enqueue; the mailbox itself is already a lock-free MPSC queue (`lib/scheduler/mailbox.ml`). So the hot path for broadcasting (send to N actors) takes the registry lock once per send for the lookup, not for the enqueue. A `Hashtbl`→`Mutex`-per-bucket sharded map would reduce contention further, but is not needed for v1.
 - Pure handlers (no actor interaction) run with zero synchronization overhead
 
-**For v1:** handlers that interact with actors will serialize through the mutex. Pure `Conn -> Conn` handlers (the common case for HTTP) run fully in parallel.
+**For v1:** handlers that interact with actors will serialize registry *lookups* through the mutex, but message delivery (the expensive part in broadcast) is lock-free. Pure `Conn -> Conn` handlers (the common case for HTTP) run fully in parallel.
 
 ### The March-Side API
 
@@ -506,7 +551,7 @@ HttpServer.new(4000)
    - Max connection enforcement (503 on overload)
    - `Fun.protect ~finally` in connection threads for crash-safe cleanup
    - `SIGTERM` handler + drain loop for graceful shutdown
-4. **Thread-local state** for `module_stack`, `reduction_ctx`, `debug_ctx` using `Thread.key`
+4. **Thread-local state** for `module_stack`, `reduction_ctx`, `debug_ctx`. **`Domain.DLS` is NOT suitable** — it's per-domain, not per-thread, and all connection threads run in Domain 0 (they'd silently clobber each other's state). `Domain.DLS` is also not thread-safe ([ocaml#12677](https://github.com/ocaml/ocaml/issues/12677)). OCaml 5 has no stdlib `Thread.key` yet ([ocaml#11770](https://github.com/ocaml/ocaml/issues/11770)). Use a **`(int, state) Hashtbl.t` keyed by `Thread.id (Thread.self ())`** behind a single `Mutex.t`. Each connection thread registers its state on entry and removes it on exit. Functions that currently read `!module_stack` become `Hashtbl.find tls_table (Thread.id (Thread.self ()))`. The mutex is only contended on thread create/destroy — not on every state access — because each thread only reads its own slot. Alternatively, pass all interpreter state as an explicit `eval_ctx` record through the call chain (more invasive but zero synchronization).
 
 ### Compiled Mode: LLVM IR (how the server works as native code)
 
@@ -612,7 +657,7 @@ clang -O2 runtime/march_runtime.c app.ll -lpthread -o server
 | Pipeline loop | Interpreter reduces ~50 AST nodes per plug | Tight loop, ~5 native instructions per plug |
 | String concat | Allocate March value + OCaml string ops | Direct `memcpy` via `march_string_concat` |
 | Pattern match routing | Interpreter walks pattern tree | Jump table via `switch i32` |
-| Conn transforms | Alloc new VVariant, copy fields | FBIP in-place rewrite (zero allocation) |
+| Conn transforms | Alloc new VCon, copy fields | FBIP in-place rewrite (zero allocation) |
 | Per-request overhead | ~100μs interpreter dispatch | ~1-5μs native |
 
 The I/O cost (TCP recv/send) dominates either way. But for compute-heavy handlers (JSON parsing, template rendering, auth token validation), compiled mode is 20-100× faster.
@@ -907,7 +952,7 @@ The broadcasting example in the WebSocket section doesn't actually work:
 fn chat_loop(room_pid, socket) do
   match WebSocket.recv(socket) with    -- blocked here forever
   | TextFrame(msg) ->
-    Actor.send(room_pid, Broadcast(msg))  -- sends TO the room
+    send(room_pid, Broadcast(msg))  -- sends TO the room
     chat_loop(room_pid, socket)
   | ...
 ```
@@ -923,18 +968,18 @@ BEAM doesn't have this problem. Each Erlang process has a single mailbox that re
 Add `WebSocket.select(socket, timeout)` that suspends until either a WebSocket frame arrives OR an actor message arrives:
 
 ```march
-type SelectResult = WsData(WsFrame) | ActorMsg(Msg) | Timeout
+type SelectResult(a) = WsData(WsFrame) | ActorMsg(a) | Timeout
 
 fn chat_loop(room_pid, socket) do
   match WebSocket.select(socket, 30000) with
   | WsData(TextFrame(msg)) ->
-    Actor.send(room_pid, Broadcast(msg))
+    send(room_pid, Broadcast(msg))
     chat_loop(room_pid, socket)
   | ActorMsg(Push(frame)) ->
     WebSocket.send(socket, frame)
     chat_loop(room_pid, socket)
   | WsData(Close(_, _)) ->
-    Actor.send(room_pid, Leave(socket))
+    send(room_pid, Leave(socket))
   | Timeout ->
     WebSocket.send(socket, Ping)
     chat_loop(room_pid, socket)
@@ -1279,9 +1324,16 @@ end
 -- Multiplex: wait on socket OR actor mailbox OR timeout
 -- This is the key primitive for server-push and broadcasting.
 -- Without it, handlers can only react to client messages.
-type SelectResult = WsData(WsFrame) | ActorMsg(Any) | Timeout
+--
+-- SelectResult is polymorphic in the actor message type:
+--   type SelectResult(a) = WsData(WsFrame) | ActorMsg(a) | Timeout
+-- The type variable `a` is inferred from how the handler pattern-matches
+-- on ActorMsg. For example, if the handler matches ActorMsg(Push(frame)),
+-- then `a` is inferred as ChatMsg (or whatever type Push belongs to).
+-- At the runtime level, ws_select returns the raw VCon from the mailbox;
+-- the type checker ensures the match arms are exhaustive over `a`.
 
-pub fn select(socket, timeout_ms) : SelectResult do
+pub fn select(socket, timeout_ms) : SelectResult(a) do
   match socket with
   | WsSocket(fd) -> ws_select(fd, timeout_ms)
   end
@@ -1328,7 +1380,6 @@ end
 fn chat_loop(socket, history) do
   match WebSocket.recv(socket) with
   | TextFrame(msg) ->
-    let entry = (msg, history)
     WebSocket.send(socket, TextFrame("You said: " ++ msg))
     chat_loop(socket, Cons(msg, history))
   | Close(_, _) ->
@@ -1346,47 +1397,57 @@ end
 For multi-client scenarios (chat rooms, live updates), the handler must wait on *both* the WebSocket fd and actor messages simultaneously. This requires `WebSocket.select` — without it, server-push is impossible (see Tradeoffs section).
 
 ```march
-type ChatMsg = Push(WsFrame) | ServerClose
-
 fn chat_handler(room_pid, socket) do
-  Actor.send(room_pid, Join(self()))
-  chat_loop(room_pid, socket)
-end
-
-fn chat_loop(room_pid, socket) do
-  match WebSocket.select(socket, 30000) with
-  | WsData(TextFrame(msg)) ->
-    -- Client sent a message — tell room to broadcast
-    Actor.send(room_pid, Broadcast(msg))
-    chat_loop(room_pid, socket)
-  | WsData(Close(_, _)) ->
-    Actor.send(room_pid, Leave(self()))
-  | WsData(Ping) ->
-    WebSocket.send(socket, Pong)
-    chat_loop(room_pid, socket)
-  | ActorMsg(Push(frame)) ->
-    -- Room pushed a message — forward to this client
-    WebSocket.send(socket, frame)
-    chat_loop(room_pid, socket)
-  | ActorMsg(ServerClose) ->
-    WebSocket.close(socket, 1000, "Server shutting down")
-  | Timeout ->
-    -- Keepalive
-    WebSocket.send(socket, Ping)
-    chat_loop(room_pid, socket)
-  | _ -> chat_loop(room_pid, socket)
+  match socket with
+  | WsSocket(fd) ->
+    send(room_pid, Join(fd))
+    chat_loop(room_pid, socket, fd)
   end
 end
 
--- Room actor: maintains list of connected pids, broadcasts to all
-fn room_actor(members) do
-  receive do
-  | Join(pid) -> room_actor(Cons(pid, members))
-  | Leave(pid) -> room_actor(remove(members, pid))
-  | Broadcast(msg) ->
+fn chat_loop(room_pid, socket, fd) do
+  match WebSocket.select(socket, 30000) with
+  | WsData(TextFrame(msg)) ->
+    -- Client sent a message — tell room to broadcast
+    send(room_pid, Broadcast(msg))
+    chat_loop(room_pid, socket, fd)
+  | WsData(Close(_, _)) ->
+    send(room_pid, Leave(fd))
+  | WsData(Ping) ->
+    WebSocket.send(socket, Pong)
+    chat_loop(room_pid, socket, fd)
+  | ActorMsg(Push(frame)) ->
+    -- Room pushed a message — forward to this client
+    WebSocket.send(socket, frame)
+    chat_loop(room_pid, socket, fd)
+  | Timeout ->
+    -- Keepalive
+    WebSocket.send(socket, Ping)
+    chat_loop(room_pid, socket, fd)
+  | _ -> chat_loop(room_pid, socket, fd)
+  end
+end
+
+-- Room actor: maintains list of connected client fds, broadcasts to all.
+-- Uses Int (fd) instead of WsSocket for state, since Int has structural equality
+-- (needed for filter). WsSocket wraps an Int, so we extract the fd.
+actor ChatRoom do
+  state { members : List(Int) }
+  init { members = Nil }
+  on Join(fd) do
+    { members = Cons(fd, members) }
+  end
+  on Leave(fd) do
+    { members = List.filter(members, fn(m) do m != fd end) }
+  end
+  on Broadcast(msg) do
     let frame = TextFrame(msg)
-    each(members, fn(pid) do Actor.send(pid, Push(frame)) end)
-    room_actor(members)
+    -- NOTE: WebSocket.send does blocking I/O. For N members, this handler
+    -- blocks N times. During this time the actor can't process other messages.
+    -- For v1 this is acceptable (small rooms). For large fan-out, use a
+    -- dedicated broadcast actor per-member or batch sends in compiled mode.
+    Enum.each(members, fn(fd) do ws_send(fd, frame) end)
+    { members = members }
   end
 end
 ```
@@ -1396,22 +1457,33 @@ end
 - An actor message arrives in the process mailbox → returns `ActorMsg(msg)`
 - The timeout expires → returns `Timeout`
 
-Under the hood: the io_uring loop watches the socket fd *and* the process's eventfd (signaled when the mailbox is non-empty). Whichever fires first wakes the process.
+Under the hood (v1 interpreter): each connection thread has a notification pipe. When an actor `send` enqueues a message, it also writes a byte to the pipe. `ws_select` calls `Unix.select` on both the socket fd and the pipe's read end — whichever fires first determines the return value. (In compiled Tier 3: io_uring watches the socket fd + process eventfd instead.)
 
-This is the March equivalent of Phoenix Channels + PubSub. The room actor is the channel, `Actor.send` is the PubSub, and `select` multiplexes network + actor I/O like BEAM's `receive`. No framework — just actors, functions, and `select`.
+This is the March equivalent of Phoenix Channels + PubSub. The room actor is the channel, `send` is the PubSub, and `select` multiplexes network + actor I/O like BEAM's `receive`. No framework — just actors, functions, and `select`.
 
 ### Routing WebSocket Connections
 
-WebSocket routes are just plug branches that call `WebSocket.upgrade`:
+WebSocket routes are just plug branches that call `WebSocket.upgrade`. The `room_pid` is spawned once at startup and captured by the router closure:
 
 ```march
-fn router(conn) do
-  match (Conn.method(conn), Conn.path_info(conn)) with
-  | (Get, ["ws", "echo"])  -> conn |> WebSocket.upgrade(echo_handler)
-  | (Get, ["ws", "chat"])  -> conn |> WebSocket.upgrade(chat_handler(room_pid))
-  | (Get, [])              -> conn |> Conn.text(200, "Hello!")
-  | _                      -> conn |> Conn.text(404, "Not found")
+fn main() do
+  -- Spawn the room actor once, before the server starts
+  let room_pid = spawn(ChatRoom)
+
+  fn router(conn) do
+    match (Conn.method(conn), Conn.path_info(conn)) with
+    | (Get, ["ws", "echo"])  -> conn |> WebSocket.upgrade(echo_handler)
+    | (Get, ["ws", "chat"])  ->
+      -- Wrap in a closure to capture room_pid:
+      conn |> WebSocket.upgrade(fn(socket) do chat_handler(room_pid, socket) end)
+    | (Get, [])              -> conn |> Conn.text(200, "Hello!")
+    | _                      -> conn |> Conn.text(404, "Not found")
+    end
   end
+
+  HttpServer.new(4000)
+  |> HttpServer.plug(router)
+  |> HttpServer.listen()
 end
 ```
 
@@ -1422,7 +1494,7 @@ Auth middleware runs before the router, so WebSocket connections go through the 
 After the plug pipeline returns, the runtime checks the upgrade field:
 
 ```ocaml
-let handle_connection client_fd pipeline env =
+let handle_connection client_fd pipeline env ws_fds_mu ws_fds =
   let raw = tcp_recv_http client_fd in
   let conn = build_conn client_fd raw in
   let result_conn = eval_pipeline conn pipeline env in
@@ -1439,9 +1511,20 @@ let handle_connection client_fd pipeline env =
     (* Remove socket timeout — WS connections are long-lived *)
     Unix.setsockopt_float client_fd Unix.SO_RCVTIMEO 0.0;
     Unix.setsockopt_float client_fd Unix.SO_SNDTIMEO 0.0;
+    (* Register this fd for graceful shutdown signaling *)
+    Mutex.lock ws_fds_mu;
+    ws_fds := client_fd :: !ws_fds;
+    Mutex.unlock ws_fds_mu;
     (* Call the March handler — blocks until it returns *)
-    eval_apply handler [VVariant ("WsSocket", [VInt (Obj.magic client_fd)])] env
-    (* Thread cleanup happens in Fun.protect ~finally *)
+    let fd_int = (Obj.magic client_fd : int) in
+    Fun.protect
+      ~finally:(fun () ->
+        Mutex.lock ws_fds_mu;
+        ws_fds := List.filter (fun fd -> fd <> client_fd) !ws_fds;
+        Mutex.unlock ws_fds_mu)
+      (fun () ->
+        eval_apply handler [VCon ("WsSocket", [VInt fd_int])] env)
+    (* Outer thread cleanup happens in connection_thread's Fun.protect ~finally *)
 ```
 
 The WebSocket handshake (RFC 6455 §4.2.2):
@@ -1527,12 +1610,12 @@ http_server_listen(port : Int, pipeline : List(Conn -> Conn),
   1. Unix.socket + Unix.bind(SO_REUSEADDR) + Unix.listen
   2. Install SIGTERM handler (sets shutdown flag)
   3. Loop: Unix.select(1s timeout) → check shutdown → check max_conns →
-     Unix.accept → set SO_RCVTIMEO/SO_SNDTIMEO → Atomic.incr active →
+     Unix.accept → set SO_RCVTIMEO/SO_SNDTIMEO → ignore (Atomic.fetch_and_add active 1) →
      Thread.create(connection_thread) → loop
   4. Each thread: tcp_recv_http → http_parse_request → build Conn →
-     eval pipeline → write response → close fd → Atomic.decr active
-  5. On crash: catch Eval_error → send 500 → close fd → decr active
-  6. On timeout: catch EAGAIN → close fd → decr active
+     eval pipeline → write response → close fd → ignore (Atomic.fetch_and_add active (-1))
+  5. On crash: catch Eval_error → send 500 → close fd (finally decrements active)
+  6. On timeout: catch EAGAIN → close fd (finally decrements active)
   7. On max_conns: accept → send 503 → close fd (no thread spawned)
   8. On shutdown: stop accepting, drain (wait for active=0), close listen_fd
   Blocks forever (the accept loop). Called from HttpServer.listen().
@@ -1572,12 +1655,25 @@ ws_handshake(fd : Int, key : String) -> Unit
   Called internally by the runtime after pipeline upgrade detection.
   Also exposed as a builtin for custom server implementations.
 
-ws_select(fd : Int, timeout_ms : Int) -> SelectResult
+ws_select(fd : Int, timeout_ms : Int) -> SelectResult(a)
   Suspend until a WebSocket frame arrives on fd, an actor message
   arrives in the current process's mailbox, or timeout expires.
-  Implementation: io_uring watches fd + process eventfd.
   Returns WsData(frame), ActorMsg(msg), or Timeout.
   This is the key primitive enabling server-push and pub/sub.
+
+  v1 interpreter implementation (OCaml threads):
+    Each connection thread has a per-thread notification pipe (pipe_rd, pipe_wr).
+    When an actor sends a message to a connection's mailbox, the mailbox enqueue
+    also writes a byte to pipe_wr to wake the select. The builtin calls
+    Unix.select [socket_fd; pipe_rd] [] [] timeout — whichever fires first
+    determines the return value. If socket_fd is readable, read a WS frame
+    and return WsData(frame). If pipe_rd is readable, drain the pipe byte,
+    dequeue from the actor mailbox, and return ActorMsg(msg). If neither
+    fires within timeout_ms, return Timeout.
+
+  Compiled mode (Tier 3):
+    io_uring watches fd + process eventfd (signaled on mailbox enqueue).
+    Wakes the process on whichever fires first.
 ```
 
 ### Existing Builtins Reused
@@ -1587,6 +1683,11 @@ tcp_recv_http(fd, max_bytes)   — already implemented for HTTP client; reads un
                                   headers complete, then reads body per Content-Length
                                   or chunked encoding. Works for reading requests too
                                   since HTTP/1.1 framing is symmetric.
+                                  Note for request parsing: clients sending POST/PUT
+                                  without Content-Length should be rejected (400). Requests
+                                  with Content-Length > max_body_size (default 1MB) should
+                                  be rejected (413 Payload Too Large) to prevent memory
+                                  exhaustion. The builtin already handles chunked encoding.
 
 tcp_send_all(fd, data)         — already implemented; sends all bytes in a loop.
 
@@ -1598,11 +1699,13 @@ string_split(s, sep)           — already implemented in eval.ml. Used for
 
 | File | Changes |
 |------|---------|
-| `lib/eval/dune` | Add `threads` library dependency |
-| `lib/eval/eval.ml` | Add `http_server_listen`, `http_parse_request`, `http_serialize_response`, `ws_recv`, `ws_send`, `ws_handshake` builtins; add `Mutex.t` around actor globals; thread-local state via `Thread.key`; WebSocket upgrade detection after pipeline |
-| `stdlib/http_server.march` | New file: `Conn` type (with Upgrade field), accessors, transforms, pipeline runner, `HttpServer.new`, `HttpServer.plug`, `HttpServer.listen` (calls builtin) |
-| `stdlib/websocket.march` | New file: `WsFrame`, `WsSocket`, `WebSocket.upgrade`, `WebSocket.recv`, `WebSocket.send`, `WebSocket.close` |
-| `bin/main.ml` | Add `http_server.march` to stdlib load order (after `http.march` for `Header` type) |
+| `lib/parser/parser.mly` | Add list literal patterns (`[a, b]` sugar for `Cons(a, Cons(b, Nil))`) — prerequisite for readable routing |
+| `march.opam` | Add `digestif` (SHA-1) and `base64` opam dependencies for WebSocket handshake |
+| `lib/eval/dune` | Add `threads`, `digestif`, `base64` library dependencies |
+| `lib/eval/eval.ml` | Add `http_server_listen`, `http_parse_request`, `http_serialize_response`, `ws_recv`, `ws_send`, `ws_handshake`, `ws_select` builtins; add `Mutex.t` around actor globals; thread-local state via `Hashtbl` keyed by `Thread.id` (see Required OCaml Changes §4); WebSocket upgrade detection after pipeline |
+| `stdlib/http_server.march` | New file: `Conn` type (with Upgrade field), accessors, transforms, `method_to_string`, pipeline runner, `HttpServer.new`, `HttpServer.plug`, `HttpServer.listen` (calls builtin) |
+| `stdlib/websocket.march` | New file: `WsFrame`, `WsSocket`, `SelectResult(a)`, `WebSocket.upgrade`, `WebSocket.recv`, `WebSocket.send`, `WebSocket.close`, `WebSocket.select` |
+| `bin/main.ml` | Add `http_server.march` and `websocket.march` to stdlib load order (after `http.march` for `Header` type) |
 | `test/test_march.ml` | Tests for builtins and server module |
 
 ## Testing Strategy

@@ -89,7 +89,7 @@ mod HttpClient do
 
   pub fn with_retry(client, max_attempts, backoff_ms) do
     match client with
-    | Client(rq, rs, es, redir, _) ->
+    | Client(rq, rs, es, redir, _, _) ->
       Client(rq, rs, es, redir, max_attempts, backoff_ms)
     end
   end
@@ -124,7 +124,7 @@ mod HttpClient do
       end
     end
     match client with
-    | Client(rq, rs, es, _, _) ->
+    | Client(rq, rs, es, _, _, _) ->
       list_concat(req_names(rq), list_concat(resp_names(rs), err_names(es)))
     end
   end
@@ -300,6 +300,41 @@ mod HttpClient do
           let result = callback(do_request)
           tcp_close(fd)
           Ok(result)
+        end
+      end
+    end
+  end
+
+  doc """
+  Stream a GET response body. Calls on_chunk(chunk_string) for each
+  chunk as it arrives over the wire. Returns Ok((status, headers, last_result))
+  where last_result is the return value of the final on_chunk call.
+
+  Example:
+    HttpClient.stream_get(client, "http://example.com/bigfile", fn(chunk) ->
+      print("got " ++ int_to_string(string_length(chunk)) ++ " bytes")
+    end)
+  """
+  pub fn stream_get(client, url, on_chunk) do
+    match Http.get(url) with
+    | Err(_) -> Err(StepError("url", "invalid url: " ++ url))
+    | Ok(req) ->
+      let req = Http.set_body(req, "")
+      match client with
+      | Client(req_steps, _, _, _, _, _) ->
+        match run_request_steps(req_steps, req) with
+        | Err(e) -> Err(e)
+        | Ok(transformed_req) ->
+          match HttpTransport.connect(transformed_req) with
+          | Err(e) -> Err(HttpTransportError(e))
+          | Ok(fd) ->
+            let result = HttpTransport.stream_request_on(fd, transformed_req, on_chunk)
+            tcp_close(fd)
+            match result with
+            | Err(e) -> Err(HttpTransportError(e))
+            | Ok((status, headers, last)) -> Ok((status, headers, last))
+            end
+          end
         end
       end
     end
