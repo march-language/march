@@ -1067,6 +1067,7 @@ let base_env : env =
           Buffer.add_string buf "Host: ";
           Buffer.add_string buf host;
           Buffer.add_string buf "\r\n";
+          Buffer.add_string buf "Connection: close\r\n";
           let rec add_headers = function
             | VCon ("Nil", []) -> ()
             | VCon ("Cons", [VCon ("Header", [VString n; VString v]); rest]) ->
@@ -1181,12 +1182,10 @@ let rec eval_block (env : env) (es : expr list) : value =
   (* Local named recursive function: fn go(params) do body end *)
   | ELetFn (name, params, _, body, _) :: rest ->
     let param_names = List.map (fun p -> p.param_name.txt) params in
-    Printf.eprintf "[DBG-LETFN] %s params=[%s]\n%!" name.txt (String.concat "," param_names);
     (* Use the env_ref trick so the function can call itself recursively. *)
     let env_ref = ref env in
     let rec_v = VBuiltin ("<rec:" ^ name.txt ^ ">", fun args ->
       let call_env = !env_ref in
-      Printf.eprintf "[DBG-LETFN-CALL] %s args=%d params=[%s]\n%!" name.txt (List.length args) (String.concat "," param_names);
       apply (VClosure (call_env, param_names, body)) args) in
     let env' = (name.txt, rec_v) :: env in
     env_ref := env';
@@ -1199,20 +1198,9 @@ let rec eval_block (env : env) (es : expr list) : value =
 and apply_inner (fn_val : value) (args : value list) : value =
   match fn_val with
   | VClosure (closure_env, params, body) ->
-    if List.length params <> List.length args then begin
-      let names = List.filter_map (fun (k, _) -> if String.length k < 30 then Some k else None) closure_env in
-      let span_str = match body with
-        | EBlock (_, sp) | EMatch (_, _, sp) | ELetFn (_, _, _, _, sp) | EApp (_, _, sp) | EVar { span = sp; _ } -> Printf.sprintf "%s:%d" sp.file sp.start_line
-        | _ -> "??" in
-      Printf.eprintf "[DBG-ARITY] closure params=[%s] args=%d (%s), body=%s at %s, env has: %s\n%!"
-        (String.concat "," params) (List.length args)
-        (String.concat "," (List.map value_to_string args))
-        (match body with EBlock _ -> "EBlock" | EMatch _ -> "EMatch" | ELetFn _ -> "ELetFn" | EApp _ -> "EApp" | EVar _ -> "EVar" | _ -> "other")
-        span_str
-        (String.concat ", " (List.filteri (fun i _ -> i < 10) names));
+    if List.length params <> List.length args then
       eval_error "arity mismatch: expected %d args, got %d"
-        (List.length params) (List.length args)
-    end;
+        (List.length params) (List.length args);
     let env' = List.combine params args @ closure_env in
     eval_expr env' body
 
@@ -1695,7 +1683,6 @@ let rec eval_decl (env : env) (d : decl) : env =
                                     fun args ->
                                       let call_env = !inner_ref in
                                       let fn_v = VClosure (call_env, params, clause.fc_body) in
-                                      Printf.eprintf "[DBG] calling %s with %d args, closure has %d params\n%!" def.fn_name.txt (List.length args) (List.length params);
                                       apply fn_v args) in
         let e' = (def.fn_name.txt, rec_closure)
                    :: List.remove_assoc def.fn_name.txt e in
