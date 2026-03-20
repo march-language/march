@@ -51,6 +51,14 @@ let () =
       ("needs", NEEDS);
       ("dbg", DBG);
       ("doc", DOC);
+      ("supervise", SUPERVISE);
+      ("strategy", STRATEGY);
+      ("max_restarts", MAX_RESTARTS);
+      ("within", WITHIN);
+      ("one_for_one", ONE_FOR_ONE);
+      ("one_for_all", ONE_FOR_ALL);
+      ("rest_for_one", REST_FOR_ONE);
+      ("restart", RESTART_KW);
     ]
 }
 

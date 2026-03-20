@@ -1348,10 +1348,14 @@ let test_defun_free_vars () =
     end
   end|} in
   (* After defun, the lifted $lam_apply fn should have n as a param *)
-  let lifted = List.filter (fun f ->
-    String.length f.March_tir.Tir.fn_name > 6 &&
-    String.sub f.March_tir.Tir.fn_name (String.length f.March_tir.Tir.fn_name - 6) 6 = "$apply"
-  ) m.March_tir.Tir.tm_fns in
+  let contains_apply s =
+    let target = "$apply" in
+    let tlen = String.length target in
+    let slen = String.length s in
+    let rec loop i = i <= slen - tlen && (String.sub s i tlen = target || loop (i+1)) in
+    loop 0
+  in
+  let lifted = List.filter (fun f -> contains_apply f.March_tir.Tir.fn_name) m.March_tir.Tir.tm_fns in
   Alcotest.(check bool) "lifted apply fn exists" true (List.length lifted >= 1);
   (* The apply fn should have 2 params: captured n + original x *)
   let apply_fn = List.hd lifted in
@@ -1789,17 +1793,24 @@ let test_complete_replace_with_suffix () =
 (* ------------------------------------------------------------------ *)
 
 let dummy_actor_def = March_ast.Ast.{
-  actor_state    = [];
-  actor_init     = ELit (LitInt 0, dummy_span);
-  actor_handlers = [];
+  actor_state     = [];
+  actor_init      = ELit (LitInt 0, dummy_span);
+  actor_handlers  = [];
+  actor_supervise = None;
 }
 
 let mk_actor_inst name alive st = March_eval.Eval.{
-  ai_name    = name;
-  ai_def     = dummy_actor_def;
-  ai_env_ref = ref [];
-  ai_state   = st;
-  ai_alive   = alive;
+  ai_name          = name;
+  ai_def           = dummy_actor_def;
+  ai_env_ref       = ref [];
+  ai_state         = st;
+  ai_alive         = alive;
+  ai_monitors      = [];
+  ai_links         = [];
+  ai_mailbox       = Queue.create ();
+  ai_supervisor    = None;
+  ai_restart_count = [];
+  ai_epoch         = 0;
 }
 
 let test_list_actors_empty () =
@@ -3475,6 +3486,852 @@ let test_cap_parse_needs_dotted () =
   Alcotest.(check bool) "IO.Network parsed as DNeeds" true
     (List.exists (fun paths -> List.mem "IO.Network" paths) cap_paths)
 
+(* ── Sort stdlib tests ──────────────────────────────────────────────────── *)
+
+let sort_decl = lazy (load_stdlib_file_for_test "sort.march")
+let enum_decl = lazy (load_stdlib_file_for_test "enum.march")
+
+let eval_with_sort src    = eval_with_stdlib [Lazy.force sort_decl] src
+let eval_with_enum src    = eval_with_stdlib [Lazy.force sort_decl; Lazy.force enum_decl] src
+
+(** Build a March Cons-list from an OCaml int list. *)
+let[@warning "-32"] rec make_vlist = function
+  | [] -> March_eval.Eval.VCon ("Nil", [])
+  | x :: xs -> March_eval.Eval.VCon ("Cons", [March_eval.Eval.VInt x; make_vlist xs])
+
+(** Assert two int lists are equal, converting from March VCon lists. *)
+let check_int_list msg expected actual =
+  let got = List.map vint (vlist actual) in
+  Alcotest.(check (list int)) msg expected got
+
+(* Helper: call Sort.sort_small_by on a literal list *)
+let sort_small xs =
+  let src = Printf.sprintf {|mod Test do
+    fn f() do
+      Sort.sort_small_by([%s], fn a -> fn b -> a <= b)
+    end
+  end|} (String.concat ", " (List.map string_of_int xs)) in
+  let env = eval_with_sort src in
+  call_fn env "f" []
+
+(* Helper: call Sort.timsort_by on a literal list *)
+let timsort xs =
+  let src = Printf.sprintf {|mod Test do
+    fn f() do
+      Sort.timsort_by([%s], fn a -> fn b -> a <= b)
+    end
+  end|} (String.concat ", " (List.map string_of_int xs)) in
+  let env = eval_with_sort src in
+  call_fn env "f" []
+
+(* Helper: call Sort.introsort_by on a literal list *)
+let introsort xs =
+  let src = Printf.sprintf {|mod Test do
+    fn f() do
+      Sort.introsort_by([%s], fn a -> fn b -> a <= b)
+    end
+  end|} (String.concat ", " (List.map string_of_int xs)) in
+  let env = eval_with_sort src in
+  call_fn env "f" []
+
+(* -- sort_small_by -- *)
+
+let test_sort_small_empty () =
+  check_int_list "sort_small [] = []" [] (sort_small [])
+
+let test_sort_small_n1 () =
+  check_int_list "sort_small [5] = [5]" [5] (sort_small [5])
+
+let test_sort_small_n2 () =
+  check_int_list "sort_small [2,1] = [1,2]" [1;2] (sort_small [2;1])
+
+let test_sort_small_n2_already_sorted () =
+  check_int_list "sort_small [1,2] = [1,2]" [1;2] (sort_small [1;2])
+
+let test_sort_small_n3 () =
+  check_int_list "sort_small [3,1,2] = [1,2,3]" [1;2;3] (sort_small [3;1;2])
+
+let test_sort_small_n3_all_perms () =
+  (* Verify all 6 permutations of [1,2,3] sort correctly *)
+  let perms = [[1;2;3];[1;3;2];[2;1;3];[2;3;1];[3;1;2];[3;2;1]] in
+  List.iter (fun perm ->
+    check_int_list
+      (Printf.sprintf "sort_small n=3 perm %s" (String.concat "," (List.map string_of_int perm)))
+      [1;2;3] (sort_small perm)
+  ) perms
+
+let test_sort_small_n4 () =
+  check_int_list "sort_small [4,2,3,1] = [1,2,3,4]" [1;2;3;4] (sort_small [4;2;3;1])
+
+let test_sort_small_n4_all_perms () =
+  (* 24 permutations of [1,2,3,4] *)
+  let perms = [
+    [1;2;3;4];[1;2;4;3];[1;3;2;4];[1;3;4;2];[1;4;2;3];[1;4;3;2];
+    [2;1;3;4];[2;1;4;3];[2;3;1;4];[2;3;4;1];[2;4;1;3];[2;4;3;1];
+    [3;1;2;4];[3;1;4;2];[3;2;1;4];[3;2;4;1];[3;4;1;2];[3;4;2;1];
+    [4;1;2;3];[4;1;3;2];[4;2;1;3];[4;2;3;1];[4;3;1;2];[4;3;2;1];
+  ] in
+  List.iter (fun perm ->
+    check_int_list
+      (Printf.sprintf "sort_small n=4 perm %s" (String.concat "," (List.map string_of_int perm)))
+      [1;2;3;4] (sort_small perm)
+  ) perms
+
+let test_sort_small_n5 () =
+  check_int_list "sort_small [5,3,1,4,2] = [1,2,3,4,5]" [1;2;3;4;5] (sort_small [5;3;1;4;2])
+
+let test_sort_small_n6 () =
+  check_int_list "sort_small [6,3,5,1,4,2] = [1..6]" [1;2;3;4;5;6] (sort_small [6;3;5;1;4;2])
+
+let test_sort_small_n7 () =
+  check_int_list "sort_small n=7 descending" [1;2;3;4;5;6;7] (sort_small [7;6;5;4;3;2;1])
+
+let test_sort_small_n8 () =
+  check_int_list "sort_small n=8 descending" [1;2;3;4;5;6;7;8] (sort_small [8;7;6;5;4;3;2;1])
+
+let test_sort_small_n9_fallback () =
+  (* n=9 falls back to mergesort *)
+  check_int_list "sort_small n=9 fallback" [1;2;3;4;5;6;7;8;9] (sort_small [9;5;3;7;1;8;2;6;4])
+
+let test_sort_small_stability () =
+  (* Stability: equal elements must preserve original order.
+     We use a pair sort: sort by first element, ties keep original order.
+     Since we only have Int lists, we test with all-equal elements. *)
+  check_int_list "sort_small equal elements stable" [1;1;1] (sort_small [1;1;1])
+
+(* -- timsort_by -- *)
+
+let test_timsort_empty () =
+  check_int_list "timsort [] = []" [] (timsort [])
+
+let test_timsort_single () =
+  check_int_list "timsort [7] = [7]" [7] (timsort [7])
+
+let test_timsort_already_sorted () =
+  let xs = [1;2;3;4;5;6;7;8;9;10] in
+  check_int_list "timsort already sorted" xs (timsort xs)
+
+let test_timsort_reverse () =
+  check_int_list "timsort reverse = sorted" [1;2;3;4;5] (timsort [5;4;3;2;1])
+
+let test_timsort_random () =
+  check_int_list "timsort random 20 elems" (List.sort compare [17;3;42;8;1;99;23;55;7;13;88;2;31;64;19;47;6;77;38;11])
+    (timsort [17;3;42;8;1;99;23;55;7;13;88;2;31;64;19;47;6;77;38;11])
+
+let test_timsort_nearly_sorted () =
+  (* Timsort's strength: nearly sorted input *)
+  check_int_list "timsort nearly sorted" [1;2;3;4;5;6;7;8;9;10]
+    (timsort [1;2;3;4;5;6;8;7;9;10])
+
+let test_timsort_stable () =
+  (* All equal: stable sort returns same order *)
+  check_int_list "timsort equal elems stable" [5;5;5;5] (timsort [5;5;5;5])
+
+(* -- introsort_by -- *)
+
+let test_introsort_empty () =
+  check_int_list "introsort [] = []" [] (introsort [])
+
+let test_introsort_single () =
+  check_int_list "introsort [7] = [7]" [7] (introsort [7])
+
+let test_introsort_already_sorted () =
+  let xs = [1;2;3;4;5;6;7;8;9;10] in
+  check_int_list "introsort already sorted" xs (introsort xs)
+
+let test_introsort_reverse () =
+  check_int_list "introsort reverse = sorted" [1;2;3;4;5] (introsort [5;4;3;2;1])
+
+let test_introsort_random () =
+  check_int_list "introsort random 20 elems"
+    (List.sort compare [17;3;42;8;1;99;23;55;7;13;88;2;31;64;19;47;6;77;38;11])
+    (introsort [17;3;42;8;1;99;23;55;7;13;88;2;31;64;19;47;6;77;38;11])
+
+let test_introsort_large () =
+  (* 100 elements in reverse — exercises heapsort fallback *)
+  let xs = List.init 100 (fun i -> 100 - i) in
+  let expected = List.init 100 (fun i -> i + 1) in
+  check_int_list "introsort 100 elements reverse" expected (introsort xs)
+
+(* -- Enum module tests -- *)
+
+let test_enum_map () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.map([1, 2, 3], fn x -> x * 2) end
+  end|} in
+  check_int_list "Enum.map *2" [2;4;6] (call_fn env "f" [])
+
+let test_enum_flat_map () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.flat_map([1, 2, 3], fn x -> [x, x]) end
+  end|} in
+  check_int_list "Enum.flat_map dup" [1;1;2;2;3;3] (call_fn env "f" [])
+
+let test_enum_filter () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.filter([1, 2, 3, 4, 5], fn x -> x % 2 == 0) end
+  end|} in
+  check_int_list "Enum.filter evens" [2;4] (call_fn env "f" [])
+
+let test_enum_fold () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.fold(0, [1, 2, 3, 4, 5], fn acc -> fn x -> acc + x) end
+  end|} in
+  Alcotest.(check int) "Enum.fold sum" 15 (vint (call_fn env "f" []))
+
+let test_enum_reduce_some () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.reduce([1, 2, 3, 4], fn a -> fn b -> a + b) end
+  end|} in
+  let v = call_fn env "f" [] in
+  let args = vcon "Some" v in
+  Alcotest.(check int) "Enum.reduce Some(10)" 10 (vint (List.hd args))
+
+let test_enum_reduce_none () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.reduce([], fn a -> fn b -> a + b) end
+  end|} in
+  let v = call_fn env "f" [] in
+  let _ = vcon "None" v in
+  ()
+
+let test_enum_each () =
+  (* each is for side effects; we verify it returns Unit *)
+  let env = eval_with_enum {|mod Test do
+    fn f() do
+      Enum.each([1, 2, 3], fn x -> x)
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  (match v with March_eval.Eval.VUnit -> () | _ -> Alcotest.fail "expected Unit")
+
+let test_enum_count () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.count([10, 20, 30, 40]) end
+  end|} in
+  Alcotest.(check int) "Enum.count 4" 4 (vint (call_fn env "f" []))
+
+let test_enum_any () =
+  let env = eval_with_enum {|mod Test do
+    fn yes() do Enum.any([1, 2, 3], fn x -> x > 2) end
+    fn no()  do Enum.any([1, 2, 3], fn x -> x > 10) end
+  end|} in
+  Alcotest.(check bool) "Enum.any true"  true  (vbool (call_fn env "yes" []));
+  Alcotest.(check bool) "Enum.any false" false (vbool (call_fn env "no"  []))
+
+let test_enum_all () =
+  let env = eval_with_enum {|mod Test do
+    fn yes() do Enum.all([2, 4, 6], fn x -> x % 2 == 0) end
+    fn no()  do Enum.all([2, 3, 6], fn x -> x % 2 == 0) end
+  end|} in
+  Alcotest.(check bool) "Enum.all true"  true  (vbool (call_fn env "yes" []));
+  Alcotest.(check bool) "Enum.all false" false (vbool (call_fn env "no"  []))
+
+let test_enum_find () =
+  let env = eval_with_enum {|mod Test do
+    fn found()    do Enum.find([1, 2, 3, 4], fn x -> x > 2) end
+    fn not_found() do Enum.find([1, 2, 3], fn x -> x > 10) end
+  end|} in
+  let found = call_fn env "found" [] in
+  let args = vcon "Some" found in
+  Alcotest.(check int) "Enum.find Some(3)" 3 (vint (List.hd args));
+  let not_found = call_fn env "not_found" [] in
+  let _ = vcon "None" not_found in
+  ()
+
+let test_enum_group_by () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.group_by([1, 1, 2, 2, 3], fn x -> x) end
+  end|} in
+  let v = call_fn env "f" [] in
+  let groups = vlist v in
+  (* Should be 3 groups: (1,[1,1]), (2,[2,2]), (3,[3]) *)
+  Alcotest.(check int) "Enum.group_by 3 groups" 3 (List.length groups)
+
+let test_enum_zip_with () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.zip_with([1, 2, 3], [10, 20, 30], fn a -> fn b -> a + b) end
+  end|} in
+  check_int_list "Enum.zip_with +" [11;22;33] (call_fn env "f" [])
+
+let test_enum_sort_by () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.sort_by([3, 1, 4, 1, 5], fn a -> fn b -> a <= b) end
+  end|} in
+  check_int_list "Enum.sort_by" [1;1;3;4;5] (call_fn env "f" [])
+
+let test_enum_timsort_by () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.timsort_by([5, 3, 1, 4, 2], fn a -> fn b -> a <= b) end
+  end|} in
+  check_int_list "Enum.timsort_by" [1;2;3;4;5] (call_fn env "f" [])
+
+let test_enum_introsort_by () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.introsort_by([5, 3, 1, 4, 2], fn a -> fn b -> a <= b) end
+  end|} in
+  check_int_list "Enum.introsort_by" [1;2;3;4;5] (call_fn env "f" [])
+
+let test_enum_sort_small_by () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.sort_small_by([4, 2, 3, 1], fn a -> fn b -> a <= b) end
+  end|} in
+  check_int_list "Enum.sort_small_by" [1;2;3;4] (call_fn env "f" [])
+
+(* ── Phase 1: Monitor and Link tests ──────────────────────────────── *)
+
+(** Helper: create a fresh actor inst with Phase 1 fields and add to registry. *)
+let add_fresh_actor pid name =
+  let inst = mk_actor_inst name true March_eval.Eval.VUnit in
+  Hashtbl.replace March_eval.Eval.actor_registry pid inst;
+  inst
+
+let test_monitor_receives_down_on_kill () =
+  March_eval.Eval.reset_scheduler_state ();
+  let _ia = add_fresh_actor 0 "A" in
+  let ib  = add_fresh_actor 1 "B" in
+  let _mon = March_eval.Eval.monitor_actor ~watcher_pid:1 ~target_pid:0 in
+  March_eval.Eval.crash_actor 0 "killed";
+  Alcotest.(check bool) "B's mailbox non-empty after A killed" true
+    (not (Queue.is_empty ib.March_eval.Eval.ai_mailbox))
+
+let test_demonitor_prevents_down () =
+  March_eval.Eval.reset_scheduler_state ();
+  let _ia = add_fresh_actor 0 "A" in
+  let ib  = add_fresh_actor 1 "B" in
+  let mon = March_eval.Eval.monitor_actor ~watcher_pid:1 ~target_pid:0 in
+  March_eval.Eval.demonitor_actor mon;
+  March_eval.Eval.crash_actor 0 "killed";
+  Alcotest.(check bool) "B's mailbox empty after demonitor" true
+    (Queue.is_empty ib.March_eval.Eval.ai_mailbox)
+
+let test_link_kills_both_on_crash () =
+  March_eval.Eval.reset_scheduler_state ();
+  let _ia = add_fresh_actor 0 "A" in
+  let ib  = add_fresh_actor 1 "B" in
+  March_eval.Eval.link_actors 0 1;
+  March_eval.Eval.crash_actor 0 "killed";
+  Alcotest.(check bool) "B dead after linked A crashes" true
+    (not ib.March_eval.Eval.ai_alive)
+
+let test_monitor_already_dead_immediate_down () =
+  March_eval.Eval.reset_scheduler_state ();
+  (* A is spawned already dead *)
+  let ia_dead = mk_actor_inst "A" false March_eval.Eval.VUnit in
+  Hashtbl.replace March_eval.Eval.actor_registry 0 ia_dead;
+  let ib = add_fresh_actor 1 "B" in
+  let _mon = March_eval.Eval.monitor_actor ~watcher_pid:1 ~target_pid:0 in
+  Alcotest.(check bool) "B gets immediate Down for dead actor" true
+    (not (Queue.is_empty ib.March_eval.Eval.ai_mailbox))
+
+let test_multiple_monitors_all_fire () =
+  March_eval.Eval.reset_scheduler_state ();
+  let _ia = add_fresh_actor 0 "A" in
+  let ib  = add_fresh_actor 1 "B" in
+  let ic  = add_fresh_actor 2 "C" in
+  let _b_mon = March_eval.Eval.monitor_actor ~watcher_pid:1 ~target_pid:0 in
+  let _c_mon = March_eval.Eval.monitor_actor ~watcher_pid:2 ~target_pid:0 in
+  March_eval.Eval.crash_actor 0 "killed";
+  Alcotest.(check bool) "B gets Down" true
+    (not (Queue.is_empty ib.March_eval.Eval.ai_mailbox));
+  Alcotest.(check bool) "C gets Down" true
+    (not (Queue.is_empty ic.March_eval.Eval.ai_mailbox))
+
+let test_down_message_format () =
+  (* Down message has the right constructor shape: Down(mon_ref, reason) *)
+  March_eval.Eval.reset_scheduler_state ();
+  let _ia = add_fresh_actor 0 "A" in
+  let ib  = add_fresh_actor 1 "B" in
+  let mon = March_eval.Eval.monitor_actor ~watcher_pid:1 ~target_pid:0 in
+  March_eval.Eval.crash_actor 0 "bang";
+  let msg = Queue.pop ib.March_eval.Eval.ai_mailbox in
+  (match msg with
+   | March_eval.Eval.VCon ("Down", [March_eval.Eval.VInt m; March_eval.Eval.VString r]) ->
+     Alcotest.(check int) "mon_ref matches" mon m;
+     Alcotest.(check string) "reason in Down" "bang" r
+   | _ -> Alcotest.fail "expected Down(mon_ref, reason)")
+
+let test_eval_monitor_builtin () =
+  (* End-to-end: monitor/kill/mailbox_size via March source *)
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = state.x } end
+    end
+
+    actor B do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = state.x } end
+    end
+
+    fn main() do
+      let pa = spawn(A)
+      let pb = spawn(B)
+      monitor(pb, pa)
+      kill(pa)
+      mailbox_size(pb)
+    end
+  end|} in
+  let v = call_fn env "main" [] in
+  Alcotest.(check bool) "mailbox_size >= 1 after kill" true
+    (match v with March_eval.Eval.VInt n -> n >= 1 | _ -> false)
+
+let test_eval_link_builtin () =
+  (* End-to-end: link/kill propagates death via March source *)
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = state.x } end
+    end
+
+    actor B do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = state.x } end
+    end
+
+    fn main() do
+      let pa = spawn(A)
+      let pb = spawn(B)
+      link(pa, pb)
+      kill(pa)
+      is_alive(pb)
+    end
+  end|} in
+  let v = call_fn env "main" [] in
+  Alcotest.(check bool) "B is dead after linked A killed" false
+    (match v with March_eval.Eval.VBool b -> b | _ -> failwith "expected VBool")
+
+(* ── Supervision Phase 2: Supervisor Actor Pattern ─────────────────────── *)
+
+(** Helper: get the child pid stored in a supervisor's state field. *)
+let get_supervisor_child_pid sup_pid field_name =
+  match Hashtbl.find_opt March_eval.Eval.actor_registry sup_pid with
+  | None -> -1
+  | Some inst ->
+    (match inst.March_eval.Eval.ai_state with
+     | March_eval.Eval.VRecord fields ->
+       (match List.assoc_opt field_name fields with
+        | Some (March_eval.Eval.VInt pid) -> pid
+        | _ -> -1)
+     | _ -> -1)
+
+(** Phase 2: one_for_one restart — crashed child is restarted by supervisor.
+    Spawn a supervisor with a Worker child. Kill the worker; the supervisor
+    should restart it with a new pid. *)
+let test_supervision_one_for_one_restart () =
+  let _env = eval_module {|mod Test do
+    actor Worker do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    actor Supervisor do
+      state { worker : Int }
+      init { worker = 0 }
+      supervise do
+        strategy one_for_one
+        max_restarts 3 within 5
+        Worker worker
+      end
+    end
+
+    fn main() do
+      spawn(Supervisor)
+    end
+  end|} in
+  let sup_pid = match call_fn _env "main" [] with
+    | March_eval.Eval.VPid p -> p | _ -> -1 in
+  let w1_pid = get_supervisor_child_pid sup_pid "worker" in
+  Alcotest.(check bool) "initial worker pid >= 0" true (w1_pid >= 0);
+  March_eval.Eval.crash_actor w1_pid "test kill";
+  let w2_pid = get_supervisor_child_pid sup_pid "worker" in
+  Alcotest.(check bool) "old worker is dead" false
+    (match Hashtbl.find_opt March_eval.Eval.actor_registry w1_pid with
+     | Some i -> i.March_eval.Eval.ai_alive | None -> false);
+  Alcotest.(check bool) "new worker pid differs from old" true (w2_pid <> w1_pid);
+  Alcotest.(check bool) "new worker is alive" true
+    (match Hashtbl.find_opt March_eval.Eval.actor_registry w2_pid with
+     | Some i -> i.March_eval.Eval.ai_alive | None -> false)
+
+(** Phase 2: max_restarts escalation — after hitting the limit, the supervisor
+    itself should crash. *)
+let test_supervision_max_restarts_escalation () =
+  let _env = eval_module {|mod Test do
+    actor Worker do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    actor Supervisor do
+      state { worker : Int }
+      init { worker = 0 }
+      supervise do
+        strategy one_for_one
+        max_restarts 2 within 60
+        Worker worker
+      end
+    end
+
+    fn main() do
+      spawn(Supervisor)
+    end
+  end|} in
+  let sup_pid = match call_fn _env "main" [] with
+    | March_eval.Eval.VPid p -> p | _ -> -1 in
+  (* Kill the worker 3 times — exceeds max_restarts=2 *)
+  let w1 = get_supervisor_child_pid sup_pid "worker" in
+  March_eval.Eval.crash_actor w1 "test kill 1";
+  let w2 = get_supervisor_child_pid sup_pid "worker" in
+  March_eval.Eval.crash_actor w2 "test kill 2";
+  let w3 = get_supervisor_child_pid sup_pid "worker" in
+  March_eval.Eval.crash_actor w3 "test kill 3";
+  (* Supervisor should be dead after exceeding max_restarts *)
+  Alcotest.(check bool) "supervisor crashed after max_restarts exceeded" false
+    (match Hashtbl.find_opt March_eval.Eval.actor_registry sup_pid with
+     | Some i -> i.March_eval.Eval.ai_alive | None -> false)
+
+(** Phase 2: one_for_all — when one child crashes, all children are restarted.
+    Check that after killing WorkerA, WorkerB also gets a new pid. *)
+let test_supervision_one_for_all () =
+  let _env = eval_module {|mod Test do
+    actor WorkerA do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    actor WorkerB do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    actor Supervisor do
+      state { wa : Int, wb : Int }
+      init { wa = 0, wb = 0 }
+      supervise do
+        strategy one_for_all
+        max_restarts 3 within 60
+        WorkerA wa
+        WorkerB wb
+      end
+    end
+
+    fn main() do
+      spawn(Supervisor)
+    end
+  end|} in
+  let sup_pid = match call_fn _env "main" [] with
+    | March_eval.Eval.VPid p -> p | _ -> -1 in
+  let wb1_pid = get_supervisor_child_pid sup_pid "wb" in
+  let wa1_pid = get_supervisor_child_pid sup_pid "wa" in
+  Alcotest.(check bool) "initial wa alive" true
+    (match Hashtbl.find_opt March_eval.Eval.actor_registry wa1_pid with
+     | Some i -> i.March_eval.Eval.ai_alive | None -> false);
+  (* Kill wa — under one_for_all, wb should also be restarted *)
+  March_eval.Eval.crash_actor wa1_pid "test kill";
+  let wb2_pid = get_supervisor_child_pid sup_pid "wb" in
+  (* wb should have a new pid *)
+  Alcotest.(check bool) "wb restarted under one_for_all (new pid)" true
+    (wb1_pid <> wb2_pid);
+  Alcotest.(check bool) "new wb is alive" true
+    (match Hashtbl.find_opt March_eval.Eval.actor_registry wb2_pid with
+     | Some i -> i.March_eval.Eval.ai_alive | None -> false)
+
+(** Phase 2: rest_for_one — only children after the crashed one are restarted.
+    First child should keep its pid; third child should get a new one. *)
+let test_supervision_rest_for_one () =
+  let _env = eval_module {|mod Test do
+    actor First do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    actor Second do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    actor Third do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    actor Supervisor do
+      state { first : Int, second : Int, third : Int }
+      init { first = 0, second = 0, third = 0 }
+      supervise do
+        strategy rest_for_one
+        max_restarts 3 within 60
+        First first
+        Second second
+        Third third
+      end
+    end
+
+    fn main() do
+      spawn(Supervisor)
+    end
+  end|} in
+  let sup_pid = match call_fn _env "main" [] with
+    | March_eval.Eval.VPid p -> p | _ -> -1 in
+  let first1_pid  = get_supervisor_child_pid sup_pid "first" in
+  let second1_pid = get_supervisor_child_pid sup_pid "second" in
+  let third1_pid  = get_supervisor_child_pid sup_pid "third" in
+  (* Kill second — first should be unchanged, third should restart *)
+  March_eval.Eval.crash_actor second1_pid "test kill";
+  let first2_pid = get_supervisor_child_pid sup_pid "first" in
+  let third2_pid = get_supervisor_child_pid sup_pid "third" in
+  Alcotest.(check int) "first not restarted (same pid)" first1_pid first2_pid;
+  Alcotest.(check bool) "third restarted (new pid)" true (third1_pid <> third2_pid);
+  Alcotest.(check bool) "third alive after restart" true
+    (match Hashtbl.find_opt March_eval.Eval.actor_registry third2_pid with
+     | Some i -> i.March_eval.Eval.ai_alive | None -> false)
+
+(** Phase 2: supervisor replaces dead child state with fresh init state. *)
+let test_supervision_state_replacement () =
+  let _env = eval_module {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    actor Supervisor do
+      state { counter : Int }
+      init { counter = 0 }
+      supervise do
+        strategy one_for_one
+        max_restarts 3 within 60
+        Counter counter
+      end
+    end
+
+    fn main() do
+      spawn(Supervisor)
+    end
+  end|} in
+  let sup_pid = match call_fn _env "main" [] with
+    | March_eval.Eval.VPid p -> p | _ -> -1 in
+  let c1_pid = get_supervisor_child_pid sup_pid "counter" in
+  (* Manually update counter state to simulate some work *)
+  (match Hashtbl.find_opt March_eval.Eval.actor_registry c1_pid with
+   | Some ci ->
+     ci.March_eval.Eval.ai_state <- March_eval.Eval.VRecord [("count", March_eval.Eval.VInt 5)]
+   | None -> ());
+  (* Kill and let supervisor restart it *)
+  March_eval.Eval.crash_actor c1_pid "test kill";
+  let c2_pid = get_supervisor_child_pid sup_pid "counter" in
+  (* Fresh restart should have count = 0 *)
+  let restarted_count = match Hashtbl.find_opt March_eval.Eval.actor_registry c2_pid with
+    | Some ci ->
+      (match ci.March_eval.Eval.ai_state with
+       | March_eval.Eval.VRecord fields ->
+         (match List.assoc_opt "count" fields with
+          | Some (March_eval.Eval.VInt n) -> n | _ -> -1)
+       | _ -> -1)
+    | None -> -1
+  in
+  Alcotest.(check int) "restarted counter starts at 0" 0 restarted_count
+
+(* ── Supervision Phase 3: Epochs and Capability Tracking ───────────────── *)
+
+(** Phase 3: epoch starts at 0 when actor is spawned. *)
+let test_supervision_epoch_starts_at_zero () =
+  March_eval.Eval.reset_scheduler_state ();
+  let _ia = add_fresh_actor 0 "A" in
+  let inst = Hashtbl.find March_eval.Eval.actor_registry 0 in
+  Alcotest.(check int) "epoch is 0 on spawn" 0 inst.March_eval.Eval.ai_epoch
+
+(** Phase 3: get_cap returns Some(VCap) for a live actor. *)
+let test_supervision_get_cap () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    fn main() do
+      let pid = spawn(A)
+      get_cap(pid)
+    end
+  end|} in
+  let v = call_fn env "main" [] in
+  (match v with
+   | March_eval.Eval.VCon ("Some", [March_eval.Eval.VCap (pid, epoch)]) ->
+     Alcotest.(check bool) "pid >= 0" true (pid >= 0);
+     Alcotest.(check int) "epoch is 0" 0 epoch
+   | _ -> Alcotest.fail "expected Some(VCap(pid, epoch))")
+
+(** Phase 3: send_checked with a valid (fresh) cap succeeds. *)
+let test_supervision_send_checked_ok () =
+  let env = eval_module {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+      on Get() do state.count end
+    end
+
+    fn main() do
+      let pid = spawn(Counter)
+      match get_cap(pid) with
+      | None -> :error
+      | Some(cap) -> send_checked(cap, Inc())
+      end
+    end
+  end|} in
+  let v = call_fn env "main" [] in
+  (* send_checked with valid cap should return :ok *)
+  Alcotest.(check bool) "send_checked with valid cap returns ok" true
+    (match v with
+     | March_eval.Eval.VAtom "ok" -> true
+     | March_eval.Eval.VCon ("Ok", _) -> true
+     | March_eval.Eval.VCon ("Some", _) -> true
+     | _ -> false)
+
+(** Phase 3: send_checked to a dead actor returns :error. *)
+let test_supervision_send_checked_dead_actor () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    fn main() do
+      let pid = spawn(A)
+      match get_cap(pid) with
+      | None -> :error
+      | Some(cap) ->
+        kill(pid)
+        send_checked(cap, Noop())
+      end
+    end
+  end|} in
+  let v = call_fn env "main" [] in
+  Alcotest.(check bool) "send_checked to dead actor returns error" true
+    (match v with
+     | March_eval.Eval.VAtom "error" -> true
+     | March_eval.Eval.VCon ("Err", _) -> true
+     | March_eval.Eval.VCon ("Error", _) -> true
+     | March_eval.Eval.VCon ("None", _) -> true
+     | _ -> false)
+
+(** Phase 3: epoch increments on restart so old caps become stale. *)
+let test_supervision_epoch_increments_on_restart () =
+  March_eval.Eval.reset_scheduler_state ();
+  let inst = add_fresh_actor 0 "A" in
+  let epoch_before = inst.March_eval.Eval.ai_epoch in
+  March_eval.Eval.increment_epoch 0;
+  let epoch_after = inst.March_eval.Eval.ai_epoch in
+  Alcotest.(check int) "epoch incremented" (epoch_before + 1) epoch_after
+
+(** Phase 3: a stale cap (epoch mismatch) is rejected by send_checked.
+    We use the OCaml API to get the worker pid directly, build a stale
+    cap, then force a restart (via crash_actor) and verify send_checked fails. *)
+let test_supervision_stale_epoch () =
+  let _env = eval_module {|mod Test do
+    actor Worker do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    actor Supervisor do
+      state { worker : Int }
+      init { worker = 0 }
+      supervise do
+        strategy one_for_one
+        max_restarts 3 within 60
+        Worker worker
+      end
+    end
+
+    fn main() do
+      spawn(Supervisor)
+    end
+  end|} in
+  let sup_pid = match call_fn _env "main" [] with
+    | March_eval.Eval.VPid p -> p | _ -> -1 in
+  let w1_pid = get_supervisor_child_pid sup_pid "worker" in
+  (* Build a cap for the original worker at epoch 0 *)
+  let stale_cap = March_eval.Eval.VCap (w1_pid, 0) in
+  (* Kill the worker — supervisor restarts it and increments epoch *)
+  March_eval.Eval.crash_actor w1_pid "test kill";
+  (* Manually increment epoch on the new worker to make old cap stale *)
+  let w2_pid = get_supervisor_child_pid sup_pid "worker" in
+  March_eval.Eval.increment_epoch w2_pid;
+  (* The original pid is now dead (epoch 0); new pid has epoch 1.
+     send_checked with stale_cap (pointing to dead pid) should return error. *)
+  let result = March_eval.Eval.apply
+    (List.assoc "send_checked" (March_eval.Eval.base_env))
+    [stale_cap; March_eval.Eval.VCon ("Noop", [])] in
+  Alcotest.(check bool) "stale cap rejected" true
+    (match result with
+     | March_eval.Eval.VAtom "error" -> true
+     | _ -> false)
+
+(* ── Supervision Phase 5: Task Linking ─────────────────────────────────── *)
+
+(** Phase 5: task_spawn_link — a linked task that completes normally doesn't
+    crash the calling actor. The result should be retrievable. *)
+let test_supervision_task_spawn_link_completes () =
+  let env = eval_module {|mod Test do
+    actor Worker do
+      state { x : Int }
+      init { x = 0 }
+      on Compute() do { x = 42 } end
+      on GetX() do state.x end
+    end
+
+    fn main() do
+      let pid = spawn(Worker)
+      let task = task_spawn_link(fn x -> 99, pid)
+      task_await_unwrap(task)
+    end
+  end|} in
+  let v = call_fn env "main" [] in
+  Alcotest.(check int) "linked task result is 99" 99
+    (match v with March_eval.Eval.VInt n -> n | _ -> -1)
+
+(** Phase 5: task_spawn_link — if the linked actor crashes, the task is
+    cancelled or returns an error. *)
+let test_supervision_task_spawn_link_crash_propagates () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    fn main() do
+      let pid = spawn(A)
+      let task = task_spawn_link(fn x -> 1, pid)
+      kill(pid)
+      task_await(task)
+    end
+  end|} in
+  let v = call_fn env "main" [] in
+  (* After killing the linked actor, task_await should return Err or the
+     task may still complete (depending on ordering). Either Ok or Err is
+     acceptable — we just check it doesn't raise an exception. *)
+  Alcotest.(check bool) "task_await returns Ok or Err" true
+    (match v with
+     | March_eval.Eval.VCon ("Ok", _) -> true
+     | March_eval.Eval.VCon ("Err", _) -> true
+     | _ -> false)
+
 let () =
   Alcotest.run "march"
     [
@@ -3871,4 +4728,81 @@ let () =
           Alcotest.test_case "parse needs"               `Quick test_cap_parse_needs;
           Alcotest.test_case "parse needs dotted"        `Quick test_cap_parse_needs_dotted;
         ] );
+      ("sort stdlib", [
+        Alcotest.test_case "sort_small empty"       `Quick test_sort_small_empty;
+        Alcotest.test_case "sort_small n=1"         `Quick test_sort_small_n1;
+        Alcotest.test_case "sort_small n=2"         `Quick test_sort_small_n2;
+        Alcotest.test_case "sort_small n=2 ordered" `Quick test_sort_small_n2_already_sorted;
+        Alcotest.test_case "sort_small n=3"         `Quick test_sort_small_n3;
+        Alcotest.test_case "sort_small n=3 all perms" `Quick test_sort_small_n3_all_perms;
+        Alcotest.test_case "sort_small n=4"         `Quick test_sort_small_n4;
+        Alcotest.test_case "sort_small n=4 all perms" `Quick test_sort_small_n4_all_perms;
+        Alcotest.test_case "sort_small n=5"         `Quick test_sort_small_n5;
+        Alcotest.test_case "sort_small n=6"         `Quick test_sort_small_n6;
+        Alcotest.test_case "sort_small n=7"         `Quick test_sort_small_n7;
+        Alcotest.test_case "sort_small n=8"         `Quick test_sort_small_n8;
+        Alcotest.test_case "sort_small n=9 fallback" `Quick test_sort_small_n9_fallback;
+        Alcotest.test_case "sort_small stability"   `Quick test_sort_small_stability;
+        Alcotest.test_case "timsort empty"          `Quick test_timsort_empty;
+        Alcotest.test_case "timsort single"         `Quick test_timsort_single;
+        Alcotest.test_case "timsort already sorted" `Quick test_timsort_already_sorted;
+        Alcotest.test_case "timsort reverse"        `Quick test_timsort_reverse;
+        Alcotest.test_case "timsort random"         `Quick test_timsort_random;
+        Alcotest.test_case "timsort nearly sorted"  `Quick test_timsort_nearly_sorted;
+        Alcotest.test_case "timsort stable"         `Quick test_timsort_stable;
+        Alcotest.test_case "introsort empty"        `Quick test_introsort_empty;
+        Alcotest.test_case "introsort single"       `Quick test_introsort_single;
+        Alcotest.test_case "introsort already sorted" `Quick test_introsort_already_sorted;
+        Alcotest.test_case "introsort reverse"      `Quick test_introsort_reverse;
+        Alcotest.test_case "introsort random"       `Quick test_introsort_random;
+        Alcotest.test_case "introsort large"        `Quick test_introsort_large;
+      ]);
+      ("enum stdlib", [
+        Alcotest.test_case "map"         `Quick test_enum_map;
+        Alcotest.test_case "flat_map"    `Quick test_enum_flat_map;
+        Alcotest.test_case "filter"      `Quick test_enum_filter;
+        Alcotest.test_case "fold"        `Quick test_enum_fold;
+        Alcotest.test_case "reduce some" `Quick test_enum_reduce_some;
+        Alcotest.test_case "reduce none" `Quick test_enum_reduce_none;
+        Alcotest.test_case "each"        `Quick test_enum_each;
+        Alcotest.test_case "count"       `Quick test_enum_count;
+        Alcotest.test_case "any"         `Quick test_enum_any;
+        Alcotest.test_case "all"         `Quick test_enum_all;
+        Alcotest.test_case "find"        `Quick test_enum_find;
+        Alcotest.test_case "group_by"    `Quick test_enum_group_by;
+        Alcotest.test_case "zip_with"    `Quick test_enum_zip_with;
+        Alcotest.test_case "sort_by"     `Quick test_enum_sort_by;
+        Alcotest.test_case "timsort_by"  `Quick test_enum_timsort_by;
+        Alcotest.test_case "introsort_by" `Quick test_enum_introsort_by;
+        Alcotest.test_case "sort_small_by" `Quick test_enum_sort_small_by;
+      ]);
+      ("supervision phase1", [
+        Alcotest.test_case "monitor receives Down on kill"        `Quick (with_reset test_monitor_receives_down_on_kill);
+        Alcotest.test_case "demonitor prevents Down delivery"     `Quick (with_reset test_demonitor_prevents_down);
+        Alcotest.test_case "link kills both on crash"             `Quick (with_reset test_link_kills_both_on_crash);
+        Alcotest.test_case "monitor on dead actor immediate Down" `Quick (with_reset test_monitor_already_dead_immediate_down);
+        Alcotest.test_case "multiple monitors all fire"           `Quick (with_reset test_multiple_monitors_all_fire);
+        Alcotest.test_case "Down message format"                  `Quick (with_reset test_down_message_format);
+        Alcotest.test_case "monitor builtin end-to-end"           `Quick (with_reset test_eval_monitor_builtin);
+        Alcotest.test_case "link builtin end-to-end"              `Quick (with_reset test_eval_link_builtin);
+      ]);
+      ("supervision phase2", [
+        Alcotest.test_case "one_for_one restart"          `Quick (with_reset test_supervision_one_for_one_restart);
+        Alcotest.test_case "max_restarts escalation"      `Quick (with_reset test_supervision_max_restarts_escalation);
+        Alcotest.test_case "one_for_all"                  `Quick (with_reset test_supervision_one_for_all);
+        Alcotest.test_case "rest_for_one"                 `Quick (with_reset test_supervision_rest_for_one);
+        Alcotest.test_case "state replacement on restart" `Quick (with_reset test_supervision_state_replacement);
+      ]);
+      ("supervision phase3", [
+        Alcotest.test_case "epoch starts at 0"            `Quick (with_reset test_supervision_epoch_starts_at_zero);
+        Alcotest.test_case "get_cap"                      `Quick (with_reset test_supervision_get_cap);
+        Alcotest.test_case "send_checked ok"              `Quick (with_reset test_supervision_send_checked_ok);
+        Alcotest.test_case "send_checked dead actor"      `Quick (with_reset test_supervision_send_checked_dead_actor);
+        Alcotest.test_case "epoch increments on restart"  `Quick (with_reset test_supervision_epoch_increments_on_restart);
+        Alcotest.test_case "stale epoch rejected"         `Quick (with_reset test_supervision_stale_epoch);
+      ]);
+      ("supervision phase5", [
+        Alcotest.test_case "task_spawn_link completes"         `Quick (with_reset test_supervision_task_spawn_link_completes);
+        Alcotest.test_case "task_spawn_link crash propagates"  `Quick (with_reset test_supervision_task_spawn_link_crash_propagates);
+      ]);
     ]

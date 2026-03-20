@@ -456,6 +456,12 @@ let builtin_bindings : (string * scheme) list =
     let a = fresh_var 0 in
     Poly ([get_id a], [COrd a], f a)
   in
+  (* ∀a b. f(a, b) — two unconstrained type variables *)
+  let poly2 f =
+    let a = fresh_var 0 in
+    let b = fresh_var 0 in
+    Poly ([get_id a; get_id b], [], f a b)
+  in
   [
     (* Arithmetic: Num-constrained so they work on Int and Float *)
     ("+",  poly1_num (fun a -> TArrow (a, TArrow (a, a))));
@@ -604,6 +610,17 @@ let builtin_bindings : (string * scheme) list =
     (* Capability builtins *)
     ("root_cap",   Mono (TCon ("Cap", [TCon ("IO", [])])));
     ("cap_narrow", poly1 (fun a -> TArrow (TCon ("Cap", [TCon ("IO", [])]), TCon ("Cap", [a]))));
+    (* Phase 1: Monitor/link builtins *)
+    ("monitor",      poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (TCon ("Pid", [b]), t_int))));
+    ("demonitor",    Mono (TArrow (t_int, t_unit)));
+    ("mailbox_size", poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_int)));
+    (* Phase 3: Epoch-based capability builtins *)
+    ("get_cap",      poly1 (fun a -> TArrow (TCon ("Pid", [a]), TCon ("Option", [TCon ("Cap", [a])]))));
+    ("send_checked", poly1 (fun a -> TArrow (TCon ("Cap", [a]), TArrow (a, t_atom))));
+    (* Utility: convert Int to Pid (unsafe but needed for supervisor state fields) *)
+    ("pid_of_int",   poly1 (fun a -> TArrow (t_int, TCon ("Pid", [a]))));
+    (* Phase 5: task_spawn_link — like task_spawn but links to spawner *)
+    ("task_spawn_link", poly1 (fun a -> TArrow (TArrow (t_int, a), TCon ("Task", [a]))));
   ]
 
 let builtin_types : (string * int) list =
@@ -1196,7 +1213,9 @@ let rec infer_expr env (e : Ast.expr) : ty =
     | Ast.ESend (cap, msg, _) ->
       ignore (infer_expr env cap);
       ignore (infer_expr env msg);
-      TCon ("Option", [t_unit])
+      (* send() returns the handler's result — unconstrained so callers can
+         match on Option(a) (drop semantics) or access record fields (state). *)
+      fresh_var env.level
 
     | Ast.ESpawn (actor, _) ->
       ignore (infer_expr env actor);

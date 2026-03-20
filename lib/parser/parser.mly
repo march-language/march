@@ -66,6 +66,8 @@
 %token LINEAR AFFINE
 %token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS USE NEEDS
 %token DBG DOC
+%token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
+%token ONE_FOR_ONE ONE_FOR_ALL REST_FOR_ONE RESTART_KW
 %token <string> INTERP_START
 %token <string> INTERP_MID
 %token <string> INTERP_END
@@ -167,11 +169,43 @@ actor_decl:
   | ACTOR; name = upper_name; DO;
     STATE; LBRACE; fields = separated_list(COMMA, field); RBRACE;
     INIT; init_expr = expr;
+    sup = option(supervise_block);
     handlers = list(actor_handler);
     END
     { DActor (name,
-              { actor_state = fields; actor_init = init_expr; actor_handlers = handlers },
+              { actor_state = fields; actor_init = init_expr; actor_handlers = handlers;
+                actor_supervise = sup },
               mk_span ($loc)) }
+
+(** supervise do
+      strategy one_for_one
+      max_restarts 3 within 60
+      WorkerA wa
+      WorkerB wb
+    end *)
+supervise_block:
+  | SUPERVISE; DO;
+    STRATEGY; strat = restart_strategy_tok;
+    MAX_RESTARTS; max_r = INT; WITHIN; win = INT;
+    children = list(supervise_child);
+    END
+    { let names = List.map fst children in
+      let tyfields = List.map (fun (n, t) ->
+        { sf_name = n; sf_ty = t }) children in
+      { sc_fields = tyfields;
+        sc_strategy = strat;
+        sc_max_restarts = max_r;
+        sc_window_secs = win;
+        sc_order = names } }
+
+supervise_child:
+  | actor_type = upper_name; field_name = lower_name
+    { (field_name, TyCon (actor_type, [])) }
+
+restart_strategy_tok:
+  | ONE_FOR_ONE  { OneForOne }
+  | ONE_FOR_ALL  { OneForAll }
+  | REST_FOR_ONE { RestForOne }
 
 actor_handler:
   | ON; msg = upper_name; LPAREN; params = separated_list(COMMA, param); RPAREN;

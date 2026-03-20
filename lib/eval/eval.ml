@@ -33,6 +33,8 @@ type value =
   | VPid    of int                      (** Actor process id *)
   | VTask   of int                      (** Task handle *)
   | VWorkPool                           (** Work-stealing pool capability *)
+  | VCap    of int * int                (** Epoch-stamped capability: (pid, epoch) *)
+  | VActorId of int                     (** Opaque actor identity (epoch-independent) *)
 
 (** Association-list environment mapping names to values. *)
 and env = (string * value) list
@@ -45,8 +47,17 @@ type actor_inst = {
   ai_name    : string;           (** Actor type name, e.g. "Counter" *)
   ai_def     : actor_def;
   ai_env_ref : env ref;         (** Module environment at spawn time *)
-  mutable ai_state : value;
-  mutable ai_alive : bool;
+  mutable ai_state    : value;
+  mutable ai_alive    : bool;
+  (* Phase 1: supervision infrastructure *)
+  mutable ai_monitors : (int * int) list;   (** (monitor_ref, watcher_pid) pairs *)
+  mutable ai_links    : int list;            (** bidirectionally linked pids *)
+  mutable ai_mailbox  : value Queue.t;      (** pending Down/Crashed messages *)
+  (* Phase 2: supervisor support *)
+  mutable ai_supervisor : int option;        (** pid of supervising actor, if any *)
+  mutable ai_restart_count : (float * int) list; (** (timestamp, count) restart history *)
+  (* Phase 3: epoch-based capability tracking *)
+  mutable ai_epoch    : int;                 (** monotonically increasing restart epoch *)
 }
 
 (** Actor definitions registered by [DActor] — reset per module eval. *)
@@ -81,7 +92,8 @@ let current_doc_prefix () =
 let lookup_doc (key : string) : string option =
   Hashtbl.find_opt doc_registry key
 
-let next_pid : int ref = ref 0
+let next_pid        : int ref = ref 0
+let next_monitor_id : int ref = ref 0
 
 (* ------------------------------------------------------------------ *)
 (* Ring buffer                                                         *)
@@ -188,11 +200,17 @@ let restore_actors (snap : actor_state_snapshot) : unit =
       match Hashtbl.find_opt actor_defs_tbl s.ais_name with
       | None -> ()
       | Some (def, env_r) ->
-        let inst = { ai_name    = s.ais_name;
-                     ai_def     = def;
-                     ai_env_ref = env_r;
-                     ai_state   = s.ais_state;
-                     ai_alive   = s.ais_alive } in
+        let inst = { ai_name     = s.ais_name;
+                     ai_def      = def;
+                     ai_env_ref  = env_r;
+                     ai_state    = s.ais_state;
+                     ai_alive    = s.ais_alive;
+                     ai_monitors = [];
+                     ai_links    = [];
+                     ai_mailbox  = Queue.create ();
+                     ai_supervisor = None;
+                     ai_restart_count = [];
+                     ai_epoch = 0 } in
         Hashtbl.add actor_registry pid inst
     ) snap.ass_instances;
   next_pid := snap.ass_next_pid
@@ -269,6 +287,7 @@ let rec match_pattern (v : value) (pat : pattern) : (string * value) list option
     else match_list pats args
   | PatAtom _, _ -> None
 
+  | PatTuple ([], _), VUnit -> Some []
   | PatTuple (pats, _), VTuple vs ->
     if List.length pats <> List.length vs then None
     else match_list pats vs
@@ -366,6 +385,8 @@ let rec value_to_string v =
   | VPid pid -> "Pid(" ^ string_of_int pid ^ ")"
   | VTask id -> Printf.sprintf "<task:%d>" id
   | VWorkPool -> "<work_pool>"
+  | VCap (pid, epoch) -> Printf.sprintf "Cap(%d, epoch=%d)" pid epoch
+  | VActorId pid -> Printf.sprintf "ActorId(%d)" pid
 
 (** Pretty-print a value with indented multi-line layout when the flat
     representation exceeds [width] characters. *)
@@ -420,6 +441,11 @@ type actor_info = {
   (** Distinct from actor_inst.ai_state which is a [value]. *)
 }
 
+let increment_epoch pid =
+  match Hashtbl.find_opt actor_registry pid with
+  | None -> ()
+  | Some inst -> inst.ai_epoch <- inst.ai_epoch + 1
+
 let list_actors () =
   Hashtbl.fold (fun pid (inst : actor_inst) acc ->
     { ai_pid       = pid;
@@ -429,6 +455,293 @@ let list_actors () =
     :: acc
   ) actor_registry []
   |> List.sort (fun a b -> compare a.ai_pid b.ai_pid)
+
+(* ------------------------------------------------------------------ *)
+(* Phase 1: Monitors, Links, and crash_actor (must precede base_env)  *)
+(* ------------------------------------------------------------------ *)
+
+let fresh_monitor_id () =
+  let id = !next_monitor_id in
+  next_monitor_id := id + 1;
+  id
+
+(** Forward reference for evaluating an expression — set after [eval_expr]
+    is defined so that [crash_actor] can call it for supervisor restarts. *)
+let eval_expr_hook : (env -> expr -> value) ref =
+  ref (fun _env _expr -> eval_error "eval_expr not yet initialized")
+
+(** Spawn a fresh child actor instance (for supervisor restarts).
+    Returns the new pid. *)
+let spawn_child_actor (child_actor_name : string) (supervisor_pid : int) : int =
+  match Hashtbl.find_opt actor_defs_tbl child_actor_name with
+  | None -> eval_error "restart: unknown child actor '%s'" child_actor_name
+  | Some (child_def, child_env_ref) ->
+    let child_init_state = !eval_expr_hook !child_env_ref child_def.actor_init in
+    let child_pid = !next_pid in
+    next_pid := child_pid + 1;
+    let child_inst = {
+      ai_name = child_actor_name; ai_def = child_def;
+      ai_env_ref = child_env_ref;
+      ai_state = child_init_state; ai_alive = true;
+      ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
+      ai_supervisor = Some supervisor_pid;
+      ai_restart_count = []; ai_epoch = 0 } in
+    Hashtbl.add actor_registry child_pid child_inst;
+    child_pid
+
+(** Restart a supervisor's crashed child under one_for_one strategy.
+    Finds which field in the supervisor state held the crashed pid,
+    spawns a new child, and updates the supervisor's state. *)
+let rec one_for_one_restart (sup_pid : int) (crashed_pid : int) : unit =
+  match Hashtbl.find_opt actor_registry sup_pid with
+  | None -> crash_actor sup_pid "supervisor lost"
+  | Some sup_inst ->
+    (match sup_inst.ai_def.actor_supervise with
+     | None -> ()
+     | Some sup_cfg ->
+       (* Find which child field had crashed_pid *)
+       let crashed_field = match sup_inst.ai_state with
+         | VRecord fields ->
+           List.find_opt (fun (_, v) -> v = VInt crashed_pid) fields
+           |> Option.map fst
+         | _ -> None
+       in
+       (match crashed_field with
+        | None -> ()
+        | Some fname ->
+          (* Find the actor type for this field *)
+          let child_type_opt = List.find_opt (fun sf -> sf.sf_name.txt = fname)
+                                 sup_cfg.sc_fields in
+          (match child_type_opt with
+           | None -> ()
+           | Some sf ->
+             let child_actor_name = match sf.sf_ty with
+               | TyCon (n, []) -> n.txt
+               | _ -> ""
+             in
+             if child_actor_name <> "" then begin
+               (* Check max_restarts window *)
+               let now = Unix.gettimeofday () in
+               let window = float_of_int sup_cfg.sc_window_secs in
+               let recent = List.filter (fun (ts, _) -> now -. ts < window)
+                              sup_inst.ai_restart_count in
+               let restart_count = List.fold_left (fun acc (_, n) -> acc + n) 0 recent in
+               if restart_count >= sup_cfg.sc_max_restarts then begin
+                 (* Exceeded max_restarts — crash the supervisor *)
+                 crash_actor sup_pid "max_restarts exceeded"
+               end else begin
+                 (* Update restart history *)
+                 sup_inst.ai_restart_count <- recent @ [(now, 1)];
+                 (* Spawn a new child *)
+                 let new_pid = spawn_child_actor child_actor_name sup_pid in
+                 (* Update the supervisor's state record *)
+                 (match sup_inst.ai_state with
+                  | VRecord fields ->
+                    sup_inst.ai_state <- VRecord (List.map (fun (k, v) ->
+                      if k = fname then (k, VInt new_pid) else (k, v)) fields)
+                  | _ -> ())
+               end
+             end)))
+
+(** Restart under one_for_all: kill all siblings, then respawn all children. *)
+and one_for_all_restart (sup_pid : int) (_crashed_pid : int) : unit =
+  match Hashtbl.find_opt actor_registry sup_pid with
+  | None -> ()
+  | Some sup_inst ->
+    (match sup_inst.ai_def.actor_supervise with
+     | None -> ()
+     | Some sup_cfg ->
+       let now = Unix.gettimeofday () in
+       let window = float_of_int sup_cfg.sc_window_secs in
+       let recent = List.filter (fun (ts, _) -> now -. ts < window)
+                      sup_inst.ai_restart_count in
+       let restart_count = List.fold_left (fun acc (_, n) -> acc + n) 0 recent in
+       if restart_count >= sup_cfg.sc_max_restarts then begin
+         crash_actor sup_pid "max_restarts exceeded"
+       end else begin
+         sup_inst.ai_restart_count <- recent @ [(now, 1)];
+         (* Kill all children that are still alive *)
+         let all_child_pids = match sup_inst.ai_state with
+           | VRecord fields ->
+             List.filter_map (fun (_, v) -> match v with VInt p -> Some p | _ -> None) fields
+           | _ -> []
+         in
+         List.iter (fun cpid ->
+           match Hashtbl.find_opt actor_registry cpid with
+           | Some ci when ci.ai_alive ->
+             ci.ai_supervisor <- None;  (* detach before crashing to prevent re-entry *)
+             crash_actor cpid "one_for_all restart"
+           | _ -> ()
+         ) all_child_pids;
+         (* Respawn all children in order *)
+         let new_state = match sup_inst.ai_state with
+           | VRecord fields ->
+             let new_fields = List.map (fun (fname, _) ->
+               match List.find_opt (fun sf -> sf.sf_name.txt = fname) sup_cfg.sc_fields with
+               | None -> (fname, VInt 0)
+               | Some sf ->
+                 let child_actor_name = match sf.sf_ty with
+                   | TyCon (n, []) -> n.txt | _ -> "" in
+                 if child_actor_name = "" then (fname, VInt 0)
+                 else (fname, VInt (spawn_child_actor child_actor_name sup_pid))
+             ) fields in
+             VRecord new_fields
+           | other -> other
+         in
+         sup_inst.ai_state <- new_state
+       end)
+
+(** Restart under rest_for_one: kill children ordered after the crashed one,
+    then respawn only those. *)
+and rest_for_one_restart (sup_pid : int) (crashed_pid : int) : unit =
+  match Hashtbl.find_opt actor_registry sup_pid with
+  | None -> ()
+  | Some sup_inst ->
+    (match sup_inst.ai_def.actor_supervise with
+     | None -> ()
+     | Some sup_cfg ->
+       let now = Unix.gettimeofday () in
+       let window = float_of_int sup_cfg.sc_window_secs in
+       let recent = List.filter (fun (ts, _) -> now -. ts < window)
+                      sup_inst.ai_restart_count in
+       let restart_count = List.fold_left (fun acc (_, n) -> acc + n) 0 recent in
+       if restart_count >= sup_cfg.sc_max_restarts then begin
+         crash_actor sup_pid "max_restarts exceeded"
+       end else begin
+         sup_inst.ai_restart_count <- recent @ [(now, 1)];
+         (* Find the index of the crashed child in declaration order *)
+         let order = List.map (fun n -> n.txt) sup_cfg.sc_order in
+         let crashed_fname = match sup_inst.ai_state with
+           | VRecord fields ->
+             (match List.find_opt (fun (_, v) -> v = VInt crashed_pid) fields with
+              | Some (k, _) -> k | None -> "")
+           | _ -> ""
+         in
+         let crashed_idx =
+           let rec find_idx i = function
+             | [] -> -1
+             | x :: _ when x = crashed_fname -> i
+             | _ :: rest -> find_idx (i + 1) rest
+           in find_idx 0 order
+         in
+         if crashed_idx >= 0 then begin
+           (* Kill siblings that come after the crashed child *)
+           let rest_names = List.filteri (fun i _ -> i > crashed_idx) order in
+           List.iter (fun fname ->
+             let cpid = match sup_inst.ai_state with
+               | VRecord fields ->
+                 (match List.assoc_opt fname fields with Some (VInt p) -> p | _ -> -1)
+               | _ -> -1
+             in
+             if cpid >= 0 then
+               (match Hashtbl.find_opt actor_registry cpid with
+                | Some ci when ci.ai_alive ->
+                  ci.ai_supervisor <- None;
+                  crash_actor cpid "rest_for_one restart"
+                | _ -> ())
+           ) rest_names;
+           (* Respawn crashed child + rest in order *)
+           let to_respawn = List.filteri (fun i _ -> i >= crashed_idx) order in
+           let new_state = match sup_inst.ai_state with
+             | VRecord fields ->
+               let updated = List.fold_left (fun acc fname ->
+                 match List.find_opt (fun sf -> sf.sf_name.txt = fname) sup_cfg.sc_fields with
+                 | None -> acc
+                 | Some sf ->
+                   let child_actor_name = match sf.sf_ty with
+                     | TyCon (n, []) -> n.txt | _ -> "" in
+                   if child_actor_name = "" then acc
+                   else
+                     let new_pid = spawn_child_actor child_actor_name sup_pid in
+                     List.map (fun (k, v) ->
+                       if k = fname then (k, VInt new_pid) else (k, v)) acc
+               ) fields to_respawn in
+               VRecord updated
+             | other -> other
+           in
+           sup_inst.ai_state <- new_state
+         end
+       end)
+
+(** Notify a supervisor that a child has crashed, triggering the appropriate
+    restart strategy. *)
+and notify_supervisor (sup_pid : int) (crashed_pid : int) : unit =
+  match Hashtbl.find_opt actor_registry sup_pid with
+  | None -> ()
+  | Some sup_inst ->
+    (match sup_inst.ai_def.actor_supervise with
+     | None -> ()
+     | Some sup_cfg ->
+       (match sup_cfg.sc_strategy with
+        | OneForOne  -> one_for_one_restart sup_pid crashed_pid
+        | OneForAll  -> one_for_all_restart sup_pid crashed_pid
+        | RestForOne -> rest_for_one_restart sup_pid crashed_pid))
+
+(** Crash an actor: mark dead, deliver Down to monitors, propagate to links,
+    and notify any supervising actor for restart. *)
+and crash_actor (pid : int) (reason : string) : unit =
+  match Hashtbl.find_opt actor_registry pid with
+  | None -> ()
+  | Some inst when not inst.ai_alive -> ()
+  | Some inst ->
+    let supervisor = inst.ai_supervisor in
+    inst.ai_alive <- false;
+    (* Deliver Down(mon_ref, reason) to each watcher's mailbox *)
+    List.iter (fun (mon_ref, watcher_pid) ->
+      match Hashtbl.find_opt actor_registry watcher_pid with
+      | Some watcher when watcher.ai_alive ->
+        Queue.push (VCon ("Down", [VInt mon_ref; VString reason])) watcher.ai_mailbox
+      | _ -> ()
+    ) inst.ai_monitors;
+    (* Propagate crash to all linked actors *)
+    let links = inst.ai_links in
+    inst.ai_links <- [];  (* Clear to prevent re-entrancy *)
+    List.iter (fun linked_pid ->
+      (* Remove back-link first to avoid infinite loop *)
+      (match Hashtbl.find_opt actor_registry linked_pid with
+       | Some linked_inst ->
+         linked_inst.ai_links <- List.filter (fun p -> p <> pid) linked_inst.ai_links
+       | None -> ());
+      crash_actor linked_pid
+        (Printf.sprintf "linked to %d which crashed: %s" pid reason)
+    ) links;
+    (* Phase 2: notify supervisor for restart *)
+    (match supervisor with
+     | Some sup_pid -> notify_supervisor sup_pid pid
+     | None -> ())
+
+(** Register a monitor: watcher_pid observes target_pid. Returns monitor_ref. *)
+let monitor_actor ~watcher_pid ~target_pid : int =
+  let mon_ref = fresh_monitor_id () in
+  (match Hashtbl.find_opt actor_registry target_pid with
+   | Some inst when inst.ai_alive ->
+     inst.ai_monitors <- (mon_ref, watcher_pid) :: inst.ai_monitors
+   | _ ->
+     (* Target already dead — immediately deliver Down to watcher *)
+     (match Hashtbl.find_opt actor_registry watcher_pid with
+      | Some watcher when watcher.ai_alive ->
+        Queue.push (VCon ("Down", [VInt mon_ref; VString "noproc"])) watcher.ai_mailbox
+      | _ -> ()));
+  mon_ref
+
+(** Remove a monitor by its ref. Scans all actors. *)
+let demonitor_actor (mon_ref : int) : unit =
+  Hashtbl.iter (fun _ (inst : actor_inst) ->
+    inst.ai_monitors <- List.filter (fun (m, _) -> m <> mon_ref) inst.ai_monitors
+  ) actor_registry
+
+(** Establish a bidirectional link between two actors. *)
+let link_actors (pid_a : int) (pid_b : int) : unit =
+  (match Hashtbl.find_opt actor_registry pid_a with
+   | Some ia ->
+     if not (List.mem pid_b ia.ai_links) then
+       ia.ai_links <- pid_b :: ia.ai_links
+   | None -> ());
+  (match Hashtbl.find_opt actor_registry pid_b with
+   | Some ib ->
+     if not (List.mem pid_a ib.ai_links) then
+       ib.ai_links <- pid_a :: ib.ai_links
+   | None -> ())
 
 let base_env : env =
   [ (* Integer arithmetic *)
@@ -535,10 +848,7 @@ let base_env : env =
         | _ -> eval_error "negate: expected number"))
     (* Actor builtins — operate on the global actor_registry *)
   ; ("kill", VBuiltin ("kill", function
-        | [VPid pid] ->
-          (match Hashtbl.find_opt actor_registry pid with
-           | Some inst -> inst.ai_alive <- false; VUnit
-           | None      -> VUnit)
+        | [VPid pid] -> crash_actor pid "killed"; VUnit
         | _ -> eval_error "kill: expected Pid"))
   ; ("is_alive", VBuiltin ("is_alive", function
         | [VPid pid] ->
@@ -549,6 +859,71 @@ let base_env : env =
   ; ("respond", VBuiltin ("respond", function
         | [_] -> VUnit   (* stub: full async impl in future *)
         | _ -> eval_error "respond: expected one argument"))
+  ; ("monitor", VBuiltin ("monitor", function
+        | [VPid watcher_pid; VPid target_pid] ->
+          VInt (monitor_actor ~watcher_pid ~target_pid)
+        | _ -> eval_error "monitor: expected (watcher_pid, target_pid)"))
+  ; ("demonitor", VBuiltin ("demonitor", function
+        | [VInt mon_ref] -> demonitor_actor mon_ref; VUnit
+        | _ -> eval_error "demonitor: expected monitor ref"))
+  ; ("link", VBuiltin ("link", function
+        | [VPid a; VPid b] -> link_actors a b; VUnit
+        | _ -> eval_error "link: expected two pids"))
+  ; ("mailbox_size", VBuiltin ("mailbox_size", function
+        | [VPid pid] ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | Some inst -> VInt (Queue.length inst.ai_mailbox)
+           | None      -> VInt 0)
+        | _ -> eval_error "mailbox_size: expected pid"))
+    (* Utility: convert Int to Pid (needed for supervisor state field access) *)
+  ; ("pid_of_int", VBuiltin ("pid_of_int", function
+        | [VInt n] -> VPid n
+        | _ -> eval_error "pid_of_int: expected int"))
+    (* Phase 3: epoch-based capability builtins *)
+  ; ("get_cap", VBuiltin ("get_cap", function
+        | [VPid pid] ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | Some inst when inst.ai_alive ->
+             (* Wrap in Some so callers can pattern-match: Some(cap) / None *)
+             VCon ("Some", [VCap (pid, inst.ai_epoch)])
+           | _ -> VCon ("None", []))
+        | _ -> eval_error "get_cap: expected Pid"))
+  ; ("send_checked", VBuiltin ("send_checked", fun args ->
+        (* send_checked(cap, msg) — like send but validates epoch *)
+        match args with
+        | [VCap (pid, cap_epoch); msg] ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | None -> VAtom "error"
+           | Some inst when not inst.ai_alive -> VAtom "error"
+           | Some inst when inst.ai_epoch <> cap_epoch -> VAtom "error"
+           | Some _inst ->
+             (* Deliver the message synchronously like ESend *)
+             (match Hashtbl.find_opt actor_registry pid with
+              | None -> VAtom "error"
+              | Some inst ->
+                let (msg_tag, msg_args) = match msg with
+                  | VCon (tag, args) -> (tag, args)
+                  | VAtom tag -> (tag, [])
+                  | _ -> eval_error "send_checked: message must be a constructor value"
+                in
+                (match List.find_opt (fun h -> h.ah_msg.txt = msg_tag)
+                         inst.ai_def.actor_handlers with
+                 | None -> VAtom "error"
+                 | Some handler ->
+                   let param_bindings =
+                     List.map2 (fun p v -> (p.param_name.txt, v))
+                       handler.ah_params msg_args
+                   in
+                   let handler_env =
+                     [("state", inst.ai_state)] @ param_bindings @ !(inst.ai_env_ref)
+                   in
+                   let new_state = !eval_expr_hook handler_env handler.ah_body in
+                   inst.ai_state <- new_state;
+                   VAtom "ok")))
+        | [VPid _pid; _msg] ->
+          (* Legacy: VPid used directly — not epoch-checked *)
+          VAtom "error"
+        | _ -> eval_error "send_checked: expected (Cap, msg)"))
   ; ("to_string", VBuiltin ("to_string", function
         | [v] -> VString (value_display v)
         | _ -> eval_error "to_string: expected one argument"))
@@ -1177,6 +1552,115 @@ let base_env : env =
           (* Return headers ++ body as a single raw string *)
           VCon ("Ok", [VString (headers_str ^ Buffer.contents body_buf)])
         | _ -> eval_error "tcp_recv_http(fd, max_bytes)"))
+  ; ("tcp_recv_http_headers", VBuiltin ("tcp_recv_http_headers", function
+        | [VInt fd] ->
+          (* Read HTTP response headers up to \r\n\r\n.
+             Returns Ok((headers_string, content_length, is_chunked)).
+             content_length = -1 if not present. *)
+          let sock = (Obj.magic fd : Unix.file_descr) in
+          let hdr_buf = Buffer.create 1024 in
+          let one = Bytes.create 1 in
+          let found_end = ref false in
+          (try
+            while not !found_end do
+              let n = Unix.recv sock one 0 1 [] in
+              if n = 0 then (found_end := true)
+              else begin
+                Buffer.add_subbytes hdr_buf one 0 1;
+                let len = Buffer.length hdr_buf in
+                if len >= 4 then begin
+                  let s = Buffer.contents hdr_buf in
+                  if s.[len-4] = '\r' && s.[len-3] = '\n'
+                     && s.[len-2] = '\r' && s.[len-1] = '\n' then
+                    found_end := true
+                end
+              end
+            done
+          with Unix.Unix_error _ -> ());
+          let headers_str = Buffer.contents hdr_buf in
+          let content_length = ref (-1) in
+          let chunked = ref false in
+          List.iter (fun line ->
+            let t = String.trim (String.lowercase_ascii line) in
+            if String.length t > 16
+               && String.sub t 0 16 = "content-length: " then
+              (try content_length :=
+                 int_of_string (String.trim (String.sub t 16
+                   (String.length t - 16)))
+               with _ -> ())
+            else if String.length t > 19
+               && String.sub t 0 19 = "transfer-encoding: " then
+              let v = String.trim (String.sub t 19 (String.length t - 19)) in
+              if v = "chunked" then chunked := true
+          ) (String.split_on_char '\n' headers_str);
+          VCon ("Ok", [VTuple [VString headers_str;
+                               VInt !content_length;
+                               VBool !chunked]])
+        | _ -> eval_error "tcp_recv_http_headers(fd)"))
+  ; ("tcp_recv_chunk", VBuiltin ("tcp_recv_chunk", function
+        | [VInt fd; VInt max_bytes] ->
+          (* Read up to max_bytes from fd. Returns Ok(string) or Ok("")
+             on EOF. This is a single non-blocking-style read. *)
+          let sock = (Obj.magic fd : Unix.file_descr) in
+          let buf = Bytes.create (min max_bytes 8192) in
+          (try
+            let n = Unix.recv sock buf 0 (Bytes.length buf) [] in
+            VCon ("Ok", [VString (Bytes.sub_string buf 0 n)])
+          with Unix.Unix_error (err, _, _) ->
+            VCon ("Err", [VString (Unix.error_message err)]))
+        | _ -> eval_error "tcp_recv_chunk(fd, max_bytes)"))
+  ; ("tcp_recv_chunked_frame", VBuiltin ("tcp_recv_chunked_frame", function
+        | [VInt fd] ->
+          (* Read one HTTP chunked transfer frame: size\r\n data\r\n.
+             Returns Ok(string) for the data, Ok("") for the terminal 0-chunk. *)
+          let sock = (Obj.magic fd : Unix.file_descr) in
+          let one = Bytes.create 1 in
+          (* Read the chunk-size line *)
+          let line_buf = Buffer.create 32 in
+          let stop = ref false in
+          (try while not !stop do
+            let n = Unix.recv sock one 0 1 [] in
+            if n = 0 then stop := true
+            else begin
+              Buffer.add_char line_buf (Bytes.get one 0);
+              let lb = Buffer.length line_buf in
+              if lb >= 2 then begin
+                let s = Buffer.contents line_buf in
+                if s.[lb-2] = '\r' && s.[lb-1] = '\n' then
+                  stop := true
+              end
+            end
+          done with _ -> ());
+          let size_str = Buffer.contents line_buf in
+          let size_str = if String.length size_str >= 2
+            then String.sub size_str 0 (String.length size_str - 2)
+            else size_str in
+          let chunk_size =
+            try int_of_string ("0x" ^ String.trim size_str)
+            with _ -> 0 in
+          if chunk_size = 0 then
+            VCon ("Ok", [VString ""])
+          else begin
+            let data_buf = Buffer.create chunk_size in
+            let remaining = ref chunk_size in
+            let tmp = Bytes.create (min chunk_size 8192) in
+            (try while !remaining > 0 do
+              let to_read = min (Bytes.length tmp) !remaining in
+              let n = Unix.recv sock tmp 0 to_read [] in
+              if n = 0 then remaining := 0
+              else begin
+                Buffer.add_subbytes data_buf tmp 0 n;
+                remaining := !remaining - n
+              end
+            done with _ -> ());
+            (* consume trailing \r\n *)
+            (try
+              ignore (Unix.recv sock one 0 1 []);
+              ignore (Unix.recv sock one 0 1 [])
+            with _ -> ());
+            VCon ("Ok", [VString (Buffer.contents data_buf)])
+          end
+        | _ -> eval_error "tcp_recv_chunked_frame(fd)"))
     (* ---- HTTP serialization builtins ---- *)
   ; ("http_serialize_request", VBuiltin ("http_serialize_request", function
         | [VString meth; VString host; VString path; query_opt; header_list; VString body] ->
@@ -1390,6 +1874,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
     let v = eval_expr env scrut in
     eval_match env v branches
 
+  | ETuple ([], _) -> VUnit
   | ETuple (es, _) ->
     VTuple (List.map (eval_expr env) es)
 
@@ -1481,11 +1966,62 @@ and eval_expr_inner (env : env) (e : expr) : value =
     (match Hashtbl.find_opt actor_defs_tbl actor_name with
      | None -> eval_error "spawn: unknown actor '%s'" actor_name
      | Some (def, env_ref) ->
-       let init_state = eval_expr !env_ref def.actor_init in
        let pid = !next_pid in
        next_pid := pid + 1;
-       let inst = { ai_name = actor_name; ai_def = def; ai_env_ref = env_ref;
-                    ai_state = init_state; ai_alive = true } in
+       (* Phase 2: if this actor is a supervisor, spawn children first and
+          inject their pids into the init state. *)
+       let init_state = match def.actor_supervise with
+         | None ->
+           eval_expr !env_ref def.actor_init
+         | Some sup_cfg ->
+           (* Spawn each child and collect (field_name -> pid) *)
+           let child_pids = List.map (fun sf ->
+             let child_actor_name = match sf.sf_ty with
+               | TyCon (n, []) -> n.txt
+               | _ -> eval_error "supervise: child type must be a simple actor name"
+             in
+             match Hashtbl.find_opt actor_defs_tbl child_actor_name with
+             | None -> eval_error "spawn supervisor: unknown child actor '%s'" child_actor_name
+             | Some (child_def, child_env_ref) ->
+               let child_init_state = eval_expr !child_env_ref child_def.actor_init in
+               let child_pid = !next_pid in
+               next_pid := child_pid + 1;
+               let child_inst = {
+                 ai_name = child_actor_name; ai_def = child_def;
+                 ai_env_ref = child_env_ref;
+                 ai_state = child_init_state; ai_alive = true;
+                 ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
+                 ai_supervisor = Some pid;
+                 ai_restart_count = []; ai_epoch = 0 } in
+               Hashtbl.add actor_registry child_pid child_inst;
+               (sf.sf_name.txt, child_pid)
+           ) sup_cfg.sc_fields in
+           (* Build init state: start from declared init, then overlay child pids *)
+           let base_state = eval_expr !env_ref def.actor_init in
+           (match base_state with
+            | VRecord fields ->
+              (* Replace fields that correspond to child actors with their pids *)
+              let updated = List.map (fun (fname, fval) ->
+                match List.assoc_opt fname child_pids with
+                | Some cpid -> (fname, VInt cpid)
+                | None -> (fname, fval)
+              ) fields in
+              (* Also add any child pids not in the record *)
+              let extras = List.filter_map (fun (fname, cpid) ->
+                if List.assoc_opt fname fields = None
+                then Some (fname, VInt cpid)
+                else None
+              ) child_pids in
+              VRecord (updated @ extras)
+            | _ ->
+              (* Non-record state: just use the init as-is *)
+              base_state)
+       in
+       let inst = { ai_name     = actor_name; ai_def = def; ai_env_ref = env_ref;
+                    ai_state    = init_state; ai_alive = true;
+                    ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
+                    ai_supervisor = None; ai_restart_count = [];
+                    ai_epoch = 0 } in
        Hashtbl.add actor_registry pid inst;
        VPid pid)
 
@@ -1552,7 +2088,9 @@ and eval_expr_inner (env : env) (e : expr) : value =
                   raise exn)
              in
              inst.ai_state <- new_state;
-             VCon ("Some", [VUnit])))
+             (* Return Some(new_state) so callers can inspect the result.
+                Existing code uses Some(_) which matches any payload. *)
+             VCon ("Some", [new_state])))
      | _ ->
        eval_error "send: first argument must be a Pid, got %s"
          (value_to_string pid_val))
@@ -1621,6 +2159,12 @@ and eval_expr (env : env) (e : expr) : value =
      | `Err exn -> raise exn)
 
 (* ------------------------------------------------------------------ *)
+(* Phase 2/3: Initialize eval_expr_hook for supervisor restarts       *)
+(* ------------------------------------------------------------------ *)
+
+let () = eval_expr_hook := eval_expr
+
+(* ------------------------------------------------------------------ *)
 (* Task builtins                                                       *)
 (* These are defined after [apply] so they can call it directly.      *)
 (* ------------------------------------------------------------------ *)
@@ -1636,6 +2180,7 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear actor_registry;
   Hashtbl.clear actor_defs_tbl;
   next_pid := 0;
+  next_monitor_id := 0;
   reduction_ctx := None;
   last_reduction_count := 0
 
@@ -1714,6 +2259,44 @@ let task_builtins : env =
   ; ("cap_narrow", VBuiltin ("cap_narrow", function
     | [_cap] -> VUnit   (* attenuation is a compile-time check; runtime is a no-op *)
     | _ -> eval_error "cap_narrow: expected 1 argument"))
+
+  (* Phase 5: task_spawn_link — spawn a task linked to an actor pid.
+     If the linked actor crashes, the task is cancelled (or vice versa). *)
+  ; ("task_spawn_link", VBuiltin ("task_spawn_link", function
+    | [thunk; VPid linked_pid] ->
+      let tid = !next_task_id in
+      next_task_id := tid + 1;
+      (* Check if linked actor is still alive before running *)
+      let linked_alive = match Hashtbl.find_opt actor_registry linked_pid with
+        | Some inst -> inst.ai_alive
+        | None -> false
+      in
+      if not linked_alive then begin
+        (* Linked actor already dead — task fails immediately *)
+        let entry = { te_id = tid; te_result = Some (VCon ("Err", [VString "linked actor dead"]));
+                      te_thunk = thunk } in
+        Hashtbl.add task_registry tid entry;
+        VTask tid
+      end else begin
+        (* Eagerly execute the thunk (Phase 1: single-threaded) *)
+        let result =
+          (try
+             let v = apply thunk [VInt 0] in
+             v
+           with exn ->
+             (* Task raised an exception: crash the linked actor *)
+             (match Hashtbl.find_opt actor_registry linked_pid with
+              | Some inst when inst.ai_alive ->
+                crash_actor linked_pid
+                  (Printf.sprintf "linked task raised: %s" (Printexc.to_string exn))
+              | _ -> ());
+             raise exn)
+        in
+        let entry = { te_id = tid; te_result = Some result; te_thunk = thunk } in
+        Hashtbl.add task_registry tid entry;
+        VTask tid
+      end
+    | _ -> eval_error "task_spawn_link: expected (thunk, Pid)"))
   ]
 
 (** Run [thunk] (a zero-argument closure) while counting reductions.

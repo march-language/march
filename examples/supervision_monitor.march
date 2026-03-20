@@ -1,0 +1,93 @@
+-- supervision_monitor.march
+-- Phase 1: Monitors and Down notifications.
+--
+-- Demonstrates:
+--   * monitor(watcher, target)  — returns an Int monitor-ref
+--   * demonitor(ref)            — cancel a monitor
+--   * mailbox_size(pid)         — count pending Down messages
+--
+-- When a monitored actor is killed, a Down message is pushed to the
+-- watcher's mailbox.  The watcher can process it via a message handler,
+-- or we can inspect the mailbox_size to confirm delivery.
+--
+-- Run: march examples/supervision_monitor.march
+
+mod MonitorDemo do
+
+  -- A simple actor that does some counting work.
+  actor Worker do
+    state { count : Int }
+    init { count = 0 }
+
+    on Work() do
+      let n = state.count + 1
+      println("[Worker] processed work #" ++ int_to_string(n))
+      { count = n }
+    end
+  end
+
+  -- A watcher whose mailbox receives Down(ref, reason) on crash.
+  -- It has a handler so we can also ask it to report its down count.
+  actor Watcher do
+    state { down_count : Int }
+    init { down_count = 0 }
+
+    -- Calling this causes the watcher to check its mailbox and print.
+    -- (In real use, a receive loop would drain the mailbox automatically.)
+    on Report() do
+      println("[Watcher] down_count in state: " ++ int_to_string(state.down_count))
+      state
+    end
+  end
+
+  fn main() do
+    println("=== Monitor Demo ===")
+    println("")
+
+    let worker  = spawn(Worker)
+    let watcher = spawn(Watcher)
+    println("worker  pid: " ++ to_string(worker))
+    println("watcher pid: " ++ to_string(watcher))
+    println("")
+
+    -- Establish a monitor: watcher will receive Down when worker crashes
+    let ref1 = monitor(watcher, worker)
+    println("monitor established, ref = " ++ int_to_string(ref1))
+    println("watcher mailbox size (before kill): " ++ int_to_string(mailbox_size(watcher)))
+    println("")
+
+    -- Worker does some work before it crashes
+    send(worker, Work())
+    send(worker, Work())
+    println("")
+
+    -- Kill the worker — crash_actor fires, Down is pushed to watcher mailbox
+    println("Killing worker...")
+    kill(worker)
+    println("worker alive: " ++ bool_to_string(is_alive(worker)))
+
+    -- mailbox_size shows the Down notification arrived
+    let mbox1 = mailbox_size(watcher)
+    println("watcher mailbox size (after kill):  " ++ int_to_string(mbox1))
+    println("  (expect 1 — one Down notification)")
+    println("")
+
+    -- demonitor cancels the subscription (idempotent even after actor death)
+    demonitor(ref1)
+    println("monitor cancelled (ref " ++ int_to_string(ref1) ++ ")")
+    println("")
+
+    -- Monitoring an already-dead actor delivers Down immediately
+    println("--- Monitoring a dead actor ---")
+    let ref2 = monitor(watcher, worker)
+    let mbox2 = mailbox_size(watcher)
+    println("monitor dead actor, ref = " ++ int_to_string(ref2))
+    println("watcher mailbox size: " ++ int_to_string(mbox2))
+    println("  (expect 2 — second Down arrives immediately for dead actor)")
+    demonitor(ref2)
+    println("")
+
+    println("=== Done ===")
+  end
+
+end

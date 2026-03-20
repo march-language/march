@@ -188,17 +188,39 @@ and type_def =
 and variant = { var_name : name; var_args : ty list } [@@deriving show]
 and field = { fld_name : name; fld_ty : ty; fld_lin : linearity } [@@deriving show]
 
+and restart_strategy =
+  | OneForOne    (** Only restart the crashed child *)
+  | OneForAll    (** Kill and restart all children *)
+  | RestForOne   (** Kill and restart children after the crashed one in order *)
+[@@deriving show]
+
+and supervise_field = {
+  sf_name : name;
+  sf_ty   : ty;
+}
+[@@deriving show]
+
+and supervise_config = {
+  sc_fields       : supervise_field list;
+  sc_strategy     : restart_strategy;
+  sc_max_restarts : int;
+  sc_window_secs  : int;
+  sc_order        : name list;   (** declared field order for rest_for_one *)
+}
+[@@deriving show]
+
 and actor_def = {
-  actor_state : field list;
-  actor_init : expr;
+  actor_state    : field list;
+  actor_init     : expr;
   actor_handlers : actor_handler list;
+  actor_supervise : supervise_config option;   (** Some = supervisor actor *)
 }
 [@@deriving show]
 
 and actor_handler = {
-  ah_msg : name;
+  ah_msg    : name;
   ah_params : param list;
-  ah_body : expr;
+  ah_body   : expr;
 }
 [@@deriving show]
 

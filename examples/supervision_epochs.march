@@ -1,0 +1,118 @@
+-- supervision_epochs.march
+-- Phase 3: Epoch-based capability tracking.
+--
+-- Demonstrates:
+--   * get_cap(pid)              — returns Some(Cap(pid, epoch)) while alive
+--   * send_checked(cap, msg)    — delivers msg only if cap epoch matches actor
+--   * After a supervisor restart, the old pid is dead; old cap is stale.
+--
+-- The epoch model prevents messages from reaching the WRONG actor instance
+-- after a crash+restart.  The old Cap holds the old pid; since that pid
+-- is now dead, send_checked returns :error (stale/dead cap).
+--
+-- Run: march examples/supervision_epochs.march
+
+mod EpochDemo do
+
+  actor Service do
+    state { value : Int }
+    init { value = 42 }
+
+    on GetValue() do
+      println("[Service] GetValue — value = " ++ int_to_string(state.value))
+      state
+    end
+
+    on SetValue(n : Int) do
+      println("[Service] SetValue(" ++ int_to_string(n) ++ ")")
+      { value = n }
+    end
+  end
+
+  -- Supervisor auto-spawns Service and restarts it on crash.
+  actor ServiceSupervisor do
+    state { service : Int }
+    init { service = 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      Service service
+    end
+
+    on GetState() do
+      state
+    end
+  end
+
+  -- Helper: retrieve the current service pid via supervisor
+  fn get_service_pid(sup) do
+    let result = send(sup, GetState())
+    match result with
+    | None    -> pid_of_int(-1)
+    | Some(s) -> pid_of_int(s.service)
+    end
+  end
+
+  fn main() do
+    println("=== Epoch-Based Capability Demo (Phase 3) ===")
+    println("")
+
+    -- Spawn supervisor; it auto-spawns Service
+    let sup = spawn(ServiceSupervisor)
+    let svc = get_service_pid(sup)
+    println("ServiceSupervisor spawned, service pid = " ++ to_string(svc))
+    println("service alive: " ++ bool_to_string(is_alive(svc)))
+    println("")
+
+    -- Acquire a capability for the service (stamped with current epoch)
+    let cap_result = get_cap(svc)
+    println("--- Acquiring capability ---")
+    match cap_result with
+    | None ->
+      println("ERROR: could not get cap — service already dead?")
+    | Some(cap) ->
+      println("cap acquired: " ++ to_string(cap))
+
+      -- send_checked validates the cap epoch before delivering
+      println("")
+      println("--- send_checked with fresh cap (expect :ok) ---")
+      let r1 = send_checked(cap, GetValue())
+      println("send_checked result: " ++ to_string(r1))
+
+      println("")
+      println("--- Crashing the service (supervisor restarts it with new pid) ---")
+      kill(svc)
+      println("old service alive: " ++ bool_to_string(is_alive(svc)))
+
+      let svc2 = get_service_pid(sup)
+      println("new service pid:   " ++ to_string(svc2))
+      println("new service alive: " ++ bool_to_string(is_alive(svc2)))
+      println("")
+
+      -- Old cap (old pid) is now stale — send_checked rejects it
+      println("--- send_checked with OLD cap (expect :error — dead actor) ---")
+      let r2 = send_checked(cap, GetValue())
+      println("send_checked old cap result: " ++ to_string(r2))
+      println("")
+
+      -- Acquire a fresh cap for the NEW service instance
+      println("--- Acquiring fresh cap for new service instance ---")
+      let cap2_result = get_cap(svc2)
+      match cap2_result with
+      | None -> println("ERROR: could not get fresh cap")
+      | Some(cap2) ->
+        println("new cap acquired: " ++ to_string(cap2))
+
+        let r3 = send_checked(cap2, GetValue())
+        println("send_checked new cap result: " ++ to_string(r3))
+        println("")
+        println("New instance starts fresh (value = 42, reset to initial state)")
+      end
+    end
+
+    println("")
+    println("=== Done ===")
+  end
+
+end
