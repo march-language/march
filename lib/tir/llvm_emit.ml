@@ -35,6 +35,11 @@ type ctx = {
   field_map : (string, (string * Tir.ty) list) Hashtbl.t;
   mutable ret_ty  : Tir.ty;
   fast_math : bool;
+  (* For resolving concrete field types from polymorphic type definitions.
+     poly_ctors: (type_name, ctor_name) -> generic field types (may contain TVar)
+     type_params: type_name -> ordered list of type-variable parameter names *)
+  poly_ctors  : (string * string, Tir.ty list) Hashtbl.t;
+  type_params : (string, string list) Hashtbl.t;
   (* Maps each TIR variable name to its current LLVM alloca slot name.
      Updated when a new ELet binding is created; loads look up the current
      slot here.  When a name is shadowed (let x = ...; let x = ...), the
@@ -56,6 +61,8 @@ let make_ctx ?(fast_math=false) () = {
   fast_math;
   var_slot    = Hashtbl.create 32;
   local_names = Hashtbl.create 32;
+  poly_ctors  = Hashtbl.create 64;
+  type_params = Hashtbl.create 16;
 }
 
 (* ── Helpers ─────────────────────────────────────────────────────────── *)
@@ -341,6 +348,35 @@ let ctor_entry ctx name n_args_fallback =
   | Some e -> e
   | None   -> { ce_tag = 0; ce_fields = List.init n_args_fallback (fun _ -> Tir.TVar "_") }
 
+(** Apply a type-variable substitution to a TIR type. *)
+let rec apply_ty_subst (subst : (string * Tir.ty) list) : Tir.ty -> Tir.ty = function
+  | Tir.TVar n ->
+    (match List.assoc_opt n subst with Some t -> t | None -> Tir.TVar n)
+  | Tir.TCon (n, args) -> Tir.TCon (n, List.map (apply_ty_subst subst) args)
+  | Tir.TFn (ps, r)    -> Tir.TFn (List.map (apply_ty_subst subst) ps, apply_ty_subst subst r)
+  | Tir.TTuple ts      -> Tir.TTuple (List.map (apply_ty_subst subst) ts)
+  | Tir.TPtr t         -> Tir.TPtr (apply_ty_subst subst t)
+  | t -> t
+
+(** Return concrete field types for [ctor_name] given the scrutinee's TIR type.
+    When the scrutinee is a concrete [TCon(name, ty_args)] (e.g. List(Int)),
+    substitutes type variable parameters with the concrete arguments so that
+    scalar fields (Int, Bool, …) get their real LLVM type instead of "ptr".
+    Falls back to [ctor_entry] (which may contain TVar placeholders) otherwise. *)
+let resolve_ctor_fields ctx scrut_tir_ty ctor_name n_args =
+  match scrut_tir_ty with
+  | Tir.TCon (type_name, ty_args) ->
+    (match Hashtbl.find_opt ctx.type_params type_name,
+           Hashtbl.find_opt ctx.poly_ctors (type_name, ctor_name) with
+     | Some param_names, Some generic_fields
+       when List.length param_names = List.length ty_args ->
+       let subst = List.combine param_names ty_args in
+       List.map (apply_ty_subst subst) generic_fields
+     | _ ->
+       (ctor_entry ctx ctor_name n_args).ce_fields)
+  | _ ->
+    (ctor_entry ctx ctor_name n_args).ce_fields
+
 (** Look up the sorted field list for a record type. *)
 let get_record_fields ctx (ty : Tir.ty) : (string * Tir.ty) list =
   match ty with
@@ -614,27 +650,91 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ) args;
     ("ptr", ptr)
 
-  (* ── FBIP reuse ────────────────────────────────────────────────────── *)
+  (* ── FBIP reuse (conditional: check RC=1 before reusing in-place) ──── *)
+  (* EReuse semantics: if RC=1, reuse in-place; else DecRC + alloc fresh.
+     This is critical for correctness when the caller holds extra references
+     (e.g. after IncRC before passing to a function). *)
   | Tir.EReuse (reuse_atom, Tir.TCon (ctor, _), args) ->
     let (_, rv) = emit_atom ctx reuse_atom in
     let entry = ctor_entry ctx ctor (List.length args) in
-    emit_store_tag ctx rv entry.ce_tag;
-    List.iteri (fun i atom ->
+    (* Pre-compute all arg values before branching *)
+    let arg_vals = List.mapi (fun i atom ->
       let field_ty = match List.nth_opt entry.ce_fields i with
         | Some t -> llvm_ty t | None -> "ptr" in
       let (v_ty, v_val) = emit_atom ctx atom in
       let v_coerced = coerce ctx v_ty v_val field_ty in
+      (field_ty, v_coerced)
+    ) args in
+    (* Load RC and check if uniquely owned *)
+    let rc = fresh ctx "rc" in
+    emit ctx (Printf.sprintf "%s = load i64, ptr %s, align 8" rc rv);
+    let is_unique = fresh ctx "uniq" in
+    emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" is_unique rc);
+    let reuse_lbl = fresh_block ctx "fbip_reuse" in
+    let fresh_lbl = fresh_block ctx "fbip_fresh" in
+    let merge_lbl = fresh_block ctx "fbip_merge" in
+    let result_slot = fresh ctx "fbip_slot" in
+    emit ctx (Printf.sprintf "%s = alloca ptr" result_slot);
+    emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+                     is_unique reuse_lbl fresh_lbl);
+    (* Reuse branch: write tag/fields to original pointer *)
+    emit_label ctx reuse_lbl;
+    emit_store_tag ctx rv entry.ce_tag;
+    List.iteri (fun i (field_ty, v_coerced) ->
       emit_store_field ctx rv i field_ty v_coerced
-    ) args;
-    ("ptr", rv)
+    ) arg_vals;
+    emit ctx (Printf.sprintf "store ptr %s, ptr %s" rv result_slot);
+    emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
+    (* Fresh branch: DecRC original, alloc fresh, write tag/fields *)
+    emit_label ctx fresh_lbl;
+    emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
+    let hp = emit_heap_alloc ctx entry.ce_tag (List.length args) in
+    List.iteri (fun i (field_ty, v_coerced) ->
+      emit_store_field ctx hp i field_ty v_coerced
+    ) arg_vals;
+    emit ctx (Printf.sprintf "store ptr %s, ptr %s" hp result_slot);
+    emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
+    (* Merge: load result *)
+    emit_label ctx merge_lbl;
+    let result = fresh ctx "fbip_r" in
+    emit ctx (Printf.sprintf "%s = load ptr, ptr %s" result result_slot);
+    ("ptr", result)
 
   | Tir.EReuse (reuse_atom, _, args) ->
+    (* Non-TCon reuse: same conditional logic without ctor-specific fields *)
     let (_, rv) = emit_atom ctx reuse_atom in
-    List.iteri (fun i atom ->
-      let (ty, v) = emit_atom ctx atom in
+    let arg_vals = List.map (fun atom ->
+      let (ty, v) = emit_atom ctx atom in (ty, v)
+    ) args in
+    let rc = fresh ctx "rc" in
+    emit ctx (Printf.sprintf "%s = load i64, ptr %s, align 8" rc rv);
+    let is_unique = fresh ctx "uniq" in
+    emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" is_unique rc);
+    let reuse_lbl = fresh_block ctx "fbip_reuse" in
+    let fresh_lbl = fresh_block ctx "fbip_fresh" in
+    let merge_lbl = fresh_block ctx "fbip_merge" in
+    let result_slot = fresh ctx "fbip_slot" in
+    emit ctx (Printf.sprintf "%s = alloca ptr" result_slot);
+    emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+                     is_unique reuse_lbl fresh_lbl);
+    emit_label ctx reuse_lbl;
+    List.iteri (fun i (ty, v) ->
       emit_store_field ctx rv i ty v
-    ) args;
-    ("ptr", rv)
+    ) arg_vals;
+    emit ctx (Printf.sprintf "store ptr %s, ptr %s" rv result_slot);
+    emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
+    emit_label ctx fresh_lbl;
+    emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
+    let hp = emit_heap_alloc ctx 0 (List.length args) in
+    List.iteri (fun i (ty, v) ->
+      emit_store_field ctx hp i ty v
+    ) arg_vals;
+    emit ctx (Printf.sprintf "store ptr %s, ptr %s" hp result_slot);
+    emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
+    emit_label ctx merge_lbl;
+    let result = fresh ctx "fbip_r" in
+    emit ctx (Printf.sprintf "%s = load ptr, ptr %s" result result_slot);
+    ("ptr", result)
 
   (* ── RC ops ────────────────────────────────────────────────────────── *)
   (* Skip RC ops on builtins AND on top-level function references.
@@ -790,22 +890,89 @@ and emit_case ctx scrut_atom branches default_opt =
   emit_term ctx (Printf.sprintf "switch %s %s, label %%%s [\n      %s\n  ]"
                    sw_ty sw_val default_lbl cases_part);
 
+  (* Helper: if body = ESeq(EDecRC(v), rest) where v.v_name = scrut_name,
+     return (v, rest). Used to handle shared-value field IncRC below. *)
+  let strip_scrut_decrc scrut_name body =
+    match body with
+    | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest)
+      when String.equal v.Tir.v_name scrut_name -> Some (v, rest)
+    | _ -> None
+  in
+
+  (* The scrutinee's TIR type — used to resolve concrete field types for
+     polymorphic constructors (e.g. List(Int): field 0 is Int, not TVar "a"). *)
+  let scrut_tir_ty =
+    match scrut_atom with Tir.AVar v -> v.Tir.v_ty | _ -> Tir.TUnit
+  in
+
   (* Emit branch blocks *)
   List.iter2 (fun br lbl ->
     emit_label ctx lbl;
     (* Bind branch variables from scrutinee fields *)
+    let heap_field_vals = ref [] in
     if is_ptr_scrut then begin
       let entry = ctor_entry ctx br.Tir.br_tag (List.length br.Tir.br_vars) in
+      (* Concrete field types — uses scrutinee type to instantiate type variables.
+         For polymorphic ctors like Cons('a, List('a)) with scrutinee List(Int),
+         this gives [TInt, TCon("List",[TInt])] instead of [TVar "a", ...]. *)
+      let concrete_fields =
+        resolve_ctor_fields ctx scrut_tir_ty br.Tir.br_tag (List.length br.Tir.br_vars)
+      in
       List.iteri (fun i (v : Tir.var) ->
         let field_ty = match List.nth_opt entry.ce_fields i with
           | Some t -> llvm_ty t | None -> llvm_ty v.Tir.v_ty in
         let fv = emit_load_field ctx scrut_val i field_ty in
         let slot = alloca_name ctx (llvm_name v.Tir.v_name) in
         emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot field_ty);
-        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" field_ty fv slot)
+        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" field_ty fv slot);
+        (* Track heap-type fields for conditional IncRC.
+           Use the concrete field type (with type-vars resolved) so scalar
+           fields (Int, Bool, Float) in polymorphic ctors are NOT IncRC'd. *)
+        let concrete_field_ty = match List.nth_opt concrete_fields i with
+          | Some t -> llvm_ty t | None -> field_ty in
+        if concrete_field_ty = "ptr" then
+          heap_field_vals := fv :: !heap_field_vals
       ) br.Tir.br_vars
     end;
-    let (br_ty, br_val) = emit_expr ctx br.Tir.br_body in
+    (* When this branch has heap fields AND the body starts with dec_rc(scrutinee),
+       use march_decrc_freed to conditionally IncRC extracted child pointers.
+       This is necessary for correctness when the scrutinee is shared (RC > 1):
+       dec_rc doesn't free the parent, so children are still owned by parent
+       AND by the extracted variables — we need IncRC to resolve the double-ownership. *)
+    let scrut_name = match scrut_atom with
+      | Tir.AVar v -> Some v.Tir.v_name | _ -> None
+    in
+    let body_to_emit =
+      match scrut_name, !heap_field_vals with
+      | Some sn, (_ :: _ as fields) ->
+        (match strip_scrut_decrc sn br.Tir.br_body with
+         | Some (_scrut_v, rest) ->
+           (* Emit: march_decrc_freed(scrut); if not freed, incrc each heap field *)
+           let freed = fresh ctx "freed" in
+           emit ctx (Printf.sprintf "%s = call i64 @march_decrc_freed(ptr %s)"
+                       freed scrut_val);
+           let freed_bool = fresh ctx "freed_b" in
+           emit ctx (Printf.sprintf "%s = icmp ne i64 %s, 0" freed_bool freed);
+           let unique_lbl = fresh_block ctx "br_unique" in
+           let shared_lbl = fresh_block ctx "br_shared" in
+           let body_lbl   = fresh_block ctx "br_body" in
+           emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+                            freed_bool unique_lbl shared_lbl);
+           (* Shared path: IncRC each extracted heap field *)
+           emit_label ctx shared_lbl;
+           List.iter (fun fv ->
+             emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" fv)
+           ) fields;
+           emit_term ctx (Printf.sprintf "br label %%%s" body_lbl);
+           (* Unique path: no IncRC needed *)
+           emit_label ctx unique_lbl;
+           emit_term ctx (Printf.sprintf "br label %%%s" body_lbl);
+           emit_label ctx body_lbl;
+           rest   (* emit the rest of the body without the leading dec_rc *)
+         | None -> br.Tir.br_body)
+      | _ -> br.Tir.br_body
+    in
+    let (br_ty, br_val) = emit_expr ctx body_to_emit in
     let stored = coerce ctx br_ty br_val "ptr" in
     emit ctx (Printf.sprintf "store ptr %s, ptr %s" stored result_slot);
     emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl)
@@ -868,9 +1035,28 @@ let build_ctor_info ctx (m : Tir.tir_module) =
   List.iter (fun td ->
     match td with
     | Tir.TDVariant (_name, ctors) ->
+      (* Collect free type-variable names in declaration order for poly resolution *)
+      let seen = Hashtbl.create 4 in
+      let params = ref [] in
+      let rec collect_tvars = function
+        | Tir.TVar n ->
+          if not (Hashtbl.mem seen n) then begin
+            Hashtbl.add seen n ();
+            params := n :: !params
+          end
+        | Tir.TCon (_, args) -> List.iter collect_tvars args
+        | Tir.TFn (ps, r)   -> List.iter collect_tvars ps; collect_tvars r
+        | Tir.TTuple ts     -> List.iter collect_tvars ts
+        | Tir.TPtr t        -> collect_tvars t
+        | _                 -> ()
+      in
+      List.iter (fun (_, field_tys) -> List.iter collect_tvars field_tys) ctors;
+      let param_names = List.rev !params in
+      Hashtbl.replace ctx.type_params _name param_names;
       List.iteri (fun tag_idx (ctor_name, field_tys) ->
         Hashtbl.replace ctx.ctor_info ctor_name
-          { ce_tag = tag_idx; ce_fields = field_tys }
+          { ce_tag = tag_idx; ce_fields = field_tys };
+        Hashtbl.replace ctx.poly_ctors (_name, ctor_name) field_tys
       ) ctors
     | Tir.TDRecord (_name, fields) ->
       Hashtbl.replace ctx.ctor_info _name
@@ -889,6 +1075,7 @@ target triple = "arm64-apple-macosx15.0.0"
 declare ptr  @march_alloc(i64 %sz)
 declare void @march_incrc(ptr %p)
 declare void @march_decrc(ptr %p)
+declare i64  @march_decrc_freed(ptr %p)
 declare void @march_free(ptr %p)
 declare void @march_print(ptr %s)
 declare void @march_println(ptr %s)
