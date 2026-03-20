@@ -4588,7 +4588,12 @@ let test_file_append () =
 (* ── Dir stdlib tests ──────────────────────────────────────────────────── *)
 
 let load_dir_stdlib () =
-  [ load_stdlib_file_for_test "dir.march" ]
+  [ load_stdlib_file_for_test "string.march"
+  ; load_stdlib_file_for_test "list.march"
+  ; load_stdlib_file_for_test "seq.march"
+  ; load_stdlib_file_for_test "path.march"
+  ; load_stdlib_file_for_test "file.march"
+  ; load_stdlib_file_for_test "dir.march" ]
 
 let eval_with_dir src =
   eval_with_stdlib (load_dir_stdlib ()) src
@@ -4688,6 +4693,44 @@ let test_dir_mkdir_p () =
   in
   (try rm_rf base with _ -> ());
   Alcotest.(check bool) "mkdir_p creates nested dir" true result
+
+let test_integration_file_pipeline () =
+  let base = Printf.sprintf "/tmp/march_integ_%d" (Unix.getpid ()) in
+  (try Unix.mkdir base 0o755 with _ -> ());
+  let write path content =
+    let oc = open_out path in output_string oc content; close_out oc in
+  write (base ^ "/a.txt") "hello\nworld\n";
+  write (base ^ "/b.txt") "foo\nbar\n";
+  write (base ^ "/c.csv") "ignore me";
+  let env = eval_with_dir (Printf.sprintf {|mod T do
+    fn f() do
+      match Dir.list_full("%s") with
+      | Err(ig) -> Nil
+      | Ok(files) ->
+        let txt_files = List.filter(files, fn(p) -> Path.extension(p) == "txt")
+        fn collect(ps, acc) do
+          match ps with
+          | Nil -> List.reverse(acc)
+          | Cons(p, rest) ->
+            match File.read_lines(p) with
+            | Ok(ls) -> collect(rest, List.append(List.reverse(ls), acc))
+            | Err(ig) -> collect(rest, acc)
+            end
+          end
+        end
+        collect(txt_files, Nil)
+      end
+    end
+  end|} base) in
+  let result = List.map vstr (vlist (call_fn env "f" [])) in
+  (* cleanup *)
+  (try Sys.remove (base ^ "/a.txt") with _ -> ());
+  (try Sys.remove (base ^ "/b.txt") with _ -> ());
+  (try Sys.remove (base ^ "/c.csv") with _ -> ());
+  (try Unix.rmdir base with _ -> ());
+  (* Dir.list returns sorted, so a.txt before b.txt, gives hello/world/foo/bar *)
+  Alcotest.(check (list string)) "integration pipeline"
+    ["hello"; "world"; "foo"; "bar"] result
 
 let () =
   Alcotest.run "march"
@@ -5200,5 +5243,8 @@ let () =
         Alcotest.test_case "exists true"      `Quick test_dir_exists;
         Alcotest.test_case "exists false"     `Quick test_dir_not_exists;
         Alcotest.test_case "mkdir_p nested"   `Quick test_dir_mkdir_p;
+      ]);
+      ("integration", [
+        Alcotest.test_case "file/dir/path pipeline" `Quick test_integration_file_pipeline;
       ]);
     ]
