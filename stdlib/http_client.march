@@ -89,7 +89,7 @@ mod HttpClient do
 
   pub fn with_retry(client, max_attempts, backoff_ms) do
     match client with
-    | Client(rq, rs, es, redir, _, _) ->
+    | Client(rq, rs, es, redir, _) ->
       Client(rq, rs, es, redir, max_attempts, backoff_ms)
     end
   end
@@ -124,7 +124,7 @@ mod HttpClient do
       end
     end
     match client with
-    | Client(rq, rs, es, _, _, _) ->
+    | Client(rq, rs, es, _, _) ->
       list_concat(req_names(rq), list_concat(resp_names(rs), err_names(es)))
     end
   end
@@ -177,6 +177,25 @@ mod HttpClient do
     end
   end
 
+  fn reconnect_and_retry(req, retries_left) do
+    match HttpTransport.connect(req) with
+    | Err(ce) -> Err(ce)
+    | Ok(new_fd) -> transport_keepalive(new_fd, req, retries_left - 1)
+    end
+  end
+
+  fn transport_keepalive(fd, req, retries_left) do
+    match HttpTransport.request_on(fd, req) with
+    | Ok(resp) -> Ok((fd, resp))
+    | Err(_) ->
+      tcp_close(fd)
+      if retries_left > 0 then
+        reconnect_and_retry(req, retries_left - 1)
+      else
+        Err(Closed)
+    end
+  end
+
   fn handle_redirects(req, resp, max, count) do
     if max == 0 then Ok(resp)
     else if not(Http.response_is_redirect(resp)) then Ok(resp)
@@ -210,6 +229,27 @@ mod HttpClient do
   4. Run response steps left-to-right
   5. On error, run error steps (first Recover wins)
   """
+  -- Internal: run a single request through steps + transport on an fd
+  fn run_on_fd(fd, req_steps, resp_steps, err_steps, max_redir, max_retries, req) do
+    match run_request_steps(req_steps, req) with
+    | Err(e) -> run_error_steps(err_steps, req, e)
+    | Ok(transformed_req) ->
+      match transport_keepalive(fd, transformed_req, max_retries + 1) with
+      | Err(transport_err) ->
+        run_error_steps(err_steps, transformed_req, HttpTransportError(transport_err))
+      | Ok((_, resp)) ->
+        match handle_redirects(transformed_req, resp, max_redir, 0) with
+        | Err(e) -> run_error_steps(err_steps, transformed_req, e)
+        | Ok(final_resp) ->
+          match run_response_steps(resp_steps, transformed_req, final_resp) with
+          | Err(e) -> run_error_steps(err_steps, transformed_req, e)
+          | Ok((_, response)) -> Ok(response)
+          end
+        end
+      end
+    end
+  end
+
   pub fn run(client, req) do
     match client with
     | Client(req_steps, resp_steps, err_steps, max_redir, max_retries, _) ->
@@ -228,6 +268,38 @@ mod HttpClient do
             | Ok((_, response)) -> Ok(response)
             end
           end
+        end
+      end
+    end
+  end
+
+  doc """
+  Open a keep-alive connection and run a function with it.
+  The function receives a `do_request` callback that sends requests
+  on the shared connection. Connection is closed when done.
+
+  Example:
+    HttpClient.with_connection(client, "http://api.example.com", fn(do_request) ->
+      let r1 = do_request(Http.get_request("/users"))
+      let r2 = do_request(Http.get_request("/posts"))
+      (r1, r2)
+    end)
+  """
+  pub fn with_connection(client, url, callback) do
+    match Http.parse_url(url) with
+    | Err(_) -> Err(StepError("url", "invalid url: " ++ url))
+    | Ok(base_req) ->
+      match HttpTransport.connect(base_req) with
+      | Err(e) -> Err(HttpTransportError(e))
+      | Ok(fd) ->
+        match client with
+        | Client(req_steps, resp_steps, err_steps, max_redir, max_retries, _) ->
+          fn do_request(req) do
+            run_on_fd(fd, req_steps, resp_steps, err_steps, max_redir, max_retries, req)
+          end
+          let result = callback(do_request)
+          tcp_close(fd)
+          Ok(result)
         end
       end
     end

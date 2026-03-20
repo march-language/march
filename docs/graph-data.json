@@ -1,1 +1,160 @@
-{"nodes":[],"edges":[]}
+{
+  "nodes": [
+    {
+      "id": 1,
+      "change_id": "d5343127-6de7-4770-bd42-8d4457b5994a",
+      "node_type": "goal",
+      "title": "Implement actor lowering from AST to TIR and LLVM",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-03-18T22:11:26.656582-04:00",
+      "updated_at": "2026-03-18T22:11:26.656582-04:00",
+      "metadata_json": "{\"branch\":\"claude/dazzling-khorana\",\"confidence\":90,\"prompt\":\"implement specs/actor-lowering.md\"}"
+    },
+    {
+      "id": 2,
+      "change_id": "602cf5ea-dd10-4bf0-9ae9-648bc4763873",
+      "node_type": "action",
+      "title": "Add march_kill/is_alive/send runtime functions",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-03-18T22:14:43.054570-04:00",
+      "updated_at": "2026-03-18T22:14:43.054570-04:00",
+      "metadata_json": "{\"branch\":\"claude/dazzling-khorana\",\"confidence\":85,\"files\":[\"runtime/march_runtime.c\",\"runtime/march_runtime.h\"]}"
+    },
+    {
+      "id": 3,
+      "change_id": "f3233bdb-0468-4434-abff-82c794da4dd5",
+      "node_type": "action",
+      "title": "Implement lower_actor in lower.ml + fix ESpawn/ESend",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-03-18T22:31:33.034128-04:00",
+      "updated_at": "2026-03-18T22:31:33.034128-04:00",
+      "metadata_json": "{\"branch\":\"claude/dazzling-khorana\",\"confidence\":85,\"files\":[\"lib/tir/lower.ml\"]}"
+    },
+    {
+      "id": 4,
+      "change_id": "e42ee3cd-f15b-4579-8d20-54526bedb84b",
+      "node_type": "outcome",
+      "title": "Actor lowering complete: actors.march compiles and runs, 163 tests pass",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-03-18T23:09:29.682586-04:00",
+      "updated_at": "2026-03-18T23:09:29.682586-04:00",
+      "metadata_json": "{\"branch\":\"claude/dazzling-khorana\",\"commit\":\"5c1a8b3\",\"confidence\":95}"
+    },
+    {
+      "id": 5,
+      "change_id": "983bf444-1f4f-492b-9a26-2ba059e53fb5",
+      "node_type": "goal",
+      "title": "Implement March stdlib from specs/stdlib_design.md",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-03-18T23:21:33.370601-04:00",
+      "updated_at": "2026-03-18T23:21:33.370601-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":90,\"prompt\":\"read specs/stdlib_design.md carefully and start implementing it. \\n\\nthere's another agent adding doc strings\\n\\nthey look like \\n```\\n  doc \\\"Adds two integers.\\\"   pub fn add(a : Int, b : Int) : Int do     a + b   end    doc \\\"\\\"\\\"   Divides `a` by `b`.    Returns :error if `b` is zero.   \\\"\\\"\\\"\\n```\\nconsider adding those to the stdlib functions as you go\"}"
+    },
+    {
+      "id": 6,
+      "change_id": "a9a476d3-c374-45a1-913c-3be1240190d8",
+      "node_type": "outcome",
+      "title": "Time-travel debugger implemented with integrated REPL",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-03-19T12:43:19.475262-04:00",
+      "updated_at": "2026-03-19T12:43:19.475262-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"commit\":\"e354078\",\"confidence\":95}"
+    },
+    {
+      "id": 7,
+      "change_id": "ee1088d6-9194-4154-9ac6-eaf730fe1b6d",
+      "node_type": "goal",
+      "title": "Implement 10 debugger enhancements",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-03-19T15:44:15.158887-04:00",
+      "updated_at": "2026-03-19T15:44:15.158887-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":90,\"prompt\":\"build it\"}"
+    },
+    {
+      "id": 8,
+      "change_id": "0516fb82-62f9-4ad6-8124-8097e76e6445",
+      "node_type": "action",
+      "title": "Implement dbg(expr), goto, diff, find, watch, pretty-print, tsave/tload, actors across all files",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-03-19T15:47:27.172139-04:00",
+      "updated_at": "2026-03-19T15:47:27.172139-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"confidence\":85,\"files\":[\"lib/ast/ast.ml\",\"lib/parser/parser.mly\",\"lib/eval/eval.ml\",\"lib/typecheck/typecheck.ml\",\"lib/desugar/desugar.ml\",\"lib/debug/trace.ml\",\"lib/repl/repl.mli\",\"lib/repl/repl.ml\",\"lib/debug/debug_repl.ml\",\"test/test_march.ml\"]}"
+    },
+    {
+      "id": 9,
+      "change_id": "d2683a5a-61d8-49a3-b8be-573d27fed857",
+      "node_type": "outcome",
+      "title": "All 10 debugger enhancements implemented and committed",
+      "description": null,
+      "status": "pending",
+      "created_at": "2026-03-19T15:58:49.748894-04:00",
+      "updated_at": "2026-03-19T15:58:49.748894-04:00",
+      "metadata_json": "{\"branch\":\"main\",\"commit\":\"67f3c6d\",\"confidence\":95}"
+    }
+  ],
+  "edges": [
+    {
+      "id": 1,
+      "from_node_id": 1,
+      "to_node_id": 2,
+      "from_change_id": "d5343127-6de7-4770-bd42-8d4457b5994a",
+      "to_change_id": "602cf5ea-dd10-4bf0-9ae9-648bc4763873",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Step 1: runtime additions",
+      "created_at": "2026-03-18T22:14:43.066010-04:00"
+    },
+    {
+      "id": 2,
+      "from_node_id": 1,
+      "to_node_id": 3,
+      "from_change_id": "d5343127-6de7-4770-bd42-8d4457b5994a",
+      "to_change_id": "f3233bdb-0468-4434-abff-82c794da4dd5",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Step 3: core actor lowering",
+      "created_at": "2026-03-18T22:31:33.048276-04:00"
+    },
+    {
+      "id": 3,
+      "from_node_id": 3,
+      "to_node_id": 4,
+      "from_change_id": "f3233bdb-0468-4434-abff-82c794da4dd5",
+      "to_change_id": "e42ee3cd-f15b-4579-8d20-54526bedb84b",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation complete",
+      "created_at": "2026-03-18T23:09:29.692457-04:00"
+    },
+    {
+      "id": 4,
+      "from_node_id": 7,
+      "to_node_id": 8,
+      "from_change_id": "ee1088d6-9194-4154-9ac6-eaf730fe1b6d",
+      "to_change_id": "0516fb82-62f9-4ad6-8124-8097e76e6445",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation",
+      "created_at": "2026-03-19T15:47:27.183935-04:00"
+    },
+    {
+      "id": 5,
+      "from_node_id": 8,
+      "to_node_id": 9,
+      "from_change_id": "0516fb82-62f9-4ad6-8124-8097e76e6445",
+      "to_change_id": "d2683a5a-61d8-49a3-b8be-573d27fed857",
+      "edge_type": "leads_to",
+      "weight": 1.0,
+      "rationale": "Implementation complete",
+      "created_at": "2026-03-19T15:58:49.761285-04:00"
+    }
+  ]
+}

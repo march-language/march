@@ -1051,6 +1051,132 @@ let base_env : env =
           (try Unix.close (Obj.magic fd : Unix.file_descr) with _ -> ());
           VUnit
         | _ -> eval_error "tcp_close(fd)"))
+  ; ("tcp_recv_http", VBuiltin ("tcp_recv_http", function
+        | [VInt fd; VInt max_bytes] ->
+          (* Read an HTTP response on a keep-alive connection:
+             1. Read headers byte-by-byte until \r\n\r\n
+             2. Parse Content-Length (or read until close if absent)
+             3. Read exactly Content-Length bytes of body *)
+          let sock = (Obj.magic fd : Unix.file_descr) in
+          let hdr_buf = Buffer.create 1024 in
+          let one = Bytes.create 1 in
+          let found_end = ref false in
+          (try
+            while not !found_end do
+              let n = Unix.recv sock one 0 1 [] in
+              if n = 0 then (found_end := true)  (* connection closed *)
+              else begin
+                Buffer.add_subbytes hdr_buf one 0 1;
+                let len = Buffer.length hdr_buf in
+                if len >= 4 then begin
+                  let s = Buffer.contents hdr_buf in
+                  if s.[len-4] = '\r' && s.[len-3] = '\n'
+                     && s.[len-2] = '\r' && s.[len-1] = '\n' then
+                    found_end := true
+                end
+              end
+            done
+          with Unix.Unix_error (err, _, _) ->
+            ignore err  (* treat as end-of-headers *));
+          let headers_str = Buffer.contents hdr_buf in
+          (* Parse Content-Length from headers *)
+          let content_length = ref (-1) in
+          let chunked = ref false in
+          let lines = String.split_on_char '\n' headers_str in
+          List.iter (fun line ->
+            let t = String.trim (String.lowercase_ascii line) in
+            if String.length t > 16
+               && String.sub t 0 16 = "content-length: " then
+              (try content_length :=
+                 int_of_string (String.trim (String.sub t 16
+                   (String.length t - 16)))
+               with _ -> ())
+            else if String.length t > 19
+               && String.sub t 0 19 = "transfer-encoding: " then
+              let v = String.trim (String.sub t 19 (String.length t - 19)) in
+              if v = "chunked" then chunked := true
+          ) lines;
+          let body_buf = Buffer.create 4096 in
+          if !chunked then begin
+            (* Chunked transfer: read chunk-size\r\n, chunk-data\r\n, repeat until 0 *)
+            let line_buf = Buffer.create 32 in
+            let read_line () =
+              Buffer.clear line_buf;
+              let stop = ref false in
+              (try while not !stop do
+                let n = Unix.recv sock one 0 1 [] in
+                if n = 0 then stop := true
+                else begin
+                  let c = Bytes.get one 0 in
+                  Buffer.add_char line_buf c;
+                  let lb = Buffer.length line_buf in
+                  if lb >= 2 then begin
+                    let s = Buffer.contents line_buf in
+                    if s.[lb-2] = '\r' && s.[lb-1] = '\n' then
+                      stop := true
+                  end
+                end
+              done with _ -> ());
+              let s = Buffer.contents line_buf in
+              if String.length s >= 2
+              then String.sub s 0 (String.length s - 2)
+              else s
+            in
+            let done_ = ref false in
+            while not !done_ do
+              let size_line = read_line () in
+              let chunk_size =
+                try int_of_string ("0x" ^ String.trim size_line)
+                with _ -> 0 in
+              if chunk_size = 0 then
+                done_ := true
+              else begin
+                let remaining = ref chunk_size in
+                let chunk = Bytes.create (min chunk_size 8192) in
+                while !remaining > 0 do
+                  let to_read = min (Bytes.length chunk) !remaining in
+                  let n = Unix.recv sock chunk 0 to_read [] in
+                  if n = 0 then remaining := 0
+                  else begin
+                    Buffer.add_subbytes body_buf chunk 0 n;
+                    remaining := !remaining - n
+                  end
+                done;
+                ignore (read_line ())  (* consume trailing \r\n *)
+              end
+            done
+          end else if !content_length >= 0 then begin
+            let remaining = ref (min !content_length max_bytes) in
+            let chunk = Bytes.create 4096 in
+            while !remaining > 0 do
+              let to_read = min 4096 !remaining in
+              let n = Unix.recv sock chunk 0 to_read [] in
+              if n = 0 then remaining := 0
+              else begin
+                Buffer.add_subbytes body_buf chunk 0 n;
+                remaining := !remaining - n
+              end
+            done
+          end else begin
+            (* No Content-Length, not chunked: read until close *)
+            let chunk = Bytes.create 4096 in
+            let total = ref 0 in
+            let stop = ref false in
+            while not !stop && !total < max_bytes do
+              (try
+                let to_read = min 4096 (max_bytes - !total) in
+                let n = Unix.recv sock chunk 0 to_read [] in
+                if n = 0 then stop := true
+                else begin
+                  Buffer.add_subbytes body_buf chunk 0 n;
+                  total := !total + n
+                end
+              with _ -> stop := true)
+            done
+          end;
+          (* Return headers ++ body as a single raw string *)
+          VCon ("Ok", [VString (headers_str ^ Buffer.contents body_buf)])
+        | _ -> eval_error "tcp_recv_http(fd, max_bytes)"))
     (* ---- HTTP serialization builtins ---- *)
   ; ("http_serialize_request", VBuiltin ("http_serialize_request", function
         | [VString meth; VString host; VString path; query_opt; header_list; VString body] ->
@@ -1067,7 +1193,6 @@ let base_env : env =
           Buffer.add_string buf "Host: ";
           Buffer.add_string buf host;
           Buffer.add_string buf "\r\n";
-          Buffer.add_string buf "Connection: close\r\n";
           let rec add_headers = function
             | VCon ("Nil", []) -> ()
             | VCon ("Cons", [VCon ("Header", [VString n; VString v]); rest]) ->

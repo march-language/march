@@ -1,0 +1,31 @@
+-- HTTP GET benchmark.
+-- Performs N sequential GET requests to measure per-request latency.
+--
+-- Usage: march bench/http_get.march
+
+mod HttpGetBench do
+
+fn run_requests(n, client, url) do
+  if n == 0 then Ok(0)
+  else
+    match HttpClient.get(client, url) with
+    | Ok(_) -> run_requests(n - 1, client, url)
+    | Err(e) -> Err(e)
+    end
+end
+
+fn main() do
+  let n = 20
+  let url = "http://httpbin.org/get"
+  let client = HttpClient.new_client()
+  let client = HttpClient.add_request_step(client, "defaults",
+    HttpClient.step_default_headers)
+
+  print("March HTTP GET benchmark: " ++ int_to_string(n) ++ " sequential requests to " ++ url)
+  match run_requests(n, client, url) with
+  | Ok(_) -> print("done")
+  | Err(_) -> print("error during requests")
+  end
+end
+
+end

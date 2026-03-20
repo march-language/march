@@ -14,6 +14,9 @@ declare ptr  @march_float_to_string(double %f)
 declare ptr  @march_bool_to_string(i64 %b)
 declare ptr  @march_string_concat(ptr %a, ptr %b)
 declare i64  @march_string_eq(ptr %a, ptr %b)
+declare void @march_kill(ptr %actor)
+declare i64  @march_is_alive(ptr %actor)
+declare ptr  @march_send(ptr %actor, ptr %msg)
 
 @.str1 = private unnamed_addr constant [2 x i8] c"[\00"
 @.str2 = private unnamed_addr constant [3 x i8] c", \00"
@@ -54,17 +57,17 @@ case_br3:
 case_br4:
   %fp6 = getelementptr i8, ptr %ld1, i64 16
   %fv7 = load ptr, ptr %fp6, align 8
-  %$w1.addr = alloca ptr
-  store ptr %fv7, ptr %$w1.addr
+  %$w17.addr = alloca ptr
+  store ptr %fv7, ptr %$w17.addr
   %fp8 = getelementptr i8, ptr %ld1, i64 24
   %fv9 = load ptr, ptr %fp8, align 8
   %t.addr = alloca ptr
   store ptr %fv9, ptr %t.addr
   %ld10 = load ptr, ptr %t.addr
   %cr11 = call i64 @length(ptr %ld10)
-  %$t2.addr = alloca i64
-  store i64 %cr11, ptr %$t2.addr
-  %ld12 = load i64, ptr %$t2.addr
+  %$t18.addr = alloca i64
+  store i64 %cr11, ptr %$t18.addr
+  %ld12 = load i64, ptr %$t18.addr
   %ar13 = add i64 1, %ld12
   %cv14 = inttoptr i64 %ar13 to ptr
   store ptr %cv14, ptr %res_slot2
@@ -111,21 +114,21 @@ case_br8:
   %fv29 = load ptr, ptr %fp28, align 8
   %ld30 = load i64, ptr %h.addr
   %cr31 = call i64 (ptr, i64) %fv29(ptr %ld27, i64 %ld30)
-  %$t3.addr = alloca i64
-  store i64 %cr31, ptr %$t3.addr
+  %$t19.addr = alloca i64
+  store i64 %cr31, ptr %$t19.addr
   %ld32 = load ptr, ptr %f.addr
   %ld33 = load ptr, ptr %t.addr
   %cr34 = call ptr @map(ptr %ld32, ptr %ld33)
-  %$t4.addr = alloca ptr
-  store ptr %cr34, ptr %$t4.addr
+  %$t20.addr = alloca ptr
+  store ptr %cr34, ptr %$t20.addr
   %hp35 = call ptr @march_alloc(i64 32)
   %tgp36 = getelementptr i8, ptr %hp35, i64 8
   store i32 1, ptr %tgp36, align 4
-  %ld37 = load i64, ptr %$t3.addr
+  %ld37 = load i64, ptr %$t19.addr
   %cv38 = inttoptr i64 %ld37 to ptr
   %fp39 = getelementptr i8, ptr %hp35, i64 16
   store ptr %cv38, ptr %fp39, align 8
-  %ld40 = load ptr, ptr %$t4.addr
+  %ld40 = load ptr, ptr %$t20.addr
   %fp41 = getelementptr i8, ptr %hp35, i64 24
   store ptr %ld40, ptr %fp41, align 8
   store ptr %hp35, ptr %res_slot18
@@ -171,9 +174,9 @@ case_br12:
   %fv55 = load ptr, ptr %fp54, align 8
   %ld56 = load i64, ptr %h.addr
   %cr57 = call i64 (ptr, i64) %fv55(ptr %ld53, i64 %ld56)
-  %$t5.addr = alloca i64
-  store i64 %cr57, ptr %$t5.addr
-  %ld58 = load i64, ptr %$t5.addr
+  %$t21.addr = alloca i64
+  store i64 %cr57, ptr %$t21.addr
+  %ld58 = load i64, ptr %$t21.addr
   %res_slot59 = alloca ptr
   switch i64 %ld58, label %case_default14 [
       i64 1, label %case_br15
@@ -182,8 +185,8 @@ case_br15:
   %ld60 = load ptr, ptr %pred.addr
   %ld61 = load ptr, ptr %t.addr
   %cr62 = call ptr @filter(ptr %ld60, ptr %ld61)
-  %$t6.addr = alloca ptr
-  store ptr %cr62, ptr %$t6.addr
+  %$t22.addr = alloca ptr
+  store ptr %cr62, ptr %$t22.addr
   %hp63 = call ptr @march_alloc(i64 32)
   %tgp64 = getelementptr i8, ptr %hp63, i64 8
   store i32 1, ptr %tgp64, align 4
@@ -191,7 +194,7 @@ case_br15:
   %cv66 = inttoptr i64 %ld65 to ptr
   %fp67 = getelementptr i8, ptr %hp63, i64 16
   store ptr %cv66, ptr %fp67, align 8
-  %ld68 = load ptr, ptr %$t6.addr
+  %ld68 = load ptr, ptr %$t22.addr
   %fp69 = getelementptr i8, ptr %hp63, i64 24
   store ptr %ld68, ptr %fp69, align 8
   store ptr %hp63, ptr %res_slot59
@@ -249,10 +252,10 @@ case_br19:
   %ld88 = load i64, ptr %acc.addr
   %ld89 = load i64, ptr %h.addr
   %cr90 = call i64 (ptr, i64, i64) %fv87(ptr %ld85, i64 %ld88, i64 %ld89)
-  %$t7.addr = alloca i64
-  store i64 %cr90, ptr %$t7.addr
+  %$t23.addr = alloca i64
+  store i64 %cr90, ptr %$t23.addr
   %ld91 = load ptr, ptr %f.addr
-  %ld92 = load i64, ptr %$t7.addr
+  %ld92 = load i64, ptr %$t23.addr
   %ld93 = load ptr, ptr %t.addr
   %cr94 = call i64 @fold_left(ptr %ld91, i64 %ld92, ptr %ld93)
   %cv95 = inttoptr i64 %cr94 to ptr
@@ -266,155 +269,55 @@ case_merge16:
   ret i64 %cv97
 }
 
-define i64 @sum(ptr %lst.arg) {
-entry:
-  %lst.addr = alloca ptr
-  store ptr %lst.arg, ptr %lst.addr
-  %hp98 = call ptr @march_alloc(i64 24)
-  %tgp99 = getelementptr i8, ptr %hp98, i64 8
-  store i32 0, ptr %tgp99, align 4
-  %fp100 = getelementptr i8, ptr %hp98, i64 16
-  store ptr @$lam8$apply, ptr %fp100, align 8
-  %$t9.addr = alloca ptr
-  store ptr %hp98, ptr %$t9.addr
-  %ld101 = load ptr, ptr %$t9.addr
-  %ld102 = load ptr, ptr %lst.addr
-  %cr103 = call i64 @fold_left(ptr %ld101, i64 0, ptr %ld102)
-  ret i64 %cr103
-}
-
-define i64 @product(ptr %lst.arg) {
-entry:
-  %lst.addr = alloca ptr
-  store ptr %lst.arg, ptr %lst.addr
-  %hp104 = call ptr @march_alloc(i64 24)
-  %tgp105 = getelementptr i8, ptr %hp104, i64 8
-  store i32 0, ptr %tgp105, align 4
-  %fp106 = getelementptr i8, ptr %hp104, i64 16
-  store ptr @$lam10$apply, ptr %fp106, align 8
-  %$t11.addr = alloca ptr
-  store ptr %hp104, ptr %$t11.addr
-  %ld107 = load ptr, ptr %$t11.addr
-  %ld108 = load ptr, ptr %lst.addr
-  %cr109 = call i64 @fold_left(ptr %ld107, i64 1, ptr %ld108)
-  ret i64 %cr109
-}
-
-define ptr @append(ptr %xs.arg, ptr %ys.arg) {
-entry:
-  %xs.addr = alloca ptr
-  store ptr %xs.arg, ptr %xs.addr
-  %ys.addr = alloca ptr
-  store ptr %ys.arg, ptr %ys.addr
-  %ld110 = load ptr, ptr %xs.addr
-  %res_slot111 = alloca ptr
-  %tgp112 = getelementptr i8, ptr %ld110, i64 8
-  %tag113 = load i32, ptr %tgp112, align 4
-  switch i32 %tag113, label %case_default21 [
-      i32 0, label %case_br22
-      i32 1, label %case_br23
-  ]
-case_br22:
-  %ld114 = load ptr, ptr %ys.addr
-  store ptr %ld114, ptr %res_slot111
-  br label %case_merge20
-case_br23:
-  %fp115 = getelementptr i8, ptr %ld110, i64 16
-  %fv116 = load ptr, ptr %fp115, align 8
-  %h.addr = alloca ptr
-  store ptr %fv116, ptr %h.addr
-  %fp117 = getelementptr i8, ptr %ld110, i64 24
-  %fv118 = load ptr, ptr %fp117, align 8
-  %t.addr = alloca ptr
-  store ptr %fv118, ptr %t.addr
-  %ld119 = load ptr, ptr %t.addr
-  %ld120 = load ptr, ptr %ys.addr
-  %cr121 = call ptr @append(ptr %ld119, ptr %ld120)
-  %$t12.addr = alloca ptr
-  store ptr %cr121, ptr %$t12.addr
-  %hp122 = call ptr @march_alloc(i64 32)
-  %tgp123 = getelementptr i8, ptr %hp122, i64 8
-  store i32 1, ptr %tgp123, align 4
-  %ld124 = load i64, ptr %h.addr
-  %cv125 = inttoptr i64 %ld124 to ptr
-  %fp126 = getelementptr i8, ptr %hp122, i64 16
-  store ptr %cv125, ptr %fp126, align 8
-  %ld127 = load ptr, ptr %$t12.addr
-  %fp128 = getelementptr i8, ptr %hp122, i64 24
-  store ptr %ld127, ptr %fp128, align 8
-  store ptr %hp122, ptr %res_slot111
-  br label %case_merge20
-case_default21:
-  unreachable
-case_merge20:
-  %case_r129 = load ptr, ptr %res_slot111
-  ret ptr %case_r129
-}
-
 define ptr @reverse_acc(ptr %lst.arg, ptr %acc.arg) {
 entry:
   %lst.addr = alloca ptr
   store ptr %lst.arg, ptr %lst.addr
   %acc.addr = alloca ptr
   store ptr %acc.arg, ptr %acc.addr
-  %ld130 = load ptr, ptr %lst.addr
-  %res_slot131 = alloca ptr
-  %tgp132 = getelementptr i8, ptr %ld130, i64 8
-  %tag133 = load i32, ptr %tgp132, align 4
-  switch i32 %tag133, label %case_default25 [
-      i32 0, label %case_br26
-      i32 1, label %case_br27
+  %ld98 = load ptr, ptr %lst.addr
+  %res_slot99 = alloca ptr
+  %tgp100 = getelementptr i8, ptr %ld98, i64 8
+  %tag101 = load i32, ptr %tgp100, align 4
+  switch i32 %tag101, label %case_default21 [
+      i32 0, label %case_br22
+      i32 1, label %case_br23
   ]
-case_br26:
-  %ld134 = load ptr, ptr %acc.addr
-  store ptr %ld134, ptr %res_slot131
-  br label %case_merge24
-case_br27:
-  %fp135 = getelementptr i8, ptr %ld130, i64 16
-  %fv136 = load ptr, ptr %fp135, align 8
+case_br22:
+  %ld102 = load ptr, ptr %acc.addr
+  store ptr %ld102, ptr %res_slot99
+  br label %case_merge20
+case_br23:
+  %fp103 = getelementptr i8, ptr %ld98, i64 16
+  %fv104 = load ptr, ptr %fp103, align 8
   %h.addr = alloca ptr
-  store ptr %fv136, ptr %h.addr
-  %fp137 = getelementptr i8, ptr %ld130, i64 24
-  %fv138 = load ptr, ptr %fp137, align 8
+  store ptr %fv104, ptr %h.addr
+  %fp105 = getelementptr i8, ptr %ld98, i64 24
+  %fv106 = load ptr, ptr %fp105, align 8
   %t.addr = alloca ptr
-  store ptr %fv138, ptr %t.addr
-  %hp139 = call ptr @march_alloc(i64 32)
-  %tgp140 = getelementptr i8, ptr %hp139, i64 8
-  store i32 1, ptr %tgp140, align 4
-  %ld141 = load i64, ptr %h.addr
-  %cv142 = inttoptr i64 %ld141 to ptr
-  %fp143 = getelementptr i8, ptr %hp139, i64 16
-  store ptr %cv142, ptr %fp143, align 8
-  %ld144 = load ptr, ptr %acc.addr
-  %fp145 = getelementptr i8, ptr %hp139, i64 24
-  store ptr %ld144, ptr %fp145, align 8
-  %$t13.addr = alloca ptr
-  store ptr %hp139, ptr %$t13.addr
-  %ld146 = load ptr, ptr %t.addr
-  %ld147 = load ptr, ptr %$t13.addr
-  %cr148 = call ptr @reverse_acc(ptr %ld146, ptr %ld147)
-  store ptr %cr148, ptr %res_slot131
-  br label %case_merge24
-case_default25:
+  store ptr %fv106, ptr %t.addr
+  %hp107 = call ptr @march_alloc(i64 32)
+  %tgp108 = getelementptr i8, ptr %hp107, i64 8
+  store i32 1, ptr %tgp108, align 4
+  %ld109 = load i64, ptr %h.addr
+  %cv110 = inttoptr i64 %ld109 to ptr
+  %fp111 = getelementptr i8, ptr %hp107, i64 16
+  store ptr %cv110, ptr %fp111, align 8
+  %ld112 = load ptr, ptr %acc.addr
+  %fp113 = getelementptr i8, ptr %hp107, i64 24
+  store ptr %ld112, ptr %fp113, align 8
+  %$t29.addr = alloca ptr
+  store ptr %hp107, ptr %$t29.addr
+  %ld114 = load ptr, ptr %t.addr
+  %ld115 = load ptr, ptr %$t29.addr
+  %cr116 = call ptr @reverse_acc(ptr %ld114, ptr %ld115)
+  store ptr %cr116, ptr %res_slot99
+  br label %case_merge20
+case_default21:
   unreachable
-case_merge24:
-  %case_r149 = load ptr, ptr %res_slot131
-  ret ptr %case_r149
-}
-
-define ptr @reverse(ptr %lst.arg) {
-entry:
-  %lst.addr = alloca ptr
-  store ptr %lst.arg, ptr %lst.addr
-  %hp150 = call ptr @march_alloc(i64 16)
-  %tgp151 = getelementptr i8, ptr %hp150, i64 8
-  store i32 0, ptr %tgp151, align 4
-  %$t14.addr = alloca ptr
-  store ptr %hp150, ptr %$t14.addr
-  %ld152 = load ptr, ptr %lst.addr
-  %ld153 = load ptr, ptr %$t14.addr
-  %cr154 = call ptr @reverse_acc(ptr %ld152, ptr %ld153)
-  ret ptr %cr154
+case_merge20:
+  %case_r117 = load ptr, ptr %res_slot99
+  ret ptr %case_r117
 }
 
 define ptr @find(ptr %pred.arg, ptr %lst.arg) {
@@ -423,66 +326,66 @@ entry:
   store ptr %pred.arg, ptr %pred.addr
   %lst.addr = alloca ptr
   store ptr %lst.arg, ptr %lst.addr
-  %ld155 = load ptr, ptr %lst.addr
-  %res_slot156 = alloca ptr
-  %tgp157 = getelementptr i8, ptr %ld155, i64 8
-  %tag158 = load i32, ptr %tgp157, align 4
-  switch i32 %tag158, label %case_default29 [
-      i32 0, label %case_br30
-      i32 1, label %case_br31
+  %ld118 = load ptr, ptr %lst.addr
+  %res_slot119 = alloca ptr
+  %tgp120 = getelementptr i8, ptr %ld118, i64 8
+  %tag121 = load i32, ptr %tgp120, align 4
+  switch i32 %tag121, label %case_default25 [
+      i32 0, label %case_br26
+      i32 1, label %case_br27
+  ]
+case_br26:
+  %hp122 = call ptr @march_alloc(i64 16)
+  %tgp123 = getelementptr i8, ptr %hp122, i64 8
+  store i32 0, ptr %tgp123, align 4
+  store ptr %hp122, ptr %res_slot119
+  br label %case_merge24
+case_br27:
+  %fp124 = getelementptr i8, ptr %ld118, i64 16
+  %fv125 = load ptr, ptr %fp124, align 8
+  %h.addr = alloca ptr
+  store ptr %fv125, ptr %h.addr
+  %fp126 = getelementptr i8, ptr %ld118, i64 24
+  %fv127 = load ptr, ptr %fp126, align 8
+  %t.addr = alloca ptr
+  store ptr %fv127, ptr %t.addr
+  %ld128 = load ptr, ptr %pred.addr
+  %fp129 = getelementptr i8, ptr %ld128, i64 16
+  %fv130 = load ptr, ptr %fp129, align 8
+  %ld131 = load i64, ptr %h.addr
+  %cr132 = call i64 (ptr, i64) %fv130(ptr %ld128, i64 %ld131)
+  %$t31.addr = alloca i64
+  store i64 %cr132, ptr %$t31.addr
+  %ld133 = load i64, ptr %$t31.addr
+  %res_slot134 = alloca ptr
+  switch i64 %ld133, label %case_default29 [
+      i64 1, label %case_br30
   ]
 case_br30:
-  %hp159 = call ptr @march_alloc(i64 16)
-  %tgp160 = getelementptr i8, ptr %hp159, i64 8
-  store i32 0, ptr %tgp160, align 4
-  store ptr %hp159, ptr %res_slot156
-  br label %case_merge28
-case_br31:
-  %fp161 = getelementptr i8, ptr %ld155, i64 16
-  %fv162 = load ptr, ptr %fp161, align 8
-  %h.addr = alloca ptr
-  store ptr %fv162, ptr %h.addr
-  %fp163 = getelementptr i8, ptr %ld155, i64 24
-  %fv164 = load ptr, ptr %fp163, align 8
-  %t.addr = alloca ptr
-  store ptr %fv164, ptr %t.addr
-  %ld165 = load ptr, ptr %pred.addr
-  %fp166 = getelementptr i8, ptr %ld165, i64 16
-  %fv167 = load ptr, ptr %fp166, align 8
-  %ld168 = load i64, ptr %h.addr
-  %cr169 = call i64 (ptr, i64) %fv167(ptr %ld165, i64 %ld168)
-  %$t15.addr = alloca i64
-  store i64 %cr169, ptr %$t15.addr
-  %ld170 = load i64, ptr %$t15.addr
-  %res_slot171 = alloca ptr
-  switch i64 %ld170, label %case_default33 [
-      i64 1, label %case_br34
-  ]
-case_br34:
-  %hp172 = call ptr @march_alloc(i64 24)
-  %tgp173 = getelementptr i8, ptr %hp172, i64 8
-  store i32 1, ptr %tgp173, align 4
-  %ld174 = load i64, ptr %h.addr
-  %cv175 = inttoptr i64 %ld174 to ptr
-  %fp176 = getelementptr i8, ptr %hp172, i64 16
-  store ptr %cv175, ptr %fp176, align 8
-  store ptr %hp172, ptr %res_slot171
-  br label %case_merge32
-case_default33:
-  %ld177 = load ptr, ptr %pred.addr
-  %ld178 = load ptr, ptr %t.addr
-  %cr179 = call ptr @find(ptr %ld177, ptr %ld178)
-  store ptr %cr179, ptr %res_slot171
-  br label %case_merge32
-case_merge32:
-  %case_r180 = load ptr, ptr %res_slot171
-  store ptr %case_r180, ptr %res_slot156
+  %hp135 = call ptr @march_alloc(i64 24)
+  %tgp136 = getelementptr i8, ptr %hp135, i64 8
+  store i32 1, ptr %tgp136, align 4
+  %ld137 = load i64, ptr %h.addr
+  %cv138 = inttoptr i64 %ld137 to ptr
+  %fp139 = getelementptr i8, ptr %hp135, i64 16
+  store ptr %cv138, ptr %fp139, align 8
+  store ptr %hp135, ptr %res_slot134
   br label %case_merge28
 case_default29:
-  unreachable
+  %ld140 = load ptr, ptr %pred.addr
+  %ld141 = load ptr, ptr %t.addr
+  %cr142 = call ptr @find(ptr %ld140, ptr %ld141)
+  store ptr %cr142, ptr %res_slot134
+  br label %case_merge28
 case_merge28:
-  %case_r181 = load ptr, ptr %res_slot156
-  ret ptr %case_r181
+  %case_r143 = load ptr, ptr %res_slot134
+  store ptr %case_r143, ptr %res_slot119
+  br label %case_merge24
+case_default25:
+  unreachable
+case_merge24:
+  %case_r144 = load ptr, ptr %res_slot119
+  ret ptr %case_r144
 }
 
 define ptr @range(i64 %lo.arg, i64 %hi.arg) {
@@ -491,111 +394,111 @@ entry:
   store i64 %lo.arg, ptr %lo.addr
   %hi.addr = alloca i64
   store i64 %hi.arg, ptr %hi.addr
-  %ld182 = load i64, ptr %lo.addr
-  %ld183 = load i64, ptr %hi.addr
-  %cmp184 = icmp sgt i64 %ld182, %ld183
-  %ar185 = zext i1 %cmp184 to i64
-  %$t16.addr = alloca i64
-  store i64 %ar185, ptr %$t16.addr
-  %ld186 = load i64, ptr %$t16.addr
-  %res_slot187 = alloca ptr
-  switch i64 %ld186, label %case_default36 [
-      i64 1, label %case_br37
+  %ld145 = load i64, ptr %lo.addr
+  %ld146 = load i64, ptr %hi.addr
+  %cmp147 = icmp sgt i64 %ld145, %ld146
+  %ar148 = zext i1 %cmp147 to i64
+  %$t32.addr = alloca i64
+  store i64 %ar148, ptr %$t32.addr
+  %ld149 = load i64, ptr %$t32.addr
+  %res_slot150 = alloca ptr
+  switch i64 %ld149, label %case_default32 [
+      i64 1, label %case_br33
   ]
-case_br37:
-  %hp188 = call ptr @march_alloc(i64 16)
-  %tgp189 = getelementptr i8, ptr %hp188, i64 8
-  store i32 0, ptr %tgp189, align 4
-  store ptr %hp188, ptr %res_slot187
-  br label %case_merge35
-case_default36:
-  %ld190 = load i64, ptr %lo.addr
-  %ar191 = add i64 %ld190, 1
-  %$t17.addr = alloca i64
-  store i64 %ar191, ptr %$t17.addr
-  %ld192 = load i64, ptr %$t17.addr
-  %ld193 = load i64, ptr %hi.addr
-  %cr194 = call ptr @range(i64 %ld192, i64 %ld193)
-  %$t18.addr = alloca ptr
-  store ptr %cr194, ptr %$t18.addr
-  %hp195 = call ptr @march_alloc(i64 32)
-  %tgp196 = getelementptr i8, ptr %hp195, i64 8
-  store i32 1, ptr %tgp196, align 4
-  %ld197 = load i64, ptr %lo.addr
-  %cv198 = inttoptr i64 %ld197 to ptr
-  %fp199 = getelementptr i8, ptr %hp195, i64 16
-  store ptr %cv198, ptr %fp199, align 8
-  %ld200 = load ptr, ptr %$t18.addr
-  %fp201 = getelementptr i8, ptr %hp195, i64 24
-  store ptr %ld200, ptr %fp201, align 8
-  store ptr %hp195, ptr %res_slot187
-  br label %case_merge35
-case_merge35:
-  %case_r202 = load ptr, ptr %res_slot187
-  ret ptr %case_r202
+case_br33:
+  %hp151 = call ptr @march_alloc(i64 16)
+  %tgp152 = getelementptr i8, ptr %hp151, i64 8
+  store i32 0, ptr %tgp152, align 4
+  store ptr %hp151, ptr %res_slot150
+  br label %case_merge31
+case_default32:
+  %ld153 = load i64, ptr %lo.addr
+  %ar154 = add i64 %ld153, 1
+  %$t33.addr = alloca i64
+  store i64 %ar154, ptr %$t33.addr
+  %ld155 = load i64, ptr %$t33.addr
+  %ld156 = load i64, ptr %hi.addr
+  %cr157 = call ptr @range(i64 %ld155, i64 %ld156)
+  %$t34.addr = alloca ptr
+  store ptr %cr157, ptr %$t34.addr
+  %hp158 = call ptr @march_alloc(i64 32)
+  %tgp159 = getelementptr i8, ptr %hp158, i64 8
+  store i32 1, ptr %tgp159, align 4
+  %ld160 = load i64, ptr %lo.addr
+  %cv161 = inttoptr i64 %ld160 to ptr
+  %fp162 = getelementptr i8, ptr %hp158, i64 16
+  store ptr %cv161, ptr %fp162, align 8
+  %ld163 = load ptr, ptr %$t34.addr
+  %fp164 = getelementptr i8, ptr %hp158, i64 24
+  store ptr %ld163, ptr %fp164, align 8
+  store ptr %hp158, ptr %res_slot150
+  br label %case_merge31
+case_merge31:
+  %case_r165 = load ptr, ptr %res_slot150
+  ret ptr %case_r165
 }
 
 define void @print_list(ptr %lst.arg) {
 entry:
   %lst.addr = alloca ptr
   store ptr %lst.arg, ptr %lst.addr
-  %sl203 = call ptr @march_string_lit(ptr @.str1, i64 1)
-  call void @march_print(ptr %sl203)
-  %ld204 = load ptr, ptr %lst.addr
-  %res_slot205 = alloca ptr
-  %tgp206 = getelementptr i8, ptr %ld204, i64 8
-  %tag207 = load i32, ptr %tgp206, align 4
-  switch i32 %tag207, label %case_default39 [
+  %sl166 = call ptr @march_string_lit(ptr @.str1, i64 1)
+  call void @march_print(ptr %sl166)
+  %ld167 = load ptr, ptr %lst.addr
+  %res_slot168 = alloca ptr
+  %tgp169 = getelementptr i8, ptr %ld167, i64 8
+  %tag170 = load i32, ptr %tgp169, align 4
+  switch i32 %tag170, label %case_default35 [
+      i32 0, label %case_br36
+      i32 1, label %case_br37
+  ]
+case_br36:
+  %cv171 = inttoptr i64 0 to ptr
+  store ptr %cv171, ptr %res_slot168
+  br label %case_merge34
+case_br37:
+  %fp172 = getelementptr i8, ptr %ld167, i64 16
+  %fv173 = load ptr, ptr %fp172, align 8
+  %h.addr = alloca ptr
+  store ptr %fv173, ptr %h.addr
+  %fp174 = getelementptr i8, ptr %ld167, i64 24
+  %fv175 = load ptr, ptr %fp174, align 8
+  %t.addr = alloca ptr
+  store ptr %fv175, ptr %t.addr
+  %ld176 = load i64, ptr %h.addr
+  %cr177 = call ptr @march_int_to_string(i64 %ld176)
+  %$t35.addr = alloca ptr
+  store ptr %cr177, ptr %$t35.addr
+  %ld178 = load ptr, ptr %$t35.addr
+  call void @march_print(ptr %ld178)
+  %ld179 = load ptr, ptr %t.addr
+  %res_slot180 = alloca ptr
+  %tgp181 = getelementptr i8, ptr %ld179, i64 8
+  %tag182 = load i32, ptr %tgp181, align 4
+  switch i32 %tag182, label %case_default39 [
       i32 0, label %case_br40
-      i32 1, label %case_br41
   ]
 case_br40:
-  %cv208 = inttoptr i64 0 to ptr
-  store ptr %cv208, ptr %res_slot205
-  br label %case_merge38
-case_br41:
-  %fp209 = getelementptr i8, ptr %ld204, i64 16
-  %fv210 = load ptr, ptr %fp209, align 8
-  %h.addr = alloca ptr
-  store ptr %fv210, ptr %h.addr
-  %fp211 = getelementptr i8, ptr %ld204, i64 24
-  %fv212 = load ptr, ptr %fp211, align 8
-  %t.addr = alloca ptr
-  store ptr %fv212, ptr %t.addr
-  %ld213 = load i64, ptr %h.addr
-  %cr214 = call ptr @march_int_to_string(i64 %ld213)
-  %$t19.addr = alloca ptr
-  store ptr %cr214, ptr %$t19.addr
-  %ld215 = load ptr, ptr %$t19.addr
-  call void @march_print(ptr %ld215)
-  %ld216 = load ptr, ptr %t.addr
-  %res_slot217 = alloca ptr
-  %tgp218 = getelementptr i8, ptr %ld216, i64 8
-  %tag219 = load i32, ptr %tgp218, align 4
-  switch i32 %tag219, label %case_default43 [
-      i32 0, label %case_br44
-  ]
-case_br44:
-  %cv220 = inttoptr i64 0 to ptr
-  store ptr %cv220, ptr %res_slot217
-  br label %case_merge42
-case_default43:
-  %sl221 = call ptr @march_string_lit(ptr @.str2, i64 2)
-  call void @march_print(ptr %sl221)
-  %ld222 = load ptr, ptr %t.addr
-  %cr223 = call ptr @print_list_tail(ptr %ld222)
-  store ptr %cr223, ptr %res_slot217
-  br label %case_merge42
-case_merge42:
-  %case_r224 = load ptr, ptr %res_slot217
-  store ptr %case_r224, ptr %res_slot205
+  %cv183 = inttoptr i64 0 to ptr
+  store ptr %cv183, ptr %res_slot180
   br label %case_merge38
 case_default39:
-  unreachable
+  %sl184 = call ptr @march_string_lit(ptr @.str2, i64 2)
+  call void @march_print(ptr %sl184)
+  %ld185 = load ptr, ptr %t.addr
+  %cr186 = call ptr @print_list_tail(ptr %ld185)
+  store ptr %cr186, ptr %res_slot180
+  br label %case_merge38
 case_merge38:
-  %case_r225 = load ptr, ptr %res_slot205
-  %sl226 = call ptr @march_string_lit(ptr @.str3, i64 1)
-  call void @march_print(ptr %sl226)
+  %case_r187 = load ptr, ptr %res_slot180
+  store ptr %case_r187, ptr %res_slot168
+  br label %case_merge34
+case_default35:
+  unreachable
+case_merge34:
+  %case_r188 = load ptr, ptr %res_slot168
+  %sl189 = call ptr @march_string_lit(ptr @.str3, i64 1)
+  call void @march_print(ptr %sl189)
   ret void
 }
 
@@ -603,59 +506,59 @@ define void @print_list_tail(ptr %lst.arg) {
 entry:
   %lst.addr = alloca ptr
   store ptr %lst.arg, ptr %lst.addr
-  %ld227 = load ptr, ptr %lst.addr
-  %res_slot228 = alloca ptr
-  %tgp229 = getelementptr i8, ptr %ld227, i64 8
-  %tag230 = load i32, ptr %tgp229, align 4
-  switch i32 %tag230, label %case_default46 [
+  %ld190 = load ptr, ptr %lst.addr
+  %res_slot191 = alloca ptr
+  %tgp192 = getelementptr i8, ptr %ld190, i64 8
+  %tag193 = load i32, ptr %tgp192, align 4
+  switch i32 %tag193, label %case_default42 [
+      i32 0, label %case_br43
+      i32 1, label %case_br44
+  ]
+case_br43:
+  %cv194 = inttoptr i64 0 to ptr
+  store ptr %cv194, ptr %res_slot191
+  br label %case_merge41
+case_br44:
+  %fp195 = getelementptr i8, ptr %ld190, i64 16
+  %fv196 = load ptr, ptr %fp195, align 8
+  %h.addr = alloca ptr
+  store ptr %fv196, ptr %h.addr
+  %fp197 = getelementptr i8, ptr %ld190, i64 24
+  %fv198 = load ptr, ptr %fp197, align 8
+  %t.addr = alloca ptr
+  store ptr %fv198, ptr %t.addr
+  %ld199 = load i64, ptr %h.addr
+  %cr200 = call ptr @march_int_to_string(i64 %ld199)
+  %$t36.addr = alloca ptr
+  store ptr %cr200, ptr %$t36.addr
+  %ld201 = load ptr, ptr %$t36.addr
+  call void @march_print(ptr %ld201)
+  %ld202 = load ptr, ptr %t.addr
+  %res_slot203 = alloca ptr
+  %tgp204 = getelementptr i8, ptr %ld202, i64 8
+  %tag205 = load i32, ptr %tgp204, align 4
+  switch i32 %tag205, label %case_default46 [
       i32 0, label %case_br47
-      i32 1, label %case_br48
   ]
 case_br47:
-  %cv231 = inttoptr i64 0 to ptr
-  store ptr %cv231, ptr %res_slot228
-  br label %case_merge45
-case_br48:
-  %fp232 = getelementptr i8, ptr %ld227, i64 16
-  %fv233 = load ptr, ptr %fp232, align 8
-  %h.addr = alloca ptr
-  store ptr %fv233, ptr %h.addr
-  %fp234 = getelementptr i8, ptr %ld227, i64 24
-  %fv235 = load ptr, ptr %fp234, align 8
-  %t.addr = alloca ptr
-  store ptr %fv235, ptr %t.addr
-  %ld236 = load i64, ptr %h.addr
-  %cr237 = call ptr @march_int_to_string(i64 %ld236)
-  %$t20.addr = alloca ptr
-  store ptr %cr237, ptr %$t20.addr
-  %ld238 = load ptr, ptr %$t20.addr
-  call void @march_print(ptr %ld238)
-  %ld239 = load ptr, ptr %t.addr
-  %res_slot240 = alloca ptr
-  %tgp241 = getelementptr i8, ptr %ld239, i64 8
-  %tag242 = load i32, ptr %tgp241, align 4
-  switch i32 %tag242, label %case_default50 [
-      i32 0, label %case_br51
-  ]
-case_br51:
-  %cv243 = inttoptr i64 0 to ptr
-  store ptr %cv243, ptr %res_slot240
-  br label %case_merge49
-case_default50:
-  %sl244 = call ptr @march_string_lit(ptr @.str4, i64 2)
-  call void @march_print(ptr %sl244)
-  %ld245 = load ptr, ptr %t.addr
-  %cr246 = call ptr @print_list_tail(ptr %ld245)
-  store ptr %cr246, ptr %res_slot240
-  br label %case_merge49
-case_merge49:
-  %case_r247 = load ptr, ptr %res_slot240
-  store ptr %case_r247, ptr %res_slot228
+  %cv206 = inttoptr i64 0 to ptr
+  store ptr %cv206, ptr %res_slot203
   br label %case_merge45
 case_default46:
-  unreachable
+  %sl207 = call ptr @march_string_lit(ptr @.str4, i64 2)
+  call void @march_print(ptr %sl207)
+  %ld208 = load ptr, ptr %t.addr
+  %cr209 = call ptr @print_list_tail(ptr %ld208)
+  store ptr %cr209, ptr %res_slot203
+  br label %case_merge45
 case_merge45:
-  %case_r248 = load ptr, ptr %res_slot228
+  %case_r210 = load ptr, ptr %res_slot203
+  store ptr %case_r210, ptr %res_slot191
+  br label %case_merge41
+case_default42:
+  unreachable
+case_merge41:
+  %case_r211 = load ptr, ptr %res_slot191
   ret void
 }
 
@@ -663,294 +566,246 @@ define ptr @option_to_string(ptr %o.arg) {
 entry:
   %o.addr = alloca ptr
   store ptr %o.arg, ptr %o.addr
-  %ld249 = load ptr, ptr %o.addr
-  %res_slot250 = alloca ptr
-  %tgp251 = getelementptr i8, ptr %ld249, i64 8
-  %tag252 = load i32, ptr %tgp251, align 4
-  switch i32 %tag252, label %case_default53 [
-      i32 0, label %case_br54
-      i32 1, label %case_br55
+  %ld212 = load ptr, ptr %o.addr
+  %res_slot213 = alloca ptr
+  %tgp214 = getelementptr i8, ptr %ld212, i64 8
+  %tag215 = load i32, ptr %tgp214, align 4
+  switch i32 %tag215, label %case_default49 [
+      i32 0, label %case_br50
+      i32 1, label %case_br51
   ]
-case_br54:
-  %sl253 = call ptr @march_string_lit(ptr @.str5, i64 4)
-  store ptr %sl253, ptr %res_slot250
-  br label %case_merge52
-case_br55:
-  %fp254 = getelementptr i8, ptr %ld249, i64 16
-  %fv255 = load ptr, ptr %fp254, align 8
+case_br50:
+  %sl216 = call ptr @march_string_lit(ptr @.str5, i64 4)
+  store ptr %sl216, ptr %res_slot213
+  br label %case_merge48
+case_br51:
+  %fp217 = getelementptr i8, ptr %ld212, i64 16
+  %fv218 = load ptr, ptr %fp217, align 8
   %x.addr = alloca ptr
-  store ptr %fv255, ptr %x.addr
-  %ld256 = load i64, ptr %x.addr
-  %cr257 = call ptr @march_int_to_string(i64 %ld256)
-  %$t21.addr = alloca ptr
-  store ptr %cr257, ptr %$t21.addr
-  %sl258 = call ptr @march_string_lit(ptr @.str6, i64 5)
-  %ld259 = load ptr, ptr %$t21.addr
-  %cr260 = call ptr @march_string_concat(ptr %sl258, ptr %ld259)
-  %$t22.addr = alloca ptr
-  store ptr %cr260, ptr %$t22.addr
-  %ld261 = load ptr, ptr %$t22.addr
-  %sl262 = call ptr @march_string_lit(ptr @.str7, i64 1)
-  %cr263 = call ptr @march_string_concat(ptr %ld261, ptr %sl262)
-  store ptr %cr263, ptr %res_slot250
-  br label %case_merge52
-case_default53:
+  store ptr %fv218, ptr %x.addr
+  %ld219 = load i64, ptr %x.addr
+  %cr220 = call ptr @march_int_to_string(i64 %ld219)
+  %$t37.addr = alloca ptr
+  store ptr %cr220, ptr %$t37.addr
+  %sl221 = call ptr @march_string_lit(ptr @.str6, i64 5)
+  %ld222 = load ptr, ptr %$t37.addr
+  %cr223 = call ptr @march_string_concat(ptr %sl221, ptr %ld222)
+  %$t38.addr = alloca ptr
+  store ptr %cr223, ptr %$t38.addr
+  %ld224 = load ptr, ptr %$t38.addr
+  %sl225 = call ptr @march_string_lit(ptr @.str7, i64 1)
+  %cr226 = call ptr @march_string_concat(ptr %ld224, ptr %sl225)
+  store ptr %cr226, ptr %res_slot213
+  br label %case_merge48
+case_default49:
   unreachable
-case_merge52:
-  %case_r264 = load ptr, ptr %res_slot250
-  ret ptr %case_r264
+case_merge48:
+  %case_r227 = load ptr, ptr %res_slot213
+  ret ptr %case_r227
 }
 
 define void @march_main() {
 entry:
-  %cr265 = call ptr @range(i64 1, i64 10)
+  %cr228 = call ptr @range(i64 1, i64 10)
   %nums.addr = alloca ptr
-  store ptr %cr265, ptr %nums.addr
-  %ld266 = load ptr, ptr %nums.addr
-  call void @march_incrc(ptr %ld266)
-  %ld267 = load ptr, ptr %nums.addr
-  %cr268 = call ptr @print_list(ptr %ld267)
-  %sl269 = call ptr @march_string_lit(ptr @.str8, i64 0)
-  call void @march_println(ptr %sl269)
-  %hp270 = call ptr @march_alloc(i64 24)
-  %tgp271 = getelementptr i8, ptr %hp270, i64 8
-  store i32 0, ptr %tgp271, align 4
-  %fp272 = getelementptr i8, ptr %hp270, i64 16
-  store ptr @$lam23$apply, ptr %fp272, align 8
-  %$t24.addr = alloca ptr
-  store ptr %hp270, ptr %$t24.addr
-  %ld273 = load ptr, ptr %nums.addr
-  call void @march_incrc(ptr %ld273)
-  %ld274 = load ptr, ptr %$t24.addr
-  %ld275 = load ptr, ptr %nums.addr
-  %cr276 = call ptr @map(ptr %ld274, ptr %ld275)
-  %doubled.addr = alloca ptr
-  store ptr %cr276, ptr %doubled.addr
-  %sl277 = call ptr @march_string_lit(ptr @.str9, i64 11)
-  call void @march_print(ptr %sl277)
-  %ld278 = load ptr, ptr %doubled.addr
-  %cr279 = call ptr @print_list(ptr %ld278)
-  %sl280 = call ptr @march_string_lit(ptr @.str10, i64 0)
-  call void @march_println(ptr %sl280)
-  %hp281 = call ptr @march_alloc(i64 24)
-  %tgp282 = getelementptr i8, ptr %hp281, i64 8
-  store i32 0, ptr %tgp282, align 4
-  %fp283 = getelementptr i8, ptr %hp281, i64 16
-  store ptr @$lam25$apply, ptr %fp283, align 8
-  %$t27.addr = alloca ptr
-  store ptr %hp281, ptr %$t27.addr
-  %ld284 = load ptr, ptr %nums.addr
-  call void @march_incrc(ptr %ld284)
-  %ld285 = load ptr, ptr %$t27.addr
-  %ld286 = load ptr, ptr %nums.addr
-  %cr287 = call ptr @filter(ptr %ld285, ptr %ld286)
-  %evens.addr = alloca ptr
-  store ptr %cr287, ptr %evens.addr
-  %sl288 = call ptr @march_string_lit(ptr @.str11, i64 11)
-  call void @march_print(ptr %sl288)
-  %ld289 = load ptr, ptr %evens.addr
-  %cr290 = call ptr @print_list(ptr %ld289)
-  %sl291 = call ptr @march_string_lit(ptr @.str12, i64 0)
-  call void @march_println(ptr %sl291)
-  %ld292 = load ptr, ptr %nums.addr
-  call void @march_incrc(ptr %ld292)
-  %ld293 = load ptr, ptr %nums.addr
-  %cr294 = call i64 @sum(ptr %ld293)
-  %s.addr = alloca i64
-  store i64 %cr294, ptr %s.addr
-  %ld295 = load i64, ptr %s.addr
-  %cr296 = call ptr @march_int_to_string(i64 %ld295)
-  %$t28.addr = alloca ptr
-  store ptr %cr296, ptr %$t28.addr
-  %sl297 = call ptr @march_string_lit(ptr @.str13, i64 13)
-  %ld298 = load ptr, ptr %$t28.addr
-  %cr299 = call ptr @march_string_concat(ptr %sl297, ptr %ld298)
-  %$t29.addr = alloca ptr
-  store ptr %cr299, ptr %$t29.addr
-  %ld300 = load ptr, ptr %$t29.addr
-  call void @march_println(ptr %ld300)
-  %cr301 = call ptr @range(i64 1, i64 5)
-  %$t30.addr = alloca ptr
-  store ptr %cr301, ptr %$t30.addr
-  %ld302 = load ptr, ptr %$t30.addr
-  %cr303 = call i64 @product(ptr %ld302)
-  %p.addr = alloca i64
-  store i64 %cr303, ptr %p.addr
-  %ld304 = load i64, ptr %p.addr
-  %cr305 = call ptr @march_int_to_string(i64 %ld304)
-  %$t31.addr = alloca ptr
-  store ptr %cr305, ptr %$t31.addr
-  %sl306 = call ptr @march_string_lit(ptr @.str14, i64 13)
-  %ld307 = load ptr, ptr %$t31.addr
-  %cr308 = call ptr @march_string_concat(ptr %sl306, ptr %ld307)
-  %$t32.addr = alloca ptr
-  store ptr %cr308, ptr %$t32.addr
-  %ld309 = load ptr, ptr %$t32.addr
-  call void @march_println(ptr %ld309)
-  %cr310 = call ptr @range(i64 1, i64 5)
-  %$t33.addr = alloca ptr
-  store ptr %cr310, ptr %$t33.addr
-  %ld311 = load ptr, ptr %$t33.addr
-  %cr312 = call ptr @reverse(ptr %ld311)
-  %rev.addr = alloca ptr
-  store ptr %cr312, ptr %rev.addr
-  %sl313 = call ptr @march_string_lit(ptr @.str15, i64 11)
-  call void @march_print(ptr %sl313)
-  %ld314 = load ptr, ptr %rev.addr
-  %cr315 = call ptr @print_list(ptr %ld314)
-  %sl316 = call ptr @march_string_lit(ptr @.str16, i64 0)
-  call void @march_println(ptr %sl316)
-  %hp317 = call ptr @march_alloc(i64 24)
-  %tgp318 = getelementptr i8, ptr %hp317, i64 8
-  store i32 0, ptr %tgp318, align 4
-  %fp319 = getelementptr i8, ptr %hp317, i64 16
-  store ptr @$lam34$apply, ptr %fp319, align 8
-  %$t35.addr = alloca ptr
-  store ptr %hp317, ptr %$t35.addr
-  %ld320 = load ptr, ptr %nums.addr
-  call void @march_incrc(ptr %ld320)
-  %ld321 = load ptr, ptr %$t35.addr
-  %ld322 = load ptr, ptr %nums.addr
-  %cr323 = call ptr @find(ptr %ld321, ptr %ld322)
-  %big.addr = alloca ptr
-  store ptr %cr323, ptr %big.addr
-  %ld324 = load ptr, ptr %big.addr
-  %cr325 = call ptr @option_to_string(ptr %ld324)
-  %$t36.addr = alloca ptr
-  store ptr %cr325, ptr %$t36.addr
-  %sl326 = call ptr @march_string_lit(ptr @.str17, i64 11)
-  %ld327 = load ptr, ptr %$t36.addr
-  %cr328 = call ptr @march_string_concat(ptr %sl326, ptr %ld327)
-  %$t37.addr = alloca ptr
-  store ptr %cr328, ptr %$t37.addr
-  %ld329 = load ptr, ptr %$t37.addr
-  call void @march_println(ptr %ld329)
-  %hp330 = call ptr @march_alloc(i64 24)
-  %tgp331 = getelementptr i8, ptr %hp330, i64 8
-  store i32 0, ptr %tgp331, align 4
-  %fp332 = getelementptr i8, ptr %hp330, i64 16
-  store ptr @$lam38$apply, ptr %fp332, align 8
-  %$t39.addr = alloca ptr
-  store ptr %hp330, ptr %$t39.addr
-  %ld333 = load ptr, ptr %nums.addr
-  call void @march_incrc(ptr %ld333)
-  %ld334 = load ptr, ptr %$t39.addr
-  %ld335 = load ptr, ptr %nums.addr
-  %cr336 = call ptr @find(ptr %ld334, ptr %ld335)
-  %none.addr = alloca ptr
-  store ptr %cr336, ptr %none.addr
-  %ld337 = load ptr, ptr %none.addr
-  %cr338 = call ptr @option_to_string(ptr %ld337)
+  store ptr %cr228, ptr %nums.addr
+  %ld229 = load ptr, ptr %nums.addr
+  call void @march_incrc(ptr %ld229)
+  %ld230 = load ptr, ptr %nums.addr
+  %cr231 = call ptr @print_list(ptr %ld230)
+  %sl232 = call ptr @march_string_lit(ptr @.str8, i64 0)
+  call void @march_println(ptr %sl232)
+  %hp233 = call ptr @march_alloc(i64 24)
+  %tgp234 = getelementptr i8, ptr %hp233, i64 8
+  store i32 0, ptr %tgp234, align 4
+  %ld235 = load ptr, ptr %$lam39$apply.addr
+  %fp236 = getelementptr i8, ptr %hp233, i64 16
+  store ptr %ld235, ptr %fp236, align 8
   %$t40.addr = alloca ptr
-  store ptr %cr338, ptr %$t40.addr
-  %sl339 = call ptr @march_string_lit(ptr @.str18, i64 11)
-  %ld340 = load ptr, ptr %$t40.addr
-  %cr341 = call ptr @march_string_concat(ptr %sl339, ptr %ld340)
-  %$t41.addr = alloca ptr
-  store ptr %cr341, ptr %$t41.addr
-  %ld342 = load ptr, ptr %$t41.addr
-  call void @march_println(ptr %ld342)
-  %ld343 = load ptr, ptr %nums.addr
-  %cr344 = call i64 @length(ptr %ld343)
-  %$t42.addr = alloca i64
-  store i64 %cr344, ptr %$t42.addr
-  %ld345 = load i64, ptr %$t42.addr
-  %cr346 = call ptr @march_int_to_string(i64 %ld345)
+  store ptr %hp233, ptr %$t40.addr
+  %ld237 = load ptr, ptr %nums.addr
+  call void @march_incrc(ptr %ld237)
+  %ld238 = load ptr, ptr %$t40.addr
+  %ld239 = load ptr, ptr %nums.addr
+  %cr240 = call ptr @map(ptr %ld238, ptr %ld239)
+  %doubled.addr = alloca ptr
+  store ptr %cr240, ptr %doubled.addr
+  %sl241 = call ptr @march_string_lit(ptr @.str9, i64 11)
+  call void @march_print(ptr %sl241)
+  %ld242 = load ptr, ptr %doubled.addr
+  %cr243 = call ptr @print_list(ptr %ld242)
+  %sl244 = call ptr @march_string_lit(ptr @.str10, i64 0)
+  call void @march_println(ptr %sl244)
+  %hp245 = call ptr @march_alloc(i64 24)
+  %tgp246 = getelementptr i8, ptr %hp245, i64 8
+  store i32 0, ptr %tgp246, align 4
+  %ld247 = load ptr, ptr %$lam41$apply.addr
+  %fp248 = getelementptr i8, ptr %hp245, i64 16
+  store ptr %ld247, ptr %fp248, align 8
   %$t43.addr = alloca ptr
-  store ptr %cr346, ptr %$t43.addr
-  %sl347 = call ptr @march_string_lit(ptr @.str19, i64 11)
-  %ld348 = load ptr, ptr %$t43.addr
-  %cr349 = call ptr @march_string_concat(ptr %sl347, ptr %ld348)
+  store ptr %hp245, ptr %$t43.addr
+  %ld249 = load ptr, ptr %nums.addr
+  call void @march_incrc(ptr %ld249)
+  %ld250 = load ptr, ptr %$t43.addr
+  %ld251 = load ptr, ptr %nums.addr
+  %cr252 = call ptr @filter(ptr %ld250, ptr %ld251)
+  %evens.addr = alloca ptr
+  store ptr %cr252, ptr %evens.addr
+  %sl253 = call ptr @march_string_lit(ptr @.str11, i64 11)
+  call void @march_print(ptr %sl253)
+  %ld254 = load ptr, ptr %evens.addr
+  %cr255 = call ptr @print_list(ptr %ld254)
+  %sl256 = call ptr @march_string_lit(ptr @.str12, i64 0)
+  call void @march_println(ptr %sl256)
+  %ld257 = load ptr, ptr %nums.addr
+  call void @march_incrc(ptr %ld257)
+  %ld258 = load ptr, ptr %nums.addr
+  %lst_i5.addr = alloca ptr
+  store ptr %ld258, ptr %lst_i5.addr
+  %hp259 = call ptr @march_alloc(i64 24)
+  %tgp260 = getelementptr i8, ptr %hp259, i64 8
+  store i32 0, ptr %tgp260, align 4
+  %ld261 = load ptr, ptr %$lam24$apply.addr
+  %fp262 = getelementptr i8, ptr %hp259, i64 16
+  store ptr %ld261, ptr %fp262, align 8
+  %$t25_i6.addr = alloca ptr
+  store ptr %hp259, ptr %$t25_i6.addr
+  %ld263 = load ptr, ptr %$t25_i6.addr
+  %ld264 = load ptr, ptr %lst_i5.addr
+  %cr265 = call i64 @fold_left(ptr %ld263, i64 0, ptr %ld264)
+  %s.addr = alloca i64
+  store i64 %cr265, ptr %s.addr
+  %ld266 = load i64, ptr %s.addr
+  %cr267 = call ptr @march_int_to_string(i64 %ld266)
   %$t44.addr = alloca ptr
-  store ptr %cr349, ptr %$t44.addr
-  %ld350 = load ptr, ptr %$t44.addr
-  call void @march_println(ptr %ld350)
+  store ptr %cr267, ptr %$t44.addr
+  %sl268 = call ptr @march_string_lit(ptr @.str13, i64 13)
+  %ld269 = load ptr, ptr %$t44.addr
+  %cr270 = call ptr @march_string_concat(ptr %sl268, ptr %ld269)
+  %$t45.addr = alloca ptr
+  store ptr %cr270, ptr %$t45.addr
+  %ld271 = load ptr, ptr %$t45.addr
+  call void @march_println(ptr %ld271)
+  %cr272 = call ptr @range(i64 1, i64 5)
+  %$t46.addr = alloca ptr
+  store ptr %cr272, ptr %$t46.addr
+  %ld273 = load ptr, ptr %$t46.addr
+  %lst_i3.addr = alloca ptr
+  store ptr %ld273, ptr %lst_i3.addr
+  %hp274 = call ptr @march_alloc(i64 24)
+  %tgp275 = getelementptr i8, ptr %hp274, i64 8
+  store i32 0, ptr %tgp275, align 4
+  %ld276 = load ptr, ptr %$lam26$apply.addr
+  %fp277 = getelementptr i8, ptr %hp274, i64 16
+  store ptr %ld276, ptr %fp277, align 8
+  %$t27_i4.addr = alloca ptr
+  store ptr %hp274, ptr %$t27_i4.addr
+  %ld278 = load ptr, ptr %$t27_i4.addr
+  %ld279 = load ptr, ptr %lst_i3.addr
+  %cr280 = call i64 @fold_left(ptr %ld278, i64 1, ptr %ld279)
+  %p.addr = alloca i64
+  store i64 %cr280, ptr %p.addr
+  %ld281 = load i64, ptr %p.addr
+  %cr282 = call ptr @march_int_to_string(i64 %ld281)
+  %$t47.addr = alloca ptr
+  store ptr %cr282, ptr %$t47.addr
+  %sl283 = call ptr @march_string_lit(ptr @.str14, i64 13)
+  %ld284 = load ptr, ptr %$t47.addr
+  %cr285 = call ptr @march_string_concat(ptr %sl283, ptr %ld284)
+  %$t48.addr = alloca ptr
+  store ptr %cr285, ptr %$t48.addr
+  %ld286 = load ptr, ptr %$t48.addr
+  call void @march_println(ptr %ld286)
+  %cr287 = call ptr @range(i64 1, i64 5)
+  %$t49.addr = alloca ptr
+  store ptr %cr287, ptr %$t49.addr
+  %ld288 = load ptr, ptr %$t49.addr
+  %lst_i1.addr = alloca ptr
+  store ptr %ld288, ptr %lst_i1.addr
+  %hp289 = call ptr @march_alloc(i64 16)
+  %tgp290 = getelementptr i8, ptr %hp289, i64 8
+  store i32 0, ptr %tgp290, align 4
+  %$t30_i2.addr = alloca ptr
+  store ptr %hp289, ptr %$t30_i2.addr
+  %ld291 = load ptr, ptr %lst_i1.addr
+  %ld292 = load ptr, ptr %$t30_i2.addr
+  %cr293 = call ptr @reverse_acc(ptr %ld291, ptr %ld292)
+  %rev.addr = alloca ptr
+  store ptr %cr293, ptr %rev.addr
+  %sl294 = call ptr @march_string_lit(ptr @.str15, i64 11)
+  call void @march_print(ptr %sl294)
+  %ld295 = load ptr, ptr %rev.addr
+  %cr296 = call ptr @print_list(ptr %ld295)
+  %sl297 = call ptr @march_string_lit(ptr @.str16, i64 0)
+  call void @march_println(ptr %sl297)
+  %hp298 = call ptr @march_alloc(i64 24)
+  %tgp299 = getelementptr i8, ptr %hp298, i64 8
+  store i32 0, ptr %tgp299, align 4
+  %ld300 = load ptr, ptr %$lam50$apply.addr
+  %fp301 = getelementptr i8, ptr %hp298, i64 16
+  store ptr %ld300, ptr %fp301, align 8
+  %$t51.addr = alloca ptr
+  store ptr %hp298, ptr %$t51.addr
+  %ld302 = load ptr, ptr %nums.addr
+  call void @march_incrc(ptr %ld302)
+  %ld303 = load ptr, ptr %$t51.addr
+  %ld304 = load ptr, ptr %nums.addr
+  %cr305 = call ptr @find(ptr %ld303, ptr %ld304)
+  %big.addr = alloca ptr
+  store ptr %cr305, ptr %big.addr
+  %ld306 = load ptr, ptr %big.addr
+  %cr307 = call ptr @option_to_string(ptr %ld306)
+  %$t52.addr = alloca ptr
+  store ptr %cr307, ptr %$t52.addr
+  %sl308 = call ptr @march_string_lit(ptr @.str17, i64 11)
+  %ld309 = load ptr, ptr %$t52.addr
+  %cr310 = call ptr @march_string_concat(ptr %sl308, ptr %ld309)
+  %$t53.addr = alloca ptr
+  store ptr %cr310, ptr %$t53.addr
+  %ld311 = load ptr, ptr %$t53.addr
+  call void @march_println(ptr %ld311)
+  %hp312 = call ptr @march_alloc(i64 24)
+  %tgp313 = getelementptr i8, ptr %hp312, i64 8
+  store i32 0, ptr %tgp313, align 4
+  %ld314 = load ptr, ptr %$lam54$apply.addr
+  %fp315 = getelementptr i8, ptr %hp312, i64 16
+  store ptr %ld314, ptr %fp315, align 8
+  %$t55.addr = alloca ptr
+  store ptr %hp312, ptr %$t55.addr
+  %ld316 = load ptr, ptr %nums.addr
+  call void @march_incrc(ptr %ld316)
+  %ld317 = load ptr, ptr %$t55.addr
+  %ld318 = load ptr, ptr %nums.addr
+  %cr319 = call ptr @find(ptr %ld317, ptr %ld318)
+  %none.addr = alloca ptr
+  store ptr %cr319, ptr %none.addr
+  %ld320 = load ptr, ptr %none.addr
+  %cr321 = call ptr @option_to_string(ptr %ld320)
+  %$t56.addr = alloca ptr
+  store ptr %cr321, ptr %$t56.addr
+  %sl322 = call ptr @march_string_lit(ptr @.str18, i64 11)
+  %ld323 = load ptr, ptr %$t56.addr
+  %cr324 = call ptr @march_string_concat(ptr %sl322, ptr %ld323)
+  %$t57.addr = alloca ptr
+  store ptr %cr324, ptr %$t57.addr
+  %ld325 = load ptr, ptr %$t57.addr
+  call void @march_println(ptr %ld325)
+  %ld326 = load ptr, ptr %nums.addr
+  %cr327 = call i64 @length(ptr %ld326)
+  %$t58.addr = alloca i64
+  store i64 %cr327, ptr %$t58.addr
+  %ld328 = load i64, ptr %$t58.addr
+  %cr329 = call ptr @march_int_to_string(i64 %ld328)
+  %$t59.addr = alloca ptr
+  store ptr %cr329, ptr %$t59.addr
+  %sl330 = call ptr @march_string_lit(ptr @.str19, i64 11)
+  %ld331 = load ptr, ptr %$t59.addr
+  %cr332 = call ptr @march_string_concat(ptr %sl330, ptr %ld331)
+  %$t60.addr = alloca ptr
+  store ptr %cr332, ptr %$t60.addr
+  %ld333 = load ptr, ptr %$t60.addr
+  call void @march_println(ptr %ld333)
   ret void
-}
-
-define ptr @$lam8$apply(ptr %$clo.arg, ptr %a.arg, ptr %b.arg) {
-entry:
-  %$clo.addr = alloca ptr
-  store ptr %$clo.arg, ptr %$clo.addr
-  %a.addr = alloca ptr
-  store ptr %a.arg, ptr %a.addr
-  %b.addr = alloca ptr
-  store ptr %b.arg, ptr %b.addr
-  %ld351 = load i64, ptr %a.addr
-  %ld352 = load i64, ptr %b.addr
-  %ar353 = add i64 %ld351, %ld352
-  %cv354 = inttoptr i64 %ar353 to ptr
-  ret ptr %cv354
-}
-
-define ptr @$lam10$apply(ptr %$clo.arg, ptr %a.arg, ptr %b.arg) {
-entry:
-  %$clo.addr = alloca ptr
-  store ptr %$clo.arg, ptr %$clo.addr
-  %a.addr = alloca ptr
-  store ptr %a.arg, ptr %a.addr
-  %b.addr = alloca ptr
-  store ptr %b.arg, ptr %b.addr
-  %ld355 = load i64, ptr %a.addr
-  %ld356 = load i64, ptr %b.addr
-  %ar357 = mul i64 %ld355, %ld356
-  %cv358 = inttoptr i64 %ar357 to ptr
-  ret ptr %cv358
-}
-
-define ptr @$lam23$apply(ptr %$clo.arg, ptr %x.arg) {
-entry:
-  %$clo.addr = alloca ptr
-  store ptr %$clo.arg, ptr %$clo.addr
-  %x.addr = alloca ptr
-  store ptr %x.arg, ptr %x.addr
-  %ld359 = load i64, ptr %x.addr
-  %ar360 = mul i64 %ld359, 2
-  %cv361 = inttoptr i64 %ar360 to ptr
-  ret ptr %cv361
-}
-
-define ptr @$lam25$apply(ptr %$clo.arg, ptr %x.arg) {
-entry:
-  %$clo.addr = alloca ptr
-  store ptr %$clo.arg, ptr %$clo.addr
-  %x.addr = alloca ptr
-  store ptr %x.arg, ptr %x.addr
-  %ld362 = load i64, ptr %x.addr
-  %ar363 = srem i64 %ld362, 2
-  %$t26.addr = alloca i64
-  store i64 %ar363, ptr %$t26.addr
-  %ld364 = load i64, ptr %$t26.addr
-  %cmp365 = icmp eq i64 %ld364, 0
-  %ar366 = zext i1 %cmp365 to i64
-  %cv367 = inttoptr i64 %ar366 to ptr
-  ret ptr %cv367
-}
-
-define ptr @$lam34$apply(ptr %$clo.arg, ptr %x.arg) {
-entry:
-  %$clo.addr = alloca ptr
-  store ptr %$clo.arg, ptr %$clo.addr
-  %x.addr = alloca ptr
-  store ptr %x.arg, ptr %x.addr
-  %ld368 = load i64, ptr %x.addr
-  %cmp369 = icmp sgt i64 %ld368, 7
-  %ar370 = zext i1 %cmp369 to i64
-  %cv371 = inttoptr i64 %ar370 to ptr
-  ret ptr %cv371
-}
-
-define ptr @$lam38$apply(ptr %$clo.arg, ptr %x.arg) {
-entry:
-  %$clo.addr = alloca ptr
-  store ptr %$clo.arg, ptr %$clo.addr
-  %x.addr = alloca ptr
-  store ptr %x.arg, ptr %x.addr
-  %ld372 = load i64, ptr %x.addr
-  %cmp373 = icmp sgt i64 %ld372, 100
-  %ar374 = zext i1 %cmp373 to i64
-  %cv375 = inttoptr i64 %ar374 to ptr
-  ret ptr %cv375
 }
 
 define i32 @main() {

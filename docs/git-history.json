@@ -1,0 +1,26 @@
+[
+  {
+    "hash": "67f3c6d539bd4e9ce813e30c9c93ca930fa7638c",
+    "short_hash": "67f3c6d",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-19T15:58:42-04:00",
+    "message": "feat(debugger): implement 10 debugger enhancements\n\n- dbg(expr): value-returning trace point (logs to stderr, returns value)\n- dbg(bool_expr): conditional breakpoint (pauses only when true)\n- :goto N: absolute frame jump\n- :diff [N]: env diff between frames with +/~/- markers\n- :find <expr>: search trace backward for condition\n- :watch/:unwatch/:watches: watch expressions (TUI only)\n- Pretty-print nested values (value_to_string_pretty, 2-level)\n- :tsave/:tload: trace export/import via OCaml Marshal\n- :actors/:actor <pid> [n]: actor message history\n- Auto-show :where after all navigation commands\n\nAST: EDbg of span -> EDbg of expr option * span\neval: actor_msg_event type, dc_actor_log, value_to_string_pretty\ntrace: goto, diff_frames, find_frame, actors_summary, actor_history,\n       save_trace, load_trace\nrepl: watch_list, nav_context helper, all new debug commands",
+    "files_changed": 12
+  },
+  {
+    "hash": "e3540789c2589cb5fe1d594558413c2e1dc0d9a4",
+    "short_hash": "e354078",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-19T12:39:04-04:00",
+    "message": "feat(debugger): implement time-travel debugger with integrated REPL\n\n- Add EDbg AST node, `dbg` keyword, parser rule, desugar/typecheck/eval support\n- Add ring-buffer trace recording in eval with per-frame env/result/span/depth capture\n- Add actor snapshots for restoring state during replay\n- Add lib/debug: Debug, Trace, Replay, Debug_repl modules\n- Wire debugger into the normal REPL (TUI + simple) via debug_hooks callbacks\n  so breakpoints drop into the full two-pane REPL with scope panel and history\n- Add :back/:forward/:where/:stack/:trace/:replay/:continue commands\n- :where now shows surrounding source lines with → marker\n- Add --debug / --debug-tui CLI flags\n- Add stdlib/ (prelude, option, result, list, math)\n- Add 13 new debugger tests; all 211 tests pass",
+    "files_changed": 23
+  },
+  {
+    "hash": "5c1a8b35b191078fb000aa528c17c66ebf2ccee1",
+    "short_hash": "5c1a8b3",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-18T23:09:23-04:00",
+    "message": "feat(tir): implement actor lowering from AST to TIR and LLVM\n\n- lower.ml: implement lower_actor generating per-actor types (Name_State,\n  Name_Msg variant, Name_Actor record) and functions (handlers, dispatch,\n  spawn); fix ESpawn to call ActorName_spawn() and ESend to use typed\n  march_send signature; inject built-in Option/Result/List types for stable\n  constructor tags; use TCon(actor_type) on actor params so EField lookups\n  resolve field indices correctly; prefix dispatch branch vars per-handler\n  to avoid LLVM alloca name collisions\n\n- llvm_emit.ml: add march_kill/is_alive/send declares and mangle_extern\n  entries; skip RC ops on top-level function pointers (code segment, not heap)\n\n- march_runtime.c/h: add march_kill, march_is_alive, march_send\n\n- test_march.ml: update type-def count assertions to account for 3 built-in types\n\nVerified: examples/actors.march compiles and runs correctly end-to-end,\nall 163 tests pass.",
+    "files_changed": 5
+  }
+]
