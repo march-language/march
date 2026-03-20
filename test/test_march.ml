@@ -4481,6 +4481,110 @@ let test_path_is_absolute () =
   Alcotest.(check bool) "is_absolute" true
     (vbool (call_fn env "f" []))
 
+(* ── File stdlib tests ──────────────────────────────────────────────────── *)
+
+let load_file_stdlib () =
+  [ load_stdlib_file_for_test "seq.march"
+  ; load_stdlib_file_for_test "file.march" ]
+
+let eval_with_file src =
+  eval_with_stdlib (load_file_stdlib ()) src
+
+let with_temp_file content f =
+  let path = Filename.temp_file "march_test_" ".txt" in
+  let oc = open_out path in
+  output_string oc content;
+  close_out oc;
+  let result = f path in
+  (try Sys.remove path with _ -> ());
+  result
+
+let test_file_read () =
+  with_temp_file "hello world" (fun path ->
+    let env = eval_with_file (Printf.sprintf {|mod T do
+      fn f() do
+        match File.read("%s") with
+        | Ok(s) -> s
+        | Err(ig) -> "fail"
+        end
+      end
+    end|} path) in
+    Alcotest.(check string) "read file" "hello world"
+      (vstr (call_fn env "f" [])))
+
+let test_file_write_read () =
+  let path = Filename.temp_file "march_test_" ".txt" in
+  (try
+     let env = eval_with_file (Printf.sprintf {|mod T do
+       fn f() do
+         match File.write("%s", "written data") with
+         | Ok(ig) ->
+           match File.read("%s") with
+           | Ok(s) -> s
+           | Err(ig) -> "read fail"
+           end
+         | Err(ig) -> "write fail"
+         end
+       end
+     end|} path path) in
+     let result = vstr (call_fn env "f" []) in
+     (try Sys.remove path with _ -> ());
+     Alcotest.(check string) "write then read" "written data" result
+   with e -> (try Sys.remove path with _ -> ()); raise e)
+
+let test_file_exists () =
+  with_temp_file "x" (fun path ->
+    let env = eval_with_file (Printf.sprintf {|mod T do
+      fn f() do File.exists("%s") end
+    end|} path) in
+    Alcotest.(check bool) "exists" true
+      (vbool (call_fn env "f" [])))
+
+let test_file_with_lines () =
+  with_temp_file "a\nb\nc" (fun path ->
+    let env = eval_with_file (Printf.sprintf {|mod T do
+      fn append_bang(l) do l ++ "!" end
+      fn collect_lines(lines) do Seq.to_list(Seq.map(lines, fn l -> append_bang(l))) end
+      fn f() do
+        match File.with_lines("%s", fn lines -> collect_lines(lines)) with
+        | Ok(xs) -> xs
+        | Err(ig) -> Nil
+        end
+      end
+    end|} path) in
+    Alcotest.(check (list string)) "with_lines" ["a!"; "b!"; "c!"]
+      (List.map vstr (vlist (call_fn env "f" []))))
+
+let test_file_not_found () =
+  let env = eval_with_file {|mod T do
+    fn f() do
+      match File.read("/nonexistent/path/xyz_march_test.txt") with
+      | Ok(ig) -> "ok"
+      | Err(ig) -> "err"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "not found returns Err" "err"
+    (vstr (call_fn env "f" []))
+
+let test_file_append () =
+  let path = Filename.temp_file "march_append_" ".txt" in
+  (try
+     let env = eval_with_file (Printf.sprintf {|mod T do
+       fn f() do
+         File.write("%s", "line1\n")
+         File.append("%s", "line2\n")
+         match File.read("%s") with
+         | Ok(s) -> s
+         | Err(ig) -> "fail"
+         end
+       end
+     end|} path path path) in
+     let result = vstr (call_fn env "f" []) in
+     (try Sys.remove path with _ -> ());
+     Alcotest.(check string) "append" "line1\nline2\n" result
+   with e -> (try Sys.remove path with _ -> ()); raise e)
+
 let () =
   Alcotest.run "march"
     [
@@ -4976,5 +5080,13 @@ let () =
         Alcotest.test_case "strip_extension dotfile" `Quick test_path_strip_extension_dotfile;
         Alcotest.test_case "normalize absolute"      `Quick test_path_normalize_absolute;
         Alcotest.test_case "is_absolute"             `Quick test_path_is_absolute;
+      ]);
+      ("file stdlib", [
+        Alcotest.test_case "read"           `Quick test_file_read;
+        Alcotest.test_case "write then read" `Quick test_file_write_read;
+        Alcotest.test_case "exists"         `Quick test_file_exists;
+        Alcotest.test_case "with_lines"     `Quick test_file_with_lines;
+        Alcotest.test_case "not found"      `Quick test_file_not_found;
+        Alcotest.test_case "append"         `Quick test_file_append;
       ]);
     ]

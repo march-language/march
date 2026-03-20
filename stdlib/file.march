@@ -1,0 +1,125 @@
+-- File module: filesystem I/O.
+-- All I/O functions return Result(value, FileError).
+-- Use with_lines / with_chunks for streaming (resource cleanup guaranteed).
+
+mod File do
+
+type FileError = NotFound(String) | Permission(String) | IsDirectory(String) | NotEmpty(String) | IoError(String)
+
+type FileKind = RegularFile | Directory | Symlink | Other
+
+-- FileStat uses a positional constructor
+-- Pattern match: FileStat(size, kind, modified, accessed)
+type FileStat = FileStat(Int, FileKind, Int, Int)
+
+-- Read
+
+pub fn read(path) do
+  file_read(path)
+end
+
+pub fn read_lines(path) do
+  match file_read(path) with
+  | Err(e) -> Err(e)
+  | Ok(s) ->
+    let lines = String.split(s, "\n")
+    match List.reverse(lines) with
+    | Cons("", rest) -> Ok(List.reverse(rest))
+    | ig -> Ok(lines)
+    end
+  end
+end
+
+pub fn exists(path) do
+  file_exists(path)
+end
+
+pub fn stat(path) do
+  file_stat(path)
+end
+
+-- Write
+
+pub fn write(path, data) do file_write(path, data) end
+pub fn append(path, data) do file_append(path, data) end
+pub fn delete(path) do file_delete(path) end
+pub fn copy(src, dest) do file_copy(src, dest) end
+pub fn rename(src, dest) do file_rename(src, dest) end
+
+-- Streaming (scoped, guarantees file handle cleanup)
+
+pub fn with_lines(path, callback) do
+  match file_open(path) with
+  | Err(e) -> Err(e)
+  | Ok(fd) ->
+    fn do_lines(a, f) do
+      match file_read_line(fd) with
+      | None -> a
+      | Some(line) -> do_lines(f(a, line), f)
+      end
+    end
+    let seq = Seq(fn(acc, f) -> do_lines(acc, f))
+    let result = callback(seq)
+    file_close(fd)
+    Ok(result)
+  end
+end
+
+pub fn with_chunks(path, size, callback) do
+  match file_open(path) with
+  | Err(e) -> Err(e)
+  | Ok(fd) ->
+    fn do_chunks(a, f) do
+      match file_read_chunk(fd, size) with
+      | None -> a
+      | Some(chunk) -> do_chunks(f(a, chunk), f)
+      end
+    end
+    let seq = Seq(fn(acc, f) -> do_chunks(acc, f))
+    let result = callback(seq)
+    file_close(fd)
+    Ok(result)
+  end
+end
+
+-- Low-level callbacks (side-effect iteration)
+
+fn each_line_loop(fd, f) do
+  match file_read_line(fd) with
+  | None -> :ok
+  | Some(line) ->
+    f(line)
+    each_line_loop(fd, f)
+  end
+end
+
+pub fn each_line(path, f) do
+  match file_open(path) with
+  | Err(e) -> Err(e)
+  | Ok(fd) ->
+    each_line_loop(fd, f)
+    file_close(fd)
+    Ok(:ok)
+  end
+end
+
+fn each_chunk_loop(fd, size, f) do
+  match file_read_chunk(fd, size) with
+  | None -> :ok
+  | Some(chunk) ->
+    f(chunk)
+    each_chunk_loop(fd, size, f)
+  end
+end
+
+pub fn each_chunk(path, size, f) do
+  match file_open(path) with
+  | Err(e) -> Err(e)
+  | Ok(fd) ->
+    each_chunk_loop(fd, size, f)
+    file_close(fd)
+    Ok(:ok)
+  end
+end
+
+end
