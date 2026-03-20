@@ -4,4 +4,4 @@
 
 (library
  (name march_parser)
- (libraries march_ast))
+ (libraries march_ast march_errors))
