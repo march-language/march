@@ -15,14 +15,18 @@ March needs a JSON library serving two use cases with equal priority: parsing HT
 
 ```march
 type Json
-  = Null
+  = Array(List(Json))
   | Bool(Bool)
-  | Int(Int)
   | Float(Float)
+  | Int(Int)
+  | Null
+  | Object(List((String, Json)))
   | Str(String)
-  | Array(List(Json))
-  | Object(Map(String, Json))
 ```
+
+**Constructor order is alphabetical and must not be changed.** The C wrapper (`march_json.c`) hardcodes integer tag constants that must match the order the compiler assigns when lowering this type declaration. The compiler assigns tags in declaration order. Reordering constructors silently breaks the C wrapper. Use named C constants (`#define JSON_TAG_ARRAY 0`, etc.) rather than raw integers in the C wrapper for safety.
+
+**`Object` uses `List((String, Json))`, not `Map(String, Json)`.** `Map` has no runtime implementation yet — it is nominal only in the typechecker. `List((String, Json))` is consistent with how `Http.Header` is modelled. When `Map` is implemented, `Object` can be upgraded; the accessor API (`get`, `path`) will not change.
 
 **`Int` and `Float` are split**, not unified into `Number(Float)`. Rationale:
 
@@ -41,30 +45,32 @@ The heuristic: if the JSON number token has no decimal point and no exponent, it
 mod Json do
 
   type Json
-    = Null
+    = Array(List(Json))
     | Bool(Bool)
-    | Int(Int)
     | Float(Float)
+    | Int(Int)
+    | Null
+    | Object(List((String, Json)))
     | Str(String)
-    | Array(List(Json))
-    | Object(Map(String, Json))
 
   type JsonError = JsonError(message : String, offset : Int)
 
   -- Core
   pub fn parse(s : String) : Result(Json, JsonError)
   pub fn encode(v : Json) : String
-  pub fn encode_pretty(v : Json) : String
+  pub fn encode_pretty(v : Json) : String   -- two-space indentation
   pub fn parse_or_panic(s : String) : Json
 
-  -- Object access
+  -- Object access (linear search; first match wins on duplicate keys)
   pub fn get(v : Json, key : String) : Option(Json)
 
   -- Array access
   pub fn at(v : Json, idx : Int) : Option(Json)
 
-  -- Nested path access
-  -- path(j, ["users", "0", "name"]) — integer indices written as strings
+  -- Nested path access: path(j, ["users", "0", "name"])
+  -- Integer array indices are written as strings ("0", "1", ...).
+  -- Returns None if any intermediate node is not an Object or Array,
+  -- or if any key/index is not found.
   pub fn path(v : Json, keys : List(String)) : Option(Json)
 
   -- Type coercions
@@ -73,7 +79,7 @@ mod Json do
   pub fn as_float(v : Json) : Option(Float)
   pub fn as_bool(v : Json) : Option(Bool)
   pub fn as_list(v : Json) : Option(List(Json))
-  pub fn as_map(v : Json) : Option(Map(String, Json))
+  pub fn as_object(v : Json) : Option(List((String, Json)))
 
   -- Constructors (convenience — the ADT constructors work directly too)
   pub fn null() : Json
@@ -83,17 +89,21 @@ mod Json do
   pub fn str(s : String) : Json
   pub fn array(xs : List(Json)) : Json
   pub fn object(pairs : List((String, Json))) : Json
+    -- Duplicate keys: first-write-wins (first occurrence is found by get/path).
+    -- The list is stored as-is; no deduplication is performed.
 
 end
 ```
 
 ### Design decisions
 
-**`path` uses `List(String)` with integer indices as strings.** Consistent with how JSON path notation works universally. Avoids a mixed `String | Int` key type.
+**`path` uses `List(String)` with integer indices as strings.** Consistent with how JSON path notation works universally. Avoids a mixed `String | Int` key type. When an intermediate node is not an `Object` or `Array`, or a key/index is absent, `path` returns `None` — it never panics.
 
-**`object` takes `List((String, Json))` not `Map(String, Json)`.** Construction at call sites is more ergonomic with a list of pairs. The function builds the `Map` internally.
+**`object` takes `List((String, Json))`.** Construction at call sites is more ergonomic with a list of pairs. The value is stored directly as the `Object` payload with no transformation. Duplicate keys are preserved; `get` returns the first match.
 
-**`parse_or_panic` follows the `head`/`head_opt` convention.** For hardcoded JSON literals, test fixtures, and config known to be valid. Panics with the `JsonError` message on failure.
+**`as_map` renamed to `as_object`.** Returns `List((String, Json))` to match the actual `Object` payload type.
+
+**`parse_or_panic` follows the `head`/`head_opt` convention.** For hardcoded JSON literals, test fixtures, and config known to be valid. Panics with the `JsonError` message on failure using the same panic mechanism as `List.head` on an empty list.
 
 **No `Show` impl.** `encode` and `encode_pretty` serve that purpose. A `Show` impl would need to choose between compact and pretty — `encode` makes that explicit.
 
@@ -127,7 +137,7 @@ A single C function cannot serve both. Bridging C → OCaml values requires `CAM
 
 The split is invisible to users — `json_parse` is a builtin name in both paths, the March module is identical.
 
-**Edge case caveat:** Yojson and yyjson may disagree on exotic edge cases (unusual unicode sequences, number boundary values). This is unlikely with two well-maintained parsers but is worth a future conformance test.
+**Edge case caveat:** Yojson and yyjson may disagree on exotic edge cases (unusual unicode sequences, number boundary values). This is unlikely with two well-maintained parsers but worth a conformance test in `test/test_march.ml` covering the JSON test suite edge cases.
 
 ### C wrapper (`march_json.c`)
 
@@ -141,37 +151,53 @@ void *march_json_parse(const char *s, int64_t len);
 
 // Returns a march_string*.
 void *march_json_encode(void *json_val);
-void *march_json_encode_pretty(void *json_val);
+void *march_json_encode_pretty(void *json_val);  // two-space indent (yyjson default)
 ```
 
-ADT tag assignments for `Json` constructors (follows alphabetical-field convention of the runtime):
+ADT tag assignments for `Json` constructors (alphabetical declaration order = tag assignment order):
 
 | Constructor | Tag | Fields |
 |-------------|-----|--------|
-| `Array`     | 0   | `List(Json)` |
-| `Bool`      | 1   | `Bool` (int64: 0=false, 1=true) |
-| `Float`     | 2   | `Float` (double) |
-| `Int`       | 3   | `Int` (int64) |
-| `Null`      | 4   | none |
-| `Object`    | 5   | `Map(String, Json)` |
-| `Str`       | 6   | `String` (march_string*) |
+| `Array`     | 0   | `List(Json)` (march cons-list pointer) |
+| `Bool`      | 1   | int64: 0=false, 1=true |
+| `Float`     | 2   | double |
+| `Int`       | 3   | int64 |
+| `Null`      | 4   | none (0 fields) |
+| `Object`    | 5   | `List((String, Json))` (march cons-list of 2-field tuple objects) |
+| `Str`       | 6   | `march_string*` |
 
-`Object` fields are built as a `Map(String, Json)` by inserting into the HAMT incrementally during the tree walk. `Array` fields become a `List(Json)` built in reverse then reversed once.
+Use named C constants in `march_json.c`:
+
+```c
+#define JSON_TAG_ARRAY  0
+#define JSON_TAG_BOOL   1
+#define JSON_TAG_FLOAT  2
+#define JSON_TAG_INT    3
+#define JSON_TAG_NULL   4
+#define JSON_TAG_OBJECT 5
+#define JSON_TAG_STR    6
+```
+
+`Array` fields become a `List(Json)` built in reverse then reversed once. `Object` fields become a `List((String, Json))` the same way — each entry is a 2-field tuple heap object. `encode` and `encode_pretty` walk the list sequentially; no iteration API beyond cons-list traversal is needed.
 
 ### OCaml builtins (`eval.ml`)
 
 Three builtins: `json_parse`, `json_encode`, `json_encode_pretty`. Implemented using Yojson. Translation between Yojson's `Basic.t` AST and March's `value` type is a straightforward recursive walk.
 
-Number handling in Yojson: `Int` comes through as Yojson's `` `Int ``, `Float` as `` `Float ``. The `Int`/`Float` split is preserved naturally.
+Number handling: Yojson's `` `Int `` → `VConstructor("Int", [VInt n])`, `` `Float `` → `VConstructor("Float", [VFloat f])`. The `Int`/`Float` split is preserved naturally.
+
+`Object` in Yojson is `(string * t) list` — maps directly to March's `List((String, Json))` representation.
 
 ### March module (`stdlib/json.march`)
 
 Only `parse`, `encode`, and `encode_pretty` call builtins. All accessors and helpers are pure March:
 
-- `get`, `at` — pattern match + `Map.get` / `List.nth_opt`
-- `path` — fold over keys calling `get`/`at`
+- `get` — pattern match on `Object`, linear search through the pairs list
+- `at` — pattern match on `Array`, `List.nth_opt`
+- `path` — fold over keys calling `get`/`at`; short-circuits to `None` on any miss or wrong type
 - `as_str`, `as_int`, etc. — single-arm pattern matches returning `Option`
-- `object` — `List.fold_left` building a `Map`
+- `as_object` — unwrap `Object` payload
+- `object` — identity wrap (list is stored as-is)
 - Constructor helpers — trivial wrappers around ADT constructors
 
 ---
@@ -198,9 +224,10 @@ No structured error variants (`UnexpectedToken`, `MaxDepthExceeded`, etc.). JSON
 | `runtime/march_json.c` | Add (new C wrapper) |
 | `runtime/march_runtime.h` | Add declarations for `march_json_*` functions |
 | `lib/eval/eval.ml` | Add `json_parse`, `json_encode`, `json_encode_pretty` builtins |
+| `lib/tir/llvm_emit.ml` | Add `declare` lines in the LLVM IR preamble string; add entries in `is_builtin_fn`, `builtin_ret_ty`, and `mangle_extern` for the three `json_*` builtins so the compiler recognises them, knows their return types (`Result(Json, JsonError)` for `json_parse`, `String` for `json_encode`/`json_encode_pretty`), and mangles them to the correct C symbol names |
 | `stdlib/json.march` | Add (new stdlib module) |
-| `bin/main.ml` | Add `json.march` to stdlib load order |
-| `test/test_march.ml` | Add JSON tests |
+| `bin/main.ml` | Add `json.march` to stdlib load order, after `list.march`, `option.march`, `result.march`, and `string.march` (all of which `json.march` depends on) |
+| `test/test_march.ml` | Add JSON tests including edge cases |
 | `dune` (runtime) | Add yyjson.c and march_json.c to foreign stubs |
 
 ---
