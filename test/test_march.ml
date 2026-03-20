@@ -4650,6 +4650,45 @@ let test_dir_rm_rf_refuses_root () =
   Alcotest.(check string) "rm_rf refuses root" "refused"
     (vstr (call_fn env "f" []))
 
+let test_dir_exists () =
+  let base = Filename.temp_dir "march_exists_" "" in
+  let env = eval_with_dir (Printf.sprintf {|mod T do
+    fn f() do Dir.exists("%s") end
+  end|} base) in
+  let result = vbool (call_fn env "f" []) in
+  (try Unix.rmdir base with _ -> ());
+  Alcotest.(check bool) "dir exists" true result
+
+let test_dir_not_exists () =
+  let env = eval_with_dir {|mod T do
+    fn f() do Dir.exists("/nonexistent_march_test_xyz_dir") end
+  end|} in
+  Alcotest.(check bool) "dir not exists" false
+    (vbool (call_fn env "f" []))
+
+let test_dir_mkdir_p () =
+  let base = Printf.sprintf "/tmp/march_mkdirp_%d" (Unix.getpid ()) in
+  let deep = base ^ "/a/b/c" in
+  let env = eval_with_dir (Printf.sprintf {|mod T do
+    fn f() do
+      match Dir.mkdir_p("%s") with
+      | Ok(ig) -> Dir.exists("%s")
+      | Err(ig) -> false
+      end
+    end
+  end|} deep deep) in
+  let result = vbool (call_fn env "f" []) in
+  let rec rm_rf p =
+    match Sys.file_exists p with
+    | true when Sys.is_directory p ->
+      Array.iter (fun e -> rm_rf (p ^ "/" ^ e)) (Sys.readdir p);
+      Unix.rmdir p
+    | true -> Sys.remove p
+    | false -> ()
+  in
+  (try rm_rf base with _ -> ());
+  Alcotest.(check bool) "mkdir_p creates nested dir" true result
+
 let () =
   Alcotest.run "march"
     [
@@ -5158,5 +5197,8 @@ let () =
         Alcotest.test_case "mkdir/list/rmdir" `Quick test_dir_mkdir_list_rmdir;
         Alcotest.test_case "rm_rf nested"     `Quick test_dir_rm_rf;
         Alcotest.test_case "rm_rf refuses root" `Quick test_dir_rm_rf_refuses_root;
+        Alcotest.test_case "exists true"      `Quick test_dir_exists;
+        Alcotest.test_case "exists false"     `Quick test_dir_not_exists;
+        Alcotest.test_case "mkdir_p nested"   `Quick test_dir_mkdir_p;
       ]);
     ]
