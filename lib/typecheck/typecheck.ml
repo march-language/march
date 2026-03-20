@@ -629,7 +629,7 @@ let builtin_bindings : (string * scheme) list =
     ("file_delete",     poly1 (fun e -> TArrow (t_string, t_result t_unit e)));
     ("file_copy",       poly1 (fun e -> TArrow (t_string, TArrow (t_string, t_result t_unit e))));
     ("file_rename",     poly1 (fun e -> TArrow (t_string, TArrow (t_string, t_result t_unit e))));
-    ("file_stat",       poly1 (fun e -> TArrow (t_string, t_result t_int e)));
+    ("file_stat",       poly1 (fun e -> TArrow (t_string, t_result (TCon ("FileStat", [])) e)));
     ("file_open",       poly1 (fun e -> TArrow (t_string, t_result t_int e)));
     ("file_read_line",  Mono (TArrow (t_int, t_option t_string)));
     ("file_read_chunk", Mono (TArrow (t_int, TArrow (t_int, t_option t_string))));

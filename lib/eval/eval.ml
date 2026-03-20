@@ -1369,11 +1369,11 @@ let base_env : env =
       | [VString path] ->
         (try
            let ic = open_in path in
-           let n = in_channel_length ic in
-           let s = Bytes.create n in
-           really_input ic s 0 n;
-           close_in ic;
-           VCon ("Ok", [VString (Bytes.to_string s)])
+           Fun.protect ~finally:(fun () -> close_in_noerr ic) (fun () ->
+             let n = in_channel_length ic in
+             let s = Bytes.create n in
+             really_input ic s 0 n;
+             VCon ("Ok", [VString (Bytes.to_string s)]))
          with
          | Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
       | _ -> eval_error "file_read(path)"))
@@ -1382,9 +1382,9 @@ let base_env : env =
       | [VString path; VString data] ->
         (try
            let oc = open_out path in
-           output_string oc data;
-           close_out oc;
-           VCon ("Ok", [VAtom "ok"])
+           Fun.protect ~finally:(fun () -> close_out_noerr oc) (fun () ->
+             output_string oc data;
+             VCon ("Ok", [VAtom "ok"]))
          with
          | Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
       | _ -> eval_error "file_write(path, data)"))
@@ -1393,9 +1393,9 @@ let base_env : env =
       | [VString path; VString data] ->
         (try
            let oc = open_out_gen [Open_append; Open_creat] 0o644 path in
-           output_string oc data;
-           close_out oc;
-           VCon ("Ok", [VAtom "ok"])
+           Fun.protect ~finally:(fun () -> close_out_noerr oc) (fun () ->
+             output_string oc data;
+             VCon ("Ok", [VAtom "ok"]))
          with
          | Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
       | _ -> eval_error "file_append(path, data)"))
