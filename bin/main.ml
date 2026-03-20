@@ -79,6 +79,10 @@ let load_stdlib () =
       "http.march";
       "http_transport.march";
       "http_client.march";
+      "seq.march";
+      "path.march";
+      "file.march";
+      "dir.march";
     ] in
     List.concat_map (fun name ->
         load_stdlib_file (Filename.concat stdlib_dir name)
