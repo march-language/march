@@ -4585,6 +4585,71 @@ let test_file_append () =
      Alcotest.(check string) "append" "line1\nline2\n" result
    with e -> (try Sys.remove path with _ -> ()); raise e)
 
+(* ── Dir stdlib tests ──────────────────────────────────────────────────── *)
+
+let load_dir_stdlib () =
+  [ load_stdlib_file_for_test "dir.march" ]
+
+let eval_with_dir src =
+  eval_with_stdlib (load_dir_stdlib ()) src
+
+let test_dir_mkdir_list_rmdir () =
+  (* Use Filename.temp_file to get a unique path, then create the dir ourselves.
+     Resolve symlinks (macOS /var -> /private/var) so Unix.mkdir works inside March eval. *)
+  (* Create a unique temp dir directly in /tmp to avoid dune sandbox issues *)
+  let base = Printf.sprintf "/tmp/march_dir_test_%d_%d" (Unix.getpid ()) (Random.int 1000000) in
+  Unix.mkdir base 0o755;
+  let path = base ^ "/subdir" in
+  let env = eval_with_dir (Printf.sprintf {|mod T do
+    fn f() do
+      match Dir.mkdir("%s") with
+      | Err(e) -> "mkdir failed: " ++ to_string(e)
+      | Ok(ig) ->
+        match Dir.list("%s") with
+        | Err(ig) -> "list failed"
+        | Ok(ig) ->
+          match Dir.rmdir("%s") with
+          | Err(ig) -> "rmdir failed"
+          | Ok(ig) -> "ok"
+          end
+        end
+      end
+    end
+  end|} path base path) in
+  let result = vstr (call_fn env "f" []) in
+  (try Unix.rmdir path with _ -> ());
+  (try Unix.rmdir base with _ -> ());
+  Alcotest.(check string) "mkdir/list/rmdir" "ok" result
+
+let test_dir_rm_rf () =
+  let base = Filename.temp_dir "march_rmrf_" "" in
+  (* Create nested structure *)
+  Unix.mkdir (base ^ "/sub") 0o755;
+  let oc = open_out (base ^ "/sub/file.txt") in
+  output_string oc "x"; close_out oc;
+  let env = eval_with_dir (Printf.sprintf {|mod T do
+    fn f() do
+      match Dir.rm_rf("%s") with
+      | Ok(ig) -> "ok"
+      | Err(ig) -> "err"
+      end
+    end
+  end|} base) in
+  Alcotest.(check string) "rm_rf nested" "ok"
+    (vstr (call_fn env "f" []))
+
+let test_dir_rm_rf_refuses_root () =
+  let env = eval_with_dir {|mod T do
+    fn f() do
+      match Dir.rm_rf("/") with
+      | Ok(ig) -> "deleted root"
+      | Err(ig) -> "refused"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "rm_rf refuses root" "refused"
+    (vstr (call_fn env "f" []))
+
 let () =
   Alcotest.run "march"
     [
@@ -5088,5 +5153,10 @@ let () =
         Alcotest.test_case "with_lines"     `Quick test_file_with_lines;
         Alcotest.test_case "not found"      `Quick test_file_not_found;
         Alcotest.test_case "append"         `Quick test_file_append;
+      ]);
+      ("dir stdlib", [
+        Alcotest.test_case "mkdir/list/rmdir" `Quick test_dir_mkdir_list_rmdir;
+        Alcotest.test_case "rm_rf nested"     `Quick test_dir_rm_rf;
+        Alcotest.test_case "rm_rf refuses root" `Quick test_dir_rm_rf_refuses_root;
       ]);
     ]

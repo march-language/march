@@ -1,0 +1,47 @@
+-- Dir module: directory I/O.
+-- All operations return Result(value, FileError) except `exists` which returns Bool.
+-- rm_rf does not follow symlinks; symlink entries are removed, targets left intact.
+-- rm_rf refuses to operate on "/" or "" (returns Err).
+
+mod Dir do
+
+pub fn list(path) do
+  dir_list(path)
+end
+
+pub fn list_full(path) do
+  match dir_list(path) with
+  | Err(e) -> Err(e)
+  | Ok(names) ->
+    let prefix = if String.ends_with(path, "/") then path else path ++ "/"
+    fn prepend(xs) do
+      match xs with
+      | Nil -> Nil
+      | Cons(name, rest) -> Cons(prefix ++ name, prepend(rest))
+      end
+    end
+    Ok(prepend(names))
+  end
+end
+
+pub fn mkdir(path) do
+  dir_mkdir(path)
+end
+
+pub fn mkdir_p(path) do
+  dir_mkdir_p(path)
+end
+
+pub fn rmdir(path) do
+  dir_rmdir(path)
+end
+
+pub fn rm_rf(path) do
+  dir_rm_rf(path)
+end
+
+pub fn exists(path) do
+  dir_exists(path)
+end
+
+end
