@@ -894,6 +894,11 @@ let base_env : env =
            | None -> eval_error "self: called outside an actor handler")
         | _ -> eval_error "self: expected 0 arguments"))
   ; ("receive", VBuiltin ("receive", function
+        (* Single-threaded cooperative semantics: receive() pops the NEXT message
+           from this actor's mailbox immediately. If the mailbox is empty, it errors
+           rather than blocking — true blocking receive requires a multi-threaded
+           scheduler (Phase 4 async). Use this only when you know a message is
+           already queued (e.g., you sent the message before calling the handler). *)
         | [] ->
           (match !current_pid with
            | Some pid ->
@@ -2437,7 +2442,6 @@ let run_scheduler () =
       | Some inst when not inst.ai_alive -> ()
       | Some inst when Queue.is_empty inst.ai_mailbox -> ()
       | Some inst ->
-        changed := true;
         let msg = Queue.pop inst.ai_mailbox in
         let (msg_tag, msg_args) = match msg with
           | VCon (tag, args) -> (tag, args)
@@ -2455,9 +2459,14 @@ let run_scheduler () =
              ()
            | Some handler ->
              if List.length handler.ah_params <> List.length msg_args then
-               Printf.eprintf "run_scheduler: handler '%s' arity mismatch for actor %d\n"
+               Printf.eprintf "run_scheduler: handler '%s' arity mismatch for actor %d\n%!"
                  msg_tag pid
+               (* Arity mismatch: message consumed but actor not crashed.
+                  The message is lost and the actor continues with unchanged state.
+                  This is intentional: a mismatch is a programming error, but crashing
+                  the actor would mask the original bug. *)
              else begin
+               changed := true;   (* only mark changed when handler actually runs *)
                let prev_pid = !current_pid in
                current_pid := Some pid;
                let param_bindings =
@@ -2467,12 +2476,11 @@ let run_scheduler () =
                let handler_env =
                  [("state", inst.ai_state)] @ param_bindings @ !(inst.ai_env_ref)
                in
-               (try
-                  let new_state = !eval_expr_hook handler_env handler.ah_body in
+               (match !eval_expr_hook handler_env handler.ah_body with
+                | new_state ->
                   inst.ai_state <- new_state
-                with exn ->
+                | exception exn ->
                   (* Handler raised an exception: crash the actor *)
-                  current_pid := prev_pid;
                   crash_actor pid (Printexc.to_string exn));
                current_pid := prev_pid
              end)

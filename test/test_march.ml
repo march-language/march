@@ -3399,7 +3399,7 @@ let test_scheduler_updates_actor_state () =
         | _ -> -1)
      | _ -> -1)
 
-(** Phase 4: scheduler processes messages from multiple actors interleaved. *)
+(** Phase 4: scheduler processes messages from multiple actors, all actors processed. *)
 let test_scheduler_round_robin () =
   let src = {|mod Test do
     actor Counter do
@@ -3419,21 +3419,85 @@ let test_scheduler_round_robin () =
       send(p3, Inc())
       send(p3, Inc())
       run_until_idle()
-      p3
+      p1
     end
   end|} in
   let env = eval_module src in
   let v = call_fn env "main" [] in
-  let pid3 = match v with March_eval.Eval.VPid n -> n | _ -> failwith "expected pid" in
-  let count3 = match Hashtbl.find_opt March_eval.Eval.actor_registry pid3 with
+  let pid1 = match v with March_eval.Eval.VPid n -> n | _ -> failwith "expected pid" in
+  let get_count pid =
+    match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
     | Some inst ->
       (match inst.March_eval.Eval.ai_state with
        | March_eval.Eval.VRecord fs ->
          (match List.assoc_opt "count" fs with
           | Some (March_eval.Eval.VInt n) -> n | _ -> -1)
        | _ -> -1)
+    | None -> -1
+  in
+  Alcotest.(check int) "p1 received 1 Inc message" 1 (get_count pid1);
+  Alcotest.(check int) "p2 received 2 Inc messages" 2 (get_count (pid1 + 1));
+  Alcotest.(check int) "p3 received 3 Inc messages" 3 (get_count (pid1 + 2))
+
+(** Phase 4: self() returns the current actor's pid inside a handler. *)
+let test_self_inside_handler () =
+  let src = {|mod Test do
+    actor Echo do
+      state { alive : Bool }
+      init { alive = true }
+      on Ping() do
+        let me = self()
+        { alive = true }
+      end
+    end
+
+    fn main() do
+      let pid = spawn(Echo)
+      send(pid, Ping())
+      run_until_idle()
+      is_alive(pid)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check bool) "actor still alive after self() call" true
+    (match v with March_eval.Eval.VBool b -> b | _ -> false)
+
+(** Phase 4: receive() inside a handler pops the next queued message. *)
+let test_receive_inside_handler () =
+  let src = {|mod Test do
+    actor Dispatcher do
+      state { got : Int }
+      init { got = 0 }
+      on Dispatch() do
+        let follow = receive()
+        match follow with
+        | Followup(n) -> { got = n }
+        end
+      end
+    end
+
+    fn main() do
+      let pid = spawn(Dispatcher)
+      send(pid, Dispatch())
+      send(pid, Followup(99))
+      run_until_idle()
+      pid
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  let pid = match v with March_eval.Eval.VPid n -> n | _ -> failwith "expected pid" in
+  let got = match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
+    | Some inst ->
+      (match inst.March_eval.Eval.ai_state with
+       | March_eval.Eval.VRecord fs ->
+         (match List.assoc_opt "got" fs with
+          | Some (March_eval.Eval.VInt n) -> n
+          | _ -> -1)
+       | _ -> -1)
     | None -> -1 in
-  Alcotest.(check int) "p3 received 3 Inc messages" 3 count3
+  Alcotest.(check int) "Dispatcher got 99 via receive()" 99 got
 
 let test_eval_reduction_count () =
   let src = {|mod Test do
@@ -5329,6 +5393,10 @@ let () =
           (with_reset test_scheduler_updates_actor_state);
         Alcotest.test_case "scheduler round-robin"            `Quick
           (with_reset test_scheduler_round_robin);
+        Alcotest.test_case "self inside handler"              `Quick
+          (with_reset test_self_inside_handler);
+        Alcotest.test_case "receive inside handler"           `Quick
+          (with_reset test_receive_inside_handler);
       ]);
       ("file builtins", [
         Alcotest.test_case "file_exists false" `Quick test_file_builtin_exists_false;
