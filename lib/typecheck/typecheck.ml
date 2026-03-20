@@ -267,13 +267,14 @@ type env = {
   sigs       : (string * Ast.sig_def) list;       (** Registered module signatures *)
   mod_needs  : string list;
   (** Capabilities declared via [needs] in the current module scope, as dot-joined paths *)
+  protocols  : (string * Ast.protocol_def) list; (** Registered session-type protocols *)
 }
 
 let make_env errors type_map = {
   vars = []; types = []; ctors = []; records = []; level = 0; lin = [];
   errors; pending_constraints = ref []; type_map;
   interfaces = []; sigs = [];
-  mod_needs = [];
+  mod_needs = []; protocols = [];
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -510,6 +511,7 @@ let builtin_bindings : (string * scheme) list =
     (* Actor builtins *)
     ("kill",     poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_unit)));
     ("is_alive", poly1 (fun a -> TArrow (TCon ("Pid", [a]), t_bool)));
+    ("actor_get_int", poly1 (fun a -> TArrow (TCon ("Pid", [a]), TArrow (t_int, t_int))));
     (* Int primitives *)
     ("int_abs",         Mono (TArrow (t_int,   t_int)));
     ("int_pow",         Mono (TArrow (t_int,   TArrow (t_int, t_int))));
@@ -1835,7 +1837,15 @@ let rec check_decl env (d : Ast.decl) : env =
     let env' = bind_vars new_names env in
     { env' with types = new_types @ env'.types; ctors = new_ctors @ env'.ctors }
 
-  | Ast.DProtocol _ -> env
+  | Ast.DProtocol (name, pdef, sp) ->
+    (* Register the protocol and validate basic well-formedness. *)
+    if List.mem_assoc name.txt env.protocols then
+      Err.error env.errors ~span:sp
+        (Printf.sprintf "duplicate protocol definition: %s" name.txt);
+    if pdef.proto_steps = [] then
+      Err.warning env.errors ~span:sp
+        (Printf.sprintf "protocol %s has no steps" name.txt);
+    { env with protocols = (name.txt, pdef) :: env.protocols }
 
   | Ast.DSig (name, sdef, _sp) ->
     (* Store the signature so DMod can check conformance later. *)

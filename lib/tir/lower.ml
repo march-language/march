@@ -114,6 +114,51 @@ let ty_of_span (sp : Ast.span) : Tir.ty =
 let ty_of_expr (e : Ast.expr) : Tir.ty =
   ty_of_span (Typecheck.span_of_expr e)
 
+(* ── Use import resolution ───────────────────────────────────────── *)
+
+(** Maps unqualified names to their qualified module-prefixed names.
+    Built from [DUse] declarations. E.g. [map] → [List.map]. *)
+let _use_aliases : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
+
+(** Resolve a variable name through use-import aliases. *)
+let resolve_use_alias (name : string) : string =
+  match Hashtbl.find_opt !_use_aliases name with
+  | Some qualified -> qualified
+  | None -> name
+
+(* ── Interface method resolution ────────────────────────────────── *)
+
+(** Maps interface method names to a list of (concrete_type_name, mangled_fn_name).
+    Used during lowering to rewrite calls like [show(42)] → [Show$Int.show(42)]. *)
+let _iface_methods : (string, (string * string) list) Hashtbl.t ref
+  = ref (Hashtbl.create 0)
+
+(** Resolve an interface method call if possible.
+    Given a method name and the inferred type of the first argument,
+    returns the mangled impl function name, or None. *)
+let resolve_iface_method (method_name : string) (arg_span : Ast.span) : string option =
+  match Hashtbl.find_opt !_iface_methods method_name with
+  | None -> None
+  | Some impls ->
+    match !_type_map_ref with
+    | None -> None
+    | Some tbl ->
+      match Hashtbl.find_opt tbl arg_span with
+      | None -> None
+      | Some tc_ty ->
+        let tc_ty = Typecheck.repr tc_ty in
+        (* Extract the concrete type name from the typechecker type *)
+        let type_name = match tc_ty with
+          | Typecheck.TCon (name, _) -> Some name
+          | Typecheck.TTuple _       -> Some "$Tuple"
+          | Typecheck.TRecord _      -> Some "$Record"
+          | _ -> None
+        in
+        match type_name with
+        | None -> None
+        | Some tname ->
+          List.assoc_opt tname impls
+
 (* ── CPS-based ANF lowering ────────────────────────────────────── *)
 
 (** Lower an expression, ensuring the result is an atom.
@@ -127,6 +172,7 @@ let rec lower_to_atom_k (e : Ast.expr) (k : Tir.atom -> Tir.expr) : Tir.expr =
   match e with
   | Ast.ELit (lit, _) -> k (Tir.ALit lit)
   | Ast.EVar { txt = name; span; _ } ->
+    let name = resolve_use_alias name in
     k (Tir.AVar { v_name = name; v_ty = ty_of_span span; v_lin = Tir.Unr })
   | _ ->
     let rhs = lower_expr e in
@@ -149,6 +195,7 @@ and lower_expr (e : Ast.expr) : Tir.expr =
   | Ast.ELit (lit, _) -> Tir.EAtom (Tir.ALit lit)
 
   | Ast.EVar { txt = name; span; _ } ->
+    let name = resolve_use_alias name in
     Tir.EAtom (Tir.AVar { v_name = name; v_ty = ty_of_span span; v_lin = Tir.Unr })
 
   (* --- Let bindings --- *)
@@ -251,7 +298,18 @@ and lower_expr (e : Ast.expr) : Tir.expr =
 
   (* --- Function application (CPS: all args must be atoms) --- *)
   | Ast.EApp (f_expr, args, _) ->
-    lower_to_atom_k f_expr (fun f_atom ->
+    (* Check for interface method resolution: if f is a plain EVar that
+       names an interface method, and we can determine the concrete type
+       of the first argument, redirect to the mangled impl function. *)
+    let resolved_f = match f_expr, args with
+      | Ast.EVar { txt = name; _ }, first_arg :: _ ->
+        (match resolve_iface_method name (Typecheck.span_of_expr first_arg) with
+         | Some mangled_name -> Ast.EVar { txt = mangled_name;
+             span = Typecheck.span_of_expr f_expr }
+         | None -> f_expr)
+      | _ -> f_expr
+    in
+    lower_to_atom_k resolved_f (fun f_atom ->
       lower_atoms_k args (fun arg_atoms ->
         let f_var = match f_atom with
           | Tir.AVar v -> v
@@ -340,7 +398,18 @@ and lower_expr (e : Ast.expr) : Tir.expr =
       v_ty = Tir.TPtr Tir.TUnit;
       v_lin = Tir.Unr
     } in
-    Tir.EApp (spawn_fn, [])
+    let march_spawn : Tir.var = {
+      v_name = "spawn";
+      v_ty = Tir.TPtr Tir.TUnit;
+      v_lin = Tir.Unr
+    } in
+    let raw_var : Tir.var = {
+      v_name = "$raw_actor";
+      v_ty = Tir.TPtr Tir.TUnit;
+      v_lin = Tir.Unr
+    } in
+    Tir.ELet (raw_var, Tir.EApp (spawn_fn, []),
+              Tir.EApp (march_spawn, [Tir.AVar raw_var]))
 
   | Ast.ESpawn _ ->
     failwith "TIR lower: ESpawn argument must be a plain actor name"
@@ -504,15 +573,41 @@ and compile_matrix
       else
         Tir.ECase (scrut, tir_branches, default)
 
-(** Lower a single-scrutinee match to a TIR decision tree. *)
+(** Lower a single-scrutinee match to a TIR decision tree.
+    Branches with [when] guards are handled by embedding a boolean check
+    in the branch body: if the guard is false, control falls through to the
+    remaining branches. *)
 and lower_match (scrut : Tir.atom) (branches : Ast.branch list) : Tir.expr =
-  List.iter (fun (br : Ast.branch) ->
-      match br.branch_guard with
-      | Some _ -> failwith "TIR lower: match guards are not yet supported"
-      | None -> ()
-    ) branches;
-  let rows = List.map (fun (br : Ast.branch) -> ([br.branch_pat], lower_expr br.branch_body)) branches in
-  compile_matrix [scrut] rows None
+  let has_guards = List.exists (fun (br : Ast.branch) ->
+      br.branch_guard <> None) branches in
+  if not has_guards then begin
+    (* Fast path: no guards — use efficient matrix compilation. *)
+    let rows = List.map (fun (br : Ast.branch) ->
+        ([br.branch_pat], lower_expr br.branch_body)) branches in
+    compile_matrix [scrut] rows None
+  end else begin
+    (* Guards present: compile each branch individually with fallthrough
+       to the remaining branches when the guard fails. *)
+    let rec go = function
+      | [] -> Tir.EAtom (Tir.ALit (Ast.LitInt 0))  (* match failure *)
+      | (br : Ast.branch) :: rest ->
+        let rest_expr = go rest in
+        let body = lower_expr br.branch_body in
+        let guarded_body = match br.branch_guard with
+          | None -> body
+          | Some guard ->
+            let guard_expr = lower_expr guard in
+            let gv : Tir.var = { v_name = fresh_name "guard";
+                                 v_ty = Tir.TBool; v_lin = Tir.Unr } in
+            Tir.ELet (gv, guard_expr,
+              Tir.ECase (Tir.AVar gv,
+                [{ br_tag = "true"; br_vars = []; br_body = body }],
+                Some rest_expr))
+        in
+        compile_matrix [scrut] [([br.branch_pat], guarded_body)] (Some rest_expr)
+    in
+    go branches
+  end
 
 (* ── TIR renaming ───────────────────────────────────────────────── *)
 
@@ -884,8 +979,41 @@ let builtin_type_defs : Tir.type_def list = [
 let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
   reset_counter ();
   _type_map_ref := type_map;
+  _iface_methods := Hashtbl.create 16;
+  _use_aliases := Hashtbl.create 16;
   let fns = ref [] in
   let types = ref [] in
+  let top_lets = ref [] in
+  let externs = ref [] in
+  (* Pass 1: Collect interface/impl declarations first so that interface
+     method resolution is available when lowering function bodies. *)
+  List.iter (fun d ->
+      match d with
+      | Ast.DInterface (idef, _) ->
+        List.iter (fun (m : Ast.method_decl) ->
+            if not (Hashtbl.mem !_iface_methods m.md_name.txt) then
+              Hashtbl.replace !_iface_methods m.md_name.txt []
+          ) idef.iface_methods
+      | Ast.DImpl (idef, _) ->
+        let type_name = match idef.impl_ty with
+          | Ast.TyCon ({ txt = name; _ }, _) -> name
+          | Ast.TyTuple _  -> "$Tuple"
+          | Ast.TyRecord _ -> "$Record"
+          | _ -> "$Unknown"
+        in
+        List.iter (fun ((mname : Ast.name), (mdef : Ast.fn_def)) ->
+            let mangled = Printf.sprintf "%s$%s.%s"
+              idef.impl_iface.txt type_name mname.txt in
+            let fn = lower_fn_def mdef in
+            fns := { fn with fn_name = mangled } :: !fns;
+            let existing = match Hashtbl.find_opt !_iface_methods mname.txt with
+              | Some l -> l | None -> [] in
+            Hashtbl.replace !_iface_methods mname.txt
+              ((type_name, mangled) :: existing)
+          ) idef.impl_methods
+      | _ -> ()
+    ) m.mod_decls;
+  (* Pass 2: Lower all other declarations. *)
   List.iter (fun d ->
       match d with
       | Ast.DFn (def, _) ->
@@ -894,17 +1022,23 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
         (match lower_type_def name params td with
          | Some td' -> types := td' :: !types
          | None -> ())
-      | Ast.DLet _ -> ()
+      | Ast.DLet (b, _) ->
+        let rhs = lower_expr b.bind_expr in
+        (match b.bind_pat with
+         | Ast.PatVar n ->
+           let v : Tir.var = {
+             v_name = n.txt;
+             v_ty = (match b.bind_ty with Some t -> lower_ty t
+                     | None -> ty_of_expr b.bind_expr);
+             v_lin = lower_linearity b.bind_lin;
+           } in
+           top_lets := (v, rhs) :: !top_lets
+         | _ -> ())
       | Ast.DActor (name, actor_def, _) ->
         let (new_types, new_fns) = lower_actor name.txt actor_def in
         types := List.rev_append new_types !types;
         fns   := List.rev_append new_fns   !fns
       | Ast.DMod (mod_name, _, inner_decls, _) ->
-        (* Lower inner DFn/DType declarations, prefixing function names with
-           "ModName." to produce the qualified names that call sites use.
-           Intra-module calls are lowered with unqualified names (typecheck
-           needs them that way), so after lowering we rename AVar references
-           that match inner function names to their qualified form. *)
         let prefix = mod_name.txt ^ "." in
         let inner_fn_names = List.filter_map (function
             | Ast.DFn (def, _) -> Some def.fn_name.txt
@@ -921,11 +1055,66 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
                | None -> ())
             | _ -> ()
           ) inner_decls
-      | Ast.DProtocol _ | Ast.DSig _ | Ast.DInterface _
-      | Ast.DImpl _ | Ast.DExtern _ | Ast.DUse _ | Ast.DNeeds _ -> ()
+      | Ast.DExtern (edef, _) ->
+        List.iter (fun (ef : Ast.extern_fn) ->
+            let params = List.map (fun (_, t) -> lower_ty t) ef.ef_params in
+            let ret = lower_ty ef.ef_ret_ty in
+            let c_name = edef.ext_lib_name ^ "_" ^ ef.ef_name.txt in
+            externs := { Tir.ed_march_name = ef.ef_name.txt;
+                         ed_c_name = c_name;
+                         ed_params = params;
+                         ed_ret = ret } :: !externs
+          ) edef.ext_fns
+      | Ast.DInterface _ | Ast.DImpl _ -> ()  (* handled in pass 1 *)
+      | Ast.DProtocol _ | Ast.DSig _
+      | Ast.DNeeds _ -> ()
+      | Ast.DUse (ud, _) ->
+        (* Build use-import aliases: map unqualified names to qualified names.
+           The qualified fn_defs are already in [fns] from DMod processing above. *)
+        let prefix = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) ^ "." in
+        let all_fn_names = List.map (fun (fn : Tir.fn_def) -> fn.fn_name) !fns in
+        (match ud.use_sel with
+         | Ast.UseSingle -> ()
+         | Ast.UseAll ->
+           (* Find all functions with the matching prefix *)
+           List.iter (fun fn_name ->
+               let plen = String.length prefix in
+               if String.length fn_name > plen
+                  && String.sub fn_name 0 plen = prefix
+               then begin
+                 let short = String.sub fn_name plen (String.length fn_name - plen) in
+                 Hashtbl.replace !_use_aliases short fn_name
+               end
+             ) all_fn_names
+         | Ast.UseNames names ->
+           List.iter (fun (n : Ast.name) ->
+               let qualified = prefix ^ n.txt in
+               if List.mem qualified all_fn_names then
+                 Hashtbl.replace !_use_aliases n.txt qualified
+             ) names)
     ) m.mod_decls;
+  (* Inject top-level let bindings into main's body as a chain of ELet. *)
+  let all_fns = List.rev !fns in
+  let all_fns =
+    match List.rev !top_lets with
+    | [] -> all_fns
+    | lets ->
+      List.map (fun (fn : Tir.fn_def) ->
+          let is_main = fn.fn_name = "main" ||
+            (String.length fn.fn_name > 5 &&
+             String.sub fn.fn_name (String.length fn.fn_name - 5) 5 = ".main") in
+          if is_main then
+            let body = List.fold_right (fun (v, rhs) body ->
+                Tir.ELet (v, rhs, body)) lets fn.fn_body in
+            { fn with fn_body = body }
+          else fn
+        ) all_fns
+  in
   let result : Tir.tir_module = { tm_name = m.mod_name.txt;
-    tm_fns = List.rev !fns;
-    tm_types = builtin_type_defs @ List.rev !types } in
+    tm_fns = all_fns;
+    tm_types = builtin_type_defs @ List.rev !types;
+    tm_externs = List.rev !externs } in
   _type_map_ref := None;
+  _iface_methods := Hashtbl.create 0;
+  _use_aliases := Hashtbl.create 0;
   result

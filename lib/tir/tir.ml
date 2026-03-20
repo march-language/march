@@ -78,10 +78,20 @@ type type_def =
   | TDClosure of string * ty list                   (* defun closure struct *)
 [@@deriving show]
 
+(** An extern (FFI) function declaration. *)
+type extern_decl = {
+  ed_march_name : string;     (* name as used in March source *)
+  ed_c_name     : string;     (* C symbol name *)
+  ed_params     : ty list;    (* parameter types *)
+  ed_ret        : ty;         (* return type *)
+}
+[@@deriving show]
+
 (** A TIR module. *)
 type tir_module = {
-  tm_name  : string;
-  tm_fns   : fn_def list;
-  tm_types : type_def list;
+  tm_name    : string;
+  tm_fns     : fn_def list;
+  tm_types   : type_def list;
+  tm_externs : extern_decl list;
 }
 [@@deriving show]

@@ -52,6 +52,8 @@ type ctx = {
   emitted_wraps : (string, unit) Hashtbl.t;
   (* Buffer for extra wrapper functions emitted at the end *)
   extra_fns : Buffer.t;
+  (* User-defined extern function name mapping: march_name → c_name *)
+  extern_map : (string, string) Hashtbl.t;
 }
 
 let make_ctx ?(fast_math=false) () = {
@@ -69,6 +71,7 @@ let make_ctx ?(fast_math=false) () = {
   type_params = Hashtbl.create 16;
   emitted_wraps = Hashtbl.create 8;
   extra_fns = Buffer.create 1024;
+  extern_map = Hashtbl.create 8;
 }
 
 (* ── Helpers ─────────────────────────────────────────────────────────── *)
@@ -142,7 +145,7 @@ let is_builtin_fn name =
                  "string_byte_length"; "string_is_empty"; "string_to_int"; "string_join";
                  "println"; "print";
                  "int_to_string"; "float_to_string"; "bool_to_string";
-                 "kill"; "is_alive"; "send";
+                 "kill"; "is_alive"; "send"; "spawn"; "actor_get_int";
                  "task_spawn"; "task_await"; "task_await_unwrap";
                  "task_yield"; "task_spawn_steal"; "task_reductions";
                  "get_work_pool";
@@ -192,6 +195,8 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "kill"                        -> Some Tir.TUnit
   | "is_alive"                    -> Some Tir.TBool
   | "send"                        -> Some (Tir.TCon ("Option", [Tir.TUnit]))
+  | "spawn"                        -> Some (Tir.TPtr Tir.TUnit)
+  | "actor_get_int"               -> Some Tir.TInt
   (* Float builtins *)
   | "float_abs"                   -> Some Tir.TFloat
   | "float_ceil"                  -> Some Tir.TInt
@@ -254,6 +259,8 @@ let mangle_extern : string -> string = function
   | "kill"               -> "march_kill"
   | "is_alive"      -> "march_is_alive"
   | "send"          -> "march_send"
+  | "spawn"         -> "march_spawn"
+  | "actor_get_int" -> "march_actor_get_int"
   | "tcp_listen"              -> "march_tcp_listen"
   | "tcp_accept"              -> "march_tcp_accept"
   | "tcp_recv_http"           -> "march_tcp_recv_http"
@@ -816,7 +823,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         let (ty, v) = emit_atom ctx a in ty ^ " " ^ v
       ) args in
     let args_str = String.concat ", " arg_strs in
-    let fname    = mangle_extern f.Tir.v_name in
+    let fname    = match Hashtbl.find_opt ctx.extern_map f.Tir.v_name with
+      | Some c_name -> c_name
+      | None -> mangle_extern f.Tir.v_name in
     (* Determine return type: check known builtins first, then TFn annotation *)
     let ret_tir  = match builtin_ret_ty f.Tir.v_name with
       | Some t -> t
@@ -1391,6 +1400,8 @@ declare ptr  @march_string_join(ptr %list, ptr %sep)
 declare void @march_kill(ptr %actor)
 declare i64  @march_is_alive(ptr %actor)
 declare ptr  @march_send(ptr %actor, ptr %msg)
+declare ptr  @march_spawn(ptr %actor)
+declare i64  @march_actor_get_int(ptr %actor, i64 %index)
 declare i64  @march_tcp_listen(i64 %port)
 declare i64  @march_tcp_accept(i64 %fd)
 declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)
@@ -1467,12 +1478,26 @@ let emit_main_wrapper (buf : Buffer.t) =
 let emit_module ?(fast_math=false) (m : Tir.tir_module) : string =
   let ctx = make_ctx ~fast_math () in
   build_ctor_info ctx m;
+  (* Register user-defined extern functions *)
+  List.iter (fun (ed : Tir.extern_decl) ->
+      Hashtbl.replace ctx.extern_map ed.ed_march_name ed.ed_c_name;
+      Hashtbl.replace ctx.top_fns ed.ed_march_name true
+    ) m.Tir.tm_externs;
   List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true)
     m.Tir.tm_fns;
   List.iter (emit_fn ctx) m.Tir.tm_fns;
 
   let out = Buffer.create 8192 in
   emit_preamble out;
+  (* Emit user-defined extern function declarations *)
+  List.iter (fun (ed : Tir.extern_decl) ->
+      let ret_llty = llvm_ret_ty ed.ed_ret in
+      let param_lltys = List.map (fun _t -> "ptr") ed.ed_params in
+      let params_str = String.concat ", " (List.mapi (fun i ty ->
+          Printf.sprintf "%s %%%d" ty i) param_lltys) in
+      Buffer.add_string out
+        (Printf.sprintf "declare %s @%s(%s)\n" ret_llty ed.ed_c_name params_str)
+    ) m.Tir.tm_externs;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
 
@@ -1536,7 +1561,7 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
   let ctx = make_ctx ~fast_math () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true) fns;
   List.iter (emit_fn ctx) fns;
@@ -1563,7 +1588,7 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
   let ctx = make_ctx ~fast_math () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true) fns;
   List.iter (emit_fn ctx) fns;
@@ -1591,7 +1616,7 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
   let ctx = make_ctx ~fast_math () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn] } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = [] } in
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
   emit_fn ctx fn;
