@@ -14,6 +14,7 @@
 (* ── Type detection ─────────────────────────────────────────────── *)
 
 let rec has_tvar : Tir.ty -> bool = function
+  | Tir.TVar "_"      -> false  (* lowering fallback placeholder, not a real polymorph *)
   | Tir.TVar _        -> true
   | Tir.TTuple ts     -> List.exists has_tvar ts
   | Tir.TRecord fs    -> List.exists (fun (_, t) -> has_tvar t) fs
@@ -138,6 +139,18 @@ let build_subst (fn : Tir.fn_def) (arg_tys : Tir.ty list) : ty_subst =
   in
   List.fold_left (fun acc (poly, conc) -> match_ty poly conc acc) [] pairs
 
+(** Ensure any function referenced as a value (atom) is enqueued for emission. *)
+let ensure_atom_fns fn_table done_set worklist atoms =
+  List.iter (function
+    | Tir.AVar v ->
+      let name = v.Tir.v_name in
+      (match Hashtbl.find_opt fn_table name with
+       | Some orig_fn when not (Hashtbl.mem done_set name) ->
+         Queue.add (name, orig_fn, []) worklist
+       | _ -> ())
+    | _ -> ()
+  ) atoms
+
 (** Rewrite all [EApp] and [ELetRec] calls in [expr] that target
     polymorphic functions, replacing them with calls to the
     specialized (mangled) version and enqueuing the specialization
@@ -150,6 +163,8 @@ let rec rewrite_calls
   : Tir.expr =
   match expr with
   | Tir.EApp (f_var, args) ->
+    (* Ensure functions passed as arguments are discovered *)
+    ensure_atom_fns fn_table done_set worklist args;
     (* Check if the *callee's definition* is polymorphic (has TVar in params),
        NOT whether f_var.v_ty has TVar. After Task 1, call sites have concrete
        types from the type_map, so f_var.v_ty is already monomorphic there —
@@ -159,7 +174,10 @@ let rec rewrite_calls
      | None -> expr   (* builtin or external, leave as-is *)
      | Some orig_fn
        when not (List.exists (fun v -> has_tvar v.Tir.v_ty) orig_fn.Tir.fn_params) ->
-       (* Callee is already monomorphic — recurse into args (no-op here, atoms) *)
+       (* Callee params are monomorphic but it may not have been seeded
+          (e.g. return type has TVar).  Ensure it's enqueued. *)
+       if not (Hashtbl.mem done_set orig_name) then
+         Queue.add (orig_name, orig_fn, []) worklist;
        expr
      | Some orig_fn ->
        let lit_ty = function
@@ -185,6 +203,48 @@ let rec rewrite_calls
                                    v_ty = subst_ty subst f_var.Tir.v_ty } in
          Tir.EApp (f_var', args)
        end)
+  (* ECallPtr: if the callee is a known top-level fn, ensure it's discovered *)
+  | Tir.ECallPtr (fn_atom, args) ->
+    (match fn_atom with
+     | Tir.AVar v ->
+       let orig_name = v.Tir.v_name in
+       (match Hashtbl.find_opt fn_table orig_name with
+        | None -> expr  (* unknown / builtin *)
+        | Some orig_fn ->
+          (* If callee is polymorphic, try to build a substitution from args *)
+          let lit_ty = function
+            | March_ast.Ast.LitInt _    -> Tir.TInt
+            | March_ast.Ast.LitFloat _  -> Tir.TFloat
+            | March_ast.Ast.LitBool _   -> Tir.TBool
+            | March_ast.Ast.LitString _ -> Tir.TString
+            | March_ast.Ast.LitAtom _   -> Tir.TUnit
+          in
+          let arg_tys = List.map (function
+              | Tir.AVar v -> v.Tir.v_ty
+              | Tir.ALit l -> lit_ty l
+            ) args in
+          (* Partial application: only first N params have concrete args *)
+          let param_vars = orig_fn.Tir.fn_params in
+          let n = min (List.length arg_tys) (List.length param_vars) in
+          let pairs = List.combine
+              (List.filteri (fun i _ -> i < n) (List.map (fun v -> v.Tir.v_ty) param_vars))
+              (List.filteri (fun i _ -> i < n) arg_tys) in
+          let subst = List.fold_left (fun acc (poly, conc) -> match_ty poly conc acc) [] pairs in
+          if subst = [] then begin
+            (* No specialization needed — just ensure it's enqueued as-is *)
+            if not (Hashtbl.mem done_set orig_name) then
+              Queue.add (orig_name, orig_fn, []) worklist;
+            expr
+          end else begin
+            let param_tys_concrete = List.map (fun v -> subst_ty subst v.Tir.v_ty) param_vars in
+            let mangled = mangle_name orig_name param_tys_concrete in
+            if not (Hashtbl.mem done_set mangled) then
+              Queue.add (mangled, orig_fn, subst) worklist;
+            let v' = { v with Tir.v_name = mangled;
+                              v_ty = subst_ty subst v.Tir.v_ty } in
+            Tir.ECallPtr (Tir.AVar v', args)
+          end)
+     | _ -> expr)
   | Tir.ELet (v, e1, e2) ->
     Tir.ELet (v,
       rewrite_calls fn_table done_set worklist e1,
@@ -217,13 +277,21 @@ let monomorphize (m : Tir.tir_module) : Tir.tir_module =
   (* worklist entries: (target_name, original_fn_def, subst_to_apply) *)
   let worklist : (string * Tir.fn_def * ty_subst) Queue.t = Queue.create () in
 
-  (* Seed: all fns that are already monomorphic (no TVar in params or ret) *)
+  (* Seed: all fns that are already monomorphic (no TVar in params or ret),
+     plus always seed "main" / "*.main" as entry points. *)
   List.iter (fun fn ->
     let is_mono =
       (not (List.exists (fun v -> has_tvar v.Tir.v_ty) fn.Tir.fn_params)) &&
       not (has_tvar fn.Tir.fn_ret_ty)
     in
-    if is_mono then Queue.add (fn.Tir.fn_name, fn, []) worklist
+    let is_main =
+      fn.Tir.fn_name = "main" ||
+      (let n = fn.Tir.fn_name in
+       let suf = ".main" in
+       let ln = String.length n and ls = String.length suf in
+       ln >= ls && String.sub n (ln - ls) ls = suf)
+    in
+    if is_mono || is_main then Queue.add (fn.Tir.fn_name, fn, []) worklist
   ) m.Tir.tm_fns;
 
   while not (Queue.is_empty worklist) do

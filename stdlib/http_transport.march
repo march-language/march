@@ -13,10 +13,10 @@ mod HttpTransport do
 
   type TransportError =
     ConnectionRefused(String)
-    | Timeout(String)
+    | ConnTimeout(String)
     | SendError(String)
     | RecvError(String)
-    | ParseError(String)
+    | ConnConnParseError(String)
     | Closed
 
   doc """
@@ -57,7 +57,7 @@ mod HttpTransport do
       | Err(msg) -> Err(RecvError(msg))
       | Ok(raw_response) ->
         match http_parse_response(raw_response) with
-        | Err(msg) -> Err(ParseError(msg))
+        | Err(msg) -> Err(ConnParseError(msg))
         | Ok((status_code, resp_headers, resp_body)) ->
           Ok(Response(Status(status_code), resp_headers, resp_body))
         end
@@ -88,7 +88,7 @@ mod HttpTransport do
       | Err(msg) -> Err(RecvError(msg))
       | Ok((headers_str, content_length, is_chunked)) ->
         match http_parse_response(headers_str) with
-        | Err(msg) -> Err(ParseError(msg))
+        | Err(msg) -> Err(ConnParseError(msg))
         | Ok((status_code, resp_headers, _)) ->
           if is_chunked then
             stream_chunked_body(fd, on_chunk, status_code, resp_headers)
@@ -154,7 +154,7 @@ mod HttpTransport do
         | Ok(raw_response) ->
           tcp_close(fd)
           match http_parse_response(raw_response) with
-          | Err(msg) -> Err(ParseError(msg))
+          | Err(msg) -> Err(ConnParseError(msg))
           | Ok((status_code, resp_headers, resp_body)) ->
             Ok(Response(Status(status_code), resp_headers, resp_body))
           end
@@ -169,10 +169,10 @@ mod HttpTransport do
   """
   pub fn simple_get(url) do
     match Http.get(url) with
-    | Err(InvalidScheme(s)) -> Err(ParseError("invalid scheme: " ++ s))
-    | Err(MissingHost) -> Err(ParseError("missing host"))
-    | Err(InvalidPort(s)) -> Err(ParseError("invalid port: " ++ s))
-    | Err(MalformedUrl(s)) -> Err(ParseError("malformed url: " ++ s))
+    | Err(InvalidScheme(s)) -> Err(ConnParseError("invalid scheme: " ++ s))
+    | Err(MissingHost) -> Err(ConnParseError("missing host"))
+    | Err(InvalidPort(s)) -> Err(ConnParseError("invalid port: " ++ s))
+    | Err(MalformedUrl(s)) -> Err(ConnParseError("malformed url: " ++ s))
     | Ok(req) -> request(Http.set_body(req, ""))
     end
   end

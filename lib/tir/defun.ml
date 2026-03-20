@@ -22,12 +22,37 @@ let builtin_names : StringSet.t =
       "string_to_int"; "string_length"; "string_concat";
       "string_byte_length"; "string_is_empty"; "string_join";
       "read_line"; "not";
+      "panic";
       "head"; "tail"; "is_nil";
       "to_string"; "respond"; "kill"; "is_alive";
       "send"; "spawn";
       "task_spawn"; "task_await"; "task_await_unwrap";
       "task_yield"; "task_spawn_steal"; "task_reductions";
-      "get_work_pool" ]
+      "get_work_pool";
+      (* Float builtins *)
+      "float_abs"; "float_ceil"; "float_floor"; "float_round";
+      "float_truncate"; "int_to_float";
+      (* Math builtins *)
+      "math_sin"; "math_cos"; "math_tan";
+      "math_asin"; "math_acos"; "math_atan"; "math_atan2";
+      "math_sinh"; "math_cosh"; "math_tanh";
+      "math_sqrt"; "math_cbrt";
+      "math_exp"; "math_exp2";
+      "math_log"; "math_log2"; "math_log10"; "math_pow";
+      (* Extended string builtins *)
+      "string_contains"; "string_starts_with"; "string_ends_with";
+      "string_slice"; "string_split"; "string_split_first";
+      "string_replace"; "string_replace_all";
+      "string_to_lowercase"; "string_to_uppercase";
+      "string_trim"; "string_trim_start"; "string_trim_end";
+      "string_repeat"; "string_reverse";
+      "string_pad_left"; "string_pad_right";
+      "string_grapheme_count"; "string_index_of"; "string_last_index_of";
+      "string_to_float";
+      (* List builtins *)
+      "list_append"; "list_concat";
+      (* File/Dir builtins *)
+      "file_exists"; "dir_exists" ]
 
 (* ── Phase 0: collect top-level names ────────────────────────────── *)
 

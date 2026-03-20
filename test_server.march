@@ -1,0 +1,13 @@
+mod TestServer do
+
+  fn hello(conn) do
+    HttpServer.text(conn, 200, "Hello from March!")
+  end
+
+  fn main() do
+    HttpServer.new(8787)
+    |> HttpServer.plug(hello)
+    |> HttpServer.listen()
+  end
+
+end

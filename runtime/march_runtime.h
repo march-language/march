@@ -18,6 +18,7 @@ void  march_decrc(void *p);
 /* Decrement RC and return 1 if the object was freed (RC hit 0), 0 if still alive.
    Used when pattern-matching to conditionally IncRC extracted child pointers. */
 int64_t march_decrc_freed(void *p);
+
 void  march_free(void *p);
 
 /* I/O builtins. */
@@ -48,6 +49,65 @@ void  march_kill(void *actor);
 int64_t march_is_alive(void *actor);
 /* Returns Option(Unit): None (tag 0) if dead, Some(()) (tag 1) if dispatch ran. */
 void *march_send(void *actor, void *msg);
+
+/* Float builtins. */
+double  march_float_abs(double f);
+int64_t march_float_ceil(double f);
+int64_t march_float_floor(double f);
+int64_t march_float_round(double f);
+int64_t march_float_truncate(double f);
+double  march_int_to_float(int64_t n);
+
+/* Math builtins. */
+double march_math_sin(double f);
+double march_math_cos(double f);
+double march_math_tan(double f);
+double march_math_asin(double f);
+double march_math_acos(double f);
+double march_math_atan(double f);
+double march_math_atan2(double y, double x);
+double march_math_sinh(double f);
+double march_math_cosh(double f);
+double march_math_tanh(double f);
+double march_math_sqrt(double f);
+double march_math_cbrt(double f);
+double march_math_exp(double f);
+double march_math_exp2(double f);
+double march_math_log(double f);
+double march_math_log2(double f);
+double march_math_log10(double f);
+double march_math_pow(double b, double e);
+
+/* Extended string builtins. */
+int64_t march_string_contains(void *s, void *sub);
+int64_t march_string_starts_with(void *s, void *prefix);
+int64_t march_string_ends_with(void *s, void *suffix);
+void   *march_string_slice(void *s, int64_t start, int64_t len);
+void   *march_string_split(void *s, void *sep);
+void   *march_string_split_first(void *s, void *sep);
+void   *march_string_replace(void *s, void *old, void *new_);
+void   *march_string_replace_all(void *s, void *old, void *new_);
+void   *march_string_to_lowercase(void *s);
+void   *march_string_to_uppercase(void *s);
+void   *march_string_trim(void *s);
+void   *march_string_trim_start(void *s);
+void   *march_string_trim_end(void *s);
+void   *march_string_repeat(void *s, int64_t n);
+void   *march_string_reverse(void *s);
+void   *march_string_pad_left(void *s, int64_t width, void *fill);
+void   *march_string_pad_right(void *s, int64_t width, void *fill);
+int64_t march_string_grapheme_count(void *s);
+void   *march_string_index_of(void *s, void *sub);
+void   *march_string_last_index_of(void *s, void *sub);
+void   *march_string_to_float(void *s);
+
+/* List builtins. */
+void *march_list_append(void *a, void *b);
+void *march_list_concat(void *lists);
+
+/* File/Dir builtins. */
+int64_t march_file_exists(void *s);
+int64_t march_dir_exists(void *s);
 
 /* Value pretty-printing. */
 void *march_value_to_string(void *v);

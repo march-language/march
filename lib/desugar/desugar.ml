@@ -82,11 +82,17 @@ let mk_named_param name : fn_param =
     Works recursively; all other nodes are walked to catch nested pipes. *)
 let rec desugar_expr (e : expr) : expr =
   match e with
-  (* --- Pipe: x |> f  ⟶  f(x) --- *)
+  (* --- Pipe: x |> f(a,b)  ⟶  f(x,a,b) --- *)
+  (* Elixir-style pipe: the LHS becomes the FIRST argument of the RHS.
+     When the RHS is already an application, prepend the LHS to its
+     argument list so we get a single saturated call instead of a
+     curried (partial-apply) chain. *)
   | EPipe (l, r, sp) ->
     let l' = desugar_expr l in
     let r' = desugar_expr r in
-    EApp (r', [l'], sp)
+    (match r' with
+     | EApp (f, args, _) -> EApp (f, l' :: args, sp)
+     | _ -> EApp (r', [l'], sp))
 
   (* --- Recurse into all other nodes --- *)
   | ELit _ | EVar _ | EHole _ | EResultRef _ -> e

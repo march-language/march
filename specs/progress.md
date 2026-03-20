@@ -134,12 +134,27 @@ march/
     ├── dune
     ├── test_march.ml         # 132 passing tests
     └── test_jit.ml           # JIT dlopen round-trip test
+├── stdlib/
+│   ├── list.march           # List operations (map, filter, fold, reverse, etc.)
+│   ├── string.march         # String operations
+│   ├── path.march           # Pure path manipulation
+│   ├── seq.march            # Lazy church-encoded fold sequences
+│   ├── file.march           # Result-based file I/O
+│   ├── dir.march            # Directory operations
+│   ├── http.march           # HTTP types (Method, Header, Request, Response, URL parsing)
+│   ├── http_transport.march # Low-level HTTP transport (TCP connect, request/response)
+│   ├── http_client.march    # High-level HTTP client with middleware pipeline
+│   ├── http_server.march    # HTTP server types, pipeline runner, Conn type
+│   ├── websocket.march      # WebSocket types and frame operations
+│   ├── csv.march            # CSV parser (streaming and eager modes)
+│   └── heap.march           # Min-heap data structure
+└── test_server.march        # Example: compiled HTTP server on port 8787
 ```
 
 ## Current State (as of 2026-03-20)
 
 - **Builds clean**
-- **132+ tests passing**: lexer (12), AST (1), parser (5), module (2), keywords (1), desugar (3), typecheck (8), eval (12), parser gaps (6), constraints (5), tir (83), list builtins (6), declarations (14), string interp (2), type_map (2), convert_ty (2), perceus (6), jit (1)
+- **401 tests passing**: lexer (12), AST (1), parser (5), module (2), keywords (1), desugar (3), typecheck (8), eval (12), parser gaps (6), constraints (5), tir (83), list builtins (6), declarations (14), string interp (2), type_map (2), convert_ty (2), perceus (6), jit (1), stdlib integration, dir stdlib, and more
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present
 - **`--dump-tir` flag**: prints TIR after full pipeline (Lower → Mono → Defun → Perceus → Escape); shows `stack_alloc` for promoted allocations
 - **`--emit-llvm` flag**: emits textual LLVM IR to `<basename>.ll`; links with `runtime/march_runtime.c` via `clang` to produce native binaries
@@ -148,11 +163,11 @@ march/
 - **Tree-walking interpreter**: `value` type (incl. `VPid`), pattern matching, `base_env` builtins, two-pass `eval_module_env` for mutual recursion; full synchronous actor runtime with `kill`/`is_alive`/drop semantics
 - **TIR pipeline** (`lib/tir/`):
   - `lower.ml` — AST → ANF TIR, CPS let-insertion, nested pattern flattening, type_map threading
-  - `mono.ml` — worklist monomorphization, name mangling (`identity$Int`), TVar elimination
+  - `mono.ml` — worklist monomorphization, name mangling (`identity$Int`), TVar elimination; `main` always seeded as entry point; monomorphic callees enqueued on reference; function-as-value atoms discovered via `ensure_atom_fns`; `ECallPtr` callee discovery; `TVar "_"` treated as non-polymorphic fallback
   - `defun.ml` — defunctionalization: lambda lifting, `$Clo_` struct generation, `ECallPtr` rewriting
   - `perceus.ml` — Perceus RC analysis: backwards liveness, `EIncRC`/`EDecRC`/`EFree` insertion, Inc/Dec cancel-pair elision, FBIP `EReuse` detection
   - `escape.ml` — Escape analysis: 3-phase intra-procedural stack promotion; `EAlloc` → `EStackAlloc` for non-escaping allocations; dead RC ops on stack vars removed
-  - `llvm_emit.ml` — TIR → textual LLVM IR; alloca+store+load for all let-bindings; ECase as switch+blocks+merge; arithmetic/cmp builtins to native ops; EAlloc→`@march_alloc`; EStackAlloc→`alloca`; EReuse→in-place write; March `main` → `@march_main` with C `@main` wrapper; REPL emission helpers (`emit_repl_expr`, `emit_repl_decl`, `emit_repl_fn`); HTTP/WS extern declarations
+  - `llvm_emit.ml` — TIR → textual LLVM IR; alloca+store+load for all let-bindings; ECase as switch+blocks+merge; arithmetic/cmp builtins to native ops; EAlloc→`@march_alloc`; EStackAlloc→`alloca`; EReuse→in-place write; March `main` → `@march_main` with C `@main` wrapper; REPL emission helpers (`emit_repl_expr`, `emit_repl_decl`, `emit_repl_fn`); HTTP/WS extern declarations; float ops (`fcmp`, `fneg`, IEEE hex literals); string equality via `march_string_eq`; string pattern matching (if-else chains); boolean ops (`&&`, `||`, `not`) inline; double↔ptr coercion; closure wrappers for top-level functions used as first-class values; ~49 builtin function declarations (float, math, string, list, file/dir)
   - `pp.ml` — pretty-printer for all TIR types and expressions (incl. `stack_alloc`, `reuse`)
 - **JIT / compile-and-dlopen** (`lib/jit/`):
   - `jit_stubs.c` — OCaml C stubs for POSIX `dlopen`/`dlsym`/`dlclose` + function pointer call stubs (void→ptr, void→void, void→i64, void→double, ptr→ptr)
@@ -162,10 +177,13 @@ march/
   - `march_http.c` / `march_http.h` — TCP listen/accept/recv/send/close; HTTP request parsing and response serialization; thread-per-connection server accept loop; WebSocket handshake, frame recv/send, and select (with actor pipe support)
   - `sha1.c` — Minimal RFC 3174 SHA-1 for WebSocket handshake
   - `base64.c` — Minimal Base64 encoding for WebSocket handshake
+- **C runtime builtins** — 49 compiled-path builtins: float (6), math (18), string (21), list (2), file/dir (2); all declared in `march_runtime.h` and registered in `llvm_emit.ml` + `defun.ml`
 - **Pre-compiled runtime .so** — `ensure_runtime_so()` in `bin/main.ml` compiles `march_runtime.c` + `march_http.c` + `sha1.c` + `base64.c` to `~/.cache/march/libmarch_runtime.so`, cached and rebuilt only when sources change
-- **Two working examples**:
+- **Compiled HTTP server** — End-to-end working: `test_server.march` compiles to a native binary that listens on port 8787 and serves HTTP requests. Pipeline: March source → Parse → Desugar → Typecheck → Lower → Mono → Defun → Perceus → Escape → Opt → LLVM IR → clang → native binary. Closure-based pipeline dispatch with refcount borrowing for thread safety.
+- **Three working examples**:
   - `examples/list_lib.march` — map, filter, fold, reverse, find, range (polymorphic list library)
   - `examples/actors.march` — Counter + Logger actors, normal messaging, kill, drop semantics, restart
+  - `test_server.march` — Compiled HTTP server: `HttpServer.new(8787) |> HttpServer.plug(hello) |> HttpServer.listen()`
 - **Actor system**: `spawn(ActorName)` / `send(pid, Msg(args))` → `Option(Unit)`, `kill(pid)`, `is_alive(pid)`, `{ state with field = ... }` record spread, synchronous inline dispatch
 - **Syntax additions**: `%` modulo, multi-statement match arm bodies, zero-arg constructor calls `Con()`, `state` as contextual keyword in expressions
 
@@ -203,13 +221,35 @@ march/
 4. **Field-index map for records** — `EField`/`EUpdate` need a field→offset table (from type checker) to emit correct GEP offsets beyond field 0.
 5. ~~**`llc` / `clang` invocation from compiler**~~ ✓ — `march --compile` calls clang automatically; `ensure_runtime_so()` pre-compiles runtime to cached `.so`.
 6. **More test programs** — compile list operations, recursive functions, actors to LLVM.
-7. **HTTP server stdlib** — March-level HTTP server types, routing, and stdlib modules using the compiled HTTP/WS C runtime.
+7. ~~**HTTP server stdlib**~~ ✓ — Full stdlib: `Http`, `HttpTransport`, `HttpClient`, `HttpServer`, `WebSocket`, `Csv` modules. Test server compiles and serves requests.
+8. **Type-qualified constructor names** — `build_ctor_info` in `llvm_emit.ml` uses a flat hashtable keyed by constructor name; same-named constructors across types collide. Workaround: renamed colliding constructors (`Other`→`OtherKind`, `Timeout`→`ConnTimeout`, `ParseError`→`CsvParseError`/`ConnParseError`). Proper fix: type-qualify constructor keys.
+9. **Atomic refcounting for threads** — Perceus RC ops are non-atomic; HTTP server works via explicit `inc_rc` borrowing before pipeline calls but general multi-threaded code needs atomic RC or a GC.
+10. **Pipe desugar produces saturated calls** — Fixed: `a |> f(b)` now desugars to `f(a, b)` instead of curried `f(b)(a)`. Matches Elixir convention (piped value = first arg).
 
 ### Frontend / Ergonomics
 4. **More tests** — actor spawning/send/kill, record operations, `Option`/`Result` pattern matching
 5. **Typechecker: actor handler return type checking** — handlers should be verified to return the state record type
 6. **String interpolation** — `${}` syntax, desugars to `Interpolatable` interface calls
 7. **Error recovery in REPL** — currently a type error halts the REPL session
+
+## LLVM Codegen: End-to-End Compilation (2026-03-20)
+
+First-ever compilation of a full March program (HTTP server with stdlib dependencies). Fixed ~15 codegen bugs:
+
+- **Float literal emission**: OCaml `%h` → IEEE 754 hex via `Int64.bits_of_float`
+- **Float comparisons**: `fcmp` instead of `icmp` when operands are `double`
+- **Float negation**: `fneg double` for unary minus on floats
+- **Boolean operators**: `&&`/`||`/`not` emitted inline as `and`/`or`/`xor i64`
+- **String equality**: Detected `ptr`-typed `==`/`!=` → `march_string_eq` call
+- **String pattern matching**: If-else chains with `march_string_eq` instead of `switch`
+- **Double↔ptr coercion**: `bitcast` intermediary for case result slots
+- **Closure wrappers**: Top-level functions used as first-class values wrapped in closure structs with trampolines
+- **Mono seeding**: `main` always seeded; monomorphic callees enqueued on reference; function-as-value atoms discovered
+- **Mono ECallPtr discovery**: Added handling so indirect call targets are specialized
+- **Pipe desugar**: Changed from curried `f(b)(a)` to saturated `f(a, b)` (Elixir convention)
+- **Constructor name collisions**: Renamed across stdlib (`Other`→`OtherKind`, `Timeout`→`ConnTimeout`, etc.)
+- **49 C runtime builtins**: Float, math, string, list, file/dir functions
+- **HTTP pipeline dispatch**: Closure-based invocation with refcount borrowing for thread safety
 
 ## Stdlib: File System (added 2026-03-20)
 - [x] Path module — pure path manipulation (join, basename, dirname, extension, normalize)

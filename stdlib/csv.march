@@ -14,7 +14,7 @@
 
 mod Csv do
 
-type CsvError = FileError(String) | ParseError(String)
+type CsvError = FileError(String) | CsvParseError(String)
 
 -- Internal streaming loop: call callback(fields) for each row.
 fn each_row_loop(handle, callback) do

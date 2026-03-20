@@ -371,10 +371,14 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
              | src ->
                let lexbuf = Lexing.from_string src in
                (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
-                       with March_parser.Parser.Error ->
-                         let pos = Lexing.lexeme_start_p lexbuf in
-                         Printf.eprintf "parse error at col %d\n%!"
-                           (pos.Lexing.pos_cnum - pos.Lexing.pos_bol);
+                       with
+                       | March_errors.Errors.ParseError (msg, hint, _) ->
+                         let rendered = March_errors.Errors.render_parse_error ~src ?hint ~msg lexbuf in
+                         Printf.eprintf "%s\n%!" rendered;
+                         None
+                       | March_parser.Parser.Error ->
+                         let rendered = March_errors.Errors.render_parse_error ~src ~msg:"I got stuck here:" lexbuf in
+                         Printf.eprintf "%s\n%!" rendered;
                          None) with
                | None | Some March_ast.Ast.ReplEOF -> ()
                | Some (March_ast.Ast.ReplDecl d) ->
@@ -632,11 +636,14 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
   let process_src src =
     let lexbuf = Lexing.from_string src in
     (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
-            with March_parser.Parser.Error ->
-              let pos = Lexing.lexeme_start_p lexbuf in
-              add_line Notty.A.(fg red)
-                (Printf.sprintf "parse error at col %d"
-                   (pos.Lexing.pos_cnum - pos.Lexing.pos_bol));
+            with
+            | March_errors.Errors.ParseError (msg, hint, _) ->
+              let rendered = March_errors.Errors.render_parse_error ~src ?hint ~msg lexbuf in
+              List.iter (add_line Notty.A.(fg red)) (String.split_on_char '\n' rendered);
+              None
+            | March_parser.Parser.Error ->
+              let rendered = March_errors.Errors.render_parse_error ~src ~msg:"I got stuck here:" lexbuf in
+              List.iter (add_line Notty.A.(fg red)) (String.split_on_char '\n' rendered);
               None) with
     | None | Some March_ast.Ast.ReplEOF -> ()
     | Some (March_ast.Ast.ReplDecl d) ->

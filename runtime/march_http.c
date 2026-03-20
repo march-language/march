@@ -656,10 +656,37 @@ static void *connection_thread(void *arg) {
         make_no_upgrade()      /* upgrade = NoUpgrade */
     );
 
-    /* 5. Call the pipeline: Conn -> Conn */
-    typedef void *(*pipeline_fn_t)(void *);
-    pipeline_fn_t fn = (pipeline_fn_t)pipeline;
-    void *result_conn = fn(conn);
+    /* 5. Call the pipeline closure: Conn -> Conn
+       March closures: header(16 bytes) + fields.
+       Field 0 (offset 16) = apply function pointer.
+       Calling convention: apply(closure_ptr, arg1, arg2, ...).
+       We inc_rc the pipeline before each call so Perceus doesn't
+       free it (it's shared across connection threads). */
+    typedef void *(*closure_fn_t)(void *clo, void *arg);
+    char *clo = (char *)pipeline;
+    closure_fn_t fn = *(closure_fn_t *)(clo + 16);
+    /* The pipeline closure is shared across all connection threads.
+       Perceus inserts dec_rc for arguments consumed by the callee, so
+       we must inc_rc the closure (and its captured vars) before each
+       call to keep the balance.  This is the standard "borrow" pattern. */
+    march_incrc(pipeline);
+    /* Also inc_rc captured fields (offset 24 = first captured var, etc.)
+       Walk Cons-spine of the plugs list so inner cells survive too. */
+    {
+        void *p = *(void **)(clo + 24);
+        while (p) {
+            march_incrc(p);
+            march_hdr *h = (march_hdr *)p;
+            if (h->tag == 1) {  /* Cons(head, tail) */
+                void *head = *(void **)((char *)p + 16);
+                if (head) march_incrc(head);
+                p = *(void **)((char *)p + 24);  /* tail */
+            } else {
+                break;  /* Nil or other */
+            }
+        }
+    }
+    void *result_conn = fn(pipeline, conn);
 
     if (!result_conn) {
         /* Pipeline returned NULL — send 500 */

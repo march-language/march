@@ -1,3 +1,6 @@
+exception ParseError of string * string option * Lexing.position
+(** ParseError (message, hint, position) *)
+
 (** March error reporting.
 
     Errors carry provenance (source spans) and are designed
@@ -54,3 +57,31 @@ let sorted ctx =
       let c = compare a.span.start_line b.span.start_line in
       if c <> 0 then c else compare a.span.start_col b.span.start_col)
     ctx.diagnostics
+
+let render_parse_error ~src ?(filename = "") ?hint ~msg lexbuf =
+  let pos  = Lexing.lexeme_start_p lexbuf in
+  let line = pos.Lexing.pos_lnum in
+  let col  = pos.Lexing.pos_cnum - pos.Lexing.pos_bol in
+  let tok  = Lexing.lexeme lexbuf in
+  (* Extract the source line being reported *)
+  let src_line =
+    let lines = String.split_on_char '\n' src in
+    (try List.nth lines (line - 1) with _ -> "")
+  in
+  (* Underline the offending token (at least one ^ wide) *)
+  let tok_len   = max 1 (String.length tok) in
+  let underline = String.make col ' ' ^ String.make tok_len '^' in
+  (* Header bar *)
+  let loc_str = if filename = "" then "" else " " ^ filename in
+  let dashes  = String.make (max 2 (48 - String.length loc_str)) '-' in
+  let header  = "-- PARSE ERROR " ^ dashes ^ loc_str in
+  (* Gutter  "N | " *)
+  let gutter = Printf.sprintf "%d | " line in
+  let pad    = String.make (String.length gutter) ' ' in
+  (* Optional hint block *)
+  let hint_block = match hint with
+    | Some h -> Printf.sprintf "\n    %s" h
+    | None   -> ""
+  in
+  String.concat "\n"
+    [ header; ""; msg; ""; gutter ^ src_line; pad ^ underline; hint_block ]

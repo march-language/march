@@ -8,7 +8,7 @@ mod File do
 
 type FileError = NotFound(String) | Permission(String) | IsDirectory(String) | NotEmpty(String) | IoError(String)
 
-type FileKind = RegularFile | Directory | Symlink | Other
+type FileKind = RegularFile | Directory | Symlink | OtherKind
 
 -- FileStat uses a positional constructor
 -- Pattern match: FileStat(size, kind, modified, accessed)

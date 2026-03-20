@@ -48,6 +48,10 @@ type ctx = {
   var_slot  : (string, string) Hashtbl.t;
   (* Counts alloca name uses for uniquification. *)
   local_names : (string, int) Hashtbl.t;
+  (* Tracks which closure wrappers have been generated for top-level fns *)
+  emitted_wraps : (string, unit) Hashtbl.t;
+  (* Buffer for extra wrapper functions emitted at the end *)
+  extra_fns : Buffer.t;
 }
 
 let make_ctx ?(fast_math=false) () = {
@@ -63,6 +67,8 @@ let make_ctx ?(fast_math=false) () = {
   local_names = Hashtbl.create 32;
   poly_ctors  = Hashtbl.create 64;
   type_params = Hashtbl.create 16;
+  emitted_wraps = Hashtbl.create 8;
+  extra_fns = Buffer.create 1024;
 }
 
 (* ── Helpers ─────────────────────────────────────────────────────────── *)
@@ -139,7 +145,31 @@ let is_builtin_fn name =
                  "kill"; "is_alive"; "send";
                  "task_spawn"; "task_await"; "task_await_unwrap";
                  "task_yield"; "task_spawn_steal"; "task_reductions";
-                 "get_work_pool"]
+                 "get_work_pool";
+                 (* Float builtins *)
+                 "float_abs"; "float_ceil"; "float_floor"; "float_round";
+                 "float_truncate"; "int_to_float";
+                 (* Math builtins *)
+                 "math_sin"; "math_cos"; "math_tan";
+                 "math_asin"; "math_acos"; "math_atan"; "math_atan2";
+                 "math_sinh"; "math_cosh"; "math_tanh";
+                 "math_sqrt"; "math_cbrt";
+                 "math_exp"; "math_exp2";
+                 "math_log"; "math_log2"; "math_log10"; "math_pow";
+                 (* Extended string builtins *)
+                 "string_contains"; "string_starts_with"; "string_ends_with";
+                 "string_slice"; "string_split"; "string_split_first";
+                 "string_replace"; "string_replace_all";
+                 "string_to_lowercase"; "string_to_uppercase";
+                 "string_trim"; "string_trim_start"; "string_trim_end";
+                 "string_repeat"; "string_reverse";
+                 "string_pad_left"; "string_pad_right";
+                 "string_grapheme_count"; "string_index_of"; "string_last_index_of";
+                 "string_to_float";
+                 (* List builtins *)
+                 "list_append"; "list_concat";
+                 (* File/Dir builtins *)
+                 "file_exists"; "dir_exists"]
 
 let atom_is_builtin (atom : Tir.atom) =
   match atom with
@@ -148,6 +178,7 @@ let atom_is_builtin (atom : Tir.atom) =
 
 (** TIR return type for known builtin/extern functions, overriding type info. *)
 let builtin_ret_ty : string -> Tir.ty option = function
+  | "panic"                       -> Some Tir.TUnit
   | "println" | "print"           -> Some Tir.TUnit
   | "int_to_string"               -> Some Tir.TString
   | "float_to_string"             -> Some Tir.TString
@@ -161,10 +192,54 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "kill"                        -> Some Tir.TUnit
   | "is_alive"                    -> Some Tir.TBool
   | "send"                        -> Some (Tir.TCon ("Option", [Tir.TUnit]))
+  (* Float builtins *)
+  | "float_abs"                   -> Some Tir.TFloat
+  | "float_ceil"                  -> Some Tir.TInt
+  | "float_floor"                 -> Some Tir.TInt
+  | "float_round"                 -> Some Tir.TInt
+  | "float_truncate"              -> Some Tir.TInt
+  | "int_to_float"                -> Some Tir.TFloat
+  (* Math builtins — all double→double *)
+  | "math_sin" | "math_cos" | "math_tan"
+  | "math_asin" | "math_acos" | "math_atan"
+  | "math_sinh" | "math_cosh" | "math_tanh"
+  | "math_sqrt" | "math_cbrt"
+  | "math_exp" | "math_exp2"
+  | "math_log" | "math_log2" | "math_log10" -> Some Tir.TFloat
+  | "math_atan2" | "math_pow"    -> Some Tir.TFloat
+  (* Extended string builtins *)
+  | "string_contains"             -> Some Tir.TBool
+  | "string_starts_with"          -> Some Tir.TBool
+  | "string_ends_with"            -> Some Tir.TBool
+  | "string_slice"                -> Some Tir.TString
+  | "string_split"                -> Some (Tir.TCon ("List", [Tir.TString]))
+  | "string_split_first"          -> Some (Tir.TCon ("Option", [Tir.TTuple [Tir.TString; Tir.TString]]))
+  | "string_replace"              -> Some Tir.TString
+  | "string_replace_all"          -> Some Tir.TString
+  | "string_to_lowercase"         -> Some Tir.TString
+  | "string_to_uppercase"         -> Some Tir.TString
+  | "string_trim"                 -> Some Tir.TString
+  | "string_trim_start"           -> Some Tir.TString
+  | "string_trim_end"             -> Some Tir.TString
+  | "string_repeat"               -> Some Tir.TString
+  | "string_reverse"              -> Some Tir.TString
+  | "string_pad_left"             -> Some Tir.TString
+  | "string_pad_right"            -> Some Tir.TString
+  | "string_grapheme_count"       -> Some Tir.TInt
+  | "string_index_of"             -> Some (Tir.TCon ("Option", [Tir.TInt]))
+  | "string_last_index_of"        -> Some (Tir.TCon ("Option", [Tir.TInt]))
+  | "string_to_float"             -> Some (Tir.TCon ("Option", [Tir.TFloat]))
+  (* List builtins *)
+  | "list_append"                 -> Some (Tir.TCon ("List", [Tir.TVar "a"]))
+  | "list_concat"                 -> Some (Tir.TCon ("List", [Tir.TVar "a"]))
+  (* File/Dir builtins *)
+  | "file_exists"                 -> Some Tir.TBool
+  | "dir_exists"                  -> Some Tir.TBool
   | _ -> None
 
 (** Mangle a March builtin name to the C runtime function name. *)
 let mangle_extern : string -> string = function
+  | "panic"         -> "march_panic"
   | "println"       -> "march_println"
   | "print"         -> "march_print"
   | "int_to_string" -> "march_int_to_string"
@@ -191,6 +266,60 @@ let mangle_extern : string -> string = function
   | "ws_recv"                 -> "march_ws_recv"
   | "ws_send"                 -> "march_ws_send"
   | "ws_select"               -> "march_ws_select"
+  (* Float builtins *)
+  | "float_abs"       -> "march_float_abs"
+  | "float_ceil"      -> "march_float_ceil"
+  | "float_floor"     -> "march_float_floor"
+  | "float_round"     -> "march_float_round"
+  | "float_truncate"  -> "march_float_truncate"
+  | "int_to_float"    -> "march_int_to_float"
+  (* Math builtins *)
+  | "math_sin"   -> "march_math_sin"
+  | "math_cos"   -> "march_math_cos"
+  | "math_tan"   -> "march_math_tan"
+  | "math_asin"  -> "march_math_asin"
+  | "math_acos"  -> "march_math_acos"
+  | "math_atan"  -> "march_math_atan"
+  | "math_atan2" -> "march_math_atan2"
+  | "math_sinh"  -> "march_math_sinh"
+  | "math_cosh"  -> "march_math_cosh"
+  | "math_tanh"  -> "march_math_tanh"
+  | "math_sqrt"  -> "march_math_sqrt"
+  | "math_cbrt"  -> "march_math_cbrt"
+  | "math_exp"   -> "march_math_exp"
+  | "math_exp2"  -> "march_math_exp2"
+  | "math_log"   -> "march_math_log"
+  | "math_log2"  -> "march_math_log2"
+  | "math_log10" -> "march_math_log10"
+  | "math_pow"   -> "march_math_pow"
+  (* Extended string builtins *)
+  | "string_contains"      -> "march_string_contains"
+  | "string_starts_with"   -> "march_string_starts_with"
+  | "string_ends_with"     -> "march_string_ends_with"
+  | "string_slice"         -> "march_string_slice"
+  | "string_split"         -> "march_string_split"
+  | "string_split_first"   -> "march_string_split_first"
+  | "string_replace"       -> "march_string_replace"
+  | "string_replace_all"   -> "march_string_replace_all"
+  | "string_to_lowercase"  -> "march_string_to_lowercase"
+  | "string_to_uppercase"  -> "march_string_to_uppercase"
+  | "string_trim"          -> "march_string_trim"
+  | "string_trim_start"    -> "march_string_trim_start"
+  | "string_trim_end"      -> "march_string_trim_end"
+  | "string_repeat"        -> "march_string_repeat"
+  | "string_reverse"       -> "march_string_reverse"
+  | "string_pad_left"      -> "march_string_pad_left"
+  | "string_pad_right"     -> "march_string_pad_right"
+  | "string_grapheme_count" -> "march_string_grapheme_count"
+  | "string_index_of"      -> "march_string_index_of"
+  | "string_last_index_of" -> "march_string_last_index_of"
+  | "string_to_float"      -> "march_string_to_float"
+  (* List builtins *)
+  | "list_append"  -> "march_list_append"
+  | "list_concat"  -> "march_list_concat"
+  (* File/Dir builtins *)
+  | "file_exists"  -> "march_file_exists"
+  | "dir_exists"   -> "march_dir_exists"
   | "main"          -> "march_main"   (* March main → march_main in LLVM *)
   | other           -> other
 
@@ -221,6 +350,20 @@ let float_arith_op = function
 let coerce ctx from_ty v to_ty =
   if from_ty = to_ty then v
   else match (from_ty, to_ty) with
+  | ("ptr", "double") ->
+    (* ptr → i64 → double (LLVM can't ptrtoint to double directly) *)
+    let i = fresh ctx "cv" in
+    let r = fresh ctx "cv" in
+    emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" i v);
+    emit ctx (Printf.sprintf "%s = bitcast i64 %s to double" r i);
+    r
+  | ("double", "ptr") ->
+    (* double → i64 → ptr *)
+    let i = fresh ctx "cv" in
+    let r = fresh ctx "cv" in
+    emit ctx (Printf.sprintf "%s = bitcast double %s to i64" i v);
+    emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" r i);
+    r
   | ("ptr", scalar) ->
     let r = fresh ctx "cv" in
     emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to %s" r v scalar);
@@ -282,7 +425,12 @@ let alloca_name ctx (base : string) : string =
 let emit_atom ctx (atom : Tir.atom) : string * string =
   match atom with
   | Tir.ALit (March_ast.Ast.LitInt n)   -> ("i64",    string_of_int n)
-  | Tir.ALit (March_ast.Ast.LitFloat f) -> ("double", Printf.sprintf "%h" f)
+  | Tir.ALit (March_ast.Ast.LitFloat f) ->
+    (* LLVM requires IEEE 754 hex: 0x followed by 16 hex digits of the
+       raw 64-bit double representation.  OCaml's %h gives C hex floats
+       which LLVM cannot parse. *)
+    let bits = Int64.bits_of_float f in
+    ("double", Printf.sprintf "0x%016LX" bits)
   | Tir.ALit (March_ast.Ast.LitBool b)  -> ("i64",    if b then "1" else "0")
   | Tir.ALit (March_ast.Ast.LitAtom _)  -> ("i64",    "0")
   | Tir.ALit (March_ast.Ast.LitString s) ->
@@ -294,8 +442,52 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
   | Tir.AVar v when v.Tir.v_name = "get_work_pool" ->
     (* Phase 1: work pool is a null sentinel *)
     ("ptr", "null")
+  | Tir.AVar v when Hashtbl.mem ctx.top_fns v.Tir.v_name
+                 && (match v.Tir.v_ty with Tir.TFn _ -> true | _ -> false) ->
+    (* Top-level function used as a first-class value — wrap in a closure.
+       Closure layout: header(16) + field0(fn_ptr).
+       The apply wrapper expects (clo, args…) and just forwards to the
+       raw function, ignoring the clo argument. We reuse the raw function
+       directly as the apply fn since it has compatible calling convention
+       ONLY if it doesn't need the closure pointer. Instead, allocate a
+       thin closure: {header, fn_ptr} where fn_ptr points to a generated
+       wrapper that ignores its first arg, or just to the function directly.
+       For now: store the raw fn_ptr; ECallPtr dispatch loads field 0 and
+       calls fn(clo, args). For top-level fns that don't expect a clo arg,
+       we need a trampoline. Simplest: alloc closure with fn ptr = raw fn,
+       and make the raw fn accept an extra leading ptr arg that it ignores.
+       Actually, all top-level fn_defs DON'T take a clo arg. So we need
+       a wrapper. Let's create one inline. *)
+    let fn_name = llvm_name (mangle_extern v.Tir.v_name) in
+    (* Determine the wrapper name *)
+    let wrap_name = fn_name ^ "$clo_wrap" in
+    (* Register wrapper if not already generated *)
+    if not (Hashtbl.mem ctx.emitted_wraps wrap_name) then begin
+      Hashtbl.add ctx.emitted_wraps wrap_name ();
+      (* We'll generate the wrapper function at the end.  For now, declare it. *)
+      let nparams = match v.Tir.v_ty with Tir.TFn (ps, _) -> List.length ps | _ -> 0 in
+      let param_tys = List.init nparams (fun _ -> "ptr") in
+      let all_params = "ptr" :: param_tys in  (* clo + original params *)
+      let arg_names = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
+      let all_arg_decls = "%_clo" :: arg_names in
+      let decl_str = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_arg_decls) in
+      let call_args = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
+      Buffer.add_string ctx.extra_fns
+        (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call ptr @%s(%s)\n  ret ptr %%r\n}\n\n"
+           wrap_name decl_str fn_name call_args)
+    end;
+    (* Allocate closure: header(16) + fn_ptr(8) = 24 bytes *)
+    let hp = fresh ctx "cwrap" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
+    let tgp = fresh ctx "cwt" in
+    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tgp hp);
+    emit ctx (Printf.sprintf "store i32 0, ptr %s, align 4" tgp);
+    let fp = fresh ctx "cwf" in
+    emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp hp);
+    emit ctx (Printf.sprintf "store ptr @%s, ptr %s, align 8" wrap_name fp);
+    ("ptr", hp)
   | Tir.AVar v when Hashtbl.mem ctx.top_fns v.Tir.v_name ->
-    (* Top-level function reference — emit its address directly *)
+    (* Top-level function reference — emit its address directly (for EApp callee) *)
     ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
   | Tir.AVar v ->
     let ty = llvm_ty v.Tir.v_ty in
@@ -457,13 +649,35 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", r)
 
   | Tir.EApp (f, [a; b]) when is_int_cmp f.Tir.v_name ->
-    let va  = emit_atom_val ctx a in
-    let vb  = emit_atom_val ctx b in
-    let cmp = fresh ctx "cmp" in
-    let r   = fresh ctx "ar" in
-    emit ctx (Printf.sprintf "%s = icmp %s i64 %s, %s" cmp (int_cmp_pred f.Tir.v_name) va vb);
-    emit ctx (Printf.sprintf "%s = zext i1 %s to i64" r cmp);
-    ("i64", r)
+    let (ty_a, va) = emit_atom ctx a in
+    let (_,    vb) = emit_atom ctx b in
+    if ty_a = "ptr" && (f.Tir.v_name = "==" || f.Tir.v_name = "!=") then begin
+      (* String equality: call march_string_eq which returns i64 (0 or 1) *)
+      let r = fresh ctx "cr" in
+      emit ctx (Printf.sprintf "%s = call i64 @march_string_eq(ptr %s, ptr %s)" r va vb);
+      if f.Tir.v_name = "!=" then begin
+        let nr = fresh ctx "ar" in
+        emit ctx (Printf.sprintf "%s = xor i64 %s, 1" nr r);
+        ("i64", nr)
+      end else
+        ("i64", r)
+    end else begin
+      let cmp = fresh ctx "cmp" in
+      let r   = fresh ctx "ar" in
+      if ty_a = "double" then begin
+        (* Float comparison: use fcmp ordered predicates *)
+        let fpred = match f.Tir.v_name with
+          | "==" -> "oeq" | "!=" -> "one"
+          | "<"  -> "olt" | "<=" -> "ole"
+          | ">"  -> "ogt" | ">=" -> "oge"
+          | s -> failwith ("unknown cmp: " ^ s)
+        in
+        emit ctx (Printf.sprintf "%s = fcmp %s double %s, %s" cmp fpred va vb);
+      end else
+        emit ctx (Printf.sprintf "%s = icmp %s i64 %s, %s" cmp (int_cmp_pred f.Tir.v_name) va vb);
+      emit ctx (Printf.sprintf "%s = zext i1 %s to i64" r cmp);
+      ("i64", r)
+    end
 
   | Tir.EApp (f, [a; b]) when is_float_arith f.Tir.v_name ->
     let va = emit_atom_val ctx a in
@@ -473,6 +687,36 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let op_str = if ctx.fast_math then op ^ " fast" else op in
     emit ctx (Printf.sprintf "%s = %s double %s, %s" r op_str va vb);
     ("double", r)
+
+  (* ── Boolean operators ───────────────────────────────────────────── *)
+  | Tir.EApp (f, [a; b]) when f.Tir.v_name = "&&" ->
+    let va = emit_atom_val ctx a in
+    let vb = emit_atom_val ctx b in
+    let r  = fresh ctx "ar" in
+    emit ctx (Printf.sprintf "%s = and i64 %s, %s" r va vb);
+    ("i64", r)
+
+  | Tir.EApp (f, [a; b]) when f.Tir.v_name = "||" ->
+    let va = emit_atom_val ctx a in
+    let vb = emit_atom_val ctx b in
+    let r  = fresh ctx "ar" in
+    emit ctx (Printf.sprintf "%s = or i64 %s, %s" r va vb);
+    ("i64", r)
+
+  | Tir.EApp (f, [a]) when f.Tir.v_name = "not" ->
+    let va = emit_atom_val ctx a in
+    let r  = fresh ctx "ar" in
+    emit ctx (Printf.sprintf "%s = xor i64 %s, 1" r va);
+    ("i64", r)
+
+  | Tir.EApp (f, [a]) when f.Tir.v_name = "negate" ->
+    let (ty, va) = emit_atom ctx a in
+    let r = fresh ctx "ar" in
+    if ty = "double" then
+      emit ctx (Printf.sprintf "%s = fneg double %s" r va)
+    else
+      emit ctx (Printf.sprintf "%s = sub i64 0, %s" r va);
+    (ty, r)
 
   (* ── Task builtins (Phase 1: inline LLVM IR, no C runtime) ────────── *)
   (* Thunks are fn x -> expr (Int -> a).  task_spawn calls the closure
@@ -588,15 +832,20 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.ECallPtr (fn_atom, args) ->
     let (_, clo_ptr) = emit_atom ctx fn_atom in
     let fn_ptr = emit_load_field ctx clo_ptr 0 "ptr" in
+    let nargs = List.length args in
     let ret_tir = match fn_atom with
-      | Tir.AVar v -> fn_ret_tir v.Tir.v_ty
+      | Tir.AVar v ->
+        (match v.Tir.v_ty with
+         | Tir.TFn (ps, ret) when List.length ps = nargs -> ret
+         | Tir.TFn _ -> Tir.TVar "_"   (* partial application → returns closure (ptr) *)
+         | other -> other)
       | _ -> Tir.TVar "_"
     in
     let ret_ty = llvm_ret_ty ret_tir in
     let orig_param_llvm_tys = match fn_atom with
       | Tir.AVar v ->
         (match v.Tir.v_ty with
-         | Tir.TFn (ps, _) -> List.map llvm_ty ps
+         | Tir.TFn (ps, _) when List.length ps = nargs -> List.map llvm_ty ps
          | _ -> List.map (fun _ -> "ptr") args)
       | _ -> List.map (fun _ -> "ptr") args
     in
@@ -875,32 +1124,62 @@ and emit_case ctx scrut_atom branches default_opt =
   let result_slot = fresh ctx "res_slot" in
   emit ctx (Printf.sprintf "%s = alloca ptr" result_slot);
 
-  (* Determine switch discriminant (tag or scalar) *)
-  let (sw_ty, sw_val) =
-    if is_ptr_scrut then ("i32", emit_load_tag ctx scrut_val)
-    else ("i64", scrut_val)
-  in
+  (* Detect string-literal case: br_tag starts with '"' *)
+  let is_string_case = List.exists (fun br ->
+      String.length br.Tir.br_tag > 0 && br.Tir.br_tag.[0] = '"'
+    ) branches in
 
-  (* Build switch arms *)
-  let cases_str = List.map2 (fun br lbl ->
-      let tag_str =
-        if is_ptr_scrut then
-          let e = ctor_entry ctx br.Tir.br_tag 0 in
-          string_of_int e.ce_tag
-        else begin
-          match int_of_string_opt br.Tir.br_tag with
-          | Some n -> string_of_int n
-          | None ->
-            if br.Tir.br_tag = "true"  || br.Tir.br_tag = "True"  then "1"
-            else if br.Tir.br_tag = "false" || br.Tir.br_tag = "False" then "0"
-            else "0"
-        end
-      in
-      Printf.sprintf "%s %s, label %%%s" sw_ty tag_str lbl
-    ) branches branch_lbls in
-  let cases_part = String.concat "\n      " cases_str in
-  emit_term ctx (Printf.sprintf "switch %s %s, label %%%s [\n      %s\n  ]"
-                   sw_ty sw_val default_lbl cases_part);
+  if is_string_case then begin
+    (* String pattern matching: emit if-else chain with march_string_eq *)
+    let rec emit_chain brs lbls =
+      match brs, lbls with
+      | [], [] -> emit_term ctx (Printf.sprintf "br label %%%s" default_lbl)
+      | br :: rest_brs, lbl :: rest_lbls ->
+        let next_lbl = fresh_block ctx "str_next" in
+        let s = String.sub br.Tir.br_tag 1 (String.length br.Tir.br_tag - 2) in
+        let gname = intern_string ctx s in
+        let slit = fresh ctx "sl" in
+        emit ctx (Printf.sprintf "%s = call ptr @march_string_lit(ptr %s, i64 %d)"
+                    slit gname (String.length s));
+        let eq = fresh ctx "seq" in
+        emit ctx (Printf.sprintf "%s = call i64 @march_string_eq(ptr %s, ptr %s)"
+                    eq scrut_val slit);
+        let cmp = fresh ctx "cmp" in
+        emit ctx (Printf.sprintf "%s = icmp ne i64 %s, 0" cmp eq);
+        emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" cmp lbl next_lbl);
+        emit_label ctx next_lbl;
+        emit_chain rest_brs rest_lbls
+      | _ -> ()
+    in
+    emit_chain branches branch_lbls
+  end else begin
+    (* Determine switch discriminant (tag or scalar) *)
+    let (sw_ty, sw_val) =
+      if is_ptr_scrut then ("i32", emit_load_tag ctx scrut_val)
+      else ("i64", scrut_val)
+    in
+
+    (* Build switch arms *)
+    let cases_str = List.map2 (fun br lbl ->
+        let tag_str =
+          if is_ptr_scrut then
+            let e = ctor_entry ctx br.Tir.br_tag 0 in
+            string_of_int e.ce_tag
+          else begin
+            match int_of_string_opt br.Tir.br_tag with
+            | Some n -> string_of_int n
+            | None ->
+              if br.Tir.br_tag = "true"  || br.Tir.br_tag = "True"  then "1"
+              else if br.Tir.br_tag = "false" || br.Tir.br_tag = "False" then "0"
+              else "0"
+          end
+          in
+        Printf.sprintf "%s %s, label %%%s" sw_ty tag_str lbl
+      ) branches branch_lbls in
+    let cases_part = String.concat "\n      " cases_str in
+    emit_term ctx (Printf.sprintf "switch %s %s, label %%%s [\n      %s\n  ]"
+                     sw_ty sw_val default_lbl cases_part)
+  end;
 
   (* Helper: if body = ESeq(EDecRC(v), rest) where v.v_name = scrut_name,
      return (v, rest). Used to handle shared-value field IncRC below. *)
@@ -1090,6 +1369,7 @@ declare void @march_decrc(ptr %p)
 declare i64  @march_decrc_freed(ptr %p)
 declare void @march_free(ptr %p)
 declare void @march_print(ptr %s)
+declare void @march_panic(ptr %s)
 declare void @march_println(ptr %s)
 declare ptr  @march_string_lit(ptr %s, i64 %len)
 declare ptr  @march_int_to_string(i64 %n)
@@ -1111,11 +1391,65 @@ declare void @march_tcp_send_all(i64 %fd, ptr %data)
 declare void @march_tcp_close(i64 %fd)
 declare ptr  @march_http_parse_request(ptr %raw)
 declare ptr  @march_http_serialize_response(i64 %status, ptr %headers, ptr %body)
-declare void @march_http_server_listen(ptr %config, ptr %pipeline)
+declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
 declare void @march_ws_handshake(i64 %fd, ptr %key)
 declare ptr  @march_ws_recv(i64 %fd)
 declare void @march_ws_send(i64 %fd, ptr %frame)
 declare ptr  @march_ws_select(i64 %fd, ptr %pipe, i64 %timeout)
+; Float builtins
+declare double @march_float_abs(double %f)
+declare i64    @march_float_ceil(double %f)
+declare i64    @march_float_floor(double %f)
+declare i64    @march_float_round(double %f)
+declare i64    @march_float_truncate(double %f)
+declare double @march_int_to_float(i64 %n)
+; Math builtins
+declare double @march_math_sin(double %f)
+declare double @march_math_cos(double %f)
+declare double @march_math_tan(double %f)
+declare double @march_math_asin(double %f)
+declare double @march_math_acos(double %f)
+declare double @march_math_atan(double %f)
+declare double @march_math_atan2(double %y, double %x)
+declare double @march_math_sinh(double %f)
+declare double @march_math_cosh(double %f)
+declare double @march_math_tanh(double %f)
+declare double @march_math_sqrt(double %f)
+declare double @march_math_cbrt(double %f)
+declare double @march_math_exp(double %f)
+declare double @march_math_exp2(double %f)
+declare double @march_math_log(double %f)
+declare double @march_math_log2(double %f)
+declare double @march_math_log10(double %f)
+declare double @march_math_pow(double %b, double %e)
+; Extended string builtins
+declare i64  @march_string_contains(ptr %s, ptr %sub)
+declare i64  @march_string_starts_with(ptr %s, ptr %prefix)
+declare i64  @march_string_ends_with(ptr %s, ptr %suffix)
+declare ptr  @march_string_slice(ptr %s, i64 %start, i64 %len)
+declare ptr  @march_string_split(ptr %s, ptr %sep)
+declare ptr  @march_string_split_first(ptr %s, ptr %sep)
+declare ptr  @march_string_replace(ptr %s, ptr %old, ptr %new)
+declare ptr  @march_string_replace_all(ptr %s, ptr %old, ptr %new)
+declare ptr  @march_string_to_lowercase(ptr %s)
+declare ptr  @march_string_to_uppercase(ptr %s)
+declare ptr  @march_string_trim(ptr %s)
+declare ptr  @march_string_trim_start(ptr %s)
+declare ptr  @march_string_trim_end(ptr %s)
+declare ptr  @march_string_repeat(ptr %s, i64 %n)
+declare ptr  @march_string_reverse(ptr %s)
+declare ptr  @march_string_pad_left(ptr %s, i64 %width, ptr %fill)
+declare ptr  @march_string_pad_right(ptr %s, i64 %width, ptr %fill)
+declare i64  @march_string_grapheme_count(ptr %s)
+declare ptr  @march_string_index_of(ptr %s, ptr %sub)
+declare ptr  @march_string_last_index_of(ptr %s, ptr %sub)
+declare ptr  @march_string_to_float(ptr %s)
+; List builtins
+declare ptr  @march_list_append(ptr %a, ptr %b)
+declare ptr  @march_list_concat(ptr %lists)
+; File/Dir builtins
+declare i64  @march_file_exists(ptr %s)
+declare i64  @march_dir_exists(ptr %s)
 
 |}
 
@@ -1135,9 +1469,24 @@ let emit_module ?(fast_math=false) (m : Tir.tir_module) : string =
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
 
-  let has_main = List.exists (fun (fn : Tir.fn_def) -> fn.Tir.fn_name = "main")
-                   m.Tir.tm_fns in
-  if has_main then emit_main_wrapper out;
+  (* Find a main function: either top-level "main" or "ModName.main" *)
+  let main_fn_name = List.find_map (fun (fn : Tir.fn_def) ->
+      if fn.Tir.fn_name = "main" then Some "main"
+      else if String.length fn.Tir.fn_name > 5 &&
+              String.sub fn.Tir.fn_name
+                (String.length fn.Tir.fn_name - 5) 5 = ".main"
+      then Some fn.Tir.fn_name
+      else None
+    ) m.Tir.tm_fns in
+  (match main_fn_name with
+   | Some name ->
+     let mangled = llvm_name (mangle_extern name) in
+     Buffer.add_string out
+       (Printf.sprintf "\ndefine i32 @main() {\nentry:\n  call void @%s()\n  ret i32 0\n}\n" mangled)
+   | None -> ());
+
+  (* Append closure wrapper functions generated for top-level fn-as-value *)
+  Buffer.add_buffer out ctx.extra_fns;
 
   Buffer.contents out
 
@@ -1151,6 +1500,23 @@ let emit_repl_globals_decl (buf : Buffer.t) (globals : (string * string) list) =
   List.iter (fun (name, ty) ->
     Printf.bprintf buf "@%s = external global %s\n" name ty
   ) globals
+
+(** Emit bridge alloca+load+store pairs for each prev_global into the current
+    function entry block, and register the slot in [ctx.var_slot].
+    This lets the body refer to REPL globals via the normal alloca load path.
+    LLVM's mem2reg/SROA eliminates the extra instructions. *)
+let emit_prev_global_bridges ctx (prev_globals : (string * string) list) =
+  List.iter (fun (gname, llty) ->
+    (* gname is always "repl_<bare>" by construction in repl_jit *)
+    let bare = if String.length gname > 5 && String.sub gname 0 5 = "repl_"
+               then String.sub gname 5 (String.length gname - 5)
+               else gname in
+    let tmp = fresh ctx "br" in
+    Printf.bprintf ctx.buf "  %%%s.addr = alloca %s\n" bare llty;
+    Printf.bprintf ctx.buf "  %s = load %s, ptr @%s\n" tmp llty gname;
+    Printf.bprintf ctx.buf "  store %s %s, ptr %%%s.addr\n" llty tmp bare;
+    Hashtbl.replace ctx.var_slot bare bare
+  ) prev_globals
 
 (** Emit a REPL expression as a standalone .ll fragment.
     Returns textual LLVM IR with a function [@repl_<n>] that computes
@@ -1170,6 +1536,7 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   let ret_llty = llvm_ty ret_ty in
   let fname = Printf.sprintf "repl_%d" n in
   Printf.bprintf ctx.buf "\ndefine %s @%s() {\nentry:\n" ret_llty fname;
+  emit_prev_global_bridges ctx prev_globals;
   let (_ty, result) = emit_expr ctx body in
   Printf.bprintf ctx.buf "  ret %s %s\n}\n" ret_llty result;
   let out = Buffer.create 4096 in
@@ -1198,6 +1565,7 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
   let init_name = Printf.sprintf "repl_%d_init" n in
   Printf.bprintf ctx.preamble "@%s = global %s zeroinitializer\n" global_name llty;
   Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n" init_name;
+  emit_prev_global_bridges ctx prev_globals;
   let (_ty, result) = emit_expr ctx body in
   Printf.bprintf ctx.buf "  store %s %s, ptr @%s\n" llty result global_name;
   Printf.bprintf ctx.buf "  ret void\n}\n";

@@ -173,12 +173,14 @@ let compile filename =
   (* Parse *)
   let module_ast =
     try March_parser.Parser.module_ March_lexer.Lexer.token lexbuf
-    with March_parser.Parser.Error ->
-      let pos = Lexing.lexeme_start_p lexbuf in
-      Printf.eprintf "%s:%d:%d: parse error\n"
-        pos.Lexing.pos_fname
-        pos.Lexing.pos_lnum
-        (pos.Lexing.pos_cnum - pos.Lexing.pos_bol);
+    with
+    | March_errors.Errors.ParseError (msg, hint, _) ->
+      Printf.eprintf "%s\n"
+        (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg lexbuf);
+      exit 1
+    | March_parser.Parser.Error ->
+      Printf.eprintf "%s\n"
+        (March_errors.Errors.render_parse_error ~src ~filename ~msg:"I got stuck here:" lexbuf);
       exit 1
   in
   (* Desugar *)

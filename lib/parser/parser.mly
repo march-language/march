@@ -6,6 +6,7 @@
 
 %{
   open March_ast.Ast
+
   let mk_span (s, e) =
     let open Lexing in
     { file = s.pos_fname;
@@ -425,6 +426,13 @@ expr:
   | e = expr_pipe { e }
   | FN; ps = lambda_params; ARROW; body = expr
     { ELam (ps, body, mk_span ($loc)) }
+  | FN; ps = lambda_params; error
+    { let params = String.concat " " (List.map (fun p -> p.param_name.txt) ps) in
+      let hint = Printf.sprintf "fn %s -> expr" params in
+      raise (March_errors.Errors.ParseError (
+        "I was expecting `->` to start the lambda body here:",
+        Some hint,
+        $startpos($3))) }
   | IF; cond = expr; THEN; t = expr; ELSE; f = expr
     { EIf (cond, t, f, mk_span ($loc)) }
   | MATCH; e = expr; WITH; option(PIPE); bs = separated_nonempty_list(PIPE, branch); END

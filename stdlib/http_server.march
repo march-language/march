@@ -179,9 +179,9 @@ mod HttpServer do
   pub fn run_pipeline(conn, plugs) do
     match plugs with
     | Nil -> conn
-    | Cons(plug, rest) ->
+    | Cons(f, rest) ->
       if halted(conn) then conn
-      else run_pipeline(plug(conn), rest)
+      else run_pipeline(f(conn), rest)
     end
   end
 
@@ -225,7 +225,7 @@ mod HttpServer do
       -- The C runtime expects (port, max_conns, idle_timeout) at fields 0,1,2.
       -- The pipeline is passed separately.
       -- For now, we pass the pipeline as a function that runs run_pipeline.
-      let pipeline_fn = fn(conn) do run_pipeline(conn, plugs) end
+      let pipeline_fn = fn conn -> run_pipeline(conn, plugs)
       http_server_listen(port, mc, it, pipeline_fn)
     end
   end

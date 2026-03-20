@@ -30,7 +30,7 @@ mod WebSocket do
   end
 
   -- Send a frame
-  pub fn send(socket, frame) do
+  pub fn send_frame(socket, frame) do
     match socket with
     | WsSocket(fd) -> ws_send(fd, frame)
     end
@@ -38,7 +38,7 @@ mod WebSocket do
 
   -- Send a close frame
   pub fn close(socket, code, reason) do
-    send(socket, Close(code, reason))
+    send_frame(socket, Close(code, reason))
   end
 
   -- Multiplex: wait on socket OR actor mailbox OR timeout.
