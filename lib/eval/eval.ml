@@ -922,39 +922,28 @@ let base_env : env =
            | _ -> VCon ("None", []))
         | _ -> eval_error "get_cap: expected Pid"))
   ; ("send_checked", VBuiltin ("send_checked", fun args ->
-        (* send_checked(cap, msg) — like send but validates epoch *)
+        (* Validate epoch, then enqueue (Phase 4: async dispatch).
+           Returns :ok if the cap is valid, :error otherwise.
+           The message is delivered asynchronously — call run_until_idle()
+           to process it. *)
         match args with
         | [VCap (pid, cap_epoch); msg] ->
           (match Hashtbl.find_opt actor_registry pid with
-           | None -> VAtom "error"
-           | Some inst when not inst.ai_alive -> VAtom "error"
-           | Some inst when inst.ai_epoch <> cap_epoch -> VAtom "error"
-           | Some _inst ->
-             (* Deliver the message synchronously like ESend *)
-             (match Hashtbl.find_opt actor_registry pid with
-              | None -> VAtom "error"
-              | Some inst ->
-                let (msg_tag, msg_args) = match msg with
-                  | VCon (tag, args) -> (tag, args)
-                  | VAtom tag -> (tag, [])
-                  | _ -> eval_error "send_checked: message must be a constructor value"
-                in
-                (match List.find_opt (fun h -> h.ah_msg.txt = msg_tag)
-                         inst.ai_def.actor_handlers with
-                 | None -> VAtom "error"
-                 | Some handler ->
-                   let param_bindings =
-                     List.map2 (fun p v -> (p.param_name.txt, v))
-                       handler.ah_params msg_args
-                   in
-                   let handler_env =
-                     [("state", inst.ai_state)] @ param_bindings @ !(inst.ai_env_ref)
-                   in
-                   let new_state = !eval_expr_hook handler_env handler.ah_body in
-                   inst.ai_state <- new_state;
-                   VAtom "ok")))
+           | None -> VAtom "error"                              (* unknown actor *)
+           | Some inst when not inst.ai_alive -> VAtom "error" (* actor dead *)
+           | Some inst when inst.ai_epoch <> cap_epoch ->
+             VAtom "error"                                      (* stale epoch *)
+           | Some inst ->
+             (* Valid cap: enqueue and return :ok immediately *)
+             (match msg with
+              | VCon _ | VAtom _ ->
+                Queue.push msg inst.ai_mailbox;
+                VAtom "ok"
+              | _ ->
+                eval_error "send_checked: message must be a constructor value, got %s"
+                  (value_to_string msg)))
         | [VPid _pid; _msg] ->
-          (* Legacy: VPid used directly — not epoch-checked *)
+          (* Legacy: bare VPid without epoch — not supported in Phase 3+ *)
           VAtom "error"
         | _ -> eval_error "send_checked: expected (Cap, msg)"))
   ; ("to_string", VBuiltin ("to_string", function
