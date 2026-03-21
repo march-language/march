@@ -166,6 +166,13 @@ type lambda_info = {
 let lambda_counter : int ref = ref 0
 let fresh_lambda_uid () = let n = !lambda_counter in incr lambda_counter; n
 
+(** Read the current lambda counter value (for persisting to cache). *)
+let get_lambda_counter () = !lambda_counter
+
+(** Restore the lambda counter (when loading from cache, set it above all
+    prelude-compiled UIDs so fresh REPL fragments never reuse a prelude UID). *)
+let set_lambda_counter n = lambda_counter := n
+
 (** Collect all lambdas from all top-level fn bodies. *)
 let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info list =
   let lambdas = ref [] in
