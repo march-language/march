@@ -1049,23 +1049,26 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
       fns := fn :: !fns;
       reg_method "eq" ty_name mangled
     ) eq_types;
-  (* Ord implementations: compare(x, y) -> compare(x, y) [runtime builtin] *)
-  let ord_types = [("Int", Tir.TInt); ("Float", Tir.TFloat); ("String", Tir.TString)] in
-  List.iter (fun (ty_name, tir_ty) ->
+  (* Ord implementations: compare(x, y) — delegate to typed C runtime builtins *)
+  let ord_specs = [
+    ("Int",    Tir.TInt,    "march_compare_int");
+    ("Float",  Tir.TFloat,  "march_compare_float");
+    ("String", Tir.TString, "march_compare_string");
+  ] in
+  List.iter (fun (ty_name, tir_ty, c_fn) ->
       let mangled = Printf.sprintf "Ord$%s.compare" ty_name in
       let x = mk_var "x" tir_ty and y = mk_var "y" tir_ty in
       let fn : Tir.fn_def = {
         fn_name = mangled; fn_params = [x; y]; fn_ret_ty = Tir.TInt;
-        fn_body = Tir.EApp (mk_var "compare" unknown_ty, [Tir.AVar x; Tir.AVar y]);
+        fn_body = Tir.EApp (mk_var c_fn unknown_ty, [Tir.AVar x; Tir.AVar y]);
       } in
       fns := fn :: !fns;
       reg_method "compare" ty_name mangled
-    ) ord_types;
+    ) ord_specs;
   (* Show implementations: show(x) -> type_specific_to_string(x) *)
   let show_specs = [
     ("Int",    Tir.TInt,    "int_to_string");
     ("Float",  Tir.TFloat,  "float_to_string");
-    ("String", Tir.TString, "show");    (* identity via show builtin *)
     ("Bool",   Tir.TBool,   "bool_to_string");
   ] in
   List.iter (fun (ty_name, tir_ty, to_str_fn) ->
@@ -1074,19 +1077,32 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
         [mk_var "x" tir_ty];
       reg_method "show" ty_name mangled
     ) show_specs;
-  (* Hash implementations: hash(x) -> hash(x) [runtime builtin] *)
-  let hash_types = [("Int", Tir.TInt); ("Float", Tir.TFloat);
-                    ("String", Tir.TString); ("Bool", Tir.TBool)] in
-  List.iter (fun (ty_name, tir_ty) ->
+  (* Show$String.show: identity — the string is already its own representation *)
+  let str_x = mk_var "x" Tir.TString in
+  let show_str_fn : Tir.fn_def = {
+    fn_name = "Show$String.show"; fn_params = [str_x];
+    fn_ret_ty = Tir.TString;
+    fn_body = Tir.EAtom (Tir.AVar str_x);
+  } in
+  fns := show_str_fn :: !fns;
+  reg_method "show" "String" "Show$String.show";
+  (* Hash implementations: hash(x) — delegate to typed C runtime builtins *)
+  let hash_specs = [
+    ("Int",    Tir.TInt,    "march_hash_int");
+    ("Float",  Tir.TFloat,  "march_hash_float");
+    ("String", Tir.TString, "march_hash_string");
+    ("Bool",   Tir.TBool,   "march_hash_bool");
+  ] in
+  List.iter (fun (ty_name, tir_ty, c_fn) ->
       let mangled = Printf.sprintf "Hash$%s.hash" ty_name in
       let x = mk_var "x" tir_ty in
       let fn : Tir.fn_def = {
         fn_name = mangled; fn_params = [x]; fn_ret_ty = Tir.TInt;
-        fn_body = Tir.EApp (mk_var "hash" unknown_ty, [Tir.AVar x]);
+        fn_body = Tir.EApp (mk_var c_fn unknown_ty, [Tir.AVar x]);
       } in
       fns := fn :: !fns;
       reg_method "hash" ty_name mangled
-    ) hash_types;
+    ) hash_specs;
   end; (* end of builtin iface injection *)
   (* Pass 1: Collect interface/impl declarations first so that interface
      method resolution is available when lowering function bodies. *)

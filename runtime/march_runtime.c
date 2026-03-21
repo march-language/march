@@ -107,6 +107,57 @@ void *march_string_concat(void *a, void *b) {
     return s;
 }
 
+/* ── Ord: compare — returns -1 / 0 / 1 ─────────────────────────────────── */
+
+int64_t march_compare_int(int64_t x, int64_t y) {
+    return (x > y) - (x < y);
+}
+
+int64_t march_compare_float(double x, double y) {
+    return (x > y) - (x < y);
+}
+
+int64_t march_compare_string(void *a, void *b) {
+    march_string *sa = (march_string *)a;
+    march_string *sb = (march_string *)b;
+    size_t min_len = sa->len < sb->len ? (size_t)sa->len : (size_t)sb->len;
+    int cmp = memcmp(sa->data, sb->data, min_len);
+    if (cmp != 0) return cmp > 0 ? 1 : -1;
+    if (sa->len < sb->len) return -1;
+    if (sa->len > sb->len) return 1;
+    return 0;
+}
+
+/* ── Hash ────────────────────────────────────────────────────────────────── */
+
+int64_t march_hash_int(int64_t x) {
+    /* Finalizer from splitmix64 */
+    uint64_t v = (uint64_t)x;
+    v ^= v >> 30; v *= UINT64_C(0xbf58476d1ce4e5b9);
+    v ^= v >> 27; v *= UINT64_C(0x94d049bb133111eb);
+    v ^= v >> 31;
+    return (int64_t)v;
+}
+
+int64_t march_hash_float(double x) {
+    uint64_t bits;
+    memcpy(&bits, &x, sizeof(bits));
+    return march_hash_int((int64_t)bits);
+}
+
+int64_t march_hash_string(void *s) {
+    march_string *ms = (march_string *)s;
+    /* FNV-1a 64-bit */
+    uint64_t h = UINT64_C(14695981039346656037);
+    for (int64_t i = 0; i < ms->len; i++) {
+        h ^= (uint8_t)ms->data[i];
+        h *= UINT64_C(1099511628211);
+    }
+    return (int64_t)h;
+}
+
+int64_t march_hash_bool(int64_t b) { return b; }
+
 int64_t march_string_eq(void *a, void *b) {
     march_string *sa = (march_string *)a;
     march_string *sb = (march_string *)b;

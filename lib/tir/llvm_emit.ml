@@ -528,6 +528,11 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
 
 let emit_atom_val ctx a = snd (emit_atom ctx a)
 
+(** Emit atom and coerce result to [ty]. Handles TVar→ptr mismatches. *)
+let emit_atom_as ctx ty a =
+  let (actual_ty, v) = emit_atom ctx a in
+  coerce ctx actual_ty v ty
+
 (* ── GEP helpers ─────────────────────────────────────────────────────── *)
 
 let emit_load_tag ctx obj_val =
@@ -675,15 +680,15 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Arithmetic builtins ───────────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_arith f.Tir.v_name ->
-    let va = emit_atom_val ctx a in
-    let vb = emit_atom_val ctx b in
+    let va = emit_atom_as ctx "i64" a in
+    let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
     emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_arith_op f.Tir.v_name) va vb);
     ("i64", r)
 
   | Tir.EApp (f, [a; b]) when is_int_cmp f.Tir.v_name ->
     let (ty_a, va) = emit_atom ctx a in
-    let (_,    vb) = emit_atom ctx b in
+    let (ty_b, vb) = emit_atom ctx b in
     if ty_a = "ptr" && (f.Tir.v_name = "==" || f.Tir.v_name = "!=") then begin
       (* String equality: call march_string_eq which returns i64 (0 or 1) *)
       let r = fresh ctx "cr" in
@@ -706,15 +711,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
           | s -> failwith ("unknown cmp: " ^ s)
         in
         emit ctx (Printf.sprintf "%s = fcmp %s double %s, %s" cmp fpred va vb);
-      end else
-        emit ctx (Printf.sprintf "%s = icmp %s i64 %s, %s" cmp (int_cmp_pred f.Tir.v_name) va vb);
+      end else begin
+        (* Coerce to i64 in case variables were loaded as ptr due to TVar type *)
+        let va' = coerce ctx ty_a va "i64" in
+        let vb' = coerce ctx ty_b vb "i64" in
+        emit ctx (Printf.sprintf "%s = icmp %s i64 %s, %s" cmp (int_cmp_pred f.Tir.v_name) va' vb')
+      end;
       emit ctx (Printf.sprintf "%s = zext i1 %s to i64" r cmp);
       ("i64", r)
     end
 
   | Tir.EApp (f, [a; b]) when is_float_arith f.Tir.v_name ->
-    let va = emit_atom_val ctx a in
-    let vb = emit_atom_val ctx b in
+    let va = emit_atom_as ctx "double" a in
+    let vb = emit_atom_as ctx "double" b in
     let r  = fresh ctx "ar" in
     let op = float_arith_op f.Tir.v_name in
     let op_str = if ctx.fast_math then op ^ " fast" else op in
@@ -723,21 +732,21 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Boolean operators ───────────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when f.Tir.v_name = "&&" ->
-    let va = emit_atom_val ctx a in
-    let vb = emit_atom_val ctx b in
+    let va = emit_atom_as ctx "i64" a in
+    let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
     emit ctx (Printf.sprintf "%s = and i64 %s, %s" r va vb);
     ("i64", r)
 
   | Tir.EApp (f, [a; b]) when f.Tir.v_name = "||" ->
-    let va = emit_atom_val ctx a in
-    let vb = emit_atom_val ctx b in
+    let va = emit_atom_as ctx "i64" a in
+    let vb = emit_atom_as ctx "i64" b in
     let r  = fresh ctx "ar" in
     emit ctx (Printf.sprintf "%s = or i64 %s, %s" r va vb);
     ("i64", r)
 
   | Tir.EApp (f, [a]) when f.Tir.v_name = "not" ->
-    let va = emit_atom_val ctx a in
+    let va = emit_atom_as ctx "i64" a in
     let r  = fresh ctx "ar" in
     emit ctx (Printf.sprintf "%s = xor i64 %s, 1" r va);
     ("i64", r)
@@ -887,7 +896,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let fn_ty_str = Printf.sprintf "%s (%s)" ret_ty
         (String.concat ", " ("ptr" :: orig_param_llvm_tys)) in
     let orig_arg_strs = List.map2 (fun pty a ->
-        let (_, v) = emit_atom ctx a in pty ^ " " ^ v
+        let (actual_ty, v) = emit_atom ctx a in
+        let v' = coerce ctx actual_ty v pty in
+        pty ^ " " ^ v'
       ) orig_param_llvm_tys args in
     let all_arg_strs = Printf.sprintf "ptr %s" clo_ptr :: orig_arg_strs in
     if ret_ty = "void" then begin
@@ -1390,6 +1401,15 @@ let emit_fn ctx (fn : Tir.fn_def) =
 
   Buffer.add_string ctx.buf "}\n"
 
+(** Return the LLVM `declare` string for a function, for use as a forward
+    declaration in subsequent JIT fragments that reference it without redefining it. *)
+let fn_declare_str (fn : Tir.fn_def) : string =
+  let fn_llvm_name = mangle_extern fn.Tir.fn_name in
+  let ret_ty = llvm_ret_ty fn.Tir.fn_ret_ty in
+  let param_tys = String.concat ", " (List.map (fun (v : Tir.var) ->
+      llvm_ty v.Tir.v_ty) fn.Tir.fn_params) in
+  Printf.sprintf "declare %s @%s(%s)" ret_ty fn_llvm_name param_tys
+
 (* ── Module emitter ──────────────────────────────────────────────────── *)
 
 let build_ctor_info ctx (m : Tir.tir_module) =
@@ -1452,6 +1472,14 @@ declare ptr  @march_float_to_string(double %f)
 declare ptr  @march_bool_to_string(i64 %b)
 declare ptr  @march_string_concat(ptr %a, ptr %b)
 declare i64  @march_string_eq(ptr %a, ptr %b)
+; Ord / Hash builtins
+declare i64    @march_compare_int(i64 %x, i64 %y)
+declare i64    @march_compare_float(double %x, double %y)
+declare i64    @march_compare_string(ptr %x, ptr %y)
+declare i64    @march_hash_int(i64 %x)
+declare i64    @march_hash_float(double %x)
+declare i64    @march_hash_string(ptr %x)
+declare i64    @march_hash_bool(i64 %x)
 declare i64  @march_string_byte_length(ptr %s)
 declare i64  @march_string_is_empty(ptr %s)
 declare ptr  @march_string_to_int(ptr %s)
@@ -1629,8 +1657,9 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   let fname = Printf.sprintf "repl_%d" n in
   Printf.bprintf ctx.buf "\ndefine %s @%s() {\nentry:\n" ret_llty fname;
   emit_prev_global_bridges ctx prev_globals;
-  let (_ty, result) = emit_expr ctx body in
-  Printf.bprintf ctx.buf "  ret %s %s\n}\n" ret_llty result;
+  let (actual_ty, result) = emit_expr ctx body in
+  let result' = coerce ctx actual_ty result ret_llty in
+  Printf.bprintf ctx.buf "  ret %s %s\n}\n" ret_llty result';
   let out = Buffer.create 4096 in
   emit_preamble out;
   emit_repl_globals_decl out prev_globals;
@@ -1658,8 +1687,9 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
   Printf.bprintf ctx.preamble "@%s = global %s zeroinitializer\n" global_name llty;
   Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n" init_name;
   emit_prev_global_bridges ctx prev_globals;
-  let (_ty, result) = emit_expr ctx body in
-  Printf.bprintf ctx.buf "  store %s %s, ptr @%s\n" llty result global_name;
+  let (actual_ty, result) = emit_expr ctx body in
+  let result' = coerce ctx actual_ty result llty in
+  Printf.bprintf ctx.buf "  store %s %s, ptr @%s\n" llty result' global_name;
   Printf.bprintf ctx.buf "  ret void\n}\n";
   let out = Buffer.create 4096 in
   emit_preamble out;
@@ -1682,6 +1712,61 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
   emit_fn ctx fn;
   let init_name = Printf.sprintf "repl_%d_init" n in
   Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n  ret void\n}\n" init_name;
+  let out = Buffer.create 4096 in
+  emit_preamble out;
+  emit_repl_globals_decl out prev_globals;
+  Buffer.add_buffer out ctx.preamble;
+  Buffer.add_buffer out ctx.buf;
+  Buffer.contents out
+
+(** Emit a REPL function declaration as a .ll fragment, and also create a
+    first-class closure value stored in a global [@repl_<bind_name>].
+    This lets later REPL fragments reference [bind_name] as a value via the
+    normal global-bridge mechanism (same as [emit_repl_decl] for data lets).
+    The init function [@repl_<n>_init] allocates the closure and fills the global. *)
+let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
+    ~(bind_name : string)
+    ~(prev_globals : (string * string) list)
+    ~(types : Tir.type_def list)
+    (fn : Tir.fn_def) : string =
+  let ctx = make_ctx ~fast_math () in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = [] } in
+  build_ctor_info ctx pseudo_mod;
+  Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
+  emit_fn ctx fn;
+  (* Build a thin closure wrapper: @<fn>$clo_wrap(ptr %_clo, ptr %a0, ...) *)
+  let fn_llvm_name = llvm_name (mangle_extern fn.Tir.fn_name) in
+  let wrap_name = fn_llvm_name ^ "$clo_wrap" in
+  let nparams = List.length fn.Tir.fn_params in
+  let target_ret = llvm_ret_ty fn.Tir.fn_ret_ty in
+  let param_tys = List.init nparams (fun _ -> "ptr") in
+  let all_params = "ptr" :: param_tys in
+  let arg_names = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
+  let all_arg_decls = "%_clo" :: arg_names in
+  let decl_str = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_arg_decls) in
+  let call_args = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
+  let wrap_body =
+    if target_ret = "void" then
+      Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n"
+        wrap_name decl_str fn_llvm_name call_args
+    else
+      Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret ptr %%r\n}\n"
+        wrap_name decl_str target_ret fn_llvm_name call_args
+  in
+  Buffer.add_string ctx.buf wrap_body;
+  (* Global that holds the closure pointer *)
+  let global_name = "repl_" ^ bind_name in
+  Printf.bprintf ctx.preamble "@%s = global ptr zeroinitializer\n" global_name;
+  (* Init function: allocate closure {header(16), fn_ptr} and store in the global *)
+  let init_name = Printf.sprintf "repl_%d_init" n in
+  Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n" init_name;
+  Printf.bprintf ctx.buf "  %%hp = call ptr @march_alloc(i64 24)\n";
+  Printf.bprintf ctx.buf "  %%tgp = getelementptr i8, ptr %%hp, i64 8\n";
+  Printf.bprintf ctx.buf "  store i32 0, ptr %%tgp, align 4\n";
+  Printf.bprintf ctx.buf "  %%fp = getelementptr i8, ptr %%hp, i64 16\n";
+  Printf.bprintf ctx.buf "  store ptr @%s, ptr %%fp, align 8\n" wrap_name;
+  Printf.bprintf ctx.buf "  store ptr %%hp, ptr @%s\n" global_name;
+  Printf.bprintf ctx.buf "  ret void\n}\n";
   let out = Buffer.create 4096 in
   emit_preamble out;
   emit_repl_globals_decl out prev_globals;

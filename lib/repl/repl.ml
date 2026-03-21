@@ -411,6 +411,32 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
                         Printf.printf "val %s = <fn>\n%!" bind_name
+                      | Some jit when (match d' with
+                          | March_ast.Ast.DLet (b, _) ->
+                            (match b.bind_pat with March_ast.Ast.PatVar _ -> true | _ -> false)
+                          | _ -> false) ->
+                        (* JIT path for simple let bindings: compile value to a global
+                           so later expressions can reference the name across module boundaries. *)
+                        let bind_name = match d' with
+                          | March_ast.Ast.DLet (b, _) ->
+                            (match b.bind_pat with March_ast.Ast.PatVar n -> n.txt | _ -> assert false)
+                          | _ -> assert false
+                        in
+                        let bind_expr = match d' with
+                          | March_ast.Ast.DLet (b, _) -> b.bind_expr
+                          | _ -> assert false
+                        in
+                        let m = wrap_expr_as_module ~stdlib_decls bind_expr in
+                        March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m;
+                        (* Also update interpreter env for scope display / debug mode *)
+                        env := March_eval.Eval.eval_decl !env d';
+                        if tc_ok then
+                          tc_env := { new_tc with errors = March_errors.Errors.create () };
+                        let vstr = match List.assoc_opt bind_name !env with
+                          | Some v -> March_eval.Eval.value_to_string v
+                          | None -> "?"
+                        in
+                        Printf.printf "val %s = %s\n%!" bind_name vstr
                       | _ ->
                         env := March_eval.Eval.eval_decl !env d';
                         if tc_ok then
@@ -689,6 +715,30 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              if tc_ok then
                tc_env := { new_tc with errors = March_errors.Errors.create () };
              add_line Notty.A.empty (Printf.sprintf "val %s = <fn>" bind_name)
+           | Some jit when (match d' with
+               | March_ast.Ast.DLet (b, _) ->
+                 (match b.bind_pat with March_ast.Ast.PatVar _ -> true | _ -> false)
+               | _ -> false) ->
+             (* JIT path for simple let bindings: compile value to a global. *)
+             let bind_name = match d' with
+               | March_ast.Ast.DLet (b, _) ->
+                 (match b.bind_pat with March_ast.Ast.PatVar n -> n.txt | _ -> assert false)
+               | _ -> assert false
+             in
+             let bind_expr = match d' with
+               | March_ast.Ast.DLet (b, _) -> b.bind_expr
+               | _ -> assert false
+             in
+             let m = wrap_expr_as_module ~stdlib_decls bind_expr in
+             March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m;
+             env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
+             if tc_ok then
+               tc_env := { new_tc with errors = March_errors.Errors.create () };
+             let vstr = match List.assoc_opt bind_name !env with
+               | Some v -> March_eval.Eval.value_to_string v
+               | None -> "?"
+             in
+             add_line Notty.A.empty (Printf.sprintf "val %s = %s" bind_name vstr)
            | _ ->
              env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
              if tc_ok then
