@@ -1732,12 +1732,15 @@ let emit_prev_global_bridges ctx (prev_globals : (string * string) list) =
 let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
     ~(prev_globals : (string * string) list)
     ~(fns : Tir.fn_def list)
+    ?(extern_fns : Tir.fn_def list = [])
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
   let ctx = make_ctx ~fast_math () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true) fns;
+  (* Register pre-compiled extern functions so EApp generates direct calls *)
+  List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true) extern_fns;
   List.iter (emit_fn ctx) fns;
   let ret_llty = llvm_ty ret_ty in
   let fname = Printf.sprintf "repl_%d" n in
@@ -1749,6 +1752,8 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   let out = Buffer.create 4096 in
   emit_preamble out;
   emit_repl_globals_decl out prev_globals;
+  (* Declare pre-compiled functions so LLVM IR is valid even without definitions *)
+  List.iter (fun fn -> Buffer.add_string out (fn_declare_str fn ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
   Buffer.contents out
@@ -1760,12 +1765,14 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
     ~(val_ty : Tir.ty)
     ~(prev_globals : (string * string) list)
     ~(fns : Tir.fn_def list)
+    ?(extern_fns : Tir.fn_def list = [])
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
   let ctx = make_ctx ~fast_math () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true) fns;
+  List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true) extern_fns;
   List.iter (emit_fn ctx) fns;
   let llty = llvm_ty val_ty in
   let global_name = "repl_" ^ name in
@@ -1780,6 +1787,7 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
   let out = Buffer.create 4096 in
   emit_preamble out;
   emit_repl_globals_decl out prev_globals;
+  List.iter (fun fn -> Buffer.add_string out (fn_declare_str fn ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
   Buffer.contents out
@@ -1789,18 +1797,21 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
     A no-op [@repl_<n>_init] is emitted so the REPL runner can call it uniformly. *)
 let emit_repl_fn ?(fast_math=false) ~(n : int)
     ~(prev_globals : (string * string) list)
+    ?(extern_fns : Tir.fn_def list = [])
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
   let ctx = make_ctx ~fast_math () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = [] } in
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
+  List.iter (fun f -> Hashtbl.replace ctx.top_fns f.Tir.fn_name true) extern_fns;
   emit_fn ctx fn;
   let init_name = Printf.sprintf "repl_%d_init" n in
   Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n  ret void\n}\n" init_name;
   let out = Buffer.create 4096 in
   emit_preamble out;
   emit_repl_globals_decl out prev_globals;
+  List.iter (fun f -> Buffer.add_string out (fn_declare_str f ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
   Buffer.contents out
@@ -1813,12 +1824,14 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
 let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
     ~(bind_name : string)
     ~(prev_globals : (string * string) list)
+    ?(extern_fns : Tir.fn_def list = [])
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
   let ctx = make_ctx ~fast_math () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = [] } in
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
+  List.iter (fun f -> Hashtbl.replace ctx.top_fns f.Tir.fn_name true) extern_fns;
   emit_fn ctx fn;
   (* Build a thin closure wrapper: @<fn>$clo_wrap(ptr %_clo, ptr %a0, ...) *)
   let fn_llvm_name = llvm_name (mangle_extern fn.Tir.fn_name) in
@@ -1856,6 +1869,7 @@ let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
   let out = Buffer.create 4096 in
   emit_preamble out;
   emit_repl_globals_decl out prev_globals;
+  List.iter (fun f -> Buffer.add_string out (fn_declare_str f ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
   Buffer.contents out

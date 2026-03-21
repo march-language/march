@@ -70,15 +70,26 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
 let is_c_runtime_fn name =
   March_tir.Llvm_emit.mangle_extern name <> name
 
-(** Filter a function list to only those not yet compiled, and record the new ones.
-    Also drops any function that is actually a C-runtime builtin. *)
-let filter_new_fns ctx (fns : March_tir.Tir.fn_def list) : March_tir.Tir.fn_def list =
-  let new_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
-    not (Hashtbl.mem ctx.compiled_fns f.fn_name) &&
-    not (is_c_runtime_fn f.fn_name)) fns in
+(** Partition functions into (new_fns, extern_fns):
+    - new_fns: not yet compiled → will be defined in this fragment, recorded
+      in compiled_fns.
+    - extern_fns: already compiled in a prior fragment or stdlib prelude →
+      need `declare` in the IR so LLVM IR is valid.
+    C-runtime functions (already declared in emit_preamble) are excluded
+    from both lists. *)
+let partition_fns ctx (fns : March_tir.Tir.fn_def list)
+    : March_tir.Tir.fn_def list * March_tir.Tir.fn_def list =
+  let new_fns = ref [] and extern_fns = ref [] in
   List.iter (fun (f : March_tir.Tir.fn_def) ->
-    Hashtbl.replace ctx.compiled_fns f.fn_name ()) new_fns;
-  new_fns
+    if is_c_runtime_fn f.fn_name then ()
+    else if Hashtbl.mem ctx.compiled_fns f.fn_name then
+      extern_fns := f :: !extern_fns
+    else begin
+      Hashtbl.replace ctx.compiled_fns f.fn_name ();
+      new_fns := f :: !new_fns
+    end
+  ) fns;
+  (List.rev !new_fns, List.rev !extern_fns)
 
 (** Lower a single-expression module through the TIR pipeline. *)
 let lower_module ~type_map (m : March_ast.Ast.module_) =
@@ -99,13 +110,13 @@ let run_expr ctx ~type_map m =
   let ret_ty = main_fn.fn_ret_ty in
   let support_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
-  (* Only emit functions not already compiled in a previous fragment.
-     The rest are already in the global symbol table via RTLD_GLOBAL. *)
-  let new_fns = filter_new_fns ctx support_fns in
+  (* Partition into new (to define) and extern (already compiled, need declare). *)
+  let (new_fns, extern_fns) = partition_fns ctx support_fns in
   let ir = March_tir.Llvm_emit.emit_repl_expr
     ~n ~ret_ty
     ~prev_globals:ctx.globals
     ~fns:new_fns
+    ~extern_fns
     ~types:tir.March_tir.Tir.tm_types
     main_fn.fn_body in
   let handle = compile_fragment ctx ir in
@@ -146,19 +157,14 @@ let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
   let tir = lower_module ~type_map m in
   let all_support_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
-  (* Split into new (to define) and previously compiled (already in global symbol table) *)
-  let user_fns = filter_new_fns ctx all_support_fns in
+  (* Partition into new (to define) and extern (already compiled, need declare). *)
+  let (user_fns, extern_fns) = partition_fns ctx all_support_fns in
   if is_fn_decl then begin
     (* Function declaration: emit the function at top level.
        After defunctionalization a single user-defined function may produce
        multiple lifted functions (primary + closure helpers).  Find the primary
        by bind_name, emit helpers first (so their symbols are available via
-       RTLD_GLOBAL), then emit the primary.
-       NOTE: calling REPL-defined functions from later REPL expressions requires
-       proper LLVM `declare` infrastructure in emit_repl_fn/emit_repl_expr
-       (tracking fn signatures in ctx, not just data globals).  This is a known
-       v1 limitation — function-to-function calls across REPL fragments are
-       future work. *)
+       RTLD_GLOBAL), then emit the primary. *)
     let primary_fn =
       match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
         f.fn_name = bind_name) user_fns with
@@ -175,7 +181,7 @@ let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
     List.iter (fun helper ->
       let hn = next_id ctx in
       let ir = March_tir.Llvm_emit.emit_repl_fn
-        ~n:hn ~prev_globals:ctx.globals ~types:tir.March_tir.Tir.tm_types
+        ~n:hn ~prev_globals:ctx.globals ~extern_fns ~types:tir.March_tir.Tir.tm_types
         helper in
       let _h = compile_fragment ctx ir in
       ()
@@ -184,7 +190,7 @@ let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
        reference bind_name as a first-class value via the global-bridge path. *)
     let pn = next_id ctx in
     let ir = March_tir.Llvm_emit.emit_repl_fn_with_closure_global
-      ~n:pn ~bind_name ~prev_globals:ctx.globals ~types:tir.March_tir.Tir.tm_types
+      ~n:pn ~bind_name ~prev_globals:ctx.globals ~extern_fns ~types:tir.March_tir.Tir.tm_types
       primary_fn in
     let handle = compile_fragment ctx ir in
     (* Call the init function to allocate the closure and fill @repl_<bind_name> *)
@@ -202,6 +208,7 @@ let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
       ~val_ty:main_fn.fn_ret_ty
       ~prev_globals:ctx.globals
       ~fns:user_fns
+      ~extern_fns
       ~types:tir.March_tir.Tir.tm_types
       main_fn.fn_body in
     let handle = compile_fragment ctx ir in
