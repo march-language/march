@@ -256,7 +256,8 @@ let compile filename =
         let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
         let h_sccs = March_cas.Pipeline.hash_module tir in
         let mod_hash = String.concat "" (List.map March_cas.Pipeline.scc_impl_hash h_sccs) in
-        let cas_flags = [if !opt_enabled then "opt" else "no-opt"] in
+        let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
+        let cas_flags = [if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt"] in
         let ch = March_cas.Cas.compilation_hash mod_hash ~target:"native" ~flags:cas_flags in
         (match March_cas.Cas.lookup_artifact store ch with
         | Some cached_bin ->
@@ -280,11 +281,7 @@ let compile filename =
             | None ->
               Printf.eprintf "march: cannot find runtime/march_runtime.c\n"; exit 1
           in
-          let opt_flag =
-            if !opt_level >= 0 && !opt_level <= 3
-            then Printf.sprintf " -O%d" !opt_level
-            else ""
-          in
+          let opt_flag = Printf.sprintf " -O%d" effective_opt in
           let runtime_dir = Filename.dirname runtime in
           let http_c = Filename.concat runtime_dir "march_http.c" in
           let extra_c_files =
