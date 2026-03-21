@@ -73,6 +73,7 @@ let load_stdlib () =
       "option.march";
       "result.march";
       "list.march";
+      "map.march";
       "math.march";
       "string.march";
       "iolist.march";
