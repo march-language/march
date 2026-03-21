@@ -56,8 +56,7 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
   (match status with
    | Unix.WEXITED 0 -> ()
    | _ ->
-     (* Clean up temp files before raising so we don't leak on failure *)
-     (try Sys.remove ll_path with _ -> ());
+     (* Keep .ll file for debugging; remove only the .so partial artifact *)
      (try Sys.remove so_path with _ -> ());
      failwith (Printf.sprintf "clang failed: %s"
        (Buffer.contents output)));
@@ -66,10 +65,18 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
   ctx.handles <- handle :: ctx.handles;
   handle
 
-(** Filter a function list to only those not yet compiled, and record the new ones. *)
+(** True if a TIR function name resolves to a C runtime symbol (i.e. mangle
+    changes its name). Such functions are already in the runtime .so and must
+    not be re-defined in a JIT fragment or LLVM will reject the double-define. *)
+let is_c_runtime_fn name =
+  March_tir.Llvm_emit.mangle_extern name <> name
+
+(** Filter a function list to only those not yet compiled, and record the new ones.
+    Also drops any function that is actually a C-runtime builtin. *)
 let filter_new_fns ctx (fns : March_tir.Tir.fn_def list) : March_tir.Tir.fn_def list =
   let new_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
-    not (Hashtbl.mem ctx.compiled_fns f.fn_name)) fns in
+    not (Hashtbl.mem ctx.compiled_fns f.fn_name) &&
+    not (is_c_runtime_fn f.fn_name)) fns in
   List.iter (fun (f : March_tir.Tir.fn_def) ->
     Hashtbl.replace ctx.compiled_fns f.fn_name ()) new_fns;
   new_fns
