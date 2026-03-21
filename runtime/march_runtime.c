@@ -7,6 +7,7 @@
 #include <stdatomic.h>
 #include <pthread.h>
 #include <sys/stat.h>
+#include <time.h>
 
 /* ── Allocation ──────────────────────────────────────────────────────── */
 
@@ -57,7 +58,15 @@ void march_decrc(void *p) {
      * we see all other threads' writes to the object. */
     int64_t prev = atomic_fetch_sub_explicit(
         (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
-    if (prev <= 1) free(p);
+    if (prev == 1) {
+        free(p);
+    } else if (prev < 1) {
+        /* RC underflow: double-decrement detected — abort to surface the bug
+         * rather than silently double-freeing and corrupting the heap. */
+        fprintf(stderr, "march: RC underflow (rc was %lld) at %p — aborting\n",
+                (long long)prev, p);
+        abort();
+    }
 }
 
 int64_t march_decrc_freed(void *p) {
@@ -321,8 +330,12 @@ void march_panic(void *s) {
  * re-scheduled, ensuring other actors get CPU time between large bursts.
  */
 
-#define MARCH_SCHED_BUCKETS 256   /* Power-of-2 hash table size              */
-#define MARCH_BATCH_MAX      64   /* Max messages dispatched per actor/turn  */
+#define MARCH_SCHED_BUCKETS  256  /* Power-of-2 hash table size              */
+#define MARCH_BATCH_MAX       64  /* Max messages dispatched per actor/turn  */
+/* M2 preemption: wall-clock time budget per actor turn (5 ms). */
+#define MARCH_TIME_QUANTUM_NS  5000000LL
+/* M3 work: number of worker threads in the pool (0 = single-threaded). */
+#define MARCH_NUM_WORKERS      4
 
 /* Single node in an actor's MPSC mailbox (intrusive linked list). */
 typedef struct march_msg_node {
@@ -348,6 +361,14 @@ static pthread_mutex_t    g_tbl_mu = PTHREAD_MUTEX_INITIALIZER;
 static march_actor_meta  *g_run_head = NULL;
 static march_actor_meta  *g_run_tail = NULL;
 static pthread_mutex_t    g_run_mu   = PTHREAD_MUTEX_INITIALIZER;
+/* M3: Condition variable to wake idle workers when work arrives. */
+static pthread_cond_t     g_run_cond = PTHREAD_COND_INITIALIZER;
+/* M3: Worker threads + shutdown flag. */
+static pthread_t           g_worker_threads[MARCH_NUM_WORKERS];
+static _Atomic int         g_workers_started = 0;
+static _Atomic int         g_shutdown        = 0;
+/* Number of workers currently processing an actor (for quiescence). */
+static _Atomic int         g_active_workers  = 0;
 
 /* Re-entrancy guard: handlers that call march_send must not recurse into
  * the scheduler; the outer loop will pick up newly-queued actors. */
@@ -381,12 +402,15 @@ static march_actor_meta *find_or_create_meta(void *actor) {
 
 /* ── Run-queue helpers ───────────────────────────────────────────── */
 
-/* Add actor to run queue tail.  Caller must have won the scheduled CAS. */
+/* Add actor to run queue tail.  Caller must have won the scheduled CAS.
+ * M3: signals any idle worker thread that work is available. */
 static void sched_enqueue(march_actor_meta *meta) {
     meta->run_next = NULL;
     pthread_mutex_lock(&g_run_mu);
     if (g_run_tail) { g_run_tail->run_next = meta; g_run_tail = meta; }
     else            { g_run_head = g_run_tail = meta; }
+    /* Wake one idle worker (no-op if no workers are running). */
+    pthread_cond_signal(&g_run_cond);
     pthread_mutex_unlock(&g_run_mu);
 }
 
@@ -413,6 +437,108 @@ static march_msg_node *reverse_msgs(march_msg_node *head) {
         head = next;
     }
     return prev;
+}
+
+/* ── M2: Time measurement helpers ───────────────────────────────── */
+
+static long long now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
+/* ── M3: Worker thread body ──────────────────────────────────────── */
+
+/* Process one actor turn: drain up to MARCH_BATCH_MAX messages within
+ * MARCH_TIME_QUANTUM_NS nanoseconds, then re-enqueue if more remain. */
+static void process_actor_turn(march_actor_meta *meta) {
+    void *actor   = meta->actor;
+    int64_t *a    = (int64_t *)actor;
+
+    march_msg_node *stack = atomic_exchange_explicit(
+        &meta->mbox_head, NULL, memory_order_acquire);
+
+    atomic_store_explicit(&meta->scheduled, 0, memory_order_release);
+
+    if (stack) {
+        march_msg_node *fifo = reverse_msgs(stack);
+
+        char *closure = (char *)(uintptr_t)a[2];
+        typedef void (*closure_fn_t)(void *, void *, void *);
+        closure_fn_t fn = *(closure_fn_t *)(closure + 16);
+
+        int count = 0;
+        /* M2 preemption: record start time; yield after time quantum. */
+        long long t_start = now_ns();
+
+        while (fifo && count < MARCH_BATCH_MAX) {
+            /* M2: check time budget after each dispatch */
+            if (count > 0 && (now_ns() - t_start) >= MARCH_TIME_QUANTUM_NS)
+                break;
+
+            march_msg_node *node = fifo;
+            fifo = node->next;
+            void *msg = node->msg;
+            free(node);
+
+            if (a[3]) {
+                fn(closure, actor, msg);
+            } else {
+                march_decrc(msg);
+            }
+            count++;
+        }
+
+        if (fifo) {
+            march_msg_node *tail = fifo;
+            while (tail->next) tail = tail->next;
+            march_msg_node *cur;
+            do {
+                cur = atomic_load_explicit(&meta->mbox_head,
+                                           memory_order_relaxed);
+                tail->next = cur;
+            } while (!atomic_compare_exchange_weak_explicit(
+                         &meta->mbox_head, &cur, fifo,
+                         memory_order_release, memory_order_relaxed));
+        }
+    }
+
+    /* Re-schedule if mailbox is non-empty and we win the CAS 0→1. */
+    {
+        int exp = 0;
+        if (atomic_load_explicit(&meta->mbox_head, memory_order_acquire)
+                != NULL &&
+            atomic_compare_exchange_strong_explicit(
+                &meta->scheduled, &exp, 1,
+                memory_order_acq_rel, memory_order_relaxed)) {
+            sched_enqueue(meta);
+        }
+    }
+}
+
+/* M3: Worker thread body — processes actors from the shared run queue
+ * until shutdown is signaled and the queue is empty. */
+static void *march_worker_body(void *_arg) {
+    (void)_arg;
+    g_in_scheduler = 1;   /* Prevent nested scheduler re-entrancy */
+
+    while (!atomic_load_explicit(&g_shutdown, memory_order_acquire)) {
+        march_actor_meta *meta = sched_dequeue();
+        if (meta) {
+            atomic_fetch_add_explicit(&g_active_workers, 1, memory_order_relaxed);
+            process_actor_turn(meta);
+            atomic_fetch_sub_explicit(&g_active_workers, 1, memory_order_release);
+        } else {
+            /* Queue empty: sleep until work arrives or shutdown. */
+            pthread_mutex_lock(&g_run_mu);
+            while (!g_run_head &&
+                   !atomic_load_explicit(&g_shutdown, memory_order_relaxed)) {
+                pthread_cond_wait(&g_run_cond, &g_run_mu);
+            }
+            pthread_mutex_unlock(&g_run_mu);
+        }
+    }
+    return NULL;
 }
 
 /* ── Public actor API ────────────────────────────────────────────── */
@@ -450,84 +576,87 @@ int64_t march_actor_get_int(void *actor, int64_t index) {
  * Re-entrancy: if a handler calls march_send the inner call enqueues to the
  * run queue but does NOT call march_run_scheduler (g_in_scheduler == 1).
  * The outer loop below processes newly-queued actors on its next iteration. */
+/* M3: Start the worker thread pool (called once on first march_run_scheduler).
+ * Workers process actors from the shared run queue concurrently.
+ * Each worker blocks on g_run_cond when the queue is empty. */
+static void start_workers(void) {
+    int exp = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_workers_started, &exp, 1,
+            memory_order_acq_rel, memory_order_relaxed))
+        return;   /* Already started by another thread */
+
+    atomic_store_explicit(&g_shutdown, 0, memory_order_relaxed);
+    for (int i = 0; i < MARCH_NUM_WORKERS; i++) {
+        if (pthread_create(&g_worker_threads[i], NULL,
+                           march_worker_body, (void *)(intptr_t)i) != 0) {
+            fprintf(stderr, "march: failed to create worker thread %d\n", i);
+            exit(1);
+        }
+    }
+}
+
+/* M3: Shut down workers and join them.  Called after all actors are done. */
+static void stop_workers(void) {
+    atomic_store_explicit(&g_shutdown, 1, memory_order_release);
+    /* Wake all sleeping workers so they can notice the shutdown. */
+    pthread_mutex_lock(&g_run_mu);
+    pthread_cond_broadcast(&g_run_cond);
+    pthread_mutex_unlock(&g_run_mu);
+    for (int i = 0; i < MARCH_NUM_WORKERS; i++) {
+        pthread_join(g_worker_threads[i], NULL);
+    }
+    atomic_store_explicit(&g_workers_started, 0, memory_order_relaxed);
+}
+
+/* Drain the actor run queue.
+ *
+ * M2 preemption: each actor gets at most MARCH_BATCH_MAX messages AND
+ *   MARCH_TIME_QUANTUM_NS nanoseconds per turn.  A handler that takes
+ *   longer than the time budget yields to the next actor in the queue,
+ *   preventing one slow handler from starving all others.
+ *
+ * M3 work: on first call, spawns MARCH_NUM_WORKERS worker threads that
+ *   consume from the shared run queue in parallel.  The calling thread
+ *   waits (with exponential back-off) until the queue is empty AND no
+ *   workers are active, then shuts down the pool and returns.
+ *
+ * Re-entrancy: if a handler calls march_send the inner call enqueues to
+ *   the run queue but does NOT call march_run_scheduler (g_in_scheduler==1).
+ *   Workers — and this function — pick up the new actor on the next loop. */
 void march_run_scheduler(void) {
     if (g_in_scheduler) return;
     g_in_scheduler = 1;
 
+    /* M3: Start worker pool on first invocation. */
+    start_workers();
+
+    /* Main thread participates in draining alongside workers. */
     march_actor_meta *meta;
     while ((meta = sched_dequeue()) != NULL) {
-        void *actor   = meta->actor;
-        int64_t *a    = (int64_t *)actor;
-
-        /* Drain mailbox atomically: swap head to NULL, get the Treiber stack,
-         * reverse to recover FIFO order. */
-        march_msg_node *stack = atomic_exchange_explicit(
-            &meta->mbox_head, NULL, memory_order_acquire);
-
-        /* Clear scheduled flag BEFORE re-checking the mailbox.
-         * release: our flag clear is visible to producers checking it.
-         * We check for new messages below; a producer that pushes after our
-         * drain but before our clear will see scheduled=1, skip re-scheduling,
-         * and we will re-schedule in the re-check below. */
-        atomic_store_explicit(&meta->scheduled, 0, memory_order_release);
-
-        if (stack) {
-            march_msg_node *fifo = reverse_msgs(stack);
-
-            /* Dispatch closure is stored as field[2] of the actor struct.
-             * Closure layout: header(16) + fn_ptr(8). The wrapper fn takes
-             * (closure, actor, msg) and calls ActorName_dispatch(actor, msg). */
-            char *closure = (char *)(uintptr_t)a[2];
-            typedef void (*closure_fn_t)(void *, void *, void *);
-            closure_fn_t fn = *(closure_fn_t *)(closure + 16);
-
-            int count = 0;
-            while (fifo && count < MARCH_BATCH_MAX) {
-                march_msg_node *node = fifo;
-                fifo = node->next;
-                void *msg = node->msg;
-                free(node);
-
-                if (a[3]) {            /* alive? */
-                    fn(closure, actor, msg);   /* dispatch; Perceus handles RC */
-                } else {
-                    /* Actor died mid-batch: release the reference we own. */
-                    march_decrc(msg);
-                }
-                count++;
-            }
-
-            /* Batch was truncated: push leftover messages back to mailbox
-             * so other actors get a turn before we continue. */
-            if (fifo) {
-                march_msg_node *tail = fifo;
-                while (tail->next) tail = tail->next;
-                /* CAS-push the entire leftover FIFO list onto the stack head. */
-                march_msg_node *cur;
-                do {
-                    cur = atomic_load_explicit(&meta->mbox_head,
-                                               memory_order_relaxed);
-                    tail->next = cur;
-                } while (!atomic_compare_exchange_weak_explicit(
-                             &meta->mbox_head, &cur, fifo,
-                             memory_order_release, memory_order_relaxed));
-            }
-        }
-
-        /* Re-check mailbox after clearing the scheduled flag.
-         * acquire: see any message pushed by a concurrent sender.
-         * If the mailbox is non-empty and we win the CAS 0→1 we re-schedule. */
-        {
-            int exp = 0;
-            if (atomic_load_explicit(&meta->mbox_head, memory_order_acquire)
-                    != NULL &&
-                atomic_compare_exchange_strong_explicit(
-                    &meta->scheduled, &exp, 1,
-                    memory_order_acq_rel, memory_order_relaxed)) {
-                sched_enqueue(meta);
-            }
-        }
+        atomic_fetch_add_explicit(&g_active_workers, 1, memory_order_relaxed);
+        process_actor_turn(meta);
+        atomic_fetch_sub_explicit(&g_active_workers, 1, memory_order_release);
     }
+
+    /* Wait for quiescence: run queue empty AND no in-flight processing.
+     * Spin with decreasing sleep to minimise latency while avoiding busy-wait. */
+    long sleep_ns = 1000;   /* 1 µs initial backoff */
+    for (;;) {
+        /* Acquire fence: see worker writes to g_active_workers and g_run_head. */
+        int active = atomic_load_explicit(&g_active_workers, memory_order_acquire);
+        pthread_mutex_lock(&g_run_mu);
+        int has_work = (g_run_head != NULL);
+        pthread_mutex_unlock(&g_run_mu);
+        if (active == 0 && !has_work) break;
+
+        struct timespec ts = { 0, sleep_ns };
+        nanosleep(&ts, NULL);
+        sleep_ns = (sleep_ns < 1000000) ? sleep_ns * 2 : 1000000; /* cap 1 ms */
+    }
+
+    /* M3: Shut down the worker pool now that all work is done. */
+    stop_workers();
 
     g_in_scheduler = 0;
 }

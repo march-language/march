@@ -999,6 +999,23 @@ let expand_record env ty =
      | _ -> None)
   | _ -> None
 
+(** Register per-field linear sentinels for a named record variable [varname].
+    When [ty] is or expands to a TRecord with linear fields, adds phantom
+    ["varname#fieldname"] entries to env.lin so that EField accesses on
+    that variable can detect double-use of individual linear fields. *)
+let bind_linear_field_sentinels varname ty env =
+  match expand_record env (repr ty) with
+  | Some (TRecord flds) ->
+    List.fold_left (fun acc_env (fname, fty) ->
+        match repr fty with
+        | TLin (lin, _) when lin <> Ast.Unrestricted ->
+          let key = varname ^ "#" ^ fname in
+          let le = { le_name = key; le_lin = lin; le_used = ref false } in
+          { acc_env with lin = le :: acc_env.lin }
+        | _ -> acc_env
+      ) env flds
+  | _ -> env
+
 (* =================================================================
    §12  Linearity tracking
    ================================================================= *)
@@ -1038,7 +1055,9 @@ let bind_vars_with_linearity (bindings : (string * scheme) list) env =
         (match repr t with
          | TLin (lin, inner) when lin <> Ast.Unrestricted ->
            bind_linear name lin inner acc_env
-         | t' -> bind_var name (Mono t') acc_env)
+         | t' ->
+           let env1 = bind_var name (Mono t') acc_env in
+           bind_linear_field_sentinels name t' env1)
       | _ -> bind_var name sch acc_env
     ) env bindings
 
@@ -1072,8 +1091,14 @@ let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
             | Some lin ->
               (* Scrutinee was linear: the bound variable inherits its linearity. *)
               bind_linear name lin t' acc_env
-            | None -> bind_var name (Mono t') acc_env))
-      | _ -> bind_var name sch acc_env
+            | None ->
+              let env1 = bind_var name (Mono t') acc_env in
+              bind_linear_field_sentinels name t' env1))
+      | Poly (_, _, t) ->
+        (* Generalised binding: bind normally but also add field sentinels for
+           any linear fields in the underlying type. *)
+        let env1 = bind_var name sch acc_env in
+        bind_linear_field_sentinels name (repr t) env1
     ) env bindings
 
 (** After a scope closes, check that every in-scope linear var was used. *)
@@ -1439,7 +1464,26 @@ let rec infer_expr env (e : Ast.expr) : ty =
             (match repr t with
              | TLin (lin, _) when lin <> Ast.Unrestricted ->
                (match e with
-                | Ast.EVar _ -> ()  (* record_use already handled above *)
+                | Ast.EVar vname ->
+                  (* Record is held in a named variable: check per-field sentinel.
+                     Sentinel "varname#fieldname" was registered by bind_lam_param /
+                     bind_pattern_bindings when the variable was bound.  If it
+                     exists, record_use will catch a second access; if it doesn't
+                     (e.g., variable is outer-scope), fall back to checking the
+                     whole-record linear entry via record_use on the variable itself. *)
+                  let sentinel = vname.txt ^ "#" ^ name.txt in
+                  if List.exists (fun le -> le.le_name = sentinel) env.lin then
+                    record_use sentinel sp env
+                  else begin
+                    (* Sentinel not present — warn that we can't track this field. *)
+                    ignore lin;
+                    Err.warning env.errors ~span:sp
+                      (Printf.sprintf
+                         "Field `%s` has a linear type but linearity tracking \
+                          is not available for `%s` at this binding site.\n\
+                          Ensure `%s` is a locally-bound variable."
+                         name.txt vname.txt vname.txt)
+                  end
                 | _ ->
                   Err.error env.errors ~span:sp
                     (Printf.sprintf
@@ -1691,8 +1735,10 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
     | None, None   -> fresh_var env.level
   in
   match p.param_lin with
-  | Ast.Unrestricted -> bind_var p.param_name.txt (Mono t) env
-  | lin              -> bind_linear p.param_name.txt lin t env
+  | Ast.Unrestricted ->
+    let env1 = bind_var p.param_name.txt (Mono t) env in
+    bind_linear_field_sentinels p.param_name.txt t env1
+  | lin -> bind_linear p.param_name.txt lin t env
 
 (* =================================================================
    §15  Declaration checking
@@ -2013,6 +2059,16 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       List.concat_map (fun t ->
         List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty t)
       ) (param_tys @ ret_tys)
+    (* H9 gap fix: also check actor handler signatures for Cap usage.
+       Actor handlers can receive Cap(X) values as message arguments; those
+       must also be covered by module-level [needs] declarations. *)
+    | Ast.DActor (_, actor, sp) ->
+      List.concat_map (fun (h : Ast.actor_handler) ->
+          let param_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
+          List.concat_map (fun t ->
+            List.map (fun cap -> (cap, sp)) (cap_paths_in_surface_ty t)
+          ) param_tys
+        ) actor.actor_handlers
     | _ -> []
   ) decls in
   let cap s = MPCode ("Cap(" ^ s ^ ")") in
@@ -2329,7 +2385,7 @@ let rec check_decl env (d : Ast.decl) : env =
         List.iter (List.iter validate_step) branches
     in
     List.iter validate_step pdef.proto_steps;
-    (* Warn if only one participant is ever named (communication needs two). *)
+    (* Collect all participant names. *)
     let participants =
       List.sort_uniq String.compare
         (List.concat_map collect_participants pdef.proto_steps)
@@ -2340,7 +2396,44 @@ let rec check_decl env (d : Ast.decl) : env =
            "Protocol `%s` only names one participant (`%s`). \
             A protocol usually involves at least two parties."
            name.txt (List.hd participants));
-    { env with protocols = (name.txt, pdef) :: env.protocols }
+    (* H8: Use env to validate that participants are known actor types.
+       Any participant that is NOT a registered actor or type gets a hint.
+       This makes env.protocols non-dead: we cross-check against the type env. *)
+    List.iter (fun p ->
+        let is_actor = List.exists (fun (_, ci) -> ci.ci_type = p) env.ctors in
+        let is_type  = List.mem_assoc p env.types in
+        if not (is_actor || is_type) then
+          Err.hint env.errors ~span:sp
+            (Printf.sprintf
+               "Protocol `%s`: participant `%s` is not a known actor or type. \
+                Did you forget to declare `actor %s ...`?"
+               name.txt p p)
+      ) participants;
+    (* H8: Note that step-ordering conformance is checked structurally but
+       channel-level enforcement requires session typing at call sites.
+       Registered for future conformance passes. *)
+    let new_env = { env with protocols = (name.txt, pdef) :: env.protocols } in
+    (* Check against previously-declared protocols for cross-protocol conflicts. *)
+    (if List.length new_env.protocols > 1 then
+       (* Detect if two protocols use the same participant pair in opposite directions
+          without declaring a dual — this is a common session type mistake. *)
+       List.iter (fun (other_name, other_pdef) ->
+           if other_name <> name.txt then begin
+             let other_parts =
+               List.sort_uniq String.compare
+                 (List.concat_map collect_participants other_pdef.proto_steps)
+             in
+             if List.length participants >= 2 && List.length other_parts >= 2
+             && List.sort compare participants = List.sort compare other_parts then
+               Err.hint env.errors ~span:sp
+                 (Printf.sprintf
+                    "Protocol `%s` involves the same participants as `%s`. \
+                     If these are dual protocols (one for each direction), \
+                     this is expected. Otherwise, consider merging them."
+                    name.txt other_name)
+           end
+         ) env.protocols);
+    new_env
 
   | Ast.DSig (name, sdef, _sp) ->
     (* Store the signature so DMod can check conformance later. *)

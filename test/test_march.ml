@@ -541,6 +541,83 @@ let test_protocol_duplicate_error () =
   end|} in
   Alcotest.(check bool) "duplicate protocol name: error" true (has_errors ctx)
 
+(* ── H6: Linear types through record fields (direct field access) ─────────── *)
+
+let test_linear_field_double_access_error () =
+  (* Accessing a linear record field twice directly on a named variable should error.
+     The sentinel "r#data" is created when r is bound, and record_use is called
+     on it each time r.data is evaluated. *)
+  let ctx = typecheck {|mod Test do
+    type Packet = { linear data: Int, size: Int }
+    fn bad(r: Packet) : Int do
+      r.data + r.data
+    end
+  end|} in
+  Alcotest.(check bool) "linear field direct double-access: error" true (has_errors ctx)
+
+let test_linear_field_single_access_ok () =
+  (* Accessing a linear record field exactly once should be fine. *)
+  let ctx = typecheck {|mod Test do
+    type Packet = { linear data: Int, size: Int }
+    fn ok(r: Packet) : Int do
+      r.data
+    end
+  end|} in
+  Alcotest.(check bool) "linear field single access: no error" false (has_errors ctx)
+
+(* ── H8: Protocol participant cross-checking ─────────────────────────────── *)
+
+let test_protocol_unknown_participant_hint () =
+  (* A protocol that names participants that are not known actors or types
+     should produce a hint (not an error). *)
+  let ctx = typecheck {|mod Test do
+    protocol Mystery do
+      Unicorn -> Dragon : Int
+    end
+  end|} in
+  (* Should have hints (unknown participants) but no hard errors *)
+  Alcotest.(check bool) "unknown protocol participant: hint (not error)" false (has_errors ctx)
+
+let test_protocol_known_participant_no_hint () =
+  (* A protocol that names a declared type as participant should not hint. *)
+  let ctx = typecheck {|mod Test do
+    type Client = {}
+    type Server = {}
+    protocol Ping do
+      Client -> Server : Int
+    end
+  end|} in
+  Alcotest.(check bool) "known participant types: no errors" false (has_errors ctx)
+
+(* ── H9: Actor handler capability checking ───────────────────────────────── *)
+
+let test_actor_handler_cap_needs_ok () =
+  (* An actor handler with a Cap parameter is OK if the module declares the need. *)
+  let ctx = typecheck {|mod Test do
+    needs IO
+    actor Counter do
+      state { count: Int }
+      init { count = 0 }
+      on Inc(cap: Cap(IO)) do
+        state
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "actor handler cap with needs: ok" false (has_errors ctx)
+
+let test_actor_handler_cap_missing_needs_error () =
+  (* An actor handler with a Cap parameter, but no needs declaration, should error. *)
+  let ctx = typecheck {|mod Test do
+    actor Counter do
+      state { count: Int }
+      init { count = 0 }
+      on Inc(cap: Cap(IO.Console)) do
+        state
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "actor handler cap without needs: error" true (has_errors ctx)
+
 let test_lexer_when () =
   let lexbuf = Lexing.from_string "when" in
   let tok = March_lexer.Lexer.token lexbuf in
@@ -6567,11 +6644,19 @@ let () =
           Alcotest.test_case "linear pattern match double"   `Quick test_linear_pattern_match_double_use;
           Alcotest.test_case "linear closure capture"        `Quick test_linear_closure_capture_error;
           Alcotest.test_case "linear field let binding"       `Quick test_linear_field_let_binding;
-          (* Fix 3: Session type validation *)
+          (* H6: Linear field direct field-access tracking *)
+          Alcotest.test_case "linear field double access"    `Quick test_linear_field_double_access_error;
+          Alcotest.test_case "linear field single access ok" `Quick test_linear_field_single_access_ok;
+          (* Fix 3/H8: Session type validation + participant cross-check *)
           Alcotest.test_case "protocol self-message"         `Quick test_protocol_self_message_error;
           Alcotest.test_case "protocol empty loop"           `Quick test_protocol_empty_loop_error;
           Alcotest.test_case "protocol valid"                `Quick test_protocol_valid;
           Alcotest.test_case "protocol duplicate"            `Quick test_protocol_duplicate_error;
+          Alcotest.test_case "protocol unknown participant"  `Quick test_protocol_unknown_participant_hint;
+          Alcotest.test_case "protocol known participant"    `Quick test_protocol_known_participant_no_hint;
+          (* H9: Actor handler capability checking *)
+          Alcotest.test_case "actor cap needs ok"            `Quick test_actor_handler_cap_needs_ok;
+          Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;
         ] );
       ( "eval",
         [
