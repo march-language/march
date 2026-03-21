@@ -176,7 +176,15 @@ let is_builtin_fn name =
                  (* List builtins *)
                  "list_append"; "list_concat";
                  (* File/Dir builtins *)
-                 "file_exists"; "dir_exists"]
+                 "file_exists"; "dir_exists";
+                 (* Capability builtins *)
+                 "cap_narrow";
+                 (* Monitor/supervision builtins *)
+                 "demonitor"; "monitor"; "mailbox_size";
+                 "run_until_idle"; "register_resource"; "get_cap";
+                 "send_checked"; "pid_of_int"; "get_actor_field";
+                 (* Generic to_string *)
+                 "to_string"]
 
 let atom_is_builtin (atom : Tir.atom) =
   match atom with
@@ -244,6 +252,19 @@ let builtin_ret_ty : string -> Tir.ty option = function
   (* File/Dir builtins *)
   | "file_exists"                 -> Some Tir.TBool
   | "dir_exists"                  -> Some Tir.TBool
+  (* Capability builtins *)
+  | "cap_narrow"                  -> Some (Tir.TCon ("Cap", [Tir.TVar "a"]))
+  (* Monitor/supervision builtins *)
+  | "demonitor"                   -> Some Tir.TUnit
+  | "monitor"                     -> Some Tir.TInt
+  | "mailbox_size"                -> Some Tir.TInt
+  | "run_until_idle"              -> Some Tir.TUnit
+  | "register_resource"           -> Some Tir.TUnit
+  | "get_cap"                     -> Some (Tir.TCon ("Option", [Tir.TCon ("Cap", [Tir.TVar "a"])]))
+  | "send_checked"                -> Some Tir.TUnit
+  | "pid_of_int"                  -> Some (Tir.TCon ("Pid", [Tir.TVar "a"]))
+  | "get_actor_field"             -> Some (Tir.TCon ("Option", [Tir.TVar "a"]))
+  | "to_string"                   -> Some Tir.TString
   | _ -> None
 
 (** Mangle a March builtin name to the C runtime function name. *)
@@ -331,6 +352,19 @@ let mangle_extern : string -> string = function
   (* File/Dir builtins *)
   | "file_exists"  -> "march_file_exists"
   | "dir_exists"   -> "march_dir_exists"
+  (* Capability builtins *)
+  | "cap_narrow"         -> "march_cap_narrow"
+  (* Monitor/supervision builtins *)
+  | "demonitor"          -> "march_demonitor"
+  | "monitor"            -> "march_monitor"
+  | "mailbox_size"       -> "march_mailbox_size"
+  | "run_until_idle"     -> "march_run_until_idle"
+  | "register_resource"  -> "march_register_resource"
+  | "get_cap"            -> "march_get_cap"
+  | "send_checked"       -> "march_send_checked"
+  | "pid_of_int"         -> "march_pid_of_int"
+  | "get_actor_field"    -> "march_get_actor_field"
+  | "to_string"          -> "march_value_to_string"
   | "main"          -> "march_main"   (* March main → march_main in LLVM *)
   | other           -> other
 
@@ -455,6 +489,9 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     ("ptr", "@" ^ llvm_name (mangle_extern did.Tir.did_name))
   | Tir.AVar v when v.Tir.v_name = "get_work_pool" ->
     (* Phase 1: work pool is a null sentinel *)
+    ("ptr", "null")
+  | Tir.AVar v when v.Tir.v_name = "root_cap" ->
+    (* Capability token: in compiled mode, capabilities are opaque null pointers *)
     ("ptr", "null")
   | Tir.AVar v when Hashtbl.mem ctx.top_fns v.Tir.v_name
                  && (match v.Tir.v_ty with Tir.TFn _ -> true | _ -> false) ->
@@ -1580,6 +1617,19 @@ declare ptr  @march_list_concat(ptr %lists)
 ; File/Dir builtins
 declare i64  @march_file_exists(ptr %s)
 declare i64  @march_dir_exists(ptr %s)
+; Capability builtins
+declare ptr  @march_cap_narrow(ptr %cap)
+; Monitor/supervision builtins
+declare void @march_demonitor(i64 %ref)
+declare i64  @march_monitor(ptr %watcher, ptr %target)
+declare i64  @march_mailbox_size(ptr %pid)
+declare void @march_run_until_idle()
+declare void @march_register_resource(ptr %pid, ptr %name, ptr %cleanup)
+declare ptr  @march_get_cap(ptr %pid)
+declare void @march_send_checked(ptr %cap, ptr %msg)
+declare ptr  @march_pid_of_int(i64 %n)
+declare ptr  @march_get_actor_field(ptr %pid, ptr %name)
+declare ptr  @march_value_to_string(ptr %v)
 
 |}
 
@@ -1597,7 +1647,14 @@ let emit_module ?(fast_math=false) (m : Tir.tir_module) : string =
     ) m.Tir.tm_externs;
   List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true)
     m.Tir.tm_fns;
-  List.iter (emit_fn ctx) m.Tir.tm_fns;
+  (* Skip emitting prelude wrapper functions whose runtime name is already
+     declared in the preamble.  Only filter short unqualified names that map
+     to march_* builtins — not user-defined qualified names like "CapDemo.main". *)
+  let preamble_declared = ["panic"; "println"; "print"] in
+  List.iter (fun fn ->
+      if List.mem fn.Tir.fn_name preamble_declared then ()
+      else emit_fn ctx fn
+    ) m.Tir.tm_fns;
 
   let out = Buffer.create 8192 in
   emit_preamble out;

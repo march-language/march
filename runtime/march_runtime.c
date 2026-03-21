@@ -1163,6 +1163,63 @@ int64_t march_dir_exists(void *s) {
     return S_ISDIR(st.st_mode) ? 1 : 0;
 }
 
+/* ── Capability builtins ─────────────────────────────────────────────── */
+
+/* cap_narrow: attenuates a capability to a sub-capability.
+   In compiled mode, capabilities are opaque pointers (just pass through). */
+void *march_cap_narrow(void *cap) {
+    return cap;
+}
+
+/* ── Monitor/supervision builtins ────────────────────────────────────── */
+
+/* demonitor: cancel a monitor subscription. No-op stub. */
+void march_demonitor(int64_t ref) {
+    (void)ref;
+}
+
+/* monitor: establish a monitor link. Returns a monitor ref (0 = stub). */
+int64_t march_monitor(void *watcher, void *target) {
+    (void)watcher; (void)target;
+    return 0;
+}
+
+/* mailbox_size: return the number of pending messages for an actor.
+   Stub: returns 0 (mailbox introspection is for interpreter use). */
+int64_t march_mailbox_size(void *pid) {
+    (void)pid;
+    return 0;
+}
+
+/* run_until_idle: flush the async message queue by running the scheduler. */
+void march_run_until_idle(void) {
+    march_run_scheduler();
+}
+
+/* register_resource: register a cleanup callback for an actor. Stub. */
+void march_register_resource(void *pid, void *name, void *cleanup) {
+    (void)pid; (void)name; (void)cleanup;
+}
+
+/* get_cap: get the capability associated with an actor pid.
+   Returns None (tag=0) — capability enforcement is compile-time only. */
+void *march_get_cap(void *pid) {
+    (void)pid;
+    void *none = march_alloc(16);
+    /* tag 0 = None, already zeroed by march_alloc */
+    return none;
+}
+
+/* send_checked: send a message to an actor with capability check. Stub. */
+void march_send_checked(void *cap, void *msg) {
+    (void)cap; (void)msg;
+}
+
+/* pid_of_int: cast an integer to a Pid (unsafe, for supervisor state fields). */
+void *march_pid_of_int(int64_t n) {
+    return (void *)(intptr_t)n;
+}
+
 /* ── Value pretty-printing ───────────────────────────────────────────── */
 
 /* Format a March value as a human-readable string.

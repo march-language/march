@@ -386,8 +386,12 @@ and lower_expr (e : Ast.expr) : Tir.expr =
 
   | Ast.EResultRef _ -> failwith "TIR lower: EResultRef is REPL-only and should be substituted before lowering"
 
-  | Ast.EDbg _ ->
-    failwith "TIR lower: EDbg is interpreter-only and cannot be lowered to TIR"
+  | Ast.EDbg (None, _) ->
+    (* dbg() with no argument: compile to unit in compiled mode *)
+    Tir.EAtom (Tir.ALit (Ast.LitAtom "unit"))
+  | Ast.EDbg (Some inner, _) ->
+    (* dbg(expr): compile to just the expression (strip the debug wrapper) *)
+    lower_expr inner
 
   (* --- Send/Spawn (CPS for args) --- *)
   | Ast.ESend (cap, msg, _) ->

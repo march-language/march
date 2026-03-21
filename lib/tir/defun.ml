@@ -52,7 +52,13 @@ let builtin_names : StringSet.t =
       (* List builtins *)
       "list_append"; "list_concat";
       (* File/Dir builtins *)
-      "file_exists"; "dir_exists" ]
+      "file_exists"; "dir_exists";
+      (* Capability builtins *)
+      "cap_narrow"; "root_cap";
+      (* Monitor/supervision builtins *)
+      "demonitor"; "monitor"; "mailbox_size";
+      "run_until_idle"; "register_resource"; "get_cap";
+      "send_checked"; "pid_of_int" ]
 
 (* ── Phase 0: collect top-level names ────────────────────────────── *)
 

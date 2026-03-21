@@ -74,6 +74,14 @@ pub fn tail(xs : List(a)) : List(a) do
   end
 end
 
+doc "Returns true if the list is empty."
+pub fn is_nil(xs : List(a)) : Bool do
+  match xs with
+  | Nil -> true
+  | Cons(_, _) -> false
+  end
+end
+
 doc "Returns the number of elements in the list."
 pub fn length(xs : List(a)) : Int do
   fn go(lst : List(a), acc : Int) : Int do
