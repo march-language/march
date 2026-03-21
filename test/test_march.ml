@@ -1624,19 +1624,21 @@ let test_superclass_satisfied () =
   Alcotest.(check bool) "Ord(Int) with Eq(Int) present — no errors" false (has_errors ctx)
 
 let test_superclass_missing () =
-  (* impl Ord(String) without impl Eq(String) — should error *)
+  (* impl Sortable(MyType) without impl Equatable(MyType) — should error.
+     Use a custom type to avoid builtin Eq/Ord impls for String satisfying the check. *)
   let ctx = typecheck {|mod Test do
-    interface Eq(a) do
+    type MyType = MyType(Int)
+    interface Equatable(a) do
       fn eq: a -> a -> Bool
     end
-    interface Ord(a) requires Eq(a) do
+    interface Sortable(a) requires Equatable(a) do
       fn compare: a -> a -> Int
     end
-    impl Ord(String) do
-      fn compare(x, y) do compare_string(x, y) end
+    impl Sortable(MyType) do
+      fn compare(x, y) do 0 end
     end
   end|} in
-  Alcotest.(check bool) "Ord(String) without Eq(String) — has errors" true (has_errors ctx)
+  Alcotest.(check bool) "Sortable(MyType) without Equatable(MyType) — has errors" true (has_errors ctx)
 
 let test_unknown_ctor_suggests_similar () =
   (* Typo: "Somm" — should suggest "Some" and produce an error *)
