@@ -92,10 +92,12 @@ and tvar =
 
 (** Lightweight type-class constraints.
     [CNum t] asserts t must be Int or Float (arithmetic).
-    [COrd t] asserts t must be Int, Float, or String (ordered). *)
+    [COrd t] asserts t must be Int, Float, or String (ordered).
+    [CInterface (name, t)] asserts t must implement interface [name]. *)
 type constraint_ =
   | CNum of ty
   | COrd of ty
+  | CInterface of string * ty
 
 (** A type scheme encodes Hindley-Milner polymorphism.
     [Poly(ids, cs, ty)] represents ∀(α₁ … αₙ). τ where the αᵢ are the
@@ -268,13 +270,14 @@ type env = {
   mod_needs  : string list;
   (** Capabilities declared via [needs] in the current module scope, as dot-joined paths *)
   protocols  : (string * Ast.protocol_def) list; (** Registered session-type protocols *)
+  impls      : (string * ty) list; (** Registered interface implementations: (iface_name, impl_ty) *)
 }
 
 let make_env errors type_map = {
   vars = []; types = []; ctors = []; records = []; level = 0; lin = [];
   errors; pending_constraints = ref []; type_map;
   interfaces = []; sigs = [];
-  mod_needs = []; protocols = [];
+  mod_needs = []; protocols = []; impls = [];
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -349,7 +352,8 @@ let instantiate level env = function
     in
     let inst_cs = List.map (function
         | CNum t -> CNum (inst t)
-        | COrd t -> COrd (inst t)) cs
+        | COrd t -> COrd (inst t)
+        | CInterface (n, t) -> CInterface (n, inst t)) cs
     in
     env.pending_constraints := inst_cs @ !(env.pending_constraints);
     inst ty
@@ -893,6 +897,57 @@ let record_use name span env =
        le.le_used := true
      | Ast.Unrestricted -> ())
 
+(** [bind_vars_with_linearity bindings env] is like [bind_vars] except it
+    checks the repr'd type of each binding after unification: if the type
+    has resolved to a [TLin] wrapper, the variable is registered as a
+    linear/affine binding (tracked in [env.lin]) rather than an ordinary one.
+    Use this wherever pattern-bound variables inherit linearity from the
+    scrutinee, e.g. in match arms. *)
+let bind_vars_with_linearity (bindings : (string * scheme) list) env =
+  List.fold_left (fun acc_env (name, sch) ->
+      match sch with
+      | Mono t ->
+        (match repr t with
+         | TLin (lin, inner) when lin <> Ast.Unrestricted ->
+           bind_linear name lin inner acc_env
+         | t' -> bind_var name (Mono t') acc_env)
+      | _ -> bind_var name sch acc_env
+    ) env bindings
+
+(** [bind_pattern_bindings scrut_expr bindings env] adds [bindings] to [env].
+    Linearity is propagated in two ways:
+    1. If a binding's type (after unification) is [TLin], it is registered as
+       linear (catches cases where the type annotation carries linearity).
+    2. If [scrut_expr] is a linear/affine variable, ALL top-level bindings
+       inherit that linearity — this covers the common pattern of matching
+       a linearly-typed variable bound with the [linear x: T] syntax, where
+       the internal type is plain [T] without a [TLin] wrapper. *)
+let bind_pattern_bindings scrut_expr (bindings : (string * scheme) list) env =
+  (* Check whether the scrutinee is itself a tracked linear variable. *)
+  let inherited_lin =
+    match scrut_expr with
+    | Ast.EVar sname ->
+      (match List.find_opt (fun le -> le.le_name = sname.txt) env.lin with
+       | Some le when le.le_lin <> Ast.Unrestricted -> Some le.le_lin
+       | _ -> None)
+    | _ -> None
+  in
+  List.fold_left (fun acc_env (name, sch) ->
+      match sch with
+      | Mono t ->
+        (match repr t with
+         | TLin (lin, inner) when lin <> Ast.Unrestricted ->
+           (* Binding type carries TLin — use that linearity. *)
+           bind_linear name lin inner acc_env
+         | t' ->
+           (match inherited_lin with
+            | Some lin ->
+              (* Scrutinee was linear: the bound variable inherits its linearity. *)
+              bind_linear name lin t' acc_env
+            | None -> bind_var name (Mono t') acc_env))
+      | _ -> bind_var name sch acc_env
+    ) env bindings
+
 (** After a scope closes, check that every in-scope linear var was used. *)
 let check_linear_all_consumed env ~scope_span in_scope_names =
   List.iter (fun le ->
@@ -1101,9 +1156,33 @@ let rec infer_expr env (e : Ast.expr) : ty =
          end)
 
     (* ── Lambdas ──────────────────────────────────────────────────── *)
-    | Ast.ELam (params, body, _) ->
+    | Ast.ELam (params, body, lsp) ->
+      (* Snapshot which outer linear vars are unused before entering the lambda.
+         Any that become used during body checking were captured by the closure.
+         Capturing a linear value in a closure is unsound because the closure
+         could be called multiple times, violating the exactly-once guarantee. *)
+      let outer_lin_snapshot =
+        List.map (fun le -> (le.le_name, !(le.le_used))) env.lin
+      in
       let param_tys, env' = bind_lam_params env params in
       let body_ty = infer_expr env' body in
+      (* Detect captures: outer linear vars that were unused before but used now. *)
+      List.iter (fun le ->
+          let was_used_before =
+            match List.assoc_opt le.le_name outer_lin_snapshot with
+            | Some b -> b
+            | None   -> true  (* not in snapshot = lambda's own param, skip *)
+          in
+          if not was_used_before && !(le.le_used)
+          && le.le_lin <> Ast.Unrestricted then
+            Err.error env.errors ~span:lsp
+              (Printf.sprintf
+                 "The linear value `%s` cannot be captured by a closure.\n\
+                  A closure may be called multiple times, which would violate \
+                  the exactly-once guarantee.\n\
+                  Pass `%s` as a parameter to the closure instead."
+                 le.le_name le.le_name)
+        ) env.lin;
       List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty
 
     (* ── do/end block ─────────────────────────────────────────────── *)
@@ -1124,7 +1203,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
     (* ── match ────────────────────────────────────────────────────── *)
     | Ast.EMatch (scrut, branches, sp) ->
       let scrut_ty = infer_expr env scrut in
-      infer_match env sp scrut_ty branches
+      infer_match env sp scrut scrut_ty branches
 
     (* ── Tuples ───────────────────────────────────────────────────── *)
     | Ast.ETuple ([], _)  -> t_unit
@@ -1196,7 +1275,24 @@ let rec infer_expr env (e : Ast.expr) : ty =
       (match expand_record env (repr e_ty) with
        | Some (TRecord flds) ->
          (match List.assoc_opt name.txt flds with
-          | Some t -> t
+          | Some t ->
+            (* If the field type is linear/affine, accessing it consumes the
+               field.  When the record is held in a named variable, a second
+               access on the same variable is caught by [record_use].
+               For non-variable expressions we emit a diagnostic here. *)
+            (match repr t with
+             | TLin (lin, _) when lin <> Ast.Unrestricted ->
+               (match e with
+                | Ast.EVar _ -> ()  (* record_use already handled above *)
+                | _ ->
+                  Err.error env.errors ~span:sp
+                    (Printf.sprintf
+                       "Field `%s` has a linear type; accessing it through \
+                        a complex expression loses linearity tracking.\n\
+                        Bind the record to a variable first."
+                       name.txt))
+             | _ -> ());
+            t
           | None   ->
             Err.error env.errors ~span:sp
               (Printf.sprintf
@@ -1316,7 +1412,8 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
     List.iter (fun (br : Ast.branch) ->
         let bindings, pat_ty = infer_pattern env br.branch_pat in
         unify env ~span:msp ~reason:(Some (RMatchArm msp)) scrut_ty pat_ty;
-        let env' = bind_vars bindings env in
+        (* Propagate linearity from scrutinee to pattern-bound variables. *)
+        let env' = bind_pattern_bindings scrut bindings env in
         (match br.branch_guard with
          | Some g ->
            check_expr env' g t_bool
@@ -1358,12 +1455,13 @@ and infer_app env span f_ty args idx =
     TError
 
 (** Infer the result type of a match expression. *)
-and infer_match env span scrut_ty branches =
+and infer_match env span scrut scrut_ty branches =
   let result_ty = fresh_var env.level in
   List.iter (fun (br : Ast.branch) ->
       let bindings, pat_ty = infer_pattern env br.branch_pat in
       unify env ~span ~reason:(Some (RMatchArm span)) scrut_ty pat_ty;
-      let env' = bind_vars bindings env in
+      (* Propagate linearity from scrutinee to pattern-bound variables. *)
+      let env' = bind_pattern_bindings scrut bindings env in
       (match br.branch_guard with
        | Some g ->
          check_expr env' g t_bool
@@ -1392,7 +1490,8 @@ and infer_block env exprs =
       | Ast.PatVar _ -> List.map gen_binding bindings
       | _            -> bindings
     in
-    let env' = bind_vars bindings' env in
+    (* Propagate linearity from the RHS expression into pattern bindings. *)
+    let env' = bind_pattern_bindings b.bind_expr bindings' env in
     infer_block env' rest
   (* Local named recursive function: fn go(params) : ret_ty do body end *)
   | Ast.ELetFn (name, params, ret_ann, body, sp) :: rest ->
@@ -1554,27 +1653,63 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
   ignore (leave_level env');
   sch
 
-(** Discharge all pending Num/Ord constraints accumulated during inference.
-    Called at each declaration boundary (DFn, DLet) to verify that constrained
-    type variables were unified with a compatible concrete type. *)
+(** [impl_matches_ty impl_ty target_ty] returns true if [target_ty] could be
+    satisfied by an implementation typed as [impl_ty].  Free unification
+    variables in [impl_ty] (from parameterised impls like [List(a)]) are
+    treated as wildcards that match any type. *)
+let rec impl_matches_ty impl_ty target_ty =
+  match repr impl_ty, repr target_ty with
+  | TVar _, _ -> true  (* polymorphic impl var — matches anything *)
+  | _, TVar _ -> false (* target still unresolved — cannot confirm *)
+  | TCon (n1, as1), TCon (n2, as2)
+    when n1 = n2 && List.length as1 = List.length as2 ->
+    List.for_all2 impl_matches_ty as1 as2
+  | TArrow (a1, b1), TArrow (a2, b2) ->
+    impl_matches_ty a1 a2 && impl_matches_ty b1 b2
+  | TTuple ts1, TTuple ts2 when List.length ts1 = List.length ts2 ->
+    List.for_all2 impl_matches_ty ts1 ts2
+  | TRecord f1, TRecord f2
+    when List.map fst f1 = List.map fst f2 ->
+    List.for_all2 (fun (_, t1) (_, t2) -> impl_matches_ty t1 t2) f1 f2
+  | TLin (_, t1), TLin (_, t2) -> impl_matches_ty t1 t2
+  | TError, _ | _, TError -> true
+  | a, b -> a = b
+
+(** Discharge all pending Num/Ord/CInterface constraints accumulated during
+    inference.  Called at each declaration boundary (DFn, DLet) to verify
+    that constrained type variables were unified with a compatible type. *)
 let discharge_constraints env span =
   List.iter (fun c ->
-      let ty, kind = match c with
-        | CNum t -> (repr t, "Num")
-        | COrd t -> (repr t, "Ord")
-      in
-      match ty with
-      | TCon ("Int",   []) | TCon ("Float", []) -> ()   (* Num + Ord *)
-      | TCon ("String",[]) ->
-        (match c with
-         | COrd _ -> ()   (* String is Ord *)
-         | CNum _ ->
+      match c with
+      | CNum t | COrd t ->
+        let ty   = repr t in
+        let kind = match c with CNum _ -> "Num" | COrd _ -> "Ord" | _ -> assert false in
+        (match ty with
+         | TCon ("Int",   []) | TCon ("Float", []) -> ()   (* Num + Ord *)
+         | TCon ("String",[]) ->
+           (match c with
+            | COrd _ -> ()   (* String is Ord *)
+            | _ ->
+              Err.error env.errors ~span
+                "String does not implement Num (only Int and Float do).")
+         | TVar _ -> ()   (* Unresolved — will be polymorphic, constraint preserved *)
+         | _ ->
            Err.error env.errors ~span
-             "String does not implement Num (only Int and Float do).")
-      | TVar _ -> ()   (* Unresolved — will be polymorphic, constraint preserved *)
-      | _ ->
-        Err.error env.errors ~span
-          (Printf.sprintf "`%s` does not implement %s." (pp_ty ty) kind)
+             (Printf.sprintf "`%s` does not implement %s." (pp_ty ty) kind))
+      | CInterface (iface_name, t) ->
+        let ty = repr t in
+        (match ty with
+         | TVar _ -> ()   (* Still polymorphic — cannot check yet *)
+         | _ ->
+           let satisfied = List.exists (fun (iname, impl_ty) ->
+               iname = iface_name && impl_matches_ty (repr impl_ty) ty
+             ) env.impls in
+           if not satisfied then
+             Err.error env.errors ~span
+               (Printf.sprintf
+                  "`%s` does not implement interface `%s`.\n\
+                   Add `impl %s(%s) do ... end` to provide an implementation."
+                  (pp_ty ty) iface_name iface_name (pp_ty ty)))
     ) !(env.pending_constraints);
   env.pending_constraints := []
 
@@ -1711,7 +1846,17 @@ let rec check_decl env (d : Ast.decl) : env =
          ) env1 variants
      | Ast.TDRecord fields ->
        let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
-       let field_pairs = List.map (fun (f : Ast.field) -> (f.fld_name.txt, f.fld_ty)) fields in
+       (* Propagate field-level linearity annotations into the surface type so
+          that expand_record returns TLin wrappers for linear fields.  This
+          enables both the EField check and let-binding linearity propagation
+          (bind_vars_with_linearity) to see the linear field constraint. *)
+       let field_pairs = List.map (fun (f : Ast.field) ->
+           let fty = match f.fld_lin with
+             | Ast.Unrestricted -> f.fld_ty
+             | lin -> Ast.TyLinear (lin, f.fld_ty)
+           in
+           (f.fld_name.txt, fty)
+         ) fields in
        { env1 with records = (name.txt, (param_names, field_pairs)) :: env1.records }
      | Ast.TDAlias _ -> env1)
 
@@ -1838,13 +1983,61 @@ let rec check_decl env (d : Ast.decl) : env =
     { env' with types = new_types @ env'.types; ctors = new_ctors @ env'.ctors }
 
   | Ast.DProtocol (name, pdef, sp) ->
-    (* Register the protocol and validate basic well-formedness. *)
+    (* Register the protocol and validate structural well-formedness. *)
     if List.mem_assoc name.txt env.protocols then
       Err.error env.errors ~span:sp
-        (Printf.sprintf "duplicate protocol definition: %s" name.txt);
+        (Printf.sprintf "Duplicate protocol definition `%s`." name.txt);
     if pdef.proto_steps = [] then
       Err.warning env.errors ~span:sp
-        (Printf.sprintf "protocol %s has no steps" name.txt);
+        (Printf.sprintf "Protocol `%s` has no steps — it describes no communication."
+           name.txt);
+    (* Collect all participant names mentioned in the protocol. *)
+    let rec collect_participants = function
+      | Ast.ProtoMsg (sender, receiver, _) ->
+        [sender.txt; receiver.txt]
+      | Ast.ProtoLoop steps ->
+        List.concat_map collect_participants steps
+      | Ast.ProtoChoice (_, branches) ->
+        List.concat_map (List.concat_map collect_participants) branches
+    in
+    (* Validate each step for structural correctness. *)
+    let rec validate_step = function
+      | Ast.ProtoMsg (sender, receiver, msg_ty) ->
+        (* Sender and receiver must be distinct. *)
+        if sender.txt = receiver.txt then
+          Err.error env.errors ~span:sender.span
+            (Printf.sprintf
+               "Protocol `%s`: participant `%s` cannot send a message to itself."
+               name.txt sender.txt);
+        (* Message type must be a valid type. *)
+        let tvars = ref [] in
+        ignore (surface_ty env ~tvars msg_ty)
+      | Ast.ProtoLoop steps ->
+        if steps = [] then
+          Err.error env.errors ~span:sp
+            (Printf.sprintf "Protocol `%s`: a `loop` block must contain at least one step."
+               name.txt);
+        List.iter validate_step steps
+      | Ast.ProtoChoice (participant, branches) ->
+        if List.length branches < 2 then
+          Err.error env.errors ~span:participant.span
+            (Printf.sprintf
+               "Protocol `%s`: `choice` by `%s` must have at least 2 branches."
+               name.txt participant.txt);
+        List.iter (List.iter validate_step) branches
+    in
+    List.iter validate_step pdef.proto_steps;
+    (* Warn if only one participant is ever named (communication needs two). *)
+    let participants =
+      List.sort_uniq String.compare
+        (List.concat_map collect_participants pdef.proto_steps)
+    in
+    if participants <> [] && List.length participants < 2 then
+      Err.warning env.errors ~span:sp
+        (Printf.sprintf
+           "Protocol `%s` only names one participant (`%s`). \
+            A protocol usually involves at least two parties."
+           name.txt (List.hd participants));
     { env with protocols = (name.txt, pdef) :: env.protocols }
 
   | Ast.DSig (name, sdef, _sp) ->
@@ -1853,15 +2046,55 @@ let rec check_decl env (d : Ast.decl) : env =
 
   | Ast.DInterface (idef, _sp) ->
     (* Register the interface definition for impl validation, and register
-       each method as a polymorphic function binding in scope. *)
+       each method as a polymorphic function binding in scope.
+       Methods get CInterface constraints so call sites verify the type
+       satisfies the interface (discharged in discharge_constraints). *)
     let env' = { env with interfaces = (idef.iface_name.txt, idef) :: env.interfaces } in
     List.fold_left (fun env (m : Ast.method_decl) ->
-        let tvars = ref [(idef.iface_param.txt, fresh_var env.level)] in
+        (* Use level+1 so the interface type parameter gets quantified by generalize. *)
+        let a = fresh_var (env.level + 1) in
+        let tvars = ref [(idef.iface_param.txt, a)] in
         let ty = surface_ty env ~tvars m.md_ty in
-        bind_var m.md_name.txt (generalize env.level ty) env
+        let a_id = match a with
+          | TVar r -> (match !r with Unbound (id, _) -> id | _ -> 0)
+          | _ -> 0
+        in
+        (* Build scheme: ∀a. [CInterface(iface, a)] => method_ty *)
+        let base_sch = generalize env.level ty in
+        let sch = match base_sch with
+          | Poly (ids, cs, t) ->
+            Poly (ids, CInterface (idef.iface_name.txt, a) :: cs, t)
+          | Mono t ->
+            Poly ([a_id], [CInterface (idef.iface_name.txt, a)], t)
+        in
+        bind_var m.md_name.txt sch env
       ) env' idef.iface_methods
 
   | Ast.DImpl (idef, _sp) ->
+    (* Instantiate the impl type, sharing tvars so the 'when' constraints
+       can reference the same type variables as the impl type itself. *)
+    let tvars = ref [] in
+    let inst_ty = surface_ty env ~tvars idef.impl_ty in
+    (* Register this implementation so CInterface constraints can be discharged. *)
+    let env_with_impl = { env with impls = (idef.impl_iface.txt, inst_ty) :: env.impls } in
+    (* Check 'when' constraints: each C(T) must already be implemented. *)
+    List.iter (fun ((cname : Ast.name), ctys) ->
+        match List.map (surface_ty env ~tvars) ctys with
+        | [cty] ->
+          let cty = repr cty in
+          (match cty with
+           | TVar _ -> ()   (* Polymorphic param — checked at use sites *)
+           | _ ->
+             if not (List.exists (fun (iname, impl_ty) ->
+                 iname = cname.txt && impl_matches_ty (repr impl_ty) cty
+               ) env.impls) then
+               Err.error env.errors ~span:cname.span
+                 (Printf.sprintf
+                    "Constraint `%s(%s)` in `when` clause is not satisfied.\n\
+                     No `impl %s(%s)` is in scope."
+                    cname.txt (pp_ty cty) cname.txt (pp_ty cty)))
+        | _ -> ()
+      ) idef.impl_constraints;
     (* Validate each method against the interface declaration. *)
     (match List.assoc_opt idef.impl_iface.txt env.interfaces with
      | None ->
@@ -1869,10 +2102,6 @@ let rec check_decl env (d : Ast.decl) : env =
          (Printf.sprintf "Unknown interface `%s` — is it declared above this impl?"
             idef.impl_iface.txt)
      | Some interface ->
-       (* Instantiate the interface's type parameter with the concrete impl type *)
-       let inst_ty =
-         let tvars = ref [] in surface_ty env ~tvars idef.impl_ty
-       in
        List.iter (fun ((mname : Ast.name), (def : Ast.fn_def)) ->
            match List.find_opt
                    (fun (m : Ast.method_decl) -> m.md_name.txt = mname.txt)
@@ -1882,7 +2111,7 @@ let rec check_decl env (d : Ast.decl) : env =
                (Printf.sprintf "Interface `%s` does not declare a method `%s`."
                   idef.impl_iface.txt mname.txt)
            | Some iface_method ->
-             (* Expected type: substitute interface param → concrete type *)
+             (* Expected type: substitute interface param → concrete impl type *)
              let expected_ty =
                surface_ty env
                  ~tvars:(ref [(interface.iface_param.txt, inst_ty)])
@@ -1896,7 +2125,7 @@ let rec check_decl env (d : Ast.decl) : env =
                   (Printf.sprintf "`%s` in `impl %s` must match the interface signature"
                      mname.txt idef.impl_iface.txt)))
          ) idef.impl_methods);
-    env
+    env_with_impl
 
   | Ast.DExtern (edef, _sp) ->
     (* Register each foreign function as a monomorphic binding. *)
