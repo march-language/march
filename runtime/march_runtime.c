@@ -215,44 +215,329 @@ void march_panic(void *s) {
     exit(1);
 }
 
-/* ── Actor builtins ──────────────────────────────────────────────────────── */
+/* ── Actor runtime — concurrent mailbox + scheduler ──────────────────────── */
+/*
+ * Design overview
+ * ───────────────
+ * Each actor has a per-actor side-table entry (march_actor_meta) holding:
+ *   • mbox_head — an MPSC Treiber stack.  Any thread CAS-pushes message
+ *     nodes here lock-free.  The scheduler atomically swaps the head to NULL,
+ *     reverses the result to recover FIFO order, then dispatches.
+ *   • scheduled — atomic int, 0 = idle, 1 = in run queue.  Only the thread
+ *     that wins the CAS 0→1 adds the actor to the run queue, preventing
+ *     duplicate entries and the "silent message loss" race.
+ *
+ * Actor struct layout (as int64_t[]):
+ *   [0] rc         (reference count)
+ *   [1] tag+pad
+ *   [2] dispatch   ($dispatch field — closure struct ptr, see llvm_emit.ml)
+ *   [3] alive      ($alive field   — 1 = alive, 0 = dead)
+ *   [4+] state fields (alphabetical order)
+ *
+ * RC / FBIP contract
+ * ──────────────────
+ * march_send does NOT call march_incrc on the message.  Perceus at the call
+ * site either transfers ownership (no extra incrc) or has already incremented
+ * (if msg is used after the send).  Either way we receive exactly one
+ * reference, store it in the mailbox node, and the dispatch function's own
+ * Perceus instrumentation decrements after unpacking.
+ *
+ * We do NOT force-write rc=1 before calling dispatch (the FBIP anti-pattern
+ * described in the correctness audit).  FBIP within handlers operates on the
+ * locally-constructed state record, which is ephemeral and always rc=1 by
+ * construction — not on the actor struct whose rc may be >1.
+ *
+ * Scheduling
+ * ──────────
+ * march_send enqueues the message and, on winning the scheduled CAS, calls
+ * march_run_scheduler().  A re-entrancy guard (g_in_scheduler) prevents
+ * nested scheduler invocations: if a handler calls march_send the inner send
+ * still enqueues to the run queue but does not recurse into the scheduler.
+ * The outer scheduler loop picks up newly-added actors on the next iteration.
+ *
+ * Starvation prevention
+ * ─────────────────────
+ * The scheduler drains up to MARCH_BATCH_MAX messages per actor per turn.
+ * Any remaining messages are pushed back to the mailbox and the actor is
+ * re-scheduled, ensuring other actors get CPU time between large bursts.
+ */
 
-/* Actor layout as int64_t[]:
- *   [0] rc, [1] tag+pad, [2] dispatch ptr, [3] alive flag, [4+] state fields */
+#define MARCH_SCHED_BUCKETS 256   /* Power-of-2 hash table size              */
+#define MARCH_BATCH_MAX      64   /* Max messages dispatched per actor/turn  */
+
+/* Single node in an actor's MPSC mailbox (intrusive linked list). */
+typedef struct march_msg_node {
+    void                  *msg;   /* Payload — one RC reference owned by us  */
+    struct march_msg_node *next;
+} march_msg_node;
+
+/* Per-actor scheduler metadata.  Stored in a side table keyed by actor
+ * pointer so the actor object layout (and codegen) are unaffected. */
+typedef struct march_actor_meta {
+    void                      *actor;
+    _Atomic(march_msg_node *)   mbox_head;  /* MPSC Treiber stack head         */
+    _Atomic int                 scheduled;  /* 0 = idle, 1 = queued/running    */
+    struct march_actor_meta    *run_next;   /* Run-queue intrusive link        */
+    struct march_actor_meta    *tbl_next;   /* Hash-table chain                */
+} march_actor_meta;
+
+/* Global side table: actor ptr → march_actor_meta */
+static march_actor_meta  *g_actor_tbl[MARCH_SCHED_BUCKETS];
+static pthread_mutex_t    g_tbl_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* Scheduler run queue — FIFO, protected by g_run_mu */
+static march_actor_meta  *g_run_head = NULL;
+static march_actor_meta  *g_run_tail = NULL;
+static pthread_mutex_t    g_run_mu   = PTHREAD_MUTEX_INITIALIZER;
+
+/* Re-entrancy guard: handlers that call march_send must not recurse into
+ * the scheduler; the outer loop will pick up newly-queued actors. */
+static _Thread_local int g_in_scheduler = 0;
+
+/* ── Side-table helpers ──────────────────────────────────────────── */
+
+static unsigned int actor_bucket(void *actor) {
+    return (unsigned int)(((uintptr_t)actor >> 4) % MARCH_SCHED_BUCKETS);
+}
+
+/* Look up or lazily create the meta entry for an actor. */
+static march_actor_meta *find_or_create_meta(void *actor) {
+    unsigned int b = actor_bucket(actor);
+    pthread_mutex_lock(&g_tbl_mu);
+    march_actor_meta *m = g_actor_tbl[b];
+    while (m) {
+        if (m->actor == actor) { pthread_mutex_unlock(&g_tbl_mu); return m; }
+        m = m->tbl_next;
+    }
+    m = (march_actor_meta *)calloc(1, sizeof(march_actor_meta));
+    if (!m) { fputs("march: out of memory (actor meta)\n", stderr); exit(1); }
+    m->actor = actor;
+    atomic_init(&m->mbox_head, NULL);
+    atomic_init(&m->scheduled, 0);
+    m->tbl_next = g_actor_tbl[b];
+    g_actor_tbl[b] = m;
+    pthread_mutex_unlock(&g_tbl_mu);
+    return m;
+}
+
+/* ── Run-queue helpers ───────────────────────────────────────────── */
+
+/* Add actor to run queue tail.  Caller must have won the scheduled CAS. */
+static void sched_enqueue(march_actor_meta *meta) {
+    meta->run_next = NULL;
+    pthread_mutex_lock(&g_run_mu);
+    if (g_run_tail) { g_run_tail->run_next = meta; g_run_tail = meta; }
+    else            { g_run_head = g_run_tail = meta; }
+    pthread_mutex_unlock(&g_run_mu);
+}
+
+/* Remove and return the head of the run queue (NULL = empty). */
+static march_actor_meta *sched_dequeue(void) {
+    pthread_mutex_lock(&g_run_mu);
+    march_actor_meta *meta = g_run_head;
+    if (meta) {
+        g_run_head = meta->run_next;
+        if (!g_run_head) g_run_tail = NULL;
+        meta->run_next = NULL;
+    }
+    pthread_mutex_unlock(&g_run_mu);
+    return meta;
+}
+
+/* Reverse a singly-linked msg list (Treiber stack → FIFO order). */
+static march_msg_node *reverse_msgs(march_msg_node *head) {
+    march_msg_node *prev = NULL;
+    while (head) {
+        march_msg_node *next = head->next;
+        head->next = prev;
+        prev = head;
+        head = next;
+    }
+    return prev;
+}
+
+/* ── Public actor API ────────────────────────────────────────────── */
 
 void march_kill(void *actor) {
     int64_t *fields = (int64_t *)actor;
-    fields[3] = 0;   /* alive flag at byte offset 24 */
+    fields[3] = 0;   /* $alive flag at byte offset 24 */
 }
 
 int64_t march_is_alive(void *actor) {
-    int64_t *fields = (int64_t *)actor;
-    return fields[3];
+    return ((int64_t *)actor)[3];
 }
 
-/* Returns Option(Unit): None (tag=0, no payload) or Some(()) (tag=1, unit payload).
- * None and Some constructors follow declaration order: None first, Some second. */
+/* Register an actor with the scheduler and return it unchanged.
+ * Called from generated ActorName_spawn() wrappers:
+ *   let $raw = ActorName_spawn()
+ *   march_spawn($raw)            -- returns $raw */
+void *march_spawn(void *actor) {
+    find_or_create_meta(actor);
+    return actor;
+}
+
+/* Read an int64 field at word index from an actor struct.
+ * Index mapping: 0=rc, 1=tag+pad, 2=dispatch, 3=alive, 4+=state fields. */
+int64_t march_actor_get_int(void *actor, int64_t index) {
+    return ((int64_t *)actor)[index];
+}
+
+/* Drain the run queue: dispatch messages in batches of MARCH_BATCH_MAX.
+ *
+ * Starvation prevention: if an actor has more than MARCH_BATCH_MAX pending
+ * messages the remainder are pushed back to its mailbox and it is
+ * re-scheduled, so other actors in the run queue get a turn.
+ *
+ * Re-entrancy: if a handler calls march_send the inner call enqueues to the
+ * run queue but does NOT call march_run_scheduler (g_in_scheduler == 1).
+ * The outer loop below processes newly-queued actors on its next iteration. */
+void march_run_scheduler(void) {
+    if (g_in_scheduler) return;
+    g_in_scheduler = 1;
+
+    march_actor_meta *meta;
+    while ((meta = sched_dequeue()) != NULL) {
+        void *actor   = meta->actor;
+        int64_t *a    = (int64_t *)actor;
+
+        /* Drain mailbox atomically: swap head to NULL, get the Treiber stack,
+         * reverse to recover FIFO order. */
+        march_msg_node *stack = atomic_exchange_explicit(
+            &meta->mbox_head, NULL, memory_order_acquire);
+
+        /* Clear scheduled flag BEFORE re-checking the mailbox.
+         * release: our flag clear is visible to producers checking it.
+         * We check for new messages below; a producer that pushes after our
+         * drain but before our clear will see scheduled=1, skip re-scheduling,
+         * and we will re-schedule in the re-check below. */
+        atomic_store_explicit(&meta->scheduled, 0, memory_order_release);
+
+        if (stack) {
+            march_msg_node *fifo = reverse_msgs(stack);
+
+            /* Dispatch closure is stored as field[2] of the actor struct.
+             * Closure layout: header(16) + fn_ptr(8). The wrapper fn takes
+             * (closure, actor, msg) and calls ActorName_dispatch(actor, msg). */
+            char *closure = (char *)(uintptr_t)a[2];
+            typedef void (*closure_fn_t)(void *, void *, void *);
+            closure_fn_t fn = *(closure_fn_t *)(closure + 16);
+
+            int count = 0;
+            while (fifo && count < MARCH_BATCH_MAX) {
+                march_msg_node *node = fifo;
+                fifo = node->next;
+                void *msg = node->msg;
+                free(node);
+
+                if (a[3]) {            /* alive? */
+                    fn(closure, actor, msg);   /* dispatch; Perceus handles RC */
+                } else {
+                    /* Actor died mid-batch: release the reference we own. */
+                    march_decrc(msg);
+                }
+                count++;
+            }
+
+            /* Batch was truncated: push leftover messages back to mailbox
+             * so other actors get a turn before we continue. */
+            if (fifo) {
+                march_msg_node *tail = fifo;
+                while (tail->next) tail = tail->next;
+                /* CAS-push the entire leftover FIFO list onto the stack head. */
+                march_msg_node *cur;
+                do {
+                    cur = atomic_load_explicit(&meta->mbox_head,
+                                               memory_order_relaxed);
+                    tail->next = cur;
+                } while (!atomic_compare_exchange_weak_explicit(
+                             &meta->mbox_head, &cur, fifo,
+                             memory_order_release, memory_order_relaxed));
+            }
+        }
+
+        /* Re-check mailbox after clearing the scheduled flag.
+         * acquire: see any message pushed by a concurrent sender.
+         * If the mailbox is non-empty and we win the CAS 0→1 we re-schedule. */
+        {
+            int exp = 0;
+            if (atomic_load_explicit(&meta->mbox_head, memory_order_acquire)
+                    != NULL &&
+                atomic_compare_exchange_strong_explicit(
+                    &meta->scheduled, &exp, 1,
+                    memory_order_acq_rel, memory_order_relaxed)) {
+                sched_enqueue(meta);
+            }
+        }
+    }
+
+    g_in_scheduler = 0;
+}
+
+/* Send a message to an actor.
+ *
+ * RC contract: we do NOT call march_incrc on msg.  Perceus at the call site
+ * either transfers ownership (msg not used after send → no extra incrc) or
+ * has already incremented (msg used after send → incrc before the call).
+ * Either way we receive exactly one reference.  The dispatch function's own
+ * Perceus instrumentation decrements it after unpacking.
+ *
+ * FBIP: we do NOT force-write actor->rc = 1 before calling the dispatch
+ * closure.  Doing so (with relaxed ordering) would silently clobber any
+ * concurrent RC modifications.  FBIP for state mutation operates on the
+ * locally-constructed state record inside the handler (always rc=1).
+ *
+ * Returns Option(Unit): None (tag=0) if actor is dead, Some(()) (tag=1) if
+ * the message was enqueued.
+ */
 void *march_send(void *actor, void *msg) {
     int64_t *a = (int64_t *)actor;
+
     if (!a[3]) {
-        /* Actor is dead — return None (tag=0, no fields, just header) */
+        /* Actor dead: release the reference we were given. */
+        march_decrc(msg);
         void *none = march_alloc(16);
-        /* tag is already 0 from calloc in march_alloc */
         return none;
     }
-    /* Dispatch: field[2] is a closure struct.
-     * Closure layout: header(16) + fn_ptr(8).  fn_ptr at offset 16.
-     * The closure wrapper takes (clo, actor, msg). */
-    char *closure = (char *)(void *)a[2];
-    typedef void *(*closure_fn_t)(void *, void *, void *);
-    closure_fn_t fn = *(closure_fn_t *)(closure + 16);
-    fn(closure, actor, msg);
-    /* Return Some(()) — tag=1, one field = 0 (unit) */
+
+    march_actor_meta *meta = find_or_create_meta(actor);
+
+    /* Allocate message node — does NOT touch msg's RC. */
+    march_msg_node *node = (march_msg_node *)malloc(sizeof(march_msg_node));
+    if (!node) { fputs("march: out of memory (msg node)\n", stderr); exit(1); }
+    node->msg = msg;
+
+    /* MPSC Treiber-stack push — lock-free, safe from any thread.
+     * release: node->msg write is visible to the consumer (scheduler). */
+    march_msg_node *old;
+    do {
+        old = atomic_load_explicit(&meta->mbox_head, memory_order_relaxed);
+        node->next = old;
+    } while (!atomic_compare_exchange_weak_explicit(
+                 &meta->mbox_head, &old, node,
+                 memory_order_release, memory_order_relaxed));
+
+    /* Schedule actor if not already in the run queue.
+     * Only the winner of the CAS 0→1 adds to the run queue, preventing
+     * duplicate entries when concurrent sends race on the same actor. */
+    int exp = 0;
+    if (atomic_compare_exchange_strong_explicit(
+            &meta->scheduled, &exp, 1,
+            memory_order_acq_rel, memory_order_relaxed)) {
+        sched_enqueue(meta);
+        /* Inline scheduling: run the queue now if no scheduler is active.
+         * Preserves apparent-synchronous semantics for single-threaded
+         * programs without blocking concurrent senders. */
+        if (!g_in_scheduler) {
+            march_run_scheduler();
+        }
+    }
+
+    /* Return Some(()). */
     void *some = march_alloc(16 + 8);
     int32_t *hdr = (int32_t *)((char *)some + 8);
-    hdr[0] = 1;  /* tag = 1 for Some */
+    hdr[0] = 1;
     int64_t *fld = (int64_t *)((char *)some + 16);
-    fld[0] = 0;  /* () = 0 */
+    fld[0] = 0;
     return some;
 }
 
