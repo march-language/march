@@ -58,7 +58,7 @@ let builtin_names : StringSet.t =
       (* Monitor/supervision builtins *)
       "demonitor"; "monitor"; "mailbox_size";
       "run_until_idle"; "register_resource"; "get_cap";
-      "send_checked"; "pid_of_int" ]
+      "send_checked"; "pid_of_int"; "get_actor_field" ]
 
 (* ── Phase 0: collect top-level names ────────────────────────────── *)
 

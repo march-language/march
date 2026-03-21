@@ -66,6 +66,14 @@ pub fn head(xs : List(a)) : a do
   end
 end
 
+doc "Returns true if the list is empty."
+pub fn is_nil(xs : List(a)) : Bool do
+  match xs with
+  | Nil -> true
+  | Cons(_, _) -> false
+  end
+end
+
 doc "Returns all but the first element. Panics if empty."
 pub fn tail(xs : List(a)) : List(a) do
   match xs with

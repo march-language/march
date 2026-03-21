@@ -264,6 +264,7 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "send_checked"                -> Some Tir.TUnit
   | "pid_of_int"                  -> Some (Tir.TCon ("Pid", [Tir.TVar "a"]))
   | "get_actor_field"             -> Some (Tir.TCon ("Option", [Tir.TVar "a"]))
+  (* Generic to_string *)
   | "to_string"                   -> Some Tir.TString
   | _ -> None
 
@@ -364,6 +365,7 @@ let mangle_extern : string -> string = function
   | "send_checked"       -> "march_send_checked"
   | "pid_of_int"         -> "march_pid_of_int"
   | "get_actor_field"    -> "march_get_actor_field"
+  (* Generic to_string *)
   | "to_string"          -> "march_value_to_string"
   | "main"          -> "march_main"   (* March main → march_main in LLVM *)
   | other           -> other
@@ -487,6 +489,9 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
   | Tir.ADefRef did ->
     (* Reference to a top-level def by content hash — emit as a function pointer *)
     ("ptr", "@" ^ llvm_name (mangle_extern did.Tir.did_name))
+  | Tir.AVar v when v.Tir.v_name = "root_cap" ->
+    (* root_cap is a capability constant — represented as null ptr at runtime *)
+    ("ptr", "null")
   | Tir.AVar v when v.Tir.v_name = "get_work_pool" ->
     (* Phase 1: work pool is a null sentinel *)
     ("ptr", "null")
