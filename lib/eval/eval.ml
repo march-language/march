@@ -953,6 +953,214 @@ let csv_close_impl : value list -> value = function
   | _ -> eval_error "csv_close(handle)"
 
 (* ------------------------------------------------------------------ *)
+(* HTTP server helpers (interpreter mode)                             *)
+(* ------------------------------------------------------------------ *)
+
+(** Convert an OCaml string list to a March List(String) value. *)
+let march_string_list xs =
+  List.fold_right
+    (fun s acc -> VCon ("Cons", [VString s; acc]))
+    xs (VCon ("Nil", []))
+
+(** Parse an HTTP method string to the March Method variant. *)
+let http_method_of_string s =
+  match String.uppercase_ascii s with
+  | "GET"     -> VCon ("Get",     [])
+  | "POST"    -> VCon ("Post",    [])
+  | "PUT"     -> VCon ("Put",     [])
+  | "PATCH"   -> VCon ("Patch",   [])
+  | "DELETE"  -> VCon ("Delete",  [])
+  | "HEAD"    -> VCon ("Head",    [])
+  | "OPTIONS" -> VCon ("Options", [])
+  | "TRACE"   -> VCon ("Trace",   [])
+  | "CONNECT" -> VCon ("Connect", [])
+  | _         -> VCon ("Other",   [VString s])
+
+(** Split a URI path on "/" into non-empty segments → March List(String). *)
+let split_path_info path =
+  path
+  |> String.split_on_char '/'
+  |> List.filter (fun s -> s <> "")
+  |> march_string_list
+
+(** Read exactly one HTTP header line (up to CRLF) from a Unix socket.
+    Returns the line without the trailing CR/LF. Raises End_of_file on close. *)
+let http_recv_line sock =
+  let buf = Buffer.create 128 in
+  let one = Bytes.create 1 in
+  let stop = ref false in
+  while not !stop do
+    let n = Unix.recv sock one 0 1 [] in
+    if n = 0 then (stop := true)
+    else begin
+      let c = Bytes.get one 0 in
+      if c = '\n' then stop := true
+      else Buffer.add_char buf c
+    end
+  done;
+  let s = Buffer.contents buf in
+  (* Strip trailing CR if present *)
+  if String.length s > 0 && s.[String.length s - 1] = '\r'
+  then String.sub s 0 (String.length s - 1)
+  else s
+
+(** Read exactly [n] bytes from a socket into a string. *)
+let http_recv_exactly sock n =
+  let buf = Bytes.create n in
+  let remaining = ref n in
+  let off = ref 0 in
+  while !remaining > 0 do
+    let got = Unix.recv sock buf !off !remaining [] in
+    if got = 0 then remaining := 0
+    else begin off := !off + got; remaining := !remaining - got end
+  done;
+  Bytes.sub_string buf 0 !off
+
+(** Parse "Name: Value" header lines into an OCaml association list. *)
+let parse_header_line line =
+  match String.index_opt line ':' with
+  | None -> None
+  | Some i ->
+    let name  = String.sub line 0 i in
+    let value = String.trim (String.sub line (i + 1) (String.length line - i - 1)) in
+    Some (name, value)
+
+(** Build a March Conn value from parsed request data.
+    The [headers_raw] list contains (name, value) pairs. *)
+let build_conn_value ~method_str ~full_path ~headers_raw ~body =
+  let path, query_string =
+    match String.index_opt full_path '?' with
+    | Some i ->
+      ( String.sub full_path 0 i,
+        String.sub full_path (i + 1) (String.length full_path - i - 1) )
+    | None -> (full_path, "")
+  in
+  let method_val  = http_method_of_string method_str in
+  let path_info   = split_path_info path in
+  let header_list =
+    List.fold_right
+      (fun (n, v) acc ->
+         VCon ("Cons", [VCon ("Header", [VString n; VString v]); acc]))
+      headers_raw (VCon ("Nil", []))
+  in
+  VCon ("Conn", [
+    VInt 0;                  (* fd — not used in interpreter mode *)
+    method_val;
+    VString path;
+    path_info;
+    VString query_string;
+    header_list;
+    VString body;
+    VInt 0;                  (* response status = 0 (not yet set) *)
+    VCon ("Nil", []);        (* response headers = [] *)
+    VString "";              (* response body = "" *)
+    VBool false;             (* halted = false *)
+    VCon ("Nil", []);        (* assigns = [] *)
+    VCon ("NoUpgrade", []);  (* upgrade = NoUpgrade *)
+  ])
+
+(** Extract (status, resp_headers_value, resp_body) from a March Conn. *)
+let extract_conn_response conn =
+  match conn with
+  | VCon ("Conn", [_fd; _meth; _path; _pi; _qs;
+                   _rh; _rb;
+                   VInt status; resp_headers; VString resp_body;
+                   _halted; _assigns; _upgrade]) ->
+    (status, resp_headers, resp_body)
+  | _ -> (500, VCon ("Nil", []), "Internal Server Error")
+
+(** Standard HTTP reason phrases. *)
+let http_reason_phrase = function
+  | 200 -> "OK"        | 201 -> "Created"
+  | 204 -> "No Content"
+  | 301 -> "Moved Permanently" | 302 -> "Found"
+  | 304 -> "Not Modified"
+  | 400 -> "Bad Request"       | 401 -> "Unauthorized"
+  | 403 -> "Forbidden"         | 404 -> "Not Found"
+  | 405 -> "Method Not Allowed"
+  | 500 -> "Internal Server Error"
+  | n   -> string_of_int n
+
+(** Serialize a March List(Header) value to HTTP header lines. *)
+let rec march_headers_to_string = function
+  | VCon ("Nil", []) -> ""
+  | VCon ("Cons", [VCon ("Header", [VString n; VString v]); rest]) ->
+    n ^ ": " ^ v ^ "\r\n" ^ march_headers_to_string rest
+  | _ -> ""
+
+(** Send all bytes in [data] to [sock], ignoring short writes. *)
+let tcp_send_all sock data =
+  let buf   = Bytes.of_string data in
+  let total = Bytes.length buf in
+  let off   = ref 0 in
+  (try
+     while !off < total do
+       let n = Unix.send sock buf !off (total - !off) [] in
+       if n = 0 then off := total
+       else off := !off + n
+     done
+   with Unix.Unix_error _ -> ())
+
+(** Handle a single HTTP connection: read request → call pipeline → write response.
+    [pipeline_fn] is a March value (VClosure or VBuiltin) of type Conn → Conn. *)
+let handle_http_connection (sock : Unix.file_descr) (pipeline_fn : value) : unit =
+  try
+    (* 1. Read the request line *)
+    let req_line = http_recv_line sock in
+    if req_line = "" then ()
+    else begin
+      let (meth, full_path) =
+        match String.split_on_char ' ' req_line with
+        | m :: fp :: _ -> (m, fp)
+        | _ -> ("GET", "/")
+      in
+      (* 2. Read header lines until a blank line *)
+      let headers_raw = ref [] in
+      let stop = ref false in
+      while not !stop do
+        let line = http_recv_line sock in
+        if line = "" then stop := true
+        else
+          (match parse_header_line line with
+           | Some pair -> headers_raw := pair :: !headers_raw
+           | None -> ())
+      done;
+      let headers_raw = List.rev !headers_raw in
+      (* 3. Read body if Content-Length present (case-insensitive) *)
+      let content_length =
+        match List.find_opt
+                (fun (n, _) -> String.lowercase_ascii n = "content-length")
+                headers_raw
+        with
+        | Some (_, s) -> int_of_string_opt (String.trim s)
+        | None        -> None
+      in
+      let body = match content_length with
+        | Some n when n > 0 -> http_recv_exactly sock n
+        | _ -> ""
+      in
+      (* 4. Build the Conn value *)
+      let conn_val = build_conn_value
+          ~method_str:meth ~full_path ~headers_raw ~body in
+      (* 5. Call the pipeline closure *)
+      let result_conn = !apply_hook pipeline_fn [conn_val] in
+      (* 6. Extract response and serialize *)
+      let (status, resp_headers, resp_body) = extract_conn_response result_conn in
+      let effective_status = if status = 0 then 200 else status in
+      let reason     = http_reason_phrase effective_status in
+      let header_str = march_headers_to_string resp_headers in
+      let response   =
+        Printf.sprintf "HTTP/1.1 %d %s\r\n%sContent-Length: %d\r\n\r\n%s"
+          effective_status reason
+          header_str
+          (String.length resp_body)
+          resp_body
+      in
+      tcp_send_all sock response
+    end
+  with _ -> ()  (* swallow connection errors *)
+
+(* ------------------------------------------------------------------ *)
 (* Base environment                                                    *)
 (* ------------------------------------------------------------------ *)
 
@@ -1088,6 +1296,35 @@ let base_env : env =
            | Some inst -> VInt (Queue.length inst.ai_mailbox)
            | None      -> VInt 0)
         | _ -> eval_error "mailbox_size: expected pid"))
+  ; ("actor_get_int", VBuiltin ("actor_get_int", function
+        (* Access actor state by field index and return the Int value.
+           Mirrors the compiled-mode march_actor_get_int(actor_ptr, index).
+           In the compiled runtime, worker threads process messages concurrently,
+           so actor_get_int sees the latest state after any recent send().
+           In interpreter mode we drain the scheduler first to match that
+           behaviour: pending messages are processed before the read. *)
+        | [VPid pid; VInt index] ->
+          !run_scheduler_hook ();
+          (match Hashtbl.find_opt actor_registry pid with
+           | None -> VInt 0
+           | Some inst ->
+             let nth_int_of_value v i =
+               match v with
+               | VRecord fields ->
+                 (match List.nth_opt fields i with
+                  | Some (_, VInt n) -> VInt n
+                  | Some (_, VFloat f) -> VInt (int_of_float f)
+                  | _ -> VInt 0)
+               | VCon (_, args) ->
+                 (match List.nth_opt args i with
+                  | Some (VInt n) -> VInt n
+                  | Some (VFloat f) -> VInt (int_of_float f)
+                  | _ -> VInt 0)
+               | VInt n when i = 0 -> VInt n
+               | _ -> VInt 0
+             in
+             nth_int_of_value inst.ai_state index)
+        | _ -> eval_error "actor_get_int: expected (Pid, Int)"))
   ; ("get_actor_field", VBuiltin ("get_actor_field", function
         (* Read a named field from an actor's current state record.
            Returns Some(value) if the actor exists and has the field,
@@ -2264,12 +2501,27 @@ let base_env : env =
                 VCon ("Err", [VString ("bad status line: " ^ (List.hd lines))])))
         | _ -> eval_error "http_parse_response(raw_string)"))
 
-  (* ── HTTP server stubs (interpreter mode: not supported) ────────── *)
-  ; ("http_server_listen", VBuiltin ("http_server_listen", fun _ ->
-      Printf.eprintf
-        "error: http_server_listen is not supported in interpreter mode.\n\
-         Compile with `march --compile` to run an HTTP server.\n";
-      exit 1))
+  (* ── HTTP server (interpreter mode: pure-OCaml implementation) ──── *)
+  ; ("http_server_listen", VBuiltin ("http_server_listen", function
+      | [VInt port; VInt _max_conns; VInt _idle_timeout; pipeline_fn] ->
+        let open Unix in
+        let server_sock = socket PF_INET SOCK_STREAM 0 in
+        setsockopt server_sock SO_REUSEADDR true;
+        bind server_sock (ADDR_INET (inet_addr_any, port));
+        listen server_sock 128;
+        Printf.eprintf "march: HTTP server listening on port %d\n%!" port;
+        (try
+           while true do
+             let (client_sock, _addr) = accept server_sock in
+             (try handle_http_connection client_sock pipeline_fn
+              with _ -> ());
+             (try close client_sock with _ -> ())
+           done
+         with exn ->
+           (try close server_sock with _ -> ());
+           raise exn);
+        VUnit
+      | _ -> eval_error "http_server_listen(port, max_conns, idle_timeout, pipeline)"))
 
   (* ── CSV parser ─────────────────────────────────────────────────── *)
   ; ("csv_open",     VBuiltin ("csv_open",     csv_open_impl))
