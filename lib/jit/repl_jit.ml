@@ -91,18 +91,28 @@ let partition_fns ctx (fns : March_tir.Tir.fn_def list)
   ) fns;
   (List.rev !new_fns, List.rev !extern_fns)
 
-(** Lower a single-expression module through the TIR pipeline. *)
-let lower_module ~type_map (m : March_ast.Ast.module_) =
+(** Strip the "repl_" prefix from a global name to recover the bare variable
+    name as it appears in TIR. *)
+let bare_of_global (gname : string) : string =
+  if String.length gname > 5 && String.sub gname 0 5 = "repl_"
+  then String.sub gname 5 (String.length gname - 5)
+  else gname
+
+(** Lower a single-expression module through the TIR pipeline.
+    [repl_vars] are bare variable names of REPL globals that should be
+    treated as borrowed by Perceus so they are never freed mid-session. *)
+let lower_module ~type_map ?(repl_vars : string list = []) (m : March_ast.Ast.module_) =
   let tir = March_tir.Lower.lower_module ~type_map m in
   let tir = March_tir.Mono.monomorphize tir in
   let tir = March_tir.Defun.defunctionalize tir in
-  let tir = March_tir.Perceus.perceus tir in
+  let tir = March_tir.Perceus.perceus ~repl_vars tir in
   let tir = March_tir.Escape.escape_analysis tir in
   tir
 
 let run_expr ctx ~type_map m =
   let n = next_id ctx in
-  let tir = lower_module ~type_map m in
+  let repl_vars = List.map (fun (gname, _) -> bare_of_global gname) ctx.globals in
+  let tir = lower_module ~type_map ~repl_vars m in
   (* The last function in the module is the expression wrapper.
      Extract its body and return type. *)
   let main_fn = List.find (fun (f : March_tir.Tir.fn_def) ->
@@ -154,7 +164,8 @@ let run_expr ctx ~type_map m =
     [is_fn_decl] is true when the original REPL input was a DFn. *)
 let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
   let n = next_id ctx in
-  let tir = lower_module ~type_map m in
+  let repl_vars = List.map (fun (gname, _) -> bare_of_global gname) ctx.globals in
+  let tir = lower_module ~type_map ~repl_vars m in
   let all_support_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
   (* Partition into new (to define) and extern (already compiled, need declare). *)

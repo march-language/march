@@ -382,9 +382,12 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     in
     (e', lb)
 
-(** Insert RC ops into a function definition. *)
-let insert_rc (fn : Tir.fn_def) : Tir.fn_def =
-  let (body', _) = insert_rc_expr fn.Tir.fn_body StringSet.empty in
+(** Insert RC ops into a function definition.
+    [borrowed] names are treated as still-live at the function's exit,
+    preventing Perceus from treating their last use as an ownership transfer.
+    Used for REPL globals that persist across compilation units. *)
+let insert_rc ?(borrowed = StringSet.empty) (fn : Tir.fn_def) : Tir.fn_def =
+  let (body', _) = insert_rc_expr fn.Tir.fn_body borrowed in
   { fn with Tir.fn_body = body' }
 
 (* ── Phase 3: RC Elision (cancel pairs) ──────────────────────────────────── *)
@@ -496,11 +499,24 @@ let insert_fbip (fn : Tir.fn_def) : Tir.fn_def =
 
 (* ── Entry point ──────────────────────────────────────────────────────────── *)
 
-(** Run all four Perceus phases over every function in the module. *)
-let perceus (m : Tir.tir_module) : Tir.tir_module =
+(** Run all four Perceus phases over every function in the module.
+    [repl_vars] is a list of bare variable names that correspond to REPL
+    globals bridged into the current compilation unit.  They are injected
+    into the borrowed set of the [main] function so Perceus never treats
+    their last use as an ownership transfer, preventing RC underflow when
+    the same global is passed to multiple successive REPL lines. *)
+let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_module =
+  let borrowed_set =
+    List.fold_left (fun s n -> StringSet.add n s) StringSet.empty repl_vars
+  in
   let fns' =
     m.Tir.tm_fns
-    |> List.map insert_rc
+    |> List.map (fun fn ->
+         let borrowed =
+           if fn.Tir.fn_name = "main" then borrowed_set
+           else StringSet.empty
+         in
+         insert_rc ~borrowed fn)
     |> List.map elide_cancel_pairs
     |> List.map insert_fbip
   in
