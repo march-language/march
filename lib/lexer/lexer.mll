@@ -59,6 +59,7 @@ let () =
       ("one_for_all", ONE_FOR_ALL);
       ("rest_for_one", REST_FOR_ONE);
       ("restart", RESTART_KW);
+      ("requires", REQUIRES);
     ]
 }
 

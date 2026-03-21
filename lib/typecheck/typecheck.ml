@@ -290,6 +290,37 @@ let lookup_var  name env = List.assoc_opt name env.vars
 let lookup_type name env = List.assoc_opt name env.types
 let lookup_ctor name env = List.assoc_opt name env.ctors
 
+(** All parent types of ctors in [env] that share [name] (multiple types may
+    define the same variant). Returns list of type names (deduplicated). *)
+let all_ctors_named (name : string) (env : env) : string list =
+  let seen = Hashtbl.create 4 in
+  List.filter_map (fun (k, ci) ->
+    if k = name && not (Hashtbl.mem seen ci.ci_type)
+    then begin Hashtbl.add seen ci.ci_type (); Some ci.ci_type end
+    else None
+  ) env.ctors
+
+(** Suggest constructors close to [name]: case-insensitive match or first-2-char
+    prefix match with length difference ≤ 2. Returns [(ctor_name, type_name)]. *)
+let suggest_ctors (name : string) (env : env) : (string * string) list =
+  let name_lo = String.lowercase_ascii name in
+  let seen = Hashtbl.create 8 in
+  List.filter_map (fun (k, ci) ->
+    let key = k ^ "/" ^ ci.ci_type in
+    if Hashtbl.mem seen key then None
+    else begin
+      let k_lo = String.lowercase_ascii k in
+      let close =
+        k_lo = name_lo ||
+        (String.length name_lo >= 2 && String.length k_lo >= 2 &&
+         String.sub k_lo 0 2 = String.sub name_lo 0 2 &&
+         abs (String.length k - String.length name) <= 2)
+      in
+      if close then begin Hashtbl.add seen key (); Some (k, ci.ci_type) end
+      else None
+    end
+  ) env.ctors
+
 let bind_var name sch env =
   { env with vars = (name, sch) :: env.vars }
 
@@ -1090,10 +1121,19 @@ let rec infer_pattern env (pat : Ast.pattern)
   | Ast.PatCon (name, ps) ->
     (match lookup_ctor name.txt env with
      | None ->
+       let candidates = suggest_ctors name.txt env in
+       let hint =
+         if candidates = [] then
+           "Is this a typo, or did you forget to declare the type?"
+         else
+           let lines = List.map (fun (k, ty) ->
+               Printf.sprintf "  • `%s` — from type `%s`" k ty
+             ) candidates in
+           "Did you mean one of:\n" ^ String.concat "\n" lines
+       in
        Err.error env.errors ~span:name.span
-         (Printf.sprintf
-            "I don't know a constructor called `%s`.\n\
-             Is this a typo, or did you forget to declare the type?" name.txt);
+         (Printf.sprintf "I don't know a constructor called `%s`.\n%s"
+            name.txt hint);
        let bindings = List.concat_map fst (List.map (infer_pattern env) ps) in
        bindings, TError
      | Some ci ->
@@ -1226,13 +1266,32 @@ let rec infer_expr env (e : Ast.expr) : ty =
     | Ast.ECon (name, args, sp) ->
       (match lookup_ctor name.txt env with
        | None ->
+         let candidates = suggest_ctors name.txt env in
+         let hint =
+           if candidates = [] then
+             "Is this a typo, or did you forget to declare the type?"
+           else
+             let lines = List.map (fun (k, ty) ->
+                 Printf.sprintf "  • `%s` — from type `%s`" k ty
+               ) candidates in
+             "Did you mean one of:\n" ^ String.concat "\n" lines
+         in
          Err.error env.errors ~span:name.span
-           (Printf.sprintf
-              "I don't know a constructor called `%s`.\n\
-               Is this a typo, or did you forget to declare the type?" name.txt);
+           (Printf.sprintf "I don't know a constructor called `%s`.\n%s"
+              name.txt hint);
          List.iter (fun a -> ignore (infer_expr env a)) args;
          TError
        | Some ci ->
+         (* Warn if multiple types define this constructor name *)
+         let all_types = all_ctors_named name.txt env in
+         if List.length all_types > 1 then
+           Err.warning env.errors ~span:name.span
+             (Printf.sprintf
+                "Constructor `%s` is defined in multiple types: %s.\n\
+                 I'm using the one from `%s`. Use a type annotation to disambiguate."
+                name.txt
+                (String.concat ", " (List.map (fun t -> "`" ^ t ^ "`") all_types))
+                ci.ci_type);
          let arg_tys, result_ty = instantiate_ctor env ci in
          let n_expected = List.length arg_tys in
          let n_got      = List.length args in
@@ -1639,6 +1698,92 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
    §15  Declaration checking
    ================================================================= *)
 
+(** Collect all free variable names referenced in [e].
+    Only [EVar] nodes with no dot (non-qualified names) are collected.
+    Re-bindings introduced by [ELet]/[EMatch]/[ELam] are accounted for so
+    we never report a variable that is shadowed by an inner binding. *)
+let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
+  match e with
+  | Ast.EVar n ->
+    if List.mem n.txt bound || String.contains n.txt '.' then [] else [n.txt]
+  | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> []
+  | Ast.EDbg (Some inner, _) -> free_vars_expr bound inner
+  | Ast.EApp (f, args, _) ->
+    free_vars_expr bound f @ List.concat_map (free_vars_expr bound) args
+  | Ast.ECon (_, args, _) -> List.concat_map (free_vars_expr bound) args
+  | Ast.ELam (ps, body, _) ->
+    let inner_bound = List.filter_map (fun (p : Ast.param) ->
+        Some p.param_name.txt) ps @ bound in
+    free_vars_expr inner_bound body
+  | Ast.EBlock (es, _) -> free_vars_block bound es
+  | Ast.ELet (b, _) -> free_vars_expr bound b.Ast.bind_expr
+  | Ast.EMatch (scrut, branches, _) ->
+    free_vars_expr bound scrut @
+    List.concat_map (fun br ->
+      let pat_bound = free_vars_pattern br.Ast.branch_pat in
+      let inner = pat_bound @ bound in
+      Option.fold ~none:[] ~some:(free_vars_expr inner) br.Ast.branch_guard @
+      free_vars_expr inner br.Ast.branch_body
+    ) branches
+  | Ast.ETuple (es, _) -> List.concat_map (free_vars_expr bound) es
+  | Ast.ERecord (fields, _) ->
+    List.concat_map (fun (_, ex) -> free_vars_expr bound ex) fields
+  | Ast.ERecordUpdate (base, fields, _) ->
+    free_vars_expr bound base @
+    List.concat_map (fun (_, ex) -> free_vars_expr bound ex) fields
+  | Ast.EField (ex, _, _) -> free_vars_expr bound ex
+  | Ast.EIf (c, t, f, _) ->
+    free_vars_expr bound c @ free_vars_expr bound t @ free_vars_expr bound f
+  | Ast.EAnnot (ex, _, _) -> free_vars_expr bound ex
+  | Ast.EAtom (_, args, _) -> List.concat_map (free_vars_expr bound) args
+  | Ast.ESend (a, b, _) ->
+    free_vars_expr bound a @ free_vars_expr bound b
+  | Ast.ESpawn (e, _) -> free_vars_expr bound e
+  | Ast.ELetFn (name, params, _, body, _) ->
+    let inner_bound = name.txt :: List.map (fun p -> p.Ast.param_name.txt) params @ bound in
+    free_vars_expr inner_bound body
+  | Ast.EPipe (l, r, _) ->
+    free_vars_expr bound l @ free_vars_expr bound r
+
+and free_vars_block (bound : string list) (es : Ast.expr list) : string list =
+  match es with
+  | [] -> []
+  | Ast.ELet (b, _) :: rest ->
+    let used_in_rhs = free_vars_expr bound b.Ast.bind_expr in
+    let pat_bound = free_vars_pattern b.Ast.bind_pat in
+    used_in_rhs @ free_vars_block (pat_bound @ bound) rest
+  | e :: rest ->
+    free_vars_expr bound e @ free_vars_block bound rest
+
+and free_vars_pattern (p : Ast.pattern) : string list =
+  match p with
+  | Ast.PatVar n -> [n.txt]
+  | Ast.PatWild _ -> []
+  | Ast.PatLit _ -> []
+  | Ast.PatCon (_, ps) -> List.concat_map free_vars_pattern ps
+  | Ast.PatTuple (ps, _) -> List.concat_map free_vars_pattern ps
+  | Ast.PatRecord (fields, _) -> List.concat_map (fun (_, p) -> free_vars_pattern p) fields
+  | Ast.PatAs (p, n, _) -> n.txt :: free_vars_pattern p
+  | Ast.PatAtom (_, ps, _) -> List.concat_map free_vars_pattern ps
+
+(** Emit unused-variable warnings for fn params not referenced in the body.
+    The wildcard [_] and names starting with [_] are silently ignored. *)
+let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) fn_span =
+  let used = free_vars_expr [] body in
+  let check_name name span =
+    if name <> "_" && not (String.length name > 0 && name.[0] = '_')
+       && not (List.mem name used) then
+      Err.warning env.errors ~span
+        (Printf.sprintf "Unused variable `%s`.\n\
+                         Use `_` to mark intentionally unused params." name)
+  in
+  List.iter (fun fp ->
+    match fp with
+    | Ast.FPNamed p -> check_name p.param_name.txt fn_span
+    | Ast.FPPat (Ast.PatVar n) -> check_name n.txt n.span
+    | Ast.FPPat _ -> ()
+  ) params
+
 (** Check a function definition.
 
     Strategy:
@@ -1727,6 +1872,9 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
           | Ast.FPNamed p -> Some p.param_name.txt
           | Ast.FPPat _ -> None) clause.fc_params in
       check_linear_all_consumed body_env ~scope_span:fn_span param_names;
+
+      (* Warn about unrestricted params not referenced in the body *)
+      warn_unused_params env clause.fc_params clause.fc_body fn_span;
 
       let fn_ty =
         List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty
@@ -1867,15 +2015,18 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       ) (param_tys @ ret_tys)
     | _ -> []
   ) decls in
+  let cap s = MPCode ("Cap(" ^ s ^ ")") in
   (* Check 1: every Cap(X) must be covered by a declared need *)
   List.iter (fun (cap_path, sp) ->
     let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
     if not covered then
       Err.error env.errors ~span:sp
-        (Printf.sprintf
-           "capability `Cap(%s)` used in module `%s` but `%s` is not declared in `needs`.\n\
-            help: add `needs %s` to the module body."
-           cap_path mod_name.txt cap_path cap_path)
+        (render_parts [
+          cap cap_path; MPText " used in module "; MPCode mod_name.txt;
+          MPText " but "; MPCode cap_path; MPText " is not declared in ";
+          MPCode "needs"; MPText ".";
+          MPBreak; MPText "help: add "; MPCode ("needs " ^ cap_path);
+          MPText " to the module body." ])
   ) used_caps;
   (* Check 2: every needs declaration must be used *)
   List.iter (fun need ->
@@ -1891,17 +2042,21 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
     let used = List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) used_caps in
     if not used then
       Err.warning env.errors ~span:need_sp
-        (Printf.sprintf
-           "module `%s` declares `needs %s` but no function requires `Cap(%s)` or a sub-capability.\n\
-            help: remove the unused capability declaration."
-           mod_name.txt need need)
+        (render_parts [
+          MPText "module "; MPCode mod_name.txt; MPText " declares ";
+          MPCode ("needs " ^ need); MPText " but no function requires ";
+          cap need; MPText " or a sub-capability.";
+          MPBreak; MPText "help: remove the unused capability declaration." ])
   ) declared_needs;
   (* Check 3 (hint): Cap(IO) root — suggest narrowing *)
   List.iter (fun (cap_path, sp) ->
     if cap_path = "IO" then
       Err.hint env.errors ~span:sp
-        "this function takes `Cap(IO)` (the root capability); \
-         consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege."
+        (render_parts [
+          MPText "this function takes "; cap "IO";
+          MPText " (the root capability); consider narrowing to e.g. ";
+          cap "IO.FileRead"; MPText " or "; cap "IO.Console";
+          MPText " for least-privilege." ])
   ) used_caps;
   (* Check 4: transitive — every module we `use` that declares `needs` must be covered *)
   List.iter (function
@@ -1916,11 +2071,13 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
            in
            if not covered then
              Err.error env.errors ~span:sp
-               (Printf.sprintf
-                  "module `%s` imports `%s` which requires `Cap(%s)`, \
-                   but `%s` is not declared in `needs`.\n\
-                   help: add `needs %s` to the module body."
-                  mod_name.txt imported req_cap req_cap req_cap)
+               (render_parts [
+                 MPText "module "; MPCode mod_name.txt; MPText " imports ";
+                 MPCode imported; MPText " which requires "; cap req_cap;
+                 MPText ", but "; MPCode req_cap; MPText " is not declared in ";
+                 MPCode "needs"; MPText ".";
+                 MPBreak; MPText "help: add "; MPCode ("needs " ^ req_cap);
+                 MPText " to the module body." ])
          ) req_caps)
     | _ -> ()
   ) decls;
@@ -1934,11 +2091,13 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
         in
         if not covered then
           Err.error env.errors ~span:sp
-            (Printf.sprintf
-               "extern block `\"%s\"` uses `Cap(%s)`, \
-                but `%s` is not declared in `needs`.\n\
-                help: add `needs %s` to the module body."
-               edef.ext_lib_name cap_path cap_path cap_path)
+            (render_parts [
+              MPText "extern block "; MPCode ("\"" ^ edef.ext_lib_name ^ "\"");
+              MPText " uses "; cap cap_path;
+              MPText ", but "; MPCode cap_path; MPText " is not declared in ";
+              MPCode "needs"; MPText ".";
+              MPBreak; MPText "help: add "; MPCode ("needs " ^ cap_path);
+              MPText " to the module body." ])
       ) cap_paths
     | _ -> ()
   ) decls
@@ -2245,6 +2404,44 @@ let rec check_decl env (d : Ast.decl) : env =
          (Printf.sprintf "Unknown interface `%s` — is it declared above this impl?"
             idef.impl_iface.txt)
      | Some interface ->
+       (* Check superclass constraints: each required superclass must already have an impl *)
+       let sc_tvars = ref [(interface.iface_param.txt, inst_ty)] in
+       List.iter (fun ((sc_name : Ast.name), sc_tys) ->
+           let sc_inst_tys = List.map (surface_ty env ~tvars:sc_tvars) sc_tys in
+           (match sc_inst_tys with
+            | [sc_inst_ty] ->
+              let sc_inst_ty = repr sc_inst_ty in
+              (match sc_inst_ty with
+               | TVar _ -> ()  (* polymorphic param — checked at use sites *)
+               | _ ->
+                 if not (List.exists (fun (iname, impl_ty) ->
+                     iname = sc_name.txt && impl_matches_ty (repr impl_ty) sc_inst_ty
+                   ) env.impls) then
+                   Err.error env.errors ~span:idef.impl_iface.span
+                     (Printf.sprintf
+                        "Cannot implement `%s(%s)`: required superclass `%s(%s)` is not \
+                         satisfied.\n\
+                         Add `impl %s(%s) do ... end` before this implementation."
+                        idef.impl_iface.txt (pp_ty inst_ty)
+                        sc_name.txt (pp_ty sc_inst_ty)
+                        sc_name.txt (pp_ty sc_inst_ty)))
+            | _ -> ()  (* multi-param superclasses not yet supported *)
+           )
+         ) interface.iface_superclasses;
+       (* Check all required methods are provided (error for non-default missing) *)
+       List.iter (fun (iface_m : Ast.method_decl) ->
+           let provided = List.exists
+             (fun ((mname : Ast.name), _) -> mname.txt = iface_m.md_name.txt)
+             idef.impl_methods
+           in
+           if not provided && iface_m.md_default = None then
+             Err.error env.errors ~span:idef.impl_iface.span
+               (Printf.sprintf
+                  "Missing method `%s` in `impl %s(%s)`.\n\
+                   Interface `%s` requires this method to be implemented."
+                  iface_m.md_name.txt idef.impl_iface.txt (pp_ty inst_ty)
+                  idef.impl_iface.txt)
+         ) interface.iface_methods;
        List.iter (fun ((mname : Ast.name), (def : Ast.fn_def)) ->
            match List.find_opt
                    (fun (m : Ast.method_decl) -> m.md_name.txt = mname.txt)
@@ -2260,13 +2457,23 @@ let rec check_decl env (d : Ast.decl) : env =
                  ~tvars:(ref [(interface.iface_param.txt, inst_ty)])
                  iface_method.md_ty
              in
-             (* Infer the method body's actual type *)
-             let actual_sch = check_fn env def _sp in
-             let actual_ty = instantiate env.level env actual_sch in
-             unify env ~span:mname.span actual_ty expected_ty
-               ~reason:(Some (RBuiltin
-                  (Printf.sprintf "`%s` in `impl %s` must match the interface signature"
-                     mname.txt idef.impl_iface.txt)))
+             (* Infer the method body's actual type.
+                For injected default methods (zero params, body = default expr),
+                use check_expr directly against the expected type. *)
+             (match def.fn_clauses with
+              | [{ fc_params = []; fc_body; _ }] when iface_method.md_default <> None ->
+                (* Default method injected by desugar — just check the body expr *)
+                check_expr env fc_body expected_ty
+                  ~reason:(Some (RBuiltin
+                    (Printf.sprintf "default `%s` in interface `%s`"
+                       mname.txt idef.impl_iface.txt)))
+              | _ ->
+                let actual_sch = check_fn env def _sp in
+                let actual_ty = instantiate env.level env actual_sch in
+                unify env ~span:mname.span actual_ty expected_ty
+                  ~reason:(Some (RBuiltin
+                     (Printf.sprintf "`%s` in `impl %s` must match the interface signature"
+                        mname.txt idef.impl_iface.txt))))
          ) idef.impl_methods);
     env_with_impl
 

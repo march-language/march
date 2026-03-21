@@ -250,14 +250,73 @@ let rec desugar_decl (d : decl) : decl =
   | DMod (name, vis, decls, sp) ->
     DMod (name, vis, List.map desugar_decl decls, sp)
 
-  | DProtocol _ | DSig _ | DInterface _ | DImpl _ | DExtern _ | DUse _ | DNeeds _ ->
-    (* These either contain no expressions or will be handled when their
-       content types are enriched (e.g. default method bodies in DInterface). *)
+  | DInterface (idef, sp) ->
+    (* Desugar default method bodies *)
+    let methods' = List.map (fun (m : method_decl) ->
+        { m with md_default = Option.map desugar_expr m.md_default }
+      ) idef.iface_methods in
+    DInterface ({ idef with iface_methods = methods' }, sp)
+
+  | DImpl (idef, sp) ->
+    (* Desugar each provided method's fn_def *)
+    let methods' = List.map (fun (name, def) ->
+        (name, desugar_fn_def def sp)
+      ) idef.impl_methods in
+    DImpl ({ idef with impl_methods = methods' }, sp)
+
+  | DProtocol _ | DSig _ | DExtern _ | DUse _ | DNeeds _ ->
     d
 
 (* ---- Module entry point ---- *)
 
+(** Collect interface definitions from a declaration list (one level deep). *)
+let collect_interfaces (decls : decl list) : (string * interface_def) list =
+  List.filter_map (function
+    | DInterface (idef, _) -> Some (idef.iface_name.txt, idef)
+    | _ -> None
+  ) decls
+
+(** Inject default methods from the interface into an impl that omits them. *)
+let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : decl =
+  match d with
+  | DImpl (idef, sp) ->
+    (match List.assoc_opt idef.impl_iface.txt interfaces with
+     | None -> d
+     | Some iface ->
+       let provided_names = List.map (fun (n, _) -> n.txt) idef.impl_methods in
+       let extra_methods = List.filter_map (fun (m : method_decl) ->
+           if List.mem m.md_name.txt provided_names then None
+           else match m.md_default with
+             | None -> None
+             | Some default_expr ->
+               (* Synthesise a fn_def for the default: fn method_name = default_expr
+                  The default body is a value of the method type (often a lambda),
+                  so wrap it in a zero-param clause. *)
+               let fn_def : fn_def = {
+                 fn_name = m.md_name;
+                 fn_vis = Private;
+                 fn_doc = None;
+                 fn_ret_ty = None;
+                 fn_clauses = [{
+                   fc_params = [];
+                   fc_guard = None;
+                   fc_body = desugar_expr default_expr;
+                   fc_span = m.md_name.span;
+                 }];
+               } in
+               Some (m.md_name, fn_def)
+         ) iface.iface_methods
+       in
+       if extra_methods = [] then d
+       else DImpl ({ idef with impl_methods = idef.impl_methods @ extra_methods }, sp))
+  | _ -> d
+
 (** Desugar an entire module.  Returns a new [module_] with all multi-head
-    fns and pipe expressions lowered to their core forms. *)
+    fns and pipe expressions lowered to their core forms.
+    Also injects default interface method bodies into impls that omit them. *)
 let desugar_module (m : module_) : module_ =
-  { m with mod_decls = List.map desugar_decl m.mod_decls }
+  let interfaces = collect_interfaces m.mod_decls in
+  let decls = List.map (fun d ->
+      inject_defaults interfaces (desugar_decl d)
+    ) m.mod_decls in
+  { m with mod_decls = decls }

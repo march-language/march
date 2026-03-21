@@ -65,7 +65,7 @@
 %token TYPE MOD ACTOR ON SEND SPAWN
 %token STATE INIT RESPOND PROTOCOL LOOP
 %token LINEAR AFFINE
-%token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS USE NEEDS
+%token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS USE NEEDS REQUIRES
 %token DBG DOC
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
 %token ONE_FOR_ONE ONE_FOR_ALL REST_FOR_ONE RESTART_KW
@@ -190,8 +190,18 @@ type_decl:
     LBRACE; fields = separated_list(COMMA, field); RBRACE
     { let tps = match tparams with Some ps -> ps | None -> [] in
       DType (name, tps, TDRecord fields, mk_span ($loc)) }
+  | TYPE; _n = upper_name; error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `=` after the type name here:",
+        Some "type Name = Variant1 | Variant2(Int)",
+        $startpos($3))) }
 
 actor_decl:
+  | ACTOR; _n = upper_name; error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `do` after the actor name here:",
+        Some "actor Name do\n    state { field: Type }\n    init ...\n    on Msg(x) do ... end\nend",
+        $startpos($3))) }
   | ACTOR; name = upper_name; DO;
     STATE; LBRACE; fields = separated_list(COMMA, field); RBRACE;
     INIT; init_expr = expr;
@@ -298,17 +308,24 @@ cap_path:
   | id = upper_name { [id] }
   | id = upper_name; DOT; rest = cap_path { id :: rest }
 
-(** Interface (typeclass) definition: interface Eq(a) do fn eq: a -> a -> Bool end *)
+(** Interface (typeclass) definition: interface Eq(a) do fn eq: a -> a -> Bool end
+    Optional requires clause: interface Ord(a) requires Eq(a) do ... end *)
 interface_decl:
-  | INTERFACE; name = upper_name; LPAREN; param = lower_name; RPAREN; DO;
-    methods = list(method_sig); END
+  | INTERFACE; name = upper_name; LPAREN; param = lower_name; RPAREN;
+    superclasses = loption(preceded(REQUIRES, separated_nonempty_list(COMMA, constraint_expr)));
+    DO; methods = list(method_sig); END
     { DInterface ({
         iface_name = name;
         iface_param = param;
-        iface_superclasses = [];
+        iface_superclasses = superclasses;
         iface_assoc_types = [];
         iface_methods = methods;
       }, mk_span ($loc)) }
+  | INTERFACE; _n = upper_name; error
+    { raise (March_errors.Errors.ParseError (
+        "Interfaces need a type parameter in parentheses:",
+        Some "interface Name(a) do\n    fn method: a -> a\nend",
+        $startpos($3))) }
 
 method_sig:
   | FN; name = lower_name; COLON; t = ty;
@@ -333,6 +350,11 @@ impl_decl:
             | DFn (def, _) -> Some (def.fn_name, def)
             | _ -> None) methods;
       }, mk_span ($loc)) }
+  | IMPL; _iface = upper_name; error
+    { raise (March_errors.Errors.ParseError (
+        "Implementations need a type argument in parentheses:",
+        Some "impl InterfaceName(ConcreteType) do\n    fn method(x) do ... end\nend",
+        $startpos($3))) }
 
 constraint_expr:
   | name = upper_name; LPAREN; t = ty; RPAREN { (name, [t]) }

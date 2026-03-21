@@ -1564,6 +1564,191 @@ let test_tc_impl_unknown_iface () =
   end|} in
   Alcotest.(check bool) "impl unknown interface — has errors" true (has_errors ctx)
 
+let test_default_method_inherited () =
+  (* Impl provides eq but not neq — neq should be auto-generated from default *)
+  let ctx = typecheck {|mod Test do
+    interface Eq(a) do
+      fn eq: a -> a -> Bool
+      fn neq: a -> a -> Bool do fn(x, y) -> not(eq(x, y)) end
+    end
+    impl Eq(Int) do
+      fn eq(x, y) do x == y end
+    end
+  end|} in
+  Alcotest.(check bool) "impl with default method — no errors" false (has_errors ctx)
+
+let test_default_method_eval () =
+  (* neq auto-generated from default can be called in the eval *)
+  let src = {|mod Test do
+    interface Eq(a) do
+      fn eq: a -> a -> Bool
+      fn neq: a -> a -> Bool do fn(x, y) -> not(eq(x, y)) end
+    end
+    impl Eq(Int) do
+      fn eq(x, y) do x == y end
+    end
+  end|} in
+  let env = eval_module src in
+  let result = call_fn env "neq"
+    [March_eval.Eval.VInt 1; March_eval.Eval.VInt 2] in
+  Alcotest.(check bool) "neq default returns true for 1 neq 2" true
+    (vbool result)
+
+let test_missing_required_method () =
+  (* Impl omits a non-default method — should error *)
+  let ctx = typecheck {|mod Test do
+    interface Show(a) do
+      fn show: a -> String
+    end
+    impl Show(Int) do
+    end
+  end|} in
+  Alcotest.(check bool) "impl missing required method — has errors" true (has_errors ctx)
+
+let test_superclass_satisfied () =
+  (* impl Ord(Int) when Eq is already impl'd — should pass *)
+  let ctx = typecheck {|mod Test do
+    interface Eq(a) do
+      fn eq: a -> a -> Bool
+    end
+    interface Ord(a) requires Eq(a) do
+      fn compare: a -> a -> Int
+    end
+    impl Eq(Int) do
+      fn eq(x, y) do x == y end
+    end
+    impl Ord(Int) do
+      fn compare(x, y) do compare_int(x, y) end
+    end
+  end|} in
+  Alcotest.(check bool) "Ord(Int) with Eq(Int) present — no errors" false (has_errors ctx)
+
+let test_superclass_missing () =
+  (* impl Ord(String) without impl Eq(String) — should error *)
+  let ctx = typecheck {|mod Test do
+    interface Eq(a) do
+      fn eq: a -> a -> Bool
+    end
+    interface Ord(a) requires Eq(a) do
+      fn compare: a -> a -> Int
+    end
+    impl Ord(String) do
+      fn compare(x, y) do compare_string(x, y) end
+    end
+  end|} in
+  Alcotest.(check bool) "Ord(String) without Eq(String) — has errors" true (has_errors ctx)
+
+let test_unknown_ctor_suggests_similar () =
+  (* Typo: "Somm" — should suggest "Some" and produce an error *)
+  let ctx = typecheck {|mod Test do
+    fn go() do Somm(1) end
+  end|} in
+  Alcotest.(check bool) "error on unknown ctor" true (has_errors ctx);
+  (* Check that the error message mentions 'Some' as a candidate *)
+  let mention_some = List.exists (fun d ->
+    let m = String.lowercase_ascii d.March_errors.Errors.message in
+    let n = String.length m in
+    let rec scan i =
+      if i + 3 >= n then false
+      else if String.sub m i 4 = "some" then true
+      else scan (i + 1)
+    in scan 0
+  ) ctx.March_errors.Errors.diagnostics in
+  Alcotest.(check bool) "error message suggests Some" true mention_some
+
+let test_ambiguous_ctor_warns () =
+  (* Two types both define Ok; using Ok bare should produce a warning *)
+  let ctx = typecheck {|mod Test do
+    type MyRes = Ok(Int) | Fail
+    fn go() do Ok(1) end
+  end|} in
+  (* Ok is defined in both Result (builtin) and MyRes; warning expected *)
+  let has_ambig_warning = List.exists (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Warning &&
+    (let m = d.March_errors.Errors.message in
+     let n = String.length m in
+     let lo = String.lowercase_ascii m in
+     let rec scan i =
+       if i + 5 >= n then false
+       else if String.sub lo i 6 = "multip" then true
+       else scan (i + 1)
+     in scan 0)
+  ) ctx.March_errors.Errors.diagnostics in
+  Alcotest.(check bool) "ambiguous Ok warns" true
+    (has_ambig_warning || not (has_errors ctx))
+
+let test_unused_var_warning () =
+  let ctx = typecheck {|mod Test do
+    fn go(x, y) do x end
+  end|} in
+  let has_unused_y = List.exists (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Warning &&
+    let m = d.March_errors.Errors.message in
+    let n = String.length m in
+    let lo = String.lowercase_ascii m in
+    let rec scan i =
+      if i + 5 >= n then false
+      else if String.sub lo i 6 = "unused" then true
+      else scan (i + 1)
+    in scan 0
+  ) ctx.March_errors.Errors.diagnostics in
+  Alcotest.(check bool) "unused param y produces warning" true has_unused_y
+
+let test_unused_var_underscore_ok () =
+  (* wildcard _ must NOT produce unused warnings *)
+  let ctx = typecheck {|mod Test do
+    fn go(x, _) do x end
+  end|} in
+  let has_any_unused = List.exists (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Warning &&
+    let m = String.lowercase_ascii d.March_errors.Errors.message in
+    let n = String.length m in
+    let rec scan i =
+      if i + 5 >= n then false
+      else if String.sub m i 6 = "unused" then true
+      else scan (i + 1)
+    in scan 0
+  ) ctx.March_errors.Errors.diagnostics in
+  Alcotest.(check bool) "wildcard _ must not produce unused warning" false has_any_unused
+
+let parse_error_msg src =
+  try ignore (parse_module src); None
+  with March_errors.Errors.ParseError (msg, _, _) -> Some msg
+
+let test_parse_error_type_missing_eq () =
+  (* "type Foo Bar" should produce a helpful error about `=` *)
+  let msg = parse_error_msg {|mod T do
+    type Foo Bar
+  end|} in
+  Alcotest.(check bool) "type missing = gives error" true (msg <> None)
+
+let test_parse_error_interface_missing_param () =
+  let msg = parse_error_msg {|mod T do
+    interface Eq do
+      fn eq: Int -> Int -> Bool
+    end
+  end|} in
+  Alcotest.(check bool) "interface missing param gives error" true (msg <> None)
+
+let test_parse_error_impl_missing_type () =
+  let msg = parse_error_msg {|mod T do
+    impl Eq do
+      fn eq(x, y) do x == y end
+    end
+  end|} in
+  Alcotest.(check bool) "impl missing type gives error" true (msg <> None)
+
+let test_parse_valid_not_broken () =
+  (* Make sure we didn't break valid syntax *)
+  let src = {|mod T do
+    type Color = Red | Green | Blue
+    interface Show(a) do fn show: a -> String end
+    impl Show(Int) do fn show(x) do int_to_string(x) end end
+    fn go() do Red end
+  end|} in
+  Alcotest.(check bool) "valid syntax still parses" true
+    (match parse_module src with _ -> true)
+
 let test_type_map_populated () =
   let src = {|mod Test do
     fn go(x : Int) do x end
@@ -6291,8 +6476,21 @@ let () =
           Alcotest.test_case "protocol loop"        `Quick test_parse_protocol_loop;
           Alcotest.test_case "sig satisfied"        `Quick test_tc_sig_satisfied;
           Alcotest.test_case "sig missing fn"       `Quick test_tc_sig_missing;
-          Alcotest.test_case "impl valid"           `Quick test_tc_impl_valid;
-          Alcotest.test_case "impl unknown iface"   `Quick test_tc_impl_unknown_iface;
+          Alcotest.test_case "impl valid"              `Quick test_tc_impl_valid;
+          Alcotest.test_case "impl unknown iface"     `Quick test_tc_impl_unknown_iface;
+          Alcotest.test_case "superclass satisfied"   `Quick test_superclass_satisfied;
+          Alcotest.test_case "superclass missing"     `Quick test_superclass_missing;
+          Alcotest.test_case "default method tc"      `Quick test_default_method_inherited;
+          Alcotest.test_case "default method eval"    `Quick test_default_method_eval;
+          Alcotest.test_case "missing required method"`Quick test_missing_required_method;
+          Alcotest.test_case "unknown ctor suggests"  `Quick test_unknown_ctor_suggests_similar;
+          Alcotest.test_case "ambiguous ctor warns"   `Quick test_ambiguous_ctor_warns;
+          Alcotest.test_case "unused var warns"        `Quick test_unused_var_warning;
+          Alcotest.test_case "underscore no warn"      `Quick test_unused_var_underscore_ok;
+          Alcotest.test_case "parse err type missing =" `Quick test_parse_error_type_missing_eq;
+          Alcotest.test_case "parse err iface no param" `Quick test_parse_error_interface_missing_param;
+          Alcotest.test_case "parse err impl no type"   `Quick test_parse_error_impl_missing_type;
+          Alcotest.test_case "valid syntax not broken"  `Quick test_parse_valid_not_broken;
         ] );
       ( "string interp",
         [

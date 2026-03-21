@@ -148,6 +148,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
   let running    = ref true in
   let buf        = Buffer.create 64 in
   let first_line = ref true in
+  let show_type  = ref false in
 
   let print_diag (d : March_errors.Errors.diagnostic) =
     let sev = match d.severity with
@@ -338,6 +339,12 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                      List.iter (fun s -> Printf.printf "%s\n" s) (h.dh_where ())
                    | Error msg -> Printf.eprintf "error: %s\n%!" msg)
                 | None -> ())
+             | ":set +t" ->
+               show_type := true;
+               Printf.printf "type display: on  (`:set -t` to disable)\n%!"
+             | ":set -t" ->
+               show_type := false;
+               Printf.printf "type display: off\n%!"
              | ":env" ->
                let env_baseline = if is_debug then e0 else March_eval.Eval.base_env in
                List.iter (fun (k, _) ->
@@ -473,6 +480,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         let (_ty, result_str) =
                           March_jit.Repl_jit.run_expr jit ~type_map m in
                         Printf.printf "= %s\n%!" result_str;
+                        if !show_type then
+                          Printf.printf "- : %s\n%!" ty_str;
                         if tc_ok then
                           tc_env := { !tc_env with
                             vars = ("v", March_typecheck.Typecheck.Mono inferred)
@@ -481,6 +490,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         let v = March_eval.Eval.eval_expr !env e' in
                         let vs = March_eval.Eval.value_to_string_pretty v in
                         Printf.printf "= %s\n%!" vs;
+                        if !show_type then
+                          Printf.printf "- : %s\n%!" ty_str;
                         Result_vars.push result_h v ty_str;
                         env    := ("v", v)
                                  :: (List.remove_assoc "v" !env);
@@ -530,6 +541,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
   let scroll_offset = ref 0 in
   (* Watch expressions: (display_string * parsed_expr) list *)
   let watch_list   : (string * March_ast.Ast.expr) list ref = ref [] in
+  (* Auto-type display: when true, print inferred type after each expression. *)
+  let show_type    = ref false in
   let base_status  =
     if is_debug then "dbg  :continue  :back/:forward  :where  :goto  :diff  :find  :help"
     else "march  :help  Tab  ↑↓: hist  wheel/PgUp: scroll"
@@ -756,6 +769,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              let (_ty, result_str) =
                March_jit.Repl_jit.run_expr jit ~type_map m in
              add_line Notty.A.(fg green) (Printf.sprintf "= %s" result_str);
+             if !show_type then
+               add_line Notty.A.(fg cyan) (Printf.sprintf "- : %s" ty_str);
              if tc_ok then
                tc_env := { !tc_env with
                  vars = ("v", March_typecheck.Typecheck.Mono inferred)
@@ -764,6 +779,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              let v = capture_stdout (fun () -> March_eval.Eval.eval_expr !env e') in
              let vs = March_eval.Eval.value_to_string_pretty v in
              add_line Notty.A.(fg green) (Printf.sprintf "= %s" vs);
+             if !show_type then
+               add_line Notty.A.(fg cyan) (Printf.sprintf "- : %s" ty_str);
              Result_vars.push result_h v ty_str;
              env    := ("v", v) :: (List.remove_assoc "v" !env);
              if tc_ok then
@@ -987,6 +1004,12 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                else "(no user bindings)")
           else
             List.iter (add_line Notty.A.empty) lines
+        | ":set +t" ->
+          show_type := true;
+          add_line Notty.A.(fg green) "type display: on  (`:set -t` to disable)"
+        | ":set -t" ->
+          show_type := false;
+          add_line Notty.A.(fg green) "type display: off"
         | ":clear" -> hist_lines := []
         | ":reset" when not is_debug ->
           let (e', tc') = load_decls_into_env March_eval.Eval.base_env
@@ -1027,6 +1050,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
             "  :quit :q        — exit";
             "  :env            — list bindings";
             "  :type <expr>    — show type without evaluating";
+            "  :set +t         — show inferred type after each expression";
+            "  :set -t         — hide inferred type (default)";
             "  :clear          — clear transcript (keeps bindings)";
             "  :reset          — reset all bindings";
             "  :load <file>    — load a .march file";
