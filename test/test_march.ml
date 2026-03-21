@@ -1581,6 +1581,44 @@ let test_unused_var_underscore_ok () =
   ) ctx.March_errors.Errors.diagnostics in
   Alcotest.(check bool) "wildcard _ must not produce unused warning" false has_any_unused
 
+let parse_error_msg src =
+  try ignore (parse_module src); None
+  with March_errors.Errors.ParseError (msg, _, _) -> Some msg
+
+let test_parse_error_type_missing_eq () =
+  (* "type Foo Bar" should produce a helpful error about `=` *)
+  let msg = parse_error_msg {|mod T do
+    type Foo Bar
+  end|} in
+  Alcotest.(check bool) "type missing = gives error" true (msg <> None)
+
+let test_parse_error_interface_missing_param () =
+  let msg = parse_error_msg {|mod T do
+    interface Eq do
+      fn eq: Int -> Int -> Bool
+    end
+  end|} in
+  Alcotest.(check bool) "interface missing param gives error" true (msg <> None)
+
+let test_parse_error_impl_missing_type () =
+  let msg = parse_error_msg {|mod T do
+    impl Eq do
+      fn eq(x, y) do x == y end
+    end
+  end|} in
+  Alcotest.(check bool) "impl missing type gives error" true (msg <> None)
+
+let test_parse_valid_not_broken () =
+  (* Make sure we didn't break valid syntax *)
+  let src = {|mod T do
+    type Color = Red | Green | Blue
+    interface Show(a) do fn show: a -> String end
+    impl Show(Int) do fn show(x) do int_to_string(x) end end
+    fn go() do Red end
+  end|} in
+  Alcotest.(check bool) "valid syntax still parses" true
+    (match parse_module src with _ -> true)
+
 let test_type_map_populated () =
   let src = {|mod Test do
     fn go(x : Int) do x end
@@ -5793,6 +5831,10 @@ let () =
           Alcotest.test_case "ambiguous ctor warns"   `Quick test_ambiguous_ctor_warns;
           Alcotest.test_case "unused var warns"        `Quick test_unused_var_warning;
           Alcotest.test_case "underscore no warn"      `Quick test_unused_var_underscore_ok;
+          Alcotest.test_case "parse err type missing =" `Quick test_parse_error_type_missing_eq;
+          Alcotest.test_case "parse err iface no param" `Quick test_parse_error_interface_missing_param;
+          Alcotest.test_case "parse err impl no type"   `Quick test_parse_error_impl_missing_type;
+          Alcotest.test_case "valid syntax not broken"  `Quick test_parse_valid_not_broken;
         ] );
       ( "string interp",
         [

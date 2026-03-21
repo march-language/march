@@ -190,8 +190,18 @@ type_decl:
     LBRACE; fields = separated_list(COMMA, field); RBRACE
     { let tps = match tparams with Some ps -> ps | None -> [] in
       DType (name, tps, TDRecord fields, mk_span ($loc)) }
+  | TYPE; _n = upper_name; error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `=` after the type name here:",
+        Some "type Name = Variant1 | Variant2(Int)",
+        $startpos($3))) }
 
 actor_decl:
+  | ACTOR; _n = upper_name; error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `do` after the actor name here:",
+        Some "actor Name do\n    state { field: Type }\n    init ...\n    on Msg(x) do ... end\nend",
+        $startpos($3))) }
   | ACTOR; name = upper_name; DO;
     STATE; LBRACE; fields = separated_list(COMMA, field); RBRACE;
     INIT; init_expr = expr;
@@ -311,6 +321,11 @@ interface_decl:
         iface_assoc_types = [];
         iface_methods = methods;
       }, mk_span ($loc)) }
+  | INTERFACE; _n = upper_name; error
+    { raise (March_errors.Errors.ParseError (
+        "Interfaces need a type parameter in parentheses:",
+        Some "interface Name(a) do\n    fn method: a -> a\nend",
+        $startpos($3))) }
 
 method_sig:
   | FN; name = lower_name; COLON; t = ty;
@@ -335,6 +350,11 @@ impl_decl:
             | DFn (def, _) -> Some (def.fn_name, def)
             | _ -> None) methods;
       }, mk_span ($loc)) }
+  | IMPL; _iface = upper_name; error
+    { raise (March_errors.Errors.ParseError (
+        "Implementations need a type argument in parentheses:",
+        Some "impl InterfaceName(ConcreteType) do\n    fn method(x) do ... end\nend",
+        $startpos($3))) }
 
 constraint_expr:
   | name = upper_name; LPAREN; t = ty; RPAREN { (name, [t]) }
