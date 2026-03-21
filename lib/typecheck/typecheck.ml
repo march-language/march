@@ -1921,15 +1921,18 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       ) (param_tys @ ret_tys)
     | _ -> []
   ) decls in
+  let cap s = MPCode ("Cap(" ^ s ^ ")") in
   (* Check 1: every Cap(X) must be covered by a declared need *)
   List.iter (fun (cap_path, sp) ->
     let covered = List.exists (fun need -> cap_subsumes need cap_path) declared_needs in
     if not covered then
       Err.error env.errors ~span:sp
-        (Printf.sprintf
-           "capability `Cap(%s)` used in module `%s` but `%s` is not declared in `needs`.\n\
-            help: add `needs %s` to the module body."
-           cap_path mod_name.txt cap_path cap_path)
+        (render_parts [
+          cap cap_path; MPText " used in module "; MPCode mod_name.txt;
+          MPText " but "; MPCode cap_path; MPText " is not declared in ";
+          MPCode "needs"; MPText ".";
+          MPBreak; MPText "help: add "; MPCode ("needs " ^ cap_path);
+          MPText " to the module body." ])
   ) used_caps;
   (* Check 2: every needs declaration must be used *)
   List.iter (fun need ->
@@ -1945,17 +1948,21 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
     let used = List.exists (fun (cap_path, _) -> cap_subsumes need cap_path) used_caps in
     if not used then
       Err.warning env.errors ~span:need_sp
-        (Printf.sprintf
-           "module `%s` declares `needs %s` but no function requires `Cap(%s)` or a sub-capability.\n\
-            help: remove the unused capability declaration."
-           mod_name.txt need need)
+        (render_parts [
+          MPText "module "; MPCode mod_name.txt; MPText " declares ";
+          MPCode ("needs " ^ need); MPText " but no function requires ";
+          cap need; MPText " or a sub-capability.";
+          MPBreak; MPText "help: remove the unused capability declaration." ])
   ) declared_needs;
   (* Check 3 (hint): Cap(IO) root — suggest narrowing *)
   List.iter (fun (cap_path, sp) ->
     if cap_path = "IO" then
       Err.hint env.errors ~span:sp
-        "this function takes `Cap(IO)` (the root capability); \
-         consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege."
+        (render_parts [
+          MPText "this function takes "; cap "IO";
+          MPText " (the root capability); consider narrowing to e.g. ";
+          cap "IO.FileRead"; MPText " or "; cap "IO.Console";
+          MPText " for least-privilege." ])
   ) used_caps;
   (* Check 4: transitive — every module we `use` that declares `needs` must be covered *)
   List.iter (function
@@ -1970,11 +1977,13 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
            in
            if not covered then
              Err.error env.errors ~span:sp
-               (Printf.sprintf
-                  "module `%s` imports `%s` which requires `Cap(%s)`, \
-                   but `%s` is not declared in `needs`.\n\
-                   help: add `needs %s` to the module body."
-                  mod_name.txt imported req_cap req_cap req_cap)
+               (render_parts [
+                 MPText "module "; MPCode mod_name.txt; MPText " imports ";
+                 MPCode imported; MPText " which requires "; cap req_cap;
+                 MPText ", but "; MPCode req_cap; MPText " is not declared in ";
+                 MPCode "needs"; MPText ".";
+                 MPBreak; MPText "help: add "; MPCode ("needs " ^ req_cap);
+                 MPText " to the module body." ])
          ) req_caps)
     | _ -> ()
   ) decls;
@@ -1988,11 +1997,13 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
         in
         if not covered then
           Err.error env.errors ~span:sp
-            (Printf.sprintf
-               "extern block `\"%s\"` uses `Cap(%s)`, \
-                but `%s` is not declared in `needs`.\n\
-                help: add `needs %s` to the module body."
-               edef.ext_lib_name cap_path cap_path cap_path)
+            (render_parts [
+              MPText "extern block "; MPCode ("\"" ^ edef.ext_lib_name ^ "\"");
+              MPText " uses "; cap cap_path;
+              MPText ", but "; MPCode cap_path; MPText " is not declared in ";
+              MPCode "needs"; MPText ".";
+              MPBreak; MPText "help: add "; MPCode ("needs " ^ cap_path);
+              MPText " to the module body." ])
       ) cap_paths
     | _ -> ()
   ) decls
