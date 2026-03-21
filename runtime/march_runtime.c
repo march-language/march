@@ -4,6 +4,8 @@
 #include <string.h>
 #include <math.h>
 #include <ctype.h>
+#include <stdatomic.h>
+#include <pthread.h>
 #include <sys/stat.h>
 
 /* ── Allocation ──────────────────────────────────────────────────────── */
@@ -20,22 +22,41 @@ void *march_alloc(int64_t sz) {
 }
 
 /* ── Reference counting ──────────────────────────────────────────────── */
+/*
+ * RC operations use C11 atomics to be safe under concurrent access.
+ *
+ * ABA fix: we use atomic_fetch_sub and check the RETURNED previous value.
+ * This avoids the race where thread A loads rc=1, thread B increments to 2,
+ * thread A stores rc=0 and frees.  With fetch_sub the decrement is atomic
+ * with the value read, so only the thread that observes prev==1 calls free.
+ *
+ * The fields in march_hdr / march_string are plain int64_t (not _Atomic) so
+ * that LLVM-generated FBIP code can access them without atomic semantics.
+ * We cast to _Atomic int64_t * at the RC call sites; this is safe because
+ * _Atomic int64_t has the same size and alignment as int64_t on all targets.
+ */
 
 void march_incrc(void *p) {
     if (!p) return;
-    ((march_hdr *)p)->rc++;
+    /* Relaxed: caller already holds a reference so the object is alive. */
+    atomic_fetch_add_explicit(
+        (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_relaxed);
 }
 
 void march_decrc(void *p) {
     if (!p) return;
-    march_hdr *h = (march_hdr *)p;
-    if (--h->rc <= 0) free(p);
+    /* acq_rel: release our writes before decrement; acquire before free so
+     * we see all other threads' writes to the object. */
+    int64_t prev = atomic_fetch_sub_explicit(
+        (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
+    if (prev <= 1) free(p);
 }
 
 int64_t march_decrc_freed(void *p) {
     if (!p) return 1;
-    march_hdr *h = (march_hdr *)p;
-    if (--h->rc <= 0) { free(p); return 1; }
+    int64_t prev = atomic_fetch_sub_explicit(
+        (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
+    if (prev <= 1) { free(p); return 1; }
     return 0;
 }
 
