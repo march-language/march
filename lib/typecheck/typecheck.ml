@@ -897,6 +897,13 @@ let rec unify env ~span ?(reason = None) t1 t2 =
   | TLin (l1, inner1), TLin (l2, inner2) when l1 = l2 ->
     unify env ~span ~reason inner1 inner2
 
+  (* Transparent coercion: a linear/affine value is structurally the same
+     type as its inner (unrestricted) type.  This allows e.g. a field of
+     type [linear Int] to unify with an expected [Int] at a use site while
+     still preserving the TLin wrapper for linearity tracking in let-bindings. *)
+  | TLin (_, inner), other | other, TLin (_, inner) ->
+    unify env ~span ~reason inner other
+
   | TNat n1, TNat n2 when n1 = n2 -> ()
 
   | TNatOp (op1, a1, b1), TNatOp (op2, a2, b2) when op1 = op2 ->
@@ -2419,7 +2426,7 @@ let rec check_decl env (d : Ast.decl) : env =
     (if List.length new_env.protocols > 1 then
        (* Detect if two protocols use the same participant pair in opposite directions
           without declaring a dual — this is a common session type mistake. *)
-       List.iter (fun (other_name, other_pdef) ->
+       List.iter (fun (other_name, (other_pdef : Ast.protocol_def)) ->
            if other_name <> name.txt then begin
              let other_parts =
                List.sort_uniq String.compare
