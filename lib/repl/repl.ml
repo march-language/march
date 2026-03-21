@@ -81,15 +81,53 @@ let user_scope eval_env tc_env result_h ~baseline_env =
   in
   (scope, result_latest)
 
-(** Load a list of pre-desugared declarations into the eval/typecheck envs silently. *)
+(* Load a list of pre-desugared declarations into the eval/typecheck envs silently. *)
+(** Pre-register all DType definitions found inside stdlib DMod declarations.
+    Without this pass, circular type dependencies between stdlib modules
+    (e.g. http_server.march uses WsSocket from websocket.march, and vice versa)
+    cause both modules to fail incremental typecheck and silently drop all their
+    runtime bindings from the REPL environment.  By registering every variant
+    type and its constructors up-front, each subsequent check_decl call sees a
+    complete type environment regardless of module load order. *)
+let preregister_stdlib_types tc_env (stdlib_decls : March_ast.Ast.decl list) =
+  let open March_ast.Ast in
+  let open March_typecheck.Typecheck in
+  let rec add_from env decls =
+    List.fold_left (fun env d ->
+      match d with
+      | DMod (_, _, inner, _) -> add_from env inner
+      | DType (name, params, TDVariant variants, _) ->
+        let arity      = List.length params in
+        let param_names = List.map (fun (p : name) -> p.txt) params in
+        let env1 = { env with types = (name.txt, arity) :: env.types } in
+        List.fold_left (fun e (v : variant) ->
+          let ci = { ci_type = name.txt; ci_params = param_names;
+                     ci_arg_tys = v.var_args } in
+          { e with ctors = (v.var_name.txt, ci) :: e.ctors }
+        ) env1 variants
+      | DType (name, params, _, _) ->
+        let arity = List.length params in
+        { env with types = (name.txt, arity) :: env.types }
+      | _ -> env
+    ) env decls
+  in
+  add_from tc_env stdlib_decls
+
 let load_decls_into_env env tc_env decls =
   List.fold_left (fun (e, tc) decl ->
     let ctx = March_errors.Errors.create () in
     let tc' = March_typecheck.Typecheck.check_decl { tc with errors = ctx } decl in
-    if March_errors.Errors.has_errors ctx then (e, tc)
-    else
-      let e' = (try March_eval.Eval.eval_decl e decl with _ -> e) in
-      (e', { tc' with errors = March_errors.Errors.create () })
+    (* Always use tc' even when typecheck produces errors: stdlib modules that
+       call unregistered C builtins (http_server_listen, ws_recv, etc.) fail
+       the check, but tc' still contains the public function types that were
+       successfully inferred (e.g. HttpServer.new, HttpServer.plug).  Falling
+       back to tc on error would silently drop all of those from the REPL env. *)
+    (* Always eval_decl even if typecheck fails: stdlib is known-good, and the
+       eval path is purely structural (no type info needed at runtime).  This
+       ensures modules with circular type deps (e.g. HttpServer ↔ WebSocket)
+       still populate the eval environment and remain callable in the REPL. *)
+    let e' = (try March_eval.Eval.eval_decl e decl with _ -> e) in
+    (e', { tc' with errors = March_errors.Errors.create () })
   ) (env, tc_env) decls
 
 (** Compute a content hash of stdlib decls using MD5 of their marshalled form.
@@ -155,7 +193,9 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
     (March_errors.Errors.create ()) type_map in
   let (e0, tc0) = match initial_env with
     | Some e -> (e, base_tc)
-    | None   -> load_decls_into_env base_e base_tc stdlib_decls
+    | None   ->
+      let tc_pre = preregister_stdlib_types base_tc stdlib_decls in
+      load_decls_into_env base_e tc_pre stdlib_decls
   in
   maybe_precompile_stdlib jit_ctx ~stdlib_decls ~type_map;
   let env      = ref e0 in
@@ -572,7 +612,9 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
     (March_errors.Errors.create ()) type_map in
   let (e0, tc0) = match initial_env with
     | Some e -> (e, base_tc)
-    | None   -> load_decls_into_env base_e base_tc stdlib_decls
+    | None   ->
+      let tc_pre = preregister_stdlib_types base_tc stdlib_decls in
+      load_decls_into_env base_e tc_pre stdlib_decls
   in
   maybe_precompile_stdlib jit_ctx ~stdlib_decls ~type_map;
   let env      = ref e0 in
@@ -1082,9 +1124,10 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
           add_line Notty.A.(fg green) "type display: off"
         | ":clear" -> hist_lines := []
         | ":reset" when not is_debug ->
-          let (e', tc') = load_decls_into_env March_eval.Eval.base_env
-            (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map)
-            stdlib_decls in
+          let base_tc' = March_typecheck.Typecheck.base_env
+            (March_errors.Errors.create ()) type_map in
+          let tc_pre' = preregister_stdlib_types base_tc' stdlib_decls in
+          let (e', tc') = load_decls_into_env March_eval.Eval.base_env tc_pre' stdlib_decls in
           env := e'; tc_env := tc';
           hist_lines := []
         | ":help" ->
