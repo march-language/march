@@ -1,0 +1,366 @@
+-- Map module: persistent ordered map based on AVL trees.
+--
+-- Map(k, v) is an immutable balanced binary search tree ordered by key.
+--
+-- Operations that require ordering take an explicit comparator:
+--   cmp : k -> k -> Bool    where   cmp(a)(b) = true  means  a < b
+--
+-- Standard comparators:
+--   fn(a) -> fn(b) -> a < b      for Int keys
+--   fn(a) -> fn(b) -> a < b      for String keys (lexicographic)
+--
+-- All structural operations (map_values, entries, keys, values) do NOT
+-- need a comparator; only insert / get / remove / from_list / merge /
+-- contains_key / get_or / filter do.
+--
+-- Performance: O(log n) insert / get / remove, O(n) traversals.
+--
+-- Design:
+--   Internal type: Map(k, v) = Leaf | Node(left, key, val, right, height)
+--   AVL invariant: |height(left) - height(right)| <= 1 at every node
+--   The comparator style matches Sort.timsort_by: fn a -> fn b -> a < b
+
+mod Map do
+
+-- ---- Internal representation ----
+
+-- Leaf = empty node; Node(left, key, val, right, height) = internal node
+type Map(k, v) = Leaf | Node(Map(k, v), k, v, Map(k, v), Int)
+
+-- ---- Private helpers ----
+
+fn height(t) do
+  match t with
+  | Leaf                -> 0
+  | Node(_, _, _, _, h) -> h
+  end
+end
+
+fn make_node(l, k, v, r) do
+  let hl = height(l)
+  let hr = height(r)
+  let h = if hl > hr then hl + 1 else hr + 1
+  Node(l, k, v, r, h)
+end
+
+fn balance_factor(t) do
+  match t with
+  | Leaf                -> 0
+  | Node(l, _, _, r, _) -> height(r) - height(l)
+  end
+end
+
+-- Single left rotation (right-right case)
+fn rot_left(t) do
+  match t with
+  | Node(l, k, v, Node(rl, rk, rv, rr, _), _) ->
+    make_node(make_node(l, k, v, rl), rk, rv, rr)
+  | other -> other
+  end
+end
+
+-- Single right rotation (left-left case)
+fn rot_right(t) do
+  match t with
+  | Node(Node(ll, lk, lv, lr, _), k, v, r, _) ->
+    make_node(ll, lk, lv, make_node(lr, k, v, r))
+  | other -> other
+  end
+end
+
+-- Restore AVL balance after insert or delete. Handles all four cases.
+fn rebalance(t) do
+  let bf = balance_factor(t)
+  if bf > 1 then
+    match t with
+    | Node(l, k, v, r, _) ->
+      if balance_factor(r) < 0 then
+        rot_left(make_node(l, k, v, rot_right(r)))
+      else
+        rot_left(t)
+    | Leaf -> Leaf
+    end
+  else if bf < -1 then
+    match t with
+    | Node(l, k, v, r, _) ->
+      if balance_factor(l) > 0 then
+        rot_right(make_node(rot_left(l), k, v, r))
+      else
+        rot_right(t)
+    | Leaf -> Leaf
+    end
+  else t
+end
+
+-- Apply a curried comparator: cmp_less(cmp, a, b) = cmp(a)(b)
+fn cmp_less(cmp, a, b) do
+  let f = cmp(a)
+  f(b)
+end
+
+-- Extract and remove the minimum (leftmost) node from a non-empty tree.
+fn remove_min(t) do
+  match t with
+  | Leaf -> panic("Map.remove_min: empty tree")
+  | Node(Leaf, k, v, r, _) -> (k, v, r)
+  | Node(l, k, v, r, _) ->
+    let (mk, mv, l2) = remove_min(l)
+    (mk, mv, rebalance(make_node(l2, k, v, r)))
+  end
+end
+
+-- ---- Construction ----
+
+doc "Returns an empty map."
+pub fn empty() do
+  Leaf
+end
+
+doc "Returns a map containing exactly one key-value pair."
+pub fn singleton(k, v) do
+  Node(Leaf, k, v, Leaf, 1)
+end
+
+-- ---- Query ----
+
+doc "Returns true if the map contains no entries."
+pub fn is_empty(m) do
+  match m with
+  | Leaf -> true
+  | _    -> false
+  end
+end
+
+doc "Returns the number of key-value pairs in the map. O(n)."
+pub fn size(m) do
+  match m with
+  | Leaf                -> 0
+  | Node(l, _, _, r, _) -> 1 + size(l) + size(r)
+  end
+end
+
+doc """
+Returns Some(value) if key is present, or None.
+cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
+"""
+pub fn get(m, key, cmp) do
+  match m with
+  | Leaf -> None
+  | Node(l, nk, nv, r, _) ->
+    if cmp_less(cmp, key, nk) then get(l, key, cmp)
+    else if cmp_less(cmp, nk, key) then get(r, key, cmp)
+    else Some(nv)
+  end
+end
+
+doc "Returns the value for key, or default if the key is absent."
+pub fn get_or(m, key, default, cmp) do
+  match get(m, key, cmp) with
+  | Some(v) -> v
+  | None    -> default
+  end
+end
+
+doc "Returns true if key is present in the map."
+pub fn contains_key(m, key, cmp) do
+  match get(m, key, cmp) with
+  | Some(_) -> true
+  | None    -> false
+  end
+end
+
+-- ---- Modification ----
+
+doc """
+Inserts or updates a key-value pair. Returns the new map.
+If the key is already present its value is replaced.
+cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
+"""
+pub fn insert(m, key, val, cmp) do
+  match m with
+  | Leaf -> Node(Leaf, key, val, Leaf, 1)
+  | Node(l, nk, nv, r, h) ->
+    if cmp_less(cmp, key, nk) then
+      rebalance(make_node(insert(l, key, val, cmp), nk, nv, r))
+    else if cmp_less(cmp, nk, key) then
+      rebalance(make_node(l, nk, nv, insert(r, key, val, cmp)))
+    else
+      Node(l, key, val, r, h)
+  end
+end
+
+doc """
+Removes a key from the map. Returns the map unchanged if the key is absent.
+cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
+"""
+pub fn remove(m, key, cmp) do
+  match m with
+  | Leaf -> Leaf
+  | Node(l, nk, nv, r, _) ->
+    if cmp_less(cmp, key, nk) then
+      rebalance(make_node(remove(l, key, cmp), nk, nv, r))
+    else if cmp_less(cmp, nk, key) then
+      rebalance(make_node(l, nk, nv, remove(r, key, cmp)))
+    else
+      match r with
+      | Leaf -> l
+      | _    ->
+        let (sk, sv, r2) = remove_min(r)
+        rebalance(make_node(l, sk, sv, r2))
+      end
+  end
+end
+
+-- ---- Traversal ----
+
+doc """
+Left fold over all entries in ascending key order.
+f is curried: fn acc -> fn key -> fn val -> new_acc
+"""
+pub fn fold(acc, m, f) do
+  match m with
+  | Leaf                ->  acc
+  | Node(l, nk, nv, r, _) ->
+    let acc2 = fold(acc, l, f)
+    let f1   = f(acc2)
+    let f2   = f1(nk)
+    let acc3 = f2(nv)
+    fold(acc3, r, f)
+  end
+end
+
+doc "Returns all keys in ascending order as a list."
+pub fn keys(m) do
+  fn go(t, acc) do
+    match t with
+    | Leaf                  -> acc
+    | Node(l, nk, _, r, _) ->
+      let acc2 = go(r, acc)
+      go(l, Cons(nk, acc2))
+    end
+  end
+  go(m, Nil)
+end
+
+doc "Returns all values in ascending key order as a list."
+pub fn values(m) do
+  fn go(t, acc) do
+    match t with
+    | Leaf                  -> acc
+    | Node(l, _, nv, r, _) ->
+      let acc2 = go(r, acc)
+      go(l, Cons(nv, acc2))
+    end
+  end
+  go(m, Nil)
+end
+
+doc "Returns all (key, value) pairs in ascending key order as a list."
+pub fn entries(m) do
+  fn go(t, acc) do
+    match t with
+    | Leaf                   -> acc
+    | Node(l, nk, nv, r, _) ->
+      let acc2 = go(r, acc)
+      go(l, Cons((nk, nv), acc2))
+    end
+  end
+  go(m, Nil)
+end
+
+-- ---- Conversion ----
+
+doc """
+Builds a map from a list of (key, value) pairs.
+Later entries overwrite earlier ones for duplicate keys.
+cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
+"""
+pub fn from_list(pairs, cmp) do
+  fn go(lst, acc) do
+    match lst with
+    | Nil -> acc
+    | Cons(pair, rest) ->
+      let (k, v) = pair
+      go(rest, insert(acc, k, v, cmp))
+    end
+  end
+  go(pairs, Leaf)
+end
+
+doc "Converts a map to a list of (key, value) pairs in ascending key order."
+pub fn to_list(m) do
+  entries(m)
+end
+
+-- ---- Transformation ----
+
+doc "Applies f to each value, returning a new map with the same keys and structure."
+pub fn map_values(m, f) do
+  match m with
+  | Leaf                   -> Leaf
+  | Node(l, nk, nv, r, h) ->
+    Node(map_values(l, f), nk, f(nv), map_values(r, f), h)
+  end
+end
+
+doc """
+Returns a map containing only entries where pred(key)(value) is true.
+cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
+pred : k -> v -> Bool (curried).
+"""
+pub fn filter(m, pred, cmp) do
+  fn go(lst, acc) do
+    match lst with
+    | Nil -> acc
+    | Cons(pair, rest) ->
+      let (k, v) = pair
+      let p = pred(k)
+      if p(v) then go(rest, insert(acc, k, v, cmp))
+      else go(rest, acc)
+    end
+  end
+  go(entries(m), Leaf)
+end
+
+doc """
+Merges two maps. When a key appears in both maps, the value from b takes
+precedence. O(n log n) in the size of b.
+cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
+"""
+pub fn merge(a, b, cmp) do
+  fn go(lst, acc) do
+    match lst with
+    | Nil -> acc
+    | Cons(pair, rest) ->
+      let (k, v) = pair
+      go(rest, insert(acc, k, v, cmp))
+    end
+  end
+  go(entries(b), a)
+end
+
+doc """
+Merges two maps with a combining function for conflicting keys.
+merge_with(a, b, f, cmp): when key exists in both, value = f(val_a)(val_b).
+cmp : k -> k -> Bool; f : v -> v -> v (curried).
+"""
+pub fn merge_with(a, b, f, cmp) do
+  fn go(lst, acc) do
+    match lst with
+    | Nil -> acc
+    | Cons(pair, rest) ->
+      let (k, v) = pair
+      let new_val =
+        match get(acc, k, cmp) with
+        | None    -> v
+        | Some(existing) ->
+          let combine = f(existing)
+          combine(v)
+        end
+      go(rest, insert(acc, k, new_val, cmp))
+    end
+  end
+  go(entries(b), a)
+end
+
+end

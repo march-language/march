@@ -5169,6 +5169,293 @@ let test_integration_file_pipeline () =
   Alcotest.(check (list string)) "integration pipeline"
     ["hello"; "world"; "foo"; "bar"] result
 
+(* ── Map stdlib tests ──────────────────────────────────────────────────── *)
+
+let map_decl = lazy (load_stdlib_file_for_test "map.march")
+let eval_with_map src = eval_with_stdlib [Lazy.force map_decl] src
+
+(** Lower a module that includes the Map stdlib to TIR (for compiled-path smoke tests). *)
+let lower_map_typed src =
+  let map_m = Lazy.force map_decl in
+  let m = parse_and_desugar src in
+  let m = { m with March_ast.Ast.mod_decls = [map_m] @ m.March_ast.Ast.mod_decls } in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  March_tir.Lower.lower_module ~type_map m
+
+(* Standard int comparator: fn a -> fn b -> a < b *)
+let int_cmp = {|fn(a) -> fn(b) -> a < b|}
+
+(* Helper: extract Some(v) payload *)
+let vsome = function
+  | March_eval.Eval.VCon ("Some", [v]) -> v
+  | _ -> failwith "expected Some"
+
+let test_map_empty () =
+  let env = eval_with_map {|mod T do
+    fn f() do Map.is_empty(Map.empty()) end
+  end|} in
+  Alcotest.(check bool) "empty map is empty" true (vbool (call_fn env "f" []))
+
+let test_map_singleton () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.singleton(42, "hello")
+      Map.size(m)
+    end
+  end|}) in
+  Alcotest.(check int) "singleton size = 1" 1 (vint (call_fn env "f" []))
+
+let test_map_insert_get () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.insert(Map.empty(), 1, "one", %s)
+      Map.get(m, 1, %s)
+    end
+  end|} int_cmp int_cmp) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check string) "get inserted key" "one" (vstr (vsome v))
+
+let test_map_get_missing () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.insert(Map.empty(), 1, "one", %s)
+      Map.get(m, 99, %s)
+    end
+  end|} int_cmp int_cmp) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check bool) "missing key returns None" true
+    (match v with March_eval.Eval.VCon ("None", []) -> true | _ -> false)
+
+let test_map_insert_overwrite () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.insert(Map.empty(), 1, "first", %s)
+      let m2 = Map.insert(m, 1, "second", %s)
+      Map.get(m2, 1, %s)
+    end
+  end|} int_cmp int_cmp int_cmp) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check string) "overwrite gives new value" "second" (vstr (vsome v))
+
+let test_map_contains_key_true () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.insert(Map.empty(), 7, true, %s)
+      Map.contains_key(m, 7, %s)
+    end
+  end|} int_cmp int_cmp) in
+  Alcotest.(check bool) "contains inserted key" true (vbool (call_fn env "f" []))
+
+let test_map_contains_key_false () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.insert(Map.empty(), 7, true, %s)
+      Map.contains_key(m, 42, %s)
+    end
+  end|} int_cmp int_cmp) in
+  Alcotest.(check bool) "absent key not contained" false (vbool (call_fn env "f" []))
+
+let test_map_get_or () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do Map.get_or(Map.empty(), 5, 99, %s) end
+  end|} int_cmp) in
+  Alcotest.(check int) "get_or default on empty" 99 (vint (call_fn env "f" []))
+
+let test_map_remove () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.insert(Map.insert(Map.empty(), 1, "a", %s), 2, "b", %s)
+      let m2 = Map.remove(m, 1, %s)
+      Map.size(m2)
+    end
+  end|} int_cmp int_cmp int_cmp) in
+  Alcotest.(check int) "size after remove" 1 (vint (call_fn env "f" []))
+
+let test_map_remove_absent () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.insert(Map.empty(), 1, "a", %s)
+      let m2 = Map.remove(m, 99, %s)
+      Map.size(m2)
+    end
+  end|} int_cmp int_cmp) in
+  Alcotest.(check int) "remove absent is no-op" 1 (vint (call_fn env "f" []))
+
+let test_map_size () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.from_list([(3, "c"), (1, "a"), (4, "d"), (1, "a2"), (2, "b")], %s)
+      Map.size(m)
+    end
+  end|} int_cmp) in
+  (* key 1 inserted twice so 4 distinct keys *)
+  Alcotest.(check int) "size deduplicates keys" 4 (vint (call_fn env "f" []))
+
+let test_map_is_empty_after_insert () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do Map.is_empty(Map.insert(Map.empty(), 1, 2, %s)) end
+  end|} int_cmp) in
+  Alcotest.(check bool) "non-empty after insert" false (vbool (call_fn env "f" []))
+
+let test_map_keys () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.from_list([(3, "c"), (1, "a"), (2, "b")], %s)
+      Map.keys(m)
+    end
+  end|} int_cmp) in
+  let ks = List.map vint (vlist (call_fn env "f" [])) in
+  Alcotest.(check (list int)) "keys in sorted order" [1; 2; 3] ks
+
+let test_map_values () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.from_list([(3, 30), (1, 10), (2, 20)], %s)
+      Map.values(m)
+    end
+  end|} int_cmp) in
+  let vs = List.map vint (vlist (call_fn env "f" [])) in
+  Alcotest.(check (list int)) "values in key order" [10; 20; 30] vs
+
+let test_map_entries () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.from_list([(2, "b"), (1, "a"), (3, "c")], %s)
+      Map.entries(m)
+    end
+  end|} int_cmp) in
+  let es = vlist (call_fn env "f" []) in
+  let pairs = List.map (function
+    | March_eval.Eval.VTuple [k; v] -> (vint k, vstr v)
+    | _ -> failwith "expected pair") es in
+  Alcotest.(check (list (pair int string))) "entries sorted" [(1,"a");(2,"b");(3,"c")] pairs
+
+let test_map_from_list () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.from_list([(1, "a"), (2, "b"), (3, "c")], %s)
+      Map.get(m, 2, %s)
+    end
+  end|} int_cmp int_cmp) in
+  Alcotest.(check string) "from_list lookup" "b" (vstr (vsome (call_fn env "f" [])))
+
+let test_map_to_list () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.from_list([(3, 3), (1, 1), (2, 2)], %s)
+      Map.to_list(m)
+    end
+  end|} int_cmp) in
+  let es = vlist (call_fn env "f" []) in
+  let ks = List.map (function
+    | March_eval.Eval.VTuple [k; _] -> vint k
+    | _ -> failwith "expected pair") es in
+  Alcotest.(check (list int)) "to_list sorted by key" [1; 2; 3] ks
+
+let test_map_map_values () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.from_list([(1, 10), (2, 20), (3, 30)], %s)
+      let m2 = Map.map_values(m, fn(v) -> v * 2)
+      Map.values(m2)
+    end
+  end|} int_cmp) in
+  let vs = List.map vint (vlist (call_fn env "f" [])) in
+  Alcotest.(check (list int)) "map_values doubles" [20; 40; 60] vs
+
+let test_map_filter () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.from_list([(1, 1), (2, 2), (3, 3), (4, 4)], %s)
+      let m2 = Map.filter(m, fn(k) -> fn(v) -> k > 2, %s)
+      Map.keys(m2)
+    end
+  end|} int_cmp int_cmp) in
+  let ks = List.map vint (vlist (call_fn env "f" [])) in
+  Alcotest.(check (list int)) "filter keeps k > 2" [3; 4] ks
+
+let test_map_fold () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.from_list([(1, 10), (2, 20), (3, 30)], %s)
+      Map.fold(0, m, fn(acc) -> fn(k) -> fn(v) -> acc + v)
+    end
+  end|} int_cmp) in
+  Alcotest.(check int) "fold sums values" 60 (vint (call_fn env "f" []))
+
+let test_map_merge () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let a = Map.from_list([(1, "a1"), (2, "a2")], %s)
+      let b = Map.from_list([(2, "b2"), (3, "b3")], %s)
+      let m = Map.merge(a, b, %s)
+      Map.size(m)
+    end
+  end|} int_cmp int_cmp int_cmp) in
+  Alcotest.(check int) "merge size" 3 (vint (call_fn env "f" []))
+
+let test_map_merge_b_overwrites () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let a = Map.from_list([(1, "a1"), (2, "a2")], %s)
+      let b = Map.from_list([(2, "b2"), (3, "b3")], %s)
+      let m = Map.merge(a, b, %s)
+      Map.get(m, 2, %s)
+    end
+  end|} int_cmp int_cmp int_cmp int_cmp) in
+  Alcotest.(check string) "merge: b overwrites a" "b2" (vstr (vsome (call_fn env "f" [])))
+
+let test_map_merge_with () =
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let a = Map.from_list([(1, 10), (2, 20)], %s)
+      let b = Map.from_list([(2, 5), (3, 30)], %s)
+      let m = Map.merge_with(a, b, fn(old) -> fn(new) -> old + new, %s)
+      Map.values(m)
+    end
+  end|} int_cmp int_cmp int_cmp) in
+  let vs = List.map vint (vlist (call_fn env "f" [])) in
+  Alcotest.(check (list int)) "merge_with sums conflict" [10; 25; 30] vs
+
+let test_map_string_keys () =
+  let str_cmp = {|fn(a) -> fn(b) -> a < b|} in
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let m = Map.from_list([("banana", 2), ("apple", 1), ("cherry", 3)], %s)
+      Map.keys(m)
+    end
+  end|} str_cmp) in
+  let ks = List.map vstr (vlist (call_fn env "f" [])) in
+  Alcotest.(check (list string)) "string keys sorted" ["apple"; "banana"; "cherry"] ks
+
+let test_map_large () =
+  (* Insert 20 keys in various orders, verify all are retrievable and sorted. *)
+  let env = eval_with_map (Printf.sprintf {|mod T do
+    fn f() do
+      let pairs = [(15,15),(3,3),(18,18),(7,7),(11,11),(1,1),(20,20),(9,9),
+                   (13,13),(5,5),(17,17),(2,2),(19,19),(8,8),(12,12),(4,4),
+                   (16,16),(6,6),(14,14),(10,10)]
+      let m = Map.from_list(pairs, %s)
+      Map.keys(m)
+    end
+  end|} int_cmp) in
+  let ks = List.map vint (vlist (call_fn env "f" [])) in
+  let expected = List.init 20 (fun i -> i + 1) in
+  Alcotest.(check (list int)) "20 keys sorted" expected ks
+
+let test_map_tir_lower () =
+  (* Smoke test: lower a program that uses Map through the TIR pipeline. *)
+  let _m = lower_map_typed (Printf.sprintf {|mod T do
+    fn make_map() do
+      Map.from_list([(1, "a"), (2, "b")], %s)
+    end
+    fn lookup_key(m) do
+      Map.get(m, 1, %s)
+    end
+  end|} int_cmp int_cmp) in
+  (* If lowering didn't throw, the test passes *)
+  ()
+
 (* ── Track integration tests ──────────────────────────────────────────── *)
 
 (* Track-B: type-qualified constructors — EAlloc in the TIR must use a
@@ -5886,6 +6173,34 @@ let () =
       ]);
       ("integration", [
         Alcotest.test_case "file/dir/path pipeline" `Quick test_integration_file_pipeline;
+      ]);
+      ("map stdlib", [
+        Alcotest.test_case "empty is_empty"             `Quick test_map_empty;
+        Alcotest.test_case "singleton"                  `Quick test_map_singleton;
+        Alcotest.test_case "insert and get"             `Quick test_map_insert_get;
+        Alcotest.test_case "get missing key"            `Quick test_map_get_missing;
+        Alcotest.test_case "insert overwrites"          `Quick test_map_insert_overwrite;
+        Alcotest.test_case "contains_key true"          `Quick test_map_contains_key_true;
+        Alcotest.test_case "contains_key false"         `Quick test_map_contains_key_false;
+        Alcotest.test_case "get_or default"             `Quick test_map_get_or;
+        Alcotest.test_case "remove existing"            `Quick test_map_remove;
+        Alcotest.test_case "remove absent no-op"        `Quick test_map_remove_absent;
+        Alcotest.test_case "size"                       `Quick test_map_size;
+        Alcotest.test_case "is_empty after insert"      `Quick test_map_is_empty_after_insert;
+        Alcotest.test_case "keys sorted"                `Quick test_map_keys;
+        Alcotest.test_case "values in key order"        `Quick test_map_values;
+        Alcotest.test_case "entries sorted"             `Quick test_map_entries;
+        Alcotest.test_case "from_list"                  `Quick test_map_from_list;
+        Alcotest.test_case "to_list equals entries"     `Quick test_map_to_list;
+        Alcotest.test_case "map_values"                 `Quick test_map_map_values;
+        Alcotest.test_case "filter"                     `Quick test_map_filter;
+        Alcotest.test_case "fold sum"                   `Quick test_map_fold;
+        Alcotest.test_case "merge size"                 `Quick test_map_merge;
+        Alcotest.test_case "merge b overwrites a"       `Quick test_map_merge_b_overwrites;
+        Alcotest.test_case "merge_with combine"         `Quick test_map_merge_with;
+        Alcotest.test_case "string keys"                `Quick test_map_string_keys;
+        Alcotest.test_case "large insert order"         `Quick test_map_large;
+        Alcotest.test_case "tir lowering"               `Quick test_map_tir_lower;
       ]);
       ("track integration", [
         Alcotest.test_case "shared ctor tir key"        `Quick test_shared_ctor_tir_key;
