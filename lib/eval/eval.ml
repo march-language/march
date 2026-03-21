@@ -2264,6 +2264,13 @@ let base_env : env =
                 VCon ("Err", [VString ("bad status line: " ^ (List.hd lines))])))
         | _ -> eval_error "http_parse_response(raw_string)"))
 
+  (* ── HTTP server stubs (interpreter mode: not supported) ────────── *)
+  ; ("http_server_listen", VBuiltin ("http_server_listen", fun _ ->
+      Printf.eprintf
+        "error: http_server_listen is not supported in interpreter mode.\n\
+         Compile with `march --compile` to run an HTTP server.\n";
+      exit 1))
+
   (* ── CSV parser ─────────────────────────────────────────────────── *)
   ; ("csv_open",     VBuiltin ("csv_open",     csv_open_impl))
   ; ("csv_next_row", VBuiltin ("csv_next_row", csv_next_row_impl))
@@ -2560,15 +2567,15 @@ and eval_expr_inner (env : env) (e : expr) : value =
     (match pid_val with
      | VPid pid ->
        (match Hashtbl.find_opt actor_registry pid with
-        | None -> VUnit  (* dead/unknown actor: fire-and-forget, silently drop *)
-        | Some inst when not inst.ai_alive -> VUnit  (* actor was killed: drop *)
+        | None -> VCon ("None", [])  (* dead/unknown actor: fire-and-forget, silently drop *)
+        | Some inst when not inst.ai_alive -> VCon ("None", [])  (* actor was killed: drop *)
         | Some inst ->
           (* Phase 4: async — push message to mailbox, do not dispatch inline.
              Only constructor values (VCon/VAtom) are valid messages. *)
           (match msg_val with
            | VCon _ | VAtom _ ->
              Queue.push msg_val inst.ai_mailbox;
-             VUnit
+             VCon ("Some", [VUnit])
            | _ ->
              eval_error "send: message must be a constructor value, got %s"
                (value_to_string msg_val)))

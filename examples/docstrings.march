@@ -50,8 +50,8 @@ mod Stack do
   pub fn pop(Nil) do
     Err(:empty)
   end
-  pub fn pop(Cons(x, rest)) do
-    Ok(x, rest)
+  pub fn pop(Cons(x, _)) do
+    Ok(x)
   end
 
   doc "Returns true if the stack has no elements."

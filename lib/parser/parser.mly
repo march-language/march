@@ -165,7 +165,7 @@ when_guard:
 
 (** Function parameters: can be patterns (for head matching) or named params. *)
 fn_param:
-  | p = simple_pattern { FPPat p }
+  | p = pattern { FPPat p }
   | name = lower_name; COLON; t = ty
     { FPNamed { param_name = name; param_ty = Some t; param_lin = Unrestricted } }
   | LINEAR; name = lower_name; COLON; t = ty
