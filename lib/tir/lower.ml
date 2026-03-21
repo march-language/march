@@ -996,6 +996,98 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
   let types = ref [] in
   let top_lets = ref [] in
   let externs = ref [] in
+  (* Pre-populate _iface_methods with standard interface builtins:
+     Eq, Ord, Show, Hash for Int/Float/String/Bool/Unit.
+     These mirror the builtin_impls registered in the typechecker.
+     Synthetic TIR functions delegate to the corresponding built-in ops.
+     Only injected when a type_map is available (full pipeline mode). *)
+  if !_type_map_ref <> None then begin
+  let mk_var name ty = { Tir.v_name = name; v_ty = ty; v_lin = Tir.Unr } in
+  let call2 op_name x_ty y_ty ret_ty =
+    (* fn(x, y) -> op(x, y) *)
+    let x = mk_var "x" x_ty and y = mk_var "y" y_ty in
+    { Tir.fn_name   = op_name;
+      fn_params     = [x; y];
+      fn_ret_ty     = ret_ty;
+      fn_body       = Tir.EApp (mk_var op_name unknown_ty, [Tir.AVar x; Tir.AVar y]) }
+  in
+  let call1 op_name x_ty ret_ty =
+    (* fn(x) -> op(x) *)
+    let x = mk_var "x" x_ty in
+    { Tir.fn_name   = op_name;
+      fn_params     = [x];
+      fn_ret_ty     = ret_ty;
+      fn_body       = Tir.EApp (mk_var op_name unknown_ty, [Tir.AVar x]) }
+  in
+  let reg_method meth_name ty_name mangled_name =
+    let existing = match Hashtbl.find_opt !_iface_methods meth_name with
+      | Some l -> l | None -> [] in
+    Hashtbl.replace !_iface_methods meth_name ((ty_name, mangled_name) :: existing)
+  in
+  let emit_builtin_fn name params ret_ty body_fn_name body_params =
+    let fn : Tir.fn_def = {
+      fn_name   = name;
+      fn_params = params;
+      fn_ret_ty = ret_ty;
+      fn_body   = Tir.EApp (mk_var body_fn_name unknown_ty,
+                             List.map (fun v -> Tir.AVar v) body_params);
+    } in
+    fns := fn :: !fns
+  in
+  ignore (call2 "" Tir.TInt Tir.TInt Tir.TInt);  (* suppress unused warnings *)
+  ignore (call1 "" Tir.TInt Tir.TInt);
+  (* Eq implementations: eq(x, y) -> x == y *)
+  let eq_types = [("Int", Tir.TInt); ("Float", Tir.TFloat);
+                  ("String", Tir.TString); ("Bool", Tir.TBool)] in
+  List.iter (fun (ty_name, tir_ty) ->
+      let mangled = Printf.sprintf "Eq$%s.eq" ty_name in
+      let x = mk_var "x" tir_ty and y = mk_var "y" tir_ty in
+      let fn : Tir.fn_def = {
+        fn_name = mangled; fn_params = [x; y]; fn_ret_ty = Tir.TBool;
+        fn_body = Tir.EApp (mk_var "==" unknown_ty, [Tir.AVar x; Tir.AVar y]);
+      } in
+      fns := fn :: !fns;
+      reg_method "eq" ty_name mangled
+    ) eq_types;
+  (* Ord implementations: compare(x, y) -> compare(x, y) [runtime builtin] *)
+  let ord_types = [("Int", Tir.TInt); ("Float", Tir.TFloat); ("String", Tir.TString)] in
+  List.iter (fun (ty_name, tir_ty) ->
+      let mangled = Printf.sprintf "Ord$%s.compare" ty_name in
+      let x = mk_var "x" tir_ty and y = mk_var "y" tir_ty in
+      let fn : Tir.fn_def = {
+        fn_name = mangled; fn_params = [x; y]; fn_ret_ty = Tir.TInt;
+        fn_body = Tir.EApp (mk_var "compare" unknown_ty, [Tir.AVar x; Tir.AVar y]);
+      } in
+      fns := fn :: !fns;
+      reg_method "compare" ty_name mangled
+    ) ord_types;
+  (* Show implementations: show(x) -> type_specific_to_string(x) *)
+  let show_specs = [
+    ("Int",    Tir.TInt,    "int_to_string");
+    ("Float",  Tir.TFloat,  "float_to_string");
+    ("String", Tir.TString, "show");    (* identity via show builtin *)
+    ("Bool",   Tir.TBool,   "bool_to_string");
+  ] in
+  List.iter (fun (ty_name, tir_ty, to_str_fn) ->
+      let mangled = Printf.sprintf "Show$%s.show" ty_name in
+      emit_builtin_fn mangled [mk_var "x" tir_ty] Tir.TString to_str_fn
+        [mk_var "x" tir_ty];
+      reg_method "show" ty_name mangled
+    ) show_specs;
+  (* Hash implementations: hash(x) -> hash(x) [runtime builtin] *)
+  let hash_types = [("Int", Tir.TInt); ("Float", Tir.TFloat);
+                    ("String", Tir.TString); ("Bool", Tir.TBool)] in
+  List.iter (fun (ty_name, tir_ty) ->
+      let mangled = Printf.sprintf "Hash$%s.hash" ty_name in
+      let x = mk_var "x" tir_ty in
+      let fn : Tir.fn_def = {
+        fn_name = mangled; fn_params = [x]; fn_ret_ty = Tir.TInt;
+        fn_body = Tir.EApp (mk_var "hash" unknown_ty, [Tir.AVar x]);
+      } in
+      fns := fn :: !fns;
+      reg_method "hash" ty_name mangled
+    ) hash_types;
+  end; (* end of builtin iface injection *)
   (* Pass 1: Collect interface/impl declarations first so that interface
      method resolution is available when lowering function bodies. *)
   List.iter (fun d ->

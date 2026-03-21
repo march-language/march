@@ -1181,6 +1181,24 @@ let base_env : env =
         | [v] -> VString (value_display v)
         | _ -> eval_error "to_string: expected one argument"))
 
+    (* ---- Standard interface builtins: Eq, Ord, Show, Hash ---- *)
+  ; ("eq", VBuiltin ("eq", function
+        | [a; b] -> VBool (a = b)
+        | _ -> eval_error "eq: expected two arguments"))
+  ; ("compare", VBuiltin ("compare", function
+        | [VInt a;    VInt b]    -> VInt (Int.compare a b)
+        | [VFloat a;  VFloat b]  -> VInt (Float.compare a b)
+        | [VString a; VString b] -> VInt (String.compare a b)
+        | [VBool a;   VBool b]   -> VInt (Bool.compare a b)
+        | [a; b] -> VInt (compare a b)
+        | _ -> eval_error "compare: expected two arguments"))
+  ; ("show", VBuiltin ("show", function
+        | [v] -> VString (value_to_string v)
+        | _ -> eval_error "show: expected one argument"))
+  ; ("hash", VBuiltin ("hash", function
+        | [v] -> VInt (Hashtbl.hash v)
+        | _ -> eval_error "hash: expected one argument"))
+
     (* ---- Int primitives ---- *)
   ; ("int_abs", VBuiltin ("int_abs", function
         | [VInt n] -> VInt (abs n)
