@@ -65,7 +65,7 @@
 %token TYPE MOD ACTOR ON SEND SPAWN
 %token STATE INIT RESPOND PROTOCOL LOOP
 %token LINEAR AFFINE
-%token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS USE NEEDS
+%token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS USE NEEDS REQUIRES
 %token DBG DOC
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
 %token ONE_FOR_ONE ONE_FOR_ALL REST_FOR_ONE RESTART_KW
@@ -298,14 +298,16 @@ cap_path:
   | id = upper_name { [id] }
   | id = upper_name; DOT; rest = cap_path { id :: rest }
 
-(** Interface (typeclass) definition: interface Eq(a) do fn eq: a -> a -> Bool end *)
+(** Interface (typeclass) definition: interface Eq(a) do fn eq: a -> a -> Bool end
+    Optional requires clause: interface Ord(a) requires Eq(a) do ... end *)
 interface_decl:
-  | INTERFACE; name = upper_name; LPAREN; param = lower_name; RPAREN; DO;
-    methods = list(method_sig); END
+  | INTERFACE; name = upper_name; LPAREN; param = lower_name; RPAREN;
+    superclasses = loption(preceded(REQUIRES, separated_nonempty_list(COMMA, constraint_expr)));
+    DO; methods = list(method_sig); END
     { DInterface ({
         iface_name = name;
         iface_param = param;
-        iface_superclasses = [];
+        iface_superclasses = superclasses;
         iface_assoc_types = [];
         iface_methods = methods;
       }, mk_span ($loc)) }

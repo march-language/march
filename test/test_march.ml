@@ -1434,6 +1434,39 @@ let test_tc_impl_unknown_iface () =
   end|} in
   Alcotest.(check bool) "impl unknown interface — has errors" true (has_errors ctx)
 
+let test_superclass_satisfied () =
+  (* impl Ord(Int) when Eq is already impl'd — should pass *)
+  let ctx = typecheck {|mod Test do
+    interface Eq(a) do
+      fn eq: a -> a -> Bool
+    end
+    interface Ord(a) requires Eq(a) do
+      fn compare: a -> a -> Int
+    end
+    impl Eq(Int) do
+      fn eq(x, y) do x == y end
+    end
+    impl Ord(Int) do
+      fn compare(x, y) do compare_int(x, y) end
+    end
+  end|} in
+  Alcotest.(check bool) "Ord(Int) with Eq(Int) present — no errors" false (has_errors ctx)
+
+let test_superclass_missing () =
+  (* impl Ord(String) without impl Eq(String) — should error *)
+  let ctx = typecheck {|mod Test do
+    interface Eq(a) do
+      fn eq: a -> a -> Bool
+    end
+    interface Ord(a) requires Eq(a) do
+      fn compare: a -> a -> Int
+    end
+    impl Ord(String) do
+      fn compare(x, y) do compare_string(x, y) end
+    end
+  end|} in
+  Alcotest.(check bool) "Ord(String) without Eq(String) — has errors" true (has_errors ctx)
+
 let test_type_map_populated () =
   let src = {|mod Test do
     fn go(x : Int) do x end
@@ -5637,6 +5670,8 @@ let () =
           Alcotest.test_case "sig missing fn"       `Quick test_tc_sig_missing;
           Alcotest.test_case "impl valid"           `Quick test_tc_impl_valid;
           Alcotest.test_case "impl unknown iface"   `Quick test_tc_impl_unknown_iface;
+          Alcotest.test_case "superclass satisfied" `Quick test_superclass_satisfied;
+          Alcotest.test_case "superclass missing"   `Quick test_superclass_missing;
         ] );
       ( "string interp",
         [

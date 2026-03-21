@@ -2151,6 +2151,30 @@ let rec check_decl env (d : Ast.decl) : env =
          (Printf.sprintf "Unknown interface `%s` — is it declared above this impl?"
             idef.impl_iface.txt)
      | Some interface ->
+       (* Check superclass constraints: each required superclass must already have an impl *)
+       let sc_tvars = ref [(interface.iface_param.txt, inst_ty)] in
+       List.iter (fun ((sc_name : Ast.name), sc_tys) ->
+           let sc_inst_tys = List.map (surface_ty env ~tvars:sc_tvars) sc_tys in
+           (match sc_inst_tys with
+            | [sc_inst_ty] ->
+              let sc_inst_ty = repr sc_inst_ty in
+              (match sc_inst_ty with
+               | TVar _ -> ()  (* polymorphic param — checked at use sites *)
+               | _ ->
+                 if not (List.exists (fun (iname, impl_ty) ->
+                     iname = sc_name.txt && impl_matches_ty (repr impl_ty) sc_inst_ty
+                   ) env.impls) then
+                   Err.error env.errors ~span:idef.impl_iface.span
+                     (Printf.sprintf
+                        "Cannot implement `%s(%s)`: required superclass `%s(%s)` is not \
+                         satisfied.\n\
+                         Add `impl %s(%s) do ... end` before this implementation."
+                        idef.impl_iface.txt (pp_ty inst_ty)
+                        sc_name.txt (pp_ty sc_inst_ty)
+                        sc_name.txt (pp_ty sc_inst_ty)))
+            | _ -> ()  (* multi-param superclasses not yet supported *)
+           )
+         ) interface.iface_superclasses;
        List.iter (fun ((mname : Ast.name), (def : Ast.fn_def)) ->
            match List.find_opt
                    (fun (m : Ast.method_decl) -> m.md_name.txt = mname.txt)
