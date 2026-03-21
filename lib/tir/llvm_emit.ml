@@ -1860,4 +1860,23 @@ let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
   Buffer.add_buffer out ctx.buf;
   Buffer.contents out
 
+(** Emit a collection of functions as a standalone LLVM IR module.
+    Used for precompiling the stdlib to a cacheable .so fragment.
+    No expression wrapper is emitted — just the function definitions. *)
+let emit_fns_fragment
+    ~(types : Tir.type_def list)
+    ~(fns : Tir.fn_def list) : string =
+  let ctx = make_ctx () in
+  let pseudo_mod : Tir.tir_module =
+    { tm_name = "stdlib_prelude"; tm_types = types; tm_fns = fns; tm_externs = [] } in
+  build_ctor_info ctx pseudo_mod;
+  List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true) fns;
+  List.iter (emit_fn ctx) fns;
+  let out = Buffer.create 8192 in
+  emit_preamble out;
+  Buffer.add_buffer out ctx.preamble;
+  Buffer.add_buffer out ctx.buf;
+  Buffer.add_buffer out ctx.extra_fns;
+  Buffer.contents out
+
 let llvm_ty_of_tir = llvm_ty

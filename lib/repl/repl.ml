@@ -92,6 +92,24 @@ let load_decls_into_env env tc_env decls =
       (e', { tc' with errors = March_errors.Errors.create () })
   ) (env, tc_env) decls
 
+(** Compute a content hash of stdlib decls using MD5 of their marshalled form.
+    Stable within a binary build — changes whenever stdlib source changes. *)
+let stdlib_content_hash (stdlib_decls : March_ast.Ast.decl list) : string =
+  let bytes = Marshal.to_string stdlib_decls [] in
+  Digest.to_hex (Digest.string bytes)
+
+(** Precompile the stdlib to a cached .so via the JIT context.
+    Uses a source-level content hash so cache hits skip TIR lowering entirely.
+    Non-fatal: any error is silently swallowed so the REPL always starts. *)
+let maybe_precompile_stdlib jit_ctx ~stdlib_decls
+    ~(type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t) =
+  match jit_ctx with
+  | None -> ()
+  | Some jit ->
+    let content_hash = stdlib_content_hash stdlib_decls in
+    March_jit.Repl_jit.precompile_stdlib jit
+      ~content_hash ~stdlib_decls ~type_map
+
 (** Wrap a REPL expression in a synthetic module for TIR lowering.
     The expression becomes the body of fn main() -> expr. *)
 let wrap_expr_as_module ~(stdlib_decls : March_ast.Ast.decl list)
@@ -139,6 +157,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
     | Some e -> (e, base_tc)
     | None   -> load_decls_into_env base_e base_tc stdlib_decls
   in
+  maybe_precompile_stdlib jit_ctx ~stdlib_decls ~type_map;
   let env      = ref e0 in
   let tc_env   = ref tc0 in
   let result_h = Result_vars.create () in
@@ -555,6 +574,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
     | Some e -> (e, base_tc)
     | None   -> load_decls_into_env base_e base_tc stdlib_decls
   in
+  maybe_precompile_stdlib jit_ctx ~stdlib_decls ~type_map;
   let env      = ref e0 in
   let tc_env   = ref tc0 in
   let result_h = Result_vars.create () in

@@ -4,5 +4,5 @@
 ; (c_library_flags (-ldl)) later.
 (library
  (name march_jit)
- (libraries unix march_tir march_ast march_typecheck)
+ (libraries unix march_tir march_ast march_typecheck march_cas)
  (foreign_stubs (language c) (names jit_stubs)))

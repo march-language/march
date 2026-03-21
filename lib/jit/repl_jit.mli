@@ -30,5 +30,18 @@ val run_decl :
   March_ast.Ast.module_ ->
   unit
 
+(** Pre-compile stdlib functions to a cached .so in ~/.cache/march/.
+    [content_hash] is a hex string derived from the stdlib source content
+    (see [Repl.stdlib_content_hash]).  Uses a source-level hash so that
+    cache hits are handled without TIR lowering.
+    After this call all stdlib functions are marked as already compiled,
+    so subsequent JIT fragments don't need to re-emit them. *)
+val precompile_stdlib :
+  t ->
+  content_hash:string ->
+  stdlib_decls:March_ast.Ast.decl list ->
+  type_map:(March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t ->
+  unit
+
 (** Clean up: close all open dl handles, remove temp files. *)
 val cleanup : t -> unit

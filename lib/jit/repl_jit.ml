@@ -1,10 +1,9 @@
 (* lib/jit/repl_jit.ml *)
 
+(* Detect macOS without forking a subprocess — check for a macOS-only path. *)
 let is_macos () =
   Sys.os_type = "Unix" &&
-  (try let ic = Unix.open_process_in "uname -s" in
-       let s = input_line ic in ignore (Unix.close_process_in ic); s = "Darwin"
-   with _ -> false)
+  Sys.file_exists "/System/Library/CoreServices/SystemVersion.plist"
 
 type t = {
   runtime_so   : string;
@@ -212,6 +211,100 @@ let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
     let global_name = "repl_" ^ bind_name in
     let llty = March_tir.Llvm_emit.llvm_ty_of_tir main_fn.fn_ret_ty in
     ctx.globals <- (global_name, llty) :: ctx.globals
+  end
+
+(** Pre-compile stdlib functions to a cached .so, keyed by a content hash
+    of the stdlib source files.
+
+    Two-tier cache in ~/.cache/march/:
+      stdlib_prelude_<hash>.so    — compiled shared library
+      stdlib_prelude_<hash>.names — newline-separated list of function names
+
+    On cache hit: dlopen the .so, read function names from the .names file,
+      mark all functions as compiled — NO TIR lowering needed.
+    On cache miss: lower [stdlib_decls] to TIR, compile to a .so, write the
+      .names file, then dlopen.
+
+    [content_hash] must be a hex string derived from the stdlib source content
+    (see [stdlib_content_hash] in the caller).  Using source-level hashing
+    avoids the expensive TIR-lowering step on every warm-cache startup.
+
+    After this call, every stdlib TIR function is recorded in [ctx.compiled_fns]
+    so subsequent [run_expr] / [run_decl] fragments don't re-emit them. *)
+let precompile_stdlib ctx
+    ~(content_hash : string)
+    ~(stdlib_decls : March_ast.Ast.decl list)
+    ~(type_map     : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t) =
+  let home = (try Sys.getenv "HOME" with Not_found -> ".") in
+  let cache_dir = Filename.concat home ".cache/march" in
+  let short_hash = String.sub content_hash 0 16 in
+  let so_path    = Filename.concat cache_dir
+    ("stdlib_prelude_" ^ short_hash ^ ".so") in
+  let names_path = Filename.concat cache_dir
+    ("stdlib_prelude_" ^ short_hash ^ ".names") in
+  (* ── Cache hit path ───────────────────────────────────────────────────── *)
+  if Sys.file_exists so_path && Sys.file_exists names_path then begin
+    (try
+      let handle = Jit.dlopen so_path in
+      ctx.handles <- handle :: ctx.handles;
+      (* Read function names and mark as compiled. *)
+      let ic = open_in names_path in
+      (try while true do
+        let name = String.trim (input_line ic) in
+        if name <> "" then Hashtbl.replace ctx.compiled_fns name ()
+      done with End_of_file -> ());
+      close_in ic
+    with _ -> ())  (* Non-fatal: fall through to lazy JIT *)
+  end else begin
+    (* ── Cache miss: lower stdlib to TIR, compile, cache ─────────────────── *)
+    let s = March_ast.Ast.dummy_span in
+    let stdlib_mod : March_ast.Ast.module_ =
+      { March_ast.Ast.mod_name = { txt = "StdlibPrelude"; span = s };
+        mod_decls = stdlib_decls } in
+    (try
+      let tir = lower_module ~type_map stdlib_mod in
+      let stdlib_fns = List.filter
+        (fun (f : March_tir.Tir.fn_def) ->
+          not (is_c_runtime_fn f.fn_name) &&
+          not (Hashtbl.mem ctx.compiled_fns f.fn_name))
+        tir.March_tir.Tir.tm_fns in
+      if stdlib_fns <> [] then begin
+        let ir = March_tir.Llvm_emit.emit_fns_fragment
+          ~types:tir.March_tir.Tir.tm_types ~fns:stdlib_fns in
+        let n = next_id ctx in
+        let ll_path = Filename.concat ctx.tmp_dir
+          (Printf.sprintf "stdlib_prelude_%d.ll" n) in
+        let oc = open_out ll_path in
+        output_string oc ir;
+        close_out oc;
+        let cmd = Printf.sprintf "%s -shared -fPIC -O0%s -o %s %s 2>&1"
+          ctx.clang ctx.undef_flag so_path ll_path in
+        let ic = Unix.open_process_in cmd in
+        let errbuf = Buffer.create 256 in
+        (try while true do Buffer.add_char errbuf (input_char ic) done
+         with End_of_file -> ());
+        (match Unix.close_process_in ic with
+         | Unix.WEXITED 0 ->
+           (* Write companion names file *)
+           (try
+             let nc = open_out names_path in
+             List.iter (fun (f : March_tir.Tir.fn_def) ->
+               output_string nc (f.fn_name ^ "\n")) stdlib_fns;
+             close_out nc
+           with _ -> ());
+           (try
+             let handle = Jit.dlopen so_path in
+             ctx.handles <- handle :: ctx.handles
+           with _ -> ())
+         | _ ->
+           (try Sys.remove so_path with _ -> ());
+           let _ = Buffer.contents errbuf in ());
+        (* Mark functions as compiled regardless of outcome *)
+        List.iter (fun (f : March_tir.Tir.fn_def) ->
+          Hashtbl.replace ctx.compiled_fns f.fn_name ()
+        ) stdlib_fns
+      end
+    with _ -> ())  (* Non-fatal *)
   end
 
 let cleanup ctx =
