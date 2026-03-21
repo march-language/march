@@ -1434,6 +1434,47 @@ let test_tc_impl_unknown_iface () =
   end|} in
   Alcotest.(check bool) "impl unknown interface — has errors" true (has_errors ctx)
 
+let test_default_method_inherited () =
+  (* Impl provides eq but not neq — neq should be auto-generated from default *)
+  let ctx = typecheck {|mod Test do
+    interface Eq(a) do
+      fn eq: a -> a -> Bool
+      fn neq: a -> a -> Bool do fn(x, y) -> not(eq(x, y)) end
+    end
+    impl Eq(Int) do
+      fn eq(x, y) do x == y end
+    end
+  end|} in
+  Alcotest.(check bool) "impl with default method — no errors" false (has_errors ctx)
+
+let test_default_method_eval () =
+  (* neq auto-generated from default can be called in the eval *)
+  let src = {|mod Test do
+    interface Eq(a) do
+      fn eq: a -> a -> Bool
+      fn neq: a -> a -> Bool do fn(x, y) -> not(eq(x, y)) end
+    end
+    impl Eq(Int) do
+      fn eq(x, y) do x == y end
+    end
+  end|} in
+  let env = eval_module src in
+  let result = call_fn env "neq"
+    [March_eval.Eval.VInt 1; March_eval.Eval.VInt 2] in
+  Alcotest.(check bool) "neq default returns true for 1 neq 2" true
+    (vbool result)
+
+let test_missing_required_method () =
+  (* Impl omits a non-default method — should error *)
+  let ctx = typecheck {|mod Test do
+    interface Show(a) do
+      fn show: a -> String
+    end
+    impl Show(Int) do
+    end
+  end|} in
+  Alcotest.(check bool) "impl missing required method — has errors" true (has_errors ctx)
+
 let test_superclass_satisfied () =
   (* impl Ord(Int) when Eq is already impl'd — should pass *)
   let ctx = typecheck {|mod Test do
@@ -5668,10 +5709,13 @@ let () =
           Alcotest.test_case "protocol loop"        `Quick test_parse_protocol_loop;
           Alcotest.test_case "sig satisfied"        `Quick test_tc_sig_satisfied;
           Alcotest.test_case "sig missing fn"       `Quick test_tc_sig_missing;
-          Alcotest.test_case "impl valid"           `Quick test_tc_impl_valid;
-          Alcotest.test_case "impl unknown iface"   `Quick test_tc_impl_unknown_iface;
-          Alcotest.test_case "superclass satisfied" `Quick test_superclass_satisfied;
-          Alcotest.test_case "superclass missing"   `Quick test_superclass_missing;
+          Alcotest.test_case "impl valid"              `Quick test_tc_impl_valid;
+          Alcotest.test_case "impl unknown iface"     `Quick test_tc_impl_unknown_iface;
+          Alcotest.test_case "superclass satisfied"   `Quick test_superclass_satisfied;
+          Alcotest.test_case "superclass missing"     `Quick test_superclass_missing;
+          Alcotest.test_case "default method tc"      `Quick test_default_method_inherited;
+          Alcotest.test_case "default method eval"    `Quick test_default_method_eval;
+          Alcotest.test_case "missing required method"`Quick test_missing_required_method;
         ] );
       ( "string interp",
         [

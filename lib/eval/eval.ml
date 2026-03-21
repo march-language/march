@@ -2961,7 +2961,20 @@ let rec eval_decl (env : env) (d : decl) : env =
       ) mod_env in
     prefixed @ env
 
-  | DProtocol _ | DSig _ | DInterface _ | DImpl _ | DExtern _ | DUse _ | DNeeds _ -> env
+  | DImpl (idef, sp) ->
+    (* Evaluate each impl method so they become callable at runtime.
+       Default methods injected by the desugar pass have fc_params=[] and a
+       lambda body; evaluate the body directly and bind the resulting value. *)
+    List.fold_left (fun env (name, fn_def) ->
+        match fn_def.fn_clauses with
+        | [{ fc_params = []; fc_body; _ }] ->
+          let v = eval_expr env fc_body in
+          (name.txt, v) :: env
+        | _ ->
+          eval_decl env (DFn (fn_def, sp))
+      ) env idef.impl_methods
+
+  | DProtocol _ | DSig _ | DInterface _ | DExtern _ | DUse _ | DNeeds _ -> env
 
 and eval_decls (env : env) (decls : decl list) : env =
   List.fold_left eval_decl env decls
@@ -3045,6 +3058,20 @@ let eval_module_env (m : module_) : env =
          and exposes prefixed bindings). Docs inside nested modules are registered
          as a side effect of eval_decl → eval_decls → eval_decl(DFn). *)
       let env' = eval_decl env d in
+      env_ref := env';
+      make_recursive_env rest env'
+
+    | DImpl (idef, sp) :: rest ->
+      (* Bind each impl method (including injected defaults) as a function.
+         Zero-param clauses hold a lambda body; eval directly to bind the value. *)
+      let env' = List.fold_left (fun acc_env (name, fn_def) ->
+          match fn_def.fn_clauses with
+          | [{ fc_params = []; fc_body; _ }] ->
+            let v = eval_expr acc_env fc_body in
+            (name.txt, v) :: acc_env
+          | _ ->
+            eval_decl acc_env (DFn (fn_def, sp))
+        ) env idef.impl_methods in
       env_ref := env';
       make_recursive_env rest env'
 

@@ -2175,6 +2175,20 @@ let rec check_decl env (d : Ast.decl) : env =
             | _ -> ()  (* multi-param superclasses not yet supported *)
            )
          ) interface.iface_superclasses;
+       (* Check all required methods are provided (error for non-default missing) *)
+       List.iter (fun (iface_m : Ast.method_decl) ->
+           let provided = List.exists
+             (fun ((mname : Ast.name), _) -> mname.txt = iface_m.md_name.txt)
+             idef.impl_methods
+           in
+           if not provided && iface_m.md_default = None then
+             Err.error env.errors ~span:idef.impl_iface.span
+               (Printf.sprintf
+                  "Missing method `%s` in `impl %s(%s)`.\n\
+                   Interface `%s` requires this method to be implemented."
+                  iface_m.md_name.txt idef.impl_iface.txt (pp_ty inst_ty)
+                  idef.impl_iface.txt)
+         ) interface.iface_methods;
        List.iter (fun ((mname : Ast.name), (def : Ast.fn_def)) ->
            match List.find_opt
                    (fun (m : Ast.method_decl) -> m.md_name.txt = mname.txt)
@@ -2190,13 +2204,23 @@ let rec check_decl env (d : Ast.decl) : env =
                  ~tvars:(ref [(interface.iface_param.txt, inst_ty)])
                  iface_method.md_ty
              in
-             (* Infer the method body's actual type *)
-             let actual_sch = check_fn env def _sp in
-             let actual_ty = instantiate env.level env actual_sch in
-             unify env ~span:mname.span actual_ty expected_ty
-               ~reason:(Some (RBuiltin
-                  (Printf.sprintf "`%s` in `impl %s` must match the interface signature"
-                     mname.txt idef.impl_iface.txt)))
+             (* Infer the method body's actual type.
+                For injected default methods (zero params, body = default expr),
+                use check_expr directly against the expected type. *)
+             (match def.fn_clauses with
+              | [{ fc_params = []; fc_body; _ }] when iface_method.md_default <> None ->
+                (* Default method injected by desugar — just check the body expr *)
+                check_expr env fc_body expected_ty
+                  ~reason:(Some (RBuiltin
+                    (Printf.sprintf "default `%s` in interface `%s`"
+                       mname.txt idef.impl_iface.txt)))
+              | _ ->
+                let actual_sch = check_fn env def _sp in
+                let actual_ty = instantiate env.level env actual_sch in
+                unify env ~span:mname.span actual_ty expected_ty
+                  ~reason:(Some (RBuiltin
+                     (Printf.sprintf "`%s` in `impl %s` must match the interface signature"
+                        mname.txt idef.impl_iface.txt))))
          ) idef.impl_methods);
     env_with_impl
 
