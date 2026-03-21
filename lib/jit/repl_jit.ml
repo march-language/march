@@ -265,11 +265,22 @@ let precompile_stdlib ctx
     (try
       let handle = Jit.dlopen so_path in
       ctx.handles <- handle :: ctx.handles;
-      (* Read function names and mark as compiled. *)
+      (* Read function names and mark as compiled.
+         The last line of the .names file may be "lambda_counter=N" — if so,
+         restore the defun lambda counter so that fresh REPL compilations
+         always assign UIDs strictly above those used by prelude functions.
+         Without this, a cache-hit run starts the counter at 0 and the REPL's
+         freshly-generated go$apply$N functions get UIDs that collide with
+         prelude-compiled functions, causing partition_fns to treat them as
+         already-compiled externs and link the wrong implementation. *)
       let ic = open_in names_path in
       (try while true do
-        let name = String.trim (input_line ic) in
-        if name <> "" then Hashtbl.replace ctx.compiled_fns name ()
+        let line = String.trim (input_line ic) in
+        if String.length line > 15 && String.sub line 0 15 = "lambda_counter=" then begin
+          let n = int_of_string (String.sub line 15 (String.length line - 15)) in
+          March_tir.Defun.set_lambda_counter n
+        end else if line <> "" then
+          Hashtbl.replace ctx.compiled_fns line ()
       done with End_of_file -> ());
       close_in ic
     with _ -> ())  (* Non-fatal: fall through to lazy JIT *)
@@ -303,11 +314,16 @@ let precompile_stdlib ctx
          with End_of_file -> ());
         (match Unix.close_process_in ic with
          | Unix.WEXITED 0 ->
-           (* Write companion names file *)
+           (* Write companion names file: one function name per line, then
+              a "lambda_counter=N" sentinel so cache-hit runs can restore
+              the counter and avoid UID collisions with prelude functions. *)
            (try
              let nc = open_out names_path in
              List.iter (fun (f : March_tir.Tir.fn_def) ->
                output_string nc (f.fn_name ^ "\n")) stdlib_fns;
+             output_string nc
+               (Printf.sprintf "lambda_counter=%d\n"
+                  (March_tir.Defun.get_lambda_counter ()));
              close_out nc
            with _ -> ());
            (try
