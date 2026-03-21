@@ -2523,6 +2523,65 @@ let test_repl_jit_cross_line_hof () =
      with exn ->
        March_jit.Repl_jit.cleanup jit; raise exn)
 
+(** Test: List.length works correctly in JIT REPL with stdlib precompile.
+
+    This is a regression test for the defun TVar bug: when the stdlib is
+    precompiled with an empty type_map (as in the real REPL), inner function
+    calls like [go(xs, 0)] inside [length] had v_ty = TVar "_" at the call site.
+    Defun's condition B required TFn to convert EApp → ECallPtr, so the call
+    stayed as a direct [call @go] — an undefined symbol — returning garbage.
+
+    The fix: EApp of a TVar-typed non-top-level var is also converted to ECallPtr. *)
+let test_repl_jit_stdlib_list_length () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    (* Load list.march *)
+    let list_decl = load_stdlib_file_for_test "list.march" in
+    let stdlib_decls = [list_decl] in
+    (* Compute content hash the same way Repl does *)
+    let content_hash =
+      Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
+    let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
+      Hashtbl.create 16 in
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       (* Precompile stdlib — this triggers the TVar bug path on unfixed builds *)
+       March_jit.Repl_jit.precompile_stdlib jit
+         ~content_hash ~stdlib_decls ~type_map;
+       (* Wrap expression in a module that includes stdlib_decls so that
+          List.length resolves through monomorphization to length$List_Int. *)
+       let make_stdlib_mod e =
+         let s = March_ast.Ast.dummy_span in
+         let main_clause = March_ast.Ast.{
+           fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let main_def = March_ast.Ast.{
+           fn_name = { txt = "main"; span = s };
+           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_clauses = [main_clause]; } in
+         { March_ast.Ast.mod_name = { txt = "Main"; span = s };
+           mod_decls = stdlib_decls @ [DFn (main_def, s)] }
+       in
+       (* List.length([1, 2, 3]) should return 3 *)
+       (match parse_repl "List.length([1, 2, 3])" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_stdlib_mod e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "List.length [1,2,3] = 3" "3" result
+        | _ -> failwith "expected ReplExpr");
+       (* List.length([]) should return 0 *)
+       (match parse_repl "List.length([])" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_stdlib_mod e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "List.length [] = 0" "0" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
 (* ------------------------------------------------------------------ *)
 (* list_actors tests                                                   *)
 (* ------------------------------------------------------------------ *)
@@ -7138,6 +7197,7 @@ let () =
         Alcotest.test_case "let binding cross-line" `Quick test_repl_jit_cross_line_let;
         Alcotest.test_case "fn reference cross-line" `Quick test_repl_jit_cross_line_fn;
         Alcotest.test_case "hof with fn and let cross-line" `Quick test_repl_jit_cross_line_hof;
+        Alcotest.test_case "stdlib List.length via precompile" `Quick test_repl_jit_stdlib_list_length;
       ];
       "complete", [
         Alcotest.test_case "command" `Quick test_complete_command;
