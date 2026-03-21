@@ -1604,6 +1604,92 @@ and bind_lam_param env _sp (p : Ast.param) ann_ty =
    §15  Declaration checking
    ================================================================= *)
 
+(** Collect all free variable names referenced in [e].
+    Only [EVar] nodes with no dot (non-qualified names) are collected.
+    Re-bindings introduced by [ELet]/[EMatch]/[ELam] are accounted for so
+    we never report a variable that is shadowed by an inner binding. *)
+let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
+  match e with
+  | Ast.EVar n ->
+    if List.mem n.txt bound || String.contains n.txt '.' then [] else [n.txt]
+  | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> []
+  | Ast.EDbg (Some inner, _) -> free_vars_expr bound inner
+  | Ast.EApp (f, args, _) ->
+    free_vars_expr bound f @ List.concat_map (free_vars_expr bound) args
+  | Ast.ECon (_, args, _) -> List.concat_map (free_vars_expr bound) args
+  | Ast.ELam (ps, body, _) ->
+    let inner_bound = List.filter_map (fun (p : Ast.param) ->
+        Some p.param_name.txt) ps @ bound in
+    free_vars_expr inner_bound body
+  | Ast.EBlock (es, _) -> free_vars_block bound es
+  | Ast.ELet (b, _) -> free_vars_expr bound b.Ast.bind_expr
+  | Ast.EMatch (scrut, branches, _) ->
+    free_vars_expr bound scrut @
+    List.concat_map (fun br ->
+      let pat_bound = free_vars_pattern br.Ast.branch_pat in
+      let inner = pat_bound @ bound in
+      Option.fold ~none:[] ~some:(free_vars_expr inner) br.Ast.branch_guard @
+      free_vars_expr inner br.Ast.branch_body
+    ) branches
+  | Ast.ETuple (es, _) -> List.concat_map (free_vars_expr bound) es
+  | Ast.ERecord (fields, _) ->
+    List.concat_map (fun (_, ex) -> free_vars_expr bound ex) fields
+  | Ast.ERecordUpdate (base, fields, _) ->
+    free_vars_expr bound base @
+    List.concat_map (fun (_, ex) -> free_vars_expr bound ex) fields
+  | Ast.EField (ex, _, _) -> free_vars_expr bound ex
+  | Ast.EIf (c, t, f, _) ->
+    free_vars_expr bound c @ free_vars_expr bound t @ free_vars_expr bound f
+  | Ast.EAnnot (ex, _, _) -> free_vars_expr bound ex
+  | Ast.EAtom (_, args, _) -> List.concat_map (free_vars_expr bound) args
+  | Ast.ESend (a, b, _) ->
+    free_vars_expr bound a @ free_vars_expr bound b
+  | Ast.ESpawn (e, _) -> free_vars_expr bound e
+  | Ast.ELetFn (name, params, _, body, _) ->
+    let inner_bound = name.txt :: List.map (fun p -> p.Ast.param_name.txt) params @ bound in
+    free_vars_expr inner_bound body
+  | Ast.EPipe (l, r, _) ->
+    free_vars_expr bound l @ free_vars_expr bound r
+
+and free_vars_block (bound : string list) (es : Ast.expr list) : string list =
+  match es with
+  | [] -> []
+  | Ast.ELet (b, _) :: rest ->
+    let used_in_rhs = free_vars_expr bound b.Ast.bind_expr in
+    let pat_bound = free_vars_pattern b.Ast.bind_pat in
+    used_in_rhs @ free_vars_block (pat_bound @ bound) rest
+  | e :: rest ->
+    free_vars_expr bound e @ free_vars_block bound rest
+
+and free_vars_pattern (p : Ast.pattern) : string list =
+  match p with
+  | Ast.PatVar n -> [n.txt]
+  | Ast.PatWild _ -> []
+  | Ast.PatLit _ -> []
+  | Ast.PatCon (_, ps) -> List.concat_map free_vars_pattern ps
+  | Ast.PatTuple (ps, _) -> List.concat_map free_vars_pattern ps
+  | Ast.PatRecord (fields, _) -> List.concat_map (fun (_, p) -> free_vars_pattern p) fields
+  | Ast.PatAs (p, n, _) -> n.txt :: free_vars_pattern p
+  | Ast.PatAtom (_, ps, _) -> List.concat_map free_vars_pattern ps
+
+(** Emit unused-variable warnings for fn params not referenced in the body.
+    The wildcard [_] and names starting with [_] are silently ignored. *)
+let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) fn_span =
+  let used = free_vars_expr [] body in
+  let check_name name span =
+    if name <> "_" && not (String.length name > 0 && name.[0] = '_')
+       && not (List.mem name used) then
+      Err.warning env.errors ~span
+        (Printf.sprintf "Unused variable `%s`.\n\
+                         Use `_` to mark intentionally unused params." name)
+  in
+  List.iter (fun fp ->
+    match fp with
+    | Ast.FPNamed p -> check_name p.param_name.txt fn_span
+    | Ast.FPPat (Ast.PatVar n) -> check_name n.txt n.span
+    | Ast.FPPat _ -> ()
+  ) params
+
 (** Check a function definition.
 
     Strategy:
@@ -1692,6 +1778,9 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
           | Ast.FPNamed p -> Some p.param_name.txt
           | Ast.FPPat _ -> None) clause.fc_params in
       check_linear_all_consumed body_env ~scope_span:fn_span param_names;
+
+      (* Warn about unrestricted params not referenced in the body *)
+      warn_unused_params env clause.fc_params clause.fc_body fn_span;
 
       let fn_ty =
         List.fold_right (fun pt acc -> TArrow (pt, acc)) param_tys body_ty

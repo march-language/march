@@ -1547,6 +1547,40 @@ let test_ambiguous_ctor_warns () =
   Alcotest.(check bool) "ambiguous Ok warns" true
     (has_ambig_warning || not (has_errors ctx))
 
+let test_unused_var_warning () =
+  let ctx = typecheck {|mod Test do
+    fn go(x, y) do x end
+  end|} in
+  let has_unused_y = List.exists (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Warning &&
+    let m = d.March_errors.Errors.message in
+    let n = String.length m in
+    let lo = String.lowercase_ascii m in
+    let rec scan i =
+      if i + 5 >= n then false
+      else if String.sub lo i 6 = "unused" then true
+      else scan (i + 1)
+    in scan 0
+  ) ctx.March_errors.Errors.diagnostics in
+  Alcotest.(check bool) "unused param y produces warning" true has_unused_y
+
+let test_unused_var_underscore_ok () =
+  (* wildcard _ must NOT produce unused warnings *)
+  let ctx = typecheck {|mod Test do
+    fn go(x, _) do x end
+  end|} in
+  let has_any_unused = List.exists (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Warning &&
+    let m = String.lowercase_ascii d.March_errors.Errors.message in
+    let n = String.length m in
+    let rec scan i =
+      if i + 5 >= n then false
+      else if String.sub m i 6 = "unused" then true
+      else scan (i + 1)
+    in scan 0
+  ) ctx.March_errors.Errors.diagnostics in
+  Alcotest.(check bool) "wildcard _ must not produce unused warning" false has_any_unused
+
 let test_type_map_populated () =
   let src = {|mod Test do
     fn go(x : Int) do x end
@@ -5757,6 +5791,8 @@ let () =
           Alcotest.test_case "missing required method"`Quick test_missing_required_method;
           Alcotest.test_case "unknown ctor suggests"  `Quick test_unknown_ctor_suggests_similar;
           Alcotest.test_case "ambiguous ctor warns"   `Quick test_ambiguous_ctor_warns;
+          Alcotest.test_case "unused var warns"        `Quick test_unused_var_warning;
+          Alcotest.test_case "underscore no warn"      `Quick test_unused_var_underscore_ok;
         ] );
       ( "string interp",
         [
