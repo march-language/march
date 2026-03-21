@@ -273,8 +273,17 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
         (* Use the concrete ctor type so shape_matches works in FBIP.
            Do not dec_rc if the branch body still uses the scrutinee (e.g.,
            when the scrutinee is passed through as an argument after inspection
-           of one of its fields via a nested match). *)
-        let ctor_v = { v with Tir.v_ty = Tir.TCon (ctor_tag, []) } in
+           of one of its fields via a nested match).
+           IMPORTANT: qualify the ctor_tag with the scrutinee's type name so it
+           matches the key format used by EAlloc (see lower.ml ECon case:
+           ctor_key = type_name ^ "." ^ tag).  Without this, shape_matches
+           compares e.g. "Leaf" vs "Tree.Leaf" and always returns false,
+           preventing FBIP from ever firing. *)
+        let qualified_tag = match v.Tir.v_ty with
+          | Tir.TCon (type_name, _) -> type_name ^ "." ^ ctor_tag
+          | _ -> ctor_tag
+        in
+        let ctor_v = { v with Tir.v_ty = Tir.TCon (qualified_tag, []) } in
         Tir.ESeq (Tir.EDecRC (Tir.AVar ctor_v), body)
       | _ -> body
     in
