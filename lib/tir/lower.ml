@@ -321,9 +321,18 @@ and lower_expr (e : Ast.expr) : Tir.expr =
         Tir.EApp (f_var, arg_atoms)))
 
   (* --- Constructor application (CPS for args) --- *)
-  | Ast.ECon ({ txt = tag; _ }, args, _) ->
+  (* Embed the parent type name in the TCon key so that different ADTs with
+     the same constructor name (e.g. List.Cons vs Tree.Cons) produce distinct
+     keys in the emitter's ctor_info table.  The span carries the inferred
+     result type from the typechecker; when it is TCon(type_name, _) we use
+     "type_name.ctor_name" as the key, otherwise fall back to the bare name. *)
+  | Ast.ECon ({ txt = tag; _ }, args, span) ->
     lower_atoms_k args (fun arg_atoms ->
-      Tir.EAlloc (Tir.TCon (tag, []), arg_atoms))
+      let ctor_key = match ty_of_span span with
+        | Tir.TCon (type_name, _) -> type_name ^ "." ^ tag
+        | _ -> tag
+      in
+      Tir.EAlloc (Tir.TCon (ctor_key, []), arg_atoms))
 
   (* --- Lambda → ELetRec with a single fn_def --- *)
   | Ast.ELam (params, body, lam_span) ->

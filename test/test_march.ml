@@ -2715,6 +2715,75 @@ let test_fast_math_emits_fast_attr () =
     (let re = Str.regexp "fadd fast" in
      (try ignore (Str.search_forward re ir_normal 0); true with Not_found -> false))
 
+(* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
+
+(** Bug: ctor_info keyed by constructor name only — two ADTs with the same
+    constructor name (e.g. both having "Cons") silently overwrite each other,
+    producing wrong tags and field counts.
+
+    Fix: keys are now type-qualified ("A.Cons", "B.Cons").
+    lower.ml embeds the parent type name in EAlloc TCon; build_ctor_info stores
+    variants as "TypeName.CtorName"; emit_case qualifies br_tag at lookup time. *)
+let test_ctor_no_collision_different_tags () =
+  (* Type A: [Nil, Cons(Int)] — Nil=tag0, Cons=tag1
+     Type B: [Cons(Int), Nil] — Cons=tag0, Nil=tag1
+     Without the fix, ctor_info["Cons"] would be overwritten by whichever type
+     is processed last, and make_a's allocation would get the wrong tag. *)
+  let td_a = March_tir.Tir.TDVariant ("A",
+    [("Nil", []); ("Cons", [March_tir.Tir.TInt])]) in
+  let td_b = March_tir.Tir.TDVariant ("B",
+    [("Cons", [March_tir.Tir.TInt]); ("Nil", [])]) in
+  let x = mk_var "x" March_tir.Tir.TInt in
+  (* make_a: builds A.Cons — should store tag 1 (second ctor of A) *)
+  let fn_a = { March_tir.Tir.fn_name = "make_a";
+               fn_params = [x];
+               fn_ret_ty = March_tir.Tir.TCon ("A", []);
+               fn_body   = March_tir.Tir.EAlloc
+                             (March_tir.Tir.TCon ("A.Cons", []),
+                              [March_tir.Tir.AVar x]) } in
+  (* make_b: builds B.Cons — should store tag 0 (first ctor of B) *)
+  let fn_b = { March_tir.Tir.fn_name = "make_b";
+               fn_params = [x];
+               fn_ret_ty = March_tir.Tir.TCon ("B", []);
+               fn_body   = March_tir.Tir.EAlloc
+                             (March_tir.Tir.TCon ("B.Cons", []),
+                              [March_tir.Tir.AVar x]) } in
+  let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fn_a; fn_b];
+            tm_types = [td_a; td_b]; tm_externs = [] } in
+  let ir = March_tir.Llvm_emit.emit_module m in
+  (* Without the fix, A.Cons lookup falls back to tag=0 (ctor_info["A.Cons"]
+     not found → fallback entry with ce_tag=0).  With the fix, it finds
+     ctor_info["A.Cons"] = {tag=1} and emits "store i32 1". *)
+  let has_tag1 =
+    try ignore (Str.search_forward (Str.regexp "store i32 1") ir 0); true
+    with Not_found -> false
+  in
+  Alcotest.(check bool) "A.Cons emits tag 1 (not the fallback tag 0)" true has_tag1
+
+(** Bug 2: when field counts don't match (e.g. cascading from collision),
+    the emitter silently fell back to ptr type.  Fix: hard Failure. *)
+let test_ctor_arity_mismatch_raises () =
+  (* Construct EAlloc with key "A.Cons" (1 field in the type def) but 2 args.
+     With the fix this must raise, not silently emit broken IR. *)
+  let td = March_tir.Tir.TDVariant ("A",
+    [("Cons", [March_tir.Tir.TInt])]) in   (* Cons has exactly 1 field *)
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let y = mk_var "y" March_tir.Tir.TInt in
+  let fn_t = { March_tir.Tir.fn_name = "bad";
+               fn_params = [x; y];
+               fn_ret_ty = March_tir.Tir.TCon ("A", []);
+               fn_body   = March_tir.Tir.EAlloc
+                             (March_tir.Tir.TCon ("A.Cons", []),
+                              (* 2 args but ctor only has 1 field *)
+                              [March_tir.Tir.AVar x; March_tir.Tir.AVar y]) } in
+  let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fn_t];
+            tm_types = [td]; tm_externs = [] } in
+  let raised =
+    try ignore (March_tir.Llvm_emit.emit_module m); false
+    with Failure _ -> true
+  in
+  Alcotest.(check bool) "arity mismatch raises Failure" true raised
+
 (* ── String stdlib module tests ─────────────────────────────────────────── *)
 
 (** Helper: load string.march and evaluate [src] with it in scope. *)
@@ -5405,6 +5474,12 @@ let () =
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;
+      ]);
+      ("llvm_emit correctness", [
+        Alcotest.test_case "ctor_no_collision_different_tags" `Quick
+          test_ctor_no_collision_different_tags;
+        Alcotest.test_case "ctor_arity_mismatch_raises" `Quick
+          test_ctor_arity_mismatch_raises;
       ]);
       ("string stdlib", [
         Alcotest.test_case "byte_size"           `Quick test_string_byte_size;
