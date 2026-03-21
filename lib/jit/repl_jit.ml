@@ -127,11 +127,16 @@ let run_expr ctx ~type_map m =
       Jit.call_void_to_void fptr;
       "()"
     | _ ->
-      (* Heap-allocated value.
-         TODO: call march_value_to_string (via call_ptr_to_ptr) and read the
-         resulting march_string bytes back into OCaml for pretty-printing. *)
+      (* Heap-allocated value or scalar stored as pointer (e.g. TVar in cross-line
+         let bindings where the type wasn't fully resolved during lowering).
+         Small integers (< 4096) are almost certainly scalar values stored via
+         inttoptr — display them as integers rather than bogus addresses. *)
       let ptr = Jit.call_void_to_ptr fptr in
-      Printf.sprintf "#<value at 0x%Lx>" (Int64.of_nativeint ptr)
+      let raw = Int64.of_nativeint ptr in
+      if Int64.compare raw 4096L < 0 && Int64.compare raw 0L >= 0 then
+        Int64.to_string raw
+      else
+        Printf.sprintf "#<value at 0x%Lx>" raw
   in
   (ret_ty, result_str)
 
