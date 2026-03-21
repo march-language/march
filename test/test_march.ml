@@ -2063,6 +2063,170 @@ let test_complete_replace_with_suffix () =
   Alcotest.(check int)    "cur" 10               s'.March_repl.Input.cursor
 
 (* ------------------------------------------------------------------ *)
+(* JIT cross-line REPL variable capture tests                         *)
+(* These tests exercise the fix for the bug where variables defined   *)
+(* on previous REPL lines could not be referenced in HOF arguments.  *)
+(* Tests are skipped gracefully when clang/runtime is unavailable.   *)
+(* ------------------------------------------------------------------ *)
+
+(** Try to compile the march runtime to a shared library.
+    Returns [Some path] on success, [None] if clang or runtime.c is missing. *)
+let setup_jit_runtime () =
+  let home = Sys.getenv "HOME" in
+  let dot_cache = Filename.concat home ".cache" in
+  let cache_dir = Filename.concat dot_cache "march" in
+  (try Unix.mkdir dot_cache 0o755 with Unix.Unix_error _ -> ());
+  (try Unix.mkdir cache_dir 0o755 with Unix.Unix_error _ -> ());
+  let so_path = Filename.concat cache_dir "libmarch_rt_test.so" in
+  let candidates = [
+    "runtime/march_runtime.c";
+    "../runtime/march_runtime.c";
+    "../../runtime/march_runtime.c";
+    Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.c";
+  ] in
+  match List.find_opt Sys.file_exists candidates with
+  | None -> None
+  | Some runtime_c ->
+    if not (Sys.file_exists so_path) then begin
+      let rc = Sys.command (Printf.sprintf
+        "clang -shared -O2 -fPIC %s -o %s 2>/dev/null" runtime_c so_path) in
+      if rc <> 0 then None else Some so_path
+    end else Some so_path
+
+(** Wrap a desugared expression as `fn main() -> e` in a minimal module. *)
+let make_jit_test_module (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
+  let s = March_ast.Ast.dummy_span in
+  let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+  let fn_def = March_ast.Ast.{
+    fn_name = { txt = "main"; span = s };
+    fn_vis = March_ast.Ast.Public;
+    fn_doc = None; fn_ret_ty = None;
+    fn_clauses = [clause] } in
+  { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
+    mod_decls = [March_ast.Ast.DFn (fn_def, s)] }
+
+let parse_repl src =
+  let lexbuf = Lexing.from_string src in
+  March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf
+
+(** Test: `let x = 21` on line 1, then `x + 21` on line 2 should give 42. *)
+let test_repl_jit_cross_line_let () =
+  match setup_jit_runtime () with
+  | None -> ()  (* skip: clang or runtime not available in this environment *)
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       (* Compile: let x = 21 *)
+       (match parse_repl "let x = 21" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let (bind_name, bind_expr) = match d' with
+            | March_ast.Ast.DLet (b, _) ->
+              let n = match b.bind_pat with
+                | March_ast.Ast.PatVar v -> v.txt
+                | _ -> failwith "expected PatVar"
+              in (n, b.bind_expr)
+            | _ -> failwith "expected DLet for 'let x = 21'"
+          in
+          let m = make_jit_test_module bind_expr in
+          March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m
+        | _ -> failwith "expected ReplDecl");
+       (* Compile: x + 21 — cross-line reference *)
+       (match parse_repl "x + 21" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "cross-line let: x+21 = 42" "42" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** Test: `let f = fn x -> x * 2` (DFn) on line 1,
+    then `f(21)` on line 2 should give 42 (cross-line function reference). *)
+let test_repl_jit_cross_line_fn () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       (* Compile: let f = fn x -> x * 2  (parsed as DFn) *)
+       (match parse_repl "let f = fn x -> x * 2" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let bind_name = match d' with
+            | March_ast.Ast.DFn (def, _) -> def.fn_name.txt
+            | _ -> failwith "expected DFn for 'let f = fn x -> x * 2'"
+          in
+          let s = March_ast.Ast.dummy_span in
+          let m = { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
+                    mod_decls = [d'] } in
+          March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:true ~bind_name m
+        | _ -> failwith "expected ReplDecl");
+       (* Compile: f(21) — cross-line function reference *)
+       (match parse_repl "f(21)" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "cross-line fn: f(21) = 42" "42" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** Test: both a let and a function defined on previous lines,
+    used together in a HOF call — the original bug scenario. *)
+let test_repl_jit_cross_line_hof () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       (* let n = 21 *)
+       (match parse_repl "let n = 21" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let (bind_name, bind_expr) = match d' with
+            | March_ast.Ast.DLet (b, _) ->
+              let nm = match b.bind_pat with
+                | March_ast.Ast.PatVar v -> v.txt | _ -> assert false
+              in (nm, b.bind_expr)
+            | _ -> failwith "expected DLet"
+          in
+          let m = make_jit_test_module bind_expr in
+          March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m
+        | _ -> failwith "expected ReplDecl");
+       (* let g = fn x -> x + n  (closure capturing n) *)
+       (match parse_repl "let double = fn x -> x * 2" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let bind_name = match d' with
+            | March_ast.Ast.DFn (def, _) -> def.fn_name.txt
+            | _ -> failwith "expected DFn"
+          in
+          let s = March_ast.Ast.dummy_span in
+          let m = { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
+                    mod_decls = [d'] } in
+          March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:true ~bind_name m
+        | _ -> failwith "expected ReplDecl");
+       (* double(n) — both from previous lines *)
+       (match parse_repl "double(n)" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "cross-line hof: double(n) = 42" "42" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(* ------------------------------------------------------------------ *)
 (* list_actors tests                                                   *)
 (* ------------------------------------------------------------------ *)
 
@@ -6324,6 +6488,11 @@ let () =
         Alcotest.test_case "starts with pipe" `Quick test_multiline_starts_with_pipe;
         Alcotest.test_case "is_complete simple" `Quick test_multiline_is_complete_simple;
         Alcotest.test_case "is_complete open block" `Quick test_multiline_is_complete_open_block;
+      ];
+      "repl_jit_cross_line", [
+        Alcotest.test_case "let binding cross-line" `Quick test_repl_jit_cross_line_let;
+        Alcotest.test_case "fn reference cross-line" `Quick test_repl_jit_cross_line_fn;
+        Alcotest.test_case "hof with fn and let cross-line" `Quick test_repl_jit_cross_line_hof;
       ];
       "complete", [
         Alcotest.test_case "command" `Quick test_complete_command;

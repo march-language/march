@@ -169,13 +169,19 @@ let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
       let _h = compile_fragment ctx ir in
       ()
     ) helper_fns;
-    (* Emit primary function *)
+    (* Emit primary function WITH a closure global so later fragments can
+       reference bind_name as a first-class value via the global-bridge path. *)
     let pn = next_id ctx in
-    let ir = March_tir.Llvm_emit.emit_repl_fn
-      ~n:pn ~prev_globals:ctx.globals ~types:tir.March_tir.Tir.tm_types
+    let ir = March_tir.Llvm_emit.emit_repl_fn_with_closure_global
+      ~n:pn ~bind_name ~prev_globals:ctx.globals ~types:tir.March_tir.Tir.tm_types
       primary_fn in
-    let _handle = compile_fragment ctx ir in
-    ()
+    let handle = compile_fragment ctx ir in
+    (* Call the init function to allocate the closure and fill @repl_<bind_name> *)
+    let init_name = Printf.sprintf "repl_%d_init" pn in
+    let fptr = Jit.dlsym handle init_name in
+    Jit.call_void_to_void fptr;
+    (* Register as a global so emit_prev_global_bridges creates the bridge alloca *)
+    ctx.globals <- ("repl_" ^ bind_name, "ptr") :: ctx.globals
   end else begin
     (* Let binding: find main, extract body, store in global *)
     let main_fn = List.find (fun (f : March_tir.Tir.fn_def) ->

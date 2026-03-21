@@ -1689,4 +1689,59 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
   Buffer.add_buffer out ctx.buf;
   Buffer.contents out
 
+(** Emit a REPL function declaration as a .ll fragment, and also create a
+    first-class closure value stored in a global [@repl_<bind_name>].
+    This lets later REPL fragments reference [bind_name] as a value via the
+    normal global-bridge mechanism (same as [emit_repl_decl] for data lets).
+    The init function [@repl_<n>_init] allocates the closure and fills the global. *)
+let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
+    ~(bind_name : string)
+    ~(prev_globals : (string * string) list)
+    ~(types : Tir.type_def list)
+    (fn : Tir.fn_def) : string =
+  let ctx = make_ctx ~fast_math () in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = [] } in
+  build_ctor_info ctx pseudo_mod;
+  Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
+  emit_fn ctx fn;
+  (* Build a thin closure wrapper: @<fn>$clo_wrap(ptr %_clo, ptr %a0, ...) *)
+  let fn_llvm_name = llvm_name (mangle_extern fn.Tir.fn_name) in
+  let wrap_name = fn_llvm_name ^ "$clo_wrap" in
+  let nparams = List.length fn.Tir.fn_params in
+  let target_ret = llvm_ret_ty fn.Tir.fn_ret_ty in
+  let param_tys = List.init nparams (fun _ -> "ptr") in
+  let all_params = "ptr" :: param_tys in
+  let arg_names = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
+  let all_arg_decls = "%_clo" :: arg_names in
+  let decl_str = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_arg_decls) in
+  let call_args = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
+  let wrap_body =
+    if target_ret = "void" then
+      Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n"
+        wrap_name decl_str fn_llvm_name call_args
+    else
+      Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret ptr %%r\n}\n"
+        wrap_name decl_str target_ret fn_llvm_name call_args
+  in
+  Buffer.add_string ctx.buf wrap_body;
+  (* Global that holds the closure pointer *)
+  let global_name = "repl_" ^ bind_name in
+  Printf.bprintf ctx.preamble "@%s = global ptr zeroinitializer\n" global_name;
+  (* Init function: allocate closure {header(16), fn_ptr} and store in the global *)
+  let init_name = Printf.sprintf "repl_%d_init" n in
+  Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n" init_name;
+  Printf.bprintf ctx.buf "  %%hp = call ptr @march_alloc(i64 24)\n";
+  Printf.bprintf ctx.buf "  %%tgp = getelementptr i8, ptr %%hp, i64 8\n";
+  Printf.bprintf ctx.buf "  store i32 0, ptr %%tgp, align 4\n";
+  Printf.bprintf ctx.buf "  %%fp = getelementptr i8, ptr %%hp, i64 16\n";
+  Printf.bprintf ctx.buf "  store ptr @%s, ptr %%fp, align 8\n" wrap_name;
+  Printf.bprintf ctx.buf "  store ptr %%hp, ptr @%s\n" global_name;
+  Printf.bprintf ctx.buf "  ret void\n}\n";
+  let out = Buffer.create 4096 in
+  emit_preamble out;
+  emit_repl_globals_decl out prev_globals;
+  Buffer.add_buffer out ctx.preamble;
+  Buffer.add_buffer out ctx.buf;
+  Buffer.contents out
+
 let llvm_ty_of_tir = llvm_ty
