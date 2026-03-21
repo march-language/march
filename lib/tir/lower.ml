@@ -1162,22 +1162,26 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
         types := List.rev_append new_types !types;
         fns   := List.rev_append new_fns   !fns
       | Ast.DMod (mod_name, _, inner_decls, _) ->
-        let prefix = mod_name.txt ^ "." in
-        let inner_fn_names = List.filter_map (function
-            | Ast.DFn (def, _) -> Some def.fn_name.txt
-            | _ -> None) inner_decls in
-        List.iter (fun d ->
-            match d with
-            | Ast.DFn (def, _) ->
-              let fn = lower_fn_def def in
-              let fn = rename_tir_vars prefix inner_fn_names fn in
-              fns := { fn with fn_name = prefix ^ fn.fn_name } :: !fns
-            | Ast.DType (tname, params, td, _) ->
-              (match lower_type_def tname params td with
-               | Some td' -> types := td' :: !types
-               | None -> ())
-            | _ -> ()
-          ) inner_decls
+        let rec lower_mod_decls prefix decls =
+          let direct_fn_names = List.filter_map (function
+              | Ast.DFn (def, _) -> Some def.fn_name.txt
+              | _ -> None) decls in
+          List.iter (fun d ->
+              match d with
+              | Ast.DFn (def, _) ->
+                let fn = lower_fn_def def in
+                let fn = rename_tir_vars prefix direct_fn_names fn in
+                fns := { fn with fn_name = prefix ^ fn.fn_name } :: !fns
+              | Ast.DType (tname, params, td, _) ->
+                (match lower_type_def tname params td with
+                 | Some td' -> types := td' :: !types
+                 | None -> ())
+              | Ast.DMod (sub_name, _, sub_decls, _) ->
+                lower_mod_decls (prefix ^ sub_name.txt ^ ".") sub_decls
+              | _ -> ()
+            ) decls
+        in
+        lower_mod_decls (mod_name.txt ^ ".") inner_decls
       | Ast.DExtern (edef, _) ->
         List.iter (fun (ef : Ast.extern_fn) ->
             let params = List.map (fun (_, t) -> lower_ty t) ef.ef_params in
