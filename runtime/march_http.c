@@ -213,7 +213,7 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
     size_t total = hdr_len + body_len;
     march_string *result = malloc(sizeof(march_string) + total + 1);
     if (!result) { free(body_buf); goto cleanup_err; }
-    result->rc  = 1;
+    atomic_store_explicit(&result->rc, 1, memory_order_relaxed);
     result->len = (int64_t)total;
     memcpy(result->data, hdr_buf, hdr_len);
     if (body_buf) {

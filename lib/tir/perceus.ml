@@ -11,9 +11,9 @@ module StringSet = Set.Make (String)
 
 (** Returns true if this type needs reference counting (heap-allocated). *)
 let needs_rc : Tir.ty -> bool = function
-  | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
+  | Tir.TCon _ | Tir.TString | Tir.TPtr _ | Tir.TVar _ -> true
   | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit
-  | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _ | Tir.TVar _ -> false
+  | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _ -> false
 
 (** Returns the set of variable names referenced by an atom. *)
 let vars_of_atom : Tir.atom -> StringSet.t = function

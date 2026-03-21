@@ -54,6 +54,9 @@ type ctx = {
   extra_fns : Buffer.t;
   (* User-defined extern function name mapping: march_name → c_name *)
   extern_map : (string, string) Hashtbl.t;
+  (* Tracks the actual LLVM type stored in each alloca slot, keyed by slot name.
+     Used to emit correct load types even when TIR var has unresolved TVar. *)
+  var_llvm_ty : (string, string) Hashtbl.t;
 }
 
 let make_ctx ?(fast_math=false) () = {
@@ -72,6 +75,7 @@ let make_ctx ?(fast_math=false) () = {
   emitted_wraps = Hashtbl.create 8;
   extra_fns = Buffer.create 1024;
   extern_map = Hashtbl.create 8;
+  var_llvm_ty = Hashtbl.create 32;
 }
 
 (* ── Helpers ─────────────────────────────────────────────────────────── *)
@@ -507,13 +511,18 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     (* Top-level function reference — emit its address directly (for EApp callee) *)
     ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
   | Tir.AVar v ->
-    let ty = llvm_ty v.Tir.v_ty in
-    let tmp = fresh ctx "ld" in
     let base = llvm_name v.Tir.v_name in
     let slot = match Hashtbl.find_opt ctx.var_slot base with
       | Some s -> s
       | None   -> base
     in
+    (* Use the recorded LLVM type for this slot if available, so that
+       variables with unresolved TVar types load with the correct type. *)
+    let ty = match Hashtbl.find_opt ctx.var_llvm_ty slot with
+      | Some t -> t
+      | None   -> llvm_ty v.Tir.v_ty
+    in
+    let tmp = fresh ctx "ld" in
     emit ctx (Printf.sprintf "%s = load %s, ptr %%%s.addr" tmp ty slot);
     (ty, tmp)
 
@@ -645,11 +654,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   (* ── Let binding ───────────────────────────────────────────────────── *)
   | Tir.ELet (v, rhs, body) ->
     let (rhs_ty, rhs_val) = emit_expr ctx rhs in
-    let slot_ty  = llvm_ty v.Tir.v_ty in
+    (* When the variable has an unresolved type (TVar), trust the actual
+       LLVM type produced by the rhs expression.  This prevents type confusion
+       where e.g. an Int field loaded as i64 gets coerced to ptr. *)
+    let slot_ty  = match v.Tir.v_ty with
+      | Tir.TVar _ -> rhs_ty
+      | _ -> llvm_ty v.Tir.v_ty
+    in
     let final_val = coerce ctx rhs_ty rhs_val slot_ty in
     let slot = alloca_name ctx (llvm_name v.Tir.v_name) in
     emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot slot_ty);
     emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" slot_ty final_val slot);
+    Hashtbl.replace ctx.var_llvm_ty slot slot_ty;
     emit_expr ctx body
 
   (* ── Sequence ──────────────────────────────────────────────────────── *)
@@ -1043,8 +1059,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false) ->
     ("i64", "0")
   | Tir.EIncRC atom ->
-    let (_, v) = emit_atom ctx atom in
-    emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" v);
+    let (ty, v) = emit_atom ctx atom in
+    if ty = "ptr" then
+      emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" v);
     ("i64", "0")
 
   | Tir.EDecRC atom
@@ -1052,8 +1069,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false) ->
     ("i64", "0")
   | Tir.EDecRC atom ->
-    let (_, v) = emit_atom ctx atom in
-    emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" v);
+    let (ty, v) = emit_atom ctx atom in
+    if ty = "ptr" then
+      emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" v);
     ("i64", "0")
 
   | Tir.EFree atom
@@ -1061,8 +1079,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false) ->
     ("i64", "0")
   | Tir.EFree atom ->
-    let (_, v) = emit_atom ctx atom in
-    emit ctx (Printf.sprintf "call void @march_free(ptr %s)" v);
+    let (ty, v) = emit_atom ctx atom in
+    if ty = "ptr" then
+      emit ctx (Printf.sprintf "call void @march_free(ptr %s)" v);
     ("i64", "0")
 
   (* ── Tuples ────────────────────────────────────────────────────────── *)
@@ -1264,6 +1283,7 @@ and emit_case ctx scrut_atom branches default_opt =
         let slot = alloca_name ctx (llvm_name v.Tir.v_name) in
         emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot field_ty);
         emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" field_ty fv slot);
+        Hashtbl.replace ctx.var_llvm_ty slot field_ty;
         (* Track heap-type fields for conditional IncRC.
            Use the concrete field type (with type-vars resolved) so scalar
            fields (Int, Bool, Float) in polymorphic ctors are NOT IncRC'd. *)
@@ -1337,6 +1357,7 @@ and emit_case ctx scrut_atom branches default_opt =
 let emit_fn ctx (fn : Tir.fn_def) =
   Hashtbl.clear ctx.local_names;
   Hashtbl.clear ctx.var_slot;
+  Hashtbl.clear ctx.var_llvm_ty;
   ctx.ret_ty <- fn.Tir.fn_ret_ty;
   let fn_llvm_name = mangle_extern fn.Tir.fn_name in
   let ret_ty       = llvm_ret_ty fn.Tir.fn_ret_ty in
@@ -1354,7 +1375,8 @@ let emit_fn ctx (fn : Tir.fn_def) =
     let ty = llvm_ty v.Tir.v_ty in
     let slot = alloca_name ctx (llvm_name v.Tir.v_name) in
     emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot ty);
-    emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty (llvm_name v.Tir.v_name) slot)
+    emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty (llvm_name v.Tir.v_name) slot);
+    Hashtbl.replace ctx.var_llvm_ty slot ty
   ) fn.Tir.fn_params;
 
   let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
