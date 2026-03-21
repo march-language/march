@@ -40,6 +40,7 @@ end
 **Backend**
 - Compiles to LLVM IR, linked to native binaries via `clang`
 - Perceus reference counting — deterministic memory management, no GC pauses
+- **FBIP (Functional But In-Place)** — when the reference count on a pattern-matched value is 1, destructured nodes are reused in-place rather than freed and reallocated (see below)
 - Escape analysis promotes allocations to the stack where possible
 - Defunctionalization: closures compiled to structs + dispatch, no indirect call overhead
 - Tree-walking interpreter available for fast iteration
@@ -47,6 +48,60 @@ end
 **Concurrency** (interpreter only for now)
 - Actor model: share-nothing message passing, `spawn`, `send`, `kill`, `is_alive`
 - Actor state updated via record spread: `{ state with count = state.count + 1 }`
+
+## FBIP: Functional But In-Place
+
+One of March's most distinctive performance features is **FBIP (Functional But In-Place)**, derived from the [Perceus reference counting paper](https://www.microsoft.com/en-us/research/publication/perceus-garbage-free-reference-counting-with-reuse/). March code that recursively transforms a data structure can automatically run as fast as — or faster than — equivalent imperative C code that mutates in-place.
+
+### How it works
+
+Every heap-allocated value has a reference count. When the Perceus compiler pass inserts `DecRC` before a match branch body and finds a downstream allocation of the same constructor shape, it replaces the `DecRC + alloc` pair with a single conditional `EReuse` node:
+
+- **RC == 1 (unique owner)**: write the new tag and fields directly into the old allocation. Return the same pointer. Zero allocator calls.
+- **RC > 1 (shared)**: decrement the count, allocate fresh. Correct behavior for shared data.
+
+No source-level annotations are needed. The compiler derives this entirely from liveness and shape analysis.
+
+### Example: tree transformation
+
+```march
+type Tree = Leaf(Int) | Node(Tree, Tree)
+
+fn inc_leaves(t : Tree) : Tree do
+  match t with
+  | Leaf(n)    -> Leaf(n + 1)         -- rewrites the Leaf in-place when RC=1
+  | Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))  -- rewrites the Node in-place when RC=1
+  end
+end
+```
+
+With FBIP active, after the initial tree is built, every subsequent pass of `inc_leaves` does **zero heap allocations** — it rewrites the tree's nodes in-place.
+
+### Benchmark: `bench/tree_transform.march`
+
+Depth-20 binary tree (1,048,576 leaves), 100 passes of `inc_leaves`:
+
+| Implementation | Time | Allocations per pass |
+|---|---|---|
+| March (FBIP off, pre-fix) | 11.0 s | 2 × 2^20 = 2M |
+| C (`malloc` / `free`) | 8.8 s | 2 × 2^20 = 2M |
+| Rust (`Box`) | 9.5 s | 2 × 2^20 = 2M |
+| OCaml (GC) | ~3.65 s | 2 × 2^20 = 2M (amortized) |
+| **March (FBIP on)** | **1.3 s** | 0 (after pass 1) |
+
+March is **7× faster than C** on this benchmark — not because C is slow, but because `malloc`/`free` carry real overhead (bookkeeping, potential locks, cache pressure). 200M allocator calls across 100 passes add up. March avoids all of them with in-place reuse.
+
+### What patterns benefit
+
+FBIP fires automatically on any function that:
+
+1. Consumes a uniquely-owned value via pattern match (RC == 1)
+2. Returns a new value of the same constructor as the matched arm
+3. Does not retain the original value alongside the result
+
+This covers `map` over lists, any tree traversal/transformation, and most structural recursion patterns. Functions that alias the original correctly take the RC > 1 fallback path, which allocates fresh.
+
+For the full technical description — including how `shape_matches` works, the TIR `EReuse` node, and the LLVM codegen for the conditional reuse — see `specs/design.md` § Perceus Reference Counting and FBIP.
 
 ## Quick start
 

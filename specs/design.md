@@ -693,6 +693,128 @@ Combined with monomorphization, this means the generated code is first-order and
 6. Defunctionalize (closures → tagged unions + dispatch)
 7. Code generation
 
+### Perceus Reference Counting and FBIP
+
+Memory management in March uses **deterministic reference counting** with compile-time RC insertion, augmented by an optimization called **FBIP (Functional But In-Place)**.
+
+#### How Perceus RC works
+
+Every heap-allocated value (ADT constructor, closure, string) has a reference count in a header word. The Perceus pass — running over the TIR after monomorphization and defunctionalization — inserts `IncRC` and `DecRC` operations statically, without any GC scanner or write barrier:
+
+1. **Backwards liveness analysis**: The pass computes which variables are live before each expression by propagating liveness backwards through the IR. A variable is "last used" at the point where it leaves the live set.
+2. **RC insertion**: Non-last uses of a heap variable get `IncRC` before the use (to prevent premature collection). Last uses get nothing — the existing reference is consumed. Dead let-bindings get `DecRC` at the point of death.
+3. **Cancel-pair elision**: Adjacent `IncRC v` / `DecRC v` pairs are removed as a peephole pass. These arise when a value is passed to a function and immediately returned — the net RC change is zero.
+4. **Runtime behavior**: `DecRC` calls the runtime, which atomically decrements the count. If it reaches zero, the object is freed (and its children are recursively decremented). `IncRC` increments atomically. Linear and affine values are `free`'d directly without counting.
+
+The result is fully deterministic memory management: memory is freed exactly when the last reference is dropped, with no GC pauses, no conservative scanning, and no write barriers on the hot path.
+
+#### FBIP — reusing destructured values in-place
+
+The key insight behind FBIP: if a function pattern-matches a heap value and then immediately allocates a new value of the same constructor shape, _and_ the original value has RC == 1 (uniquely owned), the new allocation is unnecessary. The old memory can be overwritten in-place with the new field values.
+
+Consider the tree transformation in `bench/tree_transform.march`:
+
+```march
+fn inc_leaves(t : Tree) : Tree do
+  match t with
+  | Leaf(n)    -> Leaf(n + 1)
+  | Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
+  end
+end
+```
+
+Without FBIP, each call allocates a fresh `Leaf` or `Node` and frees the original — 2^depth allocator calls per pass.
+
+**How FBIP detects the opportunity**: After RC insertion, each match branch gets a `DecRC(t)` at the branch head (since `t` is consumed by the match and not live after). The Perceus FBIP sub-pass then scans for the pattern `DecRC(v); ...; EAlloc(same_shape)` and, when found, replaces the pair with a single `EReuse(v, shape, new_fields)` node. The `...` in between may be a chain of `ELet` bindings, as long as `v` itself is not referenced in any of the intermediate RHS expressions (otherwise sinking the decrement past them would be unsound).
+
+**What the generated code does at runtime**: `EReuse(v, shape, args)` compiles to a conditional:
+
+```
+rc = load v.header
+if rc == 1:
+    v.tag   = new_tag          -- overwrite in-place
+    v.field0 = args[0]
+    ...
+    result = v                 -- return the same pointer
+else:
+    march_decrc(v)             -- release our reference
+    result = march_alloc(...)  -- allocate fresh
+    result.tag   = new_tag
+    result.field0 = args[0]
+    ...
+```
+
+The RC == 1 path writes directly into the existing allocation and returns the same pointer — no allocator call, no free. The RC > 1 path handles the shared case correctly.
+
+#### The shape_matches bug and fix
+
+The Perceus pass annotates each branch's `DecRC` with the **concrete constructor type** — e.g. type `TCon("Leaf", [])` for the `Leaf` branch — so `shape_matches` can verify that the downstream `EAlloc` has the same shape. However, the lowering pass emits `EAlloc` with a **qualified** constructor key:
+
+```ocaml
+(* lower.ml — ECon case *)
+let ctor_key = match ty_of_span span with
+  | Tir.TCon (type_name, _) -> type_name ^ "." ^ tag   (* e.g. "Tree.Leaf" *)
+  | _ -> tag
+in
+Tir.EAlloc (Tir.TCon (ctor_key, []), arg_atoms)
+```
+
+The qualification (`"Tree.Leaf"` rather than `"Leaf"`) is necessary to prevent collisions in the LLVM emitter's constructor-info table when two different ADTs define constructors with the same name (e.g. `List.Cons` vs `Tree.Cons`). The LLVM emitter already has a `qualified_br_key` helper that applies this same transformation when looking up constructors during ECase emission.
+
+The Perceus pass was tagging the scrutinee's `DecRC` with the bare branch tag `"Leaf"`. `shape_matches` uses exact string equality:
+
+```ocaml
+| Tir.TCon (n1, _), Tir.TCon (n2, _) -> String.equal n1 n2
+```
+
+So `"Leaf" ≠ "Tree.Leaf"` — `shape_matches` always returned false, and `EReuse` was never generated. FBIP was silently disabled for every ADT in the language.
+
+The fix is a single change in `add_scrutinee_free_for`:
+
+```ocaml
+(* Before *)
+let ctor_v = { v with Tir.v_ty = Tir.TCon (ctor_tag, []) } in
+
+(* After — mirror qualified_br_key from llvm_emit.ml *)
+let qualified_tag = match v.Tir.v_ty with
+  | Tir.TCon (type_name, _) -> type_name ^ "." ^ ctor_tag
+  | _ -> ctor_tag
+in
+let ctor_v = { v with Tir.v_ty = Tir.TCon (qualified_tag, []) } in
+```
+
+#### Benchmark: `bench/tree_transform.march`
+
+The benchmark builds a depth-20 binary tree (2^20 = 1,048,576 leaves) and runs 100 passes of `inc_leaves`. With FBIP active, passes 2–100 do zero allocations: every `Leaf` and `Node` is overwritten in-place.
+
+| Implementation | Time | Notes |
+|---|---|---|
+| March (before fix) | 11.0 s | FBIP silently disabled; 200M alloc+free ops |
+| C (`malloc`/`free`) | 8.8 s | 200M allocator calls, explicit |
+| Rust (`Box`) | 9.5 s | 200M heap allocations |
+| OCaml (GC) | ~3.65 s | Generational GC amortizes allocation cost |
+| **March (after fix)** | **1.3 s** | Zero allocations after pass 1; 7× faster than C |
+
+The 7× speedup over C is not paradoxical. C's `malloc` and `free` have real runtime cost — bookkeeping, potential lock acquisition, cache misses on the allocator metadata. For a 1M-node tree over 100 passes, that is 100 × 2 × 1M = 200 million allocator calls. March's FBIP eliminates all 199 × 2 × 1M of them (all passes after the first), replacing them with direct field stores.
+
+#### Generalization
+
+FBIP fires automatically — no source annotations required — whenever:
+
+1. A function pattern-matches a heap value it uniquely owns (RC == 1 at runtime).
+2. The matching arm immediately produces a new value of the same constructor.
+3. The original scrutinee is not retained anywhere in the arm's computation.
+
+This covers the standard recursive structural patterns over trees and lists:
+
+- `map` over a linked list: each `Cons(h, t)` → `Cons(f(h), map(f, t))` reuses the `Cons` cell in-place
+- Any tree transformation where the old tree is not needed alongside the new one
+- Recursive descent transformations like `inc_leaves`, `scale`, `normalize`
+
+Functions where the old value IS retained (e.g. a function that both traverses and separately stores the original) correctly fall through to the RC > 1 path, which allocates fresh and decrements the original — correct, just not in-place.
+
+The optimization interacts correctly with the rest of the Perceus analysis: `IncRC`/`DecRC` cancel-pair elision runs before FBIP, so the cancel pairs introduced by passing uniquely-owned values into recursive calls are already removed by the time FBIP looks for the `DecRC + EAlloc` pattern.
+
 ### Compilation Target
 
 **LLVM**. Mature, excellent optimization, broad platform support, and the obvious choice for a language targeting native code with unboxed representations and no GC write barriers on the hot path.
