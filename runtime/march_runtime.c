@@ -1163,6 +1163,19 @@ int64_t march_dir_exists(void *s) {
     return S_ISDIR(st.st_mode) ? 1 : 0;
 }
 
+/* ── Capability / monitor / supervision builtins ─────────────────────── */
+
+void *march_cap_narrow(void *cap) { return cap; }
+void march_demonitor(int64_t ref) { (void)ref; }
+int64_t march_monitor(void *watcher, void *target) { (void)watcher; (void)target; return 0; }
+int64_t march_mailbox_size(void *pid) { (void)pid; return 0; }
+void march_run_until_idle(void) { march_run_scheduler(); }
+void march_register_resource(void *pid, void *name, void *cleanup) { (void)pid; (void)name; (void)cleanup; }
+void *march_get_cap(void *pid) { (void)pid; void *none = march_alloc(16); *(int32_t *)none = 0; return none; }
+void march_send_checked(void *cap, void *msg) { (void)cap; (void)msg; }
+void *march_pid_of_int(int64_t n) { return (void *)(intptr_t)n; }
+void *march_get_actor_field(void *pid, void *name) { (void)pid; (void)name; void *none = march_alloc(16); *(int32_t *)none = 0; return none; }
+
 /* ── Value pretty-printing ───────────────────────────────────────────── */
 
 /* Format a March value as a human-readable string.
