@@ -891,7 +891,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let ptr = emit_heap_alloc ctx entry.ce_tag (List.length args) in
     List.iteri (fun i atom ->
       let field_ty = match List.nth_opt entry.ce_fields i with
-        | Some t -> llvm_ty t | None -> "ptr" in
+        | Some t -> llvm_ty t
+        | None ->
+          failwith (Printf.sprintf
+            "LLVM emit: constructor %s has %d field(s) but field index %d \
+             was requested (arity mismatch — cascading from a ctor_info collision?)"
+            ctor (List.length entry.ce_fields) i)
+      in
       let (v_ty, v_val) = emit_atom ctx atom in
       let v_coerced = coerce ctx v_ty v_val field_ty in
       emit_store_field ctx ptr i field_ty v_coerced
@@ -914,7 +920,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit_store_tag ctx ptr entry.ce_tag;
     List.iteri (fun i atom ->
       let field_ty = match List.nth_opt entry.ce_fields i with
-        | Some t -> llvm_ty t | None -> "ptr" in
+        | Some t -> llvm_ty t
+        | None ->
+          failwith (Printf.sprintf
+            "LLVM emit: constructor %s has %d field(s) but field index %d \
+             was requested (arity mismatch — cascading from a ctor_info collision?)"
+            ctor (List.length entry.ce_fields) i)
+      in
       let (v_ty, v_val) = emit_atom ctx atom in
       let v_coerced = coerce ctx v_ty v_val field_ty in
       emit_store_field ctx ptr i field_ty v_coerced
@@ -940,7 +952,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     (* Pre-compute all arg values before branching *)
     let arg_vals = List.mapi (fun i atom ->
       let field_ty = match List.nth_opt entry.ce_fields i with
-        | Some t -> llvm_ty t | None -> "ptr" in
+        | Some t -> llvm_ty t
+        | None ->
+          failwith (Printf.sprintf
+            "LLVM emit: constructor %s has %d field(s) but field index %d \
+             was requested (arity mismatch — cascading from a ctor_info collision?)"
+            ctor (List.length entry.ce_fields) i)
+      in
       let (v_ty, v_val) = emit_atom ctx atom in
       let v_coerced = coerce ctx v_ty v_val field_ty in
       (field_ty, v_coerced)
@@ -1150,6 +1168,21 @@ and emit_case ctx scrut_atom branches default_opt =
       String.length br.Tir.br_tag > 0 && br.Tir.br_tag.[0] = '"'
     ) branches in
 
+  (* The scrutinee's TIR type — needed both for the switch tag lookup and for
+     branch field binding.  Defined early so both uses see it. *)
+  let scrut_tir_ty =
+    match scrut_atom with Tir.AVar v -> v.Tir.v_ty | _ -> Tir.TUnit
+  in
+
+  (* Produce the type-qualified ctor_info key for a branch tag.
+     When the scrutinee's type is TCon("List", _) and br_tag is "Cons", the key
+     is "List.Cons" — matching the key format used by build_ctor_info and lower.ml. *)
+  let qualified_br_key br_tag =
+    match scrut_tir_ty with
+    | Tir.TCon (type_name, _) -> type_name ^ "." ^ br_tag
+    | _ -> br_tag
+  in
+
   if is_string_case then begin
     (* String pattern matching: emit if-else chain with march_string_eq *)
     let rec emit_chain brs lbls =
@@ -1184,7 +1217,7 @@ and emit_case ctx scrut_atom branches default_opt =
     let cases_str = List.map2 (fun br lbl ->
         let tag_str =
           if is_ptr_scrut then
-            let e = ctor_entry ctx br.Tir.br_tag 0 in
+            let e = ctor_entry ctx (qualified_br_key br.Tir.br_tag) 0 in
             string_of_int e.ce_tag
           else begin
             match int_of_string_opt br.Tir.br_tag with
@@ -1211,19 +1244,13 @@ and emit_case ctx scrut_atom branches default_opt =
     | _ -> None
   in
 
-  (* The scrutinee's TIR type — used to resolve concrete field types for
-     polymorphic constructors (e.g. List(Int): field 0 is Int, not TVar "a"). *)
-  let scrut_tir_ty =
-    match scrut_atom with Tir.AVar v -> v.Tir.v_ty | _ -> Tir.TUnit
-  in
-
   (* Emit branch blocks *)
   List.iter2 (fun br lbl ->
     emit_label ctx lbl;
     (* Bind branch variables from scrutinee fields *)
     let heap_field_vals = ref [] in
     if is_ptr_scrut then begin
-      let entry = ctor_entry ctx br.Tir.br_tag (List.length br.Tir.br_vars) in
+      let entry = ctor_entry ctx (qualified_br_key br.Tir.br_tag) (List.length br.Tir.br_vars) in
       (* Concrete field types — uses scrutinee type to instantiate type variables.
          For polymorphic ctors like Cons('a, List('a)) with scrutinee List(Int),
          this gives [TInt, TCon("List",[TInt])] instead of [TVar "a", ...]. *)
@@ -1366,7 +1393,12 @@ let build_ctor_info ctx (m : Tir.tir_module) =
       let param_names = List.rev !params in
       Hashtbl.replace ctx.type_params _name param_names;
       List.iteri (fun tag_idx (ctor_name, field_tys) ->
-        Hashtbl.replace ctx.ctor_info ctor_name
+        (* Use a type-qualified key "TypeName.CtorName" so that two different
+           ADTs with the same constructor name (e.g. List.Cons and Tree.Cons)
+           never collide in ctor_info.  lower.ml embeds the same qualified key
+           in EAlloc (TCon ("TypeName.CtorName", [])), and emit_case qualifies
+           br_tag with scrut_tir_ty before the lookup. *)
+        Hashtbl.replace ctx.ctor_info (_name ^ "." ^ ctor_name)
           { ce_tag = tag_idx; ce_fields = field_tys };
         Hashtbl.replace ctx.poly_ctors (_name, ctor_name) field_tys
       ) ctors
