@@ -2273,7 +2273,9 @@ let rec check_decl env (d : Ast.decl) : env =
        Types defined in a module (e.g. IOList, Option) are referred to by their
        bare name throughout user code, not prefixed. *)
     let new_types = List.filter (fun (k, _) -> List.mem k pub_set) inner_env.types in
-    let new_ctors = List.filter (fun (k, _) -> List.mem k pub_set) inner_env.ctors in
+    let new_ctors = List.filter (fun (k, ci) ->
+        List.mem k pub_set || List.mem ci.ci_type pub_set
+      ) inner_env.ctors in
     (* Collect this module's declared capabilities for transitive enforcement *)
     let inner_needs = List.concat_map (function
         | Ast.DNeeds (caps, _) -> List.map cap_path_of_names caps
