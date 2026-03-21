@@ -270,6 +270,147 @@ let test_tc_hole () =
   end|} in
   Alcotest.(check bool) "hole is not an error" false (has_errors ctx)
 
+(* ── Fix 1: Interface constraint discharge ──────────────────────────────── *)
+
+let test_interface_constraint_satisfied () =
+  (* Calling a method when an impl exists should succeed. *)
+  let ctx = typecheck {|mod Test do
+    interface Eq(a) do
+      fn eq: a -> a -> Bool
+    end
+    impl Eq(Int) do
+      fn eq(x, y) do x == y end
+    end
+    fn check() do eq(1, 2) end
+  end|} in
+  Alcotest.(check bool) "interface method with impl: no errors" false (has_errors ctx)
+
+let test_interface_constraint_missing_impl () =
+  (* Calling a method on a concrete type with NO impl should error. *)
+  let ctx = typecheck {|mod Test do
+    interface Eq(a) do
+      fn eq: a -> a -> Bool
+    end
+    fn check() do eq("hello", "world") end
+  end|} in
+  Alcotest.(check bool) "interface method without impl: error" true (has_errors ctx)
+
+let test_impl_when_constraint_satisfied () =
+  (* impl with a satisfied 'when' constraint should succeed. *)
+  let ctx = typecheck {|mod Test do
+    interface Eq(a) do
+      fn eq: a -> a -> Bool
+    end
+    impl Eq(Int) do
+      fn eq(x, y) do x == y end
+    end
+    impl Eq(Bool) when Eq(Int) do
+      fn eq(x, y) do x == y end
+    end
+  end|} in
+  Alcotest.(check bool) "impl when Eq(Int) with Eq(Int) in scope: no errors" false (has_errors ctx)
+
+let test_impl_when_constraint_unsatisfied () =
+  (* impl with an unsatisfied 'when' constraint should error. *)
+  let ctx = typecheck {|mod Test do
+    interface Eq(a) do
+      fn eq: a -> a -> Bool
+    end
+    impl Eq(Bool) when Eq(Int) do
+      fn eq(x, y) do x == y end
+    end
+  end|} in
+  Alcotest.(check bool) "impl when Eq(Int) but no Eq(Int) in scope: error" true (has_errors ctx)
+
+(* ── Fix 2: Linear type enforcement ─────────────────────────────────────── *)
+
+let test_linear_pattern_match_ok () =
+  (* Matching a linear var and using the binding exactly once is fine. *)
+  let ctx = typecheck {|mod Test do
+    fn consume(linear x: Int) : Int do
+      match x with
+      | n -> n
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "linear through pattern match once: no errors" false (has_errors ctx)
+
+let test_linear_pattern_match_double_use () =
+  (* Matching a linear var and using the binding twice should error. *)
+  let ctx = typecheck {|mod Test do
+    fn bad(linear x: Int) : Int do
+      match x with
+      | n -> n + n
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "linear pattern binding used twice: error" true (has_errors ctx)
+
+let test_linear_closure_capture_error () =
+  (* Capturing a linear value in a closure should error. *)
+  let ctx = typecheck {|mod Test do
+    fn bad(linear x: Int) : Int do
+      let f = fn () -> x
+      f()
+    end
+  end|} in
+  Alcotest.(check bool) "linear value captured in closure: error" true (has_errors ctx)
+
+let test_linear_field_let_binding () =
+  (* A linear record field bound to a let-variable should be tracked as linear.
+     Using that variable twice should error. *)
+  let ctx = typecheck {|mod Test do
+    type Packet = { linear data: Int, size: Int }
+    fn bad(p: Packet) : Int do
+      let x = p.data
+      x + x
+    end
+  end|} in
+  Alcotest.(check bool) "linear field bound in let, used twice: error" true (has_errors ctx)
+
+(* ── Fix 3: Session type validation ─────────────────────────────────────── *)
+
+let test_protocol_self_message_error () =
+  (* A participant sending a message to itself should be an error. *)
+  let ctx = typecheck {|mod Test do
+    protocol SelfTalk do
+      Client -> Client : Int
+    end
+  end|} in
+  Alcotest.(check bool) "self-message in protocol: error" true (has_errors ctx)
+
+let test_protocol_empty_loop_error () =
+  (* An empty loop block should be an error. *)
+  let ctx = typecheck {|mod Test do
+    protocol Ping do
+      loop do
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "empty loop in protocol: error" true (has_errors ctx)
+
+let test_protocol_valid () =
+  (* A well-formed two-party protocol should produce no errors. *)
+  let ctx = typecheck {|mod Test do
+    protocol Ping do
+      Client -> Server : Int
+      Server -> Client : Bool
+    end
+  end|} in
+  Alcotest.(check bool) "valid two-party protocol: no errors" false (has_errors ctx)
+
+let test_protocol_duplicate_error () =
+  (* Duplicate protocol names should error. *)
+  let ctx = typecheck {|mod Test do
+    protocol P do
+      A -> B : Int
+    end
+    protocol P do
+      A -> B : Bool
+    end
+  end|} in
+  Alcotest.(check bool) "duplicate protocol name: error" true (has_errors ctx)
+
 let test_lexer_when () =
   let lexbuf = Lexing.from_string "when" in
   let tok = March_lexer.Lexer.token lexbuf in
@@ -5017,6 +5158,21 @@ let () =
           Alcotest.test_case "actor handler extra field"   `Quick test_actor_handler_extra_field;
           Alcotest.test_case "actor handler missing field" `Quick test_actor_handler_missing_field;
           Alcotest.test_case "actor handler correct"       `Quick test_actor_handler_correct;
+          (* Fix 1: Interface constraint discharge *)
+          Alcotest.test_case "iface constraint satisfied"   `Quick test_interface_constraint_satisfied;
+          Alcotest.test_case "iface constraint missing impl" `Quick test_interface_constraint_missing_impl;
+          Alcotest.test_case "impl when satisfied"          `Quick test_impl_when_constraint_satisfied;
+          Alcotest.test_case "impl when unsatisfied"        `Quick test_impl_when_constraint_unsatisfied;
+          (* Fix 2: Linear type enforcement *)
+          Alcotest.test_case "linear pattern match ok"       `Quick test_linear_pattern_match_ok;
+          Alcotest.test_case "linear pattern match double"   `Quick test_linear_pattern_match_double_use;
+          Alcotest.test_case "linear closure capture"        `Quick test_linear_closure_capture_error;
+          Alcotest.test_case "linear field let binding"       `Quick test_linear_field_let_binding;
+          (* Fix 3: Session type validation *)
+          Alcotest.test_case "protocol self-message"         `Quick test_protocol_self_message_error;
+          Alcotest.test_case "protocol empty loop"           `Quick test_protocol_empty_loop_error;
+          Alcotest.test_case "protocol valid"                `Quick test_protocol_valid;
+          Alcotest.test_case "protocol duplicate"            `Quick test_protocol_duplicate_error;
         ] );
       ( "eval",
         [
