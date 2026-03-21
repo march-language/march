@@ -1101,6 +1101,175 @@ let tcp_send_all sock data =
      done
    with Unix.Unix_error _ -> ())
 
+(* ------------------------------------------------------------------ *)
+(* WebSocket helpers (RFC 6455)                                        *)
+(* ------------------------------------------------------------------ *)
+
+let ws_magic_guid = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+(** Base64 encode a binary string. *)
+let base64_encode s =
+  let chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" in
+  let n = String.length s in
+  let out = Buffer.create ((n + 2) / 3 * 4) in
+  let i = ref 0 in
+  while !i < n do
+    let b0 = Char.code s.[!i] in
+    let b1 = if !i + 1 < n then Char.code s.[!i + 1] else 0 in
+    let b2 = if !i + 2 < n then Char.code s.[!i + 2] else 0 in
+    let v  = (b0 lsl 16) lor (b1 lsl 8) lor b2 in
+    Buffer.add_char out chars.[(v lsr 18) land 0x3f];
+    Buffer.add_char out chars.[(v lsr 12) land 0x3f];
+    (if !i + 1 < n then Buffer.add_char out chars.[(v lsr 6) land 0x3f]
+     else Buffer.add_char out '=');
+    (if !i + 2 < n then Buffer.add_char out chars.[v land 0x3f]
+     else Buffer.add_char out '=');
+    i := !i + 3
+  done;
+  Buffer.contents out
+
+(** Compute the Sec-WebSocket-Accept header value for a given key. *)
+let ws_compute_accept_key key =
+  let s = key ^ ws_magic_guid in
+  let digest = Digestif.SHA1.digest_string s in
+  base64_encode (Digestif.SHA1.to_raw_string digest)
+
+(** Read exactly [n] bytes from a socket, raising End_of_file on close. *)
+let ws_recv_bytes sock n =
+  let buf  = Bytes.create n in
+  let got  = ref 0 in
+  while !got < n do
+    let r = Unix.recv sock buf !got (n - !got) [] in
+    if r = 0 then raise End_of_file;
+    got := !got + r
+  done;
+  buf
+
+(** Read one byte from a socket. *)
+let ws_recv_byte sock =
+  let b = ws_recv_bytes sock 1 in
+  Char.code (Bytes.get b 0)
+
+(** Read and unmask one WebSocket frame.
+    Returns (opcode, payload_string).
+    Raises End_of_file / Unix.Unix_error on connection close. *)
+let ws_read_frame sock =
+  let b0     = ws_recv_byte sock in
+  let b1     = ws_recv_byte sock in
+  let opcode = b0 land 0x0f in
+  let masked = (b1 land 0x80) <> 0 in
+  let len0   = b1 land 0x7f in
+  let payload_len = match len0 with
+    | 126 ->
+      let hi = ws_recv_byte sock in
+      let lo = ws_recv_byte sock in
+      (hi lsl 8) lor lo
+    | 127 ->
+      (* 8-byte extended length; we only handle up to 2^30 *)
+      let _b7 = ws_recv_byte sock in
+      let _b6 = ws_recv_byte sock in
+      let _b5 = ws_recv_byte sock in
+      let _b4 = ws_recv_byte sock in
+      let b3  = ws_recv_byte sock in
+      let b2  = ws_recv_byte sock in
+      let b1' = ws_recv_byte sock in
+      let b0' = ws_recv_byte sock in
+      (b3 lsl 24) lor (b2 lsl 16) lor (b1' lsl 8) lor b0'
+    | n -> n
+  in
+  let mask_key = if masked then Some (ws_recv_bytes sock 4) else None in
+  let payload  = ws_recv_bytes sock payload_len in
+  (match mask_key with
+   | None -> ()
+   | Some mk ->
+     for i = 0 to Bytes.length payload - 1 do
+       Bytes.set payload i
+         (Char.chr (Char.code (Bytes.get payload i)
+                    lxor Char.code (Bytes.get mk (i mod 4))))
+     done);
+  (opcode, Bytes.to_string payload)
+
+(** Convert an (opcode, payload) pair to the March WsFrame variant. *)
+let ws_frame_to_march opcode payload =
+  match opcode with
+  | 0x1 -> VCon ("TextFrame",   [VString payload])
+  | 0x2 -> VCon ("BinaryFrame", [VString payload])
+  | 0x8 ->
+    let code   = if String.length payload >= 2
+                 then (Char.code payload.[0] lsl 8) lor Char.code payload.[1]
+                 else 1000 in
+    let reason = if String.length payload > 2
+                 then String.sub payload 2 (String.length payload - 2)
+                 else "" in
+    VCon ("Close", [VInt code; VString reason])
+  | 0x9 -> VCon ("Ping", [])
+  | 0xA -> VCon ("Pong", [])
+  | _   -> VCon ("BinaryFrame", [VString payload])
+
+(** Write one WebSocket frame to [sock] (server side — no masking). *)
+let ws_write_frame sock opcode payload =
+  let len    = String.length payload in
+  let header = Buffer.create 10 in
+  Buffer.add_char header (Char.chr (0x80 lor opcode));
+  (if len <= 125 then
+     Buffer.add_char header (Char.chr len)
+   else if len <= 65535 then begin
+     Buffer.add_char header (Char.chr 126);
+     Buffer.add_char header (Char.chr ((len lsr 8) land 0xff));
+     Buffer.add_char header (Char.chr  (len        land 0xff))
+   end else begin
+     Buffer.add_char header (Char.chr 127);
+     for i = 7 downto 0 do
+       Buffer.add_char header (Char.chr ((len lsr (i * 8)) land 0xff))
+     done
+   end);
+  tcp_send_all sock (Buffer.contents header);
+  if len > 0 then tcp_send_all sock payload
+
+(** Convert a March WsFrame value to (opcode, payload). *)
+let march_frame_to_ws = function
+  | VCon ("TextFrame",   [VString s])          -> (0x1, s)
+  | VCon ("BinaryFrame", [VString s])          -> (0x2, s)
+  | VCon ("Ping",        [])                   -> (0x9, "")
+  | VCon ("Pong",        [])                   -> (0xA, "")
+  | VCon ("Close", [VInt code; VString reason]) ->
+    let n   = 2 + String.length reason in
+    let buf = Bytes.create n in
+    Bytes.set buf 0 (Char.chr ((code lsr 8) land 0xff));
+    Bytes.set buf 1 (Char.chr  (code        land 0xff));
+    Bytes.blit_string reason 0 buf 2 (String.length reason);
+    (0x8, Bytes.to_string buf)
+  | VCon ("Close", []) -> (0x8, "")
+  | _ -> (0x1, "")
+
+(** Complete the WebSocket handshake on [sock] using [headers_raw].
+    Returns true on success, false if the Sec-WebSocket-Key header is missing. *)
+let ws_perform_handshake sock headers_raw =
+  match List.find_opt
+          (fun (n, _) -> String.lowercase_ascii n = "sec-websocket-key")
+          headers_raw
+  with
+  | None -> false
+  | Some (_, key) ->
+    let accept   = ws_compute_accept_key (String.trim key) in
+    let response =
+      "HTTP/1.1 101 Switching Protocols\r\n" ^
+      "Upgrade: websocket\r\n" ^
+      "Connection: Upgrade\r\n" ^
+      "Sec-WebSocket-Accept: " ^ accept ^ "\r\n" ^
+      "\r\n"
+    in
+    tcp_send_all sock response;
+    true
+
+(** Extract the Upgrade field from a March Conn value. *)
+let extract_conn_upgrade = function
+  | VCon ("Conn", [_fd; _m; _p; _pi; _qs;
+                   _rh; _rb;
+                   _s; _rhs; _rbody;
+                   _halt; _assigns; upgrade]) -> upgrade
+  | _ -> VCon ("NoUpgrade", [])
+
 (** Handle a single HTTP connection: read request → call pipeline → write response.
     [pipeline_fn] is a March value (VClosure or VBuiltin) of type Conn → Conn. *)
 let handle_http_connection (sock : Unix.file_descr) (pipeline_fn : value) : unit =
@@ -1144,19 +1313,31 @@ let handle_http_connection (sock : Unix.file_descr) (pipeline_fn : value) : unit
           ~method_str:meth ~full_path ~headers_raw ~body in
       (* 5. Call the pipeline closure *)
       let result_conn = !apply_hook pipeline_fn [conn_val] in
-      (* 6. Extract response and serialize *)
-      let (status, resp_headers, resp_body) = extract_conn_response result_conn in
-      let effective_status = if status = 0 then 200 else status in
-      let reason     = http_reason_phrase effective_status in
-      let header_str = march_headers_to_string resp_headers in
-      let response   =
-        Printf.sprintf "HTTP/1.1 %d %s\r\n%sContent-Length: %d\r\n\r\n%s"
-          effective_status reason
-          header_str
-          (String.length resp_body)
-          resp_body
-      in
-      tcp_send_all sock response
+      (* 6. Check for WebSocket upgrade or send normal HTTP response *)
+      let upgrade = extract_conn_upgrade result_conn in
+      (match upgrade with
+       | VCon ("WebSocketUpgrade", [handler]) ->
+         (* Perform the RFC 6455 handshake *)
+         if ws_perform_handshake sock headers_raw then begin
+           let ws_fd     = VInt (Obj.magic sock : int) in
+           let ws_socket = VCon ("WsSocket", [ws_fd]) in
+           (try ignore (!apply_hook handler [ws_socket]) with _ -> ());
+           (* Send a close frame when the handler returns *)
+           (try ws_write_frame sock 0x8 "" with _ -> ())
+         end
+       | _ ->
+         let (status, resp_headers, resp_body) = extract_conn_response result_conn in
+         let effective_status = if status = 0 then 200 else status in
+         let reason     = http_reason_phrase effective_status in
+         let header_str = march_headers_to_string resp_headers in
+         let response   =
+           Printf.sprintf "HTTP/1.1 %d %s\r\n%sContent-Length: %d\r\n\r\n%s"
+             effective_status reason
+             header_str
+             (String.length resp_body)
+             resp_body
+         in
+         tcp_send_all sock response)
     end
   with _ -> ()  (* swallow connection errors *)
 
@@ -2527,6 +2708,40 @@ let base_env : env =
   ; ("csv_open",     VBuiltin ("csv_open",     csv_open_impl))
   ; ("csv_next_row", VBuiltin ("csv_next_row", csv_next_row_impl))
   ; ("csv_close",    VBuiltin ("csv_close",    csv_close_impl))
+
+  (* ── WebSocket builtins ──────────────────────────────────────────── *)
+  ; ("ws_recv", VBuiltin ("ws_recv", function
+        | [VInt fd] ->
+          let sock = (Obj.magic fd : Unix.file_descr) in
+          (try
+             let (opcode, payload) = ws_read_frame sock in
+             ws_frame_to_march opcode payload
+           with _ ->
+             VCon ("Close", [VInt 1006; VString "connection error"]))
+        | _ -> eval_error "ws_recv(fd)"))
+
+  ; ("ws_send", VBuiltin ("ws_send", function
+        | [VInt fd; frame] ->
+          let sock   = (Obj.magic fd : Unix.file_descr) in
+          let (op, payload) = march_frame_to_ws frame in
+          (try ws_write_frame sock op payload with _ -> ());
+          VUnit
+        | _ -> eval_error "ws_send(fd, frame)"))
+
+  ; ("ws_select", VBuiltin ("ws_select", function
+        | [VInt fd; VInt _actor_fd; VInt timeout_ms] ->
+          let sock    = (Obj.magic fd : Unix.file_descr) in
+          let timeout = float_of_int timeout_ms /. 1000.0 in
+          (match Unix.select [sock] [] [] timeout with
+           | ([_], _, _) ->
+             (try
+                let (opcode, payload) = ws_read_frame sock in
+                VCon ("WsData", [ws_frame_to_march opcode payload])
+              with _ ->
+                VCon ("WsData",
+                      [VCon ("Close", [VInt 1006; VString "connection error"])]))
+           | _ -> VCon ("Timeout", []))
+        | _ -> eval_error "ws_select(fd, actor_fd, timeout_ms)"))
   ]
 
 (* ------------------------------------------------------------------ *)

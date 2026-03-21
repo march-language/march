@@ -1,0 +1,138 @@
+-- examples/csv_server.march
+--
+-- HTTP server on port 9876 that accepts POST /csv with a CSV body,
+-- applies math and string operations, and returns formatted results.
+-- Also writes results to /tmp/march_csv_results.txt.
+--
+-- Usage:
+--   dune exec march -- examples/csv_server.march
+--   curl -X POST http://localhost:9876/csv \
+--        -d "name,score\nAlice,92\nBob,78\nCarol,88\nDave,55"
+
+mod CsvServer do
+
+fn save_csv(body) do
+  let path = "/tmp/march_csv_input.csv"
+  File.write(path, body)
+  path
+end
+
+fn first(row) do
+  match row with
+  | Cons(x, _) -> x
+  | Nil -> ""
+  end
+end
+
+fn second(row) do
+  match row with
+  | Cons(_, Cons(x, _)) -> x
+  | _ -> ""
+  end
+end
+
+fn parse_score(s) do
+  match String.to_int(String.trim(s)) with
+  | Ok(n) -> n
+  | Err(_) -> 0
+  end
+end
+
+fn sum_scores(rows) do
+  List.fold_left(0, rows, fn(acc, row) ->
+    acc + parse_score(second(row)))
+end
+
+fn max_score_loop(rows, best) do
+  match rows with
+  | Nil -> best
+  | Cons(row, rest) ->
+    let s = parse_score(second(row))
+    if s > best
+    then max_score_loop(rest, s)
+    else max_score_loop(rest, best)
+  end
+end
+
+fn min_score_loop(rows, best) do
+  match rows with
+  | Nil -> best
+  | Cons(row, rest) ->
+    let s = parse_score(second(row))
+    if s < best
+    then min_score_loop(rest, s)
+    else min_score_loop(rest, best)
+  end
+end
+
+fn format_row(row) do
+  let name = first(row)
+  let score = second(row)
+  let upper_name = String.to_uppercase(name)
+  let name_bytes = to_string(String.byte_size(name))
+  upper_name ++ " (bytes=" ++ name_bytes ++ ", score=" ++ score ++ ")"
+end
+
+fn build_names_section(rows) do
+  List.fold_left("", rows, fn(acc, row) ->
+    acc ++ "  " ++ format_row(row) ++ "\n")
+end
+
+fn router(conn) do
+  match (HttpServer.method(conn), HttpServer.path_info(conn)) with
+  | (Post, Cons("csv", Nil)) ->
+    let body = HttpServer.req_body(conn)
+    let csv_path = save_csv(body)
+    match Csv.read_all(csv_path, ",", :rfc4180) with
+    | Err(e) ->
+      conn |> HttpServer.text(400, "CSV error: " ++ to_string(e))
+    | Ok(all_rows) ->
+      let data_rows = match all_rows with
+      | Nil -> Nil
+      | Cons(_, rest) -> rest
+      end
+      let row_count = List.length(data_rows)
+      let total = sum_scores(data_rows)
+      let mx = match data_rows with
+      | Nil -> 0
+      | Cons(first_row, rest) ->
+        max_score_loop(rest, parse_score(second(first_row)))
+      end
+      let mn = match data_rows with
+      | Nil -> 0
+      | Cons(first_row, rest) ->
+        min_score_loop(rest, parse_score(second(first_row)))
+      end
+      let high_rows = List.filter(data_rows, fn row ->
+        parse_score(second(row)) > 80)
+      let high_count = List.length(high_rows)
+      let names_section = build_names_section(data_rows)
+      let avg = if row_count > 0 then total / row_count else 0
+      let result =
+        "=== CSV Analysis Results ===\n" ++
+        "Rows parsed: " ++ to_string(row_count) ++ "\n" ++
+        "Sum of scores: " ++ to_string(total) ++ "\n" ++
+        "Average score: " ++ to_string(avg) ++ "\n" ++
+        "Max score: " ++ to_string(mx) ++ "\n" ++
+        "Min score: " ++ to_string(mn) ++ "\n" ++
+        "High scorers (>80): " ++ to_string(high_count) ++ "\n" ++
+        "Names (uppercase, byte sizes):\n" ++
+        names_section
+      File.write("/tmp/march_csv_results.txt", result)
+      conn |> HttpServer.text(200, result)
+    end
+  | (Get, Nil) ->
+    conn |> HttpServer.text(200, "POST /csv with a CSV body (name,score rows)")
+  | _ ->
+    conn |> HttpServer.text(404, "Not Found")
+  end
+end
+
+pub fn main() do
+  println("CSV server starting on port 9876 ...")
+  HttpServer.new(9876)
+  |> HttpServer.plug(router)
+  |> HttpServer.listen()
+end
+
+end

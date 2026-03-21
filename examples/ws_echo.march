@@ -1,0 +1,61 @@
+-- examples/ws_echo.march
+--
+-- WebSocket echo server on port 9877 at /ws.
+--
+-- Frame handling:
+--   TextFrame(s)  -> echo back "Echo: " ++ s
+--   Ping          -> Pong
+--   Close(c, r)   -> Close(c, r) then exit handler
+--   BinaryFrame   -> echo back unchanged
+--
+-- Usage:
+--   dune exec march -- examples/ws_echo.march
+--
+-- Test with websocat:
+--   websocat ws://127.0.0.1:9877/ws
+
+mod WsEcho do
+
+-- Recursive message loop: handles frames until the connection closes.
+fn ws_loop(socket) do
+  match WebSocket.recv(socket) with
+  | TextFrame(msg) ->
+    WebSocket.send_frame(socket, TextFrame("Echo: " ++ msg))
+    ws_loop(socket)
+  | BinaryFrame(data) ->
+    WebSocket.send_frame(socket, BinaryFrame(data))
+    ws_loop(socket)
+  | Ping ->
+    WebSocket.send_frame(socket, Pong)
+    ws_loop(socket)
+  | Pong ->
+    -- unsolicited pong — ignore and keep going
+    ws_loop(socket)
+  | Close(code, reason) ->
+    WebSocket.close(socket, code, reason)
+  end
+end
+
+fn ws_handler(socket) do
+  ws_loop(socket)
+end
+
+fn router(conn) do
+  match (HttpServer.method(conn), HttpServer.path_info(conn)) with
+  | (Get, Cons("ws", Nil)) ->
+    WebSocket.upgrade(conn, fn socket -> ws_handler(socket))
+  | (Get, Nil) ->
+    conn |> HttpServer.text(200, "WebSocket echo server — connect to /ws")
+  | _ ->
+    conn |> HttpServer.text(404, "Not Found")
+  end
+end
+
+pub fn main() do
+  println("WebSocket echo server starting on port 9877 ...")
+  HttpServer.new(9877)
+  |> HttpServer.plug(router)
+  |> HttpServer.listen()
+end
+
+end
