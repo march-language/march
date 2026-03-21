@@ -36,15 +36,23 @@ void *march_alloc(int64_t sz) {
  * _Atomic int64_t has the same size and alignment as int64_t on all targets.
  */
 
+/* Polymorphic containers store scalars via inttoptr (e.g. List(Int) stores
+ * integers as pointers).  When code-generated pattern-match shared-paths emit
+ * march_incrc/decrc on extracted fields whose compile-time type is still a
+ * type variable, the value may be a small integer, not a heap pointer.
+ * Guard against this: addresses below one page (4096) are never valid heap
+ * allocations on any modern platform. */
+#define IS_HEAP_PTR(p) ((uintptr_t)(p) >= 4096u)
+
 void march_incrc(void *p) {
-    if (!p) return;
+    if (!IS_HEAP_PTR(p)) return;
     /* Relaxed: caller already holds a reference so the object is alive. */
     atomic_fetch_add_explicit(
         (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_relaxed);
 }
 
 void march_decrc(void *p) {
-    if (!p) return;
+    if (!IS_HEAP_PTR(p)) return;
     /* acq_rel: release our writes before decrement; acquire before free so
      * we see all other threads' writes to the object. */
     int64_t prev = atomic_fetch_sub_explicit(
@@ -53,7 +61,7 @@ void march_decrc(void *p) {
 }
 
 int64_t march_decrc_freed(void *p) {
-    if (!p) return 1;
+    if (!IS_HEAP_PTR(p)) return 1;
     int64_t prev = atomic_fetch_sub_explicit(
         (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
     if (prev <= 1) { free(p); return 1; }
