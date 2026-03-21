@@ -1237,32 +1237,56 @@ and emit_case ctx scrut_atom branches default_opt =
     in
     emit_chain branches branch_lbls
   end else begin
-    (* Determine switch discriminant (tag or scalar) *)
-    let (sw_ty, sw_val) =
-      if is_ptr_scrut then ("i32", emit_load_tag ctx scrut_val)
-      else ("i64", scrut_val)
+    (* Detect boolean case: all branch tags are "true"/"false" — emit br i1 *)
+    let is_bool_tag t = t = "true" || t = "True" || t = "false" || t = "False" in
+    let is_bool_case =
+      not is_ptr_scrut &&
+      branches <> [] &&
+      List.for_all (fun br -> is_bool_tag br.Tir.br_tag) branches
     in
+    if is_bool_case then begin
+      (* trunc i64 -> i1, then br i1 *)
+      let i1v = fresh ctx "bi" in
+      emit ctx (Printf.sprintf "%s = trunc i64 %s to i1" i1v scrut_val);
+      let find_lbl tag fallback =
+        match List.find_opt (fun br -> is_bool_tag br.Tir.br_tag &&
+          (br.Tir.br_tag = tag || br.Tir.br_tag = String.capitalize_ascii tag)) branches with
+        | Some br ->
+          let idx = fst (List.fold_left (fun (i, found) b ->
+              if found then (i, true)
+              else if b == br then (i, true) else (i+1, false)
+            ) (0, false) branches) in
+          List.nth branch_lbls idx
+        | None -> fallback
+      in
+      let true_lbl  = find_lbl "true"  default_lbl in
+      let false_lbl = find_lbl "false" default_lbl in
+      emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s" i1v true_lbl false_lbl)
+    end else begin
+      (* Determine switch discriminant (tag or scalar) *)
+      let (sw_ty, sw_val) =
+        if is_ptr_scrut then ("i32", emit_load_tag ctx scrut_val)
+        else ("i64", scrut_val)
+      in
 
-    (* Build switch arms *)
-    let cases_str = List.map2 (fun br lbl ->
-        let tag_str =
-          if is_ptr_scrut then
-            let e = ctor_entry ctx (qualified_br_key br.Tir.br_tag) 0 in
-            string_of_int e.ce_tag
-          else begin
-            match int_of_string_opt br.Tir.br_tag with
-            | Some n -> string_of_int n
-            | None ->
-              if br.Tir.br_tag = "true"  || br.Tir.br_tag = "True"  then "1"
-              else if br.Tir.br_tag = "false" || br.Tir.br_tag = "False" then "0"
-              else "0"
-          end
-          in
-        Printf.sprintf "%s %s, label %%%s" sw_ty tag_str lbl
-      ) branches branch_lbls in
-    let cases_part = String.concat "\n      " cases_str in
-    emit_term ctx (Printf.sprintf "switch %s %s, label %%%s [\n      %s\n  ]"
-                     sw_ty sw_val default_lbl cases_part)
+      (* Build switch arms *)
+      let cases_str = List.map2 (fun br lbl ->
+          let tag_str =
+            if is_ptr_scrut then
+              let e = ctor_entry ctx (qualified_br_key br.Tir.br_tag) 0 in
+              string_of_int e.ce_tag
+            else begin
+              match int_of_string_opt br.Tir.br_tag with
+              | Some n -> string_of_int n
+              | None -> "0"
+            end
+            in
+          Printf.sprintf "%s %s, label %%%s" sw_ty tag_str lbl
+        ) branches branch_lbls in
+      let cases_part = String.concat "\n      " cases_str in
+      emit_term ctx (Printf.sprintf "switch %s %s, label %%%s [\n      %s\n  ]"
+                       sw_ty sw_val default_lbl cases_part)
+    end
   end;
 
   (* Helper: if body = ESeq(EDecRC(v), rest) where v.v_name = scrut_name,
