@@ -2784,6 +2784,41 @@ let test_ctor_arity_mismatch_raises () =
   in
   Alcotest.(check bool) "arity mismatch raises Failure" true raised
 
+(** Compiled path: the generated @main() C wrapper must call
+    march_run_scheduler() after march_main() so that actor mailboxes
+    are drained even when main() never calls run_until_idle(). *)
+let test_compiled_main_calls_march_run_scheduler () =
+  let src = {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+    fn main() do
+      let pid = spawn(Counter)
+      send(pid, Inc())
+    end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let ir = March_tir.Llvm_emit.emit_module tir in
+  (* The @main() wrapper must contain a call to march_run_scheduler so
+     that actor mailboxes are drained after march_main() returns.
+     Without this, handlers would never run in compiled executables. *)
+  let has_scheduler_call =
+    try ignore (Str.search_forward (Str.regexp "march_run_scheduler") ir 0); true
+    with Not_found -> false
+  in
+  Alcotest.(check bool) "@main wrapper calls march_run_scheduler" true has_scheduler_call;
+  (* Verify the declaration is present too (needed by the linker) *)
+  let has_declaration =
+    try ignore (Str.search_forward
+      (Str.regexp "declare void @march_run_scheduler") ir 0); true
+    with Not_found -> false
+  in
+  Alcotest.(check bool) "march_run_scheduler is declared in preamble" true has_declaration
+
 (* ── String stdlib module tests ─────────────────────────────────────────── *)
 
 (** Helper: load string.march and evaluate [src] with it in scope. *)
@@ -3709,6 +3744,190 @@ let test_receive_inside_handler () =
        | _ -> -1)
     | None -> -1 in
   Alcotest.(check int) "Dispatcher got 99 via receive()" 99 got
+
+(** Async mailbox semantics: messages to a single actor are delivered in
+    FIFO order.  We use the "accumulator * 10 + n" trick: if processed as
+    Append(1) → Append(2) → Append(3), acc = 123.  LIFO would give 321. *)
+let test_message_fifo_ordering () =
+  let src = {|mod Test do
+    actor Accumulator do
+      state { acc : Int }
+      init { acc = 0 }
+      on Append(n) do
+        { acc = state.acc * 10 + n }
+      end
+    end
+
+    fn main() do
+      let pid = spawn(Accumulator)
+      send(pid, Append(1))
+      send(pid, Append(2))
+      send(pid, Append(3))
+      run_until_idle()
+      pid
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  let pid = match v with March_eval.Eval.VPid n -> n | _ -> failwith "expected pid" in
+  let acc =
+    match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
+    | Some inst ->
+      (match inst.March_eval.Eval.ai_state with
+       | March_eval.Eval.VRecord fs ->
+         (match List.assoc_opt "acc" fs with
+          | Some (March_eval.Eval.VInt n) -> n | _ -> -1)
+       | _ -> -1)
+    | None -> -1
+  in
+  (* FIFO: Append(1)→Append(2)→Append(3) ⟹ ((0*10+1)*10+2)*10+3 = 123 *)
+  Alcotest.(check int) "FIFO ordering: acc = 123" 123 acc
+
+(** A message sent to an actor from inside a handler is queued and
+    processed in a subsequent scheduler pass — not dropped, not
+    processed inline during the current handler. *)
+let test_handler_sends_to_another_actor () =
+  let src = {|mod Test do
+    actor Target do
+      state { pinged : Bool }
+      init { pinged = false }
+      on Ping() do { pinged = true } end
+    end
+
+    actor Relay do
+      state { relayed : Bool }
+      init { relayed = false }
+      on Forward(target) do
+        let _ = send(target, Ping())
+        { relayed = true }
+      end
+    end
+
+    fn main() do
+      let target = spawn(Target)
+      let relay  = spawn(Relay)
+      send(relay, Forward(target))
+      run_until_idle()
+      target
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  let pid = match v with March_eval.Eval.VPid n -> n | _ -> failwith "expected pid" in
+  let pinged =
+    match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
+    | Some inst ->
+      (match inst.March_eval.Eval.ai_state with
+       | March_eval.Eval.VRecord fs ->
+         (match List.assoc_opt "pinged" fs with
+          | Some (March_eval.Eval.VBool b) -> b | _ -> false)
+       | _ -> false)
+    | None -> false
+  in
+  Alcotest.(check bool) "Target received Ping relayed from handler" true pinged
+
+(** run_module drains the scheduler after main() returns even when
+    main() never calls run_until_idle() explicitly. *)
+let test_run_module_auto_drains () =
+  March_eval.Eval.reset_scheduler_state ();
+  let src = {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    fn main() do
+      let pid = spawn(Counter)
+      send(pid, Inc())
+      send(pid, Inc())
+      send(pid, Inc())
+      pid
+    end
+  end|} in
+  let m = parse_and_desugar src in
+  March_eval.Eval.run_module m;
+  (* After run_module, the scheduler has been drained even though main()
+     never called run_until_idle(). *)
+  (* Collect all live actor instances directly from the registry. *)
+  let instances =
+    Hashtbl.fold (fun _pid inst acc -> inst :: acc)
+      March_eval.Eval.actor_registry []
+  in
+  let count = match instances with
+    | [inst] ->
+      (match inst.March_eval.Eval.ai_state with
+       | March_eval.Eval.VRecord fs ->
+         (match List.assoc_opt "count" fs with
+          | Some (March_eval.Eval.VInt n) -> n | _ -> -1)
+       | _ -> -1)
+    | _ -> -2
+  in
+  Alcotest.(check int) "run_module auto-drain: count = 3" 3 count
+
+(** Sending to a dead actor silently drops the message; the mailbox
+    stays empty and the caller does not crash. *)
+let test_send_to_dead_actor_dropped () =
+  let src = {|mod Test do
+    actor Worker do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    fn main() do
+      let pid = spawn(Worker)
+      kill(pid)
+      send(pid, Inc())
+      run_until_idle()
+      mailbox_size(pid)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check int) "dead actor mailbox stays 0 after send" 0
+    (match v with March_eval.Eval.VInt n -> n | _ -> -1)
+
+(** An actor that sends to self() in a handler: the self-message is
+    queued and processed in a subsequent scheduler pass, not inline.
+    Here Relay sends Ping to itself; after run_until_idle both the
+    initial Forward handler and the Ping handler must have run. *)
+let test_self_send_from_handler () =
+  let src = {|mod Test do
+    actor SelfSender do
+      state { stage : Int }
+      init { stage = 0 }
+      on Begin() do
+        let _ = send(self(), End())
+        { stage = 1 }
+      end
+      on End() do
+        { stage = 2 }
+      end
+    end
+
+    fn main() do
+      let pid = spawn(SelfSender)
+      send(pid, Begin())
+      run_until_idle()
+      pid
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  let pid = match v with March_eval.Eval.VPid n -> n | _ -> failwith "expected pid" in
+  let stage =
+    match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
+    | Some inst ->
+      (match inst.March_eval.Eval.ai_state with
+       | March_eval.Eval.VRecord fs ->
+         (match List.assoc_opt "stage" fs with
+          | Some (March_eval.Eval.VInt n) -> n | _ -> -1)
+       | _ -> -1)
+    | None -> -1
+  in
+  (* stage 1 after Begin(), stage 2 after the queued End() — both must run *)
+  Alcotest.(check int) "self-send reaches stage 2" 2 stage
 
 let test_eval_reduction_count () =
   let src = {|mod Test do
@@ -6057,6 +6276,8 @@ let () =
           test_ctor_no_collision_different_tags;
         Alcotest.test_case "ctor_arity_mismatch_raises" `Quick
           test_ctor_arity_mismatch_raises;
+        Alcotest.test_case "compiled main calls march_run_scheduler" `Quick
+          (with_reset test_compiled_main_calls_march_run_scheduler);
       ]);
       ("string stdlib", [
         Alcotest.test_case "byte_size"           `Quick test_string_byte_size;
@@ -6271,6 +6492,16 @@ let () =
           (with_reset test_self_inside_handler);
         Alcotest.test_case "receive inside handler"           `Quick
           (with_reset test_receive_inside_handler);
+        Alcotest.test_case "message FIFO ordering"            `Quick
+          (with_reset test_message_fifo_ordering);
+        Alcotest.test_case "handler sends to another actor"   `Quick
+          (with_reset test_handler_sends_to_another_actor);
+        Alcotest.test_case "run_module auto-drains mailbox"   `Quick
+          test_run_module_auto_drains;
+        Alcotest.test_case "send to dead actor dropped"       `Quick
+          (with_reset test_send_to_dead_actor_dropped);
+        Alcotest.test_case "self-send from handler"           `Quick
+          (with_reset test_self_send_from_handler);
       ]);
       ("file builtins", [
         Alcotest.test_case "file_exists false" `Quick test_file_builtin_exists_false;
