@@ -60,6 +60,11 @@ let () =
       ("rest_for_one", REST_FOR_ONE);
       ("restart", RESTART_KW);
       ("requires", REQUIRES);
+      ("import", IMPORT);
+      ("alias", ALIAS);
+      ("only", ONLY);
+      ("except", EXCEPT);
+      ("p_fn", P_FN);
     ]
 }
 

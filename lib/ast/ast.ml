@@ -135,6 +135,7 @@ type decl =
   | DImpl of impl_def * span                       (** Interface implementation *)
   | DExtern of extern_def * span                   (** FFI extern block *)
   | DUse of use_decl * span                        (** Import: use Mod.* or use Mod.{f} *)
+  | DAlias of alias_decl * span                    (** alias Long.Name, as: Short *)
   | DNeeds of name list list * span
   (** Capability manifest: [needs IO.Network, IO.Clock]
       Each [name list] is one capability path, e.g. [["IO";"Network"]; ["IO";"Clock"]] *)
@@ -146,10 +147,17 @@ and use_decl = {
 }
 [@@deriving show]
 
+and alias_decl = {
+  alias_path : name list;      (** Original module path, e.g. [Collections; HashMap] *)
+  alias_name : name;           (** Short name (defaults to last path segment) *)
+}
+[@@deriving show]
+
 and use_selector =
   | UseAll                     (** .* — import all public names *)
   | UseNames of name list      (** .{f, g} — import named items *)
   | UseSingle                  (** no selector — import the module itself *)
+  | UseExcept of name list     (** except: [f, g] — import all except listed *)
 [@@deriving show]
 
 (** A function is one or more clauses with the same name.

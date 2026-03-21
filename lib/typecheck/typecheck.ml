@@ -254,6 +254,15 @@ type ctor_info = {
   ci_arg_tys : Ast.ty list;   (** Surface arg types of this constructor *)
 }
 
+(** One entry in the import tracker — records an imported name or alias and
+    whether it was referenced at least once during typechecking. *)
+type import_entry = {
+  ie_span    : Ast.span;
+  ie_desc    : string;              (** human-readable warning message *)
+  ie_matches : string -> bool;      (** does looking up [name] count as "using" this? *)
+  ie_used    : bool ref;
+}
+
 type env = {
   vars    : (string * scheme) list;        (** Term variable → scheme *)
   types   : (string * int) list;           (** Type constructor name → arity *)
@@ -274,6 +283,9 @@ type env = {
       Populated when a [DMod] is fully checked; used for transitive enforcement. *)
   protocols  : (string * Ast.protocol_def) list; (** Registered session-type protocols *)
   impls      : (string * ty) list; (** Registered interface implementations: (iface_name, impl_ty) *)
+  import_tracker : import_entry list ref;
+  (** Accumulated import/alias entries for unused-import warning detection.
+      Shared (mutable) across all env copies derived from the same root. *)
 }
 
 let make_env errors type_map = {
@@ -281,6 +293,7 @@ let make_env errors type_map = {
   errors; pending_constraints = ref []; type_map;
   interfaces = []; sigs = [];
   mod_needs = []; module_caps = []; protocols = []; impls = [];
+  import_tracker = ref [];
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -897,6 +910,13 @@ let rec unify env ~span ?(reason = None) t1 t2 =
   | TLin (l1, inner1), TLin (l2, inner2) when l1 = l2 ->
     unify env ~span ~reason inner1 inner2
 
+  (* Transparent coercion: a linear/affine value is structurally the same
+     type as its inner (unrestricted) type.  This allows e.g. a field of
+     type [linear Int] to unify with an expected [Int] at a use site while
+     still preserving the TLin wrapper for linearity tracking in let-bindings. *)
+  | TLin (_, inner), other | other, TLin (_, inner) ->
+    unify env ~span ~reason inner other
+
   | TNat n1, TNat n2 when n1 = n2 -> ()
 
   | TNatOp (op1, a1, b1), TNatOp (op2, a2, b2) when op1 = op2 ->
@@ -1023,6 +1043,10 @@ let bind_linear_field_sentinels varname ty env =
 (** Record a use of variable [name].  Errors if a linear var is used
     more than once. *)
 let record_use name span env =
+  (* Mark any import entry that matches this name as used. *)
+  if !(env.import_tracker) <> [] then
+    List.iter (fun ie -> if ie.ie_matches name then ie.ie_used := true)
+      !(env.import_tracker);
   match List.find_opt (fun e -> e.le_name = name) env.lin with
   | None -> ()   (* unrestricted — no tracking needed *)
   | Some le ->
@@ -1437,17 +1461,24 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     (* ── Field access: e.name ─────────────────────────────────────── *)
     | Ast.EField (e, name, sp) ->
-      (* Module member access: if e is a bare uppercase identifier (module name),
-         try looking up "ModName.field" in env.vars before falling back to
-         record field access. *)
+      (* Module member access: if e is a module path (ECon or chained EField),
+         try looking up "A.B.name" in env.vars before falling back to record field. *)
+      let rec module_path = function
+        | Ast.ECon (n, [], _) -> Some n.txt
+        | Ast.EField (e2, f, _) ->
+          (match module_path e2 with
+           | Some prefix -> Some (prefix ^ "." ^ f.txt)
+           | None -> None)
+        | _ -> None
+      in
       let mod_access =
-        match e with
-        | Ast.ECon (modname, [], _) ->
-          let qualified = modname.txt ^ "." ^ name.txt in
+        match module_path e with
+        | Some prefix ->
+          let qualified = prefix ^ "." ^ name.txt in
           (match lookup_var qualified env with
            | Some sch -> Some (instantiate env.level env sch)
            | None     -> None)
-        | _ -> None
+        | None -> None
       in
       (match mod_access with
        | Some ty -> ty
@@ -2319,9 +2350,17 @@ let rec check_decl env (d : Ast.decl) : env =
     );
     (* Validate capability declarations for this module *)
     check_module_needs env name decls;
-    (* Expose only public names as "ModName.name" in the outer env *)
+    (* Expose only public names as "ModName.name" in the outer env.
+       Also export sub-module keys: if "B" is in pub_set, export "B.f" as "A.B.f". *)
+    let is_pub_key k =
+      List.exists (fun n ->
+        k = n ||
+        (String.length k > String.length n + 1 &&
+         String.sub k 0 (String.length n + 1) = n ^ ".")
+      ) pub_set
+    in
     let new_names = List.filter_map (fun (k, sch) ->
-        if List.mem k pub_set
+        if is_pub_key k
         then Some (name.txt ^ "." ^ k, sch)
         else None
       ) inner_env.vars in
@@ -2419,7 +2458,7 @@ let rec check_decl env (d : Ast.decl) : env =
     (if List.length new_env.protocols > 1 then
        (* Detect if two protocols use the same participant pair in opposite directions
           without declaring a dual — this is a common session type mistake. *)
-       List.iter (fun (other_name, other_pdef) ->
+       List.iter (fun (other_name, (other_pdef : Ast.protocol_def)) ->
            if other_name <> name.txt then begin
              let other_parts =
                List.sort_uniq String.compare
@@ -2582,8 +2621,9 @@ let rec check_decl env (d : Ast.decl) : env =
         bind_var ef.ef_name.txt (Mono ty) env
       ) env edef.ext_fns
 
-  | Ast.DUse (ud, _sp) ->
-    let prefix = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) ^ "." in
+  | Ast.DUse (ud, sp) ->
+    let mod_str = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) in
+    let prefix = mod_str ^ "." in
     (match ud.use_sel with
      | Ast.UseSingle ->
        (* Import the module path as an accessible prefix — no new bindings needed *)
@@ -2596,17 +2636,86 @@ let rec check_decl env (d : Ast.decl) : env =
               && String.sub k 0 plen = prefix
            then Some (String.sub k plen (String.length k - plen), sch)
            else None) env.vars in
+       (* Track for unused-import warning: warn if nothing from this module is used. *)
+       if matching <> [] then begin
+         let short_names = List.map fst matching in
+         let entry = { ie_span = sp
+                     ; ie_desc = Printf.sprintf
+                         "Unused import: nothing from `%s` is used.\n\
+                          Remove this import or use something from it." mod_str
+                     ; ie_matches = (fun name -> List.mem name short_names)
+                     ; ie_used = ref false } in
+         env.import_tracker := entry :: !(env.import_tracker)
+       end;
        bind_vars matching env
      | Ast.UseNames names ->
        List.fold_left (fun env n ->
            match List.assoc_opt (prefix ^ n.Ast.txt) env.vars with
-           | Some sch -> bind_var n.Ast.txt sch env
+           | Some sch ->
+             (* Track for unused-import warning: warn if this specific name is unused. *)
+             let entry = { ie_span = n.Ast.span
+                         ; ie_desc = Printf.sprintf
+                             "Unused import `%s` from `%s`.\n\
+                              Remove it from the import list or use it." n.Ast.txt mod_str
+                         ; ie_matches = (fun name -> name = n.Ast.txt)
+                         ; ie_used = ref false } in
+             env.import_tracker := entry :: !(env.import_tracker);
+             bind_var n.Ast.txt sch env
            | None ->
              Err.error env.errors ~span:n.Ast.span
                (Printf.sprintf "Module `%s` does not export `%s`."
-                  (String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path))
-                  n.Ast.txt);
-             env) env names)
+                  mod_str n.Ast.txt);
+             env) env names
+     | Ast.UseExcept excluded ->
+       let excl_set = List.map (fun n -> n.Ast.txt) excluded in
+       let matching = List.filter_map (fun (k, sch) ->
+           let plen = String.length prefix in
+           if String.length k > plen
+              && String.sub k 0 plen = prefix
+           then
+             let short = String.sub k plen (String.length k - plen) in
+             if List.mem short excl_set then None
+             else Some (short, sch)
+           else None) env.vars in
+       (* Track for unused-import warning: warn if nothing from this module is used. *)
+       if matching <> [] then begin
+         let short_names = List.map fst matching in
+         let entry = { ie_span = sp
+                     ; ie_desc = Printf.sprintf
+                         "Unused import: nothing from `%s` is used.\n\
+                          Remove this import or use something from it." mod_str
+                     ; ie_matches = (fun name -> List.mem name short_names)
+                     ; ie_used = ref false } in
+         env.import_tracker := entry :: !(env.import_tracker)
+       end;
+       bind_vars matching env)
+
+  | Ast.DAlias (ad, sp) ->
+    let orig_prefix = String.concat "." (List.map (fun n -> n.Ast.txt) ad.alias_path) ^ "." in
+    let short_name = ad.alias_name.Ast.txt in
+    let short_prefix = short_name ^ "." in
+    (* Re-export all "Orig.name" as "Short.name" *)
+    let new_bindings = List.filter_map (fun (k, sch) ->
+        let plen = String.length orig_prefix in
+        if String.length k > plen && String.sub k 0 plen = orig_prefix then
+          let rest = String.sub k plen (String.length k - plen) in
+          Some (short_prefix ^ rest, sch)
+        else None) env.vars in
+    (* Track for unused-alias warning: warn if no "Short.*" name is referenced. *)
+    if new_bindings <> [] then begin
+      let orig_str = String.concat "." (List.map (fun n -> n.Ast.txt) ad.alias_path) in
+      let entry = { ie_span = sp
+                  ; ie_desc = Printf.sprintf
+                      "Unused alias `%s` for `%s`.\n\
+                       Remove this alias or use it to qualify a name." short_name orig_str
+                  ; ie_matches = (fun name ->
+                      let plen = String.length short_prefix in
+                      (String.length name >= plen && String.sub name 0 plen = short_prefix)
+                      || name = short_name)
+                  ; ie_used = ref false } in
+      env.import_tracker := entry :: !(env.import_tracker)
+    end;
+    bind_vars new_bindings env
 
   | Ast.DNeeds (caps, _sp) ->
     (* Record declared capability paths in env for DMod validation.
@@ -2615,6 +2724,13 @@ let rec check_decl env (d : Ast.decl) : env =
         String.concat "." (List.map (fun (n : Ast.name) -> n.txt) names)
       ) caps in
     { env with mod_needs = paths @ env.mod_needs }
+
+(** Emit warnings for any imports or aliases that were never referenced. *)
+let warn_unused_imports env =
+  List.iter (fun ie ->
+    if not !(ie.ie_used) then
+      Err.warning env.errors ~span:ie.ie_span ie.ie_desc
+  ) !(env.import_tracker)
 
 (* =================================================================
    §16  Module entry point
@@ -2677,4 +2793,6 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
   let final_env = List.fold_left check_decl pre_env m.Ast.mod_decls in
   (* Validate capability declarations for the top-level module *)
   check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;
+  (* Warn about any unused imports or aliases *)
+  warn_unused_imports final_env;
   (errors, type_map)

@@ -2426,6 +2426,25 @@ and eval_expr_inner (env : env) (e : expr) : value =
      | _ -> eval_error "record update on non-record value")
 
   | EField (ex, field, _) ->
+    (* First try to resolve as a module path (handles A.B.c chained access) *)
+    let rec module_path_str = function
+      | ECon (n, [], _) -> Some n.txt
+      | EField (e2, f, _) ->
+        (match module_path_str e2 with
+         | Some prefix -> Some (prefix ^ "." ^ f.txt)
+         | None -> None)
+      | _ -> None
+    in
+    let qualified_lookup =
+      match module_path_str ex with
+      | Some prefix ->
+        let key = prefix ^ "." ^ field.txt in
+        List.assoc_opt key env
+      | None -> None
+    in
+    (match qualified_lookup with
+     | Some v -> v
+     | None ->
     (match eval_expr env ex with
      | VRecord fields ->
        (match List.assoc_opt field.txt fields with
@@ -2437,7 +2456,7 @@ and eval_expr_inner (env : env) (e : expr) : value =
        (match List.assoc_opt key env with
         | Some v -> v
         | None   -> eval_error "no member '%s' in module '%s'" field.txt mod_name)
-     | _ -> eval_error "field access on non-record value")
+     | _ -> eval_error "field access on non-record value"))
 
   | EIf (cond, then_, else_, _) ->
     (match eval_expr env cond with
@@ -2972,8 +2991,16 @@ let rec eval_decl (env : env) (d : decl) : env =
       | _ :: rest -> declared_names acc rest
     in
     let own_names = declared_names [] decls in
+    (* Also export keys like "B.f" when "B" is a declared sub-module *)
+    let is_own_key k =
+      List.exists (fun n ->
+        k = n ||
+        (String.length k > String.length n + 1 &&
+         String.sub k 0 (String.length n + 1) = n ^ ".")
+      ) own_names
+    in
     let prefixed = List.filter_map (fun (k, v) ->
-        if List.mem k own_names
+        if is_own_key k
         then Some (name.txt ^ "." ^ k, v)
         else None
       ) mod_env in
@@ -2992,7 +3019,45 @@ let rec eval_decl (env : env) (d : decl) : env =
           eval_decl env (DFn (fn_def, sp))
       ) env idef.impl_methods
 
-  | DProtocol _ | DSig _ | DInterface _ | DExtern _ | DUse _ | DNeeds _ -> env
+  | DProtocol _ | DSig _ | DInterface _ | DExtern _ | DNeeds _ -> env
+
+  | DUse (ud, _) ->
+    let prefix = String.concat "." (List.map (fun (n : name) -> n.txt) ud.use_path) ^ "." in
+    (match ud.use_sel with
+     | UseSingle -> env
+     | UseAll ->
+       let plen = String.length prefix in
+       let additions = List.filter_map (fun (k, v) ->
+           if String.length k > plen && String.sub k 0 plen = prefix then
+             Some (String.sub k plen (String.length k - plen), v)
+           else None) env in
+       additions @ env
+     | UseNames names ->
+       List.fold_left (fun env n ->
+           match List.assoc_opt (prefix ^ n.txt) env with
+           | Some v -> (n.txt, v) :: env
+           | None -> env) env names
+     | UseExcept excluded ->
+       let excl_set = List.map (fun (n : name) -> n.txt) excluded in
+       let plen = String.length prefix in
+       let additions = List.filter_map (fun (k, v) ->
+           if String.length k > plen && String.sub k 0 plen = prefix then
+             let short = String.sub k plen (String.length k - plen) in
+             if List.mem short excl_set then None
+             else Some (short, v)
+           else None) env in
+       additions @ env)
+
+  | DAlias (ad, _) ->
+    let orig_prefix = String.concat "." (List.map (fun (n : name) -> n.txt) ad.alias_path) ^ "." in
+    let short_name = ad.alias_name.txt in
+    let short_prefix = short_name ^ "." in
+    let plen = String.length orig_prefix in
+    let additions = List.filter_map (fun (k, v) ->
+        if String.length k > plen && String.sub k 0 plen = orig_prefix then
+          Some (short_prefix ^ String.sub k plen (String.length k - plen), v)
+        else None) env in
+    additions @ env
 
 and eval_decls (env : env) (decls : decl list) : env =
   List.fold_left eval_decl env decls
@@ -3090,6 +3155,11 @@ let eval_module_env (m : module_) : env =
           | _ ->
             eval_decl acc_env (DFn (fn_def, sp))
         ) env idef.impl_methods in
+      env_ref := env';
+      make_recursive_env rest env'
+
+    | (DUse _ | DAlias _) as d :: rest ->
+      let env' = eval_decl env d in
       env_ref := env';
       make_recursive_env rest env'
 
