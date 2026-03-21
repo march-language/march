@@ -290,9 +290,13 @@ let rewrite_expr (known_lambdas : (string * lambda_info) list)
          Tir.ELetRec ([{ fn with Tir.fn_body = rw fn.Tir.fn_body }],
                       Tir.EAtom (Tir.AVar ref_var)))
 
-    (* B. Indirect call: EApp of a TFn-typed non-top-level var *)
+    (* B. Indirect call: EApp of a TFn-typed (or TVar, i.e. unresolved) non-top-level var.
+       TVar "_" occurs when type_map is empty (e.g. stdlib precompile).  Without this
+       case the call stays as a direct @go invocation — an undefined symbol — causing
+       undefined behaviour at runtime.  Converting to ECallPtr is always safe for
+       non-top-level vars: they must be closure pointers allocated by an earlier ELetRec. *)
     | Tir.EApp (f_var, args)
-      when (match f_var.Tir.v_ty with Tir.TFn _ -> true | _ -> false)
+      when (match f_var.Tir.v_ty with Tir.TFn _ | Tir.TVar _ -> true | _ -> false)
         && not (StringSet.mem f_var.Tir.v_name top_level) ->
       Tir.ECallPtr (Tir.AVar f_var, args)
 
