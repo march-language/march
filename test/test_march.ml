@@ -1561,7 +1561,7 @@ let test_tc_mod_typecheck () =
 let test_tc_mod_private () =
   let ctx = typecheck {|mod Test do
     mod Foo do
-      fn secret() do 42 end
+      p_fn secret() do 42 end
     end
     fn main() do Foo.secret() end
   end|} in
@@ -6560,6 +6560,333 @@ let test_cas_cache_hit () =
   Alcotest.(check bool) "first pass: compile called" true (first_count > 0);
   Alcotest.(check int)  "second pass: all cache hits (compile=0)" 0 second_count
 
+(* ── Module system tests ──────────────────────────────────────────────── *)
+
+(* ── Lexer ─────────────────────────────────────────────────────────────── *)
+
+let test_lex_import () =
+  let lexbuf = Lexing.from_string "import" in
+  let tok = March_lexer.Lexer.token lexbuf in
+  Alcotest.(check bool) "lexes import keyword" true
+    (match tok with March_parser.Parser.IMPORT -> true | _ -> false)
+
+let test_lex_alias () =
+  let lexbuf = Lexing.from_string "alias" in
+  let tok = March_lexer.Lexer.token lexbuf in
+  Alcotest.(check bool) "lexes alias keyword" true
+    (match tok with March_parser.Parser.ALIAS -> true | _ -> false)
+
+let test_lex_p_fn () =
+  let lexbuf = Lexing.from_string "p_fn" in
+  let tok = March_lexer.Lexer.token lexbuf in
+  Alcotest.(check bool) "lexes p_fn keyword" true
+    (match tok with March_parser.Parser.P_FN -> true | _ -> false)
+
+(* ── Parser ─────────────────────────────────────────────────────────────── *)
+
+let test_parse_import_all () =
+  let src = {|mod Test do
+    import Foo
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DUse (ud, _)] ->
+    Alcotest.(check bool) "import all → UseAll" true
+      (match ud.March_ast.Ast.use_sel with March_ast.Ast.UseAll -> true | _ -> false)
+  | _ -> Alcotest.fail "expected DUse UseAll"
+
+let test_parse_import_only () =
+  let src = {|mod Test do
+    import Foo, only: [bar, baz]
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DUse (ud, _)] ->
+    (match ud.March_ast.Ast.use_sel with
+     | March_ast.Ast.UseNames names ->
+       Alcotest.(check int) "2 names" 2 (List.length names)
+     | _ -> Alcotest.fail "expected UseNames")
+  | _ -> Alcotest.fail "expected DUse UseNames"
+
+let test_parse_import_except () =
+  let src = {|mod Test do
+    import Foo, except: [secret]
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DUse (ud, _)] ->
+    (match ud.March_ast.Ast.use_sel with
+     | March_ast.Ast.UseExcept names ->
+       Alcotest.(check int) "1 excluded name" 1 (List.length names)
+     | _ -> Alcotest.fail "expected UseExcept")
+  | _ -> Alcotest.fail "expected DUse UseExcept"
+
+let test_parse_alias_as () =
+  let src = {|mod Test do
+    alias Long.Name, as: Short
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DAlias (ad, _)] ->
+    Alcotest.(check string) "alias name" "Short" ad.March_ast.Ast.alias_name.March_ast.Ast.txt;
+    Alcotest.(check int) "2 path segments" 2 (List.length ad.March_ast.Ast.alias_path)
+  | _ -> Alcotest.fail "expected DAlias"
+
+let test_parse_alias_bare () =
+  let src = {|mod Test do
+    alias Foo.Bar
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DAlias (ad, _)] ->
+    Alcotest.(check string) "alias name is last segment" "Bar"
+      ad.March_ast.Ast.alias_name.March_ast.Ast.txt
+  | _ -> Alcotest.fail "expected DAlias"
+
+(* p_fn produces fn_vis = Private *)
+let test_parse_p_fn_private () =
+  let src = {|mod Test do
+    p_fn secret(x) do x end
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    Alcotest.(check bool) "p_fn → Private" true
+      (def.March_ast.Ast.fn_vis = March_ast.Ast.Private)
+  | _ -> Alcotest.fail "expected DFn"
+
+(* bare fn produces fn_vis = Public *)
+let test_parse_fn_public () =
+  let src = {|mod Test do
+    fn visible(x) do x end
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    Alcotest.(check bool) "fn → Public" true
+      (def.March_ast.Ast.fn_vis = March_ast.Ast.Public)
+  | _ -> Alcotest.fail "expected DFn"
+
+(* ── Visibility ─────────────────────────────────────────────────────────── *)
+
+(* bare fn inside nested mod is accessible from outside (public default) *)
+let test_tc_fn_is_public () =
+  let ctx = typecheck {|mod Test do
+    mod Foo do
+      fn bar() do 42 end
+    end
+    fn main() do Foo.bar() end
+  end|} in
+  Alcotest.(check bool) "bare fn is public" false (has_errors ctx)
+
+(* p_fn inside nested mod is NOT accessible from outside *)
+let test_tc_p_fn_is_private () =
+  let ctx = typecheck {|mod Test do
+    mod Foo do
+      p_fn secret() do 42 end
+    end
+    fn main() do Foo.secret() end
+  end|} in
+  Alcotest.(check bool) "p_fn is private" true (has_errors ctx)
+
+(* ── Typecheck: import ───────────────────────────────────────────────────── *)
+
+(* import Foo brings all public functions into bare scope *)
+let test_tc_import_all () =
+  let ctx = typecheck {|mod Test do
+    mod Foo do
+      fn add(x, y) do x + y end
+    end
+    import Foo
+    fn main() do add(1, 2) end
+  end|} in
+  Alcotest.(check bool) "import Foo — bare add works" false (has_errors ctx)
+
+(* import Foo, only: [add] brings only add into scope *)
+let test_tc_import_only () =
+  let ctx = typecheck {|mod Test do
+    mod Foo do
+      fn add(x, y) do x + y end
+      fn mul(x, y) do x * y end
+    end
+    import Foo, only: [add]
+    fn main() do add(1, 2) end
+  end|} in
+  Alcotest.(check bool) "import only: [add] — bare add works" false (has_errors ctx)
+
+(* import Foo, except: [secret] — 'secret' is NOT in scope *)
+let test_tc_import_except () =
+  let ctx = typecheck {|mod Test do
+    mod Foo do
+      fn pub1() do 1 end
+      fn secret() do 99 end
+    end
+    import Foo, except: [secret]
+    fn main() do secret() end
+  end|} in
+  Alcotest.(check bool) "import except: [secret] — secret not in scope" true (has_errors ctx)
+
+(* ── Typecheck: alias ────────────────────────────────────────────────────── *)
+
+let test_tc_alias_qualified () =
+  let ctx = typecheck {|mod Test do
+    mod Long do
+      mod Name do
+        fn f() do 42 end
+      end
+    end
+    alias Long.Name, as: Short
+    fn main() do Short.f() end
+  end|} in
+  Alcotest.(check bool) "alias Long.Name as Short — Short.f() works" false (has_errors ctx)
+
+(* ── Eval: import ────────────────────────────────────────────────────────── *)
+
+let test_eval_import_all () =
+  let env = eval_module {|mod Test do
+    mod Foo do
+      fn double(x) do x + x end
+    end
+    import Foo
+    fn go() do double(21) end
+  end|} in
+  let v = call_fn env "go" [] in
+  Alcotest.(check int) "import Foo — double(21) = 42" 42 (vint v)
+
+let test_eval_import_only () =
+  let env = eval_module {|mod Test do
+    mod Foo do
+      fn inc(x) do x + 1 end
+      fn dec(x) do x - 1 end
+    end
+    import Foo, only: [inc]
+    fn go() do inc(41) end
+  end|} in
+  let v = call_fn env "go" [] in
+  Alcotest.(check int) "import only: [inc] — inc(41) = 42" 42 (vint v)
+
+let test_eval_import_except () =
+  let env = eval_module {|mod Test do
+    mod Foo do
+      fn good(x) do x + 1 end
+      fn bad(x) do 0 end
+    end
+    import Foo, except: [bad]
+    fn go() do good(41) end
+  end|} in
+  let v = call_fn env "go" [] in
+  Alcotest.(check int) "import except: [bad] — good(41) = 42" 42 (vint v)
+
+(* ── Eval: alias ─────────────────────────────────────────────────────────── *)
+
+let test_eval_alias () =
+  let env = eval_module {|mod Test do
+    mod Long do
+      mod Name do
+        fn answer() do 42 end
+      end
+    end
+    alias Long.Name, as: Short
+    fn go() do Short.answer() end
+  end|} in
+  let v = call_fn env "go" [] in
+  Alcotest.(check int) "alias Long.Name as Short — Short.answer() = 42" 42 (vint v)
+
+let test_eval_alias_bare () =
+  let env = eval_module {|mod Test do
+    mod Foo do
+      fn f() do 7 end
+    end
+    alias Foo
+    fn go() do Foo.f() end
+  end|} in
+  let v = call_fn env "go" [] in
+  Alcotest.(check int) "alias Foo (bare) — Foo.f() still works" 7 (vint v)
+
+(* ── Nested modules ──────────────────────────────────────────────────────── *)
+
+let test_eval_nested_module () =
+  let env = eval_module {|mod Test do
+    mod A do
+      mod B do
+        fn value() do 42 end
+      end
+    end
+    fn go() do A.B.value() end
+  end|} in
+  let v = call_fn env "go" [] in
+  Alcotest.(check int) "A.B.value() = 42" 42 (vint v)
+
+let test_tc_nested_module () =
+  let ctx = typecheck {|mod Test do
+    mod A do
+      mod B do
+        fn value() do 42 end
+      end
+    end
+    fn go() do A.B.value() end
+  end|} in
+  Alcotest.(check bool) "A.B.value() typechecks" false (has_errors ctx)
+
+(* ── Unused import/alias warnings ─────────────────────────────── *)
+
+let has_unused_warning ctx =
+  List.exists (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Warning &&
+    let lo = String.lowercase_ascii d.March_errors.Errors.message in
+    let n = String.length lo in
+    let rec scan i =
+      if i + 5 >= n then false
+      else if String.sub lo i 6 = "unused" then true
+      else scan (i + 1)
+    in scan 0
+  ) ctx.March_errors.Errors.diagnostics
+
+let test_warn_unused_alias () =
+  (* alias Foo, as: F where F is never used → should warn *)
+  let ctx = typecheck {|mod Test do
+    mod Foo do
+      fn bar() do 1 end
+    end
+    alias Foo, as: F
+    fn main() do 0 end
+  end|} in
+  Alcotest.(check bool) "unused alias warns" true (has_unused_warning ctx)
+
+let test_warn_unused_import_specific () =
+  (* import Mod, only: [f, g] where g is unused → warn about g *)
+  let ctx = typecheck {|mod Test do
+    mod Math do
+      fn add(x, y) do x + y end
+      fn mul(x, y) do x * y end
+    end
+    import Math, only: [add, mul]
+    fn main() do add(1, 2) end
+  end|} in
+  Alcotest.(check bool) "unused import name warns" true (has_unused_warning ctx)
+
+let test_warn_unused_import_all () =
+  (* import Mod where nothing from Mod is used → warn *)
+  let ctx = typecheck {|mod Test do
+    mod Utils do
+      fn helper() do 42 end
+    end
+    import Utils
+    fn main() do 0 end
+  end|} in
+  Alcotest.(check bool) "unused import all warns" true (has_unused_warning ctx)
+
+let test_no_warn_import_used () =
+  (* import Mod, only: [f] where f IS used → no warning *)
+  let ctx = typecheck {|mod Test do
+    mod Math do
+      fn square(x) do x * x end
+    end
+    import Math, only: [square]
+    fn main() do square(5) end
+  end|} in
+  Alcotest.(check bool) "used import no warn" false (has_unused_warning ctx)
+
 let () =
   Alcotest.run "march"
     [
@@ -7218,5 +7545,43 @@ let () =
         Alcotest.test_case "actor spawn and send"       `Quick (with_reset test_actor_spawn_and_send);
         Alcotest.test_case "cas stable hash"            `Quick test_cas_stable_hash;
         Alcotest.test_case "cas cache hit"              `Quick test_cas_cache_hit;
+      ]);
+      ("module system", [
+        (* ── Lexer ──────────────────────────────────────────────────── *)
+        Alcotest.test_case "lex import"           `Quick test_lex_import;
+        Alcotest.test_case "lex alias"            `Quick test_lex_alias;
+        Alcotest.test_case "lex p_fn"             `Quick test_lex_p_fn;
+        (* ── Parser ─────────────────────────────────────────────────── *)
+        Alcotest.test_case "parse import all"     `Quick test_parse_import_all;
+        Alcotest.test_case "parse import only"    `Quick test_parse_import_only;
+        Alcotest.test_case "parse import except"  `Quick test_parse_import_except;
+        Alcotest.test_case "parse alias as"       `Quick test_parse_alias_as;
+        Alcotest.test_case "parse alias bare"     `Quick test_parse_alias_bare;
+        Alcotest.test_case "parse p_fn private"   `Quick test_parse_p_fn_private;
+        Alcotest.test_case "parse fn public"      `Quick test_parse_fn_public;
+        (* ── Visibility ─────────────────────────────────────────────── *)
+        Alcotest.test_case "fn is public"         `Quick test_tc_fn_is_public;
+        Alcotest.test_case "p_fn is private"      `Quick test_tc_p_fn_is_private;
+        (* ── Typecheck: import ──────────────────────────────────────── *)
+        Alcotest.test_case "tc import all"        `Quick test_tc_import_all;
+        Alcotest.test_case "tc import only"       `Quick test_tc_import_only;
+        Alcotest.test_case "tc import except"     `Quick test_tc_import_except;
+        (* ── Typecheck: alias ───────────────────────────────────────── *)
+        Alcotest.test_case "tc alias qualified"   `Quick test_tc_alias_qualified;
+        (* ── Eval: import ───────────────────────────────────────────── *)
+        Alcotest.test_case "eval import all"      `Quick test_eval_import_all;
+        Alcotest.test_case "eval import only"     `Quick test_eval_import_only;
+        Alcotest.test_case "eval import except"   `Quick test_eval_import_except;
+        (* ── Eval: alias ────────────────────────────────────────────── *)
+        Alcotest.test_case "eval alias"           `Quick test_eval_alias;
+        Alcotest.test_case "eval alias bare"      `Quick test_eval_alias_bare;
+        (* ── Nested modules ─────────────────────────────────────────── *)
+        Alcotest.test_case "eval nested A.B.f"    `Quick test_eval_nested_module;
+        Alcotest.test_case "tc nested A.B.f"      `Quick test_tc_nested_module;
+        (* ── Unused import/alias warnings ───────────────────────────── *)
+        Alcotest.test_case "warn unused alias"          `Quick test_warn_unused_alias;
+        Alcotest.test_case "warn unused import specific" `Quick test_warn_unused_import_specific;
+        Alcotest.test_case "warn unused import all"      `Quick test_warn_unused_import_all;
+        Alcotest.test_case "no warn when import used"    `Quick test_no_warn_import_used;
       ]);
     ]

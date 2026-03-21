@@ -66,6 +66,7 @@
 %token STATE INIT RESPOND PROTOCOL LOOP
 %token LINEAR AFFINE
 %token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS USE NEEDS REQUIRES
+%token IMPORT ALIAS ONLY EXCEPT P_FN
 %token DBG DOC
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
 %token ONE_FOR_ONE ONE_FOR_ALL REST_FOR_ONE RESTART_KW
@@ -121,6 +122,8 @@ decl:
   | d = extern_decl    { d }
   | d = mod_decl       { d }
   | d = use_decl       { d }
+  | d = import_decl    { d }
+  | d = alias_decl_rule { d }
   | d = protocol_decl  { d }
   | d = needs_decl     { d }
 
@@ -128,6 +131,17 @@ decl:
     The group_fn_clauses pass merges consecutive same-name clauses. *)
 fn_decl:
   | FN; name = lower_name; LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
+    ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
+    { DFn ({ fn_name = name;
+             fn_vis = Public;
+             fn_doc = None;
+             fn_ret_ty = ret;
+             fn_clauses = [{ fc_params = params;
+                             fc_guard = guard;
+                             fc_body = body;
+                             fc_span = mk_span ($loc) }] },
+           mk_span ($loc)) }
+  | P_FN; name = lower_name; LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
     { DFn ({ fn_name = name;
              fn_vis = Private;
@@ -153,6 +167,11 @@ fn_decl:
     { raise (March_errors.Errors.ParseError (
         "I was expecting `do` to start the function body here:",
         Some "fn name(params) do\n    body\nend",
+        $startpos($6))) }
+  | P_FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `do` to start the function body here:",
+        Some "p_fn name(params) do\n    body\nend",
         $startpos($6))) }
   | PUB; FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
     { raise (March_errors.Errors.ParseError (
@@ -270,7 +289,7 @@ protocol_step:
 (** Nested module: mod Name do ... end *)
 mod_decl:
   | MOD; name = upper_name; DO; decls = list(decl); END
-    { DMod (name, Private, group_fn_clauses decls, mk_span ($loc)) }
+    { DMod (name, Public, group_fn_clauses decls, mk_span ($loc)) }
   | PUB; MOD; name = upper_name; DO; decls = list(decl); END
     { DMod (name, Public, group_fn_clauses decls, mk_span ($loc)) }
   | MOD; _n = upper_name; error
@@ -297,6 +316,29 @@ use_selector:
     { UseAll }
   | LBRACE; names = separated_list(COMMA, lower_name); RBRACE
     { UseNames names }
+
+(** Elixir-style import: import Mod, import Mod, only: [f,g], import Mod, except: [f,g] *)
+import_decl:
+  | IMPORT; name = upper_name
+    { DUse ({ use_path = [name]; use_sel = UseAll }, mk_span ($loc)) }
+  | IMPORT; name = upper_name; COMMA; ONLY; COLON; LBRACKET;
+    names = separated_list(COMMA, lower_name); RBRACKET
+    { DUse ({ use_path = [name]; use_sel = UseNames names }, mk_span ($loc)) }
+  | IMPORT; name = upper_name; COMMA; EXCEPT; COLON; LBRACKET;
+    names = separated_list(COMMA, lower_name); RBRACKET
+    { DUse ({ use_path = [name]; use_sel = UseExcept names }, mk_span ($loc)) }
+
+(** alias Long.Name, as: Short  or  alias Long.Name  (short = last segment) *)
+alias_decl_rule:
+  | ALIAS; path = upper_dot_path; COMMA; AS; COLON; short = upper_name
+    { DAlias ({ alias_path = path; alias_name = short }, mk_span ($loc)) }
+  | ALIAS; path = upper_dot_path
+    { let last = List.nth path (List.length path - 1) in
+      DAlias ({ alias_path = path; alias_name = last }, mk_span ($loc)) }
+
+upper_dot_path:
+  | name = upper_name { [name] }
+  | name = upper_name; DOT; rest = upper_dot_path { name :: rest }
 
 (** Capability manifest: needs IO.Network, IO.Clock
     Each path is a dot-separated sequence of uppercase names stored as a name list. *)
@@ -589,6 +631,9 @@ expr_app:
 (** Field access: x.name — left-recursive for chained access: x.y.z *)
 expr_field:
   | e = expr_field; DOT; name = lower_name
+    { EField (e, name, mk_span ($loc)) }
+  | e = expr_field; DOT; name = upper_name
+    (* Module chain access: A.B.c or A.B.C — upper segments are sub-module names *)
     { EField (e, name, mk_span ($loc)) }
   | e = expr_atom { e }
 

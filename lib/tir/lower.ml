@@ -1214,7 +1214,34 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
                let qualified = prefix ^ n.txt in
                if List.mem qualified all_fn_names then
                  Hashtbl.replace !_use_aliases n.txt qualified
-             ) names)
+             ) names
+         | Ast.UseExcept excluded ->
+           let excl_set = List.map (fun (n : Ast.name) -> n.txt) excluded in
+           List.iter (fun fn_name ->
+               let plen = String.length prefix in
+               if String.length fn_name > plen
+                  && String.sub fn_name 0 plen = prefix
+               then begin
+                 let short = String.sub fn_name plen (String.length fn_name - plen) in
+                 if not (List.mem short excl_set) then
+                   Hashtbl.replace !_use_aliases short fn_name
+               end
+             ) all_fn_names)
+      | Ast.DAlias (ad, _) ->
+        (* alias Long.Name, as: Short — map Short.f → Long.Name.f *)
+        let orig_prefix = String.concat "." (List.map (fun n -> n.Ast.txt) ad.alias_path) ^ "." in
+        let short_name = ad.alias_name.Ast.txt in
+        let short_prefix = short_name ^ "." in
+        let all_fn_names = List.map (fun (fn : Tir.fn_def) -> fn.fn_name) !fns in
+        List.iter (fun fn_name ->
+            let plen = String.length orig_prefix in
+            if String.length fn_name > plen
+               && String.sub fn_name 0 plen = orig_prefix
+            then begin
+              let rest = String.sub fn_name plen (String.length fn_name - plen) in
+              Hashtbl.replace !_use_aliases (short_prefix ^ rest) fn_name
+            end
+          ) all_fn_names
     ) m.mod_decls;
   (* Inject top-level let bindings into main's body as a chain of ELet. *)
   let all_fns = List.rev !fns in

@@ -132,13 +132,21 @@ let rec desugar_expr (e : expr) : expr =
                    sp)
 
   | EField (ex, name, sp) ->
-    (* Desugar module member access: Mod.fn(...) → EVar "Mod.fn"
-       When the base is a bare upper-case constructor with no args,
-       it is a module namespace reference rather than a value. *)
-    (match ex with
-     | ECon (mod_name, [], _) ->
-       EVar { txt = mod_name.txt ^ "." ^ name.txt; span = sp }
-     | _ -> EField (desugar_expr ex, name, sp))
+    (* Desugar module member access: A.B.fn(...) → EVar "A.B.fn"
+       If the base is a chain of ECon/EField that looks like a module path,
+       flatten it into a single qualified EVar. *)
+    let rec flatten_module_path = function
+      | ECon (mod_name, [], _) -> Some mod_name.txt
+      | EField (inner, field, _) ->
+        (match flatten_module_path inner with
+         | Some prefix -> Some (prefix ^ "." ^ field.txt)
+         | None -> None)
+      | _ -> None
+    in
+    (match flatten_module_path ex with
+     | Some prefix ->
+       EVar { txt = prefix ^ "." ^ name.txt; span = sp }
+     | None -> EField (desugar_expr ex, name, sp))
 
   | EIf (cond, t, f, sp) ->
     EIf (desugar_expr cond, desugar_expr t, desugar_expr f, sp)
@@ -264,7 +272,7 @@ let rec desugar_decl (d : decl) : decl =
       ) idef.impl_methods in
     DImpl ({ idef with impl_methods = methods' }, sp)
 
-  | DProtocol _ | DSig _ | DExtern _ | DUse _ | DNeeds _ ->
+  | DProtocol _ | DSig _ | DExtern _ | DUse _ | DAlias _ | DNeeds _ ->
     d
 
 (* ---- Module entry point ---- *)
