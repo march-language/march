@@ -290,6 +290,37 @@ let lookup_var  name env = List.assoc_opt name env.vars
 let lookup_type name env = List.assoc_opt name env.types
 let lookup_ctor name env = List.assoc_opt name env.ctors
 
+(** All parent types of ctors in [env] that share [name] (multiple types may
+    define the same variant). Returns list of type names (deduplicated). *)
+let all_ctors_named (name : string) (env : env) : string list =
+  let seen = Hashtbl.create 4 in
+  List.filter_map (fun (k, ci) ->
+    if k = name && not (Hashtbl.mem seen ci.ci_type)
+    then begin Hashtbl.add seen ci.ci_type (); Some ci.ci_type end
+    else None
+  ) env.ctors
+
+(** Suggest constructors close to [name]: case-insensitive match or first-2-char
+    prefix match with length difference ≤ 2. Returns [(ctor_name, type_name)]. *)
+let suggest_ctors (name : string) (env : env) : (string * string) list =
+  let name_lo = String.lowercase_ascii name in
+  let seen = Hashtbl.create 8 in
+  List.filter_map (fun (k, ci) ->
+    let key = k ^ "/" ^ ci.ci_type in
+    if Hashtbl.mem seen key then None
+    else begin
+      let k_lo = String.lowercase_ascii k in
+      let close =
+        k_lo = name_lo ||
+        (String.length name_lo >= 2 && String.length k_lo >= 2 &&
+         String.sub k_lo 0 2 = String.sub name_lo 0 2 &&
+         abs (String.length k - String.length name) <= 2)
+      in
+      if close then begin Hashtbl.add seen key (); Some (k, ci.ci_type) end
+      else None
+    end
+  ) env.ctors
+
 let bind_var name sch env =
   { env with vars = (name, sch) :: env.vars }
 
@@ -996,10 +1027,19 @@ let rec infer_pattern env (pat : Ast.pattern)
   | Ast.PatCon (name, ps) ->
     (match lookup_ctor name.txt env with
      | None ->
+       let candidates = suggest_ctors name.txt env in
+       let hint =
+         if candidates = [] then
+           "Is this a typo, or did you forget to declare the type?"
+         else
+           let lines = List.map (fun (k, ty) ->
+               Printf.sprintf "  • `%s` — from type `%s`" k ty
+             ) candidates in
+           "Did you mean one of:\n" ^ String.concat "\n" lines
+       in
        Err.error env.errors ~span:name.span
-         (Printf.sprintf
-            "I don't know a constructor called `%s`.\n\
-             Is this a typo, or did you forget to declare the type?" name.txt);
+         (Printf.sprintf "I don't know a constructor called `%s`.\n%s"
+            name.txt hint);
        let bindings = List.concat_map fst (List.map (infer_pattern env) ps) in
        bindings, TError
      | Some ci ->
@@ -1132,13 +1172,32 @@ let rec infer_expr env (e : Ast.expr) : ty =
     | Ast.ECon (name, args, sp) ->
       (match lookup_ctor name.txt env with
        | None ->
+         let candidates = suggest_ctors name.txt env in
+         let hint =
+           if candidates = [] then
+             "Is this a typo, or did you forget to declare the type?"
+           else
+             let lines = List.map (fun (k, ty) ->
+                 Printf.sprintf "  • `%s` — from type `%s`" k ty
+               ) candidates in
+             "Did you mean one of:\n" ^ String.concat "\n" lines
+         in
          Err.error env.errors ~span:name.span
-           (Printf.sprintf
-              "I don't know a constructor called `%s`.\n\
-               Is this a typo, or did you forget to declare the type?" name.txt);
+           (Printf.sprintf "I don't know a constructor called `%s`.\n%s"
+              name.txt hint);
          List.iter (fun a -> ignore (infer_expr env a)) args;
          TError
        | Some ci ->
+         (* Warn if multiple types define this constructor name *)
+         let all_types = all_ctors_named name.txt env in
+         if List.length all_types > 1 then
+           Err.warning env.errors ~span:name.span
+             (Printf.sprintf
+                "Constructor `%s` is defined in multiple types: %s.\n\
+                 I'm using the one from `%s`. Use a type annotation to disambiguate."
+                name.txt
+                (String.concat ", " (List.map (fun t -> "`" ^ t ^ "`") all_types))
+                ci.ci_type);
          let arg_tys, result_ty = instantiate_ctor env ci in
          let n_expected = List.length arg_tys in
          let n_got      = List.length args in

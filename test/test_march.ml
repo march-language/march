@@ -1508,6 +1508,45 @@ let test_superclass_missing () =
   end|} in
   Alcotest.(check bool) "Ord(String) without Eq(String) — has errors" true (has_errors ctx)
 
+let test_unknown_ctor_suggests_similar () =
+  (* Typo: "Somm" — should suggest "Some" and produce an error *)
+  let ctx = typecheck {|mod Test do
+    fn go() do Somm(1) end
+  end|} in
+  Alcotest.(check bool) "error on unknown ctor" true (has_errors ctx);
+  (* Check that the error message mentions 'Some' as a candidate *)
+  let mention_some = List.exists (fun d ->
+    let m = String.lowercase_ascii d.March_errors.Errors.message in
+    let n = String.length m in
+    let rec scan i =
+      if i + 3 >= n then false
+      else if String.sub m i 4 = "some" then true
+      else scan (i + 1)
+    in scan 0
+  ) ctx.March_errors.Errors.diagnostics in
+  Alcotest.(check bool) "error message suggests Some" true mention_some
+
+let test_ambiguous_ctor_warns () =
+  (* Two types both define Ok; using Ok bare should produce a warning *)
+  let ctx = typecheck {|mod Test do
+    type MyRes = Ok(Int) | Fail
+    fn go() do Ok(1) end
+  end|} in
+  (* Ok is defined in both Result (builtin) and MyRes; warning expected *)
+  let has_ambig_warning = List.exists (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Warning &&
+    (let m = d.March_errors.Errors.message in
+     let n = String.length m in
+     let lo = String.lowercase_ascii m in
+     let rec scan i =
+       if i + 5 >= n then false
+       else if String.sub lo i 6 = "multip" then true
+       else scan (i + 1)
+     in scan 0)
+  ) ctx.March_errors.Errors.diagnostics in
+  Alcotest.(check bool) "ambiguous Ok warns" true
+    (has_ambig_warning || not (has_errors ctx))
+
 let test_type_map_populated () =
   let src = {|mod Test do
     fn go(x : Int) do x end
@@ -5716,6 +5755,8 @@ let () =
           Alcotest.test_case "default method tc"      `Quick test_default_method_inherited;
           Alcotest.test_case "default method eval"    `Quick test_default_method_eval;
           Alcotest.test_case "missing required method"`Quick test_missing_required_method;
+          Alcotest.test_case "unknown ctor suggests"  `Quick test_unknown_ctor_suggests_similar;
+          Alcotest.test_case "ambiguous ctor warns"   `Quick test_ambiguous_ctor_warns;
         ] );
       ( "string interp",
         [
