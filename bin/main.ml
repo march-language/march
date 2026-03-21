@@ -242,50 +242,70 @@ let compile filename =
     end else begin
       let basename = Filename.remove_extension filename in
       let ll_file  = basename ^ ".ll" in
-      let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math tir in
-      let oc = open_out ll_file in
-      output_string oc ir;
-      close_out oc;
       if !do_compile then begin
-        (* Locate the runtime: try cwd-relative first (development), then
-           relative to the executable (installed). *)
-        let candidates = [
-          "runtime/march_runtime.c";
-          Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime.c";
-          Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.c";
-        ] in
-        let runtime = match List.find_opt Sys.file_exists candidates with
-          | Some p -> p
-          | None ->
-            Printf.eprintf "march: cannot find runtime/march_runtime.c\n"; exit 1
-        in
         let out_bin =
           if !output_file <> "" then !output_file
           else basename
         in
-        let opt_flag =
-          if !opt_level >= 0 && !opt_level <= 3
-          then Printf.sprintf " -O%d" !opt_level
-          else ""
-        in
-        let runtime_dir = Filename.dirname runtime in
-        let http_c = Filename.concat runtime_dir "march_http.c" in
-        let extra_c_files =
-          if Sys.file_exists http_c then
-            let sha1_c = Filename.concat runtime_dir "sha1.c" in
-            let base64_c = Filename.concat runtime_dir "base64.c" in
-            Printf.sprintf " %s %s %s" http_c sha1_c base64_c
-          else ""
-        in
-        let cmd = Printf.sprintf "clang%s %s%s %s -o %s"
-          opt_flag runtime extra_c_files ll_file out_bin in
-        let rc = Sys.command cmd in
-        if rc <> 0 then begin
-          Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
-        end else
-          Printf.printf "compiled %s\n" out_bin
-      end else
+        (* CAS: check for a cached binary before running clang *)
+        let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
+        let h_sccs = March_cas.Pipeline.hash_module tir in
+        let mod_hash = String.concat "" (List.map March_cas.Pipeline.scc_impl_hash h_sccs) in
+        let cas_flags = [if !opt_enabled then "opt" else "no-opt"] in
+        let ch = March_cas.Cas.compilation_hash mod_hash ~target:"native" ~flags:cas_flags in
+        (match March_cas.Cas.lookup_artifact store ch with
+        | Some cached_bin ->
+          let _ = Sys.command (Printf.sprintf "cp %s %s" cached_bin out_bin) in
+          Printf.printf "compiled %s (cached)\n" out_bin
+        | None ->
+          (* Cache miss: emit LLVM IR, call clang, then cache the binary *)
+          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math tir in
+          let oc = open_out ll_file in
+          output_string oc ir;
+          close_out oc;
+          (* Locate the runtime: try cwd-relative first (development), then
+             relative to the executable (installed). *)
+          let candidates = [
+            "runtime/march_runtime.c";
+            Filename.concat (Filename.dirname Sys.executable_name) "../runtime/march_runtime.c";
+            Filename.concat (Filename.dirname Sys.executable_name) "../../runtime/march_runtime.c";
+          ] in
+          let runtime = match List.find_opt Sys.file_exists candidates with
+            | Some p -> p
+            | None ->
+              Printf.eprintf "march: cannot find runtime/march_runtime.c\n"; exit 1
+          in
+          let opt_flag =
+            if !opt_level >= 0 && !opt_level <= 3
+            then Printf.sprintf " -O%d" !opt_level
+            else ""
+          in
+          let runtime_dir = Filename.dirname runtime in
+          let http_c = Filename.concat runtime_dir "march_http.c" in
+          let extra_c_files =
+            if Sys.file_exists http_c then
+              let sha1_c = Filename.concat runtime_dir "sha1.c" in
+              let base64_c = Filename.concat runtime_dir "base64.c" in
+              Printf.sprintf " %s %s %s" http_c sha1_c base64_c
+            else ""
+          in
+          let cmd = Printf.sprintf "clang%s %s%s %s -o %s"
+            opt_flag runtime extra_c_files ll_file out_bin in
+          let rc = Sys.command cmd in
+          if rc <> 0 then begin
+            Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
+          end else begin
+            March_cas.Cas.store_artifact store ch out_bin;
+            Printf.printf "compiled %s\n" out_bin
+          end)
+      end else begin
+        (* --emit-llvm only: write IR and exit *)
+        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math tir in
+        let oc = open_out ll_file in
+        output_string oc ir;
+        close_out oc;
         Printf.printf "wrote %s\n" ll_file
+      end
     end
   end
   else begin
