@@ -1461,6 +1461,7 @@ declare i64  @march_is_alive(ptr %actor)
 declare ptr  @march_send(ptr %actor, ptr %msg)
 declare ptr  @march_spawn(ptr %actor)
 declare i64  @march_actor_get_int(ptr %actor, i64 %index)
+declare void @march_run_scheduler()
 declare i64  @march_tcp_listen(i64 %port)
 declare i64  @march_tcp_accept(i64 %fd)
 declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)
@@ -1532,7 +1533,7 @@ declare i64  @march_dir_exists(ptr %s)
 
 let emit_main_wrapper (buf : Buffer.t) =
   Buffer.add_string buf
-    "\ndefine i32 @main() {\nentry:\n  call void @march_main()\n  ret i32 0\n}\n"
+    "\ndefine i32 @main() {\nentry:\n  call void @march_main()\n  call void @march_run_scheduler()\n  ret i32 0\n}\n"
 
 let emit_module ?(fast_math=false) (m : Tir.tir_module) : string =
   let ctx = make_ctx ~fast_math () in
@@ -1573,7 +1574,7 @@ let emit_module ?(fast_math=false) (m : Tir.tir_module) : string =
    | Some name ->
      let mangled = llvm_name (mangle_extern name) in
      Buffer.add_string out
-       (Printf.sprintf "\ndefine i32 @main() {\nentry:\n  call void @%s()\n  ret i32 0\n}\n" mangled)
+       (Printf.sprintf "\ndefine i32 @main() {\nentry:\n  call void @%s()\n  call void @march_run_scheduler()\n  ret i32 0\n}\n" mangled)
    | None -> ());
 
   (* Append closure wrapper functions generated for top-level fn-as-value *)

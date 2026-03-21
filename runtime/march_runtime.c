@@ -518,18 +518,19 @@ void *march_send(void *actor, void *msg) {
 
     /* Schedule actor if not already in the run queue.
      * Only the winner of the CAS 0→1 adds to the run queue, preventing
-     * duplicate entries when concurrent sends race on the same actor. */
+     * duplicate entries when concurrent sends race on the same actor.
+     *
+     * Scheduling is deferred: march_run_scheduler() is called by the
+     * @main() C wrapper after march_main() returns, or explicitly by
+     * the caller via march_run_scheduler().  This ensures true async
+     * semantics consistent with the interpreter: send() enqueues and
+     * returns without executing the handler; the handler runs in a
+     * separate scheduler pass. */
     int exp = 0;
     if (atomic_compare_exchange_strong_explicit(
             &meta->scheduled, &exp, 1,
             memory_order_acq_rel, memory_order_relaxed)) {
         sched_enqueue(meta);
-        /* Inline scheduling: run the queue now if no scheduler is active.
-         * Preserves apparent-synchronous semantics for single-threaded
-         * programs without blocking concurrent senders. */
-        if (!g_in_scheduler) {
-            march_run_scheduler();
-        }
     }
 
     /* Return Some(()). */
