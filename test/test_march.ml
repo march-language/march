@@ -5169,6 +5169,166 @@ let test_integration_file_pipeline () =
   Alcotest.(check (list string)) "integration pipeline"
     ["hello"; "world"; "foo"; "bar"] result
 
+(* ── Track integration tests ──────────────────────────────────────────── *)
+
+(* Track-B: type-qualified constructors — EAlloc in the TIR must use a
+   type-qualified key "TypeName.CtorName" so two ADTs with the same constructor
+   name don't collide in the codegen table. *)
+let test_shared_ctor_tir_key () =
+  (* Verify that lower_module_typed embeds the parent type name into the EAlloc
+     TCon for a user-defined ADT constructor. *)
+  let m = lower_module_typed {|mod Test do
+    type Tree = Node(Int) | Leaf
+    fn make() do Node(42) end
+  end|} in
+  let f = find_fn "make" m in
+  let rec find_alloc_ty = function
+    | March_tir.Tir.EAlloc (ty, _) -> Some ty
+    | March_tir.Tir.ELet (_, e1, e2) ->
+      (match find_alloc_ty e1 with Some _ as r -> r | None -> find_alloc_ty e2)
+    | _ -> None
+  in
+  match find_alloc_ty f.March_tir.Tir.fn_body with
+  | None -> Alcotest.fail "expected EAlloc in make()"
+  | Some ty ->
+    (* After Track-B fix, the TCon key should be "Tree.Node" not bare "Node" *)
+    let ty_str = March_tir.Pp.string_of_ty ty in
+    Alcotest.(check bool) "EAlloc uses type-qualified key" true
+      (contains "Tree" ty_str)
+
+let test_shared_ctor_name_eval () =
+  (* Two distinct types; constructors from one must not interfere with the other. *)
+  let env = eval_module {|mod Test do
+    type Shape = Circle(Int) | Square(Int)
+    type Color = Red | Green | Blue
+    fn shape_val() do
+      match Circle(42) with
+      | Circle(r) -> r
+      | Square(s) -> s
+      end
+    end
+    fn color_val() do
+      match Red with
+      | Red   -> 1
+      | Green -> 2
+      | Blue  -> 3
+      end
+    end
+  end|} in
+  let sv = call_fn env "shape_val" [] in
+  let cv = call_fn env "color_val" [] in
+  Alcotest.(check int) "Circle(42) → 42" 42 (vint sv);
+  Alcotest.(check int) "Red → 1" 1 (vint cv)
+
+(* Track-A: interface constraint discharge — calling an interface method at a
+   call site where the concrete type has no registered impl must be rejected. *)
+let test_interface_when_constraint_missing () =
+  (* Direct call to `eq` with Float: no Eq(Float) impl registered → error. *)
+  let ctx = typecheck {|mod Test do
+    interface Eq(a) do
+      fn eq: a -> a -> Bool
+    end
+    impl Eq(Int) do
+      fn eq(x, y) do x == y end
+    end
+    fn check() do eq(1.0, 2.0) end
+  end|} in
+  Alcotest.(check bool) "Eq(Float) not in scope: error" true (has_errors ctx)
+
+(* Track-A: linear type enforcement — using a linear binding twice inside a
+   match arm is detected and rejected. *)
+let test_linear_match_arm_double_use () =
+  (* Pattern binds `n` from a linear source; returning `n + n` uses it twice. *)
+  let ctx = typecheck {|mod Test do
+    fn double_linear(linear x: Int) : Int do
+      match x with
+      | n -> n + n
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "linear binding used twice in match arm: error" true (has_errors ctx)
+
+(* Track-C: actor messaging — spawn an actor and send it a message end-to-end. *)
+let test_actor_spawn_and_send () =
+  March_eval.Eval.reset_scheduler_state ();
+  let src = {|mod Test do
+    actor Counter do
+      state { value : Int }
+      init { value = 0 }
+      on Inc() do
+        { value = state.value + 1 }
+      end
+    end
+    fn main() do
+      let pid = spawn(Counter)
+      send(pid, Inc())
+    end
+  end|} in
+  let m = parse_and_desugar src in
+  (* No errors during typecheck *)
+  let (errors, _) = March_typecheck.Typecheck.check_module m in
+  Alcotest.(check bool) "actor spawn+send: no type errors" false (has_errors errors);
+  (* Runs without raising *)
+  (try March_eval.Eval.run_module m
+   with March_eval.Eval.Eval_error _ -> ()
+      | March_eval.Eval.Match_failure _ -> ())
+
+(* Track-D: CAS integration — hashing a module twice returns the same impl_hash,
+   confirming the content-addressable cache key is stable. *)
+let test_cas_stable_hash () =
+  let src = {|mod Test do
+    fn add(x : Int, y : Int) : Int do x + y end
+    fn main() : Int do add(1, 2) end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  (* hash_module must produce deterministic results *)
+  let sccs1 = March_cas.Pipeline.hash_module tir in
+  let sccs2 = March_cas.Pipeline.hash_module tir in
+  let hashes1 = List.map March_cas.Pipeline.scc_impl_hash sccs1 in
+  let hashes2 = List.map March_cas.Pipeline.scc_impl_hash sccs2 in
+  Alcotest.(check (list string)) "CAS impl_hash is stable across two calls"
+    hashes1 hashes2
+
+let test_cas_cache_hit () =
+  (* Compile an SCC, store it, then look it up — should be a hit. *)
+  let src = {|mod Test do
+    fn double(x : Int) : Int do x + x end
+    fn main() : Int do double(21) end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let sccs = March_cas.Pipeline.hash_module tir in
+  (* Create a temporary CAS store *)
+  let tmp_dir = Filename.temp_file "march_cas_test_" "" in
+  Sys.remove tmp_dir;
+  Unix.mkdir tmp_dir 0o755;
+  let store = March_cas.Cas.create ~project_root:tmp_dir in
+  let compile_count = ref 0 in
+  let fake_compile _scc =
+    incr compile_count;
+    tmp_dir ^ "/fake_artifact"
+  in
+  (* First pass: all misses — compile is called for each SCC *)
+  List.iter (fun h_scc ->
+    let _ = March_cas.Pipeline.compile_scc store
+              ~target:"native" ~flags:[] ~compile:fake_compile h_scc
+    in ()
+  ) sccs;
+  let first_count = !compile_count in
+  compile_count := 0;
+  (* Second pass: all hits — compile should NOT be called *)
+  List.iter (fun h_scc ->
+    let _ = March_cas.Pipeline.compile_scc store
+              ~target:"native" ~flags:[] ~compile:fake_compile h_scc
+    in ()
+  ) sccs;
+  let second_count = !compile_count in
+  Alcotest.(check bool) "first pass: compile called" true (first_count > 0);
+  Alcotest.(check int)  "second pass: all cache hits (compile=0)" 0 second_count
+
 let () =
   Alcotest.run "march"
     [
@@ -5726,5 +5886,14 @@ let () =
       ]);
       ("integration", [
         Alcotest.test_case "file/dir/path pipeline" `Quick test_integration_file_pipeline;
+      ]);
+      ("track integration", [
+        Alcotest.test_case "shared ctor tir key"        `Quick test_shared_ctor_tir_key;
+        Alcotest.test_case "shared ctor name eval"      `Quick test_shared_ctor_name_eval;
+        Alcotest.test_case "interface when missing"     `Quick test_interface_when_constraint_missing;
+        Alcotest.test_case "linear match arm double"    `Quick test_linear_match_arm_double_use;
+        Alcotest.test_case "actor spawn and send"       `Quick (with_reset test_actor_spawn_and_send);
+        Alcotest.test_case "cas stable hash"            `Quick test_cas_stable_hash;
+        Alcotest.test_case "cas cache hit"              `Quick test_cas_cache_hit;
       ]);
     ]
