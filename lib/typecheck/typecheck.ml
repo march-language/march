@@ -440,6 +440,89 @@ let rec cap_paths_in_surface_ty (ty : Ast.ty) : string list =
   | Ast.TyLinear (_, t) -> cap_paths_in_surface_ty t
   | _ -> []
 
+(* =================================================================
+   §9b  Standard interfaces — Eq, Ord, Show, Hash
+   These are pre-registered in every module so that builtin types
+   (Int, Float, String, Bool) already satisfy the constraints and
+   user code can write `impl Eq(MyType)` without re-declaring the
+   interface.
+   ================================================================= *)
+
+(** Extract the unification-variable id from a fresh TVar. *)
+let get_tvar_id = function
+  | TVar r -> (match !r with Unbound (id, _) -> id | _ -> 0)
+  | _ -> 0
+
+(** Build an [Ast.interface_def] for a builtin interface with a single
+    type parameter named "a". [methods] is a list of (method_name, surface_ty). *)
+let mk_builtin_iface name methods =
+  let mk_n txt = { Ast.txt; span = Ast.dummy_span } in
+  let mk_method (mname, mty) =
+    { Ast.md_name = mk_n mname; md_ty = mty; md_default = None }
+  in
+  { Ast.iface_name        = mk_n name;
+    iface_param           = mk_n "a";
+    iface_superclasses    = [];
+    iface_assoc_types     = [];
+    iface_methods         = List.map mk_method methods }
+
+let _mk_n txt = { Ast.txt; span = Ast.dummy_span }
+
+(** Pre-declared standard interfaces.  These are injected into every
+    module's initial environment so users can write impls for them. *)
+let builtin_interfaces : (string * Ast.interface_def) list =
+  let av       = Ast.TyVar  { txt = "a";      span = Ast.dummy_span } in
+  let bool_t   = Ast.TyCon  ({ txt = "Bool";   span = Ast.dummy_span }, []) in
+  let int_t    = Ast.TyCon  ({ txt = "Int";    span = Ast.dummy_span }, []) in
+  let string_t = Ast.TyCon  ({ txt = "String"; span = Ast.dummy_span }, []) in
+  [
+    ("Eq",   mk_builtin_iface "Eq" [
+       ("eq",      Ast.TyArrow (av, Ast.TyArrow (av, bool_t)));
+     ]);
+    ("Ord",  mk_builtin_iface "Ord" [
+       ("compare", Ast.TyArrow (av, Ast.TyArrow (av, int_t)));
+     ]);
+    ("Show", mk_builtin_iface "Show" [
+       ("show",    Ast.TyArrow (av, string_t));
+     ]);
+    ("Hash", mk_builtin_iface "Hash" [
+       ("hash",    Ast.TyArrow (av, int_t));
+     ]);
+  ]
+
+(** Concrete type implementations for the standard interfaces.
+    These ensure that Int/Float/String/Bool satisfy Eq, Ord, Show, Hash
+    out of the box. *)
+let builtin_impls : (string * ty) list =
+  [ (* Eq *)
+    ("Eq",   t_int);   ("Eq",   t_float); ("Eq",   t_string);
+    ("Eq",   t_bool);  ("Eq",   t_unit);
+    (* Ord *)
+    ("Ord",  t_int);   ("Ord",  t_float); ("Ord",  t_string);
+    (* Show *)
+    ("Show", t_int);   ("Show", t_float); ("Show", t_string);
+    ("Show", t_bool);  ("Show", t_unit);
+    (* Hash *)
+    ("Hash", t_int);   ("Hash", t_float); ("Hash", t_string);
+    ("Hash", t_bool);
+  ]
+
+(** Build a scheme [∀a. CInterface(iface, a) => mk_ty(a)] for a builtin
+    interface method binding. *)
+let mk_iface_method_scheme iface_name mk_ty =
+  let a = fresh_var 0 in
+  Poly ([get_tvar_id a], [CInterface (iface_name, a)], mk_ty a)
+
+(** Method bindings for the standard interfaces.  These are added to
+    every module's initial [vars] so that [eq], [compare], [show],
+    and [hash] resolve as polymorphic functions at call sites. *)
+let builtin_interface_bindings : (string * scheme) list =
+  [ ("eq",      mk_iface_method_scheme "Eq"   (fun a -> TArrow (a, TArrow (a, t_bool))));
+    ("compare", mk_iface_method_scheme "Ord"  (fun a -> TArrow (a, TArrow (a, t_int))));
+    ("show",    mk_iface_method_scheme "Show" (fun a -> TArrow (a, t_string)));
+    ("hash",    mk_iface_method_scheme "Hash" (fun a -> TArrow (a, t_int)));
+  ]
+
 (** Built-in binary operator schemes.
     We use level-0 fresh vars for polymorphic ops — they will be
     properly instantiated each time [instantiate] is called. *)
@@ -459,10 +542,15 @@ let builtin_bindings : (string * scheme) list =
     let a = fresh_var 0 in
     Poly ([get_id a], [CNum a], f a)
   in
-  (* ∀a:Ord. f(a) — a must be Int, Float, or String *)
-  let poly1_ord f =
+  (* ∀a:Ord. f(a) — a must be Int, Float, or String (legacy COrd path) *)
+  let _poly1_ord f =
     let a = fresh_var 0 in
     Poly ([get_id a], [COrd a], f a)
+  in
+  (* ∀a:Iface. f(a) — a must implement the named interface *)
+  let poly1_iface iname f =
+    let a = fresh_var 0 in
+    Poly ([get_id a], [CInterface (iname, a)], f a)
   in
   (* ∀a b. f(a, b) — two unconstrained type variables *)
   let poly2 f =
@@ -483,16 +571,16 @@ let builtin_bindings : (string * scheme) list =
     ("-.", Mono (TArrow (t_float, TArrow (t_float, t_float))));
     ("*.", Mono (TArrow (t_float, TArrow (t_float, t_float))));
     ("/.", Mono (TArrow (t_float, TArrow (t_float, t_float))));
-    (* Comparisons: Ord-constrained so they work on Int, Float, and String *)
-    ("<",  poly1_ord (fun a -> TArrow (a, TArrow (a, t_bool))));
-    (">",  poly1_ord (fun a -> TArrow (a, TArrow (a, t_bool))));
-    ("<=", poly1_ord (fun a -> TArrow (a, TArrow (a, t_bool))));
-    (">=", poly1_ord (fun a -> TArrow (a, TArrow (a, t_bool))));
+    (* Ordering comparisons: Ord interface-constrained (Int, Float, String) *)
+    ("<",  poly1_iface "Ord" (fun a -> TArrow (a, TArrow (a, t_bool))));
+    (">",  poly1_iface "Ord" (fun a -> TArrow (a, TArrow (a, t_bool))));
+    ("<=", poly1_iface "Ord" (fun a -> TArrow (a, TArrow (a, t_bool))));
+    (">=", poly1_iface "Ord" (fun a -> TArrow (a, TArrow (a, t_bool))));
     ("&&", Mono (TArrow (t_bool,   TArrow (t_bool,   t_bool))));
     ("||", Mono (TArrow (t_bool,   TArrow (t_bool,   t_bool))));
-    (* Polymorphic equality: ==, != : ∀a. a -> a -> Bool *)
-    ("==", poly1 (fun a -> TArrow (a, TArrow (a, t_bool))));
-    ("!=", poly1 (fun a -> TArrow (a, TArrow (a, t_bool))));
+    (* Equality: Eq interface-constrained *)
+    ("==", poly1_iface "Eq" (fun a -> TArrow (a, TArrow (a, t_bool))));
+    ("!=", poly1_iface "Eq" (fun a -> TArrow (a, TArrow (a, t_bool))));
     ("++",             Mono (TArrow (t_string, TArrow (t_string, t_string))));
     ("print",          Mono (TArrow (t_string, t_unit)));
     ("println",        Mono (TArrow (t_string, t_unit)));
@@ -692,7 +780,13 @@ let builtin_ctors : (string * ctor_info) list =
 let base_env errors type_map =
   let env = make_env errors type_map in
   let env = bind_vars builtin_bindings env in
-  { env with types = builtin_types; ctors = builtin_ctors }
+  let env = bind_vars builtin_interface_bindings env in
+  { env with
+    types      = builtin_types;
+    ctors      = builtin_ctors;
+    interfaces = builtin_interfaces;
+    impls      = builtin_impls;
+  }
 
 (* =================================================================
    §10  Unification
