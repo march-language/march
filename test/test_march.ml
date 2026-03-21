@@ -3876,6 +3876,136 @@ let test_cap_parse_needs_dotted () =
   Alcotest.(check bool) "IO.Network parsed as DNeeds" true
     (List.exists (fun paths -> List.mem "IO.Network" paths) cap_paths)
 
+(* ── Transitive capability enforcement tests ────────────────────────────── *)
+
+(* Module that imports another with matching needs declared — should be ok *)
+let test_cap_transitive_ok () =
+  let ctx = typecheck {|mod Outer do
+    mod Lib do
+      needs IO.Network
+      pub fn connect(cap : Cap(IO.Network)) do cap end
+    end
+    mod Test do
+      needs IO.Network
+      use Lib.*
+      fn run(cap : Cap(IO.Network)) do Lib.connect(cap) end
+    end
+  end|} in
+  Alcotest.(check bool) "transitive ok when needs declared" false (has_errors ctx)
+
+(* Module imports another that requires IO.Network but declares nothing — error *)
+let test_cap_transitive_missing_error () =
+  let ctx = typecheck {|mod Outer do
+    mod Lib do
+      needs IO.Network
+      pub fn connect(cap : Cap(IO.Network)) do cap end
+    end
+    mod Test do
+      use Lib.*
+      fn run(x) do x end
+    end
+  end|} in
+  Alcotest.(check bool) "transitive import without needs is an error" true (has_errors ctx)
+
+(* Module declares parent cap (IO) which covers imported module's child (IO.Network) *)
+let test_cap_transitive_supertype_ok () =
+  let ctx = typecheck {|mod Outer do
+    mod Lib do
+      needs IO.Network
+      pub fn connect(cap : Cap(IO.Network)) do cap end
+    end
+    mod Test do
+      needs IO
+      use Lib.*
+      fn run(cap : Cap(IO)) do cap end
+    end
+  end|} in
+  Alcotest.(check bool) "parent cap covers transitive import" false (has_errors ctx)
+
+(* Three-level chain: C uses B uses A; B covers its A import, C must cover B's needs *)
+let test_cap_transitive_chain_error () =
+  let ctx = typecheck {|mod Outer do
+    mod A do
+      needs IO.FileRead
+      pub fn read(cap : Cap(IO.FileRead)) do cap end
+    end
+    mod B do
+      needs IO.FileRead
+      use A.*
+      pub fn do_read(cap : Cap(IO.FileRead)) do A.read(cap) end
+    end
+    mod C do
+      use B.*
+      fn run(x) do x end
+    end
+  end|} in
+  Alcotest.(check bool) "chain: C must declare needs covered by B" true (has_errors ctx)
+
+(* extern with capability declared in needs — ok *)
+let test_cap_extern_with_needs_ok () =
+  let ctx = typecheck {|mod Test do
+    needs LibC
+    extern "libc": Cap(LibC) do
+      fn malloc(n : Int) : Int
+    end
+  end|} in
+  Alcotest.(check bool) "extern with declared needs: no errors" false (has_errors ctx)
+
+(* extern without declaring its capability in needs — error *)
+let test_cap_extern_missing_needs_error () =
+  let ctx = typecheck {|mod Test do
+    extern "libc": Cap(LibC) do
+      fn malloc(n : Int) : Int
+    end
+  end|} in
+  Alcotest.(check bool) "extern without needs is an error" true (has_errors ctx)
+
+(* ── Capability enforcement path tests ─────────────────────────────────── *)
+
+(* Verify capability errors surface via check_capabilities (the effects-module
+   entry point that wraps check_module for explicit use on both paths). *)
+let test_cap_effects_clean () =
+  let src = {|mod Test do
+    needs IO.Network
+    fn f(cap : Cap(IO.Network)) do cap end
+  end|} in
+  let m = parse_and_desugar src in
+  let ctx = March_effects.Effects.check_capabilities m in
+  Alcotest.(check bool) "check_capabilities: clean module has no errors" false
+    (March_errors.Errors.has_errors ctx)
+
+let test_cap_effects_violation () =
+  let src = {|mod Test do
+    fn f(cap : Cap(IO.Network)) do cap end
+  end|} in
+  let m = parse_and_desugar src in
+  let ctx = March_effects.Effects.check_capabilities m in
+  Alcotest.(check bool) "check_capabilities: capability violation produces error" true
+    (March_errors.Errors.has_errors ctx)
+
+(* Verify eval path: typechecking with capability errors prevents eval.
+   We check that has_errors returns true, which in main.ml causes exit(1)
+   before run_module is ever called. *)
+let test_cap_eval_path_blocked () =
+  let src = {|mod Test do
+    fn f(cap : Cap(IO.Network)) do cap end
+    fn main() do f(42) end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "eval path: capability error prevents evaluation" true
+    (has_errors ctx)
+
+(* Verify eval path: clean module can evaluate *)
+let test_cap_eval_path_ok () =
+  let src = {|mod Test do
+    needs IO.Network
+    fn double(x) do x + x end
+    fn main() do double(21) end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "eval path: clean module with needs evaluates without error" false
+    (has_errors ctx)
+
 (* ── Sort stdlib tests ──────────────────────────────────────────────────── *)
 
 let sort_decl = lazy (load_stdlib_file_for_test "sort.march")
@@ -5745,6 +5875,16 @@ let () =
           Alcotest.test_case "multiple needs"            `Quick test_cap_multiple_needs;
           Alcotest.test_case "parse needs"               `Quick test_cap_parse_needs;
           Alcotest.test_case "parse needs dotted"        `Quick test_cap_parse_needs_dotted;
+          Alcotest.test_case "transitive ok"             `Quick test_cap_transitive_ok;
+          Alcotest.test_case "transitive missing error"  `Quick test_cap_transitive_missing_error;
+          Alcotest.test_case "transitive supertype ok"   `Quick test_cap_transitive_supertype_ok;
+          Alcotest.test_case "transitive chain error"    `Quick test_cap_transitive_chain_error;
+          Alcotest.test_case "extern with needs ok"      `Quick test_cap_extern_with_needs_ok;
+          Alcotest.test_case "extern missing needs error" `Quick test_cap_extern_missing_needs_error;
+          Alcotest.test_case "effects entry point clean"  `Quick test_cap_effects_clean;
+          Alcotest.test_case "effects entry point violation" `Quick test_cap_effects_violation;
+          Alcotest.test_case "eval path blocked by cap error" `Quick test_cap_eval_path_blocked;
+          Alcotest.test_case "eval path ok with needs"    `Quick test_cap_eval_path_ok;
         ] );
       ("sort stdlib", [
         Alcotest.test_case "sort_small empty"       `Quick test_sort_small_empty;

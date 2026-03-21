@@ -191,7 +191,11 @@ let compile filename =
     { desugared with
       March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
   in
-  (* Typecheck *)
+  (* Typecheck + capability enforcement (applies to both eval and compile paths).
+     Capability enforcement is embedded in check_module via check_module_needs:
+       - transitive needs propagation across module imports
+       - extern block capability gating
+     See also: March_effects.Effects.check_capabilities *)
   let (errors, type_map) = March_typecheck.Typecheck.check_module desugared in
   (* Print diagnostics sorted by position, filtering stdlib-internal errors *)
   let diags = March_errors.Errors.sorted errors in

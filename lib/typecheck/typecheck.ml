@@ -269,6 +269,9 @@ type env = {
   sigs       : (string * Ast.sig_def) list;       (** Registered module signatures *)
   mod_needs  : string list;
   (** Capabilities declared via [needs] in the current module scope, as dot-joined paths *)
+  module_caps : (string * string list) list;
+  (** Capabilities required by checked sub-modules: module name → list of cap paths.
+      Populated when a [DMod] is fully checked; used for transitive enforcement. *)
   protocols  : (string * Ast.protocol_def) list; (** Registered session-type protocols *)
   impls      : (string * ty) list; (** Registered interface implementations: (iface_name, impl_ty) *)
 }
@@ -277,7 +280,7 @@ let make_env errors type_map = {
   vars = []; types = []; ctors = []; records = []; level = 0; lin = [];
   errors; pending_constraints = ref []; type_map;
   interfaces = []; sigs = [];
-  mod_needs = []; protocols = []; impls = [];
+  mod_needs = []; module_caps = []; protocols = []; impls = [];
 }
 
 let enter_level env = { env with level = env.level + 1 }
@@ -1805,7 +1808,46 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
       Err.hint env.errors ~span:sp
         "this function takes `Cap(IO)` (the root capability); \
          consider narrowing to e.g. `Cap(IO.FileRead)` or `Cap(IO.Console)` for least-privilege."
-  ) used_caps
+  ) used_caps;
+  (* Check 4: transitive — every module we `use` that declares `needs` must be covered *)
+  List.iter (function
+    | Ast.DUse (ud, sp) ->
+      let imported = String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) in
+      (match List.assoc_opt imported env.module_caps with
+       | None | Some [] -> ()
+       | Some req_caps ->
+         List.iter (fun req_cap ->
+           let covered =
+             List.exists (fun need -> cap_subsumes need req_cap) declared_needs
+           in
+           if not covered then
+             Err.error env.errors ~span:sp
+               (Printf.sprintf
+                  "module `%s` imports `%s` which requires `Cap(%s)`, \
+                   but `%s` is not declared in `needs`.\n\
+                   help: add `needs %s` to the module body."
+                  mod_name.txt imported req_cap req_cap req_cap)
+         ) req_caps)
+    | _ -> ()
+  ) decls;
+  (* Check 5: extern blocks require the declared capability to be in `needs` *)
+  List.iter (function
+    | Ast.DExtern (edef, sp) ->
+      let cap_paths = cap_paths_in_surface_ty edef.ext_cap_ty in
+      List.iter (fun cap_path ->
+        let covered =
+          List.exists (fun need -> cap_subsumes need cap_path) declared_needs
+        in
+        if not covered then
+          Err.error env.errors ~span:sp
+            (Printf.sprintf
+               "extern block `\"%s\"` uses `Cap(%s)`, \
+                but `%s` is not declared in `needs`.\n\
+                help: add `needs %s` to the module body."
+               edef.ext_lib_name cap_path cap_path cap_path)
+      ) cap_paths
+    | _ -> ()
+  ) decls
 
 let rec check_decl env (d : Ast.decl) : env =
   match d with
@@ -1979,8 +2021,15 @@ let rec check_decl env (d : Ast.decl) : env =
        bare name throughout user code, not prefixed. *)
     let new_types = List.filter (fun (k, _) -> List.mem k pub_set) inner_env.types in
     let new_ctors = List.filter (fun (k, _) -> List.mem k pub_set) inner_env.ctors in
+    (* Collect this module's declared capabilities for transitive enforcement *)
+    let inner_needs = List.concat_map (function
+        | Ast.DNeeds (caps, _) -> List.map cap_path_of_names caps
+        | _ -> []) decls in
     let env' = bind_vars new_names env in
-    { env' with types = new_types @ env'.types; ctors = new_ctors @ env'.ctors }
+    { env' with
+      types = new_types @ env'.types;
+      ctors = new_ctors @ env'.ctors;
+      module_caps = (name.txt, inner_needs) :: env'.module_caps }
 
   | Ast.DProtocol (name, pdef, sp) ->
     (* Register the protocol and validate structural well-formedness. *)
