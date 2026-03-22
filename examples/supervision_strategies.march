@@ -1,0 +1,169 @@
+-- supervision_strategies.march
+-- Demonstrates all three supervision restart strategies.
+--
+-- Strategies:
+--   one_for_one  — only the crashed child is restarted; siblings unaffected.
+--   one_for_all  — all children are restarted when any one crashes.
+--   rest_for_one — the crashed child and all children declared after it restart;
+--                  children declared before it are unaffected.
+--
+-- Run: march examples/supervision_strategies.march
+
+mod StrategyDemo do
+
+  -- Generic worker actor used across all demos.
+  actor Worker do
+    state { count : Int }
+    init  { count = 0 }
+
+    on Work() do
+      let n = state.count + 1
+      println("[Worker] work #" ++ int_to_string(n))
+      { count = n }
+    end
+  end
+
+  -- ── Strategy 1: one_for_one ──────────────────────────────────────────────
+  -- Two independent workers; crashing one does not affect the other.
+  actor OneForOneSup do
+    state { wa : Int, wb : Int }
+    init  { wa = 0, wb = 0 }
+
+    supervise do
+      strategy one_for_one
+      max_restarts 5 within 60
+      Worker wa
+      Worker wb
+    end
+  end
+
+  -- ── Strategy 2: one_for_all ──────────────────────────────────────────────
+  -- Two coupled workers; crashing any one triggers full group restart.
+  actor OneForAllSup do
+    state { wa : Int, wb : Int }
+    init  { wa = 0, wb = 0 }
+
+    supervise do
+      strategy one_for_all
+      max_restarts 5 within 60
+      Worker wa
+      Worker wb
+    end
+  end
+
+  -- ── Strategy 3: rest_for_one ─────────────────────────────────────────────
+  -- Pipeline: reader → parser → writer.
+  -- Crashing the parser also restarts writer (downstream); reader is kept.
+  actor PipelineSup do
+    state { reader : Int, parser : Int, writer : Int }
+    init  { reader = 0, parser = 0, writer = 0 }
+
+    supervise do
+      strategy rest_for_one
+      max_restarts 5 within 60
+      Worker reader
+      Worker parser
+      Worker writer
+    end
+  end
+
+  -- Read the raw integer pid stored in a supervisor state field.
+  fn child_int(sup, field) do
+    match get_actor_field(sup, field) with
+    | None    -> -1
+    | Some(n) -> n
+    end
+  end
+
+  fn section(title) do
+    println("")
+    println("─── " ++ title ++ " ───")
+  end
+
+  fn demo_one_for_one() do
+    section("Strategy: one_for_one")
+    let sup = spawn(OneForOneSup)
+    let wa1 = child_int(sup, "wa")
+    let wb1 = child_int(sup, "wb")
+    println("wa=" ++ int_to_string(wa1) ++ "  wb=" ++ int_to_string(wb1))
+
+    send(pid_of_int(wa1), Work())
+    send(pid_of_int(wb1), Work())
+    run_until_idle()
+
+    println("Crashing wa (pid " ++ int_to_string(wa1) ++ ")...")
+    kill(pid_of_int(wa1))
+
+    let wa2 = child_int(sup, "wa")
+    let wb2 = child_int(sup, "wb")
+
+    println("wa restarted with new pid: " ++ bool_to_string(wa2 != wa1) ++ " (" ++ int_to_string(wa2) ++ ")")
+    println("wb unchanged (same pid):   " ++ bool_to_string(wb2 == wb1))
+    println("wa alive: " ++ bool_to_string(is_alive(pid_of_int(wa2))))
+    println("wb alive: " ++ bool_to_string(is_alive(pid_of_int(wb2))))
+  end
+
+  fn demo_one_for_all() do
+    section("Strategy: one_for_all")
+    let sup = spawn(OneForAllSup)
+    let wa1 = child_int(sup, "wa")
+    let wb1 = child_int(sup, "wb")
+    println("wa=" ++ int_to_string(wa1) ++ "  wb=" ++ int_to_string(wb1))
+
+    send(pid_of_int(wa1), Work())
+    send(pid_of_int(wa1), Work())
+    send(pid_of_int(wb1), Work())
+    run_until_idle()
+
+    println("Crashing wa (pid " ++ int_to_string(wa1) ++ ")...")
+    kill(pid_of_int(wa1))
+
+    let wa2 = child_int(sup, "wa")
+    let wb2 = child_int(sup, "wb")
+
+    println("wa restarted: " ++ bool_to_string(wa2 != wa1) ++ " (new pid=" ++ int_to_string(wa2) ++ ")")
+    println("wb restarted: " ++ bool_to_string(wb2 != wb1) ++ " (new pid=" ++ int_to_string(wb2) ++ ")")
+    println("wa alive: " ++ bool_to_string(is_alive(pid_of_int(wa2))))
+    println("wb alive: " ++ bool_to_string(is_alive(pid_of_int(wb2))))
+  end
+
+  fn demo_rest_for_one() do
+    section("Strategy: rest_for_one  [reader -> parser -> writer]")
+    let sup = spawn(PipelineSup)
+    let r1  = child_int(sup, "reader")
+    let p1  = child_int(sup, "parser")
+    let w1  = child_int(sup, "writer")
+    println("reader=" ++ int_to_string(r1) ++ "  parser=" ++ int_to_string(p1) ++ "  writer=" ++ int_to_string(w1))
+
+    send(pid_of_int(r1), Work())
+    send(pid_of_int(p1), Work())
+    send(pid_of_int(w1), Work())
+    run_until_idle()
+
+    println("Crashing parser (pid " ++ int_to_string(p1) ++ ")...")
+    kill(pid_of_int(p1))
+
+    let r2 = child_int(sup, "reader")
+    let p2 = child_int(sup, "parser")
+    let w2 = child_int(sup, "writer")
+
+    println("reader unchanged: " ++ bool_to_string(r2 == r1) ++ " (pid=" ++ int_to_string(r2) ++ ")")
+    println("parser restarted: " ++ bool_to_string(p2 != p1) ++ " (new pid=" ++ int_to_string(p2) ++ ")")
+    println("writer restarted: " ++ bool_to_string(w2 != w1) ++ " (new pid=" ++ int_to_string(w2) ++ ")")
+    println("reader alive: " ++ bool_to_string(is_alive(pid_of_int(r2))))
+    println("parser alive: " ++ bool_to_string(is_alive(pid_of_int(p2))))
+    println("writer alive: " ++ bool_to_string(is_alive(pid_of_int(w2))))
+  end
+
+  fn main() do
+    println("=== Supervision Strategies Demo ===")
+
+    demo_one_for_one()
+    demo_one_for_all()
+    demo_rest_for_one()
+
+    println("")
+    println("=== Done ===")
+  end
+
+end
