@@ -146,14 +146,22 @@ let run_expr ctx ~type_map m =
     | March_tir.Tir.TUnit ->
       Jit.call_void_to_void fptr;
       "()"
+    | March_tir.Tir.TVar _ ->
+      (* Unresolved type variable — the LLVM function returns ptr, but the
+         actual value is almost always a scalar stored via inttoptr (e.g.,
+         a large integer from List.length, fold, etc.).  On ARM64/x86-64
+         both ptr and i64 occupy the same register, so call_void_to_int
+         reads the raw bits correctly regardless of the declared return type.
+         This avoids the old 4096 heuristic which broke for any integer > 4095. *)
+      let v = Jit.call_void_to_int fptr in
+      Int64.to_string v
     | _ ->
-      (* Heap-allocated value or scalar stored as pointer (e.g. TVar in cross-line
-         let bindings where the type wasn't fully resolved during lowering).
-         Small integers (< 4096) are almost certainly scalar values stored via
-         inttoptr — display them as integers rather than bogus addresses. *)
+      (* Heap-allocated value: use the pointer path.
+         Values below 4 GiB are almost certainly scalars stored via inttoptr
+         (small counts, flags, etc.) rather than real heap addresses. *)
       let ptr = Jit.call_void_to_ptr fptr in
       let raw = Int64.of_nativeint ptr in
-      if Int64.compare raw 4096L < 0 && Int64.compare raw 0L >= 0 then
+      if Int64.compare raw 0x100000000L < 0 && Int64.compare raw 0L >= 0 then
         Int64.to_string raw
       else
         Printf.sprintf "#<value at 0x%Lx>" raw
