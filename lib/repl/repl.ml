@@ -521,7 +521,9 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                     | March_eval.Eval.Match_failure msg ->
                       Printf.eprintf "match failure: %s\n%!" msg
                     | Failure msg ->
-                      Printf.eprintf "jit error: %s\n%!" msg)
+                      Printf.eprintf "jit error: %s\n%!" msg
+                    | exn ->
+                      Printf.eprintf "error: %s\n%!" (Printexc.to_string exn))
                | Some (March_ast.Ast.ReplExpr e) ->
                  (* Intercept h(name) before typecheck — h is a REPL-only doc lookup *)
                  let rec doc_key_of = function
@@ -590,11 +592,17 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                     | March_eval.Eval.Match_failure msg ->
                       Printf.eprintf "match failure: %s\n%!" msg
                     | Failure msg ->
-                      Printf.eprintf "jit error: %s\n%!" msg)))
+                      Printf.eprintf "jit error: %s\n%!" msg
+                    | exn ->
+                      Printf.eprintf "error: %s\n%!" (Printexc.to_string exn))))
           end)
      with
-     | March_lexer.Lexer.Lexer_error msg -> Printf.eprintf "lexer error: %s\n%!" msg
-     | exn -> Printf.eprintf "internal error: %s\n%!" (Printexc.to_string exn))
+     | March_lexer.Lexer.Lexer_error msg ->
+       Buffer.clear buf; first_line := true;
+       Printf.eprintf "lexer error: %s\n%!" msg
+     | exn ->
+       Buffer.clear buf; first_line := true;
+       Printf.eprintf "internal error: %s\n%!" (Printexc.to_string exn))
   done;
   History.save hist (history_path ())
 
@@ -828,7 +836,9 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
          | March_eval.Eval.Match_failure msg ->
            add_line Notty.A.(fg red) (Printf.sprintf "match failure: %s" msg)
          | Failure msg ->
-           add_line Notty.A.(fg red) (Printf.sprintf "jit error: %s" msg))
+           add_line Notty.A.(fg red) (Printf.sprintf "jit error: %s" msg)
+         | exn ->
+           add_line Notty.A.(fg red) (Printf.sprintf "error: %s" (Printexc.to_string exn)))
     | Some (March_ast.Ast.ReplExpr e) ->
       (* Intercept h(name) before typecheck — h is a REPL-only doc lookup *)
       let rec doc_key_of = function
@@ -905,7 +915,9 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
          | March_eval.Eval.Match_failure msg ->
            add_line Notty.A.(fg red) (Printf.sprintf "match failure: %s" msg)
          | Failure msg ->
-           add_line Notty.A.(fg red) (Printf.sprintf "jit error: %s" msg)))
+           add_line Notty.A.(fg red) (Printf.sprintf "jit error: %s" msg)
+         | exn ->
+           add_line Notty.A.(fg red) (Printf.sprintf "error: %s" (Printexc.to_string exn))))
   in
 
   let dispatch_action action =
