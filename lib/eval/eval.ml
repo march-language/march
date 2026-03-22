@@ -98,6 +98,12 @@ let lookup_doc (key : string) : string option =
 let next_pid        : int ref = ref 0
 let next_monitor_id : int ref = ref 0
 
+(** Process registry: atom name → pid for named supervision children. *)
+let process_registry : (string, int) Hashtbl.t = Hashtbl.create 8
+
+(** Reverse map: pid → registered atom name (for re-registration on restart). *)
+let pid_to_registry_name : (int, string) Hashtbl.t = Hashtbl.create 8
+
 (** Pid of the actor whose handler is currently executing.
     Set by [run_scheduler] when entering a handler; used by [self] and [receive]. *)
 let current_pid : int option ref = ref None
@@ -518,6 +524,16 @@ let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : str
       ai_restart_count = []; ai_epoch = inherited_epoch;
       ai_resources = [] } in
     Hashtbl.add actor_registry child_pid child_inst;
+    (* Re-register in process registry if the crashed actor had a name *)
+    (match crashed_pid with
+     | None -> ()
+     | Some old_pid ->
+       (match Hashtbl.find_opt pid_to_registry_name old_pid with
+        | None -> ()
+        | Some name ->
+          Hashtbl.remove pid_to_registry_name old_pid;
+          Hashtbl.replace process_registry name child_pid;
+          Hashtbl.replace pid_to_registry_name child_pid name));
     child_pid
 
 (** Restart a supervisor's crashed child under one_for_one strategy.
@@ -3415,7 +3431,9 @@ let reset_scheduler_state () : unit =
   next_monitor_id := 0;
   current_pid := None;
   reduction_ctx := None;
-  last_reduction_count := 0
+  last_reduction_count := 0;
+  Hashtbl.clear process_registry;
+  Hashtbl.clear pid_to_registry_name
 
 (* NOTE: debug_ctx actor event logging is intentionally not reproduced here.
    The old ESend recorded ame_state_before/ame_state_after. When actor debug
@@ -3526,7 +3544,13 @@ let spawn_from_spec (spec : value) : unit =
              ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
              ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
              ai_resources = [] } in
-           Hashtbl.add actor_registry pid inst)
+           Hashtbl.add actor_registry pid inst;
+           (* Register named children in the process registry *)
+           (match List.assoc_opt "name" child_fields with
+            | Some (VAtom atom_name) ->
+              Hashtbl.replace process_registry atom_name pid;
+              Hashtbl.replace pid_to_registry_name pid atom_name
+            | _ -> ()))
       | other -> eval_error "spawn_from_spec: expected child spec record, got %s"
                    (value_to_string other)
     ) children
@@ -3617,12 +3641,60 @@ let task_builtins : env =
         VRecord [("actor", VString name); ("restart", VAtom "permanent")]
       | [VString name] ->
         VRecord [("actor", VString name); ("restart", VAtom "permanent")]
-      | _ -> eval_error "worker: expected an actor name"))
+      (* Named form: worker(ActorName, :atom_name) *)
+      | [VCon (name, []); VAtom atom_name] ->
+        VRecord [("actor", VString name); ("restart", VAtom "permanent");
+                 ("name", VAtom atom_name)]
+      | [VString name; VAtom atom_name] ->
+        VRecord [("actor", VString name); ("restart", VAtom "permanent");
+                 ("name", VAtom atom_name)]
+      | _ -> eval_error "worker: expected an actor name or (actor_name, :registered_name)"))
 
   ; ("Supervisor.spec", VBuiltin ("Supervisor.spec", function
       | [strategy; children] ->
         VRecord [("strategy", strategy); ("children", children)]
       | _ -> eval_error "Supervisor.spec: expected (strategy, children)"))
+
+  (* Process registry: whereis returns Option(Pid); whereis_bang crashes if missing *)
+  ; ("whereis", VBuiltin ("whereis", function
+      | [VAtom name] ->
+        (match Hashtbl.find_opt process_registry name with
+         | Some pid when (match Hashtbl.find_opt actor_registry pid with
+                          | Some inst -> inst.ai_alive
+                          | None -> false) ->
+           VCon ("Some", [VPid pid])
+         | _ -> VCon ("None", []))
+      | _ -> eval_error "whereis: expected atom argument"))
+
+  ; ("App.whereis", VBuiltin ("App.whereis", function
+      | [VAtom name] ->
+        (match Hashtbl.find_opt process_registry name with
+         | Some pid when (match Hashtbl.find_opt actor_registry pid with
+                          | Some inst -> inst.ai_alive
+                          | None -> false) ->
+           VCon ("Some", [VPid pid])
+         | _ -> VCon ("None", []))
+      | _ -> eval_error "App.whereis: expected atom argument"))
+
+  ; ("whereis_bang", VBuiltin ("whereis_bang", function
+      | [VAtom name] ->
+        (match Hashtbl.find_opt process_registry name with
+         | Some pid when (match Hashtbl.find_opt actor_registry pid with
+                          | Some inst -> inst.ai_alive
+                          | None -> false) ->
+           VPid pid
+         | _ -> eval_error "whereis!: no alive process named :%s" name)
+      | _ -> eval_error "whereis_bang: expected atom argument"))
+
+  ; ("App.whereis_bang", VBuiltin ("App.whereis_bang", function
+      | [VAtom name] ->
+        (match Hashtbl.find_opt process_registry name with
+         | Some pid when (match Hashtbl.find_opt actor_registry pid with
+                          | Some inst -> inst.ai_alive
+                          | None -> false) ->
+           VPid pid
+         | _ -> eval_error "whereis!: no alive process named :%s" name)
+      | _ -> eval_error "App.whereis_bang: expected atom argument"))
 
   ; ("task_spawn_link", VBuiltin ("task_spawn_link", function
     | [thunk; VPid linked_pid] ->

@@ -7637,6 +7637,123 @@ let test_lexer_keyword_app () =
   Alcotest.(check bool) "lexes app keyword" true
     (match tok with March_parser.Parser.APP -> true | _ -> false)
 
+(* ------------------------------------------------------------------ *)
+(* Process Registry tests                                              *)
+(* ------------------------------------------------------------------ *)
+
+(** Helper: look up a builtin from task_builtins and apply it. *)
+let call_builtin name args =
+  let fn_val = List.assoc name March_eval.Eval.task_builtins in
+  March_eval.Eval.apply fn_val args
+
+(** worker(Counter, :my_name) produces a VRecord with a name field *)
+let test_worker_named_spec () =
+  let src = {|mod AppTest do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    fn main() do
+      worker(Counter, :my_svc)
+    end
+  end|} in
+  let env = eval_module src in
+  let spec = call_fn env "main" [] in
+  (match spec with
+   | March_eval.Eval.VRecord fields ->
+     let name_field = List.assoc_opt "name" fields in
+     Alcotest.(check bool) "worker named spec has name field" true
+       (name_field = Some (March_eval.Eval.VAtom "my_svc"))
+   | _ -> Alcotest.fail "expected VRecord from worker/2")
+
+(** run_module with a named app child registers it in process_registry *)
+let test_whereis_named () =
+  let src = {|mod AppTest do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    app MyApp do
+      Supervisor.spec(:one_for_one, [worker(Counter, :counter_svc)])
+    end
+  end|} in
+  let m =
+    let lexbuf = Lexing.from_string src in
+    let ast = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+    March_desugar.Desugar.desugar_module ast
+  in
+  March_eval.Eval.run_module m;
+  (* process_registry should have "counter_svc" → some pid *)
+  let registered = Hashtbl.find_opt March_eval.Eval.process_registry "counter_svc" in
+  Alcotest.(check bool) "counter_svc registered" true (registered <> None);
+  (* whereis builtin should return Some(Pid) *)
+  let result = call_builtin "whereis" [March_eval.Eval.VAtom "counter_svc"] in
+  Alcotest.(check bool) "whereis returns Some(Pid)" true
+    (match result with March_eval.Eval.VCon ("Some", [March_eval.Eval.VPid _]) -> true | _ -> false)
+
+(** whereis on an unknown atom returns None *)
+let test_whereis_unknown () =
+  let result = call_builtin "whereis" [March_eval.Eval.VAtom "no_such_process"] in
+  Alcotest.(check bool) "whereis unknown returns None" true
+    (match result with March_eval.Eval.VCon ("None", []) -> true | _ -> false)
+
+(** whereis_bang on an unknown atom raises Eval_error *)
+let test_whereis_bang_unknown () =
+  let raised =
+    try
+      ignore (call_builtin "whereis_bang" [March_eval.Eval.VAtom "no_such_process"]);
+      false
+    with March_eval.Eval.Eval_error _ -> true
+       | Failure _                    -> true
+  in
+  Alcotest.(check bool) "whereis_bang unknown raises" true raised
+
+(** When a supervised actor is killed and restarted, its registered name
+    is rebound to the new pid automatically. *)
+let test_name_reregisters_on_restart () =
+  let _env = eval_module {|mod Test do
+    actor Worker do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    actor Supervisor do
+      state { worker : Int }
+      init { worker = 0 }
+      supervise do
+        strategy one_for_one
+        max_restarts 3 within 5
+        Worker worker
+      end
+    end
+
+    fn main() do
+      spawn(Supervisor)
+    end
+  end|} in
+  let sup_pid = match call_fn _env "main" [] with
+    | March_eval.Eval.VPid p -> p | _ -> -1 in
+  let w1_pid = get_supervisor_child_pid sup_pid "worker" in
+  Alcotest.(check bool) "initial worker pid >= 0" true (w1_pid >= 0);
+  (* Manually register the worker under a name, simulating named spawn *)
+  Hashtbl.replace March_eval.Eval.process_registry "my_worker" w1_pid;
+  Hashtbl.replace March_eval.Eval.pid_to_registry_name w1_pid "my_worker";
+  (* Kill the worker — supervisor restarts it *)
+  March_eval.Eval.crash_actor w1_pid "test kill";
+  let w2_pid = get_supervisor_child_pid sup_pid "worker" in
+  Alcotest.(check bool) "new pid differs from old" true (w2_pid <> w1_pid);
+  (* Verify the name is now bound to the new pid *)
+  let registered_pid = Hashtbl.find_opt March_eval.Eval.process_registry "my_worker" in
+  Alcotest.(check bool) "name rebound to new pid" true (registered_pid = Some w2_pid);
+  (* Old pid no longer in pid_to_registry_name *)
+  let old_name = Hashtbl.find_opt March_eval.Eval.pid_to_registry_name w1_pid in
+  Alcotest.(check bool) "old pid removed from name map" true (old_name = None)
+
 let () =
   Alcotest.run "march"
     [
@@ -7646,6 +7763,14 @@ let () =
           Alcotest.test_case "app desugars to init"    `Quick (with_reset test_app_desugars_to_app_init);
           Alcotest.test_case "app spawns actors"       `Quick (with_reset test_app_spawns_actors);
           Alcotest.test_case "main + app exclusive"    `Quick test_app_main_exclusive;
+        ] );
+      ( "registry",
+        [
+          Alcotest.test_case "worker named spec"         `Quick (with_reset test_worker_named_spec);
+          Alcotest.test_case "whereis named"             `Quick (with_reset test_whereis_named);
+          Alcotest.test_case "whereis unknown"           `Quick (with_reset test_whereis_unknown);
+          Alcotest.test_case "whereis_bang unknown"      `Quick (with_reset test_whereis_bang_unknown);
+          Alcotest.test_case "name reregisters restart"  `Quick (with_reset test_name_reregisters_on_restart);
         ] );
       ( "lexer",
         [
