@@ -1612,3 +1612,12 @@ void *march_value_to_string(void *v) {
     int n = snprintf(buf, sizeof(buf), "#<tag:%d>", tag);
     return march_string_lit(buf, n);
 }
+
+/* ── Resource ownership ──────────────────────────────────────────────── */
+
+/* own(pid, value): register a linear resource with an actor for cleanup.
+ * Compiled stub — full implementation requires Drop trait dispatch at runtime. */
+void march_own(void *pid, void *value) {
+    (void)pid; (void)value;
+    /* TODO: look up Drop impl for value's type and call register_resource */
+}

@@ -21,6 +21,7 @@
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
@@ -252,6 +253,59 @@ void *march_tcp_send_all(int64_t fd, void *data) {
 
 void march_tcp_close(int64_t fd) {
     close((int)fd);
+}
+
+/* Connect to host:port as a TCP client.
+ * Returns Ok(fd:i64) on success, Err(reason:string) on failure.
+ * Tag convention: Ok=tag0, Err=tag1 (matches march_runtime.c mk_ok/mk_err). */
+void *march_tcp_connect(void *host_ptr, int64_t port) {
+    if (!host_ptr) {
+        void *s = march_string_lit("tcp_connect: null host", 22);
+        void *r = march_alloc(24);
+        ((march_hdr *)r)->tag = 1; /* Err */
+        *(void **)((char *)r + 16) = s;
+        return r;
+    }
+    march_string *hs = (march_string *)host_ptr;
+    char *host = hs->data;
+    char port_str[16];
+    snprintf(port_str, sizeof(port_str), "%d", (int)port);
+
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, port_str, &hints, &res) != 0 || !res) {
+        void *s = march_string_lit("tcp_connect: getaddrinfo failed", 31);
+        void *r = march_alloc(24);
+        ((march_hdr *)r)->tag = 1; /* Err */
+        *(void **)((char *)r + 16) = s;
+        return r;
+    }
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    if (fd < 0) {
+        freeaddrinfo(res);
+        void *s = march_string_lit("tcp_connect: socket failed", 26);
+        void *r = march_alloc(24);
+        ((march_hdr *)r)->tag = 1; /* Err */
+        *(void **)((char *)r + 16) = s;
+        return r;
+    }
+    if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
+        close(fd);
+        freeaddrinfo(res);
+        void *s = march_string_lit("tcp_connect: connection refused", 31);
+        void *r = march_alloc(24);
+        ((march_hdr *)r)->tag = 1; /* Err */
+        *(void **)((char *)r + 16) = s;
+        return r;
+    }
+    freeaddrinfo(res);
+    /* Return Ok(fd) — fd stored as i64 field 0, Ok=tag0 */
+    void *ok_obj = march_alloc(24);
+    /* tag stays 0 = Ok */
+    *(int64_t *)((char *)ok_obj + 16) = (int64_t)fd;
+    return ok_obj;
 }
 
 /* ── HTTP builtins ─────────────────────────────────────────────────────── */
@@ -1127,4 +1181,101 @@ void *march_ws_select(int64_t socket_fd, void *pipe_rd, int64_t timeout_ms) {
     void *t = march_alloc(16);
     *(int32_t *)((char *)t + 8) = 2;
     return t;
+}
+
+/* ── HTTP client builtins ─────────────────────────────────────────────── */
+
+/* Serialize an HTTP request to a raw string.
+ * http_serialize_request(method, host, path, query, headers, body) -> String */
+void *march_http_serialize_request(void *method_ptr, void *host_ptr, void *path_ptr,
+                                    void *query_ptr, void *headers_ptr, void *body_ptr) {
+    march_string *method  = (march_string *)method_ptr;
+    march_string *host    = (march_string *)host_ptr;
+    march_string *path    = (march_string *)path_ptr;
+    march_string *query   = (march_string *)query_ptr;
+    march_string *body    = body_ptr ? (march_string *)body_ptr : NULL;
+    (void)headers_ptr;
+
+    /* Build: "METHOD /path?query HTTP/1.1\r\nHost: host\r\n\r\nbody" */
+    const char *m   = method ? method->data : "GET";
+    const char *h   = host   ? host->data   : "";
+    const char *p   = path   ? path->data   : "/";
+    const char *q   = (query && query->len > 0) ? query->data : NULL;
+    const char *b   = (body && body->len > 0)   ? body->data  : "";
+    int64_t blen    = (body && body->len > 0)   ? body->len   : 0;
+
+    char content_len_buf[64];
+    snprintf(content_len_buf, sizeof(content_len_buf), "%lld", (long long)blen);
+
+    /* Approximate buffer size */
+    size_t sz = strlen(m) + strlen(h) + strlen(p) + (q ? strlen(q) : 0) + blen + 256;
+    char *buf = (char *)malloc(sz);
+    if (!buf) return march_string_lit("", 0);
+
+    int n;
+    if (q && *q) {
+        n = snprintf(buf, sz, "%s %s?%s HTTP/1.1\r\nHost: %s\r\nContent-Length: %s\r\n\r\n%s",
+                     m, p, q, h, content_len_buf, b);
+    } else {
+        n = snprintf(buf, sz, "%s %s HTTP/1.1\r\nHost: %s\r\nContent-Length: %s\r\n\r\n%s",
+                     m, p, h, content_len_buf, b);
+    }
+    void *result = march_string_lit(buf, n < 0 ? 0 : (int64_t)n);
+    free(buf);
+    return result;
+}
+
+/* Parse a raw HTTP response string.
+ * Returns Ok((status_code:i64, headers:List, body:String)) or Err(reason:String).
+ * Tag: Ok=tag0, Err=tag1. */
+void *march_http_parse_response(void *raw_ptr) {
+    if (!raw_ptr) {
+        void *s = march_string_lit("http_parse_response: null input", 31);
+        void *r = march_alloc(24);
+        ((march_hdr *)r)->tag = 1; /* Err */
+        *(void **)((char *)r + 16) = s;
+        return r;
+    }
+    march_string *raw = (march_string *)raw_ptr;
+    const char *data = raw->data;
+
+    /* Parse status line: HTTP/1.x NNN ... */
+    int status_code = 200;
+    const char *p = data;
+    if (strncmp(p, "HTTP/", 5) == 0) {
+        p += 5;
+        while (*p && *p != ' ') p++;  /* skip version */
+        while (*p == ' ') p++;
+        status_code = (int)strtol(p, NULL, 10);
+    }
+
+    /* Find header/body split at \r\n\r\n */
+    const char *body_start = strstr(data, "\r\n\r\n");
+    if (!body_start) body_start = strstr(data, "\n\n");
+    if (body_start) {
+        body_start += (body_start[0] == '\r') ? 4 : 2;
+    } else {
+        body_start = data + raw->len;
+    }
+
+    /* Build body string */
+    int64_t body_len = (int64_t)(raw->len - (body_start - data));
+    void *body_str = body_len > 0 ? march_string_lit(body_start, body_len)
+                                  : march_string_lit("", 0);
+
+    /* Build empty headers list (Nil) */
+    void *headers_nil = march_alloc(16); /* Nil = tag 0, no fields */
+
+    /* Build tuple (status_code, headers_nil, body_str): 3-field heap object */
+    void *tup = march_alloc(16 + 3 * 8);
+    /* tag 0 for tuple */
+    *(int64_t *)((char *)tup + 16) = (int64_t)status_code;
+    *(void **)((char *)tup + 24)   = headers_nil;
+    *(void **)((char *)tup + 32)   = body_str;
+
+    /* Wrap in Ok(tup): tag=0 */
+    void *ok_obj = march_alloc(24);
+    /* tag stays 0 = Ok */
+    *(void **)((char *)ok_obj + 16) = tup;
+    return ok_obj;
 }

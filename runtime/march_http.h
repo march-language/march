@@ -34,7 +34,23 @@ void *march_tcp_send_all(int64_t fd, void *data);
 /* Close a file descriptor. */
 void march_tcp_close(int64_t fd);
 
-/* ── HTTP builtins ─────────────────────────────────────────────────── */
+/* Connect to host:port as a TCP client.
+ * Returns Ok(fd:i64) or Err(reason:String). Ok=tag0, Err=tag1. */
+void *march_tcp_connect(void *host, int64_t port);
+
+/* ── HTTP client builtins ──────────────────────────────────────────── */
+
+/* Serialize an HTTP/1.1 request from its components.
+ * Returns a march_string* with the raw request. */
+void *march_http_serialize_request(void *method, void *host, void *path,
+                                    void *query, void *headers, void *body);
+
+/* Parse a raw HTTP response string.
+ * Returns Ok(tuple(status_code:i64, headers:List, body:String)) or Err(String).
+ * Ok=tag0, Err=tag1. */
+void *march_http_parse_response(void *raw);
+
+/* ── HTTP server builtins ──────────────────────────────────────────── */
 
 /* Parse a raw HTTP request string.
  * Returns: Ok(tuple(method_str, path_str, headers_list, body_str))
