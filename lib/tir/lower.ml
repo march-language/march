@@ -173,7 +173,8 @@ let rec lower_to_atom_k (e : Ast.expr) (k : Tir.atom -> Tir.expr) : Tir.expr =
   | Ast.ELit (lit, _) -> k (Tir.ALit lit)
   | Ast.EVar { txt = name; span; _ } ->
     let name = resolve_use_alias name in
-    k (Tir.AVar { v_name = name; v_ty = ty_of_span span; v_lin = Tir.Unr })
+    let ty = ty_of_span span in
+    k (Tir.AVar { v_name = name; v_ty = ty; v_lin = Tir.Unr })
   | _ ->
     let rhs = lower_expr e in
     let v = fresh_var (ty_of_expr e) in

@@ -8,6 +8,10 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <errno.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <fcntl.h>
 
 /* ── Allocation ──────────────────────────────────────────────────────── */
 
@@ -1161,6 +1165,373 @@ int64_t march_dir_exists(void *s) {
     struct stat st;
     if (stat(ss->data, &st) != 0) return 0;
     return S_ISDIR(st.st_mode) ? 1 : 0;
+}
+
+/* ── File/Dir/CSV I/O helpers ────────────────────────────────────────── */
+
+/* Header layout: rc(8) | tag(4) | pad(4) | fields... */
+#define MARCH_FIELD(obj, i) (((int64_t *)(obj))[2 + (i)])
+#define MARCH_FIELD_PTR(obj, i) ((void *)MARCH_FIELD(obj, i))
+#define MARCH_SET_TAG(obj, t) (((march_hdr *)(obj))->tag = (int32_t)(t))
+
+/* Create Result(Ok=0,Err=1) values; all file/dir/csv fns return Result. */
+static void *mk_ok(void *value) {
+    void *r = march_alloc(24); /* tag=0 by default */
+    MARCH_FIELD(r, 0) = (int64_t)value;
+    return r;
+}
+static void *mk_ok_unit(void) {
+    /* Ok(()) — unit value is null/0 */
+    void *r = march_alloc(24);
+    MARCH_FIELD(r, 0) = 0;
+    return r;
+}
+static void *mk_err(void *msg_str) {
+    void *r = march_alloc(24);
+    MARCH_SET_TAG(r, 1);
+    MARCH_FIELD(r, 0) = (int64_t)msg_str;
+    return r;
+}
+static void *mk_err_cstr(const char *msg) {
+    return mk_err(march_string_lit(msg, (int64_t)strlen(msg)));
+}
+static void *mk_err_errno(void) {
+    return mk_err_cstr(strerror(errno));
+}
+
+/* Build a March List(String) from an array of strings. */
+static void *build_string_list(char **strs, int n) {
+    /* Nil = alloc 16 bytes, tag=0 */
+    void *lst = march_alloc(16); /* Nil */
+    for (int i = n - 1; i >= 0; i--) {
+        void *s = march_string_lit(strs[i], (int64_t)strlen(strs[i]));
+        void *cons = march_alloc(32); /* Cons: header(16)+head(8)+tail(8) */
+        MARCH_SET_TAG(cons, 1);
+        MARCH_FIELD(cons, 0) = (int64_t)s;
+        MARCH_FIELD(cons, 1) = (int64_t)lst;
+        lst = cons;
+    }
+    return lst;
+}
+
+/* ── File I/O builtins ───────────────────────────────────────────────── */
+
+void *march_file_read(void *path_ptr) {
+    march_string *ps = (march_string *)path_ptr;
+    FILE *f = fopen(ps->data, "rb");
+    if (!f) return mk_err_errno();
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (len < 0) { fclose(f); return mk_err_cstr("ftell failed"); }
+    char *buf = (char *)malloc((size_t)len + 1);
+    if (!buf) { fclose(f); return mk_err_cstr("out of memory"); }
+    size_t n = fread(buf, 1, (size_t)len, f);
+    fclose(f);
+    buf[n] = '\0';
+    void *s = march_string_lit(buf, (int64_t)n);
+    free(buf);
+    return mk_ok(s);
+}
+
+void *march_file_write(void *path_ptr, void *data_ptr) {
+    march_string *ps = (march_string *)path_ptr;
+    march_string *ds = (march_string *)data_ptr;
+    FILE *f = fopen(ps->data, "wb");
+    if (!f) return mk_err_errno();
+    size_t w = fwrite(ds->data, 1, (size_t)ds->len, f);
+    fclose(f);
+    if ((int64_t)w != ds->len) return mk_err_cstr("write failed");
+    return mk_ok_unit();
+}
+
+void *march_file_append(void *path_ptr, void *data_ptr) {
+    march_string *ps = (march_string *)path_ptr;
+    march_string *ds = (march_string *)data_ptr;
+    FILE *f = fopen(ps->data, "ab");
+    if (!f) return mk_err_errno();
+    size_t w = fwrite(ds->data, 1, (size_t)ds->len, f);
+    fclose(f);
+    if ((int64_t)w != ds->len) return mk_err_cstr("write failed");
+    return mk_ok_unit();
+}
+
+void *march_file_delete(void *path_ptr) {
+    march_string *ps = (march_string *)path_ptr;
+    if (remove(ps->data) != 0) return mk_err_errno();
+    return mk_ok_unit();
+}
+
+void *march_file_copy(void *src_ptr, void *dst_ptr) {
+    march_string *src = (march_string *)src_ptr;
+    march_string *dst = (march_string *)dst_ptr;
+    FILE *in = fopen(src->data, "rb");
+    if (!in) return mk_err_errno();
+    FILE *out = fopen(dst->data, "wb");
+    if (!out) { fclose(in); return mk_err_errno(); }
+    char buf[8192];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+        fwrite(buf, 1, n, out);
+    fclose(in);
+    fclose(out);
+    return mk_ok_unit();
+}
+
+void *march_file_rename(void *src_ptr, void *dst_ptr) {
+    march_string *src = (march_string *)src_ptr;
+    march_string *dst = (march_string *)dst_ptr;
+    if (rename(src->data, dst->data) != 0) return mk_err_errno();
+    return mk_ok_unit();
+}
+
+/* FileKind tags: RegularFile=0, Directory=1, Symlink=2, OtherKind=3 */
+void *march_file_stat(void *path_ptr) {
+    march_string *ps = (march_string *)path_ptr;
+    struct stat st;
+    if (stat(ps->data, &st) != 0) return mk_err_errno();
+    int kind_tag = S_ISREG(st.st_mode) ? 0 :
+                   S_ISDIR(st.st_mode) ? 1 :
+                   S_ISLNK(st.st_mode) ? 2 : 3;
+    void *kind = march_alloc(16); /* FileKind variant, no fields */
+    MARCH_SET_TAG(kind, kind_tag);
+    /* FileStat(size, kind, modified, accessed) — 4 fields, 48 bytes total */
+    void *fs = march_alloc(48);
+    MARCH_FIELD(fs, 0) = (int64_t)st.st_size;
+    MARCH_FIELD(fs, 1) = (int64_t)kind;
+    MARCH_FIELD(fs, 2) = (int64_t)st.st_mtime;
+    MARCH_FIELD(fs, 3) = (int64_t)st.st_atime;
+    return mk_ok(fs);
+}
+
+/* File handle: heap object with tag=0, field[0] = FILE* as int64_t */
+void *march_file_open(void *path_ptr) {
+    march_string *ps = (march_string *)path_ptr;
+    FILE *f = fopen(ps->data, "rb");
+    if (!f) return mk_err_errno();
+    void *handle = march_alloc(24);
+    MARCH_FIELD(handle, 0) = (int64_t)(uintptr_t)f;
+    return mk_ok(handle);
+}
+
+void *march_file_close(void *handle_ptr) {
+    FILE *f = (FILE *)(uintptr_t)MARCH_FIELD(handle_ptr, 0);
+    if (f) fclose(f);
+    return mk_ok_unit();
+}
+
+void *march_file_read_line(void *handle_ptr) {
+    FILE *f = (FILE *)(uintptr_t)MARCH_FIELD(handle_ptr, 0);
+    if (!f) return mk_err_cstr("file not open");
+    char buf[4096];
+    if (!fgets(buf, sizeof(buf), f)) {
+        if (feof(f)) return mk_err_cstr("eof");
+        return mk_err_errno();
+    }
+    size_t len = strlen(buf);
+    /* Strip trailing newline */
+    if (len > 0 && buf[len-1] == '\n') { buf[--len] = '\0'; }
+    if (len > 0 && buf[len-1] == '\r') { buf[--len] = '\0'; }
+    return mk_ok(march_string_lit(buf, (int64_t)len));
+}
+
+void *march_file_read_chunk(void *handle_ptr, int64_t size) {
+    FILE *f = (FILE *)(uintptr_t)MARCH_FIELD(handle_ptr, 0);
+    if (!f || size <= 0) return mk_err_cstr("file not open");
+    char *buf = (char *)malloc((size_t)size);
+    if (!buf) return mk_err_cstr("out of memory");
+    size_t n = fread(buf, 1, (size_t)size, f);
+    void *s = march_string_lit(buf, (int64_t)n);
+    free(buf);
+    if (n == 0 && feof(f)) return mk_err_cstr("eof");
+    return mk_ok(s);
+}
+
+/* ── Directory builtins ─────────────────────────────────────────────── */
+
+void *march_dir_list(void *path_ptr) {
+    march_string *ps = (march_string *)path_ptr;
+    DIR *dir = opendir(ps->data);
+    if (!dir) return mk_err_errno();
+    /* Collect entries into a dynamic array */
+    char **names = NULL;
+    int n = 0, cap = 0;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        if (n >= cap) {
+            cap = cap ? cap * 2 : 16;
+            names = (char **)realloc(names, (size_t)cap * sizeof(char *));
+        }
+        names[n++] = strdup(ent->d_name);
+    }
+    closedir(dir);
+    void *lst = build_string_list(names, n);
+    for (int i = 0; i < n; i++) free(names[i]);
+    free(names);
+    return mk_ok(lst);
+}
+
+static int mkdir_p(const char *path) {
+    char *p = strdup(path);
+    for (char *s = p + 1; *s; s++) {
+        if (*s == '/') {
+            *s = '\0';
+            mkdir(p, 0755);
+            *s = '/';
+        }
+    }
+    int r = mkdir(p, 0755);
+    free(p);
+    return r;
+}
+
+void *march_dir_mkdir(void *path_ptr) {
+    march_string *ps = (march_string *)path_ptr;
+    if (mkdir(ps->data, 0755) != 0 && errno != EEXIST) return mk_err_errno();
+    return mk_ok_unit();
+}
+
+void *march_dir_mkdir_p(void *path_ptr) {
+    march_string *ps = (march_string *)path_ptr;
+    if (mkdir_p(ps->data) != 0 && errno != EEXIST) return mk_err_errno();
+    return mk_ok_unit();
+}
+
+void *march_dir_rmdir(void *path_ptr) {
+    march_string *ps = (march_string *)path_ptr;
+    if (rmdir(ps->data) != 0) return mk_err_errno();
+    return mk_ok_unit();
+}
+
+static int rm_rf(const char *path) {
+    struct stat st;
+    if (lstat(path, &st) != 0) return -1;
+    if (!S_ISDIR(st.st_mode)) return remove(path);
+    DIR *dir = opendir(path);
+    if (!dir) return -1;
+    struct dirent *ent;
+    char buf[4096];
+    while ((ent = readdir(dir)) != NULL) {
+        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0) continue;
+        snprintf(buf, sizeof(buf), "%s/%s", path, ent->d_name);
+        rm_rf(buf);
+    }
+    closedir(dir);
+    return rmdir(path);
+}
+
+void *march_dir_rm_rf(void *path_ptr) {
+    march_string *ps = (march_string *)path_ptr;
+    if (rm_rf(ps->data) != 0) return mk_err_errno();
+    return mk_ok_unit();
+}
+
+/* ── CSV builtins ───────────────────────────────────────────────────── */
+
+/* CSV handle: heap object with fields:
+   [0] = FILE* (as int64_t)
+   [1] = delimiter char code (int64_t)
+   [2] = mode (0=simple, 1=rfc4180) */
+typedef struct {
+    FILE *f;
+    char delim;
+    int rfc4180;
+} csv_handle;
+
+static void *csv_row_result(void *fields_list) {
+    /* Row(fields) — constructor tag 0, 1 field */
+    void *row = march_alloc(24);
+    /* tag=0 for Row (first/only constructor) */
+    MARCH_FIELD(row, 0) = (int64_t)fields_list;
+    return row;
+}
+
+/* Parse one CSV row from f according to delimiter/mode.
+   Returns a March List(String) or NULL on EOF. */
+static void **csv_parse_row_fields(FILE *f, char delim, int rfc4180,
+                                   int *out_n) {
+    int cap = 8, n = 0;
+    void **fields = (void **)malloc((size_t)cap * sizeof(void *));
+    char buf[65536];
+    int buf_len = 0;
+    int in_quote = 0, at_eof = 0;
+
+    while (1) {
+        int c = fgetc(f);
+        if (c == EOF) { at_eof = 1; break; }
+        if (rfc4180 && c == '"') {
+            if (!in_quote) { in_quote = 1; continue; }
+            int next = fgetc(f);
+            if (next == '"') { if (buf_len < 65535) buf[buf_len++] = '"'; }
+            else { in_quote = 0; ungetc(next, f); }
+            continue;
+        }
+        if (!in_quote && c == delim) {
+            /* End of field */
+            if (n >= cap) { cap *= 2; fields = (void **)realloc(fields, (size_t)cap * sizeof(void *)); }
+            fields[n++] = march_string_lit(buf, buf_len);
+            buf_len = 0;
+            continue;
+        }
+        if (!in_quote && (c == '\n' || c == '\r')) {
+            if (c == '\r') { int next = fgetc(f); if (next != '\n') ungetc(next, f); }
+            break; /* End of row */
+        }
+        if (buf_len < 65535) buf[buf_len++] = (char)c;
+    }
+
+    /* Last field */
+    if (!at_eof || buf_len > 0 || n > 0) {
+        if (n >= cap) { cap *= 2; fields = (void **)realloc(fields, (size_t)cap * sizeof(void *)); }
+        fields[n++] = march_string_lit(buf, buf_len);
+    }
+    if (at_eof && n == 0) { free(fields); *out_n = 0; return NULL; }
+    *out_n = n;
+    return fields;
+}
+
+void *march_csv_open(void *path_ptr, void *delim_ptr, void *mode_ptr) {
+    (void)mode_ptr; /* mode stored but we always use rfc4180 for now */
+    march_string *ps = (march_string *)path_ptr;
+    march_string *ds = (march_string *)delim_ptr;
+    FILE *f = fopen(ps->data, "rb");
+    if (!f) return mk_err_errno();
+    char delim = (ds->len > 0) ? ds->data[0] : ',';
+    /* handle: 3 fields: FILE*, delim, mode */
+    void *h = march_alloc(40);
+    MARCH_FIELD(h, 0) = (int64_t)(uintptr_t)f;
+    MARCH_FIELD(h, 1) = (int64_t)(uint8_t)delim;
+    MARCH_FIELD(h, 2) = 1; /* rfc4180 */
+    return mk_ok(h);
+}
+
+void *march_csv_close(void *handle_ptr) {
+    FILE *f = (FILE *)(uintptr_t)MARCH_FIELD(handle_ptr, 0);
+    if (f) { fclose(f); MARCH_FIELD(handle_ptr, 0) = 0; }
+    return mk_ok_unit();
+}
+
+/* Returns Row(List(String)) or :eof (null) */
+void *march_csv_next_row(void *handle_ptr) {
+    FILE *f = (FILE *)(uintptr_t)MARCH_FIELD(handle_ptr, 0);
+    char delim = (char)(uint8_t)MARCH_FIELD(handle_ptr, 1);
+    int rfc4180 = (int)MARCH_FIELD(handle_ptr, 2);
+    if (!f) return NULL; /* eof = null = atom */
+    int n = 0;
+    void **fields = csv_parse_row_fields(f, delim, rfc4180, &n);
+    if (!fields) return NULL; /* EOF → :eof (null) */
+    /* Build List(String) from fields */
+    void *lst = march_alloc(16); /* Nil, tag=0 */
+    for (int i = n - 1; i >= 0; i--) {
+        void *cons = march_alloc(32);
+        MARCH_SET_TAG(cons, 1);
+        MARCH_FIELD(cons, 0) = (int64_t)fields[i];
+        MARCH_FIELD(cons, 1) = (int64_t)lst;
+        lst = cons;
+    }
+    free(fields);
+    return csv_row_result(lst);
 }
 
 /* ── Capability builtins ─────────────────────────────────────────────── */

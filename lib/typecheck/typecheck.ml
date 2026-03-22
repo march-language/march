@@ -2430,11 +2430,21 @@ let rec check_decl env (d : Ast.decl) : env =
          String.sub k 0 (String.length n + 1) = n ^ ".")
       ) pub_set
     in
-    let new_names = List.filter_map (fun (k, sch) ->
+    (* Collect exported names from inner_env.vars.
+       inner_env.vars may contain duplicate entries for a given key because
+       the pre-binding pass added a Mono(TVar) forward-ref before check_decl
+       added the real Poly scheme.  keep only the FIRST (most recently bound =
+       correct) entry per exported key. *)
+    let new_names_raw = List.filter_map (fun (k, sch) ->
         if is_pub_key k
         then Some (name.txt ^ "." ^ k, sch)
         else None
       ) inner_env.vars in
+    let _seen_export = Hashtbl.create 16 in
+    let new_names = List.filter_map (fun (k, v) ->
+        if Hashtbl.mem _seen_export k then None
+        else (Hashtbl.add _seen_export k (); Some (k, v))
+      ) new_names_raw in
     (* Also export type names and constructors from public DMod into outer scope.
        Types defined in a module (e.g. IOList, Option) are referred to by their
        bare name throughout user code, not prefixed. *)

@@ -1,5 +1,101 @@
 [
   {
+    "hash": "92daec830c0961d237f5d26b12bad16df2664ac5",
+    "short_hash": "92daec8",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-21T12:05:08-04:00",
+    "message": "fix(interp): fix 4 example file interpreter failures\n\n- actors.march: ESend now returns Option(Unit) — None for dead/killed\n  actors, Some(()) on success. The match in safe_send expected Option\n  but got plain Unit, causing non-exhaustive match failure.\n\n- counter_server.march, http_hello.march: add http_server_listen stub\n  to interpreter builtins that prints a clear error and exits 1 instead\n  of crashing with \"unbound variable\".\n\n- docstrings.march: (a) extend fn_param parser rule from simple_pattern\n  to pattern so constructor patterns like Nil/Cons(x,_) work in function\n  heads; (b) fix Ok(x, rest) → Ok(x) (Ok takes 1 argument).\n\nAll 501 tests pass.",
+    "files_changed": 3
+  },
+  {
+    "hash": "85359bb6b969c48c777a9d64aaad2821f964afb5",
+    "short_hash": "85359bb",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-21T07:57:22-04:00",
+    "message": "fix(jit): handle TVar return type in run_expr, fix cross-line test assertions\n\nrun_expr: detect small integers (< 4096) returned as ptr in the TVar/_ case,\ndisplaying them as integers rather than '#<value at 0xNN>'. This fixes\ncross-line let bindings where the return type wasn't fully resolved.\n\ntest_march.ml: fix test_repl_jit_cross_line_fn/hof to use DLet pattern\n(let f = fn x -> ... always parses as DLet, never DFn). Cross-fragment\nfunction calls that fail due to the known 'undefined value' issue are\nnow caught and treated as a known limitation (matching smoke test xfail).",
+    "files_changed": 2
+  },
+  {
+    "hash": "26a2e8004b24517a2c5bc7a238d9c15e89163825",
+    "short_hash": "26a2e80",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-21T04:30:26-04:00",
+    "message": "fix(jit): resolve cross-line REPL variable capture in HOF arguments\n\nWhen the REPL JIT compiled `map(l, f)` where both `l` and `f` were\ndefined on previous lines, it emitted `load ptr, ptr %f.addr` and\n`load ptr, ptr %l.addr` but neither alloca existed in the new module.\n\nRoot causes:\n1. `DLet` bindings (e.g. `let l = [1,2,3]`) were only evaluated by\n   the interpreter, never compiled to JIT globals. Subsequent JIT\n   fragments couldn't load `l` from anywhere.\n\n2. `DFn` bindings (e.g. `let f = fn x -> x * 2`) were compiled as\n   top-level LLVM functions but never registered as first-class value\n   globals. Later fragments didn't know `f` was a known top-level\n   function (not in `ctx.top_fns`), so `AVar f` fell through to the\n   alloca-load path, which failed.\n\nFixes:\n- `emit_repl_fn_with_closure_global`: new LLVM emitter that, in\n  addition to the raw function, generates a thin closure wrapper\n  `@<fn>$clo_wrap`, a global `@repl_<bind_name> = global ptr`, and\n  an init function that allocates the closure and fills the global.\n\n- `repl_jit.ml run_decl` (DFn path): switch primary-function emission\n  to use `emit_repl_fn_with_closure_global`, call the init to allocate\n  the closure, and register `(\"repl_<name>\", \"ptr\")` in `ctx.globals`\n  so subsequent fragments bridge it via `emit_prev_global_bridges`.\n\n- `repl.ml` (both run_simple and run_tui): add a new JIT dispatch arm\n  for `DLet` with `PatVar` patterns. Uses `wrap_expr_as_module` +\n  `run_decl ~is_fn_decl:false` to compile the value to a JIT global;\n  also runs through the interpreter for scope-panel/debug consistency.\n\nTests: three new `repl_jit_cross_line` cases verify integer let,\nfunction reference, and HOF (fn + let together) all work correctly.",
+    "files_changed": 4
+  },
+  {
+    "hash": "5c6615d0aa7795da771c03cce821742b43a8cdff",
+    "short_hash": "5c6615d",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-20T23:33:44-04:00",
+    "message": "feat(capabilities): transitive capability enforcement for module imports\n\nImplements Phase 1 of the capability security plan:\n\n- Add `module_caps` to typecheck env: maps module name → declared needs.\n  Populated when each DMod is checked, enabling downstream lookup.\n- Extend `check_module_needs` with two new checks:\n  - Check 4 (transitive): if module A `use`s module B, A must declare all\n    capabilities that B declares via `needs` (or a parent in the hierarchy).\n    Error: \"module A imports B which requires Cap(X), but X is not declared\n    in needs\"\n  - Check 5 (extern gating): `extern \"lib\": Cap(X)` blocks require `needs X`\n    in the enclosing module.\n- Replace `check_capabilities` stub in effects.ml with a real implementation\n  that delegates to `check_module`, wiring it explicitly for both the eval\n  (tree-walking interpreter) and compile (TIR/LLVM) paths.\n- Add 10 new tests covering: transitive ok, transitive missing error,\n  supertype coverage, three-level chain errors, extern gating, effects\n  entry point, and eval-path blocking.\n- 432/432 tests pass.",
+    "files_changed": 6
+  },
+  {
+    "hash": "f2b29272277a5fcd434029c20ca5e27dac8f1bee",
+    "short_hash": "f2b2927",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-20T23:29:46-04:00",
+    "message": "feat(actors): true async mailbox dispatch in both interpreter and compiled paths\n\nThe C runtime's march_send() previously called march_run_scheduler()\ninline (synchronous-looking behaviour). This contradicts the spec and\nthe interpreter, which defers handler execution to a separate scheduler\npass.\n\nChanges:\n- runtime/march_runtime.c: remove inline march_run_scheduler() call\n  from march_send(); messages are now enqueued only — handlers run when\n  the scheduler is explicitly drained.\n- lib/tir/llvm_emit.ml: add `declare void @march_run_scheduler()` to\n  the LLVM preamble and call it in the @main() C wrapper after\n  march_main() returns, mirroring the interpreter's run_module()\n  behaviour.\n- test/test_march.ml: 6 new \"eval phase 4\" tests covering FIFO message\n  ordering, handler-to-actor cascade dispatch, self-send from a handler,\n  dead-actor silent drop, and run_module auto-drain without explicit\n  run_until_idle(); plus 1 new llvm_emit test verifying the compiled\n  @main() wrapper calls march_run_scheduler().\n\n428 tests pass (up from 422).",
+    "files_changed": 3
+  },
+  {
+    "hash": "07fc03cb4cb5cd0d79d2e03f7cd3cf02388e2cc5",
+    "short_hash": "07fc03c",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-20T23:29:34-04:00",
+    "message": "feat(stdlib): persistent Map module (AVL tree, 17 ops, 26 tests)\n\nImplements Map(k, v) as a persistent AVL balanced BST. No interface\nsystem required — operations take an explicit curried comparator\n  cmp : k -> k -> Bool  (same style as Sort.timsort_by).\n\nPublic API:\n  empty, singleton, is_empty, size\n  insert, get, get_or, contains_key, remove\n  fold, keys, values, entries\n  from_list, to_list, map_values, filter, merge, merge_with\n\nInternal: Leaf | Node(left, key, val, right, height) with full AVL\nrebalancing (all 4 rotation cases). O(log n) insert/get/remove;\nO(n) traversals; O(n log n) merge and filter.\n\nTests: 26 new alcotest cases covering interpreter path (eval_with_map)\nand TIR lowering smoke test (lower_map_typed). All 448 tests pass.",
+    "files_changed": 3
+  },
+  {
+    "hash": "919688f0a335941a5bf520adc276af4056a52457",
+    "short_hash": "919688f",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-20T23:09:14-04:00",
+    "message": "test: integration tests for tracks A-D fixes\n\nAdds 7 tests in a new 'track integration' suite exercising the four\nmerged fix tracks:\n\nTrack B (type-qualified constructors):\n- Verify EAlloc in TIR uses \"TypeName.CtorName\" key after lower_module_typed\n- Eval test: two distinct ADTs dispatch to correct constructors\n\nTrack A (interface constraint discharge):\n- Calling an interface method with no impl for the concrete type → error\n\nTrack A (linear type enforcement):\n- Linear pattern binding used twice in match arm → error\n\nTrack C (actor messaging):\n- spawn(Counter) + send(pid, Inc()) typechecks and runs without exception\n\nTrack D (CAS integration):\n- hash_module is deterministic (stable impl_hash across two calls)\n- Second compile_scc pass is a full cache hit (compile fn not called)\n\nAlso adds march_cas and unix to test/dune dependencies for test_march.",
+    "files_changed": 2
+  },
+  {
+    "hash": "9159ae05960a2eef476e6b12e0204c8c9455d7a6",
+    "short_hash": "9159ae0",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-20T21:14:55-04:00",
+    "message": "feat(cas): wire CAS cache into default compile path\n\nAdd march_cas to bin/dune and restructure the --compile path in\nbin/main.ml to check the content-addressed store before invoking\nclang. On a cache hit the cached binary is copied directly, skipping\nboth LLVM IR emission and the clang invocation. On a miss the binary\nis compiled as before and stored in the CAS for future reuse.\n\nThe --emit-llvm path is unaffected; only --compile benefits from\ncaching.",
+    "files_changed": 2
+  },
+  {
+    "hash": "b00e620614b1787539a27ed9a48443c4f4dce018",
+    "short_hash": "b00e620",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-20T17:04:56-04:00",
+    "message": "feat(codegen): full compiled code feature parity for non-actor features\n\nClose all gaps between the interpreter and LLVM backend:\n\n- Match guards: lower `when` clauses to nested ECase with bool check\n  and fallthrough to remaining branches\n- Top-level let: inject DLet bindings into main's body as ELet chain\n- Extern/FFI: add extern_decl to TIR, lower DExtern blocks, emit\n  LLVM declare statements and resolve march→C name mapping\n- Use imports: resolve DUse aliases so unqualified names map to\n  qualified module-prefixed fn_defs during lowering\n- Interface dispatch: two-pass lowering collects DInterface/DImpl,\n  lowers impl methods as mangled fn_defs, resolves interface method\n  calls via type_map to concrete impl functions\n- Protocol registration: store DProtocol in typechecker env with\n  duplicate/empty validation (full message-flow verification TBD)",
+    "files_changed": 5
+  },
+  {
+    "hash": "087e53dbb8e19b21ae533f0cd879b38e9f3802ed",
+    "short_hash": "087e53d",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-20T16:19:49-04:00",
+    "message": "feat: end-to-end compiled HTTP server with ~15 LLVM codegen fixes\n\nFirst successful compilation of a full March program with stdlib\ndependencies. The test server (`test_server.march`) compiles to a\nnative binary and serves HTTP requests on port 8787.\n\nKey fixes:\n- Mono: seed `main` as entry point, discover function-as-value atoms,\n  handle ECallPtr callees, treat TVar \"_\" as non-polymorphic\n- Desugar: pipe `a |> f(b)` now produces saturated `f(a, b)` instead\n  of curried `f(b)(a)`, matching Elixir convention\n- LLVM emit: float ops (fcmp/fneg/IEEE hex), string equality via\n  march_string_eq, string pattern matching, boolean ops inline,\n  double↔ptr coercion, closure wrappers for top-level fn-as-value\n- Runtime: 49 C builtins (float/math/string/list/file), closure-based\n  HTTP pipeline dispatch with refcount borrowing for thread safety\n- Stdlib: renamed colliding constructors across types",
+    "files_changed": 18
+  },
+  {
+    "hash": "933dbf03c058e31aabc4490e630a808bcca16af2",
+    "short_hash": "933dbf0",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-20T15:19:20-04:00",
+    "message": "feat: add WebSocket/HTTP server stdlib, CSV spec, and REPL HTTP improvements\n\n- stdlib/websocket.march: WebSocket upgrade and frame handling module\n- stdlib/http_server.march: HTTP/1.1 server with plug-based routing\n- bin/main.ml: add websocket.march and http_server.march to stdlib load order\n- runtime/march_http.c/h: extend HTTP runtime with server-side socket builtins\n- lib/parser/parser.mly: parser improvements\n- lib/repl/repl.ml: REPL improvements for HTTP/compiled mode\n- specs/2026-03-20-csv-parser-design.md: full CSV parser design spec\n- specs/2026-03-20-http-server-design.md: update HTTP server spec\n- specs/progress.md: update implementation progress\n- docs/superpowers/plans: compiled REPL HTTP runtime plan\n- remove stale list_lib_asan.dSYM debug artifacts",
+    "files_changed": 14
+  },
+  {
+    "hash": "52a45bc2451165cc5f82753d1e5a49afaca3cae3",
+    "short_hash": "52a45bc",
+    "author": "Matthew Gilliam",
+    "date": "2026-03-20T15:15:31-04:00",
+    "message": "feat: add Csv stdlib module with csv_open/csv_next_row/csv_close builtins\n\n- Add csv_reader type and 4-state RFC 4180 FSM scanner at module level in eval.ml\n- Three builtins: csv_open(path, delim, mode), csv_next_row(handle), csv_close(handle)\n- csv_next_row returns Row(List(String)) or :eof atom\n- Modes: :simple (split-only) and :rfc4180 (quoted fields, \"\" escapes, embedded newlines)\n- stdlib/csv.march: each_row, read_all, each_row_with_header, read_csv, each_csv_row\n- examples/csv_example.march: demos of all four API patterns (streaming, eager, header, TSV)",
+    "files_changed": 4
+  },
+  {
     "hash": "e678b390c779484cf475bc80b65dd7611357f189",
     "short_hash": "e678b39",
     "author": "Matthew Gilliam",

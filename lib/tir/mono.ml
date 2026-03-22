@@ -295,7 +295,8 @@ let monomorphize (m : Tir.tir_module) : Tir.tir_module =
        let ln = String.length n and ls = String.length suf in
        ln >= ls && String.sub n (ln - ls) ls = suf)
     in
-    if is_mono || is_main then Queue.add (fn.Tir.fn_name, fn, []) worklist
+    if is_mono || is_main then
+      Queue.add (fn.Tir.fn_name, fn, []) worklist
   ) m.Tir.tm_fns;
 
   while not (Queue.is_empty worklist) do

@@ -191,13 +191,22 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
   let base_e  = March_eval.Eval.base_env in
   let base_tc = March_typecheck.Typecheck.base_env
     (March_errors.Errors.create ()) type_map in
+  let t_s0 = Unix.gettimeofday () in
   let (e0, tc0) = match initial_env with
     | Some e -> (e, base_tc)
     | None   ->
       let tc_pre = preregister_stdlib_types base_tc stdlib_decls in
-      load_decls_into_env base_e tc_pre stdlib_decls
+      let t_s1 = Unix.gettimeofday () in
+      Printf.eprintf "[timing] preregister: %.3fs\n%!" (t_s1 -. t_s0);
+      let r = load_decls_into_env base_e tc_pre stdlib_decls in
+      let t_s2 = Unix.gettimeofday () in
+      Printf.eprintf "[timing] load_decls: %.3fs\n%!" (t_s2 -. t_s1);
+      r
   in
+  let t_s3 = Unix.gettimeofday () in
   maybe_precompile_stdlib jit_ctx ~stdlib_decls ~type_map;
+  let t_s4 = Unix.gettimeofday () in
+  Printf.eprintf "[timing] precompile: %.3fs\n%!" (t_s4 -. t_s3);
   let env      = ref e0 in
   let tc_env   = ref tc0 in
   let result_h = Result_vars.create () in

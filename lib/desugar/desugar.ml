@@ -42,13 +42,25 @@ open March_ast.Ast
 
 (* ---- Utilities ---- *)
 
+(** Counter for generating unique synthetic spans for synthesised params.
+    Each call to [fresh_arg_name] gets a distinct [start_line] so that
+    the typechecker can annotate each synthesised [__argN] param at its
+    own slot in the type_map, avoiding collisions across functions that
+    previously all shared [dummy_span] and got the wrong inferred type. *)
+let _synth_counter = ref 0
+
 (** Generate fresh argument names __arg0, __arg1 … for synthesised match
     scrutinees.  These are prefixed with "__" to avoid shadowing user
-    bindings. *)
+    bindings.  Each generated name gets a unique synthetic span so the
+    typechecker's type_map entries don't collide across functions. *)
 let fresh_arg_name i =
+  incr _synth_counter;
   let txt = Printf.sprintf "__arg%d" i in
-  (* We use a dummy span; the real span comes from the clause. *)
-  { txt; span = dummy_span }
+  { txt; span = { file = "__synth__";
+                  start_line = !_synth_counter;
+                  start_col  = i;
+                  end_line   = 0;
+                  end_col    = 0 } }
 
 (** True if a fn_param is "trivially named" — i.e. it is an [FPNamed]
     with no need to match.  A single clause of all trivially-named params
