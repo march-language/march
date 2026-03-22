@@ -53,6 +53,22 @@ let builtin_names : StringSet.t =
       "list_append"; "list_concat";
       (* File/Dir builtins *)
       "file_exists"; "dir_exists";
+      "file_open"; "file_close"; "file_read"; "file_read_line"; "file_read_chunk";
+      "file_write"; "file_append"; "file_delete"; "file_copy"; "file_rename"; "file_stat";
+      "file_create_dir"; "file_create_dir_all";
+      (* TCP/network builtins *)
+      "tcp_connect"; "tcp_close"; "tcp_listen"; "tcp_accept";
+      "tcp_send_all"; "tcp_recv_all"; "tcp_recv_http"; "tcp_recv_http_headers";
+      "tcp_recv_chunk"; "tcp_recv_chunked_frame";
+      (* HTTP builtins *)
+      "http_parse_request"; "http_serialize_response"; "http_server_listen";
+      "http_serialize_request"; "http_parse_response";
+      (* WebSocket builtins *)
+      "ws_handshake"; "ws_recv"; "ws_send"; "ws_select";
+      (* CSV builtins *)
+      "csv_open"; "csv_next_row"; "csv_close";
+      (* Resource ownership *)
+      "own";
       (* Capability builtins *)
       "cap_narrow"; "root_cap";
       (* Monitor/supervision builtins *)

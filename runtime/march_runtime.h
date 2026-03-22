@@ -115,6 +115,25 @@ void *march_list_concat(void *lists);
 /* File/Dir builtins. */
 int64_t march_file_exists(void *s);
 int64_t march_dir_exists(void *s);
+void   *march_file_open(void *path);
+void   *march_file_close(void *handle);
+void   *march_file_read(void *path);
+void   *march_file_read_line(void *handle);
+void   *march_file_read_chunk(void *handle, int64_t size);
+void   *march_file_write(void *path, void *data);
+void   *march_file_append(void *path, void *data);
+void   *march_file_delete(void *path);
+void   *march_file_copy(void *src, void *dst);
+void   *march_file_rename(void *src, void *dst);
+void   *march_file_stat(void *path);
+
+/* CSV builtins. */
+void   *march_csv_open(void *path, void *delim, void *mode);
+void   *march_csv_next_row(void *handle);
+void   *march_csv_close(void *handle);
+
+/* Resource ownership. */
+void    march_own(void *pid, void *value);
 
 /* Value pretty-printing. */
 void *march_value_to_string(void *v);

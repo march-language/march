@@ -177,6 +177,16 @@ let is_builtin_fn name =
                  "list_append"; "list_concat";
                  (* File/Dir builtins *)
                  "file_exists"; "dir_exists";
+                 "file_open"; "file_close"; "file_read"; "file_read_line"; "file_read_chunk";
+                 "file_write"; "file_append"; "file_delete"; "file_copy"; "file_rename"; "file_stat";
+                 (* TCP/network builtins *)
+                 "tcp_connect"; "tcp_close";
+                 (* HTTP builtins *)
+                 "http_serialize_request"; "http_parse_response";
+                 (* CSV builtins *)
+                 "csv_open"; "csv_next_row"; "csv_close";
+                 (* Resource ownership *)
+                 "own";
                  (* Capability builtins *)
                  "cap_narrow";
                  (* Monitor/supervision builtins *)
@@ -252,6 +262,28 @@ let builtin_ret_ty : string -> Tir.ty option = function
   (* File/Dir builtins *)
   | "file_exists"                 -> Some Tir.TBool
   | "dir_exists"                  -> Some Tir.TBool
+  | "file_open"                   -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
+  | "file_close"                  -> Some (Tir.TPtr Tir.TUnit)
+  | "file_read"                   -> Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]))
+  | "file_read_line"              -> Some (Tir.TCon ("Option", [Tir.TString]))
+  | "file_read_chunk"             -> Some (Tir.TCon ("Option", [Tir.TString]))
+  | "file_write"                  -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
+  | "file_append"                 -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
+  | "file_delete"                 -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
+  | "file_copy"                   -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
+  | "file_rename"                 -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
+  | "file_stat"                   -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]))
+  (* TCP/network builtins *)
+  | "tcp_connect"                 -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
+  (* HTTP builtins *)
+  | "http_serialize_request"      -> Some Tir.TString
+  | "http_parse_response"         -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]))
+  (* CSV builtins *)
+  | "csv_open"                    -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]))
+  | "csv_next_row"                -> Some (Tir.TCon ("Option", [Tir.TCon ("List", [Tir.TString])]))
+  | "csv_close"                   -> Some (Tir.TPtr Tir.TUnit)
+  (* Resource ownership *)
+  | "own"                         -> Some Tir.TUnit
   (* Capability builtins *)
   | "cap_narrow"                  -> Some (Tir.TCon ("Cap", [Tir.TVar "a"]))
   (* Monitor/supervision builtins *)
@@ -351,8 +383,30 @@ let mangle_extern : string -> string = function
   | "list_append"  -> "march_list_append"
   | "list_concat"  -> "march_list_concat"
   (* File/Dir builtins *)
-  | "file_exists"  -> "march_file_exists"
-  | "dir_exists"   -> "march_dir_exists"
+  | "file_exists"       -> "march_file_exists"
+  | "dir_exists"        -> "march_dir_exists"
+  | "file_open"         -> "march_file_open"
+  | "file_close"        -> "march_file_close"
+  | "file_read"         -> "march_file_read"
+  | "file_read_line"    -> "march_file_read_line"
+  | "file_read_chunk"   -> "march_file_read_chunk"
+  | "file_write"        -> "march_file_write"
+  | "file_append"       -> "march_file_append"
+  | "file_delete"       -> "march_file_delete"
+  | "file_copy"         -> "march_file_copy"
+  | "file_rename"       -> "march_file_rename"
+  | "file_stat"         -> "march_file_stat"
+  (* TCP/network builtins *)
+  | "tcp_connect"       -> "march_tcp_connect"
+  (* HTTP builtins *)
+  | "http_serialize_request" -> "march_http_serialize_request"
+  | "http_parse_response"    -> "march_http_parse_response"
+  (* CSV builtins *)
+  | "csv_open"          -> "march_csv_open"
+  | "csv_next_row"      -> "march_csv_next_row"
+  | "csv_close"         -> "march_csv_close"
+  (* Resource ownership *)
+  | "own"               -> "march_own"
   (* Capability builtins *)
   | "cap_narrow"         -> "march_cap_narrow"
   (* Monitor/supervision builtins *)
@@ -630,7 +684,27 @@ let emit_stack_alloc ctx n_fields =
 let ctor_entry ctx name n_args_fallback =
   match Hashtbl.find_opt ctx.ctor_info name with
   | Some e -> e
-  | None   -> { ce_tag = 0; ce_fields = List.init n_args_fallback (fun _ -> Tir.TVar "_") }
+  | None   ->
+    (* Exact key not found: try to find a type-qualified key ending in ".<name>".
+       This handles pattern matches on constructors whose scrutinee type is TVar "_"
+       (unknown at codegen time) — e.g. nested match arms where the inner value's
+       type was not propagated through the pattern-matrix compiler. *)
+    let suffix = "." ^ name in
+    let suffix_len = String.length suffix in
+    let found = Hashtbl.fold (fun k v acc ->
+        match acc with
+        | Some _ -> acc
+        | None ->
+          let klen = String.length k in
+          if klen > suffix_len &&
+             String.equal (String.sub k (klen - suffix_len) suffix_len) suffix
+          then Some v
+          else None
+      ) ctx.ctor_info None in
+    (match found with
+     | Some e -> e
+     | None ->
+       { ce_tag = 0; ce_fields = List.init n_args_fallback (fun _ -> Tir.TVar "_") })
 
 (** Apply a type-variable substitution to a TIR type. *)
 let rec apply_ty_subst (subst : (string * Tir.ty) list) : Tir.ty -> Tir.ty = function
@@ -1629,6 +1703,28 @@ declare ptr  @march_list_concat(ptr %lists)
 ; File/Dir builtins
 declare i64  @march_file_exists(ptr %s)
 declare i64  @march_dir_exists(ptr %s)
+declare ptr  @march_file_open(ptr %path)
+declare ptr  @march_file_close(ptr %handle)
+declare ptr  @march_file_read(ptr %path)
+declare ptr  @march_file_read_line(ptr %handle)
+declare ptr  @march_file_read_chunk(ptr %handle, i64 %size)
+declare ptr  @march_file_write(ptr %path, ptr %data)
+declare ptr  @march_file_append(ptr %path, ptr %data)
+declare ptr  @march_file_delete(ptr %path)
+declare ptr  @march_file_copy(ptr %src, ptr %dst)
+declare ptr  @march_file_rename(ptr %src, ptr %dst)
+declare ptr  @march_file_stat(ptr %path)
+; TCP/network builtins
+declare ptr  @march_tcp_connect(ptr %host, i64 %port)
+; HTTP client builtins
+declare ptr  @march_http_serialize_request(ptr %method, ptr %host, ptr %path, ptr %query, ptr %headers, ptr %body)
+declare ptr  @march_http_parse_response(ptr %raw)
+; CSV builtins
+declare ptr  @march_csv_open(ptr %path, ptr %delim, ptr %mode)
+declare ptr  @march_csv_next_row(ptr %handle)
+declare ptr  @march_csv_close(ptr %handle)
+; Resource ownership
+declare void @march_own(ptr %pid, ptr %value)
 ; Capability builtins
 declare ptr  @march_cap_narrow(ptr %cap)
 ; Monitor/supervision builtins
