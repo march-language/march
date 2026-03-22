@@ -687,6 +687,93 @@ let test_session_chan_unknown_role_error () =
   end|} in
   Alcotest.(check bool) "Chan with unknown role: error" true (has_errors ctx)
 
+(* ── Phase 2: Chan.send / Chan.recv / Chan.close session type checking ─────── *)
+
+let test_session_send_recv_close_ok () =
+  (* A well-typed send/recv/close sequence: no errors *)
+  let ctx = typecheck {|mod Test do
+    protocol Ping do
+      Client -> Server : Int
+      Server -> Client : Bool
+    end
+    fn client_side(ch : Chan(Client, Ping)) : Bool do
+      let ch2 = Chan.send(ch, 42)
+      let (b, ch3) = Chan.recv(ch2)
+      Chan.close(ch3)
+      b
+    end
+    fn server_side(ch : Chan(Server, Ping)) : Unit do
+      let (_, ch2) = Chan.recv(ch)
+      let ch3 = Chan.send(ch2, true)
+      Chan.close(ch3)
+    end
+  end|} in
+  Alcotest.(check bool) "valid send/recv/close: no errors" false (has_errors ctx)
+
+let test_session_send_wrong_type_error () =
+  (* Sending wrong type: Int where Bool expected *)
+  let ctx = typecheck {|mod Test do
+    protocol BoolChan do
+      A -> B : Bool
+    end
+    fn bad(ch : Chan(A, BoolChan)) : Unit do
+      let ch2 = Chan.send(ch, 42)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "send wrong type: error" true (has_errors ctx)
+
+let test_session_send_at_recv_state_error () =
+  (* Calling send on a channel at Recv state is a protocol violation *)
+  let ctx = typecheck {|mod Test do
+    protocol PingB do
+      A -> B : Int
+      B -> A : Int
+    end
+    fn bad(ch : Chan(B, PingB)) : Unit do
+      -- B's first action is Recv(Int, ...) but we try to send
+      let ch2 = Chan.send(ch, 99)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "send at recv state: error" true (has_errors ctx)
+
+let test_session_close_at_wrong_state_error () =
+  (* Calling close on a channel that is not at End *)
+  let ctx = typecheck {|mod Test do
+    protocol NotDone do
+      A -> B : Int
+    end
+    fn bad(ch : Chan(A, NotDone)) : Unit do
+      Chan.close(ch)
+    end
+  end|} in
+  Alcotest.(check bool) "close at non-End state: error" true (has_errors ctx)
+
+let test_session_chan_new_ok () =
+  (* Chan.new with a valid protocol produces no errors *)
+  let ctx = typecheck {|mod Test do
+    protocol Counter do
+      Client -> Server : Int
+      Server -> Client : Int
+    end
+    fn make_chan() : Unit do
+      let _ = Chan.new(Counter)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "Chan.new valid protocol: no errors" false (has_errors ctx)
+
+let test_session_chan_new_unknown_proto_error () =
+  (* Chan.new with an undeclared protocol is an error *)
+  let ctx = typecheck {|mod Test do
+    fn bad() : Unit do
+      let _ = Chan.new(NoSuchProto)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "Chan.new unknown protocol: error" true (has_errors ctx)
+
 (* ── H9: Actor handler capability checking ───────────────────────────────── *)
 
 let test_actor_handler_cap_needs_ok () =
@@ -787,6 +874,29 @@ let rec vlist = function
 let vcon tag = function
   | March_eval.Eval.VCon (t, args) when t = tag -> args
   | _ -> failwith ("expected VCon " ^ tag)
+
+(* ── Phase 2: session eval test (needs eval_module / call_fn) ─────────────── *)
+
+let test_session_eval_send_recv () =
+  (* End-to-end eval: send an Int on one endpoint, receive it on the other *)
+  let env = eval_module {|mod Test do
+    protocol Echo do
+      Sender -> Receiver : Int
+      Receiver -> Sender : Int
+    end
+    fn run() do
+      let (sc, rc) = Chan.new(Echo)
+      let sc2 = Chan.send(sc, 42)
+      let (n, rc2) = Chan.recv(rc)
+      let rc3 = Chan.send(rc2, n + 1)
+      let (result, sc3) = Chan.recv(sc2)
+      Chan.close(sc3)
+      Chan.close(rc3)
+      result
+    end
+  end|} in
+  let v = call_fn env "run" [] in
+  Alcotest.(check int) "eval echo protocol: result = 43" 43 (vint v)
 
 (* ── Eval tests ─────────────────────────────────────────────────────────── *)
 
@@ -8638,6 +8748,14 @@ let () =
           Alcotest.test_case "session Chan annotation ok"    `Quick test_session_chan_type_annotation;
           Alcotest.test_case "session Chan unknown proto"    `Quick test_session_chan_unknown_protocol_error;
           Alcotest.test_case "session Chan unknown role"     `Quick test_session_chan_unknown_role_error;
+          (* Phase 2: Chan.send/recv/close session type checking + eval *)
+          Alcotest.test_case "session send recv close ok"    `Quick test_session_send_recv_close_ok;
+          Alcotest.test_case "session send wrong type"       `Quick test_session_send_wrong_type_error;
+          Alcotest.test_case "session send at recv state"    `Quick test_session_send_at_recv_state_error;
+          Alcotest.test_case "session close wrong state"     `Quick test_session_close_at_wrong_state_error;
+          Alcotest.test_case "session Chan.new ok"           `Quick test_session_chan_new_ok;
+          Alcotest.test_case "session Chan.new unknown"      `Quick test_session_chan_new_unknown_proto_error;
+          Alcotest.test_case "session eval send recv"        `Quick test_session_eval_send_recv;
           (* H9: Actor handler capability checking *)
           Alcotest.test_case "actor cap needs ok"            `Quick test_actor_handler_cap_needs_ok;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;

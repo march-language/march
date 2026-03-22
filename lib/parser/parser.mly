@@ -662,13 +662,17 @@ expr_app:
     { ECon (mk_name con $loc, args, mk_span ($loc)) }
   | e = expr_field { e }
 
-(** Field access: x.name — left-recursive for chained access: x.y.z *)
+(** Field access: x.name — left-recursive for chained access: x.y.z
+    Contextual keywords (send) are allowed as field names to support Chan.send(…). *)
 expr_field:
   | e = expr_field; DOT; name = lower_name
     { EField (e, name, mk_span ($loc)) }
   | e = expr_field; DOT; name = upper_name
     (* Module chain access: A.B.c or A.B.C — upper segments are sub-module names *)
     { EField (e, name, mk_span ($loc)) }
+  | e = expr_field; DOT; SEND
+    (* Allow `send` keyword as a field/method name: Chan.send(…) *)
+    { EField (e, mk_name "send" $loc, mk_span ($loc)) }
   | e = expr_atom { e }
 
 expr_atom:

@@ -855,6 +855,13 @@ let builtin_bindings : (string * scheme) list =
     ("Supervisor.count_children",
      Mono (TArrow (t_atom, TCon ("SupervisorSpec", []))));  (* simplified return type *)
     ("App.stop",        Mono (TArrow (t_unit, t_unit)));
+    (* Session-typed channel builtins — Chan.send/recv/close are special-cased in
+       infer_expr for proper session type advancement. These entries just put the
+       names in scope; the real typing is done in the Chan.* EApp branches. *)
+    ("Chan.new",   poly2 (fun a b -> TArrow (t_string, TTuple [a; b])));
+    ("Chan.send",  poly2 (fun a b -> TArrow (a, TArrow (t_unit, b))));
+    ("Chan.recv",  poly1 (fun a -> TArrow (t_unit, a)));
+    ("Chan.close", Mono (TArrow (t_unit, t_unit)));
   ]
 
 let builtin_types : (string * int) list =
@@ -1443,6 +1450,146 @@ let rec infer_expr env (e : Ast.expr) : ty =
       t
 
     (* ── Function application ─────────────────────────────────────── *)
+    (* ── Session channel operations (special casing for session type advancement) ── *)
+
+    (* Normalize Mod.method(args) → EVar("Mod.method")(args) so that Chan.send etc.
+       work whether written as `Chan.send(ch, v)` (field access) or `Chan.send(ch, v)`. *)
+    | Ast.EApp (Ast.EField (Ast.ECon ({txt = mod_name; _}, [], _),
+                             {txt = meth; _}, _),
+                args, sp) ->
+      let norm = Ast.EApp (Ast.EVar {txt = mod_name ^ "." ^ meth;
+                                     span = Ast.dummy_span}, args, sp) in
+      infer_expr env norm
+
+    (* Chan.new(proto_name_string_or_atom) →
+         (linear Chan(RoleA, Proto), linear Chan(RoleB, Proto))
+       The protocol name is the sole argument; we look it up to generate typed endpoints. *)
+    | Ast.EApp (Ast.EVar { txt = "Chan.new"; _ }, [proto_expr], sp) ->
+      let proto_name = match proto_expr with
+        | Ast.ELit (LitString s, _) | Ast.ELit (LitAtom s, _) -> Some s
+        | Ast.EVar n -> Some n.txt
+        | Ast.ECon (n, [], _) -> Some n.txt   (* bare Protocol name: Chan.new(MyProto) *)
+        | _ -> None
+      in
+      (match proto_name with
+       | None ->
+         Err.error env.errors ~span:sp
+           "Chan.new: argument must be a protocol name (string, atom, or bare name).";
+         TError
+       | Some pname ->
+         (match List.assoc_opt pname env.protocols with
+          | None ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf "Chan.new: protocol `%s` is not declared." pname);
+            TError
+          | Some pi ->
+            (match pi.pi_projections with
+             | [(_, sty_a); (_, sty_b)] ->
+               (* Return (linear Chan(A, Proto), linear Chan(B, Proto)) *)
+               let ty_a = TLin (Ast.Linear, TChan (ref sty_a)) in
+               let ty_b = TLin (Ast.Linear, TChan (ref sty_b)) in
+               TTuple [ty_a; ty_b]
+             | [_] ->
+               Err.error env.errors ~span:sp
+                 (Printf.sprintf "Chan.new: protocol `%s` has only one role." pname);
+               TError
+             | [] ->
+               Err.error env.errors ~span:sp
+                 (Printf.sprintf "Chan.new: protocol `%s` has no roles." pname);
+               TError
+             | _ ->
+               (* 3+ roles: just return first two as a pair *)
+               (match pi.pi_projections with
+                | (_, sty_a) :: (_, sty_b) :: _ ->
+                  TTuple [TLin (Ast.Linear, TChan (ref sty_a));
+                          TLin (Ast.Linear, TChan (ref sty_b))]
+                | _ -> TError))))
+
+    (* Chan.send(ch, value) → linear Chan at continuation session state.
+       Pre-condition: ch must be at SSend(T, S). Post: ch is consumed; returns Chan at S. *)
+    | Ast.EApp (Ast.EVar { txt = "Chan.send"; _ }, [ch_expr; val_expr], sp) ->
+      let ch_ty = repr (infer_expr env ch_expr) in
+      let inner_chan_ty = match ch_ty with
+        | TLin (_, t) -> repr t
+        | t -> t
+      in
+      (match inner_chan_ty with
+       | TChan r ->
+         (match !r with
+          | SSend (payload_ty, cont) ->
+            check_expr env val_expr payload_ty
+              ~reason:(Some (RBuiltin "Payload type of Chan.send"));
+            TLin (Ast.Linear, TChan (ref cont))
+          | SError -> TError
+          | other ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "Chan.send: channel is at `%s` but I expected `Send(T, ...)`."
+                 (pp_session_ty other));
+            TError)
+       | TError -> TError
+       | _ ->
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "Chan.send: expected a channel endpoint but got `%s`."
+              (pp_ty ch_ty));
+         TError)
+
+    (* Chan.recv(ch) → (value, linear Chan at continuation).
+       Pre-condition: ch must be at SRecv(T, S). Post: ch consumed; returns (T, Chan at S). *)
+    | Ast.EApp (Ast.EVar { txt = "Chan.recv"; _ }, [ch_expr], sp) ->
+      let ch_ty = repr (infer_expr env ch_expr) in
+      let inner_chan_ty = match ch_ty with
+        | TLin (_, t) -> repr t
+        | t -> t
+      in
+      (match inner_chan_ty with
+       | TChan r ->
+         (match !r with
+          | SRecv (payload_ty, cont) ->
+            TTuple [payload_ty; TLin (Ast.Linear, TChan (ref cont))]
+          | SError -> TError
+          | other ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "Chan.recv: channel is at `%s` but I expected `Recv(T, ...)`."
+                 (pp_session_ty other));
+            TError)
+       | TError -> TError
+       | _ ->
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "Chan.recv: expected a channel endpoint but got `%s`."
+              (pp_ty ch_ty));
+         TError)
+
+    (* Chan.close(ch) → Unit.
+       Pre-condition: ch must be at SEnd. *)
+    | Ast.EApp (Ast.EVar { txt = "Chan.close"; _ }, [ch_expr], sp) ->
+      let ch_ty = repr (infer_expr env ch_expr) in
+      let inner_chan_ty = match ch_ty with
+        | TLin (_, t) -> repr t
+        | t -> t
+      in
+      (match inner_chan_ty with
+       | TChan r ->
+         (match !r with
+          | SEnd -> t_unit
+          | SError -> TError
+          | other ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "Chan.close: channel is at `%s` but I expected `End`."
+                 (pp_session_ty other));
+            TError)
+       | TError -> TError
+       | _ ->
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "Chan.close: expected a channel endpoint but got `%s`."
+              (pp_ty ch_ty));
+         TError)
+
     | Ast.EApp (f, args, sp) ->
       let f_ty = infer_expr env f in
       infer_app env sp f_ty args 0
