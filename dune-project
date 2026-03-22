@@ -20,4 +20,6 @@
   (menhir (>= 20230608))
   (ppx_deriving (>= 6.0))
   (alcotest (>= 1.7.0))
+  (qcheck-core (>= 0.91))
+  (qcheck-alcotest (>= 0.91))
   (notty (>= 0.2.3))))
