@@ -1,7 +1,9 @@
 # March Language Compiler Pipeline
 
-**Document Date**: March 20, 2026
-**Total Lines Analyzed**: ~14,262 (across 23 source files)
+**Document Date**: March 22, 2026
+**Total Lines Analyzed**: ~18,500 (across 30+ source files)
+
+**Implementation:** `lib/` directory — `typecheck/`, `tir/`, `jit/`, `repl/`, `cas/`, `debug/`, `scheduler/`
 
 ## Overview
 
@@ -18,27 +20,30 @@ Source Code
     ↓
 [Desugaring] (lib/desugar/desugar.ml:1-263)
     ↓
-[Type Checking] (lib/typecheck/typecheck.ml:1-2006)
+[Type Checking] (lib/typecheck/typecheck.ml:1-3389)
     ↓
-[AST → TIR Lowering] (lib/tir/lower.ml:1-1122)
+[Session Type Verification] (lib/typecheck/typecheck.ml: infer_expr Chan.* cases + project_protocol)
     ↓
-[Monomorphization] (lib/tir/mono.ml:1-314)
+[AST → TIR Lowering] (lib/tir/lower.ml:1-1277)
     ↓
-[Defunctionalization] (lib/tir/defun.ml:1-336)
+[Monomorphization] (lib/tir/mono.ml:1-315)
+    ↓
+[Defunctionalization] (lib/tir/defun.ml:1-373)
     ↓
 [Escape Analysis] (lib/tir/escape.ml:1-279)
     ↓
-[Perceus RC Analysis] (lib/tir/perceus.ml:1-498)
+[Perceus RC Analysis] (lib/tir/perceus.ml:1-523)
     ↓
-[Optimization Loop] (lib/tir/opt.ml:1-19)
+[Optimization Loop] (lib/tir/opt.ml:1-19)  ← fixed-point over passes
   ├─ [Inlining] (lib/tir/inline.ml:1-179)
   ├─ [Constant Folding] (lib/tir/fold.ml:1-91)
   ├─ [Simplification] (lib/tir/simplify.ml:1-107)
-  └─ [Dead Code Elimination] (lib/tir/dce.ml:1-130)
+  ├─ [Dead Code Elimination] (lib/tir/dce.ml:1-130)
+  └─ [Purity Analysis] (lib/tir/purity.ml:1-25)  ← gates inlining decisions
     ↓
-[LLVM IR Emission] (lib/tir/llvm_emit.ml:1-1659)
+[LLVM IR Emission] (lib/tir/llvm_emit.ml:1-2021)
     ↓
-[Code Generation] (lib/codegen/codegen.ml:1-10)
+[Code Generation] (lib/codegen/codegen.ml:1-10)  ← thin shim, clang invoked from bin/main.ml
 ```
 
 ---

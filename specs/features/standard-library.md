@@ -2,12 +2,14 @@
 
 ## Overview
 
-The March standard library consists of **21 modules** totaling **4,512 lines of code** (as of March 20, 2026). The library is auto-loaded by the compiler into every March program and provides:
+The March standard library consists of **21 modules** totaling **~4,894 lines of code** (as of March 22, 2026). The library is auto-loaded by the compiler into every March program and provides:
+
+**Implementation:** `stdlib/` directory — see `bin/main.ml` for load order
 
 - **Core data structures**: List, Option, Result, Seq
 - **String and formatting**: String manipulation, IOList (lazy string builder)
 - **Mathematics**: Transcendental functions, constants, min/max/clamp
-- **Collections**: List operations (map, fold, filter, sort), Enum (higher-level list utilities), Seq (lazy folds)
+- **Collections**: List operations (map, fold, filter, sort), Enum (higher-level list utilities), Seq (lazy folds), **Map** (persistent AVL tree ordered map)
 - **Sorting**: Timsort, Introsort, AlphaDev optimal comparison networks (n ≤ 8)
 - **HTTP networking**: Http (types), HttpTransport (TCP), HttpClient (high-level pipeline), HttpServer
 - **WebSocket support**: WsSocket, frame types, multiplex operations
@@ -38,8 +40,9 @@ The March standard library consists of **21 modules** totaling **4,512 lines of 
 16. csv.march
 17. websocket.march
 18. http_server.march
-19. enum.march — not explicitly listed in main.ml (May be loaded dynamically or imported by other modules)
-20. iterable.march — placeholder for future interface system
+19. enum.march
+20. map.march — persistent AVL tree Map(k, v) with comparator-based operations
+21. iterable.march — placeholder for future interface system
 
 ### Module System
 

@@ -93,62 +93,99 @@ march/
 ├── specs/defun.md           # Defunctionalization design
 ├── specs/perceus.md         # Perceus RC analysis design
 ├── specs/progress.md        # This file
-├── examples/list_lib.march  # End-to-end working example
-├── examples/actors.march    # Actor system example
+├── specs/features/          # Per-feature documentation with source pointers
+├── examples/                # Working example programs (actors, HTTP, debug, etc.)
+├── tree-sitter-march/       # Zed editor extension (grammar.js + compiled march.dylib)
 ├── dune-project
-├── .gitignore
-├── .ocamlformat
 ├── bin/
-│   ├── dune
 │   └── main.ml              # parse → desugar → typecheck → eval + --compile + REPL JIT bootstrap
 ├── lib/
-│   ├── ast/ast.ml           # Full AST: spans, exprs, patterns, decls, actors
+│   ├── ast/ast.ml           # Full AST: spans, exprs, patterns, decls, actors, session types
 │   ├── lexer/lexer.mll      # ocamllex: atoms, pipes, do/end, when, etc.
-│   ├── parser/parser.mly    # menhir: full expression grammar, fn head grouping
+│   ├── parser/parser.mly    # menhir: full expression grammar, fn head grouping, session types
 │   ├── desugar/desugar.ml   # pipe desugar, multi-head fn → single EMatch clause
-│   ├── typecheck/typecheck.ml  # Bidirectional HM, constructor registry, error recovery
-│   ├── eval/eval.ml         # Tree-walking interpreter, base_env builtins
+│   ├── typecheck/typecheck.ml  # 3389 lines: Bidirectional HM, linear types, session types,
+│   │                           #   interface dispatch, pub/sig enforcement, cap hierarchy
+│   ├── eval/eval.ml         # 4567 lines: Tree-walking interpreter, actors, Chan.send/recv,
+│   │                         #   App.stop/lifecycle, supervision, session type eval
 │   ├── effects/effects.ml   # Placeholder
 │   ├── codegen/codegen.ml   # Placeholder
 │   ├── errors/errors.ml     # Diagnostic type (Error/Warning/Hint + span)
+│   ├── cas/                 # Content-addressed store
+│   │   ├── cas.ml           # CAS object store (BLAKE3, 2-tier project+global cache)
+│   │   ├── pipeline.ml      # Compilation pipeline (SCC → hash → cache)
+│   │   ├── hash.ml          # BLAKE3 hashing helpers
+│   │   ├── scc.ml           # Strongly-connected component analysis
+│   │   └── serialize.ml     # Serialization for cache keys
+│   ├── debug/               # Time-travel debugger
+│   │   ├── debug.ml         # Debug context + dbg() handler
+│   │   ├── debug_repl.ml    # Debug REPL (goto, diff, find, watch, replay)
+│   │   ├── replay.ml        # Step replay engine
+│   │   └── trace.ml         # Execution trace capture + actor history
 │   ├── jit/
 │   │   ├── jit_stubs.c      # C stubs for dlopen/dlsym/dlclose + call stubs
 │   │   ├── jit.ml / jit.mli # OCaml externals wrapping C stubs
-│   │   ├── repl_jit.ml/mli  # Compile-and-dlopen REPL engine
-│   │   └── dune
+│   │   └── repl_jit.ml/mli  # Compile-and-dlopen REPL engine
+│   ├── repl/                # Interactive REPL
+│   │   ├── repl.ml          # 1478 lines: TUI + simple modes, eval loop, :commands
+│   │   ├── tui.ml           # Two-pane notty TUI (input + scope panel)
+│   │   ├── highlight.ml     # Syntax highlighting for live input
+│   │   ├── input.ml         # Line editor state machine (kill ring, history nav)
+│   │   ├── multiline.ml     # Continuation detection (do/end, fn, let blocks)
+│   │   ├── history.ml       # Session history persistence
+│   │   ├── complete.ml      # Tab completion (commands, keywords, in-scope names)
+│   │   └── result_vars.ml   # `v` magic variable tracking
+│   ├── scheduler/           # Cooperative + work-stealing scheduler
+│   │   ├── scheduler.ml     # Reduction-counted preemption, run queue
+│   │   ├── mailbox.ml       # Actor mailbox (bounded FIFO)
+│   │   ├── task.ml          # Task (structured parallel compute) abstraction
+│   │   └── work_pool.ml     # Work-stealing thread pool
 │   └── tir/
 │       ├── tir.ml           # ANF IR type definitions
-│       ├── lower.ml         # AST → TIR (ANF conversion, pattern flattening)
+│       ├── lower.ml         # 1277 lines: AST → TIR (ANF, pattern flattening, actors)
 │       ├── mono.ml          # Monomorphization pass
 │       ├── defun.ml         # Defunctionalization pass
-│       ├── pp.ml            # Pretty-printer
-│       ├── perceus.ml       # Perceus RC analysis ✓
-│       ├── escape.ml        # Escape analysis ✓
-│       └── llvm_emit.ml     # TIR → LLVM IR + REPL emission + HTTP extern decls
+│       ├── perceus.ml       # Perceus RC analysis
+│       ├── escape.ml        # Escape analysis (stack promotion)
+│       ├── opt.ml           # Optimization loop (fixed-point over passes)
+│       ├── inline.ml        # Function inlining
+│       ├── fold.ml          # Constant folding
+│       ├── simplify.ml      # Algebraic simplification
+│       ├── dce.ml           # Dead code elimination
+│       ├── purity.ml        # Purity analysis (for inlining decisions)
+│       ├── llvm_emit.ml     # 2021 lines: TIR → LLVM IR + REPL emission
+│       └── pp.ml            # Pretty-printer
 ├── runtime/
 │   ├── march_runtime.c/h    # Core runtime: alloc, RC, strings, actors, value_to_string
 │   ├── march_http.c/h       # HTTP/WS runtime: TCP, HTTP parse/serialize, server, WebSocket
 │   ├── sha1.c               # SHA-1 for WebSocket handshake
 │   └── base64.c             # Base64 for WebSocket handshake
+├── stdlib/                  # 21 modules, ~4894 lines
+│   ├── prelude.march        # Auto-imported helpers (panic, identity, compose, unwrap, etc.)
+│   ├── option.march         # Option(a) with Some/None
+│   ├── result.march         # Result(a,e) with Ok/Err
+│   ├── list.march           # 508 lines: map, filter, fold, zip, sort, etc.
+│   ├── string.march         # 364 lines: String operations
+│   ├── math.march           # 193 lines: transcendental functions, constants
+│   ├── iolist.march         # 221 lines: lazy string builder
+│   ├── seq.march            # 251 lines: lazy church-encoded fold sequences
+│   ├── sort.march           # 615 lines: Timsort, Introsort, AlphaDev (n≤8)
+│   ├── enum.march           # 314 lines: higher-level list utilities
+│   ├── map.march            # 366 lines: AVL tree Map(k,v)
+│   ├── path.march           # 91 lines: pure path manipulation
+│   ├── file.march           # 139 lines: Result-based file I/O
+│   ├── dir.march            # 50 lines: directory operations
+│   ├── csv.march            # 100 lines: CSV parser (streaming + eager)
+│   ├── http.march           # 338 lines: HTTP types (Method, Header, Request, Response)
+│   ├── http_transport.march # 180 lines: Low-level TCP HTTP transport
+│   ├── http_client.march    # 440 lines: High-level HTTP client with middleware pipeline
+│   ├── http_server.march    # 233 lines: HTTP server types + pipeline runner
+│   ├── websocket.march      # 52 lines: WebSocket types and frame operations
+│   └── iterable.march       # 28 lines: placeholder Iterable interface
 └── test/
-    ├── dune
-    ├── test_march.ml         # 132 passing tests
-    └── test_jit.ml           # JIT dlopen round-trip test
-├── stdlib/
-│   ├── list.march           # List operations (map, filter, fold, reverse, etc.)
-│   ├── string.march         # String operations
-│   ├── path.march           # Pure path manipulation
-│   ├── seq.march            # Lazy church-encoded fold sequences
-│   ├── file.march           # Result-based file I/O
-│   ├── dir.march            # Directory operations
-│   ├── http.march           # HTTP types (Method, Header, Request, Response, URL parsing)
-│   ├── http_transport.march # Low-level HTTP transport (TCP connect, request/response)
-│   ├── http_client.march    # High-level HTTP client with middleware pipeline
-│   ├── http_server.march    # HTTP server types, pipeline runner, Conn type
-│   ├── websocket.march      # WebSocket types and frame operations
-│   ├── csv.march            # CSV parser (streaming and eager modes)
-│   └── heap.march           # Min-heap data structure
-└── test_server.march        # Example: compiled HTTP server on port 8787
+    ├── test_march.ml         # 652 tests (6 failing: REPL JIT list literal issues)
+    ├── test_cas.ml           # 41 tests (all passing: scc, pipeline, def_id)
+    └── test_jit.ml           # 1 test (dlopen round-trip)
 ```
 
 ## Current State (as of 2026-03-22)
@@ -162,16 +199,24 @@ march/
 - **`--dump-tir` flag**: prints TIR after full pipeline (Lower → Mono → Defun → Perceus → Escape); shows `stack_alloc` for promoted allocations
 - **`--emit-llvm` flag**: emits textual LLVM IR to `<basename>.ll`; links with `runtime/march_runtime.c` via `clang` to produce native binaries
 - **Compiled REPL**: `dune exec march` with no args launches a compile-and-dlopen REPL — each expression goes through the full TIR pipeline → LLVM IR → `clang -shared` → `.so` → `dlopen` → `dlsym` → call. Bindings persist as LLVM globals with `RTLD_GLOBAL`. Falls back to interpreter if JIT unavailable. `:quit`/`:env` commands; incremental env
-- **Bidirectional HM type checker**: constructor registry, builtin `Some/None/Ok/Err`, named record type expansion, `Unit`/`Bool`/etc. annotation normalization, builtins (`print`, `println`, `int_to_string`, `bool_to_string`, etc.) in scope; actor declarations register message ctors and bind `state` in handler envs
-- **Tree-walking interpreter**: `value` type (incl. `VPid`), pattern matching, `base_env` builtins, two-pass `eval_module_env` for mutual recursion; full synchronous actor runtime with `kill`/`is_alive`/drop semantics
+- **Session types (binary, phases 1–3)**: `TChan` type + full `session_ty` representation (`SSend`/`SRecv`/`SChoose`/`SOffer`/`SRec`/`SEnd`/`SVar`/`SError`); `Chan.send`/`recv`/`close`/`choose`/`offer` special-cased in typecheck with linear channel advancement; duality verification for two-party protocols; `Chan.new(proto_name)` creates dual endpoints; protocol registry in typecheck env. Example: `examples/session_echo.march`
+- **pub/sig enforcement**: Phase 1 visibility (`pub` on fn/type/ctor) enforced in `check_module` — private names are not exported to outer scope; Phase 2 sig conformance — `sig Name do ... end` checked against the actual `mod Name` implementation, missing declarations reported as errors
+- **Bidirectional HM type checker**: 3389 lines; constructor registry, builtin `Some/None/Ok/Err`, named record type expansion, `Unit`/`Bool`/etc. annotation normalization, builtins (`print`, `println`, `int_to_string`, `bool_to_string`, etc.) in scope; actor declarations register message ctors and bind `state` in handler envs; interface dispatch wired (impl lookup + vtable-style call); capability hierarchy subtyping (`IO` → `IO.FileSystem` → etc.)
+- **Tree-walking interpreter**: 4567 lines; `value` type (incl. `VPid`, `VChan`), pattern matching, `base_env` builtins, two-pass `eval_module_env` for mutual recursion; full synchronous actor runtime with `kill`/`is_alive`/drop semantics; `App.stop()`, `on_start`/`on_stop` lifecycle hooks, graceful shutdown + SIGTERM; supervision with epoch caps + task linking; `Chan.send`/`recv`/`close`/`choose`/`offer` evaluations; Drop handler support via `impl Drop`
 - **TIR pipeline** (`lib/tir/`):
-  - `lower.ml` — AST → ANF TIR, CPS let-insertion, nested pattern flattening, type_map threading
-  - `mono.ml` — worklist monomorphization, name mangling (`identity$Int`), TVar elimination; `main` always seeded as entry point; monomorphic callees enqueued on reference; function-as-value atoms discovered via `ensure_atom_fns`; `ECallPtr` callee discovery; `TVar "_"` treated as non-polymorphic fallback
-  - `defun.ml` — defunctionalization: lambda lifting, `$Clo_` struct generation, `ECallPtr` rewriting
-  - `perceus.ml` — Perceus RC analysis: backwards liveness, `EIncRC`/`EDecRC`/`EFree` insertion, Inc/Dec cancel-pair elision, FBIP `EReuse` detection
-  - `escape.ml` — Escape analysis: 3-phase intra-procedural stack promotion; `EAlloc` → `EStackAlloc` for non-escaping allocations; dead RC ops on stack vars removed
-  - `llvm_emit.ml` — TIR → textual LLVM IR; alloca+store+load for all let-bindings; ECase as switch+blocks+merge; arithmetic/cmp builtins to native ops; EAlloc→`@march_alloc`; EStackAlloc→`alloca`; EReuse→in-place write; March `main` → `@march_main` with C `@main` wrapper; REPL emission helpers (`emit_repl_expr`, `emit_repl_decl`, `emit_repl_fn`); HTTP/WS extern declarations; float ops (`fcmp`, `fneg`, IEEE hex literals); string equality via `march_string_eq`; string pattern matching (if-else chains); boolean ops (`&&`, `||`, `not`) inline; double↔ptr coercion; closure wrappers for top-level functions used as first-class values; ~49 builtin function declarations (float, math, string, list, file/dir)
-  - `pp.ml` — pretty-printer for all TIR types and expressions (incl. `stack_alloc`, `reuse`)
+  - `lower.ml` (1277 lines) — AST → ANF TIR, CPS let-insertion, nested pattern flattening, type_map threading, actor lowering
+  - `mono.ml` (315 lines) — worklist monomorphization, name mangling (`identity$Int`), TVar elimination; `main` always seeded; function-as-value atoms via `ensure_atom_fns`; `ECallPtr` callee discovery
+  - `defun.ml` (373 lines) — defunctionalization: lambda lifting, `$Clo_` struct generation, `ECallPtr` rewriting
+  - `perceus.ml` (523 lines) — Perceus RC analysis: backwards liveness, `EIncRC`/`EDecRC`/`EFree` insertion, Inc/Dec cancel-pair elision, FBIP `EReuse` detection
+  - `escape.ml` (279 lines) — Escape analysis: 3-phase intra-procedural stack promotion; `EAlloc` → `EStackAlloc` for non-escaping allocations
+  - **Optimization loop** (`opt.ml`, 19 lines): fixed-point iteration over inline → fold → simplify → dce
+    - `inline.ml` (179 lines) — function inlining (small, pure, single-use callees)
+    - `fold.ml` (91 lines) — constant folding (arithmetic, boolean, string literals)
+    - `simplify.ml` (107 lines) — algebraic simplification (identity ops, dead branches)
+    - `dce.ml` (130 lines) — dead code elimination (unreachable lets, unused bindings)
+    - `purity.ml` (25 lines) — purity analysis (used by inliner to gate side-effectful fns)
+  - `llvm_emit.ml` (2021 lines) — TIR → textual LLVM IR; alloca+store+load for all let-bindings; ECase as switch+blocks+merge; arithmetic/cmp builtins to native ops; EAlloc→`@march_alloc`; EStackAlloc→`alloca`; EReuse→in-place write; REPL emission helpers; HTTP/WS extern declarations; float ops; string equality via `march_string_eq`; string pattern matching (if-else chains); closure wrappers; ~49 builtin function declarations
+  - `pp.ml` — pretty-printer for all TIR types (incl. `stack_alloc`, `reuse`)
 - **JIT / compile-and-dlopen** (`lib/jit/`):
   - `jit_stubs.c` — OCaml C stubs for POSIX `dlopen`/`dlsym`/`dlclose` + function pointer call stubs (void→ptr, void→void, void→i64, void→double, ptr→ptr)
   - `jit.ml` / `jit.mli` — OCaml externals wrapping the C stubs
@@ -187,8 +232,28 @@ march/
   - `examples/list_lib.march` — map, filter, fold, reverse, find, range (polymorphic list library)
   - `examples/actors.march` — Counter + Logger actors, normal messaging, kill, drop semantics, restart
   - `test_server.march` — Compiled HTTP server: `HttpServer.new(8787) |> HttpServer.plug(hello) |> HttpServer.listen()`
-- **Actor system**: `spawn(ActorName)` / `send(pid, Msg(args))` → `Option(Unit)`, `kill(pid)`, `is_alive(pid)`, `{ state with field = ... }` record spread, synchronous inline dispatch
+- **Content-addressed store** (`lib/cas/`): BLAKE3 hashing of definitions, 2-tier cache (project-local `.march/cas/` + global `~/.march/cas/`), SCC-aware pipeline, `def_id` type for hash-based identity; 41 tests passing
+- **Cooperative scheduler** (`lib/scheduler/`): reduction-counted preemption (4000 reductions/quantum), work-stealing thread pool, actor mailboxes, `Task(a)` for structured parallel compute
+- **Time-travel debugger** (`lib/debug/`): `dbg(expr)` breakpoints, step replay, actor history, `goto`/`diff`/`find`/`watch` commands, trace save/load; integrated with REPL via `on_dbg` callback
+- **Full TUI REPL** (`lib/repl/`): 2197 lines; notty two-pane TUI with live syntax highlighting, tab completion, scope panel, actor monitoring; `v` magic variable (last result); `{ x with f = v }` record update hint; list pretty-printer; `:quit`/`:env`/`:help` commands; kill-ring line editing; multiline continuation detection
+- **Actor system**: `spawn(ActorName)` / `send(pid, Msg(args))` → `Option(Unit)`, `kill(pid)`, `is_alive(pid)`, `{ state with field = ... }` record spread, synchronous inline dispatch; supervision (supervisor blocks, epoch caps, task linking); `App.stop()` with graceful SIGTERM shutdown; `on_start`/`on_stop` lifecycle hooks; process registry (`whereis`)
+- **Zed editor extension** (`tree-sitter-march/`): grammar.js (12726 lines), compiled `march.dylib`, Tree-sitter queries, full syntax highlighting for all language constructs
+- **Stdlib** (21 modules, 4894 lines): `prelude`, `option`, `result`, `list`, `string`, `math`, `iolist`, `seq`, `sort` (Timsort+Introsort+AlphaDev), `enum`, **`map`** (AVL tree), `path`, `file`, `dir`, `csv`, `http`, `http_transport`, `http_client`, `http_server`, `websocket`, `iterable`
 - **Syntax additions**: `%` modulo, multi-statement match arm bodies, zero-arg constructor calls `Con()`, `state` as contextual keyword in expressions
+
+## Known Failures (2026-03-22)
+
+**6 failing REPL JIT tests** — all in `test/test_march.ml`, groups `repl_jit_regression` (0,1,3,6,8) and `repl_jit_cross_line` (3):
+- "list literal compiles" — JIT compilation of `[1, 2, 3]` list literals fails
+- "stdlib on list literal" — `List.length [1, 2, 3]` via JIT fails
+- "stdlib List.length via prelude" — cross-line JIT test fails
+- "stdlib chain" — chained stdlib calls fail under JIT
+- "list pretty-print display" — list pretty-printing in JIT mode broken
+- "general REPL interaction" — falls through list-related failure
+
+Root cause: REPL JIT list literal codegen is broken. Non-JIT (interpreter) path works fine.
+
+---
 
 ## Resolved Open Questions
 
@@ -230,10 +295,11 @@ march/
 10. **Pipe desugar produces saturated calls** — Fixed: `a |> f(b)` now desugars to `f(a, b)` instead of curried `f(b)(a)`. Matches Elixir convention (piped value = first arg).
 
 ### Frontend / Ergonomics
-4. **More tests** — actor spawning/send/kill, record operations, `Option`/`Result` pattern matching
+4. **Fix REPL JIT list literal** — 6 failing tests; list literals in JIT (compile-and-dlopen) path break. Interpreter path is fine
 5. **Typechecker: actor handler return type checking** — handlers should be verified to return the state record type
 6. **String interpolation** — `${}` syntax, desugars to `Interpolatable` interface calls
-7. **Error recovery in REPL** — currently a type error halts the REPL session
+7. **Type-qualified constructor names** — `build_ctor_info` in `llvm_emit.ml` uses flat hashtable; same-named ctors across types collide. Proper fix: type-qualify keys
+8. **Atomic refcounting** — Perceus RC ops non-atomic; HTTP server works via explicit `inc_rc` borrowing but general multi-threaded code needs atomic RC or GC
 
 ## LLVM Codegen: End-to-End Compilation (2026-03-20)
 

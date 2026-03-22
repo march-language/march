@@ -1,6 +1,6 @@
 # March Language Type System
 
-**Last Updated:** March 20, 2026
+**Last Updated:** March 22, 2026
 **Status:** Production-ready with known limitations
 
 ## Overview
@@ -23,32 +23,32 @@ The type checker is implemented in two stages:
 
 | Component | File | Lines | Purpose |
 |-----------|------|-------|---------|
-| Type Checker | `lib/typecheck/typecheck.ml` | 2006 | Bidirectional HM inference with linearity tracking |
-| TIR Definition | `lib/tir/tir.ml` | 108 | Monomorphic, ANF-based IR |
+| Type Checker | `lib/typecheck/typecheck.ml` | 3389 | Bidirectional HM inference, linearity, session types, interfaces |
+| TIR Definition | `lib/tir/tir.ml` | ~120 | Monomorphic, ANF-based IR |
 | Monomorphization | `lib/tir/mono.ml` | 315 | Specializes polymorphic functions |
-| AST & Types | `lib/ast/ast.ml` | 306 | Surface syntax, type representations |
+| AST & Types | `lib/ast/ast.ml` | ~320 | Surface syntax, type representations, session types |
 | Error Reporting | `lib/errors/errors.ml` | 90 | Diagnostic context and rendering |
-| Evaluation | `lib/eval/eval.ml` | 3068 | Runtime (type-unrelated) |
+| Evaluation | `lib/eval/eval.ml` | 4567 | Runtime including Chan.send/recv/close eval |
 
 ### Design Sections in typecheck.ml
 
-The type checker is organized into 16 sections:
+The type checker is organized into 16+ sections (file is 3389 lines):
 
 1. **§1 Provenance** (lines 35–70) — `reason` type for error context
-2. **§2 Internal Type Representation** (lines 71–107) — `ty`, `tvar`, `scheme`, `constraint_`
+2. **§2 Internal Type Representation** (lines 71–107) — `ty`, `tvar`, `scheme`, `constraint_`, `session_ty`, `TChan`
 3. **§3 Fresh Variables & Levels** (lines 108–117) — `fresh_var()`, generalization levels
 4. **§4 Type Utilities** (lines 118–150) — `repr()`, `occurs()` check, type operations
-5. **§5 Pretty-Printing** (lines 151–203) — `pp_ty`, display names for unification vars
-6. **§6 Elm-Style Error Parts** (lines 205–233) — `message_part`, rich error formatting
-7. **§7 Type Environment** (lines 235–298) — `env`, `lin_entry`, `ctor_info`
-8. **§8 Generalization & Instantiation** (lines 300–355) — `generalize()`, `instantiate()`
-9. **§9 Built-in Types** (lines 357–689) — `base_env`, `builtin_bindings`, capability hierarchy
-10. **§10 Unification** (lines 690–776) — `unify()`, error reporting
-11. **§11 Surface-Type Conversion** (lines 777–868) — `surface_ty()`, record expansion
-12. **§12 Linearity Tracking** (lines 870–908) — `record_use()`, linear consumption checking
-13. **§13 Pattern Inference** (lines 909–998) — `infer_pattern()`, constructor matching
-14. **§14 Expression Checking** (lines 999–1400+) — `infer_expr()`, `check_expr()`, bidirectional flow
-15. **§15 Declaration Checking** (lines 1675–1750+) — `check_decl()`, module-level rules
+5. **§5 Pretty-Printing** (lines 151–234) — `pp_ty`, `pp_session_ty`, display names for unification vars
+6. **§6 Elm-Style Error Parts** — `message_part`, rich error formatting
+7. **§7 Type Environment** — `env`, `lin_entry`, `ctor_info`; includes `protocols` and `sigs` registries
+8. **§8 Generalization & Instantiation** — `generalize()`, `instantiate()`
+9. **§9 Built-in Types** — `base_env`, `builtin_bindings`, capability hierarchy, Chan.* builtins, interface builtins
+10. **§10 Unification** — `unify()`, `session_ty_equal`, error reporting
+11. **§11 Surface-Type Conversion** — `surface_ty()`, record expansion
+12. **§12 Linearity Tracking** — `record_use()`, `bind_linear_field_sentinels`, `check_linear_all_consumed`
+13. **§13 Pattern Inference** — `infer_pattern()`, constructor matching with linearity propagation
+14. **§14 Expression Checking** — `infer_expr()`, `check_expr()`, bidirectional flow; Chan.send/recv/close/choose/offer special cases
+15. **§15 Declaration Checking** — `check_decl()`; `pub_set` visibility enforcement; sig conformance; protocol duality verification
 16. **§16 Module Entry Point** — `check_module()`, main API
 
 ---
@@ -561,13 +561,15 @@ Tests that the `type_map` (expression → type mapping) is populated for all sub
 
 ### Partial Implementation
 
-1. **Session types (protocols)**
-   - Parsed and stored in `env.protocols` but not type-checked
-   - Could be used for stateful message protocol validation
+1. **Session types (protocols)** — ✅ **Phases 1–3 implemented** (see `specs/features/session-types.md`)
+   - `TChan` type + full `session_ty` AST (`SSend`/`SRecv`/`SChoose`/`SOffer`/`SRec`/`SEnd`)
+   - `Chan.send`/`recv`/`close`/`choose`/`offer` are special-cased in `infer_expr` with linear channel advancement
+   - Protocol registration, projection, and duality checking
+   - Still incomplete: `SRec` recursive protocol unfolding, multi-party (post-v1)
 
-2. **Module signatures**
-   - Parsed and stored in `env.sigs` but abstract type checking not implemented
-   - Opaque type declarations are not enforced
+2. **Module signatures** — ✅ **Phase 2 sig conformance implemented**
+   - `sig Name do ... end` is checked against the actual `mod Name` — missing declarations are errors
+   - Opaque type enforcement (abstract types hiding their representation) not yet implemented
 
 ### Performance & Quality
 
@@ -772,6 +774,8 @@ String does not implement Num (only Int and Float do).
 
 ---
 
-**Document Version:** 1.0
-**Last Verified:** March 20, 2026
+**Document Version:** 1.1
+**Last Verified:** March 22, 2026
 **Maintainer:** Type System Team
+
+**Implementation:** `lib/typecheck/typecheck.ml` (3389 lines), `lib/ast/ast.ml`, `lib/tir/mono.ml`

@@ -6,7 +6,19 @@ March provides a hierarchical module system with explicit declarations (`mod Nam
 
 ## Implementation Status
 
-**Complete (Core), Partial (Signatures).** Module declarations and imports are fully functional. Module signatures are parsed and stored but not fully enforced during type checking.
+**Complete.** Module declarations, imports, visibility (`pub`), and signature conformance (`sig`) are all enforced during type checking.
+
+**Implementation:** `lib/typecheck/typecheck.ml` (pub enforcement: lines ~2850–2950; sig conformance: lines ~3032–3060), `lib/ast/ast.ml`
+
+### What's working
+- **pub visibility** — `pub` declarations are exported; private names are inaccessible outside the module
+- **Nested modules** — `mod A do mod B do ... end end` with `A.B.fn` qualified access
+- **sig conformance** — `sig Name do ... end` verified against actual `mod Name` implementation; missing declarations are errors
+- **use imports** — `use Module.*` (all public names) and `use Module.{f, g}` (named selection)
+
+### Still incomplete
+- **Opaque type enforcement** — `sig` can declare types as abstract, but the type checker doesn't yet hide the representation from outside callers
+- **Re-exports** — no `pub use` to re-export names from imported modules
 
 ## Source Files & Line References
 
