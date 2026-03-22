@@ -19,3 +19,5 @@ tree-sitter-march/src/tree_sitter/
 # Git worktrees
 .worktrees/
 *.ll
+.march/
+.claude/worktrees/
