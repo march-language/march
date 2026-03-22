@@ -3661,6 +3661,37 @@ let test_string_pad_right () =
   Alcotest.(check string) "pad_right" "hi..."
     (vstr (call_fn env "f" []))
 
+let test_string_chars () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.chars("abc") end
+  end|} in
+  let xs = vlist (call_fn env "f" []) in
+  Alcotest.(check int)    "chars length" 3   (List.length xs);
+  Alcotest.(check string) "chars[0]"     "a" (vstr (List.nth xs 0));
+  Alcotest.(check string) "chars[1]"     "b" (vstr (List.nth xs 1));
+  Alcotest.(check string) "chars[2]"     "c" (vstr (List.nth xs 2))
+
+let test_string_chars_empty () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.chars("") end
+  end|} in
+  let xs = vlist (call_fn env "f" []) in
+  Alcotest.(check int) "chars empty" 0 (List.length xs)
+
+let test_string_to_upper () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.to_upper("hello world") end
+  end|} in
+  Alcotest.(check string) "to_upper" "HELLO WORLD"
+    (vstr (call_fn env "f" []))
+
+let test_string_to_lower () =
+  let env = eval_with_string {|mod Test do
+    fn f() do String.to_lower("HELLO WORLD") end
+  end|} in
+  Alcotest.(check string) "to_lower" "hello world"
+    (vstr (call_fn env "f" []))
+
 let test_string_is_empty () =
   let env = eval_with_string {|mod Test do
     fn yes() do String.is_empty("") end
@@ -7615,6 +7646,10 @@ let () =
         Alcotest.test_case "reverse"             `Quick test_string_reverse;
         Alcotest.test_case "pad_left"            `Quick test_string_pad_left;
         Alcotest.test_case "pad_right"           `Quick test_string_pad_right;
+        Alcotest.test_case "chars"               `Quick test_string_chars;
+        Alcotest.test_case "chars empty"         `Quick test_string_chars_empty;
+        Alcotest.test_case "to_upper"            `Quick test_string_to_upper;
+        Alcotest.test_case "to_lower"            `Quick test_string_to_lower;
         Alcotest.test_case "is_empty"            `Quick test_string_is_empty;
         Alcotest.test_case "grapheme_count"      `Quick test_string_grapheme_count;
         Alcotest.test_case "index_of"            `Quick test_string_index_of;
