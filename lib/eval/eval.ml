@@ -3684,7 +3684,7 @@ let spawn_from_spec (spec : value) : unit =
                 ai_state = init_state; ai_alive = true;
                 ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
                 ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
-                ai_resources = [] } in
+                ai_resources = []; ai_linear_values = [] } in
               Hashtbl.add actor_registry pid inst;
               app_spawn_order := !app_spawn_order @ [pid];
               (* Register named children in the process registry *)

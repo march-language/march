@@ -7931,7 +7931,7 @@ let test_worker_named_spec () =
     end
 
     fn main() do
-      worker(Counter, :permanent, {name: :my_svc})
+      worker(Counter, :permanent, {name = :my_svc})
     end
   end|} in
   let env = eval_module src in
@@ -7953,7 +7953,7 @@ let test_whereis_named () =
     end
 
     app MyApp do
-      Supervisor.spec(:one_for_one, [worker(Counter, :permanent, {name: :counter_svc})])
+      Supervisor.spec(:one_for_one, [worker(Counter, :permanent, {name = :counter_svc})])
     end
   end|} in
   let m =
