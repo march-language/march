@@ -4023,7 +4023,8 @@ let graceful_shutdown () : unit =
 
 (** Spawn all children described in a supervisor spec record.
     Spec shape: { strategy = :one_for_one, children = [ChildSpec, ...] }
-    ChildSpec shape: { actor = "Name", restart = :permanent } *)
+    ChildSpec shape: { actor = "Name", restart = :permanent }
+    Records spawn order in [app_spawn_order]. *)
 let spawn_from_spec (spec : value) : unit =
   match spec with
   | VRecord fields ->
