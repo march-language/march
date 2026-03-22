@@ -347,6 +347,19 @@ typedef struct march_msg_node {
     struct march_msg_node *next;
 } march_msg_node;
 
+/* Cleanup node: stores a (value, drop_fn closure) pair for register_resource. */
+typedef struct march_cleanup_node {
+    void                      *cleanup_fn;  /* March closure: Unit -> Unit */
+    struct march_cleanup_node *next;
+} march_cleanup_node;
+
+/* Monitor node: one (watcher, ref) entry registered on a target actor. */
+typedef struct march_monitor_node {
+    void                       *watcher;   /* watcher actor ptr */
+    int64_t                     mon_ref;   /* monitor reference ID */
+    struct march_monitor_node  *next;
+} march_monitor_node;
+
 /* Per-actor scheduler metadata.  Stored in a side table keyed by actor
  * pointer so the actor object layout (and codegen) are unaffected. */
 typedef struct march_actor_meta {
@@ -355,11 +368,21 @@ typedef struct march_actor_meta {
     _Atomic int                 scheduled;  /* 0 = idle, 1 = queued/running    */
     struct march_actor_meta    *run_next;   /* Run-queue intrusive link        */
     struct march_actor_meta    *tbl_next;   /* Hash-table chain                */
+    int64_t                     pid_index;  /* Sequential spawn index for Pid(n) display */
+    march_cleanup_node         *cleanup_head; /* Cleanup callbacks (most recent first) */
+    march_monitor_node         *monitor_head; /* Monitors watching this actor   */
+    _Atomic int64_t             down_count;   /* Down messages received (watcher side) */
 } march_actor_meta;
 
 /* Global side table: actor ptr → march_actor_meta */
 static march_actor_meta  *g_actor_tbl[MARCH_SCHED_BUCKETS];
 static pthread_mutex_t    g_tbl_mu = PTHREAD_MUTEX_INITIALIZER;
+
+/* Sequential Pid index counter: each spawned actor gets a unique integer. */
+static _Atomic int64_t g_next_pid_index = 0;
+
+/* Sequential monitor ref counter. */
+static _Atomic int64_t g_next_monitor_ref = 0;
 
 /* Scheduler run queue — FIFO, protected by g_run_mu */
 static march_actor_meta  *g_run_head = NULL;
@@ -384,6 +407,20 @@ static unsigned int actor_bucket(void *actor) {
     return (unsigned int)(((uintptr_t)actor >> 4) % MARCH_SCHED_BUCKETS);
 }
 
+/* Look up meta entry for an actor without creating (returns NULL if not found). */
+static march_actor_meta *find_meta(void *actor) {
+    if (!IS_HEAP_PTR(actor)) return NULL;
+    unsigned int b = actor_bucket(actor);
+    pthread_mutex_lock(&g_tbl_mu);
+    march_actor_meta *m = g_actor_tbl[b];
+    while (m) {
+        if (m->actor == actor) { pthread_mutex_unlock(&g_tbl_mu); return m; }
+        m = m->tbl_next;
+    }
+    pthread_mutex_unlock(&g_tbl_mu);
+    return NULL;
+}
+
 /* Look up or lazily create the meta entry for an actor. */
 static march_actor_meta *find_or_create_meta(void *actor) {
     unsigned int b = actor_bucket(actor);
@@ -398,6 +435,7 @@ static march_actor_meta *find_or_create_meta(void *actor) {
     m->actor = actor;
     atomic_init(&m->mbox_head, NULL);
     atomic_init(&m->scheduled, 0);
+    atomic_init(&m->down_count, 0);
     m->tbl_next = g_actor_tbl[b];
     g_actor_tbl[b] = m;
     pthread_mutex_unlock(&g_tbl_mu);
@@ -486,7 +524,14 @@ static void process_actor_turn(march_actor_meta *meta) {
             free(node);
 
             if (a[3]) {
+                /* Force RC=1 so FBIP always takes the in-place reuse path.
+                 * Safety: only one scheduler thread processes this actor at a
+                 * time (scheduled CAS), and march_run_scheduler() blocks the
+                 * calling thread, so no concurrent RC changes occur here. */
+                int64_t saved_rc = a[0];
+                a[0] = 1;
                 fn(closure, actor, msg);
+                a[0] = saved_rc;
             } else {
                 march_decrc(msg);
             }
@@ -549,6 +594,52 @@ static void *march_worker_body(void *_arg) {
 
 void march_kill(void *actor) {
     int64_t *fields = (int64_t *)actor;
+    if (!fields[3]) return;   /* Already dead */
+
+    /* Run cleanup callbacks in reverse acquisition order (cleanup_head is
+     * most recently registered → already LIFO order). */
+    march_actor_meta *meta = find_meta(actor);
+    if (meta && meta->cleanup_head) {
+        /* The cleanup function is a March closure: fn(_ : Unit) : Unit.
+         * Call it via the closure dispatch convention:
+         *   closure[16] = function pointer, called as fn(closure, unit_arg) */
+        march_cleanup_node *node = meta->cleanup_head;
+        while (node) {
+            march_cleanup_node *next = node->next;
+            void *clo = node->cleanup_fn;
+            if (clo && IS_HEAP_PTR(clo)) {
+                typedef void *(*clo_fn_t)(void *, void *);
+                void **clo_fields = (void **)((char *)clo + 16);
+                clo_fn_t fn_ptr = (clo_fn_t)(*(clo_fields));
+                if (fn_ptr) {
+                    /* Allocate a Unit argument */
+                    void *unit_arg = march_alloc(16);
+                    fn_ptr(clo, unit_arg);
+                    march_decrc(unit_arg);
+                }
+            }
+            free(node);
+            node = next;
+        }
+        meta->cleanup_head = NULL;
+    }
+
+    /* Deliver Down notifications to all watchers. */
+    if (meta && meta->monitor_head) {
+        march_monitor_node *mn = meta->monitor_head;
+        while (mn) {
+            march_monitor_node *next_mn = mn->next;
+            march_actor_meta *watcher_meta = find_meta(mn->watcher);
+            if (watcher_meta) {
+                atomic_fetch_add_explicit(&watcher_meta->down_count, 1,
+                                          memory_order_relaxed);
+            }
+            free(mn);
+            mn = next_mn;
+        }
+        meta->monitor_head = NULL;
+    }
+
     fields[3] = 0;   /* $alive flag at byte offset 24 */
 }
 
@@ -561,7 +652,9 @@ int64_t march_is_alive(void *actor) {
  *   let $raw = ActorName_spawn()
  *   march_spawn($raw)            -- returns $raw */
 void *march_spawn(void *actor) {
-    find_or_create_meta(actor);
+    march_actor_meta *meta = find_or_create_meta(actor);
+    meta->pid_index = atomic_fetch_add_explicit(&g_next_pid_index, 1,
+                                                memory_order_relaxed);
     return actor;
 }
 
@@ -1544,22 +1637,71 @@ void *march_cap_narrow(void *cap) {
 
 /* ── Monitor/supervision builtins ────────────────────────────────────── */
 
-/* demonitor: cancel a monitor subscription. No-op stub. */
+/* demonitor: cancel a monitor subscription. Removes the entry from the
+   target actor's monitor_head list (best-effort; no-op if ref not found). */
 void march_demonitor(int64_t ref) {
-    (void)ref;
+    /* Scan all actor meta entries looking for the ref. */
+    pthread_mutex_lock(&g_tbl_mu);
+    for (int b = 0; b < MARCH_SCHED_BUCKETS; b++) {
+        march_actor_meta *m = g_actor_tbl[b];
+        while (m) {
+            march_monitor_node **pp = &m->monitor_head;
+            while (*pp) {
+                if ((*pp)->mon_ref == ref) {
+                    march_monitor_node *dead = *pp;
+                    *pp = dead->next;
+                    free(dead);
+                    pthread_mutex_unlock(&g_tbl_mu);
+                    return;
+                }
+                pp = &(*pp)->next;
+            }
+            m = m->tbl_next;
+        }
+    }
+    pthread_mutex_unlock(&g_tbl_mu);
 }
 
-/* monitor: establish a monitor link. Returns a monitor ref (0 = stub). */
+/* monitor: establish a monitor link from watcher to target.
+   Returns a unique monitor ref.  If target is already dead,
+   delivers Down immediately by incrementing watcher's down_count. */
 int64_t march_monitor(void *watcher, void *target) {
-    (void)watcher; (void)target;
-    return 0;
+    int64_t ref = atomic_fetch_add_explicit(&g_next_monitor_ref, 1,
+                                             memory_order_relaxed);
+    if (!IS_HEAP_PTR(target)) {
+        /* Target is an integer/non-heap ptr — treat as dead. */
+        march_actor_meta *wm = find_or_create_meta(watcher);
+        atomic_fetch_add_explicit(&wm->down_count, 1, memory_order_relaxed);
+        return ref;
+    }
+    int64_t *tfields = (int64_t *)target;
+    int target_alive = (int)tfields[3];
+    if (!target_alive) {
+        /* Target already dead — deliver Down immediately. */
+        march_actor_meta *wm = find_or_create_meta(watcher);
+        atomic_fetch_add_explicit(&wm->down_count, 1, memory_order_relaxed);
+        return ref;
+    }
+    /* Register on target's monitor list. */
+    march_monitor_node *node = (march_monitor_node *)malloc(sizeof(march_monitor_node));
+    if (!node) return ref;
+    node->watcher = watcher;
+    node->mon_ref = ref;
+    march_actor_meta *tm = find_or_create_meta(target);
+    pthread_mutex_lock(&g_tbl_mu);
+    node->next = tm->monitor_head;
+    tm->monitor_head = node;
+    pthread_mutex_unlock(&g_tbl_mu);
+    return ref;
 }
 
-/* mailbox_size: return the number of pending messages for an actor.
-   Stub: returns 0 (mailbox introspection is for interpreter use). */
+/* mailbox_size: return count of Down messages delivered to this actor's
+   "down_count" (watcher side only — regular actor messages are not counted). */
 int64_t march_mailbox_size(void *pid) {
-    (void)pid;
-    return 0;
+    if (!IS_HEAP_PTR(pid)) return 0;
+    march_actor_meta *meta = find_meta(pid);
+    if (!meta) return 0;
+    return atomic_load_explicit(&meta->down_count, memory_order_relaxed);
 }
 
 /* run_until_idle: flush the async message queue by running the scheduler. */
@@ -1567,9 +1709,21 @@ void march_run_until_idle(void) {
     march_run_scheduler();
 }
 
-/* register_resource: register a cleanup callback for an actor. Stub. */
+/* register_resource: register a cleanup callback for an actor.
+ * cleanup is a March closure of type Unit -> Unit.
+ * Callbacks run in reverse acquisition order when kill() is called. */
 void march_register_resource(void *pid, void *name, void *cleanup) {
-    (void)pid; (void)name; (void)cleanup;
+    (void)name;  /* Name is for documentation only */
+    if (!IS_HEAP_PTR(pid)) return;
+    march_actor_meta *meta = find_meta(pid);
+    if (!meta) return;
+    march_cleanup_node *node = (march_cleanup_node *)malloc(sizeof(march_cleanup_node));
+    if (!node) return;
+    node->cleanup_fn = cleanup;
+    /* Prepend: most recently registered is at head → LIFO on kill */
+    node->next = meta->cleanup_head;
+    meta->cleanup_head = node;
+    march_incrc(cleanup);  /* Keep closure alive */
 }
 
 /* get_cap: get the capability associated with an actor pid.
@@ -1602,10 +1756,17 @@ void *march_get_actor_field(void *pid, void *name) {
 /* ── Value pretty-printing ───────────────────────────────────────────── */
 
 /* Format a March value as a human-readable string.
-   v1: prints scalars inline; heap objects as #<tag:N>.
-   Future: can use registered constructor name tables for better output. */
+   If v is a registered actor (Pid), prints Pid(n).
+   Otherwise prints #<tag:N> for heap objects. */
 void *march_value_to_string(void *v) {
     if (!v) return march_string_lit("nil", 3);
+    /* Check if this pointer is a registered actor → display as Pid(n) */
+    march_actor_meta *meta = find_meta(v);
+    if (meta) {
+        char buf[64];
+        int n = snprintf(buf, sizeof(buf), "Pid(%lld)", (long long)meta->pid_index);
+        return march_string_lit(buf, n);
+    }
     march_hdr *h = (march_hdr *)v;
     int32_t tag = h->tag;
     char buf[128];

@@ -11,7 +11,9 @@ module StringSet = Set.Make (String)
 
 (** Returns true if this type needs reference counting (heap-allocated). *)
 let needs_rc : Tir.ty -> bool = function
-  | Tir.TCon _ | Tir.TString | Tir.TPtr _ | Tir.TVar _ -> true
+  | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
+  | Tir.TVar _ -> false  (* unresolved after mono: conservatively skip RC
+                            to avoid incrc on integers stored as inttoptr *)
   | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit
   | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _ -> false
 

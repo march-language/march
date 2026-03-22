@@ -968,6 +968,42 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EApp (f, []) when f.Tir.v_name = "get_work_pool" ->
     ("ptr", "null")
 
+  (* ── to_string: dispatch on argument TIR type ──────────────────────── *)
+  | Tir.EApp (f, [a]) when f.Tir.v_name = "to_string" ->
+    let (arg_ty, arg_val) = emit_atom ctx a in
+    let tir_ty = (match a with
+      | Tir.AVar v -> v.Tir.v_ty
+      | Tir.ALit (March_ast.Ast.LitInt _) -> Tir.TInt
+      | Tir.ALit (March_ast.Ast.LitFloat _) -> Tir.TFloat
+      | Tir.ALit (March_ast.Ast.LitBool _) -> Tir.TBool
+      | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
+      | _ -> Tir.TVar "_") in
+    (match tir_ty with
+     | Tir.TString ->
+       (* Already a string, identity *)
+       let v = coerce ctx arg_ty arg_val "ptr" in
+       ("ptr", v)
+     | Tir.TInt ->
+       let v = coerce ctx arg_ty arg_val "i64" in
+       let r = fresh ctx "cr" in
+       emit ctx (Printf.sprintf "%s = call ptr @march_int_to_string(i64 %s)" r v);
+       ("ptr", r)
+     | Tir.TFloat ->
+       let v = coerce ctx arg_ty arg_val "double" in
+       let r = fresh ctx "cr" in
+       emit ctx (Printf.sprintf "%s = call ptr @march_float_to_string(double %s)" r v);
+       ("ptr", r)
+     | Tir.TBool ->
+       let v = coerce ctx arg_ty arg_val "i64" in
+       let r = fresh ctx "cr" in
+       emit ctx (Printf.sprintf "%s = call ptr @march_bool_to_string(i64 %s)" r v);
+       ("ptr", r)
+     | _ ->
+       let v = coerce ctx arg_ty arg_val "ptr" in
+       let r = fresh ctx "cr" in
+       emit ctx (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" r v);
+       ("ptr", r))
+
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->
     let arg_strs = List.map (fun a ->

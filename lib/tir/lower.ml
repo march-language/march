@@ -321,7 +321,52 @@ and lower_expr (e : Ast.expr) : Tir.expr =
           | Tir.ALit _ ->
             { v_name = "<lit>"; v_ty = unknown_ty; v_lin = Tir.Unr }
         in
-        Tir.EApp (f_var, arg_atoms)))
+        (* Special case: own(pid, value) → register_resource + drop closure.
+           Transforms own(pid, value : TypeName) into:
+             let $own_dropN = fn _ -> Drop$TypeName.drop(value) in
+             register_resource(pid, "drop_TypeName", $own_dropN)
+           This keeps the Drop impl alive through the mono pass and wires
+           the cleanup callback into the actor's kill/crash path. *)
+        if f_var.v_name = "own" && List.length arg_atoms = 2 then
+          let pid_atom   = List.nth arg_atoms 0 in
+          let value_atom = List.nth arg_atoms 1 in
+          let value_ty = match value_atom with
+            | Tir.AVar v -> v.Tir.v_ty
+            | _ -> Tir.TVar "_"
+          in
+          let type_name = match value_ty with
+            | Tir.TCon (n, _) -> n
+            | _ -> ""
+          in
+          if type_name = "" then Tir.EApp (f_var, arg_atoms)
+          else
+            let drop_fn_name = Printf.sprintf "Drop$%s.drop" type_name in
+            let lam_name     = fresh_name "own_drop" in
+            let drop_var  = { Tir.v_name = drop_fn_name;
+                              v_ty = Tir.TFn ([value_ty], Tir.TUnit);
+                              v_lin = Tir.Unr } in
+            let dummy_param = { Tir.v_name = "$_"; v_ty = Tir.TUnit; v_lin = Tir.Unr } in
+            let drop_body   = Tir.EApp (drop_var, [value_atom]) in
+            let lam_fn : Tir.fn_def = {
+              fn_name   = lam_name;
+              fn_params = [dummy_param];
+              fn_ret_ty = Tir.TUnit;
+              fn_body   = drop_body;
+            } in
+            let lam_ty  = Tir.TFn ([Tir.TUnit], Tir.TUnit) in
+            let lam_var = { Tir.v_name = lam_name; v_ty = lam_ty; v_lin = Tir.Unr } in
+            (* Bind the closure to a fresh variable so defun can see the
+               canonical ELetRec([fn], EAtom(AVar fn)) → closure alloc pattern. *)
+            let clo_var = fresh_var lam_ty in
+            let name_atom = Tir.ALit (March_ast.Ast.LitString ("drop_" ^ type_name)) in
+            let reg_var   = { Tir.v_name = "register_resource";
+                              v_ty = Tir.TFn ([Tir.TVar "_"; Tir.TString; lam_ty], Tir.TUnit);
+                              v_lin = Tir.Unr } in
+            Tir.ELet (clo_var,
+              Tir.ELetRec ([lam_fn], Tir.EAtom (Tir.AVar lam_var)),
+              Tir.EApp (reg_var, [pid_atom; name_atom; Tir.AVar clo_var]))
+        else
+          Tir.EApp (f_var, arg_atoms)))
 
   (* --- Constructor application (CPS for args) --- *)
   (* Embed the parent type name in the TCon key so that different ADTs with

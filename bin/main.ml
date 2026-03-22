@@ -212,14 +212,14 @@ let compile filename =
           | March_errors.Errors.Warning -> "warning"
           | March_errors.Errors.Hint    -> "hint"
         in
-        Printf.printf "%s:%d:%d: %s: %s\n"
+        Printf.eprintf "%s:%d:%d: %s: %s\n"
           d.span.March_ast.Ast.file
           d.span.March_ast.Ast.start_line
           d.span.March_ast.Ast.start_col
           sev
           d.message;
         List.iter (fun note ->
-            Printf.printf "note: %s\n" note
+            Printf.eprintf "note: %s\n" note
           ) d.notes
       end
     ) diags;
@@ -262,7 +262,7 @@ let compile filename =
         (match March_cas.Cas.lookup_artifact store ch with
         | Some cached_bin ->
           let _ = Sys.command (Printf.sprintf "cp %s %s" cached_bin out_bin) in
-          Printf.printf "compiled %s (cached)\n" out_bin
+          Printf.eprintf "compiled %s (cached)\n" out_bin
         | None ->
           (* Cache miss: emit LLVM IR, call clang, then cache the binary *)
           let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math tir in
@@ -298,7 +298,7 @@ let compile filename =
             Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
           end else begin
             March_cas.Cas.store_artifact store ch out_bin;
-            Printf.printf "compiled %s\n" out_bin
+            Printf.eprintf "compiled %s\n" out_bin
           end)
       end else begin
         (* --emit-llvm only: write IR and exit *)
@@ -306,7 +306,7 @@ let compile filename =
         let oc = open_out ll_file in
         output_string oc ir;
         close_out oc;
-        Printf.printf "wrote %s\n" ll_file
+        Printf.eprintf "wrote %s\n" ll_file
       end
     end
   end

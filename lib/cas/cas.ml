@@ -147,11 +147,17 @@ let store_artifact (t : t) (ch : string) (path : string) : unit =
   write_file ptr path
 
 let lookup_artifact (t : t) (ch : string) : string option =
+  (* Only return a cached path if the binary actually still exists on disk.
+     The store records the output path from a previous compilation, which may
+     have been a temp file that was later deleted (e.g. between oracle runs). *)
+  let check p = if Sys.file_exists p then Some p else None in
   match Hashtbl.find_opt t.artifacts ch with
-  | Some p -> Some p
+  | Some p -> check p
   | None ->
     let ptr = artifact_path t.local_root ch in
-    read_file ptr
+    match read_file ptr with
+    | None -> None
+    | Some p -> check p
 
 let lookup_name (t : t) (name : string) : def_id option =
   Hashtbl.find_opt t.index name
