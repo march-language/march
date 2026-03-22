@@ -13,7 +13,7 @@ fn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
 end
 
 fn head(xs : List(Int)) : Int do
-  match xs with
+  match xs do
   | Nil        -> 0
   | Cons(h, _) -> h
   end

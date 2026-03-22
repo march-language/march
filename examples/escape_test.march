@@ -13,7 +13,7 @@ type Wrap = Wrap(Box)
 -- Expected TIR: stack_alloc MkPair(...)
 fn sum_pair(x : Int, y : Int) : Int do
   let p = MkPair(x, y)
-  match p with
+  match p do
   | MkPair(a, b) -> a + b
   end
 end

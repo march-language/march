@@ -14,7 +14,7 @@ type Seq(a) = Seq(a)
 -- Internal helper: reverse a list. Avoids dependency on list.march.
 fn rev(xs) do
   fn go(lst, acc) do
-    match lst with
+    match lst do
     | Nil -> acc
     | Cons(h, t) -> go(t, Cons(h, acc))
     end
@@ -26,7 +26,7 @@ end
 
 pub fn from_list(xs) do
   fn go(lst, a, f) do
-    match lst with
+    match lst do
     | Nil -> a
     | Cons(h, t) -> go(t, f(a, h), f)
     end
@@ -40,7 +40,7 @@ end
 
 pub fn unfold(seed, next) do
   fn go(s, a, f) do
-    match next(s) with
+    match next(s) do
     | None -> a
     | Some(pair) ->
       let (value, s2) = pair
@@ -55,9 +55,9 @@ pub fn concat(s1, s2) do
     let mid = fold1(acc, f)
     fold2(mid, f)
   end
-  match s1 with
+  match s1 do
   | Seq(fold1) ->
-    match s2 with
+    match s2 do
     | Seq(fold2) ->
       Seq(fn(acc, f) -> run_concat(fold1, fold2, acc, f))
     end
@@ -67,14 +67,14 @@ end
 -- Transformation (lazy)
 
 pub fn map(seq, f) do
-  match seq with
+  match seq do
   | Seq(fold) ->
     Seq(fn(acc, g) -> fold(acc, fn(a, x) -> g(a, f(x))))
   end
 end
 
 pub fn filter(seq, pred) do
-  match seq with
+  match seq do
   | Seq(fold) ->
     Seq(fn(acc, f) ->
       fold(acc, fn(a, x) -> if pred(x) then f(a, x) else a)
@@ -83,11 +83,11 @@ pub fn filter(seq, pred) do
 end
 
 pub fn flat_map(seq, f) do
-  match seq with
+  match seq do
   | Seq(fold) ->
     Seq(fn(acc, g) ->
       fold(acc, fn(a, x) ->
-        match f(x) with
+        match f(x) do
         | Seq(inner_fold) -> inner_fold(a, g)
         end
       )
@@ -106,7 +106,7 @@ pub fn take(seq, n) do
     let (a, ig) = result
     a
   end
-  match seq with
+  match seq do
   | Seq(fold) ->
     Seq(fn(acc, f) -> run_take(fold, acc, f))
   end
@@ -123,7 +123,7 @@ pub fn drop(seq, n) do
     let (a, ig) = result
     a
   end
-  match seq with
+  match seq do
   | Seq(fold) ->
     Seq(fn(acc, f) -> run_drop(fold, acc, f))
   end
@@ -132,7 +132,7 @@ end
 pub fn zip(s1, s2) do
   fn step_zip(pair, x, f) do
     let (a, remaining) = pair
-    match remaining with
+    match remaining do
     | Nil -> (a, Nil)
     | Cons(y, rest) -> (f(a, (x, y)), rest)
     end
@@ -144,7 +144,7 @@ pub fn zip(s1, s2) do
     let (a, ig) = result
     a
   end
-  match s1 with
+  match s1 do
   | Seq(fold) ->
     Seq(fn(acc, f) -> run_zip(fold, s2, acc, f))
   end
@@ -160,7 +160,7 @@ pub fn batch(seq, n) do
       (a, Cons(x, buf), count + 1)
   end
   fn flush_batch(triple, f) do
-    match triple with
+    match triple do
     | (a, Nil, ig) -> a
     | (a, buf, ig) -> f(a, rev(buf))
     end
@@ -169,7 +169,7 @@ pub fn batch(seq, n) do
     let result = fold((acc, Nil, 0), fn(triple, x) -> step_batch(triple, x, f))
     flush_batch(result, f)
   end
-  match seq with
+  match seq do
   | Seq(fold) ->
     Seq(fn(acc, f) -> run_batch(fold, acc, f))
   end
@@ -178,14 +178,14 @@ end
 -- Consumption (eager)
 
 pub fn to_list(seq) do
-  match seq with
+  match seq do
   | Seq(fold) ->
     rev(fold(Nil, fn(acc, x) -> Cons(x, acc)))
   end
 end
 
 pub fn fold(seq, start, f) do
-  match seq with
+  match seq do
   | Seq(folder) -> folder(start, f)
   end
 end
@@ -196,15 +196,15 @@ end
 -- even after Halt. This is a known limitation of the fold-based model.
 pub fn fold_while(seq, start, f) do
   fn step_fold_while(step, x, f) do
-    match step with
+    match step do
     | Halt(a) -> Halt(a)
     | Continue(a) -> f(a, x)
     end
   end
-  match seq with
+  match seq do
   | Seq(folder) ->
     let result = folder(Continue(start), fn(step, x) -> step_fold_while(step, x, f))
-    match result with
+    match result do
     | Continue(a) -> a
     | Halt(a) -> a
     end
@@ -212,7 +212,7 @@ pub fn fold_while(seq, start, f) do
 end
 
 pub fn each(seq, f) do
-  match seq with
+  match seq do
   | Seq(folder) ->
     folder(:ok, fn(ig, x) -> f(x))
     :ok
@@ -220,7 +220,7 @@ pub fn each(seq, f) do
 end
 
 pub fn count(seq) do
-  match seq with
+  match seq do
   | Seq(folder) ->
     folder(0, fn(n, ig) -> n + 1)
   end

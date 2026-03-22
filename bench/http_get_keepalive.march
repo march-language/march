@@ -4,7 +4,7 @@ mod HttpGetKeepalive do
 fn run_keepalive(n, do_request, req) do
   if n == 0 then Ok(0)
   else
-    match do_request(req) with
+    match do_request(req) do
     | Ok(_) -> run_keepalive(n - 1, do_request, req)
     | Err(e) -> Err(e)
     end
@@ -17,14 +17,14 @@ fn main() do
   let client = HttpClient.add_request_step(client, "defaults",
     HttpClient.step_default_headers)
   print("keep-alive: " ++ int_to_string(n) ++ " GETs")
-  match Http.get(url) with
+  match Http.get(url) do
   | Err(_) -> print("error parsing url")
   | Ok(req) ->
     let req = Http.set_body(req, "")
     fn callback(do_request) do
       run_keepalive(n, do_request, req)
     end
-    match HttpClient.with_connection(client, url, callback) with
+    match HttpClient.with_connection(client, url, callback) do
     | Ok(Ok(_)) -> print("done")
     | _ -> print("error")
     end

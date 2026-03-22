@@ -13,7 +13,7 @@ mod Enum do
 -- Internal helper: reverse a list. Avoids dependency on prelude's reverse.
 fn rev(xs : List(a)) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
-    match lst with
+    match lst do
     | Nil        -> acc
     | Cons(h, t) -> go(t, Cons(h, acc))
     end
@@ -30,7 +30,7 @@ This is the primary way to transform a collection element-by-element.
 """
 pub fn map(xs : List(a), f : a -> b) : List(b) do
   fn go(lst : List(a), acc : List(b)) : List(b) do
-    match lst with
+    match lst do
     | Nil        -> rev(acc)
     | Cons(h, t) -> go(t, Cons(f(h), acc))
     end
@@ -48,13 +48,13 @@ expanding ranges). Equivalent to Haskell's concatMap.
 pub fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
   -- append_list: append ys onto xs (xs ++ ys). O(|xs|).
   fn append_list(left : List(b), right : List(b)) : List(b) do
-    match left with
+    match left do
     | Nil        -> right
     | Cons(x, r) -> Cons(x, append_list(r, right))
     end
   end
   fn go(lst : List(a), acc : List(b)) : List(b) do
-    match lst with
+    match lst do
     | Nil        -> acc
     | Cons(h, t) -> go(t, append_list(acc, f(h)))
     end
@@ -69,7 +69,7 @@ Preserves order and is stable (equal elements stay in original relative order).
 """
 pub fn filter(xs : List(a), pred : a -> Bool) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
-    match lst with
+    match lst do
     | Nil        -> rev(acc)
     | Cons(h, t) ->
       if pred(h) then go(t, Cons(h, acc))
@@ -88,7 +88,7 @@ Use fold when you need to accumulate a single value from all elements.
 """
 pub fn fold(zero : b, xs : List(a), f : b -> a -> b) : b do
   fn go(lst : List(a), acc : b) : b do
-    match lst with
+    match lst do
     | Nil        -> acc
     | Cons(h, t) ->
       let g = f(acc)
@@ -106,11 +106,11 @@ Prefer over fold when there is no natural zero value (e.g. max, min,
 string concatenation without a starting value).
 """
 pub fn reduce(xs : List(a), f : a -> a -> a) : Option(a) do
-  match xs with
+  match xs do
   | Nil        -> None
   | Cons(h, t) ->
     fn go(lst : List(a), acc : a) : a do
-      match lst with
+      match lst do
       | Nil        -> acc
       | Cons(x, r) ->
         let g = f(acc)
@@ -128,7 +128,7 @@ Use when you want to perform an action (e.g. println) for each element
 and don't care about the result. Returns Unit regardless of f's return type.
 """
 pub fn each(xs : List(a), f : a -> b) : Unit do
-  match xs with
+  match xs do
   | Nil        -> ()
   | Cons(h, t) ->
     let _ = f(h)
@@ -145,7 +145,7 @@ Prefer this over computing length inside a recursive helper when possible.
 """
 pub fn count(xs : List(a)) : Int do
   fn go(lst : List(a), acc : Int) : Int do
-    match lst with
+    match lst do
     | Nil        -> acc
     | Cons(_, t) -> go(t, acc + 1)
     end
@@ -160,7 +160,7 @@ Use any instead of filter + count when you only need a yes/no answer —
 any stops at the first match.
 """
 pub fn any(xs : List(a), pred : a -> Bool) : Bool do
-  match xs with
+  match xs do
   | Nil        -> false
   | Cons(h, t) ->
     if pred(h) then true
@@ -174,7 +174,7 @@ Returns true if all elements satisfy pred. Short-circuits on first failure. O(n)
 Use all to validate a collection without counting or filtering.
 """
 pub fn all(xs : List(a), pred : a -> Bool) : Bool do
-  match xs with
+  match xs do
   | Nil        -> true
   | Cons(h, t) ->
     if pred(h) then all(t, pred)
@@ -189,7 +189,7 @@ Use find when you need one element that matches a condition. If you
 need all matching elements, use filter instead.
 """
 pub fn find(xs : List(a), pred : a -> Bool) : Option(a) do
-  match xs with
+  match xs do
   | Nil        -> None
   | Cons(h, t) ->
     if pred(h) then Some(h)
@@ -212,7 +212,7 @@ keeping this function pure and O(n) without sorting.
 """
 pub fn group_by(xs : List(a), key : a -> k) : List((k, List(a))) do
   fn go(lst : List(a), cur_key : k, cur_group : List(a), acc : List((k, List(a)))) : List((k, List(a))) do
-    match lst with
+    match lst do
     | Nil ->
       let finished = Cons((cur_key, rev(cur_group)), acc)
       rev(finished)
@@ -227,7 +227,7 @@ pub fn group_by(xs : List(a), key : a -> k) : List((k, List(a))) do
       end
     end
   end
-  match xs with
+  match xs do
   | Nil        -> Nil
   | Cons(h, t) ->
     let k = key(h)
@@ -245,10 +245,10 @@ Equivalent to Haskell's zipWith.
 """
 pub fn zip_with(xs : List(a), ys : List(b), f : a -> b -> c) : List(c) do
   fn go(as_ : List(a), bs : List(b), acc : List(c)) : List(c) do
-    match as_ with
+    match as_ do
     | Nil -> rev(acc)
     | Cons(x, xt) ->
-      match bs with
+      match bs do
       | Nil -> rev(acc)
       | Cons(y, yt) ->
         let g = f(x)

@@ -53,7 +53,7 @@ end
 
 doc "Returns the first element. Panics on empty list."
 pub fn head(xs : List(a)) : a do
-  match xs with
+  match xs do
   | Cons(h, _) -> h
   | Nil        -> panic("List.head: empty list")
   end
@@ -61,7 +61,7 @@ end
 
 doc "Returns the tail (all but first element). Panics on empty list."
 pub fn tail(xs : List(a)) : List(a) do
-  match xs with
+  match xs do
   | Cons(_, t) -> t
   | Nil        -> panic("List.tail: empty list")
   end
@@ -69,7 +69,7 @@ end
 
 doc "Returns Some(first element), or None if empty."
 pub fn head_opt(xs : List(a)) : Option(a) do
-  match xs with
+  match xs do
   | Cons(h, _) -> Some(h)
   | Nil        -> None
   end
@@ -77,7 +77,7 @@ end
 
 doc "Returns Some(tail), or None if empty."
 pub fn tail_opt(xs : List(a)) : Option(List(a)) do
-  match xs with
+  match xs do
   | Cons(_, t) -> Some(t)
   | Nil        -> None
   end
@@ -85,7 +85,7 @@ end
 
 doc "Returns the last element. Panics on empty list."
 pub fn last(xs : List(a)) : a do
-  match xs with
+  match xs do
   | Nil        -> panic("List.last: empty list")
   | Cons(x, Nil) -> x
   | Cons(_, t)   -> last(t)
@@ -94,7 +94,7 @@ end
 
 doc "Returns the nth element (0-indexed). Panics if out of bounds."
 pub fn nth(xs : List(a), n : Int) : a do
-  match xs with
+  match xs do
   | Nil        -> panic("List.nth: index out of bounds")
   | Cons(h, t) -> if n == 0 then h else nth(t, n - 1)
   end
@@ -102,7 +102,7 @@ end
 
 doc "Returns Some(nth element), or None if out of bounds."
 pub fn nth_opt(xs : List(a), n : Int) : Option(a) do
-  match xs with
+  match xs do
   | Nil        -> None
   | Cons(h, t) -> if n == 0 then Some(h) else nth_opt(t, n - 1)
   end
@@ -113,7 +113,7 @@ end
 doc "Returns the number of elements in the list."
 pub fn length(xs : List(a)) : Int do
   fn go(lst : List(a), acc : Int) : Int do
-    match lst with
+    match lst do
     | Nil        -> acc
     | Cons(_, t) -> go(t, acc + 1)
     end
@@ -123,7 +123,7 @@ end
 
 doc "Returns true if the list has no elements."
 pub fn is_empty(xs : List(a)) : Bool do
-  match xs with
+  match xs do
   | Nil -> true
   | _   -> false
   end
@@ -134,7 +134,7 @@ end
 doc "Returns the list in reverse order."
 pub fn reverse(xs : List(a)) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
-    match lst with
+    match lst do
     | Nil        -> acc
     | Cons(h, t) -> go(t, Cons(h, acc))
     end
@@ -144,7 +144,7 @@ end
 
 doc "Concatenates two lists."
 pub fn append(xs : List(a), ys : List(a)) : List(a) do
-  match xs with
+  match xs do
   | Nil        -> ys
   | Cons(h, t) -> Cons(h, append(t, ys))
   end
@@ -152,7 +152,7 @@ end
 
 doc "Applies `f` to each element, returning a new list."
 pub fn map(xs : List(a), f : a -> b) : List(b) do
-  match xs with
+  match xs do
   | Nil        -> Nil
   | Cons(h, t) -> Cons(f(h), map(t, f))
   end
@@ -160,7 +160,7 @@ end
 
 doc "Applies `f` to each element and concatenates the results."
 pub fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
-  match xs with
+  match xs do
   | Nil        -> Nil
   | Cons(h, t) -> append(f(h), flat_map(t, f))
   end
@@ -168,7 +168,7 @@ end
 
 doc "Returns only elements satisfying `pred`."
 pub fn filter(xs : List(a), pred : a -> Bool) : List(a) do
-  match xs with
+  match xs do
   | Nil        -> Nil
   | Cons(h, t) ->
     if pred(h) then Cons(h, filter(t, pred)) else filter(t, pred)
@@ -180,10 +180,10 @@ Applies `f` to each element; collects Some values, discards None.
 Equivalent to map followed by filter for non-None values.
 """
 pub fn filter_map(xs : List(a), f : a -> Option(b)) : List(b) do
-  match xs with
+  match xs do
   | Nil        -> Nil
   | Cons(h, t) ->
-    match f(h) with
+    match f(h) do
     | Some(v) -> Cons(v, filter_map(t, f))
     | None    -> filter_map(t, f)
     end
@@ -192,7 +192,7 @@ end
 
 doc "Left fold: reduces the list from left to right with an accumulator."
 pub fn fold_left(acc : b, xs : List(a), f : b -> a -> b) : b do
-  match xs with
+  match xs do
   | Nil        -> acc
   | Cons(h, t) -> fold_left(f(acc, h), t, f)
   end
@@ -200,7 +200,7 @@ end
 
 doc "Right fold: reduces the list from right to left."
 pub fn fold_right(xs : List(a), acc : b, f : a -> b -> b) : b do
-  match xs with
+  match xs do
   | Nil        -> acc
   | Cons(h, t) -> f(h, fold_right(t, acc, f))
   end
@@ -209,7 +209,7 @@ end
 doc "Like fold_left but returns a list of all intermediate accumulator values."
 pub fn scan_left(acc : b, xs : List(a), f : b -> a -> b) : List(b) do
   fn go(a : b, lst : List(a), result : List(b)) : List(b) do
-    match lst with
+    match lst do
     | Nil        -> reverse(Cons(a, result))
     | Cons(h, t) ->
       let a2 = f(a, h)
@@ -226,7 +226,7 @@ end
 
 doc "Inserts `sep` between every consecutive pair of elements."
 pub fn intersperse(xs : List(a), sep : a) : List(a) do
-  match xs with
+  match xs do
   | Nil           -> Nil
   | Cons(x, Nil)  -> Cons(x, Nil)
   | Cons(h, t)    -> Cons(h, Cons(sep, intersperse(t, sep)))
@@ -237,7 +237,7 @@ end
 
 doc "Returns the first element satisfying `pred`, or None."
 pub fn find(xs : List(a), pred : a -> Bool) : Option(a) do
-  match xs with
+  match xs do
   | Nil        -> None
   | Cons(h, t) -> if pred(h) then Some(h) else find(t, pred)
   end
@@ -246,7 +246,7 @@ end
 doc "Returns the index of the first element satisfying `pred`, or None."
 pub fn find_index(xs : List(a), pred : a -> Bool) : Option(Int) do
   fn go(lst : List(a), i : Int) : Option(Int) do
-    match lst with
+    match lst do
     | Nil        -> None
     | Cons(h, t) -> if pred(h) then Some(i) else go(t, i + 1)
     end
@@ -256,7 +256,7 @@ end
 
 doc "Returns true if any element satisfies `pred`."
 pub fn any(xs : List(a), pred : a -> Bool) : Bool do
-  match xs with
+  match xs do
   | Nil        -> false
   | Cons(h, t) -> if pred(h) then true else any(t, pred)
   end
@@ -264,7 +264,7 @@ end
 
 doc "Returns true if all elements satisfy `pred` (vacuously true for [])."
 pub fn all(xs : List(a), pred : a -> Bool) : Bool do
-  match xs with
+  match xs do
   | Nil        -> true
   | Cons(h, t) -> if pred(h) then all(t, pred) else false
   end
@@ -275,10 +275,10 @@ end
 doc "Sorts by a comparator function. Uses merge sort (stable, O(n log n))."
 pub fn sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   fn merge(a : List(a), b : List(a)) : List(a) do
-    match a with
+    match a do
     | Nil -> b
     | Cons(x, xa) ->
-      match b with
+      match b do
       | Nil -> a
       | Cons(y, yb) ->
         if cmp(x, y)
@@ -290,7 +290,7 @@ pub fn sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   fn split_half(lst : List(a), n : Int) : (List(a), List(a)) do
     fn go(l : List(a), k : Int, acc : List(a)) : (List(a), List(a)) do
       if k == 0 then (reverse(acc), l)
-      else match l with
+      else match l do
         | Nil        -> (reverse(acc), Nil)
         | Cons(h, t) -> go(t, k - 1, Cons(h, acc))
         end
@@ -313,7 +313,7 @@ end
 doc "Returns the first `n` elements. Returns the whole list if n >= length."
 pub fn take(xs : List(a), n : Int) : List(a) do
   if n <= 0 then Nil
-  else match xs with
+  else match xs do
     | Nil        -> Nil
     | Cons(h, t) -> Cons(h, take(t, n - 1))
     end
@@ -322,7 +322,7 @@ end
 doc "Drops the first `n` elements. Returns [] if n >= length."
 pub fn drop(xs : List(a), n : Int) : List(a) do
   if n <= 0 then xs
-  else match xs with
+  else match xs do
     | Nil        -> Nil
     | Cons(_, t) -> drop(t, n - 1)
     end
@@ -330,7 +330,7 @@ end
 
 doc "Returns the longest prefix of elements satisfying `pred`."
 pub fn take_while(xs : List(a), pred : a -> Bool) : List(a) do
-  match xs with
+  match xs do
   | Nil        -> Nil
   | Cons(h, t) -> if pred(h) then Cons(h, take_while(t, pred)) else Nil
   end
@@ -338,7 +338,7 @@ end
 
 doc "Drops elements while `pred` holds, returning the rest."
 pub fn drop_while(xs : List(a), pred : a -> Bool) : List(a) do
-  match xs with
+  match xs do
   | Nil        -> Nil
   | Cons(h, t) -> if pred(h) then drop_while(t, pred) else xs
   end
@@ -348,7 +348,7 @@ doc "Splits the list at position n, returning (take n xs, drop n xs)."
 pub fn split_at(xs : List(a), n : Int) : (List(a), List(a)) do
   fn go(lst : List(a), k : Int, acc : List(a)) : (List(a), List(a)) do
     if k <= 0 then (reverse(acc), lst)
-    else match lst with
+    else match lst do
       | Nil        -> (reverse(acc), Nil)
       | Cons(h, t) -> go(t, k - 1, Cons(h, acc))
       end
@@ -359,7 +359,7 @@ end
 doc "Splits into (elements satisfying pred, elements not satisfying pred)."
 pub fn partition(xs : List(a), pred : a -> Bool) : (List(a), List(a)) do
   fn go(lst : List(a), yes : List(a), no : List(a)) : (List(a), List(a)) do
-    match lst with
+    match lst do
     | Nil        -> (reverse(yes), reverse(no))
     | Cons(h, t) ->
       if pred(h) then go(t, Cons(h, yes), no)
@@ -371,7 +371,7 @@ end
 
 doc "Returns all elements except the last. Returns Nil for empty or singleton lists."
 pub fn drop_last(xs : List(a)) : List(a) do
-  match reverse(xs) with
+  match reverse(xs) do
   | Nil -> Nil
   | Cons(ig, rest) -> reverse(rest)
   end
@@ -390,10 +390,10 @@ end
 
 doc "Pairs up elements from two lists. Stops at the shorter list."
 pub fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
-  match xs with
+  match xs do
   | Nil -> Nil
   | Cons(x, xt) ->
-    match ys with
+    match ys do
     | Nil -> Nil
     | Cons(y, yt) -> Cons((x, y), zip(xt, yt))
     end
@@ -402,10 +402,10 @@ end
 
 doc "Like zip but applies `f` to each pair instead of building tuples."
 pub fn zip_with(xs : List(a), ys : List(b), f : a -> b -> c) : List(c) do
-  match xs with
+  match xs do
   | Nil -> Nil
   | Cons(x, xt) ->
-    match ys with
+    match ys do
     | Nil -> Nil
     | Cons(y, yt) -> Cons(f(x, y), zip_with(xt, yt, f))
     end
@@ -415,7 +415,7 @@ end
 doc "Splits a list of pairs into two lists."
 pub fn unzip(pairs : List((a, b))) : (List(a), List(b)) do
   fn go(lst : List((a, b)), as_ : List(a), bs : List(b)) : (List(a), List(b)) do
-    match lst with
+    match lst do
     | Nil            -> (reverse(as_), reverse(bs))
     | Cons((x, y), t) -> go(t, Cons(x, as_), Cons(y, bs))
     end
@@ -426,7 +426,7 @@ end
 doc "Pairs each element with its 0-based index: [a, b] -> [(0, a), (1, b)]."
 pub fn enumerate(xs : List(a)) : List((Int, a)) do
   fn go(lst : List(a), i : Int, acc : List((Int, a))) : List((Int, a)) do
-    match lst with
+    match lst do
     | Nil        -> reverse(acc)
     | Cons(h, t) -> go(t, i + 1, Cons((i, h), acc))
     end
@@ -439,7 +439,7 @@ end
 doc "Sums a list of integers."
 pub fn sum_int(xs : List(Int)) : Int do
   fn go(lst : List(Int), acc : Int) : Int do
-    match lst with
+    match lst do
     | Nil        -> acc
     | Cons(x, t) -> go(t, acc + x)
     end
@@ -450,7 +450,7 @@ end
 doc "Multiplies all integers in a list."
 pub fn product_int(xs : List(Int)) : Int do
   fn go(lst : List(Int), acc : Int) : Int do
-    match lst with
+    match lst do
     | Nil        -> acc
     | Cons(x, t) -> go(t, acc * x)
     end
@@ -461,12 +461,12 @@ end
 doc "Returns the minimum integer in the list. Panics if empty."
 pub fn minimum_int(xs : List(Int)) : Int do
   fn go(lst : List(Int), m : Int) : Int do
-    match lst with
+    match lst do
     | Nil        -> m
     | Cons(x, r) -> if x < m then go(r, x) else go(r, m)
     end
   end
-  match xs with
+  match xs do
   | Nil        -> panic("List.minimum_int: empty list")
   | Cons(h, t) -> go(t, h)
   end
@@ -475,12 +475,12 @@ end
 doc "Returns the maximum integer in the list. Panics if empty."
 pub fn maximum_int(xs : List(Int)) : Int do
   fn go(lst : List(Int), m : Int) : Int do
-    match lst with
+    match lst do
     | Nil        -> m
     | Cons(x, r) -> if x > m then go(r, x) else go(r, m)
     end
   end
-  match xs with
+  match xs do
   | Nil        -> panic("List.maximum_int: empty list")
   | Cons(h, t) -> go(t, h)
   end
@@ -491,7 +491,7 @@ end
 doc "Removes consecutive duplicate elements (keeps first of each run)."
 pub fn dedup(xs : List(a)) : List(a) do
   fn go(lst : List(a), prev : a, acc : List(a)) : List(a) do
-    match lst with
+    match lst do
     | Nil        -> reverse(acc)
     | Cons(h, t) ->
       if to_string(h) == to_string(prev)
@@ -499,7 +499,7 @@ pub fn dedup(xs : List(a)) : List(a) do
       else go(t, h, Cons(h, acc))
     end
   end
-  match xs with
+  match xs do
   | Nil        -> Nil
   | Cons(h, t) -> go(t, h, Cons(h, Nil))
   end

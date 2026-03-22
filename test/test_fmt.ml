@@ -46,7 +46,7 @@ end|} in
 let test_match_expr () =
   let src = {|mod Test do
 fn describe(x : Int) : String do
-  match x with
+  match x do
   | 0 -> "zero"
   | 1 -> "one"
   | _ -> "many"
@@ -119,9 +119,9 @@ end|} in
 let test_nested_match () =
   let src = {|mod Test do
 fn classify(x : Int, y : Int) : String do
-  match x with
+  match x do
   | 0 ->
-    match y with
+    match y do
     | 0 -> "origin"
     | _ -> "x-axis"
     end
@@ -200,7 +200,7 @@ let test_format_fixpoint () =
 type Shape = Circle(Float) | Rect(Float, Float)
 
 fn area(s : Shape) : Float do
-  match s with
+  match s do
   | Circle(r) -> 3.14159 * r * r
   | Rect(w, h) -> w * h
   end

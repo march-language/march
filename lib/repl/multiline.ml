@@ -6,24 +6,12 @@ let count_token tok buf =
   let words = Str.split (Str.regexp "[^a-zA-Z0-9_']") buf in
   List.length (List.filter (( = ) tok) words)
 
-(** Count lines whose last word is "with" AND the line contains "match" —
-    these are genuine match-expression openers like [match x with].
-    Record update syntax like [{ state with] ends with "with" but contains
-    no "match" keyword, so it is NOT counted here (it needs no balancing "end"). *)
-let count_match_with buf =
-  let lines = String.split_on_char '\n' buf in
-  List.length (List.filter (fun line ->
-      let words = Str.split (Str.regexp "[^a-zA-Z0-9_']") (String.trim line) in
-      match List.rev words with
-      | "with" :: rest -> List.mem "match" rest
-      | _              -> false
-    ) lines)
 
-(** Net depth of open blocks: do/with openers minus end closers.
+(** Net depth of open blocks: do openers minus end closers.
     Positive means we are inside an unclosed block.
     Known limitation: tokens inside string literals are miscounted. *)
 let do_end_depth buf =
-  count_token "do" buf + count_match_with buf - count_token "end" buf
+  count_token "do" buf - count_token "end" buf
 
 (** Last non-blank line in [buf], trimmed. *)
 let last_non_blank_line buf =
@@ -32,7 +20,8 @@ let last_non_blank_line buf =
   | []     -> ""
   | l :: _ -> String.trim l
 
-(** True if the last non-blank line ends with the token "with". *)
+(** True if the last non-blank line ends with the token "with" (record update)
+    or is a match opener ending in "do".  Both forms require more input. *)
 let ends_with_with buf =
   let l = last_non_blank_line buf in
   let words = String.split_on_char ' ' (String.trim l) in

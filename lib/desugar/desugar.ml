@@ -245,7 +245,7 @@ let desugar_fn_def (def : fn_def) (fn_span : span) : fn_def =
 
     let branches = List.map clause_to_branch clauses in
 
-    (* Build the merged body: match (arg0, …, argN) with … end *)
+    (* Build the merged body: match (arg0, …, argN) do … end *)
     let body = EMatch (scrutinee, branches, fn_span) in
 
     (* Single merged clause with all FPNamed params *)

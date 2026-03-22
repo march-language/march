@@ -21,13 +21,13 @@ pub fn read(path) do
 end
 
 pub fn read_lines(path) do
-  match file_read(path) with
+  match file_read(path) do
   | Err(e) -> Err(e)
   | Ok(s) ->
     let lines = String.split(s, "\n")
     -- Strip all trailing empty strings (from trailing newlines)
     fn strip_trailing(xs) do
-      match List.reverse(xs) with
+      match List.reverse(xs) do
       | Nil -> Nil
       | Cons("", rest) -> strip_trailing(List.reverse(rest))
       | ig -> xs
@@ -61,11 +61,11 @@ pub fn rename(src, dest) do file_rename(src, dest) end
 -- then closes the file handle. The Seq is single-pass -- consuming it twice yields
 -- empty results on the second pass.
 pub fn with_lines(path, callback) do
-  match file_open(path) with
+  match file_open(path) do
   | Err(e) -> Err(e)
   | Ok(fd) ->
     fn do_lines(a, f) do
-      match file_read_line(fd) with
+      match file_read_line(fd) do
       | None -> a
       | Some(line) -> do_lines(f(a, line), f)
       end
@@ -78,11 +78,11 @@ pub fn with_lines(path, callback) do
 end
 
 pub fn with_chunks(path, size, callback) do
-  match file_open(path) with
+  match file_open(path) do
   | Err(e) -> Err(e)
   | Ok(fd) ->
     fn do_chunks(a, f) do
-      match file_read_chunk(fd, size) with
+      match file_read_chunk(fd, size) do
       | None -> a
       | Some(chunk) -> do_chunks(f(a, chunk), f)
       end
@@ -98,7 +98,7 @@ end
 
 -- Internal helper: recursively reads lines. Used by each_line.
 fn each_line_loop(fd, f) do
-  match file_read_line(fd) with
+  match file_read_line(fd) do
   | None -> :ok
   | Some(line) ->
     f(line)
@@ -107,7 +107,7 @@ fn each_line_loop(fd, f) do
 end
 
 pub fn each_line(path, f) do
-  match file_open(path) with
+  match file_open(path) do
   | Err(e) -> Err(e)
   | Ok(fd) ->
     each_line_loop(fd, f)
@@ -118,7 +118,7 @@ end
 
 -- Internal helper: recursively reads chunks. Used by each_chunk.
 fn each_chunk_loop(fd, size, f) do
-  match file_read_chunk(fd, size) with
+  match file_read_chunk(fd, size) do
   | None -> :ok
   | Some(chunk) ->
     f(chunk)
@@ -127,7 +127,7 @@ fn each_chunk_loop(fd, size, f) do
 end
 
 pub fn each_chunk(path, size, f) do
-  match file_open(path) with
+  match file_open(path) do
   | Err(e) -> Err(e)
   | Ok(fd) ->
     each_chunk_loop(fd, size, f)

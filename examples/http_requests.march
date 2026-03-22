@@ -11,7 +11,7 @@ mod HttpExample do
 
   -- Helper to print a Result
   fn print_result(label, result) do
-    match result with
+    match result do
     | Ok(resp) ->
       print(label ++ ": OK (status " ++ int_to_string(Http.response_status_code(resp)) ++ ")")
       print("  body: " ++ Http.response_body(resp))
@@ -46,7 +46,7 @@ mod HttpExample do
 
     -- Show configured steps
     fn show_steps(xs) do
-      match xs with
+      match xs do
       | Nil -> "done"
       | Cons(h, t) ->
         print("  - " ++ h)

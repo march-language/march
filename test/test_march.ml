@@ -249,7 +249,7 @@ let test_tc_annotated_fn () =
 let test_tc_match () =
   let ctx = typecheck {|mod Test do
     fn f(x) do
-      match x with
+      match x do
       | 0 -> 1
       | n -> n + 1
       end
@@ -358,7 +358,7 @@ let test_eq_user_impl () =
     type Color = Red | Green | Blue
     impl Eq(Color) do
       fn eq(x, y) do
-        match (x, y) with
+        match (x, y) do
         | (Red, Red)     -> true
         | (Green, Green) -> true
         | (Blue, Blue)   -> true
@@ -442,7 +442,7 @@ let test_standard_interfaces_in_scope () =
     type Wrap = Wrap(Int)
     impl Eq(Wrap) do
       fn eq(x, y) do
-        match (x, y) with
+        match (x, y) do
         | (Wrap(a), Wrap(b)) -> a == b
         end
       end
@@ -458,7 +458,7 @@ let test_linear_pattern_match_ok () =
   (* Matching a linear var and using the binding exactly once is fine. *)
   let ctx = typecheck {|mod Test do
     fn consume(linear x: Int) : Int do
-      match x with
+      match x do
       | n -> n
       end
     end
@@ -469,7 +469,7 @@ let test_linear_pattern_match_double_use () =
   (* Matching a linear var and using the binding twice should error. *)
   let ctx = typecheck {|mod Test do
     fn bad(linear x: Int) : Int do
-      match x with
+      match x do
       | n -> n + n
       end
     end
@@ -1033,7 +1033,7 @@ let test_eval_match_adt () =
   let env = eval_module {|mod Test do
     type Shape = Circle(Int) | Square(Int)
     fn area(s) do
-      match s with
+      match s do
       | Circle(r) -> r * r
       | Square(side) -> side * side
       end
@@ -1089,7 +1089,7 @@ let test_parse_negative_lit_pattern () =
   (* match n with | -1 -> ... should produce PatLit(LitInt(-1)) *)
   let src = {|mod T do
     fn f(n) do
-      match n with
+      match n do
       | -1 -> true
       | _  -> false
       end
@@ -1136,7 +1136,7 @@ let test_eval_multi_stmt_match_arm () =
   (* Multi-statement match arm body — sequences two lets and returns result *)
   let env = eval_module {|mod Test do
     fn classify(n) do
-      match n with
+      match n do
       | 0 ->
         let tag = 0
         tag
@@ -1174,7 +1174,7 @@ let test_eval_list_literal () =
 let test_eval_negative_pattern () =
   let env = eval_module {|mod Test do
     fn sign(n) do
-      match n with
+      match n do
       | 0  -> 0
       | -1 -> -1
       | _  -> 1
@@ -1471,7 +1471,7 @@ let test_tir_lower_match () =
   let m = lower_module {|mod Test do
     type Shape = Circle(Int) | Square(Int)
     fn area(s) do
-      match s with
+      match s do
       | Circle(r) -> r
       | Square(side) -> side
       end
@@ -1559,7 +1559,7 @@ let test_tir_lower_patvar_default () =
   (* PatVar in default arm should bind the scrutinee *)
   let m = lower_module {|mod Test do
     fn describe(n) do
-      match n with
+      match n do
       | 0 -> 0
       | other -> other
       end
@@ -1620,14 +1620,14 @@ let test_tir_lower_list_ops () =
     type List = Cons(Int, List) | Nil
 
     fn map(f, xs) do
-      match xs with
+      match xs do
       | Nil -> Nil()
       | Cons(h, t) -> Cons(f(h), map(f, t))
       end
     end
 
     fn length(xs) do
-      match xs with
+      match xs do
       | Nil -> 0
       | Cons(h, t) -> 1 + length(t)
       end
@@ -2632,8 +2632,8 @@ let test_multiline_depth_closed () =
     0 (March_repl.Multiline.do_end_depth "fn foo() do\n  x + 1\nend")
 
 let test_multiline_ends_with_with () =
-  Alcotest.(check bool) "match opener ends with with"
-    true (March_repl.Multiline.ends_with_with "match x with")
+  Alcotest.(check int) "match opener depth is 1"
+    1 (March_repl.Multiline.do_end_depth "match x do")
 
 let test_multiline_not_ends_with_with () =
   Alcotest.(check bool) "record update does not trigger with heuristic"
@@ -4582,7 +4582,7 @@ let eval_with_http src =
 let test_http_parse_url () =
   let env = eval_with_http {|mod Test do
     fn f() do
-      match Http.parse_url("https://example.com/path?q=1") with
+      match Http.parse_url("https://example.com/path?q=1") do
       | Ok(req) -> Http.host(req)
       | Err(_) -> "fail"
       end
@@ -4593,9 +4593,9 @@ let test_http_parse_url () =
 let test_http_parse_url_scheme () =
   let env = eval_with_http {|mod Test do
     fn f() do
-      match Http.parse_url("http://localhost:8080/api") with
+      match Http.parse_url("http://localhost:8080/api") do
       | Ok(req) ->
-        match Http.scheme(req) with
+        match Http.scheme(req) do
         | SchemeHttp -> "http"
         | SchemeHttps -> "https"
         end
@@ -4608,7 +4608,7 @@ let test_http_parse_url_scheme () =
 let test_http_parse_url_path () =
   let env = eval_with_http {|mod Test do
     fn f() do
-      match Http.parse_url("https://example.com/api/v1") with
+      match Http.parse_url("https://example.com/api/v1") do
       | Ok(req) -> Http.path(req)
       | Err(_) -> "fail"
       end
@@ -4619,9 +4619,9 @@ let test_http_parse_url_path () =
 let test_http_parse_url_port () =
   let env = eval_with_http {|mod Test do
     fn f() do
-      match Http.parse_url("http://localhost:3000/") with
+      match Http.parse_url("http://localhost:3000/") do
       | Ok(req) ->
-        match Http.port(req) with
+        match Http.port(req) do
         | Some(p) -> p
         | None -> 0
         end
@@ -4634,7 +4634,7 @@ let test_http_parse_url_port () =
 let test_http_parse_url_invalid () =
   let env = eval_with_http {|mod Test do
     fn f() do
-      match Http.parse_url("ftp://bad") with
+      match Http.parse_url("ftp://bad") do
       | Ok(_) -> "ok"
       | Err(InvalidScheme(_)) -> "invalid_scheme"
       | Err(_) -> "other_error"
@@ -4646,10 +4646,10 @@ let test_http_parse_url_invalid () =
 let test_http_set_header () =
   let env = eval_with_http {|mod Test do
     fn f() do
-      match Http.get("https://example.com") with
+      match Http.get("https://example.com") do
       | Ok(req) ->
         let req = Http.set_header(req, "Accept", "application/json")
-        match Http.get_request_header(req, "accept") with
+        match Http.get_request_header(req, "accept") do
         | Some(v) -> v
         | None -> "none"
         end
@@ -4662,7 +4662,7 @@ let test_http_set_header () =
 let test_http_method_to_string () =
   let env = eval_with_http {|mod Test do
     fn f() do
-      match Http.post("https://example.com", ()) with
+      match Http.post("https://example.com", ()) do
       | Ok(req) -> Http.method_to_string(Http.method(req))
       | Err(_) -> "fail"
       end
@@ -4679,7 +4679,7 @@ let test_http_status_helpers () =
 let test_http_post_constructor () =
   let env = eval_with_http {|mod Test do
     fn f() do
-      match Http.post("https://example.com/api", "body data") with
+      match Http.post("https://example.com/api", "body data") do
       | Ok(req) -> Http.method_to_string(Http.method(req))
       | Err(_) -> "fail"
       end
@@ -4783,7 +4783,7 @@ let test_http_client_add_steps () =
       let c = HttpClient.add_request_step(c, "auth", HttpClient.step_bearer_auth("tok"))
       let c = HttpClient.add_request_step(c, "headers", HttpClient.step_default_headers)
       fn count(xs) do
-        match xs with
+        match xs do
         | Nil -> 0
         | Cons(_, t) -> 1 + count(t)
         end
@@ -4796,14 +4796,14 @@ let test_http_client_add_steps () =
 let test_http_client_request_step_transforms () =
   let env = eval_with_http_client {|mod Test do
     fn f() do
-      match Http.get("http://example.com") with
+      match Http.get("http://example.com") do
       | Err(_) -> "fail"
       | Ok(req) ->
         let step = HttpClient.step_bearer_auth("my-token")
-        match step(req) with
+        match step(req) do
         | Err(_) -> "fail"
         | Ok(transformed) ->
-          match Http.get_request_header(transformed, "authorization") with
+          match Http.get_request_header(transformed, "authorization") do
           | Some(v) -> v
           | None -> "none"
           end
@@ -4816,11 +4816,11 @@ let test_http_client_request_step_transforms () =
 let test_http_client_raise_on_error_status () =
   let env = eval_with_http_client {|mod Test do
     fn f() do
-      match Http.get("http://example.com") with
+      match Http.get("http://example.com") do
       | Err(_) -> "url_fail"
       | Ok(req) ->
         let resp = Response(Status(500), Nil, "Internal Server Error")
-        match HttpClient.step_raise_on_error(req, resp) with
+        match HttpClient.step_raise_on_error(req, resp) do
         | Ok(_) -> "ok"
         | Err(StepError(name, code)) -> name ++ ":" ++ code
         | Err(_) -> "other_error"
@@ -4835,7 +4835,7 @@ let test_http_client_with_redirects () =
     fn f() do
       let c = HttpClient.new_client()
       let c = HttpClient.with_redirects(c, 5)
-      match HttpClient.list_steps(c) with
+      match HttpClient.list_steps(c) do
       | Nil -> "empty"
       | _ -> "has_steps"
       end
@@ -4849,7 +4849,7 @@ let test_http_client_base_url_step () =
       let step = HttpClient.step_base_url("http://api.example.com")
       -- Create a request with just a path
       let req = Request(Get, SchemeHttp, "", None, "/users", None, Nil, "")
-      match step(req) with
+      match step(req) do
       | Ok(transformed) -> Http.host(transformed)
       | Err(_) -> "fail"
       end
@@ -4862,9 +4862,9 @@ let test_http_client_content_type_step () =
     fn f() do
       let step = HttpClient.step_content_type("application/json")
       let req = Request(Post, SchemeHttp, "example.com", None, "/api", None, Nil, "{}")
-      match step(req) with
+      match step(req) do
       | Ok(transformed) ->
-        match Http.get_request_header(transformed, "content-type") with
+        match Http.get_request_header(transformed, "content-type") do
         | Some(v) -> v
         | None -> "none"
         end
@@ -5178,7 +5178,7 @@ let test_receive_inside_handler () =
       init { got = 0 }
       on Dispatch() do
         let follow = receive()
-        match follow with
+        match follow do
         | Followup(n) -> { got = n }
         end
       end
@@ -6385,7 +6385,7 @@ let test_supervision_send_checked_ok () =
 
     fn main() do
       let pid = spawn(Counter)
-      match get_cap(pid) with
+      match get_cap(pid) do
       | None -> :error
       | Some(cap) -> send_checked(cap, Inc())
       end
@@ -6411,7 +6411,7 @@ let test_supervision_send_checked_dead_actor () =
 
     fn main() do
       let pid = spawn(A)
-      match get_cap(pid) with
+      match get_cap(pid) do
       | None -> :error
       | Some(cap) ->
         kill(pid)
@@ -6850,7 +6850,7 @@ let test_file_read () =
   with_temp_file "hello world" (fun path ->
     let env = eval_with_file (Printf.sprintf {|mod T do
       fn f() do
-        match File.read("%s") with
+        match File.read("%s") do
         | Ok(s) -> s
         | Err(ig) -> "fail"
         end
@@ -6864,9 +6864,9 @@ let test_file_write_read () =
   (try
      let env = eval_with_file (Printf.sprintf {|mod T do
        fn f() do
-         match File.write("%s", "written data") with
+         match File.write("%s", "written data") do
          | Ok(ig) ->
-           match File.read("%s") with
+           match File.read("%s") do
            | Ok(s) -> s
            | Err(ig) -> "read fail"
            end
@@ -6893,7 +6893,7 @@ let test_file_with_lines () =
       fn append_bang(l) do l ++ "!" end
       fn collect_lines(lines) do Seq.to_list(Seq.map(lines, fn l -> append_bang(l))) end
       fn f() do
-        match File.with_lines("%s", fn lines -> collect_lines(lines)) with
+        match File.with_lines("%s", fn lines -> collect_lines(lines)) do
         | Ok(xs) -> xs
         | Err(ig) -> Nil
         end
@@ -6905,7 +6905,7 @@ let test_file_with_lines () =
 let test_file_not_found () =
   let env = eval_with_file {|mod T do
     fn f() do
-      match File.read("/nonexistent/path/xyz_march_test.txt") with
+      match File.read("/nonexistent/path/xyz_march_test.txt") do
       | Ok(ig) -> "ok"
       | Err(ig) -> "err"
       end
@@ -6921,7 +6921,7 @@ let test_file_append () =
        fn f() do
          File.write("%s", "line1\n")
          File.append("%s", "line2\n")
-         match File.read("%s") with
+         match File.read("%s") do
          | Ok(s) -> s
          | Err(ig) -> "fail"
          end
@@ -6954,13 +6954,13 @@ let test_dir_mkdir_list_rmdir () =
   let path = base ^ "/subdir" in
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
-      match Dir.mkdir("%s") with
+      match Dir.mkdir("%s") do
       | Err(e) -> "mkdir failed: " ++ to_string(e)
       | Ok(ig) ->
-        match Dir.list("%s") with
+        match Dir.list("%s") do
         | Err(ig) -> "list failed"
         | Ok(ig) ->
-          match Dir.rmdir("%s") with
+          match Dir.rmdir("%s") do
           | Err(ig) -> "rmdir failed"
           | Ok(ig) -> "ok"
           end
@@ -6981,7 +6981,7 @@ let test_dir_rm_rf () =
   output_string oc "x"; close_out oc;
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
-      match Dir.rm_rf("%s") with
+      match Dir.rm_rf("%s") do
       | Ok(ig) -> "ok"
       | Err(ig) -> "err"
       end
@@ -6993,7 +6993,7 @@ let test_dir_rm_rf () =
 let test_dir_rm_rf_refuses_root () =
   let env = eval_with_dir {|mod T do
     fn f() do
-      match Dir.rm_rf("/") with
+      match Dir.rm_rf("/") do
       | Ok(ig) -> "deleted root"
       | Err(ig) -> "refused"
       end
@@ -7023,7 +7023,7 @@ let test_dir_mkdir_p () =
   let deep = base ^ "/a/b/c" in
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
-      match Dir.mkdir_p("%s") with
+      match Dir.mkdir_p("%s") do
       | Ok(ig) -> Dir.exists("%s")
       | Err(ig) -> false
       end
@@ -7051,15 +7051,15 @@ let test_integration_file_pipeline () =
   write (base ^ "/c.csv") "ignore me";
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
-      match Dir.list_full("%s") with
+      match Dir.list_full("%s") do
       | Err(ig) -> Nil
       | Ok(files) ->
         let txt_files = List.filter(files, fn(p) -> Path.extension(p) == "txt")
         fn collect(ps, acc) do
-          match ps with
+          match ps do
           | Nil -> List.reverse(acc)
           | Cons(p, rest) ->
-            match File.read_lines(p) with
+            match File.read_lines(p) do
             | Ok(ls) -> collect(rest, List.append(List.reverse(ls), acc))
             | Err(ig) -> collect(rest, acc)
             end
@@ -7399,13 +7399,13 @@ let test_shared_ctor_name_eval () =
     type Shape = Circle(Int) | Square(Int)
     type Color = Red | Green | Blue
     fn shape_val() do
-      match Circle(42) with
+      match Circle(42) do
       | Circle(r) -> r
       | Square(s) -> s
       end
     end
     fn color_val() do
-      match Red with
+      match Red do
       | Red   -> 1
       | Green -> 2
       | Blue  -> 3
@@ -7440,7 +7440,7 @@ let test_fn_when_constraint_satisfied () =
       fn eq(x, y) do x == y end
     end
     fn contains(xs : List(a), x : a) : Bool when Eq(a) do
-      match xs with
+      match xs do
       | Nil -> false
       | Cons(h, t) -> if eq(h, x) then true else contains(t, x)
       end
@@ -7456,7 +7456,7 @@ let test_fn_when_constraint_unsatisfied () =
   let ctx = typecheck {|mod Test do
     type Color = Red | Green
     fn contains(xs : List(a), x : a) : Bool when Eq(a) do
-      match xs with
+      match xs do
       | Nil -> false
       | Cons(h, t) -> if eq(h, x) then true else contains(t, x)
       end
@@ -7514,7 +7514,7 @@ let test_linear_match_arm_double_use () =
   (* Pattern binds `n` from a linear source; returning `n + n` uses it twice. *)
   let ctx = typecheck {|mod Test do
     fn double_linear(linear x: Int) : Int do
-      match x with
+      match x do
       | n -> n + n
       end
     end

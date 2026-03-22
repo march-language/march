@@ -616,17 +616,17 @@ expr:
         "I was expecting `then` after the condition here:",
         Some "if cond then\n    expr1\nelse\n    expr2",
         $startpos($3))) }
-  | MATCH; e = expr; WITH; option(PIPE); bs = separated_nonempty_list(PIPE, branch); END
+  | MATCH; e = expr; DO; bs = nonempty_list(branch); END
     { EMatch (e, bs, mk_span ($loc)) }
-  | MATCH; _e = expr; WITH; option(PIPE); _bs = separated_nonempty_list(PIPE, branch); error
+  | MATCH; _e = expr; DO; _bs = nonempty_list(branch); error
     { raise (March_errors.Errors.ParseError (
         "I was expecting `end` to close the match here:",
         None,
-        $startpos($6))) }
+        $startpos($5))) }
   | MATCH; _e = expr; error
     { raise (March_errors.Errors.ParseError (
-        "I was expecting `with` after the match expression here:",
-        Some "match expr with\n    | Pattern -> result\nend",
+        "I was expecting `do` after the match expression here:",
+        Some "match expr do\n    Pattern -> result\nend",
         $startpos($3))) }
 
 lambda_params:
@@ -768,13 +768,13 @@ interp_parts:
   | e = expr; mid = INTERP_MID; rest = interp_parts { (e, mid) :: rest }
 
 branch:
-  | p = pattern; guard = option(when_guard); ARROW; e = block_body
+  | option(PIPE); p = pattern; guard = option(when_guard); ARROW; e = block_body
     { { branch_pat = p; branch_guard = guard; branch_body = e } }
-  | _p = pattern; _guard = option(when_guard); error
+  | option(PIPE); _p = pattern; _guard = option(when_guard); error
     { raise (March_errors.Errors.ParseError (
         "I was expecting `->` in the match arm here:",
-        Some "| Pattern -> result",
-        $startpos($3))) }
+        Some "Pattern -> result",
+        $startpos($4))) }
 
 (* ---- Patterns ---- *)
 

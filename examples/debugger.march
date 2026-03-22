@@ -50,7 +50,7 @@ end
 type IntList = INil | ICons(Int, IntList)
 
 fn find_large(lst : IntList, threshold : Int) : Int do
-  match lst with
+  match lst do
   | INil        -> 0
   | ICons(h, t) ->
     dbg(h > threshold)

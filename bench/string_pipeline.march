@@ -20,14 +20,14 @@ end
 
 -- Double the integer value of a decimal string.
 fn double_str(s : String) : String do
-  match string_to_int(s) with
+  match string_to_int(s) do
   | Some(n) -> int_to_string(n * 2)
   | None    -> s
   end
 end
 
 fn map_strings(xs : List(String)) : List(String) do
-  match xs with
+  match xs do
   | Nil        -> Nil
   | Cons(h, t) -> Cons(double_str(h), map_strings(t))
   end

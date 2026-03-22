@@ -13,7 +13,7 @@ fn make(d : Int) : Tree do
 end
 
 fn check(t : Tree) : Int do
-  match t with
+  match t do
   | Leaf       -> 1
   | Node(l, r) -> check(l) + check(r) + 1
   end

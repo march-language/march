@@ -20,12 +20,12 @@ March is a statically-typed functional programming language built for safe concu
 - **Functions**: `fn name(x, y) do ... end` — named, parenthesized arguments
 - **Lambdas**: `fn x -> x + 1` or `fn(x, y) -> body` — `fn` keyword avoids ambiguity with expressions
 - **Pipes**: `x |> f |> g` — left-to-right data flow
-- **Pattern matching**: `match expr with | Pat -> body end`
+- **Pattern matching**: `match expr do | Pat -> body end`
 - **Let bindings**: `let x = expr` — block-scoped, no `in` keyword needed
 - **Type annotations**: Optional everywhere except where inference fails (recursive functions, ambiguous overloads). Top-level signatures are encouraged but not required.
 - **Typed holes**: `?name` or `?` — the compiler reports the expected type, enabling type-directed development and LLM completion
 - **Atoms**: `:name` — lightweight runtime tags used for messaging and symbol comparisons. Not type constructors — ADTs use capitalized constructors instead.
-- **Function head matching**: Multiple `fn` clauses with the same name are grouped into one function with pattern-matched heads (Elixir-style). Desugared into a single function with a `match` immediately after parsing (before type checking), so the type checker, exhaustiveness checker, and backend each handle one representation.
+- **Function head matching**: Multiple `fn` clauses do the same name are grouped into one function with pattern-matched heads (Elixir-style). Desugared into a single function do a `match` immediately after parsing (before type checking), so the type checker, exhaustiveness checker, and backend each handle one representation.
 - **Guards**: `when` clauses on function heads and match branches
 - **No algebraic effects**: Concurrency is via actors and message passing, not resumable continuations. Side effects are tracked via capability types, not an effect system.
 
@@ -39,7 +39,7 @@ end
 
 -- Pattern matching
 fn factorial(n : Int) : Int do
-  match n with
+  match n do
   | 0 -> 1
   | n -> n * factorial(n - 1)
   end
@@ -74,7 +74,7 @@ type Result(a, e) = Ok(a) | Err(e)
 type Option(a) = Some(a) | None
 
 fn safe_div(a : Int, b : Int) : Result(Int, String) do
-  match b with
+  match b do
   | 0 -> Err("division by zero")
   | _ -> Ok(a / b)
   end
@@ -434,7 +434,7 @@ end
 
 impl Eq(a) for List(a) when Eq(a) do
   fn eq(xs, ys) do
-    match (xs, ys) with
+    match (xs, ys) do
     | (Nil, Nil)           -> true
     | (Cons(x, xs), Cons(y, ys)) -> eq(x, y) and eq(xs, ys)
     | _                    -> false
@@ -710,13 +710,13 @@ The result is fully deterministic memory management: memory is freed exactly whe
 
 #### FBIP — reusing destructured values in-place
 
-The key insight behind FBIP: if a function pattern-matches a heap value and then immediately allocates a new value of the same constructor shape, _and_ the original value has RC == 1 (uniquely owned), the new allocation is unnecessary. The old memory can be overwritten in-place with the new field values.
+The key insight behind FBIP: if a function pattern-matches a heap value and then immediately allocates a new value of the same constructor shape, _and_ the original value has RC == 1 (uniquely owned), the new allocation is unnecessary. The old memory can be overwritten in-place do the new field values.
 
 Consider the tree transformation in `bench/tree_transform.march`:
 
 ```march
 fn inc_leaves(t : Tree) : Tree do
-  match t with
+  match t do
   | Leaf(n)    -> Leaf(n + 1)
   | Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
   end
@@ -725,7 +725,7 @@ end
 
 Without FBIP, each call allocates a fresh `Leaf` or `Node` and frees the original — 2^depth allocator calls per pass.
 
-**How FBIP detects the opportunity**: After RC insertion, each match branch gets a `DecRC(t)` at the branch head (since `t` is consumed by the match and not live after). The Perceus FBIP sub-pass then scans for the pattern `DecRC(v); ...; EAlloc(same_shape)` and, when found, replaces the pair with a single `EReuse(v, shape, new_fields)` node. The `...` in between may be a chain of `ELet` bindings, as long as `v` itself is not referenced in any of the intermediate RHS expressions (otherwise sinking the decrement past them would be unsound).
+**How FBIP detects the opportunity**: After RC insertion, each match branch gets a `DecRC(t)` at the branch head (since `t` is consumed by the match and not live after). The Perceus FBIP sub-pass then scans for the pattern `DecRC(v); ...; EAlloc(same_shape)` and, when found, replaces the pair do a single `EReuse(v, shape, new_fields)` node. The `...` in between may be a chain of `ELet` bindings, as long as `v` itself is not referenced in any of the intermediate RHS expressions (otherwise sinking the decrement past them would be unsound).
 
 **What the generated code does at runtime**: `EReuse(v, shape, args)` compiles to a conditional:
 
@@ -748,11 +748,11 @@ The RC == 1 path writes directly into the existing allocation and returns the sa
 
 #### The shape_matches bug and fix
 
-The Perceus pass annotates each branch's `DecRC` with the **concrete constructor type** — e.g. type `TCon("Leaf", [])` for the `Leaf` branch — so `shape_matches` can verify that the downstream `EAlloc` has the same shape. However, the lowering pass emits `EAlloc` with a **qualified** constructor key:
+The Perceus pass annotates each branch's `DecRC` with the **concrete constructor type** — e.g. type `TCon("Leaf", [])` for the `Leaf` branch — so `shape_matches` can verify that the downstream `EAlloc` has the same shape. However, the lowering pass emits `EAlloc` do a **qualified** constructor key:
 
 ```ocaml
 (* lower.ml — ECon case *)
-let ctor_key = match ty_of_span span with
+let ctor_key = match ty_of_span span do
   | Tir.TCon (type_name, _) -> type_name ^ "." ^ tag   (* e.g. "Tree.Leaf" *)
   | _ -> tag
 in
@@ -776,7 +776,7 @@ The fix is a single change in `add_scrutinee_free_for`:
 let ctor_v = { v with Tir.v_ty = Tir.TCon (ctor_tag, []) } in
 
 (* After — mirror qualified_br_key from llvm_emit.ml *)
-let qualified_tag = match v.Tir.v_ty with
+let qualified_tag = match v.Tir.v_ty do
   | Tir.TCon (type_name, _) -> type_name ^ "." ^ ctor_tag
   | _ -> ctor_tag
 in
@@ -833,7 +833,7 @@ The compiler is **not** a traditional pipeline. It's a query system:
 ### Error Strategy
 
 - **Provenance**: Every type constraint carries a reason chain, not just a source span
-- **Expected vs. found**: Errors frame mismatches with full provenance: "expected X because of Y, but found Z because of W"
+- **Expected vs. found**: Errors frame mismatches do full provenance: "expected X because of Y, but found Z because of W"
 - **Hole injection**: Errors become typed holes; the compiler continues past them
 - **No cascades**: Holes have a special error type that suppresses further errors downstream
 - **Multiple diagnostics**: Parser and type checker recover from errors to report all problems in one compilation

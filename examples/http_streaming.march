@@ -24,7 +24,7 @@ fn main() do
     print(chunk)
   end
 
-  match HttpClient.stream_get(client, "http://httpbin.org/stream/5", print_chunk) with
+  match HttpClient.stream_get(client, "http://httpbin.org/stream/5", print_chunk) do
   | Ok((status, _, _)) ->
     print("Status: " ++ int_to_string(status))
   | Err(_) ->
@@ -40,7 +40,7 @@ fn main() do
     print("  received " ++ int_to_string(string_length(chunk)) ++ " bytes")
   end
 
-  match HttpClient.stream_get(client, "http://httpbin.org/bytes/8192", count_bytes) with
+  match HttpClient.stream_get(client, "http://httpbin.org/bytes/8192", count_bytes) do
   | Ok((status, _, _)) ->
     print("Status: " ++ int_to_string(status))
   | Err(_) ->
@@ -55,7 +55,7 @@ fn main() do
     print("  chunk: " ++ int_to_string(string_length(chunk)) ++ " bytes")
   end
 
-  match HttpClient.stream_get(client, "http://httpbin.org/stream/20", show_chunk) with
+  match HttpClient.stream_get(client, "http://httpbin.org/stream/20", show_chunk) do
   | Ok((status, _, _)) ->
     print("Status: " ++ int_to_string(status))
     print("Done!")

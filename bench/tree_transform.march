@@ -18,14 +18,14 @@ end
 
 -- FBIP: each pass reuses every node in-place when RC=1.
 fn inc_leaves(t : Tree) : Tree do
-  match t with
+  match t do
   | Leaf(n)    -> Leaf(n + 1)
   | Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
   end
 end
 
 fn sum_leaves(t : Tree) : Int do
-  match t with
+  match t do
   | Leaf(n)    -> n
   | Node(l, r) -> sum_leaves(l) + sum_leaves(r)
   end

@@ -10,7 +10,7 @@ pub fn list(path) do
 end
 
 pub fn list_full(path) do
-  match dir_list(path) with
+  match dir_list(path) do
   | Err(e) -> Err(e)
   | Ok(names) ->
     let prefix =
@@ -18,7 +18,7 @@ pub fn list_full(path) do
       else if string_ends_with(path, "/") then path
       else path ++ "/"
     fn prepend(xs) do
-      match xs with
+      match xs do
       | Nil -> Nil
       | Cons(name, rest) -> Cons(prefix ++ name, prepend(rest))
       end

@@ -23,7 +23,7 @@ end
 
 fn demo_each_row(path) do
   println("--- Example 1: each_row (streaming) ---")
-  match Csv.each_row(path, ",", :rfc4180, fn row -> print_row(row)) with
+  match Csv.each_row(path, ",", :rfc4180, fn row -> print_row(row)) do
   | Ok(:ok) -> println("Done.")
   | Err(e) -> println("Error: " ++ to_string(e))
   end
@@ -32,24 +32,24 @@ end
 -- ── Example 2: read_all, count rows, find oldest ─────────────────────
 
 fn get_age(row) do
-  match row with
+  match row do
   | Cons(_, Cons(age_str, _)) -> String.to_int(age_str)
   | _ -> Err("no age")
   end
 end
 
 fn get_name(row) do
-  match row with
+  match row do
   | Cons(name, _) -> name
   | _ -> ""
   end
 end
 
 fn find_oldest_loop(rows, best_name, best_age) do
-  match rows with
+  match rows do
   | Nil -> best_name
   | Cons(row, rest) ->
-    match get_age(row) with
+    match get_age(row) do
     | Err(_) -> find_oldest_loop(rest, best_name, best_age)
     | Ok(age) ->
       if age > best_age
@@ -61,11 +61,11 @@ end
 
 fn demo_read_all(path) do
   println("--- Example 2: read_all (eager) ---")
-  match Csv.read_all(path, ",", :rfc4180) with
+  match Csv.read_all(path, ",", :rfc4180) do
   | Err(e) -> println("Error: " ++ to_string(e))
   | Ok(rows) ->
     println("Total rows (incl. header): " ++ to_string(List.length(rows)))
-    match rows with
+    match rows do
     | Nil -> println("No data.")
     | Cons(_, data_rows) ->
       let oldest = find_oldest_loop(data_rows, "nobody", -1)
@@ -77,10 +77,10 @@ end
 -- ── Example 3: each_row_with_header ──────────────────────────────────
 
 fn get_field_loop(hs, rs, name) do
-  match hs with
+  match hs do
   | Nil -> None
   | Cons(h, rh) ->
-    match rs with
+    match rs do
     | Nil -> None
     | Cons(v, rv) ->
       if h == name then Some(v) else get_field_loop(rh, rv, name)
@@ -93,11 +93,11 @@ fn get_field(header, row, name) do
 end
 
 fn print_name_city(header, row) do
-  let name = match get_field(header, row, "name") with
+  let name = match get_field(header, row, "name") do
   | Some(v) -> v
   | None -> "?"
   end
-  let city = match get_field(header, row, "city") with
+  let city = match get_field(header, row, "city") do
   | Some(v) -> v
   | None -> "?"
   end

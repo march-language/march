@@ -15,7 +15,7 @@ mod WebSocket do
   -- Upgrade a conn to websocket. Handler is called after handshake.
   -- Validates upgrade headers, marks conn as halted with WebSocketUpgrade.
   pub fn upgrade(conn, handler) do
-    match conn with
+    match conn do
     | Conn(fd, m, p, pi, qs, rh, rb, _, _, _, _, assigns, _) ->
       Conn(fd, m, p, pi, qs, rh, rb, 101, Nil, "", true, assigns,
            WebSocketUpgrade(handler))
@@ -24,14 +24,14 @@ mod WebSocket do
 
   -- Receive a frame (blocks until one arrives)
   pub fn recv(socket) do
-    match socket with
+    match socket do
     | WsSocket(fd) -> ws_recv(fd)
     end
   end
 
   -- Send a frame
   pub fn send_frame(socket, frame) do
-    match socket with
+    match socket do
     | WsSocket(fd) -> ws_send(fd, frame)
     end
   end
@@ -44,7 +44,7 @@ mod WebSocket do
   -- Multiplex: wait on socket OR actor mailbox OR timeout.
   -- Returns WsData(frame), ActorMsg, or Timeout.
   pub fn select(socket, timeout_ms) do
-    match socket with
+    match socket do
     | WsSocket(fd) -> ws_select(fd, 0, timeout_ms)
     end
   end

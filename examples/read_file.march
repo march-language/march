@@ -8,7 +8,7 @@ mod ReadFile do
     let path = "examples/read_file.march"
 
     -- Read the whole file at once
-    match File.read(path) with
+    match File.read(path) do
     | Err(e) ->
       println("Error reading file: " ++ to_string(e))
     | Ok(contents) ->
@@ -17,7 +17,7 @@ mod ReadFile do
     end
 
     -- Read as a list of lines
-    match File.read_lines(path) with
+    match File.read_lines(path) do
     | Err(e) ->
       println("Error: " ++ to_string(e))
     | Ok(lines) ->
@@ -27,7 +27,7 @@ mod ReadFile do
     -- dbg()
     -- Stream lines with with_lines, collect first 3
     println("=== First 3 lines (streaming) ===")
-    match File.with_lines(path, fn(lines) -> Seq.to_list(Seq.take(lines, 3))) with
+    match File.with_lines(path, fn(lines) -> Seq.to_list(Seq.take(lines, 3))) do
     | Err(e) ->
       println("Error: " ++ to_string(e))
     | Ok(first3) ->

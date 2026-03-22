@@ -18,21 +18,21 @@ fn save_csv(body) do
 end
 
 fn first(row) do
-  match row with
+  match row do
   | Cons(x, _) -> x
   | Nil -> ""
   end
 end
 
 fn second(row) do
-  match row with
+  match row do
   | Cons(_, Cons(x, _)) -> x
   | _ -> ""
   end
 end
 
 fn parse_score(s) do
-  match String.to_int(String.trim(s)) with
+  match String.to_int(String.trim(s)) do
   | Ok(n) -> n
   | Err(_) -> 0
   end
@@ -44,7 +44,7 @@ fn sum_scores(rows) do
 end
 
 fn max_score_loop(rows, best) do
-  match rows with
+  match rows do
   | Nil -> best
   | Cons(row, rest) ->
     let s = parse_score(second(row))
@@ -55,7 +55,7 @@ fn max_score_loop(rows, best) do
 end
 
 fn min_score_loop(rows, best) do
-  match rows with
+  match rows do
   | Nil -> best
   | Cons(row, rest) ->
     let s = parse_score(second(row))
@@ -79,26 +79,26 @@ fn build_names_section(rows) do
 end
 
 fn router(conn) do
-  match (HttpServer.method(conn), HttpServer.path_info(conn)) with
+  match (HttpServer.method(conn), HttpServer.path_info(conn)) do
   | (Post, Cons("csv", Nil)) ->
     let body = HttpServer.req_body(conn)
     let csv_path = save_csv(body)
-    match Csv.read_all(csv_path, ",", :rfc4180) with
+    match Csv.read_all(csv_path, ",", :rfc4180) do
     | Err(e) ->
       conn |> HttpServer.text(400, "CSV error: " ++ to_string(e))
     | Ok(all_rows) ->
-      let data_rows = match all_rows with
+      let data_rows = match all_rows do
       | Nil -> Nil
       | Cons(_, rest) -> rest
       end
       let row_count = List.length(data_rows)
       let total = sum_scores(data_rows)
-      let mx = match data_rows with
+      let mx = match data_rows do
       | Nil -> 0
       | Cons(first_row, rest) ->
         max_score_loop(rest, parse_score(second(first_row)))
       end
-      let mn = match data_rows with
+      let mn = match data_rows do
       | Nil -> 0
       | Cons(first_row, rest) ->
         min_score_loop(rest, parse_score(second(first_row)))

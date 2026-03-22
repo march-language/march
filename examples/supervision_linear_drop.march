@@ -24,7 +24,7 @@ mod LinearDropDemo do
   -- Called automatically when the owning actor crashes.
   impl Drop(DbConnection) do
     fn drop(conn) do
-      match conn with
+      match conn do
       | DbConnection(id) ->
         println("[Drop] Closing database connection " ++ to_string(id))
       end
@@ -35,7 +35,7 @@ mod LinearDropDemo do
 
   impl Drop(FileHandle) do
     fn drop(h) do
-      match h with
+      match h do
       | FileHandle(path) ->
         println("[Drop] Closing file: " ++ path)
       end

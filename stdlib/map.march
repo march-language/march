@@ -30,7 +30,7 @@ type Map(k, v) = Leaf | Node(Map(k, v), k, v, Map(k, v), Int)
 -- ---- Private helpers ----
 
 fn height(t) do
-  match t with
+  match t do
   | Leaf                -> 0
   | Node(_, _, _, _, h) -> h
   end
@@ -44,7 +44,7 @@ fn make_node(l, k, v, r) do
 end
 
 fn balance_factor(t) do
-  match t with
+  match t do
   | Leaf                -> 0
   | Node(l, _, _, r, _) -> height(r) - height(l)
   end
@@ -52,7 +52,7 @@ end
 
 -- Single left rotation (right-right case)
 fn rot_left(t) do
-  match t with
+  match t do
   | Node(l, k, v, Node(rl, rk, rv, rr, _), _) ->
     make_node(make_node(l, k, v, rl), rk, rv, rr)
   | other -> other
@@ -61,7 +61,7 @@ end
 
 -- Single right rotation (left-left case)
 fn rot_right(t) do
-  match t with
+  match t do
   | Node(Node(ll, lk, lv, lr, _), k, v, r, _) ->
     make_node(ll, lk, lv, make_node(lr, k, v, r))
   | other -> other
@@ -72,7 +72,7 @@ end
 fn rebalance(t) do
   let bf = balance_factor(t)
   if bf > 1 then
-    match t with
+    match t do
     | Node(l, k, v, r, _) ->
       if balance_factor(r) < 0 then
         rot_left(make_node(l, k, v, rot_right(r)))
@@ -81,7 +81,7 @@ fn rebalance(t) do
     | Leaf -> Leaf
     end
   else if bf < -1 then
-    match t with
+    match t do
     | Node(l, k, v, r, _) ->
       if balance_factor(l) > 0 then
         rot_right(make_node(rot_left(l), k, v, r))
@@ -100,7 +100,7 @@ end
 
 -- Extract and remove the minimum (leftmost) node from a non-empty tree.
 fn remove_min(t) do
-  match t with
+  match t do
   | Leaf -> panic("Map.remove_min: empty tree")
   | Node(Leaf, k, v, r, _) -> (k, v, r)
   | Node(l, k, v, r, _) ->
@@ -125,7 +125,7 @@ end
 
 doc "Returns true if the map contains no entries."
 pub fn is_empty(m) do
-  match m with
+  match m do
   | Leaf -> true
   | _    -> false
   end
@@ -133,7 +133,7 @@ end
 
 doc "Returns the number of key-value pairs in the map. O(n)."
 pub fn size(m) do
-  match m with
+  match m do
   | Leaf                -> 0
   | Node(l, _, _, r, _) -> 1 + size(l) + size(r)
   end
@@ -144,7 +144,7 @@ Returns Some(value) if key is present, or None.
 cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 """
 pub fn get(m, key, cmp) do
-  match m with
+  match m do
   | Leaf -> None
   | Node(l, nk, nv, r, _) ->
     if cmp_less(cmp, key, nk) then get(l, key, cmp)
@@ -155,7 +155,7 @@ end
 
 doc "Returns the value for key, or default if the key is absent."
 pub fn get_or(m, key, default, cmp) do
-  match get(m, key, cmp) with
+  match get(m, key, cmp) do
   | Some(v) -> v
   | None    -> default
   end
@@ -163,7 +163,7 @@ end
 
 doc "Returns true if key is present in the map."
 pub fn contains_key(m, key, cmp) do
-  match get(m, key, cmp) with
+  match get(m, key, cmp) do
   | Some(_) -> true
   | None    -> false
   end
@@ -177,7 +177,7 @@ If the key is already present its value is replaced.
 cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 """
 pub fn insert(m, key, val, cmp) do
-  match m with
+  match m do
   | Leaf -> Node(Leaf, key, val, Leaf, 1)
   | Node(l, nk, nv, r, h) ->
     if cmp_less(cmp, key, nk) then
@@ -194,7 +194,7 @@ Removes a key from the map. Returns the map unchanged if the key is absent.
 cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 """
 pub fn remove(m, key, cmp) do
-  match m with
+  match m do
   | Leaf -> Leaf
   | Node(l, nk, nv, r, _) ->
     if cmp_less(cmp, key, nk) then
@@ -202,7 +202,7 @@ pub fn remove(m, key, cmp) do
     else if cmp_less(cmp, nk, key) then
       rebalance(make_node(l, nk, nv, remove(r, key, cmp)))
     else
-      match r with
+      match r do
       | Leaf -> l
       | _    ->
         let (sk, sv, r2) = remove_min(r)
@@ -218,7 +218,7 @@ Left fold over all entries in ascending key order.
 f is curried: fn acc -> fn key -> fn val -> new_acc
 """
 pub fn fold(acc, m, f) do
-  match m with
+  match m do
   | Leaf                ->  acc
   | Node(l, nk, nv, r, _) ->
     let acc2 = fold(acc, l, f)
@@ -232,7 +232,7 @@ end
 doc "Returns all keys in ascending order as a list."
 pub fn keys(m) do
   fn go(t, acc) do
-    match t with
+    match t do
     | Leaf                  -> acc
     | Node(l, nk, _, r, _) ->
       let acc2 = go(r, acc)
@@ -245,7 +245,7 @@ end
 doc "Returns all values in ascending key order as a list."
 pub fn values(m) do
   fn go(t, acc) do
-    match t with
+    match t do
     | Leaf                  -> acc
     | Node(l, _, nv, r, _) ->
       let acc2 = go(r, acc)
@@ -258,7 +258,7 @@ end
 doc "Returns all (key, value) pairs in ascending key order as a list."
 pub fn entries(m) do
   fn go(t, acc) do
-    match t with
+    match t do
     | Leaf                   -> acc
     | Node(l, nk, nv, r, _) ->
       let acc2 = go(r, acc)
@@ -277,7 +277,7 @@ cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 """
 pub fn from_list(pairs, cmp) do
   fn go(lst, acc) do
-    match lst with
+    match lst do
     | Nil -> acc
     | Cons(pair, rest) ->
       let (k, v) = pair
@@ -296,7 +296,7 @@ end
 
 doc "Applies f to each value, returning a new map with the same keys and structure."
 pub fn map_values(m, f) do
-  match m with
+  match m do
   | Leaf                   -> Leaf
   | Node(l, nk, nv, r, h) ->
     Node(map_values(l, f), nk, f(nv), map_values(r, f), h)
@@ -310,7 +310,7 @@ pred : k -> v -> Bool (curried).
 """
 pub fn filter(m, pred, cmp) do
   fn go(lst, acc) do
-    match lst with
+    match lst do
     | Nil -> acc
     | Cons(pair, rest) ->
       let (k, v) = pair
@@ -329,7 +329,7 @@ cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 """
 pub fn merge(a, b, cmp) do
   fn go(lst, acc) do
-    match lst with
+    match lst do
     | Nil -> acc
     | Cons(pair, rest) ->
       let (k, v) = pair
@@ -346,12 +346,12 @@ cmp : k -> k -> Bool; f : v -> v -> v (curried).
 """
 pub fn merge_with(a, b, f, cmp) do
   fn go(lst, acc) do
-    match lst with
+    match lst do
     | Nil -> acc
     | Cons(pair, rest) ->
       let (k, v) = pair
       let new_val =
-        match get(acc, k, cmp) with
+        match get(acc, k, cmp) do
         | None    -> v
         | Some(existing) ->
           let combine = f(existing)

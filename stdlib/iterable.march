@@ -18,7 +18,7 @@ mod Iterable do
 --
 -- impl Iterable(a) for List(a) do
 --   fn next(xs : List(a)) : Option((a, List(a))) do
---     match xs with
+--     match xs do
 --     | Nil        -> None
 --     | Cons(h, t) -> Some((h, t))
 --     end

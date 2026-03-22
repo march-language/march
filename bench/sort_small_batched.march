@@ -13,7 +13,7 @@ fn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
 end
 
 fn head(xs : List(Int)) : Int do
-  match xs with
+  match xs do
   | Nil        -> 0
   | Cons(h, _) -> h
   end
@@ -22,7 +22,7 @@ end
 -- Take exactly k elements, returning (taken_reversed, rest).
 fn take_k(xs : List(Int), k : Int, acc : List(Int)) : (List(Int), List(Int)) do
   if k == 0 then (acc, xs)
-  else match xs with
+  else match xs do
     | Nil        -> (acc, Nil)
     | Cons(h, t) -> take_k(t, k - 1, Cons(h, acc))
   end
@@ -32,7 +32,7 @@ end
 -- then do one final mergesort over the whole thing.
 fn sort_batched(xs : List(Int), cmp : Int -> Int -> Bool) : List(Int) do
   fn go(lst : List(Int), acc : List(Int)) : List(Int) do
-    match lst with
+    match lst do
     | Nil -> Sort.mergesort_by(acc, cmp)
     | _ ->
       let (chunk, rest) = take_k(lst, 8, Nil)

@@ -25,11 +25,11 @@ mod HttpTransport do
   """
   pub fn connect(req) do
     let req_host = Http.host(req)
-    let req_port = match Http.port(req) with
+    let req_port = match Http.port(req) do
       | Some(p) -> p
       | None -> 80
       end
-    match tcp_connect(req_host, req_port) with
+    match tcp_connect(req_host, req_port) do
     | Err(msg) -> Err(ConnectionRefused(msg))
     | Ok(fd) -> Ok(fd)
     end
@@ -50,13 +50,13 @@ mod HttpTransport do
 
     let raw_request = http_serialize_request(meth, req_host, req_path, req_query, req_headers, req_body)
 
-    match tcp_send_all(fd, raw_request) with
+    match tcp_send_all(fd, raw_request) do
     | Err(msg) -> Err(SendError(msg))
     | Ok(_) ->
-      match tcp_recv_http(fd, 1048576) with
+      match tcp_recv_http(fd, 1048576) do
       | Err(msg) -> Err(RecvError(msg))
       | Ok(raw_response) ->
-        match http_parse_response(raw_response) with
+        match http_parse_response(raw_response) do
         | Err(msg) -> Err(ConnParseError(msg))
         | Ok((status_code, resp_headers, resp_body)) ->
           Ok(Response(Status(status_code), resp_headers, resp_body))
@@ -81,13 +81,13 @@ mod HttpTransport do
 
     let raw_request = http_serialize_request(meth, req_host, req_path, req_query, req_headers, req_body)
 
-    match tcp_send_all(fd, raw_request) with
+    match tcp_send_all(fd, raw_request) do
     | Err(msg) -> Err(SendError(msg))
     | Ok(_) ->
-      match tcp_recv_http_headers(fd) with
+      match tcp_recv_http_headers(fd) do
       | Err(msg) -> Err(RecvError(msg))
       | Ok((headers_str, content_length, is_chunked)) ->
-        match http_parse_response(headers_str) with
+        match http_parse_response(headers_str) do
         | Err(msg) -> Err(ConnParseError(msg))
         | Ok((status_code, resp_headers, _)) ->
           if is_chunked then
@@ -100,7 +100,7 @@ mod HttpTransport do
   end
 
   fn stream_chunked_body(fd, on_chunk, status_code, resp_headers) do
-    match tcp_recv_chunked_frame(fd) with
+    match tcp_recv_chunked_frame(fd) do
     | Err(msg) -> Err(RecvError(msg))
     | Ok("") -> Ok((status_code, resp_headers, ()))
     | Ok(chunk) ->
@@ -112,7 +112,7 @@ mod HttpTransport do
   fn stream_fixed_body(fd, remaining, on_chunk, status_code, resp_headers) do
     if remaining == 0 then Ok((status_code, resp_headers, ()))
     else
-      match tcp_recv_chunk(fd, remaining) with
+      match tcp_recv_chunk(fd, remaining) do
       | Err(msg) -> Err(RecvError(msg))
       | Ok("") -> Ok((status_code, resp_headers, ()))
       | Ok(chunk) ->
@@ -129,7 +129,7 @@ mod HttpTransport do
   pub fn request(req) do
     let req = Http.set_header(req, "Connection", "close")
     let req_host = Http.host(req)
-    let req_port = match Http.port(req) with
+    let req_port = match Http.port(req) do
       | Some(p) -> p
       | None -> 80
       end
@@ -139,21 +139,21 @@ mod HttpTransport do
       req_host, Http.path(req), Http.query(req),
       Http.headers(req), Http.body(req))
 
-    match tcp_connect(req_host, req_port) with
+    match tcp_connect(req_host, req_port) do
     | Err(msg) -> Err(ConnectionRefused(msg))
     | Ok(fd) ->
-      match tcp_send_all(fd, raw_request) with
+      match tcp_send_all(fd, raw_request) do
       | Err(msg) ->
         tcp_close(fd)
         Err(SendError(msg))
       | Ok(_) ->
-        match tcp_recv_all(fd, 1048576, 30000) with
+        match tcp_recv_all(fd, 1048576, 30000) do
         | Err(msg) ->
           tcp_close(fd)
           Err(RecvError(msg))
         | Ok(raw_response) ->
           tcp_close(fd)
-          match http_parse_response(raw_response) with
+          match http_parse_response(raw_response) do
           | Err(msg) -> Err(ConnParseError(msg))
           | Ok((status_code, resp_headers, resp_body)) ->
             Ok(Response(Status(status_code), resp_headers, resp_body))
@@ -168,7 +168,7 @@ mod HttpTransport do
   Returns a TransportError if the URL is invalid or the request fails.
   """
   pub fn simple_get(url) do
-    match Http.get(url) with
+    match Http.get(url) do
     | Err(InvalidScheme(s)) -> Err(ConnParseError("invalid scheme: " ++ s))
     | Err(MissingHost) -> Err(ConnParseError("missing host"))
     | Err(InvalidPort(s)) -> Err(ConnParseError("invalid port: " ++ s))

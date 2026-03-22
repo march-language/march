@@ -40,7 +40,7 @@ mod EpochDemo do
 
   -- Helper: read current service pid directly from supervisor state.
   fn get_service_pid(sup) do
-    match get_actor_field(sup, "service") with
+    match get_actor_field(sup, "service") do
     | None    -> pid_of_int(-1)
     | Some(n) -> pid_of_int(n)
     end
@@ -60,7 +60,7 @@ mod EpochDemo do
     -- Acquire a capability for the service (stamped with current epoch)
     let cap_result = get_cap(svc)
     println("--- Acquiring capability ---")
-    match cap_result with
+    match cap_result do
     | None ->
       println("ERROR: could not get cap — service already dead?")
     | Some(cap) ->
@@ -92,7 +92,7 @@ mod EpochDemo do
       -- Acquire a fresh cap for the NEW service instance
       println("--- Acquiring fresh cap for new service instance ---")
       let cap2_result = get_cap(svc2)
-      match cap2_result with
+      match cap2_result do
       | None -> println("ERROR: could not get fresh cap")
       | Some(cap2) ->
         println("new cap acquired: " ++ to_string(cap2))

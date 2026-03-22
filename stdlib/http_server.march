@@ -37,62 +37,62 @@ mod HttpServer do
   -- Conn accessors
 
   pub fn method(conn) do
-    match conn with | Conn(_, m, _, _, _, _, _, _, _, _, _, _, _) -> m end
+    match conn do | Conn(_, m, _, _, _, _, _, _, _, _, _, _, _) -> m end
   end
 
   pub fn path(conn) do
-    match conn with | Conn(_, _, p, _, _, _, _, _, _, _, _, _, _) -> p end
+    match conn do | Conn(_, _, p, _, _, _, _, _, _, _, _, _, _) -> p end
   end
 
   pub fn path_info(conn) do
-    match conn with | Conn(_, _, _, pi, _, _, _, _, _, _, _, _, _) -> pi end
+    match conn do | Conn(_, _, _, pi, _, _, _, _, _, _, _, _, _) -> pi end
   end
 
   pub fn query_string(conn) do
-    match conn with | Conn(_, _, _, _, qs, _, _, _, _, _, _, _, _) -> qs end
+    match conn do | Conn(_, _, _, _, qs, _, _, _, _, _, _, _, _) -> qs end
   end
 
   pub fn req_headers(conn) do
-    match conn with | Conn(_, _, _, _, _, rh, _, _, _, _, _, _, _) -> rh end
+    match conn do | Conn(_, _, _, _, _, rh, _, _, _, _, _, _, _) -> rh end
   end
 
   pub fn req_body(conn) do
-    match conn with | Conn(_, _, _, _, _, _, rb, _, _, _, _, _, _) -> rb end
+    match conn do | Conn(_, _, _, _, _, _, rb, _, _, _, _, _, _) -> rb end
   end
 
   pub fn status(conn) do
-    match conn with | Conn(_, _, _, _, _, _, _, s, _, _, _, _, _) -> s end
+    match conn do | Conn(_, _, _, _, _, _, _, s, _, _, _, _, _) -> s end
   end
 
   pub fn resp_headers(conn) do
-    match conn with | Conn(_, _, _, _, _, _, _, _, rh, _, _, _, _) -> rh end
+    match conn do | Conn(_, _, _, _, _, _, _, _, rh, _, _, _, _) -> rh end
   end
 
   pub fn resp_body(conn) do
-    match conn with | Conn(_, _, _, _, _, _, _, _, _, rb, _, _, _) -> rb end
+    match conn do | Conn(_, _, _, _, _, _, _, _, _, rb, _, _, _) -> rb end
   end
 
   pub fn halted(conn) do
-    match conn with | Conn(_, _, _, _, _, _, _, _, _, _, h, _, _) -> h end
+    match conn do | Conn(_, _, _, _, _, _, _, _, _, _, h, _, _) -> h end
   end
 
   pub fn assigns(conn) do
-    match conn with | Conn(_, _, _, _, _, _, _, _, _, _, _, a, _) -> a end
+    match conn do | Conn(_, _, _, _, _, _, _, _, _, _, _, a, _) -> a end
   end
 
   pub fn conn_upgrade(conn) do
-    match conn with | Conn(_, _, _, _, _, _, _, _, _, _, _, _, u) -> u end
+    match conn do | Conn(_, _, _, _, _, _, _, _, _, _, _, _, u) -> u end
   end
 
   pub fn fd(conn) do
-    match conn with | Conn(f, _, _, _, _, _, _, _, _, _, _, _, _) -> f end
+    match conn do | Conn(f, _, _, _, _, _, _, _, _, _, _, _, _) -> f end
   end
 
   -- Header lookup (case-insensitive) on request headers
   pub fn get_req_header(conn, name) do
     let lower_name = string_to_lowercase(name)
     fn find(hs) do
-      match hs with
+      match hs do
       | Nil -> None
       | Cons(Header(n, v), rest) ->
         if string_to_lowercase(n) == lower_name then Some(v)
@@ -105,7 +105,7 @@ mod HttpServer do
   -- Assign lookup
   pub fn get_assign(conn, key) do
     fn find(pairs) do
-      match pairs with
+      match pairs do
       | Nil -> None
       | Cons((k, v), rest) ->
         if k == key then Some(v)
@@ -118,14 +118,14 @@ mod HttpServer do
   -- Conn transforms
 
   pub fn put_resp_header(conn, name, value) do
-    match conn with
+    match conn do
     | Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, a, u) ->
       Conn(fd, m, p, pi, qs, rh, rb, s, Cons(Header(name, value), rhs), rbody, h, a, u)
     end
   end
 
   pub fn assign(conn, key, value) do
-    match conn with
+    match conn do
     | Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, a, u) ->
       Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, Cons((key, value), a), u)
     end
@@ -134,7 +134,7 @@ mod HttpServer do
   -- Set response status + body and mark halted.
   -- This is the primary way to "respond".
   pub fn send_resp(conn, resp_status, body) do
-    match conn with
+    match conn do
     | Conn(fd, m, p, pi, qs, rh, rb, _, rhs, _, _, a, u) ->
       Conn(fd, m, p, pi, qs, rh, rb, resp_status, rhs, body, true, a, u)
     end
@@ -142,7 +142,7 @@ mod HttpServer do
 
   -- Mark as halted without setting a response.
   pub fn halt(conn) do
-    match conn with
+    match conn do
     | Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, _, a, u) ->
       Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, true, a, u)
     end
@@ -177,7 +177,7 @@ mod HttpServer do
   -- Pipeline execution: run a list of plugs in order.
   -- Stops at the first halted conn.
   pub fn run_pipeline(conn, plugs) do
-    match plugs with
+    match plugs do
     | Nil -> conn
     | Cons(f, rest) ->
       if halted(conn) then conn
@@ -198,20 +198,20 @@ mod HttpServer do
   end
 
   pub fn plug(server, p) do
-    match server with
+    match server do
     | Server(port, plugs, mc, it) ->
       Server(port, List.append(plugs, Cons(p, Nil)), mc, it)
     end
   end
 
   pub fn max_connections(server, n) do
-    match server with
+    match server do
     | Server(port, plugs, _, it) -> Server(port, plugs, n, it)
     end
   end
 
   pub fn idle_timeout(server, secs) do
-    match server with
+    match server do
     | Server(port, plugs, mc, _) -> Server(port, plugs, mc, secs)
     end
   end
@@ -219,7 +219,7 @@ mod HttpServer do
   -- Start the server. Blocks forever.
   -- Extracts config and calls the C runtime http_server_listen builtin.
   pub fn listen(server) do
-    match server with
+    match server do
     | Server(port, plugs, mc, it) ->
       -- Build a server config heap object for the C runtime:
       -- The C runtime expects (port, max_conns, idle_timeout) at fields 0,1,2.
@@ -234,7 +234,7 @@ mod HttpServer do
   -- then exits. Returns a handle (child PID) that can be passed to wait_for.
   -- A readiness pipe ensures the parent does not race ahead of the child's bind.
   pub fn spawn_n(server, n) do
-    match server with
+    match server do
     | Server(port, plugs, mc, it) ->
       let pipeline_fn = fn conn -> run_pipeline(conn, plugs)
       http_server_spawn_n(port, n, mc, it, pipeline_fn)

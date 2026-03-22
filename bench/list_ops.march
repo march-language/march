@@ -12,7 +12,7 @@ type IntList = INil | ICons(Int, IntList)
 
 -- Tail-recursive reverse
 fn irev(xs : IntList, acc : IntList) : IntList do
-  match xs with
+  match xs do
   | INil        -> acc
   | ICons(h, t) -> irev(t, ICons(h, acc))
   end
@@ -30,7 +30,7 @@ end
 
 -- Tail-recursive map (builds reversed, then reverses)
 fn imap_acc(xs : IntList, f : Int -> Int, acc : IntList) : IntList do
-  match xs with
+  match xs do
   | INil        -> acc
   | ICons(h, t) -> imap_acc(t, f, ICons(f(h), acc))
   end
@@ -42,7 +42,7 @@ end
 
 -- Tail-recursive filter (builds reversed, then reverses)
 fn ifilter_acc(xs : IntList, pred : Int -> Bool, acc : IntList) : IntList do
-  match xs with
+  match xs do
   | INil        -> acc
   | ICons(h, t) ->
     if pred(h) then ifilter_acc(t, pred, ICons(h, acc))
@@ -56,7 +56,7 @@ end
 
 -- Fold is already tail-recursive
 fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
-  match xs with
+  match xs do
   | INil        -> acc
   | ICons(h, t) -> ifold(t, f(acc, h), f)
   end

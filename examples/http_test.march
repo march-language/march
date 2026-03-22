@@ -12,7 +12,7 @@
 mod HttpTest do
 
   fn router(conn) do
-    match (HttpServer.method(conn), HttpServer.path_info(conn)) with
+    match (HttpServer.method(conn), HttpServer.path_info(conn)) do
     | (Get, Nil) ->
       HttpServer.text(conn, 200, "hello")
     | (Get, Cons("ping", Nil)) ->
@@ -40,7 +40,7 @@ mod HttpTest do
     let client = HttpClient.new_client()
 
     -- GET / → "hello"
-    match HttpClient.get(client, "http://localhost:18080/") with
+    match HttpClient.get(client, "http://localhost:18080/") do
     | Ok(resp) ->
       assert_eq("GET /", "hello", Http.response_body(resp))
     | Err(_) ->
@@ -48,7 +48,7 @@ mod HttpTest do
     end
 
     -- GET /ping → "pong"
-    match HttpClient.get(client, "http://localhost:18080/ping") with
+    match HttpClient.get(client, "http://localhost:18080/ping") do
     | Ok(resp) ->
       assert_eq("GET /ping", "pong", Http.response_body(resp))
     | Err(_) ->
@@ -56,7 +56,7 @@ mod HttpTest do
     end
 
     -- POST /echo → echoes the body
-    match HttpClient.post(client, "http://localhost:18080/echo", "hello echo") with
+    match HttpClient.post(client, "http://localhost:18080/echo", "hello echo") do
     | Ok(resp) ->
       assert_eq("POST /echo", "hello echo", Http.response_body(resp))
     | Err(_) ->

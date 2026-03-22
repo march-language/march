@@ -19,7 +19,7 @@ end
 
 pub fn basename(path) do
   let parts = components(path)
-  match parts with
+  match parts do
   | Nil -> path
   | _ ->
     -- fold_left to get the last element safely (List.last panics on empty)
@@ -30,7 +30,7 @@ end
 
 pub fn dirname(path) do
   let parts = components(path)
-  match List.drop_last(parts) with
+  match List.drop_last(parts) do
   | Nil -> if is_absolute(path) then "/" else "."
   | dirs ->
     let joined = String.join(dirs, "/")
@@ -40,7 +40,7 @@ end
 
 pub fn extension(path) do
   let base = basename(path)
-  match String.last_index_of(base, ".") with
+  match String.last_index_of(base, ".") do
   | None -> ""
   | Some(0) -> ""          -- leading dot is not an extension (e.g. .bashrc)
   | Some(i) ->
@@ -53,7 +53,7 @@ end
 pub fn strip_extension(path) do
   let base = basename(path)
   let dir = dirname(path)
-  match String.last_index_of(base, ".") with
+  match String.last_index_of(base, ".") do
   | None -> path
   | Some(0) -> path          -- leading dot is not an extension (e.g. .bashrc)
   | Some(i) ->
@@ -66,11 +66,11 @@ pub fn normalize(path) do
   let abs = is_absolute(path)
   let parts = components(path)
   fn process(remaining, stack) do
-    match remaining with
+    match remaining do
     | Nil -> stack
     | Cons(".", rest) -> process(rest, stack)
     | Cons("..", rest) ->
-      match stack with
+      match stack do
       | Nil ->
         if abs then process(rest, Nil)
         else process(rest, Cons("..", Nil))

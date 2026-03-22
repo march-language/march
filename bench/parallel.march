@@ -31,7 +31,7 @@ end
 
 -- Sequential sum — used below the task-spawn threshold.
 fn sum(t : Tree) : Int do
-  match t with
+  match t do
   | Leaf(n)    -> n
   | Node(l, r) -> sum(l) + sum(r)
   end
@@ -40,7 +40,7 @@ end
 -- Parallel sum: spawn two tasks for left/right subtrees down to `threshold`
 -- depth, then switch to sequential to avoid spawning millions of tiny tasks.
 fn par_sum(t : Tree, depth : Int, threshold : Int) : Int do
-  match t with
+  match t do
   | Leaf(n) -> n
   | Node(l, r) ->
     if depth >= threshold then sum(l) + sum(r)

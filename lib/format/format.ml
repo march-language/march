@@ -391,7 +391,7 @@ and emit_body ctx body =
   | _ -> emit_stmt ctx body
 
 and emit_match ctx subj arms =
-  line ctx (Printf.sprintf "match %s with" (expr_inline subj));
+  line ctx (Printf.sprintf "match %s do" (expr_inline subj));
   List.iter (fun arm ->
     let guard = match arm.branch_guard with
       | None   -> ""
