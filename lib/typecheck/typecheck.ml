@@ -559,12 +559,19 @@ let mk_iface_method_scheme iface_name mk_ty =
 
 (** Method bindings for the standard interfaces.  These are added to
     every module's initial [vars] so that [eq], [compare], [show],
-    and [hash] resolve as polymorphic functions at call sites. *)
+    and [hash] resolve as polymorphic functions at call sites.
+    Both unqualified (eq) and qualified (Eq.eq) forms are registered
+    so that [Eq.eq(x, y)] resolves via the EField module-path lookup. *)
 let builtin_interface_bindings : (string * scheme) list =
   [ ("eq",      mk_iface_method_scheme "Eq"   (fun a -> TArrow (a, TArrow (a, t_bool))));
     ("compare", mk_iface_method_scheme "Ord"  (fun a -> TArrow (a, TArrow (a, t_int))));
     ("show",    mk_iface_method_scheme "Show" (fun a -> TArrow (a, t_string)));
     ("hash",    mk_iface_method_scheme "Hash" (fun a -> TArrow (a, t_int)));
+    (* Qualified forms: Eq.eq, Ord.compare, Show.show, Hash.hash *)
+    ("Eq.eq",      mk_iface_method_scheme "Eq"   (fun a -> TArrow (a, TArrow (a, t_bool))));
+    ("Ord.compare",mk_iface_method_scheme "Ord"  (fun a -> TArrow (a, TArrow (a, t_int))));
+    ("Show.show",  mk_iface_method_scheme "Show" (fun a -> TArrow (a, t_string)));
+    ("Hash.hash",  mk_iface_method_scheme "Hash" (fun a -> TArrow (a, t_int)));
   ]
 
 (** Built-in binary operator schemes.
@@ -1721,8 +1728,22 @@ and infer_block env exprs =
       | Ast.PatVar _ -> List.map gen_binding bindings
       | _            -> bindings
     in
-    (* Propagate linearity from the RHS expression into pattern bindings. *)
-    let env' = bind_pattern_bindings b.bind_expr bindings' env in
+    (* Propagate linearity: if bind_lin is Linear/Affine (written as
+       `linear let x = ...` or `affine let x = ...`), override the
+       normal binding and register the variable as linear/affine.
+       Otherwise, propagate linearity from the RHS expression type. *)
+    let env' = match b.bind_lin with
+      | Ast.Unrestricted ->
+        bind_pattern_bindings b.bind_expr bindings' env
+      | lin ->
+        (* Explicit linearity annotation on the binding: register each
+           pattern variable as linear/affine. *)
+        List.fold_left (fun acc_env (name, sch) ->
+            match sch with
+            | Mono t -> bind_linear name lin t acc_env
+            | _      -> bind_var name sch acc_env
+          ) env bindings'
+    in
     infer_block env' rest
   (* Local named recursive function: fn go(params) : ret_ty do body end *)
   | Ast.ELetFn (name, params, ret_ann, body, sp) :: rest ->
@@ -1884,15 +1905,20 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       Mono TError
 
     | [clause] ->
+      (* Shared type variable mapping for this function's signature.
+         Using a single ref across all param annotations, return type, and
+         class constraints ensures that the same type variable name (e.g. `a`)
+         in `fn foo(x : a, y : a) : a when Eq(a)` maps to the same
+         unification variable everywhere. *)
+      let fn_tvars = ref [] in
+
       (* Bind parameters *)
       let param_tys, body_env =
         List.fold_right (fun fp (tys, env) ->
             match fp with
             | Ast.FPNamed p ->
               let t = match p.param_ty with
-                | Some ann ->
-                  let tvars = ref [] in
-                  surface_ty env' ~tvars ann
+                | Some ann -> surface_ty env' ~tvars:fn_tvars ann
                 | None -> fresh_var env'.level
               in
               let env' = match p.param_lin with
@@ -1925,18 +1951,43 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
           | Ast.FPPat _ -> ()
         ) clause.fc_params param_tys;
 
-      (* Check the guard if present *)
-      (match clause.fc_guard with
-       | Some g ->
-         check_expr body_env g t_bool
-           ~reason:(Some (RBuiltin "Function guards must be Bool."))
-       | None -> ());
+      (* Process the when-clause: distinguish class constraints from guards.
+         A class constraint looks like `ECon("Eq", [EVar "a"])` where "Eq"
+         is a known interface name.  Such guards are treated as type-class
+         constraints added to the function scheme rather than checked as Bool
+         expressions. *)
+      let class_constraints =
+        match clause.fc_guard with
+        | None -> []
+        | Some (Ast.ECon (iface_name, args, _))
+          when List.assoc_opt iface_name.txt env.interfaces <> None ->
+          (* It's a class constraint: Eq(a), Ord(b), etc. *)
+          List.filter_map (fun arg ->
+              match arg with
+              | Ast.EVar v ->
+                let ty = match List.assoc_opt v.txt !fn_tvars with
+                  | Some t -> t
+                  | None   ->
+                    (* Type var not yet in fn_tvars (e.g. declared only in constraint).
+                       Create a fresh var and register it. *)
+                    let fv = fresh_var env'.level in
+                    fn_tvars := (v.txt, fv) :: !fn_tvars;
+                    fv
+                in
+                Some (CInterface (iface_name.txt, ty))
+              | _ -> None
+            ) args
+        | Some g ->
+          (* Normal expression guard: type-check it as Bool *)
+          check_expr body_env g t_bool
+            ~reason:(Some (RBuiltin "Function guards must be Bool."));
+          []
+      in
 
-      (* Check or infer the body *)
+      (* Check or infer the body, sharing fn_tvars with the return annotation *)
       let body_ty = match def.fn_ret_ty with
         | Some ann ->
-          let tvars = ref [] in
-          let expected = surface_ty env' ~tvars ann in
+          let expected = surface_ty env' ~tvars:fn_tvars ann in
           check_expr body_env clause.fc_body expected
             ~reason:(Some (RFnReturn (def.fn_name.txt, fn_span)));
           expected
@@ -1961,7 +2012,27 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       (* Unify self_ty so recursive calls get the correct type *)
       unify env' ~span:fn_span self_ty fn_ty;
 
-      generalize env.level fn_ty
+      (* Generalize; attach any class constraints from the when-clause *)
+      let base_sch = generalize env.level fn_ty in
+      (match class_constraints with
+       | [] -> base_sch
+       | cs  ->
+         match base_sch with
+         | Poly (ids, existing_cs, t) -> Poly (ids, cs @ existing_cs, t)
+         | Mono t ->
+           (* Collect the ids of all quantified vars referenced in constraints *)
+           let extra_ids = List.filter_map (fun c ->
+               match c with
+               | CInterface (_, tv) ->
+                 (match repr tv with
+                  | TVar r ->
+                    (match !r with
+                     | Unbound (id, l) when l > env.level -> Some id
+                     | _ -> None)
+                  | _ -> None)
+               | _ -> None
+             ) cs in
+           Poly (extra_ids, cs, t))
 
     | _ ->
       (* Multi-clause fn — desugar pass should have eliminated these *)
@@ -2503,7 +2574,11 @@ let rec check_decl env (d : Ast.decl) : env =
           | Mono t ->
             Poly ([a_id], [CInterface (idef.iface_name.txt, a)], t)
         in
-        bind_var m.md_name.txt sch env
+        (* Register both unqualified (eq) and qualified (Eq.eq) names so
+           that Eq.eq(x, y) resolves via the EField module-path lookup. *)
+        let qualified = idef.iface_name.txt ^ "." ^ m.md_name.txt in
+        let env1 = bind_var m.md_name.txt sch env in
+        bind_var qualified sch env1
       ) env' idef.iface_methods
 
   | Ast.DImpl (idef, _sp) ->

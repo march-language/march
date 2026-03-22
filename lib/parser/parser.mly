@@ -509,6 +509,9 @@ block_expr:
   | LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
     { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Unrestricted; bind_expr = e },
             mk_span ($loc)) }
+  | LINEAR; LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
+    { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Linear; bind_expr = e },
+            mk_span ($loc)) }
   | LET; _p = simple_pattern; _ty = option(type_annot); error
     { raise (March_errors.Errors.ParseError (
         "I was expecting `=` in the let binding here:",

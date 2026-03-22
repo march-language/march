@@ -58,9 +58,20 @@ let is_trivial_param = function
   | FPPat (PatVar _) -> true   (* single var pattern is just a binding *)
   | FPPat _ -> false
 
+(** A guard looks like a type-class constraint (e.g. [Eq(a)]) when it is a
+    constructor application whose constructor name starts with an uppercase
+    letter.  Such guards should be preserved in [fc_guard] rather than
+    pushed into a match-branch guard so that the type checker can recognize
+    and handle them as interface constraints on the function's scheme. *)
+let is_class_constraint_guard = function
+  | Some (ECon (name, _, _))
+    when String.length name.txt > 0
+      && Char.uppercase_ascii name.txt.[0] = name.txt.[0] -> true
+  | _ -> false
+
 (** True if a single-clause fn needs no match desugaring at all. *)
 let clause_is_trivial (clause : fn_clause) =
-  clause.fc_guard = None
+  (clause.fc_guard = None || is_class_constraint_guard clause.fc_guard)
   && List.for_all is_trivial_param clause.fc_params
 
 (** Convert an [fn_param] into the [pattern] used as a branch arm.
