@@ -45,7 +45,7 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
   (* Compile to .so.
      -undefined dynamic_lookup (macOS): undefined symbols resolve at dlopen time
      from RTLD_GLOBAL, so later fragments can omit stdlib already compiled. *)
-  let cmd = Printf.sprintf "%s -shared -fPIC -O0%s -o %s %s 2>&1"
+  let cmd = Printf.sprintf "%s -shared -fPIC -O1%s -o %s %s 2>&1"
     ctx.clang ctx.undef_flag so_path ll_path in
   let ic = Unix.open_process_in cmd in
   let output = Buffer.create 256 in
@@ -257,9 +257,9 @@ let precompile_stdlib ctx
   let cache_dir = Filename.concat home ".cache/march" in
   let short_hash = String.sub content_hash 0 16 in
   let so_path    = Filename.concat cache_dir
-    ("stdlib_prelude_" ^ short_hash ^ ".so") in
+    ("stdlib_prelude_O1_" ^ short_hash ^ ".so") in
   let names_path = Filename.concat cache_dir
-    ("stdlib_prelude_" ^ short_hash ^ ".names") in
+    ("stdlib_prelude_O1_" ^ short_hash ^ ".names") in
   (* ── Cache hit path ───────────────────────────────────────────────────── *)
   if Sys.file_exists so_path && Sys.file_exists names_path then begin
     (try
@@ -306,7 +306,7 @@ let precompile_stdlib ctx
         let oc = open_out ll_path in
         output_string oc ir;
         close_out oc;
-        let cmd = Printf.sprintf "%s -shared -fPIC -O0%s -o %s %s 2>&1"
+        let cmd = Printf.sprintf "%s -shared -fPIC -O1%s -o %s %s 2>&1"
           ctx.clang ctx.undef_flag so_path ll_path in
         let ic = Unix.open_process_in cmd in
         let errbuf = Buffer.create 256 in
