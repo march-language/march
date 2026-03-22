@@ -30,7 +30,7 @@ let parse_src src =
 
 (** Full pipeline through typecheck; returns [None] on parse error. *)
 let pipeline_up_to_typecheck src =
-  match (try Some (parse_src src) with _ -> None) do
+  match (try Some (parse_src src) with _ -> None) with
   | None   -> None
   | Some m ->
     let m      = March_desugar.Desugar.desugar_module m in
@@ -42,7 +42,7 @@ let pipeline_up_to_typecheck src =
 let eval_main m =
   March_eval.Eval.reset_scheduler_state ();
   let env = March_eval.Eval.eval_module_env m in
-  match List.assoc_opt "main" env do
+  match List.assoc_opt "main" env with
   | None    -> None
   | Some fn -> Some (March_eval.Eval.apply fn [])
 
@@ -185,7 +185,7 @@ let gen_adt_module : string Gen.t =
 let gen_adt3_module : string Gen.t =
   Gen.map4
     (fun pick a b _unit ->
-       let ctor = match pick mod 3 do
+       let ctor = match pick mod 3 with
          | 0 -> Printf.sprintf "Pair(%d, %d)" a b
          | 1 -> Printf.sprintf "Single(%d)" a
          | _ -> "Empty"
@@ -429,7 +429,7 @@ let gen_list_module : string Gen.t =
 let gen_nested_match_module : string Gen.t =
   Gen.map3
     (fun inner_val outer_tag inner_tag ->
-       let ctor = match (outer_tag mod 2, inner_tag mod 2) do
+       let ctor = match (outer_tag mod 2, inner_tag mod 2) with
          | (0, _) -> "Nothing"
          | (1, 0) -> Printf.sprintf "Just(Left(%d))" inner_val
          | _      -> Printf.sprintf "Just(Right(%d))" inner_val
@@ -699,7 +699,7 @@ let write_temp_march src =
     interpreter output == compiled output.
     Returns Ok () on match, Error msg on mismatch, or None to skip. *)
 let oracle_check src =
-  match Lazy.force march_bin_opt do
+  match Lazy.force march_bin_opt with
   | None -> None  (* no binary — skip *)
   | Some bin ->
     let src_file = write_temp_march src in
@@ -742,7 +742,7 @@ let prop_parse_no_unexpected_exception =
     ~count:500
     gen_well_typed_module
     (fun src ->
-       match parse_src src do
+       match parse_src src with
        | _  -> true
        | exception March_parser.Parser.Error -> true
        | exception _ -> false)
@@ -765,7 +765,7 @@ let prop_generated_programs_are_well_typed =
     ~print:Fun.id
     gen_well_typed_module
     (fun src ->
-       match pipeline_up_to_typecheck src do
+       match pipeline_up_to_typecheck src with
        | None -> true  (* parse error counts as skip *)
        | Some (_, errors, _) -> not (Errors.has_errors errors))
 
@@ -776,7 +776,7 @@ let prop_type_sound_eval_no_crash =
     gen_well_typed_module
     (fun src ->
        try
-         match pipeline_up_to_typecheck src do
+         match pipeline_up_to_typecheck src with
          | None -> true
          | Some (_, errors, _) when Errors.has_errors errors -> true
          | Some (m, _, _) ->
@@ -791,7 +791,7 @@ let prop_lower_no_crash =
     gen_well_typed_module
     (fun src ->
        try
-         match pipeline_up_to_typecheck src do
+         match pipeline_up_to_typecheck src with
          | None -> true
          | Some (_, errors, _) when Errors.has_errors errors -> true
          | Some (m, _, type_map) ->
@@ -806,7 +806,7 @@ let prop_mono_no_crash =
     gen_well_typed_module
     (fun src ->
        try
-         match pipeline_up_to_typecheck src do
+         match pipeline_up_to_typecheck src with
          | None -> true
          | Some (_, errors, _) when Errors.has_errors errors -> true
          | Some (m, _, type_map) ->
@@ -822,7 +822,7 @@ let prop_defun_no_crash =
     gen_well_typed_module
     (fun src ->
        try
-         match pipeline_up_to_typecheck src do
+         match pipeline_up_to_typecheck src with
          | None -> true
          | Some (_, errors, _) when Errors.has_errors errors -> true
          | Some (m, _, type_map) ->
@@ -839,7 +839,7 @@ let prop_perceus_no_crash =
     gen_well_typed_module
     (fun src ->
        try
-         match pipeline_up_to_typecheck src do
+         match pipeline_up_to_typecheck src with
          | None -> true
          | Some (_, errors, _) when Errors.has_errors errors -> true
          | Some (m, _, type_map) ->
@@ -859,11 +859,11 @@ let prop_perceus_no_crash =
     and return the integer result, or None on any failure. *)
 let eval_int_src body =
   try
-    match pipeline_up_to_typecheck (wrap_main body) do
+    match pipeline_up_to_typecheck (wrap_main body) with
     | None -> None
     | Some (_, errors, _) when Errors.has_errors errors -> None
     | Some (m, _, _) ->
-      (match eval_main m do
+      (match eval_main m with
        | Some v -> value_to_int v
        | None   -> None)
   with _ -> None
@@ -876,7 +876,7 @@ let prop_add_commutative =
     (fun (a, b) ->
        let lhs = eval_int_src (Printf.sprintf "(%d + %d)" a b) in
        let rhs = eval_int_src (Printf.sprintf "(%d + %d)" b a) in
-       match lhs, rhs do
+       match lhs, rhs with
        | Some l, Some r -> l = r
        | _ -> true (* skip if eval failed *))
 
@@ -888,7 +888,7 @@ let prop_add_zero_identity =
     (fun a ->
        let lhs = eval_int_src (Printf.sprintf "(%d + 0)" a) in
        let rhs = eval_int_src (string_of_int a) in
-       match lhs, rhs do
+       match lhs, rhs with
        | Some l, Some r -> l = r
        | _ -> true)
 
@@ -900,7 +900,7 @@ let prop_mul_one_identity =
     (fun a ->
        let lhs = eval_int_src (Printf.sprintf "(%d * 1)" a) in
        let rhs = eval_int_src (string_of_int a) in
-       match lhs, rhs do
+       match lhs, rhs with
        | Some l, Some r -> l = r
        | _ -> true)
 
@@ -910,7 +910,7 @@ let prop_sub_self_zero =
     ~count:300
     (Gen.int_range (-100) 100)
     (fun a ->
-       match eval_int_src (Printf.sprintf "(%d - %d)" a a) do
+       match eval_int_src (Printf.sprintf "(%d - %d)" a a) with
        | Some n -> n = 0
        | None   -> true)
 
@@ -921,7 +921,7 @@ let prop_if_else_branch =
     Gen.(pair (int_range (-100) 100) (int_range (-100) 100))
     (fun (t, f) ->
        let body = Printf.sprintf "if (1 == 2) then %d else %d" t f in
-       match eval_int_src body do
+       match eval_int_src body with
        | Some n -> n = f
        | None   -> true)
 
@@ -932,7 +932,7 @@ let prop_if_then_branch =
     Gen.(pair (int_range (-100) 100) (int_range (-100) 100))
     (fun (t, f) ->
        let body = Printf.sprintf "if (1 == 1) then %d else %d" t f in
-       match eval_int_src body do
+       match eval_int_src body with
        | Some n -> n = t
        | None   -> true)
 
@@ -963,14 +963,14 @@ let prop_adt_match_correct =
        | _ ->
          (* Re-implement without eval_int_src which wraps with its own mod *)
          try
-           match pipeline_up_to_typecheck src do
+           match pipeline_up_to_typecheck src with
            | None -> true
            | Some (_, errors, _) when Errors.has_errors errors -> true
            | Some (m, _, _) ->
-             (match eval_main m do
+             (match eval_main m with
               | Some v ->
                 let expected = if use_a then 0 else n in
-                (match value_to_int v do
+                (match value_to_int v with
                  | Some result -> result = expected
                  | None -> true)
               | None -> true)
@@ -1008,11 +1008,11 @@ let prop_tuple_swap_involution =
          a b a b
        in
        try
-         match pipeline_up_to_typecheck src do
+         match pipeline_up_to_typecheck src with
          | None -> true
          | Some (_, errors, _) when Errors.has_errors errors -> true
          | Some (m, _, _) ->
-           (match eval_main m do
+           (match eval_main m with
             | Some v -> (match value_to_int v with Some 1 -> true | Some _ -> false | None -> true)
             | None -> true)
        with _ -> true)
@@ -1037,11 +1037,11 @@ let prop_closure_captures_correct_value =
          base arg
        in
        try
-         match pipeline_up_to_typecheck src do
+         match pipeline_up_to_typecheck src with
          | None -> true
          | Some (_, errors, _) when Errors.has_errors errors -> true
          | Some (m, _, _) ->
-           (match eval_main m do
+           (match eval_main m with
             | Some v -> (match value_to_int v with Some r -> r = expected | None -> true)
             | None -> true)
        with _ -> true)
@@ -1069,11 +1069,11 @@ let prop_list_sum_correct =
          a b c
        in
        try
-         match pipeline_up_to_typecheck src do
+         match pipeline_up_to_typecheck src with
          | None -> true
          | Some (_, errors, _) when Errors.has_errors errors -> true
          | Some (m, _, _) ->
-           (match eval_main m do
+           (match eval_main m with
             | Some v -> (match value_to_int v with Some r -> r = expected | None -> true)
             | None -> true)
        with _ -> true)
@@ -1152,7 +1152,7 @@ let prop_mono_eliminates_tvars =
     gen_well_typed_module
     (fun src ->
        try
-         match pipeline_up_to_typecheck src do
+         match pipeline_up_to_typecheck src with
          | None -> true
          | Some (_, errors, _) when Errors.has_errors errors -> true
          | Some (m, _, type_map) ->
@@ -1171,7 +1171,7 @@ let prop_defun_eliminates_letrec =
     gen_well_typed_module
     (fun src ->
        try
-         match pipeline_up_to_typecheck src do
+         match pipeline_up_to_typecheck src with
          | None -> true
          | Some (_, errors, _) when Errors.has_errors errors -> true
          | Some (m, _, type_map) ->
@@ -1248,7 +1248,7 @@ let prop_oracle_println_arith =
        gen_arith_expr
        gen_arith_expr)
     (fun src ->
-       match oracle_check src do
+       match oracle_check src with
        | None           -> true
        | Some (Ok ())   -> true
        | Some (Error (interp, compiled)) ->
@@ -1275,7 +1275,7 @@ let prop_oracle_println_closure =
        (Gen.int_range (-50) 50)
        (Gen.int_range (-50) 50))
     (fun src ->
-       match oracle_check src do
+       match oracle_check src with
        | None           -> true
        | Some (Ok ())   -> true
        | Some (Error (interp, compiled)) ->
@@ -1307,7 +1307,7 @@ let prop_oracle_println_adt =
        Gen.bool
        (Gen.int_range 1 100))
     (fun src ->
-       match oracle_check src do
+       match oracle_check src with
        | None           -> true
        | Some (Ok ())   -> true
        | Some (Error (interp, compiled)) ->
@@ -1333,7 +1333,7 @@ let prop_oracle_println_hof =
        (Gen.int_range 1 20)
        (Gen.int_range (-50) 50))
     (fun src ->
-       match oracle_check src do
+       match oracle_check src with
        | None           -> true
        | Some (Ok ())   -> true
        | Some (Error (interp, compiled)) ->
@@ -1358,7 +1358,7 @@ let prop_oracle_println_tuple =
        (Gen.int_range (-100) 100)
        (Gen.int_range (-100) 100))
     (fun src ->
-       match oracle_check src do
+       match oracle_check src with
        | None           -> true
        | Some (Ok ())   -> true
        | Some (Error (interp, compiled)) ->
@@ -1389,7 +1389,7 @@ let prop_oracle_println_list =
        (Gen.int_range (-50) 50)
        (Gen.int_range (-50) 50))
     (fun src ->
-       match oracle_check src do
+       match oracle_check src with
        | None           -> true
        | Some (Ok ())   -> true
        | Some (Error (interp, compiled)) ->
