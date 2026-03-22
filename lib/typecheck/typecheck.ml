@@ -802,6 +802,17 @@ let builtin_bindings : (string * scheme) list =
     ("worker",          poly1 (fun a -> TArrow (a, TCon ("ChildSpec", []))));
     ("Supervisor.spec", Mono (TArrow (t_atom, TArrow (t_list (TCon ("ChildSpec", [])),
                                                        TCon ("SupervisorSpec", [])))));
+    (* Dynamic supervisor builtins *)
+    ("dynamic_supervisor", Mono (TArrow (t_atom, TArrow (t_atom, TCon ("ChildSpec", [])))));
+    ("Supervisor.start_child",
+     poly1 (fun a -> TArrow (t_atom, TArrow (TCon ("ChildSpec", []),
+                                             t_result (TCon ("Pid", [a])) t_string))));
+    ("Supervisor.stop_child",
+     Mono (TArrow (t_atom, TArrow (t_int, t_result t_unit t_string))));
+    ("Supervisor.which_children",
+     Mono (TArrow (t_atom, t_list t_unit)));   (* simplified; full type is List({pid,...}) *)
+    ("Supervisor.count_children",
+     Mono (TArrow (t_atom, TCon ("SupervisorSpec", []))));  (* simplified return type *)
   ]
 
 let builtin_types : (string * int) list =
