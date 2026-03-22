@@ -1749,6 +1749,7 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
     ~(prev_globals : (string * string) list)
     ~(fns : Tir.fn_def list)
     ?(extern_fns : Tir.fn_def list = [])
+    ?(store_as : string option = None)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
   let ctx = make_ctx ~fast_math () in
@@ -1760,10 +1761,22 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   List.iter (emit_fn ctx) fns;
   let ret_llty = llvm_ty ret_ty in
   let fname = Printf.sprintf "repl_%d" n in
+  (* When store_as = Some name, emit a global to hold the result (for `v`). *)
+  (match store_as with
+   | None -> ()
+   | Some vname ->
+     let gname = Printf.sprintf "repl_%d_%s" n vname in
+     Printf.bprintf ctx.preamble "@%s = global %s zeroinitializer\n" gname ret_llty);
   Printf.bprintf ctx.buf "\ndefine %s @%s() {\nentry:\n" ret_llty fname;
   emit_prev_global_bridges ctx prev_globals;
   let (actual_ty, result) = emit_expr ctx body in
   let result' = coerce ctx actual_ty result ret_llty in
+  (* Store to the `v` global before returning, so later fragments can read it. *)
+  (match store_as with
+   | None -> ()
+   | Some vname ->
+     let gname = Printf.sprintf "repl_%d_%s" n vname in
+     Printf.bprintf ctx.buf "  store %s %s, ptr @%s\n" ret_llty result' gname);
   Printf.bprintf ctx.buf "  ret %s %s\n}\n" ret_llty result';
   let out = Buffer.create 4096 in
   emit_preamble out;

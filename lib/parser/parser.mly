@@ -787,3 +787,11 @@ repl_input:
   | d = decl; EOF { March_ast.Ast.ReplDecl d }
   | e = expr; EOF { March_ast.Ast.ReplExpr e }
   | EOF           { March_ast.Ast.ReplEOF }
+  (* Hint: `name = expr` looks like an assignment but should be `let name = expr`.
+     This rule must come last so that valid decls/exprs are preferred above. *)
+  | name = LOWER_IDENT; EQUALS
+    { raise (March_errors.Errors.ParseError (
+        Printf.sprintf
+          "unexpected `%s = ...` — did you mean `let %s = ...`?" name name,
+        Some (Printf.sprintf "let %s = expr" name),
+        $startpos($2))) }

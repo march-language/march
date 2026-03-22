@@ -81,3 +81,53 @@ CAMLprim value march_call_ptr_to_ptr(value v_fptr, value v_arg) {
     void *result = fn(arg);
     CAMLreturn(caml_copy_nativeint((intnat)result));
 }
+
+/* ── Heap inspection helpers (for REPL pretty-printer) ──────────────── */
+#include <string.h>
+
+/* Read int32_t from (ptr + byte_offset), sign-extended to OCaml int.
+   Used to read march_hdr.tag (i32 at offset 8 in the header). */
+CAMLprim value march_read_i32_at(value v_ptr, value v_off) {
+    CAMLparam2(v_ptr, v_off);
+    char *ptr = (char *)Nativeint_val(v_ptr);
+    int off = Int_val(v_off);
+    int32_t val;
+    memcpy(&val, ptr + off, 4);
+    CAMLreturn(Val_int((int)val));
+}
+
+/* Read int64_t from (ptr + byte_offset).
+   Used to read i64 fields (TInt, TBool, TUnit, TFloat-as-bits). */
+CAMLprim value march_read_i64_at(value v_ptr, value v_off) {
+    CAMLparam2(v_ptr, v_off);
+    char *ptr = (char *)Nativeint_val(v_ptr);
+    int off = Int_val(v_off);
+    int64_t val;
+    memcpy(&val, ptr + off, 8);
+    CAMLreturn(caml_copy_int64(val));
+}
+
+/* Read void* from (ptr + byte_offset).
+   Used to read pointer fields (TString, TCon, TTuple, etc.). */
+CAMLprim value march_read_ptr_at(value v_ptr, value v_off) {
+    CAMLparam2(v_ptr, v_off);
+    char *ptr = (char *)Nativeint_val(v_ptr);
+    int off = Int_val(v_off);
+    void *result;
+    memcpy(&result, ptr + off, sizeof(void *));
+    CAMLreturn(caml_copy_nativeint((intnat)result));
+}
+
+/* Read a march_string* as an OCaml string.
+   march_string layout: { int64_t rc; int64_t len; char data[]; }
+   — rc at offset 0, len at offset 8, data at offset 16. */
+CAMLprim value march_read_march_string(value v_ptr) {
+    CAMLparam1(v_ptr);
+    CAMLlocal1(result);
+    char *base = (char *)Nativeint_val(v_ptr);
+    int64_t len;
+    memcpy(&len, base + 8, 8);
+    result = caml_alloc_string((mlsize_t)len);
+    memcpy(Bytes_val(result), base + 16, (size_t)len);
+    CAMLreturn(result);
+}

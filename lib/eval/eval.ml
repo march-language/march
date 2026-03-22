@@ -3695,7 +3695,20 @@ let task_builtins : env =
           VRecord [("actor", VString name); ("restart", VAtom kw)]
         else
           VRecord [("actor", VString name); ("restart", VAtom "permanent"); ("name", VAtom kw)]
-      | _ -> eval_error "worker: expected an actor name or (actor_name, :policy | :registered_name)"))
+      (* Three-arg form: worker(Name, :policy, {name: :my_svc}) *)
+      | [VCon (name, []); VAtom policy; VRecord opts] ->
+        let base = [("actor", VString name); ("restart", VAtom policy)] in
+        let with_name = match List.assoc_opt "name" opts with
+          | Some (VAtom n) -> ("name", VAtom n) :: base
+          | _ -> base in
+        VRecord with_name
+      | [VString name; VAtom policy; VRecord opts] ->
+        let base = [("actor", VString name); ("restart", VAtom policy)] in
+        let with_name = match List.assoc_opt "name" opts with
+          | Some (VAtom n) -> ("name", VAtom n) :: base
+          | _ -> base in
+        VRecord with_name
+      | _ -> eval_error "worker: expected an actor name, or (name, :policy), or (name, :policy, opts)"))
 
   ; ("Supervisor.spec", VBuiltin ("Supervisor.spec", function
       | [strategy; children] ->

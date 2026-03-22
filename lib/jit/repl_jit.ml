@@ -117,6 +117,95 @@ let lower_module ~type_map ?(repl_vars : string list = []) (m : March_ast.Ast.mo
   let tir = March_tir.Escape.escape_analysis tir in
   tir
 
+(* ── Heap pretty-printer ───────────────────────────────────────────── *)
+(* March heap layout (march_hdr):
+     offset  0: int64_t rc
+     offset  8: int32_t tag
+     offset 12: int32_t pad
+   Fields start at offset 16, 8 bytes each.
+   TInt/TBool/TUnit fields are stored as int64.
+   TFloat fields are stored as double (same 8-byte slot, read bits).
+   All other fields (TString, TCon, TTuple, …) are stored as pointers.
+
+   Built-in variant tag assignments (determined by constructor order in lower.ml):
+     List:   Nil=0, Cons=1  (Cons fields: [head, tail])
+     Option: None=0, Some=1 (Some fields: [value])
+     Result: Ok=0,  Err=1   (Ok fields: [value]; Err fields: [value])
+*)
+
+(** Read the constructor tag from a heap object (int32 at offset 8). *)
+let heap_tag (ptr : nativeint) : int =
+  Jit.read_i32_at ptr 8
+
+(** Read field i (0-based) as an int64 (for TInt/TBool/TUnit/TFloat). *)
+let field_i64 (ptr : nativeint) (i : int) : int64 =
+  Jit.read_i64_at ptr (16 + i * 8)
+
+(** Read field i (0-based) as a pointer (for TString/TCon/TTuple/etc.). *)
+let field_ptr (ptr : nativeint) (i : int) : nativeint =
+  Jit.read_ptr_at ptr (16 + i * 8)
+
+(** Pretty-print a March heap value given its TIR type.
+    Recursion is bounded to depth [max_depth] to guard against unexpected
+    structures; beyond that, falls back to the raw-address display. *)
+let rec pp_heap_value ?(depth=0) (ty : March_tir.Tir.ty) (ptr : nativeint) : string =
+  if depth > 64 then Printf.sprintf "#<...>" else
+  let open March_tir.Tir in
+  match ty with
+  | TString ->
+    (* march_string layout: {rc:i64, len:i64, data:char[]} *)
+    Printf.sprintf "%S" (Jit.read_march_string ptr)
+  | TCon ("List", [elem_ty]) ->
+    pp_list ~depth elem_ty ptr
+  | TCon ("Option", [inner_ty]) ->
+    let tag = heap_tag ptr in
+    if tag = 0 then "None"
+    else
+      let v = pp_field ~depth inner_ty ptr 0 in
+      Printf.sprintf "Some(%s)" v
+  | TCon ("Result", [ok_ty; err_ty]) ->
+    let tag = heap_tag ptr in
+    if tag = 0 then Printf.sprintf "Ok(%s)" (pp_field ~depth ok_ty ptr 0)
+    else         Printf.sprintf "Err(%s)" (pp_field ~depth err_ty ptr 0)
+  | TTuple tys ->
+    let fields = List.mapi (fun i ty -> pp_field ~depth ty ptr i) tys in
+    Printf.sprintf "(%s)" (String.concat ", " fields)
+  | _ ->
+    (* Unknown heap type: show tag for basic orientation *)
+    Printf.sprintf "#<tag:%d>" (heap_tag ptr)
+
+and pp_list ?(depth=0) elem_ty (ptr : nativeint) : string =
+  let buf = Buffer.create 32 in
+  Buffer.add_char buf '[';
+  let cur = ref ptr in
+  let first = ref true in
+  (* Traverse Cons chain; stop at Nil (tag=0) or null pointer *)
+  while !cur <> Nativeint.zero && heap_tag !cur <> 0 do
+    if not !first then Buffer.add_string buf ", ";
+    first := false;
+    Buffer.add_string buf (pp_field ~depth elem_ty !cur 0);
+    cur := field_ptr !cur 1  (* tail is field 1 of Cons *)
+  done;
+  Buffer.add_char buf ']';
+  Buffer.contents buf
+
+and pp_field ?(depth=0) (ty : March_tir.Tir.ty) (ptr : nativeint) (i : int) : string =
+  let open March_tir.Tir in
+  match ty with
+  | TInt  -> Int64.to_string (field_i64 ptr i)
+  | TBool -> if field_i64 ptr i = 0L then "false" else "true"
+  | TUnit -> "()"
+  | TFloat ->
+    let bits = field_i64 ptr i in
+    Printf.sprintf "%g" (Int64.float_of_bits bits)
+  | _ ->
+    (* Pointer field: read the child pointer, then recurse *)
+    let child = field_ptr ptr i in
+    if child = Nativeint.zero then "null"
+    else pp_heap_value ~depth:(depth + 1) ty child
+
+(* ── run_expr ──────────────────────────────────────────────────────── *)
+
 let run_expr ctx ~type_map m =
   let n = next_id ctx in
   let repl_vars = List.map (fun (gname, _) -> bare_of_global gname) ctx.globals in
@@ -130,11 +219,15 @@ let run_expr ctx ~type_map m =
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
   (* Partition into new (to define) and extern (already compiled, need declare). *)
   let (new_fns, extern_fns) = partition_fns ctx support_fns in
+  (* ~store_as:(Some "v") makes the IR store the result in @repl_N_v so that
+     later fragments that reference `v` (the magic last-result variable) can
+     load it via the global-bridge mechanism. *)
   let ir = March_tir.Llvm_emit.emit_repl_expr
     ~n ~ret_ty
     ~prev_globals:ctx.globals
     ~fns:new_fns
     ~extern_fns
+    ~store_as:(Some "v")
     ~types:tir.March_tir.Tir.tm_types
     main_fn.fn_body in
   let handle = compile_fragment ctx ir in
@@ -163,8 +256,8 @@ let run_expr ctx ~type_map m =
          This avoids the old 4096 heuristic which broke for any integer > 4095. *)
       let v = Jit.call_void_to_int fptr in
       Int64.to_string v
-    | _ ->
-      (* Heap-allocated value: use the pointer path.
+    | ty ->
+      (* Heap-allocated value: use the pointer path, then pretty-print.
          Values below 4 GiB are almost certainly scalars stored via inttoptr
          (small counts, flags, etc.) rather than real heap addresses. *)
       let ptr = Jit.call_void_to_ptr fptr in
@@ -172,8 +265,14 @@ let run_expr ctx ~type_map m =
       if Int64.compare raw 0x100000000L < 0 && Int64.compare raw 0L >= 0 then
         Int64.to_string raw
       else
-        Printf.sprintf "#<value at 0x%Lx>" raw
+        pp_heap_value ty ptr
   in
+  (* Register @repl_N_v in ctx.globals so subsequent fragments can bridge `v`
+     via emit_prev_global_bridges.  Replace any prior `v` entry. *)
+  let llty = March_tir.Llvm_emit.llvm_ty_of_tir ret_ty in
+  let global_name = Printf.sprintf "repl_%d_v" n in
+  ctx.globals <- (global_name, llty) ::
+    List.filter (fun (gn, _) -> bare_of_global gn <> "v") ctx.globals;
   (ret_ty, result_str)
 
 (** Distinguish fn vs let at the AST level, not TIR.

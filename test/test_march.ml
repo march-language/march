@@ -2896,6 +2896,167 @@ let test_repl_expr_after_let () =
        March_jit.Repl_jit.cleanup jit; raise exn)
 
 (* ------------------------------------------------------------------ *)
+(* REPL magic `v` variable and heap pretty-printer tests              *)
+(* ------------------------------------------------------------------ *)
+
+(** `v` (magic last-result variable) works across JIT fragments.
+    After evaluating `21 + 21`, `v` should be available and equal to 42.
+    Bug: previously `v` was added to tc_env but not to JIT globals,
+    so referencing `v` in the next fragment crashed clang. *)
+let test_repl_jit_v_magic_int () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       (* Evaluate `21 + 21` — result stored as @repl_N_v *)
+       (match parse_repl "21 + 21" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "21+21 = 42" "42" result
+        | _ -> failwith "expected ReplExpr");
+       (* Now evaluate `v + 1` — references the `v` global from prior fragment *)
+       (match parse_repl "v + 1" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "v+1 = 43" "43" result
+        | _ -> failwith "expected ReplExpr");
+       (* `v` itself equals 43 now (the result of the last expression) *)
+       (match parse_repl "v" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "v = 43 (last result)" "43" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** Heap pretty-printer: a list literal `[1, 2, 3]` must display as
+    "[1, 2, 3]" rather than "#<value at 0x...>".
+    Bug: the `_` catch-all in run_expr returned the raw pointer address. *)
+let test_repl_jit_list_display () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let list_decl = load_stdlib_file_for_test "list.march" in
+    let stdlib_decls = [list_decl] in
+    let content_hash =
+      Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
+    let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
+      Hashtbl.create 16 in
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       March_jit.Repl_jit.precompile_stdlib jit
+         ~content_hash ~stdlib_decls ~type_map;
+       let make_stdlib_mod e =
+         let s = March_ast.Ast.dummy_span in
+         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let main_def = March_ast.Ast.{
+           fn_name = { txt = "main"; span = s };
+           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_clauses = [clause] } in
+         { March_ast.Ast.mod_name = { txt = "Main"; span = s };
+           mod_decls = stdlib_decls @ [DFn (main_def, s)] }
+       in
+       (* Evaluate `[1, 2, 3]` — should pretty-print as "[1, 2, 3]" *)
+       (match parse_repl "[1, 2, 3]" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_stdlib_mod e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "[1,2,3] display" "[1, 2, 3]" result
+        | _ -> failwith "expected ReplExpr");
+       (* Empty list `[]` — should display as "[]" *)
+       (match parse_repl "List.empty()" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_stdlib_mod e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "empty list display" "[]" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** Parser hint: `x = 5` at REPL top-level should raise ParseError with
+    a hint containing "let". *)
+let test_repl_assign_hint () =
+  (try
+     let _ = parse_repl "x = 5" in
+     Alcotest.fail "expected ParseError for `x = 5`"
+   with
+   | March_errors.Errors.ParseError (msg, _hint, _pos) ->
+     (* Message must mention `let` as a hint *)
+     let has_let = String.length msg >= 3 &&
+       (let rec check i =
+          if i + 2 >= String.length msg then false
+          else if String.sub msg i 3 = "let" then true
+          else check (i + 1)
+        in check 0) in
+     Alcotest.(check bool) "hint mentions let" true has_let
+   | exn ->
+     Alcotest.failf "unexpected exception: %s" (Printexc.to_string exn))
+
+(** General REPL interaction: define a variable, evaluate an expression
+    using it, redefine it, and check v tracks the last result. *)
+let test_repl_jit_general_interaction () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       (* Step 1: let x = 10 *)
+       let run_decl_str src =
+         match parse_repl src with
+         | March_ast.Ast.ReplDecl d ->
+           let d' = March_desugar.Desugar.desugar_decl d in
+           let (bind_name, bind_expr) = match d' with
+             | March_ast.Ast.DLet (b, _) ->
+               let n = match b.bind_pat with
+                 | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "PatVar"
+               in (n, b.bind_expr)
+             | _ -> failwith "expected DLet"
+           in
+           let m = make_jit_test_module bind_expr in
+           March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m
+         | _ -> failwith ("expected ReplDecl for: " ^ src)
+       in
+       let run_expr_str src =
+         match parse_repl src with
+         | March_ast.Ast.ReplExpr e ->
+           let e' = March_desugar.Desugar.desugar_expr e in
+           let m = make_jit_test_module e' in
+           let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+           result
+         | _ -> failwith ("expected ReplExpr for: " ^ src)
+       in
+       run_decl_str "let x = 10";
+       (* x + 5 = 15 *)
+       Alcotest.(check string) "x+5" "15" (run_expr_str "x + 5");
+       (* v = 15 (last result) *)
+       Alcotest.(check string) "v=15" "15" (run_expr_str "v");
+       (* redefine x = 99 *)
+       run_decl_str "let x = 99";
+       Alcotest.(check string) "x after redef" "99" (run_expr_str "x");
+       (* v = 99 now *)
+       Alcotest.(check string) "v=99" "99" (run_expr_str "v");
+       (* boolean expression: true *)
+       Alcotest.(check string) "true expr" "true" (run_expr_str "1 == 1");
+       (* v after bool *)
+       Alcotest.(check string) "v=true" "true" (run_expr_str "v");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(* ------------------------------------------------------------------ *)
 (* list_actors tests                                                   *)
 (* ------------------------------------------------------------------ *)
 
@@ -7663,7 +7824,7 @@ let dyn_sup_children name =
 
 (** Basic: dynamic_supervisor registers correctly, start_child adds a child. *)
 let test_dyn_sup_start_child () =
-  let _env = eval_module {|mod Test do
+  let env = eval_module {|mod Test do
     actor Worker do
       state { n : Int }
       init { n = 0 }
@@ -7676,7 +7837,7 @@ let test_dyn_sup_start_child () =
       Supervisor.start_child(:workers, spec)
     end
   end|} in
-  let result = call_fn _env "main" [] in
+  let result = call_fn env "main" [] in
   (* start_child should return Ok(pid) *)
   let ok = match result with
     | March_eval.Eval.VCon ("Ok", [March_eval.Eval.VInt _]) -> true
@@ -8137,6 +8298,14 @@ let () =
           Alcotest.test_case "app spawns actors"       `Quick (with_reset test_app_spawns_actors);
           Alcotest.test_case "main + app exclusive"    `Quick test_app_main_exclusive;
         ] );
+      ( "registry",
+        [
+          Alcotest.test_case "worker named spec"         `Quick (with_reset test_worker_named_spec);
+          Alcotest.test_case "whereis named"             `Quick (with_reset test_whereis_named);
+          Alcotest.test_case "whereis unknown"           `Quick (with_reset test_whereis_unknown);
+          Alcotest.test_case "whereis_bang unknown"      `Quick (with_reset test_whereis_bang_unknown);
+          Alcotest.test_case "name reregisters restart"  `Quick (with_reset test_name_reregisters_on_restart);
+        ] );
       ( "dynamic_supervisor",
         [
           Alcotest.test_case "start_child adds child"      `Quick (with_reset test_dyn_sup_start_child);
@@ -8146,14 +8315,6 @@ let () =
           Alcotest.test_case "temporary child not restart" `Quick (with_reset test_dyn_sup_temporary_not_restarted);
           Alcotest.test_case "stop_child removes child"    `Quick (with_reset test_dyn_sup_stop_child);
           Alcotest.test_case "dyn sup in app spec"         `Quick (with_reset test_dyn_sup_in_app);
-        ] );
-      ( "registry",
-        [
-          Alcotest.test_case "worker named spec"         `Quick (with_reset test_worker_named_spec);
-          Alcotest.test_case "whereis named"             `Quick (with_reset test_whereis_named);
-          Alcotest.test_case "whereis unknown"           `Quick (with_reset test_whereis_unknown);
-          Alcotest.test_case "whereis_bang unknown"      `Quick (with_reset test_whereis_bang_unknown);
-          Alcotest.test_case "name reregisters restart"  `Quick (with_reset test_name_reregisters_on_restart);
         ] );
       ( "lexer",
         [
@@ -8431,6 +8592,10 @@ let () =
         Alcotest.test_case "var redefinition" `Quick test_repl_var_redefinition;
         Alcotest.test_case "stdlib chain" `Quick test_repl_stdlib_chain;
         Alcotest.test_case "expr after let" `Quick test_repl_expr_after_let;
+        Alcotest.test_case "v magic var (int)" `Quick test_repl_jit_v_magic_int;
+        Alcotest.test_case "list pretty-print display" `Quick test_repl_jit_list_display;
+        Alcotest.test_case "assign hint (x = 5)" `Quick test_repl_assign_hint;
+        Alcotest.test_case "general REPL interaction" `Quick test_repl_jit_general_interaction;
       ];
       "complete", [
         Alcotest.test_case "command" `Quick test_complete_command;
