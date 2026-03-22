@@ -7021,6 +7021,209 @@ let test_no_warn_import_used () =
   end|} in
   Alcotest.(check bool) "used import no warn" false (has_unused_warning ctx)
 
+(* ── Option builtin combinator tests ──────────────────────────────────── *)
+
+let test_option_map_some () =
+  let env = eval_module {|mod T do
+    fn f() do Option.map(Some(3), fn x -> x * 2) end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "Option.map Some" 6
+    (match v with March_eval.Eval.VCon ("Some", [March_eval.Eval.VInt n]) -> n | _ -> failwith "expected Some")
+
+let test_option_map_none () =
+  let env = eval_module {|mod T do
+    fn f() do Option.map(None, fn x -> x * 2) end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check bool) "Option.map None returns None" true
+    (match v with March_eval.Eval.VCon ("None", []) -> true | _ -> false)
+
+let test_option_flat_map_some () =
+  let env = eval_module {|mod T do
+    fn f() do Option.flat_map(Some(5), fn x -> Some(x + 1)) end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "Option.flat_map Some" 6
+    (match v with March_eval.Eval.VCon ("Some", [March_eval.Eval.VInt n]) -> n | _ -> failwith "expected Some")
+
+let test_option_flat_map_none () =
+  let env = eval_module {|mod T do
+    fn f() do Option.flat_map(None, fn x -> Some(x)) end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check bool) "Option.flat_map None" true
+    (match v with March_eval.Eval.VCon ("None", []) -> true | _ -> false)
+
+let test_option_unwrap_some () =
+  let env = eval_module {|mod T do
+    fn f() do Option.unwrap(Some(42)) end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "Option.unwrap Some" 42 (vint v)
+
+let test_option_unwrap_or_some () =
+  let env = eval_module {|mod T do
+    fn f() do Option.unwrap_or(Some(7), 99) end
+  end|} in
+  Alcotest.(check int) "Option.unwrap_or Some" 7 (vint (call_fn env "f" []))
+
+let test_option_unwrap_or_none () =
+  let env = eval_module {|mod T do
+    fn f() do Option.unwrap_or(None, 99) end
+  end|} in
+  Alcotest.(check int) "Option.unwrap_or None" 99 (vint (call_fn env "f" []))
+
+let test_option_is_some () =
+  let env = eval_module {|mod T do
+    fn f() do Option.is_some(Some(1)) end
+    fn g() do Option.is_some(None) end
+  end|} in
+  Alcotest.(check bool) "Option.is_some Some" true  (vbool (call_fn env "f" []));
+  Alcotest.(check bool) "Option.is_some None" false (vbool (call_fn env "g" []))
+
+let test_option_is_none () =
+  let env = eval_module {|mod T do
+    fn f() do Option.is_none(None) end
+    fn g() do Option.is_none(Some(1)) end
+  end|} in
+  Alcotest.(check bool) "Option.is_none None" true  (vbool (call_fn env "f" []));
+  Alcotest.(check bool) "Option.is_none Some" false (vbool (call_fn env "g" []))
+
+(* ── Result builtin combinator tests ──────────────────────────────────── *)
+
+let test_result_map_ok () =
+  let env = eval_module {|mod T do
+    fn f() do Result.map(Ok(3), fn x -> x * 2) end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "Result.map Ok" 6
+    (match v with March_eval.Eval.VCon ("Ok", [March_eval.Eval.VInt n]) -> n | _ -> failwith "expected Ok")
+
+let test_result_map_err () =
+  let env = eval_module {|mod T do
+    fn f() do Result.map(Err("fail"), fn x -> x * 2) end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check bool) "Result.map Err passthrough" true
+    (match v with March_eval.Eval.VCon ("Err", [_]) -> true | _ -> false)
+
+let test_result_flat_map_ok () =
+  let env = eval_module {|mod T do
+    fn f() do Result.flat_map(Ok(5), fn x -> Ok(x + 1)) end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "Result.flat_map Ok" 6
+    (match v with March_eval.Eval.VCon ("Ok", [March_eval.Eval.VInt n]) -> n | _ -> failwith "expected Ok")
+
+let test_result_flat_map_err () =
+  let env = eval_module {|mod T do
+    fn f() do Result.flat_map(Err("oops"), fn x -> Ok(x)) end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check bool) "Result.flat_map Err passthrough" true
+    (match v with March_eval.Eval.VCon ("Err", [_]) -> true | _ -> false)
+
+let test_result_unwrap_ok () =
+  let env = eval_module {|mod T do
+    fn f() do Result.unwrap(Ok(99)) end
+  end|} in
+  Alcotest.(check int) "Result.unwrap Ok" 99 (vint (call_fn env "f" []))
+
+let test_result_unwrap_or_ok () =
+  let env = eval_module {|mod T do
+    fn f() do Result.unwrap_or(Ok(7), 0) end
+  end|} in
+  Alcotest.(check int) "Result.unwrap_or Ok" 7 (vint (call_fn env "f" []))
+
+let test_result_unwrap_or_err () =
+  let env = eval_module {|mod T do
+    fn f() do Result.unwrap_or(Err("bad"), 42) end
+  end|} in
+  Alcotest.(check int) "Result.unwrap_or Err" 42 (vint (call_fn env "f" []))
+
+let test_result_is_ok () =
+  let env = eval_module {|mod T do
+    fn f() do Result.is_ok(Ok(1)) end
+    fn g() do Result.is_ok(Err("e")) end
+  end|} in
+  Alcotest.(check bool) "Result.is_ok Ok"  true  (vbool (call_fn env "f" []));
+  Alcotest.(check bool) "Result.is_ok Err" false (vbool (call_fn env "g" []))
+
+let test_result_is_err () =
+  let env = eval_module {|mod T do
+    fn f() do Result.is_err(Err("e")) end
+    fn g() do Result.is_err(Ok(1)) end
+  end|} in
+  Alcotest.(check bool) "Result.is_err Err" true  (vbool (call_fn env "f" []));
+  Alcotest.(check bool) "Result.is_err Ok"  false (vbool (call_fn env "g" []))
+
+let test_result_map_err_fn () =
+  let env = eval_module {|mod T do
+    fn f() do Result.map_err(Err(3), fn e -> e * 10) end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "Result.map_err applies f to Err" 30
+    (match v with March_eval.Eval.VCon ("Err", [March_eval.Eval.VInt n]) -> n | _ -> failwith "expected Err")
+
+let test_result_map_err_ok_passthrough () =
+  let env = eval_module {|mod T do
+    fn f() do Result.map_err(Ok(5), fn e -> e * 10) end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "Result.map_err Ok passthrough" 5
+    (match v with March_eval.Eval.VCon ("Ok", [March_eval.Eval.VInt n]) -> n | _ -> failwith "expected Ok")
+
+(* ── List.sort / List.sort_by builtin tests ────────────────────────────── *)
+
+let test_list_sort_basic () =
+  let env = eval_module {|mod T do
+    fn f() do List.sort(Cons(3, Cons(1, Cons(2, Nil)))) end
+  end|} in
+  let v = call_fn env "f" [] in
+  let ns = List.map (function March_eval.Eval.VInt n -> n | _ -> failwith "int") (vlist v) in
+  Alcotest.(check (list int)) "List.sort basic" [1; 2; 3] ns
+
+let test_list_sort_empty () =
+  let env = eval_module {|mod T do
+    fn f() do List.sort(Nil) end
+  end|} in
+  let v = call_fn env "f" [] in
+  let ns = List.map (function March_eval.Eval.VInt n -> n | _ -> failwith "int") (vlist v) in
+  Alcotest.(check (list int)) "List.sort empty" [] ns
+
+let test_list_sort_single () =
+  let env = eval_module {|mod T do
+    fn f() do List.sort(Cons(5, Nil)) end
+  end|} in
+  let v = call_fn env "f" [] in
+  let ns = List.map (function March_eval.Eval.VInt n -> n | _ -> failwith "int") (vlist v) in
+  Alcotest.(check (list int)) "List.sort single" [5] ns
+
+let test_list_sort_duplicates () =
+  let env = eval_module {|mod T do
+    fn f() do List.sort(Cons(3, Cons(1, Cons(3, Cons(2, Nil))))) end
+  end|} in
+  let v = call_fn env "f" [] in
+  let ns = List.map (function March_eval.Eval.VInt n -> n | _ -> failwith "int") (vlist v) in
+  Alcotest.(check (list int)) "List.sort duplicates" [1; 2; 3; 3] ns
+
+let test_list_sort_by_descending () =
+  let env = eval_module {|mod T do
+    fn f() do List.sort_by(Cons(3, Cons(1, Cons(2, Nil))), fn a -> fn b -> a > b) end
+  end|} in
+  let v = call_fn env "f" [] in
+  let ns = List.map (function March_eval.Eval.VInt n -> n | _ -> failwith "int") (vlist v) in
+  Alcotest.(check (list int)) "List.sort_by descending" [3; 2; 1] ns
+
+let test_list_sort_by_ascending () =
+  let env = eval_module {|mod T do
+    fn f() do List.sort_by(Cons(5, Cons(2, Cons(8, Cons(1, Nil)))), fn a -> fn b -> a < b) end
+  end|} in
+  let v = call_fn env "f" [] in
+  let ns = List.map (function March_eval.Eval.VInt n -> n | _ -> failwith "int") (vlist v) in
+  Alcotest.(check (list int)) "List.sort_by ascending" [1; 2; 5; 8] ns
+
 let () =
   Alcotest.run "march"
     [
@@ -7680,6 +7883,38 @@ let () =
         Alcotest.test_case "string keys"                `Quick test_map_string_keys;
         Alcotest.test_case "large insert order"         `Quick test_map_large;
         Alcotest.test_case "tir lowering"               `Quick test_map_tir_lower;
+      ]);
+      ("Option builtins", [
+        Alcotest.test_case "map Some"         `Quick test_option_map_some;
+        Alcotest.test_case "map None"         `Quick test_option_map_none;
+        Alcotest.test_case "flat_map Some"    `Quick test_option_flat_map_some;
+        Alcotest.test_case "flat_map None"    `Quick test_option_flat_map_none;
+        Alcotest.test_case "unwrap Some"      `Quick test_option_unwrap_some;
+        Alcotest.test_case "unwrap_or Some"   `Quick test_option_unwrap_or_some;
+        Alcotest.test_case "unwrap_or None"   `Quick test_option_unwrap_or_none;
+        Alcotest.test_case "is_some"          `Quick test_option_is_some;
+        Alcotest.test_case "is_none"          `Quick test_option_is_none;
+      ]);
+      ("Result builtins", [
+        Alcotest.test_case "map Ok"              `Quick test_result_map_ok;
+        Alcotest.test_case "map Err passthrough" `Quick test_result_map_err;
+        Alcotest.test_case "flat_map Ok"         `Quick test_result_flat_map_ok;
+        Alcotest.test_case "flat_map Err"        `Quick test_result_flat_map_err;
+        Alcotest.test_case "unwrap Ok"           `Quick test_result_unwrap_ok;
+        Alcotest.test_case "unwrap_or Ok"        `Quick test_result_unwrap_or_ok;
+        Alcotest.test_case "unwrap_or Err"       `Quick test_result_unwrap_or_err;
+        Alcotest.test_case "is_ok"               `Quick test_result_is_ok;
+        Alcotest.test_case "is_err"              `Quick test_result_is_err;
+        Alcotest.test_case "map_err applies f"   `Quick test_result_map_err_fn;
+        Alcotest.test_case "map_err Ok passthrough" `Quick test_result_map_err_ok_passthrough;
+      ]);
+      ("List.sort builtins", [
+        Alcotest.test_case "sort basic"           `Quick test_list_sort_basic;
+        Alcotest.test_case "sort empty"           `Quick test_list_sort_empty;
+        Alcotest.test_case "sort single"          `Quick test_list_sort_single;
+        Alcotest.test_case "sort duplicates"      `Quick test_list_sort_duplicates;
+        Alcotest.test_case "sort_by descending"   `Quick test_list_sort_by_descending;
+        Alcotest.test_case "sort_by ascending"    `Quick test_list_sort_by_ascending;
       ]);
       ("track integration", [
         Alcotest.test_case "shared ctor tir key"        `Quick test_shared_ctor_tir_key;

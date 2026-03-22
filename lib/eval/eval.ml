@@ -2793,6 +2793,110 @@ let base_env : env =
         end else
           VCon ("WsData", [ws_recv_frame sock])
       | _ -> eval_error "ws_select(fd, actor_fd, timeout_ms)"))
+
+  (* ---- Option combinators ---- *)
+  ; ("Option.map", VBuiltin ("Option.map", function
+        | [VCon ("Some", [v]); f] -> VCon ("Some", [!apply_hook f [v]])
+        | [VCon ("None", []); _]  -> VCon ("None", [])
+        | _ -> eval_error "Option.map: expected (Option, fn)"))
+  ; ("Option.flat_map", VBuiltin ("Option.flat_map", function
+        | [VCon ("Some", [v]); f] -> !apply_hook f [v]
+        | [VCon ("None", []); _]  -> VCon ("None", [])
+        | _ -> eval_error "Option.flat_map: expected (Option, fn)"))
+  ; ("Option.unwrap", VBuiltin ("Option.unwrap", function
+        | [VCon ("Some", [v])] -> v
+        | [VCon ("None", [])]  -> eval_error "Option.unwrap: called on None"
+        | _ -> eval_error "Option.unwrap: expected Option"))
+  ; ("Option.unwrap_or", VBuiltin ("Option.unwrap_or", function
+        | [VCon ("Some", [v]); _]       -> v
+        | [VCon ("None", []); default]  -> default
+        | _ -> eval_error "Option.unwrap_or: expected (Option, default)"))
+  ; ("Option.is_some", VBuiltin ("Option.is_some", function
+        | [VCon ("Some", [_])] -> VBool true
+        | [VCon ("None", [])]  -> VBool false
+        | _ -> eval_error "Option.is_some: expected Option"))
+  ; ("Option.is_none", VBuiltin ("Option.is_none", function
+        | [VCon ("None", [])]  -> VBool true
+        | [VCon ("Some", [_])] -> VBool false
+        | _ -> eval_error "Option.is_none: expected Option"))
+
+  (* ---- Result combinators ---- *)
+  ; ("Result.map", VBuiltin ("Result.map", function
+        | [VCon ("Ok", [v]); f]  -> VCon ("Ok", [!apply_hook f [v]])
+        | [VCon ("Err", [e]); _] -> VCon ("Err", [e])
+        | _ -> eval_error "Result.map: expected (Result, fn)"))
+  ; ("Result.flat_map", VBuiltin ("Result.flat_map", function
+        | [VCon ("Ok", [v]); f]  -> !apply_hook f [v]
+        | [VCon ("Err", [e]); _] -> VCon ("Err", [e])
+        | _ -> eval_error "Result.flat_map: expected (Result, fn)"))
+  ; ("Result.unwrap", VBuiltin ("Result.unwrap", function
+        | [VCon ("Ok", [v])]  -> v
+        | [VCon ("Err", [e])] ->
+          eval_error "Result.unwrap: called on Err(%s)" (value_to_string e)
+        | _ -> eval_error "Result.unwrap: expected Result"))
+  ; ("Result.unwrap_or", VBuiltin ("Result.unwrap_or", function
+        | [VCon ("Ok", [v]); _]        -> v
+        | [VCon ("Err", []); default]  -> default
+        | [VCon ("Err", [_]); default] -> default
+        | _ -> eval_error "Result.unwrap_or: expected (Result, default)"))
+  ; ("Result.is_ok", VBuiltin ("Result.is_ok", function
+        | [VCon ("Ok", [_])]  -> VBool true
+        | [VCon ("Err", [_])] -> VBool false
+        | _ -> eval_error "Result.is_ok: expected Result"))
+  ; ("Result.is_err", VBuiltin ("Result.is_err", function
+        | [VCon ("Err", [_])] -> VBool true
+        | [VCon ("Ok", [_])]  -> VBool false
+        | _ -> eval_error "Result.is_err: expected Result"))
+  ; ("Result.map_err", VBuiltin ("Result.map_err", function
+        | [VCon ("Ok", [v]); _]  -> VCon ("Ok", [v])
+        | [VCon ("Err", [e]); f] -> VCon ("Err", [!apply_hook f [e]])
+        | _ -> eval_error "Result.map_err: expected (Result, fn)"))
+
+  (* ---- List.sort / List.sort_by ---- *)
+  ; ("List.sort", VBuiltin ("List.sort", function
+        (* Sort an Int list using merge sort via OCaml's List.sort. *)
+        | [lst] ->
+          let rec to_ints = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [VInt n; rest]) -> n :: to_ints rest
+            | VCon ("Cons", [v; _]) ->
+              eval_error "List.sort: expected Int list, got %s" (value_to_string v)
+            | v -> eval_error "List.sort: not a list: %s" (value_to_string v)
+          in
+          let ints = to_ints lst in
+          let sorted = List.sort Int.compare ints in
+          List.fold_right (fun n acc -> VCon ("Cons", [VInt n; acc]))
+            sorted (VCon ("Nil", []))
+        | _ -> eval_error "List.sort: expected one list argument"))
+  ; ("List.sort_by", VBuiltin ("List.sort_by", function
+        (* Sort a list using a curried March comparison function cmp : a -> a -> Bool.
+           cmp(x)(y) should return true if x should come before y.
+           The function is curried so we apply in two steps. *)
+        | [lst; cmp] ->
+          let rec to_vals = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [h; rest]) -> h :: to_vals rest
+            | v -> eval_error "List.sort_by: not a list: %s" (value_to_string v)
+          in
+          let vals = to_vals lst in
+          (* Apply curried cmp: cmp(x)(y) — two single-arg applications *)
+          let call2 f a b =
+            let f1 = !apply_hook f [a] in
+            !apply_hook f1 [b]
+          in
+          let sorted = List.stable_sort (fun x y ->
+            match call2 cmp x y with
+            | VBool true  -> -1   (* x before y *)
+            | VBool false ->
+              (match call2 cmp y x with
+               | VBool true  -> 1    (* y before x *)
+               | _           -> 0)   (* equal *)
+            | v -> eval_error "List.sort_by: cmp must return Bool, got %s"
+                     (value_to_string v)
+          ) vals in
+          List.fold_right (fun v acc -> VCon ("Cons", [v; acc]))
+            sorted (VCon ("Nil", []))
+        | _ -> eval_error "List.sort_by: expected (list, cmp_fn)"))
   ]
 
 (* ------------------------------------------------------------------ *)
