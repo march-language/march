@@ -68,6 +68,9 @@ let () =
       ("app", APP);
       ("on_start", ON_START);
       ("on_stop",  ON_STOP);
+      ("choose", CHOOSE);
+      ("by",     BY);
+      ("offer",  OFFER);
     ]
 }
 

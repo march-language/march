@@ -858,10 +858,12 @@ let builtin_bindings : (string * scheme) list =
     (* Session-typed channel builtins — Chan.send/recv/close are special-cased in
        infer_expr for proper session type advancement. These entries just put the
        names in scope; the real typing is done in the Chan.* EApp branches. *)
-    ("Chan.new",   poly2 (fun a b -> TArrow (t_string, TTuple [a; b])));
-    ("Chan.send",  poly2 (fun a b -> TArrow (a, TArrow (t_unit, b))));
-    ("Chan.recv",  poly1 (fun a -> TArrow (t_unit, a)));
-    ("Chan.close", Mono (TArrow (t_unit, t_unit)));
+    ("Chan.new",    poly2 (fun a b -> TArrow (t_string, TTuple [a; b])));
+    ("Chan.send",   poly2 (fun a b -> TArrow (a, TArrow (t_unit, b))));
+    ("Chan.recv",   poly1 (fun a -> TArrow (t_unit, a)));
+    ("Chan.close",  Mono (TArrow (t_unit, t_unit)));
+    ("Chan.choose", poly2 (fun a b -> TArrow (a, TArrow (t_atom, b))));
+    ("Chan.offer",  poly1 (fun a -> TArrow (a, TTuple [t_atom; a])));
   ]
 
 let builtin_types : (string * int) list =
@@ -1587,6 +1589,88 @@ let rec infer_expr env (e : Ast.expr) : ty =
          Err.error env.errors ~span:sp
            (Printf.sprintf
               "Chan.close: expected a channel endpoint but got `%s`."
+              (pp_ty ch_ty));
+         TError)
+
+    (* Chan.choose(ch, :label) → linear Chan at chosen branch continuation.
+       Pre-condition: ch must be at SChoose(branches). *)
+    | Ast.EApp (Ast.EVar { txt = "Chan.choose"; _ }, [ch_expr; label_expr], sp) ->
+      let ch_ty = repr (infer_expr env ch_expr) in
+      let inner_chan_ty = match ch_ty with
+        | TLin (_, t) -> repr t
+        | t -> t
+      in
+      let label_str = match label_expr with
+        | Ast.EAtom (s, [], _) -> Some s
+        | Ast.ELit (LitAtom s, _) -> Some s
+        | _ -> None
+      in
+      (match inner_chan_ty with
+       | TChan r ->
+         (match !r with
+          | SChoose branches ->
+            (match label_str with
+             | None ->
+               Err.error env.errors ~span:sp
+                 "Chan.choose: label must be an atom literal (e.g. :ok).";
+               TError
+             | Some lbl ->
+               (match List.assoc_opt lbl branches with
+                | Some cont -> TLin (Ast.Linear, TChan (ref cont))
+                | None ->
+                  Err.error env.errors ~span:sp
+                    (Printf.sprintf
+                       "Chan.choose: label `:%s` is not a valid branch of this protocol." lbl);
+                  TError))
+          | SError -> TError
+          | other ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "Chan.choose: channel is at `%s` but I expected `Choose{...}`."
+                 (pp_session_ty other));
+            TError)
+       | TError -> TError
+       | _ ->
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "Chan.choose: expected a channel endpoint but got `%s`."
+              (pp_ty ch_ty));
+         TError)
+
+    (* Chan.offer(ch) → (Atom, linear Chan at some continuation).
+       Pre-condition: ch must be at SOffer(branches).
+       Returns (label_atom, new_chan) where new_chan is at the continuation
+       for whichever branch the other side chose.  The exact continuation is
+       not known statically without dependent types, so we return the first
+       branch's continuation type as a conservative approximation that still
+       lets users write match expressions over the returned atom. *)
+    | Ast.EApp (Ast.EVar { txt = "Chan.offer"; _ }, [ch_expr], sp) ->
+      let ch_ty = repr (infer_expr env ch_expr) in
+      let inner_chan_ty = match ch_ty with
+        | TLin (_, t) -> repr t
+        | t -> t
+      in
+      (match inner_chan_ty with
+       | TChan r ->
+         (match !r with
+          | SOffer branches ->
+            let cont_ty = match branches with
+              | (_, sty) :: _ -> TLin (Ast.Linear, TChan (ref sty))
+              | []             -> TError
+            in
+            TTuple [t_atom; cont_ty]
+          | SError -> TError
+          | other ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "Chan.offer: channel is at `%s` but I expected `Offer{...}`."
+                 (pp_session_ty other));
+            TError)
+       | TError -> TError
+       | _ ->
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "Chan.offer: expected a channel endpoint but got `%s`."
               (pp_ty ch_ty));
          TError)
 

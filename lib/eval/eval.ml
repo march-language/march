@@ -3241,6 +3241,19 @@ let base_env : env =
   ; ("Chan.close", VBuiltin ("Chan.close", function
         | [VChan ce] -> chan_close ce
         | _ -> eval_error "Chan.close: expected Chan"))
+
+  (* Chan.choose(channel_endpoint, :label) → new_channel_endpoint
+     Sends the chosen branch label to the other side (via chan_send), returns the channel. *)
+  ; ("Chan.choose", VBuiltin ("Chan.choose", function
+        | [VChan ce; (VAtom _ as v)]
+        | [VChan ce; (VString _ as v)] -> chan_send ce v
+        | _ -> eval_error "Chan.choose: expected (Chan, :label)"))
+
+  (* Chan.offer(channel_endpoint) → (:label, new_channel_endpoint)
+     Receives the branch label chosen by the other side (via chan_recv). *)
+  ; ("Chan.offer", VBuiltin ("Chan.offer", function
+        | [VChan ce] -> chan_recv ce
+        | _ -> eval_error "Chan.offer: expected Chan"))
   ]
 
 (* ------------------------------------------------------------------ *)

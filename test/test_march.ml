@@ -774,6 +774,100 @@ let test_session_chan_new_unknown_proto_error () =
   end|} in
   Alcotest.(check bool) "Chan.new unknown protocol: error" true (has_errors ctx)
 
+(* ── Phase 3: Choose/Offer branching ────────────────────────────────────── *)
+
+let test_session_choose_protocol_parses () =
+  (* A protocol with choose by syntax should parse and typecheck without errors. *)
+  let ctx = typecheck {|mod Test do
+    protocol Decision do
+      Client -> Server : Int
+      choose by Server:
+        | ok  -> Server -> Client : Bool
+        | err -> Server -> Client : Int
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "choose protocol parses: no errors" false (has_errors ctx)
+
+let test_session_choose_advances_state () =
+  (* Chan.choose(ch, :ok) on a SChoose channel should produce no errors *)
+  let ctx = typecheck {|mod Test do
+    protocol Decision do
+      Client -> Server : Int
+      choose by Server:
+        | ok  -> Server -> Client : Bool
+        | err -> Server -> Client : Int
+      end
+    end
+    fn server_side(ch : Chan(Server, Decision)) : Unit do
+      let (_, ch2) = Chan.recv(ch)
+      let ch3 = Chan.choose(ch2, :ok)
+      let ch4 = Chan.send(ch3, true)
+      Chan.close(ch4)
+    end
+  end|} in
+  Alcotest.(check bool) "Chan.choose advances state: no errors" false (has_errors ctx)
+
+let test_session_choose_invalid_label_error () =
+  (* Chan.choose with wrong label should produce an error *)
+  let ctx = typecheck {|mod Test do
+    protocol Bin do
+      choose by A:
+        | left  -> A -> B : Int
+        | right -> A -> B : Bool
+      end
+    end
+    fn bad(ch : Chan(A, Bin)) : Unit do
+      let ch2 = Chan.choose(ch, :missing)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "Chan.choose invalid label: error" true (has_errors ctx)
+
+let test_session_choose_at_wrong_state_error () =
+  (* Chan.choose on a channel not at SChoose should error *)
+  let ctx = typecheck {|mod Test do
+    protocol Simple do
+      A -> B : Int
+    end
+    fn bad(ch : Chan(A, Simple)) : Unit do
+      let ch2 = Chan.choose(ch, :ok)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "Chan.choose at non-choose state: error" true (has_errors ctx)
+
+let test_session_offer_ok () =
+  (* Chan.offer on a SOffer channel should produce no errors *)
+  let ctx = typecheck {|mod Test do
+    protocol Decision do
+      Client -> Server : Int
+      choose by Server:
+        | ok  -> Server -> Client : Bool
+        | err -> Server -> Client : Int
+      end
+    end
+    fn client_side(ch : Chan(Client, Decision)) : Unit do
+      let ch2 = Chan.send(ch, 42)
+      let (_, ch3) = Chan.offer(ch2)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "Chan.offer on SOffer: no errors" false (has_errors ctx)
+
+let test_session_offer_at_wrong_state_error () =
+  (* Chan.offer on a channel not at SOffer should error *)
+  let ctx = typecheck {|mod Test do
+    protocol Simple do
+      A -> B : Int
+    end
+    fn bad(ch : Chan(A, Simple)) : Unit do
+      let (_, ch2) = Chan.offer(ch)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "Chan.offer at non-offer state: error" true (has_errors ctx)
+
 (* ── H9: Actor handler capability checking ───────────────────────────────── *)
 
 let test_actor_handler_cap_needs_ok () =
@@ -8756,6 +8850,13 @@ let () =
           Alcotest.test_case "session Chan.new ok"           `Quick test_session_chan_new_ok;
           Alcotest.test_case "session Chan.new unknown"      `Quick test_session_chan_new_unknown_proto_error;
           Alcotest.test_case "session eval send recv"        `Quick test_session_eval_send_recv;
+          (* Phase 3: Choose/Offer branching *)
+          Alcotest.test_case "session choose protocol parses"    `Quick test_session_choose_protocol_parses;
+          Alcotest.test_case "session choose advances state"     `Quick test_session_choose_advances_state;
+          Alcotest.test_case "session choose invalid label"      `Quick test_session_choose_invalid_label_error;
+          Alcotest.test_case "session choose wrong state"        `Quick test_session_choose_at_wrong_state_error;
+          Alcotest.test_case "session offer ok"                  `Quick test_session_offer_ok;
+          Alcotest.test_case "session offer wrong state"         `Quick test_session_offer_at_wrong_state_error;
           (* H9: Actor handler capability checking *)
           Alcotest.test_case "actor cap needs ok"            `Quick test_actor_handler_cap_needs_ok;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;
