@@ -3080,6 +3080,7 @@ let mk_actor_inst name alive st = March_eval.Eval.{
   ai_restart_count = [];
   ai_epoch         = 0;
   ai_resources     = [];
+  ai_linear_values = [];    (* Phase 6b *)
 }
 
 let test_list_actors_empty () =
@@ -6276,6 +6277,106 @@ let test_resource_cleanup_on_link_crash () =
   Alcotest.(check bool) "A's resource cleaned" true !a_cleaned;
   Alcotest.(check bool) "B's resource cleaned via link" true !b_cleaned
 
+(* ── Supervision Phase 6b: Linear Drop Handlers ──────────────────────────── *)
+
+(** Phase 6b: ai_linear_values field exists on actor_inst. *)
+let test_actor_inst_has_linear_values_field () =
+  March_eval.Eval.reset_scheduler_state ();
+  let inst = mk_actor_inst "A" true March_eval.Eval.VUnit in
+  Alcotest.(check int) "linear_values starts empty" 0
+    (List.length inst.March_eval.Eval.ai_linear_values)
+
+(** Phase 6b: drop is called on owned linear values when actor crashes. *)
+let test_linear_drop_called_on_crash () =
+  March_eval.Eval.reset_scheduler_state ();
+  let dropped_val = ref None in
+  let _ = add_fresh_actor 0 "A" in
+  let drop_fn = March_eval.Eval.VBuiltin ("test_drop", function
+    | [v] -> dropped_val := Some v; March_eval.Eval.VUnit
+    | _   -> March_eval.Eval.VUnit) in
+  Hashtbl.replace March_eval.Eval.impl_tbl ("Drop", "Widget") drop_fn;
+  let widget = March_eval.Eval.VCon ("Widget", [March_eval.Eval.VInt 99]) in
+  (match Hashtbl.find_opt March_eval.Eval.actor_registry 0 with
+   | Some inst ->
+     inst.March_eval.Eval.ai_linear_values <- [(widget, drop_fn)]
+   | None -> Alcotest.fail "actor not found");
+  March_eval.Eval.crash_actor 0 "test";
+  Alcotest.(check bool) "drop called" true (!dropped_val <> None);
+  (match !dropped_val with
+   | Some (March_eval.Eval.VCon ("Widget", [March_eval.Eval.VInt 99])) -> ()
+   | _ -> Alcotest.fail "drop received wrong value")
+
+(** Phase 6b: drops run in reverse acquisition order. *)
+let test_linear_drop_reverse_order () =
+  March_eval.Eval.reset_scheduler_state ();
+  let order = ref [] in
+  let _ = add_fresh_actor 0 "A" in
+  let make_drop name = March_eval.Eval.VBuiltin ("drop_" ^ name, function
+    | [_] -> order := name :: !order; March_eval.Eval.VUnit
+    | _   -> March_eval.Eval.VUnit) in
+  let v1 = March_eval.Eval.VCon ("R1", []) in
+  let v2 = March_eval.Eval.VCon ("R2", []) in
+  let v3 = March_eval.Eval.VCon ("R3", []) in
+  (match Hashtbl.find_opt March_eval.Eval.actor_registry 0 with
+   | Some inst ->
+     inst.March_eval.Eval.ai_linear_values <-
+       [(v1, make_drop "first"); (v2, make_drop "second"); (v3, make_drop "third")]
+   | None -> Alcotest.fail "actor not found");
+  March_eval.Eval.crash_actor 0 "test";
+  Alcotest.(check (list string)) "reverse drop order"
+    ["first"; "second"; "third"] !order
+
+(** Phase 6b: integration — own() + Drop impl + crash via OCaml-level setup. *)
+let test_own_drop_integration () =
+  March_eval.Eval.reset_scheduler_state ();
+  let cleanup_called = ref false in
+  let _inst = add_fresh_actor 0 "Worker" in
+  March_eval.Eval.register_resource_ocaml 0 "phase6b_bridge"
+    (fun () -> cleanup_called := true);
+  let own_drop_called = ref false in
+  let drop_fn = March_eval.Eval.VBuiltin ("drop_Token", function
+    | [March_eval.Eval.VCon ("Token", _)] ->
+      own_drop_called := true; March_eval.Eval.VUnit
+    | _ -> March_eval.Eval.VUnit) in
+  Hashtbl.replace March_eval.Eval.impl_tbl ("Drop", "Token") drop_fn;
+  let token = March_eval.Eval.VCon ("Token", [March_eval.Eval.VInt 1]) in
+  (match Hashtbl.find_opt March_eval.Eval.actor_registry 0 with
+   | Some inst -> inst.March_eval.Eval.ai_linear_values <- [(token, drop_fn)]
+   | None -> Alcotest.fail "actor 0 not found");
+  March_eval.Eval.crash_actor 0 "test";
+  Alcotest.(check bool) "Phase 6a resource cleanup still works" true !cleanup_called;
+  Alcotest.(check bool) "Phase 6b Drop handler called" true !own_drop_called
+
+(** Phase 6b: full March source — interface/impl/own/kill pipeline. *)
+let test_own_drop_full_march_source () =
+  let src = {|mod DropTest do
+    interface Drop(a) do
+      fn drop : a -> Unit
+    end
+
+    type Token = Token(Int)
+
+    impl Drop(Token) do
+      fn drop(t) do VUnit end
+    end
+
+    actor Worker do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    fn main() do
+      let pid = spawn(Worker)
+      let t = Token(42)
+      own(pid, t)
+      kill(pid)
+      :done
+    end
+  end|} in
+  let env = eval_with_stdlib [] src in
+  ignore env
+
 let test_file_builtin_exists_false () =
   (* If file_exists builtin is missing, this will raise an eval error *)
   let env = eval_with_stdlib [] {|mod T do
@@ -8919,6 +9020,18 @@ let () =
           `Quick (with_reset test_resource_cleanup_reverse_order);
         Alcotest.test_case "resource cleanup on link crash"
           `Quick (with_reset test_resource_cleanup_on_link_crash);
+      ]);
+      ("supervision phase6b", [
+        Alcotest.test_case "actor_inst has ai_linear_values field"
+          `Quick (with_reset test_actor_inst_has_linear_values_field);
+        Alcotest.test_case "linear drop called on crash"
+          `Quick (with_reset test_linear_drop_called_on_crash);
+        Alcotest.test_case "linear drop reverse order"
+          `Quick (with_reset test_linear_drop_reverse_order);
+        Alcotest.test_case "own + drop integration (OCaml level)"
+          `Quick (with_reset test_own_drop_integration);
+        Alcotest.test_case "own + drop full March source"
+          `Quick (with_reset test_own_drop_full_march_source);
       ]);
       ("eval phase 4", [
         Alcotest.test_case "async send queues not dispatches" `Quick

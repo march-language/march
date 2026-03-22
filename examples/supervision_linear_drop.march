@@ -1,0 +1,83 @@
+-- Phase 6b: Linear Drop Handlers Example
+--
+-- Demonstrates user-defined Drop implementations for linear values.
+-- When an actor that owns a linear value crashes, the Drop impl is called
+-- automatically in reverse acquisition order.
+--
+-- Compare with examples/supervision_resources.march (Phase 6a), which uses
+-- the lower-level register_resource() API directly.
+
+mod LinearDropDemo do
+
+  -- Step 1: Declare the Drop interface.
+  -- Any type can implement this to register cleanup logic.
+  interface Drop(a) do
+    fn drop : a -> Unit
+  end
+
+  -- Step 2: Declare "linear" resource types.
+  -- In Phase 6b, linearity is not enforced by the type system yet —
+  -- it is a convention. Use own() to associate the value with an actor.
+  type DbConnection = DbConnection(Int)   -- Int = mock connection id
+
+  -- Step 3: Implement Drop for DbConnection.
+  -- Called automatically when the owning actor crashes.
+  impl Drop(DbConnection) do
+    fn drop(conn) do
+      match conn with
+      | DbConnection(id) ->
+        println("[Drop] Closing database connection " ++ to_string(id))
+      end
+    end
+  end
+
+  type FileHandle = FileHandle(String)  -- String = mock file path
+
+  impl Drop(FileHandle) do
+    fn drop(h) do
+      match h with
+      | FileHandle(path) ->
+        println("[Drop] Closing file: " ++ path)
+      end
+    end
+  end
+
+  -- Step 4: Declare a worker actor.
+  actor Worker do
+    state { id : Int }
+    init { id = 0 }
+    on SetId(n : Int) do { id = n } end
+    on Work() do
+      println("[Worker] doing work, id = " ++ to_string(state.id))
+      state
+    end
+  end
+
+  fn main() do
+    println("=== Linear Drop Handlers Demo (Phase 6b) ===")
+
+    let pid = spawn(Worker)
+    send(pid, SetId(1))
+    run_until_idle()
+
+    -- Acquire two linear resources and own() them with the actor.
+    -- The Drop impl will be called for each in reverse acquisition order.
+    let conn = DbConnection(100)
+    let file = FileHandle("/var/log/worker.log")
+
+    println("Acquiring resources and registering with actor via own()...")
+    own(pid, conn)   -- registered first, dropped last
+    own(pid, file)   -- registered second, dropped first
+
+    println("Crashing worker...")
+    kill(pid)
+
+    -- Output (in order):
+    --   [Drop] Closing file: /var/log/worker.log    (registered 2nd, dropped 1st)
+    --   [Drop] Closing database connection 100      (registered 1st, dropped 2nd)
+
+    println("Worker alive: " ++ to_string(is_alive(pid)))
+    println("(file dropped before conn — reverse acquisition order)")
+    println("=== Done ===")
+  end
+end
