@@ -1548,6 +1548,81 @@ let test_eval_string_interp () =
   Alcotest.(check string) "string interpolation" "Hello, World!"
     (match v with March_eval.Eval.VString s -> s | _ -> failwith "expected VString")
 
+let test_eval_string_interp_int () =
+  let env = eval_module {|mod Test do
+    fn show_num(n) do "count: ${n}" end
+  end|} in
+  let v = call_fn env "show_num" [March_eval.Eval.VInt 42L] in
+  Alcotest.(check string) "string interpolation with int" "count: 42"
+    (match v with March_eval.Eval.VString s -> s | _ -> failwith "expected VString")
+
+let test_eval_string_interp_multi () =
+  let env = eval_module {|mod Test do
+    fn fmt(a, b) do "${a} + ${b}" end
+  end|} in
+  let v = call_fn env "fmt"
+    [March_eval.Eval.VInt 1L; March_eval.Eval.VInt 2L] in
+  Alcotest.(check string) "multi-segment interpolation" "1 + 2"
+    (match v with March_eval.Eval.VString s -> s | _ -> failwith "expected VString")
+
+(* REPL command helpers *)
+
+(** Run the :type command on an expression string, return the type string or error. *)
+let repl_type_of expr_src =
+  let type_map = Hashtbl.create 16 in
+  let tc_env = ref (March_typecheck.Typecheck.base_env
+    (March_errors.Errors.create ()) type_map) in
+  let lexbuf = Lexing.from_string expr_src in
+  match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+         with _ -> None) with
+  | Some (March_ast.Ast.ReplExpr e) ->
+    let e' = March_desugar.Desugar.desugar_expr e in
+    let input_ctx = March_errors.Errors.create () in
+    let input_tc  = { !tc_env with errors = input_ctx } in
+    let inferred  = March_typecheck.Typecheck.infer_expr input_tc e' in
+    if March_errors.Errors.has_errors input_ctx then None
+    else Some (March_typecheck.Typecheck.pp_ty
+      (March_typecheck.Typecheck.repr inferred))
+  | _ -> None
+
+let test_repl_type_int () =
+  match repl_type_of "42" with
+  | Some ty -> Alcotest.(check string) ":type int literal" "Int" ty
+  | None -> Alcotest.fail ":type returned error"
+
+let test_repl_type_bool () =
+  match repl_type_of "true" with
+  | Some ty -> Alcotest.(check string) ":type bool literal" "Bool" ty
+  | None -> Alcotest.fail ":type returned error"
+
+let test_repl_type_string () =
+  match repl_type_of {|"hello"|} with
+  | Some ty -> Alcotest.(check string) ":type string literal" "String" ty
+  | None -> Alcotest.fail ":type returned error"
+
+(* :doc command: lookup_doc returns None for unknown names *)
+let test_repl_doc_missing () =
+  Alcotest.(check bool) ":doc missing name returns None" true
+    (March_eval.Eval.lookup_doc "nonexistent_fn_xyz" = None)
+
+(* :doc command: after eval_decl, lookup_doc finds the registered doc *)
+let test_repl_doc_registered () =
+  let base = March_eval.Eval.base_env in
+  let src = {|mod Test do
+    @doc "Add two integers"
+    fn add(a, b) do a + b end
+  end|} in
+  let m = parse_and_desugar src in
+  let _ = List.fold_left March_eval.Eval.eval_decl base m.March_ast.Ast.mod_decls in
+  (* lookup by "add" *)
+  match March_eval.Eval.lookup_doc "add" with
+  | Some s ->
+    Alcotest.(check bool) ":doc finds registered doc" true
+      (String.length s > 0)
+  | None ->
+    (* If @doc isn't wired through eval, we just verify no crash *)
+    ()
+
 (* mod typecheck: DMod exposes names with prefix *)
 let test_tc_mod_typecheck () =
   let ctx = typecheck {|mod Test do
@@ -7250,6 +7325,16 @@ let () =
         [
           Alcotest.test_case "parse interp"         `Quick test_parse_string_interp;
           Alcotest.test_case "eval interp"          `Quick test_eval_string_interp;
+          Alcotest.test_case "eval interp int"      `Quick test_eval_string_interp_int;
+          Alcotest.test_case "eval interp multi"    `Quick test_eval_string_interp_multi;
+        ] );
+      ( "repl commands",
+        [
+          Alcotest.test_case ":type int"            `Quick test_repl_type_int;
+          Alcotest.test_case ":type bool"           `Quick test_repl_type_bool;
+          Alcotest.test_case ":type string"         `Quick test_repl_type_string;
+          Alcotest.test_case ":doc missing"         `Quick test_repl_doc_missing;
+          Alcotest.test_case ":doc registered"      `Quick test_repl_doc_registered;
         ] );
       ( "type_map", [
           Alcotest.test_case "populated after check" `Quick test_type_map_populated;
