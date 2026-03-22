@@ -769,6 +769,8 @@ let builtin_bindings : (string * scheme) list =
     (* Phase 6a: Register a cleanup resource with an actor — called on kill/crash *)
     ("register_resource", poly1 (fun a -> TArrow (TCon ("Pid", [a]),
         TArrow (t_string, TArrow (TArrow (t_unit, t_unit), t_unit)))));
+    (* Phase 6b: Register a linear value with an actor; Drop impl resolved at runtime *)
+    ("own", poly2 (fun a b -> TArrow (TCon ("Pid", [a]), TArrow (b, t_unit))));
     (* Phase 3: Epoch-based capability builtins *)
     ("get_cap",      poly1 (fun a -> TArrow (TCon ("Pid", [a]), TCon ("Option", [TCon ("Cap", [a])]))));
     ("send_checked", poly1 (fun a -> TArrow (TCon ("Cap", [a]), TArrow (a, t_atom))));

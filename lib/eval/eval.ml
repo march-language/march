@@ -61,6 +61,11 @@ type actor_inst = {
   (* Phase 6a: OS resource cleanup *)
   mutable ai_resources : (string * (unit -> unit)) list;
   (** Named cleanup thunks acquired in order, cleaned in reverse on crash. *)
+  (* Phase 6b: linear value drop handlers *)
+  mutable ai_linear_values : (value * value) list;
+  (** Linear values owned by this actor: (value, drop_fn) pairs in acquisition order.
+      drop_fn is a March callable (VClosure or VBuiltin) : value -> value.
+      Walked in reverse and called at crash time (Phase 6b). *)
 }
 
 (** Actor definitions registered by [DActor] — reset per module eval. *)
@@ -113,6 +118,11 @@ let next_task_id : int ref = ref 0
 (** Doc registry: fully-qualified name → doc string.
     Populated when [eval_decl] encounters a [DFn] with [fn_doc = Some s]. *)
 let doc_registry : (string, string) Hashtbl.t = Hashtbl.create 32
+
+(** Interface implementation table — maps (iface_name, type_name) to the method value.
+    Populated when [eval_decl] processes [DImpl] nodes.
+    Reset per module eval via [reset_scheduler_state]. *)
+let impl_tbl : (string * string, value) Hashtbl.t = Hashtbl.create 8
 
 (** Module stack for tracking the current module path during eval.
     Updated when entering/leaving [DMod]. Top of stack = innermost module. *)
@@ -255,7 +265,8 @@ let restore_actors (snap : actor_state_snapshot) : unit =
                      ai_supervisor = None;
                      ai_restart_count = [];
                      ai_epoch = 0;
-                     ai_resources = [] } in
+                     ai_resources = [];
+                     ai_linear_values = [] } in
         Hashtbl.add actor_registry pid inst
     ) snap.ass_instances;
   next_pid := snap.ass_next_pid
@@ -553,7 +564,8 @@ let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : str
       ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
       ai_supervisor = Some supervisor_pid;
       ai_restart_count = []; ai_epoch = inherited_epoch;
-      ai_resources = [] } in
+      ai_resources = [];
+      ai_linear_values = [] } in
     Hashtbl.add actor_registry child_pid child_inst;
     (* Re-register in process registry if the crashed actor had a name *)
     (match crashed_pid with
@@ -809,6 +821,17 @@ and crash_actor (pid : int) (reason : string) : unit =
           pid (Printexc.to_string exn)
     ) (List.rev inst.ai_resources);
     inst.ai_resources <- [];  (* clear so cleanup doesn't re-run on double-crash *)
+    (* Phase 6b: call Drop impl on each owned linear value, in reverse acquisition order.
+       drop_fn is a March callable (VClosure or VBuiltin): value -> value.
+       Errors are caught and logged so one failing drop cannot block others. *)
+    List.iter (fun (v, drop_fn) ->
+      try
+        let _ = !apply_hook drop_fn [v] in ()
+      with exn ->
+        Printf.eprintf "warn: Drop handler failed for actor %d: %s\n"
+          pid (Printexc.to_string exn)
+    ) (List.rev inst.ai_linear_values);
+    inst.ai_linear_values <- [];  (* clear to prevent re-run on double-crash *)
     (* Deliver Down(mon_ref, reason) to each watcher's mailbox *)
     List.iter (fun (mon_ref, watcher_pid) ->
       match Hashtbl.find_opt actor_registry watcher_pid with
@@ -874,6 +897,22 @@ let register_resource_ocaml (pid : int) (name : string) (cleanup : unit -> unit)
   | None -> ()
   | Some inst ->
     inst.ai_resources <- inst.ai_resources @ [(name, cleanup)]
+
+(** [type_tag_of v] returns the type name string for value [v], used to look up
+    Drop implementations in [impl_tbl].
+    - Primitives map to their canonical type name.
+    - Constructor values map to their constructor tag (works for single-constructor
+      newtypes like [type FileHandle = FileHandle(Int)]).
+    - Returns [None] for values without a registered impl (VPid, VClosure, etc.). *)
+let type_tag_of (v : value) : string option =
+  match v with
+  | VInt _    -> Some "Int"
+  | VFloat _  -> Some "Float"
+  | VString _ -> Some "String"
+  | VBool _   -> Some "Bool"
+  | VUnit     -> Some "Unit"
+  | VCon (tag, _) -> Some tag
+  | _ -> None
 
 (* ------------------------------------------------------------------ *)
 (* CSV parser state                                                    *)
@@ -1633,6 +1672,28 @@ let base_env : env =
           register_resource_ocaml pid name cleanup;
           VUnit
         | _ -> eval_error "register_resource: expected (Pid, String, fn _ -> ...)"))
+  ; ("own", VBuiltin ("own", function
+        (* Register a linear value with an actor, associating its Drop impl.
+           Calling convention: own(pid, value)
+           Resolves Drop impl from impl_tbl using the value's type tag.
+           In March: own(pid, my_handle)
+           The drop fn is called at crash time in reverse acquisition order. *)
+        | [VPid pid; v] ->
+          (match type_tag_of v with
+           | None ->
+             eval_error "own: value has no Drop-resolvable type (got %s)" (value_display v)
+           | Some tag ->
+             (match Hashtbl.find_opt impl_tbl ("Drop", tag) with
+              | None ->
+                eval_error "own: no impl Drop for type '%s' — declare impl Drop(%s)" tag tag
+              | Some drop_fn ->
+                (match Hashtbl.find_opt actor_registry pid with
+                 | None ->
+                   eval_error "own: unknown actor pid %d" pid
+                 | Some inst ->
+                   inst.ai_linear_values <- inst.ai_linear_values @ [(v, drop_fn)];
+                   VUnit)))
+        | _ -> eval_error "own: expected (Pid, value)"))
   ; ("run_until_idle", VBuiltin ("run_until_idle", function
         | [] -> !run_scheduler_hook (); VUnit
         | _ -> eval_error "run_until_idle: expected 0 arguments"))
@@ -3347,7 +3408,8 @@ and eval_expr_inner (env : env) (e : expr) : value =
                  ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
                  ai_supervisor = Some pid;
                  ai_restart_count = []; ai_epoch = 0;
-                 ai_resources = [] } in
+                 ai_resources = [];
+                 ai_linear_values = [] } in
                Hashtbl.add actor_registry child_pid child_inst;
                (sf.sf_name.txt, child_pid)
            ) sup_cfg.sc_fields in
@@ -3376,7 +3438,8 @@ and eval_expr_inner (env : env) (e : expr) : value =
                     ai_state    = init_state; ai_alive = true;
                     ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
                     ai_supervisor = None; ai_restart_count = [];
-                    ai_epoch = 0; ai_resources = [] } in
+                    ai_epoch = 0; ai_resources = [];
+                    ai_linear_values = [] } in
        Hashtbl.add actor_registry pid inst;
        VPid pid)
 
@@ -3488,6 +3551,7 @@ let reset_scheduler_state () : unit =
   next_task_id := 0;
   Hashtbl.clear actor_registry;
   Hashtbl.clear actor_defs_tbl;
+  Hashtbl.reset impl_tbl;
   next_pid := 0;
   next_monitor_id := 0;
   current_pid := None;
@@ -4052,14 +4116,29 @@ let rec eval_decl (env : env) (d : decl) : env =
   | DImpl (idef, sp) ->
     (* Evaluate each impl method so they become callable at runtime.
        Default methods injected by the desugar pass have fc_params=[] and a
-       lambda body; evaluate the body directly and bind the resulting value. *)
-    List.fold_left (fun env (name, fn_def) ->
-        match fn_def.fn_clauses with
-        | [{ fc_params = []; fc_body; _ }] ->
-          let v = eval_expr env fc_body in
-          (name.txt, v) :: env
-        | _ ->
-          eval_decl env (DFn (fn_def, sp))
+       lambda body; evaluate the body directly and bind the resulting value.
+       Phase 6b: also populate impl_tbl so the `own` builtin can resolve drop fns. *)
+    let type_name = match idef.impl_ty with
+      | TyCon (n, _) -> n.txt
+      | TyVar n      -> n.txt
+      | _            -> ""
+    in
+    List.fold_left (fun env (mname, fn_def) ->
+        let new_env = match fn_def.fn_clauses with
+          | [{ fc_params = []; fc_body; _ }] ->
+            let v = eval_expr env fc_body in
+            (mname.txt, v) :: env
+          | _ ->
+            eval_decl env (DFn (fn_def, sp))
+        in
+        (* Phase 6b: register in impl_tbl for own() resolution *)
+        if type_name <> "" then begin
+          match List.assoc_opt mname.txt new_env with
+          | Some fn_val ->
+            Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val
+          | None -> ()
+        end;
+        new_env
       ) env idef.impl_methods
 
   | DProtocol _ | DSig _ | DInterface _ | DExtern _ | DNeeds _ -> env
@@ -4196,14 +4275,29 @@ let eval_module_env (m : module_) : env =
 
     | DImpl (idef, sp) :: rest ->
       (* Bind each impl method (including injected defaults) as a function.
-         Zero-param clauses hold a lambda body; eval directly to bind the value. *)
-      let env' = List.fold_left (fun acc_env (name, fn_def) ->
-          match fn_def.fn_clauses with
-          | [{ fc_params = []; fc_body; _ }] ->
-            let v = eval_expr acc_env fc_body in
-            (name.txt, v) :: acc_env
-          | _ ->
-            eval_decl acc_env (DFn (fn_def, sp))
+         Zero-param clauses hold a lambda body; eval directly to bind the value.
+         Phase 6b: also populate impl_tbl so the `own` builtin can resolve drop fns. *)
+      let type_name = match idef.impl_ty with
+        | TyCon (n, _) -> n.txt
+        | TyVar n      -> n.txt
+        | _            -> ""
+      in
+      let env' = List.fold_left (fun acc_env (mname, fn_def) ->
+          let new_acc = match fn_def.fn_clauses with
+            | [{ fc_params = []; fc_body; _ }] ->
+              let v = eval_expr acc_env fc_body in
+              (mname.txt, v) :: acc_env
+            | _ ->
+              eval_decl acc_env (DFn (fn_def, sp))
+          in
+          (* Phase 6b: register in impl_tbl for own() resolution *)
+          if type_name <> "" then begin
+            match List.assoc_opt mname.txt new_acc with
+            | Some fn_val ->
+              Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val
+            | None -> ()
+          end;
+          new_acc
         ) env idef.impl_methods in
       env_ref := env';
       make_recursive_env rest env'
