@@ -67,6 +67,7 @@
 %token LINEAR AFFINE
 %token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS USE NEEDS REQUIRES
 %token IMPORT ALIAS ONLY EXCEPT P_FN
+%token APP ON_START ON_STOP
 %token DBG DOC
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
 %token ONE_FOR_ONE ONE_FOR_ALL REST_FOR_ONE RESTART_KW
@@ -126,6 +127,7 @@ decl:
   | d = alias_decl_rule { d }
   | d = protocol_decl  { d }
   | d = needs_decl     { d }
+  | d = app_decl       { d }
 
 (** Each fn clause is parsed as its own DFn with a single clause.
     The group_fn_clauses pass merges consecutive same-name clauses. *)
@@ -231,6 +233,35 @@ actor_decl:
               { actor_state = fields; actor_init = init_expr; actor_handlers = handlers;
                 actor_supervise = sup },
               mk_span ($loc)) }
+
+(** Application entry point:
+      app MyApp do
+        on_start do ... end   (* optional *)
+        on_stop  do ... end   (* optional *)
+        Supervisor.spec(:one_for_one, [...])
+      end *)
+app_decl:
+  | APP; _n = upper_name; error
+    { raise (March_errors.Errors.ParseError (
+        "I was expecting `do` after the app name here:",
+        Some "app MyApp do\n    Supervisor.spec(:one_for_one, [...])\nend",
+        $startpos($3))) }
+  | APP; name = upper_name; DO;
+    on_start = option(on_start_block);
+    on_stop  = option(on_stop_block);
+    body = block_body;
+    END
+    { DApp ({ app_name = name; app_body = body;
+              app_on_start = on_start; app_on_stop = on_stop },
+            mk_span ($loc)) }
+
+on_start_block:
+  | ON_START; DO; body = block_body; END
+    { body }
+
+on_stop_block:
+  | ON_STOP; DO; body = block_body; END
+    { body }
 
 (** supervise do
       strategy one_for_one

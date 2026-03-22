@@ -298,6 +298,38 @@ let rec desugar_decl (d : decl) : decl =
   | DProtocol _ | DSig _ | DExtern _ | DUse _ | DAlias _ | DNeeds _ ->
     d
 
+  | DApp (adef, sp) ->
+    (* Desugar: DApp → private __app_init__ function that returns a record
+       { spec, on_start, on_stop }.  The interpreter detects __app_init__ in
+       the environment and uses it to drive the supervisor lifecycle. *)
+    let body' = desugar_expr adef.app_body in
+    let on_start' = Option.map desugar_expr adef.app_on_start in
+    let on_stop'  = Option.map desugar_expr adef.app_on_stop  in
+    (* Build: fn __app_init__() -> { spec = <body>, on_start = <fn>, on_stop = <fn> } *)
+    let none_val = ECon ({ txt = "None"; span = sp }, [], sp) in
+    let wrap_opt = function
+      | None   -> none_val
+      | Some e -> ECon ({ txt = "Some"; span = sp }, [ELam ([], e, sp)], sp)
+    in
+    let result_expr = ERecord (
+      [ ({ txt = "spec";     span = sp }, body')
+      ; ({ txt = "on_start"; span = sp }, wrap_opt on_start')
+      ; ({ txt = "on_stop";  span = sp }, wrap_opt on_stop')
+      ], sp) in
+    let init_fn : fn_def = {
+      fn_name    = { txt = "__app_init__"; span = sp };
+      fn_vis     = Private;
+      fn_doc     = None;
+      fn_ret_ty  = None;
+      fn_clauses = [{
+        fc_params = [];
+        fc_guard  = None;
+        fc_body   = result_expr;
+        fc_span   = sp;
+      }];
+    } in
+    DFn (init_fn, sp)
+
 (* ---- Module entry point ---- *)
 
 (** Collect interface definitions from a declaration list (one level deep). *)
@@ -342,10 +374,22 @@ let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : de
        else DImpl ({ idef with impl_methods = idef.impl_methods @ extra_methods }, sp))
   | _ -> d
 
+(** Check mutual exclusivity of [main] and [app] declarations. *)
+let check_app_main_exclusivity (decls : decl list) : unit =
+  let has_main = List.exists (function
+      | DFn (def, _) when def.fn_name.txt = "main" -> true
+      | _ -> false) decls in
+  let has_app = List.exists (function
+      | DApp _ -> true
+      | _ -> false) decls in
+  if has_main && has_app then
+    failwith "A module cannot define both main() and an app declaration"
+
 (** Desugar an entire module.  Returns a new [module_] with all multi-head
     fns and pipe expressions lowered to their core forms.
     Also injects default interface method bodies into impls that omit them. *)
 let desugar_module (m : module_) : module_ =
+  check_app_main_exclusivity m.mod_decls;
   let interfaces = collect_interfaces m.mod_decls in
   let decls = List.map (fun d ->
       inject_defaults interfaces (desugar_decl d)

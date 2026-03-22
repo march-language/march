@@ -798,6 +798,11 @@ let builtin_bindings : (string * scheme) list =
     ("dir_rm_rf",       poly1 (fun e -> TArrow (t_string, t_result t_unit e)));
     (* String extra builtins *)
     ("string_last_index_of", Mono (TArrow (t_string, TArrow (t_string, t_option t_int))));
+    (* App/Supervisor builtins *)
+    ("worker",          poly1 (fun a -> TArrow (a, TCon ("ChildSpec", []))));
+    ("Supervisor.spec", Mono (TArrow (t_atom, TArrow (t_list (TCon ("ChildSpec", [])),
+                                                       TCon ("SupervisorSpec", [])))));
+    ("App.stop",        Mono (TArrow (t_unit, t_unit)));
   ]
 
 let builtin_types : (string * int) list =
@@ -807,6 +812,7 @@ let builtin_types : (string * int) list =
     ("Result", 2); ("Map",    2);
     ("Pid",    1); ("Cap",    1); ("Future",1); ("Stream", 1);
     ("Task",   1); ("WorkPool", 0); ("Node",   0);
+    ("ChildSpec", 0); ("SupervisorSpec", 0);
     ("Vector", 2); ("Matrix", 3); ("NDArray", 2);
     (* Capability token types — used as arguments to Cap(X) *)
     ("IO",            0); ("IO.Console",    0); ("IO.FileSystem", 0);
@@ -2809,6 +2815,10 @@ let rec check_decl env (d : Ast.decl) : env =
         String.concat "." (List.map (fun (n : Ast.name) -> n.txt) names)
       ) caps in
     { env with mod_needs = paths @ env.mod_needs }
+
+  | Ast.DApp _ ->
+    (* DApp is desugared to DFn(__app_init__) before typecheck; reaching here is a bug. *)
+    env
 
 (** Emit warnings for any imports or aliases that were never referenced. *)
 let warn_unused_imports env =
