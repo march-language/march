@@ -1195,7 +1195,7 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
           ) edef.ext_fns
       | Ast.DInterface _ | Ast.DImpl _ -> ()  (* handled in pass 1 *)
       | Ast.DProtocol _ | Ast.DSig _
-      | Ast.DNeeds _ -> ()
+      | Ast.DNeeds _ | Ast.DApp _ -> ()
       | Ast.DUse (ud, _) ->
         (* Build use-import aliases: map unqualified names to qualified names.
            The qualified fn_defs are already in [fns] from DMod processing above. *)

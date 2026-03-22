@@ -65,6 +65,7 @@ let () =
       ("only", ONLY);
       ("except", EXCEPT);
       ("p_fn", P_FN);
+      ("app", APP);
     ]
 }
 

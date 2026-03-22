@@ -298,6 +298,25 @@ let rec desugar_decl (d : decl) : decl =
   | DProtocol _ | DSig _ | DExtern _ | DUse _ | DAlias _ | DNeeds _ ->
     d
 
+  | DApp (adef, sp) ->
+    (* Desugar: DApp → private __app_init__ function.
+       The interpreter detects __app_init__ in the environment and calls it
+       instead of main(), entering the supervisor-driven app lifecycle. *)
+    let body' = desugar_expr adef.app_body in
+    let init_fn : fn_def = {
+      fn_name    = { txt = "__app_init__"; span = sp };
+      fn_vis     = Private;
+      fn_doc     = None;
+      fn_ret_ty  = None;
+      fn_clauses = [{
+        fc_params = [];
+        fc_guard  = None;
+        fc_body   = body';
+        fc_span   = sp;
+      }];
+    } in
+    DFn (init_fn, sp)
+
 (* ---- Module entry point ---- *)
 
 (** Collect interface definitions from a declaration list (one level deep). *)
@@ -342,10 +361,25 @@ let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : de
        else DImpl ({ idef with impl_methods = idef.impl_methods @ extra_methods }, sp))
   | _ -> d
 
+(** Check mutual exclusivity of [main] and [app] declarations.
+    Returns an error message if both are present. *)
+let check_app_main_exclusivity (decls : decl list) : unit =
+  let has_main = List.exists (function
+      | DFn (def, _) when def.fn_name.txt = "main" -> true
+      | _ -> false
+    ) decls in
+  let has_app = List.exists (function
+      | DApp _ -> true
+      | _ -> false
+    ) decls in
+  if has_main && has_app then
+    failwith "A module cannot define both main() and an app declaration"
+
 (** Desugar an entire module.  Returns a new [module_] with all multi-head
     fns and pipe expressions lowered to their core forms.
     Also injects default interface method bodies into impls that omit them. *)
 let desugar_module (m : module_) : module_ =
+  check_app_main_exclusivity m.mod_decls;
   let interfaces = collect_interfaces m.mod_decls in
   let decls = List.map (fun d ->
       inject_defaults interfaces (desugar_decl d)
