@@ -6,7 +6,35 @@ let attr_string  = A.(fg green)
 let attr_number  = A.(fg yellow)
 let attr_atom    = A.(fg blue)
 let attr_op      = A.(st bold)
+let attr_comment = A.(fg (rgb_888 ~r:105 ~g:121 ~b:137))
 let attr_default = A.empty
+
+(** Find the byte position of the first [--] comment marker not inside a
+    double-quoted string.  Handles [\\] escapes.  Returns [None] if no
+    comment is present on this line. *)
+let find_comment_start src =
+  let n = String.length src in
+  let i = ref 0 in
+  let in_string = ref false in
+  let found = ref None in
+  while !i < n && !found = None do
+    if !in_string then begin
+      if src.[!i] = '\\' && !i + 1 < n then
+        i := !i + 2   (* skip escaped char *)
+      else begin
+        if src.[!i] = '"' then in_string := false;
+        incr i
+      end
+    end else begin
+      if src.[!i] = '"' then begin
+        in_string := true; incr i
+      end else if src.[!i] = '-' && !i + 1 < n && src.[!i + 1] = '-' then
+        found := Some !i
+      else
+        incr i
+    end
+  done;
+  !found
 
 let attr_of_token tok =
   let open March_parser.Parser in
@@ -41,7 +69,7 @@ let render_with_newlines attr s =
   | first :: rest ->
     List.fold_left (fun acc img -> I.(acc <-> img)) first rest
 
-let highlight src =
+let highlight_tokens src =
   if src = "" then I.empty
   else
     let lexbuf = Lexing.from_string src in
@@ -83,3 +111,14 @@ let highlight src =
         pos := stop)
     done;
     I.hcat (List.rev !images)
+
+let highlight src =
+  if src = "" then I.empty
+  else
+    match find_comment_start src with
+    | Some pos ->
+      let code_part    = String.sub src 0 pos in
+      let comment_part = String.sub src pos (String.length src - pos) in
+      I.(highlight_tokens code_part <|> string attr_comment comment_part)
+    | None ->
+      highlight_tokens src

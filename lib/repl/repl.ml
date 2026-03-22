@@ -32,9 +32,9 @@ let make_input_img s cur =
   let left  = String.sub s 0 cur in
   let cur_c = if cur < n then String.make 1 s.[cur] else " " in
   let right = if cur < n then String.sub s (cur+1) (n - cur - 1) else "" in
-  I.(string A.empty left
+  I.(Highlight.highlight left
      <|> string A.(bg white ++ fg black) cur_c
-     <|> string A.empty right)
+     <|> Highlight.highlight right)
 
 let history_path () =
   match Sys.getenv_opt "MARCH_HISTORY_FILE" with
