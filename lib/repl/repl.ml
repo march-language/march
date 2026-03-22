@@ -419,7 +419,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                  if not (List.mem_assoc k env_baseline) then
                    Printf.printf "  %s\n" k
                ) !env
-             | ":help" when is_debug ->
+             | ":help" ->
+               if is_debug then
                List.iter (fun s -> Printf.printf "%s\n" s) [
                  "Debug commands:";
                  "  :continue :c        — resume execution";
@@ -441,6 +442,21 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                  "  :quit :q            — exit program";
                  "";
                  "Any other input is evaluated as a March expression.";
+               ]
+               else
+               List.iter (fun s -> Printf.printf "%s\n" s) [
+                 "Commands:";
+                 "  :quit :q        — exit";
+                 "  :env            — list bindings";
+                 "  :type <expr>    — show type without evaluating";
+                 "  :doc <name>     — show documentation for a name";
+                 "  :reload         — reload the last :load-ed file";
+                 "  :set +t         — show inferred type after each expression";
+                 "  :set -t         — hide inferred type (default)";
+                 "  :load <file>    — load a .march file";
+                 "  :help           — this message";
+                 "";
+                 "Keys: Tab: complete | Up/Down: history";
                ]
              | ":reload" ->
                Printf.printf "Nothing to reload.\n%!"

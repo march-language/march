@@ -6,14 +6,17 @@ let count_token tok buf =
   let words = Str.split (Str.regexp "[^a-zA-Z0-9_']") buf in
   List.length (List.filter (( = ) tok) words)
 
-(** Count lines whose last word is "with" — match expression openers. *)
+(** Count lines whose last word is "with" AND the line contains "match" —
+    these are genuine match-expression openers like [match x with].
+    Record update syntax like [{ state with] ends with "with" but contains
+    no "match" keyword, so it is NOT counted here (it needs no balancing "end"). *)
 let count_match_with buf =
   let lines = String.split_on_char '\n' buf in
   List.length (List.filter (fun line ->
       let words = Str.split (Str.regexp "[^a-zA-Z0-9_']") (String.trim line) in
       match List.rev words with
-      | "with" :: _ -> true
-      | _           -> false
+      | "with" :: rest -> List.mem "match" rest
+      | _              -> false
     ) lines)
 
 (** Net depth of open blocks: do/with openers minus end closers.
@@ -42,8 +45,34 @@ let starts_with_pipe buf =
   let l = last_non_blank_line buf in
   String.length l > 0 && l.[0] = '|'
 
+(** True if the last non-blank line ends with a token that implies the
+    expression continues on the next line: trailing [=] (let/fn binding),
+    [->] (lambda or match arm arrow), or keywords [then]/[else]. *)
+let ends_with_continuation buf =
+  let l = last_non_blank_line buf in
+  let n = String.length l in
+  if n = 0 then false
+  else begin
+    (* Trailing -> *)
+    let trailing_arrow = n >= 2 && l.[n-1] = '>' && l.[n-2] = '-' in
+    (* Trailing = but not ==, !=, <=, >= *)
+    let trailing_eq =
+      l.[n-1] = '='
+      && not (n >= 2 &&
+              (l.[n-2] = '=' || l.[n-2] = '!' || l.[n-2] = '<' || l.[n-2] = '>')) in
+    (* Trailing keyword: then or else *)
+    let trailing_kw =
+      let words = String.split_on_char ' ' (String.trim l) in
+      match List.rev words with
+      | w :: _ -> w = "then" || w = "else"
+      | []     -> false
+    in
+    trailing_arrow || trailing_eq || trailing_kw
+  end
+
 (** True when [buf] appears syntactically complete (safe to submit). *)
 let is_complete buf =
   do_end_depth buf <= 0
   && not (ends_with_with buf)
   && not (starts_with_pipe buf)
+  && not (ends_with_continuation buf)
