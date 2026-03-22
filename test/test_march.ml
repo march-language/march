@@ -6525,6 +6525,81 @@ let test_interface_when_constraint_missing () =
   end|} in
   Alcotest.(check bool) "Eq(Color) not in scope: error" true (has_errors ctx)
 
+(* F2: when Eq(a) constraint on user function signature — satisfied *)
+let test_fn_when_constraint_satisfied () =
+  let ctx = typecheck {|mod Test do
+    impl Eq(Int) do
+      fn eq(x, y) do x == y end
+    end
+    fn contains(xs : List(a), x : a) : Bool when Eq(a) do
+      match xs with
+      | Nil -> false
+      | Cons(h, t) -> if eq(h, x) then true else contains(t, x)
+      end
+    end
+    fn main() : Bool do
+      contains(Cons(1, Cons(2, Nil)), 2)
+    end
+  end|} in
+  Alcotest.(check bool) "fn when Eq(a) with Int (has impl): no errors" false (has_errors ctx)
+
+(* F2: when Eq(a) constraint on user function signature — unsatisfied *)
+let test_fn_when_constraint_unsatisfied () =
+  let ctx = typecheck {|mod Test do
+    type Color = Red | Green
+    fn contains(xs : List(a), x : a) : Bool when Eq(a) do
+      match xs with
+      | Nil -> false
+      | Cons(h, t) -> if eq(h, x) then true else contains(t, x)
+      end
+    end
+    fn main() : Bool do
+      contains(Cons(Red, Nil), Green)
+    end
+  end|} in
+  Alcotest.(check bool) "fn when Eq(a) with Color (no impl): error" true (has_errors ctx)
+
+(* F2: qualified method call Eq.eq(x, y) resolves correctly *)
+let test_qualified_method_call () =
+  let ctx = typecheck {|mod Test do
+    impl Eq(Int) do
+      fn eq(x, y) do x == y end
+    end
+    fn check(x : Int, y : Int) : Bool do
+      Eq.eq(x, y)
+    end
+  end|} in
+  Alcotest.(check bool) "Eq.eq(x, y) resolves: no errors" false (has_errors ctx)
+
+(* F2: qualified Show.show call *)
+let test_qualified_show_call () =
+  let ctx = typecheck {|mod Test do
+    fn to_str(x : Int) : String do Show.show(x) end
+  end|} in
+  Alcotest.(check bool) "Show.show(x) resolves: no errors" false (has_errors ctx)
+
+(* F5: linear let binding — used exactly once is ok *)
+let test_linear_let_ok () =
+  let ctx = typecheck {|mod Test do
+    fn consume(x : Int) : Int do x end
+    fn f() : Int do
+      linear let v = 42
+      consume(v)
+    end
+  end|} in
+  Alcotest.(check bool) "linear let used once: no errors" false (has_errors ctx)
+
+(* F5: linear let binding — used twice is an error *)
+let test_linear_let_double_use () =
+  let ctx = typecheck {|mod Test do
+    fn consume(x : Int) : Int do x end
+    fn f() : Int do
+      linear let v = 42
+      consume(v) + consume(v)
+    end
+  end|} in
+  Alcotest.(check bool) "linear let used twice: error" true (has_errors ctx)
+
 (* Track-A: linear type enforcement — using a linear binding twice inside a
    match arm is detected and rejected. *)
 let test_linear_match_arm_double_use () =
@@ -7025,6 +7100,15 @@ let () =
           Alcotest.test_case "Hash builtin String"          `Quick test_hash_builtin_string;
           Alcotest.test_case "eq method callable"           `Quick test_eq_method_callable;
           Alcotest.test_case "std ifaces pre-registered"    `Quick test_standard_interfaces_in_scope;
+          (* F2: when Eq(a) constraints on function signatures *)
+          Alcotest.test_case "fn when constraint satisfied"  `Quick test_fn_when_constraint_satisfied;
+          Alcotest.test_case "fn when constraint unsatisfied" `Quick test_fn_when_constraint_unsatisfied;
+          (* F2: qualified method calls Eq.eq, Show.show *)
+          Alcotest.test_case "qualified Eq.eq call"          `Quick test_qualified_method_call;
+          Alcotest.test_case "qualified Show.show call"      `Quick test_qualified_show_call;
+          (* F5: linear let bindings *)
+          Alcotest.test_case "linear let ok"                 `Quick test_linear_let_ok;
+          Alcotest.test_case "linear let double use"         `Quick test_linear_let_double_use;
           (* Fix 2: Linear type enforcement *)
           Alcotest.test_case "linear pattern match ok"       `Quick test_linear_pattern_match_ok;
           Alcotest.test_case "linear pattern match double"   `Quick test_linear_pattern_match_double_use;
