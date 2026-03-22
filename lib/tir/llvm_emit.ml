@@ -552,6 +552,9 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
   | Tir.AVar v when Hashtbl.mem ctx.top_fns v.Tir.v_name ->
     (* Top-level function reference — emit its address directly (for EApp callee) *)
     ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
+  | Tir.AVar v when String.length v.Tir.v_name >= 6 && String.sub v.Tir.v_name 0 6 = "march_" ->
+    (* Runtime C function declared in preamble — emit as global reference, not local alloca *)
+    ("ptr", "@" ^ v.Tir.v_name)
   | Tir.AVar v ->
     let base = llvm_name v.Tir.v_name in
     let slot = match Hashtbl.find_opt ctx.var_slot base with
