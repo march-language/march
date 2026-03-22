@@ -491,21 +491,31 @@ let apply_hook : (value -> value list -> value) ref =
   ref (fun _fn _args -> eval_error "apply not yet initialized")
 
 (** Spawn a fresh child actor instance (for supervisor restarts).
+    [crashed_pid] is the pid of the actor being replaced; its epoch is
+    inherited and incremented so that old VCap values become stale.
     Returns the new pid. *)
-let spawn_child_actor (child_actor_name : string) (supervisor_pid : int) : int =
+let spawn_child_actor ?(crashed_pid : int option = None) (child_actor_name : string) (supervisor_pid : int) : int =
   match Hashtbl.find_opt actor_defs_tbl child_actor_name with
   | None -> eval_error "restart: unknown child actor '%s'" child_actor_name
   | Some (child_def, child_env_ref) ->
     let child_init_state = !eval_expr_hook !child_env_ref child_def.actor_init in
     let child_pid = !next_pid in
     next_pid := child_pid + 1;
+    (* Inherit epoch from crashed actor + 1 for proper stale-cap detection. *)
+    let inherited_epoch = match crashed_pid with
+      | None -> 0
+      | Some old_pid ->
+        (match Hashtbl.find_opt actor_registry old_pid with
+         | Some old_inst -> old_inst.ai_epoch + 1
+         | None -> 1)
+    in
     let child_inst = {
       ai_name = child_actor_name; ai_def = child_def;
       ai_env_ref = child_env_ref;
       ai_state = child_init_state; ai_alive = true;
       ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
       ai_supervisor = Some supervisor_pid;
-      ai_restart_count = []; ai_epoch = 0;
+      ai_restart_count = []; ai_epoch = inherited_epoch;
       ai_resources = [] } in
     Hashtbl.add actor_registry child_pid child_inst;
     child_pid
@@ -553,8 +563,8 @@ let rec one_for_one_restart (sup_pid : int) (crashed_pid : int) : unit =
                end else begin
                  (* Update restart history *)
                  sup_inst.ai_restart_count <- recent @ [(now, 1)];
-                 (* Spawn a new child *)
-                 let new_pid = spawn_child_actor child_actor_name sup_pid in
+                 (* Spawn a new child, inheriting epoch from crashed actor *)
+                 let new_pid = spawn_child_actor ~crashed_pid:(Some crashed_pid) child_actor_name sup_pid in
                  (* Update the supervisor's state record *)
                  (match sup_inst.ai_state with
                   | VRecord fields ->
@@ -594,17 +604,19 @@ and one_for_all_restart (sup_pid : int) (_crashed_pid : int) : unit =
              crash_actor cpid "one_for_all restart"
            | _ -> ()
          ) all_child_pids;
-         (* Respawn all children in order *)
+         (* Respawn all children in order, inheriting epoch from old pids *)
          let new_state = match sup_inst.ai_state with
            | VRecord fields ->
-             let new_fields = List.map (fun (fname, _) ->
+             let new_fields = List.map (fun (fname, old_val) ->
                match List.find_opt (fun sf -> sf.sf_name.txt = fname) sup_cfg.sc_fields with
                | None -> (fname, VInt 0)
                | Some sf ->
                  let child_actor_name = match sf.sf_ty with
                    | TyCon (n, []) -> n.txt | _ -> "" in
                  if child_actor_name = "" then (fname, VInt 0)
-                 else (fname, VInt (spawn_child_actor child_actor_name sup_pid))
+                 else
+                   let old_pid = match old_val with VInt p -> Some p | _ -> None in
+                   (fname, VInt (spawn_child_actor ~crashed_pid:old_pid child_actor_name sup_pid))
              ) fields in
              VRecord new_fields
            | other -> other
@@ -661,7 +673,7 @@ and rest_for_one_restart (sup_pid : int) (crashed_pid : int) : unit =
                   crash_actor cpid "rest_for_one restart"
                 | _ -> ())
            ) rest_names;
-           (* Respawn crashed child + rest in order *)
+           (* Respawn crashed child + rest in order, inheriting epoch from old pids *)
            let to_respawn = List.filteri (fun i _ -> i >= crashed_idx) order in
            let new_state = match sup_inst.ai_state with
              | VRecord fields ->
@@ -673,7 +685,9 @@ and rest_for_one_restart (sup_pid : int) (crashed_pid : int) : unit =
                      | TyCon (n, []) -> n.txt | _ -> "" in
                    if child_actor_name = "" then acc
                    else
-                     let new_pid = spawn_child_actor child_actor_name sup_pid in
+                     let old_pid = match List.assoc_opt fname acc with
+                       | Some (VInt p) -> Some p | _ -> None in
+                     let new_pid = spawn_child_actor ~crashed_pid:old_pid child_actor_name sup_pid in
                      List.map (fun (k, v) ->
                        if k = fname then (k, VInt new_pid) else (k, v)) acc
                ) fields to_respawn in
@@ -1561,6 +1575,38 @@ let base_env : env =
   ; ("pid_of_int", VBuiltin ("pid_of_int", function
         | [VInt n] -> VPid n
         | _ -> eval_error "pid_of_int: expected int"))
+    (* Supervision: restart a supervised child actor.
+       Accepts a Pid pointing to the child actor. Finds the supervisor,
+       kills the child (if still alive), spawns a fresh instance, and
+       returns the new Pid. Must be called from within a supervisor context
+       (i.e. the child must have a supervisor registered). *)
+  ; ("restart", VBuiltin ("restart", function
+        | [VPid child_pid] ->
+          (match Hashtbl.find_opt actor_registry child_pid with
+           | None -> eval_error "restart: actor %d not found" child_pid
+           | Some child_inst ->
+             (match child_inst.ai_supervisor with
+              | None -> eval_error "restart: actor %d has no supervisor" child_pid
+              | Some sup_pid ->
+                let child_actor_name = child_inst.ai_name in
+                (* Kill the old child if still alive *)
+                if child_inst.ai_alive then begin
+                  child_inst.ai_supervisor <- None;  (* detach to prevent re-entry *)
+                  crash_actor child_pid "restart called"
+                end;
+                (* Spawn fresh child, inheriting epoch *)
+                let new_pid = spawn_child_actor ~crashed_pid:(Some child_pid) child_actor_name sup_pid in
+                (* Update the supervisor's state to point to new pid *)
+                (match Hashtbl.find_opt actor_registry sup_pid with
+                 | Some sup_inst ->
+                   (match sup_inst.ai_state with
+                    | VRecord fields ->
+                      sup_inst.ai_state <- VRecord (List.map (fun (k, v) ->
+                        if v = VInt child_pid then (k, VInt new_pid) else (k, v)) fields)
+                    | _ -> ())
+                 | None -> ());
+                VPid new_pid))
+        | _ -> eval_error "restart: expected Pid"))
     (* Phase 3: epoch-based capability builtins *)
   ; ("get_cap", VBuiltin ("get_cap", function
         | [VPid pid] ->
