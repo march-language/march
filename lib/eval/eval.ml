@@ -3753,62 +3753,6 @@ let () = run_scheduler_hook := run_scheduler
 (* App / Supervisor machinery                                          *)
 (* ------------------------------------------------------------------ *)
 
-(** Convert a March list value (VCon Cons/Nil) to an OCaml list of values. *)
-let rec march_list_to_list = function
-  | VCon ("Nil", []) -> []
-  | VCon ("Cons", [h; t]) -> h :: march_list_to_list t
-  | v -> eval_error "spawn_from_spec: expected list, got %s" (value_to_string v)
-
-(** Spawn all children described in a supervisor spec record and run the scheduler.
-    Spec shape: { strategy = :one_for_one, children = [ChildSpec, ...] }
-    ChildSpec shape: { actor = "Name", restart = :permanent } *)
-let spawn_from_spec (spec : value) : unit =
-  match spec with
-  | VRecord fields ->
-    let children_val = match List.assoc_opt "children" fields with
-      | Some v -> v
-      | None -> eval_error "spawn_from_spec: spec missing 'children' field"
-    in
-    let children = march_list_to_list children_val in
-    List.iter (fun child ->
-      match child with
-      | VRecord child_fields ->
-        (* Dynamic supervisor specs are pre-registered; skip spawning an actor for them *)
-        (match List.assoc_opt "type" child_fields with
-         | Some (VString "dynamic_supervisor") -> ()
-         | _ ->
-           let actor_name = match List.assoc_opt "actor" child_fields with
-             | Some (VString s) -> s
-             | Some other -> eval_error "spawn_from_spec: actor field should be a string, got %s"
-                               (value_to_string other)
-             | None -> eval_error "spawn_from_spec: child spec missing 'actor' field"
-           in
-           (match Hashtbl.find_opt actor_defs_tbl actor_name with
-            | None -> eval_error "spawn_from_spec: unknown actor '%s'" actor_name
-            | Some (def, env_ref) ->
-              let pid = !next_pid in
-              next_pid := pid + 1;
-              let init_state = eval_expr !env_ref def.actor_init in
-              let inst = {
-                ai_name = actor_name; ai_def = def; ai_env_ref = env_ref;
-                ai_state = init_state; ai_alive = true;
-                ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
-                ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
-                ai_resources = []; ai_linear_values = [] } in
-              Hashtbl.add actor_registry pid inst;
-              app_spawn_order := !app_spawn_order @ [pid];
-              (* Register named children in the process registry *)
-              (match List.assoc_opt "name" child_fields with
-               | Some (VAtom atom_name) ->
-                 Hashtbl.replace process_registry atom_name pid;
-                 Hashtbl.replace pid_to_registry_name pid atom_name
-               | _ -> ())))
-      | other -> eval_error "spawn_from_spec: expected child spec record, got %s"
-                   (value_to_string other)
-    ) children
-  | other -> eval_error "spawn_from_spec: expected supervisor spec record, got %s"
-               (value_to_string other)
-
 (** Task builtins: spawn, await, await_unwrap, yield.
     Placed after [apply] because [task_spawn] calls [apply] to eagerly
     execute the thunk (Phase 1: single-threaded cooperative scheduler). *)
@@ -3885,13 +3829,6 @@ let task_builtins : env =
     | [_cap] -> VUnit   (* attenuation is a compile-time check; runtime is a no-op *)
     | _ -> eval_error "cap_narrow: expected 1 argument"))
 
-  (* App/Supervisor builtins *)
-  ; ("App.stop", VBuiltin ("App.stop", function
-      | [] | [VUnit] ->
-        shutdown_requested := true;
-        VUnit
-      | _ -> eval_error "App.stop: expected no arguments"))
-
   (* Phase 5: task_spawn_link — spawn a task linked to an actor pid.
      If the linked actor crashes, the task is cancelled (or vice versa). *)
   (* App/Supervisor builtins *)
@@ -3900,12 +3837,24 @@ let task_builtins : env =
         VRecord [("actor", VString name); ("restart", VAtom "permanent")]
       | [VString name] ->
         VRecord [("actor", VString name); ("restart", VAtom "permanent")]
-      (* worker(Name, :restart_policy) — e.g. worker(:MyActor, :temporary) *)
-      | [VCon (name, []); VAtom policy] ->
-        VRecord [("actor", VString name); ("restart", VAtom policy)]
-      | [VString name; VAtom policy] ->
-        VRecord [("actor", VString name); ("restart", VAtom policy)]
-      (* worker(Name, :restart_policy, opts_record) — e.g. worker(MyActor, :permanent, {name: :my_svc}) *)
+      (* Two-arg form: worker(Name, :restart_policy) or worker(Name, :registered_name).
+         Restart policies (:permanent, :temporary, :transient) set the restart field.
+         Any other atom is treated as a registered process name. *)
+      | [VCon (name, []); VAtom arg] ->
+        (match arg with
+         | "permanent" | "temporary" | "transient" ->
+           VRecord [("actor", VString name); ("restart", VAtom arg)]
+         | atom_name ->
+           VRecord [("actor", VString name); ("restart", VAtom "permanent");
+                    ("name", VAtom atom_name)])
+      | [VString name; VAtom arg] ->
+        (match arg with
+         | "permanent" | "temporary" | "transient" ->
+           VRecord [("actor", VString name); ("restart", VAtom arg)]
+         | atom_name ->
+           VRecord [("actor", VString name); ("restart", VAtom "permanent");
+                    ("name", VAtom atom_name)])
+      (* Three-arg form: worker(Name, :policy, {name: :my_svc}) *)
       | [VCon (name, []); VAtom policy; VRecord opts] ->
         let base = [("actor", VString name); ("restart", VAtom policy)] in
         let with_name = match List.assoc_opt "name" opts with
@@ -3924,6 +3873,13 @@ let task_builtins : env =
       | [strategy; children] ->
         VRecord [("strategy", strategy); ("children", children)]
       | _ -> eval_error "Supervisor.spec: expected (strategy, children)"))
+
+  ; ("App.stop", VBuiltin ("App.stop", function
+      | [] | [VUnit] ->
+        shutdown_requested := true;
+        VUnit
+      | _ -> eval_error "App.stop: expected no arguments"))
+
 
   (* Process registry: whereis returns Option(Pid); whereis_bang crashes if missing *)
   ; ("whereis", VBuiltin ("whereis", function
@@ -4179,6 +4135,53 @@ let graceful_shutdown () : unit =
     Spec shape: { strategy = :one_for_one, children = [ChildSpec, ...] }
     ChildSpec shape: { actor = "Name", restart = :permanent }
     Records spawn order in [app_spawn_order]. *)
+let spawn_from_spec (spec : value) : unit =
+  match spec with
+  | VRecord fields ->
+    let children_val = match List.assoc_opt "children" fields with
+      | Some v -> v
+      | None -> eval_error "spawn_from_spec: spec missing 'children' field"
+    in
+    let children = march_list_to_list children_val in
+    List.iter (fun child ->
+      match child with
+      | VRecord child_fields ->
+        (* Dynamic supervisor specs are pre-registered; skip spawning an actor for them *)
+        (match List.assoc_opt "type" child_fields with
+         | Some (VString "dynamic_supervisor") -> ()
+         | _ ->
+           let actor_name = match List.assoc_opt "actor" child_fields with
+             | Some (VString s) -> s
+             | Some other -> eval_error "spawn_from_spec: actor field should be a string, got %s"
+                               (value_to_string other)
+             | None -> eval_error "spawn_from_spec: child spec missing 'actor' field"
+           in
+           (match Hashtbl.find_opt actor_defs_tbl actor_name with
+            | None -> eval_error "spawn_from_spec: unknown actor '%s'" actor_name
+            | Some (def, env_ref) ->
+              let pid = !next_pid in
+              next_pid := pid + 1;
+              let init_state = eval_expr !env_ref def.actor_init in
+              let inst = {
+                ai_name = actor_name; ai_def = def; ai_env_ref = env_ref;
+                ai_state = init_state; ai_alive = true;
+                ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
+                ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
+                ai_resources = []; ai_linear_values = [] } in
+              Hashtbl.add actor_registry pid inst;
+              app_spawn_order := !app_spawn_order @ [pid];
+              (* Register named children in the process registry *)
+              (match List.assoc_opt "name" child_fields with
+               | Some (VAtom atom_name) ->
+                 Hashtbl.replace process_registry atom_name pid;
+                 Hashtbl.replace pid_to_registry_name pid atom_name
+               | _ -> ())))
+      | other -> eval_error "spawn_from_spec: expected child spec record, got %s"
+                   (value_to_string other)
+    ) children
+  | other -> eval_error "spawn_from_spec: expected supervisor spec record, got %s"
+               (value_to_string other)
+
 (* ------------------------------------------------------------------ *)
 (* Module evaluation                                                   *)
 (* ------------------------------------------------------------------ *)

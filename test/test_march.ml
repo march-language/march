@@ -8370,12 +8370,33 @@ let test_whereis_named () =
     March_desugar.Desugar.desugar_module ast
   in
   March_eval.Eval.run_module m;
-  (* process_registry should have "counter_svc" → some pid *)
+  (* process_registry should have "counter_svc" → some pid (set during app startup) *)
   let registered = Hashtbl.find_opt March_eval.Eval.process_registry "counter_svc" in
   Alcotest.(check bool) "counter_svc registered" true (registered <> None);
-  (* The pid should be a non-negative integer (actor may be dead after graceful shutdown) *)
-  let pid_valid = match registered with Some p -> p >= 0 | None -> false in
-  Alcotest.(check bool) "counter_svc pid valid" true pid_valid
+  (* After graceful shutdown, the actor is dead; whereis correctly returns None *)
+  let result = call_builtin "whereis" [March_eval.Eval.VAtom "counter_svc"] in
+  Alcotest.(check bool) "whereis returns None for dead post-shutdown actor" true
+    (match result with March_eval.Eval.VCon ("None", []) -> true | _ -> false)
+
+(** whereis returns Some(Pid) for a live actor registered manually *)
+let test_whereis_live_actor () =
+  let _env = eval_module {|mod TestWhereis do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+    fn main() do
+      spawn(Counter)
+    end
+  end|} in
+  let pid = match call_fn _env "main" [] with
+    | March_eval.Eval.VPid p -> p | _ -> -1 in
+  Alcotest.(check bool) "actor spawned" true (pid >= 0);
+  Hashtbl.replace March_eval.Eval.process_registry "live_svc" pid;
+  let result = call_builtin "whereis" [March_eval.Eval.VAtom "live_svc"] in
+  Alcotest.(check bool) "whereis returns Some(Pid) for live actor" true
+    (match result with March_eval.Eval.VCon ("Some", [March_eval.Eval.VPid _]) -> true | _ -> false)
 
 (** whereis on an unknown atom returns None *)
 let test_whereis_unknown () =
@@ -8437,10 +8458,10 @@ let test_name_reregisters_on_restart () =
   Alcotest.(check bool) "old pid removed from name map" true (old_name = None)
 
 (* ------------------------------------------------------------------ *)
-(* Dynamic Supervisor tests                                           *)
+(* Dynamic Supervisor tests                                            *)
 (* ------------------------------------------------------------------ *)
 
-(** Helper: get list of live child pids from a dynamic supervisor. *)
+(** Helper: get list of live child entries from a dynamic supervisor. *)
 let dyn_sup_children name =
   match Hashtbl.find_opt March_eval.Eval.dyn_sup_registry name with
   | None -> []
@@ -8635,7 +8656,6 @@ let test_dyn_sup_in_app () =
   Alcotest.(check bool) "dyn sup registered in app" true
     (Hashtbl.mem March_eval.Eval.dyn_sup_registry "handlers")
 
-
 (* ------------------------------------------------------------------ *)
 (* Shutdown protocol tests                                            *)
 (* ------------------------------------------------------------------ *)
@@ -8815,16 +8835,17 @@ let () =
       ( "shutdown",
         [
           Alcotest.test_case "shutdown handler runs"        `Quick (with_reset test_shutdown_handler_runs);
-          Alcotest.test_case "graceful shutdown reverse"    `Quick (with_reset test_graceful_shutdown_reverse_order);
+          Alcotest.test_case "graceful shutdown order"      `Quick (with_reset test_graceful_shutdown_reverse_order);
           Alcotest.test_case "on_start hook"                `Quick (with_reset test_on_start_hook);
           Alcotest.test_case "on_stop hook"                 `Quick (with_reset test_on_stop_hook);
-          Alcotest.test_case "no shutdown handler"          `Quick (with_reset test_actor_no_shutdown_handler_force_killed);
+          Alcotest.test_case "no-handler actor force-killed" `Quick (with_reset test_actor_no_shutdown_handler_force_killed);
           Alcotest.test_case "shutdown marks actor dead"    `Quick (with_reset test_shutdown_actor_pid_marks_dead);
         ] );
       ( "registry",
         [
           Alcotest.test_case "worker named spec"         `Quick (with_reset test_worker_named_spec);
           Alcotest.test_case "whereis named"             `Quick (with_reset test_whereis_named);
+          Alcotest.test_case "whereis live actor"        `Quick (with_reset test_whereis_live_actor);
           Alcotest.test_case "whereis unknown"           `Quick (with_reset test_whereis_unknown);
           Alcotest.test_case "whereis_bang unknown"      `Quick (with_reset test_whereis_bang_unknown);
           Alcotest.test_case "name reregisters restart"  `Quick (with_reset test_name_reregisters_on_restart);
