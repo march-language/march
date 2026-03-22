@@ -150,6 +150,100 @@ let debug_tui_mode = ref false
 let opt_enabled    = ref true
 let fast_math      = ref false
 let opt_level      = ref (-1)   (* -1 = not set; 0..3 = explicit clang -ON *)
+let do_fmt         = ref false   (* --fmt: format source before compiling *)
+
+(* ------------------------------------------------------------------ *)
+(* Formatter helpers                                                   *)
+(* ------------------------------------------------------------------ *)
+
+(** Read a file's contents, returning the string. *)
+let read_file path =
+  let ic = open_in path in
+  let n  = in_channel_length ic in
+  let buf = Bytes.create n in
+  really_input ic buf 0 n;
+  close_in ic;
+  Bytes.to_string buf
+
+(** Write [contents] to [path] atomically (via a temp file). *)
+let write_file path contents =
+  let tmp = path ^ ".fmt.tmp" in
+  let oc = open_out tmp in
+  output_string oc contents;
+  close_out oc;
+  Sys.rename tmp path
+
+(** Format [filename] in-place.  Returns true if the file was changed. *)
+let fmt_file filename =
+  let src = read_file filename in
+  let formatted =
+    try March_format.Format.format_source ~filename src
+    with
+    | March_errors.Errors.ParseError (msg, hint, _) ->
+      Printf.eprintf "%s\n"
+        (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg
+           (Lexing.from_string src));
+      exit 1
+    | March_parser.Parser.Error ->
+      let lexbuf = Lexing.from_string src in
+      lexbuf.Lexing.lex_curr_p <-
+        { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
+      Printf.eprintf "%s\n"
+        (March_errors.Errors.render_parse_error ~src ~filename
+           ~msg:"Parse error (cannot format)" lexbuf);
+      exit 1
+  in
+  formatted <> src, formatted
+
+(** Collect all .march files under a directory recursively. *)
+let rec march_files_in dir =
+  let entries = Sys.readdir dir in
+  Array.fold_left (fun acc entry ->
+    let path = Filename.concat dir entry in
+    if Sys.is_directory path then
+      acc @ march_files_in path
+    else if Filename.check_suffix path ".march" then
+      acc @ [path]
+    else
+      acc
+  ) [] entries
+
+(** Run the fmt subcommand and exit. *)
+let run_fmt args =
+  (* Parse --check flag and collect targets *)
+  let check_mode = ref false in
+  let targets    = ref [] in
+  List.iter (fun a ->
+    if a = "--check" then check_mode := true
+    else targets := a :: !targets
+  ) args;
+  let targets = List.rev !targets in
+  let files = List.concat_map (fun target ->
+    if target = "." || (Sys.file_exists target && Sys.is_directory target) then
+      march_files_in target
+    else
+      [target]
+  ) targets in
+  if files = [] then begin
+    Printf.eprintf "march fmt: no files specified\n"; exit 1
+  end;
+  let any_changed = ref false in
+  List.iter (fun f ->
+    let changed, formatted = fmt_file f in
+    if !check_mode then begin
+      if changed then begin
+        Printf.eprintf "%s: not formatted\n" f;
+        any_changed := true
+      end
+    end else begin
+      if changed then begin
+        write_file f formatted;
+        Printf.printf "formatted %s\n%!" f
+      end
+    end
+  ) files;
+  if !check_mode && !any_changed then exit 1
+  else exit 0
 
 (* ------------------------------------------------------------------ *)
 (* File compiler                                                       *)
@@ -157,17 +251,19 @@ let opt_level      = ref (-1)   (* -1 = not set; 0..3 = explicit clang -ON *)
 
 let compile filename =
   let src =
-    try
-      let ic = open_in filename in
-      let n = in_channel_length ic in
-      let buf = Bytes.create n in
-      really_input ic buf 0 n;
-      close_in ic;
-      Bytes.to_string buf
+    try read_file filename
     with Sys_error msg ->
       Printf.eprintf "march: %s\n" msg;
       exit 1
   in
+  (* --fmt: format the source file before compiling *)
+  if !do_fmt then begin
+    let changed, formatted = fmt_file filename in
+    if changed then begin
+      write_file filename formatted;
+      Printf.eprintf "formatted %s\n%!" filename
+    end
+  end;
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
@@ -331,6 +427,12 @@ let compile filename =
   end
 
 let () =
+  (* Handle "march fmt [--check] <targets...>" as a subcommand before Arg.parse *)
+  let argv = Sys.argv in
+  if Array.length argv >= 2 && argv.(1) = "fmt" then begin
+    let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
+    run_fmt rest
+  end;
   let files = ref [] in
   let specs = [
     ("--dump-tir",   Arg.Set dump_tir,    " Print TIR instead of evaluating");
@@ -342,6 +444,7 @@ let () =
     ("--opt",        Arg.Set_int opt_level, "<N>  Optimization level passed to clang (0-3)");
     ("--debug",     Arg.Set debug_mode,     " Enable time-travel debugger (simple mode)");
     ("--debug-tui", Arg.Set debug_tui_mode, " Enable time-travel debugger (TUI mode)");
+    ("--fmt",       Arg.Set do_fmt,         " Format source file in-place before compiling");
   ] in
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
   match !files with

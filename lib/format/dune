@@ -1,0 +1,3 @@
+(library
+ (name march_format)
+ (libraries march_ast march_lexer march_parser))
