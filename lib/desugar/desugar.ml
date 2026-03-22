@@ -299,10 +299,23 @@ let rec desugar_decl (d : decl) : decl =
     d
 
   | DApp (adef, sp) ->
-    (* Desugar: DApp → private __app_init__ function.
-       The interpreter detects __app_init__ in the environment and calls it
-       instead of main(), entering the supervisor-driven app lifecycle. *)
+    (* Desugar: DApp → private __app_init__ function that returns a record
+       { spec, on_start, on_stop }.  The interpreter detects __app_init__ in
+       the environment and uses it to drive the supervisor lifecycle. *)
     let body' = desugar_expr adef.app_body in
+    let on_start' = Option.map desugar_expr adef.app_on_start in
+    let on_stop'  = Option.map desugar_expr adef.app_on_stop  in
+    (* Build: fn __app_init__() -> { spec = <body>, on_start = <fn>, on_stop = <fn> } *)
+    let none_val = ECon ({ txt = "None"; span = sp }, [], sp) in
+    let wrap_opt = function
+      | None   -> none_val
+      | Some e -> ECon ({ txt = "Some"; span = sp }, [ELam ([], e, sp)], sp)
+    in
+    let result_expr = ERecord (
+      [ ({ txt = "spec";     span = sp }, body')
+      ; ({ txt = "on_start"; span = sp }, wrap_opt on_start')
+      ; ({ txt = "on_stop";  span = sp }, wrap_opt on_stop')
+      ], sp) in
     let init_fn : fn_def = {
       fn_name    = { txt = "__app_init__"; span = sp };
       fn_vis     = Private;
@@ -311,7 +324,7 @@ let rec desugar_decl (d : decl) : decl =
       fn_clauses = [{
         fc_params = [];
         fc_guard  = None;
-        fc_body   = body';
+        fc_body   = result_expr;
         fc_span   = sp;
       }];
     } in
