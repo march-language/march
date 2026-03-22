@@ -27,3 +27,19 @@ val call_void_to_float : nativeint -> float
 
 (** Call a (ptr -> ptr) function pointer. *)
 val call_ptr_to_ptr : nativeint -> nativeint -> nativeint
+
+(** Read a 32-bit signed integer from [ptr + byte_offset].
+    Used to inspect march_hdr.tag (i32 at offset 8). *)
+val read_i32_at : nativeint -> int -> int
+
+(** Read a 64-bit integer from [ptr + byte_offset].
+    Used to read i64 fields (Int, Bool, Unit, Float-as-bits). *)
+val read_i64_at : nativeint -> int -> int64
+
+(** Read a pointer from [ptr + byte_offset].
+    Used to read heap-pointer fields (String, List, Option, …). *)
+val read_ptr_at : nativeint -> int -> nativeint
+
+(** Read a march_string* as an OCaml string.
+    Layout: {rc:i64, len:i64, data:char[]}; len at offset 8, data at offset 16. *)
+val read_march_string : nativeint -> string
