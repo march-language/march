@@ -442,6 +442,38 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                  "";
                  "Any other input is evaluated as a March expression.";
                ]
+             | ":reload" ->
+               Printf.printf "Nothing to reload.\n%!"
+             | src when String.length src > 5 && String.sub src 0 5 = ":type" ->
+               let expr_src = String.trim (String.sub src 5 (String.length src - 5)) in
+               if expr_src = "" then
+                 Printf.eprintf "usage: :type <expr>\n%!"
+               else begin
+                 let lexbuf = Lexing.from_string expr_src in
+                 (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+                         with _ -> None) with
+                 | Some (March_ast.Ast.ReplExpr e) ->
+                   let e' = March_desugar.Desugar.desugar_expr e in
+                   let input_ctx = March_errors.Errors.create () in
+                   let input_tc  = { !tc_env with errors = input_ctx } in
+                   let inferred  = March_typecheck.Typecheck.infer_expr input_tc e' in
+                   let ty_str    = March_typecheck.Typecheck.pp_ty
+                     (March_typecheck.Typecheck.repr inferred) in
+                   if March_errors.Errors.has_errors input_ctx then
+                     Printf.eprintf "type error\n%!"
+                   else
+                     Printf.printf "- : %s\n%!" ty_str
+                 | _ -> Printf.eprintf "parse error\n%!")
+               end
+             | src when String.length src > 4 && String.sub src 0 4 = ":doc" ->
+               let name = String.trim (String.sub src 4 (String.length src - 4)) in
+               if name = "" then
+                 Printf.eprintf "usage: :doc <name>\n%!"
+               else begin
+                 match March_eval.Eval.lookup_doc name with
+                 | Some s -> Printf.printf "%s\n%!" s
+                 | None   -> Printf.printf "No documentation found for %s\n%!" name
+               end
              | src when String.trim src = "" -> ()
              | src ->
                let lexbuf = Lexing.from_string src in
@@ -637,6 +669,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
   let env      = ref e0 in
   let tc_env   = ref tc0 in
   let result_h = Result_vars.create () in
+  let loaded_file  = ref (None : string option) in
   let tui          = Tui.create () in
   let inp          = ref Input.empty in
   let comp         = ref CompOff in
@@ -1184,6 +1217,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
             "  :quit :q        — exit";
             "  :env            — list bindings";
             "  :type <expr>    — show type without evaluating";
+            "  :doc <name>     — show documentation for a name";
+            "  :reload         — reload the last :load-ed file";
             "  :set +t         — show inferred type after each expression";
             "  :set -t         — hide inferred type (default)";
             "  :clear          — clear transcript (keeps bindings)";
@@ -1256,7 +1291,58 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                         (Printf.sprintf "error: %s" d.message)
                     ) (March_errors.Errors.sorted input_ctx)
                 ) desugared.March_ast.Ast.mod_decls;
-                add_line Notty.A.(fg green) (Printf.sprintf "loaded %s" path)))
+                add_line Notty.A.(fg green) (Printf.sprintf "loaded %s" path);
+                loaded_file := Some path))
+        | ":reload" ->
+          (match !loaded_file with
+           | None ->
+             add_line Notty.A.(fg yellow) "Nothing to reload."
+           | Some path ->
+             (match (try
+               let ic = open_in path in
+               let n  = in_channel_length ic in
+               let b  = Bytes.create n in
+               really_input ic b 0 n;
+               close_in ic;
+               Some (Bytes.to_string b)
+             with Sys_error msg -> add_line Notty.A.(fg red)
+               (Printf.sprintf "cannot open: %s" msg); None) with
+             | None -> ()
+             | Some file_src ->
+               let lexbuf = Lexing.from_string file_src in
+               (match (try
+                 let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+                 Some (March_desugar.Desugar.desugar_module m)
+               with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
+               | None -> ()
+               | Some desugared ->
+                 List.iter (fun decl ->
+                   let input_ctx = March_errors.Errors.create () in
+                   let input_tc  = { !tc_env with errors = input_ctx } in
+                   let new_tc    = March_typecheck.Typecheck.check_decl input_tc decl in
+                   if not (March_errors.Errors.has_errors input_ctx) then begin
+                     (try
+                       env := March_eval.Eval.eval_decl !env decl;
+                       tc_env := { new_tc with errors = March_errors.Errors.create () }
+                     with _ -> ())
+                   end else
+                     List.iter (fun (d : March_errors.Errors.diagnostic) ->
+                       add_line Notty.A.(fg red)
+                         (Printf.sprintf "error: %s" d.message)
+                     ) (March_errors.Errors.sorted input_ctx)
+                 ) desugared.March_ast.Ast.mod_decls;
+                 add_line Notty.A.(fg green) (Printf.sprintf "reloaded %s" path))))
+        | src when String.length src > 4 && String.sub src 0 4 = ":doc" ->
+          let name = String.trim (String.sub src 4 (String.length src - 4)) in
+          if name = "" then
+            add_line Notty.A.(fg red) "usage: :doc <name>"
+          else begin
+            match March_eval.Eval.lookup_doc name with
+            | Some s -> add_line Notty.A.empty s
+            | None   ->
+              add_line Notty.A.(fg yellow)
+                (Printf.sprintf "No documentation found for %s" name)
+          end
         | src when String.length src > 5 && String.sub src 0 5 = ":save" ->
           let path = String.trim (String.sub src 5 (String.length src - 5)) in
           if path = "" then
