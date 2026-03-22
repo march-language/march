@@ -84,7 +84,20 @@ type ty =
   | TLin    of Ast.linearity * ty        (** linear / affine wrapper *)
   | TNat    of int                       (** Type-level natural literal *)
   | TNatOp  of Ast.nat_op * ty * ty      (** n + m, n * m *)
+  | TChan   of session_ty ref            (** Linear session-typed channel endpoint *)
   | TError                               (** Error sentinel *)
+
+(** Local session type — per-endpoint view of a binary protocol.
+    Computed by projecting the global [Ast.protocol_def] onto one role. *)
+and session_ty =
+  | SSend   of ty * session_ty           (** Send a value of type T, then follow S *)
+  | SRecv   of ty * session_ty           (** Receive a value of type T, then follow S *)
+  | SChoose of (string * session_ty) list (** Actively select a branch label *)
+  | SOffer  of (string * session_ty) list (** Passively wait for the other side to pick *)
+  | SEnd                                 (** Session complete — channel must be closed *)
+  | SRec    of string * session_ty       (** Recursive binding: Rec(X, S) *)
+  | SVar    of string                    (** Back-reference to a recursive binder *)
+  | SError                               (** Error sentinel *)
 
 and tvar =
   | Unbound of int * int   (** id, generalization level *)
@@ -148,6 +161,7 @@ let rec occurs id level = function
   | TRecord flds        -> List.exists (fun (_, t) -> occurs id level t) flds
   | TLin   (_, t)       -> occurs id level t
   | TNatOp (_, a, b)    -> occurs id level a || occurs id level b
+  | TChan  _            -> false  (* session_ty is not polymorphic *)
   | TNat _ | TError     -> false
 
 (* =================================================================
@@ -202,7 +216,22 @@ let rec pp_ty ?(parens = false) t =
       Printf.sprintf "%s + %s" (pp_ty a) (pp_ty b)
     | TNatOp (Ast.NatMul, a, b)   ->
       Printf.sprintf "%s * %s" (pp_ty a) (pp_ty b)
+    | TChan r -> "Chan(" ^ pp_session_ty !r ^ ")"
   in s
+
+and pp_session_ty = function
+  | SSend (t, s)  -> Printf.sprintf "Send(%s, %s)" (pp_ty t) (pp_session_ty s)
+  | SRecv (t, s)  -> Printf.sprintf "Recv(%s, %s)" (pp_ty t) (pp_session_ty s)
+  | SChoose bs    ->
+    let arms = List.map (fun (l, s) -> l ^ ": " ^ pp_session_ty s) bs in
+    "Choose{" ^ String.concat ", " arms ^ "}"
+  | SOffer bs     ->
+    let arms = List.map (fun (l, s) -> l ^ ": " ^ pp_session_ty s) bs in
+    "Offer{" ^ String.concat ", " arms ^ "}"
+  | SEnd          -> "End"
+  | SRec (x, s)   -> Printf.sprintf "Rec(%s, %s)" x (pp_session_ty s)
+  | SVar x        -> x
+  | SError        -> "<session_error>"
 
 (* =================================================================
    §6  Elm-style error message parts
@@ -263,6 +292,14 @@ type import_entry = {
   ie_used    : bool ref;
 }
 
+(** Computed session-type information for a declared [protocol].
+    Stored in [env.protocols] after [DProtocol] is checked. *)
+type proto_info = {
+  pi_def         : Ast.protocol_def;
+  pi_projections : (string * session_ty) list;  (** role → local session type *)
+  pi_span        : Ast.span;
+}
+
 type env = {
   vars    : (string * scheme) list;        (** Term variable → scheme *)
   types   : (string * int) list;           (** Type constructor name → arity *)
@@ -281,7 +318,7 @@ type env = {
   module_caps : (string * string list) list;
   (** Capabilities required by checked sub-modules: module name → list of cap paths.
       Populated when a [DMod] is fully checked; used for transitive enforcement. *)
-  protocols  : (string * Ast.protocol_def) list; (** Registered session-type protocols *)
+  protocols  : (string * proto_info) list; (** Registered session-type protocols *)
   impls      : (string * ty) list; (** Registered interface implementations: (iface_name, impl_ty) *)
   import_tracker : import_entry list ref;
   (** Accumulated import/alias entries for unused-import warning detection.
@@ -368,6 +405,7 @@ let generalize level ty =
     | TRecord flds       -> List.iter (fun (_, t) -> collect t) flds
     | TLin   (_, t)      -> collect t
     | TNatOp (_, a, b)   -> collect a; collect b
+    | TChan  _           -> ()   (* session_ty has no polymorphic variables *)
     | TNat _ | TError    -> ()
   in
   collect ty;
@@ -395,6 +433,7 @@ let instantiate level env = function
       | TRecord flds       -> TRecord (List.map (fun (n, t) -> (n, inst t)) flds)
       | TLin   (l, t)      -> TLin   (l, inst t)
       | TNatOp (op, a, b)  -> TNatOp (op, inst a, inst b)
+      | TChan  _           -> t   (* session_ty has no polymorphic variables *)
       | TNat _ | TError    -> t
     in
     let inst_cs = List.map (function
@@ -816,6 +855,15 @@ let builtin_bindings : (string * scheme) list =
     ("Supervisor.count_children",
      Mono (TArrow (t_atom, TCon ("SupervisorSpec", []))));  (* simplified return type *)
     ("App.stop",        Mono (TArrow (t_unit, t_unit)));
+    (* Session-typed channel builtins — Chan.send/recv/close are special-cased in
+       infer_expr for proper session type advancement. These entries just put the
+       names in scope; the real typing is done in the Chan.* EApp branches. *)
+    ("Chan.new",    poly2 (fun a b -> TArrow (t_string, TTuple [a; b])));
+    ("Chan.send",   poly2 (fun a b -> TArrow (a, TArrow (t_unit, b))));
+    ("Chan.recv",   poly1 (fun a -> TArrow (t_unit, a)));
+    ("Chan.close",  Mono (TArrow (t_unit, t_unit)));
+    ("Chan.choose", poly2 (fun a b -> TArrow (a, TArrow (t_atom, b))));
+    ("Chan.offer",  poly1 (fun a -> TArrow (a, TTuple [t_atom; a])));
   ]
 
 let builtin_types : (string * int) list =
@@ -888,6 +936,21 @@ let report_mismatch env ~span ~reason expected found =
     { Err.severity = Error; span; message = headline;
       labels; notes = why_note }
 
+(** Structural equality for session types (used by [unify] for [TChan] cases). *)
+let rec session_ty_equal s1 s2 =
+  match s1, s2 with
+  | SEnd, SEnd -> true
+  | SError, SError -> true
+  | SSend (_, s1'), SSend (_, s2') -> session_ty_equal s1' s2'
+  | SRecv (_, s1'), SRecv (_, s2') -> session_ty_equal s1' s2'
+  | SChoose bs1, SChoose bs2 | SOffer bs1, SOffer bs2 ->
+    List.length bs1 = List.length bs2 &&
+    List.for_all2 (fun (l1, s1') (l2, s2') ->
+        l1 = l2 && session_ty_equal s1' s2') bs1 bs2
+  | SRec (x1, s1'), SRec (x2, s2') -> x1 = x2 && session_ty_equal s1' s2'
+  | SVar x1, SVar x2 -> x1 = x2
+  | _ -> false
+
 (** Unify [t1] and [t2], reporting any mismatch to [env.errors].
     Uses [TError] as a recovery sentinel — if either side is [TError]
     the constraint is silently satisfied (the error was already reported). *)
@@ -949,6 +1012,14 @@ let rec unify env ~span ?(reason = None) t1 t2 =
     unify env ~span ~reason a1 a2;
     unify env ~span ~reason b1 b2
 
+  (* Session-typed channels unify by checking their current session states match. *)
+  | TChan r1, TChan r2 ->
+    if not (session_ty_equal !r1 !r2) then
+      Err.error env.errors ~span
+        (Printf.sprintf
+           "Session type mismatch: expected channel at `%s` but found `%s`."
+           (pp_session_ty !r1) (pp_session_ty !r2))
+
   | _ ->
     report_mismatch env ~span ~reason t1 t2
 
@@ -963,6 +1034,34 @@ let rec unify env ~span ?(reason = None) t1 t2 =
 let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
   match s with
   | Ast.TyCon (name, args) ->
+    (* Special case: Chan(Role, Proto) — session-typed channel endpoint.
+       Users write Chan(RoleName, ProtoName) in type annotations.
+       The parser produces TyCon("Chan", [TyCon("Role",[]), TyCon("Proto",[])]).
+       We intercept this before the normal type-lookup path. *)
+    (match name.txt, args with
+     | "Chan", [Ast.TyCon (role, []); Ast.TyCon (proto, [])] ->
+       (match List.assoc_opt proto.txt env.protocols with
+        | None ->
+          Err.error env.errors ~span:proto.span
+            (Printf.sprintf "I don't know a protocol called `%s`." proto.txt);
+          TChan (ref SError)
+        | Some pi ->
+          (match List.assoc_opt role.txt pi.pi_projections with
+           | None ->
+             Err.error env.errors ~span:role.span
+               (Printf.sprintf
+                  "Protocol `%s` has no role called `%s`.\n\
+                   Known roles: %s"
+                  proto.txt role.txt
+                  (String.concat ", " (List.map fst pi.pi_projections)));
+             TChan (ref SError)
+           | Some sty ->
+             TLin (Ast.Linear, TChan (ref sty))))
+     | "Chan", _ when name.txt = "Chan" ->
+       Err.error env.errors ~span:name.span
+         "Chan expects exactly two type arguments: Chan(RoleName, ProtocolName)";
+       TChan (ref SError)
+     | _ ->
     let arity = match lookup_type name.txt env with
       | Some a -> a
       | None   ->
@@ -988,7 +1087,7 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
        (* Normalize built-in unit/bool so surface annotations unify with internal reps *)
        match name.txt with
        | "Unit" -> t_unit
-       | _ -> TCon (name.txt, args'))
+       | _ -> TCon (name.txt, args')))
 
   | Ast.TyVar name ->
     (match List.assoc_opt name.txt !tvars with
@@ -1014,6 +1113,26 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
   | Ast.TyNat n  -> TNat n
   | Ast.TyNatOp (op, a, b) ->
     TNatOp (op, surface_ty env ~tvars a, surface_ty env ~tvars b)
+
+  | Ast.TyChan (role, proto) ->
+    (* Look up the protocol and project onto the given role. *)
+    (match List.assoc_opt proto.txt env.protocols with
+     | None ->
+       Err.error env.errors ~span:proto.span
+         (Printf.sprintf "I don't know a protocol called `%s`." proto.txt);
+       TChan (ref SError)
+     | Some pi ->
+       (match List.assoc_opt role.txt pi.pi_projections with
+        | None ->
+          Err.error env.errors ~span:role.span
+            (Printf.sprintf
+               "Protocol `%s` has no role called `%s`.\n\
+                Known roles: %s"
+               proto.txt role.txt
+               (String.concat ", " (List.map fst pi.pi_projections)));
+          TChan (ref SError)
+        | Some sty ->
+          TChan (ref sty)))
 
 (** Instantiate a constructor's type at the current level.
     Creates fresh unification variables for each type parameter of the
@@ -1333,6 +1452,228 @@ let rec infer_expr env (e : Ast.expr) : ty =
       t
 
     (* ── Function application ─────────────────────────────────────── *)
+    (* ── Session channel operations (special casing for session type advancement) ── *)
+
+    (* Normalize Mod.method(args) → EVar("Mod.method")(args) so that Chan.send etc.
+       work whether written as `Chan.send(ch, v)` (field access) or `Chan.send(ch, v)`. *)
+    | Ast.EApp (Ast.EField (Ast.ECon ({txt = mod_name; _}, [], _),
+                             {txt = meth; _}, _),
+                args, sp) ->
+      let norm = Ast.EApp (Ast.EVar {txt = mod_name ^ "." ^ meth;
+                                     span = Ast.dummy_span}, args, sp) in
+      infer_expr env norm
+
+    (* Chan.new(proto_name_string_or_atom) →
+         (linear Chan(RoleA, Proto), linear Chan(RoleB, Proto))
+       The protocol name is the sole argument; we look it up to generate typed endpoints. *)
+    | Ast.EApp (Ast.EVar { txt = "Chan.new"; _ }, [proto_expr], sp) ->
+      let proto_name = match proto_expr with
+        | Ast.ELit (LitString s, _) | Ast.ELit (LitAtom s, _) -> Some s
+        | Ast.EVar n -> Some n.txt
+        | Ast.ECon (n, [], _) -> Some n.txt   (* bare Protocol name: Chan.new(MyProto) *)
+        | _ -> None
+      in
+      (match proto_name with
+       | None ->
+         Err.error env.errors ~span:sp
+           "Chan.new: argument must be a protocol name (string, atom, or bare name).";
+         TError
+       | Some pname ->
+         (match List.assoc_opt pname env.protocols with
+          | None ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf "Chan.new: protocol `%s` is not declared." pname);
+            TError
+          | Some pi ->
+            (match pi.pi_projections with
+             | [(_, sty_a); (_, sty_b)] ->
+               (* Return (linear Chan(A, Proto), linear Chan(B, Proto)) *)
+               let ty_a = TLin (Ast.Linear, TChan (ref sty_a)) in
+               let ty_b = TLin (Ast.Linear, TChan (ref sty_b)) in
+               TTuple [ty_a; ty_b]
+             | [_] ->
+               Err.error env.errors ~span:sp
+                 (Printf.sprintf "Chan.new: protocol `%s` has only one role." pname);
+               TError
+             | [] ->
+               Err.error env.errors ~span:sp
+                 (Printf.sprintf "Chan.new: protocol `%s` has no roles." pname);
+               TError
+             | _ ->
+               (* 3+ roles: just return first two as a pair *)
+               (match pi.pi_projections with
+                | (_, sty_a) :: (_, sty_b) :: _ ->
+                  TTuple [TLin (Ast.Linear, TChan (ref sty_a));
+                          TLin (Ast.Linear, TChan (ref sty_b))]
+                | _ -> TError))))
+
+    (* Chan.send(ch, value) → linear Chan at continuation session state.
+       Pre-condition: ch must be at SSend(T, S). Post: ch is consumed; returns Chan at S. *)
+    | Ast.EApp (Ast.EVar { txt = "Chan.send"; _ }, [ch_expr; val_expr], sp) ->
+      let ch_ty = repr (infer_expr env ch_expr) in
+      let inner_chan_ty = match ch_ty with
+        | TLin (_, t) -> repr t
+        | t -> t
+      in
+      (match inner_chan_ty with
+       | TChan r ->
+         (match !r with
+          | SSend (payload_ty, cont) ->
+            check_expr env val_expr payload_ty
+              ~reason:(Some (RBuiltin "Payload type of Chan.send"));
+            TLin (Ast.Linear, TChan (ref cont))
+          | SError -> TError
+          | other ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "Chan.send: channel is at `%s` but I expected `Send(T, ...)`."
+                 (pp_session_ty other));
+            TError)
+       | TError -> TError
+       | _ ->
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "Chan.send: expected a channel endpoint but got `%s`."
+              (pp_ty ch_ty));
+         TError)
+
+    (* Chan.recv(ch) → (value, linear Chan at continuation).
+       Pre-condition: ch must be at SRecv(T, S). Post: ch consumed; returns (T, Chan at S). *)
+    | Ast.EApp (Ast.EVar { txt = "Chan.recv"; _ }, [ch_expr], sp) ->
+      let ch_ty = repr (infer_expr env ch_expr) in
+      let inner_chan_ty = match ch_ty with
+        | TLin (_, t) -> repr t
+        | t -> t
+      in
+      (match inner_chan_ty with
+       | TChan r ->
+         (match !r with
+          | SRecv (payload_ty, cont) ->
+            TTuple [payload_ty; TLin (Ast.Linear, TChan (ref cont))]
+          | SError -> TError
+          | other ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "Chan.recv: channel is at `%s` but I expected `Recv(T, ...)`."
+                 (pp_session_ty other));
+            TError)
+       | TError -> TError
+       | _ ->
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "Chan.recv: expected a channel endpoint but got `%s`."
+              (pp_ty ch_ty));
+         TError)
+
+    (* Chan.close(ch) → Unit.
+       Pre-condition: ch must be at SEnd. *)
+    | Ast.EApp (Ast.EVar { txt = "Chan.close"; _ }, [ch_expr], sp) ->
+      let ch_ty = repr (infer_expr env ch_expr) in
+      let inner_chan_ty = match ch_ty with
+        | TLin (_, t) -> repr t
+        | t -> t
+      in
+      (match inner_chan_ty with
+       | TChan r ->
+         (match !r with
+          | SEnd -> t_unit
+          | SError -> TError
+          | other ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "Chan.close: channel is at `%s` but I expected `End`."
+                 (pp_session_ty other));
+            TError)
+       | TError -> TError
+       | _ ->
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "Chan.close: expected a channel endpoint but got `%s`."
+              (pp_ty ch_ty));
+         TError)
+
+    (* Chan.choose(ch, :label) → linear Chan at chosen branch continuation.
+       Pre-condition: ch must be at SChoose(branches). *)
+    | Ast.EApp (Ast.EVar { txt = "Chan.choose"; _ }, [ch_expr; label_expr], sp) ->
+      let ch_ty = repr (infer_expr env ch_expr) in
+      let inner_chan_ty = match ch_ty with
+        | TLin (_, t) -> repr t
+        | t -> t
+      in
+      let label_str = match label_expr with
+        | Ast.EAtom (s, [], _) -> Some s
+        | Ast.ELit (LitAtom s, _) -> Some s
+        | _ -> None
+      in
+      (match inner_chan_ty with
+       | TChan r ->
+         (match !r with
+          | SChoose branches ->
+            (match label_str with
+             | None ->
+               Err.error env.errors ~span:sp
+                 "Chan.choose: label must be an atom literal (e.g. :ok).";
+               TError
+             | Some lbl ->
+               (match List.assoc_opt lbl branches with
+                | Some cont -> TLin (Ast.Linear, TChan (ref cont))
+                | None ->
+                  Err.error env.errors ~span:sp
+                    (Printf.sprintf
+                       "Chan.choose: label `:%s` is not a valid branch of this protocol." lbl);
+                  TError))
+          | SError -> TError
+          | other ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "Chan.choose: channel is at `%s` but I expected `Choose{...}`."
+                 (pp_session_ty other));
+            TError)
+       | TError -> TError
+       | _ ->
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "Chan.choose: expected a channel endpoint but got `%s`."
+              (pp_ty ch_ty));
+         TError)
+
+    (* Chan.offer(ch) → (Atom, linear Chan at some continuation).
+       Pre-condition: ch must be at SOffer(branches).
+       Returns (label_atom, new_chan) where new_chan is at the continuation
+       for whichever branch the other side chose.  The exact continuation is
+       not known statically without dependent types, so we return the first
+       branch's continuation type as a conservative approximation that still
+       lets users write match expressions over the returned atom. *)
+    | Ast.EApp (Ast.EVar { txt = "Chan.offer"; _ }, [ch_expr], sp) ->
+      let ch_ty = repr (infer_expr env ch_expr) in
+      let inner_chan_ty = match ch_ty with
+        | TLin (_, t) -> repr t
+        | t -> t
+      in
+      (match inner_chan_ty with
+       | TChan r ->
+         (match !r with
+          | SOffer branches ->
+            let cont_ty = match branches with
+              | (_, sty) :: _ -> TLin (Ast.Linear, TChan (ref sty))
+              | []             -> TError
+            in
+            TTuple [t_atom; cont_ty]
+          | SError -> TError
+          | other ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "Chan.offer: channel is at `%s` but I expected `Offer{...}`."
+                 (pp_session_ty other));
+            TError)
+       | TError -> TError
+       | _ ->
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "Chan.offer: expected a channel endpoint but got `%s`."
+              (pp_ty ch_ty));
+         TError)
+
     | Ast.EApp (f, args, sp) ->
       let f_ty = infer_expr env f in
       infer_app env sp f_ty args 0
@@ -2279,6 +2620,113 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
     | _ -> ()
   ) decls
 
+(* =================================================================
+   §16a  Session type projection and duality
+   ================================================================= *)
+
+(** [project_steps steps role cont] projects a list of protocol steps onto
+    [role], appending [cont] as the continuation after the last step.
+    Returns the local session type for [role]. *)
+let rec project_steps env ~proto_name steps role cont =
+  match steps with
+  | [] -> cont
+  | step :: rest ->
+    let rest_ty () = project_steps env ~proto_name rest role cont in
+    (match step with
+     | Ast.ProtoMsg (sender, receiver, msg_ty) ->
+       let tvars = ref [] in
+       let t = surface_ty env ~tvars msg_ty in
+       if sender.Ast.txt = role then
+         SSend (t, rest_ty ())
+       else if receiver.Ast.txt = role then
+         SRecv (t, rest_ty ())
+       else
+         rest_ty ()   (* This role doesn't participate in this step *)
+     | Ast.ProtoLoop inner_steps ->
+       (* Wrap the inner projection in a recursive binder *)
+       let rec_var = proto_name ^ "_loop" in
+       let inner = project_steps env ~proto_name inner_steps role (SVar rec_var) in
+       let after_loop = rest_ty () in
+       (match inner with
+        | SVar _ ->
+          (* Role not involved in the loop at all — skip *)
+          after_loop
+        | _ ->
+          (* Substitute the continuation into the SVar back-reference *)
+          let inner_with_cont = subst_svar rec_var after_loop inner in
+          SRec (rec_var, inner_with_cont))
+     | Ast.ProtoChoice (chooser, branches) ->
+       let branch_tys = List.map (fun (lbl, arm_steps) ->
+           let arm_ty = project_steps env ~proto_name arm_steps role cont in
+           (lbl.Ast.txt, arm_ty)
+         ) branches in
+       if chooser.Ast.txt = role then
+         SChoose branch_tys
+       else
+         SOffer branch_tys)
+
+(** Substitute occurrences of [SVar x] with [replacement] inside [s]. *)
+and subst_svar x replacement s =
+  match s with
+  | SVar y when y = x -> replacement
+  | SSend (t, s')  -> SSend (t, subst_svar x replacement s')
+  | SRecv (t, s')  -> SRecv (t, subst_svar x replacement s')
+  | SChoose bs     -> SChoose (List.map (fun (l, s') -> (l, subst_svar x replacement s')) bs)
+  | SOffer bs      -> SOffer  (List.map (fun (l, s') -> (l, subst_svar x replacement s')) bs)
+  | SRec (y, s') when y <> x -> SRec (y, subst_svar x replacement s')
+  | other -> other
+
+(** Compute the dual of a local session type (what the other endpoint must have). *)
+let rec dual_session_ty = function
+  | SSend (t, s)  -> SRecv (t, dual_session_ty s)
+  | SRecv (t, s)  -> SSend (t, dual_session_ty s)
+  | SChoose bs    -> SOffer  (List.map (fun (l, s) -> (l, dual_session_ty s)) bs)
+  | SOffer  bs    -> SChoose (List.map (fun (l, s) -> (l, dual_session_ty s)) bs)
+  | SEnd          -> SEnd
+  | SRec (x, s)   -> SRec (x, dual_session_ty s)
+  | SVar x        -> SVar x
+  | SError        -> SError
+
+(** Project a global protocol onto all participating roles.
+    Returns [(role, local_ty) list]. Verifies that exactly two roles are present
+    and that their projections are duals of each other. *)
+let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
+  (* Collect all roles *)
+  let rec roles_of_steps = function
+    | [] -> []
+    | Ast.ProtoMsg (s, r, _) :: rest ->
+      s.Ast.txt :: r.Ast.txt :: roles_of_steps rest
+    | Ast.ProtoLoop steps :: rest ->
+      roles_of_steps steps @ roles_of_steps rest
+    | Ast.ProtoChoice (chooser, branches) :: rest ->
+      chooser.Ast.txt ::
+      List.concat_map (fun (_, steps) -> roles_of_steps steps) branches @
+      roles_of_steps rest
+  in
+  let roles = List.sort_uniq String.compare (roles_of_steps pdef.proto_steps) in
+  (* Project each role *)
+  let projections = List.map (fun role ->
+      let ty = project_steps env ~proto_name pdef.proto_steps role SEnd in
+      (role, ty)
+    ) roles in
+  (* For two-party protocols, verify duality *)
+  (match roles with
+   | [a; b] ->
+     let proj_a = List.assoc a projections in
+     let proj_b = List.assoc b projections in
+     let dual_a = dual_session_ty proj_a in
+     if not (session_ty_equal dual_a proj_b) then
+       Err.error env.errors ~span
+         (Printf.sprintf
+            "Protocol `%s`: the projection onto `%s` and the projection onto \
+             `%s` are not duals of each other.\n\
+             dual(%s) = %s\nbut %s has: %s"
+            proto_name a b
+            a (pp_session_ty dual_a)
+            b (pp_session_ty proj_b))
+   | _ -> ());  (* For 0 or 1 or 3+ roles, skip duality check *)
+  projections
+
 let rec check_decl env (d : Ast.decl) : env =
   match d with
   | Ast.DFn (def, sp) ->
@@ -2517,25 +2965,14 @@ let rec check_decl env (d : Ast.decl) : env =
       Err.warning env.errors ~span:sp
         (Printf.sprintf "Protocol `%s` has no steps — it describes no communication."
            name.txt);
-    (* Collect all participant names mentioned in the protocol. *)
-    let rec collect_participants = function
-      | Ast.ProtoMsg (sender, receiver, _) ->
-        [sender.txt; receiver.txt]
-      | Ast.ProtoLoop steps ->
-        List.concat_map collect_participants steps
-      | Ast.ProtoChoice (_, branches) ->
-        List.concat_map (List.concat_map collect_participants) branches
-    in
     (* Validate each step for structural correctness. *)
     let rec validate_step = function
       | Ast.ProtoMsg (sender, receiver, msg_ty) ->
-        (* Sender and receiver must be distinct. *)
         if sender.txt = receiver.txt then
           Err.error env.errors ~span:sender.span
             (Printf.sprintf
                "Protocol `%s`: participant `%s` cannot send a message to itself."
                name.txt sender.txt);
-        (* Message type must be a valid type. *)
         let tvars = ref [] in
         ignore (surface_ty env ~tvars msg_ty)
       | Ast.ProtoLoop steps ->
@@ -2550,23 +2987,19 @@ let rec check_decl env (d : Ast.decl) : env =
             (Printf.sprintf
                "Protocol `%s`: `choice` by `%s` must have at least 2 branches."
                name.txt participant.txt);
-        List.iter (List.iter validate_step) branches
+        List.iter (fun (_, steps) -> List.iter validate_step steps) branches
     in
     List.iter validate_step pdef.proto_steps;
-    (* Collect all participant names. *)
-    let participants =
-      List.sort_uniq String.compare
-        (List.concat_map collect_participants pdef.proto_steps)
-    in
+    (* Project the protocol onto each role and verify duality. *)
+    let projections = project_protocol env ~span:sp ~proto_name:name.txt pdef in
+    let participants = List.map fst projections in
     if participants <> [] && List.length participants < 2 then
       Err.warning env.errors ~span:sp
         (Printf.sprintf
            "Protocol `%s` only names one participant (`%s`). \
             A protocol usually involves at least two parties."
            name.txt (List.hd participants));
-    (* H8: Use env to validate that participants are known actor types.
-       Any participant that is NOT a registered actor or type gets a hint.
-       This makes env.protocols non-dead: we cross-check against the type env. *)
+    (* Hint if participant names are not known actor/type names. *)
     List.iter (fun p ->
         let is_actor = List.exists (fun (_, ci) -> ci.ci_type = p) env.ctors in
         let is_type  = List.mem_assoc p env.types in
@@ -2577,20 +3010,13 @@ let rec check_decl env (d : Ast.decl) : env =
                 Did you forget to declare `actor %s ...`?"
                name.txt p p)
       ) participants;
-    (* H8: Note that step-ordering conformance is checked structurally but
-       channel-level enforcement requires session typing at call sites.
-       Registered for future conformance passes. *)
-    let new_env = { env with protocols = (name.txt, pdef) :: env.protocols } in
     (* Check against previously-declared protocols for cross-protocol conflicts. *)
+    let pi = { pi_def = pdef; pi_projections = projections; pi_span = sp } in
+    let new_env = { env with protocols = (name.txt, pi) :: env.protocols } in
     (if List.length new_env.protocols > 1 then
-       (* Detect if two protocols use the same participant pair in opposite directions
-          without declaring a dual — this is a common session type mistake. *)
-       List.iter (fun (other_name, (other_pdef : Ast.protocol_def)) ->
+       List.iter (fun (other_name, other_pi) ->
            if other_name <> name.txt then begin
-             let other_parts =
-               List.sort_uniq String.compare
-                 (List.concat_map collect_participants other_pdef.proto_steps)
-             in
+             let other_parts = List.map fst other_pi.pi_projections in
              if List.length participants >= 2 && List.length other_parts >= 2
              && List.sort compare participants = List.sort compare other_parts then
                Err.hint env.errors ~span:sp
@@ -2931,3 +3357,33 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
   (* Warn about any unused imports or aliases *)
   warn_unused_imports final_env;
   (errors, type_map)
+
+(** Like [check_module] but also returns the final type environment.
+    Used by tests to inspect protocol projections. *)
+let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
+    : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
+  let type_map = Hashtbl.create 256 in
+  (* Same two-pass structure as check_module — uses base_env with builtins. *)
+  let pre_env = List.fold_left (fun env d ->
+      match d with
+      | Ast.DFn (def, _) ->
+        if List.mem_assoc def.fn_name.txt env.vars then env
+        else bind_var def.fn_name.txt (Mono (fresh_var 0)) env
+      | Ast.DType (_vis, name, params, typedef, _) ->
+        let env1 = { env with types = (name.txt, List.length params) :: env.types } in
+        (match typedef with
+         | Ast.TDVariant variants ->
+           let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+           List.fold_left (fun e (v : Ast.variant) ->
+               let ci = { ci_type    = name.txt
+                        ; ci_params  = param_names
+                        ; ci_arg_tys = v.var_args } in
+               { e with ctors = (v.var_name.txt, ci) :: e.ctors }
+             ) env1 variants
+         | _ -> env1)
+      | _ -> env
+    ) (base_env errors type_map) m.Ast.mod_decls in
+  let final_env = List.fold_left check_decl pre_env m.Ast.mod_decls in
+  check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;
+  warn_unused_imports final_env;
+  (errors, type_map, final_env)

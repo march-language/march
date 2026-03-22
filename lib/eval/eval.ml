@@ -35,6 +35,19 @@ type value =
   | VWorkPool                           (** Work-stealing pool capability *)
   | VCap    of int * int                (** Epoch-stamped capability: (pid, epoch) *)
   | VActorId of int                     (** Opaque actor identity (epoch-independent) *)
+  | VChan   of chan_endpoint            (** Session-typed channel endpoint *)
+
+(** One endpoint of a binary session-typed channel.
+    Each channel consists of two linked endpoints; one side's [ce_out_q]
+    is the other side's [ce_in_q]. *)
+and chan_endpoint = {
+  ce_id      : int;           (** Globally unique channel id *)
+  ce_role    : string;        (** Which side of the protocol this is *)
+  ce_proto   : string;        (** Protocol name, for runtime error messages *)
+  mutable ce_closed   : bool;
+  ce_out_q   : value Queue.t; (** Values this endpoint puts out (other side reads) *)
+  ce_in_q    : value Queue.t; (** Values this endpoint receives (other side wrote) *)
+}
 
 (** Association-list environment mapping names to values. *)
 and env = (string * value) list
@@ -452,6 +465,8 @@ let rec value_to_string v =
   | VWorkPool -> "<work_pool>"
   | VCap (pid, epoch) -> Printf.sprintf "Cap(%d, epoch=%d)" pid epoch
   | VActorId pid -> Printf.sprintf "ActorId(%d)" pid
+  | VChan ce ->
+    Printf.sprintf "Chan(%s#%d, %s)" ce.ce_proto ce.ce_id ce.ce_role
 
 (** Pretty-print a value with indented multi-line layout when the flat
     representation exceeds [width] characters. *)
@@ -1486,6 +1501,55 @@ let handle_http_connection (sock : Unix.file_descr) (pipeline_fn : value) : unit
          tcp_send_all sock response)
     end
   with _ -> ()  (* swallow connection errors *)
+
+(* ------------------------------------------------------------------ *)
+(* Session-typed channel runtime                                       *)
+(* ------------------------------------------------------------------ *)
+
+let next_chan_id : int ref = ref 0
+
+(** Create a linked pair of channel endpoints for [proto_name].
+    The two roles are [role_a] and [role_b]. Returns (endpoint_a, endpoint_b)
+    where a's out_q = b's in_q and vice versa. *)
+let chan_new proto_name role_a role_b =
+  let id = !next_chan_id in
+  incr next_chan_id;
+  let q_ab = Queue.create () in  (* a sends, b receives *)
+  let q_ba = Queue.create () in  (* b sends, a receives *)
+  let ep_a = { ce_id = id; ce_role = role_a; ce_proto = proto_name;
+               ce_closed = false; ce_out_q = q_ab; ce_in_q = q_ba } in
+  let ep_b = { ce_id = id; ce_role = role_b; ce_proto = proto_name;
+               ce_closed = false; ce_out_q = q_ba; ce_in_q = q_ab } in
+  (ep_a, ep_b)
+
+(** Send [v] on channel endpoint [ce]. Returns the same endpoint
+    (the type system ensures linearity; here we just pass it through). *)
+let chan_send ce v =
+  if ce.ce_closed then
+    eval_error "Chan.send: channel %s#%d is already closed" ce.ce_proto ce.ce_id;
+  Queue.push v ce.ce_out_q;
+  VChan ce
+
+(** Receive from channel endpoint [ce].
+    Blocks until a value is available (in the synchronous eval model,
+    the sender runs first so the queue is always populated).
+    Returns (value, new_endpoint_as_VTuple). *)
+let chan_recv ce =
+  if ce.ce_closed then
+    eval_error "Chan.recv: channel %s#%d is already closed" ce.ce_proto ce.ce_id;
+  if Queue.is_empty ce.ce_in_q then
+    eval_error
+      "Chan.recv: channel %s#%d has no pending value — \
+       did you run the sender first?" ce.ce_proto ce.ce_id;
+  let v = Queue.pop ce.ce_in_q in
+  VTuple [v; VChan ce]
+
+(** Close channel endpoint [ce]. The endpoint must not be in-use after this. *)
+let chan_close ce =
+  if ce.ce_closed then
+    eval_error "Chan.close: channel %s#%d was already closed" ce.ce_proto ce.ce_id;
+  ce.ce_closed <- true;
+  VUnit
 
 (* ------------------------------------------------------------------ *)
 (* Base environment                                                    *)
@@ -3144,6 +3208,52 @@ let base_env : env =
                           String.sub s (!idx + lold) (ls - !idx - lold))
           end
         | _ -> eval_error "String.replace: expected three strings"))
+
+  (* ── Session-typed channels ─────────────────────────────────────── *)
+  (* Chan.new(proto_name) or Chan.new(proto_name, role_a, role_b)
+     Returns a pair (endpoint_a, endpoint_b).
+     With one arg: roles are named "A" and "B" — the typechecker already verified
+     the protocol exists; we only need a connected pair at runtime. *)
+  ; ("Chan.new", VBuiltin ("Chan.new", function
+        | [VString proto] | [VAtom proto] | [VCon (proto, [])] ->
+          let (ep_a, ep_b) = chan_new proto "A" "B" in
+          VTuple [VChan ep_a; VChan ep_b]
+        | [VString proto; VString role_a; VString role_b]
+        | [VAtom proto; VAtom role_a; VAtom role_b] ->
+          let (ep_a, ep_b) = chan_new proto role_a role_b in
+          VTuple [VChan ep_a; VChan ep_b]
+        | _ -> eval_error "Chan.new: expected a protocol name"))
+
+  (* Chan.send(channel_endpoint, value) → new_channel_endpoint
+     The endpoint is consumed (linear); the returned one is the continuation. *)
+  ; ("Chan.send", VBuiltin ("Chan.send", function
+        | [VChan ce; v] -> chan_send ce v
+        | _ -> eval_error "Chan.send: expected (Chan, value)"))
+
+  (* Chan.recv(channel_endpoint) → (value, new_channel_endpoint)
+     Pops one value from the receive queue. *)
+  ; ("Chan.recv", VBuiltin ("Chan.recv", function
+        | [VChan ce] -> chan_recv ce
+        | _ -> eval_error "Chan.recv: expected Chan"))
+
+  (* Chan.close(channel_endpoint) → ()
+     Marks the endpoint closed. Must be done when session state is End. *)
+  ; ("Chan.close", VBuiltin ("Chan.close", function
+        | [VChan ce] -> chan_close ce
+        | _ -> eval_error "Chan.close: expected Chan"))
+
+  (* Chan.choose(channel_endpoint, :label) → new_channel_endpoint
+     Sends the chosen branch label to the other side (via chan_send), returns the channel. *)
+  ; ("Chan.choose", VBuiltin ("Chan.choose", function
+        | [VChan ce; (VAtom _ as v)]
+        | [VChan ce; (VString _ as v)] -> chan_send ce v
+        | _ -> eval_error "Chan.choose: expected (Chan, :label)"))
+
+  (* Chan.offer(channel_endpoint) → (:label, new_channel_endpoint)
+     Receives the branch label chosen by the other side (via chan_recv). *)
+  ; ("Chan.offer", VBuiltin ("Chan.offer", function
+        | [VChan ce] -> chan_recv ce
+        | _ -> eval_error "Chan.offer: expected Chan"))
   ]
 
 (* ------------------------------------------------------------------ *)

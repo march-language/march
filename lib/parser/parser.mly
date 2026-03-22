@@ -68,6 +68,7 @@
 %token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS USE NEEDS REQUIRES
 %token IMPORT ALIAS ONLY EXCEPT P_FN
 %token APP ON_START ON_STOP
+%token CHOOSE BY OFFER
 %token DBG DOC
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
 %token ONE_FOR_ONE ONE_FOR_ALL REST_FOR_ONE RESTART_KW
@@ -337,6 +338,12 @@ protocol_step:
     { ProtoMsg (sender, receiver, t) }
   | LOOP; DO; steps = list(protocol_step); END
     { ProtoLoop steps }
+  | CHOOSE; BY; chooser = upper_name; COLON; branches = nonempty_list(choose_branch); END
+    { ProtoChoice (chooser, branches) }
+
+choose_branch:
+  | PIPE; label = lower_name; ARROW; steps = list(protocol_step)
+    { (label, steps) }
 
 (** Nested module: mod Name do ... end *)
 mod_decl:
@@ -683,13 +690,23 @@ expr_app:
     { ECon (mk_name con $loc, args, mk_span ($loc)) }
   | e = expr_field { e }
 
-(** Field access: x.name — left-recursive for chained access: x.y.z *)
+(** Field access: x.name — left-recursive for chained access: x.y.z
+    Contextual keywords (send) are allowed as field names to support Chan.send(…). *)
 expr_field:
   | e = expr_field; DOT; name = lower_name
     { EField (e, name, mk_span ($loc)) }
   | e = expr_field; DOT; name = upper_name
     (* Module chain access: A.B.c or A.B.C — upper segments are sub-module names *)
     { EField (e, name, mk_span ($loc)) }
+  | e = expr_field; DOT; SEND
+    (* Allow `send` keyword as a field/method name: Chan.send(…) *)
+    { EField (e, mk_name "send" $loc, mk_span ($loc)) }
+  | e = expr_field; DOT; CHOOSE
+    (* Allow `choose` keyword as a field/method name: Chan.choose(…) *)
+    { EField (e, mk_name "choose" $loc, mk_span ($loc)) }
+  | e = expr_field; DOT; OFFER
+    (* Allow `offer` keyword as a field/method name: Chan.offer(…) *)
+    { EField (e, mk_name "offer" $loc, mk_span ($loc)) }
   | e = expr_atom { e }
 
 expr_atom:
