@@ -2788,6 +2788,108 @@ let base_env : env =
                       [VCon ("Close", [VInt 1006; VString "connection error"])]))
            | _ -> VCon ("Timeout", []))
         | _ -> eval_error "ws_select(fd, actor_fd, timeout_ms)"))
+
+    (* ── String module — direct builtins accessible as String.X ────── *)
+  ; ("String.chars", VBuiltin ("String.chars", function
+        | [VString s] ->
+          let chars = List.init (String.length s) (fun i -> VString (String.make 1 s.[i])) in
+          List.fold_right (fun c acc -> VCon ("Cons", [c; acc])) chars (VCon ("Nil", []))
+        | _ -> eval_error "String.chars: expected string"))
+  ; ("String.pad_left", VBuiltin ("String.pad_left", function
+        | [VString s; VInt width; VString fill] when String.length fill = 1 ->
+          let ls = String.length s in
+          if ls >= width then VString s
+          else VString (String.make (width - ls) fill.[0] ^ s)
+        | _ -> eval_error "String.pad_left: expected string, int, char-string"))
+  ; ("String.pad_right", VBuiltin ("String.pad_right", function
+        | [VString s; VInt width; VString fill] when String.length fill = 1 ->
+          let ls = String.length s in
+          if ls >= width then VString s
+          else VString (s ^ String.make (width - ls) fill.[0])
+        | _ -> eval_error "String.pad_right: expected string, int, char-string"))
+  ; ("String.repeat", VBuiltin ("String.repeat", function
+        | [VString s; VInt n] ->
+          let buf = Buffer.create (String.length s * max 0 n) in
+          for _ = 1 to n do Buffer.add_string buf s done;
+          VString (Buffer.contents buf)
+        | _ -> eval_error "String.repeat: expected string and int"))
+  ; ("String.reverse", VBuiltin ("String.reverse", function
+        | [VString s] ->
+          let n = String.length s in
+          VString (String.init n (fun i -> s.[n - 1 - i]))
+        | _ -> eval_error "String.reverse: expected string"))
+  ; ("String.split", VBuiltin ("String.split", function
+        | [VString s; VString sep] ->
+          let parts =
+            if sep = "" then
+              List.init (String.length s) (fun i -> String.make 1 s.[i])
+            else begin
+              let ls = String.length s and lsep = String.length sep in
+              let result = ref [] and start = ref 0 in
+              (try
+                 for i = 0 to ls - lsep do
+                   if String.sub s i lsep = sep then begin
+                     result := String.sub s !start (i - !start) :: !result;
+                     start := i + lsep
+                   end
+                 done
+               with _ -> ());
+              result := String.sub s !start (ls - !start) :: !result;
+              List.rev !result
+            end
+          in
+          List.fold_right (fun p acc -> VCon ("Cons", [VString p; acc]))
+            parts (VCon ("Nil", []))
+        | _ -> eval_error "String.split: expected two strings"))
+  ; ("String.contains", VBuiltin ("String.contains", function
+        | [VString s; VString sub] ->
+          let ls = String.length s and lsub = String.length sub in
+          if lsub = 0 then VBool true
+          else if ls < lsub then VBool false
+          else
+            let found = ref false in
+            for i = 0 to ls - lsub do
+              if String.sub s i lsub = sub then found := true
+            done;
+            VBool !found
+        | _ -> eval_error "String.contains: expected two strings"))
+  ; ("String.starts_with", VBuiltin ("String.starts_with", function
+        | [VString s; VString prefix] ->
+          let lp = String.length prefix in
+          VBool (String.length s >= lp && String.sub s 0 lp = prefix)
+        | _ -> eval_error "String.starts_with: expected two strings"))
+  ; ("String.ends_with", VBuiltin ("String.ends_with", function
+        | [VString s; VString suffix] ->
+          let ls = String.length s and lsuf = String.length suffix in
+          VBool (ls >= lsuf && String.sub s (ls - lsuf) lsuf = suffix)
+        | _ -> eval_error "String.ends_with: expected two strings"))
+  ; ("String.trim", VBuiltin ("String.trim", function
+        | [VString s] -> VString (String.trim s)
+        | _ -> eval_error "String.trim: expected string"))
+  ; ("String.to_upper", VBuiltin ("String.to_upper", function
+        | [VString s] -> VString (String.uppercase_ascii s)
+        | _ -> eval_error "String.to_upper: expected string"))
+  ; ("String.to_lower", VBuiltin ("String.to_lower", function
+        | [VString s] -> VString (String.lowercase_ascii s)
+        | _ -> eval_error "String.to_lower: expected string"))
+  ; ("String.replace", VBuiltin ("String.replace", function
+        | [VString s; VString old_; VString new_] ->
+          let lold = String.length old_ in
+          if lold = 0 then VString s
+          else begin
+            let ls = String.length s in
+            let idx = ref (-1) in
+            (try
+               for i = 0 to ls - lold do
+                 if String.sub s i lold = old_ then
+                   (idx := i; raise Exit)
+               done
+             with Exit -> ());
+            if !idx = -1 then VString s
+            else VString (String.sub s 0 !idx ^ new_ ^
+                          String.sub s (!idx + lold) (ls - !idx - lold))
+          end
+        | _ -> eval_error "String.replace: expected three strings"))
   ]
 
 (* ------------------------------------------------------------------ *)
