@@ -135,7 +135,7 @@ fn_decl:
   | FN; name = lower_name; LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
     { DFn ({ fn_name = name;
-             fn_vis = Public;
+             fn_vis = Private;
              fn_doc = None;
              fn_ret_ty = ret;
              fn_clauses = [{ fc_params = params;
@@ -194,7 +194,10 @@ fn_param:
 
 let_decl:
   | LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
-    { DLet ({ bind_pat = p; bind_ty = ty; bind_lin = Unrestricted; bind_expr = e },
+    { DLet (Private, { bind_pat = p; bind_ty = ty; bind_lin = Unrestricted; bind_expr = e },
+            mk_span ($loc)) }
+  | PUB; LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
+    { DLet (Public, { bind_pat = p; bind_ty = ty; bind_lin = Unrestricted; bind_expr = e },
             mk_span ($loc)) }
   | LET; _p = simple_pattern; _ty = option(type_annot); error
     { raise (March_errors.Errors.ParseError (
@@ -206,11 +209,19 @@ type_decl:
   | TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     variants = separated_nonempty_list(PIPE, variant)
     { let tps = match tparams with Some ps -> ps | None -> [] in
-      DType (name, tps, TDVariant variants, mk_span ($loc)) }
+      DType (Private, name, tps, TDVariant variants, mk_span ($loc)) }
   | TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     LBRACE; fields = separated_list(COMMA, field); RBRACE
     { let tps = match tparams with Some ps -> ps | None -> [] in
-      DType (name, tps, TDRecord fields, mk_span ($loc)) }
+      DType (Private, name, tps, TDRecord fields, mk_span ($loc)) }
+  | PUB; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
+    variants = separated_nonempty_list(PIPE, variant)
+    { let tps = match tparams with Some ps -> ps | None -> [] in
+      DType (Public, name, tps, TDVariant variants, mk_span ($loc)) }
+  | PUB; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
+    LBRACE; fields = separated_list(COMMA, field); RBRACE
+    { let tps = match tparams with Some ps -> ps | None -> [] in
+      DType (Public, name, tps, TDRecord fields, mk_span ($loc)) }
   | TYPE; _n = upper_name; error
     { raise (March_errors.Errors.ParseError (
         "I was expecting `=` after the type name here:",
@@ -229,7 +240,17 @@ actor_decl:
     sup = option(supervise_block);
     handlers = list(actor_handler);
     END
-    { DActor (name,
+    { DActor (Private, name,
+              { actor_state = fields; actor_init = init_expr; actor_handlers = handlers;
+                actor_supervise = sup },
+              mk_span ($loc)) }
+  | PUB; ACTOR; name = upper_name; DO;
+    STATE; LBRACE; fields = separated_list(COMMA, field); RBRACE;
+    INIT; init_expr = expr;
+    sup = option(supervise_block);
+    handlers = list(actor_handler);
+    END
+    { DActor (Public, name,
               { actor_state = fields; actor_init = init_expr; actor_handlers = handlers;
                 actor_supervise = sup },
               mk_span ($loc)) }
@@ -320,7 +341,7 @@ protocol_step:
 (** Nested module: mod Name do ... end *)
 mod_decl:
   | MOD; name = upper_name; DO; decls = list(decl); END
-    { DMod (name, Public, group_fn_clauses decls, mk_span ($loc)) }
+    { DMod (name, Private, group_fn_clauses decls, mk_span ($loc)) }
   | PUB; MOD; name = upper_name; DO; decls = list(decl); END
     { DMod (name, Public, group_fn_clauses decls, mk_span ($loc)) }
   | MOD; _n = upper_name; error

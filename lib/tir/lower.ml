@@ -1142,11 +1142,11 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
       match d with
       | Ast.DFn (def, _) ->
         fns := lower_fn_def def :: !fns
-      | Ast.DType (name, params, td, _) ->
+      | Ast.DType (_, name, params, td, _) ->
         (match lower_type_def name params td with
          | Some td' -> types := td' :: !types
          | None -> ())
-      | Ast.DLet (b, _) ->
+      | Ast.DLet (_, b, _) ->
         let rhs = lower_expr b.bind_expr in
         (match b.bind_pat with
          | Ast.PatVar n ->
@@ -1158,7 +1158,7 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
            } in
            top_lets := (v, rhs) :: !top_lets
          | _ -> ())
-      | Ast.DActor (name, actor_def, _) ->
+      | Ast.DActor (_, name, actor_def, _) ->
         let (new_types, new_fns) = lower_actor name.txt actor_def in
         types := List.rev_append new_types !types;
         fns   := List.rev_append new_fns   !fns
@@ -1173,7 +1173,7 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
                 let fn = lower_fn_def def in
                 let fn = rename_tir_vars prefix direct_fn_names fn in
                 fns := { fn with fn_name = prefix ^ fn.fn_name } :: !fns
-              | Ast.DType (tname, params, td, _) ->
+              | Ast.DType (_, tname, params, td, _) ->
                 (match lower_type_def tname params td with
                  | Some td' -> types := td' :: !types
                  | None -> ())

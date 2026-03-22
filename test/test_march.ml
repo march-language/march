@@ -1626,7 +1626,7 @@ let test_repl_doc_registered () =
 (* mod typecheck: DMod exposes names with prefix *)
 let test_tc_mod_typecheck () =
   let ctx = typecheck {|mod Test do
-    mod Foo do
+    pub mod Foo do
       pub fn bar() do 42 end
     end
     fn main() do Foo.bar() end
@@ -2461,7 +2461,7 @@ let test_repl_jit_cross_line_let () =
         | March_ast.Ast.ReplDecl d ->
           let d' = March_desugar.Desugar.desugar_decl d in
           let (bind_name, bind_expr) = match d' with
-            | March_ast.Ast.DLet (b, _) ->
+            | March_ast.Ast.DLet (_, b, _) ->
               let n = match b.bind_pat with
                 | March_ast.Ast.PatVar v -> v.txt
                 | _ -> failwith "expected PatVar"
@@ -2497,7 +2497,7 @@ let test_repl_jit_cross_line_fn () =
         | March_ast.Ast.ReplDecl d ->
           let d' = March_desugar.Desugar.desugar_decl d in
           let (bind_name, bind_expr) = match d' with
-            | March_ast.Ast.DLet (b, _) ->
+            | March_ast.Ast.DLet (_, b, _) ->
               let name = match b.bind_pat with
                 | March_ast.Ast.PatVar n -> n.txt
                 | _ -> failwith "expected PatVar"
@@ -2548,7 +2548,7 @@ let test_repl_jit_cross_line_hof () =
         | March_ast.Ast.ReplDecl d ->
           let d' = March_desugar.Desugar.desugar_decl d in
           let (bind_name, bind_expr) = match d' with
-            | March_ast.Ast.DLet (b, _) ->
+            | March_ast.Ast.DLet (_, b, _) ->
               let nm = match b.bind_pat with
                 | March_ast.Ast.PatVar v -> v.txt | _ -> assert false
               in (nm, b.bind_expr)
@@ -2562,7 +2562,7 @@ let test_repl_jit_cross_line_hof () =
         | March_ast.Ast.ReplDecl d ->
           let d' = March_desugar.Desugar.desugar_decl d in
           let (bind_name, bind_expr) = match d' with
-            | March_ast.Ast.DLet (b, _) ->
+            | March_ast.Ast.DLet (_, b, _) ->
               let name = match b.bind_pat with
                 | March_ast.Ast.PatVar n -> n.txt
                 | _ -> failwith "expected PatVar"
@@ -2693,7 +2693,7 @@ let test_repl_list_literal () =
         | March_ast.Ast.ReplDecl d ->
           let d' = March_desugar.Desugar.desugar_decl d in
           let (bind_name, bind_expr) = match d' with
-            | March_ast.Ast.DLet (b, _) ->
+            | March_ast.Ast.DLet (_, b, _) ->
               let n = match b.bind_pat with
                 | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "expected PatVar"
               in (n, b.bind_expr)
@@ -2736,7 +2736,7 @@ let test_repl_stdlib_on_list () =
         | March_ast.Ast.ReplDecl d ->
           let d' = March_desugar.Desugar.desugar_decl d in
           let (bind_name, bind_expr) = match d' with
-            | March_ast.Ast.DLet (b, _) ->
+            | March_ast.Ast.DLet (_, b, _) ->
               let n = match b.bind_pat with
                 | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "expected PatVar"
               in (n, b.bind_expr)
@@ -2770,7 +2770,7 @@ let test_repl_var_redefinition () =
         | March_ast.Ast.ReplDecl d ->
           let d' = March_desugar.Desugar.desugar_decl d in
           let (bind_name, bind_expr) = match d' with
-            | March_ast.Ast.DLet (b, _) ->
+            | March_ast.Ast.DLet (_, b, _) ->
               let n = match b.bind_pat with
                 | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "PatVar"
               in (n, b.bind_expr)
@@ -2783,7 +2783,7 @@ let test_repl_var_redefinition () =
         | March_ast.Ast.ReplDecl d ->
           let d' = March_desugar.Desugar.desugar_decl d in
           let (bind_name, bind_expr) = match d' with
-            | March_ast.Ast.DLet (b, _) ->
+            | March_ast.Ast.DLet (_, b, _) ->
               let n = match b.bind_pat with
                 | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "PatVar"
               in (n, b.bind_expr)
@@ -2833,7 +2833,7 @@ let test_repl_stdlib_chain () =
         | March_ast.Ast.ReplDecl d ->
           let d' = March_desugar.Desugar.desugar_decl d in
           let (bind_name, bind_expr) = match d' with
-            | March_ast.Ast.DLet (b, _) ->
+            | March_ast.Ast.DLet (_, b, _) ->
               let n = match b.bind_pat with
                 | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "PatVar"
               in (n, b.bind_expr)
@@ -2875,7 +2875,7 @@ let test_repl_expr_after_let () =
         | March_ast.Ast.ReplDecl d ->
           let d' = March_desugar.Desugar.desugar_decl d in
           let (bind_name, bind_expr) = match d' with
-            | March_ast.Ast.DLet (b, _) ->
+            | March_ast.Ast.DLet (_, b, _) ->
               let n = match b.bind_pat with
                 | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "PatVar"
               in (n, b.bind_expr)
@@ -3019,7 +3019,7 @@ let test_repl_jit_general_interaction () =
          | March_ast.Ast.ReplDecl d ->
            let d' = March_desugar.Desugar.desugar_decl d in
            let (bind_name, bind_expr) = match d' with
-             | March_ast.Ast.DLet (b, _) ->
+             | March_ast.Ast.DLet (_, b, _) ->
                let n = match b.bind_pat with
                  | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "PatVar"
                in (n, b.bind_expr)
@@ -7395,7 +7395,7 @@ let test_parse_p_fn_private () =
       (def.March_ast.Ast.fn_vis = March_ast.Ast.Private)
   | _ -> Alcotest.fail "expected DFn"
 
-(* bare fn produces fn_vis = Public *)
+(* bare fn produces fn_vis = Private *)
 let test_parse_fn_public () =
   let src = {|mod Test do
     fn visible(x) do x end
@@ -7403,21 +7403,21 @@ let test_parse_fn_public () =
   let m = parse_module src in
   match m.March_ast.Ast.mod_decls with
   | [March_ast.Ast.DFn (def, _)] ->
-    Alcotest.(check bool) "fn → Public" true
-      (def.March_ast.Ast.fn_vis = March_ast.Ast.Public)
+    Alcotest.(check bool) "bare fn → Private" true
+      (def.March_ast.Ast.fn_vis = March_ast.Ast.Private)
   | _ -> Alcotest.fail "expected DFn"
 
 (* ── Visibility ─────────────────────────────────────────────────────────── *)
 
-(* bare fn inside nested mod is accessible from outside (public default) *)
+(* bare fn inside nested mod is NOT accessible from outside (private by default) *)
 let test_tc_fn_is_public () =
   let ctx = typecheck {|mod Test do
-    mod Foo do
+    pub mod Foo do
       fn bar() do 42 end
     end
     fn main() do Foo.bar() end
   end|} in
-  Alcotest.(check bool) "bare fn is public" false (has_errors ctx)
+  Alcotest.(check bool) "bare fn is private — error accessing Foo.bar" true (has_errors ctx)
 
 (* p_fn inside nested mod is NOT accessible from outside *)
 let test_tc_p_fn_is_private () =
@@ -7434,8 +7434,8 @@ let test_tc_p_fn_is_private () =
 (* import Foo brings all public functions into bare scope *)
 let test_tc_import_all () =
   let ctx = typecheck {|mod Test do
-    mod Foo do
-      fn add(x, y) do x + y end
+    pub mod Foo do
+      pub fn add(x, y) do x + y end
     end
     import Foo
     fn main() do add(1, 2) end
@@ -7445,9 +7445,9 @@ let test_tc_import_all () =
 (* import Foo, only: [add] brings only add into scope *)
 let test_tc_import_only () =
   let ctx = typecheck {|mod Test do
-    mod Foo do
-      fn add(x, y) do x + y end
-      fn mul(x, y) do x * y end
+    pub mod Foo do
+      pub fn add(x, y) do x + y end
+      pub fn mul(x, y) do x * y end
     end
     import Foo, only: [add]
     fn main() do add(1, 2) end
@@ -7457,9 +7457,9 @@ let test_tc_import_only () =
 (* import Foo, except: [secret] — 'secret' is NOT in scope *)
 let test_tc_import_except () =
   let ctx = typecheck {|mod Test do
-    mod Foo do
-      fn pub1() do 1 end
-      fn secret() do 99 end
+    pub mod Foo do
+      pub fn pub1() do 1 end
+      pub fn secret() do 99 end
     end
     import Foo, except: [secret]
     fn main() do secret() end
@@ -7470,9 +7470,9 @@ let test_tc_import_except () =
 
 let test_tc_alias_qualified () =
   let ctx = typecheck {|mod Test do
-    mod Long do
-      mod Name do
-        fn f() do 42 end
+    pub mod Long do
+      pub mod Name do
+        pub fn f() do 42 end
       end
     end
     alias Long.Name, as: Short
@@ -7559,9 +7559,9 @@ let test_eval_nested_module () =
 
 let test_tc_nested_module () =
   let ctx = typecheck {|mod Test do
-    mod A do
-      mod B do
-        fn value() do 42 end
+    pub mod A do
+      pub mod B do
+        pub fn value() do 42 end
       end
     end
     fn go() do A.B.value() end
@@ -7585,8 +7585,8 @@ let has_unused_warning ctx =
 let test_warn_unused_alias () =
   (* alias Foo, as: F where F is never used → should warn *)
   let ctx = typecheck {|mod Test do
-    mod Foo do
-      fn bar() do 1 end
+    pub mod Foo do
+      pub fn bar() do 1 end
     end
     alias Foo, as: F
     fn main() do 0 end
@@ -7596,9 +7596,9 @@ let test_warn_unused_alias () =
 let test_warn_unused_import_specific () =
   (* import Mod, only: [f, g] where g is unused → warn about g *)
   let ctx = typecheck {|mod Test do
-    mod Math do
-      fn add(x, y) do x + y end
-      fn mul(x, y) do x * y end
+    pub mod Math do
+      pub fn add(x, y) do x + y end
+      pub fn mul(x, y) do x * y end
     end
     import Math, only: [add, mul]
     fn main() do add(1, 2) end
@@ -7608,8 +7608,8 @@ let test_warn_unused_import_specific () =
 let test_warn_unused_import_all () =
   (* import Mod where nothing from Mod is used → warn *)
   let ctx = typecheck {|mod Test do
-    mod Utils do
-      fn helper() do 42 end
+    pub mod Utils do
+      pub fn helper() do 42 end
     end
     import Utils
     fn main() do 0 end
@@ -7619,13 +7619,119 @@ let test_warn_unused_import_all () =
 let test_no_warn_import_used () =
   (* import Mod, only: [f] where f IS used → no warning *)
   let ctx = typecheck {|mod Test do
-    mod Math do
-      fn square(x) do x * x end
+    pub mod Math do
+      pub fn square(x) do x * x end
     end
     import Math, only: [square]
     fn main() do square(5) end
   end|} in
   Alcotest.(check bool) "used import no warn" false (has_unused_warning ctx)
+
+(* ── Phase 1: pub/private visibility tests ────────────────────────────── *)
+
+(* pub fn in nested mod is accessible from outside *)
+let test_tc_pub_fn_accessible () =
+  let ctx = typecheck {|mod Test do
+    pub mod Foo do
+      pub fn bar() do 42 end
+    end
+    fn main() do Foo.bar() end
+  end|} in
+  Alcotest.(check bool) "pub fn accessible from outside" false (has_errors ctx)
+
+(* bare fn in nested mod (Private) is NOT accessible from outside *)
+let test_tc_bare_fn_private () =
+  let ctx = typecheck {|mod Test do
+    pub mod Foo do
+      fn secret() do 42 end
+    end
+    fn main() do Foo.secret() end
+  end|} in
+  Alcotest.(check bool) "bare fn is private — error from outside" true (has_errors ctx)
+
+(* private mod makes the whole module inaccessible *)
+let test_tc_private_mod_inaccessible () =
+  (* Hidden is a private submodule of Test; main is in Outer, outside Test,
+     so Test.Hidden.f() should fail because Hidden is not in Test's pub_set *)
+  let ctx = typecheck {|mod Outer do
+    pub mod Test do
+      mod Hidden do
+        pub fn f() do 1 end
+      end
+    end
+    fn main() do Test.Hidden.f() end
+  end|} in
+  Alcotest.(check bool) "private mod — Hidden.f not accessible from outside" true (has_errors ctx)
+
+(* pub let is accessible from outside *)
+let test_tc_pub_let_accessible () =
+  let ctx = typecheck {|mod Test do
+    pub mod M do
+      pub let x = 42
+    end
+    fn main() do M.x end
+  end|} in
+  Alcotest.(check bool) "pub let accessible from outside" false (has_errors ctx)
+
+(* bare let (Private) is NOT accessible from outside *)
+let test_tc_private_let () =
+  let ctx = typecheck {|mod Test do
+    pub mod M do
+      let x = 42
+    end
+    fn main() do M.x end
+  end|} in
+  Alcotest.(check bool) "bare let is private — error from outside" true (has_errors ctx)
+
+(* pub type exports constructors; bare type hides them *)
+let test_tc_pub_type_ctors_accessible () =
+  (* pub type in pub mod exports ctors to outer scope unqualified *)
+  let ctx = typecheck {|mod Test do
+    pub mod M do
+      pub type Color = Red | Green | Blue
+    end
+    fn main() do Red end
+  end|} in
+  Alcotest.(check bool) "pub type ctors accessible from outside" false (has_errors ctx)
+
+let test_tc_private_type_ctors_hidden () =
+  (* bare type (Private) does NOT export ctors to outer scope *)
+  let ctx = typecheck {|mod Test do
+    pub mod M do
+      type Color = Red | Green | Blue
+    end
+    fn main() do Red end
+  end|} in
+  Alcotest.(check bool) "bare type ctors hidden outside" true (has_errors ctx)
+
+(* Phase 2: sig type-level conformance tests *)
+
+(* sig fn type mismatch is an error *)
+let test_tc_sig_type_mismatch () =
+  let ctx = typecheck {|mod Test do
+    sig Foo do
+      fn bar : Int -> Int
+    end
+    pub mod Foo do
+      pub fn bar(x : String) : String do x end
+    end
+  end|} in
+  Alcotest.(check bool) "sig type mismatch — error" true (has_errors ctx)
+
+(* sig with opaque type hides constructors *)
+let test_tc_sig_opaque_hides_ctors () =
+  (* sig opaque type hides constructors; access to Empty should error *)
+  let ctx = typecheck {|mod Test do
+    sig Stack do
+      type Stack a
+    end
+    pub mod Stack do
+      pub type Stack(a) = Empty | Push(a, Stack(a))
+      pub fn empty() : Stack(a) do Empty end
+    end
+    fn main() do Empty end
+  end|} in
+  Alcotest.(check bool) "opaque type — ctors hidden outside" true (has_errors ctx)
 
 (* ── Option builtin combinator tests ──────────────────────────────────── *)
 
@@ -9204,6 +9310,17 @@ let () =
         Alcotest.test_case "warn unused import specific" `Quick test_warn_unused_import_specific;
         Alcotest.test_case "warn unused import all"      `Quick test_warn_unused_import_all;
         Alcotest.test_case "no warn when import used"    `Quick test_no_warn_import_used;
+        (* Phase 1: visibility *)
+        Alcotest.test_case "pub fn accessible"           `Quick test_tc_pub_fn_accessible;
+        Alcotest.test_case "bare fn is private"          `Quick test_tc_bare_fn_private;
+        Alcotest.test_case "private mod inaccessible"    `Quick test_tc_private_mod_inaccessible;
+        Alcotest.test_case "pub let accessible"          `Quick test_tc_pub_let_accessible;
+        Alcotest.test_case "private let hidden"          `Quick test_tc_private_let;
+        Alcotest.test_case "pub type ctors accessible"   `Quick test_tc_pub_type_ctors_accessible;
+        Alcotest.test_case "private type ctors hidden"   `Quick test_tc_private_type_ctors_hidden;
+        (* Phase 2: sig conformance *)
+        Alcotest.test_case "sig type mismatch"           `Quick test_tc_sig_type_mismatch;
+        Alcotest.test_case "sig opaque hides ctors"      `Quick test_tc_sig_opaque_hides_ctors;
       ]);
       ("app_shutdown", [
         Alcotest.test_case "lex app keyword"                 `Quick test_lexer_keyword_app;
