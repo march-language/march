@@ -143,8 +143,10 @@ type decl =
 [@@deriving show]
 
 and app_def = {
-  app_name : name;
-  app_body : expr;
+  app_name     : name;
+  app_body     : expr;               (** Returns Supervisor.Spec *)
+  app_on_start : expr option;        (** Runs after tree is up *)
+  app_on_stop  : expr option;        (** Runs after tree is down *)
 }
 [@@deriving show]
 

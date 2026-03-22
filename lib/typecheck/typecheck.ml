@@ -813,6 +813,7 @@ let builtin_bindings : (string * scheme) list =
      Mono (TArrow (t_atom, t_list t_unit)));   (* simplified; full type is List({pid,...}) *)
     ("Supervisor.count_children",
      Mono (TArrow (t_atom, TCon ("SupervisorSpec", []))));  (* simplified return type *)
+    ("App.stop",        Mono (TArrow (t_unit, t_unit)));
   ]
 
 let builtin_types : (string * int) list =

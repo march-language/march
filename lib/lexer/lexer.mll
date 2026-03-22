@@ -66,6 +66,8 @@ let () =
       ("except", EXCEPT);
       ("p_fn", P_FN);
       ("app", APP);
+      ("on_start", ON_START);
+      ("on_stop",  ON_STOP);
     ]
 }
 
