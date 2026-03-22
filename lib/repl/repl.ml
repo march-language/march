@@ -49,10 +49,11 @@ let history_size () =
 (** Build scope panel entries from eval env + typecheck env.
     [baseline_env] is the env after stdlib loading — names present there are hidden. *)
 let user_scope eval_env tc_env result_h ~baseline_env =
-  let baseline_names = List.map fst baseline_env in
+  let baseline_set = Hashtbl.create 64 in
+  List.iter (fun (name, _) -> Hashtbl.replace baseline_set name ()) baseline_env;
   let seen = Hashtbl.create 16 in
   let scope = List.filter_map (fun (name, v) ->
-    if List.mem name baseline_names
+    if Hashtbl.mem baseline_set name
     || name = "v"
     || (String.length name > 0 && name.[0] = '_')
     || Hashtbl.mem seen name
@@ -697,6 +698,19 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
   let watch_list   : (string * March_ast.Ast.expr) list ref = ref [] in
   (* Auto-type display: when true, print inferred type after each expression. *)
   let show_type    = ref false in
+  (* scope_baseline is constant: stdlib names to hide from the right pane. *)
+  let scope_baseline = if is_debug then base_e else e0 in
+  (* Cached right-pane data — recomputed only after Submit/env changes,
+     never on plain Redraw keystrokes.  This avoids O(|env|²) work per key. *)
+  let cached_scope   = ref ([] : Tui.scope_entry list) in
+  let cached_result  = ref (None : (string * string) option) in
+  let cached_actors  = ref ([] : March_eval.Eval.actor_info list) in
+  let refresh_scope () =
+    let (sc, res) = user_scope !env !tc_env result_h ~baseline_env:scope_baseline in
+    cached_scope  := sc;
+    cached_result := res;
+    cached_actors := March_eval.Eval.list_actors ()
+  in
   let base_status  =
     if is_debug then "dbg  :continue  :back/:forward  :where  :goto  :diff  :find  :help"
     else "march  :help  Tab  ↑↓: hist  wheel/PgUp: scroll"
@@ -714,16 +728,13 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
       Notty.I.(Notty.I.string Notty.A.empty pad_str <|> Highlight.highlight line)
     ) (List.rev !inp.Input.multiline_buf) in
     let transcript = !hist_lines @ cont_imgs in
-    (* In debug mode use base_e (primitive builtins only) as baseline so user vars
-       appear; in normal mode use e0 (base + stdlib) to hide stdlib.
-       VClosure/VBuiltin values are filtered separately in user_scope. *)
-    let scope_baseline = if is_debug then base_e else e0 in
-    let (scope, result_latest) = user_scope !env !tc_env result_h ~baseline_env:scope_baseline in
+    let scope         = !cached_scope in
+    let result_latest = !cached_result in
     let (comp_items, comp_sel) = match !comp with
       | CompOff -> ([], 0)
       | CompOn { items; sel } -> (items, sel)
     in
-    let actors = March_eval.Eval.list_actors () in
+    let actors = !cached_actors in
     (* Scroll indicator at the FRONT so it is visible even on narrow terminals *)
     let status =
       if !scroll_offset > 0
@@ -1368,6 +1379,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
               (Printf.sprintf ":save %s — session tracking not yet implemented" path)
         | src when String.trim src = "" -> ()
         | src -> process_src src);
+       refresh_scope ();
        render_frame ()
      | Input.HistoryPrev ->
        (match History.prev hist with
@@ -1415,6 +1427,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
   (match debug_hooks with
    | Some h -> nav_context h
    | None   -> ());
+  refresh_scope ();
   render_frame ();
 
   while !running do
