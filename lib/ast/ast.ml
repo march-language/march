@@ -139,6 +139,13 @@ type decl =
   | DNeeds of name list list * span
   (** Capability manifest: [needs IO.Network, IO.Clock]
       Each [name list] is one capability path, e.g. [["IO";"Network"]; ["IO";"Clock"]] *)
+  | DApp of app_def * span             (** Application entry point: app Name do ... end *)
+[@@deriving show]
+
+and app_def = {
+  app_name : name;
+  app_body : expr;
+}
 [@@deriving show]
 
 and use_decl = {

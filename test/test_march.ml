@@ -7224,9 +7224,85 @@ let test_list_sort_by_ascending () =
   let ns = List.map (function March_eval.Eval.VInt n -> n | _ -> failwith "int") (vlist v) in
   Alcotest.(check (list int)) "List.sort_by ascending" [1; 2; 5; 8] ns
 
+(* ------------------------------------------------------------------ *)
+(* App declaration tests                                              *)
+(* ------------------------------------------------------------------ *)
+
+(** app parses and desugars to __app_init__ in env *)
+let test_app_desugars_to_app_init () =
+  let src = {|mod AppTest do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    app MyApp do
+      Supervisor.spec(:one_for_one, [worker(Counter)])
+    end
+  end|} in
+  let env = eval_module src in
+  Alcotest.(check bool) "__app_init__ exists in env" true
+    (List.mem_assoc "__app_init__" env)
+
+(** run_module with app declaration spawns actors and runs scheduler *)
+let test_app_spawns_actors () =
+  let src = {|mod AppTest do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    app MyApp do
+      Supervisor.spec(:one_for_one, [worker(Counter)])
+    end
+  end|} in
+  let m =
+    let lexbuf = Lexing.from_string src in
+    let ast = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+    March_desugar.Desugar.desugar_module ast
+  in
+  March_eval.Eval.run_module m;
+  (* After run_module, at least one actor should have been spawned *)
+  let count = Hashtbl.length March_eval.Eval.actor_registry in
+  Alcotest.(check bool) "at least one actor spawned" true (count >= 1)
+
+(** mutual exclusivity: main + app raises *)
+let test_app_main_exclusive () =
+  let src = {|mod Bad do
+    fn main() do 42 end
+    app MyApp do
+      Supervisor.spec(:one_for_one, [])
+    end
+  end|} in
+  let raised =
+    try
+      let lexbuf = Lexing.from_string src in
+      let ast = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+      ignore (March_desugar.Desugar.desugar_module ast);
+      false
+    with Failure _ -> true
+  in
+  Alcotest.(check bool) "main + app raises" true raised
+
+(** APP token lexes correctly *)
+let test_lexer_keyword_app () =
+  let lexbuf = Lexing.from_string "app" in
+  let tok = March_lexer.Lexer.token lexbuf in
+  Alcotest.(check bool) "lexes app keyword" true
+    (match tok with March_parser.Parser.APP -> true | _ -> false)
+
 let () =
   Alcotest.run "march"
     [
+      ( "app",
+        [
+          Alcotest.test_case "app keyword lexes"       `Quick test_lexer_keyword_app;
+          Alcotest.test_case "app desugars to init"    `Quick (with_reset test_app_desugars_to_app_init);
+          Alcotest.test_case "app spawns actors"       `Quick (with_reset test_app_spawns_actors);
+          Alcotest.test_case "main + app exclusive"    `Quick test_app_main_exclusive;
+        ] );
       ( "lexer",
         [
           Alcotest.test_case "integer" `Quick test_lexer_int;
@@ -7235,6 +7311,7 @@ let () =
           Alcotest.test_case "do keyword" `Quick test_lexer_keyword_do;
           Alcotest.test_case "end keyword" `Quick test_lexer_keyword_end;
           Alcotest.test_case "mod keyword" `Quick test_lexer_keyword_mod;
+          Alcotest.test_case "app keyword" `Quick test_lexer_keyword_app;
           Alcotest.test_case "string" `Quick test_lexer_string;
           Alcotest.test_case "atom" `Quick test_lexer_atom;
           Alcotest.test_case "pipe arrow" `Quick test_lexer_pipe_arrow;

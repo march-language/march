@@ -3382,6 +3382,55 @@ let run_scheduler () =
 
 let () = run_scheduler_hook := run_scheduler
 
+(* ------------------------------------------------------------------ *)
+(* App / Supervisor machinery                                          *)
+(* ------------------------------------------------------------------ *)
+
+(** Convert a March list value (VCon Cons/Nil) to an OCaml list of values. *)
+let rec march_list_to_list = function
+  | VCon ("Nil", []) -> []
+  | VCon ("Cons", [h; t]) -> h :: march_list_to_list t
+  | v -> eval_error "spawn_from_spec: expected list, got %s" (value_to_string v)
+
+(** Spawn all children described in a supervisor spec record and run the scheduler.
+    Spec shape: { strategy = :one_for_one, children = [ChildSpec, ...] }
+    ChildSpec shape: { actor = "Name", restart = :permanent } *)
+let spawn_from_spec (spec : value) : unit =
+  match spec with
+  | VRecord fields ->
+    let children_val = match List.assoc_opt "children" fields with
+      | Some v -> v
+      | None -> eval_error "spawn_from_spec: spec missing 'children' field"
+    in
+    let children = march_list_to_list children_val in
+    List.iter (fun child ->
+      match child with
+      | VRecord child_fields ->
+        let actor_name = match List.assoc_opt "actor" child_fields with
+          | Some (VString s) -> s
+          | Some other -> eval_error "spawn_from_spec: actor field should be a string, got %s"
+                            (value_to_string other)
+          | None -> eval_error "spawn_from_spec: child spec missing 'actor' field"
+        in
+        (match Hashtbl.find_opt actor_defs_tbl actor_name with
+         | None -> eval_error "spawn_from_spec: unknown actor '%s'" actor_name
+         | Some (def, env_ref) ->
+           let pid = !next_pid in
+           next_pid := pid + 1;
+           let init_state = eval_expr !env_ref def.actor_init in
+           let inst = {
+             ai_name = actor_name; ai_def = def; ai_env_ref = env_ref;
+             ai_state = init_state; ai_alive = true;
+             ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
+             ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
+             ai_resources = [] } in
+           Hashtbl.add actor_registry pid inst)
+      | other -> eval_error "spawn_from_spec: expected child spec record, got %s"
+                   (value_to_string other)
+    ) children
+  | other -> eval_error "spawn_from_spec: expected supervisor spec record, got %s"
+               (value_to_string other)
+
 (** Task builtins: spawn, await, await_unwrap, yield.
     Placed after [apply] because [task_spawn] calls [apply] to eagerly
     execute the thunk (Phase 1: single-threaded cooperative scheduler). *)
@@ -3460,6 +3509,19 @@ let task_builtins : env =
 
   (* Phase 5: task_spawn_link — spawn a task linked to an actor pid.
      If the linked actor crashes, the task is cancelled (or vice versa). *)
+  (* App/Supervisor builtins *)
+  ; ("worker", VBuiltin ("worker", function
+      | [VCon (name, [])] ->
+        VRecord [("actor", VString name); ("restart", VAtom "permanent")]
+      | [VString name] ->
+        VRecord [("actor", VString name); ("restart", VAtom "permanent")]
+      | _ -> eval_error "worker: expected an actor name"))
+
+  ; ("Supervisor.spec", VBuiltin ("Supervisor.spec", function
+      | [strategy; children] ->
+        VRecord [("strategy", strategy); ("children", children)]
+      | _ -> eval_error "Supervisor.spec: expected (strategy, children)"))
+
   ; ("task_spawn_link", VBuiltin ("task_spawn_link", function
     | [thunk; VPid linked_pid] ->
       let tid = !next_task_id in
@@ -3650,6 +3712,10 @@ let rec eval_decl (env : env) (d : decl) : env =
 
   | DProtocol _ | DSig _ | DInterface _ | DExtern _ | DNeeds _ -> env
 
+  | DApp _ ->
+    (* DApp is desugared to DFn(__app_init__) before eval; reaching here is a bug. *)
+    env
+
   | DUse (ud, _) ->
     let prefix = String.concat "." (List.map (fun (n : name) -> n.txt) ud.use_path) ^ "." in
     (match ud.use_sel with
@@ -3805,8 +3871,16 @@ let eval_module_env (m : module_) : env =
     processes them all before the program exits. *)
 let run_module (m : module_) : unit =
   let env = eval_module_env m in
-  match List.assoc_opt "main" env with
-  | None   -> ()
-  | Some v ->
-    let _ = apply v [] in
+  match List.assoc_opt "__app_init__" env with
+  | Some init_fn ->
+    (* App entry point: call __app_init__() to get the supervisor spec,
+       spawn all children, then run the scheduler. *)
+    let spec = apply init_fn [] in
+    spawn_from_spec spec;
     run_scheduler ()
+  | None ->
+    match List.assoc_opt "main" env with
+    | None   -> ()
+    | Some v ->
+      let _ = apply v [] in
+      run_scheduler ()
