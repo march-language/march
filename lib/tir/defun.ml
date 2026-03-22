@@ -58,7 +58,9 @@ let builtin_names : StringSet.t =
       (* Monitor/supervision builtins *)
       "demonitor"; "monitor"; "mailbox_size";
       "run_until_idle"; "register_resource"; "get_cap";
-      "send_checked"; "pid_of_int"; "get_actor_field" ]
+      "send_checked"; "pid_of_int"; "get_actor_field";
+      (* Comparison builtins used by derived Ord instances *)
+      "march_compare_int"; "march_compare_float"; "march_compare_string" ]
 
 (* ── Phase 0: collect top-level names ────────────────────────────── *)
 
