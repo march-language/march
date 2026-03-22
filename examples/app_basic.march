@@ -1,0 +1,16 @@
+-- Simplest possible app: a Counter actor managed by a supervisor.
+-- Run with: dune exec march -- examples/app_basic.march
+
+mod AppDemo do
+  actor Counter do
+    state { count : Int }
+    init  { count = 0 }
+    on Inc() do { count = state.count + 1 } end
+  end
+
+  app MyApp do
+    Supervisor.spec(:one_for_one, [
+      worker(Counter)
+    ])
+  end
+end
