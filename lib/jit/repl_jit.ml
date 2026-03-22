@@ -326,17 +326,19 @@ let precompile_stdlib ctx
                   (March_tir.Defun.get_lambda_counter ()));
              close_out nc
            with _ -> ());
+           (* Only mark functions as compiled if the .so was actually loaded.
+              If we mark them before dlopen, future fragments would declare them
+              as extern and then fail at link time with "symbol not found". *)
            (try
              let handle = Jit.dlopen so_path in
-             ctx.handles <- handle :: ctx.handles
+             ctx.handles <- handle :: ctx.handles;
+             List.iter (fun (f : March_tir.Tir.fn_def) ->
+               Hashtbl.replace ctx.compiled_fns f.fn_name ()
+             ) stdlib_fns
            with _ -> ())
          | _ ->
            (try Sys.remove so_path with _ -> ());
-           let _ = Buffer.contents errbuf in ());
-        (* Mark functions as compiled regardless of outcome *)
-        List.iter (fun (f : March_tir.Tir.fn_def) ->
-          Hashtbl.replace ctx.compiled_fns f.fn_name ()
-        ) stdlib_fns
+           let _ = Buffer.contents errbuf in ())
       end
     with _ -> ())  (* Non-fatal *)
   end
