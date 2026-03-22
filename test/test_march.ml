@@ -7656,7 +7656,7 @@ let test_worker_named_spec () =
     end
 
     fn main() do
-      worker(Counter, :my_svc)
+      worker(Counter, :permanent, {name: :my_svc})
     end
   end|} in
   let env = eval_module src in
@@ -7666,7 +7666,7 @@ let test_worker_named_spec () =
      let name_field = List.assoc_opt "name" fields in
      Alcotest.(check bool) "worker named spec has name field" true
        (name_field = Some (March_eval.Eval.VAtom "my_svc"))
-   | _ -> Alcotest.fail "expected VRecord from worker/2")
+   | _ -> Alcotest.fail "expected VRecord from worker/3")
 
 (** run_module with a named app child registers it in process_registry *)
 let test_whereis_named () =
@@ -7678,7 +7678,7 @@ let test_whereis_named () =
     end
 
     app MyApp do
-      Supervisor.spec(:one_for_one, [worker(Counter, :counter_svc)])
+      Supervisor.spec(:one_for_one, [worker(Counter, :permanent, {name: :counter_svc})])
     end
   end|} in
   let m =
@@ -7715,7 +7715,7 @@ let test_whereis_bang_unknown () =
 (** When a supervised actor is killed and restarted, its registered name
     is rebound to the new pid automatically. *)
 let test_name_reregisters_on_restart () =
-  let _env = eval_module {|mod Test do
+  let env = eval_module {|mod Test do
     actor Worker do
       state { count : Int }
       init { count = 0 }
@@ -7736,7 +7736,7 @@ let test_name_reregisters_on_restart () =
       spawn(Supervisor)
     end
   end|} in
-  let sup_pid = match call_fn _env "main" [] with
+  let sup_pid = match call_fn env "main" [] with
     | March_eval.Eval.VPid p -> p | _ -> -1 in
   let w1_pid = get_supervisor_child_pid sup_pid "worker" in
   Alcotest.(check bool) "initial worker pid >= 0" true (w1_pid >= 0);
@@ -7753,6 +7753,208 @@ let test_name_reregisters_on_restart () =
   (* Old pid no longer in pid_to_registry_name *)
   let old_name = Hashtbl.find_opt March_eval.Eval.pid_to_registry_name w1_pid in
   Alcotest.(check bool) "old pid removed from name map" true (old_name = None)
+
+(* ------------------------------------------------------------------ *)
+(* Dynamic Supervisor tests                                           *)
+(* ------------------------------------------------------------------ *)
+
+(** Helper: get list of live child pids from a dynamic supervisor. *)
+let dyn_sup_children name =
+  match Hashtbl.find_opt March_eval.Eval.dyn_sup_registry name with
+  | None -> []
+  | Some ds -> ds.March_eval.Eval.ds_children
+
+(** Basic: dynamic_supervisor registers correctly, start_child adds a child. *)
+let test_dyn_sup_start_child () =
+  let env = eval_module {|mod Test do
+    actor Worker do
+      state { n : Int }
+      init { n = 0 }
+      on Inc() do { n = state.n + 1 } end
+    end
+
+    fn main() do
+      dynamic_supervisor(:workers, :one_for_one)
+      let spec = worker(Worker)
+      Supervisor.start_child(:workers, spec)
+    end
+  end|} in
+  let result = call_fn env "main" [] in
+  (* start_child should return Ok(pid) *)
+  let ok = match result with
+    | March_eval.Eval.VCon ("Ok", [March_eval.Eval.VInt _]) -> true
+    | _ -> false in
+  Alcotest.(check bool) "start_child returns Ok(pid)" true ok;
+  (* Dynamic supervisor should have exactly 1 child *)
+  let children = dyn_sup_children "workers" in
+  Alcotest.(check int) "dyn sup has 1 child" 1 (List.length children)
+
+(** count_children returns active + specs counts. *)
+let test_dyn_sup_count_children () =
+  let _env = eval_module {|mod Test do
+    actor W do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    fn main() do
+      dynamic_supervisor(:pool, :one_for_one)
+      Supervisor.start_child(:pool, worker(W))
+      Supervisor.start_child(:pool, worker(W))
+      Supervisor.count_children(:pool)
+    end
+  end|} in
+  let result = call_fn _env "main" [] in
+  let active = match result with
+    | March_eval.Eval.VRecord fs ->
+      (match List.assoc_opt "active" fs with
+       | Some (March_eval.Eval.VInt n) -> n | _ -> -1)
+    | _ -> -1 in
+  let specs = match result with
+    | March_eval.Eval.VRecord fs ->
+      (match List.assoc_opt "specs" fs with
+       | Some (March_eval.Eval.VInt n) -> n | _ -> -1)
+    | _ -> -1 in
+  Alcotest.(check int) "count_children active = 2" 2 active;
+  Alcotest.(check int) "count_children specs = 2" 2 specs
+
+(** which_children returns a list of child records. *)
+let test_dyn_sup_which_children () =
+  let _env = eval_module {|mod Test do
+    actor W do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    fn main() do
+      dynamic_supervisor(:ws, :one_for_one)
+      Supervisor.start_child(:ws, worker(W))
+      Supervisor.start_child(:ws, worker(W))
+      Supervisor.which_children(:ws)
+    end
+  end|} in
+  let result = call_fn _env "main" [] in
+  let children = vlist result in
+  Alcotest.(check int) "which_children returns 2 entries" 2 (List.length children);
+  (* Each entry should be a record with pid/actor/restart fields *)
+  let has_pid = match List.hd children with
+    | March_eval.Eval.VRecord fs -> List.mem_assoc "pid" fs | _ -> false in
+  Alcotest.(check bool) "child records have pid field" true has_pid
+
+(** Crash a permanent child → it is restarted with a new pid. *)
+let test_dyn_sup_permanent_restart () =
+  let _env = eval_module {|mod Test do
+    actor W do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    fn main() do
+      dynamic_supervisor(:wpool, :one_for_one)
+      Supervisor.start_child(:wpool, worker(W))
+    end
+  end|} in
+  ignore (call_fn _env "main" []);
+  let ds = Hashtbl.find March_eval.Eval.dyn_sup_registry "wpool" in
+  let orig_pid = (List.hd ds.March_eval.Eval.ds_children).March_eval.Eval.dce_pid in
+  (* Crash the child — should be restarted *)
+  March_eval.Eval.crash_actor orig_pid "test kill";
+  let ds2 = Hashtbl.find March_eval.Eval.dyn_sup_registry "wpool" in
+  let new_children = ds2.March_eval.Eval.ds_children in
+  Alcotest.(check int) "still has 1 child after restart" 1 (List.length new_children);
+  let new_pid = (List.hd new_children).March_eval.Eval.dce_pid in
+  Alcotest.(check bool) "new pid differs from old" true (new_pid <> orig_pid);
+  Alcotest.(check bool) "new child is alive" true
+    (match Hashtbl.find_opt March_eval.Eval.actor_registry new_pid with
+     | Some i -> i.March_eval.Eval.ai_alive | None -> false)
+
+(** Crash a temporary child → it is NOT restarted. *)
+let test_dyn_sup_temporary_not_restarted () =
+  let _env = eval_module {|mod Test do
+    actor W do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    fn main() do
+      dynamic_supervisor(:temps, :one_for_one)
+      Supervisor.start_child(:temps, worker(W, :temporary))
+    end
+  end|} in
+  ignore (call_fn _env "main" []);
+  let ds = Hashtbl.find March_eval.Eval.dyn_sup_registry "temps" in
+  let orig_pid = (List.hd ds.March_eval.Eval.ds_children).March_eval.Eval.dce_pid in
+  March_eval.Eval.crash_actor orig_pid "test kill";
+  let ds2 = Hashtbl.find March_eval.Eval.dyn_sup_registry "temps" in
+  Alcotest.(check int) "temporary child NOT restarted" 0 (List.length ds2.March_eval.Eval.ds_children)
+
+(** stop_child removes child from supervisor and kills it. *)
+let test_dyn_sup_stop_child () =
+  let _env = eval_module {|mod Test do
+    actor W do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    fn main() do
+      dynamic_supervisor(:stoppool, :one_for_one)
+      let r = Supervisor.start_child(:stoppool, worker(W))
+      r
+    end
+  end|} in
+  let result = call_fn _env "main" [] in
+  let pid = match result with
+    | March_eval.Eval.VCon ("Ok", [March_eval.Eval.VInt p]) -> p
+    | _ -> failwith "expected Ok(pid)" in
+  (* Verify child is present *)
+  let ds_before = Hashtbl.find March_eval.Eval.dyn_sup_registry "stoppool" in
+  Alcotest.(check int) "1 child before stop" 1 (List.length ds_before.March_eval.Eval.ds_children);
+  (* stop_child via builtin *)
+  let stop_fn = List.assoc "Supervisor.stop_child"
+    (March_eval.Eval.task_builtins @ March_eval.Eval.base_env) in
+  let stop_result = March_eval.Eval.apply stop_fn
+    [March_eval.Eval.VAtom "stoppool"; March_eval.Eval.VInt pid] in
+  let ok = match stop_result with
+    | March_eval.Eval.VCon ("Ok", [March_eval.Eval.VUnit]) -> true | _ -> false in
+  Alcotest.(check bool) "stop_child returns Ok(Unit)" true ok;
+  let ds_after = Hashtbl.find March_eval.Eval.dyn_sup_registry "stoppool" in
+  Alcotest.(check int) "0 children after stop" 0 (List.length ds_after.March_eval.Eval.ds_children);
+  Alcotest.(check bool) "stopped child is dead" false
+    (match Hashtbl.find_opt March_eval.Eval.actor_registry pid with
+     | Some i -> i.March_eval.Eval.ai_alive | None -> false)
+
+(** dynamic_supervisor in an app spec: registers the dyn sup before scheduler runs. *)
+let test_dyn_sup_in_app () =
+  let src = {|mod DynApp do
+    actor Worker do
+      state { n : Int }
+      init { n = 0 }
+      on Inc() do { n = state.n + 1 } end
+    end
+
+    app MyApp do
+      Supervisor.spec(:one_for_one, [
+        dynamic_supervisor(:handlers, :one_for_one)
+      ])
+    end
+  end|} in
+  let m =
+    let lexbuf = Lexing.from_string src in
+    let ast = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+    March_desugar.Desugar.desugar_module ast
+  in
+  March_eval.Eval.run_module m;
+  (* The dynamic supervisor should have been registered *)
+  Alcotest.(check bool) "dyn sup registered in app" true
+    (Hashtbl.mem March_eval.Eval.dyn_sup_registry "handlers")
+
+
+(* NOTE: duplicate test functions removed during merge — clean versions are defined above *)
 
 let () =
   Alcotest.run "march"
@@ -7771,6 +7973,16 @@ let () =
           Alcotest.test_case "whereis unknown"           `Quick (with_reset test_whereis_unknown);
           Alcotest.test_case "whereis_bang unknown"      `Quick (with_reset test_whereis_bang_unknown);
           Alcotest.test_case "name reregisters restart"  `Quick (with_reset test_name_reregisters_on_restart);
+        ] );
+      ( "dynamic_supervisor",
+        [
+          Alcotest.test_case "start_child adds child"      `Quick (with_reset test_dyn_sup_start_child);
+          Alcotest.test_case "count_children"              `Quick (with_reset test_dyn_sup_count_children);
+          Alcotest.test_case "which_children"              `Quick (with_reset test_dyn_sup_which_children);
+          Alcotest.test_case "permanent child restarts"    `Quick (with_reset test_dyn_sup_permanent_restart);
+          Alcotest.test_case "temporary child not restart" `Quick (with_reset test_dyn_sup_temporary_not_restarted);
+          Alcotest.test_case "stop_child removes child"    `Quick (with_reset test_dyn_sup_stop_child);
+          Alcotest.test_case "dyn sup in app spec"         `Quick (with_reset test_dyn_sup_in_app);
         ] );
       ( "lexer",
         [
