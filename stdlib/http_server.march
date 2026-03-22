@@ -230,4 +230,20 @@ mod HttpServer do
     end
   end
 
+  -- Start the server in a forked subprocess that handles exactly n requests
+  -- then exits. Returns a handle (child PID) that can be passed to wait_for.
+  -- A readiness pipe ensures the parent does not race ahead of the child's bind.
+  pub fn spawn_n(server, n) do
+    match server with
+    | Server(port, plugs, mc, it) ->
+      let pipeline_fn = fn conn -> run_pipeline(conn, plugs)
+      http_server_spawn_n(port, n, mc, it, pipeline_fn)
+    end
+  end
+
+  -- Wait for a server handle (child PID) returned by spawn_n to exit.
+  pub fn wait_for(handle) do
+    http_server_wait(handle)
+  end
+
 end

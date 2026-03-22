@@ -1,0 +1,72 @@
+-- examples/http_test.march
+--
+-- Self-contained HTTP integration test:
+--   1. Starts a server in a forked subprocess (handles exactly 3 requests)
+--   2. Client hits GET /, GET /ping, POST /echo
+--   3. Asserts responses
+--   4. Waits for server subprocess to exit
+--   5. Process exits cleanly
+--
+-- Run: dune exec march -- examples/http_test.march
+
+mod HttpTest do
+
+  fn router(conn) do
+    match (HttpServer.method(conn), HttpServer.path_info(conn)) with
+    | (Get, Nil) ->
+      HttpServer.text(conn, 200, "hello")
+    | (Get, Cons("ping", Nil)) ->
+      HttpServer.text(conn, 200, "pong")
+    | (Post, Cons("echo", Nil)) ->
+      HttpServer.text(conn, 200, HttpServer.req_body(conn))
+    | _ ->
+      HttpServer.text(conn, 404, "not found")
+    end
+  end
+
+  fn assert_eq(label, expected, actual) do
+    if expected == actual then
+      print("[PASS] " ++ label)
+    else
+      print("[FAIL] " ++ label ++ ": expected \"" ++ expected ++ "\" got \"" ++ actual ++ "\"")
+  end
+
+  fn main() do
+    -- Spawn server subprocess: handles exactly 3 requests then exits
+    let handle = HttpServer.new(18080)
+      |> HttpServer.plug(router)
+      |> HttpServer.spawn_n(3)
+
+    let client = HttpClient.new_client()
+
+    -- GET / → "hello"
+    match HttpClient.get(client, "http://localhost:18080/") with
+    | Ok(resp) ->
+      assert_eq("GET /", "hello", Http.response_body(resp))
+    | Err(_) ->
+      print("[FAIL] GET / - request error")
+    end
+
+    -- GET /ping → "pong"
+    match HttpClient.get(client, "http://localhost:18080/ping") with
+    | Ok(resp) ->
+      assert_eq("GET /ping", "pong", Http.response_body(resp))
+    | Err(_) ->
+      print("[FAIL] GET /ping - request error")
+    end
+
+    -- POST /echo → echoes the body
+    match HttpClient.post(client, "http://localhost:18080/echo", "hello echo") with
+    | Ok(resp) ->
+      assert_eq("POST /echo", "hello echo", Http.response_body(resp))
+    | Err(_) ->
+      print("[FAIL] POST /echo - request error")
+    end
+
+    -- Wait for server to exit cleanly
+    HttpServer.wait_for(handle)
+
+    print("Done.")
+  end
+
+end
