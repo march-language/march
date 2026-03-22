@@ -2968,6 +2968,54 @@ let base_env : env =
         VUnit
       | _ -> eval_error "http_server_listen(port, max_conns, idle_timeout, pipeline)"))
 
+  (* ── HTTP server: fork-based N-request variant ───────────────────── *)
+  (* http_server_spawn_n(port, n, max_conns, idle_timeout, pipeline_fn)
+     Forks a child process that handles exactly [n] requests then exits.
+     Uses a pipe to signal readiness so the parent doesn't race the client.
+     Returns VInt child_pid. *)
+  ; ("http_server_spawn_n", VBuiltin ("http_server_spawn_n", function
+      | [VInt port; VInt n; VInt _max_conns; VInt _idle_timeout; pipeline_fn] ->
+        let open Unix in
+        let server_sock = socket PF_INET SOCK_STREAM 0 in
+        setsockopt server_sock SO_REUSEADDR true;
+        bind server_sock (ADDR_INET (inet_addr_any, port));
+        listen server_sock 128;
+        let (read_fd, write_fd) = pipe () in
+        (match fork () with
+         | 0 ->
+           (* child: signal ready, handle n requests, exit *)
+           (try close read_fd with _ -> ());
+           (try ignore (write write_fd (Bytes.of_string "\x00") 0 1) with _ -> ());
+           (try close write_fd with _ -> ());
+           let handled = ref 0 in
+           (try
+              while !handled < n do
+                let (client_sock, _addr) = accept server_sock in
+                (try handle_http_connection client_sock pipeline_fn
+                 with _ -> ());
+                (try close client_sock with _ -> ());
+                incr handled
+              done
+            with _ -> ());
+           (try close server_sock with _ -> ());
+           _exit 0
+         | child_pid ->
+           (* parent: wait for ready signal, close server socket, return pid *)
+           (try close write_fd with _ -> ());
+           (try close server_sock with _ -> ());
+           let buf = Bytes.create 1 in
+           (try ignore (read read_fd buf 0 1) with _ -> ());
+           (try close read_fd with _ -> ());
+           VInt child_pid)
+      | _ -> eval_error "http_server_spawn_n(port, n, max_conns, idle_timeout, pipeline)"))
+
+  (* http_server_wait(pid) — waitpid for the spawned server child *)
+  ; ("http_server_wait", VBuiltin ("http_server_wait", function
+      | [VInt pid] ->
+        (try ignore (Unix.waitpid [] pid) with _ -> ());
+        VUnit
+      | _ -> eval_error "http_server_wait(pid)"))
+
   (* ── CSV parser ─────────────────────────────────────────────────── *)
   ; ("csv_open",     VBuiltin ("csv_open",     csv_open_impl))
   ; ("csv_next_row", VBuiltin ("csv_next_row", csv_next_row_impl))
