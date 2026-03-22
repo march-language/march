@@ -1720,10 +1720,19 @@ let emit_repl_globals_decl (buf : Buffer.t) (globals : (string * string) list) =
     LLVM's mem2reg/SROA eliminates the extra instructions. *)
 let emit_prev_global_bridges ctx (prev_globals : (string * string) list) =
   List.iter (fun (gname, llty) ->
-    (* gname is always "repl_<bare>" by construction in repl_jit *)
-    let bare = if String.length gname > 5 && String.sub gname 0 5 = "repl_"
-               then String.sub gname 5 (String.length gname - 5)
-               else gname in
+    (* gname is "repl_N_<bare>" by construction in repl_jit (N = fragment number).
+       Strip the "repl_N_" prefix to recover the bare variable name. *)
+    let bare =
+      let len = String.length gname in
+      if len > 5 && String.sub gname 0 5 = "repl_" then begin
+        let i = ref 5 in
+        while !i < len && gname.[!i] >= '0' && gname.[!i] <= '9' do incr i done;
+        if !i < len && gname.[!i] = '_' then
+          String.sub gname (!i + 1) (len - !i - 1)
+        else
+          String.sub gname 5 (len - 5)  (* fallback: old "repl_<bare>" format *)
+      end else gname
+    in
     let tmp = fresh ctx "br" in
     Printf.bprintf ctx.buf "  %%%s.addr = alloca %s\n" bare llty;
     Printf.bprintf ctx.buf "  %s = load %s, ptr @%s\n" tmp llty gname;
@@ -1782,7 +1791,7 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
   List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true) extern_fns;
   List.iter (emit_fn ctx) fns;
   let llty = llvm_ty val_ty in
-  let global_name = "repl_" ^ name in
+  let global_name = Printf.sprintf "repl_%d_%s" n name in
   let init_name = Printf.sprintf "repl_%d_init" n in
   Printf.bprintf ctx.preamble "@%s = global %s zeroinitializer\n" global_name llty;
   Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n" init_name;
@@ -1861,7 +1870,7 @@ let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
   in
   Buffer.add_string ctx.buf wrap_body;
   (* Global that holds the closure pointer *)
-  let global_name = "repl_" ^ bind_name in
+  let global_name = Printf.sprintf "repl_%d_%s" n bind_name in
   Printf.bprintf ctx.preamble "@%s = global ptr zeroinitializer\n" global_name;
   (* Init function: allocate closure {header(16), fn_ptr} and store in the global *)
   let init_name = Printf.sprintf "repl_%d_init" n in
