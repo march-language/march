@@ -91,12 +91,20 @@ let partition_fns ctx (fns : March_tir.Tir.fn_def list)
   ) fns;
   (List.rev !new_fns, List.rev !extern_fns)
 
-(** Strip the "repl_" prefix from a global name to recover the bare variable
-    name as it appears in TIR. *)
+(** Strip the "repl_N_" prefix from a global name to recover the bare variable
+    name as it appears in TIR.  The current format is "repl_<N>_<bare>" where
+    N is the fragment number; the old "repl_<bare>" format is also accepted as
+    a fallback so cached stdlib names are still handled correctly. *)
 let bare_of_global (gname : string) : string =
-  if String.length gname > 5 && String.sub gname 0 5 = "repl_"
-  then String.sub gname 5 (String.length gname - 5)
-  else gname
+  let len = String.length gname in
+  if len > 5 && String.sub gname 0 5 = "repl_" then begin
+    let i = ref 5 in
+    while !i < len && gname.[!i] >= '0' && gname.[!i] <= '9' do incr i done;
+    if !i < len && gname.[!i] = '_' then
+      String.sub gname (!i + 1) (len - !i - 1)
+    else
+      String.sub gname 5 (len - 5)   (* fallback: old "repl_<bare>" format *)
+  end else gname
 
 (** Lower a single-expression module through the TIR pipeline.
     [repl_vars] are bare variable names of REPL globals that should be
@@ -216,8 +224,12 @@ let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
     let init_name = Printf.sprintf "repl_%d_init" pn in
     let fptr = Jit.dlsym handle init_name in
     Jit.call_void_to_void fptr;
-    (* Register as a global so emit_prev_global_bridges creates the bridge alloca *)
-    ctx.globals <- ("repl_" ^ bind_name, "ptr") :: ctx.globals
+    (* Register as a global so emit_prev_global_bridges creates the bridge alloca.
+       Use the same uniquified name as emit_repl_fn_with_closure_global.
+       Replace any prior entry for this bare name so bridges don't duplicate. *)
+    let gname = Printf.sprintf "repl_%d_%s" pn bind_name in
+    ctx.globals <- (gname, "ptr") ::
+      List.filter (fun (gn, _) -> bare_of_global gn <> bind_name) ctx.globals
   end else begin
     (* Let binding: find main, extract body, store in global *)
     let main_fn = List.find (fun (f : March_tir.Tir.fn_def) ->
@@ -234,9 +246,12 @@ let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
     let init_name = Printf.sprintf "repl_%d_init" n in
     let fptr = Jit.dlsym handle init_name in
     Jit.call_void_to_void fptr;
-    let global_name = "repl_" ^ bind_name in
+    (* Use the same uniquified name as emit_repl_decl: "repl_N_<bind_name>".
+       Replace any prior entry for this bare name so bridges don't duplicate. *)
+    let global_name = Printf.sprintf "repl_%d_%s" n bind_name in
     let llty = March_tir.Llvm_emit.llvm_ty_of_tir main_fn.fn_ret_ty in
-    ctx.globals <- (global_name, llty) :: ctx.globals
+    ctx.globals <- (global_name, llty) ::
+      List.filter (fun (gn, _) -> bare_of_global gn <> bind_name) ctx.globals
   end
 
 (** Pre-compile stdlib functions to a cached .so, keyed by a content hash
