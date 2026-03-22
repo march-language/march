@@ -552,6 +552,13 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
   | Tir.AVar v when Hashtbl.mem ctx.top_fns v.Tir.v_name ->
     (* Top-level function reference — emit its address directly (for EApp callee) *)
     ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
+  | Tir.AVar v when (let n = v.Tir.v_name in
+                     String.length n >= 7 && String.sub n 0 7 = "march_") ->
+    (* C-runtime extern used as a first-class value (e.g. march_compare_int passed
+       to a HOF).  These are declared in emit_preamble — never in var_slot or
+       compiled_fns — so the alloca-bridge path would generate an invalid
+       "%march_*.addr" load.  Emit the global address directly instead. *)
+    ("ptr", "@" ^ llvm_name v.Tir.v_name)
   | Tir.AVar v ->
     let base = llvm_name v.Tir.v_name in
     let slot = match Hashtbl.find_opt ctx.var_slot base with
