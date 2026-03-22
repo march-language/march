@@ -151,10 +151,13 @@ march/
 └── test_server.march        # Example: compiled HTTP server on port 8787
 ```
 
-## Current State (as of 2026-03-20)
+## Current State (as of 2026-03-22)
 
 - **Builds clean**
-- **401 tests passing**: lexer (12), AST (1), parser (5), module (2), keywords (1), desugar (3), typecheck (8), eval (12), parser gaps (6), constraints (5), tir (83), list builtins (6), declarations (14), string interp (2), type_map (2), convert_ty (2), perceus (6), jit (1), stdlib integration, dir stdlib, and more
+- **694 tests across 3 suites; 6 failures (all in REPL JIT)**:
+  - `test_march.exe`: 652 tests, 6 failures (repl_jit_regression 0,1,3,6,8 and repl_jit_cross_line 3 — all involve list literal JIT compilation)
+  - `test_cas.exe`: 41 tests, all passing (scc, pipeline, def_id)
+  - `test_jit.exe`: 1 test, passing (dlopen_libc)
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present
 - **`--dump-tir` flag**: prints TIR after full pipeline (Lower → Mono → Defun → Perceus → Escape); shows `stack_alloc` for promoted allocations
 - **`--emit-llvm` flag**: emits textual LLVM IR to `<basename>.ll`; links with `runtime/march_runtime.c` via `clang` to produce native binaries

@@ -5,8 +5,10 @@ target triple = "arm64-apple-macosx15.0.0"
 declare ptr  @march_alloc(i64 %sz)
 declare void @march_incrc(ptr %p)
 declare void @march_decrc(ptr %p)
+declare i64  @march_decrc_freed(ptr %p)
 declare void @march_free(ptr %p)
 declare void @march_print(ptr %s)
+declare void @march_panic(ptr %s)
 declare void @march_println(ptr %s)
 declare ptr  @march_string_lit(ptr %s, i64 %len)
 declare ptr  @march_int_to_string(i64 %n)
@@ -14,6 +16,14 @@ declare ptr  @march_float_to_string(double %f)
 declare ptr  @march_bool_to_string(i64 %b)
 declare ptr  @march_string_concat(ptr %a, ptr %b)
 declare i64  @march_string_eq(ptr %a, ptr %b)
+; Ord / Hash builtins
+declare i64    @march_compare_int(i64 %x, i64 %y)
+declare i64    @march_compare_float(double %x, double %y)
+declare i64    @march_compare_string(ptr %x, ptr %y)
+declare i64    @march_hash_int(i64 %x)
+declare i64    @march_hash_float(double %x)
+declare i64    @march_hash_string(ptr %x)
+declare i64    @march_hash_bool(i64 %x)
 declare i64  @march_string_byte_length(ptr %s)
 declare i64  @march_string_is_empty(ptr %s)
 declare ptr  @march_string_to_int(ptr %s)
@@ -21,6 +31,88 @@ declare ptr  @march_string_join(ptr %list, ptr %sep)
 declare void @march_kill(ptr %actor)
 declare i64  @march_is_alive(ptr %actor)
 declare ptr  @march_send(ptr %actor, ptr %msg)
+declare ptr  @march_spawn(ptr %actor)
+declare i64  @march_actor_get_int(ptr %actor, i64 %index)
+declare void @march_run_scheduler()
+declare i64  @march_tcp_listen(i64 %port)
+declare i64  @march_tcp_accept(i64 %fd)
+declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)
+declare void @march_tcp_send_all(i64 %fd, ptr %data)
+declare void @march_tcp_close(i64 %fd)
+declare ptr  @march_http_parse_request(ptr %raw)
+declare ptr  @march_http_serialize_response(i64 %status, ptr %headers, ptr %body)
+declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
+declare void @march_ws_handshake(i64 %fd, ptr %key)
+declare ptr  @march_ws_recv(i64 %fd)
+declare void @march_ws_send(i64 %fd, ptr %frame)
+declare ptr  @march_ws_select(i64 %fd, ptr %pipe, i64 %timeout)
+; Float builtins
+declare double @march_float_abs(double %f)
+declare i64    @march_float_ceil(double %f)
+declare i64    @march_float_floor(double %f)
+declare i64    @march_float_round(double %f)
+declare i64    @march_float_truncate(double %f)
+declare double @march_int_to_float(i64 %n)
+; Math builtins
+declare double @march_math_sin(double %f)
+declare double @march_math_cos(double %f)
+declare double @march_math_tan(double %f)
+declare double @march_math_asin(double %f)
+declare double @march_math_acos(double %f)
+declare double @march_math_atan(double %f)
+declare double @march_math_atan2(double %y, double %x)
+declare double @march_math_sinh(double %f)
+declare double @march_math_cosh(double %f)
+declare double @march_math_tanh(double %f)
+declare double @march_math_sqrt(double %f)
+declare double @march_math_cbrt(double %f)
+declare double @march_math_exp(double %f)
+declare double @march_math_exp2(double %f)
+declare double @march_math_log(double %f)
+declare double @march_math_log2(double %f)
+declare double @march_math_log10(double %f)
+declare double @march_math_pow(double %b, double %e)
+; Extended string builtins
+declare i64  @march_string_contains(ptr %s, ptr %sub)
+declare i64  @march_string_starts_with(ptr %s, ptr %prefix)
+declare i64  @march_string_ends_with(ptr %s, ptr %suffix)
+declare ptr  @march_string_slice(ptr %s, i64 %start, i64 %len)
+declare ptr  @march_string_split(ptr %s, ptr %sep)
+declare ptr  @march_string_split_first(ptr %s, ptr %sep)
+declare ptr  @march_string_replace(ptr %s, ptr %old, ptr %new)
+declare ptr  @march_string_replace_all(ptr %s, ptr %old, ptr %new)
+declare ptr  @march_string_to_lowercase(ptr %s)
+declare ptr  @march_string_to_uppercase(ptr %s)
+declare ptr  @march_string_trim(ptr %s)
+declare ptr  @march_string_trim_start(ptr %s)
+declare ptr  @march_string_trim_end(ptr %s)
+declare ptr  @march_string_repeat(ptr %s, i64 %n)
+declare ptr  @march_string_reverse(ptr %s)
+declare ptr  @march_string_pad_left(ptr %s, i64 %width, ptr %fill)
+declare ptr  @march_string_pad_right(ptr %s, i64 %width, ptr %fill)
+declare i64  @march_string_grapheme_count(ptr %s)
+declare ptr  @march_string_index_of(ptr %s, ptr %sub)
+declare ptr  @march_string_last_index_of(ptr %s, ptr %sub)
+declare ptr  @march_string_to_float(ptr %s)
+; List builtins
+declare ptr  @march_list_append(ptr %a, ptr %b)
+declare ptr  @march_list_concat(ptr %lists)
+; File/Dir builtins
+declare i64  @march_file_exists(ptr %s)
+declare i64  @march_dir_exists(ptr %s)
+; Capability builtins
+declare ptr  @march_cap_narrow(ptr %cap)
+; Monitor/supervision builtins
+declare void @march_demonitor(i64 %ref)
+declare i64  @march_monitor(ptr %watcher, ptr %target)
+declare i64  @march_mailbox_size(ptr %pid)
+declare void @march_run_until_idle()
+declare void @march_register_resource(ptr %pid, ptr %name, ptr %cleanup)
+declare ptr  @march_get_cap(ptr %pid)
+declare void @march_send_checked(ptr %cap, ptr %msg)
+declare ptr  @march_pid_of_int(i64 %n)
+declare ptr  @march_get_actor_field(ptr %pid, ptr %name)
+declare ptr  @march_value_to_string(ptr %v)
 
 
 define i64 @fib(i64 %n.arg) {
@@ -30,45 +122,44 @@ entry:
   %ld1 = load i64, ptr %n.addr
   %cmp2 = icmp slt i64 %ld1, 2
   %ar3 = zext i1 %cmp2 to i64
-  %$t351.addr = alloca i64
-  store i64 %ar3, ptr %$t351.addr
-  %ld4 = load i64, ptr %$t351.addr
+  %$t2009.addr = alloca i64
+  store i64 %ar3, ptr %$t2009.addr
+  %ld4 = load i64, ptr %$t2009.addr
   %res_slot5 = alloca ptr
-  switch i64 %ld4, label %case_default2 [
-      i64 1, label %case_br3
-  ]
+  %bi6 = trunc i64 %ld4 to i1
+  br i1 %bi6, label %case_br3, label %case_default2
 case_br3:
-  %ld6 = load i64, ptr %n.addr
-  %cv7 = inttoptr i64 %ld6 to ptr
-  store ptr %cv7, ptr %res_slot5
+  %ld7 = load i64, ptr %n.addr
+  %cv8 = inttoptr i64 %ld7 to ptr
+  store ptr %cv8, ptr %res_slot5
   br label %case_merge1
 case_default2:
-  %ld8 = load i64, ptr %n.addr
-  %ar9 = sub i64 %ld8, 1
-  %$t352.addr = alloca i64
-  store i64 %ar9, ptr %$t352.addr
-  %ld10 = load i64, ptr %$t352.addr
-  %cr11 = call i64 @fib(i64 %ld10)
-  %$t353.addr = alloca i64
-  store i64 %cr11, ptr %$t353.addr
-  %ld12 = load i64, ptr %n.addr
-  %ar13 = sub i64 %ld12, 2
-  %$t354.addr = alloca i64
-  store i64 %ar13, ptr %$t354.addr
-  %ld14 = load i64, ptr %$t354.addr
-  %cr15 = call i64 @fib(i64 %ld14)
-  %$t355.addr = alloca i64
-  store i64 %cr15, ptr %$t355.addr
-  %ld16 = load i64, ptr %$t353.addr
-  %ld17 = load i64, ptr %$t355.addr
-  %ar18 = add i64 %ld16, %ld17
-  %cv19 = inttoptr i64 %ar18 to ptr
-  store ptr %cv19, ptr %res_slot5
+  %ld9 = load i64, ptr %n.addr
+  %ar10 = sub i64 %ld9, 1
+  %$t2010.addr = alloca i64
+  store i64 %ar10, ptr %$t2010.addr
+  %ld11 = load i64, ptr %$t2010.addr
+  %cr12 = call i64 @fib(i64 %ld11)
+  %$t2011.addr = alloca i64
+  store i64 %cr12, ptr %$t2011.addr
+  %ld13 = load i64, ptr %n.addr
+  %ar14 = sub i64 %ld13, 2
+  %$t2012.addr = alloca i64
+  store i64 %ar14, ptr %$t2012.addr
+  %ld15 = load i64, ptr %$t2012.addr
+  %cr16 = call i64 @fib(i64 %ld15)
+  %$t2013.addr = alloca i64
+  store i64 %cr16, ptr %$t2013.addr
+  %ld17 = load i64, ptr %$t2011.addr
+  %ld18 = load i64, ptr %$t2013.addr
+  %ar19 = add i64 %ld17, %ld18
+  %cv20 = inttoptr i64 %ar19 to ptr
+  store ptr %cv20, ptr %res_slot5
   br label %case_merge1
 case_merge1:
-  %case_r20 = load ptr, ptr %res_slot5
-  %cv21 = ptrtoint ptr %case_r20 to i64
-  ret i64 %cv21
+  %case_r21 = load ptr, ptr %res_slot5
+  %cv22 = ptrtoint ptr %case_r21 to i64
+  ret i64 %cv22
 }
 
 define i64 @par_fib(i64 %n.arg, i64 %threshold.arg) {
@@ -77,188 +168,187 @@ entry:
   store i64 %n.arg, ptr %n.addr
   %threshold.addr = alloca i64
   store i64 %threshold.arg, ptr %threshold.addr
-  %ld22 = load i64, ptr %n.addr
-  %cmp23 = icmp slt i64 %ld22, 2
-  %ar24 = zext i1 %cmp23 to i64
-  %$t356.addr = alloca i64
-  store i64 %ar24, ptr %$t356.addr
-  %ld25 = load i64, ptr %$t356.addr
-  %res_slot26 = alloca ptr
-  switch i64 %ld25, label %case_default5 [
-      i64 1, label %case_br6
-  ]
+  %ld23 = load i64, ptr %n.addr
+  %cmp24 = icmp slt i64 %ld23, 2
+  %ar25 = zext i1 %cmp24 to i64
+  %$t2014.addr = alloca i64
+  store i64 %ar25, ptr %$t2014.addr
+  %ld26 = load i64, ptr %$t2014.addr
+  %res_slot27 = alloca ptr
+  %bi28 = trunc i64 %ld26 to i1
+  br i1 %bi28, label %case_br6, label %case_default5
 case_br6:
-  %ld27 = load i64, ptr %n.addr
-  %cv28 = inttoptr i64 %ld27 to ptr
-  store ptr %cv28, ptr %res_slot26
+  %ld29 = load i64, ptr %n.addr
+  %cv30 = inttoptr i64 %ld29 to ptr
+  store ptr %cv30, ptr %res_slot27
   br label %case_merge4
 case_default5:
-  %ld29 = load i64, ptr %n.addr
-  %ld30 = load i64, ptr %threshold.addr
-  %cmp31 = icmp sle i64 %ld29, %ld30
-  %ar32 = zext i1 %cmp31 to i64
-  %$t357.addr = alloca i64
-  store i64 %ar32, ptr %$t357.addr
-  %ld33 = load i64, ptr %$t357.addr
-  %res_slot34 = alloca ptr
-  switch i64 %ld33, label %case_default8 [
-      i64 1, label %case_br9
-  ]
+  %ld31 = load i64, ptr %n.addr
+  %ld32 = load i64, ptr %threshold.addr
+  %cmp33 = icmp sle i64 %ld31, %ld32
+  %ar34 = zext i1 %cmp33 to i64
+  %$t2015.addr = alloca i64
+  store i64 %ar34, ptr %$t2015.addr
+  %ld35 = load i64, ptr %$t2015.addr
+  %res_slot36 = alloca ptr
+  %bi37 = trunc i64 %ld35 to i1
+  br i1 %bi37, label %case_br9, label %case_default8
 case_br9:
-  %ld35 = load i64, ptr %n.addr
-  %cr36 = call i64 @fib(i64 %ld35)
-  %cv37 = inttoptr i64 %cr36 to ptr
-  store ptr %cv37, ptr %res_slot34
+  %ld38 = load i64, ptr %n.addr
+  %cr39 = call i64 @fib(i64 %ld38)
+  %cv40 = inttoptr i64 %cr39 to ptr
+  store ptr %cv40, ptr %res_slot36
   br label %case_merge7
 case_default8:
-  %hp38 = call ptr @march_alloc(i64 40)
-  %tgp39 = getelementptr i8, ptr %hp38, i64 8
-  store i32 0, ptr %tgp39, align 4
-  %fp40 = getelementptr i8, ptr %hp38, i64 16
-  store ptr @$lam358$apply, ptr %fp40, align 8
-  %ld41 = load i64, ptr %n.addr
-  %fp42 = getelementptr i8, ptr %hp38, i64 24
-  store i64 %ld41, ptr %fp42, align 8
-  %ld43 = load i64, ptr %threshold.addr
-  %fp44 = getelementptr i8, ptr %hp38, i64 32
-  store i64 %ld43, ptr %fp44, align 8
-  %$t360.addr = alloca ptr
-  store ptr %hp38, ptr %$t360.addr
-  %ld45 = load ptr, ptr %$t360.addr
-  %fp46 = getelementptr i8, ptr %ld45, i64 16
-  %fv47 = load ptr, ptr %fp46, align 8
-  %tsres48 = call i64 %fv47(ptr %ld45, i64 0)
-  %hp49 = call ptr @march_alloc(i64 24)
-  %tgp50 = getelementptr i8, ptr %hp49, i64 8
-  store i32 0, ptr %tgp50, align 4
-  %fp51 = getelementptr i8, ptr %hp49, i64 16
-  store i64 %tsres48, ptr %fp51, align 8
-  %t1.addr = alloca ptr
-  store ptr %hp49, ptr %t1.addr
-  %hp52 = call ptr @march_alloc(i64 40)
+  %hp41 = call ptr @march_alloc(i64 40)
+  %tgp42 = getelementptr i8, ptr %hp41, i64 8
+  store i32 0, ptr %tgp42, align 4
+  %fp43 = getelementptr i8, ptr %hp41, i64 16
+  store ptr @$lam2016$apply$21, ptr %fp43, align 8
+  %ld44 = load i64, ptr %n.addr
+  %fp45 = getelementptr i8, ptr %hp41, i64 24
+  store i64 %ld44, ptr %fp45, align 8
+  %ld46 = load i64, ptr %threshold.addr
+  %fp47 = getelementptr i8, ptr %hp41, i64 32
+  store i64 %ld46, ptr %fp47, align 8
+  %$t2018.addr = alloca ptr
+  store ptr %hp41, ptr %$t2018.addr
+  %ld48 = load ptr, ptr %$t2018.addr
+  %fp49 = getelementptr i8, ptr %ld48, i64 16
+  %fv50 = load ptr, ptr %fp49, align 8
+  %tsres51 = call i64 %fv50(ptr %ld48, i64 0)
+  %hp52 = call ptr @march_alloc(i64 24)
   %tgp53 = getelementptr i8, ptr %hp52, i64 8
   store i32 0, ptr %tgp53, align 4
   %fp54 = getelementptr i8, ptr %hp52, i64 16
-  store ptr @$lam361$apply, ptr %fp54, align 8
-  %ld55 = load i64, ptr %n.addr
-  %fp56 = getelementptr i8, ptr %hp52, i64 24
-  store i64 %ld55, ptr %fp56, align 8
-  %ld57 = load i64, ptr %threshold.addr
-  %fp58 = getelementptr i8, ptr %hp52, i64 32
-  store i64 %ld57, ptr %fp58, align 8
-  %$t363.addr = alloca ptr
-  store ptr %hp52, ptr %$t363.addr
-  %ld59 = load ptr, ptr %$t363.addr
-  %fp60 = getelementptr i8, ptr %ld59, i64 16
-  %fv61 = load ptr, ptr %fp60, align 8
-  %tsres62 = call i64 %fv61(ptr %ld59, i64 0)
-  %hp63 = call ptr @march_alloc(i64 24)
-  %tgp64 = getelementptr i8, ptr %hp63, i64 8
-  store i32 0, ptr %tgp64, align 4
-  %fp65 = getelementptr i8, ptr %hp63, i64 16
-  store i64 %tsres62, ptr %fp65, align 8
+  store i64 %tsres51, ptr %fp54, align 8
+  %t1.addr = alloca ptr
+  store ptr %hp52, ptr %t1.addr
+  %hp55 = call ptr @march_alloc(i64 40)
+  %tgp56 = getelementptr i8, ptr %hp55, i64 8
+  store i32 0, ptr %tgp56, align 4
+  %fp57 = getelementptr i8, ptr %hp55, i64 16
+  store ptr @$lam2019$apply$22, ptr %fp57, align 8
+  %ld58 = load i64, ptr %n.addr
+  %fp59 = getelementptr i8, ptr %hp55, i64 24
+  store i64 %ld58, ptr %fp59, align 8
+  %ld60 = load i64, ptr %threshold.addr
+  %fp61 = getelementptr i8, ptr %hp55, i64 32
+  store i64 %ld60, ptr %fp61, align 8
+  %$t2021.addr = alloca ptr
+  store ptr %hp55, ptr %$t2021.addr
+  %ld62 = load ptr, ptr %$t2021.addr
+  %fp63 = getelementptr i8, ptr %ld62, i64 16
+  %fv64 = load ptr, ptr %fp63, align 8
+  %tsres65 = call i64 %fv64(ptr %ld62, i64 0)
+  %hp66 = call ptr @march_alloc(i64 24)
+  %tgp67 = getelementptr i8, ptr %hp66, i64 8
+  store i32 0, ptr %tgp67, align 4
+  %fp68 = getelementptr i8, ptr %hp66, i64 16
+  store i64 %tsres65, ptr %fp68, align 8
   %t2.addr = alloca ptr
-  store ptr %hp63, ptr %t2.addr
-  %ld66 = load ptr, ptr %t1.addr
-  %fp67 = getelementptr i8, ptr %ld66, i64 16
-  %fv68 = load i64, ptr %fp67, align 8
-  %r1.addr = alloca i64
-  store i64 %fv68, ptr %r1.addr
-  %ld69 = load ptr, ptr %t2.addr
+  store ptr %hp66, ptr %t2.addr
+  %ld69 = load ptr, ptr %t1.addr
   %fp70 = getelementptr i8, ptr %ld69, i64 16
   %fv71 = load i64, ptr %fp70, align 8
+  %r1.addr = alloca i64
+  store i64 %fv71, ptr %r1.addr
+  %ld72 = load ptr, ptr %t2.addr
+  %fp73 = getelementptr i8, ptr %ld72, i64 16
+  %fv74 = load i64, ptr %fp73, align 8
   %r2.addr = alloca i64
-  store i64 %fv71, ptr %r2.addr
-  %ld72 = load i64, ptr %r1.addr
-  %ld73 = load i64, ptr %r2.addr
-  %ar74 = add i64 %ld72, %ld73
-  %cv75 = inttoptr i64 %ar74 to ptr
-  store ptr %cv75, ptr %res_slot34
+  store i64 %fv74, ptr %r2.addr
+  %ld75 = load i64, ptr %r1.addr
+  %ld76 = load i64, ptr %r2.addr
+  %ar77 = add i64 %ld75, %ld76
+  %cv78 = inttoptr i64 %ar77 to ptr
+  store ptr %cv78, ptr %res_slot36
   br label %case_merge7
 case_merge7:
-  %case_r76 = load ptr, ptr %res_slot34
-  store ptr %case_r76, ptr %res_slot26
+  %case_r79 = load ptr, ptr %res_slot36
+  store ptr %case_r79, ptr %res_slot27
   br label %case_merge4
 case_merge4:
-  %case_r77 = load ptr, ptr %res_slot26
-  %cv78 = ptrtoint ptr %case_r77 to i64
-  ret i64 %cv78
+  %case_r80 = load ptr, ptr %res_slot27
+  %cv81 = ptrtoint ptr %case_r80 to i64
+  ret i64 %cv81
 }
 
 define void @march_main() {
 entry:
-  %cr79 = call i64 @par_fib(i64 40, i64 20)
+  %cr82 = call i64 @par_fib(i64 40, i64 20)
   %result.addr = alloca i64
-  store i64 %cr79, ptr %result.addr
-  %ld80 = load i64, ptr %result.addr
-  %cr81 = call ptr @march_int_to_string(i64 %ld80)
-  %$t364.addr = alloca ptr
-  store ptr %cr81, ptr %$t364.addr
-  %ld82 = load ptr, ptr %$t364.addr
-  call void @march_println(ptr %ld82)
+  store i64 %cr82, ptr %result.addr
+  %ld83 = load i64, ptr %result.addr
+  %cr84 = call ptr @march_int_to_string(i64 %ld83)
+  %$t2022.addr = alloca ptr
+  store ptr %cr84, ptr %$t2022.addr
+  %ld85 = load ptr, ptr %$t2022.addr
+  call void @march_println(ptr %ld85)
   ret void
 }
 
-define i64 @$lam358$apply(ptr %$clo.arg, i64 %x.arg) {
+define i64 @$lam2016$apply$21(ptr %$clo.arg, i64 %x.arg) {
 entry:
   %$clo.addr = alloca ptr
   store ptr %$clo.arg, ptr %$clo.addr
   %x.addr = alloca i64
   store i64 %x.arg, ptr %x.addr
-  %ld83 = load ptr, ptr %$clo.addr
-  call void @march_incrc(ptr %ld83)
-  %ld84 = load ptr, ptr %$clo.addr
-  %fp85 = getelementptr i8, ptr %ld84, i64 24
-  %fv86 = load ptr, ptr %fp85, align 8
-  %cv87 = ptrtoint ptr %fv86 to i64
+  %ld86 = load ptr, ptr %$clo.addr
+  call void @march_incrc(ptr %ld86)
+  %ld87 = load ptr, ptr %$clo.addr
+  %fp88 = getelementptr i8, ptr %ld87, i64 24
+  %fv89 = load ptr, ptr %fp88, align 8
+  %cv90 = ptrtoint ptr %fv89 to i64
   %n.addr = alloca i64
-  store i64 %cv87, ptr %n.addr
-  %ld88 = load ptr, ptr %$clo.addr
-  %fp89 = getelementptr i8, ptr %ld88, i64 32
-  %fv90 = load i64, ptr %fp89, align 8
+  store i64 %cv90, ptr %n.addr
+  %ld91 = load ptr, ptr %$clo.addr
+  %fp92 = getelementptr i8, ptr %ld91, i64 32
+  %fv93 = load i64, ptr %fp92, align 8
   %threshold.addr = alloca i64
-  store i64 %fv90, ptr %threshold.addr
-  %ld91 = load i64, ptr %n.addr
-  %ar92 = sub i64 %ld91, 1
-  %$t359.addr = alloca i64
-  store i64 %ar92, ptr %$t359.addr
-  %ld93 = load i64, ptr %$t359.addr
-  %ld94 = load i64, ptr %threshold.addr
-  %cr95 = call i64 @par_fib(i64 %ld93, i64 %ld94)
-  ret i64 %cr95
+  store i64 %fv93, ptr %threshold.addr
+  %ld94 = load i64, ptr %n.addr
+  %ar95 = sub i64 %ld94, 1
+  %$t2017.addr = alloca i64
+  store i64 %ar95, ptr %$t2017.addr
+  %ld96 = load i64, ptr %$t2017.addr
+  %ld97 = load i64, ptr %threshold.addr
+  %cr98 = call i64 @par_fib(i64 %ld96, i64 %ld97)
+  ret i64 %cr98
 }
 
-define i64 @$lam361$apply(ptr %$clo.arg, i64 %x.arg) {
+define i64 @$lam2019$apply$22(ptr %$clo.arg, i64 %x.arg) {
 entry:
   %$clo.addr = alloca ptr
   store ptr %$clo.arg, ptr %$clo.addr
   %x.addr = alloca i64
   store i64 %x.arg, ptr %x.addr
-  %ld96 = load ptr, ptr %$clo.addr
-  call void @march_incrc(ptr %ld96)
-  %ld97 = load ptr, ptr %$clo.addr
-  %fp98 = getelementptr i8, ptr %ld97, i64 24
-  %fv99 = load ptr, ptr %fp98, align 8
-  %cv100 = ptrtoint ptr %fv99 to i64
+  %ld99 = load ptr, ptr %$clo.addr
+  call void @march_incrc(ptr %ld99)
+  %ld100 = load ptr, ptr %$clo.addr
+  %fp101 = getelementptr i8, ptr %ld100, i64 24
+  %fv102 = load ptr, ptr %fp101, align 8
+  %cv103 = ptrtoint ptr %fv102 to i64
   %n.addr = alloca i64
-  store i64 %cv100, ptr %n.addr
-  %ld101 = load ptr, ptr %$clo.addr
-  %fp102 = getelementptr i8, ptr %ld101, i64 32
-  %fv103 = load i64, ptr %fp102, align 8
+  store i64 %cv103, ptr %n.addr
+  %ld104 = load ptr, ptr %$clo.addr
+  %fp105 = getelementptr i8, ptr %ld104, i64 32
+  %fv106 = load i64, ptr %fp105, align 8
   %threshold.addr = alloca i64
-  store i64 %fv103, ptr %threshold.addr
-  %ld104 = load i64, ptr %n.addr
-  %ar105 = sub i64 %ld104, 2
-  %$t362.addr = alloca i64
-  store i64 %ar105, ptr %$t362.addr
-  %ld106 = load i64, ptr %$t362.addr
-  %ld107 = load i64, ptr %threshold.addr
-  %cr108 = call i64 @par_fib(i64 %ld106, i64 %ld107)
-  ret i64 %cr108
+  store i64 %fv106, ptr %threshold.addr
+  %ld107 = load i64, ptr %n.addr
+  %ar108 = sub i64 %ld107, 2
+  %$t2020.addr = alloca i64
+  store i64 %ar108, ptr %$t2020.addr
+  %ld109 = load i64, ptr %$t2020.addr
+  %ld110 = load i64, ptr %threshold.addr
+  %cr111 = call i64 @par_fib(i64 %ld109, i64 %ld110)
+  ret i64 %cr111
 }
 
 define i32 @main() {
 entry:
   call void @march_main()
+  call void @march_run_scheduler()
   ret i32 0
 }

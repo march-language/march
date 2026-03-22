@@ -1,0 +1,83 @@
+-- Counter server: HTTP API with actor-based state management.
+-- Demonstrates compiled actors + HTTP server integration.
+--
+-- Endpoints:
+--   GET  /count      → current count as plain text
+--   POST /increment  → increment count by N (body = integer)
+--   POST /decrement  → decrement count by N (body = integer)
+--
+-- Build & run:
+--   march examples/counter_server.march --compile && ./counter_server
+--
+-- Test:
+--   curl http://localhost:8080/count
+--   curl -X POST -d "5" http://localhost:8080/increment
+--   curl http://localhost:8080/count
+--   curl -X POST -d "3" http://localhost:8080/decrement
+--   curl http://localhost:8080/count
+
+mod CounterServer do
+
+actor Counter do
+  state { count : Int }
+  init { count = 0 }
+
+  on Increment(n : Int) do
+    { state with count = state.count + n }
+  end
+
+  on Decrement(n : Int) do
+    { state with count = state.count - n }
+  end
+end
+
+fn get_count(counter) : String do
+  int_to_string(actor_get_int(counter, 0))
+end
+
+fn do_increment(counter, n) : String do
+  let _ = send(counter, Increment(n))
+  get_count(counter)
+end
+
+fn do_decrement(counter, n) : String do
+  let _ = send(counter, Decrement(n))
+  get_count(counter)
+end
+
+fn handle_post(counter, conn) do
+  let p = HttpServer.path(conn)
+  let body = HttpServer.req_body(conn)
+  let maybe_n = string_to_int(body)
+  match maybe_n with
+  | None -> HttpServer.text(conn, 400, "Bad Request: body must be an integer")
+  | Some(n) ->
+    if p == "/increment" then HttpServer.text(conn, 200, do_increment(counter, n))
+    else if p == "/decrement" then HttpServer.text(conn, 200, do_decrement(counter, n))
+    else HttpServer.text(conn, 404, "Not Found")
+  end
+end
+
+fn router(counter, conn) do
+  let m = Http.method_to_string(HttpServer.method(conn))
+  let p = HttpServer.path(conn)
+  if m == "GET" then
+    if p == "/count" then HttpServer.text(conn, 200, get_count(counter))
+    else HttpServer.text(conn, 404, "Not Found")
+  else if m == "POST" then handle_post(counter, conn)
+  else HttpServer.text(conn, 405, "Method Not Allowed")
+end
+
+fn main() : Unit do
+  let counter = spawn(Counter)
+  println("Counter server on http://localhost:8080")
+  println("  GET  /count     - read counter")
+  println("  POST /increment - add N (body)")
+  println("  POST /decrement - subtract N (body)")
+
+  HttpServer.new(8080)
+  |> HttpServer.plug(fn conn -> router(counter, conn))
+  |> HttpServer.listen()
+end
+
+end
