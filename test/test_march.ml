@@ -7962,10 +7962,32 @@ let test_whereis_named () =
     March_desugar.Desugar.desugar_module ast
   in
   March_eval.Eval.run_module m;
+  (* process_registry should have "counter_svc" → some pid (set during app startup) *)
   let registered = Hashtbl.find_opt March_eval.Eval.process_registry "counter_svc" in
   Alcotest.(check bool) "counter_svc registered" true (registered <> None);
+  (* After graceful shutdown, the actor is dead; whereis correctly returns None *)
   let result = call_builtin "whereis" [March_eval.Eval.VAtom "counter_svc"] in
-  Alcotest.(check bool) "whereis returns Some(Pid)" true
+  Alcotest.(check bool) "whereis returns None for dead post-shutdown actor" true
+    (match result with March_eval.Eval.VCon ("None", []) -> true | _ -> false)
+
+(** whereis returns Some(Pid) for a live actor registered manually *)
+let test_whereis_live_actor () =
+  let _env = eval_module {|mod TestWhereis do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+    fn main() do
+      spawn(Counter)
+    end
+  end|} in
+  let pid = match call_fn _env "main" [] with
+    | March_eval.Eval.VPid p -> p | _ -> -1 in
+  Alcotest.(check bool) "actor spawned" true (pid >= 0);
+  Hashtbl.replace March_eval.Eval.process_registry "live_svc" pid;
+  let result = call_builtin "whereis" [March_eval.Eval.VAtom "live_svc"] in
+  Alcotest.(check bool) "whereis returns Some(Pid) for live actor" true
     (match result with March_eval.Eval.VCon ("Some", [March_eval.Eval.VPid _]) -> true | _ -> false)
 
 (** whereis on an unknown atom returns None *)
@@ -8393,6 +8415,7 @@ let () =
         [
           Alcotest.test_case "worker named spec"         `Quick (with_reset test_worker_named_spec);
           Alcotest.test_case "whereis named"             `Quick (with_reset test_whereis_named);
+          Alcotest.test_case "whereis live actor"        `Quick (with_reset test_whereis_live_actor);
           Alcotest.test_case "whereis unknown"           `Quick (with_reset test_whereis_unknown);
           Alcotest.test_case "whereis_bang unknown"      `Quick (with_reset test_whereis_bang_unknown);
           Alcotest.test_case "name reregisters restart"  `Quick (with_reset test_name_reregisters_on_restart);

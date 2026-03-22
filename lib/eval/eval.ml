@@ -3719,25 +3719,6 @@ let task_builtins : env =
     | [_cap] -> VUnit   (* attenuation is a compile-time check; runtime is a no-op *)
     | _ -> eval_error "cap_narrow: expected 1 argument"))
 
-  (* App/Supervisor builtins *)
-  ; ("worker", VBuiltin ("worker", function
-      | [VCon (name, [])] ->
-        VRecord [("actor", VString name); ("restart", VAtom "permanent")]
-      | [VString name] ->
-        VRecord [("actor", VString name); ("restart", VAtom "permanent")]
-      | _ -> eval_error "worker: expected an actor name"))
-
-  ; ("Supervisor.spec", VBuiltin ("Supervisor.spec", function
-      | [strategy; children] ->
-        VRecord [("strategy", strategy); ("children", children)]
-      | _ -> eval_error "Supervisor.spec: expected (strategy, children)"))
-
-  ; ("App.stop", VBuiltin ("App.stop", function
-      | [] | [VUnit] ->
-        shutdown_requested := true;
-        VUnit
-      | _ -> eval_error "App.stop: expected no arguments"))
-
   (* Phase 5: task_spawn_link — spawn a task linked to an actor pid.
      If the linked actor crashes, the task is cancelled (or vice versa). *)
   (* App/Supervisor builtins *)
@@ -3769,6 +3750,12 @@ let task_builtins : env =
       | [strategy; children] ->
         VRecord [("strategy", strategy); ("children", children)]
       | _ -> eval_error "Supervisor.spec: expected (strategy, children)"))
+
+  ; ("App.stop", VBuiltin ("App.stop", function
+      | [] | [VUnit] ->
+        shutdown_requested := true;
+        VUnit
+      | _ -> eval_error "App.stop: expected no arguments"))
 
   (* Process registry: whereis returns Option(Pid); whereis_bang crashes if missing *)
   ; ("whereis", VBuiltin ("whereis", function
