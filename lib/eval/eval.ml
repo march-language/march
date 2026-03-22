@@ -135,6 +135,13 @@ let process_registry : (string, int) Hashtbl.t = Hashtbl.create 8
 (** Reverse map: pid → registered atom name (for re-registration on restart). *)
 let pid_to_registry_name : (int, string) Hashtbl.t = Hashtbl.create 8
 
+(** Flag set when graceful shutdown has been requested (SIGTERM, App.stop). *)
+let shutdown_requested : bool ref = ref false
+
+(** Ordered list of pids spawned by [spawn_from_spec], in start order.
+    Shutdown iterates this in reverse (last started = first stopped). *)
+let app_spawn_order : int list ref = ref []
+
 (** Pid of the actor whose handler is currently executing.
     Set by [run_scheduler] when entering a handler; used by [self] and [receive]. *)
 let current_pid : int option ref = ref None
@@ -3497,7 +3504,9 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear pid_to_registry_name;
   Hashtbl.clear dyn_sup_registry;
   Hashtbl.clear dyn_sup_vpid_map;
-  dyn_sup_next_vpid := (-1)
+  dyn_sup_next_vpid := (-1);
+  app_spawn_order := [];
+  shutdown_requested := false
 
 (* NOTE: debug_ctx actor event logging is intentionally not reproduced here.
    The old ESend recorded ame_state_before/ame_state_after. When actor debug
@@ -3509,7 +3518,7 @@ let reset_scheduler_state () : unit =
     Repeats until a full pass produces no work (all mailboxes empty). *)
 let run_scheduler () =
   let changed = ref true in
-  while !changed do
+  while !changed && not !shutdown_requested do
     changed := false;
     (* Snapshot current pids to avoid issues with new actors spawned mid-pass *)
     let pids = Hashtbl.fold (fun pid _ acc -> pid :: acc) actor_registry [] in
@@ -3613,6 +3622,7 @@ let spawn_from_spec (spec : value) : unit =
                 ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
                 ai_resources = [] } in
               Hashtbl.add actor_registry pid inst;
+              app_spawn_order := !app_spawn_order @ [pid];
               (* Register named children in the process registry *)
               (match List.assoc_opt "name" child_fields with
                | Some (VAtom atom_name) ->
@@ -3700,6 +3710,25 @@ let task_builtins : env =
   ; ("cap_narrow", VBuiltin ("cap_narrow", function
     | [_cap] -> VUnit   (* attenuation is a compile-time check; runtime is a no-op *)
     | _ -> eval_error "cap_narrow: expected 1 argument"))
+
+  (* App/Supervisor builtins *)
+  ; ("worker", VBuiltin ("worker", function
+      | [VCon (name, [])] ->
+        VRecord [("actor", VString name); ("restart", VAtom "permanent")]
+      | [VString name] ->
+        VRecord [("actor", VString name); ("restart", VAtom "permanent")]
+      | _ -> eval_error "worker: expected an actor name"))
+
+  ; ("Supervisor.spec", VBuiltin ("Supervisor.spec", function
+      | [strategy; children] ->
+        VRecord [("strategy", strategy); ("children", children)]
+      | _ -> eval_error "Supervisor.spec: expected (strategy, children)"))
+
+  ; ("App.stop", VBuiltin ("App.stop", function
+      | [] | [VUnit] ->
+        shutdown_requested := true;
+        VUnit
+      | _ -> eval_error "App.stop: expected no arguments"))
 
   (* Phase 5: task_spawn_link — spawn a task linked to an actor pid.
      If the linked actor crashes, the task is cancelled (or vice versa). *)
@@ -3924,6 +3953,70 @@ let eval_with_reduction_tracking (thunk : value) : value * int =
   last_reduction_count := consumed;
   (result, consumed)
 
+(* ------------------------------------------------------------------ *)
+(* App / Supervisor machinery                                          *)
+(* ------------------------------------------------------------------ *)
+
+(** Convert a March list value (VCon Cons/Nil) to an OCaml list of values. *)
+let rec march_list_to_list = function
+  | VCon ("Nil", []) -> []
+  | VCon ("Cons", [h; t]) -> h :: march_list_to_list t
+  | v -> eval_error "march_list_to_list: expected list, got %s" (value_to_string v)
+
+(** Send [Shutdown()] to [pid], run one scheduler pass to execute the handler
+    if defined, then force-kill the actor regardless. *)
+let shutdown_actor_pid (pid : int) : unit =
+  match Hashtbl.find_opt actor_registry pid with
+  | None -> ()
+  | Some inst when not inst.ai_alive -> ()
+  | Some inst ->
+    (* Enqueue Shutdown() message *)
+    Queue.push (VCon ("Shutdown", [])) inst.ai_mailbox;
+    (* Process one message from this actor's mailbox (the Shutdown we just queued) *)
+    if not (Queue.is_empty inst.ai_mailbox) then begin
+      let msg = Queue.pop inst.ai_mailbox in
+      let (msg_tag, msg_args) = match msg with
+        | VCon (tag, args) -> (tag, args)
+        | VAtom tag        -> (tag, [])
+        | _                -> ("__drop__", [])
+      in
+      if msg_tag <> "__drop__" then begin
+        match List.find_opt (fun h -> h.ah_msg.txt = msg_tag)
+                inst.ai_def.actor_handlers with
+        | None -> ()  (* No Shutdown handler: fall through to force-kill *)
+        | Some handler ->
+          if List.length handler.ah_params = List.length msg_args then begin
+            let prev_pid = !current_pid in
+            current_pid := Some pid;
+            let param_bindings =
+              List.map2 (fun p v -> (p.param_name.txt, v))
+                handler.ah_params msg_args
+            in
+            let handler_env =
+              [("state", inst.ai_state)] @ param_bindings @ !(inst.ai_env_ref)
+            in
+            (match !eval_expr_hook handler_env handler.ah_body with
+             | new_state -> inst.ai_state <- new_state
+             | exception _ -> ());
+            current_pid := prev_pid
+          end
+      end
+    end;
+    (* Force-kill the actor *)
+    (match Hashtbl.find_opt actor_registry pid with
+     | Some inst2 -> inst2.ai_alive <- false
+     | None -> ())
+
+(** Graceful shutdown: stop all app-level children in reverse spawn order. *)
+let graceful_shutdown () : unit =
+  let pids_rev = List.rev !app_spawn_order in
+  List.iter shutdown_actor_pid pids_rev;
+  app_spawn_order := []
+
+(** Spawn all children described in a supervisor spec record.
+    Spec shape: { strategy = :one_for_one, children = [ChildSpec, ...] }
+    ChildSpec shape: { actor = "Name", restart = :permanent }
+    Records spawn order in [app_spawn_order]. *)
 (* ------------------------------------------------------------------ *)
 (* Module evaluation                                                   *)
 (* ------------------------------------------------------------------ *)
@@ -4221,19 +4314,56 @@ let eval_module_env (m : module_) : env =
   env_ref := final_env;
   final_env
 
-(** Run the module: evaluate it, then call [main()] if it exists.
-    After [main()] returns, drain all actor mailboxes via the scheduler loop.
-    [main()] sets up actors and queues initial messages; the scheduler
-    processes them all before the program exits. *)
+(** Call an optional hook stored as [Some(fn)] / [None] in a VCon. *)
+let call_hook_opt (v_opt : value option) : unit =
+  match v_opt with
+  | Some (VCon ("Some", [hook_fn])) -> ignore (apply hook_fn [])
+  | _ -> ()
+
+(** Run the module: evaluate it, then call [main()] or drive the [app] lifecycle.
+    - [main()] path: call main, drain the scheduler, exit.
+    - [app] path: evaluate __app_init__ → { spec, on_start, on_stop },
+      spawn supervision tree, call on_start, run scheduler until shutdown,
+      call graceful_shutdown, call on_stop, exit. *)
 let run_module (m : module_) : unit =
+  (* Reset global app state for fresh run *)
+  app_spawn_order   := [];
+  shutdown_requested := false;
   let env = eval_module_env m in
+  (* Install SIGTERM/SIGINT handlers for graceful shutdown *)
+  let handle_signal (_ : int) = shutdown_requested := true in
+  Sys.set_signal Sys.sigterm (Sys.Signal_handle handle_signal);
+  Sys.set_signal Sys.sigint  (Sys.Signal_handle handle_signal);
   match List.assoc_opt "__app_init__" env with
   | Some init_fn ->
-    (* App entry point: call __app_init__() to get the supervisor spec,
-       spawn all children, then run the scheduler. *)
-    let spec = apply init_fn [] in
+    (* App entry point: evaluate app body to get { spec, on_start, on_stop } *)
+    let app_record = apply init_fn [] in
+    let spec = match app_record with
+      | VRecord fields ->
+        (match List.assoc_opt "spec" fields with
+         | Some v -> v
+         | None -> app_record)
+      | _ -> app_record
+    in
+    let on_start_opt = match app_record with
+      | VRecord fields -> List.assoc_opt "on_start" fields
+      | _ -> None
+    in
+    let on_stop_opt = match app_record with
+      | VRecord fields -> List.assoc_opt "on_stop" fields
+      | _ -> None
+    in
+    (* 1. Spawn supervision tree *)
     spawn_from_spec spec;
-    run_scheduler ()
+    (* 2. Call on_start hook (after tree is up) *)
+    call_hook_opt on_start_opt;
+    (* 3. Run scheduler until drained or shutdown requested *)
+    run_scheduler ();
+    (* 4. Graceful shutdown: reverse-order Shutdown() to each child *)
+    if not (List.is_empty !app_spawn_order) then
+      graceful_shutdown ();
+    (* 5. Call on_stop hook (after tree is down) *)
+    call_hook_opt on_stop_opt
   | None ->
     match List.assoc_opt "main" env with
     | None   -> ()
