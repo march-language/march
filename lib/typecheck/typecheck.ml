@@ -2183,7 +2183,7 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
     (* H9 gap fix: also check actor handler signatures for Cap usage.
        Actor handlers can receive Cap(X) values as message arguments; those
        must also be covered by module-level [needs] declarations. *)
-    | Ast.DActor (_, actor, sp) ->
+    | Ast.DActor (_, _, actor, sp) ->
       List.concat_map (fun (h : Ast.actor_handler) ->
           let param_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
           List.concat_map (fun t ->
@@ -2286,7 +2286,7 @@ let rec check_decl env (d : Ast.decl) : env =
     discharge_constraints env sp;
     bind_var def.fn_name.txt sch env
 
-  | Ast.DLet (b, sp) ->
+  | Ast.DLet (_vis, b, sp) ->
     let env' = enter_level env in
     let rhs_ty = infer_expr env' b.bind_expr in
     Hashtbl.replace env.type_map sp (repr rhs_ty);
@@ -2305,7 +2305,7 @@ let rec check_decl env (d : Ast.decl) : env =
     in
     bind_vars bindings' env
 
-  | Ast.DType (name, params, typedef, _sp) ->
+  | Ast.DType (_vis, name, params, typedef, _sp) ->
     let env1 = { env with types = (name.txt, List.length params) :: env.types } in
     (match typedef with
      | Ast.TDVariant variants ->
@@ -2332,7 +2332,7 @@ let rec check_decl env (d : Ast.decl) : env =
        { env1 with records = (name.txt, (param_names, field_pairs)) :: env1.records }
      | Ast.TDAlias _ -> env1)
 
-  | Ast.DActor (name, actor, _sp) ->
+  | Ast.DActor (_vis, name, actor, _sp) ->
     (* Build the state record type from field declarations *)
     let state_ty =
       let tvars = ref [] in
@@ -2401,43 +2401,66 @@ let rec check_decl env (d : Ast.decl) : env =
         | _ -> e
       ) env decls in
     let inner_env = List.fold_left check_decl pre_env decls in
-    (* Collect the names that are explicitly public within this module.
-       DFn respects fn_vis; DLet/DType/DActor have no visibility field and are
-       treated as public by default (visibility annotations for them are future work). *)
+    (* Collect the names that are explicitly public within this module. *)
     let pub_set =
       List.filter_map (function
         | Ast.DFn (def, _) when def.fn_vis = Ast.Public -> Some def.fn_name.txt
         | Ast.DFn _ -> None
-        | Ast.DLet (b, _) ->
+        | Ast.DLet (Ast.Public, b, _) ->
           (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
-        | Ast.DType (n, _, _, _) -> Some n.txt
-        | Ast.DActor (n, _, _) -> Some n.txt
+        | Ast.DLet _ -> None
+        | Ast.DType (Ast.Public, n, _, _, _) -> Some n.txt
+        | Ast.DType _ -> None
+        | Ast.DActor (Ast.Public, n, _, _) -> Some n.txt
+        | Ast.DActor _ -> None
         | Ast.DMod (n, Ast.Public, _, _) -> Some n.txt
         | Ast.DMod _ -> None
         | _ -> None
       ) decls
     in
-    (* Check conformance against any matching sig declaration *)
-    (match List.assoc_opt name.txt env.sigs with
-     | None -> ()
-     | Some sdef ->
-       (* Verify all sig_fns are present in the module *)
-       List.iter (fun ((fname : Ast.name), _sig_ty) ->
-           if not (List.mem_assoc fname.txt inner_env.vars) then
-             Err.error env.errors ~span:name.span
-               (Printf.sprintf
-                  "Module `%s` does not implement `%s` required by `sig %s`."
-                  name.txt fname.txt name.txt)
-         ) sdef.sig_fns;
-       (* Verify all sig_types are declared in the module *)
-       List.iter (fun ((tname : Ast.name), _params) ->
-           if not (List.mem_assoc tname.txt inner_env.types) then
-             Err.error env.errors ~span:name.span
-               (Printf.sprintf
-                  "Module `%s` does not declare type `%s` required by `sig %s`."
-                  name.txt tname.txt name.txt)
-         ) sdef.sig_types
-    );
+    (* Check conformance against any matching sig declaration (Phase 2) *)
+    let opaque_types =
+      match List.assoc_opt name.txt env.sigs with
+      | None -> []
+      | Some sdef ->
+        (* Verify all sig_fns are present with matching types *)
+        List.iter (fun ((fname : Ast.name), sig_ty) ->
+            match List.assoc_opt fname.txt inner_env.vars with
+            | None ->
+              Err.error env.errors ~span:name.span
+                (Printf.sprintf
+                   "Module `%s` does not implement `%s` required by `sig %s`."
+                   name.txt fname.txt name.txt)
+            | Some sch ->
+              (* Convert sig_ty to internal type and check unification via a
+                 temporary error context so we can produce a clean error message. *)
+              let tvars = ref [] in
+              let expected = surface_ty inner_env ~tvars sig_ty in
+              let actual = instantiate env.level inner_env sch in
+              let tmp_errors = Err.create () in
+              let tmp_env = { inner_env with errors = tmp_errors } in
+              unify tmp_env ~span:fname.span expected actual;
+              if Err.has_errors tmp_errors then
+                Err.error env.errors ~span:fname.span
+                  (Printf.sprintf
+                     "Module `%s` implements `%s` with wrong type.\n  \
+                      Expected: %s  (from sig %s)\n  \
+                      Got:      %s"
+                     name.txt fname.txt
+                     (pp_ty (repr expected)) name.txt
+                     (pp_ty (repr actual)))
+          ) sdef.sig_fns;
+        (* Verify all sig_types are declared in the module *)
+        List.iter (fun ((tname : Ast.name), _params) ->
+            if not (List.mem_assoc tname.txt inner_env.types) then
+              Err.error env.errors ~span:name.span
+                (Printf.sprintf
+                   "Module `%s` does not declare type `%s` required by `sig %s`."
+                   name.txt tname.txt name.txt)
+          ) sdef.sig_types;
+        (* Return the list of opaque type names for constructor hiding below *)
+        List.map (fun ((tname : Ast.name), _) -> tname.txt) sdef.sig_types
+    in
     (* Validate capability declarations for this module *)
     check_module_needs env name decls;
     (* Expose only public names as "ModName.name" in the outer env.
@@ -2466,10 +2489,14 @@ let rec check_decl env (d : Ast.decl) : env =
       ) new_names_raw in
     (* Also export type names and constructors from public DMod into outer scope.
        Types defined in a module (e.g. IOList, Option) are referred to by their
-       bare name throughout user code, not prefixed. *)
+       bare name throughout user code, not prefixed.
+       Opaque types listed in the sig have their constructors hidden: only the
+       type name is exported, not the constructors (encapsulation). *)
     let new_types = List.filter (fun (k, _) -> List.mem k pub_set) inner_env.types in
     let new_ctors = List.filter (fun (k, ci) ->
-        List.mem k pub_set || List.mem ci.ci_type pub_set
+        (* Hide constructors for opaque types declared in the sig *)
+        if List.mem ci.ci_type opaque_types then false
+        else List.mem k pub_set || List.mem ci.ci_type pub_set
       ) inner_env.ctors in
     (* Collect this module's declared capabilities for transitive enforcement *)
     let inner_needs = List.concat_map (function
@@ -2863,7 +2890,7 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
         (* Don't shadow existing bindings (e.g., builtins) with mono forward refs *)
         if List.mem_assoc def.fn_name.txt env.vars then env
         else bind_var def.fn_name.txt (Mono (fresh_var 0)) env
-      | Ast.DType (name, params, typedef, _) ->
+      | Ast.DType (_, name, params, typedef, _) ->
         let env1 = { env with types = (name.txt, List.length params) :: env.types } in
         (match typedef with
          | Ast.TDVariant variants ->
@@ -2879,7 +2906,7 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
            let field_pairs = List.map (fun (f : Ast.field) -> (f.fld_name.txt, f.fld_ty)) fields in
            { env1 with records = (name.txt, (param_names, field_pairs)) :: env1.records }
          | _ -> env1)
-      | Ast.DActor (name, actor, _) ->
+      | Ast.DActor (_, name, actor, _) ->
         (* Register actor name as a zero-arg constructor and message ctors *)
         let env1 = { env with ctors =
           (name.txt, { ci_type = name.txt; ci_params = []; ci_arg_tys = [] })

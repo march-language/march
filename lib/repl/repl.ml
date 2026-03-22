@@ -96,7 +96,7 @@ let preregister_stdlib_types tc_env (stdlib_decls : March_ast.Ast.decl list) =
     List.fold_left (fun env d ->
       match d with
       | DMod (_, _, inner, _) -> add_from env inner
-      | DType (name, params, TDVariant variants, _) ->
+      | DType (_, name, params, TDVariant variants, _) ->
         let arity      = List.length params in
         let param_names = List.map (fun (p : name) -> p.txt) params in
         let env1 = { env with types = (name.txt, arity) :: env.types } in
@@ -105,7 +105,7 @@ let preregister_stdlib_types tc_env (stdlib_decls : March_ast.Ast.decl list) =
                      ci_arg_tys = v.var_args } in
           { e with ctors = (v.var_name.txt, ci) :: e.ctors }
         ) env1 variants
-      | DType (name, params, _, _) ->
+      | DType (_, name, params, _, _) ->
         let arity = List.length params in
         { env with types = (name.txt, arity) :: env.types }
       | _ -> env
@@ -512,18 +512,18 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
                         Printf.printf "val %s = <fn>\n%!" bind_name
                       | Some jit when (match d' with
-                          | March_ast.Ast.DLet (b, _) ->
+                          | March_ast.Ast.DLet (_, b, _) ->
                             (match b.bind_pat with March_ast.Ast.PatVar _ -> true | _ -> false)
                           | _ -> false) ->
                         (* JIT path for simple let bindings: compile value to a global
                            so later expressions can reference the name across module boundaries. *)
                         let bind_name = match d' with
-                          | March_ast.Ast.DLet (b, _) ->
+                          | March_ast.Ast.DLet (_, b, _) ->
                             (match b.bind_pat with March_ast.Ast.PatVar n -> n.txt | _ -> assert false)
                           | _ -> assert false
                         in
                         let bind_expr = match d' with
-                          | March_ast.Ast.DLet (b, _) -> b.bind_expr
+                          | March_ast.Ast.DLet (_, b, _) -> b.bind_expr
                           | _ -> assert false
                         in
                         let m = wrap_expr_as_module ~stdlib_decls bind_expr in
@@ -544,7 +544,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         (match d' with
                          | March_ast.Ast.DFn (def, _) ->
                            Printf.printf "val %s = <fn>\n%!" def.fn_name.txt
-                         | March_ast.Ast.DLet (b, _) ->
+                         | March_ast.Ast.DLet (_, b, _) ->
                            (match b.bind_pat with
                             | March_ast.Ast.PatVar n ->
                               let vstr = match List.assoc_opt n.txt !env with
@@ -553,7 +553,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                               in
                               Printf.printf "val %s = %s\n%!" n.txt vstr
                             | _ -> Printf.printf "val _ = ...\n%!")
-                         | March_ast.Ast.DActor (name, _, _) ->
+                         | March_ast.Ast.DActor (_, name, _, _) ->
                            Printf.printf "val %s = <actor>\n%!" name.txt
                          | _ -> ()))
                     with
@@ -828,17 +828,17 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                tc_env := { new_tc with errors = March_errors.Errors.create () };
              add_line Notty.A.empty (Printf.sprintf "val %s = <fn>" bind_name)
            | Some jit when (match d' with
-               | March_ast.Ast.DLet (b, _) ->
+               | March_ast.Ast.DLet (_, b, _) ->
                  (match b.bind_pat with March_ast.Ast.PatVar _ -> true | _ -> false)
                | _ -> false) ->
              (* JIT path for simple let bindings: compile value to a global. *)
              let bind_name = match d' with
-               | March_ast.Ast.DLet (b, _) ->
+               | March_ast.Ast.DLet (_, b, _) ->
                  (match b.bind_pat with March_ast.Ast.PatVar n -> n.txt | _ -> assert false)
                | _ -> assert false
              in
              let bind_expr = match d' with
-               | March_ast.Ast.DLet (b, _) -> b.bind_expr
+               | March_ast.Ast.DLet (_, b, _) -> b.bind_expr
                | _ -> assert false
              in
              let m = wrap_expr_as_module ~stdlib_decls bind_expr in
@@ -858,7 +858,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              let out = match d' with
                | March_ast.Ast.DFn (def, _) ->
                  Printf.sprintf "val %s = <fn>" def.fn_name.txt
-               | March_ast.Ast.DLet (b, _) ->
+               | March_ast.Ast.DLet (_, b, _) ->
                  (match b.bind_pat with
                   | March_ast.Ast.PatVar n ->
                     let vstr = match List.assoc_opt n.txt !env with
@@ -867,7 +867,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                     in
                     Printf.sprintf "val %s = %s" n.txt vstr
                   | _ -> "val _ = ...")
-               | March_ast.Ast.DActor (name, _, _) ->
+               | March_ast.Ast.DActor (_, name, _, _) ->
                  Printf.sprintf "val %s = <actor>" name.txt
                | _ -> ""
              in

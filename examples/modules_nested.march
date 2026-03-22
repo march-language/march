@@ -4,28 +4,28 @@
 mod Example do
 
   -- Two-level nesting: A.B.function() access
-  mod Geometry do
-    mod Rect do
-      fn area(w : Int, h : Int) : Int do w * h end
-      fn perimeter(w : Int, h : Int) : Int do (w + h) * 2 end
+  pub mod Geometry do
+    pub mod Rect do
+      pub fn area(w : Int, h : Int) : Int do w * h end
+      pub fn perimeter(w : Int, h : Int) : Int do (w + h) * 2 end
     end
 
-    mod Triangle do
-      fn area(base : Int, height : Int) : Int do (base * height) / 2 end
-    end
-  end
-
-  mod Algebra do
-    mod Linear do
-      fn eval(m : Int, x : Int, b : Int) : Int do m * x + b end
-    end
-
-    mod Quadratic do
-      fn discriminant(a : Int, b : Int, c : Int) : Int do b * b - 4 * a * c end
+    pub mod Triangle do
+      pub fn area(base : Int, height : Int) : Int do (base * height) / 2 end
     end
   end
 
-  fn main() : Int do
+  pub mod Algebra do
+    pub mod Linear do
+      pub fn eval(m : Int, x : Int, b : Int) : Int do m * x + b end
+    end
+
+    pub mod Quadratic do
+      pub fn discriminant(a : Int, b : Int, c : Int) : Int do b * b - 4 * a * c end
+    end
+  end
+
+  pub fn main() : Int do
     -- Access nested module functions via Module.SubModule.function()
     let rect_a   = Geometry.Rect.area(6, 7)           -- 42
     let rect_p   = Geometry.Rect.perimeter(6, 7)      -- 26

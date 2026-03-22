@@ -124,10 +124,10 @@ and branch = {
 
 (** Top-level declarations. *)
 type decl =
-  | DFn of fn_def * span                          (** fn name(args) do ... end *)
-  | DLet of binding * span                         (** Top-level let binding *)
-  | DType of name * name list * type_def * span    (** Type definition *)
-  | DActor of name * actor_def * span              (** Actor definition *)
+  | DFn of fn_def * span                                        (** fn name(args) do ... end *)
+  | DLet of visibility * binding * span                         (** Top-level let binding *)
+  | DType of visibility * name * name list * type_def * span    (** Type definition *)
+  | DActor of visibility * name * actor_def * span              (** Actor definition *)
   | DProtocol of name * protocol_def * span        (** Protocol (session type) definition *)
   | DMod of name * visibility * decl list * span   (** Nested module *)
   | DSig of name * sig_def * span                  (** Module signature *)

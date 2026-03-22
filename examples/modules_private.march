@@ -4,35 +4,35 @@
 
 mod Example do
 
-  mod Crypto do
+  pub mod Crypto do
     -- Public API
-    fn encode(x : Int) : Int do
+    pub fn encode(x : Int) : Int do
       let scrambled = scramble(x)
       add_checksum(scrambled)
     end
 
-    fn decode(x : Int) : Int do
+    pub fn decode(x : Int) : Int do
       let without_check = remove_checksum(x)
       unscramble(without_check)
     end
 
     -- Private implementation details: only callable within Crypto
-    p_fn scramble(x : Int) : Int do x * 31 + 7 end
-    p_fn unscramble(x : Int) : Int do (x - 7) / 31 end
-    p_fn add_checksum(x : Int) : Int do x + 100 end
-    p_fn remove_checksum(x : Int) : Int do x - 100 end
+    fn scramble(x : Int) : Int do x * 31 + 7 end
+    fn unscramble(x : Int) : Int do (x - 7) / 31 end
+    fn add_checksum(x : Int) : Int do x + 100 end
+    fn remove_checksum(x : Int) : Int do x - 100 end
   end
 
-  mod Counter do
+  pub mod Counter do
     -- Public: increment a counter value
-    fn increment(n : Int) : Int do n + step() end
-    fn decrement(n : Int) : Int do n - step() end
+    pub fn increment(n : Int) : Int do n + step() end
+    pub fn decrement(n : Int) : Int do n - step() end
 
     -- Private: the step size is an implementation detail
-    p_fn step() : Int do 1 end
+    fn step() : Int do 1 end
   end
 
-  fn main() : Int do
+  pub fn main() : Int do
     -- Use the public API of Crypto
     let encoded = Crypto.encode(42)
     let decoded = Crypto.decode(encoded)
