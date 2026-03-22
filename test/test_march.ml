@@ -589,6 +589,104 @@ let test_protocol_known_participant_no_hint () =
   end|} in
   Alcotest.(check bool) "known participant types: no errors" false (has_errors ctx)
 
+(* ── Phase 1: Session type projection + duality ──────────────────────────── *)
+
+let typecheck_full src =
+  let m = parse_module src in
+  let (errors, _type_map, env) = March_typecheck.Typecheck.check_module_full m in
+  (errors, env)
+
+let pp_sty = March_typecheck.Typecheck.pp_session_ty
+
+let test_session_projection_simple () =
+  (* A two-step protocol: Client sends Int, Server sends Bool back.
+     Client projection: Send(Int, Recv(Bool, End))
+     Server projection: Recv(Int, Send(Bool, End)) *)
+  let (_ctx, env) = typecheck_full {|mod Test do
+    protocol Ping do
+      Client -> Server : Int
+      Server -> Client : Bool
+    end
+  end|} in
+  let pi = List.assoc "Ping" env.March_typecheck.Typecheck.protocols in
+  let client_ty = List.assoc "Client" pi.March_typecheck.Typecheck.pi_projections in
+  let server_ty = List.assoc "Server" pi.March_typecheck.Typecheck.pi_projections in
+  Alcotest.(check string) "client projection"
+    "Send(Int, Recv(Bool, End))"
+    (pp_sty client_ty);
+  Alcotest.(check string) "server projection"
+    "Recv(Int, Send(Bool, End))"
+    (pp_sty server_ty)
+
+let test_session_duality_holds () =
+  (* dual(client) should equal server *)
+  let (_ctx, env) = typecheck_full {|mod Test do
+    protocol Counter do
+      Client -> Server : Int
+      Server -> Client : Int
+    end
+  end|} in
+  let pi = List.assoc "Counter" env.March_typecheck.Typecheck.protocols in
+  let client_ty = List.assoc "Client" pi.March_typecheck.Typecheck.pi_projections in
+  let server_ty = List.assoc "Server" pi.March_typecheck.Typecheck.pi_projections in
+  let dual_client = March_typecheck.Typecheck.dual_session_ty client_ty in
+  Alcotest.(check bool) "dual(client) = server"
+    true
+    (March_typecheck.Typecheck.session_ty_equal dual_client server_ty)
+
+let test_session_loop_projection () =
+  (* A protocol with a loop: generates SRec/SVar *)
+  let (ctx, env) = typecheck_full {|mod Test do
+    protocol Stream do
+      loop do
+        Source -> Sink : Int
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "loop protocol: no errors" false (has_errors ctx);
+  let pi = List.assoc "Stream" env.March_typecheck.Typecheck.protocols in
+  let source_ty = List.assoc "Source" pi.March_typecheck.Typecheck.pi_projections in
+  (* Source projection should be Rec(X, Send(Int, X)) for some X *)
+  (match source_ty with
+   | March_typecheck.Typecheck.SRec (_, March_typecheck.Typecheck.SSend _) ->
+     Alcotest.(check bool) "source loop projection is SRec(Send(...))" true true
+   | other ->
+     Alcotest.fail ("expected SRec(SSend(...)) but got: " ^ pp_sty other))
+
+let test_session_chan_type_annotation () =
+  (* Chan(Client, Ping) in a type annotation should resolve correctly — no errors *)
+  let ctx = typecheck {|mod Test do
+    protocol Ping do
+      Client -> Server : Int
+      Server -> Client : Bool
+    end
+    fn use_chan(ch : Chan(Client, Ping)) : Unit do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "Chan(Role, Proto) annotation: no errors" false (has_errors ctx)
+
+let test_session_chan_unknown_protocol_error () =
+  (* Chan(Client, DoesNotExist) should produce an error *)
+  let ctx = typecheck {|mod Test do
+    fn bad(ch : Chan(Client, DoesNotExist)) : Unit do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "Chan with unknown protocol: error" true (has_errors ctx)
+
+let test_session_chan_unknown_role_error () =
+  (* Chan(Ghost, Ping) where Ghost is not a role in Ping should error *)
+  let ctx = typecheck {|mod Test do
+    protocol Ping do
+      Client -> Server : Int
+    end
+    fn bad(ch : Chan(Ghost, Ping)) : Unit do
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "Chan with unknown role: error" true (has_errors ctx)
+
 (* ── H9: Actor handler capability checking ───────────────────────────────── *)
 
 let test_actor_handler_cap_needs_ok () =
@@ -8533,6 +8631,13 @@ let () =
           Alcotest.test_case "protocol duplicate"            `Quick test_protocol_duplicate_error;
           Alcotest.test_case "protocol unknown participant"  `Quick test_protocol_unknown_participant_hint;
           Alcotest.test_case "protocol known participant"    `Quick test_protocol_known_participant_no_hint;
+          (* Phase 1: Session type projection + duality *)
+          Alcotest.test_case "session projection simple"     `Quick test_session_projection_simple;
+          Alcotest.test_case "session duality holds"         `Quick test_session_duality_holds;
+          Alcotest.test_case "session loop projection"       `Quick test_session_loop_projection;
+          Alcotest.test_case "session Chan annotation ok"    `Quick test_session_chan_type_annotation;
+          Alcotest.test_case "session Chan unknown proto"    `Quick test_session_chan_unknown_protocol_error;
+          Alcotest.test_case "session Chan unknown role"     `Quick test_session_chan_unknown_role_error;
           (* H9: Actor handler capability checking *)
           Alcotest.test_case "actor cap needs ok"            `Quick test_actor_handler_cap_needs_ok;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;

@@ -54,6 +54,7 @@ let rec lower_ty (t : Ast.ty) : Tir.ty =
   | Ast.TyLinear (_, t)                   -> lower_ty t  (* linearity tracked on var *)
   | Ast.TyNat n                           -> Tir.TCon ("Nat", [Tir.TCon (string_of_int n, [])])
   | Ast.TyNatOp _                         -> Tir.TCon ("NatOp", [])  (* placeholder *)
+  | Ast.TyChan _                          -> Tir.TCon ("Chan", [])   (* lowered to opaque Chan ptr *)
 
 (** Convert AST linearity to TIR linearity. *)
 let lower_linearity : Ast.linearity -> Tir.linearity = function
@@ -91,6 +92,7 @@ let rec convert_ty (t : Typecheck.ty) : Tir.ty =
   | Typecheck.TLin (_, inner) -> convert_ty inner
   | Typecheck.TNat n          -> Tir.TCon (Printf.sprintf "Nat_%d" n, [])
   | Typecheck.TNatOp _        -> Tir.TVar "_natop"
+  | Typecheck.TChan _         -> Tir.TCon ("Chan", [])  (* lowered to opaque Chan ptr *)
   | Typecheck.TError          -> Tir.TVar "_err"
 
 (* ── Type map reference (set by lower_module, used by lower_expr) ── *)

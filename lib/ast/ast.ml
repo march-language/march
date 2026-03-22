@@ -41,6 +41,7 @@ type ty =
   | TyLinear of linearity * ty       (** Linearity-annotated type *)
   | TyNat of int                     (** Type-level natural literal: 3 *)
   | TyNatOp of nat_op * ty * ty      (** Type-level arithmetic: n + m, n * m *)
+  | TyChan of name * name            (** Session-typed channel endpoint: Chan(Role, Protocol) *)
 [@@deriving show]
 
 (** Type-level natural number operations. *)
@@ -247,9 +248,9 @@ and protocol_def = {
 [@@deriving show]
 
 and protocol_step =
-  | ProtoMsg of name * name * ty          (** Sender -> Receiver : MsgType *)
-  | ProtoLoop of protocol_step list       (** loop do ... end *)
-  | ProtoChoice of name * protocol_step list list  (** branching *)
+  | ProtoMsg of name * name * ty                          (** Sender -> Receiver : MsgType *)
+  | ProtoLoop of protocol_step list                       (** loop do ... end *)
+  | ProtoChoice of name * (name * protocol_step list) list  (** choose by Role: label -> steps *)
 [@@deriving show]
 
 (** Interface (typeclass) definition:
