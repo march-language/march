@@ -3961,7 +3961,7 @@ let rec eval_decl (env : env) (d : decl) : env =
     env_ref := env';
     env'
 
-  | DLet (b, _) ->
+  | DLet (_, b, _) ->
     let v = eval_expr env b.bind_expr in
     (match match_pattern v b.bind_pat with
      | Some bs -> bs @ env
@@ -3969,7 +3969,7 @@ let rec eval_decl (env : env) (d : decl) : env =
 
   | DType _ -> env   (* No runtime effect *)
 
-  | DActor (name, def, _) ->
+  | DActor (_, name, def, _) ->
     (* Register actor definition so spawn() can find it later *)
     let env_ref = ref env in
     Hashtbl.replace actor_defs_tbl name.txt (def, env_ref);
@@ -4023,7 +4023,7 @@ let rec eval_decl (env : env) (d : decl) : env =
     let rec declared_names acc = function
       | [] -> acc
       | DFn (def, _) :: rest -> declared_names (def.fn_name.txt :: acc) rest
-      | DLet (b, _) :: rest ->
+      | DLet (_, b, _) :: rest ->
         let rec pat_names a = function
           | PatVar n -> n.txt :: a
           | PatTuple (ps, _) -> List.fold_left pat_names a ps
@@ -4173,7 +4173,7 @@ let eval_module_env (m : module_) : env =
       env_ref := env';
       make_recursive_env rest env'
 
-    | DLet (b, _) :: rest ->
+    | DLet (_, b, _) :: rest ->
       let v = eval_expr env b.bind_expr in
       let env' = match match_pattern v b.bind_pat with
         | Some bs -> bs @ env
@@ -4182,7 +4182,7 @@ let eval_module_env (m : module_) : env =
       env_ref := env';
       make_recursive_env rest env'
 
-    | DActor (name, def, _) :: rest ->
+    | DActor (_, name, def, _) :: rest ->
       (* Register actor with the shared env_ref so handlers can call module fns *)
       Hashtbl.replace actor_defs_tbl name.txt (def, env_ref);
       make_recursive_env rest env

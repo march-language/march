@@ -4,21 +4,21 @@
 mod Example do
 
   -- Define a module with math utilities
-  mod MathUtils do
-    fn square(x : Int) : Int do x * x end
-    fn cube(x : Int) : Int do x * x * x end
-    fn abs_val(n : Int) : Int do
+  pub mod MathUtils do
+    pub fn square(x : Int) : Int do x * x end
+    pub fn cube(x : Int) : Int do x * x * x end
+    pub fn abs_val(n : Int) : Int do
       if n < 0 then 0 - n else n
     end
   end
 
   -- Define a greeting module
-  mod Greet do
-    fn prefix() : Int do 1000 end
+  pub mod Greet do
+    pub fn prefix() : Int do 1000 end
   end
 
   -- 1. Qualified access: call functions via Module.function
-  fn demo_qualified() : Int do
+  pub fn demo_qualified() : Int do
     let a = MathUtils.square(4)
     let b = MathUtils.cube(3)
     a + b
@@ -27,32 +27,32 @@ mod Example do
   -- 2. Import all: bring every name from MathUtils into scope
   import MathUtils
 
-  fn demo_import_all() : Int do
+  pub fn demo_import_all() : Int do
     square(5) + cube(2)
   end
 
   -- 3. Import specific names only
   import MathUtils, only: [abs_val]
 
-  fn demo_import_only() : Int do
+  pub fn demo_import_only() : Int do
     abs_val(0 - 7)
   end
 
   -- 4. Alias: give a module a shorter name
   alias MathUtils, as: M
 
-  fn demo_alias() : Int do
+  pub fn demo_alias() : Int do
     M.square(6)
   end
 
   -- 5. Use from the Greet module to verify no unused-import warning
   import Greet, only: [prefix]
 
-  fn demo_greet() : Int do
+  pub fn demo_greet() : Int do
     prefix()
   end
 
-  fn main() : Int do
+  pub fn main() : Int do
     let q  = demo_qualified()  -- 16 + 27 = 43
     let ia = demo_import_all() -- 25 + 8  = 33
     let io = demo_import_only() -- 7

@@ -722,7 +722,7 @@ let collect_names (m : Ast.module_) =
         Option.iter visit_expr cl.fc_guard;
         visit_expr cl.fc_body
       ) fd.fn_clauses
-    | Ast.DLet (b, _)            -> visit_pat b.Ast.bind_pat; visit_expr b.Ast.bind_expr
+    | Ast.DLet (_, b, _)         -> visit_pat b.Ast.bind_pat; visit_expr b.Ast.bind_expr
     | Ast.DMod (_, _, decls, _)  -> List.iter visit_decl decls
     | _ -> ()
   in

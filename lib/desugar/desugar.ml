@@ -265,18 +265,18 @@ let rec desugar_decl (d : decl) : decl =
   | DFn (def, sp) ->
     DFn (desugar_fn_def def sp, sp)
 
-  | DLet (b, sp) ->
-    DLet ({ b with bind_expr = desugar_expr b.bind_expr }, sp)
+  | DLet (vis, b, sp) ->
+    DLet (vis, { b with bind_expr = desugar_expr b.bind_expr }, sp)
 
   | DType _ ->
     (* Type declarations have no expressions to desugar. *)
     d
 
-  | DActor (name, actor, sp) ->
+  | DActor (vis, name, actor, sp) ->
     let init'     = desugar_expr actor.actor_init in
     let handlers' = List.map (fun h ->
         { h with ah_body = desugar_expr h.ah_body }) actor.actor_handlers in
-    DActor (name, { actor with actor_init = init'; actor_handlers = handlers' }, sp)
+    DActor (vis, name, { actor with actor_init = init'; actor_handlers = handlers' }, sp)
 
   | DMod (name, vis, decls, sp) ->
     DMod (name, vis, List.map desugar_decl decls, sp)
