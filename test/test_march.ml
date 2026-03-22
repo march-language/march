@@ -1552,7 +1552,7 @@ let test_eval_string_interp_int () =
   let env = eval_module {|mod Test do
     fn show_num(n) do "count: ${n}" end
   end|} in
-  let v = call_fn env "show_num" [March_eval.Eval.VInt 42L] in
+  let v = call_fn env "show_num" [March_eval.Eval.VInt 42] in
   Alcotest.(check string) "string interpolation with int" "count: 42"
     (match v with March_eval.Eval.VString s -> s | _ -> failwith "expected VString")
 
@@ -1561,7 +1561,7 @@ let test_eval_string_interp_multi () =
     fn fmt(a, b) do "${a} + ${b}" end
   end|} in
   let v = call_fn env "fmt"
-    [March_eval.Eval.VInt 1L; March_eval.Eval.VInt 2L] in
+    [March_eval.Eval.VInt 1; March_eval.Eval.VInt 2] in
   Alcotest.(check string) "multi-segment interpolation" "1 + 2"
     (match v with March_eval.Eval.VString s -> s | _ -> failwith "expected VString")
 
@@ -1609,7 +1609,7 @@ let test_repl_doc_missing () =
 let test_repl_doc_registered () =
   let base = March_eval.Eval.base_env in
   let src = {|mod Test do
-    @doc "Add two integers"
+    doc "Add two integers"
     fn add(a, b) do a + b end
   end|} in
   let m = parse_and_desugar src in
@@ -2652,6 +2652,244 @@ let test_repl_jit_stdlib_list_length () =
           let m = make_stdlib_mod e' in
           let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
           Alcotest.(check string) "List.length [] = 0" "0" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(* ------------------------------------------------------------------ *)
+(* REPL JIT regression tests                                           *)
+(* Exercises fixes: AVar extern fix, repl_N global uniquification,    *)
+(* List literal JIT support, var redefinition, expr-after-let.        *)
+(* ------------------------------------------------------------------ *)
+
+(** Regression: `let xs = [1,2,3]` should succeed without JIT error.
+    Fixes: AVar for march_compare_int was falling through to alloca bridge. *)
+let test_repl_list_literal () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let list_decl = load_stdlib_file_for_test "list.march" in
+    let stdlib_decls = [list_decl] in
+    let content_hash =
+      Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
+    let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
+      Hashtbl.create 16 in
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       March_jit.Repl_jit.precompile_stdlib jit
+         ~content_hash ~stdlib_decls ~type_map;
+       let make_stdlib_mod e =
+         let s = March_ast.Ast.dummy_span in
+         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let main_def = March_ast.Ast.{
+           fn_name = { txt = "main"; span = s };
+           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_clauses = [clause] } in
+         { March_ast.Ast.mod_name = { txt = "Main"; span = s };
+           mod_decls = stdlib_decls @ [DFn (main_def, s)] }
+       in
+       (match parse_repl "let xs = [1, 2, 3]" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let (bind_name, bind_expr) = match d' with
+            | March_ast.Ast.DLet (b, _) ->
+              let n = match b.bind_pat with
+                | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "expected PatVar"
+              in (n, b.bind_expr)
+            | _ -> failwith "expected DLet"
+          in
+          let m = make_stdlib_mod bind_expr in
+          March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m
+        | _ -> failwith "expected ReplDecl");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** Regression: `let xs = [1,2,3]` then `List.length(xs)` should return 3.
+    Exercises stdlib dispatch on a list literal defined in a prior REPL line. *)
+let test_repl_stdlib_on_list () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let list_decl = load_stdlib_file_for_test "list.march" in
+    let stdlib_decls = [list_decl] in
+    let content_hash =
+      Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
+    let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
+      Hashtbl.create 16 in
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       March_jit.Repl_jit.precompile_stdlib jit
+         ~content_hash ~stdlib_decls ~type_map;
+       let make_stdlib_mod e =
+         let s = March_ast.Ast.dummy_span in
+         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let main_def = March_ast.Ast.{
+           fn_name = { txt = "main"; span = s };
+           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_clauses = [clause] } in
+         { March_ast.Ast.mod_name = { txt = "Main"; span = s };
+           mod_decls = stdlib_decls @ [DFn (main_def, s)] }
+       in
+       (match parse_repl "let xs = [1, 2, 3]" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let (bind_name, bind_expr) = match d' with
+            | March_ast.Ast.DLet (b, _) ->
+              let n = match b.bind_pat with
+                | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "expected PatVar"
+              in (n, b.bind_expr)
+            | _ -> failwith "expected DLet"
+          in
+          let m = make_stdlib_mod bind_expr in
+          March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m
+        | _ -> failwith "expected ReplDecl");
+       (match parse_repl "List.length(xs)" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_stdlib_mod e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "List.length(xs) = 3" "3" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** Regression: `let x = 1` then `let x = 2` then `x` should return 2.
+    Exercises global-name uniquification (repl_N_x) so redefining x doesn't
+    collide with the previous fragment's global. *)
+let test_repl_var_redefinition () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       (match parse_repl "let x = 1" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let (bind_name, bind_expr) = match d' with
+            | March_ast.Ast.DLet (b, _) ->
+              let n = match b.bind_pat with
+                | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "PatVar"
+              in (n, b.bind_expr)
+            | _ -> failwith "expected DLet"
+          in
+          let m = make_jit_test_module bind_expr in
+          March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m
+        | _ -> failwith "expected ReplDecl");
+       (match parse_repl "let x = 2" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let (bind_name, bind_expr) = match d' with
+            | March_ast.Ast.DLet (b, _) ->
+              let n = match b.bind_pat with
+                | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "PatVar"
+              in (n, b.bind_expr)
+            | _ -> failwith "expected DLet"
+          in
+          let m = make_jit_test_module bind_expr in
+          March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m
+        | _ -> failwith "expected ReplDecl");
+       (match parse_repl "x" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "x after redef = 2" "2" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** Regression: `let xs = [3,1,2]` then `List.length(xs)` twice.
+    Exercises that the stdlib precompile cache is stable across multiple calls. *)
+let test_repl_stdlib_chain () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let list_decl = load_stdlib_file_for_test "list.march" in
+    let stdlib_decls = [list_decl] in
+    let content_hash =
+      Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
+    let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
+      Hashtbl.create 16 in
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       March_jit.Repl_jit.precompile_stdlib jit
+         ~content_hash ~stdlib_decls ~type_map;
+       let make_stdlib_mod e =
+         let s = March_ast.Ast.dummy_span in
+         let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let main_def = March_ast.Ast.{
+           fn_name = { txt = "main"; span = s };
+           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_clauses = [clause] } in
+         { March_ast.Ast.mod_name = { txt = "Main"; span = s };
+           mod_decls = stdlib_decls @ [DFn (main_def, s)] }
+       in
+       (match parse_repl "let xs = [3, 1, 2]" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let (bind_name, bind_expr) = match d' with
+            | March_ast.Ast.DLet (b, _) ->
+              let n = match b.bind_pat with
+                | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "PatVar"
+              in (n, b.bind_expr)
+            | _ -> failwith "expected DLet"
+          in
+          let m = make_stdlib_mod bind_expr in
+          March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m
+        | _ -> failwith "expected ReplDecl");
+       (* First call *)
+       (match parse_repl "List.length(xs)" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_stdlib_mod e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "List.length(xs) call 1 = 3" "3" result
+        | _ -> failwith "expected ReplExpr");
+       (* Second call — same value, different fragment *)
+       (match parse_repl "List.length(xs)" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_stdlib_mod e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "List.length(xs) call 2 = 3" "3" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** Regression: `let x = 42` then `x + 1` should return 43.
+    Exercises that an expression using a previous binding evaluates correctly. *)
+let test_repl_expr_after_let () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       let type_map = Hashtbl.create 16 in
+       (match parse_repl "let x = 42" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let (bind_name, bind_expr) = match d' with
+            | March_ast.Ast.DLet (b, _) ->
+              let n = match b.bind_pat with
+                | March_ast.Ast.PatVar v -> v.txt | _ -> failwith "PatVar"
+              in (n, b.bind_expr)
+            | _ -> failwith "expected DLet"
+          in
+          let m = make_jit_test_module bind_expr in
+          March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m
+        | _ -> failwith "expected ReplDecl");
+       (match parse_repl "x + 1" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_jit_test_module e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "x + 1 = 43" "43" result
         | _ -> failwith "expected ReplExpr");
        March_jit.Repl_jit.cleanup jit
      with exn ->
@@ -7601,6 +7839,13 @@ let () =
         Alcotest.test_case "fn reference cross-line" `Quick test_repl_jit_cross_line_fn;
         Alcotest.test_case "hof with fn and let cross-line" `Quick test_repl_jit_cross_line_hof;
         Alcotest.test_case "stdlib List.length via precompile" `Quick test_repl_jit_stdlib_list_length;
+      ];
+      "repl_jit_regression", [
+        Alcotest.test_case "list literal compiles" `Quick test_repl_list_literal;
+        Alcotest.test_case "stdlib on list literal" `Quick test_repl_stdlib_on_list;
+        Alcotest.test_case "var redefinition" `Quick test_repl_var_redefinition;
+        Alcotest.test_case "stdlib chain" `Quick test_repl_stdlib_chain;
+        Alcotest.test_case "expr after let" `Quick test_repl_expr_after_let;
       ];
       "complete", [
         Alcotest.test_case "command" `Quick test_complete_command;
