@@ -69,6 +69,37 @@ let actor_defs_tbl : (string, actor_def * env ref) Hashtbl.t = Hashtbl.create 8
 (** Live actor instances — reset per module eval. *)
 let actor_registry  : (int, actor_inst) Hashtbl.t = Hashtbl.create 16
 
+(* ------------------------------------------------------------------ *)
+(* Dynamic Supervisor state                                            *)
+(* ------------------------------------------------------------------ *)
+
+(** One child entry inside a dynamic supervisor. *)
+type dyn_child_entry = {
+  dce_pid        : int;
+  dce_actor_name : string;
+  dce_restart    : string;  (** "permanent" | "transient" | "temporary" *)
+}
+
+(** Runtime state for a dynamic supervisor (no static actor_def). *)
+type dyn_sup_state = {
+  ds_name           : string;  (** atom name, e.g. "connections" *)
+  ds_strategy       : string;  (** "one_for_one" (only strategy supported now) *)
+  ds_max_restarts   : int;
+  ds_window_secs    : int;
+  ds_vpid           : int;     (** negative virtual pid used as ai_supervisor *)
+  mutable ds_children      : dyn_child_entry list;
+  mutable ds_restart_count : (float * int) list;
+}
+
+(** Dynamic supervisor registry: atom name → state. Reset per module eval. *)
+let dyn_sup_registry   : (string, dyn_sup_state) Hashtbl.t = Hashtbl.create 4
+
+(** Virtual-pid → atom name mapping (for crash_actor dispatch). *)
+let dyn_sup_vpid_map   : (int, string) Hashtbl.t = Hashtbl.create 4
+
+(** Allocates negative virtual pids to avoid collisions with real actor pids. *)
+let dyn_sup_next_vpid  : int ref = ref (-1)
+
 (** Task registry — maps task IDs to their result. *)
 type task_entry = {
   te_id     : int;
@@ -714,11 +745,41 @@ and rest_for_one_restart (sup_pid : int) (crashed_pid : int) : unit =
          end
        end)
 
+(** Notify a dynamic supervisor that one of its children crashed. *)
+and notify_dyn_supervisor (sup_name : string) (crashed_pid : int) : unit =
+  match Hashtbl.find_opt dyn_sup_registry sup_name with
+  | None -> ()
+  | Some ds ->
+    (match List.find_opt (fun e -> e.dce_pid = crashed_pid) ds.ds_children with
+     | None -> ()
+     | Some entry ->
+       (* Remove from the list regardless of restart policy *)
+       ds.ds_children <- List.filter (fun e -> e.dce_pid <> crashed_pid) ds.ds_children;
+       if entry.dce_restart = "temporary" then ()
+       else begin
+         (* Permanent or transient: attempt restart within budget *)
+         let now = Unix.gettimeofday () in
+         let window = float_of_int ds.ds_window_secs in
+         let recent = List.filter (fun (ts, _) -> now -. ts < window)
+                        ds.ds_restart_count in
+         let restart_count = List.fold_left (fun acc (_, n) -> acc + n) 0 recent in
+         if restart_count < ds.ds_max_restarts then begin
+           ds.ds_restart_count <- recent @ [(now, 1)];
+           let new_pid = spawn_child_actor ~crashed_pid:(Some crashed_pid)
+                           entry.dce_actor_name ds.ds_vpid in
+           ds.ds_children <- { entry with dce_pid = new_pid } :: ds.ds_children
+         end
+       end)
+
 (** Notify a supervisor that a child has crashed, triggering the appropriate
     restart strategy. *)
 and notify_supervisor (sup_pid : int) (crashed_pid : int) : unit =
   match Hashtbl.find_opt actor_registry sup_pid with
-  | None -> ()
+  | None ->
+    (* Check if this is a dynamic supervisor virtual pid *)
+    (match Hashtbl.find_opt dyn_sup_vpid_map sup_pid with
+     | Some sup_name -> notify_dyn_supervisor sup_name crashed_pid
+     | None -> ())
   | Some sup_inst ->
     (match sup_inst.ai_def.actor_supervise with
      | None -> ()
@@ -3433,7 +3494,10 @@ let reset_scheduler_state () : unit =
   reduction_ctx := None;
   last_reduction_count := 0;
   Hashtbl.clear process_registry;
-  Hashtbl.clear pid_to_registry_name
+  Hashtbl.clear pid_to_registry_name;
+  Hashtbl.clear dyn_sup_registry;
+  Hashtbl.clear dyn_sup_vpid_map;
+  dyn_sup_next_vpid := (-1)
 
 (* NOTE: debug_ctx actor event logging is intentionally not reproduced here.
    The old ESend recorded ame_state_before/ame_state_after. When actor debug
@@ -3526,31 +3590,35 @@ let spawn_from_spec (spec : value) : unit =
     List.iter (fun child ->
       match child with
       | VRecord child_fields ->
-        let actor_name = match List.assoc_opt "actor" child_fields with
-          | Some (VString s) -> s
-          | Some other -> eval_error "spawn_from_spec: actor field should be a string, got %s"
-                            (value_to_string other)
-          | None -> eval_error "spawn_from_spec: child spec missing 'actor' field"
-        in
-        (match Hashtbl.find_opt actor_defs_tbl actor_name with
-         | None -> eval_error "spawn_from_spec: unknown actor '%s'" actor_name
-         | Some (def, env_ref) ->
-           let pid = !next_pid in
-           next_pid := pid + 1;
-           let init_state = eval_expr !env_ref def.actor_init in
-           let inst = {
-             ai_name = actor_name; ai_def = def; ai_env_ref = env_ref;
-             ai_state = init_state; ai_alive = true;
-             ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
-             ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
-             ai_resources = [] } in
-           Hashtbl.add actor_registry pid inst;
-           (* Register named children in the process registry *)
-           (match List.assoc_opt "name" child_fields with
-            | Some (VAtom atom_name) ->
-              Hashtbl.replace process_registry atom_name pid;
-              Hashtbl.replace pid_to_registry_name pid atom_name
-            | _ -> ()))
+        (* Dynamic supervisor specs are pre-registered; skip spawning an actor for them *)
+        (match List.assoc_opt "type" child_fields with
+         | Some (VString "dynamic_supervisor") -> ()
+         | _ ->
+           let actor_name = match List.assoc_opt "actor" child_fields with
+             | Some (VString s) -> s
+             | Some other -> eval_error "spawn_from_spec: actor field should be a string, got %s"
+                               (value_to_string other)
+             | None -> eval_error "spawn_from_spec: child spec missing 'actor' field"
+           in
+           (match Hashtbl.find_opt actor_defs_tbl actor_name with
+            | None -> eval_error "spawn_from_spec: unknown actor '%s'" actor_name
+            | Some (def, env_ref) ->
+              let pid = !next_pid in
+              next_pid := pid + 1;
+              let init_state = eval_expr !env_ref def.actor_init in
+              let inst = {
+                ai_name = actor_name; ai_def = def; ai_env_ref = env_ref;
+                ai_state = init_state; ai_alive = true;
+                ai_monitors = []; ai_links = []; ai_mailbox = Queue.create ();
+                ai_supervisor = None; ai_restart_count = []; ai_epoch = 0;
+                ai_resources = [] } in
+              Hashtbl.add actor_registry pid inst;
+              (* Register named children in the process registry *)
+              (match List.assoc_opt "name" child_fields with
+               | Some (VAtom atom_name) ->
+                 Hashtbl.replace process_registry atom_name pid;
+                 Hashtbl.replace pid_to_registry_name pid atom_name
+               | _ -> ())))
       | other -> eval_error "spawn_from_spec: expected child spec record, got %s"
                    (value_to_string other)
     ) children
@@ -3641,14 +3709,24 @@ let task_builtins : env =
         VRecord [("actor", VString name); ("restart", VAtom "permanent")]
       | [VString name] ->
         VRecord [("actor", VString name); ("restart", VAtom "permanent")]
-      (* Named form: worker(ActorName, :atom_name) *)
-      | [VCon (name, []); VAtom atom_name] ->
-        VRecord [("actor", VString name); ("restart", VAtom "permanent");
-                 ("name", VAtom atom_name)]
-      | [VString name; VAtom atom_name] ->
-        VRecord [("actor", VString name); ("restart", VAtom "permanent");
-                 ("name", VAtom atom_name)]
-      | _ -> eval_error "worker: expected an actor name or (actor_name, :registered_name)"))
+      (* Two-arg form: worker(Name, :restart_policy) or worker(Name, :registered_name).
+         Restart policies (:permanent, :temporary, :transient) set the restart field.
+         Any other atom is treated as a registered process name. *)
+      | [VCon (name, []); VAtom arg] ->
+        (match arg with
+         | "permanent" | "temporary" | "transient" ->
+           VRecord [("actor", VString name); ("restart", VAtom arg)]
+         | atom_name ->
+           VRecord [("actor", VString name); ("restart", VAtom "permanent");
+                    ("name", VAtom atom_name)])
+      | [VString name; VAtom arg] ->
+        (match arg with
+         | "permanent" | "temporary" | "transient" ->
+           VRecord [("actor", VString name); ("restart", VAtom arg)]
+         | atom_name ->
+           VRecord [("actor", VString name); ("restart", VAtom "permanent");
+                    ("name", VAtom atom_name)])
+      | _ -> eval_error "worker: expected an actor name or (actor_name, :policy_or_name)"))
 
   ; ("Supervisor.spec", VBuiltin ("Supervisor.spec", function
       | [strategy; children] ->
@@ -3695,6 +3773,106 @@ let task_builtins : env =
            VPid pid
          | _ -> eval_error "whereis!: no alive process named :%s" name)
       | _ -> eval_error "App.whereis_bang: expected atom argument"))
+
+  (* Dynamic supervisor: dynamic_supervisor(:name, :strategy) *)
+  ; ("dynamic_supervisor", VBuiltin ("dynamic_supervisor", function
+      | [VAtom name; strategy] ->
+        let strat_str = match strategy with
+          | VAtom s -> s | VCon (s, []) -> String.lowercase_ascii s | _ -> "one_for_one" in
+        let vpid = !dyn_sup_next_vpid in
+        dyn_sup_next_vpid := vpid - 1;
+        let ds = { ds_name = name; ds_strategy = strat_str;
+                   ds_max_restarts = 10; ds_window_secs = 60;
+                   ds_vpid = vpid;
+                   ds_children = []; ds_restart_count = [] } in
+        Hashtbl.replace dyn_sup_registry name ds;
+        Hashtbl.replace dyn_sup_vpid_map vpid name;
+        VRecord [("type", VString "dynamic_supervisor"); ("name", VAtom name); ("vpid", VInt vpid)]
+      | [VAtom name; strategy; VRecord opts] ->
+        let strat_str = match strategy with
+          | VAtom s -> s | VCon (s, []) -> String.lowercase_ascii s | _ -> "one_for_one" in
+        let max_r = match List.assoc_opt "max_restarts" opts with
+          | Some (VInt n) -> n | _ -> 10 in
+        let window = match List.assoc_opt "within" opts with
+          | Some (VInt n) -> n | _ -> 60 in
+        let vpid = !dyn_sup_next_vpid in
+        dyn_sup_next_vpid := vpid - 1;
+        let ds = { ds_name = name; ds_strategy = strat_str;
+                   ds_max_restarts = max_r; ds_window_secs = window;
+                   ds_vpid = vpid;
+                   ds_children = []; ds_restart_count = [] } in
+        Hashtbl.replace dyn_sup_registry name ds;
+        Hashtbl.replace dyn_sup_vpid_map vpid name;
+        VRecord [("type", VString "dynamic_supervisor"); ("name", VAtom name); ("vpid", VInt vpid)]
+      | _ -> eval_error "dynamic_supervisor: expected (name, strategy) or (name, strategy, opts)"))
+
+  (* Supervisor.start_child(:sup_name, child_spec) : Result(Pid, String) *)
+  ; ("Supervisor.start_child", VBuiltin ("Supervisor.start_child", function
+      | [VAtom sup_name; VRecord spec_fields] ->
+        (match Hashtbl.find_opt dyn_sup_registry sup_name with
+         | None -> VCon ("Err", [VString ("no dynamic supervisor named :" ^ sup_name)])
+         | Some ds ->
+           let actor_name = match List.assoc_opt "actor" spec_fields with
+             | Some (VString s) -> s
+             | _ -> "" in
+           let restart_pol = match List.assoc_opt "restart" spec_fields with
+             | Some (VAtom s) -> s | _ -> "permanent" in
+           if actor_name = "" then
+             VCon ("Err", [VString "start_child: spec missing actor field"])
+           else begin
+             let new_pid = spawn_child_actor actor_name ds.ds_vpid in
+             let entry = { dce_pid = new_pid; dce_actor_name = actor_name;
+                           dce_restart = restart_pol } in
+             ds.ds_children <- entry :: ds.ds_children;
+             VCon ("Ok", [VInt new_pid])
+           end)
+      | _ -> eval_error "Supervisor.start_child: expected (atom, child_spec)"))
+
+  (* Supervisor.stop_child(:sup_name, pid) : Result(Unit, String) *)
+  ; ("Supervisor.stop_child", VBuiltin ("Supervisor.stop_child", function
+      | [VAtom sup_name; VInt pid] ->
+        (match Hashtbl.find_opt dyn_sup_registry sup_name with
+         | None -> VCon ("Err", [VString ("no dynamic supervisor named :" ^ sup_name)])
+         | Some ds ->
+           (match List.find_opt (fun e -> e.dce_pid = pid) ds.ds_children with
+            | None -> VCon ("Err", [VString "stop_child: pid not found"])
+            | Some entry ->
+              (* Detach from supervisor first to prevent restart *)
+              (match Hashtbl.find_opt actor_registry entry.dce_pid with
+               | Some inst -> inst.ai_supervisor <- None
+               | None -> ());
+              ds.ds_children <- List.filter (fun e -> e.dce_pid <> pid) ds.ds_children;
+              crash_actor pid "stop_child";
+              VCon ("Ok", [VUnit])))
+      | _ -> eval_error "Supervisor.stop_child: expected (atom, pid)"))
+
+  (* Supervisor.which_children(:sup_name) : List({pid, actor, restart}) *)
+  ; ("Supervisor.which_children", VBuiltin ("Supervisor.which_children", function
+      | [VAtom sup_name] ->
+        (match Hashtbl.find_opt dyn_sup_registry sup_name with
+         | None -> VCon ("Nil", [])
+         | Some ds ->
+           let make_rec e =
+             VRecord [("pid",    VInt e.dce_pid);
+                      ("actor",  VString e.dce_actor_name);
+                      ("restart", VAtom e.dce_restart)] in
+           List.fold_right
+             (fun e acc -> VCon ("Cons", [make_rec e; acc]))
+             ds.ds_children (VCon ("Nil", [])))
+      | _ -> eval_error "Supervisor.which_children: expected (atom)"))
+
+  (* Supervisor.count_children(:sup_name) : {active: Int, specs: Int} *)
+  ; ("Supervisor.count_children", VBuiltin ("Supervisor.count_children", function
+      | [VAtom sup_name] ->
+        (match Hashtbl.find_opt dyn_sup_registry sup_name with
+         | None -> VRecord [("active", VInt 0); ("specs", VInt 0)]
+         | Some ds ->
+           let total = List.length ds.ds_children in
+           let active = List.length (List.filter (fun e ->
+             match Hashtbl.find_opt actor_registry e.dce_pid with
+             | Some inst -> inst.ai_alive | None -> false) ds.ds_children) in
+           VRecord [("active", VInt active); ("specs", VInt total)])
+      | _ -> eval_error "Supervisor.count_children: expected (atom)"))
 
   ; ("task_spawn_link", VBuiltin ("task_spawn_link", function
     | [thunk; VPid linked_pid] ->
@@ -3946,6 +4124,9 @@ let eval_module_env (m : module_) : env =
   next_pid := 0;
   Hashtbl.clear task_registry;
   next_task_id := 0;
+  Hashtbl.clear dyn_sup_registry;
+  Hashtbl.clear dyn_sup_vpid_map;
+  dyn_sup_next_vpid := (-1);
 
   (* Pass 1: stubs.  We use a ref cell shared across all stubs so that
      closures created in pass 2 can see the final environment. *)
