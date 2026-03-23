@@ -90,14 +90,17 @@ type ty =
 (** Local session type — per-endpoint view of a binary protocol.
     Computed by projecting the global [Ast.protocol_def] onto one role. *)
 and session_ty =
-  | SSend   of ty * session_ty           (** Send a value of type T, then follow S *)
-  | SRecv   of ty * session_ty           (** Receive a value of type T, then follow S *)
+  | SSend   of ty * session_ty           (** Send a value of type T, then follow S (binary) *)
+  | SRecv   of ty * session_ty           (** Receive a value of type T, then follow S (binary) *)
   | SChoose of (string * session_ty) list (** Actively select a branch label *)
   | SOffer  of (string * session_ty) list (** Passively wait for the other side to pick *)
   | SEnd                                 (** Session complete — channel must be closed *)
   | SRec    of string * session_ty       (** Recursive binding: Rec(X, S) *)
   | SVar    of string                    (** Back-reference to a recursive binder *)
   | SError                               (** Error sentinel *)
+  (* MPST: role-annotated send/recv for multi-party protocols (N>2 participants). *)
+  | SMSend  of string * ty * session_ty  (** Send to role: MSend(target_role, T, S) *)
+  | SMRecv  of string * ty * session_ty  (** Receive from role: MRecv(source_role, T, S) *)
 
 and tvar =
   | Unbound of int * int   (** id, generalization level *)
@@ -259,18 +262,20 @@ and find_arg_mismatch name args1 args2 =
   aux 1 (args1, args2)
 
 and pp_session_ty = function
-  | SSend (t, s)  -> Printf.sprintf "Send(%s, %s)" (pp_ty t) (pp_session_ty s)
-  | SRecv (t, s)  -> Printf.sprintf "Recv(%s, %s)" (pp_ty t) (pp_session_ty s)
-  | SChoose bs    ->
+  | SSend (t, s)        -> Printf.sprintf "Send(%s, %s)" (pp_ty t) (pp_session_ty s)
+  | SRecv (t, s)        -> Printf.sprintf "Recv(%s, %s)" (pp_ty t) (pp_session_ty s)
+  | SChoose bs          ->
     let arms = List.map (fun (l, s) -> l ^ ": " ^ pp_session_ty s) bs in
     "Choose{" ^ String.concat ", " arms ^ "}"
-  | SOffer bs     ->
+  | SOffer bs           ->
     let arms = List.map (fun (l, s) -> l ^ ": " ^ pp_session_ty s) bs in
     "Offer{" ^ String.concat ", " arms ^ "}"
-  | SEnd          -> "End"
-  | SRec (x, s)   -> Printf.sprintf "Rec(%s, %s)" x (pp_session_ty s)
-  | SVar x        -> x
-  | SError        -> "<session_error>"
+  | SEnd                -> "End"
+  | SRec (x, s)         -> Printf.sprintf "Rec(%s, %s)" x (pp_session_ty s)
+  | SVar x              -> x
+  | SError              -> "<session_error>"
+  | SMSend (role, t, s) -> Printf.sprintf "MSend(%s, %s, %s)" role (pp_ty t) (pp_session_ty s)
+  | SMRecv (role, t, s) -> Printf.sprintf "MRecv(%s, %s, %s)" role (pp_ty t) (pp_session_ty s)
 
 (* =================================================================
    §6  Elm-style error message parts
@@ -1037,7 +1042,8 @@ let report_mismatch env ~span ~reason expected found =
     { Err.severity = Error; span; message = headline;
       labels; notes = why_note @ mismatch_note }
 
-(** Structural equality for session types (used by [unify] for [TChan] cases). *)
+(** Structural equality for session types (used by [unify] for [TChan] cases).
+    Intentionally ignores payload types — only checks session structure shape. *)
 let rec session_ty_equal s1 s2 =
   match s1, s2 with
   | SEnd, SEnd -> true
@@ -1050,6 +1056,31 @@ let rec session_ty_equal s1 s2 =
         l1 = l2 && session_ty_equal s1' s2') bs1 bs2
   | SRec (x1, s1'), SRec (x2, s2') -> x1 = x2 && session_ty_equal s1' s2'
   | SVar x1, SVar x2 -> x1 = x2
+  | SMSend (r1, _, s1'), SMSend (r2, _, s2') -> r1 = r2 && session_ty_equal s1' s2'
+  | SMRecv (r1, _, s1'), SMRecv (r2, _, s2') -> r1 = r2 && session_ty_equal s1' s2'
+  | _ -> false
+
+(** Exact structural equality including payload types.
+    Used by MPST mergeability check to determine if branches can be merged.
+    Two branches can be merged only if they are completely identical. *)
+let rec session_ty_exact_equal s1 s2 =
+  match s1, s2 with
+  | SEnd, SEnd -> true
+  | SError, SError -> true
+  | SSend (t1, s1'), SSend (t2, s2') ->
+    pp_ty t1 = pp_ty t2 && session_ty_exact_equal s1' s2'
+  | SRecv (t1, s1'), SRecv (t2, s2') ->
+    pp_ty t1 = pp_ty t2 && session_ty_exact_equal s1' s2'
+  | SChoose bs1, SChoose bs2 | SOffer bs1, SOffer bs2 ->
+    List.length bs1 = List.length bs2 &&
+    List.for_all2 (fun (l1, s1') (l2, s2') ->
+        l1 = l2 && session_ty_exact_equal s1' s2') bs1 bs2
+  | SRec (x1, s1'), SRec (x2, s2') -> x1 = x2 && session_ty_exact_equal s1' s2'
+  | SVar x1, SVar x2 -> x1 = x2
+  | SMSend (r1, t1, s1'), SMSend (r2, t2, s2') ->
+    r1 = r2 && pp_ty t1 = pp_ty t2 && session_ty_exact_equal s1' s2'
+  | SMRecv (r1, t1, s1'), SMRecv (r2, t2, s2') ->
+    r1 = r2 && pp_ty t1 = pp_ty t2 && session_ty_exact_equal s1' s2'
   | _ -> false
 
 (** Unify [t1] and [t2], reporting any mismatch to [env.errors].
@@ -1870,6 +1901,8 @@ let rec unfold_srec s =
       | SRecv (t, s')              -> SRecv (t, subst_inner s')
       | SChoose bs                 -> SChoose (List.map (fun (l, s') -> (l, subst_inner s')) bs)
       | SOffer  bs                 -> SOffer  (List.map (fun (l, s') -> (l, subst_inner s')) bs)
+      | SMSend (r, t, s')          -> SMSend (r, t, subst_inner s')
+      | SMRecv (r, t, s')          -> SMRecv (r, t, subst_inner s')
       | SRec (y, s') when y <> x  -> SRec (y, subst_inner s')
       | other                      -> other
     in
@@ -2136,6 +2169,174 @@ let rec infer_expr env (e : Ast.expr) : ty =
          Err.error env.errors ~span:sp
            (Printf.sprintf
               "Chan.offer: expected a channel endpoint but got `%s`."
+              (pp_ty ch_ty));
+         TError)
+
+    (* ── MPST multi-party session operations ─────────────────────────
+       These mirror Chan.* but work with multi-party protocols (N>2 roles).
+       MPST.new(Proto)            → (ep_r1, ep_r2, ..., ep_rN) sorted by role name
+       MPST.send(ep, :Role, val)  → new_ep  (must be at SMSend(Role, T, S))
+       MPST.recv(ep, :Role)       → (val, new_ep) (must be at SMRecv(Role, T, S))
+       MPST.close(ep)             → ()  (must be at SEnd)
+    ──────────────────────────────────────────────────────────────────── *)
+
+    | Ast.EApp (Ast.EVar { txt = "MPST.new"; _ }, [proto_expr], sp) ->
+      (* Look up the protocol and return a tuple of one TChan per role. *)
+      let proto_name = match proto_expr with
+        | Ast.ELit (Ast.LitString s, _) -> Some s
+        | Ast.EAtom (s, [], _)           -> Some s
+        | Ast.ECon (n, [], _)            -> Some n.txt
+        | Ast.EVar n                     -> Some n.txt
+        | _ -> None
+      in
+      (match proto_name with
+       | None ->
+         Err.error env.errors ~span:sp
+           "MPST.new: argument must be a protocol name.";
+         TError
+       | Some pname ->
+         (match List.assoc_opt pname env.protocols with
+          | None ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf "MPST.new: protocol `%s` is not declared." pname);
+            TError
+          | Some pi ->
+            let n = List.length pi.pi_projections in
+            if n < 3 then begin
+              Err.error env.errors ~span:sp
+                (Printf.sprintf
+                   "MPST.new: protocol `%s` has %d role(s) but MPST.new \
+                    requires at least 3. Use Chan.new for binary protocols."
+                   pname n);
+              TError
+            end else
+              (* Return tuple of TChan endpoints, sorted by role (same as projections order) *)
+              TTuple (List.map (fun (_, s_ty) ->
+                  TLin (Ast.Linear, TChan (ref s_ty))
+                ) pi.pi_projections)))
+
+    | Ast.EApp (Ast.EVar { txt = "MPST.send"; _ }, [ch_expr; role_expr; val_expr], sp) ->
+      (* MPST.send(ch, Server, value) — ch must be at SMSend(Server, T, S).
+         The role can be written as a bare uppercase name (ECon) or atom (:server). *)
+      let ch_ty = repr (infer_expr env ch_expr) in
+      let inner_chan_ty = match ch_ty with
+        | TLin (_, t) -> repr t
+        | t -> t
+      in
+      (match inner_chan_ty with
+       | TChan r ->
+         (match unfold_srec !r with
+          | SMSend (target_role, payload_ty, cont) ->
+            (* Verify the role argument matches *)
+            let actual_role = match role_expr with
+              | Ast.ECon (n, [], _) -> Some n.txt
+              | Ast.EVar n           -> Some n.txt
+              | Ast.EAtom (s, [], _) -> Some s
+              | Ast.ELit (Ast.LitAtom s, _) -> Some s
+              | _ -> None
+            in
+            (match actual_role with
+             | None ->
+               Err.error env.errors ~span:sp
+                 "MPST.send: second argument must be a role name (e.g. Server).";
+               TError
+             | Some ar when ar <> target_role ->
+               Err.error env.errors ~span:sp
+                 (Printf.sprintf
+                    "MPST.send: channel expects to send to `%s` but you said `%s`."
+                    target_role ar);
+               TError
+             | _ ->
+               check_expr env val_expr payload_ty
+                 ~reason:(Some (RBuiltin "Payload type of MPST.send"));
+               TLin (Ast.Linear, TChan (ref cont)))
+          | SError -> TError
+          | other ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "MPST.send: channel is at `%s` but I expected `MSend(Role, T, ...)`."
+                 (pp_session_ty other));
+            TError)
+       | TError -> TError
+       | _ ->
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "MPST.send: expected a multi-party channel endpoint but got `%s`."
+              (pp_ty ch_ty));
+         TError)
+
+    | Ast.EApp (Ast.EVar { txt = "MPST.recv"; _ }, [ch_expr; role_expr], sp) ->
+      (* MPST.recv(ch, Source) — ch must be at SMRecv(Source, T, S).
+         The role can be written as a bare uppercase name or atom.
+         Returns (value, new_chan). *)
+      let ch_ty = repr (infer_expr env ch_expr) in
+      let inner_chan_ty = match ch_ty with
+        | TLin (_, t) -> repr t
+        | t -> t
+      in
+      (match inner_chan_ty with
+       | TChan r ->
+         (match unfold_srec !r with
+          | SMRecv (source_role, payload_ty, cont) ->
+            let actual_role = match role_expr with
+              | Ast.ECon (n, [], _) -> Some n.txt
+              | Ast.EVar n           -> Some n.txt
+              | Ast.EAtom (s, [], _) -> Some s
+              | Ast.ELit (Ast.LitAtom s, _) -> Some s
+              | _ -> None
+            in
+            (match actual_role with
+             | None ->
+               Err.error env.errors ~span:sp
+                 "MPST.recv: second argument must be a role name (e.g. Client).";
+               TError
+             | Some ar when ar <> source_role ->
+               Err.error env.errors ~span:sp
+                 (Printf.sprintf
+                    "MPST.recv: channel expects to receive from `%s` but you said `%s`."
+                    source_role ar);
+               TError
+             | _ ->
+               TTuple [payload_ty; TLin (Ast.Linear, TChan (ref cont))])
+          | SError -> TError
+          | other ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "MPST.recv: channel is at `%s` but I expected `MRecv(Role, T, ...)`."
+                 (pp_session_ty other));
+            TError)
+       | TError -> TError
+       | _ ->
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "MPST.recv: expected a multi-party channel endpoint but got `%s`."
+              (pp_ty ch_ty));
+         TError)
+
+    | Ast.EApp (Ast.EVar { txt = "MPST.close"; _ }, [ch_expr], sp) ->
+      (* MPST.close(ch) — ch must be at SEnd. *)
+      let ch_ty = repr (infer_expr env ch_expr) in
+      let inner_chan_ty = match ch_ty with
+        | TLin (_, t) -> repr t
+        | t -> t
+      in
+      (match inner_chan_ty with
+       | TChan r ->
+         (match unfold_srec !r with
+          | SEnd -> t_unit
+          | SError -> TError
+          | other ->
+            Err.error env.errors ~span:sp
+              (Printf.sprintf
+                 "MPST.close: channel is at `%s` but the session must be complete \
+                  (End) before closing."
+                 (pp_session_ty other));
+            TError)
+       | TError -> TError
+       | _ ->
+         Err.error env.errors ~span:sp
+           (Printf.sprintf
+              "MPST.close: expected a multi-party channel endpoint but got `%s`."
               (pp_ty ch_ty));
          TError)
 
@@ -3095,28 +3296,31 @@ let check_module_needs (env : env) (mod_name : Ast.name) (decls : Ast.decl list)
    §16a  Session type projection and duality
    ================================================================= *)
 
-(** [project_steps steps role cont] projects a list of protocol steps onto
-    [role], appending [cont] as the continuation after the last step.
-    Returns the local session type for [role]. *)
-let rec project_steps env ~proto_name steps role cont =
+(** [project_steps env ~proto_name ~multiparty steps role cont] projects a
+    list of protocol steps onto [role], appending [cont] as the continuation.
+    When [multiparty] is true (N>2 roles), produces [SMSend]/[SMRecv] with
+    explicit role annotations; otherwise produces [SSend]/[SRecv]. *)
+let rec project_steps env ~proto_name ~multiparty steps role cont =
   match steps with
   | [] -> cont
   | step :: rest ->
-    let rest_ty () = project_steps env ~proto_name rest role cont in
+    let rest_ty () = project_steps env ~proto_name ~multiparty rest role cont in
     (match step with
      | Ast.ProtoMsg (sender, receiver, msg_ty) ->
        let tvars = ref [] in
        let t = surface_ty env ~tvars msg_ty in
        if sender.Ast.txt = role then
-         SSend (t, rest_ty ())
+         (if multiparty then SMSend (receiver.Ast.txt, t, rest_ty ())
+          else SSend (t, rest_ty ()))
        else if receiver.Ast.txt = role then
-         SRecv (t, rest_ty ())
+         (if multiparty then SMRecv (sender.Ast.txt, t, rest_ty ())
+          else SRecv (t, rest_ty ()))
        else
          rest_ty ()   (* This role doesn't participate in this step *)
      | Ast.ProtoLoop inner_steps ->
        (* Wrap the inner projection in a recursive binder *)
        let rec_var = proto_name ^ "_loop" in
-       let inner = project_steps env ~proto_name inner_steps role (SVar rec_var) in
+       let inner = project_steps env ~proto_name ~multiparty inner_steps role (SVar rec_var) in
        let after_loop = rest_ty () in
        (match inner with
         | SVar _ ->
@@ -3128,13 +3332,23 @@ let rec project_steps env ~proto_name steps role cont =
           SRec (rec_var, inner_with_cont))
      | Ast.ProtoChoice (chooser, branches) ->
        let branch_tys = List.map (fun (lbl, arm_steps) ->
-           let arm_ty = project_steps env ~proto_name arm_steps role cont in
+           let arm_ty = project_steps env ~proto_name ~multiparty arm_steps role cont in
            (lbl.Ast.txt, arm_ty)
          ) branches in
        if chooser.Ast.txt = role then
          SChoose branch_tys
-       else
-         SOffer branch_tys)
+       else begin
+         (* Mergeability: if all branches project to the same local type for
+            this role, merge them into that type (the role need not observe
+            the choice at all).  This is the standard MPST merge rule. *)
+         match branch_tys with
+         | [] -> SOffer branch_tys
+         | (_, first_ty) :: rest ->
+           if List.for_all (fun (_, ty) -> session_ty_exact_equal ty first_ty) rest then
+             first_ty   (* role not involved — merged/transparent *)
+           else
+             SOffer branch_tys
+       end)
 
 (** Substitute occurrences of [SVar x] with [replacement] inside [s]. *)
 and subst_svar x replacement s =
@@ -3144,10 +3358,13 @@ and subst_svar x replacement s =
   | SRecv (t, s')  -> SRecv (t, subst_svar x replacement s')
   | SChoose bs     -> SChoose (List.map (fun (l, s') -> (l, subst_svar x replacement s')) bs)
   | SOffer bs      -> SOffer  (List.map (fun (l, s') -> (l, subst_svar x replacement s')) bs)
+  | SMSend (r, t, s') -> SMSend (r, t, subst_svar x replacement s')
+  | SMRecv (r, t, s') -> SMRecv (r, t, subst_svar x replacement s')
   | SRec (y, s') when y <> x -> SRec (y, subst_svar x replacement s')
   | other -> other
 
-(** Compute the dual of a local session type (what the other endpoint must have). *)
+(** Compute the dual of a local session type (what the other endpoint must have).
+    Only meaningful for binary protocols; MPST types use SMSend/SMRecv directly. *)
 let rec dual_session_ty = function
   | SSend (t, s)  -> SRecv (t, dual_session_ty s)
   | SRecv (t, s)  -> SSend (t, dual_session_ty s)
@@ -3157,10 +3374,14 @@ let rec dual_session_ty = function
   | SRec (x, s)   -> SRec (x, dual_session_ty s)
   | SVar x        -> SVar x
   | SError        -> SError
+  | SMSend (r, t, s) -> SMSend (r, t, dual_session_ty s)
+  | SMRecv (r, t, s) -> SMRecv (r, t, dual_session_ty s)
 
 (** Project a global protocol onto all participating roles.
-    Returns [(role, local_ty) list]. Verifies that exactly two roles are present
-    and that their projections are duals of each other. *)
+    Returns [(role, local_ty) list].
+    - Binary (2 roles): verifies duality of the two projections.
+    - Multiparty (N>2 roles): verifies pairwise send/recv consistency using
+      role-annotated SMSend/SMRecv constructors. *)
 let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
   (* Collect all roles *)
   let rec roles_of_steps = function
@@ -3175,14 +3396,15 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
       roles_of_steps rest
   in
   let roles = List.sort_uniq String.compare (roles_of_steps pdef.proto_steps) in
+  let multiparty = List.length roles > 2 in
   (* Project each role *)
   let projections = List.map (fun role ->
-      let ty = project_steps env ~proto_name pdef.proto_steps role SEnd in
+      let ty = project_steps env ~proto_name ~multiparty pdef.proto_steps role SEnd in
       (role, ty)
     ) roles in
-  (* For two-party protocols, verify duality *)
   (match roles with
    | [a; b] ->
+     (* Binary protocol: verify duality *)
      let proj_a = List.assoc a projections in
      let proj_b = List.assoc b projections in
      let dual_a = dual_session_ty proj_a in
@@ -3195,7 +3417,67 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
             proto_name a b
             a (pp_session_ty dual_a)
             b (pp_session_ty proj_b))
-   | _ -> ());  (* For 0 or 1 or 3+ roles, skip duality check *)
+   | _ when multiparty ->
+     (* Multiparty protocol: verify that every SMSend in role A to role B
+        corresponds to an SMRecv in role B from role A with the same type.
+        We check this by collecting all (sender, receiver, msg_ty) triples
+        from the global steps and comparing against the projections. *)
+     let rec gather_msgs acc = function
+       | [] -> acc
+       | Ast.ProtoMsg (s, r, t) :: rest ->
+         let tvars = ref [] in
+         let ty = surface_ty env ~tvars t in
+         gather_msgs ((s.Ast.txt, r.Ast.txt, ty) :: acc) rest
+       | Ast.ProtoLoop inner :: rest ->
+         gather_msgs (gather_msgs acc inner) rest
+       | Ast.ProtoChoice (_, branches) :: rest ->
+         let branch_msgs = List.concat_map (fun (_, steps) ->
+             gather_msgs [] steps) branches in
+         gather_msgs (branch_msgs @ acc) rest
+     in
+     let msgs = gather_msgs [] pdef.proto_steps in
+     List.iter (fun (sender, receiver, msg_ty) ->
+         (* Check sender has SMSend(receiver, msg_ty, ...) somewhere *)
+         let rec has_msend s =
+           match unfold_srec s with
+           | SMSend (r, t, cont) ->
+             (r = receiver && session_ty_equal (SSend (t, SEnd)) (SSend (msg_ty, SEnd)))
+             || has_msend cont
+           | SMRecv (_, _, cont) -> has_msend cont
+           | SChoose bs | SOffer bs ->
+             List.exists (fun (_, s') -> has_msend s') bs
+           | SRec (_, s') -> has_msend s'
+           | _ -> false
+         in
+         let rec has_mrecv s =
+           match unfold_srec s with
+           | SMRecv (r, t, cont) ->
+             (r = sender && session_ty_equal (SSend (t, SEnd)) (SSend (msg_ty, SEnd)))
+             || has_mrecv cont
+           | SMSend (_, _, cont) -> has_mrecv cont
+           | SChoose bs | SOffer bs ->
+             List.exists (fun (_, s') -> has_mrecv s') bs
+           | SRec (_, s') -> has_mrecv s'
+           | _ -> false
+         in
+         (match List.assoc_opt sender projections with
+          | Some proj when not (has_msend proj) ->
+            Err.error env.errors ~span
+              (Printf.sprintf
+                 "Protocol `%s`: role `%s` should send to `%s` but \
+                  its projected type does not include MSend(%s, ...)."
+                 proto_name sender receiver receiver)
+          | _ -> ());
+         (match List.assoc_opt receiver projections with
+          | Some proj when not (has_mrecv proj) ->
+            Err.error env.errors ~span
+              (Printf.sprintf
+                 "Protocol `%s`: role `%s` should receive from `%s` but \
+                  its projected type does not include MRecv(%s, ...)."
+                 proto_name receiver sender sender)
+          | _ -> ())
+       ) msgs
+   | _ -> ());  (* 0 or 1 role: already warned in caller *)
   projections
 
 let rec check_decl env (d : Ast.decl) : env =

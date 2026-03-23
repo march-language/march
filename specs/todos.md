@@ -64,7 +64,7 @@ This file tracks everything that still needs to get done. Organized by priority 
 ### Compiler Backend
 
 - [ ] **Query-based/demand-driven compiler architecture** — Current pipeline is linear (parse → desugar → typecheck → eval/TIR). Design goal is a query-based architecture (like `rustc`'s `salsa`) for fine-grained incremental recompilation. Deferred post-v1.
-- [ ] **Multi-party session types** — Binary session types are implemented (phases 1–3). Multi-party session types (MPST with choreographies) are deferred post-v1.
+- ✅ **Multi-party session types** — MPST with choreographies implemented: `SMSend`/`SMRecv` role-annotated session type constructors; projection of global choreography to each role's local type; mergeability for non-chooser roles in `ProtoChoice`; `MPST.new`/`MPST.send`/`MPST.recv`/`MPST.close` type-checked at compile time; runtime pairwise queue routing for N-party sessions; 21 new tests.
 - [ ] **Constraint solver for type-level naturals** — Currently `TNat 1 + TNat 2` does not simplify to `TNat 3`. Full constraint solving for type-level arithmetic would enable richer dimension-checked types.
 - [ ] **Row polymorphism** — Record operations on types with unknown record shapes. Would enable `e.field` when `e : TVar` to constrain the record shape rather than return a fresh var.
 

@@ -811,6 +811,73 @@ Planned V2 implementation:
 
 ---
 
+## Multi-Party Session Types (MPST)
+
+Multi-party session types extend binary session types to N≥3 participants via a global choreography that is projected to each role's local session type.
+
+### Global Choreography
+
+Protocols with 3+ roles use `protocol ... do ... end` syntax (same as binary, but with 3+ distinct role names):
+
+```march
+protocol Auth do
+  Client -> Server : String    -- Client sends credentials to Server
+  Server -> AuthDB : String    -- Server forwards to AuthDB
+  AuthDB -> Server : Bool      -- AuthDB replies with result
+  Server -> Client : Bool      -- Server relays result to Client
+end
+```
+
+### Projection
+
+`project_protocol` in `typecheck.ml` detects N>2 roles and uses role-annotated constructors:
+
+- **`SMSend(target_role, T, S)`** — send value of type `T` to `target_role`, continue as `S`
+- **`SMRecv(source_role, T, S)`** — receive value of type `T` from `source_role`, continue as `S`
+
+Each role's projection:
+- `Client`'s type: `SMSend(Server, String, SMRecv(Server, Bool, SEnd))`
+- `Server`'s type: `SMRecv(Client, String, SMSend(AuthDB, String, SMRecv(AuthDB, Bool, SMSend(Client, Bool, SEnd))))`
+- `AuthDB`'s type: `SMRecv(Server, String, SMSend(Server, Bool, SEnd))`
+
+### Mergeability for Choice
+
+When a role is not the chooser in a `ProtoChoice`, its branches are merged if all project to the same type (the standard MPST merge rule). `session_ty_exact_equal` in `typecheck.ml` tests exact structural equality including payload types.
+
+### MPST Operations
+
+```march
+-- Create N endpoints (returns TTuple of N linear TChan values)
+let (ch_client, ch_server, ch_authdb) = MPST.new(Auth)
+
+-- Send to a specific role (ch must be in SMSend(Role, T, _) state)
+let ch2 = MPST.send(ch_client, Server, "alice:password")
+
+-- Receive from a specific role (ch must be in SMRecv(Role, T, _) state)
+let (result, ch3) = MPST.recv(ch_server, AuthDB)
+
+-- Close (ch must be in SEnd state)
+MPST.close(ch3)
+```
+
+All operations are checked at compile time; mismatched roles or wrong-order send/recv are caught as type errors.
+
+### Runtime: Pairwise Queue Routing
+
+For N roles, N×(N-1) directed queues are created — one per ordered role pair. Each endpoint holds:
+- `me_out_qs`: map from target role → outgoing queue (shared with target's in-queue)
+- `me_in_qs`: map from source role → incoming queue (shared with source's out-queue)
+
+`MPST.send(ch, Role, v)` pushes `v` into `me_out_qs[Role]`. `MPST.recv(ch, Role)` pops from `me_in_qs[Role]`; if empty, raises `Eval_error` explaining that the sender must run first.
+
+### Constraints
+
+- `MPST.new` requires ≥3 roles (2-party protocols use `Chan.new`)
+- The protocol must be declared at module level before `MPST.new` is called
+- All `TChan` endpoints returned by `MPST.new` are linear and must be consumed
+
+---
+
 ## Source Files Reference
 
 ### Core System

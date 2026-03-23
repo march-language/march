@@ -204,8 +204,8 @@ march/
 ## Current State (as of 2026-03-23)
 
 - **Builds clean**
-- **1106 tests across 8 suites; 0 failures** (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + REPL JIT fix + 5 new LSP features):
-  - `test_march.exe`: 891 tests, all passing (app entry point: 8 new; HAMT Map/Set/Array: 26 new; tap bus: 6 new; repl_compiler_parity: 5 new; REPL JIT fix)
+- **1127 tests across 8 suites; 0 failures** (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + 5 new LSP features):
+  - `test_march.exe`: 912 tests, all passing (app entry point: 8 new; HAMT Map/Set/Array: 26 new; tap bus: 6 new; repl_compiler_parity: 5 new; MPST: 21 new; REPL JIT fix)
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests, passing (formatter round-trip)
@@ -237,6 +237,7 @@ march/
 - **Atomic refcounting** — C11 atomics (`atomic_fetch_add/sub_explicit`) in `march_runtime.c`; RC thread-safe
 - **Actor TIR lowering** — `lower_actor` in `lib/tir/lower.ml`; actors compile to native code via `ESpawn`/`ESend` lowering
 - **SRec recursive protocol unfolding** — `unfold_srec` in typecheck.ml; recursive session types handled; 6 new multi-turn tests (ping-pong loop, nested SRec, SChoose inside SRec, wrong type in loop)
+- **Multi-party session types (MPST)** — `SMSend(role, T, S)` / `SMRecv(role, T, S)` role-annotated session type constructors; `project_steps` projects global choreography to each role's local type; MPST mergeability check for non-chooser roles in `ProtoChoice` (via `session_ty_exact_equal`); `MPST.new` creates N linear `TChan` endpoints (requires ≥3 roles); `MPST.send(ch, Role, v)` / `MPST.recv(ch, Role)` / `MPST.close(ch)` all type-checked at compile time; runtime pairwise queue routing (N*(N-1) directed queues shared between endpoints); 21 new tests (parsing, projection, type check ok/error, eval: 3-party auth, relay, 4-party chain, recv-before-send error)
 - **Type error pretty-printing** — `pp_ty_pretty` wraps long type expressions at 60 chars with indented args; `report_mismatch` shows multi-line format for types >50 chars; `find_arg_mismatch` adds contextual notes identifying which arg/field differs
 - **Forge build tool** — `forge/` package: `forge new/build/run/test/format/interactive/i/clean/deps`; scaffold generates valid March (PascalCase module names, `do/end` fn bodies, `println` builtin, test file with `main()`); 15 tests in `forge/test/test_forge.ml`
 - **HAMT persistent data structures** — `stdlib/hamt.march` (generic 32-way HAMT engine); `stdlib/map.march` rewritten with HAMT (O(1) amortized); `stdlib/set.march` rewritten with HAMT; `stdlib/array.march` added (persistent vector, 32-way trie + tail buffer, O(1) amortized push/pop). 26 new tests.

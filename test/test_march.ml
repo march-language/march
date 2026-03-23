@@ -1326,6 +1326,412 @@ let test_srec_multi_turn_typechecks () =
   end|} in
   Alcotest.(check bool) "recursive Chan usage typechecks" false (has_errors ctx)
 
+(* ══════════════════════════════════════════════════════════════════════════
+   Multi-party session types (MPST) tests
+   ══════════════════════════════════════════════════════════════════════════ *)
+
+(* ── §1  Protocol declaration and projection ─────────────────────────── *)
+
+let test_mpst_three_party_parses () =
+  (* A 3-party protocol should parse and typecheck without errors. *)
+  let ctx = typecheck {|mod Test do
+    protocol ThreePartyAuth do
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
+    end
+  end|} in
+  Alcotest.(check bool) "3-party protocol: no errors" false (has_errors ctx)
+
+let test_mpst_projection_client () =
+  (* Client projection: MSend(Server, Int, MRecv(Server, Bool, End)) *)
+  let (_ctx, env) = typecheck_full {|mod Test do
+    protocol Auth do
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
+    end
+  end|} in
+  let pi = List.assoc "Auth" env.March_typecheck.Typecheck.protocols in
+  let client_ty = List.assoc "Client" pi.March_typecheck.Typecheck.pi_projections in
+  Alcotest.(check string) "client projection"
+    "MSend(Server, Int, MRecv(Server, Bool, End))"
+    (pp_sty client_ty)
+
+let test_mpst_projection_authdb () =
+  (* AuthDB projection: MRecv(Server, String, MSend(Server, Bool, End)) *)
+  let (_ctx, env) = typecheck_full {|mod Test do
+    protocol Auth do
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
+    end
+  end|} in
+  let pi = List.assoc "Auth" env.March_typecheck.Typecheck.protocols in
+  let authdb_ty = List.assoc "AuthDB" pi.March_typecheck.Typecheck.pi_projections in
+  Alcotest.(check string) "authdb projection"
+    "MRecv(Server, String, MSend(Server, Bool, End))"
+    (pp_sty authdb_ty)
+
+let test_mpst_projection_server () =
+  (* Server projection: MRecv(Client, Int, MSend(AuthDB, String, MRecv(AuthDB, Bool, MSend(Client, Bool, End)))) *)
+  let (_ctx, env) = typecheck_full {|mod Test do
+    protocol Auth do
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
+    end
+  end|} in
+  let pi = List.assoc "Auth" env.March_typecheck.Typecheck.protocols in
+  let server_ty = List.assoc "Server" pi.March_typecheck.Typecheck.pi_projections in
+  Alcotest.(check string) "server projection"
+    "MRecv(Client, Int, MSend(AuthDB, String, MRecv(AuthDB, Bool, MSend(Client, Bool, End))))"
+    (pp_sty server_ty)
+
+let test_mpst_four_party_parses () =
+  (* A 4-party protocol should also typecheck without errors. *)
+  let ctx = typecheck {|mod Test do
+    protocol FourParty do
+      A -> B : Int
+      B -> C : String
+      C -> D : Bool
+      D -> A : Float
+    end
+  end|} in
+  Alcotest.(check bool) "4-party protocol: no errors" false (has_errors ctx)
+
+(* ── §2  MPST.new type checking ─────────────────────────────────────── *)
+
+let test_mpst_new_ok () =
+  (* MPST.new on a 3-party protocol typechecks fine. *)
+  let ctx = typecheck {|mod Test do
+    protocol Auth do
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
+    end
+    fn make() do
+      let _ = MPST.new(Auth)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "MPST.new 3-party: no errors" false (has_errors ctx)
+
+let test_mpst_new_binary_error () =
+  (* MPST.new on a 2-party protocol is an error (use Chan.new instead). *)
+  let ctx = typecheck {|mod Test do
+    protocol Binary do
+      A -> B : Int
+    end
+    fn bad() do
+      let _ = MPST.new(Binary)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "MPST.new binary protocol: error" true (has_errors ctx)
+
+let test_mpst_new_unknown_proto_error () =
+  let ctx = typecheck {|mod Test do
+    fn bad() do
+      let _ = MPST.new(NoSuchProto)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "MPST.new unknown protocol: error" true (has_errors ctx)
+
+(* ── §3  MPST.send type checking ────────────────────────────────────── *)
+
+let test_mpst_send_ok () =
+  (* Client sending Int to Server should typecheck. *)
+  let ctx = typecheck {|mod Test do
+    protocol Auth do
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
+    end
+    fn client_step(ch : Chan(Client, Auth)) : Unit do
+      let ch2 = MPST.send(ch, Server, 42)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "MPST.send correct role+type: no errors" false (has_errors ctx)
+
+let test_mpst_send_wrong_role_error () =
+  (* Client sending to AuthDB instead of Server is a type error. *)
+  let ctx = typecheck {|mod Test do
+    protocol Auth do
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
+    end
+    fn bad(ch : Chan(Client, Auth)) : Unit do
+      let _ = MPST.send(ch, AuthDB, 42)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "MPST.send wrong role: error" true (has_errors ctx)
+
+let test_mpst_send_wrong_type_error () =
+  (* Client sending String instead of Int is a type error. *)
+  let ctx = typecheck {|mod Test do
+    protocol Auth do
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
+    end
+    fn bad(ch : Chan(Client, Auth)) : Unit do
+      let _ = MPST.send(ch, Server, "hello")
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "MPST.send wrong payload type: error" true (has_errors ctx)
+
+(* ── §4  MPST.recv type checking ────────────────────────────────────── *)
+
+let test_mpst_recv_ok () =
+  (* AuthDB receiving String from Server then completing its session typechecks. *)
+  let ctx = typecheck {|mod Test do
+    protocol Auth do
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
+    end
+    fn authdb_step(ch : Chan(AuthDB, Auth)) : Unit do
+      let (_, ch2) = MPST.recv(ch, Server)
+      let ch3 = MPST.send(ch2, Server, true)
+      MPST.close(ch3)
+    end
+  end|} in
+  Alcotest.(check bool) "MPST.recv correct role: no errors" false (has_errors ctx)
+
+let test_mpst_recv_wrong_role_error () =
+  (* AuthDB receiving from Client instead of Server is a type error. *)
+  let ctx = typecheck {|mod Test do
+    protocol Auth do
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
+    end
+    fn bad(ch : Chan(AuthDB, Auth)) : Unit do
+      let (_, ch2) = MPST.recv(ch, Client)
+      let ch3 = MPST.send(ch2, Server, true)
+      MPST.close(ch3)
+    end
+  end|} in
+  Alcotest.(check bool) "MPST.recv wrong role: error" true (has_errors ctx)
+
+(* ── §5  MPST.close type checking ───────────────────────────────────── *)
+
+let test_mpst_close_ok () =
+  (* AuthDB can close after finishing all its communications. *)
+  let ctx = typecheck {|mod Test do
+    protocol Auth do
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
+    end
+    fn authdb_role(ch : Chan(AuthDB, Auth)) : Unit do
+      let (_, ch2) = MPST.recv(ch, Server)
+      let ch3 = MPST.send(ch2, Server, true)
+      MPST.close(ch3)
+    end
+  end|} in
+  Alcotest.(check bool) "MPST.close at SEnd: no errors" false (has_errors ctx)
+
+let test_mpst_close_wrong_state_error () =
+  (* Closing when not at SEnd is an error. *)
+  let ctx = typecheck {|mod Test do
+    protocol Auth do
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
+    end
+    fn bad(ch : Chan(Client, Auth)) : Unit do
+      MPST.close(ch)
+    end
+  end|} in
+  Alcotest.(check bool) "MPST.close at non-End: error" true (has_errors ctx)
+
+(* ── §6  Full protocol type checking ────────────────────────────────── *)
+
+let test_mpst_full_auth_protocol_typechecks () =
+  (* A complete function for each role should typecheck without errors. *)
+  let ctx = typecheck {|mod Test do
+    protocol Auth do
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
+    end
+    fn client_role(ch : Chan(Client, Auth)) : Bool do
+      let ch2 = MPST.send(ch, Server, 42)
+      let (result, ch3) = MPST.recv(ch2, Server)
+      MPST.close(ch3)
+      result
+    end
+    fn authdb_role(ch : Chan(AuthDB, Auth)) : Unit do
+      let (_, ch2) = MPST.recv(ch, Server)
+      let ch3 = MPST.send(ch2, Server, true)
+      MPST.close(ch3)
+    end
+    fn server_role(ch : Chan(Server, Auth)) : Unit do
+      let (creds, ch2) = MPST.recv(ch, Client)
+      let ch3 = MPST.send(ch2, AuthDB, "query")
+      let (ok, ch4) = MPST.recv(ch3, AuthDB)
+      let ch5 = MPST.send(ch4, Client, ok)
+      MPST.close(ch5)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "full Auth protocol: no errors" false (has_errors ctx)
+
+let test_mpst_choose_offer_three_party_typechecks () =
+  (* 3-party protocol with choose/offer branching typechecks. *)
+  let ctx = typecheck {|mod Test do
+    protocol Decision do
+      A -> B : Int
+      choose by B:
+        | yes -> B -> C : String
+        | no  -> B -> C : Int
+      end
+    end
+    fn a_role(ch : Chan(A, Decision)) : Unit do
+      let ch2 = MPST.send(ch, B, 42)
+      MPST.close(ch2)
+    end
+  end|} in
+  Alcotest.(check bool) "3-party choose/offer: no errors" false (has_errors ctx)
+
+(* ── §7  Runtime (eval) tests ───────────────────────────────────────── *)
+
+let test_mpst_eval_three_party () =
+  (* Full runtime execution of ThreePartyAuth: client sends 42,
+     authdb approves (true), client receives true back. *)
+  let env = eval_module {|mod Test do
+    protocol Auth do
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
+    end
+    fn run() do
+      let (ep_authdb, ep_client, ep_server) = MPST.new(Auth)
+      -- Client sends credentials
+      let ep_client2 = MPST.send(ep_client, Server, 42)
+      -- Server receives credentials from Client
+      let (_, ep_server2) = MPST.recv(ep_server, Client)
+      -- Server sends query to AuthDB
+      let ep_server3 = MPST.send(ep_server2, AuthDB, "lookup:42")
+      -- AuthDB receives query from Server
+      let (_, ep_authdb2) = MPST.recv(ep_authdb, Server)
+      -- AuthDB sends result to Server
+      let ep_authdb3 = MPST.send(ep_authdb2, Server, true)
+      MPST.close(ep_authdb3)
+      -- Server receives result from AuthDB
+      let (result, ep_server4) = MPST.recv(ep_server3, AuthDB)
+      -- Server sends response to Client
+      let ep_server5 = MPST.send(ep_server4, Client, result)
+      MPST.close(ep_server5)
+      -- Client receives response from Server
+      let (response, ep_client3) = MPST.recv(ep_client2, Server)
+      MPST.close(ep_client3)
+      response
+    end
+  end|} in
+  let v = call_fn env "run" [] in
+  Alcotest.(check bool) "MPST eval: client receives true" true (vbool v)
+
+let test_mpst_eval_two_messages_same_pair () =
+  (* Three parties where one pair exchanges two messages in sequence. *)
+  let env = eval_module {|mod Test do
+    protocol Relay do
+      Sender -> Relay : Int
+      Relay -> Sink : Int
+    end
+    fn run() do
+      let (ep_relay, ep_sender, ep_sink) = MPST.new(Relay)
+      -- Sender sends to Relay
+      let ep_sender2 = MPST.send(ep_sender, Relay, 99)
+      MPST.close(ep_sender2)
+      -- Relay receives from Sender
+      let (n, ep_relay2) = MPST.recv(ep_relay, Sender)
+      -- Relay forwards to Sink
+      let ep_relay3 = MPST.send(ep_relay2, Sink, n + 1)
+      MPST.close(ep_relay3)
+      -- Sink receives from Relay
+      let (result, ep_sink2) = MPST.recv(ep_sink, Relay)
+      MPST.close(ep_sink2)
+      result
+    end
+  end|} in
+  let v = call_fn env "run" [] in
+  Alcotest.(check int) "MPST relay: sender 99 → sink 100" 100 (vint v)
+
+let test_mpst_eval_four_party () =
+  (* 4-party linear chain: A→B→C→D *)
+  let env = eval_module {|mod Test do
+    protocol Chain do
+      A -> B : Int
+      B -> C : Int
+      C -> D : Int
+    end
+    fn run() do
+      let (ep_a, ep_b, ep_c, ep_d) = MPST.new(Chain)
+      let ep_a2 = MPST.send(ep_a, B, 1)
+      MPST.close(ep_a2)
+      let (n1, ep_b2) = MPST.recv(ep_b, A)
+      let ep_b3 = MPST.send(ep_b2, C, n1 + 1)
+      MPST.close(ep_b3)
+      let (n2, ep_c2) = MPST.recv(ep_c, B)
+      let ep_c3 = MPST.send(ep_c2, D, n2 + 1)
+      MPST.close(ep_c3)
+      let (n3, ep_d2) = MPST.recv(ep_d, C)
+      MPST.close(ep_d2)
+      n3
+    end
+  end|} in
+  let v = call_fn env "run" [] in
+  Alcotest.(check int) "MPST 4-party chain: 1→2→3" 3 (vint v)
+
+let test_mpst_eval_wrong_order_error () =
+  (* Receiving before sender sends should produce a runtime error. *)
+  let env = eval_module {|mod Test do
+    protocol Simple do
+      X -> Y : Int
+      Y -> Z : Int
+    end
+    fn run() do
+      let (ep_x, ep_y, ep_z) = MPST.new(Simple)
+      -- Y tries to recv from X before X sends — this will fail at runtime
+      let (_, ep_y2) = MPST.recv(ep_y, X)
+      let ep_x2 = MPST.send(ep_x, Y, 5)
+      MPST.close(ep_x2)
+      let ep_y3 = MPST.send(ep_y2, Z, 10)
+      MPST.close(ep_y3)
+      let (n, ep_z2) = MPST.recv(ep_z, Y)
+      MPST.close(ep_z2)
+      n
+    end
+  end|} in
+  Alcotest.(check bool) "MPST recv before send: runtime error"
+    true
+    (try
+       ignore (call_fn env "run" []);
+       false  (* should not reach here *)
+     with Failure _ | Invalid_argument _ | March_eval.Eval.Eval_error _ -> true)
+
 (* ── Eval tests ─────────────────────────────────────────────────────────── *)
 
 let test_eval_literal () =
@@ -12952,6 +13358,37 @@ let () =
           Alcotest.test_case "actor handler unannotated param arity err" `Quick test_actor_handler_unannotated_param_wrong_arity;
           Alcotest.test_case "actor handler state spread correct"      `Quick test_actor_handler_state_spread_correct;
           Alcotest.test_case "actor handler no-param msgs correct"      `Quick test_actor_handler_no_message_params_correct;
+        ] );
+      ( "mpst",
+        [
+          (* §1 Protocol declaration and projection *)
+          Alcotest.test_case "3-party protocol parses"         `Quick test_mpst_three_party_parses;
+          Alcotest.test_case "3-party projection: Client"      `Quick test_mpst_projection_client;
+          Alcotest.test_case "3-party projection: AuthDB"      `Quick test_mpst_projection_authdb;
+          Alcotest.test_case "3-party projection: Server"      `Quick test_mpst_projection_server;
+          Alcotest.test_case "4-party protocol parses"         `Quick test_mpst_four_party_parses;
+          (* §2 MPST.new *)
+          Alcotest.test_case "MPST.new 3-party ok"             `Quick test_mpst_new_ok;
+          Alcotest.test_case "MPST.new binary: error"          `Quick test_mpst_new_binary_error;
+          Alcotest.test_case "MPST.new unknown proto: error"   `Quick test_mpst_new_unknown_proto_error;
+          (* §3 MPST.send *)
+          Alcotest.test_case "MPST.send correct: ok"           `Quick test_mpst_send_ok;
+          Alcotest.test_case "MPST.send wrong role: error"     `Quick test_mpst_send_wrong_role_error;
+          Alcotest.test_case "MPST.send wrong type: error"     `Quick test_mpst_send_wrong_type_error;
+          (* §4 MPST.recv *)
+          Alcotest.test_case "MPST.recv correct: ok"           `Quick test_mpst_recv_ok;
+          Alcotest.test_case "MPST.recv wrong role: error"     `Quick test_mpst_recv_wrong_role_error;
+          (* §5 MPST.close *)
+          Alcotest.test_case "MPST.close at End: ok"           `Quick test_mpst_close_ok;
+          Alcotest.test_case "MPST.close wrong state: error"   `Quick test_mpst_close_wrong_state_error;
+          (* §6 Full protocol *)
+          Alcotest.test_case "full Auth protocol typechecks"   `Quick test_mpst_full_auth_protocol_typechecks;
+          Alcotest.test_case "3-party choose/offer typechecks" `Quick test_mpst_choose_offer_three_party_typechecks;
+          (* §7 Runtime eval *)
+          Alcotest.test_case "MPST eval: 3-party auth"         `Quick (with_reset test_mpst_eval_three_party);
+          Alcotest.test_case "MPST eval: relay 3-party"        `Quick (with_reset test_mpst_eval_two_messages_same_pair);
+          Alcotest.test_case "MPST eval: 4-party chain"        `Quick (with_reset test_mpst_eval_four_party);
+          Alcotest.test_case "MPST eval: recv before send error" `Quick (with_reset test_mpst_eval_wrong_order_error);
         ] );
       ( "eval",
         [

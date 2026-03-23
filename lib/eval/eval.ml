@@ -35,7 +35,8 @@ type value =
   | VWorkPool                           (** Work-stealing pool capability *)
   | VCap    of int * int                (** Epoch-stamped capability: (pid, epoch) *)
   | VActorId of int                     (** Opaque actor identity (epoch-independent) *)
-  | VChan   of chan_endpoint            (** Session-typed channel endpoint *)
+  | VChan   of chan_endpoint            (** Binary session-typed channel endpoint *)
+  | VMChan  of mpst_endpoint            (** Multi-party session-typed channel endpoint *)
 
 (** One endpoint of a binary session-typed channel.
     Each channel consists of two linked endpoints; one side's [ce_out_q]
@@ -47,6 +48,20 @@ and chan_endpoint = {
   mutable ce_closed   : bool;
   ce_out_q   : value Queue.t; (** Values this endpoint puts out (other side reads) *)
   ce_in_q    : value Queue.t; (** Values this endpoint receives (other side wrote) *)
+}
+
+(** One endpoint of a multi-party session.
+    For N roles there are N*(N-1) directed queues (one per ordered role pair).
+    [me_out_qs] maps target_role → send queue (messages this endpoint sends to target).
+    [me_in_qs]  maps source_role → recv queue (messages this endpoint receives from source).
+    By construction A.me_out_qs["B"] == B.me_in_qs["A"] (same physical Queue). *)
+and mpst_endpoint = {
+  me_id       : int;            (** Globally unique session id *)
+  me_role     : string;         (** Which role this endpoint represents *)
+  me_proto    : string;         (** Protocol name, for runtime error messages *)
+  mutable me_closed : bool;
+  me_out_qs   : (string, value Queue.t) Hashtbl.t;  (** target_role → send queue *)
+  me_in_qs    : (string, value Queue.t) Hashtbl.t;  (** source_role → recv queue *)
 }
 
 (** Association-list environment mapping names to values. *)
@@ -142,6 +157,11 @@ let impl_tbl : (string * string, value) Hashtbl.t = Hashtbl.create 8
     Populated when [eval_decl] processes [DType] nodes.
     Used by [==] and interface method dispatch to look up Eq/Ord/Hash/Show impls. *)
 let ctor_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 16
+
+(** Protocol → sorted role list mapping.
+    Populated when [eval_decl] processes [DProtocol] nodes.
+    Used by [MPST.new] to know how many endpoints to create and their names. *)
+let protocol_roles_tbl : (string, string list) Hashtbl.t = Hashtbl.create 8
 
 (** Module stack for tracking the current module path during eval.
     Updated when entering/leaving [DMod]. Top of stack = innermost module. *)
@@ -563,6 +583,8 @@ let rec value_to_string v =
   | VActorId pid -> Printf.sprintf "ActorId(%d)" pid
   | VChan ce ->
     Printf.sprintf "Chan(%s#%d, %s)" ce.ce_proto ce.ce_id ce.ce_role
+  | VMChan me ->
+    Printf.sprintf "MChan(%s#%d, %s)" me.me_proto me.me_id me.me_role
 
 (** Pretty-print a value with indented multi-line layout when the flat
     representation exceeds [width] characters.
@@ -1667,6 +1689,83 @@ let chan_close ce =
   if ce.ce_closed then
     eval_error "Chan.close: channel %s#%d was already closed" ce.ce_proto ce.ce_id;
   ce.ce_closed <- true;
+  VUnit
+
+(* ------------------------------------------------------------------ *)
+(* Multi-party session (MPST) runtime                                  *)
+(* ------------------------------------------------------------------ *)
+
+(** Create N linked MPST endpoints for [proto_name] with the given [roles]
+    (sorted list of role name strings).
+    For each ordered pair (A, B) of distinct roles, creates one shared Queue
+    such that A.me_out_qs["B"] == B.me_in_qs["A"].
+    Returns endpoints in the same order as [roles]. *)
+let mpst_new proto_name roles =
+  let id = !next_chan_id in
+  incr next_chan_id;
+  (* Pre-allocate all pairwise queues. *)
+  let pair_queues : (string * string, value Queue.t) Hashtbl.t =
+    Hashtbl.create (List.length roles * List.length roles)
+  in
+  List.iter (fun a ->
+      List.iter (fun b ->
+          if a <> b then
+            Hashtbl.replace pair_queues (a, b) (Queue.create ())
+        ) roles
+    ) roles;
+  (* Build one endpoint per role. *)
+  List.map (fun role ->
+      let out_qs = Hashtbl.create (List.length roles) in
+      let in_qs  = Hashtbl.create (List.length roles) in
+      List.iter (fun other ->
+          if other <> role then begin
+            Hashtbl.replace out_qs other (Hashtbl.find pair_queues (role, other));
+            Hashtbl.replace in_qs  other (Hashtbl.find pair_queues (other, role))
+          end
+        ) roles;
+      VMChan { me_id = id; me_role = role; me_proto = proto_name;
+               me_closed = false; me_out_qs = out_qs; me_in_qs = in_qs }
+    ) roles
+
+(** Send [v] from [me] to [target_role].
+    Returns the same endpoint (linearity enforced by the type system). *)
+let mpst_send me target_role v =
+  if me.me_closed then
+    eval_error "MPST.send: session %s#%d (%s) is already closed"
+      me.me_proto me.me_id me.me_role;
+  (match Hashtbl.find_opt me.me_out_qs target_role with
+   | None ->
+     eval_error "MPST.send: role `%s` has no channel to `%s` in protocol `%s`"
+       me.me_role target_role me.me_proto
+   | Some q ->
+     Queue.push v q;
+     VMChan me)
+
+(** Receive from [source_role] into [me].
+    Returns (value, same_endpoint_as_VMChan). *)
+let mpst_recv me source_role =
+  if me.me_closed then
+    eval_error "MPST.recv: session %s#%d (%s) is already closed"
+      me.me_proto me.me_id me.me_role;
+  (match Hashtbl.find_opt me.me_in_qs source_role with
+   | None ->
+     eval_error "MPST.recv: role `%s` has no channel from `%s` in protocol `%s`"
+       me.me_role source_role me.me_proto
+   | Some q ->
+     if Queue.is_empty q then
+       eval_error
+         "MPST.recv: role `%s` expected a message from `%s` in session %s#%d \
+          but the queue is empty — did you run the sender first?"
+         me.me_role source_role me.me_proto me.me_id;
+     let v = Queue.pop q in
+     VTuple [v; VMChan me])
+
+(** Close an MPST endpoint. *)
+let mpst_close me =
+  if me.me_closed then
+    eval_error "MPST.close: session %s#%d (%s) was already closed"
+      me.me_proto me.me_id me.me_role;
+  me.me_closed <- true;
   VUnit
 
 (* ------------------------------------------------------------------ *)
@@ -3520,6 +3619,50 @@ let base_env : env =
   ; ("Chan.offer", VBuiltin ("Chan.offer", function
         | [VChan ce] -> chan_recv ce
         | _ -> eval_error "Chan.offer: expected Chan"))
+
+  (* ── Multi-party session (MPST) operations ──────────────────────── *)
+  (* MPST.new(proto_name) → (ep_role1, ep_role2, ..., ep_roleN) sorted by role.
+     The roles are inferred from the protocol name at typecheck time; at runtime
+     we need the role list, which is passed as additional args by the typechecker
+     desugaring via an atom list. We accept:
+       MPST.new(:ThreePartyAuth, ["Client","Server","AuthDB"])
+     but also a convenience form where roles are passed as additional atom args.
+     Since the typechecker rewrites MPST.new(Proto) calls, we accept either form. *)
+  ; ("MPST.new", VBuiltin ("MPST.new", function
+        | [VString proto] | [VAtom proto] | [VCon (proto, [])] ->
+          (* Look up the registered roles from [protocol_roles_tbl]. *)
+          (match Hashtbl.find_opt protocol_roles_tbl proto with
+           | None ->
+             eval_error "MPST.new: protocol `%s` is not registered \
+                         (was it declared with `protocol ... do ... end`?)" proto
+           | Some roles ->
+             let n = List.length roles in
+             if n < 3 then
+               eval_error "MPST.new: protocol `%s` has %d role(s); \
+                           MPST.new requires at least 3. Use Chan.new for binary protocols."
+                 proto n;
+             VTuple (mpst_new proto roles))
+        | _ -> eval_error "MPST.new: expected a single protocol name argument"))
+
+  (* MPST.send(endpoint, Role, value) → new_endpoint
+     Role can be a bare uppercase name (VCon "Server" []) or atom/string. *)
+  ; ("MPST.send", VBuiltin ("MPST.send", function
+        | [VMChan me; VAtom target; v]
+        | [VMChan me; VString target; v] -> mpst_send me target v
+        | [VMChan me; VCon (target, []); v] -> mpst_send me target v
+        | _ -> eval_error "MPST.send: expected (MChan, Role, value)"))
+
+  (* MPST.recv(endpoint, Source) → (value, new_endpoint) *)
+  ; ("MPST.recv", VBuiltin ("MPST.recv", function
+        | [VMChan me; VAtom source]
+        | [VMChan me; VString source] -> mpst_recv me source
+        | [VMChan me; VCon (source, [])] -> mpst_recv me source
+        | _ -> eval_error "MPST.recv: expected (MChan, Role)"))
+
+  (* MPST.close(endpoint) → () *)
+  ; ("MPST.close", VBuiltin ("MPST.close", function
+        | [VMChan me] -> mpst_close me
+        | _ -> eval_error "MPST.close: expected MChan"))
   ]
 
 (* ------------------------------------------------------------------ *)
@@ -3961,6 +4104,7 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.reset impl_tbl;
   Hashtbl.reset ctor_type_tbl;
+  Hashtbl.reset protocol_roles_tbl;
   next_pid := 0;
   next_monitor_id := 0;
   current_pid := None;
@@ -4637,7 +4781,25 @@ let rec eval_decl (env : env) (d : decl) : env =
         new_env
       ) env idef.impl_methods
 
-  | DProtocol _ | DSig _ | DInterface _ | DExtern _ | DNeeds _ -> env
+  | DProtocol (name, pdef, _sp) ->
+    (* Register the protocol roles so MPST.new can create the right endpoints. *)
+    let rec collect_roles acc = function
+      | [] -> acc
+      | ProtoMsg (s, r, _) :: rest ->
+        collect_roles (s.txt :: r.txt :: acc) rest
+      | ProtoLoop steps :: rest ->
+        collect_roles (collect_roles acc steps) rest
+      | ProtoChoice (ch, branches) :: rest ->
+        let branch_roles = List.concat_map (fun (_, steps) ->
+            collect_roles [] steps) branches in
+        collect_roles (ch.txt :: branch_roles @ acc) rest
+    in
+    let roles = List.sort_uniq String.compare
+        (collect_roles [] pdef.proto_steps) in
+    Hashtbl.replace protocol_roles_tbl name.txt roles;
+    env
+
+  | DSig _ | DInterface _ | DExtern _ | DNeeds _ -> env
 
   | DDeriving _ ->
     (* DDeriving is expanded to DImpl blocks by the desugar pass; skip here. *)
@@ -4815,6 +4977,10 @@ let eval_module_env (m : module_) : env =
              Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt
            ) variants
        | _ -> ());
+      make_recursive_env rest env
+
+    | DProtocol _ as d :: rest ->
+      ignore (eval_decl env d);
       make_recursive_env rest env
 
     | _ :: rest -> make_recursive_env rest env
