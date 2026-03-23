@@ -17,6 +17,19 @@
 
   let mk_name id loc = { txt = id; span = mk_span loc }
 
+  (* ── Multi-error recovery ────────────────────────────────────────────── *)
+
+  (** Delegate to Parse_errors module so callers outside the parser can
+      access collected errors via March_parser.Parse_errors.take_parse_errors. *)
+  let collect_parse_error = Parse_errors.collect_parse_error
+
+  (** Collect a parse error into the buffer and then raise [ParseError].
+      Use this in sub-production error rules where Menhir requires the action
+      to abort (assert false is generated after the action otherwise). *)
+  let error_raise msg hint pos =
+    Parse_errors.collect_parse_error msg hint pos;
+    raise (March_errors.Errors.ParseError (msg, hint, pos))
+
   (** Group consecutive fn clauses with the same name into a single DFn.
       Clauses must be adjacent — interleaving with other decls is an error
       that we can catch later in a validation pass. *)
@@ -94,7 +107,7 @@
 (* ---- Module ---- *)
 
 module_:
-  | MOD; name = upper_name; DO; decls = list(decl); END; EOF
+  | MOD; name = upper_name; DO; decls = decl_list_r; END; EOF
     { { mod_name = name; mod_decls = group_fn_clauses decls } }
   | MOD; _n = upper_name; error
     { raise (March_errors.Errors.ParseError (
@@ -106,6 +119,18 @@ module_:
         "March programs must start with a module declaration:",
         Some "mod Main do\n    fn main() do\n        ...\n    end\nend",
         $startpos($1))) }
+
+(** Recoverable declaration list.  On error, collects the diagnostic and
+    skips tokens (via Menhir's default error-recovery token-dropping)
+    until the parser can shift a sync token that starts a new declaration
+    (FN, PUB, TYPE, LET, MOD, etc.) or END/EOF to close the block.
+    Capped at 20 errors to suppress cascading noise. *)
+decl_list_r:
+  | { [] }
+  | ds = decl_list_r; d = decl { ds @ [d] }
+  | ds = decl_list_r; error
+    { collect_parse_error "Parse error in declaration" None $startpos($2);
+      ds }
 
 (* ---- Declarations ---- *)
 
@@ -168,20 +193,20 @@ fn_decl:
                              fc_span = mk_span ($loc) }] },
            mk_span ($loc)) }
   | FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `do` to start the function body here:",
-        Some "fn name(params) do\n    body\nend",
-        $startpos($6))) }
+    { error_raise
+        "I was expecting `do` to start the function body here:"
+        (Some "fn name(params) do\n    body\nend")
+        $startpos($6) }
   | P_FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `do` to start the function body here:",
-        Some "p_fn name(params) do\n    body\nend",
-        $startpos($6))) }
+    { error_raise
+        "I was expecting `do` to start the function body here:"
+        (Some "p_fn name(params) do\n    body\nend")
+        $startpos($6) }
   | PUB; FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `do` to start the function body here:",
-        Some "pub fn name(params) do\n    body\nend",
-        $startpos($7))) }
+    { error_raise
+        "I was expecting `do` to start the function body here:"
+        (Some "pub fn name(params) do\n    body\nend")
+        $startpos($7) }
 
 when_guard:
   | WHEN; e = expr { e }
@@ -202,10 +227,10 @@ let_decl:
     { DLet (Public, { bind_pat = p; bind_ty = ty; bind_lin = Unrestricted; bind_expr = e },
             mk_span ($loc)) }
   | LET; _p = simple_pattern; _ty = option(type_annot); error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `=` in the let binding here:",
-        Some "let name = expr",
-        $startpos($4))) }
+    { error_raise
+        "I was expecting `=` in the let binding here:"
+        (Some "let name = expr")
+        $startpos($4) }
 
 type_decl:
   | TYPE; name = upper_name; tparams = option(type_params); EQUALS;
@@ -225,10 +250,10 @@ type_decl:
     { let tps = match tparams with Some ps -> ps | None -> [] in
       DType (Public, name, tps, TDRecord fields, mk_span ($loc)) }
   | TYPE; _n = upper_name; error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `=` after the type name here:",
-        Some "type Name = Variant1 | Variant2(Int)",
-        $startpos($3))) }
+    { error_raise
+        "I was expecting `=` after the type name here:"
+        (Some "type Name = Variant1 | Variant2(Int)")
+        $startpos($3) }
 
 derive_decl:
   | DERIVE; ifaces = separated_nonempty_list(COMMA, upper_name);
@@ -237,10 +262,10 @@ derive_decl:
 
 actor_decl:
   | ACTOR; _n = upper_name; error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `do` after the actor name here:",
-        Some "actor Name do\n    state { field: Type }\n    init ...\n    on Msg(x) do ... end\nend",
-        $startpos($3))) }
+    { error_raise
+        "I was expecting `do` after the actor name here:"
+        (Some "actor Name do\n    state { field: Type }\n    init ...\n    on Msg(x) do ... end\nend")
+        $startpos($3) }
   | ACTOR; name = upper_name; DO;
     STATE; LBRACE; fields = separated_list(COMMA, field); RBRACE;
     INIT; init_expr = expr;
@@ -270,10 +295,10 @@ actor_decl:
       end *)
 app_decl:
   | APP; _n = upper_name; error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `do` after the app name here:",
-        Some "app MyApp do\n    Supervisor.spec(:one_for_one, [...])\nend",
-        $startpos($3))) }
+    { error_raise
+        "I was expecting `do` after the app name here:"
+        (Some "app MyApp do\n    Supervisor.spec(:one_for_one, [...])\nend")
+        $startpos($3) }
   | APP; name = upper_name; DO;
     on_start = option(on_start_block);
     on_stop  = option(on_stop_block);
@@ -353,20 +378,20 @@ choose_branch:
 
 (** Nested module: mod Name do ... end *)
 mod_decl:
-  | MOD; name = upper_name; DO; decls = list(decl); END
+  | MOD; name = upper_name; DO; decls = decl_list_r; END
     { DMod (name, Private, group_fn_clauses decls, mk_span ($loc)) }
-  | PUB; MOD; name = upper_name; DO; decls = list(decl); END
+  | PUB; MOD; name = upper_name; DO; decls = decl_list_r; END
     { DMod (name, Public, group_fn_clauses decls, mk_span ($loc)) }
   | MOD; _n = upper_name; error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `do` after the module name here:",
-        Some "mod Name do\n    ...\nend",
-        $startpos($3))) }
+    { error_raise
+        "I was expecting `do` after the module name here:"
+        (Some "mod Name do\n    ...\nend")
+        $startpos($3) }
   | PUB; MOD; _n = upper_name; error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `do` after the module name here:",
-        Some "pub mod Name do\n    ...\nend",
-        $startpos($4))) }
+    { error_raise
+        "I was expecting `do` after the module name here:"
+        (Some "pub mod Name do\n    ...\nend")
+        $startpos($4) }
 
 (** Import declaration: use Mod.* or use Mod.{f, g} or use Mod
     Single-level module paths to avoid shift/reduce conflicts with DOT. *)
@@ -429,10 +454,10 @@ interface_decl:
         iface_methods = methods;
       }, mk_span ($loc)) }
   | INTERFACE; _n = upper_name; error
-    { raise (March_errors.Errors.ParseError (
-        "Interfaces need a type parameter in parentheses:",
-        Some "interface Name(a) do\n    fn method: a -> a\nend",
-        $startpos($3))) }
+    { error_raise
+        "Interfaces need a type parameter in parentheses:"
+        (Some "interface Name(a) do\n    fn method: a -> a\nend")
+        $startpos($3) }
 
 method_sig:
   | FN; name = lower_name; COLON; t = ty;
@@ -458,10 +483,10 @@ impl_decl:
             | _ -> None) methods;
       }, mk_span ($loc)) }
   | IMPL; _iface = upper_name; error
-    { raise (March_errors.Errors.ParseError (
-        "Implementations need a type argument in parentheses:",
-        Some "impl InterfaceName(ConcreteType) do\n    fn method(x) do ... end\nend",
-        $startpos($3))) }
+    { error_raise
+        "Implementations need a type argument in parentheses:"
+        (Some "impl InterfaceName(ConcreteType) do\n    fn method(x) do ... end\nend")
+        $startpos($3) }
 
 constraint_expr:
   | name = upper_name; LPAREN; t = ty; RPAREN { (name, [t]) }
@@ -541,14 +566,22 @@ dotted_upper_tail:
   | id = upper_name; DOT; rest = dotted_upper_tail { id :: rest }
 
 variant:
+  | PUB; name = upper_name; LPAREN; args = separated_nonempty_list(COMMA, ty); RPAREN
+    { { var_name = name; var_args = args; var_vis = Public } }
+  | PUB; name = upper_name
+    { { var_name = name; var_args = []; var_vis = Public } }
+  | PUB; a = ATOM; LPAREN; args = separated_nonempty_list(COMMA, ty); RPAREN
+    { { var_name = mk_name a $loc; var_args = args; var_vis = Public } }
+  | PUB; a = ATOM
+    { { var_name = mk_name a $loc; var_args = []; var_vis = Public } }
   | name = upper_name; LPAREN; args = separated_nonempty_list(COMMA, ty); RPAREN
-    { { var_name = name; var_args = args } }
+    { { var_name = name; var_args = args; var_vis = Private } }
   | name = upper_name
-    { { var_name = name; var_args = [] } }
+    { { var_name = name; var_args = []; var_vis = Private } }
   | a = ATOM; LPAREN; args = separated_nonempty_list(COMMA, ty); RPAREN
-    { { var_name = mk_name a $loc; var_args = args } }
+    { { var_name = mk_name a $loc; var_args = args; var_vis = Private } }
   | a = ATOM
-    { { var_name = mk_name a $loc; var_args = [] } }
+    { { var_name = mk_name a $loc; var_args = []; var_vis = Private } }
 
 field:
   | name = lower_name; COLON; t = ty
@@ -578,10 +611,10 @@ block_expr:
     { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Linear; bind_expr = e },
             mk_span ($loc)) }
   | LET; _p = simple_pattern; _ty = option(type_annot); error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `=` in the let binding here:",
-        Some "let name = expr",
-        $startpos($4))) }
+    { error_raise
+        "I was expecting `=` in the let binding here:"
+        (Some "let name = expr")
+        $startpos($4) }
   | FN; name = lower_name; LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
     ret = option(ret_annot); DO; body = block_body; END
     { let simple_params = List.filter_map (function
@@ -593,10 +626,10 @@ block_expr:
         | FPPat _ -> None) params in
       ELetFn (name, simple_params, ret, body, mk_span ($loc)) }
   | FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `do` to start the function body here:",
-        Some "fn name(params) do\n    body\nend",
-        $startpos($6))) }
+    { error_raise
+        "I was expecting `do` to start the function body here:"
+        (Some "fn name(params) do\n    body\nend")
+        $startpos($6) }
   | e = expr { e }
 
 expr:
@@ -606,34 +639,34 @@ expr:
   | FN; ps = lambda_params; error
     { let params = String.concat " " (List.map (fun p -> p.param_name.txt) ps) in
       let hint = Printf.sprintf "fn %s -> expr" params in
-      raise (March_errors.Errors.ParseError (
-        "I was expecting `->` to start the lambda body here:",
-        Some hint,
-        $startpos($3))) }
+      error_raise
+        "I was expecting `->` to start the lambda body here:"
+        (Some hint)
+        $startpos($3) }
   | IF; cond = expr; THEN; t = expr; ELSE; f = expr
     { EIf (cond, t, f, mk_span ($loc)) }
   | IF; _c = expr; THEN; _t = expr; error
-    { raise (March_errors.Errors.ParseError (
-        "March `if` expressions always need an `else` branch:",
-        Some "if cond then\n    expr1\nelse\n    expr2",
-        $startpos($5))) }
+    { error_raise
+        "March `if` expressions always need an `else` branch:"
+        (Some "if cond then\n    expr1\nelse\n    expr2")
+        $startpos($5) }
   | IF; _c = expr; error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `then` after the condition here:",
-        Some "if cond then\n    expr1\nelse\n    expr2",
-        $startpos($3))) }
+    { error_raise
+        "I was expecting `then` after the condition here:"
+        (Some "if cond then\n    expr1\nelse\n    expr2")
+        $startpos($3) }
   | MATCH; e = expr; DO; bs = nonempty_list(branch); END
     { EMatch (e, bs, mk_span ($loc)) }
   | MATCH; _e = expr; DO; _bs = nonempty_list(branch); error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `end` to close the match here:",
-        None,
-        $startpos($5))) }
+    { error_raise
+        "I was expecting `end` to close the match here:"
+        None
+        $startpos($5) }
   | MATCH; _e = expr; error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `do` after the match expression here:",
-        Some "match expr do\n    Pattern -> result\nend",
-        $startpos($3))) }
+    { error_raise
+        "I was expecting `do` after the match expression here:"
+        (Some "match expr do\n    Pattern -> result\nend")
+        $startpos($3) }
 
 lambda_params:
   | name = lower_name { [{ param_name = name; param_ty = None; param_lin = Unrestricted }] }
@@ -777,10 +810,10 @@ branch:
   | option(PIPE); p = pattern; guard = option(when_guard); ARROW; e = block_body
     { { branch_pat = p; branch_guard = guard; branch_body = e } }
   | option(PIPE); _p = pattern; _guard = option(when_guard); error
-    { raise (March_errors.Errors.ParseError (
-        "I was expecting `->` in the match arm here:",
-        Some "Pattern -> result",
-        $startpos($4))) }
+    { error_raise
+        "I was expecting `->` in the match arm here:"
+        (Some "Pattern -> result")
+        $startpos($4) }
 
 (* ---- Patterns ---- *)
 

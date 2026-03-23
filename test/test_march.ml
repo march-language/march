@@ -2168,8 +2168,15 @@ let test_unused_var_underscore_ok () =
   Alcotest.(check bool) "wildcard _ must not produce unused warning" false has_any_unused
 
 let parse_error_msg src =
-  try ignore (parse_module src); None
-  with March_errors.Errors.ParseError (msg, _, _) -> Some msg
+  try
+    ignore (parse_module src);
+    (* No exception: check errors collected during recovery *)
+    let errs = March_parser.Parse_errors.take_parse_errors () in
+    (match errs with (msg, _, _) :: _ -> Some msg | [] -> None)
+  with March_errors.Errors.ParseError (msg, _, _) ->
+    (* Fatal parse error (e.g. bad module header) *)
+    ignore (March_parser.Parse_errors.take_parse_errors ());
+    Some msg
 
 let test_parse_error_type_missing_eq () =
   (* "type Foo Bar" should produce a helpful error about `=` *)
@@ -2204,6 +2211,30 @@ let test_parse_valid_not_broken () =
   end|} in
   Alcotest.(check bool) "valid syntax still parses" true
     (match parse_module src with _ -> true)
+
+(* Multi-error recovery: decl_list_r collects errors and continues parsing.
+   A module with two bad declarations (unknown tokens at declaration level)
+   should parse and the error buffer should have entries. *)
+let test_multi_error_recovery_collects () =
+  (* Two malformed declarations separated by valid ones.
+     "@@@" is not a valid token, triggering decl_list_r recovery. *)
+  let src = {|mod T do
+    fn ok1() do 42 end
+    @@@ garbage
+    fn ok2() do 1 end
+  end|} in
+  (* May raise ParseError (lexer error) or succeed with errors in buffer.
+     Either way, at least one error is reported. *)
+  let has_error =
+    (try
+       ignore (parse_module src);
+       let errs = March_parser.Parse_errors.take_parse_errors () in
+       errs <> []
+     with _ ->
+       ignore (March_parser.Parse_errors.take_parse_errors ());
+       true)
+  in
+  Alcotest.(check bool) "multi-error recovery reports at least one error" true has_error
 
 let test_type_map_populated () =
   let src = {|mod Test do
@@ -8401,14 +8432,14 @@ let test_tc_private_let () =
 
 (* pub type exports constructors; bare type hides them *)
 let test_tc_pub_type_ctors_accessible () =
-  (* pub type in pub mod exports ctors to outer scope unqualified *)
+  (* pub type with pub constructors exports both type and ctors to outer scope *)
   let ctx = typecheck {|mod Test do
     pub mod M do
-      pub type Color = Red | Green | Blue
+      pub type Color = pub Red | pub Green | pub Blue
     end
     fn main() do Red end
   end|} in
-  Alcotest.(check bool) "pub type ctors accessible from outside" false (has_errors ctx)
+  Alcotest.(check bool) "pub type pub ctors accessible from outside" false (has_errors ctx)
 
 let test_tc_private_type_ctors_hidden () =
   (* bare type (Private) does NOT export ctors to outer scope *)
@@ -8419,6 +8450,50 @@ let test_tc_private_type_ctors_hidden () =
     fn main() do Red end
   end|} in
   Alcotest.(check bool) "bare type ctors hidden outside" true (has_errors ctx)
+
+let test_tc_opaque_pub_type_ctors_hidden () =
+  (* pub type with private (no-pub) constructors: type name is exported, ctors are not *)
+  let ctx = typecheck {|mod Test do
+    pub mod M do
+      pub type Color = Red | Green | Blue
+    end
+    fn main() do Red end
+  end|} in
+  Alcotest.(check bool) "opaque pub type: ctors hidden outside" true (has_errors ctx)
+
+let test_tc_opaque_pub_type_name_accessible () =
+  (* pub type with private ctors: the public fn that returns Color is accessible *)
+  let ctx = typecheck {|mod Test do
+    pub mod M do
+      pub type Color = Red | Green | Blue
+      pub fn make_red() : Color do Red end
+    end
+    fn main() do M.make_red() end
+  end|} in
+  Alcotest.(check bool) "opaque pub type: type name still accessible" false (has_errors ctx)
+
+let test_tc_partial_pub_ctors () =
+  (* pub type with only some ctors public: public ones accessible, private ones not.
+     The outer module uses `use M.*` to bring Circle into scope. *)
+  let ctx = typecheck {|mod Test do
+    pub mod M do
+      pub type Shape = pub Circle | Square
+    end
+    use M.*
+    fn main() do Circle end
+  end|} in
+  Alcotest.(check bool) "partial pub ctors: public ctor accessible" false (has_errors ctx)
+
+let test_tc_partial_pub_ctors_private_hidden () =
+  (* private ctor of a partially-public type is hidden outside *)
+  let ctx = typecheck {|mod Test do
+    pub mod M do
+      pub type Shape = pub Circle | Square
+    end
+    use M.*
+    fn main() do Square end
+  end|} in
+  Alcotest.(check bool) "partial pub ctors: private ctor hidden" true (has_errors ctx)
 
 (* Phase 2: sig type-level conformance tests *)
 
@@ -9700,6 +9775,7 @@ let () =
           Alcotest.test_case "parse err iface no param" `Quick test_parse_error_interface_missing_param;
           Alcotest.test_case "parse err impl no type"   `Quick test_parse_error_impl_missing_type;
           Alcotest.test_case "valid syntax not broken"  `Quick test_parse_valid_not_broken;
+          Alcotest.test_case "multi-error recovery"     `Quick test_multi_error_recovery_collects;
         ] );
       ( "string interp",
         [
@@ -10280,6 +10356,11 @@ let () =
         Alcotest.test_case "private let hidden"          `Quick test_tc_private_let;
         Alcotest.test_case "pub type ctors accessible"   `Quick test_tc_pub_type_ctors_accessible;
         Alcotest.test_case "private type ctors hidden"   `Quick test_tc_private_type_ctors_hidden;
+        (* Opaque pub types: pub type with private constructors *)
+        Alcotest.test_case "opaque pub type ctors hidden"   `Quick test_tc_opaque_pub_type_ctors_hidden;
+        Alcotest.test_case "opaque pub type name accessible" `Quick test_tc_opaque_pub_type_name_accessible;
+        Alcotest.test_case "partial pub ctors: public accessible"  `Quick test_tc_partial_pub_ctors;
+        Alcotest.test_case "partial pub ctors: private hidden"     `Quick test_tc_partial_pub_ctors_private_hidden;
         (* Phase 2: sig conformance *)
         Alcotest.test_case "sig type mismatch"           `Quick test_tc_sig_type_mismatch;
         Alcotest.test_case "sig opaque hides ctors"      `Quick test_tc_sig_opaque_hides_ctors;

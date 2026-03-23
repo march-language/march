@@ -6,19 +6,19 @@
 
 mod Http do
 
-  pub type Method = Get | Post | Put | Patch | Delete | Head | Options | Trace | Connect | Other(String)
+  pub type Method = pub Get | pub Post | pub Put | pub Patch | pub Delete | pub Head | pub Options | pub Trace | pub Connect | pub Other(String)
 
-  pub type Scheme = SchemeHttp | SchemeHttps
+  pub type Scheme = pub SchemeHttp | pub SchemeHttps
 
-  pub type Status = Status(Int)
+  pub type Status = pub Status(Int)
 
-  pub type Header = Header(String, String)
+  pub type Header = pub Header(String, String)
 
-  pub type UrlError = InvalidScheme(String) | MissingHost | InvalidPort(String) | MalformedUrl(String)
+  pub type UrlError = pub InvalidScheme(String) | pub MissingHost | pub InvalidPort(String) | pub MalformedUrl(String)
 
-  pub type Request(body) = Request(Method, Scheme, String, Option(Int), String, Option(String), List(Header), body)
+  pub type Request(body) = pub Request(Method, Scheme, String, Option(Int), String, Option(String), List(Header), body)
 
-  pub type Response(body) = Response(Status, List(Header), body)
+  pub type Response(body) = pub Response(Status, List(Header), body)
 
   -- Method helpers
 
