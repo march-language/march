@@ -2788,13 +2788,37 @@ let rec check_decl env (d : Ast.decl) : env =
           (f.fld_name.txt, surface_ty env ~tvars f.fld_ty)) actor.actor_state in
       TRecord (List.sort (fun (a,_)(b,_) -> String.compare a b) flds)
     in
+    (* Check for duplicate handler names — two `on Msg(...)` arms for the
+       same message name is always a programmer error. *)
+    let _ = List.fold_left (fun seen (h : Ast.actor_handler) ->
+        if List.mem h.ah_msg.txt seen then
+          Err.error env.errors ~span:h.ah_msg.span
+            (Printf.sprintf
+               "actor '%s' defines handler '%s' more than once;\
+                \nremove the duplicate or rename one of them"
+               name.txt h.ah_msg.txt);
+        h.ah_msg.txt :: seen
+      ) [] actor.actor_handlers in
     (* Register actor name as a zero-arg constructor (so spawn(ActorName) typechecks)
-       and message constructors so ECon lookups succeed *)
+       and message constructors so ECon lookups succeed.
+       Include ALL params — annotated and unannotated — so constructor arity
+       is always correct.  Unannotated params are given a unique TyVar placeholder
+       (named "$p<i>_<Msg>") that resolves to a fresh unification variable during
+       instantiation; this ensures `send(pid, Msg(x))` typechecks correctly even
+       when the handler omits a type annotation. *)
     let env_with_actor_ctor = { env with ctors =
       (name.txt, { ci_type = name.txt; ci_params = []; ci_arg_tys = [] })
       :: env.ctors } in
     let env_with_ctors = List.fold_left (fun acc_env (h : Ast.actor_handler) ->
-        let arg_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
+        let arg_tys = List.mapi (fun i (p : Ast.param) ->
+            match p.param_ty with
+            | Some ty -> ty
+            | None ->
+              (* Unique name per (handler, position) so each instantiation
+                 gets an independent fresh variable. *)
+              Ast.TyVar { txt = Printf.sprintf "$p%d_%s" i h.ah_msg.txt;
+                          span = p.param_name.span }
+          ) h.ah_params in
         let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
                    ci_arg_tys = arg_tys } in
         { acc_env with ctors = (h.ah_msg.txt, ci) :: acc_env.ctors }
@@ -3337,12 +3361,20 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
            { env1 with records = (name.txt, (param_names, field_pairs)) :: env1.records }
          | _ -> env1)
       | Ast.DActor (_, name, actor, _) ->
-        (* Register actor name as a zero-arg constructor and message ctors *)
+        (* Register actor name as a zero-arg constructor and message ctors.
+           Same arity fix as in check_decl: include unannotated params as
+           unique TyVar placeholders so constructor arity is always correct. *)
         let env1 = { env with ctors =
           (name.txt, { ci_type = name.txt; ci_params = []; ci_arg_tys = [] })
           :: env.ctors } in
         List.fold_left (fun acc_env (h : Ast.actor_handler) ->
-            let arg_tys = List.filter_map (fun (p : Ast.param) -> p.param_ty) h.ah_params in
+            let arg_tys = List.mapi (fun i (p : Ast.param) ->
+                match p.param_ty with
+                | Some ty -> ty
+                | None ->
+                  Ast.TyVar { txt = Printf.sprintf "$p%d_%s" i h.ah_msg.txt;
+                              span = p.param_name.span }
+              ) h.ah_params in
             let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
                        ci_arg_tys = arg_tys } in
             { acc_env with ctors = (h.ah_msg.txt, ci) :: acc_env.ctors }

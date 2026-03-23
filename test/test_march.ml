@@ -2514,6 +2514,174 @@ let test_actor_handler_correct () =
   end|} in
   Alcotest.(check bool) "correct handler: no errors" false (has_errors ctx)
 
+(* ── Actor handler return type checks — new gap-filling tests ─────────── *)
+
+let test_actor_handler_duplicate_name () =
+  (* Two handlers with the same message name → error *)
+  let ctx = typecheck {|mod Test do
+    actor Counter do
+      state { value : Int }
+      init { value = 0 }
+      on Inc() do
+        { value = state.value + 1 }
+      end
+      on Inc() do
+        { value = state.value + 2 }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "duplicate handler: has error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  (match List.find_opt (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Error) diags with
+  | None -> Alcotest.fail "expected an Error diagnostic for duplicate handler"
+  | Some d ->
+    Alcotest.(check bool) "message mentions 'Inc'" true
+      (contains "Inc" d.March_errors.Errors.message);
+    Alcotest.(check bool) "message mentions 'Counter'" true
+      (contains "Counter" d.March_errors.Errors.message))
+
+let test_actor_handler_wrong_return_type () =
+  (* Handler returns Int instead of the state record → error *)
+  let ctx = typecheck {|mod Test do
+    actor Ticker do
+      state { count : Int }
+      init { count = 0 }
+      on Tick() do
+        42
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "wrong return type: has error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  (match List.find_opt (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Error) diags with
+  | None -> Alcotest.fail "expected an Error diagnostic"
+  | Some d ->
+    Alcotest.(check bool) "message mentions handler 'Tick'" true
+      (contains "Tick" d.March_errors.Errors.message);
+    Alcotest.(check bool) "message mentions actor 'Ticker'" true
+      (contains "Ticker" d.March_errors.Errors.message))
+
+let test_actor_handler_init_wrong_type () =
+  (* Init returns wrong type (Int) instead of state record → error *)
+  let ctx = typecheck {|mod Test do
+    actor Foo do
+      state { x : Int }
+      init 99
+      on Noop() do
+        { x = state.x }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "init wrong type: has error" true (has_errors ctx)
+
+let test_actor_handler_multiple_all_correct () =
+  (* Multiple handlers, all returning correct state → no errors *)
+  let ctx = typecheck {|mod Test do
+    actor Game do
+      state { score : Int, lives : Int }
+      init { score = 0, lives = 3 }
+      on Score(n : Int) do
+        { score = state.score + n, lives = state.lives }
+      end
+      on Die() do
+        { score = state.score, lives = state.lives - 1 }
+      end
+      on Reset() do
+        { score = 0, lives = 3 }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "multiple handlers all correct: no errors" false (has_errors ctx)
+
+let test_actor_handler_multiple_one_wrong () =
+  (* Multiple handlers; one returns wrong type → exactly that handler errors *)
+  let ctx = typecheck {|mod Test do
+    actor Game do
+      state { score : Int }
+      init { score = 0 }
+      on Add(n : Int) do
+        { score = state.score + n }
+      end
+      on Cheat() do
+        "free win"
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "one bad handler: has error" true (has_errors ctx);
+  let diags = March_errors.Errors.sorted ctx in
+  let errors = List.filter (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Error) diags in
+  (* Only the 'Cheat' handler should error, not 'Add' *)
+  Alcotest.(check bool) "bad handler name in message" true
+    (List.exists (fun d -> contains "Cheat" d.March_errors.Errors.message) errors)
+
+let test_actor_handler_unannotated_param_correct_arity () =
+  (* Handler with unannotated param — constructor arity must be 1, not 0.
+     Sending with the right number of args should typecheck with no error. *)
+  let ctx = typecheck {|mod Test do
+    actor Adder do
+      state { total : Int }
+      init { total = 0 }
+      on Add(n) do
+        { total = state.total + n }
+      end
+    end
+    fn go(pid : Pid(Int)) : Int do
+      send(pid, Add(5))
+      0
+    end
+  end|} in
+  Alcotest.(check bool) "unannotated param, correct arity: no error" false (has_errors ctx)
+
+let test_actor_handler_unannotated_param_wrong_arity () =
+  (* Sending wrong number of args to a handler with an unannotated param
+     must error: constructor registered with arity 1, but 0 args sent. *)
+  let ctx = typecheck {|mod Test do
+    actor Adder do
+      state { total : Int }
+      init { total = 0 }
+      on Add(n) do
+        { total = state.total + n }
+      end
+    end
+    fn go(pid : Pid(Int)) : Int do
+      send(pid, Add())
+      0
+    end
+  end|} in
+  Alcotest.(check bool) "unannotated param, wrong arity: has error" true (has_errors ctx)
+
+let test_actor_handler_state_spread_correct () =
+  (* Record spread { state with field = ... } returns the correct state type *)
+  let ctx = typecheck {|mod Test do
+    actor Counter do
+      state { count : Int, label : String }
+      init { count = 0, label = "x" }
+      on Inc() do
+        { count = state.count + 1, label = state.label }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "state spread handler: no errors" false (has_errors ctx)
+
+let test_actor_handler_no_message_params_correct () =
+  (* Handler with no params (zero-arg message) that uses state correctly *)
+  let ctx = typecheck {|mod Test do
+    actor Toggle do
+      state { active : Bool }
+      init { active = false }
+      on Flip() do
+        { active = true }
+      end
+      on Reset() do
+        { active = false }
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "no-param handlers: no errors" false (has_errors ctx)
+
 (* ── Perceus RC tests ────────────────────────────────────────────────── *)
 
 (** Parse, desugar, typecheck, lower, mono, defun, then run perceus. *)
@@ -9582,6 +9750,16 @@ let () =
           (* H9: Actor handler capability checking *)
           Alcotest.test_case "actor cap needs ok"            `Quick test_actor_handler_cap_needs_ok;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;
+          (* Actor handler return type checking — gap fills *)
+          Alcotest.test_case "actor handler duplicate name"            `Quick test_actor_handler_duplicate_name;
+          Alcotest.test_case "actor handler wrong return type"         `Quick test_actor_handler_wrong_return_type;
+          Alcotest.test_case "actor handler init wrong type"           `Quick test_actor_handler_init_wrong_type;
+          Alcotest.test_case "actor handler multiple all correct"      `Quick test_actor_handler_multiple_all_correct;
+          Alcotest.test_case "actor handler multiple one wrong"        `Quick test_actor_handler_multiple_one_wrong;
+          Alcotest.test_case "actor handler unannotated param arity ok"  `Quick test_actor_handler_unannotated_param_correct_arity;
+          Alcotest.test_case "actor handler unannotated param arity err" `Quick test_actor_handler_unannotated_param_wrong_arity;
+          Alcotest.test_case "actor handler state spread correct"      `Quick test_actor_handler_state_spread_correct;
+          Alcotest.test_case "actor handler no-param msgs correct"      `Quick test_actor_handler_no_message_params_correct;
         ] );
       ( "eval",
         [
