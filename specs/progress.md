@@ -202,8 +202,8 @@ march/
 ## Current State (as of 2026-03-23)
 
 - **Builds clean**
-- **1008 tests across 8 suites; 8 failures** (all failures are in `repl_jit_regression` group — see Known Failures):
-  - `test_march.exe`: 820 tests, 8 failures (repl_jit_regression/repl_jit_cross_line)
+- **1011 tests across 8 suites; 0 failures** (REPL JIT partition_fns fix applied):
+  - `test_march.exe`: 823 tests, all passing (REPL JIT fix; List.reverse/no-precompile/length-3x regression tests added)
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests, passing (formatter round-trip)
@@ -241,6 +241,7 @@ march/
 - **Property tests for Eq/Ord/Show/Hash** — QCheck2 properties (reflexivity, symmetry, transitivity, hash consistency)
 - **Parser fuzz tests** — 19 structural fuzz cases in `parser_fuzz` test group
 - **Supervisor restart policies** — `sc_max_restarts` sliding window enforced in eval.ml
+- **REPL JIT `compiled_fns` corruption fix** — `partition_fns` in `repl_jit.ml` now pure (no side effects); `mark_compiled_fns` called only after successful `compile_fragment` + dlopen; prevents stdlib fn "undefined symbol" cascade when any prior fragment compilation failed
 
 ### Known Implementation Gaps
 

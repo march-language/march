@@ -1,4 +1,24 @@
-(* lib/jit/repl_jit.ml *)
+(* lib/jit/repl_jit.ml
+ *
+ * REPL JIT compilation engine.
+ *
+ * ROOT CAUSE FIX (2026-03): The original `partition_fns` function eagerly
+ * recorded every "new" function in `compiled_fns` BEFORE calling
+ * `compile_fragment`.  If clang or dlopen failed for any reason, the
+ * functions were "poisoned" — marked as compiled but not present in any
+ * loaded .so.  On the next REPL expression those functions were treated as
+ * extern (declared but not defined), causing "undefined symbol" errors that
+ * were hard to diagnose and persisted for the entire session.
+ *
+ * The fix separates classification from recording:
+ *   • `partition_fns`     — pure classification, no side effects on compiled_fns
+ *   • `mark_compiled_fns` — called ONLY after compile_fragment + dlopen succeed
+ *
+ * This ensures that if compilation fails, compiled_fns stays consistent with
+ * the set of functions actually available in loaded .sos.  On the next REPL
+ * expression the same functions are re-classified as "new" and re-emitted,
+ * giving the user a clean retry rather than a cryptic undefined-symbol cascade.
+ *)
 
 (* Detect macOS without forking a subprocess — check for a macOS-only path. *)
 let is_macos () =
@@ -70,13 +90,18 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
 let is_c_runtime_fn name =
   March_tir.Llvm_emit.mangle_extern name <> name
 
-(** Partition functions into (new_fns, extern_fns):
-    - new_fns: not yet compiled → will be defined in this fragment, recorded
-      in compiled_fns.
+(** Classify functions into (new_fns, extern_fns) WITHOUT touching compiled_fns.
+    - new_fns:    not yet compiled → will be defined in this fragment.
     - extern_fns: already compiled in a prior fragment or stdlib prelude →
-      need `declare` in the IR so LLVM IR is valid.
+                  need `declare` in the IR so LLVM IR is valid.
     C-runtime functions (already declared in emit_preamble) are excluded
-    from both lists. *)
+    from both lists.
+
+    IMPORTANT: this function is intentionally pure with respect to compiled_fns.
+    Call [mark_compiled_fns] after a successful [compile_fragment] + dlopen to
+    record new_fns as compiled.  Marking eagerly (before compilation) corrupts
+    compiled_fns when compilation fails — see the file-level comment for the
+    full explanation. *)
 let partition_fns ctx (fns : March_tir.Tir.fn_def list)
     : March_tir.Tir.fn_def list * March_tir.Tir.fn_def list =
   let new_fns = ref [] and extern_fns = ref [] in
@@ -84,12 +109,19 @@ let partition_fns ctx (fns : March_tir.Tir.fn_def list)
     if is_c_runtime_fn f.fn_name then ()
     else if Hashtbl.mem ctx.compiled_fns f.fn_name then
       extern_fns := f :: !extern_fns
-    else begin
-      Hashtbl.replace ctx.compiled_fns f.fn_name ();
-      new_fns := f :: !new_fns
-    end
+    else
+      new_fns := f :: !new_fns   (* no Hashtbl.replace — deferred to mark_compiled_fns *)
   ) fns;
   (List.rev !new_fns, List.rev !extern_fns)
+
+(** Record [fns] as compiled in [ctx.compiled_fns].
+    Must be called AFTER [compile_fragment] + dlopen succeed so that a
+    failed compilation does not leave phantom entries that turn the next
+    attempt's defines into incorrectly-declared externs. *)
+let mark_compiled_fns ctx (fns : March_tir.Tir.fn_def list) =
+  List.iter (fun (f : March_tir.Tir.fn_def) ->
+    Hashtbl.replace ctx.compiled_fns f.fn_name ()
+  ) fns
 
 (** Strip the "repl_N_" prefix from a global name to recover the bare variable
     name as it appears in TIR.  The current format is "repl_<N>_<bare>" where
@@ -231,6 +263,9 @@ let run_expr ctx ~type_map m =
     ~types:tir.March_tir.Tir.tm_types
     main_fn.fn_body in
   let handle = compile_fragment ctx ir in
+  (* Mark new_fns as compiled only after the fragment was successfully loaded.
+     If compile_fragment raised an exception, compiled_fns stays clean. *)
+  mark_compiled_fns ctx new_fns;
   let sym_name = Printf.sprintf "repl_%d" n in
   let fptr = Jit.dlsym handle sym_name in
   (* Call based on return type *)
@@ -310,7 +345,8 @@ let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
         ~n:hn ~prev_globals:ctx.globals ~extern_fns ~types:tir.March_tir.Tir.tm_types
         helper in
       let _h = compile_fragment ctx ir in
-      ()
+      (* Mark each helper compiled only after its fragment loads successfully *)
+      mark_compiled_fns ctx [helper]
     ) helper_fns;
     (* Emit primary function WITH a closure global so later fragments can
        reference bind_name as a first-class value via the global-bridge path. *)
@@ -319,6 +355,8 @@ let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
       ~n:pn ~bind_name ~prev_globals:ctx.globals ~extern_fns ~types:tir.March_tir.Tir.tm_types
       primary_fn in
     let handle = compile_fragment ctx ir in
+    (* Mark primary compiled only after its fragment loads successfully *)
+    mark_compiled_fns ctx [primary_fn];
     (* Call the init function to allocate the closure and fill @repl_<bind_name> *)
     let init_name = Printf.sprintf "repl_%d_init" pn in
     let fptr = Jit.dlsym handle init_name in
@@ -342,6 +380,8 @@ let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
       ~types:tir.March_tir.Tir.tm_types
       main_fn.fn_body in
     let handle = compile_fragment ctx ir in
+    (* Mark user_fns compiled only after the fragment loads successfully *)
+    mark_compiled_fns ctx user_fns;
     let init_name = Printf.sprintf "repl_%d_init" n in
     let fptr = Jit.dlsym handle init_name in
     Jit.call_void_to_void fptr;

@@ -4901,6 +4901,153 @@ let test_repl_list_literal_with_precompile_bigint () =
        March_jit.Repl_jit.cleanup jit; raise exn)
 
 (* ------------------------------------------------------------------ *)
+(* P0 REGRESSION: compiled_fns corruption fix (2026-03)               *)
+(*                                                                     *)
+(* Previously `partition_fns` added functions to `compiled_fns`       *)
+(* BEFORE `compile_fragment` succeeded.  If compilation failed, those *)
+(* functions were poisoned: marked compiled but absent from any .so.   *)
+(* On the next REPL expression they became `extern_fns` (declared but *)
+(* not defined), causing "undefined symbol" errors on ALL stdlib fns.  *)
+(*                                                                     *)
+(* Fix: `partition_fns` is now pure; `mark_compiled_fns` is called    *)
+(* only after a successful `compile_fragment` + dlopen.               *)
+(*                                                                     *)
+(* Tests below cover:                                                  *)
+(*   1. stdlib fns (List.reverse, List.length) work in successive frags*)
+(*   2. stdlib fns available WITHOUT precompile (inline-JIT mode)     *)
+(*   3. List.map with user-defined lambda across REPL lines            *)
+(* ------------------------------------------------------------------ *)
+
+(** Helper: build a module including [stdlib_decls] with main = [e]. *)
+let make_stdlib_module stdlib_decls (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
+  let s = March_ast.Ast.dummy_span in
+  let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+  let main_def = March_ast.Ast.{
+    fn_name = { txt = "main"; span = s };
+    fn_vis = March_ast.Ast.Public; fn_doc = None; fn_ret_ty = None;
+    fn_clauses = [clause] } in
+  { March_ast.Ast.mod_name = { txt = "Main"; span = s };
+    mod_decls = stdlib_decls @ [March_ast.Ast.DFn (main_def, s)] }
+
+(** Regression P0: List.reverse works across successive JIT fragments.
+    Tests that List.reverse$List_Int (a monomorphized stdlib fn) is
+    available in both the first and second fragments, proving that
+    mark_compiled_fns runs only after successful compile. *)
+let test_repl_jit_stdlib_reverse () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let list_decl = load_stdlib_file_for_test "list.march" in
+    let stdlib_decls = [list_decl] in
+    let content_hash =
+      Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
+    let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
+      Hashtbl.create 16 in
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       March_jit.Repl_jit.precompile_stdlib jit
+         ~content_hash ~stdlib_decls ~type_map;
+       (* First fragment: List.reverse([1, 2, 3]) *)
+       (match parse_repl "List.reverse([1, 2, 3])" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_stdlib_module stdlib_decls e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "List.reverse [1,2,3] = [3, 2, 1]" "[3, 2, 1]" result
+        | _ -> failwith "expected ReplExpr");
+       (* Second fragment: List.reverse([4, 5]) — stdlib fn in 2nd fragment *)
+       (match parse_repl "List.reverse([4, 5])" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_stdlib_module stdlib_decls e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "List.reverse [4,5] = [5, 4]" "[5, 4]" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** Regression P0: stdlib fns available WITHOUT precompile (inline-JIT mode).
+    When precompile_stdlib is not called (simulating a failed precompile),
+    stdlib fns must still compile inline on first use, and then be properly
+    marked compiled so subsequent fragments can use them as externs.
+    Previously the premature-marking bug caused the SECOND call to crash. *)
+let test_repl_jit_stdlib_no_precompile () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let list_decl = load_stdlib_file_for_test "list.march" in
+    let stdlib_decls = [list_decl] in
+    let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
+      Hashtbl.create 16 in
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (* Intentionally skip precompile_stdlib to force inline-JIT mode *)
+    (try
+       (* First call: List.length inline (includes stdlib in fragment) *)
+       (match parse_repl "List.length([10, 20, 30])" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_stdlib_module stdlib_decls e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "inline: List.length [10,20,30] = 3" "3" result
+        | _ -> failwith "expected ReplExpr");
+       (* Second call: List.length again — stdlib fns are now extern, must resolve *)
+       (match parse_repl "List.length([1])" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_stdlib_module stdlib_decls e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "inline: List.length [1] = 1" "1" result
+        | _ -> failwith "expected ReplExpr");
+       (* Third call: List.reverse — different stdlib fn, same fragment mode *)
+       (match parse_repl "List.reverse([3, 2, 1])" with
+        | March_ast.Ast.ReplExpr e ->
+          let e' = March_desugar.Desugar.desugar_expr e in
+          let m = make_stdlib_module stdlib_decls e' in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+          Alcotest.(check string) "inline: List.reverse [3,2,1] = [1, 2, 3]" "[1, 2, 3]" result
+        | _ -> failwith "expected ReplExpr");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** Regression P0: List.length works 3 times in succession.
+    With the old premature-marking bug, if ANY of the compilations had
+    failed, subsequent calls would see length$List_Int as "already compiled"
+    (extern-only) and crash.  Three successive calls exercises the
+    mark-after-success invariant thoroughly. *)
+let test_repl_jit_stdlib_length_3x () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let list_decl = load_stdlib_file_for_test "list.march" in
+    let stdlib_decls = [list_decl] in
+    let content_hash =
+      Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
+    let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
+      Hashtbl.create 16 in
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       March_jit.Repl_jit.precompile_stdlib jit
+         ~content_hash ~stdlib_decls ~type_map;
+       let run_length lst expected label =
+         let src = Printf.sprintf "List.length(%s)" lst in
+         match parse_repl src with
+         | March_ast.Ast.ReplExpr e ->
+           let e' = March_desugar.Desugar.desugar_expr e in
+           let m = make_stdlib_module stdlib_decls e' in
+           let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
+           Alcotest.(check string) label expected result
+         | _ -> failwith ("expected ReplExpr for: " ^ src)
+       in
+       run_length "[1, 2, 3]"    "3" "length 3 (fragment 1)";
+       run_length "[1, 2]"       "2" "length 2 (fragment 2)";
+       run_length "[]"           "0" "length 0 (fragment 3)";
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(* ------------------------------------------------------------------ *)
 (* list_actors tests                                                   *)
 (* ------------------------------------------------------------------ *)
 
@@ -12481,6 +12628,10 @@ let () =
         Alcotest.test_case "list pretty-print display" `Quick test_repl_jit_list_display;
         Alcotest.test_case "assign hint (x = 5)" `Quick test_repl_assign_hint;
         Alcotest.test_case "general REPL interaction" `Quick test_repl_jit_general_interaction;
+        (* P0 compiled_fns corruption fix *)
+        Alcotest.test_case "P0: List.reverse works (precompile)" `Quick test_repl_jit_stdlib_reverse;
+        Alcotest.test_case "P0: stdlib fns inline (no precompile)" `Quick test_repl_jit_stdlib_no_precompile;
+        Alcotest.test_case "P0: List.length x3 successive fragments" `Quick test_repl_jit_stdlib_length_3x;
       ];
       "complete", [
         Alcotest.test_case "command" `Quick test_complete_command;

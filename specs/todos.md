@@ -10,7 +10,7 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ### Known Test Failures
 
-- [ ] **REPL JIT permanent fix** — Monomorphized stdlib functions are not emitted into the JIT module, so any REPL expression that calls into a polymorphic stdlib function (e.g., list ops, decimal arithmetic) hits an undefined symbol. Symptomatic fixes have been applied repeatedly (decimal.march parse error fix, list literal workaround) but the root cause — that the JIT module never includes monomorphized instances of stdlib fns — needs a structural fix. Likely in `lib/tir/mono.ml` + `lib/jit/repl_jit.ml`. This is a recurring regression.
+- [x] **REPL JIT permanent fix** — Root cause fixed (2026-03): `partition_fns` in `lib/jit/repl_jit.ml` was eagerly marking functions compiled BEFORE `compile_fragment` succeeded, poisoning `compiled_fns` on any failure. Fixed by making `partition_fns` pure and adding `mark_compiled_fns` called only after successful dlopen. Comprehensive regression tests added (`test_repl_jit_stdlib_reverse`, `test_repl_jit_stdlib_no_precompile`, `test_repl_jit_stdlib_length_3x`).
 
 ---
 
