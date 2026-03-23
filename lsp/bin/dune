@@ -1,0 +1,5 @@
+(executable
+ (name main)
+ (public_name march-lsp)
+ (package march-lsp)
+ (libraries march_lsp_lib linol-lwt lwt lwt.unix))

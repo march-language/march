@@ -1,0 +1,13 @@
+(test
+ (name test_lsp)
+ (libraries
+  march_ast
+  march_parser
+  march_lexer
+  march_desugar
+  march_typecheck
+  march_errors
+  march_lsp_lib
+  linol.lsp
+  alcotest
+  str))

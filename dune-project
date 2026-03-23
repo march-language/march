@@ -23,3 +23,16 @@
   (qcheck-core (>= 0.91))
   (qcheck-alcotest (>= 0.91))
   (notty (>= 0.2.3))))
+
+(package
+ (name march-lsp)
+ (synopsis "Language Server Protocol server for the March language")
+ (description "An LSP server providing diagnostics, hover types, go-to-definition, completion, inlay hints, and March-specific features (interface navigation, actor analysis, linear type tracking) for the March programming language.")
+ (depends
+  (ocaml (>= 5.3.0))
+  (dune (>= 3.0))
+  (march (= :version))
+  (linol (>= 0.10))
+  (linol-lwt (>= 0.10))
+  (lsp (>= 1.20.0))
+  (lwt (>= 5.0))))
