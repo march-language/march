@@ -25,6 +25,16 @@
   (notty (>= 0.2.3))))
 
 (package
+ (name forge)
+ (synopsis "The March package manager and build tool")
+ (description "A build tool and package manager for the March programming language")
+ (depends
+  (ocaml (>= 5.3.0))
+  (dune (>= 3.0))
+  (cmdliner (>= 1.3.0))
+  (alcotest (>= 1.7.0))))
+
+(package
  (name march-lsp)
  (synopsis "Language Server Protocol server for the March language")
  (description "An LSP server providing diagnostics, hover types, go-to-definition, completion, inlay hints, and March-specific features (interface navigation, actor analysis, linear type tracking) for the March programming language.")
