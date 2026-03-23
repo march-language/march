@@ -18,19 +18,9 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 - ✅ **Implement `forge`** — Implemented as `forge/` package. Commands: `forge new`, `forge build`, `forge run`, `forge test`, `forge format`, `forge interactive`/`i`, `forge deps`, `forge clean`. Template scaffolding generates valid March code (PascalCase module names, `do/end` fn bodies, `println` builtin). 15 tests in `forge/test/test_forge.ml`.
 
-### Language: Application Entry Point
-
-- ✅ **Implement `app` entry point** — Spec written at `specs/application_spec.md`. Introduces a declarative `app` entry point for long-running supervised systems, distinct from `main()`. Implemented: `APP`/`ON_START`/`ON_STOP` lexer tokens; `DApp`/`app_def` AST node (with `app_on_start`/`app_on_stop` hooks); parser rule `app_decl`; desugar pass converts `DApp` → `__app_init__` function (with type annotation ensuring body returns `SupervisorSpec`); mutual-exclusivity check (`main` + `app` conflict → compile error); `spawn_from_spec` in eval; `run_module` dispatches on `__app_init__`; signal handlers for SIGTERM/SIGINT; graceful shutdown (reverse start order); process registry (`whereis`/`whereis_bang`); dynamic supervisors; named children; `on_start`/`on_stop` lifecycle hooks. Tests: `app` group (8), `shutdown` group (6), `registry` group (6), `dynamic_supervisor` group (7), `spec_construction` group (2), `app_shutdown` group (16) in `test_march.ml`.
-
 ---
 
 ## P2 — Important / Near-Term
-
-### Stdlib: HAMT Persistent Data Structures
-
-- ✅ **HAMT engine for Map/Set** — `stdlib/hamt.march` (generic HAMT engine), `stdlib/map.march` rewritten with HAMT internals, `stdlib/set.march` rewritten with HAMT internals, `stdlib/array.march` added (persistent vector backed by 32-way trie). 26 new tests (16 Set + 10 Array). All 872 tests pass.
-
-### REPL Quality
 
 ### Compiler: Type System
 
@@ -51,7 +41,6 @@ This file tracks everything that still needs to get done. Organized by priority 
 ### Testing
 
 - ✅ **Actor compilation tests** — 8 new tests in `actor_compile` group: dispatch emitted, spawn fn emitted, handlers emitted, supervisor registers, monitor emitted, link emitted, multi-actor no crash, run_scheduler in main. All verify LLVM IR output of compiled actor programs.
-- ✅ **Cross-language benchmarks** — `bench/elixir/`, `bench/ocaml/`, `bench/rust/` contain idiomatic implementations of fib(40), binary-trees(15), tree-transform(depth=20×100), and list-ops(1M). `bench/run_benchmarks.sh` compiles all four languages and reports median/min/max over 10 runs. Results in `bench/RESULTS.md`: FBIP delivers 7.5–19× speedup over OCaml/Rust on tree-transform; March ties Rust on fib; OCaml wins binary-trees (generational GC); Rust wins list-ops (iterator fusion).
 
 ---
 
@@ -64,7 +53,6 @@ This file tracks everything that still needs to get done. Organized by priority 
 ### Compiler Backend
 
 - [ ] **Query-based/demand-driven compiler architecture** — Current pipeline is linear (parse → desugar → typecheck → eval/TIR). Design goal is a query-based architecture (like `rustc`'s `salsa`) for fine-grained incremental recompilation. Deferred post-v1.
-- ✅ **Multi-party session types** — MPST with choreographies implemented: `SMSend`/`SMRecv` role-annotated session type constructors; projection of global choreography to each role's local type; mergeability for non-chooser roles in `ProtoChoice`; `MPST.new`/`MPST.send`/`MPST.recv`/`MPST.close` type-checked at compile time; runtime pairwise queue routing for N-party sessions; 21 new tests.
 - [ ] **Constraint solver for type-level naturals** — Currently `TNat 1 + TNat 2` does not simplify to `TNat 3`. Full constraint solving for type-level arithmetic would enable richer dimension-checked types.
 - [ ] **Row polymorphism** — Record operations on types with unknown record shapes. Would enable `e.field` when `e : TVar` to constrain the record shape rather than return a fresh var.
 
@@ -77,8 +65,12 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ## Done (recently completed)
 
+- ✅ **`app` entry point (Phase 1 interpreter)** — `APP`/`ON_START`/`ON_STOP` lexer tokens; `DApp` AST node; `app_decl` parser rule; desugar converts `DApp` → `__app_init__` function with `SupervisorSpec` return type annotation; mutual-exclusivity check; `spawn_from_spec`; SIGTERM/SIGINT handlers; graceful shutdown; process registry (`whereis`/`whereis_bang`); dynamic supervisors; named children; `on_start`/`on_stop` lifecycle hooks. 45 tests across 6 groups.
+- ✅ **HAMT engine for Map/Set + persistent Array** — `stdlib/hamt.march` (generic 32-way HAMT engine); `stdlib/map.march` rewritten with HAMT; `stdlib/set.march` rewritten with HAMT; `stdlib/array.march` added (persistent vector, 32-way trie + tail buffer, O(1) amortized push/pop). 26 new tests.
 - ✅ **`tap>` async value inspector** — Clojure `tap>` model: `tap` builtin (∀a. a → a) sends values to a thread-safe global tap bus (Mutex + Queue in `eval.ml`); REPL drains after each expression and displays tapped values in orange in TUI pane and as `tap> value` in simple mode. Type registered in typecheck `base_env`. 6 tests in `tap` group.
 - ✅ **REPL/compiler parity enforcement** — Added `check_parity` helper that runs March expressions through both interpreter (`repl_eval_exprs`) and JIT (`run_expr`) and asserts identical output. New `repl_compiler_parity` test group with 5 tests (basic arith, bool ops, string interp, closures, if/else). JIT tests skip gracefully when clang is unavailable. Approach documented inline.
+- ✅ **Cross-language benchmarks** — `bench/elixir/`, `bench/ocaml/`, `bench/rust/` contain idiomatic implementations of fib(40), binary-trees(15), tree-transform(depth=20×100), and list-ops(1M). `bench/run_benchmarks.sh` compiles all four languages and reports median/min/max over 10 runs. Results in `bench/RESULTS.md`: FBIP delivers 7.5–19× speedup over OCaml/Rust on tree-transform; March ties Rust on fib; OCaml wins binary-trees (generational GC); Rust wins list-ops (iterator fusion).
+- ✅ **Multi-party session types (MPST)** — `SMSend(role, T, S)` / `SMRecv(role, T, S)` role-annotated session type constructors; `project_steps` projects global choreography to each role's local type; MPST mergeability check for non-chooser roles in `ProtoChoice`; `MPST.new`/`MPST.send`/`MPST.recv`/`MPST.close` all type-checked at compile time; runtime pairwise queue routing (N*(N-1) directed queues); 21 new tests.
 - ✅ **REPL JIT permanent fix** — `partition_fns` in `lib/jit/repl_jit.ml` was eagerly marking functions compiled BEFORE `compile_fragment` succeeded, poisoning `compiled_fns` on any failure. Fixed by making `partition_fns` pure and adding `mark_compiled_fns` called only after successful dlopen. Regression tests: `test_repl_jit_stdlib_reverse`, `test_repl_jit_stdlib_no_precompile`, `test_repl_jit_stdlib_length_3x`.
 - ✅ **5 new LSP features** — Doc-string hover, find references (`textDocument/references`), rename symbol (`textDocument/rename`), signature help (`textDocument/signatureHelp`), code actions (make-linear quickfix, pattern exhaustion quickfix). 27 new tests; 84 total LSP tests.
 - ✅ **Epoch-based capability revocation** — `revoke_cap(cap)` + revocation table; VCap handling in ESend; C runtime `march_revoke_cap`/`march_is_cap_valid`; 5 new supervision phase3 tests

@@ -188,7 +188,7 @@ march/
 │   ├── websocket.march      # 52 lines: WebSocket types and frame operations
 │   └── iterable.march       # 184 lines: map/filter/fold/take/drop/zip/enumerate/flat_map/any/all/find/count
 ├── test/
-│   ├── test_march.ml         # 812 tests (exhaustiveness/LSP/opaque/actor handler tests)
+│   ├── test_march.ml         # 912 tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, etc.)
 │   ├── test_cas.ml           # 41 tests (scc, pipeline, def_id)
 │   ├── test_jit.ml           # 1 test (dlopen round-trip)
 │   ├── test_fmt.ml           # 23 tests (formatter round-trip)
@@ -271,7 +271,7 @@ These are JIT-mode REPL tests that require `clang` to compile `.so` fragments. A
 ## Resolved Open Questions
 
 - **Compilation target**: LLVM
-- **MPST scope**: Binary session types for v1, multi-party deferred
+- **MPST scope**: Multi-party session types implemented (N≥3 participants, pairwise queue routing)
 - **Stdlib scope**: "Some batteries" — collections, strings, IO, Result/Option, Decimal, basic math, actors/messaging
 - **GC strategy**: Stratified model — see `specs/gc_design.md`
 - **Orphan instances**: Forbidden
@@ -303,9 +303,9 @@ These are JIT-mode REPL tests that require `clang` to compile `.so` fragments. A
 5. ~~**`llc` / `clang` invocation from compiler**~~ ✓ — `march --compile` calls clang automatically; `ensure_runtime_so()` pre-compiles runtime to cached `.so`.
 6. ~~**Type-qualified constructor names**~~ ✓ — `build_ctor_info` keyed by `(type_name, ctor_name)` pairs.
 7. ~~**Atomic refcounting**~~ ✓ — C11 atomics in `march_runtime.c`.
-8. **Actor compilation tests** — need `dune runtest`-level tests for compiled actor programs.
+8. ~~**Actor compilation tests**~~ ✓ — 8 tests in `actor_compile` group verifying LLVM IR for actor programs.
 9. ~~**HAMT implementation**~~ ✓ — `stdlib/hamt.march` + HAMT-backed `Map`/`Set` + persistent `Array`; 26 new tests.
-10. **LSP feature improvements** — 5 new features; spec in `specs/plans/2026-03-23-lsp-feature-improvements.md`.
+10. ~~**LSP feature improvements**~~ ✓ — 5 new features merged; 84 LSP tests total.
 
 ### Frontend / Ergonomics
 1. ~~**Fix REPL JIT list literal**~~ — 8 repl_jit failures remain (see Known Failures).
@@ -316,7 +316,7 @@ These are JIT-mode REPL tests that require `clang` to compile `.so` fragments. A
 6. ~~**Multi-level use paths**~~ ✓ — done.
 7. ~~**Merge Standard Interfaces branch**~~ ✓ — merged.
 8. ~~**Merge LSP branch**~~ ✓ — merged (57-test suite).
-9. **`tap>` async value inspector** — remaining REPL quality gap.
+9. ~~**`tap>` async value inspector**~~ ✓ — done (`tap` builtin, thread-safe bus, REPL drains after each eval).
 10. ~~**`app` entry point**~~ ✓ — done (Phase 1 interpreter: parser, desugar, typecheck annotation, eval, shutdown, registry, dynamic supervisors).
 
 ## LLVM Codegen: End-to-End Compilation (2026-03-20)
