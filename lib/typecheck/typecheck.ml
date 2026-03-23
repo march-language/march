@@ -219,6 +219,45 @@ let rec pp_ty ?(parens = false) t =
     | TChan r -> "Chan(" ^ pp_session_ty !r ^ ")"
   in s
 
+(** Pretty-print a type with line-wrapping.
+    If the flat representation fits within [width] chars, return it unchanged.
+    Otherwise indent arguments across multiple lines for readability. *)
+and pp_ty_pretty ?(indent = 0) ?(width = 60) t =
+  let flat = pp_ty t in
+  if String.length flat <= width - indent then flat
+  else
+    match repr t with
+    | TCon (name, (_::_ as args)) ->
+      let pad = String.make (indent + 2) ' ' in
+      let close_pad = String.make indent ' ' in
+      let formatted = List.map (pp_ty_pretty ~indent:(indent + 2) ~width) args in
+      name ^ "(\n" ^ pad ^ String.concat (",\n" ^ pad) formatted ^ "\n" ^ close_pad ^ ")"
+    | TRecord ((_::_) as flds) ->
+      let pad = String.make (indent + 2) ' ' in
+      let close_pad = String.make indent ' ' in
+      let fs = List.map (fun (n, t) ->
+        n ^ " : " ^ pp_ty_pretty ~indent:(indent + String.length n + 3) ~width t) flds in
+      "{\n" ^ pad ^ String.concat (",\n" ^ pad) fs ^ "\n" ^ close_pad ^ "}"
+    | TTuple ((_::_) as ts) ->
+      let pad = String.make (indent + 2) ' ' in
+      let close_pad = String.make indent ' ' in
+      let formatted = List.map (pp_ty_pretty ~indent:(indent + 2) ~width) ts in
+      "(\n" ^ pad ^ String.concat (",\n" ^ pad) formatted ^ "\n" ^ close_pad ^ ")"
+    | _ -> flat
+
+(** Find which argument of a type constructor differs between two types
+    of the same constructor. Returns (1-based index, expected, found) for
+    the first differing argument, or None if no structural difference found. *)
+and find_arg_mismatch name args1 args2 =
+  let rec aux i = function
+    | [], [] -> None
+    | t1 :: rest1, t2 :: rest2 ->
+      if pp_ty t1 = pp_ty t2 then aux (i + 1) (rest1, rest2)
+      else Some (i, name, t1, t2)
+    | _ -> None
+  in
+  aux 1 (args1, args2)
+
 and pp_session_ty = function
   | SSend (t, s)  -> Printf.sprintf "Send(%s, %s)" (pp_ty t) (pp_session_ty s)
   | SRecv (t, s)  -> Printf.sprintf "Recv(%s, %s)" (pp_ty t) (pp_session_ty s)
@@ -919,17 +958,60 @@ let base_env errors type_map =
    §10  Unification
    ================================================================= *)
 
+(** Format a type for display in an error message.
+    Uses pretty-printing with line-wrapping for long types. *)
+let format_ty_for_error t =
+  let flat = pp_ty t in
+  if String.length flat > 50 then
+    "\n    " ^ String.concat "\n    " (String.split_on_char '\n' (pp_ty_pretty ~indent:4 ~width:60 t))
+  else "`" ^ flat ^ "`"
+
 (** Report a type mismatch with a conversational Elm-style message. *)
 let report_mismatch env ~span ~reason expected found =
+  (* Build headline, using pretty-printing for long types *)
+  let exp_str = format_ty_for_error expected in
+  let fnd_str = format_ty_for_error found in
   let headline =
-    render_parts
-      [ MPText "I expected "; MPType expected;
-        MPText " but found "; MPType found; MPText "." ]
+    if String.length (pp_ty expected) > 50 || String.length (pp_ty found) > 50 then
+      Printf.sprintf "I expected:\n    %s\nbut found:\n    %s"
+        (String.concat "\n    " (String.split_on_char '\n' (pp_ty_pretty ~indent:4 ~width:60 expected)))
+        (String.concat "\n    " (String.split_on_char '\n' (pp_ty_pretty ~indent:4 ~width:60 found)))
+    else
+      render_parts
+        [ MPText "I expected "; MPText exp_str;
+          MPText " but found "; MPText fnd_str; MPText "." ]
   in
   let why_note =
     match reason with
     | None   -> []
     | Some r -> [ string_of_reason r ]
+  in
+  (* Contextual hint: when both types share the same constructor but differ
+     in one argument, identify which argument mismatches. *)
+  let mismatch_note =
+    match repr expected, repr found with
+    | TCon (name1, args1), TCon (name2, args2)
+      when name1 = name2 && List.length args1 = List.length args2 ->
+      (match find_arg_mismatch name1 args1 args2 with
+       | Some (i, cname, exp_arg, fnd_arg) ->
+         let ordinal = match i with 1 -> "1st" | 2 -> "2nd" | 3 -> "3rd"
+           | n -> string_of_int n ^ "th" in
+         [ Printf.sprintf "The %s argument of `%s` mismatches: expected `%s` but got `%s`."
+             ordinal cname (pp_ty exp_arg) (pp_ty fnd_arg) ]
+       | None -> [])
+    | TRecord flds1, TRecord flds2 ->
+      (* Find first field that differs *)
+      let notes = List.filter_map (fun (name, t1) ->
+        match List.assoc_opt name flds2 with
+        | Some t2 when pp_ty t1 <> pp_ty t2 ->
+          Some (Printf.sprintf "Field `%s` mismatches: expected `%s` but got `%s`."
+            name (pp_ty t1) (pp_ty t2))
+        | None ->
+          Some (Printf.sprintf "Field `%s` is present in the expected type but missing in the found type." name)
+        | _ -> None) flds1
+      in
+      (match notes with n :: _ -> [n] | [] -> [])
+    | _ -> []
   in
   let labels =
     match reason with
@@ -943,7 +1025,7 @@ let report_mismatch env ~span ~reason expected found =
   in
   Err.report env.errors
     { Err.severity = Error; span; message = headline;
-      labels; notes = why_note }
+      labels; notes = why_note @ mismatch_note }
 
 (** Structural equality for session types (used by [unify] for [TChan] cases). *)
 let rec session_ty_equal s1 s2 =

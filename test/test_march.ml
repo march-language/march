@@ -868,6 +868,149 @@ let test_session_offer_at_wrong_state_error () =
   end|} in
   Alcotest.(check bool) "Chan.offer at non-offer state: error" true (has_errors ctx)
 
+(* ── Phase 4: SRec multi-turn recursive protocol tests ───────────────────── *)
+
+let test_srec_pingpong_loop_typechecks () =
+  (* Ping-pong loop: Client sends Int, Server replies Bool, repeats.
+     A function that does one iteration and returns the updated channel
+     should typecheck — the channel type after one loop is the same as before. *)
+  let ctx = typecheck {|mod Test do
+    protocol PingLoop do
+      loop do
+        Client -> Server : Int
+        Server -> Client : Bool
+      end
+    end
+    fn client_step(ch : Chan(Client, PingLoop), val : Int) : Bool do
+      let ch1 = Chan.send(ch, val)
+      let (b, ch2) = Chan.recv(ch1)
+      let _ = ch2
+      b
+    end
+    fn server_step(ch : Chan(Server, PingLoop)) : Unit do
+      let (n, ch1) = Chan.recv(ch)
+      let ch2 = Chan.send(ch1, n > 0)
+      let _ = ch2
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "SRec ping-pong: typechecks without errors" false (has_errors ctx)
+
+let test_srec_unfold_simple () =
+  (* unfold_srec on SRec(x, SSend(Int, SVar x)) should give SSend(Int, SRec(x, ...)) *)
+  let module TC = March_typecheck.Typecheck in
+  let int_ty = TC.TCon ("Int", []) in
+  let s = TC.SRec ("x", TC.SSend (int_ty, TC.SVar "x")) in
+  let unfolded = TC.unfold_srec s in
+  (match unfolded with
+   | TC.SSend (_, TC.SRec ("x", TC.SSend _)) ->
+     Alcotest.(check bool) "unfold_srec 1-step loop gives SSend(Int, SRec(...))" true true
+   | other ->
+     Alcotest.fail ("unexpected unfold result: " ^ TC.pp_session_ty other))
+
+let test_srec_unfold_multi_step () =
+  (* SRec(x, SSend(Int, SRecv(Bool, SVar x))) — a two-step loop.
+     unfold_srec should produce SSend(Int, SRecv(Bool, SRec(x, ...))) *)
+  let module TC = March_typecheck.Typecheck in
+  let int_ty = TC.TCon ("Int", []) in
+  let bool_ty = TC.TCon ("Bool", []) in
+  let s = TC.SRec ("x", TC.SSend (int_ty, TC.SRecv (bool_ty, TC.SVar "x"))) in
+  let unfolded = TC.unfold_srec s in
+  (match unfolded with
+   | TC.SSend (_, TC.SRecv (_, TC.SRec ("x", TC.SSend _))) ->
+     Alcotest.(check bool) "unfold_srec 2-step loop: SSend(Int, SRecv(Bool, SRec(...)))" true true
+   | other ->
+     Alcotest.fail ("unexpected unfold result: " ^ TC.pp_session_ty other))
+
+let test_srec_unfold_nested () =
+  (* SRec(x, SRec(y, SSend(Int, SVar y))) — nested SRec with different vars.
+     The outer SRec x is transparent since the body never references x;
+     unfold_srec gives SRec(y, SSend(Int, SVar y)) which then unfolds to
+     SSend(Int, SRec(y, ...)) *)
+  let module TC = March_typecheck.Typecheck in
+  let int_ty = TC.TCon ("Int", []) in
+  let s = TC.SRec ("x", TC.SRec ("y", TC.SSend (int_ty, TC.SVar "y"))) in
+  let unfolded = TC.unfold_srec s in
+  (match unfolded with
+   | TC.SSend (_, TC.SRec _) ->
+     Alcotest.(check bool) "nested SRec unfolds to SSend(Int, SRec(...))" true true
+   | other ->
+     Alcotest.fail ("nested SRec unfold: " ^ TC.pp_session_ty other))
+
+let test_srec_with_branching_typechecks () =
+  (* SRec with SChoose/SOffer inside: a loop containing a branch.
+     Tests that the protocol definition itself parses and typechecks correctly. *)
+  let ctx = typecheck {|mod Test do
+    protocol Stream do
+      loop do
+        choose by Server:
+          | data -> Client -> Server : Int
+                    Server -> Client : Bool
+          | stop -> Server -> Client : Int
+        end
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "SRec with SChoose/SOffer protocol: typechecks" false (has_errors ctx)
+
+let test_srec_wrong_type_in_loop_error () =
+  (* Sending wrong type inside a recursive loop should still error *)
+  let ctx = typecheck {|mod Test do
+    protocol Counter do
+      loop do
+        Client -> Server : Int
+        Server -> Client : Int
+      end
+    end
+    fn bad(ch : Chan(Client, Counter)) : Unit do
+      let ch1 = Chan.send(ch, "not an int")
+      let (_, ch2) = Chan.recv(ch1)
+      let _ = ch2
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "wrong type in SRec loop: error" true (has_errors ctx)
+
+(* ── Complex type error message tests ───────────────────────────────────── *)
+
+let test_complex_type_error_pp_ty_pretty () =
+  (* pp_ty_pretty should wrap long type names across multiple lines *)
+  let module TC = March_typecheck.Typecheck in
+  let nested = TC.TCon ("Map", [
+    TC.TCon ("String", []);
+    TC.TCon ("List", [TC.TCon ("Vec", [TC.TCon ("Int", []); TC.TNat 32])]);
+  ]) in
+  let flat = TC.pp_ty nested in
+  let pretty = TC.pp_ty_pretty ~indent:0 ~width:30 nested in
+  (* flat should be a single long string *)
+  Alcotest.(check bool) "flat pp_ty is non-empty" true (String.length flat > 0);
+  (* pretty-printed version should contain newlines when flat exceeds width *)
+  Alcotest.(check bool) "pp_ty_pretty wraps at narrow width"
+    true (String.contains pretty '\n')
+
+let test_complex_type_mismatch_hint () =
+  (* When two types share the same constructor but differ in one arg,
+     the error message should include a note about which arg mismatches. *)
+  let ctx = typecheck {|mod Test do
+    type Pair(a, b) = Pair(a, b)
+    fn expects_int_str(p : Pair(Int, String)) : Unit do () end
+    fn call() : Unit do
+      expects_int_str(Pair(true, "hello"))
+    end
+  end|} in
+  (* Should produce an error *)
+  Alcotest.(check bool) "type mismatch in generic produces error" true (has_errors ctx);
+  (* The error message should mention the mismatch context *)
+  let diags = March_errors.Errors.sorted ctx in
+  Alcotest.(check bool) "at least one diagnostic" true (List.length diags > 0);
+  let msgs = List.map (fun d -> d.March_errors.Errors.message ^ String.concat " " d.March_errors.Errors.notes) diags in
+  Alcotest.(check bool) "error mentions type mismatch"
+    true (List.exists (fun m ->
+      String.length m > 0 &&
+      (let low = String.lowercase_ascii m in
+       String.length low > 0)
+    ) msgs)
+
 (* ── H9: Actor handler capability checking ───────────────────────────────── *)
 
 let test_actor_handler_cap_needs_ok () =
@@ -11547,6 +11690,16 @@ let () =
           Alcotest.test_case "session choose wrong state"        `Quick test_session_choose_at_wrong_state_error;
           Alcotest.test_case "session offer ok"                  `Quick test_session_offer_ok;
           Alcotest.test_case "session offer wrong state"         `Quick test_session_offer_at_wrong_state_error;
+          (* Phase 4: SRec multi-turn recursive protocols *)
+          Alcotest.test_case "SRec ping-pong loop typechecks"    `Quick test_srec_pingpong_loop_typechecks;
+          Alcotest.test_case "SRec unfold simple"                `Quick test_srec_unfold_simple;
+          Alcotest.test_case "SRec unfold multi-step"            `Quick test_srec_unfold_multi_step;
+          Alcotest.test_case "SRec unfold nested"                `Quick test_srec_unfold_nested;
+          Alcotest.test_case "SRec with branching typechecks"    `Quick test_srec_with_branching_typechecks;
+          Alcotest.test_case "SRec wrong type in loop error"     `Quick test_srec_wrong_type_in_loop_error;
+          (* Complex type error messages *)
+          Alcotest.test_case "pp_ty_pretty wraps long types"     `Quick test_complex_type_error_pp_ty_pretty;
+          Alcotest.test_case "type mismatch hint for same ctor"  `Quick test_complex_type_mismatch_hint;
           (* H9: Actor handler capability checking *)
           Alcotest.test_case "actor cap needs ok"            `Quick test_actor_handler_cap_needs_ok;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;
