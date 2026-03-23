@@ -174,7 +174,9 @@ march/
 │   ├── seq.march            # 251 lines: lazy church-encoded fold sequences
 │   ├── sort.march           # 615 lines: Timsort, Introsort, AlphaDev (n≤8)
 │   ├── enum.march           # 314 lines: higher-level list utilities
-│   ├── map.march            # 366 lines: AVL tree Map(k,v)
+│   ├── hamt.march           # HAMT engine (generic 32-way trie, O(1) amortized)
+│   ├── map.march            # HAMT-backed Map(k,v) — O(1) amortized lookup/insert/delete
+│   ├── array.march          # Persistent vector (32-way trie + tail buffer)
 │   ├── path.march           # 91 lines: pure path manipulation
 │   ├── file.march           # 139 lines: Result-based file I/O
 │   ├── dir.march            # 50 lines: directory operations
@@ -202,8 +204,8 @@ march/
 ## Current State (as of 2026-03-23)
 
 - **Builds clean**
-- **1069 tests across 8 suites; 0 failures** (app entry point + spec construction tests):
-  - `test_march.exe`: 854 tests, all passing (app entry point: app keyword/parser/desugar/typecheck/eval; spec_construction group; type annotation on app body; graceful shutdown; registry; dynamic supervisors)
+- **1095 tests across 8 suites; 0 failures** (app entry point + HAMT Map/Set/Array + REPL JIT fix + 5 new LSP features):
+  - `test_march.exe`: 880 tests, all passing (app entry point: app keyword/parser/desugar/typecheck/eval; spec_construction group; HAMT Map/Set/Array: 26 new tests; REPL JIT fix)
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests, passing (formatter round-trip)
@@ -235,7 +237,8 @@ march/
 - **SRec recursive protocol unfolding** — `unfold_srec` in typecheck.ml; recursive session types handled; 6 new multi-turn tests (ping-pong loop, nested SRec, SChoose inside SRec, wrong type in loop)
 - **Type error pretty-printing** — `pp_ty_pretty` wraps long type expressions at 60 chars with indented args; `report_mismatch` shows multi-line format for types >50 chars; `find_arg_mismatch` adds contextual notes identifying which arg/field differs
 - **Forge build tool** — `forge/` package: `forge new/build/run/test/format/interactive/i/clean/deps`; scaffold generates valid March (PascalCase module names, `do/end` fn bodies, `println` builtin, test file with `main()`); 15 tests in `forge/test/test_forge.ml`
-- **`Set` module** — `stdlib/set.march` (AVL tree-backed, full API)
+- **HAMT persistent data structures** — `stdlib/hamt.march` (generic 32-way HAMT engine); `stdlib/map.march` rewritten with HAMT (O(1) amortized); `stdlib/set.march` rewritten with HAMT; `stdlib/array.march` added (persistent vector, 32-way trie + tail buffer, O(1) amortized push/pop). 26 new tests.
+- **`Set` module** — `stdlib/set.march` (HAMT-backed, full API: insert/remove/contains/union/intersection/difference/fold)
 - **`BigInt` / `Decimal`** — `stdlib/bigint.march`, `stdlib/decimal.march`
 - **`Iterable` interface expansion** — 184 lines in `stdlib/iterable.march`; map/filter/fold/take/drop/zip/enumerate/flat_map/any/all/find/count
 - **Property tests for Eq/Ord/Show/Hash** — QCheck2 properties (reflexivity, symmetry, transitivity, hash consistency)
@@ -298,7 +301,7 @@ These are JIT-mode REPL tests that require `clang` to compile `.so` fragments. A
 6. ~~**Type-qualified constructor names**~~ ✓ — `build_ctor_info` keyed by `(type_name, ctor_name)` pairs.
 7. ~~**Atomic refcounting**~~ ✓ — C11 atomics in `march_runtime.c`.
 8. **Actor compilation tests** — need `dune runtest`-level tests for compiled actor programs.
-9. **HAMT implementation** — replace AVL-tree `Map` with HAMT engine; spec in `specs/plans/hamt-proposal.md`.
+9. ~~**HAMT implementation**~~ ✓ — `stdlib/hamt.march` + HAMT-backed `Map`/`Set` + persistent `Array`; 26 new tests.
 10. **LSP feature improvements** — 5 new features; spec in `specs/plans/2026-03-23-lsp-feature-improvements.md`.
 
 ### Frontend / Ergonomics

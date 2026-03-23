@@ -73,6 +73,7 @@ let load_stdlib () =
       "option.march";
       "result.march";
       "list.march";
+      "hamt.march";
       "map.march";
       "math.march";
       "string.march";
@@ -90,6 +91,7 @@ let load_stdlib () =
       "http_server.march";
       "iterable.march";
       "set.march";
+      "array.march";
       "bigint.march";
       "decimal.march";
     ] in

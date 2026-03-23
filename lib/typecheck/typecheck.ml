@@ -747,6 +747,14 @@ let builtin_bindings : (string * scheme) list =
     ("int_to_float",    Mono (TArrow (t_int,   t_float)));
     ("int_max_value",   Mono (TArrow (t_unit,  t_int)));
     ("int_min_value",   Mono (TArrow (t_unit,  t_int)));
+    (* Int bitwise primitives *)
+    ("int_and",         Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    ("int_or",          Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    ("int_xor",         Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    ("int_not",         Mono (TArrow (t_int,   t_int)));
+    ("int_shl",         Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    ("int_shr",         Mono (TArrow (t_int,   TArrow (t_int, t_int))));
+    ("int_popcount",    Mono (TArrow (t_int,   t_int)));
     (* Float primitives *)
     ("float_abs",       Mono (TArrow (t_float, t_float)));
     ("float_floor",     Mono (TArrow (t_float, t_int)));

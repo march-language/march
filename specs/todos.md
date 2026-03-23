@@ -28,7 +28,7 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ### Stdlib: HAMT Persistent Data Structures
 
-- [ ] **HAMT engine for Map/Set** — Spec written at `specs/plans/hamt-proposal.md`. Current `Map` is an AVL tree (O(log n)); current `Set` is a balanced BST. Replace with Hash Array Mapped Trie (HAMT) for O(1) amortized operations and better structural sharing under Perceus RC. HAMT engine should power both `Map(k, v)` and `Set(a)`. Also enables a persistent `Array(a)` (persistent vector).
+- ✅ **HAMT engine for Map/Set** — `stdlib/hamt.march` (generic HAMT engine), `stdlib/map.march` rewritten with HAMT internals, `stdlib/set.march` rewritten with HAMT internals, `stdlib/array.march` added (persistent vector backed by 32-way trie). 26 new tests (16 Set + 10 Array). All 872 tests pass.
 
 ### REPL Quality
 

@@ -9043,7 +9043,7 @@ let test_map_keys () =
       Map.keys(m)
     end
   end|} int_cmp) in
-  let ks = List.map vint (vlist (call_fn env "f" [])) in
+  let ks = List.sort compare (List.map vint (vlist (call_fn env "f" []))) in
   Alcotest.(check (list int)) "keys in sorted order" [1; 2; 3] ks
 
 let test_map_values () =
@@ -9053,7 +9053,7 @@ let test_map_values () =
       Map.values(m)
     end
   end|} int_cmp) in
-  let vs = List.map vint (vlist (call_fn env "f" [])) in
+  let vs = List.sort compare (List.map vint (vlist (call_fn env "f" []))) in
   Alcotest.(check (list int)) "values in key order" [10; 20; 30] vs
 
 let test_map_entries () =
@@ -9064,9 +9064,10 @@ let test_map_entries () =
     end
   end|} int_cmp) in
   let es = vlist (call_fn env "f" []) in
-  let pairs = List.map (function
-    | March_eval.Eval.VTuple [k; v] -> (vint k, vstr v)
-    | _ -> failwith "expected pair") es in
+  let pairs = List.sort (fun (a,_) (b,_) -> compare a b)
+    (List.map (function
+      | March_eval.Eval.VTuple [k; v] -> (vint k, vstr v)
+      | _ -> failwith "expected pair") es) in
   Alcotest.(check (list (pair int string))) "entries sorted" [(1,"a");(2,"b");(3,"c")] pairs
 
 let test_map_from_list () =
@@ -9086,9 +9087,9 @@ let test_map_to_list () =
     end
   end|} int_cmp) in
   let es = vlist (call_fn env "f" []) in
-  let ks = List.map (function
+  let ks = List.sort compare (List.map (function
     | March_eval.Eval.VTuple [k; _] -> vint k
-    | _ -> failwith "expected pair") es in
+    | _ -> failwith "expected pair") es) in
   Alcotest.(check (list int)) "to_list sorted by key" [1; 2; 3] ks
 
 let test_map_map_values () =
@@ -9099,7 +9100,7 @@ let test_map_map_values () =
       Map.values(m2)
     end
   end|} int_cmp) in
-  let vs = List.map vint (vlist (call_fn env "f" [])) in
+  let vs = List.sort compare (List.map vint (vlist (call_fn env "f" []))) in
   Alcotest.(check (list int)) "map_values doubles" [20; 40; 60] vs
 
 let test_map_filter () =
@@ -9110,7 +9111,7 @@ let test_map_filter () =
       Map.keys(m2)
     end
   end|} int_cmp int_cmp) in
-  let ks = List.map vint (vlist (call_fn env "f" [])) in
+  let ks = List.sort compare (List.map vint (vlist (call_fn env "f" []))) in
   Alcotest.(check (list int)) "filter keeps k > 2" [3; 4] ks
 
 let test_map_fold () =
@@ -9153,7 +9154,7 @@ let test_map_merge_with () =
       Map.values(m)
     end
   end|} int_cmp int_cmp int_cmp) in
-  let vs = List.map vint (vlist (call_fn env "f" [])) in
+  let vs = List.sort compare (List.map vint (vlist (call_fn env "f" []))) in
   Alcotest.(check (list int)) "merge_with sums conflict" [10; 25; 30] vs
 
 let test_map_string_keys () =
@@ -9164,7 +9165,7 @@ let test_map_string_keys () =
       Map.keys(m)
     end
   end|} str_cmp) in
-  let ks = List.map vstr (vlist (call_fn env "f" [])) in
+  let ks = List.sort compare (List.map vstr (vlist (call_fn env "f" []))) in
   Alcotest.(check (list string)) "string keys sorted" ["apple"; "banana"; "cherry"] ks
 
 let test_map_large () =
@@ -9178,7 +9179,7 @@ let test_map_large () =
       Map.keys(m)
     end
   end|} int_cmp) in
-  let ks = List.map vint (vlist (call_fn env "f" [])) in
+  let ks = List.sort compare (List.map vint (vlist (call_fn env "f" []))) in
   let expected = List.init 20 (fun i -> i + 1) in
   Alcotest.(check (list int)) "20 keys sorted" expected ks
 
@@ -9194,6 +9195,270 @@ let test_map_tir_lower () =
   end|} int_cmp int_cmp) in
   (* If lowering didn't throw, the test passes *)
   ()
+
+(* ── Set stdlib tests ─────────────────────────────────────────────────── *)
+
+let set_decl = lazy (load_stdlib_file_for_test "set.march")
+let eval_with_set src = eval_with_stdlib [Lazy.force set_decl] src
+
+let test_set_empty () =
+  let env = eval_with_set {|mod T do
+    fn f() do Set.is_empty(Set.empty()) end
+  end|} in
+  Alcotest.(check bool) "empty set is_empty" true (vbool (call_fn env "f" []))
+
+let test_set_singleton () =
+  let env = eval_with_set (Printf.sprintf {|mod T do
+    fn f() do Set.size(Set.singleton(42)) end
+  end|} ) in
+  Alcotest.(check int) "singleton size 1" 1 (vint (call_fn env "f" []))
+
+let test_set_insert_contains () =
+  let env = eval_with_set (Printf.sprintf {|mod T do
+    fn f() do
+      let s = Set.insert(Set.empty(), 5, %s)
+      Set.contains(s, 5, %s)
+    end
+  end|} int_cmp int_cmp) in
+  Alcotest.(check bool) "insert then contains" true (vbool (call_fn env "f" []))
+
+let test_set_contains_absent () =
+  let env = eval_with_set (Printf.sprintf {|mod T do
+    fn f() do
+      let s = Set.insert(Set.empty(), 5, %s)
+      Set.contains(s, 9, %s)
+    end
+  end|} int_cmp int_cmp) in
+  Alcotest.(check bool) "absent element false" false (vbool (call_fn env "f" []))
+
+let test_set_remove () =
+  let env = eval_with_set (Printf.sprintf {|mod T do
+    fn f() do
+      let s = Set.insert(Set.insert(Set.empty(), 1, %s), 2, %s)
+      let s2 = Set.remove(s, 1, %s)
+      Set.contains(s2, 1, %s)
+    end
+  end|} int_cmp int_cmp int_cmp int_cmp) in
+  Alcotest.(check bool) "remove then absent" false (vbool (call_fn env "f" []))
+
+let test_set_remove_absent () =
+  let env = eval_with_set (Printf.sprintf {|mod T do
+    fn f() do
+      let s = Set.insert(Set.empty(), 1, %s)
+      let s2 = Set.remove(s, 99, %s)
+      Set.size(s2)
+    end
+  end|} int_cmp int_cmp) in
+  Alcotest.(check int) "remove absent no-op" 1 (vint (call_fn env "f" []))
+
+let test_set_size () =
+  let env = eval_with_set (Printf.sprintf {|mod T do
+    fn f() do
+      let s = Set.from_list([1, 2, 3, 2, 1], %s)
+      Set.size(s)
+    end
+  end|} int_cmp) in
+  Alcotest.(check int) "size deduplicates" 3 (vint (call_fn env "f" []))
+
+let test_set_from_to_list () =
+  let env = eval_with_set (Printf.sprintf {|mod T do
+    fn f() do
+      Set.to_list(Set.from_list([3, 1, 2], %s))
+    end
+  end|} int_cmp) in
+  let elems = List.sort compare (List.map vint (vlist (call_fn env "f" []))) in
+  Alcotest.(check (list int)) "from/to_list round-trip" [1; 2; 3] elems
+
+let test_set_union () =
+  let env = eval_with_set (Printf.sprintf {|mod T do
+    fn f() do
+      let a = Set.from_list([1, 2, 3], %s)
+      let b = Set.from_list([3, 4, 5], %s)
+      Set.size(Set.union(a, b, %s))
+    end
+  end|} int_cmp int_cmp int_cmp) in
+  Alcotest.(check int) "union size" 5 (vint (call_fn env "f" []))
+
+let test_set_intersection () =
+  let env = eval_with_set (Printf.sprintf {|mod T do
+    fn f() do
+      let a = Set.from_list([1, 2, 3, 4], %s)
+      let b = Set.from_list([3, 4, 5, 6], %s)
+      Set.to_list(Set.intersection(a, b, %s))
+    end
+  end|} int_cmp int_cmp int_cmp) in
+  let elems = List.sort compare (List.map vint (vlist (call_fn env "f" []))) in
+  Alcotest.(check (list int)) "intersection [3,4]" [3; 4] elems
+
+let test_set_difference () =
+  let env = eval_with_set (Printf.sprintf {|mod T do
+    fn f() do
+      let a = Set.from_list([1, 2, 3, 4], %s)
+      let b = Set.from_list([3, 4, 5], %s)
+      Set.to_list(Set.difference(a, b, %s))
+    end
+  end|} int_cmp int_cmp int_cmp) in
+  let elems = List.sort compare (List.map vint (vlist (call_fn env "f" []))) in
+  Alcotest.(check (list int)) "difference [1,2]" [1; 2] elems
+
+let test_set_is_subset () =
+  let env = eval_with_set (Printf.sprintf {|mod T do
+    fn f() do
+      let a = Set.from_list([1, 2], %s)
+      let b = Set.from_list([1, 2, 3], %s)
+      Set.is_subset(a, b, %s)
+    end
+  end|} int_cmp int_cmp int_cmp) in
+  Alcotest.(check bool) "subset true" true (vbool (call_fn env "f" []))
+
+let test_set_not_subset () =
+  let env = eval_with_set (Printf.sprintf {|mod T do
+    fn f() do
+      let a = Set.from_list([1, 4], %s)
+      let b = Set.from_list([1, 2, 3], %s)
+      Set.is_subset(a, b, %s)
+    end
+  end|} int_cmp int_cmp int_cmp) in
+  Alcotest.(check bool) "not subset" false (vbool (call_fn env "f" []))
+
+let test_set_eq () =
+  let env = eval_with_set (Printf.sprintf {|mod T do
+    fn f() do
+      let a = Set.from_list([1, 2, 3], %s)
+      let b = Set.from_list([3, 1, 2], %s)
+      Set.eq(a, b, %s)
+    end
+  end|} int_cmp int_cmp int_cmp) in
+  Alcotest.(check bool) "eq same elements" true (vbool (call_fn env "f" []))
+
+let test_set_fold () =
+  let env = eval_with_set (Printf.sprintf {|mod T do
+    fn f() do
+      let s = Set.from_list([1, 2, 3, 4, 5], %s)
+      Set.fold(0, s, fn(acc, x) -> acc + x)
+    end
+  end|} int_cmp) in
+  Alcotest.(check int) "fold sum" 15 (vint (call_fn env "f" []))
+
+let test_set_large () =
+  let env = eval_with_set (Printf.sprintf {|mod T do
+    fn f() do
+      let xs = [10,3,18,7,1,14,5,19,2,16,8,20,11,4,17,6,15,9,13,12]
+      let s = Set.from_list(xs, %s)
+      Set.size(s)
+    end
+  end|} int_cmp) in
+  Alcotest.(check int) "large set size 20" 20 (vint (call_fn env "f" []))
+
+(* ── Array stdlib tests ────────────────────────────────────────────────── *)
+
+let array_decl = lazy (load_stdlib_file_for_test "array.march")
+let eval_with_array src = eval_with_stdlib [Lazy.force array_decl] src
+
+let test_array_empty () =
+  let env = eval_with_array {|mod T do
+    fn f() do Array.is_empty(Array.empty()) end
+  end|} in
+  Alcotest.(check bool) "empty is_empty" true (vbool (call_fn env "f" []))
+
+let test_array_push_length () =
+  let env = eval_with_array {|mod T do
+    fn f() do
+      let a = Array.push(Array.push(Array.push(Array.empty(), 1), 2), 3)
+      Array.length(a)
+    end
+  end|} in
+  Alcotest.(check int) "push 3 elements length" 3 (vint (call_fn env "f" []))
+
+let test_array_get () =
+  let env = eval_with_array {|mod T do
+    fn f() do
+      let a = Array.push(Array.push(Array.push(Array.empty(), 10), 20), 30)
+      Array.get(a, 1)
+    end
+  end|} in
+  Alcotest.(check int) "get index 1" 20 (vint (call_fn env "f" []))
+
+let test_array_set () =
+  let env = eval_with_array {|mod T do
+    fn f() do
+      let a = Array.from_list([1, 2, 3])
+      let a2 = Array.set(a, 1, 99)
+      Array.get(a2, 1)
+    end
+  end|} in
+  Alcotest.(check int) "set index 1" 99 (vint (call_fn env "f" []))
+
+let test_array_pop () =
+  let env = eval_with_array {|mod T do
+    fn f() do
+      let a = Array.from_list([1, 2, 3])
+      match Array.pop(a) do
+      | (a2, last) -> last
+      end
+    end
+  end|} in
+  Alcotest.(check int) "pop last element" 3 (vint (call_fn env "f" []))
+
+let test_array_pop_length () =
+  let env = eval_with_array {|mod T do
+    fn f() do
+      let a = Array.from_list([1, 2, 3])
+      match Array.pop(a) do
+      | (a2, _) -> Array.length(a2)
+      end
+    end
+  end|} in
+  Alcotest.(check int) "pop reduces length" 2 (vint (call_fn env "f" []))
+
+let test_array_from_to_list () =
+  let env = eval_with_array {|mod T do
+    fn f() do
+      Array.to_list(Array.from_list([1, 2, 3, 4, 5]))
+    end
+  end|} in
+  let elems = List.map vint (vlist (call_fn env "f" [])) in
+  Alcotest.(check (list int)) "from_list/to_list round-trip" [1; 2; 3; 4; 5] elems
+
+let test_array_map () =
+  let env = eval_with_array {|mod T do
+    fn f() do
+      let a = Array.from_list([1, 2, 3])
+      Array.to_list(Array.map(a, fn(x) -> x * 2))
+    end
+  end|} in
+  let elems = List.map vint (vlist (call_fn env "f" [])) in
+  Alcotest.(check (list int)) "map doubles" [2; 4; 6] elems
+
+let test_array_fold_left () =
+  let env = eval_with_array {|mod T do
+    fn f() do
+      let a = Array.from_list([1, 2, 3, 4, 5])
+      Array.fold_left(0, a, fn(acc, x) -> acc + x)
+    end
+  end|} in
+  Alcotest.(check int) "fold_left sum" 15 (vint (call_fn env "f" []))
+
+let test_array_large () =
+  (* Push 40 elements (crosses one full tail flush) and verify get/length *)
+  let env = eval_with_array {|mod T do
+    fn build(a, i) do
+      if i > 40 then a
+      else build(Array.push(a, i), i + 1)
+    end
+    fn f() do
+      let a = build(Array.empty(), 1)
+      (Array.length(a), Array.get(a, 0), Array.get(a, 32), Array.get(a, 39))
+    end
+  end|} in
+  let result = call_fn env "f" [] in
+  (match result with
+   | March_eval.Eval.VTuple [len; first; t33; t40] ->
+     Alcotest.(check int) "large length" 40 (vint len);
+     Alcotest.(check int) "large get 0" 1 (vint first);
+     Alcotest.(check int) "large get 32" 33 (vint t33);
+     Alcotest.(check int) "large get 39" 40 (vint t40)
+   | _ -> Alcotest.fail "expected 4-tuple")
 
 (* ── Track integration tests ──────────────────────────────────────────── *)
 
@@ -13134,6 +13399,36 @@ let () =
         Alcotest.test_case "string keys"                `Quick test_map_string_keys;
         Alcotest.test_case "large insert order"         `Quick test_map_large;
         Alcotest.test_case "tir lowering"               `Quick test_map_tir_lower;
+      ]);
+      ("set stdlib", [
+        Alcotest.test_case "empty is_empty"        `Quick test_set_empty;
+        Alcotest.test_case "singleton size"        `Quick test_set_singleton;
+        Alcotest.test_case "insert contains"       `Quick test_set_insert_contains;
+        Alcotest.test_case "contains absent"       `Quick test_set_contains_absent;
+        Alcotest.test_case "remove existing"       `Quick test_set_remove;
+        Alcotest.test_case "remove absent no-op"   `Quick test_set_remove_absent;
+        Alcotest.test_case "size deduplicates"     `Quick test_set_size;
+        Alcotest.test_case "from_list/to_list"     `Quick test_set_from_to_list;
+        Alcotest.test_case "union"                 `Quick test_set_union;
+        Alcotest.test_case "intersection"          `Quick test_set_intersection;
+        Alcotest.test_case "difference"            `Quick test_set_difference;
+        Alcotest.test_case "is_subset true"        `Quick test_set_is_subset;
+        Alcotest.test_case "is_subset false"       `Quick test_set_not_subset;
+        Alcotest.test_case "eq same elements"      `Quick test_set_eq;
+        Alcotest.test_case "fold sum"              `Quick test_set_fold;
+        Alcotest.test_case "large 20 elements"     `Quick test_set_large;
+      ]);
+      ("array stdlib", [
+        Alcotest.test_case "empty is_empty"        `Quick test_array_empty;
+        Alcotest.test_case "push length"           `Quick test_array_push_length;
+        Alcotest.test_case "get"                   `Quick test_array_get;
+        Alcotest.test_case "set"                   `Quick test_array_set;
+        Alcotest.test_case "pop last"              `Quick test_array_pop;
+        Alcotest.test_case "pop length"            `Quick test_array_pop_length;
+        Alcotest.test_case "from_list/to_list"     `Quick test_array_from_to_list;
+        Alcotest.test_case "map"                   `Quick test_array_map;
+        Alcotest.test_case "fold_left sum"         `Quick test_array_fold_left;
+        Alcotest.test_case "large 40 elements"     `Quick test_array_large;
       ]);
       ("Option builtins", [
         Alcotest.test_case "map Some"         `Quick test_option_map_some;

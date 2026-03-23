@@ -2079,6 +2079,41 @@ let base_env : env =
   ; ("int_min_value", VBuiltin ("int_min_value", function
         | [] | [VUnit] -> VInt min_int
         | _ -> eval_error "int_min_value: no arguments"))
+    (* ---- Int bitwise primitives ---- *)
+  ; ("int_and", VBuiltin ("int_and", function
+        | [VInt a; VInt b] -> VInt (a land b)
+        | _ -> eval_error "int_and: expected two ints"))
+  ; ("int_or", VBuiltin ("int_or", function
+        | [VInt a; VInt b] -> VInt (a lor b)
+        | _ -> eval_error "int_or: expected two ints"))
+  ; ("int_xor", VBuiltin ("int_xor", function
+        | [VInt a; VInt b] -> VInt (a lxor b)
+        | _ -> eval_error "int_xor: expected two ints"))
+  ; ("int_not", VBuiltin ("int_not", function
+        | [VInt a] -> VInt (lnot a)
+        | _ -> eval_error "int_not: expected int"))
+  ; ("int_shl", VBuiltin ("int_shl", function
+        | [VInt a; VInt n] ->
+          if n < 0 || n >= 63 then eval_error "int_shl: shift out of range"
+          else VInt (a lsl n)
+        | _ -> eval_error "int_shl: expected two ints"))
+  ; ("int_shr", VBuiltin ("int_shr", function
+        | [VInt a; VInt n] ->
+          if n < 0 || n >= 63 then eval_error "int_shr: shift out of range"
+          else VInt (a lsr n)
+        | _ -> eval_error "int_shr: expected two ints"))
+  ; ("int_popcount", VBuiltin ("int_popcount", function
+        | [VInt n] ->
+          (* Count set bits in 63-bit OCaml int *)
+          let x = ref (if n < 0 then n lxor min_int else n) in
+          let c = ref 0 in
+          while !x <> 0 do
+            x := !x land (!x - 1);
+            incr c
+          done;
+          if n < 0 then VInt (!c + 1)
+          else VInt !c
+        | _ -> eval_error "int_popcount: expected int"))
 
     (* ---- Float primitives ---- *)
   ; ("float_abs", VBuiltin ("float_abs", function
