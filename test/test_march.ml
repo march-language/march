@@ -8820,6 +8820,188 @@ let test_shutdown_actor_pid_marks_dead () =
   in
   Alcotest.(check bool) "all actors dead after shutdown" true all_dead
 
+(* ── derive syntax ──────────────────────────────────────────────────────── *)
+
+let test_derive_lexes_keyword () =
+  let lexbuf = Lexing.from_string "derive" in
+  let tok = March_lexer.Lexer.token lexbuf in
+  Alcotest.(check bool) "derive keyword lexes" true
+    (match tok with March_parser.Parser.DERIVE -> true | _ -> false)
+
+let test_derive_for_keyword () =
+  let lexbuf = Lexing.from_string "for" in
+  let tok = March_lexer.Lexer.token lexbuf in
+  Alcotest.(check bool) "for keyword lexes" true
+    (match tok with March_parser.Parser.FOR -> true | _ -> false)
+
+let test_derive_parses () =
+  (* derive Eq, Show for Color should parse as DDeriving *)
+  let m = parse_module {|mod Test do
+    type Color = Red | Green | Blue
+    derive Eq, Show for Color
+  end|} in
+  let has_deriving = List.exists (function
+    | March_ast.Ast.DDeriving _ -> true
+    | _ -> false
+  ) m.March_ast.Ast.mod_decls in
+  Alcotest.(check bool) "derive parses to DDeriving" true has_deriving
+
+let test_derive_expands_to_impl () =
+  (* After desugar, DDeriving should become DImpl *)
+  let m = parse_and_desugar {|mod Test do
+    type Color = Red | Green | Blue
+    derive Eq, Show for Color
+  end|} in
+  let impl_count = List.length (List.filter (function
+    | March_ast.Ast.DImpl _ -> true
+    | _ -> false
+  ) m.March_ast.Ast.mod_decls) in
+  Alcotest.(check bool) "derive expands to 2 DImpl nodes" true (impl_count >= 2)
+
+let test_derive_eq_typechecks () =
+  let ctx = typecheck {|mod Test do
+    type Color = Red | Green | Blue
+    derive Eq, Show for Color
+    fn f() : Bool do Red == Green end
+  end|} in
+  Alcotest.(check bool) "derive Eq typechecks == on Color" false (has_errors ctx)
+
+let test_derive_show_typechecks () =
+  let ctx = typecheck {|mod Test do
+    type Color = Red | Green | Blue
+    derive Show for Color
+    fn f() : String do show(Red) end
+  end|} in
+  Alcotest.(check bool) "derive Show typechecks show(Color)" false (has_errors ctx)
+
+let test_derive_ord_typechecks () =
+  let ctx = typecheck {|mod Test do
+    type Color = Red | Green | Blue
+    derive Ord for Color
+    fn f() : Int do compare(Red, Green) end
+  end|} in
+  Alcotest.(check bool) "derive Ord typechecks compare(Color, Color)" false (has_errors ctx)
+
+let test_derive_hash_typechecks () =
+  let ctx = typecheck {|mod Test do
+    type Color = Red | Green | Blue
+    derive Hash for Color
+    fn f() : Int do hash(Red) end
+  end|} in
+  Alcotest.(check bool) "derive Hash typechecks hash(Color)" false (has_errors ctx)
+
+(* ── Interface dispatch in eval ─────────────────────────────────────────── *)
+
+let test_eval_eq_dispatch_same () =
+  (* derive Eq + == at runtime: same constructor should be true *)
+  let env = eval_module {|mod Test do
+    type Color = Red | Green | Blue
+    derive Eq for Color
+    fn result() : Bool do Red == Red end
+  end|} in
+  Alcotest.(check bool) "Red == Red (derived Eq) = true" true
+    (vbool (call_fn env "result" []))
+
+let test_eval_eq_dispatch_diff () =
+  let env = eval_module {|mod Test do
+    type Color = Red | Green | Blue
+    derive Eq for Color
+    fn result() : Bool do Red == Green end
+  end|} in
+  Alcotest.(check bool) "Red == Green (derived Eq) = false" false
+    (vbool (call_fn env "result" []))
+
+let test_eval_custom_eq_dispatch () =
+  (* User-defined impl Eq(Color) should override structural equality *)
+  let env = eval_module {|mod Test do
+    type Parity = Even | Odd
+    impl Eq(Parity) do
+      fn eq(a, b) do
+        match (a, b) do
+        | (Even, Even) -> true
+        | (Odd, Odd)   -> true
+        | _            -> false
+        end
+      end
+    end
+    fn result() : Bool do Even == Odd end
+  end|} in
+  Alcotest.(check bool) "custom Eq dispatch: Even == Odd = false" false
+    (vbool (call_fn env "result" []))
+
+let test_eval_show_dispatch () =
+  let env = eval_module {|mod Test do
+    type Color = Red | Green | Blue
+    derive Show for Color
+    fn result() : String do show(Red) end
+  end|} in
+  Alcotest.(check string) "show(Red) with derive Show = \"Red\"" "Red"
+    (vstr (call_fn env "result" []))
+
+let test_eval_custom_show_dispatch () =
+  let env = eval_module {|mod Test do
+    type Point = { x: Int, y: Int }
+    impl Show(Point) do
+      fn show(p) do
+        "(" ++ int_to_string(p.x) ++ "," ++ int_to_string(p.y) ++ ")"
+      end
+    end
+    fn result() : String do show({ x = 3, y = 4 }) end
+  end|} in
+  Alcotest.(check string) "custom show for Point" "(3,4)"
+    (vstr (call_fn env "result" []))
+
+let test_eval_hash_dispatch () =
+  let env = eval_module {|mod Test do
+    type Color = Red | Green | Blue
+    derive Hash for Color
+    fn result() : Int do hash(Red) end
+  end|} in
+  (* Red is constructor 0, so hash(Red) = hash(0); just check it doesn't crash *)
+  let _ = call_fn env "result" [] in
+  Alcotest.(check bool) "hash(Red) with derive Hash runs without error" true true
+
+let test_eval_ord_dispatch_compare () =
+  let env = eval_module {|mod Test do
+    type Priority = Low | Medium | High
+    derive Ord for Priority
+    fn result() : Int do compare(Low, High) end
+  end|} in
+  let v = vint (call_fn env "result" []) in
+  Alcotest.(check bool) "compare(Low, High) < 0 (derived Ord)" true (v < 0)
+
+let test_eval_eq_method_dispatch () =
+  (* The eq() function should dispatch through impl_tbl *)
+  let env = eval_module {|mod Test do
+    type Color = Red | Green | Blue
+    derive Eq for Color
+    fn result() : Bool do eq(Red, Red) end
+  end|} in
+  Alcotest.(check bool) "eq(Red, Red) with derive Eq = true" true
+    (vbool (call_fn env "result" []))
+
+let test_derive_record_eq () =
+  let env = eval_module {|mod Test do
+    type Point = { x: Int, y: Int }
+    derive Eq for Point
+    fn result() : Bool do
+      let p1 = { x = 1, y = 2 }
+      let p2 = { x = 1, y = 2 }
+      p1 == p2
+    end
+  end|} in
+  Alcotest.(check bool) "record derive Eq: equal records" true
+    (vbool (call_fn env "result" []))
+
+let test_derive_variant_with_args_eq () =
+  let env = eval_module {|mod Test do
+    type Wrap = Wrap(Int)
+    derive Eq for Wrap
+    fn result() : Bool do Wrap(42) == Wrap(42) end
+  end|} in
+  Alcotest.(check bool) "derive Eq for variant with args" true
+    (vbool (call_fn env "result" []))
+
 let () =
   Alcotest.run "march"
     [
@@ -9680,5 +9862,27 @@ let () =
         Alcotest.test_case "on_stop hook parses"             `Quick (with_reset test_on_stop_hook);
         Alcotest.test_case "no-handler actor force-killed"   `Quick (with_reset test_actor_no_shutdown_handler_force_killed);
         Alcotest.test_case "shutdown marks actors dead"      `Quick (with_reset test_shutdown_actor_pid_marks_dead);
+      ]);
+      ("derive_syntax", [
+        Alcotest.test_case "derive keyword lexes"          `Quick test_derive_lexes_keyword;
+        Alcotest.test_case "for keyword lexes"             `Quick test_derive_for_keyword;
+        Alcotest.test_case "derive parses to DDeriving"    `Quick test_derive_parses;
+        Alcotest.test_case "derive expands to DImpl"       `Quick test_derive_expands_to_impl;
+        Alcotest.test_case "derive Eq typechecks"          `Quick test_derive_eq_typechecks;
+        Alcotest.test_case "derive Show typechecks"        `Quick test_derive_show_typechecks;
+        Alcotest.test_case "derive Ord typechecks"         `Quick test_derive_ord_typechecks;
+        Alcotest.test_case "derive Hash typechecks"        `Quick test_derive_hash_typechecks;
+      ]);
+      ("interface_dispatch", [
+        Alcotest.test_case "derived Eq: same ctor == true"      `Quick (with_reset test_eval_eq_dispatch_same);
+        Alcotest.test_case "derived Eq: diff ctor == false"     `Quick (with_reset test_eval_eq_dispatch_diff);
+        Alcotest.test_case "custom Eq impl dispatch"            `Quick (with_reset test_eval_custom_eq_dispatch);
+        Alcotest.test_case "derived Show: show(ctor) = name"    `Quick (with_reset test_eval_show_dispatch);
+        Alcotest.test_case "custom Show impl dispatch"          `Quick (with_reset test_eval_custom_show_dispatch);
+        Alcotest.test_case "derived Hash: hash(ctor) runs"      `Quick (with_reset test_eval_hash_dispatch);
+        Alcotest.test_case "derived Ord: compare(Low, High)<0"  `Quick (with_reset test_eval_ord_dispatch_compare);
+        Alcotest.test_case "eq() method dispatches via impl"    `Quick (with_reset test_eval_eq_method_dispatch);
+        Alcotest.test_case "derive Eq record equality"          `Quick (with_reset test_derive_record_eq);
+        Alcotest.test_case "derive Eq variant with args"        `Quick (with_reset test_derive_variant_with_args_eq);
       ]);
     ]

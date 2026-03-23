@@ -468,7 +468,8 @@ let get_span = function
   | DFn (_, s) | DLet (_, _, s) | DType (_, _, _, _, s)
   | DMod (_, _, _, s) | DProtocol (_, _, s) | DActor (_, _, _, s)
   | DSig (_, _, s) | DInterface (_, s) | DImpl (_, s) | DExtern (_, s)
-  | DUse (_, s) | DAlias (_, s) | DNeeds (_, s) | DApp (_, s) -> s
+  | DUse (_, s) | DAlias (_, s) | DNeeds (_, s) | DApp (_, s)
+  | DDeriving (_, _, s) -> s
 
 (** Emit a list of declarations separated by blank lines,
     flushing comments before each one. *)
@@ -703,6 +704,11 @@ and emit_decl ctx = function
          line ctx "end")
     );
     line ctx "end"
+
+  | DDeriving (type_name, ifaces, _) ->
+    line ctx (Printf.sprintf "derive %s for %s"
+      (String.concat ", " (List.map (fun n -> n.txt) ifaces))
+      type_name.txt)
 
 and emit_fn ctx fn =
   let v   = match fn.fn_vis with Public -> "pub " | Private -> "" in
