@@ -17,6 +17,7 @@ module Pos  = Position   (* our position utilities *)
 (** Full analysis result for one document. *)
 type t = {
   src         : string;
+  filename    : string;
   type_map    : (Ast.span, Tc.ty) Hashtbl.t;
   (** Span → inferred type. *)
   def_map     : (string, Ast.span) Hashtbl.t;
@@ -413,9 +414,12 @@ let analyse ~filename ~src : t =
       Error (`ParseError (msg, hint, pos))
     | March_parser.Parser.Error ->
       Error (`MenhirError (Lexing.lexeme_start_p lexbuf))
+    | March_lexer.Lexer.Lexer_error msg ->
+      Error (`LexerError (msg, Lexing.lexeme_start_p lexbuf))
   in
   let make_empty_with diag =
     { src;
+      filename;
       type_map    = Hashtbl.create 0;
       def_map     = Hashtbl.create 0;
       use_map     = Hashtbl.create 0;
@@ -451,6 +455,9 @@ let analyse ~filename ~src : t =
   | Error (`MenhirError pos) ->
     make_empty_with (make_parse_diag pos "Parse error")
 
+  | Error (`LexerError (msg, pos)) ->
+    make_empty_with (make_parse_diag pos msg)
+
   | Ok raw_ast ->
     let desugared = March_desugar.Desugar.desugar_module raw_ast in
     let stdlib_decls = load_stdlib () in
@@ -484,7 +491,7 @@ let analyse ~filename ~src : t =
     List.iter (collect_decl ~def_map ~use_map ~actors_tbl) user_decls;
     let actors = Hashtbl.fold (fun k v acc -> (k, v) :: acc) actors_tbl [] in
     let diags = Err.sorted errors |> List.filter_map (diag_to_lsp ~filename) in
-    { src; type_map; def_map; use_map;
+    { src; filename; type_map; def_map; use_map;
       vars       = final_env.Tc.vars;
       types      = final_env.Tc.types;
       ctors      = List.map (fun (name, ci) -> (name, ci.Tc.ci_type))
@@ -577,6 +584,9 @@ let completions_at (a : t) ~line:_ ~character:_ =
 
 let inlay_hints_for (a : t) (range : Lsp.Types.Range.t) =
   let open Lsp.Types in
+  let is_user_span (sp : Ast.span) =
+    sp.Ast.file = a.filename || sp.Ast.file = "" || sp.Ast.file = "<unknown>"
+  in
   let in_range (sp : Ast.span) =
     let r = Pos.span_to_lsp_range sp in
     r.Range.end_.line >= range.Range.start.line &&
@@ -584,7 +594,7 @@ let inlay_hints_for (a : t) (range : Lsp.Types.Range.t) =
   in
   let hints = ref [] in
   Hashtbl.iter (fun sp ty ->
-      if in_range sp &&
+      if is_user_span sp && in_range sp &&
          sp.Ast.start_line = sp.Ast.end_line &&
          sp.Ast.end_col - sp.Ast.start_col <= 40
       then begin

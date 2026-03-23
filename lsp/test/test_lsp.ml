@@ -651,12 +651,31 @@ let test_partial_source_no_crash () =
 
 let test_malformed_grammar_no_crash () =
   (* Use tokens that are individually valid but form an invalid parse,
-     so Menhir (not the lexer) raises Parser.Error — which analyse() catches.
-     Note: sources with illegal *characters* (e.g. '@') raise Lexer_error,
-     which currently propagates out of analyse(). *)
+     so Menhir (not the lexer) raises Parser.Error — which analyse() catches. *)
   let src = "mod Bad do\n  let = 42\nend" in
   let a   = analyse src in
   Alcotest.(check bool) "bad grammar: has diagnostic" true
+    (List.length a.diagnostics > 0)
+
+let test_lexer_error_produces_diagnostic () =
+  (* Sources with illegal characters (e.g. '@') raise Lexer_error in the lexer.
+     analyse() catches this and converts it to a diagnostic rather than crashing. *)
+  let src = "mod Bad do\n  let x = @invalid\nend" in
+  let a   = analyse src in
+  Alcotest.(check bool) "lexer error: no crash"    true  (List.length a.diagnostics >= 0);
+  Alcotest.(check bool) "lexer error: has diag"    true  (List.length a.diagnostics > 0);
+  Alcotest.(check bool) "lexer error: is error"    true
+    (List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+         d.severity = Some Lsp.Types.DiagnosticSeverity.Error)
+       a.diagnostics)
+
+let test_unterminated_string_is_diagnostic () =
+  (* Unterminated strings raise Lexer_error — should become a diagnostic. *)
+  let src = {|mod Bad do
+  let x = "unterminated
+end|} in
+  let a = analyse src in
+  Alcotest.(check bool) "unterminated string: has diagnostic" true
     (List.length a.diagnostics > 0)
 
 let test_source_with_only_comment_no_crash () =
@@ -796,6 +815,8 @@ let () =
       Alcotest.test_case "bad grammar: no crash"              `Quick test_malformed_grammar_no_crash;
       Alcotest.test_case "comment-only source: no crash"      `Quick test_source_with_only_comment_no_crash;
       Alcotest.test_case "missing expression: no crash"       `Quick test_missing_expression_no_crash;
+      Alcotest.test_case "lexer error: diagnostic produced"   `Quick test_lexer_error_produces_diagnostic;
+      Alcotest.test_case "unterminated string: diagnostic"    `Quick test_unterminated_string_is_diagnostic;
     ];
     "analysis-struct", [
       Alcotest.test_case "empty module: struct fields"        `Quick test_empty_module_fields_empty;
