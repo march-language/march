@@ -32,6 +32,9 @@ type ctx = {
   mutable str_ctr : int;
   ctor_info : (string, ctor_entry) Hashtbl.t;
   top_fns   : (string, bool) Hashtbl.t;
+  (* Maps fn_name → fn_ret_ty for functions registered in top_fns.
+     Used in EApp to resolve concrete return types when call-site TVar is "_". *)
+  top_fn_ret_ty : (string, Tir.ty) Hashtbl.t;
   field_map : (string, (string * Tir.ty) list) Hashtbl.t;
   mutable ret_ty  : Tir.ty;
   fast_math : bool;
@@ -65,6 +68,7 @@ let make_ctx ?(fast_math=false) () = {
   ctr      = 0; blk = 0; str_ctr = 0;
   ctor_info = Hashtbl.create 64;
   top_fns   = Hashtbl.create 64;
+  top_fn_ret_ty = Hashtbl.create 64;
   field_map = Hashtbl.create 16;
   ret_ty   = Tir.TUnit;
   fast_math;
@@ -1013,10 +1017,16 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let fname    = match Hashtbl.find_opt ctx.extern_map f.Tir.v_name with
       | Some c_name -> c_name
       | None -> mangle_extern f.Tir.v_name in
-    (* Determine return type: check known builtins first, then TFn annotation *)
+    (* Determine return type: check known builtins first, then the registered
+       fn_def return type (if any), then fall back to the call-site TFn annotation.
+       The call-site type may be TVar "_" in JIT mode (empty type_map), so
+       top_fn_ret_ty gives the concrete type from the function's definition. *)
     let ret_tir  = match builtin_ret_ty f.Tir.v_name with
       | Some t -> t
-      | None   -> fn_ret_tir f.Tir.v_ty
+      | None   ->
+        (match Hashtbl.find_opt ctx.top_fn_ret_ty f.Tir.v_name with
+         | Some (Tir.TVar _) | None -> fn_ret_tir f.Tir.v_ty
+         | Some t -> t)
     in
     let ret_ty = llvm_ret_ty ret_tir in
     if ret_ty = "void" then begin
@@ -1787,9 +1797,12 @@ let emit_module ?(fast_math=false) (m : Tir.tir_module) : string =
   (* Register user-defined extern functions *)
   List.iter (fun (ed : Tir.extern_decl) ->
       Hashtbl.replace ctx.extern_map ed.ed_march_name ed.ed_c_name;
-      Hashtbl.replace ctx.top_fns ed.ed_march_name true
+      Hashtbl.replace ctx.top_fns ed.ed_march_name true;
+      Hashtbl.replace ctx.top_fn_ret_ty ed.ed_march_name ed.ed_ret
     ) m.Tir.tm_externs;
-  List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true)
+  List.iter (fun fn ->
+      Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
+      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty)
     m.Tir.tm_fns;
   (* Skip emitting prelude wrapper functions whose runtime name is already
      declared in the preamble.  Only filter short unqualified names that map
@@ -1887,9 +1900,13 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   let ctx = make_ctx ~fast_math () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = [] } in
   build_ctor_info ctx pseudo_mod;
-  List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true) fns;
+  List.iter (fun fn ->
+      Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
+      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty) fns;
   (* Register pre-compiled extern functions so EApp generates direct calls *)
-  List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true) extern_fns;
+  List.iter (fun fn ->
+      Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
+      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty) extern_fns;
   List.iter (emit_fn ctx) fns;
   let ret_llty = llvm_ty ret_ty in
   let fname = Printf.sprintf "repl_%d" n in
@@ -1932,8 +1949,12 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
   let ctx = make_ctx ~fast_math () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = [] } in
   build_ctor_info ctx pseudo_mod;
-  List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true) fns;
-  List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true) extern_fns;
+  List.iter (fun fn ->
+      Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
+      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty) fns;
+  List.iter (fun fn ->
+      Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
+      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty) extern_fns;
   List.iter (emit_fn ctx) fns;
   let llty = llvm_ty val_ty in
   let global_name = Printf.sprintf "repl_%d_%s" n name in
@@ -1965,7 +1986,10 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = [] } in
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-  List.iter (fun f -> Hashtbl.replace ctx.top_fns f.Tir.fn_name true) extern_fns;
+  Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+  List.iter (fun f ->
+      Hashtbl.replace ctx.top_fns f.Tir.fn_name true;
+      Hashtbl.replace ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty) extern_fns;
   emit_fn ctx fn;
   let init_name = Printf.sprintf "repl_%d_init" n in
   Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n  ret void\n}\n" init_name;
@@ -1992,7 +2016,10 @@ let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = [] } in
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-  List.iter (fun f -> Hashtbl.replace ctx.top_fns f.Tir.fn_name true) extern_fns;
+  Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+  List.iter (fun f ->
+      Hashtbl.replace ctx.top_fns f.Tir.fn_name true;
+      Hashtbl.replace ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty) extern_fns;
   emit_fn ctx fn;
   (* Build a thin closure wrapper: @<fn>$clo_wrap(ptr %_clo, ptr %a0, ...) *)
   let fn_llvm_name = llvm_name (mangle_extern fn.Tir.fn_name) in
@@ -2045,7 +2072,9 @@ let emit_fns_fragment
   let pseudo_mod : Tir.tir_module =
     { tm_name = "stdlib_prelude"; tm_types = types; tm_fns = fns; tm_externs = [] } in
   build_ctor_info ctx pseudo_mod;
-  List.iter (fun fn -> Hashtbl.replace ctx.top_fns fn.Tir.fn_name true) fns;
+  List.iter (fun fn ->
+      Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
+      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty) fns;
   List.iter (emit_fn ctx) fns;
   let out = Buffer.create 8192 in
   emit_preamble out;
