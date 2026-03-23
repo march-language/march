@@ -51,7 +51,7 @@ This file tracks everything that still needs to get done. Organized by priority 
 ### Testing
 
 - ✅ **Actor compilation tests** — 8 new tests in `actor_compile` group: dispatch emitted, spawn fn emitted, handlers emitted, supervisor registers, monitor emitted, link emitted, multi-actor no crash, run_scheduler in main. All verify LLVM IR output of compiled actor programs.
-- [ ] **Cross-language benchmarks** — Compare March performance against Elixir, OCaml, and Rust on the existing benchmark suite (`bench/`). Needed to validate that the Perceus RC + FBIP approach delivers on the performance promise. Methodology: same algorithm, idiomatic code in each language, median of 10 runs.
+- ✅ **Cross-language benchmarks** — `bench/elixir/`, `bench/ocaml/`, `bench/rust/` contain idiomatic implementations of fib(40), binary-trees(15), tree-transform(depth=20×100), and list-ops(1M). `bench/run_benchmarks.sh` compiles all four languages and reports median/min/max over 10 runs. Results in `bench/RESULTS.md`: FBIP delivers 7.5–19× speedup over OCaml/Rust on tree-transform; March ties Rust on fib; OCaml wins binary-trees (generational GC); Rust wins list-ops (iterator fusion).
 
 ---
 

@@ -248,10 +248,10 @@ march/
 - **Supervisor restart policies** — `sc_max_restarts` sliding window enforced in eval.ml
 - **REPL JIT `compiled_fns` corruption fix** — `partition_fns` in `repl_jit.ml` now pure (no side effects); `mark_compiled_fns` called only after successful `compile_fragment` + dlopen; prevents stdlib fn "undefined symbol" cascade when any prior fragment compilation failed
 - **`app` entry point (Phase 1 interpreter)** — `APP`/`ON_START`/`ON_STOP` lexer tokens; `DApp` AST node; `app_decl` parser rule; desugar converts `DApp` → `__app_init__` function with `SupervisorSpec` return type annotation; mutual-exclusivity check (compile error if both `main` + `app` defined); `spawn_from_spec` spawns actor tree; `run_module` dispatches on `__app_init__`; SIGTERM/SIGINT signal handlers; graceful reverse-order shutdown; process registry (`whereis`/`whereis_bang`); named children; `on_start`/`on_stop` lifecycle hooks; dynamic supervisors (`dynamic_supervisor`, `start_child`, `stop_child`, `which_children`, `count_children`). 45 tests across `app`, `shutdown`, `registry`, `dynamic_supervisor`, `spec_construction`, and `app_shutdown` groups.
+- **Cross-language benchmarks** — `bench/elixir/`, `bench/ocaml/`, `bench/rust/` contain idiomatic implementations of fib(40), binary-trees(15), tree-transform(depth=20×100), and list-ops(1M); `bench/run_benchmarks.sh` compiles all, runs 10 times, reports median/min/max; results in `bench/RESULTS.md`. FBIP delivers 7.5–19× speedup vs OCaml/Rust on tree-transform; March ≈ Rust on fib; OCaml wins binary-trees (generational GC); Rust wins list-ops (iterator fusion).
 
 ### Known Implementation Gaps
 
-- **`tap>` async value inspector** — Clojure-style side-channel tap not yet implemented. `:inspect/:i` covers synchronous inspection but `tap>` (middleware-style async tap) is missing.
 - **Epoch-based capability revocation** — `send(cap, msg)` does not validate the epoch against a revocation list. `Cap(A, e)` epoch is carried in the type but not checked at runtime.
 - **`rest_for_one`/`one_for_all` supervisor strategies** — only `one_for_one` is implemented; the other OTP-style restart strategies are not yet handled.
 - **Actor compilation tests** — need `dune runtest`-level tests for compiled actor programs.

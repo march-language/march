@@ -397,6 +397,8 @@ typedef struct march_actor_meta {
     int                         supervisor_strategy;    /* 0=one_for_one, 1=one_for_all, 2=rest_for_one */
     int64_t                     supervisor_max_restarts;
     int64_t                     supervisor_window_secs;
+    /* Capability revocation (used by march_is_cap_valid): */
+    int64_t                     epoch;    /* Current epoch; incremented on revocation */
 } march_actor_meta;
 
 /* Global side table: actor ptr → march_actor_meta */
@@ -1887,7 +1889,7 @@ int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch) {
         if (m) break;
     }
     pthread_mutex_unlock(&g_tbl_mu);
-    if (!m || !m->alive) return 0;
+    if (!m || !march_is_alive(m->actor)) return 0;
     if (m->epoch != epoch) return 0;
     return 1;
 }
