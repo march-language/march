@@ -185,20 +185,33 @@ march/
 │   ├── http_server.march    # 233 lines: HTTP server types + pipeline runner
 │   ├── websocket.march      # 52 lines: WebSocket types and frame operations
 │   └── iterable.march       # 184 lines: map/filter/fold/take/drop/zip/enumerate/flat_map/any/all/find/count
-└── test/
-    ├── test_march.ml         # 770+ tests (all passing)
-    ├── test_cas.ml           # 41 tests (all passing: scc, pipeline, def_id)
-    └── test_jit.ml           # 1 test (dlopen round-trip)
+├── test/
+│   ├── test_march.ml         # 812 tests (exhaustiveness/LSP/opaque/actor handler tests)
+│   ├── test_cas.ml           # 41 tests (scc, pipeline, def_id)
+│   ├── test_jit.ml           # 1 test (dlopen round-trip)
+│   ├── test_fmt.ml           # 23 tests (formatter round-trip)
+│   ├── test_properties.ml    # 36 QCheck2 property tests
+│   ├── test_supervision.ml   # 15 tests (actor supervision policies)
+│   └── test_oracle.ml        # oracle tests (requires MARCH_BIN env var)
+├── lsp/
+│   └── test/test_lsp.ml      # 57 tests (initialize/diagnostics/hover/goto-def/completion/inlay hints)
+└── forge/
+    └── test/test_forge.exe   # 15 tests (scaffold, toml)
 ```
 
 ## Current State (as of 2026-03-23)
 
 - **Builds clean**
-- **835 tests across 4 suites; 0 failures** (excluding pre-existing JIT/clang failures):
-  - `test_march.exe`: 820 tests (8 pre-existing REPL JIT clang failures; all others pass)
-  - `test_cas.exe`: 41 tests, all passing (scc, pipeline, def_id)
+- **1008 tests across 8 suites; 8 failures** (all failures are in `repl_jit_regression` group — see Known Failures):
+  - `test_march.exe`: 820 tests, 8 failures (repl_jit_regression/repl_jit_cross_line)
+  - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
-  - `test_forge.exe`: 15 tests, all passing (scaffold, TOML parser)
+  - `test_fmt.exe`: 23 tests, passing (formatter round-trip)
+  - `test_properties.exe`: 36 tests, passing (QCheck2 properties)
+  - `test_supervision.exe`: 15 tests, passing (actor supervision)
+  - `test_lsp.exe`: 57 tests, passing (LSP protocol/diagnostics/hover/completion)
+  - `test_forge.exe`: 15 tests, passing (scaffold/toml — +2 from this branch)
+  - `test_oracle.exe`: requires `MARCH_BIN` env var (oracle/idempotency/pass tests)
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present
 - **Match syntax**: `match expr do | Pat -> body end` (changed from `with` to `do` in 2026-03-21 — Elixir case-style)
 - **String interpolation**: `${}` syntax fully implemented — `INTERP_START`/`INTERP_MID`/`INTERP_END` tokens in lexer; desugars to `++`/`to_string` chains (`lib/desugar/desugar.ml`)
@@ -206,7 +219,8 @@ march/
 - **Property-based testing**: 36 QCheck2 properties in `test/test_properties.ml` — ADTs, closures, HOFs, tuples, strings, oracle/idempotency/pass properties
 - **Standard Interfaces (Eq/Ord/Show/Hash) with derive syntax** — merged to main (from `claude/intelligent-austin`); `derive [Eq, Show]` syntax, eval dispatch for `==`/`show`/`hash`/`compare` via `impl_tbl`; 18 tests
 - **LSP Server** (`march-lsp`) — merged to main (from `claude/vibrant-bartik`); diagnostics, hover, goto-def, completion, inlay hints, semantic tokens, actor info; uses `linol` framework; Zed extension wired up
-- **LSP test suite** — `lsp/test/test_lsp.ml` (826 lines, 55 tests): initialize/open/diagnostics, hover types, goto-def, completion, inlay hints
+- **LSP test suite** — `lsp/test/test_lsp.ml` (57 tests): initialize/open/diagnostics, hover types, goto-def, completion, inlay hints
+- **Module alias declarations** — `alias Long.Module as Short` / `alias Long.Module` (last segment as alias); `DAlias` in AST; resolved in typecheck; unused-alias warning emitted
 - **Pattern matching exhaustiveness checking** — compile-time pattern matrix analysis in `lib/typecheck/typecheck.ml`; warns on non-exhaustive matches, errors on unreachable arms
 - **Multi-level `use` paths** — `use A.B.*` / `use A.B.C` fully supported; grammar ambiguity resolved in parser, full path resolution in typecheck
 - **Opaque type enforcement** — `sig Name do type T end` hides representation; callers cannot access internal structure through the abstraction boundary
@@ -233,57 +247,16 @@ march/
 - **`tap>` async value inspector** — Clojure-style side-channel tap not yet implemented. `:inspect/:i` covers synchronous inspection but `tap>` (middleware-style async tap) is missing.
 - **Epoch-based capability revocation** — `send(cap, msg)` does not validate the epoch against a revocation list. `Cap(A, e)` epoch is carried in the type but not checked at runtime.
 - **`rest_for_one`/`one_for_all` supervisor strategies** — only `one_for_one` is implemented; the other OTP-style restart strategies are not yet handled.
-- **`--dump-tir` flag**: prints TIR after full pipeline (Lower → Mono → Defun → Perceus → Escape); shows `stack_alloc` for promoted allocations
-- **`--emit-llvm` flag**: emits textual LLVM IR to `<basename>.ll`; links with `runtime/march_runtime.c` via `clang` to produce native binaries
-- **Compiled REPL**: `dune exec march` with no args launches a compile-and-dlopen REPL — each expression goes through the full TIR pipeline → LLVM IR → `clang -shared` → `.so` → `dlopen` → `dlsym` → call. Bindings persist as LLVM globals with `RTLD_GLOBAL`. Falls back to interpreter if JIT unavailable. `:quit`/`:env` commands; incremental env
-- **Session types (binary, phases 1–3)**: `TChan` type + full `session_ty` representation (`SSend`/`SRecv`/`SChoose`/`SOffer`/`SRec`/`SEnd`/`SVar`/`SError`); `Chan.send`/`recv`/`close`/`choose`/`offer` special-cased in typecheck with linear channel advancement; duality verification for two-party protocols; `Chan.new(proto_name)` creates dual endpoints; protocol registry in typecheck env. Example: `examples/session_echo.march`
-- **pub/sig enforcement**: Phase 1 visibility (`pub` on fn/type/ctor) enforced in `check_module` — private names are not exported to outer scope; Phase 2 sig conformance — `sig Name do ... end` checked against the actual `mod Name` implementation, missing declarations reported as errors
-- **Bidirectional HM type checker**: 3389 lines; constructor registry, builtin `Some/None/Ok/Err`, named record type expansion, `Unit`/`Bool`/etc. annotation normalization, builtins (`print`, `println`, `int_to_string`, `bool_to_string`, etc.) in scope; actor declarations register message ctors and bind `state` in handler envs; interface dispatch wired (impl lookup + vtable-style call); capability hierarchy subtyping (`IO` → `IO.FileSystem` → etc.)
-- **Tree-walking interpreter**: 4567 lines; `value` type (incl. `VPid`, `VChan`), pattern matching, `base_env` builtins, two-pass `eval_module_env` for mutual recursion; full synchronous actor runtime with `kill`/`is_alive`/drop semantics; `App.stop()`, `on_start`/`on_stop` lifecycle hooks, graceful shutdown + SIGTERM; supervision with epoch caps + task linking; `Chan.send`/`recv`/`close`/`choose`/`offer` evaluations; Drop handler support via `impl Drop`
-- **Standard interfaces with auto-derivation**: `Eq`, `Show`, `Hash`, `Ord` — `derive Eq, Show for Color` syntax; desugar expands `DDeriving` to `DImpl` blocks; runtime dispatch via `impl_tbl` and `ctor_type_tbl`; `==`/`!=`/`<`/`<=`/`>`/`>=` and `show()`/`hash()`/`compare()` builtins dispatch through user impls for custom types; 18 new tests
-- **TIR pipeline** (`lib/tir/`):
-  - `lower.ml` (1277 lines) — AST → ANF TIR, CPS let-insertion, nested pattern flattening, type_map threading, actor lowering
-  - `mono.ml` (315 lines) — worklist monomorphization, name mangling (`identity$Int`), TVar elimination; `main` always seeded; function-as-value atoms via `ensure_atom_fns`; `ECallPtr` callee discovery
-  - `defun.ml` (373 lines) — defunctionalization: lambda lifting, `$Clo_` struct generation, `ECallPtr` rewriting
-  - `perceus.ml` (523 lines) — Perceus RC analysis: backwards liveness, `EIncRC`/`EDecRC`/`EFree` insertion, Inc/Dec cancel-pair elision, FBIP `EReuse` detection
-  - `escape.ml` (279 lines) — Escape analysis: 3-phase intra-procedural stack promotion; `EAlloc` → `EStackAlloc` for non-escaping allocations
-  - **Optimization loop** (`opt.ml`, 19 lines): fixed-point iteration over inline → fold → simplify → dce
-    - `inline.ml` (179 lines) — function inlining (small, pure, single-use callees)
-    - `fold.ml` (91 lines) — constant folding (arithmetic, boolean, string literals)
-    - `simplify.ml` (107 lines) — algebraic simplification (identity ops, dead branches)
-    - `dce.ml` (130 lines) — dead code elimination (unreachable lets, unused bindings)
-    - `purity.ml` (25 lines) — purity analysis (used by inliner to gate side-effectful fns)
-  - `llvm_emit.ml` (2021 lines) — TIR → textual LLVM IR; alloca+store+load for all let-bindings; ECase as switch+blocks+merge; arithmetic/cmp builtins to native ops; EAlloc→`@march_alloc`; EStackAlloc→`alloca`; EReuse→in-place write; REPL emission helpers; HTTP/WS extern declarations; float ops; string equality via `march_string_eq`; string pattern matching (if-else chains); closure wrappers; ~49 builtin function declarations
-  - `pp.ml` — pretty-printer for all TIR types (incl. `stack_alloc`, `reuse`)
-- **JIT / compile-and-dlopen** (`lib/jit/`):
-  - `jit_stubs.c` — OCaml C stubs for POSIX `dlopen`/`dlsym`/`dlclose` + function pointer call stubs (void→ptr, void→void, void→i64, void→double, ptr→ptr)
-  - `jit.ml` / `jit.mli` — OCaml externals wrapping the C stubs
-  - `repl_jit.ml` / `repl_jit.mli` — Compiled REPL engine: TIR pipeline → LLVM IR → `clang -shared -fPIC` → `.so` → `dlopen` → call; tracks globals across fragments, deduplicates already-compiled functions, handles fn decls / let bindings / expressions
-- **HTTP/WS C runtime** (`runtime/`):
-  - `march_http.c` / `march_http.h` — TCP listen/accept/recv/send/close; HTTP request parsing and response serialization; thread-per-connection server accept loop; WebSocket handshake, frame recv/send, and select (with actor pipe support)
-  - `sha1.c` — Minimal RFC 3174 SHA-1 for WebSocket handshake
-  - `base64.c` — Minimal Base64 encoding for WebSocket handshake
-- **C runtime builtins** — 49 compiled-path builtins: float (6), math (18), string (21), list (2), file/dir (2); all declared in `march_runtime.h` and registered in `llvm_emit.ml` + `defun.ml`
-- **Pre-compiled runtime .so** — `ensure_runtime_so()` in `bin/main.ml` compiles `march_runtime.c` + `march_http.c` + `sha1.c` + `base64.c` to `~/.cache/march/libmarch_runtime.so`, cached and rebuilt only when sources change
-- **Compiled HTTP server** — End-to-end working: `test_server.march` compiles to a native binary that listens on port 8787 and serves HTTP requests. Pipeline: March source → Parse → Desugar → Typecheck → Lower → Mono → Defun → Perceus → Escape → Opt → LLVM IR → clang → native binary. Closure-based pipeline dispatch with refcount borrowing for thread safety.
-- **Three working examples**:
-  - `examples/list_lib.march` — map, filter, fold, reverse, find, range (polymorphic list library)
-  - `examples/actors.march` — Counter + Logger actors, normal messaging, kill, drop semantics, restart
-  - `test_server.march` — Compiled HTTP server: `HttpServer.new(8787) |> HttpServer.plug(hello) |> HttpServer.listen()`
-- **Content-addressed store** (`lib/cas/`): BLAKE3 hashing of definitions, 2-tier cache (project-local `.march/cas/` + global `~/.march/cas/`), SCC-aware pipeline, `def_id` type for hash-based identity; 41 tests passing
-- **Cooperative scheduler** (`lib/scheduler/`): reduction-counted preemption (4000 reductions/quantum), work-stealing thread pool, actor mailboxes, `Task(a)` for structured parallel compute
-- **Time-travel debugger** (`lib/debug/`): `dbg(expr)` breakpoints, step replay, actor history, `goto`/`diff`/`find`/`watch` commands, trace save/load; integrated with REPL via `on_dbg` callback
-- **Full TUI REPL** (`lib/repl/`): 2197 lines; notty two-pane TUI with live syntax highlighting, tab completion, scope panel, actor monitoring; `v` magic variable (last result); `{ x with f = v }` record update hint; list pretty-printer; `:quit`/`:env`/`:help` commands; kill-ring line editing; multiline continuation detection
-- **Actor system**: `spawn(ActorName)` / `send(pid, Msg(args))` → `Option(Unit)`, `kill(pid)`, `is_alive(pid)`, `{ state with field = ... }` record spread, synchronous inline dispatch; supervision (supervisor blocks, epoch caps, task linking); `App.stop()` with graceful SIGTERM shutdown; `on_start`/`on_stop` lifecycle hooks; process registry (`whereis`)
-- **Zed editor extension** (`tree-sitter-march/`): grammar.js (12726 lines), compiled `march.dylib`, Tree-sitter queries, full syntax highlighting for all language constructs
-- **Stdlib** (21 modules, 4894 lines): `prelude`, `option`, `result`, `list`, `string`, `math`, `iolist`, `seq`, `sort` (Timsort+Introsort+AlphaDev), `enum`, **`map`** (AVL tree), `path`, `file`, `dir`, `csv`, `http`, `http_transport`, `http_client`, `http_server`, `websocket`, `iterable`
-- **Syntax additions**: `%` modulo, multi-statement match arm bodies, zero-arg constructor calls `Con()`, `state` as contextual keyword in expressions
+- **Actor compilation tests** — need `dune runtest`-level tests for compiled actor programs.
 
 ## Known Failures (2026-03-23)
 
-**None.** All 812 tests pass across all 3 suites.
+**8 failures** in `test_march.exe`, all in the `repl_jit_regression` and `repl_jit_cross_line` test groups:
 
-Previously-failing REPL JIT list literal tests (6 failures) were resolved by `fix(stdlib,jit): fix decimal.march parse error causing REPL JIT degradation` (commit dcd5a55) and its predecessors.
+- `repl_jit_regression` 0, 1, 3, 4, 6, 9, 11 — list literal compilation, stdlib on list literal, stdlib chain, list pretty-print, general REPL interaction
+- `repl_jit_cross_line` 3 — stdlib `List.length` across lines
+
+These are JIT-mode REPL tests that require `clang` to compile `.so` fragments. All other 990 tests pass.
 
 ---
 
@@ -327,14 +300,14 @@ Previously-failing REPL JIT list literal tests (6 failures) were resolved by `fi
 10. **LSP feature improvements** — 5 new features; spec in `specs/plans/2026-03-23-lsp-feature-improvements.md`.
 
 ### Frontend / Ergonomics
-1. ~~**Fix REPL JIT list literal**~~ ✓ — all 812 tests pass.
+1. ~~**Fix REPL JIT list literal**~~ — 8 repl_jit failures remain (see Known Failures).
 2. ~~**Actor handler return type checking**~~ ✓ — gap checks in typecheck.
 3. ~~**Type-qualified constructor names**~~ ✓ — done.
 4. ~~**Atomic refcounting**~~ ✓ — done.
 5. ~~**Pattern matching exhaustiveness checking**~~ ✓ — done.
 6. ~~**Multi-level use paths**~~ ✓ — done.
 7. ~~**Merge Standard Interfaces branch**~~ ✓ — merged.
-8. ~~**Merge LSP branch**~~ ✓ — merged (with 55-test suite).
+8. ~~**Merge LSP branch**~~ ✓ — merged (57-test suite).
 9. **`tap>` async value inspector** — remaining REPL quality gap.
 10. **`app` entry point** — spec in `specs/application_spec.md`.
 
