@@ -2062,3 +2062,452 @@ Pos.span_contains sp ~line ~character : bool
 Pos.span_to_lsp_range sp : Lsp.Types.Range.t
 Pos.span_smaller inner outer : bool
 ```
+
+---
+
+## March-Specific LSP Features
+
+These features go beyond the five tasks above and are specific to March's language model. They are planned at the same architectural level but not yet tasked for implementation. Work them in priority order.
+
+---
+
+### P1 — High Value
+
+---
+
+#### Feature A — Actor/Supervision Topology Visualization
+
+**What:** A custom LSP notification that sends actor hierarchy data to the editor. Shows which actors spawn which, supervision trees, link/monitor relationships. Editors that support custom LSP extensions (Zed, Neovim, VS Code with extension) can render this as a sidebar or inline code lens.
+
+**Why:** March's actor system with supervisors, links, and monitors is hard to reason about from code alone. A topology view is a killer feature that no mainstream language server offers.
+
+**Protocol:**
+- Option A: Custom `march/actorTopology` notification. Server computes the graph on `textDocument/didOpen` / `textDocument/didChange` and pushes it to the client. Client extension renders it.
+- Option B: `textDocument/codeLens` — annotate each `actor` declaration with spawn count and supervision depth, e.g., `[spawned by: Supervisor | depth: 2 | links: 3]`. No custom client needed.
+- **Recommended:** Ship Option B first (zero client work), then add Option A as a richer extension.
+
+**Implementation sketch:**
+1. Walk the desugared AST for `actor` declarations, `spawn` / `spawn_link` / `spawn_monitor` calls, and `supervise` blocks.
+2. Build an adjacency map: `actor_name → { spawns: name list; supervised_by: name option; links: name list }`.
+3. For code lens: compute depth (BFS from root supervisor) and attach to each actor's declaration span.
+4. For custom notification: serialize adjacency map to JSON and push via `$/march/actorTopology`.
+
+**New analysis fields:**
+```ocaml
+type actor_info = {
+  ai_name       : string;
+  ai_span       : Ast.span;
+  ai_spawns     : string list;
+  ai_supervised : string option;
+  ai_links      : string list;
+}
+
+(* in Analysis.t *)
+actor_map : actor_info String.Map.t;
+```
+
+**Test scaffolding:**
+```ocaml
+(* Test: supervisor spawns two workers *)
+let src = {|
+mod M do
+  actor Supervisor do ... end
+  actor Worker do ... end
+  fn main() do
+    spawn_link Worker
+    spawn_link Worker
+  end
+end
+|} in
+let a = analyse src in
+let info = An.actor_info a "Supervisor" in
+Alcotest.(check int) "spawns 2 workers" 2 (List.length info.ai_spawns)
+```
+
+**Complexity:** Medium. AST walk is straightforward; the tricky part is resolving `spawn` call targets when they're stored in variables. Start with direct `spawn(ActorName, ...)` forms and handle indirect spawns in a follow-up.
+
+---
+
+#### Feature B — Linear Type Consumption Tracking
+
+**What:** Show where linear/affine values are consumed, warn about unconsumed values inline, highlight the consumption point. In practice: inlay hints saying `consumed ↑` at the call site, and diagnostics for paths where a linear value escapes unconsumed.
+
+**Why:** Linear types are March's core differentiator. Without IDE support, users must mentally track consumption — error messages alone aren't enough.
+
+**Protocol:**
+- `textDocument/inlayHints` — `consumed here` annotation at each consumption span.
+- `textDocument/diagnostic` (supplemental) — `linear value 'x' not consumed on this path` for missing consumptions.
+- Optional `textDocument/codeLens` on the binding site: `consumed 1×` or `⚠ unconsumed`.
+
+**Implementation sketch:**
+1. The typechecker already tracks linear bindings in `lin_entry` (or equivalent). After type-checking a function body, enumerate all linear binding spans and their single consumption span.
+2. Build `lin_consumption_map : span -> span` (binding span → consumption span).
+3. For inlay hints: at the consumption span, emit `↑ linear 'x' consumed`.
+4. For diagnostics: any linear binding without a recorded consumption site emits a warning diagnostic.
+
+**New analysis fields:**
+```ocaml
+type lin_consumption = {
+  lc_binding   : Ast.span;   (* where the linear value was bound *)
+  lc_consumed  : Ast.span option;  (* where it was consumed; None = leak *)
+  lc_name      : string;
+}
+
+(* in Analysis.t *)
+lin_map : lin_consumption list;
+```
+
+**New query functions:**
+```ocaml
+val linear_consumptions : t -> lin_consumption list
+(** All linear bindings in the last-analysed document. *)
+
+val inlay_hints_for_linear : t -> Lsp.Types.InlayHint.t list
+(** Convert lin_map to LSP InlayHint records. *)
+```
+
+**Test scaffolding:**
+```ocaml
+(* Test: linear value consumed once — one consumption record, no leak *)
+let src = {|
+mod M do
+  fn use_linear(x: lin Int): Int do consume(x) end
+end
+|} in
+let a = analyse src in
+let lins = An.linear_consumptions a in
+Alcotest.(check int) "one linear binding" 1 (List.length lins);
+Alcotest.(check bool) "consumed" true (Option.is_some (List.hd lins).lc_consumed)
+```
+
+**Complexity:** Medium. Requires threading consumption-span recording through the typechecker's linear checking pass. The hard part is multi-branch paths (if/match) where a linear value must be consumed on every branch — the per-branch analysis is already done by the typechecker; we just need to surface the spans.
+
+---
+
+#### Feature C — Session Type Protocol State Tracking
+
+**What:** Show the current protocol state at each point in a session-typed channel interaction inline. After `Chan.send(ch, msg)`, an inlay hint shows that the channel's protocol advanced from `!Int.?String.end` to `?String.end`. Hovering a channel variable shows its remaining protocol.
+
+**Why:** Session types are expressive but opaque — the protocol lives in the type signature, not in the code. Inline state tracking makes session types actually usable in practice.
+
+**Protocol:**
+- `textDocument/inlayHints` — after each channel operation, emit the residual protocol type.
+- `textDocument/hover` (extend existing) — hover on a channel variable shows current protocol type, not just the raw session type.
+
+**Implementation sketch:**
+1. During type inference, when the typechecker processes a channel operation (send/receive/close), record the pre- and post-operation session types alongside the AST span.
+2. Store as `session_state_map : Ast.span -> { before: Tc.ty; after: Tc.ty }`.
+3. For inlay hints: at the end of each channel-op span, emit the `after` type formatted with `Tc.pp_ty`.
+4. For hover: look up the channel variable name in `session_state_map` for the innermost span; show the current `before` type.
+
+**New analysis fields:**
+```ocaml
+type session_state = {
+  ss_before : Tc.ty;
+  ss_after  : Tc.ty;
+  ss_op     : string;   (* "send" | "recv" | "close" *)
+}
+
+(* in Analysis.t *)
+session_map : session_state Ast.Span.Map.t;
+```
+
+**Test scaffolding:**
+```ocaml
+(* Test: after a send, protocol advances *)
+let src = {|
+mod M do
+  fn proto(ch: Chan(!Int.end)): Unit do
+    Chan.send(ch, 42)
+  end
+end
+|} in
+let a = analyse src in
+(* Find the send span, check that after-state is `end` *)
+let states = An.session_states_at a ~line ~character in
+Alcotest.(check string) "after send, protocol is end"
+  "end" (Tc.pp_ty (List.hd states).ss_after)
+```
+
+**Complexity:** High. Requires threading span-annotated session type state through the typechecker. Session type unfolding (unfold a recursive session type at each step) must be recorded rather than discarded. This is the highest-complexity feature in this plan — implement after the typechecker is stable.
+
+---
+
+#### Feature D — Interface Impl Navigation
+
+**What:** Go-to-definition on an interface method call jumps to the specific impl for that concrete type. E.g., clicking `==` on a `Color` value jumps to `impl Eq for Color`, not to the `Eq` interface declaration.
+
+**Why:** With mono-time dispatch, the compiler knows exactly which impl applies — exposing that to the user makes code navigation much more precise.
+
+**Protocol:**
+- Extend `textDocument/definition` — when the resolved name is an interface method and there's a concrete type at the call site, return the impl declaration span instead of (or in addition to) the interface declaration span.
+- `textDocument/implementation` — list all impls for an interface method across the workspace.
+
+**Implementation sketch:**
+1. After type-checking, the `impl_tbl` maps `(interface_name, type_name) → impl_decl`. Impl declarations must have their source spans recorded (add `impl_span : Ast.span` to the impl table entry).
+2. In `definition_at`: if the target resolves to an interface method name and the enclosing expression has a concrete inferred type, look up `impl_tbl[(interface, concrete_type)]` and return its span.
+3. In `implementation_at`: given an interface method name, return all `impl_tbl` entries for that method name.
+
+**New analysis fields:**
+```ocaml
+(* Extend existing impl_tbl entry *)
+type impl_entry = {
+  ie_interface : string;
+  ie_type      : string;
+  ie_span      : Ast.span;   (* declaration span of the impl block *)
+  ie_methods   : (string * Ast.span) list;  (* method name → method span *)
+}
+
+(* in Analysis.t *)
+impl_map : impl_entry list;
+```
+
+**New query functions:**
+```ocaml
+val impl_for : t -> interface:string -> ty:string -> impl_entry option
+val impls_of_method : t -> method_name:string -> impl_entry list
+```
+
+**Test scaffolding:**
+```ocaml
+(* Test: definition on `==` for Color jumps to Color's Eq impl *)
+let src = {|
+mod M do
+  type Color = Red | Green | Blue
+  impl Eq for Color do
+    fn eq(a: Color, b: Color): Bool do a == b end
+  end
+  fn main() do Red == Blue end
+end
+|} in
+let a = analyse src in
+let (line, col) = pos_of src "Red == Blue" |> advance_to "==" in
+let defs = An.definition_at a ~line ~character:col in
+(* Should point into the impl block, not the Eq interface *)
+Alcotest.(check bool) "points to impl" true
+  (List.exists (fun d -> span_contains_text d "impl Eq for Color") defs)
+```
+
+**Complexity:** Low-Medium. The impl resolution logic already exists in the typechecker; the main work is (a) recording impl declaration spans during the typecheck pass and (b) wiring the `definition_at` lookup to prefer the concrete impl span when a concrete type is known.
+
+---
+
+#### Feature E — Pipe Chain Type Flow
+
+**What:** Show the type at each step of a `|>` pipeline as inlay hints. E.g.:
+
+```
+data |> filter(pred) |> map(f) |> take(5)
+     ^ List(Int)     ^ List(Int) ^ List(String) ^ List(String)
+```
+
+**Why:** March is pipe-heavy (like Elixir). Seeing types flow through the chain makes it easy to spot mismatches without reading deeply nested type error messages.
+
+**Protocol:**
+- `textDocument/inlayHints` — after each `|>` operator, emit a `: Type` inlay hint.
+
+**Implementation sketch:**
+1. The desugarer transforms `a |> f |> g` into nested `EApp` nodes. The typechecker annotates each `EApp` with its result type (in the `type_map`).
+2. Walk the `type_map` for spans that correspond to `EApp` nodes produced by pipe desugaring. The desugarer should tag these nodes (e.g., with a boolean `from_pipe : bool` on `EApp`) or we can identify them by checking whether the span of the outer `EApp` immediately follows a `|>` token.
+3. Emit a `: T` inlay hint after the `|>` token at the start of each pipe step.
+
+**New query function:**
+```ocaml
+val pipe_type_hints : t -> Lsp.Types.InlayHint.t list
+(** All pipe-step type annotations as LSP inlay hints. *)
+```
+
+**Test scaffolding:**
+```ocaml
+(* Test: pipeline of two steps produces two inlay hints *)
+let src = {|
+mod M do
+  fn main() do
+    [1, 2, 3] |> List.map(fn x -> x + 1) |> List.length
+  end
+end
+|} in
+let a = analyse src in
+let hints = An.pipe_type_hints a in
+(* One hint after each |> = 2 hints *)
+Alcotest.(check int) "two pipe hints" 2 (List.length hints);
+(* Second hint should be Int (result of List.length) *)
+let last_hint = List.nth hints 1 in
+Alcotest.(check string) "last pipe type is Int" "Int"
+  (match last_hint.Lsp.Types.InlayHint.label with
+   | `String s -> s | _ -> "?")
+```
+
+**Note on desugarer tagging:** The cleanest implementation adds a `pipe_steps : Ast.span list` field to `Analysis.t` during the desugar pass, recording the span of each expression produced by a `|>`. This avoids any heuristic span-matching in `analysis.ml`.
+
+**Complexity:** Low-Medium. The type information is already in `type_map`; the main challenge is correctly identifying which `EApp` spans came from pipe desugaring. Tagging in the desugarer is ~5 lines.
+
+---
+
+### P2 — Nice to Have
+
+---
+
+#### Feature F — Semantic Tokens
+
+**What:** Rich compiler-driven syntax highlighting that supersedes Tree-sitter regex patterns. Distinguishes linear variables, actor names, constructor names, interface names, and type variables from ordinary identifiers.
+
+**Protocol:** `textDocument/semanticTokens/full` — returns a flat encoded array of `(line, startChar, length, tokenType, tokenModifiers)` tuples.
+
+**Implementation sketch:**
+1. Define a token legend matching Lsp.Types.SemanticTokensLegend: token types include `variable`, `function`, `type`, `interface`, `enumMember` (constructors), `macro` (actors), plus custom `linearVariable` if client supports it.
+2. Walk the `type_map` and `def_map` to classify each use-site span by its kind.
+3. Encode into the LSP-required delta-encoded integer array.
+4. Register the capability in `server.ml` and add a handler for `textDocument/semanticTokens/full`.
+
+**Test scaffolding:**
+```ocaml
+(* Test: 'add' classified as function token, 'Int' as type token *)
+let a = analyse src in
+let tokens = An.semantic_tokens a in
+let add_tok = List.find (fun t -> t.st_text = "add") tokens in
+Alcotest.(check string) "add is function" "function" add_tok.st_type
+```
+
+**Complexity:** Medium. The LSP encoding format (delta encoding) is fiddly; use the `lsp` library's helpers. The classification logic is straightforward given `def_map` and `type_map`.
+
+---
+
+#### Feature G — Code Lens
+
+**What:** Show contextual metadata above declarations:
+- Functions: test count (if any test references this function by name)
+- Types: count of interface impls for this type
+- Actors: count of message handlers, supervision depth
+- `derive(...)`: which traits are auto-derived
+
+**Protocol:** `textDocument/codeLens` — returns a list of `CodeLens` (range + command + optional data).
+
+**Implementation sketch:**
+1. For test counts: scan `def_map` for functions whose names start with `test_` and that call a given function; group by called function name.
+2. For impl counts: use `impl_map` from Feature D; for each type declaration, count entries.
+3. For actor stats: use `actor_map` from Feature A.
+4. Emit each code lens with a `march.showRefs` command that the editor can invoke.
+
+**Test scaffolding:**
+```ocaml
+let lenses = An.code_lenses a in
+let type_lens = List.find (fun l -> l.cl_label = "2 impls") lenses in
+Alcotest.(check bool) "Color has 2 impl lenses" true (Option.is_some type_lens)
+```
+
+**Complexity:** Low. Most data is already collected by Features A and D; this is primarily a rendering pass.
+
+---
+
+#### Feature H — Call Hierarchy
+
+**What:** Show incoming and outgoing calls for any function. Essential for understanding actor message flows and tracing data through pipelines.
+
+**Protocol:**
+- `textDocument/prepareCallHierarchy` — resolve the item at cursor.
+- `callHierarchy/incomingCalls` — who calls this function.
+- `callHierarchy/outgoingCalls` — what this function calls.
+
+**Implementation sketch:**
+1. Build `call_graph : string -> string list` (callee → callers) by walking the `use_map` for function-name uses that appear inside another function body. The enclosing function can be determined by checking which `fn_def` span contains the use span.
+2. `prepare_call_hierarchy_at` resolves the name at cursor to a function definition (via `def_map`), returns a `CallHierarchyItem`.
+3. `incoming_calls` looks up `call_graph[name]` → caller function items.
+4. `outgoing_calls` walks the function body spans in `use_map` to find callees.
+
+**New analysis field:**
+```ocaml
+(* in Analysis.t *)
+call_graph : (string * string list) list;  (* fn_name -> list of callee names *)
+enclosing_fn : Ast.span -> string option;  (* span -> enclosing function name *)
+```
+
+**Test scaffolding:**
+```ocaml
+(* Test: main calls add twice — outgoing calls for main includes add *)
+let calls = An.outgoing_calls a "main" in
+Alcotest.(check bool) "main calls add" true (List.mem "add" calls)
+```
+
+**Complexity:** Medium. The call graph traversal requires mapping use-site spans to their enclosing function, which means sorting `fn_def` spans and doing a containment check — O(n log n) on first build, then O(1) per lookup with a span tree.
+
+---
+
+#### Feature I — Workspace Symbols
+
+**What:** Fuzzy-find any symbol (function, type, constructor, interface, actor) across all open/indexed March files in the workspace.
+
+**Protocol:** `workspace/symbol` — given a query string, return matching `SymbolInformation` records.
+
+**Implementation sketch:**
+1. Maintain a workspace-level index (`WorkspaceIndex.t`) that aggregates `def_map` entries from all analysed files. Update on `textDocument/didChange`.
+2. On `workspace/symbol` request, run a simple substring or trigram match against all indexed symbol names.
+3. Return `SymbolInformation` with kind mapped from March's declaration kind (`DFn → Function`, `DType → Class`, `DInterface → Interface`, etc.).
+
+**New module:** `lsp/lib/workspace_index.ml` (the only feature that warrants a new file, since it manages cross-file state).
+
+**Test scaffolding:**
+```ocaml
+(* Test: query "add" returns the add function from the indexed file *)
+let idx = WorkspaceIndex.empty |> WorkspaceIndex.add_file "test.march" a in
+let results = WorkspaceIndex.query idx "add" in
+Alcotest.(check bool) "found add" true
+  (List.exists (fun r -> r.wi_name = "add") results)
+```
+
+**Complexity:** Low. Substring matching is fast enough for typical workspace sizes. Trigram indexing can be added later if needed.
+
+---
+
+### P3 — Future
+
+---
+
+#### Feature J — Debug Adapter Protocol
+
+**What:** Step-through debugging for the March interpreter, with actor-aware features: step into an actor's message handler, inspect mailbox state, visualize actor lifecycle.
+
+**Protocol:** DAP (Debug Adapter Protocol) — a separate TCP server from the LSP server, launched alongside the interpreter. Implements `initialize`, `launch`, `setBreakpoints`, `continue`, `next`, `stepIn`, `stackTrace`, `variables`, `evaluate`.
+
+**Implementation sketch:**
+1. Add a `--dap` flag to `bin/main.ml` that starts a DAP server on a port instead of running the interpreter directly.
+2. Instrument `eval.ml` with a hook table: before each `eval_expr` call, check if the current span has a breakpoint set; if so, pause and notify the DAP client.
+3. For actor debugging: extend the hook to also pause on actor message receipt and expose the mailbox queue as a DAP `variable` scope.
+
+**Complexity:** Very High. DAP is a separate protocol (JSON-RPC over stdin/stdout or TCP). Actor debugging requires the evaluator to be re-entrant (pause mid-execution) — incompatible with the current recursive tree-walk evaluator. This feature requires either a trampoline-style evaluator or cooperative coroutines via OCaml 5's effects. Defer until after the compiler is code-generating.
+
+---
+
+#### Feature K — Type Hierarchy
+
+**What:** Show subtype/supertype relationships for interfaces. E.g., if `Ord` extends `Eq`, navigate up/down the hierarchy. Show all types that implement a given interface.
+
+**Protocol:**
+- `typeHierarchy/supertypes` — interfaces that a given interface extends.
+- `typeHierarchy/subtypes` — types/interfaces that extend a given interface.
+- `textDocument/prepareTypeHierarchy` — resolve the item at cursor.
+
+**Implementation sketch:**
+1. Build `interface_hierarchy : string -> string list` (interface → list of super-interfaces it extends) during the typecheck pass.
+2. Build `interface_impls : string -> string list` (interface → list of concrete types that implement it) from `impl_tbl`.
+3. Wire into LSP handlers.
+
+**Complexity:** Medium. The data is already present in the typechecker; the implementation is mostly wiring into LSP protocol types. Depends on Feature D (impl navigation) being done first.
+
+---
+
+### Implementation Order
+
+| Priority | Feature | Depends on | Estimated effort |
+|----------|---------|-----------|-----------------|
+| P1 | D — Interface Impl Nav | `impl_tbl` spans | 1–2 days |
+| P1 | E — Pipe Chain Types | Desugarer tagging | 1–2 days |
+| P1 | B — Linear Consumption | `lin_entry` threading | 2–3 days |
+| P1 | A — Actor Topology | AST walk | 2–3 days |
+| P1 | C — Session Types | Typechecker threading | 4–6 days |
+| P2 | I — Workspace Symbols | None | 1 day |
+| P2 | G — Code Lens | A, D | 1 day |
+| P2 | F — Semantic Tokens | `type_map`, `def_map` | 2 days |
+| P2 | H — Call Hierarchy | `use_map` | 2 days |
+| P3 | K — Type Hierarchy | D, typechecker | 2–3 days |
+| P3 | J — Debug Adapter | Evaluator rewrite | weeks |
