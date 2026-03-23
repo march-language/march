@@ -1,0 +1,278 @@
+-- Decimal module: fixed-point decimal arithmetic for financial math.
+--
+-- Representation: Decimal(coefficient, scale) where
+--   coefficient : BigInt  — the unscaled integer value
+--   scale       : Int     — number of decimal places (>= 0)
+--
+-- Examples:
+--   1.23  = Decimal(BigInt(123), 2)
+--   -0.01 = Decimal(BigInt(-1),  2)
+--   100   = Decimal(BigInt(100), 0)
+--
+-- All arithmetic normalizes to the higher scale of the two operands,
+-- avoiding loss of precision. Round uses half-up (0.5 rounds away from zero).
+--
+-- Interface implementations:
+--   impl Eq(Decimal)   — eq/2
+--   impl Ord(Decimal)  — compare/2
+--   impl Show(Decimal) — show/1
+
+mod Decimal do
+
+type Decimal = Decimal(BigInt, Int)
+
+-- ---- Internal helpers ----
+
+fn pow10(n : Int) : BigInt do
+  fn go(i : Int, acc : BigInt) : BigInt do
+    if i <= 0 then acc
+    else go(i - 1, BigInt.mul(acc, BigInt.from_int(10)))
+  end
+  go(n, BigInt.from_int(1))
+end
+
+-- Scale up a coefficient by 10^n
+fn scale_up(coef : BigInt, n : Int) : BigInt do
+  if n <= 0 then coef
+  else BigInt.mul(coef, pow10(n))
+end
+
+-- Align two decimals to the same scale, returning (coef_a, coef_b, scale)
+fn align(a : Decimal, b : Decimal) : (BigInt, BigInt, Int) do
+  match a do
+  | Decimal(ca, sa) ->
+    match b do
+    | Decimal(cb, sb) ->
+      if sa == sb then (ca, cb, sa)
+      else if sa > sb then
+        (ca, scale_up(cb, sa - sb), sa)
+      else
+        (scale_up(ca, sb - sa), cb, sb)
+      end
+    end
+  end
+end
+
+-- ---- Construction ----
+
+doc "Creates a Decimal from a string like \"1.23\", \"-0.5\", \"100\"."
+pub fn from_string(s : String) : Decimal do
+  -- Find the decimal point position
+  fn find_dot(chars : List(Int), pos : Int) : Option(Int) do
+    match chars do
+    | Nil -> None
+    | Cons(c, rest) ->
+      -- ASCII 46 = '.'
+      if c == 46 then Some(pos)
+      else find_dot(rest, pos + 1)
+    end
+  end
+  let chars = string_to_chars(s)
+  match find_dot(chars, 0) do
+  | None ->
+    -- No decimal point — scale 0
+    Decimal(BigInt.from_int(string_to_int(s)), 0)
+  | Some(dot_pos) ->
+    let total_len = string_length(s)
+    let scale = total_len - dot_pos - 1
+    -- Remove the dot and parse as integer
+    let int_part = string_slice(s, 0, dot_pos)
+    let frac_part = string_slice(s, dot_pos + 1, total_len)
+    let combined_str =
+      if int_part == "-" then "-" ++ frac_part
+      else if int_part == "" then frac_part
+      else int_part ++ frac_part
+    Decimal(BigInt.from_int(string_to_int(combined_str)), scale)
+  end
+end
+
+doc "Creates a Decimal from a BigInt with a given scale."
+pub fn from_bigint(n : BigInt, scale : Int) : Decimal do
+  Decimal(n, if scale < 0 then 0 else scale)
+end
+
+doc "Creates a Decimal from a native Int (scale 0)."
+pub fn from_int(n : Int) : Decimal do
+  Decimal(BigInt.from_int(n), 0)
+end
+
+-- ---- Arithmetic ----
+
+doc "Adds two Decimals. Result has the larger of the two scales."
+pub fn add(a : Decimal, b : Decimal) : Decimal do
+  let (ca, cb, s) = align(a, b)
+  Decimal(BigInt.add(ca, cb), s)
+end
+
+doc "Subtracts b from a. Result has the larger of the two scales."
+pub fn sub(a : Decimal, b : Decimal) : Decimal do
+  let (ca, cb, s) = align(a, b)
+  Decimal(BigInt.sub(ca, cb), s)
+end
+
+doc "Multiplies two Decimals. Result scale is the sum of the two scales."
+pub fn mul(a : Decimal, b : Decimal) : Decimal do
+  match a do
+  | Decimal(ca, sa) ->
+    match b do
+    | Decimal(cb, sb) ->
+      Decimal(BigInt.mul(ca, cb), sa + sb)
+    end
+  end
+end
+
+doc """
+Divides a by b to `precision` decimal places using truncation.
+Panics if b is zero.
+"""
+pub fn div(a : Decimal, b : Decimal, precision : Int) : Decimal do
+  match a do
+  | Decimal(ca, sa) ->
+    match b do
+    | Decimal(cb, sb) ->
+      if BigInt.is_zero(cb) then panic("Decimal.div: division by zero")
+      else do
+        -- Scale up numerator to get desired precision: (ca * 10^(precision+sb)) / cb
+        let scale_factor = scale_up(ca, precision + sb)
+        let quotient = BigInt.div(scale_factor, cb)
+        Decimal(quotient, sa + precision)
+      end
+    end
+  end
+end
+
+doc """
+Rounds a Decimal to `places` decimal places using half-up rounding
+(0.5 rounds away from zero).
+"""
+pub fn round(d : Decimal, places : Int) : Decimal do
+  match d do
+  | Decimal(coef, scale) ->
+    if scale <= places then d
+    else do
+      let diff = scale - places
+      let divisor = pow10(diff)
+      -- Check the first dropped digit for rounding
+      let half_divisor = pow10(diff - 1)
+      let remainder = BigInt.mod_(coef, divisor)
+      let first_dropped = BigInt.div(remainder, half_divisor)
+      let five = BigInt.from_int(5)
+      let quotient = BigInt.div(coef, divisor)
+      -- Add 1 if first_dropped >= 5 (half-up)
+      let rounded =
+        if BigInt.gte(BigInt.abs(first_dropped), five) then
+          if BigInt.is_negative(coef) then BigInt.sub(quotient, BigInt.from_int(1))
+          else BigInt.add(quotient, BigInt.from_int(1))
+        else quotient
+      Decimal(rounded, places)
+    end
+  end
+end
+
+-- ---- Comparison ----
+
+doc "Compares two Decimals. Returns -1, 0, or 1."
+pub fn compare(a : Decimal, b : Decimal) : Int do
+  let (ca, cb, _) = align(a, b)
+  BigInt.compare(ca, cb)
+end
+
+doc "Returns true if two Decimals are equal."
+pub fn eq(a : Decimal, b : Decimal) : Bool do
+  compare(a, b) == 0
+end
+
+doc "Returns true if a < b."
+pub fn lt(a : Decimal, b : Decimal) : Bool do
+  compare(a, b) < 0
+end
+
+doc "Returns true if a > b."
+pub fn gt(a : Decimal, b : Decimal) : Bool do
+  compare(a, b) > 0
+end
+
+-- ---- Conversion ----
+
+doc "Converts a Decimal to its string representation (e.g. \"1.23\", \"-0.50\")."
+pub fn to_string(d : Decimal) : String do
+  match d do
+  | Decimal(coef, scale) ->
+    let coef_str = BigInt.to_string(coef)
+    if scale == 0 then coef_str
+    else do
+      -- Determine sign
+      let is_neg = BigInt.is_negative(coef)
+      let abs_str = if is_neg then string_slice(coef_str, 1, string_length(coef_str)) else coef_str
+      let abs_len = string_length(abs_str)
+      let result =
+        if abs_len <= scale then do
+          -- Need to left-pad with zeros after "0."
+          fn pad(n : Int, s : String) : String do
+            if n <= 0 then s else pad(n - 1, "0" ++ s)
+          end
+          let padded = pad(scale - abs_len + 1, abs_str)
+          let int_part = string_slice(padded, 0, 1)
+          let frac_part = string_slice(padded, 1, string_length(padded))
+          int_part ++ "." ++ frac_part
+        end
+        else do
+          let split_at = abs_len - scale
+          let int_part = string_slice(abs_str, 0, split_at)
+          let frac_part = string_slice(abs_str, split_at, abs_len)
+          int_part ++ "." ++ frac_part
+        end
+      if is_neg then "-" ++ result else result
+    end
+  end
+end
+
+doc "Returns the scale (number of decimal places) of a Decimal."
+pub fn scale(d : Decimal) : Int do
+  match d do
+  | Decimal(_, s) -> s
+  end
+end
+
+doc "Returns the unscaled BigInt coefficient."
+pub fn coefficient(d : Decimal) : BigInt do
+  match d do
+  | Decimal(c, _) -> c
+  end
+end
+
+doc "Returns true if the Decimal is zero."
+pub fn is_zero(d : Decimal) : Bool do
+  match d do
+  | Decimal(c, _) -> BigInt.is_zero(c)
+  end
+end
+
+doc "Returns the absolute value."
+pub fn abs(d : Decimal) : Decimal do
+  match d do
+  | Decimal(c, s) -> Decimal(BigInt.abs(c), s)
+  end
+end
+
+-- ---- Interface implementations ----
+
+impl Eq(Decimal) do
+  fn eq(a, b) do
+    Decimal.eq(a, b)
+  end
+end
+
+impl Ord(Decimal) do
+  fn compare(a, b) do
+    Decimal.compare(a, b)
+  end
+end
+
+impl Show(Decimal) do
+  fn show(d) do
+    Decimal.to_string(d)
+  end
+end
+
+end
