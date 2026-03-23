@@ -1,0 +1,17 @@
+(library
+ (name march_lsp_lib)
+ (ocamlopt_flags (:standard -w -7))
+ (flags (:standard -w -7))
+ (libraries
+  march_ast
+  march_parser
+  march_lexer
+  march_desugar
+  march_typecheck
+  march_errors
+  march_format
+  linol.lsp
+  linol
+  linol-lwt
+  lwt
+  lwt.unix))
