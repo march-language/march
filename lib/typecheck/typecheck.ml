@@ -716,6 +716,8 @@ let builtin_bindings : (string * scheme) list =
     ("println",        Mono (TArrow (t_string, t_unit)));
     ("print_int",      Mono (TArrow (t_int,    t_unit)));
     ("print_float",    Mono (TArrow (t_float,  t_unit)));
+    (* Tap bus: ∀a. a -> a  (sends value to tap bus, returns it unchanged) *)
+    ("tap",            poly1 (fun a -> TArrow (a, a)));
     ("int_to_string",  Mono (TArrow (t_int,    t_string)));
     ("float_to_string",Mono (TArrow (t_float,  t_string)));
     ("bool_to_string", Mono (TArrow (t_bool,   t_string)));

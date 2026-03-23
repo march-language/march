@@ -152,6 +152,32 @@ let current_doc_prefix () =
   | []    -> ""
   | parts -> String.concat "." (List.rev parts) ^ "."
 
+(* ------------------------------------------------------------------ *)
+(* Tap bus — thread-safe value inspector (Clojure tap> model)         *)
+(* ------------------------------------------------------------------ *)
+
+(** The global tap queue.  Threads push values here via [tap]; the REPL
+    drains it after each expression evaluation to display tapped values. *)
+let tap_mutex : Mutex.t = Mutex.create ()
+let tap_queue : value Queue.t = Queue.create ()
+
+(** Push [v] onto the tap bus.  Thread-safe: may be called from actor threads. *)
+let tap_push (v : value) : unit =
+  Mutex.lock tap_mutex;
+  Queue.push v tap_queue;
+  Mutex.unlock tap_mutex
+
+(** Drain all pending tap values from the queue and return them in FIFO order.
+    Thread-safe.  Called by the REPL after each expression evaluation. *)
+let tap_drain () : value list =
+  Mutex.lock tap_mutex;
+  let acc = ref [] in
+  while not (Queue.is_empty tap_queue) do
+    acc := Queue.pop tap_queue :: !acc
+  done;
+  Mutex.unlock tap_mutex;
+  List.rev !acc
+
 let lookup_doc (key : string) : string option =
   Hashtbl.find_opt doc_registry key
 
@@ -1708,6 +1734,10 @@ let base_env : env =
   ; ("print_float", VBuiltin ("print_float", function
         | [VFloat f] -> print_float f; VUnit
         | _ -> eval_error "print_float: expected float"))
+    (* Tap bus — Clojure tap> model for non-intrusive value inspection *)
+  ; ("tap", VBuiltin ("tap", function
+        | [v] -> tap_push v; v
+        | _ -> eval_error "tap: expected exactly one argument"))
     (* Conversions *)
   ; ("bool_to_string", VBuiltin ("bool_to_string", function
         | [VBool b] -> VString (string_of_bool b)

@@ -764,7 +764,12 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                       Printf.eprintf "jit error: %s\n%!" msg
                     | exn ->
                       Printf.eprintf "error: %s\n%!" (Printexc.to_string exn))))
-          end)
+          end;
+          (* Drain any values that were tap()ed during evaluation. *)
+          List.iter (fun v ->
+            let vs = March_eval.Eval.value_to_string_pretty v in
+            Printf.printf "tap> %s\n%!" vs
+          ) (March_eval.Eval.tap_drain ()))
      with
      | March_lexer.Lexer.Lexer_error msg ->
        Buffer.clear buf; first_line := true;
@@ -1532,6 +1537,12 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
               (Printf.sprintf ":save %s — session tracking not yet implemented" path)
         | src when String.trim src = "" -> ()
         | src -> process_src src);
+       (* Drain any values that were tap()ed during evaluation. *)
+       List.iter (fun v ->
+         let vs = March_eval.Eval.value_to_string_pretty v in
+         add_line Notty.A.(fg (rgb_888 ~r:255 ~g:165 ~b:0))
+           (Printf.sprintf "tap> %s" vs)
+       ) (March_eval.Eval.tap_drain ());
        refresh_scope ();
        render_frame ()
      | Input.HistoryPrev ->

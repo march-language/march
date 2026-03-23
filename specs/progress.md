@@ -204,8 +204,8 @@ march/
 ## Current State (as of 2026-03-23)
 
 - **Builds clean**
-- **1095 tests across 8 suites; 0 failures** (app entry point + HAMT Map/Set/Array + REPL JIT fix + 5 new LSP features):
-  - `test_march.exe`: 880 tests, all passing (app entry point: app keyword/parser/desugar/typecheck/eval; spec_construction group; HAMT Map/Set/Array: 26 new tests; REPL JIT fix)
+- **1106 tests across 8 suites; 0 failures** (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + REPL JIT fix + 5 new LSP features):
+  - `test_march.exe`: 891 tests, all passing (app entry point: 8 new; HAMT Map/Set/Array: 26 new; tap bus: 6 new; repl_compiler_parity: 5 new; REPL JIT fix)
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests, passing (formatter round-trip)
@@ -228,6 +228,8 @@ march/
 - **Opaque type enforcement** — `sig Name do type T end` hides representation; callers cannot access internal structure through the abstraction boundary
 - **Multi-error parser recovery** — Menhir `error` token recovery; multiple syntax errors per file reported
 - **Clojure-level REPL quality** — `:reload`, `:inspect/:i <expr>`, pretty-printer (depth/collection truncation), error recovery (env preserved on typecheck error), REPL/compiler parity tests
+- **`tap` builtin** — `tap(v)` sends `v` to a global thread-safe tap bus and returns `v`; REPL drains and displays tapped values after each eval (orange in TUI, `tap> v` in simple mode). Type: `∀a. a → a`. Safe for actor-context use.
+- **REPL/compiler parity harness** — `check_parity` helper + `repl_compiler_parity` test group; runs expressions through both interpreter and JIT, compares outputs; JIT tests skip gracefully when clang is absent
 - **Type-qualified constructor names** — `build_ctor_info` in `llvm_emit.ml` uses `(type_name, ctor_name)` pairs; constructor collisions across ADTs eliminated
 - **Actor handler return type checking** — handlers statically verified to return correct state record type
 - **Linear/affine propagation through record fields** — `EField` access on a linear field consumes it; `EUpdate` respects per-field linearity

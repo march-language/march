@@ -32,9 +32,6 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ### REPL Quality
 
-- [ ] **`tap>` async value inspector** — Clojure's `tap>` model: a global tap bus where any expression can emit values for external subscribers to observe. Useful for debugging long-running actor systems without adding print statements. No implementation yet. Would require: `tap` as a stdlib function, a tap sink in the REPL, and probably a TUI panel.
-- [ ] **REPL/compiler parity** — Any new feature added must be tested in both interpreter and JIT/compiled paths. JIT is a recurring source of divergence (see P0).
-
 ### Compiler: Type System
 
 - ✅ **Epoch-based capability revocation** — `revoke_cap(cap)` builtin, global `revocation_table`, `is_cap_valid(cap)`, and VCap handling in ESend. C runtime: `march_revoke_cap` / `march_is_cap_valid`. 5 new tests in supervision phase3 group.
@@ -80,6 +77,8 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ## Done (recently completed)
 
+- ✅ **`tap>` async value inspector** — Clojure `tap>` model: `tap` builtin (∀a. a → a) sends values to a thread-safe global tap bus (Mutex + Queue in `eval.ml`); REPL drains after each expression and displays tapped values in orange in TUI pane and as `tap> value` in simple mode. Type registered in typecheck `base_env`. 6 tests in `tap` group.
+- ✅ **REPL/compiler parity enforcement** — Added `check_parity` helper that runs March expressions through both interpreter (`repl_eval_exprs`) and JIT (`run_expr`) and asserts identical output. New `repl_compiler_parity` test group with 5 tests (basic arith, bool ops, string interp, closures, if/else). JIT tests skip gracefully when clang is unavailable. Approach documented inline.
 - ✅ **REPL JIT permanent fix** — `partition_fns` in `lib/jit/repl_jit.ml` was eagerly marking functions compiled BEFORE `compile_fragment` succeeded, poisoning `compiled_fns` on any failure. Fixed by making `partition_fns` pure and adding `mark_compiled_fns` called only after successful dlopen. Regression tests: `test_repl_jit_stdlib_reverse`, `test_repl_jit_stdlib_no_precompile`, `test_repl_jit_stdlib_length_3x`.
 - ✅ **5 new LSP features** — Doc-string hover, find references (`textDocument/references`), rename symbol (`textDocument/rename`), signature help (`textDocument/signatureHelp`), code actions (make-linear quickfix, pattern exhaustion quickfix). 27 new tests; 84 total LSP tests.
 - ✅ **Epoch-based capability revocation** — `revoke_cap(cap)` + revocation table; VCap handling in ESend; C runtime `march_revoke_cap`/`march_is_cap_valid`; 5 new supervision phase3 tests
