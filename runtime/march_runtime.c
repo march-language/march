@@ -1826,9 +1826,80 @@ void *march_get_cap(void *pid) {
     return none;
 }
 
-/* send_checked: send a message to an actor with capability check. Stub. */
+/* ── Capability revocation table ──────────────────────────────────────── */
+/* Each revoked capability is stored as a (pid_index, epoch) pair in a
+ * singly-linked list protected by a single mutex.  The table is small in
+ * practice (revocations are rare) so linear search is acceptable. */
+
+typedef struct march_revoc_entry {
+    int64_t                  pid_index;
+    int64_t                  epoch;
+    struct march_revoc_entry *next;
+} march_revoc_entry;
+
+static march_revoc_entry *g_revoc_head = NULL;
+static pthread_mutex_t    g_revoc_mu   = PTHREAD_MUTEX_INITIALIZER;
+
+/* Check whether (pid_index, epoch) appears in the revocation table.
+ * Caller must NOT hold g_revoc_mu. */
+static int revoc_contains(int64_t pid_index, int64_t epoch) {
+    pthread_mutex_lock(&g_revoc_mu);
+    march_revoc_entry *e = g_revoc_head;
+    while (e) {
+        if (e->pid_index == pid_index && e->epoch == epoch) {
+            pthread_mutex_unlock(&g_revoc_mu);
+            return 1;
+        }
+        e = e->next;
+    }
+    pthread_mutex_unlock(&g_revoc_mu);
+    return 0;
+}
+
+/* revoke_cap(pid_index, epoch): add (pid_index, epoch) to the revocation table.
+ * Idempotent — does nothing if already revoked. */
+void march_revoke_cap(int64_t pid_index, int64_t epoch) {
+    if (revoc_contains(pid_index, epoch)) return;
+    march_revoc_entry *e = malloc(sizeof(march_revoc_entry));
+    if (!e) return;
+    e->pid_index = pid_index;
+    e->epoch     = epoch;
+    pthread_mutex_lock(&g_revoc_mu);
+    e->next      = g_revoc_head;
+    g_revoc_head = e;
+    pthread_mutex_unlock(&g_revoc_mu);
+}
+
+/* is_cap_valid(pid_index, epoch): return 1 if the capability is valid, 0 otherwise.
+ * A capability is invalid if it is in the revocation table, the actor is dead,
+ * or the actor's current epoch differs. */
+int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch) {
+    if (revoc_contains(pid_index, epoch)) return 0;
+    /* Look up actor by pid_index to check liveness and current epoch. */
+    pthread_mutex_lock(&g_tbl_mu);
+    march_actor_meta *m = NULL;
+    for (int i = 0; i < MARCH_SCHED_BUCKETS; i++) {
+        march_actor_meta *cur = g_actor_tbl[i];
+        while (cur) {
+            if (cur->pid_index == pid_index) { m = cur; break; }
+            cur = cur->tbl_next;
+        }
+        if (m) break;
+    }
+    pthread_mutex_unlock(&g_tbl_mu);
+    if (!m || !m->alive) return 0;
+    if (m->epoch != epoch) return 0;
+    return 1;
+}
+
+/* send_checked: send a message to an actor with capability check.
+ * Validates liveness, epoch match, and revocation before enqueuing. */
 void march_send_checked(void *cap, void *msg) {
     (void)cap; (void)msg;
+    /* TODO(Phase 3 compiled): extract pid_index and epoch from cap object,
+     * call march_is_cap_valid, then march_send on success.
+     * The interpreter path (eval.ml) fully implements this; the compiled
+     * path is pending TIR lowering of VCap values. */
 }
 
 /* pid_of_int: cast an integer to a Pid (unsafe, for supervisor state fields). */

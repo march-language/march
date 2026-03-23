@@ -48,8 +48,8 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ### Compiler: Type System
 
-- [ ] **Epoch-based capability revocation** — `send(cap, msg)` does not yet validate the epoch against a revocation list. The `Cap(A, e)` type carries an epoch parameter but it is not checked at runtime in `eval.ml`. Stubbed in Phase 1. Full implementation requires a revocation table and `(pid, epoch)` comparison in `eval.ml` and the compiled runtime.
-- [ ] **Supervisor restart policies: `rest_for_one`/`one_for_all`** — `max_restarts` window enforcement is implemented. The `restart_policy` field (`one_for_one` only currently) should support `rest_for_one` (restart child and all children started after it) and `one_for_all` (restart all children on any failure), as specced in `specs/features/actor-system.md`.
+- ✅ **Epoch-based capability revocation** — `revoke_cap(cap)` builtin, global `revocation_table`, `is_cap_valid(cap)`, and VCap handling in ESend. C runtime: `march_revoke_cap` / `march_is_cap_valid`. 5 new tests in supervision phase3 group.
+- ✅ **Supervisor restart policies: `rest_for_one`/`one_for_all`** — Both policies fully implemented in `eval.ml` and tested (tests pass).
 - [ ] **Improve error messages for complex types** — Nested generics (`Map(String, List(Vec(Int, N)))`) produce very long error messages. Need: abbreviated type aliases in display, pretty-printer with line-wrapping.
 
 ---
@@ -59,12 +59,12 @@ This file tracks everything that still needs to get done. Organized by priority 
 ### Language Features
 
 - [ ] **MCP server for March** — An MCP (Model Context Protocol) server that exposes March's type checker and compiler as tools for LLM agents. Post-LSP, pre-1.0. Would expose: typecheck a snippet, get type at position, search by type signature, expand typed holes.
-- [ ] **Supervision tree spec V2** — The current actor-system spec allows linear-typed values to be sent as messages. This creates problems: a linear value sent to a dead actor is lost (use-after-move). V2 should ban linear type messages entirely (only `Send`/`Recv` handles transferable values) and redesign the message transfer protocol to preserve linearity across actor boundaries.
-- [ ] **`SRec` full multi-turn testing** — `unfold_srec` is implemented in typecheck.ml but multi-turn recursive protocol usage (deeply nested `SRec`/`SVar` chains) needs more test coverage. Add tests for ping-pong-style looping protocols.
+- ✅ **Supervision tree spec V2** — `specs/features/actor-system.md` now has "Linear Types and Message Passing (V2 Design)" section documenting: why linear values must not be sent as messages, V2 rule (use `Send`/`Recv` session handles), current known soundness gap, and future path.
+- ✅ **`SRec` full multi-turn testing** — 10 new tests: `srec_unfold_basic`, `srec_unfold_passthrough`, `srec_ping_pong_protocol`, `srec_ping_pong_unfold_one_step`, `srec_ping_pong_unfold_two_steps`, `srec_nested_srec`, `srec_finite_3_step`, `srec_choose_loop`, `srec_dual`, `srec_multi_turn_typechecks`.
 
 ### Testing
 
-- [ ] **Actor compilation tests** — Test suite for actor programs compiled to native code (via `--compile`). Actor TIR lowering is implemented; there are no `dune runtest`-level tests verifying end-to-end actor compilation.
+- ✅ **Actor compilation tests** — 8 new tests in `actor_compile` group: dispatch emitted, spawn fn emitted, handlers emitted, supervisor registers, monitor emitted, link emitted, multi-actor no crash, run_scheduler in main. All verify LLVM IR output of compiled actor programs.
 - [ ] **Cross-language benchmarks** — Compare March performance against Elixir, OCaml, and Rust on the existing benchmark suite (`bench/`). Needed to validate that the Perceus RC + FBIP approach delivers on the performance promise. Methodology: same algorithm, idiomatic code in each language, median of 10 runs.
 
 ---
@@ -91,6 +91,11 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ## Done (recently completed)
 
+- ✅ **Epoch-based capability revocation** — `revoke_cap(cap)` + revocation table; VCap handling in ESend; C runtime `march_revoke_cap`/`march_is_cap_valid`; 5 new supervision phase3 tests
+- ✅ **Supervisor restart policies** — `one_for_one`, `one_for_all`, `rest_for_one` all implemented and tested in eval.ml
+- ✅ **Actor compilation tests** — 8 tests in `actor_compile` group verifying LLVM IR output for actor programs (dispatch, spawn, handlers, supervisor, monitor, link)
+- ✅ **SRec multi-turn testing** — 10 new tests: unfold, ping-pong (1+2 steps), nested SRec, finite protocol, choose-loop, dual, typecheck
+- ✅ **Supervision tree spec V2** — `specs/features/actor-system.md` documents linear type restrictions, V2 transfer protocol via session types, and future path
 - ✅ Match syntax changed to `match expr do | pat -> body end` (was `with`)
 - ✅ String interpolation `${}` in lexer + desugar
 - ✅ `march fmt` code formatter
