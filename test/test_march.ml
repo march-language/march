@@ -9416,6 +9416,310 @@ let test_derive_variant_with_args_eq () =
   Alcotest.(check bool) "derive Eq for variant with args" true
     (vbool (call_fn env "result" []))
 
+(* =====================================================================
+   Feature 1: Multi-level `use` paths
+   ===================================================================== *)
+
+(* Parser: use A.B.* parses to use_path=[A,B], sel=UseAll *)
+let test_parse_use_multilevel_all () =
+  let src = {|mod Test do
+    use A.B.*
+    fn go() do 1 end
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | March_ast.Ast.DUse (ud, _) :: _ ->
+    let path_names = List.map (fun n -> n.March_ast.Ast.txt) ud.March_ast.Ast.use_path in
+    Alcotest.(check (list string)) "use A.B.* path" ["A"; "B"] path_names;
+    Alcotest.(check bool) "use A.B.* selector is UseAll" true
+      (ud.March_ast.Ast.use_sel = March_ast.Ast.UseAll)
+  | _ -> Alcotest.fail "expected DUse first"
+
+(* Parser: use A.B.{f,g} parses to use_path=[A,B], sel=UseNames *)
+let test_parse_use_multilevel_names () =
+  let src = {|mod Test do
+    use A.B.{f, g}
+    fn go() do 1 end
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | March_ast.Ast.DUse (ud, _) :: _ ->
+    let path_names = List.map (fun n -> n.March_ast.Ast.txt) ud.March_ast.Ast.use_path in
+    Alcotest.(check (list string)) "use A.B.{f,g} path" ["A"; "B"] path_names;
+    (match ud.March_ast.Ast.use_sel with
+     | March_ast.Ast.UseNames ns ->
+       let names = List.map (fun n -> n.March_ast.Ast.txt) ns in
+       Alcotest.(check (list string)) "use A.B.{f,g} names" ["f"; "g"] names
+     | _ -> Alcotest.fail "expected UseNames")
+  | _ -> Alcotest.fail "expected DUse first"
+
+(* Parser: use A.B.foo parses to use_path=[A,B], sel=UseNames[foo] *)
+let test_parse_use_multilevel_single () =
+  let src = {|mod Test do
+    use A.B.foo
+    fn go() do 1 end
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | March_ast.Ast.DUse (ud, _) :: _ ->
+    let path_names = List.map (fun n -> n.March_ast.Ast.txt) ud.March_ast.Ast.use_path in
+    Alcotest.(check (list string)) "use A.B.foo path" ["A"; "B"] path_names;
+    (match ud.March_ast.Ast.use_sel with
+     | March_ast.Ast.UseNames [n] ->
+       Alcotest.(check string) "use A.B.foo name" "foo" n.March_ast.Ast.txt
+     | _ -> Alcotest.fail "expected UseNames with one name")
+  | _ -> Alcotest.fail "expected DUse first"
+
+(* Typecheck: use A.B.* imports names from nested module *)
+let test_tc_use_multilevel_all () =
+  let ctx = typecheck {|mod Test do
+    pub mod A do
+      pub mod B do
+        pub fn f() do 42 end
+      end
+    end
+    use A.B.*
+    fn go() do f() end
+  end|} in
+  Alcotest.(check bool) "use A.B.* — f() in scope" false (has_errors ctx)
+
+(* Typecheck: use A.B.{f} imports only that name *)
+let test_tc_use_multilevel_names () =
+  let ctx = typecheck {|mod Test do
+    pub mod A do
+      pub mod B do
+        pub fn f() do 42 end
+        pub fn secret() do 99 end
+      end
+    end
+    use A.B.{f}
+    fn go() do f() end
+  end|} in
+  Alcotest.(check bool) "use A.B.{f} — f() in scope, no error" false (has_errors ctx)
+
+(* Typecheck: use A.B.f imports a single function *)
+let test_tc_use_multilevel_single () =
+  let ctx = typecheck {|mod Test do
+    pub mod A do
+      pub mod B do
+        pub fn f() do 42 end
+      end
+    end
+    use A.B.f
+    fn go() do f() end
+  end|} in
+  Alcotest.(check bool) "use A.B.f — f() in scope" false (has_errors ctx)
+
+(* Eval: use A.B.* makes names callable without qualification *)
+let test_eval_use_multilevel_all () =
+  let env = eval_module {|mod Test do
+    mod A do
+      mod B do
+        fn double(x) do x + x end
+      end
+    end
+    use A.B.*
+    fn go() do double(21) end
+  end|} in
+  let v = call_fn env "go" [] in
+  Alcotest.(check int) "use A.B.* — double(21) = 42" 42 (vint v)
+
+(* Eval: use A.B.f makes that one name callable *)
+let test_eval_use_multilevel_single () =
+  let env = eval_module {|mod Test do
+    mod A do
+      mod B do
+        fn inc(x) do x + 1 end
+        fn dec(x) do x - 1 end
+      end
+    end
+    use A.B.inc
+    fn go() do inc(41) end
+  end|} in
+  let v = call_fn env "go" [] in
+  Alcotest.(check int) "use A.B.inc — inc(41) = 42" 42 (vint v)
+
+(* Three-level path: use A.B.C.* *)
+let test_tc_use_three_level () =
+  let ctx = typecheck {|mod Test do
+    pub mod A do
+      pub mod B do
+        pub mod C do
+          pub fn f() do 100 end
+        end
+      end
+    end
+    use A.B.C.*
+    fn go() do f() end
+  end|} in
+  Alcotest.(check bool) "use A.B.C.* — f() in scope" false (has_errors ctx)
+
+(* =====================================================================
+   Feature 2: Type-qualified constructor names
+   ===================================================================== *)
+
+(* Parser: Result.Error pattern parses as PatCon("Result.Error", ...) *)
+let test_parse_qualified_pat_con () =
+  let src = {|mod Test do
+    fn f(x) do
+      match x do
+      | Result.Ok(v) -> v
+      | Result.Err(e) -> 0
+      end
+    end
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    let clause = List.hd def.fn_clauses in
+    (match clause.March_ast.Ast.fc_body with
+     | March_ast.Ast.EMatch (_, branches, _) ->
+       let first_pat = (List.hd branches).March_ast.Ast.branch_pat in
+       (match first_pat with
+        | March_ast.Ast.PatCon (n, _) ->
+          Alcotest.(check string) "qualified pattern name" "Result.Ok" n.March_ast.Ast.txt
+        | _ -> Alcotest.fail "expected PatCon")
+     | _ -> Alcotest.fail "expected EMatch")
+  | _ -> Alcotest.fail "expected single DFn"
+
+(* Typecheck: qualified constructor in expression typechecks *)
+let test_tc_qualified_ctor_expr () =
+  let ctx = typecheck {|mod Test do
+    type Color = Red | Green | Blue
+    fn f() do Color.Red end
+  end|} in
+  Alcotest.(check bool) "Color.Red typechecks" false (has_errors ctx)
+
+(* Typecheck: qualified constructor with args *)
+let test_tc_qualified_ctor_with_args () =
+  let ctx = typecheck {|mod Test do
+    type Shape = Circle(Int) | Square(Int)
+    fn make_circle(r) do Shape.Circle(r) end
+  end|} in
+  Alcotest.(check bool) "Shape.Circle(r) typechecks" false (has_errors ctx)
+
+(* Typecheck: qualified constructor in pattern *)
+let test_tc_qualified_ctor_pat () =
+  let ctx = typecheck {|mod Test do
+    type Shape = Circle(Int) | Square(Int)
+    fn area(s) do
+      match s do
+      | Shape.Circle(r) -> r * r
+      | Shape.Square(side) -> side * side
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "Shape.Circle / Shape.Square patterns typecheck" false (has_errors ctx)
+
+(* Typecheck: disambiguation hint when constructors are ambiguous *)
+let test_tc_qualified_ctor_ambiguity_hint () =
+  let ctx = typecheck {|mod Test do
+    type HttpErr = Error(Int)
+    type AppErr = Error(String)
+    fn f(x) do Error(x) end
+  end|} in
+  (* Should have a hint (not an error) about ambiguity *)
+  let has_hint = List.exists (fun d ->
+      d.March_errors.Errors.severity = March_errors.Errors.Hint &&
+      let lo = String.lowercase_ascii d.March_errors.Errors.message in
+      String.length lo > 0 && (
+        let has s = let n = String.length s in let m = String.length lo in
+          let rec go i = if i > m - n then false
+            else if String.sub lo i n = s then true
+            else go (i+1) in go 0 in
+        has "ambig" || has "multiple" || has "disamb" || has "qualified")
+    ) ctx.March_errors.Errors.diagnostics
+  in
+  Alcotest.(check bool) "ambiguous constructor emits a hint" true has_hint
+
+(* Eval: qualified constructor in expression evaluates correctly *)
+let test_eval_qualified_ctor_expr () =
+  let env = eval_module {|mod Test do
+    type Color = Red | Green | Blue
+    fn make() do Color.Green end
+    fn is_green(c) do
+      match c do
+      | Green -> true
+      | _ -> false
+      end
+    end
+  end|} in
+  let v = call_fn env "make" [] in
+  let result = call_fn env "is_green" [v] in
+  Alcotest.(check bool) "Color.Green evaluates and matches Green" true (vbool result)
+
+(* Eval: qualified constructor in pattern match *)
+let test_eval_qualified_ctor_pat () =
+  let env = eval_module {|mod Test do
+    type Shape = Circle(Int) | Square(Int)
+    fn area(s) do
+      match s do
+      | Shape.Circle(r) -> r * r
+      | Shape.Square(side) -> side * side
+      end
+    end
+    fn go() do
+      let c = Shape.Circle(5)
+      let sq = Shape.Square(4)
+      area(c) + area(sq)
+    end
+  end|} in
+  let v = call_fn env "go" [] in
+  Alcotest.(check int) "Circle(5) area + Square(4) area = 25+16=41" 41 (vint v)
+
+(* Eval: bare and qualified constructors are interchangeable at runtime *)
+let test_eval_qualified_ctor_interop () =
+  let env = eval_module {|mod Test do
+    type Msg = Ok(Int) | Fail
+    fn go() do
+      let v = Ok(99)
+      match v do
+      | Msg.Ok(n) -> n
+      | Msg.Fail -> 0
+      end
+    end
+  end|} in
+  let result = call_fn env "go" [] in
+  Alcotest.(check int) "bare Ok matched by Msg.Ok pattern" 99 (vint result)
+
+(* Eval: qualified constructor and bare constructor match each other *)
+let test_eval_qualified_and_bare_match () =
+  let env = eval_module {|mod Test do
+    type Msg = Ok(Int) | Fail
+    fn go() do
+      let v = Msg.Ok(42)
+      match v do
+      | Ok(n) -> n
+      | Fail -> 0
+      end
+    end
+  end|} in
+  let result = call_fn env "go" [] in
+  Alcotest.(check int) "Msg.Ok(42) matched by bare Ok pattern" 42 (vint result)
+
+(* Typecheck: builtin qualified constructors: Option.Some, Result.Ok, etc. *)
+let test_tc_builtin_qualified_ctors () =
+  let ctx = typecheck {|mod Test do
+    fn wrap(x) do Option.Some(x) end
+    fn ok_val(x) do Result.Ok(x) end
+    fn err_val(e) do Result.Err(e) end
+  end|} in
+  Alcotest.(check bool) "Option.Some, Result.Ok, Result.Err typecheck" false (has_errors ctx)
+
+(* Eval: builtin qualified constructors work at runtime *)
+let test_eval_builtin_qualified_ctors () =
+  let env = eval_module {|mod Test do
+    fn wrap(x) do Option.Some(x) end
+    fn go() do
+      match wrap(7) do
+      | Some(v) -> v
+      | None -> 0
+      end
+    end
+  end|} in
+  let v = call_fn env "go" [] in
+  Alcotest.(check int) "Option.Some(7) matched by Some" 7 (vint v)
+
 let () =
   Alcotest.run "march"
     [
@@ -10319,5 +10623,29 @@ let () =
         Alcotest.test_case "eq() method dispatches via impl"    `Quick (with_reset test_eval_eq_method_dispatch);
         Alcotest.test_case "derive Eq record equality"          `Quick (with_reset test_derive_record_eq);
         Alcotest.test_case "derive Eq variant with args"        `Quick (with_reset test_derive_variant_with_args_eq);
+      ]);
+      ("multi_level_use", [
+        Alcotest.test_case "parse use A.B.*"       `Quick test_parse_use_multilevel_all;
+        Alcotest.test_case "parse use A.B.{f,g}"   `Quick test_parse_use_multilevel_names;
+        Alcotest.test_case "parse use A.B.foo"     `Quick test_parse_use_multilevel_single;
+        Alcotest.test_case "tc use A.B.*"          `Quick test_tc_use_multilevel_all;
+        Alcotest.test_case "tc use A.B.{f}"        `Quick test_tc_use_multilevel_names;
+        Alcotest.test_case "tc use A.B.f"          `Quick test_tc_use_multilevel_single;
+        Alcotest.test_case "eval use A.B.*"        `Quick test_eval_use_multilevel_all;
+        Alcotest.test_case "eval use A.B.f"        `Quick test_eval_use_multilevel_single;
+        Alcotest.test_case "tc use A.B.C.*"        `Quick test_tc_use_three_level;
+      ]);
+      ("qualified_constructors", [
+        Alcotest.test_case "parse Type.Ctor pattern"        `Quick test_parse_qualified_pat_con;
+        Alcotest.test_case "tc Type.Ctor expr"              `Quick test_tc_qualified_ctor_expr;
+        Alcotest.test_case "tc Type.Ctor(args) expr"        `Quick test_tc_qualified_ctor_with_args;
+        Alcotest.test_case "tc Type.Ctor in pattern"        `Quick test_tc_qualified_ctor_pat;
+        Alcotest.test_case "tc ambiguous ctor hint"         `Quick test_tc_qualified_ctor_ambiguity_hint;
+        Alcotest.test_case "eval Type.Ctor expr"            `Quick test_eval_qualified_ctor_expr;
+        Alcotest.test_case "eval Type.Ctor in pattern"      `Quick test_eval_qualified_ctor_pat;
+        Alcotest.test_case "eval bare/qualified interop"    `Quick test_eval_qualified_ctor_interop;
+        Alcotest.test_case "eval qualified/bare match"      `Quick test_eval_qualified_and_bare_match;
+        Alcotest.test_case "tc builtin qualified ctors"     `Quick test_tc_builtin_qualified_ctors;
+        Alcotest.test_case "eval builtin qualified ctors"   `Quick test_eval_builtin_qualified_ctors;
       ]);
     ]

@@ -368,13 +368,31 @@ mod_decl:
         Some "pub mod Name do\n    ...\nend",
         $startpos($4))) }
 
-(** Import declaration: use Mod.* or use Mod.{f, g} or use Mod
-    Single-level module paths to avoid shift/reduce conflicts with DOT. *)
+(** Import declaration: use A.B.* or use A.B.{f,g} or use A.B.foo or use A
+    Multi-level module paths are handled via the right-recursive use_path_tail
+    nonterminal, which avoids LALR(1) shift/reduce conflicts: after each DOT,
+    the lookahead (UPPER_IDENT vs LOWER_IDENT vs STAR vs LBRACE) unambiguously
+    selects which branch to take. *)
 use_decl:
-  | USE; name = upper_name; DOT; sel = use_selector
-    { DUse ({ use_path = [name]; use_sel = sel }, mk_span ($loc)) }
-  | USE; name = upper_name
-    { DUse ({ use_path = [name]; use_sel = UseSingle }, mk_span ($loc)) }
+  | USE; head = upper_name; tail = use_path_tail
+    { let (path_rest, sel) = tail in
+      DUse ({ use_path = head :: path_rest; use_sel = sel }, mk_span ($loc)) }
+
+(* Right-recursive tail for use paths.  After the leading UPPER_IDENT the
+   lookahead determines which alternative applies:
+     DOT STAR        -> UseAll       -- use A.STAR
+     DOT LBRACE      -> UseNames     -- use A.{f,g}
+     DOT UPPER_IDENT -> recurse      -- use A.B....
+     DOT LOWER_IDENT -> UseNames[1]  -- use A.foo
+     empty           -> UseSingle    -- use A *)
+use_path_tail:
+  |   { ([], UseSingle) }
+  | DOT; sel = use_selector
+    { ([], sel) }
+  | DOT; seg = upper_name; tail = use_path_tail
+    { let (rest, sel) = tail in (seg :: rest, sel) }
+  | DOT; name = lower_name
+    { ([], UseNames [name]) }
 
 use_selector:
   | STAR
@@ -784,10 +802,21 @@ branch:
 
 (* ---- Patterns ---- *)
 
+(** Qualified constructor name for patterns: either a bare UPPER_IDENT or
+    a TypeName.CtorName two-segment form for disambiguation.
+    The DOT-lookahead is conflict-free because DOT is not in follow(qualified_upper):
+    qualified_upper only appears before LPAREN or at the end of a pattern, so
+    seeing DOT after the first UPPER_IDENT always means shift (second alternative). *)
+qualified_upper:
+  | con = UPPER_IDENT
+    { mk_name con $loc }
+  | con1 = UPPER_IDENT; DOT; con2 = UPPER_IDENT
+    { mk_name (con1 ^ "." ^ con2) $loc }
+
 pattern:
-  | con = upper_name; LPAREN; ps = separated_nonempty_list(COMMA, pattern); RPAREN
+  | con = qualified_upper; LPAREN; ps = separated_nonempty_list(COMMA, pattern); RPAREN
     { PatCon (con, ps) }
-  | con = upper_name
+  | con = qualified_upper
     { PatCon (con, []) }
   | a = ATOM; LPAREN; ps = separated_nonempty_list(COMMA, pattern); RPAREN
     { PatAtom (a, ps, mk_span ($loc)) }
