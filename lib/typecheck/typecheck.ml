@@ -1411,6 +1411,336 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.EDbg (_, sp)            -> sp
   | Ast.ELetFn (_, _, _, _, sp) -> sp
 
+(* ══════════════════════════════════════════════════════════════════
+   §E  Pattern exhaustiveness checking
+   ══════════════════════════════════════════════════════════════════
+
+   Implements a simplified version of Maranget's "Warnings for
+   Pattern Matching" algorithm.  We build a pattern matrix (one row
+   per branch, one column per nested level of structure) and look for
+   a value that no row matches.  Missing values are reported as
+   Warning diagnostics.
+*)
+
+(** Simplified pattern for exhaustiveness analysis. *)
+type spat =
+  | SPWild                          (** _ or any variable binding *)
+  | SPCon  of string * spat list    (** Constructor: Some(x), None *)
+  | SPLit  of Ast.literal           (** Literal: 0, true, "hi" *)
+  | SPTup  of spat list             (** Tuple: (a, b) *)
+
+(** Normalize an AST pattern to a [spat]. *)
+let rec norm_pat (p : Ast.pattern) : spat =
+  match p with
+  | Ast.PatWild _            -> SPWild
+  | Ast.PatVar  _            -> SPWild
+  | Ast.PatAs  (p', _, _)    -> norm_pat p'
+  | Ast.PatRecord _          -> SPWild   (* conservative *)
+  | Ast.PatCon  (n, args)    -> SPCon (n.txt, List.map norm_pat args)
+  | Ast.PatAtom (n, args, _) -> SPCon (":" ^ n, List.map norm_pat args)
+  | Ast.PatTuple (ps, _)     -> SPTup (List.map norm_pat ps)
+  | Ast.PatLit  (l, _)       -> SPLit l
+
+(** All [(ctor_name, arity)] pairs for a type name, in declaration order. *)
+let ctors_for_type (env : env) type_name =
+  List.filter_map (fun (k, (ci : ctor_info)) ->
+    if ci.ci_type = type_name then Some (k, List.length ci.ci_arg_tys)
+    else None
+  ) env.ctors
+
+(** Instantiate a surface type with a substitution from param names to internal
+    types.  Used to reconstruct constructor argument types. *)
+let rec inst_ty (subst : (string * ty) list) (surf : Ast.ty) : ty =
+  match surf with
+  | Ast.TyVar name ->
+    (match List.assoc_opt name.txt subst with
+     | Some t -> t
+     | None   -> TError)  (* unresolved type param — use error sentinel *)
+  | Ast.TyCon (name, []) ->
+    (match List.assoc_opt name.txt subst with
+     | Some t -> t
+     | None   -> TCon (name.txt, []))
+  | Ast.TyCon (name, args) ->
+    TCon (name.txt, List.map (inst_ty subst) args)
+  | Ast.TyArrow (a, b) -> TArrow (inst_ty subst a, inst_ty subst b)
+  | Ast.TyTuple ts     -> TTuple (List.map (inst_ty subst) ts)
+  | _                  -> TError
+
+(** Instantiated argument types for [ctor_name] given the parent type's
+    concrete type arguments (e.g. [Int] for Option(Int)). *)
+let ctor_arg_tys (env : env) ctor_name parent_args =
+  match List.assoc_opt ctor_name env.ctors with
+  | None -> []
+  | Some ci ->
+    let n = List.length ci.ci_params in
+    let m = List.length parent_args in
+    if n <> m then List.map (fun _ -> TError) ci.ci_arg_tys
+    else
+      let subst = List.combine ci.ci_params parent_args in
+      List.map (inst_ty subst) ci.ci_arg_tys
+
+(** Specialize the pattern matrix for constructor [c] with [a] sub-columns.
+    - Wildcard rows → a wildcards prepended to remaining columns.
+    - Matching [c] rows → their args prepended to remaining columns.
+    - Other constructor rows → dropped. *)
+let spec_ctor_mc (c : string) (a : int) (matrix : spat list list)
+    : spat list list =
+  List.filter_map (fun row ->
+    match row with
+    | [] -> None
+    | p :: rest ->
+      match p with
+      | SPWild               -> Some (List.init a (fun _ -> SPWild) @ rest)
+      | SPCon (d, ps) when d = c -> Some (ps @ rest)
+      | SPCon _ | SPLit _ | SPTup _ -> None
+  ) matrix
+
+(** Specialize the pattern matrix for a tuple of [a] components. *)
+let spec_tup_mc (a : int) (matrix : spat list list) : spat list list =
+  List.filter_map (fun row ->
+    match row with
+    | [] -> None
+    | p :: rest ->
+      match p with
+      | SPWild               -> Some (List.init a (fun _ -> SPWild) @ rest)
+      | SPTup ps when List.length ps = a -> Some (ps @ rest)
+      | _ -> None
+  ) matrix
+
+(** Specialize the pattern matrix for a literal value [lit].
+    Wildcard rows and matching literal rows pass through (minus first col). *)
+let spec_lit_mc (lit : Ast.literal) (matrix : spat list list)
+    : spat list list =
+  List.filter_map (fun row ->
+    match row with
+    | [] -> None
+    | p :: rest ->
+      match p with
+      | SPWild           -> Some rest
+      | SPLit l when l = lit -> Some rest
+      | _ -> None
+  ) matrix
+
+(** Default matrix: rows whose first column is a wildcard, with that
+    column removed.  Used for infinite-domain types that need a catch-all. *)
+let default_mc (matrix : spat list list) : spat list list =
+  List.filter_map (fun row ->
+    match row with
+    | SPWild :: rest -> Some rest
+    | _ -> None
+  ) matrix
+
+(** Split a list into the first [n] elements and the remainder. *)
+let split_at n lst =
+  let rec go acc i = function
+    | []       -> (List.rev acc, [])
+    | x :: rest ->
+      if i >= n then (List.rev acc, x :: rest)
+      else go (x :: acc) (i + 1) rest
+  in
+  go [] 0 lst
+
+(** Produce a concise human-readable example value for [ty].
+    Used only to build warning messages, not for type-checking. *)
+let rec example_of (ty : ty) : string =
+  match repr ty with
+  | TCon ("Int",    []) -> "0"
+  | TCon ("Float",  []) -> "0.0"
+  | TCon ("String", []) -> "\"\""
+  | TCon ("Bool",   []) -> "true"
+  | TCon ("Char",   []) -> "' '"
+  | TCon (n, _)         -> n
+  | TTuple []           -> "()"
+  | TTuple ts           -> "(" ^ String.concat ", " (List.map example_of ts) ^ ")"
+  | TVar _              -> "_"
+  | TError              -> "_"
+  | TArrow _            -> "<fn>"
+  | TRecord _           -> "{ ... }"
+  | TChan _             -> "<chan>"
+  | TLin (_, t)         -> example_of t
+  | TNat n              -> string_of_int n
+  | TNatOp _            -> "_"
+
+(** Core exhaustiveness algorithm (Maranget-style).
+
+    [find_missing_mc env tys matrix] tries to find an example value
+    (represented as a list of strings, one per column) that is not
+    matched by any row in [matrix].
+
+    Returns [None] if the matrix is exhaustive for [tys], or
+    [Some examples] (a list of column examples) if non-exhaustive.
+
+    Invariant: when called with k columns, a [Some] result contains
+    exactly k strings (for the outermost call, k = 1). *)
+let rec find_missing_mc (env : env) (tys : ty list) (matrix : spat list list)
+    : string list option =
+  match tys with
+  | [] ->
+    (* No columns left: exhaustive iff matrix has ≥1 row covering this point. *)
+    if matrix = [] then Some [] else None
+  | ty :: rest_tys ->
+    let ty = repr ty in
+    (* If any row starts with a wildcard, it covers all values in this column.
+       Check the wildcard rows' remaining columns via the default matrix. *)
+    let has_first_wild =
+      List.exists
+        (fun row -> match row with SPWild :: _ -> true | _ -> false)
+        matrix
+    in
+    if has_first_wild then begin
+      let def = default_mc matrix in
+      match find_missing_mc env rest_tys def with
+      | None -> None
+      | Some rest_exs ->
+        (* First column is covered; use a placeholder for the counterexample. *)
+        Some ("_" :: rest_exs)
+    end else
+    match ty with
+    | TError -> None   (* error recovery — skip *)
+    | TVar _ ->
+      (* Unknown type: treat like infinite domain. *)
+      let def = default_mc matrix in
+      (match find_missing_mc env rest_tys def with
+       | None -> None
+       | Some rest_exs -> Some ("_" :: rest_exs))
+    | TCon ("Bool", []) ->
+      (* Bool has exactly two values: true and false (literal patterns). *)
+      let check_lit b =
+        let sub = spec_lit_mc (Ast.LitBool b) matrix in
+        match find_missing_mc env rest_tys sub with
+        | None -> None
+        | Some rest_exs ->
+          Some ((if b then "true" else "false") :: rest_exs)
+      in
+      (match check_lit true with
+       | Some _ as s -> s
+       | None        -> check_lit false)
+    | TCon (("Int" | "Float" | "String" | "Char" | "Atom"), _) ->
+      (* Infinite domains require a wildcard catch-all.
+         (No wildcards exist here — checked above — so report missing.) *)
+      let def = default_mc matrix in
+      (match find_missing_mc env rest_tys def with
+       | None -> None
+       | Some rest_exs -> Some ("_" :: rest_exs))
+    | TCon (name, parent_args) ->
+      let ctors = ctors_for_type env name in
+      if ctors = [] then
+        (* Opaque / unknown type: conservative skip. *)
+        let def = default_mc matrix in
+        (match find_missing_mc env rest_tys def with
+         | None -> None
+         | Some rest_exs -> Some ("_" :: rest_exs))
+      else begin
+        (* Collect which constructors appear in the first column. *)
+        let seen =
+          List.filter_map
+            (fun row -> match row with SPCon (c, _) :: _ -> Some c | _ -> None)
+            matrix
+        in
+        (* Is the signature complete? (All ctors present — no wildcards since
+           those were handled above.) *)
+        let is_complete =
+          List.for_all (fun (c, _) -> List.mem c seen) ctors
+        in
+        if is_complete then
+          (* Every constructor appears: check each one's sub-matrix. *)
+          List.find_map (fun (ctor_name, arity) ->
+            let arg_tys = ctor_arg_tys env ctor_name parent_args in
+            let sub      = spec_ctor_mc ctor_name arity matrix in
+            let full_tys = arg_tys @ rest_tys in
+            match find_missing_mc env full_tys sub with
+            | None -> None
+            | Some exs ->
+              let ctor_exs, rest_exs = split_at arity exs in
+              let ctor_str =
+                if arity = 0 then ctor_name
+                else
+                  Printf.sprintf "%s(%s)" ctor_name
+                    (String.concat ", " ctor_exs)
+              in
+              Some (ctor_str :: rest_exs)
+          ) ctors
+        else begin
+          (* Some constructor missing from first col and no wildcards:
+             find one and report it. *)
+          let def = default_mc matrix in
+          match find_missing_mc env rest_tys def with
+          | None -> None
+          | Some rest_exs ->
+            let missing_ctor =
+              List.find_opt (fun (c, _) -> not (List.mem c seen)) ctors
+            in
+            let first_ex = match missing_ctor with
+              | Some (c, 0) -> c
+              | Some (c, _) ->
+                let args = ctor_arg_tys env c parent_args in
+                Printf.sprintf "%s(%s)" c
+                  (String.concat ", " (List.map example_of args))
+              | None -> "_"
+            in
+            Some (first_ex :: rest_exs)
+        end
+      end
+    | TTuple [] -> None   (* unit — always covered *)
+    | TTuple inner_tys ->
+      let arity = List.length inner_tys in
+      let any_tup =
+        List.exists
+          (fun row -> match row with SPTup _ :: _ -> true | _ -> false)
+          matrix
+      in
+      if any_tup then begin
+        (* At least one tuple pattern: specialize and recurse. *)
+        let sub      = spec_tup_mc arity matrix in
+        let full_tys = inner_tys @ rest_tys in
+        match find_missing_mc env full_tys sub with
+        | None -> None
+        | Some exs ->
+          let tup_exs, rest_exs = split_at arity exs in
+          let tup_str =
+            Printf.sprintf "(%s)" (String.concat ", " tup_exs)
+          in
+          Some (tup_str :: rest_exs)
+      end else begin
+        (* No tuple patterns and no wildcards: entirely missing. *)
+        let def = default_mc matrix in
+        match find_missing_mc env rest_tys def with
+        | None -> None
+        | Some rest_exs ->
+          let tup_ex =
+            Printf.sprintf "(%s)"
+              (String.concat ", " (List.map example_of inner_tys))
+          in
+          Some (tup_ex :: rest_exs)
+      end
+    | TArrow _ | TRecord _ | TChan _ | TLin _ | TNat _ | TNatOp _ ->
+      (* Non-enumerable types: treat like infinite domain. *)
+      let def = default_mc matrix in
+      (match find_missing_mc env rest_tys def with
+       | None -> None
+       | Some rest_exs -> Some ("_" :: rest_exs))
+
+(** Emit a Warning if the match on [scrut_ty] with [branches] is non-exhaustive.
+    Skips the check when any branch has a guard (coverage becomes undecidable). *)
+let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
+    (branches : Ast.branch list) =
+  let has_guards =
+    List.exists (fun (br : Ast.branch) -> br.branch_guard <> None) branches
+  in
+  if has_guards then ()
+  else begin
+    let matrix =
+      List.map (fun (br : Ast.branch) -> [norm_pat br.branch_pat]) branches
+    in
+    match find_missing_mc env [scrut_ty] matrix with
+    | None -> ()
+    | Some (ex :: _) ->
+      Err.warning env.errors ~span
+        (Printf.sprintf "Non-exhaustive pattern match — missing case: %s" ex)
+    | Some [] ->
+      Err.warning env.errors ~span "Non-exhaustive pattern match"
+  end
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
@@ -2018,7 +2348,8 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
              ~reason:(Some (RBuiltin "Match guards must be Bool."))
          | None -> ());
         check_expr env' br.branch_body expected ~reason
-      ) branches
+      ) branches;
+    check_exhaustiveness env msp scrut_ty branches
 
   (* All other expressions: infer then unify *)
   | _ ->
@@ -2068,6 +2399,7 @@ and infer_match env span scrut scrut_ty branches =
       check_expr env' br.branch_body result_ty
         ~reason:(Some (RMatchArm span))
     ) branches;
+  check_exhaustiveness env span scrut_ty branches;
   result_ty
 
 (** Infer types of all expressions in a block, threading [ELet] bindings. *)

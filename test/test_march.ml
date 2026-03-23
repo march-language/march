@@ -9416,6 +9416,352 @@ let test_derive_variant_with_args_eq () =
   Alcotest.(check bool) "derive Eq for variant with args" true
     (vbool (call_fn env "result" []))
 
+(* ── Helpers for exhaustiveness tests ──────────────────────────────────── *)
+
+(** Returns true if the diagnostic context has a warning whose message contains
+    the substring [sub] (case-insensitive). *)
+let has_warning_with ctx sub =
+  let sub_lo = String.lowercase_ascii sub in
+  List.exists (fun d ->
+    d.March_errors.Errors.severity = March_errors.Errors.Warning &&
+    let m = String.lowercase_ascii d.March_errors.Errors.message in
+    let sub_len = String.length sub_lo in
+    let m_len   = String.length m in
+    let found   = ref false in
+    for i = 0 to m_len - sub_len do
+      if String.sub m i sub_len = sub_lo then found := true
+    done;
+    !found
+  ) ctx.March_errors.Errors.diagnostics
+
+(** Returns true if ANY exhaustiveness warning is present. *)
+let has_exhaust_warning ctx =
+  has_warning_with ctx "non-exhaustive"
+
+(* ── Exhaustiveness tests ───────────────────────────────────────────────── *)
+
+(* §1  Trivially exhaustive matches *)
+
+let test_exhaust_wildcard_ok () =
+  let ctx = typecheck {|mod Test do
+    fn go(x : Int) : Int do
+      match x do
+      | _ -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "wildcard match: no exhaustiveness warning" false
+    (has_exhaust_warning ctx)
+
+let test_exhaust_var_ok () =
+  let ctx = typecheck {|mod Test do
+    fn go(x : Int) : Int do
+      match x do
+      | n -> n
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "variable pattern: no exhaustiveness warning" false
+    (has_exhaust_warning ctx)
+
+(* §2  Bool exhaustiveness *)
+
+let test_exhaust_bool_complete () =
+  let ctx = typecheck {|mod Test do
+    fn go(b : Bool) : Int do
+      match b do
+      | true  -> 1
+      | false -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "bool true+false: no warning" false
+    (has_exhaust_warning ctx)
+
+let test_exhaust_bool_missing_false () =
+  let ctx = typecheck {|mod Test do
+    fn go(b : Bool) : Int do
+      match b do
+      | true -> 1
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "bool only true: warning" true
+    (has_exhaust_warning ctx)
+
+let test_exhaust_bool_missing_true () =
+  let ctx = typecheck {|mod Test do
+    fn go(b : Bool) : Int do
+      match b do
+      | false -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "bool only false: warning" true
+    (has_exhaust_warning ctx)
+
+let test_exhaust_bool_empty () =
+  (* A match with zero arms is non-exhaustive for Bool. *)
+  (* We can't write a zero-arm match in surface syntax easily, so
+     we use a single arm with the wrong literal. *)
+  let ctx = typecheck {|mod Test do
+    fn go(b : Bool) : Int do
+      match b do
+      | true -> 1
+      end
+    end
+  end|} in
+  (* false is missing *)
+  Alcotest.(check bool) "bool missing false: warning reported" true
+    (has_exhaust_warning ctx)
+
+(* §3  Option exhaustiveness *)
+
+let test_exhaust_option_complete () =
+  let ctx = typecheck {|mod Test do
+    fn go(x : Option(Int)) : Int do
+      match x do
+      | None    -> 0
+      | Some(n) -> n
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "option None+Some: no warning" false
+    (has_exhaust_warning ctx)
+
+let test_exhaust_option_missing_none () =
+  let ctx = typecheck {|mod Test do
+    fn go(x : Option(Int)) : Int do
+      match x do
+      | Some(n) -> n
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "option only Some: warning" true
+    (has_exhaust_warning ctx)
+
+let test_exhaust_option_missing_some () =
+  let ctx = typecheck {|mod Test do
+    fn go(x : Option(Int)) : Int do
+      match x do
+      | None -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "option only None: warning" true
+    (has_exhaust_warning ctx)
+
+let test_exhaust_option_wildcard () =
+  let ctx = typecheck {|mod Test do
+    fn go(x : Option(Int)) : Int do
+      match x do
+      | Some(n) -> n
+      | _       -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "option Some+wildcard: no warning" false
+    (has_exhaust_warning ctx)
+
+(* §4  Three-constructor ADT *)
+
+let test_exhaust_3ctor_complete () =
+  let ctx = typecheck {|mod Test do
+    type Color = Red | Green | Blue
+    fn go(c : Color) : Int do
+      match c do
+      | Red   -> 0
+      | Green -> 1
+      | Blue  -> 2
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "3-variant all present: no warning" false
+    (has_exhaust_warning ctx)
+
+let test_exhaust_3ctor_missing_one () =
+  let ctx = typecheck {|mod Test do
+    type Color = Red | Green | Blue
+    fn go(c : Color) : Int do
+      match c do
+      | Red   -> 0
+      | Green -> 1
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "3-variant missing Blue: warning" true
+    (has_exhaust_warning ctx)
+
+(* §5  Nested patterns *)
+
+let test_exhaust_nested_complete () =
+  let ctx = typecheck {|mod Test do
+    fn go(x : Option(Option(Int))) : Int do
+      match x do
+      | None          -> 0
+      | Some(None)    -> 1
+      | Some(Some(n)) -> n
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "nested option all cases: no warning" false
+    (has_exhaust_warning ctx)
+
+let test_exhaust_nested_wildcard_inner () =
+  let ctx = typecheck {|mod Test do
+    fn go(x : Option(Option(Int))) : Int do
+      match x do
+      | None    -> 0
+      | Some(_) -> 1
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "nested option Some(_)+None: no warning" false
+    (has_exhaust_warning ctx)
+
+let test_exhaust_nested_missing () =
+  let ctx = typecheck {|mod Test do
+    fn go(x : Option(Option(Int))) : Int do
+      match x do
+      | None       -> 0
+      | Some(None) -> 1
+      end
+    end
+  end|} in
+  (* Missing Some(Some(_)) *)
+  Alcotest.(check bool) "nested option missing Some(Some(...)): warning" true
+    (has_exhaust_warning ctx)
+
+(* §6  Int/String — infinite domains *)
+
+let test_exhaust_int_needs_wildcard () =
+  let ctx = typecheck {|mod Test do
+    fn go(n : Int) : Int do
+      match n do
+      | 0 -> 1
+      | 1 -> 2
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "int no wildcard: warning" true
+    (has_exhaust_warning ctx)
+
+let test_exhaust_int_wildcard_ok () =
+  let ctx = typecheck {|mod Test do
+    fn go(n : Int) : Int do
+      match n do
+      | 0 -> 1
+      | _ -> n
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "int with wildcard: no warning" false
+    (has_exhaust_warning ctx)
+
+let test_exhaust_string_needs_wildcard () =
+  let ctx = typecheck {|mod Test do
+    fn go(s : String) : Int do
+      match s do
+      | "hello" -> 1
+      | "world" -> 2
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "string no wildcard: warning" true
+    (has_exhaust_warning ctx)
+
+let test_exhaust_string_wildcard_ok () =
+  let ctx = typecheck {|mod Test do
+    fn go(s : String) : Int do
+      match s do
+      | "hello" -> 1
+      | _       -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "string with wildcard: no warning" false
+    (has_exhaust_warning ctx)
+
+(* §7  Guards disable the check *)
+
+let test_exhaust_guard_skipped () =
+  (* Match with a guard: we conservatively skip exhaustiveness checking. *)
+  let ctx = typecheck {|mod Test do
+    fn go(n : Int) : Int do
+      match n do
+      | x when x > 0 -> x
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "guarded match: no exhaustiveness warning" false
+    (has_exhaust_warning ctx)
+
+(* §8  Tuple patterns *)
+
+let test_exhaust_tuple_bool_bool_complete () =
+  let ctx = typecheck {|mod Test do
+    fn go(p : (Bool, Bool)) : Int do
+      match p do
+      | (true,  true)  -> 0
+      | (true,  false) -> 1
+      | (false, true)  -> 2
+      | (false, false) -> 3
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "(bool,bool) all four: no warning" false
+    (has_exhaust_warning ctx)
+
+let test_exhaust_tuple_wildcards_ok () =
+  let ctx = typecheck {|mod Test do
+    fn go(p : (Bool, Int)) : Int do
+      match p do
+      | (true,  _) -> 1
+      | (false, _) -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "tuple wildcards: no warning" false
+    (has_exhaust_warning ctx)
+
+let test_exhaust_tuple_partial () =
+  let ctx = typecheck {|mod Test do
+    fn go(p : (Bool, Bool)) : Int do
+      match p do
+      | (true, true)  -> 1
+      | (true, false) -> 0
+      end
+    end
+  end|} in
+  (* Missing (false, _) cases *)
+  Alcotest.(check bool) "tuple partial: warning" true
+    (has_exhaust_warning ctx)
+
+(* §9  Result type *)
+
+let test_exhaust_result_complete () =
+  let ctx = typecheck {|mod Test do
+    fn go(r : Result(Int, String)) : Int do
+      match r do
+      | Ok(n)  -> n
+      | Err(_) -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "result Ok+Err: no warning" false
+    (has_exhaust_warning ctx)
+
+let test_exhaust_result_missing_err () =
+  let ctx = typecheck {|mod Test do
+    fn go(r : Result(Int, String)) : Int do
+      match r do
+      | Ok(n) -> n
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "result only Ok: warning" true
+    (has_exhaust_warning ctx)
+
 let () =
   Alcotest.run "march"
     [
@@ -10307,6 +10653,33 @@ let () =
         Alcotest.test_case "derive Show typechecks"        `Quick test_derive_show_typechecks;
         Alcotest.test_case "derive Ord typechecks"         `Quick test_derive_ord_typechecks;
         Alcotest.test_case "derive Hash typechecks"        `Quick test_derive_hash_typechecks;
+      ]);
+      ("exhaustiveness", [
+        Alcotest.test_case "wildcard is exhaustive"               `Quick test_exhaust_wildcard_ok;
+        Alcotest.test_case "variable is exhaustive"               `Quick test_exhaust_var_ok;
+        Alcotest.test_case "bool: true+false exhaustive"          `Quick test_exhaust_bool_complete;
+        Alcotest.test_case "bool: only true warns"                `Quick test_exhaust_bool_missing_false;
+        Alcotest.test_case "bool: only false warns"               `Quick test_exhaust_bool_missing_true;
+        Alcotest.test_case "bool: empty match warns"              `Quick test_exhaust_bool_empty;
+        Alcotest.test_case "option: None+Some exhaustive"         `Quick test_exhaust_option_complete;
+        Alcotest.test_case "option: only Some warns"              `Quick test_exhaust_option_missing_none;
+        Alcotest.test_case "option: only None warns"              `Quick test_exhaust_option_missing_some;
+        Alcotest.test_case "option: wildcard arm exhaustive"      `Quick test_exhaust_option_wildcard;
+        Alcotest.test_case "3-variant: all present"               `Quick test_exhaust_3ctor_complete;
+        Alcotest.test_case "3-variant: missing one warns"         `Quick test_exhaust_3ctor_missing_one;
+        Alcotest.test_case "nested: Some(Some) + Some(None) + None ok" `Quick test_exhaust_nested_complete;
+        Alcotest.test_case "nested: Some(_) + None ok"            `Quick test_exhaust_nested_wildcard_inner;
+        Alcotest.test_case "nested: Some(None) only warns"        `Quick test_exhaust_nested_missing;
+        Alcotest.test_case "int match needs wildcard"             `Quick test_exhaust_int_needs_wildcard;
+        Alcotest.test_case "int match with wildcard ok"           `Quick test_exhaust_int_wildcard_ok;
+        Alcotest.test_case "string match needs wildcard"          `Quick test_exhaust_string_needs_wildcard;
+        Alcotest.test_case "string match with wildcard ok"        `Quick test_exhaust_string_wildcard_ok;
+        Alcotest.test_case "guard skips exhaustiveness"           `Quick test_exhaust_guard_skipped;
+        Alcotest.test_case "tuple: (bool,bool) all four ok"       `Quick test_exhaust_tuple_bool_bool_complete;
+        Alcotest.test_case "tuple: wildcards ok"                  `Quick test_exhaust_tuple_wildcards_ok;
+        Alcotest.test_case "tuple: partial warns"                 `Quick test_exhaust_tuple_partial;
+        Alcotest.test_case "result Ok+Err exhaustive"             `Quick test_exhaust_result_complete;
+        Alcotest.test_case "result only Ok warns"                 `Quick test_exhaust_result_missing_err;
       ]);
       ("interface_dispatch", [
         Alcotest.test_case "derived Eq: same ctor == true"      `Quick (with_reset test_eval_eq_dispatch_same);
