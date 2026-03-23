@@ -123,7 +123,17 @@ let rec desugar_expr (e : expr) : expr =
   | EDbg (Some inner, sp) -> EDbg (Some (desugar_expr inner), sp)
 
   | EApp (f, args, sp) ->
-    EApp (desugar_expr f, List.map desugar_expr args, sp)
+    let f' = desugar_expr f in
+    let args' = List.map desugar_expr args in
+    (* When a qualified constructor reference (e.g. Result.Error, desugared
+       from EField to ECon("Result.Error",[],_)) is applied to arguments,
+       fold the args directly into the ECon so the typechecker and eval see a
+       proper constructor application rather than a function call. *)
+    (match f' with
+     | ECon (name, [], _) when String.contains name.txt '.' ->
+       ECon (name, args', sp)
+     | _ ->
+       EApp (f', args', sp))
 
   | ECon (name, args, sp) ->
     ECon (name, List.map desugar_expr args, sp)
@@ -157,7 +167,9 @@ let rec desugar_expr (e : expr) : expr =
   | EField (ex, name, sp) ->
     (* Desugar module member access: A.B.fn(...) → EVar "A.B.fn"
        If the base is a chain of ECon/EField that looks like a module path,
-       flatten it into a single qualified EVar. *)
+       flatten it into a single qualified name.
+       When the field name is uppercase (a constructor), emit ECon so that the
+       typechecker resolves it through the constructor table rather than vars. *)
     let rec flatten_module_path = function
       | ECon (mod_name, [], _) -> Some mod_name.txt
       | EField (inner, field, _) ->
@@ -168,7 +180,10 @@ let rec desugar_expr (e : expr) : expr =
     in
     (match flatten_module_path ex with
      | Some prefix ->
-       EVar { txt = prefix ^ "." ^ name.txt; span = sp }
+       let qualified_txt = prefix ^ "." ^ name.txt in
+       if String.length name.txt > 0 && Char.uppercase_ascii name.txt.[0] = name.txt.[0]
+       then ECon ({ txt = qualified_txt; span = sp }, [], sp)
+       else EVar { txt = qualified_txt; span = sp }
      | None -> EField (desugar_expr ex, name, sp))
 
   | EIf (cond, t, f, sp) ->

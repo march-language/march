@@ -883,17 +883,25 @@ let builtin_types : (string * int) list =
     ("IO.Clock",      0); ]
 
 (** Built-in constructor table for Option, Result, and List, which are
-    pre-registered types.  User-declared types are added via [DType]. *)
+    pre-registered types.  User-declared types are added via [DType].
+    Each constructor is registered under both its bare name ("Some") and its
+    type-qualified name ("Option.Some") so that users can write either form. *)
 let builtin_ctors : (string * ctor_info) list =
   let mk_var s = Ast.TyVar { txt = s; span = Ast.dummy_span } in
   let mk_list_ty s = Ast.TyCon ({ txt = "List"; span = Ast.dummy_span }, [mk_var s]) in
-  [ ("Some", { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [mk_var "a"]; ci_vis = Ast.Public });
-    ("None", { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = []; ci_vis = Ast.Public });
-    ("Ok",   { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "a"]; ci_vis = Ast.Public });
-    ("Err",  { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "e"]; ci_vis = Ast.Public });
-    ("Nil",  { ci_type = "List";   ci_params = ["a"];      ci_arg_tys = []; ci_vis = Ast.Public });
-    ("Cons", { ci_type = "List";   ci_params = ["a"];
-               ci_arg_tys = [mk_var "a"; mk_list_ty "a"]; ci_vis = Ast.Public });
+  let some_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [mk_var "a"]; ci_vis = Ast.Public } in
+  let none_ci  = { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = []; ci_vis = Ast.Public } in
+  let ok_ci    = { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "a"]; ci_vis = Ast.Public } in
+  let err_ci   = { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "e"]; ci_vis = Ast.Public } in
+  let nil_ci   = { ci_type = "List";   ci_params = ["a"];      ci_arg_tys = []; ci_vis = Ast.Public } in
+  let cons_ci  = { ci_type = "List";   ci_params = ["a"];
+                   ci_arg_tys = [mk_var "a"; mk_list_ty "a"]; ci_vis = Ast.Public } in
+  [ ("Some",        some_ci);  ("Option.Some", some_ci);
+    ("None",        none_ci);  ("Option.None", none_ci);
+    ("Ok",          ok_ci);    ("Result.Ok",   ok_ci);
+    ("Err",         err_ci);   ("Result.Err",  err_ci);
+    ("Nil",         nil_ci);   ("List.Nil",    nil_ci);
+    ("Cons",        cons_ci);  ("List.Cons",   cons_ci);
   ]
 
 let base_env errors type_map =
@@ -1332,6 +1340,17 @@ let rec infer_pattern env (pat : Ast.pattern)
        let bindings = List.concat_map fst (List.map (infer_pattern env) ps) in
        bindings, TError
      | Some ci ->
+       (* Emit a hint when the bare constructor name is ambiguous across types. *)
+       let all_types = all_ctors_named name.txt env in
+       (if List.length all_types > 1 && not (String.contains name.txt '.') then
+         Err.hint env.errors ~span:name.span
+           (Printf.sprintf
+              "Constructor `%s` is defined by multiple types (%s). \
+               Use a qualified form to disambiguate, e.g. `%s.%s`."
+              name.txt
+              (String.concat ", " all_types)
+              (List.hd all_types)
+              name.txt));
        let arg_tys, result_ty = instantiate_ctor env ci in
        let n_expected = List.length arg_tys in
        let n_got      = List.length ps in
@@ -1442,10 +1461,13 @@ let rec norm_pat (p : Ast.pattern) : spat =
   | Ast.PatTuple (ps, _)     -> SPTup (List.map norm_pat ps)
   | Ast.PatLit  (l, _)       -> SPLit l
 
-(** All [(ctor_name, arity)] pairs for a type name, in declaration order. *)
+(** All [(ctor_name, arity)] pairs for a type name, in declaration order.
+    Qualified aliases (keys containing '.') are skipped so that exhaustiveness
+    analysis only sees each constructor once under its bare name. *)
 let ctors_for_type (env : env) type_name =
   List.filter_map (fun (k, (ci : ctor_info)) ->
-    if ci.ci_type = type_name then Some (k, List.length ci.ci_arg_tys)
+    if ci.ci_type = type_name && not (String.contains k '.')
+    then Some (k, List.length ci.ci_arg_tys)
     else None
   ) env.ctors
 
@@ -2029,16 +2051,20 @@ let rec infer_expr env (e : Ast.expr) : ty =
          List.iter (fun a -> ignore (infer_expr env a)) args;
          TError
        | Some ci ->
-         (* Warn if multiple types define this constructor name *)
-         let all_types = all_ctors_named name.txt env in
-         if List.length all_types > 1 then
-           Err.warning env.errors ~span:name.span
-             (Printf.sprintf
-                "Constructor `%s` is defined in multiple types: %s.\n\
-                 I'm using the one from `%s`. Use a type annotation to disambiguate."
-                name.txt
-                (String.concat ", " (List.map (fun t -> "`" ^ t ^ "`") all_types))
-                ci.ci_type);
+         (* Warn if a bare constructor name is ambiguous across multiple types.
+            Qualified names (containing '.') are already disambiguated — skip. *)
+         (if not (String.contains name.txt '.') then begin
+           let all_types = all_ctors_named name.txt env in
+           if List.length all_types > 1 then
+             Err.hint env.errors ~span:name.span
+               (Printf.sprintf
+                  "Constructor `%s` is defined by multiple types (%s). \
+                   Use a qualified form to disambiguate, e.g. `%s.%s`."
+                  name.txt
+                  (String.concat ", " all_types)
+                  (List.hd all_types)
+                  name.txt)
+         end);
          let arg_tys, result_ty = instantiate_ctor env ci in
          let n_expected = List.length arg_tys in
          let n_got      = List.length args in
@@ -3096,7 +3122,10 @@ let rec check_decl env (d : Ast.decl) : env =
                     ; ci_params  = param_names
                     ; ci_arg_tys = v.var_args
                     ; ci_vis     = v.var_vis } in
-           { e with ctors = (v.var_name.txt, ci) :: e.ctors }
+           (* Register both bare "CtorName" and qualified "TypeName.CtorName"
+              so users can write either form for disambiguation. *)
+           let qual_key = name.txt ^ "." ^ v.var_name.txt in
+           { e with ctors = (qual_key, ci) :: (v.var_name.txt, ci) :: e.ctors }
          ) env1 variants
      | Ast.TDRecord fields ->
        let param_names = List.map (fun (p : Ast.name) -> p.txt) params in

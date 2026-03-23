@@ -357,8 +357,15 @@ let rec match_pattern (v : value) (pat : pattern) : (string * value) list option
   | PatLit (LitAtom a, _),   VAtom b   when a = b   -> Some []
   | PatLit _,                _                       -> None
 
-  | PatCon (n, pats), VCon (tag, args) when n.txt = tag ->
-    if List.length pats <> List.length args then None
+  | PatCon (n, pats), VCon (tag, args) ->
+    (* Strip any type qualifier from the pattern name before comparing so that
+       both Result.Ok(x) and Ok(x) match VCon("Ok", …) at runtime. *)
+    let bare_pat = match String.rindex_opt n.txt '.' with
+      | Some i -> String.sub n.txt (i + 1) (String.length n.txt - i - 1)
+      | None   -> n.txt
+    in
+    if bare_pat <> tag then None
+    else if List.length pats <> List.length args then None
     else match_list pats args
 
   | PatCon _, _ -> None
@@ -3536,7 +3543,13 @@ and eval_expr_inner (env : env) (e : expr) : value =
 
   | ECon (name, args, _) ->
     let arg_vals = List.map (eval_expr env) args in
-    VCon (name.txt, arg_vals)
+    (* Strip any type qualifier from the constructor tag so that
+       Result.Ok and Ok both produce VCon("Ok", …) at runtime. *)
+    let tag = match String.rindex_opt name.txt '.' with
+      | Some i -> String.sub name.txt (i + 1) (String.length name.txt - i - 1)
+      | None   -> name.txt
+    in
+    VCon (tag, arg_vals)
 
   | ELam (params, body, _) ->
     let param_names = List.map (fun p -> p.param_name.txt) params in
