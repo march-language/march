@@ -91,7 +91,9 @@ let load_stdlib () =
     let files = [
       "prelude.march"; "option.march"; "result.march"; "list.march";
       "map.march"; "math.march"; "string.march"; "iolist.march";
-      "sort.march"; "seq.march";
+      "http.march"; "http_transport.march"; "http_client.march";
+      "seq.march"; "path.march"; "file.march"; "dir.march";
+      "sort.march"; "csv.march"; "websocket.march"; "http_server.march";
     ] in
     List.concat_map
       (fun name -> load_stdlib_file (Filename.concat stdlib_dir name))
@@ -133,8 +135,12 @@ let diag_to_lsp ~filename (d : Err.diagnostic) =
 (* AST traversal: build def_map + use_map                             *)
 (* ------------------------------------------------------------------ *)
 
-let rec collect_decl ~def_map ~use_map ~actors_tbl (decl : Ast.decl) =
-  let add_def name span = Hashtbl.replace def_map name span in
+let rec collect_decl ~def_map ~use_map ~actors_tbl ?(prefix = "") (decl : Ast.decl) =
+  let add_def name span =
+    Hashtbl.replace def_map name span;
+    if prefix <> "" then
+      Hashtbl.replace def_map (prefix ^ "." ^ name) span
+  in
   match decl with
   | Ast.DFn (fn, _) ->
     add_def fn.fn_name.txt fn.fn_name.span;
@@ -166,8 +172,11 @@ let rec collect_decl ~def_map ~use_map ~actors_tbl (decl : Ast.decl) =
       ) adef.actor_handlers
 
   | Ast.DMod (name, _, decls, _) ->
-    add_def name.txt name.span;
-    List.iter (collect_decl ~def_map ~use_map ~actors_tbl) decls
+    Hashtbl.replace def_map name.txt name.span;
+    let mod_prefix =
+      if prefix = "" then name.txt else prefix ^ "." ^ name.txt
+    in
+    List.iter (collect_decl ~def_map ~use_map ~actors_tbl ~prefix:mod_prefix) decls
 
   | Ast.DInterface (idef, _) ->
     add_def idef.iface_name.txt idef.iface_name.span;
