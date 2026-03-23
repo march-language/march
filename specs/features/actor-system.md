@@ -133,7 +133,7 @@ let msg = receive()
 
 **Line references**:
 - **Interpreter**: `lib/eval/eval.ml:1127–1141` (receive builtin)
-- **Design**: `specs/2026-03-19-scheduler-design.md` (scheduler architecture)
+- **Design**: `specs/features/scheduler.md` (scheduler architecture)
 
 ### self
 
@@ -391,7 +391,7 @@ let pid = cap_to_pid(cap)
 - **Revocation checking**: `send(cap, msg)` does **not** currently validate the epoch against a revocation list. This is stubbed in Phase 1 and will be fully implemented in Phase 3.
 - **Capability-based authorization**: Access control based on capability possession is planned but not enforced.
 
-**Design**: `specs/2026-03-19-capability-security.md`
+**Design**: `specs/features/actor-system.md` (capability system section)
 
 ---
 
@@ -746,9 +746,8 @@ Note: Does **not** deallocate; reference counting handles that.
 | File | Purpose |
 |---|---|
 | `specs/actor-lowering.md` | Detailed lowering strategy and object layout |
-| `specs/2026-03-19-scheduler-design.md` | Scheduler architecture and design |
-| `specs/2026-03-19-capability-security.md` | Capability system and security model |
-| `specs/supervision-plan.md` | Supervision and restart semantics |
+| `specs/features/scheduler.md` | Scheduler architecture and design |
+| `specs/features/actor-system.md` | Capability system (see Capability System section) |
 
 ---
 

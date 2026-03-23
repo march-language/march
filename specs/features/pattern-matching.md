@@ -2,11 +2,18 @@
 
 ## Overview
 
-March provides expressive pattern matching through `match` expressions and function clauses. Patterns are compiled to decision trees via a matrix algorithm, supporting constructor patterns, literals, tuples, records, wildcards, and as-patterns. Match guards (`when`) enable value-dependent branching. Exhaustiveness checking ensures all cases are covered.
+March provides expressive pattern matching through `match` expressions and function clauses. Patterns are compiled to decision trees via a matrix algorithm, supporting constructor patterns, literals, tuples, records, wildcards, and as-patterns. Match guards (`when`) enable value-dependent branching.
 
 ## Implementation Status
 
-**Complete.** Pattern matching is fully implemented from parsing through LLVM code generation, with comprehensive exhaustiveness checking.
+**Mostly complete.** Pattern matching is fully implemented from parsing through LLVM code generation. **Exhaustiveness checking is NOT implemented** — non-exhaustive patterns produce a runtime `Match_failure` exception, not a compile-time error.
+
+**Syntax note (as of 2026-03-21):** Match expressions use `do` instead of `with`:
+```march
+match expr do
+| Pat -> body
+end
+```
 
 ## Source Files & Line References
 
@@ -82,20 +89,13 @@ let rec infer_pattern env (pat : Ast.pattern)
 - Each pattern introduces bindings that are added to the type environment for the branch body
 - Duplicate bindings in a pattern are detected and reported as errors
 
-### Exhaustiveness Checking: `lib/typecheck/typecheck.ml` (1050–1150)
+### Exhaustiveness Checking: NOT IMPLEMENTED
 
-**Exhaustiveness analysis:**
-The type checker validates that match expressions cover all possible cases. This is implemented via pattern matrix analysis:
+**No compile-time exhaustiveness analysis exists.** The type checker does not validate that match expressions cover all possible cases. Missing branches are silently accepted and result in a runtime `Match_failure` exception when reached.
 
-1. **Coverage validation during type checking:**
-   - For constructor types (variants), all constructor names must appear in some branch
-   - For non-exhaustive matches with a guard, a default case is inferred
+This is a known gap. Future work would implement a pattern matrix usefulness/reachability algorithm (similar to OCaml's or Rust's) to warn or error on non-exhaustive matches at compile time.
 
-2. **Patterns with guards:**
-   - Guards are semantically meaningful: a branch might not execute even if its pattern matches
-   - The type checker accounts for this by ensuring either:
-     - All possible constructor cases are covered by non-guarded patterns, OR
-     - A catch-all (wildcard) pattern exists after all guarded patterns
+**Practical implication:** Always include a wildcard `| _ -> ...` branch if you don't want a potential runtime crash for unmatched patterns.
 
 ### Desugaring: Multi-Clause Function Conversion: `lib/desugar/desugar.ml` (45–280)
 
