@@ -426,6 +426,9 @@ static _Atomic int         g_active_workers  = 0;
  * the scheduler; the outer loop will pick up newly-queued actors. */
 static _Thread_local int g_in_scheduler = 0;
 
+/* Forward declarations */
+int64_t march_monitor(void *watcher, void *target);
+
 /* ── Side-table helpers ──────────────────────────────────────────── */
 
 static unsigned int actor_bucket(void *actor) {
