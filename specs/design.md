@@ -25,7 +25,7 @@ March is a statically-typed functional programming language built for safe concu
 - **Type annotations**: Optional everywhere except where inference fails (recursive functions, ambiguous overloads). Top-level signatures are encouraged but not required.
 - **Typed holes**: `?name` or `?` — the compiler reports the expected type, enabling type-directed development and LLM completion
 - **Atoms**: `:name` — lightweight runtime tags used for messaging and symbol comparisons. Not type constructors — ADTs use capitalized constructors instead.
-- **Function head matching**: Multiple `fn` clauses do the same name are grouped into one function with pattern-matched heads (Elixir-style). Desugared into a single function do a `match` immediately after parsing (before type checking), so the type checker, exhaustiveness checker, and backend each handle one representation.
+- **Function head matching**: Multiple `fn` clauses with the same name are grouped into one function with pattern-matched heads (Elixir-style). Desugared into a single function with a `match` immediately after parsing (before type checking), so the type checker and backend each handle one representation.
 - **Guards**: `when` clauses on function heads and match branches
 - **No algebraic effects**: Concurrency is via actors and message passing, not resumable continuations. Side effects are tracked via capability types, not an effect system.
 
@@ -137,17 +137,14 @@ Rope                -- stdlib: large string manipulation (editors, log assembly)
 Regex               -- stdlib: compiled regex pattern
 ```
 
-**String interpolation** uses `${}` syntax, desugared to the `Interpolatable` interface:
+**String interpolation** uses `${}` syntax, desugared to `++` and `to_string` chains:
 
 ```march
 let msg = "Hello, ${name}! You have ${count} items."
-
-interface Interpolatable(a) do
-  fn format(value : a) : String
-end
+-- desugars to: "Hello, " ++ to_string(name) ++ "! You have " ++ to_string(count) ++ " items."
 ```
 
-Any type implementing `Interpolatable` can appear in `${}`. A type error in interpolation produces a clear message: "`MyRecord` doesn't implement `Interpolatable`."
+The lexer emits `INTERP_START` / `INTERP_MID` / `INTERP_END` tokens; the desugar pass builds the concatenation chain. Any value with a `to_string` conversion can appear in `${}`.
 
 **String interface** for polymorphic operations:
 
@@ -350,7 +347,9 @@ Natural numbers can appear as type parameters, enabling compile-time dimension c
 The type checker includes:
 - A `TNat` type descriptor for literal naturals and nat variables
 - Type-level `+` and `*` operators
-- A constraint solver for equations like `n + m = k`
+- Structural unification of nat expressions (e.g., `n + m` unifies with `n + m` but does not simplify `1 + 2` to `3`)
+
+A full constraint solver for equations like `n + m = k` is not yet implemented — type-level arithmetic unifies structurally rather than algebraically.
 
 ```march
 -- Length in the type
@@ -460,6 +459,22 @@ impl Collection(List(Int)) do
   fn member(x, xs) do List.contains(x, xs) end
 end
 ```
+
+### Standard Interfaces and Auto-Derivation
+
+Four standard interfaces cover the most common boilerplate: `Eq`, `Ord`, `Show`, and `Hash`. ADTs can automatically derive these with a `derive` annotation:
+
+```march
+type Color = Red | Green | Blue
+derive [Eq, Show] for Color
+
+type Point = { x : Int, y : Int }
+derive [Eq, Ord, Show, Hash] for Point
+```
+
+Derived implementations use structural equality (field-by-field for records, tag then fields for variants), lexicographic ordering for `Ord`, a `"TypeName(field, ...)"` format for `Show`, and a FNV-style mix for `Hash`.
+
+Superclass constraints are enforced: `Ord` requires `Eq`, and `Hash` requires `Eq`. The compiler verifies these at the `impl` site.
 
 ### Interface Coherence
 
@@ -704,7 +719,7 @@ Every heap-allocated value (ADT constructor, closure, string) has a reference co
 1. **Backwards liveness analysis**: The pass computes which variables are live before each expression by propagating liveness backwards through the IR. A variable is "last used" at the point where it leaves the live set.
 2. **RC insertion**: Non-last uses of a heap variable get `IncRC` before the use (to prevent premature collection). Last uses get nothing — the existing reference is consumed. Dead let-bindings get `DecRC` at the point of death.
 3. **Cancel-pair elision**: Adjacent `IncRC v` / `DecRC v` pairs are removed as a peephole pass. These arise when a value is passed to a function and immediately returned — the net RC change is zero.
-4. **Runtime behavior**: `DecRC` calls the runtime, which atomically decrements the count. If it reaches zero, the object is freed (and its children are recursively decremented). `IncRC` increments atomically. Linear and affine values are `free`'d directly without counting.
+4. **Runtime behavior**: `DecRC` calls the runtime, which decrements the count. If it reaches zero, the object is freed (and its children are recursively decremented). `IncRC` increments the count. Linear and affine values are `free`'d directly without counting. (Atomic RC for multi-threaded access is a planned upgrade; the current implementation is non-atomic, safe for single-threaded and actor-per-thread patterns where explicit borrowing is used at thread boundaries.)
 
 The result is fully deterministic memory management: memory is freed exactly when the last reference is dropped, with no GC pauses, no conservative scanning, and no write barriers on the hot path.
 
@@ -836,30 +851,47 @@ The compiler is **not** a traditional pipeline. It's a query system:
 - **Expected vs. found**: Errors frame mismatches do full provenance: "expected X because of Y, but found Z because of W"
 - **Hole injection**: Errors become typed holes; the compiler continues past them
 - **No cascades**: Holes have a special error type that suppresses further errors downstream
-- **Multiple diagnostics**: Parser and type checker recover from errors to report all problems in one compilation
+- **Multiple diagnostics**: The type checker recovers from errors (holes absorb mismatches; checking continues). The parser currently stops at the first syntax error — multi-error parser recovery is planned.
 
 ## Tooling & LLM Integration
 
+### Code Formatter (`march fmt`)
+
+A canonical formatter ships with the compiler. One true format — no style debates, deterministic output, smaller diffs for LLM-generated code:
+
+```sh
+march fmt file.march           # reformat in-place
+march fmt --check file.march   # CI mode: exit 1 if not formatted
+march --fmt file.march         # format then compile
+```
+
+**Implementation:** `lib/format/format.ml` — pretty-printer over the parsed AST.
+
 ### Language Server Protocol (LSP)
 
-- Type information at every cursor position
+`march-lsp` provides full IDE support via the LSP protocol (VS Code, Neovim, Helix, Zed, etc.):
+
+- Diagnostics (type errors and parse errors in real-time)
+- Hover (show inferred type at cursor)
 - Go-to-definition via content-addressed lookup
-- Type-directed completion (suggest terms that fit the expected type)
-- Typed hole filling (what type does the compiler expect here?)
-- Provenance inspection ("why does the compiler expect this type?")
+- Type-directed completion (keywords, in-scope names, stdlib)
+- Inlay hints (inferred types on `let` bindings)
+- Semantic tokens (richer syntax highlighting)
+- Actor info (mailbox state on `Pid` hover)
+
+**Implementation:** `lsp/march_lsp.ml` using the `linol` OCaml LSP framework.
 
 ### LLM-Specific Features
 
 - **Typed holes as prompts**: `?` in code becomes a structured query — the compiler provides the expected type, available bindings, and capability context. An LLM can fill the hole with a type-correct expression.
-- **Canonical formatter**: One true format — no style debates, deterministic output, smaller diffs for LLM-generated code
-- **MCP server**: Direct integration point for LLMs to query the compiler (type at position, available completions, capability context)
+- **MCP server**: Direct integration point for LLMs to query the compiler (type at position, available completions, capability context). Planned post-LSP.
 - **Content-addressed search**: Find existing code by type signature — "is there already a function `List a -> Int`?" — enabling LLMs to reuse rather than rewrite
 - **Capability boundaries**: Capability types give LLMs clear contracts about what resources a function can access
 
 ### Tree-sitter Grammar
 
-A Tree-sitter grammar for incremental parsing in editors, enabling:
-- Syntax highlighting
+A Tree-sitter grammar for incremental parsing in editors (`tree-sitter-march/`), enabling:
+- Syntax highlighting (used by the Zed extension today)
 - Structural editing
 - Fast re-parsing on edit
 
@@ -883,3 +915,11 @@ A Tree-sitter grammar for incremental parsing in editors, enabling:
 - **Pony-style capabilities**: No. Linear/affine is the ceiling.
 - **Module system**: Namespaces + interfaces with associated types. No ML functors.
 - **Sig hashing**: Sigs have their own hash, separate from impl hashes.
+- **Match syntax**: `match expr do | Pat -> body end` (Elixir-style `do` keyword, not ML-style `with`).
+- **Pipe operator**: `a |> f(b)` desugars to saturated call `f(a, b)` — piped value is the **first** argument (Elixir convention, not Haskell `&`).
+- **Standard interfaces**: `Eq`, `Ord`, `Show`, `Hash` with `derive` auto-derivation. Superclass constraints enforced at `impl` site.
+- **String interpolation**: `${}` desugars to `++` / `to_string` chains at desugar time, not via an `Interpolatable` typeclass.
+- **No algebraic effects**: Concurrency is actors + message passing. Side effects tracked via capability types, not an effect system.
+- **Atoms**: `:name` are runtime tags, not ADT constructors. ADTs use capitalized names (`Ok`, `Err`, `Some`, `None`).
+- **Exhaustiveness checking**: Not yet implemented. Non-exhaustive patterns produce runtime `Match_failure`. Planned for v1 completion.
+- **Multi-level `use` paths**: `use A.*` works; `use A.B.*` deferred (grammar ambiguity). Single-level for now.

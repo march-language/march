@@ -89,11 +89,14 @@ march/
 ├── CLAUDE.md                # Build instructions, syntax notes, project map
 ├── specs/design.md          # Full language design spec
 ├── specs/gc_design.md       # GC strategy (Perceus RC + arenas + FBIP)
-├── specs/tir.md             # Typed IR design (ANF, passes, LLVM)
-├── specs/defun.md           # Defunctionalization design
-├── specs/perceus.md         # Perceus RC analysis design
 ├── specs/progress.md        # This file
+├── specs/todos.md           # Prioritised todo list
 ├── specs/features/          # Per-feature documentation with source pointers
+│   ├── compiler-pipeline.md # TIR, defun, perceus, escape analysis, LLVM
+│   ├── type-system.md       # HM inference, linear types, session types
+│   ├── actor-system.md      # Actors, scheduler, mailbox, supervision
+│   ├── content-addressed-system.md  # CAS, BLAKE3, pipeline
+│   └── ...                  # (formatter, LSP, pattern-matching, repl, etc.)
 ├── examples/                # Working example programs (actors, HTTP, debug, etc.)
 ├── tree-sitter-march/       # Zed editor extension (grammar.js + compiled march.dylib)
 ├── dune-project
@@ -293,8 +296,8 @@ Root cause: REPL JIT list literal codegen is broken. Non-JIT (interpreter) path 
 ## Next Steps
 
 ### TIR Pipeline (continuing)
-1. ~~**Perceus RC Analysis**~~ ✓ — `lib/tir/perceus.ml` complete. Spec at `specs/perceus.md`.
-2. ~~**Escape Analysis**~~ ✓ — `lib/tir/escape.ml` complete. Spec at `specs/escape.md`.
+1. ~~**Perceus RC Analysis**~~ ✓ — `lib/tir/perceus.ml` complete. Documented in `specs/features/compiler-pipeline.md`.
+2. ~~**Escape Analysis**~~ ✓ — `lib/tir/escape.ml` complete. Documented in `specs/features/compiler-pipeline.md`.
 3. ~~**LLVM IR emission**~~ ✓ — `lib/tir/llvm_emit.ml` + `runtime/march_runtime.{c,h}`. `march --emit-llvm file.march` produces `.ll`; link with `clang runtime/march_runtime.c file.ll -o bin`. Verified: `escape_test.march` compiles to native binary printing `7`.
 
 ### Next milestones
