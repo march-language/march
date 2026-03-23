@@ -554,7 +554,15 @@ type_params:
   | LPAREN; ps = separated_nonempty_list(COMMA, lower_name); RPAREN { ps }
 
 ty:
-  | t = ty_app ARROW u = ty { TyArrow (t, u) }
+  | t = ty_nat_add ARROW u = ty { TyArrow (t, u) }
+  | t = ty_nat_add { t }
+
+ty_nat_add:
+  | a = ty_nat_add PLUS b = ty_nat_mul { TyNatOp (NatAdd, a, b) }
+  | t = ty_nat_mul { t }
+
+ty_nat_mul:
+  | a = ty_nat_mul STAR b = ty_app { TyNatOp (NatMul, a, b) }
   | t = ty_app { t }
 
 ty_app:
@@ -566,6 +574,7 @@ ty_app:
   | t = ty_atom { t }
 
 ty_atom:
+  | n = INT { TyNat n }
   | id = LOWER_IDENT { TyVar (mk_name id $loc) }
   | id = upper_name; DOT; rest = dotted_upper_tail
     { (* Dotted type name: IO.Network → TyCon("IO.Network", []) *)

@@ -13566,6 +13566,82 @@ let test_tc_tail_let_continuation_ok () =
   end|} in
   Alcotest.(check bool) "tail call after let: no errors" false (has_errors ctx)
 
+(* ── Type-level natural number constraint solver ──────────────────────────── *)
+
+let test_tnat_normalize_concrete () =
+  let open March_typecheck.Typecheck in
+  let t = TNatOp (March_ast.Ast.NatAdd, TNat 2, TNat 3) in
+  let result = normalize_tnat t in
+  Alcotest.(check int) "2+3 normalizes to 5" 5
+    (match result with TNat n -> n | _ -> -1)
+
+let test_tnat_normalize_identity_add () =
+  let open March_typecheck.Typecheck in
+  let v = fresh_var 0 in
+  let t = TNatOp (March_ast.Ast.NatAdd, v, TNat 0) in
+  let result = normalize_tnat t in
+  Alcotest.(check bool) "n+0 normalizes to n (same ref)" true
+    (result == v)
+
+let test_tnat_normalize_mul_zero () =
+  let open March_typecheck.Typecheck in
+  let v = fresh_var 0 in
+  let t = TNatOp (March_ast.Ast.NatMul, v, TNat 0) in
+  let result = normalize_tnat t in
+  Alcotest.(check int) "n*0 normalizes to 0" 0
+    (match result with TNat n -> n | _ -> -1)
+
+let test_tnat_normalize_mul_one () =
+  let open March_typecheck.Typecheck in
+  let v = fresh_var 0 in
+  let t = TNatOp (March_ast.Ast.NatMul, v, TNat 1) in
+  let result = normalize_tnat t in
+  Alcotest.(check bool) "n*1 normalizes to n (same ref)" true
+    (result == v)
+
+let test_tnat_normalize_nested () =
+  let open March_typecheck.Typecheck in
+  let t = TNatOp (March_ast.Ast.NatMul,
+    TNatOp (March_ast.Ast.NatAdd, TNat 1, TNat 2),
+    TNat 3) in
+  let result = normalize_tnat t in
+  Alcotest.(check int) "(1+2)*3 normalizes to 9" 9
+    (match result with TNat n -> n | _ -> -1)
+
+let test_tnat_typecheck_concrete_ok () =
+  let ctx = typecheck {|mod Test do
+    type Sized(n) = S
+    fn mk() : Sized(2 + 3) do S end
+    fn use5(x : Sized(5)) : Bool do true end
+    fn main() : Bool do use5(mk()) end
+  end|} in
+  Alcotest.(check bool) "2+3 = 5: no typecheck error" false (has_errors ctx)
+
+let test_tnat_typecheck_concrete_mismatch () =
+  let ctx = typecheck {|mod Test do
+    type Sized(n) = S
+    fn mk() : Sized(2 + 3) do S end
+    fn use6(x : Sized(6)) : Bool do true end
+    fn main() : Bool do use6(mk()) end
+  end|} in
+  Alcotest.(check bool) "2+3 /= 6: typecheck error expected" true (has_errors ctx)
+
+let test_tnat_typecheck_identity () =
+  let ctx = typecheck {|mod Test do
+    type Sized(n) = S
+    fn passthrough(x : Sized(n)) : Sized(n + 0) do x end
+  end|} in
+  Alcotest.(check bool) "n+0 = n: no typecheck error" false (has_errors ctx)
+
+let test_tnat_typecheck_solve_add () =
+  let ctx = typecheck {|mod Test do
+    type Sized(n) = S
+    fn mk5() : Sized(5) do S end
+    fn use_np2(x : Sized(n + 2)) : Bool do true end
+    fn main() : Bool do use_np2(mk5()) end
+  end|} in
+  Alcotest.(check bool) "a+2=5 solves to a=3: no typecheck error" false (has_errors ctx)
+
 let () =
   Alcotest.run "march"
     [
@@ -14768,5 +14844,17 @@ let () =
           Alcotest.test_case "recursive call in binop error"     `Quick test_tc_tail_match_arms_fail;
           Alcotest.test_case "non-recursive function ok"         `Quick test_tc_tail_nonrecursive_ok;
           Alcotest.test_case "tail call after let ok"            `Quick test_tc_tail_let_continuation_ok;
+        ] );
+      ( "type_level_nat",
+        [
+          Alcotest.test_case "normalize 2+3 = 5"       `Quick test_tnat_normalize_concrete;
+          Alcotest.test_case "normalize n+0 = n"        `Quick test_tnat_normalize_identity_add;
+          Alcotest.test_case "normalize n*0 = 0"        `Quick test_tnat_normalize_mul_zero;
+          Alcotest.test_case "normalize n*1 = n"        `Quick test_tnat_normalize_mul_one;
+          Alcotest.test_case "normalize (1+2)*3 = 9"    `Quick test_tnat_normalize_nested;
+          Alcotest.test_case "tc: 2+3 = 5 ok"           `Quick test_tnat_typecheck_concrete_ok;
+          Alcotest.test_case "tc: 2+3 /= 6 error"       `Quick test_tnat_typecheck_concrete_mismatch;
+          Alcotest.test_case "tc: n+0 = n ok"           `Quick test_tnat_typecheck_identity;
+          Alcotest.test_case "tc: a+2=5 solves a=3"     `Quick test_tnat_typecheck_solve_add;
         ] );
     ]

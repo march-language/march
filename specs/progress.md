@@ -188,7 +188,7 @@ march/
 │   ├── websocket.march      # 52 lines: WebSocket types and frame operations
 │   └── iterable.march       # 184 lines: map/filter/fold/take/drop/zip/enumerate/flat_map/any/all/find/count
 ├── test/
-│   ├── test_march.ml         # 912 tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, etc.)
+│   ├── test_march.ml         # 921 tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, etc.)
 │   ├── test_cas.ml           # 41 tests (scc, pipeline, def_id)
 │   ├── test_jit.ml           # 1 test (dlopen round-trip)
 │   ├── test_fmt.ml           # 23 tests (formatter round-trip)
@@ -204,8 +204,8 @@ march/
 ## Current State (as of 2026-03-23)
 
 - **Builds clean**
-- **1146 tests across 8 suites; 0 failures** (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + 5 new LSP features + tail-call enforcement + stream fusion):
-  - `test_march.exe`: 931 tests, all passing (app entry point: 8 new; HAMT Map/Set/Array: 26 new; tap bus: 6 new; repl_compiler_parity: 5 new; MPST: 21 new; REPL JIT fix; tail_recursion: 10 new; stream fusion: 9 new)
+- **1155 tests across 8 suites; 0 failures** (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + 5 new LSP features + tail-call enforcement + stream fusion + type-level nat solver):
+  - `test_march.exe`: 940 tests, all passing (app entry point: 8 new; HAMT Map/Set/Array: 26 new; tap bus: 6 new; repl_compiler_parity: 5 new; MPST: 21 new; REPL JIT fix; tail_recursion: 10 new; stream fusion: 9 new; type_level_nat: 9 new)
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests, passing (formatter round-trip)
@@ -237,6 +237,7 @@ march/
 - **Field-index map for records** — `field_index_for` in `llvm_emit.ml` (line 762); all field GEP offsets correct
 - **Atomic refcounting** — C11 atomics (`atomic_fetch_add/sub_explicit`) in `march_runtime.c`; RC thread-safe
 - **Actor TIR lowering** — `lower_actor` in `lib/tir/lower.ml`; actors compile to native code via `ESpawn`/`ESend` lowering
+- **Type-level natural number constraint solver (v1)** — `normalize_tnat` reduces concrete arithmetic (`2+3→5`, `(1+2)*3→9`) and identity/annihilation rules (`n+0→n`, `n*0→0`, `n*1→n`); `solve_nat_eq` in `unify` solves linear equations (`a+2=5 → a=3`, `a*k=n` when divisible); parser extended with `ty_nat_add`/`ty_nat_mul` levels and integer literals in type position; 9 tests in `type_level_nat` group
 - **SRec recursive protocol unfolding** — `unfold_srec` in typecheck.ml; recursive session types handled; 6 new multi-turn tests (ping-pong loop, nested SRec, SChoose inside SRec, wrong type in loop)
 - **Multi-party session types (MPST)** — `SMSend(role, T, S)` / `SMRecv(role, T, S)` role-annotated session type constructors; `project_steps` projects global choreography to each role's local type; MPST mergeability check for non-chooser roles in `ProtoChoice` (via `session_ty_exact_equal`); `MPST.new` creates N linear `TChan` endpoints (requires ≥3 roles); `MPST.send(ch, Role, v)` / `MPST.recv(ch, Role)` / `MPST.close(ch)` all type-checked at compile time; runtime pairwise queue routing (N*(N-1) directed queues shared between endpoints); 21 new tests (parsing, projection, type check ok/error, eval: 3-party auth, relay, 4-party chain, recv-before-send error)
 - **Type error pretty-printing** — `pp_ty_pretty` wraps long type expressions at 60 chars with indented args; `report_mismatch` shows multi-line format for types >50 chars; `find_arg_mismatch` adds contextual notes identifying which arg/field differs

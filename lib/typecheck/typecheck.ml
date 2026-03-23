@@ -1084,11 +1084,31 @@ let rec session_ty_exact_equal s1 s2 =
     r1 = r2 && pp_ty t1 = pp_ty t2 && session_ty_exact_equal s1' s2'
   | _ -> false
 
+(** Normalize type-level nat arithmetic.
+    Reduces concrete sub-expressions and applies identity / annihilation laws.
+    The result is in weak-head normal form: outer-most TNatOp is simplified as
+    far as possible, sub-expressions are recursively normalized. *)
+let rec normalize_tnat t =
+  match repr t with
+  | TNatOp (op, a, b) ->
+    let a = normalize_tnat a and b = normalize_tnat b in
+    (match op, a, b with
+     | Ast.NatAdd, TNat m, TNat n  -> TNat (m + n)
+     | Ast.NatAdd, t',    TNat 0   -> t'
+     | Ast.NatAdd, TNat 0, t'      -> t'
+     | Ast.NatMul, TNat m, TNat n  -> TNat (m * n)
+     | Ast.NatMul, _,     TNat 0   -> TNat 0
+     | Ast.NatMul, TNat 0, _       -> TNat 0
+     | Ast.NatMul, t',    TNat 1   -> t'
+     | Ast.NatMul, TNat 1, t'      -> t'
+     | _                           -> TNatOp (op, a, b))
+  | t -> t
+
 (** Unify [t1] and [t2], reporting any mismatch to [env.errors].
     Uses [TError] as a recovery sentinel — if either side is [TError]
     the constraint is silently satisfied (the error was already reported). *)
 let rec unify env ~span ?(reason = None) t1 t2 =
-  let t1 = repr t1 and t2 = repr t2 in
+  let t1 = normalize_tnat t1 and t2 = normalize_tnat t2 in
   match t1, t2 with
   (* Error sentinel absorbs everything *)
   | TError, _ | _, TError -> ()
@@ -1141,9 +1161,18 @@ let rec unify env ~span ?(reason = None) t1 t2 =
 
   | TNat n1, TNat n2 when n1 = n2 -> ()
 
+  (* Structural unification for nat ops that could not be fully normalized
+     (e.g. both sides have the same un-solved variable structure). *)
   | TNatOp (op1, a1, b1), TNatOp (op2, a2, b2) when op1 = op2 ->
     unify env ~span ~reason a1 a2;
     unify env ~span ~reason b1 b2
+
+  (* Solve: one side is a concrete nat, the other is a partially-known op.
+     E.g. TVar a + TNat 2 = TNat 5  →  a = 3. *)
+  | TNatOp (op, a, b), TNat n ->
+    solve_nat_eq env ~span ~reason op a b n
+  | TNat n, TNatOp (op, a, b) ->
+    solve_nat_eq env ~span ~reason op a b n
 
   (* Session-typed channels unify by checking their current session states match. *)
   | TChan r1, TChan r2 ->
@@ -1155,6 +1184,27 @@ let rec unify env ~span ?(reason = None) t1 t2 =
 
   | _ ->
     report_mismatch env ~span ~reason t1 t2
+
+(** Solve a type-level nat equation: (op a b) = n.
+    Handles exactly the cases where one operand is an unbound TVar and
+    the other is a concrete TNat, so we can isolate the variable.
+    Falls back to [report_mismatch] for anything more complex. *)
+and solve_nat_eq env ~span ~reason op a b n =
+  match op, a, b with
+  (* a + k = n  →  a = n - k  (when n >= k) *)
+  | Ast.NatAdd, TVar _, TNat k when n >= k ->
+    unify env ~span ~reason a (TNat (n - k))
+  (* k + a = n  →  a = n - k  (when n >= k) *)
+  | Ast.NatAdd, TNat k, TVar _ when n >= k ->
+    unify env ~span ~reason b (TNat (n - k))
+  (* a * k = n  →  a = n / k  (when k divides n) *)
+  | Ast.NatMul, TVar _, TNat k when k <> 0 && n mod k = 0 ->
+    unify env ~span ~reason a (TNat (n / k))
+  (* k * a = n  →  a = n / k  (when k divides n) *)
+  | Ast.NatMul, TNat k, TVar _ when k <> 0 && n mod k = 0 ->
+    unify env ~span ~reason b (TNat (n / k))
+  | _ ->
+    report_mismatch env ~span ~reason (TNatOp (op, a, b)) (TNat n)
 
 (* =================================================================
    §11  Surface-type → internal-type conversion
