@@ -88,6 +88,10 @@ let load_stdlib () =
       "csv.march";
       "websocket.march";
       "http_server.march";
+      "iterable.march";
+      "set.march";
+      "bigint.march";
+      "decimal.march";
     ] in
     List.concat_map (fun name ->
         load_stdlib_file (Filename.concat stdlib_dir name)

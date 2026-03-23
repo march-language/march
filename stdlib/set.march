@@ -1,0 +1,289 @@
+-- Set module: persistent ordered set based on AVL trees.
+--
+-- Set(a) is an immutable balanced binary search tree.
+--
+-- Operations that require ordering take an explicit comparator:
+--   cmp : a -> a -> Bool    where   cmp(a)(b) = true  means  a < b
+--
+-- Standard comparators:
+--   fn(a) -> fn(b) -> a < b      for Int elements
+--   fn(a) -> fn(b) -> a < b      for String elements (lexicographic)
+--
+-- Performance: O(log n) insert / contains / remove, O(n) traversals.
+--
+-- Design:
+--   Internal type: Set(a) = Leaf | Node(left, elem, right, height)
+--   AVL invariant: |height(left) - height(right)| <= 1 at every node
+
+mod Set do
+
+-- ---- Internal representation ----
+
+-- Leaf = empty node; Node(left, elem, right, height) = internal node
+type Set(a) = Leaf | Node(Set(a), a, Set(a), Int)
+
+-- ---- Private helpers ----
+
+fn height(t) do
+  match t do
+  | Leaf               -> 0
+  | Node(_, _, _, h)   -> h
+  end
+end
+
+fn make_node(l, x, r) do
+  let hl = height(l)
+  let hr = height(r)
+  let h = if hl > hr then hl + 1 else hr + 1
+  Node(l, x, r, h)
+end
+
+fn balance_factor(t) do
+  match t do
+  | Leaf               -> 0
+  | Node(l, _, r, _)   -> height(r) - height(l)
+  end
+end
+
+fn rot_left(t) do
+  match t do
+  | Node(l, x, Node(rl, rx, rr, _), _) ->
+    make_node(make_node(l, x, rl), rx, rr)
+  | other -> other
+  end
+end
+
+fn rot_right(t) do
+  match t do
+  | Node(Node(ll, lx, lr, _), x, r, _) ->
+    make_node(ll, lx, make_node(lr, x, r))
+  | other -> other
+  end
+end
+
+fn rebalance(t) do
+  let bf = balance_factor(t)
+  if bf > 1 then
+    match t do
+    | Node(l, x, r, _) ->
+      if balance_factor(r) < 0 then
+        rot_left(make_node(l, x, rot_right(r)))
+      else
+        rot_left(t)
+    | Leaf -> Leaf
+    end
+  else if bf < -1 then
+    match t do
+    | Node(l, x, r, _) ->
+      if balance_factor(l) > 0 then
+        rot_right(make_node(rot_left(l), x, r))
+      else
+        rot_right(t)
+    | Leaf -> Leaf
+    end
+  else t
+end
+
+fn cmp_less(cmp, a, b) do
+  let f = cmp(a)
+  f(b)
+end
+
+fn remove_min(t) do
+  match t do
+  | Leaf               -> panic("Set.remove_min: empty tree")
+  | Node(Leaf, x, r, _) -> (x, r)
+  | Node(l, x, r, _)  ->
+    let (mx, l2) = remove_min(l)
+    (mx, rebalance(make_node(l2, x, r)))
+  end
+end
+
+-- ---- Construction ----
+
+doc "Returns an empty set."
+pub fn empty() do
+  Leaf
+end
+
+doc "Returns a set containing exactly one element."
+pub fn singleton(x) do
+  Node(Leaf, x, Leaf, 1)
+end
+
+-- ---- Query ----
+
+doc "Returns true if the set contains no elements."
+pub fn is_empty(s) do
+  match s do
+  | Leaf -> true
+  | _    -> false
+  end
+end
+
+doc "Returns the number of elements in the set. O(n)."
+pub fn size(s) do
+  match s do
+  | Leaf             -> 0
+  | Node(l, _, r, _) -> 1 + size(l) + size(r)
+  end
+end
+
+doc """
+Returns true if the set contains elem.
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+"""
+pub fn contains(s, elem, cmp) do
+  match s do
+  | Leaf -> false
+  | Node(l, x, r, _) ->
+    if cmp_less(cmp, elem, x) then contains(l, elem, cmp)
+    else if cmp_less(cmp, x, elem) then contains(r, elem, cmp)
+    else true
+  end
+end
+
+-- ---- Modification ----
+
+doc """
+Inserts elem into the set. Returns the set unchanged if elem is already present.
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+"""
+pub fn insert(s, elem, cmp) do
+  match s do
+  | Leaf -> Node(Leaf, elem, Leaf, 1)
+  | Node(l, x, r, h) ->
+    if cmp_less(cmp, elem, x) then
+      rebalance(make_node(insert(l, elem, cmp), x, r))
+    else if cmp_less(cmp, x, elem) then
+      rebalance(make_node(l, x, insert(r, elem, cmp)))
+    else
+      Node(l, x, r, h)
+  end
+end
+
+doc """
+Removes elem from the set. Returns the set unchanged if elem is absent.
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+"""
+pub fn remove(s, elem, cmp) do
+  match s do
+  | Leaf -> Leaf
+  | Node(l, x, r, _) ->
+    if cmp_less(cmp, elem, x) then
+      rebalance(make_node(remove(l, elem, cmp), x, r))
+    else if cmp_less(cmp, x, elem) then
+      rebalance(make_node(l, x, remove(r, elem, cmp)))
+    else
+      match r do
+      | Leaf -> l
+      | _    ->
+        let (mx, r2) = remove_min(r)
+        rebalance(make_node(l, mx, r2))
+      end
+  end
+end
+
+-- ---- Set operations ----
+
+doc """
+Returns the union of two sets (all elements in either set).
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+"""
+pub fn union(a, b, cmp) do
+  fn go(lst, acc) do
+    match lst do
+    | Nil -> acc
+    | Cons(x, rest) -> go(rest, insert(acc, x, cmp))
+    end
+  end
+  go(to_list(b), a)
+end
+
+doc """
+Returns the intersection of two sets (elements in both sets).
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+"""
+pub fn intersection(a, b, cmp) do
+  fn go(lst, acc) do
+    match lst do
+    | Nil -> acc
+    | Cons(x, rest) ->
+      if contains(b, x, cmp) then go(rest, insert(acc, x, cmp))
+      else go(rest, acc)
+    end
+  end
+  go(to_list(a), Leaf)
+end
+
+doc """
+Returns elements in a that are not in b (set difference a \\ b).
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+"""
+pub fn difference(a, b, cmp) do
+  fn go(lst, acc) do
+    match lst do
+    | Nil -> acc
+    | Cons(x, rest) ->
+      if contains(b, x, cmp) then go(rest, acc)
+      else go(rest, insert(acc, x, cmp))
+    end
+  end
+  go(to_list(a), Leaf)
+end
+
+-- ---- Traversal ----
+
+doc "Returns all elements in ascending order as a list."
+pub fn to_list(s) do
+  fn go(t, acc) do
+    match t do
+    | Leaf             -> acc
+    | Node(l, x, r, _) ->
+      let acc2 = go(r, acc)
+      go(l, Cons(x, acc2))
+    end
+  end
+  go(s, Nil)
+end
+
+doc """
+Builds a set from a list of elements.
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+"""
+pub fn from_list(xs, cmp) do
+  fn go(lst, acc) do
+    match lst do
+    | Nil -> acc
+    | Cons(x, rest) -> go(rest, insert(acc, x, cmp))
+    end
+  end
+  go(xs, Leaf)
+end
+
+doc """
+Returns true if the two sets contain the same elements.
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+"""
+pub fn eq(a, b, cmp) do
+  fn lists_equal(xs, ys) do
+    match xs do
+    | Nil ->
+      match ys do
+      | Nil -> true
+      | _   -> false
+      end
+    | Cons(x, xrest) ->
+      match ys do
+      | Nil -> false
+      | Cons(y, yrest) ->
+        if cmp_less(cmp, x, y) then false
+        else if cmp_less(cmp, y, x) then false
+        else lists_equal(xrest, yrest)
+      end
+    end
+  end
+  lists_equal(to_list(a), to_list(b))
+end
+
+end

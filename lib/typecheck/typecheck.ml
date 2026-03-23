@@ -1764,6 +1764,26 @@ let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
       Err.warning env.errors ~span "Non-exhaustive pattern match"
   end
 
+(** Unfold one step of a recursive session type.
+    [SRec(x, body)] becomes [body] with every [SVar x] replaced by [SRec(x, body)].
+    Keeps unfolding until the outermost constructor is no longer [SRec],
+    so callers can pattern-match directly on [SSend] / [SRecv] / etc. *)
+let rec unfold_srec s =
+  match s with
+  | SRec (x, body) ->
+    let rec subst_inner s =
+      match s with
+      | SVar y when y = x          -> SRec (x, body)
+      | SSend (t, s')              -> SSend (t, subst_inner s')
+      | SRecv (t, s')              -> SRecv (t, subst_inner s')
+      | SChoose bs                 -> SChoose (List.map (fun (l, s') -> (l, subst_inner s')) bs)
+      | SOffer  bs                 -> SOffer  (List.map (fun (l, s') -> (l, subst_inner s')) bs)
+      | SRec (y, s') when y <> x  -> SRec (y, subst_inner s')
+      | other                      -> other
+    in
+    unfold_srec (subst_inner body)
+  | _ -> s
+
 (** [infer_expr env e] synthesises the type of [e], accumulating any
     errors into [env.errors]. *)
 let rec infer_expr env (e : Ast.expr) : ty =
@@ -1870,7 +1890,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
       in
       (match inner_chan_ty with
        | TChan r ->
-         (match !r with
+         (match unfold_srec !r with
           | SSend (payload_ty, cont) ->
             check_expr env val_expr payload_ty
               ~reason:(Some (RBuiltin "Payload type of Chan.send"));
@@ -1900,7 +1920,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
       in
       (match inner_chan_ty with
        | TChan r ->
-         (match !r with
+         (match unfold_srec !r with
           | SRecv (payload_ty, cont) ->
             TTuple [payload_ty; TLin (Ast.Linear, TChan (ref cont))]
           | SError -> TError
@@ -1928,7 +1948,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
       in
       (match inner_chan_ty with
        | TChan r ->
-         (match !r with
+         (match unfold_srec !r with
           | SEnd -> t_unit
           | SError -> TError
           | other ->
@@ -1960,7 +1980,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
       in
       (match inner_chan_ty with
        | TChan r ->
-         (match !r with
+         (match unfold_srec !r with
           | SChoose branches ->
             (match label_str with
              | None ->
@@ -2005,7 +2025,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
       in
       (match inner_chan_ty with
        | TChan r ->
-         (match !r with
+         (match unfold_srec !r with
           | SOffer branches ->
             let cont_ty = match branches with
               | (_, sty) :: _ -> TLin (Ast.Linear, TChan (ref sty))
