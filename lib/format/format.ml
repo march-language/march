@@ -507,10 +507,11 @@ and emit_decl ctx = function
        line ctx (Printf.sprintf "%stype %s%s = %s" v name.txt ps (fmt_ty ty))
 
      | TDVariant variants ->
-       let var_str { var_name; var_args } =
+       let var_str { var_name; var_args; var_vis } =
+         let vis = match var_vis with Public -> "pub " | Private -> "" in
          match var_args with
-         | []  -> var_name.txt
-         | tys -> Printf.sprintf "%s(%s)" var_name.txt (fmt_tys tys)
+         | []  -> vis ^ var_name.txt
+         | tys -> Printf.sprintf "%s%s(%s)" vis var_name.txt (fmt_tys tys)
        in
        let all  = String.concat " | " (List.map var_str variants) in
        let full = Printf.sprintf "%stype %s%s = %s" v name.txt ps all in

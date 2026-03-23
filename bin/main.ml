@@ -280,6 +280,17 @@ let compile filename =
         (March_errors.Errors.render_parse_error ~src ~filename ~msg:"I got stuck here:" lexbuf);
       exit 1
   in
+  (* Display any declaration-level parse errors collected during recovery *)
+  let parse_errs = March_parser.Parse_errors.take_parse_errors () in
+  let has_parse_errors = parse_errs <> [] in
+  List.iter (fun (msg, hint, pos) ->
+      let open Lexing in
+      Printf.eprintf "%s:%d:%d: error: %s\n"
+        filename pos.pos_lnum (pos.pos_cnum - pos.pos_bol) msg;
+      (match hint with
+       | None -> ()
+       | Some h -> Printf.eprintf "hint: %s\n" h)
+    ) parse_errs;
   (* Desugar *)
   let desugared = March_desugar.Desugar.desugar_module module_ast in
   (* Inject stdlib declarations before user declarations *)
@@ -325,7 +336,7 @@ let compile filename =
     ) diags in
   (* In compile mode, abort on user-file errors only.  Stdlib errors
      (e.g. http_client) are tolerated since those modules are WIP. *)
-  if has_user_errors then exit 1
+  if has_user_errors || has_parse_errors then exit 1
   else if compile_mode then begin
     let tir = March_tir.Lower.lower_module ~type_map desugared in
     let tir = March_tir.Mono.monomorphize tir in

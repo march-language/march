@@ -207,7 +207,7 @@ and type_def =
   | TDRecord of field list                     (** Record type *)
 [@@deriving show]
 
-and variant = { var_name : name; var_args : ty list } [@@deriving show]
+and variant = { var_name : name; var_args : ty list; var_vis : visibility } [@@deriving show]
 and field = { fld_name : name; fld_ty : ty; fld_lin : linearity } [@@deriving show]
 
 and restart_strategy =

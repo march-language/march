@@ -278,9 +278,10 @@ type lin_entry = {
     Describes one variant of a sum type so we can give [ECon] and
     [PatCon] real types instead of fresh variables. *)
 type ctor_info = {
-  ci_type    : string;        (** Parent type name, e.g. "Result" *)
-  ci_params  : string list;   (** Type param names in declaration order *)
-  ci_arg_tys : Ast.ty list;   (** Surface arg types of this constructor *)
+  ci_type    : string;           (** Parent type name, e.g. "Result" *)
+  ci_params  : string list;      (** Type param names in declaration order *)
+  ci_arg_tys : Ast.ty list;      (** Surface arg types of this constructor *)
+  ci_vis     : Ast.visibility;   (** Constructor visibility (Public/Private) *)
 }
 
 (** One entry in the import tracker — records an imported name or alias and
@@ -886,13 +887,13 @@ let builtin_types : (string * int) list =
 let builtin_ctors : (string * ctor_info) list =
   let mk_var s = Ast.TyVar { txt = s; span = Ast.dummy_span } in
   let mk_list_ty s = Ast.TyCon ({ txt = "List"; span = Ast.dummy_span }, [mk_var s]) in
-  [ ("Some", { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [mk_var "a"] });
-    ("None", { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [] });
-    ("Ok",   { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "a"] });
-    ("Err",  { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "e"] });
-    ("Nil",  { ci_type = "List";   ci_params = ["a"];      ci_arg_tys = [] });
+  [ ("Some", { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = [mk_var "a"]; ci_vis = Ast.Public });
+    ("None", { ci_type = "Option"; ci_params = ["a"];      ci_arg_tys = []; ci_vis = Ast.Public });
+    ("Ok",   { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "a"]; ci_vis = Ast.Public });
+    ("Err",  { ci_type = "Result"; ci_params = ["a"; "e"]; ci_arg_tys = [mk_var "e"]; ci_vis = Ast.Public });
+    ("Nil",  { ci_type = "List";   ci_params = ["a"];      ci_arg_tys = []; ci_vis = Ast.Public });
     ("Cons", { ci_type = "List";   ci_params = ["a"];
-               ci_arg_tys = [mk_var "a"; mk_list_ty "a"] });
+               ci_arg_tys = [mk_var "a"; mk_list_ty "a"]; ci_vis = Ast.Public });
   ]
 
 let base_env errors type_map =
@@ -3093,7 +3094,8 @@ let rec check_decl env (d : Ast.decl) : env =
        List.fold_left (fun e (v : Ast.variant) ->
            let ci = { ci_type    = name.txt
                     ; ci_params  = param_names
-                    ; ci_arg_tys = v.var_args } in
+                    ; ci_arg_tys = v.var_args
+                    ; ci_vis     = v.var_vis } in
            { e with ctors = (v.var_name.txt, ci) :: e.ctors }
          ) env1 variants
      | Ast.TDRecord fields ->
@@ -3139,7 +3141,7 @@ let rec check_decl env (d : Ast.decl) : env =
        instantiation; this ensures `send(pid, Msg(x))` typechecks correctly even
        when the handler omits a type annotation. *)
     let env_with_actor_ctor = { env with ctors =
-      (name.txt, { ci_type = name.txt; ci_params = []; ci_arg_tys = [] })
+      (name.txt, { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_vis = Ast.Public })
       :: env.ctors } in
     let env_with_ctors = List.fold_left (fun acc_env (h : Ast.actor_handler) ->
         let arg_tys = List.mapi (fun i (p : Ast.param) ->
@@ -3152,7 +3154,7 @@ let rec check_decl env (d : Ast.decl) : env =
                           span = p.param_name.span }
           ) h.ah_params in
         let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
-                   ci_arg_tys = arg_tys } in
+                   ci_arg_tys = arg_tys; ci_vis = Ast.Public } in
         { acc_env with ctors = (h.ah_msg.txt, ci) :: acc_env.ctors }
       ) env_with_actor_ctor actor.actor_handlers in
     (* Check init expression — must return the state record type *)
@@ -3297,10 +3299,14 @@ let rec check_decl env (d : Ast.decl) : env =
        Opaque types listed in the sig have their constructors hidden: only the
        type name is exported, not the constructors (encapsulation). *)
     let new_types = List.filter (fun (k, _) -> List.mem k pub_set) inner_env.types in
-    let new_ctors = List.filter (fun (k, ci) ->
+    let new_ctors = List.filter (fun (_k, ci) ->
         (* Hide constructors for opaque types declared in the sig *)
         if List.mem ci.ci_type opaque_types then false
-        else List.mem k pub_set || List.mem ci.ci_type pub_set
+        (* Export constructor only if its parent type is public AND
+           the constructor itself is explicitly marked Public.
+           This enforces opaque types: `pub type Foo = A | B` hides A and B
+           until they are individually marked `pub A | pub B`. *)
+        else List.mem ci.ci_type pub_set && ci.ci_vis = Ast.Public
       ) inner_env.ctors in
     (* Collect this module's declared capabilities for transitive enforcement *)
     let inner_needs = List.concat_map (function
@@ -3684,7 +3690,8 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
            List.fold_left (fun e (v : Ast.variant) ->
                let ci = { ci_type    = name.txt
                         ; ci_params  = param_names
-                        ; ci_arg_tys = v.var_args } in
+                        ; ci_arg_tys = v.var_args
+                        ; ci_vis     = v.var_vis } in
                { e with ctors = (v.var_name.txt, ci) :: e.ctors }
              ) env1 variants
          | Ast.TDRecord fields ->
@@ -3697,7 +3704,7 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
            Same arity fix as in check_decl: include unannotated params as
            unique TyVar placeholders so constructor arity is always correct. *)
         let env1 = { env with ctors =
-          (name.txt, { ci_type = name.txt; ci_params = []; ci_arg_tys = [] })
+          (name.txt, { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_vis = Ast.Public })
           :: env.ctors } in
         List.fold_left (fun acc_env (h : Ast.actor_handler) ->
             let arg_tys = List.mapi (fun i (p : Ast.param) ->
@@ -3708,7 +3715,7 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
                               span = p.param_name.span }
               ) h.ah_params in
             let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
-                       ci_arg_tys = arg_tys } in
+                       ci_arg_tys = arg_tys; ci_vis = Ast.Public } in
             { acc_env with ctors = (h.ah_msg.txt, ci) :: acc_env.ctors }
           ) env1 actor.actor_handlers
       | Ast.DSig (name, sdef, _) ->
@@ -3745,7 +3752,8 @@ let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
            List.fold_left (fun e (v : Ast.variant) ->
                let ci = { ci_type    = name.txt
                         ; ci_params  = param_names
-                        ; ci_arg_tys = v.var_args } in
+                        ; ci_arg_tys = v.var_args
+                        ; ci_vis     = v.var_vis } in
                { e with ctors = (v.var_name.txt, ci) :: e.ctors }
              ) env1 variants
          | _ -> env1)
