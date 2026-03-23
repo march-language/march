@@ -4256,6 +4256,124 @@ let test_repl_jit_general_interaction () =
      with exn ->
        March_jit.Repl_jit.cleanup jit; raise exn)
 
+(** Regression: `let ll = [1,2,3,9,4,5,6,7]` must compile when bigint is
+    in the JIT fragment.  Reproduces the real-REPL scenario where
+    precompile_stdlib fails (e.g. decimal.march parse error), causing ALL
+    stdlib functions — including BigInt.div_digit$go$apply$N — to be
+    JIT-compiled in the first fragment alongside the user's list literal.
+
+    Bug: the Cons branch of div_digit$go$apply$N defines %new_rem.addr in
+    case_cons_lbl, but after FBIP the subsequent load lands in fbip_merge1
+    without %new_rem.addr being defined there (or the alloca uses the wrong
+    slot due to stale local_names state leaking from a prior emit_fn call). *)
+let test_repl_list_literal_with_bigint () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let list_decl   = load_stdlib_file_for_test "list.march" in
+    let bigint_decl = load_stdlib_file_for_test "bigint.march" in
+    let stdlib_decls = [list_decl; bigint_decl] in
+    let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
+      Hashtbl.create 16 in
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (* Intentionally do NOT call precompile_stdlib — this forces all stdlib
+       functions (including BigInt) into the first JIT fragment, reproducing
+       the real-REPL scenario when precompile fails due to a parse error in
+       another stdlib file (e.g. decimal.march). *)
+    (try
+       let make_stdlib_mod e =
+         let s = March_ast.Ast.dummy_span in
+         let clause = March_ast.Ast.{
+           fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let main_def = March_ast.Ast.{
+           fn_name = { txt = "main"; span = s };
+           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_clauses = [clause] } in
+         { March_ast.Ast.mod_name = { txt = "Main"; span = s };
+           mod_decls = stdlib_decls @ [DFn (main_def, s)] }
+       in
+       let run_decl_with_stdlib src =
+         match parse_repl src with
+         | March_ast.Ast.ReplDecl d ->
+           let d' = March_desugar.Desugar.desugar_decl d in
+           let (bind_name, bind_expr) = match d' with
+             | March_ast.Ast.DLet (_, b, _) ->
+               let n = match b.bind_pat with
+                 | March_ast.Ast.PatVar v -> v.txt
+                 | _ -> failwith "expected PatVar"
+               in (n, b.bind_expr)
+             | _ -> failwith "expected DLet"
+           in
+           March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false
+             ~bind_name (make_stdlib_mod bind_expr)
+         | _ -> failwith ("expected ReplDecl for: " ^ src)
+       in
+       (* 8-element list — exact reproducer from bug report *)
+       run_decl_with_stdlib "let ll = [1,2,3,9,4,5,6,7]";
+       (* Shorter lists at the boundary *)
+       run_decl_with_stdlib "let xs = [1,2,3]";
+       run_decl_with_stdlib "let ys = [1]";
+       run_decl_with_stdlib "let zs = []";
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
+(** Regression: decimal.march must parse without errors.
+    A missing `end` in the `align` function caused the module block to close
+    prematurely, which then caused a parse error on the next `doc` annotation.
+    With decimal fixed, precompile_stdlib can succeed for the full stdlib. *)
+let test_decimal_march_parses () =
+  (* load_stdlib_file_for_test will raise if decimal.march fails to parse *)
+  let _decl = load_stdlib_file_for_test "decimal.march" in
+  ignore _decl
+
+(** Regression: precompile_stdlib with bigint + decimal should succeed,
+    ensuring list literals don't drag all stdlib fns into every JIT fragment. *)
+let test_repl_list_literal_with_precompile_bigint () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    let list_decl   = load_stdlib_file_for_test "list.march" in
+    let bigint_decl = load_stdlib_file_for_test "bigint.march" in
+    let stdlib_decls = [list_decl; bigint_decl] in
+    let content_hash =
+      Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
+    let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
+      Hashtbl.create 16 in
+    let jit = March_jit.Repl_jit.create ~runtime_so () in
+    (try
+       (* Precompile bigint — should succeed now that decimal.march is fixed *)
+       March_jit.Repl_jit.precompile_stdlib jit
+         ~content_hash ~stdlib_decls ~type_map;
+       let make_stdlib_mod e =
+         let s = March_ast.Ast.dummy_span in
+         let clause = March_ast.Ast.{
+           fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
+         let main_def = March_ast.Ast.{
+           fn_name = { txt = "main"; span = s };
+           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_clauses = [clause] } in
+         { March_ast.Ast.mod_name = { txt = "Main"; span = s };
+           mod_decls = stdlib_decls @ [DFn (main_def, s)] }
+       in
+       (match parse_repl "let ll = [1,2,3,9,4,5,6,7]" with
+        | March_ast.Ast.ReplDecl d ->
+          let d' = March_desugar.Desugar.desugar_decl d in
+          let (bind_name, bind_expr) = match d' with
+            | March_ast.Ast.DLet (_, b, _) ->
+              let n = match b.bind_pat with
+                | March_ast.Ast.PatVar v -> v.txt
+                | _ -> failwith "expected PatVar"
+              in (n, b.bind_expr)
+            | _ -> failwith "expected DLet"
+          in
+          March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false
+            ~bind_name (make_stdlib_mod bind_expr)
+        | _ -> failwith "expected ReplDecl");
+       March_jit.Repl_jit.cleanup jit
+     with exn ->
+       March_jit.Repl_jit.cleanup jit; raise exn)
+
 (* ------------------------------------------------------------------ *)
 (* list_actors tests                                                   *)
 (* ------------------------------------------------------------------ *)
@@ -11655,6 +11773,9 @@ let () =
       ];
       "repl_jit_regression", [
         Alcotest.test_case "list literal compiles" `Quick test_repl_list_literal;
+        Alcotest.test_case "list literal with bigint in fragment" `Quick test_repl_list_literal_with_bigint;
+        Alcotest.test_case "decimal.march parses" `Quick test_decimal_march_parses;
+        Alcotest.test_case "list literal with precompile bigint" `Quick test_repl_list_literal_with_precompile_bigint;
         Alcotest.test_case "stdlib on list literal" `Quick test_repl_stdlib_on_list;
         Alcotest.test_case "var redefinition" `Quick test_repl_var_redefinition;
         Alcotest.test_case "stdlib chain" `Quick test_repl_stdlib_chain;
