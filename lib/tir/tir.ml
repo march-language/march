@@ -58,8 +58,10 @@ type expr =
   | EAlloc      of ty * atom list                 (* heap-allocate a constructor *)
   | EStackAlloc of ty * atom list                 (* stack-allocate — inserted by Escape analysis *)
   | EFree    of atom                              (* explicit dealloc — inserted by Perceus *)
-  | EIncRC   of atom                              (* RC increment — inserted by Perceus *)
-  | EDecRC   of atom                              (* RC decrement — inserted by Perceus *)
+  | EIncRC   of atom                              (* non-atomic RC increment — local values only *)
+  | EDecRC   of atom                              (* non-atomic RC decrement — local values only *)
+  | EAtomicIncRC of atom                          (* atomic RC increment — actor-shared values *)
+  | EAtomicDecRC of atom                          (* atomic RC decrement — actor-shared values *)
   | EReuse   of atom * ty * atom list             (* FBIP reuse — inserted by Perceus *)
   | ESeq     of expr * expr                       (* sequence, first result discarded *)
 [@@deriving show]

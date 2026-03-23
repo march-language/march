@@ -47,7 +47,8 @@ let rec refs_in_expr (known : string list) (e : expr) : string list =
     refs_in_atom known a @ List.concat_map (fun (_, av) -> refs_in_atom known av) fields
   | EAlloc (_, args)
   | EStackAlloc (_, args)     -> List.concat_map (refs_in_atom known) args
-  | EFree a | EIncRC a | EDecRC a -> refs_in_atom known a
+  | EFree a | EIncRC a | EDecRC a
+  | EAtomicIncRC a | EAtomicDecRC a -> refs_in_atom known a
   | EReuse (a, _, args)       ->
     refs_in_atom known a @ List.concat_map (refs_in_atom known) args
   | ESeq (e1, e2)             -> refs_in_expr known e1 @ refs_in_expr known e2

@@ -710,8 +710,10 @@ let rename_tir_vars (prefix : string) (names : string list) (fn : Tir.fn_def) : 
     | Tir.EAlloc (ty, args)      -> Tir.EAlloc (ty, List.map rename_atom args)
     | Tir.EStackAlloc (ty, args) -> Tir.EStackAlloc (ty, List.map rename_atom args)
     | Tir.EFree a   -> Tir.EFree (rename_atom a)
-    | Tir.EIncRC a  -> Tir.EIncRC (rename_atom a)
-    | Tir.EDecRC a  -> Tir.EDecRC (rename_atom a)
+    | Tir.EIncRC a       -> Tir.EIncRC (rename_atom a)
+    | Tir.EDecRC a       -> Tir.EDecRC (rename_atom a)
+    | Tir.EAtomicIncRC a -> Tir.EAtomicIncRC (rename_atom a)
+    | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (rename_atom a)
     | Tir.EReuse (a, ty, args) -> Tir.EReuse (rename_atom a, ty, List.map rename_atom args)
     | Tir.ESeq (e1, e2) -> Tir.ESeq (rename_expr e1, rename_expr e2)
   and rename_fn (f : Tir.fn_def) : Tir.fn_def =
@@ -1007,14 +1009,56 @@ let lower_actor (name : string) (actor : Ast.actor_def) : Tir.type_def list * Ti
         Tir.ELet (ifv, Tir.EField (Tir.AVar init_var, fname), acc)
       ) init_field_vars spawn_inner
   in
-  let spawn_body =
-    Tir.ELet (init_var, lower_expr actor.actor_init, spawn_with_fields)
+  (* ── 5b. Supervision registration ───────────────────────────────── *)
+  (* If this actor declares a supervise block, call march_register_supervisor
+     from the spawn function body so the runtime knows the supervision strategy.
+     Encoding: OneForOne=0, OneForAll=1, RestForOne=2. *)
+  let strategy_int (s : Ast.restart_strategy) : int =
+    match s with
+    | Ast.OneForOne  -> 0
+    | Ast.OneForAll  -> 1
+    | Ast.RestForOne -> 2
+  in
+  let mk_reg_sup_call (spawned_atom : Tir.atom) (sc : Ast.supervise_config) : Tir.expr =
+    let reg_sup_var : Tir.var = {
+      v_name = "register_supervisor";
+      v_ty   = Tir.TFn ([Tir.TPtr Tir.TUnit; Tir.TInt; Tir.TInt; Tir.TInt], Tir.TUnit);
+      v_lin  = Tir.Unr;
+    } in
+    Tir.EApp (reg_sup_var, [
+      spawned_atom;
+      Tir.ALit (Ast.LitInt (strategy_int sc.Ast.sc_strategy));
+      Tir.ALit (Ast.LitInt sc.Ast.sc_max_restarts);
+      Tir.ALit (Ast.LitInt sc.Ast.sc_window_secs);
+    ])
+  in
+  (* Wrap the spawn body: after allocating the actor, register supervision if needed. *)
+  let spawn_body_with_sup =
+    match actor.actor_supervise with
+    | None -> Tir.ELet (init_var, lower_expr actor.actor_init, spawn_with_fields)
+    | Some sc ->
+      (* Replace the final EAtom($spawned) with:
+           let $reg_sup_result = register_supervisor($spawned, strat, max, window) in
+           EAtom($spawned)
+         We thread the $spawned var through by wrapping the full body. *)
+      let rec wrap_sup (e : Tir.expr) : Tir.expr =
+        match e with
+        | Tir.ELet (v, Tir.EAlloc (ty, args), rest) when v.Tir.v_name = "$spawned" ->
+          (* After allocating, call march_spawn, then register_supervisor, then return *)
+          Tir.ELet (v, Tir.EAlloc (ty, args),
+            Tir.ELet ({ v_name = "$sup_reg"; v_ty = Tir.TUnit; v_lin = Tir.Unr },
+              mk_reg_sup_call (Tir.AVar v) sc,
+              rest))
+        | Tir.ELet (v, rhs, body) -> Tir.ELet (v, rhs, wrap_sup body)
+        | other -> other
+      in
+      Tir.ELet (init_var, lower_expr actor.actor_init, wrap_sup spawn_with_fields)
   in
   let spawn_fn : Tir.fn_def = {
     fn_name   = name ^ "_spawn";
     fn_params = [];
     fn_ret_ty = Tir.TPtr Tir.TUnit;
-    fn_body   = spawn_body;
+    fn_body   = spawn_body_with_sup;
   } in
 
   (* Also register a state record type so EField accesses on the init state

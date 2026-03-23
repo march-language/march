@@ -24,7 +24,8 @@ let fop name args  = EApp (mk_var name (TFn ([], TFloat)), args)
 (** Count all TIR expression nodes recursively. *)
 let rec node_count : expr -> int = function
   | EAtom _ | ETuple _ | ERecord _ | EField _ | EUpdate _
-  | EAlloc _ | EStackAlloc _ | EIncRC _ | EDecRC _ | EFree _ | EReuse _ -> 1
+  | EAlloc _ | EStackAlloc _ | EIncRC _ | EDecRC _ | EFree _ | EReuse _
+  | EAtomicIncRC _ | EAtomicDecRC _ -> 1
   | EApp (_, args) | ECallPtr (_, args) -> 1 + List.length args
   | ELet (_, rhs, body)   -> 1 + node_count rhs + node_count body
   | ELetRec (fns, body)   ->

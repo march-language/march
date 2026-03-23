@@ -193,6 +193,7 @@ let is_builtin_fn name =
                  "demonitor"; "monitor"; "mailbox_size";
                  "run_until_idle"; "register_resource"; "get_cap";
                  "send_checked"; "pid_of_int"; "get_actor_field";
+                 "link"; "unlink"; "register_supervisor";
                  (* Generic to_string *)
                  "to_string"]
 
@@ -296,6 +297,10 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "send_checked"                -> Some Tir.TUnit
   | "pid_of_int"                  -> Some (Tir.TCon ("Pid", [Tir.TVar "a"]))
   | "get_actor_field"             -> Some (Tir.TCon ("Option", [Tir.TVar "a"]))
+  (* Link / supervisor builtins *)
+  | "link"                        -> Some Tir.TUnit
+  | "unlink"                      -> Some Tir.TUnit
+  | "register_supervisor"         -> Some Tir.TUnit
   (* Generic to_string *)
   | "to_string"                   -> Some Tir.TString
   | _ -> None
@@ -416,9 +421,13 @@ let mangle_extern : string -> string = function
   | "run_until_idle"     -> "march_run_until_idle"
   | "register_resource"  -> "march_register_resource"
   | "get_cap"            -> "march_get_cap"
-  | "send_checked"       -> "march_send_checked"
-  | "pid_of_int"         -> "march_pid_of_int"
-  | "get_actor_field"    -> "march_get_actor_field"
+  | "send_checked"         -> "march_send_checked"
+  | "pid_of_int"           -> "march_pid_of_int"
+  | "get_actor_field"      -> "march_get_actor_field"
+  (* Link / supervisor builtins *)
+  | "link"                 -> "march_link"
+  | "unlink"               -> "march_unlink"
+  | "register_supervisor"  -> "march_register_supervisor"
   (* Generic to_string *)
   | "to_string"          -> "march_value_to_string"
   | "main"          -> "march_main"   (* March main → march_main in LLVM *)
@@ -1223,7 +1232,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   (* ── RC ops ────────────────────────────────────────────────────────── *)
   (* Skip RC ops on builtins AND on top-level function references.
      Function addresses live in the code segment, not the heap, so calling
-     march_incrc/decrc/free on them would corrupt memory or crash. *)
+     march_incrc_local/decrc_local/free on them would corrupt memory or crash.
+     EIncRC/EDecRC use non-atomic local RC (fast path, single-owner values).
+     EAtomicIncRC/EAtomicDecRC use C11-atomic RC for actor-shared values. *)
   | Tir.EIncRC atom
     when atom_is_builtin atom ||
          (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false) ->
@@ -1231,7 +1242,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EIncRC atom ->
     let (ty, v) = emit_atom ctx atom in
     if ty = "ptr" then
-      emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" v);
+      emit ctx (Printf.sprintf "call void @march_incrc_local(ptr %s)" v);
     ("i64", "0")
 
   | Tir.EDecRC atom
@@ -1239,6 +1250,26 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false) ->
     ("i64", "0")
   | Tir.EDecRC atom ->
+    let (ty, v) = emit_atom ctx atom in
+    if ty = "ptr" then
+      emit ctx (Printf.sprintf "call void @march_decrc_local(ptr %s)" v);
+    ("i64", "0")
+
+  | Tir.EAtomicIncRC atom
+    when atom_is_builtin atom ||
+         (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false) ->
+    ("i64", "0")
+  | Tir.EAtomicIncRC atom ->
+    let (ty, v) = emit_atom ctx atom in
+    if ty = "ptr" then
+      emit ctx (Printf.sprintf "call void @march_incrc(ptr %s)" v);
+    ("i64", "0")
+
+  | Tir.EAtomicDecRC atom
+    when atom_is_builtin atom ||
+         (match atom with Tir.AVar v -> Hashtbl.mem ctx.top_fns v.Tir.v_name | _ -> false) ->
+    ("i64", "0")
+  | Tir.EAtomicDecRC atom ->
     let (ty, v) = emit_atom ctx atom in
     if ty = "ptr" then
       emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" v);
@@ -1448,11 +1479,14 @@ and emit_case ctx scrut_atom branches default_opt =
     end
   end;
 
-  (* Helper: if body = ESeq(EDecRC(v), rest) where v.v_name = scrut_name,
-     return (v, rest). Used to handle shared-value field IncRC below. *)
+  (* Helper: if body = ESeq(EDecRC(v)|EAtomicDecRC(v), rest) where
+     v.v_name = scrut_name, return (v, rest).
+     Both atomic and non-atomic DecRC qualify — the decrc_freed path handles
+     the conditional IncRC of children either way. *)
   let strip_scrut_decrc scrut_name body =
     match body with
     | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest)
+    | Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v), rest)
       when String.equal v.Tir.v_name scrut_name -> Some (v, rest)
     | _ -> None
   in
@@ -1645,6 +1679,8 @@ declare ptr  @march_alloc(i64 %sz)
 declare void @march_incrc(ptr %p)
 declare void @march_decrc(ptr %p)
 declare i64  @march_decrc_freed(ptr %p)
+declare void @march_incrc_local(ptr %p)
+declare void @march_decrc_local(ptr %p)
 declare void @march_free(ptr %p)
 declare void @march_print(ptr %s)
 declare void @march_panic(ptr %s)
@@ -1773,6 +1809,9 @@ declare ptr  @march_get_cap(ptr %pid)
 declare void @march_send_checked(ptr %cap, ptr %msg)
 declare ptr  @march_pid_of_int(i64 %n)
 declare ptr  @march_get_actor_field(ptr %pid, ptr %name)
+declare void @march_link(ptr %actor_a, ptr %actor_b)
+declare void @march_unlink(ptr %actor_a, ptr %actor_b)
+declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs)
 declare ptr  @march_value_to_string(ptr %v)
 
 |}

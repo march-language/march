@@ -156,8 +156,8 @@ let free_vars_of_expr (top_level : StringSet.t) (body : Tir.expr) (params : Tir.
     | Tir.EAlloc (_, args) | Tir.EStackAlloc (_, args) ->
       List.iter (fun a -> fv_atom a bound) args
     | Tir.EFree a -> fv_atom a bound
-    | Tir.EIncRC a -> fv_atom a bound
-    | Tir.EDecRC a -> fv_atom a bound
+    | Tir.EIncRC a | Tir.EAtomicIncRC a -> fv_atom a bound
+    | Tir.EDecRC a | Tir.EAtomicDecRC a -> fv_atom a bound
     | Tir.EReuse (a, _, args) ->
       fv_atom a bound;
       List.iter (fun a -> fv_atom a bound) args
