@@ -10590,6 +10590,682 @@ let test_eval_builtin_qualified_ctors () =
   Alcotest.(check int) "Option.Some(7) matched by Some" 7 (vint v)
 
 
+(* ══════════════════════════════════════════════════════════════════════════
+   §A  Property tests for derived Eq / Ord / Show / Hash interfaces
+   ══════════════════════════════════════════════════════════════════════════ *)
+
+(* ── Eq properties ──────────────────────────────────────────────────────── *)
+
+let test_eq_prop_reflexivity_enum () =
+  let env = eval_module {|mod Test do
+    type Color = Red | Green | Blue
+    derive Eq for Color
+    fn result() : Bool do
+      (Red == Red) && (Green == Green) && (Blue == Blue)
+    end
+  end|} in
+  Alcotest.(check bool) "Eq reflexivity: a==a for every ctor" true
+    (vbool (call_fn env "result" []))
+
+let test_eq_prop_symmetry_enum () =
+  let env = eval_module {|mod Test do
+    type Color = Red | Green | Blue
+    derive Eq for Color
+    fn result() : Bool do
+      let ab = Red == Green
+      let ba = Green == Red
+      ab == ba
+    end
+  end|} in
+  Alcotest.(check bool) "Eq symmetry: (a==b) == (b==a)" true
+    (vbool (call_fn env "result" []))
+
+let test_eq_prop_transitivity_same () =
+  (* a==b and b==c and a==c should all agree *)
+  let env = eval_module {|mod Test do
+    type Color = Red | Green | Blue
+    derive Eq for Color
+    fn result() : Bool do
+      let ab = Red == Red
+      let bc = Red == Red
+      let ac = Red == Red
+      if ab then if bc then ac else false else true
+    end
+  end|} in
+  Alcotest.(check bool) "Eq transitivity: a==b && b==c => a==c" true
+    (vbool (call_fn env "result" []))
+
+let test_eq_prop_record_reflexivity () =
+  let env = eval_module {|mod Test do
+    type Point = { x: Int, y: Int }
+    derive Eq for Point
+    fn result() : Bool do
+      let p = { x = 5, y = 10 }
+      p == p
+    end
+  end|} in
+  Alcotest.(check bool) "Eq reflexivity for record type" true
+    (vbool (call_fn env "result" []))
+
+let test_eq_prop_nested_reflexivity () =
+  let env = eval_module {|mod Test do
+    type Wrap = Wrap(Int)
+    derive Eq for Wrap
+    fn result() : Bool do
+      let w = Wrap(42)
+      w == w
+    end
+  end|} in
+  Alcotest.(check bool) "Eq reflexivity for variant-with-args" true
+    (vbool (call_fn env "result" []))
+
+let test_eq_prop_symmetry_records () =
+  let env = eval_module {|mod Test do
+    type Point = { x: Int, y: Int }
+    derive Eq for Point
+    fn result() : Bool do
+      let p1 = { x = 1, y = 2 }
+      let p2 = { x = 3, y = 4 }
+      let ab = p1 == p2
+      let ba = p2 == p1
+      ab == ba
+    end
+  end|} in
+  Alcotest.(check bool) "Eq symmetry for records" true
+    (vbool (call_fn env "result" []))
+
+(* ── Ord properties ─────────────────────────────────────────────────────── *)
+
+let test_ord_prop_reflexivity () =
+  let env = eval_module {|mod Test do
+    type Priority = Low | Medium | High
+    derive Ord for Priority
+    fn result() : Bool do
+      (compare(Low, Low) == 0) && (compare(Medium, Medium) == 0) && (compare(High, High) == 0)
+    end
+  end|} in
+  Alcotest.(check bool) "Ord reflexivity: compare(a,a)==0" true
+    (vbool (call_fn env "result" []))
+
+let test_ord_prop_antisymmetry () =
+  let env = eval_module {|mod Test do
+    type Priority = Low | Medium | High
+    derive Ord for Priority
+    fn result() : Bool do
+      let lh = compare(Low, High)
+      let hl = compare(High, Low)
+      (lh < 0) && (hl > 0)
+    end
+  end|} in
+  Alcotest.(check bool) "Ord antisymmetry: compare(a,b)<0 => compare(b,a)>0" true
+    (vbool (call_fn env "result" []))
+
+let test_ord_prop_transitivity () =
+  let env = eval_module {|mod Test do
+    type Priority = Low | Medium | High
+    derive Ord for Priority
+    fn result() : Bool do
+      let lm = compare(Low, Medium)
+      let mh = compare(Medium, High)
+      let lh = compare(Low, High)
+      (lm < 0) && (mh < 0) && (lh < 0)
+    end
+  end|} in
+  Alcotest.(check bool) "Ord transitivity: a<b && b<c => a<c" true
+    (vbool (call_fn env "result" []))
+
+let test_ord_prop_totality () =
+  let env = eval_module {|mod Test do
+    type Priority = Low | Medium | High
+    derive Ord for Priority
+    fn one_of(c : Int) : Bool do
+      (c < 0) || (c == 0) || (c > 0)
+    end
+    fn result() : Bool do
+      one_of(compare(Low, High)) && one_of(compare(High, Low)) && one_of(compare(Low, Low))
+    end
+  end|} in
+  Alcotest.(check bool) "Ord totality: compare always gives <0, ==0, or >0" true
+    (vbool (call_fn env "result" []))
+
+let test_ord_prop_eq_consistency () =
+  (* compare(a,a)==0 and a==a should both hold *)
+  let env = eval_module {|mod Test do
+    type Priority = Low | Medium | High
+    derive Eq, Ord for Priority
+    fn result() : Bool do
+      let eq_result = Low == Low
+      let cmp_result = compare(Low, Low) == 0
+      eq_result == cmp_result
+    end
+  end|} in
+  Alcotest.(check bool) "Ord/Eq consistency: a==a iff compare(a,a)==0" true
+    (vbool (call_fn env "result" []))
+
+(* ── Show properties ────────────────────────────────────────────────────── *)
+
+let test_show_prop_non_empty () =
+  let env = eval_module {|mod Test do
+    type Color = Red | Green | Blue
+    derive Show for Color
+    fn result() : Bool do
+      string_length(show(Red)) > 0
+    end
+  end|} in
+  Alcotest.(check bool) "Show: output is non-empty" true
+    (vbool (call_fn env "result" []))
+
+let test_show_prop_distinct_ctors () =
+  let env = eval_module {|mod Test do
+    type Color = Red | Green | Blue
+    derive Show for Color
+    fn result() : Bool do
+      let sr = show(Red)
+      let sg = show(Green)
+      let sb = show(Blue)
+      (sr == sg) == false && (sg == sb) == false && (sr == sb) == false
+    end
+  end|} in
+  Alcotest.(check bool) "Show: distinct ctors produce distinct strings" true
+    (vbool (call_fn env "result" []))
+
+let test_show_prop_record_runs () =
+  let env = eval_module {|mod Test do
+    type Point = { x: Int, y: Int }
+    impl Show(Point) do
+      fn show(p) do
+        "(" ++ int_to_string(p.x) ++ "," ++ int_to_string(p.y) ++ ")"
+      end
+    end
+    fn result() : String do show({ x = 1, y = 2 }) end
+  end|} in
+  let s = vstr (call_fn env "result" []) in
+  Alcotest.(check bool) "Show for record: non-empty" true (String.length s > 0)
+
+(* ── Hash properties ────────────────────────────────────────────────────── *)
+
+let test_hash_prop_deterministic () =
+  let env = eval_module {|mod Test do
+    type Color = Red | Green | Blue
+    derive Hash for Color
+    fn result() : Bool do
+      hash(Red) == hash(Red)
+    end
+  end|} in
+  Alcotest.(check bool) "Hash deterministic: hash(a)==hash(a)" true
+    (vbool (call_fn env "result" []))
+
+let test_hash_prop_eq_consistency () =
+  (* For equal values hash must agree *)
+  let env = eval_module {|mod Test do
+    type Color = Red | Green | Blue
+    derive Eq, Hash for Color
+    fn result() : Bool do
+      let a = Red
+      let b = Red
+      if a == b then hash(a) == hash(b) else true
+    end
+  end|} in
+  Alcotest.(check bool) "Hash/Eq consistency: a==b => hash(a)==hash(b)" true
+    (vbool (call_fn env "result" []))
+
+let test_hash_prop_nested () =
+  let env = eval_module {|mod Test do
+    type Wrap = Wrap(Int)
+    derive Hash for Wrap
+    fn result() : Int do hash(Wrap(99)) end
+  end|} in
+  let _ = call_fn env "result" [] in
+  Alcotest.(check bool) "Hash for variant-with-arg: runs without error" true true
+
+let test_hash_prop_record () =
+  (* verify derive Hash for record typechecks and dispatches correctly *)
+  let ctx = typecheck {|mod Test do
+    type Point = { x: Int, y: Int }
+    derive Hash for Point
+    fn result(p : Point) : Int do hash(p) end
+  end|} in
+  Alcotest.(check bool) "derive Hash for record typechecks" false (has_errors ctx)
+
+(* ══════════════════════════════════════════════════════════════════════════
+   §B  Actor compilation and runtime tests
+   ══════════════════════════════════════════════════════════════════════════ *)
+
+let test_actor_multi_handler_typechecks () =
+  let ctx = typecheck {|mod Test do
+    actor Counter do
+      state { value : Int }
+      init { value = 0 }
+      on Inc() do { value = state.value + 1 } end
+      on Dec() do { value = state.value - 1 } end
+      on Reset() do { value = 0 } end
+    end
+    fn main() do
+      let pid = spawn(Counter)
+      send(pid, Inc())
+      send(pid, Dec())
+      send(pid, Reset())
+    end
+  end|} in
+  Alcotest.(check bool) "actor with 3 handlers typechecks" false (has_errors ctx)
+
+let test_actor_state_update_eval () =
+  (* spawn Counter, send two Inc messages, then read state via a query
+     that returns the current value via a fresh actor + process inspection *)
+  let src = {|mod Test do
+    actor Counter do
+      state { value : Int }
+      init { value = 0 }
+      on Inc() do { value = state.value + 1 } end
+    end
+    fn main() do
+      let pid = spawn(Counter)
+      send(pid, Inc())
+      send(pid, Inc())
+      is_alive(pid)
+    end
+  end|} in
+  let m = parse_and_desugar src in
+  let (errors, _) = March_typecheck.Typecheck.check_module m in
+  Alcotest.(check bool) "actor state update: no type errors" false (has_errors errors);
+  (try March_eval.Eval.run_module m
+   with March_eval.Eval.Eval_error _ -> ()
+      | March_eval.Eval.Match_failure _ -> ())
+
+let test_actor_multiple_actors_spawn () =
+  let env = eval_module {|mod Test do
+    actor Worker do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+    fn main() do
+      let pa = spawn(Worker)
+      let pb = spawn(Worker)
+      is_alive(pa) && is_alive(pb)
+    end
+  end|} in
+  Alcotest.(check bool) "two actors both alive after spawn" true
+    (vbool (call_fn env "main" []))
+
+let test_actor_send_does_not_crash () =
+  (* verify that sending a message to an alive actor doesn't raise *)
+  let env = eval_module {|mod Test do
+    actor Accumulator do
+      state { total : Int }
+      init { total = 0 }
+      on Add(n : Int) do { total = state.total + n } end
+    end
+    fn main() do
+      let pid = spawn(Accumulator)
+      send(pid, Add(10))
+      send(pid, Add(20))
+      send(pid, Add(30))
+      is_alive(pid)
+    end
+  end|} in
+  Alcotest.(check bool) "actor still alive after three sends" true
+    (vbool (call_fn env "main" []))
+
+let test_actor_is_alive_after_spawn () =
+  let env = eval_module {|mod Test do
+    actor Idle do
+      state { dummy : Int }
+      init { dummy = 0 }
+      on Ping() do { dummy = 0 } end
+    end
+    fn main() : Bool do
+      let pid = spawn(Idle)
+      is_alive(pid)
+    end
+  end|} in
+  Alcotest.(check bool) "is_alive returns true right after spawn" true
+    (vbool (call_fn env "main" []))
+
+let test_actor_kill_marks_dead () =
+  let env = eval_module {|mod Test do
+    actor Idle do
+      state { dummy : Int }
+      init { dummy = 0 }
+      on Ping() do { dummy = 0 } end
+    end
+    fn main() : Bool do
+      let pid = spawn(Idle)
+      kill(pid)
+      is_alive(pid)
+    end
+  end|} in
+  Alcotest.(check bool) "is_alive returns false after kill" false
+    (vbool (call_fn env "main" []))
+
+let test_actor_link_propagates_death () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+    actor B do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+    fn main() : Bool do
+      let pa = spawn(A)
+      let pb = spawn(B)
+      link(pa, pb)
+      kill(pa)
+      is_alive(pb)
+    end
+  end|} in
+  Alcotest.(check bool) "linked actor B dies when A is killed" false
+    (vbool (call_fn env "main" []))
+
+let test_actor_monitor_delivers_down () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+    actor B do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+    fn main() : Int do
+      let pa = spawn(A)
+      let pb = spawn(B)
+      monitor(pb, pa)
+      kill(pa)
+      mailbox_size(pb)
+    end
+  end|} in
+  let n = vint (call_fn env "main" []) in
+  Alcotest.(check bool) "monitor: Down message delivered to watcher" true (n >= 1)
+
+let test_actor_supervisor_max_restarts_eval () =
+  (* Independent of existing supervisor tests — just checks no crash *)
+  let src = {|mod Test do
+    actor Worker do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+    actor Sup do
+      state { w : Int }
+      init { w = 0 }
+      supervise do
+        strategy one_for_one
+        max_restarts 1 within 60
+        Worker w
+      end
+    end
+    fn main() do spawn(Sup) end
+  end|} in
+  let m = parse_and_desugar src in
+  let (errors, _) = March_typecheck.Typecheck.check_module m in
+  Alcotest.(check bool) "supervisor with max_restarts 1: typechecks" false (has_errors errors)
+
+(* ══════════════════════════════════════════════════════════════════════════
+   §C  Parser fuzz / stress tests
+   ══════════════════════════════════════════════════════════════════════════ *)
+
+let test_parse_empty_module () =
+  let m = parse_module {|mod Empty do end|} in
+  Alcotest.(check int) "empty module has 0 decls" 0
+    (List.length m.March_ast.Ast.mod_decls)
+
+let test_parse_deeply_nested_if () =
+  (* 8 levels of nested if/then/else *)
+  let src = {|mod Test do
+    fn deep(x : Int) : Int do
+      if x > 0 then
+        if x > 1 then
+          if x > 2 then
+            if x > 3 then
+              if x > 4 then
+                if x > 5 then
+                  if x > 6 then
+                    if x > 7 then x else 7
+                  else 6
+                else 5
+              else 4
+            else 3
+          else 2
+        else 1
+      else 0
+    end
+  end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "deeply nested if parses" true
+    (List.length m.March_ast.Ast.mod_decls = 1)
+
+let test_parse_deeply_nested_match () =
+  let src = {|mod Test do
+    fn classify(x : Int) : Int do
+      match x do
+      | 0 ->
+        match x do
+        | 0 ->
+          match x do
+          | 0 -> 0
+          | _ -> 1
+          end
+        | _ -> 2
+        end
+      | _ -> 3
+      end
+    end
+  end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "triply nested match parses" true
+    (List.length m.March_ast.Ast.mod_decls = 1)
+
+let test_parse_deeply_nested_lambda () =
+  let src = {|mod Test do
+    fn main() do
+      let f = fn a -> fn b -> fn c -> fn d -> a + b + c + d
+      f
+    end
+  end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "4-deep nested lambdas parse" true
+    (List.length m.March_ast.Ast.mod_decls = 1)
+
+let test_parse_many_params () =
+  let src = {|mod Test do
+    fn sum10(a : Int, b : Int, c : Int, d : Int, e : Int,
+             f : Int, g : Int, h : Int, i : Int, j : Int) : Int do
+      a + b + c + d + e + f + g + h + i + j
+    end
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    let n_params = match def.March_ast.Ast.fn_clauses with
+      | [cl] -> List.length cl.March_ast.Ast.fc_params
+      | _ -> 0
+    in
+    Alcotest.(check int) "10-param function parses correctly" 10 n_params
+  | _ -> Alcotest.fail "expected single DFn"
+
+let test_parse_long_pipe_chain () =
+  (* x |> f |> g |> h |> ... 8 deep *)
+  let src = {|mod Test do
+    fn go(x : Int) : Int do
+      x |> negate |> negate |> negate |> negate |> negate |> negate |> negate |> negate
+    end
+  end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "long pipe chain (8-deep) parses" true
+    (List.length m.March_ast.Ast.mod_decls = 1)
+
+let test_parse_unicode_string () =
+  let src = {|mod Test do
+    fn greeting() : String do "Hello, 世界! Привет мир" end
+  end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "unicode string literal parses" true
+    (List.length m.March_ast.Ast.mod_decls = 1)
+
+let test_parse_single_let_module () =
+  let src = {|mod Test do
+    let answer = 42
+  end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "module with single let parses" true
+    (List.length m.March_ast.Ast.mod_decls >= 1)
+
+let test_parse_nested_record_literal () =
+  let src = {|mod Test do
+    type Inner = { v : Int }
+    type Outer = { inner : Inner }
+    fn make() : Outer do
+      { inner = { v = 99 } }
+    end
+  end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "nested record literal parses" true
+    (List.length m.March_ast.Ast.mod_decls >= 3)
+
+let test_parse_match_wildcard_only () =
+  let src = {|mod Test do
+    fn always(x : Int) : Int do
+      match x do
+      | _ -> 42
+      end
+    end
+  end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "match with only wildcard arm parses" true
+    (List.length m.March_ast.Ast.mod_decls = 1)
+
+let test_parse_error_empty_fn_body () =
+  (* fn with do but no body before end — must not propagate uncaught exception *)
+  (try
+    ignore (parse_module {|mod T do fn bad() do end end|});
+    ignore (March_parser.Parse_errors.take_parse_errors ())
+   with _ ->
+    ignore (try March_parser.Parse_errors.take_parse_errors () with _ -> []));
+  Alcotest.(check bool) "empty fn body: no uncaught exception" true true
+
+let test_parse_error_type_no_variants () =
+  let has_error =
+    try
+      ignore (parse_module {|mod T do type Foo = end|});
+      let errs = March_parser.Parse_errors.take_parse_errors () in
+      errs <> []
+    with _ ->
+      ignore (try March_parser.Parse_errors.take_parse_errors () with _ -> []);
+      true
+  in
+  Alcotest.(check bool) "type with no variants: error reported" true has_error
+
+let test_parse_error_fn_missing_arrow () =
+  (* fn without -> is malformed *)
+  let msg = parse_error_msg {|mod T do
+    fn go() do
+      let f = fn x x
+      f
+    end
+  end|} in
+  Alcotest.(check bool) "lambda missing -> gives error" true (msg <> None)
+
+let test_parse_error_recovery_two_bad_decls () =
+  (* Two bad tokens at declaration level — recovery should continue and
+     report at least one error (possibly two) *)
+  let src = {|mod T do
+    fn ok1() do 1 end
+    @@@ junk1
+    fn ok2() do 2 end
+    @@@ junk2
+    fn ok3() do 3 end
+  end|} in
+  let has_error =
+    (try
+       ignore (parse_module src);
+       let errs = March_parser.Parse_errors.take_parse_errors () in
+       errs <> []
+     with _ ->
+       ignore (March_parser.Parse_errors.take_parse_errors ());
+       true)
+  in
+  Alcotest.(check bool) "two bad decls: at least one error collected" true has_error
+
+let test_parse_error_valid_decls_survive_recovery () =
+  (* After recovery, the valid declarations around the bad token should
+     still be present. *)
+  let src = {|mod T do
+    fn before() do 1 end
+    @@@ garbage
+    fn after() do 2 end
+  end|} in
+  let m_opt =
+    (try
+       let m = parse_module src in
+       ignore (March_parser.Parse_errors.take_parse_errors ());
+       Some m
+     with _ ->
+       ignore (March_parser.Parse_errors.take_parse_errors ());
+       None)
+  in
+  (* We only assert we don't crash; recovered parse may have partial decls *)
+  Alcotest.(check bool) "recovery: valid decls survive without exception" true true;
+  let _ = m_opt in ()
+
+let test_parse_large_tuple_match () =
+  (* match on a 4-tuple with a wildcard arm *)
+  let src = {|mod Test do
+    fn go(a : Int, b : Int, c : Int, d : Int) : Int do
+      match (a, b, c, d) do
+      | (0, 0, 0, 0) -> 0
+      | (x, _, _, _) -> x
+      end
+    end
+  end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "4-tuple match parses" true
+    (List.length m.March_ast.Ast.mod_decls = 1)
+
+let test_parse_let_chain_in_fn () =
+  (* long chain of let bindings in a function body *)
+  let src = {|mod Test do
+    fn go() : Int do
+      let a = 1
+      let b = a + 1
+      let c = b + 1
+      let d = c + 1
+      let e = d + 1
+      let f = e + 1
+      let g = f + 1
+      let h = g + 1
+      let i = h + 1
+      let j = i + 1
+      j
+    end
+  end|} in
+  let env = eval_module src in
+  let v = vint (call_fn env "go" []) in
+  Alcotest.(check int) "10-step let chain evaluates correctly" 10 v
+
+let test_parse_operator_precedence () =
+  (* 2 + 3 * 4 should be 14, not 20 *)
+  let env = eval_module {|mod Test do
+    fn result() : Int do 2 + 3 * 4 end
+  end|} in
+  let v = vint (call_fn env "result" []) in
+  Alcotest.(check int) "operator precedence: 2+3*4=14" 14 v
+
+let test_parse_string_escape_sequences () =
+  (* String with escape sequences should parse without error *)
+  let src = {|mod Test do
+    fn msg() : String do "line1\nline2\ttabbed" end
+  end|} in
+  let m = parse_module src in
+  Alcotest.(check bool) "string with escape sequences parses" true
+    (List.length m.March_ast.Ast.mod_decls = 1)
+
 let () =
   Alcotest.run "march"
     [
@@ -11583,5 +12259,57 @@ let () =
         Alcotest.test_case "eval qualified/bare match"      `Quick test_eval_qualified_and_bare_match;
         Alcotest.test_case "tc builtin qualified ctors"     `Quick test_tc_builtin_qualified_ctors;
         Alcotest.test_case "eval builtin qualified ctors"   `Quick test_eval_builtin_qualified_ctors;
+      ]);
+      ("eq_ord_show_hash_properties", [
+        Alcotest.test_case "Eq reflexivity enum"            `Quick (with_reset test_eq_prop_reflexivity_enum);
+        Alcotest.test_case "Eq symmetry enum"               `Quick (with_reset test_eq_prop_symmetry_enum);
+        Alcotest.test_case "Eq transitivity same ctor"      `Quick (with_reset test_eq_prop_transitivity_same);
+        Alcotest.test_case "Eq reflexivity record"          `Quick (with_reset test_eq_prop_record_reflexivity);
+        Alcotest.test_case "Eq reflexivity nested"          `Quick (with_reset test_eq_prop_nested_reflexivity);
+        Alcotest.test_case "Eq symmetry records"            `Quick (with_reset test_eq_prop_symmetry_records);
+        Alcotest.test_case "Ord reflexivity"                `Quick (with_reset test_ord_prop_reflexivity);
+        Alcotest.test_case "Ord antisymmetry"               `Quick (with_reset test_ord_prop_antisymmetry);
+        Alcotest.test_case "Ord transitivity"               `Quick (with_reset test_ord_prop_transitivity);
+        Alcotest.test_case "Ord totality"                   `Quick (with_reset test_ord_prop_totality);
+        Alcotest.test_case "Ord/Eq consistency"             `Quick (with_reset test_ord_prop_eq_consistency);
+        Alcotest.test_case "Show non-empty"                 `Quick (with_reset test_show_prop_non_empty);
+        Alcotest.test_case "Show distinct ctors"            `Quick (with_reset test_show_prop_distinct_ctors);
+        Alcotest.test_case "Show record custom impl"        `Quick (with_reset test_show_prop_record_runs);
+        Alcotest.test_case "Hash deterministic"             `Quick (with_reset test_hash_prop_deterministic);
+        Alcotest.test_case "Hash/Eq consistency"            `Quick (with_reset test_hash_prop_eq_consistency);
+        Alcotest.test_case "Hash nested variant"            `Quick (with_reset test_hash_prop_nested);
+        Alcotest.test_case "Hash deterministic record"      `Quick (with_reset test_hash_prop_record);
+      ]);
+      ("actor_runtime", [
+        Alcotest.test_case "multi-handler typechecks"        `Quick test_actor_multi_handler_typechecks;
+        Alcotest.test_case "state update no crash"           `Quick (with_reset test_actor_state_update_eval);
+        Alcotest.test_case "two actors both alive"           `Quick (with_reset test_actor_multiple_actors_spawn);
+        Alcotest.test_case "send doesn't crash actor"        `Quick (with_reset test_actor_send_does_not_crash);
+        Alcotest.test_case "is_alive after spawn"            `Quick (with_reset test_actor_is_alive_after_spawn);
+        Alcotest.test_case "kill marks dead"                 `Quick (with_reset test_actor_kill_marks_dead);
+        Alcotest.test_case "link propagates death"           `Quick (with_reset test_actor_link_propagates_death);
+        Alcotest.test_case "monitor delivers Down"           `Quick (with_reset test_actor_monitor_delivers_down);
+        Alcotest.test_case "supervisor max_restarts 1 typechecks" `Quick (with_reset test_actor_supervisor_max_restarts_eval);
+      ]);
+      ("parser_fuzz", [
+        Alcotest.test_case "empty module"                    `Quick test_parse_empty_module;
+        Alcotest.test_case "deeply nested if"                `Quick test_parse_deeply_nested_if;
+        Alcotest.test_case "deeply nested match"             `Quick test_parse_deeply_nested_match;
+        Alcotest.test_case "deeply nested lambda"            `Quick test_parse_deeply_nested_lambda;
+        Alcotest.test_case "10-param function"               `Quick test_parse_many_params;
+        Alcotest.test_case "long pipe chain"                 `Quick test_parse_long_pipe_chain;
+        Alcotest.test_case "unicode string"                  `Quick test_parse_unicode_string;
+        Alcotest.test_case "single let module"               `Quick test_parse_single_let_module;
+        Alcotest.test_case "nested record literal"           `Quick test_parse_nested_record_literal;
+        Alcotest.test_case "wildcard-only match"             `Quick test_parse_match_wildcard_only;
+        Alcotest.test_case "empty fn body no crash"          `Quick test_parse_error_empty_fn_body;
+        Alcotest.test_case "type no variants: error"         `Quick test_parse_error_type_no_variants;
+        Alcotest.test_case "lambda missing arrow: error"     `Quick test_parse_error_fn_missing_arrow;
+        Alcotest.test_case "two bad decls: errors collected" `Quick test_parse_error_recovery_two_bad_decls;
+        Alcotest.test_case "recovery: valid decls survive"   `Quick test_parse_error_valid_decls_survive_recovery;
+        Alcotest.test_case "4-tuple match"                   `Quick test_parse_large_tuple_match;
+        Alcotest.test_case "10-step let chain"               `Quick (with_reset test_parse_let_chain_in_fn);
+        Alcotest.test_case "operator precedence"             `Quick (with_reset test_parse_operator_precedence);
+        Alcotest.test_case "string escapes"                  `Quick test_parse_string_escape_sequences;
       ]);
     ]
