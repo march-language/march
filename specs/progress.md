@@ -204,8 +204,8 @@ march/
 ## Current State (as of 2026-03-23)
 
 - **Builds clean**
-- **1137 tests across 8 suites; 0 failures** (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + 5 new LSP features + tail-call enforcement):
-  - `test_march.exe`: 922 tests, all passing (app entry point: 8 new; HAMT Map/Set/Array: 26 new; tap bus: 6 new; repl_compiler_parity: 5 new; MPST: 21 new; REPL JIT fix; tail_recursion: 10 new)
+- **1146 tests across 8 suites; 0 failures** (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + 5 new LSP features + tail-call enforcement + stream fusion):
+  - `test_march.exe`: 931 tests, all passing (app entry point: 8 new; HAMT Map/Set/Array: 26 new; tap bus: 6 new; repl_compiler_parity: 5 new; MPST: 21 new; REPL JIT fix; tail_recursion: 10 new; stream fusion: 9 new)
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests, passing (formatter round-trip)
@@ -230,6 +230,7 @@ march/
 - **Clojure-level REPL quality** — `:reload`, `:inspect/:i <expr>`, pretty-printer (depth/collection truncation), error recovery (env preserved on typecheck error), REPL/compiler parity tests
 - **`tap` builtin** — `tap(v)` sends `v` to a global thread-safe tap bus and returns `v`; REPL drains and displays tapped values after each eval (orange in TUI, `tap> v` in simple mode). Type: `∀a. a → a`. Safe for actor-context use.
 - **REPL/compiler parity harness** — `check_parity` helper + `repl_compiler_parity` test group; runs expressions through both interpreter and JIT, compares outputs; JIT tests skip gracefully when clang is absent
+- **Stream fusion / deforestation** — `lib/tir/fusion.ml` TIR optimization pass fuses chains of `map/filter/fold` into single-loop functions with no intermediate list allocations; runs after monomorphization before defunctionalization; handles 2-step (`map+fold`, `filter+fold`) and 3-step (`map+filter+fold`) chains; guards against multi-use intermediates and impure operations; 9 tests
 - **Type-qualified constructor names** — `build_ctor_info` in `llvm_emit.ml` uses `(type_name, ctor_name)` pairs; constructor collisions across ADTs eliminated
 - **Actor handler return type checking** — handlers statically verified to return correct state record type
 - **Linear/affine propagation through record fields** — `EField` access on a linear field consumes it; `EUpdate` respects per-field linearity

@@ -3504,6 +3504,301 @@ let test_defun_e2e_no_hof_unchanged () =
   ) m.March_tir.Tir.tm_types) in
   Alcotest.(check int) "no TDClosure for non-HOF program" 0 closure_count
 
+(* ── Stream fusion tests ──────────────────────────────────────────────── *)
+
+(** Run lower → mono → fusion on a March source string. *)
+let fusion_module src =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let changed = ref false in
+  March_tir.Fusion.run ~changed tir
+
+(** Check whether any top-level function name starts with "$fused_". *)
+let has_fused_fn (m : March_tir.Tir.tir_module) : bool =
+  List.exists (fun (fd : March_tir.Tir.fn_def) ->
+    let len = String.length fd.fn_name in
+    len >= 7 && String.sub fd.fn_name 0 7 = "$fused_"
+  ) m.March_tir.Tir.tm_fns
+
+(** True if any function in the module calls the function named [fn_name]. *)
+let rec expr_calls (fn_name : string) : March_tir.Tir.expr -> bool = function
+  | March_tir.Tir.EApp (f, _) -> f.March_tir.Tir.v_name = fn_name
+  | March_tir.Tir.ELet (_, rhs, body) ->
+    expr_calls fn_name rhs || expr_calls fn_name body
+  | March_tir.Tir.ELetRec (fns, body) ->
+    List.exists (fun fd -> expr_calls fn_name fd.March_tir.Tir.fn_body) fns
+    || expr_calls fn_name body
+  | March_tir.Tir.ECase (_, brs, def) ->
+    List.exists (fun b -> expr_calls fn_name b.March_tir.Tir.br_body) brs
+    || Option.fold ~none:false ~some:(expr_calls fn_name) def
+  | March_tir.Tir.ESeq (e1, e2) -> expr_calls fn_name e1 || expr_calls fn_name e2
+  | _ -> false
+
+let _module_calls_fn (m : March_tir.Tir.tir_module) (fn_name : string) : bool =
+  List.exists (fun fd -> expr_calls fn_name fd.March_tir.Tir.fn_body)
+    m.March_tir.Tir.tm_fns
+
+(** A basic map→fold chain: fuse map then fold into one pass. *)
+let test_fusion_map_fold () =
+  let m = fusion_module {|mod Test do
+    type IntList = INil | ICons(Int, IntList)
+
+    fn imap(xs : IntList, f : Int -> Int) : IntList do
+      match xs do
+      | INil        -> INil
+      | ICons(h, t) -> ICons(f(h), imap(t, f))
+      end
+    end
+
+    fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+      match xs do
+      | INil        -> acc
+      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      end
+    end
+
+    fn main() : Int do
+      let xs = ICons(1, ICons(2, ICons(3, INil)))
+      let ys = imap(xs, fn x -> x * 2)
+      ifold(ys, 0, fn (a, b) -> a + b)
+    end
+  end|} in
+  Alcotest.(check bool) "fused fn emitted for map+fold" true (has_fused_fn m)
+
+(** A filter→fold chain: fuse filter then fold. *)
+let test_fusion_filter_fold () =
+  let m = fusion_module {|mod Test do
+    type IntList = INil | ICons(Int, IntList)
+
+    fn ifilter(xs : IntList, p : Int -> Bool) : IntList do
+      match xs do
+      | INil        -> INil
+      | ICons(h, t) ->
+        if p(h) then ICons(h, ifilter(t, p))
+        else ifilter(t, p)
+      end
+    end
+
+    fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+      match xs do
+      | INil        -> acc
+      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      end
+    end
+
+    fn main() : Int do
+      let xs = ICons(1, ICons(2, ICons(3, INil)))
+      let ys = ifilter(xs, fn x -> x > 1)
+      ifold(ys, 0, fn (a, b) -> a + b)
+    end
+  end|} in
+  Alcotest.(check bool) "fused fn emitted for filter+fold" true (has_fused_fn m)
+
+(** The intermediate list variable must NOT be called after fusion. *)
+let test_fusion_eliminates_intermediate () =
+  let m = fusion_module {|mod Test do
+    type IntList = INil | ICons(Int, IntList)
+
+    fn imap(xs : IntList, f : Int -> Int) : IntList do
+      match xs do
+      | INil        -> INil
+      | ICons(h, t) -> ICons(f(h), imap(t, f))
+      end
+    end
+
+    fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+      match xs do
+      | INil        -> acc
+      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      end
+    end
+
+    fn main() : Int do
+      let xs = ICons(1, ICons(2, INil))
+      let ys = imap(xs, fn x -> x * 2)
+      ifold(ys, 0, fn (a, b) -> a + b)
+    end
+  end|} in
+  (* After fusion, main should NOT call imap directly (the intermediate is gone) *)
+  let main_fn = List.find (fun (fd : March_tir.Tir.fn_def) -> fd.fn_name = "main")
+      m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "main no longer calls imap directly" false
+    (expr_calls "imap" main_fn.March_tir.Tir.fn_body)
+
+(** Multi-use intermediate must NOT be fused (would change semantics). *)
+let test_fusion_no_fuse_multi_use () =
+  let m = fusion_module {|mod Test do
+    type IntList = INil | ICons(Int, IntList)
+
+    fn imap(xs : IntList, f : Int -> Int) : IntList do
+      match xs do
+      | INil        -> INil
+      | ICons(h, t) -> ICons(f(h), imap(t, f))
+      end
+    end
+
+    fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+      match xs do
+      | INil        -> acc
+      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      end
+    end
+
+    fn ilength(xs : IntList) : Int do
+      match xs do
+      | INil        -> 0
+      | ICons(_, t) -> 1 + ilength(t)
+      end
+    end
+
+    fn main() : Int do
+      let xs = ICons(1, ICons(2, ICons(3, INil)))
+      let ys = imap(xs, fn x -> x * 2)
+      let s  = ifold(ys, 0, fn (a, b) -> a + b)
+      let n  = ilength(ys)
+      s
+    end
+  end|} in
+  (* ys is used TWICE (in ifold and ilength) — must NOT fuse *)
+  Alcotest.(check bool) "multi-use not fused — no fused fn" false (has_fused_fn m)
+
+(** Purity constraint: calls with IO must not be fused. *)
+let test_fusion_no_fuse_impure () =
+  let m = fusion_module {|mod Test do
+    type IntList = INil | ICons(Int, IntList)
+
+    fn imap_print(xs : IntList, f : Int -> Int) : IntList do
+      match xs do
+      | INil        -> INil
+      | ICons(h, t) ->
+        let _ = println(int_to_string(h))
+        ICons(f(h), imap_print(t, f))
+      end
+    end
+
+    fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+      match xs do
+      | INil        -> acc
+      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      end
+    end
+
+    fn main() : Int do
+      let xs = ICons(1, ICons(2, INil))
+      let ys = imap_print(xs, fn x -> x * 2)
+      ifold(ys, 0, fn (a, b) -> a + b)
+    end
+  end|} in
+  (* imap_print is not in the fusible producers list — no fusion *)
+  Alcotest.(check bool) "impure (non-fusible name) not fused" false (has_fused_fn m)
+
+(** The fused function must appear in tm_fns and be callable. *)
+let test_fusion_fused_fn_in_tm_fns () =
+  let m = fusion_module {|mod Test do
+    type IntList = INil | ICons(Int, IntList)
+
+    fn imap(xs : IntList, f : Int -> Int) : IntList do
+      match xs do
+      | INil        -> INil
+      | ICons(h, t) -> ICons(f(h), imap(t, f))
+      end
+    end
+
+    fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+      match xs do
+      | INil        -> acc
+      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      end
+    end
+
+    fn main() : Int do
+      let xs = ICons(1, ICons(2, ICons(3, INil)))
+      let ys = imap(xs, fn x -> x)
+      ifold(ys, 0, fn (a, b) -> a + b)
+    end
+  end|} in
+  let fused_fns = List.filter (fun (fd : March_tir.Tir.fn_def) ->
+    let n = fd.fn_name in
+    String.length n >= 7 && String.sub n 0 7 = "$fused_"
+  ) m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "at least one fused fn in tm_fns" true
+    (List.length fused_fns >= 1);
+  (* main must call the fused fn *)
+  let main_fn = List.find (fun (fd : March_tir.Tir.fn_def) -> fd.fn_name = "main")
+      m.March_tir.Tir.tm_fns in
+  let calls_fused = List.exists (fun fd ->
+    expr_calls fd.March_tir.Tir.fn_name main_fn.March_tir.Tir.fn_body
+  ) fused_fns in
+  Alcotest.(check bool) "main calls fused fn" true calls_fused
+
+(** Map+filter+fold 3-step chain: fuse all three into one pass. *)
+let test_fusion_map_filter_fold () =
+  let m = fusion_module {|mod Test do
+    type IntList = INil | ICons(Int, IntList)
+
+    fn imap(xs : IntList, f : Int -> Int) : IntList do
+      match xs do
+      | INil        -> INil
+      | ICons(h, t) -> ICons(f(h), imap(t, f))
+      end
+    end
+
+    fn ifilter(xs : IntList, p : Int -> Bool) : IntList do
+      match xs do
+      | INil        -> INil
+      | ICons(h, t) ->
+        if p(h) then ICons(h, ifilter(t, p))
+        else ifilter(t, p)
+      end
+    end
+
+    fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
+      match xs do
+      | INil        -> acc
+      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      end
+    end
+
+    fn main() : Int do
+      let xs = ICons(1, ICons(2, ICons(3, ICons(4, ICons(5, INil)))))
+      let ys = imap(xs, fn x -> x * 2)
+      let zs = ifilter(ys, fn x -> x > 4)
+      ifold(zs, 0, fn (a, b) -> a + b)
+    end
+  end|} in
+  Alcotest.(check bool) "fused fn emitted for map+filter+fold" true (has_fused_fn m);
+  (* main should not call imap or ifilter directly *)
+  let main_fn = List.find (fun (fd : March_tir.Tir.fn_def) -> fd.fn_name = "main")
+      m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "main no longer calls imap" false
+    (expr_calls "imap" main_fn.March_tir.Tir.fn_body);
+  Alcotest.(check bool) "main no longer calls ifilter" false
+    (expr_calls "ifilter" main_fn.March_tir.Tir.fn_body)
+
+(** Fusion does not break functions with no list chains. *)
+let test_fusion_no_change_non_list () =
+  let m = fusion_module {|mod Test do
+    fn add(a : Int, b : Int) : Int do a + b end
+    fn main() : Int do add(1, 2) end
+  end|} in
+  Alcotest.(check bool) "no fused fn for non-list program" false (has_fused_fn m)
+
+(** Use-count helper is correct. *)
+let test_fusion_use_count () =
+  let open March_tir.Tir in
+  let open March_tir.Fusion in
+  let x_var = { v_name = "x"; v_ty = TInt; v_lin = Unr } in
+  let y_var = { v_name = "y"; v_ty = TInt; v_lin = Unr } in
+  let e =
+    ELet (y_var, EApp ({v_name="+"; v_ty=TInt; v_lin=Unr},
+                       [AVar x_var; AVar x_var]),
+    EAtom (AVar y_var)) in
+  Alcotest.(check int) "x used 2 times" 2 (use_count "x" e);
+  Alcotest.(check int) "y used 1 time"  1 (use_count "y" e);
+  Alcotest.(check int) "z used 0 times" 0 (use_count "z" e)
+
 let contains sub s =
   let sl = String.length sub and tl = String.length s in
   let rec go i = i <= tl - sl && (String.sub s i sl = sub || go (i + 1))
@@ -13577,6 +13872,18 @@ let () =
           Alcotest.test_case "defun e2e no lambda letrec"    `Quick test_defun_e2e_no_lambda_letrec;
           Alcotest.test_case "defun e2e closure types"        `Quick test_defun_e2e_closure_types_present;
           Alcotest.test_case "defun e2e no HOF unchanged"     `Quick test_defun_e2e_no_hof_unchanged;
+        ] );
+      ( "fusion",
+        [
+          Alcotest.test_case "use_count helper"          `Quick test_fusion_use_count;
+          Alcotest.test_case "map+fold fused"            `Quick test_fusion_map_fold;
+          Alcotest.test_case "filter+fold fused"         `Quick test_fusion_filter_fold;
+          Alcotest.test_case "map+filter+fold fused"     `Quick test_fusion_map_filter_fold;
+          Alcotest.test_case "eliminates intermediate"   `Quick test_fusion_eliminates_intermediate;
+          Alcotest.test_case "no fuse multi-use"         `Quick test_fusion_no_fuse_multi_use;
+          Alcotest.test_case "no fuse impure"            `Quick test_fusion_no_fuse_impure;
+          Alcotest.test_case "fused fn in tm_fns"        `Quick test_fusion_fused_fn_in_tm_fns;
+          Alcotest.test_case "no change non-list"        `Quick test_fusion_no_change_non_list;
         ] );
       ( "constraints",
         [

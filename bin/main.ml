@@ -346,6 +346,7 @@ let compile filename =
   else if compile_mode then begin
     let tir = March_tir.Lower.lower_module ~type_map desugared in
     let tir = March_tir.Mono.monomorphize tir in
+    let tir = if !opt_enabled then March_tir.Fusion.run ~changed:(ref false) tir else tir in
     let tir = March_tir.Defun.defunctionalize tir in
     let tir = March_tir.Perceus.perceus tir in
     let tir = March_tir.Escape.escape_analysis tir in

@@ -1,5 +1,5 @@
 (library
  (name march_tir)
- (modules tir pp lower mono defun perceus escape llvm_emit purity fold simplify inline dce opt)
+ (modules tir pp lower mono defun perceus escape llvm_emit purity fold simplify inline dce opt fusion)
  (libraries march_ast march_typecheck)
  (preprocess (pps ppx_deriving.show)))

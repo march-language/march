@@ -79,6 +79,7 @@ This file tracks everything that still needs to get done. Organized by priority 
 - ✅ **Actor compilation tests** — 8 tests in `actor_compile` group verifying LLVM IR output for actor programs (dispatch, spawn, handlers, supervisor, monitor, link)
 - ✅ **SRec multi-turn testing** — 10 new tests: unfold, ping-pong (1+2 steps), nested SRec, finite protocol, choose-loop, dual, typecheck
 - ✅ **Supervision tree spec V2** — `specs/features/actor-system.md` documents linear type restrictions, V2 transfer protocol via session types, and future path
+- ✅ **Stream fusion / deforestation** — `lib/tir/fusion.ml` TIR optimization pass; fuses `map+fold`, `filter+fold`, `map+filter+fold` chains into single-pass fused functions with no intermediate lists; ANF flatten step hoists lambda pre-bindings; guards for multi-use and impure ops; wired into pipeline after mono, before defun (`--opt` flag); 9 tests
 - ✅ Match syntax changed to `match expr do | pat -> body end` (was `with`)
 - ✅ String interpolation `${}` in lexer + desugar
 - ✅ `march fmt` code formatter
