@@ -298,6 +298,10 @@ let rec desugar_decl (d : decl) : decl =
   | DProtocol _ | DSig _ | DExtern _ | DUse _ | DAlias _ | DNeeds _ ->
     d
 
+  | DDeriving _ ->
+    (* DDeriving is expanded by desugar_module before desugar_decl is called *)
+    d
+
   | DApp (adef, sp) ->
     (* Desugar: DApp → private __app_init__ function that returns a record
        { spec, on_start, on_stop }.  The interpreter detects __app_init__ in
@@ -374,6 +378,341 @@ let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : de
        else DImpl ({ idef with impl_methods = idef.impl_methods @ extra_methods }, sp))
   | _ -> d
 
+(* ── Derive expansion ──────────────────────────────────────────────────── *)
+
+(** Collect DType definitions: name → (type_params, type_def). *)
+let collect_type_defs (decls : decl list) : (string * (name list * type_def)) list =
+  List.filter_map (function
+    | DType (_, name, tparams, td, _) -> Some (name.txt, (tparams, td))
+    | _ -> None
+  ) decls
+
+(** Make a name with a dummy span. *)
+let mk_name txt = { txt; span = dummy_span }
+
+(** Make a single-clause fn_def with named params and a body expression. *)
+let mk_fn_def name params body : fn_def =
+  { fn_name   = mk_name name;
+    fn_vis     = Private;
+    fn_doc     = None;
+    fn_ret_ty  = None;
+    fn_clauses = [{
+      fc_params = List.map (fun p ->
+        FPNamed { param_name = mk_name p; param_ty = None; param_lin = Unrestricted }
+      ) params;
+      fc_guard  = None;
+      fc_body   = body;
+      fc_span   = dummy_span;
+    }] }
+
+(** Build a [DImpl] for one derived interface on [type_name]. *)
+let derive_impl (type_name : name) (sp : span)
+    (iface : string) (tparams : name list) (td : type_def) : decl option =
+  (* Type annotation for the type being implemented *)
+  let self_ty : ty =
+    if tparams = [] then TyCon (type_name, [])
+    else TyCon (type_name, List.map (fun tp -> TyVar tp) tparams)
+  in
+  (* Helper: build an impl_def with a single method *)
+  let impl_one meth_name fn_body_params fn_body =
+    let fn_def = mk_fn_def meth_name fn_body_params fn_body in
+    let idef : impl_def = {
+      impl_iface       = mk_name iface;
+      impl_ty          = self_ty;
+      impl_constraints = [];
+      impl_assoc_types = [];
+      impl_methods     = [(mk_name meth_name, fn_def)];
+    } in
+    DImpl (idef, sp)
+  in
+  match iface with
+  | "Eq" ->
+    (* derive Eq: structural comparison using == on each field/variant.
+       For variant types: match on pairs of constructors.
+       For records: compare field-by-field.
+       For aliases: delegate to the aliased type. *)
+    let body = match td with
+      | TDVariant variants ->
+        (* match (a, b) with | (CtorA(args...), CtorA(args...)) -> all args eq | _ -> false *)
+        let pair = ETuple ([EVar (mk_name "a"); EVar (mk_name "b")], dummy_span) in
+        let branches = List.mapi (fun _i (v : variant) ->
+            let n = List.length v.var_args in
+            if n = 0 then
+              (* no-arg ctor: Red, Red -> true *)
+              { branch_pat = PatTuple (
+                    [PatCon (v.var_name, []); PatCon (v.var_name, [])], dummy_span);
+                branch_guard = None;
+                branch_body  = ELit (LitBool true, dummy_span) }
+            else begin
+              (* ctor with args: Wrap(a0), Wrap(b0) -> a0 == b0 && ... *)
+              let avar_names = List.init n (fun i -> Printf.sprintf "_da%d" i) in
+              let bvar_names = List.init n (fun i -> Printf.sprintf "_db%d" i) in
+              let pats_a = List.map (fun s -> PatVar (mk_name s)) avar_names in
+              let pats_b = List.map (fun s -> PatVar (mk_name s)) bvar_names in
+              let eq_exprs = List.map2 (fun sa sb ->
+                  EApp (EVar (mk_name "=="),
+                        [EVar (mk_name sa); EVar (mk_name sb)],
+                        dummy_span)
+                ) avar_names bvar_names in
+              let body_expr = List.fold_right (fun eq_e acc ->
+                  EApp (EVar (mk_name "&&"), [eq_e; acc], dummy_span)
+                ) (List.rev (List.tl (List.rev eq_exprs)))
+                  (List.nth eq_exprs (List.length eq_exprs - 1))
+              in
+              { branch_pat = PatTuple (
+                    [PatCon (v.var_name, pats_a); PatCon (v.var_name, pats_b)], dummy_span);
+                branch_guard = None;
+                branch_body  = body_expr }
+            end
+          ) variants
+        in
+        (* wildcard arm: _ -> false *)
+        let wild_branch = {
+          branch_pat  = PatWild dummy_span;
+          branch_guard = None;
+          branch_body  = ELit (LitBool false, dummy_span);
+        } in
+        EMatch (pair, branches @ [wild_branch], dummy_span)
+      | TDRecord fields ->
+        (* compare each field: a.f == b.f && a.g == b.g && ... *)
+        (match fields with
+         | [] -> ELit (LitBool true, dummy_span)
+         | [f] ->
+           EApp (EVar (mk_name "=="),
+                 [EField (EVar (mk_name "a"), f.fld_name, dummy_span);
+                  EField (EVar (mk_name "b"), f.fld_name, dummy_span)],
+                 dummy_span)
+         | f :: rest ->
+           let field_eq fld =
+             EApp (EVar (mk_name "=="),
+                   [EField (EVar (mk_name "a"), fld.fld_name, dummy_span);
+                    EField (EVar (mk_name "b"), fld.fld_name, dummy_span)],
+                   dummy_span)
+           in
+           List.fold_left (fun acc fld ->
+               EApp (EVar (mk_name "&&"), [acc; field_eq fld], dummy_span)
+             ) (field_eq f) rest)
+      | TDAlias _ ->
+        (* Delegate to the underlying type's eq *)
+        EApp (EVar (mk_name "=="), [EVar (mk_name "a"); EVar (mk_name "b")], dummy_span)
+    in
+    Some (impl_one "eq" ["a"; "b"] body)
+
+  | "Show" ->
+    let body = match td with
+      | TDVariant variants ->
+        let branches = List.map (fun (v : variant) ->
+            let n = List.length v.var_args in
+            if n = 0 then
+              { branch_pat  = PatCon (v.var_name, []);
+                branch_guard = None;
+                branch_body  = ELit (LitString v.var_name.txt, dummy_span) }
+            else begin
+              let arg_names = List.init n (fun i -> Printf.sprintf "_sv%d" i) in
+              let pats = List.map (fun s -> PatVar (mk_name s)) arg_names in
+              (* "Ctor(" ++ show(a0) ++ ", " ++ show(a1) ++ ... ++ ")" *)
+              let parts = List.mapi (fun i s ->
+                  let show_e = EApp (EVar (mk_name "show"), [EVar (mk_name s)], dummy_span) in
+                  if i = 0 then show_e
+                  else EApp (EVar (mk_name "++"),
+                             [ELit (LitString ", ", dummy_span); show_e],
+                             dummy_span)
+                ) arg_names
+              in
+              let inner = List.fold_left (fun acc p ->
+                  EApp (EVar (mk_name "++"), [acc; p], dummy_span)
+                ) (ELit (LitString (v.var_name.txt ^ "("), dummy_span)) parts
+              in
+              let full = EApp (EVar (mk_name "++"),
+                               [inner; ELit (LitString ")", dummy_span)],
+                               dummy_span)
+              in
+              { branch_pat  = PatCon (v.var_name, pats);
+                branch_guard = None;
+                branch_body  = full }
+            end
+          ) variants
+        in
+        EMatch (EVar (mk_name "x"), branches, dummy_span)
+      | TDRecord fields ->
+        (* "TypeName { f1 = " ++ show(x.f1) ++ ", f2 = " ++ show(x.f2) ++ " }" *)
+        let field_strs = List.mapi (fun i f ->
+            let prefix = if i = 0 then f.fld_name.txt ^ " = " else ", " ^ f.fld_name.txt ^ " = " in
+            let show_e = EApp (EVar (mk_name "show"),
+                               [EField (EVar (mk_name "x"), f.fld_name, dummy_span)],
+                               dummy_span)
+            in
+            EApp (EVar (mk_name "++"),
+                  [ELit (LitString prefix, dummy_span); show_e],
+                  dummy_span)
+          ) fields
+        in
+        let header = ELit (LitString (type_name.txt ^ " { "), dummy_span) in
+        let mid = List.fold_left (fun acc e ->
+            EApp (EVar (mk_name "++"), [acc; e], dummy_span)
+          ) header field_strs
+        in
+        EApp (EVar (mk_name "++"), [mid; ELit (LitString " }", dummy_span)], dummy_span)
+      | TDAlias _ ->
+        EApp (EVar (mk_name "show"), [EVar (mk_name "x")], dummy_span)
+    in
+    Some (impl_one "show" ["x"] body)
+
+  | "Hash" ->
+    (* Avoid calling hash() recursively (check_fn shadows the polymorphic binding).
+       For variants: return the constructor index directly (stable hash).
+       For records: use int_hash(field) via the builtin int hashing path. *)
+    let body = match td with
+      | TDVariant variants ->
+        let branches = List.mapi (fun i (v : variant) ->
+            let n = List.length v.var_args in
+            let pats = List.init n (fun _ -> PatWild dummy_span) in
+            { branch_pat  = PatCon (v.var_name, pats);
+              branch_guard = None;
+              branch_body  = ELit (LitInt i, dummy_span) }
+          ) variants
+        in
+        EMatch (EVar (mk_name "x"), branches, dummy_span)
+      | TDRecord fields ->
+        (match fields with
+         | [] -> ELit (LitInt 0, dummy_span)
+         | fields ->
+           (* Combine field hashes: fold over fields, mixing with prime *)
+           let hash_field fld =
+             (* Use the polymorphic hash for each field's value.
+                Note: field values may be any type — hash is safe here since
+                it's called on field values, not on x: Color. *)
+             EApp (EVar (mk_name "hash"),
+                   [EField (EVar (mk_name "x"), fld.fld_name, dummy_span)],
+                   dummy_span)
+           in
+           (match fields with
+            | [] -> ELit (LitInt 0, dummy_span)
+            | [f] -> hash_field f
+            | f :: rest ->
+              List.fold_left (fun acc fld ->
+                  EApp (EVar (mk_name "+"),
+                        [EApp (EVar (mk_name "*"), [acc; ELit (LitInt 31, dummy_span)], dummy_span);
+                         hash_field fld],
+                        dummy_span)
+                ) (hash_field f) rest))
+      | TDAlias _ ->
+        EApp (EVar (mk_name "hash"), [EVar (mk_name "x")], dummy_span)
+    in
+    Some (impl_one "hash" ["x"] body)
+
+  | "Ord" ->
+    (* derive Ord: compare constructors by their declaration index.
+       For records: compare field by field lexicographically. *)
+    let body = match td with
+      | TDVariant variants ->
+        (* fn compare(a, b) -> compare(ctor_index(a), ctor_index(b)) *)
+        let index_of_branches var_name_for arg_count =
+          List.mapi (fun i (v : variant) ->
+              let n = List.length v.var_args in
+              let pats = List.init n (fun _ -> PatWild dummy_span) in
+              { branch_pat  = PatCon (v.var_name, pats);
+                branch_guard = None;
+                branch_body  = ELit (LitInt i, dummy_span) }
+            ) variants
+          |> (fun branches ->
+               EMatch (EVar (mk_name var_name_for), branches, dummy_span))
+          |> (fun e -> ignore arg_count; e)
+        in
+        let ai = index_of_branches "a" (List.length variants) in
+        let bi = index_of_branches "b" (List.length variants) in
+        (* let _ai = ...; let _bi = ...; compare(_ai, _bi) *)
+        EBlock ([
+          ELet ({ bind_pat = PatVar (mk_name "_oi_a"); bind_ty = None;
+                  bind_lin = Unrestricted; bind_expr = ai }, dummy_span);
+          ELet ({ bind_pat = PatVar (mk_name "_oi_b"); bind_ty = None;
+                  bind_lin = Unrestricted; bind_expr = bi }, dummy_span);
+          EApp (EVar (mk_name "-"),
+                [EVar (mk_name "_oi_a"); EVar (mk_name "_oi_b")],
+                dummy_span);
+        ], dummy_span)
+      | TDRecord fields ->
+        (* Compare field by field; return first non-zero *)
+        (match fields with
+         | [] -> ELit (LitInt 0, dummy_span)
+         | [f] ->
+           EApp (EVar (mk_name "compare"),
+                 [EField (EVar (mk_name "a"), f.fld_name, dummy_span);
+                  EField (EVar (mk_name "b"), f.fld_name, dummy_span)],
+                 dummy_span)
+         | fields ->
+           let stmts = List.mapi (fun i f ->
+               let cmp_e =
+                 EApp (EVar (mk_name "compare"),
+                       [EField (EVar (mk_name "a"), f.fld_name, dummy_span);
+                        EField (EVar (mk_name "b"), f.fld_name, dummy_span)],
+                       dummy_span)
+               in
+               let name = Printf.sprintf "_cmp%d" i in
+               ELet ({ bind_pat = PatVar (mk_name name); bind_ty = None;
+                       bind_lin = Unrestricted; bind_expr = cmp_e }, dummy_span)
+             ) fields
+           in
+           let final_cmp name i =
+             if i = List.length fields - 1 then EVar (mk_name name)
+             else
+               EIf (EApp (EVar (mk_name "!="),
+                          [EVar (mk_name name); ELit (LitInt 0, dummy_span)],
+                          dummy_span),
+                    EVar (mk_name name),
+                    EVar (mk_name (Printf.sprintf "_cmp%d" (i + 1))),
+                    dummy_span)
+           in
+           let last_name = Printf.sprintf "_cmp%d" (List.length fields - 1) in
+           let result =
+             List.fold_right (fun (i, f) acc ->
+                 ignore f;
+                 let cname = Printf.sprintf "_cmp%d" i in
+                 if i = List.length fields - 1 then EVar (mk_name last_name)
+                 else
+                   EIf (EApp (EVar (mk_name "!="),
+                              [EVar (mk_name cname); ELit (LitInt 0, dummy_span)],
+                              dummy_span),
+                        EVar (mk_name cname),
+                        acc,
+                        dummy_span)
+               ) (List.mapi (fun i f -> (i, f)) fields |> List.rev |> List.tl |> List.rev)
+               (EVar (mk_name last_name))
+           in
+           ignore result;
+           ignore final_cmp;
+           EBlock (stmts @ [
+             List.fold_right (fun (i, _f) acc ->
+                 let cname = Printf.sprintf "_cmp%d" i in
+                 if i = List.length fields - 1 then EVar (mk_name cname)
+                 else EIf (EApp (EVar (mk_name "!="),
+                                 [EVar (mk_name cname); ELit (LitInt 0, dummy_span)],
+                                 dummy_span),
+                           EVar (mk_name cname), acc, dummy_span)
+               ) (List.mapi (fun i f -> (i, f)) fields |> List.rev) (ELit (LitInt 0, dummy_span))
+           ], dummy_span))
+      | TDAlias _ ->
+        EApp (EVar (mk_name "compare"), [EVar (mk_name "a"); EVar (mk_name "b")], dummy_span)
+    in
+    Some (impl_one "compare" ["a"; "b"] body)
+
+  | _ -> None  (* Unknown interface — silently skip *)
+
+(** Expand a [DDeriving] into zero or more [DImpl] blocks.
+    If the type is not found or an interface is unknown, silently skips. *)
+let expand_derive
+    (type_defs : (string * (name list * type_def)) list)
+    (type_name : name)
+    (ifaces : name list)
+    (sp : span)
+  : decl list =
+  match List.assoc_opt type_name.txt type_defs with
+  | None -> []   (* type not found — silently skip *)
+  | Some (tparams, td) ->
+    List.filter_map (fun iface_name ->
+        derive_impl type_name sp iface_name.txt tparams td
+      ) ifaces
+
 (** Check mutual exclusivity of [main] and [app] declarations.
     Returns an error message if both are present. *)
 let check_app_main_exclusivity (decls : decl list) : unit =
@@ -390,11 +729,21 @@ let check_app_main_exclusivity (decls : decl list) : unit =
 
 (** Desugar an entire module.  Returns a new [module_] with all multi-head
     fns and pipe expressions lowered to their core forms.
-    Also injects default interface method bodies into impls that omit them. *)
+    Also injects default interface method bodies into impls that omit them.
+    [DDeriving] nodes are expanded into [DImpl] blocks here. *)
 let desugar_module (m : module_) : module_ =
   check_app_main_exclusivity m.mod_decls;
-  let interfaces = collect_interfaces m.mod_decls in
+  (* Collect type definitions so derive expansion can reference them. *)
+  let type_defs = collect_type_defs m.mod_decls in
+  (* Expand DDeriving nodes and desugar everything else. *)
+  let expanded = List.concat_map (fun d ->
+      match d with
+      | DDeriving (type_name, ifaces, sp) ->
+        expand_derive type_defs type_name ifaces sp
+      | _ -> [d]
+    ) m.mod_decls in
+  let interfaces = collect_interfaces expanded in
   let decls = List.map (fun d ->
       inject_defaults interfaces (desugar_decl d)
-    ) m.mod_decls in
+    ) expanded in
   { m with mod_decls = decls }

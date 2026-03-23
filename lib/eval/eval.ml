@@ -137,6 +137,12 @@ let doc_registry : (string, string) Hashtbl.t = Hashtbl.create 32
     Reset per module eval via [reset_scheduler_state]. *)
 let impl_tbl : (string * string, value) Hashtbl.t = Hashtbl.create 8
 
+(** Constructor → type name mapping.
+    Maps each data constructor name (e.g. "Red") to its declaring type (e.g. "Color").
+    Populated when [eval_decl] processes [DType] nodes.
+    Used by [==] and interface method dispatch to look up Eq/Ord/Hash/Show impls. *)
+let ctor_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 16
+
 (** Module stack for tracking the current module path during eval.
     Updated when entering/leaving [DMod]. Top of stack = innermost module. *)
 let module_stack : string list ref = ref []
@@ -415,11 +421,62 @@ let arith_num iop fop name = VBuiltin (name, function
     | [VFloat a; VFloat b] -> VFloat (fop a b)
     | _ -> eval_error "builtin %s: expected two numbers of the same type" name)
 
+(** Look up the type name for a runtime value.
+    Used by interface dispatch in [==], [eq], [compare], [show], [hash]. *)
+let type_name_of_value = function
+  | VInt _    -> Some "Int"
+  | VFloat _  -> Some "Float"
+  | VString _ -> Some "String"
+  | VBool _   -> Some "Bool"
+  | VCon (tag, _) -> Hashtbl.find_opt ctor_type_tbl tag
+  | VRecord _ -> None  (* records don't carry a type tag at runtime *)
+  | _         -> None
+
+(** Forward-reference hook for dispatch in comparison operators.
+    Interface dispatch needs [apply] but [cmp_op] is defined before [apply].
+    Set to the real [apply] after it is defined (see [apply_hook] pattern). *)
+let iface_dispatch_hook : (value -> value list -> value) ref =
+  ref (fun _fn _args -> eval_error "iface_dispatch not yet initialized")
+
 let cmp_op op_i op_f op_s op_b name = VBuiltin (name, function
     | [VInt a;    VInt b]    -> VBool (op_i a b)
     | [VFloat a;  VFloat b]  -> VBool (op_f a b)
     | [VString a; VString b] -> VBool (op_s a b)
     | [VBool a;   VBool b]   -> VBool (op_b a b)
+    | [a; b] when (name = "==" || name = "!=") ->
+      (* For == and !=, look up the Eq impl if available. *)
+      let eq_result = match type_name_of_value a with
+        | Some tname ->
+          (match Hashtbl.find_opt impl_tbl ("Eq", tname) with
+           | Some eq_fn -> Some (!iface_dispatch_hook eq_fn [a; b])
+           | None       -> None)
+        | None -> None
+      in
+      (match eq_result with
+       | Some (VBool b_result) ->
+         VBool (if name = "!=" then not b_result else b_result)
+       | _ ->
+         (* No Eq impl found — fall back to structural OCaml equality *)
+         VBool (if name = "==" then a = b else a <> b))
+    | [a; b] when (name = "<" || name = "<=" || name = ">" || name = ">=") ->
+      (* For ordering operators, look up the Ord impl if available. *)
+      let cmp_result = match type_name_of_value a with
+        | Some tname ->
+          (match Hashtbl.find_opt impl_tbl ("Ord", tname) with
+           | Some cmp_fn -> Some (!iface_dispatch_hook cmp_fn [a; b])
+           | None        -> None)
+        | None -> None
+      in
+      (match cmp_result with
+       | Some (VInt n) ->
+         VBool (match name with
+                | "<"  -> n < 0
+                | "<=" -> n <= 0
+                | ">"  -> n > 0
+                | ">=" -> n >= 0
+                | _    -> false)
+       | _ ->
+         eval_error "builtin %s: incompatible operand types" name)
     | _ -> eval_error "builtin %s: incompatible operand types" name)
 
 (** Detect whether a VCon chain is a March list (Nil / Cons(h, t)). *)
@@ -1864,21 +1921,61 @@ let base_env : env =
         | _ -> eval_error "to_string: expected one argument"))
 
     (* ---- Standard interface builtins: Eq, Ord, Show, Hash ---- *)
+    (* These dispatch through impl_tbl for user-defined types; fall back
+       to structural/primitive operations for built-in types. *)
   ; ("eq", VBuiltin ("eq", function
-        | [a; b] -> VBool (a = b)
+        | [VInt a;    VInt b]    -> VBool (a = b)
+        | [VFloat a;  VFloat b]  -> VBool (a = b)
+        | [VString a; VString b] -> VBool (a = b)
+        | [VBool a;   VBool b]   -> VBool (a = b)
+        | [a; b] ->
+          (match type_name_of_value a with
+           | Some tname ->
+             (match Hashtbl.find_opt impl_tbl ("Eq", tname) with
+              | Some eq_fn -> !apply_hook eq_fn [a; b]
+              | None       -> VBool (a = b))
+           | None -> VBool (a = b))
         | _ -> eval_error "eq: expected two arguments"))
   ; ("compare", VBuiltin ("compare", function
         | [VInt a;    VInt b]    -> VInt (Int.compare a b)
         | [VFloat a;  VFloat b]  -> VInt (Float.compare a b)
         | [VString a; VString b] -> VInt (String.compare a b)
         | [VBool a;   VBool b]   -> VInt (Bool.compare a b)
-        | [a; b] -> VInt (compare a b)
+        | [a; b] ->
+          (match type_name_of_value a with
+           | Some tname ->
+             (match Hashtbl.find_opt impl_tbl ("Ord", tname) with
+              | Some cmp_fn -> !apply_hook cmp_fn [a; b]
+              | None        -> VInt (compare a b))
+           | None -> VInt (compare a b))
         | _ -> eval_error "compare: expected two arguments"))
   ; ("show", VBuiltin ("show", function
-        | [v] -> VString (value_to_string v)
+        | [VInt n]    -> VString (string_of_int n)
+        | [VFloat f]  ->
+          let s = string_of_float f in
+          VString (if String.contains s '.' || String.contains s 'e' then s else s ^ ".0")
+        | [VBool b]   -> VString (string_of_bool b)
+        | [VString s] -> VString s
+        | [v] ->
+          (match type_name_of_value v with
+           | Some tname ->
+             (match Hashtbl.find_opt impl_tbl ("Show", tname) with
+              | Some show_fn -> !apply_hook show_fn [v]
+              | None         -> VString (value_to_string v))
+           | None -> VString (value_to_string v))
         | _ -> eval_error "show: expected one argument"))
   ; ("hash", VBuiltin ("hash", function
-        | [v] -> VInt (Hashtbl.hash v)
+        | [VInt n]    -> VInt (Hashtbl.hash n)
+        | [VFloat f]  -> VInt (Hashtbl.hash f)
+        | [VString s] -> VInt (Hashtbl.hash s)
+        | [VBool b]   -> VInt (Hashtbl.hash b)
+        | [v] ->
+          (match type_name_of_value v with
+           | Some tname ->
+             (match Hashtbl.find_opt impl_tbl ("Hash", tname) with
+              | Some hash_fn -> !apply_hook hash_fn [v]
+              | None         -> VInt (Hashtbl.hash v))
+           | None -> VInt (Hashtbl.hash v))
         | _ -> eval_error "hash: expected one argument"))
 
     (* ---- Int primitives ---- *)
@@ -3700,6 +3797,7 @@ and eval_expr (env : env) (e : expr) : value =
 
 let () = eval_expr_hook := eval_expr
 let () = apply_hook := apply
+let () = iface_dispatch_hook := apply
 
 (* ------------------------------------------------------------------ *)
 (* Task builtins                                                       *)
@@ -3717,6 +3815,7 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear actor_registry;
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.reset impl_tbl;
+  Hashtbl.reset ctor_type_tbl;
   next_pid := 0;
   next_monitor_id := 0;
   current_pid := None;
@@ -4273,7 +4372,15 @@ let rec eval_decl (env : env) (d : decl) : env =
      | Some bs -> bs @ env
      | None    -> eval_error "top-level let binding pattern failed")
 
-  | DType _ -> env   (* No runtime effect *)
+  | DType (_, name, _, td, _) ->
+    (* Populate ctor_type_tbl so dispatch can find the type from a constructor value. *)
+    (match td with
+     | TDVariant variants ->
+       List.iter (fun (v : variant) ->
+           Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt
+         ) variants
+     | _ -> ());
+    env
 
   | DActor (_, name, def, _) ->
     (* Register actor definition so spawn() can find it later *)
@@ -4385,6 +4492,10 @@ let rec eval_decl (env : env) (d : decl) : env =
       ) env idef.impl_methods
 
   | DProtocol _ | DSig _ | DInterface _ | DExtern _ | DNeeds _ -> env
+
+  | DDeriving _ ->
+    (* DDeriving is expanded to DImpl blocks by the desugar pass; skip here. *)
+    env
 
   | DApp _ ->
     (* DApp is desugared to DFn(__app_init__) before eval; reaching here is a bug. *)
@@ -4549,6 +4660,16 @@ let eval_module_env (m : module_) : env =
       let env' = eval_decl env d in
       env_ref := env';
       make_recursive_env rest env'
+
+    | DType (_, name, _, td, _) :: rest ->
+      (* Populate ctor_type_tbl for dispatch *)
+      (match td with
+       | TDVariant variants ->
+         List.iter (fun (v : variant) ->
+             Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt
+           ) variants
+       | _ -> ());
+      make_recursive_env rest env
 
     | _ :: rest -> make_recursive_env rest env
   in

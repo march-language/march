@@ -64,6 +64,8 @@ let () =
       ("alias", ALIAS);
       ("only", ONLY);
       ("except", EXCEPT);
+      ("derive", DERIVE);
+      ("for", FOR);
       ("p_fn", P_FN);
       ("app", APP);
       ("on_start", ON_START);
