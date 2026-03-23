@@ -196,6 +196,18 @@ march/
   - `test_cas.exe`: 41 tests, all passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present
+- **Match syntax**: `match expr do | Pat -> body end` (changed from `with` to `do` in 2026-03-21 — Elixir case-style)
+- **String interpolation**: `${}` syntax fully implemented — `INTERP_START`/`INTERP_MID`/`INTERP_END` tokens in lexer; desugars to `++`/`to_string` chains (`lib/desugar/desugar.ml`)
+- **Code formatter**: `march fmt [--check] <files>` — reformats source in-place (`lib/format/format.ml`, `bin/main.ml`)
+- **Property-based testing**: 36 QCheck2 properties in `test/test_properties.ml` — ADTs, closures, HOFs, tuples, strings, oracle/idempotency/pass properties
+- **Standard Interfaces (Eq/Ord/Show/Hash) with derive syntax** — implemented on branch `claude/intelligent-austin` (not yet merged to main); adds `derive [Eq, Show]` syntax, eval dispatch for `==`/`show`/`hash`/`compare` via `impl_tbl`
+- **LSP Server** (`march-lsp`) — implemented on branch `claude/vibrant-bartik` (not yet merged to main); diagnostics, hover, goto-def, completion, inlay hints, semantic tokens, actor info; uses `linol` framework
+
+### Known Implementation Gaps
+
+- **Pattern matching exhaustiveness checking** — NOT implemented. No compile-time analysis of missing cases; only runtime `Match_failure` exception.
+- **Multi-level module paths** — `use` paths support single-level only (e.g., `use List.*` works; `use Collections.List.*` does not). Parser deferred multi-level to avoid shift/reduce conflicts.
+- **Multi-error parser recovery** — parser stops at first syntax error; no error recovery to continue parsing and report multiple errors.
 - **`--dump-tir` flag**: prints TIR after full pipeline (Lower → Mono → Defun → Perceus → Escape); shows `stack_alloc` for promoted allocations
 - **`--emit-llvm` flag**: emits textual LLVM IR to `<basename>.ll`; links with `runtime/march_runtime.c` via `clang` to produce native binaries
 - **Compiled REPL**: `dune exec march` with no args launches a compile-and-dlopen REPL — each expression goes through the full TIR pipeline → LLVM IR → `clang -shared` → `.so` → `dlopen` → `dlsym` → call. Bindings persist as LLVM globals with `RTLD_GLOBAL`. Falls back to interpreter if JIT unavailable. `:quit`/`:env` commands; incremental env
@@ -297,9 +309,13 @@ Root cause: REPL JIT list literal codegen is broken. Non-JIT (interpreter) path 
 ### Frontend / Ergonomics
 4. **Fix REPL JIT list literal** — 6 failing tests; list literals in JIT (compile-and-dlopen) path break. Interpreter path is fine
 5. **Typechecker: actor handler return type checking** — handlers should be verified to return the state record type
-6. **String interpolation** — `${}` syntax, desugars to `Interpolatable` interface calls
+6. ~~**String interpolation**~~ ✓ — `${}` syntax fully implemented (`lib/lexer/lexer.mll` INTERP_START/MID/END, `lib/desugar/desugar.ml` to_string chains)
 7. **Type-qualified constructor names** — `build_ctor_info` in `llvm_emit.ml` uses flat hashtable; same-named ctors across types collide. Proper fix: type-qualify keys
 8. **Atomic refcounting** — Perceus RC ops non-atomic; HTTP server works via explicit `inc_rc` borrowing but general multi-threaded code needs atomic RC or GC
+9. **Pattern matching exhaustiveness checking** — no analysis; runtime Match_failure only
+10. **Multi-level use paths** — `use Mod.Sub.*` deferred; parser only handles single-level
+11. **Merge Standard Interfaces branch** (`claude/intelligent-austin`) → main
+12. **Merge LSP branch** (`claude/vibrant-bartik`) → main (needs test suite first)
 
 ## LLVM Codegen: End-to-End Compilation (2026-03-20)
 

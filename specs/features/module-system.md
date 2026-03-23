@@ -16,7 +16,8 @@ March provides a hierarchical module system with explicit declarations (`mod Nam
 - **sig conformance** — `sig Name do ... end` verified against actual `mod Name` implementation; missing declarations are errors
 - **use imports** — `use Module.*` (all public names) and `use Module.{f, g}` (named selection)
 
-### Still incomplete
+### Still incomplete / known limitations
+- **Multi-level use paths** — `use A.B.*` is NOT supported. Only single-level `use A.*` works. Parser deferred multi-level path resolution to avoid shift/reduce conflicts (`lib/parser/parser.mly`).
 - **Opaque type enforcement** — `sig` can declare types as abstract, but the type checker doesn't yet hide the representation from outside callers
 - **Re-exports** — no `pub use` to re-export names from imported modules
 
