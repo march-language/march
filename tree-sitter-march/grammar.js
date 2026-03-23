@@ -426,14 +426,21 @@ module.exports = grammar({
     float: _ => /[0-9]+\.[0-9]+/,
     boolean: _ => choice('true', 'false'),
 
-    string: _ => seq(
+    // Wrapped in token() so the entire string is lexed as one atomic unit.
+    // Without this, the tree-sitter lexer tries to match comment tokens (which
+    // start with '--') inside string content.  After '--' the lexer enters a
+    // comment-scanning state; when it then sees the closing '"' it advances to
+    // the comment-accept state and swallows the quote, breaking the string.
+    // Making the rule atomic prevents any extra-token (comment/whitespace)
+    // matching from occurring mid-string.
+    string: _ => token(seq(
       '"',
       repeat(choice(
         /[^"\\]+/,
         seq('\\', choice('n', 't', '\\', '"')),
       )),
       '"',
-    ),
+    )),
 
     atom_literal: _ => seq(':', /[a-z][a-zA-Z0-9_']*/),
 

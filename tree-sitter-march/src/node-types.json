@@ -5460,11 +5460,6 @@
     }
   },
   {
-    "type": "string",
-    "named": true,
-    "fields": {}
-  },
-  {
     "type": "superclass_constraint",
     "named": true,
     "fields": {},
@@ -6278,10 +6273,6 @@
     "named": false
   },
   {
-    "type": "\"",
-    "named": false
-  },
-  {
     "type": "%",
     "named": false
   },
@@ -6363,10 +6354,6 @@
   },
   {
     "type": "[",
-    "named": false
-  },
-  {
-    "type": "\\",
     "named": false
   },
   {
@@ -6472,10 +6459,6 @@
     "named": false
   },
   {
-    "type": "n",
-    "named": false
-  },
-  {
     "type": "on",
     "named": false
   },
@@ -6508,8 +6491,8 @@
     "named": false
   },
   {
-    "type": "t",
-    "named": false
+    "type": "string",
+    "named": true
   },
   {
     "type": "then",
