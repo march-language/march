@@ -48,7 +48,6 @@ fn align(a : Decimal, b : Decimal) : (BigInt, BigInt, Int) do
         (ca, scale_up(cb, sa - sb), sa)
       else
         (scale_up(ca, sb - sa), cb, sb)
-      end
     end
   end
 end
