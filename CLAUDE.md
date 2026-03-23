@@ -2,6 +2,15 @@
 
 March is a statically-typed functional language (ML/Elixir hybrid) compiled with OCaml 5.3.0.
 
+## Keeping specs up to date
+
+**IMPORTANT:** When implementing a feature, always update `specs/todos.md` and `specs/progress.md` in the same commit:
+- Move completed items from the todo list to the "Done" section in `specs/todos.md`.
+- Update the "Current State" counts in `specs/progress.md` (test count, known failures).
+- Add any new capabilities to the feature bullet list in `specs/progress.md`.
+
+These files are the canonical record of what exists. Do not let them go stale.
+
 ## Build & test
 
 The opam switch is `march`. `opam` and `dune` are available directly in PATH — no wrapper needed.

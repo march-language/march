@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-22
+**Last updated:** 2026-03-23
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -8,67 +8,45 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ## P0 — Blocking / Active
 
-### Merge Pending Branches
-
-- [ ] **Merge `claude/intelligent-austin` → main** — Standard Interfaces (Eq/Ord/Show/Hash) with `derive` syntax. Needs review; add tests in `test/test_march.ml` for derive expansion and eval dispatch.
-- [ ] **Merge `claude/vibrant-bartik` → main** — LSP server (`march-lsp`). **Blocked on**: test suite (`lsp/test/test_lsp.ml`) must be written first. Tests being written on a separate rate-limited agent.
-
-### Known Test Failures
-
-- [ ] **Fix REPL JIT list literal** — 6 failing tests (`repl_jit_regression` 0,1,3,6,8 and `repl_jit_cross_line` 3). JIT compilation of `[1, 2, 3]` list literals broken; interpreter path fine. Root cause: codegen path in `repl_jit.ml` / `llvm_emit.ml` for list literals.
+*(Nothing currently blocking.)*
 
 ---
 
 ## P1 — High Impact / Near-Term
 
-### Compiler: Pattern Matching
+### Tooling: LSP Feature Improvements
 
-- [ ] **Exhaustiveness checking** — No compile-time analysis exists. Non-exhaustive patterns produce a runtime `Match_failure`. Need a pattern matrix usefulness/reachability algorithm (similar to OCaml's `lib/typing/parmatch.ml`). Should warn on non-exhaustive, error on unreachable arms. Implementation location: new pass in `lib/typecheck/typecheck.ml` or `lib/typecheck/exhaust.ml`.
+- [ ] **Implement 5 new LSP features** — Plan in `specs/plans/2026-03-23-lsp-feature-improvements.md`. Features:
+  - Doc-string hover (show `--` comments above a function on hover)
+  - Find references (`textDocument/references`)
+  - Rename symbol (`textDocument/rename`)
+  - Signature help (`textDocument/signatureHelp`)
+  - Code actions: make-linear quickfix, pattern exhaustion quickfix
 
-### Compiler: Module System
+### Language: Application Entry Point
 
-- [ ] **Multi-level `use` paths** — `use A.B.*` currently unsupported; only `use A.*` works. Parser deferred this to avoid shift/reduce conflicts (`lib/parser/parser.mly`). Need to resolve grammar ambiguity and implement full path resolution in typecheck.
-- [ ] **Opaque type enforcement** — `sig Name do type T end` declares `T` as abstract, but the type checker doesn't hide the representation. Callers can still access the internal structure. Need to enforce abstraction boundary in `typecheck.ml`.
-
-### Compiler: Parser
-
-- [ ] **Multi-error parser recovery** — Parser stops at first syntax error. Need to implement error recovery (e.g., Menhir's `error` token or a panic-mode resync strategy) to report multiple parse errors per file.
-
-### Tooling: LSP Test Suite
-
-- [ ] **Write `lsp/test/test_lsp.ml`** — Integration tests for the LSP server. Must cover:
-  - Initialize → open file → receive diagnostics
-  - Hover over a bound variable → get its type
-  - Completion at a dot (module member access)
-  - Go-to-definition for a function reference
-  - Inlay hints on let bindings
-  This is the merge blocker for `claude/vibrant-bartik`.
+- [ ] **Implement `app` entry point** — `specs/application_spec.md` fully specifies the `app` declaration for long-lived supervised services (distinct from `main()` scripts). The parser, desugar, typecheck, and eval layers need to support it. Supervision spec is already in `specs/features/actor-system.md`.
 
 ---
 
 ## P2 — Important / Near-Term
 
-### REPL Quality
+### Compiler: Collections
 
-- [ ] **Clojure-level REPL quality** (stated goal) — The REPL should feel as good as Clojure's nREPL:
-  - Persistent session state across JIT invocations (already partially there via RTLD_GLOBAL)
-  - Better error recovery (don't drop session on typecheck error; keep env intact)
-  - `:reload` command to re-eval a module
-  - Tap/inspect tooling (like Clojure's `tap>`)
-  - Pretty-printer for all value types (lists, records, ADTs)
-- [ ] **REPL/compiler parity** — Features must work in both the interpreter REPL and the compiled path. List literals in JIT is the current gap. Any new feature added must be tested in both modes.
+- [ ] **HAMT implementation** — `specs/plans/hamt-proposal.md` describes replacing the AVL-tree `Map` module with a Hash Array Mapped Trie backed by the C runtime. Same HAMT engine would power `Map(k,v)`, `Set(a)`, and a future `PersistentVector(a)`. Depends on: `Hash` interface (already done). Current `Map` is AVL tree; HAMT gives O(log₃₂ n) ops and better cache behavior. See `stdlib/map.march` for the current implementation.
 
 ### Compiler: Type System
 
-- [ ] **Type-qualified constructor names** — `build_ctor_info` in `lib/tir/llvm_emit.ml` uses a flat hashtable keyed by constructor name. Same-named constructors across different ADTs collide. Workaround: renamed stdlib constructors. Proper fix: type-qualify keys as `(type_name, ctor_name)`.
-- [ ] **Actor handler return type checking** — Handlers should be statically verified to return the correct state record type. Currently type-checked but runtime exceptions still possible on mismatch.
-- [ ] **Linear/affine propagation through record fields** — Fields declared `linear` in record definitions don't enforce field-level consumption. Record operations (update, projection) skip field linearity checks.
+- [ ] **Epoch-based capability revocation** — `send(cap, msg)` does not yet validate the epoch against a revocation list. The `Cap(A, e)` type carries an epoch parameter but it is not checked at runtime in `eval.ml`. Stubbed in Phase 1. Full implementation requires a revocation table and `(pid, epoch)` comparison in `eval.ml` and the compiled runtime.
 
-### Compiler: LLVM Codegen
+### REPL Quality
 
-- [ ] **Field-index map for records** — `EField`/`EUpdate` need a field→offset table from the type checker to emit correct GEP offsets beyond field 0. Currently only field 0 is correct.
-- [ ] **Atomic refcounting** — Perceus RC ops are non-atomic. HTTP server works via explicit `inc_rc` borrowing for thread safety, but general multi-threaded code needs atomic RC or a GC to be safe. Options: atomic ops via C11 atomics in runtime, or switch to a tracing GC.
-- [ ] **Actor TIR lowering** — Actor declarations are fully evaluated in the interpreter but dropped during TIR lowering. Compiling actor programs to native code requires implementing the lowering described in `specs/actor-lowering.md`.
+- [ ] **`tap>` async value inspector** — Clojure-style side-channel value tap: `tap> expr` registers value with a registered tap function without interrupting the pipeline. `:inspect/:i` covers synchronous inspection; `tap>` enables middleware-style observation in pipelines. Implementation: new builtin in `eval.ml` + `EBuiltin` in typecheck, wired to a REPL-registered callback.
+- [ ] **REPL/compiler parity** — `:inspect` shows types but doesn't yet surface match exhaustiveness warnings inline. Any new language feature must be tested in both interpreter and JIT paths.
+
+### Tooling
+
+- [ ] **Forge build tool** — March-native package manager and build orchestrator. Uses the content-addressed store (CAS, `lib/cas/`) as its foundation. Should handle: `march.toml` manifest, dependency resolution via hash-pinned lockfile, `march build`, `march test`, `march run`, `march publish` (to a CAS-backed registry). Design goal: no version conflicts (multiple hash-pinned versions coexist), reproducible builds by default.
 
 ---
 
@@ -76,23 +54,15 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ### Language Features
 
-- [ ] **MCP server for March** — An MCP (Model Context Protocol) server that exposes March's type checker and compiler as tools for LLM agents. Discussed as a post-LSP, pre-1.0 item. Would expose: typecheck a snippet, get type at position, search by type signature, expand typed holes.
-- [ ] **Improve error messages for complex types** — Nested generics (`Map(String, List(Vec(Int, N)))`) produce very long error messages. Need: abbreviated type aliases in display, pretty-printer with line-wrapping.
-- [ ] **Epoch-based capability revocation** — `send(cap, msg)` does not yet validate the epoch against a revocation list. Stubbed in Phase 1. Full implementation requires a revocation table and `(pid, epoch)` comparison in `eval.ml` / runtime C.
-- [ ] **Supervisor restart policies** — Supervisors track restart history (`ai_restart_count`) but don't yet enforce policies (e.g., max 3 restarts in 5s → stop). See actor supervision section in `specs/features/actor-system.md`.
-- [ ] **`SRec` recursive protocol unfolding** — Session type `SRec` (recursive protocol) is parsed and represented but not yet fully handled in the type checker's linear channel advancement logic.
+- [ ] **MCP server for March** — An MCP (Model Context Protocol) server that exposes March's type checker and compiler as tools for LLM agents. Post-LSP, pre-1.0. Would expose: typecheck a snippet, get type at position, search by type signature, expand typed holes.
+- [ ] **Improve error messages for complex types** — Nested generics (`Map(String, List(Vec(Int, N)))`) produce very long error messages. Need: abbreviated type aliases in display, pretty-printer with line-wrapping. Implementation location: `lib/errors/errors.ml` + `lib/typecheck/typecheck.ml` pp_ty.
+- [ ] **`SRec` full multi-turn testing** — `unfold_srec` is implemented in typecheck.ml but multi-turn recursive protocol usage (deeply nested `SRec`/`SVar` chains) needs more test coverage. Add tests for ping-pong-style looping protocols.
+- [ ] **Supervisor restart policies: `rest_for_one`/`one_for_all`** — `max_restarts` enforcement is implemented. The `restart_policy` field (`one_for_one` only currently) should support `rest_for_one` (restart child and all children started after it) and `one_for_all` (restart all children on any failure), as specced in `specs/features/actor-system.md`.
 
 ### Testing
 
-- [ ] **Actor compilation tests** — Test suite for actor programs compiled to native code (post actor-lowering).
-- [ ] **Property tests for standard interfaces** — QCheck properties for Eq reflexivity/symmetry/transitivity, Ord total order, Show round-trip, Hash consistency (once `claude/intelligent-austin` is merged).
-- [ ] **Fuzz testing for the parser** — AFL/libFuzzer on `lib/parser/parser.mly` to find crash-inducing inputs.
-
-### Stdlib
-
-- [ ] **`Set` module** — `Set(a)` type is declared in builtins but no stdlib implementation exists.
-- [ ] **`BigInt` / `Decimal`** — Declared in type system design as stdlib numeric types; not yet implemented.
-- [ ] **`Iterable` interface expansion** — `stdlib/iterable.march` is a placeholder (28 lines). Expand to full lazy iteration protocol (like Rust's `Iterator` or Haskell's `Foldable`).
+- [ ] **Actor compilation tests** — Test suite for actor programs compiled to native code (via `--compile`). Actor TIR lowering is implemented; there are no `dune runtest`-level tests verifying end-to-end actor compilation.
+- [ ] **Cross-language benchmarks** — Benchmarks comparing March vs Go, Rust, OCaml on: actor throughput, HAMT ops, HTTP serving, recursive computation. Would validate that March's design goals (Perceus FBIP, zero-cost abstractions) are achieved in practice.
 
 ---
 
@@ -132,5 +102,27 @@ This file tracks everything that still needs to get done. Organized by priority 
 - ✅ Full TUI REPL with JIT
 - ✅ HTTP/WebSocket stdlib + C runtime
 - ✅ Zed editor extension (Tree-sitter grammar)
-- ✅ Standard Interfaces Eq/Ord/Show/Hash (on `claude/intelligent-austin`, pending merge)
-- ✅ LSP server (on `claude/vibrant-bartik`, pending merge + tests)
+- ✅ **Standard Interfaces Eq/Ord/Show/Hash** — merged from `claude/intelligent-austin`; `derive` syntax, eval dispatch for `==`/`show`/`hash`/`compare`, 18 tests
+- ✅ **LSP server** (`march-lsp`) — merged from `claude/vibrant-bartik`; diagnostics, hover, goto-def, completion, inlay hints, semantic tokens, actor info; Zed extension wired up
+- ✅ **LSP test suite** — `lsp/test/test_lsp.ml` (826 lines, 55 tests); was the merge blocker for the LSP branch
+- ✅ **REPL JIT list literal fix** — `[1, 2, 3]` now compiles correctly in JIT; all 812 tests pass (0 failures)
+- ✅ **Exhaustiveness checking** — compile-time pattern matrix analysis in `lib/typecheck/typecheck.ml`; warns on non-exhaustive matches, errors on unreachable arms
+- ✅ **Multi-level `use` paths** — `use A.B.*` / `use A.B.C` now fully supported; parser grammar ambiguity resolved, typecheck does full path resolution
+- ✅ **Opaque type enforcement** — `sig Name do type T end` now hides representation; callers cannot access internal structure through the abstraction boundary
+- ✅ **Multi-error parser recovery** — Menhir `error` token recovery; parser reports multiple syntax errors per file instead of stopping at the first
+- ✅ **Clojure-level REPL quality** — `:reload` (re-eval last loaded file), `:inspect/:i <expr>` (type + value), pretty-printer with depth/collection truncation, error recovery (env preserved on typecheck error), REPL/compiler parity tests
+- ✅ **Type-qualified constructor names** — `build_ctor_info` in `llvm_emit.ml` now keys by `(type_name, ctor_name)` pairs; same-named constructors across different ADTs no longer collide
+- ✅ **Actor handler return type checking** — handlers statically verified to return the correct state record type; gap checks added in typecheck
+- ✅ **Linear/affine propagation through record fields** — `EField` access on a linear record field consumes the field; `EUpdate` respects per-field linearity annotations
+- ✅ **Field-index map for records** — `field_index_for` in `llvm_emit.ml` (line 762) computes correct GEP offsets for all fields; `EField`/`EUpdate` emit correct offsets beyond field 0
+- ✅ **Atomic refcounting** — C11 atomics (`atomic_fetch_add_explicit`, `atomic_fetch_sub_explicit`) in `march_runtime.c`; RC operations are thread-safe
+- ✅ **Actor TIR lowering** — `lower_actor` in `lib/tir/lower.ml` generates TIR type defs + dispatch functions for actor declarations; actors compile to native code
+- ✅ **SRec recursive protocol unfolding** — `unfold_srec` in `lib/typecheck/typecheck.ml`; `SRec(x, body)` unfolded to concrete constructor before matching; recursive protocols handled in session type advancement
+- ✅ **`Set` module** — `stdlib/set.march` (AVL tree-backed, full API)
+- ✅ **`BigInt` / `Decimal`** — `stdlib/bigint.march`, `stdlib/decimal.march`; registered in `bin/main.ml` load order
+- ✅ **`Iterable` interface expansion** — `stdlib/iterable.march` expanded from 28 lines to 184 lines with full lazy iteration protocol (map, filter, fold, take, drop, zip, enumerate, flat_map, any, all, find, count)
+- ✅ **Property tests for Eq/Ord/Show/Hash** — QCheck2 properties for reflexivity/symmetry/transitivity, Ord total order, Show non-empty/distinct, Hash determinism/consistency
+- ✅ **Fuzz testing for the parser** — 19 structural fuzz cases in `test_march.ml` (`parser_fuzz` group); covers deeply nested constructs, bad syntax with recovery, unicode, multi-error cases
+- ✅ **Supervisor restart policies (max_restarts)** — `sc_max_restarts` + sliding time window enforced in `eval.ml`; supervisor crashes when child exceeds restart budget
+- ✅ **Timsort, Introsort, AlphaDev sort** — `stdlib/sort.march` (615 lines)
+- ✅ **Enum module** — `stdlib/enum.march` (314 lines)

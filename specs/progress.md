@@ -184,18 +184,18 @@ march/
 │   ├── http_client.march    # 440 lines: High-level HTTP client with middleware pipeline
 │   ├── http_server.march    # 233 lines: HTTP server types + pipeline runner
 │   ├── websocket.march      # 52 lines: WebSocket types and frame operations
-│   └── iterable.march       # 28 lines: placeholder Iterable interface
+│   └── iterable.march       # 184 lines: map/filter/fold/take/drop/zip/enumerate/flat_map/any/all/find/count
 └── test/
-    ├── test_march.ml         # 670 tests (6 failing: REPL JIT list literal issues)
+    ├── test_march.ml         # 770+ tests (all passing)
     ├── test_cas.ml           # 41 tests (all passing: scc, pipeline, def_id)
     └── test_jit.ml           # 1 test (dlopen round-trip)
 ```
 
-## Current State (as of 2026-03-22)
+## Current State (as of 2026-03-23)
 
 - **Builds clean**
-- **694 tests across 3 suites; 6 failures (all in REPL JIT)**:
-  - `test_march.exe`: 670 tests, 6 failures (repl_jit_regression 0,1,3,6,8 and repl_jit_cross_line 3 — all involve list literal JIT compilation)
+- **812 tests across 3 suites; 0 failures**:
+  - `test_march.exe`: 770+ tests, all passing (REPL JIT list literal fixed; LSP/exhaustiveness/multi-level-use/opaque/actor handler tests added)
   - `test_cas.exe`: 41 tests, all passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present
@@ -203,14 +203,33 @@ march/
 - **String interpolation**: `${}` syntax fully implemented — `INTERP_START`/`INTERP_MID`/`INTERP_END` tokens in lexer; desugars to `++`/`to_string` chains (`lib/desugar/desugar.ml`)
 - **Code formatter**: `march fmt [--check] <files>` — reformats source in-place (`lib/format/format.ml`, `bin/main.ml`)
 - **Property-based testing**: 36 QCheck2 properties in `test/test_properties.ml` — ADTs, closures, HOFs, tuples, strings, oracle/idempotency/pass properties
-- **Standard Interfaces (Eq/Ord/Show/Hash) with derive syntax** — implemented on branch `claude/intelligent-austin` (not yet merged to main); adds `derive [Eq, Show]` syntax, eval dispatch for `==`/`show`/`hash`/`compare` via `impl_tbl`
-- **LSP Server** (`march-lsp`) — implemented on branch `claude/vibrant-bartik` (not yet merged to main); diagnostics, hover, goto-def, completion, inlay hints, semantic tokens, actor info; uses `linol` framework
+- **Standard Interfaces (Eq/Ord/Show/Hash) with derive syntax** — merged to main (from `claude/intelligent-austin`); `derive [Eq, Show]` syntax, eval dispatch for `==`/`show`/`hash`/`compare` via `impl_tbl`; 18 tests
+- **LSP Server** (`march-lsp`) — merged to main (from `claude/vibrant-bartik`); diagnostics, hover, goto-def, completion, inlay hints, semantic tokens, actor info; uses `linol` framework; Zed extension wired up
+- **LSP test suite** — `lsp/test/test_lsp.ml` (826 lines, 55 tests): initialize/open/diagnostics, hover types, goto-def, completion, inlay hints
+- **Pattern matching exhaustiveness checking** — compile-time pattern matrix analysis in `lib/typecheck/typecheck.ml`; warns on non-exhaustive matches, errors on unreachable arms
+- **Multi-level `use` paths** — `use A.B.*` / `use A.B.C` fully supported; grammar ambiguity resolved in parser, full path resolution in typecheck
+- **Opaque type enforcement** — `sig Name do type T end` hides representation; callers cannot access internal structure through the abstraction boundary
+- **Multi-error parser recovery** — Menhir `error` token recovery; multiple syntax errors per file reported
+- **Clojure-level REPL quality** — `:reload`, `:inspect/:i <expr>`, pretty-printer (depth/collection truncation), error recovery (env preserved on typecheck error), REPL/compiler parity tests
+- **Type-qualified constructor names** — `build_ctor_info` in `llvm_emit.ml` uses `(type_name, ctor_name)` pairs; constructor collisions across ADTs eliminated
+- **Actor handler return type checking** — handlers statically verified to return correct state record type
+- **Linear/affine propagation through record fields** — `EField` access on a linear field consumes it; `EUpdate` respects per-field linearity
+- **Field-index map for records** — `field_index_for` in `llvm_emit.ml` (line 762); all field GEP offsets correct
+- **Atomic refcounting** — C11 atomics (`atomic_fetch_add/sub_explicit`) in `march_runtime.c`; RC thread-safe
+- **Actor TIR lowering** — `lower_actor` in `lib/tir/lower.ml`; actors compile to native code via `ESpawn`/`ESend` lowering
+- **SRec recursive protocol unfolding** — `unfold_srec` in typecheck.ml; recursive session types handled
+- **`Set` module** — `stdlib/set.march` (AVL tree-backed, full API)
+- **`BigInt` / `Decimal`** — `stdlib/bigint.march`, `stdlib/decimal.march`
+- **`Iterable` interface expansion** — 184 lines in `stdlib/iterable.march`; map/filter/fold/take/drop/zip/enumerate/flat_map/any/all/find/count
+- **Property tests for Eq/Ord/Show/Hash** — QCheck2 properties (reflexivity, symmetry, transitivity, hash consistency)
+- **Parser fuzz tests** — 19 structural fuzz cases in `parser_fuzz` test group
+- **Supervisor restart policies** — `sc_max_restarts` sliding window enforced in eval.ml
 
 ### Known Implementation Gaps
 
-- **Pattern matching exhaustiveness checking** — NOT implemented. No compile-time analysis of missing cases; only runtime `Match_failure` exception.
-- **Multi-level module paths** — `use` paths support single-level only (e.g., `use List.*` works; `use Collections.List.*` does not). Parser deferred multi-level to avoid shift/reduce conflicts.
-- **Multi-error parser recovery** — parser stops at first syntax error; no error recovery to continue parsing and report multiple errors.
+- **`tap>` async value inspector** — Clojure-style side-channel tap not yet implemented. `:inspect/:i` covers synchronous inspection but `tap>` (middleware-style async tap) is missing.
+- **Epoch-based capability revocation** — `send(cap, msg)` does not validate the epoch against a revocation list. `Cap(A, e)` epoch is carried in the type but not checked at runtime.
+- **`rest_for_one`/`one_for_all` supervisor strategies** — only `one_for_one` is implemented; the other OTP-style restart strategies are not yet handled.
 - **`--dump-tir` flag**: prints TIR after full pipeline (Lower → Mono → Defun → Perceus → Escape); shows `stack_alloc` for promoted allocations
 - **`--emit-llvm` flag**: emits textual LLVM IR to `<basename>.ll`; links with `runtime/march_runtime.c` via `clang` to produce native binaries
 - **Compiled REPL**: `dune exec march` with no args launches a compile-and-dlopen REPL — each expression goes through the full TIR pipeline → LLVM IR → `clang -shared` → `.so` → `dlopen` → `dlsym` → call. Bindings persist as LLVM globals with `RTLD_GLOBAL`. Falls back to interpreter if JIT unavailable. `:quit`/`:env` commands; incremental env
@@ -218,7 +237,7 @@ march/
 - **pub/sig enforcement**: Phase 1 visibility (`pub` on fn/type/ctor) enforced in `check_module` — private names are not exported to outer scope; Phase 2 sig conformance — `sig Name do ... end` checked against the actual `mod Name` implementation, missing declarations reported as errors
 - **Bidirectional HM type checker**: 3389 lines; constructor registry, builtin `Some/None/Ok/Err`, named record type expansion, `Unit`/`Bool`/etc. annotation normalization, builtins (`print`, `println`, `int_to_string`, `bool_to_string`, etc.) in scope; actor declarations register message ctors and bind `state` in handler envs; interface dispatch wired (impl lookup + vtable-style call); capability hierarchy subtyping (`IO` → `IO.FileSystem` → etc.)
 - **Tree-walking interpreter**: 4567 lines; `value` type (incl. `VPid`, `VChan`), pattern matching, `base_env` builtins, two-pass `eval_module_env` for mutual recursion; full synchronous actor runtime with `kill`/`is_alive`/drop semantics; `App.stop()`, `on_start`/`on_stop` lifecycle hooks, graceful shutdown + SIGTERM; supervision with epoch caps + task linking; `Chan.send`/`recv`/`close`/`choose`/`offer` evaluations; Drop handler support via `impl Drop`
-- **Standard interfaces with auto-derivation**: `Eq`, `Show`, `Hash`, `Ord` — `derive Eq, Show for Color` syntax; desugar expands `DDeriving` to `DImpl` blocks; runtime dispatch via `impl_tbl` and `ctor_type_tbl`; `==`/`!=`/`<`/`<=`/`>`/`>=` and `show()`/`hash()`/`compare()` builtins dispatch through user impls for custom types; 18 new tests (670 total in test_march)
+- **Standard interfaces with auto-derivation**: `Eq`, `Show`, `Hash`, `Ord` — `derive Eq, Show for Color` syntax; desugar expands `DDeriving` to `DImpl` blocks; runtime dispatch via `impl_tbl` and `ctor_type_tbl`; `==`/`!=`/`<`/`<=`/`>`/`>=` and `show()`/`hash()`/`compare()` builtins dispatch through user impls for custom types; 18 new tests
 - **TIR pipeline** (`lib/tir/`):
   - `lower.ml` (1277 lines) — AST → ANF TIR, CPS let-insertion, nested pattern flattening, type_map threading, actor lowering
   - `mono.ml` (315 lines) — worklist monomorphization, name mangling (`identity$Int`), TVar elimination; `main` always seeded; function-as-value atoms via `ensure_atom_fns`; `ECallPtr` callee discovery
@@ -257,17 +276,11 @@ march/
 - **Stdlib** (21 modules, 4894 lines): `prelude`, `option`, `result`, `list`, `string`, `math`, `iolist`, `seq`, `sort` (Timsort+Introsort+AlphaDev), `enum`, **`map`** (AVL tree), `path`, `file`, `dir`, `csv`, `http`, `http_transport`, `http_client`, `http_server`, `websocket`, `iterable`
 - **Syntax additions**: `%` modulo, multi-statement match arm bodies, zero-arg constructor calls `Con()`, `state` as contextual keyword in expressions
 
-## Known Failures (2026-03-22)
+## Known Failures (2026-03-23)
 
-**6 failing REPL JIT tests** — all in `test/test_march.ml`, groups `repl_jit_regression` (0,1,3,6,8) and `repl_jit_cross_line` (3):
-- "list literal compiles" — JIT compilation of `[1, 2, 3]` list literals fails
-- "stdlib on list literal" — `List.length [1, 2, 3]` via JIT fails
-- "stdlib List.length via prelude" — cross-line JIT test fails
-- "stdlib chain" — chained stdlib calls fail under JIT
-- "list pretty-print display" — list pretty-printing in JIT mode broken
-- "general REPL interaction" — falls through list-related failure
+**None.** All 812 tests pass across all 3 suites.
 
-Root cause: REPL JIT list literal codegen is broken. Non-JIT (interpreter) path works fine.
+Previously-failing REPL JIT list literal tests (6 failures) were resolved by `fix(stdlib,jit): fix decimal.march parse error causing REPL JIT degradation` (commit dcd5a55) and its predecessors.
 
 ---
 
@@ -302,24 +315,25 @@ Root cause: REPL JIT list literal codegen is broken. Non-JIT (interpreter) path 
 3. ~~**LLVM IR emission**~~ ✓ — `lib/tir/llvm_emit.ml` + `runtime/march_runtime.{c,h}`. `march --emit-llvm file.march` produces `.ll`; link with `clang runtime/march_runtime.c file.ll -o bin`. Verified: `escape_test.march` compiles to native binary printing `7`.
 
 ### Next milestones
-4. **Field-index map for records** — `EField`/`EUpdate` need a field→offset table (from type checker) to emit correct GEP offsets beyond field 0.
+4. ~~**Field-index map for records**~~ ✓ — `field_index_for` in `llvm_emit.ml` (line 762) handles all fields.
 5. ~~**`llc` / `clang` invocation from compiler**~~ ✓ — `march --compile` calls clang automatically; `ensure_runtime_so()` pre-compiles runtime to cached `.so`.
-6. **More test programs** — compile list operations, recursive functions, actors to LLVM.
-7. ~~**HTTP server stdlib**~~ ✓ — Full stdlib: `Http`, `HttpTransport`, `HttpClient`, `HttpServer`, `WebSocket`, `Csv` modules. Test server compiles and serves requests.
-8. **Type-qualified constructor names** — `build_ctor_info` in `llvm_emit.ml` uses a flat hashtable keyed by constructor name; same-named constructors across types collide. Workaround: renamed colliding constructors (`Other`→`OtherKind`, `Timeout`→`ConnTimeout`, `ParseError`→`CsvParseError`/`ConnParseError`). Proper fix: type-qualify constructor keys.
-9. **Atomic refcounting for threads** — Perceus RC ops are non-atomic; HTTP server works via explicit `inc_rc` borrowing before pipeline calls but general multi-threaded code needs atomic RC or a GC.
-10. **Pipe desugar produces saturated calls** — Fixed: `a |> f(b)` now desugars to `f(a, b)` instead of curried `f(b)(a)`. Matches Elixir convention (piped value = first arg).
+6. ~~**Type-qualified constructor names**~~ ✓ — `build_ctor_info` keyed by `(type_name, ctor_name)` pairs.
+7. ~~**Atomic refcounting**~~ ✓ — C11 atomics in `march_runtime.c`.
+8. **Actor compilation tests** — need `dune runtest`-level tests for compiled actor programs.
+9. **HAMT implementation** — replace AVL-tree `Map` with HAMT engine; spec in `specs/plans/hamt-proposal.md`.
+10. **LSP feature improvements** — 5 new features; spec in `specs/plans/2026-03-23-lsp-feature-improvements.md`.
 
 ### Frontend / Ergonomics
-4. **Fix REPL JIT list literal** — 6 failing tests; list literals in JIT (compile-and-dlopen) path break. Interpreter path is fine
-5. **Typechecker: actor handler return type checking** — handlers should be verified to return the state record type
-6. ~~**String interpolation**~~ ✓ — `${}` syntax fully implemented (`lib/lexer/lexer.mll` INTERP_START/MID/END, `lib/desugar/desugar.ml` to_string chains)
-7. **Type-qualified constructor names** — `build_ctor_info` in `llvm_emit.ml` uses flat hashtable; same-named ctors across types collide. Proper fix: type-qualify keys
-8. **Atomic refcounting** — Perceus RC ops non-atomic; HTTP server works via explicit `inc_rc` borrowing but general multi-threaded code needs atomic RC or GC
-9. **Pattern matching exhaustiveness checking** — no analysis; runtime Match_failure only
-10. **Multi-level use paths** — `use Mod.Sub.*` deferred; parser only handles single-level
-11. **Merge Standard Interfaces branch** (`claude/intelligent-austin`) → main
-12. **Merge LSP branch** (`claude/vibrant-bartik`) → main (needs test suite first)
+1. ~~**Fix REPL JIT list literal**~~ ✓ — all 812 tests pass.
+2. ~~**Actor handler return type checking**~~ ✓ — gap checks in typecheck.
+3. ~~**Type-qualified constructor names**~~ ✓ — done.
+4. ~~**Atomic refcounting**~~ ✓ — done.
+5. ~~**Pattern matching exhaustiveness checking**~~ ✓ — done.
+6. ~~**Multi-level use paths**~~ ✓ — done.
+7. ~~**Merge Standard Interfaces branch**~~ ✓ — merged.
+8. ~~**Merge LSP branch**~~ ✓ — merged (with 55-test suite).
+9. **`tap>` async value inspector** — remaining REPL quality gap.
+10. **`app` entry point** — spec in `specs/application_spec.md`.
 
 ## LLVM Codegen: End-to-End Compilation (2026-03-20)
 
