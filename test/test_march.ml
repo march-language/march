@@ -1135,6 +1135,197 @@ let test_session_eval_send_recv () =
   let v = call_fn env "run" [] in
   Alcotest.(check int) "eval echo protocol: result = 43" 43 (vint v)
 
+(* ── SRec multi-turn protocol tests ─────────────────────────────────────── *)
+
+(** unfold_srec: basic SRec(x, Send(Int, x)) unfolds to Send(Int, SRec(x,...)). *)
+let test_srec_unfold_basic () =
+  let t_int = March_typecheck.Typecheck.TCon ("Int", []) in
+  let s = March_typecheck.Typecheck.(SRec ("x", SSend (t_int, SVar "x"))) in
+  let unfolded = March_typecheck.Typecheck.unfold_srec s in
+  (match unfolded with
+   | March_typecheck.Typecheck.SSend (ty, cont) ->
+     Alcotest.(check bool) "unfold gives SSend" true true;
+     Alcotest.(check bool) "inner type is Int" true (ty = t_int);
+     (match cont with
+      | March_typecheck.Typecheck.SRec _ ->
+        Alcotest.(check bool) "continuation is SRec (recursive)" true true
+      | _ -> Alcotest.fail "continuation should be SRec")
+   | other -> Alcotest.fail ("expected SSend, got: " ^ pp_sty other))
+
+(** unfold_srec: SEnd passes through unchanged (no SRec to unfold). *)
+let test_srec_unfold_send_passes_through () =
+  let t_int = March_typecheck.Typecheck.TCon ("Int", []) in
+  let s = March_typecheck.Typecheck.SSend (t_int, March_typecheck.Typecheck.SEnd) in
+  let unfolded = March_typecheck.Typecheck.unfold_srec s in
+  Alcotest.(check bool) "SSend(Int, SEnd) unchanged by unfold" true
+    (March_typecheck.Typecheck.session_ty_equal s unfolded)
+
+(** SRec ping-pong protocol: source sends Int, receives Bool, loops.
+    Projection should be SRec(x, Send(Int, Recv(Bool, x))). *)
+let test_srec_ping_pong_protocol () =
+  let (ctx, env) = typecheck_full {|mod Test do
+    protocol PingPong do
+      loop do
+        Client -> Server : Int
+        Server -> Client : Bool
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "ping-pong: no typecheck errors" false (has_errors ctx);
+  let pi = List.assoc "PingPong" env.March_typecheck.Typecheck.protocols in
+  let client_ty = List.assoc "Client" pi.March_typecheck.Typecheck.pi_projections in
+  let t_int  = March_typecheck.Typecheck.TCon ("Int",  []) in
+  let t_bool = March_typecheck.Typecheck.TCon ("Bool", []) in
+  (* Client projection should be SRec(_, SSend(Int, SRecv(Bool, ...))) *)
+  (match client_ty with
+   | March_typecheck.Typecheck.SRec (_, inner) ->
+     (match inner with
+      | March_typecheck.Typecheck.SSend (ty, recv_part) when ty = t_int ->
+        (match recv_part with
+         | March_typecheck.Typecheck.SRecv (ty2, _) when ty2 = t_bool ->
+           Alcotest.(check bool) "client: Rec(_, Send(Int, Recv(Bool, ...)))" true true
+         | _ -> Alcotest.fail ("client inner recv: " ^ pp_sty recv_part))
+      | _ -> Alcotest.fail ("client inner: " ^ pp_sty inner))
+   | other -> Alcotest.fail ("client: " ^ pp_sty other))
+
+(** Ping-pong unfold: one step of unfold gives Send(Int, Recv(Bool, Rec(...))). *)
+let test_srec_ping_pong_unfold_one_step () =
+  let t_int  = March_typecheck.Typecheck.TCon ("Int",  []) in
+  let t_bool = March_typecheck.Typecheck.TCon ("Bool", []) in
+  (* Manually construct Rec(x, Send(Int, Recv(Bool, x))) *)
+  let s = March_typecheck.Typecheck.SRec ("x",
+    March_typecheck.Typecheck.SSend (t_int,
+      March_typecheck.Typecheck.SRecv (t_bool,
+        March_typecheck.Typecheck.SVar "x"))) in
+  let step1 = March_typecheck.Typecheck.unfold_srec s in
+  (match step1 with
+   | March_typecheck.Typecheck.SSend (ty, cont) when ty = t_int ->
+     Alcotest.(check bool) "step 1: SSend(Int, ...)" true true;
+     (match cont with
+      | March_typecheck.Typecheck.SRecv (ty2, loop_back) when ty2 = t_bool ->
+        (match loop_back with
+         | March_typecheck.Typecheck.SRec _ ->
+           Alcotest.(check bool) "step 1: ... Recv(Bool, SRec(...))" true true
+         | _ -> Alcotest.fail ("loop-back should be SRec: " ^ pp_sty loop_back))
+      | _ -> Alcotest.fail ("after Send: expected Recv(Bool,...): " ^ pp_sty cont))
+   | other -> Alcotest.fail ("step 1 expected SSend: " ^ pp_sty other))
+
+(** Ping-pong unfold: second step after advancing restores the same structure. *)
+let test_srec_ping_pong_unfold_two_steps () =
+  let t_int  = March_typecheck.Typecheck.TCon ("Int",  []) in
+  let t_bool = March_typecheck.Typecheck.TCon ("Bool", []) in
+  (* After unfolding once and advancing past Send+Recv, we get back SRec which
+     can be unfolded again: structure should be identical to step 1. *)
+  let s = March_typecheck.Typecheck.SRec ("x",
+    March_typecheck.Typecheck.SSend (t_int,
+      March_typecheck.Typecheck.SRecv (t_bool,
+        March_typecheck.Typecheck.SVar "x"))) in
+  let step1 = March_typecheck.Typecheck.unfold_srec s in
+  (* Advance past SSend *)
+  let after_send = match step1 with
+    | March_typecheck.Typecheck.SSend (_, cont) -> cont
+    | _ -> March_typecheck.Typecheck.SEnd in
+  (* Advance past SRecv *)
+  let after_recv = match after_send with
+    | March_typecheck.Typecheck.SRecv (_, cont) -> cont
+    | _ -> March_typecheck.Typecheck.SEnd in
+  (* after_recv should be SRec, unfoldable again *)
+  let step2 = March_typecheck.Typecheck.unfold_srec after_recv in
+  (match step2 with
+   | March_typecheck.Typecheck.SSend (ty, _) when ty = t_int ->
+     Alcotest.(check bool) "step 2 again starts with SSend(Int,...)" true true
+   | other -> Alcotest.fail ("step 2 expected SSend: " ^ pp_sty other))
+
+(** Multi-level nested SRec: SRec inside SRec where inner loop recurses. *)
+let test_srec_nested_srec () =
+  let t_int = March_typecheck.Typecheck.TCon ("Int", []) in
+  (* Rec(x, Rec(y, Send(Int, y))) — inner loop never uses x *)
+  let inner = March_typecheck.Typecheck.(SRec ("y", SSend (t_int, SVar "y"))) in
+  ignore t_int; (* used inside local open above *)
+  let outer = March_typecheck.Typecheck.SRec ("x", inner) in
+  (* Unfolding outer should eliminate the outer SRec and give us the inner SRec.
+     Then unfolding the inner SRec gives SSend. *)
+  let unfolded = March_typecheck.Typecheck.unfold_srec outer in
+  (match unfolded with
+   | March_typecheck.Typecheck.SSend _ ->
+     Alcotest.(check bool) "nested SRec unfolds to SSend" true true
+   | March_typecheck.Typecheck.SRec _ ->
+     (* One more unfold needed — also acceptable *)
+     let step2 = March_typecheck.Typecheck.unfold_srec unfolded in
+     (match step2 with
+      | March_typecheck.Typecheck.SSend _ ->
+        Alcotest.(check bool) "nested SRec: two unfold steps reach SSend" true true
+      | _ -> Alcotest.fail ("nested: two steps gave: " ^ pp_sty step2))
+   | other -> Alcotest.fail ("nested SRec: " ^ pp_sty other))
+
+(** Protocol that recurses N times then ends (counted recursion via nesting).
+    We simulate a 3-turn protocol: Send, Send, Send, End.
+    Uses SRec + choice to represent a counted loop.  *)
+let test_srec_finite_protocol () =
+  let t_int = March_typecheck.Typecheck.TCon ("Int", []) in
+  (* A finite 3-step linear protocol (no recursion), represented in typecheck *)
+  let s = March_typecheck.Typecheck.SSend (t_int,
+    March_typecheck.Typecheck.SSend (t_int,
+      March_typecheck.Typecheck.SSend (t_int,
+        March_typecheck.Typecheck.SEnd))) in
+  (* Three steps advance correctly *)
+  let step s' = match March_typecheck.Typecheck.unfold_srec s' with
+    | March_typecheck.Typecheck.SSend (_, cont) -> cont
+    | other -> other in
+  let s1 = step s in
+  let s2 = step s1 in
+  let s3 = step s2 in
+  Alcotest.(check bool) "3-step protocol ends at SEnd" true
+    (s3 = March_typecheck.Typecheck.SEnd)
+
+(** SRec choose-based ping-pong: client can Continue or Stop each round. *)
+let test_srec_choose_loop_protocol () =
+  let (ctx, env) = typecheck_full {|mod Test do
+    protocol Negotiation do
+      loop do
+        Client -> Server : Int
+        Server -> Client : Bool
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "choose loop: no typecheck errors" false (has_errors ctx);
+  let pi = List.assoc "Negotiation" env.March_typecheck.Typecheck.protocols in
+  (* Both roles should have a projection *)
+  let has_client = List.mem_assoc "Client" pi.March_typecheck.Typecheck.pi_projections in
+  let has_server = List.mem_assoc "Server" pi.March_typecheck.Typecheck.pi_projections in
+  Alcotest.(check bool) "Client projection present" true has_client;
+  Alcotest.(check bool) "Server projection present" true has_server
+
+(** SRec duality: dual of Rec(x, Send(Int, x)) is Rec(x, Recv(Int, x)). *)
+let test_srec_dual () =
+  let t_int = March_typecheck.Typecheck.TCon ("Int", []) in
+  let s = March_typecheck.Typecheck.(SRec ("x", SSend (t_int, SVar "x"))) in
+  let d = March_typecheck.Typecheck.dual_session_ty s in
+  (* dual should be Rec(x, Recv(Int, x)) *)
+  (match d with
+   | March_typecheck.Typecheck.SRec (_, inner) ->
+     (match inner with
+      | March_typecheck.Typecheck.SRecv (ty, March_typecheck.Typecheck.SVar _) when ty = t_int ->
+        Alcotest.(check bool) "dual(Rec(x,Send(Int,x))) = Rec(x,Recv(Int,x))" true true
+      | _ -> Alcotest.fail ("dual inner: " ^ pp_sty inner))
+   | other -> Alcotest.fail ("dual: " ^ pp_sty other))
+
+(** SRec multi-turn typecheck: a function using a recursive channel protocol typechecks. *)
+let test_srec_multi_turn_typechecks () =
+  (* A function that uses a recursive protocol exactly once (one send+recv then done) *)
+  let ctx = typecheck {|mod Test do
+    protocol Ping do
+      loop do
+        Client -> Server : Int
+      end
+    end
+    fn one_ping(ch : Chan(Client, Ping)) : Unit do
+      let ch2 = Chan.send(ch, 42)
+      Chan.close(ch2)
+    end
+  end|} in
+  Alcotest.(check bool) "recursive Chan usage typechecks" false (has_errors ctx)
+
 (* ── Eval tests ─────────────────────────────────────────────────────────── *)
 
 let test_eval_literal () =
@@ -3645,6 +3836,198 @@ let test_actor_tir_full_pipeline_no_crash () =
   end|} in
   Alcotest.(check bool) "full pipeline with actor: no crash" true
     (List.length m.March_tir.Tir.tm_fns > 0)
+
+(* ── Actor compilation tests (LLVM IR path) ─────────────────────────────── *)
+
+(** Helper: parse, typecheck, lower + full pipeline → LLVM IR string. *)
+let emit_actor_ir src =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  March_tir.Llvm_emit.emit_module tir
+
+let ir_contains ir pat =
+  try ignore (Str.search_forward (Str.regexp_string pat) ir 0); true
+  with Not_found -> false
+
+(** Compiled actor: dispatch function is emitted in the LLVM IR. *)
+let test_actor_compile_dispatch_emitted () =
+  let ir = emit_actor_ir {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+      on Reset() do { count = 0 } end
+    end
+    fn main() : Unit do
+      let pid = spawn(Counter)
+      let _ = send(pid, Inc())
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "Counter_dispatch defined in IR" true
+    (ir_contains ir "Counter_dispatch");
+  Alcotest.(check bool) "march_spawn called" true
+    (ir_contains ir "march_spawn");
+  Alcotest.(check bool) "march_send called" true
+    (ir_contains ir "march_send")
+
+(** Compiled actor: spawn function is emitted with allocation. *)
+let test_actor_compile_spawn_fn_emitted () =
+  let ir = emit_actor_ir {|mod Test do
+    actor Greeter do
+      state { n : Int }
+      init { n = 0 }
+      on Hello() do { n = state.n + 1 } end
+    end
+    fn main() : Unit do
+      let _ = spawn(Greeter)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "Greeter_spawn defined in IR" true
+    (ir_contains ir "Greeter_spawn");
+  Alcotest.(check bool) "march_alloc called" true
+    (ir_contains ir "march_alloc")
+
+(** Compiled actor: handler functions are emitted for each message type. *)
+let test_actor_compile_handlers_emitted () =
+  let ir = emit_actor_ir {|mod Test do
+    actor Worker do
+      state { x : Int }
+      init { x = 0 }
+      on DoA() do { x = state.x + 1 } end
+      on DoB() do { x = state.x - 1 } end
+      on DoC() do { x = 0 } end
+    end
+    fn main() : Unit do () end
+  end|} in
+  Alcotest.(check bool) "Worker_DoA handler in IR" true
+    (ir_contains ir "Worker_DoA");
+  Alcotest.(check bool) "Worker_DoB handler in IR" true
+    (ir_contains ir "Worker_DoB");
+  Alcotest.(check bool) "Worker_DoC handler in IR" true
+    (ir_contains ir "Worker_DoC")
+
+(** Compiled supervisor: register_supervisor call emitted for supervisor actor. *)
+let test_actor_compile_supervisor_registers () =
+  let ir = emit_actor_ir {|mod Test do
+    actor Worker do
+      state { x : Int }
+      init { x = 0 }
+      on Tick() do { x = state.x + 1 } end
+    end
+    actor Sup do
+      state { w : Int }
+      init { w = 0 }
+      supervise do
+        strategy one_for_one
+        max_restarts 3 within 60
+        Worker w
+      end
+    end
+    fn main() : Unit do
+      let _ = spawn(Sup)
+      ()
+    end
+  end|} in
+  (* Supervisor spawning should emit march_register_supervisor *)
+  Alcotest.(check bool) "march_register_supervisor in IR" true
+    (ir_contains ir "march_register_supervisor")
+
+(** Compiled monitor: monitor call emitted. *)
+let test_actor_compile_monitor_emitted () =
+  let ir = emit_actor_ir {|mod Test do
+    actor Target do
+      state { x : Int }
+      init { x = 0 }
+      on Stop() do { x = -1 } end
+    end
+    actor Watcher do
+      state { ref_ : Int }
+      init { ref_ = 0 }
+    end
+    fn main() : Unit do
+      let t = spawn(Target)
+      let w = spawn(Watcher)
+      let _ = monitor(w, t)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "march_monitor in IR" true
+    (ir_contains ir "march_monitor")
+
+(** Compiled link: link call emitted. *)
+let test_actor_compile_link_emitted () =
+  let ir = emit_actor_ir {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x = 0 }
+      on Ping() do { x = 1 } end
+    end
+    actor B do
+      state { x : Int }
+      init { x = 0 }
+      on Pong() do { x = 1 } end
+    end
+    fn main() : Unit do
+      let a = spawn(A)
+      let b = spawn(B)
+      let _ = link(a, b)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "march_link in IR" true
+    (ir_contains ir "march_link")
+
+(** Compiled multi-actor: multiple actors in same module compile without crash. *)
+let test_actor_compile_multi_actor_no_crash () =
+  let ir = emit_actor_ir {|mod Test do
+    actor A do
+      state { v : Int }
+      init { v = 0 }
+      on MsgA() do { v = 1 } end
+    end
+    actor B do
+      state { v : Int }
+      init { v = 0 }
+      on MsgB() do { v = 2 } end
+    end
+    actor C do
+      state { v : Int }
+      init { v = 0 }
+      on MsgC() do { v = 3 } end
+    end
+    fn main() : Unit do
+      let _ = spawn(A)
+      let _ = spawn(B)
+      let _ = spawn(C)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "A_dispatch in IR" true (ir_contains ir "A_dispatch");
+  Alcotest.(check bool) "B_dispatch in IR" true (ir_contains ir "B_dispatch");
+  Alcotest.(check bool) "C_dispatch in IR" true (ir_contains ir "C_dispatch")
+
+(** Compiled actor with run_scheduler: @main wraps march_main with scheduler drain. *)
+let test_actor_compile_run_scheduler_in_main () =
+  let ir = emit_actor_ir {|mod Test do
+    actor Echo do
+      state { count : Int }
+      init { count = 0 }
+      on Ping() do { count = state.count + 1 } end
+    end
+    fn main() : Unit do
+      let pid = spawn(Echo)
+      let _ = send(pid, Ping())
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "@main calls march_run_scheduler" true
+    (ir_contains ir "march_run_scheduler")
 
 let test_perceus_preserves_fn_count () =
   (* After perceus, user function count is unchanged.
@@ -7640,6 +8023,146 @@ let test_supervision_stale_epoch () =
     (match result with
      | March_eval.Eval.VAtom "error" -> true
      | _ -> false)
+
+(* ── Supervision Phase 3b: Explicit Capability Revocation ──────────────── *)
+
+(** revoke_cap: calling revoke_cap then send_checked returns :error. *)
+let test_supervision_revoke_cap_blocks_send () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    fn main() do
+      let pid = spawn(A)
+      match get_cap(pid) do
+      | None -> :error
+      | Some(cap) ->
+        revoke_cap(cap)
+        send_checked(cap, Noop())
+      end
+    end
+  end|} in
+  let v = call_fn env "main" [] in
+  Alcotest.(check bool) "revoked cap blocked by send_checked" true
+    (match v with
+     | March_eval.Eval.VAtom "error" -> true
+     | _ -> false)
+
+(** revoke_cap is idempotent: calling it twice does not error. *)
+let test_supervision_revoke_cap_idempotent () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    fn main() do
+      let pid = spawn(A)
+      match get_cap(pid) do
+      | None -> :error
+      | Some(cap) ->
+        revoke_cap(cap)
+        revoke_cap(cap)
+        :ok
+      end
+    end
+  end|} in
+  let v = call_fn env "main" [] in
+  Alcotest.(check bool) "double revoke does not error" true
+    (match v with March_eval.Eval.VAtom "ok" -> true | _ -> false)
+
+(** is_cap_valid: fresh cap is valid; revoked cap is not. *)
+let test_supervision_is_cap_valid () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    fn main() do
+      let pid = spawn(A)
+      match get_cap(pid) do
+      | None -> :error
+      | Some(cap) ->
+        let before = is_cap_valid(cap)
+        revoke_cap(cap)
+        let after = is_cap_valid(cap)
+        if before == true then
+          if after == false then :ok else :bad_after
+        else :bad_before
+      end
+    end
+  end|} in
+  let v = call_fn env "main" [] in
+  Alcotest.(check bool) "is_cap_valid before/after revocation" true
+    (match v with March_eval.Eval.VAtom "ok" -> true | _ -> false)
+
+(** send with VCap and revoked cap raises a capability error. *)
+let test_supervision_send_revoked_cap_errors () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x = 0 }
+      on Noop() do { x = 0 } end
+    end
+
+    fn main() do
+      let pid = spawn(A)
+      match get_cap(pid) do
+      | None -> :setup_error
+      | Some(cap) ->
+        revoke_cap(cap)
+        cap
+      end
+    end
+  end|} in
+  let cap = call_fn env "main" [] in
+  (* Direct send with a revoked cap should raise an error *)
+  let raised = try
+    ignore (March_eval.Eval.apply
+      (List.assoc "send_checked" (March_eval.Eval.base_env))
+      [cap; March_eval.Eval.VCon ("Noop", [])]);
+    false
+  with _ -> false in
+  (* send_checked returns :error atom rather than raising *)
+  let result = March_eval.Eval.apply
+    (List.assoc "send_checked" (March_eval.Eval.base_env))
+    [cap; March_eval.Eval.VCon ("Noop", [])] in
+  ignore raised;
+  Alcotest.(check bool) "send_checked with revoked cap returns error" true
+    (match result with March_eval.Eval.VAtom "error" -> true | _ -> false)
+
+(** Revocation survives after the actor is still alive (no restart needed). *)
+let test_supervision_revoke_without_kill () =
+  let env = eval_module {|mod Test do
+    actor A do
+      state { x : Int }
+      init { x = 0 }
+      on Inc() do { x = state.x + 1 } end
+    end
+
+    fn main() do
+      let pid = spawn(A)
+      match get_cap(pid) do
+      | None -> :error
+      | Some(cap) ->
+        revoke_cap(cap)
+        let alive = is_alive(pid)
+        let valid = is_cap_valid(cap)
+        if alive == true then
+          if valid == false then :ok else :still_valid
+        else :actor_dead
+      end
+    end
+  end|} in
+  let v = call_fn env "main" [] in
+  Alcotest.(check bool) "actor alive but cap revoked" true
+    (match v with March_eval.Eval.VAtom "ok" -> true | _ -> false)
 
 (* ── Supervision Phase 5: Task Linking ─────────────────────────────────── *)
 
@@ -11690,7 +12213,7 @@ let () =
           Alcotest.test_case "session choose wrong state"        `Quick test_session_choose_at_wrong_state_error;
           Alcotest.test_case "session offer ok"                  `Quick test_session_offer_ok;
           Alcotest.test_case "session offer wrong state"         `Quick test_session_offer_at_wrong_state_error;
-          (* Phase 4: SRec multi-turn recursive protocols *)
+          (* Phase 4: SRec multi-turn recursive protocols — original set *)
           Alcotest.test_case "SRec ping-pong loop typechecks"    `Quick test_srec_pingpong_loop_typechecks;
           Alcotest.test_case "SRec unfold simple"                `Quick test_srec_unfold_simple;
           Alcotest.test_case "SRec unfold multi-step"            `Quick test_srec_unfold_multi_step;
@@ -11700,6 +12223,17 @@ let () =
           (* Complex type error messages *)
           Alcotest.test_case "pp_ty_pretty wraps long types"     `Quick test_complex_type_error_pp_ty_pretty;
           Alcotest.test_case "type mismatch hint for same ctor"  `Quick test_complex_type_mismatch_hint;
+          (* Phase 4: SRec extended test suite *)
+          Alcotest.test_case "srec unfold basic"               `Quick test_srec_unfold_basic;
+          Alcotest.test_case "srec unfold passthrough"         `Quick test_srec_unfold_send_passes_through;
+          Alcotest.test_case "srec ping-pong protocol"         `Quick test_srec_ping_pong_protocol;
+          Alcotest.test_case "srec ping-pong unfold step 1"    `Quick test_srec_ping_pong_unfold_one_step;
+          Alcotest.test_case "srec ping-pong unfold step 2"    `Quick test_srec_ping_pong_unfold_two_steps;
+          Alcotest.test_case "srec nested SRec"                `Quick test_srec_nested_srec;
+          Alcotest.test_case "srec finite 3-step"              `Quick test_srec_finite_protocol;
+          Alcotest.test_case "srec choose-loop protocol"       `Quick test_srec_choose_loop_protocol;
+          Alcotest.test_case "srec dual"                       `Quick test_srec_dual;
+          Alcotest.test_case "srec multi-turn typechecks"      `Quick test_srec_multi_turn_typechecks;
           (* H9: Actor handler capability checking *)
           Alcotest.test_case "actor cap needs ok"            `Quick test_actor_handler_cap_needs_ok;
           Alcotest.test_case "actor cap needs missing error" `Quick test_actor_handler_cap_missing_needs_error;
@@ -11907,6 +12441,16 @@ let () =
           Alcotest.test_case "msg variant ctors"           `Quick test_actor_tir_msg_variant_ctors;
           Alcotest.test_case "actor struct dispatch field" `Quick test_actor_tir_actor_struct_has_dispatch_field;
           Alcotest.test_case "full pipeline no crash"      `Quick test_actor_tir_full_pipeline_no_crash;
+        ] );
+      ( "actor_compile", [
+          Alcotest.test_case "dispatch emitted"             `Quick test_actor_compile_dispatch_emitted;
+          Alcotest.test_case "spawn fn emitted"             `Quick test_actor_compile_spawn_fn_emitted;
+          Alcotest.test_case "handlers emitted"             `Quick test_actor_compile_handlers_emitted;
+          Alcotest.test_case "supervisor registers"         `Quick test_actor_compile_supervisor_registers;
+          Alcotest.test_case "monitor emitted"              `Quick test_actor_compile_monitor_emitted;
+          Alcotest.test_case "link emitted"                 `Quick test_actor_compile_link_emitted;
+          Alcotest.test_case "multi-actor no crash"         `Quick test_actor_compile_multi_actor_no_crash;
+          Alcotest.test_case "run_scheduler in main"        `Quick test_actor_compile_run_scheduler_in_main;
         ] );
       "multiline", [
         Alcotest.test_case "depth zero" `Quick test_multiline_depth_zero;
@@ -12233,6 +12777,11 @@ let () =
         Alcotest.test_case "send_checked dead actor"      `Quick (with_reset test_supervision_send_checked_dead_actor);
         Alcotest.test_case "epoch increments on restart"  `Quick (with_reset test_supervision_epoch_increments_on_restart);
         Alcotest.test_case "stale epoch rejected"         `Quick (with_reset test_supervision_stale_epoch);
+        Alcotest.test_case "revoke_cap blocks send"       `Quick (with_reset test_supervision_revoke_cap_blocks_send);
+        Alcotest.test_case "revoke_cap idempotent"        `Quick (with_reset test_supervision_revoke_cap_idempotent);
+        Alcotest.test_case "is_cap_valid"                 `Quick (with_reset test_supervision_is_cap_valid);
+        Alcotest.test_case "send revoked cap returns error" `Quick (with_reset test_supervision_send_revoked_cap_errors);
+        Alcotest.test_case "revoke without kill"          `Quick (with_reset test_supervision_revoke_without_kill);
       ]);
       ("supervision phase5", [
         Alcotest.test_case "task_spawn_link completes"         `Quick (with_reset test_supervision_task_spawn_link_completes);

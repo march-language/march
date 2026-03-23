@@ -164,6 +164,12 @@ let process_registry : (string, int) Hashtbl.t = Hashtbl.create 8
 (** Reverse map: pid → registered atom name (for re-registration on restart). *)
 let pid_to_registry_name : (int, string) Hashtbl.t = Hashtbl.create 8
 
+(** Explicit capability revocation table.
+    Maps [(pid, epoch)] pairs that have been revoked via [revoke_cap].
+    A cap is invalid if its (pid, epoch) is in this table OR if
+    the actor's current epoch differs (implying a restart occurred). *)
+let revocation_table : (int * int, unit) Hashtbl.t = Hashtbl.create 4
+
 (** Flag set when graceful shutdown has been requested (SIGTERM, App.stop). *)
 let shutdown_requested : bool ref = ref false
 
@@ -1932,6 +1938,8 @@ let base_env : env =
            | Some inst when not inst.ai_alive -> VAtom "error" (* actor dead *)
            | Some inst when inst.ai_epoch <> cap_epoch ->
              VAtom "error"                                      (* stale epoch *)
+           | _ when Hashtbl.mem revocation_table (pid, cap_epoch) ->
+             VAtom "error"                                      (* explicitly revoked *)
            | Some inst ->
              (* Valid cap: enqueue and return :ok immediately *)
              (match msg with
@@ -1945,6 +1953,25 @@ let base_env : env =
           (* Legacy: bare VPid without epoch — not supported in Phase 3+ *)
           VAtom "error"
         | _ -> eval_error "send_checked: expected (Cap, msg)"))
+  ; ("revoke_cap", VBuiltin ("revoke_cap", function
+        (* Explicitly revoke a capability so it can no longer be used to send
+           messages, even if the actor is still alive at the same epoch.
+           Returns :ok always (idempotent). *)
+        | [VCap (pid, epoch)] ->
+          Hashtbl.replace revocation_table (pid, epoch) ();
+          VAtom "ok"
+        | _ -> eval_error "revoke_cap: expected Cap"))
+  ; ("is_cap_valid", VBuiltin ("is_cap_valid", function
+        (* Check whether a capability is currently valid (not revoked, actor alive,
+           epoch matches). Returns true/false. *)
+        | [VCap (pid, cap_epoch)] ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | None -> VBool false
+           | Some inst when not inst.ai_alive -> VBool false
+           | Some inst when inst.ai_epoch <> cap_epoch -> VBool false
+           | _ when Hashtbl.mem revocation_table (pid, cap_epoch) -> VBool false
+           | _ -> VBool true)
+        | _ -> eval_error "is_cap_valid: expected Cap"))
   ; ("to_string", VBuiltin ("to_string", function
         | [v] -> VString (value_display v)
         | _ -> eval_error "to_string: expected one argument"))
@@ -3759,8 +3786,26 @@ and eval_expr_inner (env : env) (e : expr) : value =
            | _ ->
              eval_error "send: message must be a constructor value, got %s"
                (value_to_string msg_val)))
+     | VCap (pid, cap_epoch) ->
+       (* Capability-based send: validate epoch and revocation before enqueuing. *)
+       (match Hashtbl.find_opt actor_registry pid with
+        | None -> VCon ("None", [])
+        | Some inst when not inst.ai_alive -> VCon ("None", [])
+        | Some inst when inst.ai_epoch <> cap_epoch ->
+          eval_error "send: capability epoch mismatch — cap has epoch %d, actor is at epoch %d"
+            cap_epoch inst.ai_epoch
+        | _ when Hashtbl.mem revocation_table (pid, cap_epoch) ->
+          eval_error "send: capability (pid=%d, epoch=%d) has been revoked" pid cap_epoch
+        | Some inst ->
+          (match msg_val with
+           | VCon _ | VAtom _ ->
+             Queue.push msg_val inst.ai_mailbox;
+             VCon ("Some", [VUnit])
+           | _ ->
+             eval_error "send: message must be a constructor value, got %s"
+               (value_to_string msg_val)))
      | _ ->
-       eval_error "send: first argument must be a Pid, got %s"
+       eval_error "send: first argument must be a Pid or Cap, got %s"
          (value_to_string pid_val))
 
   | ELetFn (name, params, _, body, _) ->
@@ -3862,7 +3907,8 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear dyn_sup_vpid_map;
   dyn_sup_next_vpid := (-1);
   app_spawn_order := [];
-  shutdown_requested := false
+  shutdown_requested := false;
+  Hashtbl.clear revocation_table
 
 (* NOTE: debug_ctx actor event logging is intentionally not reproduced here.
    The old ESend recorded ame_state_before/ame_state_after. When actor debug

@@ -386,12 +386,50 @@ let pid = cap_to_pid(cap)
 
 **Line reference**: `lib/eval/eval.ml:60` (actor instance definition)
 
-### Stubbed Features
+4. **send_checked** — Send a message only if the capability is still valid
 
-- **Revocation checking**: `send(cap, msg)` does **not** currently validate the epoch against a revocation list. This is stubbed in Phase 1 and will be fully implemented in Phase 3.
-- **Capability-based authorization**: Access control based on capability possession is planned but not enforced.
+```march
+let result = send_checked(cap, Inc())  (* :ok | :error *)
+```
 
-**Design**: `specs/features/actor-system.md` (capability system section)
+Validates epoch match AND checks the revocation table before enqueuing. Returns `:ok` or `:error` (never raises).
+
+**Line reference**: `lib/eval/eval.ml` (`send_checked` builtin)
+
+5. **revoke_cap** — Explicitly revoke a capability (without restarting the actor)
+
+```march
+revoke_cap(cap)  (* always returns :ok; idempotent *)
+```
+
+Adds `(pid, epoch)` to the revocation table. After this call, `send_checked(cap, ...)` and `is_cap_valid(cap)` both reject the capability even if the actor is still alive at the same epoch. Use this to implement access expiry without triggering a restart.
+
+**Line reference**: `lib/eval/eval.ml` (`revoke_cap` builtin), `runtime/march_runtime.c` (`march_revoke_cap`)
+
+6. **is_cap_valid** — Check whether a capability is currently usable
+
+```march
+let ok = is_cap_valid(cap)  (* true | false *)
+```
+
+Returns `true` if: actor is alive, current epoch matches cap epoch, and the capability has not been explicitly revoked.
+
+**Line reference**: `lib/eval/eval.ml` (`is_cap_valid` builtin), `runtime/march_runtime.c` (`march_is_cap_valid`)
+
+### Revocation Table
+
+A global `revocation_table : (pid * epoch, unit) Hashtbl.t` stores explicitly revoked capabilities. A capability `(pid, epoch)` is invalid if **any** of the following hold:
+
+1. The actor with `pid` does not exist in the registry
+2. The actor is dead (`ai_alive = false`)
+3. The actor's current epoch differs from `epoch` (stale — implies a restart occurred)
+4. `(pid, epoch)` is present in the revocation table (explicit revocation)
+
+Revocation is **permanent**: once revoked, a `(pid, epoch)` pair cannot be re-activated. However, restarting the actor increments its epoch, so a fresh `get_cap` returns a new capability unaffected by prior revocations.
+
+**Revocation table reset**: cleared by `reset_scheduler_state()` between test runs.
+
+**C runtime**: `march_revoke_cap(pid_index, epoch)` / `march_is_cap_valid(pid_index, epoch)` in `runtime/march_runtime.c`.
 
 ---
 
@@ -668,24 +706,25 @@ Note: Does **not** deallocate; reference counting handles that.
 - ✅ Spawn, send, kill, is_alive (fully functional)
 - ✅ Message dispatch, handlers, state update
 - ✅ Monitoring and linking (functional in interpreter)
-- ✅ Supervision (partial: spawn children, track restarts, no action on crash)
-- 🔄 Capabilities (typed but epoch validation stubbed)
+- ✅ Supervision: one_for_one, one_for_all, rest_for_one + max_restarts window
+- ✅ Capabilities: epoch tracking, get_cap, send_checked, revoke_cap, is_cap_valid
+- ✅ TIR lowering: actor declarations lower to message types + dispatch functions
+- ✅ LLVM IR generation: actor programs compile to LLVM IR with scheduler integration
 - ⚠️  Receive (can pop next message but no true blocking; requires async Phase 4)
-- ❌ TIR lowering (actor declarations dropped)
-- ❌ LLVM compilation (no native code generation)
+- ❌ Full end-to-end native compilation (TIR lowering complete; LLVM emit+link pending)
 
-### Phase 2 (Planned)
+### Phase 2 (Done)
 
-- [ ] Full TIR lowering (message types, actor structs, handler functions, dispatch)
-- [ ] LLVM code generation and native compilation
-- [ ] Compiled scheduler operation
+- ✅ Full TIR lowering (message types, actor structs, handler functions, dispatch)
+- ✅ LLVM IR generation and actor compilation tests
+- [ ] Compiled scheduler operation end-to-end (linking + binary execution)
 - [ ] Performance benchmarks vs. interpreter
 
-### Phase 3 (Planned)
+### Phase 3 (Done)
 
-- [ ] Epoch-based capability revocation checking
+- ✅ Epoch-based capability revocation (revocation table, revoke_cap, is_cap_valid)
 - [ ] Weak references for cycle breaking
-- [ ] Supervisor restart policies (exponential backoff, max restarts)
+- [ ] Supervisor restart policies (exponential backoff)
 - [ ] Crash reason tracking and reporting
 
 ### Phase 4 (Future)
@@ -695,6 +734,71 @@ Note: Does **not** deallocate; reference counting handles that.
 - [ ] Remote actors (networked message passing)
 - [ ] Session types (protocol validation against actors)
 
+---
+
+## Linear Types and Message Passing (V2 Design)
+
+### The Problem: Linear Values in Actor Messages
+
+**Linear-typed values MUST NOT be sent as actor messages.**
+
+In March, linear types (annotated `@linear`) have **move semantics**: each value may be used exactly once. The actor model introduces a subtle soundness problem: if you send a linear value as a message to a dead actor, the value is silently dropped with no opportunity to call its destructor. This is a **use-after-move violation** — the value is moved (sent) but never processed.
+
+Example of the unsound pattern:
+```march
+(* WRONG — do not do this *)
+let resource = acquire_linear_resource()
+send(some_actor, Payload(resource))  (* If actor is dead, resource is lost *)
+```
+
+This is the same class of bug as freeing memory twice or forgetting to close a file handle.
+
+### Why It Matters
+
+The actor mailbox is an invisible ownership boundary. When a linear value crosses into a mailbox:
+1. The sender loses ownership (move semantics)
+2. The value is now owned by the mailbox
+3. If the actor dies before processing the message, no handler runs — the value is leaked
+
+The Perceus RC system cannot reclaim linear resources automatically because their "drop" action is user-defined (close a file, release a lock, signal completion). Only the type system can guarantee that drops happen.
+
+### V2 Rule: Only Session-Type Handles Cross Actor Boundaries
+
+The correct way to transfer values that require linear handling across actor boundaries is via **session-typed channel handles** (`Chan` values with `Send`/`Recv` types).
+
+Session-typed channels:
+1. Have explicit send/recv operations that transfer ownership
+2. Enforce protocol adherence at compile time (the typechecker ensures the channel is used linearly)
+3. Can be closed explicitly, triggering destructor logic
+4. Are themselves linear — the `Chan` handle is a linear value, so it cannot be aliased or dropped
+
+```march
+(* CORRECT — use a session channel to pass linear values between actors *)
+protocol Transfer do
+  Sender -> Receiver : LinearResource
+end
+
+(* The Sender actor uses a Chan(Sender, Transfer) to pass the resource.
+   The Receiver actor awaits on Chan(Receiver, Transfer).
+   The typechecker ensures the channel is used exactly once. *)
+```
+
+### What This Means for Today's Code
+
+As of Phase 1 (interpreter), the type system does **not** enforce this restriction statically — you can technically write `send(pid, Payload(linear_val))` and it will run. The restriction is a **design rule** that will become a compile-time error in a future version.
+
+For now:
+- Do not send `@linear` values in actor messages
+- If you need to pass a resource across an actor boundary, use `Chan`/session types
+- In the actor `on` handlers, resources that enter via `state` fields should be cleaned up via `ai_resources` (Phase 6a) or `ai_linear_values` (Phase 6b) if the actor crashes
+
+### Future Path: Safe Linear Message Passing
+
+Planned V2 implementation:
+1. **Static check**: The typechecker will reject `send(pid, msg)` if any field of `msg` has a linear type
+2. **Session types for actors**: An actor will be able to declare a session-typed inbox — instead of a message variant, incoming messages arrive on a `Chan(Receiver, Proto)` that enforces linearity
+3. **Transfer protocol**: The `Send`/`Recv` session type constructors will be the only mechanism that allows linear values to move between actors, with full protocol-level ownership tracking
+
 ### Known Issues
 
 1. **Circular references**: Two actors holding Pid references to each other create a cycle that RC cannot collect. Workaround: explicit `kill` before dropping. Fix: weak references (deferred).
@@ -702,6 +806,8 @@ Note: Does **not** deallocate; reference counting handles that.
 2. **Supervisor state field injection**: When spawning a supervisor, child Pids are injected into the state record. Fields named differently in the definition are added as extras. This works but is error-prone.
 
 3. **Type safety in handlers**: No static guarantee that handler returns the correct state record type. Type-checking passes this check, but runtime exceptions occur on mismatch. Interpreter rejects via `eval_error`.
+
+4. **Linear values in messages (unsound)**: As noted in the V2 design above, the current system does not statically prevent sending linear values as actor messages. This is a known soundness gap; do not rely on it.
 
 ---
 

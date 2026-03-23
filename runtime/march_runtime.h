@@ -154,5 +154,17 @@ void   *march_csv_close(void *handle);
 /* Resource ownership. */
 void    march_own(void *pid, void *value);
 
+/* Capability revocation (Phase 3). */
+/* Explicitly revoke a capability identified by (pid_index, epoch).
+ * After this call, march_send_checked and march_is_cap_valid reject the cap.
+ * Idempotent — safe to call more than once for the same cap. */
+void    march_revoke_cap(int64_t pid_index, int64_t epoch);
+/* Check whether (pid_index, epoch) is still a valid capability:
+ * returns 1 if valid (actor alive, epoch matches, not revoked), 0 otherwise. */
+int64_t march_is_cap_valid(int64_t pid_index, int64_t epoch);
+/* Capability-checked send: validates liveness, epoch, and revocation before
+ * enqueuing msg.  No-op if the capability is invalid. */
+void    march_send_checked(void *cap, void *msg);
+
 /* Value pretty-printing. */
 void *march_value_to_string(void *v);
