@@ -141,6 +141,10 @@ type decl =
   (** Capability manifest: [needs IO.Network, IO.Clock]
       Each [name list] is one capability path, e.g. [["IO";"Network"]; ["IO";"Clock"]] *)
   | DApp of app_def * span             (** Application entry point: app Name do ... end *)
+  | DDeriving of name * name list * span
+  (** Derive declaration: [derive Eq, Show for Color]
+      name = type name; name list = interface names to derive.
+      Expanded to [DImpl] blocks by the desugar pass. *)
 [@@deriving show]
 
 and app_def = {

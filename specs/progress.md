@@ -183,7 +183,7 @@ march/
 │   ├── websocket.march      # 52 lines: WebSocket types and frame operations
 │   └── iterable.march       # 28 lines: placeholder Iterable interface
 └── test/
-    ├── test_march.ml         # 652 tests (6 failing: REPL JIT list literal issues)
+    ├── test_march.ml         # 670 tests (6 failing: REPL JIT list literal issues)
     ├── test_cas.ml           # 41 tests (all passing: scc, pipeline, def_id)
     └── test_jit.ml           # 1 test (dlopen round-trip)
 ```
@@ -192,7 +192,7 @@ march/
 
 - **Builds clean**
 - **694 tests across 3 suites; 6 failures (all in REPL JIT)**:
-  - `test_march.exe`: 652 tests, 6 failures (repl_jit_regression 0,1,3,6,8 and repl_jit_cross_line 3 — all involve list literal JIT compilation)
+  - `test_march.exe`: 670 tests, 6 failures (repl_jit_regression 0,1,3,6,8 and repl_jit_cross_line 3 — all involve list literal JIT compilation)
   - `test_cas.exe`: 41 tests, all passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present
@@ -203,6 +203,7 @@ march/
 - **pub/sig enforcement**: Phase 1 visibility (`pub` on fn/type/ctor) enforced in `check_module` — private names are not exported to outer scope; Phase 2 sig conformance — `sig Name do ... end` checked against the actual `mod Name` implementation, missing declarations reported as errors
 - **Bidirectional HM type checker**: 3389 lines; constructor registry, builtin `Some/None/Ok/Err`, named record type expansion, `Unit`/`Bool`/etc. annotation normalization, builtins (`print`, `println`, `int_to_string`, `bool_to_string`, etc.) in scope; actor declarations register message ctors and bind `state` in handler envs; interface dispatch wired (impl lookup + vtable-style call); capability hierarchy subtyping (`IO` → `IO.FileSystem` → etc.)
 - **Tree-walking interpreter**: 4567 lines; `value` type (incl. `VPid`, `VChan`), pattern matching, `base_env` builtins, two-pass `eval_module_env` for mutual recursion; full synchronous actor runtime with `kill`/`is_alive`/drop semantics; `App.stop()`, `on_start`/`on_stop` lifecycle hooks, graceful shutdown + SIGTERM; supervision with epoch caps + task linking; `Chan.send`/`recv`/`close`/`choose`/`offer` evaluations; Drop handler support via `impl Drop`
+- **Standard interfaces with auto-derivation**: `Eq`, `Show`, `Hash`, `Ord` — `derive Eq, Show for Color` syntax; desugar expands `DDeriving` to `DImpl` blocks; runtime dispatch via `impl_tbl` and `ctor_type_tbl`; `==`/`!=`/`<`/`<=`/`>`/`>=` and `show()`/`hash()`/`compare()` builtins dispatch through user impls for custom types; 18 new tests (670 total in test_march)
 - **TIR pipeline** (`lib/tir/`):
   - `lower.ml` (1277 lines) — AST → ANF TIR, CPS let-insertion, nested pattern flattening, type_map threading, actor lowering
   - `mono.ml` (315 lines) — worklist monomorphization, name mangling (`identity$Int`), TVar elimination; `main` always seeded; function-as-value atoms via `ensure_atom_fns`; `ECallPtr` callee discovery

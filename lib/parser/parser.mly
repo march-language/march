@@ -66,7 +66,7 @@
 %token STATE INIT RESPOND PROTOCOL LOOP
 %token LINEAR AFFINE
 %token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS USE NEEDS REQUIRES
-%token IMPORT ALIAS ONLY EXCEPT P_FN
+%token IMPORT ALIAS ONLY EXCEPT P_FN DERIVE FOR
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
 %token DBG DOC
@@ -129,6 +129,7 @@ decl:
   | d = protocol_decl  { d }
   | d = needs_decl     { d }
   | d = app_decl       { d }
+  | d = derive_decl    { d }
 
 (** Each fn clause is parsed as its own DFn with a single clause.
     The group_fn_clauses pass merges consecutive same-name clauses. *)
@@ -228,6 +229,11 @@ type_decl:
         "I was expecting `=` after the type name here:",
         Some "type Name = Variant1 | Variant2(Int)",
         $startpos($3))) }
+
+derive_decl:
+  | DERIVE; ifaces = separated_nonempty_list(COMMA, upper_name);
+    FOR; type_name = upper_name
+    { DDeriving (type_name, ifaces, mk_span ($loc)) }
 
 actor_decl:
   | ACTOR; _n = upper_name; error

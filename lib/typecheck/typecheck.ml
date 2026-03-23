@@ -3286,6 +3286,10 @@ let rec check_decl env (d : Ast.decl) : env =
     (* DApp is desugared to DFn(__app_init__) before typecheck; reaching here is a bug. *)
     env
 
+  | Ast.DDeriving _ ->
+    (* DDeriving is expanded to DImpl blocks by the desugar pass; should not reach here. *)
+    env
+
 (** Emit warnings for any imports or aliases that were never referenced. *)
 let warn_unused_imports env =
   List.iter (fun ie ->
