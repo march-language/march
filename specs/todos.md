@@ -8,22 +8,11 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ## P0 — Blocking / Active
 
-### Known Test Failures
-
-- [x] **REPL JIT permanent fix** — Root cause fixed (2026-03): `partition_fns` in `lib/jit/repl_jit.ml` was eagerly marking functions compiled BEFORE `compile_fragment` succeeded, poisoning `compiled_fns` on any failure. Fixed by making `partition_fns` pure and adding `mark_compiled_fns` called only after successful dlopen. Comprehensive regression tests added (`test_repl_jit_stdlib_reverse`, `test_repl_jit_stdlib_no_precompile`, `test_repl_jit_stdlib_length_3x`).
+*(No active P0 blockers)*
 
 ---
 
 ## P1 — High Impact / Near-Term
-
-### Tooling: LSP Feature Improvements
-
-- ✅ **Implement 5 new LSP features** — Plan in `specs/plans/2026-03-23-lsp-feature-improvements.md`. All implemented; 84 LSP tests pass.
-  - Doc-string hover (show `doc "..."` comments on hover alongside type)
-  - Find references (`textDocument/references`)
-  - Rename symbol (`textDocument/rename`)
-  - Signature help (`textDocument/signatureHelp`)
-  - Code actions: make-linear quickfix, pattern exhaustion quickfix
 
 ### Tooling: Forge Build Tool
 
@@ -91,6 +80,8 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ## Done (recently completed)
 
+- ✅ **REPL JIT permanent fix** — `partition_fns` in `lib/jit/repl_jit.ml` was eagerly marking functions compiled BEFORE `compile_fragment` succeeded, poisoning `compiled_fns` on any failure. Fixed by making `partition_fns` pure and adding `mark_compiled_fns` called only after successful dlopen. Regression tests: `test_repl_jit_stdlib_reverse`, `test_repl_jit_stdlib_no_precompile`, `test_repl_jit_stdlib_length_3x`.
+- ✅ **5 new LSP features** — Doc-string hover, find references (`textDocument/references`), rename symbol (`textDocument/rename`), signature help (`textDocument/signatureHelp`), code actions (make-linear quickfix, pattern exhaustion quickfix). 27 new tests; 84 total LSP tests.
 - ✅ **Epoch-based capability revocation** — `revoke_cap(cap)` + revocation table; VCap handling in ESend; C runtime `march_revoke_cap`/`march_is_cap_valid`; 5 new supervision phase3 tests
 - ✅ **Supervisor restart policies** — `one_for_one`, `one_for_all`, `rest_for_one` all implemented and tested in eval.ml
 - ✅ **Actor compilation tests** — 8 tests in `actor_compile` group verifying LLVM IR output for actor programs (dispatch, spawn, handlers, supervisor, monitor, link)

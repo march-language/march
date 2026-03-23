@@ -202,15 +202,15 @@ march/
 ## Current State (as of 2026-03-23)
 
 - **Builds clean**
-- **1038 tests across 8 suites; 0 failures** (REPL JIT fix + 5 new LSP features):
-  - `test_march.exe`: 823 tests, all passing (REPL JIT fix; List.reverse/no-precompile/length-3x regression tests added)
+- **1061 tests across 8 suites; 0 failures** (REPL JIT fix + 5 new LSP features):
+  - `test_march.exe`: 846 tests, all passing (REPL JIT fix; List.reverse/no-precompile/length-3x regression tests added)
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests, passing (formatter round-trip)
   - `test_properties.exe`: 36 tests, passing (QCheck2 properties)
   - `test_supervision.exe`: 15 tests, passing (actor supervision)
   - `test_lsp.exe`: 84 tests, passing (doc strings, find-refs, rename, sig-help, code actions)
-  - `test_forge.exe`: 15 tests, passing (scaffold/toml — +2 from this branch)
+  - `test_forge.exe`: 15 tests, passing (scaffold/toml)
   - `test_oracle.exe`: requires `MARCH_BIN` env var (oracle/idempotency/pass tests)
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present
 - **Match syntax**: `match expr do | Pat -> body end` (changed from `with` to `do` in 2026-03-21 — Elixir case-style)
