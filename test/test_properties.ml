@@ -758,7 +758,29 @@ let prop_typecheck_no_crash =
          true
        with _ -> false)
 
-(** 3. Well-typed programs should typecheck without errors. *)
+(** Returns true if ctx has errors OTHER than tail-call enforcement errors.
+    Tail-call enforcement rejects non-tail-recursive code; the generator does
+    not produce TCE-compliant programs, so those errors are expected/acceptable. *)
+let has_non_tce_errors ctx =
+  let is_tce_err (d : Errors.diagnostic) =
+    d.Errors.severity = Errors.Error &&
+    let msg = d.Errors.message in
+    let len = String.length msg in
+    let needle = "not in tail position" in
+    let nlen = String.length needle in
+    let rec check i =
+      if i + nlen > len then false
+      else if String.sub msg i nlen = needle then true
+      else check (i + 1)
+    in
+    check 0
+  in
+  List.exists
+    (fun d -> d.Errors.severity = Errors.Error && not (is_tce_err d))
+    ctx.Errors.diagnostics
+
+(** 3. Well-typed programs should typecheck without errors (modulo tail-call
+    enforcement, which the generator does not account for). *)
 let prop_generated_programs_are_well_typed =
   Test.make ~name:"generated programs: no type errors"
     ~count:500
@@ -767,7 +789,7 @@ let prop_generated_programs_are_well_typed =
     (fun src ->
        match pipeline_up_to_typecheck src with
        | None -> true  (* parse error counts as skip *)
-       | Some (_, errors, _) -> not (Errors.has_errors errors))
+       | Some (_, errors, _) -> not (has_non_tce_errors errors))
 
 (** 4. Well-typed programs should not crash the interpreter. *)
 let prop_type_sound_eval_no_crash =

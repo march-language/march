@@ -76,38 +76,56 @@ end
 -- These helpers insert / replace / delete at a given index.
 
 fn list_insert_at(lst, idx, elem) do
-  fn go(xs, i) do
-    if i == 0 then Cons(elem, xs)
+  fn rev_onto(rev_xs, ys) do
+    match rev_xs do
+    | Nil -> ys
+    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    end
+  end
+  fn go(xs, i, acc) do
+    if i == 0 then rev_onto(acc, Cons(elem, xs))
     else match xs do
-      | Nil        -> Cons(elem, Nil)
-      | Cons(h, t) -> Cons(h, go(t, i - 1))
+      | Nil        -> rev_onto(acc, Cons(elem, Nil))
+      | Cons(h, t) -> go(t, i - 1, Cons(h, acc))
       end
   end
-  go(lst, idx)
+  go(lst, idx, Nil)
 end
 
 fn list_replace_at(lst, idx, elem) do
-  fn go(xs, i) do
-    match xs do
-    | Nil -> Nil
-    | Cons(h, t) ->
-      if i == 0 then Cons(elem, t)
-      else Cons(h, go(t, i - 1))
+  fn rev_onto(rev_xs, ys) do
+    match rev_xs do
+    | Nil -> ys
+    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
-  go(lst, idx)
+  fn go(xs, i, acc) do
+    match xs do
+    | Nil -> rev_onto(acc, Nil)
+    | Cons(h, t) ->
+      if i == 0 then rev_onto(acc, Cons(elem, t))
+      else go(t, i - 1, Cons(h, acc))
+    end
+  end
+  go(lst, idx, Nil)
 end
 
 fn list_delete_at(lst, idx) do
-  fn go(xs, i) do
-    match xs do
-    | Nil -> Nil
-    | Cons(h, t) ->
-      if i == 0 then t
-      else Cons(h, go(t, i - 1))
+  fn rev_onto(rev_xs, ys) do
+    match rev_xs do
+    | Nil -> ys
+    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
-  go(lst, idx)
+  fn go(xs, i, acc) do
+    match xs do
+    | Nil -> rev_onto(acc, Nil)
+    | Cons(h, t) ->
+      if i == 0 then rev_onto(acc, t)
+      else go(t, i - 1, Cons(h, acc))
+    end
+  end
+  go(lst, idx, Nil)
 end
 
 -- ── Collision-bucket helpers ───────────────────────────────────────────────
@@ -123,23 +141,41 @@ fn collision_find(pairs, key, eq) do
 end
 
 fn collision_insert(pairs, key, val, eq) do
-  match pairs do
-  | Nil -> Cons((key, val), Nil)
-  | Cons(pair, rest) ->
-    let (k, v) = pair
-    if eq(k, key) then Cons((key, val), rest)
-    else Cons(pair, collision_insert(rest, key, val, eq))
+  fn rev_onto(rev_xs, ys) do
+    match rev_xs do
+    | Nil -> ys
+    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    end
   end
+  fn go(ps, acc) do
+    match ps do
+    | Nil -> rev_onto(acc, Cons((key, val), Nil))
+    | Cons(pair, rest) ->
+      let (k, v) = pair
+      if eq(k, key) then rev_onto(acc, Cons((key, val), rest))
+      else go(rest, Cons(pair, acc))
+    end
+  end
+  go(pairs, Nil)
 end
 
 fn collision_remove(pairs, key, eq) do
-  match pairs do
-  | Nil -> Nil
-  | Cons(pair, rest) ->
-    let (k, v) = pair
-    if eq(k, key) then rest
-    else Cons(pair, collision_remove(rest, key, eq))
+  fn rev_onto(rev_xs, ys) do
+    match rev_xs do
+    | Nil -> ys
+    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    end
   end
+  fn go(ps, acc) do
+    match ps do
+    | Nil -> rev_onto(acc, Nil)
+    | Cons(pair, rest) ->
+      let (k, v) = pair
+      if eq(k, key) then rev_onto(acc, rest)
+      else go(rest, Cons(pair, acc))
+    end
+  end
+  go(pairs, Nil)
 end
 
 -- ── Core HAMT operations ───────────────────────────────────────────────────
@@ -167,26 +203,39 @@ end
 
 -- make_branch: expand two distinct-hash leaves into a shared subtree.
 fn make_branch(h1, k1, v1, h2, k2, v2, level) do
-  if level > 6 then
-    -- Same hash bits exhausted at all 7 levels → collision (same full hash)
-    HCollision(h1, Cons((k1, v1), Cons((k2, v2), Nil)))
-  else do
-    let s1 = hash_slot(h1, level)
-    let s2 = hash_slot(h2, level)
-    if s1 == s2 then do
-      -- Both fall into the same slot at this level → recurse deeper
-      let sub = make_branch(h1, k1, v1, h2, k2, v2, level + 1)
-      let bm = bitmap_set(0, s1)
-      HBranch(bm, Cons(sub, Nil))
-    end else do
-      -- Different slots: create a two-entry branch
-      let leaf1 = HLeaf(h1, k1, v1)
-      let leaf2 = HLeaf(h2, k2, v2)
-      let bm = bitmap_set(bitmap_set(0, s1), s2)
-      if s1 < s2 then HBranch(bm, Cons(leaf1, Cons(leaf2, Nil)))
-      else HBranch(bm, Cons(leaf2, Cons(leaf1, Nil)))
+  fn rev_onto(rev_xs, ys) do
+    match rev_xs do
+    | Nil -> ys
+    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
+  fn apply_slots(node, slots) do
+    match slots do
+    | Nil -> node
+    | Cons(s, rest) ->
+      apply_slots(HBranch(bitmap_set(0, s), Cons(node, Nil)), rest)
+    end
+  end
+  fn go(lvl, slots_acc) do
+    if lvl > 6 then
+      apply_slots(HCollision(h1, Cons((k1, v1), Cons((k2, v2), Nil))), slots_acc)
+    else do
+      let s1 = hash_slot(h1, lvl)
+      let s2 = hash_slot(h2, lvl)
+      if s1 == s2 then
+        go(lvl + 1, Cons(s1, slots_acc))
+      else do
+        let leaf1 = HLeaf(h1, k1, v1)
+        let leaf2 = HLeaf(h2, k2, v2)
+        let bm = bitmap_set(bitmap_set(0, s1), s2)
+        let base_node =
+          if s1 < s2 then HBranch(bm, Cons(leaf1, Cons(leaf2, Nil)))
+          else HBranch(bm, Cons(leaf2, Cons(leaf1, Nil)))
+        apply_slots(base_node, slots_acc)
+      end
+    end
+  end
+  go(level, Nil)
 end
 
 -- insert: add or update key→val in the trie.

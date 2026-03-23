@@ -31,6 +31,7 @@
 
 module Ast  = March_ast.Ast
 module Err  = March_errors.Errors
+module StringSet = Set.Make(String)
 
 (* =================================================================
    §1  Provenance — why was this type expected?
@@ -4083,7 +4084,277 @@ let warn_unused_imports env =
   ) !(env.import_tracker)
 
 (* =================================================================
-   §16  Module entry point
+   §16  Tail-call enforcement
+   ================================================================= *)
+
+(** Collect all names from [fn_names] that are called directly (not through
+    lambdas or local [ELetFn] bodies) in [e].  Used to build the call graph
+    for SCC / mutual-recursion detection. *)
+let rec collect_direct_fn_calls (fn_names : StringSet.t) (e : Ast.expr) : StringSet.t =
+  match e with
+  | Ast.EApp (Ast.EVar fn, args, _) ->
+    let self = if StringSet.mem fn.txt fn_names then StringSet.singleton fn.txt
+               else StringSet.empty in
+    List.fold_left (fun acc a ->
+      StringSet.union acc (collect_direct_fn_calls fn_names a)
+    ) self args
+  | Ast.EApp (f, args, _) ->
+    List.fold_left (fun acc a ->
+      StringSet.union acc (collect_direct_fn_calls fn_names a)
+    ) (collect_direct_fn_calls fn_names f) args
+  | Ast.ECon (_, args, _) ->
+    List.fold_left (fun acc a ->
+      StringSet.union acc (collect_direct_fn_calls fn_names a)
+    ) StringSet.empty args
+  | Ast.EIf (c, t, f, _) ->
+    StringSet.union (collect_direct_fn_calls fn_names c)
+      (StringSet.union (collect_direct_fn_calls fn_names t)
+                       (collect_direct_fn_calls fn_names f))
+  | Ast.EMatch (scrut, branches, _) ->
+    List.fold_left (fun acc br ->
+      let g = Option.fold ~none:StringSet.empty
+                ~some:(collect_direct_fn_calls fn_names) br.Ast.branch_guard in
+      StringSet.union acc
+        (StringSet.union g (collect_direct_fn_calls fn_names br.Ast.branch_body))
+    ) (collect_direct_fn_calls fn_names scrut) branches
+  | Ast.EBlock (exprs, _) ->
+    List.fold_left (fun acc ex ->
+      StringSet.union acc (collect_direct_fn_calls fn_names ex)
+    ) StringSet.empty exprs
+  | Ast.ELet (b, _) -> collect_direct_fn_calls fn_names b.Ast.bind_expr
+  | Ast.ELetFn (_, _, _, _, _) -> StringSet.empty   (* new scope *)
+  | Ast.ELam (_, _, _)         -> StringSet.empty   (* new scope *)
+  | Ast.ETuple (es, _) ->
+    List.fold_left (fun acc ex ->
+      StringSet.union acc (collect_direct_fn_calls fn_names ex)
+    ) StringSet.empty es
+  | Ast.ERecord (fields, _) ->
+    List.fold_left (fun acc (_, ex) ->
+      StringSet.union acc (collect_direct_fn_calls fn_names ex)
+    ) StringSet.empty fields
+  | Ast.ERecordUpdate (base, fields, _) ->
+    List.fold_left (fun acc (_, ex) ->
+      StringSet.union acc (collect_direct_fn_calls fn_names ex)
+    ) (collect_direct_fn_calls fn_names base) fields
+  | Ast.EField (ex, _, _)  -> collect_direct_fn_calls fn_names ex
+  | Ast.EAnnot (ex, _, _)  -> collect_direct_fn_calls fn_names ex
+  | Ast.EPipe (l, r, _) ->
+    StringSet.union (collect_direct_fn_calls fn_names l)
+                    (collect_direct_fn_calls fn_names r)
+  | Ast.EAtom (_, args, _) ->
+    List.fold_left (fun acc a ->
+      StringSet.union acc (collect_direct_fn_calls fn_names a)
+    ) StringSet.empty args
+  | Ast.ESend (a, b, _) ->
+    StringSet.union (collect_direct_fn_calls fn_names a)
+                    (collect_direct_fn_calls fn_names b)
+  | Ast.ESpawn (ex, _)       -> collect_direct_fn_calls fn_names ex
+  | Ast.EDbg (Some ex, _)    -> collect_direct_fn_calls fn_names ex
+  | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
+  | Ast.EDbg (None, _)       -> StringSet.empty
+
+(** Tarjan's SCC algorithm.  [adj] is a list of (name, called-names) pairs.
+    Returns each SCC as a list; non-recursive singletons are included. *)
+let find_sccs (adj : (string * StringSet.t) list) : string list list =
+  let idx_ctr   = ref 0 in
+  let stk       = ref [] in
+  let on_stk    = Hashtbl.create 16 in
+  let idx_map   = Hashtbl.create 16 in
+  let lowlink   = Hashtbl.create 16 in
+  let sccs      = ref [] in
+  let rec sc v =
+    let vi = !idx_ctr in
+    Hashtbl.replace idx_map  v vi;
+    Hashtbl.replace lowlink  v vi;
+    incr idx_ctr;
+    stk := v :: !stk;
+    Hashtbl.replace on_stk v true;
+    let neighbors = match List.assoc_opt v adj with
+      | Some s -> StringSet.elements s | None -> [] in
+    List.iter (fun w ->
+      if not (Hashtbl.mem idx_map w) then begin
+        sc w;
+        let lv = Hashtbl.find lowlink v in
+        let lw = Hashtbl.find lowlink w in
+        Hashtbl.replace lowlink v (min lv lw)
+      end else if Hashtbl.mem on_stk w then begin
+        let lv = Hashtbl.find lowlink v in
+        let iw = Hashtbl.find idx_map  w in
+        Hashtbl.replace lowlink v (min lv iw)
+      end
+    ) neighbors;
+    if Hashtbl.find lowlink v = Hashtbl.find idx_map v then begin
+      let scc = ref [] in
+      let go  = ref true in
+      while !go do
+        match !stk with
+        | [] -> go := false
+        | w :: rest ->
+          stk := rest;
+          Hashtbl.remove on_stk w;
+          scc := w :: !scc;
+          if w = v then go := false
+      done;
+      sccs := !scc :: !sccs
+    end
+  in
+  List.iter (fun (v, _) ->
+    if not (Hashtbl.mem idx_map v) then sc v
+  ) adj;
+  !sccs
+
+let is_infix_op name =
+  match name with
+  | "+" | "-" | "*" | "/" | "%" | "<" | ">" | "<=" | ">="
+  | "==" | "!=" | "&&" | "||" | "+." | "-." | "*." | "/." -> true
+  | _ -> false
+
+(** Verify that every call to any name in [recursive_names] within [body]
+    is in tail position.  Emits [Error] diagnostics for violations.
+    [fn_name] is the enclosing function (for readable error messages).
+    Recurses into [ELetFn] bodies to check their own self-recursion. *)
+let rec check_tail_position
+    (errors : Err.ctx)
+    (recursive_names : StringSet.t)
+    (fn_name : string)
+    (body : Ast.expr) : unit =
+  let rec chk in_tail ctx expr =
+    match expr with
+    (* ── Recursive call ── *)
+    | Ast.EApp (Ast.EVar fn, args, sp) when StringSet.mem fn.txt recursive_names ->
+      if not in_tail then
+        Err.error errors ~span:sp
+          (Printf.sprintf
+             "Function `%s`: recursive call to `%s` is not in tail position \
+              (%s).\n\
+              Hint: Consider using an accumulator parameter."
+             fn_name fn.txt ctx);
+      List.iteri (fun i arg ->
+        chk false
+          (Printf.sprintf "argument #%d in call to `%s`" (i + 1) fn.txt)
+          arg
+      ) args
+    (* ── Regular application ── *)
+    | Ast.EApp (f, args, _) ->
+      let arg_ctx = match f with
+        | Ast.EVar op when is_infix_op op.txt ->
+          Printf.sprintf "wrapped in binary operation `%s`" op.txt
+        | Ast.EVar fn_n -> Printf.sprintf "passed as argument to `%s`" fn_n.txt
+        | _ -> "passed as argument to a function"
+      in
+      chk false "function part of application" f;
+      List.iter (chk false arg_ctx) args
+    (* ── Constructor ── *)
+    | Ast.ECon (name, args, _) ->
+      let arg_ctx = Printf.sprintf "wrapped in constructor `%s`" name.txt in
+      List.iter (chk false arg_ctx) args
+    (* ── if/then/else: condition not tail; branches inherit ── *)
+    | Ast.EIf (cond, then_, else_, _) ->
+      chk false "condition of `if`" cond;
+      chk in_tail ctx then_;
+      chk in_tail ctx else_
+    (* ── match: scrutinee not tail; branch bodies inherit ── *)
+    | Ast.EMatch (scrut, branches, _) ->
+      chk false "scrutinee of `match`" scrut;
+      List.iter (fun (br : Ast.branch) ->
+        Option.iter (chk false "match guard") br.branch_guard;
+        chk in_tail ctx br.branch_body
+      ) branches
+    (* ── block: only last expression is in tail position ── *)
+    | Ast.EBlock (exprs, _) ->
+      let n = List.length exprs in
+      List.iteri (fun i ex ->
+        if i = n - 1 then chk in_tail ctx ex
+        else chk false "non-final expression in block" ex
+      ) exprs
+    (* ── let binding: RHS is never tail ── *)
+    | Ast.ELet (b, _) ->
+      chk false "right-hand side of `let` binding" b.Ast.bind_expr
+    (* ── inner named function: check its own self-recursion separately ── *)
+    | Ast.ELetFn (iname, _, _, ibody, _) ->
+      check_tail_position errors (StringSet.singleton iname.txt) iname.txt ibody
+    (* ── lambda: new scope, skip outer recursive-name check ── *)
+    | Ast.ELam _ -> ()
+    (* ── transparent ── *)
+    | Ast.EAnnot (ex, _, _) -> chk in_tail ctx ex
+    (* ── non-tail contexts ── *)
+    | Ast.ETuple (es, _) ->
+      List.iter (chk false "tuple element") es
+    | Ast.ERecord (fields, _) ->
+      List.iter (fun ((nm : Ast.name), ex) ->
+        chk false (Printf.sprintf "value of record field `%s`" nm.txt) ex
+      ) fields
+    | Ast.ERecordUpdate (base, fields, _) ->
+      chk false "base of record update" base;
+      List.iter (fun ((nm : Ast.name), ex) ->
+        chk false (Printf.sprintf "value of record field `%s`" nm.txt) ex
+      ) fields
+    | Ast.EField (ex, _, _)  -> chk false "object of field access" ex
+    | Ast.EPipe  (l, r, _)   -> chk false "left side of pipe" l;
+                                 chk false "right side of pipe" r
+    | Ast.EAtom (_, args, _) -> List.iter (chk false "atom argument") args
+    | Ast.ESend (cap, msg, _) ->
+      chk false "capability in `send`" cap;
+      chk false "message in `send`" msg
+    | Ast.ESpawn (ex, _)      -> chk false "argument to `spawn`" ex
+    | Ast.EDbg (Some ex, _)   -> chk false "argument to `dbg`" ex
+    (* ── leaves ── *)
+    | Ast.EDbg (None, _) | Ast.ELit _ | Ast.EVar _ | Ast.EHole _
+    | Ast.EResultRef _ -> ()
+  in
+  chk true "" body
+
+(** Run tail-call enforcement for all [DFn] declarations in [decls]
+    (at a single scope level).  Recurses into [DMod] sub-modules. *)
+let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) : unit =
+  (* Collect function names at this level *)
+  let fn_names =
+    List.fold_left (fun acc d ->
+      match d with
+      | Ast.DFn (def, _) -> StringSet.add def.fn_name.txt acc
+      | _ -> acc
+    ) StringSet.empty decls
+  in
+  (* Build call graph *)
+  let adj = List.filter_map (function
+    | Ast.DFn (def, _) ->
+      (match def.fn_clauses with
+       | [clause] ->
+         Some (def.fn_name.txt,
+               collect_direct_fn_calls fn_names clause.Ast.fc_body)
+       | _ -> None)
+    | _ -> None
+  ) decls in
+  (* Find SCCs *)
+  let sccs = find_sccs adj in
+  let scc_of = Hashtbl.create 16 in
+  List.iter (fun scc ->
+    List.iter (fun nm -> Hashtbl.replace scc_of nm scc) scc
+  ) sccs;
+  (* Check each function that participates in recursion *)
+  List.iter (function
+    | Ast.DFn (def, _) ->
+      (match def.fn_clauses with
+       | [clause] ->
+         let scc = try Hashtbl.find scc_of def.fn_name.txt
+                   with Not_found -> [def.fn_name.txt] in
+         let direct = match List.assoc_opt def.fn_name.txt adj with
+           | Some s -> s | None -> StringSet.empty in
+         let is_recursive =
+           List.length scc > 1 ||
+           StringSet.mem def.fn_name.txt direct
+         in
+         if is_recursive then
+           let rec_set = List.fold_right StringSet.add scc StringSet.empty in
+           check_tail_position errors rec_set def.fn_name.txt clause.Ast.fc_body
+       | _ -> ())
+    | Ast.DMod (_, _, inner_decls, _) ->
+      enforce_tail_calls_in_decls errors inner_decls
+    | _ -> ()
+  ) decls
+
+(* =================================================================
+   §17  Module entry point
    ================================================================= *)
 
 (** Type-check a whole module.
@@ -4154,6 +4425,8 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
   check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;
   (* Warn about any unused imports or aliases *)
   warn_unused_imports final_env;
+  (* Pass 3: tail-call enforcement *)
+  enforce_tail_calls_in_decls errors m.Ast.mod_decls;
   (errors, type_map)
 
 (** Like [check_module] but also returns the final type environment.
@@ -4185,4 +4458,5 @@ let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
   let final_env = List.fold_left check_decl pre_env m.Ast.mod_decls in
   check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;
   warn_unused_imports final_env;
+  enforce_tail_calls_in_decls errors m.Ast.mod_decls;
   (errors, type_map, final_env)

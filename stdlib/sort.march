@@ -29,10 +29,13 @@ end
 
 doc "Appends two lists. O(|xs|)."
 pub fn append_list(xs : List(a), ys : List(a)) : List(a) do
-  match xs do
-  | Nil        -> ys
-  | Cons(h, t) -> Cons(h, append_list(t, ys))
+  fn go(lst : List(a), acc : List(a)) : List(a) do
+    match lst do
+    | Nil        -> acc
+    | Cons(h, t) -> go(t, Cons(h, acc))
+    end
   end
+  go(reverse_list(xs), ys)
 end
 
 doc "Returns the length of a list."
@@ -78,17 +81,26 @@ Merges two sorted lists into one sorted list.
 Stable: left-list elements are preferred on equal keys.
 """
 fn merge_sorted(xs : List(a), ys : List(a), cmp : a -> a -> Bool) : List(a) do
-  match xs do
-  | Nil -> ys
-  | Cons(x, xt) ->
-    match ys do
-    | Nil -> xs
-    | Cons(y, yt) ->
-      if cmp2(cmp, x, y)
-      then Cons(x, merge_sorted(xt, ys, cmp))
-      else Cons(y, merge_sorted(xs, yt, cmp))
+  fn rev_onto(rev_pfx : List(a), tail : List(a)) : List(a) do
+    match rev_pfx do
+    | Nil        -> tail
+    | Cons(h, t) -> rev_onto(t, Cons(h, tail))
     end
   end
+  fn go(l : List(a), r : List(a), acc : List(a)) : List(a) do
+    match l do
+    | Nil -> rev_onto(acc, r)
+    | Cons(x, xl) ->
+      match r do
+      | Nil -> rev_onto(acc, l)
+      | Cons(y, yl) ->
+        if cmp2(cmp, x, y)
+        then go(xl, r, Cons(x, acc))
+        else go(l, yl, Cons(y, acc))
+      end
+    end
+  end
+  go(xs, ys, Nil)
 end
 
 doc """
@@ -97,23 +109,27 @@ Used as the fallback for sort_small_by when n > 8,
 and as the heapsort-free path for introsort on very small inputs.
 """
 pub fn mergesort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
-  -- Sequential split: take exactly k elements for the left half.
-  fn take_k(lst : List(a), k : Int, acc : List(a)) : (List(a), List(a)) do
-    if k == 0 then (reverse_list(acc), lst)
-    else match lst do
-      | Nil        -> (reverse_list(acc), Nil)
-      | Cons(h, t) -> take_k(t, k - 1, Cons(h, acc))
+  fn step_pairs(groups : List(List(a)), acc : List(List(a))) : List(List(a)) do
+    match groups do
+    | Nil -> reverse_list(acc)
+    | Cons(g, Nil) -> reverse_list(Cons(g, acc))
+    | Cons(g1, Cons(g2, rest)) -> step_pairs(rest, Cons(merge_sorted(g1, g2, cmp), acc))
     end
   end
-  fn go(lst : List(a), n : Int) : List(a) do
-    if n <= 1 then lst
-    else do
-      let half = n / 2
-      let (l, r) = take_k(lst, half, Nil)
-      merge_sorted(go(l, half), go(r, n - half), cmp)
+  fn sort_loop(groups : List(List(a))) : List(a) do
+    match groups do
+    | Nil -> Nil
+    | Cons(sole, Nil) -> sole
+    | _ -> sort_loop(step_pairs(groups, Nil))
     end
   end
-  go(xs, list_len(xs))
+  fn to_singletons(lst : List(a), acc : List(List(a))) : List(List(a)) do
+    match lst do
+    | Nil        -> reverse_list(acc)
+    | Cons(h, t) -> to_singletons(t, Cons(Cons(h, Nil), acc))
+    end
+  end
+  sort_loop(to_singletons(xs, Nil))
 end
 
 -- ---- AlphaDev sort: optimal comparison networks for n = 2..8 ----

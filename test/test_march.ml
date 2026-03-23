@@ -13154,6 +13154,123 @@ let test_parity_if_else () =
    covered here because the standalone JIT test module has no globals;
    those cases are exercised in the repl_jit_cross_line tests instead. *)
 
+(* ── Tail-call enforcement tests ────────────────────────────────────────── *)
+
+let test_tc_tail_factorial_ok () =
+  let ctx = typecheck {|mod Test do
+    fn fact(n, acc) do
+      if n == 0 then acc
+      else fact(n - 1, n * acc)
+    end
+  end|} in
+  Alcotest.(check bool) "tail-recursive factorial: no errors" false (has_errors ctx)
+
+let test_tc_tail_factorial_fail () =
+  let ctx = typecheck {|mod Test do
+    fn factorial(n) do
+      if n == 0 then 1
+      else n * factorial(n - 1)
+    end
+  end|} in
+  Alcotest.(check bool) "non-tail factorial: has error" true (has_errors ctx)
+
+let test_tc_tail_map_ok () =
+  let ctx = typecheck {|mod Test do
+    fn rev(xs, acc) do
+      match xs do
+      | Nil -> acc
+      | Cons(h, t) -> rev(t, Cons(h, acc))
+      end
+    end
+    fn map(xs, f, acc) do
+      match xs do
+      | Nil -> rev(acc, Nil)
+      | Cons(h, t) -> map(t, f, Cons(f(h), acc))
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "accumulator map: no errors" false (has_errors ctx)
+
+let test_tc_tail_map_fail () =
+  let ctx = typecheck {|mod Test do
+    fn map(xs, f) do
+      match xs do
+      | Nil -> Nil
+      | Cons(h, t) -> Cons(f(h), map(t, f))
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "non-tail Cons(f(h), map(t,f)): has error" true (has_errors ctx)
+
+let test_tc_tail_mutual_ok () =
+  let ctx = typecheck {|mod Test do
+    fn is_even(n) do
+      if n == 0 then true
+      else is_odd(n - 1)
+    end
+    fn is_odd(n) do
+      if n == 0 then false
+      else is_even(n - 1)
+    end
+  end|} in
+  Alcotest.(check bool) "mutual recursion both tail: no errors" false (has_errors ctx)
+
+let test_tc_tail_mutual_fail () =
+  let ctx = typecheck {|mod Test do
+    fn ping(n) do
+      if n == 0 then 0
+      else pong(n - 1) + 1
+    end
+    fn pong(n) do
+      if n == 0 then 0
+      else ping(n - 1)
+    end
+  end|} in
+  Alcotest.(check bool) "mutual recursion one non-tail: has error" true (has_errors ctx)
+
+let test_tc_tail_match_arms_ok () =
+  let ctx = typecheck {|mod Test do
+    type Tree = Leaf | Node(Tree, Tree)
+    fn depth(t) do
+      match t do
+      | Leaf -> 0
+      | Node(l, _) -> depth(l)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "match arm tail call: no errors" false (has_errors ctx)
+
+let test_tc_tail_match_arms_fail () =
+  let ctx = typecheck {|mod Test do
+    fn sum_list(xs) do
+      match xs do
+      | Nil -> 0
+      | Cons(h, t) -> h + sum_list(t)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "recursive call in binop: has error" true (has_errors ctx)
+
+let test_tc_tail_nonrecursive_ok () =
+  let ctx = typecheck {|mod Test do
+    fn add(x, y) do
+      x + y
+    end
+    fn double(x) do
+      add(x, x)
+    end
+  end|} in
+  Alcotest.(check bool) "non-recursive function: no errors" false (has_errors ctx)
+
+let test_tc_tail_let_continuation_ok () =
+  let ctx = typecheck {|mod Test do
+    fn count_up(n, limit) do
+      let m = n + 1
+      if m >= limit then m else count_up(m, limit)
+    end
+  end|} in
+  Alcotest.(check bool) "tail call after let: no errors" false (has_errors ctx)
+
 let () =
   Alcotest.run "march"
     [
@@ -14331,5 +14448,18 @@ let () =
           Alcotest.test_case "string interp"     `Quick test_parity_string_interp;
           Alcotest.test_case "closures"          `Quick test_parity_closures;
           Alcotest.test_case "if/else"           `Quick test_parity_if_else;
+        ] );
+      ( "tail_recursion",
+        [
+          Alcotest.test_case "tail-recursive factorial ok"       `Quick test_tc_tail_factorial_ok;
+          Alcotest.test_case "non-tail factorial error"          `Quick test_tc_tail_factorial_fail;
+          Alcotest.test_case "accumulator map ok"                `Quick test_tc_tail_map_ok;
+          Alcotest.test_case "Cons(f(h), map(t,f)) error"       `Quick test_tc_tail_map_fail;
+          Alcotest.test_case "mutual recursion both-tail ok"     `Quick test_tc_tail_mutual_ok;
+          Alcotest.test_case "mutual recursion one non-tail err" `Quick test_tc_tail_mutual_fail;
+          Alcotest.test_case "match arms all tail ok"            `Quick test_tc_tail_match_arms_ok;
+          Alcotest.test_case "recursive call in binop error"     `Quick test_tc_tail_match_arms_fail;
+          Alcotest.test_case "non-recursive function ok"         `Quick test_tc_tail_nonrecursive_ok;
+          Alcotest.test_case "tail call after let ok"            `Quick test_tc_tail_let_continuation_ok;
         ] );
     ]

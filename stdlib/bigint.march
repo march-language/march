@@ -24,19 +24,20 @@ fn base() : Int do 10000 end
 
 -- Remove trailing zeros (leading zeros in little-endian) from a digit list.
 fn normalize(digits : List(Int)) : List(Int) do
-  fn strip(xs : List(Int)) : List(Int) do
+  fn drop_leading_zeros(xs) do
     match xs do
-    | Nil         -> Nil
-    | Cons(x, Nil) -> if x == 0 then Nil else Cons(x, Nil)
-    | Cons(x, rest) ->
-      let stripped = strip(rest)
-      match stripped do
-      | Nil -> if x == 0 then Nil else Cons(x, Nil)
-      | _   -> Cons(x, stripped)
-      end
+    | Nil -> Nil
+    | Cons(0, rest) -> drop_leading_zeros(rest)
+    | _ -> xs
     end
   end
-  strip(digits)
+  fn rev(xs, acc) do
+    match xs do
+    | Nil -> acc
+    | Cons(h, t) -> rev(t, Cons(h, acc))
+    end
+  end
+  rev(drop_leading_zeros(rev(digits, Nil)), Nil)
 end
 
 -- Compare two magnitude digit lists. Returns -1, 0, or 1.
@@ -49,19 +50,20 @@ fn compare_digits(a : List(Int), b : List(Int)) : Int do
     -- Same length: compare from most significant limb down.
     -- Reverse so we go from most-significant to least-significant.
     fn cmp_lists(xs : List(Int), ys : List(Int)) : Int do
-      match xs do
-      | Nil -> 0
-      | Cons(x, xrest) ->
-        match ys do
+      fn go(as_, bs) do
+        match as_ do
         | Nil -> 0
-        | Cons(y, yrest) ->
-          let tail_cmp = cmp_lists(xrest, yrest)
-          if tail_cmp != 0 then tail_cmp
-          else if x < y then -1
-          else if x > y then 1
-          else 0
+        | Cons(x, xrest) ->
+          match bs do
+          | Nil -> 0
+          | Cons(y, yrest) ->
+            if x < y then -1
+            else if x > y then 1
+            else go(xrest, yrest)
+          end
         end
       end
+      go(xs, ys)
     end
     cmp_lists(reverse(a), reverse(b))
   end
@@ -69,36 +71,43 @@ end
 
 -- Add two digit lists (unsigned). Returns normalized digit list.
 fn add_digits(a : List(Int), b : List(Int)) : List(Int) do
-  fn go(xs : List(Int), ys : List(Int), carry : Int) : List(Int) do
+  fn rev(xs, acc) do
+    match xs do | Nil -> acc | Cons(h, t) -> rev(t, Cons(h, acc)) end
+  end
+  fn go(xs : List(Int), ys : List(Int), carry : Int, acc : List(Int)) : List(Int) do
     match xs do
     | Nil ->
       match ys do
       | Nil ->
-        if carry == 0 then Nil else Cons(carry, Nil)
+        if carry == 0 then rev(acc, Nil)
+        else rev(Cons(carry, acc), Nil)
       | Cons(y, yr) ->
         let sum = y + carry
-        Cons(sum - (sum / base()) * base(), go(Nil, yr, sum / base()))
+        go(Nil, yr, sum / base(), Cons(sum - (sum / base()) * base(), acc))
       end
     | Cons(x, xr) ->
       match ys do
       | Nil ->
         let sum = x + carry
-        Cons(sum - (sum / base()) * base(), go(xr, Nil, sum / base()))
+        go(xr, Nil, sum / base(), Cons(sum - (sum / base()) * base(), acc))
       | Cons(y, yr) ->
         let sum = x + y + carry
-        Cons(sum - (sum / base()) * base(), go(xr, yr, sum / base()))
+        go(xr, yr, sum / base(), Cons(sum - (sum / base()) * base(), acc))
       end
     end
   end
-  normalize(go(a, b, 0))
+  normalize(go(a, b, 0, Nil))
 end
 
 -- Subtract smaller magnitude b from larger magnitude a (a >= b assumed).
 -- Returns normalized digit list.
 fn sub_digits(a : List(Int), b : List(Int)) : List(Int) do
-  fn go(xs : List(Int), ys : List(Int), borrow : Int) : List(Int) do
+  fn rev(xs, acc) do
+    match xs do | Nil -> acc | Cons(h, t) -> rev(t, Cons(h, acc)) end
+  end
+  fn go(xs : List(Int), ys : List(Int), borrow : Int, acc : List(Int)) : List(Int) do
     match xs do
-    | Nil -> Nil
+    | Nil -> rev(acc, Nil)
     | Cons(x, xr) ->
       let y = match ys do
         | Nil        -> 0
@@ -110,26 +119,30 @@ fn sub_digits(a : List(Int), b : List(Int)) : List(Int) do
         end
       let diff = x - y - borrow
       if diff < 0 then
-        Cons(diff + base(), go(xr, yr, 1))
+        go(xr, yr, 1, Cons(diff + base(), acc))
       else
-        Cons(diff, go(xr, yr, 0))
+        go(xr, yr, 0, Cons(diff, acc))
     end
   end
-  normalize(go(a, b, 0))
+  normalize(go(a, b, 0, Nil))
 end
 
 -- Multiply a digit list by a single limb.
 fn mul_digit(a : List(Int), d : Int) : List(Int) do
-  fn go(xs : List(Int), carry : Int) : List(Int) do
+  fn rev(xs, acc) do
+    match xs do | Nil -> acc | Cons(h, t) -> rev(t, Cons(h, acc)) end
+  end
+  fn go(xs : List(Int), carry : Int, acc : List(Int)) : List(Int) do
     match xs do
     | Nil ->
-      if carry == 0 then Nil else Cons(carry, Nil)
+      if carry == 0 then rev(acc, Nil)
+      else rev(Cons(carry, acc), Nil)
     | Cons(x, rest) ->
       let prod = x * d + carry
-      Cons(prod - (prod / base()) * base(), go(rest, prod / base()))
+      go(rest, prod / base(), Cons(prod - (prod / base()) * base(), acc))
     end
   end
-  normalize(go(a, 0))
+  normalize(go(a, 0, Nil))
 end
 
 -- Shift a digit list left by n limbs (multiply by base^n).
@@ -153,20 +166,22 @@ end
 
 -- Divide digit list `a` by single limb `d`. Returns (quotient, remainder).
 fn div_digit(a : List(Int), d : Int) : (List(Int), Int) do
-  fn go(xs : List(Int), rem : Int) : (List(Int), Int) do
+  fn rev(xs, acc) do
+    match xs do | Nil -> acc | Cons(h, t) -> rev(t, Cons(h, acc)) end
+  end
+  fn go(xs : List(Int), carry : Int, acc : List(Int)) : (List(Int), Int) do
     match xs do
-    | Nil -> (Nil, rem)
+    | Nil -> (rev(acc, Nil), carry)
     | Cons(x, rest) ->
-      let (qt, r2) = go(rest, rem)
-      let cur = rem * base() + x
+      let cur = carry * base() + x
       let q = cur / d
-      let new_rem = cur - q * d
-      (Cons(q, qt), new_rem)
+      let new_carry = cur - q * d
+      go(rest, new_carry, Cons(q, acc))
     end
   end
   let reversed_a = reverse(a)
-  let (q_rev, rem) = go(reversed_a, 0)
-  (normalize(reverse(q_rev)), rem)
+  let (q_msb_first, rem) = go(reversed_a, 0, Nil)
+  (normalize(reverse(q_msb_first)), rem)
 end
 
 -- ---- Length helper ----
@@ -210,8 +225,11 @@ pub fn from_int(n : Int) : BigInt do
     let sign = n >= 0
     let abs_n = if n >= 0 then n else 0 - n
     fn to_digits(x : Int) : List(Int) do
-      if x == 0 then Nil
-      else Cons(x - (x / base()) * base(), to_digits(x / base()))
+      fn go(n, acc) do
+        if n == 0 then acc
+        else go(n / base(), Cons(n - (n / base()) * base(), acc))
+      end
+      reverse(go(x, Nil))
     end
     BigInt(sign, to_digits(abs_n))
   end

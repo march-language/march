@@ -144,35 +144,47 @@ end
 
 doc "Concatenates two lists."
 pub fn append(xs : List(a), ys : List(a)) : List(a) do
-  match xs do
-  | Nil        -> ys
-  | Cons(h, t) -> Cons(h, append(t, ys))
+  fn go(lst : List(a), acc : List(a)) : List(a) do
+    match lst do
+    | Nil        -> acc
+    | Cons(h, t) -> go(t, Cons(h, acc))
+    end
   end
+  go(reverse(xs), ys)
 end
 
 doc "Applies `f` to each element, returning a new list."
 pub fn map(xs : List(a), f : a -> b) : List(b) do
-  match xs do
-  | Nil        -> Nil
-  | Cons(h, t) -> Cons(f(h), map(t, f))
+  fn go(lst : List(a), acc : List(b)) : List(b) do
+    match lst do
+    | Nil        -> reverse(acc)
+    | Cons(h, t) -> go(t, Cons(f(h), acc))
+    end
   end
+  go(xs, Nil)
 end
 
 doc "Applies `f` to each element and concatenates the results."
 pub fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
-  match xs do
-  | Nil        -> Nil
-  | Cons(h, t) -> append(f(h), flat_map(t, f))
+  fn go(lst : List(a), acc : List(b)) : List(b) do
+    match lst do
+    | Nil        -> acc
+    | Cons(h, t) -> go(t, append(acc, f(h)))
+    end
   end
+  go(xs, Nil)
 end
 
 doc "Returns only elements satisfying `pred`."
 pub fn filter(xs : List(a), pred : a -> Bool) : List(a) do
-  match xs do
-  | Nil        -> Nil
-  | Cons(h, t) ->
-    if pred(h) then Cons(h, filter(t, pred)) else filter(t, pred)
+  fn go(lst : List(a), acc : List(a)) : List(a) do
+    match lst do
+    | Nil        -> reverse(acc)
+    | Cons(h, t) ->
+      if pred(h) then go(t, Cons(h, acc)) else go(t, acc)
+    end
   end
+  go(xs, Nil)
 end
 
 doc """
@@ -180,14 +192,17 @@ Applies `f` to each element; collects Some values, discards None.
 Equivalent to map followed by filter for non-None values.
 """
 pub fn filter_map(xs : List(a), f : a -> Option(b)) : List(b) do
-  match xs do
-  | Nil        -> Nil
-  | Cons(h, t) ->
-    match f(h) do
-    | Some(v) -> Cons(v, filter_map(t, f))
-    | None    -> filter_map(t, f)
+  fn go(lst : List(a), acc : List(b)) : List(b) do
+    match lst do
+    | Nil        -> reverse(acc)
+    | Cons(h, t) ->
+      match f(h) do
+      | Some(v) -> go(t, Cons(v, acc))
+      | None    -> go(t, acc)
+      end
     end
   end
+  go(xs, Nil)
 end
 
 doc "Left fold: reduces the list from left to right with an accumulator."
@@ -200,10 +215,7 @@ end
 
 doc "Right fold: reduces the list from right to left."
 pub fn fold_right(xs : List(a), acc : b, f : a -> b -> b) : b do
-  match xs do
-  | Nil        -> acc
-  | Cons(h, t) -> f(h, fold_right(t, acc, f))
-  end
+  fold_left(acc, reverse(xs), fn (a, h) -> f(h, a))
 end
 
 doc "Like fold_left but returns a list of all intermediate accumulator values."
@@ -226,11 +238,14 @@ end
 
 doc "Inserts `sep` between every consecutive pair of elements."
 pub fn intersperse(xs : List(a), sep : a) : List(a) do
-  match xs do
-  | Nil           -> Nil
-  | Cons(x, Nil)  -> Cons(x, Nil)
-  | Cons(h, t)    -> Cons(h, Cons(sep, intersperse(t, sep)))
+  fn go(lst : List(a), acc : List(a)) : List(a) do
+    match lst do
+    | Nil           -> reverse(acc)
+    | Cons(x, Nil)  -> reverse(Cons(x, acc))
+    | Cons(h, t)    -> go(t, Cons(sep, Cons(h, acc)))
+    end
   end
+  go(xs, Nil)
 end
 
 -- ---- Searching ----
@@ -274,49 +289,63 @@ end
 
 doc "Sorts by a comparator function. Uses merge sort (stable, O(n log n))."
 pub fn sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+  fn rev_onto(rev_prefix : List(a), tail : List(a)) : List(a) do
+    match rev_prefix do
+    | Nil        -> tail
+    | Cons(h, t) -> rev_onto(t, Cons(h, tail))
+    end
+  end
   fn merge(a : List(a), b : List(a)) : List(a) do
-    match a do
-    | Nil -> b
-    | Cons(x, xa) ->
-      match b do
-      | Nil -> a
-      | Cons(y, yb) ->
-        if cmp(x, y)
-        then Cons(x, merge(xa, b))
-        else Cons(y, merge(a, yb))
+    fn go(l : List(a), r : List(a), acc : List(a)) : List(a) do
+      match l do
+      | Nil -> rev_onto(acc, r)
+      | Cons(x, xl) ->
+        match r do
+        | Nil -> rev_onto(acc, l)
+        | Cons(y, yl) ->
+          if cmp(x, y)
+          then go(xl, r, Cons(x, acc))
+          else go(l, yl, Cons(y, acc))
+        end
       end
     end
+    go(a, b, Nil)
   end
-  fn split_half(lst : List(a), n : Int) : (List(a), List(a)) do
-    fn go(l : List(a), k : Int, acc : List(a)) : (List(a), List(a)) do
-      if k == 0 then (reverse(acc), l)
-      else match l do
-        | Nil        -> (reverse(acc), Nil)
-        | Cons(h, t) -> go(t, k - 1, Cons(h, acc))
-        end
-    end
-    go(lst, n / 2, Nil)
-  end
-  fn msort(lst : List(a), n : Int) : List(a) do
-    if n <= 1 then lst
-    else do
-      let (left, right) = split_half(lst, n)
-      let half = n / 2
-      merge(msort(left, half), msort(right, n - half))
+  fn step_pairs(groups : List(List(a)), acc : List(List(a))) : List(List(a)) do
+    match groups do
+    | Nil -> reverse(acc)
+    | Cons(g, Nil) -> reverse(Cons(g, acc))
+    | Cons(g1, Cons(g2, rest)) -> step_pairs(rest, Cons(merge(g1, g2), acc))
     end
   end
-  msort(xs, length(xs))
+  fn sort_loop(groups : List(List(a))) : List(a) do
+    match groups do
+    | Nil -> Nil
+    | Cons(sole, Nil) -> sole
+    | _ -> sort_loop(step_pairs(groups, Nil))
+    end
+  end
+  fn to_singletons(lst : List(a), acc : List(List(a))) : List(List(a)) do
+    match lst do
+    | Nil        -> reverse(acc)
+    | Cons(h, t) -> to_singletons(t, Cons(Cons(h, Nil), acc))
+    end
+  end
+  sort_loop(to_singletons(xs, Nil))
 end
 
 -- ---- Splitting ----
 
 doc "Returns the first `n` elements. Returns the whole list if n >= length."
 pub fn take(xs : List(a), n : Int) : List(a) do
-  if n <= 0 then Nil
-  else match xs do
-    | Nil        -> Nil
-    | Cons(h, t) -> Cons(h, take(t, n - 1))
-    end
+  fn go(lst : List(a), k : Int, acc : List(a)) : List(a) do
+    if k <= 0 then reverse(acc)
+    else match lst do
+      | Nil        -> reverse(acc)
+      | Cons(h, t) -> go(t, k - 1, Cons(h, acc))
+      end
+  end
+  go(xs, n, Nil)
 end
 
 doc "Drops the first `n` elements. Returns [] if n >= length."
@@ -330,10 +359,14 @@ end
 
 doc "Returns the longest prefix of elements satisfying `pred`."
 pub fn take_while(xs : List(a), pred : a -> Bool) : List(a) do
-  match xs do
-  | Nil        -> Nil
-  | Cons(h, t) -> if pred(h) then Cons(h, take_while(t, pred)) else Nil
+  fn go(lst : List(a), acc : List(a)) : List(a) do
+    match lst do
+    | Nil        -> reverse(acc)
+    | Cons(h, t) ->
+      if pred(h) then go(t, Cons(h, acc)) else reverse(acc)
+    end
   end
+  go(xs, Nil)
 end
 
 doc "Drops elements while `pred` holds, returning the rest."
@@ -379,37 +412,46 @@ end
 
 doc "Splits the list into consecutive chunks of at most `size` elements."
 pub fn chunks(xs : List(a), size : Int) : List(List(a)) do
-  if is_empty(xs) then Nil
-  else do
-    let (chunk, rest) = split_at(xs, size)
-    Cons(chunk, chunks(rest, size))
+  fn go(lst : List(a), acc : List(List(a))) : List(List(a)) do
+    if is_empty(lst) then reverse(acc)
+    else do
+      let (chunk, rest) = split_at(lst, size)
+      go(rest, Cons(chunk, acc))
+    end
   end
+  go(xs, Nil)
 end
 
 -- ---- Combining ----
 
 doc "Pairs up elements from two lists. Stops at the shorter list."
 pub fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
-  match xs do
-  | Nil -> Nil
-  | Cons(x, xt) ->
-    match ys do
-    | Nil -> Nil
-    | Cons(y, yt) -> Cons((x, y), zip(xt, yt))
+  fn go(a : List(a), b : List(b), acc : List((a, b))) : List((a, b)) do
+    match a do
+    | Nil -> reverse(acc)
+    | Cons(x, xt) ->
+      match b do
+      | Nil -> reverse(acc)
+      | Cons(y, yt) -> go(xt, yt, Cons((x, y), acc))
+      end
     end
   end
+  go(xs, ys, Nil)
 end
 
 doc "Like zip but applies `f` to each pair instead of building tuples."
 pub fn zip_with(xs : List(a), ys : List(b), f : a -> b -> c) : List(c) do
-  match xs do
-  | Nil -> Nil
-  | Cons(x, xt) ->
-    match ys do
-    | Nil -> Nil
-    | Cons(y, yt) -> Cons(f(x, y), zip_with(xt, yt, f))
+  fn go(a : List(a), b : List(b), acc : List(c)) : List(c) do
+    match a do
+    | Nil -> reverse(acc)
+    | Cons(x, xt) ->
+      match b do
+      | Nil -> reverse(acc)
+      | Cons(y, yt) -> go(xt, yt, Cons(f(x, y), acc))
+      end
     end
   end
+  go(xs, ys, Nil)
 end
 
 doc "Splits a list of pairs into two lists."

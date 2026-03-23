@@ -55,12 +55,21 @@ fn lst_nth(lst, n) do
 end
 
 fn lst_set(lst, n, v) do
-  match lst do
-  | Nil -> Nil
-  | Cons(h, t) ->
-    if n == 0 then Cons(v, t)
-    else Cons(h, lst_set(t, n - 1, v))
+  fn rev_onto(rev_xs, ys) do
+    match rev_xs do
+    | Nil -> ys
+    | Cons(a, rest) -> rev_onto(rest, Cons(a, ys))
+    end
   end
+  fn go(xs, i, acc) do
+    match xs do
+    | Nil -> lst_rev(acc)
+    | Cons(h, t) ->
+      if i == 0 then rev_onto(acc, Cons(v, t))
+      else go(t, i - 1, Cons(h, acc))
+    end
+  end
+  go(lst, n, Nil)
 end
 
 fn lst_len(lst) do
@@ -74,18 +83,24 @@ fn lst_len(lst) do
 end
 
 fn lst_snoc(lst, x) do
-  match lst do
-  | Nil -> Cons(x, Nil)
-  | Cons(h, t) -> Cons(h, lst_snoc(t, x))
+  fn go(xs, acc) do
+    match xs do
+    | Nil -> lst_rev(Cons(x, acc))
+    | Cons(h, t) -> go(t, Cons(h, acc))
+    end
   end
+  go(lst, Nil)
 end
 
 fn lst_init(lst) do
-  match lst do
-  | Nil -> Nil
-  | Cons(_, Nil) -> Nil
-  | Cons(h, t) -> Cons(h, lst_init(t))
+  fn go(xs, acc) do
+    match xs do
+    | Nil -> lst_rev(acc)
+    | Cons(_, Nil) -> lst_rev(acc)
+    | Cons(h, t) -> go(t, Cons(h, acc))
+    end
   end
+  go(lst, Nil)
 end
 
 fn lst_last(lst) do
@@ -97,15 +112,21 @@ fn lst_last(lst) do
 end
 
 fn lst_replace_nth(lst, n, node) do
-  fn go(xs, i) do
-    match xs do
-    | Nil -> Nil
-    | Cons(h, t) ->
-      if i == 0 then Cons(node, t)
-      else Cons(h, go(t, i - 1))
+  fn rev_onto(rev_xs, ys) do
+    match rev_xs do
+    | Nil -> ys
+    | Cons(a, rest) -> rev_onto(rest, Cons(a, ys))
     end
   end
-  go(lst, n)
+  fn go(xs, i, acc) do
+    match xs do
+    | Nil -> lst_rev(acc)
+    | Cons(h, t) ->
+      if i == 0 then rev_onto(acc, Cons(node, t))
+      else go(t, i - 1, Cons(h, acc))
+    end
+  end
+  go(lst, n, Nil)
 end
 
 -- ── Bit helpers ───────────────────────────────────────────────────────────
@@ -128,24 +149,35 @@ fn trie_get(node, idx, shift) do
 end
 
 fn trie_update(node, idx, val, shift) do
-  match node do
-  | TrieEmpty -> panic("Array.set: missing node")
-  | TrieLeaf(values) ->
-    TrieLeaf(lst_set(values, int_and(idx, 31), val))
-  | TrieBranch(children) ->
-    let slot = trie_slot(idx, shift)
-    let child = lst_nth(children, slot)
-    let new_child = trie_update(child, idx, val, shift - 5)
-    TrieBranch(lst_replace_nth(children, slot, new_child))
+  fn ascend(nd, stk) do
+    match stk do
+    | Nil -> nd
+    | Cons(frame, rest) ->
+      let (children, slot) = frame
+      ascend(TrieBranch(lst_replace_nth(children, slot, nd)), rest)
+    end
   end
+  fn descend(n, s, path) do
+    match n do
+    | TrieEmpty -> panic("Array.set: missing node")
+    | TrieLeaf(values) ->
+      ascend(TrieLeaf(lst_set(values, int_and(idx, 31), val)), path)
+    | TrieBranch(children) ->
+      let slot = trie_slot(idx, s)
+      let child = lst_nth(children, slot)
+      descend(child, s - 5, Cons((children, slot), path))
+    end
+  end
+  descend(node, shift, Nil)
 end
 
 -- Create a fresh path from 'shift' levels down to a leaf containing 'values'.
 fn new_path(values, shift) do
-  if shift == 0 then
-    TrieLeaf(values)
-  else
-    TrieBranch(Cons(new_path(values, shift - 5), Nil))
+  fn go(s, node) do
+    if s == 0 then node
+    else go(s - 5, TrieBranch(Cons(node, Nil)))
+  end
+  go(shift, TrieLeaf(values))
 end
 
 -- Number of leaf slots accessible at a given shift (max leaves in tree).
@@ -168,22 +200,27 @@ fn push_leaf(root, leaf_values, trie_leaf_count, shift) do
     -- Navigate to the insertion point.
     -- The new leaf should be at leaf index = trie_leaf_count.
     fn insert(node, leaf_idx, s) do
-      match node do
-      | TrieBranch(children) ->
-        let slot = trie_slot(leaf_idx, s)
-        let n = lst_len(children)
-        if slot == n then do
-          -- This slot does not exist yet: add a new path.
-          let new_child = new_path(leaf_values, s - 5)
-          TrieBranch(lst_snoc(children, new_child))
-        end else do
-          -- Descend into the last existing child.
-          let child = lst_nth(children, n - 1)
-          let new_child = insert(child, leaf_idx, s - 5)
-          TrieBranch(lst_replace_nth(children, n - 1, new_child))
+      fn ascend(nd, stk) do
+        match stk do
+        | Nil -> nd
+        | Cons(frame, rest) ->
+          let (children, slot_i) = frame
+          ascend(TrieBranch(lst_replace_nth(children, slot_i, nd)), rest)
         end
-      | _ -> new_path(leaf_values, s - 5)
       end
+      fn descend(nd, s, path) do
+        match nd do
+        | TrieBranch(children) ->
+          let slot = trie_slot(leaf_idx, s)
+          let n = lst_len(children)
+          if slot == n then
+            ascend(TrieBranch(lst_snoc(children, new_path(leaf_values, s - 5))), path)
+          else
+            descend(lst_nth(children, n - 1), s - 5, Cons((children, n - 1), path))
+        | _ -> ascend(new_path(leaf_values, s - 5), path)
+        end
+      end
+      descend(node, s, Nil)
     end
     (insert(root, trie_leaf_count, shift), shift)
   end
@@ -196,26 +233,35 @@ fn pop_leaf(root, trie_leaf_count, shift) do
   -- The leaf we're removing is at index (trie_leaf_count - 1).
   let last_leaf_idx = trie_leaf_count - 1
   fn extract(node, leaf_idx, s) do
-    match node do
-    | TrieLeaf(values) ->
-      (None, values)
-    | TrieBranch(children) ->
-      let slot = trie_slot(leaf_idx, s)
-      let n = lst_len(children)
-      let child = lst_nth(children, n - 1)
-      match extract(child, leaf_idx, s - 5) do
-      | (None, leaf_vals) ->
-        let new_children = lst_init(children)
-        match new_children do
-        | Nil -> (None, leaf_vals)
-        | _   -> (Some(TrieBranch(new_children)), leaf_vals)
+    fn ascend(result_opt, leaf_vals, stk) do
+      match stk do
+      | Nil -> (result_opt, leaf_vals)
+      | Cons(frame, rest) ->
+        let (children, idx) = frame
+        match result_opt do
+        | None ->
+          let new_children = lst_init(children)
+          match new_children do
+          | Nil -> ascend(None, leaf_vals, rest)
+          | _   -> ascend(Some(TrieBranch(new_children)), leaf_vals, rest)
+          end
+        | Some(new_child) ->
+          let new_children = lst_replace_nth(children, idx, new_child)
+          ascend(Some(TrieBranch(new_children)), leaf_vals, rest)
         end
-      | (Some(new_child), leaf_vals) ->
-        let new_children = lst_replace_nth(children, n - 1, new_child)
-        (Some(TrieBranch(new_children)), leaf_vals)
       end
-    | TrieEmpty -> (None, Nil)
     end
+    fn descend(nd, li, s, path) do
+      match nd do
+      | TrieLeaf(values) -> ascend(None, values, path)
+      | TrieBranch(children) ->
+        let n = lst_len(children)
+        let child = lst_nth(children, n - 1)
+        descend(child, li, s - 5, Cons((children, n - 1), path))
+      | TrieEmpty -> ascend(None, Nil, path)
+      end
+    end
+    descend(node, leaf_idx, s, Nil)
   end
   extract(root, last_leaf_idx, shift)
 end

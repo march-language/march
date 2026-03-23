@@ -48,10 +48,19 @@ expanding ranges). Equivalent to Haskell's concatMap.
 pub fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
   -- append_list: append ys onto xs (xs ++ ys). O(|xs|).
   fn append_list(left : List(b), right : List(b)) : List(b) do
-    match left do
-    | Nil        -> right
-    | Cons(x, r) -> Cons(x, append_list(r, right))
+    fn rev_onto(rev_xs, ys) do
+      match rev_xs do
+      | Nil -> ys
+      | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+      end
     end
+    fn rev_left(xs, acc) do
+      match xs do
+      | Nil -> acc
+      | Cons(h, t) -> rev_left(t, Cons(h, acc))
+      end
+    end
+    rev_onto(rev_left(left, Nil), right)
   end
   fn go(lst : List(a), acc : List(b)) : List(b) do
     match lst do

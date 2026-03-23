@@ -75,38 +75,56 @@ fn bitmap_clear(bitmap, idx) do
 end
 
 fn list_insert_at(lst, idx, elem) do
-  fn go(xs, i) do
-    if i == 0 then Cons(elem, xs)
+  fn rev_onto(rev_xs, ys) do
+    match rev_xs do
+    | Nil -> ys
+    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    end
+  end
+  fn go(xs, i, acc) do
+    if i == 0 then rev_onto(acc, Cons(elem, xs))
     else match xs do
-      | Nil        -> Cons(elem, Nil)
-      | Cons(h, t) -> Cons(h, go(t, i - 1))
+      | Nil        -> rev_onto(acc, Cons(elem, Nil))
+      | Cons(h, t) -> go(t, i - 1, Cons(h, acc))
       end
   end
-  go(lst, idx)
+  go(lst, idx, Nil)
 end
 
 fn list_replace_at(lst, idx, elem) do
-  fn go(xs, i) do
-    match xs do
-    | Nil -> Nil
-    | Cons(h, t) ->
-      if i == 0 then Cons(elem, t)
-      else Cons(h, go(t, i - 1))
+  fn rev_onto(rev_xs, ys) do
+    match rev_xs do
+    | Nil -> ys
+    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
-  go(lst, idx)
+  fn go(xs, i, acc) do
+    match xs do
+    | Nil -> rev_onto(acc, Nil)
+    | Cons(h, t) ->
+      if i == 0 then rev_onto(acc, Cons(elem, t))
+      else go(t, i - 1, Cons(h, acc))
+    end
+  end
+  go(lst, idx, Nil)
 end
 
 fn list_delete_at(lst, idx) do
-  fn go(xs, i) do
-    match xs do
-    | Nil -> Nil
-    | Cons(h, t) ->
-      if i == 0 then t
-      else Cons(h, go(t, i - 1))
+  fn rev_onto(rev_xs, ys) do
+    match rev_xs do
+    | Nil -> ys
+    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
-  go(lst, idx)
+  fn go(xs, i, acc) do
+    match xs do
+    | Nil -> rev_onto(acc, Nil)
+    | Cons(h, t) ->
+      if i == 0 then rev_onto(acc, t)
+      else go(t, i - 1, Cons(h, acc))
+    end
+  end
+  go(lst, idx, Nil)
 end
 
 fn list_nth_safe(lst, n) do
@@ -131,12 +149,21 @@ fn coll_insert_elem(elems, x, eq) do
 end
 
 fn coll_remove_elem(elems, x, eq) do
-  match elems do
-  | Nil -> Nil
-  | Cons(e, rest) ->
-    if eq(e, x) then rest
-    else Cons(e, coll_remove_elem(rest, x, eq))
+  fn rev_onto(rev_xs, ys) do
+    match rev_xs do
+    | Nil -> ys
+    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    end
   end
+  fn go(es, acc) do
+    match es do
+    | Nil -> rev_onto(acc, Nil)
+    | Cons(e, rest) ->
+      if eq(e, x) then rev_onto(acc, rest)
+      else go(rest, Cons(e, acc))
+    end
+  end
+  go(elems, Nil)
 end
 
 -- ── HAMT core ─────────────────────────────────────────────────────────────
@@ -159,22 +186,33 @@ fn node_contains(node, x, h, eq, level) do
 end
 
 fn make_branch(h1, x1, h2, x2, level) do
-  if level > 6 then
-    HCollision(h1, Cons(x1, Cons(x2, Nil)))
-  else do
-    let s1 = hash_slot(h1, level)
-    let s2 = hash_slot(h2, level)
-    if s1 == s2 then do
-      let sub = make_branch(h1, x1, h2, x2, level + 1)
-      HBranch(bitmap_set(0, s1), Cons(sub, Nil))
-    end else do
-      let leaf1 = HLeaf(h1, x1)
-      let leaf2 = HLeaf(h2, x2)
-      let bm = bitmap_set(bitmap_set(0, s1), s2)
-      if s1 < s2 then HBranch(bm, Cons(leaf1, Cons(leaf2, Nil)))
-      else HBranch(bm, Cons(leaf2, Cons(leaf1, Nil)))
+  fn apply_slots(node, slots) do
+    match slots do
+    | Nil -> node
+    | Cons(s, rest) ->
+      apply_slots(HBranch(bitmap_set(0, s), Cons(node, Nil)), rest)
     end
   end
+  fn go(lvl, slots_acc) do
+    if lvl > 6 then
+      apply_slots(HCollision(h1, Cons(x1, Cons(x2, Nil))), slots_acc)
+    else do
+      let s1 = hash_slot(h1, lvl)
+      let s2 = hash_slot(h2, lvl)
+      if s1 == s2 then
+        go(lvl + 1, Cons(s1, slots_acc))
+      else do
+        let leaf1 = HLeaf(h1, x1)
+        let leaf2 = HLeaf(h2, x2)
+        let bm = bitmap_set(bitmap_set(0, s1), s2)
+        let base_node =
+          if s1 < s2 then HBranch(bm, Cons(leaf1, Cons(leaf2, Nil)))
+          else HBranch(bm, Cons(leaf2, Cons(leaf1, Nil)))
+        apply_slots(base_node, slots_acc)
+      end
+    end
+  end
+  go(level, Nil)
 end
 
 fn node_insert(node, x, h, eq, level) do
