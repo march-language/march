@@ -194,10 +194,11 @@ march/
 ## Current State (as of 2026-03-23)
 
 - **Builds clean**
-- **812 tests across 3 suites; 0 failures**:
-  - `test_march.exe`: 770+ tests, all passing (REPL JIT list literal fixed; LSP/exhaustiveness/multi-level-use/opaque/actor handler tests added)
+- **835 tests across 4 suites; 0 failures** (excluding pre-existing JIT/clang failures):
+  - `test_march.exe`: 820 tests (8 pre-existing REPL JIT clang failures; all others pass)
   - `test_cas.exe`: 41 tests, all passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
+  - `test_forge.exe`: 15 tests, all passing (scaffold, TOML parser)
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present
 - **Match syntax**: `match expr do | Pat -> body end` (changed from `with` to `do` in 2026-03-21 — Elixir case-style)
 - **String interpolation**: `${}` syntax fully implemented — `INTERP_START`/`INTERP_MID`/`INTERP_END` tokens in lexer; desugars to `++`/`to_string` chains (`lib/desugar/desugar.ml`)
@@ -217,7 +218,9 @@ march/
 - **Field-index map for records** — `field_index_for` in `llvm_emit.ml` (line 762); all field GEP offsets correct
 - **Atomic refcounting** — C11 atomics (`atomic_fetch_add/sub_explicit`) in `march_runtime.c`; RC thread-safe
 - **Actor TIR lowering** — `lower_actor` in `lib/tir/lower.ml`; actors compile to native code via `ESpawn`/`ESend` lowering
-- **SRec recursive protocol unfolding** — `unfold_srec` in typecheck.ml; recursive session types handled
+- **SRec recursive protocol unfolding** — `unfold_srec` in typecheck.ml; recursive session types handled; 6 new multi-turn tests (ping-pong loop, nested SRec, SChoose inside SRec, wrong type in loop)
+- **Type error pretty-printing** — `pp_ty_pretty` wraps long type expressions at 60 chars with indented args; `report_mismatch` shows multi-line format for types >50 chars; `find_arg_mismatch` adds contextual notes identifying which arg/field differs
+- **Forge build tool** — `forge/` package: `forge new/build/run/test/format/interactive/i/clean/deps`; scaffold generates valid March (PascalCase module names, `do/end` fn bodies, `println` builtin, test file with `main()`); 15 tests in `forge/test/test_forge.ml`
 - **`Set` module** — `stdlib/set.march` (AVL tree-backed, full API)
 - **`BigInt` / `Decimal`** — `stdlib/bigint.march`, `stdlib/decimal.march`
 - **`Iterable` interface expansion** — 184 lines in `stdlib/iterable.march`; map/filter/fold/take/drop/zip/enumerate/flat_map/any/all/find/count

@@ -127,6 +127,48 @@ let test_readme_has_name () =
               len_c >= len_cap + 2 &&
               String.sub content 2 len_cap = cap))
 
+(* ----------------------------------------------------------------- module naming *)
+
+let test_module_name_is_pascal_case () =
+  (* snake_case project names should produce PascalCase module names.
+     "test_project" -> "mod TestProject do" not "mod Test_project do" *)
+  with_temp_parent (fun name ->
+      let proj_name = name ^ "_project" in
+      (match Scaffold.scaffold proj_name Project.App with
+       | Error msg -> Alcotest.fail msg
+       | Ok () -> ());
+      let lib_src = read_file
+          (Filename.concat proj_name
+             (Filename.concat "lib" (proj_name ^ ".march"))) in
+      (* Expected: "mod TestProject do" — no underscore in the module name *)
+      let expected_parts = String.split_on_char '_' proj_name
+          |> List.filter (fun p -> p <> "")
+          |> List.map String.capitalize_ascii in
+      let expected_mod = "mod " ^ String.concat "" expected_parts ^ " do" in
+      Alcotest.(check bool) "module name is joined PascalCase"
+        true (let len = String.length expected_mod in
+              String.length lib_src >= len &&
+              String.sub lib_src 0 len = expected_mod))
+
+let test_generated_march_uses_do_end () =
+  (* Generated functions must use 'do ... end' not '->' syntax *)
+  with_temp_parent (fun name ->
+      (match Scaffold.scaffold name Project.App with
+       | Error msg -> Alcotest.fail msg
+       | Ok () -> ());
+      let lib_src  = read_file (Filename.concat name (Filename.concat "lib"  (name ^ ".march"))) in
+      let test_src = read_file (Filename.concat name (Filename.concat "test" (name ^ "_test.march"))) in
+      (* Both files should contain "do" and "end" but not "fn ... ->" pattern *)
+      let contains s sub =
+        let n = String.length s and m = String.length sub in
+        let rec loop i = if i + m > n then false
+          else if String.sub s i m = sub then true else loop (i + 1) in
+        loop 0 in
+      Alcotest.(check bool) "lib has do keyword"   true (contains lib_src  " do\n");
+      Alcotest.(check bool) "test has do keyword"  true (contains test_src " do\n");
+      Alcotest.(check bool) "lib has no fn ->"     false (contains lib_src  "fn main() ->");
+      Alcotest.(check bool) "test has no fn ->"    false (contains test_src "fn test_placeholder() ->"))
+
 (* ------------------------------------------------------------------- TOML parser *)
 
 let test_toml_simple () =
@@ -208,6 +250,8 @@ let () =
       Alcotest.test_case ".gitignore contains /.march/"       `Quick test_gitignore_has_march;
       Alcotest.test_case ".editorconfig indent_size=2"        `Quick test_editorconfig_indent;
       Alcotest.test_case "README.md contains project name"    `Quick test_readme_has_name;
+      Alcotest.test_case "module name is PascalCase"          `Quick test_module_name_is_pascal_case;
+      Alcotest.test_case "generated files use do/end syntax"  `Quick test_generated_march_uses_do_end;
     ];
     "toml", [
       Alcotest.test_case "simple key/value pairs"   `Quick test_toml_simple;

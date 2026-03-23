@@ -24,11 +24,12 @@ let build ~release =
     if files = [] then
       Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin
-      let files_str    = String.concat " " (List.map Filename.quote files) in
-      let output       = Filename.concat build_dir proj.Project.name in
-      let release_flag = if release then " --release" else "" in
-      let cmd = Printf.sprintf "march%s --output %s %s"
-          release_flag (Filename.quote output) files_str in
+      let files_str = String.concat " " (List.map Filename.quote files) in
+      let output    = Filename.concat build_dir proj.Project.name in
+      let opt_flag  = if release then " --opt 2" else "" in
+      (* march --compile -o <out> [--opt N] <file> *)
+      let cmd = Printf.sprintf "march --compile -o %s%s %s"
+          (Filename.quote output) opt_flag files_str in
       let rc = Sys.command cmd in
       if rc = 0 then Ok output
       else Error (Printf.sprintf "march compiler exited with code %d" rc)

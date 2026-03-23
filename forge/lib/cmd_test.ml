@@ -19,10 +19,14 @@ let run () =
         Printf.printf "no test files found in %s\n%!" test_dir;
         Ok ()
       end else begin
-        let files_str = String.concat " " (List.map Filename.quote test_files) in
-        let cmd = Printf.sprintf "march --test %s" files_str in
-        let rc  = Sys.command cmd in
-        if rc = 0 then Ok ()
-        else Error (Printf.sprintf "tests exited with code %d" rc)
+        (* Run each test file independently; march executes main() if present *)
+        let failed = List.filter (fun f ->
+          let rc = Sys.command (Printf.sprintf "march %s" (Filename.quote f)) in
+          rc <> 0) test_files in
+        if failed = [] then Ok ()
+        else
+          Error (Printf.sprintf "%d test file(s) failed: %s"
+            (List.length failed)
+            (String.concat ", " (List.map Filename.basename failed)))
       end
     end
