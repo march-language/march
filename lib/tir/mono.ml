@@ -65,6 +65,8 @@ let rec subst_expr (s : ty_subst) : Tir.expr -> Tir.expr = function
   | Tir.EFree a           -> Tir.EFree (subst_atom s a)
   | Tir.EIncRC a          -> Tir.EIncRC (subst_atom s a)
   | Tir.EDecRC a          -> Tir.EDecRC (subst_atom s a)
+  | Tir.EAtomicIncRC a    -> Tir.EAtomicIncRC (subst_atom s a)
+  | Tir.EAtomicDecRC a    -> Tir.EAtomicDecRC (subst_atom s a)
   | Tir.EReuse (a, ty, args) ->
     Tir.EReuse (subst_atom s a, subst_ty s ty, List.map (subst_atom s) args)
   | Tir.ESeq (e1, e2)     -> Tir.ESeq (subst_expr s e1, subst_expr s e2)

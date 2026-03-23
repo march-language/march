@@ -85,6 +85,27 @@ void march_free(void *p) {
     free(p);
 }
 
+/* Non-atomic reference counting — for values provably local to one thread.
+ * These must NOT be called on values that may be concurrently accessed from
+ * another actor.  The callers (Perceus-generated code) guarantee this. */
+void march_incrc_local(void *p) {
+    if (!IS_HEAP_PTR(p)) return;
+    ((march_hdr *)p)->rc++;
+}
+
+void march_decrc_local(void *p) {
+    if (!IS_HEAP_PTR(p)) return;
+    march_hdr *h = (march_hdr *)p;
+    h->rc--;
+    if (h->rc <= 0) {
+        if (h->rc < 0) {
+            fprintf(stderr, "march: local RC underflow at %p — aborting\n", p);
+            abort();
+        }
+        free(p);
+    }
+}
+
 /* ── Strings ─────────────────────────────────────────────────────────── */
 
 /* march_string layout: [rc:i64][len:i64][data:char*] */
@@ -372,6 +393,10 @@ typedef struct march_actor_meta {
     march_cleanup_node         *cleanup_head; /* Cleanup callbacks (most recent first) */
     march_monitor_node         *monitor_head; /* Monitors watching this actor   */
     _Atomic int64_t             down_count;   /* Down messages received (watcher side) */
+    /* Supervision metadata (set by march_register_supervisor): */
+    int                         supervisor_strategy;    /* 0=one_for_one, 1=one_for_all, 2=rest_for_one */
+    int64_t                     supervisor_max_restarts;
+    int64_t                     supervisor_window_secs;
 } march_actor_meta;
 
 /* Global side table: actor ptr → march_actor_meta */
@@ -1660,6 +1685,69 @@ void march_demonitor(int64_t ref) {
         }
     }
     pthread_mutex_unlock(&g_tbl_mu);
+}
+
+/* link: establish a bidirectional crash-propagation link.
+   Implemented as two one-way monitors; when either actor dies, the other
+   gets a Down notification (and the default behaviour is to crash too —
+   supervision should be used if restart is desired).
+   No-op if either pointer is not a valid heap actor. */
+void march_link(void *actor_a, void *actor_b) {
+    if (!IS_HEAP_PTR(actor_a) || !IS_HEAP_PTR(actor_b)) return;
+    /* Two one-way monitors: a watches b and b watches a. */
+    march_monitor(actor_a, actor_b);
+    march_monitor(actor_b, actor_a);
+}
+
+/* unlink: cancel the bidirectional link between two actors.
+   Best-effort: scans for and removes both one-way monitor nodes. */
+void march_unlink(void *actor_a, void *actor_b) {
+    if (!IS_HEAP_PTR(actor_a) || !IS_HEAP_PTR(actor_b)) return;
+    /* Scan actor_b's monitor list for a node watching actor_a. */
+    pthread_mutex_lock(&g_tbl_mu);
+    march_actor_meta *mb = g_actor_tbl[actor_bucket(actor_b)];
+    while (mb && mb->actor != actor_b) mb = mb->tbl_next;
+    if (mb) {
+        march_monitor_node **pp = &mb->monitor_head;
+        while (*pp) {
+            if ((*pp)->watcher == actor_a) {
+                march_monitor_node *dead = *pp;
+                *pp = dead->next;
+                free(dead);
+                break;
+            }
+            pp = &(*pp)->next;
+        }
+    }
+    /* Scan actor_a's monitor list for a node watching actor_b. */
+    march_actor_meta *ma = g_actor_tbl[actor_bucket(actor_a)];
+    while (ma && ma->actor != actor_a) ma = ma->tbl_next;
+    if (ma) {
+        march_monitor_node **pp = &ma->monitor_head;
+        while (*pp) {
+            if ((*pp)->watcher == actor_b) {
+                march_monitor_node *dead = *pp;
+                *pp = dead->next;
+                free(dead);
+                break;
+            }
+            pp = &(*pp)->next;
+        }
+    }
+    pthread_mutex_unlock(&g_tbl_mu);
+}
+
+/* register_supervisor: record supervision metadata for an actor.
+   strategy: 0=one_for_one, 1=one_for_all, 2=rest_for_one.
+   The actor must already be registered via march_spawn.
+   This is a metadata call; actual restart logic is driven by Down events. */
+void march_register_supervisor(void *supervisor, int64_t strategy,
+                                int64_t max_restarts, int64_t window_secs) {
+    if (!IS_HEAP_PTR(supervisor)) return;
+    march_actor_meta *meta = find_or_create_meta(supervisor);
+    meta->supervisor_strategy  = (int)strategy;
+    meta->supervisor_max_restarts = max_restarts;
+    meta->supervisor_window_secs  = window_secs;
 }
 
 /* monitor: establish a monitor link from watcher to target.

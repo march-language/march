@@ -51,8 +51,10 @@
       EFree      0x4c
       EIncRC     0x4d
       EDecRC     0x4e
-      EReuse     0x4f
-      ESeq       0x50
+      EReuse        0x4f
+      ESeq          0x50
+      EAtomicIncRC  0x51
+      EAtomicDecRC  0x52
 
     Linearity tags:
       Lin  0x60
@@ -249,6 +251,12 @@ let rec write_expr buf (e : expr) =
     buf_u8 buf 0x50;
     write_expr buf e1;
     write_expr buf e2
+  | EAtomicIncRC a ->
+    buf_u8 buf 0x51;
+    write_atom buf a
+  | EAtomicDecRC a ->
+    buf_u8 buf 0x52;
+    write_atom buf a
 
 and write_branch buf (br : branch) =
   buf_string buf br.br_tag;

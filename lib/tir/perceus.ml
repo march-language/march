@@ -3,9 +3,62 @@
     Inserts reference-counting operations (EIncRC / EDecRC) into the TIR,
     exploiting static last-use information to elide as many RC ops as
     possible.  Linear and affine values get EFree instead of RC.
-    Adjacent Inc/Dec cancel pairs are removed, and FBIP reuse is detected. *)
+    Adjacent Inc/Dec cancel pairs are removed, and FBIP reuse is detected.
+
+    Atomic RC (EAtomicIncRC / EAtomicDecRC) is emitted for values that are
+    passed as message arguments to [send()].  These values may cross actor
+    thread boundaries and require C11-atomic RC to avoid data races.
+    All other values use fast non-atomic RC (march_incrc_local / march_decrc_local). *)
 
 module StringSet = Set.Make (String)
+
+(* ── Actor-send analysis ─────────────────────────────────────────────────── *)
+
+(** Variables that appear as message arguments to [send()] in the current
+    function.  Set by [insert_rc] before processing each function body.
+    Values in this set use atomic RC operations. *)
+let _actor_sent : StringSet.t ref = ref StringSet.empty
+
+(** Collect the set of variable names passed as messages to [send()].
+    [send(actor, msg)] — msg is the 2nd argument. *)
+let rec collect_actor_sent_vars (e : Tir.expr) : StringSet.t =
+  match e with
+  | Tir.EApp (f, [_; Tir.AVar msg])
+    when String.equal f.Tir.v_name "send" ->
+    StringSet.singleton msg.Tir.v_name
+  | Tir.EApp _ -> StringSet.empty
+  | Tir.EAtom _ | Tir.ECallPtr _ -> StringSet.empty
+  | Tir.ELet (_, e1, e2) ->
+    StringSet.union (collect_actor_sent_vars e1) (collect_actor_sent_vars e2)
+  | Tir.ELetRec (fns, body) ->
+    List.fold_left (fun acc fn ->
+      StringSet.union acc (collect_actor_sent_vars fn.Tir.fn_body)
+    ) (collect_actor_sent_vars body) fns
+  | Tir.ECase (_, branches, default) ->
+    let from_branches = List.fold_left (fun acc br ->
+      StringSet.union acc (collect_actor_sent_vars br.Tir.br_body)
+    ) StringSet.empty branches in
+    let from_default = match default with
+      | Some d -> collect_actor_sent_vars d
+      | None -> StringSet.empty
+    in
+    StringSet.union from_branches from_default
+  | Tir.ESeq (e1, e2) ->
+    StringSet.union (collect_actor_sent_vars e1) (collect_actor_sent_vars e2)
+  | _ -> StringSet.empty
+
+(** Choose the appropriate IncRC variant for [v].
+    Actor-sent vars use atomic; all others use local (non-atomic). *)
+let incrc_for (v : Tir.var) (a : Tir.atom) : Tir.expr =
+  if StringSet.mem v.Tir.v_name !_actor_sent
+  then Tir.EAtomicIncRC a
+  else Tir.EIncRC a
+
+(** Choose the appropriate DecRC variant for [v]. *)
+let decrc_for (v : Tir.var) (a : Tir.atom) : Tir.expr =
+  if StringSet.mem v.Tir.v_name !_actor_sent
+  then Tir.EAtomicDecRC a
+  else Tir.EDecRC a
 
 (* ── Helpers ─────────────────────────────────────────────────────────────── *)
 
@@ -110,9 +163,9 @@ let rec live_before (e : Tir.expr) (live_after : live_set) : live_set =
     StringSet.union live_after (vars_of_atoms atoms)
   | Tir.EFree a ->
     StringSet.union live_after (vars_of_atom a)
-  | Tir.EIncRC a ->
+  | Tir.EIncRC a | Tir.EAtomicIncRC a ->
     StringSet.union live_after (vars_of_atom a)
-  | Tir.EDecRC a ->
+  | Tir.EDecRC a | Tir.EAtomicDecRC a ->
     StringSet.union live_after (vars_of_atom a)
   | Tir.EReuse (a, _, atoms) ->
     live_after
@@ -155,16 +208,16 @@ let rec name_free_in (name : string) (e : Tir.expr) : bool =
   | Tir.EField (a, _)                        -> atom_uses a
   | Tir.EUpdate (a, fields)                  ->
     atom_uses a || List.exists (fun (_, a) -> atom_uses a) fields
-  | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a -> atom_uses a
+  | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a
+  | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a -> atom_uses a
   | Tir.EReuse (a, _, atoms)                 -> atom_uses a || atoms_use atoms
 
 (* ── Phase 2: RC Insertion ────────────────────────────────────────────────── *)
 
-(** Wrap [inner] with EIncRC for each variable in [vars] that is Unr,
-    needs_rc, and is still live after this point. *)
+(** Wrap [inner] with IncRC (atomic if actor-sent) for each variable in [incs]. *)
 let wrap_incrcs (incs : Tir.var list) (inner : Tir.expr) : Tir.expr =
   List.fold_right (fun v acc ->
-    Tir.ESeq (Tir.EIncRC (Tir.AVar v), acc)
+    Tir.ESeq (incrc_for v (Tir.AVar v), acc)
   ) incs inner
 
 (** Determine which AVar atoms in a list need EIncRC because they are
@@ -190,7 +243,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     if v.Tir.v_lin = Tir.Unr && needs_rc v.Tir.v_ty
        && StringSet.mem v.Tir.v_name live_after then
       (* Non-last use of Unr heap value: inc before use *)
-      (Tir.ESeq (Tir.EIncRC (Tir.AVar v), e), lb)
+      (Tir.ESeq (incrc_for v (Tir.AVar v), e), lb)
     else
       (e, lb)
 
@@ -229,9 +282,10 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     (* Check if v is dead in e2 *)
     let e2'' =
       if not (StringSet.mem v.Tir.v_name live_into_e2) then
-        (* Dead binding — insert cleanup at start of e2 *)
+        (* Dead binding — insert cleanup at start of e2.
+           Use atomic DecRC for actor-sent values (may be concurrently accessed). *)
         if v.Tir.v_lin = Tir.Unr && needs_rc v.Tir.v_ty then
-          Tir.ESeq (Tir.EDecRC (Tir.AVar v), e2')
+          Tir.ESeq (decrc_for v (Tir.AVar v), e2')
         else if v.Tir.v_lin = Tir.Lin || v.Tir.v_lin = Tir.Aff then
           if needs_rc v.Tir.v_ty then
             Tir.ESeq (Tir.EFree (Tir.AVar v), e2')
@@ -286,7 +340,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
           | _ -> ctor_tag
         in
         let ctor_v = { v with Tir.v_ty = Tir.TCon (qualified_tag, []) } in
-        Tir.ESeq (Tir.EDecRC (Tir.AVar ctor_v), body)
+        Tir.ESeq (decrc_for v (Tir.AVar ctor_v), body)
       | _ -> body
     in
     let branches' = List.map (fun br ->
@@ -307,7 +361,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
        | Tir.AVar v when needs_rc v.Tir.v_ty
                       && not (StringSet.mem v.Tir.v_name live_after)
                       && not (name_free_in v.Tir.v_name d) ->
-         Tir.ESeq (Tir.EDecRC (Tir.AVar v), d_rc)
+         Tir.ESeq (decrc_for v (Tir.AVar v), d_rc)
        | _ -> d_rc)
     ) default in
     (* Compute live_before from the original liveness *)
@@ -365,11 +419,11 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     let lb = StringSet.union live_after (vars_of_atom a) in
     (e, lb)
 
-  | Tir.EIncRC a ->
+  | Tir.EIncRC a | Tir.EAtomicIncRC a ->
     let lb = StringSet.union live_after (vars_of_atom a) in
     (e, lb)
 
-  | Tir.EDecRC a ->
+  | Tir.EDecRC a | Tir.EAtomicDecRC a ->
     let lb = StringSet.union live_after (vars_of_atom a) in
     (e, lb)
 
@@ -387,9 +441,13 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
 (** Insert RC ops into a function definition.
     [borrowed] names are treated as still-live at the function's exit,
     preventing Perceus from treating their last use as an ownership transfer.
-    Used for REPL globals that persist across compilation units. *)
+    Used for REPL globals that persist across compilation units.
+    Pre-computes the actor-sent variable set so that values sent across actor
+    thread boundaries use atomic RC operations. *)
 let insert_rc ?(borrowed = StringSet.empty) (fn : Tir.fn_def) : Tir.fn_def =
+  _actor_sent := collect_actor_sent_vars fn.Tir.fn_body;
   let (body', _) = insert_rc_expr fn.Tir.fn_body borrowed in
+  _actor_sent := StringSet.empty;
   { fn with Tir.fn_body = body' }
 
 (* ── Phase 3: RC Elision (cancel pairs) ──────────────────────────────────── *)
@@ -397,14 +455,14 @@ let insert_rc ?(borrowed = StringSet.empty) (fn : Tir.fn_def) : Tir.fn_def =
 (** Remove adjacent EIncRC/EDecRC cancel pairs. *)
 let rec elide_expr (e : Tir.expr) : Tir.expr =
   match e with
-  (* Cancel pair: ESeq(EIncRC v, ESeq(EDecRC v, rest)) -> rest *)
-  | Tir.ESeq (Tir.EIncRC (Tir.AVar v1),
-              Tir.ESeq (Tir.EDecRC (Tir.AVar v2), rest))
+  (* Cancel pair: ESeq(EIncRC v, ESeq(EDecRC v, rest)) -> rest (any atomicity mix) *)
+  | Tir.ESeq ((Tir.EIncRC (Tir.AVar v1) | Tir.EAtomicIncRC (Tir.AVar v1)),
+              Tir.ESeq ((Tir.EDecRC (Tir.AVar v2) | Tir.EAtomicDecRC (Tir.AVar v2)), rest))
     when String.equal v1.Tir.v_name v2.Tir.v_name ->
     elide_expr rest
-  (* Also check the reverse: ESeq(EDecRC v, ESeq(EIncRC v, rest)) -> rest *)
-  | Tir.ESeq (Tir.EDecRC (Tir.AVar v1),
-              Tir.ESeq (Tir.EIncRC (Tir.AVar v2), rest))
+  (* Also check the reverse *)
+  | Tir.ESeq ((Tir.EDecRC (Tir.AVar v1) | Tir.EAtomicDecRC (Tir.AVar v1)),
+              Tir.ESeq ((Tir.EIncRC (Tir.AVar v2) | Tir.EAtomicIncRC (Tir.AVar v2)), rest))
     when String.equal v1.Tir.v_name v2.Tir.v_name ->
     elide_expr rest
   (* Recurse into all sub-expressions *)
@@ -427,7 +485,7 @@ let rec elide_expr (e : Tir.expr) : Tir.expr =
   | Tir.EAtom _ | Tir.EApp _ | Tir.ECallPtr _
   | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _ | Tir.EUpdate _
   | Tir.EAlloc _ | Tir.EStackAlloc _ | Tir.EFree _ | Tir.EIncRC _ | Tir.EDecRC _
-  | Tir.EReuse _ ->
+  | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ | Tir.EReuse _ ->
     e
 
 (** Elide cancel pairs in a function definition. *)
@@ -492,7 +550,7 @@ let rec fbip_expr (e : Tir.expr) : Tir.expr =
   | Tir.EAtom _ | Tir.EApp _ | Tir.ECallPtr _
   | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _ | Tir.EUpdate _
   | Tir.EAlloc _ | Tir.EStackAlloc _ | Tir.EFree _ | Tir.EIncRC _ | Tir.EDecRC _
-  | Tir.EReuse _ ->
+  | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ | Tir.EReuse _ ->
     e
 
 (** Apply FBIP reuse to a function definition. *)

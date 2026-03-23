@@ -12,12 +12,19 @@ typedef struct { int64_t rc; int32_t tag; int32_t pad; } march_hdr;
 /* Heap allocation: allocates sz bytes zeroed, returns a pointer. */
 void *march_alloc(int64_t sz);
 
-/* Reference counting. */
+/* Reference counting (atomic — safe for cross-thread shared values). */
 void  march_incrc(void *p);
 void  march_decrc(void *p);
 /* Decrement RC and return 1 if the object was freed (RC hit 0), 0 if still alive.
    Used when pattern-matching to conditionally IncRC extracted child pointers. */
 int64_t march_decrc_freed(void *p);
+
+/* Non-atomic reference counting — only safe for values provably owned by a
+   single thread (no actor send in their lifetime).  Faster than atomic ops
+   because they avoid memory barriers; the compiler may also optimize them
+   into register increments. */
+void  march_incrc_local(void *p);
+void  march_decrc_local(void *p);
 
 void  march_free(void *p);
 
@@ -38,6 +45,18 @@ int64_t march_string_byte_length(void *s);
 int64_t march_string_is_empty(void *s);
 void   *march_string_to_int(void *s);
 void   *march_string_join(void *list, void *sep);
+
+/* Actor link builtins. */
+/* link: establish a bidirectional crash-propagation link between two actors.
+   If either dies, the other receives a Down notification (and may crash too). */
+void    march_link(void *actor_a, void *actor_b);
+/* unlink: cancel a previously established link (best-effort, no-op if absent). */
+void    march_unlink(void *actor_a, void *actor_b);
+/* register_supervisor: record an actor as a supervisor with a given restart
+   strategy (0=one_for_one, 1=one_for_all, 2=rest_for_one), max_restarts, and
+   time window in seconds.  Children are registered separately via march_link. */
+void    march_register_supervisor(void *supervisor, int64_t strategy,
+                                   int64_t max_restarts, int64_t window_secs);
 
 /* Actor builtins.
  * Actor object layout (on top of the standard 16-byte header):

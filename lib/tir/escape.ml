@@ -54,7 +54,8 @@ let rec all_atom_vars (e : Tir.expr) : StringSet.t =
   | Tir.EField (a, _) -> vars_of_atom a
   | Tir.EUpdate (a, fields) ->
     StringSet.union (vars_of_atom a) (vars_of_atoms (List.map snd fields))
-  | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a -> vars_of_atom a
+  | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a
+  | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a -> vars_of_atom a
   | Tir.EReuse (a, _, args) ->
     StringSet.union (vars_of_atom a) (vars_of_atoms args)
 
@@ -170,8 +171,9 @@ let rec escaping_vars (e : Tir.expr) (candidates : StringSet.t) : StringSet.t =
     StringSet.union (escaping_vars e1 candidates) (escaping_vars e2 candidates)
 
   (* Non-escaping positions: ECase scrutinee (handled above), EField,
-     EIncRC, EDecRC, EFree, EReuse first position *)
-  | Tir.EField _ | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EFree _ ->
+     EIncRC, EDecRC, EFree, EReuse first position, atomic RC ops *)
+  | Tir.EField _ | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EFree _
+  | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ ->
     StringSet.empty
 
 (** Returns the subset of [candidates] for which EIncRC appears anywhere in [e].
@@ -179,6 +181,8 @@ let rec escaping_vars (e : Tir.expr) (candidates : StringSet.t) : StringSet.t =
 let rec has_incrc_for (e : Tir.expr) (candidates : StringSet.t) : StringSet.t =
   match e with
   | Tir.EIncRC (Tir.AVar v) when StringSet.mem v.Tir.v_name candidates ->
+    StringSet.singleton v.Tir.v_name
+  | Tir.EAtomicIncRC (Tir.AVar v) when StringSet.mem v.Tir.v_name candidates ->
     StringSet.singleton v.Tir.v_name
   | Tir.ELet (_, e1, e2) ->
     StringSet.union (has_incrc_for e1 candidates) (has_incrc_for e2 candidates)
@@ -221,12 +225,17 @@ let rec promote_expr (e : Tir.expr) (promotable : StringSet.t) : Tir.expr =
   | Tir.ESeq (Tir.EDecRC (Tir.AVar v), rest)
     when StringSet.mem v.Tir.v_name promotable ->
     promote_expr rest promotable
+  | Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v), rest)
+    when StringSet.mem v.Tir.v_name promotable ->
+    promote_expr rest promotable
   | Tir.ESeq (Tir.EFree (Tir.AVar v), rest)
     when StringSet.mem v.Tir.v_name promotable ->
     promote_expr rest promotable
 
-  (* Standalone EDecRC/EFree on promotable var — replace with unit no-op *)
+  (* Standalone EDecRC/EFree/EAtomicDecRC on promotable var — replace with unit no-op *)
   | Tir.EDecRC (Tir.AVar v) when StringSet.mem v.Tir.v_name promotable ->
+    unit_expr
+  | Tir.EAtomicDecRC (Tir.AVar v) when StringSet.mem v.Tir.v_name promotable ->
     unit_expr
   | Tir.EFree (Tir.AVar v) when StringSet.mem v.Tir.v_name promotable ->
     unit_expr
@@ -250,7 +259,7 @@ let rec promote_expr (e : Tir.expr) (promotable : StringSet.t) : Tir.expr =
   | Tir.EAtom _ | Tir.EApp _ | Tir.ECallPtr _
   | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _ | Tir.EUpdate _
   | Tir.EAlloc _ | Tir.EStackAlloc _ | Tir.EFree _ | Tir.EIncRC _
-  | Tir.EDecRC _ | Tir.EReuse _ ->
+  | Tir.EDecRC _ | Tir.EReuse _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ ->
     e
 
 (* ── Per-function entry ───────────────────────────────────────────────────── *)

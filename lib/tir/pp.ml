@@ -70,6 +70,8 @@ let rec string_of_expr = function
   | EFree a -> "free " ^ string_of_atom a
   | EIncRC a -> "inc_rc " ^ string_of_atom a
   | EDecRC a -> "dec_rc " ^ string_of_atom a
+  | EAtomicIncRC a -> "atomic_inc_rc " ^ string_of_atom a
+  | EAtomicDecRC a -> "atomic_dec_rc " ^ string_of_atom a
   | EReuse (a, ty, args) ->
     "reuse " ^ string_of_atom a ^ " as " ^ string_of_ty ty ^
     "(" ^ String.concat ", " (List.map string_of_atom args) ^ ")"

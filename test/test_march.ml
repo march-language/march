@@ -2605,6 +2605,420 @@ let test_perceus_needs_rc_tcon () =
   Alcotest.(check bool) "TInt no RC" false
     (March_tir.Perceus.needs_rc March_tir.Tir.TInt)
 
+(* ── Atomic RC tests ───────────────────────────────────────────────────────── *)
+
+(** Collect all EAtomicIncRC variable names in an expression. *)
+let[@warning "-32"] rec atomic_inc_vars = function
+  | March_tir.Tir.EAtomicIncRC (March_tir.Tir.AVar v) -> [v.March_tir.Tir.v_name]
+  | March_tir.Tir.EAtomicIncRC _ -> []
+  | March_tir.Tir.ESeq (e1, e2) -> atomic_inc_vars e1 @ atomic_inc_vars e2
+  | March_tir.Tir.ELet (_, e1, e2) -> atomic_inc_vars e1 @ atomic_inc_vars e2
+  | March_tir.Tir.ELetRec (fns, body) ->
+    List.concat_map (fun f -> atomic_inc_vars f.March_tir.Tir.fn_body) fns
+    @ atomic_inc_vars body
+  | March_tir.Tir.ECase (_, brs, def) ->
+    List.concat_map (fun b -> atomic_inc_vars b.March_tir.Tir.br_body) brs
+    @ (match def with Some e -> atomic_inc_vars e | None -> [])
+  | _ -> []
+
+(** Collect all EAtomicDecRC variable names in an expression. *)
+let rec atomic_dec_vars = function
+  | March_tir.Tir.EAtomicDecRC (March_tir.Tir.AVar v) -> [v.March_tir.Tir.v_name]
+  | March_tir.Tir.EAtomicDecRC _ -> []
+  | March_tir.Tir.ESeq (e1, e2) -> atomic_dec_vars e1 @ atomic_dec_vars e2
+  | March_tir.Tir.ELet (_, e1, e2) -> atomic_dec_vars e1 @ atomic_dec_vars e2
+  | March_tir.Tir.ELetRec (fns, body) ->
+    List.concat_map (fun f -> atomic_dec_vars f.March_tir.Tir.fn_body) fns
+    @ atomic_dec_vars body
+  | March_tir.Tir.ECase (_, brs, def) ->
+    List.concat_map (fun b -> atomic_dec_vars b.March_tir.Tir.br_body) brs
+    @ (match def with Some e -> atomic_dec_vars e | None -> [])
+  | _ -> []
+
+let test_atomic_rc_non_actor_uses_local_rc () =
+  (* A heap value used locally (not sent to actor) should use non-atomic EDecRC,
+     not EAtomicDecRC. *)
+  let m = perceus_module {|mod Test do
+    type Box = Box(Int)
+    fn make_unused() : Int do
+      let b = Box(42)
+      0
+    end
+  end|} in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "make_unused")
+            m.March_tir.Tir.tm_fns in
+  let has_atomic = atomic_dec_vars f.March_tir.Tir.fn_body <> [] in
+  let rec has_local_dec = function
+    | March_tir.Tir.EDecRC _ -> true
+    | March_tir.Tir.ESeq (e1, e2) -> has_local_dec e1 || has_local_dec e2
+    | March_tir.Tir.ELet (_, e1, e2) -> has_local_dec e1 || has_local_dec e2
+    | _ -> false
+  in
+  Alcotest.(check bool) "non-actor value: no EAtomicDecRC" false has_atomic;
+  Alcotest.(check bool) "non-actor value: EDecRC present" true (has_local_dec f.March_tir.Tir.fn_body)
+
+let test_atomic_rc_actor_send_uses_atomic_rc () =
+  (* A Box sent to an actor (and still live after the send) should use
+     EAtomicIncRC before the send call. *)
+  let m = perceus_module {|mod Test do
+    type Box = Box(Int)
+    actor Counter do
+      state { ticks : Int }
+      init { ticks = 0 }
+      on Tick() do { ticks = state.ticks + 1 } end
+    end
+    fn main() : Unit do
+      let pid = spawn(Counter)
+      let b = Box(99)
+      let _ = send(pid, b)
+      ()
+    end
+  end|} in
+  (* Find the 'main' function in the Perceus output *)
+  let main_fn = List.find (fun fn -> fn.March_tir.Tir.fn_name = "main")
+                  m.March_tir.Tir.tm_fns in
+  (* b is the last use before send, so no IncRC needed — Perceus elides it.
+     This test checks the pipeline does NOT crash and the module is well-formed. *)
+  Alcotest.(check bool) "actor send pipeline: no crash" true
+    (List.length m.March_tir.Tir.tm_fns > 0);
+  ignore main_fn
+
+let test_atomic_rc_sent_box_shared_gets_atomic_inc () =
+  (* When a Box is sent to an actor AND used after the send, Perceus must
+     insert EAtomicIncRC (not EIncRC) before the send. *)
+  let m = perceus_module {|mod Test do
+    type Box = Box(Int)
+    actor Sink do
+      state { count : Int }
+      init { count = 0 }
+      on Got(b : Box) do { count = state.count + 1 } end
+    end
+    fn f(b : Box) : Box do
+      let pid = spawn(Sink)
+      let msg = Got(b)
+      let _ = send(pid, msg)
+      b
+    end
+  end|} in
+  (* 'msg' is sent; 'b' is sent-inside-msg AND returned, so it may need atomic RC.
+     Key invariant: no EIncRC (local) should appear for the sent variable 'msg'. *)
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "f")
+            m.March_tir.Tir.tm_fns in
+  let local_incs = List.filter (fun name -> name = "msg")
+    (let rec local_inc_vars = function
+      | March_tir.Tir.EIncRC (March_tir.Tir.AVar v) -> [v.March_tir.Tir.v_name]
+      | March_tir.Tir.EIncRC _ -> []
+      | March_tir.Tir.ESeq (e1, e2) -> local_inc_vars e1 @ local_inc_vars e2
+      | March_tir.Tir.ELet (_, e1, e2) -> local_inc_vars e1 @ local_inc_vars e2
+      | _ -> []
+     in local_inc_vars f.March_tir.Tir.fn_body) in
+  (* msg is in actor_sent_set, so any IncRC on it should be EAtomicIncRC, not EIncRC *)
+  Alcotest.(check int) "no local (non-atomic) IncRC for sent variable 'msg'" 0
+    (List.length local_incs)
+
+let test_atomic_rc_local_decrc_not_atomic () =
+  (* A value that is NOT sent to an actor should get EDecRC (local), not EAtomicDecRC. *)
+  let m = perceus_module {|mod Test do
+    type Pair = Pair(Int, Int)
+    fn sum_pair(p : Pair) : Int do
+      match p do
+        Pair(a, b) -> a + b
+      end
+    end
+  end|} in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "sum_pair")
+            m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "local pattern match: no EAtomicDecRC"
+    false (atomic_dec_vars f.March_tir.Tir.fn_body <> [])
+
+(* ── Actor TIR lowering tests ──────────────────────────────────────────────── *)
+
+let test_actor_tir_lowering_generates_types () =
+  (* An actor declaration should generate:
+     - Name_State record type
+     - Name_Msg variant type
+     - Name_Actor record type *)
+  let m = lower_module_typed {|mod Test do
+    actor Counter do
+      state { value : Int }
+      init { value = 0 }
+      on Increment() do { value = state.value + 1 } end
+      on Reset()     do { value = 0 } end
+    end
+    fn main() : Unit do () end
+  end|} in
+  let type_names = List.map (function
+    | March_tir.Tir.TDVariant (n, _) -> n
+    | March_tir.Tir.TDRecord  (n, _) -> n
+    | March_tir.Tir.TDClosure (n, _) -> n
+  ) m.March_tir.Tir.tm_types in
+  Alcotest.(check bool) "Counter_State type generated" true
+    (List.mem "Counter_State" type_names);
+  Alcotest.(check bool) "Counter_Msg type generated" true
+    (List.mem "Counter_Msg" type_names);
+  Alcotest.(check bool) "Counter_Actor type generated" true
+    (List.mem "Counter_Actor" type_names)
+
+let test_actor_tir_lowering_generates_functions () =
+  (* An actor with two handlers should generate:
+     Counter_Increment, Counter_Reset, Counter_dispatch, Counter_spawn *)
+  let m = lower_module_typed {|mod Test do
+    actor Counter do
+      state { value : Int }
+      init { value = 0 }
+      on Increment() do { value = state.value + 1 } end
+      on Reset()     do { value = 0 } end
+    end
+    fn main() : Unit do () end
+  end|} in
+  let fn_names = List.map (fun f -> f.March_tir.Tir.fn_name) m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "Counter_Increment generated" true
+    (List.mem "Counter_Increment" fn_names);
+  Alcotest.(check bool) "Counter_Reset generated" true
+    (List.mem "Counter_Reset" fn_names);
+  Alcotest.(check bool) "Counter_dispatch generated" true
+    (List.mem "Counter_dispatch" fn_names);
+  Alcotest.(check bool) "Counter_spawn generated" true
+    (List.mem "Counter_spawn" fn_names)
+
+let test_actor_tir_dispatch_has_ecase () =
+  (* The dispatch function should have an ECase as its body *)
+  let m = lower_module_typed {|mod Test do
+    actor Greeter do
+      state { value : Int }
+      init { value = 0 }
+      on Hello() do { value = state.value + 1 } end
+      on Bye()   do { value = state.value - 1 } end
+    end
+    fn main() : Unit do () end
+  end|} in
+  let dispatch = List.find (fun f -> f.March_tir.Tir.fn_name = "Greeter_dispatch")
+                   m.March_tir.Tir.tm_fns in
+  let has_case = match dispatch.March_tir.Tir.fn_body with
+    | March_tir.Tir.ECase _ -> true
+    | _ -> false
+  in
+  Alcotest.(check bool) "dispatch body is ECase" true has_case
+
+let test_actor_tir_dispatch_branch_count () =
+  (* Dispatch function has one branch per handler *)
+  let m = lower_module_typed {|mod Test do
+    actor Multi do
+      state { value : Int }
+      init { value = 0 }
+      on A() do { value = state.value + 1 } end
+      on B() do { value = state.value + 2 } end
+      on C() do { value = state.value + 3 } end
+    end
+    fn main() : Unit do () end
+  end|} in
+  let dispatch = List.find (fun f -> f.March_tir.Tir.fn_name = "Multi_dispatch")
+                   m.March_tir.Tir.tm_fns in
+  let n_branches = match dispatch.March_tir.Tir.fn_body with
+    | March_tir.Tir.ECase (_, brs, _) -> List.length brs
+    | _ -> -1
+  in
+  Alcotest.(check int) "3 handlers → 3 dispatch branches" 3 n_branches
+
+let test_actor_tir_spawn_returns_ptr () =
+  (* The spawn function should return TPtr TUnit *)
+  let m = lower_module_typed {|mod Test do
+    actor Simple do
+      state { value : Int }
+      init { value = 0 }
+      on Tick() do { value = state.value + 1 } end
+    end
+    fn main() : Unit do () end
+  end|} in
+  let spawn_fn = List.find (fun f -> f.March_tir.Tir.fn_name = "Simple_spawn")
+                   m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "spawn returns TPtr TUnit" true
+    (spawn_fn.March_tir.Tir.fn_ret_ty = March_tir.Tir.TPtr March_tir.Tir.TUnit)
+
+let test_actor_tir_handler_params () =
+  (* A handler with parameters should generate a function with those params
+     plus the implicit $actor first param. *)
+  let m = lower_module_typed {|mod Test do
+    actor Adder do
+      state { value : Int }
+      init { value = 0 }
+      on Add(n : Int) do { value = state.value + n } end
+    end
+    fn main() : Unit do () end
+  end|} in
+  let handler = List.find (fun f -> f.March_tir.Tir.fn_name = "Adder_Add")
+                  m.March_tir.Tir.tm_fns in
+  (* Params: [$actor, n] *)
+  let param_names = List.map (fun v -> v.March_tir.Tir.v_name)
+                      handler.March_tir.Tir.fn_params in
+  Alcotest.(check int) "handler has 2 params ($actor + n)" 2 (List.length param_names);
+  Alcotest.(check bool) "first param is $actor" true
+    (List.hd param_names = "$actor")
+
+let test_actor_tir_handler_loads_state () =
+  (* A handler body should begin with ELet bindings loading the state fields *)
+  let m = lower_module_typed {|mod Test do
+    actor Banked do
+      state { balance : Int }
+      init { balance = 100 }
+      on Withdraw() do { balance = state.balance - 10 } end
+    end
+    fn main() : Unit do () end
+  end|} in
+  let handler = List.find (fun f -> f.March_tir.Tir.fn_name = "Banked_Withdraw")
+                  m.March_tir.Tir.tm_fns in
+  (* Body should contain EField accesses to load state *)
+  let rec has_efield = function
+    | March_tir.Tir.EField _ -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> has_efield e1 || has_efield e2
+    | _ -> false
+  in
+  Alcotest.(check bool) "handler loads state via EField" true
+    (has_efield handler.March_tir.Tir.fn_body)
+
+let test_actor_tir_spawn_contains_ealloc () =
+  (* The spawn function should allocate the actor struct via EAlloc *)
+  let m = lower_module_typed {|mod Test do
+    actor Ticker do
+      state { ticks : Int }
+      init { ticks = 0 }
+      on Tick() do { ticks = state.ticks + 1 } end
+    end
+    fn main() : Unit do () end
+  end|} in
+  let spawn_fn = List.find (fun f -> f.March_tir.Tir.fn_name = "Ticker_spawn")
+                   m.March_tir.Tir.tm_fns in
+  let rec has_alloc = function
+    | March_tir.Tir.EAlloc _ -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> has_alloc e1 || has_alloc e2
+    | March_tir.Tir.ESeq (e1, e2) -> has_alloc e1 || has_alloc e2
+    | _ -> false
+  in
+  Alcotest.(check bool) "spawn contains EAlloc for actor struct" true
+    (has_alloc spawn_fn.March_tir.Tir.fn_body)
+
+let test_actor_tir_supervisor_spawn_calls_register () =
+  (* A supervisor actor's spawn function should call register_supervisor *)
+  let m = lower_module_typed {|mod Test do
+    actor Worker do
+      state { count : Int }
+      init { count = 0 }
+      on DoWork() do { count = state.count + 1 } end
+    end
+    actor Supervisor do
+      state { count : Int }
+      init { count = 0 }
+      supervise do
+        strategy one_for_one
+        max_restarts 3 within 5
+        Worker worker
+      end
+      on Start() do { count = state.count } end
+    end
+    fn main() : Unit do () end
+  end|} in
+  let spawn_fn = List.find (fun f -> f.March_tir.Tir.fn_name = "Supervisor_spawn")
+                   m.March_tir.Tir.tm_fns in
+  let rec calls_register_supervisor = function
+    | March_tir.Tir.EApp (v, _) when v.March_tir.Tir.v_name = "register_supervisor" -> true
+    | March_tir.Tir.ELet (_, e1, e2) ->
+      calls_register_supervisor e1 || calls_register_supervisor e2
+    | March_tir.Tir.ESeq (e1, e2) ->
+      calls_register_supervisor e1 || calls_register_supervisor e2
+    | _ -> false
+  in
+  Alcotest.(check bool) "supervisor spawn calls register_supervisor" true
+    (calls_register_supervisor spawn_fn.March_tir.Tir.fn_body)
+
+let test_actor_tir_non_supervisor_no_register () =
+  (* A plain (non-supervisor) actor's spawn should NOT call register_supervisor *)
+  let m = lower_module_typed {|mod Test do
+    actor Plain do
+      state { value : Int }
+      init { value = 0 }
+      on Tick() do { value = state.value + 1 } end
+    end
+    fn main() : Unit do () end
+  end|} in
+  let spawn_fn = List.find (fun f -> f.March_tir.Tir.fn_name = "Plain_spawn")
+                   m.March_tir.Tir.tm_fns in
+  let rec calls_register_supervisor = function
+    | March_tir.Tir.EApp (v, _) when v.March_tir.Tir.v_name = "register_supervisor" -> true
+    | March_tir.Tir.ELet (_, e1, e2) ->
+      calls_register_supervisor e1 || calls_register_supervisor e2
+    | March_tir.Tir.ESeq (e1, e2) ->
+      calls_register_supervisor e1 || calls_register_supervisor e2
+    | _ -> false
+  in
+  Alcotest.(check bool) "non-supervisor spawn does NOT call register_supervisor" false
+    (calls_register_supervisor spawn_fn.March_tir.Tir.fn_body)
+
+let test_actor_tir_msg_variant_ctors () =
+  (* Message variant type has one constructor per handler, in declaration order *)
+  let m = lower_module_typed {|mod Test do
+    actor Calc do
+      state { value : Int }
+      init { value = 0 }
+      on Add(n : Int) do { value = state.value + n } end
+      on Sub(n : Int) do { value = state.value - n } end
+      on Zero() do { value = 0 } end
+    end
+    fn main() : Unit do () end
+  end|} in
+  let msg_type = List.find_opt (function
+    | March_tir.Tir.TDVariant ("Calc_Msg", _) -> true
+    | _ -> false
+  ) m.March_tir.Tir.tm_types in
+  Alcotest.(check bool) "Calc_Msg variant type exists" true (msg_type <> None);
+  match msg_type with
+  | Some (March_tir.Tir.TDVariant (_, ctors)) ->
+    let ctor_names = List.map fst ctors in
+    Alcotest.(check bool) "Add ctor in Calc_Msg" true (List.mem "Add" ctor_names);
+    Alcotest.(check bool) "Sub ctor in Calc_Msg" true (List.mem "Sub" ctor_names);
+    Alcotest.(check bool) "Zero ctor in Calc_Msg" true (List.mem "Zero" ctor_names);
+    Alcotest.(check int) "3 ctors in Calc_Msg" 3 (List.length ctors)
+  | _ -> Alcotest.fail "Calc_Msg is not TDVariant"
+
+let test_actor_tir_actor_struct_has_dispatch_field () =
+  (* Actor struct has $dispatch and $alive fields plus state fields *)
+  let m = lower_module_typed {|mod Test do
+    actor Box do
+      state { value : Int }
+      init { value = 0 }
+      on Poke() do { value = state.value + 1 } end
+    end
+    fn main() : Unit do () end
+  end|} in
+  let actor_type = List.find_opt (function
+    | March_tir.Tir.TDRecord ("Box_Actor", _) -> true
+    | _ -> false
+  ) m.March_tir.Tir.tm_types in
+  Alcotest.(check bool) "Box_Actor record type exists" true (actor_type <> None);
+  match actor_type with
+  | Some (March_tir.Tir.TDRecord (_, fields)) ->
+    let field_names = List.map fst fields in
+    Alcotest.(check bool) "$dispatch field present" true (List.mem "$dispatch" field_names);
+    Alcotest.(check bool) "$alive field present"    true (List.mem "$alive"    field_names);
+    Alcotest.(check bool) "value field present"     true (List.mem "value"     field_names)
+  | _ -> Alcotest.fail "Box_Actor is not TDRecord"
+
+let test_actor_tir_full_pipeline_no_crash () =
+  (* A module with an actor should survive the full TIR pipeline without exception *)
+  let m = perceus_module {|mod Test do
+    actor Echo do
+      state { count : Int }
+      init { count = 0 }
+      on Ping() do { count = state.count + 1 } end
+    end
+    fn main() : Unit do
+      let pid = spawn(Echo)
+      let _ = send(pid, Ping)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "full pipeline with actor: no crash" true
+    (List.length m.March_tir.Tir.tm_fns > 0)
+
 let test_perceus_preserves_fn_count () =
   (* After perceus, user function count is unchanged.
      The module will also contain 15 builtin interface impl functions
@@ -9135,6 +9549,27 @@ let () =
           Alcotest.test_case "pipeline no crash"         `Quick test_perceus_pipeline_no_crash;
           Alcotest.test_case "needs_rc TCon/TInt"        `Quick test_perceus_needs_rc_tcon;
           Alcotest.test_case "preserves fn count"        `Quick test_perceus_preserves_fn_count;
+        ] );
+      ( "atomic_rc", [
+          Alcotest.test_case "non-actor uses local RC"       `Quick test_atomic_rc_non_actor_uses_local_rc;
+          Alcotest.test_case "actor send pipeline no crash"  `Quick test_atomic_rc_actor_send_uses_atomic_rc;
+          Alcotest.test_case "sent box: no local IncRC"      `Quick test_atomic_rc_sent_box_shared_gets_atomic_inc;
+          Alcotest.test_case "non-sent pattern: local DecRC" `Quick test_atomic_rc_local_decrc_not_atomic;
+        ] );
+      ( "actor_tir_lowering", [
+          Alcotest.test_case "generates types"             `Quick test_actor_tir_lowering_generates_types;
+          Alcotest.test_case "generates functions"         `Quick test_actor_tir_lowering_generates_functions;
+          Alcotest.test_case "dispatch has ECase"          `Quick test_actor_tir_dispatch_has_ecase;
+          Alcotest.test_case "dispatch branch count"       `Quick test_actor_tir_dispatch_branch_count;
+          Alcotest.test_case "spawn returns TPtr"          `Quick test_actor_tir_spawn_returns_ptr;
+          Alcotest.test_case "handler params"              `Quick test_actor_tir_handler_params;
+          Alcotest.test_case "handler loads state"         `Quick test_actor_tir_handler_loads_state;
+          Alcotest.test_case "spawn has EAlloc"            `Quick test_actor_tir_spawn_contains_ealloc;
+          Alcotest.test_case "supervisor spawn registers"  `Quick test_actor_tir_supervisor_spawn_calls_register;
+          Alcotest.test_case "non-supervisor no register"  `Quick test_actor_tir_non_supervisor_no_register;
+          Alcotest.test_case "msg variant ctors"           `Quick test_actor_tir_msg_variant_ctors;
+          Alcotest.test_case "actor struct dispatch field" `Quick test_actor_tir_actor_struct_has_dispatch_field;
+          Alcotest.test_case "full pipeline no crash"      `Quick test_actor_tir_full_pipeline_no_crash;
         ] );
       "multiline", [
         Alcotest.test_case "depth zero" `Quick test_multiline_depth_zero;

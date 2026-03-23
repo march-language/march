@@ -9,7 +9,8 @@ let inline_size_threshold = 15
 let rec node_count : Tir.expr -> int = function
   | Tir.EAtom _ | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _
   | Tir.EUpdate _ | Tir.EAlloc _ | Tir.EStackAlloc _
-  | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EFree _ | Tir.EReuse _ -> 1
+  | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EFree _ | Tir.EReuse _
+  | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ -> 1
   | Tir.EApp (_, args)     -> 1 + List.length args
   | Tir.ECallPtr (_, args) -> 1 + List.length args
   | Tir.ELet (_, rhs, body) -> 1 + node_count rhs + node_count body
@@ -99,6 +100,8 @@ let alpha_rename (params : Tir.var list) (body : Tir.expr)
     | Tir.EFree a            -> Tir.EFree (subst_atom a)
     | Tir.EIncRC a           -> Tir.EIncRC (subst_atom a)
     | Tir.EDecRC a           -> Tir.EDecRC (subst_atom a)
+    | Tir.EAtomicIncRC a     -> Tir.EAtomicIncRC (subst_atom a)
+    | Tir.EAtomicDecRC a     -> Tir.EAtomicDecRC (subst_atom a)
     | Tir.EReuse (a, ty, args) ->
       Tir.EReuse (subst_atom a, ty, List.map subst_atom args)
     | Tir.ESeq (e1, e2)      -> Tir.ESeq (subst_expr e1, subst_expr e2)

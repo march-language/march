@@ -39,7 +39,8 @@ let rec free_vars : Tir.expr -> StringSet.t = function
   | Tir.EField (a, _)        -> free_atom a
   | Tir.EUpdate (a, fields)  ->
     List.fold_left (fun s (_, v) -> StringSet.union s (free_atom v)) (free_atom a) fields
-  | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a -> free_atom a
+  | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a
+  | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a -> free_atom a
   | Tir.EReuse (a, _, args)  ->
     List.fold_left (fun s v -> StringSet.union s (free_atom v)) (free_atom a) args
   | Tir.ESeq (e1, e2)        -> StringSet.union (free_vars e1) (free_vars e2)
