@@ -27,7 +27,7 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ### Tooling: Forge Build Tool
 
-- [ ] **Implement `forge`** — Spec written at `specs/plans/forge-spec.md`. Forge is the unified build tool for March (like Cargo/Mix). Needs implementation as a new binary (`bin/forge.ml` or a separate `forge/` package). Core commands: `forge new`, `forge build`, `forge run`, `forge test`, `forge format`, `forge interactive`, `forge deps`, `forge clean`. Integrates with the existing CAS (`lib/cas/`). Depends on: project template scaffolding, `forge.toml` parser, multi-file compilation support.
+- ✅ **Implement `forge`** — Implemented as `forge/` package. Commands: `forge new`, `forge build`, `forge run`, `forge test`, `forge format`, `forge interactive`/`i`, `forge deps`, `forge clean`. Template scaffolding generates valid March code (PascalCase module names, `do/end` fn bodies, `println` builtin). 15 tests in `forge/test/test_forge.ml`.
 
 ### Language: Application Entry Point
 
@@ -50,7 +50,7 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 - [ ] **Epoch-based capability revocation** — `send(cap, msg)` does not yet validate the epoch against a revocation list. The `Cap(A, e)` type carries an epoch parameter but it is not checked at runtime in `eval.ml`. Stubbed in Phase 1. Full implementation requires a revocation table and `(pid, epoch)` comparison in `eval.ml` and the compiled runtime.
 - [ ] **Supervisor restart policies: `rest_for_one`/`one_for_all`** — `max_restarts` window enforcement is implemented. The `restart_policy` field (`one_for_one` only currently) should support `rest_for_one` (restart child and all children started after it) and `one_for_all` (restart all children on any failure), as specced in `specs/features/actor-system.md`.
-- [ ] **Improve error messages for complex types** — Nested generics (`Map(String, List(Vec(Int, N)))`) produce very long error messages. Need: abbreviated type aliases in display, pretty-printer with line-wrapping.
+- ✅ **Improve error messages for complex types** — Added `pp_ty_pretty` (line-wrapping at 60 chars with indented args), `find_arg_mismatch` (identifies which arg differs), and enhanced `report_mismatch` with multi-line format for long types and contextual notes identifying the mismatching arg/field.
 
 ---
 
@@ -60,7 +60,7 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 - [ ] **MCP server for March** — An MCP (Model Context Protocol) server that exposes March's type checker and compiler as tools for LLM agents. Post-LSP, pre-1.0. Would expose: typecheck a snippet, get type at position, search by type signature, expand typed holes.
 - [ ] **Supervision tree spec V2** — The current actor-system spec allows linear-typed values to be sent as messages. This creates problems: a linear value sent to a dead actor is lost (use-after-move). V2 should ban linear type messages entirely (only `Send`/`Recv` handles transferable values) and redesign the message transfer protocol to preserve linearity across actor boundaries.
-- [ ] **`SRec` full multi-turn testing** — `unfold_srec` is implemented in typecheck.ml but multi-turn recursive protocol usage (deeply nested `SRec`/`SVar` chains) needs more test coverage. Add tests for ping-pong-style looping protocols.
+- ✅ **`SRec` full multi-turn testing** — Added 6 SRec tests: ping-pong loop typecheck, unfold simple/multi-step/nested unit tests, SChoose inside SRec, wrong type in recursive loop error.
 
 ### Testing
 
