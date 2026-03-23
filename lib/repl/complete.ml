@@ -1,7 +1,7 @@
 (** Tab completion engine for the March REPL.
     Context-aware: commands, keywords, scope names, type names, constructors. *)
 
-let repl_commands = [":quit"; ":q"; ":env"; ":help"; ":type"; ":clear"; ":reset"; ":load"; ":save"]
+let repl_commands = [":quit"; ":q"; ":env"; ":help"; ":type"; ":inspect"; ":i"; ":clear"; ":reset"; ":load"; ":reload"; ":doc"; ":set"; ":save"]
 
 let keywords = [
   "fn"; "do"; "end"; "let"; "match"; "with"; "if"; "then"; "else";

@@ -208,16 +208,17 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
   maybe_precompile_stdlib jit_ctx ~stdlib_decls ~type_map;
   let t_s4 = Unix.gettimeofday () in
   Printf.eprintf "[timing] precompile: %.3fs\n%!" (t_s4 -. t_s3);
-  let env      = ref e0 in
-  let tc_env   = ref tc0 in
-  let result_h = Result_vars.create () in
-  let hist     = History.create ~max_size:(history_size ()) in
+  let env         = ref e0 in
+  let tc_env      = ref tc0 in
+  let result_h    = Result_vars.create () in
+  let hist        = History.create ~max_size:(history_size ()) in
   History.load hist (history_path ());
-  let prompt_num = ref 1 in
-  let running    = ref true in
-  let buf        = Buffer.create 64 in
-  let first_line = ref true in
-  let show_type  = ref false in
+  let prompt_num  = ref 1 in
+  let running     = ref true in
+  let buf         = Buffer.create 64 in
+  let first_line  = ref true in
+  let show_type   = ref false in
+  let loaded_file : string option ref = ref None in
 
   let print_diag (d : March_errors.Errors.diagnostic) =
     let sev = match d.severity with
@@ -227,6 +228,43 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
     in
     Printf.eprintf "%s: %s\n%!" sev d.message;
     List.iter (fun note -> Printf.eprintf "note: %s\n%!" note) d.notes
+  in
+
+  (* Load a file path into env/tc_env, printing any errors to stderr. *)
+  let do_load_file path =
+    match (try
+      let ic = open_in path in
+      let n  = in_channel_length ic in
+      let b  = Bytes.create n in
+      really_input ic b 0 n;
+      close_in ic;
+      Some (Bytes.to_string b)
+    with Sys_error msg -> Printf.eprintf "error: cannot open %s: %s\n%!" path msg; None) with
+    | None -> ()
+    | Some file_src ->
+      let lexbuf = Lexing.from_string file_src in
+      (match (try
+        let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+        Some (March_desugar.Desugar.desugar_module m)
+      with exn ->
+        Printf.eprintf "parse error in %s: %s\n%!" path (Printexc.to_string exn); None) with
+      | None -> ()
+      | Some desugared ->
+        List.iter (fun decl ->
+          let input_ctx = March_errors.Errors.create () in
+          let input_tc  = { !tc_env with errors = input_ctx } in
+          let new_tc    = March_typecheck.Typecheck.check_decl input_tc decl in
+          if not (March_errors.Errors.has_errors input_ctx) then begin
+            (try
+              env    := March_eval.Eval.eval_decl !env decl;
+              tc_env := { new_tc with errors = March_errors.Errors.create () }
+            with exn ->
+              Printf.eprintf "runtime error loading %s: %s\n%!" path (Printexc.to_string exn))
+          end else
+            List.iter print_diag (March_errors.Errors.sorted input_ctx)
+        ) desugared.March_ast.Ast.mod_decls;
+        Printf.printf "loaded %s\n%!" path;
+        loaded_file := Some path)
   in
 
   (* Show :where immediately on entry. *)
@@ -420,6 +458,17 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                  if not (List.mem_assoc k env_baseline) then
                    Printf.printf "  %s\n" k
                ) !env
+             | ":clear" ->
+               (* Clear terminal screen and reprint prompt on next iteration *)
+               Printf.printf "\027[2J\027[H%!"
+             | ":reset" when not is_debug ->
+               let base_tc' = March_typecheck.Typecheck.base_env
+                 (March_errors.Errors.create ()) type_map in
+               let tc_pre' = preregister_stdlib_types base_tc' stdlib_decls in
+               let (e', tc') = load_decls_into_env March_eval.Eval.base_env tc_pre' stdlib_decls in
+               env    := e';
+               tc_env := tc';
+               Printf.printf "REPL state reset.\n%!"
              | ":help" ->
                if is_debug then
                List.iter (fun s -> Printf.printf "%s\n" s) [
@@ -447,19 +496,41 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                else
                List.iter (fun s -> Printf.printf "%s\n" s) [
                  "Commands:";
-                 "  :quit :q        — exit";
-                 "  :env            — list bindings";
-                 "  :type <expr>    — show type without evaluating";
-                 "  :doc <name>     — show documentation for a name";
-                 "  :reload         — reload the last :load-ed file";
-                 "  :set +t         — show inferred type after each expression";
-                 "  :set -t         — hide inferred type (default)";
-                 "  :load <file>    — load a .march file";
-                 "  :help           — this message";
+                 "  :quit :q            — exit";
+                 "  :env                — list bindings in scope";
+                 "  :type <expr>        — show inferred type without evaluating";
+                 "  :inspect <expr>     — show type and value";
+                 "  :doc <name>         — show documentation for a name";
+                 "  :load <file>        — load a .march source file";
+                 "  :reload             — reload the last :load-ed file";
+                 "  :clear              — clear screen";
+                 "  :reset              — reset all bindings to stdlib baseline";
+                 "  :set +t             — show inferred type after each expression";
+                 "  :set -t             — hide inferred type (default)";
+                 "  :help               — this message";
                  "";
-                 "Keys: Tab: complete | Up/Down: history";
+                 "Aliases: :i = :inspect  :t = :type (outside debug mode)";
                ]
-             | ":reload" ->
+             | src when String.length src > 5 && String.sub src 0 5 = ":load" && not is_debug ->
+               let path = String.trim (String.sub src 5 (String.length src - 5)) in
+               if path = "" then
+                 Printf.eprintf "usage: :load <file>\n%!"
+               else
+                 do_load_file path
+             | ":reload" when not is_debug ->
+               (match !loaded_file with
+                | None -> Printf.printf "Nothing to reload (use :load <file> first).\n%!"
+                | Some path ->
+                  (* Reset to stdlib baseline then reload *)
+                  let base_tc' = March_typecheck.Typecheck.base_env
+                    (March_errors.Errors.create ()) type_map in
+                  let tc_pre' = preregister_stdlib_types base_tc' stdlib_decls in
+                  let (e', tc') = load_decls_into_env March_eval.Eval.base_env tc_pre' stdlib_decls in
+                  env    := e';
+                  tc_env := tc';
+                  do_load_file path;
+                  Printf.printf "reloaded %s\n%!" path)
+             | ":reload" when is_debug ->
                Printf.printf "Nothing to reload.\n%!"
              | src when String.length src > 5 && String.sub src 0 5 = ":type" ->
                let expr_src = String.trim (String.sub src 5 (String.length src - 5)) in
@@ -480,6 +551,46 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                      Printf.eprintf "type error\n%!"
                    else
                      Printf.printf "- : %s\n%!" ty_str
+                 | _ -> Printf.eprintf "parse error\n%!")
+               end
+             | src when (let t = String.trim src in
+                          (String.length t >= 8 && String.sub t 0 8 = ":inspect")
+                          || (String.length t >= 2 && String.sub t 0 2 = ":i"
+                              && (String.length t = 2 || t.[2] = ' '))) && not is_debug ->
+               (* :inspect expr  /  :i expr — show type and value *)
+               let prefix_len =
+                 let t = String.trim src in
+                 if String.length t >= 8 && String.sub t 0 8 = ":inspect" then 8
+                 else 2
+               in
+               let expr_src = String.trim (String.sub (String.trim src) prefix_len
+                 (String.length (String.trim src) - prefix_len)) in
+               if expr_src = "" then
+                 Printf.eprintf "usage: :inspect <expr>\n%!"
+               else begin
+                 let lexbuf = Lexing.from_string expr_src in
+                 (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+                         with _ -> None) with
+                 | Some (March_ast.Ast.ReplExpr e) ->
+                   let e' = March_desugar.Desugar.desugar_expr e in
+                   let input_ctx = March_errors.Errors.create () in
+                   let input_tc  = { !tc_env with errors = input_ctx } in
+                   let inferred  = March_typecheck.Typecheck.infer_expr input_tc e' in
+                   let ty_str    = March_typecheck.Typecheck.pp_ty
+                     (March_typecheck.Typecheck.repr inferred) in
+                   if March_errors.Errors.has_errors input_ctx then
+                     Printf.eprintf "type error\n%!"
+                   else begin
+                     (try
+                        let v   = March_eval.Eval.eval_expr !env e' in
+                        let vs  = March_eval.Eval.value_to_string_pretty v in
+                        Printf.printf "type  : %s\nvalue : %s\n%!" ty_str vs
+                      with
+                      | March_eval.Eval.Eval_error msg ->
+                        Printf.eprintf "runtime error: %s\n%!" msg
+                      | exn ->
+                        Printf.eprintf "error: %s\n%!" (Printexc.to_string exn))
+                   end
                  | _ -> Printf.eprintf "parse error\n%!")
                end
              | src when String.length src > 4 && String.sub src 0 4 = ":doc" ->
@@ -1241,17 +1352,18 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
           else
           List.iter (add_line Notty.A.empty) [
             "Commands:";
-            "  :quit :q        — exit";
-            "  :env            — list bindings";
-            "  :type <expr>    — show type without evaluating";
-            "  :doc <name>     — show documentation for a name";
-            "  :reload         — reload the last :load-ed file";
-            "  :set +t         — show inferred type after each expression";
-            "  :set -t         — hide inferred type (default)";
-            "  :clear          — clear transcript (keeps bindings)";
-            "  :reset          — reset all bindings";
-            "  :load <file>    — load a .march file";
-            "  :help           — this message";
+            "  :quit :q            — exit";
+            "  :env                — list bindings in scope";
+            "  :type <expr>        — show inferred type without evaluating";
+            "  :inspect <expr>     — show type and value  (alias: :i)";
+            "  :doc <name>         — show documentation for a name";
+            "  :load <file>        — load a .march source file";
+            "  :reload             — reload the last :load-ed file";
+            "  :clear              — clear transcript (keeps bindings)";
+            "  :reset              — reset all bindings to stdlib baseline";
+            "  :set +t             — show inferred type after each expression";
+            "  :set -t             — hide inferred type (default)";
+            "  :help               — this message";
             "";
             "Keys: Tab: complete | Up/Down: history";
             "      PgUp/PgDn or mouse wheel: scroll history";
@@ -1359,6 +1471,47 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                      ) (March_errors.Errors.sorted input_ctx)
                  ) desugared.March_ast.Ast.mod_decls;
                  add_line Notty.A.(fg green) (Printf.sprintf "reloaded %s" path))))
+        | src when (let t = String.trim src in
+                      (String.length t >= 8 && String.sub t 0 8 = ":inspect")
+                      || (String.length t >= 2 && String.sub t 0 2 = ":i"
+                          && (String.length t = 2 || t.[2] = ' '))) && not is_debug ->
+          (* :inspect expr  /  :i expr — show type and value *)
+          let prefix_len =
+            let t = String.trim src in
+            if String.length t >= 8 && String.sub t 0 8 = ":inspect" then 8
+            else 2
+          in
+          let expr_src = String.trim (String.sub (String.trim src) prefix_len
+            (String.length (String.trim src) - prefix_len)) in
+          if expr_src = "" then
+            add_line Notty.A.(fg red) "usage: :inspect <expr>"
+          else begin
+            let lexbuf = Lexing.from_string expr_src in
+            (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+                    with _ -> None) with
+            | Some (March_ast.Ast.ReplExpr e) ->
+              let e' = March_desugar.Desugar.desugar_expr e in
+              let input_ctx = March_errors.Errors.create () in
+              let input_tc  = { !tc_env with errors = input_ctx } in
+              let inferred  = March_typecheck.Typecheck.infer_expr input_tc e' in
+              let ty_str    = March_typecheck.Typecheck.pp_ty
+                (March_typecheck.Typecheck.repr inferred) in
+              if March_errors.Errors.has_errors input_ctx then
+                add_line Notty.A.(fg red) "type error"
+              else begin
+                (try
+                   let v   = March_eval.Eval.eval_expr !env e' in
+                   let vs  = March_eval.Eval.value_to_string_pretty v in
+                   add_line Notty.A.(fg cyan) (Printf.sprintf "type  : %s" ty_str);
+                   add_line Notty.A.empty     (Printf.sprintf "value : %s" vs)
+                 with
+                 | March_eval.Eval.Eval_error msg ->
+                   add_line Notty.A.(fg red) (Printf.sprintf "runtime error: %s" msg)
+                 | exn ->
+                   add_line Notty.A.(fg red) (Printf.sprintf "error: %s" (Printexc.to_string exn)))
+              end
+            | _ -> add_line Notty.A.(fg red) "parse error")
+          end
         | src when String.length src > 4 && String.sub src 0 4 = ":doc" ->
           let name = String.trim (String.sub src 4 (String.length src - 4)) in
           if name = "" then

@@ -526,21 +526,42 @@ let rec value_to_string v =
     Printf.sprintf "Chan(%s#%d, %s)" ce.ce_proto ce.ce_id ce.ce_role
 
 (** Pretty-print a value with indented multi-line layout when the flat
-    representation exceeds [width] characters. *)
-let value_to_string_pretty ?(width=80) v =
+    representation exceeds [width] characters.
+    Truncates collections longer than [max_items] with "... (N more)". *)
+let value_to_string_pretty ?(width=80) ?(max_items=50) ?(max_depth=6) v =
   let flat = value_to_string v in
   if String.length flat <= width then flat
   else
     let indent n = String.make n ' ' in
+    let truncate_list items pp_item depth =
+      let n = List.length items in
+      if n <= max_items then
+        List.map (pp_item depth) items
+      else
+        let shown = List.filteri (fun i _ -> i < max_items) items in
+        List.map (pp_item depth) shown
+        @ [Printf.sprintf "... (%d more)" (n - max_items)]
+    in
+    let truncate_fields fields pp_field depth =
+      let n = List.length fields in
+      if n <= max_items then
+        List.map (pp_field depth) fields
+      else
+        let shown = List.filteri (fun i _ -> i < max_items) fields in
+        List.map (pp_field depth) shown
+        @ [Printf.sprintf "... (%d more fields)" (n - max_items)]
+    in
     let rec pp depth v =
+      if depth >= max_depth then "<...>" else
       let flat_v = value_to_string v in
       if String.length flat_v <= width - depth * 2 then flat_v
       else match v with
       | VRecord fields ->
         let pad = indent (depth * 2 + 2) in
         let close_pad = indent (depth * 2) in
-        "{ " ^ String.concat ("\n" ^ pad ^ ", ")
-          (List.map (fun (k, fv) -> k ^ " = " ^ pp (depth + 1) fv) fields)
+        let strs = truncate_fields fields
+          (fun d (k, fv) -> k ^ " = " ^ pp (d + 1) fv) depth in
+        "{ " ^ String.concat ("\n" ^ pad ^ ", ") strs
         ^ "\n" ^ close_pad ^ "}"
       | VTuple vs ->
         let pad = indent (depth * 2 + 2) in
@@ -552,7 +573,8 @@ let value_to_string_pretty ?(width=80) v =
         let elems = list_elems [] lv in
         let pad = indent (depth * 2 + 2) in
         let close_pad = indent (depth * 2) in
-        "[ " ^ String.concat ("\n" ^ pad ^ ", ") (List.map (pp (depth + 1)) elems)
+        let strs = truncate_list elems (fun d e -> pp d e) (depth + 1) in
+        "[ " ^ String.concat ("\n" ^ pad ^ ", ") strs
         ^ "\n" ^ close_pad ^ "]"
       | VCon (tag, args) when args <> [] ->
         let pad = indent (depth * 2 + 2) in

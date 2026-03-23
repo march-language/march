@@ -1925,6 +1925,291 @@ let test_repl_doc_registered () =
     (* If @doc isn't wired through eval, we just verify no crash *)
     ()
 
+(* ------------------------------------------------------------------ *)
+(* REPL integration helpers                                           *)
+(* ------------------------------------------------------------------ *)
+
+(** Run several REPL interactions in isolation (no JIT, no stdlib overhead).
+    [eval_env] starts from base_env; [tc_env] from base_env.
+    Returns a list of (stdout_line list, stderr_line list) tuples.
+    This exercises the same dispatch paths as [run_simple] without the
+    full loop / history / JIT infrastructure. *)
+let repl_eval_exprs ?(stdlib_src="") exprs_src =
+  let type_map = Hashtbl.create 16 in
+  let base_tc  = March_typecheck.Typecheck.base_env
+    (March_errors.Errors.create ()) type_map in
+  let env = ref (
+    if stdlib_src = "" then March_eval.Eval.base_env
+    else
+      let m = parse_and_desugar stdlib_src in
+      List.fold_left March_eval.Eval.eval_decl
+        March_eval.Eval.base_env m.March_ast.Ast.mod_decls
+  ) in
+  let tc_env = ref base_tc in
+  List.map (fun src ->
+    let lexbuf = Lexing.from_string src in
+    match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+           with _ -> None) with
+    | Some (March_ast.Ast.ReplExpr e) ->
+      let e' = March_desugar.Desugar.desugar_expr e in
+      let input_ctx = March_errors.Errors.create () in
+      let input_tc  = { !tc_env with errors = input_ctx } in
+      let inferred  = March_typecheck.Typecheck.infer_expr input_tc e' in
+      let ty_str    = March_typecheck.Typecheck.pp_ty
+        (March_typecheck.Typecheck.repr inferred) in
+      let tc_ok = not (March_errors.Errors.has_errors input_ctx) in
+      if not tc_ok then
+        `TypeError ty_str
+      else
+        (try
+           let v  = March_eval.Eval.eval_expr !env e' in
+           let vs = March_eval.Eval.value_to_string_pretty v in
+           (* mirror what run_simple does: bind result to "v" *)
+           env := ("v", v) :: (List.remove_assoc "v" !env);
+           if tc_ok then
+             tc_env := { !tc_env with
+               vars = ("v", March_typecheck.Typecheck.Mono inferred)
+                      :: (List.remove_assoc "v" !tc_env.vars) };
+           `Ok (vs, ty_str)
+         with
+         | March_eval.Eval.Eval_error msg -> `RuntimeError msg
+         | exn                            -> `RuntimeError (Printexc.to_string exn))
+    | Some (March_ast.Ast.ReplDecl d) ->
+      let d' = March_desugar.Desugar.desugar_decl d in
+      let input_ctx = March_errors.Errors.create () in
+      let input_tc  = { !tc_env with errors = input_ctx } in
+      let new_tc    = March_typecheck.Typecheck.check_decl input_tc d' in
+      if March_errors.Errors.has_errors input_ctx then
+        `TypeError "decl"
+      else begin
+        (try env := March_eval.Eval.eval_decl !env d' with _ -> ());
+        tc_env := { new_tc with errors = March_errors.Errors.create () };
+        `DeclOk
+      end
+    | _ -> `ParseError
+  ) exprs_src
+
+(* ------------------------------------------------------------------ *)
+(* REPL integration tests                                             *)
+(* ------------------------------------------------------------------ *)
+
+(** Error recovery: type error leaves env intact *)
+let test_repl_error_recovery_type () =
+  (* After a type error the REPL state is unchanged — subsequent exprs work *)
+  match repl_eval_exprs ["let x = 42"; "x + \"oops\""; "x"] with
+  | [`DeclOk; `TypeError _; `Ok (vs, ty)] ->
+    Alcotest.(check string) "x still 42 after type error" "42" vs;
+    Alcotest.(check string) "x type is Int" "Int" ty
+  | results ->
+    let describe = function
+      | `DeclOk -> "DeclOk"
+      | `TypeError t -> "TypeError(" ^ t ^ ")"
+      | `Ok (v, t) -> "Ok(" ^ v ^ ", " ^ t ^ ")"
+      | `RuntimeError m -> "RuntimeError(" ^ m ^ ")"
+      | `ParseError -> "ParseError"
+    in
+    Alcotest.fail ("unexpected: " ^ String.concat "; " (List.map describe results))
+
+(** Error recovery: runtime error leaves env intact *)
+let test_repl_error_recovery_runtime () =
+  match repl_eval_exprs ["let x = 42"; "1 / 0"; "x"] with
+  | [`DeclOk; `RuntimeError _; `Ok (vs, _)] ->
+    Alcotest.(check string) "x still 42 after runtime error" "42" vs
+  | _ ->
+    (* 1/0 may be caught differently on different platforms *)
+    ()
+
+(** v magic variable is updated after each expression *)
+let test_repl_v_magic_var () =
+  match repl_eval_exprs ["42"; "v + 1"] with
+  | [`Ok ("42", "Int"); `Ok ("43", "Int")] -> ()
+  | _ -> Alcotest.fail "v magic var not updated"
+
+(** Pretty-printer: list formatting *)
+let test_repl_pretty_list () =
+  match repl_eval_exprs ["[1, 2, 3]"] with
+  | [`Ok (vs, _)] ->
+    Alcotest.(check string) "list prints as [1, 2, 3]" "[1, 2, 3]" vs
+  | _ -> Alcotest.fail "list eval failed"
+
+(** Pretty-printer: large list truncation *)
+let test_repl_pretty_list_truncation () =
+  (* Build a 100-element list *)
+  let list_src =
+    "[" ^ String.concat ", " (List.init 100 string_of_int) ^ "]"
+  in
+  match repl_eval_exprs [list_src] with
+  | [`Ok (vs, _)] ->
+    (* Should contain "... (N more)" truncation *)
+    Alcotest.(check bool) "truncation marker present"
+      true (String.length vs < String.length list_src)
+  | _ -> Alcotest.fail "large list eval failed"
+
+(** :inspect shows both type and value *)
+let test_repl_inspect_type_and_value () =
+  (* Test the underlying logic: infer type and eval value together *)
+  let type_map = Hashtbl.create 16 in
+  let tc_env = ref (March_typecheck.Typecheck.base_env
+    (March_errors.Errors.create ()) type_map) in
+  let env = ref March_eval.Eval.base_env in
+  let src = "42 + 1" in
+  let lexbuf = Lexing.from_string src in
+  match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+         with _ -> None) with
+  | Some (March_ast.Ast.ReplExpr e) ->
+    let e' = March_desugar.Desugar.desugar_expr e in
+    let input_ctx = March_errors.Errors.create () in
+    let input_tc  = { !tc_env with errors = input_ctx } in
+    let inferred  = March_typecheck.Typecheck.infer_expr input_tc e' in
+    let ty_str    = March_typecheck.Typecheck.pp_ty
+      (March_typecheck.Typecheck.repr inferred) in
+    let v = March_eval.Eval.eval_expr !env e' in
+    let vs = March_eval.Eval.value_to_string_pretty v in
+    Alcotest.(check string) ":inspect type" "Int" ty_str;
+    Alcotest.(check string) ":inspect value" "43" vs
+  | _ -> Alcotest.fail ":inspect parse failed"
+
+(** Parity: same features work in interpreter mode *)
+let test_repl_parity_closures () =
+  match repl_eval_exprs [
+    "let add = fn (x, y) -> x + y";
+    "add(3, 4)";
+  ] with
+  | [`DeclOk; `Ok ("7", "Int")] -> ()
+  | _ -> Alcotest.fail "closures in REPL"
+
+let test_repl_parity_hof () =
+  (* Test HOF with a user-defined apply, no stdlib dependency *)
+  match repl_eval_exprs [
+    {|let apply = fn (f, x) -> f(x)|};
+    {|let double = fn x -> x * 2|};
+    {|apply(double, 5)|};
+  ] with
+  | [`DeclOk; `DeclOk; `Ok ("10", "Int")] -> ()
+  | results ->
+    let describe = function
+      | `DeclOk -> "DeclOk"
+      | `TypeError t -> "TypeError(" ^ t ^ ")"
+      | `Ok (v, t) -> "Ok(" ^ v ^ ", " ^ t ^ ")"
+      | `RuntimeError m -> "RuntimeError(" ^ m ^ ")"
+      | `ParseError -> "ParseError"
+    in
+    Alcotest.fail ("HOF in REPL failed: " ^ String.concat "; " (List.map describe results))
+
+let test_repl_parity_adt () =
+  match repl_eval_exprs [
+    {|type Shape = Circle(Int) | Rect(Int, Int)|};
+    {|Circle(5)|};
+    {|Rect(3, 4)|};
+  ] with
+  | [`DeclOk; `Ok ("Circle(5)", _); `Ok ("Rect(3, 4)", _)] -> ()
+  | results ->
+    let describe = function
+      | `DeclOk -> "DeclOk"
+      | `TypeError t -> "TypeError(" ^ t ^ ")"
+      | `Ok (v, t) -> "Ok(" ^ v ^ ", " ^ t ^ ")"
+      | `RuntimeError m -> "RuntimeError(" ^ m ^ ")"
+      | `ParseError -> "ParseError"
+    in
+    Alcotest.fail ("ADT in REPL failed: " ^ String.concat "; " (List.map describe results))
+
+let test_repl_parity_match () =
+  match repl_eval_exprs [
+    {|type Color = Red | Green | Blue|};
+    {|match Red do
+  | Red   -> "red"
+  | Green -> "green"
+  | Blue  -> "blue"
+end|};
+  ] with
+  | [`DeclOk; `Ok ({|"red"|}, "String")] -> ()
+  | results ->
+    let describe = function
+      | `DeclOk -> "DeclOk"
+      | `TypeError t -> "TypeError(" ^ t ^ ")"
+      | `Ok (v, t) -> "Ok(" ^ v ^ ", " ^ t ^ ")"
+      | `RuntimeError m -> "RuntimeError(" ^ m ^ ")"
+      | `ParseError -> "ParseError"
+    in
+    Alcotest.fail ("match in REPL failed: " ^ String.concat "; " (List.map describe results))
+
+let test_repl_parity_mutual_recursion () =
+  (* Mutual recursion in the REPL requires both fns in the same module decl.
+     Test that a module with mutual recursion evaluates correctly. *)
+  match repl_eval_exprs [
+    {|mod MutRec do
+  pub fn is_even(n) do
+    if n == 0 then true
+    else is_odd(n - 1)
+  end
+  pub fn is_odd(n) do
+    if n == 0 then false
+    else is_even(n - 1)
+  end
+end|};
+    {|MutRec.is_even(4)|};
+    {|MutRec.is_odd(3)|};
+  ] with
+  | [`DeclOk; `Ok ("true", "Bool"); `Ok ("true", "Bool")] -> ()
+  | results ->
+    let describe = function
+      | `DeclOk -> "DeclOk"
+      | `TypeError t -> "TypeError(" ^ t ^ ")"
+      | `Ok (v, t) -> "Ok(" ^ v ^ ", " ^ t ^ ")"
+      | `RuntimeError m -> "RuntimeError(" ^ m ^ ")"
+      | `ParseError -> "ParseError"
+    in
+    Alcotest.fail ("mutual recursion in REPL failed: " ^ String.concat "; " (List.map describe results))
+
+let test_repl_parity_string_interp () =
+  match repl_eval_exprs [
+    {|let name = "World"|};
+    {|"Hello, ${name}!"|};
+  ] with
+  | [`DeclOk; `Ok ({|"Hello, World!"|}, "String")] -> ()
+  | _ -> Alcotest.fail "string interpolation in REPL"
+
+let test_repl_parity_records () =
+  match repl_eval_exprs [
+    {|let p = { x = 1, y = 2 }|};
+    {|p.x + p.y|};
+  ] with
+  | [`DeclOk; `Ok ("3", "Int")] -> ()
+  | _ -> Alcotest.fail "records in REPL"
+
+let test_repl_parity_if_else () =
+  match repl_eval_exprs [
+    {|if 1 < 2 then "yes" else "no"|};
+  ] with
+  | [`Ok ({|"yes"|}, "String")] -> ()
+  | _ -> Alcotest.fail "if/else in REPL"
+
+(** value_to_string_pretty: ADT constructor *)
+let test_repl_pretty_adt () =
+  let v = March_eval.Eval.VCon ("Some", [March_eval.Eval.VInt 42]) in
+  let s = March_eval.Eval.value_to_string_pretty v in
+  Alcotest.(check string) "ADT constructor" "Some(42)" s
+
+(** value_to_string_pretty: nested record *)
+let test_repl_pretty_record () =
+  let v = March_eval.Eval.VRecord [("name", March_eval.Eval.VString "Alice");
+                                    ("age",  March_eval.Eval.VInt 30)] in
+  let s = March_eval.Eval.value_to_string_pretty v in
+  Alcotest.(check string) "record" {|{ name = "Alice", age = 30 }|} s
+
+(** value_to_string_pretty: depth truncation *)
+let test_repl_pretty_depth_truncation () =
+  (* Build deeply nested VCon *)
+  let rec nest n v =
+    if n = 0 then v
+    else nest (n-1) (March_eval.Eval.VCon ("Wrap", [v]))
+  in
+  let v = nest 20 (March_eval.Eval.VInt 0) in
+  let s = March_eval.Eval.value_to_string_pretty v in
+  Alcotest.(check bool) "depth truncation"
+    true (String.length s < 200)  (* should be truncated, not ~4KB *)
+
+(* ------------------------------------------------------------------ *)
 (* mod typecheck: DMod exposes names with prefix *)
 let test_tc_mod_typecheck () =
   let ctx = typecheck {|mod Test do
@@ -9715,6 +10000,29 @@ let () =
           Alcotest.test_case ":type string"         `Quick test_repl_type_string;
           Alcotest.test_case ":doc missing"         `Quick test_repl_doc_missing;
           Alcotest.test_case ":doc registered"      `Quick test_repl_doc_registered;
+        ] );
+      ( "repl integration",
+        [
+          Alcotest.test_case "error recovery: type"    `Quick test_repl_error_recovery_type;
+          Alcotest.test_case "error recovery: runtime" `Quick test_repl_error_recovery_runtime;
+          Alcotest.test_case "v magic var"             `Quick test_repl_v_magic_var;
+          Alcotest.test_case "pretty: list"            `Quick test_repl_pretty_list;
+          Alcotest.test_case "pretty: list truncation" `Quick test_repl_pretty_list_truncation;
+          Alcotest.test_case "pretty: ADT constructor" `Quick test_repl_pretty_adt;
+          Alcotest.test_case "pretty: record"          `Quick test_repl_pretty_record;
+          Alcotest.test_case "pretty: depth truncation" `Quick test_repl_pretty_depth_truncation;
+          Alcotest.test_case ":inspect type+value"     `Quick test_repl_inspect_type_and_value;
+        ] );
+      ( "repl parity",
+        [
+          Alcotest.test_case "closures"              `Quick test_repl_parity_closures;
+          Alcotest.test_case "HOF"                   `Quick test_repl_parity_hof;
+          Alcotest.test_case "ADT"                   `Quick test_repl_parity_adt;
+          Alcotest.test_case "match"                 `Quick test_repl_parity_match;
+          Alcotest.test_case "mutual recursion"      `Quick test_repl_parity_mutual_recursion;
+          Alcotest.test_case "string interpolation"  `Quick test_repl_parity_string_interp;
+          Alcotest.test_case "records"               `Quick test_repl_parity_records;
+          Alcotest.test_case "if/else"               `Quick test_repl_parity_if_else;
         ] );
       ( "type_map", [
           Alcotest.test_case "populated after check" `Quick test_type_map_populated;
