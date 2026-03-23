@@ -741,6 +741,579 @@ end|} in
   Alcotest.(check bool) "def_map contains my_fn" true has_fn
 
 (* ------------------------------------------------------------------ *)
+(* 11. Doc strings                                                     *)
+(* ------------------------------------------------------------------ *)
+
+let test_doc_for_documented_fn () =
+  let src = {|
+mod M do
+  doc "Adds two integers together."
+  fn add(x: Int, y: Int): Int do
+    x + y
+  end
+
+  fn main() do
+    add(1, 2)
+  end
+end
+|} in
+  let a = analyse src in
+  Alcotest.(check (option string))
+    "doc for add"
+    (Some "Adds two integers together.")
+    (An.doc_for a "add")
+
+let test_doc_for_undocumented_fn () =
+  let src = {|
+mod M do
+  fn no_doc(x: Int): Int do x end
+end
+|} in
+  let a = analyse src in
+  Alcotest.(check (option string))
+    "no doc returns None"
+    None
+    (An.doc_for a "no_doc")
+
+let test_doc_for_unknown_name () =
+  let src = {|mod M do fn f() do 1 end end|} in
+  let a = analyse src in
+  Alcotest.(check (option string))
+    "unknown name returns None"
+    None
+    (An.doc_for a "does_not_exist")
+
+let test_doc_name_at_cursor () =
+  let src = {|
+mod M do
+  doc "Multiply."
+  fn mul(a: Int, b: Int): Int do a * b end
+
+  fn main() do
+    mul(2, 3)
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "mul(2" in
+  Alcotest.(check (option string))
+    "doc at call site"
+    (Some "Multiply.")
+    (An.doc_name_at a ~line ~character:col)
+
+let test_doc_triple_quoted () =
+  let src = {|
+mod M do
+  doc """
+  Multi-line doc.
+  Second line.
+  """
+  fn greet() do "hi" end
+end
+|} in
+  let a = analyse src in
+  Alcotest.(check bool)
+    "triple-quoted doc non-empty"
+    true
+    (match An.doc_for a "greet" with
+     | Some s -> String.length s > 0
+     | None   -> false)
+
+let test_hover_includes_doc () =
+  let src = {|
+mod M do
+  doc "Returns the integer unchanged."
+  fn identity(x: Int): Int do x end
+
+  fn main() do
+    identity(42)
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "identity(42" in
+  let ty = An.type_at a ~line ~character:col in
+  let doc = An.doc_name_at a ~line ~character:col in
+  Alcotest.(check bool) "type present"  true (ty  <> None);
+  Alcotest.(check bool) "doc present"   true (doc <> None)
+
+(* ------------------------------------------------------------------ *)
+(* 12. Find references                                                 *)
+(* ------------------------------------------------------------------ *)
+
+let test_references_empty_for_literal () =
+  let src = {|mod M do fn f() do 42 end end|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "42" in
+  Alcotest.(check int)
+    "no refs for literal"
+    0
+    (List.length (An.references_at a ~include_declaration:false ~line ~character:col))
+
+let test_references_finds_uses () =
+  let src = {|
+mod M do
+  fn double(n: Int): Int do n + n end
+  fn main() do
+    double(1)
+    double(2)
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "double(1" in
+  let refs = An.references_at a ~include_declaration:false ~line ~character:col in
+  Alcotest.(check bool)
+    "at least 2 use refs"
+    true
+    (List.length refs >= 2)
+
+let test_references_include_declaration () =
+  let src = {|
+mod M do
+  fn sq(n: Int): Int do n * n end
+  fn main() do sq(3) end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "sq(3" in
+  let with_decl    = An.references_at a ~include_declaration:true  ~line ~character:col in
+  let without_decl = An.references_at a ~include_declaration:false ~line ~character:col in
+  Alcotest.(check bool)
+    "include_declaration adds one entry"
+    true
+    (List.length with_decl = List.length without_decl + 1)
+
+let test_references_local_variable () =
+  let src = {|
+mod M do
+  fn f() do
+    let x = 10
+    let a = x
+    a + x
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "a = x" in
+  let refs = An.references_at a ~include_declaration:false ~line ~character:(col + 4) in
+  Alcotest.(check bool) "two uses of x" true (List.length refs >= 2)
+
+let test_references_no_cross_contamination () =
+  let src = {|
+mod M do
+  fn a() do 1 end
+  fn b() do 2 end
+  fn main() do a() end
+end
+|} in
+  let a_an = analyse src in
+  let (line, col) = pos_of src "a()" in
+  let refs = An.references_at a_an ~include_declaration:false ~line ~character:col in
+  let all_same_name =
+    List.for_all (fun (loc : Lsp.Types.Location.t) ->
+        loc.range.start.character < loc.range.end_.character
+      ) refs
+  in
+  Alcotest.(check bool) "all refs are real ranges" true all_same_name
+
+(* ------------------------------------------------------------------ *)
+(* 13. Rename symbol                                                   *)
+(* ------------------------------------------------------------------ *)
+
+let test_rename_no_edits_for_literal () =
+  let src = {|mod M do fn f() do 99 end end|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "99" in
+  let edits = An.rename_at a ~line ~character:col ~new_name:"foo" in
+  Alcotest.(check int) "no edits for literal" 0 (List.length edits)
+
+let test_rename_produces_edits_for_def_and_uses () =
+  let src = {|
+mod M do
+  fn calc(n: Int): Int do n + 1 end
+  fn main() do
+    calc(10)
+    calc(20)
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "calc(10" in
+  let edits = An.rename_at a ~line ~character:col ~new_name:"compute" in
+  Alcotest.(check bool)
+    "at least 3 edits"
+    true
+    (List.length edits >= 3)
+
+let test_rename_new_name_in_edits () =
+  let src = {|
+mod M do
+  fn old_name(x: Int): Int do x end
+  fn main() do old_name(5) end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "old_name(5" in
+  let edits = An.rename_at a ~line ~character:col ~new_name:"new_name" in
+  let all_new_name =
+    List.for_all (fun (e : Lsp.Types.TextEdit.t) ->
+        e.newText = "new_name"
+      ) edits
+  in
+  Alcotest.(check bool) "all edits contain new_name" true all_new_name
+
+let test_rename_does_not_rename_other_names () =
+  let src = {|
+mod M do
+  fn alpha() do 1 end
+  fn beta()  do 2 end
+  fn main()  do alpha() end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "alpha()" in
+  let edits = An.rename_at a ~line ~character:col ~new_name:"gamma" in
+  let no_beta =
+    List.for_all (fun (e : Lsp.Types.TextEdit.t) ->
+        e.newText <> "beta"
+      ) edits
+  in
+  Alcotest.(check bool) "beta untouched" true no_beta
+
+(* ------------------------------------------------------------------ *)
+(* 14. Signature help                                                  *)
+(* ------------------------------------------------------------------ *)
+
+let test_sig_help_none_outside_call () =
+  let src = {|mod M do fn f() do 42 end end|} in
+  let a = analyse src in
+  Alcotest.(check bool)
+    "no sig help outside call"
+    true
+    (An.signature_help_at a ~line:2 ~character:5 = None)
+
+let test_sig_help_single_param () =
+  let src = {|
+mod M do
+  fn negate(n: Int): Int do 0 - n end
+  fn main() do negate(10) end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "negate(10" in
+  let sh = An.signature_help_at a ~line ~character:(col + 7) in
+  Alcotest.(check bool) "sig help present" true (sh <> None);
+  match sh with
+  | None -> ()
+  | Some (label, params, active_param) ->
+    Alcotest.(check bool) "label non-empty"   true (String.length label > 0);
+    Alcotest.(check int)  "one param"         1    (List.length params);
+    Alcotest.(check int)  "first param active" 0   active_param
+
+let test_sig_help_active_param_index () =
+  let src = {|
+mod M do
+  fn add3(a: Int, b: Int, c: Int): Int do a + b + c end
+  fn main() do add3(1, 2, 3) end
+end
+|} in
+  let a = analyse src in
+  let (line, comma_col) = pos_of src ", 3)" in
+  (match An.signature_help_at a ~line ~character:(comma_col + 2) with
+   | None -> Alcotest.fail "expected signature help"
+   | Some (_, _, active) ->
+     Alcotest.(check int) "third param active (index 2)" 2 active)
+
+let test_sig_help_param_labels () =
+  let src = {|
+mod M do
+  fn div(numerator: Int, denominator: Int): Int do
+    numerator / denominator
+  end
+  fn main() do div(10, 2) end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "div(10" in
+  (match An.signature_help_at a ~line ~character:(col + 4) with
+   | None -> Alcotest.fail "expected sig help"
+   | Some (_, params, _) ->
+     Alcotest.(check int) "two params" 2 (List.length params);
+     List.iter (fun p ->
+         Alcotest.(check bool)
+           "param label non-empty"
+           true
+           (String.length p > 0)
+       ) params)
+
+let test_sig_help_not_a_known_function () =
+  let src = {|
+mod M do
+  fn main() do
+    let f = fn x -> x + 1
+    f(5)
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "f(5" in
+  let _ = An.signature_help_at a ~line ~character:(col + 2) in
+  Alcotest.(check bool) "no crash" true true
+
+(* ------------------------------------------------------------------ *)
+(* 15. Code actions: make-linear                                       *)
+(* ------------------------------------------------------------------ *)
+
+let test_make_linear_offered_for_single_use () =
+  let src = {|
+mod M do
+  fn f() do
+    let x = 42
+    x + 1
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "let x" in
+  let acts = An.code_actions_at a ~line ~character:col in
+  let has_make_linear =
+    List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
+        match ca.title with
+        | t -> String.length t > 0 &&
+               (let low = String.lowercase_ascii t in
+                let n = String.length low in
+                let sub = "linear" in
+                let sn = String.length sub in
+                let found = ref false in
+                for i = 0 to n - sn do
+                  if String.sub low i sn = sub then found := true
+                done;
+                !found)
+      ) acts
+  in
+  Alcotest.(check bool) "make-linear offered" true has_make_linear
+
+let test_make_linear_not_offered_for_multi_use () =
+  let src = {|
+mod M do
+  fn f() do
+    let x = 10
+    x + x
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "let x" in
+  let acts = An.code_actions_at a ~line ~character:col in
+  let has_make_linear =
+    List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
+        match ca.title with
+        | t ->
+          let low = String.lowercase_ascii t in
+          let n = String.length low and sn = 6 in
+          let found = ref false in
+          for i = 0 to n - sn do
+            if String.sub low i sn = "linear" then found := true
+          done;
+          !found
+      ) acts
+  in
+  Alcotest.(check bool) "no make-linear for multi-use" false has_make_linear
+
+let test_make_linear_edit_inserts_keyword () =
+  let src = {|
+mod M do
+  fn f() do
+    let value = 5
+    value * 2
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "let value" in
+  let acts = An.code_actions_at a ~line ~character:col in
+  let linear_act = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+      match ca.title with
+      | t ->
+        let low = String.lowercase_ascii t in
+        let n = String.length low and sn = 6 in
+        let found = ref false in
+        for i = 0 to n - sn do
+          if String.sub low i sn = "linear" then found := true
+        done;
+        !found
+    ) acts
+  in
+  match linear_act with
+  | None -> Alcotest.fail "expected make-linear action"
+  | Some ca ->
+    (match ca.edit with
+     | None -> Alcotest.fail "expected workspace edit"
+     | Some edit ->
+       let has_edit =
+         match edit.changes with
+         | None -> false
+         | Some m ->
+           List.exists (fun (_, edits) ->
+               List.exists (fun (e : Lsp.Types.TextEdit.t) ->
+                   let t = e.newText in
+                   let n = String.length t and sn = 7 in
+                   let found = ref false in
+                   for i = 0 to n - sn do
+                     if String.sub t i sn = "linear " then found := true
+                   done;
+                   !found
+                 ) edits
+             ) m
+       in
+       Alcotest.(check bool) "edit inserts 'linear '" true has_edit)
+
+(* ------------------------------------------------------------------ *)
+(* 16. Code actions: pattern exhaustion quickfix                       *)
+(* ------------------------------------------------------------------ *)
+
+let test_exhaustion_quickfix_absent_for_exhaustive_match () =
+  let src = {|
+mod M do
+  type Color = Red | Green | Blue
+
+  fn describe(c: Color): String do
+    match c do
+    | Red   -> "red"
+    | Green -> "green"
+    | Blue  -> "blue"
+    end
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "match c" in
+  let acts = An.code_actions_at a ~line ~character:col in
+  let has_exhaustion =
+    List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
+        let low = String.lowercase_ascii ca.title in
+        let n = String.length low and sn = 7 in
+        let found = ref false in
+        for i = 0 to n - sn do
+          if String.sub low i sn = "missing" then found := true
+        done;
+        !found
+      ) acts
+  in
+  Alcotest.(check bool) "no exhaustion fix for complete match" false has_exhaustion
+
+let test_exhaustion_quickfix_offered_for_incomplete_match () =
+  let src = {|
+mod M do
+  type Shape = Circle | Square | Triangle
+
+  fn area(s: Shape): Int do
+    match s do
+    | Circle -> 1
+    | Square -> 2
+    end
+  end
+end
+|} in
+  let a = analyse src in
+  let has_warning =
+    List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+        match d.severity with
+        | Some Lsp.Types.DiagnosticSeverity.Warning -> true
+        | _ -> false
+      ) a.diagnostics
+  in
+  Alcotest.(check bool) "warning present" true has_warning;
+  let (line, col) = pos_of src "match s" in
+  let acts = An.code_actions_at a ~line ~character:col in
+  let has_quickfix =
+    List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
+        ca.kind = Some Lsp.Types.CodeActionKind.QuickFix
+      ) acts
+  in
+  Alcotest.(check bool) "quickfix offered" true has_quickfix
+
+let test_exhaustion_quickfix_edit_contains_missing_arm () =
+  let src = {|
+mod M do
+  type Dir = North | South | East | West
+
+  fn label(d: Dir): String do
+    match d do
+    | North -> "N"
+    | South -> "S"
+    | East  -> "E"
+    end
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "match d" in
+  let acts = An.code_actions_at a ~line ~character:col in
+  let qf = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+      ca.kind = Some Lsp.Types.CodeActionKind.QuickFix
+    ) acts in
+  match qf with
+  | None -> Alcotest.fail "expected quickfix"
+  | Some ca ->
+    (match ca.edit with
+     | None -> Alcotest.fail "expected edit"
+     | Some edit ->
+       let found_west =
+         match edit.changes with
+         | None -> false
+         | Some m ->
+           List.exists (fun (_, edits) ->
+               List.exists (fun (e : Lsp.Types.TextEdit.t) ->
+                   let low = String.lowercase_ascii e.newText in
+                   let n = String.length low and sn = 4 in
+                   let f = ref false in
+                   for i = 0 to n - sn do
+                     if String.sub low i sn = "west" then f := true
+                   done;
+                   !f
+                 ) edits
+             ) m
+       in
+       Alcotest.(check bool) "edit mentions West" true found_west)
+
+let test_exhaustion_quickfix_edit_inserts_before_end () =
+  let src = {|
+mod M do
+  type Bit = Zero | One
+
+  fn flip(b: Bit): Bit do
+    match b do
+    | Zero -> One
+    end
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "match b" in
+  let acts = An.code_actions_at a ~line ~character:col in
+  let qf = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+      ca.kind = Some Lsp.Types.CodeActionKind.QuickFix) acts in
+  match qf with
+  | None -> Alcotest.fail "expected quickfix"
+  | Some ca ->
+    (match ca.edit with
+     | None -> Alcotest.fail "expected edit"
+     | Some edit ->
+       let has_arm =
+         match edit.changes with
+         | None -> false
+         | Some m ->
+           List.exists (fun (_, edits) ->
+               List.exists (fun (e : Lsp.Types.TextEdit.t) ->
+                   String.contains e.newText '|'
+                 ) edits
+             ) m
+       in
+       Alcotest.(check bool) "edit is a match arm" true has_arm)
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -822,5 +1395,44 @@ let () =
       Alcotest.test_case "empty module: struct fields"        `Quick test_empty_module_fields_empty;
       Alcotest.test_case "type_map populated for valid code"  `Quick test_analysis_has_type_map;
       Alcotest.test_case "def_map contains fn name"          `Quick test_analysis_has_def_map;
+    ];
+    "doc strings", [
+      "documented fn",          `Quick, test_doc_for_documented_fn;
+      "undocumented fn",        `Quick, test_doc_for_undocumented_fn;
+      "unknown name",           `Quick, test_doc_for_unknown_name;
+      "at call-site cursor",    `Quick, test_doc_name_at_cursor;
+      "triple-quoted",          `Quick, test_doc_triple_quoted;
+      "hover has both type and doc", `Quick, test_hover_includes_doc;
+    ];
+    "find references", [
+      "literal has no refs",       `Quick, test_references_empty_for_literal;
+      "finds multiple uses",        `Quick, test_references_finds_uses;
+      "include_declaration flag",   `Quick, test_references_include_declaration;
+      "local variable",             `Quick, test_references_local_variable;
+      "no cross-contamination",     `Quick, test_references_no_cross_contamination;
+    ];
+    "rename symbol", [
+      "literal produces no edits",    `Quick, test_rename_no_edits_for_literal;
+      "def + uses all renamed",        `Quick, test_rename_produces_edits_for_def_and_uses;
+      "new name appears in all edits", `Quick, test_rename_new_name_in_edits;
+      "other names untouched",         `Quick, test_rename_does_not_rename_other_names;
+    ];
+    "signature help", [
+      "none outside call",       `Quick, test_sig_help_none_outside_call;
+      "single param",            `Quick, test_sig_help_single_param;
+      "active param index",      `Quick, test_sig_help_active_param_index;
+      "param labels",            `Quick, test_sig_help_param_labels;
+      "non-resolvable callee",   `Quick, test_sig_help_not_a_known_function;
+    ];
+    "code actions: make-linear", [
+      "offered for single-use binding",  `Quick, test_make_linear_offered_for_single_use;
+      "not offered for multi-use",        `Quick, test_make_linear_not_offered_for_multi_use;
+      "edit inserts 'linear ' keyword",   `Quick, test_make_linear_edit_inserts_keyword;
+    ];
+    "code actions: exhaustion quickfix", [
+      "absent for exhaustive match",    `Quick, test_exhaustion_quickfix_absent_for_exhaustive_match;
+      "offered for incomplete match",   `Quick, test_exhaustion_quickfix_offered_for_incomplete_match;
+      "edit contains missing arm",      `Quick, test_exhaustion_quickfix_edit_contains_missing_arm;
+      "edit inserts before end",        `Quick, test_exhaustion_quickfix_edit_inserts_before_end;
     ];
   ]

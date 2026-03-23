@@ -26,10 +26,11 @@ let get_analysis uri =
 (* Code actions (helper, defined before the class)                    *)
 (* ------------------------------------------------------------------ *)
 
-let code_actions_for (_a : Analysis.t) _uri _range :
+let code_actions_for (a : Analysis.t) _uri (range : Lsp.Types.Range.t) :
     Lsp.Types.CodeAction.t list =
-  (* Stub: future home of "make linear", "suggest sort algorithm", etc. *)
-  []
+  let line      = range.Lsp.Types.Range.start.Lsp.Types.Position.line in
+  let character = range.Lsp.Types.Range.start.Lsp.Types.Position.character in
+  Analysis.code_actions_at a ~line ~character
 
 (* ------------------------------------------------------------------ *)
 (* Semantic tokens encoding                                            *)
@@ -149,9 +150,20 @@ class march_server =
           ~full:(`Full (SemanticTokensOptions.create_full ~delta:false ()))
           ()
       in
+      let sig_help =
+        SignatureHelpOptions.create
+          ~triggerCharacters:["("; ","]
+          ()
+      in
       { caps with
         ServerCapabilities.semanticTokensProvider =
-          Some (`SemanticTokensOptions sem_tokens) }
+          Some (`SemanticTokensOptions sem_tokens);
+        ServerCapabilities.referencesProvider =
+          Some (`Bool true);
+        ServerCapabilities.renameProvider =
+          Some (`Bool true);
+        ServerCapabilities.signatureHelpProvider =
+          Some sig_help }
 
     (* -------------------------------------------------------------- *)
     (* Document synchronisation                                        *)
@@ -185,22 +197,23 @@ class march_server =
         match get_analysis uri with
         | None -> None
         | Some a ->
-          let ty_hover =
-            Analysis.type_at a ~line ~character
-            |> Option.map (fun ty_str ->
+          let ty_str  = Analysis.type_at a ~line ~character in
+          let doc_str = Analysis.doc_name_at a ~line ~character in
+          let parts   = List.filter_map Fun.id [
+            Option.map (fun ty -> Printf.sprintf "```march\n%s\n```" ty) ty_str;
+            Option.map (fun d  -> "---\n" ^ d) doc_str;
+          ] in
+          if parts <> [] then
+            let md = MarkupContent.create
+              ~kind:MarkupKind.Markdown
+              ~value:(String.concat "\n" parts) in
+            Some (Hover.create ~contents:(`MarkupContent md) ())
+          else
+            Analysis.actor_info_at a ~line ~character
+            |> Option.map (fun info ->
                 let md = MarkupContent.create
-                  ~kind:MarkupKind.Markdown
-                  ~value:(Printf.sprintf "```march\n%s\n```" ty_str) in
+                  ~kind:MarkupKind.Markdown ~value:info in
                 Hover.create ~contents:(`MarkupContent md) ())
-          in
-          (match ty_hover with
-           | Some _ -> ty_hover
-           | None ->
-             Analysis.actor_info_at a ~line ~character
-             |> Option.map (fun info ->
-                 let md = MarkupContent.create
-                   ~kind:MarkupKind.Markdown ~value:info in
-                 Hover.create ~contents:(`MarkupContent md) ()))
       in
       Lwt.return result
 
@@ -281,27 +294,56 @@ class march_server =
     (* -------------------------------------------------------------- *)
 
     method on_unknown_request ~notify_back:_ ~server_request:_ ~id:_ meth params =
+      (* ---- helpers ---- *)
+      let get_td_uri () =
+        match params with
+        | Some (`Assoc fields) ->
+          (match List.assoc_opt "textDocument" fields with
+           | Some (`Assoc td) ->
+             (match List.assoc_opt "uri" td with
+              | Some (`String u) ->
+                let path =
+                  if String.length u >= 7 &&
+                     String.sub u 0 7 = "file://"
+                  then String.sub u 7 (String.length u - 7)
+                  else u
+                in
+                Some (Lsp.Types.DocumentUri.of_path path)
+              | _ -> None)
+           | _ -> None)
+        | _ -> None
+      in
+      let get_position () =
+        match params with
+        | Some (`Assoc fields) ->
+          (match List.assoc_opt "position" fields with
+           | Some (`Assoc pos) ->
+             let line =
+               match List.assoc_opt "line" pos with
+               | Some (`Int n) -> n | _ -> 0
+             in
+             let character =
+               match List.assoc_opt "character" pos with
+               | Some (`Int n) -> n | _ -> 0
+             in
+             (line, character)
+           | _ -> (0, 0))
+        | _ -> (0, 0)
+      in
+      let json_range (r : Lsp.Types.Range.t) =
+        `Assoc [
+          ("start", `Assoc [
+            ("line",      `Int r.Lsp.Types.Range.start.Lsp.Types.Position.line);
+            ("character", `Int r.Lsp.Types.Range.start.Lsp.Types.Position.character)]);
+          ("end", `Assoc [
+            ("line",      `Int r.Lsp.Types.Range.end_.Lsp.Types.Position.line);
+            ("character", `Int r.Lsp.Types.Range.end_.Lsp.Types.Position.character)])
+        ]
+      in
+      (* ---- dispatch ---- *)
       if meth = "textDocument/semanticTokens/full" then begin
-        let uri_opt =
-          match params with
-          | Some (`Assoc fields) ->
-            (match List.assoc_opt "textDocument" fields with
-             | Some (`Assoc td) ->
-               (match List.assoc_opt "uri" td with
-                | Some (`String u) ->
-                  let path =
-                    if String.length u >= 7 &&
-                       String.sub u 0 7 = "file://"
-                    then String.sub u 7 (String.length u - 7)
-                    else u
-                  in
-                  Some (Lsp.Types.DocumentUri.of_path path)
-                | _ -> None)
-             | _ -> None)
-          | _ -> None
-        in
         let data =
-          match uri_opt with
+          match get_td_uri () with
           | None -> [||]
           | Some uri ->
             (match get_analysis uri with
@@ -311,6 +353,95 @@ class march_server =
         Lwt.return
           (`Assoc [("data",
                     `List (Array.to_list (Array.map (fun n -> `Int n) data)))])
+
+      end else if meth = "textDocument/references" then begin
+        let include_declaration =
+          match params with
+          | Some (`Assoc fields) ->
+            (match List.assoc_opt "context" fields with
+             | Some (`Assoc ctx) ->
+               (match List.assoc_opt "includeDeclaration" ctx with
+                | Some (`Bool b) -> b | _ -> false)
+             | _ -> false)
+          | _ -> false
+        in
+        let (line, character) = get_position () in
+        let locs =
+          match get_td_uri () with
+          | None -> []
+          | Some uri ->
+            (match get_analysis uri with
+             | None -> []
+             | Some a ->
+               Analysis.references_at a ~include_declaration ~line ~character)
+        in
+        Lwt.return
+          (`List (List.map (fun (loc : Lsp.Types.Location.t) ->
+               `Assoc [
+                 ("uri",   `String (Lsp.Types.DocumentUri.to_string loc.uri));
+                 ("range", json_range loc.range)
+               ]) locs))
+
+      end else if meth = "textDocument/rename" then begin
+        let new_name =
+          match params with
+          | Some (`Assoc fields) ->
+            (match List.assoc_opt "newName" fields with
+             | Some (`String s) -> s | _ -> "")
+          | _ -> ""
+        in
+        let (line, character) = get_position () in
+        let edits, uri_str =
+          match get_td_uri () with
+          | None -> ([], "")
+          | Some uri ->
+            (match get_analysis uri with
+             | None -> ([], "")
+             | Some a ->
+               let es = Analysis.rename_at a ~line ~character ~new_name in
+               (es, Lsp.Types.DocumentUri.to_string uri))
+        in
+        let json_edits = List.map (fun (e : Lsp.Types.TextEdit.t) ->
+            `Assoc [
+              ("range",   json_range e.range);
+              ("newText", `String e.newText)
+            ]) edits
+        in
+        if edits = [] then
+          Lwt.return (`Assoc [("changes", `Assoc [])])
+        else
+          Lwt.return
+            (`Assoc [("changes", `Assoc [(uri_str, `List json_edits)])])
+
+      end else if meth = "textDocument/signatureHelp" then begin
+        let (line, character) = get_position () in
+        let result =
+          match get_td_uri () with
+          | None -> None
+          | Some uri ->
+            (match get_analysis uri with
+             | None -> None
+             | Some a -> Analysis.signature_help_at a ~line ~character)
+        in
+        (match result with
+         | None ->
+           Lwt.return (`Assoc [("signatures", `List [])])
+         | Some (label, param_labels, active_param) ->
+           let parameters = List.map (fun p ->
+               `Assoc [("label", `String p)]
+             ) param_labels in
+           Lwt.return
+             (`Assoc [
+               ("signatures", `List [
+                 `Assoc [
+                   ("label",      `String label);
+                   ("parameters", `List parameters)
+                 ]
+               ]);
+               ("activeSignature", `Int 0);
+               ("activeParameter", `Int active_param)
+             ]))
+
       end else
         Lwt.fail_with (Printf.sprintf "unhandled request: %s" meth)
   end

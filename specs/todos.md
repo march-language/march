@@ -18,8 +18,8 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ### Tooling: LSP Feature Improvements
 
-- [ ] **Implement 5 new LSP features** — Plan in `specs/plans/2026-03-23-lsp-feature-improvements.md`. Features:
-  - Doc-string hover (show `--` comments above a function on hover)
+- ✅ **Implement 5 new LSP features** — Plan in `specs/plans/2026-03-23-lsp-feature-improvements.md`. All implemented; 84 LSP tests pass.
+  - Doc-string hover (show `doc "..."` comments on hover alongside type)
   - Find references (`textDocument/references`)
   - Rename symbol (`textDocument/rename`)
   - Signature help (`textDocument/signatureHelp`)
@@ -112,7 +112,7 @@ This file tracks everything that still needs to get done. Organized by priority 
 - ✅ Zed editor extension (Tree-sitter grammar)
 - ✅ **Standard Interfaces Eq/Ord/Show/Hash** — merged from `claude/intelligent-austin`; `derive` syntax, eval dispatch for `==`/`show`/`hash`/`compare`, 18 tests
 - ✅ **LSP server** (`march-lsp`) — merged from `claude/vibrant-bartik`; diagnostics, hover, goto-def, completion, inlay hints, semantic tokens, actor info; Zed extension wired up
-- ✅ **LSP test suite** — `lsp/test/test_lsp.ml` (826 lines, 55 tests); was the merge blocker for the LSP branch
+- ✅ **LSP test suite** — `lsp/test/test_lsp.ml` (84 tests); was the merge blocker for the LSP branch; expanded with 27 new tests for doc strings, find-refs, rename, sig-help, code actions
 - ✅ **REPL JIT list literal fix** — `[1, 2, 3]` now compiles correctly in JIT; all 812 tests pass (0 failures)
 - ✅ **Exhaustiveness checking** — compile-time pattern matrix analysis in `lib/typecheck/typecheck.ml`; warns on non-exhaustive matches, errors on unreachable arms
 - ✅ **Multi-level `use` paths** — `use A.B.*` / `use A.B.{f,g}` now fully supported; `use_path_tail` in parser, qualified lookups in typecheck

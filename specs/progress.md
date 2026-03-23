@@ -202,14 +202,14 @@ march/
 ## Current State (as of 2026-03-23)
 
 - **Builds clean**
-- **1011 tests across 8 suites; 0 failures** (REPL JIT partition_fns fix applied):
+- **1038 tests across 8 suites; 0 failures** (REPL JIT fix + 5 new LSP features):
   - `test_march.exe`: 823 tests, all passing (REPL JIT fix; List.reverse/no-precompile/length-3x regression tests added)
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests, passing (formatter round-trip)
   - `test_properties.exe`: 36 tests, passing (QCheck2 properties)
   - `test_supervision.exe`: 15 tests, passing (actor supervision)
-  - `test_lsp.exe`: 57 tests, passing (LSP protocol/diagnostics/hover/completion)
+  - `test_lsp.exe`: 84 tests, passing (doc strings, find-refs, rename, sig-help, code actions)
   - `test_forge.exe`: 15 tests, passing (scaffold/toml — +2 from this branch)
   - `test_oracle.exe`: requires `MARCH_BIN` env var (oracle/idempotency/pass tests)
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present
@@ -218,8 +218,8 @@ march/
 - **Code formatter**: `march fmt [--check] <files>` — reformats source in-place (`lib/format/format.ml`, `bin/main.ml`)
 - **Property-based testing**: 36 QCheck2 properties in `test/test_properties.ml` — ADTs, closures, HOFs, tuples, strings, oracle/idempotency/pass properties
 - **Standard Interfaces (Eq/Ord/Show/Hash) with derive syntax** — merged to main (from `claude/intelligent-austin`); `derive [Eq, Show]` syntax, eval dispatch for `==`/`show`/`hash`/`compare` via `impl_tbl`; 18 tests
-- **LSP Server** (`march-lsp`) — merged to main (from `claude/vibrant-bartik`); diagnostics, hover, goto-def, completion, inlay hints, semantic tokens, actor info; uses `linol` framework; Zed extension wired up
-- **LSP test suite** — `lsp/test/test_lsp.ml` (57 tests): initialize/open/diagnostics, hover types, goto-def, completion, inlay hints
+- **LSP Server** (`march-lsp`) — diagnostics, hover (with doc strings), goto-def, completion, inlay hints, semantic tokens, actor info, find references, rename symbol, signature help, code actions (make-linear quickfix, exhaustion quickfix); uses `linol` framework; Zed extension wired up
+- **LSP test suite** — `lsp/test/test_lsp.ml` (84 tests): position utils, diagnostics, document symbols, completions, goto-def, hover types, inlay hints, march-specific features, error recovery, analysis struct, doc strings, find references, rename symbol, signature help, code actions
 - **Module alias declarations** — `alias Long.Module as Short` / `alias Long.Module` (last segment as alias); `DAlias` in AST; resolved in typecheck; unused-alias warning emitted
 - **Pattern matching exhaustiveness checking** — compile-time pattern matrix analysis in `lib/typecheck/typecheck.ml`; warns on non-exhaustive matches, errors on unreachable arms
 - **Multi-level `use` paths** — `use A.B.*` / `use A.B.C` fully supported; grammar ambiguity resolved in parser, full path resolution in typecheck
