@@ -13461,13 +13461,14 @@ let test_tc_tail_factorial_ok () =
   Alcotest.(check bool) "tail-recursive factorial: no errors" false (has_errors ctx)
 
 let test_tc_tail_factorial_fail () =
+  (* factorial(n) with no reduction — truly unbounded *)
   let ctx = typecheck {|mod Test do
     fn factorial(n) do
       if n == 0 then 1
-      else n * factorial(n - 1)
+      else n * factorial(n)
     end
   end|} in
-  Alcotest.(check bool) "non-tail factorial: has error" true (has_errors ctx)
+  Alcotest.(check bool) "truly unbounded factorial: has error" true (has_errors ctx)
 
 let test_tc_tail_map_ok () =
   let ctx = typecheck {|mod Test do
@@ -13487,15 +13488,16 @@ let test_tc_tail_map_ok () =
   Alcotest.(check bool) "accumulator map: no errors" false (has_errors ctx)
 
 let test_tc_tail_map_fail () =
+  (* map(xs, f) — same xs argument, not a sub-component: truly unbounded *)
   let ctx = typecheck {|mod Test do
     fn map(xs, f) do
       match xs do
       | Nil -> Nil
-      | Cons(h, t) -> Cons(f(h), map(t, f))
+      | Cons(h, _) -> Cons(f(h), map(xs, f))
       end
     end
   end|} in
-  Alcotest.(check bool) "non-tail Cons(f(h), map(t,f)): has error" true (has_errors ctx)
+  Alcotest.(check bool) "truly unbounded map with same arg: has error" true (has_errors ctx)
 
 let test_tc_tail_mutual_ok () =
   let ctx = typecheck {|mod Test do
@@ -13511,17 +13513,18 @@ let test_tc_tail_mutual_ok () =
   Alcotest.(check bool) "mutual recursion both tail: no errors" false (has_errors ctx)
 
 let test_tc_tail_mutual_fail () =
+  (* pong(n) — no reduction, same argument each call: truly unbounded *)
   let ctx = typecheck {|mod Test do
     fn ping(n) do
       if n == 0 then 0
-      else pong(n - 1) + 1
+      else pong(n) + 1
     end
     fn pong(n) do
       if n == 0 then 0
       else ping(n - 1)
     end
   end|} in
-  Alcotest.(check bool) "mutual recursion one non-tail: has error" true (has_errors ctx)
+  Alcotest.(check bool) "truly unbounded mutual recursion: has error" true (has_errors ctx)
 
 let test_tc_tail_match_arms_ok () =
   let ctx = typecheck {|mod Test do
@@ -13536,6 +13539,51 @@ let test_tc_tail_match_arms_ok () =
   Alcotest.(check bool) "match arm tail call: no errors" false (has_errors ctx)
 
 let test_tc_tail_match_arms_fail () =
+  (* sum_list(xs) — same argument, not a sub-component: truly unbounded *)
+  let ctx = typecheck {|mod Test do
+    fn sum_list(xs) do
+      match xs do
+      | Nil -> 0
+      | Cons(h, _) -> h + sum_list(xs)
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "truly unbounded recursive call: has error" true (has_errors ctx)
+
+(* ── Structural recursion: should pass with refined TCE ── *)
+
+let test_tc_structural_fib_ok () =
+  let ctx = typecheck {|mod Test do
+    fn fib(n : Int) : Int do
+      if n < 2 then n
+      else fib(n - 1) + fib(n - 2)
+    end
+  end|} in
+  Alcotest.(check bool) "fib arithmetic reduction: no errors" false (has_errors ctx)
+
+let test_tc_structural_tree_make_ok () =
+  let ctx = typecheck {|mod Test do
+    type Tree = Leaf | Node(Tree, Tree)
+    fn make(d : Int) : Tree do
+      if d == 0 then Leaf
+      else Node(make(d - 1), make(d - 1))
+    end
+  end|} in
+  Alcotest.(check bool) "tree make arithmetic reduction: no errors" false (has_errors ctx)
+
+let test_tc_structural_tree_map_ok () =
+  let ctx = typecheck {|mod Test do
+    type Tree = Leaf(Int) | Node(Tree, Tree)
+    fn inc_leaves(t : Tree) : Tree do
+      match t do
+      | Leaf(n)    -> Leaf(n + 1)
+      | Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "tree map pattern-bound substructure: no errors" false (has_errors ctx)
+
+let test_tc_structural_sum_list_ok () =
   let ctx = typecheck {|mod Test do
     fn sum_list(xs) do
       match xs do
@@ -13544,7 +13592,16 @@ let test_tc_tail_match_arms_fail () =
       end
     end
   end|} in
-  Alcotest.(check bool) "recursive call in binop: has error" true (has_errors ctx)
+  Alcotest.(check bool) "sum_list on pattern-bound t: no errors" false (has_errors ctx)
+
+let test_tc_structural_loop_unbounded_fail () =
+  (* infloop(n) — same argument every call, no reduction: truly unbounded *)
+  let ctx = typecheck {|mod Test do
+    fn infloop(n) do
+      1 + infloop(n)
+    end
+  end|} in
+  Alcotest.(check bool) "infloop with same arg: has error" true (has_errors ctx)
 
 let test_tc_tail_nonrecursive_ok () =
   let ctx = typecheck {|mod Test do
@@ -14839,11 +14896,16 @@ let () =
           Alcotest.test_case "accumulator map ok"                `Quick test_tc_tail_map_ok;
           Alcotest.test_case "Cons(f(h), map(t,f)) error"       `Quick test_tc_tail_map_fail;
           Alcotest.test_case "mutual recursion both-tail ok"     `Quick test_tc_tail_mutual_ok;
-          Alcotest.test_case "mutual recursion one non-tail err" `Quick test_tc_tail_mutual_fail;
+          Alcotest.test_case "mutual recursion unbounded err"    `Quick test_tc_tail_mutual_fail;
           Alcotest.test_case "match arms all tail ok"            `Quick test_tc_tail_match_arms_ok;
-          Alcotest.test_case "recursive call in binop error"     `Quick test_tc_tail_match_arms_fail;
+          Alcotest.test_case "truly unbounded recursive err"     `Quick test_tc_tail_match_arms_fail;
           Alcotest.test_case "non-recursive function ok"         `Quick test_tc_tail_nonrecursive_ok;
           Alcotest.test_case "tail call after let ok"            `Quick test_tc_tail_let_continuation_ok;
+          Alcotest.test_case "fib n-1+n-2 structural ok"        `Quick test_tc_structural_fib_ok;
+          Alcotest.test_case "tree make d-1 structural ok"      `Quick test_tc_structural_tree_make_ok;
+          Alcotest.test_case "tree map pattern substructure ok" `Quick test_tc_structural_tree_map_ok;
+          Alcotest.test_case "sum_list pattern-bound t ok"      `Quick test_tc_structural_sum_list_ok;
+          Alcotest.test_case "loop same arg unbounded err"      `Quick test_tc_structural_loop_unbounded_fail;
         ] );
       ( "type_level_nat",
         [

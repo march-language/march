@@ -4259,28 +4259,83 @@ let is_infix_op name =
   | "==" | "!=" | "&&" | "||" | "+." | "-." | "*." | "/." -> true
   | _ -> false
 
+(** Collect all variable names bound by a pattern (used to find structurally
+    smaller variables introduced by pattern matching). *)
+let rec collect_pattern_vars (pat : Ast.pattern) : StringSet.t =
+  match pat with
+  | Ast.PatWild _ | Ast.PatLit _ -> StringSet.empty
+  | Ast.PatVar v -> StringSet.singleton v.txt
+  | Ast.PatCon (_, pats) ->
+    List.fold_left (fun acc p -> StringSet.union acc (collect_pattern_vars p))
+      StringSet.empty pats
+  | Ast.PatAtom (_, pats, _) ->
+    List.fold_left (fun acc p -> StringSet.union acc (collect_pattern_vars p))
+      StringSet.empty pats
+  | Ast.PatTuple (pats, _) ->
+    List.fold_left (fun acc p -> StringSet.union acc (collect_pattern_vars p))
+      StringSet.empty pats
+  | Ast.PatRecord (fields, _) ->
+    List.fold_left (fun acc (_, p) -> StringSet.union acc (collect_pattern_vars p))
+      StringSet.empty fields
+  | Ast.PatAs (p, v, _) -> StringSet.add v.txt (collect_pattern_vars p)
+
+(** True if [expr] is provably structurally smaller than some function parameter.
+    - [params]: the set of function parameter variable names.
+    - [smaller]: variables known to be sub-components of a parameter (from pattern matching).
+    Recognises two cases:
+      1. A pattern-bound sub-component: [EVar v] where [v ∈ smaller].
+      2. Arithmetic reduction: [v - k] where [v ∈ params ∪ smaller]. *)
+let is_structurally_smaller (params : StringSet.t) (smaller : StringSet.t) (expr : Ast.expr) : bool =
+  match expr with
+  | Ast.EVar v -> StringSet.mem v.txt smaller
+  | Ast.EApp (Ast.EVar op, [lhs; _], _) when op.txt = "-" ->
+    (match lhs with
+     | Ast.EVar v -> StringSet.mem v.txt params || StringSet.mem v.txt smaller
+     | _ -> false)
+  | _ -> false
+
+(** True if [expr] is a function parameter or a known-smaller variable — meaning
+    pattern-bound sub-components of this scrutinee can be treated as smaller. *)
+let scrutinee_is_param_or_smaller (params : StringSet.t) (smaller : StringSet.t) (expr : Ast.expr) : bool =
+  match expr with
+  | Ast.EVar v -> StringSet.mem v.txt params || StringSet.mem v.txt smaller
+  | _ -> false
+
 (** Verify that every call to any name in [recursive_names] within [body]
-    is in tail position.  Emits [Error] diagnostics for violations.
+    is either in tail position OR is structurally recursive (guaranteed to
+    terminate because every argument is provably smaller than a parameter).
+    Emits [Error] diagnostics only for truly unbounded non-tail recursion.
     [fn_name] is the enclosing function (for readable error messages).
-    Recurses into [ELetFn] bodies to check their own self-recursion. *)
+    [fn_params] is the set of parameter variable names for [fn_name]. *)
 let rec check_tail_position
     (errors : Err.ctx)
     (recursive_names : StringSet.t)
     (fn_name : string)
+    (fn_params : StringSet.t)
     (body : Ast.expr) : unit =
-  let rec chk in_tail ctx expr =
+  (* [smaller] accumulates variables known to be structurally smaller than a
+     function parameter (introduced by pattern-matching on a parameter). *)
+  let rec chk in_tail (smaller : StringSet.t) ctx expr =
     match expr with
     (* ── Recursive call ── *)
     | Ast.EApp (Ast.EVar fn, args, sp) when StringSet.mem fn.txt recursive_names ->
-      if not in_tail then
-        Err.error errors ~span:sp
-          (Printf.sprintf
-             "Function `%s`: recursive call to `%s` is not in tail position \
-              (%s).\n\
-              Hint: Consider using an accumulator parameter."
-             fn_name fn.txt ctx);
+      if not in_tail then begin
+        (* Allow if at least one argument is provably structurally smaller:
+           this covers structural recursion on sub-trees/sub-lists and
+           arithmetic reductions like n-1, n-2. *)
+        let is_structural =
+          List.exists (is_structurally_smaller fn_params smaller) args
+        in
+        if not is_structural then
+          Err.error errors ~span:sp
+            (Printf.sprintf
+               "Function `%s`: recursive call to `%s` is not in tail position \
+                (%s).\n\
+                Hint: Consider using an accumulator parameter."
+               fn_name fn.txt ctx)
+      end;
       List.iteri (fun i arg ->
-        chk false
+        chk false smaller
           (Printf.sprintf "argument #%d in call to `%s`" (i + 1) fn.txt)
           arg
       ) args
@@ -4292,67 +4347,78 @@ let rec check_tail_position
         | Ast.EVar fn_n -> Printf.sprintf "passed as argument to `%s`" fn_n.txt
         | _ -> "passed as argument to a function"
       in
-      chk false "function part of application" f;
-      List.iter (chk false arg_ctx) args
+      chk false smaller "function part of application" f;
+      List.iter (chk false smaller arg_ctx) args
     (* ── Constructor ── *)
     | Ast.ECon (name, args, _) ->
       let arg_ctx = Printf.sprintf "wrapped in constructor `%s`" name.txt in
-      List.iter (chk false arg_ctx) args
+      List.iter (chk false smaller arg_ctx) args
     (* ── if/then/else: condition not tail; branches inherit ── *)
     | Ast.EIf (cond, then_, else_, _) ->
-      chk false "condition of `if`" cond;
-      chk in_tail ctx then_;
-      chk in_tail ctx else_
-    (* ── match: scrutinee not tail; branch bodies inherit ── *)
+      chk false smaller "condition of `if`" cond;
+      chk in_tail smaller ctx then_;
+      chk in_tail smaller ctx else_
+    (* ── match: scrutinee not tail; if scrutinee is a parameter or smaller
+          variable, extend [smaller] with all vars bound in each arm's pattern ── *)
     | Ast.EMatch (scrut, branches, _) ->
-      chk false "scrutinee of `match`" scrut;
+      chk false smaller "scrutinee of `match`" scrut;
+      let scrut_is_smaller = scrutinee_is_param_or_smaller fn_params smaller scrut in
       List.iter (fun (br : Ast.branch) ->
-        Option.iter (chk false "match guard") br.branch_guard;
-        chk in_tail ctx br.branch_body
+        let arm_smaller =
+          if scrut_is_smaller
+          then StringSet.union smaller (collect_pattern_vars br.branch_pat)
+          else smaller
+        in
+        Option.iter (chk false arm_smaller "match guard") br.branch_guard;
+        chk in_tail arm_smaller ctx br.branch_body
       ) branches
     (* ── block: only last expression is in tail position ── *)
     | Ast.EBlock (exprs, _) ->
       let n = List.length exprs in
       List.iteri (fun i ex ->
-        if i = n - 1 then chk in_tail ctx ex
-        else chk false "non-final expression in block" ex
+        if i = n - 1 then chk in_tail smaller ctx ex
+        else chk false smaller "non-final expression in block" ex
       ) exprs
     (* ── let binding: RHS is never tail ── *)
     | Ast.ELet (b, _) ->
-      chk false "right-hand side of `let` binding" b.Ast.bind_expr
-    (* ── inner named function: check its own self-recursion separately ── *)
-    | Ast.ELetFn (iname, _, _, ibody, _) ->
-      check_tail_position errors (StringSet.singleton iname.txt) iname.txt ibody
+      chk false smaller "right-hand side of `let` binding" b.Ast.bind_expr
+    (* ── inner named function: check its own self-recursion in its own scope ── *)
+    | Ast.ELetFn (iname, iparams, _, ibody, _) ->
+      let iparams_set =
+        List.fold_left (fun acc (p : Ast.param) -> StringSet.add p.param_name.txt acc)
+          StringSet.empty iparams
+      in
+      check_tail_position errors (StringSet.singleton iname.txt) iname.txt iparams_set ibody
     (* ── lambda: new scope, skip outer recursive-name check ── *)
     | Ast.ELam _ -> ()
     (* ── transparent ── *)
-    | Ast.EAnnot (ex, _, _) -> chk in_tail ctx ex
+    | Ast.EAnnot (ex, _, _) -> chk in_tail smaller ctx ex
     (* ── non-tail contexts ── *)
     | Ast.ETuple (es, _) ->
-      List.iter (chk false "tuple element") es
+      List.iter (chk false smaller "tuple element") es
     | Ast.ERecord (fields, _) ->
       List.iter (fun ((nm : Ast.name), ex) ->
-        chk false (Printf.sprintf "value of record field `%s`" nm.txt) ex
+        chk false smaller (Printf.sprintf "value of record field `%s`" nm.txt) ex
       ) fields
     | Ast.ERecordUpdate (base, fields, _) ->
-      chk false "base of record update" base;
+      chk false smaller "base of record update" base;
       List.iter (fun ((nm : Ast.name), ex) ->
-        chk false (Printf.sprintf "value of record field `%s`" nm.txt) ex
+        chk false smaller (Printf.sprintf "value of record field `%s`" nm.txt) ex
       ) fields
-    | Ast.EField (ex, _, _)  -> chk false "object of field access" ex
-    | Ast.EPipe  (l, r, _)   -> chk false "left side of pipe" l;
-                                 chk false "right side of pipe" r
-    | Ast.EAtom (_, args, _) -> List.iter (chk false "atom argument") args
+    | Ast.EField (ex, _, _)  -> chk false smaller "object of field access" ex
+    | Ast.EPipe  (l, r, _)   -> chk false smaller "left side of pipe" l;
+                                 chk false smaller "right side of pipe" r
+    | Ast.EAtom (_, args, _) -> List.iter (chk false smaller "atom argument") args
     | Ast.ESend (cap, msg, _) ->
-      chk false "capability in `send`" cap;
-      chk false "message in `send`" msg
-    | Ast.ESpawn (ex, _)      -> chk false "argument to `spawn`" ex
-    | Ast.EDbg (Some ex, _)   -> chk false "argument to `dbg`" ex
+      chk false smaller "capability in `send`" cap;
+      chk false smaller "message in `send`" msg
+    | Ast.ESpawn (ex, _)      -> chk false smaller "argument to `spawn`" ex
+    | Ast.EDbg (Some ex, _)   -> chk false smaller "argument to `dbg`" ex
     (* ── leaves ── *)
     | Ast.EDbg (None, _) | Ast.ELit _ | Ast.EVar _ | Ast.EHole _
     | Ast.EResultRef _ -> ()
   in
-  chk true "" body
+  chk true StringSet.empty "" body
 
 (** Run tail-call enforcement for all [DFn] declarations in [decls]
     (at a single scope level).  Recurses into [DMod] sub-modules. *)
@@ -4394,9 +4460,17 @@ let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) :
            List.length scc > 1 ||
            StringSet.mem def.fn_name.txt direct
          in
-         if is_recursive then
+         if is_recursive then begin
            let rec_set = List.fold_right StringSet.add scc StringSet.empty in
-           check_tail_position errors rec_set def.fn_name.txt clause.Ast.fc_body
+           let fn_params =
+             List.fold_left (fun acc p ->
+               match p with
+               | Ast.FPNamed named -> StringSet.add named.param_name.txt acc
+               | Ast.FPPat pat -> StringSet.union acc (collect_pattern_vars pat)
+             ) StringSet.empty clause.Ast.fc_params
+           in
+           check_tail_position errors rec_set def.fn_name.txt fn_params clause.Ast.fc_body
+         end
        | _ -> ())
     | Ast.DMod (_, _, inner_decls, _) ->
       enforce_tail_calls_in_decls errors inner_decls
