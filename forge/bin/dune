@@ -1,0 +1,5 @@
+(executable
+ (name main)
+ (public_name forge)
+ (package forge)
+ (libraries march_forge cmdliner))
