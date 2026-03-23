@@ -202,8 +202,8 @@ march/
 ## Current State (as of 2026-03-23)
 
 - **Builds clean**
-- **1061 tests across 8 suites; 0 failures** (REPL JIT fix + 5 new LSP features):
-  - `test_march.exe`: 846 tests, all passing (REPL JIT fix; List.reverse/no-precompile/length-3x regression tests added)
+- **1069 tests across 8 suites; 0 failures** (app entry point + spec construction tests):
+  - `test_march.exe`: 854 tests, all passing (app entry point: app keyword/parser/desugar/typecheck/eval; spec_construction group; type annotation on app body; graceful shutdown; registry; dynamic supervisors)
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests, passing (formatter round-trip)
@@ -242,6 +242,7 @@ march/
 - **Parser fuzz tests** — 19 structural fuzz cases in `parser_fuzz` test group
 - **Supervisor restart policies** — `sc_max_restarts` sliding window enforced in eval.ml
 - **REPL JIT `compiled_fns` corruption fix** — `partition_fns` in `repl_jit.ml` now pure (no side effects); `mark_compiled_fns` called only after successful `compile_fragment` + dlopen; prevents stdlib fn "undefined symbol" cascade when any prior fragment compilation failed
+- **`app` entry point (Phase 1 interpreter)** — `APP`/`ON_START`/`ON_STOP` lexer tokens; `DApp` AST node; `app_decl` parser rule; desugar converts `DApp` → `__app_init__` function with `SupervisorSpec` return type annotation; mutual-exclusivity check (compile error if both `main` + `app` defined); `spawn_from_spec` spawns actor tree; `run_module` dispatches on `__app_init__`; SIGTERM/SIGINT signal handlers; graceful reverse-order shutdown; process registry (`whereis`/`whereis_bang`); named children; `on_start`/`on_stop` lifecycle hooks; dynamic supervisors (`dynamic_supervisor`, `start_child`, `stop_child`, `which_children`, `count_children`). 45 tests across `app`, `shutdown`, `registry`, `dynamic_supervisor`, `spec_construction`, and `app_shutdown` groups.
 
 ### Known Implementation Gaps
 
@@ -310,7 +311,7 @@ These are JIT-mode REPL tests that require `clang` to compile `.so` fragments. A
 7. ~~**Merge Standard Interfaces branch**~~ ✓ — merged.
 8. ~~**Merge LSP branch**~~ ✓ — merged (57-test suite).
 9. **`tap>` async value inspector** — remaining REPL quality gap.
-10. **`app` entry point** — spec in `specs/application_spec.md`.
+10. ~~**`app` entry point**~~ ✓ — done (Phase 1 interpreter: parser, desugar, typecheck annotation, eval, shutdown, registry, dynamic supervisors).
 
 ## LLVM Codegen: End-to-End Compilation (2026-03-20)
 

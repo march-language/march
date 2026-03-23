@@ -330,8 +330,12 @@ let rec desugar_decl (d : decl) : decl =
       | None   -> none_val
       | Some e -> ECon ({ txt = "Some"; span = sp }, [ELam ([], e, sp)], sp)
     in
+    (* Annotate the spec field so the type checker verifies the body
+       returns SupervisorSpec, rather than silently accepting any type. *)
+    let spec_ty = TyCon ({ txt = "SupervisorSpec"; span = sp }, []) in
+    let annotated_body = EAnnot (body', spec_ty, sp) in
     let result_expr = ERecord (
-      [ ({ txt = "spec";     span = sp }, body')
+      [ ({ txt = "spec";     span = sp }, annotated_body)
       ; ({ txt = "on_start"; span = sp }, wrap_opt on_start')
       ; ({ txt = "on_stop";  span = sp }, wrap_opt on_stop')
       ], sp) in

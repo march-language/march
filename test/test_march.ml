@@ -10331,6 +10331,82 @@ let test_name_reregisters_on_restart () =
   Alcotest.(check bool) "old pid removed from name map" true (old_name = None)
 
 (* ------------------------------------------------------------------ *)
+(* Spec construction tests                                             *)
+(* ------------------------------------------------------------------ *)
+
+(** Supervisor.spec(:one_for_one, [...]) returns a record with strategy and
+    children fields. Verifies the spec value structure at the eval level. *)
+let test_supervisor_spec_value () =
+  let env = eval_module {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    fn main() do
+      Supervisor.spec(:one_for_one, [worker(Counter)])
+    end
+  end|} in
+  let spec = call_fn env "main" [] in
+  (match spec with
+   | March_eval.Eval.VRecord fields ->
+     Alcotest.(check bool) "spec has strategy field" true
+       (List.assoc_opt "strategy" fields = Some (March_eval.Eval.VAtom "one_for_one"));
+     Alcotest.(check bool) "spec has children field" true
+       (List.mem_assoc "children" fields)
+   | _ -> Alcotest.fail "expected VRecord from Supervisor.spec")
+
+(** worker(Counter) returns a child spec record with actor and restart fields. *)
+let test_worker_builtin_fields () =
+  let env = eval_module {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    fn main() do
+      worker(Counter)
+    end
+  end|} in
+  let spec = call_fn env "main" [] in
+  (match spec with
+   | March_eval.Eval.VRecord fields ->
+     Alcotest.(check bool) "worker has actor field" true
+       (List.mem_assoc "actor" fields);
+     Alcotest.(check bool) "worker has restart field" true
+       (List.mem_assoc "restart" fields)
+   | _ -> Alcotest.fail "expected VRecord from worker/1")
+
+(** The app body is typechecked: a valid app block produces no typecheck errors. *)
+let test_app_typechecks_valid () =
+  let src = {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Inc() do { count = state.count + 1 } end
+    end
+
+    app MyApp do
+      Supervisor.spec(:one_for_one, [worker(Counter)])
+    end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "valid app block: no typecheck errors" false (has_errors ctx)
+
+(** An app body that returns the wrong type (Int) should produce a typecheck
+    error, since the desugar annotates the spec field as SupervisorSpec. *)
+let test_app_wrong_body_type_error () =
+  let src = {|mod Test do
+    app MyApp do
+      42
+    end
+  end|} in
+  let ctx = typecheck src in
+  Alcotest.(check bool) "wrong app body type: has typecheck error" true (has_errors ctx)
+
+(* ------------------------------------------------------------------ *)
 (* Dynamic Supervisor tests                                            *)
 (* ------------------------------------------------------------------ *)
 
@@ -12208,6 +12284,13 @@ let () =
           Alcotest.test_case "app desugars to init"    `Quick (with_reset test_app_desugars_to_app_init);
           Alcotest.test_case "app spawns actors"       `Quick (with_reset test_app_spawns_actors);
           Alcotest.test_case "main + app exclusive"    `Quick test_app_main_exclusive;
+          Alcotest.test_case "app typechecks valid"    `Quick (with_reset test_app_typechecks_valid);
+          Alcotest.test_case "app wrong body type err" `Quick (with_reset test_app_wrong_body_type_error);
+        ] );
+      ( "spec_construction",
+        [
+          Alcotest.test_case "Supervisor.spec returns record"  `Quick (with_reset test_supervisor_spec_value);
+          Alcotest.test_case "worker/1 returns child spec"     `Quick (with_reset test_worker_builtin_fields);
         ] );
       ( "shutdown",
         [
@@ -13160,6 +13243,10 @@ let () =
         Alcotest.test_case "on_stop hook parses"             `Quick (with_reset test_on_stop_hook);
         Alcotest.test_case "no-handler actor force-killed"   `Quick (with_reset test_actor_no_shutdown_handler_force_killed);
         Alcotest.test_case "shutdown marks actors dead"      `Quick (with_reset test_shutdown_actor_pid_marks_dead);
+        Alcotest.test_case "app typechecks valid"            `Quick (with_reset test_app_typechecks_valid);
+        Alcotest.test_case "app wrong body type: tc error"   `Quick (with_reset test_app_wrong_body_type_error);
+        Alcotest.test_case "Supervisor.spec value shape"     `Quick (with_reset test_supervisor_spec_value);
+        Alcotest.test_case "worker/1 child spec shape"       `Quick (with_reset test_worker_builtin_fields);
       ]);
       ("derive_syntax", [
         Alcotest.test_case "derive keyword lexes"          `Quick test_derive_lexes_keyword;

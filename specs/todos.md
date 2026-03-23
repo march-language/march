@@ -20,7 +20,7 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ### Language: Application Entry Point
 
-- [ ] **Implement `app` entry point** — Spec written at `specs/application_spec.md`. Introduces a declarative `app` entry point for long-running supervised systems, distinct from `main()`. Requires parser changes (new `app` keyword/block), type checker support for supervision specs as values, and runtime integration to detect which entry point exists and drive actor lifecycle accordingly.
+- ✅ **Implement `app` entry point** — Spec written at `specs/application_spec.md`. Introduces a declarative `app` entry point for long-running supervised systems, distinct from `main()`. Implemented: `APP`/`ON_START`/`ON_STOP` lexer tokens; `DApp`/`app_def` AST node (with `app_on_start`/`app_on_stop` hooks); parser rule `app_decl`; desugar pass converts `DApp` → `__app_init__` function (with type annotation ensuring body returns `SupervisorSpec`); mutual-exclusivity check (`main` + `app` conflict → compile error); `spawn_from_spec` in eval; `run_module` dispatches on `__app_init__`; signal handlers for SIGTERM/SIGINT; graceful shutdown (reverse start order); process registry (`whereis`/`whereis_bang`); dynamic supervisors; named children; `on_start`/`on_stop` lifecycle hooks. Tests: `app` group (8), `shutdown` group (6), `registry` group (6), `dynamic_supervisor` group (7), `spec_construction` group (2), `app_shutdown` group (16) in `test_march.ml`.
 
 ---
 
