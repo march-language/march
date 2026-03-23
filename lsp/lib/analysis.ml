@@ -189,7 +189,8 @@ let rec collect_decl ~def_map ~use_map ~actors_tbl (decl : Ast.decl) =
     Option.iter (collect_expr ~def_map ~use_map) app.app_on_stop
 
   | Ast.DUse _ | Ast.DAlias _ | Ast.DNeeds _
-  | Ast.DProtocol _ | Ast.DExtern _ | Ast.DSig _ -> ()
+  | Ast.DProtocol _ | Ast.DExtern _ | Ast.DSig _
+  | Ast.DDeriving _ -> ()
 
 and collect_expr ~def_map ~use_map (e : Ast.expr) =
   match e with
