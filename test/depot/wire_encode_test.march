@@ -1,0 +1,345 @@
+-- test/depot/wire_encode_test.march
+-- Phase 1: PostgreSQL wire protocol encoding tests.
+-- Self-contained: includes type definitions and encoder inline
+-- (March compiles one file at a time; no cross-file imports for user code).
+--
+-- Run with: dune exec march -- test test/depot/wire_encode_test.march
+
+mod WireEncodeTest do
+
+-- ── Types (from depot/src/wire/message.march) ─────────────────────────────
+
+type FrontendMessage =
+    Startup(Map(String, String))
+  | Query(String)
+  | Parse(String, String, List(Int))
+  | Bind(String, String, List(Param))
+  | Execute(String, Int)
+  | Describe(DescribeTarget)
+  | Close(CloseTarget)
+  | Sync
+  | Flush
+  | Terminate
+  | PasswordMessage(String)
+  | SASLInitialResponse(String, Bytes)
+  | SASLResponse(Bytes)
+
+type DescribeTarget = DescribeStatement(String) | DescribePortal(String)
+type CloseTarget    = CloseStatement(String)    | ClosePortal(String)
+
+type Param =
+    ParamNull
+  | ParamText(String)
+  | ParamBinary(Bytes)
+
+-- ── Encoding helpers (from depot/src/wire/encode.march) ───────────────────
+
+fn i32_be(n : Int) : Bytes do
+  Bytes.from_list([
+    (n / 16777216) % 256,
+    (n / 65536)    % 256,
+    (n / 256)      % 256,
+     n             % 256
+  ])
+end
+
+fn i16_be(n : Int) : Bytes do
+  Bytes.from_list([(n / 256) % 256, n % 256])
+end
+
+fn cstring(s : String) : Bytes do
+  Bytes.concat(Bytes.from_string(s), Bytes.from_list([0]))
+end
+
+fn length_prefix(payload : Bytes) : Bytes do
+  Bytes.concat(i32_be(Bytes.length(payload) + 4), payload)
+end
+
+fn frame(type_byte : Int, payload : Bytes) : Bytes do
+  Bytes.concat(Bytes.from_list([type_byte]), length_prefix(payload))
+end
+
+fn str_cmp(a : String) : String -> Bool do
+  fn b -> a < b
+end
+
+fn encode(msg : FrontendMessage) : Bytes do
+  match msg do
+  | Startup(params) ->
+    let pairs = Map.fold(Bytes.empty(), params, fn acc -> fn k -> fn v ->
+      Bytes.concat(acc, Bytes.concat(cstring(k), cstring(v)))
+    )
+    let payload = Bytes.concat(i32_be(196608), Bytes.concat(pairs, Bytes.from_list([0])))
+    length_prefix(payload)
+  | Query(sql) ->
+    frame(81, cstring(sql))
+  | Parse(name, sql, oids) ->
+    let oid_bytes = List.fold_left(Bytes.empty(), oids, fn (acc, oid) ->
+      Bytes.concat(acc, i32_be(oid)))
+    let payload = Bytes.concat(
+      Bytes.concat(cstring(name), cstring(sql)),
+      Bytes.concat(i16_be(List.length(oids)), oid_bytes))
+    frame(80, payload)
+  | Bind(portal, stmt, params) ->
+    encode_bind(portal, stmt, params)
+  | Execute(portal, max_rows) ->
+    frame(69, Bytes.concat(cstring(portal), i32_be(max_rows)))
+  | Sync      -> frame(83, Bytes.empty())
+  | Flush     -> frame(72, Bytes.empty())
+  | Terminate -> frame(88, Bytes.empty())
+  | PasswordMessage(pw) ->
+    frame(112, cstring(pw))
+  | Describe(DescribeStatement(name)) ->
+    frame(68, Bytes.concat(Bytes.from_list([83]), cstring(name)))
+  | Describe(DescribePortal(name)) ->
+    frame(68, Bytes.concat(Bytes.from_list([80]), cstring(name)))
+  | _ -> panic("encode: unimplemented message type")
+  end
+end
+
+fn encode_bind(portal, stmt, params) do
+  let n = List.length(params)
+  let param_bytes = List.fold_left(Bytes.empty(), params, fn (acc, p) ->
+    match p do
+    | ParamNull    -> Bytes.concat(acc, i32_be(-1))
+    | ParamText(s) ->
+      let b = Bytes.from_string(s)
+      Bytes.concat(acc, Bytes.concat(i32_be(Bytes.length(b)), b))
+    | ParamBinary(b) ->
+      Bytes.concat(acc, Bytes.concat(i32_be(Bytes.length(b)), b))
+    end
+  )
+  let payload = Bytes.concat(
+    Bytes.concat(cstring(portal), cstring(stmt)),
+    Bytes.concat(i16_be(1), Bytes.concat(i16_be(0),
+      Bytes.concat(i16_be(n), Bytes.concat(param_bytes,
+        Bytes.concat(i16_be(1), i16_be(0)))))))
+  frame(66, payload)
+end
+
+-- ── Tests ──────────────────────────────────────────────────────────────────
+
+describe "i32_be" do
+  test "zero" do
+    assert (i32_be(0) == Bytes.from_list([0, 0, 0, 0]))
+  end
+
+  test "one" do
+    assert (i32_be(1) == Bytes.from_list([0, 0, 0, 1]))
+  end
+
+  test "256" do
+    assert (i32_be(256) == Bytes.from_list([0, 0, 1, 0]))
+  end
+
+  test "65536" do
+    assert (i32_be(65536) == Bytes.from_list([0, 1, 0, 0]))
+  end
+
+  test "16777216" do
+    assert (i32_be(16777216) == Bytes.from_list([1, 0, 0, 0]))
+  end
+
+  test "protocol version 196608 (3.0)" do
+    -- 196608 = 0x00030000
+    assert (i32_be(196608) == Bytes.from_list([0, 3, 0, 0]))
+  end
+end
+
+describe "i16_be" do
+  test "zero" do
+    assert (i16_be(0) == Bytes.from_list([0, 0]))
+  end
+
+  test "one" do
+    assert (i16_be(1) == Bytes.from_list([0, 1]))
+  end
+
+  test "256" do
+    assert (i16_be(256) == Bytes.from_list([1, 0]))
+  end
+
+  test "1000" do
+    -- 1000 = 0x03E8
+    assert (i16_be(1000) == Bytes.from_list([3, 232]))
+  end
+end
+
+describe "cstring" do
+  test "empty string becomes single null byte" do
+    assert (cstring("") == Bytes.from_list([0]))
+  end
+
+  test "hello becomes hello + null" do
+    assert (cstring("hi") == Bytes.from_list([104, 105, 0]))
+  end
+end
+
+describe "Terminate" do
+  test "encodes to exactly [88, 0, 0, 0, 4]" do
+    assert (encode(Terminate) == Bytes.from_list([88, 0, 0, 0, 4]))
+  end
+
+  test "is exactly 5 bytes" do
+    assert (Bytes.length(encode(Terminate)) == 5)
+  end
+end
+
+describe "Sync" do
+  test "encodes to exactly [83, 0, 0, 0, 4]" do
+    assert (encode(Sync) == Bytes.from_list([83, 0, 0, 0, 4]))
+  end
+
+  test "is exactly 5 bytes" do
+    assert (Bytes.length(encode(Sync)) == 5)
+  end
+end
+
+describe "Flush" do
+  test "encodes to exactly [72, 0, 0, 0, 4]" do
+    assert (encode(Flush) == Bytes.from_list([72, 0, 0, 0, 4]))
+  end
+end
+
+describe "Query" do
+  test "SELECT 1 has correct type byte Q=81" do
+    let bytes = Bytes.to_list(encode(Query("SELECT 1")))
+    assert (List.head(bytes) == 81)
+  end
+
+  test "SELECT 1 has correct length field" do
+    -- payload = cstring("SELECT 1") = 9 bytes; length field = 9+4 = 13
+    let bytes = encode(Query("SELECT 1"))
+    let b = Bytes.to_list(bytes)
+    -- bytes 1-4 are the length field (big-endian 13)
+    assert (List.nth(b, 1) == 0)
+    assert (List.nth(b, 2) == 0)
+    assert (List.nth(b, 3) == 0)
+    assert (List.nth(b, 4) == 13)
+  end
+
+  test "SELECT 1 is null-terminated" do
+    let bytes = Bytes.to_list(encode(Query("SELECT 1")))
+    assert (List.last(bytes) == 0)
+  end
+
+  test "SELECT 1 total length is 14 bytes" do
+    -- 1 type + 4 length + 8 chars + 1 null = 14
+    assert (Bytes.length(encode(Query("SELECT 1"))) == 14)
+  end
+
+  test "empty query encodes correctly" do
+    -- payload = cstring("") = 1 byte (null); length = 5; total = 6
+    assert (Bytes.length(encode(Query(""))) == 6)
+  end
+end
+
+describe "Startup" do
+  test "single param has correct protocol version" do
+    let params = Map.singleton("user", "postgres")
+    let bytes = Bytes.to_list(encode(Startup(params)))
+    -- bytes 4-7 are protocol version (no type byte for Startup)
+    assert (List.nth(bytes, 4) == 0)
+    assert (List.nth(bytes, 5) == 3)
+    assert (List.nth(bytes, 6) == 0)
+    assert (List.nth(bytes, 7) == 0)
+  end
+
+  test "single param correct total length" do
+    -- payload = i32_be(196608) + cstring("user") + cstring("postgres") + 0x00
+    --         = 4 + 5 + 9 + 1 = 19 bytes
+    -- with length prefix: 4 + 19 = 23 bytes total
+    let params = Map.singleton("user", "postgres")
+    assert (Bytes.length(encode(Startup(params))) == 23)
+  end
+
+  test "length field encodes payload+4 correctly" do
+    let params = Map.singleton("user", "postgres")
+    let bytes = Bytes.to_list(encode(Startup(params)))
+    -- first 4 bytes = i32_be(23) since no type byte for Startup
+    assert (List.nth(bytes, 0) == 0)
+    assert (List.nth(bytes, 1) == 0)
+    assert (List.nth(bytes, 2) == 0)
+    assert (List.nth(bytes, 3) == 23)
+  end
+
+  test "terminated with double null" do
+    let params = Map.singleton("user", "postgres")
+    let bytes = Bytes.to_list(encode(Startup(params)))
+    assert (List.last(bytes) == 0)
+  end
+end
+
+describe "Parse" do
+  test "unnamed statement with no oids" do
+    let bytes = encode(Parse("", "SELECT 1", []))
+    -- type 'P' = 80
+    assert (Bytes.get(bytes, 0) == 80)
+    -- payload = cstring("") + cstring("SELECT 1") + i16_be(0)
+    --         = 1 + 9 + 2 = 12 bytes
+    -- length field = 12 + 4 = 16
+    assert (Bytes.get(bytes, 4) == 16)
+  end
+
+  test "with one oid adds 4 bytes to payload" do
+    let b0 = encode(Parse("", "SELECT $1", []))
+    let b1 = encode(Parse("", "SELECT $1", [23]))
+    -- one oid = 4 extra bytes + 2 bytes for count change (0->1)
+    -- actually i16_be(0) -> i16_be(1) is same size; oid_bytes adds 4
+    assert (Bytes.length(b1) == Bytes.length(b0) + 4)
+  end
+end
+
+describe "Describe" do
+  test "DescribeStatement has type D=68 and sub-type S=83" do
+    let bytes = encode(Describe(DescribeStatement("my_stmt")))
+    assert (Bytes.get(bytes, 0) == 68)
+    assert (Bytes.get(bytes, 5) == 83)
+  end
+
+  test "DescribePortal has type D=68 and sub-type P=80" do
+    let bytes = encode(Describe(DescribePortal("")))
+    assert (Bytes.get(bytes, 0) == 68)
+    assert (Bytes.get(bytes, 5) == 80)
+  end
+end
+
+describe "Execute" do
+  test "has type E=69" do
+    let bytes = encode(Execute("", 0))
+    assert (Bytes.get(bytes, 0) == 69)
+  end
+
+  test "max_rows=0 in payload" do
+    let bytes = encode(Execute("", 0))
+    -- payload = cstring("") + i32_be(0) = 1 + 4 = 5
+    -- length = 5 + 4 = 9; total = 10
+    assert (Bytes.length(bytes) == 10)
+  end
+end
+
+describe "Bind" do
+  test "empty bind has type B=66" do
+    let bytes = encode(Bind("", "", []))
+    assert (Bytes.get(bytes, 0) == 66)
+  end
+
+  test "bind with two text params correct length" do
+    let params = [ParamText("hello"), ParamText("world")]
+    let bytes = encode(Bind("", "s", params))
+    -- portal cstring("") = 1
+    -- stmt cstring("s") = 2
+    -- i16_be(1) format codes count = 2
+    -- i16_be(0) format code = 2
+    -- i16_be(2) param count = 2
+    -- param "hello": i32_be(5) + 5 bytes = 9
+    -- param "world": i32_be(5) + 5 bytes = 9
+    -- i16_be(1) result format count = 2
+    -- i16_be(0) result format = 2
+    -- total payload = 1+2+2+2+2+9+9+2+2 = 31
+    -- with type+length: 1 + 4 + 31 = 36
+    assert (Bytes.length(bytes) == 36)
+  end
+end
+
+end
