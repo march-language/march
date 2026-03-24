@@ -834,6 +834,61 @@ The optimization interacts correctly with the rest of the Perceus analysis: `Inc
 
 **LLVM**. Mature, excellent optimization, broad platform support, and the obvious choice for a language targeting native code with unboxed representations and no GC write barriers on the hot path.
 
+### Tail-Call Optimization (TCO) — Loop Transformation
+
+March guarantees O(1) stack space for tail-recursive functions via a loop transformation in LLVM IR emission (`lib/tir/llvm_emit.ml`).
+
+#### How it works
+
+For a self-tail-recursive function, the emitter:
+
+1. **Detects** self-tail-recursion in the TIR body using `has_self_tail_call` — a simple structural traversal that follows tail-position expressions (ELet body, ESeq second operand, ECase branch bodies).
+
+2. **Transforms** the LLVM IR from a recursive call into a loop:
+   - Emits `entry: → br label %tco_loop` after parameter allocas
+   - Emits a `tco_loop:` header block
+   - At each tail-self-call site, stores the new argument values into the parameter alloca slots and emits `br label %tco_loop` instead of a `call` instruction
+   - Opens a dead block for any instructions that the calling context emits after the branch (e.g., `emit_case`'s store-to-result-slot) — these are unreachable but keep the IR structurally valid
+
+3. **Relies on LLVM's mem2reg + DCE** to promote the alloca slots to registers and eliminate the dead blocks, producing tight loop IR equivalent to a hand-written while loop.
+
+The transformation uses the existing alloca-based parameter representation — no phi nodes are required in the emitted IR; LLVM's mem2reg promotes them automatically.
+
+#### Example
+
+```march
+@[no_warn_recursion]
+fn factorial(n : Int, acc : Int) : Int do
+  if n == 0 then acc
+  else factorial(n - 1, n * acc)
+end
+```
+
+Emits (schematically):
+```llvm
+define i64 @factorial(i64 %n.arg, i64 %acc.arg) {
+entry:
+  %n.addr   = alloca i64
+  store i64 %n.arg,   ptr %n.addr
+  %acc.addr = alloca i64
+  store i64 %acc.arg, ptr %acc.addr
+  br label %tco_loop1
+tco_loop1:
+  ; ... evaluate condition, emit branch/case ...
+  ; false branch — tail self-call → back-edge:
+  store i64 %new_n,   ptr %n.addr
+  store i64 %new_acc, ptr %acc.addr
+  br label %tco_loop1
+  ; true branch → ret i64 %acc_val
+}
+```
+
+#### Scope
+
+- **Supported**: Direct self-recursion (function calls itself in tail position)
+- **Not yet supported**: Mutual recursion (requires Continuation Passing Style or a shared trampoline — deferred post-v1)
+- **Interaction with Perceus**: RC operations inserted before the tail call (e.g., `ESeq(EDecRC(xs), EApp(go, ...))`) are emitted before the back-edge store, so reference counting is correct
+
 ## Compiler Architecture
 
 ### Query-Based / Demand-Driven

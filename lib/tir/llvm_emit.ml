@@ -60,6 +60,14 @@ type ctx = {
   (* Tracks the actual LLVM type stored in each alloca slot, keyed by slot name.
      Used to emit correct load types even when TIR var has unresolved TVar. *)
   var_llvm_ty : (string, string) Hashtbl.t;
+  (* TCO state — set by emit_fn when emitting a self-tail-recursive function.
+     tco_fn_name: the TIR name of the function being TCO'd (None = no TCO active).
+     tco_loop_label: the LLVM block label to branch to for loop back-edge.
+     tco_param_info: (tir_var_name, alloca_slot, llvm_ty) for each parameter,
+       in declaration order — used to store new argument values before looping. *)
+  mutable tco_fn_name   : string option;
+  mutable tco_loop_label : string;
+  mutable tco_param_info : (string * string * string) list;
 }
 
 let make_ctx ?(fast_math=false) () = {
@@ -80,6 +88,9 @@ let make_ctx ?(fast_math=false) () = {
   extra_fns = Buffer.create 1024;
   extern_map = Hashtbl.create 8;
   var_llvm_ty = Hashtbl.create 32;
+  tco_fn_name    = None;
+  tco_loop_label = "";
+  tco_param_info = [];
 }
 
 (* ── Helpers ─────────────────────────────────────────────────────────── *)
@@ -1050,6 +1061,43 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        emit ctx (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" r v);
        ("ptr", r))
 
+  (* ── TCO self-call: back-edge instead of a call instruction ────────── *)
+  (* When TCO is active for the current function and this EApp targets it,
+     store the new argument values into the parameter alloca slots and
+     jump to the loop header.  The instructions emitted after the br
+     (from the calling emit_case / emit_fn context) land in a dead block —
+     valid LLVM IR but never executed; the optimizer removes them. *)
+  | Tir.EApp (f, args)
+    when (match ctx.tco_fn_name with
+          | Some n -> String.equal n f.Tir.v_name
+          | None   -> false)
+         && List.length args = List.length ctx.tco_param_info ->
+    (* 1. Evaluate every new argument while the old parameter slots are
+          still live — read all inputs before writing any outputs. *)
+    let new_vals = List.map2 (fun (_vname, _slot, param_ty) a ->
+        let (arg_ty, arg_val) = emit_atom ctx a in
+        coerce ctx arg_ty arg_val param_ty
+      ) ctx.tco_param_info args in
+    (* 2. Store each new value into the corresponding parameter slot. *)
+    List.iter2 (fun (_vname, slot, param_ty) new_v ->
+        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr" param_ty new_v slot)
+      ) ctx.tco_param_info new_vals;
+    (* 3. Loop back — this is the terminator for the current basic block. *)
+    emit_term ctx (Printf.sprintf "br label %%%s" ctx.tco_loop_label);
+    (* 4. Open a dead block so that any instructions the caller emits after
+          us (e.g., emit_case's store-to-result-slot + br-to-merge) are
+          syntactically valid LLVM IR even though they are unreachable. *)
+    emit_label ctx (fresh_block ctx "tco_cont");
+    (* 5. Return a dummy value.  The caller may coerce / store it, but since
+          we are in a dead block the value is never observed. *)
+    let dummy_ty = llvm_ret_ty ctx.ret_ty in
+    let dummy = match dummy_ty with
+      | "double" -> ("double", "0x0000000000000000")
+      | "void"   -> ("i64",    "0")
+      | _        -> ("i64",    "0")
+    in
+    dummy
+
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->
     let arg_strs = List.map (fun a ->
@@ -1623,6 +1671,26 @@ and emit_case ctx scrut_atom branches default_opt =
   emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r result_slot);
   ("ptr", r)
 
+(* ── TCO helper ──────────────────────────────────────────────────────── *)
+
+(** Return true if [expr] contains a tail-position call to [fn_name].
+    Only traverses sub-expressions that are in tail position:
+    - ELet body (not rhs)
+    - ESeq second operand (not first)
+    - ECase branch bodies and default
+    - ELetRec body
+    A bare EApp whose callee name matches is a tail call. *)
+let rec has_self_tail_call (fn_name : string) (expr : Tir.expr) : bool =
+  match expr with
+  | Tir.EApp (f, _) -> String.equal f.Tir.v_name fn_name
+  | Tir.ELet (_, _, body) -> has_self_tail_call fn_name body
+  | Tir.ESeq (_, e2) -> has_self_tail_call fn_name e2
+  | Tir.ECase (_, branches, default_opt) ->
+    List.exists (fun br -> has_self_tail_call fn_name br.Tir.br_body) branches ||
+    (match default_opt with Some d -> has_self_tail_call fn_name d | None -> false)
+  | Tir.ELetRec (_, body) -> has_self_tail_call fn_name body
+  | _ -> false
+
 (* ── Function emitter ────────────────────────────────────────────────── *)
 
 let emit_fn ctx (fn : Tir.fn_def) =
@@ -1633,6 +1701,13 @@ let emit_fn ctx (fn : Tir.fn_def) =
   let fn_llvm_name = mangle_extern fn.Tir.fn_name in
   let ret_ty       = llvm_ret_ty fn.Tir.fn_ret_ty in
 
+  (* Detect self-tail-recursion: only do TCO when the function calls itself
+     in tail position and is not a closure apply fn (those have a clo arg). *)
+  let is_tco =
+    has_self_tail_call fn.Tir.fn_name fn.Tir.fn_body
+    && not (is_builtin_fn fn.Tir.fn_name)
+  in
+
   let params_str = String.concat ", " (List.map (fun (v : Tir.var) ->
       let vn = llvm_name v.Tir.v_name in
       llvm_ty v.Tir.v_ty ^ " %" ^ vn ^ ".arg"
@@ -1641,22 +1716,42 @@ let emit_fn ctx (fn : Tir.fn_def) =
   Buffer.add_string ctx.buf
     (Printf.sprintf "\ndefine %s @%s(%s) {\nentry:\n" ret_ty fn_llvm_name params_str);
 
-  (* Alloca + store for each parameter *)
-  List.iter (fun (v : Tir.var) ->
+  (* Alloca + store for each parameter; collect slot info for TCO. *)
+  let param_slots = List.map (fun (v : Tir.var) ->
     let ty = llvm_ty v.Tir.v_ty in
     let slot = alloca_name ctx (llvm_name v.Tir.v_name) in
     emit ctx (Printf.sprintf "%%%s.addr = alloca %s" slot ty);
     emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty (llvm_name v.Tir.v_name) slot);
-    Hashtbl.replace ctx.var_llvm_ty slot ty
-  ) fn.Tir.fn_params;
+    Hashtbl.replace ctx.var_llvm_ty slot ty;
+    (v.Tir.v_name, slot, ty)
+  ) fn.Tir.fn_params in
 
-  let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
-
-  if ret_ty = "void" then
-    emit_term ctx "ret void"
-  else begin
-    let final_val = coerce ctx body_ty body_val ret_ty in
-    emit_term ctx (Printf.sprintf "ret %s %s" ret_ty final_val)
+  if is_tco then begin
+    (* Emit: entry → loop.  The loop block header is the back-edge target. *)
+    let loop_lbl = fresh_block ctx "tco_loop" in
+    emit_term ctx (Printf.sprintf "br label %%%s" loop_lbl);
+    emit_label ctx loop_lbl;
+    (* Install TCO context so EApp to self emits a back-edge instead of a call. *)
+    ctx.tco_fn_name    <- Some fn.Tir.fn_name;
+    ctx.tco_loop_label <- loop_lbl;
+    ctx.tco_param_info <- param_slots;
+    let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
+    (* Clear TCO state before emitting any other function. *)
+    ctx.tco_fn_name <- None;
+    if ret_ty = "void" then
+      emit_term ctx "ret void"
+    else begin
+      let final_val = coerce ctx body_ty body_val ret_ty in
+      emit_term ctx (Printf.sprintf "ret %s %s" ret_ty final_val)
+    end
+  end else begin
+    let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
+    if ret_ty = "void" then
+      emit_term ctx "ret void"
+    else begin
+      let final_val = coerce ctx body_ty body_val ret_ty in
+      emit_term ctx (Printf.sprintf "ret %s %s" ret_ty final_val)
+    end
   end;
 
   Buffer.add_string ctx.buf "}\n"

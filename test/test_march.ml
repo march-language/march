@@ -4748,6 +4748,76 @@ let test_actor_compile_run_scheduler_in_main () =
   Alcotest.(check bool) "@main calls march_run_scheduler" true
     (ir_contains ir "march_run_scheduler")
 
+(* ── TCO (tail-call optimisation) IR tests ─────────────────────────────── *)
+
+(** Helper: full pipeline → LLVM IR, same as emit_actor_ir but named clearly. *)
+let emit_tco_ir src = emit_actor_ir src
+
+(** Tail-recursive accumulator factorial: should produce a tco_loop block and
+    a back-edge branch replacing the self-tail-call. *)
+let test_tco_factorial_has_loop () =
+  let ir = emit_tco_ir {|mod Test do
+    @[no_warn_recursion]
+    fn factorial(n : Int, acc : Int) : Int do
+      if n == 0 then acc
+      else factorial(n - 1, n * acc)
+    end
+    fn main() : Unit do println(int_to_string(factorial(10, 1))) end
+  end|} in
+  (* The tco_loop label and back-edge branch are the unique markers of TCO. *)
+  Alcotest.(check bool) "TCO factorial: tco_loop block emitted" true
+    (ir_contains ir "tco_loop");
+  Alcotest.(check bool) "TCO factorial: back-edge branch emitted" true
+    (ir_contains ir "br label %tco_loop")
+
+(** Tail-recursive list fold: should be transformed into a loop. *)
+let test_tco_fold_has_loop () =
+  let ir = emit_tco_ir {|mod Test do
+    type L = Nil | Cons(Int, L)
+    @[no_warn_recursion]
+    fn fold(xs : L, acc : Int) : Int do
+      match xs do
+      | Nil        -> acc
+      | Cons(h, t) -> fold(t, acc + h)
+      end
+    end
+    fn main() : Unit do println(int_to_string(fold(Cons(1, Cons(2, Nil)), 0))) end
+  end|} in
+  Alcotest.(check bool) "TCO fold: tco_loop block emitted" true
+    (ir_contains ir "tco_loop");
+  Alcotest.(check bool) "TCO fold: back-edge branch emitted" true
+    (ir_contains ir "br label %tco_loop")
+
+(** Non-tail-recursive fib must NOT get a TCO loop (it is not tail recursive). *)
+let test_tco_nontail_fib_no_loop () =
+  let ir = emit_tco_ir {|mod Test do
+    @[no_warn_recursion]
+    fn fib(n : Int) : Int do
+      if n < 2 then n
+      else fib(n - 1) + fib(n - 2)
+    end
+    fn main() : Unit do println(int_to_string(fib(10))) end
+  end|} in
+  Alcotest.(check bool) "non-tail fib: no TCO loop" false
+    (ir_contains ir "tco_loop");
+  Alcotest.(check bool) "non-tail fib: call instruction present" true
+    (ir_contains ir "call i64 @fib")
+
+(** Single-param tail-recursive countdown: loop emitted with back-edge. *)
+let test_tco_countdown_has_loop () =
+  let ir = emit_tco_ir {|mod Test do
+    @[no_warn_recursion]
+    fn count(n : Int) : Int do
+      if n == 0 then 0
+      else count(n - 1)
+    end
+    fn main() : Unit do println(int_to_string(count(100))) end
+  end|} in
+  Alcotest.(check bool) "TCO countdown: tco_loop block emitted" true
+    (ir_contains ir "tco_loop");
+  Alcotest.(check bool) "TCO countdown: back-edge branch emitted" true
+    (ir_contains ir "br label %tco_loop")
+
 let test_perceus_preserves_fn_count () =
   (* After perceus, user function count is unchanged.
      The module will also contain 15 builtin interface impl functions
@@ -15330,6 +15400,12 @@ let () =
           Alcotest.test_case "link emitted"                 `Quick test_actor_compile_link_emitted;
           Alcotest.test_case "multi-actor no crash"         `Quick test_actor_compile_multi_actor_no_crash;
           Alcotest.test_case "run_scheduler in main"        `Quick test_actor_compile_run_scheduler_in_main;
+        ] );
+      ( "tco_codegen", [
+          Alcotest.test_case "factorial loop emitted"   `Quick test_tco_factorial_has_loop;
+          Alcotest.test_case "fold loop emitted"        `Quick test_tco_fold_has_loop;
+          Alcotest.test_case "non-tail fib no loop"     `Quick test_tco_nontail_fib_no_loop;
+          Alcotest.test_case "countdown loop emitted"   `Quick test_tco_countdown_has_loop;
         ] );
       "multiline", [
         Alcotest.test_case "depth zero" `Quick test_multiline_depth_zero;
