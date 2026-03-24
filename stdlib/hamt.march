@@ -181,6 +181,7 @@ end
 -- ── Core HAMT operations ───────────────────────────────────────────────────
 
 -- get: look up key in the trie; returns Some(value) or None.
+@[no_warn_recursion]
 fn hamt_get(node, key, h, eq, level) do
   match node do
   | HEmpty -> None
@@ -239,6 +240,7 @@ fn make_branch(h1, k1, v1, h2, k2, v2, level) do
 end
 
 -- insert: add or update key→val in the trie.
+@[no_warn_recursion]
 fn hamt_insert(node, key, val, h, eq, level) do
   match node do
   | HEmpty ->
@@ -286,6 +288,7 @@ fn hamt_insert(node, key, val, h, eq, level) do
 end
 
 -- remove: delete key from the trie.
+@[no_warn_recursion]
 fn hamt_remove(node, key, h, eq, level) do
   match node do
   | HEmpty -> HEmpty
@@ -335,6 +338,7 @@ end
 
 -- fold: left fold over all (key, value) pairs in the trie.
 -- f is curried: f(acc)(key)(val) = new_acc
+@[no_warn_recursion]
 fn hamt_fold(acc, node, f) do
   match node do
   | HEmpty -> acc
@@ -367,6 +371,7 @@ fn hamt_fold(acc, node, f) do
 end
 
 -- size: count the total number of entries.
+@[no_warn_recursion]
 fn hamt_size(node) do
   match node do
   | HEmpty -> 0

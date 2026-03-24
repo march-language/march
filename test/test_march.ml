@@ -4884,7 +4884,7 @@ let make_jit_test_module (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
   let fn_def = March_ast.Ast.{
     fn_name = { txt = "main"; span = s };
     fn_vis = March_ast.Ast.Public;
-    fn_doc = None; fn_ret_ty = None;
+    fn_doc = None; fn_attrs = []; fn_ret_ty = None;
     fn_clauses = [clause] } in
   { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
     mod_decls = [March_ast.Ast.DFn (fn_def, s)] }
@@ -5077,7 +5077,7 @@ let test_repl_jit_stdlib_list_length () =
            fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
-           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
            fn_clauses = [main_clause]; } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
@@ -5129,7 +5129,7 @@ let test_repl_list_literal () =
          let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
-           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
            fn_clauses = [clause] } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
@@ -5172,7 +5172,7 @@ let test_repl_stdlib_on_list () =
          let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
-           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
            fn_clauses = [clause] } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
@@ -5269,7 +5269,7 @@ let test_repl_stdlib_chain () =
          let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
-           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
            fn_clauses = [clause] } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
@@ -5405,7 +5405,7 @@ let test_repl_jit_list_display () =
          let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
-           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
            fn_clauses = [clause] } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
@@ -5532,7 +5532,7 @@ let test_repl_list_literal_with_bigint () =
            fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
-           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
            fn_clauses = [clause] } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
@@ -5596,7 +5596,7 @@ let test_repl_list_literal_with_precompile_bigint () =
            fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
-           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
            fn_clauses = [clause] } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
@@ -5643,7 +5643,7 @@ let make_stdlib_module stdlib_decls (e : March_ast.Ast.expr) : March_ast.Ast.mod
   let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
   let main_def = March_ast.Ast.{
     fn_name = { txt = "main"; span = s };
-    fn_vis = March_ast.Ast.Public; fn_doc = None; fn_ret_ty = None;
+    fn_vis = March_ast.Ast.Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
     fn_clauses = [clause] } in
   { March_ast.Ast.mod_name = { txt = "Main"; span = s };
     mod_decls = stdlib_decls @ [March_ast.Ast.DFn (main_def, s)] }

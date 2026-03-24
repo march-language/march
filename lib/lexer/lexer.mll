@@ -114,6 +114,7 @@ rule token = parse
     }
   | '['           { LBRACKET }
   | ']'           { RBRACKET }
+  | '@'           { AT }
   | "->"          { ARROW }
   | "|>"          { PIPE_ARROW }
   | '='           { EQUALS }

@@ -358,6 +358,7 @@ let rec desugar_decl (d : decl) : decl =
       fn_name    = { txt = "__app_init__"; span = sp };
       fn_vis     = Private;
       fn_doc     = None;
+      fn_attrs   = [];
       fn_ret_ty  = None;
       fn_clauses = [{
         fc_params = [];
@@ -397,6 +398,7 @@ let inject_defaults (interfaces : (string * interface_def) list) (d : decl) : de
                  fn_name = m.md_name;
                  fn_vis = Private;
                  fn_doc = None;
+                 fn_attrs = [];
                  fn_ret_ty = None;
                  fn_clauses = [{
                    fc_params = [];
@@ -429,6 +431,7 @@ let mk_fn_def name params body : fn_def =
   { fn_name   = mk_name name;
     fn_vis     = Private;
     fn_doc     = None;
+    fn_attrs   = [];
     fn_ret_ty  = None;
     fn_clauses = [{
       fc_params = List.map (fun p ->

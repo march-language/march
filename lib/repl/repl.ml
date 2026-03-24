@@ -164,6 +164,7 @@ let wrap_expr_as_module ~(stdlib_decls : March_ast.Ast.decl list)
     March_ast.Ast.fn_name = { txt = "main"; span = s };
     fn_vis = March_ast.Ast.Public;
     fn_doc = None;
+    fn_attrs = [];
     fn_ret_ty = None;
     fn_clauses = [main_clause];
   } in

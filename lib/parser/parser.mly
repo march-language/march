@@ -61,7 +61,7 @@
           | rest' -> (ret_acc, clauses_acc, rest')
         in
         let (final_ret, all_clauses, rest') = collect_same ret clauses rest in
-        go (DFn ({ fn_name = def.fn_name; fn_vis = vis; fn_doc = def.fn_doc; fn_ret_ty = final_ret; fn_clauses = all_clauses }, span) :: acc) rest'
+        go (DFn ({ fn_name = def.fn_name; fn_vis = vis; fn_doc = def.fn_doc; fn_attrs = def.fn_attrs; fn_ret_ty = final_ret; fn_clauses = all_clauses }, span) :: acc) rest'
       | d :: rest -> go (d :: acc) rest
     in
     go [] decls
@@ -90,6 +90,7 @@
 %token <string> INTERP_MID
 %token <string> INTERP_END
 %token LPAREN RPAREN LBRACE RBRACE LBRACKET RBRACKET
+%token AT
 %token ARROW PIPE_ARROW
 %token EQUALS COLON COMMA PIPE DOT
 %token PLUSPLUS PLUS MINUS STAR SLASH PERCENT
@@ -135,10 +136,17 @@ decl_list_r:
 
 (* ---- Declarations ---- *)
 
+fn_attr:
+  | AT; LBRACKET; name = LOWER_IDENT; RBRACKET { name }
+
 decl:
   | DOC; s = STRING; d = fn_decl
     { match d with
       | DFn (def, span) -> DFn ({ def with fn_doc = Some s }, span)
+      | d -> d }
+  | attrs = nonempty_list(fn_attr); d = fn_decl
+    { match d with
+      | DFn (def, span) -> DFn ({ def with fn_attrs = attrs }, span)
       | d -> d }
   | d = fn_decl        { d }
   | d = let_decl       { d }
@@ -169,6 +177,7 @@ fn_decl:
     { DFn ({ fn_name = name;
              fn_vis = Private;
              fn_doc = None;
+             fn_attrs = [];
              fn_ret_ty = ret;
              fn_clauses = [{ fc_params = params;
                              fc_guard = guard;
@@ -180,6 +189,7 @@ fn_decl:
     { DFn ({ fn_name = name;
              fn_vis = Private;
              fn_doc = None;
+             fn_attrs = [];
              fn_ret_ty = ret;
              fn_clauses = [{ fc_params = params;
                              fc_guard = guard;
@@ -191,6 +201,7 @@ fn_decl:
     { DFn ({ fn_name = name;
              fn_vis = Public;
              fn_doc = None;
+             fn_attrs = [];
              fn_ret_ty = ret;
              fn_clauses = [{ fc_params = params;
                              fc_guard = guard;
