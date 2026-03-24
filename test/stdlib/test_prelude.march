@@ -1,0 +1,251 @@
+-- Tests for the Prelude stdlib module
+-- Run with: dune exec march -- test/stdlib/test_prelude.march
+
+mod TestPrelude do
+
+fn assert_true(cond : Bool, msg : String) : Unit do
+  if cond then () else panic("FAIL: " ++ msg)
+end
+
+fn assert_false(cond : Bool, msg : String) : Unit do
+  if cond then panic("FAIL: " ++ msg) else ()
+end
+
+fn assert_eq_int(a : Int, b : Int, msg : String) : Unit do
+  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ int_to_string(b) ++ ", got " ++ int_to_string(a) ++ ")")
+end
+
+fn assert_eq_str(a : String, b : String, msg : String) : Unit do
+  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ b ++ ", got " ++ a ++ ")")
+end
+
+-- ---- unwrap (Prelude version) ----
+
+fn test_unwrap_some() : Unit do
+  assert_eq_int(unwrap(Some(42)), 42, "unwrap(Some(42)) should be 42")
+end
+
+fn test_unwrap_some_zero() : Unit do
+  assert_eq_int(unwrap(Some(0)), 0, "unwrap(Some(0)) should be 0")
+end
+
+-- ---- unwrap_or (Prelude version) ----
+
+fn test_unwrap_or_some() : Unit do
+  assert_eq_int(unwrap_or(Some(5), 99), 5, "unwrap_or(Some(5), 99) should be 5")
+end
+
+fn test_unwrap_or_none() : Unit do
+  assert_eq_int(unwrap_or(None, 7), 7, "unwrap_or(None, 7) should be 7")
+end
+
+-- ---- head (Prelude version) ----
+
+fn test_head_nonempty() : Unit do
+  assert_eq_int(head(Cons(10, Cons(20, Nil))), 10, "head([10,20]) should be 10")
+end
+
+fn test_head_singleton() : Unit do
+  assert_eq_int(head(Cons(99, Nil)), 99, "head([99]) should be 99")
+end
+
+-- ---- tail (Prelude version) ----
+
+fn test_tail_nonempty() : Unit do
+  let t = tail(Cons(1, Cons(2, Cons(3, Nil))))
+  assert_eq_int(head(t), 2, "tail([1,2,3]) head should be 2")
+end
+
+fn test_tail_singleton() : Unit do
+  let t = tail(Cons(1, Nil))
+  assert_true(is_nil(t), "tail([1]) should be Nil")
+end
+
+-- ---- is_nil (Prelude version) ----
+
+fn test_is_nil_empty() : Unit do
+  assert_true(is_nil(Nil), "is_nil(Nil) should be true")
+end
+
+fn test_is_nil_nonempty() : Unit do
+  assert_false(is_nil(Cons(1, Nil)), "is_nil([1]) should be false")
+end
+
+-- ---- length (Prelude version) ----
+
+fn test_length_empty() : Unit do
+  assert_eq_int(length(Nil), 0, "length([]) should be 0")
+end
+
+fn test_length_one() : Unit do
+  assert_eq_int(length(Cons(1, Nil)), 1, "length([1]) should be 1")
+end
+
+fn test_length_three() : Unit do
+  assert_eq_int(length(Cons(1, Cons(2, Cons(3, Nil)))), 3, "length([1,2,3]) should be 3")
+end
+
+-- ---- reverse (Prelude version) ----
+
+fn test_reverse_empty() : Unit do
+  let r = reverse(Nil)
+  assert_true(is_nil(r), "reverse([]) should be []")
+end
+
+fn test_reverse_singleton() : Unit do
+  let r = reverse(Cons(42, Nil))
+  assert_eq_int(head(r), 42, "reverse([42]) should be [42]")
+end
+
+fn test_reverse_three() : Unit do
+  let r = reverse(Cons(1, Cons(2, Cons(3, Nil))))
+  assert_eq_int(head(r), 3, "reverse([1,2,3]) head should be 3")
+  assert_eq_int(head(tail(r)), 2, "reverse([1,2,3]) second should be 2")
+end
+
+-- ---- fold_left (Prelude version) ----
+
+fn test_fold_left_sum() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Cons(4, Nil))))
+  let s = fold_left(0, xs, fn (acc, x) -> acc + x)
+  assert_eq_int(s, 10, "fold_left sum [1,2,3,4] should be 10")
+end
+
+fn test_fold_left_empty() : Unit do
+  let empty_ints : List(Int) = Nil
+  let s = fold_left(0, empty_ints, fn (acc, x) -> acc + x)
+  assert_eq_int(s, 0, "fold_left sum [] should be 0")
+end
+
+fn test_fold_left_product() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Nil)))
+  let p = fold_left(1, xs, fn (acc, x) -> acc * x)
+  assert_eq_int(p, 6, "fold_left product [1,2,3] should be 6")
+end
+
+-- ---- filter (Prelude version) ----
+
+fn test_filter_evens() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil)))))
+  let evens = filter(xs, fn x -> x % 2 == 0)
+  assert_eq_int(length(evens), 2, "filter evens [1..5] should have 2 elements")
+  assert_eq_int(head(evens), 2, "filter evens [1..5] first should be 2")
+end
+
+fn test_filter_none_pass() : Unit do
+  let xs = Cons(1, Cons(3, Cons(5, Nil)))
+  let evens = filter(xs, fn x -> x % 2 == 0)
+  assert_true(is_nil(evens), "filter evens [1,3,5] should be []")
+end
+
+fn test_filter_all_pass() : Unit do
+  let xs = Cons(2, Cons(4, Cons(6, Nil)))
+  let evens = filter(xs, fn x -> x % 2 == 0)
+  assert_eq_int(length(evens), 3, "filter evens [2,4,6] should have 3 elements")
+end
+
+-- ---- map (Prelude version) ----
+
+fn test_map_double() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Nil)))
+  let doubled = map(xs, fn x -> x * 2)
+  assert_eq_int(head(doubled), 2, "map double [1,2,3] first should be 2")
+  assert_eq_int(head(tail(doubled)), 4, "map double [1,2,3] second should be 4")
+end
+
+fn test_map_empty() : Unit do
+  let empty_ints : List(Int) = Nil
+  let r = map(empty_ints, fn x -> x * 2)
+  assert_true(is_nil(r), "map f [] should be []")
+end
+
+-- ---- identity ----
+
+fn test_identity_int() : Unit do
+  assert_eq_int(identity(42), 42, "identity(42) should be 42")
+end
+
+fn test_identity_zero() : Unit do
+  assert_eq_int(identity(0), 0, "identity(0) should be 0")
+end
+
+fn test_identity_negative() : Unit do
+  assert_eq_int(identity(-1), -1, "identity(-1) should be -1")
+end
+
+-- ---- compose ----
+
+fn test_compose_two_fns() : Unit do
+  let double = fn x -> x * 2
+  let inc = fn x -> x + 1
+  let double_then_inc = compose(inc, double)
+  assert_eq_int(double_then_inc(3), 7, "compose(inc, double)(3) should be 7")
+end
+
+fn test_compose_order() : Unit do
+  let add_one = fn x -> x + 1
+  let times_three = fn x -> x * 3
+  let f = compose(times_three, add_one)
+  assert_eq_int(f(4), 15, "compose(times_three, add_one)(4) should be 15")
+end
+
+-- ---- const ----
+
+fn test_const() : Unit do
+  let always5 = const(5)
+  assert_eq_int(always5(99), 5, "const(5)(99) should be 5")
+end
+
+fn test_const_zero() : Unit do
+  let always0 = const(0)
+  assert_eq_int(always0(42), 0, "const(0)(42) should be 0")
+end
+
+-- ---- inspect ----
+
+fn test_inspect_int() : Unit do
+  assert_eq_str(inspect(42), "42", "inspect(42) should be \"42\"")
+end
+
+fn test_inspect_bool_true() : Unit do
+  assert_eq_str(inspect(true), "true", "inspect(true) should be \"true\"")
+end
+
+fn main() : Unit do
+  test_unwrap_some()
+  test_unwrap_some_zero()
+  test_unwrap_or_some()
+  test_unwrap_or_none()
+  test_head_nonempty()
+  test_head_singleton()
+  test_tail_nonempty()
+  test_tail_singleton()
+  test_is_nil_empty()
+  test_is_nil_nonempty()
+  test_length_empty()
+  test_length_one()
+  test_length_three()
+  test_reverse_empty()
+  test_reverse_singleton()
+  test_reverse_three()
+  test_fold_left_sum()
+  test_fold_left_empty()
+  test_fold_left_product()
+  test_filter_evens()
+  test_filter_none_pass()
+  test_filter_all_pass()
+  test_map_double()
+  test_map_empty()
+  test_identity_int()
+  test_identity_zero()
+  test_identity_negative()
+  test_compose_two_fns()
+  test_compose_order()
+  test_const()
+  test_const_zero()
+  test_inspect_int()
+  test_inspect_bool_true()
+  println("All Prelude tests passed!")
+end
+
+end

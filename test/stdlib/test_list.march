@@ -1,0 +1,688 @@
+-- Tests for the List stdlib module
+-- Run with: dune exec march -- test/stdlib/test_list.march
+
+mod TestList do
+
+fn assert_true(cond : Bool, msg : String) : Unit do
+  if cond then () else panic("FAIL: " ++ msg)
+end
+
+fn assert_false(cond : Bool, msg : String) : Unit do
+  if cond then panic("FAIL: " ++ msg) else ()
+end
+
+fn assert_eq_int(a : Int, b : Int, msg : String) : Unit do
+  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ int_to_string(b) ++ ", got " ++ int_to_string(a) ++ ")")
+end
+
+-- Helper: build a list [1, 2, 3, 4, 5]
+fn five() : List(Int) do
+  Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil)))))
+end
+
+fn three() : List(Int) do
+  Cons(10, Cons(20, Cons(30, Nil)))
+end
+
+-- ---- List.empty ----
+
+fn test_empty() : Unit do
+  assert_true(List.is_empty(List.empty()), "empty() should be empty")
+end
+
+-- ---- List.singleton ----
+
+fn test_singleton() : Unit do
+  let s = List.singleton(42)
+  assert_eq_int(List.length(s), 1, "singleton(42) length should be 1")
+  assert_eq_int(List.head(s), 42, "singleton(42) head should be 42")
+end
+
+-- ---- List.repeat ----
+
+fn test_repeat() : Unit do
+  let r = List.repeat(7, 3)
+  assert_eq_int(List.length(r), 3, "repeat(7, 3) length should be 3")
+  assert_eq_int(List.head(r), 7, "repeat(7, 3) head should be 7")
+end
+
+fn test_repeat_zero() : Unit do
+  let r = List.repeat(5, 0)
+  assert_true(List.is_empty(r), "repeat(5, 0) should be empty")
+end
+
+-- ---- List.range ----
+
+fn test_range() : Unit do
+  let r = List.range(1, 5)
+  assert_eq_int(List.length(r), 4, "range(1,5) length should be 4")
+  assert_eq_int(List.head(r), 1, "range(1,5) head should be 1")
+  assert_eq_int(List.last(r), 4, "range(1,5) last should be 4")
+end
+
+fn test_range_empty() : Unit do
+  let r = List.range(5, 5)
+  assert_true(List.is_empty(r), "range(5,5) should be empty")
+end
+
+fn test_range_empty_reversed() : Unit do
+  let r = List.range(6, 3)
+  assert_true(List.is_empty(r), "range(6,3) should be empty (start >= stop)")
+end
+
+-- ---- List.range_step ----
+
+fn test_range_step_positive() : Unit do
+  let r = List.range_step(0, 10, 2)
+  assert_eq_int(List.length(r), 5, "range_step(0,10,2) should have 5 elements")
+  assert_eq_int(List.head(r), 0, "range_step(0,10,2) head should be 0")
+  assert_eq_int(List.last(r), 8, "range_step(0,10,2) last should be 8")
+end
+
+fn test_range_step_negative() : Unit do
+  let r = List.range_step(5, 0, -1)
+  assert_eq_int(List.length(r), 5, "range_step(5,0,-1) should have 5 elements")
+  assert_eq_int(List.head(r), 5, "range_step(5,0,-1) head should be 5")
+end
+
+-- ---- List.head / head_opt ----
+
+fn test_head() : Unit do
+  assert_eq_int(List.head(five()), 1, "head([1..5]) should be 1")
+end
+
+fn test_head_opt_some() : Unit do
+  assert_true(Option.is_some(List.head_opt(three())), "head_opt nonempty should be Some")
+end
+
+fn test_head_opt_none() : Unit do
+  let empty : List(Int) = Nil
+  assert_true(Option.is_none(List.head_opt(empty)), "head_opt([]) should be None")
+end
+
+-- ---- List.tail / tail_opt ----
+
+fn test_tail() : Unit do
+  let t = List.tail(Cons(1, Cons(2, Nil)))
+  assert_eq_int(List.head(t), 2, "tail([1,2]) head should be 2")
+end
+
+fn test_tail_opt_some() : Unit do
+  assert_true(Option.is_some(List.tail_opt(three())), "tail_opt nonempty should be Some")
+end
+
+fn test_tail_opt_none() : Unit do
+  let empty : List(Int) = Nil
+  assert_true(Option.is_none(List.tail_opt(empty)), "tail_opt([]) should be None")
+end
+
+-- ---- List.last ----
+
+fn test_last() : Unit do
+  assert_eq_int(List.last(five()), 5, "last([1..5]) should be 5")
+end
+
+fn test_last_singleton() : Unit do
+  assert_eq_int(List.last(List.singleton(99)), 99, "last([99]) should be 99")
+end
+
+-- ---- List.nth / nth_opt ----
+
+fn test_nth() : Unit do
+  assert_eq_int(List.nth(five(), 0), 1, "nth([1..5], 0) should be 1")
+  assert_eq_int(List.nth(five(), 2), 3, "nth([1..5], 2) should be 3")
+  assert_eq_int(List.nth(five(), 4), 5, "nth([1..5], 4) should be 5")
+end
+
+fn test_nth_opt_in_bounds() : Unit do
+  assert_true(Option.is_some(List.nth_opt(five(), 1)), "nth_opt in bounds should be Some")
+end
+
+fn test_nth_opt_out_of_bounds() : Unit do
+  assert_true(Option.is_none(List.nth_opt(five(), 10)), "nth_opt out of bounds should be None")
+end
+
+-- ---- List.length ----
+
+fn test_length_empty() : Unit do
+  let empty : List(Int) = Nil
+  assert_eq_int(List.length(empty), 0, "length([]) should be 0")
+end
+
+fn test_length_nonempty() : Unit do
+  assert_eq_int(List.length(five()), 5, "length([1..5]) should be 5")
+end
+
+-- ---- List.is_empty ----
+
+fn test_is_empty_nil() : Unit do
+  let empty : List(Int) = Nil
+  assert_true(List.is_empty(empty), "is_empty([]) should be true")
+end
+
+fn test_is_empty_nonempty() : Unit do
+  assert_false(List.is_empty(five()), "is_empty([1..5]) should be false")
+end
+
+-- ---- List.reverse ----
+
+fn test_reverse() : Unit do
+  let r = List.reverse(three())
+  assert_eq_int(List.head(r), 30, "reverse([10,20,30]) head should be 30")
+  assert_eq_int(List.last(r), 10, "reverse([10,20,30]) last should be 10")
+end
+
+fn test_reverse_empty() : Unit do
+  let empty : List(Int) = Nil
+  assert_true(List.is_empty(List.reverse(empty)), "reverse([]) should be []")
+end
+
+-- ---- List.append ----
+
+fn test_append() : Unit do
+  let a = Cons(1, Cons(2, Nil))
+  let b = Cons(3, Cons(4, Nil))
+  let c = List.append(a, b)
+  assert_eq_int(List.length(c), 4, "append([1,2],[3,4]) length should be 4")
+  assert_eq_int(List.head(c), 1, "append head should be 1")
+  assert_eq_int(List.last(c), 4, "append last should be 4")
+end
+
+fn test_append_empty_left() : Unit do
+  let empty : List(Int) = Nil
+  let r = List.append(empty, three())
+  assert_eq_int(List.length(r), 3, "append([],[10,20,30]) should have 3 elements")
+end
+
+fn test_append_empty_right() : Unit do
+  let empty : List(Int) = Nil
+  let r = List.append(three(), empty)
+  assert_eq_int(List.length(r), 3, "append([10,20,30],[]) should have 3 elements")
+end
+
+-- ---- List.map ----
+
+fn test_map() : Unit do
+  let doubled = List.map(three(), fn x -> x * 2)
+  assert_eq_int(List.head(doubled), 20, "map double [10,20,30] head should be 20")
+  assert_eq_int(List.last(doubled), 60, "map double [10,20,30] last should be 60")
+end
+
+fn test_map_empty() : Unit do
+  let empty : List(Int) = Nil
+  assert_true(List.is_empty(List.map(empty, fn x -> x + 1)), "map f [] should be []")
+end
+
+-- ---- List.flat_map ----
+
+fn test_flat_map() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Nil)))
+  let r = List.flat_map(xs, fn x -> Cons(x, Cons(x * 10, Nil)))
+  assert_eq_int(List.length(r), 6, "flat_map should produce 6 elements")
+  assert_eq_int(List.head(r), 1, "flat_map head should be 1")
+end
+
+fn test_flat_map_to_empty() : Unit do
+  let xs = Cons(1, Cons(2, Nil))
+  let empty : List(Int) = Nil
+  let r = List.flat_map(xs, fn _x -> empty)
+  assert_true(List.is_empty(r), "flat_map returning [] each time should give []")
+end
+
+-- ---- List.filter ----
+
+fn test_filter() : Unit do
+  let evens = List.filter(five(), fn x -> x % 2 == 0)
+  assert_eq_int(List.length(evens), 2, "filter evens [1..5] should have 2 elements")
+  assert_eq_int(List.head(evens), 2, "filter evens head should be 2")
+  assert_eq_int(List.last(evens), 4, "filter evens last should be 4")
+end
+
+fn test_filter_empty_result() : Unit do
+  let empty : List(Int) = Nil
+  assert_true(List.is_empty(List.filter(empty, fn x -> x > 0)), "filter on [] should give []")
+end
+
+-- ---- List.filter_map ----
+
+fn test_filter_map() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Cons(4, Nil))))
+  let r = List.filter_map(xs, fn x -> if x % 2 == 0 then Some(x * 10) else None)
+  assert_eq_int(List.length(r), 2, "filter_map should give 2 elements")
+  assert_eq_int(List.head(r), 20, "filter_map head should be 20")
+  assert_eq_int(List.last(r), 40, "filter_map last should be 40")
+end
+
+-- ---- List.fold_left ----
+
+fn test_fold_left_sum() : Unit do
+  let s = List.fold_left(0, five(), fn (acc, x) -> acc + x)
+  assert_eq_int(s, 15, "fold_left sum [1..5] should be 15")
+end
+
+fn test_fold_left_build_list() : Unit do
+  let r = List.fold_left(Nil, three(), fn (acc, x) -> Cons(x, acc))
+  assert_eq_int(List.head(r), 30, "fold_left cons [10,20,30] head should be 30 (reversed)")
+end
+
+-- ---- List.fold_right ----
+
+fn test_fold_right_sum() : Unit do
+  let s = List.fold_right(five(), 0, fn (x, acc) -> x + acc)
+  assert_eq_int(s, 15, "fold_right sum [1..5] should be 15")
+end
+
+-- ---- List.scan_left ----
+
+fn test_scan_left() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Nil)))
+  let r = List.scan_left(0, xs, fn (acc, x) -> acc + x)
+  -- Should produce [0, 1, 3, 6]
+  assert_eq_int(List.length(r), 4, "scan_left length should be n+1")
+  assert_eq_int(List.head(r), 0, "scan_left first should be initial acc")
+  assert_eq_int(List.last(r), 6, "scan_left last should be total sum")
+end
+
+-- NOTE: List.concat is skipped - it uses a curried lambda with fold_right
+-- which causes a runtime arity mismatch (stdlib known issue).
+
+-- ---- List.intersperse ----
+
+fn test_intersperse() : Unit do
+  let r = List.intersperse(three(), 0)
+  -- [10, 0, 20, 0, 30]
+  assert_eq_int(List.length(r), 5, "intersperse [10,20,30] 0 length should be 5")
+  assert_eq_int(List.nth(r, 1), 0, "intersperse separator at index 1")
+  assert_eq_int(List.nth(r, 3), 0, "intersperse separator at index 3")
+end
+
+fn test_intersperse_singleton() : Unit do
+  let r = List.intersperse(List.singleton(5), 0)
+  assert_eq_int(List.length(r), 1, "intersperse [5] 0 should give [5]")
+end
+
+-- ---- List.find ----
+
+fn test_find_present() : Unit do
+  assert_true(Option.is_some(List.find(five(), fn x -> x == 3)), "find existing element should be Some")
+end
+
+fn test_find_absent() : Unit do
+  assert_true(Option.is_none(List.find(five(), fn x -> x == 99)), "find missing element should be None")
+end
+
+fn test_find_value() : Unit do
+  assert_eq_int(Option.unwrap(List.find(five(), fn x -> x > 3)), 4, "find x>3 in [1..5] should be 4")
+end
+
+-- ---- List.find_index ----
+
+fn test_find_index_present() : Unit do
+  assert_eq_int(Option.unwrap(List.find_index(five(), fn x -> x == 3)), 2, "find_index 3 in [1..5] should be 2")
+end
+
+fn test_find_index_absent() : Unit do
+  assert_true(Option.is_none(List.find_index(five(), fn x -> x > 100)), "find_index absent should be None")
+end
+
+-- ---- List.any / all ----
+
+fn test_any_true() : Unit do
+  assert_true(List.any(five(), fn x -> x > 4), "any(>4) in [1..5] should be true")
+end
+
+fn test_any_false() : Unit do
+  assert_false(List.any(five(), fn x -> x > 10), "any(>10) in [1..5] should be false")
+end
+
+fn test_any_empty() : Unit do
+  let empty : List(Int) = Nil
+  assert_false(List.any(empty, fn x -> x > 0), "any on [] should be false")
+end
+
+fn test_all_true() : Unit do
+  assert_true(List.all(five(), fn x -> x > 0), "all(>0) in [1..5] should be true")
+end
+
+fn test_all_false() : Unit do
+  assert_false(List.all(five(), fn x -> x > 3), "all(>3) in [1..5] should be false")
+end
+
+fn test_all_empty() : Unit do
+  let empty : List(Int) = Nil
+  assert_true(List.all(empty, fn x -> x > 0), "all on [] should be true (vacuously)")
+end
+
+-- ---- List.sort_by ----
+
+fn test_sort_by_ascending() : Unit do
+  let xs = Cons(3, Cons(1, Cons(4, Cons(1, Cons(5, Nil)))))
+  let sorted = List.sort_by(xs, fn (a, b) -> a < b)
+  assert_eq_int(List.head(sorted), 1, "sort_by asc head should be 1")
+  assert_eq_int(List.last(sorted), 5, "sort_by asc last should be 5")
+end
+
+fn test_sort_by_descending() : Unit do
+  let xs = Cons(3, Cons(1, Cons(4, Nil)))
+  let sorted = List.sort_by(xs, fn (a, b) -> a > b)
+  assert_eq_int(List.head(sorted), 4, "sort_by desc head should be 4")
+  assert_eq_int(List.last(sorted), 1, "sort_by desc last should be 1")
+end
+
+fn test_sort_by_empty() : Unit do
+  let empty : List(Int) = Nil
+  assert_true(List.is_empty(List.sort_by(empty, fn (a, b) -> a < b)), "sort_by [] should be []")
+end
+
+-- ---- List.take ----
+
+fn test_take() : Unit do
+  let r = List.take(five(), 3)
+  assert_eq_int(List.length(r), 3, "take(5, 3) should have 3 elements")
+  assert_eq_int(List.head(r), 1, "take head should be 1")
+  assert_eq_int(List.last(r), 3, "take last should be 3")
+end
+
+fn test_take_more_than_length() : Unit do
+  let r = List.take(three(), 100)
+  assert_eq_int(List.length(r), 3, "take more than length should give whole list")
+end
+
+fn test_take_zero() : Unit do
+  assert_true(List.is_empty(List.take(five(), 0)), "take 0 should give []")
+end
+
+-- ---- List.drop ----
+
+fn test_drop() : Unit do
+  let r = List.drop(five(), 2)
+  assert_eq_int(List.length(r), 3, "drop(5, 2) should have 3 elements")
+  assert_eq_int(List.head(r), 3, "drop(5,2) head should be 3")
+end
+
+fn test_drop_all() : Unit do
+  let r = List.drop(three(), 10)
+  assert_true(List.is_empty(r), "drop more than length should give []")
+end
+
+fn test_drop_zero() : Unit do
+  let r = List.drop(three(), 0)
+  assert_eq_int(List.length(r), 3, "drop 0 should give same list")
+end
+
+-- ---- List.take_while ----
+
+fn test_take_while() : Unit do
+  let r = List.take_while(five(), fn x -> x < 4)
+  assert_eq_int(List.length(r), 3, "take_while(<4) in [1..5] should give [1,2,3]")
+  assert_eq_int(List.last(r), 3, "take_while last should be 3")
+end
+
+fn test_take_while_none() : Unit do
+  let r = List.take_while(five(), fn x -> x > 10)
+  assert_true(List.is_empty(r), "take_while(>10) in [1..5] should be []")
+end
+
+fn test_take_while_all() : Unit do
+  let r = List.take_while(five(), fn x -> x > 0)
+  assert_eq_int(List.length(r), 5, "take_while(>0) in [1..5] should give all 5")
+end
+
+-- ---- List.drop_while ----
+
+fn test_drop_while() : Unit do
+  let r = List.drop_while(five(), fn x -> x < 3)
+  assert_eq_int(List.head(r), 3, "drop_while(<3) in [1..5] head should be 3")
+  assert_eq_int(List.length(r), 3, "drop_while(<3) in [1..5] length should be 3")
+end
+
+-- ---- List.split_at ----
+
+fn test_split_at() : Unit do
+  match List.split_at(five(), 3) do
+  | (left, right) ->
+    assert_eq_int(List.length(left), 3, "split_at(5,3) left length should be 3")
+    assert_eq_int(List.length(right), 2, "split_at(5,3) right length should be 2")
+    assert_eq_int(List.last(left), 3, "split_at left last should be 3")
+    assert_eq_int(List.head(right), 4, "split_at right head should be 4")
+  end
+end
+
+-- ---- List.partition ----
+
+fn test_partition() : Unit do
+  match List.partition(five(), fn x -> x % 2 == 0) do
+  | (evens, odds) ->
+    assert_eq_int(List.length(evens), 2, "partition evens length should be 2")
+    assert_eq_int(List.length(odds), 3, "partition odds length should be 3")
+    assert_eq_int(List.head(evens), 2, "partition evens head should be 2")
+    assert_eq_int(List.head(odds), 1, "partition odds head should be 1")
+  end
+end
+
+-- ---- List.drop_last ----
+
+fn test_drop_last() : Unit do
+  let r = List.drop_last(three())
+  assert_eq_int(List.length(r), 2, "drop_last([10,20,30]) length should be 2")
+  assert_eq_int(List.last(r), 20, "drop_last([10,20,30]) last should be 20")
+end
+
+fn test_drop_last_empty() : Unit do
+  let empty : List(Int) = Nil
+  assert_true(List.is_empty(List.drop_last(empty)), "drop_last([]) should be []")
+end
+
+-- ---- List.chunks ----
+
+fn test_chunks() : Unit do
+  let r = List.chunks(five(), 2)
+  -- [[1,2],[3,4],[5]]
+  assert_eq_int(List.length(r), 3, "chunks([1..5], 2) should give 3 chunks")
+  assert_eq_int(List.length(List.head(r)), 2, "first chunk should have 2 elements")
+  assert_eq_int(List.length(List.last(r)), 1, "last chunk should have 1 element")
+end
+
+-- ---- List.zip ----
+
+fn test_zip() : Unit do
+  let a = Cons(1, Cons(2, Cons(3, Nil)))
+  let b = Cons(10, Cons(20, Cons(30, Nil)))
+  let r = List.zip(a, b)
+  assert_eq_int(List.length(r), 3, "zip length should be 3")
+  match List.head(r) do
+  | (x, y) ->
+    assert_eq_int(x, 1, "zip first pair first should be 1")
+    assert_eq_int(y, 10, "zip first pair second should be 10")
+  end
+end
+
+fn test_zip_shorter() : Unit do
+  let a = Cons(1, Cons(2, Nil))
+  let b = Cons(10, Cons(20, Cons(30, Nil)))
+  let r = List.zip(a, b)
+  assert_eq_int(List.length(r), 2, "zip stops at shorter list")
+end
+
+-- ---- List.zip_with ----
+
+fn test_zip_with() : Unit do
+  let a = Cons(1, Cons(2, Cons(3, Nil)))
+  let b = Cons(4, Cons(5, Cons(6, Nil)))
+  let r = List.zip_with(a, b, fn (x, y) -> x + y)
+  assert_eq_int(List.head(r), 5, "zip_with (+) head should be 5")
+  assert_eq_int(List.last(r), 9, "zip_with (+) last should be 9")
+end
+
+-- ---- List.unzip ----
+
+fn test_unzip() : Unit do
+  let pairs = Cons((1, 10), Cons((2, 20), Cons((3, 30), Nil)))
+  match List.unzip(pairs) do
+  | (as_, bs) ->
+    assert_eq_int(List.head(as_), 1, "unzip first list head should be 1")
+    assert_eq_int(List.head(bs), 10, "unzip second list head should be 10")
+    assert_eq_int(List.length(as_), 3, "unzip first list length should be 3")
+  end
+end
+
+-- ---- List.enumerate ----
+
+fn test_enumerate() : Unit do
+  let r = List.enumerate(three())
+  match List.head(r) do
+  | (i, v) ->
+    assert_eq_int(i, 0, "enumerate first index should be 0")
+    assert_eq_int(v, 10, "enumerate first value should be 10")
+  end
+  assert_eq_int(List.length(r), 3, "enumerate length should be 3")
+end
+
+-- ---- List.sum_int / product_int ----
+
+fn test_sum_int() : Unit do
+  assert_eq_int(List.sum_int(five()), 15, "sum_int([1..5]) should be 15")
+end
+
+fn test_sum_int_empty() : Unit do
+  assert_eq_int(List.sum_int(Nil), 0, "sum_int([]) should be 0")
+end
+
+fn test_product_int() : Unit do
+  assert_eq_int(List.product_int(Cons(1, Cons(2, Cons(3, Cons(4, Nil))))), 24, "product_int([1,2,3,4]) should be 24")
+end
+
+fn test_product_int_empty() : Unit do
+  assert_eq_int(List.product_int(Nil), 1, "product_int([]) should be 1")
+end
+
+-- ---- List.minimum_int / maximum_int ----
+
+fn test_minimum_int() : Unit do
+  assert_eq_int(List.minimum_int(five()), 1, "minimum_int([1..5]) should be 1")
+end
+
+fn test_minimum_int_single() : Unit do
+  assert_eq_int(List.minimum_int(Cons(-5, Nil)), -5, "minimum_int([-5]) should be -5")
+end
+
+fn test_maximum_int() : Unit do
+  assert_eq_int(List.maximum_int(five()), 5, "maximum_int([1..5]) should be 5")
+end
+
+fn test_maximum_int_negative() : Unit do
+  let xs = Cons(-3, Cons(-1, Cons(-5, Nil)))
+  assert_eq_int(List.maximum_int(xs), -1, "maximum_int([-3,-1,-5]) should be -1")
+end
+
+-- ---- List.dedup ----
+
+fn test_dedup() : Unit do
+  let xs = Cons(1, Cons(1, Cons(2, Cons(2, Cons(3, Nil)))))
+  let r = List.dedup(xs)
+  assert_eq_int(List.length(r), 3, "dedup([1,1,2,2,3]) length should be 3")
+  assert_eq_int(List.head(r), 1, "dedup head should be 1")
+end
+
+fn test_dedup_no_dups() : Unit do
+  let r = List.dedup(three())
+  assert_eq_int(List.length(r), 3, "dedup with no duplicates should keep all elements")
+end
+
+fn test_dedup_empty() : Unit do
+  let empty : List(Int) = Nil
+  assert_true(List.is_empty(List.dedup(empty)), "dedup([]) should be []")
+end
+
+fn main() : Unit do
+  test_empty()
+  test_singleton()
+  test_repeat()
+  test_repeat_zero()
+  test_range()
+  test_range_empty()
+  test_range_empty_reversed()
+  test_range_step_positive()
+  test_range_step_negative()
+  test_head()
+  test_head_opt_some()
+  test_head_opt_none()
+  test_tail()
+  test_tail_opt_some()
+  test_tail_opt_none()
+  test_last()
+  test_last_singleton()
+  test_nth()
+  test_nth_opt_in_bounds()
+  test_nth_opt_out_of_bounds()
+  test_length_empty()
+  test_length_nonempty()
+  test_is_empty_nil()
+  test_is_empty_nonempty()
+  test_reverse()
+  test_reverse_empty()
+  test_append()
+  test_append_empty_left()
+  test_append_empty_right()
+  test_map()
+  test_map_empty()
+  test_flat_map()
+  test_flat_map_to_empty()
+  test_filter()
+  test_filter_empty_result()
+  test_filter_map()
+  test_fold_left_sum()
+  test_fold_left_build_list()
+  test_fold_right_sum()
+  test_scan_left()
+  test_intersperse()
+  test_intersperse_singleton()
+  test_find_present()
+  test_find_absent()
+  test_find_value()
+  test_find_index_present()
+  test_find_index_absent()
+  test_any_true()
+  test_any_false()
+  test_any_empty()
+  test_all_true()
+  test_all_false()
+  test_all_empty()
+  test_sort_by_ascending()
+  test_sort_by_descending()
+  test_sort_by_empty()
+  test_take()
+  test_take_more_than_length()
+  test_take_zero()
+  test_drop()
+  test_drop_all()
+  test_drop_zero()
+  test_take_while()
+  test_take_while_none()
+  test_take_while_all()
+  test_drop_while()
+  test_split_at()
+  test_partition()
+  test_drop_last()
+  test_drop_last_empty()
+  test_chunks()
+  test_zip()
+  test_zip_shorter()
+  test_zip_with()
+  test_unzip()
+  test_enumerate()
+  test_sum_int()
+  test_sum_int_empty()
+  test_product_int()
+  test_product_int_empty()
+  test_minimum_int()
+  test_minimum_int_single()
+  test_maximum_int()
+  test_maximum_int_negative()
+  test_dedup()
+  test_dedup_no_dups()
+  test_dedup_empty()
+  println("All List tests passed!")
+end
+
+end

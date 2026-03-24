@@ -1,0 +1,220 @@
+-- Tests for the Option stdlib module
+-- Run with: dune exec march -- test/stdlib/test_option.march
+
+mod TestOption do
+
+fn assert_true(cond : Bool, msg : String) : Unit do
+  if cond then () else panic("FAIL: " ++ msg)
+end
+
+fn assert_false(cond : Bool, msg : String) : Unit do
+  if cond then panic("FAIL: " ++ msg) else ()
+end
+
+fn assert_eq_int(a : Int, b : Int, msg : String) : Unit do
+  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ int_to_string(b) ++ ", got " ++ int_to_string(a) ++ ")")
+end
+
+fn assert_eq_str(a : String, b : String, msg : String) : Unit do
+  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ b ++ ", got " ++ a ++ ")")
+end
+
+-- ---- Option.is_some ----
+
+fn test_is_some_with_value() : Unit do
+  assert_true(Option.is_some(Some(1)), "is_some(Some(1)) should be true")
+end
+
+fn test_is_some_with_none() : Unit do
+  assert_false(Option.is_some(None), "is_some(None) should be false")
+end
+
+fn test_is_some_with_zero() : Unit do
+  assert_true(Option.is_some(Some(0)), "is_some(Some(0)) should be true")
+end
+
+-- ---- Option.is_none ----
+
+fn test_is_none_with_none() : Unit do
+  assert_true(Option.is_none(None), "is_none(None) should be true")
+end
+
+fn test_is_none_with_value() : Unit do
+  assert_false(Option.is_none(Some(42)), "is_none(Some(42)) should be false")
+end
+
+-- ---- Option.unwrap ----
+
+fn test_unwrap_some() : Unit do
+  assert_eq_int(Option.unwrap(Some(42)), 42, "unwrap(Some(42)) should be 42")
+end
+
+fn test_unwrap_zero() : Unit do
+  assert_eq_int(Option.unwrap(Some(0)), 0, "unwrap(Some(0)) should be 0")
+end
+
+-- ---- Option.expect ----
+
+fn test_expect_some() : Unit do
+  assert_eq_int(Option.expect(Some(99), "should not panic"), 99, "expect(Some(99), ...) should be 99")
+end
+
+-- ---- Option.unwrap_or ----
+
+fn test_unwrap_or_some() : Unit do
+  assert_eq_int(Option.unwrap_or(Some(5), 0), 5, "unwrap_or(Some(5), 0) should be 5")
+end
+
+fn test_unwrap_or_none() : Unit do
+  assert_eq_int(Option.unwrap_or(None, 42), 42, "unwrap_or(None, 42) should be 42")
+end
+
+fn test_unwrap_or_zero_default() : Unit do
+  assert_eq_int(Option.unwrap_or(None, 0), 0, "unwrap_or(None, 0) should be 0")
+end
+
+-- ---- Option.unwrap_or_else ----
+
+fn test_unwrap_or_else_some() : Unit do
+  assert_eq_int(Option.unwrap_or_else(Some(7), fn _u -> 99), 7, "unwrap_or_else(Some(7), ...) should be 7")
+end
+
+fn test_unwrap_or_else_none() : Unit do
+  assert_eq_int(Option.unwrap_or_else(None, fn _u -> 10), 10, "unwrap_or_else(None, fn _u -> 10) should be 10")
+end
+
+-- ---- Option.map ----
+
+fn test_map_some() : Unit do
+  assert_eq_int(Option.unwrap(Option.map(Some(3), fn x -> x * 2)), 6, "map(Some(3), *2) should be Some(6)")
+end
+
+fn test_map_none() : Unit do
+  assert_true(Option.is_none(Option.map(None, fn (x : Int) -> x * 2)), "map(None, f) should be None")
+end
+
+fn test_map_to_zero() : Unit do
+  assert_eq_int(Option.unwrap(Option.map(Some(5), fn _ -> 0)), 0, "map(Some(5), _ -> 0) should be Some(0)")
+end
+
+-- ---- Option.flat_map ----
+
+fn test_flat_map_some_to_some() : Unit do
+  assert_eq_int(Option.unwrap(Option.flat_map(Some(4), fn x -> Some(x + 1))), 5, "flat_map(Some(4), x -> Some(x+1)) should be Some(5)")
+end
+
+fn test_flat_map_some_to_none() : Unit do
+  assert_true(Option.is_none(Option.flat_map(Some(1), fn (x : Int) -> None)), "flat_map(Some(1), _ -> None) should be None")
+end
+
+fn test_flat_map_none() : Unit do
+  assert_true(Option.is_none(Option.flat_map(None, fn (x : Int) -> Some(x))), "flat_map(None, f) should be None")
+end
+
+-- ---- Option.filter ----
+
+fn test_filter_passes() : Unit do
+  assert_eq_int(Option.unwrap(Option.filter(Some(4), fn x -> x > 2)), 4, "filter(Some(4), >2) should keep it")
+end
+
+fn test_filter_rejects() : Unit do
+  assert_true(Option.is_none(Option.filter(Some(1), fn x -> x > 2)), "filter(Some(1), >2) should give None")
+end
+
+fn test_filter_none() : Unit do
+  assert_true(Option.is_none(Option.filter(None, fn (x : Int) -> true)), "filter(None, ...) should be None")
+end
+
+-- ---- Option.or_else ----
+
+fn test_or_else_some() : Unit do
+  assert_eq_int(Option.unwrap(Option.or_else(Some(5), fn _u -> Some(99))), 5, "or_else(Some(5), ...) should return Some(5)")
+end
+
+fn test_or_else_none() : Unit do
+  assert_eq_int(Option.unwrap(Option.or_else(None, fn _u -> Some(7))), 7, "or_else(None, fn _u -> Some(7)) should return Some(7)")
+end
+
+-- ---- Option.zip ----
+
+fn test_zip_both_some() : Unit do
+  match Option.zip(Some(1), Some(2)) do
+  | Some((a, b)) ->
+    assert_eq_int(a, 1, "zip first element")
+    assert_eq_int(b, 2, "zip second element")
+  | None -> panic("FAIL: zip(Some(1), Some(2)) should be Some((1,2))")
+  end
+end
+
+fn test_zip_first_none() : Unit do
+  assert_true(Option.is_none(Option.zip(None, Some(2))), "zip(None, Some(2)) should be None")
+end
+
+fn test_zip_second_none() : Unit do
+  assert_true(Option.is_none(Option.zip(Some(1), None)), "zip(Some(1), None) should be None")
+end
+
+fn test_zip_both_none() : Unit do
+  assert_true(Option.is_none(Option.zip(None, None)), "zip(None, None) should be None")
+end
+
+-- ---- Option.to_result ----
+
+fn test_to_result_some() : Unit do
+  assert_true(Result.is_ok(Option.to_result(Some(42), "err")), "to_result(Some(42), ...) should be Ok")
+end
+
+fn test_to_result_none() : Unit do
+  assert_true(Result.is_err(Option.to_result(None, "err")), "to_result(None, ...) should be Err")
+end
+
+-- ---- Option.to_list ----
+
+fn test_to_list_some() : Unit do
+  let lst = Option.to_list(Some(10))
+  assert_eq_int(length(lst), 1, "to_list(Some(10)) should have length 1")
+  assert_eq_int(head(lst), 10, "to_list(Some(10)) head should be 10")
+end
+
+fn test_to_list_none() : Unit do
+  let lst = Option.to_list(None)
+  assert_eq_int(length(lst), 0, "to_list(None) should be empty")
+end
+
+fn main() : Unit do
+  test_is_some_with_value()
+  test_is_some_with_none()
+  test_is_some_with_zero()
+  test_is_none_with_none()
+  test_is_none_with_value()
+  test_unwrap_some()
+  test_unwrap_zero()
+  test_expect_some()
+  test_unwrap_or_some()
+  test_unwrap_or_none()
+  test_unwrap_or_zero_default()
+  test_unwrap_or_else_some()
+  test_unwrap_or_else_none()
+  test_map_some()
+  test_map_none()
+  test_map_to_zero()
+  test_flat_map_some_to_some()
+  test_flat_map_some_to_none()
+  test_flat_map_none()
+  test_filter_passes()
+  test_filter_rejects()
+  test_filter_none()
+  test_or_else_some()
+  test_or_else_none()
+  test_zip_both_some()
+  test_zip_first_none()
+  test_zip_second_none()
+  test_zip_both_none()
+  test_to_result_some()
+  test_to_result_none()
+  test_to_list_some()
+  test_to_list_none()
+  println("All Option tests passed!")
+end
+
+end
