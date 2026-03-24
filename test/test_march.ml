@@ -72,6 +72,12 @@ let test_lexer_block_comment () =
   Alcotest.(check int) "skips block comment" 7
     (match tok with March_parser.Parser.INT n -> n | _ -> failwith "expected INT")
 
+let test_lexer_underscore_ident () =
+  let lexbuf = Lexing.from_string "_cap" in
+  let tok = March_lexer.Lexer.token lexbuf in
+  Alcotest.(check string) "lexes _cap as LOWER_IDENT" "_cap"
+    (match tok with March_parser.Parser.LOWER_IDENT s -> s | _ -> failwith "expected LOWER_IDENT")
+
 let test_ast_span () =
   let span = March_ast.Ast.dummy_span in
   Alcotest.(check string) "dummy span file" "<none>" span.file
@@ -138,6 +144,18 @@ let test_parse_module_single_fn () =
     Alcotest.(check string) "fn name" "greet" def.fn_name.txt;
     Alcotest.(check int) "1 clause" 1 (List.length def.fn_clauses)
   | _ -> Alcotest.fail "expected single DFn"
+
+let test_parse_underscore_param () =
+  let src = {|mod Test do
+    fn greet(_name : String) do "hello" end
+  end|} in
+  let lexbuf = Lexing.from_string src in
+  let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+  match m.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    Alcotest.(check string) "fn name" "greet" def.fn_name.txt;
+    Alcotest.(check int) "1 clause" 1 (List.length def.fn_clauses)
+  | _ -> Alcotest.fail "expected single DFn with underscore param"
 
 (* ── Helpers for desugar + typecheck tests ─────────────────────────────── *)
 
@@ -13761,6 +13779,7 @@ let () =
           Alcotest.test_case "arrow" `Quick test_lexer_arrow;
           Alcotest.test_case "line comment" `Quick test_lexer_comment;
           Alcotest.test_case "block comment" `Quick test_lexer_block_comment;
+          Alcotest.test_case "underscore-prefixed identifier" `Quick test_lexer_underscore_ident;
         ] );
       ( "ast",
         [
@@ -13778,6 +13797,7 @@ let () =
         [
           Alcotest.test_case "multi-head fn" `Quick test_parse_module_multi_head;
           Alcotest.test_case "single fn" `Quick test_parse_module_single_fn;
+          Alcotest.test_case "underscore-prefixed param" `Quick test_parse_underscore_param;
         ] );
       ( "keywords",
         [

@@ -141,7 +141,7 @@ rule token = parse
       match Hashtbl.find_opt keyword_table id with
       | Some tok -> tok
       | None ->
-        if Char.uppercase_ascii id.[0] = id.[0]
+        if id.[0] >= 'A' && id.[0] <= 'Z'
         then UPPER_IDENT id
         else LOWER_IDENT id
     }
