@@ -13806,7 +13806,7 @@ let test_run_tests_pass () =
     test "one" do assert 1 == 1 end
     test "two" do assert 2 == 2 end
   end|} in
-  let (total, failed) = March_eval.Eval.run_tests m in
+  let (total, failed, _) = March_eval.Eval.run_tests m in
   Alcotest.(check int) "total = 2" 2 total;
   Alcotest.(check int) "failed = 0" 0 failed
 
@@ -13815,7 +13815,7 @@ let test_run_tests_fail_count () =
     test "good" do assert 1 == 1 end
     test "bad"  do assert 1 == 2 end
   end|} in
-  let (total, failed) = March_eval.Eval.run_tests m in
+  let (total, failed, _) = March_eval.Eval.run_tests m in
   Alcotest.(check int) "total = 2" 2 total;
   Alcotest.(check int) "failed = 1" 1 failed
 
@@ -13825,7 +13825,7 @@ let test_run_tests_filter () =
     test "sub works"    do assert 2 == 2 end
     test "add overflow" do assert 1 == 2 end
   end|} in
-  let (total, _failed) = March_eval.Eval.run_tests ~filter:"sub" m in
+  let (total, _failed, _) = March_eval.Eval.run_tests ~filter:"sub" m in
   Alcotest.(check int) "filter: total = 1" 1 total
 
 (* ── Bytes stdlib module tests ───────────────────────────────────────────── *)

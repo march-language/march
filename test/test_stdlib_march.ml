@@ -138,7 +138,7 @@ let run_stdlib_test test_filename _mod_name () =
   let m = parse_test_file test_filename in
   (* Prepend stdlib so user code can reference Http.*, Test.*, etc. *)
   let m' = { m with March_ast.Ast.mod_decls = stdlib @ m.March_ast.Ast.mod_decls } in
-  let (total, n_failed) =
+  let (total, n_failed, _) =
     try March_eval.Eval.run_tests m'
     with March_eval.Eval.Eval_error msg ->
       Alcotest.failf "eval error: %s" msg

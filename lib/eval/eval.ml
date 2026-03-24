@@ -5411,16 +5411,18 @@ let collect_test_decls (m : module_) :
   (!setup_all_ref, !setup_ref, List.rev !tests)
 
 (** Run the test suite in [m] with the given options.
-    Returns [(total, failed_names)] so the caller can emit a summary.
+    Returns [(total, n_failed, failures)] so the caller can emit a summary.
     [~verbose] — emit each test name instead of dots.
+    [~quiet]   — suppress all output; just return counts and failure list.
     [~filter]  — only run tests whose name contains this substring.
 
     Output:
-      - Dot mode (default):  prints one `.` per pass, `F` per fail.
-      - Verbose mode:        prints `✓ name` / `✗ name  (msg)`.
+      - Dot mode (default):  prints one `.` per pass, `F` per fail, then "Finished" line.
+      - Verbose mode:        prints `✓ name` / `✗ name  (msg)`, then "Finished" line.
+      - Quiet mode:          no output at all; caller handles reporting.
 
     Exit-code contract: the caller is responsible for exiting 1 if failures > 0. *)
-let run_tests ?(verbose=false) ?(filter="") (m : module_) : int * int =
+let run_tests ?(verbose=false) ?(quiet=false) ?(filter="") (m : module_) : int * int * (string * string) list =
   (* Build the module environment (registers all fns, lets, etc.) *)
   let env = eval_module_env m in
   let (setup_all_opt, setup_opt, tests) = collect_test_decls m in
@@ -5444,7 +5446,7 @@ let run_tests ?(verbose=false) ?(filter="") (m : module_) : int * int =
    | None -> ());
   let total = List.length tests in
   let failures = ref [] in
-  if not verbose then Printf.printf "%!" else ();
+  if not verbose && not quiet then Printf.printf "%!" else ();
   List.iter (fun (name, body) ->
     (* Run per-test setup *)
     (match setup_opt with
@@ -5462,7 +5464,13 @@ let run_tests ?(verbose=false) ?(filter="") (m : module_) : int * int =
       | Match_failure msg  -> TestError ("match failure: " ^ msg)
       | exn                -> TestError (Printexc.to_string exn)
     in
-    if verbose then begin
+    if quiet then begin
+      (* Collect failures silently *)
+      (match result with
+       | TestPass -> ()
+       | TestFail msg -> failures := (name, msg) :: !failures
+       | TestError msg -> failures := (name, "error: " ^ msg) :: !failures)
+    end else if verbose then begin
       match result with
       | TestPass ->
         Printf.printf "  ✓ %s\n%!" name
@@ -5484,17 +5492,19 @@ let run_tests ?(verbose=false) ?(filter="") (m : module_) : int * int =
          failures := (name, "error: " ^ msg) :: !failures)
     end
   ) tests;
-  if not verbose then Printf.printf "\n%!";
-  (* Print failure details in dot mode *)
-  if not verbose && !failures <> [] then begin
-    Printf.printf "\n%d failure(s):\n\n" (List.length !failures);
-    List.iter (fun (name, msg) ->
-      Printf.printf "FAIL: \"%s\"\n  %s\n\n" name
-        (String.concat "\n  " (String.split_on_char '\n' msg))
-    ) (List.rev !failures)
-  end;
   let n_failed = List.length !failures in
-  Printf.printf "Finished: %d test%s, %d failure%s\n%!"
-    total (if total = 1 then "" else "s")
-    n_failed (if n_failed = 1 then "" else "s");
-  (total, n_failed)
+  if not quiet then begin
+    if not verbose then Printf.printf "\n%!";
+    (* Print failure details in dot mode *)
+    if not verbose && !failures <> [] then begin
+      Printf.printf "\n%d failure(s):\n\n" (List.length !failures);
+      List.iter (fun (name, msg) ->
+        Printf.printf "FAIL: \"%s\"\n  %s\n\n" name
+          (String.concat "\n  " (String.split_on_char '\n' msg))
+      ) (List.rev !failures)
+    end;
+    Printf.printf "Finished: %d test%s, %d failure%s\n%!"
+      total (if total = 1 then "" else "s")
+      n_failed (if n_failed = 1 then "" else "s")
+  end;
+  (total, n_failed, List.rev !failures)

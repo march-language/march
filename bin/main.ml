@@ -268,14 +268,15 @@ let run_test_cmd args =
   let total_tests = ref 0 in
   let total_failed = ref 0 in
   let failed_files = ref [] in
+  (* In quiet mode (non-verbose), collect failures across files for end-of-run reporting. *)
+  let all_file_failures : (string * (string * string) list) list ref = ref [] in
   List.iter (fun filename ->
     let src =
       try read_file filename
       with Sys_error msg ->
         Printf.eprintf "march test: %s\n" msg; exit 1
     in
-    if !verbose then Printf.printf "%s\n%!" filename
-    else Printf.printf "%s " filename;
+    if !verbose then Printf.printf "%s\n%!" filename;
     let lexbuf = Lexing.from_string src in
     lexbuf.Lexing.lex_curr_p <-
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
@@ -323,17 +324,32 @@ let run_test_cmd args =
       ) diags;
       exit 1
     end;
-    let (n_tests, n_failed) =
-      March_eval.Eval.run_tests ~verbose:!verbose ~filter:!filter desugared
+    let (n_tests, n_failed, file_failures) =
+      if !verbose then
+        March_eval.Eval.run_tests ~verbose:true ~filter:!filter desugared
+      else
+        March_eval.Eval.run_tests ~quiet:true ~filter:!filter desugared
     in
     total_tests  := !total_tests + n_tests;
     total_failed := !total_failed + n_failed;
-    if n_failed > 0 then failed_files := filename :: !failed_files
+    if n_failed > 0 then begin
+      failed_files := filename :: !failed_files;
+      if not !verbose then
+        all_file_failures := (filename, file_failures) :: !all_file_failures
+    end
   ) files;
-  if total_files > 1 then begin
-    Printf.printf "\n=== Summary: %d/%d files, %d/%d tests failed ===\n%!"
-      (List.length !failed_files) total_files !total_failed !total_tests
+  (* In quiet mode, print collected failure details grouped by file. *)
+  if not !verbose && !all_file_failures <> [] then begin
+    List.iter (fun (filename, failures) ->
+      Printf.printf "%s\n" filename;
+      List.iter (fun (name, msg) ->
+        Printf.printf "  FAIL: \"%s\"\n    %s\n\n" name
+          (String.concat "\n    " (String.split_on_char '\n' msg))
+      ) failures
+    ) (List.rev !all_file_failures)
   end;
+  Printf.printf "=== Summary: %d/%d files, %d/%d tests failed ===\n%!"
+    (List.length !failed_files) total_files !total_failed !total_tests;
   if !total_failed > 0 then exit 1
   else exit 0
 
