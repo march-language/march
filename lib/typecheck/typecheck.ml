@@ -948,12 +948,40 @@ let builtin_bindings : (string * scheme) list =
     ("Chan.close",  Mono (TArrow (t_unit, t_unit)));
     ("Chan.choose", poly2 (fun a b -> TArrow (a, TArrow (t_atom, b))));
     ("Chan.offer",  poly1 (fun a -> TArrow (a, TTuple [t_atom; a])));
+    (* Byte builtins *)
+    ("byte_to_char", Mono (TArrow (t_int, t_string)));
+    (* Actor message-passing builtins *)
+    ("actor_cast",  poly2 (fun a b -> TArrow (a, TArrow (b, t_unit))));
+    ("actor_call",  poly2 (fun a e -> TArrow (a, TArrow (a, TArrow (t_int, t_result a e)))));
+    ("actor_reply", poly2 (fun a b -> TArrow (a, TArrow (b, t_unit))));
+    (* Logger builtins — 0-arg variants typed as Mono(result) so foo() works *)
+    ("logger_set_level",   Mono (TArrow (t_int, t_unit)));
+    ("logger_get_level",   Mono t_int);
+    ("logger_add_context", Mono (TArrow (t_string, TArrow (t_string, t_unit))));
+    ("logger_clear_context", Mono t_unit);
+    ("logger_get_context", Mono (t_list (TTuple [t_string; t_string])));
+    ("logger_write",       Mono (TArrow (t_string, TArrow (t_string,
+        TArrow (t_list (TTuple [t_string; t_string]),
+        TArrow (t_list (TTuple [t_string; t_string]), t_unit))))));
+    (* Process builtins — 0-arg variants typed as Mono(result) *)
+    ("process_env",        Mono (TArrow (t_string, t_option t_string)));
+    ("process_set_env",    Mono (TArrow (t_string, TArrow (t_string, t_unit))));
+    ("process_cwd",        Mono t_string);
+    ("process_exit",       Mono (TArrow (t_int, t_unit)));
+    ("process_argv",       Mono (t_list t_string));
+    ("process_pid",        Mono t_int);
+    ("process_spawn_sync", poly1 (fun e ->
+        TArrow (t_string, TArrow (t_list t_string,
+          t_result (TCon ("ProcessResult", [])) e))));
+    ("process_spawn_lines", poly2 (fun a e ->
+        TArrow (t_string, TArrow (t_list t_string,
+          t_result (TCon ("Seq", [a])) e))));
   ]
 
 let builtin_types : (string * int) list =
   [ ("Int",    0); ("Float",  0); ("Bool",  0); ("String", 0);
     ("Char",   0); ("Byte",   0); ("Atom",  0); ("Unit",   0);
-    ("List",   1); ("Option", 1); ("Array", 1); ("Set",    1);
+    ("List",   1); ("Option", 1); ("Array", 1); ("Set",    1); ("Seq",    1);
     ("Result", 2); ("Map",    2);
     ("Pid",    1); ("Cap",    1); ("Future",1); ("Stream", 1);
     ("Task",   1); ("WorkPool", 0); ("Node",   0);
