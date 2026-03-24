@@ -562,6 +562,9 @@ let analyse ~filename ~src : t =
           is_user_file sp
         ) raw_ast.Ast.mod_decls
     in
+    (* Populate doc_map with stdlib function docs first so that user-defined
+       functions with the same name take precedence (user docs overwrite). *)
+    collect_docs ~doc_map stdlib_decls;
     List.iter (collect_decl ~def_map ~use_map ~doc_map ~calls:call_sites_acc ~actors_tbl) user_decls;
     (* Collect stdlib definitions into def_map for cross-stdlib go-to-definition.
        Use throw-away tables for use_map/doc_map/calls/actors so we don't pollute
@@ -574,9 +577,6 @@ let analyse ~filename ~src : t =
       (collect_decl ~def_map ~use_map:_slib_use ~doc_map:_slib_doc
          ~calls:_slib_calls ~actors_tbl:_slib_actors)
       stdlib_decls;
-    (* Populate doc_map with stdlib function docs so that hovering over a
-       stdlib call site (e.g. [head], [map], [filter]) shows the doc string. *)
-    collect_docs ~doc_map stdlib_decls;
     let actors = Hashtbl.fold (fun k v acc -> (k, v) :: acc) actors_tbl [] in
     (* Build refs_map by inverting use_map *)
     let refs_map = Hashtbl.create 64 in

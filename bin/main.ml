@@ -7,12 +7,25 @@
 (** Locate the stdlib directory.  Try paths relative to the source root
     (for development) and relative to the installed executable. *)
 let find_stdlib_dir () =
-  let candidates = [
-    "stdlib";
-    Filename.concat (Filename.dirname Sys.executable_name) "../stdlib";
-    Filename.concat (Filename.dirname Sys.executable_name) "../../stdlib";
-  ] in
-  List.find_opt Sys.file_exists candidates
+  (* Allow override via environment variable *)
+  let env_override =
+    match Sys.getenv_opt "MARCH_STDLIB" with
+    | Some p when Sys.file_exists p -> Some p
+    | _ -> None
+  in
+  match env_override with
+  | Some p -> Some p
+  | None ->
+    let exe_dir = Filename.dirname Sys.executable_name in
+    let candidates = [
+      "stdlib";
+      (* Installed share layout: bin/../share/march/stdlib *)
+      Filename.concat exe_dir "../share/march/stdlib";
+      (* Source-tree layouts for development *)
+      Filename.concat exe_dir "../stdlib";
+      Filename.concat exe_dir "../../stdlib";
+    ] in
+    List.find_opt Sys.file_exists candidates
 
 (** Parse a stdlib source file and return its top-level declarations.
     Each stdlib file is a single [mod Name do ... end] wrapper.
@@ -637,12 +650,81 @@ let compile filename =
     March_debug.Debug.uninstall ()
   end
 
+(** Type-check multiple .march files together.
+    Parses each file, collects all their declarations, and type-checks the
+    combined module.  Exits 0 on success, 1 if any errors are found.
+    Used by [forge build] for library projects. *)
+let run_check_cmd files =
+  if files = [] then begin
+    Printf.eprintf "march check: no files specified\n"; exit 1
+  end;
+  let stdlib_decls = load_stdlib () in
+  (* Parse and desugar each file; collect all declarations *)
+  let all_decls = List.concat_map (fun filename ->
+    let src =
+      try read_file filename
+      with Sys_error msg ->
+        Printf.eprintf "march: %s\n" msg; exit 1
+    in
+    let lexbuf = Lexing.from_string src in
+    lexbuf.Lexing.lex_curr_p <-
+      { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
+    let module_ast =
+      try March_parser.Parser.module_ March_lexer.Lexer.token lexbuf
+      with
+      | March_errors.Errors.ParseError (msg, hint, _) ->
+        Printf.eprintf "%s\n"
+          (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg lexbuf);
+        exit 1
+      | March_parser.Parser.Error ->
+        Printf.eprintf "%s\n"
+          (March_errors.Errors.render_parse_error ~src ~filename
+             ~msg:"I got stuck here:" lexbuf);
+        exit 1
+    in
+    let desugared = March_desugar.Desugar.desugar_module module_ast in
+    desugared.March_ast.Ast.mod_decls
+  ) files in
+  (* Build a synthetic combined module and type-check it *)
+  let dummy_span = March_ast.Ast.{
+    file = ""; start_line = 0; start_col = 0; end_line = 0; end_col = 0
+  } in
+  let combined = {
+    March_ast.Ast.mod_name = { March_ast.Ast.txt = "LibCheck"; span = dummy_span };
+    March_ast.Ast.mod_decls = stdlib_decls @ all_decls;
+  } in
+  let (errors, _type_map) = March_typecheck.Typecheck.check_module combined in
+  let diags = March_errors.Errors.sorted errors in
+  let lib_files = List.sort_uniq String.compare files in
+  let is_user_file (d : March_errors.Errors.diagnostic) =
+    List.mem d.span.March_ast.Ast.file lib_files ||
+    d.span.March_ast.Ast.file = "" ||
+    d.span.March_ast.Ast.file = "<unknown>"
+  in
+  let user_errors = List.filter (fun d ->
+    is_user_file d &&
+    d.March_errors.Errors.severity = March_errors.Errors.Error
+  ) diags in
+  List.iter (fun (d : March_errors.Errors.diagnostic) ->
+    Printf.eprintf "%s:%d:%d: error: %s\n"
+      d.span.March_ast.Ast.file
+      d.span.March_ast.Ast.start_line
+      d.span.March_ast.Ast.start_col
+      d.message
+  ) user_errors;
+  if user_errors <> [] then exit 1
+  else exit 0
+
 let () =
   (* Handle subcommands before Arg.parse *)
   let argv = Sys.argv in
   if Array.length argv >= 2 && argv.(1) = "fmt" then begin
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
     run_fmt rest
+  end;
+  if Array.length argv >= 2 && argv.(1) = "check" then begin
+    let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
+    run_check_cmd rest
   end;
   if Array.length argv >= 2 && argv.(1) = "test" then begin
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
