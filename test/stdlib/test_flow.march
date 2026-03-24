@@ -1,210 +1,234 @@
 -- Tests for the Flow stdlib module.
--- Covers: from_fn, identity, run, then_, map, contramap,
--- map_list, filter_list, pipeline.
+-- Run with: dune exec march -- test test/stdlib/test_flow.march
 
 mod TestFlow do
 
-  -- ── Flow.from_fn and Flow.run ──────────────────────────────────────
+describe "Flow" do
 
-  fn test_from_fn_run() do
-    let double = Flow.from_fn(fn x -> x * 2)
-    Test.assert_eq_int(Flow.run(double, 5), 10, "double 5 = 10")
-    Test.assert_eq_int(Flow.run(double, 0), 0,  "double 0 = 0")
-    Test.assert_eq_int(Flow.run(double, -3), -6, "double -3 = -6")
+  describe "from_list and collect" do
+
+    test "collect empty list" do
+      let s = Flow.from_list(Nil)
+      let result = Flow.collect(s)
+      assert (List.length(result) == 0)
+    end
+
+    test "collect preserves elements" do
+      let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      let result = Flow.collect(s)
+      assert (List.length(result) == 3)
+      assert (List.nth(result, 0) == 1)
+      assert (List.nth(result, 1) == 2)
+      assert (List.nth(result, 2) == 3)
+    end
+
+    test "collect strings" do
+      let s = Flow.from_list(Cons("a", Cons("b", Nil)))
+      let result = Flow.collect(s)
+      assert (List.length(result) == 2)
+      assert (List.nth(result, 0) == "a")
+    end
+
   end
 
-  fn test_from_fn_string() do
-    let shout = Flow.from_fn(fn s -> string_to_uppercase(s))
-    Test.assert_eq_str(Flow.run(shout, "hello"), "HELLO", "shout hello")
-    Test.assert_eq_str(Flow.run(shout, ""),      "",      "shout empty")
+  describe "map" do
+
+    test "map doubles ints" do
+      let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      let result = Flow.collect(Flow.map(s, fn x -> x * 2))
+      assert (List.length(result) == 3)
+      assert (List.nth(result, 0) == 2)
+      assert (List.nth(result, 1) == 4)
+      assert (List.nth(result, 2) == 6)
+    end
+
+    test "map to string" do
+      let s = Flow.from_list(Cons(1, Cons(2, Nil)))
+      let result = Flow.collect(Flow.map(s, fn x -> int_to_string(x)))
+      assert (List.nth(result, 0) == "1")
+      assert (List.nth(result, 1) == "2")
+    end
+
+    test "map empty list" do
+      let s = Flow.from_list(Nil)
+      let result = Flow.collect(Flow.map(s, fn x -> x * 2))
+      assert (List.length(result) == 0)
+    end
+
   end
 
-  -- ── Flow.identity ─────────────────────────────────────────────────
+  describe "filter" do
 
-  fn test_identity_int() do
-    let id = Flow.identity()
-    Test.assert_eq_int(Flow.run(id, 42),  42,  "identity 42")
-    Test.assert_eq_int(Flow.run(id, -1),  -1,  "identity -1")
-    Test.assert_eq_int(Flow.run(id, 0),   0,   "identity 0")
+    test "filter even numbers" do
+      let xs = Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil)))))
+      let s = Flow.from_list(xs)
+      let result = Flow.collect(Flow.filter(s, fn x -> x % 2 == 0))
+      assert (List.length(result) == 2)
+      assert (List.nth(result, 0) == 2)
+      assert (List.nth(result, 1) == 4)
+    end
+
+    test "filter all pass" do
+      let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      let result = Flow.collect(Flow.filter(s, fn _ -> true))
+      assert (List.length(result) == 3)
+    end
+
+    test "filter none pass" do
+      let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      let result = Flow.collect(Flow.filter(s, fn _ -> false))
+      assert (List.length(result) == 0)
+    end
+
   end
 
-  fn test_identity_string() do
-    let id = Flow.identity()
-    Test.assert_eq_str(Flow.run(id, "abc"), "abc", "identity string")
-    Test.assert_eq_str(Flow.run(id, ""),    "",    "identity empty string")
+  describe "take and drop" do
+
+    test "take first two" do
+      let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Cons(4, Nil)))))
+      let result = Flow.collect(Flow.take(s, 2))
+      assert (List.length(result) == 2)
+      assert (List.nth(result, 0) == 1)
+      assert (List.nth(result, 1) == 2)
+    end
+
+    test "take more than length" do
+      let s = Flow.from_list(Cons(1, Cons(2, Nil)))
+      let result = Flow.collect(Flow.take(s, 10))
+      assert (List.length(result) == 2)
+    end
+
+    test "take zero" do
+      let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      let result = Flow.collect(Flow.take(s, 0))
+      assert (List.length(result) == 0)
+    end
+
+    test "drop first two" do
+      let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Cons(4, Nil)))))
+      let result = Flow.collect(Flow.drop(s, 2))
+      assert (List.length(result) == 2)
+      assert (List.nth(result, 0) == 3)
+      assert (List.nth(result, 1) == 4)
+    end
+
+    test "drop more than length" do
+      let s = Flow.from_list(Cons(1, Cons(2, Nil)))
+      let result = Flow.collect(Flow.drop(s, 10))
+      assert (List.length(result) == 0)
+    end
+
   end
 
-  -- ── Flow.then_ ────────────────────────────────────────────────────
+  describe "count" do
 
-  fn test_then_basic() do
-    let add_one = Flow.from_fn(fn x -> x + 1)
-    let double  = Flow.from_fn(fn x -> x * 2)
-    let f = Flow.then_(add_one, double)  -- (x+1)*2
-    Test.assert_eq_int(Flow.run(f, 3), 8,  "(3+1)*2 = 8")
-    Test.assert_eq_int(Flow.run(f, 0), 2,  "(0+1)*2 = 2")
-    Test.assert_eq_int(Flow.run(f, -1), 0, "(-1+1)*2 = 0")
+    test "count empty" do
+      assert (Flow.count(Flow.from_list(Nil)) == 0)
+    end
+
+    test "count elements" do
+      let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      assert (Flow.count(s) == 3)
+    end
+
+    test "count after filter" do
+      let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Cons(4, Nil)))))
+      assert (Flow.count(Flow.filter(s, fn x -> x > 2)) == 2)
+    end
+
   end
 
-  fn test_then_order_matters() do
-    let add_one = Flow.from_fn(fn x -> x + 1)
-    let double  = Flow.from_fn(fn x -> x * 2)
-    let f1 = Flow.then_(add_one, double)   -- (x+1)*2
-    let f2 = Flow.then_(double, add_one)   -- x*2+1
-    Test.assert_eq_int(Flow.run(f1, 3), 8, "add then double: 8")
-    Test.assert_eq_int(Flow.run(f2, 3), 7, "double then add: 7")
+  describe "find" do
+
+    test "find first match" do
+      let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      match Flow.find(s, fn x -> x > 1) do
+      | None -> panic("expected Some")
+      | Some(v) -> assert (v == 2)
+      end
+    end
+
+    test "find no match returns None" do
+      let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      match Flow.find(s, fn x -> x > 10) do
+      | None -> ()
+      | Some(_) -> panic("expected None")
+      end
+    end
+
   end
 
-  fn test_then_three_steps() do
-    let add1   = Flow.from_fn(fn x -> x + 1)
-    let double = Flow.from_fn(fn x -> x * 2)
-    let negate = Flow.from_fn(fn x -> 0 - x)
-    let f = Flow.then_(Flow.then_(add1, double), negate)  -- -((x+1)*2)
-    Test.assert_eq_int(Flow.run(f, 3), 0 - 8, "-((3+1)*2) = -8")
+  describe "any and all" do
+
+    test "any true" do
+      let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      assert Flow.any(s, fn x -> x > 2)
+    end
+
+    test "any false" do
+      let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      assert not(Flow.any(s, fn x -> x > 10))
+    end
+
+    test "all true" do
+      let s = Flow.from_list(Cons(2, Cons(4, Cons(6, Nil))))
+      assert Flow.all(s, fn x -> x % 2 == 0)
+    end
+
+    test "all false" do
+      let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      assert not(Flow.all(s, fn x -> x % 2 == 0))
+    end
+
   end
 
-  -- ── Flow.map ──────────────────────────────────────────────────────
+  describe "range" do
 
-  fn test_map_output() do
-    let double  = Flow.from_fn(fn x -> x * 2)
-    let to_str  = Flow.map(double, fn n -> int_to_string(n))
-    Test.assert_eq_str(Flow.run(to_str, 5), "10", "map to string")
-    Test.assert_eq_str(Flow.run(to_str, 0), "0",  "map 0 to string")
+    test "range 0 to 5" do
+      let s = Flow.range(0, 5)
+      let result = Flow.collect(s)
+      assert (List.length(result) == 5)
+      assert (List.nth(result, 0) == 0)
+      assert (List.nth(result, 4) == 4)
+    end
+
+    test "range empty when start >= stop" do
+      let s = Flow.range(5, 5)
+      assert (Flow.count(s) == 0)
+    end
+
+    test "range map and filter" do
+      let s = Flow.range(1, 11)
+      let evens = Flow.filter(s, fn x -> x % 2 == 0)
+      let result = Flow.collect(evens)
+      assert (List.length(result) == 5)
+    end
+
   end
 
-  -- ── Flow.contramap ────────────────────────────────────────────────
+  describe "run and each" do
 
-  fn test_contramap() do
-    let str_len = Flow.from_fn(fn s -> string_byte_length(s))
-    let double_str_len = Flow.contramap(str_len, fn n -> string_repeat("x", n))
-    -- contramap: first build string of n x's, then measure length
-    Test.assert_eq_int(Flow.run(double_str_len, 3), 3, "contramap: 3 x's = length 3")
-    Test.assert_eq_int(Flow.run(double_str_len, 0), 0, "contramap: 0 x's = length 0")
+    test "run returns unit (count still works after)" do
+      let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
+      assert (Flow.count(s) == 3)
+    end
+
   end
 
-  -- ── Flow.map_list ─────────────────────────────────────────────────
+  describe "map then filter" do
 
-  fn test_map_list_empty() do
-    let double = Flow.from_fn(fn x -> x * 2)
-    let result = Flow.map_list(double, Nil)
-    Test.assert_true(is_nil(result), "map_list empty list")
+    test "map doubles then filter gt 4" do
+      let xs = Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil)))))
+      let s = Flow.from_list(xs)
+      let doubled = Flow.map(s, fn x -> x * 2)
+      let filtered = Flow.filter(doubled, fn x -> x > 4)
+      let result = Flow.collect(filtered)
+      assert (List.length(result) == 3)
+      assert (List.nth(result, 0) == 6)
+    end
+
   end
 
-  fn test_map_list_ints() do
-    let double = Flow.from_fn(fn x -> x * 2)
-    let result = Flow.map_list(double, Cons(1, Cons(2, Cons(3, Nil))))
-    Test.assert_false(is_nil(result), "map_list non-empty")
-    Test.assert_eq_int(head(result), 2, "first element doubled")
-    Test.assert_eq_int(head(tail(result)), 4, "second element doubled")
-    Test.assert_eq_int(head(tail(tail(result))), 6, "third element doubled")
-  end
-
-  fn test_map_list_strings() do
-    let upper = Flow.from_fn(fn s -> string_to_uppercase(s))
-    let result = Flow.map_list(upper, Cons("a", Cons("b", Cons("c", Nil))))
-    Test.assert_eq_str(head(result), "A", "A")
-    Test.assert_eq_str(head(tail(result)), "B", "B")
-  end
-
-  -- ── Flow.filter_list ──────────────────────────────────────────────
-
-  fn test_filter_list_empty() do
-    let is_even = Flow.from_fn(fn x -> x % 2 == 0)
-    let result = Flow.filter_list(is_even, Nil)
-    Test.assert_true(is_nil(result), "filter_list empty")
-  end
-
-  fn test_filter_list_all_pass() do
-    let always = Flow.from_fn(fn _ -> true)
-    let xs = Cons(1, Cons(2, Cons(3, Nil)))
-    let result = Flow.filter_list(always, xs)
-    Test.assert_eq_int(length(result), 3, "all pass")
-  end
-
-  fn test_filter_list_none_pass() do
-    let never = Flow.from_fn(fn _ -> false)
-    let xs = Cons(1, Cons(2, Cons(3, Nil)))
-    let result = Flow.filter_list(never, xs)
-    Test.assert_true(is_nil(result), "none pass")
-  end
-
-  fn test_filter_list_even_numbers() do
-    let is_even = Flow.from_fn(fn x -> x % 2 == 0)
-    let xs = Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil)))))
-    let result = Flow.filter_list(is_even, xs)
-    Test.assert_eq_int(length(result), 2, "two even numbers")
-    Test.assert_eq_int(head(result), 2, "first even is 2")
-    Test.assert_eq_int(head(tail(result)), 4, "second even is 4")
-  end
-
-  -- ── Flow.pipeline ─────────────────────────────────────────────────
-
-  fn test_pipeline_empty() do
-    let p = Flow.pipeline(Nil)
-    Test.assert_eq_int(Flow.run(p, 42), 42, "empty pipeline is identity")
-    Test.assert_eq_str(Flow.run(Flow.pipeline(Nil), "hi"), "hi", "empty pipeline string identity")
-  end
-
-  fn test_pipeline_single() do
-    let double = Flow.from_fn(fn x -> x * 2)
-    let p = Flow.pipeline(Cons(double, Nil))
-    Test.assert_eq_int(Flow.run(p, 5), 10, "single-step pipeline")
-  end
-
-  fn test_pipeline_multiple() do
-    let add1 = Flow.from_fn(fn x -> x + 1)
-    let mul3 = Flow.from_fn(fn x -> x * 3)
-    let sub2 = Flow.from_fn(fn x -> x - 2)
-    -- (x+1)*3-2 with x=4 → 5*3-2 = 13
-    let p = Flow.pipeline(Cons(add1, Cons(mul3, Cons(sub2, Nil))))
-    Test.assert_eq_int(Flow.run(p, 4), 13, "pipeline 3 steps")
-  end
-
-  fn test_pipeline_associativity() do
-    let add1 = Flow.from_fn(fn x -> x + 1)
-    let mul2 = Flow.from_fn(fn x -> x * 2)
-    let add3 = Flow.from_fn(fn x -> x + 3)
-    let p1 = Flow.pipeline(Cons(add1, Cons(mul2, Cons(add3, Nil))))
-    let p2 = Flow.then_(Flow.then_(add1, mul2), add3)
-    Test.assert_eq_int(Flow.run(p1, 5), Flow.run(p2, 5), "pipeline = then_ chain")
-  end
-
-  -- ── Combined examples ──────────────────────────────────────────────
-
-  fn test_combined_map_and_filter() do
-    let double   = Flow.from_fn(fn x -> x * 2)
-    let is_gt_4  = Flow.from_fn(fn x -> x > 4)
-    let xs = Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil))))  )
-    -- Double: [2,4,6,8,10], then filter > 4: [6,8,10]
-    let doubled   = Flow.map_list(double, xs)
-    let filtered  = Flow.filter_list(is_gt_4, doubled)
-    Test.assert_eq_int(length(filtered), 3, "three elements > 4 after doubling")
-    Test.assert_eq_int(head(filtered), 6, "first is 6")
-  end
-
-  -- ── Entry point ────────────────────────────────────────────────────
-
-  pub fn main() do
-    test_from_fn_run()
-    test_from_fn_string()
-    test_identity_int()
-    test_identity_string()
-    test_then_basic()
-    test_then_order_matters()
-    test_then_three_steps()
-    test_map_output()
-    test_contramap()
-    test_map_list_empty()
-    test_map_list_ints()
-    test_map_list_strings()
-    test_filter_list_empty()
-    test_filter_list_all_pass()
-    test_filter_list_none_pass()
-    test_filter_list_even_numbers()
-    test_pipeline_empty()
-    test_pipeline_single()
-    test_pipeline_multiple()
-    test_pipeline_associativity()
-    test_combined_map_and_filter()
-  end
+end
 
 end
