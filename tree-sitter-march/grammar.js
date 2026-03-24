@@ -35,6 +35,7 @@ module.exports = grammar({
       'send', 'spawn', 'respond',
       'actor', 'interface', 'impl', 'sig', 'extern', 'protocol', 'use',
       'for', 'loop', 'doc',
+      'test', 'describe', 'assert', 'setup', 'setup_all',
     ],
   },
 
@@ -61,6 +62,10 @@ module.exports = grammar({
       $.extern_def,
       $.protocol_def,
       $.use_declaration,
+      $.test_decl,
+      $.describe_decl,
+      $.setup_decl,
+      $.setup_all_decl,
     ),
 
     doc_annotation: $ => seq(
@@ -300,8 +305,33 @@ module.exports = grammar({
       '*',
     )),
 
+    // Test declarations
+    test_decl: $ => seq(
+      'test', field('name', $.string),
+      'do', field('body', $.block_body), 'end',
+    ),
+
+    describe_decl: $ => seq(
+      'describe', field('name', $.string),
+      'do', repeat($._describe_item), 'end',
+    ),
+
+    _describe_item: $ => choice(
+      $.test_decl,
+      $.describe_decl,
+    ),
+
+    setup_decl: $ => seq(
+      'setup', 'do', field('body', $.block_body), 'end',
+    ),
+
+    setup_all_decl: $ => seq(
+      'setup_all', 'do', field('body', $.block_body), 'end',
+    ),
+
     // Full expression hierarchy
     _expr: $ => choice(
+      $.assert_expression,
       $.pipe_expression,
       $.or_expression,
       $.and_expression,
@@ -408,6 +438,7 @@ module.exports = grammar({
     send_expression: $ => seq('send', '(', $._expr, ',', $._expr, ')'),
     spawn_expression: $ => seq('spawn', '(', $._expr, ')'),
     respond_expression: $ => seq('respond', '(', $._expr, ')'),
+    assert_expression: $ => seq('assert', field('value', $._expr)),
 
     match_expression: $ => seq(
       'match', field('value', $._expr), 'with',
