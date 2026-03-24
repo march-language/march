@@ -210,14 +210,15 @@ march/
 ## Current State (as of 2026-03-23)
 
 - **Builds clean**
-- **1173 tests across 8 suites; 0 failures** (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + 5 new LSP features + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library):
-  - `test_march.exe`: 958 tests, all passing (app entry point: 8 new; HAMT Map/Set/Array: 26 new; tap bus: 6 new; repl_compiler_parity: 5 new; MPST: 21 new; REPL JIT fix; tail_recursion: 15 (10 orig + 5 structural); stream fusion: 9 new; type_level_nat: 9 new; testing_library: 13 new)
+- **1268 tests across 9 suites; 0 failures** (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + 5 new LSP features + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning):
+  - `test_march.exe`: 1045 tests, all passing
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests, passing (formatter round-trip)
   - `test_properties.exe`: 36 tests, passing (QCheck2 properties)
   - `test_supervision.exe`: 15 tests, passing (actor supervision)
-  - `test_lsp.exe`: 84 tests, passing (doc strings, find-refs, rename, sig-help, code actions)
+  - `test_lsp.exe`: 85 tests, passing (doc strings, find-refs, rename, sig-help, code actions)
+  - `test_stdlib_march.exe`: 7 tests, passing (Http, HttpTransport, HttpClient, HttpServer, WebSocket, Process, Logger)
   - `test_forge.exe`: 15 tests, passing (scaffold/toml)
   - `test_oracle.exe`: requires `MARCH_BIN` env var (oracle/idempotency/pass tests)
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present

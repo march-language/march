@@ -130,3 +130,6 @@ This file tracks everything that still needs to get done. Organized by priority 
 - ✅ **Module `alias` declarations** — `alias Long.Name, as: Short` syntax and qualified name resolution in typecheck
 - ✅ **Timsort, Introsort, AlphaDev sort** — `stdlib/sort.march` (615 lines)
 - ✅ **Enum module** — `stdlib/enum.march` (314 lines)
+- ✅ **March-native stdlib test suite** — 23 `.march` test files in `test/stdlib/` covering all stdlib modules; `stdlib/test.march` (Test module with assert_true/false/eq_int/eq_str/some/none/ok/err); `test/test_stdlib_march.ml` OCaml runner (7 suites: Http, HttpTransport, HttpClient, HttpServer, WebSocket, Process, Logger)
+- ✅ **Logger module additions** — `Logger.level_from_string`, `level_rank`, `level_enabled`, `format_entry`, `log_if` added to `stdlib/logger.march`
+- ✅ **TCE structural recursion warning** — `check_tail_position` in `typecheck.ml` now emits a Warning when a structurally-recursive (but non-tail) call is detected; distinguishes arithmetic reductions (`n-1`) from pattern-bound sub-components
