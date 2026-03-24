@@ -1,0 +1,568 @@
+-- Tests for the DataFrame stdlib module.
+-- Run with: dune exec march -- test test/stdlib/test_dataframe.march
+--
+-- Constructor access rules:
+--   Column variants: IntCol/FloatCol/StrCol/BoolCol unqualified (pub)
+--   Value variants:  IntVal/FloatVal/StrVal/BoolVal/NullVal unqualified (pub)
+--   Row:             Row([...]) unqualified (pub)
+--   DataFrame:       DataFrame.make_df([...]) or DataFrame.from_rows(...)
+
+mod TestDataFrame do
+
+-- ── Phase 1: Core construction ─────────────────────────────────────────────
+
+describe "empty" do
+  test "empty DataFrame has zero rows and columns" do
+    let df = DataFrame.empty()
+    assert (DataFrame.row_count(df) == 0)
+    assert (DataFrame.col_count(df) == 0)
+    assert (DataFrame.schema(df) == Nil)
+  end
+end
+
+describe "from_rows" do
+  test "from_rows builds DataFrame from typed rows" do
+    let rows = [
+      Row([("x", IntVal(1)), ("y", FloatVal(1.5))]),
+      Row([("x", IntVal(2)), ("y", FloatVal(2.5))])
+    ]
+    match DataFrame.from_rows(rows) do
+    | Err(_) -> assert false
+    | Ok(df) ->
+      assert (DataFrame.row_count(df) == 2)
+      assert (DataFrame.col_count(df) == 2)
+      assert (DataFrame.schema(df) == ["x", "y"])
+    end
+  end
+
+  test "from_rows with empty list gives empty DataFrame" do
+    let rows : List(Row) = Nil
+    match DataFrame.from_rows(rows) do
+    | Err(_) -> assert false
+    | Ok(df) -> assert (DataFrame.row_count(df) == 0)
+    end
+  end
+
+  test "from_rows errors on type mismatch" do
+    let rows = [
+      Row([("x", IntVal(1))]),
+      Row([("x", StrVal("hello"))])
+    ]
+    match DataFrame.from_rows(rows) do
+    | Err(_) -> assert true
+    | Ok(_)  -> assert false
+    end
+  end
+end
+
+describe "col_name and col_len" do
+  test "col_name returns column name" do
+    let col = IntCol("myCol", [1, 2, 3])
+    assert (DataFrame.col_name(col) == "myCol")
+  end
+
+  test "col_len returns column length" do
+    let col = FloatCol("vals", [1.0, 2.0])
+    assert (DataFrame.col_len(col) == 2)
+  end
+end
+
+-- ── Phase 1: Metadata ─────────────────────────────────────────────────────
+
+describe "schema and row_count" do
+  test "schema returns column names in order" do
+    let df = DataFrame.make_df([
+      IntCol("a", [1, 2]),
+      StrCol("b", ["x", "y"])
+    ])
+    assert (DataFrame.schema(df) == ["a", "b"])
+    assert (DataFrame.row_count(df) == 2)
+    assert (DataFrame.col_count(df) == 2)
+  end
+
+  test "row_count of empty DataFrame is 0" do
+    assert (DataFrame.row_count(DataFrame.empty()) == 0)
+  end
+end
+
+-- ── Phase 1: Column access ────────────────────────────────────────────────
+
+describe "get_column" do
+  test "get_column retrieves existing column" do
+    let df = DataFrame.make_df([
+      IntCol("age", [25, 30]),
+      StrCol("name", ["Alice", "Bob"])
+    ])
+    match DataFrame.get_column(df, "age") do
+    | Err(_) -> assert false
+    | Ok(col) -> assert (DataFrame.col_name(col) == "age")
+    end
+  end
+
+  test "get_column returns Err for missing column" do
+    let df = DataFrame.empty()
+    match DataFrame.get_column(df, "missing") do
+    | Err(_) -> assert true
+    | Ok(_)  -> assert false
+    end
+  end
+end
+
+describe "get_int_col" do
+  test "get_int_col returns Int data" do
+    let df = DataFrame.make_df([IntCol("n", [10, 20, 30])])
+    match DataFrame.get_int_col(df, "n") do
+    | Err(_) -> assert false
+    | Ok(lst) -> assert (lst == [10, 20, 30])
+    end
+  end
+
+  test "get_int_col errors on non-Int column" do
+    let df = DataFrame.make_df([StrCol("s", ["a"])])
+    match DataFrame.get_int_col(df, "s") do
+    | Err(_) -> assert true
+    | Ok(_)  -> assert false
+    end
+  end
+end
+
+describe "get_float_col" do
+  test "get_float_col returns Float data" do
+    let df = DataFrame.make_df([FloatCol("f", [1.5, 2.5])])
+    match DataFrame.get_float_col(df, "f") do
+    | Err(_) -> assert false
+    | Ok(lst) ->
+      assert (List.length(lst) == 2)
+    end
+  end
+end
+
+-- ── Phase 1: Row access ───────────────────────────────────────────────────
+
+describe "get_row and to_rows" do
+  test "get_row returns Row with correct values" do
+    let df = DataFrame.make_df([
+      IntCol("x", [1, 2, 3]),
+      StrCol("y", ["a", "b", "c"])
+    ])
+    let row = DataFrame.get_row(df, 1)
+    match DataFrame.row_get_int(row, "x") do
+    | None    -> assert false
+    | Some(v) -> assert (v == 2)
+    end
+    match DataFrame.row_get_string(row, "y") do
+    | None    -> assert false
+    | Some(v) -> assert (v == "b")
+    end
+  end
+
+  test "to_rows returns all rows" do
+    let df = DataFrame.make_df([IntCol("n", [10, 20])])
+    let rows = DataFrame.to_rows(df)
+    assert (List.length(rows) == 2)
+  end
+end
+
+-- ── Phase 1: Structural ops ───────────────────────────────────────────────
+
+describe "add_column and drop_column" do
+  test "add_column appends a new column" do
+    let df = DataFrame.make_df([IntCol("a", [1, 2])])
+    match DataFrame.add_column(df, StrCol("b", ["x", "y"])) do
+    | Err(_) -> assert false
+    | Ok(df2) ->
+      assert (DataFrame.col_count(df2) == 2)
+      assert (DataFrame.schema(df2) == ["a", "b"])
+    end
+  end
+
+  test "add_column errors on length mismatch" do
+    let df = DataFrame.make_df([IntCol("a", [1, 2])])
+    match DataFrame.add_column(df, IntCol("b", [1])) do
+    | Err(_) -> assert true
+    | Ok(_)  -> assert false
+    end
+  end
+
+  test "drop_column removes a column" do
+    let df = DataFrame.make_df([
+      IntCol("a", [1]),
+      IntCol("b", [2])
+    ])
+    let df2 = DataFrame.drop_column(df, "a")
+    assert (DataFrame.col_count(df2) == 1)
+    assert (DataFrame.schema(df2) == ["b"])
+  end
+end
+
+describe "rename_column" do
+  test "rename_column renames an existing column" do
+    let df = DataFrame.make_df([IntCol("old", [1, 2])])
+    match DataFrame.rename_column(df, "old", "new") do
+    | Err(_) -> assert false
+    | Ok(df2) -> assert (DataFrame.schema(df2) == ["new"])
+    end
+  end
+
+  test "rename_column errors on missing column" do
+    let df = DataFrame.empty()
+    match DataFrame.rename_column(df, "missing", "new") do
+    | Err(_) -> assert true
+    | Ok(_)  -> assert false
+    end
+  end
+end
+
+describe "select_columns" do
+  test "select_columns keeps requested columns in order" do
+    let df = DataFrame.make_df([
+      IntCol("a", [1]),
+      IntCol("b", [2]),
+      IntCol("c", [3])
+    ])
+    match DataFrame.select_columns(df, ["c", "a"]) do
+    | Err(_) -> assert false
+    | Ok(df2) ->
+      assert (DataFrame.col_count(df2) == 2)
+      assert (DataFrame.schema(df2) == ["c", "a"])
+    end
+  end
+end
+
+describe "head and tail" do
+  test "head returns first n rows" do
+    let df = DataFrame.make_df([IntCol("n", [1, 2, 3, 4, 5])])
+    let h = DataFrame.head(df, 3)
+    assert (DataFrame.row_count(h) == 3)
+    match DataFrame.get_int_col(h, "n") do
+    | Err(_) -> assert false
+    | Ok(lst) -> assert (lst == [1, 2, 3])
+    end
+  end
+
+  test "tail returns last n rows" do
+    let df = DataFrame.make_df([IntCol("n", [1, 2, 3, 4, 5])])
+    let t = DataFrame.tail(df, 2)
+    assert (DataFrame.row_count(t) == 2)
+    match DataFrame.get_int_col(t, "n") do
+    | Err(_) -> assert false
+    | Ok(lst) -> assert (lst == [4, 5])
+    end
+  end
+end
+
+-- ── Phase 2: CSV I/O ─────────────────────────────────────────────────────
+
+describe "from_csv_string" do
+  test "parses a basic CSV into a DataFrame" do
+    let csv = "name,age,score\nAlice,30,9.5\nBob,25,8.0\n"
+    match DataFrame.from_csv_string(csv) do
+    | Err(_) -> assert false
+    | Ok(df) ->
+      assert (DataFrame.row_count(df) == 2)
+      assert (DataFrame.col_count(df) == 3)
+    end
+  end
+
+  test "infers Int column type" do
+    let csv = "x\n1\n2\n3\n"
+    match DataFrame.from_csv_string(csv) do
+    | Err(_) -> assert false
+    | Ok(df) ->
+      match DataFrame.get_int_col(df, "x") do
+      | Err(_) -> assert false
+      | Ok(lst) -> assert (lst == [1, 2, 3])
+      end
+    end
+  end
+
+  test "infers Float column type" do
+    let csv = "v\n1.5\n2.5\n"
+    match DataFrame.from_csv_string(csv) do
+    | Err(_) -> assert false
+    | Ok(df) ->
+      match DataFrame.get_float_col(df, "v") do
+      | Err(_)  -> assert false
+      | Ok(lst) -> assert (List.length(lst) == 2)
+      end
+    end
+  end
+
+  test "infers String column type" do
+    let csv = "city\nParis\nLondon\n"
+    match DataFrame.from_csv_string(csv) do
+    | Err(_) -> assert false
+    | Ok(df) ->
+      match DataFrame.get_string_col(df, "city") do
+      | Err(_)  -> assert false
+      | Ok(lst) -> assert (lst == ["Paris", "London"])
+      end
+    end
+  end
+
+  test "empty CSV gives empty DataFrame" do
+    match DataFrame.from_csv_string("") do
+    | Err(_) -> assert false
+    | Ok(df) -> assert (DataFrame.row_count(df) == 0)
+    end
+  end
+end
+
+describe "to_csv_string" do
+  test "round-trips a simple DataFrame through CSV" do
+    let df = DataFrame.make_df([
+      StrCol("name", ["Alice", "Bob"]),
+      IntCol("age", [30, 25])
+    ])
+    let csv = DataFrame.to_csv_string(df)
+    match DataFrame.from_csv_string(csv) do
+    | Err(_) -> assert false
+    | Ok(df2) ->
+      assert (DataFrame.row_count(df2) == 2)
+      assert (DataFrame.schema(df2) == ["name", "age"])
+    end
+  end
+end
+
+-- ── Phase 2: JSON I/O ─────────────────────────────────────────────────────
+
+describe "from_json_string" do
+  test "parses a JSON array of objects into a DataFrame" do
+    let json = "[{\"name\":\"Alice\",\"age\":30},{\"name\":\"Bob\",\"age\":25}]"
+    match DataFrame.from_json_string(json) do
+    | Err(_) -> assert false
+    | Ok(df) ->
+      assert (DataFrame.row_count(df) == 2)
+    end
+  end
+
+  test "empty JSON array gives empty DataFrame" do
+    match DataFrame.from_json_string("[]") do
+    | Err(_) -> assert false
+    | Ok(df) -> assert (DataFrame.row_count(df) == 0)
+    end
+  end
+
+  test "non-array JSON gives Err" do
+    match DataFrame.from_json_string("{\"x\": 1}") do
+    | Err(_) -> assert true
+    | Ok(_)  -> assert false
+    end
+  end
+end
+
+-- ── Phase 3: LazyFrame / plan eval ────────────────────────────────────────
+
+describe "LazyFrame select" do
+  test "select keeps only requested columns" do
+    let df = DataFrame.make_df([
+      IntCol("a", [1, 2]),
+      IntCol("b", [3, 4]),
+      IntCol("c", [5, 6])
+    ])
+    let result = DataFrame.lazy(df)
+      |> DataFrame.select(["a", "c"])
+      |> DataFrame.collect()
+    match result do
+    | Err(_) -> assert false
+    | Ok(df2) ->
+      assert (DataFrame.col_count(df2) == 2)
+      assert (DataFrame.schema(df2) == ["a", "c"])
+    end
+  end
+end
+
+describe "LazyFrame filter" do
+  test "filter keeps rows matching ColExpr predicate" do
+    let df = DataFrame.make_df([IntCol("n", [1, 2, 3, 4, 5])])
+    let result = DataFrame.lazy(df)
+      |> DataFrame.filter(Gt(Col("n"), LitInt(3)))
+      |> DataFrame.collect()
+    match result do
+    | Err(_) -> assert false
+    | Ok(df2) ->
+      assert (DataFrame.row_count(df2) == 2)
+      match DataFrame.get_int_col(df2, "n") do
+      | Err(_)  -> assert false
+      | Ok(lst) -> assert (lst == [4, 5])
+      end
+    end
+  end
+
+  test "filter with Eq" do
+    let df = DataFrame.make_df([StrCol("cat", ["a", "b", "a"])])
+    let result = DataFrame.lazy(df)
+      |> DataFrame.filter(Eq(Col("cat"), LitStr("a")))
+      |> DataFrame.collect()
+    match result do
+    | Err(_) -> assert false
+    | Ok(df2) -> assert (DataFrame.row_count(df2) == 2)
+    end
+  end
+
+  test "filter with And" do
+    let df = DataFrame.make_df([IntCol("n", [1, 2, 3, 4, 5])])
+    let result = DataFrame.lazy(df)
+      |> DataFrame.filter(And(Gt(Col("n"), LitInt(1)), Lt(Col("n"), LitInt(5))))
+      |> DataFrame.collect()
+    match result do
+    | Err(_) -> assert false
+    | Ok(df2) -> assert (DataFrame.row_count(df2) == 3)
+    end
+  end
+end
+
+describe "LazyFrame limit and offset" do
+  test "limit returns first n rows" do
+    let df = DataFrame.make_df([IntCol("x", [10, 20, 30, 40])])
+    let result = DataFrame.lazy(df) |> DataFrame.limit(2) |> DataFrame.collect()
+    match result do
+    | Err(_) -> assert false
+    | Ok(df2) ->
+      assert (DataFrame.row_count(df2) == 2)
+      match DataFrame.get_int_col(df2, "x") do
+      | Err(_)  -> assert false
+      | Ok(lst) -> assert (lst == [10, 20])
+      end
+    end
+  end
+
+  test "offset skips first n rows" do
+    let df = DataFrame.make_df([IntCol("x", [10, 20, 30, 40])])
+    let result = DataFrame.lazy(df) |> DataFrame.offset(2) |> DataFrame.collect()
+    match result do
+    | Err(_) -> assert false
+    | Ok(df2) ->
+      assert (DataFrame.row_count(df2) == 2)
+      match DataFrame.get_int_col(df2, "x") do
+      | Err(_)  -> assert false
+      | Ok(lst) -> assert (lst == [30, 40])
+      end
+    end
+  end
+end
+
+describe "LazyFrame sort_by" do
+  test "sort_by sorts ascending" do
+    let df = DataFrame.make_df([IntCol("n", [3, 1, 2])])
+    let result = DataFrame.lazy(df)
+      |> DataFrame.sort_by([("n", Asc)])
+      |> DataFrame.collect()
+    match result do
+    | Err(_) -> assert false
+    | Ok(df2) ->
+      match DataFrame.get_int_col(df2, "n") do
+      | Err(_)  -> assert false
+      | Ok(lst) -> assert (lst == [1, 2, 3])
+      end
+    end
+  end
+
+  test "sort_by sorts descending" do
+    let df = DataFrame.make_df([IntCol("n", [3, 1, 2])])
+    let result = DataFrame.lazy(df)
+      |> DataFrame.sort_by([("n", Desc)])
+      |> DataFrame.collect()
+    match result do
+    | Err(_) -> assert false
+    | Ok(df2) ->
+      match DataFrame.get_int_col(df2, "n") do
+      | Err(_)  -> assert false
+      | Ok(lst) -> assert (lst == [3, 2, 1])
+      end
+    end
+  end
+end
+
+describe "LazyFrame rename" do
+  test "rename renames a column in the pipeline" do
+    let df = DataFrame.make_df([IntCol("a", [1, 2])])
+    let result = DataFrame.lazy(df)
+      |> DataFrame.rename("a", "b")
+      |> DataFrame.collect()
+    match result do
+    | Err(_) -> assert false
+    | Ok(df2) -> assert (DataFrame.schema(df2) == ["b"])
+    end
+  end
+end
+
+-- ── Phase 4: GroupBy and aggregation ──────────────────────────────────────
+
+describe "group_by and agg" do
+  test "group_by Count gives frequency counts" do
+    let df = DataFrame.make_df([
+      StrCol("cat", ["a", "b", "a", "b", "a"]),
+      IntCol("val", [1, 2, 3, 4, 5])
+    ])
+    match DataFrame.agg(DataFrame.group_by(df, ["cat"]), [Count]) do
+    | Err(_)  -> assert false
+    | Ok(agg) -> assert (DataFrame.row_count(agg) == 2)
+    end
+  end
+
+  test "group_by Sum aggregates correctly" do
+    let df = DataFrame.make_df([
+      StrCol("cat", ["a", "a", "b"]),
+      IntCol("val", [10, 20, 5])
+    ])
+    match DataFrame.agg(DataFrame.group_by(df, ["cat"]), [Sum("val")]) do
+    | Err(_)  -> assert false
+    | Ok(agg) -> assert (DataFrame.row_count(agg) == 2)
+    end
+  end
+end
+
+-- ── Phase 5: inner_join ────────────────────────────────────────────────────
+
+describe "inner_join" do
+  test "inner_join on matching key returns matched rows" do
+    let left = DataFrame.make_df([
+      IntCol("id", [1, 2, 3]),
+      StrCol("name", ["Alice", "Bob", "Charlie"])
+    ])
+    let right = DataFrame.make_df([
+      IntCol("id", [1, 3]),
+      IntCol("score", [90, 85])
+    ])
+    let result = DataFrame.lazy(left)
+      |> DataFrame.inner_join(right, ["id"])
+      |> DataFrame.collect()
+    match result do
+    | Err(_)  -> assert false
+    | Ok(df2) -> assert (DataFrame.row_count(df2) == 2)
+    end
+  end
+end
+
+-- ── Phase 6: value_counts ─────────────────────────────────────────────────
+
+describe "value_counts" do
+  test "value_counts returns frequency table" do
+    let df = DataFrame.make_df([
+      StrCol("color", ["red", "blue", "red", "red", "blue"])
+    ])
+    match DataFrame.value_counts(df, "color") do
+    | Err(_) -> assert false
+    | Ok(vc) ->
+      assert (DataFrame.row_count(vc) == 2)
+    end
+  end
+
+  test "value_counts most frequent is first" do
+    let df = DataFrame.make_df([
+      StrCol("color", ["red", "blue", "red", "red", "blue"])
+    ])
+    match DataFrame.value_counts(df, "color") do
+    | Err(_) -> assert false
+    | Ok(vc) ->
+      let row0 = DataFrame.get_row(vc, 0)
+      match DataFrame.row_get_int(row0, "count") do
+      | None -> assert false
+      | Some(cnt) -> assert (cnt == 3)
+      end
+    end
+  end
+end
+
+end -- mod TestDataFrame
