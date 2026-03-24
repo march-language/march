@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-24 (forge search added)
+**Last updated:** 2026-03-24 (DataFrame Phase 7 + LSP Phase 1 + visibility fix)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -66,6 +66,8 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ## Done (recently completed)
 
+- ✅ **LSP Phase 1: snippet completions, folding ranges, code actions, diagnostic codes** — `lsp/lib/analysis.ml`: (1) Snippet completions — `completions_at` generates `insertText` snippets with tabstops for functions (`"foo(${1:Int}, ${2:String})"`) and multi-arg constructors; `ctor_arities` field in `Analysis.t`; `insertTextFormat=Snippet` (2) on snippet items. (2) Folding ranges — `fold_ranges` field; `collect_fold_ranges` walks AST (`DFn`, `DMod`, `DActor`, `DDescribe`, `EMatch`, `ELetFn`); `foldingRangeProvider=true` in server capabilities; `textDocument/foldingRange` handler added. (3) Add type annotation code action — `annotation_sites` field; `collect_annotation_sites` finds untyped `ELet`/`DLet` `PatVar` bindings; generates `RefactorRewrite` action inserting `": TypeName"`. (4) Remove unused binding code action — `code : string option` field on `Errors.diagnostic`; `warning_with_code ~code:"unused_binding"` in typecheck; `diag_to_lsp` propagates to LSP `Diagnostic.code`; generates "Prefix with underscore" and "Remove unused binding" `QuickFix` actions. 4 new LSP tests (89 total).
+- ✅ **Visibility syntax update for remaining .march files** — `examples/*.march` and `stdlib/dataframe.march` updated: `pub fn → fn` (public by default), `fn → pfn` for truly private helpers, `pub type → type`. DataFrame public API functions correctly use `fn`; internal helpers use `pfn`.
 - ✅ **TCO — loop transformation in LLVM IR codegen** — `lib/tir/llvm_emit.ml`: `has_self_tail_call` detects self-tail-recursion in TIR at emit time. `emit_fn` emits `entry → br label %tco_loop` + loop header; EApp case for self-tail-calls stores new arg values into parameter alloca slots and branches back to the loop header instead of emitting a `call` instruction. Opens a dead block for subsequent IR from calling contexts. LLVM's mem2reg + DCE clean up. 4 new `tco_codegen` tests (factorial, fold, non-tail fib, countdown). Scope: self-recursion only; mutual recursion deferred.
 - ✅ **stdlib: DataFrame module (Phase 7)** — `stdlib/dataframe.march`: production-ready DataFrame with nullable columns (`NullableIntCol`/`NullableFloatCol`/`NullableStrCol`/`NullableBoolCol`), `left_join`/`right_join`/`outer_join` (hash-join + nullable non-matching rows), `IsNull`/`IsNotNull` ColExpr, `col_is_nullable`/`col_null_count`/`col_to_nullable` helpers, `eval_agg` uses safe Stats variants (no panic on empty groups). Stats module: `mean_safe`/`std_dev_safe`/`variance_safe`/`min_safe`/`max_safe`. Benchmark: `bench/dataframe_bench.march`. Visibility syntax updated (`fn`/`pfn`/`type`). 46 tests passing.
 
