@@ -321,6 +321,32 @@ and collect_pat_defs ~def_map (pat : Ast.pattern) =
   | Ast.PatWild _ | Ast.PatLit _ -> ()
 
 (* ------------------------------------------------------------------ *)
+(* Stdlib doc-string collection                                        *)
+(* ------------------------------------------------------------------ *)
+
+(** Recursively collect [fn_doc] entries from a list of (possibly desugared)
+    declarations into [doc_map].  Used to populate hover docs for stdlib
+    functions, which are not part of [user_decls] and therefore not visited
+    by [collect_decl]. *)
+let rec collect_docs ~doc_map ?(prefix = "") (decls : Ast.decl list) =
+  List.iter (fun decl ->
+      match decl with
+      | Ast.DFn (fn, _) ->
+        (match fn.fn_doc with
+         | None -> ()
+         | Some doc ->
+           Hashtbl.replace doc_map fn.fn_name.txt doc;
+           if prefix <> "" then
+             Hashtbl.replace doc_map (prefix ^ "." ^ fn.fn_name.txt) doc)
+      | Ast.DMod (name, _, inner, _) ->
+        let sub =
+          if prefix = "" then name.txt else prefix ^ "." ^ name.txt
+        in
+        collect_docs ~doc_map ~prefix:sub inner
+      | _ -> ()
+    ) decls
+
+(* ------------------------------------------------------------------ *)
 (* Linear consumption analysis                                         *)
 (* ------------------------------------------------------------------ *)
 
@@ -515,6 +541,9 @@ let analyse ~filename ~src : t =
         ) raw_ast.Ast.mod_decls
     in
     List.iter (collect_decl ~def_map ~use_map ~doc_map ~calls:call_sites_acc ~actors_tbl) user_decls;
+    (* Populate doc_map with stdlib function docs so that hovering over a
+       stdlib call site (e.g. [head], [map], [filter]) shows the doc string. *)
+    collect_docs ~doc_map stdlib_decls;
     let actors = Hashtbl.fold (fun k v acc -> (k, v) :: acc) actors_tbl [] in
     (* Build refs_map by inverting use_map *)
     let refs_map = Hashtbl.create 64 in
