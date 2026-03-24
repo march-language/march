@@ -231,11 +231,13 @@ let rec march_files_in dir =
     Discovers test files, parses/typechecks them, and runs all test blocks.
     Usage: march test [--verbose|-v] [--filter=pattern] [file...] *)
 let run_test_cmd args =
-  let verbose = ref false in
-  let filter  = ref "" in
-  let targets = ref [] in
+  let verbose  = ref false in
+  let filter   = ref "" in
+  let coverage = ref false in
+  let targets  = ref [] in
   List.iter (fun a ->
     if a = "--verbose" || a = "-v" then verbose := true
+    else if a = "--coverage" then coverage := true
     else if String.length a > 9 && String.sub a 0 9 = "--filter=" then
       filter := String.sub a 9 (String.length a - 9)
     else
@@ -324,12 +326,21 @@ let run_test_cmd args =
       ) diags;
       exit 1
     end;
+    (* Enable coverage tracking for this file's test run. *)
+    if !coverage then begin
+      March_coverage.Coverage.reset ();
+      March_coverage.Coverage.coverage_enabled := true
+    end;
     let (n_tests, n_failed, file_failures) =
       if !verbose then
         March_eval.Eval.run_tests ~verbose:true ~filter:!filter desugared
       else
-        March_eval.Eval.run_tests ~quiet:true ~filter:!filter desugared
+        March_eval.Eval.run_tests ~dot_stream:true ~filter:!filter desugared
     in
+    if !coverage then begin
+      March_coverage.Coverage.coverage_enabled := false;
+      March_coverage.Coverage.report_summary ~target_file:filename desugared ()
+    end;
     total_tests  := !total_tests + n_tests;
     total_failed := !total_failed + n_failed;
     if n_failed > 0 then begin
@@ -338,7 +349,9 @@ let run_test_cmd args =
         all_file_failures := (filename, file_failures) :: !all_file_failures
     end
   ) files;
-  (* In quiet mode, print collected failure details grouped by file. *)
+  (* End the dot line after all files *)
+  if not !verbose then Printf.printf "\n%!";
+  (* Print collected failure details grouped by file. *)
   if not !verbose && !all_file_failures <> [] then begin
     List.iter (fun (filename, failures) ->
       Printf.printf "%s\n" filename;
@@ -348,8 +361,15 @@ let run_test_cmd args =
       ) failures
     ) (List.rev !all_file_failures)
   end;
-  Printf.printf "=== Summary: %d/%d files, %d/%d tests failed ===\n%!"
-    (List.length !failed_files) total_files !total_failed !total_tests;
+  let n_failed_files = List.length !failed_files in
+  if n_failed_files = 0 then
+    Printf.printf "=== %d file%s, %d test%s passed ===\n%!"
+      total_files (if total_files = 1 then "" else "s")
+      !total_tests (if !total_tests = 1 then "" else "s")
+  else
+    Printf.printf "=== %d/%d file%s, %d/%d test%s failed ===\n%!"
+      n_failed_files total_files (if total_files = 1 then "" else "s")
+      !total_failed !total_tests (if !total_tests = 1 then "" else "s");
   if !total_failed > 0 then exit 1
   else exit 0
 

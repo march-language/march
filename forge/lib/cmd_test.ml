@@ -14,12 +14,13 @@ let rec find_test_files dir =
     else if is_test_file entry then [path]
     else [])
 
-let invoke_march ?(verbose=false) ?(filter="") files =
-  let verbose_flag = if verbose then " --verbose" else "" in
-  let filter_flag  = if filter = "" then ""
-                     else Printf.sprintf " --filter=%s" (Filename.quote filter) in
+let invoke_march ?(verbose=false) ?(filter="") ?(coverage=false) files =
+  let verbose_flag  = if verbose  then " --verbose"  else "" in
+  let coverage_flag = if coverage then " --coverage" else "" in
+  let filter_flag   = if filter = "" then ""
+                      else Printf.sprintf " --filter=%s" (Filename.quote filter) in
   let files_str = String.concat " " (List.map Filename.quote files) in
-  let cmd = Printf.sprintf "march test%s%s %s" verbose_flag filter_flag files_str in
+  let cmd = Printf.sprintf "march test%s%s%s %s" verbose_flag coverage_flag filter_flag files_str in
   let rc = Sys.command cmd in
   if rc = 0 then Ok ()
   else Error (Printf.sprintf "test run failed (exit %d)" rc)
@@ -41,7 +42,7 @@ let find_test_dir () =
     if Sys.file_exists cwd_test && Sys.is_directory cwd_test then Some cwd_test
     else None
 
-let run ?(verbose=false) ?(filter="") ?(files=[]) () =
+let run ?(verbose=false) ?(filter="") ?(coverage=false) ?(files=[]) () =
   if files <> [] then begin
     (* User provided explicit files/directories — expand dirs, then run. *)
     let expanded = expand_paths files in
@@ -49,7 +50,7 @@ let run ?(verbose=false) ?(filter="") ?(files=[]) () =
       Printf.printf "no test files found\n%!";
       Ok ()
     end else
-      invoke_march ~verbose ~filter expanded
+      invoke_march ~verbose ~filter ~coverage expanded
   end else
     match find_test_dir () with
     | None ->
@@ -64,5 +65,5 @@ let run ?(verbose=false) ?(filter="") ?(files=[]) () =
           Printf.printf "no test files found under %s\n%!" test_dir;
           Ok ()
         end else
-          invoke_march ~verbose ~filter test_files
+          invoke_march ~verbose ~filter ~coverage test_files
       end

@@ -4050,6 +4050,14 @@ and eval_expr_inner (env : env) (e : expr) : value =
 
   | EApp (f, args, _) ->
     check_reductions ();
+    (if !March_coverage.Coverage.coverage_enabled then begin
+      let name = match f with
+        | EVar n -> n.txt
+        | EField (_, field, _) -> field.txt
+        | _ -> "<anon>"
+      in
+      March_coverage.Coverage.record_fn_call name
+    end);
     let fn_val = eval_expr env f in
     let arg_vals = List.map (eval_expr env) args in
     apply fn_val arg_vals
@@ -4075,10 +4083,10 @@ and eval_expr_inner (env : env) (e : expr) : value =
        This shouldn't appear after desugaring except inside EBlock. *)
     eval_expr env b.bind_expr
 
-  | EMatch (scrut, branches, _) ->
+  | EMatch (scrut, branches, sp) ->
     check_reductions ();
     let v = eval_expr env scrut in
-    eval_match env v branches
+    eval_match env sp v branches
 
   | ETuple ([], _) -> VUnit
   | ETuple (es, _) ->
@@ -4137,10 +4145,16 @@ and eval_expr_inner (env : env) (e : expr) : value =
         | None   -> eval_error "no member '%s' in module '%s'" field.txt mod_name)
      | _ -> eval_error "field access on non-record value"))
 
-  | EIf (cond, then_, else_, _) ->
+  | EIf (cond, then_, else_, sp) ->
     (match eval_expr env cond with
-     | VBool true  -> eval_expr env then_
-     | VBool false -> eval_expr env else_
+     | VBool true  ->
+       (if !March_coverage.Coverage.coverage_enabled then
+         March_coverage.Coverage.record_branch sp true);
+       eval_expr env then_
+     | VBool false ->
+       (if !March_coverage.Coverage.coverage_enabled then
+         March_coverage.Coverage.record_branch sp false);
+       eval_expr env else_
      | _           -> eval_error "if condition must be a boolean")
 
   | EPipe _ ->
@@ -4333,34 +4347,42 @@ and eval_expr_inner (env : env) (e : expr) : value =
           raise (Assert_failure (Printf.sprintf "assert: expected Bool, got %s"
             (value_to_string v)))))
 
-(** Evaluate a match expression: try each branch until one matches. *)
-and eval_match (env : env) (v : value) (branches : branch list) : value =
-  match branches with
-  | [] ->
-    raise (Match_failure
-             (Printf.sprintf "non-exhaustive match on value: %s"
-                (value_to_string v)))
-  | br :: rest ->
-    (match match_pattern v br.branch_pat with
-     | None -> eval_match env v rest
-     | Some bindings ->
-       let env' = bindings @ env in
-       (* Check guard if present *)
-       let guard_ok = match br.branch_guard with
-         | None   -> true
-         | Some g ->
-           (match eval_expr env' g with
-            | VBool b -> b
-            | _       -> eval_error "guard must evaluate to a boolean")
-       in
-       if guard_ok
-       then eval_expr env' br.branch_body
-       else eval_match env v rest)
+(** Evaluate a match expression: try each branch until one matches.
+    [match_span] is the span of the [EMatch] node, used for coverage arm tracking. *)
+and eval_match (env : env) (match_span : span) (v : value) (branches : branch list) : value =
+  let rec go arm_idx = function
+    | [] ->
+      raise (Match_failure
+               (Printf.sprintf "non-exhaustive match on value: %s"
+                  (value_to_string v)))
+    | br :: rest ->
+      (match match_pattern v br.branch_pat with
+       | None -> go (arm_idx + 1) rest
+       | Some bindings ->
+         let env' = bindings @ env in
+         (* Check guard if present *)
+         let guard_ok = match br.branch_guard with
+           | None   -> true
+           | Some g ->
+             (match eval_expr env' g with
+              | VBool b -> b
+              | _       -> eval_error "guard must evaluate to a boolean")
+         in
+         if guard_ok then begin
+           (if !March_coverage.Coverage.coverage_enabled then
+             March_coverage.Coverage.record_arm match_span arm_idx);
+           eval_expr env' br.branch_body
+         end else go (arm_idx + 1) rest)
+  in
+  go 0 branches
 
 (** Tracing wrapper around [eval_expr_inner].
     When debug mode is active, records a [trace_frame] for every evaluation step.
-    When [!debug_ctx] is None, this is a single pointer deref — zero overhead. *)
+    When [!debug_ctx] is None, this is a single pointer deref — zero overhead.
+    Coverage recording is gated by [March_coverage.Coverage.coverage_enabled]. *)
 and eval_expr (env : env) (e : expr) : value =
+  (if !March_coverage.Coverage.coverage_enabled then
+    March_coverage.Coverage.record_expr (span_of_expr e));
   match !debug_ctx with
   | None | Some { dc_enabled = false; _ } ->
     eval_expr_inner env e
@@ -5422,7 +5444,7 @@ let collect_test_decls (m : module_) :
       - Quiet mode:          no output at all; caller handles reporting.
 
     Exit-code contract: the caller is responsible for exiting 1 if failures > 0. *)
-let run_tests ?(verbose=false) ?(quiet=false) ?(filter="") (m : module_) : int * int * (string * string) list =
+let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") (m : module_) : int * int * (string * string) list =
   (* Build the module environment (registers all fns, lets, etc.) *)
   let env = eval_module_env m in
   let (setup_all_opt, setup_opt, tests) = collect_test_decls m in
@@ -5483,17 +5505,21 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(filter="") (m : module_) : int *
         failures := (name, "error: " ^ msg) :: !failures
     end else begin
       (match result with
-       | TestPass -> Printf.printf ".%!"
+       | TestPass ->
+         if dot_stream then Printf.printf "\027[32m.\027[0m%!"
+         else Printf.printf ".%!"
        | TestFail msg ->
-         Printf.printf "F%!";
+         if dot_stream then Printf.printf "\027[31mF\027[0m%!"
+         else Printf.printf "F%!";
          failures := (name, msg) :: !failures
        | TestError msg ->
-         Printf.printf "E%!";
+         if dot_stream then Printf.printf "\027[31mE\027[0m%!"
+         else Printf.printf "E%!";
          failures := (name, "error: " ^ msg) :: !failures)
     end
   ) tests;
   let n_failed = List.length !failures in
-  if not quiet then begin
+  if not quiet && not dot_stream then begin
     if not verbose then Printf.printf "\n%!";
     (* Print failure details in dot mode *)
     if not verbose && !failures <> [] then begin
