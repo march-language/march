@@ -324,11 +324,21 @@ let run_test_cmd args =
       ) diags;
       exit 1
     end;
+    (* Check whether the test source opts into IO capture via @capture_io. *)
+    let capture_io =
+      let pat = "@capture_io" in
+      let n = String.length src and p = String.length pat in
+      let rec check i =
+        if i + p > n then false
+        else if String.sub src i p = pat then true
+        else check (i + 1)
+      in check 0
+    in
     let (n_tests, n_failed, file_failures) =
       if !verbose then
-        March_eval.Eval.run_tests ~verbose:true ~filter:!filter desugared
+        March_eval.Eval.run_tests ~verbose:true ~filter:!filter ~capture_io desugared
       else
-        March_eval.Eval.run_tests ~quiet:true ~filter:!filter desugared
+        March_eval.Eval.run_tests ~quiet:true ~filter:!filter ~capture_io desugared
     in
     total_tests  := !total_tests + n_tests;
     total_failed := !total_failed + n_failed;
