@@ -159,10 +159,7 @@ pub fn decode_utf8(b) do Ok(to_string(b)) end
 
 fn hex_digit(n) do
   if n < 10 then int_to_string(n)
-  else match char_from_int(87 + n) do  -- 87 = ord('a') - 10
-    | Some(c) -> c
-    | None -> "?"
-    end
+  else char_from_int(87 + n)  -- 87 = ord('a') - 10, returns String directly
 end
 
 fn byte_to_hex_str(n) do
