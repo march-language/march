@@ -1,0 +1,417 @@
+-- Tests for the Hamt stdlib module (Hash Array Mapped Trie)
+-- Run with: dune exec march -- test test/stdlib/test_hamt.march
+
+mod TestHamt do
+
+-- ── Hash / equality helpers ──────────────────────────────────────────────────
+
+-- Identity hash: each Int maps to itself.
+fn int_hash(k : Int) : Int do k end
+
+-- 2-arg equality function (called as eq(a, b) inside HAMT internals).
+fn int_eq(a : Int, b : Int) : Bool do
+  a == b
+end
+
+-- String identity hash via string_length (cheap, not great, but deterministic).
+fn str_hash(k : String) : Int do
+  string_length(k)
+end
+
+fn str_eq(a : String, b : String) : Bool do
+  a == b
+end
+
+-- Collision hash: everything hashes to 0, forcing HCollision nodes.
+fn zero_hash(k : Int) : Int do 0 end
+
+-- ── Curried fold accumulator helpers ─────────────────────────────────────────
+
+-- Count entries (ignores keys and values, increments by 1 each time).
+fn count_fn(acc : Int) do
+  fn k -> fn v -> acc + 1
+end
+
+-- Sum values (keys and values are both Int).
+fn sum_vals_fn(acc : Int) do
+  fn k -> fn v -> acc + v
+end
+
+-- Collect all (key, value) pairs into a list.
+fn collect_kv_fn(acc) do
+  fn k -> fn v -> Cons((k, v), acc)
+end
+
+-- ── empty ────────────────────────────────────────────────────────────────────
+
+describe "empty" do
+  test "empty trie has size 0" do
+    assert (Hamt.size(Hamt.empty()) == 0)
+  end
+
+  test "get on empty returns None" do
+    assert (Hamt.get(Hamt.empty(), 42, int_hash, int_eq) == None)
+  end
+
+  test "remove on empty returns empty" do
+    let e = Hamt.empty()
+    let after = Hamt.remove(e, 42, int_hash, int_eq)
+    assert (Hamt.size(after) == 0)
+  end
+
+  test "fold on empty returns initial accumulator" do
+    assert (Hamt.fold(99, Hamt.empty(), count_fn) == 99)
+  end
+end
+
+-- ── single element ───────────────────────────────────────────────────────────
+
+describe "single element" do
+  test "insert then size is 1" do
+    let node = Hamt.insert(Hamt.empty(), 7, 100, int_hash, int_eq)
+    assert (Hamt.size(node) == 1)
+  end
+
+  test "insert then get returns Some(value)" do
+    let node = Hamt.insert(Hamt.empty(), 7, 100, int_hash, int_eq)
+    assert (Hamt.get(node, 7, int_hash, int_eq) == Some(100))
+  end
+
+  test "get absent key from singleton returns None" do
+    let node = Hamt.insert(Hamt.empty(), 7, 100, int_hash, int_eq)
+    assert (Hamt.get(node, 99, int_hash, int_eq) == None)
+  end
+
+  test "remove existing key gives size 0" do
+    let node = Hamt.insert(Hamt.empty(), 7, 100, int_hash, int_eq)
+    let after = Hamt.remove(node, 7, int_hash, int_eq)
+    assert (Hamt.size(after) == 0)
+  end
+
+  test "remove existing key then get returns None" do
+    let node = Hamt.insert(Hamt.empty(), 7, 100, int_hash, int_eq)
+    let after = Hamt.remove(node, 7, int_hash, int_eq)
+    assert (Hamt.get(after, 7, int_hash, int_eq) == None)
+  end
+
+  test "remove absent key from singleton leaves it unchanged" do
+    let node = Hamt.insert(Hamt.empty(), 7, 100, int_hash, int_eq)
+    let after = Hamt.remove(node, 99, int_hash, int_eq)
+    assert (Hamt.size(after) == 1)
+    assert (Hamt.get(after, 7, int_hash, int_eq) == Some(100))
+  end
+
+  test "fold over singleton calls f once" do
+    let node = Hamt.insert(Hamt.empty(), 7, 100, int_hash, int_eq)
+    assert (Hamt.fold(0, node, count_fn) == 1)
+  end
+
+  test "fold over singleton accumulates value" do
+    let node = Hamt.insert(Hamt.empty(), 7, 100, int_hash, int_eq)
+    assert (Hamt.fold(0, node, sum_vals_fn) == 100)
+  end
+end
+
+-- ── multiple elements ─────────────────────────────────────────────────────────
+
+describe "multiple elements" do
+  test "three inserts give size 3" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 10, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 20, int_hash, int_eq)
+    let n3 = Hamt.insert(n2, 3, 30, int_hash, int_eq)
+    assert (Hamt.size(n3) == 3)
+  end
+
+  test "all inserted keys are retrievable" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 10, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 20, int_hash, int_eq)
+    let n3 = Hamt.insert(n2, 3, 30, int_hash, int_eq)
+    assert (Hamt.get(n3, 1, int_hash, int_eq) == Some(10))
+    assert (Hamt.get(n3, 2, int_hash, int_eq) == Some(20))
+    assert (Hamt.get(n3, 3, int_hash, int_eq) == Some(30))
+  end
+
+  test "absent key returns None among multiple entries" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 10, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 20, int_hash, int_eq)
+    assert (Hamt.get(n2, 99, int_hash, int_eq) == None)
+  end
+
+  test "overwrite existing key updates value" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 10, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 1, 999, int_hash, int_eq)
+    assert (Hamt.size(n2) == 1)
+    assert (Hamt.get(n2, 1, int_hash, int_eq) == Some(999))
+  end
+
+  test "overwrite does not change size" do
+    let n1 = Hamt.insert(Hamt.empty(), 5, 50, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 5, 55, int_hash, int_eq)
+    let n3 = Hamt.insert(n2, 6, 60, int_hash, int_eq)
+    let n4 = Hamt.insert(n3, 5, 500, int_hash, int_eq)
+    assert (Hamt.size(n4) == 2)
+    assert (Hamt.get(n4, 5, int_hash, int_eq) == Some(500))
+    assert (Hamt.get(n4, 6, int_hash, int_eq) == Some(60))
+  end
+
+  test "remove one of several keys" do
+    let n1 = Hamt.insert(Hamt.empty(), 10, 100, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 20, 200, int_hash, int_eq)
+    let n3 = Hamt.insert(n2, 30, 300, int_hash, int_eq)
+    let n4 = Hamt.remove(n3, 20, int_hash, int_eq)
+    assert (Hamt.size(n4) == 2)
+    assert (Hamt.get(n4, 10, int_hash, int_eq) == Some(100))
+    assert (Hamt.get(n4, 20, int_hash, int_eq) == None)
+    assert (Hamt.get(n4, 30, int_hash, int_eq) == Some(300))
+  end
+
+  test "remove nonexistent key leaves trie unchanged" do
+    let n1 = Hamt.insert(Hamt.empty(), 10, 100, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 20, 200, int_hash, int_eq)
+    let n3 = Hamt.remove(n2, 99, int_hash, int_eq)
+    assert (Hamt.size(n3) == 2)
+    assert (Hamt.get(n3, 10, int_hash, int_eq) == Some(100))
+    assert (Hamt.get(n3, 20, int_hash, int_eq) == Some(200))
+  end
+
+  test "remove all keys to empty" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 11, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 22, int_hash, int_eq)
+    let n3 = Hamt.remove(n2, 1, int_hash, int_eq)
+    let n4 = Hamt.remove(n3, 2, int_hash, int_eq)
+    assert (Hamt.size(n4) == 0)
+    assert (Hamt.get(n4, 1, int_hash, int_eq) == None)
+    assert (Hamt.get(n4, 2, int_hash, int_eq) == None)
+  end
+
+  test "fold counts all entries" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 10, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 20, int_hash, int_eq)
+    let n3 = Hamt.insert(n2, 3, 30, int_hash, int_eq)
+    assert (Hamt.fold(0, n3, count_fn) == 3)
+  end
+
+  test "fold sum matches expected total" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 10, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 20, int_hash, int_eq)
+    let n3 = Hamt.insert(n2, 3, 30, int_hash, int_eq)
+    assert (Hamt.fold(0, n3, sum_vals_fn) == 60)
+  end
+
+  test "fold count matches size" do
+    let n1 = Hamt.insert(Hamt.empty(), 10, 1, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 20, 2, int_hash, int_eq)
+    let n3 = Hamt.insert(n2, 30, 3, int_hash, int_eq)
+    let n4 = Hamt.insert(n3, 40, 4, int_hash, int_eq)
+    let n5 = Hamt.insert(n4, 50, 5, int_hash, int_eq)
+    let fold_count = Hamt.fold(0, n5, count_fn)
+    assert (fold_count == Hamt.size(n5))
+  end
+end
+
+-- ── size ─────────────────────────────────────────────────────────────────────
+
+describe "size" do
+  test "size of empty is 0" do
+    assert (Hamt.size(Hamt.empty()) == 0)
+  end
+
+  test "size grows with each unique insert" do
+    let n0 = Hamt.empty()
+    let n1 = Hamt.insert(n0, 1, 1, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 2, int_hash, int_eq)
+    let n3 = Hamt.insert(n2, 3, 3, int_hash, int_eq)
+    assert (Hamt.size(n1) == 1)
+    assert (Hamt.size(n2) == 2)
+    assert (Hamt.size(n3) == 3)
+  end
+
+  test "size unchanged when overwriting existing key" do
+    let n1 = Hamt.insert(Hamt.empty(), 7, 10, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 7, 20, int_hash, int_eq)
+    assert (Hamt.size(n2) == 1)
+  end
+
+  test "size decreases by 1 after remove" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 1, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 2, int_hash, int_eq)
+    let n3 = Hamt.remove(n2, 1, int_hash, int_eq)
+    assert (Hamt.size(n3) == 1)
+  end
+
+  test "size unchanged when removing absent key" do
+    let n1 = Hamt.insert(Hamt.empty(), 5, 50, int_hash, int_eq)
+    let n2 = Hamt.remove(n1, 99, int_hash, int_eq)
+    assert (Hamt.size(n2) == 1)
+  end
+end
+
+-- ── hash collisions ──────────────────────────────────────────────────────────
+--
+-- zero_hash maps all keys to hash 0, forcing HCollision nodes.
+-- This exercises the collision bucket code paths.
+
+describe "hash collisions" do
+  test "two colliding keys both retrievable" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 100, zero_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 200, zero_hash, int_eq)
+    assert (Hamt.get(n2, 1, zero_hash, int_eq) == Some(100))
+    assert (Hamt.get(n2, 2, zero_hash, int_eq) == Some(200))
+  end
+
+  test "three colliding keys all retrievable" do
+    let n1 = Hamt.insert(Hamt.empty(), 10, 1, zero_hash, int_eq)
+    let n2 = Hamt.insert(n1, 20, 2, zero_hash, int_eq)
+    let n3 = Hamt.insert(n2, 30, 3, zero_hash, int_eq)
+    assert (Hamt.get(n3, 10, zero_hash, int_eq) == Some(1))
+    assert (Hamt.get(n3, 20, zero_hash, int_eq) == Some(2))
+    assert (Hamt.get(n3, 30, zero_hash, int_eq) == Some(3))
+  end
+
+  test "size correct with colliding keys" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 10, zero_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 20, zero_hash, int_eq)
+    let n3 = Hamt.insert(n2, 3, 30, zero_hash, int_eq)
+    assert (Hamt.size(n3) == 3)
+  end
+
+  test "overwrite in collision bucket updates value" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 10, zero_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 20, zero_hash, int_eq)
+    let n3 = Hamt.insert(n2, 1, 999, zero_hash, int_eq)
+    assert (Hamt.size(n3) == 2)
+    assert (Hamt.get(n3, 1, zero_hash, int_eq) == Some(999))
+    assert (Hamt.get(n3, 2, zero_hash, int_eq) == Some(20))
+  end
+
+  test "remove one colliding key leaves others" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 10, zero_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 20, zero_hash, int_eq)
+    let n3 = Hamt.insert(n2, 3, 30, zero_hash, int_eq)
+    let n4 = Hamt.remove(n3, 2, zero_hash, int_eq)
+    assert (Hamt.size(n4) == 2)
+    assert (Hamt.get(n4, 1, zero_hash, int_eq) == Some(10))
+    assert (Hamt.get(n4, 2, zero_hash, int_eq) == None)
+    assert (Hamt.get(n4, 3, zero_hash, int_eq) == Some(30))
+  end
+
+  test "remove collision to single entry collapses to leaf" do
+    -- After removing one of two colliding keys, the node should collapse
+    -- to a single HLeaf.  size and get must still work correctly.
+    let n1 = Hamt.insert(Hamt.empty(), 1, 10, zero_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 20, zero_hash, int_eq)
+    let n3 = Hamt.remove(n2, 1, zero_hash, int_eq)
+    assert (Hamt.size(n3) == 1)
+    assert (Hamt.get(n3, 2, zero_hash, int_eq) == Some(20))
+    assert (Hamt.get(n3, 1, zero_hash, int_eq) == None)
+  end
+
+  test "remove both colliding keys gives empty" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 10, zero_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 20, zero_hash, int_eq)
+    let n3 = Hamt.remove(n2, 1, zero_hash, int_eq)
+    let n4 = Hamt.remove(n3, 2, zero_hash, int_eq)
+    assert (Hamt.size(n4) == 0)
+    assert (Hamt.get(n4, 1, zero_hash, int_eq) == None)
+    assert (Hamt.get(n4, 2, zero_hash, int_eq) == None)
+  end
+
+  test "fold over collision bucket counts correctly" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 10, zero_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 20, zero_hash, int_eq)
+    let n3 = Hamt.insert(n2, 3, 30, zero_hash, int_eq)
+    assert (Hamt.fold(0, n3, count_fn) == 3)
+  end
+
+  test "fold sum over collision bucket" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 10, zero_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 20, zero_hash, int_eq)
+    let n3 = Hamt.insert(n2, 3, 30, zero_hash, int_eq)
+    assert (Hamt.fold(0, n3, sum_vals_fn) == 60)
+  end
+
+  test "absent key with colliding hash returns None" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 10, zero_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 20, zero_hash, int_eq)
+    assert (Hamt.get(n2, 99, zero_hash, int_eq) == None)
+  end
+end
+
+-- ── larger trie ───────────────────────────────────────────────────────────────
+
+describe "larger trie" do
+  test "ten entries all retrievable" do
+    let n0 = Hamt.empty()
+    let n1 = Hamt.insert(n0, 1, 101, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 102, int_hash, int_eq)
+    let n3 = Hamt.insert(n2, 3, 103, int_hash, int_eq)
+    let n4 = Hamt.insert(n3, 4, 104, int_hash, int_eq)
+    let n5 = Hamt.insert(n4, 5, 105, int_hash, int_eq)
+    let n6 = Hamt.insert(n5, 6, 106, int_hash, int_eq)
+    let n7 = Hamt.insert(n6, 7, 107, int_hash, int_eq)
+    let n8 = Hamt.insert(n7, 8, 108, int_hash, int_eq)
+    let n9 = Hamt.insert(n8, 9, 109, int_hash, int_eq)
+    let n10 = Hamt.insert(n9, 10, 110, int_hash, int_eq)
+    assert (Hamt.size(n10) == 10)
+    assert (Hamt.get(n10, 1, int_hash, int_eq) == Some(101))
+    assert (Hamt.get(n10, 5, int_hash, int_eq) == Some(105))
+    assert (Hamt.get(n10, 10, int_hash, int_eq) == Some(110))
+    assert (Hamt.get(n10, 99, int_hash, int_eq) == None)
+  end
+
+  test "fold count equals size for large trie" do
+    let n1 = Hamt.insert(Hamt.empty(), 100, 1, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 200, 2, int_hash, int_eq)
+    let n3 = Hamt.insert(n2, 300, 3, int_hash, int_eq)
+    let n4 = Hamt.insert(n3, 400, 4, int_hash, int_eq)
+    let n5 = Hamt.insert(n4, 500, 5, int_hash, int_eq)
+    let n6 = Hamt.insert(n5, 600, 6, int_hash, int_eq)
+    let n7 = Hamt.insert(n6, 700, 7, int_hash, int_eq)
+    let fold_count = Hamt.fold(0, n7, count_fn)
+    assert (fold_count == Hamt.size(n7))
+    assert (Hamt.size(n7) == 7)
+  end
+
+  test "insert then remove brings size back" do
+    let n1 = Hamt.insert(Hamt.empty(), 1, 10, int_hash, int_eq)
+    let n2 = Hamt.insert(n1, 2, 20, int_hash, int_eq)
+    let n3 = Hamt.insert(n2, 3, 30, int_hash, int_eq)
+    let n4 = Hamt.insert(n3, 4, 40, int_hash, int_eq)
+    let n5 = Hamt.remove(n4, 2, int_hash, int_eq)
+    let n6 = Hamt.remove(n5, 4, int_hash, int_eq)
+    assert (Hamt.size(n6) == 2)
+    assert (Hamt.get(n6, 1, int_hash, int_eq) == Some(10))
+    assert (Hamt.get(n6, 3, int_hash, int_eq) == Some(30))
+    assert (Hamt.get(n6, 2, int_hash, int_eq) == None)
+    assert (Hamt.get(n6, 4, int_hash, int_eq) == None)
+  end
+end
+
+-- ── string keys ──────────────────────────────────────────────────────────────
+
+describe "string keys" do
+  test "insert and get string-keyed entries" do
+    let n1 = Hamt.insert(Hamt.empty(), "a", 1, str_hash, str_eq)
+    let n2 = Hamt.insert(n1, "bb", 2, str_hash, str_eq)
+    let n3 = Hamt.insert(n2, "ccc", 3, str_hash, str_eq)
+    assert (Hamt.get(n3, "a", str_hash, str_eq) == Some(1))
+    assert (Hamt.get(n3, "bb", str_hash, str_eq) == Some(2))
+    assert (Hamt.get(n3, "ccc", str_hash, str_eq) == Some(3))
+    assert (Hamt.get(n3, "d", str_hash, str_eq) == None)
+  end
+
+  test "string key size" do
+    let n1 = Hamt.insert(Hamt.empty(), "hello", 1, str_hash, str_eq)
+    let n2 = Hamt.insert(n1, "world", 2, str_hash, str_eq)
+    assert (Hamt.size(n2) == 2)
+  end
+
+  test "overwrite string key" do
+    let n1 = Hamt.insert(Hamt.empty(), "key", 1, str_hash, str_eq)
+    let n2 = Hamt.insert(n1, "key", 42, str_hash, str_eq)
+    assert (Hamt.size(n2) == 1)
+    assert (Hamt.get(n2, "key", str_hash, str_eq) == Some(42))
+  end
+end
+
+end -- mod TestHamt

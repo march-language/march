@@ -1,0 +1,337 @@
+-- Tests for the IOList stdlib module
+-- Run with: dune exec march -- test test/stdlib/test_iolist.march
+
+mod TestIOList do
+
+describe "empty" do
+  test "empty is_empty returns true" do
+    assert IOList.is_empty(IOList.empty())
+  end
+
+  test "empty to_string returns empty string" do
+    assert (IOList.to_string(IOList.empty()) == "")
+  end
+
+  test "empty byte_size returns 0" do
+    assert (IOList.byte_size(IOList.empty()) == 0)
+  end
+end
+
+describe "from_string" do
+  test "empty string is_empty returns true" do
+    assert IOList.is_empty(IOList.from_string(""))
+  end
+
+  test "empty string byte_size is 0" do
+    assert (IOList.byte_size(IOList.from_string("")) == 0)
+  end
+
+  test "empty string to_string is empty string" do
+    assert (IOList.to_string(IOList.from_string("")) == "")
+  end
+
+  test "non-empty string to_string roundtrips" do
+    assert (IOList.to_string(IOList.from_string("hello")) == "hello")
+  end
+
+  test "non-empty string byte_size matches length" do
+    assert (IOList.byte_size(IOList.from_string("hello")) == 5)
+  end
+
+  test "non-empty string is not empty" do
+    assert !IOList.is_empty(IOList.from_string("hello"))
+  end
+
+  test "single char string roundtrips" do
+    assert (IOList.to_string(IOList.from_string("x")) == "x")
+  end
+
+  test "single char byte_size is 1" do
+    assert (IOList.byte_size(IOList.from_string("x")) == 1)
+  end
+end
+
+describe "append" do
+  test "append two non-empty strings" do
+    let a = IOList.from_string("foo")
+    let b = IOList.from_string("bar")
+    assert (IOList.to_string(IOList.append(a, b)) == "foobar")
+  end
+
+  test "append empty on left returns right content" do
+    let b = IOList.from_string("bar")
+    assert (IOList.to_string(IOList.append(IOList.empty(), b)) == "bar")
+  end
+
+  test "append empty on right returns left content" do
+    let a = IOList.from_string("foo")
+    assert (IOList.to_string(IOList.append(a, IOList.empty())) == "foo")
+  end
+
+  test "append two empties is empty" do
+    assert IOList.is_empty(IOList.append(IOList.empty(), IOList.empty()))
+  end
+
+  test "append preserves order" do
+    let a = IOList.from_string("abc")
+    let b = IOList.from_string("def")
+    assert (IOList.to_string(IOList.append(a, b)) == "abcdef")
+  end
+
+  test "append byte_size is sum of parts" do
+    let a = IOList.from_string("foo")
+    let b = IOList.from_string("bar")
+    assert (IOList.byte_size(IOList.append(a, b)) == 6)
+  end
+
+  test "append with empty-string from_string on left" do
+    let a = IOList.from_string("")
+    let b = IOList.from_string("bar")
+    assert (IOList.to_string(IOList.append(a, b)) == "bar")
+  end
+
+  test "append with empty-string from_string on right" do
+    let a = IOList.from_string("foo")
+    let b = IOList.from_string("")
+    assert (IOList.to_string(IOList.append(a, b)) == "foo")
+  end
+
+  test "nested appends preserve order" do
+    let a = IOList.from_string("a")
+    let b = IOList.from_string("b")
+    let c = IOList.from_string("c")
+    let ab = IOList.append(a, b)
+    let abc = IOList.append(ab, c)
+    assert (IOList.to_string(abc) == "abc")
+  end
+
+  test "deeply nested appends" do
+    let a = IOList.from_string("a")
+    let b = IOList.from_string("b")
+    let c = IOList.from_string("c")
+    let d = IOList.from_string("d")
+    let ab = IOList.append(a, b)
+    let cd = IOList.append(c, d)
+    let abcd = IOList.append(ab, cd)
+    assert (IOList.to_string(abcd) == "abcd")
+  end
+
+  test "append result is not empty when both non-empty" do
+    let a = IOList.from_string("x")
+    let b = IOList.from_string("y")
+    assert !IOList.is_empty(IOList.append(a, b))
+  end
+
+  test "append empty with non-empty is not empty" do
+    let b = IOList.from_string("b")
+    assert !IOList.is_empty(IOList.append(IOList.empty(), b))
+  end
+end
+
+describe "prepend" do
+  test "prepend string to IOList" do
+    let iol = IOList.from_string("world!")
+    assert (IOList.to_string(IOList.prepend("Hello, ", iol)) == "Hello, world!")
+  end
+
+  test "prepend empty string is identity" do
+    let iol = IOList.from_string("hello")
+    assert (IOList.to_string(IOList.prepend("", iol)) == "hello")
+  end
+
+  test "prepend to empty IOList" do
+    assert (IOList.to_string(IOList.prepend("hi", IOList.empty())) == "hi")
+  end
+
+  test "prepend empty string to empty IOList is empty" do
+    assert IOList.is_empty(IOList.prepend("", IOList.empty()))
+  end
+
+  test "prepend byte_size correct" do
+    let iol = IOList.from_string("world")
+    assert (IOList.byte_size(IOList.prepend("hello", iol)) == 10)
+  end
+
+  test "prepend result is not empty when prefix non-empty" do
+    assert !IOList.is_empty(IOList.prepend("x", IOList.empty()))
+  end
+end
+
+describe "push" do
+  test "push string to IOList" do
+    let iol = IOList.from_string("Hello")
+    assert (IOList.to_string(IOList.push(iol, ", world!")) == "Hello, world!")
+  end
+
+  test "push empty string is identity" do
+    let iol = IOList.from_string("hello")
+    assert (IOList.to_string(IOList.push(iol, "")) == "hello")
+  end
+
+  test "push to empty IOList" do
+    assert (IOList.to_string(IOList.push(IOList.empty(), "hi")) == "hi")
+  end
+
+  test "push empty string to empty IOList is empty" do
+    assert IOList.is_empty(IOList.push(IOList.empty(), ""))
+  end
+
+  test "push byte_size correct" do
+    let iol = IOList.from_string("hello")
+    assert (IOList.byte_size(IOList.push(iol, "world")) == 10)
+  end
+
+  test "chained pushes preserve order" do
+    let iol0 = IOList.empty()
+    let iol1 = IOList.push(iol0, "a")
+    let iol2 = IOList.push(iol1, "b")
+    let iol3 = IOList.push(iol2, "c")
+    assert (IOList.to_string(iol3) == "abc")
+  end
+
+  test "push result is not empty when suffix non-empty" do
+    assert !IOList.is_empty(IOList.push(IOList.empty(), "x"))
+  end
+end
+
+describe "from_strings" do
+  test "empty list returns empty IOList" do
+    let empty : List(String) = Nil
+    assert IOList.is_empty(IOList.from_strings(empty))
+  end
+
+  test "empty list to_string is empty string" do
+    let empty : List(String) = Nil
+    assert (IOList.to_string(IOList.from_strings(empty)) == "")
+  end
+
+  test "empty list byte_size is 0" do
+    let empty : List(String) = Nil
+    assert (IOList.byte_size(IOList.from_strings(empty)) == 0)
+  end
+
+  test "single string roundtrips" do
+    assert (IOList.to_string(IOList.from_strings(["hello"])) == "hello")
+  end
+
+  test "multiple strings concatenated in order" do
+    assert (IOList.to_string(IOList.from_strings(["a", "b", "c"])) == "abc")
+  end
+
+  test "multiple strings byte_size is sum" do
+    assert (IOList.byte_size(IOList.from_strings(["foo", "bar"])) == 6)
+  end
+
+  test "from_strings with embedded empty strings" do
+    assert (IOList.to_string(IOList.from_strings(["a", "", "b"])) == "ab")
+  end
+
+  test "from_strings with only empty strings is empty" do
+    assert IOList.is_empty(IOList.from_strings(["", "", ""]))
+  end
+
+  test "from_strings preserves order" do
+    assert (IOList.to_string(IOList.from_strings(["hello", " ", "world"])) == "hello world")
+  end
+
+  test "many segments" do
+    assert (IOList.to_string(IOList.from_strings(["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"])) == "abcdefghij")
+  end
+end
+
+describe "to_string" do
+  test "to_string of empty is empty string" do
+    assert (IOList.to_string(IOList.empty()) == "")
+  end
+
+  test "to_string flattens nested structure correctly" do
+    let a = IOList.from_string("x")
+    let b = IOList.from_string("y")
+    let c = IOList.from_string("z")
+    let nested = IOList.append(IOList.append(a, b), c)
+    assert (IOList.to_string(nested) == "xyz")
+  end
+
+  test "to_string of from_strings many parts" do
+    let parts = IOList.from_strings(["a", "b", "c", "d", "e"])
+    assert (IOList.to_string(parts) == "abcde")
+  end
+
+  test "to_string result length matches byte_size" do
+    let iol = IOList.from_strings(["hello", " ", "world"])
+    assert (string_length(IOList.to_string(iol)) == IOList.byte_size(iol))
+  end
+end
+
+describe "byte_size" do
+  test "empty has byte_size 0" do
+    assert (IOList.byte_size(IOList.empty()) == 0)
+  end
+
+  test "single string byte_size matches string length" do
+    assert (IOList.byte_size(IOList.from_string("hello")) == 5)
+  end
+
+  test "byte_size of nested structure is total" do
+    let a = IOList.from_string("abc")
+    let b = IOList.from_string("de")
+    assert (IOList.byte_size(IOList.append(a, b)) == 5)
+  end
+
+  test "byte_size equals string_length of to_string" do
+    let iol = IOList.from_strings(["hello", " ", "world"])
+    assert (IOList.byte_size(iol) == string_length(IOList.to_string(iol)))
+  end
+
+  test "byte_size of prepend is sum of lengths" do
+    let iol = IOList.from_string("world")
+    assert (IOList.byte_size(IOList.prepend("hello", iol)) == 10)
+  end
+end
+
+describe "is_empty" do
+  test "empty() is empty" do
+    assert IOList.is_empty(IOList.empty())
+  end
+
+  test "from_string with empty string is empty" do
+    assert IOList.is_empty(IOList.from_string(""))
+  end
+
+  test "from_string with non-empty is not empty" do
+    assert !IOList.is_empty(IOList.from_string("x"))
+  end
+
+  test "append of two non-empties is not empty" do
+    let a = IOList.from_string("a")
+    let b = IOList.from_string("b")
+    assert !IOList.is_empty(IOList.append(a, b))
+  end
+
+  test "append of empty and empty is empty" do
+    assert IOList.is_empty(IOList.append(IOList.empty(), IOList.empty()))
+  end
+
+  test "from_strings empty list is empty" do
+    let empty : List(String) = Nil
+    assert IOList.is_empty(IOList.from_strings(empty))
+  end
+
+  test "from_strings with only empty strings is empty" do
+    assert IOList.is_empty(IOList.from_strings(["", ""]))
+  end
+
+  test "from_strings with non-empty strings is not empty" do
+    assert !IOList.is_empty(IOList.from_strings(["hello"]))
+  end
+
+  test "prepend empty to empty is empty" do
+    assert IOList.is_empty(IOList.prepend("", IOList.empty()))
+  end
+
+  test "push empty to empty is empty" do
+    assert IOList.is_empty(IOList.push(IOList.empty(), ""))
+  end
+end
+
+end
