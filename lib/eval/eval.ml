@@ -5574,3 +5574,144 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?
       n_failed (if n_failed = 1 then "" else "s")
   end;
   (total, n_failed, List.rev !failures)
+
+(* ------------------------------------------------------------------ *)
+(* Doctest runner                                                      *)
+(* ------------------------------------------------------------------ *)
+
+(** Run all doctests extracted from [fn_doc] fields in the module.
+
+    [parse_expr] converts a source string to an AST [expr].  It is injected
+    by the caller so that [march_eval] does not need to depend on [march_parser].
+
+    Returns [(total, n_failed, failures)] with the same contract as [run_tests].
+    Output format mirrors [run_tests]:
+      Verbose   — "  ✓ doctest Option.is_some (1)"
+      Dot mode  — one '.' per pass, 'F' per fail, 'E' per error
+      Quiet     — no output; caller handles reporting. *)
+let run_doctests ?(verbose=false) ?(quiet=false) ?(filter="")
+    ~(parse_expr : string -> expr)
+    (m : module_) : int * int * (string * string) list =
+  (* Build the module environment *)
+  let env = eval_module_env m in
+  (* Collect (qualified_fn_name, doc_string) pairs, walking nested mods *)
+  let rec collect_docs prefix decls =
+    List.concat_map (fun decl ->
+      match decl with
+      | DFn (def, _) ->
+        (match def.fn_doc with
+         | None -> []
+         | Some doc ->
+           let qname = if prefix = "" then def.fn_name.txt
+                       else prefix ^ "." ^ def.fn_name.txt in
+           [(qname, doc)])
+      | DMod (mname, _, inner, _) ->
+        let new_prefix = if prefix = "" then mname.txt
+                         else prefix ^ "." ^ mname.txt in
+        collect_docs new_prefix inner
+      | _ -> [])
+    decls
+  in
+  let fn_docs = collect_docs "" m.mod_decls in
+  (* Expand docs into (test_name, example) list *)
+  let tests : (string * March_doctest.Doctest.example) list =
+    List.concat_map (fun (fname, doc) ->
+      let examples = March_doctest.Doctest.extract doc in
+      List.mapi (fun i ex ->
+        let name = Printf.sprintf "doctest %s (%d)" fname (i + 1) in
+        (name, ex)
+      ) examples
+    ) fn_docs
+  in
+  (* Filter *)
+  let tests =
+    if filter = "" then tests
+    else List.filter (fun (name, _) ->
+           let lname = String.lowercase_ascii name in
+           let lpat  = String.lowercase_ascii filter in
+           let n = String.length lname and p = String.length lpat in
+           let rec check i =
+             if i + p > n then false
+             else if String.sub lname i p = lpat then true
+             else check (i + 1)
+           in check 0
+         ) tests
+  in
+  let total    = List.length tests in
+  let failures = ref [] in
+  List.iter (fun (name, ex) ->
+    let result =
+      (try
+         let expr   = parse_expr ex.March_doctest.Doctest.ex_source in
+         let v      = eval_expr env expr in
+         let actual = value_to_string v in
+         (match ex.March_doctest.Doctest.ex_expected with
+          | March_doctest.Doctest.ExpectOutput expected ->
+            if actual = expected then TestPass
+            else TestFail (Printf.sprintf "expected: %s\n  got:      %s" expected actual)
+          | March_doctest.Doctest.ExpectPanic expected ->
+            TestFail (Printf.sprintf "expected panic %S\n  but got: %s" expected actual)
+          | March_doctest.Doctest.ExpectNothing ->
+            TestPass)
+       with
+       | Eval_error msg ->
+         (match ex.March_doctest.Doctest.ex_expected with
+          | March_doctest.Doctest.ExpectPanic expected ->
+            (* Panic messages are raised as "panic: <msg>"; strip the prefix *)
+            let panic_tag = "panic: " in
+            let actual_msg =
+              if String.length msg > String.length panic_tag &&
+                 String.sub msg 0 (String.length panic_tag) = panic_tag
+              then String.sub msg (String.length panic_tag)
+                     (String.length msg - String.length panic_tag)
+              else msg
+            in
+            if actual_msg = expected then TestPass
+            else TestFail (Printf.sprintf "expected panic %S\n  got panic: %s" expected actual_msg)
+          | _ ->
+            TestError msg)
+       | exn ->
+         TestError (Printexc.to_string exn))
+    in
+    if quiet then begin
+      match result with
+      | TestPass -> ()
+      | TestFail msg -> failures := (name, msg) :: !failures
+      | TestError msg -> failures := (name, "error: " ^ msg) :: !failures
+    end else if verbose then begin
+      match result with
+      | TestPass ->
+        Printf.printf "  ✓ %s\n%!" name
+      | TestFail msg ->
+        Printf.printf "  ✗ %s\n    %s\n%!" name
+          (String.concat "\n    " (String.split_on_char '\n' msg));
+        failures := (name, msg) :: !failures
+      | TestError msg ->
+        Printf.printf "  ✗ %s (error: %s)\n%!" name msg;
+        failures := (name, "error: " ^ msg) :: !failures
+    end else begin
+      match result with
+      | TestPass  -> Printf.printf "\027[32m.\027[0m%!"
+      | TestFail msg ->
+        Printf.printf "\027[31mF\027[0m%!";
+        failures := (name, msg) :: !failures
+      | TestError msg ->
+        Printf.printf "\027[31mE\027[0m%!";
+        failures := (name, "error: " ^ msg) :: !failures
+    end
+  ) tests;
+  let n_failed = List.length !failures in
+  if not quiet then begin
+    if not verbose then Printf.printf "\n%!";
+    if not verbose && !failures <> [] then begin
+      Printf.printf "\n%d failure(s):\n\n" (List.length !failures);
+      List.iter (fun (name, msg) ->
+        Printf.printf "FAIL: \"%s\"\n  %s\n\n" name
+          (String.concat "\n  " (String.split_on_char '\n' msg))
+      ) (List.rev !failures)
+    end;
+    Printf.printf "Finished: %d doctest%s, %d failure%s\n%!"
+      total (if total = 1 then "" else "s")
+      n_failed (if n_failed = 1 then "" else "s")
+  end;
+  (total, n_failed, List.rev !failures)

@@ -5,7 +5,15 @@
 
 mod Option do
 
-doc "Returns true if the option contains a value."
+doc """
+Returns true if the option contains a value.
+
+    march> Option.is_some(Some(42))
+    true
+
+    march> Option.is_some(None)
+    false
+"""
 pub fn is_some(opt : Option(a)) : Bool do
   match opt do
   | Some(_) -> true
@@ -13,7 +21,15 @@ pub fn is_some(opt : Option(a)) : Bool do
   end
 end
 
-doc "Returns true if the option is None."
+doc """
+Returns true if the option is None.
+
+    march> Option.is_none(None)
+    true
+
+    march> Option.is_none(Some(0))
+    false
+"""
 pub fn is_none(opt : Option(a)) : Bool do
   match opt do
   | None    -> true
@@ -32,7 +48,15 @@ pub fn expect(opt : Option(a), msg : String) : a do
   end
 end
 
-doc "Extracts the value from Some(x), panicking if None."
+doc """
+Extracts the value from Some(x), panicking if None.
+
+    march> Option.unwrap(Some(42))
+    42
+
+    march> Option.unwrap(None)
+    ** panic: Option.unwrap called on None
+"""
 pub fn unwrap(opt : Option(a)) : a do
   match opt do
   | Some(x) -> x
@@ -40,7 +64,15 @@ pub fn unwrap(opt : Option(a)) : a do
   end
 end
 
-doc "Returns the contained value, or `default` if None."
+doc """
+Returns the contained value, or `default` if None.
+
+    march> Option.unwrap_or(Some(7), 0)
+    7
+
+    march> Option.unwrap_or(None, 99)
+    99
+"""
 pub fn unwrap_or(opt : Option(a), default : a) : a do
   match opt do
   | Some(x) -> x

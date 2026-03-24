@@ -357,6 +357,30 @@ let run_test_cmd args =
       failed_files := filename :: !failed_files;
       if not !verbose then
         all_file_failures := (filename, file_failures) :: !all_file_failures
+    end;
+    (* Run doctests extracted from fn_doc fields *)
+    let parse_expr src =
+      let lexbuf = Lexing.from_string src in
+      try March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf
+      with
+      | March_errors.Errors.ParseError (msg, _, _) ->
+        failwith ("doctest parse error: " ^ msg)
+      | March_parser.Parser.Error ->
+        failwith ("doctest parse error in: " ^ src)
+    in
+    let (dt_total, dt_failed, dt_failures) =
+      if !verbose then
+        March_eval.Eval.run_doctests ~verbose:true ~filter:!filter ~parse_expr desugared
+      else
+        March_eval.Eval.run_doctests ~quiet:true ~filter:!filter ~parse_expr desugared
+    in
+    total_tests  := !total_tests + dt_total;
+    total_failed := !total_failed + dt_failed;
+    if dt_failed > 0 then begin
+      if not (List.mem filename !failed_files) then
+        failed_files := filename :: !failed_files;
+      if not !verbose then
+        all_file_failures := (filename, dt_failures) :: !all_file_failures
     end
   ) files;
   (* End the dot line after all files *)
