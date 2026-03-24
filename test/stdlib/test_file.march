@@ -1,150 +1,224 @@
 -- test/stdlib/test_file.march
--- Comprehensive tests for the File module.
--- Creates files in /tmp; cleans up on success.
+-- Tests for the File stdlib module.
+-- Creates and removes files in /tmp; each test uses a unique path.
+-- Run with: dune exec march -- test test/stdlib/test_file.march
 
 mod TestFile do
 
-fn do_write(path, content) do
+-- Local mirrors of File private types.
+type FileKind = RegularFile | Directory | Symlink | OtherKind
+type FileStat = FileStat(Int, FileKind, Int, Int)
+
+fn write_ok(path, content) do
   match File.write(path, content) do
-  | Err(e) -> panic("File.write failed for " ++ path ++ ": " ++ to_string(e))
-  | Ok(_) -> :ok
+  | Ok(_)  -> ()
+  | Err(e) -> panic("File.write failed: " ++ to_string(e))
   end
 end
 
-fn do_read(path) do
+fn read_ok(path) do
   match File.read(path) do
-  | Err(e) -> panic("File.read failed for " ++ path ++ ": " ++ to_string(e))
-  | Ok(s) -> s
+  | Ok(s)  -> s
+  | Err(e) -> panic("File.read failed: " ++ to_string(e))
   end
 end
 
-fn main() do
-  let base = "/tmp/march_test_file"
-
-  -- ---- File.exists false for nonexistent ----
-  assert_true("exists false", not File.exists(base ++ "_noexist"))
-
-  -- ---- File.write then exists ----
-  do_write(base ++ "_a", "hello world")
-  assert_true("exists after write", File.exists(base ++ "_a"))
-
-  -- ---- File.read ----
-  assert_eq("read content", do_read(base ++ "_a"), "hello world")
-
-  -- ---- File.read on nonexistent returns Err ----
-  match File.read(base ++ "_noexist") do
-  | Err(_) -> :ok
-  | Ok(_) -> panic("read nonexistent should return Err")
+describe "File.exists" do
+  test "returns false for nonexistent path" do
+    assert (not (File.exists("/tmp/march_tf_noexist_00")))
   end
 
-  -- ---- File.read_lines ----
-  do_write(base ++ "_lines", "line1\nline2\nline3")
-  match File.read_lines(base ++ "_lines") do
-  | Err(e) -> panic("read_lines failed: " ++ to_string(e))
-  | Ok(lines) ->
-    assert_eq("read_lines count", List.length(lines), 3)
-    assert_eq("read_lines[0]", List.nth(lines, 0), "line1")
-    assert_eq("read_lines[1]", List.nth(lines, 1), "line2")
-    assert_eq("read_lines[2]", List.nth(lines, 2), "line3")
+  test "returns true after write" do
+    let path = "/tmp/march_tf_exists_01"
+    write_ok(path, "hello")
+    assert (File.exists(path))
+    let _ = File.delete(path)
   end
 
-  -- ---- File.read_lines trailing newline stripped ----
-  do_write(base ++ "_trail", "a\nb\n")
-  match File.read_lines(base ++ "_trail") do
-  | Err(e) -> panic("read_lines trailing failed: " ++ to_string(e))
-  | Ok(lines) ->
-    assert_eq("trailing newline stripped", List.length(lines), 2)
+  test "returns false for file path when checking dir" do
+    let path = "/tmp/march_tf_exists_02"
+    write_ok(path, "data")
+    assert (not (Dir.exists(path)))
+    let _ = File.delete(path)
+  end
+end
+
+describe "File.write and File.read" do
+  test "read returns written content" do
+    let path = "/tmp/march_tf_rw_03"
+    write_ok(path, "hello world")
+    assert (read_ok(path) == "hello world")
+    let _ = File.delete(path)
   end
 
-  -- ---- File.append ----
-  do_write(base ++ "_app", "first")
-  match File.append(base ++ "_app", " second") do
-  | Err(e) -> panic("append failed: " ++ to_string(e))
-  | Ok(_) -> :ok
-  end
-  assert_eq("append content", do_read(base ++ "_app"), "first second")
-
-  -- ---- File.copy ----
-  match File.copy(base ++ "_a", base ++ "_copy") do
-  | Err(e) -> panic("copy failed: " ++ to_string(e))
-  | Ok(_) -> :ok
-  end
-  assert_true("copy exists", File.exists(base ++ "_copy"))
-  assert_eq("copy content matches", do_read(base ++ "_copy"), "hello world")
-
-  -- ---- File.rename ----
-  match File.rename(base ++ "_copy", base ++ "_renamed") do
-  | Err(e) -> panic("rename failed: " ++ to_string(e))
-  | Ok(_) -> :ok
-  end
-  assert_true("renamed exists", File.exists(base ++ "_renamed"))
-  assert_true("old name gone after rename", not File.exists(base ++ "_copy"))
-
-  -- ---- File.stat ----
-  match File.stat(base ++ "_a") do
-  | Err(e) -> panic("stat failed: " ++ to_string(e))
-  | Ok(FileStat(size, kind, _mtime, _atime)) ->
-    assert_eq("stat size", size, 11)
-    assert_eq("stat kind regular", kind, RegularFile)
+  test "read on nonexistent returns Err" do
+    match File.read("/tmp/march_tf_rw_noexist_04") do
+    | Err(_) -> ()
+    | Ok(_)  -> assert false
+    end
   end
 
-  -- ---- File.stat on nonexistent ----
-  match File.stat(base ++ "_noexist") do
-  | Err(_) -> :ok
-  | Ok(_) -> panic("stat nonexistent should return Err")
+  test "write empty string" do
+    let path = "/tmp/march_tf_rw_empty_05"
+    write_ok(path, "")
+    assert (read_ok(path) == "")
+    let _ = File.delete(path)
+  end
+end
+
+describe "File.read_lines" do
+  test "splits content into lines" do
+    let path = "/tmp/march_tf_lines_06"
+    write_ok(path, "line1\nline2\nline3")
+    let lines = match File.read_lines(path) do
+      | Ok(ls) -> ls
+      | Err(_) -> panic("File.read_lines failed")
+    end
+    assert (List.length(lines) == 3)
+    assert (List.nth(lines, 0) == "line1")
+    assert (List.nth(lines, 1) == "line2")
+    assert (List.nth(lines, 2) == "line3")
+    let _ = File.delete(path)
   end
 
-  -- ---- File.write empty ----
-  do_write(base ++ "_empty", "")
-  assert_eq("empty file content", do_read(base ++ "_empty"), "")
-  match File.read_lines(base ++ "_empty") do
-  | Err(e) -> panic("read_lines empty failed: " ++ to_string(e))
-  | Ok(lines) -> assert_eq("empty read_lines", List.length(lines), 0)
+  test "trailing newline is stripped" do
+    let path = "/tmp/march_tf_lines_trail_07"
+    write_ok(path, "a\nb\n")
+    let lines = match File.read_lines(path) do
+      | Ok(ls) -> ls
+      | Err(_) -> panic("File.read_lines trailing failed")
+    end
+    assert (List.length(lines) == 2)
+    let _ = File.delete(path)
   end
 
-  -- ---- File.with_lines streaming ----
-  match File.with_lines(base ++ "_lines", fn seq ->
-    Seq.to_list(seq)
-  ) do
-  | Err(e) -> panic("with_lines failed: " ++ to_string(e))
-  | Ok(lines) ->
-    assert_eq("with_lines count", List.length(lines), 3)
-    assert_eq("with_lines[0]", List.nth(lines, 0), "line1")
+  test "empty file returns empty list" do
+    let path = "/tmp/march_tf_lines_empty_08"
+    write_ok(path, "")
+    let lines = match File.read_lines(path) do
+      | Ok(ls) -> ls
+      | Err(_) -> panic("File.read_lines empty failed")
+    end
+    assert (List.length(lines) == 0)
+    let _ = File.delete(path)
+  end
+end
+
+describe "File.append" do
+  test "appends to existing content" do
+    let path = "/tmp/march_tf_append_09"
+    write_ok(path, "first")
+    match File.append(path, " second") do
+    | Err(_) -> assert false
+    | Ok(_)  -> ()
+    end
+    assert (read_ok(path) == "first second")
+    let _ = File.delete(path)
+  end
+end
+
+describe "File.copy" do
+  test "creates new file with same content" do
+    let src  = "/tmp/march_tf_copy_src_10"
+    let dest = "/tmp/march_tf_copy_dst_10"
+    write_ok(src, "hello world")
+    match File.copy(src, dest) do
+    | Err(_) -> assert false
+    | Ok(_)  -> ()
+    end
+    assert (File.exists(dest))
+    assert (read_ok(dest) == "hello world")
+    let _ = File.delete(src)
+    let _ = File.delete(dest)
+  end
+end
+
+describe "File.rename" do
+  test "moves file to new name" do
+    let src  = "/tmp/march_tf_rename_src_11"
+    let dest = "/tmp/march_tf_rename_dst_11"
+    write_ok(src, "data")
+    match File.rename(src, dest) do
+    | Err(_) -> assert false
+    | Ok(_)  -> ()
+    end
+    assert (File.exists(dest))
+    assert (not (File.exists(src)))
+    let _ = File.delete(dest)
+  end
+end
+
+describe "File.stat" do
+  test "returns size and kind for regular file" do
+    let path = "/tmp/march_tf_stat_12"
+    write_ok(path, "hello world")
+    match File.stat(path) do
+    | Err(_) -> assert false
+    | Ok(FileStat(size, kind, _, _)) ->
+      assert (size == 11)
+      assert (kind == RegularFile)
+    end
+    let _ = File.delete(path)
   end
 
-  -- ---- File.with_lines on nonexistent ----
-  match File.with_lines(base ++ "_noexist", fn _seq -> :ok) do
-  | Err(_) -> :ok
-  | Ok(_) -> panic("with_lines nonexistent should return Err")
+  test "returns Err for nonexistent" do
+    match File.stat("/tmp/march_tf_stat_noexist_13") do
+    | Err(_) -> ()
+    | Ok(_)  -> assert false
+    end
+  end
+end
+
+describe "File.delete" do
+  test "removes the file" do
+    let path = "/tmp/march_tf_delete_14"
+    write_ok(path, "bye")
+    match File.delete(path) do
+    | Err(_) -> assert false
+    | Ok(_)  -> ()
+    end
+    assert (not (File.exists(path)))
   end
 
-  -- ---- File.each_line ----
-  match File.each_line(base ++ "_lines", fn _line -> :ok) do
-  | Err(e) -> panic("each_line failed: " ++ to_string(e))
-  | Ok(_) -> :ok
+  test "returns Err for nonexistent" do
+    match File.delete("/tmp/march_tf_delete_noexist_15") do
+    | Err(_) -> ()
+    | Ok(_)  -> assert false
+    end
+  end
+end
+
+describe "File.with_lines" do
+  test "streams all lines via callback" do
+    let path = "/tmp/march_tf_wlines_16"
+    write_ok(path, "line1\nline2\nline3")
+    let lines = match File.with_lines(path, fn seq -> Seq.to_list(seq)) do
+      | Ok(ls) -> ls
+      | Err(_) -> panic("File.with_lines failed")
+    end
+    assert (List.length(lines) == 3)
+    assert (List.nth(lines, 0) == "line1")
+    let _ = File.delete(path)
   end
 
-  -- ---- File.delete ----
-  match File.delete(base ++ "_a") do
-  | Err(e) -> panic("delete failed: " ++ to_string(e))
-  | Ok(_) -> :ok
+  test "returns Err for nonexistent" do
+    match File.with_lines("/tmp/march_tf_wlines_noexist_17", fn _seq -> ()) do
+    | Err(_) -> ()
+    | Ok(_)  -> assert false
+    end
   end
-  assert_true("file deleted", not File.exists(base ++ "_a"))
+end
 
-  -- ---- File.delete nonexistent ----
-  match File.delete(base ++ "_noexist") do
-  | Err(_) -> :ok
-  | Ok(_) -> panic("delete nonexistent should return Err")
+describe "File.each_line" do
+  test "iterates all lines without error" do
+    let path = "/tmp/march_tf_eline_18"
+    write_ok(path, "a\nb\nc")
+    match File.each_line(path, fn _line -> ()) do
+    | Err(_) -> assert false
+    | Ok(_)  -> ()
+    end
+    let _ = File.delete(path)
   end
-
-  -- Cleanup
-  File.delete(base ++ "_lines")
-  File.delete(base ++ "_trail")
-  File.delete(base ++ "_app")
-  File.delete(base ++ "_renamed")
-  File.delete(base ++ "_empty")
-
-  println("All File tests passed!")
 end
 
 end

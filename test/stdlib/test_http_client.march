@@ -1,163 +1,149 @@
+-- test/stdlib/test_http_client.march
 -- Tests for the HttpClient stdlib module.
 -- Covers client construction, step registration, pipeline config,
 -- and built-in step helpers (no actual network calls).
+-- Run with: dune exec march -- test test/stdlib/test_http_client.march
 
 mod TestHttpClient do
 
-  -- ── Client construction ────────────────────────────────────────────
+-- Local mirror of HttpClient.ErrorRecovery (private type).
+type ErrorRecovery = Recover(a) | Fail(b)
 
-  fn test_new_client_has_no_steps() do
+fn make_bare_req() do
+  Request(Get, SchemeHttp, "example.com", None, "/", None, Nil, "")
+end
+
+describe "HttpClient client construction" do
+  test "new_client has no steps" do
     let client = HttpClient.new_client()
-    let steps = HttpClient.list_steps(client)
-    Test.assert_true(is_nil(steps), "fresh client has no steps")
+    assert (is_nil(HttpClient.list_steps(client)))
   end
+end
 
-  -- ── Step registration ──────────────────────────────────────────────
-
-  fn test_add_request_step() do
+describe "HttpClient step registration" do
+  test "add_request_step registers with prefix" do
     let client = HttpClient.new_client()
-    let step_fn = fn req -> Ok(req)
-    let client2 = HttpClient.add_request_step(client, "my-step", step_fn)
+    let client2 = HttpClient.add_request_step(client, "my-step", fn req -> Ok(req))
     let steps = HttpClient.list_steps(client2)
-    Test.assert_false(is_nil(steps), "one request step registered")
-    Test.assert_eq_str(head(steps), "request:my-step", "step name prefixed")
+    assert (not (is_nil(steps)))
+    assert (head(steps) == "request:my-step")
   end
 
-  fn test_add_response_step() do
+  test "add_response_step registers with prefix" do
     let client = HttpClient.new_client()
-    let step_fn = fn (req, resp) -> Ok((req, resp))
-    let client2 = HttpClient.add_response_step(client, "log-resp", step_fn)
+    let client2 = HttpClient.add_response_step(client, "log-resp", fn (req, resp) -> Ok((req, resp)))
     let steps = HttpClient.list_steps(client2)
-    Test.assert_false(is_nil(steps), "one response step registered")
-    Test.assert_eq_str(head(steps), "response:log-resp", "response step name prefixed")
+    assert (not (is_nil(steps)))
+    assert (head(steps) == "response:log-resp")
   end
 
-  fn test_add_error_step() do
+  test "add_error_step registers with prefix" do
     let client = HttpClient.new_client()
-    let step_fn = fn (req, err) -> Fail(err)
-    let client2 = HttpClient.add_error_step(client, "on-error", step_fn)
+    let client2 = HttpClient.add_error_step(client, "on-error", fn (req, err) -> Fail(err))
     let steps = HttpClient.list_steps(client2)
-    Test.assert_false(is_nil(steps), "one error step registered")
-    Test.assert_eq_str(head(steps), "error:on-error", "error step name prefixed")
+    assert (not (is_nil(steps)))
+    assert (head(steps) == "error:on-error")
   end
 
-  fn test_multiple_steps_ordered() do
+  test "multiple request steps are ordered" do
     let client = HttpClient.new_client()
-      |> HttpClient.add_request_step("first", fn req -> Ok(req))
+      |> HttpClient.add_request_step("first",  fn req -> Ok(req))
       |> HttpClient.add_request_step("second", fn req -> Ok(req))
     let steps = HttpClient.list_steps(client)
-    Test.assert_eq_int(length(steps), 2, "two request steps")
-    Test.assert_eq_str(head(steps), "request:first", "first step first")
-    Test.assert_eq_str(head(tail(steps)), "request:second", "second step second")
+    assert (List.length(steps) == 2)
+    assert (head(steps) == "request:first")
+    assert (head(tail(steps)) == "request:second")
   end
 
-  fn test_mixed_steps() do
+  test "mixed step types are all counted" do
     let client = HttpClient.new_client()
-      |> HttpClient.add_request_step("auth", fn req -> Ok(req))
-      |> HttpClient.add_response_step("log", fn (req, resp) -> Ok((req, resp)))
-      |> HttpClient.add_error_step("retry", fn (req, err) -> Fail(err))
+      |> HttpClient.add_request_step("auth",  fn req -> Ok(req))
+      |> HttpClient.add_response_step("log",  fn (req, resp) -> Ok((req, resp)))
+      |> HttpClient.add_error_step("retry",   fn (req, err) -> Fail(err))
     let steps = HttpClient.list_steps(client)
-    Test.assert_eq_int(length(steps), 3, "three total steps")
+    assert (List.length(steps) == 3)
   end
+end
 
-  -- ── Pipeline config ────────────────────────────────────────────────
-
-  fn test_with_redirects() do
+describe "HttpClient pipeline config" do
+  test "with_redirects does not add steps" do
     let client = HttpClient.new_client() |> HttpClient.with_redirects(5)
-    -- We can only observe config indirectly; just verify it doesn't crash
-    -- and that steps list is still empty
-    let steps = HttpClient.list_steps(client)
-    Test.assert_true(is_nil(steps), "no steps after with_redirects")
+    assert (is_nil(HttpClient.list_steps(client)))
   end
 
-  fn test_with_retry() do
+  test "with_retry does not add steps" do
     let client = HttpClient.new_client() |> HttpClient.with_retry(3, 1000)
-    let steps = HttpClient.list_steps(client)
-    Test.assert_true(is_nil(steps), "no steps after with_retry")
+    assert (is_nil(HttpClient.list_steps(client)))
   end
+end
 
-  -- ── Built-in step functions ────────────────────────────────────────
-
-  fn make_bare_req() do
-    Request(Get, SchemeHttp, "example.com", None, "/", None, Nil, "")
-  end
-
-  fn test_step_default_headers() do
+describe "HttpClient built-in step helpers" do
+  test "step_default_headers adds User-Agent and Accept" do
     let req = make_bare_req()
-    let result = HttpClient.step_default_headers(req)
-    let req2 = Test.assert_ok(result, "step_default_headers returns Ok")
-    let ua = Test.assert_some(Http.get_request_header(req2, "user-agent"), "User-Agent set")
-    Test.assert_eq_str(ua, "march/0.1", "User-Agent value")
-    let accept = Test.assert_some(Http.get_request_header(req2, "accept"), "Accept set")
-    Test.assert_eq_str(accept, "*/*", "Accept value")
+    let req2 = match HttpClient.step_default_headers(req) do
+      | Ok(r)  -> r
+      | Err(_) -> panic("step_default_headers: expected Ok")
+    end
+    assert (Http.get_request_header(req2, "user-agent") == Some("march/0.1"))
+    assert (Http.get_request_header(req2, "accept") == Some("*/*"))
   end
 
-  fn test_step_bearer_auth() do
+  test "step_bearer_auth adds Authorization header" do
     let req = make_bare_req()
     let step = HttpClient.step_bearer_auth("my-secret-token")
-    let result = step(req)
-    let req2 = Test.assert_ok(result, "bearer_auth returns Ok")
-    let auth = Test.assert_some(Http.get_request_header(req2, "authorization"), "Auth header set")
-    Test.assert_eq_str(auth, "Bearer my-secret-token", "bearer auth value")
+    let req2 = match step(req) do
+      | Ok(r)  -> r
+      | Err(_) -> panic("step_bearer_auth: expected Ok")
+    end
+    assert (Http.get_request_header(req2, "authorization") == Some("Bearer my-secret-token"))
   end
 
-  fn test_step_basic_auth() do
+  test "step_basic_auth adds Authorization header" do
     let req = make_bare_req()
     let step = HttpClient.step_basic_auth("user", "pass")
-    let result = step(req)
-    let req2 = Test.assert_ok(result, "basic_auth returns Ok")
-    let auth = Test.assert_some(Http.get_request_header(req2, "authorization"), "basic auth header")
-    Test.assert_eq_str(auth, "Basic user:pass", "basic auth value")
+    let req2 = match step(req) do
+      | Ok(r)  -> r
+      | Err(_) -> panic("step_basic_auth: expected Ok")
+    end
+    assert (Http.get_request_header(req2, "authorization") == Some("Basic user:pass"))
   end
 
-  fn test_step_content_type() do
+  test "step_content_type adds Content-Type header" do
     let req = make_bare_req()
     let step = HttpClient.step_content_type("application/json")
-    let result = step(req)
-    let req2 = Test.assert_ok(result, "content_type returns Ok")
-    let ct = Test.assert_some(Http.get_request_header(req2, "content-type"), "Content-Type set")
-    Test.assert_eq_str(ct, "application/json", "Content-Type value")
+    let req2 = match step(req) do
+      | Ok(r)  -> r
+      | Err(_) -> panic("step_content_type: expected Ok")
+    end
+    assert (Http.get_request_header(req2, "content-type") == Some("application/json"))
   end
 
-  fn test_step_raise_on_error_200() do
+  test "step_raise_on_error returns Ok for 200" do
     let req = make_bare_req()
     let resp = Response(Status(200), Nil, "ok")
-    let result = HttpClient.step_raise_on_error(req, resp)
-    Test.assert_ok(result, "200 should not raise")
+    match HttpClient.step_raise_on_error(req, resp) do
+    | Ok(_)  -> ()
+    | Err(_) -> assert false
+    end
   end
 
-  fn test_step_raise_on_error_404() do
+  test "step_raise_on_error returns Err for 404" do
     let req = make_bare_req()
     let resp = Response(Status(404), Nil, "not found")
-    let result = HttpClient.step_raise_on_error(req, resp)
-    Test.assert_err(result, "404 should raise error")
+    match HttpClient.step_raise_on_error(req, resp) do
+    | Err(_) -> ()
+    | Ok(_)  -> assert false
+    end
   end
 
-  fn test_step_raise_on_error_500() do
+  test "step_raise_on_error returns Err for 500" do
     let req = make_bare_req()
     let resp = Response(Status(500), Nil, "server error")
-    let result = HttpClient.step_raise_on_error(req, resp)
-    Test.assert_err(result, "500 should raise error")
+    match HttpClient.step_raise_on_error(req, resp) do
+    | Err(_) -> ()
+    | Ok(_)  -> assert false
+    end
   end
-
-  -- ── Entry point ────────────────────────────────────────────────────
-
-  pub fn main() do
-    test_new_client_has_no_steps()
-    test_add_request_step()
-    test_add_response_step()
-    test_add_error_step()
-    test_multiple_steps_ordered()
-    test_mixed_steps()
-    test_with_redirects()
-    test_with_retry()
-    test_step_default_headers()
-    test_step_bearer_auth()
-    test_step_basic_auth()
-    test_step_content_type()
-    test_step_raise_on_error_200()
-    test_step_raise_on_error_404()
-    test_step_raise_on_error_500()
-  end
+end
 
 end

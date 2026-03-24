@@ -1,155 +1,142 @@
+-- test/stdlib/test_websocket.march
 -- Tests for the WebSocket stdlib module.
 -- Covers frame type constructors and pattern matching.
 -- Network/upgrade calls are not exercised here.
+-- Run with: dune exec march -- test test/stdlib/test_websocket.march
 
 mod TestWebSocket do
 
-  -- ── WsFrame constructors ───────────────────────────────────────────
+-- Local mirrors of WebSocket private types (matched structurally at runtime).
+type WsFrame = TextFrame(String) | BinaryFrame(String) | Ping | Pong | Close(Int, String)
+type WsSocket = WsSocket(Int)
+type SelectResult = WsData(WsFrame) | ActorMsg | Timeout
 
-  fn test_text_frame_ctor() do
+describe "WsFrame constructors" do
+  test "TextFrame stores content" do
     let f = TextFrame("hello")
     match f do
-    | TextFrame(s) -> Test.assert_eq_str(s, "hello", "TextFrame content")
-    | _            -> Test.fail("wrong frame type")
+    | TextFrame(s) -> assert (s == "hello")
+    | _            -> assert false
     end
   end
 
-  fn test_binary_frame_ctor() do
+  test "BinaryFrame stores content" do
     let f = BinaryFrame("\x00\x01\x02")
     match f do
-    | BinaryFrame(s) -> Test.assert_eq_str(s, "\x00\x01\x02", "BinaryFrame content")
-    | _              -> Test.fail("wrong frame type")
+    | BinaryFrame(s) -> assert (s == "\x00\x01\x02")
+    | _              -> assert false
     end
   end
 
-  fn test_ping_frame_ctor() do
+  test "Ping constructor" do
     let f = Ping
     match f do
     | Ping -> ()
-    | _    -> Test.fail("wrong frame type")
+    | _    -> assert false
     end
   end
 
-  fn test_pong_frame_ctor() do
+  test "Pong constructor" do
     let f = Pong
     match f do
     | Pong -> ()
-    | _    -> Test.fail("wrong frame type")
+    | _    -> assert false
     end
   end
 
-  fn test_close_frame_ctor() do
+  test "Close stores code and reason" do
     let f = Close(1000, "normal closure")
     match f do
     | Close(code, reason) ->
-      Test.assert_eq_int(code, 1000, "close code")
-      Test.assert_eq_str(reason, "normal closure", "close reason")
-    | _ -> Test.fail("wrong frame type")
+      assert (code == 1000)
+      assert (reason == "normal closure")
+    | _ -> assert false
     end
   end
 
-  -- ── WsSocket constructor ───────────────────────────────────────────
+  test "empty TextFrame" do
+    let f = TextFrame("")
+    match f do
+    | TextFrame(s) -> assert (s == "")
+    | _            -> assert false
+    end
+  end
 
-  fn test_ws_socket_ctor() do
+  test "Close code variants" do
+    match Close(1000, "normal") do | Close(c, _) -> assert (c == 1000) | _ -> () end
+    match Close(1001, "going away") do | Close(c, _) -> assert (c == 1001) | _ -> () end
+    match Close(1011, "server error") do | Close(c, _) -> assert (c == 1011) | _ -> () end
+  end
+end
+
+describe "WsSocket constructor" do
+  test "WsSocket stores fd" do
     let s = WsSocket(42)
     match s do
-    | WsSocket(fd) -> Test.assert_eq_int(fd, 42, "WsSocket fd")
+    | WsSocket(fd) -> assert (fd == 42)
     end
   end
+end
 
-  -- ── SelectResult constructors ──────────────────────────────────────
-
-  fn test_ws_data_ctor() do
+describe "SelectResult constructors" do
+  test "WsData wraps a frame" do
     let r = WsData(TextFrame("hi"))
     match r do
     | WsData(f) ->
       match f do
-      | TextFrame(s) -> Test.assert_eq_str(s, "hi", "WsData TextFrame")
-      | _            -> Test.fail("wrong inner frame")
+      | TextFrame(s) -> assert (s == "hi")
+      | _            -> assert false
       end
-    | _ -> Test.fail("wrong SelectResult")
+    | _ -> assert false
     end
   end
 
-  fn test_actor_msg_ctor() do
+  test "ActorMsg constructor" do
     let r = ActorMsg
     match r do
     | ActorMsg -> ()
-    | _        -> Test.fail("wrong SelectResult")
+    | _        -> assert false
     end
   end
 
-  fn test_timeout_ctor() do
+  test "Timeout constructor" do
     let r = Timeout
     match r do
     | Timeout -> ()
-    | _       -> Test.fail("wrong SelectResult")
+    | _       -> assert false
     end
   end
+end
 
-  -- ── Frame content helpers ──────────────────────────────────────────
+fn is_text_frame(f) do
+  match f do
+  | TextFrame(_) -> true
+  | _            -> false
+  end
+end
 
-  fn is_text_frame(f) do
-    match f do
-    | TextFrame(_) -> true
-    | _            -> false
-    end
+fn is_control_frame(f) do
+  match f do
+  | Ping        -> true
+  | Pong        -> true
+  | Close(_, _) -> true
+  | _           -> false
+  end
+end
+
+describe "WsFrame predicates" do
+  test "TextFrame is text, others are not" do
+    assert (is_text_frame(TextFrame("hi")))
+    assert (not (is_text_frame(BinaryFrame("hi"))))
+    assert (not (is_text_frame(Ping)))
   end
 
-  fn is_control_frame(f) do
-    match f do
-    | Ping        -> true
-    | Pong        -> true
-    | Close(_, _) -> true
-    | _           -> false
-    end
+  test "Ping Pong Close are control frames" do
+    assert (is_control_frame(Ping))
+    assert (is_control_frame(Pong))
+    assert (is_control_frame(Close(1000, "")))
+    assert (not (is_control_frame(TextFrame("x"))))
   end
-
-  fn test_frame_predicates() do
-    Test.assert_true(is_text_frame(TextFrame("hi")),    "TextFrame is text")
-    Test.assert_false(is_text_frame(BinaryFrame("hi")), "BinaryFrame not text")
-    Test.assert_false(is_text_frame(Ping),              "Ping not text")
-
-    Test.assert_true(is_control_frame(Ping),            "Ping is control")
-    Test.assert_true(is_control_frame(Pong),            "Pong is control")
-    Test.assert_true(is_control_frame(Close(1000, "")), "Close is control")
-    Test.assert_false(is_control_frame(TextFrame("x")), "TextFrame not control")
-  end
-
-  -- ── Edge cases ─────────────────────────────────────────────────────
-
-  fn test_empty_text_frame() do
-    let f = TextFrame("")
-    match f do
-    | TextFrame(s) -> Test.assert_eq_str(s, "", "empty TextFrame")
-    | _            -> Test.fail("wrong frame type")
-    end
-  end
-
-  fn test_close_code_variants() do
-    let normal  = Close(1000, "normal")
-    let go_away = Close(1001, "going away")
-    let error   = Close(1011, "server error")
-    match normal  do | Close(c, _) -> Test.assert_eq_int(c, 1000, "close 1000") | _ -> () end
-    match go_away do | Close(c, _) -> Test.assert_eq_int(c, 1001, "close 1001") | _ -> () end
-    match error   do | Close(c, _) -> Test.assert_eq_int(c, 1011, "close 1011") | _ -> () end
-  end
-
-  -- ── Entry point ────────────────────────────────────────────────────
-
-  pub fn main() do
-    test_text_frame_ctor()
-    test_binary_frame_ctor()
-    test_ping_frame_ctor()
-    test_pong_frame_ctor()
-    test_close_frame_ctor()
-    test_ws_socket_ctor()
-    test_ws_data_ctor()
-    test_actor_msg_ctor()
-    test_timeout_ctor()
-    test_frame_predicates()
-    test_empty_text_frame()
-    test_close_code_variants()
-  end
+end
 
 end

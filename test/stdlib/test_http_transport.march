@@ -1,96 +1,106 @@
+-- test/stdlib/test_http_transport.march
 -- Tests for the HttpTransport stdlib module.
 -- Only tests the pure/structural parts (error type constructors, etc.).
 -- Network I/O functions are not exercised here.
+-- Run with: dune exec march -- test test/stdlib/test_http_transport.march
 
 mod TestHttpTransport do
 
-  -- ── TransportError constructors ────────────────────────────────────
+-- Local mirror of HttpTransport.TransportError (private in HttpTransport).
+-- Constructors are structurally matched at runtime by name.
+type TransportError =
+  ConnectionRefused(String)
+  | ConnTimeout(String)
+  | SendError(String)
+  | RecvError(String)
+  | ConnParseError(String)
+  | Closed
 
-  fn test_connection_refused_ctor() do
+fn show_error(e) do
+  match e do
+  | ConnectionRefused(s) -> "refused:" ++ s
+  | ConnTimeout(s)       -> "timeout:" ++ s
+  | SendError(s)         -> "send:" ++ s
+  | RecvError(s)         -> "recv:" ++ s
+  | ConnParseError(s)    -> "parse:" ++ s
+  | Closed               -> "closed"
+  end
+end
+
+describe "TransportError constructors" do
+  test "ConnectionRefused stores message" do
     let e = ConnectionRefused("localhost:8080")
     match e do
-    | ConnectionRefused(msg) ->
-      Test.assert_eq_str(msg, "localhost:8080", "ConnectionRefused msg")
-    | _ -> Test.fail("wrong ctor")
+    | ConnectionRefused(msg) -> assert (msg == "localhost:8080")
+    | _ -> assert false
     end
   end
 
-  fn test_conn_timeout_ctor() do
+  test "ConnTimeout stores message" do
     let e = ConnTimeout("timed out after 30s")
     match e do
-    | ConnTimeout(msg) ->
-      Test.assert_eq_str(msg, "timed out after 30s", "ConnTimeout msg")
-    | _ -> Test.fail("wrong ctor")
+    | ConnTimeout(msg) -> assert (msg == "timed out after 30s")
+    | _ -> assert false
     end
   end
 
-  fn test_send_error_ctor() do
+  test "SendError stores message" do
     let e = SendError("broken pipe")
     match e do
-    | SendError(msg) ->
-      Test.assert_eq_str(msg, "broken pipe", "SendError msg")
-    | _ -> Test.fail("wrong ctor")
+    | SendError(msg) -> assert (msg == "broken pipe")
+    | _ -> assert false
     end
   end
 
-  fn test_recv_error_ctor() do
+  test "RecvError stores message" do
     let e = RecvError("connection reset")
     match e do
-    | RecvError(msg) ->
-      Test.assert_eq_str(msg, "connection reset", "RecvError msg")
-    | _ -> Test.fail("wrong ctor")
+    | RecvError(msg) -> assert (msg == "connection reset")
+    | _ -> assert false
     end
   end
 
-  fn test_parse_error_ctor() do
-    let e = ConnConnParseError("unexpected EOF")
+  test "ConnParseError stores message" do
+    let e = ConnParseError("unexpected EOF")
     match e do
-    | ConnConnParseError(msg) ->
-      Test.assert_eq_str(msg, "unexpected EOF", "ConnConnParseError msg")
-    | _ -> Test.fail("wrong ctor")
+    | ConnParseError(msg) -> assert (msg == "unexpected EOF")
+    | _ -> assert false
     end
   end
 
-  fn test_closed_ctor() do
+  test "Closed constructor" do
     let e = Closed
     match e do
     | Closed -> ()
-    | _ -> Test.fail("wrong ctor")
+    | _ -> assert false
     end
   end
+end
 
-  -- ── Error type is a variant — match coverage ──────────────────────
-
-  fn describe_error(e) do
-    match e do
-    | ConnectionRefused(s) -> "refused:" ++ s
-    | ConnTimeout(s)       -> "timeout:" ++ s
-    | SendError(s)         -> "send:" ++ s
-    | RecvError(s)         -> "recv:" ++ s
-    | ConnConnParseError(s) -> "parse:" ++ s
-    | Closed               -> "closed"
-    end
+describe "TransportError pattern matching" do
+  test "match ConnectionRefused" do
+    assert (show_error(ConnectionRefused("h")) == "refused:h")
   end
 
-  fn test_error_matching() do
-    Test.assert_eq_str(describe_error(ConnectionRefused("h")),    "refused:h",  "match refused")
-    Test.assert_eq_str(describe_error(ConnTimeout("t")),          "timeout:t",  "match timeout")
-    Test.assert_eq_str(describe_error(SendError("s")),            "send:s",     "match send")
-    Test.assert_eq_str(describe_error(RecvError("r")),            "recv:r",     "match recv")
-    Test.assert_eq_str(describe_error(ConnConnParseError("p")),   "parse:p",    "match parse")
-    Test.assert_eq_str(describe_error(Closed),                    "closed",     "match closed")
+  test "match ConnTimeout" do
+    assert (show_error(ConnTimeout("t")) == "timeout:t")
   end
 
-  -- ── Entry point ────────────────────────────────────────────────────
-
-  pub fn main() do
-    test_connection_refused_ctor()
-    test_conn_timeout_ctor()
-    test_send_error_ctor()
-    test_recv_error_ctor()
-    test_parse_error_ctor()
-    test_closed_ctor()
-    test_error_matching()
+  test "match SendError" do
+    assert (show_error(SendError("s")) == "send:s")
   end
+
+  test "match RecvError" do
+    assert (show_error(RecvError("r")) == "recv:r")
+  end
+
+  test "match ConnParseError" do
+    assert (show_error(ConnParseError("p")) == "parse:p")
+  end
+
+  test "match Closed" do
+    assert (show_error(Closed) == "closed")
+  end
+end
 
 end
