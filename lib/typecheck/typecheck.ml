@@ -4424,6 +4424,33 @@ let rec check_tail_position
                 (%s).\n\
                 Hint: Consider using an accumulator parameter."
                fn_name fn.txt ctx)
+        else begin
+          (* Structural recursion: warn but allow — distinguish arithmetic
+             reductions (n-1, n-2) from pattern-bound sub-components. *)
+          let is_arithmetic = List.exists (fun arg ->
+            match arg with
+            | Ast.EApp (Ast.EVar op, [lhs; _], _) when op.txt = "-" ->
+              (match lhs with
+               | Ast.EVar v ->
+                 StringSet.mem v.txt fn_params || StringSet.mem v.txt smaller
+               | _ -> false)
+            | _ -> false
+          ) args in
+          if is_arithmetic then
+            Err.warning errors ~span:sp
+              (Printf.sprintf
+                 "Warning: function `%s` is structurally recursive but not \
+                  tail-recursive. Consider using an accumulator parameter \
+                  for O(n) performance."
+                 fn_name)
+          else
+            Err.warning errors ~span:sp
+              (Printf.sprintf
+                 "Warning: function `%s` is structurally recursive but not \
+                  tail-recursive. This is safe for bounded input but uses \
+                  O(depth) stack space."
+                 fn_name)
+        end
       end;
       List.iteri (fun i arg ->
         chk false smaller
