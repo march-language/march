@@ -8,15 +8,23 @@ description: |
 
 March is a statically-typed functional language — an ML/Elixir hybrid compiled with OCaml 5.3.0. This document captures the patterns, idioms, and gotchas that matter when writing March code or modifying the compiler. Read the section relevant to your task before writing any code.
 
-## Build commands
+## Build & run commands
 
 Run these directly. **Never prefix with `eval $(opam env ...)`** — the opam switch is already configured.
 
 ```
 dune build                              # compile everything
 dune runtest                            # OCaml test suite
+
+# Running March files (use either dune or forge):
 dune exec march -- file.march           # run a single .march file
-dune exec march -- test path/to/test.march   # run March-native tests
+forge run file.march                    # same, via forge CLI
+
+# Running tests (use either dune or forge):
+dune exec march -- test path/to/test.march   # run a single test file
+forge test path/to/test.march                # same, via forge CLI
+forge test test/stdlib/                      # run all tests in a directory
+forge test                                   # auto-discover and run all tests
 ```
 
 ## Core syntax
@@ -49,17 +57,22 @@ fn x -> x + 1
 
 -- Multiple parameters: use parens with comma separation
 fn (a, b) -> a + b
+
+-- Used in practice (e.g., as callback to fold_left):
+List.fold_left(0, xs, fn (acc, x) -> acc + x)
 ```
 
-**The multi-arg lambda gotcha:** `fn (a, b) -> expr` creates a function taking two arguments. This is NOT tuple destructuring — it's how March spells multi-param lambdas. To destructure a tuple inside a lambda, use match:
+**The multi-arg lambda gotcha:** `fn (a, b) -> expr` creates a function taking **two separate arguments**. This is NOT tuple destructuring — it's how March spells multi-param lambdas. To destructure a tuple inside a lambda, use match:
 
 ```march
--- WRONG: trying to pattern-match a tuple in a lambda parameter
-fn (x, y) -> x + y    -- this is a 2-arg lambda, not tuple destructure
+-- This is a 2-arg lambda, NOT tuple destructure:
+fn (x, y) -> x + y
 
--- RIGHT: destructure a tuple via match
+-- To destructure a tuple, use match:
 fn p -> match p do | (x, y) -> x + y end
 ```
+
+**JIT caveat:** Standalone multi-arg lambdas (not passed as callbacks) may trigger JIT codegen errors. This is a known issue with the LLVM JIT backend. When writing examples or tests, use lambdas within function calls where they work reliably.
 
 ### Let bindings
 
@@ -297,7 +310,13 @@ end
 ### Running tests
 
 ```
-dune exec march -- test test/stdlib/test_list.march           # one file
+# Via forge (preferred — handles discovery, directories, single files):
+forge test                                    # auto-discover all tests
+forge test test/stdlib/                       # all tests in directory
+forge test test/stdlib/test_list.march        # single file
+
+# Via dune (always works, no forge.toml needed):
+dune exec march -- test test/stdlib/test_list.march           # single file
 dune exec march -- test test/stdlib/                          # directory
 dune exec march -- test --verbose test/stdlib/test_list.march # verbose output
 dune exec march -- test --filter="map" test/stdlib/           # filter by name
