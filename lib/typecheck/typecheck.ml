@@ -776,6 +776,7 @@ let builtin_bindings : (string * scheme) list =
     ("float_neg_infinity",Mono (TArrow (t_unit, t_float)));
     ("float_nan",       Mono (TArrow (t_unit,  t_float)));
     ("float_epsilon",   Mono (TArrow (t_unit,  t_float)));
+    ("unix_time",       Mono (TArrow (t_unit,  t_float)));
     ("float_from_string",Mono (TArrow (t_string, t_option t_float)));
     ("float_to_string", Mono (TArrow (t_float,  t_string)));
     (* Math primitives *)
@@ -813,8 +814,8 @@ let builtin_bindings : (string * scheme) list =
     ("string_trim_end",     Mono (TArrow (t_string, t_string)));
     ("string_to_uppercase", Mono (TArrow (t_string, t_string)));
     ("string_to_lowercase", Mono (TArrow (t_string, t_string)));
-    ("string_chars",        Mono (TArrow (t_string, t_list (TCon ("Char", [])))));
-    ("string_from_chars",   Mono (TArrow (t_list (TCon ("Char", [])), t_string)));
+    ("string_chars",        Mono (TArrow (t_string, t_list t_string)));
+    ("string_from_chars",   Mono (TArrow (t_list t_string, t_string)));
     ("string_repeat",       Mono (TArrow (t_string, TArrow (t_int, t_string))));
     ("string_reverse",      Mono (TArrow (t_string, t_string)));
     ("string_pad_left",     Mono (TArrow (t_string, TArrow (t_int, TArrow (t_string, t_string)))));
@@ -822,17 +823,17 @@ let builtin_bindings : (string * scheme) list =
     ("string_byte_length",  Mono (TArrow (t_string, t_int)));
     ("string_split_first",   Mono (TArrow (t_string, TArrow (t_string, t_option (TTuple [t_string; t_string])))));
     ("string_grapheme_count",Mono (TArrow (t_string, t_int)));
-    (* Char primitives *)
-    ("char_is_alpha",        Mono (TArrow (TCon ("Char", []), t_bool)));
-    ("char_is_digit",        Mono (TArrow (TCon ("Char", []), t_bool)));
-    ("char_is_alphanumeric", Mono (TArrow (TCon ("Char", []), t_bool)));
-    ("char_is_whitespace",   Mono (TArrow (TCon ("Char", []), t_bool)));
-    ("char_is_uppercase",    Mono (TArrow (TCon ("Char", []), t_bool)));
-    ("char_is_lowercase",    Mono (TArrow (TCon ("Char", []), t_bool)));
-    ("char_to_uppercase",    Mono (TArrow (TCon ("Char", []), TCon ("Char", []))));
-    ("char_to_lowercase",    Mono (TArrow (TCon ("Char", []), TCon ("Char", []))));
-    ("char_to_int",          Mono (TArrow (TCon ("Char", []), t_int)));
-    ("char_from_int",        Mono (TArrow (t_int, TCon ("Char", []))));
+    (* Char primitives — in March, a "char" is a single-char String *)
+    ("char_is_alpha",        Mono (TArrow (t_string, t_bool)));
+    ("char_is_digit",        Mono (TArrow (t_string, t_bool)));
+    ("char_is_alphanumeric", Mono (TArrow (t_string, t_bool)));
+    ("char_is_whitespace",   Mono (TArrow (t_string, t_bool)));
+    ("char_is_uppercase",    Mono (TArrow (t_string, t_bool)));
+    ("char_is_lowercase",    Mono (TArrow (t_string, t_bool)));
+    ("char_to_uppercase",    Mono (TArrow (t_string, t_string)));
+    ("char_to_lowercase",    Mono (TArrow (t_string, t_string)));
+    ("char_to_int",          Mono (TArrow (t_string, t_int)));
+    ("char_from_int",        Mono (TArrow (t_int, t_string)));
     (* Comparison primitives *)
     ("compare_int",    Mono (TArrow (t_int,    TArrow (t_int,    t_int))));
     ("compare_float",  Mono (TArrow (t_float,  TArrow (t_float,  t_int))));

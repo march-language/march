@@ -1,0 +1,385 @@
+-- Json module: JSON encoding and decoding.
+--
+-- Types:
+--   JsonValue = Null | Bool(Bool) | Number(Float) | Str(String)
+--              | Array(List(JsonValue)) | Object(List((String, JsonValue)))
+--
+-- Note: Object uses an association list (ordered, allows duplicate keys).
+-- Key lookup uses the first occurrence.
+--
+-- Functions:
+--   parse(String)                      -> Result(JsonValue, String)
+--   to_string(JsonValue)               -> String
+--   get(JsonValue, String)             -> Option(JsonValue)
+--   get_in(JsonValue, List(String))    -> Option(JsonValue)
+--   encode_null()                      -> JsonValue
+--   encode_bool(Bool)                  -> JsonValue
+--   encode_number(Float)               -> JsonValue
+--   encode_int(Int)                    -> JsonValue
+--   encode_string(String)              -> JsonValue
+--   encode_array(List(JsonValue))      -> JsonValue
+--   encode_object(List((String, JsonValue))) -> JsonValue
+
+mod Json do
+
+pub type JsonValue =
+    Null
+  | Bool(Bool)
+  | Number(Float)
+  | Str(String)
+  | Array(List(JsonValue))
+  | Object(List((String, JsonValue)))
+
+-- ── Private helpers ───────────────────────────────────────────────────────
+
+fn rev(xs, acc) do
+  match xs do
+  | Nil -> acc
+  | Cons(h, t) -> rev(t, Cons(h, acc))
+  end
+end
+
+-- Skip ASCII whitespace characters.
+fn skip_ws(chars) do
+  match chars do
+  | Nil -> Nil
+  | Cons(c, rest) ->
+    if c == " " || c == "\t" || c == "\n" || c == "\r" then skip_ws(rest)
+    else chars
+  end
+end
+
+-- Try to match a prefix string against the head of a char list.
+-- Returns Ok(remaining) or Err(message).
+fn match_literal(chars, expected) do
+  let exp_chars = string_chars(expected)
+  fn go(cs, es) do
+    match es do
+    | Nil -> Ok(cs)
+    | Cons(e, et) ->
+      match cs do
+      | Nil -> Err("unexpected end of input, expected: " ++ expected)
+      | Cons(c, ct) ->
+        if c == e then go(ct, et)
+        else Err("expected '" ++ e ++ "' but found '" ++ c ++ "'")
+      end
+    end
+  end
+  go(chars, exp_chars)
+end
+
+-- Parse a JSON string (chars is AFTER the opening quote).
+-- Returns Ok((string_value, remaining_chars)) or Err(message).
+fn parse_string_inner(chars) do
+  fn go(cs, acc) do
+    match cs do
+    | Nil -> Err("unterminated string literal")
+    | Cons(c, rest) ->
+      if c == "\"" then
+        Ok((string_join(rev(acc, Nil), ""), rest))
+      else if c == "\\" then
+        match rest do
+        | Nil -> Err("unexpected end of input in string escape")
+        | Cons(e, rest2) ->
+          let ec =
+            if e == "\"" then Ok("\"")
+            else if e == "\\" then Ok("\\")
+            else if e == "/" then Ok("/")
+            else if e == "n" then Ok(char_from_int(10))
+            else if e == "r" then Ok(char_from_int(13))
+            else if e == "t" then Ok(char_from_int(9))
+            else if e == "b" then Ok(char_from_int(8))
+            else if e == "f" then Ok(char_from_int(12))
+            else Err("unknown escape sequence: \\" ++ e)
+          match ec do
+          | Err(msg) -> Err(msg)
+          | Ok(ch) -> go(rest2, Cons(ch, acc))
+          end
+        end
+      else go(rest, Cons(c, acc))
+    end
+  end
+  go(chars, Nil)
+end
+
+-- Parse a JSON number.
+-- chars starts at '-' or a digit.
+fn parse_number(chars) do
+  fn is_num_char(c) do
+    char_is_digit(c) || c == "." || c == "e" || c == "E"
+  end
+  fn collect(cs, acc) do
+    match cs do
+    | Nil -> (rev(acc, Nil), Nil)
+    | Cons(c, rest) ->
+      if is_num_char(c) then collect(rest, Cons(c, acc))
+      else (rev(acc, Nil), cs)
+    end
+  end
+  -- Handle optional leading minus
+  let (sign, chars2) =
+    match chars do
+    | Cons(c, rest) -> if c == "-" then ("-", rest) else ("", chars)
+    | Nil -> ("", Nil)
+    end
+  let (num_chars, remaining) = collect(chars2, Nil)
+  let num_str = sign ++ string_join(num_chars, "")
+  match string_to_float(num_str) do
+  | None -> Err("invalid number: " ++ num_str)
+  | Some(f) -> Ok((Number(f), remaining))
+  end
+end
+
+-- Parse a JSON value from a character list.
+-- Returns Ok((JsonValue, remaining_chars)) or Err(message).
+fn parse_value(chars) do
+  let cs = skip_ws(chars)
+  match cs do
+  | Nil -> Err("unexpected end of input")
+  | Cons(c, rest) ->
+    if c == "n" then
+      match match_literal(cs, "null") do
+      | Err(e) -> Err(e)
+      | Ok(remaining) -> Ok((Null, remaining))
+      end
+    else if c == "t" then
+      match match_literal(cs, "true") do
+      | Err(e) -> Err(e)
+      | Ok(remaining) -> Ok((Bool(true), remaining))
+      end
+    else if c == "f" then
+      match match_literal(cs, "false") do
+      | Err(e) -> Err(e)
+      | Ok(remaining) -> Ok((Bool(false), remaining))
+      end
+    else if c == "\"" then
+      match parse_string_inner(rest) do
+      | Err(e) -> Err(e)
+      | Ok((s, remaining)) -> Ok((Str(s), remaining))
+      end
+    else if c == "[" then
+      parse_array(skip_ws(rest))
+    else if c == "{" then
+      parse_object(skip_ws(rest))
+    else if char_is_digit(c) || c == "-" then
+      parse_number(cs)
+    else Err("unexpected character: '" ++ c ++ "'")
+  end
+end
+
+-- Parse a JSON array (chars is AFTER the '[').
+fn parse_array(chars) do
+  match chars do
+  | Nil -> Err("unterminated array")
+  | Cons(c, rest) ->
+    if c == "]" then Ok((Array(Nil), rest))
+    else do
+      fn parse_elements(cs, acc) do
+        match parse_value(cs) do
+        | Err(e) -> Err(e)
+        | Ok((v, remaining)) ->
+          let cs2 = skip_ws(remaining)
+          match cs2 do
+          | Nil -> Err("unterminated array, expected ',' or ']'")
+          | Cons(sep, rest2) ->
+            if sep == "]" then Ok((Array(rev(Cons(v, acc), Nil)), rest2))
+            else if sep == "," then parse_elements(skip_ws(rest2), Cons(v, acc))
+            else Err("expected ',' or ']' in array, found: '" ++ sep ++ "'")
+          end
+        end
+      end
+      parse_elements(chars, Nil)
+    end
+  end
+end
+
+-- Parse a JSON object (chars is AFTER the '{').
+fn parse_object(chars) do
+  match chars do
+  | Nil -> Err("unterminated object")
+  | Cons(c, rest) ->
+    if c == "}" then Ok((Object(Nil), rest))
+    else do
+      fn parse_pairs(cs, acc) do
+        let cs2 = skip_ws(cs)
+        match cs2 do
+        | Nil -> Err("unterminated object")
+        | Cons(q, rest2) ->
+          if q == "\"" then
+            match parse_string_inner(rest2) do
+            | Err(e) -> Err(e)
+            | Ok((key, after_key)) ->
+              let cs3 = skip_ws(after_key)
+              match cs3 do
+              | Nil -> Err("expected ':' after object key")
+              | Cons(colon, rest3) ->
+                if colon == ":" then
+                  match parse_value(skip_ws(rest3)) do
+                  | Err(e) -> Err(e)
+                  | Ok((v, after_val)) ->
+                    let cs4 = skip_ws(after_val)
+                    match cs4 do
+                    | Nil -> Err("unterminated object, expected ',' or '}'")
+                    | Cons(sep, rest4) ->
+                      if sep == "}" then
+                        Ok((Object(rev(Cons((key, v), acc), Nil)), rest4))
+                      else if sep == "," then
+                        parse_pairs(skip_ws(rest4), Cons((key, v), acc))
+                      else Err("expected ',' or '}' in object, found: '" ++ sep ++ "'")
+                    end
+                  end
+                else Err("expected ':' after object key, found: '" ++ colon ++ "'")
+              end
+            end
+          else Err("expected '\"' for object key, found: '" ++ q ++ "'")
+        end
+      end
+      parse_pairs(chars, Nil)
+    end
+  end
+end
+
+-- Escape a string for JSON output.
+fn escape_string_chars(chars, acc) do
+  match chars do
+  | Nil -> string_join(rev(acc, Nil), "")
+  | Cons(c, rest) ->
+    let code = char_to_int(c)
+    let esc =
+      if c == "\"" then "\\\""
+      else if c == "\\" then "\\\\"
+      else if code == 10 then "\\n"
+      else if code == 13 then "\\r"
+      else if code == 9  then "\\t"
+      else if code == 8  then "\\b"
+      else if code == 12 then "\\f"
+      else c
+    escape_string_chars(rest, Cons(esc, acc))
+  end
+end
+
+fn escape_str(s) do
+  escape_string_chars(string_chars(s), Nil)
+end
+
+fn map_list(xs, f, acc) do
+  match xs do
+  | Nil -> rev(acc, Nil)
+  | Cons(h, t) -> map_list(t, f, Cons(f(h), acc))
+  end
+end
+
+-- ── Public API ────────────────────────────────────────────────────────────
+
+doc """
+Parse a JSON string into a JsonValue.
+Returns Ok(value) on success, Err(message) on parse error.
+
+    Json.parse("null")           -- Ok(Null)
+    Json.parse("42")             -- Ok(Number(42.0))
+    Json.parse("[1, 2, 3]")      -- Ok(Array([Number(1.0), ...]))
+    Json.parse("{\"x\": 1}")     -- Ok(Object([("x", Number(1.0))]))
+"""
+pub fn parse(s) do
+  let chars = string_chars(s)
+  match parse_value(chars) do
+  | Err(e) -> Err(e)
+  | Ok((v, remaining)) ->
+    let rest = skip_ws(remaining)
+    match rest do
+    | Nil -> Ok(v)
+    | Cons(c, _) -> Err("unexpected character after JSON value: '" ++ c ++ "'")
+    end
+  end
+end
+
+doc """
+Convert a JsonValue to its JSON string representation.
+
+    Json.to_string(Null)         -- "null"
+    Json.to_string(Bool(true))   -- "true"
+    Json.to_string(Number(3.14)) -- "3.14"
+    Json.to_string(Str("hi"))    -- "\"hi\""
+"""
+pub fn to_string(jv) do
+  match jv do
+  | Null -> "null"
+  | Bool(b) -> if b then "true" else "false"
+  | Number(f) ->
+    let fi = float_to_int(f)
+    if int_to_float(fi) == f then int_to_string(fi)
+    else float_to_string(f)
+  | Str(s) -> "\"" ++ escape_str(s) ++ "\""
+  | Array(xs) ->
+    let strs = map_list(xs, fn x -> to_string(x), Nil)
+    "[" ++ string_join(strs, ",") ++ "]"
+  | Object(kvs) ->
+    let strs = map_list(kvs, fn kv -> match kv do | (k, v) -> "\"" ++ escape_str(k) ++ "\":" ++ to_string(v) end, Nil)
+    "{" ++ string_join(strs, ",") ++ "}"
+  end
+end
+
+doc """
+Retrieve a field from a JSON Object by key.
+Returns Some(value) if found, or None otherwise.
+If jv is not an Object, returns None.
+
+    Json.get(Object([("x", Number(1.0))]), "x") -- Some(Number(1.0))
+    Json.get(Null, "x")                          -- None
+"""
+pub fn get(jv, key) do
+  match jv do
+  | Object(kvs) ->
+    fn find(pairs) do
+      match pairs do
+      | Nil -> None
+      | Cons(kv, rest) ->
+        let (k, v) = kv
+        if k == key then Some(v)
+        else find(rest)
+      end
+    end
+    find(kvs)
+  | _ -> None
+  end
+end
+
+doc """
+Nested field access: traverse a path of keys into nested JSON Objects.
+Returns Some(value) if the full path exists, or None if any step fails.
+
+    Json.get_in(obj, ["a", "b", "c"]) -- equivalent to obj.a.b.c
+"""
+pub fn get_in(jv, keys) do
+  match keys do
+  | Nil -> Some(jv)
+  | Cons(k, rest) ->
+    match get(jv, k) do
+    | None -> None
+    | Some(v) -> get_in(v, rest)
+    end
+  end
+end
+
+doc "Construct a JSON null value."
+pub fn encode_null() do Null end
+
+doc "Construct a JSON boolean value."
+pub fn encode_bool(b) do Bool(b) end
+
+doc "Construct a JSON number value from a Float."
+pub fn encode_number(f) do Number(f) end
+
+doc "Construct a JSON number value from an Int."
+pub fn encode_int(n) do Number(int_to_float(n)) end
+
+doc "Construct a JSON string value."
+pub fn encode_string(s) do Str(s) end
+
+doc "Construct a JSON array value."
+pub fn encode_array(xs) do Array(xs) end
+
+doc "Construct a JSON object value from a list of (key, value) pairs."
+pub fn encode_object(kvs) do Object(kvs) end
+
+end

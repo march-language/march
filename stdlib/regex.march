@@ -1,0 +1,431 @@
+-- Regex module: simple regular expression engine (pure March implementation).
+--
+-- Supports:
+--   literal chars       exact character match
+--   .                   any single character
+--   *                   zero or more of preceding atom (greedy)
+--   +                   one or more of preceding atom (greedy)
+--   ?                   zero or one of preceding atom (greedy)
+--   ^                   anchor at start of string
+--   $                   anchor at end of string
+--   [abc]               character class (any of a, b, c)
+--   [a-z]               character range in a class
+--   [^abc]              negated character class
+--   \d  \D              digit / non-digit
+--   \w  \W              word char (alphanumeric + _) / non-word
+--   \s  \S              whitespace / non-whitespace
+--   \\  \.  \*  etc.    literal special characters
+--
+-- Functions:
+--   match(pattern, string)                -> Bool
+--   find(pattern, string)                 -> Option(String)
+--   find_all(pattern, string)             -> List(String)
+--   replace(pattern, replacement, string) -> String
+--   split(pattern, string)                -> List(String)
+
+mod Regex do
+
+-- ── Internal types ────────────────────────────────────────────────────────
+
+type RegexAtom =
+    RALit(String)
+  | RAAny
+  | RAClass(Bool, List(String))   -- Bool = negated
+  | RADigit
+  | RAWord
+  | RASpace
+  | RANotDigit
+  | RANotWord
+  | RANotSpace
+
+type RegexQuant = QOne | QZeroOrMore | QOneOrMore | QOptional
+
+type RegexItem = RegexItem(RegexAtom, RegexQuant)
+
+type RegexPattern = RegexPattern(Bool, List(RegexItem), Bool)
+-- RegexPattern(anchor_start, items, anchor_end)
+
+-- ── Private helpers ───────────────────────────────────────────────────────
+
+fn rev(xs, acc) do
+  match xs do
+  | Nil -> acc
+  | Cons(h, t) -> rev(t, Cons(h, acc))
+  end
+end
+
+fn list_contains_str(xs, x) do
+  match xs do
+  | Nil -> false
+  | Cons(h, t) -> if h == x then true else list_contains_str(t, x)
+  end
+end
+
+-- Get the byte at position pos in string s (as a 1-char string).
+-- Returns "" if out of bounds.
+fn char_at(s, pos) do
+  let len = string_byte_length(s)
+  if pos < 0 || pos >= len then ""
+  else string_slice(s, pos, 1)
+end
+
+-- Test whether the atom matches the character at position pos in string s.
+fn atom_matches(atom, s, pos) do
+  let c = char_at(s, pos)
+  if c == "" then false
+  else match atom do
+  | RALit(lit) -> c == lit
+  | RAAny -> true
+  | RADigit -> char_is_digit(c)
+  | RAWord -> char_is_alphanumeric(c) || c == "_"
+  | RASpace -> char_is_whitespace(c)
+  | RANotDigit -> !char_is_digit(c)
+  | RANotWord -> !(char_is_alphanumeric(c) || c == "_")
+  | RANotSpace -> !char_is_whitespace(c)
+  | RAClass(negated, class_chars) ->
+    let found = list_contains_str(class_chars, c)
+    if negated then !found else found
+  end
+end
+
+-- Count maximum consecutive matches of atom starting at pos.
+fn count_atom_max(atom, s, pos) do
+  fn go(p, n) do
+    if atom_matches(atom, s, p) then go(p + 1, n + 1)
+    else n
+  end
+  go(pos, 0)
+end
+
+-- Try to match items starting at position pos in string s.
+-- anchor_end: if true, the match must consume the rest of the string.
+-- Returns Some(end_pos) on success, None on failure.
+fn match_at(items, s, slen, pos, anchor_end) do
+  match items do
+  | Nil ->
+    if anchor_end then
+      if pos == slen then Some(pos) else None
+    else Some(pos)
+  | Cons(RegexItem(atom, quant), rest_items) ->
+    match quant do
+    | QOne ->
+      if atom_matches(atom, s, pos) then
+        match_at(rest_items, s, slen, pos + 1, anchor_end)
+      else None
+    | QOptional ->
+      if atom_matches(atom, s, pos) then
+        match match_at(rest_items, s, slen, pos + 1, anchor_end) do
+        | Some(r) -> Some(r)
+        | None -> match_at(rest_items, s, slen, pos, anchor_end)
+        end
+      else match_at(rest_items, s, slen, pos, anchor_end)
+    | QZeroOrMore ->
+      let max_n = count_atom_max(atom, s, pos)
+      fn try_n(n) do
+        if n < 0 then None
+        else match match_at(rest_items, s, slen, pos + n, anchor_end) do
+          | Some(r) -> Some(r)
+          | None -> try_n(n - 1)
+          end
+      end
+      try_n(max_n)
+    | QOneOrMore ->
+      if !atom_matches(atom, s, pos) then None
+      else do
+        let max_n = count_atom_max(atom, s, pos)
+        fn try_n(n) do
+          if n < 1 then None
+          else match match_at(rest_items, s, slen, pos + n, anchor_end) do
+            | Some(r) -> Some(r)
+            | None -> try_n(n - 1)
+            end
+        end
+        try_n(max_n)
+      end
+    end
+  end
+end
+
+-- Try to match the pattern anywhere in s starting from position `start`.
+-- Returns Some((match_start, match_end)) or None.
+fn find_match(rpat, s, slen, start) do
+  match rpat do
+  | RegexPattern(anchor_start, items, anchor_end) ->
+    if anchor_start then
+      if start > 0 then None
+      else match match_at(items, s, slen, 0, anchor_end) do
+        | None -> None
+        | Some(end_pos) -> Some((0, end_pos))
+        end
+    else do
+      fn try_pos(pos) do
+        if pos > slen then None
+        else match match_at(items, s, slen, pos, anchor_end) do
+          | Some(end_pos) -> Some((pos, end_pos))
+          | None -> try_pos(pos + 1)
+          end
+      end
+      try_pos(start)
+    end
+  end
+end
+
+-- ── Pattern parser ────────────────────────────────────────────────────────
+
+-- Parse a character class body (between [ and ]).
+-- Returns Ok((class_chars, remaining_chars)) or Err(message).
+fn parse_class_body(chars, acc) do
+  match chars do
+  | Nil -> Err("unterminated character class '[...]'")
+  | Cons("]", rest) -> Ok((rev(acc, Nil), rest))
+  | Cons("\\", Cons(e, rest2)) ->
+    let ch =
+      if e == "n" then char_from_int(10)
+      else if e == "r" then char_from_int(13)
+      else if e == "t" then char_from_int(9)
+      else e
+    parse_class_body(rest2, Cons(ch, acc))
+  | Cons(c1, Cons("-", Cons(c2, rest2))) ->
+    -- Range notation: expand c1..c2
+    if c2 == "]" then
+      -- '-' at end: treat as literal
+      parse_class_body(Cons("-", Cons(c2, rest2)), Cons(c1, acc))
+    else do
+      let lo = char_to_int(c1)
+      let hi = char_to_int(c2)
+      fn add_range(code, a) do
+        if code > hi then a
+        else add_range(code + 1, Cons(char_from_int(code), a))
+      end
+      parse_class_body(rest2, add_range(lo, acc))
+    end
+  | Cons(c, rest) -> parse_class_body(rest, Cons(c, acc))
+  end
+end
+
+-- Parse one atom from the pattern character list.
+-- Returns Ok((atom, remaining_chars)) or Err(message).
+fn parse_atom(chars) do
+  match chars do
+  | Nil -> Err("expected atom but reached end of pattern")
+  | Cons(".", rest) -> Ok((RAAny, rest))
+  | Cons("\\", Cons(e, rest)) ->
+    let atom =
+      if e == "d" then Ok(RADigit)
+      else if e == "D" then Ok(RANotDigit)
+      else if e == "w" then Ok(RAWord)
+      else if e == "W" then Ok(RANotWord)
+      else if e == "s" then Ok(RASpace)
+      else if e == "S" then Ok(RANotSpace)
+      else Ok(RALit(e))
+    match atom do
+    | Err(msg) -> Err(msg)
+    | Ok(a) -> Ok((a, rest))
+    end
+  | Cons("[", rest) ->
+    let (negated, rest2) =
+      match rest do
+      | Cons("^", r) -> (true, r)
+      | _ -> (false, rest)
+      end
+    match parse_class_body(rest2, Nil) do
+    | Err(e) -> Err(e)
+    | Ok((class_chars, remaining)) -> Ok((RAClass(negated, class_chars), remaining))
+    end
+  | Cons(c, rest) ->
+    if c == "*" || c == "+" || c == "?" then
+      Err("quantifier '" ++ c ++ "' without preceding atom")
+    else Ok((RALit(c), rest))
+  end
+end
+
+-- Parse the quantifier after an atom.
+fn parse_quant(chars) do
+  match chars do
+  | Cons("*", rest) -> (QZeroOrMore, rest)
+  | Cons("+", rest) -> (QOneOrMore, rest)
+  | Cons("?", rest) -> (QOptional, rest)
+  | _ -> (QOne, chars)
+  end
+end
+
+-- Parse all items from the pattern, stopping at end or '$'.
+fn parse_items(chars, acc) do
+  match chars do
+  | Nil -> Ok((rev(acc, Nil), false, Nil))
+  | Cons("$", Nil) -> Ok((rev(acc, Nil), true, Nil))
+  | Cons("$", rest) ->
+    -- '$' in the middle: treat rest as literal (simplification)
+    Ok((rev(acc, Nil), true, rest))
+  | _ ->
+    match parse_atom(chars) do
+    | Err(e) -> Err(e)
+    | Ok((atom, rest_cs)) ->
+      let (quant, rest_cs2) = parse_quant(rest_cs)
+      parse_items(rest_cs2, Cons(RegexItem(atom, quant), acc))
+    end
+  end
+end
+
+-- Parse a complete regex pattern string.
+-- Returns Ok(RegexPattern) or Err(message).
+fn compile(pattern) do
+  let chars = string_chars(pattern)
+  let (anchor_start, chars2) =
+    match chars do
+    | Cons("^", rest) -> (true, rest)
+    | _ -> (false, chars)
+    end
+  match parse_items(chars2, Nil) do
+  | Err(e) -> Err(e)
+  | Ok((items, anchor_end, _)) -> Ok(RegexPattern(anchor_start, items, anchor_end))
+  end
+end
+
+-- ── Public API ────────────────────────────────────────────────────────────
+
+doc """
+Test whether `pattern` matches anywhere in `string`.
+If pattern starts with '^', the match is anchored to the start.
+If pattern ends with '$', the match is anchored to the end.
+
+    Regex.matches("\\d+", "hello 42 world")  -- true
+    Regex.matches("^hello", "hello world")   -- true
+    Regex.matches("^hello", "say hello")     -- false
+"""
+pub fn matches(pattern, string) do
+  match compile(pattern) do
+  | Err(_) -> false
+  | Ok(rpat) ->
+    let slen = string_byte_length(string)
+    match find_match(rpat, string, slen, 0) do
+    | None -> false
+    | Some(_) -> true
+    end
+  end
+end
+
+doc """
+Find the first match of `pattern` in `string`.
+Returns Some(matched_substring) or None.
+
+    Regex.find("\\d+", "price: 42 dollars")  -- Some("42")
+    Regex.find("xyz", "hello")               -- None
+"""
+pub fn find(pattern, string) do
+  match compile(pattern) do
+  | Err(_) -> None
+  | Ok(rpat) ->
+    let slen = string_byte_length(string)
+    match find_match(rpat, string, slen, 0) do
+    | None -> None
+    | Some((s, e)) -> Some(string_slice(string, s, e - s))
+    end
+  end
+end
+
+doc """
+Find all non-overlapping matches of `pattern` in `string`.
+Returns a list of matched substrings in order.
+
+    Regex.find_all("\\d+", "a1 b22 c333")  -- ["1", "22", "333"]
+"""
+pub fn find_all(pattern, string) do
+  match compile(pattern) do
+  | Err(_) -> Nil
+  | Ok(rpat) ->
+    let slen = string_byte_length(string)
+    fn go(pos, acc) do
+      if pos > slen then rev(acc, Nil)
+      else match find_match(rpat, string, slen, pos) do
+        | None -> rev(acc, Nil)
+        | Some((s, e)) ->
+          let matched = string_slice(string, s, e - s)
+          -- Advance at least 1 to avoid infinite loops on zero-length matches
+          let next = if e > s then e else s + 1
+          go(next, Cons(matched, acc))
+        end
+    end
+    go(0, Nil)
+  end
+end
+
+doc """
+Replace the first match of `pattern` in `string` with `replacement`.
+Returns the resulting string.
+
+    Regex.replace("\\d+", "NUM", "price 42")  -- "price NUM"
+"""
+pub fn replace(pattern, replacement, string) do
+  match compile(pattern) do
+  | Err(_) -> string
+  | Ok(rpat) ->
+    let slen = string_byte_length(string)
+    match find_match(rpat, string, slen, 0) do
+    | None -> string
+    | Some((s, e)) ->
+      string_slice(string, 0, s) ++ replacement ++ string_slice(string, e, slen - e)
+    end
+  end
+end
+
+doc """
+Replace all non-overlapping matches of `pattern` in `string` with `replacement`.
+Returns the resulting string.
+
+    Regex.replace_all("\\d", "X", "a1b2c3")  -- "aXbXcX"
+"""
+pub fn replace_all(pattern, replacement, string) do
+  match compile(pattern) do
+  | Err(_) -> string
+  | Ok(rpat) ->
+    let slen = string_byte_length(string)
+    fn go(pos, acc_parts) do
+      if pos > slen then do
+        let parts = rev(acc_parts, Nil)
+        string_join(parts, "")
+      end
+      else match find_match(rpat, string, slen, pos) do
+        | None ->
+          let tail = string_slice(string, pos, slen - pos)
+          let parts = rev(Cons(tail, acc_parts), Nil)
+          string_join(parts, "")
+        | Some((s, e)) ->
+          let before = string_slice(string, pos, s - pos)
+          let next = if e > s then e else s + 1
+          go(next, Cons(replacement, Cons(before, acc_parts)))
+        end
+    end
+    go(0, Nil)
+  end
+end
+
+doc """
+Split `string` on matches of `pattern`.
+Returns the list of substrings between matches.
+
+    Regex.split("\\s+", "hello   world  foo")  -- ["hello", "world", "foo"]
+    Regex.split(",", "a,b,c")                   -- ["a", "b", "c"]
+"""
+pub fn split(pattern, string) do
+  match compile(pattern) do
+  | Err(_) -> Cons(string, Nil)
+  | Ok(rpat) ->
+    let slen = string_byte_length(string)
+    fn go(pos, acc) do
+      if pos > slen then rev(acc, Nil)
+      else match find_match(rpat, string, slen, pos) do
+        | None ->
+          let tail = string_slice(string, pos, slen - pos)
+          rev(Cons(tail, acc), Nil)
+        | Some((s, e)) ->
+          let segment = string_slice(string, pos, s - pos)
+          let next = if e > s then e else s + 1
+          go(next, Cons(segment, acc))
+        end
+    end
+    go(0, Nil)
+  end
+end
+
+end

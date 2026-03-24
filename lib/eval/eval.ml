@@ -2616,8 +2616,8 @@ let base_env : env =
         | _ -> eval_error "char_to_int: expected single-char string"))
   ; ("char_from_int", VBuiltin ("char_from_int", function
         | [VInt n] ->
-          if n >= 0 && n <= 127 then VCon ("Some", [VString (String.make 1 (Char.chr n))])
-          else VCon ("None", [])
+          if n >= 0 && n <= 127 then VString (String.make 1 (Char.chr n))
+          else VString ""
         | _ -> eval_error "char_from_int: expected int"))
 
     (* ---- Comparison helpers ---- *)
@@ -2895,6 +2895,12 @@ let base_env : env =
            | None -> VCon ("None", [])
            | Some i -> VCon ("Some", [VInt i]))
       | _ -> eval_error "string_last_index_of(s, sub)"))
+
+    (* ---- Time builtins ---- *)
+  ; ("unix_time", VBuiltin ("unix_time", function
+        | [] -> VFloat (Unix.gettimeofday ())
+        | [VUnit] -> VFloat (Unix.gettimeofday ())
+        | _ -> eval_error "unix_time: takes no arguments"))
 
     (* ---- TCP socket builtins ---- *)
   ; ("tcp_connect", VBuiltin ("tcp_connect", function

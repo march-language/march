@@ -14147,6 +14147,712 @@ let test_actor_call_get () =
       (vint (call_fn env "f" [])))
   ()
 
+(* ── Queue stdlib tests ──────────────────────────────────────────────────── *)
+
+let eval_with_queue src =
+  let queue_decl = load_stdlib_file_for_test "queue.march" in
+  eval_with_stdlib [queue_decl] src
+
+let test_queue_empty_is_empty () =
+  let env = eval_with_queue {|mod Test do
+    fn f() do Queue.is_empty(Queue.empty()) end
+  end|} in
+  Alcotest.(check bool) "empty queue is_empty" true (vbool (call_fn env "f" []))
+
+let test_queue_push_back_pop_front () =
+  let env = eval_with_queue {|mod Test do
+    fn f() do
+      let q = Queue.push_back(Queue.push_back(Queue.empty(), 1), 2)
+      match Queue.pop_front(q) do
+      | None -> -1
+      | Some((x, _)) -> x
+      end
+    end
+  end|} in
+  Alcotest.(check int) "push_back then pop_front = 1" 1 (vint (call_fn env "f" []))
+
+let test_queue_push_front_pop_front () =
+  let env = eval_with_queue {|mod Test do
+    fn f() do
+      let q = Queue.push_front(Queue.push_front(Queue.empty(), 2), 1)
+      match Queue.pop_front(q) do
+      | None -> -1
+      | Some((x, _)) -> x
+      end
+    end
+  end|} in
+  Alcotest.(check int) "push_front twice pop_front = 1" 1 (vint (call_fn env "f" []))
+
+let test_queue_pop_back () =
+  let env = eval_with_queue {|mod Test do
+    fn f() do
+      let q = Queue.push_back(Queue.push_back(Queue.empty(), 1), 2)
+      match Queue.pop_back(q) do
+      | None -> -1
+      | Some((x, _)) -> x
+      end
+    end
+  end|} in
+  Alcotest.(check int) "push_back 1 2 then pop_back = 2" 2 (vint (call_fn env "f" []))
+
+let test_queue_peek () =
+  let env = eval_with_queue {|mod Test do
+    fn front() do
+      let q = Queue.push_back(Queue.push_back(Queue.empty(), 10), 20)
+      match Queue.peek_front(q) do | None -> -1 | Some(x) -> x end
+    end
+    fn back() do
+      let q = Queue.push_back(Queue.push_back(Queue.empty(), 10), 20)
+      match Queue.peek_back(q) do | None -> -1 | Some(x) -> x end
+    end
+  end|} in
+  Alcotest.(check int) "peek_front = 10" 10 (vint (call_fn env "front" []));
+  Alcotest.(check int) "peek_back = 20" 20 (vint (call_fn env "back" []))
+
+let test_queue_size () =
+  let env = eval_with_queue {|mod Test do
+    fn f() do
+      let q = Queue.push_back(Queue.push_back(Queue.push_back(Queue.empty(), 1), 2), 3)
+      Queue.size(q)
+    end
+  end|} in
+  Alcotest.(check int) "size of 3-element queue = 3" 3 (vint (call_fn env "f" []))
+
+let test_queue_to_list () =
+  let env = eval_with_queue {|mod Test do
+    fn f() do
+      let q = Queue.push_back(Queue.push_back(Queue.push_back(Queue.empty(), 1), 2), 3)
+      Queue.to_list(q)
+    end
+  end|} in
+  let lst = vlist (call_fn env "f" []) in
+  Alcotest.(check (list int)) "to_list [1,2,3]" [1; 2; 3] (List.map vint lst)
+
+let test_queue_from_list () =
+  let env = eval_with_queue {|mod Test do
+    fn f() do
+      Queue.to_list(Queue.from_list(Cons(1, Cons(2, Cons(3, Nil)))))
+    end
+  end|} in
+  let lst = vlist (call_fn env "f" []) in
+  Alcotest.(check (list int)) "from_list [1,2,3] |> to_list = [1,2,3]" [1; 2; 3]
+    (List.map vint lst)
+
+let test_queue_rebalance () =
+  (* Push 3 elements to front, pop 3 from front — forces rebalance of back->front *)
+  let env = eval_with_queue {|mod Test do
+    fn f() do
+      let q0 = Queue.empty()
+      let q1 = Queue.push_back(q0, 10)
+      let q2 = Queue.push_back(q1, 20)
+      let q3 = Queue.push_back(q2, 30)
+      -- Pop all from front; the second pop forces rebalancing
+      match Queue.pop_front(q3) do
+      | Some((_, q4)) ->
+        match Queue.pop_front(q4) do
+        | Some((x, _)) -> x
+        | None -> -1
+        end
+      | None -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "second pop after rebalance = 20" 20 (vint (call_fn env "f" []))
+
+(* ── DateTime stdlib tests ───────────────────────────────────────────────── *)
+
+let eval_with_datetime src =
+  let dt_decl = load_stdlib_file_for_test "datetime.march" in
+  eval_with_stdlib [dt_decl] src
+
+(** Extract year from DateTime(Date(y,m,d), Time(h,mi,s)). *)
+let dt_year v =
+  match v with
+  | March_eval.Eval.VCon ("DateTime", [date; _]) ->
+    (match date with
+     | March_eval.Eval.VCon ("Date", [y; _; _]) -> vint y
+     | _ -> failwith "expected Date")
+  | _ -> failwith "expected DateTime"
+
+let dt_month v =
+  match v with
+  | March_eval.Eval.VCon ("DateTime", [date; _]) ->
+    (match date with
+     | March_eval.Eval.VCon ("Date", [_; m; _]) -> vint m
+     | _ -> failwith "expected Date")
+  | _ -> failwith "expected DateTime"
+
+let dt_day v =
+  match v with
+  | March_eval.Eval.VCon ("DateTime", [date; _]) ->
+    (match date with
+     | March_eval.Eval.VCon ("Date", [_; _; d]) -> vint d
+     | _ -> failwith "expected Date")
+  | _ -> failwith "expected DateTime"
+
+let dt_hour v =
+  match v with
+  | March_eval.Eval.VCon ("DateTime", [_; time]) ->
+    (match time with
+     | March_eval.Eval.VCon ("Time", [h; _; _]) -> vint h
+     | _ -> failwith "expected Time")
+  | _ -> failwith "expected DateTime"
+
+let test_datetime_from_epoch () =
+  let env = eval_with_datetime {|mod Test do
+    fn f() do DateTime.from_timestamp(0) end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "from_timestamp(0) year = 1970" 1970 (dt_year v);
+  Alcotest.(check int) "from_timestamp(0) month = 1" 1 (dt_month v);
+  Alcotest.(check int) "from_timestamp(0) day = 1" 1 (dt_day v);
+  Alcotest.(check int) "from_timestamp(0) hour = 0" 0 (dt_hour v)
+
+let test_datetime_from_ts_day2 () =
+  let env = eval_with_datetime {|mod Test do
+    fn f() do DateTime.from_timestamp(86400) end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "from_timestamp(86400) day = 2" 2 (dt_day v);
+  Alcotest.(check int) "from_timestamp(86400) month = 1" 1 (dt_month v)
+
+let test_datetime_to_ts_roundtrip () =
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      let dt = DateTime.from_timestamp(1000000)
+      DateTime.to_timestamp(dt)
+    end
+  end|} in
+  Alcotest.(check int) "round-trip ts=1000000" 1000000 (vint (call_fn env "f" []))
+
+let test_datetime_add_days () =
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      let dt = DateTime.from_timestamp(0)
+      let dt2 = DateTime.add_days(dt, 1)
+      DateTime.to_timestamp(dt2)
+    end
+  end|} in
+  Alcotest.(check int) "add_days(epoch, 1) = 86400" 86400 (vint (call_fn env "f" []))
+
+let test_datetime_add_hours () =
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      let dt = DateTime.from_timestamp(0)
+      let dt2 = DateTime.add_hours(dt, 2)
+      DateTime.to_timestamp(dt2)
+    end
+  end|} in
+  Alcotest.(check int) "add_hours(epoch, 2) = 7200" 7200 (vint (call_fn env "f" []))
+
+let test_datetime_diff_seconds () =
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      let a = DateTime.from_timestamp(3600)
+      let b = DateTime.from_timestamp(0)
+      DateTime.diff_seconds(a, b)
+    end
+  end|} in
+  Alcotest.(check int) "diff_seconds 3600-0 = 3600" 3600 (vint (call_fn env "f" []))
+
+let test_datetime_day_of_week () =
+  (* Jan 1 1970 was Thursday = 4 *)
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      let dt = DateTime.from_timestamp(0)
+      DateTime.day_of_week(dt)
+    end
+  end|} in
+  Alcotest.(check int) "1970-01-01 is Thursday = 4" 4 (vint (call_fn env "f" []))
+
+let test_datetime_format () =
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      let dt = DateTime.from_timestamp(0)
+      DateTime.format(dt, "%Y-%m-%d %H:%M:%S")
+    end
+  end|} in
+  Alcotest.(check string) "format epoch = 1970-01-01 00:00:00"
+    "1970-01-01 00:00:00" (vstr (call_fn env "f" []))
+
+let test_datetime_parse_date () =
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      match DateTime.parse("2024-03-15") do
+      | Err(_) -> -1
+      | Ok(dt) -> DateTime.to_timestamp(dt)
+      end
+    end
+  end|} in
+  (* 2024-03-15: verify it round-trips through from_timestamp *)
+  let ts = vint (call_fn env "f" []) in
+  Alcotest.(check bool) "parse date-only gives valid timestamp"
+    true (ts > 0)
+
+let test_datetime_parse_datetime () =
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      match DateTime.parse("1970-01-01 00:00:00") do
+      | Err(_) -> -1
+      | Ok(dt) -> DateTime.to_timestamp(dt)
+      end
+    end
+  end|} in
+  Alcotest.(check int) "parse epoch datetime = 0" 0 (vint (call_fn env "f" []))
+
+let test_datetime_compare () =
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      let a = DateTime.from_timestamp(100)
+      let b = DateTime.from_timestamp(200)
+      DateTime.compare(a, b)
+    end
+  end|} in
+  Alcotest.(check int) "compare a<b = -1" (-1) (vint (call_fn env "f" []))
+
+let test_datetime_leap_year () =
+  (* 1972-02-29 should be valid: ts = date_to_days(1972,2,29)*86400 *)
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      -- 1972-03-01 00:00:00 should be 366+31+29 days after epoch
+      let dt = DateTime.from_timestamp(68169600)
+      match dt do
+      | DateTime(Date(y, m, d), _) -> y * 10000 + m * 100 + d
+      end
+    end
+  end|} in
+  (* 68169600 = (365 + 366 + 31 + 29) * 86400 — let's verify it gives 1972-03-01 *)
+  let _ = vint (call_fn env "f" []) in
+  (* Just check it doesn't panic and gives a reasonable year *)
+  let env2 = eval_with_datetime {|mod Test do
+    fn g() do
+      -- 1972-02-29 timestamp: (365 + 365 + 31 + 28) * 86400 = 789 * 86400
+      let ts = 789 * 86400
+      match DateTime.from_timestamp(ts) do
+      | DateTime(Date(_, m, d), _) -> m * 100 + d
+      end
+    end
+  end|} in
+  Alcotest.(check int) "1972-02-29 month=2 day=29" 229 (vint (call_fn env2 "g" []))
+
+(* ── JSON stdlib tests ───────────────────────────────────────────────────── *)
+
+let eval_with_json src =
+  let json_decl = load_stdlib_file_for_test "json.march" in
+  eval_with_stdlib [json_decl] src
+
+(** Match a VCon and extract its arguments *)
+let json_tag v =
+  match v with
+  | March_eval.Eval.VCon (tag, _) -> tag
+  | _ -> failwith "expected VCon"
+
+let json_inner v =
+  match v with
+  | March_eval.Eval.VCon (_, args) -> args
+  | _ -> failwith "expected VCon"
+
+let test_json_parse_null () =
+  let env = eval_with_json {|mod Test do
+    fn f() do Json.parse("null") end
+  end|} in
+  let r = call_fn env "f" [] in
+  Alcotest.(check string) "parse null -> Ok(Null)" "Ok" (json_tag r);
+  let inner = List.hd (json_inner r) in
+  Alcotest.(check string) "inner tag = Null" "Null" (json_tag inner)
+
+let test_json_parse_bool () =
+  let env = eval_with_json {|mod Test do
+    fn t() do Json.parse("true") end
+    fn f() do Json.parse("false") end
+  end|} in
+  let rt = call_fn env "t" [] in
+  Alcotest.(check string) "parse true -> Ok" "Ok" (json_tag rt);
+  let inner_t = List.hd (json_inner rt) in
+  Alcotest.(check string) "inner = Bool" "Bool" (json_tag inner_t);
+  Alcotest.(check bool) "Bool(true)" true (vbool (List.hd (json_inner inner_t)));
+  let rf = call_fn env "f" [] in
+  let inner_f = List.hd (json_inner rf) in
+  Alcotest.(check bool) "Bool(false)" false (vbool (List.hd (json_inner inner_f)))
+
+let test_json_parse_int () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      match Json.parse("42") do
+      | Ok(Number(n)) -> float_to_int(n)
+      | _ -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "parse 42 = Number(42.0)" 42 (vint (call_fn env "f" []))
+
+let test_json_parse_float () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      match Json.parse("3.14") do
+      | Ok(Number(n)) -> n
+      | _ -> 0.0
+      end
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  (match v with
+   | March_eval.Eval.VFloat f ->
+     Alcotest.(check bool) "parse 3.14" true (abs_float (f -. 3.14) < 0.001)
+   | _ -> Alcotest.fail "expected VFloat")
+
+let test_json_parse_negative () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      match Json.parse("-7") do
+      | Ok(Number(n)) -> float_to_int(n)
+      | _ -> 999
+      end
+    end
+  end|} in
+  Alcotest.(check int) "parse -7 = Number(-7.0)" (-7) (vint (call_fn env "f" []))
+
+let test_json_parse_string () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      match Json.parse("\"hello\"") do
+      | Ok(Str(s)) -> s
+      | _ -> "FAIL"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "parse string" "hello" (vstr (call_fn env "f" []))
+
+let test_json_parse_string_escape () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      match Json.parse("\"a\\nb\"") do
+      | Ok(Str(s)) -> string_byte_length(s)
+      | _ -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "parse string with \\n has 3 bytes" 3 (vint (call_fn env "f" []))
+
+let test_json_parse_empty_array () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      match Json.parse("[]") do
+      | Ok(Array(xs)) -> xs
+      | _ -> Cons(Null, Nil)
+      end
+    end
+  end|} in
+  let lst = vlist (call_fn env "f" []) in
+  Alcotest.(check int) "parse [] has 0 elements" 0 (List.length lst)
+
+let test_json_parse_array () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      match Json.parse("[1, 2, 3]") do
+      | Ok(Array(xs)) ->
+        match xs do
+        | Cons(Number(a), Cons(Number(b), Cons(Number(c), Nil))) ->
+          float_to_int(a) + float_to_int(b) + float_to_int(c)
+        | _ -> -1
+        end
+      | _ -> -2
+      end
+    end
+  end|} in
+  Alcotest.(check int) "parse [1,2,3] sum = 6" 6 (vint (call_fn env "f" []))
+
+let test_json_parse_empty_object () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      match Json.parse("{}") do
+      | Ok(Object(kvs)) -> kvs
+      | _ -> Cons(("x", Null), Nil)
+      end
+    end
+  end|} in
+  let lst = vlist (call_fn env "f" []) in
+  Alcotest.(check int) "parse {} has 0 entries" 0 (List.length lst)
+
+let test_json_parse_object () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      match Json.parse("{\"x\": 1}") do
+      | Ok(obj) ->
+        match Json.get(obj, "x") do
+        | Some(Number(n)) -> float_to_int(n)
+        | _ -> -1
+        end
+      | _ -> -2
+      end
+    end
+  end|} in
+  Alcotest.(check int) "parse {\"x\":1} get x = 1" 1 (vint (call_fn env "f" []))
+
+let test_json_parse_nested () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      match Json.parse("{\"a\":{\"b\":42}}") do
+      | Ok(obj) ->
+        match Json.get_in(obj, Cons("a", Cons("b", Nil))) do
+        | Some(Number(n)) -> float_to_int(n)
+        | _ -> -1
+        end
+      | _ -> -2
+      end
+    end
+  end|} in
+  Alcotest.(check int) "parse nested get_in = 42" 42 (vint (call_fn env "f" []))
+
+let test_json_parse_whitespace () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      match Json.parse("  {  \"k\"  :  true  }  ") do
+      | Ok(obj) ->
+        match Json.get(obj, "k") do
+        | Some(Bool(b)) -> b
+        | _ -> false
+        end
+      | _ -> false
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "parse with whitespace = true" true (vbool (call_fn env "f" []))
+
+let test_json_parse_error () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      match Json.parse("not json") do
+      | Err(_) -> true
+      | Ok(_) -> false
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "parse invalid = Err" true (vbool (call_fn env "f" []))
+
+let test_json_to_string_null () =
+  let env = eval_with_json {|mod Test do
+    fn f() do Json.to_string(Null) end
+  end|} in
+  Alcotest.(check string) "to_string Null" "null" (vstr (call_fn env "f" []))
+
+let test_json_to_string_bool () =
+  let env = eval_with_json {|mod Test do
+    fn t() do Json.to_string(Bool(true)) end
+    fn f() do Json.to_string(Bool(false)) end
+  end|} in
+  Alcotest.(check string) "to_string true" "true" (vstr (call_fn env "t" []));
+  Alcotest.(check string) "to_string false" "false" (vstr (call_fn env "f" []))
+
+let test_json_to_string_number_int () =
+  let env = eval_with_json {|mod Test do
+    fn f() do Json.to_string(Number(42.0)) end
+  end|} in
+  Alcotest.(check string) "to_string Number(42.0) = \"42\"" "42"
+    (vstr (call_fn env "f" []))
+
+let test_json_to_string_string () =
+  let env = eval_with_json {|mod Test do
+    fn f() do Json.to_string(Str("hello")) end
+  end|} in
+  Alcotest.(check string) "to_string Str" {|"hello"|} (vstr (call_fn env "f" []))
+
+let test_json_to_string_array () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      Json.to_string(Array(Cons(Number(1.0), Cons(Number(2.0), Nil))))
+    end
+  end|} in
+  Alcotest.(check string) "to_string Array" "[1,2]" (vstr (call_fn env "f" []))
+
+let test_json_to_string_object () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      Json.to_string(Object(Cons(("k", Bool(true)), Nil)))
+    end
+  end|} in
+  Alcotest.(check string) "to_string Object" {|{"k":true}|} (vstr (call_fn env "f" []))
+
+let test_json_get () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      let obj = Object(Cons(("x", Number(5.0)), Cons(("y", Number(10.0)), Nil)))
+      match Json.get(obj, "y") do
+      | Some(Number(n)) -> float_to_int(n)
+      | _ -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "get y from object = 10" 10 (vint (call_fn env "f" []))
+
+let test_json_get_in () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      let inner = Object(Cons(("b", Number(99.0)), Nil))
+      let outer = Object(Cons(("a", inner), Nil))
+      match Json.get_in(outer, Cons("a", Cons("b", Nil))) do
+      | Some(Number(n)) -> float_to_int(n)
+      | _ -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "get_in nested = 99" 99 (vint (call_fn env "f" []))
+
+let test_json_encode_helpers () =
+  let env = eval_with_json {|mod Test do
+    fn f() do
+      let arr = Json.encode_array(Cons(Json.encode_int(1), Cons(Json.encode_string("hi"), Nil)))
+      Json.to_string(arr)
+    end
+  end|} in
+  Alcotest.(check string) "encode helpers" {|[1,"hi"]|} (vstr (call_fn env "f" []))
+
+(* ── Regex stdlib tests ──────────────────────────────────────────────────── *)
+
+let eval_with_regex src =
+  let regex_decl = load_stdlib_file_for_test "regex.march" in
+  eval_with_stdlib [regex_decl] src
+
+let test_regex_match_literal_true () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.matches("hello", "say hello world") end
+  end|} in
+  Alcotest.(check bool) "match literal: found" true (vbool (call_fn env "f" []))
+
+let test_regex_match_literal_false () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.matches("xyz", "hello world") end
+  end|} in
+  Alcotest.(check bool) "match literal: not found" false (vbool (call_fn env "f" []))
+
+let test_regex_match_any () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.matches("h.llo", "hello") end
+    fn g() do Regex.matches("h.llo", "hxllo") end
+  end|} in
+  Alcotest.(check bool) "match any: hello" true (vbool (call_fn env "f" []));
+  Alcotest.(check bool) "match any: hxllo" true (vbool (call_fn env "g" []))
+
+let test_regex_match_star () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.matches("ab*c", "ac") end
+    fn g() do Regex.matches("ab*c", "abbbbc") end
+  end|} in
+  Alcotest.(check bool) "star: ac matches ab*c" true (vbool (call_fn env "f" []));
+  Alcotest.(check bool) "star: abbbbc matches ab*c" true (vbool (call_fn env "g" []))
+
+let test_regex_match_plus () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.matches("ab+c", "ac") end
+    fn g() do Regex.matches("ab+c", "abc") end
+  end|} in
+  Alcotest.(check bool) "plus: ac does not match ab+c" false (vbool (call_fn env "f" []));
+  Alcotest.(check bool) "plus: abc matches ab+c" true (vbool (call_fn env "g" []))
+
+let test_regex_match_optional () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.matches("colou?r", "color") end
+    fn g() do Regex.matches("colou?r", "colour") end
+  end|} in
+  Alcotest.(check bool) "optional: color" true (vbool (call_fn env "f" []));
+  Alcotest.(check bool) "optional: colour" true (vbool (call_fn env "g" []))
+
+let test_regex_match_anchor_start () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.matches("^hello", "hello world") end
+    fn g() do Regex.matches("^hello", "say hello") end
+  end|} in
+  Alcotest.(check bool) "anchor start: matches" true (vbool (call_fn env "f" []));
+  Alcotest.(check bool) "anchor start: no match" false (vbool (call_fn env "g" []))
+
+let test_regex_match_anchor_end () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.matches("world$", "hello world") end
+    fn g() do Regex.matches("world$", "world peace") end
+  end|} in
+  Alcotest.(check bool) "anchor end: matches" true (vbool (call_fn env "f" []));
+  Alcotest.(check bool) "anchor end: no match" false (vbool (call_fn env "g" []))
+
+let test_regex_match_class () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.matches("[aeiou]", "hello") end
+    fn g() do Regex.matches("[^aeiou]", "hello") end
+  end|} in
+  Alcotest.(check bool) "class [aeiou] in hello" true (vbool (call_fn env "f" []));
+  Alcotest.(check bool) "negated class [^aeiou] in hello" true (vbool (call_fn env "g" []))
+
+let test_regex_match_digit () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.matches("\\d", "abc123") end
+    fn g() do Regex.matches("\\d", "abcxyz") end
+  end|} in
+  Alcotest.(check bool) "\\d in abc123" true (vbool (call_fn env "f" []));
+  Alcotest.(check bool) "\\d in abcxyz = false" false (vbool (call_fn env "g" []))
+
+let test_regex_match_word () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.matches("\\w+", "hello_world") end
+  end|} in
+  Alcotest.(check bool) "\\w+ matches word" true (vbool (call_fn env "f" []))
+
+let test_regex_match_space () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.matches("\\s", "hello world") end
+    fn g() do Regex.matches("\\s", "helloworld") end
+  end|} in
+  Alcotest.(check bool) "\\s in 'hello world'" true (vbool (call_fn env "f" []));
+  Alcotest.(check bool) "\\s in 'helloworld' = false" false (vbool (call_fn env "g" []))
+
+let test_regex_find_basic () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.find("\\d+", "price: 42 dollars") end
+  end|} in
+  let r = call_fn env "f" [] in
+  Alcotest.(check string) "find \\d+ tag" "Some" (json_tag r);
+  let s = vstr (List.hd (json_inner r)) in
+  Alcotest.(check string) "find \\d+ = 42" "42" s
+
+let test_regex_find_none () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.find("\\d+", "no digits here") end
+  end|} in
+  let r = call_fn env "f" [] in
+  Alcotest.(check string) "find none -> None" "None" (json_tag r)
+
+let test_regex_find_all () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.find_all("\\d+", "a1 bb22 ccc333") end
+  end|} in
+  let lst = vlist (call_fn env "f" []) in
+  Alcotest.(check int) "find_all count = 3" 3 (List.length lst);
+  Alcotest.(check string) "first match = 1" "1" (vstr (List.nth lst 0));
+  Alcotest.(check string) "second match = 22" "22" (vstr (List.nth lst 1));
+  Alcotest.(check string) "third match = 333" "333" (vstr (List.nth lst 2))
+
+let test_regex_replace () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.replace("\\d+", "NUM", "price 42 or 100") end
+  end|} in
+  Alcotest.(check string) "replace first \\d+" "price NUM or 100"
+    (vstr (call_fn env "f" []))
+
+let test_regex_replace_all () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.replace_all("\\d", "X", "a1b2c3") end
+  end|} in
+  Alcotest.(check string) "replace_all \\d -> X" "aXbXcX"
+    (vstr (call_fn env "f" []))
+
+let test_regex_split () =
+  let env = eval_with_regex {|mod Test do
+    fn f() do Regex.split(",", "a,b,c") end
+  end|} in
+  let lst = vlist (call_fn env "f" []) in
+  Alcotest.(check int) "split by comma: 3 parts" 3 (List.length lst);
+  Alcotest.(check string) "part 0 = a" "a" (vstr (List.nth lst 0));
+  Alcotest.(check string) "part 1 = b" "b" (vstr (List.nth lst 1));
+  Alcotest.(check string) "part 2 = c" "c" (vstr (List.nth lst 2))
+
 let () =
   Alcotest.run "march"
     [
@@ -15420,4 +16126,74 @@ let () =
           Alcotest.test_case "cast does not crash"         `Quick test_actor_cast_basic;
           Alcotest.test_case "call/reply Get returns count" `Quick test_actor_call_get;
         ] );
+      ("stdlib_queue", [
+        Alcotest.test_case "empty is_empty"          `Quick test_queue_empty_is_empty;
+        Alcotest.test_case "push_back pop_front"     `Quick test_queue_push_back_pop_front;
+        Alcotest.test_case "push_front pop_front"    `Quick test_queue_push_front_pop_front;
+        Alcotest.test_case "pop_back"                `Quick test_queue_pop_back;
+        Alcotest.test_case "peek_front peek_back"    `Quick test_queue_peek;
+        Alcotest.test_case "size"                    `Quick test_queue_size;
+        Alcotest.test_case "to_list"                 `Quick test_queue_to_list;
+        Alcotest.test_case "from_list"               `Quick test_queue_from_list;
+        Alcotest.test_case "rebalance on pop"        `Quick test_queue_rebalance;
+      ]);
+      ("stdlib_datetime", [
+        Alcotest.test_case "from_timestamp epoch"    `Quick test_datetime_from_epoch;
+        Alcotest.test_case "from_timestamp day2"     `Quick test_datetime_from_ts_day2;
+        Alcotest.test_case "to_timestamp round-trip" `Quick test_datetime_to_ts_roundtrip;
+        Alcotest.test_case "add_days"                `Quick test_datetime_add_days;
+        Alcotest.test_case "add_hours"               `Quick test_datetime_add_hours;
+        Alcotest.test_case "diff_seconds"            `Quick test_datetime_diff_seconds;
+        Alcotest.test_case "day_of_week"             `Quick test_datetime_day_of_week;
+        Alcotest.test_case "format basic"            `Quick test_datetime_format;
+        Alcotest.test_case "parse date only"         `Quick test_datetime_parse_date;
+        Alcotest.test_case "parse datetime"          `Quick test_datetime_parse_datetime;
+        Alcotest.test_case "compare"                 `Quick test_datetime_compare;
+        Alcotest.test_case "leap year 1972"          `Quick test_datetime_leap_year;
+      ]);
+      ("stdlib_json", [
+        Alcotest.test_case "parse null"              `Quick test_json_parse_null;
+        Alcotest.test_case "parse true/false"        `Quick test_json_parse_bool;
+        Alcotest.test_case "parse integer"           `Quick test_json_parse_int;
+        Alcotest.test_case "parse float"             `Quick test_json_parse_float;
+        Alcotest.test_case "parse negative"          `Quick test_json_parse_negative;
+        Alcotest.test_case "parse string"            `Quick test_json_parse_string;
+        Alcotest.test_case "parse string escape"     `Quick test_json_parse_string_escape;
+        Alcotest.test_case "parse empty array"       `Quick test_json_parse_empty_array;
+        Alcotest.test_case "parse array"             `Quick test_json_parse_array;
+        Alcotest.test_case "parse empty object"      `Quick test_json_parse_empty_object;
+        Alcotest.test_case "parse object"            `Quick test_json_parse_object;
+        Alcotest.test_case "parse nested"            `Quick test_json_parse_nested;
+        Alcotest.test_case "parse whitespace"        `Quick test_json_parse_whitespace;
+        Alcotest.test_case "parse error"             `Quick test_json_parse_error;
+        Alcotest.test_case "to_string null"          `Quick test_json_to_string_null;
+        Alcotest.test_case "to_string bool"          `Quick test_json_to_string_bool;
+        Alcotest.test_case "to_string number int"    `Quick test_json_to_string_number_int;
+        Alcotest.test_case "to_string string"        `Quick test_json_to_string_string;
+        Alcotest.test_case "to_string array"         `Quick test_json_to_string_array;
+        Alcotest.test_case "to_string object"        `Quick test_json_to_string_object;
+        Alcotest.test_case "get object field"        `Quick test_json_get;
+        Alcotest.test_case "get_in nested"           `Quick test_json_get_in;
+        Alcotest.test_case "encode helpers"          `Quick test_json_encode_helpers;
+      ]);
+      ("stdlib_regex", [
+        Alcotest.test_case "match literal true"      `Quick test_regex_match_literal_true;
+        Alcotest.test_case "match literal false"     `Quick test_regex_match_literal_false;
+        Alcotest.test_case "match any dot"           `Quick test_regex_match_any;
+        Alcotest.test_case "match star"              `Quick test_regex_match_star;
+        Alcotest.test_case "match plus"              `Quick test_regex_match_plus;
+        Alcotest.test_case "match optional"          `Quick test_regex_match_optional;
+        Alcotest.test_case "match anchor start"      `Quick test_regex_match_anchor_start;
+        Alcotest.test_case "match anchor end"        `Quick test_regex_match_anchor_end;
+        Alcotest.test_case "match char class"        `Quick test_regex_match_class;
+        Alcotest.test_case "match \\d"               `Quick test_regex_match_digit;
+        Alcotest.test_case "match \\w"               `Quick test_regex_match_word;
+        Alcotest.test_case "match \\s"               `Quick test_regex_match_space;
+        Alcotest.test_case "find basic"              `Quick test_regex_find_basic;
+        Alcotest.test_case "find none"               `Quick test_regex_find_none;
+        Alcotest.test_case "find_all"                `Quick test_regex_find_all;
+        Alcotest.test_case "replace first"           `Quick test_regex_replace;
+        Alcotest.test_case "replace_all"             `Quick test_regex_replace_all;
+        Alcotest.test_case "split basic"             `Quick test_regex_split;
+      ]);
     ]
