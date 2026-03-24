@@ -24,15 +24,37 @@ let invoke_march ?(verbose=false) ?(filter="") files =
   if rc = 0 then Ok ()
   else Error (Printf.sprintf "test run failed (exit %d)" rc)
 
+(** Expand any directories in [paths] to their test files; keep plain files as-is. *)
+let expand_paths paths =
+  List.concat_map (fun p ->
+    if Sys.file_exists p && Sys.is_directory p then find_test_files p
+    else [p]
+  ) paths
+
+let find_test_dir () =
+  (* Try forge.toml root first, then fall back to ./test/ in cwd. *)
+  let test_dir_of_root root = Filename.concat root "test" in
+  match Project.load () with
+  | Ok proj -> Some (test_dir_of_root proj.Project.root)
+  | Error _ ->
+    let cwd_test = Filename.concat (Sys.getcwd ()) "test" in
+    if Sys.file_exists cwd_test && Sys.is_directory cwd_test then Some cwd_test
+    else None
+
 let run ?(verbose=false) ?(filter="") ?(files=[]) () =
-  if files <> [] then
-    (* User provided explicit files — run only those. *)
-    invoke_march ~verbose ~filter files
-  else
-    match Project.load () with
-    | Error msg -> Error msg
-    | Ok proj ->
-      let test_dir = Filename.concat proj.Project.root "test" in
+  if files <> [] then begin
+    (* User provided explicit files/directories — expand dirs, then run. *)
+    let expanded = expand_paths files in
+    if expanded = [] then begin
+      Printf.printf "no test files found\n%!";
+      Ok ()
+    end else
+      invoke_march ~verbose ~filter expanded
+  end else
+    match find_test_dir () with
+    | None ->
+      Error "no test/ directory found (no forge.toml and no ./test/ directory)"
+    | Some test_dir ->
       if not (Sys.file_exists test_dir) then
         Error (Printf.sprintf "no test/ directory found at %s" test_dir)
       else begin
