@@ -49,6 +49,42 @@ pub fn int_to_level(n) do
   else Error
 end
 
+doc "Parse a log level from a string (case-insensitive). Returns None for unknown strings."
+pub fn level_from_string(s) do
+  let lower = string_to_lowercase(s)
+  if lower == "debug" then Some(Debug)
+  else if lower == "info" then Some(Info)
+  else if lower == "warn" || lower == "warning" then Some(Warn)
+  else if lower == "error" then Some(Error)
+  else None
+end
+
+doc "Return the numeric rank of a log level: Debug=0, Info=1, Warn=2, Error=3."
+pub fn level_rank(l) do
+  match l do
+  | Debug -> 0
+  | Info  -> 1
+  | Warn  -> 2
+  | Error -> 3
+  end
+end
+
+doc "Return true if `level` is at least as severe as `min_level`."
+pub fn level_enabled(level, min_level) do
+  level_rank(level) >= level_rank(min_level)
+end
+
+doc "Format a log entry as a simple string: [LEVEL] message"
+pub fn format_entry(level, msg) do
+  "[" ++ level_to_string(level) ++ "] " ++ msg
+end
+
+doc "Log at `level` only if `level` is enabled relative to `min_level`."
+pub fn log_if(level, min_level, msg) do
+  if level_enabled(level, min_level) then log(level, msg)
+  else ()
+end
+
 -- ---- Level control ----
 
 doc "Set the minimum log level. Messages below this level are discarded."
