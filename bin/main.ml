@@ -684,7 +684,12 @@ let run_check_cmd files =
         exit 1
     in
     let desugared = March_desugar.Desugar.desugar_module module_ast in
-    desugared.March_ast.Ast.mod_decls
+    (* Wrap each user file in a DMod so its names are accessible as Module.name,
+       mirroring what load_stdlib_file does for stdlib modules. *)
+    [March_ast.Ast.DMod (desugared.March_ast.Ast.mod_name,
+                         March_ast.Ast.Public,
+                         desugared.March_ast.Ast.mod_decls,
+                         March_ast.Ast.dummy_span)]
   ) files in
   (* Build a synthetic combined module and type-check it *)
   let dummy_span = March_ast.Ast.{

@@ -897,6 +897,10 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_send_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_string, t_result t_unit e))));
     ("tcp_recv_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result t_string e)))));
     ("tcp_close",               Mono (TArrow (t_int, t_unit)));
+    (* tcp_recv_exact(fd, n): reads exactly n bytes, returns Result(Bytes, String) *)
+    ("tcp_recv_exact",          Mono (TArrow (t_int, TArrow (t_int, t_result (TCon ("Bytes", [])) t_string))));
+    (* md5(s): returns 32-char lowercase hex digest *)
+    ("md5",                     Mono (TArrow (t_string, t_string)));
     ("tcp_recv_http",           poly1 (fun e -> TArrow (t_int, TArrow (t_int, t_result t_string e))));
     ("tcp_recv_http_headers",   poly1 (fun e -> TArrow (t_int, t_result (TTuple [t_string; t_int; t_bool]) e)));
     ("tcp_recv_chunk",          poly1 (fun e -> TArrow (t_int, TArrow (t_int, t_result t_string e))));
@@ -3854,10 +3858,14 @@ let rec check_decl env (d : Ast.decl) : env =
     let inner_needs = List.concat_map (function
         | Ast.DNeeds (caps, _) -> List.map cap_path_of_names caps
         | _ -> []) decls in
+    (* Also export record field layouts for public record types so that
+       cross-module field access (e.g. conn.fd) works correctly. *)
+    let new_records = List.filter (fun (k, _) -> List.mem k pub_set) inner_env.records in
     let env' = bind_vars new_names env in
     { env' with
-      types = new_types @ env'.types;
-      ctors = new_ctors @ env'.ctors;
+      types   = new_types   @ env'.types;
+      ctors   = new_ctors   @ env'.ctors;
+      records = new_records @ env'.records;
       module_caps = (name.txt, inner_needs) :: env'.module_caps }
 
   | Ast.DProtocol (name, pdef, sp) ->
