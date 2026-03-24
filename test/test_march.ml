@@ -13467,6 +13467,30 @@ let test_parity_if_else () =
    covered here because the standalone JIT test module has no globals;
    those cases are exercised in the repl_jit_cross_line tests instead. *)
 
+(* ── Bitwise builtin parity tests ───────────────────────────────────────── *)
+
+let test_parity_bitwise_builtins () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    List.iter (fun (src, expected) ->
+      check_parity ~ctx:"bitwise" ~runtime_so src;
+      match interp_eval_expr src with
+      | Some (v, _) ->
+        Alcotest.(check string) ("bitwise: " ^ src) expected v
+      | None -> Alcotest.fail ("bitwise eval failed: " ^ src)
+    ) [
+      ("int_and(7, 3)",           "3");
+      ("int_or(5, 2)",            "7");
+      ("int_xor(15, 6)",          "9");
+      ("int_not(0)",              "-1");
+      ("int_shl(1, 4)",           "16");
+      ("int_shr(16, 2)",          "4");
+      ("int_popcount(7)",         "3");
+      ("int_and(int_shr(255, 3), 31)",   "31");
+      ("int_or(int_shl(1, 3), int_shl(1, 1))",  "10");
+    ]
+
 (* ── Tail-call enforcement tests ────────────────────────────────────────── *)
 
 let test_tc_tail_factorial_ok () =
@@ -16044,6 +16068,7 @@ let () =
           Alcotest.test_case "string interp"     `Quick test_parity_string_interp;
           Alcotest.test_case "closures"          `Quick test_parity_closures;
           Alcotest.test_case "if/else"           `Quick test_parity_if_else;
+          Alcotest.test_case "bitwise builtins"  `Quick test_parity_bitwise_builtins;
         ] );
       ( "tail_recursion",
         [

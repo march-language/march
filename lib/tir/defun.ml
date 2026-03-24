@@ -78,7 +78,9 @@ let builtin_names : StringSet.t =
       (* Comparison builtins used by derived Ord instances *)
       "march_compare_int"; "march_compare_float"; "march_compare_string";
       (* Hash builtins used by derived Hash instances *)
-      "march_hash_int"; "march_hash_float"; "march_hash_string"; "march_hash_bool" ]
+      "march_hash_int"; "march_hash_float"; "march_hash_string"; "march_hash_bool";
+      (* Bitwise integer builtins *)
+      "int_and"; "int_or"; "int_xor"; "int_not"; "int_shl"; "int_shr"; "int_popcount" ]
 
 (* ── Phase 0: collect top-level names ────────────────────────────── *)
 

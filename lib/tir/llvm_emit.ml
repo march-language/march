@@ -199,7 +199,9 @@ let is_builtin_fn name =
                  "send_checked"; "pid_of_int"; "get_actor_field";
                  "link"; "unlink"; "register_supervisor";
                  (* Generic to_string *)
-                 "to_string"]
+                 "to_string";
+                 (* Bitwise integer builtins *)
+                 "int_and"; "int_or"; "int_xor"; "int_not"; "int_shl"; "int_shr"; "int_popcount"]
 
 let atom_is_builtin (atom : Tir.atom) =
   match atom with
@@ -307,6 +309,10 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "register_supervisor"         -> Some Tir.TUnit
   (* Generic to_string *)
   | "to_string"                   -> Some Tir.TString
+  (* Bitwise integer builtins *)
+  | "int_and" | "int_or" | "int_xor"
+  | "int_not" | "int_shl" | "int_shr"
+  | "int_popcount"                -> Some Tir.TInt
   | _ -> None
 
 (** Mangle a March builtin name to the C runtime function name. *)
@@ -456,6 +462,13 @@ let int_cmp_pred = function
 let float_arith_op = function
   | "+." -> "fadd" | "-." -> "fsub"
   | "*." -> "fmul" | "/." -> "fdiv" | s -> failwith ("unknown float op: " ^ s)
+
+let is_int_bitwise name = List.mem name ["int_and"; "int_or"; "int_xor"; "int_shl"; "int_shr"]
+
+let int_bitwise_op = function
+  | "int_and" -> "and" | "int_or" -> "or" | "int_xor" -> "xor"
+  | "int_shl" -> "shl" | "int_shr" -> "ashr"
+  | s -> failwith ("unknown bitwise op: " ^ s)
 
 (* ── Type coercion ───────────────────────────────────────────────────── *)
 
@@ -895,6 +908,26 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     else
       emit ctx (Printf.sprintf "%s = sub i64 0, %s" r va);
     (ty, r)
+
+  (* ── Bitwise integer builtins ─────────────────────────────────────── *)
+  | Tir.EApp (f, [a; b]) when is_int_bitwise f.Tir.v_name ->
+    let va = emit_atom_as ctx "i64" a in
+    let vb = emit_atom_as ctx "i64" b in
+    let r  = fresh ctx "bw" in
+    emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_bitwise_op f.Tir.v_name) va vb);
+    ("i64", r)
+
+  | Tir.EApp (f, [a]) when f.Tir.v_name = "int_not" ->
+    let va = emit_atom_as ctx "i64" a in
+    let r  = fresh ctx "bw" in
+    emit ctx (Printf.sprintf "%s = xor i64 %s, -1" r va);
+    ("i64", r)
+
+  | Tir.EApp (f, [a]) when f.Tir.v_name = "int_popcount" ->
+    let va = emit_atom_as ctx "i64" a in
+    let r  = fresh ctx "bw" in
+    emit ctx (Printf.sprintf "%s = call i64 @llvm.ctpop.i64(i64 %s)" r va);
+    ("i64", r)
 
   (* ── Task builtins (Phase 1: inline LLVM IR, no C runtime) ────────── *)
   (* Thunks are fn x -> expr (Int -> a).  task_spawn calls the closure
@@ -1823,6 +1856,8 @@ declare void @march_link(ptr %actor_a, ptr %actor_b)
 declare void @march_unlink(ptr %actor_a, ptr %actor_b)
 declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs)
 declare ptr  @march_value_to_string(ptr %v)
+; LLVM intrinsics
+declare i64  @llvm.ctpop.i64(i64 %val)
 
 |}
 
