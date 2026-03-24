@@ -1158,7 +1158,7 @@ end
 |} in
   let a = analyse src in
   let (line, col) = pos_of src "let x" in
-  let acts = An.code_actions_at a ~line ~character:col in
+  let acts = An.code_actions_at a ~line ~character:col () in
   let has_make_linear =
     List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
         match ca.title with
@@ -1187,7 +1187,7 @@ end
 |} in
   let a = analyse src in
   let (line, col) = pos_of src "let x" in
-  let acts = An.code_actions_at a ~line ~character:col in
+  let acts = An.code_actions_at a ~line ~character:col () in
   let has_make_linear =
     List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
         match ca.title with
@@ -1214,7 +1214,7 @@ end
 |} in
   let a = analyse src in
   let (line, col) = pos_of src "let value" in
-  let acts = An.code_actions_at a ~line ~character:col in
+  let acts = An.code_actions_at a ~line ~character:col () in
   let linear_act = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
       match ca.title with
       | t ->
@@ -1271,7 +1271,7 @@ end
 |} in
   let a = analyse src in
   let (line, col) = pos_of src "match c" in
-  let acts = An.code_actions_at a ~line ~character:col in
+  let acts = An.code_actions_at a ~line ~character:col () in
   let has_exhaustion =
     List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
         let low = String.lowercase_ascii ca.title in
@@ -1308,7 +1308,7 @@ end
   in
   Alcotest.(check bool) "warning present" true has_warning;
   let (line, col) = pos_of src "match s" in
-  let acts = An.code_actions_at a ~line ~character:col in
+  let acts = An.code_actions_at a ~line ~character:col () in
   let has_quickfix =
     List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
         ca.kind = Some Lsp.Types.CodeActionKind.QuickFix
@@ -1332,7 +1332,7 @@ end
 |} in
   let a = analyse src in
   let (line, col) = pos_of src "match d" in
-  let acts = An.code_actions_at a ~line ~character:col in
+  let acts = An.code_actions_at a ~line ~character:col () in
   let qf = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
       ca.kind = Some Lsp.Types.CodeActionKind.QuickFix
     ) acts in
@@ -1374,7 +1374,7 @@ end
 |} in
   let a = analyse src in
   let (line, col) = pos_of src "match b" in
-  let acts = An.code_actions_at a ~line ~character:col in
+  let acts = An.code_actions_at a ~line ~character:col () in
   let qf = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
       ca.kind = Some Lsp.Types.CodeActionKind.QuickFix) acts in
   match qf with

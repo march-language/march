@@ -15,6 +15,7 @@ type diagnostic = {
   message : string;
   labels : label list;     (** Additional labeled source spans *)
   notes : string list;      (** Extra context / suggestions *)
+  code : string option;    (** Machine-readable error/warning code, e.g. "unused_binding" *)
 }
 [@@deriving show]
 
@@ -33,15 +34,19 @@ let report ctx diag = ctx.diagnostics <- diag :: ctx.diagnostics
 
 let error ctx ~span message =
   report ctx
-    { severity = Error; span; message; labels = []; notes = [] }
+    { severity = Error; span; message; labels = []; notes = []; code = None }
 
 let warning ctx ~span message =
   report ctx
-    { severity = Warning; span; message; labels = []; notes = [] }
+    { severity = Warning; span; message; labels = []; notes = []; code = None }
 
 let hint ctx ~span message =
   report ctx
-    { severity = Hint; span; message; labels = []; notes = [] }
+    { severity = Hint; span; message; labels = []; notes = []; code = None }
+
+let warning_with_code ctx ~span ~code message =
+  report ctx
+    { severity = Warning; span; message; labels = []; notes = []; code = Some code }
 
 let has_errors ctx =
   List.exists (fun d -> d.severity = Error) ctx.diagnostics

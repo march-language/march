@@ -27,6 +27,12 @@ type match_site = {
   ms_missing_case : string;    (** Pattern example from the warning message *)
 }
 
+(** A site where a type annotation can be inserted. *)
+type annotation_site = {
+  as_name_span : Ast.span;  (** Span of the unannotated variable name *)
+  as_rhs_span  : Ast.span;  (** Span of the RHS expression (for type lookup) *)
+}
+
 (** Where a linear/affine value is consumed. *)
 type consumption = {
   con_name : string;
@@ -67,6 +73,12 @@ type t = {
   match_sites : match_site list;
   (** Non-exhaustive match warnings, structured for quickfix consumption. *)
   diagnostics : Lsp.Types.Diagnostic.t list;
+  ctor_arities : (string * int) list;
+  (** Data constructor name → argument count (used for snippet completions). *)
+  fold_ranges : (int * int * string) list;
+  (** Fold ranges: (start_line_0indexed, end_line_0indexed, kind). *)
+  annotation_sites : annotation_site list;
+  (** Unannotated let bindings eligible for "Add type annotation" code action. *)
 }
 
 (* ------------------------------------------------------------------ *)
@@ -163,11 +175,13 @@ let diag_to_lsp ~filename (d : Err.diagnostic) =
         d.message ^ "\n" ^
         String.concat "\n" (List.map (fun n -> "note: " ^ n) d.notes)
     in
+    let code = Option.map (fun s -> `String s) d.code in
     Some (Lsp.Types.Diagnostic.create
       ~range
       ~severity:(severity_to_lsp d.severity)
       ~message:(`String message)
       ~source:"march"
+      ?code
       ())
 
 (* ------------------------------------------------------------------ *)
@@ -466,6 +480,114 @@ let build_consumption_map (_type_map : (Ast.span, Tc.ty) Hashtbl.t)
   !result
 
 (* ------------------------------------------------------------------ *)
+(* Fold-range and annotation-site collection                          *)
+(* ------------------------------------------------------------------ *)
+
+(** Extract the source span from any expression node. *)
+let span_of_expr = function
+  | Ast.ELit (_, sp) | Ast.EApp (_, _, sp) | Ast.ECon (_, _, sp)
+  | Ast.ELam (_, _, sp) | Ast.EBlock (_, sp) | Ast.ELet (_, sp)
+  | Ast.EMatch (_, _, sp) | Ast.ETuple (_, sp) | Ast.ERecord (_, sp)
+  | Ast.ERecordUpdate (_, _, sp) | Ast.EField (_, _, sp)
+  | Ast.EIf (_, _, _, sp) | Ast.EPipe (_, _, sp) | Ast.EAnnot (_, _, sp)
+  | Ast.EHole (_, sp) | Ast.EAtom (_, _, sp) | Ast.ESend (_, _, sp)
+  | Ast.ESpawn (_, sp) | Ast.EDbg (_, sp) | Ast.ELetFn (_, _, _, _, sp)
+  | Ast.EAssert (_, sp) -> sp
+  | Ast.EVar name -> name.Ast.span
+  | Ast.EResultRef _ -> Ast.dummy_span
+
+(** Walk an AST module collecting folding ranges.
+    Returns (start_line_0idx, end_line_0idx, kind) triples. *)
+let collect_fold_ranges (m : Ast.module_) : (int * int * string) list =
+  let ranges = ref [] in
+  let add (sp : Ast.span) kind =
+    let sl = sp.Ast.start_line - 1 in
+    let el = sp.Ast.end_line   - 1 in
+    if el > sl then ranges := (sl, el, kind) :: !ranges
+  in
+  let rec go_decls decls = List.iter go_decl decls
+  and go_decl decl =
+    match decl with
+    | Ast.DFn (fn, sp) ->
+      add sp "region";
+      List.iter (fun (cl : Ast.fn_clause) -> go_expr cl.fc_body) fn.fn_clauses
+    | Ast.DMod (_, _, decls, sp) ->
+      add sp "region";
+      go_decls decls
+    | Ast.DActor (_, _, adef, sp) ->
+      add sp "region";
+      go_expr adef.actor_init;
+      List.iter (fun (h : Ast.actor_handler) -> go_expr h.ah_body)
+        adef.actor_handlers
+    | Ast.DDescribe (_, decls, sp) ->
+      add sp "region";
+      go_decls decls
+    | Ast.DLet (_, b, _) -> go_expr b.bind_expr
+    | _ -> ()
+  and go_expr e =
+    match e with
+    | Ast.EMatch (subj, branches, sp) ->
+      add sp "region";
+      go_expr subj;
+      List.iter (fun (br : Ast.branch) ->
+          let bsp = span_of_expr br.branch_body in
+          add bsp "region";
+          go_expr br.branch_body
+        ) branches
+    | Ast.EBlock (es, _) -> List.iter go_expr es
+    | Ast.ELet (b, _)    -> go_expr b.bind_expr
+    | Ast.ELetFn (_, _, _, body, sp) -> add sp "region"; go_expr body
+    | Ast.ELam (_, body, _) -> go_expr body
+    | Ast.EIf (c, t, f, _) -> go_expr c; go_expr t; go_expr f
+    | Ast.EApp (f, args, _) -> go_expr f; List.iter go_expr args
+    | _ -> ()
+  in
+  go_decls m.Ast.mod_decls;
+  !ranges
+
+(** Walk an AST module collecting unannotated let bindings. *)
+let collect_annotation_sites (m : Ast.module_) : annotation_site list =
+  let sites = ref [] in
+  let rec go_decls decls = List.iter go_decl decls
+  and go_decl decl =
+    match decl with
+    | Ast.DLet (_, b, _) ->
+      (match b.bind_pat, b.bind_ty with
+       | Ast.PatVar name, None ->
+         let rhs_sp = span_of_expr b.bind_expr in
+         if rhs_sp <> Ast.dummy_span then
+           sites := { as_name_span = name.Ast.span; as_rhs_span = rhs_sp } :: !sites
+       | _ -> ());
+      go_expr b.bind_expr
+    | Ast.DFn (fn, _) ->
+      List.iter (fun (cl : Ast.fn_clause) -> go_expr cl.fc_body) fn.fn_clauses
+    | Ast.DMod (_, _, decls, _) -> go_decls decls
+    | Ast.DDescribe (_, decls, _) -> go_decls decls
+    | _ -> ()
+  and go_expr e =
+    match e with
+    | Ast.ELet (b, _) ->
+      (match b.bind_pat, b.bind_ty with
+       | Ast.PatVar name, None ->
+         let rhs_sp = span_of_expr b.bind_expr in
+         if rhs_sp <> Ast.dummy_span then
+           sites := { as_name_span = name.Ast.span; as_rhs_span = rhs_sp } :: !sites
+       | _ -> ());
+      go_expr b.bind_expr
+    | Ast.EBlock (es, _)         -> List.iter go_expr es
+    | Ast.ELam (_, body, _)      -> go_expr body
+    | Ast.ELetFn (_, _, _, body, _) -> go_expr body
+    | Ast.EMatch (subj, brs, _) ->
+      go_expr subj;
+      List.iter (fun br -> go_expr br.Ast.branch_body) brs
+    | Ast.EIf (c, t, f, _)      -> go_expr c; go_expr t; go_expr f
+    | Ast.EApp (f, args, _)      -> go_expr f; List.iter go_expr args
+    | _ -> ()
+  in
+  go_decls m.Ast.mod_decls;
+  !sites
+
+(* ------------------------------------------------------------------ *)
 (* Main analysis entry point                                           *)
 (* ------------------------------------------------------------------ *)
 
@@ -487,21 +609,24 @@ let analyse ~filename ~src : t =
   let make_empty_with diag =
     { src;
       filename;
-      type_map    = Hashtbl.create 0;
-      def_map     = Hashtbl.create 0;
-      use_map     = Hashtbl.create 0;
-      vars        = [];
-      types       = [];
-      ctors       = [];
-      interfaces  = [];
-      impls       = [];
-      actors      = [];
-      doc_map     = Hashtbl.create 0;
-      refs_map    = Hashtbl.create 0;
-      call_sites  = [];
-      consumption = [];
-      match_sites = [];
-      diagnostics = [diag] }
+      type_map         = Hashtbl.create 0;
+      def_map          = Hashtbl.create 0;
+      use_map          = Hashtbl.create 0;
+      vars             = [];
+      types            = [];
+      ctors            = [];
+      interfaces       = [];
+      impls            = [];
+      actors           = [];
+      doc_map          = Hashtbl.create 0;
+      refs_map         = Hashtbl.create 0;
+      call_sites       = [];
+      consumption      = [];
+      match_sites      = [];
+      diagnostics      = [diag];
+      ctor_arities     = [];
+      fold_ranges      = [];
+      annotation_sites = [] }
   in
   let make_parse_diag pos msg =
     let sp : Ast.span = {
@@ -623,11 +748,23 @@ let analyse ~filename ~src : t =
       call_sites;
       consumption;
       match_sites;
-      diagnostics = diags }
+      diagnostics      = diags;
+      ctor_arities     = List.map (fun (name, ci) ->
+                           (name, List.length ci.Tc.ci_arg_tys)) final_env.Tc.ctors;
+      fold_ranges      = collect_fold_ranges raw_ast;
+      annotation_sites = collect_annotation_sites raw_ast }
 
 (* ------------------------------------------------------------------ *)
 (* Query helpers                                                       *)
 (* ------------------------------------------------------------------ *)
+
+(** Walk [TArrow] chain to collect stringified parameter types. *)
+let rec unwrap_arrows (ty : Tc.ty) : string list * string =
+  match ty with
+  | Tc.TArrow (param, rest) ->
+    let (more, ret) = unwrap_arrows rest in
+    (Tc.pp_ty param :: more, ret)
+  | _                       -> ([], Tc.pp_ty ty)
 
 let type_at (a : t) ~line ~character : string option =
   let candidates = Hashtbl.fold (fun sp ty acc ->
@@ -700,19 +837,49 @@ let completions_at (a : t) ~line:_ ~character:_ =
   let var_items = List.filter_map (fun (name, scheme) ->
       if String.length name > 0 && name.[0] = '_' then None
       else
-        let detail = match scheme with
-          | Tc.Mono ty -> Tc.pp_ty ty
-          | Tc.Poly (_, _, ty) -> Tc.pp_ty ty
+        let ty = match scheme with
+          | Tc.Mono ty -> ty
+          | Tc.Poly (_, _, ty) -> ty
         in
-        Some (CompletionItem.create
-          ~label:name ~kind:CompletionItemKind.Function ~detail ())
+        let detail = Tc.pp_ty ty in
+        let (params, _) = unwrap_arrows ty in
+        if params = [] then
+          Some (CompletionItem.create
+            ~label:name ~kind:CompletionItemKind.Function ~detail ())
+        else begin
+          let parts = List.mapi
+            (fun i p -> Printf.sprintf "${%d:%s}" (i + 1) p)
+            params
+          in
+          let insert_text =
+            Printf.sprintf "%s(%s)" name (String.concat ", " parts)
+          in
+          Some (CompletionItem.create
+            ~label:name ~kind:CompletionItemKind.Function ~detail
+            ~insertText:insert_text
+            ~insertTextFormat:InsertTextFormat.Snippet ())
+        end
     ) a.vars in
   let type_items = List.map (fun (name, _) ->
       CompletionItem.create ~label:name ~kind:CompletionItemKind.Class ()
     ) a.types in
   let ctor_items = List.map (fun (name, parent) ->
-      CompletionItem.create
-        ~label:name ~kind:CompletionItemKind.EnumMember ~detail:parent ()
+      let arity = Option.value ~default:0 (List.assoc_opt name a.ctor_arities) in
+      if arity = 0 then
+        CompletionItem.create
+          ~label:name ~kind:CompletionItemKind.EnumMember ~detail:parent ()
+      else begin
+        let parts = List.init arity
+          (fun i -> Printf.sprintf "${%d:arg%d}" (i + 1) (i + 1))
+        in
+        let insert_text =
+          Printf.sprintf "%s(%s)" name (String.concat ", " parts)
+        in
+        CompletionItem.create
+          ~label:name ~kind:CompletionItemKind.EnumMember ~detail:parent
+          ~insertText:insert_text
+          ~insertTextFormat:InsertTextFormat.Snippet ()
+      end
     ) a.ctors in
   let iface_items = List.map (fun (name, _) ->
       CompletionItem.create ~label:name ~kind:CompletionItemKind.Interface ()
@@ -869,14 +1036,6 @@ let rename_at (a : t) ~line ~character ~new_name
       Lsp.Types.TextEdit.create ~range:loc.range ~newText:new_name
     ) locs
 
-(** Walk [TArrow] chain to collect stringified parameter types. *)
-let rec unwrap_arrows (ty : Tc.ty) : string list * string =
-  match ty with
-  | Tc.TArrow (param, rest) ->
-    let (more, ret) = unwrap_arrows rest in
-    (Tc.pp_ty param :: more, ret)
-  | _                       -> ([], Tc.pp_ty ty)
-
 (** Convert 0-indexed (line, character) to a byte offset in [src]. *)
 let offset_of_pos src line character =
   let n = String.length src in
@@ -1002,8 +1161,12 @@ let find_end_before_span src (span : Ast.span) =
 (** Generate code actions relevant to the cursor position [line, character].
     Produces:
     - "Make `x` linear" for single-use non-linear let bindings at cursor.
-    - "Add missing case: P" quickfix for non-exhaustive matches at cursor. *)
+    - "Add missing case: P" quickfix for non-exhaustive matches at cursor.
+    - "Add type annotation" for unannotated let bindings at cursor.
+    - "Prefix with underscore / Remove unused binding" for unused variables. *)
 let code_actions_at (a : t) ~line ~character
+    ?(diagnostics : Lsp.Types.Diagnostic.t list = [])
+    ()
     : Lsp.Types.CodeAction.t list =
   let open Lsp.Types in
   (* ---- Make-linear actions ---- *)
@@ -1080,7 +1243,123 @@ let code_actions_at (a : t) ~line ~character
         end
       ) a.match_sites
   in
-  make_linear_actions @ exhaustion_actions
+  (* ---- Add-type-annotation actions ---- *)
+  let annotation_actions =
+    List.filter_map (fun (site : annotation_site) ->
+        if not (Pos.span_contains site.as_name_span ~line ~character) then None
+        else begin
+          (* Find the type of the RHS via the type_map *)
+          let rhs_sp = site.as_rhs_span in
+          let rhs_line = rhs_sp.Ast.start_line - 1 in
+          let rhs_char = rhs_sp.Ast.start_col in
+          let candidates = Hashtbl.fold (fun sp ty acc ->
+              if Pos.span_contains sp ~line:rhs_line ~character:rhs_char
+              then (sp, ty) :: acc else acc
+            ) a.type_map []
+          in
+          let ty_opt = match candidates with
+            | [] -> None
+            | _ ->
+              let (_, ty) = List.fold_left (fun (bs, bt) (sp, ty) ->
+                  if Pos.span_smaller sp bs then (sp, ty) else (bs, bt)
+                ) (List.hd candidates) (List.tl candidates)
+              in
+              Some (Tc.pp_ty ty)
+          in
+          match ty_opt with
+          | None -> None
+          | Some ty_str ->
+            let insert_line = site.as_name_span.Ast.start_line - 1 in
+            let insert_col  = site.as_name_span.Ast.end_col in
+            let insert_pos  = Position.create ~line:insert_line ~character:insert_col in
+            let range       = Range.create ~start:insert_pos ~end_:insert_pos in
+            let edit        = TextEdit.create ~range ~newText:(": " ^ ty_str) in
+            let uri   = DocumentUri.of_path a.filename in
+            let we    = WorkspaceEdit.create ~changes:[(uri, [edit])] () in
+            let action = CodeAction.create
+                           ~title:"Add type annotation"
+                           ~kind:CodeActionKind.RefactorRewrite
+                           ~edit:we
+                           () in
+            Some action
+        end
+      ) a.annotation_sites
+  in
+  (* ---- Remove-unused-binding actions (from diagnostics context) ---- *)
+  let extract_name_from_msg msg =
+    (* "Unused variable `x`.\n..." → Some "x" *)
+    let prefix = "Unused variable `" in
+    let plen = String.length prefix in
+    if String.length msg >= plen && String.sub msg 0 plen = prefix then
+      let rest = String.sub msg plen (String.length msg - plen) in
+      (match String.index_opt rest '`' with
+       | Some i -> Some (String.sub rest 0 i)
+       | None   -> None)
+    else
+      None
+  in
+  let diag_cursor_overlap (diag : Lsp.Types.Diagnostic.t) =
+    let sl = diag.range.Lsp.Types.Range.start.line in
+    let el = diag.range.Lsp.Types.Range.end_.line in
+    let sc = diag.range.Lsp.Types.Range.start.character in
+    let ec = diag.range.Lsp.Types.Range.end_.character in
+    if line > sl && line < el then true
+    else if line = sl && line = el then character >= sc && character < ec
+    else if line = sl then character >= sc
+    else if line = el then character < ec
+    else false
+  in
+  let unused_binding_actions =
+    List.concat_map (fun (diag : Lsp.Types.Diagnostic.t) ->
+        let has_code = match diag.code with
+          | Some (`String "unused_binding") -> true
+          | _ -> false
+        in
+        if not has_code || not (diag_cursor_overlap diag) then []
+        else
+          let diag_line = diag.range.Lsp.Types.Range.start.line in
+          let diag_char = diag.range.Lsp.Types.Range.start.character in
+          let msg = match diag.message with `String s -> s | _ -> "" in
+          (match extract_name_from_msg msg with
+           | None -> []
+           | Some name ->
+             (* Prefix with underscore: insert "_" before the name *)
+             let pfx_pos    = Position.create ~line:diag_line ~character:diag_char in
+             let pfx_range  = Range.create ~start:pfx_pos ~end_:pfx_pos in
+             let pfx_edit   = TextEdit.create ~range:pfx_range ~newText:"_" in
+             let pfx_uri    = DocumentUri.of_path a.filename in
+             let pfx_we     = WorkspaceEdit.create ~changes:[(pfx_uri, [pfx_edit])] () in
+             let pfx_action = CodeAction.create
+               ~title:(Printf.sprintf "Prefix with underscore `_%s`" name)
+               ~kind:CodeActionKind.QuickFix
+               ~edit:pfx_we
+               () in
+             (* Remove unused binding: look up consumption for full let span *)
+             let remove_actions =
+               List.filter_map (fun (c : consumption) ->
+                   if c.con_name <> name || c.con_uses <> [] then None
+                   else begin
+                     let sp = c.con_def in
+                     let del_start = Position.create
+                       ~line:(sp.Ast.start_line - 1) ~character:0 in
+                     let del_end   = Position.create
+                       ~line:(sp.Ast.start_line) ~character:0 in
+                     let del_range = Range.create ~start:del_start ~end_:del_end in
+                     let del_edit  = TextEdit.create ~range:del_range ~newText:"" in
+                     let del_uri   = DocumentUri.of_path a.filename in
+                     let del_we    = WorkspaceEdit.create ~changes:[(del_uri, [del_edit])] () in
+                     Some (CodeAction.create
+                       ~title:(Printf.sprintf "Remove unused binding `%s`" name)
+                       ~kind:CodeActionKind.QuickFix
+                       ~edit:del_we
+                       ())
+                   end
+                 ) a.consumption
+             in
+             pfx_action :: remove_actions)
+      ) diagnostics
+  in
+  make_linear_actions @ exhaustion_actions @ annotation_actions @ unused_binding_actions
 
 let actor_info_at (a : t) ~line ~character : string option =
   let found = List.find_opt (fun (name, _) ->
