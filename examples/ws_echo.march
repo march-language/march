@@ -17,7 +17,7 @@
 mod WsEcho do
 
 -- Recursive message loop: handles frames until the connection closes.
-fn ws_loop(socket) do
+pfn ws_loop(socket) do
   match WebSocket.recv(socket) do
   | TextFrame(msg) ->
     WebSocket.send_frame(socket, TextFrame("Echo: " ++ msg))
@@ -36,11 +36,11 @@ fn ws_loop(socket) do
   end
 end
 
-fn ws_handler(socket) do
+pfn ws_handler(socket) do
   ws_loop(socket)
 end
 
-fn router(conn) do
+pfn router(conn) do
   match (HttpServer.method(conn), HttpServer.path_info(conn)) do
   | (Get, Cons("ws", Nil)) ->
     WebSocket.upgrade(conn, fn socket -> ws_handler(socket))
@@ -51,7 +51,7 @@ fn router(conn) do
   end
 end
 
-pub fn main() do
+pfn main() do
   println("WebSocket echo server starting on port 9877 ...")
   HttpServer.new(9877)
   |> HttpServer.plug(router)

@@ -1,38 +1,38 @@
 -- March private functions demonstration
--- Shows: p_fn for private functions, fn for public functions
+-- Shows: pfn for private functions, fn for public functions
 -- Private functions are only accessible within their defining module.
 
 mod Example do
 
-  pub mod Crypto do
+  mod Crypto do
     -- Public API
-    pub fn encode(x : Int) : Int do
+    fn encode(x : Int) : Int do
       let scrambled = scramble(x)
       add_checksum(scrambled)
     end
 
-    pub fn decode(x : Int) : Int do
+    fn decode(x : Int) : Int do
       let without_check = remove_checksum(x)
       unscramble(without_check)
     end
 
     -- Private implementation details: only callable within Crypto
-    fn scramble(x : Int) : Int do x * 31 + 7 end
-    fn unscramble(x : Int) : Int do (x - 7) / 31 end
-    fn add_checksum(x : Int) : Int do x + 100 end
-    fn remove_checksum(x : Int) : Int do x - 100 end
+    pfn scramble(x : Int) : Int do x * 31 + 7 end
+    pfn unscramble(x : Int) : Int do (x - 7) / 31 end
+    pfn add_checksum(x : Int) : Int do x + 100 end
+    pfn remove_checksum(x : Int) : Int do x - 100 end
   end
 
-  pub mod Counter do
+  mod Counter do
     -- Public: increment a counter value
-    pub fn increment(n : Int) : Int do n + step() end
-    pub fn decrement(n : Int) : Int do n - step() end
+    fn increment(n : Int) : Int do n + step() end
+    fn decrement(n : Int) : Int do n - step() end
 
     -- Private: the step size is an implementation detail
-    fn step() : Int do 1 end
+    pfn step() : Int do 1 end
   end
 
-  pub fn main() : Int do
+  fn main() : Int do
     -- Use the public API of Crypto
     let encoded = Crypto.encode(42)
     let decoded = Crypto.decode(encoded)

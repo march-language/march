@@ -9,18 +9,18 @@ mod DocExample do
 -- ---- Single-line doc strings ----
 
 doc "Returns a greeting string for the given name."
-pub fn greet(name : String) : String do
+fn greet(name : String) : String do
   "Hello, " ++ name ++ "!"
 end
 
 doc "Returns true if n is even."
-pub fn even(n : Int) : Bool do
+fn even(n : Int) : Bool do
   n % 2 == 0
 end
 
 doc "Computes the factorial of n. Undefined for negative n."
-pub fn factorial(0) : Int do 1 end
-pub fn factorial(n) : Int do n * factorial(n - 1) end
+fn factorial(0) : Int do 1 end
+fn factorial(n) : Int do n * factorial(n - 1) end
 
 -- ---- Triple-quoted doc strings (for multi-line docs) ----
 
@@ -33,30 +33,30 @@ Computes the nth Fibonacci number.
 
 Not suitable for large n — no memoisation.
 """
-pub fn fib(0) : Int do 0 end
-pub fn fib(1) : Int do 1 end
-pub fn fib(n) : Int do fib(n - 1) + fib(n - 2) end
+fn fib(0) : Int do 0 end
+fn fib(1) : Int do 1 end
+fn fib(n) : Int do fib(n - 1) + fib(n - 2) end
 
 -- ---- Nested module with its own docs ----
 
 mod Stack do
 
   doc "Pushes a value onto the front of the list, returning the new stack."
-  pub fn push(stack, value) do
+  fn push(stack, value) do
     Cons(value, stack)
   end
 
   doc "Pops the top value. Returns Ok(value) or Err(:empty)."
-  pub fn pop(Nil) do
+  fn pop(Nil) do
     Err(:empty)
   end
-  pub fn pop(Cons(x, _)) do
+  fn pop(Cons(x, _)) do
     Ok(x)
   end
 
   doc "Returns true if the stack has no elements."
-  pub fn is_empty(Nil) do true end
-  pub fn is_empty(_)   do false end
+  fn is_empty(Nil) do true end
+  fn is_empty(_)   do false end
 
 end
 

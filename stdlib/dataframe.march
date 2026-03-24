@@ -17,40 +17,40 @@ mod DataFrame do
 
 -- Value: used at row boundaries only (from_rows / to_rows / with_column).
 -- Internal column operations always work on typed Lists.
-pub type Value =
-    pub IntVal(Int)
-  | pub FloatVal(Float)
-  | pub StrVal(String)
-  | pub BoolVal(Bool)
-  | pub NullVal
+type Value =
+    IntVal(Int)
+  | FloatVal(Float)
+  | StrVal(String)
+  | BoolVal(Bool)
+  | NullVal
 
 -- Column: typed columnar storage. Each variant holds (name, data [, null_bitmap]).
 -- Null bitmap: parallel List(Bool) where true = that row is null.
-pub type Column =
-    pub IntCol(String, List(Int))
-  | pub FloatCol(String, List(Float))
-  | pub StrCol(String, List(String))
-  | pub BoolCol(String, List(Bool))
-  | pub NullableIntCol(String, List(Int), List(Bool))
-  | pub NullableFloatCol(String, List(Float), List(Bool))
-  | pub NullableStrCol(String, List(String), List(Bool))
-  | pub NullableBoolCol(String, List(Bool), List(Bool))
+type Column =
+    IntCol(String, List(Int))
+  | FloatCol(String, List(Float))
+  | StrCol(String, List(String))
+  | BoolCol(String, List(Bool))
+  | NullableIntCol(String, List(Int), List(Bool))
+  | NullableFloatCol(String, List(Float), List(Bool))
+  | NullableStrCol(String, List(String), List(Bool))
+  | NullableBoolCol(String, List(Bool), List(Bool))
 
 -- Row: a snapshot of one row, as an ordered assoc list. Slow path only.
-pub type Row = pub Row(List((String, Value)))
+type Row = Row(List((String, Value)))
 
 -- DataFrame: an ordered list of equal-length typed columns.
-pub type DataFrame = pub DataFrame(List(Column))
+type DataFrame = DataFrame(List(Column))
 
 doc "Construct a DataFrame directly from a list of columns. No length check."
-pub fn make_df(cols : List(Column)) : DataFrame do
+pfn make_df(cols : List(Column)) : DataFrame do
   DataFrame(cols)
 end
 
 -- ── Column helpers ─────────────────────────────────────────────────────────
 
 doc "Returns the name of a column."
-pub fn col_name(col : Column) : String do
+pfn col_name(col : Column) : String do
   match col do
   | IntCol(name, _)         -> name
   | FloatCol(name, _)       -> name
@@ -64,7 +64,7 @@ pub fn col_name(col : Column) : String do
 end
 
 doc "Returns the length (number of rows) of a column."
-pub fn col_len(col : Column) : Int do
+pfn col_len(col : Column) : Int do
   match col do
   | IntCol(_, data)         -> List.length(data)
   | FloatCol(_, data)       -> List.length(data)
@@ -78,7 +78,7 @@ pub fn col_len(col : Column) : Int do
 end
 
 -- Get the i-th value from a column as a Value. O(n) - slow path.
-fn col_value_at(col : Column, i : Int) : Value do
+pfn col_value_at(col : Column, i : Int) : Value do
   match col do
   | IntCol(_, data)   -> IntVal(List.nth(data, i))
   | FloatCol(_, data) -> FloatVal(List.nth(data, i))
@@ -96,7 +96,7 @@ fn col_value_at(col : Column, i : Int) : Value do
 end
 
 -- Convert a column to List(Value). O(n).
-fn col_to_value_list(col : Column) : List(Value) do
+pfn col_to_value_list(col : Column) : List(Value) do
   match col do
   | IntCol(_, data)   -> List.map(data, fn x -> IntVal(x))
   | FloatCol(_, data) -> List.map(data, fn x -> FloatVal(x))
@@ -114,7 +114,7 @@ fn col_to_value_list(col : Column) : List(Value) do
 end
 
 -- Keep only rows whose index is in the (sorted ascending) index list.
-fn filter_col_by_indices(col : Column, indices : List(Int)) : Column do
+pfn filter_col_by_indices(col : Column, indices : List(Int)) : Column do
   match col do
   | IntCol(name, data) ->
     IntCol(name, List.map(indices, fn i -> List.nth(data, i)))
@@ -144,14 +144,14 @@ fn filter_col_by_indices(col : Column, indices : List(Int)) : Column do
 end
 
 -- Reorder a column by an index permutation.
-fn reorder_col(col : Column, indices : List(Int)) : Column do
+pfn reorder_col(col : Column, indices : List(Int)) : Column do
   filter_col_by_indices(col, indices)
 end
 
 -- ── Value helpers ──────────────────────────────────────────────────────────
 
 doc "Converts a Value to its string representation."
-pub fn value_to_string(v : Value) : String do
+pfn value_to_string(v : Value) : String do
   match v do
   | IntVal(n)   -> int_to_string(n)
   | FloatVal(f) -> float_to_string(f)
@@ -162,7 +162,7 @@ pub fn value_to_string(v : Value) : String do
 end
 
 -- Type name of a value, for error messages.
-fn value_type_str(v : Value) : String do
+pfn value_type_str(v : Value) : String do
   match v do
   | IntVal(_)   -> "Int"
   | FloatVal(_) -> "Float"
@@ -173,7 +173,7 @@ fn value_type_str(v : Value) : String do
 end
 
 -- Value equality.
-fn values_equal(a : Value, b : Value) : Bool do
+pfn values_equal(a : Value, b : Value) : Bool do
   match a do
   | IntVal(x) ->
     match b do
@@ -204,7 +204,7 @@ fn values_equal(a : Value, b : Value) : Bool do
 end
 
 -- Compare two values for sort: returns -1, 0, or 1.
-fn compare_values(a : Value, b : Value) : Int do
+pfn compare_values(a : Value, b : Value) : Int do
   match a do
   | NullVal ->
     match b do
@@ -251,7 +251,7 @@ fn compare_values(a : Value, b : Value) : Int do
 end
 
 -- Compute a simple hash for a Value (for GroupBy).
-fn value_hash(v : Value) : Int do
+pfn value_hash(v : Value) : Int do
   match v do
   | IntVal(n)   -> n
   | FloatVal(f) -> float_to_int(f * 1000000.0)
@@ -266,7 +266,7 @@ fn value_hash(v : Value) : Int do
 end
 
 -- List(Value) equality (for GroupKey comparison).
-fn values_list_eq(as_ : List(Value), bs : List(Value)) : Bool do
+pfn values_list_eq(as_ : List(Value), bs : List(Value)) : Bool do
   match as_ do
   | Nil ->
     match bs do
@@ -286,14 +286,14 @@ end
 -- ── Column type inference (for from_rows and read_csv) ─────────────────────
 
 -- Internal builder: accumulates values during row-by-row construction.
-type ColumnBuilder =
+ptype ColumnBuilder =
     IntBuilder(String, List(Int))
   | FloatBuilder(String, List(Float))
   | StrBuilder(String, List(String))
   | BoolBuilder(String, List(Bool))
   | NullBuilder(String, Int)  -- all nulls so far; count of nulls seen
 
-fn builder_name(b : ColumnBuilder) : String do
+pfn builder_name(b : ColumnBuilder) : String do
   match b do
   | IntBuilder(name, _)   -> name
   | FloatBuilder(name, _) -> name
@@ -304,7 +304,7 @@ fn builder_name(b : ColumnBuilder) : String do
 end
 
 -- Push a value into a builder (strict: error on type mismatch).
-fn builder_push_strict(b : ColumnBuilder, val : Value) : Result(ColumnBuilder, String) do
+pfn builder_push_strict(b : ColumnBuilder, val : Value) : Result(ColumnBuilder, String) do
   let name = builder_name(b)
   match b do
   | IntBuilder(n, xs) ->
@@ -350,7 +350,7 @@ end
 
 -- Push a value into a builder with widening (for CSV/JSON readers).
 -- Widening order: Bool < Int < Float < String.
-fn builder_push_widen(b : ColumnBuilder, val : Value) : ColumnBuilder do
+pfn builder_push_widen(b : ColumnBuilder, val : Value) : ColumnBuilder do
   let name = builder_name(b)
   match b do
   | IntBuilder(n, xs) ->
@@ -404,7 +404,7 @@ fn builder_push_widen(b : ColumnBuilder, val : Value) : ColumnBuilder do
 end
 
 -- Finalize a builder into a Column.
-fn builder_to_column(b : ColumnBuilder) : Column do
+pfn builder_to_column(b : ColumnBuilder) : Column do
   match b do
   | IntBuilder(name, xs)   -> IntCol(name, List.reverse(xs))
   | FloatBuilder(name, xs) -> FloatCol(name, List.reverse(xs))
@@ -415,7 +415,7 @@ fn builder_to_column(b : ColumnBuilder) : Column do
 end
 
 -- Initialize a builder from the first value seen in a column.
-fn make_builder(name : String, val : Value) : ColumnBuilder do
+pfn make_builder(name : String, val : Value) : ColumnBuilder do
   match val do
   | IntVal(_)  -> IntBuilder(name, Nil)
   | FloatVal(_) -> FloatBuilder(name, Nil)
@@ -428,7 +428,7 @@ end
 -- ── Phase 1: Construction ──────────────────────────────────────────────────
 
 doc "Returns an empty DataFrame with no rows and no columns."
-pub fn empty() : DataFrame do
+pfn empty() : DataFrame do
   DataFrame(Nil)
 end
 
@@ -436,7 +436,7 @@ doc """
 Constructs a DataFrame from a list of pre-built columns.
 All columns must have equal length. Returns Err if they don't.
 """
-pub fn from_columns(cols : List(Column)) : Result(DataFrame, String) do
+pfn from_columns(cols : List(Column)) : Result(DataFrame, String) do
   match cols do
   | Nil -> Ok(DataFrame(Nil))
   | Cons(first, rest) ->
@@ -457,7 +457,7 @@ Type inference is strict: if a column starts as Int, every subsequent value
 must also be IntVal. Errors on type mismatch or NullVal in Phase 1.
 For widening inference (Int→Float→String), use from_rows_widen.
 """
-pub fn from_rows(rows : List(Row)) : Result(DataFrame, String) do
+pfn from_rows(rows : List(Row)) : Result(DataFrame, String) do
   match rows do
   | Nil -> Ok(DataFrame(Nil))
   | Cons(Row(first_pairs), rest_rows) ->
@@ -498,7 +498,7 @@ pub fn from_rows(rows : List(Row)) : Result(DataFrame, String) do
     | Err(e) -> Err(e)
     | Ok(builders_after_first) ->
       -- Process remaining rows
-      fn process_rows(remaining : List(Row), builders : List(ColumnBuilder)) : Result(List(Column), String) do
+      pfn process_rows(remaining : List(Row), builders : List(ColumnBuilder)) : Result(List(Column), String) do
         match remaining do
         | Nil ->
           Ok(List.map(builders, fn b -> builder_to_column(b)))
@@ -540,7 +540,7 @@ end
 
 -- Internal: construct a DataFrame from rows with widening type inference.
 -- Used by read_csv and read_json.
-fn from_rows_widen(rows : List(Row)) : Result(DataFrame, String) do
+pfn from_rows_widen(rows : List(Row)) : Result(DataFrame, String) do
   match rows do
   | Nil -> Ok(DataFrame(Nil))
   | Cons(Row(first_pairs), rest_rows) ->
@@ -560,7 +560,7 @@ fn from_rows_widen(rows : List(Row)) : Result(DataFrame, String) do
     match push_first do
     | Err(e) -> Err(e)
     | Ok(builders_after_first) ->
-      fn process_rows(remaining : List(Row), builders : List(ColumnBuilder)) : Result(List(Column), String) do
+      pfn process_rows(remaining : List(Row), builders : List(ColumnBuilder)) : Result(List(Column), String) do
         match remaining do
         | Nil -> Ok(List.map(builders, fn b -> builder_to_column(b)))
         | Cons(Row(pairs), more) ->
@@ -589,14 +589,14 @@ end
 -- ── Phase 1: Metadata ──────────────────────────────────────────────────────
 
 doc "Returns the ordered list of column names."
-pub fn schema(df : DataFrame) : List(String) do
+pfn schema(df : DataFrame) : List(String) do
   match df do
   | DataFrame(cols) -> List.map(cols, fn c -> col_name(c))
   end
 end
 
 doc "Returns the number of rows. O(1) for single-column frames; O(cols) otherwise."
-pub fn row_count(df : DataFrame) : Int do
+pfn row_count(df : DataFrame) : Int do
   match df do
   | DataFrame(Nil) -> 0
   | DataFrame(Cons(c, _)) -> col_len(c)
@@ -604,7 +604,7 @@ pub fn row_count(df : DataFrame) : Int do
 end
 
 doc "Returns the number of columns."
-pub fn col_count(df : DataFrame) : Int do
+pfn col_count(df : DataFrame) : Int do
   match df do
   | DataFrame(cols) -> List.length(cols)
   end
@@ -613,7 +613,7 @@ end
 -- ── Phase 1: Column access ─────────────────────────────────────────────────
 
 doc "Returns the column with the given name, or Err if not found."
-pub fn get_column(df : DataFrame, name : String) : Result(Column, String) do
+pfn get_column(df : DataFrame, name : String) : Result(Column, String) do
   match df do
   | DataFrame(cols) ->
     match List.find(cols, fn c -> col_name(c) == name) do
@@ -624,7 +624,7 @@ pub fn get_column(df : DataFrame, name : String) : Result(Column, String) do
 end
 
 doc "Returns the Int data list for a named column, or Err."
-pub fn get_int_col(df : DataFrame, name : String) : Result(List(Int), String) do
+pfn get_int_col(df : DataFrame, name : String) : Result(List(Int), String) do
   match get_column(df, name) do
   | Err(e) -> Err(e)
   | Ok(col) ->
@@ -636,7 +636,7 @@ pub fn get_int_col(df : DataFrame, name : String) : Result(List(Int), String) do
 end
 
 doc "Returns the Float data list for a named column, or Err."
-pub fn get_float_col(df : DataFrame, name : String) : Result(List(Float), String) do
+pfn get_float_col(df : DataFrame, name : String) : Result(List(Float), String) do
   match get_column(df, name) do
   | Err(e) -> Err(e)
   | Ok(col) ->
@@ -648,7 +648,7 @@ pub fn get_float_col(df : DataFrame, name : String) : Result(List(Float), String
 end
 
 doc "Returns the String data list for a named column, or Err."
-pub fn get_string_col(df : DataFrame, name : String) : Result(List(String), String) do
+pfn get_string_col(df : DataFrame, name : String) : Result(List(String), String) do
   match get_column(df, name) do
   | Err(e) -> Err(e)
   | Ok(col) ->
@@ -660,7 +660,7 @@ pub fn get_string_col(df : DataFrame, name : String) : Result(List(String), Stri
 end
 
 doc "Returns the Bool data list for a named column, or Err."
-pub fn get_bool_col(df : DataFrame, name : String) : Result(List(Bool), String) do
+pfn get_bool_col(df : DataFrame, name : String) : Result(List(Bool), String) do
   match get_column(df, name) do
   | Err(e) -> Err(e)
   | Ok(col) ->
@@ -672,7 +672,7 @@ pub fn get_bool_col(df : DataFrame, name : String) : Result(List(Bool), String) 
 end
 
 doc "Returns a column as List(Float) for use with Stats functions. Int columns are promoted."
-pub fn float_list(df : DataFrame, name : String) : Result(List(Float), String) do
+pfn float_list(df : DataFrame, name : String) : Result(List(Float), String) do
   match get_column(df, name) do
   | Err(e) -> Err(e)
   | Ok(col) ->
@@ -687,7 +687,7 @@ end
 -- ── Phase 1: Row access ────────────────────────────────────────────────────
 
 doc "Materializes row i as a Row snapshot. O(col_count × i). Slow path."
-pub fn get_row(df : DataFrame, i : Int) : Row do
+pfn get_row(df : DataFrame, i : Int) : Row do
   match df do
   | DataFrame(cols) ->
     Row(List.map(cols, fn c -> (col_name(c), col_value_at(c, i))))
@@ -695,9 +695,9 @@ pub fn get_row(df : DataFrame, i : Int) : Row do
 end
 
 doc "Returns all rows as a list of Row values. O(rows × cols). Slow path."
-pub fn to_rows(df : DataFrame) : List(Row) do
+pfn to_rows(df : DataFrame) : List(Row) do
   let n = row_count(df)
-  fn go(i : Int, acc : List(Row)) : List(Row) do
+  pfn go(i : Int, acc : List(Row)) : List(Row) do
     if i < 0 then acc
     else go(i - 1, Cons(get_row(df, i), acc))
   end
@@ -705,7 +705,7 @@ pub fn to_rows(df : DataFrame) : List(Row) do
 end
 
 doc "Look up a field in a Row by name. Returns None if not found."
-pub fn row_get(row : Row, name : String) : Option(Value) do
+pfn row_get(row : Row, name : String) : Option(Value) do
   match row do
   | Row(pairs) ->
     List.find_index(pairs, fn pair -> match pair do | (k, _) -> k == name end)
@@ -714,7 +714,7 @@ pub fn row_get(row : Row, name : String) : Option(Value) do
 end
 
 doc "Look up an Int field in a Row."
-pub fn row_get_int(row : Row, name : String) : Option(Int) do
+pfn row_get_int(row : Row, name : String) : Option(Int) do
   match row_get(row, name) do
   | None -> None
   | Some(v) ->
@@ -726,7 +726,7 @@ pub fn row_get_int(row : Row, name : String) : Option(Int) do
 end
 
 doc "Look up a Float field in a Row. Int values are promoted to Float."
-pub fn row_get_float(row : Row, name : String) : Option(Float) do
+pfn row_get_float(row : Row, name : String) : Option(Float) do
   match row_get(row, name) do
   | None -> None
   | Some(v) ->
@@ -739,7 +739,7 @@ pub fn row_get_float(row : Row, name : String) : Option(Float) do
 end
 
 doc "Look up a String field in a Row."
-pub fn row_get_string(row : Row, name : String) : Option(String) do
+pfn row_get_string(row : Row, name : String) : Option(String) do
   match row_get(row, name) do
   | None -> None
   | Some(v) ->
@@ -751,7 +751,7 @@ pub fn row_get_string(row : Row, name : String) : Option(String) do
 end
 
 doc "Look up a Bool field in a Row."
-pub fn row_get_bool(row : Row, name : String) : Option(Bool) do
+pfn row_get_bool(row : Row, name : String) : Option(Bool) do
   match row_get(row, name) do
   | None -> None
   | Some(v) ->
@@ -765,7 +765,7 @@ end
 -- ── Phase 1: Structural operations ────────────────────────────────────────
 
 doc "Adds a column to a DataFrame. Errors if name already exists or length mismatches."
-pub fn add_column(df : DataFrame, col : Column) : Result(DataFrame, String) do
+pfn add_column(df : DataFrame, col : Column) : Result(DataFrame, String) do
   match df do
   | DataFrame(cols) ->
     let n = row_count(df)
@@ -782,7 +782,7 @@ pub fn add_column(df : DataFrame, col : Column) : Result(DataFrame, String) do
 end
 
 doc "Removes a column by name. No-op if not found."
-pub fn drop_column(df : DataFrame, name : String) : DataFrame do
+pfn drop_column(df : DataFrame, name : String) : DataFrame do
   match df do
   | DataFrame(cols) ->
     DataFrame(List.filter(cols, fn c -> col_name(c) != name))
@@ -790,7 +790,7 @@ pub fn drop_column(df : DataFrame, name : String) : DataFrame do
 end
 
 doc "Renames a column. Errors if old_name not found or new_name already exists."
-pub fn rename_column(df : DataFrame, old_name : String, new_name : String) : Result(DataFrame, String) do
+pfn rename_column(df : DataFrame, old_name : String, new_name : String) : Result(DataFrame, String) do
   match df do
   | DataFrame(cols) ->
     let found = List.any(cols, fn c -> col_name(c) == old_name)
@@ -805,7 +805,7 @@ pub fn rename_column(df : DataFrame, old_name : String, new_name : String) : Res
   end
 end
 
-fn rename_col(col : Column, new_name : String) : Column do
+pfn rename_col(col : Column, new_name : String) : Column do
   match col do
   | IntCol(_, data)   -> IntCol(new_name, data)
   | FloatCol(_, data) -> FloatCol(new_name, data)
@@ -819,8 +819,8 @@ fn rename_col(col : Column, new_name : String) : Column do
 end
 
 doc "Returns a DataFrame with columns reordered/selected by name list. Errors on missing names."
-pub fn select_columns(df : DataFrame, names : List(String)) : Result(DataFrame, String) do
-  fn find_col(name : String) : Result(Column, String) do
+pfn select_columns(df : DataFrame, names : List(String)) : Result(DataFrame, String) do
+  pfn find_col(name : String) : Result(Column, String) do
     get_column(df, name)
   end
   let results = List.map(names, fn name -> find_col(name))
@@ -835,7 +835,7 @@ pub fn select_columns(df : DataFrame, names : List(String)) : Result(DataFrame, 
 end
 
 doc "Returns the first n rows."
-pub fn head(df : DataFrame, n : Int) : DataFrame do
+pfn head(df : DataFrame, n : Int) : DataFrame do
   let actual = if n > row_count(df) then row_count(df) else n
   match df do
   | DataFrame(cols) ->
@@ -844,7 +844,7 @@ pub fn head(df : DataFrame, n : Int) : DataFrame do
 end
 
 doc "Returns the last n rows."
-pub fn tail(df : DataFrame, n : Int) : DataFrame do
+pfn tail(df : DataFrame, n : Int) : DataFrame do
   let total = row_count(df)
   let start = if n >= total then 0 else total - n
   match df do
@@ -854,7 +854,7 @@ pub fn tail(df : DataFrame, n : Int) : DataFrame do
 end
 
 doc "Returns rows [start, start+len). Clamps to available rows."
-pub fn slice(df : DataFrame, start : Int, len : Int) : DataFrame do
+pfn slice(df : DataFrame, start : Int, len : Int) : DataFrame do
   let total = row_count(df)
   let s = if start < 0 then 0 else if start > total then total else start
   let end_ = s + len
@@ -867,13 +867,13 @@ pub fn slice(df : DataFrame, start : Int, len : Int) : DataFrame do
 end
 
 -- Slice a column from start index, taking len elements.
-fn slice_col(col : Column, start : Int, len : Int) : Column do
+pfn slice_col(col : Column, start : Int, len : Int) : Column do
   let indices = List.range(start, start + len)
   filter_col_by_indices(col, indices)
 end
 
 -- Drop first n rows (for Offset plan node).
-fn drop_rows(df : DataFrame, n : Int) : DataFrame do
+pfn drop_rows(df : DataFrame, n : Int) : DataFrame do
   let total = row_count(df)
   let start = if n > total then total else n
   slice(df, start, total - start)
@@ -883,45 +883,45 @@ end
 
 -- ColExpr: a typed expression evaluated against a DataFrame column-by-column.
 -- Used for filter predicates. Evaluation is vectorized - no Row materialization.
-pub type ColExpr =
+type ColExpr =
   -- Column reference
-    pub Col(String)
+    Col(String)
   -- Scalar literals (broadcast to full column length)
-  | pub LitInt(Int)
-  | pub LitFloat(Float)
-  | pub LitStr(String)
-  | pub LitBool(Bool)
+  | LitInt(Int)
+  | LitFloat(Float)
+  | LitStr(String)
+  | LitBool(Bool)
   -- Comparisons (produce BoolCol)
-  | pub Eq(ColExpr, ColExpr)
-  | pub Neq(ColExpr, ColExpr)
-  | pub Lt(ColExpr, ColExpr)
-  | pub Lte(ColExpr, ColExpr)
-  | pub Gt(ColExpr, ColExpr)
-  | pub Gte(ColExpr, ColExpr)
+  | Eq(ColExpr, ColExpr)
+  | Neq(ColExpr, ColExpr)
+  | Lt(ColExpr, ColExpr)
+  | Lte(ColExpr, ColExpr)
+  | Gt(ColExpr, ColExpr)
+  | Gte(ColExpr, ColExpr)
   -- Boolean combinators
-  | pub And(ColExpr, ColExpr)
-  | pub Or(ColExpr, ColExpr)
-  | pub Not(ColExpr)
+  | And(ColExpr, ColExpr)
+  | Or(ColExpr, ColExpr)
+  | Not(ColExpr)
   -- Arithmetic (produce Int or Float column)
-  | pub Add(ColExpr, ColExpr)
-  | pub Sub(ColExpr, ColExpr)
-  | pub Mul(ColExpr, ColExpr)
-  | pub Div(ColExpr, ColExpr)
+  | Add(ColExpr, ColExpr)
+  | Sub(ColExpr, ColExpr)
+  | Mul(ColExpr, ColExpr)
+  | Div(ColExpr, ColExpr)
   -- String predicates (produce BoolCol)
-  | pub StrContains(ColExpr, String)
-  | pub StrStartsWith(ColExpr, String)
-  | pub StrEndsWith(ColExpr, String)
+  | StrContains(ColExpr, String)
+  | StrStartsWith(ColExpr, String)
+  | StrEndsWith(ColExpr, String)
   -- Null checks (stub: require nullable column support)
-  | pub IsNull(ColExpr)
-  | pub IsNotNull(ColExpr)
+  | IsNull(ColExpr)
+  | IsNotNull(ColExpr)
 
 -- ── Phase 3: Plan types ────────────────────────────────────────────────────
 
-pub type SortDir = pub Asc | pub Desc
+type SortDir = Asc | Desc
 
-pub type JoinKind = pub Inner | pub Left | pub Right | pub Outer
+type JoinKind = Inner | Left | Right | Outer
 
-type Plan =
+ptype Plan =
     Source(DataFrame)
   | Select(Plan, List(String))
   | Filter(Plan, ColExpr)
@@ -933,83 +933,83 @@ type Plan =
   | DropCols(Plan, List(String))
   | Join(Plan, Plan, List(String), JoinKind)
 
-pub type LazyFrame = LazyFrame(Plan)
+type LazyFrame = LazyFrame(Plan)
 
 -- ── Phase 3: LazyFrame API ────────────────────────────────────────────────
 
 doc "Wraps a materialized DataFrame in a lazy frame."
-pub fn lazy(df : DataFrame) : LazyFrame do
+pfn lazy(df : DataFrame) : LazyFrame do
   LazyFrame(Source(df))
 end
 
 doc "Appends a Filter node that uses a vectorized ColExpr predicate."
-pub fn filter(lf : LazyFrame, expr : ColExpr) : LazyFrame do
+pfn filter(lf : LazyFrame, expr : ColExpr) : LazyFrame do
   match lf do | LazyFrame(plan) -> LazyFrame(Filter(plan, expr)) end
 end
 
 doc "Projects a subset of columns."
-pub fn select(lf : LazyFrame, cols : List(String)) : LazyFrame do
+pfn select(lf : LazyFrame, cols : List(String)) : LazyFrame do
   match lf do | LazyFrame(plan) -> LazyFrame(Select(plan, cols)) end
 end
 
 doc "Adds or replaces a column computed row-by-row using a March closure."
-pub fn with_column(lf : LazyFrame, name : String, f : Row -> Value) : LazyFrame do
+pfn with_column(lf : LazyFrame, name : String, f : Row -> Value) : LazyFrame do
   match lf do | LazyFrame(plan) -> LazyFrame(WithColumn(plan, name, f)) end
 end
 
 doc "Appends a sort node. Keys is a list of (column_name, SortDir) pairs."
-pub fn sort_by(lf : LazyFrame, keys : List((String, SortDir))) : LazyFrame do
+pfn sort_by(lf : LazyFrame, keys : List((String, SortDir))) : LazyFrame do
   match lf do | LazyFrame(plan) -> LazyFrame(SortBy(plan, keys)) end
 end
 
 doc "Limits the result to the first n rows."
-pub fn limit(lf : LazyFrame, n : Int) : LazyFrame do
+pfn limit(lf : LazyFrame, n : Int) : LazyFrame do
   match lf do | LazyFrame(plan) -> LazyFrame(Limit(plan, n)) end
 end
 
 doc "Skips the first n rows."
-pub fn offset(lf : LazyFrame, n : Int) : LazyFrame do
+pfn offset(lf : LazyFrame, n : Int) : LazyFrame do
   match lf do | LazyFrame(plan) -> LazyFrame(Offset(plan, n)) end
 end
 
 doc "Renames a column in the pipeline."
-pub fn rename(lf : LazyFrame, old_name : String, new_name : String) : LazyFrame do
+pfn rename(lf : LazyFrame, old_name : String, new_name : String) : LazyFrame do
   match lf do | LazyFrame(plan) -> LazyFrame(Rename(plan, old_name, new_name)) end
 end
 
 doc "Drops columns by name."
-pub fn drop(lf : LazyFrame, cols : List(String)) : LazyFrame do
+pfn drop(lf : LazyFrame, cols : List(String)) : LazyFrame do
   match lf do | LazyFrame(plan) -> LazyFrame(DropCols(plan, cols)) end
 end
 
 doc "Materializes the lazy plan into a DataFrame."
-pub fn collect(lf : LazyFrame) : Result(DataFrame, String) do
+pfn collect(lf : LazyFrame) : Result(DataFrame, String) do
   match lf do | LazyFrame(plan) -> eval_plan(plan) end
 end
 
 doc "inner_join: adds an inner join step to the pipeline."
-pub fn inner_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
+pfn inner_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
   match lf do
   | LazyFrame(plan) -> LazyFrame(Join(plan, Source(right), keys, Inner))
   end
 end
 
 doc "left_join: stubbed until nullable columns are fully supported."
-pub fn left_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
+pfn left_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
   match lf do
   | LazyFrame(plan) -> LazyFrame(Join(plan, Source(right), keys, Left))
   end
 end
 
 doc "right_join: stubbed until nullable columns are fully supported."
-pub fn right_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
+pfn right_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
   match lf do
   | LazyFrame(plan) -> LazyFrame(Join(plan, Source(right), keys, Right))
   end
 end
 
 doc "outer_join: stubbed until nullable columns are fully supported."
-pub fn outer_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
+pfn outer_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
   match lf do
   | LazyFrame(plan) -> LazyFrame(Join(plan, Source(right), keys, Outer))
   end
@@ -1018,7 +1018,7 @@ end
 -- ── Phase 3: Plan interpreter ──────────────────────────────────────────────
 
 @[no_warn_recursion]
-fn eval_plan(plan : Plan) : Result(DataFrame, String) do
+pfn eval_plan(plan : Plan) : Result(DataFrame, String) do
   match plan do
   | Source(df) -> Ok(df)
 
@@ -1087,7 +1087,7 @@ end
 -- Evaluate a ColExpr against a DataFrame. Returns a typed Column.
 -- Scalar literals are broadcast to the frame's row count.
 @[no_warn_recursion]
-fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
+pfn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
   let n = row_count(df)
   match expr do
   | Col(name) -> get_column(df, name)
@@ -1159,7 +1159,7 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
 end
 
 -- Evaluate a comparison ColExpr: produces a BoolCol.
-fn eval_comparison(df : DataFrame, left_expr : ColExpr, right_expr : ColExpr, op : a) : Result(Column, String) do
+pfn eval_comparison(df : DataFrame, left_expr : ColExpr, right_expr : ColExpr, op : a) : Result(Column, String) do
   match eval_col_expr(df, left_expr) do
   | Err(e) -> Err(e)
   | Ok(lcol) ->
@@ -1179,7 +1179,7 @@ fn eval_comparison(df : DataFrame, left_expr : ColExpr, right_expr : ColExpr, op
 end
 
 -- Apply a comparison operator to two Values, returning Bool.
-fn apply_cmp_op(lv : Value, rv : Value, op : a) : Bool do
+pfn apply_cmp_op(lv : Value, rv : Value, op : a) : Bool do
   let cmp = compare_values(lv, rv)
   match op do
   | :eq  -> cmp == 0
@@ -1193,7 +1193,7 @@ fn apply_cmp_op(lv : Value, rv : Value, op : a) : Bool do
 end
 
 -- Evaluate a boolean operation (And/Or): requires both sides to be BoolCol.
-fn eval_bool_op(df : DataFrame, left_expr : ColExpr, right_expr : ColExpr, op : a) : Result(Column, String) do
+pfn eval_bool_op(df : DataFrame, left_expr : ColExpr, right_expr : ColExpr, op : a) : Result(Column, String) do
   match eval_col_expr(df, left_expr) do
   | Err(e) -> Err(e)
   | Ok(lcol) ->
@@ -1224,7 +1224,7 @@ fn eval_bool_op(df : DataFrame, left_expr : ColExpr, right_expr : ColExpr, op : 
 end
 
 -- Evaluate arithmetic on Int/Float columns with promotion.
-fn eval_arith(df : DataFrame, left_expr : ColExpr, right_expr : ColExpr, op : a) : Result(Column, String) do
+pfn eval_arith(df : DataFrame, left_expr : ColExpr, right_expr : ColExpr, op : a) : Result(Column, String) do
   match eval_col_expr(df, left_expr) do
   | Err(e) -> Err(e)
   | Ok(lcol) ->
@@ -1262,7 +1262,7 @@ fn eval_arith(df : DataFrame, left_expr : ColExpr, right_expr : ColExpr, op : a)
   end
 end
 
-fn value_to_float_or_zero(v : Value) : Float do
+pfn value_to_float_or_zero(v : Value) : Float do
   match v do
   | FloatVal(f) -> f
   | IntVal(n)   -> int_to_float(n)
@@ -1270,14 +1270,14 @@ fn value_to_float_or_zero(v : Value) : Float do
   end
 end
 
-fn value_to_int_or_zero(v : Value) : Int do
+pfn value_to_int_or_zero(v : Value) : Int do
   match v do
   | IntVal(n) -> n
   | _ -> 0
   end
 end
 
-fn apply_arith_float(a : Float, b : Float, op : a) : Float do
+pfn apply_arith_float(a : Float, b : Float, op : a) : Float do
   match op do
   | :add -> a +. b
   | :sub -> a -. b
@@ -1287,7 +1287,7 @@ fn apply_arith_float(a : Float, b : Float, op : a) : Float do
   end
 end
 
-fn apply_arith_int(a : Int, b : Int, op : a) : Int do
+pfn apply_arith_int(a : Int, b : Int, op : a) : Int do
   match op do
   | :add -> a + b
   | :sub -> a - b
@@ -1299,7 +1299,7 @@ end
 
 -- ── Phase 3: apply_filter ─────────────────────────────────────────────────
 
-fn apply_filter(df : DataFrame, expr : ColExpr) : Result(DataFrame, String) do
+pfn apply_filter(df : DataFrame, expr : ColExpr) : Result(DataFrame, String) do
   match eval_col_expr(df, expr) do
   | Err(e) -> Err(e)
   | Ok(mask_col) ->
@@ -1323,9 +1323,9 @@ end
 
 -- ── Phase 3: apply_with_column ────────────────────────────────────────────
 
-fn apply_with_column(df : DataFrame, name : String, f : Row -> Value) : Result(DataFrame, String) do
+pfn apply_with_column(df : DataFrame, name : String, f : Row -> Value) : Result(DataFrame, String) do
   let n = row_count(df)
-  fn build_values(i : Int, acc : List(Value)) : List(Value) do
+  pfn build_values(i : Int, acc : List(Value)) : List(Value) do
     if i >= n then List.reverse(acc)
     else do
       let row = get_row(df, i)
@@ -1342,7 +1342,7 @@ fn apply_with_column(df : DataFrame, name : String, f : Row -> Value) : Result(D
 end
 
 -- Convert a List(Value) to a typed Column using widening inference.
-fn values_to_column(name : String, values : List(Value)) : Result(Column, String) do
+pfn values_to_column(name : String, values : List(Value)) : Result(Column, String) do
   match values do
   | Nil -> Ok(StrCol(name, Nil))
   | _ ->
@@ -1354,7 +1354,7 @@ end
 
 -- ── Phase 3: apply_sort ───────────────────────────────────────────────────
 
-fn apply_sort(df : DataFrame, keys : List((String, SortDir))) : Result(DataFrame, String) do
+pfn apply_sort(df : DataFrame, keys : List((String, SortDir))) : Result(DataFrame, String) do
   let n = row_count(df)
   let indices = List.range(0, n)
   let cmp = fn (a : Int, b : Int) ->
@@ -1366,7 +1366,7 @@ fn apply_sort(df : DataFrame, keys : List((String, SortDir))) : Result(DataFrame
   end
 end
 
-fn compare_rows_by_keys(df : DataFrame, i : Int, j : Int, keys : List((String, SortDir))) : Int do
+pfn compare_rows_by_keys(df : DataFrame, i : Int, j : Int, keys : List((String, SortDir))) : Int do
   match keys do
   | Nil -> 0
   | Cons((key_name, dir), rest) ->
@@ -1382,7 +1382,7 @@ fn compare_rows_by_keys(df : DataFrame, i : Int, j : Int, keys : List((String, S
   end
 end
 
-fn col_value_at_by_name(df : DataFrame, name : String, i : Int) : Value do
+pfn col_value_at_by_name(df : DataFrame, name : String, i : Int) : Value do
   match get_column(df, name) do
   | Err(_)  -> NullVal
   | Ok(col) -> col_value_at(col, i)
@@ -1391,24 +1391,24 @@ end
 
 -- ── Phase 2: CSV I/O ──────────────────────────────────────────────────────
 
-pub type CsvWriteOpts = CsvWriteOpts(String, String, Bool)
+type CsvWriteOpts = CsvWriteOpts(String, String, Bool)
 -- fields: delimiter, quote_char, write_header
 
 doc "Default CSV write options: comma delimiter, double-quote, with header."
-pub fn default_csv_opts() : CsvWriteOpts do
+pfn default_csv_opts() : CsvWriteOpts do
   CsvWriteOpts(",", "\"", true)
 end
 
 -- Split a CSV line on delimiter, respecting RFC-4180 double-quoted fields.
 -- Returns a List(String) of raw (unquoted) cell values.
-fn split_csv_line(line : String, delim : String) : List(String) do
+pfn split_csv_line(line : String, delim : String) : List(String) do
   -- Simple split (no quote handling). Sufficient for unquoted CSV.
   let raw = string_split(line, delim)
   List.map(raw, fn cell -> string_trim(cell))
 end
 
 doc "Parse a CSV string into a DataFrame. Infers column types with widening."
-pub fn from_csv_string(s : String) : Result(DataFrame, String) do
+pfn from_csv_string(s : String) : Result(DataFrame, String) do
   -- Split by newline, filter blank lines.
   let lines = List.filter(string_split(s, "\n"), fn line ->
     !string_is_empty(string_trim(line)))
@@ -1429,7 +1429,7 @@ pub fn from_csv_string(s : String) : Result(DataFrame, String) do
 end
 
 -- Parse a single CSV cell string into a typed Value.
-fn parse_cell(s : String) : Value do
+pfn parse_cell(s : String) : Value do
   if string_is_empty(s) then NullVal
   else match string_to_int(s) do
   | Some(n) -> IntVal(n)
@@ -1445,12 +1445,12 @@ fn parse_cell(s : String) : Value do
 end
 
 doc "Serialize a DataFrame to a CSV string. Uses default options."
-pub fn to_csv_string(df : DataFrame) : String do
+pfn to_csv_string(df : DataFrame) : String do
   to_csv_string_opts(df, default_csv_opts())
 end
 
 doc "Serialize a DataFrame to a CSV string with custom options."
-pub fn to_csv_string_opts(df : DataFrame, opts : CsvWriteOpts) : String do
+pfn to_csv_string_opts(df : DataFrame, opts : CsvWriteOpts) : String do
   match opts do
   | CsvWriteOpts(delim, quote, write_hdr) ->
     let lines =
@@ -1463,7 +1463,7 @@ pub fn to_csv_string_opts(df : DataFrame, opts : CsvWriteOpts) : String do
   end
 end
 
-fn data_rows_to_strings(df : DataFrame, delim : String, quote : String) : List(String) do
+pfn data_rows_to_strings(df : DataFrame, delim : String, quote : String) : List(String) do
   let rows = to_rows(df)
   List.map(rows, fn row ->
     match row do
@@ -1474,12 +1474,12 @@ fn data_rows_to_strings(df : DataFrame, delim : String, quote : String) : List(S
     end)
 end
 
-fn csv_row_to_string(cells : List(String), delim : String, quote : String) : String do
+pfn csv_row_to_string(cells : List(String), delim : String, quote : String) : String do
   let quoted = List.map(cells, fn cell -> csv_quote_cell(cell, delim, quote))
   string_join(quoted, delim)
 end
 
-fn csv_quote_cell(cell : String, delim : String, quote : String) : String do
+pfn csv_quote_cell(cell : String, delim : String, quote : String) : String do
   let needs_quote = string_contains(cell, delim)
                  || string_contains(cell, quote)
                  || string_contains(cell, "\n")
@@ -1493,7 +1493,7 @@ end
 -- ── Phase 2: JSON I/O ─────────────────────────────────────────────────────
 
 doc "Parse a JSON string (array of objects) into a DataFrame."
-pub fn from_json_string(s : String) : Result(DataFrame, String) do
+pfn from_json_string(s : String) : Result(DataFrame, String) do
   match Json.parse(s) do
   | Err(e) -> Err("DataFrame.from_json_string: JSON parse error: " ++ e)
   | Ok(jv) ->
@@ -1504,7 +1504,7 @@ pub fn from_json_string(s : String) : Result(DataFrame, String) do
   end
 end
 
-fn json_array_to_df(items : List(Json.JsonValue)) : Result(DataFrame, String) do
+pfn json_array_to_df(items : List(Json.JsonValue)) : Result(DataFrame, String) do
   match items do
   | Nil -> Ok(empty())
   | _ ->
@@ -1523,7 +1523,7 @@ fn json_array_to_df(items : List(Json.JsonValue)) : Result(DataFrame, String) do
   end
 end
 
-fn json_value_to_value(jv : Json.JsonValue) : Value do
+pfn json_value_to_value(jv : Json.JsonValue) : Value do
   match jv do
   | Json.Null      -> NullVal
   | Json.Bool(b)   -> BoolVal(b)
@@ -1536,7 +1536,7 @@ fn json_value_to_value(jv : Json.JsonValue) : Value do
 end
 
 doc "Serialize a DataFrame to a JSON string (array of objects)."
-pub fn to_json_string(df : DataFrame) : String do
+pfn to_json_string(df : DataFrame) : String do
   let rows = to_rows(df)
   let json_rows = List.map(rows, fn row ->
     match row do
@@ -1548,7 +1548,7 @@ pub fn to_json_string(df : DataFrame) : String do
   Json.to_string(Json.Array(json_rows))
 end
 
-fn value_to_json(v : Value) : Json.JsonValue do
+pfn value_to_json(v : Value) : Json.JsonValue do
   match v do
   | IntVal(n)   -> Json.Number(int_to_float(n))
   | FloatVal(f) -> Json.Number(f)
@@ -1561,25 +1561,25 @@ end
 -- ── Phase 4: GroupBy and Aggregation ──────────────────────────────────────
 
 -- Aggregation expression for use with GroupedFrame.agg.
-pub type AggExpr =
-    pub Sum(String)
-  | pub Mean(String)
-  | pub Min(String)
-  | pub Max(String)
-  | pub Count
-  | pub CountDistinct(String)
-  | pub Std(String)
-  | pub Variance(String)
-  | pub First(String)
-  | pub Last(String)
-  | pub Median(String)
-  | pub AggAs(AggExpr, String)
+type AggExpr =
+    Sum(String)
+  | Mean(String)
+  | Min(String)
+  | Max(String)
+  | Count
+  | CountDistinct(String)
+  | Std(String)
+  | Variance(String)
+  | First(String)
+  | Last(String)
+  | Median(String)
+  | AggAs(AggExpr, String)
 
 -- Structural group key: a list of typed Values, one per group column.
-type GroupKey = GroupKey(List(Value))
+ptype GroupKey = GroupKey(List(Value))
 
 -- Polynomial hash combining per-Value hashes.
-fn group_key_hash(gk : GroupKey) : Int do
+pfn group_key_hash(gk : GroupKey) : Int do
   match gk do
   | GroupKey(vals) ->
     List.fold_left(2166136261, vals, fn (h, v) ->
@@ -1587,7 +1587,7 @@ fn group_key_hash(gk : GroupKey) : Int do
   end
 end
 
-fn group_key_eq(a : GroupKey, b : GroupKey) : Bool do
+pfn group_key_eq(a : GroupKey, b : GroupKey) : Bool do
   match a do
   | GroupKey(av) ->
     match b do
@@ -1596,26 +1596,26 @@ fn group_key_eq(a : GroupKey, b : GroupKey) : Bool do
   end
 end
 
-pub type GroupedFrame = GroupedFrame(DataFrame, List(String))
+type GroupedFrame = GroupedFrame(DataFrame, List(String))
 
 doc "Groups a DataFrame by the specified columns."
-pub fn group_by(df : DataFrame, group_cols : List(String)) : GroupedFrame do
+pfn group_by(df : DataFrame, group_cols : List(String)) : GroupedFrame do
   GroupedFrame(df, group_cols)
 end
 
 doc "Aggregates a GroupedFrame using the given expressions. Returns a new DataFrame."
-pub fn agg(gf : GroupedFrame, exprs : List(AggExpr)) : Result(DataFrame, String) do
+pfn agg(gf : GroupedFrame, exprs : List(AggExpr)) : Result(DataFrame, String) do
   match gf do
   | GroupedFrame(df, group_cols) -> apply_group_by(df, group_cols, exprs)
   end
 end
 
-fn make_group_key(df : DataFrame, row_idx : Int, group_cols : List(String)) : GroupKey do
+pfn make_group_key(df : DataFrame, row_idx : Int, group_cols : List(String)) : GroupKey do
   GroupKey(List.map(group_cols, fn name -> col_value_at_by_name(df, name, row_idx)))
 end
 
 -- Determine the output column name for an AggExpr (with duplicate-suffix logic).
-fn agg_output_name(expr : AggExpr, existing_names : List(String)) : String do
+pfn agg_output_name(expr : AggExpr, existing_names : List(String)) : String do
   let base_name = agg_base_name(expr)
   if List.any(existing_names, fn n -> n == base_name) then
     base_name ++ "_" ++ agg_type_suffix(expr)
@@ -1623,7 +1623,7 @@ fn agg_output_name(expr : AggExpr, existing_names : List(String)) : String do
     base_name
 end
 
-fn agg_base_name(expr : AggExpr) : String do
+pfn agg_base_name(expr : AggExpr) : String do
   match expr do
   | Sum(col)          -> col
   | Mean(col)         -> col
@@ -1640,7 +1640,7 @@ fn agg_base_name(expr : AggExpr) : String do
   end
 end
 
-fn agg_type_suffix(expr : AggExpr) : String do
+pfn agg_type_suffix(expr : AggExpr) : String do
   match expr do
   | Sum(_)          -> "sum"
   | Mean(_)         -> "mean"
@@ -1657,7 +1657,7 @@ fn agg_type_suffix(expr : AggExpr) : String do
   end
 end
 
-fn apply_group_by(df : DataFrame, group_cols : List(String), agg_exprs : List(AggExpr)) : Result(DataFrame, String) do
+pfn apply_group_by(df : DataFrame, group_cols : List(String), agg_exprs : List(AggExpr)) : Result(DataFrame, String) do
   -- Step 1: Validate group columns exist
   let bad_col = List.find(group_cols, fn name ->
     match get_column(df, name) do | Err(_) -> true | Ok(_) -> false end)
@@ -1666,7 +1666,7 @@ fn apply_group_by(df : DataFrame, group_cols : List(String), agg_exprs : List(Ag
   | None ->
     let n = row_count(df)
     -- Step 2: Build HAMT map: GroupKey → List(Int) of row indices
-    fn build_groups(i : Int, trie) do
+    pfn build_groups(i : Int, trie) do
       if i >= n then trie
       else do
         let key = make_group_key(df, i, group_cols)
@@ -1697,7 +1697,7 @@ fn apply_group_by(df : DataFrame, group_cols : List(String), agg_exprs : List(Ag
 end
 
 -- Filter all columns of a DataFrame to keep only the given row indices.
-fn filter_col_by_indices_df(df : DataFrame, indices : List(Int)) : DataFrame do
+pfn filter_col_by_indices_df(df : DataFrame, indices : List(Int)) : DataFrame do
   match df do
   | DataFrame(cols) ->
     DataFrame(List.map(cols, fn c -> filter_col_by_indices(c, indices)))
@@ -1705,8 +1705,8 @@ fn filter_col_by_indices_df(df : DataFrame, indices : List(Int)) : DataFrame do
 end
 
 -- Evaluate all agg expressions on a sub-DataFrame, returning (name, value) pairs.
-fn eval_agg_exprs(sub_df : DataFrame, exprs : List(AggExpr), group_cols : List(String)) : List((String, Value)) do
-  fn go(remaining : List(AggExpr), seen_names : List(String), acc : List((String, Value))) : List((String, Value)) do
+pfn eval_agg_exprs(sub_df : DataFrame, exprs : List(AggExpr), group_cols : List(String)) : List((String, Value)) do
+  pfn go(remaining : List(AggExpr), seen_names : List(String), acc : List((String, Value))) : List((String, Value)) do
     match remaining do
     | Nil -> List.reverse(acc)
     | Cons(expr, rest) ->
@@ -1718,7 +1718,7 @@ fn eval_agg_exprs(sub_df : DataFrame, exprs : List(AggExpr), group_cols : List(S
   go(exprs, Nil, Nil)
 end
 
-fn eval_agg(sub_df : DataFrame, expr : AggExpr, out_name : String) : Value do
+pfn eval_agg(sub_df : DataFrame, expr : AggExpr, out_name : String) : Value do
   match expr do
   | Count -> IntVal(row_count(sub_df))
 
@@ -1791,14 +1791,14 @@ end
 -- ── Phase 4: value_counts ─────────────────────────────────────────────────
 
 doc "Count frequency of each distinct value. Returns DataFrame with columns [col_name, 'count'] sorted by count desc."
-pub fn value_counts(df : DataFrame, col : String) : Result(DataFrame, String) do
+pfn value_counts(df : DataFrame, col : String) : Result(DataFrame, String) do
   match get_column(df, col) do
   | Err(e) -> Err(e)
   | Ok(column) ->
     let vals = col_to_value_list(column)
     -- Build frequency map using string keys (serialized values)
     let str_cmp = fn (a : String) -> fn (b : String) -> a < b
-    fn count_vals(remaining : List(Value), m) do
+    pfn count_vals(remaining : List(Value), m) do
       match remaining do
       | Nil -> m
       | Cons(v, rest) ->
@@ -1828,7 +1828,7 @@ end
 
 -- ── Phase 5: Joins (inner_join complete, others stub) ─────────────────────
 
-fn apply_join(left : DataFrame, right : DataFrame, on_cols : List(String), kind : JoinKind) : Result(DataFrame, String) do
+pfn apply_join(left : DataFrame, right : DataFrame, on_cols : List(String), kind : JoinKind) : Result(DataFrame, String) do
   match kind do
   | Inner -> apply_inner_join(left, right, on_cols)
   | Left  -> Err("left_join: requires nullable column support (not yet implemented)")
@@ -1837,7 +1837,7 @@ fn apply_join(left : DataFrame, right : DataFrame, on_cols : List(String), kind 
   end
 end
 
-fn apply_inner_join(left : DataFrame, right : DataFrame, on_cols : List(String)) : Result(DataFrame, String) do
+pfn apply_inner_join(left : DataFrame, right : DataFrame, on_cols : List(String)) : Result(DataFrame, String) do
   -- Validate on_cols exist in both
   let bad_left = List.find(on_cols, fn name ->
     match get_column(left, name) do | Err(_) -> true | Ok(_) -> false end)
@@ -1851,7 +1851,7 @@ fn apply_inner_join(left : DataFrame, right : DataFrame, on_cols : List(String))
     | None ->
       -- Build hash table: right GroupKey → List(Int) of right row indices
       let r_n = row_count(right)
-      fn build_right_hash(i : Int, trie) do
+      pfn build_right_hash(i : Int, trie) do
         if i >= r_n then trie
         else do
           let key = make_group_key(right, i, on_cols)
@@ -1871,7 +1871,7 @@ fn apply_inner_join(left : DataFrame, right : DataFrame, on_cols : List(String))
       let right_schema = schema(right)
       let right_only_names = List.filter(right_schema, fn name ->
         !List.any(on_cols, fn k -> k == name))
-      fn probe(i : Int, acc : List(Row)) : List(Row) do
+      pfn probe(i : Int, acc : List(Row)) : List(Row) do
         if i >= l_n then List.reverse(acc)
         else do
           let key = make_group_key(left, i, on_cols)
@@ -1906,20 +1906,20 @@ end
 
 -- ── Phase 6: Stats integration ────────────────────────────────────────────
 
-pub type ColStats = ColStats(String, String, Int, Option(Float), Option(Float),
+type ColStats = ColStats(String, String, Int, Option(Float), Option(Float),
                              Option(Float), Option(Float), Option(Float),
                              Option(Float), Option(Float))
 -- fields: name, col_type, count, mean, std, min, p25, median, p75, max
 
 doc "Returns summary statistics for each column."
-pub fn col_describe(df : DataFrame) : List(ColStats) do
+pfn col_describe(df : DataFrame) : List(ColStats) do
   match df do
   | DataFrame(cols) ->
     List.map(cols, fn col -> col_describe_column(col))
   end
 end
 
-fn col_describe_column(col : Column) : ColStats do
+pfn col_describe_column(col : Column) : ColStats do
   let name = col_name(col)
   let n = col_len(col)
   match col do
@@ -1946,7 +1946,7 @@ fn col_describe_column(col : Column) : ColStats do
 end
 
 doc "Z-score normalize an IntCol or FloatCol. Returns FloatCol."
-pub fn col_z_score(col : Column) : Result(Column, String) do
+pfn col_z_score(col : Column) : Result(Column, String) do
   match col do
   | FloatCol(name, data) ->
     let m = Stats.mean(data)
@@ -1964,7 +1964,7 @@ pub fn col_z_score(col : Column) : Result(Column, String) do
 end
 
 doc "Min-max normalize a column to [0, 1]. Returns FloatCol."
-pub fn col_normalize(col : Column) : Result(Column, String) do
+pfn col_normalize(col : Column) : Result(Column, String) do
   match col do
   | FloatCol(name, data) ->
     let mn = Stats.min_val(data)
@@ -1986,7 +1986,7 @@ end
 -- ── Utilities ──────────────────────────────────────────────────────────────
 
 doc "Print a DataFrame as a simple text table."
-pub fn print_table(df : DataFrame) : Unit do
+pfn print_table(df : DataFrame) : Unit do
   let cols = schema(df)
   let header = string_join(cols, " | ")
   println(header)
