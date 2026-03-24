@@ -536,33 +536,38 @@ end
 -- ---- Series rendering ----
 
 fn zip_pts(xs : List(Float), ys : List(Float)) : List((Float, Float)) do
-  match (xs, ys) do
-  | (Nil, _) -> Nil
-  | (_, Nil) -> Nil
-  | (Cons(x, xr), Cons(y, yr)) -> Cons((x, y), zip_pts(xr, yr))
+  fn go(xs, ys, acc) do
+    match (xs, ys) do
+    | (Nil, _) -> List.reverse(acc)
+    | (_, Nil) -> List.reverse(acc)
+    | (Cons(x, xr), Cons(y, yr)) -> go(xr, yr, Cons((x, y), acc))
+    end
   end
+  go(xs, ys, Nil)
 end
 
 fn render_series(s : Series, sx : Float -> Float, sy : Float -> Float) : List(String) do
   let col = color_hex(s.style.line_color)
   match s.kind do
   | Line ->
-    let screen_pts = List.map(zip_pts(s.xs, s.ys), fn (x, y) -> (sx(x), sy(y)))
+    let screen_pts = List.map(zip_pts(s.xs, s.ys), fn p -> match p do | (x, y) -> (sx(x), sy(y)) end)
     Cons(svg_polyline_el(screen_pts, col, s.style.line_width), Nil)
   | Scatter ->
-    List.map(zip_pts(s.xs, s.ys), fn (x, y) ->
-      svg_circle_el(sx(x), sy(y), s.style.point_radius, col, col))
+    List.map(zip_pts(s.xs, s.ys), fn p -> match p do | (x, y) ->
+      svg_circle_el(sx(x), sy(y), s.style.point_radius, col, col) end)
   | Bar ->
     let n = List.length(s.xs)
     let bar_w = if n <= 1 then 20.0
       else do
         let first_x = Option.unwrap_or(List.head_opt(s.xs), 0.0)
         let last_x  = Option.unwrap_or(list_last_f(s.xs), int_to_float(n - 1))
-        let span = last_x -. first_x +. 1.0
-        (sx(first_x +. span /. int_to_float(n)) -. sx(first_x)) *. 0.8
+        let rng = last_x -. first_x +. 1.0
+        let w = (sx(first_x +. rng /. int_to_float(n)) -. sx(first_x)) *. 0.8
+        w
       end
     let base_y = sy(0.0)
-    List.map(zip_pts(s.xs, s.ys), fn (x, y) -> do
+    List.map(zip_pts(s.xs, s.ys), fn p -> do
+      let (x, y) = p
       let px = sx(x) -. bar_w /. 2.0
       let py = sy(y)
       let raw_h = base_y -. py
