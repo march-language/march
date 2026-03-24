@@ -4598,7 +4598,7 @@ let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) :
            List.length scc > 1 ||
            StringSet.mem def.fn_name.txt direct
          in
-         if is_recursive then begin
+         if is_recursive && not (List.mem "no_warn_recursion" def.fn_attrs) then begin
            let rec_set = List.fold_right StringSet.add scc StringSet.empty in
            let fn_params =
              List.fold_left (fun acc p ->

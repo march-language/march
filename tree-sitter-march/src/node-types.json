@@ -80,6 +80,10 @@
           "named": true
         },
         {
+          "type": "assert_expression",
+          "named": true
+        },
+        {
           "type": "atom",
           "named": true
         },
@@ -223,6 +227,10 @@
           },
           {
             "type": "and_expression",
+            "named": true
+          },
+          {
+            "type": "assert_expression",
             "named": true
           },
           {
@@ -370,6 +378,10 @@
             "named": true
           },
           {
+            "type": "assert_expression",
+            "named": true
+          },
+          {
             "type": "atom",
             "named": true
           },
@@ -502,6 +514,10 @@
             "named": true
           },
           {
+            "type": "assert_expression",
+            "named": true
+          },
+          {
             "type": "atom",
             "named": true
           },
@@ -625,6 +641,10 @@
           },
           {
             "type": "and_expression",
+            "named": true
+          },
+          {
+            "type": "assert_expression",
             "named": true
           },
           {
@@ -806,6 +826,142 @@
     }
   },
   {
+    "type": "assert_expression",
+    "named": true,
+    "fields": {
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "additive_expression",
+            "named": true
+          },
+          {
+            "type": "and_expression",
+            "named": true
+          },
+          {
+            "type": "assert_expression",
+            "named": true
+          },
+          {
+            "type": "atom",
+            "named": true
+          },
+          {
+            "type": "bare_constructor",
+            "named": true
+          },
+          {
+            "type": "block_expression",
+            "named": true
+          },
+          {
+            "type": "boolean",
+            "named": true
+          },
+          {
+            "type": "call_expression",
+            "named": true
+          },
+          {
+            "type": "comparison_expression",
+            "named": true
+          },
+          {
+            "type": "constructor_expression",
+            "named": true
+          },
+          {
+            "type": "field_expression",
+            "named": true
+          },
+          {
+            "type": "float",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "if_expression",
+            "named": true
+          },
+          {
+            "type": "integer",
+            "named": true
+          },
+          {
+            "type": "lambda_expression",
+            "named": true
+          },
+          {
+            "type": "list_expression",
+            "named": true
+          },
+          {
+            "type": "match_expression",
+            "named": true
+          },
+          {
+            "type": "multiplicative_expression",
+            "named": true
+          },
+          {
+            "type": "or_expression",
+            "named": true
+          },
+          {
+            "type": "pipe_expression",
+            "named": true
+          },
+          {
+            "type": "record_expression",
+            "named": true
+          },
+          {
+            "type": "record_update",
+            "named": true
+          },
+          {
+            "type": "respond_expression",
+            "named": true
+          },
+          {
+            "type": "send_expression",
+            "named": true
+          },
+          {
+            "type": "spawn_expression",
+            "named": true
+          },
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "tuple_expression",
+            "named": true
+          },
+          {
+            "type": "typed_hole",
+            "named": true
+          },
+          {
+            "type": "unary_expression",
+            "named": true
+          },
+          {
+            "type": "unit_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "atom",
     "named": true,
     "fields": {},
@@ -819,6 +975,10 @@
         },
         {
           "type": "and_expression",
+          "named": true
+        },
+        {
+          "type": "assert_expression",
           "named": true
         },
         {
@@ -1017,6 +1177,10 @@
           "named": true
         },
         {
+          "type": "assert_expression",
+          "named": true
+        },
+        {
           "type": "atom",
           "named": true
         },
@@ -1172,6 +1336,10 @@
             "named": true
           },
           {
+            "type": "assert_expression",
+            "named": true
+          },
+          {
             "type": "atom",
             "named": true
           },
@@ -1296,6 +1464,10 @@
         },
         {
           "type": "and_expression",
+          "named": true
+        },
+        {
+          "type": "assert_expression",
           "named": true
         },
         {
@@ -1427,6 +1599,10 @@
           },
           {
             "type": "and_expression",
+            "named": true
+          },
+          {
+            "type": "assert_expression",
             "named": true
           },
           {
@@ -1586,6 +1762,10 @@
             "named": true
           },
           {
+            "type": "assert_expression",
+            "named": true
+          },
+          {
             "type": "atom",
             "named": true
           },
@@ -1726,6 +1906,10 @@
         },
         {
           "type": "and_expression",
+          "named": true
+        },
+        {
+          "type": "assert_expression",
           "named": true
         },
         {
@@ -1884,6 +2068,36 @@
         },
         {
           "type": "wildcard_pattern",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "describe_decl",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "string",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "describe_decl",
+          "named": true
+        },
+        {
+          "type": "test_decl",
           "named": true
         }
       ]
@@ -2085,6 +2299,10 @@
           },
           {
             "type": "and_expression",
+            "named": true
+          },
+          {
+            "type": "assert_expression",
             "named": true
           },
           {
@@ -2329,6 +2547,10 @@
             "named": true
           },
           {
+            "type": "assert_expression",
+            "named": true
+          },
+          {
             "type": "atom",
             "named": true
           },
@@ -2455,6 +2677,10 @@
             "named": true
           },
           {
+            "type": "assert_expression",
+            "named": true
+          },
+          {
             "type": "atom",
             "named": true
           },
@@ -2578,6 +2804,10 @@
           },
           {
             "type": "and_expression",
+            "named": true
+          },
+          {
+            "type": "assert_expression",
             "named": true
           },
           {
@@ -2847,6 +3077,10 @@
             "named": true
           },
           {
+            "type": "assert_expression",
+            "named": true
+          },
+          {
             "type": "atom",
             "named": true
           },
@@ -3029,6 +3263,10 @@
             "named": true
           },
           {
+            "type": "assert_expression",
+            "named": true
+          },
+          {
             "type": "atom",
             "named": true
           },
@@ -3200,6 +3438,10 @@
         },
         {
           "type": "and_expression",
+          "named": true
+        },
+        {
+          "type": "assert_expression",
           "named": true
         },
         {
@@ -3417,6 +3659,10 @@
             "named": true
           },
           {
+            "type": "assert_expression",
+            "named": true
+          },
+          {
             "type": "atom",
             "named": true
           },
@@ -3612,6 +3858,10 @@
           "named": true
         },
         {
+          "type": "describe_decl",
+          "named": true
+        },
+        {
           "type": "doc_annotation",
           "named": true
         },
@@ -3640,7 +3890,19 @@
           "named": true
         },
         {
+          "type": "setup_all_decl",
+          "named": true
+        },
+        {
+          "type": "setup_decl",
+          "named": true
+        },
+        {
           "type": "sig_def",
+          "named": true
+        },
+        {
+          "type": "test_decl",
           "named": true
         },
         {
@@ -3668,6 +3930,10 @@
           },
           {
             "type": "and_expression",
+            "named": true
+          },
+          {
+            "type": "assert_expression",
             "named": true
           },
           {
@@ -3812,6 +4078,10 @@
           },
           {
             "type": "and_expression",
+            "named": true
+          },
+          {
+            "type": "assert_expression",
             "named": true
           },
           {
@@ -3993,6 +4263,10 @@
             "named": true
           },
           {
+            "type": "assert_expression",
+            "named": true
+          },
+          {
             "type": "atom",
             "named": true
           },
@@ -4116,6 +4390,10 @@
           },
           {
             "type": "and_expression",
+            "named": true
+          },
+          {
+            "type": "assert_expression",
             "named": true
           },
           {
@@ -4251,6 +4529,10 @@
             "named": true
           },
           {
+            "type": "assert_expression",
+            "named": true
+          },
+          {
             "type": "atom",
             "named": true
           },
@@ -4374,6 +4656,10 @@
           },
           {
             "type": "and_expression",
+            "named": true
+          },
+          {
+            "type": "assert_expression",
             "named": true
           },
           {
@@ -4654,6 +4940,10 @@
             "named": true
           },
           {
+            "type": "assert_expression",
+            "named": true
+          },
+          {
             "type": "atom",
             "named": true
           },
@@ -4832,6 +5122,10 @@
             "named": true
           },
           {
+            "type": "assert_expression",
+            "named": true
+          },
+          {
             "type": "atom",
             "named": true
           },
@@ -4974,6 +5268,10 @@
           "named": true
         },
         {
+          "type": "assert_expression",
+          "named": true
+        },
+        {
           "type": "atom",
           "named": true
         },
@@ -5105,6 +5403,10 @@
           "named": true
         },
         {
+          "type": "assert_expression",
+          "named": true
+        },
+        {
           "type": "atom",
           "named": true
         },
@@ -5220,6 +5522,38 @@
     }
   },
   {
+    "type": "setup_all_decl",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "block_body",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "setup_decl",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "block_body",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "sig_def",
     "named": true,
     "fields": {
@@ -5282,6 +5616,10 @@
           "named": true
         },
         {
+          "type": "describe_decl",
+          "named": true
+        },
+        {
           "type": "doc_annotation",
           "named": true
         },
@@ -5314,7 +5652,19 @@
           "named": true
         },
         {
+          "type": "setup_all_decl",
+          "named": true
+        },
+        {
+          "type": "setup_decl",
+          "named": true
+        },
+        {
           "type": "sig_def",
+          "named": true
+        },
+        {
+          "type": "test_decl",
           "named": true
         },
         {
@@ -5342,6 +5692,10 @@
         },
         {
           "type": "and_expression",
+          "named": true
+        },
+        {
+          "type": "assert_expression",
           "named": true
         },
         {
@@ -5499,6 +5853,32 @@
     }
   },
   {
+    "type": "test_decl",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "block_body",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "string",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "tuple_expression",
     "named": true,
     "fields": {},
@@ -5512,6 +5892,10 @@
         },
         {
           "type": "and_expression",
+          "named": true
+        },
+        {
+          "type": "assert_expression",
           "named": true
         },
         {
@@ -5915,6 +6299,10 @@
             "named": true
           },
           {
+            "type": "assert_expression",
+            "named": true
+          },
+          {
             "type": "atom",
             "named": true
           },
@@ -6150,6 +6538,10 @@
           "named": true
         },
         {
+          "type": "assert_expression",
+          "named": true
+        },
+        {
           "type": "atom",
           "named": true
         },
@@ -6369,6 +6761,10 @@
     "named": false
   },
   {
+    "type": "assert",
+    "named": false
+  },
+  {
     "type": "block_comment",
     "named": true,
     "extra": true
@@ -6377,6 +6773,10 @@
     "type": "comment",
     "named": true,
     "extra": true
+  },
+  {
+    "type": "describe",
+    "named": false
   },
   {
     "type": "do",
@@ -6479,6 +6879,14 @@
     "named": false
   },
   {
+    "type": "setup",
+    "named": false
+  },
+  {
+    "type": "setup_all",
+    "named": false
+  },
+  {
     "type": "sig",
     "named": false
   },
@@ -6493,6 +6901,10 @@
   {
     "type": "string",
     "named": true
+  },
+  {
+    "type": "test",
+    "named": false
   },
   {
     "type": "then",

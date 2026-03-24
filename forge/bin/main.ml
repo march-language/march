@@ -58,6 +58,9 @@ let test_cmd =
   let verbose =
     Arg.(value & flag & info ["v"; "verbose"] ~doc:"Show each test name as it runs")
   in
+  let coverage =
+    Arg.(value & flag & info ["coverage"] ~doc:"Collect and report test coverage")
+  in
   let filter =
     Arg.(value & opt string "" &
          info ["filter"] ~docv:"PATTERN" ~doc:"Only run tests whose name matches PATTERN")
@@ -66,9 +69,9 @@ let test_cmd =
     Arg.(value & pos_all string [] &
          info [] ~docv:"FILE" ~doc:"Test files to run (default: all test files under test/)")
   in
-  let run v f fs = handle (Cmd_test.run ~verbose:v ~filter:f ~files:fs ()) in
+  let run v c f fs = handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~files:fs ()) in
   Cmd.v (Cmd.info "test" ~doc:"Run the test suite")
-    Term.(const run $ verbose $ filter $ files)
+    Term.(const run $ verbose $ coverage $ filter $ files)
 
 (* ---------------------------------------------------------------- forge format *)
 

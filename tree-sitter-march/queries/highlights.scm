@@ -15,6 +15,11 @@
 (doc_annotation content: (string) @comment.documentation)
 (doc_annotation content: (triple_string) @comment.documentation)
 
+; Test constructs
+["test" "describe" "assert" "setup" "setup_all"] @keyword
+(test_decl name: (string) @string.special)
+(describe_decl name: (string) @string.special)
+
 ; Literals
 (integer) @number
 (float) @number

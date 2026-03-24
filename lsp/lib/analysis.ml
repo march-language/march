@@ -118,16 +118,25 @@ let load_stdlib () =
   match find_stdlib_dir () with
   | None -> []
   | Some stdlib_dir ->
-    let files = [
-      "prelude.march"; "option.march"; "result.march"; "list.march";
-      "map.march"; "math.march"; "string.march"; "iolist.march";
-      "http.march"; "http_transport.march"; "http_client.march";
-      "seq.march"; "path.march"; "file.march"; "dir.march";
-      "sort.march"; "csv.march"; "websocket.march"; "http_server.march";
-    ] in
+    (* Load prelude first (special treatment: its top-level mod wrapper is
+       stripped so its decls land in the global scope).  Then load every
+       other *.march file in the stdlib directory so the full standard
+       library — including Array, Test, Bigint, Json, etc. — is available
+       to the type-checker when the LSP analyses any file. *)
+    let all_files =
+      try
+        Sys.readdir stdlib_dir
+        |> Array.to_list
+        |> List.filter (fun f -> Filename.check_suffix f ".march")
+        |> List.sort String.compare
+      with Sys_error _ -> []
+    in
+    let prelude = "prelude.march" in
+    let rest = List.filter (fun f -> f <> prelude) all_files in
+    let ordered = if List.mem prelude all_files then prelude :: rest else rest in
     List.concat_map
       (fun name -> load_stdlib_file (Filename.concat stdlib_dir name))
-      files
+      ordered
 
 (* ------------------------------------------------------------------ *)
 (* Diagnostic conversion                                               *)

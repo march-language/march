@@ -226,6 +226,27 @@ let logger_level : int ref = ref 1
 (* Persistent key-value context attached to every log entry. *)
 let logger_context : (string * string) list ref = ref []
 
+(* ---- Test output capture ---- *)
+(* When Some buf, all print/log output is redirected here instead of stdout/stderr.
+   Set by run_tests around each test body; None during normal execution. *)
+let test_capture_buf : Buffer.t option ref = ref None
+
+let capture_write (s : string) : unit =
+  match !test_capture_buf with
+  | Some buf -> Buffer.add_string buf s
+  | None -> print_string s
+
+let capture_writeln (s : string) : unit =
+  match !test_capture_buf with
+  | Some buf -> Buffer.add_string buf s; Buffer.add_char buf '\n'
+  | None -> print_endline s
+
+(* Logger output goes to stderr normally; redirect to capture buf during tests. *)
+let capture_ewriteln (s : string) : unit =
+  match !test_capture_buf with
+  | Some buf -> Buffer.add_string buf s; Buffer.add_char buf '\n'
+  | None -> Printf.eprintf "%s\n%!" s
+
 (* ---- Actor.call reply tracking ---- *)
 (* Pending synchronous call replies: call_ref -> reply value. *)
 let pending_replies : (int, value) Hashtbl.t = Hashtbl.create 4
@@ -775,7 +796,7 @@ let foreign_stubs : (string * string, value list -> value) Hashtbl.t =
   (* puts: print string + newline, return length *)
   List.iter (fun lib ->
     reg lib "puts" (function
-      | [VString s] -> print_string s; print_char '\n'; VInt (String.length s + 1)
+      | [VString s] -> capture_writeln s; VInt (String.length s + 1)
       | _ -> eval_error "extern puts: expected String"))
     ["c"; "libc"; "libc.so"];
   t
@@ -1901,17 +1922,17 @@ let base_env : env =
         | _ -> eval_error "builtin ++: expected two strings"))
     (* I/O *)
   ; ("print", VBuiltin ("print", function
-        | [v] -> print_string (value_display v); VUnit
-        | vs  -> List.iter (fun v -> print_string (value_display v)) vs; VUnit))
+        | [v] -> capture_write (value_display v); VUnit
+        | vs  -> List.iter (fun v -> capture_write (value_display v)) vs; VUnit))
   ; ("println", VBuiltin ("println", function
-        | [v] -> print_endline (value_display v); VUnit
-        | vs  -> List.iter (fun v -> print_string (value_display v)) vs;
-                 print_newline (); VUnit))
+        | [v] -> capture_writeln (value_display v); VUnit
+        | vs  -> List.iter (fun v -> capture_write (value_display v)) vs;
+                 capture_write "\n"; VUnit))
   ; ("print_int", VBuiltin ("print_int", function
-        | [VInt n] -> print_int n; VUnit
+        | [VInt n] -> capture_write (string_of_int n); VUnit
         | _ -> eval_error "print_int: expected int"))
   ; ("print_float", VBuiltin ("print_float", function
-        | [VFloat f] -> print_float f; VUnit
+        | [VFloat f] -> capture_write (string_of_float f); VUnit
         | _ -> eval_error "print_float: expected float"))
     (* Tap bus — Clojure tap> model for non-intrusive value inspection *)
   ; ("tap", VBuiltin ("tap", function
@@ -3884,7 +3905,7 @@ let base_env : env =
             else " {" ^ String.concat ", "
                 (List.map (fun (k, v) -> k ^ "=" ^ v) all_meta) ^ "}"
           in
-          Printf.eprintf "[%s] %s%s\n%!" level msg meta_str;
+          capture_ewriteln (Printf.sprintf "[%s] %s%s" level msg meta_str);
           VUnit
         | _ -> eval_error "logger_write: expected (String, String, List, List)"))
 
@@ -4050,6 +4071,14 @@ and eval_expr_inner (env : env) (e : expr) : value =
 
   | EApp (f, args, _) ->
     check_reductions ();
+    (if !March_coverage.Coverage.coverage_enabled then begin
+      let name = match f with
+        | EVar n -> n.txt
+        | EField (_, field, _) -> field.txt
+        | _ -> "<anon>"
+      in
+      March_coverage.Coverage.record_fn_call name
+    end);
     let fn_val = eval_expr env f in
     let arg_vals = List.map (eval_expr env) args in
     apply fn_val arg_vals
@@ -4075,10 +4104,10 @@ and eval_expr_inner (env : env) (e : expr) : value =
        This shouldn't appear after desugaring except inside EBlock. *)
     eval_expr env b.bind_expr
 
-  | EMatch (scrut, branches, _) ->
+  | EMatch (scrut, branches, sp) ->
     check_reductions ();
     let v = eval_expr env scrut in
-    eval_match env v branches
+    eval_match env sp v branches
 
   | ETuple ([], _) -> VUnit
   | ETuple (es, _) ->
@@ -4137,10 +4166,16 @@ and eval_expr_inner (env : env) (e : expr) : value =
         | None   -> eval_error "no member '%s' in module '%s'" field.txt mod_name)
      | _ -> eval_error "field access on non-record value"))
 
-  | EIf (cond, then_, else_, _) ->
+  | EIf (cond, then_, else_, sp) ->
     (match eval_expr env cond with
-     | VBool true  -> eval_expr env then_
-     | VBool false -> eval_expr env else_
+     | VBool true  ->
+       (if !March_coverage.Coverage.coverage_enabled then
+         March_coverage.Coverage.record_branch sp true);
+       eval_expr env then_
+     | VBool false ->
+       (if !March_coverage.Coverage.coverage_enabled then
+         March_coverage.Coverage.record_branch sp false);
+       eval_expr env else_
      | _           -> eval_error "if condition must be a boolean")
 
   | EPipe _ ->
@@ -4333,34 +4368,42 @@ and eval_expr_inner (env : env) (e : expr) : value =
           raise (Assert_failure (Printf.sprintf "assert: expected Bool, got %s"
             (value_to_string v)))))
 
-(** Evaluate a match expression: try each branch until one matches. *)
-and eval_match (env : env) (v : value) (branches : branch list) : value =
-  match branches with
-  | [] ->
-    raise (Match_failure
-             (Printf.sprintf "non-exhaustive match on value: %s"
-                (value_to_string v)))
-  | br :: rest ->
-    (match match_pattern v br.branch_pat with
-     | None -> eval_match env v rest
-     | Some bindings ->
-       let env' = bindings @ env in
-       (* Check guard if present *)
-       let guard_ok = match br.branch_guard with
-         | None   -> true
-         | Some g ->
-           (match eval_expr env' g with
-            | VBool b -> b
-            | _       -> eval_error "guard must evaluate to a boolean")
-       in
-       if guard_ok
-       then eval_expr env' br.branch_body
-       else eval_match env v rest)
+(** Evaluate a match expression: try each branch until one matches.
+    [match_span] is the span of the [EMatch] node, used for coverage arm tracking. *)
+and eval_match (env : env) (match_span : span) (v : value) (branches : branch list) : value =
+  let rec go arm_idx = function
+    | [] ->
+      raise (Match_failure
+               (Printf.sprintf "non-exhaustive match on value: %s"
+                  (value_to_string v)))
+    | br :: rest ->
+      (match match_pattern v br.branch_pat with
+       | None -> go (arm_idx + 1) rest
+       | Some bindings ->
+         let env' = bindings @ env in
+         (* Check guard if present *)
+         let guard_ok = match br.branch_guard with
+           | None   -> true
+           | Some g ->
+             (match eval_expr env' g with
+              | VBool b -> b
+              | _       -> eval_error "guard must evaluate to a boolean")
+         in
+         if guard_ok then begin
+           (if !March_coverage.Coverage.coverage_enabled then
+             March_coverage.Coverage.record_arm match_span arm_idx);
+           eval_expr env' br.branch_body
+         end else go (arm_idx + 1) rest)
+  in
+  go 0 branches
 
 (** Tracing wrapper around [eval_expr_inner].
     When debug mode is active, records a [trace_frame] for every evaluation step.
-    When [!debug_ctx] is None, this is a single pointer deref — zero overhead. *)
+    When [!debug_ctx] is None, this is a single pointer deref — zero overhead.
+    Coverage recording is gated by [March_coverage.Coverage.coverage_enabled]. *)
 and eval_expr (env : env) (e : expr) : value =
+  (if !March_coverage.Coverage.coverage_enabled then
+    March_coverage.Coverage.record_expr (span_of_expr e));
   match !debug_ctx with
   | None | Some { dc_enabled = false; _ } ->
     eval_expr_inner env e
@@ -5421,8 +5464,11 @@ let collect_test_decls (m : module_) :
       - Verbose mode:        prints `✓ name` / `✗ name  (msg)`, then "Finished" line.
       - Quiet mode:          no output at all; caller handles reporting.
 
-    Exit-code contract: the caller is responsible for exiting 1 if failures > 0. *)
-let run_tests ?(verbose=false) ?(quiet=false) ?(filter="") (m : module_) : int * int * (string * string) list =
+    Exit-code contract: the caller is responsible for exiting 1 if failures > 0.
+    [~capture_io] — when true, suppress print/log output during each test and
+    include it in the failure message if the test fails.  Opt-in via @capture_io
+    in the test source. *)
+let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?(capture_io=false) (m : module_) : int * int * (string * string) list =
   (* Build the module environment (registers all fns, lets, etc.) *)
   let env = eval_module_env m in
   let (setup_all_opt, setup_opt, tests) = collect_test_decls m in
@@ -5454,6 +5500,9 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(filter="") (m : module_) : int *
                   with exn ->
                     Printf.eprintf "setup failed for \"%s\": %s\n%!" name (Printexc.to_string exn))
      | None -> ());
+    (* When capture_io is enabled, redirect print/log into a per-test buffer. *)
+    let cap_buf = if capture_io then Some (Buffer.create 128) else None in
+    (match cap_buf with Some b -> test_capture_buf := Some b | None -> ());
     let result =
       try
         let _ = eval_expr env body in
@@ -5464,12 +5513,171 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(filter="") (m : module_) : int *
       | Match_failure msg  -> TestError ("match failure: " ^ msg)
       | exn                -> TestError (Printexc.to_string exn)
     in
+    test_capture_buf := None;
+    let captured = match cap_buf with
+      | Some b -> Buffer.contents b
+      | None -> ""
+    in
+    (* Append captured output to failure message when non-empty. *)
+    let with_output msg =
+      if captured = "" then msg
+      else msg ^ "\n\n--- captured output ---\n" ^ String.trim captured
+    in
     if quiet then begin
       (* Collect failures silently *)
       (match result with
        | TestPass -> ()
-       | TestFail msg -> failures := (name, msg) :: !failures
-       | TestError msg -> failures := (name, "error: " ^ msg) :: !failures)
+       | TestFail msg -> failures := (name, with_output msg) :: !failures
+       | TestError msg -> failures := (name, with_output ("error: " ^ msg)) :: !failures)
+    end else if verbose then begin
+      match result with
+      | TestPass ->
+        Printf.printf "  ✓ %s\n%!" name
+      | TestFail msg ->
+        let full = with_output msg in
+        Printf.printf "  ✗ %s\n    %s\n%!" name
+          (String.concat "\n    " (String.split_on_char '\n' full));
+        failures := (name, full) :: !failures
+      | TestError msg ->
+        let full = with_output ("error: " ^ msg) in
+        Printf.printf "  ✗ %s\n    %s\n%!" name
+          (String.concat "\n    " (String.split_on_char '\n' full));
+        failures := (name, full) :: !failures
+    end else begin
+      (match result with
+       | TestPass ->
+         if dot_stream then Printf.printf "\027[32m.\027[0m%!"
+         else Printf.printf ".%!"
+       | TestFail msg ->
+         if dot_stream then Printf.printf "\027[31mF\027[0m%!"
+         else Printf.printf "F%!";
+         failures := (name, with_output msg) :: !failures
+       | TestError msg ->
+         if dot_stream then Printf.printf "\027[31mE\027[0m%!"
+         else Printf.printf "E%!";
+         failures := (name, with_output ("error: " ^ msg)) :: !failures)
+    end
+  ) tests;
+  let n_failed = List.length !failures in
+  if not quiet && not dot_stream then begin
+    if not verbose then Printf.printf "\n%!";
+    (* Print failure details in dot mode *)
+    if not verbose && !failures <> [] then begin
+      Printf.printf "\n%d failure(s):\n\n" (List.length !failures);
+      List.iter (fun (name, msg) ->
+        Printf.printf "FAIL: \"%s\"\n  %s\n\n" name
+          (String.concat "\n  " (String.split_on_char '\n' msg))
+      ) (List.rev !failures)
+    end;
+    Printf.printf "Finished: %d test%s, %d failure%s\n%!"
+      total (if total = 1 then "" else "s")
+      n_failed (if n_failed = 1 then "" else "s")
+  end;
+  (total, n_failed, List.rev !failures)
+
+(* ------------------------------------------------------------------ *)
+(* Doctest runner                                                      *)
+(* ------------------------------------------------------------------ *)
+
+(** Run all doctests extracted from [fn_doc] fields in the module.
+
+    [parse_expr] converts a source string to an AST [expr].  It is injected
+    by the caller so that [march_eval] does not need to depend on [march_parser].
+
+    Returns [(total, n_failed, failures)] with the same contract as [run_tests].
+    Output format mirrors [run_tests]:
+      Verbose   — "  ✓ doctest Option.is_some (1)"
+      Dot mode  — one '.' per pass, 'F' per fail, 'E' per error
+      Quiet     — no output; caller handles reporting. *)
+let run_doctests ?(verbose=false) ?(quiet=false) ?(filter="")
+    ~(parse_expr : string -> expr)
+    (m : module_) : int * int * (string * string) list =
+  (* Build the module environment *)
+  let env = eval_module_env m in
+  (* Collect (qualified_fn_name, doc_string) pairs, walking nested mods *)
+  let rec collect_docs prefix decls =
+    List.concat_map (fun decl ->
+      match decl with
+      | DFn (def, _) ->
+        (match def.fn_doc with
+         | None -> []
+         | Some doc ->
+           let qname = if prefix = "" then def.fn_name.txt
+                       else prefix ^ "." ^ def.fn_name.txt in
+           [(qname, doc)])
+      | DMod (mname, _, inner, _) ->
+        let new_prefix = if prefix = "" then mname.txt
+                         else prefix ^ "." ^ mname.txt in
+        collect_docs new_prefix inner
+      | _ -> [])
+    decls
+  in
+  let fn_docs = collect_docs "" m.mod_decls in
+  (* Expand docs into (test_name, example) list *)
+  let tests : (string * March_doctest.Doctest.example) list =
+    List.concat_map (fun (fname, doc) ->
+      let examples = March_doctest.Doctest.extract doc in
+      List.mapi (fun i ex ->
+        let name = Printf.sprintf "doctest %s (%d)" fname (i + 1) in
+        (name, ex)
+      ) examples
+    ) fn_docs
+  in
+  (* Filter *)
+  let tests =
+    if filter = "" then tests
+    else List.filter (fun (name, _) ->
+           let lname = String.lowercase_ascii name in
+           let lpat  = String.lowercase_ascii filter in
+           let n = String.length lname and p = String.length lpat in
+           let rec check i =
+             if i + p > n then false
+             else if String.sub lname i p = lpat then true
+             else check (i + 1)
+           in check 0
+         ) tests
+  in
+  let total    = List.length tests in
+  let failures = ref [] in
+  List.iter (fun (name, ex) ->
+    let result =
+      (try
+         let expr   = parse_expr ex.March_doctest.Doctest.ex_source in
+         let v      = eval_expr env expr in
+         let actual = value_to_string v in
+         (match ex.March_doctest.Doctest.ex_expected with
+          | March_doctest.Doctest.ExpectOutput expected ->
+            if actual = expected then TestPass
+            else TestFail (Printf.sprintf "expected: %s\n  got:      %s" expected actual)
+          | March_doctest.Doctest.ExpectPanic expected ->
+            TestFail (Printf.sprintf "expected panic %S\n  but got: %s" expected actual)
+          | March_doctest.Doctest.ExpectNothing ->
+            TestPass)
+       with
+       | Eval_error msg ->
+         (match ex.March_doctest.Doctest.ex_expected with
+          | March_doctest.Doctest.ExpectPanic expected ->
+            (* Panic messages are raised as "panic: <msg>"; strip the prefix *)
+            let panic_tag = "panic: " in
+            let actual_msg =
+              if String.length msg > String.length panic_tag &&
+                 String.sub msg 0 (String.length panic_tag) = panic_tag
+              then String.sub msg (String.length panic_tag)
+                     (String.length msg - String.length panic_tag)
+              else msg
+            in
+            if actual_msg = expected then TestPass
+            else TestFail (Printf.sprintf "expected panic %S\n  got panic: %s" expected actual_msg)
+          | _ ->
+            TestError msg)
+       | exn ->
+         TestError (Printexc.to_string exn))
+    in
+    if quiet then begin
+      match result with
+      | TestPass -> ()
+      | TestFail msg -> failures := (name, msg) :: !failures
+      | TestError msg -> failures := (name, "error: " ^ msg) :: !failures
     end else if verbose then begin
       match result with
       | TestPass ->
@@ -5482,20 +5690,19 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(filter="") (m : module_) : int *
         Printf.printf "  ✗ %s (error: %s)\n%!" name msg;
         failures := (name, "error: " ^ msg) :: !failures
     end else begin
-      (match result with
-       | TestPass -> Printf.printf ".%!"
-       | TestFail msg ->
-         Printf.printf "F%!";
-         failures := (name, msg) :: !failures
-       | TestError msg ->
-         Printf.printf "E%!";
-         failures := (name, "error: " ^ msg) :: !failures)
+      match result with
+      | TestPass  -> Printf.printf "\027[32m.\027[0m%!"
+      | TestFail msg ->
+        Printf.printf "\027[31mF\027[0m%!";
+        failures := (name, msg) :: !failures
+      | TestError msg ->
+        Printf.printf "\027[31mE\027[0m%!";
+        failures := (name, "error: " ^ msg) :: !failures
     end
   ) tests;
   let n_failed = List.length !failures in
   if not quiet then begin
     if not verbose then Printf.printf "\n%!";
-    (* Print failure details in dot mode *)
     if not verbose && !failures <> [] then begin
       Printf.printf "\n%d failure(s):\n\n" (List.length !failures);
       List.iter (fun (name, msg) ->
@@ -5503,7 +5710,7 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(filter="") (m : module_) : int *
           (String.concat "\n  " (String.split_on_char '\n' msg))
       ) (List.rev !failures)
     end;
-    Printf.printf "Finished: %d test%s, %d failure%s\n%!"
+    Printf.printf "Finished: %d doctest%s, %d failure%s\n%!"
       total (if total = 1 then "" else "s")
       n_failed (if n_failed = 1 then "" else "s")
   end;

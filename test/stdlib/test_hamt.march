@@ -23,7 +23,7 @@ fn str_eq(a : String, b : String) : Bool do
 end
 
 -- Collision hash: everything hashes to 0, forcing HCollision nodes.
-fn zero_hash(k : Int) : Int do 0 end
+fn zero_hash(_k : Int) : Int do 0 end
 
 -- ── Curried fold accumulator helpers ─────────────────────────────────────────
 

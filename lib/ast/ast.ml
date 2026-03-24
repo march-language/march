@@ -196,6 +196,7 @@ and fn_def = {
   fn_name : name;
   fn_vis : visibility;
   fn_doc : string option;       (** Optional doc comment: doc "..." or doc """...""" *)
+  fn_attrs : string list;       (** Compiler attributes: @[no_warn_recursion] etc. *)
   fn_ret_ty : ty option;        (** Return type (need only appear on one clause) *)
   fn_clauses : fn_clause list;  (** One or more pattern-matching heads *)
 }

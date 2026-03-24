@@ -4884,7 +4884,7 @@ let make_jit_test_module (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
   let fn_def = March_ast.Ast.{
     fn_name = { txt = "main"; span = s };
     fn_vis = March_ast.Ast.Public;
-    fn_doc = None; fn_ret_ty = None;
+    fn_doc = None; fn_attrs = []; fn_ret_ty = None;
     fn_clauses = [clause] } in
   { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
     mod_decls = [March_ast.Ast.DFn (fn_def, s)] }
@@ -5077,7 +5077,7 @@ let test_repl_jit_stdlib_list_length () =
            fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
-           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
            fn_clauses = [main_clause]; } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
@@ -5129,7 +5129,7 @@ let test_repl_list_literal () =
          let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
-           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
            fn_clauses = [clause] } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
@@ -5172,7 +5172,7 @@ let test_repl_stdlib_on_list () =
          let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
-           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
            fn_clauses = [clause] } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
@@ -5269,7 +5269,7 @@ let test_repl_stdlib_chain () =
          let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
-           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
            fn_clauses = [clause] } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
@@ -5405,7 +5405,7 @@ let test_repl_jit_list_display () =
          let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
-           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
            fn_clauses = [clause] } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
@@ -5532,7 +5532,7 @@ let test_repl_list_literal_with_bigint () =
            fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
-           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
            fn_clauses = [clause] } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
@@ -5596,7 +5596,7 @@ let test_repl_list_literal_with_precompile_bigint () =
            fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
          let main_def = March_ast.Ast.{
            fn_name = { txt = "main"; span = s };
-           fn_vis = Public; fn_doc = None; fn_ret_ty = None;
+           fn_vis = Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
            fn_clauses = [clause] } in
          { March_ast.Ast.mod_name = { txt = "Main"; span = s };
            mod_decls = stdlib_decls @ [DFn (main_def, s)] }
@@ -5643,7 +5643,7 @@ let make_stdlib_module stdlib_decls (e : March_ast.Ast.expr) : March_ast.Ast.mod
   let clause = March_ast.Ast.{ fc_params = []; fc_guard = None; fc_body = e; fc_span = s } in
   let main_def = March_ast.Ast.{
     fn_name = { txt = "main"; span = s };
-    fn_vis = March_ast.Ast.Public; fn_doc = None; fn_ret_ty = None;
+    fn_vis = March_ast.Ast.Public; fn_doc = None; fn_attrs = []; fn_ret_ty = None;
     fn_clauses = [clause] } in
   { March_ast.Ast.mod_name = { txt = "Main"; span = s };
     mod_decls = stdlib_decls @ [March_ast.Ast.DFn (main_def, s)] }
@@ -13467,6 +13467,30 @@ let test_parity_if_else () =
    covered here because the standalone JIT test module has no globals;
    those cases are exercised in the repl_jit_cross_line tests instead. *)
 
+(* ── Bitwise builtin parity tests ───────────────────────────────────────── *)
+
+let test_parity_bitwise_builtins () =
+  match setup_jit_runtime () with
+  | None -> ()
+  | Some runtime_so ->
+    List.iter (fun (src, expected) ->
+      check_parity ~ctx:"bitwise" ~runtime_so src;
+      match interp_eval_expr src with
+      | Some (v, _) ->
+        Alcotest.(check string) ("bitwise: " ^ src) expected v
+      | None -> Alcotest.fail ("bitwise eval failed: " ^ src)
+    ) [
+      ("int_and(7, 3)",           "3");
+      ("int_or(5, 2)",            "7");
+      ("int_xor(15, 6)",          "9");
+      ("int_not(0)",              "-1");
+      ("int_shl(1, 4)",           "16");
+      ("int_shr(16, 2)",          "4");
+      ("int_popcount(7)",         "3");
+      ("int_and(int_shr(255, 3), 31)",   "31");
+      ("int_or(int_shl(1, 3), int_shl(1, 1))",  "10");
+    ]
+
 (* ── Tail-call enforcement tests ────────────────────────────────────────── *)
 
 let test_tc_tail_factorial_ok () =
@@ -16044,6 +16068,7 @@ let () =
           Alcotest.test_case "string interp"     `Quick test_parity_string_interp;
           Alcotest.test_case "closures"          `Quick test_parity_closures;
           Alcotest.test_case "if/else"           `Quick test_parity_if_else;
+          Alcotest.test_case "bitwise builtins"  `Quick test_parity_bitwise_builtins;
         ] );
       ( "tail_recursion",
         [

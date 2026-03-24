@@ -231,11 +231,13 @@ let rec march_files_in dir =
     Discovers test files, parses/typechecks them, and runs all test blocks.
     Usage: march test [--verbose|-v] [--filter=pattern] [file...] *)
 let run_test_cmd args =
-  let verbose = ref false in
-  let filter  = ref "" in
-  let targets = ref [] in
+  let verbose  = ref false in
+  let filter   = ref "" in
+  let coverage = ref false in
+  let targets  = ref [] in
   List.iter (fun a ->
     if a = "--verbose" || a = "-v" then verbose := true
+    else if a = "--coverage" then coverage := true
     else if String.length a > 9 && String.sub a 0 9 = "--filter=" then
       filter := String.sub a 9 (String.length a - 9)
     else
@@ -324,21 +326,66 @@ let run_test_cmd args =
       ) diags;
       exit 1
     end;
+    (* Enable coverage tracking for this file's test run. *)
+    if !coverage then begin
+      March_coverage.Coverage.reset ();
+      March_coverage.Coverage.coverage_enabled := true
+    end;
+    (* Check whether the test source opts into IO capture via @capture_io. *)
+    let capture_io =
+      let pat = "@capture_io" in
+      let n = String.length src and p = String.length pat in
+      let rec check i =
+        if i + p > n then false
+        else if String.sub src i p = pat then true
+        else check (i + 1)
+      in check 0
+    in
     let (n_tests, n_failed, file_failures) =
       if !verbose then
-        March_eval.Eval.run_tests ~verbose:true ~filter:!filter desugared
+        March_eval.Eval.run_tests ~verbose:true ~filter:!filter ~capture_io desugared
       else
-        March_eval.Eval.run_tests ~quiet:true ~filter:!filter desugared
+        March_eval.Eval.run_tests ~dot_stream:true ~filter:!filter ~capture_io desugared
     in
+    if !coverage then begin
+      March_coverage.Coverage.coverage_enabled := false;
+      March_coverage.Coverage.report_summary ~target_file:filename desugared ()
+    end;
     total_tests  := !total_tests + n_tests;
     total_failed := !total_failed + n_failed;
     if n_failed > 0 then begin
       failed_files := filename :: !failed_files;
       if not !verbose then
         all_file_failures := (filename, file_failures) :: !all_file_failures
+    end;
+    (* Run doctests extracted from fn_doc fields *)
+    let parse_expr src =
+      let lexbuf = Lexing.from_string src in
+      try March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf
+      with
+      | March_errors.Errors.ParseError (msg, _, _) ->
+        failwith ("doctest parse error: " ^ msg)
+      | March_parser.Parser.Error ->
+        failwith ("doctest parse error in: " ^ src)
+    in
+    let (dt_total, dt_failed, dt_failures) =
+      if !verbose then
+        March_eval.Eval.run_doctests ~verbose:true ~filter:!filter ~parse_expr desugared
+      else
+        March_eval.Eval.run_doctests ~quiet:true ~filter:!filter ~parse_expr desugared
+    in
+    total_tests  := !total_tests + dt_total;
+    total_failed := !total_failed + dt_failed;
+    if dt_failed > 0 then begin
+      if not (List.mem filename !failed_files) then
+        failed_files := filename :: !failed_files;
+      if not !verbose then
+        all_file_failures := (filename, dt_failures) :: !all_file_failures
     end
   ) files;
-  (* In quiet mode, print collected failure details grouped by file. *)
+  (* End the dot line after all files *)
+  if not !verbose then Printf.printf "\n%!";
+  (* Print collected failure details grouped by file. *)
   if not !verbose && !all_file_failures <> [] then begin
     List.iter (fun (filename, failures) ->
       Printf.printf "%s\n" filename;
@@ -348,8 +395,15 @@ let run_test_cmd args =
       ) failures
     ) (List.rev !all_file_failures)
   end;
-  Printf.printf "=== Summary: %d/%d files, %d/%d tests failed ===\n%!"
-    (List.length !failed_files) total_files !total_failed !total_tests;
+  let n_failed_files = List.length !failed_files in
+  if n_failed_files = 0 then
+    Printf.printf "=== %d file%s, %d test%s passed ===\n%!"
+      total_files (if total_files = 1 then "" else "s")
+      !total_tests (if !total_tests = 1 then "" else "s")
+  else
+    Printf.printf "=== %d/%d file%s, %d/%d test%s failed ===\n%!"
+      n_failed_files total_files (if total_files = 1 then "" else "s")
+      !total_failed !total_tests (if !total_tests = 1 then "" else "s");
   if !total_failed > 0 then exit 1
   else exit 0
 

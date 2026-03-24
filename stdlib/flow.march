@@ -122,7 +122,7 @@ No-op in the interpreter (single-threaded execution).
       |> Flow.with_concurrency(8)
       |> Flow.collect
 """
-pub fn with_concurrency(stage, n) do stage end
+pub fn with_concurrency(stage, _n) do stage end
 
 -- ---- Consumers (run the pipeline eagerly) ----
 
