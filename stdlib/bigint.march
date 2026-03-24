@@ -357,10 +357,10 @@ pub fn compare(a : BigInt, b : BigInt) : Int do
       let a_zero = match da do | Nil -> true | _ -> false end
       let b_zero = match db do | Nil -> true | _ -> false end
       if a_zero && b_zero then 0
-      else if a_zero then if sb then -1 else 1
-      else if b_zero then if sa then 1 else -1
+      else if a_zero then if sb then 0 - 1 else 1
+      else if b_zero then if sa then 1 else 0 - 1
       else if sa && !sb then 1
-      else if !sa && sb then -1
+      else if !sa && sb then 0 - 1
       else do
         let mag_cmp = compare_digits(da, db)
         if sa then mag_cmp else 0 - mag_cmp
@@ -408,9 +408,9 @@ pub fn to_string(n : BigInt) : String do
       let reversed = reverse(digits)
       fn digit_to_str(d : Int, is_first : Bool) : String do
         -- Pad with leading zeros unless it's the most-significant limb
-        if is_first then to_string(d)
+        if is_first then int_to_string(d)
         else do
-          let s = to_string(d)
+          let s = int_to_string(d)
           let len = string_length(s)
           if len >= 4 then s
           else if len == 3 then "0" ++ s
@@ -467,22 +467,21 @@ end
 
 -- ---- Interface implementations ----
 
+-- Aliases to avoid name shadowing inside impl blocks.
+fn bigint_eq_impl(a, b) do eq(a, b) end
+fn bigint_compare_impl(a, b) do compare(a, b) end
+fn bigint_to_str_impl(n) do to_string(n) end
+
 impl Eq(BigInt) do
-  fn eq(a, b) do
-    BigInt.eq(a, b)
-  end
+  fn eq(a, b) do bigint_eq_impl(a, b) end
 end
 
 impl Ord(BigInt) do
-  fn compare(a, b) do
-    BigInt.compare(a, b)
-  end
+  fn compare(a, b) do bigint_compare_impl(a, b) end
 end
 
 impl Show(BigInt) do
-  fn show(n) do
-    BigInt.to_string(n)
-  end
+  fn show(n) do bigint_to_str_impl(n) end
 end
 
 end

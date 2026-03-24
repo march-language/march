@@ -1240,7 +1240,7 @@ let csv_next_row_impl : value list -> value = function
      | None -> eval_error "csv_next_row: invalid handle %d" id
      | Some r ->
        (match csv_scan_row r with
-        | None -> VAtom "eof"
+        | None -> VCon ("CsvEof", [])
         | Some fields ->
           let lst = List.fold_right
             (fun f acc -> VCon ("Cons", [VString f; acc]))

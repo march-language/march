@@ -16,7 +16,7 @@ mod HttpTransport do
     | ConnTimeout(String)
     | SendError(String)
     | RecvError(String)
-    | ConnConnParseError(String)
+    | ConnParseError(String)
     | Closed
 
   doc """

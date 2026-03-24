@@ -887,6 +887,33 @@ let builtin_bindings : (string * scheme) list =
     ("file_read_line",  Mono (TArrow (t_int, t_option t_string)));
     ("file_read_chunk", Mono (TArrow (t_int, TArrow (t_int, t_option t_string))));
     ("file_close",      Mono (TArrow (t_int, t_unit)));
+    (* CSV builtins — csv_next_row returns CsvRow (declared in csv.march) *)
+    ("csv_open",     poly1 (fun e -> TArrow (t_string, TArrow (t_string, TArrow (t_atom, t_result t_int e)))));
+    ("csv_next_row", Mono (TArrow (t_int, TCon ("CsvRow", []))));
+    ("csv_close",    Mono (TArrow (t_int, t_atom)));
+    (* TCP/HTTP transport builtins *)
+    ("tcp_connect",             poly1 (fun e -> TArrow (t_string, TArrow (t_int, t_result t_int e))));
+    ("tcp_send_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_string, t_result t_unit e))));
+    ("tcp_recv_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result t_string e)))));
+    ("tcp_close",               Mono (TArrow (t_int, t_unit)));
+    ("tcp_recv_http",           poly1 (fun e -> TArrow (t_int, TArrow (t_int, t_result t_string e))));
+    ("tcp_recv_http_headers",   poly1 (fun e -> TArrow (t_int, t_result (TTuple [t_string; t_int; t_bool]) e)));
+    ("tcp_recv_chunk",          poly1 (fun e -> TArrow (t_int, TArrow (t_int, t_result t_string e))));
+    ("tcp_recv_chunked_frame",  poly1 (fun e -> TArrow (t_int, t_result t_string e)));
+    (* http_serialize_request(method, host, path, query_opt, headers, body) -> String *)
+    ("http_serialize_request",  Mono (TArrow (t_string, TArrow (t_string, TArrow (t_string,
+        TArrow (t_option t_string, TArrow (t_list (TCon ("Header", [])), TArrow (t_string, t_string))))))));
+    ("http_parse_response",     poly1 (fun e -> TArrow (t_string,
+        t_result (TTuple [t_int; t_list (TCon ("Header", [])); t_string]) e)));
+    (* http_server_listen(port, max_conns, idle_timeout, pipeline_fn) *)
+    ("http_server_listen",      poly1 (fun a -> TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (TArrow (a, a), t_unit))))));
+    (* http_server_spawn_n(port, n, max_conns, idle_timeout, pipeline_fn) -> Int (pid) *)
+    ("http_server_spawn_n",     poly1 (fun a -> TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (t_int, TArrow (TArrow (a, a), t_int)))))));
+    ("http_server_wait",        Mono (TArrow (t_int, t_unit)));
+    (* WebSocket builtins — WsFrame and SelectResult declared in websocket.march *)
+    ("ws_recv",   Mono (TArrow (t_int, TCon ("WsFrame", []))));
+    ("ws_send",   Mono (TArrow (t_int, TArrow (TCon ("WsFrame", []), t_unit))));
+    ("ws_select", Mono (TArrow (t_int, TArrow (t_int, TArrow (t_int, TCon ("SelectResult", []))))));
     (* Dir I/O builtins *)
     ("dir_exists",      Mono (TArrow (t_string, t_bool)));
     ("dir_list",        poly1 (fun e -> TArrow (t_string, t_result (t_list t_string) e)));
@@ -4310,16 +4337,24 @@ let rec collect_pattern_vars (pat : Ast.pattern) : StringSet.t =
 (** True if [expr] is provably structurally smaller than some function parameter.
     - [params]: the set of function parameter variable names.
     - [smaller]: variables known to be sub-components of a parameter (from pattern matching).
-    Recognises two cases:
+    Recognises:
       1. A pattern-bound sub-component: [EVar v] where [v ∈ smaller].
-      2. Arithmetic reduction: [v - k] where [v ∈ params ∪ smaller]. *)
-let is_structurally_smaller (params : StringSet.t) (smaller : StringSet.t) (expr : Ast.expr) : bool =
+      2. Arithmetic reduction: [v - k] or [v / k] where [v ∈ params ∪ smaller].
+      3. List element access: [list_nth_safe(xs,i)], [List.nth(xs,i)] where xs is smaller.
+      4. Nullary constructor (e.g. HEmpty, Nil): structurally minimal. *)
+let rec is_structurally_smaller (params : StringSet.t) (smaller : StringSet.t) (expr : Ast.expr) : bool =
   match expr with
   | Ast.EVar v -> StringSet.mem v.txt smaller
-  | Ast.EApp (Ast.EVar op, [lhs; _], _) when op.txt = "-" ->
+  | Ast.EApp (Ast.EVar op, [lhs; _], _) when op.txt = "-" || op.txt = "/" ->
     (match lhs with
      | Ast.EVar v -> StringSet.mem v.txt params || StringSet.mem v.txt smaller
      | _ -> false)
+  (* List element accessor: element is structurally smaller than the list *)
+  | Ast.EApp (Ast.EVar fn, arg :: _, _)
+    when List.mem fn.txt ["list_nth_safe"; "list_nth"; "List.nth"; "List.hd"; "List.head"] ->
+    is_structurally_smaller params smaller arg
+  (* Nullary constructor (e.g. HEmpty, Nil): always structurally minimal *)
+  | Ast.ECon (_, [], _) -> true
   | _ -> false
 
 (** True if [expr] is a function parameter or a known-smaller variable — meaning
@@ -4400,13 +4435,27 @@ let rec check_tail_position
         Option.iter (chk false arm_smaller "match guard") br.branch_guard;
         chk in_tail arm_smaller ctx br.branch_body
       ) branches
-    (* ── block: only last expression is in tail position ── *)
+    (* ── block: only last expression is in tail position.
+          Propagate structural smallness: if a let binding assigns a variable
+          to a structurally-smaller expression, that variable is also smaller. ── *)
     | Ast.EBlock (exprs, _) ->
-      let n = List.length exprs in
-      List.iteri (fun i ex ->
-        if i = n - 1 then chk in_tail smaller ctx ex
-        else chk false smaller "non-final expression in block" ex
-      ) exprs
+      let rec go s = function
+        | [] -> ()
+        | [last] -> chk in_tail s ctx last
+        | hd :: tl ->
+          chk false s "non-final expression in block" hd;
+          let s' = match hd with
+            | Ast.ELet (b, _) ->
+              (match b.Ast.bind_pat with
+               | Ast.PatVar v
+                 when is_structurally_smaller fn_params s b.Ast.bind_expr ->
+                 StringSet.add v.txt s
+               | _ -> s)
+            | _ -> s
+          in
+          go s' tl
+      in
+      go smaller exprs
     (* ── let binding: RHS is never tail ── *)
     | Ast.ELet (b, _) ->
       chk false smaller "right-hand side of `let` binding" b.Ast.bind_expr

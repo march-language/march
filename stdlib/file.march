@@ -57,6 +57,9 @@ pub fn rename(src, dest) do file_rename(src, dest) end
 
 -- Streaming: closed after callback returns (not exception-safe)
 
+-- Seq wraps a church-encoded fold closure. Single-pass.
+type Seq(a) = Seq(a)
+
 -- Streaming: opens path, creates a single-pass Seq(String) of lines, calls callback,
 -- then closes the file handle. The Seq is single-pass -- consuming it twice yields
 -- empty results on the second pass.

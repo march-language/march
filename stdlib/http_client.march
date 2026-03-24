@@ -12,6 +12,15 @@
 
 mod HttpClient do
 
+  -- TransportError mirrors HttpTransport.TransportError (no imports in March).
+  type TransportError =
+    ConnectionRefused(String)
+    | ConnTimeout(String)
+    | SendError(String)
+    | RecvError(String)
+    | ConnParseError(String)
+    | Closed
+
   type HttpError =
     HttpTransportError(TransportError)
     | StepError(String, String)
