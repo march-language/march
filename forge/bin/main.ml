@@ -137,15 +137,28 @@ let help_cmd =
   Cmd.v (Cmd.info "help" ~doc:"Show help for forge or a specific command")
     Term.(ret (const run $ topic))
 
+(* ------------------------------------------------------------------ forge init *)
+
+let init_cmd =
+  Cmd.v (Cmd.info "init" ~doc:"Initialize a forge.toml in the current directory")
+    Term.(const (fun () -> handle (Cmd_init.run ())) $ const ())
+
 (* --------------------------------------------------------------------- root *)
+
+let default_term =
+  Term.(const (fun () ->
+    match Cmd_build.build ~release:false with
+    | Ok binary -> Printf.printf "built: %s\n%!" binary
+    | Error m   -> Printf.eprintf "error: %s\n%!" m; exit 1
+  ) $ const ())
 
 let () =
   let cmds =
-    [ new_cmd; build_cmd; run_cmd; test_cmd; format_cmd;
+    [ new_cmd; init_cmd; build_cmd; run_cmd; test_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; help_cmd ]
   in
   let main =
-    Cmd.group
+    Cmd.group ~default:default_term
       (Cmd.info "forge" ~version:"0.1.0"
          ~doc:"The March package manager and build tool")
       cmds
