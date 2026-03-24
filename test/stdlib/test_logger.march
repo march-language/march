@@ -1,5 +1,6 @@
 -- Tests for the Logger stdlib module.
 -- Run with: dune exec march -- test test/stdlib/test_logger.march
+-- @capture_io
 
 mod TestLogger do
 

@@ -226,6 +226,27 @@ let logger_level : int ref = ref 1
 (* Persistent key-value context attached to every log entry. *)
 let logger_context : (string * string) list ref = ref []
 
+(* ---- Test output capture ---- *)
+(* When Some buf, all print/log output is redirected here instead of stdout/stderr.
+   Set by run_tests around each test body; None during normal execution. *)
+let test_capture_buf : Buffer.t option ref = ref None
+
+let capture_write (s : string) : unit =
+  match !test_capture_buf with
+  | Some buf -> Buffer.add_string buf s
+  | None -> print_string s
+
+let capture_writeln (s : string) : unit =
+  match !test_capture_buf with
+  | Some buf -> Buffer.add_string buf s; Buffer.add_char buf '\n'
+  | None -> print_endline s
+
+(* Logger output goes to stderr normally; redirect to capture buf during tests. *)
+let capture_ewriteln (s : string) : unit =
+  match !test_capture_buf with
+  | Some buf -> Buffer.add_string buf s; Buffer.add_char buf '\n'
+  | None -> Printf.eprintf "%s\n%!" s
+
 (* ---- Actor.call reply tracking ---- *)
 (* Pending synchronous call replies: call_ref -> reply value. *)
 let pending_replies : (int, value) Hashtbl.t = Hashtbl.create 4
@@ -775,7 +796,7 @@ let foreign_stubs : (string * string, value list -> value) Hashtbl.t =
   (* puts: print string + newline, return length *)
   List.iter (fun lib ->
     reg lib "puts" (function
-      | [VString s] -> print_string s; print_char '\n'; VInt (String.length s + 1)
+      | [VString s] -> capture_writeln s; VInt (String.length s + 1)
       | _ -> eval_error "extern puts: expected String"))
     ["c"; "libc"; "libc.so"];
   t
@@ -1901,17 +1922,17 @@ let base_env : env =
         | _ -> eval_error "builtin ++: expected two strings"))
     (* I/O *)
   ; ("print", VBuiltin ("print", function
-        | [v] -> print_string (value_display v); VUnit
-        | vs  -> List.iter (fun v -> print_string (value_display v)) vs; VUnit))
+        | [v] -> capture_write (value_display v); VUnit
+        | vs  -> List.iter (fun v -> capture_write (value_display v)) vs; VUnit))
   ; ("println", VBuiltin ("println", function
-        | [v] -> print_endline (value_display v); VUnit
-        | vs  -> List.iter (fun v -> print_string (value_display v)) vs;
-                 print_newline (); VUnit))
+        | [v] -> capture_writeln (value_display v); VUnit
+        | vs  -> List.iter (fun v -> capture_write (value_display v)) vs;
+                 capture_write "\n"; VUnit))
   ; ("print_int", VBuiltin ("print_int", function
-        | [VInt n] -> print_int n; VUnit
+        | [VInt n] -> capture_write (string_of_int n); VUnit
         | _ -> eval_error "print_int: expected int"))
   ; ("print_float", VBuiltin ("print_float", function
-        | [VFloat f] -> print_float f; VUnit
+        | [VFloat f] -> capture_write (string_of_float f); VUnit
         | _ -> eval_error "print_float: expected float"))
     (* Tap bus — Clojure tap> model for non-intrusive value inspection *)
   ; ("tap", VBuiltin ("tap", function
@@ -3884,7 +3905,7 @@ let base_env : env =
             else " {" ^ String.concat ", "
                 (List.map (fun (k, v) -> k ^ "=" ^ v) all_meta) ^ "}"
           in
-          Printf.eprintf "[%s] %s%s\n%!" level msg meta_str;
+          capture_ewriteln (Printf.sprintf "[%s] %s%s" level msg meta_str);
           VUnit
         | _ -> eval_error "logger_write: expected (String, String, List, List)"))
 
@@ -5443,8 +5464,11 @@ let collect_test_decls (m : module_) :
       - Verbose mode:        prints `✓ name` / `✗ name  (msg)`, then "Finished" line.
       - Quiet mode:          no output at all; caller handles reporting.
 
-    Exit-code contract: the caller is responsible for exiting 1 if failures > 0. *)
-let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") (m : module_) : int * int * (string * string) list =
+    Exit-code contract: the caller is responsible for exiting 1 if failures > 0.
+    [~capture_io] — when true, suppress print/log output during each test and
+    include it in the failure message if the test fails.  Opt-in via @capture_io
+    in the test source. *)
+let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?(capture_io=false) (m : module_) : int * int * (string * string) list =
   (* Build the module environment (registers all fns, lets, etc.) *)
   let env = eval_module_env m in
   let (setup_all_opt, setup_opt, tests) = collect_test_decls m in
@@ -5476,6 +5500,9 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") (
                   with exn ->
                     Printf.eprintf "setup failed for \"%s\": %s\n%!" name (Printexc.to_string exn))
      | None -> ());
+    (* When capture_io is enabled, redirect print/log into a per-test buffer. *)
+    let cap_buf = if capture_io then Some (Buffer.create 128) else None in
+    (match cap_buf with Some b -> test_capture_buf := Some b | None -> ());
     let result =
       try
         let _ = eval_expr env body in
@@ -5486,23 +5513,36 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") (
       | Match_failure msg  -> TestError ("match failure: " ^ msg)
       | exn                -> TestError (Printexc.to_string exn)
     in
+    test_capture_buf := None;
+    let captured = match cap_buf with
+      | Some b -> Buffer.contents b
+      | None -> ""
+    in
+    (* Append captured output to failure message when non-empty. *)
+    let with_output msg =
+      if captured = "" then msg
+      else msg ^ "\n\n--- captured output ---\n" ^ String.trim captured
+    in
     if quiet then begin
       (* Collect failures silently *)
       (match result with
        | TestPass -> ()
-       | TestFail msg -> failures := (name, msg) :: !failures
-       | TestError msg -> failures := (name, "error: " ^ msg) :: !failures)
+       | TestFail msg -> failures := (name, with_output msg) :: !failures
+       | TestError msg -> failures := (name, with_output ("error: " ^ msg)) :: !failures)
     end else if verbose then begin
       match result with
       | TestPass ->
         Printf.printf "  ✓ %s\n%!" name
       | TestFail msg ->
+        let full = with_output msg in
         Printf.printf "  ✗ %s\n    %s\n%!" name
-          (String.concat "\n    " (String.split_on_char '\n' msg));
-        failures := (name, msg) :: !failures
+          (String.concat "\n    " (String.split_on_char '\n' full));
+        failures := (name, full) :: !failures
       | TestError msg ->
-        Printf.printf "  ✗ %s (error: %s)\n%!" name msg;
-        failures := (name, "error: " ^ msg) :: !failures
+        let full = with_output ("error: " ^ msg) in
+        Printf.printf "  ✗ %s\n    %s\n%!" name
+          (String.concat "\n    " (String.split_on_char '\n' full));
+        failures := (name, full) :: !failures
     end else begin
       (match result with
        | TestPass ->
@@ -5511,11 +5551,11 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") (
        | TestFail msg ->
          if dot_stream then Printf.printf "\027[31mF\027[0m%!"
          else Printf.printf "F%!";
-         failures := (name, msg) :: !failures
+         failures := (name, with_output msg) :: !failures
        | TestError msg ->
          if dot_stream then Printf.printf "\027[31mE\027[0m%!"
          else Printf.printf "E%!";
-         failures := (name, "error: " ^ msg) :: !failures)
+         failures := (name, with_output ("error: " ^ msg)) :: !failures)
     end
   ) tests;
   let n_failed = List.length !failures in
