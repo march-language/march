@@ -1,0 +1,297 @@
+-- test/stdlib/test_json.march
+-- Comprehensive tests for the Json module.
+
+mod TestJson do
+
+fn assert_ok_json(label, result) do
+  match result do
+  | Err(e) -> panic("FAIL: " ++ label ++ " — parse error: " ++ e)
+  | Ok(j) -> j
+  end
+end
+
+fn main() do
+  -- ---- Json.parse: null ----
+  let jnull = assert_ok_json("parse null", Json.parse("null"))
+  assert_true("null is_null", Json.is_null(jnull))
+  assert_eq("null type_name", Json.type_name(jnull), "null")
+
+  -- ---- Json.parse: booleans ----
+  let jtrue = assert_ok_json("parse true", Json.parse("true"))
+  match Json.as_bool(jtrue) do
+  | None -> panic("true: as_bool returned None")
+  | Some(b) -> assert_true("true value", b)
+  end
+  assert_eq("true type_name", Json.type_name(jtrue), "bool")
+
+  let jfalse = assert_ok_json("parse false", Json.parse("false"))
+  match Json.as_bool(jfalse) do
+  | None -> panic("false: as_bool returned None")
+  | Some(b) -> assert_true("false value", not b)
+  end
+
+  -- ---- Json.parse: integers ----
+  let jint = assert_ok_json("parse int", Json.parse("42"))
+  match Json.as_int(jint) do
+  | None -> panic("int: as_int returned None")
+  | Some(n) -> assert_eq("int value", n, 42)
+  end
+  assert_eq("int type_name", Json.type_name(jint), "int")
+
+  let jneg = assert_ok_json("parse negative int", Json.parse("-7"))
+  match Json.as_int(jneg) do
+  | None -> panic("neg int: as_int returned None")
+  | Some(n) -> assert_eq("neg int value", n, -7)
+  end
+
+  let jzero = assert_ok_json("parse zero", Json.parse("0"))
+  match Json.as_int(jzero) do
+  | Some(n) -> assert_eq("zero value", n, 0)
+  | None -> panic("zero as_int None")
+  end
+
+  -- ---- Json.parse: floats ----
+  let jfloat = assert_ok_json("parse float", Json.parse("3.14"))
+  assert_eq("float type_name", Json.type_name(jfloat), "float")
+  match Json.as_float(jfloat) do
+  | None -> panic("float: as_float returned None")
+  | Some(f) -> assert_true("float approx 3.14", f > 3.13 && f < 3.15)
+  end
+
+  let jsci = assert_ok_json("parse scientific", Json.parse("1.5e2"))
+  match Json.as_float(jsci) do
+  | None -> panic("sci: as_float None")
+  | Some(f) -> assert_true("sci value ~150", f > 149.0 && f < 151.0)
+  end
+
+  -- ---- Json.parse: strings ----
+  let jstr = assert_ok_json("parse string", Json.parse("\"hello\""))
+  match Json.as_string(jstr) do
+  | None -> panic("string: as_string returned None")
+  | Some(s) -> assert_eq("string value", s, "hello")
+  end
+  assert_eq("string type_name", Json.type_name(jstr), "string")
+
+  -- String with escapes
+  let jesc = assert_ok_json("parse escape", Json.parse("\"hello\\nworld\""))
+  match Json.as_string(jesc) do
+  | None -> panic("escape: as_string None")
+  | Some(s) -> assert_true("escape has newline", String.contains(s, "\n"))
+  end
+
+  -- String with unicode escape
+  let junicode = assert_ok_json("parse unicode", Json.parse("\"caf\\u00e9\""))
+  match Json.as_string(junicode) do
+  | Some(_) -> :ok  -- just check it parses
+  | None -> panic("unicode: as_string None")
+  end
+
+  -- Empty string
+  let jempty_str = assert_ok_json("parse empty string", Json.parse("\"\""))
+  match Json.as_string(jempty_str) do
+  | Some(s) -> assert_eq("empty string value", s, "")
+  | None -> panic("empty string as_string None")
+  end
+
+  -- ---- Json.parse: arrays ----
+  let jarr = assert_ok_json("parse empty array", Json.parse("[]"))
+  match Json.as_array(jarr) do
+  | None -> panic("array: as_array returned None")
+  | Some(xs) -> assert_eq("empty array length", List.length(xs), 0)
+  end
+  assert_eq("array type_name", Json.type_name(jarr), "array")
+
+  let jarr2 = assert_ok_json("parse int array", Json.parse("[1, 2, 3]"))
+  match Json.as_array(jarr2) do
+  | None -> panic("int array: as_array None")
+  | Some(xs) -> assert_eq("int array length", List.length(xs), 3)
+  end
+
+  -- Array element access
+  match Json.index(jarr2, 0) do
+  | None -> panic("index 0 None")
+  | Some(j) ->
+    match Json.as_int(j) do
+    | Some(n) -> assert_eq("array[0]", n, 1)
+    | None -> panic("array[0] not int")
+    end
+  end
+
+  match Json.index(jarr2, 2) do
+  | None -> panic("index 2 None")
+  | Some(j) ->
+    match Json.as_int(j) do
+    | Some(n) -> assert_eq("array[2]", n, 3)
+    | None -> panic("array[2] not int")
+    end
+  end
+
+  -- Out of bounds
+  match Json.index(jarr2, 5) do
+  | None -> :ok
+  | Some(_) -> panic("out of bounds should be None")
+  end
+
+  -- Mixed array
+  let jmixed = assert_ok_json("parse mixed array", Json.parse("[1, \"two\", true, null]"))
+  match Json.as_array(jmixed) do
+  | Some(xs) -> assert_eq("mixed array length", List.length(xs), 4)
+  | None -> panic("mixed array as_array None")
+  end
+
+  -- ---- Json.parse: objects ----
+  let jobj = assert_ok_json("parse empty object", Json.parse("{}"))
+  match Json.as_object(jobj) do
+  | None -> panic("object: as_object returned None")
+  | Some(pairs) -> assert_eq("empty object length", List.length(pairs), 0)
+  end
+  assert_eq("object type_name", Json.type_name(jobj), "object")
+
+  let jobj2 = assert_ok_json("parse simple object", Json.parse("{\"key\": \"value\"}"))
+  match Json.get(jobj2, "key") do
+  | None -> panic("get 'key' None")
+  | Some(v) ->
+    match Json.as_string(v) do
+    | Some(s) -> assert_eq("object key value", s, "value")
+    | None -> panic("object value not string")
+    end
+  end
+
+  -- Missing key
+  match Json.get(jobj2, "missing") do
+  | None -> :ok
+  | Some(_) -> panic("missing key should be None")
+  end
+
+  -- Multi-field object
+  let jobj3 = assert_ok_json("parse multi-field", Json.parse("{\"x\": 1, \"y\": 2, \"z\": 3}"))
+  match Json.get(jobj3, "x") do
+  | Some(v) ->
+    match Json.as_int(v) do
+    | Some(n) -> assert_eq("object x", n, 1)
+    | None -> panic("x not int")
+    end
+  | None -> panic("x missing")
+  end
+
+  match Json.get(jobj3, "z") do
+  | Some(v) ->
+    match Json.as_int(v) do
+    | Some(n) -> assert_eq("object z", n, 3)
+    | None -> panic("z not int")
+    end
+  | None -> panic("z missing")
+  end
+
+  -- ---- Nested JSON ----
+  let jnested = assert_ok_json("parse nested", Json.parse("{\"person\": {\"name\": \"Alice\", \"age\": 30}}"))
+  match Json.get(jnested, "person") do
+  | None -> panic("nested person missing")
+  | Some(person) ->
+    match Json.get(person, "name") do
+    | Some(v) ->
+      match Json.as_string(v) do
+      | Some(s) -> assert_eq("nested name", s, "Alice")
+      | None -> panic("nested name not string")
+      end
+    | None -> panic("nested name missing")
+    end
+    match Json.get(person, "age") do
+    | Some(v) ->
+      match Json.as_int(v) do
+      | Some(n) -> assert_eq("nested age", n, 30)
+      | None -> panic("nested age not int")
+      end
+    | None -> panic("nested age missing")
+    end
+  end
+
+  -- ---- Array of objects ----
+  let jarr_obj = assert_ok_json("parse array of objects",
+    Json.parse("[{\"id\": 1}, {\"id\": 2}]"))
+  match Json.index(jarr_obj, 0) do
+  | Some(obj) ->
+    match Json.get(obj, "id") do
+    | Some(v) ->
+      match Json.as_int(v) do
+      | Some(n) -> assert_eq("arr_obj[0].id", n, 1)
+      | None -> panic("arr_obj[0].id not int")
+      end
+    | None -> panic("arr_obj[0].id missing")
+    end
+  | None -> panic("arr_obj[0] missing")
+  end
+
+  -- ---- Json.encode / roundtrip ----
+  let encoded_null = Json.encode(JNull)
+  assert_eq("encode null", encoded_null, "null")
+
+  let encoded_true = Json.encode(JBool(true))
+  assert_eq("encode true", encoded_true, "true")
+
+  let encoded_false = Json.encode(JBool(false))
+  assert_eq("encode false", encoded_false, "false")
+
+  let encoded_int = Json.encode(JInt(42))
+  assert_eq("encode int", encoded_int, "42")
+
+  let encoded_str = Json.encode(JString("hello"))
+  assert_eq("encode string", encoded_str, "\"hello\"")
+
+  let encoded_arr = Json.encode(JArray([JInt(1), JInt(2), JInt(3)]))
+  assert_eq("encode array", encoded_arr, "[1,2,3]")
+
+  let encoded_obj = Json.encode(JObject([("key", JString("val"))]))
+  assert_eq("encode object", encoded_obj, "{\"key\":\"val\"}")
+
+  -- Roundtrip: parse then encode
+  let original = "{\"x\":1,\"y\":true}"
+  match Json.parse(original) do
+  | Err(e) -> panic("roundtrip parse failed: " ++ e)
+  | Ok(j) ->
+    let re_encoded = Json.encode(j)
+    -- Just verify it parses again (encoding order may differ)
+    match Json.parse(re_encoded) do
+    | Err(e) -> panic("roundtrip re-parse failed: " ++ e)
+    | Ok(_) -> :ok
+    end
+  end
+
+  -- ---- Parse errors ----
+  match Json.parse("{invalid}") do
+  | Err(_) -> :ok
+  | Ok(_) -> panic("invalid json should return Err")
+  end
+
+  match Json.parse("") do
+  | Err(_) -> :ok
+  | Ok(_) -> panic("empty json should return Err")
+  end
+
+  match Json.parse("{\"unclosed\": \"string") do
+  | Err(_) -> :ok
+  | Ok(_) -> panic("unclosed string should return Err")
+  end
+
+  -- ---- Whitespace handling ----
+  let jws = assert_ok_json("whitespace", Json.parse("  {  \"k\"  :  42  }  "))
+  match Json.get(jws, "k") do
+  | Some(v) ->
+    match Json.as_int(v) do
+    | Some(n) -> assert_eq("whitespace value", n, 42)
+    | None -> panic("whitespace value not int")
+    end
+  | None -> panic("whitespace key missing")
+  end
+
+  -- ---- String escapes in encode ----
+  let str_with_quotes = Json.encode(JString("say \"hi\""))
+  assert_true("encode escapes quotes", String.contains(str_with_quotes, "\\\""))
+
+  let str_with_newline = Json.encode(JString("line1\nline2"))
+  assert_true("encode escapes newline", String.contains(str_with_newline, "\\n"))
+
+  println("All Json tests passed!")
+end
+
+end

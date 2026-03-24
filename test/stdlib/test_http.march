@@ -1,0 +1,246 @@
+-- Tests for the Http stdlib module.
+-- Covers: method helpers, status helpers, request/response constructors,
+-- accessors, transforms, URL parsing, and query-string encoding.
+
+mod TestHttp do
+
+  -- ── Method helpers ─────────────────────────────────────────────────
+
+  fn test_method_to_string() do
+    Test.assert_eq_str(Http.method_to_string(Get),     "GET",     "Get")
+    Test.assert_eq_str(Http.method_to_string(Post),    "POST",    "Post")
+    Test.assert_eq_str(Http.method_to_string(Put),     "PUT",     "Put")
+    Test.assert_eq_str(Http.method_to_string(Patch),   "PATCH",   "Patch")
+    Test.assert_eq_str(Http.method_to_string(Delete),  "DELETE",  "Delete")
+    Test.assert_eq_str(Http.method_to_string(Head),    "HEAD",    "Head")
+    Test.assert_eq_str(Http.method_to_string(Options), "OPTIONS", "Options")
+    Test.assert_eq_str(Http.method_to_string(Trace),   "TRACE",   "Trace")
+    Test.assert_eq_str(Http.method_to_string(Connect), "CONNECT", "Connect")
+    Test.assert_eq_str(Http.method_to_string(Other("CUSTOM")), "CUSTOM", "Other")
+  end
+
+  -- ── Status helpers ─────────────────────────────────────────────────
+
+  fn test_status_code() do
+    Test.assert_eq_int(Http.status_code(Http.status_ok()),           200, "200 ok")
+    Test.assert_eq_int(Http.status_code(Http.status_created()),      201, "201 created")
+    Test.assert_eq_int(Http.status_code(Http.status_no_content()),   204, "204 no_content")
+    Test.assert_eq_int(Http.status_code(Http.status_moved()),        301, "301 moved")
+    Test.assert_eq_int(Http.status_code(Http.status_found()),        302, "302 found")
+    Test.assert_eq_int(Http.status_code(Http.status_bad_request()),  400, "400 bad_request")
+    Test.assert_eq_int(Http.status_code(Http.status_unauthorized()), 401, "401 unauthorized")
+    Test.assert_eq_int(Http.status_code(Http.status_forbidden()),    403, "403 forbidden")
+    Test.assert_eq_int(Http.status_code(Http.status_not_found()),    404, "404 not_found")
+    Test.assert_eq_int(Http.status_code(Http.status_server_error()), 500, "500 server_error")
+  end
+
+  fn test_status_predicates() do
+    Test.assert_true(Http.is_informational(Status(100)), "100 is informational")
+    Test.assert_true(Http.is_informational(Status(199)), "199 is informational")
+    Test.assert_false(Http.is_informational(Status(200)), "200 not informational")
+
+    Test.assert_true(Http.is_success(Status(200)), "200 is success")
+    Test.assert_true(Http.is_success(Status(201)), "201 is success")
+    Test.assert_true(Http.is_success(Status(299)), "299 is success")
+    Test.assert_false(Http.is_success(Status(300)), "300 not success")
+
+    Test.assert_true(Http.is_redirect(Status(301)), "301 is redirect")
+    Test.assert_true(Http.is_redirect(Status(302)), "302 is redirect")
+    Test.assert_false(Http.is_redirect(Status(200)), "200 not redirect")
+
+    Test.assert_true(Http.is_client_error(Status(400)), "400 is client error")
+    Test.assert_true(Http.is_client_error(Status(404)), "404 is client error")
+    Test.assert_false(Http.is_client_error(Status(500)), "500 not client error")
+
+    Test.assert_true(Http.is_server_error(Status(500)), "500 is server error")
+    Test.assert_true(Http.is_server_error(Status(503)), "503 is server error")
+    Test.assert_false(Http.is_server_error(Status(404)), "404 not server error")
+  end
+
+  -- ── Request constructors and accessors ─────────────────────────────
+
+  fn make_test_req() do
+    Request(Get, SchemeHttp, "example.com", Some(8080), "/foo", Some("q=1"), Cons(Header("content-type", "text/plain"), Nil), "body")
+  end
+
+  fn test_request_accessors() do
+    let req = make_test_req()
+    Test.assert_eq_str(Http.method_to_string(Http.method(req)), "GET",         "method")
+    Test.assert_eq_str(Http.host(req),                           "example.com", "host")
+    Test.assert_eq_str(Http.path(req),                           "/foo",        "path")
+    let p = Test.assert_some(Http.port(req), "port should be Some")
+    Test.assert_eq_int(p, 8080, "port value")
+    let q = Test.assert_some(Http.query(req), "query should be Some")
+    Test.assert_eq_str(q, "q=1", "query value")
+    Test.assert_eq_str(Http.body(req), "body", "body")
+  end
+
+  fn test_request_transforms() do
+    let req = make_test_req()
+    let req2 = Http.set_method(req, Post)
+    Test.assert_eq_str(Http.method_to_string(Http.method(req2)), "POST", "set_method")
+
+    let req3 = Http.set_host(req, "other.com")
+    Test.assert_eq_str(Http.host(req3), "other.com", "set_host")
+
+    let req4 = Http.set_path(req, "/bar")
+    Test.assert_eq_str(Http.path(req4), "/bar", "set_path")
+
+    let req5 = Http.set_port(req, 9090)
+    let p5 = Test.assert_some(Http.port(req5), "set_port Some")
+    Test.assert_eq_int(p5, 9090, "set_port value")
+
+    let req6 = Http.set_body(req, "new_body")
+    Test.assert_eq_str(Http.body(req6), "new_body", "set_body")
+  end
+
+  fn test_set_header() do
+    let req = Request(Get, SchemeHttp, "example.com", None, "/", None, Nil, "")
+    let req2 = Http.set_header(req, "X-Token", "abc123")
+    let hdrs = Http.headers(req2)
+    let val_ = Test.assert_some(Http.get_request_header(req2, "X-Token"), "X-Token present")
+    Test.assert_eq_str(val_, "abc123", "X-Token value")
+    -- case-insensitive
+    let val2 = Test.assert_some(Http.get_request_header(req2, "x-token"), "x-token lowercase")
+    Test.assert_eq_str(val2, "abc123", "lowercase key")
+    -- also check list non-empty
+    Test.assert_false(is_nil(hdrs), "headers non-empty after set_header")
+  end
+
+  -- ── Response constructors and accessors ────────────────────────────
+
+  fn make_test_resp() do
+    Response(Status(200), Cons(Header("content-type", "application/json"), Nil), "{}")
+  end
+
+  fn test_response_accessors() do
+    let resp = make_test_resp()
+    Test.assert_eq_int(Http.response_status_code(resp), 200, "response status")
+    Test.assert_true(Http.response_is_success(resp), "200 is success")
+    Test.assert_false(Http.response_is_redirect(resp), "200 not redirect")
+    Test.assert_eq_str(Http.response_body(resp), "{}", "response body")
+  end
+
+  fn test_get_header() do
+    let resp = make_test_resp()
+    let val_ = Test.assert_some(Http.get_header(resp, "content-type"), "content-type present")
+    Test.assert_eq_str(val_, "application/json", "content-type value")
+    -- case-insensitive
+    let val2 = Test.assert_some(Http.get_header(resp, "Content-Type"), "Content-Type uppercase")
+    Test.assert_eq_str(val2, "application/json", "uppercase lookup")
+    Test.assert_none(Http.get_header(resp, "x-missing"), "missing header is None")
+  end
+
+  -- ── URL parsing ────────────────────────────────────────────────────
+
+  fn test_parse_url_http() do
+    let req = Test.assert_ok(Http.parse_url("http://example.com/path"), "parse http url")
+    Test.assert_eq_str(Http.host(req), "example.com", "parsed host")
+    Test.assert_eq_str(Http.path(req), "/path", "parsed path")
+    Test.assert_none(Http.port(req), "no explicit port")
+  end
+
+  fn test_parse_url_https() do
+    let req = Test.assert_ok(Http.parse_url("https://api.example.com/v1"), "parse https url")
+    Test.assert_eq_str(Http.host(req), "api.example.com", "https host")
+    Test.assert_eq_str(Http.path(req), "/v1", "https path")
+  end
+
+  fn test_parse_url_with_port() do
+    let req = Test.assert_ok(Http.parse_url("http://localhost:3000/hello"), "parse with port")
+    Test.assert_eq_str(Http.host(req), "localhost", "port host")
+    let p = Test.assert_some(Http.port(req), "port present")
+    Test.assert_eq_int(p, 3000, "port value")
+  end
+
+  fn test_parse_url_with_query() do
+    let req = Test.assert_ok(Http.parse_url("http://example.com/search?q=march&limit=10"), "parse with query")
+    Test.assert_eq_str(Http.path(req), "/search", "query path")
+    let q = Test.assert_some(Http.query(req), "query present")
+    Test.assert_eq_str(q, "q=march&limit=10", "query string")
+  end
+
+  fn test_parse_url_invalid_scheme() do
+    let result = Http.parse_url("ftp://example.com")
+    Test.assert_err(result, "ftp scheme should err")
+  end
+
+  fn test_parse_url_missing_host() do
+    let result = Http.parse_url("http:///path")
+    Test.assert_err(result, "missing host should err")
+  end
+
+  -- ── Convenience constructors ───────────────────────────────────────
+
+  fn test_get_constructor() do
+    let req = Test.assert_ok(Http.get("http://example.com/"), "Http.get")
+    Test.assert_eq_str(Http.method_to_string(Http.method(req)), "GET", "get method")
+  end
+
+  fn test_post_constructor() do
+    let req = Test.assert_ok(Http.post("http://example.com/", "payload"), "Http.post")
+    Test.assert_eq_str(Http.method_to_string(Http.method(req)), "POST", "post method")
+    Test.assert_eq_str(Http.body(req), "payload", "post body")
+  end
+
+  fn test_delete_constructor() do
+    let req = Test.assert_ok(Http.delete("http://example.com/res/1"), "Http.delete")
+    Test.assert_eq_str(Http.method_to_string(Http.method(req)), "DELETE", "delete method")
+  end
+
+  -- ── Query encoding ─────────────────────────────────────────────────
+
+  fn test_encode_query_empty() do
+    Test.assert_eq_str(Http.encode_query(Nil), "", "empty query")
+  end
+
+  fn test_encode_query_one() do
+    Test.assert_eq_str(Http.encode_query(Cons(("key", "val"), Nil)), "key=val", "one pair")
+  end
+
+  fn test_encode_query_two() do
+    let s = Http.encode_query(Cons(("a", "1"), Cons(("b", "2"), Nil)))
+    Test.assert_eq_str(s, "a=1&b=2", "two pairs")
+  end
+
+  fn test_set_query_removes_on_empty() do
+    let req = Request(Get, SchemeHttp, "example.com", None, "/", Some("old=1"), Nil, "")
+    let req2 = Http.set_query(req, Nil)
+    Test.assert_none(Http.query(req2), "empty set_query clears query")
+  end
+
+  fn test_set_query_adds_params() do
+    let req = Request(Get, SchemeHttp, "example.com", None, "/", None, Nil, "")
+    let req2 = Http.set_query(req, Cons(("page", "2"), Nil))
+    let q = Test.assert_some(Http.query(req2), "set_query adds query")
+    Test.assert_eq_str(q, "page=2", "set_query value")
+  end
+
+  -- ── Entry point ────────────────────────────────────────────────────
+
+  pub fn main() do
+    test_method_to_string()
+    test_status_code()
+    test_status_predicates()
+    test_request_accessors()
+    test_request_transforms()
+    test_set_header()
+    test_response_accessors()
+    test_get_header()
+    test_parse_url_http()
+    test_parse_url_https()
+    test_parse_url_with_port()
+    test_parse_url_with_query()
+    test_parse_url_invalid_scheme()
+    test_parse_url_missing_host()
+    test_get_constructor()
+    test_post_constructor()
+    test_delete_constructor()
+    test_encode_query_empty()
+    test_encode_query_one()
+    test_encode_query_two()
+    test_set_query_removes_on_empty()
+    test_set_query_adds_params()
+  end
+
+end

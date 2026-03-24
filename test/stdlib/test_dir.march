@@ -1,0 +1,99 @@
+-- test/stdlib/test_dir.march
+-- Comprehensive tests for the Dir module.
+-- Uses /tmp for temporary directories; cleans up on success.
+
+mod TestDir do
+
+fn main() do
+  let base = "/tmp/march_test_dir_root"
+
+  -- ---- Clean slate: remove if leftover from prior run ----
+  Dir.rm_rf(base)
+
+  -- ---- Dir.exists false ----
+  assert_true("exists false", not Dir.exists(base))
+
+  -- ---- Dir.mkdir ----
+  match Dir.mkdir(base) do
+  | Err(e) -> panic("mkdir failed: " ++ to_string(e))
+  | Ok(_) -> :ok
+  end
+  assert_true("exists after mkdir", Dir.exists(base))
+
+  -- ---- Dir.mkdir duplicate (should error) ----
+  match Dir.mkdir(base) do
+  | Err(_) -> :ok
+  | Ok(_) -> panic("mkdir duplicate should return Err")
+  end
+
+  -- ---- Dir.list on empty dir ----
+  match Dir.list(base) do
+  | Err(e) -> panic("list empty failed: " ++ to_string(e))
+  | Ok(names) -> assert_eq("list empty", List.length(names), 0)
+  end
+
+  -- ---- Create files then list ----
+  File.write(base ++ "/a.txt", "A")
+  File.write(base ++ "/b.txt", "B")
+  match Dir.list(base) do
+  | Err(e) -> panic("list after writes failed: " ++ to_string(e))
+  | Ok(names) -> assert_eq("list count", List.length(names), 2)
+  end
+
+  -- ---- Dir.list_full returns full paths ----
+  match Dir.list_full(base) do
+  | Err(e) -> panic("list_full failed: " ++ to_string(e))
+  | Ok(paths) ->
+    assert_eq("list_full count", List.length(paths), 2)
+    -- All paths start with base
+    assert_true("list_full paths start with base",
+      List.all(paths, fn p -> String.starts_with(p, base)))
+  end
+
+  -- ---- Dir.list on nonexistent ----
+  match Dir.list(base ++ "/noexist") do
+  | Err(_) -> :ok
+  | Ok(_) -> panic("list nonexistent should return Err")
+  end
+
+  -- ---- Dir.mkdir_p nested ----
+  let nested = base ++ "/deep/nested/path"
+  match Dir.mkdir_p(nested) do
+  | Err(e) -> panic("mkdir_p failed: " ++ to_string(e))
+  | Ok(_) -> :ok
+  end
+  assert_true("nested dir exists", Dir.exists(nested))
+
+  -- ---- Dir.rmdir (non-empty should fail) ----
+  match Dir.rmdir(base) do
+  | Err(_) -> :ok   -- non-empty dir: expected to fail
+  | Ok(_) -> panic("rmdir non-empty should return Err")
+  end
+
+  -- ---- Dir.rmdir empty dir ----
+  match Dir.rmdir(nested) do
+  | Err(e) -> panic("rmdir empty failed: " ++ to_string(e))
+  | Ok(_) -> :ok
+  end
+  assert_true("rmdir removed", not Dir.exists(nested))
+
+  -- ---- Dir.exists false for file path ----
+  assert_true("file path not a dir", not Dir.exists(base ++ "/a.txt"))
+
+  -- ---- Dir.rm_rf recursive ----
+  match Dir.rm_rf(base) do
+  | Err(e) -> panic("rm_rf failed: " ++ to_string(e))
+  | Ok(_) -> :ok
+  end
+  assert_true("rm_rf removed", not Dir.exists(base))
+
+  -- ---- Dir.rm_rf on nonexistent (should succeed gracefully) ----
+  match Dir.rm_rf(base ++ "/noexist") do
+  | Err(_) -> :ok   -- acceptable: not found
+  | Ok(_) -> :ok    -- also acceptable
+  end
+
+  println("All Dir tests passed!")
+end
+
+end

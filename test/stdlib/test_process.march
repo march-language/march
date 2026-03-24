@@ -1,0 +1,93 @@
+-- Tests for the Process stdlib module.
+-- Process.env: reads environment variables.
+-- Process.cwd: returns the current working directory.
+-- Process.argv: returns command-line arguments.
+-- (Process.exit is not exercised — it would terminate the test runner.)
+
+mod TestProcess do
+
+  -- ── Process.cwd ────────────────────────────────────────────────────
+
+  fn test_cwd_is_non_empty() do
+    let dir = Process.cwd()
+    Test.assert_false(string_is_empty(dir), "cwd should not be empty")
+  end
+
+  fn test_cwd_is_string() do
+    let dir = Process.cwd()
+    -- Just checking it's a non-trivial string (at least "/")
+    Test.assert_true(string_byte_length(dir) >= 1, "cwd has at least one character")
+  end
+
+  -- ── Process.env ────────────────────────────────────────────────────
+
+  fn test_env_path_is_some() do
+    -- PATH is virtually always set in any Unix test environment
+    let path = Process.env("PATH")
+    Test.assert_some(path, "PATH should be set")
+  end
+
+  fn test_env_path_is_non_empty() do
+    let path_opt = Process.env("PATH")
+    match path_opt do
+    | None -> () -- skipped: PATH not set
+    | Some(p) ->
+      Test.assert_false(string_is_empty(p), "PATH should not be empty")
+    end
+  end
+
+  fn test_env_home_is_some() do
+    let home = Process.env("HOME")
+    -- HOME is set on macOS and Linux
+    match home do
+    | None    -> () -- skip if not set (e.g. minimal container)
+    | Some(h) -> Test.assert_false(string_is_empty(h), "HOME is non-empty")
+    end
+  end
+
+  fn test_env_missing_is_none() do
+    -- Use a key that is extremely unlikely to be set in any environment
+    let val_ = Process.env("__MARCH_TEST_UNSET_VAR_ZXQVWP__")
+    Test.assert_none(val_, "unset variable should be None")
+  end
+
+  fn test_env_returns_option() do
+    -- Verify that env returns an Option by pattern matching
+    let result = Process.env("PATH")
+    match result do
+    | Some(_) -> ()
+    | None    -> ()
+    end
+  end
+
+  -- ── Process.argv ───────────────────────────────────────────────────
+
+  fn test_argv_is_list() do
+    let args = Process.argv()
+    -- argv always has at least argv[0] (the program name)
+    Test.assert_false(is_nil(args), "argv has at least one element")
+  end
+
+  fn test_argv_first_is_string() do
+    let args = Process.argv()
+    match args do
+    | Nil        -> Test.fail("argv is empty — expected at least argv[0]")
+    | Cons(a, _) -> Test.assert_false(string_is_empty(a), "argv[0] is non-empty")
+    end
+  end
+
+  -- ── Entry point ────────────────────────────────────────────────────
+
+  pub fn main() do
+    test_cwd_is_non_empty()
+    test_cwd_is_string()
+    test_env_path_is_some()
+    test_env_path_is_non_empty()
+    test_env_home_is_some()
+    test_env_missing_is_none()
+    test_env_returns_option()
+    test_argv_is_list()
+    test_argv_first_is_string()
+  end
+
+end

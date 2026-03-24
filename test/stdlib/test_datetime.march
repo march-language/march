@@ -1,0 +1,142 @@
+-- test/stdlib/test_datetime.march
+-- Comprehensive tests for the DateTime module.
+
+mod TestDateTime do
+
+fn main() do
+  -- ---- DateTime.from_parts / field accessors ----
+  let dt = DateTime.from_parts(2024, 3, 15, 10, 30, 45)
+  assert_eq("year", DateTime.year(dt), 2024)
+  assert_eq("month", DateTime.month(dt), 3)
+  assert_eq("day", DateTime.day(dt), 15)
+  assert_eq("hour", DateTime.hour(dt), 10)
+  assert_eq("minute", DateTime.minute(dt), 30)
+  assert_eq("second", DateTime.second(dt), 45)
+
+  -- ---- DateTime.to_unix / from_unix roundtrip ----
+  let epoch = DateTime.from_parts(1970, 1, 1, 0, 0, 0)
+  assert_eq("epoch unix timestamp", DateTime.to_unix(epoch), 0)
+
+  let known = DateTime.from_parts(2000, 1, 1, 0, 0, 0)
+  let ts = DateTime.to_unix(known)
+  let back = DateTime.from_unix(ts)
+  assert_eq("from_unix year", DateTime.year(back), 2000)
+  assert_eq("from_unix month", DateTime.month(back), 1)
+  assert_eq("from_unix day", DateTime.day(back), 1)
+
+  -- ---- DateTime.add_seconds ----
+  let base = DateTime.from_parts(2024, 1, 1, 0, 0, 0)
+  let plus60 = DateTime.add_seconds(base, 60)
+  assert_eq("add_seconds +60 minute", DateTime.minute(plus60), 1)
+  assert_eq("add_seconds +60 second", DateTime.second(plus60), 0)
+
+  let plus_day = DateTime.add_seconds(base, 86400)
+  assert_eq("add_seconds +86400 day", DateTime.day(plus_day), 2)
+  assert_eq("add_seconds +86400 month", DateTime.month(plus_day), 1)
+
+  -- negative seconds (go back)
+  let minus60 = DateTime.add_seconds(DateTime.from_parts(2024, 1, 1, 0, 1, 0), -60)
+  assert_eq("add_seconds -60 minute", DateTime.minute(minus60), 0)
+  assert_eq("add_seconds -60 second", DateTime.second(minus60), 0)
+
+  -- ---- DateTime.add_days ----
+  let jan1 = DateTime.from_parts(2024, 1, 1, 12, 0, 0)
+  let jan31 = DateTime.add_days(jan1, 30)
+  assert_eq("add_days +30 day", DateTime.day(jan31), 31)
+  assert_eq("add_days +30 month", DateTime.month(jan31), 1)
+
+  -- Cross month boundary
+  let feb1 = DateTime.add_days(jan1, 31)
+  assert_eq("add_days cross month day", DateTime.day(feb1), 1)
+  assert_eq("add_days cross month month", DateTime.month(feb1), 2)
+
+  -- Cross year boundary
+  let next_year = DateTime.add_days(DateTime.from_parts(2024, 12, 31, 0, 0, 0), 1)
+  assert_eq("add_days cross year day", DateTime.day(next_year), 1)
+  assert_eq("add_days cross year month", DateTime.month(next_year), 1)
+  assert_eq("add_days cross year year", DateTime.year(next_year), 2025)
+
+  -- ---- DateTime.diff_seconds ----
+  let t1 = DateTime.from_parts(2024, 1, 1, 0, 1, 0)
+  let t2 = DateTime.from_parts(2024, 1, 1, 0, 0, 0)
+  assert_eq("diff_seconds 1 minute", DateTime.diff_seconds(t1, t2), 60)
+  assert_eq("diff_seconds reversed negative", DateTime.diff_seconds(t2, t1), -60)
+
+  let same = DateTime.from_parts(2024, 6, 15, 12, 0, 0)
+  assert_eq("diff_seconds same is 0", DateTime.diff_seconds(same, same), 0)
+
+  -- ---- DateTime.compare ----
+  let cmp_a = DateTime.from_parts(2024, 1, 1, 0, 0, 0)
+  let cmp_b = DateTime.from_parts(2024, 1, 2, 0, 0, 0)
+  assert_true("compare a < b", DateTime.compare(cmp_a, cmp_b) < 0)
+  assert_true("compare b > a", DateTime.compare(cmp_b, cmp_a) > 0)
+  assert_eq("compare equal", DateTime.compare(cmp_a, cmp_a), 0)
+
+  -- ---- DateTime.before / after / equal ----
+  assert_true("before", DateTime.before(cmp_a, cmp_b))
+  assert_true("not before same", not DateTime.before(cmp_a, cmp_a))
+  assert_true("after", DateTime.after(cmp_b, cmp_a))
+  assert_true("not after same", not DateTime.after(cmp_a, cmp_a))
+  assert_true("equal same", DateTime.equal(cmp_a, cmp_a))
+  assert_true("not equal diff", not DateTime.equal(cmp_a, cmp_b))
+
+  -- ---- DateTime.format ----
+  let fmt_dt = DateTime.from_parts(2024, 3, 5, 9, 7, 3)
+  assert_eq("format YYYY-MM-DD", DateTime.format(fmt_dt, "%Y-%m-%d"), "2024-03-05")
+  assert_eq("format HH:MM:SS", DateTime.format(fmt_dt, "%H:%M:%S"), "09:07:03")
+  assert_eq("format ISO-like", DateTime.format(fmt_dt, "%Y-%m-%dT%H:%M:%S"), "2024-03-05T09:07:03")
+  assert_eq("format year only", DateTime.format(fmt_dt, "%Y"), "2024")
+  assert_eq("format literal chars", DateTime.format(fmt_dt, "Year: %Y"), "Year: 2024")
+
+  -- ---- DateTime.parse ----
+  match DateTime.parse("2024-03-15", "%Y-%m-%d") do
+  | Err(e) -> panic("parse date failed: " ++ e)
+  | Ok(d) ->
+    assert_eq("parse year", DateTime.year(d), 2024)
+    assert_eq("parse month", DateTime.month(d), 3)
+    assert_eq("parse day", DateTime.day(d), 15)
+  end
+
+  match DateTime.parse("2024-03-15T10:30:45", "%Y-%m-%dT%H:%M:%S") do
+  | Err(e) -> panic("parse datetime failed: " ++ e)
+  | Ok(d) ->
+    assert_eq("parse full year", DateTime.year(d), 2024)
+    assert_eq("parse full hour", DateTime.hour(d), 10)
+    assert_eq("parse full minute", DateTime.minute(d), 30)
+    assert_eq("parse full second", DateTime.second(d), 45)
+  end
+
+  -- ---- DateTime.is_leap_year ----
+  assert_true("2000 is leap", DateTime.is_leap_year(2000))
+  assert_true("2024 is leap", DateTime.is_leap_year(2024))
+  assert_true("1900 not leap (century)", not DateTime.is_leap_year(1900))
+  assert_true("2023 not leap", not DateTime.is_leap_year(2023))
+  assert_true("2100 not leap (century)", not DateTime.is_leap_year(2100))
+  assert_true("2400 is leap (400-year)", DateTime.is_leap_year(2400))
+
+  -- ---- DateTime.days_in_month ----
+  assert_eq("days in Jan", DateTime.days_in_month(2024, 1), 31)
+  assert_eq("days in Feb leap", DateTime.days_in_month(2024, 2), 29)
+  assert_eq("days in Feb non-leap", DateTime.days_in_month(2023, 2), 28)
+  assert_eq("days in Apr", DateTime.days_in_month(2024, 4), 30)
+  assert_eq("days in Dec", DateTime.days_in_month(2024, 12), 31)
+
+  -- ---- DateTime.weekday ----
+  -- 2024-01-01 is a Monday (weekday = 1)
+  let monday = DateTime.from_parts(2024, 1, 1, 0, 0, 0)
+  assert_eq("2024-01-01 is Monday", DateTime.weekday(monday), 1)
+
+  -- 2024-01-07 is a Sunday (weekday = 0)
+  let sunday = DateTime.from_parts(2024, 1, 7, 0, 0, 0)
+  assert_eq("2024-01-07 is Sunday", DateTime.weekday(sunday), 0)
+
+  -- ---- DateTime.now (just verify it returns a valid date) ----
+  let now = DateTime.now()
+  assert_true("now year >= 2024", DateTime.year(now) >= 2024)
+  assert_true("now month 1..12", DateTime.month(now) >= 1 && DateTime.month(now) <= 12)
+  assert_true("now day 1..31", DateTime.day(now) >= 1 && DateTime.day(now) <= 31)
+
+  println("All DateTime tests passed!")
+end
+
+end

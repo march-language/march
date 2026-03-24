@@ -1,0 +1,73 @@
+-- test/stdlib/test_path.march
+-- Comprehensive tests for the Path module (pure string operations).
+
+mod TestPath do
+
+fn main() do
+  -- ---- Path.join ----
+  assert_eq("join basic", Path.join("foo", "bar"), "foo/bar")
+  assert_eq("join trailing slash on left", Path.join("foo/", "bar"), "foo/bar")
+  assert_eq("join with nested left", Path.join("a/b/c", "d"), "a/b/c/d")
+  assert_eq("join absolute left", Path.join("/usr", "local"), "/usr/local")
+
+  -- ---- Path.is_absolute ----
+  assert_true("is_absolute root", Path.is_absolute("/"))
+  assert_true("is_absolute /usr", Path.is_absolute("/usr/local"))
+  assert_true("not absolute relative", not Path.is_absolute("foo/bar"))
+  assert_true("not absolute empty", not Path.is_absolute(""))
+
+  -- ---- Path.basename ----
+  assert_eq("basename file in dir", Path.basename("/foo/bar/baz.txt"), "baz.txt")
+  assert_eq("basename no dir", Path.basename("file.txt"), "file.txt")
+  assert_eq("basename dotfile", Path.basename("/home/.bashrc"), ".bashrc")
+
+  -- ---- Path.dirname ----
+  assert_eq("dirname basic", Path.dirname("/foo/bar/baz.txt"), "/foo/bar")
+  assert_eq("dirname single depth", Path.dirname("/foo"), "/")
+  assert_eq("dirname relative", Path.dirname("a/b/c"), "a/b")
+  assert_eq("dirname no slash", Path.dirname("file.txt"), ".")
+
+  -- ---- Path.extension ----
+  assert_eq("extension png", Path.extension("photo.png"), "png")
+  assert_eq("extension txt", Path.extension("readme.txt"), "txt")
+  assert_eq("extension no ext", Path.extension("Makefile"), "")
+  assert_eq("extension dotfile", Path.extension(".bashrc"), "")
+  assert_eq("extension double suffix", Path.extension("archive.tar.gz"), "gz")
+  assert_eq("extension with full path", Path.extension("/usr/local/lib.so"), "so")
+
+  -- ---- Path.strip_extension ----
+  assert_eq("strip_ext basic", Path.strip_extension("photo.png"), "photo")
+  assert_eq("strip_ext with dir", Path.strip_extension("/usr/photo.png"), "/usr/photo")
+  assert_eq("strip_ext no ext", Path.strip_extension("Makefile"), "Makefile")
+  assert_eq("strip_ext dotfile unchanged", Path.strip_extension(".bashrc"), ".bashrc")
+  assert_eq("strip_ext double suffix", Path.strip_extension("archive.tar.gz"), "archive.tar")
+
+  -- ---- Path.components ----
+  let comps_abs = Path.components("/usr/local/bin")
+  assert_eq("components abs count", List.length(comps_abs), 3)
+  assert_eq("components abs[0]", List.nth(comps_abs, 0), "usr")
+  assert_eq("components abs[1]", List.nth(comps_abs, 1), "local")
+  assert_eq("components abs[2]", List.nth(comps_abs, 2), "bin")
+
+  let comps_rel = Path.components("a/b")
+  assert_eq("components rel count", List.length(comps_rel), 2)
+
+  let comps_root = Path.components("/")
+  assert_eq("components root empty", List.length(comps_root), 0)
+
+  let comps_double = Path.components("a//b")
+  assert_eq("components double-slash deduplicated", List.length(comps_double), 2)
+
+  -- ---- Path.normalize ----
+  assert_eq("normalize dot-dot", Path.normalize("a/../b/./c"), "b/c")
+  assert_eq("normalize absolute excess dot-dot", Path.normalize("/a/../../../b"), "/b")
+  assert_eq("normalize already clean", Path.normalize("a/b/c"), "a/b/c")
+  assert_eq("normalize trailing dot", Path.normalize("a/b/."), "a/b")
+  assert_eq("normalize single dot", Path.normalize("."), ".")
+  assert_eq("normalize absolute dot-dot in middle", Path.normalize("/usr/local/../share"), "/usr/share")
+  assert_eq("normalize leading dot-dot relative", Path.normalize("../foo"), "../foo")
+
+  println("All Path tests passed!")
+end
+
+end

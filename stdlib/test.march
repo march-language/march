@@ -1,0 +1,81 @@
+-- Test module: lightweight assertion helpers for in-process testing.
+--
+-- Tests are plain March functions; a test passes if it returns
+-- without calling panic/fail. Use these helpers to make assertions.
+
+mod Test do
+
+  doc "Fail immediately with a descriptive message."
+  pub fn fail(msg : String) : Unit do
+    panic("FAIL: " ++ msg)
+  end
+
+  doc "Assert that cond is true; panic with msg if not."
+  pub fn assert_true(cond : Bool, msg : String) : Unit do
+    if not(cond) then panic("Assertion failed: " ++ msg) else ()
+  end
+
+  doc "Assert that cond is false; panic with msg if not."
+  pub fn assert_false(cond : Bool, msg : String) : Unit do
+    if cond then panic("Assertion failed: expected false — " ++ msg) else ()
+  end
+
+  doc "Assert two ints are equal."
+  pub fn assert_eq_int(a : Int, b : Int, msg : String) : Unit do
+    if a != b then
+      panic("Assertion failed: " ++ msg
+        ++ " (got " ++ int_to_string(a)
+        ++ ", expected " ++ int_to_string(b) ++ ")")
+    else ()
+  end
+
+  doc "Assert two strings are equal."
+  pub fn assert_eq_str(a : String, b : String, msg : String) : Unit do
+    if a != b then
+      panic("Assertion failed: " ++ msg
+        ++ " (got \"" ++ a ++ "\", expected \"" ++ b ++ "\")")
+    else ()
+  end
+
+  doc "Assert two booleans are equal."
+  pub fn assert_eq_bool(a : Bool, b : Bool, msg : String) : Unit do
+    if a != b then
+      panic("Assertion failed: " ++ msg
+        ++ " (got " ++ bool_to_string(a)
+        ++ ", expected " ++ bool_to_string(b) ++ ")")
+    else ()
+  end
+
+  doc "Assert an Option is Some and return the inner value."
+  pub fn assert_some(opt : Option(a), msg : String) : a do
+    match opt do
+    | Some(x) -> x
+    | None    -> panic("Assertion failed: expected Some but got None — " ++ msg)
+    end
+  end
+
+  doc "Assert an Option is None."
+  pub fn assert_none(opt : Option(a), msg : String) : Unit do
+    match opt do
+    | None    -> ()
+    | Some(_) -> panic("Assertion failed: expected None but got Some — " ++ msg)
+    end
+  end
+
+  doc "Assert a Result is Ok and return the inner value."
+  pub fn assert_ok(res : Result(a, e), msg : String) : a do
+    match res do
+    | Ok(x)  -> x
+    | Err(_) -> panic("Assertion failed: expected Ok but got Err — " ++ msg)
+    end
+  end
+
+  doc "Assert a Result is Err and return the error value."
+  pub fn assert_err(res : Result(a, e), msg : String) : e do
+    match res do
+    | Err(e) -> e
+    | Ok(_)  -> panic("Assertion failed: expected Err but got Ok — " ++ msg)
+    end
+  end
+
+end

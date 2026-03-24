@@ -1,0 +1,150 @@
+-- test/stdlib/test_file.march
+-- Comprehensive tests for the File module.
+-- Creates files in /tmp; cleans up on success.
+
+mod TestFile do
+
+fn do_write(path, content) do
+  match File.write(path, content) do
+  | Err(e) -> panic("File.write failed for " ++ path ++ ": " ++ to_string(e))
+  | Ok(_) -> :ok
+  end
+end
+
+fn do_read(path) do
+  match File.read(path) do
+  | Err(e) -> panic("File.read failed for " ++ path ++ ": " ++ to_string(e))
+  | Ok(s) -> s
+  end
+end
+
+fn main() do
+  let base = "/tmp/march_test_file"
+
+  -- ---- File.exists false for nonexistent ----
+  assert_true("exists false", not File.exists(base ++ "_noexist"))
+
+  -- ---- File.write then exists ----
+  do_write(base ++ "_a", "hello world")
+  assert_true("exists after write", File.exists(base ++ "_a"))
+
+  -- ---- File.read ----
+  assert_eq("read content", do_read(base ++ "_a"), "hello world")
+
+  -- ---- File.read on nonexistent returns Err ----
+  match File.read(base ++ "_noexist") do
+  | Err(_) -> :ok
+  | Ok(_) -> panic("read nonexistent should return Err")
+  end
+
+  -- ---- File.read_lines ----
+  do_write(base ++ "_lines", "line1\nline2\nline3")
+  match File.read_lines(base ++ "_lines") do
+  | Err(e) -> panic("read_lines failed: " ++ to_string(e))
+  | Ok(lines) ->
+    assert_eq("read_lines count", List.length(lines), 3)
+    assert_eq("read_lines[0]", List.nth(lines, 0), "line1")
+    assert_eq("read_lines[1]", List.nth(lines, 1), "line2")
+    assert_eq("read_lines[2]", List.nth(lines, 2), "line3")
+  end
+
+  -- ---- File.read_lines trailing newline stripped ----
+  do_write(base ++ "_trail", "a\nb\n")
+  match File.read_lines(base ++ "_trail") do
+  | Err(e) -> panic("read_lines trailing failed: " ++ to_string(e))
+  | Ok(lines) ->
+    assert_eq("trailing newline stripped", List.length(lines), 2)
+  end
+
+  -- ---- File.append ----
+  do_write(base ++ "_app", "first")
+  match File.append(base ++ "_app", " second") do
+  | Err(e) -> panic("append failed: " ++ to_string(e))
+  | Ok(_) -> :ok
+  end
+  assert_eq("append content", do_read(base ++ "_app"), "first second")
+
+  -- ---- File.copy ----
+  match File.copy(base ++ "_a", base ++ "_copy") do
+  | Err(e) -> panic("copy failed: " ++ to_string(e))
+  | Ok(_) -> :ok
+  end
+  assert_true("copy exists", File.exists(base ++ "_copy"))
+  assert_eq("copy content matches", do_read(base ++ "_copy"), "hello world")
+
+  -- ---- File.rename ----
+  match File.rename(base ++ "_copy", base ++ "_renamed") do
+  | Err(e) -> panic("rename failed: " ++ to_string(e))
+  | Ok(_) -> :ok
+  end
+  assert_true("renamed exists", File.exists(base ++ "_renamed"))
+  assert_true("old name gone after rename", not File.exists(base ++ "_copy"))
+
+  -- ---- File.stat ----
+  match File.stat(base ++ "_a") do
+  | Err(e) -> panic("stat failed: " ++ to_string(e))
+  | Ok(FileStat(size, kind, _mtime, _atime)) ->
+    assert_eq("stat size", size, 11)
+    assert_eq("stat kind regular", kind, RegularFile)
+  end
+
+  -- ---- File.stat on nonexistent ----
+  match File.stat(base ++ "_noexist") do
+  | Err(_) -> :ok
+  | Ok(_) -> panic("stat nonexistent should return Err")
+  end
+
+  -- ---- File.write empty ----
+  do_write(base ++ "_empty", "")
+  assert_eq("empty file content", do_read(base ++ "_empty"), "")
+  match File.read_lines(base ++ "_empty") do
+  | Err(e) -> panic("read_lines empty failed: " ++ to_string(e))
+  | Ok(lines) -> assert_eq("empty read_lines", List.length(lines), 0)
+  end
+
+  -- ---- File.with_lines streaming ----
+  match File.with_lines(base ++ "_lines", fn seq ->
+    Seq.to_list(seq)
+  ) do
+  | Err(e) -> panic("with_lines failed: " ++ to_string(e))
+  | Ok(lines) ->
+    assert_eq("with_lines count", List.length(lines), 3)
+    assert_eq("with_lines[0]", List.nth(lines, 0), "line1")
+  end
+
+  -- ---- File.with_lines on nonexistent ----
+  match File.with_lines(base ++ "_noexist", fn _seq -> :ok) do
+  | Err(_) -> :ok
+  | Ok(_) -> panic("with_lines nonexistent should return Err")
+  end
+
+  -- ---- File.each_line ----
+  match File.each_line(base ++ "_lines", fn _line -> :ok) do
+  | Err(e) -> panic("each_line failed: " ++ to_string(e))
+  | Ok(_) -> :ok
+  end
+
+  -- ---- File.delete ----
+  match File.delete(base ++ "_a") do
+  | Err(e) -> panic("delete failed: " ++ to_string(e))
+  | Ok(_) -> :ok
+  end
+  assert_true("file deleted", not File.exists(base ++ "_a"))
+
+  -- ---- File.delete nonexistent ----
+  match File.delete(base ++ "_noexist") do
+  | Err(_) -> :ok
+  | Ok(_) -> panic("delete nonexistent should return Err")
+  end
+
+  -- Cleanup
+  File.delete(base ++ "_lines")
+  File.delete(base ++ "_trail")
+  File.delete(base ++ "_app")
+  File.delete(base ++ "_renamed")
+  File.delete(base ++ "_empty")
+
+  println("All File tests passed!")
+end
+
+end
