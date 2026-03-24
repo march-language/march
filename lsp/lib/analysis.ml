@@ -230,6 +230,12 @@ let rec collect_decl ~def_map ~use_map ~doc_map ~calls ~actors_tbl ?(prefix = ""
     Option.iter (collect_expr ~def_map ~use_map ~calls) app.app_on_start;
     Option.iter (collect_expr ~def_map ~use_map ~calls) app.app_on_stop
 
+  | Ast.DTest (tdef, _) ->
+    collect_expr ~def_map ~use_map ~calls tdef.test_body
+
+  | Ast.DSetup (body, _) | Ast.DSetupAll (body, _) ->
+    collect_expr ~def_map ~use_map ~calls body
+
   | Ast.DUse _ | Ast.DAlias _ | Ast.DNeeds _
   | Ast.DProtocol _ | Ast.DExtern _ | Ast.DSig _
   | Ast.DDeriving _ -> ()
@@ -301,6 +307,9 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
   | Ast.EPipe (e1, e2, _) | Ast.ESend (e1, e2, _) ->
     collect_expr ~def_map ~use_map ~calls e1;
     collect_expr ~def_map ~use_map ~calls e2
+
+  | Ast.EAssert (e, _) ->
+    collect_expr ~def_map ~use_map ~calls e
 
   | Ast.ELit _ | Ast.EHole _ | Ast.EDbg (None, _)
   | Ast.EResultRef _ -> ()

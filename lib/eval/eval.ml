@@ -359,6 +359,10 @@ let debug_ctx : debug_ctx option ref = ref None
 exception Match_failure of string
 exception Eval_error of string
 
+(** Raised when an [assert] expression fails during test execution.
+    Carries a human-readable failure message. *)
+exception Assert_failure of string
+
 (** Raised when an actor/task's reduction budget is exhausted. *)
 exception Yield
 
@@ -3693,6 +3697,7 @@ let span_of_expr (e : expr) : span =
   | EIf (_, _, _, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
   | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
   | ESpawn (_, sp) | EDbg (_, sp) | ELetFn (_, _, _, _, sp) -> sp
+  | EAssert (_, sp) -> sp
   | EVar n -> n.span
   | EResultRef _ -> dummy_span
 
@@ -4026,6 +4031,34 @@ and eval_expr_inner (env : env) (e : expr) : value =
     let env' = (name.txt, rec_v) :: env in
     env_ref := env';
     rec_v
+
+  | EAssert (inner, _) ->
+    (* Compiler-assisted assertion rewriting:
+       If the inner expression is a binary comparison (==, !=, <, >, <=, >=),
+       we evaluate both sides separately so we can show their values on failure.
+       Otherwise, we just evaluate the expression and check if it's true. *)
+    let comparison_ops = ["=="; "!="; "<"; ">"; "<="; ">="] in
+    (match inner with
+     | EApp (EVar op_name, [lhs; rhs], _) when List.mem op_name.txt comparison_ops ->
+       let lv = eval_expr env lhs in
+       let rv = eval_expr env rhs in
+       let op_fn = lookup op_name.txt env in
+       (match apply op_fn [lv; rv] with
+        | VBool true -> VUnit
+        | VBool false ->
+          raise (Assert_failure (Printf.sprintf
+            "assert %s %s %s\n    left:  %s\n    right: %s"
+            (value_to_string lv) op_name.txt (value_to_string rv)
+            (value_to_string lv) (value_to_string rv)))
+        | _ -> raise (Assert_failure "assert: comparison did not return Bool"))
+     | _ ->
+       (match eval_expr env inner with
+        | VBool true  -> VUnit
+        | VBool false ->
+          raise (Assert_failure "assert: condition was false")
+        | v ->
+          raise (Assert_failure (Printf.sprintf "assert: expected Bool, got %s"
+            (value_to_string v)))))
 
 (** Evaluate a match expression: try each branch until one matches. *)
 and eval_match (env : env) (v : value) (branches : branch list) : value =
@@ -4809,6 +4842,11 @@ let rec eval_decl (env : env) (d : decl) : env =
     (* DApp is desugared to DFn(__app_init__) before eval; reaching here is a bug. *)
     env
 
+  | DTest _ | DSetup _ | DSetupAll _ ->
+    (* DTest/DSetup/DSetupAll are not run during normal module eval.
+       They are collected and run by [run_tests]. *)
+    env
+
   | DUse (ud, _) ->
     let prefix = String.concat "." (List.map (fun (n : name) -> n.txt) ud.use_path) ^ "." in
     (match ud.use_sel with
@@ -5046,3 +5084,117 @@ let run_module (m : module_) : unit =
     | Some v ->
       let _ = apply v [] in
       run_scheduler ()
+
+(* ------------------------------------------------------------------ *)
+(* Test runner                                                         *)
+(* ------------------------------------------------------------------ *)
+
+(** Result of running a single test. *)
+type test_result =
+  | TestPass
+  | TestFail of string  (** failure message *)
+  | TestError of string (** unexpected exception *)
+
+(** Collect all [DTest], [DSetup], and [DSetupAll] nodes from the module. *)
+let collect_test_decls (m : module_) :
+    expr option * expr option * (string * expr) list =
+  let setup_ref     = ref None in
+  let setup_all_ref = ref None in
+  let tests         = ref [] in
+  List.iter (function
+    | DTest (tdef, _) ->
+      tests := (tdef.test_name, tdef.test_body) :: !tests
+    | DSetup (body, _)    -> setup_ref     := Some body
+    | DSetupAll (body, _) -> setup_all_ref := Some body
+    | _ -> ()
+  ) m.mod_decls;
+  (!setup_all_ref, !setup_ref, List.rev !tests)
+
+(** Run the test suite in [m] with the given options.
+    Returns [(total, failed_names)] so the caller can emit a summary.
+    [~verbose] — emit each test name instead of dots.
+    [~filter]  — only run tests whose name contains this substring.
+
+    Output:
+      - Dot mode (default):  prints one `.` per pass, `F` per fail.
+      - Verbose mode:        prints `✓ name` / `✗ name  (msg)`.
+
+    Exit-code contract: the caller is responsible for exiting 1 if failures > 0. *)
+let run_tests ?(verbose=false) ?(filter="") (m : module_) : int * int =
+  (* Build the module environment (registers all fns, lets, etc.) *)
+  let env = eval_module_env m in
+  let (setup_all_opt, setup_opt, tests) = collect_test_decls m in
+  (* Apply filter *)
+  let tests = if filter = "" then tests
+              else List.filter (fun (name, _) ->
+                     let lname = String.lowercase_ascii name in
+                     let lpat  = String.lowercase_ascii filter in
+                     let n = String.length lname and p = String.length lpat in
+                     let rec check i =
+                       if i + p > n then false
+                       else if String.sub lname i p = lpat then true
+                       else check (i + 1)
+                     in check 0
+                   ) tests in
+  (* Run setup_all once *)
+  (match setup_all_opt with
+   | Some body -> (try let _ = eval_expr env body in ()
+                   with exn ->
+                     Printf.eprintf "setup_all failed: %s\n%!" (Printexc.to_string exn))
+   | None -> ());
+  let total = List.length tests in
+  let failures = ref [] in
+  if not verbose then Printf.printf "%!" else ();
+  List.iter (fun (name, body) ->
+    (* Run per-test setup *)
+    (match setup_opt with
+     | Some s -> (try let _ = eval_expr env s in ()
+                  with exn ->
+                    Printf.eprintf "setup failed for \"%s\": %s\n%!" name (Printexc.to_string exn))
+     | None -> ());
+    let result =
+      try
+        let _ = eval_expr env body in
+        TestPass
+      with
+      | Assert_failure msg -> TestFail msg
+      | Eval_error msg     -> TestError msg
+      | Match_failure msg  -> TestError ("match failure: " ^ msg)
+      | exn                -> TestError (Printexc.to_string exn)
+    in
+    if verbose then begin
+      match result with
+      | TestPass ->
+        Printf.printf "  ✓ %s\n%!" name
+      | TestFail msg ->
+        Printf.printf "  ✗ %s\n    %s\n%!" name
+          (String.concat "\n    " (String.split_on_char '\n' msg));
+        failures := (name, msg) :: !failures
+      | TestError msg ->
+        Printf.printf "  ✗ %s (error: %s)\n%!" name msg;
+        failures := (name, "error: " ^ msg) :: !failures
+    end else begin
+      (match result with
+       | TestPass -> Printf.printf ".%!"
+       | TestFail msg ->
+         Printf.printf "F%!";
+         failures := (name, msg) :: !failures
+       | TestError msg ->
+         Printf.printf "E%!";
+         failures := (name, "error: " ^ msg) :: !failures)
+    end
+  ) tests;
+  if not verbose then Printf.printf "\n%!";
+  (* Print failure details in dot mode *)
+  if not verbose && !failures <> [] then begin
+    Printf.printf "\n%d failure(s):\n\n" (List.length !failures);
+    List.iter (fun (name, msg) ->
+      Printf.printf "FAIL: \"%s\"\n  %s\n\n" name
+        (String.concat "\n  " (String.split_on_char '\n' msg))
+    ) (List.rev !failures)
+  end;
+  let n_failed = List.length !failures in
+  Printf.printf "Finished: %d test%s, %d failure%s\n%!"
+    total (if total = 1 then "" else "s")
+    n_failed (if n_failed = 1 then "" else "s");
+  (total, n_failed)

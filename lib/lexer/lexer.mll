@@ -73,6 +73,10 @@ let () =
       ("choose", CHOOSE);
       ("by",     BY);
       ("offer",  OFFER);
+      ("test",      TEST);
+      ("assert",    ASSERT);
+      ("setup",     SETUP);
+      ("setup_all", SETUP_ALL);
     ]
 }
 

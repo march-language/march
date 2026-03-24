@@ -329,6 +329,7 @@ let rec expr_inline = function
     let ty = match ret with None -> "" | Some t -> Printf.sprintf " : %s" (fmt_ty t) in
     Printf.sprintf "fn %s(%s)%s do ... end"
       n.txt (String.concat ", " (List.map fmt_param ps)) ty
+  | EAssert (e, _)              -> Printf.sprintf "assert %s" (expr_inline e)
 
 (** Returns true if the expression must be rendered on multiple lines
     (match, multi-statement block, local fn definition). *)
@@ -469,7 +470,7 @@ let get_span = function
   | DMod (_, _, _, s) | DProtocol (_, _, s) | DActor (_, _, _, s)
   | DSig (_, _, s) | DInterface (_, s) | DImpl (_, s) | DExtern (_, s)
   | DUse (_, s) | DAlias (_, s) | DNeeds (_, s) | DApp (_, s)
-  | DDeriving (_, _, s) -> s
+  | DDeriving (_, _, s) | DTest (_, s) | DSetup (_, s) | DSetupAll (_, s) -> s
 
 (** Emit a list of declarations separated by blank lines,
     flushing comments before each one. *)
@@ -710,6 +711,21 @@ and emit_decl ctx = function
     line ctx (Printf.sprintf "derive %s for %s"
       (String.concat ", " (List.map (fun n -> n.txt) ifaces))
       type_name.txt)
+
+  | DTest (tdef, _) ->
+    line ctx (Printf.sprintf "test \"%s\" do" tdef.test_name);
+    indented ctx (fun () -> emit_body ctx tdef.test_body);
+    line ctx "end"
+
+  | DSetup (body, _) ->
+    line ctx "setup do";
+    indented ctx (fun () -> emit_body ctx body);
+    line ctx "end"
+
+  | DSetupAll (body, _) ->
+    line ctx "setup_all do";
+    indented ctx (fun () -> emit_body ctx body);
+    line ctx "end"
 
 and emit_fn ctx fn =
   let v   = match fn.fn_vis with Public -> "pub " | Private -> "" in

@@ -188,7 +188,7 @@ march/
 │   ├── websocket.march      # 52 lines: WebSocket types and frame operations
 │   └── iterable.march       # 184 lines: map/filter/fold/take/drop/zip/enumerate/flat_map/any/all/find/count
 ├── test/
-│   ├── test_march.ml         # 921 tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, etc.)
+│   ├── test_march.ml         # 958 tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, etc.)
 │   ├── test_cas.ml           # 41 tests (scc, pipeline, def_id)
 │   ├── test_jit.ml           # 1 test (dlopen round-trip)
 │   ├── test_fmt.ml           # 23 tests (formatter round-trip)
@@ -204,8 +204,8 @@ march/
 ## Current State (as of 2026-03-23)
 
 - **Builds clean**
-- **1160 tests across 8 suites; 0 failures** (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + 5 new LSP features + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver):
-  - `test_march.exe`: 945 tests, all passing (app entry point: 8 new; HAMT Map/Set/Array: 26 new; tap bus: 6 new; repl_compiler_parity: 5 new; MPST: 21 new; REPL JIT fix; tail_recursion: 15 (10 orig + 5 structural); stream fusion: 9 new; type_level_nat: 9 new)
+- **1173 tests across 8 suites; 0 failures** (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + 5 new LSP features + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library):
+  - `test_march.exe`: 958 tests, all passing (app entry point: 8 new; HAMT Map/Set/Array: 26 new; tap bus: 6 new; repl_compiler_parity: 5 new; MPST: 21 new; REPL JIT fix; tail_recursion: 15 (10 orig + 5 structural); stream fusion: 9 new; type_level_nat: 9 new; testing_library: 13 new)
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests, passing (formatter round-trip)
@@ -218,6 +218,7 @@ march/
 - **Match syntax**: `match expr do | Pat -> body end` (changed from `with` to `do` in 2026-03-21 — Elixir case-style)
 - **String interpolation**: `${}` syntax fully implemented — `INTERP_START`/`INTERP_MID`/`INTERP_END` tokens in lexer; desugars to `++`/`to_string` chains (`lib/desugar/desugar.ml`)
 - **Code formatter**: `march fmt [--check] <files>` — reformats source in-place (`lib/format/format.ml`, `bin/main.ml`)
+- **Built-in testing library**: `test "name" do...end` as first-class language construct; `assert expr` with compiler-assisted failure messages (shows LHS/RHS for binary comparisons); `setup do...end` (per-test hook) and `setup_all do...end` (once-before-all); `march test [--verbose] [--filter=pattern] [files...]` subcommand; dot mode by default, `--verbose` for full names; `forge test` delegates to `march test`; fully wired through all compiler passes; 13 tests in `testing_library` group
 - **Property-based testing**: 36 QCheck2 properties in `test/test_properties.ml` — ADTs, closures, HOFs, tuples, strings, oracle/idempotency/pass properties
 - **Standard Interfaces (Eq/Ord/Show/Hash) with derive syntax** — merged to main (from `claude/intelligent-austin`); `derive [Eq, Show]` syntax, eval dispatch for `==`/`show`/`hash`/`compare` via `impl_tbl`; 18 tests
 - **LSP Server** (`march-lsp`) — diagnostics, hover (with doc strings), goto-def, completion, inlay hints, semantic tokens, actor info, find references, rename symbol, signature help, code actions (make-linear quickfix, exhaustion quickfix); uses `linol` framework; Zed extension wired up

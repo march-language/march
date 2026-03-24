@@ -204,6 +204,9 @@ let rec desugar_expr (e : expr) : expr =
   | ELetFn (name, params, ret_ty, body, sp) ->
     ELetFn (name, params, ret_ty, desugar_expr body, sp)
 
+  | EAssert (e, sp) ->
+    EAssert (desugar_expr e, sp)
+
 (* ---- Multi-head fn desugaring ---- *)
 
 (** Desugar a [fn_def] that may have multiple clauses (or pattern params)
@@ -316,6 +319,15 @@ let rec desugar_decl (d : decl) : decl =
   | DDeriving _ ->
     (* DDeriving is expanded by desugar_module before desugar_decl is called *)
     d
+
+  | DTest (tdef, sp) ->
+    DTest ({ tdef with test_body = desugar_expr tdef.test_body }, sp)
+
+  | DSetup (body, sp) ->
+    DSetup (desugar_expr body, sp)
+
+  | DSetupAll (body, sp) ->
+    DSetupAll (desugar_expr body, sp)
 
   | DApp (adef, sp) ->
     (* Desugar: DApp → private __app_init__ function that returns a record

@@ -1604,6 +1604,7 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.EResultRef _            -> Ast.dummy_span
   | Ast.EDbg (_, sp)            -> sp
   | Ast.ELetFn (_, _, _, _, sp) -> sp
+  | Ast.EAssert (_, sp)         -> sp
 
 (* ══════════════════════════════════════════════════════════════════
    §E  Pattern exhaustiveness checking
@@ -2677,6 +2678,13 @@ let rec infer_expr env (e : Ast.expr) : ty =
     | Ast.EDbg (None, _) -> t_unit
     | Ast.EDbg (Some inner, _) -> infer_expr env inner
 
+    (* ── Test assertion ─────────────────────────────────────────────── *)
+    | Ast.EAssert (inner, sp) ->
+      (* The inner expression must be Bool. Assert evaluates to Unit. *)
+      check_expr env inner t_bool ~reason:(Some (RBuiltin "assert expects a Bool expression"));
+      Hashtbl.replace env.type_map sp t_unit;
+      t_unit
+
     (* ── Local recursive named function (block-scoped) ─────────────── *)
     | Ast.ELetFn (name, params, ret_ann, body, sp) ->
       (* Typecheck the local fn and return the type of its closure.
@@ -2925,6 +2933,7 @@ let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
     free_vars_expr inner_bound body
   | Ast.EPipe (l, r, _) ->
     free_vars_expr bound l @ free_vars_expr bound r
+  | Ast.EAssert (e, _) -> free_vars_expr bound e
 
 and free_vars_block (bound : string list) (es : Ast.expr list) : string list =
   match es with
@@ -4126,6 +4135,23 @@ let rec check_decl env (d : Ast.decl) : env =
     (* DDeriving is expanded to DImpl blocks by the desugar pass; should not reach here. *)
     env
 
+  | Ast.DTest (tdef, sp) ->
+    (* Typecheck the test body; it must be Unit. *)
+    check_expr env tdef.test_body t_unit
+      ~reason:(Some (RBuiltin (Printf.sprintf "test body of \"%s\" must produce Unit" tdef.test_name)));
+    Hashtbl.replace env.type_map sp t_unit;
+    env
+
+  | Ast.DSetup (body, sp) ->
+    check_expr env body t_unit ~reason:(Some (RBuiltin "setup body must produce Unit"));
+    Hashtbl.replace env.type_map sp t_unit;
+    env
+
+  | Ast.DSetupAll (body, sp) ->
+    check_expr env body t_unit ~reason:(Some (RBuiltin "setup_all body must produce Unit"));
+    Hashtbl.replace env.type_map sp t_unit;
+    env
+
 (** Emit warnings for any imports or aliases that were never referenced. *)
 let warn_unused_imports env =
   List.iter (fun ie ->
@@ -4200,6 +4226,7 @@ let rec collect_direct_fn_calls (fn_names : StringSet.t) (e : Ast.expr) : String
                     (collect_direct_fn_calls fn_names b)
   | Ast.ESpawn (ex, _)       -> collect_direct_fn_calls fn_names ex
   | Ast.EDbg (Some ex, _)    -> collect_direct_fn_calls fn_names ex
+  | Ast.EAssert (ex, _) -> collect_direct_fn_calls fn_names ex
   | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
   | Ast.EDbg (None, _)       -> StringSet.empty
 
@@ -4414,6 +4441,7 @@ let rec check_tail_position
       chk false smaller "message in `send`" msg
     | Ast.ESpawn (ex, _)      -> chk false smaller "argument to `spawn`" ex
     | Ast.EDbg (Some ex, _)   -> chk false smaller "argument to `dbg`" ex
+    | Ast.EAssert (ex, _)     -> chk false smaller "assert expression" ex
     (* ── leaves ── *)
     | Ast.EDbg (None, _) | Ast.ELit _ | Ast.EVar _ | Ast.EHole _
     | Ast.EResultRef _ -> ()

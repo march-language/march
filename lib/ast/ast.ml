@@ -99,6 +99,10 @@ type expr =
           dbg(val_expr) logs the value and returns it. *)
   | ELetFn of name * param list * ty option * expr * span
       (** Local named recursive function: fn go(params) : ret_ty do body end *)
+  | EAssert of expr * span
+      (** Test assertion: assert expr.
+          When the inner expr is a binary comparison (==, !=, <, >, <=, >=),
+          the eval pass evaluates both sides separately for rich error messages. *)
 [@@deriving show]
 
 and param = {
@@ -145,6 +149,15 @@ type decl =
   (** Derive declaration: [derive Eq, Show for Color]
       name = type name; name list = interface names to derive.
       Expanded to [DImpl] blocks by the desugar pass. *)
+  | DTest of test_def * span           (** Test case: test "name" do ... end *)
+  | DSetup of expr * span              (** Per-test setup: setup do ... end *)
+  | DSetupAll of expr * span           (** One-time setup: setup_all do ... end *)
+[@@deriving show]
+
+and test_def = {
+  test_name : string;    (** Test name string — used for display and filtering *)
+  test_body : expr;      (** Test body (block expression, should produce Unit) *)
+}
 [@@deriving show]
 
 and app_def = {

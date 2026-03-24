@@ -214,6 +214,116 @@ let rec march_files_in dir =
       acc
   ) [] entries
 
+(** Run the test subcommand and exit.
+    Discovers test files, parses/typechecks them, and runs all test blocks.
+    Usage: march test [--verbose|-v] [--filter=pattern] [file...] *)
+let run_test_cmd args =
+  let verbose = ref false in
+  let filter  = ref "" in
+  let targets = ref [] in
+  List.iter (fun a ->
+    if a = "--verbose" || a = "-v" then verbose := true
+    else if String.length a > 9 && String.sub a 0 9 = "--filter=" then
+      filter := String.sub a 9 (String.length a - 9)
+    else
+      targets := a :: !targets
+  ) args;
+  let targets = List.rev !targets in
+  (* If no explicit files given, auto-discover test/test_*.march and test/*_test.march *)
+  let files =
+    if targets <> [] then targets
+    else begin
+      let test_dir = "test" in
+      if not (Sys.file_exists test_dir) then []
+      else
+        let entries = Array.to_list (Sys.readdir test_dir) in
+        List.filter_map (fun name ->
+          if (String.length name > 6 && String.sub name 0 5 = "test_"
+              && Filename.check_suffix name ".march")
+          || Filename.check_suffix name "_test.march"
+          then Some (Filename.concat test_dir name)
+          else None
+        ) entries
+    end
+  in
+  if files = [] then begin
+    Printf.eprintf "march test: no test files found\n";
+    Printf.eprintf "  Put test files in test/ named test_*.march or *_test.march\n";
+    exit 0
+  end;
+  let total_files = List.length files in
+  let total_tests = ref 0 in
+  let total_failed = ref 0 in
+  let failed_files = ref [] in
+  List.iter (fun filename ->
+    let src =
+      try read_file filename
+      with Sys_error msg ->
+        Printf.eprintf "march test: %s\n" msg; exit 1
+    in
+    if !verbose then Printf.printf "%s\n%!" filename
+    else Printf.printf "%s " filename;
+    let lexbuf = Lexing.from_string src in
+    lexbuf.Lexing.lex_curr_p <-
+      { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
+    let module_ast =
+      try March_parser.Parser.module_ March_lexer.Lexer.token lexbuf
+      with
+      | March_errors.Errors.ParseError (msg, hint, _) ->
+        Printf.eprintf "\n%s\n"
+          (March_errors.Errors.render_parse_error ~src ~filename ?hint ~msg lexbuf);
+        exit 1
+      | March_parser.Parser.Error ->
+        Printf.eprintf "\n%s\n"
+          (March_errors.Errors.render_parse_error ~src ~filename ~msg:"Parse error:" lexbuf);
+        exit 1
+    in
+    let parse_errs = March_parser.Parse_errors.take_parse_errors () in
+    if parse_errs <> [] then begin
+      List.iter (fun (msg, _hint, pos) ->
+        let open Lexing in
+        Printf.eprintf "%s:%d:%d: error: %s\n"
+          filename pos.pos_lnum (pos.pos_cnum - pos.pos_bol) msg
+      ) parse_errs;
+      exit 1
+    end;
+    let desugared = March_desugar.Desugar.desugar_module module_ast in
+    let stdlib_decls = load_stdlib () in
+    let desugared =
+      { desugared with
+        March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
+    in
+    let (errors, _type_map) = March_typecheck.Typecheck.check_module desugared in
+    let diags = March_errors.Errors.sorted errors in
+    let is_user_file (d : March_errors.Errors.diagnostic) =
+      d.span.March_ast.Ast.file = filename
+    in
+    let has_user_errors = List.exists (fun (d : March_errors.Errors.diagnostic) ->
+        d.severity = March_errors.Errors.Error && is_user_file d
+      ) diags in
+    if has_user_errors then begin
+      List.iter (fun (d : March_errors.Errors.diagnostic) ->
+        if is_user_file d && d.severity = March_errors.Errors.Error then
+          Printf.eprintf "%s:%d:%d: error: %s\n"
+            d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
+            d.span.March_ast.Ast.start_col d.message
+      ) diags;
+      exit 1
+    end;
+    let (n_tests, n_failed) =
+      March_eval.Eval.run_tests ~verbose:!verbose ~filter:!filter desugared
+    in
+    total_tests  := !total_tests + n_tests;
+    total_failed := !total_failed + n_failed;
+    if n_failed > 0 then failed_files := filename :: !failed_files
+  ) files;
+  if total_files > 1 then begin
+    Printf.printf "\n=== Summary: %d/%d files, %d/%d tests failed ===\n%!"
+      (List.length !failed_files) total_files !total_failed !total_tests
+  end;
+  if !total_failed > 0 then exit 1
+  else exit 0
+
 (** Run the fmt subcommand and exit. *)
 let run_fmt args =
   (* Parse --check flag and collect targets *)
@@ -445,11 +555,15 @@ let compile filename =
   end
 
 let () =
-  (* Handle "march fmt [--check] <targets...>" as a subcommand before Arg.parse *)
+  (* Handle subcommands before Arg.parse *)
   let argv = Sys.argv in
   if Array.length argv >= 2 && argv.(1) = "fmt" then begin
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
     run_fmt rest
+  end;
+  if Array.length argv >= 2 && argv.(1) = "test" then begin
+    let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
+    run_test_cmd rest
   end;
   let files = ref [] in
   let specs = [

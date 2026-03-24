@@ -13717,6 +13717,117 @@ let test_tnat_typecheck_solve_add () =
   end|} in
   Alcotest.(check bool) "a+2=5 solves to a=3: no typecheck error" false (has_errors ctx)
 
+(* ── Testing library ─────────────────────────────────────────────────────── *)
+
+let lex_one src =
+  let lexbuf = Lexing.from_string src in
+  March_lexer.Lexer.token lexbuf
+
+let test_lex_test_keyword () =
+  Alcotest.(check bool) "test keyword lexes" true
+    (match lex_one "test" with March_parser.Parser.TEST -> true | _ -> false)
+
+let test_lex_assert_keyword () =
+  Alcotest.(check bool) "assert keyword lexes" true
+    (match lex_one "assert" with March_parser.Parser.ASSERT -> true | _ -> false)
+
+let test_lex_setup_keyword () =
+  Alcotest.(check bool) "setup keyword lexes" true
+    (match lex_one "setup" with March_parser.Parser.SETUP -> true | _ -> false)
+
+let test_lex_setup_all_keyword () =
+  Alcotest.(check bool) "setup_all keyword lexes" true
+    (match lex_one "setup_all" with March_parser.Parser.SETUP_ALL -> true | _ -> false)
+
+let test_parse_dtest () =
+  let m = parse_and_desugar {|mod T do
+    test "hello" do
+      1
+    end
+  end|} in
+  match m.March_ast.Ast.mod_decls with
+  | [ March_ast.Ast.DTest (tdef, _) ] ->
+    Alcotest.(check string) "test name" "hello" tdef.March_ast.Ast.test_name
+  | _ -> Alcotest.fail "expected exactly one DTest"
+
+let test_parse_assert () =
+  let m = parse_and_desugar {|mod T do
+    fn f() do assert true end
+  end|} in
+  match m.March_ast.Ast.mod_decls with
+  | [ March_ast.Ast.DFn _ ] ->
+    (* EAssert is inside the fn body — parsing succeeded *)
+    ()
+  | _ -> Alcotest.fail "expected DFn containing assert"
+
+let test_parse_setup () =
+  let m = parse_and_desugar {|mod T do
+    setup do 1 end
+  end|} in
+  match m.March_ast.Ast.mod_decls with
+  | [ March_ast.Ast.DSetup (_, _) ] -> ()
+  | _ -> Alcotest.fail "expected DSetup"
+
+let test_assert_pass () =
+  (* assert 1 == 1 should produce VUnit with no exception *)
+  let env = eval_module {|mod T do
+    fn f() do assert 1 == 1 end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check bool) "assert pass returns unit" true
+    (match v with March_eval.Eval.VUnit -> true | _ -> false)
+
+let test_assert_fail_shows_values () =
+  (* assert 1 == 2 should raise Assert_failure with LHS/RHS info *)
+  let env = eval_module {|mod T do
+    fn f() do assert 1 == 2 end
+  end|} in
+  match (try let _ = call_fn env "f" [] in None
+         with March_eval.Eval.Assert_failure msg -> Some msg)
+  with
+  | None -> Alcotest.fail "expected Assert_failure"
+  | Some msg ->
+    Alcotest.(check bool) "failure message contains 'left'" true
+      (let n = String.length msg and p = String.length "left" in
+       let rec check i = if i + p > n then false
+                         else if String.sub msg i p = "left" then true
+                         else check (i+1) in check 0)
+
+let test_assert_false_fails () =
+  let env = eval_module {|mod T do
+    fn f() do assert false end
+  end|} in
+  Alcotest.(check bool) "assert false raises" true
+    (try let _ = call_fn env "f" [] in false
+     with March_eval.Eval.Assert_failure _ -> true)
+
+let test_run_tests_pass () =
+  let m = parse_and_desugar {|mod T do
+    test "one" do assert 1 == 1 end
+    test "two" do assert 2 == 2 end
+  end|} in
+  let (total, failed) = March_eval.Eval.run_tests m in
+  Alcotest.(check int) "total = 2" 2 total;
+  Alcotest.(check int) "failed = 0" 0 failed
+
+let test_run_tests_fail_count () =
+  let m = parse_and_desugar {|mod T do
+    test "good" do assert 1 == 1 end
+    test "bad"  do assert 1 == 2 end
+  end|} in
+  let (total, failed) = March_eval.Eval.run_tests m in
+  Alcotest.(check int) "total = 2" 2 total;
+  Alcotest.(check int) "failed = 1" 1 failed
+
+let test_run_tests_filter () =
+  let m = parse_and_desugar {|mod T do
+    test "add works"    do assert 1 == 1 end
+    test "sub works"    do assert 2 == 2 end
+    test "add overflow" do assert 1 == 2 end
+  end|} in
+  let (total, _failed) = March_eval.Eval.run_tests ~filter:"sub" m in
+  Alcotest.(check int) "filter: total = 1" 1 total
+
 let () =
   Alcotest.run "march"
     [
@@ -14938,5 +15049,21 @@ let () =
           Alcotest.test_case "tc: 2+3 /= 6 error"       `Quick test_tnat_typecheck_concrete_mismatch;
           Alcotest.test_case "tc: n+0 = n ok"           `Quick test_tnat_typecheck_identity;
           Alcotest.test_case "tc: a+2=5 solves a=3"     `Quick test_tnat_typecheck_solve_add;
+        ] );
+      ( "testing_library",
+        [
+          Alcotest.test_case "test keyword lexes"          `Quick test_lex_test_keyword;
+          Alcotest.test_case "assert keyword lexes"        `Quick test_lex_assert_keyword;
+          Alcotest.test_case "setup keyword lexes"         `Quick test_lex_setup_keyword;
+          Alcotest.test_case "setup_all keyword lexes"     `Quick test_lex_setup_all_keyword;
+          Alcotest.test_case "parse DTest"                 `Quick test_parse_dtest;
+          Alcotest.test_case "parse assert expr"           `Quick test_parse_assert;
+          Alcotest.test_case "parse setup"                 `Quick test_parse_setup;
+          Alcotest.test_case "assert pass"                 `Quick test_assert_pass;
+          Alcotest.test_case "assert fail shows values"    `Quick test_assert_fail_shows_values;
+          Alcotest.test_case "assert false fails"          `Quick test_assert_false_fails;
+          Alcotest.test_case "run_tests: all pass"         `Quick test_run_tests_pass;
+          Alcotest.test_case "run_tests: fail count"       `Quick test_run_tests_fail_count;
+          Alcotest.test_case "run_tests: filter"           `Quick test_run_tests_filter;
         ] );
     ]

@@ -82,6 +82,7 @@
 %token IMPORT ALIAS ONLY EXCEPT P_FN DERIVE FOR
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
+%token TEST ASSERT SETUP SETUP_ALL
 %token DBG DOC
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
 %token ONE_FOR_ONE ONE_FOR_ALL REST_FOR_ONE RESTART_KW
@@ -155,6 +156,9 @@ decl:
   | d = needs_decl     { d }
   | d = app_decl       { d }
   | d = derive_decl    { d }
+  | d = test_decl      { d }
+  | d = setup_decl     { d }
+  | d = setup_all_decl { d }
 
 (** Each fn clause is parsed as its own DFn with a single clause.
     The group_fn_clauses pass merges consecutive same-name clauses. *)
@@ -315,6 +319,31 @@ on_start_block:
 on_stop_block:
   | ON_STOP; DO; body = block_body; END
     { body }
+
+(** test "name" do ... end *)
+test_decl:
+  | TEST; name = STRING; DO; body = block_body; END
+    { DTest ({ test_name = name; test_body = body }, mk_span ($loc)) }
+  | TEST; _n = STRING; error
+    { error_raise
+        "I was expecting `do` to start the test body here:"
+        (Some "test \"name\" do\n    assert expr\nend")
+        $startpos($3) }
+  | TEST; error
+    { error_raise
+        "I was expecting a string name for the test:"
+        (Some "test \"my test name\" do\n    assert expr\nend")
+        $startpos($2) }
+
+(** setup do ... end — runs before each test *)
+setup_decl:
+  | SETUP; DO; body = block_body; END
+    { DSetup (body, mk_span ($loc)) }
+
+(** setup_all do ... end — runs once before all tests *)
+setup_all_decl:
+  | SETUP_ALL; DO; body = block_body; END
+    { DSetupAll (body, mk_span ($loc)) }
 
 (** supervise do
       strategy one_for_one
@@ -661,6 +690,8 @@ block_expr:
 
 expr:
   | e = expr_pipe { e }
+  | ASSERT; e = expr
+    { EAssert (e, mk_span ($loc)) }
   | FN; ps = lambda_params; ARROW; body = expr
     { ELam (ps, body, mk_span ($loc)) }
   | FN; ps = lambda_params; error

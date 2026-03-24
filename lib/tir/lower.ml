@@ -500,6 +500,22 @@ and lower_expr (e : Ast.expr) : Tir.expr =
     } in
     Tir.ELetRec ([fn], Tir.EAtom (Tir.AVar fn_var))
 
+  (* --- Assert: lower to a runtime panic call on failure (for compiled path) --- *)
+  | Ast.EAssert (inner, _) ->
+    (* Lower assert to: if inner then () else panic("assertion failed")
+       Uses same CPS-based bool dispatch as EIf. *)
+    lower_to_atom_k inner (fun cond_atom ->
+      let unit_v = Tir.EAtom (Tir.ALit (Ast.LitAtom "unit")) in
+      let panic_var : Tir.var = {
+        v_name = "panic";
+        v_ty = Tir.TFn ([Tir.TCon ("String", [])], Tir.TCon ("Unit", []));
+        v_lin = Tir.Unr
+      } in
+      let panic_v = Tir.EApp (panic_var, [Tir.ALit (Ast.LitString "assertion failed")]) in
+      Tir.ECase (cond_atom,
+        [{ br_tag = "True"; br_vars = []; br_body = unit_v }],
+        Some panic_v))
+
 (* ── Match lowering ─────────────────────────────────────────────── *)
 
 (** True if [pat] matches everything without discriminating (wildcard / var / as-var). *)
@@ -1286,7 +1302,8 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
           ) edef.ext_fns
       | Ast.DInterface _ | Ast.DImpl _ -> ()  (* handled in pass 1 *)
       | Ast.DProtocol _ | Ast.DSig _
-      | Ast.DNeeds _ | Ast.DApp _ | Ast.DDeriving _ -> ()
+      | Ast.DNeeds _ | Ast.DApp _ | Ast.DDeriving _
+      | Ast.DTest _ | Ast.DSetup _ | Ast.DSetupAll _ -> ()
       | Ast.DUse (ud, _) ->
         (* Build use-import aliases: map unqualified names to qualified names.
            The qualified fn_defs are already in [fns] from DMod processing above. *)
