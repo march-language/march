@@ -364,6 +364,58 @@ end|} in
   let loc = An.definition_at a ~line ~character:col in
   Alcotest.(check bool) "helper_fn definition found" true (loc <> None)
 
+let test_definition_at_constructor_expression () =
+  (* Clicking on a constructor in an expression (ECon) should resolve to
+     the constructor's definition in the type declaration. *)
+  let src = {|mod Test do
+  type Color = Red | Green | Blue
+  fn pick() : Color do Green end
+end|} in
+  let a = analyse src in
+  (* "Green end" — unique; the 'G' of Green is the constructor use *)
+  let (line, col) = pos_of src "Green end" in
+  let loc = An.definition_at a ~line ~character:col in
+  Alcotest.(check bool) "constructor ECon resolves" true (loc <> None)
+
+let test_definition_at_constructor_pattern () =
+  (* Clicking on a constructor in a match pattern (PatCon) should resolve. *)
+  let src = {|mod Test do
+  type Opt = None | Some(Int)
+  fn unwrap(x: Opt) : Int do
+    match x do
+    | Some(v) -> v
+    | None -> 0
+    end
+  end
+end|} in
+  let a = analyse src in
+  (* "Some(v)" only appears in the pattern arm — click on 'S' of Some *)
+  let (line, col) = pos_of src "Some(v)" in
+  let loc = An.definition_at a ~line ~character:col in
+  Alcotest.(check bool) "constructor PatCon resolves" true (loc <> None)
+
+let test_definition_at_type_definition_site () =
+  (* F12 on the function name in its own declaration should return
+     the definition location (def_map fallback). *)
+  let src = {|mod Test do
+  fn my_fn() : Int do 1 end
+end|} in
+  let a = analyse src in
+  (* "fn my_fn()" — cursor on 'my_fn' in the declaration itself *)
+  let (line, col) = pos_of src "my_fn" in
+  let loc = An.definition_at a ~line ~character:col in
+  Alcotest.(check bool) "definition-site fallback" true (loc <> None)
+
+let test_definition_at_type_name () =
+  (* The type name in a DType declaration should resolve via def_map fallback. *)
+  let src = {|mod Test do
+  type MyType = A | B
+end|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "MyType" in
+  let loc = An.definition_at a ~line ~character:col in
+  Alcotest.(check bool) "type name in decl resolves" true (loc <> None)
+
 (* ------------------------------------------------------------------ *)
 (* 6. Analysis — hover types (type_at)                                 *)
 (* ------------------------------------------------------------------ *)
@@ -1389,6 +1441,10 @@ let () =
       Alcotest.test_case "let binding resolves"                 `Quick test_definition_at_let_binding;
       Alcotest.test_case "no definition for literal"            `Quick test_definition_at_outside_any_use;
       Alcotest.test_case "function name reference resolves"     `Quick test_definition_at_function_name_reference;
+      Alcotest.test_case "constructor expression resolves"      `Quick test_definition_at_constructor_expression;
+      Alcotest.test_case "constructor pattern resolves"         `Quick test_definition_at_constructor_pattern;
+      Alcotest.test_case "definition-site fallback"             `Quick test_definition_at_type_definition_site;
+      Alcotest.test_case "type name in decl resolves"           `Quick test_definition_at_type_name;
     ];
     "hover-types", [
       Alcotest.test_case "no type at module keyword"      `Quick test_type_at_no_position;

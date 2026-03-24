@@ -182,7 +182,7 @@ let rec collect_decl ~def_map ~use_map ~doc_map ~calls ~actors_tbl ?(prefix = ""
       ) fn.fn_clauses
 
   | Ast.DLet (_, b, _) ->
-    collect_pat_defs ~def_map b.bind_pat;
+    collect_pat_defs ~def_map ~use_map b.bind_pat;
     collect_expr ~def_map ~use_map ~calls b.bind_expr
 
   | Ast.DType (_, name, _, typedef, _) ->
@@ -246,7 +246,7 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
     Hashtbl.replace use_map name.span name.txt
 
   | Ast.ELet (b, _) ->
-    collect_pat_defs ~def_map b.bind_pat;
+    collect_pat_defs ~def_map ~use_map b.bind_pat;
     collect_expr ~def_map ~use_map ~calls b.bind_expr
 
   | Ast.ELetFn (name, params, _, body, _) ->
@@ -265,7 +265,7 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
   | Ast.EMatch (subj, branches, _) ->
     collect_expr ~def_map ~use_map ~calls subj;
     List.iter (fun (br : Ast.branch) ->
-        collect_pat_defs ~def_map br.branch_pat;
+        collect_pat_defs ~def_map ~use_map br.branch_pat;
         Option.iter (collect_expr ~def_map ~use_map ~calls) br.branch_guard;
         collect_expr ~def_map ~use_map ~calls br.branch_body
       ) branches
@@ -282,7 +282,8 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
     collect_expr ~def_map ~use_map ~calls f;
     List.iter (collect_expr ~def_map ~use_map ~calls) args
 
-  | Ast.ECon (_, args, _) ->
+  | Ast.ECon (name, args, _) ->
+    Hashtbl.replace use_map name.span name.txt;
     List.iter (collect_expr ~def_map ~use_map ~calls) args
 
   | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) ->
@@ -314,19 +315,22 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
   | Ast.ELit _ | Ast.EHole _ | Ast.EDbg (None, _)
   | Ast.EResultRef _ -> ()
 
-and collect_pat_defs ~def_map (pat : Ast.pattern) =
+and collect_pat_defs ~def_map ~use_map (pat : Ast.pattern) =
   match pat with
   | Ast.PatVar name ->
     Hashtbl.replace def_map name.txt name.span
   | Ast.PatAs (p, name, _) ->
-    collect_pat_defs ~def_map p;
+    collect_pat_defs ~def_map ~use_map p;
     Hashtbl.replace def_map name.txt name.span
-  | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) ->
-    List.iter (collect_pat_defs ~def_map) ps
+  | Ast.PatCon (name, ps) ->
+    Hashtbl.replace use_map name.span name.txt;
+    List.iter (collect_pat_defs ~def_map ~use_map) ps
+  | Ast.PatAtom (_, ps, _) ->
+    List.iter (collect_pat_defs ~def_map ~use_map) ps
   | Ast.PatTuple (ps, _) ->
-    List.iter (collect_pat_defs ~def_map) ps
+    List.iter (collect_pat_defs ~def_map ~use_map) ps
   | Ast.PatRecord (fields, _) ->
-    List.iter (fun (_, p) -> collect_pat_defs ~def_map p) fields
+    List.iter (fun (_, p) -> collect_pat_defs ~def_map ~use_map p) fields
   | Ast.PatWild _ | Ast.PatLit _ -> ()
 
 (* ------------------------------------------------------------------ *)
@@ -550,6 +554,17 @@ let analyse ~filename ~src : t =
         ) raw_ast.Ast.mod_decls
     in
     List.iter (collect_decl ~def_map ~use_map ~doc_map ~calls:call_sites_acc ~actors_tbl) user_decls;
+    (* Collect stdlib definitions into def_map for cross-stdlib go-to-definition.
+       Use throw-away tables for use_map/doc_map/calls/actors so we don't pollute
+       the user-file maps with stdlib-internal references. *)
+    let _slib_use    = Hashtbl.create 0 in
+    let _slib_doc    = Hashtbl.create 0 in
+    let _slib_calls  = ref [] in
+    let _slib_actors = Hashtbl.create 0 in
+    List.iter
+      (collect_decl ~def_map ~use_map:_slib_use ~doc_map:_slib_doc
+         ~calls:_slib_calls ~actors_tbl:_slib_actors)
+      stdlib_decls;
     (* Populate doc_map with stdlib function docs so that hovering over a
        stdlib call site (e.g. [head], [map], [filter]) shows the doc string. *)
     collect_docs ~doc_map stdlib_decls;
@@ -631,6 +646,19 @@ let definition_at (a : t) ~line ~character : Lsp.Types.Location.t option =
           if Pos.span_contains sp ~line ~character then Some name
           else None
       ) a.use_map None
+  in
+  (* Fallback: cursor may be sitting on a definition site itself (e.g. the
+     function name in "fn foo()").  Check def_map by span. *)
+  let var_name = match var_name with
+    | Some _ -> var_name
+    | None ->
+      Hashtbl.fold (fun name sp found ->
+          match found with
+          | Some _ -> found
+          | None ->
+            if Pos.span_contains sp ~line ~character then Some name
+            else None
+        ) a.def_map None
   in
   match var_name with
   | None -> None
