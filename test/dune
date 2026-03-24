@@ -36,6 +36,10 @@
  (name test_stdlib_march)
  (libraries march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_eval alcotest unix))
 
+(test
+ (name test_search)
+ (libraries march_search alcotest unix))
+
 (executable
  (name debug_fmt)
  (libraries march_lexer march_parser march_ast march_format))

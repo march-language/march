@@ -163,6 +163,8 @@ march/
 │   ├── march_http.c/h       # HTTP/WS runtime: TCP, HTTP parse/serialize, server, WebSocket
 │   ├── sha1.c               # SHA-1 for WebSocket handshake
 │   └── base64.c             # Base64 for WebSocket handshake
+│   ├── search/
+│   │   └── search.ml        # Search index: Levenshtein fuzzy search, type/doc search, JSON cache
 ├── stdlib/                  # 29 modules, ~6200 lines
 │   ├── prelude.march        # Auto-imported helpers (panic, identity, compose, unwrap, etc.)
 │   ├── option.march         # Option(a) with Some/None

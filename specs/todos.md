@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-24
+**Last updated:** 2026-03-24 (forge search added)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -16,7 +16,8 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ### Tooling: Forge Build Tool
 
-- ✅ **Implement `forge`** — Implemented as `forge/` package. Commands: `forge new`, `forge build`, `forge run`, `forge test`, `forge format`, `forge interactive`/`i`, `forge deps`, `forge clean`. Template scaffolding generates valid March code (PascalCase module names, `do/end` fn bodies, `println` builtin). 15 tests in `forge/test/test_forge.ml`.
+- ✅ **Implement `forge`** — Implemented as `forge/` package. Commands: `forge new`, `forge build`, `forge run`, `forge test`, `forge format`, `forge interactive`/`i`, `forge deps`, `forge clean`, `forge search`. Template scaffolding generates valid March code (PascalCase module names, `do/end` fn bodies, `println` builtin). 15 tests in `forge/test/test_forge.ml`.
+- ✅ **`forge search` — Hoogle-style search** — `lib/search/search.ml` (new `march_search` library): Levenshtein fuzzy name search, type-signature component matching, doc-keyword search, combined search (AND-semantics). JSON index cache at `.march/search-index.json`. `forge/lib/cmd_search.ml` wires up cmdliner with `--type`, `--doc`, `--limit`, `--json`, `--rebuild` flags. 25 tests in `test/test_search.ml` (levenshtein, name search, type search, doc search, combined, JSON roundtrip, stdlib integration).
 
 ---
 

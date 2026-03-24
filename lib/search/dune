@@ -1,0 +1,3 @@
+(library
+ (name march_search)
+ (libraries march_ast march_lexer march_parser march_desugar unix yojson))

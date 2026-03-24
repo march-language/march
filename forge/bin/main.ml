@@ -140,6 +140,39 @@ let help_cmd =
   Cmd.v (Cmd.info "help" ~doc:"Show help for forge or a specific command")
     Term.(ret (const run $ topic))
 
+(* --------------------------------------------------------------- forge search *)
+
+let search_cmd =
+  let query =
+    Arg.(value & pos 0 string "" &
+         info [] ~docv:"QUERY" ~doc:"Name to search for (fuzzy/substring)")
+  in
+  let type_sig =
+    Arg.(value & opt string "" &
+         info ["type"; "t"] ~docv:"TYPE" ~doc:"Type signature to search for")
+  in
+  let doc_query =
+    Arg.(value & opt string "" &
+         info ["doc"; "d"] ~docv:"KEYWORDS" ~doc:"Keywords to search in doc strings")
+  in
+  let limit =
+    Arg.(value & opt int 20 &
+         info ["limit"; "n"] ~docv:"N" ~doc:"Maximum number of results (default 20)")
+  in
+  let as_json =
+    Arg.(value & flag & info ["json"] ~doc:"Output results as JSON")
+  in
+  let rebuild =
+    Arg.(value & flag & info ["rebuild"] ~doc:"Rebuild the search index before searching")
+  in
+  let run q t d n j r =
+    Cmd_search.run ~query:q ~type_sig:t ~doc_query:d ~limit:n ~as_json:j ~rebuild:r ()
+  in
+  Cmd.v
+    (Cmd.info "search"
+       ~doc:"Search stdlib and dependencies for functions, types, and constructors")
+    Term.(const run $ query $ type_sig $ doc_query $ limit $ as_json $ rebuild)
+
 (* ------------------------------------------------------------------ forge init *)
 
 let init_cmd =
@@ -158,7 +191,7 @@ let default_term =
 let () =
   let cmds =
     [ new_cmd; init_cmd; build_cmd; run_cmd; test_cmd; format_cmd;
-      interactive_cmd; i_cmd; clean_cmd; deps_cmd; help_cmd ]
+      interactive_cmd; i_cmd; clean_cmd; deps_cmd; search_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
