@@ -1,155 +1,161 @@
 -- Tests for the Logger stdlib module.
--- Covers: level constructors, level_to_string, level_from_string,
--- level_rank, level_enabled, format_entry.
--- (Actual I/O log functions are not verified for output content.)
+-- Run with: dune exec march -- test test/stdlib/test_logger.march
 
 mod TestLogger do
 
-  -- ── Level constructors ─────────────────────────────────────────────
+-- Helper: get a Level from a string, panic if unknown
+fn get_level(s) do
+  match Logger.level_from_string(s) do
+  | None -> panic("unknown level: " ++ s)
+  | Some(l) -> l
+  end
+end
 
-  fn test_level_ctors() do
-    match Logger.Debug do | Debug -> () | _ -> Test.fail("Debug") end
-    match Logger.Info  do | Info  -> () | _ -> Test.fail("Info")  end
-    match Logger.Warn  do | Warn  -> () | _ -> Test.fail("Warn")  end
-    match Logger.Error do | Error -> () | _ -> Test.fail("Error") end
+describe "Logger" do
+
+  describe "level_from_string" do
+
+    test "level_from_string exact lowercase" do
+      match Logger.level_from_string("debug") do
+      | None -> panic("expected Some for debug")
+      | Some(l) -> assert (Logger.level_to_string(l) == "DEBUG")
+      end
+      match Logger.level_from_string("info") do
+      | None -> panic("expected Some for info")
+      | Some(l) -> assert (Logger.level_to_string(l) == "INFO")
+      end
+      match Logger.level_from_string("warn") do
+      | None -> panic("expected Some for warn")
+      | Some(l) -> assert (Logger.level_to_string(l) == "WARN")
+      end
+      match Logger.level_from_string("error") do
+      | None -> panic("expected Some for error")
+      | Some(l) -> assert (Logger.level_to_string(l) == "ERROR")
+      end
+    end
+
+    test "level_from_string uppercase" do
+      match Logger.level_from_string("DEBUG") do
+      | None -> panic("expected Some for DEBUG")
+      | Some(l) -> assert (Logger.level_to_string(l) == "DEBUG")
+      end
+      match Logger.level_from_string("INFO") do
+      | None -> panic("expected Some for INFO")
+      | Some(l) -> assert (Logger.level_to_string(l) == "INFO")
+      end
+    end
+
+    test "level_from_string warning alias" do
+      match Logger.level_from_string("warning") do
+      | None -> panic("expected Some for warning")
+      | Some(l) -> assert (Logger.level_to_string(l) == "WARN")
+      end
+    end
+
+    test "level_from_string unknown returns None" do
+      assert Option.is_none(Logger.level_from_string("trace"))
+      assert Option.is_none(Logger.level_from_string("verbose"))
+      assert Option.is_none(Logger.level_from_string(""))
+    end
+
   end
 
-  -- ── level_to_string ────────────────────────────────────────────────
+  describe "level_to_string" do
 
-  fn test_level_to_string() do
-    Test.assert_eq_str(Logger.level_to_string(Logger.Debug), "DEBUG", "Debug string")
-    Test.assert_eq_str(Logger.level_to_string(Logger.Info),  "INFO",  "Info string")
-    Test.assert_eq_str(Logger.level_to_string(Logger.Warn),  "WARN",  "Warn string")
-    Test.assert_eq_str(Logger.level_to_string(Logger.Error), "ERROR", "Error string")
+    test "level_to_string values" do
+      assert (Logger.level_to_string(get_level("debug")) == "DEBUG")
+      assert (Logger.level_to_string(get_level("info"))  == "INFO")
+      assert (Logger.level_to_string(get_level("warn"))  == "WARN")
+      assert (Logger.level_to_string(get_level("error")) == "ERROR")
+    end
+
   end
 
-  -- ── level_from_string ──────────────────────────────────────────────
+  describe "level_rank" do
 
-  fn test_level_from_string_exact() do
-    let d = Test.assert_some(Logger.level_from_string("debug"), "debug")
-    match d do | Debug -> () | _ -> Test.fail("expected Debug") end
-    let i = Test.assert_some(Logger.level_from_string("info"), "info")
-    match i do | Info -> () | _ -> Test.fail("expected Info") end
-    let w = Test.assert_some(Logger.level_from_string("warn"), "warn")
-    match w do | Warn -> () | _ -> Test.fail("expected Warn") end
-    let e = Test.assert_some(Logger.level_from_string("error"), "error")
-    match e do | Error -> () | _ -> Test.fail("expected Error") end
+    test "level_rank ordering" do
+      let d = Logger.level_rank(get_level("debug"))
+      let i = Logger.level_rank(get_level("info"))
+      let w = Logger.level_rank(get_level("warn"))
+      let e = Logger.level_rank(get_level("error"))
+      assert (d < i)
+      assert (i < w)
+      assert (w < e)
+    end
+
+    test "level_rank specific values" do
+      assert (Logger.level_rank(get_level("debug")) == 0)
+      assert (Logger.level_rank(get_level("info"))  == 1)
+      assert (Logger.level_rank(get_level("warn"))  == 2)
+      assert (Logger.level_rank(get_level("error")) == 3)
+    end
+
   end
 
-  fn test_level_from_string_uppercase() do
-    let d = Test.assert_some(Logger.level_from_string("DEBUG"), "DEBUG")
-    match d do | Debug -> () | _ -> Test.fail("expected Debug from DEBUG") end
-    let i = Test.assert_some(Logger.level_from_string("INFO"), "INFO")
-    match i do | Info -> () | _ -> Test.fail("expected Info from INFO") end
+  describe "level_enabled" do
+
+    test "level_enabled same level" do
+      let debug_ = get_level("debug")
+      let info_  = get_level("info")
+      let warn_  = get_level("warn")
+      let error_ = get_level("error")
+      assert Logger.level_enabled(debug_, debug_)
+      assert Logger.level_enabled(info_,  info_)
+      assert Logger.level_enabled(warn_,  warn_)
+      assert Logger.level_enabled(error_, error_)
+    end
+
+    test "level_enabled higher level" do
+      let debug_ = get_level("debug")
+      let warn_  = get_level("warn")
+      let error_ = get_level("error")
+      assert Logger.level_enabled(get_level("info"),  debug_)
+      assert Logger.level_enabled(warn_,  debug_)
+      assert Logger.level_enabled(error_, debug_)
+      assert Logger.level_enabled(error_, warn_)
+    end
+
+    test "level_enabled lower level" do
+      assert not(Logger.level_enabled(get_level("debug"), get_level("info")))
+      assert not(Logger.level_enabled(get_level("debug"), get_level("error")))
+      assert not(Logger.level_enabled(get_level("warn"),  get_level("error")))
+    end
+
   end
 
-  fn test_level_from_string_mixed_case() do
-    let w = Test.assert_some(Logger.level_from_string("Warn"), "Warn mixed")
-    match w do | Warn -> () | _ -> Test.fail("expected Warn from Warn") end
+  describe "format_entry" do
+
+    test "format_entry debug" do
+      let s = Logger.format_entry(get_level("debug"), "test message")
+      assert (s == "[DEBUG] test message")
+    end
+
+    test "format_entry error" do
+      let s = Logger.format_entry(get_level("error"), "something went wrong")
+      assert (s == "[ERROR] something went wrong")
+    end
+
+    test "format_entry empty message" do
+      let s = Logger.format_entry(get_level("info"), "")
+      assert (s == "[INFO] ")
+    end
+
   end
 
-  fn test_level_from_string_unknown() do
-    Test.assert_none(Logger.level_from_string("trace"),   "trace is unknown")
-    Test.assert_none(Logger.level_from_string("verbose"), "verbose is unknown")
-    Test.assert_none(Logger.level_from_string(""),        "empty string is unknown")
+  describe "log functions" do
+
+    test "log functions run without error" do
+      Logger.log(get_level("info"), "test log call")
+      Logger.debug("test debug")
+      Logger.info("test info")
+      Logger.warn("test warn")
+      Logger.error("test error")
+      Logger.log_if(get_level("info"), get_level("debug"), "should print")
+      Logger.log_if(get_level("debug"), get_level("error"), "should not print")
+    end
+
   end
 
-  -- ── level_rank ─────────────────────────────────────────────────────
-
-  fn test_level_rank_ordering() do
-    let d = Logger.level_rank(Logger.Debug)
-    let i = Logger.level_rank(Logger.Info)
-    let w = Logger.level_rank(Logger.Warn)
-    let e = Logger.level_rank(Logger.Error)
-    Test.assert_true(d < i, "Debug < Info")
-    Test.assert_true(i < w, "Info < Warn")
-    Test.assert_true(w < e, "Warn < Error")
-  end
-
-  fn test_level_rank_specific_values() do
-    Test.assert_eq_int(Logger.level_rank(Logger.Debug), 0, "Debug rank 0")
-    Test.assert_eq_int(Logger.level_rank(Logger.Info),  1, "Info rank 1")
-    Test.assert_eq_int(Logger.level_rank(Logger.Warn),  2, "Warn rank 2")
-    Test.assert_eq_int(Logger.level_rank(Logger.Error), 3, "Error rank 3")
-  end
-
-  -- ── level_enabled ──────────────────────────────────────────────────
-
-  fn test_level_enabled_same() do
-    Test.assert_true(Logger.level_enabled(Logger.Debug, Logger.Debug), "Debug >= Debug")
-    Test.assert_true(Logger.level_enabled(Logger.Info,  Logger.Info),  "Info >= Info")
-    Test.assert_true(Logger.level_enabled(Logger.Warn,  Logger.Warn),  "Warn >= Warn")
-    Test.assert_true(Logger.level_enabled(Logger.Error, Logger.Error), "Error >= Error")
-  end
-
-  fn test_level_enabled_higher() do
-    Test.assert_true(Logger.level_enabled(Logger.Info,  Logger.Debug), "Info >= Debug")
-    Test.assert_true(Logger.level_enabled(Logger.Warn,  Logger.Debug), "Warn >= Debug")
-    Test.assert_true(Logger.level_enabled(Logger.Error, Logger.Debug), "Error >= Debug")
-    Test.assert_true(Logger.level_enabled(Logger.Error, Logger.Warn),  "Error >= Warn")
-  end
-
-  fn test_level_enabled_lower() do
-    Test.assert_false(Logger.level_enabled(Logger.Debug, Logger.Info),  "Debug < Info")
-    Test.assert_false(Logger.level_enabled(Logger.Debug, Logger.Error), "Debug < Error")
-    Test.assert_false(Logger.level_enabled(Logger.Warn,  Logger.Error), "Warn < Error")
-  end
-
-  fn test_min_level_info_filters_debug() do
-    let min = Logger.Info
-    Test.assert_false(Logger.level_enabled(Logger.Debug, min), "Debug filtered at Info minimum")
-    Test.assert_true(Logger.level_enabled(Logger.Info, min),  "Info allowed at Info minimum")
-    Test.assert_true(Logger.level_enabled(Logger.Error, min), "Error allowed at Info minimum")
-  end
-
-  -- ── format_entry ───────────────────────────────────────────────────
-
-  fn test_format_entry_debug() do
-    let s = Logger.format_entry(Logger.Debug, "test message")
-    Test.assert_eq_str(s, "[DEBUG] test message", "format_entry Debug")
-  end
-
-  fn test_format_entry_error() do
-    let s = Logger.format_entry(Logger.Error, "something went wrong")
-    Test.assert_eq_str(s, "[ERROR] something went wrong", "format_entry Error")
-  end
-
-  fn test_format_entry_empty_message() do
-    let s = Logger.format_entry(Logger.Info, "")
-    Test.assert_eq_str(s, "[INFO] ", "format_entry empty message")
-  end
-
-  -- ── log functions don't panic ──────────────────────────────────────
-
-  fn test_log_functions_run() do
-    Logger.log(Logger.Info, "test log call")
-    Logger.debug("test debug")
-    Logger.info("test info")
-    Logger.warn("test warn")
-    Logger.error("test error")
-    Logger.log_if(Logger.Info, Logger.Debug, "should print")
-    Logger.log_if(Logger.Debug, Logger.Error, "should not print")
-  end
-
-  -- ── Entry point ────────────────────────────────────────────────────
-
-  pub fn main() do
-    test_level_ctors()
-    test_level_to_string()
-    test_level_from_string_exact()
-    test_level_from_string_uppercase()
-    test_level_from_string_mixed_case()
-    test_level_from_string_unknown()
-    test_level_rank_ordering()
-    test_level_rank_specific_values()
-    test_level_enabled_same()
-    test_level_enabled_higher()
-    test_level_enabled_lower()
-    test_min_level_info_filters_debug()
-    test_format_entry_debug()
-    test_format_entry_error()
-    test_format_entry_empty_message()
-    test_log_functions_run()
-  end
+end
 
 end

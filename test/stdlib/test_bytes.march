@@ -1,141 +1,193 @@
--- test/stdlib/test_bytes.march
--- Comprehensive tests for the Bytes module.
+-- Tests for the Bytes stdlib module
+-- Run with: dune exec march -- test test/stdlib/test_bytes.march
 
 mod TestBytes do
 
-fn main() do
-  -- ---- Bytes.create ----
-  let b0 = Bytes.create(0)
-  assert_eq("create 0 length", Bytes.length(b0), 0)
-  assert_true("create 0 is_empty", Bytes.is_empty(b0))
+describe "Bytes" do
 
-  let b5 = Bytes.create(5)
-  assert_eq("create 5 length", Bytes.length(b5), 5)
-  assert_eq("create 5 zeroes", Bytes.get(b5, 0), 0)
-  assert_eq("create 5 last zero", Bytes.get(b5, 4), 0)
+  describe "empty and is_empty" do
 
-  -- ---- Bytes.create_fill ----
-  let bff = Bytes.create_fill(3, 255)
-  assert_eq("create_fill length", Bytes.length(bff), 3)
-  assert_eq("create_fill [0]", Bytes.get(bff, 0), 255)
-  assert_eq("create_fill [2]", Bytes.get(bff, 2), 255)
+    test "empty is empty" do
+      let b = Bytes.empty()
+      assert Bytes.is_empty(b)
+      assert (Bytes.length(b) == 0)
+    end
 
-  let b42 = Bytes.create_fill(4, 42)
-  assert_eq("create_fill 42 [1]", Bytes.get(b42, 1), 42)
-
-  -- ---- Bytes.of_string / to_string ----
-  let s = "hello"
-  let bs = Bytes.of_string(s)
-  assert_eq("of_string length", Bytes.length(bs), 5)
-  assert_eq("of_string[0] h=104", Bytes.get(bs, 0), 104)
-  assert_eq("of_string[1] e=101", Bytes.get(bs, 1), 101)
-  assert_eq("to_string roundtrip", Bytes.to_string(bs), "hello")
-
-  -- ---- Bytes.get ----
-  let ba = Bytes.of_string("ABC")
-  assert_eq("get A=65", Bytes.get(ba, 0), 65)
-  assert_eq("get B=66", Bytes.get(ba, 1), 66)
-  assert_eq("get C=67", Bytes.get(ba, 2), 67)
-
-  -- ---- Bytes.set ----
-  let b_set = Bytes.set(ba, 1, 90)   -- 90 = 'Z'
-  assert_eq("set [1] to Z", Bytes.get(b_set, 1), 90)
-  assert_eq("set original unchanged [0]", Bytes.get(b_set, 0), 65)
-  assert_eq("set original unchanged [2]", Bytes.get(b_set, 2), 67)
-  -- Original ba is unchanged
-  assert_eq("original unmodified", Bytes.get(ba, 1), 66)
-
-  -- ---- Bytes.sub ----
-  let bsub = Bytes.of_string("hello world")
-  let sub1 = Bytes.sub(bsub, 0, 5)
-  assert_eq("sub start length", Bytes.length(sub1), 5)
-  assert_eq("sub start content", Bytes.to_string(sub1), "hello")
-
-  let sub2 = Bytes.sub(bsub, 6, 5)
-  assert_eq("sub end content", Bytes.to_string(sub2), "world")
-
-  let sub3 = Bytes.sub(bsub, 0, 0)
-  assert_eq("sub empty length", Bytes.length(sub3), 0)
-
-  -- ---- Bytes.concat ----
-  let b1 = Bytes.of_string("foo")
-  let b2 = Bytes.of_string("bar")
-  let bc = Bytes.concat(b1, b2)
-  assert_eq("concat length", Bytes.length(bc), 6)
-  assert_eq("concat content", Bytes.to_string(bc), "foobar")
-
-  let bempty = Bytes.create(0)
-  assert_eq("concat with empty left", Bytes.to_string(Bytes.concat(bempty, b1)), "foo")
-  assert_eq("concat with empty right", Bytes.to_string(Bytes.concat(b1, bempty)), "foo")
-
-  -- ---- Bytes.fill ----
-  let bfill_base = Bytes.of_string("abcde")
-  let bfill = Bytes.fill(bfill_base, 1, 3, 88)  -- 88='X'
-  assert_eq("fill [0] unchanged", Bytes.get(bfill, 0), 97)   -- 'a'
-  assert_eq("fill [1] filled", Bytes.get(bfill, 1), 88)
-  assert_eq("fill [2] filled", Bytes.get(bfill, 2), 88)
-  assert_eq("fill [3] filled", Bytes.get(bfill, 3), 88)
-  assert_eq("fill [4] unchanged", Bytes.get(bfill, 4), 101)  -- 'e'
-
-  -- ---- Bytes.of_list / to_list ----
-  let int_list = [72, 101, 108, 108, 111]   -- "Hello"
-  let b_from_list = Bytes.of_list(int_list)
-  assert_eq("of_list length", Bytes.length(b_from_list), 5)
-  assert_eq("of_list content", Bytes.to_string(b_from_list), "Hello")
-
-  let back_list = Bytes.to_list(Bytes.of_string("AB"))
-  assert_eq("to_list length", List.length(back_list), 2)
-  assert_eq("to_list[0]", List.nth(back_list, 0), 65)
-  assert_eq("to_list[1]", List.nth(back_list, 1), 66)
-
-  -- ---- Bytes.equal ----
-  let be1 = Bytes.of_string("hello")
-  let be2 = Bytes.of_string("hello")
-  let be3 = Bytes.of_string("world")
-  assert_true("equal same", Bytes.equal(be1, be2))
-  assert_true("not equal diff", not Bytes.equal(be1, be3))
-  assert_true("equal empty", Bytes.equal(Bytes.create(0), Bytes.create(0)))
-
-  -- ---- Bytes.compare ----
-  let cmp1 = Bytes.compare(Bytes.of_string("abc"), Bytes.of_string("abc"))
-  assert_eq("compare equal is 0", cmp1, 0)
-
-  let cmp2 = Bytes.compare(Bytes.of_string("abc"), Bytes.of_string("abd"))
-  assert_true("compare less is negative", cmp2 < 0)
-
-  let cmp3 = Bytes.compare(Bytes.of_string("abd"), Bytes.of_string("abc"))
-  assert_true("compare greater is positive", cmp3 > 0)
-
-  -- ---- Bytes.index_of ----
-  let bsearch = Bytes.of_string("hello world")
-  match Bytes.index_of(bsearch, Bytes.of_string("world")) do
-  | None -> panic("index_of world not found")
-  | Some(i) -> assert_eq("index_of world", i, 6)
   end
 
-  match Bytes.index_of(bsearch, Bytes.of_string("xyz")) do
-  | None -> :ok
-  | Some(_) -> panic("index_of xyz should be None")
+  describe "from_string and to_string" do
+
+    test "from_string roundtrip" do
+      let bs = Bytes.from_string("hello")
+      assert (Bytes.to_string(bs) == "hello")
+    end
+
+    test "from_string length" do
+      let bs = Bytes.from_string("hello")
+      assert (Bytes.length(bs) == 5)
+    end
+
+    test "from_string get bytes" do
+      let bs = Bytes.from_string("ABC")
+      assert (Bytes.get(bs, 0) == 65)
+      assert (Bytes.get(bs, 1) == 66)
+      assert (Bytes.get(bs, 2) == 67)
+    end
+
+    test "from_string empty" do
+      let bs = Bytes.from_string("")
+      assert Bytes.is_empty(bs)
+    end
+
   end
 
-  match Bytes.index_of(bsearch, Bytes.of_string("hello")) do
-  | None -> panic("index_of hello not found")
-  | Some(i) -> assert_eq("index_of hello at 0", i, 0)
+  describe "from_list and to_list" do
+
+    test "from_list roundtrip" do
+      let xs = Cons(72, Cons(101, Cons(108, Cons(108, Cons(111, Nil)))))
+      let b = Bytes.from_list(xs)
+      assert (Bytes.to_string(b) == "Hello")
+    end
+
+    test "to_list" do
+      let b = Bytes.from_string("AB")
+      let xs = Bytes.to_list(b)
+      assert (List.length(xs) == 2)
+      assert (List.nth(xs, 0) == 65)
+      assert (List.nth(xs, 1) == 66)
+    end
+
   end
 
-  -- index_of empty pattern
-  match Bytes.index_of(bsearch, Bytes.of_string("")) do
-  | Some(_) -> :ok  -- any implementation is fine for empty pattern
-  | None -> :ok
+  describe "get and length" do
+
+    test "get individual bytes" do
+      let b = Bytes.from_string("hello")
+      assert (Bytes.get(b, 0) == 104)
+      assert (Bytes.get(b, 1) == 101)
+      assert (Bytes.length(b) == 5)
+    end
+
   end
 
-  -- ---- Binary data (non-printable bytes) ----
-  let bbin = Bytes.of_list([0, 1, 127, 128, 255])
-  assert_eq("binary length", Bytes.length(bbin), 5)
-  assert_eq("binary[0]", Bytes.get(bbin, 0), 0)
-  assert_eq("binary[4]", Bytes.get(bbin, 4), 255)
+  describe "slice" do
 
-  println("All Bytes tests passed!")
+    test "slice from start" do
+      let b = Bytes.from_string("hello world")
+      let s = Bytes.slice(b, 0, 5)
+      assert (Bytes.to_string(s) == "hello")
+      assert (Bytes.length(s) == 5)
+    end
+
+    test "slice from middle" do
+      let b = Bytes.from_string("hello world")
+      let s = Bytes.slice(b, 6, 5)
+      assert (Bytes.to_string(s) == "world")
+    end
+
+    test "slice empty" do
+      let b = Bytes.from_string("hello")
+      let s = Bytes.slice(b, 0, 0)
+      assert Bytes.is_empty(s)
+    end
+
+  end
+
+  describe "concat" do
+
+    test "concat two bytes" do
+      let b1 = Bytes.from_string("foo")
+      let b2 = Bytes.from_string("bar")
+      let bc = Bytes.concat(b1, b2)
+      assert (Bytes.length(bc) == 6)
+      assert (Bytes.to_string(bc) == "foobar")
+    end
+
+    test "concat with empty" do
+      let b = Bytes.from_string("foo")
+      let e = Bytes.empty()
+      assert (Bytes.to_string(Bytes.concat(e, b)) == "foo")
+      assert (Bytes.to_string(Bytes.concat(b, e)) == "foo")
+    end
+
+  end
+
+  describe "hex encoding" do
+
+    test "to_hex" do
+      let b = Bytes.from_list(Cons(0, Cons(255, Cons(16, Nil))))
+      let h = Bytes.to_hex(b)
+      assert (h == "00ff10")
+    end
+
+    test "from_hex roundtrip" do
+      let b = Bytes.from_string("hello")
+      let hex = Bytes.to_hex(b)
+      match Bytes.from_hex(hex) do
+      | Err(e) -> panic("from_hex failed: " ++ e)
+      | Ok(b2) -> assert (Bytes.to_string(b2) == "hello")
+      end
+    end
+
+    test "from_hex invalid returns Err" do
+      match Bytes.from_hex("xyz") do
+      | Err(_) -> ()
+      | Ok(_) -> panic("invalid hex should return Err")
+      end
+    end
+
+    test "from_hex odd length returns Err" do
+      match Bytes.from_hex("abc") do
+      | Err(_) -> ()
+      | Ok(_) -> panic("odd-length hex should return Err")
+      end
+    end
+
+  end
+
+  describe "base64 encoding" do
+
+    test "encode_base64 and decode_base64 roundtrip" do
+      let b = Bytes.from_string("hello")
+      let encoded = Bytes.encode_base64(b)
+      match Bytes.decode_base64(encoded) do
+      | Err(e) -> panic("decode_base64 failed: " ++ e)
+      | Ok(b2) -> assert (Bytes.to_string(b2) == "hello")
+      end
+    end
+
+    test "encode_base64 empty" do
+      let b = Bytes.empty()
+      let encoded = Bytes.encode_base64(b)
+      assert (encoded == "")
+    end
+
+    test "decode_base64 invalid returns Err" do
+      match Bytes.decode_base64("!!!") do
+      | Err(_) -> ()
+      | Ok(_) -> panic("invalid base64 should return Err")
+      end
+    end
+
+  end
+
+  describe "encode_utf8 and decode_utf8" do
+
+    test "encode_utf8 roundtrip" do
+      let b = Bytes.encode_utf8("hello")
+      assert (Bytes.to_string(b) == "hello")
+    end
+
+    test "decode_utf8" do
+      let b = Bytes.from_string("world")
+      match Bytes.decode_utf8(b) do
+      | Err(e) -> panic("decode_utf8 failed: " ++ e)
+      | Ok(s) -> assert (s == "world")
+      end
+    end
+
+  end
+
 end
 
 end

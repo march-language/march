@@ -1,172 +1,148 @@
 -- Tests for the Decimal stdlib module
--- Run with: dune exec march -- test/stdlib/test_decimal.march
--- Note: Decimal.compare/eq/lt/gt are not tested because impl Ord/Eq blocks
--- cause infinite recursion (same issue as BigInt).
+-- Run with: dune exec march -- test test/stdlib/test_decimal.march
 
 mod TestDecimal do
 
-fn assert_true(cond : Bool, msg : String) : Unit do
-  if cond then () else panic("FAIL: " ++ msg)
-end
+describe "Decimal" do
 
-fn assert_eq_str(a : String, b : String, msg : String) : Unit do
-  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ b ++ ", got " ++ a ++ ")")
-end
+  describe "construction" do
 
-fn assert_eq_int(a : Int, b : Int, msg : String) : Unit do
-  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ int_to_string(b) ++ ", got " ++ int_to_string(a) ++ ")")
-end
+    test "from_int basic" do
+      let d = Decimal.from_int(42)
+      assert (Decimal.to_string(d) == "42")
+      assert (Decimal.scale(d) == 0)
+      assert (Decimal.coefficient(d) == 42)
+    end
 
--- ---- Construction ----
+    test "from_int_scaled" do
+      let d = Decimal.from_int_scaled(123, 2)
+      assert (Decimal.to_string(d) == "1.23")
+      assert (Decimal.scale(d) == 2)
+      assert (Decimal.coefficient(d) == 123)
+    end
 
-fn test_from_int() : Unit do
-  let d = Decimal.from_int(42)
-  assert_eq_str(Decimal.to_string(d), "42", "from_int 42")
-  assert_eq_int(Decimal.scale(d), 0, "from_int scale 0")
-  assert_eq_int(Decimal.coefficient(d), 42, "from_int coef 42")
-end
+    test "from_string integer" do
+      let d = Decimal.from_string("100")
+      assert (Decimal.to_string(d) == "100")
+    end
 
-fn test_from_int_scaled() : Unit do
-  let d = Decimal.from_int_scaled(123, 2)
-  assert_eq_str(Decimal.to_string(d), "1.23", "from_int_scaled 123 2")
-  assert_eq_int(Decimal.scale(d), 2, "from_int_scaled scale")
-  assert_eq_int(Decimal.coefficient(d), 123, "from_int_scaled coef")
-end
+    test "from_string decimal" do
+      let d = Decimal.from_string("1.23")
+      assert (Decimal.to_string(d) == "1.23")
+    end
 
-fn test_from_string_integer() : Unit do
-  let d = Decimal.from_string("100")
-  assert_eq_str(Decimal.to_string(d), "100", "from_string integer")
-end
+    test "from_string negative" do
+      let d = Decimal.from_string("-0.5")
+      assert (Decimal.to_string(d) == "-0.5")
+    end
 
-fn test_from_string_decimal() : Unit do
-  let d = Decimal.from_string("1.23")
-  assert_eq_str(Decimal.to_string(d), "1.23", "from_string decimal")
-end
+  end
 
-fn test_from_string_negative() : Unit do
-  let d = Decimal.from_string("-0.5")
-  assert_eq_str(Decimal.to_string(d), "-0.5", "from_string negative")
-end
+  describe "arithmetic" do
 
--- ---- Arithmetic ----
+    test "add same scale" do
+      let a = Decimal.from_int_scaled(123, 2)
+      let b = Decimal.from_int_scaled(456, 2)
+      let r = Decimal.add(a, b)
+      assert (Decimal.to_string(r) == "5.79")
+    end
 
-fn test_add_same_scale() : Unit do
-  let a = Decimal.from_int_scaled(123, 2)
-  let b = Decimal.from_int_scaled(456, 2)
-  let r = Decimal.add(a, b)
-  assert_eq_str(Decimal.to_string(r), "5.79", "add same scale")
-end
+    test "add different scale" do
+      let a = Decimal.from_int_scaled(100, 2)
+      let b = Decimal.from_int(1)
+      let r = Decimal.add(a, b)
+      assert (Decimal.to_string(r) == "2.00")
+    end
 
-fn test_add_different_scale() : Unit do
-  let a = Decimal.from_int_scaled(100, 2)
-  let b = Decimal.from_int(1)
-  let r = Decimal.add(a, b)
-  assert_eq_str(Decimal.to_string(r), "2.00", "add diff scale")
-end
+    test "sub basic" do
+      let a = Decimal.from_int_scaled(500, 2)
+      let b = Decimal.from_int_scaled(200, 2)
+      let r = Decimal.sub(a, b)
+      assert (Decimal.to_string(r) == "3.00")
+    end
 
-fn test_sub_basic() : Unit do
-  let a = Decimal.from_int_scaled(500, 2)
-  let b = Decimal.from_int_scaled(200, 2)
-  let r = Decimal.sub(a, b)
-  assert_eq_str(Decimal.to_string(r), "3.00", "sub basic")
-end
+    test "mul basic" do
+      let a = Decimal.from_int_scaled(200, 2)
+      let b = Decimal.from_int_scaled(300, 2)
+      let r = Decimal.mul(a, b)
+      assert (Decimal.to_string(r) == "6.0000")
+    end
 
-fn test_mul_basic() : Unit do
-  let a = Decimal.from_int_scaled(200, 2)
-  let b = Decimal.from_int_scaled(300, 2)
-  let r = Decimal.mul(a, b)
-  assert_eq_str(Decimal.to_string(r), "6.0000", "mul basic")
-end
+    test "mul integers" do
+      let a = Decimal.from_int(3)
+      let b = Decimal.from_int(4)
+      let r = Decimal.mul(a, b)
+      assert (Decimal.to_string(r) == "12")
+    end
 
-fn test_mul_integers() : Unit do
-  let a = Decimal.from_int(3)
-  let b = Decimal.from_int(4)
-  let r = Decimal.mul(a, b)
-  assert_eq_str(Decimal.to_string(r), "12", "mul integers")
-end
+    test "div basic" do
+      let a = Decimal.from_int(10)
+      let b = Decimal.from_int(4)
+      let r = Decimal.div(a, b, 2)
+      assert (Decimal.to_string(r) == "2.50")
+    end
 
-fn test_div_basic() : Unit do
-  let a = Decimal.from_int(10)
-  let b = Decimal.from_int(4)
-  let r = Decimal.div(a, b, 2)
-  assert_eq_str(Decimal.to_string(r), "2.50", "div basic")
-end
+  end
 
--- ---- Rounding ----
+  describe "rounding" do
 
-fn test_round_down() : Unit do
-  let d = Decimal.from_int_scaled(1234, 3)
-  let r = Decimal.round(d, 2)
-  assert_eq_str(Decimal.to_string(r), "1.23", "round down")
-end
+    test "round down" do
+      let d = Decimal.from_int_scaled(1234, 3)
+      let r = Decimal.round(d, 2)
+      assert (Decimal.to_string(r) == "1.23")
+    end
 
-fn test_round_up() : Unit do
-  let d = Decimal.from_int_scaled(1235, 3)
-  let r = Decimal.round(d, 2)
-  assert_eq_str(Decimal.to_string(r), "1.24", "round up (half-up)")
-end
+    test "round up half-up" do
+      let d = Decimal.from_int_scaled(1235, 3)
+      let r = Decimal.round(d, 2)
+      assert (Decimal.to_string(r) == "1.24")
+    end
 
-fn test_round_no_op() : Unit do
-  let d = Decimal.from_int_scaled(100, 2)
-  let r = Decimal.round(d, 3)
-  assert_eq_str(Decimal.to_string(r), "1.00", "round no-op (scale <= places)")
-end
+    test "round no-op when scale <= places" do
+      let d = Decimal.from_int_scaled(100, 2)
+      let r = Decimal.round(d, 3)
+      assert (Decimal.to_string(r) == "1.00")
+    end
 
--- ---- Predicates ----
+  end
 
-fn test_is_zero_true() : Unit do
-  assert_true(Decimal.is_zero(Decimal.from_int(0)), "is_zero 0")
-  assert_true(Decimal.is_zero(Decimal.from_int_scaled(0, 2)), "is_zero 0.00")
-end
+  describe "predicates" do
 
-fn test_is_zero_false() : Unit do
-  assert_true(!Decimal.is_zero(Decimal.from_int(1)), "is_zero false")
-end
+    test "is_zero true" do
+      assert Decimal.is_zero(Decimal.from_int(0))
+      assert Decimal.is_zero(Decimal.from_int_scaled(0, 2))
+    end
 
-fn test_abs_positive() : Unit do
-  let d = Decimal.from_int_scaled(500, 2)
-  assert_eq_str(Decimal.to_string(Decimal.abs(d)), "5.00", "abs positive")
-end
+    test "is_zero false" do
+      assert not(Decimal.is_zero(Decimal.from_int(1)))
+    end
 
-fn test_abs_negative() : Unit do
-  let d = Decimal.from_int_scaled(-500, 2)
-  assert_eq_str(Decimal.to_string(Decimal.abs(d)), "5.00", "abs negative")
-end
+    test "abs positive" do
+      let d = Decimal.from_int_scaled(500, 2)
+      assert (Decimal.to_string(Decimal.abs(d)) == "5.00")
+    end
 
--- ---- Accessors ----
+    test "abs negative" do
+      let d = Decimal.from_int_scaled(-500, 2)
+      assert (Decimal.to_string(Decimal.abs(d)) == "5.00")
+    end
 
-fn test_scale() : Unit do
-  assert_eq_int(Decimal.scale(Decimal.from_int_scaled(100, 2)), 2, "scale 2")
-  assert_eq_int(Decimal.scale(Decimal.from_int(5)), 0, "scale 0")
-end
+  end
 
-fn test_coefficient() : Unit do
-  assert_eq_int(Decimal.coefficient(Decimal.from_int_scaled(123, 2)), 123, "coef 123")
-  assert_eq_int(Decimal.coefficient(Decimal.from_int(7)), 7, "coef 7")
-end
+  describe "accessors" do
 
-fn main() : Unit do
-  test_from_int()
-  test_from_int_scaled()
-  test_from_string_integer()
-  test_from_string_decimal()
-  test_from_string_negative()
-  test_add_same_scale()
-  test_add_different_scale()
-  test_sub_basic()
-  test_mul_basic()
-  test_mul_integers()
-  test_div_basic()
-  test_round_down()
-  test_round_up()
-  test_round_no_op()
-  test_is_zero_true()
-  test_is_zero_false()
-  test_abs_positive()
-  test_abs_negative()
-  test_scale()
-  test_coefficient()
-  println("All Decimal tests passed!")
+    test "scale" do
+      assert (Decimal.scale(Decimal.from_int_scaled(100, 2)) == 2)
+      assert (Decimal.scale(Decimal.from_int(5)) == 0)
+    end
+
+    test "coefficient" do
+      assert (Decimal.coefficient(Decimal.from_int_scaled(123, 2)) == 123)
+      assert (Decimal.coefficient(Decimal.from_int(7)) == 7)
+    end
+
+  end
+
 end
 
 end

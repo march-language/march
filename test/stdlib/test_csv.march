@@ -1,6 +1,5 @@
--- test/stdlib/test_csv.march
--- Comprehensive tests for the Csv module.
--- Creates temporary CSV files in /tmp.
+-- Tests for the Csv stdlib module
+-- Run with: dune exec march -- test test/stdlib/test_csv.march
 
 mod TestCsv do
 
@@ -11,119 +10,165 @@ fn do_write(path, content) do
   end
 end
 
-fn main() do
-  let base = "/tmp/march_test_csv"
+describe "Csv" do
 
-  -- ---- Csv.read_csv: basic comma-separated ----
-  do_write(base ++ "_basic.csv", "a,b,c\n1,2,3\n4,5,6\n")
-  match Csv.read_csv(base ++ "_basic.csv") do
-  | Err(e) -> panic("read_csv basic failed: " ++ to_string(e))
-  | Ok(rows) ->
-    assert_eq("csv basic row count", List.length(rows), 3)
-    let row0 = List.nth(rows, 0)
-    assert_eq("csv row0 fields", List.length(row0), 3)
-    assert_eq("csv row0[0]", List.nth(row0, 0), "a")
-    assert_eq("csv row0[1]", List.nth(row0, 1), "b")
-    assert_eq("csv row0[2]", List.nth(row0, 2), "c")
-    let row1 = List.nth(rows, 1)
-    assert_eq("csv row1[0]", List.nth(row1, 0), "1")
-    assert_eq("csv row1[1]", List.nth(row1, 1), "2")
-    assert_eq("csv row1[2]", List.nth(row1, 2), "3")
-    let row2 = List.nth(rows, 2)
-    assert_eq("csv row2[0]", List.nth(row2, 0), "4")
+  describe "read_csv basic" do
+
+    test "basic comma-separated" do
+      let base = "/tmp/march_test_csv_basic.csv"
+      do_write(base, "a,b,c\n1,2,3\n4,5,6\n")
+      match Csv.read_csv(base) do
+      | Err(e) -> panic("read_csv basic failed: " ++ to_string(e))
+      | Ok(rows) ->
+        assert (List.length(rows) == 3)
+        let row0 = List.nth(rows, 0)
+        assert (List.length(row0) == 3)
+        assert (List.nth(row0, 0) == "a")
+        assert (List.nth(row0, 1) == "b")
+        assert (List.nth(row0, 2) == "c")
+        let row1 = List.nth(rows, 1)
+        assert (List.nth(row1, 0) == "1")
+        assert (List.nth(row1, 1) == "2")
+        assert (List.nth(row1, 2) == "3")
+        let row2 = List.nth(rows, 2)
+        assert (List.nth(row2, 0) == "4")
+      end
+      match File.delete(base) do | _ -> () end
+    end
+
   end
 
-  -- ---- Csv.read_csv: quoted fields (RFC 4180) ----
-  do_write(base ++ "_quoted.csv", "\"hello, world\",plain\n\"has \"\"quotes\"\"\",end\n")
-  match Csv.read_csv(base ++ "_quoted.csv") do
-  | Err(e) -> panic("read_csv quoted failed: " ++ to_string(e))
-  | Ok(rows) ->
-    assert_eq("quoted row count", List.length(rows), 2)
-    let row0 = List.nth(rows, 0)
-    assert_eq("quoted field with comma", List.nth(row0, 0), "hello, world")
-    assert_eq("quoted plain field", List.nth(row0, 1), "plain")
-    let row1 = List.nth(rows, 1)
-    assert_eq("doubled quotes unescaped", List.nth(row1, 0), "has \"quotes\"")
+  describe "read_csv quoted fields" do
+
+    test "RFC 4180 quoted fields" do
+      let base = "/tmp/march_test_csv_quoted.csv"
+      do_write(base, "\"hello, world\",plain\n\"has \"\"quotes\"\"\",end\n")
+      match Csv.read_csv(base) do
+      | Err(e) -> panic("read_csv quoted failed: " ++ to_string(e))
+      | Ok(rows) ->
+        assert (List.length(rows) == 2)
+        let row0 = List.nth(rows, 0)
+        assert (List.nth(row0, 0) == "hello, world")
+        assert (List.nth(row0, 1) == "plain")
+        let row1 = List.nth(rows, 1)
+        assert (List.nth(row1, 0) == "has \"quotes\"")
+      end
+      match File.delete(base) do | _ -> () end
+    end
+
   end
 
-  -- ---- Csv.read_csv: single column ----
-  do_write(base ++ "_single.csv", "name\nalice\nbob\n")
-  match Csv.read_csv(base ++ "_single.csv") do
-  | Err(e) -> panic("read_csv single col failed: " ++ to_string(e))
-  | Ok(rows) ->
-    assert_eq("single col rows", List.length(rows), 3)
-    assert_eq("single col[0][0]", List.nth(List.nth(rows, 0), 0), "name")
-    assert_eq("single col[1][0]", List.nth(List.nth(rows, 1), 0), "alice")
-    assert_eq("single col[2][0]", List.nth(List.nth(rows, 2), 0), "bob")
+  describe "read_csv single column" do
+
+    test "single column" do
+      let base = "/tmp/march_test_csv_single.csv"
+      do_write(base, "name\nalice\nbob\n")
+      match Csv.read_csv(base) do
+      | Err(e) -> panic("read_csv single col failed: " ++ to_string(e))
+      | Ok(rows) ->
+        assert (List.length(rows) == 3)
+        assert (List.nth(List.nth(rows, 0), 0) == "name")
+        assert (List.nth(List.nth(rows, 1), 0) == "alice")
+        assert (List.nth(List.nth(rows, 2), 0) == "bob")
+      end
+      match File.delete(base) do | _ -> () end
+    end
+
   end
 
-  -- ---- Csv.read_csv: empty file ----
-  do_write(base ++ "_empty.csv", "")
-  match Csv.read_csv(base ++ "_empty.csv") do
-  | Err(e) -> panic("read_csv empty failed: " ++ to_string(e))
-  | Ok(rows) ->
-    assert_eq("empty csv rows", List.length(rows), 0)
+  describe "read_csv empty file" do
+
+    test "empty file" do
+      let base = "/tmp/march_test_csv_empty.csv"
+      do_write(base, "")
+      match Csv.read_csv(base) do
+      | Err(e) -> panic("read_csv empty failed: " ++ to_string(e))
+      | Ok(rows) -> assert (List.length(rows) == 0)
+      end
+      match File.delete(base) do | _ -> () end
+    end
+
   end
 
-  -- ---- Csv.read_all with tab delimiter ----
-  do_write(base ++ "_tab.csv", "x\ty\n1\t2\n3\t4\n")
-  match Csv.read_all(base ++ "_tab.csv", "\t", :simple) do
-  | Err(e) -> panic("read_all tab failed: " ++ to_string(e))
-  | Ok(rows) ->
-    assert_eq("tab-delimited rows", List.length(rows), 3)
-    let row1 = List.nth(rows, 1)
-    assert_eq("tab row1[0]", List.nth(row1, 0), "1")
-    assert_eq("tab row1[1]", List.nth(row1, 1), "2")
+  describe "read_all with delimiters" do
+
+    test "tab delimiter" do
+      let base = "/tmp/march_test_csv_tab.csv"
+      do_write(base, "x\ty\n1\t2\n3\t4\n")
+      match Csv.read_all(base, "\t", :simple) do
+      | Err(e) -> panic("read_all tab failed: " ++ to_string(e))
+      | Ok(rows) ->
+        assert (List.length(rows) == 3)
+        let row1 = List.nth(rows, 1)
+        assert (List.nth(row1, 0) == "1")
+        assert (List.nth(row1, 1) == "2")
+      end
+      match File.delete(base) do | _ -> () end
+    end
+
+    test "simple mode" do
+      let base = "/tmp/march_test_csv_simple.csv"
+      do_write(base, "a,b\n1,2\n")
+      match Csv.read_all(base, ",", :simple) do
+      | Err(e) -> panic("read_all simple failed: " ++ to_string(e))
+      | Ok(rows) ->
+        assert (List.length(rows) == 2)
+        assert (List.nth(List.nth(rows, 0), 0) == "a")
+      end
+      match File.delete(base) do | _ -> () end
+    end
+
+    test "semicolon delimiter" do
+      let base = "/tmp/march_test_csv_semi.csv"
+      do_write(base, "x;y;z\n1;2;3\n")
+      match Csv.read_all(base, ";", :simple) do
+      | Err(e) -> panic("semicolon csv failed: " ++ to_string(e))
+      | Ok(rows) ->
+        assert (List.length(rows) == 2)
+        let row1 = List.nth(rows, 1)
+        assert (List.nth(row1, 0) == "1")
+        assert (List.nth(row1, 2) == "3")
+      end
+      match File.delete(base) do | _ -> () end
+    end
+
   end
 
-  -- ---- Csv.read_all simple mode ----
-  do_write(base ++ "_simple.csv", "a,b\n1,2\n")
-  match Csv.read_all(base ++ "_simple.csv", ",", :simple) do
-  | Err(e) -> panic("read_all simple failed: " ++ to_string(e))
-  | Ok(rows) ->
-    assert_eq("simple mode rows", List.length(rows), 2)
-    assert_eq("simple row0[0]", List.nth(List.nth(rows, 0), 0), "a")
+  describe "streaming" do
+
+    test "each_csv_row no error" do
+      let base = "/tmp/march_test_csv_stream.csv"
+      do_write(base, "a,b,c\n1,2,3\n4,5,6\n")
+      match Csv.each_csv_row(base, fn _row -> :ok) do
+      | Err(e) -> panic("each_csv_row failed: " ++ to_string(e))
+      | Ok(_) -> ()
+      end
+      match File.delete(base) do | _ -> () end
+    end
+
+    test "each_row_with_header no error" do
+      let base = "/tmp/march_test_csv_hdr.csv"
+      do_write(base, "a,b,c\n1,2,3\n4,5,6\n")
+      match Csv.each_row_with_header(base, ",", :rfc4180, fn (_hdr, _row) -> :ok) do
+      | Err(e) -> panic("each_row_with_header failed: " ++ to_string(e))
+      | Ok(_) -> ()
+      end
+      match File.delete(base) do | _ -> () end
+    end
+
   end
 
-  -- ---- Csv.each_csv_row streaming (just verify no error) ----
-  match Csv.each_csv_row(base ++ "_basic.csv", fn _row -> :ok) do
-  | Err(e) -> panic("each_csv_row failed: " ++ to_string(e))
-  | Ok(_) -> :ok
+  describe "error handling" do
+
+    test "nonexistent file returns Err" do
+      match Csv.read_csv("/tmp/march_test_csv_noexist.csv") do
+      | Err(_) -> ()
+      | Ok(_) -> panic("read_csv nonexistent should return Err")
+      end
+    end
+
   end
 
-  -- ---- Csv.each_row_with_header (just verify no error) ----
-  match Csv.each_row_with_header(base ++ "_basic.csv", ",", :rfc4180, fn _hdr _row -> :ok) do
-  | Err(e) -> panic("each_row_with_header failed: " ++ to_string(e))
-  | Ok(_) -> :ok
-  end
-
-  -- ---- Csv.each_row nonexistent ----
-  match Csv.read_csv(base ++ "_noexist.csv") do
-  | Err(_) -> :ok
-  | Ok(_) -> panic("read_csv nonexistent should return Err")
-  end
-
-  -- ---- Csv semicolon delimiter ----
-  do_write(base ++ "_semi.csv", "x;y;z\n1;2;3\n")
-  match Csv.read_all(base ++ "_semi.csv", ";", :simple) do
-  | Err(e) -> panic("semicolon csv failed: " ++ to_string(e))
-  | Ok(rows) ->
-    assert_eq("semicolon rows", List.length(rows), 2)
-    let row1 = List.nth(rows, 1)
-    assert_eq("semicolon row1[0]", List.nth(row1, 0), "1")
-    assert_eq("semicolon row1[2]", List.nth(row1, 2), "3")
-  end
-
-  -- Cleanup
-  File.delete(base ++ "_basic.csv")
-  File.delete(base ++ "_quoted.csv")
-  File.delete(base ++ "_single.csv")
-  File.delete(base ++ "_empty.csv")
-  File.delete(base ++ "_tab.csv")
-  File.delete(base ++ "_simple.csv")
-  File.delete(base ++ "_semi.csv")
-
-  println("All Csv tests passed!")
 end
 
 end

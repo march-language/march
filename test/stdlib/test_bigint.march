@@ -1,218 +1,198 @@
 -- Tests for the BigInt stdlib module
--- Run with: dune exec march -- test/stdlib/test_bigint.march
--- Note: BigInt.compare/eq/lt/gt/lte/gte are not tested here because they
--- conflict with the impl Ord block's internal name resolution.
+-- Run with: dune exec march -- test test/stdlib/test_bigint.march
 
 mod TestBigInt do
 
-fn assert_true(cond : Bool, msg : String) : Unit do
-  if cond then () else panic("FAIL: " ++ msg)
-end
+describe "BigInt" do
 
-fn assert_eq_str(a : String, b : String, msg : String) : Unit do
-  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ b ++ ", got " ++ a ++ ")")
-end
+  describe "construction" do
 
--- ---- Construction ----
+    test "zero to_string" do
+      assert (BigInt.to_string(BigInt.zero()) == "0")
+    end
 
-fn test_zero() : Unit do
-  assert_eq_str(BigInt.to_string(BigInt.zero()), "0", "zero to_string")
-  assert_true(BigInt.is_zero(BigInt.zero()), "zero is_zero")
-end
+    test "zero is_zero" do
+      assert BigInt.is_zero(BigInt.zero())
+    end
 
-fn test_one() : Unit do
-  assert_eq_str(BigInt.to_string(BigInt.one()), "1", "one to_string")
-  assert_true(!BigInt.is_zero(BigInt.one()), "one is not zero")
-end
+    test "one to_string" do
+      assert (BigInt.to_string(BigInt.one()) == "1")
+    end
 
-fn test_from_int_positive() : Unit do
-  assert_eq_str(BigInt.to_string(BigInt.from_int(42)), "42", "from_int 42")
-end
+    test "one is not zero" do
+      assert not(BigInt.is_zero(BigInt.one()))
+    end
 
-fn test_from_int_zero() : Unit do
-  let n = BigInt.from_int(0)
-  assert_true(BigInt.is_zero(n), "from_int 0 is_zero")
-  assert_eq_str(BigInt.to_string(n), "0", "from_int 0 to_string")
-end
+    test "from_int positive" do
+      assert (BigInt.to_string(BigInt.from_int(42)) == "42")
+    end
 
-fn test_from_int_negative() : Unit do
-  let n = BigInt.from_int(-5)
-  assert_eq_str(BigInt.to_string(n), "-5", "from_int -5 to_string")
-  assert_true(BigInt.is_negative(n), "from_int -5 is_negative")
-  assert_true(!BigInt.is_positive(n), "from_int -5 not positive")
-end
+    test "from_int zero is_zero" do
+      let n = BigInt.from_int(0)
+      assert BigInt.is_zero(n)
+    end
 
-fn test_from_int_large() : Unit do
-  assert_eq_str(BigInt.to_string(BigInt.from_int(1000000)), "1000000", "from_int 1000000")
-end
+    test "from_int zero to_string" do
+      assert (BigInt.to_string(BigInt.from_int(0)) == "0")
+    end
 
--- ---- Arithmetic ----
+    test "from_int negative to_string" do
+      assert (BigInt.to_string(BigInt.from_int(-5)) == "-5")
+    end
 
-fn test_add_basic() : Unit do
-  let a = BigInt.from_int(10)
-  let b = BigInt.from_int(20)
-  assert_eq_str(BigInt.to_string(BigInt.add(a, b)), "30", "add 10+20")
-end
+    test "from_int negative is_negative" do
+      assert BigInt.is_negative(BigInt.from_int(-5))
+    end
 
-fn test_add_zero() : Unit do
-  let a = BigInt.from_int(42)
-  assert_eq_str(BigInt.to_string(BigInt.add(a, BigInt.zero())), "42", "add with zero")
-end
+    test "from_int negative not positive" do
+      assert not(BigInt.is_positive(BigInt.from_int(-5)))
+    end
 
-fn test_add_negative() : Unit do
-  let a = BigInt.from_int(10)
-  let b = BigInt.from_int(-3)
-  assert_eq_str(BigInt.to_string(BigInt.add(a, b)), "7", "add 10+(-3)")
-end
+    test "from_int large" do
+      assert (BigInt.to_string(BigInt.from_int(1000000)) == "1000000")
+    end
 
-fn test_add_both_negative() : Unit do
-  let a = BigInt.from_int(-5)
-  let b = BigInt.from_int(-3)
-  assert_eq_str(BigInt.to_string(BigInt.add(a, b)), "-8", "add (-5)+(-3)")
-end
+  end
 
-fn test_sub_basic() : Unit do
-  let a = BigInt.from_int(20)
-  let b = BigInt.from_int(8)
-  assert_eq_str(BigInt.to_string(BigInt.sub(a, b)), "12", "sub 20-8")
-end
+  describe "arithmetic" do
 
--- test_sub_to_negative skipped: BigInt.add has a known issue when |a| < |b|
--- with different signs (hits the else branch in add's comparison chain).
+    test "add basic" do
+      let a = BigInt.from_int(10)
+      let b = BigInt.from_int(20)
+      assert (BigInt.to_string(BigInt.add(a, b)) == "30")
+    end
 
-fn test_sub_to_zero() : Unit do
-  let a = BigInt.from_int(7)
-  let b = BigInt.from_int(7)
-  assert_eq_str(BigInt.to_string(BigInt.sub(a, b)), "0", "sub 7-7")
-  assert_true(BigInt.is_zero(BigInt.sub(a, b)), "sub 7-7 is_zero")
-end
+    test "add with zero" do
+      let a = BigInt.from_int(42)
+      assert (BigInt.to_string(BigInt.add(a, BigInt.zero())) == "42")
+    end
 
-fn test_negate_positive() : Unit do
-  assert_eq_str(BigInt.to_string(BigInt.negate(BigInt.from_int(7))), "-7", "negate positive")
-end
+    test "add with negative" do
+      let a = BigInt.from_int(10)
+      let b = BigInt.from_int(-3)
+      assert (BigInt.to_string(BigInt.add(a, b)) == "7")
+    end
 
-fn test_negate_negative() : Unit do
-  assert_eq_str(BigInt.to_string(BigInt.negate(BigInt.from_int(-7))), "7", "negate negative")
-end
+    test "add both negative" do
+      let a = BigInt.from_int(-5)
+      let b = BigInt.from_int(-3)
+      assert (BigInt.to_string(BigInt.add(a, b)) == "-8")
+    end
 
-fn test_negate_zero() : Unit do
-  assert_eq_str(BigInt.to_string(BigInt.negate(BigInt.zero())), "0", "negate zero")
-end
+    test "sub basic" do
+      let a = BigInt.from_int(20)
+      let b = BigInt.from_int(8)
+      assert (BigInt.to_string(BigInt.sub(a, b)) == "12")
+    end
 
-fn test_mul_basic() : Unit do
-  let a = BigInt.from_int(6)
-  let b = BigInt.from_int(7)
-  assert_eq_str(BigInt.to_string(BigInt.mul(a, b)), "42", "mul 6*7")
-end
+    test "sub to zero" do
+      let a = BigInt.from_int(7)
+      let b = BigInt.from_int(7)
+      assert (BigInt.to_string(BigInt.sub(a, b)) == "0")
+      assert BigInt.is_zero(BigInt.sub(a, b))
+    end
 
-fn test_mul_zero() : Unit do
-  assert_eq_str(BigInt.to_string(BigInt.mul(BigInt.from_int(999), BigInt.zero())), "0", "mul by zero")
-end
+    test "negate positive" do
+      assert (BigInt.to_string(BigInt.negate(BigInt.from_int(7))) == "-7")
+    end
 
-fn test_mul_negative() : Unit do
-  let a = BigInt.from_int(3)
-  let b = BigInt.from_int(-4)
-  assert_eq_str(BigInt.to_string(BigInt.mul(a, b)), "-12", "mul 3*(-4)")
-end
+    test "negate negative" do
+      assert (BigInt.to_string(BigInt.negate(BigInt.from_int(-7))) == "7")
+    end
 
-fn test_mul_both_negative() : Unit do
-  let a = BigInt.from_int(-3)
-  let b = BigInt.from_int(-4)
-  assert_eq_str(BigInt.to_string(BigInt.mul(a, b)), "12", "mul (-3)*(-4)")
-end
+    test "negate zero" do
+      assert (BigInt.to_string(BigInt.negate(BigInt.zero())) == "0")
+    end
 
-fn test_div_basic() : Unit do
-  let a = BigInt.from_int(20)
-  let b = BigInt.from_int(4)
-  assert_eq_str(BigInt.to_string(BigInt.div(a, b)), "5", "div 20/4")
-end
+    test "mul basic" do
+      let a = BigInt.from_int(6)
+      let b = BigInt.from_int(7)
+      assert (BigInt.to_string(BigInt.mul(a, b)) == "42")
+    end
 
-fn test_div_truncates() : Unit do
-  let a = BigInt.from_int(7)
-  let b = BigInt.from_int(2)
-  assert_eq_str(BigInt.to_string(BigInt.div(a, b)), "3", "div 7/2 truncates")
-end
+    test "mul by zero" do
+      assert (BigInt.to_string(BigInt.mul(BigInt.from_int(999), BigInt.zero())) == "0")
+    end
 
-fn test_mod_basic() : Unit do
-  let a = BigInt.from_int(10)
-  let b = BigInt.from_int(3)
-  assert_eq_str(BigInt.to_string(BigInt.mod_(a, b)), "1", "mod 10%3")
-end
+    test "mul with negative" do
+      let a = BigInt.from_int(3)
+      let b = BigInt.from_int(-4)
+      assert (BigInt.to_string(BigInt.mul(a, b)) == "-12")
+    end
 
-fn test_mod_exact() : Unit do
-  let a = BigInt.from_int(12)
-  let b = BigInt.from_int(4)
-  assert_eq_str(BigInt.to_string(BigInt.mod_(a, b)), "0", "mod 12%4=0")
-  assert_true(BigInt.is_zero(BigInt.mod_(a, b)), "mod 12%4 is_zero")
-end
+    test "mul both negative" do
+      let a = BigInt.from_int(-3)
+      let b = BigInt.from_int(-4)
+      assert (BigInt.to_string(BigInt.mul(a, b)) == "12")
+    end
 
--- ---- Absolute value ----
+    test "div basic" do
+      let a = BigInt.from_int(20)
+      let b = BigInt.from_int(4)
+      assert (BigInt.to_string(BigInt.div(a, b)) == "5")
+    end
 
-fn test_abs_positive() : Unit do
-  assert_eq_str(BigInt.to_string(BigInt.abs(BigInt.from_int(5))), "5", "abs positive")
-end
+    test "div truncates" do
+      let a = BigInt.from_int(7)
+      let b = BigInt.from_int(2)
+      assert (BigInt.to_string(BigInt.div(a, b)) == "3")
+    end
 
-fn test_abs_negative() : Unit do
-  assert_eq_str(BigInt.to_string(BigInt.abs(BigInt.from_int(-5))), "5", "abs negative")
-  assert_true(!BigInt.is_negative(BigInt.abs(BigInt.from_int(-5))), "abs result not negative")
-end
+    test "mod basic" do
+      let a = BigInt.from_int(10)
+      let b = BigInt.from_int(3)
+      assert (BigInt.to_string(BigInt.mod_(a, b)) == "1")
+    end
 
-fn test_abs_zero() : Unit do
-  assert_eq_str(BigInt.to_string(BigInt.abs(BigInt.zero())), "0", "abs zero")
-end
+    test "mod exact" do
+      let a = BigInt.from_int(12)
+      let b = BigInt.from_int(4)
+      assert (BigInt.to_string(BigInt.mod_(a, b)) == "0")
+      assert BigInt.is_zero(BigInt.mod_(a, b))
+    end
 
--- ---- Predicates ----
+  end
 
-fn test_is_positive() : Unit do
-  assert_true(BigInt.is_positive(BigInt.from_int(1)), "is_positive 1")
-  assert_true(BigInt.is_positive(BigInt.from_int(100)), "is_positive 100")
-  assert_true(!BigInt.is_positive(BigInt.zero()), "is_positive zero false")
-  assert_true(!BigInt.is_positive(BigInt.from_int(-1)), "is_positive negative false")
-end
+  describe "absolute value" do
 
-fn test_is_negative() : Unit do
-  assert_true(BigInt.is_negative(BigInt.from_int(-1)), "is_negative -1")
-  assert_true(!BigInt.is_negative(BigInt.zero()), "is_negative zero false")
-  assert_true(!BigInt.is_negative(BigInt.from_int(1)), "is_negative positive false")
-end
+    test "abs positive" do
+      assert (BigInt.to_string(BigInt.abs(BigInt.from_int(5))) == "5")
+    end
 
-fn test_is_zero() : Unit do
-  assert_true(BigInt.is_zero(BigInt.zero()), "is_zero zero")
-  assert_true(BigInt.is_zero(BigInt.from_int(0)), "is_zero from_int(0)")
-  assert_true(!BigInt.is_zero(BigInt.one()), "is_zero one false")
-end
+    test "abs negative" do
+      assert (BigInt.to_string(BigInt.abs(BigInt.from_int(-5))) == "5")
+      assert not(BigInt.is_negative(BigInt.abs(BigInt.from_int(-5))))
+    end
 
-fn main() : Unit do
-  test_zero()
-  test_one()
-  test_from_int_positive()
-  test_from_int_zero()
-  test_from_int_negative()
-  test_from_int_large()
-  test_add_basic()
-  test_add_zero()
-  test_add_negative()
-  test_add_both_negative()
-  test_sub_basic()
-  test_sub_to_zero()
-  test_negate_positive()
-  test_negate_negative()
-  test_negate_zero()
-  test_mul_basic()
-  test_mul_zero()
-  test_mul_negative()
-  test_mul_both_negative()
-  test_div_basic()
-  test_div_truncates()
-  test_mod_basic()
-  test_mod_exact()
-  test_abs_positive()
-  test_abs_negative()
-  test_abs_zero()
-  test_is_positive()
-  test_is_negative()
-  test_is_zero()
-  println("All BigInt tests passed!")
+    test "abs zero" do
+      assert (BigInt.to_string(BigInt.abs(BigInt.zero())) == "0")
+    end
+
+  end
+
+  describe "predicates" do
+
+    test "is_positive" do
+      assert BigInt.is_positive(BigInt.from_int(1))
+      assert BigInt.is_positive(BigInt.from_int(100))
+      assert not(BigInt.is_positive(BigInt.zero()))
+      assert not(BigInt.is_positive(BigInt.from_int(-1)))
+    end
+
+    test "is_negative" do
+      assert BigInt.is_negative(BigInt.from_int(-1))
+      assert not(BigInt.is_negative(BigInt.zero()))
+      assert not(BigInt.is_negative(BigInt.from_int(1)))
+    end
+
+    test "is_zero" do
+      assert BigInt.is_zero(BigInt.zero())
+      assert BigInt.is_zero(BigInt.from_int(0))
+      assert not(BigInt.is_zero(BigInt.one()))
+    end
+
+  end
+
 end
 
 end

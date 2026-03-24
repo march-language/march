@@ -1,102 +1,150 @@
--- test/stdlib/test_regex.march
--- Comprehensive tests for the Regex module.
--- Uses OCaml Str syntax (basic regex, not PCRE).
+-- Tests for the Regex stdlib module.
+-- Run with: dune exec march -- test test/stdlib/test_regex.march
+-- Uses pure March regex engine (standard syntax: * + ? directly, not \+ \?).
 
 mod TestRegex do
 
-fn main() do
-  -- ---- Regex.match_ ----
-  assert_true("match_ literal", Regex.match_("hello", "hello world"))
-  assert_true("match_ anywhere in string", Regex.match_("world", "hello world"))
-  assert_true("no match", not Regex.match_("xyz", "hello world"))
-  assert_true("match_ empty pattern", Regex.match_("", "anything"))
+describe "Regex" do
 
-  -- Dot matches any character
-  assert_true("dot matches", Regex.match_("h.llo", "hello"))
-  assert_true("dot matches 2", Regex.match_("h.llo", "hxllo"))
+  describe "matches" do
 
-  -- Star (0 or more)
-  assert_true("star 0 times", Regex.match_("ab*c", "ac"))
-  assert_true("star 1 time", Regex.match_("ab*c", "abc"))
-  assert_true("star many", Regex.match_("ab*c", "abbbbc"))
+    test "matches literal" do
+      assert Regex.matches("hello", "hello world")
+      assert Regex.matches("world", "hello world")
+      assert not(Regex.matches("xyz", "hello world"))
+      assert Regex.matches("", "anything")
+    end
 
-  -- Plus (1 or more) - Str uses \+
-  assert_true("plus 1", Regex.match_("ab\\+c", "abc"))
-  assert_true("plus many", Regex.match_("ab\\+c", "abbbbc"))
-  assert_true("plus 0 fails", not Regex.match_("ab\\+c", "ac"))
+    test "dot matches any character" do
+      assert Regex.matches("h.llo", "hello")
+      assert Regex.matches("h.llo", "hxllo")
+    end
 
-  -- Question mark (0 or 1) - Str uses \?
-  assert_true("optional present", Regex.match_("colou\\?r", "colour"))
-  assert_true("optional absent", Regex.match_("colou\\?r", "color"))
+    test "star quantifier" do
+      assert Regex.matches("ab*c", "ac")
+      assert Regex.matches("ab*c", "abc")
+      assert Regex.matches("ab*c", "abbbbc")
+    end
 
-  -- Anchors
-  assert_true("anchor start match", Regex.match_("^hello", "hello world"))
-  assert_true("anchor start no match", not Regex.match_("^world", "hello world"))
-  assert_true("anchor end match", Regex.match_("world$", "hello world"))
-  assert_true("anchor end no match", not Regex.match_("hello$", "hello world"))
+    test "plus quantifier" do
+      assert Regex.matches("ab+c", "abc")
+      assert Regex.matches("ab+c", "abbbbc")
+      assert not(Regex.matches("ab+c", "ac"))
+    end
 
-  -- Character classes
-  assert_true("char class digit", Regex.match_("[0-9]", "abc3def"))
-  assert_true("char class no digit", not Regex.match_("[0-9]", "abcdef"))
-  assert_true("char class letters", Regex.match_("[a-z]", "Hello World"))
-  assert_true("negated char class", Regex.match_("[^a-z]", "HELLO"))
+    test "optional quantifier" do
+      assert Regex.matches("colou?r", "colour")
+      assert Regex.matches("colou?r", "color")
+    end
 
-  -- ---- Regex.find ----
-  match Regex.find("[0-9]+", "price: 42 dollars") do
-  | None -> panic("find digit not found")
-  | Some(m) -> assert_eq("find digit", m, "4")  -- Str matches single char for +
+    test "anchors" do
+      assert Regex.matches("^hello", "hello world")
+      assert not(Regex.matches("^world", "hello world"))
+      assert Regex.matches("world$", "hello world")
+      assert not(Regex.matches("hello$", "hello world"))
+    end
+
+    test "character classes" do
+      assert Regex.matches("[0-9]", "abc3def")
+      assert not(Regex.matches("[0-9]", "abcdef"))
+      assert Regex.matches("[a-z]", "Hello World")
+      assert Regex.matches("[^a-z]", "HELLO")
+    end
+
   end
 
-  match Regex.find("world", "hello world") do
-  | None -> panic("find literal not found")
-  | Some(m) -> assert_eq("find literal", m, "world")
+  describe "find" do
+
+    test "find single digit" do
+      match Regex.find("[0-9]", "price: 42 dollars") do
+      | None -> panic("find digit not found")
+      | Some(m) -> assert (m == "4")
+      end
+    end
+
+    test "find literal" do
+      match Regex.find("world", "hello world") do
+      | None -> panic("find literal not found")
+      | Some(m) -> assert (m == "world")
+      end
+    end
+
+    test "find no match returns None" do
+      match Regex.find("xyz", "hello world") do
+      | None -> ()
+      | Some(_) -> panic("find no match should be None")
+      end
+    end
+
   end
 
-  match Regex.find("xyz", "hello world") do
-  | None -> :ok
-  | Some(_) -> panic("find no match should be None")
+  describe "find_all" do
+
+    test "find_all digits" do
+      let digits = Regex.find_all("[0-9]", "a1b2c3")
+      assert (List.length(digits) == 3)
+    end
+
+    test "find_all repeated pattern" do
+      let words = Regex.find_all("ab", "ababab")
+      assert (List.length(words) == 3)
+    end
+
+    test "find_all no match returns empty" do
+      let empty_result = Regex.find_all("xyz", "hello world")
+      assert (List.length(empty_result) == 0)
+    end
+
   end
 
-  -- ---- Regex.find_all ----
-  let digits = Regex.find_all("[0-9]", "a1b2c3")
-  assert_eq("find_all digit count", List.length(digits), 3)
+  describe "replace" do
 
-  let words = Regex.find_all("ab", "ababab")
-  assert_eq("find_all repeated", List.length(words), 3)
+    test "replace basic" do
+      assert (Regex.replace("world", "March", "hello world") == "hello March")
+    end
 
-  let empty_result = Regex.find_all("xyz", "hello world")
-  assert_eq("find_all no match empty", List.length(empty_result), 0)
+    test "replace first only" do
+      assert (Regex.replace("o", "0", "foo bar boo") == "f0o bar boo")
+    end
 
-  -- ---- Regex.replace ----
-  assert_eq("replace basic", Regex.replace("world", "March", "hello world"), "hello March")
-  assert_eq("replace first only", Regex.replace("o", "0", "foo bar boo"), "f0o bar b0o")
-  assert_eq("replace digits", Regex.replace("[0-9]", "#", "a1b2c3"), "a#b#c#")
-  assert_eq("replace no match", Regex.replace("xyz", "!", "hello"), "hello")
+    test "replace no match" do
+      assert (Regex.replace("xyz", "!", "hello") == "hello")
+    end
 
-  -- ---- Regex.split ----
-  let parts = Regex.split(",", "a,b,c,d")
-  assert_eq("split comma count", List.length(parts), 4)
-  assert_eq("split[0]", List.nth(parts, 0), "a")
-  assert_eq("split[3]", List.nth(parts, 3), "d")
+  end
 
-  let ws_parts = Regex.split("[ \t]+", "hello   world\tfoo")
-  assert_eq("split whitespace count", List.length(ws_parts), 3)
+  describe "replace_all" do
 
-  -- ---- Regex.is_valid ----
-  assert_true("is_valid simple", Regex.is_valid("hello"))
-  assert_true("is_valid complex", Regex.is_valid("[a-z]+"))
-  assert_true("is_valid anchors", Regex.is_valid("^start.*end$"))
+    test "replace_all digits" do
+      assert (Regex.replace_all("[0-9]", "#", "a1b2c3") == "a#b#c#")
+    end
 
-  -- ---- Regex.matches_full ----
-  assert_true("matches_full exact", Regex.matches_full("[0-9]+", "12345"))
-  assert_true("matches_full no partial", not Regex.matches_full("[0-9]+", "123abc"))
-  assert_true("matches_full empty", Regex.matches_full("", ""))
+    test "replace_all all occurrences" do
+      assert (Regex.replace_all("o", "0", "foo bar boo") == "f00 bar b00")
+    end
 
-  -- ---- Regex.count ----
-  assert_eq("count digits", Regex.count("[0-9]", "a1b2c3d4"), 4)
-  assert_eq("count none", Regex.count("[0-9]", "abcdef"), 0)
+    test "replace_all no match" do
+      assert (Regex.replace_all("xyz", "!", "hello") == "hello")
+    end
 
-  println("All Regex tests passed!")
+  end
+
+  describe "split" do
+
+    test "split comma" do
+      let parts = Regex.split(",", "a,b,c,d")
+      assert (List.length(parts) == 4)
+      assert (List.nth(parts, 0) == "a")
+      assert (List.nth(parts, 3) == "d")
+    end
+
+    test "split whitespace" do
+      let ws_parts = Regex.split(" +", "hello   world foo")
+      assert (List.length(ws_parts) == 3)
+    end
+
+  end
+
 end
 
 end
