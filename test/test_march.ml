@@ -13828,6 +13828,325 @@ let test_run_tests_filter () =
   let (total, _failed) = March_eval.Eval.run_tests ~filter:"sub" m in
   Alcotest.(check int) "filter: total = 1" 1 total
 
+(* ── Bytes stdlib module tests ───────────────────────────────────────────── *)
+
+let eval_with_bytes src =
+  let decl = load_stdlib_file_for_test "bytes.march" in
+  eval_with_stdlib [decl] src
+
+let test_bytes_from_to_string () =
+  let env = eval_with_bytes {|mod Test do
+    fn f() do
+      let b = Bytes.from_string("hello")
+      Bytes.to_string(b)
+    end
+  end|} in
+  Alcotest.(check string) "from_string/to_string round-trip" "hello"
+    (vstr (call_fn env "f" []))
+
+let test_bytes_length () =
+  let env = eval_with_bytes {|mod Test do
+    fn f() do Bytes.length(Bytes.from_string("abc")) end
+  end|} in
+  Alcotest.(check int) "length of 'abc'" 3
+    (vint (call_fn env "f" []))
+
+let test_bytes_from_to_list () =
+  let env = eval_with_bytes {|mod Test do
+    fn f() do
+      let b = Bytes.from_list([65, 66, 67])
+      Bytes.to_list(b)
+    end
+  end|} in
+  let xs = vlist (call_fn env "f" []) in
+  Alcotest.(check int) "from_list/to_list length" 3 (List.length xs);
+  Alcotest.(check int) "byte 0 = 65" 65 (vint (List.nth xs 0));
+  Alcotest.(check int) "byte 1 = 66" 66 (vint (List.nth xs 1));
+  Alcotest.(check int) "byte 2 = 67" 67 (vint (List.nth xs 2))
+
+let test_bytes_get () =
+  let env = eval_with_bytes {|mod Test do
+    fn f() do Bytes.get(Bytes.from_string("ABC"), 1) end
+  end|} in
+  Alcotest.(check int) "get byte at index 1 = 66" 66
+    (vint (call_fn env "f" []))
+
+let test_bytes_slice () =
+  let env = eval_with_bytes {|mod Test do
+    fn f() do
+      let b = Bytes.from_string("hello world")
+      Bytes.to_string(Bytes.slice(b, 6, 5))
+    end
+  end|} in
+  Alcotest.(check string) "slice bytes" "world"
+    (vstr (call_fn env "f" []))
+
+let test_bytes_concat () =
+  let env = eval_with_bytes {|mod Test do
+    fn f() do
+      let a = Bytes.from_string("foo")
+      let b = Bytes.from_string("bar")
+      Bytes.to_string(Bytes.concat(a, b))
+    end
+  end|} in
+  Alcotest.(check string) "concat bytes" "foobar"
+    (vstr (call_fn env "f" []))
+
+let test_bytes_to_hex () =
+  let env = eval_with_bytes {|mod Test do
+    fn f() do Bytes.to_hex(Bytes.from_list([0, 255, 16])) end
+  end|} in
+  Alcotest.(check string) "to_hex [0,255,16]" "00ff10"
+    (vstr (call_fn env "f" []))
+
+let test_bytes_encode_decode_base64 () =
+  let env = eval_with_bytes {|mod Test do
+    fn f() do
+      let b = Bytes.from_string("Hello")
+      let encoded = Bytes.encode_base64(b)
+      match Bytes.decode_base64(encoded) do
+      | Ok(decoded) -> Bytes.to_string(decoded)
+      | Err(e) -> e
+      end
+    end
+  end|} in
+  Alcotest.(check string) "base64 round-trip" "Hello"
+    (vstr (call_fn env "f" []))
+
+(* ── Logger stdlib module tests ─────────────────────────────────────────── *)
+
+let eval_with_logger src =
+  let decl = load_stdlib_file_for_test "logger.march" in
+  eval_with_stdlib [decl] src
+
+let test_logger_level_to_int () =
+  let env = eval_with_logger {|mod Test do
+    fn f() do Logger.level_to_int(Logger.Info) end
+  end|} in
+  Alcotest.(check int) "Info = 1" 1
+    (vint (call_fn env "f" []))
+
+let test_logger_level_round_trip () =
+  let env = eval_with_logger {|mod Test do
+    fn f() do
+      Logger.set_level(Logger.Warn)
+      Logger.level_to_int(Logger.get_level())
+    end
+  end|} in
+  Alcotest.(check int) "set_level Warn then get_level = 2" 2
+    (vint (call_fn env "f" []))
+
+let test_logger_set_level_filters () =
+  (* set level to Error so Info does not print; just check it doesn't crash *)
+  let env = eval_with_logger {|mod Test do
+    fn f() do
+      Logger.set_level(Logger.Error)
+      Logger.info("this should be filtered")
+      Logger.error("this should appear")
+      42
+    end
+  end|} in
+  Alcotest.(check int) "logging does not crash" 42
+    (vint (call_fn env "f" []))
+
+(* ── Flow stdlib module tests ───────────────────────────────────────────── *)
+
+let flow_decls () =
+  let seq_decl    = load_stdlib_file_for_test "seq.march" in
+  let flow_decl   = load_stdlib_file_for_test "flow.march" in
+  [seq_decl; flow_decl]
+
+let eval_with_flow src =
+  eval_with_stdlib (flow_decls ()) src
+
+let test_flow_from_list_collect () =
+  let env = eval_with_flow {|mod Test do
+    fn f() do
+      Flow.from_list([1, 2, 3])
+        |> Flow.collect
+    end
+  end|} in
+  let xs = vlist (call_fn env "f" []) in
+  Alcotest.(check int) "collect length" 3 (List.length xs);
+  Alcotest.(check int) "item 0" 1 (vint (List.nth xs 0));
+  Alcotest.(check int) "item 1" 2 (vint (List.nth xs 1));
+  Alcotest.(check int) "item 2" 3 (vint (List.nth xs 2))
+
+let test_flow_map () =
+  let env = eval_with_flow {|mod Test do
+    fn f() do
+      Flow.from_list([1, 2, 3])
+        |> Flow.map(fn x -> x * 2)
+        |> Flow.collect
+    end
+  end|} in
+  let xs = vlist (call_fn env "f" []) in
+  Alcotest.(check int) "map length" 3 (List.length xs);
+  Alcotest.(check int) "map item 0" 2 (vint (List.nth xs 0));
+  Alcotest.(check int) "map item 1" 4 (vint (List.nth xs 1));
+  Alcotest.(check int) "map item 2" 6 (vint (List.nth xs 2))
+
+let test_flow_filter () =
+  let env = eval_with_flow {|mod Test do
+    fn f() do
+      Flow.from_list([1, 2, 3, 4, 5, 6])
+        |> Flow.filter(fn x -> x % 2 == 0)
+        |> Flow.collect
+    end
+  end|} in
+  let xs = vlist (call_fn env "f" []) in
+  Alcotest.(check int) "filter evens length" 3 (List.length xs);
+  Alcotest.(check int) "filter evens 0" 2 (vint (List.nth xs 0));
+  Alcotest.(check int) "filter evens 1" 4 (vint (List.nth xs 1));
+  Alcotest.(check int) "filter evens 2" 6 (vint (List.nth xs 2))
+
+let test_flow_map_filter_pipeline () =
+  let env = eval_with_flow {|mod Test do
+    fn f() do
+      Flow.from_list([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+        |> Flow.filter(fn x -> x % 2 == 0)
+        |> Flow.map(fn x -> x * x)
+        |> Flow.collect
+    end
+  end|} in
+  let xs = vlist (call_fn env "f" []) in
+  Alcotest.(check int) "pipeline length" 5 (List.length xs);
+  Alcotest.(check int) "pipeline[0] = 4"   4   (vint (List.nth xs 0));
+  Alcotest.(check int) "pipeline[1] = 16"  16  (vint (List.nth xs 1));
+  Alcotest.(check int) "pipeline[4] = 100" 100 (vint (List.nth xs 4))
+
+let test_flow_take () =
+  let env = eval_with_flow {|mod Test do
+    fn f() do
+      Flow.from_list([1, 2, 3, 4, 5])
+        |> Flow.take(3)
+        |> Flow.collect
+    end
+  end|} in
+  let xs = vlist (call_fn env "f" []) in
+  Alcotest.(check int) "take 3 length" 3 (List.length xs)
+
+let test_flow_reduce () =
+  let env = eval_with_flow {|mod Test do
+    fn f() do
+      Flow.from_list([1, 2, 3, 4, 5])
+        |> Flow.reduce(0, fn (acc, x) -> acc + x)
+    end
+  end|} in
+  Alcotest.(check int) "reduce sum = 15" 15
+    (vint (call_fn env "f" []))
+
+let test_flow_count () =
+  let env = eval_with_flow {|mod Test do
+    fn f() do
+      Flow.from_list([10, 20, 30])
+        |> Flow.count
+    end
+  end|} in
+  Alcotest.(check int) "count = 3" 3
+    (vint (call_fn env "f" []))
+
+let test_flow_range () =
+  let env = eval_with_flow {|mod Test do
+    fn f() do
+      Flow.range(0, 5)
+        |> Flow.collect
+    end
+  end|} in
+  let xs = vlist (call_fn env "f" []) in
+  Alcotest.(check int) "range length" 5 (List.length xs);
+  Alcotest.(check int) "range[0] = 0" 0 (vint (List.nth xs 0));
+  Alcotest.(check int) "range[4] = 4" 4 (vint (List.nth xs 4))
+
+let test_flow_with_concurrency_noop () =
+  (* with_concurrency is identity in interpreter *)
+  let env = eval_with_flow {|mod Test do
+    fn f() do
+      Flow.from_list([1, 2, 3])
+        |> Flow.with_concurrency(4)
+        |> Flow.collect
+    end
+  end|} in
+  let xs = vlist (call_fn env "f" []) in
+  Alcotest.(check int) "with_concurrency noop length" 3 (List.length xs)
+
+let test_flow_any_all () =
+  let env = eval_with_flow {|mod Test do
+    fn any_even() do
+      Flow.from_list([1, 3, 4, 7])
+        |> Flow.any(fn x -> x % 2 == 0)
+    end
+    fn all_pos() do
+      Flow.from_list([1, 2, 3])
+        |> Flow.all(fn x -> x > 0)
+    end
+    fn not_all() do
+      Flow.from_list([1, -1, 3])
+        |> Flow.all(fn x -> x > 0)
+    end
+  end|} in
+  Alcotest.(check bool) "any even" true  (vbool (call_fn env "any_even" []));
+  Alcotest.(check bool) "all positive" true  (vbool (call_fn env "all_pos" []));
+  Alcotest.(check bool) "not all positive" false (vbool (call_fn env "not_all" []))
+
+(* ── Actor stdlib module tests ──────────────────────────────────────────── *)
+
+let actor_decl () = load_stdlib_file_for_test "actor.march"
+
+let test_actor_cast_basic () =
+  with_reset (fun () ->
+    let decl = actor_decl () in
+    let env = eval_with_stdlib [decl] {|mod Test do
+      actor Counter do
+        state { count : Int }
+        init { count = 0 }
+        on Inc() do
+          { count = state.count + 1 }
+        end
+      end
+      fn f() do
+        let pid = spawn(Counter)
+        Actor.cast(pid, Inc())
+        Actor.cast(pid, Inc())
+        Actor.cast(pid, Inc())
+        42
+      end
+    end|} in
+    Alcotest.(check int) "cast does not crash" 42
+      (vint (call_fn env "f" [])))
+  ()
+
+let test_actor_call_get () =
+  with_reset (fun () ->
+    let decl = actor_decl () in
+    let env = eval_with_stdlib [decl] {|mod Test do
+      actor Counter do
+        state { count : Int }
+        init { count = 0 }
+        on Inc() do
+          { count = state.count + 1 }
+        end
+        on Call(ref, msg) do
+          Actor.reply(ref, state.count)
+          state
+        end
+      end
+      fn f() do
+        let pid = spawn(Counter)
+        Actor.cast(pid, Inc())
+        Actor.cast(pid, Inc())
+        Actor.cast(pid, Inc())
+        let result = Actor.call(pid, Inc(), 1000)
+        match result do
+        | Ok(n) -> n
+        | Err(_) -> -1
+        end
+      end
+    end|} in
+    Alcotest.(check int) "call returns count" 3
+      (vint (call_fn env "f" [])))
+  ()
+
 let () =
   Alcotest.run "march"
     [
@@ -15065,5 +15384,40 @@ let () =
           Alcotest.test_case "run_tests: all pass"         `Quick test_run_tests_pass;
           Alcotest.test_case "run_tests: fail count"       `Quick test_run_tests_fail_count;
           Alcotest.test_case "run_tests: filter"           `Quick test_run_tests_filter;
+        ] );
+      ( "bytes",
+        [
+          Alcotest.test_case "from_string/to_string"       `Quick test_bytes_from_to_string;
+          Alcotest.test_case "length"                      `Quick test_bytes_length;
+          Alcotest.test_case "from_list/to_list"           `Quick test_bytes_from_to_list;
+          Alcotest.test_case "get"                         `Quick test_bytes_get;
+          Alcotest.test_case "slice"                       `Quick test_bytes_slice;
+          Alcotest.test_case "concat"                      `Quick test_bytes_concat;
+          Alcotest.test_case "to_hex"                      `Quick test_bytes_to_hex;
+          Alcotest.test_case "encode/decode base64"        `Quick test_bytes_encode_decode_base64;
+        ] );
+      ( "logger",
+        [
+          Alcotest.test_case "level_to_int Info=1"         `Quick test_logger_level_to_int;
+          Alcotest.test_case "set/get level round-trip"    `Quick (with_reset test_logger_level_round_trip);
+          Alcotest.test_case "set_level filters messages"  `Quick (with_reset test_logger_set_level_filters);
+        ] );
+      ( "flow",
+        [
+          Alcotest.test_case "from_list/collect"           `Quick test_flow_from_list_collect;
+          Alcotest.test_case "map"                         `Quick test_flow_map;
+          Alcotest.test_case "filter"                      `Quick test_flow_filter;
+          Alcotest.test_case "map+filter pipeline"         `Quick test_flow_map_filter_pipeline;
+          Alcotest.test_case "take"                        `Quick test_flow_take;
+          Alcotest.test_case "reduce"                      `Quick test_flow_reduce;
+          Alcotest.test_case "count"                       `Quick test_flow_count;
+          Alcotest.test_case "range"                       `Quick test_flow_range;
+          Alcotest.test_case "with_concurrency noop"       `Quick test_flow_with_concurrency_noop;
+          Alcotest.test_case "any/all"                     `Quick test_flow_any_all;
+        ] );
+      ( "actor_module",
+        [
+          Alcotest.test_case "cast does not crash"         `Quick test_actor_cast_basic;
+          Alcotest.test_case "call/reply Get returns count" `Quick test_actor_call_get;
         ] );
     ]

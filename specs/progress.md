@@ -163,7 +163,7 @@ march/
 │   ├── march_http.c/h       # HTTP/WS runtime: TCP, HTTP parse/serialize, server, WebSocket
 │   ├── sha1.c               # SHA-1 for WebSocket handshake
 │   └── base64.c             # Base64 for WebSocket handshake
-├── stdlib/                  # 21 modules, ~4894 lines
+├── stdlib/                  # 26 modules, ~5500 lines
 │   ├── prelude.march        # Auto-imported helpers (panic, identity, compose, unwrap, etc.)
 │   ├── option.march         # Option(a) with Some/None
 │   ├── result.march         # Result(a,e) with Ok/Err
@@ -186,9 +186,15 @@ march/
 │   ├── http_client.march    # 440 lines: High-level HTTP client with middleware pipeline
 │   ├── http_server.march    # 233 lines: HTTP server types + pipeline runner
 │   ├── websocket.march      # 52 lines: WebSocket types and frame operations
-│   └── iterable.march       # 184 lines: map/filter/fold/take/drop/zip/enumerate/flat_map/any/all/find/count
+│   ├── iterable.march       # 184 lines: map/filter/fold/take/drop/zip/enumerate/flat_map/any/all/find/count
+│   ├── bytes.march          # Raw byte manipulation: from_string/to_string, hex, base64, UTF-8
+│   ├── process.march        # OS process interaction: run, run_stream, env, cwd, argv, pid, exit
+│   ├── logger.march         # Structured logging: Debug/Info/Warn/Error levels, context, log_with
+│   ├── actor.march          # Actor helpers: cast (fire-and-forget), call (sync request/reply), reply
+│   ├── flow.march           # Backpressure pipeline: Stage, from_list/range/unfold, map/filter/flat_map, collect/reduce
+│   └── docs/flow.md         # Flow module design doc: concepts, examples, GenStage comparison
 ├── test/
-│   ├── test_march.ml         # 958 tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, etc.)
+│   ├── test_march.ml         # 958+ tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, bytes, logger, flow, actor_module, etc.)
 │   ├── test_cas.ml           # 41 tests (scc, pipeline, def_id)
 │   ├── test_jit.ml           # 1 test (dlopen round-trip)
 │   ├── test_fmt.ml           # 23 tests (formatter round-trip)

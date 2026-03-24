@@ -94,6 +94,11 @@ let load_stdlib () =
       "array.march";
       "bigint.march";
       "decimal.march";
+      "bytes.march";
+      "process.march";
+      "logger.march";
+      "actor.march";
+      "flow.march";
     ] in
     List.concat_map (fun name ->
         load_stdlib_file (Filename.concat stdlib_dir name)

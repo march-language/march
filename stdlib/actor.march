@@ -1,0 +1,64 @@
+-- Actor module: messaging helpers for the actor system.
+--
+-- cast/2 is fire-and-forget (async): the message is enqueued and the
+-- caller continues immediately without waiting for a response.
+--
+-- call/3 is synchronous: it sends a Call(ref, msg) message to the target
+-- actor and blocks until the actor calls Actor.reply(ref, result).
+-- Returns Ok(result) or Err(reason) if no reply arrives.
+--
+-- call protocol:
+--   The target actor's handler receives Call(ref, Msg(args...)).
+--   It must call Actor.reply(ref, result) before returning to unblock the
+--   caller.  If the handler does not reply, call returns Err("no reply ...").
+--
+-- Example:
+--
+--   actor Counter do
+--     state = 0
+--
+--     on Call(ref, Get()) ->
+--       Actor.reply(ref, state)
+--       state
+--
+--     on Inc() ->
+--       state + 1
+--   end
+--
+--   fn main() do
+--     let pid = spawn(Counter)
+--     pid <- Inc()
+--     let count = Actor.call(pid, Get(), 5000)
+--     match count do
+--     | Ok(n) -> println("count = ${n}")
+--     | Err(e) -> println("error: ${e}")
+--     end
+--   end
+
+mod Actor do
+
+doc "Fire-and-forget: enqueue msg in the actor's mailbox without waiting."
+pub fn cast(pid, msg) do
+  actor_cast(pid, msg)
+end
+
+doc """
+Synchronous call: send Call(ref, msg) to the actor and wait for a reply.
+The actor handler must call Actor.reply(ref, result) to unblock the caller.
+Returns Ok(result) or Err(reason).
+timeout_ms is accepted for API compatibility but not enforced in the interpreter.
+"""
+pub fn call(pid, msg, timeout_ms) do
+  actor_call(pid, msg, timeout_ms)
+end
+
+doc """
+Reply to a synchronous call from within an actor handler.
+ref_id is the first element of the Call(ref_id, ...) message.
+result is the value to return to the caller.
+"""
+pub fn reply(ref_id, result) do
+  actor_reply(ref_id, result)
+end
+
+end

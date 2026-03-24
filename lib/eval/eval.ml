@@ -219,6 +219,17 @@ let revocation_table : (int * int, unit) Hashtbl.t = Hashtbl.create 4
 (** Flag set when graceful shutdown has been requested (SIGTERM, App.stop). *)
 let shutdown_requested : bool ref = ref false
 
+(* ---- Logger global state ---- *)
+(* Global log level: 0=Debug, 1=Info, 2=Warn, 3=Error.  Default: Info. *)
+let logger_level : int ref = ref 1
+(* Persistent key-value context attached to every log entry. *)
+let logger_context : (string * string) list ref = ref []
+
+(* ---- Actor.call reply tracking ---- *)
+(* Pending synchronous call replies: call_ref -> reply value. *)
+let pending_replies : (int, value) Hashtbl.t = Hashtbl.create 4
+let next_call_ref : int ref = ref 0
+
 (** Ordered list of pids spawned by [spawn_from_spec], in start order.
     Shutdown iterates this in reverse (last started = first stopped). *)
 let app_spawn_order : int list ref = ref []
@@ -3667,6 +3678,190 @@ let base_env : env =
   ; ("MPST.close", VBuiltin ("MPST.close", function
         | [VMChan me] -> mpst_close me
         | _ -> eval_error "MPST.close: expected MChan"))
+
+  (* ---- Bytes builtins ---- *)
+  (* Convert a raw byte value (0–255) to a single-byte String. Unlike
+     char_from_int, this accepts the full 0–255 range including non-ASCII. *)
+  ; ("byte_to_char", VBuiltin ("byte_to_char", function
+        | [VInt n] when n >= 0 && n <= 255 -> VString (String.make 1 (Char.chr n))
+        | [VInt n] -> eval_error "byte_to_char: %d out of range 0–255" n
+        | _ -> eval_error "byte_to_char: expected Int"))
+
+  (* ---- Process builtins ---- *)
+  ; ("process_env", VBuiltin ("process_env", function
+        | [VString name] ->
+          (match Sys.getenv_opt name with
+           | Some v -> VCon ("Some", [VString v])
+           | None   -> VCon ("None", []))
+        | _ -> eval_error "process_env: expected String"))
+  ; ("process_set_env", VBuiltin ("process_set_env", function
+        | [VString name; VString value] -> Unix.putenv name value; VUnit
+        | _ -> eval_error "process_set_env: expected (String, String)"))
+  ; ("process_cwd", VBuiltin ("process_cwd", function
+        | [] -> VString (Sys.getcwd ())
+        | _ -> eval_error "process_cwd: no arguments expected"))
+  ; ("process_exit", VBuiltin ("process_exit", function
+        | [VInt code] -> exit code
+        | _ -> eval_error "process_exit: expected Int"))
+  ; ("process_argv", VBuiltin ("process_argv", function
+        | [] ->
+          let args = Array.to_list Sys.argv in
+          List.fold_right (fun s acc -> VCon ("Cons", [VString s; acc]))
+            args (VCon ("Nil", []))
+        | _ -> eval_error "process_argv: no arguments expected"))
+  ; ("process_pid", VBuiltin ("process_pid", function
+        | [] -> VInt (Unix.getpid ())
+        | _ -> eval_error "process_pid: no arguments expected"))
+  (* Run a command synchronously; returns Ok(ProcessResult(code, stdout, stderr))
+     or Err(msg) on OS error.  Stderr is captured separately. *)
+  ; ("process_spawn_sync", VBuiltin ("process_spawn_sync", function
+        | [VString cmd; lst] ->
+          let rec args_of_list = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [VString s; rest]) -> s :: args_of_list rest
+            | VCon ("Cons", [v; _]) ->
+              eval_error "process_spawn_sync: arg must be String, got %s"
+                (value_to_string v)
+            | v -> eval_error "process_spawn_sync: expected list, got %s"
+                     (value_to_string v)
+          in
+          let args_strs = args_of_list lst in
+          let args_arr = Array.of_list (cmd :: args_strs) in
+          (try
+             let (ic, oc) = Unix.open_process_args cmd args_arr in
+             close_out_noerr oc;
+             let buf = Buffer.create 256 in
+             (try while true do Buffer.add_channel buf ic 1 done
+              with End_of_file -> ());
+             let status = Unix.close_process (ic, oc) in
+             let code = match status with
+               | Unix.WEXITED n  -> n
+               | Unix.WSIGNALED n -> -n
+               | Unix.WSTOPPED  n -> -n
+             in
+             VCon ("Ok", [VCon ("ProcessResult",
+               [VInt code; VString (Buffer.contents buf); VString ""])])
+           with Unix.Unix_error (err, _, _) ->
+             VCon ("Err", [VString (Unix.error_message err)]))
+        | _ -> eval_error "process_spawn_sync: expected (String, List(String))"))
+  (* Run a command and return its stdout as a Seq(String) of lines.
+     Returns Ok(Seq) on success or Err(msg) on OS error. *)
+  ; ("process_spawn_lines", VBuiltin ("process_spawn_lines", function
+        | [VString cmd; lst] ->
+          let rec args_of_list = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [VString s; rest]) -> s :: args_of_list rest
+            | v -> eval_error "process_spawn_lines: expected String list, got %s"
+                     (value_to_string v)
+          in
+          let args_strs = args_of_list lst in
+          let args_arr = Array.of_list (cmd :: args_strs) in
+          (try
+             let (ic, oc) = Unix.open_process_args cmd args_arr in
+             close_out_noerr oc;
+             let lines = ref [] in
+             (try while true do lines := input_line ic :: !lines done
+              with End_of_file -> ());
+             let _ = Unix.close_process (ic, oc) in
+             let ordered = List.rev !lines in
+             let fold_fn = VBuiltin ("process_stream_fold", fun args ->
+               match args with
+               | [acc; f] ->
+                 List.fold_left (fun a line ->
+                   !apply_hook f [a; VString line]) acc ordered
+               | _ -> eval_error "process_stream_fold: expected (acc, fn)")
+             in
+             VCon ("Ok", [VCon ("Seq", [fold_fn])])
+           with Unix.Unix_error (err, _, _) ->
+             VCon ("Err", [VString (Unix.error_message err)]))
+        | _ -> eval_error "process_spawn_lines: expected (String, List(String))"))
+
+  (* ---- Logger builtins ---- *)
+  ; ("logger_set_level", VBuiltin ("logger_set_level", function
+        | [VInt n] -> logger_level := n; VUnit
+        | _ -> eval_error "logger_set_level: expected Int"))
+  ; ("logger_get_level", VBuiltin ("logger_get_level", function
+        | [] -> VInt !logger_level
+        | _ -> eval_error "logger_get_level: no arguments"))
+  ; ("logger_add_context", VBuiltin ("logger_add_context", function
+        | [VString k; VString v] ->
+          logger_context := (k, v) :: !logger_context; VUnit
+        | _ -> eval_error "logger_add_context: expected (String, String)"))
+  ; ("logger_clear_context", VBuiltin ("logger_clear_context", function
+        | [] -> logger_context := []; VUnit
+        | _ -> eval_error "logger_clear_context: no arguments"))
+  ; ("logger_get_context", VBuiltin ("logger_get_context", function
+        | [] ->
+          List.fold_right (fun (k, v) acc ->
+            VCon ("Cons", [VTuple [VString k; VString v]; acc])
+          ) !logger_context (VCon ("Nil", []))
+        | _ -> eval_error "logger_get_context: no arguments"))
+  (* logger_write(level_str, msg, context_list, extra_list)
+     Writes a log entry to stderr.  Both list args are List((String,String)) tuples. *)
+  ; ("logger_write", VBuiltin ("logger_write", function
+        | [VString level; VString msg; ctx_list; extra_list] ->
+          let rec pairs_of = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [VTuple [VString k; VString v]; rest]) ->
+              (k, v) :: pairs_of rest
+            | VCon ("Cons", [_; rest]) -> pairs_of rest
+            | _ -> []
+          in
+          let all_meta = pairs_of ctx_list @ pairs_of extra_list in
+          let meta_str =
+            if all_meta = [] then ""
+            else " {" ^ String.concat ", "
+                (List.map (fun (k, v) -> k ^ "=" ^ v) all_meta) ^ "}"
+          in
+          Printf.eprintf "[%s] %s%s\n%!" level msg meta_str;
+          VUnit
+        | _ -> eval_error "logger_write: expected (String, String, List, List)"))
+
+  (* ---- Actor.call / Actor.cast ---- *)
+  (* actor_cast: fire-and-forget async message to an actor. *)
+  ; ("actor_cast", VBuiltin ("actor_cast", function
+        | [VPid pid; msg] ->
+          (match Hashtbl.find_opt actor_registry pid with
+           | None -> VUnit
+           | Some inst when not inst.ai_alive -> VUnit
+           | Some inst ->
+             (match msg with
+              | VCon _ | VAtom _ -> Queue.push msg inst.ai_mailbox; VUnit
+              | _ -> eval_error "actor_cast: message must be a constructor, got %s"
+                       (value_to_string msg)))
+        | _ -> eval_error "actor_cast: expected (Pid, message)"))
+  (* actor_call: synchronous call — sends Call(ref, msg) and waits for a reply.
+     The target handler must call actor_reply(ref, result) to unblock the caller.
+     Returns Ok(result) or Err(reason). *)
+  ; ("actor_call", VBuiltin ("actor_call", function
+        | [VPid pid; msg; VInt _timeout_ms] ->
+          let ref_id = !next_call_ref in
+          next_call_ref := ref_id + 1;
+          let call_msg = match msg with
+            | VCon (tag, args) -> VCon ("Call", [VInt ref_id; VCon (tag, args)])
+            | VAtom tag        -> VCon ("Call", [VInt ref_id; VAtom tag])
+            | _ -> eval_error "actor_call: message must be a constructor, got %s"
+                     (value_to_string msg)
+          in
+          (match Hashtbl.find_opt actor_registry pid with
+           | None -> VCon ("Err", [VString "actor not found"])
+           | Some inst when not inst.ai_alive ->
+             VCon ("Err", [VString "actor not alive"])
+           | Some inst ->
+             Queue.push call_msg inst.ai_mailbox;
+             !run_scheduler_hook ();
+             (match Hashtbl.find_opt pending_replies ref_id with
+              | Some result ->
+                Hashtbl.remove pending_replies ref_id;
+                VCon ("Ok", [result])
+              | None ->
+                VCon ("Err", [VString "no reply (timeout or unhandled Call)"])))
+        | _ -> eval_error "actor_call: expected (Pid, message, Int)"))
+  (* actor_reply: store a reply for a pending call.  Called from actor handlers. *)
+  ; ("actor_reply", VBuiltin ("actor_reply", function
+        | [VInt ref_id; result] ->
+          Hashtbl.replace pending_replies ref_id result; VUnit
+        | _ -> eval_error "actor_reply: expected (Int, value)"))
   ]
 
 (* ------------------------------------------------------------------ *)
@@ -4150,7 +4345,11 @@ let reset_scheduler_state () : unit =
   dyn_sup_next_vpid := (-1);
   app_spawn_order := [];
   shutdown_requested := false;
-  Hashtbl.clear revocation_table
+  Hashtbl.clear revocation_table;
+  Hashtbl.clear pending_replies;
+  next_call_ref := 0;
+  logger_level := 1;
+  logger_context := []
 
 (* NOTE: debug_ctx actor event logging is intentionally not reproduced here.
    The old ESend recorded ame_state_before/ame_state_after. When actor debug

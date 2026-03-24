@@ -1,0 +1,85 @@
+-- Process module: OS process interaction.
+--
+-- run/2 runs a command and waits for it to finish, returning the exit code
+-- and captured stdout.  run_stream/2 returns a Seq(String) of output lines
+-- for pipeline-style processing without buffering the whole output.
+--
+-- env/1 and set_env/2 read and write OS environment variables.
+-- cwd/0, argv/0, pid/0 expose the current process context.
+-- exit/1 terminates the VM with the given exit code.
+
+mod Process do
+
+-- Result of a completed subprocess.
+-- ProcessResult(exit_code, stdout, stderr)
+pub type ProcessResult = ProcessResult(Int, String, String)
+
+-- ---- Subprocess execution ----
+
+doc "Run command with args, wait for it to finish. Returns Ok(ProcessResult) or Err(msg)."
+pub fn run(command, args) do
+  process_spawn_sync(command, args)
+end
+
+doc "Run command and return its stdout as a Seq(String) of lines. Returns Ok(Seq) or Err(msg)."
+pub fn run_stream(command, args) do
+  process_spawn_lines(command, args)
+end
+
+-- ---- Environment ----
+
+doc "Get the value of an environment variable. Returns Some(value) or None."
+pub fn env(name) do
+  process_env(name)
+end
+
+doc "Set an environment variable."
+pub fn set_env(name, value) do
+  process_set_env(name, value)
+end
+
+-- ---- Current process ----
+
+doc "Returns the current working directory."
+pub fn cwd() do
+  process_cwd()
+end
+
+doc "Terminate the process with the given exit code."
+pub fn exit(code) do
+  process_exit(code)
+end
+
+doc "Returns the command-line arguments as List(String) (argv[0] is the executable)."
+pub fn argv() do
+  process_argv()
+end
+
+doc "Returns the OS-level PID of the current process."
+pub fn pid() do
+  process_pid()
+end
+
+-- ---- ProcessResult helpers ----
+
+doc "Extract the exit code from a ProcessResult."
+pub fn exit_code(r) do
+  match r do | ProcessResult(code, _, _) -> code end
+end
+
+doc "Extract captured stdout from a ProcessResult."
+pub fn stdout(r) do
+  match r do | ProcessResult(_, out, _) -> out end
+end
+
+doc "Extract captured stderr from a ProcessResult."
+pub fn stderr(r) do
+  match r do | ProcessResult(_, _, err) -> err end
+end
+
+doc "True if the command exited with code 0."
+pub fn ok(r) do
+  match r do | ProcessResult(code, _, _) -> code == 0 end
+end
+
+end

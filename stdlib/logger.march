@@ -1,0 +1,114 @@
+-- Logger module: structured logging with levels and persistent context.
+--
+-- Log levels (ascending severity): Debug < Info < Warn < Error.
+-- The global level filter is set with set_level/1; messages below the
+-- current level are silently discarded.
+--
+-- with_context/2 attaches a key-value pair to every subsequent log entry.
+-- clear_context/0 removes all attached context.
+--
+-- Output goes to stderr in the format:
+--   [LEVEL] message {key=value, key2=value2}
+--
+-- Usage:
+--   Logger.set_level(Logger.Info)
+--   Logger.with_context("request_id", "abc123")
+--   Logger.info("handling request")
+--   Logger.warn("slow query")
+--   Logger.error("db connection lost")
+--   Logger.log_with(Logger.Info, "user signed in", [("user", "alice")])
+
+mod Logger do
+
+pub type Level = Debug | Info | Warn | Error
+
+-- ---- Level helpers ----
+
+pub fn level_to_int(l) do
+  match l do
+  | Debug -> 0
+  | Info  -> 1
+  | Warn  -> 2
+  | Error -> 3
+  end
+end
+
+pub fn level_to_string(l) do
+  match l do
+  | Debug -> "DEBUG"
+  | Info  -> "INFO"
+  | Warn  -> "WARN"
+  | Error -> "ERROR"
+  end
+end
+
+pub fn int_to_level(n) do
+  if n <= 0 then Debug
+  else if n == 1 then Info
+  else if n == 2 then Warn
+  else Error
+end
+
+-- ---- Level control ----
+
+doc "Set the minimum log level. Messages below this level are discarded."
+pub fn set_level(level) do
+  logger_set_level(level_to_int(level))
+end
+
+doc "Get the current minimum log level."
+pub fn get_level() do
+  int_to_level(logger_get_level())
+end
+
+-- ---- Context management ----
+
+doc "Add a key-value pair to the persistent log context."
+pub fn with_context(key, value) do
+  logger_add_context(key, value)
+end
+
+doc "Remove all persistent context key-value pairs."
+pub fn clear_context() do
+  logger_clear_context()
+end
+
+-- ---- Core logging ----
+
+fn should_log(level) do
+  level_to_int(level) >= logger_get_level()
+end
+
+fn do_log(level, msg, extra) do
+  if should_log(level) then do
+    let ctx = logger_get_context()
+    logger_write(level_to_string(level), msg, ctx, extra)
+  end else ()
+end
+
+doc "Log a Debug-level message."
+pub fn debug(msg) do do_log(Debug, msg, Nil) end
+
+doc "Log an Info-level message."
+pub fn info(msg) do do_log(Info, msg, Nil) end
+
+doc "Log a Warn-level message."
+pub fn warn(msg) do do_log(Warn, msg, Nil) end
+
+doc "Log an Error-level message."
+pub fn error(msg) do do_log(Error, msg, Nil) end
+
+doc "Log a message at the given level."
+pub fn log(level, msg) do do_log(level, msg, Nil) end
+
+doc """
+Log a message at the given level with extra metadata.
+metadata is a List((String, String)) of key-value pairs.
+
+    Logger.log_with(Logger.Info, "request done", [("status", "200"), ("ms", "42")])
+"""
+pub fn log_with(level, msg, metadata) do
+  do_log(level, msg, metadata)
+end
+
+end
