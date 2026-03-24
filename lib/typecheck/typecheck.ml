@@ -840,6 +840,7 @@ let builtin_bindings : (string * scheme) list =
     ("compare_string", Mono (TArrow (t_string, TArrow (t_string, t_int))));
     (* Diverging primitives *)
     ("panic",       poly1 (fun a -> TArrow (t_string, a)));
+    ("panic_",      poly1 (fun a -> TArrow (t_string, a)));
     ("todo_",       poly1 (fun a -> TArrow (t_string, a)));
     ("unreachable_",poly1 (fun a -> TArrow (t_unit,   a)));
     (* Task builtins — thunks use fn x -> expr (single Int param, ignored).

@@ -2726,6 +2726,10 @@ let base_env : env =
         | [VString msg] -> eval_error "panic: %s" msg
         | [v] -> eval_error "panic: %s" (value_display v)
         | _ -> eval_error "panic"))
+  ; ("panic_", VBuiltin ("panic_", function
+        | [VString msg] -> eval_error "panic: %s" msg
+        | [v] -> eval_error "panic: %s" (value_display v)
+        | _ -> eval_error "panic"))
   ; ("todo_", VBuiltin ("todo_", function
         | [VString msg] -> eval_error "todo: %s" msg
         | _ -> eval_error "todo: not yet implemented"))

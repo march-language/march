@@ -21,7 +21,7 @@ Used for violated invariants — bugs, not expected failures.
 Propagates to the enclosing actor boundary.
 """
 pub fn panic(msg : String) : a do
-  panic(msg)
+  panic_(msg)
 end
 
 doc """
