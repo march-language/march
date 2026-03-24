@@ -5,23 +5,23 @@
 
 mod Main do
 
-fn write_demo_csv(path) do
+pfn write_demo_csv(path) do
   let content = "name,age,city\nAlice,30,\"New York\"\nBob,25,London\n\"Carol, Jr.\",42,\"Sao Paulo\"\nDave,35,Berlin"
   File.write(path, content)
 end
 
-fn write_demo_tsv(path) do
+pfn write_demo_tsv(path) do
   let content = "product\tprice\tqty\nApple\t1.20\t50\nBanana\t0.50\t120\nCherry\t3.00\t30"
   File.write(path, content)
 end
 
 -- ── Example 1: streaming with each_row ──────────────────────────────
 
-fn print_row(row) do
+pfn print_row(row) do
   print(to_string(row))
 end
 
-fn demo_each_row(path) do
+pfn demo_each_row(path) do
   println("--- Example 1: each_row (streaming) ---")
   match Csv.each_row(path, ",", :rfc4180, fn row -> print_row(row)) do
   | Ok(:ok) -> println("Done.")
@@ -31,21 +31,21 @@ end
 
 -- ── Example 2: read_all, count rows, find oldest ─────────────────────
 
-fn get_age(row) do
+pfn get_age(row) do
   match row do
   | Cons(_, Cons(age_str, _)) -> String.to_int(age_str)
   | _ -> Err("no age")
   end
 end
 
-fn get_name(row) do
+pfn get_name(row) do
   match row do
   | Cons(name, _) -> name
   | _ -> ""
   end
 end
 
-fn find_oldest_loop(rows, best_name, best_age) do
+pfn find_oldest_loop(rows, best_name, best_age) do
   match rows do
   | Nil -> best_name
   | Cons(row, rest) ->
@@ -59,7 +59,7 @@ fn find_oldest_loop(rows, best_name, best_age) do
   end
 end
 
-fn demo_read_all(path) do
+pfn demo_read_all(path) do
   println("--- Example 2: read_all (eager) ---")
   match Csv.read_all(path, ",", :rfc4180) do
   | Err(e) -> println("Error: " ++ to_string(e))
@@ -76,7 +76,7 @@ end
 
 -- ── Example 3: each_row_with_header ──────────────────────────────────
 
-fn get_field_loop(hs, rs, name) do
+pfn get_field_loop(hs, rs, name) do
   match hs do
   | Nil -> None
   | Cons(h, rh) ->
@@ -88,11 +88,11 @@ fn get_field_loop(hs, rs, name) do
   end
 end
 
-fn get_field(header, row, name) do
+pfn get_field(header, row, name) do
   get_field_loop(header, row, name)
 end
 
-fn print_name_city(header, row) do
+pfn print_name_city(header, row) do
   let name = match get_field(header, row, "name") do
   | Some(v) -> v
   | None -> "?"
@@ -104,7 +104,7 @@ fn print_name_city(header, row) do
   println(name ++ " lives in " ++ city)
 end
 
-fn demo_with_header(path) do
+pfn demo_with_header(path) do
   println("--- Example 3: each_row_with_header ---")
   Csv.each_row_with_header(path, ",", :rfc4180, fn (header, row) ->
     print_name_city(header, row))
@@ -112,14 +112,14 @@ end
 
 -- ── Example 4: TSV with Simple mode ──────────────────────────────────
 
-fn demo_tsv(path) do
+pfn demo_tsv(path) do
   println("--- Example 4: TSV with :simple mode ---")
   Csv.each_row(path, "\t", :simple, fn row -> println(to_string(row)))
 end
 
 -- ── main ──────────────────────────────────────────────────────────────
 
-pub fn main() do
+pfn main() do
   let csv_path = "/tmp/march_csv_demo.csv"
   let tsv_path = "/tmp/march_tsv_demo.tsv"
   write_demo_csv(csv_path)

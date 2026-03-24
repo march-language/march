@@ -11,39 +11,39 @@
 
 mod CsvServer do
 
-fn save_csv(body) do
+pfn save_csv(body) do
   let path = "/tmp/march_csv_input.csv"
   File.write(path, body)
   path
 end
 
-fn first(row) do
+pfn first(row) do
   match row do
   | Cons(x, _) -> x
   | Nil -> ""
   end
 end
 
-fn second(row) do
+pfn second(row) do
   match row do
   | Cons(_, Cons(x, _)) -> x
   | _ -> ""
   end
 end
 
-fn parse_score(s) do
+pfn parse_score(s) do
   match String.to_int(String.trim(s)) do
   | Ok(n) -> n
   | Err(_) -> 0
   end
 end
 
-fn sum_scores(rows) do
+pfn sum_scores(rows) do
   List.fold_left(0, rows, fn(acc, row) ->
     acc + parse_score(second(row)))
 end
 
-fn max_score_loop(rows, best) do
+pfn max_score_loop(rows, best) do
   match rows do
   | Nil -> best
   | Cons(row, rest) ->
@@ -54,7 +54,7 @@ fn max_score_loop(rows, best) do
   end
 end
 
-fn min_score_loop(rows, best) do
+pfn min_score_loop(rows, best) do
   match rows do
   | Nil -> best
   | Cons(row, rest) ->
@@ -65,7 +65,7 @@ fn min_score_loop(rows, best) do
   end
 end
 
-fn format_row(row) do
+pfn format_row(row) do
   let name = first(row)
   let score = second(row)
   let upper_name = String.to_uppercase(name)
@@ -73,12 +73,12 @@ fn format_row(row) do
   upper_name ++ " (bytes=" ++ name_bytes ++ ", score=" ++ score ++ ")"
 end
 
-fn build_names_section(rows) do
+pfn build_names_section(rows) do
   List.fold_left("", rows, fn(acc, row) ->
     acc ++ "  " ++ format_row(row) ++ "\n")
 end
 
-fn router(conn) do
+pfn router(conn) do
   match (HttpServer.method(conn), HttpServer.path_info(conn)) do
   | (Post, Cons("csv", Nil)) ->
     let body = HttpServer.req_body(conn)
@@ -128,7 +128,7 @@ fn router(conn) do
   end
 end
 
-pub fn main() do
+pfn main() do
   println("CSV server starting on port 9876 ...")
   HttpServer.new(9876)
   |> HttpServer.plug(router)
