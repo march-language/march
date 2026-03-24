@@ -47,7 +47,7 @@ let load_or_build_index ~verbose root =
 (* Output                                                              *)
 (* ------------------------------------------------------------------ *)
 
-let print_results ~as_json ~limit results =
+let print_results ~as_json ~pretty ~limit results =
   let results = if limit > 0 then
     let rec take n = function
       | [] -> []
@@ -64,7 +64,9 @@ let print_results ~as_json ~limit results =
     in
     print_string (Yojson.Basic.pretty_to_string j);
     print_newline ()
-  end else begin
+  end else if pretty then
+    Search.format_results_pretty results
+  else begin
     if results = [] then
       print_endline "no results found"
     else
@@ -78,7 +80,7 @@ let print_results ~as_json ~limit results =
 (* Command                                                             *)
 (* ------------------------------------------------------------------ *)
 
-let run ~query ~type_sig ~doc_query ~limit ~as_json ~rebuild () =
+let run ~query ~type_sig ~doc_query ~limit ~as_json ~pretty ~rebuild () =
   let root = match Project.load () with
     | Ok p  -> p.Project.root
     | Error _ -> Filename.current_dir_name
@@ -102,4 +104,4 @@ let run ~query ~type_sig ~doc_query ~limit ~as_json ~rebuild () =
       else
         Search.search_combined idx ?name:name_q ?type_sig:type_q ?doc_query:doc_q ()
     in
-    print_results ~as_json ~limit results
+    print_results ~as_json ~pretty ~limit results

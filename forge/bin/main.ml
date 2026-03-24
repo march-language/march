@@ -162,16 +162,19 @@ let search_cmd =
   let as_json =
     Arg.(value & flag & info ["json"] ~doc:"Output results as JSON")
   in
+  let pretty =
+    Arg.(value & flag & info ["pretty"; "p"] ~doc:"Output results as a colored, aligned table")
+  in
   let rebuild =
     Arg.(value & flag & info ["rebuild"] ~doc:"Rebuild the search index before searching")
   in
-  let run q t d n j r =
-    Cmd_search.run ~query:q ~type_sig:t ~doc_query:d ~limit:n ~as_json:j ~rebuild:r ()
+  let run q t d n j p r =
+    Cmd_search.run ~query:q ~type_sig:t ~doc_query:d ~limit:n ~as_json:j ~pretty:p ~rebuild:r ()
   in
   Cmd.v
     (Cmd.info "search"
        ~doc:"Search stdlib and dependencies for functions, types, and constructors")
-    Term.(const run $ query $ type_sig $ doc_query $ limit $ as_json $ rebuild)
+    Term.(const run $ query $ type_sig $ doc_query $ limit $ as_json $ pretty $ rebuild)
 
 (* ------------------------------------------------------------------ forge init *)
 

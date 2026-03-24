@@ -479,3 +479,46 @@ let format_entry (e : entry) : string =
   | Some doc ->
     (* Wrap doc at 72 chars with 2-space indent *)
     headline ^ "\n  " ^ doc
+
+(** Format results as a colored, aligned table for terminal output. *)
+let format_results_pretty (results : (entry * float) list) : unit =
+  if results = [] then
+    print_endline "no results found"
+  else begin
+    let cyan  = "\027[36m" in
+    let bold  = "\027[1m"  in
+    let green = "\027[32m" in
+    let dim   = "\027[2m"  in
+    let reset = "\027[0m"  in
+    let pad s n = s ^ String.make (max 0 (n - String.length s)) ' ' in
+    let rows = List.map (fun (e, _) ->
+      let loc = Printf.sprintf "%s:%d" e.file e.line in
+      (e.module_name, e.name, e.signature, loc, e.doc)
+    ) results in
+    let w1 = List.fold_left (fun acc (m, _, _, _, _) ->
+      max acc (String.length m)) (String.length "Module") rows in
+    let w2 = List.fold_left (fun acc (_, n, _, _, _) ->
+      max acc (String.length n)) (String.length "Name") rows in
+    let w3 = List.fold_left (fun acc (_, _, s, _, _) ->
+      max acc (String.length s)) (String.length "Signature") rows in
+    Printf.printf "%s  %s  %s  %s\n"
+      (pad "Module" w1) (pad "Name" w2) (pad "Signature" w3) "Location";
+    Printf.printf "%s  %s  %s  %s\n"
+      (String.make w1 '-') (String.make w2 '-')
+      (String.make w3 '-') "--------";
+    List.iter (fun (modname, name, sig_, loc, doc) ->
+      Printf.printf "%s%s%s  %s%s%s  %s%s%s  %s%s%s\n"
+        cyan  (pad modname w1) reset
+        bold  (pad name   w2) reset
+        green (pad sig_   w3) reset
+        dim   loc             reset;
+      (match doc with
+       | None -> ()
+       | Some d ->
+         let first_line =
+           match String.split_on_char '\n' d with l :: _ -> l | [] -> ""
+         in
+         if first_line <> "" then
+           Printf.printf "  %s%s%s\n" dim first_line reset)
+    ) rows
+  end
