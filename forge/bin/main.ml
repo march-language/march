@@ -55,8 +55,20 @@ let run_cmd =
 (* ------------------------------------------------------------------ forge test *)
 
 let test_cmd =
+  let verbose =
+    Arg.(value & flag & info ["v"; "verbose"] ~doc:"Show each test name as it runs")
+  in
+  let filter =
+    Arg.(value & opt string "" &
+         info ["filter"] ~docv:"PATTERN" ~doc:"Only run tests whose name matches PATTERN")
+  in
+  let files =
+    Arg.(value & pos_all string [] &
+         info [] ~docv:"FILE" ~doc:"Test files to run (default: all test files under test/)")
+  in
+  let run v f fs = handle (Cmd_test.run ~verbose:v ~filter:f ~files:fs ()) in
   Cmd.v (Cmd.info "test" ~doc:"Run the test suite")
-    Term.(const (fun () -> handle (Cmd_test.run ())) $ const ())
+    Term.(const run $ verbose $ filter $ files)
 
 (* ---------------------------------------------------------------- forge format *)
 
@@ -110,12 +122,27 @@ let deps_cmd =
     (Cmd.info "deps" ~doc:"Install and manage project dependencies")
     [deps_update_cmd]
 
+(* ------------------------------------------------------------------ forge help *)
+
+let help_cmd =
+  let topic =
+    Arg.(value & pos 0 (some string) None &
+         info [] ~docv:"COMMAND" ~doc:"Command to show help for")
+  in
+  let run t =
+    match t with
+    | None   -> `Help (`Auto, None)
+    | Some c -> `Help (`Auto, Some c)
+  in
+  Cmd.v (Cmd.info "help" ~doc:"Show help for forge or a specific command")
+    Term.(ret (const run $ topic))
+
 (* --------------------------------------------------------------------- root *)
 
 let () =
   let cmds =
     [ new_cmd; build_cmd; run_cmd; test_cmd; format_cmd;
-      interactive_cmd; i_cmd; clean_cmd; deps_cmd ]
+      interactive_cmd; i_cmd; clean_cmd; deps_cmd; help_cmd ]
   in
   let main =
     Cmd.group
