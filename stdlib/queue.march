@@ -14,25 +14,25 @@
 
 mod Queue do
 
-pub type Queue(a) = pub Queue(List(a), List(a))
+type Queue(a) = Queue(List(a), List(a))
 
 -- ── Private helpers ───────────────────────────────────────────────────────
 
-fn rev(xs, acc) do
+pfn rev(xs, acc) do
   match xs do
   | Nil -> acc
   | Cons(h, t) -> rev(t, Cons(h, acc))
   end
 end
 
-fn list_len(xs, acc) do
+pfn list_len(xs, acc) do
   match xs do
   | Nil -> acc
   | Cons(_, t) -> list_len(t, acc + 1)
   end
 end
 
-fn list_append(xs, ys) do
+pfn list_append(xs, ys) do
   match xs do
   | Nil -> ys
   | Cons(h, t) -> Cons(h, list_append(t, ys))
@@ -42,12 +42,12 @@ end
 -- ── Public API ────────────────────────────────────────────────────────────
 
 doc "Returns an empty deque."
-pub fn empty() do
+fn empty() do
   Queue(Nil, Nil)
 end
 
 doc "Returns true if the deque contains no elements."
-pub fn is_empty(q) do
+fn is_empty(q) do
   match q do
   | Queue(Nil, Nil) -> true
   | _ -> false
@@ -55,14 +55,14 @@ pub fn is_empty(q) do
 end
 
 doc "Add an element to the back of the deque."
-pub fn push_back(q, x) do
+fn push_back(q, x) do
   match q do
   | Queue(front, back) -> Queue(front, Cons(x, back))
   end
 end
 
 doc "Add an element to the front of the deque."
-pub fn push_front(q, x) do
+fn push_front(q, x) do
   match q do
   | Queue(front, back) -> Queue(Cons(x, front), back)
   end
@@ -72,7 +72,7 @@ doc """
 Remove and return the front element.
 Returns Some((element, new_queue)) if non-empty, or None if empty.
 """
-pub fn pop_front(q) do
+fn pop_front(q) do
   match q do
   | Queue(Nil, Nil) -> None
   | Queue(Nil, back) ->
@@ -89,7 +89,7 @@ doc """
 Remove and return the back element.
 Returns Some((element, new_queue)) if non-empty, or None if empty.
 """
-pub fn pop_back(q) do
+fn pop_back(q) do
   match q do
   | Queue(Nil, Nil) -> None
   | Queue(front, Nil) ->
@@ -103,7 +103,7 @@ pub fn pop_back(q) do
 end
 
 doc "Return the front element without removing it, or None if empty."
-pub fn peek_front(q) do
+fn peek_front(q) do
   match q do
   | Queue(Nil, Nil) -> None
   | Queue(Cons(h, _), _) -> Some(h)
@@ -117,7 +117,7 @@ pub fn peek_front(q) do
 end
 
 doc "Return the back element without removing it, or None if empty."
-pub fn peek_back(q) do
+fn peek_back(q) do
   match q do
   | Queue(Nil, Nil) -> None
   | Queue(_, Cons(h, _)) -> Some(h)
@@ -131,21 +131,21 @@ pub fn peek_back(q) do
 end
 
 doc "Return the number of elements in the deque. O(n)."
-pub fn size(q) do
+fn size(q) do
   match q do
   | Queue(front, back) -> list_len(front, 0) + list_len(back, 0)
   end
 end
 
 doc "Convert the deque to a list ordered from front to back."
-pub fn to_list(q) do
+fn to_list(q) do
   match q do
   | Queue(front, back) -> list_append(front, rev(back, Nil))
   end
 end
 
 doc "Build a deque from a list. The first element of the list becomes the front."
-pub fn from_list(xs) do
+fn from_list(xs) do
   fn go(lst, q) do
     match lst do
     | Nil -> q

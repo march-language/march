@@ -14,13 +14,13 @@
 
 mod Csv do
 
-type CsvError = FileError(String) | CsvParseError(String)
+ptype CsvError = FileError(String) | CsvParseError(String)
 
 -- Result of csv_next_row: either end-of-file or a parsed row.
-type CsvRow = CsvEof | Row(List(String))
+ptype CsvRow = CsvEof | Row(List(String))
 
 -- Internal streaming loop: call callback(fields) for each row.
-fn each_row_loop(handle, callback) do
+pfn each_row_loop(handle, callback) do
   match csv_next_row(handle) do
   | CsvEof -> :ok
   | Row(fields) ->
@@ -32,7 +32,7 @@ end
 -- Stream rows from path one at a time.
 -- callback receives List(String) per row.
 -- File is always closed after all rows or on :eof.
-pub fn each_row(path, delimiter, mode, callback) do
+fn each_row(path, delimiter, mode, callback) do
   match csv_open(path, delimiter, mode) do
   | Err(e) -> Err(e)
   | Ok(handle) ->
@@ -43,7 +43,7 @@ pub fn each_row(path, delimiter, mode, callback) do
 end
 
 -- Internal accumulator loop for read_all.
-fn collect_loop(handle, acc) do
+pfn collect_loop(handle, acc) do
   match csv_next_row(handle) do
   | CsvEof -> List.reverse(acc)
   | Row(fields) -> collect_loop(handle, Cons(fields, acc))
@@ -52,7 +52,7 @@ end
 
 -- Eagerly read all rows into a List(List(String)).
 -- Only for small files.
-pub fn read_all(path, delimiter, mode) do
+fn read_all(path, delimiter, mode) do
   match csv_open(path, delimiter, mode) do
   | Err(e) -> Err(e)
   | Ok(handle) ->
@@ -63,7 +63,7 @@ pub fn read_all(path, delimiter, mode) do
 end
 
 -- Internal loop for each_row_with_header: calls callback(header, fields) per row.
-fn with_header_loop(handle, header, callback) do
+pfn with_header_loop(handle, header, callback) do
   match csv_next_row(handle) do
   | CsvEof -> :ok
   | Row(fields) ->
@@ -74,7 +74,7 @@ end
 
 -- Stream rows with the first row separated as a header.
 -- callback receives (header : List(String), row : List(String)).
-pub fn each_row_with_header(path, delimiter, mode, callback) do
+fn each_row_with_header(path, delimiter, mode, callback) do
   match csv_open(path, delimiter, mode) do
   | Err(e) -> Err(e)
   | Ok(handle) ->
@@ -91,12 +91,12 @@ pub fn each_row_with_header(path, delimiter, mode, callback) do
 end
 
 -- Convenience: comma-delimited, RFC 4180, eager.
-pub fn read_csv(path) do
+fn read_csv(path) do
   read_all(path, ",", :rfc4180)
 end
 
 -- Convenience: comma-delimited, RFC 4180, streaming.
-pub fn each_csv_row(path, callback) do
+fn each_csv_row(path, callback) do
   each_row(path, ",", :rfc4180, callback)
 end
 

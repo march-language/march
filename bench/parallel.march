@@ -22,15 +22,15 @@
 
 mod Parallel do
 
-type Tree = Leaf(Int) | Node(Tree, Tree)
+ptype Tree = Leaf(Int) | Node(Tree, Tree)
 
-fn make(d : Int) : Tree do
+pfn make(d : Int) : Tree do
   if d == 0 then Leaf(1)
   else Node(make(d - 1), make(d - 1))
 end
 
 -- Sequential sum — used below the task-spawn threshold.
-fn sum(t : Tree) : Int do
+pfn sum(t : Tree) : Int do
   match t do
   | Leaf(n)    -> n
   | Node(l, r) -> sum(l) + sum(r)
@@ -39,7 +39,7 @@ end
 
 -- Parallel sum: spawn two tasks for left/right subtrees down to `threshold`
 -- depth, then switch to sequential to avoid spawning millions of tiny tasks.
-fn par_sum(t : Tree, depth : Int, threshold : Int) : Int do
+pfn par_sum(t : Tree, depth : Int, threshold : Int) : Int do
   match t do
   | Leaf(n) -> n
   | Node(l, r) ->
@@ -54,7 +54,7 @@ fn par_sum(t : Tree, depth : Int, threshold : Int) : Int do
   end
 end
 
-fn main() : Unit do
+pfn main() : Unit do
   -- depth-24 tree: 2^24 leaves, ~537 MB of nodes
   -- threshold 10: parallel down to 1024 tasks, then sequential
   let t     = make(24)

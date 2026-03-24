@@ -32,17 +32,17 @@ mod Flow do
 -- A Stage wraps a Seq(a).
 -- In the compiled runtime this would be an actor Pid; here it holds the
 -- lazy fold function directly.
-pub type Stage(a) = Stage(Seq(a))
+type Stage(a) = Stage(Seq(a))
 
 -- ---- Producers ----
 
 doc "Create a stage from a list of items."
-pub fn from_list(xs) do
+fn from_list(xs) do
   Stage(Seq.from_list(xs))
 end
 
 doc "Create a stage from an existing Seq."
-pub fn from_seq(seq) do
+fn from_seq(seq) do
   Stage(seq)
 end
 
@@ -54,12 +54,12 @@ Produces items until next returns None.
 Example — integers from 0 to 4:
     Flow.unfold(0, fn s -> if s >= 5 then None else Some((s, s + 1)))
 """
-pub fn unfold(seed, next) do
+fn unfold(seed, next) do
   Stage(Seq.unfold(seed, next))
 end
 
 doc "Create a stage over the integer range [start, stop)."
-pub fn range(start, stop) do
+fn range(start, stop) do
   Stage(Seq.unfold(start, fn i ->
     if i >= stop then None
     else Some((i, i + 1))))
@@ -68,21 +68,21 @@ end
 -- ---- Transformers ----
 
 doc "Apply f to every item."
-pub fn map(stage, f) do
+fn map(stage, f) do
   match stage do
   | Stage(seq) -> Stage(Seq.map(seq, f))
   end
 end
 
 doc "Keep only items where pred returns true."
-pub fn filter(stage, pred) do
+fn filter(stage, pred) do
   match stage do
   | Stage(seq) -> Stage(Seq.filter(seq, pred))
   end
 end
 
 doc "Apply f to each item (f returns a list) and flatten the results."
-pub fn flat_map(stage, f) do
+fn flat_map(stage, f) do
   match stage do
   | Stage(seq) ->
     Stage(Seq.flat_map(seq, fn x ->
@@ -93,21 +93,21 @@ pub fn flat_map(stage, f) do
 end
 
 doc "Keep at most n items."
-pub fn take(stage, n) do
+fn take(stage, n) do
   match stage do
   | Stage(seq) -> Stage(Seq.take(seq, n))
   end
 end
 
 doc "Skip the first n items."
-pub fn drop(stage, n) do
+fn drop(stage, n) do
   match stage do
   | Stage(seq) -> Stage(Seq.drop(seq, n))
   end
 end
 
 doc "Group items into lists of at most n elements."
-pub fn batch(stage, n) do
+fn batch(stage, n) do
   match stage do
   | Stage(seq) -> Stage(Seq.batch(seq, n))
   end
@@ -122,66 +122,66 @@ No-op in the interpreter (single-threaded execution).
       |> Flow.with_concurrency(8)
       |> Flow.collect
 """
-pub fn with_concurrency(stage, _n) do stage end
+fn with_concurrency(stage, _n) do stage end
 
 -- ---- Consumers (run the pipeline eagerly) ----
 
 doc "Collect all items into a List."
-pub fn collect(stage) do
+fn collect(stage) do
   match stage do
   | Stage(seq) -> Seq.to_list(seq)
   end
 end
 
 doc "Run the pipeline for side effects; discard all items."
-pub fn run(stage) do
+fn run(stage) do
   match stage do
   | Stage(seq) -> Seq.each(seq, fn _ -> ())
   end
 end
 
 doc "Reduce all items to a single value using f(accumulator, item) -> accumulator."
-pub fn reduce(stage, start, f) do
+fn reduce(stage, start, f) do
   match stage do
   | Stage(seq) -> Seq.fold(seq, start, f)
   end
 end
 
 doc "Consume with f(acc, item) -> acc (alias for reduce)."
-pub fn into(stage, start, f) do
+fn into(stage, start, f) do
   reduce(stage, start, f)
 end
 
 doc "Run f on each item for its side effects."
-pub fn each(stage, f) do
+fn each(stage, f) do
   match stage do
   | Stage(seq) -> Seq.each(seq, f)
   end
 end
 
 doc "Count the total number of items produced."
-pub fn count(stage) do
+fn count(stage) do
   match stage do
   | Stage(seq) -> Seq.count(seq)
   end
 end
 
 doc "Return the first item satisfying pred, or None."
-pub fn find(stage, pred) do
+fn find(stage, pred) do
   match stage do
   | Stage(seq) -> Seq.find(seq, pred)
   end
 end
 
 doc "True if any item satisfies pred."
-pub fn any(stage, pred) do
+fn any(stage, pred) do
   match stage do
   | Stage(seq) -> Seq.any(seq, pred)
   end
 end
 
 doc "True if all items satisfy pred."
-pub fn all(stage, pred) do
+fn all(stage, pred) do
   match stage do
   | Stage(seq) -> Seq.all(seq, pred)
   end

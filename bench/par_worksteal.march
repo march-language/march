@@ -22,13 +22,13 @@
 
 mod ParWorkSteal do
 
-fn fib(n : Int) : Int do
+pfn fib(n : Int) : Int do
   if n < 2 then n
   else fib(n - 1) + fib(n - 2)
 end
 
 -- Work-stealing parallel fib: pool capability threaded explicitly.
-fn par_fib(pool : WorkPool, n : Int, threshold : Int) : Int do
+pfn par_fib(pool : WorkPool, n : Int, threshold : Int) : Int do
   if n < 2 then n
   else if n <= threshold then fib(n)
   else do
@@ -41,7 +41,7 @@ fn par_fib(pool : WorkPool, n : Int, threshold : Int) : Int do
 end
 
 -- main() acquires the WorkPool capability from the runtime.
-fn main() : Unit do
+pfn main() : Unit do
   let pool = get_work_pool
   let result = par_fib(pool, 40, 20)
   println(int_to_string(result))

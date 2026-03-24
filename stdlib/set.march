@@ -22,17 +22,17 @@ mod Set do
 -- We inline the same HAMT structure directly rather than nesting the Map
 -- wrapper to avoid an extra allocation layer.
 
-type HEntry(a) =
+ptype HEntry(a) =
   HEmpty
   | HLeaf(Int, a)
   | HBranch(Int, List(HEntry(a)))
   | HCollision(Int, List(a))
 
-type Set(a) = HamtSet(HEntry(a))
+ptype Set(a) = HamtSet(HEntry(a))
 
 -- ── Private helpers ────────────────────────────────────────────────────────
 
-fn lst_rev(lst) do
+pfn lst_rev(lst) do
   fn go(xs, acc) do
     match xs do
     | Nil -> acc
@@ -42,7 +42,7 @@ fn lst_rev(lst) do
   go(lst, Nil)
 end
 
-fn cmp_eq(cmp, a, b) do
+pfn cmp_eq(cmp, a, b) do
   let lt_ab = cmp(a)
   let lt_ba = cmp(b)
   if lt_ab(b) then false
@@ -50,31 +50,31 @@ fn cmp_eq(cmp, a, b) do
   else true
 end
 
-fn key_hash(k) do
+pfn key_hash(k) do
   int_and(hash(k), 1073741823)
 end
 
-fn hash_slot(h, level) do
+pfn hash_slot(h, level) do
   int_and(int_shr(h, level * 5), 31)
 end
 
-fn bitmap_has(bitmap, idx) do
+pfn bitmap_has(bitmap, idx) do
   int_and(int_shr(bitmap, idx), 1) == 1
 end
 
-fn bitmap_rank(bitmap, idx) do
+pfn bitmap_rank(bitmap, idx) do
   int_popcount(int_and(bitmap, int_shl(1, idx) - 1))
 end
 
-fn bitmap_set(bitmap, idx) do
+pfn bitmap_set(bitmap, idx) do
   int_or(bitmap, int_shl(1, idx))
 end
 
-fn bitmap_clear(bitmap, idx) do
+pfn bitmap_clear(bitmap, idx) do
   int_and(bitmap, int_not(int_shl(1, idx)))
 end
 
-fn list_insert_at(lst, idx, elem) do
+pfn list_insert_at(lst, idx, elem) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -91,7 +91,7 @@ fn list_insert_at(lst, idx, elem) do
   go(lst, idx, Nil)
 end
 
-fn list_replace_at(lst, idx, elem) do
+pfn list_replace_at(lst, idx, elem) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -109,7 +109,7 @@ fn list_replace_at(lst, idx, elem) do
   go(lst, idx, Nil)
 end
 
-fn list_delete_at(lst, idx) do
+pfn list_delete_at(lst, idx) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -127,7 +127,7 @@ fn list_delete_at(lst, idx) do
   go(lst, idx, Nil)
 end
 
-fn list_nth_safe(lst, n) do
+pfn list_nth_safe(lst, n) do
   match lst do
   | Nil -> panic("Set: HAMT node index out of range")
   | Cons(h, t) ->
@@ -135,7 +135,7 @@ fn list_nth_safe(lst, n) do
   end
 end
 
-fn coll_has(elems, x, eq) do
+pfn coll_has(elems, x, eq) do
   match elems do
   | Nil -> false
   | Cons(e, rest) ->
@@ -143,12 +143,12 @@ fn coll_has(elems, x, eq) do
   end
 end
 
-fn coll_insert_elem(elems, x, eq) do
+pfn coll_insert_elem(elems, x, eq) do
   if coll_has(elems, x, eq) then elems
   else Cons(x, elems)
 end
 
-fn coll_remove_elem(elems, x, eq) do
+pfn coll_remove_elem(elems, x, eq) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -168,7 +168,7 @@ end
 
 -- ── HAMT core ─────────────────────────────────────────────────────────────
 
-fn node_contains(node, x, h, eq, level) do
+pfn node_contains(node, x, h, eq, level) do
   match node do
   | HEmpty -> false
   | HLeaf(lh, lx) ->
@@ -185,7 +185,7 @@ fn node_contains(node, x, h, eq, level) do
   end
 end
 
-fn make_branch(h1, x1, h2, x2, level) do
+pfn make_branch(h1, x1, h2, x2, level) do
   fn apply_slots(node, slots) do
     match slots do
     | Nil -> node
@@ -215,7 +215,7 @@ fn make_branch(h1, x1, h2, x2, level) do
   go(level, Nil)
 end
 
-fn node_insert(node, x, h, eq, level) do
+pfn node_insert(node, x, h, eq, level) do
   match node do
   | HEmpty -> HLeaf(h, x)
   | HLeaf(lh, lx) ->
@@ -251,7 +251,7 @@ fn node_insert(node, x, h, eq, level) do
   end
 end
 
-fn node_remove(node, x, h, eq, level) do
+pfn node_remove(node, x, h, eq, level) do
   match node do
   | HEmpty -> HEmpty
   | HLeaf(lh, lx) ->
@@ -293,7 +293,7 @@ fn node_remove(node, x, h, eq, level) do
   end
 end
 
-fn node_fold(acc, node, f) do
+pfn node_fold(acc, node, f) do
   match node do
   | HEmpty -> acc
   | HLeaf(_, x) -> f(acc, x)
@@ -317,7 +317,7 @@ fn node_fold(acc, node, f) do
   end
 end
 
-fn node_size(node) do
+pfn node_size(node) do
   match node do
   | HEmpty -> 0
   | HLeaf(_, _) -> 1
@@ -343,12 +343,12 @@ end
 -- ── Public API ─────────────────────────────────────────────────────────────
 
 doc "Returns an empty set."
-pub fn empty() do
+fn empty() do
   HamtSet(HEmpty)
 end
 
 doc "Returns a set containing exactly one element."
-pub fn singleton(x) do
+fn singleton(x) do
   let h = key_hash(x)
   HamtSet(HLeaf(h, x))
 end
@@ -356,7 +356,7 @@ end
 -- ---- Query ----
 
 doc "Returns true if the set contains no elements."
-pub fn is_empty(s) do
+fn is_empty(s) do
   match s do
   | HamtSet(HEmpty) -> true
   | _               -> false
@@ -364,7 +364,7 @@ pub fn is_empty(s) do
 end
 
 doc "Returns the number of elements in the set. O(n)."
-pub fn size(s) do
+fn size(s) do
   match s do
   | HamtSet(node) -> node_size(node)
   end
@@ -374,7 +374,7 @@ doc """
 Returns true if the set contains elem.
 cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
-pub fn contains(s, elem, cmp) do
+fn contains(s, elem, cmp) do
   match s do
   | HamtSet(node) ->
     let h = key_hash(elem)
@@ -389,7 +389,7 @@ doc """
 Inserts elem into the set. Returns the set unchanged if elem is already present.
 cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
-pub fn insert(s, elem, cmp) do
+fn insert(s, elem, cmp) do
   match s do
   | HamtSet(node) ->
     let h = key_hash(elem)
@@ -402,7 +402,7 @@ doc """
 Removes elem from the set. Returns the set unchanged if elem is absent.
 cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
-pub fn remove(s, elem, cmp) do
+fn remove(s, elem, cmp) do
   match s do
   | HamtSet(node) ->
     let h = key_hash(elem)
@@ -417,7 +417,7 @@ doc """
 Returns the union of two sets (all elements in either set).
 cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
-pub fn union(a, b, cmp) do
+fn union(a, b, cmp) do
   fn go(acc, x) do
     insert(acc, x, cmp)
   end
@@ -430,7 +430,7 @@ doc """
 Returns the intersection of two sets (elements in both sets).
 cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
-pub fn intersection(a, b, cmp) do
+fn intersection(a, b, cmp) do
   fn go(acc, x) do
     if contains(b, x, cmp) then insert(acc, x, cmp)
     else acc
@@ -445,7 +445,7 @@ doc """
 Returns elements in a that are not in b (set difference a \\ b).
 cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
-pub fn difference(a, b, cmp) do
+fn difference(a, b, cmp) do
   fn go(acc, x) do
     if contains(b, x, cmp) then acc
     else insert(acc, x, cmp)
@@ -457,7 +457,7 @@ pub fn difference(a, b, cmp) do
 end
 
 doc "Returns true if a is a subset of b."
-pub fn is_subset(a, b, cmp) do
+fn is_subset(a, b, cmp) do
   fn check(ok, x) do
     ok && contains(b, x, cmp)
   end
@@ -470,7 +470,7 @@ end
 -- ---- Traversal ----
 
 doc "Returns all elements as a list (hash-traversal order)."
-pub fn to_list(s) do
+fn to_list(s) do
   match s do
   | HamtSet(node) ->
     let acc = node_fold(Nil, node, fn (xs, x) -> Cons(x, xs))
@@ -482,7 +482,7 @@ doc """
 Builds a set from a list of elements.
 cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
-pub fn from_list(xs, cmp) do
+fn from_list(xs, cmp) do
   fn go(lst, acc) do
     match lst do
     | Nil -> acc
@@ -495,7 +495,7 @@ end
 doc """
 Left fold over all elements. f(acc)(elem) = new_acc.
 """
-pub fn fold(acc, s, f) do
+fn fold(acc, s, f) do
   match s do
   | HamtSet(node) ->
     node_fold(acc, node, f)
@@ -506,7 +506,7 @@ doc """
 Returns true if the two sets contain the same elements.
 cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
-pub fn eq(a, b, cmp) do
+fn eq(a, b, cmp) do
   let sa = size(a)
   let sb = size(b)
   if sa != sb then false

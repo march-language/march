@@ -13,26 +13,26 @@
 
 mod DateTime do
 
-pub type Date = pub Date(Int, Int, Int)         -- year, month (1-12), day (1-31)
-pub type Time = pub Time(Int, Int, Int)         -- hour (0-23), min (0-59), sec (0-59)
-pub type DateTime = pub DateTime(Date, Time)
+type Date = Date(Int, Int, Int)         -- year, month (1-12), day (1-31)
+type Time = Time(Int, Int, Int)         -- hour (0-23), min (0-59), sec (0-59)
+type DateTime = DateTime(Date, Time)
 
 -- ── Private helpers ───────────────────────────────────────────────────────
 
 -- Floor division (rounds toward negative infinity).
-fn floor_div(a, b) do
+pfn floor_div(a, b) do
   let q = int_div(a, b)
   let r = a - q * b
   if r < 0 then q - 1 else q
 end
 
 -- Floor modulo (always non-negative when b > 0).
-fn floor_mod(a, b) do
+pfn floor_mod(a, b) do
   a - floor_div(a, b) * b
 end
 
 -- Is the given year a leap year in the proleptic Gregorian calendar?
-fn is_leap(y) do
+pfn is_leap(y) do
   if int_mod(y, 400) == 0 then true
   else if int_mod(y, 100) == 0 then false
   else if int_mod(y, 4) == 0 then true
@@ -40,7 +40,7 @@ fn is_leap(y) do
 end
 
 -- Number of days in month m (1-indexed) of year y.
-fn days_in_month(y, m) do
+pfn days_in_month(y, m) do
   if m == 1 || m == 3 || m == 5 || m == 7 || m == 8 || m == 10 || m == 12
   then 31
   else if m == 4 || m == 6 || m == 9 || m == 11
@@ -50,19 +50,19 @@ fn days_in_month(y, m) do
 end
 
 -- Count of leap years in the range 1..n (for n >= 1).
-fn leap_count(n) do
+pfn leap_count(n) do
   int_div(n, 4) - int_div(n, 100) + int_div(n, 400)
 end
 
 -- Days from 1970-01-01 to Jan 1 of year y (may be negative for y < 1970).
-fn year_to_days(y) do
+pfn year_to_days(y) do
   let y1 = y - 1
   let leaps = if y1 > 0 then leap_count(y1) else 0
   y1 * 365 + leaps - (1969 * 365 + 477)
 end
 
 -- Days from 1970-01-01 to the date (y, m, d).
-fn date_to_days(y, m, d) do
+pfn date_to_days(y, m, d) do
   fn month_sum(mi, acc) do
     if mi >= m then acc
     else month_sum(mi + 1, acc + days_in_month(y, mi))
@@ -72,7 +72,7 @@ end
 
 -- Convert a count of days since 1970-01-01 to a Date.
 -- All helper functions are defined first, then called once.
-fn days_to_date(days) do
+pfn days_to_date(days) do
   fn find_year_fwd(y, rem) do
     let diy = if is_leap(y) then 366 else 365
     if rem < diy then (y, rem)
@@ -97,7 +97,7 @@ fn days_to_date(days) do
 end
 
 -- Pad an integer to at least `width` digits with leading zeros.
-fn pad_int(n, width) do
+pfn pad_int(n, width) do
   let s = int_to_string(n)
   let len = string_byte_length(s)
   if len >= width then s
@@ -106,7 +106,7 @@ end
 
 -- Parse a decimal integer from a string prefix of exactly `n` digits.
 -- Returns Some((value, rest_string)) or None on failure.
-fn parse_digits(s, n) do
+pfn parse_digits(s, n) do
   let len = string_byte_length(s)
   if len < n then None
   else do
@@ -120,7 +120,7 @@ fn parse_digits(s, n) do
 end
 
 -- Expect a literal prefix in s. Returns Some(rest) or None.
-fn expect_prefix(s, prefix) do
+pfn expect_prefix(s, prefix) do
   if string_starts_with(s, prefix) then
     Some(string_slice(s, string_byte_length(prefix),
            string_byte_length(s) - string_byte_length(prefix)))
@@ -130,7 +130,7 @@ end
 -- ── Public API ────────────────────────────────────────────────────────────
 
 doc "Return the current Unix timestamp as an Int (seconds since 1970-01-01 UTC)."
-pub fn now() do
+fn now() do
   float_to_int(unix_time(()))
 end
 
@@ -140,7 +140,7 @@ Convert a Unix timestamp (Int seconds) to a DateTime.
     DateTime.from_timestamp(0)     -- DateTime(Date(1970, 1, 1), Time(0, 0, 0))
     DateTime.from_timestamp(86400) -- DateTime(Date(1970, 1, 2), Time(0, 0, 0))
 """
-pub fn from_timestamp(ts) do
+fn from_timestamp(ts) do
   let days = floor_div(ts, 86400)
   let secs = floor_mod(ts, 86400)
   let hour = int_div(secs, 3600)
@@ -154,7 +154,7 @@ Convert a DateTime to a Unix timestamp (Int seconds since 1970-01-01 UTC).
 
     DateTime.to_timestamp(DateTime(Date(1970, 1, 1), Time(0, 0, 0))) -- 0
 """
-pub fn to_timestamp(dt) do
+fn to_timestamp(dt) do
   match dt do
   | DateTime(Date(y, m, d), Time(h, mi, s)) ->
     date_to_days(y, m, d) * 86400 + h * 3600 + mi * 60 + s
@@ -162,17 +162,17 @@ pub fn to_timestamp(dt) do
 end
 
 doc "Add n days to a DateTime. n may be negative."
-pub fn add_days(dt, n) do
+fn add_days(dt, n) do
   from_timestamp(to_timestamp(dt) + n * 86400)
 end
 
 doc "Add n hours to a DateTime. n may be negative."
-pub fn add_hours(dt, n) do
+fn add_hours(dt, n) do
   from_timestamp(to_timestamp(dt) + n * 3600)
 end
 
 doc "Add n seconds to a DateTime. n may be negative."
-pub fn add_seconds(dt, n) do
+fn add_seconds(dt, n) do
   from_timestamp(to_timestamp(dt) + n)
 end
 
@@ -180,7 +180,7 @@ doc """
 Difference between two DateTimes in seconds.
 diff_seconds(a, b) = to_timestamp(a) - to_timestamp(b).
 """
-pub fn diff_seconds(a, b) do
+fn diff_seconds(a, b) do
   to_timestamp(a) - to_timestamp(b)
 end
 
@@ -188,7 +188,7 @@ doc """
 Compare two DateTimes.
 Returns -1 if a < b, 0 if a == b, 1 if a > b.
 """
-pub fn compare(a, b) do
+fn compare(a, b) do
   let ta = to_timestamp(a)
   let tb = to_timestamp(b)
   if ta < tb then -1
@@ -201,7 +201,7 @@ Return the day of the week for the date component of a DateTime.
 0 = Sunday, 1 = Monday, ..., 6 = Saturday.
 (January 1, 1970 was a Thursday = 4.)
 """
-pub fn day_of_week(dt) do
+fn day_of_week(dt) do
   match dt do
   | DateTime(Date(y, m, d), _) ->
     let days = date_to_days(y, m, d)
@@ -215,7 +215,7 @@ Supported specifiers: %Y %m %d %H %M %S %%
 
 Example: DateTime.format(dt, "%Y-%m-%d %H:%M:%S")
 """
-pub fn format(dt, fmt) do
+fn format(dt, fmt) do
   match dt do
   | DateTime(Date(yr, mo, dy), Time(hr, mn, sc)) ->
     let s1 = string_replace_all(fmt, "%Y", pad_int(yr, 4))
@@ -232,7 +232,7 @@ Parse a DateTime from a string.
 Supports: "YYYY-MM-DD" and "YYYY-MM-DD HH:MM:SS".
 Returns Ok(DateTime) or Err(message).
 """
-pub fn parse(s) do
+fn parse(s) do
   let len = string_byte_length(s)
   if len < 10 then Err("string too short to be a date: " ++ s)
   else

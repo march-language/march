@@ -14,7 +14,7 @@ Returns true if the option contains a value.
     march> Option.is_some(None)
     false
 """
-pub fn is_some(opt : Option(a)) : Bool do
+fn is_some(opt : Option(a)) : Bool do
   match opt do
   | Some(_) -> true
   | None    -> false
@@ -30,7 +30,7 @@ Returns true if the option is None.
     march> Option.is_none(Some(0))
     false
 """
-pub fn is_none(opt : Option(a)) : Bool do
+fn is_none(opt : Option(a)) : Bool do
   match opt do
   | None    -> true
   | Some(_) -> false
@@ -41,7 +41,7 @@ doc """
 Extracts the value from Some(x), panicking with the given message if None.
 Use when you are certain the option is Some.
 """
-pub fn expect(opt : Option(a), msg : String) : a do
+fn expect(opt : Option(a), msg : String) : a do
   match opt do
   | Some(x) -> x
   | None    -> panic(msg)
@@ -57,7 +57,7 @@ Extracts the value from Some(x), panicking if None.
     march> Option.unwrap(None)
     ** panic: Option.unwrap called on None
 """
-pub fn unwrap(opt : Option(a)) : a do
+fn unwrap(opt : Option(a)) : a do
   match opt do
   | Some(x) -> x
   | None    -> panic("Option.unwrap called on None")
@@ -73,7 +73,7 @@ Returns the contained value, or `default` if None.
     march> Option.unwrap_or(None, 99)
     99
 """
-pub fn unwrap_or(opt : Option(a), default : a) : a do
+fn unwrap_or(opt : Option(a), default : a) : a do
   match opt do
   | Some(x) -> x
   | None    -> default
@@ -81,7 +81,7 @@ pub fn unwrap_or(opt : Option(a), default : a) : a do
 end
 
 doc "Returns the contained value, or calls `f` to produce a default."
-pub fn unwrap_or_else(opt : Option(a), f : () -> a) : a do
+fn unwrap_or_else(opt : Option(a), f : () -> a) : a do
   match opt do
   | Some(x) -> x
   | None    -> f(())
@@ -89,7 +89,7 @@ pub fn unwrap_or_else(opt : Option(a), f : () -> a) : a do
 end
 
 doc "Applies `f` to the contained value, or returns None."
-pub fn map(opt : Option(a), f : a -> b) : Option(b) do
+fn map(opt : Option(a), f : a -> b) : Option(b) do
   match opt do
   | Some(x) -> Some(f(x))
   | None    -> None
@@ -97,7 +97,7 @@ pub fn map(opt : Option(a), f : a -> b) : Option(b) do
 end
 
 doc "Applies `f` (which itself returns an Option) and flattens the result."
-pub fn flat_map(opt : Option(a), f : a -> Option(b)) : Option(b) do
+fn flat_map(opt : Option(a), f : a -> Option(b)) : Option(b) do
   match opt do
   | Some(x) -> f(x)
   | None    -> None
@@ -105,7 +105,7 @@ pub fn flat_map(opt : Option(a), f : a -> Option(b)) : Option(b) do
 end
 
 doc "Returns None if the value does not satisfy `pred`."
-pub fn filter(opt : Option(a), pred : a -> Bool) : Option(a) do
+fn filter(opt : Option(a), pred : a -> Bool) : Option(a) do
   match opt do
   | Some(x) -> if pred(x) then Some(x) else None
   | None    -> None
@@ -113,7 +113,7 @@ pub fn filter(opt : Option(a), pred : a -> Bool) : Option(a) do
 end
 
 doc "Returns `f()` if None, or the original Some value."
-pub fn or_else(opt : Option(a), f : () -> Option(a)) : Option(a) do
+fn or_else(opt : Option(a), f : () -> Option(a)) : Option(a) do
   match opt do
   | Some(_) -> opt
   | None    -> f(())
@@ -121,7 +121,7 @@ pub fn or_else(opt : Option(a), f : () -> Option(a)) : Option(a) do
 end
 
 doc "Combines two Options into a tuple Option, returning None if either is None."
-pub fn zip(a : Option(a), b : Option(b)) : Option((a, b)) do
+fn zip(a : Option(a), b : Option(b)) : Option((a, b)) do
   match a do
   | None    -> None
   | Some(x) ->
@@ -133,7 +133,7 @@ pub fn zip(a : Option(a), b : Option(b)) : Option((a, b)) do
 end
 
 doc "Converts Option(a) to Result(a, e) using the provided error value."
-pub fn to_result(opt : Option(a), err : e) : Result(a, e) do
+fn to_result(opt : Option(a), err : e) : Result(a, e) do
   match opt do
   | Some(x) -> Ok(x)
   | None    -> Err(err)
@@ -141,7 +141,7 @@ pub fn to_result(opt : Option(a), err : e) : Result(a, e) do
 end
 
 doc "Converts Option(a) to a List: Some(x) becomes [x], None becomes []."
-pub fn to_list(opt : Option(a)) : List(a) do
+fn to_list(opt : Option(a)) : List(a) do
   match opt do
   | Some(x) -> Cons(x, Nil)
   | None    -> Nil

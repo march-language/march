@@ -26,24 +26,24 @@ mod ParMap do
 -- Collatz conjecture step count: a pure, variable-cost function.
 -- Perfect for embarrassingly parallel workloads because each element
 -- is independent and the work per element varies widely.
-fn collatz_steps(n : Int, acc : Int) : Int do
+pfn collatz_steps(n : Int, acc : Int) : Int do
   if n == 1 then acc
   else if n % 2 == 0 then collatz_steps(n / 2, acc + 1)
   else collatz_steps(3 * n + 1, acc + 1)
 end
 
 -- Build a range as a list (tail-recursive with accumulator).
-fn range_acc(lo : Int, hi : Int, acc : List(Int)) : List(Int) do
+pfn range_acc(lo : Int, hi : Int, acc : List(Int)) : List(Int) do
   if lo > hi then acc
   else range_acc(lo, hi - 1, Cons(hi, acc))
 end
 
-fn range(lo : Int, hi : Int) : List(Int) do
+pfn range(lo : Int, hi : Int) : List(Int) do
   range_acc(lo, hi, Nil)
 end
 
 -- Sum a list of integers.
-fn sum(xs : List(Int), acc : Int) : Int do
+pfn sum(xs : List(Int), acc : Int) : Int do
   match xs do
   | Nil -> acc
   | Cons(x, rest) -> sum(rest, acc + x)
@@ -51,7 +51,7 @@ fn sum(xs : List(Int), acc : Int) : Int do
 end
 
 -- Map collatz_steps over a list, collecting step counts.
-fn map_collatz(xs : List(Int), acc : List(Int)) : List(Int) do
+pfn map_collatz(xs : List(Int), acc : List(Int)) : List(Int) do
   match xs do
   | Nil -> acc
   | Cons(x, rest) -> map_collatz(rest, Cons(collatz_steps(x, 0), acc))
@@ -61,7 +61,7 @@ end
 -- Process a list in chunks, spawning a task per chunk.
 -- chunk_acc accumulates the current chunk's elements.
 -- chunk_left counts remaining elements in the current chunk.
-fn par_map_inner(xs : List(Int), chunk_size : Int,
+pfn par_map_inner(xs : List(Int), chunk_size : Int,
                  chunk_acc : List(Int), chunk_left : Int) : Int do
   match xs do
   | Nil ->
@@ -84,11 +84,11 @@ fn par_map_inner(xs : List(Int), chunk_size : Int,
 end
 
 -- Spawn a task per chunk, await all, sum results.
-fn par_map_sum(xs : List(Int), chunk_size : Int) : Int do
+pfn par_map_sum(xs : List(Int), chunk_size : Int) : Int do
   par_map_inner(xs, chunk_size, Nil, chunk_size)
 end
 
-fn main() : Unit do
+pfn main() : Unit do
   -- 10K elements, 1000 per chunk = 10 tasks
   -- (100K overflows the C stack in compiled mode until TCO is improved)
   let n = 10000

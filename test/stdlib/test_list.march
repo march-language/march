@@ -3,11 +3,11 @@
 
 mod TestList do
 
-fn five() : List(Int) do
+pfn five() : List(Int) do
   Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil)))))
 end
 
-fn three() : List(Int) do
+pfn three() : List(Int) do
   Cons(10, Cons(20, Cons(30, Nil)))
 end
 

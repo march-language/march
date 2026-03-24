@@ -78,8 +78,8 @@
 %token TYPE MOD ACTOR ON SEND SPAWN
 %token STATE INIT RESPOND PROTOCOL LOOP
 %token LINEAR AFFINE
-%token PUB INTERFACE IMPL SIG EXTERN UNSAFE AS USE NEEDS REQUIRES
-%token IMPORT ALIAS ONLY EXCEPT P_FN DERIVE FOR
+%token INTERFACE IMPL SIG EXTERN UNSAFE AS USE NEEDS REQUIRES
+%token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE FOR
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
 %token TEST DESCRIBE ASSERT SETUP SETUP_ALL
@@ -125,7 +125,7 @@ module_:
 (** Recoverable declaration list.  On error, collects the diagnostic and
     skips tokens (via Menhir's default error-recovery token-dropping)
     until the parser can shift a sync token that starts a new declaration
-    (FN, PUB, TYPE, LET, MOD, etc.) or END/EOF to close the block.
+    (FN, PFN, TYPE, PTYPE, LET, MOD, etc.) or END/EOF to close the block.
     Capped at 20 errors to suppress cascading noise. *)
 decl_list_r:
   | { [] }
@@ -175,31 +175,19 @@ fn_decl:
   | FN; name = lower_name; LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
     ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
     { DFn ({ fn_name = name;
-             fn_vis = Private;
-             fn_doc = None;
-             fn_attrs = [];
-             fn_ret_ty = ret;
-             fn_clauses = [{ fc_params = params;
-                             fc_guard = guard;
-                             fc_body = body;
-                             fc_span = mk_span ($loc) }] },
-           mk_span ($loc)) }
-  | P_FN; name = lower_name; LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
-    ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
-    { DFn ({ fn_name = name;
-             fn_vis = Private;
-             fn_doc = None;
-             fn_attrs = [];
-             fn_ret_ty = ret;
-             fn_clauses = [{ fc_params = params;
-                             fc_guard = guard;
-                             fc_body = body;
-                             fc_span = mk_span ($loc) }] },
-           mk_span ($loc)) }
-  | PUB; FN; name = lower_name; LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
-    ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
-    { DFn ({ fn_name = name;
              fn_vis = Public;
+             fn_doc = None;
+             fn_attrs = [];
+             fn_ret_ty = ret;
+             fn_clauses = [{ fc_params = params;
+                             fc_guard = guard;
+                             fc_body = body;
+                             fc_span = mk_span ($loc) }] },
+           mk_span ($loc)) }
+  | PFN; name = lower_name; LPAREN; params = separated_list(COMMA, fn_param); RPAREN;
+    ret = option(ret_annot); guard = option(when_guard); DO; body = block_body; END
+    { DFn ({ fn_name = name;
+             fn_vis = Private;
              fn_doc = None;
              fn_attrs = [];
              fn_ret_ty = ret;
@@ -213,16 +201,11 @@ fn_decl:
         "I was expecting `do` to start the function body here:"
         (Some "fn name(params) do\n    body\nend")
         $startpos($6) }
-  | P_FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
+  | PFN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
     { error_raise
         "I was expecting `do` to start the function body here:"
-        (Some "p_fn name(params) do\n    body\nend")
+        (Some "pfn name(params) do\n    body\nend")
         $startpos($6) }
-  | PUB; FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
-    { error_raise
-        "I was expecting `do` to start the function body here:"
-        (Some "pub fn name(params) do\n    body\nend")
-        $startpos($7) }
 
 when_guard:
   | WHEN; e = expr { e }
@@ -237,9 +220,6 @@ fn_param:
 
 let_decl:
   | LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
-    { DLet (Private, { bind_pat = p; bind_ty = ty; bind_lin = Unrestricted; bind_expr = e },
-            mk_span ($loc)) }
-  | PUB; LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
     { DLet (Public, { bind_pat = p; bind_ty = ty; bind_lin = Unrestricted; bind_expr = e },
             mk_span ($loc)) }
   | LET; _p = simple_pattern; _ty = option(type_annot); error
@@ -252,19 +232,19 @@ type_decl:
   | TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     variants = separated_nonempty_list(PIPE, variant)
     { let tps = match tparams with Some ps -> ps | None -> [] in
-      DType (Private, name, tps, TDVariant variants, mk_span ($loc)) }
+      DType (Public, name, tps, TDVariant variants, mk_span ($loc)) }
   | TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     LBRACE; fields = separated_list(COMMA, field); RBRACE
     { let tps = match tparams with Some ps -> ps | None -> [] in
-      DType (Private, name, tps, TDRecord fields, mk_span ($loc)) }
-  | PUB; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
+      DType (Public, name, tps, TDRecord fields, mk_span ($loc)) }
+  | PTYPE; name = upper_name; tparams = option(type_params); EQUALS;
     variants = separated_nonempty_list(PIPE, variant)
     { let tps = match tparams with Some ps -> ps | None -> [] in
-      DType (Public, name, tps, TDVariant variants, mk_span ($loc)) }
-  | PUB; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
+      DType (Private, name, tps, TDVariant variants, mk_span ($loc)) }
+  | PTYPE; name = upper_name; tparams = option(type_params); EQUALS;
     LBRACE; fields = separated_list(COMMA, field); RBRACE
     { let tps = match tparams with Some ps -> ps | None -> [] in
-      DType (Public, name, tps, TDRecord fields, mk_span ($loc)) }
+      DType (Private, name, tps, TDRecord fields, mk_span ($loc)) }
   | TYPE; _n = upper_name; error
     { error_raise
         "I was expecting `=` after the type name here:"
@@ -283,16 +263,6 @@ actor_decl:
         (Some "actor Name do\n    state { field: Type }\n    init ...\n    on Msg(x) do ... end\nend")
         $startpos($3) }
   | ACTOR; name = upper_name; DO;
-    STATE; LBRACE; fields = separated_list(COMMA, field); RBRACE;
-    INIT; init_expr = expr;
-    sup = option(supervise_block);
-    handlers = list(actor_handler);
-    END
-    { DActor (Private, name,
-              { actor_state = fields; actor_init = init_expr; actor_handlers = handlers;
-                actor_supervise = sup },
-              mk_span ($loc)) }
-  | PUB; ACTOR; name = upper_name; DO;
     STATE; LBRACE; fields = separated_list(COMMA, field); RBRACE;
     INIT; init_expr = expr;
     sup = option(supervise_block);
@@ -430,19 +400,12 @@ choose_branch:
 (** Nested module: mod Name do ... end *)
 mod_decl:
   | MOD; name = upper_name; DO; decls = decl_list_r; END
-    { DMod (name, Private, group_fn_clauses decls, mk_span ($loc)) }
-  | PUB; MOD; name = upper_name; DO; decls = decl_list_r; END
     { DMod (name, Public, group_fn_clauses decls, mk_span ($loc)) }
   | MOD; _n = upper_name; error
     { error_raise
         "I was expecting `do` after the module name here:"
         (Some "mod Name do\n    ...\nend")
         $startpos($3) }
-  | PUB; MOD; _n = upper_name; error
-    { error_raise
-        "I was expecting `do` after the module name here:"
-        (Some "pub mod Name do\n    ...\nend")
-        $startpos($4) }
 
 (** Import declaration: use A.B.* or use A.B.{f,g} or use A.B.foo or use A
     Multi-level module paths are handled via the right-recursive use_path_tail
@@ -644,22 +607,14 @@ dotted_upper_tail:
   | id = upper_name; DOT; rest = dotted_upper_tail { id :: rest }
 
 variant:
-  | PUB; name = upper_name; LPAREN; args = separated_nonempty_list(COMMA, ty); RPAREN
-    { { var_name = name; var_args = args; var_vis = Public } }
-  | PUB; name = upper_name
-    { { var_name = name; var_args = []; var_vis = Public } }
-  | PUB; a = ATOM; LPAREN; args = separated_nonempty_list(COMMA, ty); RPAREN
-    { { var_name = mk_name a $loc; var_args = args; var_vis = Public } }
-  | PUB; a = ATOM
-    { { var_name = mk_name a $loc; var_args = []; var_vis = Public } }
   | name = upper_name; LPAREN; args = separated_nonempty_list(COMMA, ty); RPAREN
-    { { var_name = name; var_args = args; var_vis = Private } }
+    { { var_name = name; var_args = args; var_vis = Public } }
   | name = upper_name
-    { { var_name = name; var_args = []; var_vis = Private } }
+    { { var_name = name; var_args = []; var_vis = Public } }
   | a = ATOM; LPAREN; args = separated_nonempty_list(COMMA, ty); RPAREN
-    { { var_name = mk_name a $loc; var_args = args; var_vis = Private } }
+    { { var_name = mk_name a $loc; var_args = args; var_vis = Public } }
   | a = ATOM
-    { { var_name = mk_name a $loc; var_args = []; var_vis = Private } }
+    { { var_name = mk_name a $loc; var_args = []; var_vis = Public } }
 
 field:
   | name = lower_name; COLON; t = ty

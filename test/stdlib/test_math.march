@@ -3,7 +3,7 @@
 
 mod TestMath do
 
-fn approx_eq(a : Float, b : Float) : Bool do
+pfn approx_eq(a : Float, b : Float) : Bool do
   let diff = if a > b then a - b else b - a
   diff < 0.0001
 end

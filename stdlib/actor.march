@@ -38,7 +38,7 @@
 mod Actor do
 
 doc "Fire-and-forget: enqueue msg in the actor's mailbox without waiting."
-pub fn cast(pid, msg) do
+fn cast(pid, msg) do
   actor_cast(pid, msg)
 end
 
@@ -48,7 +48,7 @@ The actor handler must call Actor.reply(ref, result) to unblock the caller.
 Returns Ok(result) or Err(reason).
 timeout_ms is accepted for API compatibility but not enforced in the interpreter.
 """
-pub fn call(pid, msg, timeout_ms) do
+fn call(pid, msg, timeout_ms) do
   actor_call(pid, msg, timeout_ms)
 end
 
@@ -57,7 +57,7 @@ Reply to a synchronous call from within an actor handler.
 ref_id is the first element of the Call(ref_id, ...) message.
 result is the value to return to the caller.
 """
-pub fn reply(ref_id, result) do
+fn reply(ref_id, result) do
   actor_reply(ref_id, result)
 end
 

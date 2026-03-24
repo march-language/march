@@ -3,21 +3,21 @@
 
 mod Path do
 
-pub fn join(a, b) do
+fn join(a, b) do
   if String.ends_with(a, "/") then a ++ b
   else a ++ "/" ++ b
 end
 
-pub fn is_absolute(path) do
+fn is_absolute(path) do
   String.starts_with(path, "/")
 end
 
-pub fn components(path) do
+fn components(path) do
   let raw = String.split(path, "/")
   List.filter(raw, fn s -> not (String.is_empty(s)))
 end
 
-pub fn basename(path) do
+fn basename(path) do
   let parts = components(path)
   match parts do
   | Nil -> path
@@ -28,7 +28,7 @@ pub fn basename(path) do
   end
 end
 
-pub fn dirname(path) do
+fn dirname(path) do
   let parts = components(path)
   match List.drop_last(parts) do
   | Nil -> if is_absolute(path) then "/" else "."
@@ -38,7 +38,7 @@ pub fn dirname(path) do
   end
 end
 
-pub fn extension(path) do
+fn extension(path) do
   let base = basename(path)
   match String.last_index_of(base, ".") do
   | None -> ""
@@ -50,7 +50,7 @@ pub fn extension(path) do
   end
 end
 
-pub fn strip_extension(path) do
+fn strip_extension(path) do
   let base = basename(path)
   let dir = dirname(path)
   match String.last_index_of(base, ".") do
@@ -62,7 +62,7 @@ pub fn strip_extension(path) do
   end
 end
 
-pub fn normalize(path) do
+fn normalize(path) do
   let abs = is_absolute(path)
   let parts = components(path)
   fn process(remaining, stack) do

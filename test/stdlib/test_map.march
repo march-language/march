@@ -3,11 +3,11 @@
 
 mod TestMap do
 
-fn int_cmp(a : Int) : Int -> Bool do
+pfn int_cmp(a : Int) : Int -> Bool do
   fn b -> a < b
 end
 
-fn str_cmp(a : String) : String -> Bool do
+pfn str_cmp(a : String) : String -> Bool do
   fn b -> a < b
 end
 

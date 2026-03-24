@@ -6,23 +6,23 @@
 
 mod Http do
 
-  pub type Method = pub Get | pub Post | pub Put | pub Patch | pub Delete | pub Head | pub Options | pub Trace | pub Connect | pub Other(String)
+  type Method = Get | Post | Put | Patch | Delete | Head | Options | Trace | Connect | Other(String)
 
-  pub type Scheme = pub SchemeHttp | pub SchemeHttps
+  type Scheme = SchemeHttp | SchemeHttps
 
-  pub type Status = pub Status(Int)
+  type Status = Status(Int)
 
-  pub type Header = pub Header(String, String)
+  type Header = Header(String, String)
 
-  pub type UrlError = pub InvalidScheme(String) | pub MissingHost | pub InvalidPort(String) | pub MalformedUrl(String)
+  type UrlError = InvalidScheme(String) | MissingHost | InvalidPort(String) | MalformedUrl(String)
 
-  pub type Request(body) = pub Request(Method, Scheme, String, Option(Int), String, Option(String), List(Header), body)
+  type Request(body) = Request(Method, Scheme, String, Option(Int), String, Option(String), List(Header), body)
 
-  pub type Response(body) = pub Response(Status, List(Header), body)
+  type Response(body) = Response(Status, List(Header), body)
 
   -- Method helpers
 
-  pub fn method_to_string(m : Method) : String do
+  fn method_to_string(m : Method) : String do
     match m do
     | Get     -> "GET"
     | Post    -> "POST"
@@ -39,119 +39,119 @@ mod Http do
 
   -- Status helpers
 
-  pub fn status_code(s : Status) : Int do
+  fn status_code(s : Status) : Int do
     match s do | Status(n) -> n end
   end
 
-  pub fn status_ok() : Status do Status(200) end
-  pub fn status_created() : Status do Status(201) end
-  pub fn status_no_content() : Status do Status(204) end
-  pub fn status_moved() : Status do Status(301) end
-  pub fn status_found() : Status do Status(302) end
-  pub fn status_bad_request() : Status do Status(400) end
-  pub fn status_unauthorized() : Status do Status(401) end
-  pub fn status_forbidden() : Status do Status(403) end
-  pub fn status_not_found() : Status do Status(404) end
-  pub fn status_server_error() : Status do Status(500) end
+  fn status_ok() : Status do Status(200) end
+  fn status_created() : Status do Status(201) end
+  fn status_no_content() : Status do Status(204) end
+  fn status_moved() : Status do Status(301) end
+  fn status_found() : Status do Status(302) end
+  fn status_bad_request() : Status do Status(400) end
+  fn status_unauthorized() : Status do Status(401) end
+  fn status_forbidden() : Status do Status(403) end
+  fn status_not_found() : Status do Status(404) end
+  fn status_server_error() : Status do Status(500) end
 
-  pub fn is_informational(s : Status) : Bool do
+  fn is_informational(s : Status) : Bool do
     let c = status_code(s)
     c >= 100 && c < 200
   end
 
-  pub fn is_success(s : Status) : Bool do
+  fn is_success(s : Status) : Bool do
     let c = status_code(s)
     c >= 200 && c < 300
   end
 
-  pub fn is_redirect(s : Status) : Bool do
+  fn is_redirect(s : Status) : Bool do
     let c = status_code(s)
     c >= 300 && c < 400
   end
 
-  pub fn is_client_error(s : Status) : Bool do
+  fn is_client_error(s : Status) : Bool do
     let c = status_code(s)
     c >= 400 && c < 500
   end
 
-  pub fn is_server_error(s : Status) : Bool do
+  fn is_server_error(s : Status) : Bool do
     let c = status_code(s)
     c >= 500 && c < 600
   end
 
   -- Request accessors
 
-  pub fn method(req : Request(b)) : Method do
+  fn method(req : Request(b)) : Method do
     match req do | Request(m, _, _, _, _, _, _, _) -> m end
   end
 
-  pub fn scheme(req : Request(b)) : Scheme do
+  fn scheme(req : Request(b)) : Scheme do
     match req do | Request(_, s, _, _, _, _, _, _) -> s end
   end
 
-  pub fn host(req : Request(b)) : String do
+  fn host(req : Request(b)) : String do
     match req do | Request(_, _, h, _, _, _, _, _) -> h end
   end
 
-  pub fn port(req : Request(b)) : Option(Int) do
+  fn port(req : Request(b)) : Option(Int) do
     match req do | Request(_, _, _, p, _, _, _, _) -> p end
   end
 
-  pub fn path(req : Request(b)) : String do
+  fn path(req : Request(b)) : String do
     match req do | Request(_, _, _, _, p, _, _, _) -> p end
   end
 
-  pub fn query(req : Request(b)) : Option(String) do
+  fn query(req : Request(b)) : Option(String) do
     match req do | Request(_, _, _, _, _, q, _, _) -> q end
   end
 
-  pub fn headers(req : Request(b)) : List(Header) do
+  fn headers(req : Request(b)) : List(Header) do
     match req do | Request(_, _, _, _, _, _, h, _) -> h end
   end
 
-  pub fn body(req : Request(b)) : b do
+  fn body(req : Request(b)) : b do
     match req do | Request(_, _, _, _, _, _, _, b) -> b end
   end
 
   -- Request transforms
 
-  pub fn set_method(req : Request(b), m : Method) : Request(b) do
+  fn set_method(req : Request(b), m : Method) : Request(b) do
     match req do
     | Request(_, sc, h, p, pa, q, hd, bd) -> Request(m, sc, h, p, pa, q, hd, bd)
     end
   end
 
-  pub fn set_scheme(req : Request(b), s : Scheme) : Request(b) do
+  fn set_scheme(req : Request(b), s : Scheme) : Request(b) do
     match req do
     | Request(m, _, h, p, pa, q, hd, bd) -> Request(m, s, h, p, pa, q, hd, bd)
     end
   end
 
-  pub fn set_host(req : Request(b), new_host : String) : Request(b) do
+  fn set_host(req : Request(b), new_host : String) : Request(b) do
     match req do
     | Request(m, sc, _, p, pa, q, hd, bd) -> Request(m, sc, new_host, p, pa, q, hd, bd)
     end
   end
 
-  pub fn set_port(req : Request(b), new_port : Int) : Request(b) do
+  fn set_port(req : Request(b), new_port : Int) : Request(b) do
     match req do
     | Request(m, sc, h, _, pa, q, hd, bd) -> Request(m, sc, h, Some(new_port), pa, q, hd, bd)
     end
   end
 
-  pub fn set_path(req : Request(b), new_path : String) : Request(b) do
+  fn set_path(req : Request(b), new_path : String) : Request(b) do
     match req do
     | Request(m, sc, h, p, _, q, hd, bd) -> Request(m, sc, h, p, new_path, q, hd, bd)
     end
   end
 
-  pub fn set_body(req : Request(a), new_body : b) : Request(b) do
+  fn set_body(req : Request(a), new_body : b) : Request(b) do
     match req do
     | Request(m, sc, h, p, pa, q, hd, _) -> Request(m, sc, h, p, pa, q, hd, new_body)
     end
   end
 
-  pub fn set_header(req : Request(b), name : String, value : String) : Request(b) do
+  fn set_header(req : Request(b), name : String, value : String) : Request(b) do
     match req do
     | Request(m, sc, h, p, pa, q, hd, bd) ->
       Request(m, sc, h, p, pa, q, Cons(Header(name, value), hd), bd)
@@ -160,33 +160,33 @@ mod Http do
 
   -- Response accessors
 
-  pub fn response_status(resp : Response(b)) : Status do
+  fn response_status(resp : Response(b)) : Status do
     match resp do | Response(s, _, _) -> s end
   end
 
-  pub fn response_headers(resp : Response(b)) : List(Header) do
+  fn response_headers(resp : Response(b)) : List(Header) do
     match resp do | Response(_, h, _) -> h end
   end
 
-  pub fn response_body(resp : Response(b)) : b do
+  fn response_body(resp : Response(b)) : b do
     match resp do | Response(_, _, b) -> b end
   end
 
-  pub fn response_status_code(resp : Response(b)) : Int do
+  fn response_status_code(resp : Response(b)) : Int do
     status_code(response_status(resp))
   end
 
-  pub fn response_is_success(resp : Response(b)) : Bool do
+  fn response_is_success(resp : Response(b)) : Bool do
     is_success(response_status(resp))
   end
 
-  pub fn response_is_redirect(resp : Response(b)) : Bool do
+  fn response_is_redirect(resp : Response(b)) : Bool do
     is_redirect(response_status(resp))
   end
 
   -- Header lookup (case-insensitive)
 
-  pub fn get_header(resp : Response(b), name : String) : Option(String) do
+  fn get_header(resp : Response(b), name : String) : Option(String) do
     let lower_name = string_to_lowercase(name)
     fn find(hs : List(Header)) : Option(String) do
       match hs do
@@ -199,7 +199,7 @@ mod Http do
     find(response_headers(resp))
   end
 
-  pub fn get_request_header(req : Request(b), name : String) : Option(String) do
+  fn get_request_header(req : Request(b), name : String) : Option(String) do
     let lower_name = string_to_lowercase(name)
     fn find(hs : List(Header)) : Option(String) do
       match hs do
@@ -214,7 +214,7 @@ mod Http do
 
   -- URL parsing
 
-  pub fn parse_url(url : String) : Result(Request(Unit), UrlError) do
+  fn parse_url(url : String) : Result(Request(Unit), UrlError) do
     let has_https = string_starts_with(url, "https://")
     let has_http = string_starts_with(url, "http://")
     if not(has_https) && not(has_http) then
@@ -266,46 +266,46 @@ mod Http do
 
   -- Convenience constructors
 
-  pub fn get(url : String) : Result(Request(Unit), UrlError) do
+  fn get(url : String) : Result(Request(Unit), UrlError) do
     parse_url(url)
   end
 
-  pub fn post(url : String, bdy : b) : Result(Request(b), UrlError) do
+  fn post(url : String, bdy : b) : Result(Request(b), UrlError) do
     match parse_url(url) do
     | Ok(req) -> Ok(set_method(set_body(req, bdy), Post))
     | Err(e) -> Err(e)
     end
   end
 
-  pub fn put(url : String, bdy : b) : Result(Request(b), UrlError) do
+  fn put(url : String, bdy : b) : Result(Request(b), UrlError) do
     match parse_url(url) do
     | Ok(req) -> Ok(set_method(set_body(req, bdy), Put))
     | Err(e) -> Err(e)
     end
   end
 
-  pub fn patch(url : String, bdy : b) : Result(Request(b), UrlError) do
+  fn patch(url : String, bdy : b) : Result(Request(b), UrlError) do
     match parse_url(url) do
     | Ok(req) -> Ok(set_method(set_body(req, bdy), Patch))
     | Err(e) -> Err(e)
     end
   end
 
-  pub fn delete(url : String) : Result(Request(Unit), UrlError) do
+  fn delete(url : String) : Result(Request(Unit), UrlError) do
     match parse_url(url) do
     | Ok(req) -> Ok(set_method(req, Delete))
     | Err(e) -> Err(e)
     end
   end
 
-  pub fn head(url : String) : Result(Request(Unit), UrlError) do
+  fn head(url : String) : Result(Request(Unit), UrlError) do
     match parse_url(url) do
     | Ok(req) -> Ok(set_method(req, Head))
     | Err(e) -> Err(e)
     end
   end
 
-  pub fn options(url : String) : Result(Request(Unit), UrlError) do
+  fn options(url : String) : Result(Request(Unit), UrlError) do
     match parse_url(url) do
     | Ok(req) -> Ok(set_method(req, Options))
     | Err(e) -> Err(e)
@@ -314,7 +314,7 @@ mod Http do
 
   -- Query string encoding
 
-  pub fn encode_query(params : List((String, String))) : String do
+  fn encode_query(params : List((String, String))) : String do
     fn encode_pair(k : String, v : String) : String do
       k ++ "=" ++ v
     end
@@ -327,7 +327,7 @@ mod Http do
     string_join(go(params), "&")
   end
 
-  pub fn set_query(req : Request(b), params : List((String, String))) : Request(b) do
+  fn set_query(req : Request(b), params : List((String, String))) : Request(b) do
     match req do
     | Request(m, sc, h, p, pa, _, hd, bd) ->
       let q = if is_nil(params) then None else Some(encode_query(params))

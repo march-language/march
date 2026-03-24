@@ -23,7 +23,7 @@ mod HttpTransport do
   Open a TCP connection to the request's host:port.
   Returns Ok(fd) or Err(TransportError).
   """
-  pub fn connect(req) do
+  fn connect(req) do
     let req_host = Http.host(req)
     let req_port = match Http.port(req) do
       | Some(p) -> p
@@ -40,7 +40,7 @@ mod HttpTransport do
   Does NOT close the connection — caller manages the fd lifetime.
   Suitable for keep-alive connection reuse.
   """
-  pub fn request_on(fd, req) do
+  fn request_on(fd, req) do
     let meth = Http.method_to_string(Http.method(req))
     let req_host = Http.host(req)
     let req_path = Http.path(req)
@@ -71,7 +71,7 @@ mod HttpTransport do
   Returns Ok((status_code, headers, last_chunk_result)) or Err.
   Does NOT close the connection.
   """
-  pub fn stream_request_on(fd, req, on_chunk) do
+  fn stream_request_on(fd, req, on_chunk) do
     let meth = Http.method_to_string(Http.method(req))
     let req_host = Http.host(req)
     let req_path = Http.path(req)
@@ -126,7 +126,7 @@ mod HttpTransport do
   Opens a TCP connection, sends the request with Connection: close,
   receives and parses the response, then closes the connection.
   """
-  pub fn request(req) do
+  fn request(req) do
     let req = Http.set_header(req, "Connection", "close")
     let req_host = Http.host(req)
     let req_port = match Http.port(req) do
@@ -167,7 +167,7 @@ mod HttpTransport do
   Convenience wrapper: parse a URL and send a GET request.
   Returns a TransportError if the URL is invalid or the request fails.
   """
-  pub fn simple_get(url) do
+  fn simple_get(url) do
     match Http.get(url) do
     | Err(InvalidScheme(s)) -> Err(ConnParseError("invalid scheme: " ++ s))
     | Err(MissingHost) -> Err(ConnParseError("missing host"))

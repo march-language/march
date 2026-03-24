@@ -7,9 +7,9 @@
 mod TestWebSocket do
 
 -- Local mirrors of WebSocket private types (matched structurally at runtime).
-type WsFrame = TextFrame(String) | BinaryFrame(String) | Ping | Pong | Close(Int, String)
-type WsSocket = WsSocket(Int)
-type SelectResult = WsData(WsFrame) | ActorMsg | Timeout
+ptype WsFrame = TextFrame(String) | BinaryFrame(String) | Ping | Pong | Close(Int, String)
+ptype WsSocket = WsSocket(Int)
+ptype SelectResult = WsData(WsFrame) | ActorMsg | Timeout
 
 describe "WsFrame constructors" do
   test "TextFrame stores content" do
@@ -108,14 +108,14 @@ describe "SelectResult constructors" do
   end
 end
 
-fn is_text_frame(f) do
+pfn is_text_frame(f) do
   match f do
   | TextFrame(_) -> true
   | _            -> false
   end
 end
 
-fn is_control_frame(f) do
+pfn is_control_frame(f) do
   match f do
   | Ping        -> true
   | Pong        -> true

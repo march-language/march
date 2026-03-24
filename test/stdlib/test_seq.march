@@ -4,7 +4,7 @@
 mod TestSeq do
 
 -- Step type mirrors Seq.Step so Continue/Halt constructors are in scope.
-type Step(a) = Continue(a) | Halt(a)
+ptype Step(a) = Continue(a) | Halt(a)
 
 describe "from_list and to_list" do
 

@@ -7,23 +7,23 @@
 mod TestHttpServer do
 
 -- Local mirrors of HttpServer private types (matched structurally at runtime).
-type Upgrade = NoUpgrade | WebSocketUpgrade(a)
-type Conn = Conn(
+ptype Upgrade = NoUpgrade | WebSocketUpgrade(a)
+ptype Conn = Conn(
   Int, Method, String, List(String), String,
   List(Header), String, Int, List(Header), String,
   Bool, List((String, String)), Upgrade
 )
 
-fn make_conn(meth, path_, qs, req_hdrs, req_body) do
+pfn make_conn(meth, path_, qs, req_hdrs, req_body) do
   let path_parts = List.filter(string_split(path_, "/"), fn s -> not(string_is_empty(s)))
   Conn(0, meth, path_, path_parts, qs, req_hdrs, req_body, 0, Nil, "", false, Nil, NoUpgrade)
 end
 
-fn make_get(path_) do
+pfn make_get(path_) do
   make_conn(Get, path_, "", Cons(Header("host", "localhost"), Nil), "")
 end
 
-fn make_post(path_, body) do
+pfn make_post(path_, body) do
   make_conn(Post, path_, "", Cons(Header("content-type", "text/plain"), Nil), body)
 end
 

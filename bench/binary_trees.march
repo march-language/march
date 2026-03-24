@@ -5,30 +5,30 @@
 
 mod BinaryTrees do
 
-type Tree = Leaf | Node(Tree, Tree)
+ptype Tree = Leaf | Node(Tree, Tree)
 
-fn make(d : Int) : Tree do
+pfn make(d : Int) : Tree do
   if d == 0 then Leaf
   else Node(make(d - 1), make(d - 1))
 end
 
-fn check(t : Tree) : Int do
+pfn check(t : Tree) : Int do
   match t do
   | Leaf       -> 1
   | Node(l, r) -> check(l) + check(r) + 1
   end
 end
 
-fn pow2(n : Int) : Int do
+pfn pow2(n : Int) : Int do
   if n == 0 then 1 else 2 * pow2(n - 1)
 end
 
-fn sum_trees(iters : Int, depth : Int, acc : Int) : Int do
+pfn sum_trees(iters : Int, depth : Int, acc : Int) : Int do
   if iters == 0 then acc
   else sum_trees(iters - 1, depth, acc + check(make(depth)))
 end
 
-fn run_depths(d : Int, max_depth : Int, min_depth : Int) : Unit do
+pfn run_depths(d : Int, max_depth : Int, min_depth : Int) : Unit do
   if d > max_depth then ()
   else do
     let iters = pow2(max_depth - d + min_depth)
@@ -38,7 +38,7 @@ fn run_depths(d : Int, max_depth : Int, min_depth : Int) : Unit do
   end
 end
 
-fn main() : Unit do
+pfn main() : Unit do
   let n         = 15
   let min_depth = 4
   let max_depth = if n > min_depth + 2 then n else min_depth + 2

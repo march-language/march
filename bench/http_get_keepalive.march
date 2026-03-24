@@ -1,7 +1,7 @@
 -- HTTP GET benchmark: keep-alive mode (connection reuse)
 mod HttpGetKeepalive do
 
-fn run_keepalive(n, do_request, req) do
+pfn run_keepalive(n, do_request, req) do
   if n == 0 then Ok(0)
   else
     match do_request(req) do
@@ -10,7 +10,7 @@ fn run_keepalive(n, do_request, req) do
     end
 end
 
-fn main() do
+pfn main() do
   let n = 20
   let url = "http://httpbin.org/get"
   let client = HttpClient.new_client()

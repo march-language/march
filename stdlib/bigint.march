@@ -16,14 +16,14 @@
 
 mod BigInt do
 
-type BigInt = BigInt(Bool, List(Int))
+ptype BigInt = BigInt(Bool, List(Int))
 
 -- ---- Internal constants and helpers ----
 
-fn base() : Int do 10000 end
+pfn base() : Int do 10000 end
 
 -- Remove trailing zeros (leading zeros in little-endian) from a digit list.
-fn normalize(digits : List(Int)) : List(Int) do
+pfn normalize(digits : List(Int)) : List(Int) do
   fn drop_leading_zeros(xs) do
     match xs do
     | Nil -> Nil
@@ -41,7 +41,7 @@ fn normalize(digits : List(Int)) : List(Int) do
 end
 
 -- Compare two magnitude digit lists. Returns -1, 0, or 1.
-fn compare_digits(a : List(Int), b : List(Int)) : Int do
+pfn compare_digits(a : List(Int), b : List(Int)) : Int do
   let la = length(a)
   let lb = length(b)
   if la < lb then -1
@@ -70,7 +70,7 @@ fn compare_digits(a : List(Int), b : List(Int)) : Int do
 end
 
 -- Add two digit lists (unsigned). Returns normalized digit list.
-fn add_digits(a : List(Int), b : List(Int)) : List(Int) do
+pfn add_digits(a : List(Int), b : List(Int)) : List(Int) do
   fn rev(xs, acc) do
     match xs do | Nil -> acc | Cons(h, t) -> rev(t, Cons(h, acc)) end
   end
@@ -101,7 +101,7 @@ end
 
 -- Subtract smaller magnitude b from larger magnitude a (a >= b assumed).
 -- Returns normalized digit list.
-fn sub_digits(a : List(Int), b : List(Int)) : List(Int) do
+pfn sub_digits(a : List(Int), b : List(Int)) : List(Int) do
   fn rev(xs, acc) do
     match xs do | Nil -> acc | Cons(h, t) -> rev(t, Cons(h, acc)) end
   end
@@ -128,7 +128,7 @@ fn sub_digits(a : List(Int), b : List(Int)) : List(Int) do
 end
 
 -- Multiply a digit list by a single limb.
-fn mul_digit(a : List(Int), d : Int) : List(Int) do
+pfn mul_digit(a : List(Int), d : Int) : List(Int) do
   fn rev(xs, acc) do
     match xs do | Nil -> acc | Cons(h, t) -> rev(t, Cons(h, acc)) end
   end
@@ -146,13 +146,13 @@ fn mul_digit(a : List(Int), d : Int) : List(Int) do
 end
 
 -- Shift a digit list left by n limbs (multiply by base^n).
-fn shift_left(a : List(Int), n : Int) : List(Int) do
+pfn shift_left(a : List(Int), n : Int) : List(Int) do
   if n <= 0 then a
   else shift_left(Cons(0, a), n - 1)
 end
 
 -- Multiply two digit lists.
-fn mul_digits(a : List(Int), b : List(Int)) : List(Int) do
+pfn mul_digits(a : List(Int), b : List(Int)) : List(Int) do
   fn go(ys : List(Int), shift : Int, acc : List(Int)) : List(Int) do
     match ys do
     | Nil -> acc
@@ -165,7 +165,7 @@ fn mul_digits(a : List(Int), b : List(Int)) : List(Int) do
 end
 
 -- Divide digit list `a` by single limb `d`. Returns (quotient, remainder).
-fn div_digit(a : List(Int), d : Int) : (List(Int), Int) do
+pfn div_digit(a : List(Int), d : Int) : (List(Int), Int) do
   fn rev(xs, acc) do
     match xs do | Nil -> acc | Cons(h, t) -> rev(t, Cons(h, acc)) end
   end
@@ -186,7 +186,7 @@ end
 
 -- ---- Length helper ----
 
-fn length(xs : List(a)) : Int do
+pfn length(xs : List(a)) : Int do
   fn go(lst, acc) do
     match lst do
     | Nil        -> acc
@@ -196,7 +196,7 @@ fn length(xs : List(a)) : Int do
   go(xs, 0)
 end
 
-fn reverse(xs : List(a)) : List(a) do
+pfn reverse(xs : List(a)) : List(a) do
   fn go(lst, acc) do
     match lst do
     | Nil        -> acc
@@ -209,17 +209,17 @@ end
 -- ---- Construction ----
 
 doc "Returns BigInt zero."
-pub fn zero() : BigInt do
+fn zero() : BigInt do
   BigInt(true, Nil)
 end
 
 doc "Returns BigInt one."
-pub fn one() : BigInt do
+fn one() : BigInt do
   BigInt(true, Cons(1, Nil))
 end
 
 doc "Converts a native Int to BigInt."
-pub fn from_int(n : Int) : BigInt do
+fn from_int(n : Int) : BigInt do
   if n == 0 then BigInt(true, Nil)
   else do
     let sign = n >= 0
@@ -238,7 +238,7 @@ end
 -- ---- Arithmetic ----
 
 doc "Adds two BigInts."
-pub fn add(a : BigInt, b : BigInt) : BigInt do
+fn add(a : BigInt, b : BigInt) : BigInt do
   match a do
   | BigInt(sa, da) ->
     match b do
@@ -262,7 +262,7 @@ pub fn add(a : BigInt, b : BigInt) : BigInt do
 end
 
 doc "Subtracts b from a."
-pub fn sub(a : BigInt, b : BigInt) : BigInt do
+fn sub(a : BigInt, b : BigInt) : BigInt do
   match b do
   | BigInt(sb, db) -> add(a, BigInt(!sb, db))
   end
@@ -271,12 +271,12 @@ end
 -- Note: ! is the boolean negation operator in March
 -- Actually let me use a helper
 
-fn negate_sign(s : Bool) : Bool do
+pfn negate_sign(s : Bool) : Bool do
   if s then false else true
 end
 
 doc "Negates a BigInt."
-pub fn negate(a : BigInt) : BigInt do
+fn negate(a : BigInt) : BigInt do
   match a do
   | BigInt(s, d) ->
     match d do
@@ -287,7 +287,7 @@ pub fn negate(a : BigInt) : BigInt do
 end
 
 doc "Multiplies two BigInts."
-pub fn mul(a : BigInt, b : BigInt) : BigInt do
+fn mul(a : BigInt, b : BigInt) : BigInt do
   match a do
   | BigInt(sa, da) ->
     match b do
@@ -302,7 +302,7 @@ pub fn mul(a : BigInt, b : BigInt) : BigInt do
 end
 
 doc "Divides a by b (integer division, truncates toward zero). Panics if b is zero."
-pub fn div(a : BigInt, b : BigInt) : BigInt do
+fn div(a : BigInt, b : BigInt) : BigInt do
   match b do
   | BigInt(_, Nil) -> panic("BigInt.div: division by zero")
   | BigInt(sb, db) ->
@@ -328,7 +328,7 @@ pub fn div(a : BigInt, b : BigInt) : BigInt do
 end
 
 doc "Computes a mod b (remainder, same sign as a). Panics if b is zero."
-pub fn mod_(a : BigInt, b : BigInt) : BigInt do
+fn mod_(a : BigInt, b : BigInt) : BigInt do
   match b do
   | BigInt(_, Nil) -> panic("BigInt.mod: division by zero")
   | BigInt(sb, db) ->
@@ -349,7 +349,7 @@ end
 -- ---- Comparison ----
 
 doc "Compares two BigInts. Returns -1 (a < b), 0 (a == b), or 1 (a > b)."
-pub fn compare(a : BigInt, b : BigInt) : Int do
+fn compare(a : BigInt, b : BigInt) : Int do
   match a do
   | BigInt(sa, da) ->
     match b do
@@ -370,34 +370,34 @@ pub fn compare(a : BigInt, b : BigInt) : Int do
 end
 
 doc "Returns true if a equals b."
-pub fn eq(a : BigInt, b : BigInt) : Bool do
+fn eq(a : BigInt, b : BigInt) : Bool do
   compare(a, b) == 0
 end
 
 doc "Returns true if a < b."
-pub fn lt(a : BigInt, b : BigInt) : Bool do
+fn lt(a : BigInt, b : BigInt) : Bool do
   compare(a, b) < 0
 end
 
 doc "Returns true if a > b."
-pub fn gt(a : BigInt, b : BigInt) : Bool do
+fn gt(a : BigInt, b : BigInt) : Bool do
   compare(a, b) > 0
 end
 
 doc "Returns true if a <= b."
-pub fn lte(a : BigInt, b : BigInt) : Bool do
+fn lte(a : BigInt, b : BigInt) : Bool do
   compare(a, b) <= 0
 end
 
 doc "Returns true if a >= b."
-pub fn gte(a : BigInt, b : BigInt) : Bool do
+fn gte(a : BigInt, b : BigInt) : Bool do
   compare(a, b) >= 0
 end
 
 -- ---- Conversion ----
 
 doc "Converts a BigInt to its decimal string representation."
-pub fn to_string(n : BigInt) : String do
+fn to_string(n : BigInt) : String do
   match n do
   | BigInt(sign, digits) ->
     match digits do
@@ -433,14 +433,14 @@ pub fn to_string(n : BigInt) : String do
 end
 
 doc "Returns the absolute value of a BigInt."
-pub fn abs(n : BigInt) : BigInt do
+fn abs(n : BigInt) : BigInt do
   match n do
   | BigInt(_, d) -> BigInt(true, d)
   end
 end
 
 doc "Returns true if the BigInt is zero."
-pub fn is_zero(n : BigInt) : Bool do
+fn is_zero(n : BigInt) : Bool do
   match n do
   | BigInt(_, Nil) -> true
   | _              -> false
@@ -448,7 +448,7 @@ pub fn is_zero(n : BigInt) : Bool do
 end
 
 doc "Returns true if the BigInt is negative."
-pub fn is_negative(n : BigInt) : Bool do
+fn is_negative(n : BigInt) : Bool do
   match n do
   | BigInt(false, Nil) -> false
   | BigInt(false, _)   -> true
@@ -457,7 +457,7 @@ pub fn is_negative(n : BigInt) : Bool do
 end
 
 doc "Returns true if the BigInt is positive (> 0)."
-pub fn is_positive(n : BigInt) : Bool do
+fn is_positive(n : BigInt) : Bool do
   match n do
   | BigInt(true, Nil) -> false
   | BigInt(true, _)   -> true
@@ -468,9 +468,9 @@ end
 -- ---- Interface implementations ----
 
 -- Aliases to avoid name shadowing inside impl blocks.
-fn bigint_eq_impl(a, b) do eq(a, b) end
-fn bigint_compare_impl(a, b) do compare(a, b) end
-fn bigint_to_str_impl(n) do to_string(n) end
+pfn bigint_eq_impl(a, b) do eq(a, b) end
+pfn bigint_compare_impl(a, b) do compare(a, b) end
+pfn bigint_to_str_impl(n) do to_string(n) end
 
 impl Eq(BigInt) do
   fn eq(a, b) do bigint_eq_impl(a, b) end

@@ -1,0 +1,23 @@
+{
+  "skill_name": "march-lang",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "Write a March stdlib test file for the Queue module at test/stdlib/test_queue.march. Use the native test syntax with describe blocks. Make sure to read stdlib/queue.march first to see what functions exist.",
+      "expected_output": "A .march file using test/describe/assert syntax that compiles cleanly, references only functions that exist in stdlib/queue.march",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "Add a new builtin function `string_char_at(s, i)` that returns the character at index i as a single-character string. Add it to eval.ml and make it available as `String.char_at(s, i)` in stdlib/string.march. Write a test for it.",
+      "expected_output": "Correct OCaml builtin in eval.ml, correct March wrapper in string.march, test using native test syntax, all compiling",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "Fix this March code that has compilation errors:\n\n```march\nmod Util do\n  pub fn sum_floats(xs : List(Float)) : Float do\n    List.fold_left(0.0, xs, fn acc x -> acc + x)\n  end\n\n  pub fn pairs(xs : List(a)) : List((a, a)) do\n    List.zip(xs, List.tail(xs))\n  end\n\n  fn test_it() do\n    assert_eq(sum_floats([1.0, 2.0, 3.0]), 6.0)\n  end\nend\n```",
+      "expected_output": "Fixed code: lambda syntax corrected to fn (acc, x), float arithmetic uses +. not +, assert_eq replaced with test block + assert, zip signature verified against stdlib source",
+      "files": []
+    }
+  ]
+}

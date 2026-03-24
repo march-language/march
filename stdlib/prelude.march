@@ -20,7 +20,7 @@ Terminates the program with a runtime error.
 Used for violated invariants — bugs, not expected failures.
 Propagates to the enclosing actor boundary.
 """
-pub fn panic(msg : String) : a do
+fn panic(msg : String) : a do
   panic_(msg)
 end
 
@@ -29,19 +29,19 @@ Marks code as not yet implemented.
 Typechecks as any type so you can sketch a program top-down.
 Never valid in production.
 """
-pub fn todo(msg : String) : a do
+fn todo(msg : String) : a do
   todo_(msg)
 end
 
 doc "Asserts that a code path is unreachable."
-pub fn unreachable() : a do
+fn unreachable() : a do
   unreachable_()
 end
 
 -- ---- Option helpers ----
 
 doc "Extracts the value from Some(x), panicking if None."
-pub fn unwrap(opt : Option(a)) : a do
+fn unwrap(opt : Option(a)) : a do
   match opt do
   | Some(x) -> x
   | None    -> panic("unwrap called on None")
@@ -49,7 +49,7 @@ pub fn unwrap(opt : Option(a)) : a do
 end
 
 doc "Returns the contained value, or `default` if None."
-pub fn unwrap_or(opt : Option(a), default : a) : a do
+fn unwrap_or(opt : Option(a), default : a) : a do
   match opt do
   | Some(x) -> x
   | None    -> default
@@ -59,7 +59,7 @@ end
 -- ---- List basics ----
 
 doc "Returns the first element of the list. Panics if empty."
-pub fn head(xs : List(a)) : a do
+fn head(xs : List(a)) : a do
   match xs do
   | Cons(h, _) -> h
   | Nil        -> panic("head: empty list")
@@ -67,7 +67,7 @@ pub fn head(xs : List(a)) : a do
 end
 
 doc "Returns all but the first element. Panics if empty."
-pub fn tail(xs : List(a)) : List(a) do
+fn tail(xs : List(a)) : List(a) do
   match xs do
   | Cons(_, t) -> t
   | Nil        -> panic("tail: empty list")
@@ -75,7 +75,7 @@ pub fn tail(xs : List(a)) : List(a) do
 end
 
 doc "Returns true if the list is empty."
-pub fn is_nil(xs : List(a)) : Bool do
+fn is_nil(xs : List(a)) : Bool do
   match xs do
   | Nil -> true
   | Cons(_, _) -> false
@@ -83,7 +83,7 @@ pub fn is_nil(xs : List(a)) : Bool do
 end
 
 doc "Returns the number of elements in the list."
-pub fn length(xs : List(a)) : Int do
+fn length(xs : List(a)) : Int do
   fn go(lst : List(a), acc : Int) : Int do
     match lst do
     | Nil        -> acc
@@ -94,7 +94,7 @@ pub fn length(xs : List(a)) : Int do
 end
 
 doc "Reverses a list."
-pub fn reverse(xs : List(a)) : List(a) do
+fn reverse(xs : List(a)) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
     | Nil        -> acc
@@ -105,7 +105,7 @@ pub fn reverse(xs : List(a)) : List(a) do
 end
 
 doc "Left fold over a list."
-pub fn fold_left(acc : b, xs : List(a), f : b -> a -> b) : b do
+fn fold_left(acc : b, xs : List(a), f : b -> a -> b) : b do
   match xs do
   | Nil        -> acc
   | Cons(h, t) -> fold_left(f(acc, h), t, f)
@@ -113,7 +113,7 @@ pub fn fold_left(acc : b, xs : List(a), f : b -> a -> b) : b do
 end
 
 doc "Returns only the elements satisfying `pred`."
-pub fn filter(xs : List(a), pred : a -> Bool) : List(a) do
+fn filter(xs : List(a), pred : a -> Bool) : List(a) do
   fn go(acc : List(a), remaining : List(a)) : List(a) do
     match remaining do
     | Nil        -> reverse(acc)
@@ -124,7 +124,7 @@ pub fn filter(xs : List(a), pred : a -> Bool) : List(a) do
 end
 
 doc "Applies `f` to every element of the list."
-pub fn map(xs : List(a), f : a -> b) : List(b) do
+fn map(xs : List(a), f : a -> b) : List(b) do
   fn go(acc : List(b), remaining : List(a)) : List(b) do
     match remaining do
     | Nil        -> reverse(acc)
@@ -137,34 +137,34 @@ end
 -- ---- Combinators ----
 
 doc "The identity function — returns its argument unchanged."
-pub fn identity(x : a) : a do
+fn identity(x : a) : a do
   x
 end
 
 doc "Function composition: compose(f, g)(x) = f(g(x))."
-pub fn compose(f : b -> c, g : a -> b) : a -> c do
+fn compose(f : b -> c, g : a -> b) : a -> c do
   fn x -> f(g(x))
 end
 
 doc "Flips the order of arguments: flip(f)(b, a) = f(a, b)."
-pub fn flip(f : a -> b -> c) : b -> a -> c do
+fn flip(f : a -> b -> c) : b -> a -> c do
   fn (b, a) -> f(a, b)
 end
 
 doc "Returns a function that always returns `x`, ignoring its argument."
-pub fn const(x : a) : b -> a do
+fn const(x : a) : b -> a do
   fn _ -> x
 end
 
 -- ---- IO convenience ----
 
 doc "Prints a value using its Show representation, with a trailing newline."
-pub fn debug(x : a) : Unit do
+fn debug(x : a) : Unit do
   println(to_string(x))
 end
 
 doc "Converts any value to its string representation."
-pub fn inspect(x : a) : String do
+fn inspect(x : a) : String do
   to_string(x)
 end
 

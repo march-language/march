@@ -34,7 +34,7 @@ mod IOList do
 
   Cost: O(1).
   """
-  pub fn empty() : IOList do
+  fn empty() : IOList do
     Empty
   end
 
@@ -46,7 +46,7 @@ mod IOList do
   No copy is made; the IOList holds a reference to the original string.
   Cost: O(1).
   """
-  pub fn from_string(s : String) : IOList do
+  fn from_string(s : String) : IOList do
     if string_is_empty(s) then Empty else Str(s)
   end
 
@@ -61,7 +61,7 @@ mod IOList do
 
   Cost: O(1) — no flattening until `to_string`.
   """
-  pub fn append(a : IOList, b : IOList) : IOList do
+  fn append(a : IOList, b : IOList) : IOList do
     match (a, b) do
     | (Empty, r) -> r
     | (l, Empty) -> l
@@ -77,7 +77,7 @@ mod IOList do
 
   Cost: O(1).
   """
-  pub fn prepend(s : String, iol : IOList) : IOList do
+  fn prepend(s : String, iol : IOList) : IOList do
     append(from_string(s), iol)
   end
 
@@ -89,7 +89,7 @@ mod IOList do
 
   Cost: O(1).
   """
-  pub fn push(iol : IOList, s : String) : IOList do
+  fn push(iol : IOList, s : String) : IOList do
     append(iol, from_string(s))
   end
 
@@ -101,7 +101,7 @@ mod IOList do
 
   Cost: O(n) where n is the length of the list.
   """
-  pub fn from_strings(xs : List(String)) : IOList do
+  fn from_strings(xs : List(String)) : IOList do
     fn map_strings(ys : List(String)) : List(IOList) do
       match ys do
       | Nil        -> Nil
@@ -126,7 +126,7 @@ mod IOList do
 
   Cost: O(total bytes across all segments).
   """
-  pub fn to_string(iol : IOList) : String do
+  fn to_string(iol : IOList) : String do
     -- list_append: concatenate two List(String) in forward order.
     -- Must be defined before collect_list which calls it.
     fn list_append(a : List(String), b : List(String)) : List(String) do
@@ -169,7 +169,7 @@ mod IOList do
 
   Cost: O(number of nodes in the tree).
   """
-  pub fn byte_size(iol : IOList) : Int do
+  fn byte_size(iol : IOList) : Int do
     fn size_list(nodes : List(IOList)) : Int do
       match nodes do
       | Nil        -> 0
@@ -198,7 +198,7 @@ mod IOList do
 
   Cost: O(1) for `Empty` and `Str`; O(n) for `Segments`.
   """
-  pub fn is_empty(iol : IOList) : Bool do
+  fn is_empty(iol : IOList) : Bool do
     fn all_empty_list(nodes : List(IOList)) : Bool do
       match nodes do
       | Nil        -> true

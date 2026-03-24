@@ -5,11 +5,11 @@ mod TestStats do
 
 -- ---- Helpers ----
 
-fn approx_eq(a : Float, b : Float) : Bool do
+pfn approx_eq(a : Float, b : Float) : Bool do
   float_abs(a -. b) < 0.000000001
 end
 
-fn approx_eq2(a : Float, b : Float) : Bool do
+pfn approx_eq2(a : Float, b : Float) : Bool do
   float_abs(a -. b) < 0.0001
 end
 

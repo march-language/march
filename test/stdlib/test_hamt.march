@@ -6,39 +6,39 @@ mod TestHamt do
 -- ── Hash / equality helpers ──────────────────────────────────────────────────
 
 -- Identity hash: each Int maps to itself.
-fn int_hash(k : Int) : Int do k end
+pfn int_hash(k : Int) : Int do k end
 
 -- 2-arg equality function (called as eq(a, b) inside HAMT internals).
-fn int_eq(a : Int, b : Int) : Bool do
+pfn int_eq(a : Int, b : Int) : Bool do
   a == b
 end
 
 -- String identity hash via string_length (cheap, not great, but deterministic).
-fn str_hash(k : String) : Int do
+pfn str_hash(k : String) : Int do
   string_length(k)
 end
 
-fn str_eq(a : String, b : String) : Bool do
+pfn str_eq(a : String, b : String) : Bool do
   a == b
 end
 
 -- Collision hash: everything hashes to 0, forcing HCollision nodes.
-fn zero_hash(_k : Int) : Int do 0 end
+pfn zero_hash(_k : Int) : Int do 0 end
 
 -- ── Curried fold accumulator helpers ─────────────────────────────────────────
 
 -- Count entries (ignores keys and values, increments by 1 each time).
-fn count_fn(acc : Int) do
+pfn count_fn(acc : Int) do
   fn k -> fn v -> acc + 1
 end
 
 -- Sum values (keys and values are both Int).
-fn sum_vals_fn(acc : Int) do
+pfn sum_vals_fn(acc : Int) do
   fn k -> fn v -> acc + v
 end
 
 -- Collect all (key, value) pairs into a list.
-fn collect_kv_fn(acc) do
+pfn collect_kv_fn(acc) do
   fn k -> fn v -> Cons((k, v), acc)
 end
 

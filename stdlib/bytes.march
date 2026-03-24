@@ -9,32 +9,32 @@
 
 mod Bytes do
 
-pub type Bytes = Bytes(List(Int))
+type Bytes = Bytes(List(Int))
 
 -- ---- Internal list helpers (self-contained) ----
 
-fn rev(xs, acc) do
+pfn rev(xs, acc) do
   match xs do
   | Nil -> acc
   | Cons(h, t) -> rev(t, Cons(h, acc))
   end
 end
 
-fn list_len(xs, n) do
+pfn list_len(xs, n) do
   match xs do
   | Nil -> n
   | Cons(_, t) -> list_len(t, n + 1)
   end
 end
 
-fn list_nth(xs, i) do
+pfn list_nth(xs, i) do
   match xs do
   | Nil -> panic("Bytes.get: index out of bounds")
   | Cons(h, t) -> if i == 0 then h else list_nth(t, i - 1)
   end
 end
 
-fn list_drop(xs, n) do
+pfn list_drop(xs, n) do
   if n <= 0 then xs
   else match xs do
     | Nil -> Nil
@@ -42,7 +42,7 @@ fn list_drop(xs, n) do
     end
 end
 
-fn list_take(xs, n, acc) do
+pfn list_take(xs, n, acc) do
   if n <= 0 then rev(acc, Nil)
   else match xs do
     | Nil -> rev(acc, Nil)
@@ -50,7 +50,7 @@ fn list_take(xs, n, acc) do
     end
 end
 
-fn list_append(xs, ys) do
+pfn list_append(xs, ys) do
   fn go(rxs, acc) do
     match rxs do
     | Nil -> acc
@@ -60,7 +60,7 @@ fn list_append(xs, ys) do
   go(rev(xs, Nil), ys)
 end
 
-fn join_strings(xs) do
+pfn join_strings(xs) do
   fn go(lst, acc) do
     match lst do
     | Nil -> acc
@@ -73,18 +73,18 @@ end
 -- ---- Construction ----
 
 doc "Wrap a List(Int) of byte values (0–255) as Bytes."
-pub fn from_list(xs) do Bytes(xs) end
+fn from_list(xs) do Bytes(xs) end
 
 doc "Unwrap Bytes to the underlying List(Int)."
-pub fn to_list(b) do
+fn to_list(b) do
   match b do | Bytes(xs) -> xs end
 end
 
 doc "An empty Bytes value."
-pub fn empty() do Bytes(Nil) end
+fn empty() do Bytes(Nil) end
 
 doc "Convert a String to Bytes (raw UTF-8 byte values, each 0–255)."
-pub fn from_string(s) do
+fn from_string(s) do
   let chars = string_chars(s)
   fn go(cs, acc) do
     match cs do
@@ -96,7 +96,7 @@ pub fn from_string(s) do
 end
 
 doc "Convert Bytes back to a String (bytes interpreted as UTF-8)."
-pub fn to_string(b) do
+fn to_string(b) do
   match b do
   | Bytes(xs) ->
     fn go(bs, acc) do
@@ -112,12 +112,12 @@ end
 -- ---- Measurement ----
 
 doc "Number of bytes."
-pub fn length(b) do
+fn length(b) do
   match b do | Bytes(xs) -> list_len(xs, 0) end
 end
 
 doc "True if the Bytes is empty."
-pub fn is_empty(b) do
+fn is_empty(b) do
   match b do
   | Bytes(Nil) -> true
   | _          -> false
@@ -127,12 +127,12 @@ end
 -- ---- Access ----
 
 doc "Byte at position i (0-based). Panics if out of bounds."
-pub fn get(b, i) do
+fn get(b, i) do
   match b do | Bytes(xs) -> list_nth(xs, i) end
 end
 
 doc "Sub-slice: bytes from position start with given length."
-pub fn slice(b, start, len) do
+fn slice(b, start, len) do
   match b do
   | Bytes(xs) -> Bytes(list_take(list_drop(xs, start), len, Nil))
   end
@@ -141,7 +141,7 @@ end
 -- ---- Combination ----
 
 doc "Concatenate two Bytes values."
-pub fn concat(b1, b2) do
+fn concat(b1, b2) do
   match (b1, b2) do
   | (Bytes(xs), Bytes(ys)) -> Bytes(list_append(xs, ys))
   end
@@ -150,24 +150,24 @@ end
 -- ---- UTF-8 encoding ----
 
 doc "Encode a String as UTF-8 bytes. Equivalent to from_string for March strings."
-pub fn encode_utf8(s) do from_string(s) end
+fn encode_utf8(s) do from_string(s) end
 
 doc "Decode UTF-8 bytes to a String. Returns Ok(s) always (same as to_string)."
-pub fn decode_utf8(b) do Ok(to_string(b)) end
+fn decode_utf8(b) do Ok(to_string(b)) end
 
 -- ---- Hex encoding ----
 
-fn hex_digit(n) do
+pfn hex_digit(n) do
   if n < 10 then int_to_string(n)
   else char_from_int(87 + n)  -- 87 = ord('a') - 10, returns String directly
 end
 
-fn byte_to_hex_str(n) do
+pfn byte_to_hex_str(n) do
   hex_digit(n / 16) ++ hex_digit(n % 16)
 end
 
 doc "Encode Bytes as a lowercase hexadecimal string."
-pub fn to_hex(b) do
+fn to_hex(b) do
   match b do
   | Bytes(xs) ->
     fn go(bs, acc) do
@@ -180,7 +180,7 @@ pub fn to_hex(b) do
   end
 end
 
-fn hex_val(c) do
+pfn hex_val(c) do
   let code = char_to_int(c)
   if code >= 48 && code <= 57 then code - 48        -- '0'–'9'
   else if code >= 65 && code <= 70 then code - 55   -- 'A'–'F'
@@ -189,7 +189,7 @@ fn hex_val(c) do
 end
 
 doc "Parse a hex string to Bytes. Returns Err if the input is not valid hex."
-pub fn from_hex(s) do
+fn from_hex(s) do
   let chars = string_chars(s)
   fn go(cs, acc) do
     match cs do
@@ -209,12 +209,12 @@ end
 
 let b64_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
 
-fn b64_char(n) do
+pfn b64_char(n) do
   string_slice(b64_alphabet, n, 1)
 end
 
 doc "Encode Bytes as a Base64 string (with padding)."
-pub fn encode_base64(b) do
+fn encode_base64(b) do
   match b do
   | Bytes(xs) ->
     fn go(bs, acc) do
@@ -242,7 +242,7 @@ pub fn encode_base64(b) do
   end
 end
 
-fn b64_val(c) do
+pfn b64_val(c) do
   let code = char_to_int(c)
   if code >= 65 && code <= 90 then code - 65          -- A–Z → 0–25
   else if code >= 97 && code <= 122 then code - 71    -- a–z → 26–51
@@ -253,7 +253,7 @@ fn b64_val(c) do
 end
 
 doc "Decode a Base64 string to Bytes. Returns Err on invalid input."
-pub fn decode_base64(s) do
+fn decode_base64(s) do
   let chars = string_chars(s)
   fn go(cs, acc) do
     match cs do

@@ -5,7 +5,7 @@
 mod TestLogger do
 
 -- Helper: get a Level from a string, panic if unknown
-fn get_level(s) do
+pfn get_level(s) do
   match Logger.level_from_string(s) do
   | None -> panic("unknown level: " ++ s)
   | Some(l) -> l

@@ -22,7 +22,7 @@ mod Array do
 -- TrieLeaf holds a fixed 32-element list (a full leaf).
 -- TrieBranch holds a list of up to 32 child nodes (dense, no empties).
 -- TrieEmpty represents an absent node (used as a sentinel).
-type TrieNode(a) =
+ptype TrieNode(a) =
   TrieEmpty
   | TrieLeaf(List(a))
   | TrieBranch(List(TrieNode(a)))
@@ -32,11 +32,11 @@ type TrieNode(a) =
 --   shift = trie depth * 5 (0 means no levels above leaves)
 --   root  = trie holding elements 0 .. (size - tail_len - 1)
 --   tail  = up to 32 rightmost elements (dense list)
-type PVec(a) = PVec(Int, Int, TrieNode(a), List(a))
+ptype PVec(a) = PVec(Int, Int, TrieNode(a), List(a))
 
 -- ── List helpers ─────────────────────────────────────────────────────────
 
-fn lst_rev(lst) do
+pfn lst_rev(lst) do
   fn go(xs, acc) do
     match xs do
     | Nil -> acc
@@ -46,7 +46,7 @@ fn lst_rev(lst) do
   go(lst, Nil)
 end
 
-fn lst_nth(lst, n) do
+pfn lst_nth(lst, n) do
   match lst do
   | Nil -> panic("Array: index out of bounds")
   | Cons(h, t) ->
@@ -54,7 +54,7 @@ fn lst_nth(lst, n) do
   end
 end
 
-fn lst_set(lst, n, v) do
+pfn lst_set(lst, n, v) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -72,7 +72,7 @@ fn lst_set(lst, n, v) do
   go(lst, n, Nil)
 end
 
-fn lst_len(lst) do
+pfn lst_len(lst) do
   fn go(xs, acc) do
     match xs do
     | Nil -> acc
@@ -82,7 +82,7 @@ fn lst_len(lst) do
   go(lst, 0)
 end
 
-fn lst_snoc(lst, x) do
+pfn lst_snoc(lst, x) do
   fn go(xs, acc) do
     match xs do
     | Nil -> lst_rev(Cons(x, acc))
@@ -92,7 +92,7 @@ fn lst_snoc(lst, x) do
   go(lst, Nil)
 end
 
-fn lst_init(lst) do
+pfn lst_init(lst) do
   fn go(xs, acc) do
     match xs do
     | Nil -> lst_rev(acc)
@@ -103,7 +103,7 @@ fn lst_init(lst) do
   go(lst, Nil)
 end
 
-fn lst_last(lst) do
+pfn lst_last(lst) do
   match lst do
   | Nil -> panic("Array.pop: empty")
   | Cons(h, Nil) -> h
@@ -111,7 +111,7 @@ fn lst_last(lst) do
   end
 end
 
-fn lst_replace_nth(lst, n, node) do
+pfn lst_replace_nth(lst, n, node) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -131,13 +131,13 @@ end
 
 -- ── Bit helpers ───────────────────────────────────────────────────────────
 
-fn trie_slot(idx, shift) do
+pfn trie_slot(idx, shift) do
   int_and(int_shr(idx, shift), 31)
 end
 
 -- ── Trie operations ───────────────────────────────────────────────────────
 
-fn trie_get(node, idx, shift) do
+pfn trie_get(node, idx, shift) do
   match node do
   | TrieEmpty -> panic("Array.get: missing node")
   | TrieLeaf(values) ->
@@ -148,7 +148,7 @@ fn trie_get(node, idx, shift) do
   end
 end
 
-fn trie_update(node, idx, val, shift) do
+pfn trie_update(node, idx, val, shift) do
   fn ascend(nd, stk) do
     match stk do
     | Nil -> nd
@@ -172,7 +172,7 @@ fn trie_update(node, idx, val, shift) do
 end
 
 -- Create a fresh path from 'shift' levels down to a leaf containing 'values'.
-fn new_path(values, shift) do
+pfn new_path(values, shift) do
   fn go(s, node) do
     if s == 0 then node
     else go(s - 5, TrieBranch(Cons(node, Nil)))
@@ -181,14 +181,14 @@ fn new_path(values, shift) do
 end
 
 -- Number of leaf slots accessible at a given shift (max leaves in tree).
-fn max_leaves_at(shift) do
+pfn max_leaves_at(shift) do
   int_shl(1, shift)
 end
 
 -- Push a full 32-element leaf into the trie.
 -- Returns (new_root, new_shift).
 -- trie_leaf_count = how many 32-element leaves the trie already contains.
-fn push_leaf(root, leaf_values, trie_leaf_count, shift) do
+pfn push_leaf(root, leaf_values, trie_leaf_count, shift) do
   if trie_leaf_count == 0 then
     -- The trie was empty: make it a one-slot branch containing the leaf.
     (TrieBranch(Cons(TrieLeaf(leaf_values), Nil)), 5)
@@ -229,7 +229,7 @@ end
 -- Extract the last 32-element leaf from the trie.
 -- Returns (new_root_opt, leaf_values).
 -- new_root_opt = None when the trie becomes empty.
-fn pop_leaf(root, trie_leaf_count, shift) do
+pfn pop_leaf(root, trie_leaf_count, shift) do
   -- The leaf we're removing is at index (trie_leaf_count - 1).
   let last_leaf_idx = trie_leaf_count - 1
   fn extract(node, leaf_idx, s) do
@@ -268,7 +268,7 @@ end
 
 -- ── Fold ─────────────────────────────────────────────────────────────────
 
-fn trie_fold(acc, node, f) do
+pfn trie_fold(acc, node, f) do
   match node do
   | TrieEmpty -> acc
   | TrieLeaf(values) ->
@@ -294,19 +294,19 @@ end
 -- ── Public API ─────────────────────────────────────────────────────────────
 
 doc "Returns an empty persistent vector."
-pub fn empty() do
+fn empty() do
   PVec(0, 0, TrieEmpty, Nil)
 end
 
 doc "Returns the number of elements. O(1)."
-pub fn length(v) do
+fn length(v) do
   match v do
   | PVec(n, _, _, _) -> n
   end
 end
 
 doc "Returns true if the vector is empty."
-pub fn is_empty(v) do
+fn is_empty(v) do
   match v do
   | PVec(n, _, _, _) -> n == 0
   end
@@ -316,7 +316,7 @@ doc """
 Returns the element at index idx (0-based). O(log₃₂ n).
 Panics if idx is out of range.
 """
-pub fn get(v, idx) do
+fn get(v, idx) do
   match v do
   | PVec(n, shift, root, tail) ->
     if idx < 0 || idx >= n then panic("Array.get: index out of range")
@@ -335,7 +335,7 @@ doc """
 Returns a new vector with element at idx replaced by val. O(log₃₂ n).
 Panics if idx is out of range.
 """
-pub fn set(v, idx, val) do
+fn set(v, idx, val) do
   match v do
   | PVec(n, shift, root, tail) ->
     if idx < 0 || idx >= n then panic("Array.set: index out of range")
@@ -351,7 +351,7 @@ pub fn set(v, idx, val) do
 end
 
 doc "Appends an element at the end. O(1) amortized."
-pub fn push(v, elem) do
+fn push(v, elem) do
   match v do
   | PVec(n, shift, root, tail) ->
     let tail_len = lst_len(tail)
@@ -372,7 +372,7 @@ doc """
 Removes the last element. Returns (new_vector, last_element).
 Panics if the vector is empty.
 """
-pub fn pop(v) do
+fn pop(v) do
   match v do
   | PVec(0, _, _, _) -> panic("Array.pop: empty vector")
   | PVec(n, shift, root, tail) ->
@@ -408,7 +408,7 @@ pub fn pop(v) do
 end
 
 doc "Applies f to each element, returning a new vector with the results. O(n)."
-pub fn map(v, f) do
+fn map(v, f) do
   let lst = to_list(v)
   fn apply_f(xs) do
     match xs do
@@ -423,7 +423,7 @@ doc """
 Left fold over all elements in index order.
 f(acc, elem) = new_acc.
 """
-pub fn fold_left(acc, v, f) do
+fn fold_left(acc, v, f) do
   match v do
   | PVec(_, shift, root, tail) ->
     let acc2 = trie_fold(acc, root, f)
@@ -438,13 +438,13 @@ pub fn fold_left(acc, v, f) do
 end
 
 doc "Returns all elements as a list in index order. O(n)."
-pub fn to_list(v) do
+fn to_list(v) do
   let rev = fold_left(Nil, v, fn (acc, x) -> Cons(x, acc))
   lst_rev(rev)
 end
 
 doc "Builds a persistent vector from a list. O(n)."
-pub fn from_list(xs) do
+fn from_list(xs) do
   fn go(lst, acc) do
     match lst do
     | Nil -> acc

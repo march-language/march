@@ -21,7 +21,7 @@ mod String do
 
   Cost: O(1) — reads a stored length field.
   """
-  pub fn byte_size(s) do string_byte_length(s) end
+  fn byte_size(s) do string_byte_length(s) end
 
   doc """
   Return a byte-indexed substring of `s` starting at byte offset `start`
@@ -36,7 +36,7 @@ mod String do
 
   Cost: O(len) for the copy.
   """
-  pub fn slice_bytes(s, start, len) do string_slice(s, start, len) end
+  fn slice_bytes(s, start, len) do string_slice(s, start, len) end
 
   doc """
   Return `true` if `substring` appears anywhere in `s`.
@@ -47,7 +47,7 @@ mod String do
 
   Cost: O(n * m) worst case, where n = byte_size(s) and m = byte_size(substring).
   """
-  pub fn contains(s, substring) do string_contains(s, substring) end
+  fn contains(s, substring) do string_contains(s, substring) end
 
   doc """
   Return `true` if `s` begins with `prefix`.
@@ -58,7 +58,7 @@ mod String do
 
   Cost: O(|prefix|).
   """
-  pub fn starts_with(s, prefix) do string_starts_with(s, prefix) end
+  fn starts_with(s, prefix) do string_starts_with(s, prefix) end
 
   doc """
   Return `true` if `s` ends with `suffix`.
@@ -69,7 +69,7 @@ mod String do
 
   Cost: O(|suffix|).
   """
-  pub fn ends_with(s, suffix) do string_ends_with(s, suffix) end
+  fn ends_with(s, suffix) do string_ends_with(s, suffix) end
 
   doc """
   Concatenate two strings.
@@ -81,7 +81,7 @@ mod String do
 
   Cost: O(|a| + |b|) — allocates a new string.
   """
-  pub fn concat(a, b) do string_concat(a, b) end
+  fn concat(a, b) do string_concat(a, b) end
 
   doc """
   Replace the **first** occurrence of `old` in `s` with `new`.
@@ -94,7 +94,7 @@ mod String do
 
   Cost: O(n) scan + O(n) for the result string.
   """
-  pub fn replace(s, old, new) do string_replace(s, old, new) end
+  fn replace(s, old, new) do string_replace(s, old, new) end
 
   doc """
   Replace **every** non-overlapping occurrence of `old` in `s` with `new`.
@@ -106,7 +106,7 @@ mod String do
 
   Cost: O(n) where n = byte_size(s).
   """
-  pub fn replace_all(s, old, new) do string_replace_all(s, old, new) end
+  fn replace_all(s, old, new) do string_replace_all(s, old, new) end
 
   doc """
   Split `s` on every occurrence of `sep`, returning a `List(String)`.
@@ -119,7 +119,7 @@ mod String do
 
   Cost: O(n) where n = byte_size(s).
   """
-  pub fn split(s, sep) do string_split(s, sep) end
+  fn split(s, sep) do string_split(s, sep) end
 
   doc """
   Split `s` on the **first** occurrence of `sep`.
@@ -134,7 +134,7 @@ mod String do
 
   Cost: O(n) scan.
   """
-  pub fn split_first(s, sep) do string_split_first(s, sep) end
+  fn split_first(s, sep) do string_split_first(s, sep) end
 
   doc """
   Join a list of strings with a separator inserted between each element.
@@ -145,7 +145,7 @@ mod String do
 
   Cost: O(total bytes in list + (n-1) * |sep|).
   """
-  pub fn join(xs, sep) do string_join(xs, sep) end
+  fn join(xs, sep) do string_join(xs, sep) end
 
   doc """
   Remove leading and trailing ASCII whitespace (spaces, tabs, newlines, CR).
@@ -156,7 +156,7 @@ mod String do
 
   Cost: O(n).
   """
-  pub fn trim(s) do string_trim(s) end
+  fn trim(s) do string_trim(s) end
 
   doc """
   Remove leading ASCII whitespace only.
@@ -165,7 +165,7 @@ mod String do
 
   Cost: O(n).
   """
-  pub fn trim_start(s) do string_trim_start(s) end
+  fn trim_start(s) do string_trim_start(s) end
 
   doc """
   Remove trailing ASCII whitespace only.
@@ -174,7 +174,7 @@ mod String do
 
   Cost: O(n).
   """
-  pub fn trim_end(s) do string_trim_end(s) end
+  fn trim_end(s) do string_trim_end(s) end
 
   doc """
   Convert all ASCII letters in `s` to uppercase.
@@ -186,7 +186,7 @@ mod String do
 
   Cost: O(n).
   """
-  pub fn to_uppercase(s) do string_to_uppercase(s) end
+  fn to_uppercase(s) do string_to_uppercase(s) end
 
   doc """
   Convert all ASCII letters in `s` to lowercase.
@@ -197,7 +197,7 @@ mod String do
 
   Cost: O(n).
   """
-  pub fn to_lowercase(s) do string_to_lowercase(s) end
+  fn to_lowercase(s) do string_to_lowercase(s) end
 
   doc """
   Repeat `s` exactly `n` times.
@@ -208,7 +208,7 @@ mod String do
 
   Cost: O(n * |s|) — allocates a new string.
   """
-  pub fn repeat(s, n) do string_repeat(s, n) end
+  fn repeat(s, n) do string_repeat(s, n) end
 
   doc """
   Return `s` with its **bytes** reversed.
@@ -221,7 +221,7 @@ mod String do
 
   Cost: O(n).
   """
-  pub fn reverse(s) do string_reverse(s) end
+  fn reverse(s) do string_reverse(s) end
 
   doc """
   Pad `s` on the left with `fill` until the byte length reaches `width`.
@@ -234,7 +234,7 @@ mod String do
 
   Cost: O(width).
   """
-  pub fn pad_left(s, width, fill) do string_pad_left(s, width, fill) end
+  fn pad_left(s, width, fill) do string_pad_left(s, width, fill) end
 
   doc """
   Pad `s` on the right with `fill` until the byte length reaches `width`.
@@ -247,7 +247,7 @@ mod String do
 
   Cost: O(width).
   """
-  pub fn pad_right(s, width, fill) do string_pad_right(s, width, fill) end
+  fn pad_right(s, width, fill) do string_pad_right(s, width, fill) end
 
   doc """
   Return `true` if `s` contains no bytes.
@@ -258,7 +258,7 @@ mod String do
 
   Cost: O(1).
   """
-  pub fn is_empty(s) do string_is_empty(s) end
+  fn is_empty(s) do string_is_empty(s) end
 
   doc """
   Count the number of Unicode **codepoints** in the UTF-8 string `s`.
@@ -277,7 +277,7 @@ mod String do
 
   Cost: O(n) — scans the byte sequence.
   """
-  pub fn grapheme_count(s) do string_grapheme_count(s) end
+  fn grapheme_count(s) do string_grapheme_count(s) end
 
   doc """
   Find the byte offset of the first occurrence of `substring` in `s`.
@@ -289,7 +289,7 @@ mod String do
 
   Cost: O(n * m) worst case.
   """
-  pub fn index_of(s, substring) do string_index_of(s, substring) end
+  fn index_of(s, substring) do string_index_of(s, substring) end
 
   doc """
   Parse `s` as a decimal integer.
@@ -301,7 +301,7 @@ mod String do
 
   Cost: O(n).
   """
-  pub fn to_int(s) do
+  fn to_int(s) do
     match string_to_int(s) do
     | Some(n) -> Ok(n)
     | None    -> Err("not a valid integer: " ++ s)
@@ -318,7 +318,7 @@ mod String do
 
   Cost: O(n).
   """
-  pub fn to_float(s) do
+  fn to_float(s) do
     match string_to_float(s) do
     | Some(f) -> Ok(f)
     | None    -> Err("not a valid float: " ++ s)
@@ -335,7 +335,7 @@ mod String do
   Equivalent to `${n}` in a string interpolation.
   Cost: O(digits).
   """
-  pub fn from_int(n) do int_to_string(n) end
+  fn from_int(n) do int_to_string(n) end
 
   doc """
   Convert a float to a string using OCaml's default float formatting.
@@ -347,7 +347,7 @@ mod String do
   The exact format matches OCaml's `string_of_float`.
   Cost: O(1).
   """
-  pub fn from_float(f) do float_to_string(f) end
+  fn from_float(f) do float_to_string(f) end
 
   doc """
   Find the byte offset of the **last** occurrence of `substring` in `s`.
@@ -359,6 +359,6 @@ mod String do
 
   Cost: O(n * m) worst case.
   """
-  pub fn last_index_of(s, sub) do string_last_index_of(s, sub) end
+  fn last_index_of(s, sub) do string_last_index_of(s, sub) end
 
 end

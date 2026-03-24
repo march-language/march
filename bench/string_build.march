@@ -12,12 +12,12 @@ mod StringBuild do
 
 -- Tail-recursive: build ["1","2",...,"n"] in reverse as a list accumulator,
 -- then join once with empty separator.
-fn build(n : Int, acc : List(String)) : List(String) do
+pfn build(n : Int, acc : List(String)) : List(String) do
   if n == 0 then acc
   else build(n - 1, Cons(int_to_string(n), acc))
 end
 
-fn main() : Unit do
+pfn main() : Unit do
   let n = 500000
   let s = string_join(build(n, Nil), "")
   println(int_to_string(string_byte_length(s)))

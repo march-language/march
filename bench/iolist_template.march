@@ -11,7 +11,7 @@
 
 mod IOListTemplate do
 
-fn render_row(i : Int) : IOList do
+pfn render_row(i : Int) : IOList do
   let iol = IOList.from_string("<tr><td>")
   let iol = IOList.push(iol, int_to_string(i))
   let iol = IOList.push(iol, "</td><td>")
@@ -19,12 +19,12 @@ fn render_row(i : Int) : IOList do
   IOList.push(iol, "</td></tr>\n")
 end
 
-fn build_rows(n : Int, acc : IOList) : IOList do
+pfn build_rows(n : Int, acc : IOList) : IOList do
   if n == 0 then acc
   else build_rows(n - 1, IOList.append(acc, render_row(n)))
 end
 
-fn main() : Unit do
+pfn main() : Unit do
   let table = build_rows(50000, IOList.empty())
   let s     = IOList.to_string(table)
   println(int_to_string(string_byte_length(s)))

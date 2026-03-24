@@ -5,11 +5,11 @@ mod TestRandom do
 
 -- ---- Helpers ----
 
-fn approx_eq(a : Float, b : Float) : Bool do
+pfn approx_eq(a : Float, b : Float) : Bool do
   float_abs(a -. b) < 0.000000000001
 end
 
-fn gen_ints(rng, n : Int, acc : List(Int)) : List(Int) do
+pfn gen_ints(rng, n : Int, acc : List(Int)) : List(Int) do
   if n <= 0 then List.reverse(acc)
   else do
     let (v, rng2) = Random.next_int(rng)
@@ -17,7 +17,7 @@ fn gen_ints(rng, n : Int, acc : List(Int)) : List(Int) do
   end
 end
 
-fn gen_floats(rng, n : Int, acc : List(Float)) : List(Float) do
+pfn gen_floats(rng, n : Int, acc : List(Float)) : List(Float) do
   if n <= 0 then List.reverse(acc)
   else do
     let (v, rng2) = Random.next_float(rng)
@@ -25,7 +25,7 @@ fn gen_floats(rng, n : Int, acc : List(Float)) : List(Float) do
   end
 end
 
-fn gen_ranges(rng, lo : Int, hi : Int, n : Int, acc : List(Int)) : List(Int) do
+pfn gen_ranges(rng, lo : Int, hi : Int, n : Int, acc : List(Int)) : List(Int) do
   if n <= 0 then List.reverse(acc)
   else do
     let (v, rng2) = Random.range(rng, lo, hi)

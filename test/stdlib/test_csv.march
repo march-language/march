@@ -3,7 +3,7 @@
 
 mod TestCsv do
 
-fn do_write(path, content) do
+pfn do_write(path, content) do
   match File.write(path, content) do
   | Err(e) -> panic("write failed: " ++ to_string(e))
   | Ok(_) -> :ok

@@ -36,7 +36,7 @@ mod Hamt do
 --   HBranch        – internal bitmap-indexed node (children are HEntry values)
 --   HCollision     – several entries all sharing the same 32-bit hash
 
-pub type HEntry(k, v) =
+type HEntry(k, v) =
   HEmpty
   | HLeaf(Int, k, v)
   | HBranch(Int, List(HEntry(k, v)))
@@ -46,28 +46,28 @@ pub type HEntry(k, v) =
 
 -- Extract the 5-bit slot index at the given trie level from a hash.
 -- level 0 uses bits [4:0], level 1 uses bits [9:5], …
-fn hash_slot(h, level) do
+pfn hash_slot(h, level) do
   int_and(int_shr(h, level * 5), 31)
 end
 
 -- True if bit `idx` is set in `bitmap`.
-fn bitmap_has(bitmap, idx) do
+pfn bitmap_has(bitmap, idx) do
   int_and(int_shr(bitmap, idx), 1) == 1
 end
 
 -- Number of set bits in bitmap strictly below position `idx`.
 -- This gives the dense (packed) array index for slot `idx`.
-fn bitmap_rank(bitmap, idx) do
+pfn bitmap_rank(bitmap, idx) do
   int_popcount(int_and(bitmap, int_shl(1, idx) - 1))
 end
 
 -- Return bitmap with bit `idx` set.
-fn bitmap_set(bitmap, idx) do
+pfn bitmap_set(bitmap, idx) do
   int_or(bitmap, int_shl(1, idx))
 end
 
 -- Return bitmap with bit `idx` cleared.
-fn bitmap_clear(bitmap, idx) do
+pfn bitmap_clear(bitmap, idx) do
   int_and(bitmap, int_not(int_shl(1, idx)))
 end
 
@@ -75,7 +75,7 @@ end
 -- The children of a HBranch are stored as a dense list (no empty slots).
 -- These helpers insert / replace / delete at a given index.
 
-fn list_insert_at(lst, idx, elem) do
+pfn list_insert_at(lst, idx, elem) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -92,7 +92,7 @@ fn list_insert_at(lst, idx, elem) do
   go(lst, idx, Nil)
 end
 
-fn list_replace_at(lst, idx, elem) do
+pfn list_replace_at(lst, idx, elem) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -110,7 +110,7 @@ fn list_replace_at(lst, idx, elem) do
   go(lst, idx, Nil)
 end
 
-fn list_delete_at(lst, idx) do
+pfn list_delete_at(lst, idx) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -130,7 +130,7 @@ end
 
 -- ── Collision-bucket helpers ───────────────────────────────────────────────
 
-fn collision_find(pairs, key, eq) do
+pfn collision_find(pairs, key, eq) do
   match pairs do
   | Nil -> None
   | Cons(pair, rest) ->
@@ -140,7 +140,7 @@ fn collision_find(pairs, key, eq) do
   end
 end
 
-fn collision_insert(pairs, key, val, eq) do
+pfn collision_insert(pairs, key, val, eq) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -159,7 +159,7 @@ fn collision_insert(pairs, key, val, eq) do
   go(pairs, Nil)
 end
 
-fn collision_remove(pairs, key, eq) do
+pfn collision_remove(pairs, key, eq) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -182,7 +182,7 @@ end
 
 -- get: look up key in the trie; returns Some(value) or None.
 @[no_warn_recursion]
-fn hamt_get(node, key, h, eq, level) do
+pfn hamt_get(node, key, h, eq, level) do
   match node do
   | HEmpty -> None
   | HLeaf(lh, lk, lv) ->
@@ -203,7 +203,7 @@ fn hamt_get(node, key, h, eq, level) do
 end
 
 -- make_branch: expand two distinct-hash leaves into a shared subtree.
-fn make_branch(h1, k1, v1, h2, k2, v2, level) do
+pfn make_branch(h1, k1, v1, h2, k2, v2, level) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -241,7 +241,7 @@ end
 
 -- insert: add or update key→val in the trie.
 @[no_warn_recursion]
-fn hamt_insert(node, key, val, h, eq, level) do
+pfn hamt_insert(node, key, val, h, eq, level) do
   match node do
   | HEmpty ->
     HLeaf(h, key, val)
@@ -289,7 +289,7 @@ end
 
 -- remove: delete key from the trie.
 @[no_warn_recursion]
-fn hamt_remove(node, key, h, eq, level) do
+pfn hamt_remove(node, key, h, eq, level) do
   match node do
   | HEmpty -> HEmpty
   | HLeaf(lh, lk, lv) ->
@@ -339,7 +339,7 @@ end
 -- fold: left fold over all (key, value) pairs in the trie.
 -- f is curried: f(acc)(key)(val) = new_acc
 @[no_warn_recursion]
-fn hamt_fold(acc, node, f) do
+pfn hamt_fold(acc, node, f) do
   match node do
   | HEmpty -> acc
   | HLeaf(_, k, v) ->
@@ -372,7 +372,7 @@ end
 
 -- size: count the total number of entries.
 @[no_warn_recursion]
-fn hamt_size(node) do
+pfn hamt_size(node) do
   match node do
   | HEmpty -> 0
   | HLeaf(_, _, _) -> 1
@@ -391,7 +391,7 @@ end
 -- ── Public API ─────────────────────────────────────────────────────────────
 
 doc "Returns an empty HAMT node."
-pub fn empty() do
+fn empty() do
   HEmpty
 end
 
@@ -400,7 +400,7 @@ Look up a key.  Returns Some(value) if found, None otherwise.
 hash_fn  : k -> Int
 eq_fn    : k -> k -> Bool
 """
-pub fn get(node, key, hash_fn, eq_fn) do
+fn get(node, key, hash_fn, eq_fn) do
   let h = hash_fn(key)
   hamt_get(node, key, h, eq_fn, 0)
 end
@@ -410,7 +410,7 @@ Insert or update key→val.
 hash_fn  : k -> Int
 eq_fn    : k -> k -> Bool
 """
-pub fn insert(node, key, val, hash_fn, eq_fn) do
+fn insert(node, key, val, hash_fn, eq_fn) do
   let h = hash_fn(key)
   hamt_insert(node, key, val, h, eq_fn, 0)
 end
@@ -420,7 +420,7 @@ Remove a key.  Returns the trie unchanged if the key is absent.
 hash_fn  : k -> Int
 eq_fn    : k -> k -> Bool
 """
-pub fn remove(node, key, hash_fn, eq_fn) do
+fn remove(node, key, hash_fn, eq_fn) do
   let h = hash_fn(key)
   hamt_remove(node, key, h, eq_fn, 0)
 end
@@ -429,12 +429,12 @@ doc """
 Left fold over all (key, value) pairs.
 f is curried: f(acc)(key)(val) = new_acc
 """
-pub fn fold(acc, node, f) do
+fn fold(acc, node, f) do
   hamt_fold(acc, node, f)
 end
 
 doc "Count entries in O(n)."
-pub fn size(node) do
+fn size(node) do
   hamt_size(node)
 end
 

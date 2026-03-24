@@ -22,17 +22,17 @@
 
 mod Json do
 
-pub type JsonValue =
-    pub Null
-  | pub Bool(Bool)
-  | pub Number(Float)
-  | pub Str(String)
-  | pub Array(List(JsonValue))
-  | pub Object(List((String, JsonValue)))
+type JsonValue =
+    Null
+  | Bool(Bool)
+  | Number(Float)
+  | Str(String)
+  | Array(List(JsonValue))
+  | Object(List((String, JsonValue)))
 
 -- ── Private helpers ───────────────────────────────────────────────────────
 
-fn rev(xs, acc) do
+pfn rev(xs, acc) do
   match xs do
   | Nil -> acc
   | Cons(h, t) -> rev(t, Cons(h, acc))
@@ -40,7 +40,7 @@ fn rev(xs, acc) do
 end
 
 -- Skip ASCII whitespace characters.
-fn skip_ws(chars) do
+pfn skip_ws(chars) do
   match chars do
   | Nil -> Nil
   | Cons(c, rest) ->
@@ -51,7 +51,7 @@ end
 
 -- Try to match a prefix string against the head of a char list.
 -- Returns Ok(remaining) or Err(message).
-fn match_literal(chars, expected) do
+pfn match_literal(chars, expected) do
   let exp_chars = string_chars(expected)
   fn go(cs, es) do
     match es do
@@ -70,7 +70,7 @@ end
 
 -- Parse a JSON string (chars is AFTER the opening quote).
 -- Returns Ok((string_value, remaining_chars)) or Err(message).
-fn parse_string_inner(chars) do
+pfn parse_string_inner(chars) do
   fn go(cs, acc) do
     match cs do
     | Nil -> Err("unterminated string literal")
@@ -104,7 +104,7 @@ end
 
 -- Parse a JSON number.
 -- chars starts at '-' or a digit.
-fn parse_number(chars) do
+pfn parse_number(chars) do
   fn is_num_char(c) do
     char_is_digit(c) || c == "." || c == "e" || c == "E"
   end
@@ -132,7 +132,7 @@ end
 
 -- Parse a JSON value from a character list.
 -- Returns Ok((JsonValue, remaining_chars)) or Err(message).
-fn parse_value(chars) do
+pfn parse_value(chars) do
   let cs = skip_ws(chars)
   match cs do
   | Nil -> Err("unexpected end of input")
@@ -168,7 +168,7 @@ fn parse_value(chars) do
 end
 
 -- Parse a JSON array (chars is AFTER the '[').
-fn parse_array(chars) do
+pfn parse_array(chars) do
   match chars do
   | Nil -> Err("unterminated array")
   | Cons(c, rest) ->
@@ -194,7 +194,7 @@ fn parse_array(chars) do
 end
 
 -- Parse a JSON object (chars is AFTER the '{').
-fn parse_object(chars) do
+pfn parse_object(chars) do
   match chars do
   | Nil -> Err("unterminated object")
   | Cons(c, rest) ->
@@ -240,7 +240,7 @@ fn parse_object(chars) do
 end
 
 -- Escape a string for JSON output.
-fn escape_string_chars(chars, acc) do
+pfn escape_string_chars(chars, acc) do
   match chars do
   | Nil -> string_join(rev(acc, Nil), "")
   | Cons(c, rest) ->
@@ -258,11 +258,11 @@ fn escape_string_chars(chars, acc) do
   end
 end
 
-fn escape_str(s) do
+pfn escape_str(s) do
   escape_string_chars(string_chars(s), Nil)
 end
 
-fn map_list(xs, f, acc) do
+pfn map_list(xs, f, acc) do
   match xs do
   | Nil -> rev(acc, Nil)
   | Cons(h, t) -> map_list(t, f, Cons(f(h), acc))
@@ -280,7 +280,7 @@ Returns Ok(value) on success, Err(message) on parse error.
     Json.parse("[1, 2, 3]")      -- Ok(Array([Number(1.0), ...]))
     Json.parse("{\"x\": 1}")     -- Ok(Object([("x", Number(1.0))]))
 """
-pub fn parse(s) do
+fn parse(s) do
   let chars = string_chars(s)
   match parse_value(chars) do
   | Err(e) -> Err(e)
@@ -301,7 +301,7 @@ Convert a JsonValue to its JSON string representation.
     Json.to_string(Number(3.14)) -- "3.14"
     Json.to_string(Str("hi"))    -- "\"hi\""
 """
-pub fn to_string(jv) do
+fn to_string(jv) do
   match jv do
   | Null -> "null"
   | Bool(b) -> if b then "true" else "false"
@@ -327,7 +327,7 @@ If jv is not an Object, returns None.
     Json.get(Object([("x", Number(1.0))]), "x") -- Some(Number(1.0))
     Json.get(Null, "x")                          -- None
 """
-pub fn get(jv, key) do
+fn get(jv, key) do
   match jv do
   | Object(kvs) ->
     fn find(pairs) do
@@ -350,7 +350,7 @@ Returns Some(value) if the full path exists, or None if any step fails.
 
     Json.get_in(obj, ["a", "b", "c"]) -- equivalent to obj.a.b.c
 """
-pub fn get_in(jv, keys) do
+fn get_in(jv, keys) do
   match keys do
   | Nil -> Some(jv)
   | Cons(k, rest) ->
@@ -362,24 +362,24 @@ pub fn get_in(jv, keys) do
 end
 
 doc "Construct a JSON null value."
-pub fn encode_null() do Null end
+fn encode_null() do Null end
 
 doc "Construct a JSON boolean value."
-pub fn encode_bool(b) do Bool(b) end
+fn encode_bool(b) do Bool(b) end
 
 doc "Construct a JSON number value from a Float."
-pub fn encode_number(f) do Number(f) end
+fn encode_number(f) do Number(f) end
 
 doc "Construct a JSON number value from an Int."
-pub fn encode_int(n) do Number(int_to_float(n)) end
+fn encode_int(n) do Number(int_to_float(n)) end
 
 doc "Construct a JSON string value."
-pub fn encode_string(s) do Str(s) end
+fn encode_string(s) do Str(s) end
 
 doc "Construct a JSON array value."
-pub fn encode_array(xs) do Array(xs) end
+fn encode_array(xs) do Array(xs) end
 
 doc "Construct a JSON object value from a list of (key, value) pairs."
-pub fn encode_object(kvs) do Object(kvs) end
+fn encode_object(kvs) do Object(kvs) end
 
 end

@@ -49,7 +49,7 @@ mod HttpClient do
   -- -----------------------------------------------------------------------
 
   doc "Create a new bare client with no steps and no redirect/retry."
-  pub fn new_client() do
+  fn new_client() do
     Client(Nil, Nil, Nil, 0, 0, 0)
   end
 
@@ -64,21 +64,21 @@ mod HttpClient do
     end
   end
 
-  pub fn add_request_step(client, name, step) do
+  fn add_request_step(client, name, step) do
     match client do
     | Client(req_steps, resp_steps, err_steps, redir, retries, backoff) ->
       Client(append_to_list(req_steps, RequestStepEntry(name, step)), resp_steps, err_steps, redir, retries, backoff)
     end
   end
 
-  pub fn add_response_step(client, name, step) do
+  fn add_response_step(client, name, step) do
     match client do
     | Client(req_steps, resp_steps, err_steps, redir, retries, backoff) ->
       Client(req_steps, append_to_list(resp_steps, ResponseStepEntry(name, step)), err_steps, redir, retries, backoff)
     end
   end
 
-  pub fn add_error_step(client, name, step) do
+  fn add_error_step(client, name, step) do
     match client do
     | Client(req_steps, resp_steps, err_steps, redir, retries, backoff) ->
       Client(req_steps, resp_steps, append_to_list(err_steps, ErrorStepEntry(name, step)), redir, retries, backoff)
@@ -89,14 +89,14 @@ mod HttpClient do
   -- Pipeline behaviors
   -- -----------------------------------------------------------------------
 
-  pub fn with_redirects(client, max) do
+  fn with_redirects(client, max) do
     match client do
     | Client(rq, rs, es, _, retries, backoff) ->
       Client(rq, rs, es, max, retries, backoff)
     end
   end
 
-  pub fn with_retry(client, max_attempts, backoff_ms) do
+  fn with_retry(client, max_attempts, backoff_ms) do
     match client do
     | Client(rq, rs, es, redir, _, _) ->
       Client(rq, rs, es, redir, max_attempts, backoff_ms)
@@ -107,7 +107,7 @@ mod HttpClient do
   -- Step introspection
   -- -----------------------------------------------------------------------
 
-  pub fn list_steps(client) do
+  fn list_steps(client) do
     fn list_concat(a, b) do
       match a do
       | Nil -> b
@@ -259,7 +259,7 @@ mod HttpClient do
     end
   end
 
-  pub fn run(client, req) do
+  fn run(client, req) do
     match client do
     | Client(req_steps, resp_steps, err_steps, max_redir, max_retries, _) ->
       match run_request_steps(req_steps, req) do
@@ -294,7 +294,7 @@ mod HttpClient do
       (r1, r2)
     end)
   """
-  pub fn with_connection(client, url, callback) do
+  fn with_connection(client, url, callback) do
     match Http.parse_url(url) do
     | Err(_) -> Err(StepError("url", "invalid url: " ++ url))
     | Ok(base_req) ->
@@ -324,7 +324,7 @@ mod HttpClient do
       print("got " ++ int_to_string(string_length(chunk)) ++ " bytes")
     end)
   """
-  pub fn stream_get(client, url, on_chunk) do
+  fn stream_get(client, url, on_chunk) do
     match Http.get(url) do
     | Err(_) -> Err(StepError("url", "invalid url: " ++ url))
     | Ok(req) ->
@@ -353,28 +353,28 @@ mod HttpClient do
   -- Convenience methods
   -- -----------------------------------------------------------------------
 
-  pub fn get(client, url) do
+  fn get(client, url) do
     match Http.get(url) do
     | Err(_) -> Err(StepError("url", "invalid url: " ++ url))
     | Ok(req) -> run(client, Http.set_body(req, ""))
     end
   end
 
-  pub fn post(client, url, bdy) do
+  fn post(client, url, bdy) do
     match Http.post(url, bdy) do
     | Err(_) -> Err(StepError("url", "invalid url: " ++ url))
     | Ok(req) -> run(client, req)
     end
   end
 
-  pub fn put_request(client, url, bdy) do
+  fn put_request(client, url, bdy) do
     match Http.put(url, bdy) do
     | Err(_) -> Err(StepError("url", "invalid url: " ++ url))
     | Ok(req) -> run(client, req)
     end
   end
 
-  pub fn delete(client, url) do
+  fn delete(client, url) do
     match Http.delete(url) do
     | Err(_) -> Err(StepError("url", "invalid url: " ++ url))
     | Ok(req) -> run(client, Http.set_body(req, ""))
@@ -386,14 +386,14 @@ mod HttpClient do
   -- -----------------------------------------------------------------------
 
   doc "Request step: add default User-Agent and Accept headers."
-  pub fn step_default_headers(req) do
+  fn step_default_headers(req) do
     let req = Http.set_header(req, "User-Agent", "march/0.1")
     let req = Http.set_header(req, "Accept", "*/*")
     Ok(req)
   end
 
   doc "Returns a request step that adds a Bearer token authorization header."
-  pub fn step_bearer_auth(token) do
+  fn step_bearer_auth(token) do
     fn step(req) do
       Ok(Http.set_header(req, "Authorization", "Bearer " ++ token))
     end
@@ -401,7 +401,7 @@ mod HttpClient do
   end
 
   doc "Returns a request step that adds HTTP Basic authorization header."
-  pub fn step_basic_auth(user, pass) do
+  fn step_basic_auth(user, pass) do
     fn step(req) do
       Ok(Http.set_header(req, "Authorization", "Basic " ++ user ++ ":" ++ pass))
     end
@@ -409,7 +409,7 @@ mod HttpClient do
   end
 
   doc "Returns a request step that sets a base URL on requests."
-  pub fn step_base_url(base) do
+  fn step_base_url(base) do
     fn step(req) do
       match Http.parse_url(base ++ Http.path(req)) do
       | Err(_) -> Err(StepError("step_base_url", "invalid base url: " ++ base))
@@ -430,7 +430,7 @@ mod HttpClient do
   end
 
   doc "Returns a request step that sets the Content-Type header."
-  pub fn step_content_type(ct) do
+  fn step_content_type(ct) do
     fn step(req) do
       Ok(Http.set_header(req, "Content-Type", ct))
     end
@@ -438,7 +438,7 @@ mod HttpClient do
   end
 
   doc "Response step: return Err for 4xx/5xx status codes."
-  pub fn step_raise_on_error(req, resp) do
+  fn step_raise_on_error(req, resp) do
     let code = Http.response_status_code(resp)
     if code >= 400 then
       Err(StepError("step_raise_on_error", int_to_string(code)))

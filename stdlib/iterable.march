@@ -26,7 +26,7 @@
 mod Iterable do
 
 -- Internal reverse helper (avoid depending on Prelude order)
-fn rev(xs : List(a)) : List(a) do
+pfn rev(xs : List(a)) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
     | Nil        -> acc
@@ -39,7 +39,7 @@ end
 -- ---- Transformation ----
 
 doc "Applies f to each element, returning a new list of results."
-pub fn map(xs : List(a), f : a -> b) : List(b) do
+fn map(xs : List(a), f : a -> b) : List(b) do
   fn go(lst : List(a), acc : List(b)) : List(b) do
     match lst do
     | Nil        -> rev(acc)
@@ -50,7 +50,7 @@ pub fn map(xs : List(a), f : a -> b) : List(b) do
 end
 
 doc "Applies f to each element; collects the resulting lists and concatenates them."
-pub fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
+fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
   fn append_list(left : List(b), right : List(b)) : List(b) do
     match left do
     | Nil        -> right
@@ -67,7 +67,7 @@ pub fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
 end
 
 doc "Returns only the elements for which pred returns true."
-pub fn filter(xs : List(a), pred : a -> Bool) : List(a) do
+fn filter(xs : List(a), pred : a -> Bool) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
     | Nil        -> rev(acc)
@@ -85,7 +85,7 @@ doc """
 Left fold: reduces the list from left to right using an accumulator.
 f is called as f(acc, x) returning the new accumulator.
 """
-pub fn fold(zero : b, xs : List(a), f : b -> a -> b) : b do
+fn fold(zero : b, xs : List(a), f : b -> a -> b) : b do
   fn go(lst : List(a), acc : b) : b do
     match lst do
     | Nil        -> acc
@@ -96,7 +96,7 @@ pub fn fold(zero : b, xs : List(a), f : b -> a -> b) : b do
 end
 
 doc "Returns the number of elements in the list."
-pub fn count(xs : List(a)) : Int do
+fn count(xs : List(a)) : Int do
   fn go(lst : List(a), acc : Int) : Int do
     match lst do
     | Nil        -> acc
@@ -107,7 +107,7 @@ pub fn count(xs : List(a)) : Int do
 end
 
 doc "Returns true if any element satisfies pred (short-circuits)."
-pub fn any(xs : List(a), pred : a -> Bool) : Bool do
+fn any(xs : List(a), pred : a -> Bool) : Bool do
   match xs do
   | Nil        -> false
   | Cons(h, t) ->
@@ -117,7 +117,7 @@ pub fn any(xs : List(a), pred : a -> Bool) : Bool do
 end
 
 doc "Returns true if all elements satisfy pred (short-circuits on failure)."
-pub fn all(xs : List(a), pred : a -> Bool) : Bool do
+fn all(xs : List(a), pred : a -> Bool) : Bool do
   match xs do
   | Nil        -> true
   | Cons(h, t) ->
@@ -127,7 +127,7 @@ pub fn all(xs : List(a), pred : a -> Bool) : Bool do
 end
 
 doc "Returns the first element satisfying pred, or None."
-pub fn find(xs : List(a), pred : a -> Bool) : Option(a) do
+fn find(xs : List(a), pred : a -> Bool) : Option(a) do
   match xs do
   | Nil        -> None
   | Cons(h, t) ->
@@ -139,7 +139,7 @@ end
 -- ---- Slicing ----
 
 doc "Returns the first n elements. Returns the whole list if n >= length."
-pub fn take(xs : List(a), n : Int) : List(a) do
+fn take(xs : List(a), n : Int) : List(a) do
   if n <= 0 then Nil
   else match xs do
     | Nil        -> Nil
@@ -148,7 +148,7 @@ pub fn take(xs : List(a), n : Int) : List(a) do
 end
 
 doc "Drops the first n elements. Returns [] if n >= length."
-pub fn drop(xs : List(a), n : Int) : List(a) do
+fn drop(xs : List(a), n : Int) : List(a) do
   if n <= 0 then xs
   else match xs do
     | Nil        -> Nil
@@ -159,7 +159,7 @@ end
 -- ---- Combining ----
 
 doc "Pairs up elements from two lists. Stops at the shorter list."
-pub fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
+fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
   match xs do
   | Nil -> Nil
   | Cons(x, xt) ->
@@ -171,7 +171,7 @@ pub fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
 end
 
 doc "Pairs each element with its 0-based index: [a, b] -> [(0, a), (1, b)]."
-pub fn enumerate(xs : List(a)) : List((Int, a)) do
+fn enumerate(xs : List(a)) : List((Int, a)) do
   fn go(lst : List(a), i : Int, acc : List((Int, a))) : List((Int, a)) do
     match lst do
     | Nil        -> rev(acc)

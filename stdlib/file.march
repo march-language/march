@@ -6,21 +6,21 @@
 
 mod File do
 
-type FileError = NotFound(String) | Permission(String) | IsDirectory(String) | NotEmpty(String) | IoError(String)
+ptype FileError = NotFound(String) | Permission(String) | IsDirectory(String) | NotEmpty(String) | IoError(String)
 
-type FileKind = RegularFile | Directory | Symlink | OtherKind
+ptype FileKind = RegularFile | Directory | Symlink | OtherKind
 
 -- FileStat uses a positional constructor
 -- Pattern match: FileStat(size, kind, modified, accessed)
-type FileStat = FileStat(Int, FileKind, Int, Int)
+ptype FileStat = FileStat(Int, FileKind, Int, Int)
 
 -- Read
 
-pub fn read(path) do
+fn read(path) do
   file_read(path)
 end
 
-pub fn read_lines(path) do
+fn read_lines(path) do
   match file_read(path) do
   | Err(e) -> Err(e)
   | Ok(s) ->
@@ -39,31 +39,31 @@ end
 
 -- Returns true for any filesystem entry including directories.
 -- Use Dir.exists to test specifically for directories.
-pub fn exists(path) do
+fn exists(path) do
   file_exists(path)
 end
 
-pub fn stat(path) do
+fn stat(path) do
   file_stat(path)
 end
 
 -- Write
 
-pub fn write(path, data) do file_write(path, data) end
-pub fn append(path, data) do file_append(path, data) end
-pub fn delete(path) do file_delete(path) end
-pub fn copy(src, dest) do file_copy(src, dest) end
-pub fn rename(src, dest) do file_rename(src, dest) end
+fn write(path, data) do file_write(path, data) end
+fn append(path, data) do file_append(path, data) end
+fn delete(path) do file_delete(path) end
+fn copy(src, dest) do file_copy(src, dest) end
+fn rename(src, dest) do file_rename(src, dest) end
 
 -- Streaming: closed after callback returns (not exception-safe)
 
 -- Seq wraps a church-encoded fold closure. Single-pass.
-type Seq(a) = Seq(a)
+ptype Seq(a) = Seq(a)
 
 -- Streaming: opens path, creates a single-pass Seq(String) of lines, calls callback,
 -- then closes the file handle. The Seq is single-pass -- consuming it twice yields
 -- empty results on the second pass.
-pub fn with_lines(path, callback) do
+fn with_lines(path, callback) do
   match file_open(path) do
   | Err(e) -> Err(e)
   | Ok(fd) ->
@@ -80,7 +80,7 @@ pub fn with_lines(path, callback) do
   end
 end
 
-pub fn with_chunks(path, size, callback) do
+fn with_chunks(path, size, callback) do
   match file_open(path) do
   | Err(e) -> Err(e)
   | Ok(fd) ->
@@ -100,7 +100,7 @@ end
 -- Low-level callbacks (side-effect iteration)
 
 -- Internal helper: recursively reads lines. Used by each_line.
-fn each_line_loop(fd, f) do
+pfn each_line_loop(fd, f) do
   match file_read_line(fd) do
   | None -> :ok
   | Some(line) ->
@@ -109,7 +109,7 @@ fn each_line_loop(fd, f) do
   end
 end
 
-pub fn each_line(path, f) do
+fn each_line(path, f) do
   match file_open(path) do
   | Err(e) -> Err(e)
   | Ok(fd) ->
@@ -120,7 +120,7 @@ pub fn each_line(path, f) do
 end
 
 -- Internal helper: recursively reads chunks. Used by each_chunk.
-fn each_chunk_loop(fd, size, f) do
+pfn each_chunk_loop(fd, size, f) do
   match file_read_chunk(fd, size) do
   | None -> :ok
   | Some(chunk) ->
@@ -129,7 +129,7 @@ fn each_chunk_loop(fd, size, f) do
   end
 end
 
-pub fn each_chunk(path, size, f) do
+fn each_chunk(path, size, f) do
   match file_open(path) do
   | Err(e) -> Err(e)
   | Ok(fd) ->

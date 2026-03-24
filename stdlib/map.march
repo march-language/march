@@ -30,11 +30,11 @@ mod Map do
 
 -- Map(k, v) wraps a Hamt.HEntry(k, v) trie node.
 -- We use HEntry directly as the Map type to avoid an extra wrapper allocation.
-type Map(k, v) = HamtMap(HEntry(k, v))
+ptype Map(k, v) = HamtMap(HEntry(k, v))
 
 -- Re-export the HEntry constructors under Map-local names so pattern
 -- matching stays inside this module.
-type HEntry(k, v) =
+ptype HEntry(k, v) =
   HEmpty
   | HLeaf(Int, k, v)
   | HBranch(Int, List(HEntry(k, v)))
@@ -42,7 +42,7 @@ type HEntry(k, v) =
 
 -- ── Private helpers ────────────────────────────────────────────────────────
 
-fn lst_rev(lst) do
+pfn lst_rev(lst) do
   fn go(xs, acc) do
     match xs do
     | Nil -> acc
@@ -53,7 +53,7 @@ fn lst_rev(lst) do
 end
 
 -- Derive equality from a less-than comparator.
-fn cmp_eq(cmp, a, b) do
+pfn cmp_eq(cmp, a, b) do
   let lt_ab = cmp(a)
   let lt_ba = cmp(b)
   if lt_ab(b) then false
@@ -62,35 +62,35 @@ fn cmp_eq(cmp, a, b) do
 end
 
 -- Hash a key (uses the built-in polymorphic hash, masked to 30 bits).
-fn key_hash(k) do
+pfn key_hash(k) do
   int_and(hash(k), 1073741823)
 end
 
 -- ── Low-level bit helpers (duplicated from Hamt for self-containedness) ───
 
-fn hash_slot(h, level) do
+pfn hash_slot(h, level) do
   int_and(int_shr(h, level * 5), 31)
 end
 
-fn bitmap_has(bitmap, idx) do
+pfn bitmap_has(bitmap, idx) do
   int_and(int_shr(bitmap, idx), 1) == 1
 end
 
-fn bitmap_rank(bitmap, idx) do
+pfn bitmap_rank(bitmap, idx) do
   int_popcount(int_and(bitmap, int_shl(1, idx) - 1))
 end
 
-fn bitmap_set(bitmap, idx) do
+pfn bitmap_set(bitmap, idx) do
   int_or(bitmap, int_shl(1, idx))
 end
 
-fn bitmap_clear(bitmap, idx) do
+pfn bitmap_clear(bitmap, idx) do
   int_and(bitmap, int_not(int_shl(1, idx)))
 end
 
 -- ── Dense-list helpers ─────────────────────────────────────────────────────
 
-fn list_insert_at(lst, idx, elem) do
+pfn list_insert_at(lst, idx, elem) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -107,7 +107,7 @@ fn list_insert_at(lst, idx, elem) do
   go(lst, idx, Nil)
 end
 
-fn list_replace_at(lst, idx, elem) do
+pfn list_replace_at(lst, idx, elem) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -125,7 +125,7 @@ fn list_replace_at(lst, idx, elem) do
   go(lst, idx, Nil)
 end
 
-fn list_delete_at(lst, idx) do
+pfn list_delete_at(lst, idx) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -143,7 +143,7 @@ fn list_delete_at(lst, idx) do
   go(lst, idx, Nil)
 end
 
-fn list_nth_safe(lst, n) do
+pfn list_nth_safe(lst, n) do
   match lst do
   | Nil -> panic("Map: HAMT node index out of range")
   | Cons(h, t) ->
@@ -153,7 +153,7 @@ end
 
 -- ── Collision helpers ──────────────────────────────────────────────────────
 
-fn coll_find(pairs, key, eq) do
+pfn coll_find(pairs, key, eq) do
   match pairs do
   | Nil -> None
   | Cons(pair, rest) ->
@@ -163,7 +163,7 @@ fn coll_find(pairs, key, eq) do
   end
 end
 
-fn coll_insert(pairs, key, val, eq) do
+pfn coll_insert(pairs, key, val, eq) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -182,7 +182,7 @@ fn coll_insert(pairs, key, val, eq) do
   go(pairs, Nil)
 end
 
-fn coll_remove(pairs, key, eq) do
+pfn coll_remove(pairs, key, eq) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
     | Nil -> ys
@@ -203,7 +203,7 @@ end
 
 -- ── HAMT core ─────────────────────────────────────────────────────────────
 
-fn node_get(node, key, h, eq, level) do
+pfn node_get(node, key, h, eq, level) do
   match node do
   | HEmpty -> None
   | HLeaf(lh, lk, lv) ->
@@ -223,7 +223,7 @@ fn node_get(node, key, h, eq, level) do
   end
 end
 
-fn make_branch(h1, k1, v1, h2, k2, v2, level) do
+pfn make_branch(h1, k1, v1, h2, k2, v2, level) do
   fn apply_slots(node, slots) do
     match slots do
     | Nil -> node
@@ -253,7 +253,7 @@ fn make_branch(h1, k1, v1, h2, k2, v2, level) do
   go(level, Nil)
 end
 
-fn node_insert(node, key, val, h, eq, level) do
+pfn node_insert(node, key, val, h, eq, level) do
   match node do
   | HEmpty -> HLeaf(h, key, val)
   | HLeaf(lh, lk, lv) ->
@@ -290,7 +290,7 @@ fn node_insert(node, key, val, h, eq, level) do
   end
 end
 
-fn node_remove(node, key, h, eq, level) do
+pfn node_remove(node, key, h, eq, level) do
   match node do
   | HEmpty -> HEmpty
   | HLeaf(lh, lk, lv) ->
@@ -337,7 +337,7 @@ fn node_remove(node, key, h, eq, level) do
 end
 
 -- Left fold over all (key, value) pairs.  f(acc)(key)(val) = new_acc
-fn node_fold(acc, node, f) do
+pfn node_fold(acc, node, f) do
   match node do
   | HEmpty -> acc
   | HLeaf(_, k, v) ->
@@ -368,7 +368,7 @@ fn node_fold(acc, node, f) do
   end
 end
 
-fn node_size(node) do
+pfn node_size(node) do
   match node do
   | HEmpty -> 0
   | HLeaf(_, _, _) -> 1
@@ -394,12 +394,12 @@ end
 -- ── Public API ─────────────────────────────────────────────────────────────
 
 doc "Returns an empty map."
-pub fn empty() do
+fn empty() do
   HamtMap(HEmpty)
 end
 
 doc "Returns a map containing exactly one key-value pair."
-pub fn singleton(k, v) do
+fn singleton(k, v) do
   let h = key_hash(k)
   HamtMap(HLeaf(h, k, v))
 end
@@ -407,7 +407,7 @@ end
 -- ---- Query ----
 
 doc "Returns true if the map contains no entries."
-pub fn is_empty(m) do
+fn is_empty(m) do
   match m do
   | HamtMap(HEmpty) -> true
   | _               -> false
@@ -415,7 +415,7 @@ pub fn is_empty(m) do
 end
 
 doc "Returns the number of key-value pairs in the map. O(n)."
-pub fn size(m) do
+fn size(m) do
   match m do
   | HamtMap(node) -> node_size(node)
   end
@@ -425,7 +425,7 @@ doc """
 Returns Some(value) if key is present, or None.
 cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 """
-pub fn get(m, key, cmp) do
+fn get(m, key, cmp) do
   match m do
   | HamtMap(node) ->
     let h = key_hash(key)
@@ -435,7 +435,7 @@ pub fn get(m, key, cmp) do
 end
 
 doc "Returns the value for key, or default if the key is absent."
-pub fn get_or(m, key, default, cmp) do
+fn get_or(m, key, default, cmp) do
   match get(m, key, cmp) do
   | Some(v) -> v
   | None    -> default
@@ -443,7 +443,7 @@ pub fn get_or(m, key, default, cmp) do
 end
 
 doc "Returns true if key is present in the map."
-pub fn contains_key(m, key, cmp) do
+fn contains_key(m, key, cmp) do
   match get(m, key, cmp) do
   | Some(_) -> true
   | None    -> false
@@ -457,7 +457,7 @@ Inserts or updates a key-value pair. Returns the new map.
 If the key is already present its value is replaced.
 cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 """
-pub fn insert(m, key, val, cmp) do
+fn insert(m, key, val, cmp) do
   match m do
   | HamtMap(node) ->
     let h = key_hash(key)
@@ -470,7 +470,7 @@ doc """
 Removes a key from the map. Returns the map unchanged if the key is absent.
 cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 """
-pub fn remove(m, key, cmp) do
+fn remove(m, key, cmp) do
   match m do
   | HamtMap(node) ->
     let h = key_hash(key)
@@ -485,26 +485,26 @@ doc """
 Left fold over all entries.
 f is curried: fn acc -> fn key -> fn val -> new_acc
 """
-pub fn fold(acc, m, f) do
+fn fold(acc, m, f) do
   match m do
   | HamtMap(node) -> node_fold(acc, node, f)
   end
 end
 
 doc "Returns all keys as a list (hash-traversal order)."
-pub fn keys(m) do
+fn keys(m) do
   let pairs = fold(Nil, m, fn acc -> fn k -> fn v -> Cons(k, acc))
   lst_rev(pairs)
 end
 
 doc "Returns all values as a list (hash-traversal order)."
-pub fn values(m) do
+fn values(m) do
   let vals = fold(Nil, m, fn acc -> fn k -> fn v -> Cons(v, acc))
   lst_rev(vals)
 end
 
 doc "Returns all (key, value) pairs as a list (hash-traversal order)."
-pub fn entries(m) do
+fn entries(m) do
   let es = fold(Nil, m, fn acc -> fn k -> fn v -> Cons((k, v), acc))
   lst_rev(es)
 end
@@ -516,7 +516,7 @@ Builds a map from a list of (key, value) pairs.
 Later entries overwrite earlier ones for duplicate keys.
 cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 """
-pub fn from_list(pairs, cmp) do
+fn from_list(pairs, cmp) do
   fn go(lst, acc) do
     match lst do
     | Nil -> acc
@@ -529,14 +529,14 @@ pub fn from_list(pairs, cmp) do
 end
 
 doc "Converts a map to a list of (key, value) pairs (hash-traversal order)."
-pub fn to_list(m) do
+fn to_list(m) do
   entries(m)
 end
 
 -- ---- Transformation ----
 
 doc "Applies f to each value, returning a new map with the same keys."
-pub fn map_values(m, f) do
+fn map_values(m, f) do
   fn go(node) do
     match node do
     | HEmpty -> HEmpty
@@ -577,7 +577,7 @@ Returns a map containing only entries where pred(key)(value) is true.
 cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 pred : k -> v -> Bool (curried).
 """
-pub fn filter(m, pred, cmp) do
+fn filter(m, pred, cmp) do
   fn go(lst, acc) do
     match lst do
     | Nil -> acc
@@ -596,7 +596,7 @@ Merges two maps. When a key appears in both maps, the value from b takes
 precedence. O(n log n) in the size of b.
 cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 """
-pub fn merge(a, b, cmp) do
+fn merge(a, b, cmp) do
   fn go(lst, acc) do
     match lst do
     | Nil -> acc
@@ -613,7 +613,7 @@ Merges two maps with a combining function for conflicting keys.
 merge_with(a, b, f, cmp): when key exists in both, value = f(val_a)(val_b).
 cmp : k -> k -> Bool; f : v -> v -> v (curried).
 """
-pub fn merge_with(a, b, f, cmp) do
+fn merge_with(a, b, f, cmp) do
   fn go(lst, acc) do
     match lst do
     | Nil -> acc

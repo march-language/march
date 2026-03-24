@@ -4,12 +4,12 @@
 
 mod Fib do
 
-fn fib(n : Int) : Int do
+pfn fib(n : Int) : Int do
   if n < 2 then n
   else fib(n - 1) + fib(n - 2)
 end
 
-fn main() : Unit do
+pfn main() : Unit do
   println(int_to_string(fib(40)))
 end
 

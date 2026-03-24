@@ -4,7 +4,7 @@
 
 mod BenchHeapsort do
 
-fn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
+pfn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
   if n == 0 then acc
   else do
     let next = (seed * 1664525 + 1013904223) % 1000000
@@ -12,14 +12,14 @@ fn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
   end
 end
 
-fn head(xs : List(Int)) : Int do
+pfn head(xs : List(Int)) : Int do
   match xs do
   | Nil        -> 0
   | Cons(h, _) -> h
   end
 end
 
-fn main() : Unit do
+pfn main() : Unit do
   let xs     = gen_list(10000, 42, Nil)
   let cmp    = fn x -> fn y -> x <= y
   let sorted = Sort.heapsort_by(xs, cmp)

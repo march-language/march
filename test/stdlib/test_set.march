@@ -3,15 +3,15 @@
 
 mod TestSet do
 
-fn int_cmp(a : Int) : Int -> Bool do
+pfn int_cmp(a : Int) : Int -> Bool do
   fn b -> a < b
 end
 
-fn str_cmp(a : String) : String -> Bool do
+pfn str_cmp(a : String) : String -> Bool do
   fn b -> a < b
 end
 
-fn set_of(xs : List(Int)) do
+pfn set_of(xs : List(Int)) do
   Set.from_list(xs, int_cmp)
 end
 

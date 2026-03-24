@@ -6,17 +6,17 @@
 mod TestFile do
 
 -- Local mirrors of File private types.
-type FileKind = RegularFile | Directory | Symlink | OtherKind
-type FileStat = FileStat(Int, FileKind, Int, Int)
+ptype FileKind = RegularFile | Directory | Symlink | OtherKind
+ptype FileStat = FileStat(Int, FileKind, Int, Int)
 
-fn write_ok(path, content) do
+pfn write_ok(path, content) do
   match File.write(path, content) do
   | Ok(_)  -> ()
   | Err(e) -> panic("File.write failed: " ++ to_string(e))
   end
 end
 
-fn read_ok(path) do
+pfn read_ok(path) do
   match File.read(path) do
   | Ok(s)  -> s
   | Err(e) -> panic("File.read failed: " ++ to_string(e))

@@ -27,7 +27,7 @@ mod Regex do
 
 -- ── Internal types ────────────────────────────────────────────────────────
 
-type RegexAtom =
+ptype RegexAtom =
     RALit(String)
   | RAAny
   | RAClass(Bool, List(String))   -- Bool = negated
@@ -38,23 +38,23 @@ type RegexAtom =
   | RANotWord
   | RANotSpace
 
-type RegexQuant = QOne | QZeroOrMore | QOneOrMore | QOptional
+ptype RegexQuant = QOne | QZeroOrMore | QOneOrMore | QOptional
 
-type RegexItem = RegexItem(RegexAtom, RegexQuant)
+ptype RegexItem = RegexItem(RegexAtom, RegexQuant)
 
-type RegexPattern = RegexPattern(Bool, List(RegexItem), Bool)
+ptype RegexPattern = RegexPattern(Bool, List(RegexItem), Bool)
 -- RegexPattern(anchor_start, items, anchor_end)
 
 -- ── Private helpers ───────────────────────────────────────────────────────
 
-fn rev(xs, acc) do
+pfn rev(xs, acc) do
   match xs do
   | Nil -> acc
   | Cons(h, t) -> rev(t, Cons(h, acc))
   end
 end
 
-fn list_contains_str(xs, x) do
+pfn list_contains_str(xs, x) do
   match xs do
   | Nil -> false
   | Cons(h, t) -> if h == x then true else list_contains_str(t, x)
@@ -63,14 +63,14 @@ end
 
 -- Get the byte at position pos in string s (as a 1-char string).
 -- Returns "" if out of bounds.
-fn char_at(s, pos) do
+pfn char_at(s, pos) do
   let len = string_byte_length(s)
   if pos < 0 || pos >= len then ""
   else string_slice(s, pos, 1)
 end
 
 -- Test whether the atom matches the character at position pos in string s.
-fn atom_matches(atom, s, pos) do
+pfn atom_matches(atom, s, pos) do
   let c = char_at(s, pos)
   if c == "" then false
   else match atom do
@@ -89,7 +89,7 @@ fn atom_matches(atom, s, pos) do
 end
 
 -- Count maximum consecutive matches of atom starting at pos.
-fn count_atom_max(atom, s, pos) do
+pfn count_atom_max(atom, s, pos) do
   fn go(p, n) do
     if atom_matches(atom, s, p) then go(p + 1, n + 1)
     else n
@@ -100,7 +100,7 @@ end
 -- Try to match items starting at position pos in string s.
 -- anchor_end: if true, the match must consume the rest of the string.
 -- Returns Some(end_pos) on success, None on failure.
-fn match_at(items, s, slen, pos, anchor_end) do
+pfn match_at(items, s, slen, pos, anchor_end) do
   match items do
   | Nil ->
     if anchor_end then
@@ -148,7 +148,7 @@ end
 
 -- Try to match the pattern anywhere in s starting from position `start`.
 -- Returns Some((match_start, match_end)) or None.
-fn find_match(rpat, s, slen, start) do
+pfn find_match(rpat, s, slen, start) do
   match rpat do
   | RegexPattern(anchor_start, items, anchor_end) ->
     if anchor_start then
@@ -174,7 +174,7 @@ end
 
 -- Parse a character class body (between [ and ]).
 -- Returns Ok((class_chars, remaining_chars)) or Err(message).
-fn parse_class_body(chars, acc) do
+pfn parse_class_body(chars, acc) do
   match chars do
   | Nil -> Err("unterminated character class '[...]'")
   | Cons("]", rest) -> Ok((rev(acc, Nil), rest))
@@ -205,7 +205,7 @@ end
 
 -- Parse one atom from the pattern character list.
 -- Returns Ok((atom, remaining_chars)) or Err(message).
-fn parse_atom(chars) do
+pfn parse_atom(chars) do
   match chars do
   | Nil -> Err("expected atom but reached end of pattern")
   | Cons(".", rest) -> Ok((RAAny, rest))
@@ -240,7 +240,7 @@ fn parse_atom(chars) do
 end
 
 -- Parse the quantifier after an atom.
-fn parse_quant(chars) do
+pfn parse_quant(chars) do
   match chars do
   | Cons("*", rest) -> (QZeroOrMore, rest)
   | Cons("+", rest) -> (QOneOrMore, rest)
@@ -250,7 +250,7 @@ fn parse_quant(chars) do
 end
 
 -- Parse all items from the pattern, stopping at end or '$'.
-fn parse_items(chars, acc) do
+pfn parse_items(chars, acc) do
   match chars do
   | Nil -> Ok((rev(acc, Nil), false, Nil))
   | Cons("$", Nil) -> Ok((rev(acc, Nil), true, Nil))
@@ -269,7 +269,7 @@ end
 
 -- Parse a complete regex pattern string.
 -- Returns Ok(RegexPattern) or Err(message).
-fn compile(pattern) do
+pfn compile(pattern) do
   let chars = string_chars(pattern)
   let (anchor_start, chars2) =
     match chars do
@@ -293,7 +293,7 @@ If pattern ends with '$', the match is anchored to the end.
     Regex.matches("^hello", "hello world")   -- true
     Regex.matches("^hello", "say hello")     -- false
 """
-pub fn matches(pattern, string) do
+fn matches(pattern, string) do
   match compile(pattern) do
   | Err(_) -> false
   | Ok(rpat) ->
@@ -312,7 +312,7 @@ Returns Some(matched_substring) or None.
     Regex.find("\\d+", "price: 42 dollars")  -- Some("42")
     Regex.find("xyz", "hello")               -- None
 """
-pub fn find(pattern, string) do
+fn find(pattern, string) do
   match compile(pattern) do
   | Err(_) -> None
   | Ok(rpat) ->
@@ -330,7 +330,7 @@ Returns a list of matched substrings in order.
 
     Regex.find_all("\\d+", "a1 b22 c333")  -- ["1", "22", "333"]
 """
-pub fn find_all(pattern, string) do
+fn find_all(pattern, string) do
   match compile(pattern) do
   | Err(_) -> Nil
   | Ok(rpat) ->
@@ -356,7 +356,7 @@ Returns the resulting string.
 
     Regex.replace("\\d+", "NUM", "price 42")  -- "price NUM"
 """
-pub fn replace(pattern, replacement, string) do
+fn replace(pattern, replacement, string) do
   match compile(pattern) do
   | Err(_) -> string
   | Ok(rpat) ->
@@ -375,7 +375,7 @@ Returns the resulting string.
 
     Regex.replace_all("\\d", "X", "a1b2c3")  -- "aXbXcX"
 """
-pub fn replace_all(pattern, replacement, string) do
+fn replace_all(pattern, replacement, string) do
   match compile(pattern) do
   | Err(_) -> string
   | Ok(rpat) ->
@@ -407,7 +407,7 @@ Returns the list of substrings between matches.
     Regex.split("\\s+", "hello   world  foo")  -- ["hello", "world", "foo"]
     Regex.split(",", "a,b,c")                   -- ["a", "b", "c"]
 """
-pub fn split(pattern, string) do
+fn split(pattern, string) do
   match compile(pattern) do
   | Err(_) -> Cons(string, Nil)
   | Ok(rpat) ->

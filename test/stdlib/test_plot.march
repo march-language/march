@@ -3,11 +3,11 @@
 
 mod TestPlot do
 
-fn contains(haystack : String, needle : String) : Bool do
+pfn contains(haystack : String, needle : String) : Bool do
   String.contains(haystack, needle)
 end
 
-fn count_occurrences(s : String, sub : String) : Int do
+pfn count_occurrences(s : String, sub : String) : Int do
   let parts = String.split(s, sub)
   List.length(parts) - 1
 end
@@ -152,7 +152,7 @@ test "save writes file" do
   assert contains(contents, "<svg")
 end
 
-pub fn main() : Unit do
+fn main() : Unit do
   ()
 end
 

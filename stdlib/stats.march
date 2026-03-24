@@ -14,17 +14,17 @@ mod Stats do
 -- ---- Basic aggregates ----
 
 doc "Sum of all elements. Returns 0.0 for empty list."
-pub fn sum(xs : List(Float)) : Float do
+fn sum(xs : List(Float)) : Float do
   List.fold_left(0.0, xs, fn (acc, x) -> acc +. x)
 end
 
 doc "Number of elements."
-pub fn count(xs : List(Float)) : Int do
+fn count(xs : List(Float)) : Int do
   List.length(xs)
 end
 
 doc "Arithmetic mean. Panics on empty list."
-pub fn mean(xs : List(Float)) : Float do
+fn mean(xs : List(Float)) : Float do
   match xs do
   | Nil -> panic("Stats.mean: empty list")
   | _   ->
@@ -34,7 +34,7 @@ pub fn mean(xs : List(Float)) : Float do
 end
 
 doc "Minimum value. Panics on empty list."
-pub fn min_val(xs : List(Float)) : Float do
+fn min_val(xs : List(Float)) : Float do
   match xs do
   | Nil -> panic("Stats.min_val: empty list")
   | Cons(h, t) ->
@@ -43,7 +43,7 @@ pub fn min_val(xs : List(Float)) : Float do
 end
 
 doc "Maximum value. Panics on empty list."
-pub fn max_val(xs : List(Float)) : Float do
+fn max_val(xs : List(Float)) : Float do
   match xs do
   | Nil -> panic("Stats.max_val: empty list")
   | Cons(h, t) ->
@@ -53,7 +53,7 @@ end
 
 -- ---- Sorting helper ----
 
-fn sort_floats(xs : List(Float)) : List(Float) do
+pfn sort_floats(xs : List(Float)) : List(Float) do
   List.sort_by(xs, fn (a, b) -> a < b)
 end
 
@@ -63,7 +63,7 @@ doc """
 Percentile using linear interpolation.
 p must be in [0.0, 100.0]. Panics on empty list or out-of-range p.
 """
-pub fn percentile(xs : List(Float), p : Float) : Float do
+fn percentile(xs : List(Float), p : Float) : Float do
   match xs do
   | Nil -> panic("Stats.percentile: empty list")
   | _ ->
@@ -85,7 +85,7 @@ pub fn percentile(xs : List(Float), p : Float) : Float do
 end
 
 doc "Median (50th percentile). Panics on empty list."
-pub fn median(xs : List(Float)) : Float do
+fn median(xs : List(Float)) : Float do
   percentile(xs, 50.0)
 end
 
@@ -96,7 +96,7 @@ Sample variance (denominator n-1).
 Returns 0.0 for a single element.
 Panics on empty list.
 """
-pub fn variance(xs : List(Float)) : Float do
+fn variance(xs : List(Float)) : Float do
   match xs do
   | Nil -> panic("Stats.variance: empty list")
   | Cons(_, Nil) -> 0.0
@@ -112,7 +112,7 @@ doc """
 Population variance (denominator n).
 Returns 0.0 for a single element or empty list.
 """
-pub fn variance_pop(xs : List(Float)) : Float do
+fn variance_pop(xs : List(Float)) : Float do
   match xs do
   | Nil -> 0.0
   | Cons(_, Nil) -> 0.0
@@ -125,12 +125,12 @@ pub fn variance_pop(xs : List(Float)) : Float do
 end
 
 doc "Sample standard deviation. Returns 0.0 for single element. Panics on empty."
-pub fn std_dev(xs : List(Float)) : Float do
+fn std_dev(xs : List(Float)) : Float do
   math_sqrt(variance(xs))
 end
 
 doc "Population standard deviation."
-pub fn std_dev_pop(xs : List(Float)) : Float do
+fn std_dev_pop(xs : List(Float)) : Float do
   math_sqrt(variance_pop(xs))
 end
 
@@ -141,7 +141,7 @@ Mode: the most frequently occurring value.
 When there are ties, returns the first value encountered (in sorted order).
 Panics on empty list.
 """
-pub fn mode(xs : List(Float)) : Float do
+fn mode(xs : List(Float)) : Float do
   match xs do
   | Nil -> panic("Stats.mode: empty list")
   | _ ->
@@ -175,7 +175,7 @@ doc """
 Sample covariance of two equal-length lists.
 Panics if lengths differ or if either list has fewer than 2 elements.
 """
-pub fn covariance(xs : List(Float), ys : List(Float)) : Float do
+fn covariance(xs : List(Float), ys : List(Float)) : Float do
   let nx = List.length(xs)
   let ny = List.length(ys)
   if nx != ny then panic("Stats.covariance: lists must have equal length")
@@ -199,7 +199,7 @@ Returns value in [-1, 1].
 Panics if lists have different lengths, fewer than 2 elements,
 or if either list has zero standard deviation.
 """
-pub fn correlation(xs : List(Float), ys : List(Float)) : Float do
+fn correlation(xs : List(Float), ys : List(Float)) : Float do
   let sx = std_dev(xs)
   let sy = std_dev(ys)
   if sx == 0.0 || sy == 0.0 then panic("Stats.correlation: zero standard deviation")
@@ -214,7 +214,7 @@ Returns (slope, intercept).
 Panics if lists have different lengths or fewer than 2 elements,
 or if xs has zero variance (vertical line).
 """
-pub fn linear_regression(xs : List(Float), ys : List(Float)) : (Float, Float) do
+fn linear_regression(xs : List(Float), ys : List(Float)) : (Float, Float) do
   let nx = List.length(xs)
   let ny = List.length(ys)
   if nx != ny then panic("Stats.linear_regression: lists must have equal length")

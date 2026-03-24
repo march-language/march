@@ -40,7 +40,6 @@ let () =
       ("false", BOOL false);
       ("linear", LINEAR);
       ("affine", AFFINE);
-      ("pub", PUB);
       ("interface", INTERFACE);
       ("impl", IMPL);
       ("sig", SIG);
@@ -66,7 +65,8 @@ let () =
       ("except", EXCEPT);
       ("derive", DERIVE);
       ("for", FOR);
-      ("p_fn", P_FN);
+      ("pfn", PFN);
+      ("ptype", PTYPE);
       ("app", APP);
       ("on_start", ON_START);
       ("on_stop",  ON_STOP);

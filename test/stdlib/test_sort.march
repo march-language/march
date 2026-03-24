@@ -4,22 +4,22 @@
 mod TestSort do
 
 -- Curried integer comparator: cmp(a)(b) = a <= b
-fn int_cmp(a : Int) : Int -> Bool do
+pfn int_cmp(a : Int) : Int -> Bool do
   fn b -> a <= b
 end
 
 -- Curried reverse comparator: cmp(a)(b) = a >= b
-fn int_cmp_rev(a : Int) : Int -> Bool do
+pfn int_cmp_rev(a : Int) : Int -> Bool do
   fn b -> a >= b
 end
 
 -- Helper to extract the first element of an (Int, Int) pair.
-fn fst(p : (Int, Int)) : Int do
+pfn fst(p : (Int, Int)) : Int do
   match p do | (x, _) -> x end
 end
 
 -- Curried pair comparator by first element: cmp(a)(b) = fst(a) <= fst(b)
-fn pair_fst_cmp(a : (Int, Int)) : (Int, Int) -> Bool do
+pfn pair_fst_cmp(a : (Int, Int)) : (Int, Int) -> Bool do
   fn b -> fst(a) <= fst(b)
 end
 

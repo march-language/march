@@ -3,7 +3,7 @@
 
 mod TestArray do
 
-fn make_vec(n : Int) do
+pfn make_vec(n : Int) do
   fn go(i : Int, v) do
     if i > n then v else go(i + 1, Array.push(v, i))
   end

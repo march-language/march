@@ -8,7 +8,7 @@ mod TestHttpTransport do
 
 -- Local mirror of HttpTransport.TransportError (private in HttpTransport).
 -- Constructors are structurally matched at runtime by name.
-type TransportError =
+ptype TransportError =
   ConnectionRefused(String)
   | ConnTimeout(String)
   | SendError(String)
@@ -16,7 +16,7 @@ type TransportError =
   | ConnParseError(String)
   | Closed
 
-fn show_error(e) do
+pfn show_error(e) do
   match e do
   | ConnectionRefused(s) -> "refused:" ++ s
   | ConnTimeout(s)       -> "timeout:" ++ s

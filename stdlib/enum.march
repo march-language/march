@@ -11,7 +11,7 @@
 mod Enum do
 
 -- Internal helper: reverse a list. Avoids dependency on prelude's reverse.
-fn rev(xs : List(a)) : List(a) do
+pfn rev(xs : List(a)) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
     | Nil        -> acc
@@ -28,7 +28,7 @@ Applies f to each element and returns a new list of results. O(n).
 
 This is the primary way to transform a collection element-by-element.
 """
-pub fn map(xs : List(a), f : a -> b) : List(b) do
+fn map(xs : List(a), f : a -> b) : List(b) do
   fn go(lst : List(a), acc : List(b)) : List(b) do
     match lst do
     | Nil        -> rev(acc)
@@ -45,7 +45,7 @@ O(n * m) where m is average sublist length.
 Use when each element expands to zero or more output elements (e.g. tokenizing,
 expanding ranges). Equivalent to Haskell's concatMap.
 """
-pub fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
+fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
   -- append_list: append ys onto xs (xs ++ ys). O(|xs|).
   fn append_list(left : List(b), right : List(b)) : List(b) do
     fn rev_onto(rev_xs, ys) do
@@ -76,7 +76,7 @@ Returns only the elements for which pred returns true. O(n).
 
 Preserves order and is stable (equal elements stay in original relative order).
 """
-pub fn filter(xs : List(a), pred : a -> Bool) : List(a) do
+fn filter(xs : List(a), pred : a -> Bool) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
     | Nil        -> rev(acc)
@@ -95,7 +95,7 @@ O(n).
 This is the primitive from which most other Enum functions can be derived.
 Use fold when you need to accumulate a single value from all elements.
 """
-pub fn fold(zero : b, xs : List(a), f : b -> a -> b) : b do
+fn fold(zero : b, xs : List(a), f : b -> a -> b) : b do
   fn go(lst : List(a), acc : b) : b do
     match lst do
     | Nil        -> acc
@@ -114,7 +114,7 @@ Returns None for empty lists, Some(result) otherwise. O(n).
 Prefer over fold when there is no natural zero value (e.g. max, min,
 string concatenation without a starting value).
 """
-pub fn reduce(xs : List(a), f : a -> a -> a) : Option(a) do
+fn reduce(xs : List(a), f : a -> a -> a) : Option(a) do
   match xs do
   | Nil        -> None
   | Cons(h, t) ->
@@ -136,7 +136,7 @@ Applies f to each element for side effects and returns Unit. O(n).
 Use when you want to perform an action (e.g. println) for each element
 and don't care about the result. Returns Unit regardless of f's return type.
 """
-pub fn each(xs : List(a), f : a -> b) : Unit do
+fn each(xs : List(a), f : a -> b) : Unit do
   match xs do
   | Nil        -> ()
   | Cons(h, t) ->
@@ -152,7 +152,7 @@ Returns the number of elements in the list. O(n).
 
 Prefer this over computing length inside a recursive helper when possible.
 """
-pub fn count(xs : List(a)) : Int do
+fn count(xs : List(a)) : Int do
   fn go(lst : List(a), acc : Int) : Int do
     match lst do
     | Nil        -> acc
@@ -168,7 +168,7 @@ Returns true if at least one element satisfies pred. Short-circuits. O(n).
 Use any instead of filter + count when you only need a yes/no answer —
 any stops at the first match.
 """
-pub fn any(xs : List(a), pred : a -> Bool) : Bool do
+fn any(xs : List(a), pred : a -> Bool) : Bool do
   match xs do
   | Nil        -> false
   | Cons(h, t) ->
@@ -182,7 +182,7 @@ Returns true if all elements satisfy pred. Short-circuits on first failure. O(n)
 
 Use all to validate a collection without counting or filtering.
 """
-pub fn all(xs : List(a), pred : a -> Bool) : Bool do
+fn all(xs : List(a), pred : a -> Bool) : Bool do
   match xs do
   | Nil        -> true
   | Cons(h, t) ->
@@ -197,7 +197,7 @@ Returns the first element satisfying pred, or None if none does. O(n).
 Use find when you need one element that matches a condition. If you
 need all matching elements, use filter instead.
 """
-pub fn find(xs : List(a), pred : a -> Bool) : Option(a) do
+fn find(xs : List(a), pred : a -> Bool) : Option(a) do
   match xs do
   | Nil        -> None
   | Cons(h, t) ->
@@ -219,7 +219,7 @@ This matches Elixir's chunk_by semantics, not group_by.
 Design: consecutive-only grouping avoids the need for a map/hashtable,
 keeping this function pure and O(n) without sorting.
 """
-pub fn group_by(xs : List(a), key : a -> k) : List((k, List(a))) do
+fn group_by(xs : List(a), key : a -> k) : List((k, List(a))) do
   fn go(lst : List(a), cur_key : k, cur_group : List(a), acc : List((k, List(a)))) : List((k, List(a))) do
     match lst do
     | Nil ->
@@ -252,7 +252,7 @@ f is curried: f(x)(y) returns the combined value.
 Use zip_with when you want to combine two collections element-by-element.
 Equivalent to Haskell's zipWith.
 """
-pub fn zip_with(xs : List(a), ys : List(b), f : a -> b -> c) : List(c) do
+fn zip_with(xs : List(a), ys : List(b), f : a -> b -> c) : List(c) do
   fn go(as_ : List(a), bs : List(b), acc : List(c)) : List(c) do
     match as_ do
     | Nil -> rev(acc)
@@ -280,7 +280,7 @@ remain in A order.
 
 cmp is curried: cmp(x)(y) = true means x should come before y.
 """
-pub fn sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+fn sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   Sort.timsort_by(xs, cmp)
 end
 
@@ -291,7 +291,7 @@ Explicitly names the algorithm for documentation clarity. Prefer sort_by
 for application code; use timsort_by when you specifically need stability
 and near-linear behavior on natural runs (e.g. merging pre-sorted logs).
 """
-pub fn timsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+fn timsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   Sort.timsort_by(xs, cmp)
 end
 
@@ -303,7 +303,7 @@ Prefer over timsort_by when:
   - stability is not needed and you want predictable worst-case behavior
   - you are sorting data with no natural runs
 """
-pub fn introsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+fn introsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   Sort.introsort_by(xs, cmp)
 end
 
@@ -316,7 +316,7 @@ Use sort_small_by when:
   - you want provably minimal comparator count for the size
 For general sorting, prefer sort_by.
 """
-pub fn sort_small_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+fn sort_small_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   Sort.sort_small_by(xs, cmp)
 end
 

@@ -5,14 +5,14 @@
 mod Seq do
 
 -- Step type for fold_while: Continue to keep folding, Halt to stop early.
-type Step(a) = Continue(a) | Halt(a)
+ptype Step(a) = Continue(a) | Halt(a)
 
 -- Seq wraps a closure. March's type syntax cannot express the rank-2 type,
 -- so we omit the type annotation — the constructor takes any value (the fold fn).
-type Seq(a) = Seq(a)
+ptype Seq(a) = Seq(a)
 
 -- Internal helper: reverse a list. Avoids dependency on list.march.
-fn rev(xs) do
+pfn rev(xs) do
   fn go(lst, acc) do
     match lst do
     | Nil -> acc
@@ -24,7 +24,7 @@ end
 
 -- Construction
 
-pub fn from_list(xs) do
+fn from_list(xs) do
   fn go(lst, a, f) do
     match lst do
     | Nil -> a
@@ -34,11 +34,11 @@ pub fn from_list(xs) do
   Seq(fn(acc, f) -> go(xs, acc, f))
 end
 
-pub fn empty() do
+fn empty() do
   Seq(fn(acc, ig) -> acc)
 end
 
-pub fn unfold(seed, next) do
+fn unfold(seed, next) do
   fn go(s, a, f) do
     match next(s) do
     | None -> a
@@ -50,7 +50,7 @@ pub fn unfold(seed, next) do
   Seq(fn(acc, f) -> go(seed, acc, f))
 end
 
-pub fn concat(s1, s2) do
+fn concat(s1, s2) do
   fn run_concat(fold1, fold2, acc, f) do
     let mid = fold1(acc, f)
     fold2(mid, f)
@@ -66,14 +66,14 @@ end
 
 -- Transformation (lazy)
 
-pub fn map(seq, f) do
+fn map(seq, f) do
   match seq do
   | Seq(fold) ->
     Seq(fn(acc, g) -> fold(acc, fn(a, x) -> g(a, f(x))))
   end
 end
 
-pub fn filter(seq, pred) do
+fn filter(seq, pred) do
   match seq do
   | Seq(fold) ->
     Seq(fn(acc, f) ->
@@ -82,7 +82,7 @@ pub fn filter(seq, pred) do
   end
 end
 
-pub fn flat_map(seq, f) do
+fn flat_map(seq, f) do
   match seq do
   | Seq(fold) ->
     Seq(fn(acc, g) ->
@@ -95,7 +95,7 @@ pub fn flat_map(seq, f) do
   end
 end
 
-pub fn take(seq, n) do
+fn take(seq, n) do
   fn step_take(pair, x, f) do
     let (a, count) = pair
     if count >= n then (a, count)
@@ -112,7 +112,7 @@ pub fn take(seq, n) do
   end
 end
 
-pub fn drop(seq, n) do
+fn drop(seq, n) do
   fn step_drop(pair, x, f) do
     let (a, skipped) = pair
     if skipped < n then (a, skipped + 1)
@@ -129,7 +129,7 @@ pub fn drop(seq, n) do
   end
 end
 
-pub fn zip(s1, s2) do
+fn zip(s1, s2) do
   fn step_zip(pair, x, f) do
     let (a, remaining) = pair
     match remaining do
@@ -150,7 +150,7 @@ pub fn zip(s1, s2) do
   end
 end
 
-pub fn batch(seq, n) do
+fn batch(seq, n) do
   -- Group elements into lists of size n.
   fn step_batch(triple, x, f) do
     let (a, buf, count) = triple
@@ -177,14 +177,14 @@ end
 
 -- Consumption (eager)
 
-pub fn to_list(seq) do
+fn to_list(seq) do
   match seq do
   | Seq(fold) ->
     rev(fold(Nil, fn(acc, x) -> Cons(x, acc)))
   end
 end
 
-pub fn fold(seq, start, f) do
+fn fold(seq, start, f) do
   match seq do
   | Seq(folder) -> folder(start, f)
   end
@@ -194,7 +194,7 @@ end
 -- With church-encoded folds, all elements are visited but accumulation
 -- is skipped after Halt. For file streaming, the file is read to EOF
 -- even after Halt. This is a known limitation of the fold-based model.
-pub fn fold_while(seq, start, f) do
+fn fold_while(seq, start, f) do
   fn step_fold_while(step, x, f) do
     match step do
     | Halt(a) -> Halt(a)
@@ -211,7 +211,7 @@ pub fn fold_while(seq, start, f) do
   end
 end
 
-pub fn each(seq, f) do
+fn each(seq, f) do
   match seq do
   | Seq(folder) ->
     folder(:ok, fn(ig, x) -> f(x))
@@ -219,14 +219,14 @@ pub fn each(seq, f) do
   end
 end
 
-pub fn count(seq) do
+fn count(seq) do
   match seq do
   | Seq(folder) ->
     folder(0, fn(n, ig) -> n + 1)
   end
 end
 
-pub fn find(seq, pred) do
+fn find(seq, pred) do
   fold_while(seq, None, fn(ig, x) ->
     if pred(x) then Halt(Some(x))
     else Continue(None)
@@ -234,14 +234,14 @@ pub fn find(seq, pred) do
 end
 
 -- Note: March identifiers cannot contain '?', so these are named `any` and `all`
-pub fn any(seq, pred) do
+fn any(seq, pred) do
   fold_while(seq, false, fn(ig, x) ->
     if pred(x) then Halt(true)
     else Continue(false)
   )
 end
 
-pub fn all(seq, pred) do
+fn all(seq, pred) do
   fold_while(seq, true, fn(ig, x) ->
     if pred(x) then Continue(true)
     else Halt(false)

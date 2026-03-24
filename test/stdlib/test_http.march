@@ -6,12 +6,12 @@
 
 mod TestHttp do
 
-fn make_test_req() do
+pfn make_test_req() do
   Request(Get, SchemeHttp, "example.com", Some(8080), "/foo", Some("q=1"),
           Cons(Header("content-type", "text/plain"), Nil), "body")
 end
 
-fn make_test_resp() do
+pfn make_test_resp() do
   Response(Status(200), Cons(Header("content-type", "application/json"), Nil), "{}")
 end
 

@@ -21,14 +21,14 @@
 
 mod ParFib do
 
-fn fib(n : Int) : Int do
+pfn fib(n : Int) : Int do
   if n < 2 then n
   else fib(n - 1) + fib(n - 2)
 end
 
 -- Parallel fib: spawn tasks down to threshold, then sequential.
 -- threshold=20 gives ~1M sequential calls per task (good granularity).
-fn par_fib(n : Int, threshold : Int) : Int do
+pfn par_fib(n : Int, threshold : Int) : Int do
   if n < 2 then n
   else if n <= threshold then fib(n)
   else do
@@ -40,7 +40,7 @@ fn par_fib(n : Int, threshold : Int) : Int do
   end
 end
 
-fn main() : Unit do
+pfn main() : Unit do
   -- fib(40) with parallel threshold at 20
   -- ~2^20 ≈ 1M tasks above threshold, each doing fib(20) = ~21K calls
   let result = par_fib(40, 20)

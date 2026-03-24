@@ -4,7 +4,7 @@
 
 mod BenchSortSmallBatched do
 
-fn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
+pfn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
   if n == 0 then acc
   else do
     let next = (seed * 1664525 + 1013904223) % 1000000
@@ -12,7 +12,7 @@ fn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
   end
 end
 
-fn head(xs : List(Int)) : Int do
+pfn head(xs : List(Int)) : Int do
   match xs do
   | Nil        -> 0
   | Cons(h, _) -> h
@@ -20,7 +20,7 @@ fn head(xs : List(Int)) : Int do
 end
 
 -- Take exactly k elements, returning (taken_reversed, rest).
-fn take_k(xs : List(Int), k : Int, acc : List(Int)) : (List(Int), List(Int)) do
+pfn take_k(xs : List(Int), k : Int, acc : List(Int)) : (List(Int), List(Int)) do
   if k == 0 then (acc, xs)
   else match xs do
     | Nil        -> (acc, Nil)
@@ -30,7 +30,7 @@ end
 
 -- Sort each 8-element chunk with the optimal network, collect into a flat list,
 -- then do one final mergesort over the whole thing.
-fn sort_batched(xs : List(Int), cmp : Int -> Int -> Bool) : List(Int) do
+pfn sort_batched(xs : List(Int), cmp : Int -> Int -> Bool) : List(Int) do
   fn go(lst : List(Int), acc : List(Int)) : List(Int) do
     match lst do
     | Nil -> Sort.mergesort_by(acc, cmp)
@@ -43,7 +43,7 @@ fn sort_batched(xs : List(Int), cmp : Int -> Int -> Bool) : List(Int) do
   go(xs, Nil)
 end
 
-fn main() : Unit do
+pfn main() : Unit do
   let xs     = gen_list(10000, 42, Nil)
   let cmp    = fn x -> fn y -> x <= y
   let sorted = sort_batched(xs, cmp)

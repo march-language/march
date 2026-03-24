@@ -10,7 +10,7 @@
 mod BenchNearlySorted do
 
 -- Build [0,1,2,3,...,2n-1] as consecutive (even,odd) pairs.
-fn build_pairs(n : Int, acc : List(Int)) : List(Int) do
+pfn build_pairs(n : Int, acc : List(Int)) : List(Int) do
   if n < 0 then acc
   else do
     let even = n * 2
@@ -19,14 +19,14 @@ fn build_pairs(n : Int, acc : List(Int)) : List(Int) do
   end
 end
 
-fn head(xs : List(Int)) : Int do
+pfn head(xs : List(Int)) : Int do
   match xs do
   | Nil        -> 0
   | Cons(h, _) -> h
   end
 end
 
-fn main() : Unit do
+pfn main() : Unit do
   -- Build two independent lists so each sort exclusively owns its input.
   -- Passing the same list to two consuming functions requires deep RC tracking,
   -- which Perceus does not yet support across the full tree.

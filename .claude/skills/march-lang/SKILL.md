@@ -34,20 +34,25 @@ March uses `do...end` blocks, newline-separated expressions (no semicolons), and
 ### Functions
 
 ```march
--- Named function (top-level or inside a module)
-pub fn add(x : Int, y : Int) : Int do
+-- Named function (public by default — no qualifier needed)
+fn add(x : Int, y : Int) : Int do
   x + y
 end
 
--- Private (default visibility, no `pub`)
-fn helper(x : Int) : Int do
+-- Private (explicit opt-in with `pfn`)
+pfn helper(x : Int) : Int do
   x * 2
 end
 
 -- Multi-head pattern matching (clauses must be adjacent)
-pub fn factorial(0) : Int do 1 end
-pub fn factorial(n : Int) : Int do n * factorial(n - 1) end
+fn factorial(0) : Int do 1 end
+fn factorial(n : Int) : Int do n * factorial(n - 1) end
 ```
+
+**Visibility rules:**
+- `fn` = **public** (default — no qualifier needed)
+- `pfn` = **private** (explicit opt-in to hide)
+- `pub` is a **parse error** — do not use it
 
 ### Lambdas
 
@@ -228,7 +233,7 @@ These are in scope without any module prefix:
 
 ## Stdlib modules
 
-Every module is auto-loaded. Call functions with `Module.function(args)`. Here is the full list of available modules — **always read the source file** before calling functions to verify what actually exists:
+Every module is auto-loaded. Call functions with `Module.function(args)`. Here is the full list of available modules — **always run `forge search Module -p`** before calling functions to verify what actually exists:
 
 `List`, `Map`, `Set`, `Array`, `Queue`, `String`, `Option`, `Result`, `Math`, `Enum`, `BigInt`, `Decimal`, `DateTime`, `Bytes`, `Json`, `Regex`, `Csv`, `File`, `Dir`, `Path`, `Http`, `HttpClient`, `HttpServer`, `HttpTransport`, `WebSocket`, `Process`, `Logger`, `Flow`, `Actor`, `Sort`, `Hamt`, `Seq`, `Iterable`, `IOList`, `Random`, `Stats`, `Plot`, `Prelude`
 
@@ -346,7 +351,7 @@ This is especially common with `let x = y` followed by a tuple on the next line.
 
 ### 1. Calling functions that don't exist
 
-**Always read the stdlib source file** (`stdlib/module.march`) before writing code that calls its functions. Agents frequently invent function names like `Logger.level_enabled` or `String.capitalize` that don't exist. The compiler error will say: `I cannot find a variable named \`Module.function\`.`
+**Always run `forge search` before writing code that calls stdlib functions.** Agents frequently invent function names like `Logger.level_enabled` or `String.capitalize` that don't exist. Run `forge search Module -p` to see what's actually available. The compiler error will say: `I cannot find a variable named \`Module.function\`.`
 
 ### 2. Using `assert_eq` instead of `assert`
 
@@ -444,12 +449,25 @@ Add to the `initial_env` list in `eval.ml`:
 - Doc comments use `doc "..."` or `doc """..."""` before a function
 - Run `dune build` after every change to catch errors early
 
-## Quick reference: reading stdlib source
+## Quick reference: finding stdlib functions
 
-Before writing any March code that calls stdlib functions, run:
+Before writing any March code that calls stdlib functions, use `forge search` to find what's available:
 
 ```bash
-cat stdlib/MODULE.march | grep "pub fn"
+forge search map                          # find functions by name (fuzzy match)
+forge search --type "List(a) -> Int"      # find functions by type signature
+forge search --doc "sort"                 # search doc strings by keyword
+forge search map --type "List(a)" -p      # combined search, pretty table output
+forge search reverse --json               # raw JSON output for scripting
 ```
 
-This gives you the actual public API. Trust the source, not your assumptions.
+Use `forge search` instead of grepping source files — it indexes all stdlib modules with signatures, doc strings, and source locations. Add `-p` / `--pretty` for a colored table view.
+
+To see the full public API of a specific module, search by module name:
+
+```bash
+forge search List -p                      # all List module functions
+forge search Map -p                       # all Map module functions
+```
+
+Trust `forge search` results over assumptions about what functions exist.
