@@ -129,31 +129,22 @@ let parse_test_file filename =
   let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
   March_desugar.Desugar.desugar_module m
 
-(** Run a stdlib test file.  [test_filename] is the basename of the file
-    under test/stdlib/ (e.g. "test_http.march").  [mod_name] is the March
-    module name declared in that file (e.g. "TestHttp"). *)
+(** Run a stdlib test file using the native test runner.
+    [test_filename] is the basename of the file under test/stdlib/.
+    Collects all [test "..."] blocks and runs them via [run_tests]. *)
 let run_stdlib_test test_filename _mod_name () =
   March_eval.Eval.reset_scheduler_state ();
   let stdlib = Lazy.force all_stdlib_decls in
   let m = parse_test_file test_filename in
-  (* Prepend stdlib so user code can reference Http.*, Test.*, etc.
-     The test file is the top-level module; its [main] function ends up
-     in the flat env returned by eval_module_env (not qualified). *)
+  (* Prepend stdlib so user code can reference Http.*, Test.*, etc. *)
   let m' = { m with March_ast.Ast.mod_decls = stdlib @ m.March_ast.Ast.mod_decls } in
-  let env =
-    (try March_eval.Eval.eval_module_env m'
-     with March_eval.Eval.Eval_error msg ->
-       Alcotest.failf "eval error during setup: %s" msg)
+  let (total, n_failed) =
+    try March_eval.Eval.run_tests m'
+    with March_eval.Eval.Eval_error msg ->
+      Alcotest.failf "eval error: %s" msg
   in
-  match List.assoc_opt "main" env with
-  | None ->
-    Alcotest.failf "function main not found in env (test file: %s)" test_filename
-  | Some main_fn ->
-    (try
-       let _ = March_eval.Eval.apply main_fn [] in
-       ()
-     with March_eval.Eval.Eval_error msg ->
-       Alcotest.failf "%s" msg)
+  if n_failed > 0 then
+    Alcotest.failf "%d/%d tests failed in %s" n_failed total test_filename
 
 (* ------------------------------------------------------------------ *)
 (* Test cases                                                          *)

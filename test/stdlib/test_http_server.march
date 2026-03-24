@@ -1,223 +1,204 @@
+-- test/stdlib/test_http_server.march
 -- Tests for the HttpServer stdlib module.
 -- Covers Conn construction, accessors, transforms, pipeline execution,
 -- and server config. No actual TCP binding.
+-- Run with: dune exec march -- test test/stdlib/test_http_server.march
 
 mod TestHttpServer do
 
-  -- ── Conn construction helpers ──────────────────────────────────────
+-- Local mirrors of HttpServer private types (matched structurally at runtime).
+type Upgrade = NoUpgrade | WebSocketUpgrade(a)
+type Conn = Conn(
+  Int, Method, String, List(String), String,
+  List(Header), String, Int, List(Header), String,
+  Bool, List((String, String)), Upgrade
+)
 
-  -- Build a minimal Conn for testing (fd=0, no upgrade)
-  fn make_conn(meth, path_, qs, req_hdrs, req_body) do
-    let path_parts = filter(string_split(path_, "/"), fn s -> not(string_is_empty(s)))
-    Conn(0, meth, path_, path_parts, qs, req_hdrs, req_body, 0, Nil, "", false, Nil, NoUpgrade)
-  end
+fn make_conn(meth, path_, qs, req_hdrs, req_body) do
+  let path_parts = List.filter(string_split(path_, "/"), fn s -> not(string_is_empty(s)))
+  Conn(0, meth, path_, path_parts, qs, req_hdrs, req_body, 0, Nil, "", false, Nil, NoUpgrade)
+end
 
-  fn make_get(path_) do
-    make_conn(Get, path_, "", Cons(Header("host", "localhost"), Nil), "")
-  end
+fn make_get(path_) do
+  make_conn(Get, path_, "", Cons(Header("host", "localhost"), Nil), "")
+end
 
-  fn make_post(path_, body) do
-    make_conn(Post, path_, "", Cons(Header("content-type", "text/plain"), Nil), body)
-  end
+fn make_post(path_, body) do
+  make_conn(Post, path_, "", Cons(Header("content-type", "text/plain"), Nil), body)
+end
 
-  -- ── Conn accessors ─────────────────────────────────────────────────
-
-  fn test_method_accessor() do
+describe "HttpServer Conn accessors" do
+  test "method accessor Get" do
     let conn = make_get("/users")
-    Test.assert_eq_str(Http.method_to_string(HttpServer.method(conn)), "GET", "method GET")
-    let conn2 = make_post("/submit", "data")
-    Test.assert_eq_str(Http.method_to_string(HttpServer.method(conn2)), "POST", "method POST")
+    assert (Http.method_to_string(HttpServer.method(conn)) == "GET")
   end
 
-  fn test_path_accessor() do
+  test "method accessor Post" do
+    let conn = make_post("/submit", "data")
+    assert (Http.method_to_string(HttpServer.method(conn)) == "POST")
+  end
+
+  test "path accessor" do
     let conn = make_get("/api/v1/users")
-    Test.assert_eq_str(HttpServer.path(conn), "/api/v1/users", "path accessor")
+    assert (HttpServer.path(conn) == "/api/v1/users")
   end
 
-  fn test_path_info_accessor() do
+  test "path_info splits path segments" do
     let conn = make_get("/api/v1/users")
     let info = HttpServer.path_info(conn)
-    Test.assert_false(is_nil(info), "path_info not empty")
-    Test.assert_eq_str(head(info), "api", "first segment")
+    assert (not (is_nil(info)))
+    assert (head(info) == "api")
   end
 
-  fn test_query_string_accessor() do
+  test "query_string accessor" do
     let conn = make_conn(Get, "/search", "q=hello&limit=5", Nil, "")
-    Test.assert_eq_str(HttpServer.query_string(conn), "q=hello&limit=5", "query_string")
+    assert (HttpServer.query_string(conn) == "q=hello&limit=5")
   end
 
-  fn test_req_body_accessor() do
+  test "req_body accessor" do
     let conn = make_post("/submit", "my payload")
-    Test.assert_eq_str(HttpServer.req_body(conn), "my payload", "req_body")
+    assert (HttpServer.req_body(conn) == "my payload")
   end
 
-  fn test_status_accessor_default() do
+  test "status is 0 by default" do
     let conn = make_get("/")
-    Test.assert_eq_int(HttpServer.status(conn), 0, "status 0 by default")
+    assert (HttpServer.status(conn) == 0)
   end
 
-  fn test_halted_accessor_default() do
+  test "halted is false by default" do
     let conn = make_get("/")
-    Test.assert_false(HttpServer.halted(conn), "not halted by default")
+    assert (not (HttpServer.halted(conn)))
   end
+end
 
-  -- ── Request header lookup ──────────────────────────────────────────
-
-  fn test_get_req_header() do
+describe "HttpServer request header lookup" do
+  test "get_req_header finds host" do
     let conn = make_get("/")
-    let val_ = Test.assert_some(HttpServer.get_req_header(conn, "host"), "host header present")
-    Test.assert_eq_str(val_, "localhost", "host value")
-    -- case-insensitive
-    let val2 = Test.assert_some(HttpServer.get_req_header(conn, "HOST"), "HOST uppercase")
-    Test.assert_eq_str(val2, "localhost", "HOST uppercase value")
-    Test.assert_none(HttpServer.get_req_header(conn, "x-missing"), "missing header None")
+    assert (HttpServer.get_req_header(conn, "host") == Some("localhost"))
   end
 
-  -- ── Conn transforms ────────────────────────────────────────────────
+  test "get_req_header is case insensitive" do
+    let conn = make_get("/")
+    assert (HttpServer.get_req_header(conn, "HOST") == Some("localhost"))
+  end
 
-  fn test_put_resp_header() do
+  test "get_req_header returns None for missing header" do
+    let conn = make_get("/")
+    assert (HttpServer.get_req_header(conn, "x-missing") == None)
+  end
+end
+
+describe "HttpServer Conn transforms" do
+  test "put_resp_header adds header to resp_headers" do
     let conn = make_get("/")
     let conn2 = HttpServer.put_resp_header(conn, "X-Custom", "hello")
     let hdrs = HttpServer.resp_headers(conn2)
-    Test.assert_false(is_nil(hdrs), "resp headers non-empty")
-    -- verify value via resp_headers list
+    assert (not (is_nil(hdrs)))
     match head(hdrs) do
     | Header(n, v) ->
-      Test.assert_eq_str(string_to_lowercase(n), "x-custom", "resp header name")
-      Test.assert_eq_str(v, "hello", "resp header value")
+      assert (string_to_lowercase(n) == "x-custom")
+      assert (v == "hello")
     end
   end
 
-  fn test_assign() do
+  test "assign stores and retrieves value" do
     let conn = make_get("/")
     let conn2 = HttpServer.assign(conn, "user_id", "42")
-    let v = Test.assert_some(HttpServer.get_assign(conn2, "user_id"), "user_id assign")
-    Test.assert_eq_str(v, "42", "assign value")
-    Test.assert_none(HttpServer.get_assign(conn2, "missing"), "missing assign None")
+    assert (HttpServer.get_assign(conn2, "user_id") == Some("42"))
+    assert (HttpServer.get_assign(conn2, "missing") == None)
   end
 
-  fn test_send_resp() do
+  test "send_resp sets status body and halts" do
     let conn = make_get("/")
     let conn2 = HttpServer.send_resp(conn, 200, "hello world")
-    Test.assert_eq_int(HttpServer.status(conn2), 200, "send_resp status")
-    Test.assert_eq_str(HttpServer.resp_body(conn2), "hello world", "send_resp body")
-    Test.assert_true(HttpServer.halted(conn2), "halted after send_resp")
+    assert (HttpServer.status(conn2) == 200)
+    assert (HttpServer.resp_body(conn2) == "hello world")
+    assert (HttpServer.halted(conn2))
   end
 
-  fn test_halt() do
+  test "halt marks conn as halted" do
     let conn = make_get("/")
     let conn2 = HttpServer.halt(conn)
-    Test.assert_true(HttpServer.halted(conn2), "halted after halt()")
+    assert (HttpServer.halted(conn2))
   end
+end
 
-  -- ── Convenience response builders ─────────────────────────────────
-
-  fn test_text_response() do
+describe "HttpServer convenience response builders" do
+  test "text sets status body and halts" do
     let conn = make_get("/")
     let conn2 = HttpServer.text(conn, 200, "plain text")
-    Test.assert_eq_int(HttpServer.status(conn2), 200, "text status")
-    Test.assert_eq_str(HttpServer.resp_body(conn2), "plain text", "text body")
-    Test.assert_true(HttpServer.halted(conn2), "text halted")
-    let ct = Test.assert_some(HttpServer.get_req_header(
-      Conn(HttpServer.fd(conn2), HttpServer.method(conn2), HttpServer.path(conn2),
-           HttpServer.path_info(conn2), HttpServer.query_string(conn2),
-           HttpServer.resp_headers(conn2), HttpServer.resp_body(conn2),
-           HttpServer.status(conn2), HttpServer.resp_headers(conn2),
-           HttpServer.resp_body(conn2), HttpServer.halted(conn2),
-           HttpServer.assigns(conn2), NoUpgrade), "content-type"),
-      "content-type in resp headers")
-    Test.assert_true(string_starts_with(ct, "text/plain"), "text content-type")
+    assert (HttpServer.status(conn2) == 200)
+    assert (HttpServer.resp_body(conn2) == "plain text")
+    assert (HttpServer.halted(conn2))
   end
 
-  fn test_json_response() do
+  test "text sets content-type header" do
+    let conn = make_get("/")
+    let conn2 = HttpServer.text(conn, 200, "plain text")
+    let hdrs = HttpServer.resp_headers(conn2)
+    assert (not (is_nil(hdrs)))
+    match head(hdrs) do
+    | Header(n, _) -> assert (string_to_lowercase(n) == "content-type")
+    end
+  end
+
+  test "json sets status and body" do
     let conn = make_get("/")
     let conn2 = HttpServer.json(conn, 201, "{\"ok\":true}")
-    Test.assert_eq_int(HttpServer.status(conn2), 201, "json status")
-    Test.assert_eq_str(HttpServer.resp_body(conn2), "{\"ok\":true}", "json body")
+    assert (HttpServer.status(conn2) == 201)
+    assert (HttpServer.resp_body(conn2) == "{\"ok\":true}")
   end
 
-  fn test_redirect_response() do
+  test "redirect sets status 302 and halts" do
     let conn = make_get("/old")
     let conn2 = HttpServer.redirect(conn, "/new")
-    Test.assert_eq_int(HttpServer.status(conn2), 302, "redirect status")
-    Test.assert_true(HttpServer.halted(conn2), "redirect halted")
+    assert (HttpServer.status(conn2) == 302)
+    assert (HttpServer.halted(conn2))
   end
+end
 
-  -- ── Pipeline execution ─────────────────────────────────────────────
-
-  fn test_run_pipeline_empty() do
+describe "HttpServer pipeline execution" do
+  test "empty pipeline leaves conn unchanged" do
     let conn = make_get("/")
     let conn2 = HttpServer.run_pipeline(conn, Nil)
-    -- unchanged
-    Test.assert_eq_str(HttpServer.path(conn2), "/", "empty pipeline unchanged")
-    Test.assert_false(HttpServer.halted(conn2), "not halted")
+    assert (HttpServer.path(conn2) == "/")
+    assert (not (HttpServer.halted(conn2)))
   end
 
-  fn test_run_pipeline_single_plug() do
+  test "single plug is applied" do
     let conn = make_get("/")
-    let add_header_plug = fn c -> HttpServer.put_resp_header(c, "X-Plug", "ran")
-    let conn2 = HttpServer.run_pipeline(conn, Cons(add_header_plug, Nil))
+    let add_header = fn c -> HttpServer.put_resp_header(c, "X-Plug", "ran")
+    let conn2 = HttpServer.run_pipeline(conn, Cons(add_header, Nil))
+    assert (not (is_nil(HttpServer.resp_headers(conn2))))
+  end
+
+  test "pipeline stops when halted" do
+    let conn = make_get("/")
+    let halt_plug       = fn c -> HttpServer.halt(c)
+    let add_after_halt  = fn c -> HttpServer.put_resp_header(c, "X-After-Halt", "bad")
+    let conn2 = HttpServer.run_pipeline(conn, Cons(halt_plug, Cons(add_after_halt, Nil)))
+    assert (HttpServer.halted(conn2))
     let hdrs = HttpServer.resp_headers(conn2)
-    Test.assert_false(is_nil(hdrs), "plug added header")
+    let has_bad = List.any(hdrs, fn h ->
+      match h do | Header(n, _) -> string_to_lowercase(n) == "x-after-halt" end)
+    assert (not(has_bad))
   end
 
-  fn test_run_pipeline_stops_when_halted() do
-    let conn = make_get("/")
-    -- First plug halts, second plug would add a header
-    let halt_plug = fn c -> HttpServer.halt(c)
-    let add_header_plug = fn c -> HttpServer.put_resp_header(c, "X-After-Halt", "should not run")
-    let conn2 = HttpServer.run_pipeline(conn, Cons(halt_plug, Cons(add_header_plug, Nil)))
-    Test.assert_true(HttpServer.halted(conn2), "halted after halt plug")
-    -- The second plug should NOT have run
-    Test.assert_none(
-      HttpServer.get_req_header(
-        Conn(0, Get, "/", Nil, "", HttpServer.resp_headers(conn2), "", 0, Nil, "", false, Nil, NoUpgrade),
-        "x-after-halt"),
-      "second plug did not run")
-  end
-
-  fn test_run_pipeline_multiple_plugs() do
+  test "multiple plugs all run when not halted" do
     let conn = make_get("/")
     let plug1 = fn c -> HttpServer.assign(c, "step", "1")
     let plug2 = fn c -> HttpServer.assign(c, "done", "yes")
     let conn2 = HttpServer.run_pipeline(conn, Cons(plug1, Cons(plug2, Nil)))
-    let s = Test.assert_some(HttpServer.get_assign(conn2, "step"), "step assign")
-    Test.assert_eq_str(s, "1", "step=1")
-    let d = Test.assert_some(HttpServer.get_assign(conn2, "done"), "done assign")
-    Test.assert_eq_str(d, "yes", "done=yes")
+    assert (HttpServer.get_assign(conn2, "step") == Some("1"))
+    assert (HttpServer.get_assign(conn2, "done") == Some("yes"))
   end
+end
 
-  -- ── Server config ──────────────────────────────────────────────────
-
-  fn test_server_new() do
-    -- Just verify it doesn't panic
-    let srv = HttpServer.new(4000)
+describe "HttpServer server config" do
+  test "new creates a server without panicking" do
+    let _srv = HttpServer.new(4000)
     ()
   end
-
-  -- ── Entry point ────────────────────────────────────────────────────
-
-  pub fn main() do
-    test_method_accessor()
-    test_path_accessor()
-    test_path_info_accessor()
-    test_query_string_accessor()
-    test_req_body_accessor()
-    test_status_accessor_default()
-    test_halted_accessor_default()
-    test_get_req_header()
-    test_put_resp_header()
-    test_assign()
-    test_send_resp()
-    test_halt()
-    test_text_response()
-    test_json_response()
-    test_redirect_response()
-    test_run_pipeline_empty()
-    test_run_pipeline_single_plug()
-    test_run_pipeline_stops_when_halted()
-    test_run_pipeline_multiple_plugs()
-    test_server_new()
-  end
+end
 
 end

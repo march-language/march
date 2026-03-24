@@ -1,99 +1,167 @@
 -- test/stdlib/test_dir.march
--- Comprehensive tests for the Dir module.
--- Uses /tmp for temporary directories; cleans up on success.
+-- Tests for the Dir stdlib module.
+-- Uses /tmp for temporary directories; each test uses a unique base path.
+-- Run with: dune exec march -- test test/stdlib/test_dir.march
 
 mod TestDir do
 
-fn main() do
-  let base = "/tmp/march_test_dir_root"
-
-  -- ---- Clean slate: remove if leftover from prior run ----
-  Dir.rm_rf(base)
-
-  -- ---- Dir.exists false ----
-  assert_true("exists false", not Dir.exists(base))
-
-  -- ---- Dir.mkdir ----
-  match Dir.mkdir(base) do
-  | Err(e) -> panic("mkdir failed: " ++ to_string(e))
-  | Ok(_) -> :ok
-  end
-  assert_true("exists after mkdir", Dir.exists(base))
-
-  -- ---- Dir.mkdir duplicate (should error) ----
-  match Dir.mkdir(base) do
-  | Err(_) -> :ok
-  | Ok(_) -> panic("mkdir duplicate should return Err")
+describe "Dir.exists" do
+  test "returns false for nonexistent path" do
+    assert (not (Dir.exists("/tmp/march_td_noexist_00")))
   end
 
-  -- ---- Dir.list on empty dir ----
-  match Dir.list(base) do
-  | Err(e) -> panic("list empty failed: " ++ to_string(e))
-  | Ok(names) -> assert_eq("list empty", List.length(names), 0)
+  test "returns true after mkdir" do
+    let path = "/tmp/march_td_exists_01"
+    let _ = Dir.rm_rf(path)
+    let _ = Dir.mkdir(path)
+    assert (Dir.exists(path))
+    let _ = Dir.rm_rf(path)
   end
 
-  -- ---- Create files then list ----
-  File.write(base ++ "/a.txt", "A")
-  File.write(base ++ "/b.txt", "B")
-  match Dir.list(base) do
-  | Err(e) -> panic("list after writes failed: " ++ to_string(e))
-  | Ok(names) -> assert_eq("list count", List.length(names), 2)
+  test "returns false for a file path" do
+    let path = "/tmp/march_td_file_02"
+    let _ = File.write(path, "data")
+    assert (not (Dir.exists(path)))
+    let _ = File.delete(path)
+  end
+end
+
+describe "Dir.mkdir" do
+  test "creates a directory" do
+    let path = "/tmp/march_td_mkdir_03"
+    let _ = Dir.rm_rf(path)
+    match Dir.mkdir(path) do
+    | Err(_) -> assert false
+    | Ok(_)  -> ()
+    end
+    assert (Dir.exists(path))
+    let _ = Dir.rm_rf(path)
   end
 
-  -- ---- Dir.list_full returns full paths ----
-  match Dir.list_full(base) do
-  | Err(e) -> panic("list_full failed: " ++ to_string(e))
-  | Ok(paths) ->
-    assert_eq("list_full count", List.length(paths), 2)
-    -- All paths start with base
-    assert_true("list_full paths start with base",
-      List.all(paths, fn p -> String.starts_with(p, base)))
+  test "duplicate mkdir returns Err" do
+    let path = "/tmp/march_td_mkdir_dup_04"
+    let _ = Dir.rm_rf(path)
+    let _ = Dir.mkdir(path)
+    match Dir.mkdir(path) do
+    | Err(_) -> ()
+    | Ok(_)  -> assert false
+    end
+    let _ = Dir.rm_rf(path)
+  end
+end
+
+describe "Dir.list" do
+  test "empty directory has no entries" do
+    let path = "/tmp/march_td_list_05"
+    let _ = Dir.rm_rf(path)
+    let _ = Dir.mkdir(path)
+    let names = match Dir.list(path) do
+      | Ok(ns) -> ns
+      | Err(_) -> panic("Dir.list failed")
+    end
+    assert (List.length(names) == 0)
+    let _ = Dir.rm_rf(path)
   end
 
-  -- ---- Dir.list on nonexistent ----
-  match Dir.list(base ++ "/noexist") do
-  | Err(_) -> :ok
-  | Ok(_) -> panic("list nonexistent should return Err")
+  test "list returns created files" do
+    let path = "/tmp/march_td_list_06"
+    let _ = Dir.rm_rf(path)
+    let _ = Dir.mkdir(path)
+    let _ = File.write(path ++ "/a.txt", "A")
+    let _ = File.write(path ++ "/b.txt", "B")
+    let names = match Dir.list(path) do
+      | Ok(ns) -> ns
+      | Err(_) -> panic("Dir.list after writes failed")
+    end
+    assert (List.length(names) == 2)
+    let _ = Dir.rm_rf(path)
   end
 
-  -- ---- Dir.mkdir_p nested ----
-  let nested = base ++ "/deep/nested/path"
-  match Dir.mkdir_p(nested) do
-  | Err(e) -> panic("mkdir_p failed: " ++ to_string(e))
-  | Ok(_) -> :ok
+  test "list on nonexistent returns Err" do
+    match Dir.list("/tmp/march_td_list_noexist_07") do
+    | Err(_) -> ()
+    | Ok(_)  -> assert false
+    end
   end
-  assert_true("nested dir exists", Dir.exists(nested))
+end
 
-  -- ---- Dir.rmdir (non-empty should fail) ----
-  match Dir.rmdir(base) do
-  | Err(_) -> :ok   -- non-empty dir: expected to fail
-  | Ok(_) -> panic("rmdir non-empty should return Err")
+describe "Dir.list_full" do
+  test "returns full absolute paths" do
+    let path = "/tmp/march_td_full_08"
+    let _ = Dir.rm_rf(path)
+    let _ = Dir.mkdir(path)
+    let _ = File.write(path ++ "/a.txt", "A")
+    let _ = File.write(path ++ "/b.txt", "B")
+    let paths = match Dir.list_full(path) do
+      | Ok(ps) -> ps
+      | Err(_) -> panic("Dir.list_full failed")
+    end
+    assert (List.length(paths) == 2)
+    assert (List.all(paths, fn p -> String.starts_with(p, path)))
+    let _ = Dir.rm_rf(path)
+  end
+end
+
+describe "Dir.mkdir_p" do
+  test "creates nested directories" do
+    let base   = "/tmp/march_td_mkdirp_09"
+    let nested = base ++ "/deep/nested/path"
+    let _ = Dir.rm_rf(base)
+    match Dir.mkdir_p(nested) do
+    | Err(_) -> assert false
+    | Ok(_)  -> ()
+    end
+    assert (Dir.exists(nested))
+    let _ = Dir.rm_rf(base)
+  end
+end
+
+describe "Dir.rmdir" do
+  test "removes an empty directory" do
+    let path = "/tmp/march_td_rmdir_10"
+    let _ = Dir.rm_rf(path)
+    let _ = Dir.mkdir(path)
+    match Dir.rmdir(path) do
+    | Err(_) -> assert false
+    | Ok(_)  -> ()
+    end
+    assert (not (Dir.exists(path)))
   end
 
-  -- ---- Dir.rmdir empty dir ----
-  match Dir.rmdir(nested) do
-  | Err(e) -> panic("rmdir empty failed: " ++ to_string(e))
-  | Ok(_) -> :ok
+  test "fails on non-empty directory" do
+    let path = "/tmp/march_td_rmdir_ne_11"
+    let _ = Dir.rm_rf(path)
+    let _ = Dir.mkdir(path)
+    let _ = File.write(path ++ "/file.txt", "data")
+    match Dir.rmdir(path) do
+    | Err(_) -> ()
+    | Ok(_)  -> assert false
+    end
+    let _ = Dir.rm_rf(path)
   end
-  assert_true("rmdir removed", not Dir.exists(nested))
+end
 
-  -- ---- Dir.exists false for file path ----
-  assert_true("file path not a dir", not Dir.exists(base ++ "/a.txt"))
-
-  -- ---- Dir.rm_rf recursive ----
-  match Dir.rm_rf(base) do
-  | Err(e) -> panic("rm_rf failed: " ++ to_string(e))
-  | Ok(_) -> :ok
+describe "Dir.rm_rf" do
+  test "removes directory tree recursively" do
+    let path = "/tmp/march_td_rmrf_12"
+    let _ = Dir.rm_rf(path)
+    let _ = Dir.mkdir(path)
+    let _ = File.write(path ++ "/f1.txt", "x")
+    let _ = Dir.mkdir(path ++ "/sub")
+    let _ = File.write(path ++ "/sub/f2.txt", "y")
+    match Dir.rm_rf(path) do
+    | Err(_) -> assert false
+    | Ok(_)  -> ()
+    end
+    assert (not (Dir.exists(path)))
   end
-  assert_true("rm_rf removed", not Dir.exists(base))
 
-  -- ---- Dir.rm_rf on nonexistent (should succeed gracefully) ----
-  match Dir.rm_rf(base ++ "/noexist") do
-  | Err(_) -> :ok   -- acceptable: not found
-  | Ok(_) -> :ok    -- also acceptable
+  test "rm_rf on nonexistent does not panic" do
+    match Dir.rm_rf("/tmp/march_td_rmrf_noexist_13") do
+    | Err(_) -> ()
+    | Ok(_)  -> ()
+    end
   end
-
-  println("All Dir tests passed!")
 end
 
 end
