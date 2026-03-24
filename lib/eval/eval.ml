@@ -37,6 +37,7 @@ type value =
   | VActorId of int                     (** Opaque actor identity (epoch-independent) *)
   | VChan   of chan_endpoint            (** Binary session-typed channel endpoint *)
   | VMChan  of mpst_endpoint            (** Multi-party session-typed channel endpoint *)
+  | VForeign of string * string         (** FFI extern: (lib_name, symbol_name) *)
 
 (** One endpoint of a binary session-typed channel.
     Each channel consists of two linked endpoints; one side's [ce_out_q]
@@ -600,6 +601,8 @@ let rec value_to_string v =
     Printf.sprintf "Chan(%s#%d, %s)" ce.ce_proto ce.ce_id ce.ce_role
   | VMChan me ->
     Printf.sprintf "MChan(%s#%d, %s)" me.me_proto me.me_id me.me_role
+  | VForeign (lib, sym) ->
+    Printf.sprintf "<foreign:%s:%s>" lib sym
 
 (** Pretty-print a value with indented multi-line layout when the flat
     representation exceeds [width] characters.
@@ -714,6 +717,68 @@ let run_scheduler_hook : (unit -> unit) ref =
     so that [register_resource_ocaml] can call closures at crash time. *)
 let apply_hook : (value -> value list -> value) ref =
   ref (fun _fn _args -> eval_error "apply not yet initialized")
+
+(* ------------------------------------------------------------------ *)
+(* FFI extern stub table                                               *)
+(* ------------------------------------------------------------------ *)
+
+(** Table of OCaml-side stubs for extern functions.
+    Key: (lib_name, symbol_name).
+    On interpreter path we don't dlopen; instead we register known
+    math/libc symbols here so that `extern "c"` and `extern "m"` blocks
+    work without a C runtime call. *)
+let foreign_stubs : (string * string, value list -> value) Hashtbl.t =
+  let t = Hashtbl.create 32 in
+  let reg lib sym f = Hashtbl.replace t (lib, sym) f in
+  (* libc / libm math — single-float functions *)
+  let f1 name ocaml_fn =
+    List.iter (fun lib -> reg lib name (function
+        | [VFloat x] -> VFloat (ocaml_fn x)
+        | [VInt x]   -> VFloat (ocaml_fn (float_of_int x))
+        | _ -> eval_error "extern %s: expected one numeric argument" name))
+      ["c"; "m"; "libm"; "libc"; "libm.so"; "libc.so"] in
+  let f2 name ocaml_fn =
+    List.iter (fun lib -> reg lib name (function
+        | [VFloat a; VFloat b] -> VFloat (ocaml_fn a b)
+        | [VInt   a; VFloat b] -> VFloat (ocaml_fn (float_of_int a) b)
+        | [VFloat a; VInt   b] -> VFloat (ocaml_fn a (float_of_int b))
+        | [VInt   a; VInt   b] -> VFloat (ocaml_fn (float_of_int a) (float_of_int b))
+        | _ -> eval_error "extern %s: expected two numeric arguments" name))
+      ["c"; "m"; "libm"; "libc"; "libm.so"; "libc.so"] in
+  f1 "sqrt"  sqrt;
+  f1 "cbrt"  (fun x -> Float.cbrt x);
+  f1 "exp"   exp;
+  f1 "exp2"  (fun x -> Float.exp2 x);
+  f1 "log"   log;
+  f1 "log2"  (fun x -> Float.log2 x);
+  f1 "log10" log10;
+  f1 "sin"   sin;
+  f1 "cos"   cos;
+  f1 "tan"   tan;
+  f1 "asin"  asin;
+  f1 "acos"  acos;
+  f1 "atan"  atan;
+  f1 "sinh"  sinh;
+  f1 "cosh"  cosh;
+  f1 "tanh"  tanh;
+  f1 "fabs"  abs_float;
+  f1 "ceil"  ceil;
+  f1 "floor" floor;
+  f1 "round" Float.round;
+  f1 "trunc" (fun x -> Float.of_int (int_of_float x));
+  f2 "pow"   ( ** );
+  f2 "fmod"  mod_float;
+  f2 "atan2" atan2;
+  f2 "hypot" hypot;
+  f2 "fmin"  Float.min;
+  f2 "fmax"  Float.max;
+  (* puts: print string + newline, return length *)
+  List.iter (fun lib ->
+    reg lib "puts" (function
+      | [VString s] -> print_string s; print_char '\n'; VInt (String.length s + 1)
+      | _ -> eval_error "extern puts: expected String"))
+    ["c"; "libc"; "libc.so"];
+  t
 
 (** Spawn a fresh child actor instance (for supervisor restarts).
     [crashed_pid] is the pid of the actor being replaced; its epoch is
@@ -3943,6 +4008,13 @@ and apply_inner (fn_val : value) (args : value list) : value =
 
   | VBuiltin (_, f) -> f args
 
+  | VForeign (lib, sym) ->
+    (match Hashtbl.find_opt foreign_stubs (lib, sym) with
+     | Some f -> f args
+     | None ->
+       eval_error "extern %s:%s — no OCaml stub registered for this symbol \
+                   (add it to the foreign_stubs table in eval.ml)" lib sym)
+
   | _ -> eval_error "applied non-function value: %s" (value_to_string fn_val)
 
 (** Depth-tracking wrapper around [apply_inner]. *)
@@ -4973,6 +5045,9 @@ let rec eval_decl (env : env) (d : decl) : env =
         in
         declared_names (pat_names acc b.bind_pat) rest
       | DMod (n, _, _, _) :: rest -> declared_names (n.txt :: acc) rest
+      | DExtern (edef, _) :: rest ->
+        let names = List.map (fun (ef : extern_fn) -> ef.ef_name.txt) edef.ext_fns in
+        declared_names (names @ acc) rest
       | _ :: rest -> declared_names acc rest
     in
     let own_names = declared_names [] decls in
@@ -5037,7 +5112,14 @@ let rec eval_decl (env : env) (d : decl) : env =
     Hashtbl.replace protocol_roles_tbl name.txt roles;
     env
 
-  | DSig _ | DInterface _ | DExtern _ | DNeeds _ -> env
+  | DSig _ | DInterface _ | DNeeds _ -> env
+
+  | DExtern (edef, _sp) ->
+    (* Bind each extern function name to a VForeign stub. *)
+    List.fold_left (fun env' (ef : extern_fn) ->
+      let stub = VForeign (edef.ext_lib_name, ef.ef_name.txt) in
+      (ef.ef_name.txt, stub) :: env'
+    ) env edef.ext_fns
 
   | DDeriving _ ->
     (* DDeriving is expanded to DImpl blocks by the desugar pass; skip here. *)
@@ -5047,8 +5129,8 @@ let rec eval_decl (env : env) (d : decl) : env =
     (* DApp is desugared to DFn(__app_init__) before eval; reaching here is a bug. *)
     env
 
-  | DTest _ | DSetup _ | DSetupAll _ ->
-    (* DTest/DSetup/DSetupAll are not run during normal module eval.
+  | DTest _ | DSetup _ | DSetupAll _ | DDescribe _ ->
+    (* DTest/DSetup/DSetupAll/DDescribe are not run during normal module eval.
        They are collected and run by [run_tests]. *)
     env
 
@@ -5226,6 +5308,11 @@ let eval_module_env (m : module_) : env =
       ignore (eval_decl env d);
       make_recursive_env rest env
 
+    | DExtern _ as d :: rest ->
+      let env' = eval_decl env d in
+      env_ref := env';
+      make_recursive_env rest env'
+
     | _ :: rest -> make_recursive_env rest env
   in
 
@@ -5300,19 +5387,27 @@ type test_result =
   | TestFail of string  (** failure message *)
   | TestError of string (** unexpected exception *)
 
-(** Collect all [DTest], [DSetup], and [DSetupAll] nodes from the module. *)
+(** Collect all [DTest], [DSetup], and [DSetupAll] nodes from the module,
+    flattening [DDescribe] groups (prefixing test names with describe label). *)
 let collect_test_decls (m : module_) :
     expr option * expr option * (string * expr) list =
   let setup_ref     = ref None in
   let setup_all_ref = ref None in
   let tests         = ref [] in
-  List.iter (function
+  let rec collect_decl prefix d =
+    match d with
     | DTest (tdef, _) ->
-      tests := (tdef.test_name, tdef.test_body) :: !tests
+      let full_name = if prefix = "" then tdef.test_name
+                      else prefix ^ " " ^ tdef.test_name in
+      tests := (full_name, tdef.test_body) :: !tests
+    | DDescribe (name, decls, _) ->
+      let new_prefix = if prefix = "" then name else prefix ^ " " ^ name in
+      List.iter (collect_decl new_prefix) decls
     | DSetup (body, _)    -> setup_ref     := Some body
     | DSetupAll (body, _) -> setup_all_ref := Some body
     | _ -> ()
-  ) m.mod_decls;
+  in
+  List.iter (collect_decl "") m.mod_decls;
   (!setup_all_ref, !setup_ref, List.rev !tests)
 
 (** Run the test suite in [m] with the given options.

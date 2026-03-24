@@ -1,0 +1,225 @@
+-- Tests for the Enum stdlib module (higher-order list operations)
+-- Run with: dune exec march -- test/stdlib/test_enum.march
+
+mod TestEnum do
+
+fn assert_true(cond : Bool, msg : String) : Unit do
+  if cond then () else panic("FAIL: " ++ msg)
+end
+
+fn assert_eq_int(a : Int, b : Int, msg : String) : Unit do
+  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ int_to_string(b) ++ ", got " ++ int_to_string(a) ++ ")")
+end
+
+fn assert_eq_str(a : String, b : String, msg : String) : Unit do
+  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ b ++ ", got " ++ a ++ ")")
+end
+
+fn int_list(xs) do xs end
+
+-- ---- Enum.map ----
+
+fn test_map_double() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Nil)))
+  let doubled = Enum.map(xs, fn x -> x * 2)
+  assert_eq_int(head(doubled), 2, "map double first")
+  assert_eq_int(head(tail(doubled)), 4, "map double second")
+  assert_eq_int(head(tail(tail(doubled))), 6, "map double third")
+end
+
+fn test_map_empty() : Unit do
+  let result = Enum.map(Nil, fn (x : Int) -> x * 2)
+  assert_eq_int(length(result), 0, "map empty")
+end
+
+fn test_map_to_string() : Unit do
+  let xs = Cons(1, Cons(2, Nil))
+  let strs = Enum.map(xs, fn x -> int_to_string(x))
+  assert_eq_str(head(strs), "1", "map to_string first")
+end
+
+-- ---- Enum.flat_map ----
+
+fn test_flat_map_basic() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Nil)))
+  let result = Enum.flat_map(xs, fn x -> Cons(x, Cons(x * 10, Nil)))
+  assert_eq_int(length(result), 6, "flat_map length")
+  assert_eq_int(head(result), 1, "flat_map first")
+end
+
+fn test_flat_map_empty() : Unit do
+  let result = Enum.flat_map(Nil, fn (x : Int) -> Cons(x, Nil))
+  assert_eq_int(length(result), 0, "flat_map empty")
+end
+
+-- ---- Enum.filter ----
+
+fn test_filter_even() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Cons(4, Nil))))
+  let evens = Enum.filter(xs, fn x -> int_mod(x, 2) == 0)
+  assert_eq_int(length(evens), 2, "filter even length")
+  assert_eq_int(head(evens), 2, "filter even first")
+end
+
+fn test_filter_all_pass() : Unit do
+  let xs = Cons(1, Cons(2, Nil))
+  let result = Enum.filter(xs, fn _ -> true)
+  assert_eq_int(length(result), 2, "filter all pass")
+end
+
+fn test_filter_none_pass() : Unit do
+  let xs = Cons(1, Cons(2, Nil))
+  let result = Enum.filter(xs, fn _ -> false)
+  assert_eq_int(length(result), 0, "filter none pass")
+end
+
+-- ---- Enum.fold ----
+
+fn test_fold_sum() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Cons(4, Nil))))
+  let sum = Enum.fold(0, xs, fn acc -> fn x -> acc + x)
+  assert_eq_int(sum, 10, "fold sum")
+end
+
+fn test_fold_product() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Cons(4, Nil))))
+  let prod = Enum.fold(1, xs, fn acc -> fn x -> acc * x)
+  assert_eq_int(prod, 24, "fold product")
+end
+
+fn test_fold_empty() : Unit do
+  let result = Enum.fold(0, Nil, fn acc -> fn (x : Int) -> acc + x)
+  assert_eq_int(result, 0, "fold empty")
+end
+
+-- ---- Enum.reduce ----
+
+fn test_reduce_sum() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Nil)))
+  match Enum.reduce(xs, fn a -> fn b -> a + b) do
+  | None -> panic("FAIL: reduce sum returned None")
+  | Some(v) -> assert_eq_int(v, 6, "reduce sum")
+  end
+end
+
+fn test_reduce_single() : Unit do
+  match Enum.reduce(Cons(42, Nil), fn a -> fn b -> a + b) do
+  | None -> panic("FAIL: reduce single returned None")
+  | Some(v) -> assert_eq_int(v, 42, "reduce single")
+  end
+end
+
+fn test_reduce_empty() : Unit do
+  match Enum.reduce(Nil, fn (a : Int) -> fn b -> a + b) do
+  | None -> ()
+  | Some(_) -> panic("FAIL: reduce empty should return None")
+  end
+end
+
+-- ---- Enum.count ----
+
+fn test_count() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Nil)))
+  assert_eq_int(Enum.count(xs), 3, "count 3")
+end
+
+fn test_count_empty() : Unit do
+  assert_eq_int(Enum.count(Nil), 0, "count empty")
+end
+
+-- ---- Enum.any / Enum.all ----
+
+fn test_any_true() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Nil)))
+  assert_true(Enum.any(xs, fn x -> x > 2), "any true")
+end
+
+fn test_any_false() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Nil)))
+  assert_true(!Enum.any(xs, fn x -> x > 10), "any false")
+end
+
+fn test_all_true() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Nil)))
+  assert_true(Enum.all(xs, fn x -> x > 0), "all true")
+end
+
+fn test_all_false() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Nil)))
+  assert_true(!Enum.all(xs, fn x -> x > 1), "all false")
+end
+
+-- ---- Enum.find ----
+
+fn test_find_existing() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Nil)))
+  match Enum.find(xs, fn x -> x > 1) do
+  | None -> panic("FAIL: find existing returned None")
+  | Some(v) -> assert_eq_int(v, 2, "find existing")
+  end
+end
+
+fn test_find_not_found() : Unit do
+  let xs = Cons(1, Cons(2, Nil))
+  match Enum.find(xs, fn x -> x > 10) do
+  | None -> ()
+  | Some(_) -> panic("FAIL: find not found returned Some")
+  end
+end
+
+-- ---- Enum.zip_with ----
+
+fn test_zip_with() : Unit do
+  let xs = Cons(1, Cons(2, Cons(3, Nil)))
+  let ys = Cons(10, Cons(20, Cons(30, Nil)))
+  let result = Enum.zip_with(xs, ys, fn x -> fn y -> x + y)
+  assert_eq_int(head(result), 11, "zip_with first")
+  assert_eq_int(length(result), 3, "zip_with length")
+end
+
+-- ---- Enum.sort_by ----
+
+fn test_sort_by_ascending() : Unit do
+  let xs = Cons(3, Cons(1, Cons(2, Nil)))
+  let sorted = Enum.sort_by(xs, fn a -> fn b -> a < b)
+  assert_eq_int(head(sorted), 1, "sort_by asc first")
+  assert_eq_int(head(tail(sorted)), 2, "sort_by asc second")
+  assert_eq_int(head(tail(tail(sorted))), 3, "sort_by asc third")
+end
+
+fn test_sort_by_descending() : Unit do
+  let xs = Cons(1, Cons(3, Cons(2, Nil)))
+  let sorted = Enum.sort_by(xs, fn a -> fn b -> a > b)
+  assert_eq_int(head(sorted), 3, "sort_by desc first")
+end
+
+fn main() : Unit do
+  test_map_double()
+  test_map_empty()
+  test_map_to_string()
+  test_flat_map_basic()
+  test_flat_map_empty()
+  test_filter_even()
+  test_filter_all_pass()
+  test_filter_none_pass()
+  test_fold_sum()
+  test_fold_product()
+  test_fold_empty()
+  test_reduce_sum()
+  test_reduce_single()
+  test_reduce_empty()
+  test_count()
+  test_count_empty()
+  test_any_true()
+  test_any_false()
+  test_all_true()
+  test_all_false()
+  test_find_existing()
+  test_find_not_found()
+  test_zip_with()
+  test_sort_by_ascending()
+  test_sort_by_descending()
+  println("All Enum tests passed!")
+end
+
+end

@@ -150,6 +150,7 @@ type decl =
       name = type name; name list = interface names to derive.
       Expanded to [DImpl] blocks by the desugar pass. *)
   | DTest of test_def * span           (** Test case: test "name" do ... end *)
+  | DDescribe of string * decl list * span (** describe "name" do tests end *)
   | DSetup of expr * span              (** Per-test setup: setup do ... end *)
   | DSetupAll of expr * span           (** One-time setup: setup_all do ... end *)
 [@@deriving show]

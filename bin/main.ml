@@ -99,6 +99,14 @@ let load_stdlib () =
       "logger.march";
       "actor.march";
       "flow.march";
+      "json.march";
+      "regex.march";
+      "datetime.march";
+      "queue.march";
+      "enum.march";
+      "random.march";
+      "stats.march";
+      "plot.march";
     ] in
     List.concat_map (fun name ->
         load_stdlib_file (Filename.concat stdlib_dir name)

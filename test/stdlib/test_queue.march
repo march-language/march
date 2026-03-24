@@ -1,0 +1,151 @@
+-- Tests for the Queue stdlib module
+-- Run with: dune exec march -- test/stdlib/test_queue.march
+
+mod TestQueue do
+
+fn assert_true(cond : Bool, msg : String) : Unit do
+  if cond then () else panic("FAIL: " ++ msg)
+end
+
+fn assert_eq_int(a : Int, b : Int, msg : String) : Unit do
+  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ int_to_string(b) ++ ", got " ++ int_to_string(a) ++ ")")
+end
+
+-- ---- Queue.empty / is_empty ----
+
+fn test_empty_is_empty() : Unit do
+  let q = Queue.empty()
+  assert_true(Queue.is_empty(q), "empty queue is empty")
+end
+
+fn test_nonempty_not_empty() : Unit do
+  let q = Queue.push_back(Queue.empty(), 1)
+  assert_true(!Queue.is_empty(q), "non-empty queue is not empty")
+end
+
+-- ---- Queue.size ----
+
+fn test_size_empty() : Unit do
+  assert_eq_int(Queue.size(Queue.empty()), 0, "size empty")
+end
+
+fn test_size_one() : Unit do
+  let q = Queue.push_back(Queue.empty(), 42)
+  assert_eq_int(Queue.size(q), 1, "size one")
+end
+
+fn test_size_multiple() : Unit do
+  let q = Queue.push_back(Queue.push_back(Queue.push_back(Queue.empty(), 1), 2), 3)
+  assert_eq_int(Queue.size(q), 3, "size three")
+end
+
+-- ---- Queue.push_back / peek_front ----
+
+fn test_push_back_peek_front() : Unit do
+  let q = Queue.push_back(Queue.push_back(Queue.empty(), 1), 2)
+  match Queue.peek_front(q) do
+  | None -> panic("FAIL: peek_front should return Some")
+  | Some(v) -> assert_eq_int(v, 1, "peek_front returns first")
+  end
+end
+
+fn test_push_front_peek_front() : Unit do
+  let q = Queue.push_front(Queue.push_back(Queue.empty(), 1), 0)
+  match Queue.peek_front(q) do
+  | None -> panic("FAIL: peek_front after push_front")
+  | Some(v) -> assert_eq_int(v, 0, "push_front then peek_front")
+  end
+end
+
+-- ---- Queue.pop_front ----
+
+fn test_pop_front_basic() : Unit do
+  let q = Queue.push_back(Queue.push_back(Queue.empty(), 10), 20)
+  match Queue.pop_front(q) do
+  | None -> panic("FAIL: pop_front should return Some")
+  | Some((v, rest)) ->
+    assert_eq_int(v, 10, "pop_front value")
+    assert_eq_int(Queue.size(rest), 1, "pop_front remaining size")
+  end
+end
+
+fn test_pop_front_empty() : Unit do
+  match Queue.pop_front(Queue.empty()) do
+  | None -> ()
+  | Some(_) -> panic("FAIL: pop_front empty should return None")
+  end
+end
+
+-- ---- Queue.peek_back ----
+
+fn test_peek_back() : Unit do
+  let q = Queue.push_back(Queue.push_back(Queue.empty(), 1), 5)
+  match Queue.peek_back(q) do
+  | None -> panic("FAIL: peek_back should return Some")
+  | Some(v) -> assert_eq_int(v, 5, "peek_back returns last")
+  end
+end
+
+fn test_peek_back_empty() : Unit do
+  match Queue.peek_back(Queue.empty()) do
+  | None -> ()
+  | Some(_) -> panic("FAIL: peek_back empty should return None")
+  end
+end
+
+-- ---- Queue.pop_back ----
+
+fn test_pop_back_basic() : Unit do
+  let q = Queue.push_back(Queue.push_back(Queue.empty(), 1), 99)
+  match Queue.pop_back(q) do
+  | None -> panic("FAIL: pop_back should return Some")
+  | Some((v, rest)) ->
+    assert_eq_int(v, 99, "pop_back value")
+    assert_eq_int(Queue.size(rest), 1, "pop_back remaining size")
+  end
+end
+
+-- ---- Queue.to_list / from_list ----
+
+fn test_to_list() : Unit do
+  let q = Queue.push_back(Queue.push_back(Queue.push_back(Queue.empty(), 1), 2), 3)
+  let lst = Queue.to_list(q)
+  assert_eq_int(length(lst), 3, "to_list length")
+  assert_eq_int(head(lst), 1, "to_list first")
+end
+
+fn test_from_list() : Unit do
+  let lst = Cons(1, Cons(2, Cons(3, Nil)))
+  let q = Queue.from_list(lst)
+  assert_eq_int(Queue.size(q), 3, "from_list size")
+  match Queue.peek_front(q) do
+  | None -> panic("FAIL: from_list peek_front")
+  | Some(v) -> assert_eq_int(v, 1, "from_list peek_front value")
+  end
+end
+
+fn test_from_list_empty() : Unit do
+  let q = Queue.from_list(Nil)
+  assert_true(Queue.is_empty(q), "from_list empty")
+end
+
+fn main() : Unit do
+  test_empty_is_empty()
+  test_nonempty_not_empty()
+  test_size_empty()
+  test_size_one()
+  test_size_multiple()
+  test_push_back_peek_front()
+  test_push_front_peek_front()
+  test_pop_front_basic()
+  test_pop_front_empty()
+  test_peek_back()
+  test_peek_back_empty()
+  test_pop_back_basic()
+  test_to_list()
+  test_from_list()
+  test_from_list_empty()
+  println("All Queue tests passed!")
+end
+
+end

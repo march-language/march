@@ -1,0 +1,241 @@
+-- Tests for the Stats stdlib module
+-- Run with: dune exec march -- test test/stdlib/test_stats.march
+
+mod TestStats do
+
+-- ---- Helpers ----
+
+fn approx_eq(a : Float, b : Float) : Bool do
+  float_abs(a -. b) < 0.000000001
+end
+
+fn approx_eq2(a : Float, b : Float) : Bool do
+  float_abs(a -. b) < 0.0001
+end
+
+-- ---- sum ----
+
+test "sum of [1, 2, 3, 4, 5] is 15.0" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Cons(4.0, Cons(5.0, Nil)))))
+  assert approx_eq(Stats.sum(xs), 15.0)
+end
+
+test "sum of empty list is 0.0" do
+  let empty : List(Float) = Nil
+  assert approx_eq(Stats.sum(empty), 0.0)
+end
+
+test "sum of single element" do
+  assert approx_eq(Stats.sum(Cons(42.0, Nil)), 42.0)
+end
+
+test "sum with negative numbers" do
+  let xs = Cons(-1.0, Cons(-2.0, Cons(-3.0, Nil)))
+  assert approx_eq(Stats.sum(xs), -6.0)
+end
+
+-- ---- count ----
+
+test "count of [1,2,3] is 3" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Nil)))
+  assert Stats.count(xs) == 3
+end
+
+test "count of empty list is 0" do
+  let empty : List(Float) = Nil
+  assert Stats.count(empty) == 0
+end
+
+-- ---- mean ----
+
+test "mean of [1,2,3,4,5] is 3.0" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Cons(4.0, Cons(5.0, Nil)))))
+  assert approx_eq(Stats.mean(xs), 3.0)
+end
+
+test "mean of single element" do
+  assert approx_eq(Stats.mean(Cons(42.0, Nil)), 42.0)
+end
+
+test "mean with negative numbers" do
+  let xs = Cons(-1.0, Cons(-3.0, Nil))
+  assert approx_eq(Stats.mean(xs), -2.0)
+end
+
+test "mean of [0, 0, 0] is 0.0" do
+  let xs = Cons(0.0, Cons(0.0, Cons(0.0, Nil)))
+  assert approx_eq(Stats.mean(xs), 0.0)
+end
+
+-- ---- min_val / max_val ----
+
+test "min_val of [3,1,4,1,5] is 1.0" do
+  let xs = Cons(3.0, Cons(1.0, Cons(4.0, Cons(1.0, Cons(5.0, Nil)))))
+  assert approx_eq(Stats.min_val(xs), 1.0)
+end
+
+test "max_val of [3,1,4,1,5] is 5.0" do
+  let xs = Cons(3.0, Cons(1.0, Cons(4.0, Cons(1.0, Cons(5.0, Nil)))))
+  assert approx_eq(Stats.max_val(xs), 5.0)
+end
+
+test "min_val of single element" do
+  assert approx_eq(Stats.min_val(Cons(7.0, Nil)), 7.0)
+end
+
+test "max_val with negatives" do
+  let xs = Cons(-5.0, Cons(-1.0, Cons(-3.0, Nil)))
+  assert approx_eq(Stats.max_val(xs), -1.0)
+end
+
+test "min_val with negatives" do
+  let xs = Cons(-5.0, Cons(-1.0, Cons(-3.0, Nil)))
+  assert approx_eq(Stats.min_val(xs), -5.0)
+end
+
+-- ---- median ----
+
+test "median of odd list [1,3,2] is 2.0" do
+  let xs = Cons(1.0, Cons(3.0, Cons(2.0, Nil)))
+  assert approx_eq(Stats.median(xs), 2.0)
+end
+
+test "median of even list [1,2,3,4] is 2.5" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Cons(4.0, Nil))))
+  assert approx_eq(Stats.median(xs), 2.5)
+end
+
+test "median of single element" do
+  assert approx_eq(Stats.median(Cons(7.0, Nil)), 7.0)
+end
+
+test "median of [1,2,3,4,5] is 3.0" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Cons(4.0, Cons(5.0, Nil)))))
+  assert approx_eq(Stats.median(xs), 3.0)
+end
+
+test "median with negatives" do
+  let xs = Cons(-3.0, Cons(-1.0, Cons(-2.0, Nil)))
+  assert approx_eq(Stats.median(xs), -2.0)
+end
+
+-- ---- percentile ----
+
+test "percentile 50 of [1,2,3,4,5] is 3.0" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Cons(4.0, Cons(5.0, Nil)))))
+  assert approx_eq(Stats.percentile(xs, 50.0), 3.0)
+end
+
+test "percentile 0 returns min" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Nil)))
+  assert approx_eq(Stats.percentile(xs, 0.0), 1.0)
+end
+
+test "percentile 100 returns max" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Nil)))
+  assert approx_eq(Stats.percentile(xs, 100.0), 3.0)
+end
+
+-- ---- variance / std_dev ----
+
+test "variance of [2,4,4,4,5,5,7,9] (sample) is approximately 4.571" do
+  let xs = Cons(2.0, Cons(4.0, Cons(4.0, Cons(4.0,
+           Cons(5.0, Cons(5.0, Cons(7.0, Cons(9.0, Nil))))))))
+  assert approx_eq2(Stats.variance(xs), 4.571428571428571)
+end
+
+test "variance_pop of [2,4,4,4,5,5,7,9] is 4.0" do
+  let xs = Cons(2.0, Cons(4.0, Cons(4.0, Cons(4.0,
+           Cons(5.0, Cons(5.0, Cons(7.0, Cons(9.0, Nil))))))))
+  assert approx_eq(Stats.variance_pop(xs), 4.0)
+end
+
+test "std_dev_pop of [2,4,4,4,5,5,7,9] is 2.0" do
+  let xs = Cons(2.0, Cons(4.0, Cons(4.0, Cons(4.0,
+           Cons(5.0, Cons(5.0, Cons(7.0, Cons(9.0, Nil))))))))
+  assert approx_eq(Stats.std_dev_pop(xs), 2.0)
+end
+
+test "variance of single element is 0.0" do
+  assert approx_eq(Stats.variance(Cons(42.0, Nil)), 0.0)
+end
+
+test "variance_pop of empty is 0.0" do
+  let empty : List(Float) = Nil
+  assert approx_eq(Stats.variance_pop(empty), 0.0)
+end
+
+test "std_dev of [1,1,1,1] is 0.0" do
+  let xs = Cons(1.0, Cons(1.0, Cons(1.0, Cons(1.0, Nil))))
+  assert approx_eq(Stats.std_dev(xs), 0.0)
+end
+
+-- ---- mode ----
+
+test "mode of [1,2,3,3,4] is 3.0" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Cons(3.0, Cons(4.0, Nil)))))
+  assert approx_eq(Stats.mode(xs), 3.0)
+end
+
+test "mode of single element" do
+  assert approx_eq(Stats.mode(Cons(5.0, Nil)), 5.0)
+end
+
+test "mode with all same" do
+  let xs = Cons(7.0, Cons(7.0, Cons(7.0, Nil)))
+  assert approx_eq(Stats.mode(xs), 7.0)
+end
+
+-- ---- covariance ----
+
+test "covariance of perfect positive correlation" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Nil)))
+  let ys = Cons(2.0, Cons(4.0, Cons(6.0, Nil)))
+  assert approx_eq(Stats.covariance(xs, ys), 2.0)
+end
+
+test "covariance of perfect negative correlation" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Nil)))
+  let ys = Cons(3.0, Cons(2.0, Cons(1.0, Nil)))
+  assert approx_eq(Stats.covariance(xs, ys), -1.0)
+end
+
+-- ---- correlation ----
+
+test "correlation of perfectly correlated lists is 1.0" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Cons(4.0, Cons(5.0, Nil)))))
+  let ys = Cons(2.0, Cons(4.0, Cons(6.0, Cons(8.0, Cons(10.0, Nil)))))
+  assert approx_eq(Stats.correlation(xs, ys), 1.0)
+end
+
+test "correlation of perfectly negatively correlated lists is -1.0" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Cons(4.0, Cons(5.0, Nil)))))
+  let ys = Cons(5.0, Cons(4.0, Cons(3.0, Cons(2.0, Cons(1.0, Nil)))))
+  assert approx_eq(Stats.correlation(xs, ys), -1.0)
+end
+
+-- ---- linear_regression ----
+
+test "linear_regression on perfect line y=2x" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Cons(4.0, Cons(5.0, Nil)))))
+  let ys = Cons(2.0, Cons(4.0, Cons(6.0, Cons(8.0, Cons(10.0, Nil)))))
+  let (slope, intercept) = Stats.linear_regression(xs, ys)
+  assert approx_eq(slope, 2.0) && approx_eq(intercept, 0.0)
+end
+
+test "linear_regression on y=2x+1" do
+  let xs = Cons(0.0, Cons(1.0, Cons(2.0, Cons(3.0, Nil))))
+  let ys = Cons(1.0, Cons(3.0, Cons(5.0, Cons(7.0, Nil))))
+  let (slope, intercept) = Stats.linear_regression(xs, ys)
+  assert approx_eq(slope, 2.0) && approx_eq(intercept, 1.0)
+end
+
+test "linear_regression slope direction" do
+  -- y = -x: slope should be negative
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Nil)))
+  let ys = Cons(-1.0, Cons(-2.0, Cons(-3.0, Nil)))
+  let (slope, _) = Stats.linear_regression(xs, ys)
+  assert slope < 0.0
+end
+
+end

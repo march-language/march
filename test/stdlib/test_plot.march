@@ -1,0 +1,159 @@
+-- Tests for the Plot stdlib module (SVG output)
+-- Run with: dune exec march -- test/stdlib/test_plot.march
+
+mod TestPlot do
+
+fn contains(haystack : String, needle : String) : Bool do
+  String.contains(haystack, needle)
+end
+
+fn count_occurrences(s : String, sub : String) : Int do
+  let parts = String.split(s, sub)
+  List.length(parts) - 1
+end
+
+-- ---- SVG structure tests ----
+
+test "to_svg returns svg element" do
+  let p = Plot.new()
+  let svg = Plot.to_svg(p)
+  assert contains(svg, "<svg")
+  assert contains(svg, "</svg>")
+end
+
+test "to_svg has width and height" do
+  let p = Plot.new_sized(800, 600)
+  let svg = Plot.to_svg(p)
+  assert contains(svg, "width=\"800\"")
+  assert contains(svg, "height=\"600\"")
+end
+
+test "set_title embeds title text" do
+  let p = Plot.new()
+    |> Plot.add_series(Plot.line_series(Cons(1.0, Nil), Cons(2.0, Nil)))
+    |> Plot.set_title("My Chart")
+  let svg = Plot.to_svg(p)
+  assert contains(svg, "My Chart")
+end
+
+test "set_xlabel embeds x label" do
+  let p = Plot.new()
+    |> Plot.add_series(Plot.line_series(Cons(1.0, Nil), Cons(2.0, Nil)))
+    |> Plot.set_xlabel("Time")
+  let svg = Plot.to_svg(p)
+  assert contains(svg, "Time")
+end
+
+test "set_ylabel embeds y label" do
+  let p = Plot.new()
+    |> Plot.add_series(Plot.line_series(Cons(1.0, Nil), Cons(2.0, Nil)))
+    |> Plot.set_ylabel("Value")
+  let svg = Plot.to_svg(p)
+  assert contains(svg, "Value")
+end
+
+-- ---- Line chart ----
+
+test "line chart contains polyline" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Nil)))
+  let ys = Cons(1.0, Cons(4.0, Cons(9.0, Nil)))
+  let p = Plot.new()
+    |> Plot.add_series(Plot.line_series(xs, ys))
+  let svg = Plot.to_svg(p)
+  assert contains(svg, "<polyline") || contains(svg, "<path")
+end
+
+-- ---- Scatter chart ----
+
+test "scatter chart contains circles" do
+  let xs = Cons(1.0, Cons(2.0, Cons(3.0, Nil)))
+  let ys = Cons(1.0, Cons(4.0, Cons(9.0, Nil)))
+  let p = Plot.new()
+    |> Plot.add_series(Plot.scatter_series(xs, ys))
+  let svg = Plot.to_svg(p)
+  assert count_occurrences(svg, "<circle") == 3
+end
+
+-- ---- Bar chart ----
+
+test "bar chart contains rects" do
+  let labels = Cons("A", Cons("B", Cons("C", Nil)))
+  let vals = Cons(1.0, Cons(2.0, Cons(3.0, Nil)))
+  let p = Plot.new()
+    |> Plot.add_series(Plot.bar_series(labels, vals))
+  let svg = Plot.to_svg(p)
+  assert count_occurrences(svg, "<rect") >= 3
+end
+
+-- ---- Legend ----
+
+test "with_legend shows series labels" do
+  let xs = Cons(1.0, Cons(2.0, Nil))
+  let ys = Cons(3.0, Cons(4.0, Nil))
+  let p = Plot.new()
+    |> Plot.add_labeled_series(Plot.line_series(xs, ys), "MySeries")
+    |> Plot.with_legend
+  let svg = Plot.to_svg(p)
+  assert contains(svg, "MySeries")
+end
+
+-- ---- Quick convenience functions ----
+
+test "quick_line returns svg string" do
+  let xs = Cons(0.0, Cons(1.0, Cons(2.0, Nil)))
+  let ys = Cons(0.0, Cons(1.0, Cons(4.0, Nil)))
+  let svg = Plot.quick_line(xs, ys)
+  assert contains(svg, "<svg")
+  assert contains(svg, "</svg>")
+end
+
+test "quick_scatter returns svg string" do
+  let xs = Cons(0.0, Cons(1.0, Nil))
+  let ys = Cons(0.0, Cons(1.0, Nil))
+  let svg = Plot.quick_scatter(xs, ys)
+  assert contains(svg, "<svg")
+  assert contains(svg, "<circle")
+end
+
+test "quick_histogram returns svg string" do
+  let vals = Cons(1.0, Cons(2.0, Cons(2.0, Cons(3.0, Cons(3.0, Cons(3.0, Nil))))))
+  let svg = Plot.quick_histogram(vals, 3)
+  assert contains(svg, "<svg")
+  assert contains(svg, "<rect")
+end
+
+-- ---- Grid ----
+
+test "with_grid adds grid lines" do
+  let xs = Cons(1.0, Cons(2.0, Nil))
+  let ys = Cons(1.0, Cons(2.0, Nil))
+  let p = Plot.new()
+    |> Plot.add_series(Plot.line_series(xs, ys))
+    |> Plot.with_grid
+  let svg = Plot.to_svg(p)
+  -- grid uses dashed lines
+  assert contains(svg, "stroke-dasharray")
+end
+
+-- ---- Save ----
+
+test "save writes file" do
+  let xs = Cons(1.0, Cons(2.0, Nil))
+  let ys = Cons(3.0, Cons(4.0, Nil))
+  let p = Plot.new()
+    |> Plot.add_series(Plot.line_series(xs, ys))
+  let path = "/tmp/test_plot_output.svg"
+  let _ = Plot.save(p, path)
+  -- verify the file was written
+  let contents = match File.read(path) do
+    | Ok(s) -> s
+    | Err(_) -> ""
+    end
+  assert contains(contents, "<svg")
+end
+
+pub fn main() : Unit do
+  ()
+end
+
+end

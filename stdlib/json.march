@@ -23,12 +23,12 @@
 mod Json do
 
 pub type JsonValue =
-    Null
-  | Bool(Bool)
-  | Number(Float)
-  | Str(String)
-  | Array(List(JsonValue))
-  | Object(List((String, JsonValue)))
+    pub Null
+  | pub Bool(Bool)
+  | pub Number(Float)
+  | pub Str(String)
+  | pub Array(List(JsonValue))
+  | pub Object(List((String, JsonValue)))
 
 -- ── Private helpers ───────────────────────────────────────────────────────
 

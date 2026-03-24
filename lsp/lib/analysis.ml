@@ -238,7 +238,7 @@ let rec collect_decl ~def_map ~use_map ~doc_map ~calls ~actors_tbl ?(prefix = ""
 
   | Ast.DUse _ | Ast.DAlias _ | Ast.DNeeds _
   | Ast.DProtocol _ | Ast.DExtern _ | Ast.DSig _
-  | Ast.DDeriving _ -> ()
+  | Ast.DDeriving _ | Ast.DDescribe _ -> ()
 
 and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
   match e with

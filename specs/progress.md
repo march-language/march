@@ -163,7 +163,7 @@ march/
 │   ├── march_http.c/h       # HTTP/WS runtime: TCP, HTTP parse/serialize, server, WebSocket
 │   ├── sha1.c               # SHA-1 for WebSocket handshake
 │   └── base64.c             # Base64 for WebSocket handshake
-├── stdlib/                  # 26 modules, ~5500 lines
+├── stdlib/                  # 29 modules, ~6200 lines
 │   ├── prelude.march        # Auto-imported helpers (panic, identity, compose, unwrap, etc.)
 │   ├── option.march         # Option(a) with Some/None
 │   ├── result.march         # Result(a,e) with Ok/Err
@@ -192,6 +192,9 @@ march/
 │   ├── logger.march         # Structured logging: Debug/Info/Warn/Error levels, context, log_with
 │   ├── actor.march          # Actor helpers: cast (fire-and-forget), call (sync request/reply), reply
 │   ├── flow.march           # Backpressure pipeline: Stage, from_list/range/unfold, map/filter/flat_map, collect/reduce
+│   ├── random.march         # Pure PRNG: xoshiro256**, seed/next_int/next_float/next_bool/next_range/shuffle
+│   ├── stats.march          # Descriptive statistics: mean/variance/std_dev/median/mode/percentile/correlation
+│   ├── plot.march           # SVG chart generation: line/scatter/bar/histogram series, pure string building
 │   └── docs/flow.md         # Flow module design doc: concepts, examples, GenStage comparison
 ├── test/
 │   ├── test_march.ml         # 958+ tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, bytes, logger, flow, actor_module, etc.)
@@ -207,10 +210,10 @@ march/
     └── test/test_forge.exe   # 15 tests (scaffold, toml)
 ```
 
-## Current State (as of 2026-03-23)
+## Current State (as of 2026-03-24)
 
 - **Builds clean**
-- **1268 tests across 9 suites; 0 failures** (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + 5 new LSP features + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning):
+- **1268 tests across 9 suites; 0 failures** (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + 5 new LSP features + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch):
   - `test_march.exe`: 1045 tests, all passing
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
@@ -261,6 +264,11 @@ march/
 - **REPL JIT `compiled_fns` corruption fix** — `partition_fns` in `repl_jit.ml` now pure (no side effects); `mark_compiled_fns` called only after successful `compile_fragment` + dlopen; prevents stdlib fn "undefined symbol" cascade when any prior fragment compilation failed
 - **`app` entry point (Phase 1 interpreter)** — `APP`/`ON_START`/`ON_STOP` lexer tokens; `DApp` AST node; `app_decl` parser rule; desugar converts `DApp` → `__app_init__` function with `SupervisorSpec` return type annotation; mutual-exclusivity check (compile error if both `main` + `app` defined); `spawn_from_spec` spawns actor tree; `run_module` dispatches on `__app_init__`; SIGTERM/SIGINT signal handlers; graceful reverse-order shutdown; process registry (`whereis`/`whereis_bang`); named children; `on_start`/`on_stop` lifecycle hooks; dynamic supervisors (`dynamic_supervisor`, `start_child`, `stop_child`, `which_children`, `count_children`). 45 tests across `app`, `shutdown`, `registry`, `dynamic_supervisor`, `spec_construction`, and `app_shutdown` groups.
 - **Cross-language benchmarks** — `bench/elixir/`, `bench/ocaml/`, `bench/rust/` contain idiomatic implementations of fib(40), binary-trees(15), tree-transform(depth=20×100), and list-ops(1M); `bench/run_benchmarks.sh` compiles all, runs N times, reports median/min/max; results in `bench/RESULTS.md`. **All four benchmarks compile and run (2026-03-23):** fib 288 ms ≈ Rust; tree-transform 524 ms (**7.3–19× faster** than OCaml/Rust via Perceus FBIP); binary-trees 275 ms (OCaml wins at 20 ms with generational GC); list-ops ~76 ms (stream fusion: was 117 ms pre-fusion).
+- **stdlib: Random module** — `stdlib/random.march`: purely-functional PRNG using xoshiro256** algorithm adapted for 63-bit OCaml integers; `Rng` record state (4 × 63-bit integers); `seed` (SplitMix-inspired hash expansion), `next_int`, `next_float`, `next_bool`, `next_range`, `shuffle`; all pure (take `Rng`, return `(value, Rng)`); no global mutable state.
+- **stdlib: Stats module** — `stdlib/stats.march`: descriptive statistics over `List(Float)`; `mean`, `variance`, `std_dev`, `median`, `mode`, `min`, `max`, `range`, `percentile`, `covariance`, `pearson_correlation`; pure functional, no external dependencies.
+- **stdlib: Plot module** — `stdlib/plot.march`: SVG chart generation; `Color`/`Style`/`Series`/`Chart` types; `line_series`/`scatter_series`/`bar_series`/`histogram_series`; `new`/`add_series`/`set_title`/`set_size`/`set_padding`/`to_svg`; self-contained pure March string building, no external dependencies.
+- **`describe` keyword for test grouping** — `describe "name" do ... end` groups tests under a label with prefix propagation (e.g. `"auth login success"`); `DESCRIBE` lexer token; `DDescribe` AST node; fully wired through lexer, parser, desugar, typecheck, eval, TIR lower, formatter, and LSP analysis.
+- **FFI interpreter dispatch** — `VForeign(lib, sym)` value type in `eval.ml`; `foreign_stubs` hashtable maps `(lib_name, symbol_name)` to OCaml stubs; `DExtern` in `eval_decl` binds extern functions to `VForeign` stubs; `apply_inner` dispatches `VForeign` via stub table; 25 math/libc stubs pre-registered (`sqrt`, `sin`, `cos`, `pow`, `atan2`, etc. across `"c"`/`"m"`/`"libm"` library names); `puts` stub registered; `declared_names` and `make_recursive_env` updated to include extern bindings.
 
 ### Known Implementation Gaps
 
@@ -268,7 +276,7 @@ march/
 - **`rest_for_one`/`one_for_all` supervisor strategies** — only `one_for_one` is implemented; the other OTP-style restart strategies are not yet handled.
 - **Actor compilation tests** — need `dune runtest`-level tests for compiled actor programs.
 
-## Known Failures (2026-03-23)
+## Known Failures (2026-03-24)
 
 **8 failures** in `test_march.exe`, all in the `repl_jit_regression` and `repl_jit_cross_line` test groups:
 

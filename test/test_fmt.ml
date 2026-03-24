@@ -45,7 +45,7 @@ end|} in
 
 let test_match_expr () =
   let src = {|mod Test do
-fn describe(x : Int) : String do
+fn label(x : Int) : String do
   match x do
   | 0 -> "zero"
   | 1 -> "one"

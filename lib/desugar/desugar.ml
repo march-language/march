@@ -323,6 +323,9 @@ let rec desugar_decl (d : decl) : decl =
   | DTest (tdef, sp) ->
     DTest ({ tdef with test_body = desugar_expr tdef.test_body }, sp)
 
+  | DDescribe (name, decls, sp) ->
+    DDescribe (name, List.map desugar_decl decls, sp)
+
   | DSetup (body, sp) ->
     DSetup (desugar_expr body, sp)
 

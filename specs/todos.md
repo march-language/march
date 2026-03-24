@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-23
+**Last updated:** 2026-03-24
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -133,3 +133,9 @@ This file tracks everything that still needs to get done. Organized by priority 
 - ✅ **March-native stdlib test suite** — 23 `.march` test files in `test/stdlib/` covering all stdlib modules; `stdlib/test.march` (Test module with assert_true/false/eq_int/eq_str/some/none/ok/err); `test/test_stdlib_march.ml` OCaml runner (7 suites: Http, HttpTransport, HttpClient, HttpServer, WebSocket, Process, Logger)
 - ✅ **Logger module additions** — `Logger.level_from_string`, `level_rank`, `level_enabled`, `format_entry`, `log_if` added to `stdlib/logger.march`
 - ✅ **TCE structural recursion warning** — `check_tail_position` in `typecheck.ml` now emits a Warning when a structurally-recursive (but non-tail) call is detected; distinguishes arithmetic reductions (`n-1`) from pattern-bound sub-components
+- ✅ **stdlib: Random module** — `stdlib/random.march`: purely-functional pseudorandom number generation using xoshiro256** algorithm; `Rng` state record; `seed/next_int/next_float/next_bool/next_range/shuffle`; all functions pure (take Rng, return `(value, Rng)`); no global mutable state; registered in `bin/main.ml` stdlib load order.
+- ✅ **stdlib: Stats module** — `stdlib/stats.march`: descriptive statistics over `List(Float)`; `mean/variance/std_dev/median/mode/min/max/range/percentile/covariance/pearson_correlation`; pure functional, no external dependencies; registered in `bin/main.ml`.
+- ✅ **stdlib: Plot module** — `stdlib/plot.march`: SVG chart generation; `Color`/`Style`/`Series`/`Chart` types; `line_series/scatter_series/bar_series/histogram_series`; `new/add_series/set_title/set_size/set_padding/to_svg`; self-contained pure string building, no external dependencies; registered in `bin/main.ml`.
+- ✅ **`describe` keyword for test grouping** — `describe "name" do ... end` syntax groups tests under a label; `DESCRIBE` lexer token; `DDescribe` AST node; desugared recursively; typechecked as Unit; `collect_test_decls` flattens describe groups with prefixed names (e.g. `"auth login success"`); fully wired through all compiler passes (lexer, parser, AST, desugar, typecheck, eval, TIR lower, formatter, LSP analysis).
+- ✅ **FFI interpreter dispatch (`extern` blocks)** — `VForeign(lib, sym)` value; `foreign_stubs` hashtable in `eval.ml` mapping `(lib_name, symbol_name)` to OCaml stubs; `DExtern` in `eval_decl` binds each extern function to a `VForeign` stub; `apply_inner` dispatches `VForeign` via the stub table; pre-registered: 25 math functions (`sqrt`, `sin`, `cos`, `pow`, etc.), `puts`; `declared_names`/`make_recursive_env` updated to include extern bindings.
+- ✅ **New March-native stdlib test files** — `test/stdlib/test_random.march`, `test_stats.march`, `test_plot.march`, `test_bigint.march`, `test_decimal.march`, `test_enum.march`, `test_math.march`, `test_queue.march`, `test_string.march` added.

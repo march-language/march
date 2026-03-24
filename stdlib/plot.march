@@ -1,0 +1,696 @@
+-- Plot module: SVG chart generation.
+--
+-- Generates self-contained SVG strings for line, scatter, bar, and histogram
+-- charts. No external dependencies — pure March string building.
+--
+-- Usage:
+--   let svg = Plot.new()
+--     |> Plot.add_series(Plot.line_series(xs, ys))
+--     |> Plot.set_title("My Chart")
+--     |> Plot.to_svg
+
+mod Plot do
+
+-- ---- Types ----
+
+pub type Color = { r : Int, g : Int, b : Int }
+
+pub type Style = {
+  line_color   : Color,
+  fill_color   : Color,
+  line_width   : Float,
+  point_radius : Float,
+  font_size    : Float,
+  opacity      : Float
+}
+
+pub type SeriesKind = Line | Scatter | Bar | HistogramSeries
+
+pub type Series = {
+  kind  : SeriesKind,
+  xs    : List(Float),
+  ys    : List(Float),
+  label : Option(String),
+  style : Style
+}
+
+pub type Axis = {
+  label      : Option(String),
+  data_min   : Option(Float),
+  data_max   : Option(Float),
+  tick_count : Int
+}
+
+pub type Plot = {
+  title       : Option(String),
+  series      : List(Series),
+  x_axis      : Axis,
+  y_axis      : Axis,
+  width       : Int,
+  height      : Int,
+  margin      : Int,
+  show_legend : Bool,
+  show_grid   : Bool
+}
+
+-- ---- Default palette (tab10-inspired) ----
+
+fn palette_color(idx : Int) : Color do
+  let colors = Cons(
+    { r = 31,  g = 119, b = 180 }, Cons(
+    { r = 255, g = 127, b = 14  }, Cons(
+    { r = 44,  g = 160, b = 44  }, Cons(
+    { r = 214, g = 39,  b = 40  }, Cons(
+    { r = 148, g = 103, b = 189 }, Cons(
+    { r = 140, g = 86,  b = 75  }, Cons(
+    { r = 227, g = 119, b = 194 }, Cons(
+    { r = 127, g = 127, b = 127 }, Cons(
+    { r = 188, g = 189, b = 34  }, Cons(
+    { r = 23,  g = 190, b = 207 },
+    Nil))))))))))
+  fn nth(lst : List(Color), n : Int) : Color do
+    match lst do
+    | Nil        -> { r = 70, g = 130, b = 180 }
+    | Cons(h, t) -> if n == 0 then h else nth(t, n - 1)
+    end
+  end
+  nth(colors, idx % 10)
+end
+
+fn default_style(idx : Int) : Style do
+  let c = palette_color(idx)
+  {
+    line_color   = c,
+    fill_color   = c,
+    line_width   = 2.0,
+    point_radius = 4.0,
+    font_size    = 12.0,
+    opacity      = 1.0
+  }
+end
+
+fn default_axis() : Axis do
+  { label = None, data_min = None, data_max = None, tick_count = 5 }
+end
+
+-- ---- Construction ----
+
+pub fn new() : Plot do
+  {
+    title       = None,
+    series      = Nil,
+    x_axis      = default_axis(),
+    y_axis      = default_axis(),
+    width       = 640,
+    height      = 480,
+    margin      = 60,
+    show_legend = false,
+    show_grid   = false
+  }
+end
+
+pub fn new_sized(w : Int, h : Int) : Plot do
+  let p = new()
+  { p with width = w, height = h }
+end
+
+-- ---- Series factories ----
+
+pub fn line_series(xs : List(Float), ys : List(Float)) : Series do
+  {
+    kind  = Line,
+    xs    = xs,
+    ys    = ys,
+    label = None,
+    style = default_style(0)
+  }
+end
+
+pub fn scatter_series(xs : List(Float), ys : List(Float)) : Series do
+  {
+    kind  = Scatter,
+    xs    = xs,
+    ys    = ys,
+    label = None,
+    style = default_style(0)
+  }
+end
+
+pub fn bar_series(labels : List(String), values : List(Float)) : Series do
+  let n = List.length(labels)
+  fn make_indices(i : Int, acc : List(Float)) : List(Float) do
+    if i < 0 then acc
+    else make_indices(i - 1, Cons(int_to_float(i), acc))
+  end
+  {
+    kind  = Bar,
+    xs    = make_indices(n - 1, Nil),
+    ys    = values,
+    label = None,
+    style = default_style(0)
+  }
+end
+
+pub fn histogram_series(values : List(Float), bins : Int) : Series do
+  let sorted = Sort.timsort_by(values, fn a -> fn b -> a <= b)
+  fn list_first(lst : List(Float)) : Option(Float) do
+    match lst do
+    | Nil -> None
+    | Cons(h, _) -> Some(h)
+    end
+  end
+  fn list_last_val(lst : List(Float)) : Option(Float) do
+    match lst do
+    | Nil -> None
+    | Cons(h, Nil) -> Some(h)
+    | Cons(_, t) -> list_last_val(t)
+    end
+  end
+  let lo_opt = list_first(sorted)
+  let hi_opt = list_last_val(sorted)
+  match (lo_opt, hi_opt) do
+  | (None, _) ->
+    { kind = Bar, xs = Nil, ys = Nil, label = None, style = default_style(0) }
+  | (_, None) ->
+    { kind = Bar, xs = Nil, ys = Nil, label = None, style = default_style(0) }
+  | (Some(lo_v), Some(hi_v)) ->
+    let range = hi_v -. lo_v
+    let bin_w = if range == 0.0 then 1.0 else range /. int_to_float(bins)
+    fn bin_of(x : Float) : Int do
+      let b = float_to_int((x -. lo_v) /. bin_w)
+      let capped = if b >= bins then bins - 1 else b
+      if capped < 0 then 0 else capped
+    end
+    fn update_at(idx : Int, cs : List(Int)) : List(Int) do
+      match cs do
+      | Nil -> Nil
+      | Cons(c, t) ->
+        if idx == 0 then Cons(c + 1, t)
+        else Cons(c, update_at(idx - 1, t))
+      end
+    end
+    fn count_bins(lst : List(Float), counts : List(Int)) : List(Int) do
+      match lst do
+      | Nil -> counts
+      | Cons(x, rest) -> count_bins(rest, update_at(bin_of(x), counts))
+      end
+    end
+    fn make_zeros(n : Int, acc : List(Int)) : List(Int) do
+      if n <= 0 then acc else make_zeros(n - 1, Cons(0, acc))
+    end
+    fn make_xs(i : Int, acc : List(Float)) : List(Float) do
+      if i < 0 then acc else make_xs(i - 1, Cons(int_to_float(i), acc))
+    end
+    let counts = count_bins(sorted, make_zeros(bins, Nil))
+    {
+      kind  = Bar,
+      xs    = make_xs(bins - 1, Nil),
+      ys    = List.map(counts, fn c -> int_to_float(c)),
+      label = None,
+      style = default_style(0)
+    }
+  end
+end
+
+-- ---- Plot builders ----
+
+fn series_count(p : Plot) : Int do
+  List.length(p.series)
+end
+
+fn color_series(s : Series, idx : Int) : Series do
+  { s with style = default_style(idx) }
+end
+
+pub fn add_series(p : Plot, s : Series) : Plot do
+  let idx = series_count(p)
+  let colored = color_series(s, idx)
+  { p with series = List.append(p.series, Cons(colored, Nil)) }
+end
+
+pub fn add_labeled_series(p : Plot, s : Series, lbl : String) : Plot do
+  let idx = series_count(p)
+  let colored = color_series({ s with label = Some(lbl) }, idx)
+  { p with series = List.append(p.series, Cons(colored, Nil)) }
+end
+
+pub fn set_title(p : Plot, t : String) : Plot do
+  { p with title = Some(t) }
+end
+
+pub fn set_xlabel(p : Plot, l : String) : Plot do
+  let ax = p.x_axis
+  { p with x_axis = { ax with label = Some(l) } }
+end
+
+pub fn set_ylabel(p : Plot, l : String) : Plot do
+  let ay = p.y_axis
+  { p with y_axis = { ay with label = Some(l) } }
+end
+
+pub fn set_x_range(p : Plot, lo : Float, hi : Float) : Plot do
+  let ax = p.x_axis
+  { p with x_axis = { ax with data_min = Some(lo), data_max = Some(hi) } }
+end
+
+pub fn set_y_range(p : Plot, lo : Float, hi : Float) : Plot do
+  let ay = p.y_axis
+  { p with y_axis = { ay with data_min = Some(lo), data_max = Some(hi) } }
+end
+
+pub fn set_size(p : Plot, w : Int, h : Int) : Plot do
+  { p with width = w, height = h }
+end
+
+pub fn with_grid(p : Plot) : Plot do
+  { p with show_grid = true }
+end
+
+pub fn with_legend(p : Plot) : Plot do
+  { p with show_legend = true }
+end
+
+-- ---- SVG primitive builders ----
+
+fn color_hex(c : Color) : String do
+  fn hex2(n : Int) : String do
+    let clamped = if n < 0 then 0 else if n > 255 then 255 else n
+    let hi = clamped / 16
+    let lo = clamped % 16
+    fn digit(d : Int) : String do
+      if d < 10 then int_to_string(d)
+      else if d == 10 then "a"
+      else if d == 11 then "b"
+      else if d == 12 then "c"
+      else if d == 13 then "d"
+      else if d == 14 then "e"
+      else "f"
+    end
+    digit(hi) ++ digit(lo)
+  end
+  "#" ++ hex2(c.r) ++ hex2(c.g) ++ hex2(c.b)
+end
+
+fn fmt_float(f : Float) : String do
+  -- Format to 2 decimal places for compact SVG coordinates
+  let scaled = float_to_int(f *. 100.0)
+  let whole = scaled / 100
+  let frac = scaled % 100
+  let frac_abs = if frac < 0 then 0 - frac else frac
+  let frac_str =
+    if frac_abs < 10 then "0" ++ int_to_string(frac_abs)
+    else int_to_string(frac_abs)
+  if frac_abs == 0 then int_to_string(whole) ++ ".0"
+  else int_to_string(whole) ++ "." ++ frac_str
+end
+
+fn svg_rect_el(x : Float, y : Float, w : Float, h : Float,
+               fill : String, stroke : String, sw : Float) : String do
+  "<rect x=\"" ++ fmt_float(x) ++ "\" y=\"" ++ fmt_float(y) ++
+  "\" width=\"" ++ fmt_float(w) ++ "\" height=\"" ++ fmt_float(h) ++
+  "\" fill=\"" ++ fill ++ "\" stroke=\"" ++ stroke ++
+  "\" stroke-width=\"" ++ fmt_float(sw) ++ "\"/>"
+end
+
+fn svg_circle_el(cx : Float, cy : Float, r : Float,
+                 fill : String, stroke : String) : String do
+  "<circle cx=\"" ++ fmt_float(cx) ++ "\" cy=\"" ++ fmt_float(cy) ++
+  "\" r=\"" ++ fmt_float(r) ++ "\" fill=\"" ++ fill ++
+  "\" stroke=\"" ++ stroke ++ "\" stroke-width=\"1.0\"/>"
+end
+
+fn svg_line_el(x1 : Float, y1 : Float, x2 : Float, y2 : Float,
+               stroke : String, sw : Float) : String do
+  "<line x1=\"" ++ fmt_float(x1) ++ "\" y1=\"" ++ fmt_float(y1) ++
+  "\" x2=\"" ++ fmt_float(x2) ++ "\" y2=\"" ++ fmt_float(y2) ++
+  "\" stroke=\"" ++ stroke ++ "\" stroke-width=\"" ++ fmt_float(sw) ++ "\"/>"
+end
+
+fn svg_dashed_line(x1 : Float, y1 : Float, x2 : Float, y2 : Float,
+                   stroke : String) : String do
+  "<line x1=\"" ++ fmt_float(x1) ++ "\" y1=\"" ++ fmt_float(y1) ++
+  "\" x2=\"" ++ fmt_float(x2) ++ "\" y2=\"" ++ fmt_float(y2) ++
+  "\" stroke=\"" ++ stroke ++ "\" stroke-width=\"1.0\" stroke-dasharray=\"4,4\"/>"
+end
+
+fn pts_to_str(pts : List((Float, Float))) : String do
+  match pts do
+  | Nil -> ""
+  | Cons((x, y), Nil) ->
+    fmt_float(x) ++ "," ++ fmt_float(y)
+  | Cons((x, y), rest) ->
+    fmt_float(x) ++ "," ++ fmt_float(y) ++ " " ++ pts_to_str(rest)
+  end
+end
+
+fn svg_polyline_el(points : List((Float, Float)), stroke : String, sw : Float) : String do
+  match points do
+  | Nil -> ""
+  | _ ->
+    "<polyline points=\"" ++ pts_to_str(points) ++
+    "\" fill=\"none\" stroke=\"" ++ stroke ++
+    "\" stroke-width=\"" ++ fmt_float(sw) ++ "\"/>"
+  end
+end
+
+fn svg_text_el(x : Float, y : Float, txt : String,
+               fs : Float, anchor : String) : String do
+  "<text x=\"" ++ fmt_float(x) ++ "\" y=\"" ++ fmt_float(y) ++
+  "\" font-size=\"" ++ fmt_float(fs) ++
+  "\" text-anchor=\"" ++ anchor ++ "\">" ++ txt ++ "</text>"
+end
+
+fn join_strs(lst : List(String), sep : String) : String do
+  match lst do
+  | Nil -> ""
+  | Cons(s, Nil) -> s
+  | Cons(s, rest) -> s ++ sep ++ join_strs(rest, sep)
+  end
+end
+
+fn svg_wrap(w : Int, h : Int, parts : List(String)) : String do
+  "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"" ++ int_to_string(w) ++
+  "\" height=\"" ++ int_to_string(h) ++ "\">\n" ++
+  join_strs(parts, "\n") ++
+  "\n</svg>"
+end
+
+-- ---- Axis / scale helpers ----
+
+fn list_min_f(lst : List(Float)) : Option(Float) do
+  match lst do
+  | Nil -> None
+  | Cons(h, t) ->
+    fn go(xs : List(Float), acc : Float) : Float do
+      match xs do
+      | Nil -> acc
+      | Cons(x, rest) -> go(rest, if x < acc then x else acc)
+      end
+    end
+    Some(go(t, h))
+  end
+end
+
+fn list_max_f(lst : List(Float)) : Option(Float) do
+  match lst do
+  | Nil -> None
+  | Cons(h, t) ->
+    fn go(xs : List(Float), acc : Float) : Float do
+      match xs do
+      | Nil -> acc
+      | Cons(x, rest) -> go(rest, if x > acc then x else acc)
+      end
+    end
+    Some(go(t, h))
+  end
+end
+
+fn list_last_f(lst : List(Float)) : Option(Float) do
+  match lst do
+  | Nil -> None
+  | Cons(h, Nil) -> Some(h)
+  | Cons(_, t) -> list_last_f(t)
+  end
+end
+
+fn concat_float_lists(lists : List(List(Float))) : List(Float) do
+  List.fold_left(Nil, lists, fn (acc, lst) -> List.append(acc, lst))
+end
+
+fn all_xs(p : Plot) : List(Float) do
+  concat_float_lists(List.map(p.series, fn s -> s.xs))
+end
+
+fn all_ys(p : Plot) : List(Float) do
+  concat_float_lists(List.map(p.series, fn s -> s.ys))
+end
+
+fn data_range(vals : List(Float),
+              user_min : Option(Float),
+              user_max : Option(Float)) : (Float, Float) do
+  let lo = match user_min do
+    | Some(v) -> v
+    | None -> Option.unwrap_or(list_min_f(vals), 0.0)
+    end
+  let hi = match user_max do
+    | Some(v) -> v
+    | None -> Option.unwrap_or(list_max_f(vals), 1.0)
+    end
+  let span = hi -. lo
+  let pad = if span == 0.0 then 0.5 else span *. 0.05
+  let lo2 = match user_min do | Some(_) -> lo | None -> lo -. pad end
+  let hi2 = match user_max do | Some(_) -> hi | None -> hi +. pad end
+  (lo2, hi2)
+end
+
+fn make_scale(d_lo : Float, d_hi : Float, s_lo : Float, s_hi : Float) : (Float -> Float) do
+  fn scale(x : Float) : Float do
+    if d_hi == d_lo then (s_lo +. s_hi) /. 2.0
+    else s_lo +. (x -. d_lo) /. (d_hi -. d_lo) *. (s_hi -. s_lo)
+  end
+  scale
+end
+
+-- Nice tick interval: pick from {1,2,5} * 10^k
+fn nice_interval(span : Float, target_n : Int) : Float do
+  let raw = span /. int_to_float(target_n)
+  let safe = if raw <= 0.0 then 1.0 else raw
+  let mag = math_pow(10.0, Math.floor(math_log10(safe)))
+  let norm = raw /. mag
+  let nice = if norm <= 1.0 then 1.0
+    else if norm <= 2.0 then 2.0
+    else if norm <= 5.0 then 5.0
+    else 10.0
+  nice *. mag
+end
+
+fn gen_ticks(lo : Float, hi : Float, n : Int) : List(Float) do
+  let span = hi -. lo
+  let interval = nice_interval(span, n)
+  let first = Math.ceil(lo /. interval) *. interval
+  fn go(v : Float, acc : List(Float)) : List(Float) do
+    if v > hi +. interval *. 0.001 then Sort.reverse_list(acc)
+    else go(v +. interval, Cons(v, acc))
+  end
+  go(first, Nil)
+end
+
+-- ---- Grid ----
+
+fn render_grid(x_ticks : List(Float), y_ticks : List(Float),
+               sx : Float -> Float, sy : Float -> Float,
+               x_lo : Float, x_hi : Float,
+               y_lo : Float, y_hi : Float) : List(String) do
+  let col = "#e0e0e0"
+  let x_lines = List.map(x_ticks, fn v ->
+    svg_dashed_line(sx(v), sy(y_hi), sx(v), sy(y_lo), col))
+  let y_lines = List.map(y_ticks, fn v ->
+    svg_dashed_line(sx(x_lo), sy(v), sx(x_hi), sy(v), col))
+  List.append(x_lines, y_lines)
+end
+
+-- ---- Axis rendering ----
+
+fn render_x_axis(ticks : List(Float), sx : Float -> Float,
+                 y_bot : Float, lbl : Option(String), fs : Float) : List(String) do
+  let first_x = Option.unwrap_or(List.head_opt(ticks), 0.0)
+  let last_x  = Option.unwrap_or(list_last_f(ticks), 1.0)
+  let axis_line = svg_line_el(sx(first_x), y_bot, sx(last_x), y_bot, "#333333", 1.5)
+  let tick_parts = List.map(ticks, fn v -> do
+    let px = sx(v)
+    svg_line_el(px, y_bot, px, y_bot +. 5.0, "#333333", 1.5) ++
+    "\n" ++ svg_text_el(px, y_bot +. fs +. 5.0, fmt_float(v), fs *. 0.85, "middle")
+    end)
+  let lbl_parts = match lbl do
+    | None -> Nil
+    | Some(l) ->
+      let mid = (sx(first_x) +. sx(last_x)) /. 2.0
+      Cons(svg_text_el(mid, y_bot +. fs *. 2.5, l, fs, "middle"), Nil)
+    end
+  Cons(axis_line, List.append(tick_parts, lbl_parts))
+end
+
+fn render_y_axis(ticks : List(Float), sy : Float -> Float,
+                 x_left : Float, lbl : Option(String), fs : Float,
+                 mid_y : Float) : List(String) do
+  let first_y = Option.unwrap_or(List.head_opt(ticks), 0.0)
+  let last_y  = Option.unwrap_or(list_last_f(ticks), 1.0)
+  let axis_line = svg_line_el(x_left, sy(last_y), x_left, sy(first_y), "#333333", 1.5)
+  let tick_parts = List.map(ticks, fn v -> do
+    let py = sy(v)
+    svg_line_el(x_left, py, x_left -. 5.0, py, "#333333", 1.5) ++
+    "\n" ++ svg_text_el(x_left -. 8.0, py +. fs *. 0.35, fmt_float(v), fs *. 0.85, "end")
+    end)
+  let lbl_parts = match lbl do
+    | None -> Nil
+    | Some(l) ->
+      let lx = x_left -. fs *. 3.0
+      Cons("<text x=\"0\" y=\"0\" font-size=\"" ++ fmt_float(fs) ++
+           "\" text-anchor=\"middle\" transform=\"translate(" ++
+           fmt_float(lx) ++ "," ++ fmt_float(mid_y) ++
+           ") rotate(-90)\">" ++ l ++ "</text>", Nil)
+    end
+  Cons(axis_line, List.append(tick_parts, lbl_parts))
+end
+
+-- ---- Series rendering ----
+
+fn zip_pts(xs : List(Float), ys : List(Float)) : List((Float, Float)) do
+  match (xs, ys) do
+  | (Nil, _) -> Nil
+  | (_, Nil) -> Nil
+  | (Cons(x, xr), Cons(y, yr)) -> Cons((x, y), zip_pts(xr, yr))
+  end
+end
+
+fn render_series(s : Series, sx : Float -> Float, sy : Float -> Float) : List(String) do
+  let col = color_hex(s.style.line_color)
+  match s.kind do
+  | Line ->
+    let screen_pts = List.map(zip_pts(s.xs, s.ys), fn (x, y) -> (sx(x), sy(y)))
+    Cons(svg_polyline_el(screen_pts, col, s.style.line_width), Nil)
+  | Scatter ->
+    List.map(zip_pts(s.xs, s.ys), fn (x, y) ->
+      svg_circle_el(sx(x), sy(y), s.style.point_radius, col, col))
+  | Bar ->
+    let n = List.length(s.xs)
+    let bar_w = if n <= 1 then 20.0
+      else do
+        let first_x = Option.unwrap_or(List.head_opt(s.xs), 0.0)
+        let last_x  = Option.unwrap_or(list_last_f(s.xs), int_to_float(n - 1))
+        let span = last_x -. first_x +. 1.0
+        (sx(first_x +. span /. int_to_float(n)) -. sx(first_x)) *. 0.8
+      end
+    let base_y = sy(0.0)
+    List.map(zip_pts(s.xs, s.ys), fn (x, y) -> do
+      let px = sx(x) -. bar_w /. 2.0
+      let py = sy(y)
+      let raw_h = base_y -. py
+      let h = if raw_h < 0.0 then 0.0 -. raw_h else raw_h
+      let rect_y = if raw_h < 0.0 then py else base_y -. h
+      svg_rect_el(px, rect_y, bar_w, h, col, "#ffffff", 0.5)
+      end)
+  | HistogramSeries ->
+    Nil
+  end
+end
+
+-- ---- Legend ----
+
+fn render_legend(series : List(Series), x : Float, y_start : Float, fs : Float) : List(String) do
+  fn go(lst : List(Series), yi : Float) : List(String) do
+    match lst do
+    | Nil -> Nil
+    | Cons(s, rest) ->
+      match s.label do
+      | None -> go(rest, yi)
+      | Some(lbl) ->
+        let col = color_hex(s.style.line_color)
+        let swatch = svg_rect_el(x, yi -. fs, fs *. 1.5, fs, col, "none", 0.0)
+        let txt = svg_text_el(x +. fs *. 2.0, yi, lbl, fs, "start")
+        Cons(swatch ++ "\n" ++ txt, go(rest, yi +. fs *. 1.6))
+      end
+    end
+  end
+  go(series, y_start)
+end
+
+-- ---- Main render ----
+
+pub fn to_svg(p : Plot) : String do
+  let w  = p.width
+  let h  = p.height
+  let m  = p.margin
+  let mf = int_to_float(m)
+  let wf = int_to_float(w)
+  let hf = int_to_float(h)
+  let fs = 12.0
+
+  -- plot area (screen pixels)
+  let px_lo = mf
+  let px_hi = wf -. mf
+  let py_lo = mf             -- top of plot area in SVG coords
+  let py_hi = hf -. mf *. 1.5  -- bottom of plot area in SVG coords
+
+  -- data ranges
+  let (x_lo, x_hi) = data_range(all_xs(p), p.x_axis.data_min, p.x_axis.data_max)
+  let (y_lo, y_hi) = data_range(all_ys(p), p.y_axis.data_min, p.y_axis.data_max)
+
+  -- scales (SVG y-axis is inverted: high data → low screen y)
+  let sx = make_scale(x_lo, x_hi, px_lo, px_hi)
+  let sy = make_scale(y_lo, y_hi, py_hi, py_lo)
+
+  -- ticks
+  let x_ticks = gen_ticks(x_lo, x_hi, p.x_axis.tick_count)
+  let y_ticks = gen_ticks(y_lo, y_hi, p.y_axis.tick_count)
+
+  -- background + border
+  let bg     = svg_rect_el(0.0, 0.0, wf, hf, "#ffffff", "none", 0.0)
+  let border = svg_rect_el(px_lo, py_lo, px_hi -. px_lo, py_hi -. py_lo, "none", "#cccccc", 1.0)
+
+  -- optional grid
+  let grid = if p.show_grid
+    then render_grid(x_ticks, y_ticks, sx, sy, x_lo, x_hi, y_lo, y_hi)
+    else Nil
+
+  -- axes
+  let x_axis = render_x_axis(x_ticks, sx, py_hi, p.x_axis.label, fs)
+  let y_axis = render_y_axis(y_ticks, sy, px_lo, p.y_axis.label, fs,
+                             (py_lo +. py_hi) /. 2.0)
+
+  -- series data
+  let series_svg = List.fold_left(Nil, p.series,
+    fn (acc, s) -> List.append(acc, render_series(s, sx, sy)))
+
+  -- title
+  let title_svg = match p.title do
+    | None -> Nil
+    | Some(t) -> Cons(svg_text_el(wf /. 2.0, fs *. 1.5, t, fs *. 1.3, "middle"), Nil)
+    end
+
+  -- legend
+  let legend_svg = if p.show_legend
+    then render_legend(p.series, px_hi +. 5.0, py_lo +. fs, fs)
+    else Nil
+
+  -- assemble
+  let parts = List.fold_left(Nil,
+    Cons(Cons(bg, Nil),
+    Cons(Cons(border, Nil),
+    Cons(grid,
+    Cons(x_axis,
+    Cons(y_axis,
+    Cons(series_svg,
+    Cons(title_svg,
+    Cons(legend_svg, Nil)))))))),
+    fn (acc, lst) -> List.append(acc, lst))
+
+  svg_wrap(w, h, parts)
+end
+
+pub fn save(p : Plot, path : String) : Result(Unit, String) do
+  match File.write(path, to_svg(p)) do
+  | Ok(_) -> Ok(())
+  | Err(e) -> Err(e)
+  end
+end
+
+-- ---- Quick helpers ----
+
+pub fn quick_line(xs : List(Float), ys : List(Float)) : String do
+  new() |> add_series(line_series(xs, ys)) |> to_svg
+end
+
+pub fn quick_scatter(xs : List(Float), ys : List(Float)) : String do
+  new() |> add_series(scatter_series(xs, ys)) |> to_svg
+end
+
+pub fn quick_bar(labels : List(String), values : List(Float)) : String do
+  new() |> add_series(bar_series(labels, values)) |> to_svg
+end
+
+pub fn quick_histogram(values : List(Float), bins : Int) : String do
+  new() |> add_series(histogram_series(values, bins)) |> to_svg
+end
+
+end

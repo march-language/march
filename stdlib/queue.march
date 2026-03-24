@@ -14,7 +14,7 @@
 
 mod Queue do
 
-pub type Queue(a) = Queue(List(a), List(a))
+pub type Queue(a) = pub Queue(List(a), List(a))
 
 -- ── Private helpers ───────────────────────────────────────────────────────
 

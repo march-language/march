@@ -1,0 +1,191 @@
+-- Tests for the Random stdlib module
+-- Run with: dune exec march -- test test/stdlib/test_random.march
+
+mod TestRandom do
+
+-- ---- Helpers ----
+
+fn approx_eq(a : Float, b : Float) : Bool do
+  float_abs(a -. b) < 0.000000000001
+end
+
+fn gen_ints(rng, n : Int, acc : List(Int)) : List(Int) do
+  if n <= 0 then List.reverse(acc)
+  else do
+    let (v, rng2) = Random.next_int(rng)
+    gen_ints(rng2, n - 1, Cons(v, acc))
+  end
+end
+
+fn gen_floats(rng, n : Int, acc : List(Float)) : List(Float) do
+  if n <= 0 then List.reverse(acc)
+  else do
+    let (v, rng2) = Random.next_float(rng)
+    gen_floats(rng2, n - 1, Cons(v, acc))
+  end
+end
+
+fn gen_ranges(rng, lo : Int, hi : Int, n : Int, acc : List(Int)) : List(Int) do
+  if n <= 0 then List.reverse(acc)
+  else do
+    let (v, rng2) = Random.range(rng, lo, hi)
+    gen_ranges(rng2, lo, hi, n - 1, Cons(v, acc))
+  end
+end
+
+-- ---- Determinism ----
+
+test "same seed produces same first int" do
+  let rng1 = Random.seed(42)
+  let rng2 = Random.seed(42)
+  let (n1, _) = Random.next_int(rng1)
+  let (n2, _) = Random.next_int(rng2)
+  assert n1 == n2
+end
+
+test "different seeds produce different first int" do
+  let rng1 = Random.seed(1)
+  let rng2 = Random.seed(2)
+  let (n1, _) = Random.next_int(rng1)
+  let (n2, _) = Random.next_int(rng2)
+  assert n1 != n2
+end
+
+test "same seed produces identical 10-element sequence" do
+  let ints1 = gen_ints(Random.seed(7), 10, Nil)
+  let ints2 = gen_ints(Random.seed(7), 10, Nil)
+  assert ints1 == ints2
+end
+
+test "next_int advances state" do
+  let rng = Random.seed(42)
+  let (n1, rng2) = Random.next_int(rng)
+  let (n2, _) = Random.next_int(rng2)
+  assert n1 != n2
+end
+
+test "seed 0 works" do
+  let (v1, _) = Random.next_int(Random.seed(0))
+  let (v2, _) = Random.next_int(Random.seed(0))
+  assert v1 == v2
+end
+
+test "seed negative works" do
+  let (v1, _) = Random.next_int(Random.seed(-1))
+  let (v2, _) = Random.next_int(Random.seed(-1))
+  assert v1 == v2
+end
+
+-- ---- next_float ----
+
+test "next_float is in [0.0, 1.0)" do
+  let floats = gen_floats(Random.seed(99), 1000, Nil)
+  let all_valid = List.all(floats, fn x -> x >= 0.0 && x < 1.0)
+  assert all_valid
+end
+
+test "next_float is deterministic" do
+  let (f1, _) = Random.next_float(Random.seed(55))
+  let (f2, _) = Random.next_float(Random.seed(55))
+  assert approx_eq(f1, f2)
+end
+
+test "next_float produces different values in sequence" do
+  let floats = gen_floats(Random.seed(42), 10, Nil)
+  -- Not all the same: variance > 0
+  let first = List.head(floats)
+  let any_different = List.any(floats, fn x -> not(approx_eq(x, first)))
+  assert any_different
+end
+
+-- ---- range ----
+
+test "range returns value in [lo, hi]" do
+  let vals = gen_ranges(Random.seed(123), 10, 20, 200, Nil)
+  let all_valid = List.all(vals, fn v -> v >= 10 && v <= 20)
+  assert all_valid
+end
+
+test "range with lo == hi always returns lo" do
+  let (v, _) = Random.range(Random.seed(1), 5, 5)
+  assert v == 5
+end
+
+test "range is deterministic" do
+  let (v1, _) = Random.range(Random.seed(42), 0, 100)
+  let (v2, _) = Random.range(Random.seed(42), 0, 100)
+  assert v1 == v2
+end
+
+test "range covers full bounds" do
+  -- With enough samples, both lo and hi should appear
+  let vals = gen_ranges(Random.seed(77), 0, 1, 200, Nil)
+  let has_zero = List.any(vals, fn v -> v == 0)
+  let has_one  = List.any(vals, fn v -> v == 1)
+  assert has_zero && has_one
+end
+
+-- ---- shuffle ----
+
+test "shuffle preserves length" do
+  let xs = Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil)))))
+  let (shuffled, _) = Random.shuffle(Random.seed(42), xs)
+  assert List.length(shuffled) == 5
+end
+
+test "shuffle preserves all elements" do
+  let xs = Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil)))))
+  let (shuffled, _) = Random.shuffle(Random.seed(42), xs)
+  let sorted_xs = List.sort_by(xs, fn (a, b) -> a < b)
+  let sorted_sh = List.sort_by(shuffled, fn (a, b) -> a < b)
+  assert sorted_xs == sorted_sh
+end
+
+test "shuffle empty list" do
+  let empty : List(Int) = Nil
+  let (result, _) = Random.shuffle(Random.seed(1), empty)
+  assert List.is_empty(result)
+end
+
+test "shuffle singleton" do
+  let xs = Cons(42, Nil)
+  let (result, _) = Random.shuffle(Random.seed(1), xs)
+  assert List.length(result) == 1
+  assert List.head(result) == 42
+end
+
+test "shuffle is deterministic" do
+  let xs = Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil)))))
+  let (s1, _) = Random.shuffle(Random.seed(42), xs)
+  let (s2, _) = Random.shuffle(Random.seed(42), xs)
+  assert s1 == s2
+end
+
+-- ---- sample ----
+
+test "sample returns correct count" do
+  let xs = List.range(1, 101)
+  let (samp, _) = Random.sample(Random.seed(0), xs, 10)
+  assert List.length(samp) == 10
+end
+
+test "sample does not exceed list size" do
+  let xs = Cons(1, Cons(2, Cons(3, Nil)))
+  let (samp, _) = Random.sample(Random.seed(0), xs, 10)
+  assert List.length(samp) == 3
+end
+
+test "sample with n=0 returns empty" do
+  let xs = List.range(1, 11)
+  let (samp, _) = Random.sample(Random.seed(0), xs, 0)
+  assert List.is_empty(samp)
+end
+
+test "sample is deterministic" do
+  let xs = List.range(1, 21)
+  let (s1, _) = Random.sample(Random.seed(5), xs, 5)
+  let (s2, _) = Random.sample(Random.seed(5), xs, 5)
+  assert s1 == s2
+end
+
+end

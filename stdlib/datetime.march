@@ -13,9 +13,9 @@
 
 mod DateTime do
 
-pub type Date = Date(Int, Int, Int)         -- year, month (1-12), day (1-31)
-pub type Time = Time(Int, Int, Int)         -- hour (0-23), min (0-59), sec (0-59)
-pub type DateTime = DateTime(Date, Time)
+pub type Date = pub Date(Int, Int, Int)         -- year, month (1-12), day (1-31)
+pub type Time = pub Time(Int, Int, Int)         -- hour (0-23), min (0-59), sec (0-59)
+pub type DateTime = pub DateTime(Date, Time)
 
 -- ── Private helpers ───────────────────────────────────────────────────────
 

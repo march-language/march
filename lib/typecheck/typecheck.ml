@@ -4198,6 +4198,11 @@ let rec check_decl env (d : Ast.decl) : env =
     Hashtbl.replace env.type_map sp t_unit;
     env
 
+  | Ast.DDescribe (_name, decls, sp) ->
+    let env' = List.fold_left check_decl env decls in
+    Hashtbl.replace env'.type_map sp t_unit;
+    env'
+
   | Ast.DSetup (body, sp) ->
     check_expr env body t_unit ~reason:(Some (RBuiltin "setup body must produce Unit"));
     Hashtbl.replace env.type_map sp t_unit;

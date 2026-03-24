@@ -2316,14 +2316,14 @@ let test_tir_anf_invariant () =
 let test_tir_lower_patvar_default () =
   (* PatVar in default arm should bind the scrutinee *)
   let m = lower_module {|mod Test do
-    fn describe(n) do
+    fn label(n) do
       match n do
       | 0 -> 0
       | other -> other
       end
     end
   end|} in
-  let f = find_fn "describe" m in
+  let f = find_fn "label" m in
   (* The default arm should have an ELet binding "other" *)
   let rec find_case = function
     | March_tir.Tir.ECase (_, _, Some def) -> def

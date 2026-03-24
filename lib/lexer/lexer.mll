@@ -74,6 +74,7 @@ let () =
       ("by",     BY);
       ("offer",  OFFER);
       ("test",      TEST);
+      ("describe",  DESCRIBE);
       ("assert",    ASSERT);
       ("setup",     SETUP);
       ("setup_all", SETUP_ALL);

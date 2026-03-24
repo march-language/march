@@ -470,7 +470,7 @@ let get_span = function
   | DMod (_, _, _, s) | DProtocol (_, _, s) | DActor (_, _, _, s)
   | DSig (_, _, s) | DInterface (_, s) | DImpl (_, s) | DExtern (_, s)
   | DUse (_, s) | DAlias (_, s) | DNeeds (_, s) | DApp (_, s)
-  | DDeriving (_, _, s) | DTest (_, s) | DSetup (_, s) | DSetupAll (_, s) -> s
+  | DDeriving (_, _, s) | DTest (_, s) | DDescribe (_, _, s) | DSetup (_, s) | DSetupAll (_, s) -> s
 
 (** Emit a list of declarations separated by blank lines,
     flushing comments before each one. *)
@@ -725,6 +725,11 @@ and emit_decl ctx = function
   | DSetupAll (body, _) ->
     line ctx "setup_all do";
     indented ctx (fun () -> emit_body ctx body);
+    line ctx "end"
+
+  | DDescribe (name, decls, _) ->
+    line ctx (Printf.sprintf "describe %S do" name);
+    indented ctx (fun () -> List.iter (emit_decl ctx) decls);
     line ctx "end"
 
 and emit_fn ctx fn =

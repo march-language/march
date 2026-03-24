@@ -82,7 +82,7 @@
 %token IMPORT ALIAS ONLY EXCEPT P_FN DERIVE FOR
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
-%token TEST ASSERT SETUP SETUP_ALL
+%token TEST DESCRIBE ASSERT SETUP SETUP_ALL
 %token DBG DOC
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
 %token ONE_FOR_ONE ONE_FOR_ALL REST_FOR_ONE RESTART_KW
@@ -157,6 +157,7 @@ decl:
   | d = app_decl       { d }
   | d = derive_decl    { d }
   | d = test_decl      { d }
+  | d = describe_decl  { d }
   | d = setup_decl     { d }
   | d = setup_all_decl { d }
 
@@ -334,6 +335,16 @@ test_decl:
         "I was expecting a string name for the test:"
         (Some "test \"my test name\" do\n    assert expr\nend")
         $startpos($2) }
+
+(** describe "name" do test ... end — groups tests under a label *)
+describe_decl:
+  | DESCRIBE; name = STRING; DO; decls = describe_body; END
+    { DDescribe (name, decls, mk_span ($loc)) }
+
+describe_body:
+  | { [] }
+  | ds = describe_body; d = test_decl    { ds @ [d] }
+  | ds = describe_body; d = describe_decl { ds @ [d] }
 
 (** setup do ... end — runs before each test *)
 setup_decl:

@@ -1355,6 +1355,7 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
               Hashtbl.replace !_use_aliases (short_prefix ^ rest) fn_name
             end
           ) all_fn_names
+      | Ast.DDescribe _ -> ()
     ) m.mod_decls;
   (* Inject top-level let bindings into main's body as a chain of ELet. *)
   let all_fns = List.rev !fns in
