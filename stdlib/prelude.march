@@ -66,14 +66,6 @@ pub fn head(xs : List(a)) : a do
   end
 end
 
-doc "Returns true if the list is empty."
-pub fn is_nil(xs : List(a)) : Bool do
-  match xs do
-  | Nil -> true
-  | Cons(_, _) -> false
-  end
-end
-
 doc "Returns all but the first element. Panics if empty."
 pub fn tail(xs : List(a)) : List(a) do
   match xs do
@@ -122,19 +114,24 @@ end
 
 doc "Returns only the elements satisfying `pred`."
 pub fn filter(xs : List(a), pred : a -> Bool) : List(a) do
-  match xs do
-  | Nil        -> Nil
-  | Cons(h, t) ->
-    if pred(h) then Cons(h, filter(t, pred)) else filter(t, pred)
+  fn go(acc : List(a), remaining : List(a)) : List(a) do
+    match remaining do
+    | Nil        -> reverse(acc)
+    | Cons(h, t) -> if pred(h) then go(Cons(h, acc), t) else go(acc, t)
+    end
   end
+  go(Nil, xs)
 end
 
 doc "Applies `f` to every element of the list."
 pub fn map(xs : List(a), f : a -> b) : List(b) do
-  match xs do
-  | Nil        -> Nil
-  | Cons(h, t) -> Cons(f(h), map(t, f))
+  fn go(acc : List(b), remaining : List(a)) : List(b) do
+    match remaining do
+    | Nil        -> reverse(acc)
+    | Cons(h, t) -> go(Cons(f(h), acc), t)
+    end
   end
+  go(Nil, xs)
 end
 
 -- ---- Combinators ----
