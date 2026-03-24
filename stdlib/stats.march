@@ -237,4 +237,47 @@ fn linear_regression(xs : List(Float), ys : List(Float)) : (Float, Float) do
   end
 end
 
+-- ---- Result-returning (safe) variants ----
+
+doc "Mean, returning Err on empty list instead of panicking."
+fn mean_safe(xs : List(Float)) : Result(Float, String) do
+  match xs do
+  | Nil -> Err("Stats.mean_safe: empty list")
+  | _   -> Ok(mean(xs))
+  end
+end
+
+doc "Sample variance, returning Err on empty list."
+fn variance_safe(xs : List(Float)) : Result(Float, String) do
+  match xs do
+  | Nil -> Err("Stats.variance_safe: empty list")
+  | _   -> Ok(variance(xs))
+  end
+end
+
+doc "Sample standard deviation, returning Err on empty or single-element list."
+fn std_dev_safe(xs : List(Float)) : Result(Float, String) do
+  match xs do
+  | Nil -> Err("Stats.std_dev_safe: empty list")
+  | Cons(_, Nil) -> Err("Stats.std_dev_safe: need at least 2 elements")
+  | _ -> Ok(std_dev(xs))
+  end
+end
+
+doc "Minimum value, returning Err on empty list."
+fn min_safe(xs : List(Float)) : Result(Float, String) do
+  match xs do
+  | Nil -> Err("Stats.min_safe: empty list")
+  | _   -> Ok(min_val(xs))
+  end
+end
+
+doc "Maximum value, returning Err on empty list."
+fn max_safe(xs : List(Float)) : Result(Float, String) do
+  match xs do
+  | Nil -> Err("Stats.max_safe: empty list")
+  | _   -> Ok(max_val(xs))
+  end
+end
+
 end

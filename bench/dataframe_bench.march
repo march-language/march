@@ -1,0 +1,144 @@
+-- DataFrame benchmark: filter, sort, groupby+agg, inner join.
+-- Generates synthetic data inline using sequential values.
+-- Uses unix_time for wall-clock timing.
+--
+-- Note: sizes chosen for the tree-walking interpreter:
+--   1K rows for filter/sort/groupby, 200 for join.
+--
+-- Usage: dune exec march -- bench/dataframe_bench.march
+
+mod DataframeBench do
+
+-- ── Helpers ────────────────────────────────────────────────────────────────
+
+pfn elapsed_ms(t0 : Float, t1 : Float) : Int do
+  float_to_int((t1 -. t0) *. 1000.0)
+end
+
+pfn banner(name : String) : Unit do
+  println("")
+  println("=== " ++ name ++ " ===")
+end
+
+pfn report(name : String, ms : Int) : Unit do
+  println(name ++ ": " ++ int_to_string(ms) ++ " ms")
+end
+
+-- ── Data generation ─────────────────────────────────────────────────────────
+
+-- N rows: id (Int), value (Float), category (String)
+pfn make_frame(n : Int) : DataFrame do
+  fn gen_ids(i : Int, acc : List(Int)) : List(Int) do
+    if i < 0 then acc else gen_ids(i - 1, Cons(i, acc))
+  end
+  fn gen_values(i : Int, acc : List(Float)) : List(Float) do
+    if i < 0 then acc else gen_values(i - 1, Cons(int_to_float(i % 100), acc))
+  end
+  fn gen_cats(i : Int, acc : List(String)) : List(String) do
+    if i < 0 then acc
+    else gen_cats(i - 1, Cons("cat_" ++ int_to_string(i % 5), acc))
+  end
+  let ids  = gen_ids(n - 1, Nil)
+  let vals = gen_values(n - 1, Nil)
+  let cats = gen_cats(n - 1, Nil)
+  DataFrame.make_df(Cons(IntCol("id", ids),
+                    Cons(FloatCol("value", vals),
+                    Cons(StrCol("category", cats), Nil))))
+end
+
+-- N rows: key (Int), extra (Float)
+pfn make_join_frame(n : Int, label : String) : DataFrame do
+  fn gen_keys(i : Int, acc : List(Int)) : List(Int) do
+    if i < 0 then acc else gen_keys(i - 1, Cons(i % 50, acc))
+  end
+  fn gen_extras(i : Int, acc : List(Float)) : List(Float) do
+    if i < 0 then acc else gen_extras(i - 1, Cons(int_to_float(i) *. 0.5, acc))
+  end
+  let keys   = gen_keys(n - 1, Nil)
+  let extras = gen_extras(n - 1, Nil)
+  DataFrame.make_df(Cons(IntCol("key", keys),
+                    Cons(FloatCol(label, extras), Nil)))
+end
+
+-- ── Benchmarks ──────────────────────────────────────────────────────────────
+
+pfn bench_filter(df : DataFrame) : Unit do
+  banner("Filter 1K rows (value > 50.0)")
+  let t0 = unix_time(())
+  let lf = DataFrame.lazy(df)
+  let filtered = DataFrame.filter(lf, Gt(Col("value"), LitFloat(50.0)))
+  let result = DataFrame.collect(filtered)
+  let t1 = unix_time(())
+  let ms = elapsed_ms(t0, t1)
+  match result do
+  | Err(e)  -> println("Error: " ++ e)
+  | Ok(out) -> println("Result rows: " ++ int_to_string(DataFrame.row_count(out)))
+  end
+  report("Filter", ms)
+end
+
+pfn bench_sort(df : DataFrame) : Unit do
+  banner("Sort 1K rows by value desc")
+  let t0 = unix_time(())
+  let lf = DataFrame.lazy(df)
+  let sorted = DataFrame.sort_by(lf, Cons(("value", Desc), Nil))
+  let result = DataFrame.collect(sorted)
+  let t1 = unix_time(())
+  let ms = elapsed_ms(t0, t1)
+  match result do
+  | Err(e)  -> println("Error: " ++ e)
+  | Ok(out) -> println("Result rows: " ++ int_to_string(DataFrame.row_count(out)))
+  end
+  report("Sort", ms)
+end
+
+pfn bench_groupby(df : DataFrame) : Unit do
+  banner("GroupBy category + agg(count, mean(value)) on 1K rows")
+  let t0 = unix_time(())
+  let grouped = DataFrame.group_by(df, Cons("category", Nil))
+  let result = DataFrame.agg(grouped, Cons(Count, Cons(Mean("value"), Nil)))
+  let t1 = unix_time(())
+  let ms = elapsed_ms(t0, t1)
+  match result do
+  | Err(e)  -> println("Error: " ++ e)
+  | Ok(out) ->
+    println("Groups: " ++ int_to_string(DataFrame.row_count(out)))
+    DataFrame.print_table(out)
+  end
+  report("GroupBy+Agg", ms)
+end
+
+pfn bench_inner_join(left : DataFrame, right : DataFrame) : Unit do
+  banner("Inner join two 200-row frames on key")
+  let t0 = unix_time(())
+  let lf = DataFrame.inner_join(DataFrame.lazy(left), right, Cons("key", Nil))
+  let result = DataFrame.collect(lf)
+  let t1 = unix_time(())
+  let ms = elapsed_ms(t0, t1)
+  match result do
+  | Err(e)  -> println("Error: " ++ e)
+  | Ok(out) -> println("Result rows: " ++ int_to_string(DataFrame.row_count(out)))
+  end
+  report("Inner join", ms)
+end
+
+-- ── Main ────────────────────────────────────────────────────────────────────
+
+fn main() : Unit do
+  println("DataFrame benchmarks")
+  println("Generating data...")
+  let df1k    = make_frame(1000)
+  let left200 = make_join_frame(200, "extra_left")
+  let right200 = make_join_frame(200, "score_right")
+  println("1K frame:     " ++ int_to_string(DataFrame.row_count(df1k))
+          ++ " rows, " ++ int_to_string(DataFrame.col_count(df1k)) ++ " columns")
+  println("Join frames:  " ++ int_to_string(DataFrame.row_count(left200)) ++ " rows each")
+  bench_filter(df1k)
+  bench_sort(df1k)
+  bench_groupby(df1k)
+  bench_inner_join(left200, right200)
+  println("")
+  println("Done.")
+end
+
+end -- mod DataframeBench
