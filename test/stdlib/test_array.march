@@ -1,21 +1,8 @@
 -- Tests for the Array stdlib module (persistent vector)
--- Run with: dune exec march -- test/stdlib/test_array.march
+-- Run with: dune exec march -- test test/stdlib/test_array.march
 
 mod TestArray do
 
-fn assert_true(cond : Bool, msg : String) : Unit do
-  if cond then () else panic("FAIL: " ++ msg)
-end
-
-fn assert_false(cond : Bool, msg : String) : Unit do
-  if cond then panic("FAIL: " ++ msg) else ()
-end
-
-fn assert_eq_int(a : Int, b : Int, msg : String) : Unit do
-  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ int_to_string(b) ++ ", got " ++ int_to_string(a) ++ ")")
-end
-
--- Build a vector from a list of ints [1..n]
 fn make_vec(n : Int) do
   fn go(i : Int, v) do
     if i > n then v else go(i + 1, Array.push(v, i))
@@ -23,214 +10,171 @@ fn make_vec(n : Int) do
   go(1, Array.empty())
 end
 
--- ---- Array.empty ----
-
-fn test_empty() : Unit do
-  let v = Array.empty()
-  assert_true(Array.is_empty(v), "empty() should be empty")
-  assert_eq_int(Array.length(v), 0, "empty() length should be 0")
-end
-
--- ---- Array.length ----
-
-fn test_length() : Unit do
-  let v = make_vec(5)
-  assert_eq_int(Array.length(v), 5, "length of [1..5] should be 5")
-end
-
-fn test_length_zero() : Unit do
-  assert_eq_int(Array.length(Array.empty()), 0, "empty length should be 0")
-end
-
--- ---- Array.is_empty ----
-
-fn test_is_empty_empty() : Unit do
-  assert_true(Array.is_empty(Array.empty()), "is_empty on empty should be true")
-end
-
-fn test_is_empty_nonempty() : Unit do
-  let v = Array.push(Array.empty(), 1)
-  assert_false(Array.is_empty(v), "is_empty on [1] should be false")
-end
-
--- ---- Array.push / get ----
-
-fn test_push_get() : Unit do
-  let v = Array.push(Array.push(Array.push(Array.empty(), 10), 20), 30)
-  assert_eq_int(Array.get(v, 0), 10, "get(0) should be 10")
-  assert_eq_int(Array.get(v, 1), 20, "get(1) should be 20")
-  assert_eq_int(Array.get(v, 2), 30, "get(2) should be 30")
-  assert_eq_int(Array.length(v), 3, "length after 3 pushes should be 3")
-end
-
-fn test_push_many() : Unit do
-  -- Push 33 elements (crosses the 32-element trie boundary)
-  let v = make_vec(33)
-  assert_eq_int(Array.length(v), 33, "length of 33-element vec should be 33")
-  assert_eq_int(Array.get(v, 0), 1, "get(0) should be 1")
-  assert_eq_int(Array.get(v, 31), 32, "get(31) should be 32")
-  assert_eq_int(Array.get(v, 32), 33, "get(32) should be 33")
-end
-
-fn test_push_64() : Unit do
-  -- Push 64 elements (crosses two 32-element boundaries)
-  let v = make_vec(64)
-  assert_eq_int(Array.length(v), 64, "length of 64-element vec should be 64")
-  assert_eq_int(Array.get(v, 0), 1, "get(0) should be 1")
-  assert_eq_int(Array.get(v, 63), 64, "get(63) should be 64")
-end
-
--- ---- Array.set ----
-
-fn test_set() : Unit do
-  let v = make_vec(5)
-  let v2 = Array.set(v, 2, 99)
-  assert_eq_int(Array.get(v2, 2), 99, "set(2, 99) then get(2) should be 99")
-  assert_eq_int(Array.get(v2, 1), 2, "set(2, 99) should not affect get(1)")
-  assert_eq_int(Array.get(v2, 3), 4, "set(2, 99) should not affect get(3)")
-  -- Original unchanged (persistent)
-  assert_eq_int(Array.get(v, 2), 3, "original vector unchanged after set")
-end
-
-fn test_set_first() : Unit do
-  let v = Array.push(Array.push(Array.empty(), 1), 2)
-  let v2 = Array.set(v, 0, 100)
-  assert_eq_int(Array.get(v2, 0), 100, "set(0, 100) should update first element")
-end
-
--- ---- Array.pop ----
-
-fn test_pop() : Unit do
-  let v = make_vec(5)
-  match Array.pop(v) do
-  | (v2, last) ->
-    assert_eq_int(last, 5, "pop last element should be 5")
-    assert_eq_int(Array.length(v2), 4, "after pop length should be 4")
-    assert_eq_int(Array.get(v2, 0), 1, "after pop get(0) should be 1")
+describe "empty" do
+  test "empty vector is empty" do
+    let v = Array.empty()
+    assert Array.is_empty(v)
+    assert (Array.length(v) == 0)
   end
 end
 
-fn test_pop_single() : Unit do
-  let v = Array.push(Array.empty(), 42)
-  match Array.pop(v) do
-  | (v2, last) ->
-    assert_eq_int(last, 42, "pop single element should be 42")
-    assert_true(Array.is_empty(v2), "after pop single, vector should be empty")
+describe "length" do
+  test "length of five-element vector is five" do
+    assert (Array.length(make_vec(5)) == 5)
+  end
+
+  test "length of empty vector is zero" do
+    assert (Array.length(Array.empty()) == 0)
   end
 end
 
-fn test_pop_across_boundary() : Unit do
-  -- Pop from a 33-element vector (crosses trie boundary)
-  let v = make_vec(33)
-  match Array.pop(v) do
-  | (v2, last) ->
-    assert_eq_int(last, 33, "pop 33-element vec last should be 33")
-    assert_eq_int(Array.length(v2), 32, "after pop 33 length should be 32")
+describe "is_empty" do
+  test "is_empty returns true for empty vector" do
+    assert Array.is_empty(Array.empty())
+  end
+
+  test "is_empty returns false for non-empty vector" do
+    assert !Array.is_empty(Array.push(Array.empty(), 1))
   end
 end
 
--- ---- Array.map ----
+describe "push and get" do
+  test "pushed elements are retrievable by index" do
+    let v = Array.push(Array.push(Array.push(Array.empty(), 10), 20), 30)
+    assert (Array.get(v, 0) == 10)
+    assert (Array.get(v, 1) == 20)
+    assert (Array.get(v, 2) == 30)
+    assert (Array.length(v) == 3)
+  end
 
-fn test_map() : Unit do
-  let v = make_vec(5)
-  let doubled = Array.map(v, fn x -> x * 2)
-  assert_eq_int(Array.get(doubled, 0), 2, "map double get(0) should be 2")
-  assert_eq_int(Array.get(doubled, 4), 10, "map double get(4) should be 10")
-  assert_eq_int(Array.length(doubled), 5, "map double length should be 5")
+  test "push many elements crossing trie boundary" do
+    let v = make_vec(33)
+    assert (Array.length(v) == 33)
+    assert (Array.get(v, 0) == 1)
+    assert (Array.get(v, 31) == 32)
+    assert (Array.get(v, 32) == 33)
+  end
+
+  test "push 64 elements crossing two boundaries" do
+    let v = make_vec(64)
+    assert (Array.length(v) == 64)
+    assert (Array.get(v, 0) == 1)
+    assert (Array.get(v, 63) == 64)
+  end
 end
 
-fn test_map_empty() : Unit do
-  let v = Array.empty()
-  let r = Array.map(v, fn (x : Int) -> x + 1)
-  assert_true(Array.is_empty(r), "map on empty should give empty")
+describe "set" do
+  test "set updates element at index" do
+    let v = make_vec(5)
+    let v2 = Array.set(v, 2, 99)
+    assert (Array.get(v2, 2) == 99)
+    assert (Array.get(v2, 1) == 2)
+    assert (Array.get(v2, 3) == 4)
+    assert (Array.get(v, 2) == 3)
+  end
+
+  test "set at first index" do
+    let v = Array.push(Array.push(Array.empty(), 1), 2)
+    let v2 = Array.set(v, 0, 100)
+    assert (Array.get(v2, 0) == 100)
+  end
 end
 
--- ---- Array.fold_left ----
+describe "pop" do
+  test "pop removes and returns last element" do
+    let v = make_vec(5)
+    match Array.pop(v) do
+    | (v2, last) ->
+      assert (last == 5)
+      assert (Array.length(v2) == 4)
+      assert (Array.get(v2, 0) == 1)
+    end
+  end
 
-fn test_fold_left_sum() : Unit do
-  let v = make_vec(5)
-  let s = Array.fold_left(0, v, fn (acc, x) -> acc + x)
-  assert_eq_int(s, 15, "fold_left sum [1..5] should be 15")
+  test "pop from single-element vector gives empty vector" do
+    let v = Array.push(Array.empty(), 42)
+    match Array.pop(v) do
+    | (v2, last) ->
+      assert (last == 42)
+      assert Array.is_empty(v2)
+    end
+  end
+
+  test "pop across trie boundary" do
+    let v = make_vec(33)
+    match Array.pop(v) do
+    | (v2, last) ->
+      assert (last == 33)
+      assert (Array.length(v2) == 32)
+    end
+  end
 end
 
-fn test_fold_left_empty() : Unit do
-  let empty_v = Array.empty()
-  let s = Array.fold_left(0, empty_v, fn (acc, x) -> acc + x)
-  assert_eq_int(s, 0, "fold_left on empty should be 0")
+describe "map" do
+  test "map applies function to each element" do
+    let v = make_vec(5)
+    let doubled = Array.map(v, fn x -> x * 2)
+    assert (Array.get(doubled, 0) == 2)
+    assert (Array.get(doubled, 4) == 10)
+    assert (Array.length(doubled) == 5)
+  end
+
+  test "map over empty vector gives empty vector" do
+    assert Array.is_empty(Array.map(Array.empty(), fn (x : Int) -> x + 1))
+  end
 end
 
-fn test_fold_left_count() : Unit do
-  let v = make_vec(10)
-  let c = Array.fold_left(0, v, fn (acc, _x) -> acc + 1)
-  assert_eq_int(c, 10, "fold_left counting 10 elements should give 10")
+describe "fold_left" do
+  test "fold_left sums all elements" do
+    let s = Array.fold_left(0, make_vec(5), fn (acc, x) -> acc + x)
+    assert (s == 15)
+  end
+
+  test "fold_left over empty vector gives initial accumulator" do
+    let s = Array.fold_left(0, Array.empty(), fn (acc, x) -> acc + x)
+    assert (s == 0)
+  end
+
+  test "fold_left counts elements" do
+    let c = Array.fold_left(0, make_vec(10), fn (acc, _x) -> acc + 1)
+    assert (c == 10)
+  end
 end
 
--- ---- Array.to_list ----
+describe "to_list and from_list" do
+  test "to_list produces elements in order" do
+    let v = make_vec(3)
+    let lst = Array.to_list(v)
+    assert (length(lst) == 3)
+    assert (head(lst) == 1)
+    assert (List.last(lst) == 3)
+  end
 
-fn test_to_list() : Unit do
-  let v = make_vec(3)
-  let lst = Array.to_list(v)
-  assert_eq_int(length(lst), 3, "to_list length should be 3")
-  assert_eq_int(head(lst), 1, "to_list head should be 1")
-  assert_eq_int(List.last(lst), 3, "to_list last should be 3")
-end
+  test "to_list of empty vector is Nil" do
+    assert is_nil(Array.to_list(Array.empty()))
+  end
 
-fn test_to_list_empty() : Unit do
-  let v = Array.empty()
-  let lst = Array.to_list(v)
-  assert_true(is_nil(lst), "to_list of empty should be Nil")
-end
+  test "from_list builds vector from list" do
+    let lst = Cons(10, Cons(20, Cons(30, Nil)))
+    let v = Array.from_list(lst)
+    assert (Array.length(v) == 3)
+    assert (Array.get(v, 0) == 10)
+    assert (Array.get(v, 2) == 30)
+  end
 
--- ---- Array.from_list ----
+  test "from_list of empty list gives empty vector" do
+    let empty : List(Int) = Nil
+    assert Array.is_empty(Array.from_list(empty))
+  end
 
-fn test_from_list() : Unit do
-  let lst = Cons(10, Cons(20, Cons(30, Nil)))
-  let v = Array.from_list(lst)
-  assert_eq_int(Array.length(v), 3, "from_list([10,20,30]) length should be 3")
-  assert_eq_int(Array.get(v, 0), 10, "from_list get(0) should be 10")
-  assert_eq_int(Array.get(v, 2), 30, "from_list get(2) should be 30")
-end
-
-fn test_from_list_empty() : Unit do
-  let empty : List(Int) = Nil
-  let v = Array.from_list(empty)
-  assert_true(Array.is_empty(v), "from_list([]) should be empty")
-end
-
-fn test_from_list_roundtrip() : Unit do
-  let lst = Cons(5, Cons(4, Cons(3, Cons(2, Cons(1, Nil)))))
-  let v = Array.from_list(lst)
-  let lst2 = Array.to_list(v)
-  assert_eq_int(length(lst2), 5, "roundtrip length should be 5")
-  assert_eq_int(head(lst2), 5, "roundtrip head should be 5")
-  assert_eq_int(List.last(lst2), 1, "roundtrip last should be 1")
-end
-
-fn main() : Unit do
-  test_empty()
-  test_length()
-  test_length_zero()
-  test_is_empty_empty()
-  test_is_empty_nonempty()
-  test_push_get()
-  test_push_many()
-  test_push_64()
-  test_set()
-  test_set_first()
-  test_pop()
-  test_pop_single()
-  test_pop_across_boundary()
-  test_map()
-  test_map_empty()
-  test_fold_left_sum()
-  test_fold_left_empty()
-  test_fold_left_count()
-  test_to_list()
-  test_to_list_empty()
-  test_from_list()
-  test_from_list_empty()
-  test_from_list_roundtrip()
-  println("All Array tests passed!")
+  test "from_list then to_list is identity" do
+    let lst = Cons(5, Cons(4, Cons(3, Cons(2, Cons(1, Nil)))))
+    let v = Array.from_list(lst)
+    let lst2 = Array.to_list(v)
+    assert (length(lst2) == 5)
+    assert (head(lst2) == 5)
+    assert (List.last(lst2) == 1)
+  end
 end
 
 end

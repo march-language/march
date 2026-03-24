@@ -1,342 +1,271 @@
 -- Tests for the Set stdlib module (HAMT-based persistent set)
--- Run with: dune exec march -- test/stdlib/test_set.march
+-- Run with: dune exec march -- test test/stdlib/test_set.march
 
 mod TestSet do
 
-fn assert_true(cond : Bool, msg : String) : Unit do
-  if cond then () else panic("FAIL: " ++ msg)
-end
-
-fn assert_false(cond : Bool, msg : String) : Unit do
-  if cond then panic("FAIL: " ++ msg) else ()
-end
-
-fn assert_eq_int(a : Int, b : Int, msg : String) : Unit do
-  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ int_to_string(b) ++ ", got " ++ int_to_string(a) ++ ")")
-end
-
--- Standard int comparator
 fn int_cmp(a : Int) : Int -> Bool do
   fn b -> a < b
 end
 
--- Standard string comparator
 fn str_cmp(a : String) : String -> Bool do
   fn b -> a < b
 end
 
--- Build a set from a list
 fn set_of(xs : List(Int)) do
   Set.from_list(xs, int_cmp)
 end
 
--- ---- Set.empty / is_empty ----
-
-fn test_empty() : Unit do
-  let s = Set.empty()
-  assert_true(Set.is_empty(s), "empty() should be empty")
-  assert_eq_int(Set.size(s), 0, "empty() size should be 0")
+describe "empty and is_empty" do
+  test "empty set is empty with size zero" do
+    let s = Set.empty()
+    assert Set.is_empty(s)
+    assert (Set.size(s) == 0)
+  end
 end
 
--- ---- Set.singleton ----
+describe "singleton" do
+  test "singleton is non-empty and contains the element" do
+    let s = Set.singleton(42)
+    assert !Set.is_empty(s)
+    assert (Set.size(s) == 1)
+    assert Set.contains(s, 42, int_cmp)
+  end
 
-fn test_singleton() : Unit do
-  let s = Set.singleton(42)
-  assert_false(Set.is_empty(s), "singleton should not be empty")
-  assert_eq_int(Set.size(s), 1, "singleton size should be 1")
-  assert_true(Set.contains(s, 42, int_cmp), "singleton should contain 42")
+  test "singleton does not contain other elements" do
+    assert !Set.contains(Set.singleton(42), 1, int_cmp)
+  end
 end
 
-fn test_singleton_not_contains_other() : Unit do
-  let s = Set.singleton(42)
-  assert_false(Set.contains(s, 1, int_cmp), "singleton(42) should not contain 1")
+describe "insert" do
+  test "insert adds new element" do
+    let s = Set.insert(Set.empty(), 1, int_cmp)
+    assert Set.contains(s, 1, int_cmp)
+    assert (Set.size(s) == 1)
+  end
+
+  test "insert of duplicate does not increase size" do
+    let s = Set.insert(Set.insert(Set.empty(), 5, int_cmp), 5, int_cmp)
+    assert (Set.size(s) == 1)
+  end
+
+  test "insert multiple elements" do
+    let s = set_of(Cons(1, Cons(2, Cons(3, Nil))))
+    assert (Set.size(s) == 3)
+    assert Set.contains(s, 1, int_cmp)
+    assert Set.contains(s, 2, int_cmp)
+    assert Set.contains(s, 3, int_cmp)
+  end
+
+  test "insert is persistent" do
+    let s0 = Set.empty()
+    let s1 = Set.insert(s0, 1, int_cmp)
+    let s2 = Set.insert(s1, 2, int_cmp)
+    assert (Set.size(s1) == 1)
+    assert !Set.contains(s1, 2, int_cmp)
+  end
 end
 
--- ---- Set.insert ----
+describe "contains" do
+  test "empty set contains nothing" do
+    assert !Set.contains(Set.empty(), 99, int_cmp)
+  end
 
-fn test_insert_new() : Unit do
-  let s = Set.insert(Set.empty(), 1, int_cmp)
-  assert_true(Set.contains(s, 1, int_cmp), "insert then contains should be true")
-  assert_eq_int(Set.size(s), 1, "size after inserting 1 element should be 1")
+  test "contains works for large sets" do
+    let s = set_of(List.range(1, 21))
+    assert Set.contains(s, 10, int_cmp)
+    assert Set.contains(s, 1, int_cmp)
+    assert Set.contains(s, 20, int_cmp)
+    assert !Set.contains(s, 21, int_cmp)
+    assert !Set.contains(s, 0, int_cmp)
+  end
 end
 
-fn test_insert_duplicate() : Unit do
-  let s = Set.insert(Set.insert(Set.empty(), 5, int_cmp), 5, int_cmp)
-  assert_eq_int(Set.size(s), 1, "inserting duplicate should not increase size")
+describe "remove" do
+  test "remove eliminates the element" do
+    let s = set_of(Cons(1, Cons(2, Cons(3, Nil))))
+    let s2 = Set.remove(s, 2, int_cmp)
+    assert !Set.contains(s2, 2, int_cmp)
+    assert Set.contains(s2, 1, int_cmp)
+    assert Set.contains(s2, 3, int_cmp)
+    assert (Set.size(s2) == 2)
+  end
+
+  test "remove of absent element leaves set unchanged" do
+    let s2 = Set.remove(Set.singleton(5), 99, int_cmp)
+    assert (Set.size(s2) == 1)
+  end
+
+  test "remove of only element gives empty set" do
+    assert Set.is_empty(Set.remove(Set.singleton(7), 7, int_cmp))
+  end
 end
 
-fn test_insert_multiple() : Unit do
-  let s = set_of(Cons(1, Cons(2, Cons(3, Nil))))
-  assert_eq_int(Set.size(s), 3, "size of {1,2,3} should be 3")
-  assert_true(Set.contains(s, 1, int_cmp), "should contain 1")
-  assert_true(Set.contains(s, 2, int_cmp), "should contain 2")
-  assert_true(Set.contains(s, 3, int_cmp), "should contain 3")
+describe "size" do
+  test "size of empty set is zero" do
+    assert (Set.size(Set.empty()) == 0)
+  end
+
+  test "size of 10-element set is ten" do
+    assert (Set.size(set_of(List.range(1, 11))) == 10)
+  end
 end
 
-fn test_insert_persistent() : Unit do
-  let s0 = Set.empty()
-  let s1 = Set.insert(s0, 1, int_cmp)
-  let s2 = Set.insert(s1, 2, int_cmp)
-  assert_eq_int(Set.size(s1), 1, "s1 should have size 1 after s2 created")
-  assert_false(Set.contains(s1, 2, int_cmp), "s1 should not contain 2")
+describe "union" do
+  test "union of disjoint sets has all elements" do
+    let a = set_of(Cons(1, Cons(2, Nil)))
+    let b = set_of(Cons(3, Cons(4, Nil)))
+    let c = Set.union(a, b, int_cmp)
+    assert (Set.size(c) == 4)
+    assert Set.contains(c, 1, int_cmp)
+    assert Set.contains(c, 4, int_cmp)
+  end
+
+  test "union with overlap deduplicates" do
+    let a = set_of(Cons(1, Cons(2, Cons(3, Nil))))
+    let b = set_of(Cons(2, Cons(3, Cons(4, Nil))))
+    assert (Set.size(Set.union(a, b, int_cmp)) == 4)
+  end
+
+  test "union with empty preserves original" do
+    let a = set_of(Cons(1, Cons(2, Nil)))
+    assert (Set.size(Set.union(a, Set.empty(), int_cmp)) == 2)
+  end
 end
 
--- ---- Set.contains ----
+describe "intersection" do
+  test "intersection keeps only shared elements" do
+    let a = set_of(Cons(1, Cons(2, Cons(3, Nil))))
+    let b = set_of(Cons(2, Cons(3, Cons(4, Nil))))
+    let c = Set.intersection(a, b, int_cmp)
+    assert (Set.size(c) == 2)
+    assert Set.contains(c, 2, int_cmp)
+    assert Set.contains(c, 3, int_cmp)
+    assert !Set.contains(c, 1, int_cmp)
+    assert !Set.contains(c, 4, int_cmp)
+  end
 
-fn test_contains_empty() : Unit do
-  let s = Set.empty()
-  assert_false(Set.contains(s, 99, int_cmp), "empty set should not contain anything")
+  test "intersection of disjoint sets is empty" do
+    let a = set_of(Cons(1, Cons(2, Nil)))
+    let b = set_of(Cons(3, Cons(4, Nil)))
+    assert Set.is_empty(Set.intersection(a, b, int_cmp))
+  end
+
+  test "intersection with empty is empty" do
+    let a = set_of(Cons(1, Cons(2, Nil)))
+    assert Set.is_empty(Set.intersection(a, Set.empty(), int_cmp))
+  end
 end
 
-fn test_contains_many() : Unit do
-  let s = set_of(List.range(1, 21))
-  assert_true(Set.contains(s, 10, int_cmp), "should contain 10 in range [1,20]")
-  assert_true(Set.contains(s, 1, int_cmp), "should contain 1 in range [1,20]")
-  assert_true(Set.contains(s, 20, int_cmp), "should contain 20 in range [1,20]")
-  assert_false(Set.contains(s, 21, int_cmp), "should not contain 21 in range [1,20]")
-  assert_false(Set.contains(s, 0, int_cmp), "should not contain 0 in range [1,20]")
+describe "difference" do
+  test "difference removes elements in b from a" do
+    let a = set_of(Cons(1, Cons(2, Cons(3, Cons(4, Nil)))))
+    let b = set_of(Cons(2, Cons(4, Nil)))
+    let c = Set.difference(a, b, int_cmp)
+    assert (Set.size(c) == 2)
+    assert Set.contains(c, 1, int_cmp)
+    assert Set.contains(c, 3, int_cmp)
+    assert !Set.contains(c, 2, int_cmp)
+    assert !Set.contains(c, 4, int_cmp)
+  end
+
+  test "difference with empty b gives whole a" do
+    let a = set_of(Cons(1, Cons(2, Nil)))
+    assert (Set.size(Set.difference(a, Set.empty(), int_cmp)) == 2)
+  end
+
+  test "difference with self gives empty" do
+    let a = set_of(Cons(1, Cons(2, Nil)))
+    assert Set.is_empty(Set.difference(a, a, int_cmp))
+  end
 end
 
--- ---- Set.remove ----
+describe "is_subset" do
+  test "subset relation holds when all elements present" do
+    let a = set_of(Cons(1, Cons(2, Nil)))
+    let b = set_of(Cons(1, Cons(2, Cons(3, Nil))))
+    assert Set.is_subset(a, b, int_cmp)
+  end
 
-fn test_remove_present() : Unit do
-  let s = set_of(Cons(1, Cons(2, Cons(3, Nil))))
-  let s2 = Set.remove(s, 2, int_cmp)
-  assert_false(Set.contains(s2, 2, int_cmp), "after remove, 2 should be absent")
-  assert_true(Set.contains(s2, 1, int_cmp), "after remove 2, 1 should still be present")
-  assert_true(Set.contains(s2, 3, int_cmp), "after remove 2, 3 should still be present")
-  assert_eq_int(Set.size(s2), 2, "size after remove should be 2")
+  test "superset is not a subset" do
+    let a = set_of(Cons(1, Cons(2, Cons(3, Nil))))
+    let b = set_of(Cons(1, Cons(2, Nil)))
+    assert !Set.is_subset(a, b, int_cmp)
+  end
+
+  test "set is subset of itself" do
+    let a = set_of(Cons(1, Cons(2, Nil)))
+    assert Set.is_subset(a, a, int_cmp)
+  end
+
+  test "empty set is subset of any set" do
+    let a = set_of(Cons(1, Cons(2, Nil)))
+    assert Set.is_subset(Set.empty(), a, int_cmp)
+  end
 end
 
-fn test_remove_absent() : Unit do
-  let s = Set.singleton(5)
-  let s2 = Set.remove(s, 99, int_cmp)
-  assert_eq_int(Set.size(s2), 1, "remove absent element should not change size")
+describe "to_list and from_list" do
+  test "to_list returns all elements" do
+    let s = set_of(Cons(1, Cons(2, Cons(3, Nil))))
+    assert (length(Set.to_list(s)) == 3)
+  end
+
+  test "from_list deduplicates" do
+    let lst = Cons(1, Cons(2, Cons(1, Cons(3, Nil))))
+    let s = Set.from_list(lst, int_cmp)
+    assert (Set.size(s) == 3)
+  end
+
+  test "from_list of empty gives empty set" do
+    let empty : List(Int) = Nil
+    assert Set.is_empty(Set.from_list(empty, int_cmp))
+  end
 end
 
-fn test_remove_only() : Unit do
-  let s = Set.singleton(7)
-  let s2 = Set.remove(s, 7, int_cmp)
-  assert_true(Set.is_empty(s2), "after removing only element, set should be empty")
+describe "fold" do
+  test "fold sums all elements" do
+    let s = set_of(Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil))))))
+    let sum = Set.fold(0, s, fn (acc, x) -> acc + x)
+    assert (sum == 15)
+  end
+
+  test "fold counts elements" do
+    let s = set_of(Cons(10, Cons(20, Cons(30, Nil))))
+    let c = Set.fold(0, s, fn (acc, _x) -> acc + 1)
+    assert (c == 3)
+  end
 end
 
--- ---- Set.size ----
+describe "eq" do
+  test "sets with same elements are equal" do
+    let a = set_of(Cons(1, Cons(2, Cons(3, Nil))))
+    let b = set_of(Cons(3, Cons(1, Cons(2, Nil))))
+    assert Set.eq(a, b, int_cmp)
+  end
 
-fn test_size_zero() : Unit do
-  assert_eq_int(Set.size(Set.empty()), 0, "size of empty should be 0")
+  test "sets with different elements are not equal" do
+    let a = set_of(Cons(1, Cons(2, Nil)))
+    let b = set_of(Cons(1, Cons(3, Nil)))
+    assert !Set.eq(a, b, int_cmp)
+  end
+
+  test "sets of different sizes are not equal" do
+    let a = set_of(Cons(1, Cons(2, Nil)))
+    let b = set_of(Cons(1, Cons(2, Cons(3, Nil))))
+    assert !Set.eq(a, b, int_cmp)
+  end
+
+  test "two empty sets are equal" do
+    assert Set.eq(Set.empty(), Set.empty(), int_cmp)
+  end
 end
 
-fn test_size_many() : Unit do
-  let s = set_of(List.range(1, 11))
-  assert_eq_int(Set.size(s), 10, "size of {1..10} should be 10")
-end
-
--- ---- Set.union ----
-
-fn test_union_disjoint() : Unit do
-  let a = set_of(Cons(1, Cons(2, Nil)))
-  let b = set_of(Cons(3, Cons(4, Nil)))
-  let c = Set.union(a, b, int_cmp)
-  assert_eq_int(Set.size(c), 4, "union of disjoint sets should have size 4")
-  assert_true(Set.contains(c, 1, int_cmp), "union should contain 1")
-  assert_true(Set.contains(c, 4, int_cmp), "union should contain 4")
-end
-
-fn test_union_overlap() : Unit do
-  let a = set_of(Cons(1, Cons(2, Cons(3, Nil))))
-  let b = set_of(Cons(2, Cons(3, Cons(4, Nil))))
-  let c = Set.union(a, b, int_cmp)
-  assert_eq_int(Set.size(c), 4, "union with overlap should have size 4")
-end
-
-fn test_union_with_empty() : Unit do
-  let a = set_of(Cons(1, Cons(2, Nil)))
-  let c = Set.union(a, Set.empty(), int_cmp)
-  assert_eq_int(Set.size(c), 2, "union with empty should keep original size")
-end
-
--- ---- Set.intersection ----
-
-fn test_intersection() : Unit do
-  let a = set_of(Cons(1, Cons(2, Cons(3, Nil))))
-  let b = set_of(Cons(2, Cons(3, Cons(4, Nil))))
-  let c = Set.intersection(a, b, int_cmp)
-  assert_eq_int(Set.size(c), 2, "intersection size should be 2")
-  assert_true(Set.contains(c, 2, int_cmp), "intersection should contain 2")
-  assert_true(Set.contains(c, 3, int_cmp), "intersection should contain 3")
-  assert_false(Set.contains(c, 1, int_cmp), "intersection should not contain 1")
-  assert_false(Set.contains(c, 4, int_cmp), "intersection should not contain 4")
-end
-
-fn test_intersection_empty() : Unit do
-  let a = set_of(Cons(1, Cons(2, Nil)))
-  let b = set_of(Cons(3, Cons(4, Nil)))
-  let c = Set.intersection(a, b, int_cmp)
-  assert_true(Set.is_empty(c), "intersection of disjoint sets should be empty")
-end
-
-fn test_intersection_with_empty() : Unit do
-  let a = set_of(Cons(1, Cons(2, Nil)))
-  let c = Set.intersection(a, Set.empty(), int_cmp)
-  assert_true(Set.is_empty(c), "intersection with empty should be empty")
-end
-
--- ---- Set.difference ----
-
-fn test_difference() : Unit do
-  let a = set_of(Cons(1, Cons(2, Cons(3, Cons(4, Nil)))))
-  let b = set_of(Cons(2, Cons(4, Nil)))
-  let c = Set.difference(a, b, int_cmp)
-  assert_eq_int(Set.size(c), 2, "difference size should be 2")
-  assert_true(Set.contains(c, 1, int_cmp), "difference should contain 1")
-  assert_true(Set.contains(c, 3, int_cmp), "difference should contain 3")
-  assert_false(Set.contains(c, 2, int_cmp), "difference should not contain 2")
-  assert_false(Set.contains(c, 4, int_cmp), "difference should not contain 4")
-end
-
-fn test_difference_empty_b() : Unit do
-  let a = set_of(Cons(1, Cons(2, Nil)))
-  let c = Set.difference(a, Set.empty(), int_cmp)
-  assert_eq_int(Set.size(c), 2, "difference with empty b should give whole a")
-end
-
-fn test_difference_all() : Unit do
-  let a = set_of(Cons(1, Cons(2, Nil)))
-  let c = Set.difference(a, a, int_cmp)
-  assert_true(Set.is_empty(c), "difference with self should be empty")
-end
-
--- ---- Set.is_subset ----
-
-fn test_is_subset_true() : Unit do
-  let a = set_of(Cons(1, Cons(2, Nil)))
-  let b = set_of(Cons(1, Cons(2, Cons(3, Nil))))
-  assert_true(Set.is_subset(a, b, int_cmp), "{1,2} should be subset of {1,2,3}")
-end
-
-fn test_is_subset_false() : Unit do
-  let a = set_of(Cons(1, Cons(2, Cons(3, Nil))))
-  let b = set_of(Cons(1, Cons(2, Nil)))
-  assert_false(Set.is_subset(a, b, int_cmp), "{1,2,3} should not be subset of {1,2}")
-end
-
-fn test_is_subset_equal() : Unit do
-  let a = set_of(Cons(1, Cons(2, Nil)))
-  assert_true(Set.is_subset(a, a, int_cmp), "set should be subset of itself")
-end
-
-fn test_is_subset_empty() : Unit do
-  let a = set_of(Cons(1, Cons(2, Nil)))
-  assert_true(Set.is_subset(Set.empty(), a, int_cmp), "empty set is subset of any set")
-end
-
--- ---- Set.to_list / from_list ----
-
-fn test_to_list() : Unit do
-  let s = set_of(Cons(1, Cons(2, Cons(3, Nil))))
-  let lst = Set.to_list(s)
-  assert_eq_int(length(lst), 3, "to_list length should be 3")
-end
-
-fn test_from_list_dedup() : Unit do
-  -- from_list with duplicates should deduplicate
-  let lst = Cons(1, Cons(2, Cons(1, Cons(3, Nil))))
-  let s = Set.from_list(lst, int_cmp)
-  assert_eq_int(Set.size(s), 3, "from_list with duplicates should deduplicate")
-end
-
-fn test_from_list_empty() : Unit do
-  let empty : List(Int) = Nil
-  let s = Set.from_list(empty, int_cmp)
-  assert_true(Set.is_empty(s), "from_list([]) should be empty")
-end
-
--- ---- Set.fold ----
-
-fn test_fold_sum() : Unit do
-  let s = set_of(Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil))))))
-  let sum = Set.fold(0, s, fn (acc, x) -> acc + x)
-  assert_eq_int(sum, 15, "fold sum {1..5} should be 15")
-end
-
-fn test_fold_count() : Unit do
-  let s = set_of(Cons(10, Cons(20, Cons(30, Nil))))
-  let c = Set.fold(0, s, fn (acc, _x) -> acc + 1)
-  assert_eq_int(c, 3, "fold count should be 3")
-end
-
--- ---- Set.eq ----
-
-fn test_eq_equal() : Unit do
-  let a = set_of(Cons(1, Cons(2, Cons(3, Nil))))
-  let b = set_of(Cons(3, Cons(1, Cons(2, Nil))))
-  assert_true(Set.eq(a, b, int_cmp), "sets with same elements should be equal")
-end
-
-fn test_eq_different() : Unit do
-  let a = set_of(Cons(1, Cons(2, Nil)))
-  let b = set_of(Cons(1, Cons(3, Nil)))
-  assert_false(Set.eq(a, b, int_cmp), "sets with different elements should not be equal")
-end
-
-fn test_eq_different_sizes() : Unit do
-  let a = set_of(Cons(1, Cons(2, Nil)))
-  let b = set_of(Cons(1, Cons(2, Cons(3, Nil))))
-  assert_false(Set.eq(a, b, int_cmp), "sets of different sizes should not be equal")
-end
-
-fn test_eq_empty() : Unit do
-  assert_true(Set.eq(Set.empty(), Set.empty(), int_cmp), "two empty sets should be equal")
-end
-
--- ---- String sets ----
-
-fn test_string_set() : Unit do
-  let s = Set.from_list(Cons("apple", Cons("banana", Cons("cherry", Nil))), str_cmp)
-  assert_eq_int(Set.size(s), 3, "string set size should be 3")
-  assert_true(Set.contains(s, "banana", str_cmp), "should contain banana")
-  assert_false(Set.contains(s, "mango", str_cmp), "should not contain mango")
-end
-
-fn main() : Unit do
-  test_empty()
-  test_singleton()
-  test_singleton_not_contains_other()
-  test_insert_new()
-  test_insert_duplicate()
-  test_insert_multiple()
-  test_insert_persistent()
-  test_contains_empty()
-  test_contains_many()
-  test_remove_present()
-  test_remove_absent()
-  test_remove_only()
-  test_size_zero()
-  test_size_many()
-  test_union_disjoint()
-  test_union_overlap()
-  test_union_with_empty()
-  test_intersection()
-  test_intersection_empty()
-  test_intersection_with_empty()
-  test_difference()
-  test_difference_empty_b()
-  test_difference_all()
-  test_is_subset_true()
-  test_is_subset_false()
-  test_is_subset_equal()
-  test_is_subset_empty()
-  test_to_list()
-  test_from_list_dedup()
-  test_from_list_empty()
-  test_fold_sum()
-  test_fold_count()
-  test_eq_equal()
-  test_eq_different()
-  test_eq_different_sizes()
-  test_eq_empty()
-  test_string_set()
-  println("All Set tests passed!")
+describe "string sets" do
+  test "set works with string elements" do
+    let s = Set.from_list(Cons("apple", Cons("banana", Cons("cherry", Nil))), str_cmp)
+    assert (Set.size(s) == 3)
+    assert Set.contains(s, "banana", str_cmp)
+    assert !Set.contains(s, "mango", str_cmp)
+  end
 end
 
 end

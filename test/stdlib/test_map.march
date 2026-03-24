@@ -1,342 +1,283 @@
 -- Tests for the Map stdlib module (HAMT-based persistent map)
--- Run with: dune exec march -- test/stdlib/test_map.march
+-- Run with: dune exec march -- test test/stdlib/test_map.march
 
 mod TestMap do
 
-fn assert_true(cond : Bool, msg : String) : Unit do
-  if cond then () else panic("FAIL: " ++ msg)
-end
-
-fn assert_false(cond : Bool, msg : String) : Unit do
-  if cond then panic("FAIL: " ++ msg) else ()
-end
-
-fn assert_eq_int(a : Int, b : Int, msg : String) : Unit do
-  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ int_to_string(b) ++ ", got " ++ int_to_string(a) ++ ")")
-end
-
-fn assert_eq_str(a : String, b : String, msg : String) : Unit do
-  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ b ++ ", got " ++ a ++ ")")
-end
-
--- Standard int comparator
 fn int_cmp(a : Int) : Int -> Bool do
   fn b -> a < b
 end
 
--- Standard string comparator
 fn str_cmp(a : String) : String -> Bool do
   fn b -> a < b
 end
 
--- ---- Map.empty / is_empty ----
-
-fn test_empty() : Unit do
-  let m = Map.empty()
-  assert_true(Map.is_empty(m), "empty() should be empty")
-  assert_eq_int(Map.size(m), 0, "empty() size should be 0")
-end
-
--- ---- Map.singleton ----
-
-fn test_singleton() : Unit do
-  let m = Map.singleton(1, "one")
-  assert_false(Map.is_empty(m), "singleton should not be empty")
-  assert_eq_int(Map.size(m), 1, "singleton size should be 1")
-  assert_true(Map.contains_key(m, 1, int_cmp), "singleton should contain key 1")
-end
-
--- ---- Map.insert / get ----
-
-fn test_insert_get() : Unit do
-  let m = Map.empty()
-  let m1 = Map.insert(m, 1, "one", int_cmp)
-  let m2 = Map.insert(m1, 2, "two", int_cmp)
-  let m3 = Map.insert(m2, 3, "three", int_cmp)
-  match Map.get(m3, 1, int_cmp) do
-  | Some(v) -> assert_eq_str(v, "one", "get(1) should be \"one\"")
-  | None -> panic("FAIL: get(1) should not be None")
-  end
-  match Map.get(m3, 2, int_cmp) do
-  | Some(v) -> assert_eq_str(v, "two", "get(2) should be \"two\"")
-  | None -> panic("FAIL: get(2) should not be None")
-  end
-  match Map.get(m3, 3, int_cmp) do
-  | Some(v) -> assert_eq_str(v, "three", "get(3) should be \"three\"")
-  | None -> panic("FAIL: get(3) should not be None")
+describe "empty and is_empty" do
+  test "empty map is empty" do
+    let m = Map.empty()
+    assert Map.is_empty(m)
+    assert (Map.size(m) == 0)
   end
 end
 
-fn test_get_absent() : Unit do
-  let m = Map.singleton(1, "one")
-  assert_true(Option.is_none(Map.get(m, 99, int_cmp)), "get absent key should be None")
-end
-
-fn test_insert_overwrites() : Unit do
-  let m = Map.insert(Map.empty(), 1, "old", int_cmp)
-  let m2 = Map.insert(m, 1, "new", int_cmp)
-  assert_eq_int(Map.size(m2), 1, "size after overwrite should still be 1")
-  match Map.get(m2, 1, int_cmp) do
-  | Some(v) -> assert_eq_str(v, "new", "overwritten value should be \"new\"")
-  | None -> panic("FAIL: key should still exist after overwrite")
+describe "singleton" do
+  test "singleton is not empty and has size 1" do
+    let m = Map.singleton(1, "one")
+    assert !Map.is_empty(m)
+    assert (Map.size(m) == 1)
+    assert Map.contains_key(m, 1, int_cmp)
   end
 end
 
-fn test_persistent_insert() : Unit do
-  let m0 = Map.empty()
-  let m1 = Map.insert(m0, 10, "ten", int_cmp)
-  let m2 = Map.insert(m1, 20, "twenty", int_cmp)
-  -- m1 should be unchanged
-  assert_eq_int(Map.size(m1), 1, "m1 should still have size 1 after m2 created")
-  assert_true(Option.is_none(Map.get(m1, 20, int_cmp)), "m1 should not see key 20")
-end
-
--- ---- Map.get_or ----
-
-fn test_get_or_present() : Unit do
-  let m = Map.singleton(5, "five")
-  assert_eq_str(Map.get_or(m, 5, "default", int_cmp), "five", "get_or present should return value")
-end
-
-fn test_get_or_absent() : Unit do
-  let m = Map.empty()
-  assert_eq_str(Map.get_or(m, 99, "default", int_cmp), "default", "get_or absent should return default")
-end
-
--- ---- Map.contains_key ----
-
-fn test_contains_key_present() : Unit do
-  let m = Map.singleton(42, "answer")
-  assert_true(Map.contains_key(m, 42, int_cmp), "contains_key should be true for present key")
-end
-
-fn test_contains_key_absent() : Unit do
-  let m = Map.singleton(42, "answer")
-  assert_false(Map.contains_key(m, 0, int_cmp), "contains_key should be false for absent key")
-end
-
-fn test_contains_key_empty() : Unit do
-  let m = Map.empty()
-  assert_false(Map.contains_key(m, 1, int_cmp), "contains_key on empty should be false")
-end
-
--- ---- Map.remove ----
-
-fn test_remove_present() : Unit do
-  let m = Map.insert(Map.insert(Map.empty(), 1, "a", int_cmp), 2, "b", int_cmp)
-  let m2 = Map.remove(m, 1, int_cmp)
-  assert_false(Map.contains_key(m2, 1, int_cmp), "after remove, key should be absent")
-  assert_true(Map.contains_key(m2, 2, int_cmp), "after remove key 1, key 2 should remain")
-  assert_eq_int(Map.size(m2), 1, "size after remove should be 1")
-end
-
-fn test_remove_absent() : Unit do
-  let m = Map.singleton(1, "one")
-  let m2 = Map.remove(m, 99, int_cmp)
-  assert_eq_int(Map.size(m2), 1, "remove absent key should not change size")
-end
-
-fn test_remove_only_key() : Unit do
-  let m = Map.singleton(1, "one")
-  let m2 = Map.remove(m, 1, int_cmp)
-  assert_true(Map.is_empty(m2), "after removing only key, map should be empty")
-end
-
--- ---- Map.size ----
-
-fn test_size_many() : Unit do
-  fn insert_n(n : Int) do
-    fn go(i : Int, m) do
-      if i > n then m else go(i + 1, Map.insert(m, i, i * 10, int_cmp))
+describe "insert and get" do
+  test "inserted keys can be retrieved" do
+    let m = Map.empty()
+    let m1 = Map.insert(m, 1, "one", int_cmp)
+    let m2 = Map.insert(m1, 2, "two", int_cmp)
+    let m3 = Map.insert(m2, 3, "three", int_cmp)
+    match Map.get(m3, 1, int_cmp) do
+    | Some(v) -> assert (v == "one")
+    | None -> assert false
     end
-    go(1, Map.empty())
+    match Map.get(m3, 2, int_cmp) do
+    | Some(v) -> assert (v == "two")
+    | None -> assert false
+    end
+    match Map.get(m3, 3, int_cmp) do
+    | Some(v) -> assert (v == "three")
+    | None -> assert false
+    end
   end
-  let m = insert_n(10)
-  assert_eq_int(Map.size(m), 10, "size of 10-entry map should be 10")
-end
 
--- ---- Map.fold ----
+  test "get returns None for absent key" do
+    let m = Map.singleton(1, "one")
+    assert Option.is_none(Map.get(m, 99, int_cmp))
+  end
 
-fn test_fold_sum_values() : Unit do
-  let m = Map.insert(Map.insert(Map.insert(Map.empty(), 1, 10, int_cmp), 2, 20, int_cmp), 3, 30, int_cmp)
-  let s = Map.fold(0, m, fn acc -> fn _k -> fn v -> acc + v)
-  assert_eq_int(s, 60, "fold sum values should be 60")
-end
+  test "insert overwrites existing key" do
+    let m = Map.insert(Map.empty(), 1, "old", int_cmp)
+    let m2 = Map.insert(m, 1, "new", int_cmp)
+    assert (Map.size(m2) == 1)
+    match Map.get(m2, 1, int_cmp) do
+    | Some(v) -> assert (v == "new")
+    | None -> assert false
+    end
+  end
 
-fn test_fold_count_keys() : Unit do
-  let m = Map.insert(Map.insert(Map.empty(), 1, "a", int_cmp), 2, "b", int_cmp)
-  let c = Map.fold(0, m, fn acc -> fn _k -> fn _v -> acc + 1)
-  assert_eq_int(c, 2, "fold count keys should be 2")
-end
-
--- ---- Map.keys / values / entries ----
-
-fn test_keys() : Unit do
-  let m = Map.insert(Map.insert(Map.empty(), 1, "a", int_cmp), 2, "b", int_cmp)
-  let ks = Map.keys(m)
-  assert_eq_int(length(ks), 2, "keys length should be 2")
-end
-
-fn test_values() : Unit do
-  let m = Map.singleton(1, "hello")
-  let vs = Map.values(m)
-  assert_eq_int(length(vs), 1, "values length should be 1")
-  assert_eq_str(head(vs), "hello", "values head should be \"hello\"")
-end
-
-fn test_entries() : Unit do
-  let m = Map.singleton(42, 99)
-  let es = Map.entries(m)
-  assert_eq_int(length(es), 1, "entries length should be 1")
-  match head(es) do
-  | (k, v) ->
-    assert_eq_int(k, 42, "entry key should be 42")
-    assert_eq_int(v, 99, "entry value should be 99")
+  test "insert is persistent" do
+    let m0 = Map.empty()
+    let m1 = Map.insert(m0, 10, "ten", int_cmp)
+    let m2 = Map.insert(m1, 20, "twenty", int_cmp)
+    assert (Map.size(m1) == 1)
+    assert Option.is_none(Map.get(m1, 20, int_cmp))
   end
 end
 
--- ---- Map.from_list / to_list ----
+describe "get_or" do
+  test "get_or returns value when key present" do
+    let m = Map.singleton(5, "five")
+    assert (Map.get_or(m, 5, "default", int_cmp) == "five")
+  end
 
-fn test_from_list() : Unit do
-  let pairs = Cons((1, "one"), Cons((2, "two"), Cons((3, "three"), Nil)))
-  let m = Map.from_list(pairs, int_cmp)
-  assert_eq_int(Map.size(m), 3, "from_list size should be 3")
-  assert_true(Map.contains_key(m, 1, int_cmp), "from_list should contain key 1")
-  assert_true(Map.contains_key(m, 3, int_cmp), "from_list should contain key 3")
-end
-
-fn test_from_list_duplicate_keys() : Unit do
-  let pairs = Cons((1, "first"), Cons((1, "second"), Nil))
-  let m = Map.from_list(pairs, int_cmp)
-  -- Later entry wins
-  assert_eq_int(Map.size(m), 1, "from_list with duplicate key should have size 1")
-  match Map.get(m, 1, int_cmp) do
-  | Some(v) -> assert_eq_str(v, "second", "duplicate key should use later value")
-  | None -> panic("FAIL: key should exist")
+  test "get_or returns default when key absent" do
+    let m = Map.empty()
+    assert (Map.get_or(m, 99, "default", int_cmp) == "default")
   end
 end
 
-fn test_to_list() : Unit do
-  let m = Map.singleton(7, "seven")
-  let lst = Map.to_list(m)
-  assert_eq_int(length(lst), 1, "to_list of singleton should have 1 pair")
-end
-
--- ---- Map.map_values ----
-
-fn test_map_values() : Unit do
-  let m = Map.insert(Map.insert(Map.empty(), 1, 10, int_cmp), 2, 20, int_cmp)
-  let doubled = Map.map_values(m, fn x -> x * 2)
-  assert_eq_int(Map.size(doubled), 2, "map_values size should be 2")
-  match Map.get(doubled, 1, int_cmp) do
-  | Some(v) -> assert_eq_int(v, 20, "map_values key 1 should be 20")
-  | None -> panic("FAIL: key 1 should exist")
+describe "contains_key" do
+  test "contains_key returns true for present key" do
+    let m = Map.singleton(42, "answer")
+    assert Map.contains_key(m, 42, int_cmp)
   end
-  match Map.get(doubled, 2, int_cmp) do
-  | Some(v) -> assert_eq_int(v, 40, "map_values key 2 should be 40")
-  | None -> panic("FAIL: key 2 should exist")
+
+  test "contains_key returns false for absent key" do
+    let m = Map.singleton(42, "answer")
+    assert !Map.contains_key(m, 0, int_cmp)
+  end
+
+  test "contains_key on empty map returns false" do
+    assert !Map.contains_key(Map.empty(), 1, int_cmp)
   end
 end
 
--- ---- Map.filter ----
+describe "remove" do
+  test "remove eliminates the key" do
+    let m = Map.insert(Map.insert(Map.empty(), 1, "a", int_cmp), 2, "b", int_cmp)
+    let m2 = Map.remove(m, 1, int_cmp)
+    assert !Map.contains_key(m2, 1, int_cmp)
+    assert Map.contains_key(m2, 2, int_cmp)
+    assert (Map.size(m2) == 1)
+  end
 
-fn test_filter() : Unit do
-  let m = Map.insert(Map.insert(Map.insert(Map.empty(), 1, 10, int_cmp), 2, 20, int_cmp), 3, 30, int_cmp)
-  let big = Map.filter(m, fn _k -> fn v -> v > 15, int_cmp)
-  assert_eq_int(Map.size(big), 2, "filter v>15 should keep 2 entries")
-  assert_false(Map.contains_key(big, 1, int_cmp), "filter should remove key 1 (v=10 <= 15)")
-end
+  test "remove of absent key leaves map unchanged" do
+    let m = Map.singleton(1, "one")
+    let m2 = Map.remove(m, 99, int_cmp)
+    assert (Map.size(m2) == 1)
+  end
 
--- ---- Map.merge ----
-
-fn test_merge() : Unit do
-  let a = Map.singleton(1, "a1")
-  let b = Map.singleton(2, "b2")
-  let c = Map.merge(a, b, int_cmp)
-  assert_eq_int(Map.size(c), 2, "merge of disjoint maps should have size 2")
-  assert_true(Map.contains_key(c, 1, int_cmp), "merged map should contain key 1")
-  assert_true(Map.contains_key(c, 2, int_cmp), "merged map should contain key 2")
-end
-
-fn test_merge_overlap_b_wins() : Unit do
-  let a = Map.singleton(1, "from_a")
-  let b = Map.singleton(1, "from_b")
-  let c = Map.merge(a, b, int_cmp)
-  assert_eq_int(Map.size(c), 1, "merge with overlapping key should have size 1")
-  match Map.get(c, 1, int_cmp) do
-  | Some(v) -> assert_eq_str(v, "from_b", "b value should win on overlap")
-  | None -> panic("FAIL: key should exist after merge")
+  test "remove of only key gives empty map" do
+    let m = Map.singleton(1, "one")
+    let m2 = Map.remove(m, 1, int_cmp)
+    assert Map.is_empty(m2)
   end
 end
 
--- ---- Map.merge_with ----
-
-fn test_merge_with() : Unit do
-  let a = Map.singleton(1, 10)
-  let b = Map.singleton(1, 5)
-  let c = Map.merge_with(a, b, fn va -> fn vb -> va + vb, int_cmp)
-  assert_eq_int(Map.size(c), 1, "merge_with overlapping key should have size 1")
-  match Map.get(c, 1, int_cmp) do
-  | Some(v) -> assert_eq_int(v, 15, "merge_with combiner should sum values")
-  | None -> panic("FAIL: key should exist")
+describe "size" do
+  test "size of 10-entry map is 10" do
+    fn insert_n(n) do
+      fn go(i, m) do
+        if i > n then m else go(i + 1, Map.insert(m, i, i * 10, int_cmp))
+      end
+      go(1, Map.empty())
+    end
+    let m = insert_n(10)
+    assert (Map.size(m) == 10)
   end
 end
 
-fn test_merge_with_disjoint() : Unit do
-  let a = Map.singleton(1, 10)
-  let b = Map.singleton(2, 20)
-  let c = Map.merge_with(a, b, fn va -> fn vb -> va + vb, int_cmp)
-  assert_eq_int(Map.size(c), 2, "merge_with disjoint should have size 2")
+describe "fold" do
+  test "fold sums all values" do
+    let m = Map.insert(Map.insert(Map.insert(Map.empty(), 1, 10, int_cmp), 2, 20, int_cmp), 3, 30, int_cmp)
+    let s = Map.fold(0, m, fn acc -> fn _k -> fn v -> acc + v)
+    assert (s == 60)
+  end
+
+  test "fold counts keys" do
+    let m = Map.insert(Map.insert(Map.empty(), 1, "a", int_cmp), 2, "b", int_cmp)
+    let c = Map.fold(0, m, fn acc -> fn _k -> fn _v -> acc + 1)
+    assert (c == 2)
+  end
 end
 
--- ---- String keys ----
+describe "keys, values, entries" do
+  test "keys returns all keys" do
+    let m = Map.insert(Map.insert(Map.empty(), 1, "a", int_cmp), 2, "b", int_cmp)
+    assert (length(Map.keys(m)) == 2)
+  end
 
-fn test_string_keys() : Unit do
-  let m = Map.insert(Map.insert(Map.empty(), "hello", 1, str_cmp), "world", 2, str_cmp)
-  assert_eq_int(Map.size(m), 2, "string-key map size should be 2")
-  match Map.get(m, "hello", str_cmp) do
-  | Some(v) -> assert_eq_int(v, 1, "get(\"hello\") should be 1")
-  | None -> panic("FAIL: \"hello\" should be present")
+  test "values returns all values" do
+    let m = Map.singleton(1, "hello")
+    let vs = Map.values(m)
+    assert (length(vs) == 1)
+    assert (head(vs) == "hello")
   end
-  match Map.get(m, "world", str_cmp) do
-  | Some(v) -> assert_eq_int(v, 2, "get(\"world\") should be 2")
-  | None -> panic("FAIL: \"world\" should be present")
+
+  test "entries returns all key-value pairs" do
+    let m = Map.singleton(42, 99)
+    let es = Map.entries(m)
+    assert (length(es) == 1)
+    match head(es) do
+    | (k, v) ->
+      assert (k == 42)
+      assert (v == 99)
+    end
   end
-  assert_true(Option.is_none(Map.get(m, "missing", str_cmp)), "get(\"missing\") should be None")
 end
 
-fn main() : Unit do
-  test_empty()
-  test_singleton()
-  test_insert_get()
-  test_get_absent()
-  test_insert_overwrites()
-  test_persistent_insert()
-  test_get_or_present()
-  test_get_or_absent()
-  test_contains_key_present()
-  test_contains_key_absent()
-  test_contains_key_empty()
-  test_remove_present()
-  test_remove_absent()
-  test_remove_only_key()
-  test_size_many()
-  test_fold_sum_values()
-  test_fold_count_keys()
-  test_keys()
-  test_values()
-  test_entries()
-  test_from_list()
-  test_from_list_duplicate_keys()
-  test_to_list()
-  test_map_values()
-  test_filter()
-  test_merge()
-  test_merge_overlap_b_wins()
-  test_merge_with()
-  test_merge_with_disjoint()
-  test_string_keys()
-  println("All Map tests passed!")
+describe "from_list and to_list" do
+  test "from_list builds map from pairs" do
+    let pairs = Cons((1, "one"), Cons((2, "two"), Cons((3, "three"), Nil)))
+    let m = Map.from_list(pairs, int_cmp)
+    assert (Map.size(m) == 3)
+    assert Map.contains_key(m, 1, int_cmp)
+    assert Map.contains_key(m, 3, int_cmp)
+  end
+
+  test "from_list with duplicate keys uses last value" do
+    let pairs = Cons((1, "first"), Cons((1, "second"), Nil))
+    let m = Map.from_list(pairs, int_cmp)
+    assert (Map.size(m) == 1)
+    match Map.get(m, 1, int_cmp) do
+    | Some(v) -> assert (v == "second")
+    | None -> assert false
+    end
+  end
+
+  test "to_list of singleton has one pair" do
+    let m = Map.singleton(7, "seven")
+    assert (length(Map.to_list(m)) == 1)
+  end
+end
+
+describe "map_values" do
+  test "map_values transforms all values" do
+    let m = Map.insert(Map.insert(Map.empty(), 1, 10, int_cmp), 2, 20, int_cmp)
+    let doubled = Map.map_values(m, fn x -> x * 2)
+    assert (Map.size(doubled) == 2)
+    match Map.get(doubled, 1, int_cmp) do
+    | Some(v) -> assert (v == 20)
+    | None -> assert false
+    end
+    match Map.get(doubled, 2, int_cmp) do
+    | Some(v) -> assert (v == 40)
+    | None -> assert false
+    end
+  end
+end
+
+describe "filter" do
+  test "filter keeps entries matching predicate" do
+    let m = Map.insert(Map.insert(Map.insert(Map.empty(), 1, 10, int_cmp), 2, 20, int_cmp), 3, 30, int_cmp)
+    let big = Map.filter(m, fn _k -> fn v -> v > 15, int_cmp)
+    assert (Map.size(big) == 2)
+    assert !Map.contains_key(big, 1, int_cmp)
+  end
+end
+
+describe "merge" do
+  test "merge of disjoint maps has all keys" do
+    let a = Map.singleton(1, "a1")
+    let b = Map.singleton(2, "b2")
+    let c = Map.merge(a, b, int_cmp)
+    assert (Map.size(c) == 2)
+    assert Map.contains_key(c, 1, int_cmp)
+    assert Map.contains_key(c, 2, int_cmp)
+  end
+
+  test "merge with overlap: b value wins" do
+    let a = Map.singleton(1, "from_a")
+    let b = Map.singleton(1, "from_b")
+    let c = Map.merge(a, b, int_cmp)
+    assert (Map.size(c) == 1)
+    match Map.get(c, 1, int_cmp) do
+    | Some(v) -> assert (v == "from_b")
+    | None -> assert false
+    end
+  end
+
+  test "merge_with combines conflicting values" do
+    let a = Map.singleton(1, 10)
+    let b = Map.singleton(1, 5)
+    let c = Map.merge_with(a, b, fn va -> fn vb -> va + vb, int_cmp)
+    assert (Map.size(c) == 1)
+    match Map.get(c, 1, int_cmp) do
+    | Some(v) -> assert (v == 15)
+    | None -> assert false
+    end
+  end
+
+  test "merge_with on disjoint maps has all keys" do
+    let a = Map.singleton(1, 10)
+    let b = Map.singleton(2, 20)
+    let c = Map.merge_with(a, b, fn va -> fn vb -> va + vb, int_cmp)
+    assert (Map.size(c) == 2)
+  end
+end
+
+describe "string keys" do
+  test "map works with string keys" do
+    let m = Map.insert(Map.insert(Map.empty(), "hello", 1, str_cmp), "world", 2, str_cmp)
+    assert (Map.size(m) == 2)
+    match Map.get(m, "hello", str_cmp) do
+    | Some(v) -> assert (v == 1)
+    | None -> assert false
+    end
+    match Map.get(m, "world", str_cmp) do
+    | Some(v) -> assert (v == 2)
+    | None -> assert false
+    end
+    assert Option.is_none(Map.get(m, "missing", str_cmp))
+  end
 end
 
 end

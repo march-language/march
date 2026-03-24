@@ -1,212 +1,164 @@
 -- Tests for the Math stdlib module
--- Run with: dune exec march -- test/stdlib/test_math.march
+-- Run with: dune exec march -- test test/stdlib/test_math.march
 
 mod TestMath do
-
-fn assert_true(cond : Bool, msg : String) : Unit do
-  if cond then () else panic("FAIL: " ++ msg)
-end
-
-fn assert_eq_int(a : Int, b : Int, msg : String) : Unit do
-  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ int_to_string(b) ++ ", got " ++ int_to_string(a) ++ ")")
-end
 
 fn approx_eq(a : Float, b : Float) : Bool do
   let diff = if a > b then a - b else b - a
   diff < 0.0001
 end
 
-fn assert_approx(a : Float, b : Float, msg : String) : Unit do
-  if approx_eq(a, b) then ()
-  else panic("FAIL: " ++ msg ++ " (expected ~" ++ float_to_string(b) ++ ", got " ++ float_to_string(a) ++ ")")
+describe "constants" do
+  test "pi is approximately 3.14159" do
+    assert approx_eq(Math.pi(), 3.14159)
+  end
+
+  test "e is approximately 2.71828" do
+    assert approx_eq(Math.e(), 2.71828)
+  end
+
+  test "tau is approximately 6.28318" do
+    assert approx_eq(Math.tau(), 6.28318)
+  end
 end
 
--- ---- Math.pi / Math.e / Math.tau ----
+describe "abs" do
+  test "abs of positive float is unchanged" do
+    assert approx_eq(Math.abs(3.5), 3.5)
+  end
 
-fn test_pi() : Unit do
-  assert_approx(Math.pi(), 3.14159, "pi value")
+  test "abs of negative float gives positive" do
+    assert approx_eq(Math.abs(-3.5), 3.5)
+  end
+
+  test "abs of zero is zero" do
+    assert approx_eq(Math.abs(0.0), 0.0)
+  end
 end
 
-fn test_e() : Unit do
-  assert_approx(Math.e(), 2.71828, "e value")
+describe "min_int and max_int" do
+  test "min_int returns smaller of two ints" do
+    assert (Math.min_int(3, 5) == 3)
+    assert (Math.min_int(5, 3) == 3)
+    assert (Math.min_int(-1, 1) == -1)
+  end
+
+  test "max_int returns larger of two ints" do
+    assert (Math.max_int(3, 5) == 5)
+    assert (Math.max_int(5, 3) == 5)
+    assert (Math.max_int(-1, 1) == 1)
+  end
 end
 
-fn test_tau() : Unit do
-  assert_approx(Math.tau(), 6.28318, "tau value")
+describe "min_float and max_float" do
+  test "min_float returns smaller float" do
+    assert approx_eq(Math.min_float(1.5, 2.5), 1.5)
+  end
+
+  test "max_float returns larger float" do
+    assert approx_eq(Math.max_float(1.5, 2.5), 2.5)
+  end
 end
 
--- ---- Math.abs ----
+describe "clamp_int" do
+  test "clamp_int returns value when in range" do
+    assert (Math.clamp_int(5, 0, 10) == 5)
+  end
 
-fn test_abs_positive() : Unit do
-  assert_approx(Math.abs(3.5), 3.5, "abs positive")
+  test "clamp_int returns low when below range" do
+    assert (Math.clamp_int(-5, 0, 10) == 0)
+  end
+
+  test "clamp_int returns high when above range" do
+    assert (Math.clamp_int(15, 0, 10) == 10)
+  end
 end
 
-fn test_abs_negative() : Unit do
-  assert_approx(Math.abs(-3.5), 3.5, "abs negative")
+describe "sqrt" do
+  test "sqrt of 4 is 2" do
+    assert approx_eq(Math.sqrt(4.0), 2.0)
+  end
+
+  test "sqrt of 0 is 0" do
+    assert approx_eq(Math.sqrt(0.0), 0.0)
+  end
+
+  test "sqrt of 2 is approximately 1.41421" do
+    assert approx_eq(Math.sqrt(2.0), 1.41421)
+  end
 end
 
-fn test_abs_zero() : Unit do
-  assert_approx(Math.abs(0.0), 0.0, "abs zero")
+describe "pow" do
+  test "pow 2^10 is 1024" do
+    assert approx_eq(Math.pow(2.0, 10.0), 1024.0)
+  end
+
+  test "pow x^0 is 1" do
+    assert approx_eq(Math.pow(5.0, 0.0), 1.0)
+  end
+
+  test "pow 1^n is 1" do
+    assert approx_eq(Math.pow(1.0, 100.0), 1.0)
+  end
 end
 
--- ---- Math.min_int / Math.max_int ----
+describe "floor, ceil, round" do
+  test "floor rounds down" do
+    assert approx_eq(Math.floor(3.7), 3.0)
+    assert approx_eq(Math.floor(-3.7), -4.0)
+  end
 
-fn test_min_int() : Unit do
-  assert_eq_int(Math.min_int(3, 5), 3, "min_int 3 5")
-  assert_eq_int(Math.min_int(5, 3), 3, "min_int 5 3")
-  assert_eq_int(Math.min_int(-1, 1), -1, "min_int negative")
+  test "ceil rounds up" do
+    assert approx_eq(Math.ceil(3.2), 4.0)
+    assert approx_eq(Math.ceil(-3.2), -3.0)
+  end
+
+  test "round rounds to nearest" do
+    assert approx_eq(Math.round(3.5), 4.0)
+    assert approx_eq(Math.round(3.4), 3.0)
+  end
 end
 
-fn test_max_int() : Unit do
-  assert_eq_int(Math.max_int(3, 5), 5, "max_int 3 5")
-  assert_eq_int(Math.max_int(5, 3), 5, "max_int 5 3")
-  assert_eq_int(Math.max_int(-1, 1), 1, "max_int negative")
+describe "logarithms" do
+  test "log(e) is 1" do
+    assert approx_eq(Math.log(Math.e()), 1.0)
+  end
+
+  test "log2(8) is 3" do
+    assert approx_eq(Math.log2(8.0), 3.0)
+  end
+
+  test "log10(1000) is 3" do
+    assert approx_eq(Math.log10(1000.0), 3.0)
+  end
 end
 
--- ---- Math.min_float / Math.max_float ----
+describe "trigonometry" do
+  test "sin(0) is 0" do
+    assert approx_eq(Math.sin(0.0), 0.0)
+  end
 
-fn test_min_float() : Unit do
-  assert_approx(Math.min_float(1.5, 2.5), 1.5, "min_float")
+  test "cos(0) is 1" do
+    assert approx_eq(Math.cos(0.0), 1.0)
+  end
+
+  test "sin(pi) is approximately 0" do
+    assert approx_eq(Math.sin(Math.pi()), 0.0)
+  end
 end
 
-fn test_max_float() : Unit do
-  assert_approx(Math.max_float(1.5, 2.5), 2.5, "max_float")
-end
+describe "lerp" do
+  test "lerp at t=0 returns a" do
+    assert approx_eq(Math.lerp(0.0, 10.0, 0.0), 0.0)
+  end
 
--- ---- Math.clamp_int ----
+  test "lerp at t=1 returns b" do
+    assert approx_eq(Math.lerp(0.0, 10.0, 1.0), 10.0)
+  end
 
-fn test_clamp_int_in_range() : Unit do
-  assert_eq_int(Math.clamp_int(5, 0, 10), 5, "clamp_int in range")
-end
-
-fn test_clamp_int_below() : Unit do
-  assert_eq_int(Math.clamp_int(-5, 0, 10), 0, "clamp_int below")
-end
-
-fn test_clamp_int_above() : Unit do
-  assert_eq_int(Math.clamp_int(15, 0, 10), 10, "clamp_int above")
-end
-
--- ---- Math.sqrt ----
-
-fn test_sqrt_4() : Unit do
-  assert_approx(Math.sqrt(4.0), 2.0, "sqrt 4")
-end
-
-fn test_sqrt_0() : Unit do
-  assert_approx(Math.sqrt(0.0), 0.0, "sqrt 0")
-end
-
-fn test_sqrt_2() : Unit do
-  assert_approx(Math.sqrt(2.0), 1.41421, "sqrt 2")
-end
-
--- ---- Math.pow ----
-
-fn test_pow_basic() : Unit do
-  assert_approx(Math.pow(2.0, 10.0), 1024.0, "pow 2^10")
-end
-
-fn test_pow_zero_exp() : Unit do
-  assert_approx(Math.pow(5.0, 0.0), 1.0, "pow x^0 = 1")
-end
-
-fn test_pow_one_base() : Unit do
-  assert_approx(Math.pow(1.0, 100.0), 1.0, "pow 1^n = 1")
-end
-
--- ---- Math.floor / ceil / round ----
-
-fn test_floor() : Unit do
-  assert_approx(Math.floor(3.7), 3.0, "floor 3.7")
-  assert_approx(Math.floor(-3.7), -4.0, "floor -3.7")
-end
-
-fn test_ceil() : Unit do
-  assert_approx(Math.ceil(3.2), 4.0, "ceil 3.2")
-  assert_approx(Math.ceil(-3.2), -3.0, "ceil -3.2")
-end
-
-fn test_round() : Unit do
-  assert_approx(Math.round(3.5), 4.0, "round 3.5")
-  assert_approx(Math.round(3.4), 3.0, "round 3.4")
-end
-
--- ---- Math.log / log2 / log10 ----
-
-fn test_log_e() : Unit do
-  assert_approx(Math.log(Math.e()), 1.0, "log(e) = 1")
-end
-
-fn test_log2_8() : Unit do
-  assert_approx(Math.log2(8.0), 3.0, "log2(8) = 3")
-end
-
-fn test_log10_1000() : Unit do
-  assert_approx(Math.log10(1000.0), 3.0, "log10(1000) = 3")
-end
-
--- ---- Math.sin / cos ----
-
-fn test_sin_zero() : Unit do
-  assert_approx(Math.sin(0.0), 0.0, "sin(0) = 0")
-end
-
-fn test_cos_zero() : Unit do
-  assert_approx(Math.cos(0.0), 1.0, "cos(0) = 1")
-end
-
-fn test_sin_pi() : Unit do
-  assert_approx(Math.sin(Math.pi()), 0.0, "sin(pi) ~= 0")
-end
-
--- ---- Math.lerp ----
-
-fn test_lerp_zero() : Unit do
-  assert_approx(Math.lerp(0.0, 10.0, 0.0), 0.0, "lerp t=0")
-end
-
-fn test_lerp_one() : Unit do
-  assert_approx(Math.lerp(0.0, 10.0, 1.0), 10.0, "lerp t=1")
-end
-
-fn test_lerp_half() : Unit do
-  assert_approx(Math.lerp(0.0, 10.0, 0.5), 5.0, "lerp t=0.5")
-end
-
-fn main() : Unit do
-  test_pi()
-  test_e()
-  test_tau()
-  test_abs_positive()
-  test_abs_negative()
-  test_abs_zero()
-  test_min_int()
-  test_max_int()
-  test_min_float()
-  test_max_float()
-  test_clamp_int_in_range()
-  test_clamp_int_below()
-  test_clamp_int_above()
-  test_sqrt_4()
-  test_sqrt_0()
-  test_sqrt_2()
-  test_pow_basic()
-  test_pow_zero_exp()
-  test_pow_one_base()
-  test_floor()
-  test_ceil()
-  test_round()
-  test_log_e()
-  test_log2_8()
-  test_log10_1000()
-  test_sin_zero()
-  test_cos_zero()
-  test_sin_pi()
-  test_lerp_zero()
-  test_lerp_one()
-  test_lerp_half()
-  println("All Math tests passed!")
+  test "lerp at t=0.5 returns midpoint" do
+    assert approx_eq(Math.lerp(0.0, 10.0, 0.5), 5.0)
+  end
 end
 
 end

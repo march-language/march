@@ -1,279 +1,222 @@
 -- Tests for the String stdlib module
--- Run with: dune exec march -- test/stdlib/test_string.march
+-- Run with: dune exec march -- test test/stdlib/test_string.march
 
 mod TestString do
 
-fn assert_true(cond : Bool, msg : String) : Unit do
-  if cond then () else panic("FAIL: " ++ msg)
-end
+describe "byte_size" do
+  test "byte_size of empty string is zero" do
+    assert (String.byte_size("") == 0)
+  end
 
-fn assert_eq_str(a : String, b : String, msg : String) : Unit do
-  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ b ++ ", got " ++ a ++ ")")
-end
-
-fn assert_eq_int(a : Int, b : Int, msg : String) : Unit do
-  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ int_to_string(b) ++ ", got " ++ int_to_string(a) ++ ")")
-end
-
--- ---- String.byte_size ----
-
-fn test_byte_size_empty() : Unit do
-  assert_eq_int(String.byte_size(""), 0, "byte_size empty")
-end
-
-fn test_byte_size_ascii() : Unit do
-  assert_eq_int(String.byte_size("hello"), 5, "byte_size ascii")
-end
-
--- ---- String.contains ----
-
-fn test_contains_true() : Unit do
-  assert_true(String.contains("hello world", "world"), "contains true")
-end
-
-fn test_contains_false() : Unit do
-  assert_true(!String.contains("hello world", "xyz"), "contains false")
-end
-
-fn test_contains_empty() : Unit do
-  assert_true(String.contains("abc", ""), "contains empty substring")
-end
-
--- ---- String.starts_with ----
-
-fn test_starts_with_true() : Unit do
-  assert_true(String.starts_with("hello world", "hello"), "starts_with true")
-end
-
-fn test_starts_with_false() : Unit do
-  assert_true(!String.starts_with("hello world", "world"), "starts_with false")
-end
-
-fn test_starts_with_empty() : Unit do
-  assert_true(String.starts_with("hello", ""), "starts_with empty prefix")
-end
-
--- ---- String.ends_with ----
-
-fn test_ends_with_true() : Unit do
-  assert_true(String.ends_with("hello world", "world"), "ends_with true")
-end
-
-fn test_ends_with_false() : Unit do
-  assert_true(!String.ends_with("hello world", "hello"), "ends_with false")
-end
-
--- ---- String.concat ----
-
-fn test_concat() : Unit do
-  assert_eq_str(String.concat("hello", " world"), "hello world", "concat")
-end
-
-fn test_concat_empty() : Unit do
-  assert_eq_str(String.concat("", "hello"), "hello", "concat empty left")
-  assert_eq_str(String.concat("hello", ""), "hello", "concat empty right")
-end
-
--- ---- String.replace / replace_all ----
-
-fn test_replace_first() : Unit do
-  let r = String.replace("hello hello", "hello", "hi")
-  assert_eq_str(r, "hi hello", "replace first only")
-end
-
-fn test_replace_all() : Unit do
-  let r = String.replace_all("hello hello", "hello", "hi")
-  assert_eq_str(r, "hi hi", "replace_all")
-end
-
-fn test_replace_no_match() : Unit do
-  let r = String.replace("hello", "xyz", "hi")
-  assert_eq_str(r, "hello", "replace no match")
-end
-
--- ---- String.split ----
-
-fn test_split_basic() : Unit do
-  let parts = String.split("a,b,c", ",")
-  assert_eq_int(length(parts), 3, "split basic length")
-  assert_eq_str(head(parts), "a", "split first element")
-end
-
-fn test_split_no_match() : Unit do
-  let parts = String.split("hello", ",")
-  assert_eq_int(length(parts), 1, "split no match length")
-end
-
--- ---- String.join ----
-
-fn test_join_basic() : Unit do
-  let parts = Cons("a", Cons("b", Cons("c", Nil)))
-  assert_eq_str(String.join(parts, ","), "a,b,c", "join basic")
-end
-
-fn test_join_empty() : Unit do
-  assert_eq_str(String.join(Nil, ","), "", "join empty list")
-end
-
--- ---- String.trim ----
-
-fn test_trim() : Unit do
-  assert_eq_str(String.trim("  hello  "), "hello", "trim both sides")
-end
-
-fn test_trim_start() : Unit do
-  assert_eq_str(String.trim_start("  hello  "), "hello  ", "trim_start")
-end
-
-fn test_trim_end() : Unit do
-  assert_eq_str(String.trim_end("  hello  "), "  hello", "trim_end")
-end
-
--- ---- String.to_uppercase / to_lowercase ----
-
-fn test_to_uppercase() : Unit do
-  assert_eq_str(String.to_uppercase("hello"), "HELLO", "to_uppercase")
-end
-
-fn test_to_lowercase() : Unit do
-  assert_eq_str(String.to_lowercase("HELLO"), "hello", "to_lowercase")
-end
-
--- ---- String.repeat ----
-
-fn test_repeat() : Unit do
-  assert_eq_str(String.repeat("ab", 3), "ababab", "repeat 3")
-end
-
-fn test_repeat_zero() : Unit do
-  assert_eq_str(String.repeat("ab", 0), "", "repeat 0")
-end
-
--- ---- String.reverse ----
-
-fn test_reverse() : Unit do
-  assert_eq_str(String.reverse("hello"), "olleh", "reverse")
-end
-
-fn test_reverse_empty() : Unit do
-  assert_eq_str(String.reverse(""), "", "reverse empty")
-end
-
--- ---- String.pad_left / pad_right ----
-
-fn test_pad_left() : Unit do
-  assert_eq_str(String.pad_left("42", 5, "0"), "00042", "pad_left")
-end
-
-fn test_pad_right() : Unit do
-  assert_eq_str(String.pad_right("hi", 5, " "), "hi   ", "pad_right")
-end
-
-fn test_pad_left_no_pad() : Unit do
-  assert_eq_str(String.pad_left("hello", 3, "0"), "hello", "pad_left no pad needed")
-end
-
--- ---- String.is_empty ----
-
-fn test_is_empty_true() : Unit do
-  assert_true(String.is_empty(""), "is_empty true")
-end
-
-fn test_is_empty_false() : Unit do
-  assert_true(!String.is_empty("a"), "is_empty false")
-end
-
--- ---- String.to_int / to_float ----
-
-fn test_to_int_valid() : Unit do
-  match String.to_int("42") do
-  | Err(_) -> panic("FAIL: to_int valid returned Err")
-  | Ok(n) -> assert_eq_int(n, 42, "to_int valid")
+  test "byte_size of ascii string" do
+    assert (String.byte_size("hello") == 5)
   end
 end
 
-fn test_to_int_invalid() : Unit do
-  match String.to_int("abc") do
-  | Err(_) -> ()
-  | Ok(_) -> panic("FAIL: to_int invalid returned Ok")
+describe "contains" do
+  test "contains returns true when substring present" do
+    assert String.contains("hello world", "world")
+  end
+
+  test "contains returns false when substring absent" do
+    assert !String.contains("hello world", "xyz")
+  end
+
+  test "contains empty substring always true" do
+    assert String.contains("abc", "")
   end
 end
 
-fn test_to_int_negative() : Unit do
-  match String.to_int("-7") do
-  | Err(_) -> panic("FAIL: to_int negative returned Err")
-  | Ok(n) -> assert_eq_int(n, -7, "to_int negative")
+describe "starts_with" do
+  test "starts_with returns true for matching prefix" do
+    assert String.starts_with("hello world", "hello")
+  end
+
+  test "starts_with returns false for non-prefix" do
+    assert !String.starts_with("hello world", "world")
+  end
+
+  test "starts_with empty prefix always true" do
+    assert String.starts_with("hello", "")
   end
 end
 
--- ---- String.from_int / from_float ----
+describe "ends_with" do
+  test "ends_with returns true for matching suffix" do
+    assert String.ends_with("hello world", "world")
+  end
 
-fn test_from_int() : Unit do
-  assert_eq_str(String.from_int(42), "42", "from_int")
-end
-
-fn test_from_int_negative() : Unit do
-  assert_eq_str(String.from_int(-7), "-7", "from_int negative")
-end
-
--- ---- String.index_of ----
-
-fn test_index_of_found() : Unit do
-  match String.index_of("hello world", "world") do
-  | None -> panic("FAIL: index_of found returned None")
-  | Some(i) -> assert_eq_int(i, 6, "index_of found")
+  test "ends_with returns false for non-suffix" do
+    assert !String.ends_with("hello world", "hello")
   end
 end
 
-fn test_index_of_not_found() : Unit do
-  match String.index_of("hello", "xyz") do
-  | None -> ()
-  | Some(_) -> panic("FAIL: index_of not found returned Some")
+describe "concat" do
+  test "concat joins two strings" do
+    assert (String.concat("hello", " world") == "hello world")
+  end
+
+  test "concat with empty left" do
+    assert (String.concat("", "hello") == "hello")
+  end
+
+  test "concat with empty right" do
+    assert (String.concat("hello", "") == "hello")
   end
 end
 
-fn main() : Unit do
-  test_byte_size_empty()
-  test_byte_size_ascii()
-  test_contains_true()
-  test_contains_false()
-  test_contains_empty()
-  test_starts_with_true()
-  test_starts_with_false()
-  test_starts_with_empty()
-  test_ends_with_true()
-  test_ends_with_false()
-  test_concat()
-  test_concat_empty()
-  test_replace_first()
-  test_replace_all()
-  test_replace_no_match()
-  test_split_basic()
-  test_split_no_match()
-  test_join_basic()
-  test_join_empty()
-  test_trim()
-  test_trim_start()
-  test_trim_end()
-  test_to_uppercase()
-  test_to_lowercase()
-  test_repeat()
-  test_repeat_zero()
-  test_reverse()
-  test_reverse_empty()
-  test_pad_left()
-  test_pad_right()
-  test_pad_left_no_pad()
-  test_is_empty_true()
-  test_is_empty_false()
-  test_to_int_valid()
-  test_to_int_invalid()
-  test_to_int_negative()
-  test_from_int()
-  test_from_int_negative()
-  test_index_of_found()
-  test_index_of_not_found()
-  println("All String tests passed!")
+describe "replace" do
+  test "replace substitutes first occurrence" do
+    assert (String.replace("hello hello", "hello", "hi") == "hi hello")
+  end
+
+  test "replace_all substitutes all occurrences" do
+    assert (String.replace_all("hello hello", "hello", "hi") == "hi hi")
+  end
+
+  test "replace with no match returns original" do
+    assert (String.replace("hello", "xyz", "hi") == "hello")
+  end
+end
+
+describe "split" do
+  test "split on separator produces correct parts" do
+    let parts = String.split("a,b,c", ",")
+    assert (length(parts) == 3)
+    assert (head(parts) == "a")
+  end
+
+  test "split with no match returns single-element list" do
+    assert (length(String.split("hello", ",")) == 1)
+  end
+end
+
+describe "join" do
+  test "join concatenates with separator" do
+    let parts = Cons("a", Cons("b", Cons("c", Nil)))
+    assert (String.join(parts, ",") == "a,b,c")
+  end
+
+  test "join of empty list gives empty string" do
+    assert (String.join(Nil, ",") == "")
+  end
+end
+
+describe "trim" do
+  test "trim removes leading and trailing whitespace" do
+    assert (String.trim("  hello  ") == "hello")
+  end
+
+  test "trim_start removes only leading whitespace" do
+    assert (String.trim_start("  hello  ") == "hello  ")
+  end
+
+  test "trim_end removes only trailing whitespace" do
+    assert (String.trim_end("  hello  ") == "  hello")
+  end
+end
+
+describe "case conversion" do
+  test "to_uppercase converts to upper case" do
+    assert (String.to_uppercase("hello") == "HELLO")
+  end
+
+  test "to_lowercase converts to lower case" do
+    assert (String.to_lowercase("HELLO") == "hello")
+  end
+end
+
+describe "repeat" do
+  test "repeat n times concatenates string n times" do
+    assert (String.repeat("ab", 3) == "ababab")
+  end
+
+  test "repeat zero times gives empty string" do
+    assert (String.repeat("ab", 0) == "")
+  end
+end
+
+describe "reverse" do
+  test "reverse reverses ascii string" do
+    assert (String.reverse("hello") == "olleh")
+  end
+
+  test "reverse of empty string is empty" do
+    assert (String.reverse("") == "")
+  end
+end
+
+describe "padding" do
+  test "pad_left pads with fill character on left" do
+    assert (String.pad_left("42", 5, "0") == "00042")
+  end
+
+  test "pad_right pads with fill character on right" do
+    assert (String.pad_right("hi", 5, " ") == "hi   ")
+  end
+
+  test "pad_left does nothing when already long enough" do
+    assert (String.pad_left("hello", 3, "0") == "hello")
+  end
+end
+
+describe "is_empty" do
+  test "is_empty returns true for empty string" do
+    assert String.is_empty("")
+  end
+
+  test "is_empty returns false for non-empty string" do
+    assert !String.is_empty("a")
+  end
+end
+
+describe "to_int and to_float" do
+  test "to_int parses valid integer string" do
+    match String.to_int("42") do
+    | Err(_) -> assert false
+    | Ok(n) -> assert (n == 42)
+    end
+  end
+
+  test "to_int returns Err for invalid string" do
+    match String.to_int("abc") do
+    | Err(_) -> assert true
+    | Ok(_) -> assert false
+    end
+  end
+
+  test "to_int parses negative integer" do
+    match String.to_int("-7") do
+    | Err(_) -> assert false
+    | Ok(n) -> assert (n == -7)
+    end
+  end
+end
+
+describe "from_int and from_float" do
+  test "from_int converts integer to string" do
+    assert (String.from_int(42) == "42")
+  end
+
+  test "from_int converts negative integer" do
+    assert (String.from_int(-7) == "-7")
+  end
+end
+
+describe "index_of" do
+  test "index_of returns byte offset when found" do
+    match String.index_of("hello world", "world") do
+    | None -> assert false
+    | Some(i) -> assert (i == 6)
+    end
+  end
+
+  test "index_of returns None when not found" do
+    match String.index_of("hello", "xyz") do
+    | None -> assert true
+    | Some(_) -> assert false
+    end
+  end
 end
 
 end

@@ -1,180 +1,136 @@
 -- Tests for the Result stdlib module
--- Run with: dune exec march -- test/stdlib/test_result.march
+-- Run with: dune exec march -- test test/stdlib/test_result.march
 
 mod TestResult do
 
-fn assert_true(cond : Bool, msg : String) : Unit do
-  if cond then () else panic("FAIL: " ++ msg)
-end
+describe "is_ok" do
+  test "is_ok returns true for Ok" do
+    assert Result.is_ok(Ok(42))
+  end
 
-fn assert_false(cond : Bool, msg : String) : Unit do
-  if cond then panic("FAIL: " ++ msg) else ()
-end
-
-fn assert_eq_int(a : Int, b : Int, msg : String) : Unit do
-  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ int_to_string(b) ++ ", got " ++ int_to_string(a) ++ ")")
-end
-
-fn assert_eq_str(a : String, b : String, msg : String) : Unit do
-  if a == b then () else panic("FAIL: " ++ msg ++ " (expected " ++ b ++ ", got " ++ a ++ ")")
-end
-
--- ---- Result.is_ok ----
-
-fn test_is_ok_with_ok() : Unit do
-  assert_true(Result.is_ok(Ok(42)), "is_ok(Ok(42)) should be true")
-end
-
-fn test_is_ok_with_err() : Unit do
-  assert_false(Result.is_ok(Err("error")), "is_ok(Err(...)) should be false")
-end
-
--- ---- Result.is_err ----
-
-fn test_is_err_with_err() : Unit do
-  assert_true(Result.is_err(Err("oops")), "is_err(Err(...)) should be true")
-end
-
-fn test_is_err_with_ok() : Unit do
-  assert_false(Result.is_err(Ok(1)), "is_err(Ok(1)) should be false")
-end
-
--- ---- Result.unwrap ----
-
-fn test_unwrap_ok() : Unit do
-  assert_eq_int(Result.unwrap(Ok(7)), 7, "unwrap(Ok(7)) should be 7")
-end
-
-fn test_unwrap_ok_zero() : Unit do
-  assert_eq_int(Result.unwrap(Ok(0)), 0, "unwrap(Ok(0)) should be 0")
-end
-
--- ---- Result.expect ----
-
-fn test_expect_ok() : Unit do
-  assert_eq_int(Result.expect(Ok(99), "should not panic"), 99, "expect(Ok(99), ...) should be 99")
-end
-
--- ---- Result.unwrap_err ----
-
-fn test_unwrap_err() : Unit do
-  assert_eq_str(Result.unwrap_err(Err("boom")), "boom", "unwrap_err(Err(\"boom\")) should be \"boom\"")
-end
-
--- ---- Result.unwrap_or ----
-
-fn test_unwrap_or_ok() : Unit do
-  assert_eq_int(Result.unwrap_or(Ok(5), 0), 5, "unwrap_or(Ok(5), 0) should be 5")
-end
-
-fn test_unwrap_or_err() : Unit do
-  assert_eq_int(Result.unwrap_or(Err("bad"), 42), 42, "unwrap_or(Err(...), 42) should be 42")
-end
-
--- ---- Result.map ----
-
-fn test_map_ok() : Unit do
-  assert_eq_int(Result.unwrap(Result.map(Ok(3), fn x -> x * 2)), 6, "map(Ok(3), *2) should be Ok(6)")
-end
-
-fn test_map_err_unchanged() : Unit do
-  assert_true(Result.is_err(Result.map(Err("e"), fn (x : Int) -> x + 1)), "map(Err(...), f) should stay Err")
-end
-
--- ---- Result.map_err ----
-
-fn test_map_err_ok_unchanged() : Unit do
-  assert_true(Result.is_ok(Result.map_err(Ok(10), fn (e : String) -> "mapped: " ++ e)), "map_err(Ok(10), f) should stay Ok")
-end
-
-fn test_map_err_err() : Unit do
-  assert_true(Result.is_err(Result.map_err(Err("old"), fn e -> "new: " ++ e)), "map_err(Err(...), f) should be Err")
-end
-
--- ---- Result.flat_map ----
-
-fn test_flat_map_ok_to_ok() : Unit do
-  assert_eq_int(Result.unwrap(Result.flat_map(Ok(4), fn x -> Ok(x + 1))), 5, "flat_map(Ok(4), x->Ok(x+1)) should be Ok(5)")
-end
-
-fn test_flat_map_ok_to_err() : Unit do
-  assert_true(Result.is_err(Result.flat_map(Ok(1), fn (x : Int) -> Err("fail"))), "flat_map(Ok(1), _->Err) should be Err")
-end
-
-fn test_flat_map_err() : Unit do
-  assert_true(Result.is_err(Result.flat_map(Err("e"), fn (x : Int) -> Ok(x))), "flat_map(Err(...), f) should be Err")
-end
-
--- ---- Result.or_else ----
-
-fn test_or_else_ok() : Unit do
-  assert_eq_int(Result.unwrap(Result.or_else(Ok(3), fn (e : String) -> Ok(99))), 3, "or_else(Ok(3), ...) should be Ok(3)")
-end
-
-fn test_or_else_err() : Unit do
-  assert_eq_int(Result.unwrap(Result.or_else(Err("e"), fn _e -> Ok(7))), 7, "or_else(Err, fn _ -> Ok(7)) should be Ok(7)")
-end
-
--- ---- Result.collect ----
-
-fn test_collect_all_ok() : Unit do
-  let results = Cons(Ok(1), Cons(Ok(2), Cons(Ok(3), Nil)))
-  match Result.collect(results) do
-  | Ok(lst) ->
-    assert_eq_int(length(lst), 3, "collect all Ok: length should be 3")
-    assert_eq_int(head(lst), 1, "collect all Ok: first should be 1")
-  | Err(_) -> panic("FAIL: collect all Ok should succeed")
+  test "is_ok returns false for Err" do
+    assert !Result.is_ok(Err("error"))
   end
 end
 
-fn test_collect_empty() : Unit do
-  match Result.collect(Nil) do
-  | Ok(lst) -> assert_eq_int(length(lst), 0, "collect [] should be Ok([])")
-  | Err(_) -> panic("FAIL: collect [] should be Ok([])")
+describe "is_err" do
+  test "is_err returns true for Err" do
+    assert Result.is_err(Err("oops"))
+  end
+
+  test "is_err returns false for Ok" do
+    assert !Result.is_err(Ok(1))
   end
 end
 
-fn test_collect_with_err() : Unit do
-  let results = Cons(Ok(1), Cons(Err("oops"), Cons(Ok(3), Nil)))
-  assert_true(Result.is_err(Result.collect(results)), "collect with Err should return Err")
+describe "unwrap" do
+  test "unwrap extracts Ok value" do
+    assert (Result.unwrap(Ok(7)) == 7)
+  end
+
+  test "unwrap of Ok(0) is 0" do
+    assert (Result.unwrap(Ok(0)) == 0)
+  end
 end
 
--- ---- Result.to_option ----
-
-fn test_to_option_ok() : Unit do
-  assert_true(Option.is_some(Result.to_option(Ok(5))), "to_option(Ok(5)) should be Some")
+describe "expect" do
+  test "expect extracts Ok value" do
+    assert (Result.expect(Ok(99), "should not panic") == 99)
+  end
 end
 
-fn test_to_option_err() : Unit do
-  assert_true(Option.is_none(Result.to_option(Err("e"))), "to_option(Err(...)) should be None")
+describe "unwrap_err" do
+  test "unwrap_err extracts Err value" do
+    assert (Result.unwrap_err(Err("boom")) == "boom")
+  end
 end
 
-fn main() : Unit do
-  test_is_ok_with_ok()
-  test_is_ok_with_err()
-  test_is_err_with_err()
-  test_is_err_with_ok()
-  test_unwrap_ok()
-  test_unwrap_ok_zero()
-  test_expect_ok()
-  test_unwrap_err()
-  test_unwrap_or_ok()
-  test_unwrap_or_err()
-  test_map_ok()
-  test_map_err_unchanged()
-  test_map_err_ok_unchanged()
-  test_map_err_err()
-  test_flat_map_ok_to_ok()
-  test_flat_map_ok_to_err()
-  test_flat_map_err()
-  test_or_else_ok()
-  test_or_else_err()
-  test_collect_all_ok()
-  test_collect_empty()
-  test_collect_with_err()
-  test_to_option_ok()
-  test_to_option_err()
-  println("All Result tests passed!")
+describe "unwrap_or" do
+  test "unwrap_or returns Ok value" do
+    assert (Result.unwrap_or(Ok(5), 0) == 5)
+  end
+
+  test "unwrap_or returns default for Err" do
+    assert (Result.unwrap_or(Err("bad"), 42) == 42)
+  end
+end
+
+describe "map" do
+  test "map transforms Ok value" do
+    assert (Result.unwrap(Result.map(Ok(3), fn x -> x * 2)) == 6)
+  end
+
+  test "map leaves Err unchanged" do
+    assert Result.is_err(Result.map(Err("e"), fn (x : Int) -> x + 1))
+  end
+end
+
+describe "map_err" do
+  test "map_err leaves Ok unchanged" do
+    assert Result.is_ok(Result.map_err(Ok(10), fn (e : String) -> "mapped: " ++ e))
+  end
+
+  test "map_err transforms Err value" do
+    assert Result.is_err(Result.map_err(Err("old"), fn e -> "new: " ++ e))
+  end
+end
+
+describe "flat_map" do
+  test "flat_map Ok to Ok" do
+    assert (Result.unwrap(Result.flat_map(Ok(4), fn x -> Ok(x + 1))) == 5)
+  end
+
+  test "flat_map Ok to Err gives Err" do
+    assert Result.is_err(Result.flat_map(Ok(1), fn (x : Int) -> Err("fail")))
+  end
+
+  test "flat_map Err gives Err" do
+    assert Result.is_err(Result.flat_map(Err("e"), fn (x : Int) -> Ok(x)))
+  end
+end
+
+describe "or_else" do
+  test "or_else returns original Ok" do
+    assert (Result.unwrap(Result.or_else(Ok(3), fn (e : String) -> Ok(99))) == 3)
+  end
+
+  test "or_else calls function for Err" do
+    assert (Result.unwrap(Result.or_else(Err("e"), fn _e -> Ok(7))) == 7)
+  end
+end
+
+describe "collect" do
+  test "collect all Ok gives Ok list" do
+    let results = Cons(Ok(1), Cons(Ok(2), Cons(Ok(3), Nil)))
+    match Result.collect(results) do
+    | Ok(lst) ->
+      assert (length(lst) == 3)
+      assert (head(lst) == 1)
+    | Err(_) -> assert false
+    end
+  end
+
+  test "collect empty list gives Ok empty list" do
+    match Result.collect(Nil) do
+    | Ok(lst) -> assert (length(lst) == 0)
+    | Err(_) -> assert false
+    end
+  end
+
+  test "collect with Err gives Err" do
+    let results = Cons(Ok(1), Cons(Err("oops"), Cons(Ok(3), Nil)))
+    assert Result.is_err(Result.collect(results))
+  end
+end
+
+describe "to_option" do
+  test "to_option of Ok gives Some" do
+    assert Option.is_some(Result.to_option(Ok(5)))
+  end
+
+  test "to_option of Err gives None" do
+    assert Option.is_none(Result.to_option(Err("e")))
+  end
 end
 
 end
