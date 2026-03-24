@@ -52,6 +52,8 @@ fn factorial(n : Int) : Int do n * factorial(n - 1) end
 **Visibility rules:**
 - `fn` = **public** (default — no qualifier needed)
 - `pfn` = **private** (explicit opt-in to hide)
+- `type` = **public** (default)
+- `ptype` = **private** (explicit opt-in to hide)
 - `pub` is a **parse error** — do not use it
 
 ### Lambdas
@@ -136,6 +138,9 @@ Use `mod Name do...end`, not `module`. Call with `MyModule.greet("world")`.
 type Color = Red | Green | Blue
 type Shape = Circle(Float) | Rect(Float, Float)
 type Tree(a) = Leaf | Node(Tree(a), a, Tree(a))
+
+-- Private type (not exported from module):
+ptype InternalState = Active | Inactive
 ```
 
 No leading `|` on the first variant.

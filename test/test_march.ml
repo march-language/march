@@ -9214,11 +9214,11 @@ let test_linear_drop_called_on_crash () =
   let dropfn = March_eval.Eval.VBuiltin ("test_drop", function
     | [v] -> dropped_val := Some v; March_eval.Eval.VUnit
     | _   -> March_eval.Eval.VUnit) in
-  Hashtbl.replace March_eval.Eval.impl_tbl ("Drop", "Widget") drop_fn;
+  Hashtbl.replace March_eval.Eval.impl_tbl ("Drop", "Widget") dropfn;
   let widget = March_eval.Eval.VCon ("Widget", [March_eval.Eval.VInt 99]) in
   (match Hashtbl.find_opt March_eval.Eval.actor_registry 0 with
    | Some inst ->
-     inst.March_eval.Eval.ai_linear_values <- [(widget, drop_fn)]
+     inst.March_eval.Eval.ai_linear_values <- [(widget, dropfn)]
    | None -> Alcotest.fail "actor not found");
   March_eval.Eval.crash_actor 0 "test";
   Alcotest.(check bool) "drop called" true (!dropped_val <> None);
@@ -9258,10 +9258,10 @@ let test_own_drop_integration () =
     | [March_eval.Eval.VCon ("Token", _)] ->
       own_drop_called := true; March_eval.Eval.VUnit
     | _ -> March_eval.Eval.VUnit) in
-  Hashtbl.replace March_eval.Eval.impl_tbl ("Drop", "Token") drop_fn;
+  Hashtbl.replace March_eval.Eval.impl_tbl ("Drop", "Token") dropfn;
   let token = March_eval.Eval.VCon ("Token", [March_eval.Eval.VInt 1]) in
   (match Hashtbl.find_opt March_eval.Eval.actor_registry 0 with
-   | Some inst -> inst.March_eval.Eval.ai_linear_values <- [(token, drop_fn)]
+   | Some inst -> inst.March_eval.Eval.ai_linear_values <- [(token, dropfn)]
    | None -> Alcotest.fail "actor 0 not found");
   March_eval.Eval.crash_actor 0 "test";
   Alcotest.(check bool) "Phase 6a resource cleanup still works" true !cleanup_called;
@@ -11621,7 +11621,7 @@ let test_dyn_sup_stop_child () =
   (* stop_child via builtin *)
   let stopfn = List.assoc "Supervisor.stop_child"
     (March_eval.Eval.task_builtins @ March_eval.Eval.base_env) in
-  let stop_result = March_eval.Eval.apply stop_fn
+  let stop_result = March_eval.Eval.apply stopfn
     [March_eval.Eval.VAtom "stoppool"; March_eval.Eval.VInt pid] in
   let ok = match stop_result with
     | March_eval.Eval.VCon ("Ok", [March_eval.Eval.VUnit]) -> true | _ -> false in
@@ -15526,7 +15526,7 @@ let () =
         Alcotest.test_case "dead_pure_let"       `Quick test_dce_dead_pure_let;
         Alcotest.test_case "impure_let_kept"     `Quick test_dce_impure_let_kept;
         Alcotest.test_case "used_let_kept"       `Quick test_dce_used_let_kept;
-        Alcotest.test_case "unreachable_top_fn"  `Quick test_dce_unreachable_top_fn;
+        Alcotest.test_case "unreachable_top_fn"  `Quick test_dce_unreachable_topfn;
       ]);
       ("opt", [
         Alcotest.test_case "fixpoint"         `Quick test_opt_fixpoint;
@@ -15933,7 +15933,7 @@ let () =
         (* ── Lexer ──────────────────────────────────────────────────── *)
         Alcotest.test_case "lex import"           `Quick test_lex_import;
         Alcotest.test_case "lex alias"            `Quick test_lex_alias;
-        Alcotest.test_case "lex p_fn"             `Quick test_lex_p_fn;
+        Alcotest.test_case "lex p_fn"             `Quick test_lex_pfn;
         (* ── Parser ─────────────────────────────────────────────────── *)
         Alcotest.test_case "parse import all"     `Quick test_parse_import_all;
         Alcotest.test_case "parse import only"    `Quick test_parse_import_only;
