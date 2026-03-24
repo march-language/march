@@ -3058,6 +3058,34 @@ let base_env : env =
           (try Unix.close (Obj.magic fd : Unix.file_descr) with _ -> ());
           VUnit
         | _ -> eval_error "tcp_close(fd)"))
+    (* ---- Low-level binary TCP receive ---- *)
+  ; ("tcp_recv_exact", VBuiltin ("tcp_recv_exact", function
+        | [VInt fd; VInt n] ->
+          let sock = (Obj.magic fd : Unix.file_descr) in
+          let buf = Bytes.create n in
+          let rec loop off =
+            if off >= n then begin
+              (* Build March Bytes(List(Int)) value: Bytes(Cons(b0, Cons(b1, ... Nil))) *)
+              let lst = ref (VCon ("Nil", [])) in
+              for i = n - 1 downto 0 do
+                lst := VCon ("Cons", [VInt (Char.code (Bytes.get buf i)); !lst])
+              done;
+              VCon ("Ok", [VCon ("Bytes", [!lst])])
+            end else
+              (try
+                 let got = Unix.recv sock buf off (n - off) [] in
+                 if got = 0 then VCon ("Err", [VString "connection closed"])
+                 else loop (off + got)
+               with Unix.Unix_error (err, _, _) ->
+                 VCon ("Err", [VString (Unix.error_message err)]))
+          in
+          loop 0
+        | _ -> eval_error "tcp_recv_exact(fd, n)"))
+    (* ---- MD5 hash (hex string output) ---- *)
+  ; ("md5", VBuiltin ("md5", function
+        | [VString s] ->
+          VString (Digestif.MD5.(to_hex (digest_string s)))
+        | _ -> eval_error "md5(s: String): String"))
   ; ("tcp_recv_http", VBuiltin ("tcp_recv_http", function
         | [VInt fd; VInt max_bytes] ->
           (* Read an HTTP response on a keep-alive connection:
