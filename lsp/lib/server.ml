@@ -26,11 +26,12 @@ let get_analysis uri =
 (* Code actions (helper, defined before the class)                    *)
 (* ------------------------------------------------------------------ *)
 
-let code_actions_for (a : Analysis.t) _uri (range : Lsp.Types.Range.t) :
+let code_actions_for (a : Analysis.t) _uri (range : Lsp.Types.Range.t)
+    (diagnostics : Lsp.Types.Diagnostic.t list) :
     Lsp.Types.CodeAction.t list =
   let line      = range.Lsp.Types.Range.start.Lsp.Types.Position.line in
   let character = range.Lsp.Types.Range.start.Lsp.Types.Position.character in
-  Analysis.code_actions_at a ~line ~character
+  Analysis.code_actions_at a ~line ~character ~diagnostics ()
 
 (* ------------------------------------------------------------------ *)
 (* Semantic tokens encoding                                            *)
@@ -163,7 +164,9 @@ class march_server =
         ServerCapabilities.renameProvider =
           Some (`Bool true);
         ServerCapabilities.signatureHelpProvider =
-          Some sig_help }
+          Some sig_help;
+        ServerCapabilities.foldingRangeProvider =
+          Some (`Bool true) }
 
     (* -------------------------------------------------------------- *)
     (* Document synchronisation                                        *)
@@ -280,10 +283,11 @@ class march_server =
         (params : Lsp.Types.CodeActionParams.t) =
       let uri   = params.textDocument.uri in
       let range = params.range in
+      let ctx_diags = params.context.diagnostics in
       let acts =
         match get_analysis uri with
         | None -> []
-        | Some a -> code_actions_for a uri range
+        | Some a -> code_actions_for a uri range ctx_diags
       in
       Lwt.return
         (if acts = [] then None
@@ -441,6 +445,28 @@ class march_server =
                ("activeSignature", `Int 0);
                ("activeParameter", `Int active_param)
              ]))
+
+      end else if meth = "textDocument/foldingRange" then begin
+        let ranges =
+          match get_td_uri () with
+          | None -> []
+          | Some uri ->
+            (match get_analysis uri with
+             | None -> []
+             | Some a -> a.Analysis.fold_ranges)
+        in
+        let open Lsp.Types in
+        let json_ranges = List.map (fun (sl, el, kind) ->
+            let fr = FoldingRange.create
+              ~startLine:sl
+              ~endLine:el
+              ~kind:(FoldingRangeKind.Other kind)
+              ()
+            in
+            FoldingRange.yojson_of_t fr
+          ) ranges
+        in
+        Lwt.return (`List json_ranges)
 
       end else
         Lwt.fail_with (Printf.sprintf "unhandled request: %s" meth)

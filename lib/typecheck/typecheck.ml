@@ -1098,7 +1098,7 @@ let report_mismatch env ~span ~reason expected found =
   in
   Err.report env.errors
     { Err.severity = Error; span; message = headline;
-      labels; notes = why_note @ mismatch_note }
+      labels; notes = why_note @ mismatch_note; code = None }
 
 (** Structural equality for session types (used by [unify] for [TChan] cases).
     Intentionally ignores payload types — only checks session structure shape. *)
@@ -2055,7 +2055,8 @@ let rec infer_expr env (e : Ast.expr) : ty =
         { Err.severity = Hint; span = sp;
           message = Printf.sprintf "Typed hole %s has type `%s`" label (pp_ty t);
           labels  = [];
-          notes   = [ "Fill this hole with an expression of the type shown above." ] };
+          notes   = [ "Fill this hole with an expression of the type shown above." ];
+          code    = None };
       t
 
     (* ── Function application ─────────────────────────────────────── *)
@@ -3015,18 +3016,18 @@ and free_vars_pattern (p : Ast.pattern) : string list =
 
 (** Emit unused-variable warnings for fn params not referenced in the body.
     The wildcard [_] and names starting with [_] are silently ignored. *)
-let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) fn_span =
+let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_span =
   let used = free_vars_expr [] body in
   let check_name name span =
     if name <> "_" && not (String.length name > 0 && name.[0] = '_')
        && not (List.mem name used) then
-      Err.warning env.errors ~span
+      Err.warning_with_code env.errors ~span ~code:"unused_binding"
         (Printf.sprintf "Unused variable `%s`.\n\
                          Use `_` to mark intentionally unused params." name)
   in
   List.iter (fun fp ->
     match fp with
-    | Ast.FPNamed p -> check_name p.param_name.txt fn_span
+    | Ast.FPNamed p -> check_name p.param_name.txt p.param_name.span
     | Ast.FPPat (Ast.PatVar n) -> check_name n.txt n.span
     | Ast.FPPat _ -> ()
   ) params
@@ -3730,7 +3731,8 @@ let rec check_decl env (d : Ast.decl) : env =
                 h.ah_msg.txt name.txt
                 (pp_ty (repr state_ty)) (pp_ty (repr inferred));
               labels = [];
-              notes = actor_handler_hints (repr state_ty) (repr inferred) }
+              notes = actor_handler_hints (repr state_ty) (repr inferred);
+              code = None }
       ) actor.actor_handlers;
     bind_var name.txt (Mono (TCon ("Pid", [state_ty]))) env_with_ctors
 
