@@ -1,21 +1,20 @@
-/* march_scheduler.c — Phase 2 cooperative green-thread scheduler with
- * mailbox message passing.
+/* march_scheduler.c — M:N multi-thread green-thread scheduler with
+ * work-stealing deques and mailbox message passing.
  *
  * Design
  * ──────
- * Each spawned process gets its own stack (mmap'd, with a PROT_NONE guard
- * page at the low end) and a ucontext_t save area.  The global scheduler
- * holds a FIFO run queue of READY processes.
+ * N OS threads each run a scheduler loop.  Each scheduler owns a Chase-Lev
+ * work-stealing deque of READY processes.  The owner pushes/pops from the
+ * bottom (LIFO for cache locality).  Idle schedulers steal from others'
+ * tops (FIFO for load balance).
  *
- * Scheduling policy: round-robin.
- *   1. Dequeue the next READY process.
- *   2. Reset its reduction budget to MARCH_REDUCTION_BUDGET.
- *   3. swapcontext(scheduler → process).
- *   4. Process runs until it calls march_sched_yield() or march_sched_tick()
- *      exhausts its budget, at which point it swapcontext(process → scheduler).
- *   5. If the process is still READY, re-enqueue it; if DEAD, free it.
- *      If WAITING, leave it parked — a sender will re-enqueue via wake.
- *   6. Repeat until the run queue is empty.
+ * Scheduling policy: per-thread LIFO with work-stealing.
+ *   1. Pop the next READY process from the local deque.
+ *   2. If empty, attempt to steal from a random other scheduler.
+ *   3. If stolen or local: reset reduction budget, swapcontext into process.
+ *   4. On return: if READY, push back to local deque; if DEAD, free.
+ *      If WAITING, leave parked — a sender will re-enqueue via wake.
+ *   5. If all deques empty and g_live_procs == 0, set g_all_done and exit.
  *
  * Context switching
  * ─────────────────
@@ -23,25 +22,8 @@
  * Each process's ucontext points to its own mmap'd stack.  The trampoline
  * wraps the user function and calls march_sched_exit() on return.
  *
- * makecontext only accepts int-sized variadic arguments, so a 64-bit
- * pointer to the proc struct is passed as two 32-bit halves (hi, lo)
- * and reassembled in the trampoline.
- *
- * Phase 2 additions
- * ─────────────────
- * - Per-process FIFO mailbox (march_sched_send / march_sched_recv).
- * - PROC_WAITING state: a process parks itself in march_sched_recv when its
- *   mailbox is empty and resumes when march_sched_wake re-enqueues it.
- * - Process registry (g_proc_registry) for O(1) PID lookup via march_sched_find.
- * - Spinlock on each mailbox (mbox_lock) — Phase 3 will use this for
- *   cross-thread sends; in Phase 2 (single OS thread) it is always uncontended.
- * - march_sched_try_recv: non-blocking mailbox peek.
- *
- * Phase 3 extensions
- * ──────────────────
- * Multi-thread (M>1 OS threads) and work-stealing arrive in Phase 3.
- * The deadlock break in march_sched_run (all WAITING, empty run queue)
- * will be replaced by a parking lot / epoll integration.
+ * Each process stores an owner_sched pointer set by the scheduler before
+ * swapcontext.  The trampoline uses this to return to the correct scheduler.
  */
 
 /* _XOPEN_SOURCE must come before all system headers (see march_scheduler.h).
@@ -55,11 +37,13 @@
 #endif
 
 #include "march_scheduler.h"
+#include <pthread.h>
+#include <sched.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <unistd.h>   /* getpagesize */
+#include <unistd.h>   /* getpagesize, sysconf */
 
 /* macOS spells it MAP_ANON; Linux spells it MAP_ANONYMOUS.  Both platforms
  * define MAP_ANON as well, so we only need the reverse fallback. */
@@ -76,8 +60,13 @@
 
 /* ── Global state ─────────────────────────────────────────────────────── */
 
-static march_scheduler g_sched;
-static int64_t         g_total_spawned = 0;
+static march_scheduler  g_scheds[MARCH_NUM_SCHEDULERS + 1];
+static int              g_num_scheds = 0;
+static _Atomic int64_t  g_next_pid   = 0;
+static _Atomic int      g_all_done   = 0;
+static _Atomic int64_t  g_live_procs = 0;
+
+static _Thread_local march_scheduler *tl_sched = NULL;
 
 /* ── Process registry (for march_sched_find) ──────────────────────────── */
 
@@ -128,7 +117,7 @@ static void stack_free(void *stack_base, size_t alloc_size) {
     munmap(mem, alloc_size);
 }
 
-/* ── Mailbox spinlock (needed for Phase 3 thread safety, used from Phase 2) ── */
+/* ── Mailbox spinlock ────────────────────────────────────────────────── */
 
 static inline void mbox_lock_acquire(march_proc *p) {
     int exp = 0;
@@ -184,41 +173,27 @@ static void proc_trampoline(int arg_hi, int arg_lo) {
     proc->fn(proc->arg);
 
     /* Function returned — mark dead and hand control back to the scheduler. */
-    proc->status = PROC_DEAD;
-    swapcontext(&proc->ctx, &g_sched.sched_ctx);
+    atomic_store_explicit(&proc->status, PROC_DEAD, memory_order_release);
+    swapcontext(&proc->ctx, &proc->owner_sched->sched_ctx);
     /* If we ever return here the OS context is gone — abort defensively. */
     abort();
-}
-
-/* ── Run-queue helpers (FIFO) ─────────────────────────────────────────── */
-
-static void run_enqueue(march_proc *p) {
-    p->next   = NULL;
-    p->status = PROC_READY;
-    if (g_sched.run_tail) {
-        g_sched.run_tail->next = p;
-    } else {
-        g_sched.run_head = p;
-    }
-    g_sched.run_tail = p;
-}
-
-static march_proc *run_dequeue(void) {
-    march_proc *p = g_sched.run_head;
-    if (!p) return NULL;
-    g_sched.run_head = p->next;
-    if (!g_sched.run_head) g_sched.run_tail = NULL;
-    p->next = NULL;
-    return p;
 }
 
 /* ── Public API ───────────────────────────────────────────────────────── */
 
 void march_sched_init(void) {
-    memset(&g_sched, 0, sizeof(g_sched));
-    g_total_spawned = 0;
+    atomic_store_explicit(&g_next_pid, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_all_done, 0, memory_order_relaxed);
+    atomic_store_explicit(&g_live_procs, 0, memory_order_relaxed);
     memset(g_proc_registry, 0, sizeof(g_proc_registry));
     g_proc_count = 0;
+
+    g_num_scheds = MARCH_NUM_SCHEDULERS > 0 ? MARCH_NUM_SCHEDULERS : 1;
+    for (int i = 0; i < g_num_scheds; i++) {
+        memset(&g_scheds[i], 0, sizeof(march_scheduler));
+        march_deque_init(&g_scheds[i].local_queue);
+        g_scheds[i].id = i;
+    }
 }
 
 march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
@@ -228,7 +203,7 @@ march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
         return NULL;
     }
 
-    p->pid        = g_sched.next_pid++;
+    p->pid        = atomic_fetch_add_explicit(&g_next_pid, 1, memory_order_relaxed);
     p->status     = PROC_READY;
     p->priority   = PRIO_NORMAL;
     p->reductions = MARCH_REDUCTION_BUDGET;
@@ -237,7 +212,8 @@ march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
     p->mailbox    = NULL;
     p->mbox_tail  = NULL;
     p->mbox_count = 0;
-    p->mbox_lock  = 0;
+    atomic_init(&p->mbox_lock, 0);
+    p->owner_sched = NULL;
 
     /* Allocate the stack. */
     p->stack_base = stack_alloc(MARCH_STACK_SIZE, &p->stack_alloc);
@@ -264,58 +240,123 @@ march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
     int       arg_lo = (int)(uint32_t)(addr & 0xFFFFFFFFu);
     makecontext(&p->ctx, (void (*)(void))proc_trampoline, 2, arg_hi, arg_lo);
 
-    run_enqueue(p);
     registry_add(p);
-    g_total_spawned++;
+    atomic_fetch_add_explicit(&g_live_procs, 1, memory_order_relaxed);
+
+    /* Push to the local deque if called from a scheduler thread, otherwise
+     * round-robin across schedulers by PID. */
+    if (tl_sched) {
+        march_deque_push(&tl_sched->local_queue, p);
+    } else if (g_num_scheds > 0) {
+        int target = (int)(p->pid % g_num_scheds);
+        march_deque_push(&g_scheds[target].local_queue, p);
+    } else {
+        march_deque_push(&g_scheds[0].local_queue, p);
+    }
+
     return p;
 }
 
-void march_sched_run(void) {
-    g_sched.running = 1;
+/* ── Per-thread scheduler loop with work-stealing ────────────────────── */
 
-    for (;;) {
-        march_proc *p = run_dequeue();
-        if (!p) {
-            if (g_proc_count <= 0) break;
-            break;  /* Deadlock: all WAITING; Phase 3 replaces this */
+static void sched_loop(march_scheduler *sched) {
+    tl_sched = sched;
+    sched->running = 1;
+    unsigned int steal_seed = (unsigned int)sched->id;
+
+    while (!atomic_load_explicit(&g_all_done, memory_order_acquire)) {
+        /* Single-scheduler: use steal (FIFO) for fairness and compatibility.
+         * Multi-scheduler: use pop (LIFO) for cache locality; steal from others. */
+        march_proc *p;
+        if (g_num_scheds <= 1) {
+            p = (march_proc *)march_deque_steal(&sched->local_queue);
+        } else {
+            p = (march_proc *)march_deque_pop(&sched->local_queue);
         }
 
-        /* Start a new quantum: fresh budget, mark running, switch in. */
-        p->status        = PROC_RUNNING;
-        p->reductions    = MARCH_REDUCTION_BUDGET;
-        g_sched.current  = p;
+        /* Try to steal from another scheduler if local deque is empty. */
+        if (!p && g_num_scheds > 1) {
+            for (int attempts = 0; attempts < g_num_scheds - 1; attempts++) {
+                steal_seed = steal_seed * 1103515245 + 12345;
+                int victim = (int)((steal_seed >> 16) % g_num_scheds);
+                if (victim == sched->id) victim = (victim + 1) % g_num_scheds;
+                p = (march_proc *)march_deque_steal(&g_scheds[victim].local_queue);
+                if (p) break;
+            }
+        }
 
-        swapcontext(&g_sched.sched_ctx, &p->ctx);
+        if (!p) {
+            if (atomic_load_explicit(&g_live_procs, memory_order_acquire) <= 0) {
+                atomic_store_explicit(&g_all_done, 1, memory_order_release);
+                break;
+            }
+            sched_yield();
+            continue;
+        }
 
-        /* Returned here after process called march_sched_yield() or died. */
-        g_sched.current = NULL;
+        atomic_store_explicit(&p->status, PROC_RUNNING, memory_order_release);
+        p->reductions   = MARCH_REDUCTION_BUDGET;
+        p->owner_sched  = sched;
+        sched->current  = p;
 
-        if (p->status == PROC_READY) {
-            /* Process voluntarily yielded — re-enqueue for the next turn. */
-            run_enqueue(p);
-        } else if (p->status == PROC_DEAD) {
-            /* Process finished — release its resources. */
+        swapcontext(&sched->sched_ctx, &p->ctx);
+
+        sched->current = NULL;
+
+        march_proc_status st = atomic_load_explicit(&p->status, memory_order_acquire);
+        if (st == PROC_READY) {
+            march_deque_push(&sched->local_queue, p);
+        } else if (st == PROC_DEAD) {
             registry_remove(p);
+            atomic_fetch_sub_explicit(&g_live_procs, 1, memory_order_release);
             stack_free(p->stack_base, p->stack_alloc);
             free(p);
         }
         /* PROC_WAITING: process parked itself; a wakeup call re-enqueues it. */
     }
 
-    g_sched.running = 0;
+    sched->running = 0;
+    tl_sched = NULL;
+}
+
+static void *sched_thread_entry(void *arg) {
+    march_scheduler *sched = (march_scheduler *)arg;
+    sched_loop(sched);
+    return NULL;
+}
+
+void march_sched_run(void) {
+    atomic_store_explicit(&g_all_done, 0, memory_order_relaxed);
+
+    /* Single-scheduler fast path: no threads needed. */
+    if (g_num_scheds <= 1) {
+        sched_loop(&g_scheds[0]);
+        return;
+    }
+
+    /* Spawn N-1 worker threads; scheduler 0 runs on the calling thread. */
+    for (int i = 1; i < g_num_scheds; i++) {
+        pthread_create(&g_scheds[i].thread, NULL, sched_thread_entry, &g_scheds[i]);
+    }
+
+    sched_loop(&g_scheds[0]);
+
+    for (int i = 1; i < g_num_scheds; i++) {
+        pthread_join(g_scheds[i].thread, NULL);
+    }
 }
 
 void march_sched_yield(void) {
-    march_proc *p = g_sched.current;
-    if (!p) return; /* No-op when called outside a scheduled process. */
-    p->status = PROC_READY;
-    swapcontext(&p->ctx, &g_sched.sched_ctx);
+    if (!tl_sched || !tl_sched->current) return;
+    march_proc *p = tl_sched->current;
+    atomic_store_explicit(&p->status, PROC_READY, memory_order_release);
+    swapcontext(&p->ctx, &tl_sched->sched_ctx);
     /* Execution resumes here after the scheduler re-schedules us. */
 }
 
 void march_sched_tick(void) {
-    march_proc *p = g_sched.current;
-    if (!p) return;
+    if (!tl_sched || !tl_sched->current) return;
+    march_proc *p = tl_sched->current;
     p->reductions--;
     if (p->reductions <= 0) {
         march_sched_yield(); /* Budget exhausted — cooperative preemption. */
@@ -323,19 +364,19 @@ void march_sched_tick(void) {
 }
 
 void march_sched_exit(void) {
-    march_proc *p = g_sched.current;
-    if (!p) return;
-    p->status = PROC_DEAD;
-    swapcontext(&p->ctx, &g_sched.sched_ctx);
+    if (!tl_sched || !tl_sched->current) return;
+    march_proc *p = tl_sched->current;
+    atomic_store_explicit(&p->status, PROC_DEAD, memory_order_release);
+    swapcontext(&p->ctx, &tl_sched->sched_ctx);
     abort(); /* Should never be reached. */
 }
 
 march_proc *march_sched_current(void) {
-    return g_sched.current;
+    return tl_sched ? tl_sched->current : NULL;
 }
 
 int64_t march_sched_total_spawned(void) {
-    return g_total_spawned;
+    return atomic_load_explicit(&g_next_pid, memory_order_relaxed);
 }
 
 march_proc *march_sched_find(int64_t pid) {
@@ -348,16 +389,16 @@ int march_sched_send(march_proc *target, void *msg) {
         return -1;
     mbox_lock_acquire(target);
     mbox_push(target, msg);
-    int was_waiting = (atomic_load_explicit(&target->status, memory_order_acquire) == PROC_WAITING);
+    march_proc_status st = atomic_load_explicit(&target->status, memory_order_acquire);
     mbox_lock_release(target);
-    if (was_waiting) {
+    if (st == PROC_WAITING) {
         march_sched_wake(target);
     }
     return 0;
 }
 
 void *march_sched_recv(void) {
-    march_proc *p = g_sched.current;
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p) return NULL;
 
     /* Fast path: message already available. */
@@ -374,20 +415,31 @@ void *march_sched_recv(void) {
     atomic_store_explicit(&p->status, PROC_WAITING, memory_order_release);
     mbox_lock_release(p);
 
-    swapcontext(&p->ctx, &g_sched.sched_ctx);
+    swapcontext(&p->ctx, &tl_sched->sched_ctx);
 
     /* Resumed — a sender woke us. */
-    return mbox_pop(p);
+    mbox_lock_acquire(p);
+    msg = mbox_pop(p);
+    mbox_lock_release(p);
+    return msg;
 }
 
 void *march_sched_try_recv(void) {
-    march_proc *p = g_sched.current;
+    march_proc *p = tl_sched ? tl_sched->current : NULL;
     if (!p) return NULL;
-    return mbox_pop(p);
+    mbox_lock_acquire(p);
+    void *msg = mbox_pop(p);
+    mbox_lock_release(p);
+    return msg;
 }
 
 void march_sched_wake(march_proc *target) {
     if (!target || atomic_load_explicit(&target->status, memory_order_acquire) != PROC_WAITING)
         return;
-    run_enqueue(target);  /* Sets status to PROC_READY */
+    atomic_store_explicit(&target->status, PROC_READY, memory_order_release);
+    if (tl_sched) {
+        march_deque_push(&tl_sched->local_queue, target);
+    } else {
+        march_deque_push(&g_scheds[0].local_queue, target);
+    }
 }

@@ -9,11 +9,14 @@
  (targets test_scheduler_runner)
  (deps    test_scheduler.c
           ../runtime/march_scheduler.c
-          ../runtime/march_scheduler.h)
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_NUM_SCHEDULERS=1
                -o %{targets}
-               test_scheduler.c ../runtime/march_scheduler.c)))
+               test_scheduler.c ../runtime/march_scheduler.c
+               -lpthread)))
 
 (rule
  (alias   runtest)

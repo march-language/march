@@ -9,6 +9,9 @@
 #include <stddef.h>
 #include <stdatomic.h>
 #include <ucontext.h>
+#include <pthread.h>
+
+#include "march_deque.h"
 
 /* ── Constants ────────────────────────────────────────────────────────── */
 
@@ -22,11 +25,17 @@
  * this many march_sched_tick() calls within a single scheduler turn. */
 #define MARCH_REDUCTION_BUDGET  4000
 
+/* Number of OS-thread schedulers.  Override at compile time with
+ * -DMARCH_NUM_SCHEDULERS=N.  Default is 4. */
+#ifndef MARCH_NUM_SCHEDULERS
+#  define MARCH_NUM_SCHEDULERS 4
+#endif
+
 /* ── Process status ───────────────────────────────────────────────────── */
 typedef enum {
     PROC_READY   = 0,  /* In run queue, waiting for a CPU turn              */
     PROC_RUNNING = 1,  /* Currently executing on the scheduler thread       */
-    PROC_WAITING = 2,  /* Blocked on receive/I/O; not in run queue (Phase 2) */
+    PROC_WAITING = 2,  /* Blocked on receive/I/O; not in run queue          */
     PROC_DEAD    = 3   /* Finished; resources will be freed by the scheduler */
 } march_proc_status;
 
@@ -36,38 +45,42 @@ typedef enum {
     PRIO_HIGH   = 1
 } march_proc_priority;
 
-/* ── Mailbox node (Phase 2: message passing) ──────────────────────────── */
+/* ── Mailbox node ────────────────────────────────────────────────────── */
 typedef struct march_mbox_node {
     void                   *msg;
     struct march_mbox_node *next;
 } march_mbox_node;
 
+/* Forward-declare scheduler so march_proc can hold a pointer to it. */
+struct march_scheduler;
+
 /* ── Green thread process descriptor ─────────────────────────────────── */
 typedef struct march_proc {
-    int64_t                   pid;          /* Unique process ID (monotonic counter) */
-    _Atomic march_proc_status status;       /* Process lifecycle state (atomic for Phase 3) */
-    march_proc_priority       priority;
-    int64_t                   reductions;   /* Remaining reduction budget this quantum */
-    void                     *stack_base;  /* Start of usable stack (after guard page) */
-    size_t                    stack_alloc; /* Total mmap allocation size (incl. guard) */
-    march_mbox_node          *mailbox;     /* Head of message queue (FIFO)             */
-    march_mbox_node          *mbox_tail;   /* Tail of message queue (for O(1) enqueue) */
-    int64_t                   mbox_count;  /* Number of messages in mailbox            */
-    _Atomic int               mbox_lock;   /* Spinlock for mailbox access (Phase 3)    */
-    ucontext_t                ctx;         /* Saved execution context (makecontext/swap) */
-    void                    (*fn)(void *); /* Entry function */
-    void                     *arg;         /* Argument passed to fn */
-    struct march_proc        *next;        /* Intrusive run-queue link */
+    int64_t                    pid;          /* Unique process ID (monotonic counter) */
+    _Atomic march_proc_status  status;       /* Process lifecycle state (atomic)      */
+    march_proc_priority        priority;
+    int64_t                    reductions;   /* Remaining reduction budget this quantum */
+    void                      *stack_base;   /* Start of usable stack (after guard page) */
+    size_t                     stack_alloc;  /* Total mmap allocation size (incl. guard) */
+    march_mbox_node           *mailbox;      /* Head of message queue (FIFO)             */
+    march_mbox_node           *mbox_tail;    /* Tail of message queue (for O(1) enqueue) */
+    int64_t                    mbox_count;   /* Number of messages in mailbox            */
+    _Atomic int                mbox_lock;    /* Spinlock for mailbox access              */
+    ucontext_t                 ctx;          /* Saved execution context (makecontext/swap) */
+    void                     (*fn)(void *);  /* Entry function */
+    void                      *arg;          /* Argument passed to fn */
+    struct march_proc         *next;         /* Intrusive link (unused with deque, kept for compat) */
+    struct march_scheduler    *owner_sched;  /* Scheduler that last ran this process */
 } march_proc;
 
-/* ── Scheduler (single OS-thread, Phase 1) ───────────────────────────── */
+/* ── Scheduler (per OS-thread) ───────────────────────────────────────── */
 typedef struct march_scheduler {
-    march_proc *run_head;   /* FIFO run-queue head                           */
-    march_proc *run_tail;   /* FIFO run-queue tail                           */
-    march_proc *current;    /* Currently running process (NULL = in sched)   */
-    ucontext_t  sched_ctx;  /* Scheduler context; processes yield back here  */
-    int64_t     next_pid;   /* Next PID to assign (monotonic)                */
-    int         running;    /* Non-zero while march_sched_run() is active    */
+    march_deque     local_queue;  /* Work-stealing deque of READY processes      */
+    march_proc     *current;      /* Currently running process (NULL = in sched) */
+    ucontext_t      sched_ctx;    /* Scheduler context; processes yield here     */
+    int             running;      /* Non-zero while scheduler loop is active     */
+    int             id;           /* Scheduler index (0..N-1)                    */
+    pthread_t       thread;       /* OS thread handle (for schedulers 1..N-1)    */
 } march_scheduler;
 
 /* ── Public API ───────────────────────────────────────────────────────── */
@@ -76,7 +89,8 @@ typedef struct march_scheduler {
 void         march_sched_init(void);
 
 /* Run the scheduler loop until all spawned processes are DEAD.
- * Returns to the caller once the run queue drains. */
+ * Returns to the caller once all work drains.  Spawns N-1 worker threads
+ * and runs scheduler 0 on the calling thread. */
 void         march_sched_run(void);
 
 /* Spawn a new green thread.  Returns the new process, or NULL on failure.
