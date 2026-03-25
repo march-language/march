@@ -439,10 +439,14 @@ use_selector:
   | LBRACE; names = separated_list(COMMA, lower_name); RBRACE
     { UseNames names }
 
-(** Elixir-style import: import Mod, import Mod, only: [f,g], import Mod, except: [f,g] *)
+(** Elixir-style import: import Mod, import Mod, only: [f,g], import Mod, except: [f,g]
+    Also: import Mod.{A, B} — selective import using dot-brace syntax *)
 import_decl:
   | IMPORT; name = upper_name
     { DUse ({ use_path = [name]; use_sel = UseAll }, mk_span ($loc)) }
+  | IMPORT; name = upper_name; DOT; LBRACE;
+    names = separated_list(COMMA, any_name); RBRACE
+    { DUse ({ use_path = [name]; use_sel = UseNames names }, mk_span ($loc)) }
   | IMPORT; name = upper_name; COMMA; ONLY; COLON; LBRACKET;
     names = separated_list(COMMA, lower_name); RBRACKET
     { DUse ({ use_path = [name]; use_sel = UseNames names }, mk_span ($loc)) }
@@ -450,13 +454,20 @@ import_decl:
     names = separated_list(COMMA, lower_name); RBRACKET
     { DUse ({ use_path = [name]; use_sel = UseExcept names }, mk_span ($loc)) }
 
-(** alias Long.Name, as: Short  or  alias Long.Name  (short = last segment) *)
+(** alias Long.Name, as: Short  or  alias Long.Name as Short  or  alias Long.Name *)
 alias_decl_rule:
   | ALIAS; path = upper_dot_path; COMMA; AS; COLON; short = upper_name
+    { DAlias ({ alias_path = path; alias_name = short }, mk_span ($loc)) }
+  | ALIAS; path = upper_dot_path; AS; short = upper_name
     { DAlias ({ alias_path = path; alias_name = short }, mk_span ($loc)) }
   | ALIAS; path = upper_dot_path
     { let last = List.nth path (List.length path - 1) in
       DAlias ({ alias_path = path; alias_name = last }, mk_span ($loc)) }
+
+(** Name accepting both uppercase (type/constructor) and lowercase (function) identifiers *)
+any_name:
+  | n = lower_name { n }
+  | n = upper_name { n }
 
 upper_dot_path:
   | name = upper_name { [name] }

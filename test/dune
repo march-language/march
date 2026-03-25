@@ -43,3 +43,12 @@
 (executable
  (name debug_fmt)
  (libraries march_lexer march_parser march_ast march_format))
+
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (file imports/test_cross_import.march)
+       (file imports/greeting.march)
+       (file imports/math_utils.march))
+ (action (run %{exe:../bin/main.exe} test
+              imports/test_cross_import.march)))

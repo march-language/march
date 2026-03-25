@@ -1,0 +1,15 @@
+mod Greeting do
+
+fn hello(name : String) : String do
+  "Hello, " ++ name ++ "!"
+end
+
+fn goodbye(name : String) : String do
+  "Goodbye, " ++ name ++ "!"
+end
+
+pfn internal_helper() : String do
+  "secret"
+end
+
+end
