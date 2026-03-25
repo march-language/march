@@ -26,12 +26,21 @@ type match_site = {
   ms_span          : Ast.span;         (** Span of the whole match expression *)
   ms_missing_cases : string list;      (** All missing patterns for this match *)
   ms_matched_type  : string option;    (** Inferred type name being matched, if known *)
+  ms_ctor_sigs     : (string * Ast.ty list) list;
+  (** Constructor name → field arg types (surface AST types), for typed stub generation. *)
 }
+
+(** What kind of annotation site this is. *)
+type annotation_kind =
+  | AnnLet       (** let x = e  →  let x: T = e *)
+  | AnnFnReturn  (** fn foo(x) do e end  →  fn foo(x) -> T do e end *)
+  | AnnFnParam   (** fn foo(x) do e end  →  fn foo(x: T) do e end *)
 
 (** A site where a type annotation can be inserted. *)
 type annotation_site = {
-  as_name_span : Ast.span;  (** Span of the unannotated variable name *)
-  as_rhs_span  : Ast.span;  (** Span of the RHS expression (for type lookup) *)
+  as_name_span : Ast.span;         (** Span of the unannotated name (cursor detection) *)
+  as_rhs_span  : Ast.span;         (** Span used for type lookup in type_map *)
+  as_kind      : annotation_kind;  (** What kind of annotation to insert *)
 }
 
 (** Where a linear/affine value is consumed. *)
@@ -550,9 +559,31 @@ let collect_fold_ranges (m : Ast.module_) : (int * int * string) list =
   go_decls m.Ast.mod_decls;
   !ranges
 
-(** Walk an AST module collecting unannotated let bindings. *)
+(** Walk an AST module collecting unannotated let bindings, function return types,
+    and function parameters. *)
 let collect_annotation_sites (m : Ast.module_) : annotation_site list =
   let sites = ref [] in
+  let collect_fn_sites (fn : Ast.fn_def) =
+    (* Return-type annotation site: only if fn has no declared return type *)
+    if fn.fn_ret_ty = None then
+      sites := { as_name_span = fn.fn_name.span;
+                 as_rhs_span  = fn.fn_name.span;
+                 as_kind      = AnnFnReturn } :: !sites;
+    (* Parameter annotation sites: one per unannotated param in first clause.
+       March parses bare `x` as FPPat(PatVar x) and `x: T` as FPNamed.
+       Only collect sites for FPPat(PatVar) — those lack type annotations. *)
+    (match fn.fn_clauses with
+     | cl :: _ ->
+       List.iter (fun fp ->
+           match fp with
+           | Ast.FPPat (Ast.PatVar name) when name.span <> Ast.dummy_span ->
+             sites := { as_name_span = name.span;
+                        as_rhs_span  = name.span;
+                        as_kind      = AnnFnParam } :: !sites
+           | _ -> ()
+         ) cl.fc_params
+     | [] -> ())
+  in
   let rec go_decls decls = List.iter go_decl decls
   and go_decl decl =
     match decl with
@@ -561,10 +592,13 @@ let collect_annotation_sites (m : Ast.module_) : annotation_site list =
        | Ast.PatVar name, None ->
          let rhs_sp = span_of_expr b.bind_expr in
          if rhs_sp <> Ast.dummy_span then
-           sites := { as_name_span = name.Ast.span; as_rhs_span = rhs_sp } :: !sites
+           sites := { as_name_span = name.Ast.span;
+                      as_rhs_span  = rhs_sp;
+                      as_kind      = AnnLet } :: !sites
        | _ -> ());
       go_expr b.bind_expr
     | Ast.DFn (fn, _) ->
+      collect_fn_sites fn;
       List.iter (fun (cl : Ast.fn_clause) -> go_expr cl.fc_body) fn.fn_clauses
     | Ast.DMod (_, _, decls, _) -> go_decls decls
     | Ast.DDescribe (_, decls, _) -> go_decls decls
@@ -576,7 +610,9 @@ let collect_annotation_sites (m : Ast.module_) : annotation_site list =
        | Ast.PatVar name, None ->
          let rhs_sp = span_of_expr b.bind_expr in
          if rhs_sp <> Ast.dummy_span then
-           sites := { as_name_span = name.Ast.span; as_rhs_span = rhs_sp } :: !sites
+           sites := { as_name_span = name.Ast.span;
+                      as_rhs_span  = rhs_sp;
+                      as_kind      = AnnLet } :: !sites
        | _ -> ());
       go_expr b.bind_expr
     | Ast.EBlock (es, _)         -> List.iter go_expr es
@@ -743,6 +779,12 @@ let analyse ~filename ~src : t =
     let ctor_parent_map =
       List.map (fun (name, ci) -> (name, ci.Tc.ci_type)) final_env.Tc.ctors
     in
+    (* Build ctor → surface arg types map (for typed stub generation — P1.1) *)
+    let ctor_sigs_map : (string, Ast.ty list) Hashtbl.t = Hashtbl.create 16 in
+    List.iter (fun (name, (ci : Tc.ctor_info)) ->
+        if not (String.contains name '.') then
+          Hashtbl.replace ctor_sigs_map name ci.Tc.ci_arg_tys
+      ) final_env.Tc.ctors;
     (* Build parent-type → all ctors map (bare names only — skip "Type.Ctor" keys) *)
     let type_ctors_map : (string, string list) Hashtbl.t = Hashtbl.create 8 in
     List.iter (fun (ctor, parent) ->
@@ -805,7 +847,7 @@ let analyse ~filename ~src : t =
       end
     in
     (* Walk the desugared AST to find EMatch nodes at known non-exhaustive spans *)
-    let match_span_tbl : (Ast.span, string list * string option) Hashtbl.t =
+    let match_span_tbl : (Ast.span, string list * string option * (string * Ast.ty list) list) Hashtbl.t =
       Hashtbl.create 4
     in
     let is_nonexhaustive_span sp =
@@ -837,7 +879,13 @@ let analyse ~filename ~src : t =
                 | _ -> None
               ) branches
         in
-        Hashtbl.replace match_span_tbl sp (missing, ms_matched_type);
+        (* Build ctor sigs for missing cases (typed stub generation) *)
+        let ms_ctor_sigs = List.filter_map (fun case ->
+            match Hashtbl.find_opt ctor_sigs_map case with
+            | Some arg_tys -> Some (case, arg_tys)
+            | None -> None
+          ) missing in
+        Hashtbl.replace match_span_tbl sp (missing, ms_matched_type, ms_ctor_sigs);
         augment_expr scrut;
         List.iter (fun (br : Ast.branch) -> augment_expr br.branch_body) branches
       | Ast.EMatch (scrut, branches, _) ->
@@ -858,8 +906,8 @@ let analyse ~filename ~src : t =
     let match_sites =
       List.map (fun sp ->
           match Hashtbl.find_opt match_span_tbl sp with
-          | Some (missing, ms_matched_type) ->
-            { ms_span = sp; ms_missing_cases = missing; ms_matched_type }
+          | Some (missing, ms_matched_type, ms_ctor_sigs) ->
+            { ms_span = sp; ms_missing_cases = missing; ms_matched_type; ms_ctor_sigs }
           | None ->
             (* Fallback: no AST info found — use the single case from typecheck *)
             let prefix = "Non-exhaustive pattern match — missing case: " in
@@ -876,7 +924,8 @@ let analyse ~filename ~src : t =
             in
             { ms_span = sp;
               ms_missing_cases = (match fallback_case with Some c -> [c] | None -> []);
-              ms_matched_type = None }
+              ms_matched_type = None;
+              ms_ctor_sigs = [] }
         ) match_site_spans
     in
     (* Group match_sites by matched type for file-scope fix actions *)
@@ -1589,6 +1638,51 @@ let code_actions_at (a : t) ~line ~character
       ) a.consumption
   in
   (* ---- Exhaustion quickfix actions ---- *)
+  (* Helper: derive a variable name from an AST surface type (for typed stubs). *)
+  let name_from_ast_ty (ty : Ast.ty) =
+    match ty with
+    | Ast.TyCon (n, args) ->
+      (match n.Ast.txt, args with
+       | "Int",    []  -> "n"
+       | "String", []  -> "s"
+       | "Float",  []  -> "f"
+       | "Bool",   []  -> "b"
+       | "List",   _   -> "items"
+       | "Option", _   -> "opt"
+       | name, _ ->
+         let lower = String.lowercase_ascii name in
+         if lower = "" then "x" else String.sub lower 0 1)
+    | Ast.TyVar v -> v.Ast.txt
+    | _ -> "x"
+  in
+  (* Helper: deduplicate a list of names by appending numeric suffixes. *)
+  let dedup_names names =
+    let counts : (string, int) Hashtbl.t = Hashtbl.create 4 in
+    List.iter (fun n ->
+        Hashtbl.replace counts n
+          (1 + (match Hashtbl.find_opt counts n with Some c -> c | None -> 0))
+      ) names;
+    let seen : (string, int) Hashtbl.t = Hashtbl.create 4 in
+    List.map (fun n ->
+        let total = match Hashtbl.find_opt counts n with Some c -> c | None -> 1 in
+        if total = 1 then n
+        else begin
+          let idx = 1 + (match Hashtbl.find_opt seen n with Some c -> c | None -> 0) in
+          Hashtbl.replace seen n idx;
+          Printf.sprintf "%s%d" n idx
+        end
+      ) names
+  in
+  (* Helper: generate arm text for one missing case using typed stubs. *)
+  let arm_text_for_case (ms : match_site) case =
+    match List.assoc_opt case ms.ms_ctor_sigs with
+    | None | Some [] ->
+      Printf.sprintf "| %s ->\n    ?\n" case
+    | Some arg_tys ->
+      let base_names = List.map name_from_ast_ty arg_tys in
+      let names = dedup_names base_names in
+      Printf.sprintf "| %s(%s) ->\n    ?\n" case (String.concat ", " names)
+  in
   (* Helper: given a match_site, compute the insert position just before 'end' *)
   let insert_pos_for_match_site (ms : match_site) =
     match find_end_before_span a.src ms.ms_span with
@@ -1615,10 +1709,10 @@ let code_actions_at (a : t) ~line ~character
           | Some insert_pos ->
             let range = Range.create ~start:insert_pos ~end_:insert_pos in
             let uri   = DocumentUri.of_path a.filename in
-            (* Individual "Add missing case: X" actions *)
+            (* Individual "Add missing case: X" actions — typed stubs via arm_text_for_case *)
             let individual_actions =
               List.map (fun case ->
-                  let arm_text = Printf.sprintf "| %s ->\n    ?\n" case in
+                  let arm_text = arm_text_for_case ms case in
                   let edit = TextEdit.create ~range ~newText:arm_text in
                   let we   = WorkspaceEdit.create ~changes:[(uri, [edit])] () in
                   CodeAction.create
@@ -1632,9 +1726,7 @@ let code_actions_at (a : t) ~line ~character
             let bulk_action =
               if List.length ms.ms_missing_cases <= 1 then []
               else begin
-                let arm_texts = List.map (fun case ->
-                    Printf.sprintf "| %s ->\n    ?\n" case
-                  ) ms.ms_missing_cases in
+                let arm_texts = List.map (arm_text_for_case ms) ms.ms_missing_cases in
                 let combined = String.concat "" arm_texts in
                 let edit = TextEdit.create ~range ~newText:combined in
                 let we   = WorkspaceEdit.create ~changes:[(uri, [edit])] () in
@@ -1667,9 +1759,7 @@ let code_actions_at (a : t) ~line ~character
                         | None -> None
                         | Some ipos ->
                           let r = Range.create ~start:ipos ~end_:ipos in
-                          let arm_texts = List.map (fun case ->
-                              Printf.sprintf "| %s ->\n    ?\n" case
-                            ) site.ms_missing_cases in
+                          let arm_texts = List.map (arm_text_for_case site) site.ms_missing_cases in
                           Some (TextEdit.create ~range:r
                                   ~newText:(String.concat "" arm_texts))
                     ) same_type_sites
@@ -1690,47 +1780,152 @@ let code_actions_at (a : t) ~line ~character
         end
       ) a.match_sites
   in
-  (* ---- Add-type-annotation actions ---- *)
-  let annotation_actions =
-    List.filter_map (fun (site : annotation_site) ->
-        if not (Pos.span_contains site.as_name_span ~line ~character) then None
-        else begin
-          (* Find the type of the RHS via the type_map *)
-          let rhs_sp = site.as_rhs_span in
-          let rhs_line = rhs_sp.Ast.start_line - 1 in
-          let rhs_char = rhs_sp.Ast.start_col in
-          let candidates = Hashtbl.fold (fun sp ty acc ->
-              if Pos.span_contains sp ~line:rhs_line ~character:rhs_char
-              then (sp, ty) :: acc else acc
-            ) a.type_map []
-          in
-          let ty_opt = match candidates with
-            | [] -> None
-            | _ ->
-              let (_, ty) = List.fold_left (fun (bs, bt) (sp, ty) ->
-                  if Pos.span_smaller sp bs then (sp, ty) else (bs, bt)
-                ) (List.hd candidates) (List.tl candidates)
-              in
-              Some (Tc.pp_ty ty)
-          in
-          match ty_opt with
+  (* ---- Add-type-annotation actions (P1.7 enhanced) ---- *)
+  (* Look up the smallest type_map entry containing a point. *)
+  let type_at_point rhs_sp =
+    let rhs_line = rhs_sp.Ast.start_line - 1 in
+    let rhs_char = rhs_sp.Ast.start_col in
+    let candidates = Hashtbl.fold (fun sp ty acc ->
+        if Pos.span_contains sp ~line:rhs_line ~character:rhs_char
+        then (sp, ty) :: acc else acc
+      ) a.type_map []
+    in
+    match candidates with
+    | [] -> None
+    | _ ->
+      let (_, ty) = List.fold_left (fun (bs, bt) (sp, ty) ->
+          if Pos.span_smaller sp bs then (sp, ty) else (bs, bt)
+        ) (List.hd candidates) (List.tl candidates)
+      in
+      Some ty
+  in
+  (* Scan forward from [from_ofs] to find the "do" keyword (word-boundary aware).
+     Returns the byte offset of 'd' in "do", or None. Scans at most 400 chars. *)
+  let find_do_after from_ofs =
+    let src = a.src in
+    let len = String.length src in
+    let is_ident_char c =
+      let k = Char.code c in
+      (k >= 97 && k <= 122) || (k >= 65 && k <= 90) || k = 95 || (k >= 48 && k <= 57)
+    in
+    let limit = min len (from_ofs + 400) in
+    let rec find i =
+      if i + 2 > limit then None
+      else if src.[i] = 'd' && src.[i+1] = 'o'
+           && (i = 0 || not (is_ident_char src.[i-1]))
+           && (i + 2 >= len || not (is_ident_char src.[i+2]))
+      then Some i
+      else find (i + 1)
+    in
+    find from_ofs
+  in
+  (* Convert a byte offset in a.src to (line, col) 0-indexed. *)
+  let ofs_to_lsp_pos ofs =
+    let e_line = ref 0 and e_col = ref 0 in
+    let cl = ref 0 and cc = ref 0 in
+    String.iteri (fun i _ch ->
+        if i = ofs then begin e_line := !cl; e_col := !cc end;
+        if a.src.[i] = '\n' then begin incr cl; cc := 0 end
+        else incr cc
+      ) a.src;
+    Position.create ~line:!e_line ~character:!e_col
+  in
+  let make_annotation_action site =
+    if not (Pos.span_contains site.as_name_span ~line ~character) then None
+    else begin
+      let uri = DocumentUri.of_path a.filename in
+      match site.as_kind with
+
+      | AnnLet ->
+        (* Insert ": Type" after binding name *)
+        (match type_at_point site.as_rhs_span with
+         | None -> None
+         | Some ty ->
+           let ty_str = Tc.pp_ty ty in
+           let insert_line = site.as_name_span.Ast.start_line - 1 in
+           let insert_col  = site.as_name_span.Ast.end_col in
+           let pos   = Position.create ~line:insert_line ~character:insert_col in
+           let range = Range.create ~start:pos ~end_:pos in
+           let edit  = TextEdit.create ~range ~newText:(": " ^ ty_str) in
+           let we    = WorkspaceEdit.create ~changes:[(uri, [edit])] () in
+           Some (CodeAction.create ~title:"Add type annotation"
+                   ~kind:CodeActionKind.RefactorRewrite ~edit:we ()))
+
+      | AnnFnReturn ->
+        (* Look up fn type from type_map via fn_name.span; extract return type *)
+        (match type_at_point site.as_rhs_span with
+         | None -> None
+         | Some ty ->
+           let (_, ret_str) = unwrap_arrows ty in
+           (* Find the "do" keyword after the fn name to determine insert position *)
+           let fn_ofs =
+             offset_of_pos a.src
+               (site.as_name_span.Ast.start_line - 1)
+               site.as_name_span.Ast.start_col
+           in
+           (match find_do_after fn_ofs with
+            | None -> None
+            | Some do_ofs ->
+              let pos   = ofs_to_lsp_pos do_ofs in
+              let range = Range.create ~start:pos ~end_:pos in
+              let edit  = TextEdit.create ~range
+                            ~newText:("-> " ^ ret_str ^ " ") in
+              let we    = WorkspaceEdit.create ~changes:[(uri, [edit])] () in
+              Some (CodeAction.create ~title:"Add return type annotation"
+                      ~kind:CodeActionKind.RefactorRewrite ~edit:we ())))
+
+      | AnnFnParam ->
+        (* Look up param type from type_map via param_name.span *)
+        (match type_at_point site.as_rhs_span with
+         | None -> None
+         | Some ty ->
+           let ty_str = Tc.pp_ty ty in
+           let insert_line = site.as_name_span.Ast.start_line - 1 in
+           let insert_col  = site.as_name_span.Ast.end_col in
+           let pos   = Position.create ~line:insert_line ~character:insert_col in
+           let range = Range.create ~start:pos ~end_:pos in
+           let edit  = TextEdit.create ~range ~newText:(": " ^ ty_str) in
+           let we    = WorkspaceEdit.create ~changes:[(uri, [edit])] () in
+           Some (CodeAction.create ~title:"Add parameter type annotation"
+                   ~kind:CodeActionKind.RefactorRewrite ~edit:we ()))
+    end
+  in
+  let annotation_actions = List.filter_map make_annotation_action a.annotation_sites in
+  (* Batch "Annotate all unannotated let bindings in file" action *)
+  let batch_annotation_action =
+    (* Only show when cursor is on an AnnLet site and there are 2+ AnnLet sites *)
+    let cursor_on_ann_let =
+      List.exists (fun (site : annotation_site) ->
+          site.as_kind = AnnLet &&
+          Pos.span_contains site.as_name_span ~line ~character
+        ) a.annotation_sites
+    in
+    let let_sites = List.filter (fun (s : annotation_site) -> s.as_kind = AnnLet)
+                      a.annotation_sites in
+    if not cursor_on_ann_let || List.length let_sites < 2 then []
+    else begin
+      let uri = DocumentUri.of_path a.filename in
+      let edits = List.filter_map (fun (site : annotation_site) ->
+          match type_at_point site.as_rhs_span with
           | None -> None
-          | Some ty_str ->
+          | Some ty ->
+            let ty_str = Tc.pp_ty ty in
             let insert_line = site.as_name_span.Ast.start_line - 1 in
             let insert_col  = site.as_name_span.Ast.end_col in
-            let insert_pos  = Position.create ~line:insert_line ~character:insert_col in
-            let range       = Range.create ~start:insert_pos ~end_:insert_pos in
-            let edit        = TextEdit.create ~range ~newText:(": " ^ ty_str) in
-            let uri   = DocumentUri.of_path a.filename in
-            let we    = WorkspaceEdit.create ~changes:[(uri, [edit])] () in
-            let action = CodeAction.create
-                           ~title:"Add type annotation"
-                           ~kind:CodeActionKind.RefactorRewrite
-                           ~edit:we
-                           () in
-            Some action
-        end
-      ) a.annotation_sites
+            let pos   = Position.create ~line:insert_line ~character:insert_col in
+            let range = Range.create ~start:pos ~end_:pos in
+            Some (TextEdit.create ~range ~newText:(": " ^ ty_str))
+        ) let_sites
+      in
+      if edits = [] then []
+      else
+        let we = WorkspaceEdit.create ~changes:[(uri, edits)] () in
+        [CodeAction.create
+           ~title:(Printf.sprintf "Annotate all %d unannotated bindings in file"
+                     (List.length let_sites))
+           ~kind:CodeActionKind.RefactorRewrite
+           ~edit:we ()]
+    end
   in
   (* ---- Remove-unused-binding actions (from diagnostics context) ---- *)
   let extract_name_from_msg msg =
@@ -1809,7 +2004,7 @@ let code_actions_at (a : t) ~line ~character
   (* ---- Registry-driven fixes from diagnostics context ---- *)
   let registry_actions = apply_fix_registry a diagnostics in
   make_linear_actions @ exhaustion_actions @ annotation_actions
-  @ unused_binding_actions @ registry_actions
+  @ batch_annotation_action @ unused_binding_actions @ registry_actions
 
 let actor_info_at (a : t) ~line ~character : string option =
   let found = List.find_opt (fun (name, _) ->
