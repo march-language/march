@@ -437,6 +437,76 @@ end
 
 ---
 
+### P9 — Columnar DataFrame Layout (Struct-of-Arrays)
+
+**Motivation:** The current DataFrame implementation stores data row-oriented (each row is a record/tuple). Analytical workloads (filter, aggregate, group-by) typically touch a few columns out of many. A columnar (Struct-of-Arrays) layout stores each column as a contiguous typed array (`i64[]`, `double[]`, `string[]`), which delivers:
+
+1. **Cache efficiency** — scanning a single column reads sequential memory, not strided
+2. **SIMD friendliness** — contiguous typed arrays can be processed 4-8 elements at a time with vector instructions
+3. **Compression** — same-type columns compress much better (dictionary encoding, run-length, delta)
+4. **Predicate pushdown** — filter expressions evaluate on column arrays without materializing full rows
+
+**Example (internal representation):**
+```march
+-- Row-oriented (current):  [{name="Alice", age=30}, {name="Bob", age=25}]
+-- Columnar (SoA):          {names=["Alice","Bob"], ages=[30,25]}
+
+-- Column scan for sum:
+fn sum_ages(df) do
+  let col = df.column("age")   -- contiguous i64 array
+  Array.fold(col, 0, fn acc x -> acc + x)  -- sequential memory access
+end
+```
+
+**Why it matters for March:** March already has a DataFrame stdlib, but row-oriented layout makes it fundamentally non-competitive with Polars/DuckDB for analytical queries. Columnar layout is the single biggest architectural change to make March DataFrames production-grade. Combined with stream fusion (already implemented), column operations would fuse into tight vectorizable loops.
+
+**Implementation approach:**
+1. Internal `ColumnStore` type: `type Column = IntCol(Array(Int)) | FloatCol(Array(Float)) | StrCol(Array(String)) | BoolCol(Array(Bool)) | NullableCol(Column, BitArray)`
+2. DataFrame becomes `{ columns: Map(String, Column), row_count: Int }`
+3. Operations (filter, map, agg) work on column arrays directly
+4. Lazy evaluation: chain of column transforms compiles to a single fused pass
+5. Optional: Apache Arrow IPC format for zero-copy interop
+
+**Effort:** High | **Impact:** Very high (10-100x for analytical workloads)
+**Dependencies:** Array primitives in runtime; benefits from loop vectorization (P10)
+**Stage:** Stdlib + runtime — `stdlib/dataframe.march` rewrite + native array builtins
+**Status:** Planned
+
+---
+
+### P10 — Array Loop Vectorization
+
+**Motivation:** The compiler emits scalar LLVM IR for numeric loops. LLVM's auto-vectorizer can sometimes promote these to SIMD (AVX2/NEON), but it's unreliable without explicit hints. Two levels of support:
+
+**Level 1 — Vectorization hints (low effort):**
+- Emit `!llvm.loop.vectorize.enable` metadata on loops over arrays
+- Add `align 32` annotations on array allocations for AVX2
+- Use `nonnull` and `dereferenceable` attributes to help LLVM's alias analysis
+
+**Level 2 — Explicit SIMD codegen (medium effort):**
+- Detect known patterns: `Array.map(arr, fn x -> x + 1)`, `Array.fold`, `Array.zip_with`
+- Lower to LLVM vector types: `<4 x i64>`, `<4 x double>`
+- Generate vector load → vector op → vector store with scalar tail loop
+
+**Example (what gets generated):**
+```llvm
+; Array.map(arr, fn x -> x * 2) with Level 2
+loop:
+  %vec = load <4 x i64>, ptr %arr_ptr, align 32
+  %res = mul <4 x i64> %vec, <i64 2, i64 2, i64 2, i64 2>
+  store <4 x i64> %res, ptr %out_ptr, align 32
+  ; ... scalar tail for remaining 0-3 elements
+```
+
+**Why it matters for March:** Numeric array operations are the backbone of DataFrame queries, statistical computation, and scientific computing. Without vectorization, March leaves 4-8x performance on the table for these workloads. Combined with columnar layout (P9), this makes March's data processing genuinely competitive.
+
+**Effort:** Low (L1) to Medium (L2) | **Impact:** High (4-8x for numeric array ops)
+**Dependencies:** Monomorphization (arrays must be concretely typed); pairs with P9 (columnar layout provides the contiguous arrays)
+**Stage:** LLVM IR emission — extends `lib/tir/llvm_emit.ml`
+**Status:** Planned
+
+---
+
 ## Optimization Interactions
 
 The Opt coordinator (`lib/tir/opt.ml`) runs `[Inline; CProp; Fold; Simplify; DCE]` in a fixed-point loop (up to 5 iterations). The interaction order matters:
