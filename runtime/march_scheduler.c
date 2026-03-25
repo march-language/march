@@ -39,11 +39,12 @@
 #include "march_scheduler.h"
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
-#include <unistd.h>   /* getpagesize, sysconf */
+#include <unistd.h>   /* sysconf */
 
 /* macOS spells it MAP_ANON; Linux spells it MAP_ANONYMOUS.  Both platforms
  * define MAP_ANON as well, so we only need the reverse fallback. */
@@ -68,6 +69,10 @@ static _Atomic int64_t  g_live_procs = 0;
 
 static _Thread_local march_scheduler *tl_sched = NULL;
 
+/* Cached OS page size — initialised once in march_sched_init().
+ * Used by the SIGSEGV handler (sysconf is not async-signal-safe). */
+static size_t g_page_size = 0;
+
 /* ── Process registry (for march_sched_find) ──────────────────────────── */
 
 #define MARCH_MAX_PROCS 65536
@@ -89,32 +94,151 @@ static void registry_remove(march_proc *p) {
     g_proc_count--;
 }
 
-/* ── Stack allocation helpers ─────────────────────────────────────────── */
+/* ── Stack allocation helpers (Phase 4: lazy virtual-memory growth) ───── */
 
-/* Allocate an mmap'd stack with a PROT_NONE guard page at the low end.
- * Returns a pointer to the *usable* stack area (guard page excluded).
- * Sets *alloc_size to the full allocation size (usable + guard page) so
- * the caller can munmap the correct range later. */
-static void *stack_alloc(size_t usable_size, size_t *alloc_size) {
-    size_t page  = (size_t)sysconf(_SC_PAGE_SIZE);
-    size_t total = usable_size + page;
-    void  *mem   = mmap(NULL, total,
-                        PROT_READ | PROT_WRITE,
-                        MAP_PRIVATE | MAP_ANON, -1, 0);
+/*
+ * Layout of the full mmap reservation (total = MARCH_STACK_MAX + page):
+ *
+ *   [mmap_base,              mmap_base + page)           PROT_NONE  — permanent guard
+ *   [mmap_base + page,       mmap_base + MARCH_STACK_MAX) PROT_NONE  — reserved, grows down
+ *   [mmap_base + MARCH_STACK_MAX, mmap_base + total)      PROT_R|W   — initial usable (4 KiB)
+ *
+ * stack_base   = mmap_base + MARCH_STACK_MAX  (initial bottom of usable region; decreases on growth)
+ * stack_top    = mmap_base + total            (initial SP; never changes)
+ *
+ * On each guard-page fault the signal handler calls mprotect to extend the
+ * usable region downward and updates p->stack_base.  The faulting instruction
+ * is automatically retried by the CPU when the handler returns.
+ *
+ * Returns the initial stack_base (ss_sp for makecontext), or NULL on failure.
+ * Sets *alloc_size to the total reservation size and *mmap_base_out to the
+ * base of the mmap (for munmap on process death).
+ */
+static void *stack_alloc_lazy(size_t *alloc_size, void **mmap_base_out) {
+    size_t page  = g_page_size;
+    size_t total = MARCH_STACK_MAX + page;   /* guard page + max usable */
+
+    /* Reserve the full range as PROT_NONE. */
+    void *mem = mmap(NULL, total, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     if (mem == MAP_FAILED) return NULL;
-    /* Make the lowest page inaccessible — catches stack overflows as SIGSEGV. */
-    if (mprotect(mem, page, PROT_NONE) != 0) {
+
+    /* Make the top MARCH_STACK_INITIAL bytes read/write — the initial usable stack. */
+    void *usable_start = (char *)mem + MARCH_STACK_MAX;   /* = mem + total - page */
+    if (mprotect(usable_start, MARCH_STACK_INITIAL, PROT_READ | PROT_WRITE) != 0) {
         munmap(mem, total);
         return NULL;
     }
-    *alloc_size = total;
-    return (char *)mem + page; /* Usable region starts after the guard page */
+
+    *alloc_size    = total;
+    *mmap_base_out = mem;
+    return usable_start;   /* initial stack_base (bottom of usable region) */
 }
 
-static void stack_free(void *stack_base, size_t alloc_size) {
-    /* The guard page is immediately below stack_base. */
-    void *mem = (char *)stack_base - (size_t)sysconf(_SC_PAGE_SIZE);
-    munmap(mem, alloc_size);
+/* ── SIGSEGV handler for lazy stack growth ───────────────────────────── */
+
+/*
+ * Per-thread alternate signal stack.  Each scheduler OS-thread allocates one
+ * in sched_loop() before running any green threads.  The SA_ONSTACK flag
+ * directs SIGSEGV delivery here, which is necessary because the green
+ * thread's own stack may be exhausted when the fault fires.
+ */
+#define MARCH_SIGALTSTACK_SIZE  (64 * 1024)   /* 64 KiB — plenty for the handler */
+
+static _Thread_local char *tl_alt_stack = NULL;
+
+static void setup_alt_stack(void) {
+    if (tl_alt_stack) return;   /* already set up for this thread */
+    char *alt = (char *)malloc(MARCH_SIGALTSTACK_SIZE);
+    if (!alt) { fputs("march_sched: OOM (sigaltstack)\n", stderr); abort(); }
+    stack_t ss;
+    ss.ss_sp    = alt;
+    ss.ss_size  = MARCH_SIGALTSTACK_SIZE;
+    ss.ss_flags = 0;
+    if (sigaltstack(&ss, NULL) != 0) {
+        perror("march_sched: sigaltstack");
+        /* Non-fatal: stack growth will crash instead of growing, but the
+         * scheduler itself still works for shallow stacks. */
+    }
+    tl_alt_stack = alt;
+}
+
+/*
+ * SIGSEGV handler.  Called when a green thread touches a PROT_NONE page.
+ *
+ * If the fault address is in the growable region of the currently running
+ * process's stack reservation, we extend the accessible window with mprotect
+ * and return — the CPU retries the faulting instruction and succeeds.
+ *
+ * If the fault is outside any known stack reservation (real bad-pointer), we
+ * restore the default SIGSEGV handler and re-raise so the program terminates
+ * with the usual signal.
+ */
+static void march_sigsegv_handler(int sig, siginfo_t *info, void *uctx) {
+    (void)sig;
+    (void)uctx;
+
+    /* Only handle permission faults (SEGV_ACCERR), not invalid-address faults. */
+    if (info->si_code != SEGV_ACCERR) goto fatal;
+
+    {
+        size_t page       = g_page_size;
+        char  *fault_addr = (char *)info->si_addr;
+
+        /* Identify the running process on this scheduler thread. */
+        march_scheduler *s = tl_sched;
+        if (!s || !s->current) goto fatal;
+
+        march_proc *p        = s->current;
+        char       *mmap_base = (char *)p->stack_mmap_base;
+        /* Growable region: above the permanent guard page, below current usable bottom. */
+        char       *grow_lo  = mmap_base + page;          /* first growable address */
+        char       *grow_hi  = (char *)p->stack_base;     /* current usable bottom  */
+
+        if (fault_addr < grow_lo || fault_addr >= grow_hi) goto fatal;
+
+        /* Align fault address down to a page boundary and extend from there
+         * up to the current usable bottom in one mprotect call.  This covers
+         * large stack frames (e.g. a 8 KiB local array) in a single fault. */
+        char  *new_bottom = (char *)((uintptr_t)fault_addr & ~(page - 1));
+        size_t grow_size  = (size_t)(grow_hi - new_bottom);
+
+        if (mprotect(new_bottom, grow_size, PROT_READ | PROT_WRITE) != 0) goto fatal;
+
+        /* Record the new usable bottom so future faults are classified correctly. */
+        p->stack_base = new_bottom;
+        return;   /* CPU retries faulting instruction */
+    }
+
+fatal:
+    /* Not a stack-growth fault — restore the default handler and re-raise. */
+    {
+        struct sigaction sa;
+        sa.sa_handler = SIG_DFL;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sigaction(SIGSEGV, &sa, NULL);
+        raise(SIGSEGV);
+    }
+}
+
+static _Atomic int g_sigsegv_installed = 0;
+
+static void install_stack_growth_handler(void) {
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_sigsegv_installed, &expected, 1,
+            memory_order_acquire, memory_order_relaxed))
+        return;   /* already installed */
+
+    struct sigaction sa;
+    sa.sa_sigaction = march_sigsegv_handler;
+    sigemptyset(&sa.sa_mask);
+    /* SA_SIGINFO: give us siginfo_t with si_addr.
+     * SA_ONSTACK: run on the alt stack (green-thread stack may be full). */
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    if (sigaction(SIGSEGV, &sa, NULL) != 0) {
+        perror("march_sched: sigaction(SIGSEGV)");
+    }
 }
 
 /* ── Mailbox spinlock ────────────────────────────────────────────────── */
@@ -182,6 +306,10 @@ static void proc_trampoline(int arg_hi, int arg_lo) {
 /* ── Public API ───────────────────────────────────────────────────────── */
 
 void march_sched_init(void) {
+    /* Cache the OS page size for use in the async-signal-safe SIGSEGV handler. */
+    if (g_page_size == 0)
+        g_page_size = (size_t)sysconf(_SC_PAGE_SIZE);
+
     atomic_store_explicit(&g_next_pid, 0, memory_order_relaxed);
     atomic_store_explicit(&g_all_done, 0, memory_order_relaxed);
     atomic_store_explicit(&g_live_procs, 0, memory_order_relaxed);
@@ -194,6 +322,10 @@ void march_sched_init(void) {
         march_deque_init(&g_scheds[i].local_queue);
         g_scheds[i].id = i;
     }
+
+    /* Install the SIGSEGV handler that enables lazy stack growth.
+     * Idempotent: a CAS inside ensures it runs at most once per process. */
+    install_stack_growth_handler();
 }
 
 march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
@@ -215,8 +347,10 @@ march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
     atomic_init(&p->mbox_lock, 0);
     p->owner_sched = NULL;
 
-    /* Allocate the stack. */
-    p->stack_base = stack_alloc(MARCH_STACK_SIZE, &p->stack_alloc);
+    /* Allocate the stack: reserve MARCH_STACK_MAX virtual memory, make only
+     * the top MARCH_STACK_INITIAL bytes read/write initially.  The rest grows
+     * on demand via the SIGSEGV handler. */
+    p->stack_base = stack_alloc_lazy(&p->stack_alloc, &p->stack_mmap_base);
     if (!p->stack_base) {
         fputs("march_sched: failed to allocate process stack\n", stderr);
         free(p);
@@ -226,12 +360,12 @@ march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
     /* Build the execution context. */
     if (getcontext(&p->ctx) != 0) {
         fputs("march_sched: getcontext failed\n", stderr);
-        stack_free(p->stack_base, p->stack_alloc);
+        munmap(p->stack_mmap_base, p->stack_alloc);
         free(p);
         return NULL;
     }
     p->ctx.uc_stack.ss_sp   = p->stack_base;
-    p->ctx.uc_stack.ss_size = MARCH_STACK_SIZE;
+    p->ctx.uc_stack.ss_size = MARCH_STACK_INITIAL;
     p->ctx.uc_link          = NULL; /* Trampoline manages the return explicitly. */
 
     /* Pass the proc pointer as two 32-bit ints (makecontext portability). */
@@ -260,6 +394,11 @@ march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
 /* ── Per-thread scheduler loop with work-stealing ────────────────────── */
 
 static void sched_loop(march_scheduler *sched) {
+    /* Set up the per-thread alternate signal stack before running any green
+     * threads.  The SIGSEGV handler for lazy stack growth requires SA_ONSTACK
+     * so it can run even when the green thread's stack is exhausted. */
+    setup_alt_stack();
+
     tl_sched = sched;
     sched->running = 1;
     unsigned int steal_seed = (unsigned int)sched->id;
@@ -309,7 +448,7 @@ static void sched_loop(march_scheduler *sched) {
         } else if (st == PROC_DEAD) {
             registry_remove(p);
             atomic_fetch_sub_explicit(&g_live_procs, 1, memory_order_release);
-            stack_free(p->stack_base, p->stack_alloc);
+            munmap(p->stack_mmap_base, p->stack_alloc);
             free(p);
         }
         /* PROC_WAITING: process parked itself; a wakeup call re-enqueues it. */

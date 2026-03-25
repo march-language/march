@@ -103,18 +103,27 @@ Reduction budget: `MARCH_REDUCTION_BUDGET` = 4000.
 
 ---
 
-## Phase 4 — Stack growth (segmented or copying)
+## Phase 4 — Stack growth (lazy virtual-memory) ✅
 
 **Goal:** Start each process with a small stack (4 KiB) and grow on demand.
 
-Options:
-1. **Segmented stacks** (LLVM split-stacks): each frame checks stack limit;
-   allocates a new segment on overflow.  Requires compiler cooperation.
-2. **Copying stacks** (Go-style): on overflow (via signal handler / guard
-   page trap), copy the entire stack to a larger allocation and fix up
-   all pointers.  Simpler but requires scan-able stack frames.
+**Implemented:**
+- `MARCH_STACK_INITIAL` = 4 KiB initial usable stack per green thread
+- `MARCH_STACK_MAX` = 1 MiB maximum usable stack per green thread
+- Each process reserves `MARCH_STACK_MAX + page` virtual memory all as `PROT_NONE`,
+  then makes only the top `MARCH_STACK_INITIAL` bytes read/write initially.
+- A `SIGSEGV` handler (`march_sigsegv_handler`) installed via `sigaction(SA_SIGINFO | SA_ONSTACK)`
+  catches guard-page faults, calls `mprotect` to extend the accessible window downward,
+  then returns — the CPU automatically retries the faulting instruction.
+- Per-scheduler-thread alternate signal stack (64 KiB) set up in `sched_loop()` via
+  `sigaltstack`, ensuring the handler runs even when the green thread's own stack is full.
+- `p->stack_base` tracks the current bottom of the usable region and is updated on each growth.
+- Exceeding `MARCH_STACK_MAX` hits the permanent guard page → unrecoverable crash.
+- No pointer fixup required: the virtual address range is pre-reserved, growth is in-place.
 
-Phase 1 uses 64 KiB fixed stacks as a safe baseline.
+**Tests (2):**
+- `test_stack_growth_deep` — one process recurses ≈10 KiB deep (> 4 KiB initial), completes
+- `test_stack_growth_many` — 50 processes each recurse ≈10 KiB deep concurrently, all complete
 
 ---
 
