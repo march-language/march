@@ -9,16 +9,57 @@
  (targets test_scheduler_runner)
  (deps    test_scheduler.c
           ../runtime/march_scheduler.c
-          ../runtime/march_scheduler.h)
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra -I../runtime
+               -DMARCH_NUM_SCHEDULERS=1
                -o %{targets}
-               test_scheduler.c ../runtime/march_scheduler.c)))
+               test_scheduler.c ../runtime/march_scheduler.c
+               -lpthread)))
 
 (rule
  (alias   runtest)
  (deps    (file test_scheduler_runner))
  (action  (run ./test_scheduler_runner)))
+
+; Phase 3: multi-threaded scheduler tests (4 schedulers)
+(rule
+ (targets test_scheduler_mt_runner)
+ (deps    test_scheduler_mt.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_scheduler_mt.c ../runtime/march_scheduler.c
+               -lpthread)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_mt_runner))
+ (action  (run ./test_scheduler_mt_runner)))
+
+; ── SIMD HTTP parser tests ───────────────────────────────────────────────
+; -msse4.2 enables SSE4.2 on x86-64; on ARM64 the flag is a no-op (warning
+; suppressed with -Wno-unused-command-line-argument) and the scalar fallback
+; is used automatically via #if defined(__SSE4_2__) guards in the source.
+(rule
+ (targets test_http_simd_runner)
+ (deps    test_http_simd.c
+          ../runtime/march_http_parse_simd.c
+          ../runtime/march_http_parse_simd.h)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra
+               -Wno-unused-command-line-argument
+               -I../runtime -msse4.2 -O2
+               -o %{targets}
+               test_http_simd.c ../runtime/march_http_parse_simd.c)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_http_simd_runner))
+ (action  (run ./test_http_simd_runner)))
 
 (test
  (name test_fmt)
