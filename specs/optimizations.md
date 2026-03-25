@@ -375,6 +375,68 @@ This is distinct from escape analysis (which stack-allocates the struct) — tru
 
 ---
 
+### P7 — Borrow Inference and Elision
+
+**Motivation:** When a value is passed to a function that only reads it (doesn't store, return, or alias it), the compiler can insert a *borrow* instead of an RC increment/decrement pair. Borrow elision goes further: when the borrowed value's lifetime is trivially scoped (e.g., read within the callee and never escapes), the borrow tracking itself is elided — no refcount operations at all.
+
+**Example:**
+```march
+fn sum_lengths(xs, ys) do
+  -- xs and ys are only read here, not consumed
+  List.length(xs) + List.length(ys)
+end
+```
+
+Without borrow inference, `xs` and `ys` each get `inc_rc` on entry and `dec_rc` on exit. With borrow inference, both are borrowed (no RC ops). With borrow elision, the borrow annotation itself is stripped since the lifetime is trivially contained.
+
+**Why it matters for March:** Perceus RC is already implemented, but every function call currently pays inc/dec costs even for read-only parameters. In tight loops and deeply nested function calls (common in functional style), the cumulative RC traffic is significant. Borrow inference can eliminate 30-50% of RC operations in typical March programs.
+
+**Interaction with linear/affine types:** If a value is declared `affine`, the compiler already knows it can be borrowed freely (at most one owner). If `linear`, borrowing is even simpler since there's exactly one owner — no RC at all. Borrow inference extends this benefit to regular (non-annotated) values by analyzing usage patterns.
+
+**Implementation approach:**
+1. Add a pre-Perceus analysis pass (`lib/tir/borrow.ml`) that marks each variable use as "consume" or "borrow"
+2. A use is a borrow if: the callee doesn't store the value in a constructor, doesn't return it, and doesn't alias it into a longer-lived binding
+3. Perceus then skips `EIncRC`/`EDecRC` for borrow-marked uses
+4. Elision: if all uses of a binding are borrows and the binding's scope is a single basic block, skip even the borrow marker
+
+**Effort:** Medium | **Impact:** High (reduces RC overhead 30-50% in typical code)
+**Dependencies:** Runs before Perceus; benefits from Escape analysis information
+**Stage:** TIR pass — `lib/tir/borrow.ml`
+**Status:** Planned
+
+---
+
+### P8 — Constructor Reuse (FBIP Extension)
+
+**Motivation:** Perceus already implements basic FBIP with `EReuse` tokens for pattern-match-and-rebuild patterns. This extension broadens constructor reuse to cover cases where the rebuilt constructor has a *different* tag but the same allocation size, and cases where the destruction and reconstruction are separated by intervening code.
+
+**Example:**
+```march
+-- Current FBIP handles: same constructor, immediate rebuild
+fn inc_leaf(t) do
+  match t do
+  | Leaf(n) -> Leaf(n + 1)       -- reuses Leaf cell in-place
+  | Node(l, r) -> Node(inc_leaf(l), inc_leaf(r))  -- reuses Node cell
+  end
+end
+
+-- Extended reuse: different tag, same size
+fn leaf_to_node(t) do
+  match t do
+  | Leaf(n) -> Node(Leaf(0), Leaf(n))  -- Leaf cell reused for one of the new Leafs
+  end
+end
+```
+
+**Why it matters for March:** Tree transformations that change node types (e.g., balancing a tree, converting AST node kinds) currently allocate fresh even when the old cell has the right size. Extended reuse captures these cases.
+
+**Effort:** Medium | **Impact:** Medium-High (tree-heavy workloads)
+**Dependencies:** Perceus (extends existing reuse logic)
+**Stage:** TIR pass — extends `lib/tir/perceus.ml`
+**Status:** Planned
+
+---
+
 ## Optimization Interactions
 
 The Opt coordinator (`lib/tir/opt.ml`) runs `[Inline; CProp; Fold; Simplify; DCE]` in a fixed-point loop (up to 5 iterations). The interaction order matters:
