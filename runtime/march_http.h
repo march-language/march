@@ -99,8 +99,9 @@ int march_http_send_file(int client_fd, const char *path);
 
 /* ── HTTP server ───────────────────────────────────────────────────── */
 
-/* Default number of worker threads in the connection thread pool. */
-#define MARCH_HTTP_POOL_DEFAULT_SIZE 64
+/* Default number of worker threads in the connection thread pool.
+ * Used as a fallback when sysconf(_SC_NPROCESSORS_ONLN) is unavailable. */
+#define MARCH_HTTP_POOL_DEFAULT_SIZE 16
 
 /* Start the HTTP connection thread pool.
  * pool_size: number of worker threads (0 → MARCH_HTTP_POOL_DEFAULT_SIZE).

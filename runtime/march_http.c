@@ -153,64 +153,75 @@ int64_t march_tcp_accept(int64_t listen_fd) {
     return (int64_t)fd;
 }
 
+/* Per-thread accumulation buffer for march_tcp_recv_http().
+ * Allocated on first use and grown as needed; never freed (worker threads
+ * are long-lived, OS reclaims memory on exit).  Reused across requests on
+ * the same keep-alive connection — eliminates the malloc/realloc on the
+ * hot path once the buffer has stabilised at the typical request size. */
+typedef struct { char *buf; size_t cap; } recv_buf_t;
+static _Thread_local recv_buf_t tl_recv_buf;
+
+/* Grow tl_recv_buf to at least `needed` bytes.
+ * Returns the buffer pointer on success, NULL on OOM.
+ * On OOM the old buffer (and its contents) remain valid. */
+static char *recv_buf_grow(size_t needed) {
+    recv_buf_t *rb = &tl_recv_buf;
+    if (needed <= rb->cap) return rb->buf;
+    size_t new_cap = rb->cap ? rb->cap * 2 : 4096;
+    while (new_cap < needed) new_cap *= 2;
+    char *nb = realloc(rb->buf, new_cap);
+    if (!nb) return NULL;
+    rb->buf = nb;
+    rb->cap = new_cap;
+    return nb;
+}
+
 /* Receive a complete HTTP request (headers + body) from fd.
- * Reads into a 16 KB staging buffer to avoid per-byte syscalls, accumulates
- * data until \r\n\r\n is found, then reads any remaining body bytes.
+ * Uses a thread-local accumulation buffer that is reused across requests
+ * on the same keep-alive connection — no malloc on the hot path after the
+ * first request per thread.  Body allocation is still per-request (variable
+ * size, and the data is copied into the result string anyway).
  * Returns a march_string* on success, or NULL on error/close/timeout. */
 void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
     int sock = (int)fd;
     char readbuf[16384];
 
-    /* Phase 1: accumulate until \r\n\r\n */
-    char  *hdr_buf  = NULL;
-    size_t hdr_cap  = 0, hdr_len = 0;
+    /* Phase 1: accumulate into the thread-local buffer until \r\n\r\n. */
+    size_t hdr_len  = 0;   /* bytes written into tl_recv_buf so far */
     int    found_end = 0;
-    size_t hdrs_end  = 0;   /* offset of first byte AFTER the \r\n\r\n */
+    size_t hdrs_end  = 0;  /* offset of first byte AFTER \r\n\r\n */
 
     while (!found_end && (int64_t)hdr_len < max_bytes) {
         ssize_t n = recv(sock, readbuf, sizeof(readbuf), 0);
-        if (n <= 0) goto cleanup_err;
+        if (n <= 0) return NULL;
 
-        /* Grow accumulation buffer as needed. */
-        size_t needed = hdr_len + (size_t)n;
-        if (needed > hdr_cap) {
-            size_t new_cap = hdr_cap ? hdr_cap * 2 : 4096;
-            while (new_cap < needed) new_cap *= 2;
-            char *nb = realloc(hdr_buf, new_cap);
-            if (!nb) goto cleanup_err;
-            hdr_buf = nb;
-            hdr_cap = new_cap;
-        }
-        memcpy(hdr_buf + hdr_len, readbuf, (size_t)n);
+        char *buf = recv_buf_grow(hdr_len + (size_t)n);
+        if (!buf) return NULL;
+        memcpy(buf + hdr_len, readbuf, (size_t)n);
         hdr_len += (size_t)n;
 
-        /* Scan for \r\n\r\n.  Start 3 bytes before the new data so we don't
-         * miss a sequence that straddles two reads. */
+        /* Scan for \r\n\r\n; start 3 bytes before the new data to handle
+         * sequences that straddle two reads. */
         size_t scan_from = (hdr_len > (size_t)n + 3) ? hdr_len - (size_t)n - 3 : 0;
         for (size_t i = scan_from; i + 3 < hdr_len; i++) {
-            if (hdr_buf[i] == '\r' && hdr_buf[i+1] == '\n' &&
-                hdr_buf[i+2] == '\r' && hdr_buf[i+3] == '\n') {
+            if (buf[i] == '\r' && buf[i+1] == '\n' &&
+                buf[i+2] == '\r' && buf[i+3] == '\n') {
                 found_end = 1;
                 hdrs_end  = i + 4;
                 break;
             }
         }
     }
-    if (!found_end) goto cleanup_err;
+    if (!found_end) return NULL;
 
-    /* Phase 2: find Content-Length in headers.
-     * Temporarily null-terminate at hdrs_end for string scanning. */
+    /* Phase 2: find Content-Length.  Temporarily null-terminate at hdrs_end. */
     int64_t content_length = -1;
-    if (hdrs_end >= hdr_cap) {
-        char *nb = realloc(hdr_buf, hdr_cap + 1);
-        if (!nb) goto cleanup_err;
-        hdr_buf = nb;
-        hdr_cap++;
-    }
     {
-        char saved = hdr_buf[hdrs_end];
-        hdr_buf[hdrs_end] = '\0';
-        const char *p = hdr_buf;
+        char *buf = recv_buf_grow(hdrs_end + 1);
+        if (!buf) return NULL;
+        char saved = buf[hdrs_end];
+        buf[hdrs_end] = '\0';
+        const char *p = buf;
         while (*p) {
             const char *eol = strstr(p, "\r\n");
             if (!eol) break;
@@ -224,11 +235,10 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
             p = eol + 2;
             if (line_len == 0) break;
         }
-        hdr_buf[hdrs_end] = saved;
+        buf[hdrs_end] = saved;
     }
 
-    /* Phase 3: read body.  We may have already buffered some body bytes past
-     * hdrs_end from the last read — copy those first, then recv the rest. */
+    /* Phase 3: read body.  Already-buffered bytes past hdrs_end are reused. */
     char  *body_buf = NULL;
     size_t body_len = 0;
 
@@ -238,12 +248,11 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
             to_read = max_bytes - (int64_t)hdrs_end;
         if (to_read > 0) {
             body_buf = malloc((size_t)to_read);
-            if (!body_buf) goto cleanup_err;
-            /* Copy already-buffered body bytes (may have overread past \r\n\r\n). */
+            if (!body_buf) return NULL;
             size_t already = hdr_len - hdrs_end;
             if (already > (size_t)to_read) already = (size_t)to_read;
             if (already > 0)
-                memcpy(body_buf, hdr_buf + hdrs_end, already);
+                memcpy(body_buf, tl_recv_buf.buf + hdrs_end, already);
             size_t got = already;
             while ((int64_t)got < to_read) {
                 ssize_t n = recv(sock, body_buf + got,
@@ -255,24 +264,20 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
         }
     }
 
-    /* Phase 4: build result march_string (header section + body). */
+    /* Phase 4: build result march_string (header block + body).
+     * tl_recv_buf.buf is NOT freed — it is reused by the next request. */
     size_t total = hdrs_end + body_len;
     march_string *result = malloc(sizeof(march_string) + total + 1);
-    if (!result) { free(body_buf); goto cleanup_err; }
+    if (!result) { free(body_buf); return NULL; }
     atomic_store_explicit((_Atomic int64_t *)&result->rc, 1, memory_order_relaxed);
     result->len = (int64_t)total;
-    memcpy(result->data, hdr_buf, hdrs_end);
+    memcpy(result->data, tl_recv_buf.buf, hdrs_end);
     if (body_buf) {
         memcpy(result->data + hdrs_end, body_buf, body_len);
         free(body_buf);
     }
     result->data[total] = '\0';
-    free(hdr_buf);
     return result;
-
-cleanup_err:
-    free(hdr_buf);
-    return NULL;
 }
 
 /* Send all bytes of a march_string to fd.
@@ -1273,7 +1278,13 @@ static void *pool_worker(void *arg) {
 }
 
 void march_http_pool_start(int64_t pool_size, void *pipeline) {
-    if (pool_size <= 0) pool_size = MARCH_HTTP_POOL_DEFAULT_SIZE;
+    if (pool_size <= 0) {
+        /* Auto-detect: 2× logical CPUs, clamped to [4, 256]. */
+        long ncpus = sysconf(_SC_NPROCESSORS_ONLN);
+        pool_size  = (ncpus > 0) ? ncpus * 2 : MARCH_HTTP_POOL_DEFAULT_SIZE;
+        if (pool_size < 4)   pool_size = 4;
+        if (pool_size > 256) pool_size = 256;
+    }
 
     memset(&g_pool, 0, sizeof(g_pool));
     g_pool.size     = (int)pool_size;
@@ -1343,7 +1354,7 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
         return;
     }
 
-    march_http_pool_start(MARCH_HTTP_POOL_DEFAULT_SIZE, pipeline);
+    march_http_pool_start(0 /* auto-detect from CPU count */, pipeline);
     fprintf(stderr, "march: HTTP server listening on port %lld\n", (long long)port);
 
     while (!atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
