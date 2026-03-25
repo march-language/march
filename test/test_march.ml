@@ -6623,6 +6623,134 @@ let test_fast_math_emits_fast_attr () =
     (let re = Str.regexp "fadd fast" in
      (try ignore (Str.search_forward re ir_normal 0); true with Not_found -> false))
 
+(* ── Constant propagation ───────────────────────────────────────── *)
+
+(* Helpers for cprop tests: build a function body with a let-chain,
+   run CProp alone, and inspect the result. *)
+
+let test_cprop_simple_literal () =
+  (* let x = 7 in x
+     CProp: x is literal 7, so the body EAtom(AVar x) → EAtom(ALit 7) *)
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let body = March_tir.Tir.ELet (x, March_tir.Tir.EAtom (ilit 7),
+               March_tir.Tir.EAtom (March_tir.Tir.AVar x)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 7))) -> ()
+   | e -> Alcotest.failf "expected let x=7 in 7, got: %s" (March_tir.Tir.show_expr e))
+
+let test_cprop_chain () =
+  (* let a = 3
+     let b = a          — CProp: b's rhs becomes EAtom(ALit 3)
+     b                  — CProp: body becomes ALit 3 *)
+  let a = mk_var "a" March_tir.Tir.TInt in
+  let b = mk_var "b" March_tir.Tir.TInt in
+  let body =
+    March_tir.Tir.ELet (a, March_tir.Tir.EAtom (ilit 3),
+      March_tir.Tir.ELet (b, March_tir.Tir.EAtom (March_tir.Tir.AVar a),
+        March_tir.Tir.EAtom (March_tir.Tir.AVar b))) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  let rec find_inner = function
+    | March_tir.Tir.ELet (_, _, e) -> find_inner e
+    | March_tir.Tir.EAtom a -> a
+    | e -> Alcotest.failf "unexpected: %s" (March_tir.Tir.show_expr e)
+  in
+  (match find_inner (first_body m') with
+   | March_tir.Tir.ALit (March_ast.Ast.LitInt 3) -> ()
+   | a -> Alcotest.failf "expected ALit 3, got: %s" (March_tir.Tir.show_atom a))
+
+let test_cprop_enables_fold () =
+  (* let x = 7
+     let r = x + 1
+     r
+     CProp turns x→7: let x=7 in let r = 7+1 in r
+     Fold then gives 8. *)
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let r = mk_var "r" March_tir.Tir.TInt in
+  let body =
+    March_tir.Tir.ELet (x, March_tir.Tir.EAtom (ilit 7),
+      March_tir.Tir.ELet (r, app "+" [March_tir.Tir.AVar x; ilit 1],
+        March_tir.Tir.EAtom (March_tir.Tir.AVar r))) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m1 = March_tir.Cprop.run ~changed m in
+  let _  = Alcotest.(check bool) "cprop changed" true !changed in
+  let changed2 = ref false in
+  let m2 = March_tir.Fold.run ~changed:changed2 m1 in
+  Alcotest.(check bool) "fold changed after cprop" true !changed2;
+  let rec inner = function
+    | March_tir.Tir.ELet (_, _, March_tir.Tir.ELet (_, rhs, _)) -> rhs
+    | March_tir.Tir.ELet (_, _, e) -> inner e
+    | e -> e
+  in
+  (match inner (first_body m2) with
+   | March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 8)) -> ()
+   | e -> Alcotest.failf "expected 8 after fold, got: %s" (March_tir.Tir.show_expr e))
+
+let test_cprop_no_propagate_complex () =
+  (* let x = 1 + 2   (complex rhs — not a bare literal)
+     x
+     CProp should NOT propagate x since its rhs is not ALit *)
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let body = March_tir.Tir.ELet (x, app "+" [ilit 1; ilit 2],
+               March_tir.Tir.EAtom (March_tir.Tir.AVar x)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "not changed (complex rhs)" false !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EAtom (March_tir.Tir.AVar _)) -> ()
+   | e -> Alcotest.failf "expected unchanged, got: %s" (March_tir.Tir.show_expr e))
+
+let test_cprop_case_branch_shadow () =
+  (* let x = 5
+     match b do
+     | True  -> let x = 99 in x   (* shadows outer x *)
+     | False -> x                  (* uses outer x = 5 *)
+     end
+     False branch: x should propagate to 5. *)
+  let x_outer = mk_var "x" March_tir.Tir.TInt in
+  let x_inner = mk_var "x" March_tir.Tir.TInt in
+  let scrutinee = avar "b" March_tir.Tir.TBool in
+  let true_branch = { March_tir.Tir.br_tag = "True"; br_vars = [];
+    br_body = March_tir.Tir.ELet (x_inner, March_tir.Tir.EAtom (ilit 99),
+                March_tir.Tir.EAtom (March_tir.Tir.AVar x_inner)) } in
+  let false_branch = { March_tir.Tir.br_tag = "False"; br_vars = [];
+    br_body = March_tir.Tir.EAtom (March_tir.Tir.AVar x_outer) } in
+  let body = March_tir.Tir.ELet (x_outer, March_tir.Tir.EAtom (ilit 5),
+               March_tir.Tir.ECase (scrutinee, [true_branch; false_branch], None)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.ECase (_, [_; fb], None)) ->
+     (match fb.March_tir.Tir.br_body with
+      | March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 5)) -> ()
+      | e -> Alcotest.failf "False branch: expected 5, got: %s" (March_tir.Tir.show_expr e))
+   | e -> Alcotest.failf "unexpected outer form: %s" (March_tir.Tir.show_expr e))
+
+let test_cprop_opt_integration () =
+  (* Full pipeline: let x = 3 in let y = x + 4 in y
+     CProp+Fold+DCE → 7 *)
+  let x = mk_var "x" March_tir.Tir.TInt in
+  let y = mk_var "y" March_tir.Tir.TInt in
+  let body =
+    March_tir.Tir.ELet (x, March_tir.Tir.EAtom (ilit 3),
+      March_tir.Tir.ELet (y, app "+" [March_tir.Tir.AVar x; ilit 4],
+        March_tir.Tir.EAtom (March_tir.Tir.AVar y))) in
+  let m = mk_module [mk_fn "main" body] in
+  let m' = March_tir.Opt.run m in
+  (match first_body m' with
+   | March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 7)) -> ()
+   | e -> Alcotest.failf "expected 7 after full opt, got: %s" (March_tir.Tir.show_expr e))
+
 (* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
 
 (** Bug: ctor_info keyed by constructor name only — two ADTs with the same
@@ -15531,6 +15659,14 @@ let () =
       ("opt", [
         Alcotest.test_case "fixpoint"         `Quick test_opt_fixpoint;
         Alcotest.test_case "no_infinite_loop" `Quick test_opt_no_infinite_loop;
+      ]);
+      ("cprop", [
+        Alcotest.test_case "simple_literal"       `Quick test_cprop_simple_literal;
+        Alcotest.test_case "chain"                `Quick test_cprop_chain;
+        Alcotest.test_case "enables_fold"         `Quick test_cprop_enables_fold;
+        Alcotest.test_case "no_propagate_complex" `Quick test_cprop_no_propagate_complex;
+        Alcotest.test_case "case_branch_shadow"   `Quick test_cprop_case_branch_shadow;
+        Alcotest.test_case "opt_integration"      `Quick test_cprop_opt_integration;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;

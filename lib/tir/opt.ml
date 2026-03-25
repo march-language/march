@@ -1,9 +1,16 @@
 (** Optimization coordinator.
-    Runs Inline -> Fold -> Simplify -> DCE in a fixed-point loop.
-    Terminates when no pass makes a change, or after 5 iterations. *)
+    Runs Inline -> CProp -> Fold -> Simplify -> DCE in a fixed-point loop.
+    Terminates when no pass makes a change, or after 5 iterations.
+
+    Pass order matters:
+    - Inline first: exposes literal arguments at inlined call sites
+    - CProp second: propagates those literals through let chains
+    - Fold third: evaluates now-literal arithmetic
+    - Simplify fourth: identity laws / strength reduction on folded results
+    - DCE last: removes let bindings made dead by folding/simplification *)
 
 let run (m : Tir.tir_module) : Tir.tir_module =
-  let passes = [Inline.run; Fold.run; Simplify.run; Dce.run] in
+  let passes = [Inline.run; Cprop.run; Fold.run; Simplify.run; Dce.run] in
   let changed = ref false in
   let apply p =
     changed := false;

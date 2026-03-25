@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-24 (DataFrame Phase 7 + LSP Phase 1 + visibility fix)
+**Last updated:** 2026-03-24 (optimizations spec + constant propagation pass)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -57,6 +57,15 @@ This file tracks everything that still needs to get done. Organized by priority 
 - ✅ **Constraint solver for type-level naturals (v1)** — `normalize_tnat` reduces concrete arithmetic (`2+3 → 5`, `(1+2)*3 → 9`) and applies identity/annihilation laws (`n+0 → n`, `n*1 → n`, `n*0 → 0`). `solve_nat_eq` in `unify` solves linear equations (`a+2=5 → a=3`). Parser extended: `INT` as `TyNat`, `+`/`*` in type position via `ty_nat_add`/`ty_nat_mul` levels. 9 new tests in `type_level_nat` group.
 - [ ] **Row polymorphism** — Record operations on types with unknown record shapes. Would enable `e.field` when `e : TVar` to constrain the record shape rather than return a fresh var.
 
+### Compiler Optimizations (Planned)
+
+See `specs/optimizations.md` for full catalog with effort/impact/dependency details.
+
+- [ ] **Let-floating / join points** — Hoist shared sub-expressions out of match arms. `lib/tir/join_points.ml`. GHC's biggest single optimization; high impact for match-heavy code.
+- [ ] **Known-call optimization** — Replace `ECallPtr` with direct `EApp` when the closure is statically known at the call site. `lib/tir/known_call.ml`. Enables further inlining.
+- [ ] **Mutual TCO** — Extend self-TCO to mutually recursive tail calls via trampoline or shared loop. `lib/tir/llvm_emit.ml` extension.
+- [ ] **Representation polymorphism / unboxed ADT fields** — Represent single-field constructors as their payload type without a heap struct. Requires TIR type extension.
+
 ### Documentation
 
 - [ ] **Language reference manual** — Comprehensive user-facing docs covering all syntax forms, built-in types, stdlib modules, and the compiler CLI.
@@ -65,6 +74,8 @@ This file tracks everything that still needs to get done. Organized by priority 
 ---
 
 ## Done (recently completed)
+
+- ✅ **Optimization spec + constant propagation** — `specs/optimizations.md`: comprehensive catalog of all 12 implemented and 4 planned optimizations with effort/impact/dependencies. `lib/tir/cprop.ml`: new constant propagation pass that substitutes literal-bound variables at their use sites, enabling cascading folds; wired into `opt.ml` coordinator between Inline and Fold. 6 new tests in `cprop` group (1056 total).
 
 - ✅ **LSP Phase 1: snippet completions, folding ranges, code actions, diagnostic codes** — `lsp/lib/analysis.ml`: (1) Snippet completions — `completions_at` generates `insertText` snippets with tabstops for functions (`"foo(${1:Int}, ${2:String})"`) and multi-arg constructors; `ctor_arities` field in `Analysis.t`; `insertTextFormat=Snippet` (2) on snippet items. (2) Folding ranges — `fold_ranges` field; `collect_fold_ranges` walks AST (`DFn`, `DMod`, `DActor`, `DDescribe`, `EMatch`, `ELetFn`); `foldingRangeProvider=true` in server capabilities; `textDocument/foldingRange` handler added. (3) Add type annotation code action — `annotation_sites` field; `collect_annotation_sites` finds untyped `ELet`/`DLet` `PatVar` bindings; generates `RefactorRewrite` action inserting `": TypeName"`. (4) Remove unused binding code action — `code : string option` field on `Errors.diagnostic`; `warning_with_code ~code:"unused_binding"` in typecheck; `diag_to_lsp` propagates to LSP `Diagnostic.code`; generates "Prefix with underscore" and "Remove unused binding" `QuickFix` actions. 4 new LSP tests (89 total).
 - ✅ **Visibility syntax update for remaining .march files** — `examples/*.march` and `stdlib/dataframe.march` updated: `pub fn → fn` (public by default), `fn → pfn` for truly private helpers, `pub type → type`. DataFrame public API functions correctly use `fn`; internal helpers use `pfn`.
