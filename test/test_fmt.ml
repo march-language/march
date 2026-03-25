@@ -109,12 +109,12 @@ end|} in
 
 let test_pub_fn () =
   let src = {|mod Test do
-pub fn greet(name : String) : String do
+fn greet(name : String) : String do
   "hello"
 end
 end|} in
-  check_parses "pub fn" src;
-  check_idempotent "pub fn" src
+  check_parses "fn" src;
+  check_idempotent "fn" src
 
 let test_nested_match () =
   let src = {|mod Test do
@@ -165,7 +165,7 @@ end|} in
 let test_use_decl () =
   let src = {|mod Test do
 use List.*
-pub fn demo() : Int do
+fn demo() : Int do
   42
 end
 end|} in
@@ -175,7 +175,7 @@ end|} in
 let test_doc_comment () =
   let src = {|mod Test do
 doc "Returns the answer."
-pub fn answer() : Int do
+fn answer() : Int do
   42
 end
 end|} in
@@ -206,7 +206,7 @@ fn area(s : Shape) : Float do
   end
 end
 
-pub fn main() : Unit do
+fn main() : Unit do
   let s = Circle(5.0)
   let a = area(s)
   print(a)
@@ -277,7 +277,7 @@ let () =
       test_case "lambda"          `Quick test_lambda;
       test_case "type variant"    `Quick test_type_variant;
       test_case "type record"     `Quick test_type_record;
-      test_case "pub fn"          `Quick test_pub_fn;
+      test_case "fn"          `Quick test_pub_fn;
       test_case "nested match"    `Quick test_nested_match;
       test_case "tuple"           `Quick test_tuple;
       test_case "record literal"  `Quick test_record_literal;

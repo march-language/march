@@ -487,10 +487,9 @@ and emit_decl ctx = function
   | DFn (fn, _) ->
     emit_fn ctx fn
 
-  | DLet (vis, b, _) ->
-    let v   = match vis with Public -> "pub " | Private -> "" in
+  | DLet (_vis, b, _) ->
     let ty  = match b.bind_ty with None -> "" | Some t -> Printf.sprintf " : %s" (fmt_ty t) in
-    let lhs = Printf.sprintf "%slet %s%s%s" v (fmt_lin b.bind_lin) (fmt_pat b.bind_pat) ty in
+    let lhs = Printf.sprintf "let %s%s%s" (fmt_lin b.bind_lin) (fmt_pat b.bind_pat) ty in
     if should_break (ctx.indent + 1) b.bind_expr then begin
       line ctx (lhs ^ " =");
       indented ctx (fun () -> emit_stmt ctx b.bind_expr)
@@ -498,28 +497,27 @@ and emit_decl ctx = function
       line ctx (Printf.sprintf "%s = %s" lhs (expr_inline b.bind_expr))
 
   | DType (vis, name, params, tdef, _) ->
-    let v  = match vis with Public -> "pub " | Private -> "" in
+    let tkw = match vis with Public -> "type" | Private -> "ptype" in
     let ps = match params with
       | []  -> ""
       | ps' -> Printf.sprintf "(%s)" (String.concat ", " (List.map (fun n -> n.txt) ps'))
     in
     (match tdef with
      | TDAlias ty ->
-       line ctx (Printf.sprintf "%stype %s%s = %s" v name.txt ps (fmt_ty ty))
+       line ctx (Printf.sprintf "%s %s%s = %s" tkw name.txt ps (fmt_ty ty))
 
      | TDVariant variants ->
-       let var_str { var_name; var_args; var_vis } =
-         let vis = match var_vis with Public -> "pub " | Private -> "" in
+       let var_str { var_name; var_args; var_vis = _ } =
          match var_args with
-         | []  -> vis ^ var_name.txt
-         | tys -> Printf.sprintf "%s%s(%s)" vis var_name.txt (fmt_tys tys)
+         | []  -> var_name.txt
+         | tys -> Printf.sprintf "%s(%s)" var_name.txt (fmt_tys tys)
        in
        let all  = String.concat " | " (List.map var_str variants) in
-       let full = Printf.sprintf "%stype %s%s = %s" v name.txt ps all in
+       let full = Printf.sprintf "%s %s%s = %s" tkw name.txt ps all in
        if String.length full <= 80 then
          line ctx full
        else begin
-         line ctx (Printf.sprintf "%stype %s%s =" v name.txt ps);
+         line ctx (Printf.sprintf "%s %s%s =" tkw name.txt ps);
          indented ctx (fun () ->
            List.iteri (fun i var ->
              let s = var_str var in
@@ -534,12 +532,12 @@ and emit_decl ctx = function
        let fstrs = List.map (fun f ->
            Printf.sprintf "%s%s : %s" (fmt_lin f.fld_lin) f.fld_name.txt (fmt_ty f.fld_ty)
          ) fields in
-       let inline = Printf.sprintf "%stype %s%s = { %s }" v name.txt ps
+       let inline = Printf.sprintf "%s %s%s = { %s }" tkw name.txt ps
            (String.concat ", " fstrs) in
        if String.length inline <= 80 then
          line ctx inline
        else begin
-         line ctx (Printf.sprintf "%stype %s%s = {" v name.txt ps);
+         line ctx (Printf.sprintf "%s %s%s = {" tkw name.txt ps);
          indented ctx (fun () ->
            let n = List.length fstrs in
            List.iteri (fun i s ->
@@ -551,9 +549,8 @@ and emit_decl ctx = function
        end
     )
 
-  | DMod (name, vis, decls, _) ->
-    let v = match vis with Public -> "pub " | Private -> "" in
-    line ctx (Printf.sprintf "%smod %s do" v name.txt);
+  | DMod (name, _vis, decls, _) ->
+    line ctx (Printf.sprintf "mod %s do" name.txt);
     nl ctx;
     indented ctx (fun () -> emit_decls ctx decls);
     nl ctx;
@@ -646,9 +643,8 @@ and emit_decl ctx = function
       List.iter (emit_proto_step ctx) proto.proto_steps);
     line ctx "end"
 
-  | DActor (vis, name, actor, _) ->
-    let v = match vis with Public -> "pub " | Private -> "" in
-    line ctx (Printf.sprintf "%sactor %s do" v name.txt);
+  | DActor (_vis, name, actor, _) ->
+    line ctx (Printf.sprintf "actor %s do" name.txt);
     indented ctx (fun () ->
       if actor.actor_state <> [] then begin
         let fstrs = List.map (fun f ->
@@ -733,7 +729,7 @@ and emit_decl ctx = function
     line ctx "end"
 
 and emit_fn ctx fn =
-  let v   = match fn.fn_vis with Public -> "pub " | Private -> "" in
+  let kw  = match fn.fn_vis with Public -> "fn" | Private -> "pfn" in
   let ret = match fn.fn_ret_ty with
     | None   -> ""
     | Some t -> Printf.sprintf " : %s" (fmt_ty t)
@@ -756,7 +752,7 @@ and emit_fn ctx fn =
       | None   -> ""
       | Some g -> " when " ^ expr_inline g
     in
-    line ctx (Printf.sprintf "%sfn %s(%s)%s%s do" v fn.fn_name.txt ps ret guard);
+    line ctx (Printf.sprintf "%s %s(%s)%s%s do" kw fn.fn_name.txt ps ret guard);
     indented ctx (fun () -> emit_body ctx clause.fc_body);
     line ctx "end"
   | clauses ->
@@ -768,7 +764,7 @@ and emit_fn ctx fn =
         | None   -> ""
         | Some g -> " when " ^ expr_inline g
       in
-      line ctx (Printf.sprintf "%sfn %s(%s)%s%s do" v fn.fn_name.txt ps ret guard);
+      line ctx (Printf.sprintf "%s %s(%s)%s%s do" kw fn.fn_name.txt ps ret guard);
       indented ctx (fun () -> emit_body ctx clause.fc_body);
       line ctx "end";
       if i < n - 1 then nl ctx
