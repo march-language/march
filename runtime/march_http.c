@@ -34,6 +34,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <unistd.h>
@@ -138,7 +139,7 @@ int64_t march_tcp_listen(int64_t port) {
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         close(fd); return -1;
     }
-    if (listen(fd, 128) < 0) {
+    if (listen(fd, 1024) < 0) {
         close(fd); return -1;
     }
     return (int64_t)fd;
@@ -153,43 +154,62 @@ int64_t march_tcp_accept(int64_t listen_fd) {
 }
 
 /* Receive a complete HTTP request (headers + body) from fd.
- * Reads byte-by-byte until \r\n\r\n, then reads Content-Length body bytes.
- * Returns a march_string* on success, or NULL on error/close. */
+ * Reads into a 16 KB staging buffer to avoid per-byte syscalls, accumulates
+ * data until \r\n\r\n is found, then reads any remaining body bytes.
+ * Returns a march_string* on success, or NULL on error/close/timeout. */
 void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
     int sock = (int)fd;
-    /* Phase 1: read headers until \r\n\r\n */
-    char *hdr_buf = NULL;
-    size_t hdr_cap = 0, hdr_len = 0;
-    int found_end = 0;
-    uint8_t byte;
+    char readbuf[16384];
+
+    /* Phase 1: accumulate until \r\n\r\n */
+    char  *hdr_buf  = NULL;
+    size_t hdr_cap  = 0, hdr_len = 0;
+    int    found_end = 0;
+    size_t hdrs_end  = 0;   /* offset of first byte AFTER the \r\n\r\n */
+
     while (!found_end && (int64_t)hdr_len < max_bytes) {
-        ssize_t n = recv(sock, &byte, 1, 0);
+        ssize_t n = recv(sock, readbuf, sizeof(readbuf), 0);
         if (n <= 0) goto cleanup_err;
-        if (hdr_len >= hdr_cap) {
-            hdr_cap = hdr_cap ? hdr_cap * 2 : 1024;
-            char *nb = realloc(hdr_buf, hdr_cap);
+
+        /* Grow accumulation buffer as needed. */
+        size_t needed = hdr_len + (size_t)n;
+        if (needed > hdr_cap) {
+            size_t new_cap = hdr_cap ? hdr_cap * 2 : 4096;
+            while (new_cap < needed) new_cap *= 2;
+            char *nb = realloc(hdr_buf, new_cap);
             if (!nb) goto cleanup_err;
             hdr_buf = nb;
+            hdr_cap = new_cap;
         }
-        hdr_buf[hdr_len++] = (char)byte;
-        if (hdr_len >= 4 &&
-            hdr_buf[hdr_len-4] == '\r' && hdr_buf[hdr_len-3] == '\n' &&
-            hdr_buf[hdr_len-2] == '\r' && hdr_buf[hdr_len-1] == '\n') {
-            found_end = 1;
+        memcpy(hdr_buf + hdr_len, readbuf, (size_t)n);
+        hdr_len += (size_t)n;
+
+        /* Scan for \r\n\r\n.  Start 3 bytes before the new data so we don't
+         * miss a sequence that straddles two reads. */
+        size_t scan_from = (hdr_len > (size_t)n + 3) ? hdr_len - (size_t)n - 3 : 0;
+        for (size_t i = scan_from; i + 3 < hdr_len; i++) {
+            if (hdr_buf[i] == '\r' && hdr_buf[i+1] == '\n' &&
+                hdr_buf[i+2] == '\r' && hdr_buf[i+3] == '\n') {
+                found_end = 1;
+                hdrs_end  = i + 4;
+                break;
+            }
         }
     }
     if (!found_end) goto cleanup_err;
 
-    /* Phase 2: find Content-Length in headers */
+    /* Phase 2: find Content-Length in headers.
+     * Temporarily null-terminate at hdrs_end for string scanning. */
     int64_t content_length = -1;
-    /* Null-terminate temporarily for searching */
-    if (hdr_len >= hdr_cap) {
+    if (hdrs_end >= hdr_cap) {
         char *nb = realloc(hdr_buf, hdr_cap + 1);
         if (!nb) goto cleanup_err;
         hdr_buf = nb;
+        hdr_cap++;
     }
-    hdr_buf[hdr_len] = '\0';
     {
+        char saved = hdr_buf[hdrs_end];
+        hdr_buf[hdrs_end] = '\0';
         const char *p = hdr_buf;
         while (*p) {
             const char *eol = strstr(p, "\r\n");
@@ -202,21 +222,29 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
                 break;
             }
             p = eol + 2;
-            if (line_len == 0) break; /* blank line = end of headers */
+            if (line_len == 0) break;
         }
+        hdr_buf[hdrs_end] = saved;
     }
 
-    /* Phase 3: read body */
-    char *body_buf = NULL;
+    /* Phase 3: read body.  We may have already buffered some body bytes past
+     * hdrs_end from the last read — copy those first, then recv the rest. */
+    char  *body_buf = NULL;
     size_t body_len = 0;
+
     if (content_length > 0) {
         int64_t to_read = content_length;
-        if (hdr_len + to_read > max_bytes)
-            to_read = max_bytes - (int64_t)hdr_len;
+        if ((int64_t)hdrs_end + to_read > max_bytes)
+            to_read = max_bytes - (int64_t)hdrs_end;
         if (to_read > 0) {
             body_buf = malloc((size_t)to_read);
             if (!body_buf) goto cleanup_err;
-            size_t got = 0;
+            /* Copy already-buffered body bytes (may have overread past \r\n\r\n). */
+            size_t already = hdr_len - hdrs_end;
+            if (already > (size_t)to_read) already = (size_t)to_read;
+            if (already > 0)
+                memcpy(body_buf, hdr_buf + hdrs_end, already);
+            size_t got = already;
             while ((int64_t)got < to_read) {
                 ssize_t n = recv(sock, body_buf + got,
                                  (size_t)(to_read - (int64_t)got), 0);
@@ -227,15 +255,15 @@ void *march_tcp_recv_http(int64_t fd, int64_t max_bytes) {
         }
     }
 
-    /* Phase 4: concatenate headers + body into a march_string */
-    size_t total = hdr_len + body_len;
+    /* Phase 4: build result march_string (header section + body). */
+    size_t total = hdrs_end + body_len;
     march_string *result = malloc(sizeof(march_string) + total + 1);
     if (!result) { free(body_buf); goto cleanup_err; }
     atomic_store_explicit((_Atomic int64_t *)&result->rc, 1, memory_order_relaxed);
     result->len = (int64_t)total;
-    memcpy(result->data, hdr_buf, hdr_len);
+    memcpy(result->data, hdr_buf, hdrs_end);
     if (body_buf) {
-        memcpy(result->data + hdr_len, body_buf, body_len);
+        memcpy(result->data + hdrs_end, body_buf, body_len);
         free(body_buf);
     }
     result->data[total] = '\0';
@@ -927,160 +955,278 @@ static void *find_ws_key_header(void *headers) {
     return NULL;
 }
 
-/* Each connection thread: parse request, build Conn, run pipeline, send response, close. */
+/* Determine whether the request wants keep-alive.
+ * HTTP/1.1 defaults to keep-alive; HTTP/1.0 defaults to close.
+ * An explicit Connection header overrides the default in either direction.
+ * raw_s:       the raw request march_string (used for version detection).
+ * req_headers: parsed March List(Header). */
+static int detect_keep_alive(void *raw_s, void *req_headers) {
+    int keep_alive = 1;   /* optimistic default: HTTP/1.1 */
+
+    /* Scan the first line (bounded to 200 bytes) for "HTTP/1.x". */
+    march_string *rs = (march_string *)raw_s;
+    size_t scan_len = (size_t)rs->len < 200 ? (size_t)rs->len : 200;
+    for (size_t i = 0; i + 7 < scan_len; i++) {
+        if (memcmp(rs->data + i, "HTTP/1.", 7) == 0) {
+            keep_alive = (i + 7 < scan_len && rs->data[i + 7] != '0');
+            break;
+        }
+    }
+
+    /* Connection header overrides the version default. */
+    void *cur = req_headers;
+    while (cur) {
+        if (*(int32_t *)((char *)cur + 8) == 0) break;  /* Nil */
+        void *hdr  = *(void **)((char *)cur + 16);
+        void *tail = *(void **)((char *)cur + 24);
+        march_string *hname = *(march_string **)((char *)hdr + 16);
+        if (hname->len == 10 && istrncmp(hname->data, "connection", 10) == 0) {
+            march_string *hval = *(march_string **)((char *)hdr + 24);
+            if (hval->len >= 5  && istrncmp(hval->data, "close",      5)  == 0)
+                keep_alive = 0;
+            else if (hval->len >= 10 && istrncmp(hval->data, "keep-alive", 10) == 0)
+                keep_alive = 1;
+            break;
+        }
+        cur = tail;
+    }
+    return keep_alive;
+}
+
+/* Like march_http_send_response() but appends an explicit Connection header.
+ * keep_alive=1  → "Connection: keep-alive\r\n"
+ * keep_alive=0  → "Connection: close\r\n"
+ * The public march_http_send_response() signature is unchanged (used by March
+ * code directly); this variant is used only in the server keep-alive path. */
+static int send_response_with_ka(int fd, int64_t status, void *headers,
+                                  void *body, int keep_alive) {
+    static const char KA_HDR[] = "Connection: keep-alive\r\n";
+    static const char CL_HDR[] = "Connection: close\r\n";
+    const char *conn_hdr     = keep_alive ? KA_HDR : CL_HDR;
+    size_t      conn_hdr_len = keep_alive ? (sizeof(KA_HDR)-1) : (sizeof(CL_HDR)-1);
+
+    const char *reason = reason_phrase(status);
+    march_string *body_s = (march_string *)body;
+    int64_t body_len = body_s ? body_s->len : 0;
+
+    int n_hdrs = 0;
+    for (void *c = headers; c; ) {
+        if (*(int32_t *)((char *)c + 8) == 0) break;
+        n_hdrs++;
+        c = *(void **)((char *)c + 24);
+    }
+
+    /* iovec: status-line | user-hdrs | Content-Length | Connection | \r\n | body */
+    int n_iov = 4 + 4 * n_hdrs + (body_len > 0 ? 1 : 0);
+    struct iovec *iov = malloc((size_t)n_iov * sizeof(struct iovec));
+    if (!iov) return -1;
+
+    char status_line[64];
+    int sl_len = snprintf(status_line, sizeof(status_line),
+                          "HTTP/1.1 %lld %s\r\n", (long long)status, reason);
+    char cl_line[48];
+    int cl_len = snprintf(cl_line, sizeof(cl_line),
+                          "Content-Length: %lld\r\n", (long long)body_len);
+
+    int i = 0;
+    iov[i].iov_base = status_line;
+    iov[i].iov_len  = (size_t)(sl_len > 0 ? sl_len : 0);
+    i++;
+
+    void *cur = headers;
+    while (cur) {
+        if (*(int32_t *)((char *)cur + 8) == 0) break;
+        void *hdr  = *(void **)((char *)cur + 16);
+        void *tail = *(void **)((char *)cur + 24);
+        march_string *hname = *(march_string **)((char *)hdr + 16);
+        march_string *hval  = *(march_string **)((char *)hdr + 24);
+        iov[i].iov_base = hname->data;       iov[i].iov_len = (size_t)hname->len; i++;
+        iov[i].iov_base = (void *)COLON_SP;  iov[i].iov_len = 2;                  i++;
+        iov[i].iov_base = hval->data;        iov[i].iov_len = (size_t)hval->len;  i++;
+        iov[i].iov_base = (void *)CRLF;      iov[i].iov_len = 2;                  i++;
+        cur = tail;
+    }
+
+    iov[i].iov_base = cl_line;
+    iov[i].iov_len  = (size_t)(cl_len > 0 ? cl_len : 0);
+    i++;
+
+    iov[i].iov_base = (void *)conn_hdr;
+    iov[i].iov_len  = conn_hdr_len;
+    i++;
+
+    iov[i].iov_base = (void *)CRLF;
+    iov[i].iov_len  = 2;
+    i++;
+
+    if (body_len > 0) {
+        iov[i].iov_base = body_s->data;
+        iov[i].iov_len  = (size_t)body_len;
+        i++;
+    }
+
+    int ret = writev_all(fd, iov, i);
+    free(iov);
+    return ret;
+}
+
+/* Each connection worker: keep-alive loop — parse request, run pipeline,
+ * send response, repeat until client signals close or an error occurs. */
 static void *connection_thread(void *arg) {
     conn_thread_arg_t *a = (conn_thread_arg_t *)arg;
     int fd = a->client_fd;
     void *pipeline = a->pipeline;
     free(a);
 
-    /* Read raw HTTP request */
-    void *raw = march_tcp_recv_http((int64_t)fd, 1024 * 1024 /* 1MB max */);
-    if (!raw) {
-        close(fd);
-        return NULL;
-    }
-
-    /* Parse the request */
-    void *parse_result = march_http_parse_request(raw);
-    /* parse_result: Result — tag=0 Err, tag=1 Ok */
-    int32_t parse_tag = *(int32_t *)((char *)parse_result + 8);
-    if (parse_tag == 0) {
-        /* Parse error — send 400 */
-        march_http_send_response(fd, 400, make_nil(),
-                                 march_string_lit("Bad Request", 11));
-        close(fd);
-        return NULL;
-    }
-
-    /* Ok(tuple(method_str, path_str, headers, body)) */
-    void *tup = *(void **)((char *)parse_result + 16);
-    void *method_str  = *(void **)((char *)tup + 16);  /* field 0 */
-    void *full_path   = *(void **)((char *)tup + 24);  /* field 1 */
-    void *req_headers = *(void **)((char *)tup + 32);  /* field 2 */
-    void *req_body    = *(void **)((char *)tup + 40);  /* field 3 */
-
-    /* 1. Convert method string → Method variant */
-    void *method = method_string_to_variant(method_str);
-
-    /* 2. Split path and query string.
-     *    full_path may be "/users/42?page=1" — split on first '?' */
-    march_string *fp = (march_string *)full_path;
-    const char *qmark = memchr(fp->data, '?', (size_t)fp->len);
-    void *path_str;
-    void *query_str;
-    size_t path_len;
-    if (qmark) {
-        path_len = (size_t)(qmark - fp->data);
-        path_str = march_string_lit(fp->data, (int64_t)path_len);
-        query_str = march_string_lit(qmark + 1,
-                        (int64_t)(fp->len - (int64_t)path_len - 1));
-    } else {
-        path_len = (size_t)fp->len;
-        path_str = full_path;
-        query_str = march_string_lit("", 0);
-    }
-
-    /* 3. Split path on "/" to produce path_info List(String) */
-    void *path_info = split_path_info(fp->data, path_len);
-
-    /* 4. Build the full 13-field Conn heap object */
-    void *conn = make_conn(
-        (int64_t)fd,           /* fd */
-        method,                /* method (Method variant) */
-        path_str,              /* path (raw, without query) */
-        path_info,             /* path_info (split on "/") */
-        query_str,             /* query_string */
-        req_headers,           /* request headers */
-        req_body,              /* request body */
-        0,                     /* response status (0 = not set) */
-        make_nil(),            /* response headers (empty) */
-        march_string_lit("", 0), /* response body (empty) */
-        make_bool(0),          /* halted = false */
-        make_nil(),            /* assigns (empty) */
-        make_no_upgrade()      /* upgrade = NoUpgrade */
-    );
-
-    /* 5. Call the pipeline closure: Conn -> Conn
-       March closures: header(16 bytes) + fields.
-       Field 0 (offset 16) = apply function pointer.
-       Calling convention: apply(closure_ptr, arg1, arg2, ...).
-       We inc_rc the pipeline before each call so Perceus doesn't
-       free it (it's shared across connection threads). */
-    typedef void *(*closure_fn_t)(void *clo, void *arg);
-    char *clo = (char *)pipeline;
-    closure_fn_t fn = *(closure_fn_t *)(clo + 16);
-    /* The pipeline closure is shared across all connection threads.
-       Perceus inserts dec_rc for arguments consumed by the callee, so
-       we must inc_rc the closure (and its captured vars) before each
-       call to keep the balance.  This is the standard "borrow" pattern. */
-    march_incrc(pipeline);
-    /* Also inc_rc captured fields (offset 24 = first captured var, etc.)
-       Walk Cons-spine of the plugs list so inner cells survive too. */
+    /* Disable Nagle — we send complete responses with writev(), so kernel
+     * coalescing only adds latency. */
+#if defined(IPPROTO_TCP) && defined(TCP_NODELAY)
     {
-        void *p = *(void **)(clo + 24);
-        while (p) {
-            march_incrc(p);
-            march_hdr *h = (march_hdr *)p;
-            if (h->tag == 1) {  /* Cons(head, tail) */
-                void *head = *(void **)((char *)p + 16);
-                if (head) march_incrc(head);
-                p = *(void **)((char *)p + 24);  /* tail */
-            } else {
-                break;  /* Nil or other */
+        int one = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    }
+#endif
+
+    /* Set a receive timeout so idle keep-alive connections don't pin a worker
+     * indefinitely.  march_tcp_recv_http() returns NULL on timeout, which
+     * breaks the loop and closes the fd cleanly. */
+    {
+        struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+
+    /* Closure apply fn — extracted once, reused for every request. */
+    typedef void *(*closure_fn_t)(void *clo, void *arg);
+    char        *clo = (char *)pipeline;
+    closure_fn_t fn  = *(closure_fn_t *)(clo + 16);
+
+    /* ── Keep-alive request loop ─────────────────────────────────────── */
+    for (;;) {
+
+        /* 1. Receive one complete HTTP request. */
+        void *raw = march_tcp_recv_http((int64_t)fd, 1024 * 1024 /* 1 MB cap */);
+        if (!raw) break;   /* EOF, reset, or idle timeout */
+
+        /* 2. Parse the request. */
+        void *parse_result = march_http_parse_request(raw);
+        int32_t parse_tag  = *(int32_t *)((char *)parse_result + 8);
+        if (parse_tag == 0) {
+            /* Parse error — send 400 and close. */
+            march_http_send_response(fd, 400, make_nil(),
+                                     march_string_lit("Bad Request", 11));
+            break;
+        }
+
+        /* Ok(tuple(method_str, path_str, headers, body)) */
+        void *tup         = *(void **)((char *)parse_result + 16);
+        void *method_str  = *(void **)((char *)tup + 16);  /* field 0 */
+        void *full_path   = *(void **)((char *)tup + 24);  /* field 1 */
+        void *req_headers = *(void **)((char *)tup + 32);  /* field 2 */
+        void *req_body    = *(void **)((char *)tup + 40);  /* field 3 */
+
+        /* 3. Determine keep-alive from version + Connection header. */
+        int keep_alive = detect_keep_alive(raw, req_headers);
+
+        /* 4. Convert method string → Method variant. */
+        void *method = method_string_to_variant(method_str);
+
+        /* 5. Split path and query string. */
+        march_string *fp    = (march_string *)full_path;
+        const char   *qmark = memchr(fp->data, '?', (size_t)fp->len);
+        void  *path_str, *query_str;
+        size_t path_len;
+        if (qmark) {
+            path_len  = (size_t)(qmark - fp->data);
+            path_str  = march_string_lit(fp->data, (int64_t)path_len);
+            query_str = march_string_lit(qmark + 1,
+                            (int64_t)(fp->len - (int64_t)path_len - 1));
+        } else {
+            path_len  = (size_t)fp->len;
+            path_str  = full_path;
+            query_str = march_string_lit("", 0);
+        }
+
+        /* 6. Split path → path_info List(String). */
+        void *path_info = split_path_info(fp->data, path_len);
+
+        /* 7. Build the 13-field Conn heap object. */
+        void *conn = make_conn(
+            (int64_t)fd,             /* fd */
+            method,                  /* method */
+            path_str,                /* path (without query) */
+            path_info,               /* path_info */
+            query_str,               /* query_string */
+            req_headers,             /* request headers */
+            req_body,                /* request body */
+            0,                       /* response status (0 = not set) */
+            make_nil(),              /* response headers (empty) */
+            march_string_lit("", 0), /* response body (empty) */
+            make_bool(0),            /* halted = false */
+            make_nil(),              /* assigns (empty) */
+            make_no_upgrade()        /* upgrade = NoUpgrade */
+        );
+
+        /* 8. Call the pipeline: Conn -> Conn.
+         *    inc_rc the shared pipeline + captured vars before each call
+         *    (Perceus "borrow" pattern — callee dec_rcs its argument). */
+        march_incrc(pipeline);
+        {
+            void *p = *(void **)(clo + 24);
+            while (p) {
+                march_incrc(p);
+                march_hdr *h = (march_hdr *)p;
+                if (h->tag == 1) {
+                    void *head = *(void **)((char *)p + 16);
+                    if (head) march_incrc(head);
+                    p = *(void **)((char *)p + 24);
+                } else {
+                    break;
+                }
             }
         }
-    }
-    void *result_conn = fn(pipeline, conn);
+        void *result_conn = fn(pipeline, conn);
 
-    if (!result_conn) {
-        /* Pipeline returned NULL — send 500 */
-        march_http_send_response(fd, 500, make_nil(),
-                                 march_string_lit("Internal Server Error", 21));
-        close(fd);
-        return NULL;
-    }
-
-    /* 6. Check upgrade field (field 12, offset 112) for WebSocket */
-    char *rc = (char *)result_conn;
-    void *upgrade_val = *(void **)(rc + 112);
-    int32_t upgrade_tag = *(int32_t *)((char *)upgrade_val + 8);
-
-    if (upgrade_tag == 1) {
-        /* WebSocketUpgrade(handler_fn) — tag=1, field at offset 16 is the fn */
-        void *ws_handler = *(void **)((char *)upgrade_val + 16);
-
-        /* Find Sec-WebSocket-Key from request headers (field 5, offset 56) */
-        void *hdrs = *(void **)(rc + 56);
-        void *ws_key = find_ws_key_header(hdrs);
-        if (ws_key) {
-            /* Perform WS handshake */
-            march_ws_handshake((int64_t)fd, ws_key);
-
-            /* Build a WsSocket(fd) value: tag=0, one Int field at offset 16 */
-            void *ws_sock = march_alloc(16 + 8);
-            *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
-
-            /* Call the handler: WsSocket -> Unit */
-            typedef void *(*ws_handler_fn_t)(void *);
-            ws_handler_fn_t ws_fn = (ws_handler_fn_t)ws_handler;
-            ws_fn(ws_sock);
+        if (!result_conn) {
+            /* Pipeline returned NULL — send 500 and close. */
+            march_http_send_response(fd, 500, make_nil(),
+                                     march_string_lit("Internal Server Error", 21));
+            break;
         }
-        /* fd stays open — the WS handler is responsible for the socket
-         * lifetime. When the handler returns, close. */
-        close(fd);
-        return NULL;
-    }
 
-    /* 7. Extract response fields from returned Conn and send HTTP response */
-    int64_t resp_status  = *(int64_t *)(rc + 72);   /* field 7 */
-    void   *resp_headers = *(void **)(rc + 80);      /* field 8 */
-    void   *resp_body    = *(void **)(rc + 88);      /* field 9 */
+        /* 9. Check for WebSocket upgrade (field 12, offset 112). */
+        char    *rc          = (char *)result_conn;
+        void    *upgrade_val = *(void **)(rc + 112);
+        int32_t  upgrade_tag = *(int32_t *)((char *)upgrade_val + 8);
 
-    /* Default to 200 if pipeline didn't set a status */
-    if (resp_status == 0) resp_status = 200;
+        if (upgrade_tag == 1) {
+            /* Hand off to WebSocket handler — it owns the fd lifetime. */
+            void *ws_handler = *(void **)((char *)upgrade_val + 16);
+            void *ws_key     = find_ws_key_header(*(void **)(rc + 56));
+            if (ws_key) {
+                march_ws_handshake((int64_t)fd, ws_key);
+                void *ws_sock = march_alloc(16 + 8);
+                *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
+                typedef void *(*ws_handler_fn_t)(void *);
+                ((ws_handler_fn_t)ws_handler)(ws_sock);
+            }
+            close(fd);
+            return NULL;
+        }
 
-    march_http_send_response(fd, resp_status, resp_headers, resp_body);
+        /* 10. Send HTTP response with Connection header. */
+        int64_t resp_status  = *(int64_t *)(rc + 72);  /* field 7 */
+        void   *resp_headers = *(void **)(rc + 80);    /* field 8 */
+        void   *resp_body    = *(void **)(rc + 88);    /* field 9 */
+        if (resp_status == 0) resp_status = 200;
+
+        if (send_response_with_ka(fd, resp_status, resp_headers, resp_body,
+                                  keep_alive) < 0)
+            break;   /* write error — peer gone */
+
+        if (!keep_alive) break;
+        /* else: loop — read next request on this connection */
+
+    } /* end keep-alive loop */
 
     close(fd);
     return NULL;
