@@ -67,32 +67,39 @@ Reduction budget: `MARCH_REDUCTION_BUDGET` = 4000.
 
 ---
 
-## Phase 2 — Message passing + PROC_WAITING
+## Phase 2 — Message passing + PROC_WAITING ✅
 
 **Goal:** Allow processes to block on mailbox receive without busy-waiting.
 
-Additions:
-- `march_mbox_node *mailbox` — FIFO message queue (intrusive list)
+**Implemented:**
+- `march_mbox_node *mailbox` + `mbox_tail` — FIFO message queue per process
 - `march_sched_send(march_proc *, void *msg)` — enqueue message + wake target
 - `march_sched_recv(void)` — dequeue next message, or park as PROC_WAITING
-- Wakeup: `march_sched_wake(pid)` — re-enqueue a WAITING process
-- Integrate with the existing March actor mailbox in `march_runtime.c`
+- `march_sched_try_recv(void)` — non-blocking receive
+- `march_sched_wake(target)` — re-enqueue a WAITING process
+- `march_sched_find(pid)` — O(1) process lookup by PID
+- Spinlock (`mbox_lock`) protects recv's check-then-park against send race
+- **Actor convergence:** `march_runtime.c` actor scheduling replaced with green thread delegation. Each actor gets a green thread running `recv → dispatch → loop`. `march_send` delegates to `march_sched_send`. Old worker pool, Treiber stack mailbox, and `process_actor_turn` removed.
+
+**Tests (4):** `test_send_recv_basic`, `test_send_recv_multiple`, `test_waiting_wakeup`, `test_try_recv`
 
 ---
 
-## Phase 3 — Multi-thread M:N with work-stealing
+## Phase 3 — Multi-thread M:N with work-stealing ✅
 
 **Goal:** Scale to multiple OS threads with minimal contention.
 
-Architecture:
-- `N` OS threads, each with its own `march_scheduler` instance
-- Per-scheduler lock-free deque (Chase-Lev or similar)
-- Work-stealing: idle thread steals from the tail of a victim's deque
-- Global spawn balancer: new processes assigned to the least-loaded thread
-- Shutdown: barrier + quiescence detection
+**Implemented:**
+- `N` OS threads (default `MARCH_NUM_SCHEDULERS=4`), each with its own `march_scheduler` instance
+- Per-scheduler Chase-Lev work-stealing deque (`runtime/march_deque.h`, capacity 4096)
+- Work-stealing: idle thread steals from random victim's deque (LCG selection)
+- Spawn balancer: new processes round-robin to schedulers, prefer local deque
+- Quiescence: `g_live_procs` atomic counter; `g_all_done` flag
+- Thread-local `tl_sched` pointer for all scheduler operations
+- `owner_sched` field on `march_proc` so trampoline returns to correct scheduler
+- All status reads/writes are atomic (`_Atomic march_proc_status`)
 
-Prerequisite: Phase 2 mailbox wakeup must work correctly before
-multi-threading to avoid lost-wakeup races.
+**Tests (3):** `test_multithread_spawn_10000`, `test_multithread_send_recv`, `test_work_stealing`
 
 ---
 
