@@ -1932,6 +1932,323 @@ end
        Alcotest.(check bool) "remove edit unwraps to inner expr" true unwraps_to_inner)
 
 (* ------------------------------------------------------------------ *)
+(* 23. P1.1 — Typed match arm stubs                                   *)
+(* ------------------------------------------------------------------ *)
+
+(** Typed stubs: ctor with fields should produce Ctor(var) arm, not bare Ctor. *)
+let test_typed_match_stub_with_fields () =
+  let src = {|
+mod M do
+  type Shape = Circle(Int) | Square(Int) | Triangle
+
+  fn area(s: Shape): Int do
+    match s do
+    | Circle(r) -> r * r
+    end
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "match s" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  (* Find the "Add missing case: Square" action *)
+  let square_act = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+      let t = String.lowercase_ascii ca.title in
+      let n = String.length t and sn = 6 in
+      let found = ref false in
+      for i = 0 to n - sn do
+        if String.sub t i sn = "square" then found := true
+      done;
+      !found
+    ) acts in
+  match square_act with
+  | None -> Alcotest.fail "expected Square action"
+  | Some ca ->
+    (match ca.edit with
+     | None -> Alcotest.fail "expected edit"
+     | Some edit ->
+       let has_param =
+         match edit.changes with
+         | None -> false
+         | Some m ->
+           List.exists (fun (_, edits) ->
+               List.exists (fun (e : Lsp.Types.TextEdit.t) ->
+                   (* Typed stub should contain "Square(" — param binding *)
+                   let t = e.newText in
+                   let n = String.length t and sn = 7 in
+                   let found = ref false in
+                   for i = 0 to n - sn do
+                     if String.sub t i sn = "Square(" then found := true
+                   done;
+                   !found
+                 ) edits
+             ) m
+       in
+       Alcotest.(check bool) "typed stub has Square(n)" true has_param)
+
+(** Nullary ctor (no fields) stays as bare name. *)
+let test_typed_match_stub_nullary () =
+  let src = {|
+mod M do
+  type Shape = Circle(Int) | Square(Int) | Triangle
+
+  fn area(s: Shape): Int do
+    match s do
+    | Circle(r) -> r * r
+    | Square(w) -> w * w
+    end
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "match s" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  let tri_act = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+      let t = String.lowercase_ascii ca.title in
+      let n = String.length t and sn = 8 in
+      let found = ref false in
+      for i = 0 to n - sn do
+        if String.sub t i sn = "triangle" then found := true
+      done;
+      !found
+    ) acts in
+  match tri_act with
+  | None -> Alcotest.fail "expected Triangle action"
+  | Some ca ->
+    (match ca.edit with
+     | None -> Alcotest.fail "expected edit"
+     | Some edit ->
+       let bare_arm =
+         match edit.changes with
+         | None -> false
+         | Some m ->
+           List.exists (fun (_, edits) ->
+               List.exists (fun (e : Lsp.Types.TextEdit.t) ->
+                   let t = e.newText in
+                   (* Nullary: should be "| Triangle ->" not "| Triangle(" *)
+                   let n = String.length t in
+                   let has_bare = ref false in
+                   let sn_bare = 11 in  (* "| Triangle " = 11 chars *)
+                   for i = 0 to n - sn_bare do
+                     if String.sub t i sn_bare = "| Triangle " then has_bare := true
+                   done;
+                   let has_params = ref false in
+                   let sn_paren = 9 in  (* "Triangle(" = 9 chars *)
+                   for i = 0 to n - sn_paren do
+                     if String.sub t i sn_paren = "Triangle(" then has_params := true
+                   done;
+                   !has_bare && not !has_params
+                 ) edits
+             ) m
+       in
+       Alcotest.(check bool) "nullary ctor has no params in stub" true bare_arm)
+
+(* ------------------------------------------------------------------ *)
+(* 24. P1.7 — Function return type annotation                         *)
+(* ------------------------------------------------------------------ *)
+
+(** AnnFnReturn site created for fn without ret_ty. *)
+let test_fn_return_annotation_site_created () =
+  let src = {|
+mod M do
+  fn greet(name: String): String do
+    name
+  end
+
+  fn add(x: Int) do
+    x + 1
+  end
+end
+|} in
+  let a = analyse src in
+  let has_fn_return_site =
+    List.exists (fun (site : An.annotation_site) ->
+        site.An.as_kind = An.AnnFnReturn
+      ) a.An.annotation_sites
+  in
+  Alcotest.(check bool) "AnnFnReturn site created for unannotated fn" true has_fn_return_site
+
+(** "Add return type annotation" action offered when cursor on fn name. *)
+let test_fn_return_annotation_action_offered () =
+  let src = {|
+mod M do
+  fn double(x: Int) do
+    x * 2
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "double" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  let has_ret_annot =
+    List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
+        let t = String.lowercase_ascii ca.title in
+        let n = String.length t and sn = 6 in
+        let found = ref false in
+        for i = 0 to n - sn do
+          if String.sub t i sn = "return" then found := true
+        done;
+        !found
+      ) acts
+  in
+  Alcotest.(check bool) "return type annotation action offered" true has_ret_annot
+
+(** Return type annotation edit inserts "-> T" before "do". *)
+let test_fn_return_annotation_edit_inserts_arrow () =
+  let src = {|
+mod M do
+  fn double(x: Int) do
+    x * 2
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "double" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  let ret_act = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+      let t = String.lowercase_ascii ca.title in
+      let n = String.length t and sn = 6 in
+      let found = ref false in
+      for i = 0 to n - sn do
+        if String.sub t i sn = "return" then found := true
+      done;
+      !found
+    ) acts in
+  match ret_act with
+  | None -> Alcotest.fail "expected return type annotation action"
+  | Some ca ->
+    (match ca.edit with
+     | None -> Alcotest.fail "expected edit"
+     | Some edit ->
+       let has_arrow =
+         match edit.changes with
+         | None -> false
+         | Some m ->
+           List.exists (fun (_, edits) ->
+               List.exists (fun (e : Lsp.Types.TextEdit.t) ->
+                   let t = e.newText in
+                   let n = String.length t and sn = 2 in
+                   let found = ref false in
+                   for i = 0 to n - sn do
+                     if String.sub t i sn = "->" then found := true
+                   done;
+                   !found
+                 ) edits
+             ) m
+       in
+       Alcotest.(check bool) "edit contains '->'" true has_arrow)
+
+(* ------------------------------------------------------------------ *)
+(* 25. P1.7 — Function parameter type annotation                      *)
+(* ------------------------------------------------------------------ *)
+
+(** AnnFnParam site created for bare variable param (no type annotation). *)
+let test_fn_param_annotation_site_created () =
+  let src = {|
+mod M do
+  fn negate(x) do
+    0 - x
+  end
+end
+|} in
+  let a = analyse src in
+  let has_fn_param_site =
+    List.exists (fun (site : An.annotation_site) ->
+        site.An.as_kind = An.AnnFnParam
+      ) a.An.annotation_sites
+  in
+  Alcotest.(check bool) "AnnFnParam site for unannotated param" true has_fn_param_site
+
+(** "Add parameter type annotation" action offered when cursor on param name. *)
+let test_fn_param_annotation_action_offered () =
+  let src = {|
+mod M do
+  fn negate(x) do
+    0 - x
+  end
+end
+|} in
+  let a = analyse src in
+  (* "negate(x)" — pos_of gives position of 'n' in "negate".
+     The param 'x' is at column of 'x' in "(x)". *)
+  let (line, col) = pos_of src "(x)" in
+  let col = col + 1 in  (* skip '(' to get to 'x' *)
+  let acts = An.code_actions_at a ~line ~character:col () in
+  let has_param_annot =
+    List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
+        let t = String.lowercase_ascii ca.title in
+        let n = String.length t and sn = 9 in
+        let found = ref false in
+        for i = 0 to n - sn do
+          if String.sub t i sn = "parameter" then found := true
+        done;
+        !found
+      ) acts
+  in
+  Alcotest.(check bool) "param annotation action offered" true has_param_annot
+
+(* ------------------------------------------------------------------ *)
+(* 26. P1.7 — Batch annotation action                                 *)
+(* ------------------------------------------------------------------ *)
+
+(** Batch "Annotate all N unannotated bindings" offered when 2+ AnnLet sites. *)
+let test_batch_annotation_offered_for_multiple_bindings () =
+  let src = {|
+mod M do
+  fn f() do
+    let a = 1
+    let b = "hello"
+    let c = true
+    a
+  end
+end
+|} in
+  let a = analyse src in
+  (* Cursor must be on the variable name 'a', not on 'let'.
+     pos_of finds 'l' in "let a "; add 4 to reach 'a'. *)
+  let (line, col) = pos_of src "let a" in
+  let col = col + 4 in  (* skip "let " to reach 'a' *)
+  let acts = An.code_actions_at a ~line ~character:col () in
+  let has_batch =
+    List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
+        let t = String.lowercase_ascii ca.title in
+        let n = String.length t and sn = 8 in
+        let found = ref false in
+        for i = 0 to n - sn do
+          if String.sub t i sn = "annotate" then found := true
+        done;
+        !found
+      ) acts
+  in
+  Alcotest.(check bool) "batch annotation offered" true has_batch
+
+(** No batch action when only one unannotated binding. *)
+let test_batch_annotation_not_offered_for_single_binding () =
+  let src = {|
+mod M do
+  fn f() do
+    let x = 42
+    x + 1
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "let x" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  let has_batch =
+    List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
+        let t = String.lowercase_ascii ca.title in
+        let n = String.length t and sn = 8 in
+        let found = ref false in
+        for i = 0 to n - sn do
+          if String.sub t i sn = "annotate" then found := true
+        done;
+        !found
+      ) acts
+  in
+  Alcotest.(check bool) "no batch action for single binding" false has_batch
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -2087,5 +2404,22 @@ let () =
       "wrap edit inserts inspect(",             `Quick, test_wrap_with_inspect_edit_adds_inspect;
       "remove inspect offered",                 `Quick, test_remove_inspect_offered;
       "remove inspect edit unwraps to inner",   `Quick, test_remove_inspect_edit_unwraps;
+    ];
+    "p1.1: typed match stubs", [
+      "ctor with fields → typed stub",  `Quick, test_typed_match_stub_with_fields;
+      "nullary ctor → bare stub",       `Quick, test_typed_match_stub_nullary;
+    ];
+    "p1.7: fn return type annotation", [
+      "AnnFnReturn site created",       `Quick, test_fn_return_annotation_site_created;
+      "action offered on fn name",      `Quick, test_fn_return_annotation_action_offered;
+      "edit inserts '->'",              `Quick, test_fn_return_annotation_edit_inserts_arrow;
+    ];
+    "p1.7: fn param type annotation", [
+      "AnnFnParam site created",        `Quick, test_fn_param_annotation_site_created;
+      "action offered on param",        `Quick, test_fn_param_annotation_action_offered;
+    ];
+    "p1.7: batch annotation", [
+      "offered for 2+ bindings",        `Quick, test_batch_annotation_offered_for_multiple_bindings;
+      "not offered for single binding", `Quick, test_batch_annotation_not_offered_for_single_binding;
     ];
   ]
