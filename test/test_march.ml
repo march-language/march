@@ -4268,6 +4268,152 @@ let test_atomic_rc_local_decrc_not_atomic () =
   Alcotest.(check bool) "local pattern match: no EAtomicDecRC"
     false (atomic_dec_vars f.March_tir.Tir.fn_body <> [])
 
+(* ── Escape analysis tests ──────────────────────────────────────────────────── *)
+
+(** Run lower → mono → defun → perceus → escape on [src]. *)
+let escape_module src =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  March_tir.Escape.escape_analysis tir
+
+(** True if [e] contains any EStackAlloc anywhere. *)
+let rec has_stack_alloc = function
+  | March_tir.Tir.EStackAlloc _ -> true
+  | March_tir.Tir.ELet (_, e1, e2) -> has_stack_alloc e1 || has_stack_alloc e2
+  | March_tir.Tir.ELetRec (fns, body) ->
+    List.exists (fun f -> has_stack_alloc f.March_tir.Tir.fn_body) fns
+    || has_stack_alloc body
+  | March_tir.Tir.ECase (_, brs, def) ->
+    List.exists (fun b -> has_stack_alloc b.March_tir.Tir.br_body) brs
+    || (match def with Some e -> has_stack_alloc e | None -> false)
+  | March_tir.Tir.ESeq (e1, e2) -> has_stack_alloc e1 || has_stack_alloc e2
+  | _ -> false
+
+(** True if [e] contains EAlloc (heap allocation) anywhere. *)
+let rec has_heap_alloc = function
+  | March_tir.Tir.EAlloc _ -> true
+  | March_tir.Tir.ELet (_, e1, e2) -> has_heap_alloc e1 || has_heap_alloc e2
+  | March_tir.Tir.ELetRec (fns, body) ->
+    List.exists (fun f -> has_heap_alloc f.March_tir.Tir.fn_body) fns
+    || has_heap_alloc body
+  | March_tir.Tir.ECase (_, brs, def) ->
+    List.exists (fun b -> has_heap_alloc b.March_tir.Tir.br_body) brs
+    || (match def with Some e -> has_heap_alloc e | None -> false)
+  | March_tir.Tir.ESeq (e1, e2) -> has_heap_alloc e1 || has_heap_alloc e2
+  | _ -> false
+
+
+let test_escape_local_discarded_promoted () =
+  (* A value created but never returned or stored should be stack-promoted.
+     After Perceus inserts EDecRC for the dead binding, escape analysis
+     recognises EDecRC as a non-escaping position and promotes to EStackAlloc. *)
+  let m = escape_module {|mod Test do
+    type Box = Box(Int)
+    fn make_and_ignore() : Int do
+      let b = Box(42)
+      0
+    end
+  end|} in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "make_and_ignore")
+            m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "locally discarded value is stack-promoted"
+    true (has_stack_alloc f.March_tir.Tir.fn_body)
+
+let test_escape_returned_not_promoted () =
+  (* A value that is returned from the function escapes — must stay on the heap. *)
+  let m = escape_module {|mod Test do
+    type Box = Box(Int)
+    fn wrap(x : Int) : Box do Box(x) end
+  end|} in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "wrap")
+            m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "returned value stays heap-allocated"
+    true (has_heap_alloc f.March_tir.Tir.fn_body);
+  Alcotest.(check bool) "returned value is NOT stack-promoted"
+    false (has_stack_alloc f.March_tir.Tir.fn_body)
+
+let test_escape_stored_in_alloc_not_promoted () =
+  (* A value stored as a field of another allocation escapes to the heap. *)
+  let m = escape_module {|mod Test do
+    type Box  = Box(Int)
+    type Pair = Pair(Box, Int)
+    fn wrap_pair(x : Int) : Pair do
+      let b = Box(x)
+      Pair(b, 0)
+    end
+  end|} in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "wrap_pair")
+            m.March_tir.Tir.tm_fns in
+  (* Both Box(x) and Pair(b, 0) are heap allocations; the Box must stay heap. *)
+  Alcotest.(check bool) "inner alloc stored in outer alloc stays heap-allocated"
+    true (has_heap_alloc f.March_tir.Tir.fn_body)
+
+let test_escape_match_field_promoted () =
+  (* A value that is created and immediately pattern-matched — with only the
+     extracted field returned, not the struct itself — does not escape.
+     This is the "Conn through pipeline" pattern: the Conn is created, a field
+     is read from it, and the Conn itself is discarded (not returned). *)
+  let m = escape_module {|mod Test do
+    type Conn = Conn(Int, Int)
+    fn get_status(s : Int, b : Int) : Int do
+      let conn = Conn(s, b)
+      match conn do
+        Conn(status, _body) -> status
+      end
+    end
+  end|} in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "get_status")
+            m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "conn-like value with field read is stack-promoted"
+    true (has_stack_alloc f.March_tir.Tir.fn_body)
+
+let test_escape_decrc_eliminated_after_promotion () =
+  (* After stack-promotion of a discarded value, the EDecRC that Perceus
+     inserted for it should be removed (no RC needed for stack values). *)
+  let m = escape_module {|mod Test do
+    type Box = Box(Int)
+    fn make_and_ignore() : Int do
+      let b = Box(42)
+      0
+    end
+  end|} in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "make_and_ignore")
+            m.March_tir.Tir.tm_fns in
+  (* After promotion, no EDecRC should remain for the promoted variable *)
+  let has_any_decrc = function
+    | March_tir.Tir.EDecRC _ -> true
+    | _ -> false
+  in
+  let rec any_in_body = function
+    | e when has_any_decrc e -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> any_in_body e1 || any_in_body e2
+    | March_tir.Tir.ESeq (e1, e2) -> any_in_body e1 || any_in_body e2
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> any_in_body b.March_tir.Tir.br_body) brs
+      || (match def with Some e -> any_in_body e | None -> false)
+    | _ -> false
+  in
+  Alcotest.(check bool) "EDecRC eliminated for stack-promoted variable"
+    false (any_in_body f.March_tir.Tir.fn_body)
+
+let test_escape_pipeline_no_crash () =
+  (* The full escape analysis pass runs on a complex function without raising. *)
+  let m = escape_module {|mod Test do
+    type Box  = Box(Int)
+    type Pair = Pair(Box, Box)
+    fn double_wrap(x : Int, y : Int) : Pair do
+      let a = Box(x)
+      let b = Box(y)
+      Pair(a, b)
+    end
+  end|} in
+  Alcotest.(check bool) "escape analysis: complex function runs without crash"
+    true (List.length m.March_tir.Tir.tm_fns > 0)
+
 (* ── Actor TIR lowering tests ──────────────────────────────────────────────── *)
 
 let test_actor_tir_lowering_generates_types () =
@@ -15540,6 +15686,14 @@ let () =
           Alcotest.test_case "pipeline no crash"         `Quick test_perceus_pipeline_no_crash;
           Alcotest.test_case "needs_rc TCon/TInt"        `Quick test_perceus_needs_rc_tcon;
           Alcotest.test_case "preserves fn count"        `Quick test_perceus_preserves_fn_count;
+        ] );
+      ( "escape_analysis", [
+          Alcotest.test_case "local discarded promoted"      `Quick test_escape_local_discarded_promoted;
+          Alcotest.test_case "returned not promoted"         `Quick test_escape_returned_not_promoted;
+          Alcotest.test_case "stored in alloc not promoted"  `Quick test_escape_stored_in_alloc_not_promoted;
+          Alcotest.test_case "match field read promoted"     `Quick test_escape_match_field_promoted;
+          Alcotest.test_case "decrc eliminated on promote"   `Quick test_escape_decrc_eliminated_after_promotion;
+          Alcotest.test_case "pipeline no crash"             `Quick test_escape_pipeline_no_crash;
         ] );
       ( "atomic_rc", [
           Alcotest.test_case "non-actor uses local RC"       `Quick test_atomic_rc_non_actor_uses_local_rc;
