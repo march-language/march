@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-24 (optimizations spec + constant propagation pass + LSP Phase 2 + cross-file imports)
+**Last updated:** 2026-03-25 (elm-style error message audit + improvement plan)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -22,6 +22,22 @@ This file tracks everything that still needs to get done. Organized by priority 
 ---
 
 ## P2 — Important / Near-Term
+
+### Compiler: Error Messages (Elm-style)
+
+- [ ] **Phase 1 — Infrastructure**: Centralize diagnostic rendering (`render_diagnostic`),
+  thread source text through pipeline, add `did_you_mean` utility, extend `diagnostic`
+  type with `suggestion` field. See `specs/plans/elm-style-errors-plan.md`.
+- [ ] **Phase 2 — P1 errors**: Unknown type (did-you-mean), unknown constructor (did-you-mean),
+  non-exhaustive match (show missing case as code), unused binding (show `_` fix), not-a-function
+  (name the value), wrong arg count (show which arg), unexpected character hints,
+  desugar `main+app` as proper diagnostic.
+- [ ] **Phase 3 — P2 errors**: Constructor arity, clause arity, field access, import errors
+  (show search path), circular import (show cycle), impl errors with examples.
+- [ ] **Phase 4 — P3 errors**: Session type errors (show protocol step), actor handler errors.
+- [ ] **Phase 5 — P4 errors**: Eval builtin type errors (name the function, show the type).
+- [ ] **Error snapshot tests**: Add `test/errors/` with `.march` + `.expected` pairs for
+  each improved message to prevent regression.
 
 ### Compiler: Type System
 
