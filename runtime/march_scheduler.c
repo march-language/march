@@ -66,6 +66,27 @@
 static march_scheduler g_sched;
 static int64_t         g_total_spawned = 0;
 
+/* ── Process registry (for march_sched_find) ──────────────────────────── */
+
+#define MARCH_MAX_PROCS 65536
+
+static march_proc *g_proc_registry[MARCH_MAX_PROCS];
+static int64_t     g_proc_count = 0;
+
+static void registry_add(march_proc *p) {
+    if (p->pid < MARCH_MAX_PROCS) {
+        g_proc_registry[p->pid] = p;
+    }
+    g_proc_count++;
+}
+
+static void registry_remove(march_proc *p) {
+    if (p->pid < MARCH_MAX_PROCS) {
+        g_proc_registry[p->pid] = NULL;
+    }
+    g_proc_count--;
+}
+
 /* ── Stack allocation helpers ─────────────────────────────────────────── */
 
 /* Allocate an mmap'd stack with a PROT_NONE guard page at the low end.
@@ -92,6 +113,48 @@ static void stack_free(void *stack_base, size_t alloc_size) {
     /* The guard page is immediately below stack_base. */
     void *mem = (char *)stack_base - (size_t)sysconf(_SC_PAGE_SIZE);
     munmap(mem, alloc_size);
+}
+
+/* ── Mailbox spinlock (needed for Phase 3 thread safety, used from Phase 2) ── */
+
+static inline void mbox_lock_acquire(march_proc *p) {
+    int exp = 0;
+    while (!atomic_compare_exchange_weak_explicit(
+               &p->mbox_lock, &exp, 1,
+               memory_order_acquire, memory_order_relaxed)) {
+        exp = 0;
+    }
+}
+
+static inline void mbox_lock_release(march_proc *p) {
+    atomic_store_explicit(&p->mbox_lock, 0, memory_order_release);
+}
+
+/* ── Mailbox helpers (FIFO) ──────────────────────────────────────────── */
+
+static void mbox_push(march_proc *p, void *msg) {
+    march_mbox_node *node = (march_mbox_node *)malloc(sizeof(march_mbox_node));
+    if (!node) { fputs("march_sched: OOM (mbox node)\n", stderr); abort(); }
+    node->msg  = msg;
+    node->next = NULL;
+    if (p->mbox_tail) {
+        p->mbox_tail->next = node;
+    } else {
+        p->mailbox = node;
+    }
+    p->mbox_tail = node;
+    p->mbox_count++;
+}
+
+static void *mbox_pop(march_proc *p) {
+    march_mbox_node *node = p->mailbox;
+    if (!node) return NULL;
+    void *msg = node->msg;
+    p->mailbox = node->next;
+    if (!p->mailbox) p->mbox_tail = NULL;
+    p->mbox_count--;
+    free(node);
+    return msg;
 }
 
 /* ── Trampoline ───────────────────────────────────────────────────────── */
@@ -141,6 +204,8 @@ static march_proc *run_dequeue(void) {
 void march_sched_init(void) {
     memset(&g_sched, 0, sizeof(g_sched));
     g_total_spawned = 0;
+    memset(g_proc_registry, 0, sizeof(g_proc_registry));
+    g_proc_count = 0;
 }
 
 march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
@@ -156,7 +221,10 @@ march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
     p->reductions = MARCH_REDUCTION_BUDGET;
     p->fn         = fn;
     p->arg        = arg;
-    p->mailbox    = NULL; /* Phase 2 */
+    p->mailbox    = NULL;
+    p->mbox_tail  = NULL;
+    p->mbox_count = 0;
+    p->mbox_lock  = 0;
 
     /* Allocate the stack. */
     p->stack_base = stack_alloc(MARCH_STACK_SIZE, &p->stack_alloc);
@@ -184,6 +252,7 @@ march_proc *march_sched_spawn(void (*fn)(void *), void *arg) {
     makecontext(&p->ctx, (void (*)(void))proc_trampoline, 2, arg_hi, arg_lo);
 
     run_enqueue(p);
+    registry_add(p);
     g_total_spawned++;
     return p;
 }
@@ -193,7 +262,10 @@ void march_sched_run(void) {
 
     for (;;) {
         march_proc *p = run_dequeue();
-        if (!p) break; /* Run queue drained — all processes have finished. */
+        if (!p) {
+            if (g_proc_count <= 0) break;
+            break;  /* Deadlock: all WAITING; Phase 3 replaces this */
+        }
 
         /* Start a new quantum: fresh budget, mark running, switch in. */
         p->status        = PROC_RUNNING;
@@ -210,6 +282,7 @@ void march_sched_run(void) {
             run_enqueue(p);
         } else if (p->status == PROC_DEAD) {
             /* Process finished — release its resources. */
+            registry_remove(p);
             stack_free(p->stack_base, p->stack_alloc);
             free(p);
         }
@@ -250,4 +323,58 @@ march_proc *march_sched_current(void) {
 
 int64_t march_sched_total_spawned(void) {
     return g_total_spawned;
+}
+
+march_proc *march_sched_find(int64_t pid) {
+    if (pid < 0 || pid >= MARCH_MAX_PROCS) return NULL;
+    return g_proc_registry[pid];
+}
+
+int march_sched_send(march_proc *target, void *msg) {
+    if (!target || atomic_load_explicit(&target->status, memory_order_acquire) == PROC_DEAD)
+        return -1;
+    mbox_lock_acquire(target);
+    mbox_push(target, msg);
+    int was_waiting = (atomic_load_explicit(&target->status, memory_order_acquire) == PROC_WAITING);
+    mbox_lock_release(target);
+    if (was_waiting) {
+        march_sched_wake(target);
+    }
+    return 0;
+}
+
+void *march_sched_recv(void) {
+    march_proc *p = g_sched.current;
+    if (!p) return NULL;
+
+    /* Fast path: message already available. */
+    void *msg = mbox_pop(p);
+    if (msg) return msg;
+
+    /* Slow path: check mailbox under lock, then park if truly empty. */
+    mbox_lock_acquire(p);
+    msg = mbox_pop(p);
+    if (msg) {
+        mbox_lock_release(p);
+        return msg;
+    }
+    atomic_store_explicit(&p->status, PROC_WAITING, memory_order_release);
+    mbox_lock_release(p);
+
+    swapcontext(&p->ctx, &g_sched.sched_ctx);
+
+    /* Resumed — a sender woke us. */
+    return mbox_pop(p);
+}
+
+void *march_sched_try_recv(void) {
+    march_proc *p = g_sched.current;
+    if (!p) return NULL;
+    return mbox_pop(p);
+}
+
+void march_sched_wake(march_proc *target) {
+    if (!target || atomic_load_explicit(&target->status, memory_order_acquire) != PROC_WAITING)
+        return;
+    run_enqueue(target);  /* Sets status to PROC_READY */
 }
