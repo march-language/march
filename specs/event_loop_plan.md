@@ -1,8 +1,9 @@
 # Plan: Event-Loop HTTP Server (The Architectural Ceiling)
 
 ## Status
-**Not started.** This plan is the next major HTTP performance milestone after the
-thread-per-connection quick wins (~49–52k req/s on macOS ARM64).
+**Phases 1–2 complete.** Non-blocking I/O infrastructure + kqueue/epoll event loop
+with SO_REUSEPORT implemented. Phases 3–4 (per-thread arena, io_uring) are optional
+future work. Thread-per-connection fallback retained via compile flag.
 
 ---
 
