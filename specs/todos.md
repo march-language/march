@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-25 (elm-style error message audit + improvement plan)
+**Last updated:** 2026-03-25 (elm-style error message audit + improvement plan + LSP code actions P1.8, P2.10, P3.4)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 

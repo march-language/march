@@ -4228,7 +4228,7 @@ let rec check_decl env (d : Ast.decl) : env =
 let warn_unused_imports env =
   List.iter (fun ie ->
     if not !(ie.ie_used) then
-      Err.warning env.errors ~span:ie.ie_span ie.ie_desc
+      Err.warning_with_code env.errors ~span:ie.ie_span ~code:"unused_import" ie.ie_desc
   ) !(env.import_tracker)
 
 (* =================================================================
