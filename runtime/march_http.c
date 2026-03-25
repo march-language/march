@@ -493,11 +493,6 @@ void *march_http_serialize_response(int64_t status, void *headers, void *body) {
 
 /* ── HTTP server accept loop ──────────────────────────────────────────── */
 
-/* Server config fields (heap object):
- *   field 0 (offset 16): port       int64_t
- *   field 1 (offset 24): max_conns  int64_t
- *   field 2 (offset 32): timeout_ms int64_t
- */
 typedef struct {
     void *pipeline;       /* compiled March function: Conn -> Conn */
     int   client_fd;
@@ -798,14 +793,130 @@ static void *connection_thread(void *arg) {
     return NULL;
 }
 
+/* ── Thread pool ──────────────────────────────────────────────────────── */
+
+/* Ring-buffer capacity for pending connection fds.  Must be a power of 2.
+ * At 4096 slots the accept loop can absorb burst traffic without blocking. */
+#define MARCH_HTTP_QUEUE_CAPACITY 4096
+
+typedef struct {
+    int             fds[MARCH_HTTP_QUEUE_CAPACITY];
+    size_t          head;       /* next slot to consume */
+    size_t          tail;       /* next slot to produce into */
+    size_t          count;      /* current occupancy */
+    pthread_mutex_t lock;
+    pthread_cond_t  not_empty;  /* signalled when count goes 0→1 */
+    pthread_cond_t  not_full;   /* signalled when count drops below capacity */
+} http_work_queue_t;
+
+typedef struct {
+    pthread_t        *threads;
+    int               size;       /* number of worker threads allocated */
+    void             *pipeline;   /* shared March pipeline closure */
+    http_work_queue_t queue;
+    _Atomic int       shutdown;   /* set to 1 to request worker exit */
+} http_pool_t;
+
+static http_pool_t g_pool;
+static _Atomic int g_http_shutdown = 0;  /* set by signal handler */
+
+static void http_signal_handler(int sig) {
+    (void)sig;
+    atomic_store_explicit(&g_http_shutdown, 1, memory_order_relaxed);
+}
+
+/* Worker thread: dequeue fds and run the connection handler in a loop. */
+static void *pool_worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&g_pool.queue.lock);
+        while (g_pool.queue.count == 0 &&
+               !atomic_load_explicit(&g_pool.shutdown, memory_order_relaxed)) {
+            pthread_cond_wait(&g_pool.queue.not_empty, &g_pool.queue.lock);
+        }
+        if (g_pool.queue.count == 0) {
+            /* Shutdown requested and queue is drained — exit. */
+            pthread_mutex_unlock(&g_pool.queue.lock);
+            break;
+        }
+        int fd = g_pool.queue.fds[g_pool.queue.head];
+        g_pool.queue.head = (g_pool.queue.head + 1) % MARCH_HTTP_QUEUE_CAPACITY;
+        g_pool.queue.count--;
+        pthread_cond_signal(&g_pool.queue.not_full);
+        pthread_mutex_unlock(&g_pool.queue.lock);
+
+        conn_thread_arg_t *a = malloc(sizeof(conn_thread_arg_t));
+        if (a) {
+            a->client_fd = fd;
+            a->pipeline  = g_pool.pipeline;
+            connection_thread(a);   /* handles fd and frees a */
+        } else {
+            close(fd);
+        }
+    }
+    return NULL;
+}
+
+void march_http_pool_start(int64_t pool_size, void *pipeline) {
+    if (pool_size <= 0) pool_size = MARCH_HTTP_POOL_DEFAULT_SIZE;
+
+    memset(&g_pool, 0, sizeof(g_pool));
+    g_pool.size     = (int)pool_size;
+    g_pool.pipeline = pipeline;
+    atomic_store_explicit(&g_pool.shutdown, 0, memory_order_relaxed);
+
+    pthread_mutex_init(&g_pool.queue.lock, NULL);
+    pthread_cond_init(&g_pool.queue.not_empty, NULL);
+    pthread_cond_init(&g_pool.queue.not_full, NULL);
+
+    g_pool.threads = malloc(sizeof(pthread_t) * (size_t)pool_size);
+    if (!g_pool.threads) {
+        fprintf(stderr, "march: thread pool alloc failed\n");
+        g_pool.size = 0;
+        return;
+    }
+
+    for (int i = 0; i < g_pool.size; i++) {
+        if (pthread_create(&g_pool.threads[i], NULL, pool_worker, NULL) != 0) {
+            fprintf(stderr, "march: pool worker[%d] create failed: %s\n",
+                    i, strerror(errno));
+            g_pool.size = i;   /* only join threads we actually started */
+            break;
+        }
+    }
+    fprintf(stderr, "march: HTTP thread pool started (%d workers)\n", g_pool.size);
+}
+
+void march_http_pool_stop(void) {
+    /* Signal workers to exit once the queue drains. */
+    atomic_store_explicit(&g_pool.shutdown, 1, memory_order_release);
+    pthread_mutex_lock(&g_pool.queue.lock);
+    pthread_cond_broadcast(&g_pool.queue.not_empty);
+    pthread_mutex_unlock(&g_pool.queue.lock);
+
+    for (int i = 0; i < g_pool.size; i++)
+        pthread_join(g_pool.threads[i], NULL);
+
+    free(g_pool.threads);
+    g_pool.threads = NULL;
+
+    pthread_mutex_destroy(&g_pool.queue.lock);
+    pthread_cond_destroy(&g_pool.queue.not_empty);
+    pthread_cond_destroy(&g_pool.queue.not_full);
+
+    fprintf(stderr, "march: HTTP thread pool stopped\n");
+}
+
 void march_http_server_listen(int64_t port, int64_t max_conns,
                                int64_t idle_timeout, void *pipeline) {
     if (!pipeline) return;
-    (void)max_conns;    /* TODO: enforce max_conns with an atomic counter */
-    (void)idle_timeout; /* TODO: set SO_RCVTIMEO/SO_SNDTIMEO on accepted sockets */
+    (void)max_conns;
+    (void)idle_timeout;
 
-    /* Ignore broken-pipe signals — we handle send errors explicitly */
+    /* Ignore broken-pipe signals — send errors are handled explicitly. */
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGTERM, http_signal_handler);
+    signal(SIGINT,  http_signal_handler);
 
     int64_t listen_fd = march_tcp_listen(port);
     if (listen_fd < 0) {
@@ -814,10 +925,10 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
         return;
     }
 
+    march_http_pool_start(MARCH_HTTP_POOL_DEFAULT_SIZE, pipeline);
     fprintf(stderr, "march: HTTP server listening on port %lld\n", (long long)port);
 
-    for (;;) {
-        /* Use select with 1-second timeout to allow future shutdown signalling */
+    while (!atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
         fd_set rfds;
         FD_ZERO(&rfds);
         FD_SET((int)listen_fd, &rfds);
@@ -827,28 +938,31 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
             if (errno == EINTR) continue;
             break;
         }
-        if (r == 0) continue;  /* timeout — loop back */
+        if (r == 0) continue;   /* timeout — check g_http_shutdown and loop */
 
         int64_t client_fd = march_tcp_accept(listen_fd);
         if (client_fd < 0) continue;
 
-        conn_thread_arg_t *arg = malloc(sizeof(conn_thread_arg_t));
-        if (!arg) { close((int)client_fd); continue; }
-        arg->client_fd = (int)client_fd;
-        arg->pipeline  = pipeline;
-
-        pthread_t tid;
-        pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
-        if (pthread_create(&tid, &attr, connection_thread, arg) != 0) {
-            free(arg);
+        /* Enqueue the accepted fd for a pool worker.
+         * Block if the queue is full rather than dropping the connection. */
+        pthread_mutex_lock(&g_pool.queue.lock);
+        while (g_pool.queue.count == MARCH_HTTP_QUEUE_CAPACITY &&
+               !atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
+            pthread_cond_wait(&g_pool.queue.not_full, &g_pool.queue.lock);
+        }
+        if (!atomic_load_explicit(&g_http_shutdown, memory_order_relaxed)) {
+            g_pool.queue.fds[g_pool.queue.tail] = (int)client_fd;
+            g_pool.queue.tail = (g_pool.queue.tail + 1) % MARCH_HTTP_QUEUE_CAPACITY;
+            g_pool.queue.count++;
+            pthread_cond_signal(&g_pool.queue.not_empty);
+        } else {
             close((int)client_fd);
         }
-        pthread_attr_destroy(&attr);
+        pthread_mutex_unlock(&g_pool.queue.lock);
     }
 
     close((int)listen_fd);
+    march_http_pool_stop();
 }
 
 /* ── WebSocket builtins ───────────────────────────────────────────────── */

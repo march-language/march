@@ -71,12 +71,28 @@ void *march_http_serialize_response(int64_t status, void *headers, void *body);
 
 /* ── HTTP server ───────────────────────────────────────────────────── */
 
-/* Start a blocking HTTP server accept loop.
+/* Default number of worker threads in the connection thread pool. */
+#define MARCH_HTTP_POOL_DEFAULT_SIZE 64
+
+/* Start the HTTP connection thread pool.
+ * pool_size: number of worker threads (0 → MARCH_HTTP_POOL_DEFAULT_SIZE).
+ * pipeline:  compiled March function pointer (Conn -> Conn), shared by all workers.
+ * Must be called before the accept loop starts enqueuing connections.
+ * Safe to call once per process lifetime. */
+void march_http_pool_start(int64_t pool_size, void *pipeline);
+
+/* Signal all worker threads to drain remaining work and exit, then join them.
+ * Blocks until every worker has returned.  Destroys pool synchronisation
+ * primitives — do not call march_http_pool_start again after this. */
+void march_http_pool_stop(void);
+
+/* Start a blocking HTTP server accept loop backed by a fixed thread pool.
  * port:         TCP port to listen on
- * max_conns:    maximum concurrent connections (TODO: enforce)
- * idle_timeout: idle timeout in seconds (TODO: set SO_RCVTIMEO)
+ * max_conns:    maximum concurrent connections (unused — pool_size caps this)
+ * idle_timeout: idle timeout in seconds (unused — set SO_RCVTIMEO if needed)
  * pipeline:     a compiled March function pointer (Conn -> Conn)
- * This function does not return until the server is shut down. */
+ * Starts a MARCH_HTTP_POOL_DEFAULT_SIZE-worker pool internally and runs the
+ * accept loop until SIGTERM/SIGINT.  Calls march_http_pool_stop before returning. */
 void march_http_server_listen(int64_t port, int64_t max_conns,
                                int64_t idle_timeout, void *pipeline);
 
