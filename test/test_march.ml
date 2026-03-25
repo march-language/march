@@ -4937,6 +4937,217 @@ let test_perceus_preserves_fn_count () =
   (* At least 2 user functions; builtins may be present *)
   Alcotest.(check bool) "perceus preserves user fn count" true (n >= 2)
 
+(* ── Borrow Inference tests ─────────────────────────────────────────────── *)
+
+(** Run pipeline up to borrow inference (inclusive).  Returns the borrow_map. *)
+let borrow_module src =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  March_tir.Borrow.infer_module tir
+
+(** True iff [e] contains any EIncRC / EAtomicIncRC node. *)
+let rec has_any_incrc = function
+  | March_tir.Tir.EIncRC _ | March_tir.Tir.EAtomicIncRC _ -> true
+  | March_tir.Tir.ESeq (a, b)
+  | March_tir.Tir.ELet (_, a, b)    -> has_any_incrc a || has_any_incrc b
+  | March_tir.Tir.ELetRec (fns, body) ->
+    List.exists (fun f -> has_any_incrc f.March_tir.Tir.fn_body) fns
+    || has_any_incrc body
+  | March_tir.Tir.ECase (_, brs, def) ->
+    List.exists (fun b -> has_any_incrc b.March_tir.Tir.br_body) brs
+    || (match def with Some d -> has_any_incrc d | None -> false)
+  | _ -> false
+
+(** True iff [e] contains any EDecRC / EAtomicDecRC node. *)
+let rec has_any_decrc = function
+  | March_tir.Tir.EDecRC _ | March_tir.Tir.EAtomicDecRC _ -> true
+  | March_tir.Tir.ESeq (a, b)
+  | March_tir.Tir.ELet (_, a, b)    -> has_any_decrc a || has_any_decrc b
+  | March_tir.Tir.ELetRec (fns, body) ->
+    List.exists (fun f -> has_any_decrc f.March_tir.Tir.fn_body) fns
+    || has_any_decrc body
+  | March_tir.Tir.ECase (_, brs, def) ->
+    List.exists (fun b -> has_any_decrc b.March_tir.Tir.br_body) brs
+    || (match def with Some d -> has_any_decrc d | None -> false)
+  | _ -> false
+
+(* ── Analysis (borrow_map) tests ──────────────────────────────────────────── *)
+
+let test_borrow_read_only_param_is_borrowed () =
+  (* A function that only pattern-matches a TCon param (never stores /
+     returns it) should have that param inferred as borrowed. *)
+  let bm = borrow_module {|mod Test do
+    type Conn = Conn(String)
+    fn log(conn : Conn) : Unit do
+      match conn do | Conn(s) -> println(s) end
+    end
+  end|} in
+  Alcotest.(check bool) "log's conn param is borrowed" true
+    (March_tir.Borrow.is_borrowed bm "log" 0)
+
+let test_borrow_returned_param_is_owned () =
+  (* A function that returns the param directly must NOT be marked borrowed. *)
+  let bm = borrow_module {|mod Test do
+    type Conn = Conn(String)
+    fn passthrough(conn : Conn) : Conn do conn end
+  end|} in
+  Alcotest.(check bool) "returned conn param is owned (not borrowed)" false
+    (March_tir.Borrow.is_borrowed bm "passthrough" 0)
+
+let test_borrow_stored_param_is_owned () =
+  (* A function that wraps the param in a constructor must NOT be marked borrowed. *)
+  let bm = borrow_module {|mod Test do
+    type Conn = Conn(String)
+    type Box = Box(Conn)
+    fn store(conn : Conn) : Box do Box(conn) end
+  end|} in
+  Alcotest.(check bool) "stored conn param is owned (not borrowed)" false
+    (March_tir.Borrow.is_borrowed bm "store" 0)
+
+let test_borrow_int_param_not_in_map () =
+  (* TInt does not need RC, so borrow inference marks it false (not borrowed).
+     Borrowing only matters for heap-allocated (TCon/TString/TPtr) params. *)
+  let bm = borrow_module {|mod Test do
+    fn add(x : Int, y : Int) : Int do x + y end
+  end|} in
+  (* Both int params should be false — they don't need RC regardless. *)
+  Alcotest.(check bool) "Int param 0 not borrowed" false
+    (March_tir.Borrow.is_borrowed bm "add" 0);
+  Alcotest.(check bool) "Int param 1 not borrowed" false
+    (March_tir.Borrow.is_borrowed bm "add" 1)
+
+let test_borrow_passed_to_borrowed_callee_stays_borrowed () =
+  (* If a param is passed only to other functions that borrow it, it remains
+     borrowed itself.  This tests the inter-procedural fixpoint. *)
+  let bm = borrow_module {|mod Test do
+    type Conn = Conn(String)
+    fn log(conn : Conn) : Unit do
+      match conn do | Conn(s) -> println(s) end
+    end
+    fn log_twice(conn : Conn) : Unit do
+      log(conn)
+      log(conn)
+    end
+  end|} in
+  Alcotest.(check bool) "log's conn param is borrowed" true
+    (March_tir.Borrow.is_borrowed bm "log" 0);
+  Alcotest.(check bool) "log_twice's conn param is also borrowed" true
+    (March_tir.Borrow.is_borrowed bm "log_twice" 0)
+
+let test_borrow_passed_to_owned_callee_becomes_owned () =
+  (* If a param is passed to a function that stores it (owned position),
+     the param itself becomes owned. *)
+  let bm = borrow_module {|mod Test do
+    type Conn = Conn(String)
+    type Box = Box(Conn)
+    fn store(conn : Conn) : Box do Box(conn) end
+    fn wrap_and_store(conn : Conn) : Box do
+      store(conn)
+    end
+  end|} in
+  Alcotest.(check bool) "store's conn param is owned" false
+    (March_tir.Borrow.is_borrowed bm "store" 0);
+  Alcotest.(check bool) "wrap_and_store's conn param is also owned" false
+    (March_tir.Borrow.is_borrowed bm "wrap_and_store" 0)
+
+(* ── RC integration tests (via perceus_module) ────────────────────────────── *)
+
+let test_borrow_no_incrc_at_call_site () =
+  (* In a caller that invokes a borrowing function with a TCon arg that is
+     still live after the call, no EIncRC should be emitted at the call site.
+     Without borrow inference, EIncRC would be inserted because the arg is
+     live after (it is returned below the call). *)
+  let m = perceus_module {|mod Test do
+    type Conn = Conn(String)
+    fn log(conn : Conn) : Unit do
+      match conn do | Conn(s) -> println(s) end
+    end
+    fn handle(conn : Conn) : Conn do
+      log(conn)
+      conn
+    end
+  end|} in
+  let handle_fn =
+    List.find (fun fn -> fn.March_tir.Tir.fn_name = "handle") m.March_tir.Tir.tm_fns
+  in
+  (* With borrow inference, log's conn param is borrowed.
+     handle calls log(conn) while conn is still live (returned afterwards).
+     The Inc that would normally be emitted before the call is elided. *)
+  Alcotest.(check bool) "no EIncRC in handle body (borrow elides call-site Inc)" false
+    (has_any_incrc handle_fn.March_tir.Tir.fn_body)
+
+let test_borrow_no_decrc_in_callee () =
+  (* A function that only borrows its TCon param should have no EDecRC
+     emitted for that param inside its body. *)
+  let m = perceus_module {|mod Test do
+    type Conn = Conn(String)
+    fn log(conn : Conn) : Unit do
+      match conn do | Conn(s) -> println(s) end
+    end
+  end|} in
+  let log_fn =
+    List.find (fun fn -> fn.March_tir.Tir.fn_name = "log") m.March_tir.Tir.tm_fns
+  in
+  (* With borrow inference, conn is marked borrowed.
+     The ECase scrutinee-free (EDecRC on conn) is suppressed. *)
+  Alcotest.(check bool) "no EDecRC in log body (borrow elides callee Dec)" false
+    (has_any_decrc log_fn.March_tir.Tir.fn_body)
+
+let test_borrow_owned_param_still_gets_rc () =
+  (* Sanity check: a function that RETURNS its TCon param (owned) must still
+     get the standard RC treatment.  When the caller passes an arg that is
+     still live after the call (because it is used again below), EIncRC must
+     be emitted.  With borrow inference, this Inc is only elided for BORROWED
+     parameters — owned ones keep their Inc. *)
+  let m = perceus_module {|mod Test do
+    type Conn = Conn(String)
+    fn passthrough(conn : Conn) : Conn do conn end
+    fn caller(conn : Conn) : Conn do
+      let _ = passthrough(conn)
+      conn
+    end
+  end|} in
+  (* conn is still live after the passthrough(conn) call (returned below).
+     passthrough is owned → EIncRC conn is emitted before the call. *)
+  let caller_fn =
+    List.find (fun fn -> fn.March_tir.Tir.fn_name = "caller") m.March_tir.Tir.tm_fns
+  in
+  Alcotest.(check bool) "owned param call site still gets EIncRC" true
+    (has_any_incrc caller_fn.March_tir.Tir.fn_body)
+
+let test_borrow_conn_middleware_pattern () =
+  (* HTTP middleware pattern: conn is passed through multiple read-only
+     middlewares and then to a final handler that returns it.
+     Read-only middlewares should generate zero RC ops for conn. *)
+  let m = perceus_module {|mod Test do
+    type Conn = Conn(String)
+    fn log_middleware(conn : Conn) : Unit do
+      match conn do | Conn(s) -> println(s) end
+    end
+    fn auth_middleware(conn : Conn) : Unit do
+      match conn do | Conn(s) -> println(s) end
+    end
+    fn handle(conn : Conn) : Conn do
+      log_middleware(conn)
+      auth_middleware(conn)
+      conn
+    end
+  end|} in
+  let log_fn  = List.find (fun fn -> fn.March_tir.Tir.fn_name = "log_middleware")  m.March_tir.Tir.tm_fns in
+  let auth_fn = List.find (fun fn -> fn.March_tir.Tir.fn_name = "auth_middleware") m.March_tir.Tir.tm_fns in
+  let handle_fn = List.find (fun fn -> fn.March_tir.Tir.fn_name = "handle") m.March_tir.Tir.tm_fns in
+  (* Read-only middlewares: no Dec on conn inside *)
+  Alcotest.(check bool) "log_middleware: no EDecRC for conn (borrowed)" false
+    (has_any_decrc log_fn.March_tir.Tir.fn_body);
+  Alcotest.(check bool) "auth_middleware: no EDecRC for conn (borrowed)" false
+    (has_any_decrc auth_fn.March_tir.Tir.fn_body);
+  (* Caller: conn passed to two borrowed functions while live → no EIncRC *)
+  Alcotest.(check bool) "handle: no EIncRC for conn at borrowed call sites" false
+    (has_any_incrc handle_fn.March_tir.Tir.fn_body)
+
 (* --- multiline tests --- *)
 
 let test_multiline_depth_zero () =
@@ -15647,6 +15858,18 @@ let () =
           Alcotest.test_case "pipeline no crash"         `Quick test_perceus_pipeline_no_crash;
           Alcotest.test_case "needs_rc TCon/TInt"        `Quick test_perceus_needs_rc_tcon;
           Alcotest.test_case "preserves fn count"        `Quick test_perceus_preserves_fn_count;
+        ] );
+      ( "borrow_inference", [
+          Alcotest.test_case "read-only param is borrowed"           `Quick test_borrow_read_only_param_is_borrowed;
+          Alcotest.test_case "returned param is owned"               `Quick test_borrow_returned_param_is_owned;
+          Alcotest.test_case "stored param is owned"                 `Quick test_borrow_stored_param_is_owned;
+          Alcotest.test_case "Int param not borrowed (no RC needed)" `Quick test_borrow_int_param_not_in_map;
+          Alcotest.test_case "passed to borrowed callee: stays borrowed"  `Quick test_borrow_passed_to_borrowed_callee_stays_borrowed;
+          Alcotest.test_case "passed to owned callee: becomes owned"      `Quick test_borrow_passed_to_owned_callee_becomes_owned;
+          Alcotest.test_case "no IncRC at call site for borrowed arg"     `Quick test_borrow_no_incrc_at_call_site;
+          Alcotest.test_case "no DecRC in callee for borrowed param"      `Quick test_borrow_no_decrc_in_callee;
+          Alcotest.test_case "owned param still gets RC"                  `Quick test_borrow_owned_param_still_gets_rc;
+          Alcotest.test_case "HTTP Conn middleware pattern"               `Quick test_borrow_conn_middleware_pattern;
         ] );
       ( "atomic_rc", [
           Alcotest.test_case "non-actor uses local RC"       `Quick test_atomic_rc_non_actor_uses_local_rc;

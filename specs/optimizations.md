@@ -397,7 +397,10 @@ This is distinct from escape analysis (which stack-allocates the struct) — tru
 
 ---
 
-### P7 — Borrow Inference and Elision
+### P7 — Borrow Inference and Elision  ✅
+
+**Location:** `lib/tir/borrow.ml` (analysis) + `lib/tir/perceus.ml` (RC integration)
+**Stage:** TIR (before Perceus RC insertion)
 
 **Motivation:** When a value is passed to a function that only reads it (doesn't store, return, or alias it), the compiler can insert a *borrow* instead of an RC increment/decrement pair. Borrow elision goes further: when the borrowed value's lifetime is trivially scoped (e.g., read within the callee and never escapes), the borrow tracking itself is elided — no refcount operations at all.
 
@@ -421,10 +424,11 @@ Without borrow inference, `xs` and `ys` each get `inc_rc` on entry and `dec_rc` 
 3. Perceus then skips `EIncRC`/`EDecRC` for borrow-marked uses
 4. Elision: if all uses of a binding are borrows and the binding's scope is a single basic block, skip even the borrow marker
 
-**Effort:** Medium | **Impact:** High (reduces RC overhead 30-50% in typical code)
+**Effort:** Medium (done) | **Impact:** High (reduces RC overhead 30-50% in typical code)
 **Dependencies:** Runs before Perceus; benefits from Escape analysis information
 **Stage:** TIR pass — `lib/tir/borrow.ml`
-**Status:** Planned
+**Tests:** `borrow_inference` group in `test/test_march.ml` (10 tests)
+**Status:** Implemented
 
 ---
 
