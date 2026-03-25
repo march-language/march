@@ -8,9 +8,29 @@
     Atomic RC (EAtomicIncRC / EAtomicDecRC) is emitted for values that are
     passed as message arguments to [send()].  These values may cross actor
     thread boundaries and require C11-atomic RC to avoid data races.
-    All other values use fast non-atomic RC (march_incrc_local / march_decrc_local). *)
+    All other values use fast non-atomic RC (march_incrc_local / march_decrc_local).
+
+    Borrow Inference integration (Pass 4.0, via Borrow.infer_module):
+    Before inserting RC ops, the pass analyses every function to determine
+    which parameters are "borrowed" — only read (via pattern match / field
+    access), never stored, returned, or passed to an owning position.
+    For borrowed parameters:
+    - In the callee: no EDecRC is emitted (the parameter is added to the
+      [borrowed] live-at-exit set, suppressing last-use ownership transfer).
+    - At call sites: no EIncRC is emitted for arguments at borrowed positions
+      that are still live after the call.
+    - At call sites where the borrowed arg IS the caller's last use (ownership
+      would normally transfer): the caller instead emits EDecRC after the call,
+      since the callee will not decrement the value. *)
 
 module StringSet = Set.Make (String)
+
+(* ── Borrow map — module-level state ─────────────────────────────────────── *)
+
+(** The current module's borrow map, set at the start of [perceus] and cleared
+    on exit.  Using a ref (rather than threading it through every helper) keeps
+    the helpers' signatures unchanged and avoids pervasive API churn. *)
+let _borrow_map : Borrow.borrow_map ref = ref Borrow.empty
 
 (* ── Actor-send analysis ─────────────────────────────────────────────────── *)
 
@@ -254,16 +274,48 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     (e, live_after)
 
   | Tir.EApp (f, args) ->
-    (* Collect vars that need incrc (Unr, needs_rc, still live after) *)
-    let all_atoms = (Tir.AVar f) :: args in
-    let inc_vars = find_inc_vars all_atoms live_after in
+    (* Borrow-aware Inc insertion for direct (known) calls.
+       For each argument at position [i]:
+         - Standard (owned) parameter: insert EIncRC if Unr+needs_rc+live_after.
+         - Borrowed parameter (per _borrow_map):
+             • Arg still live after call → skip EIncRC (callee will not Dec).
+             • Arg NOT live after call  → no EIncRC (same as before), but emit
+               EDecRC *after* the call because the callee will not Dec it. *)
+    let indexed_args = List.mapi (fun i a -> (i, a)) args in
+    (* 1. Args that go to owned parameters — standard Inc logic. *)
+    let non_borrowed_args =
+      List.filter_map (fun (i, a) ->
+        if Borrow.is_borrowed !_borrow_map f.Tir.v_name i then None
+        else Some a
+      ) indexed_args
+    in
+    let inc_vars = find_inc_vars ((Tir.AVar f) :: non_borrowed_args) live_after in
+    (* 2. Borrowed args whose last use is this call: caller is responsible for Dec. *)
+    let post_dec_vars =
+      List.filter_map (fun (i, a) ->
+        match a with
+        | Tir.AVar v
+          when v.Tir.v_lin = Tir.Unr
+               && needs_rc v.Tir.v_ty
+               && not (StringSet.mem v.Tir.v_name live_after)
+               && Borrow.is_borrowed !_borrow_map f.Tir.v_name i ->
+          Some v
+        | _ -> None
+      ) indexed_args
+    in
     let e' = wrap_incrcs inc_vars e in
+    (* Wrap with post-call Decs (ESeq: call first, then dec). *)
+    let e'' =
+      List.fold_left (fun acc v ->
+        Tir.ESeq (acc, decrc_for v (Tir.AVar v))
+      ) e' post_dec_vars
+    in
     let lb =
       live_after
       |> StringSet.add f.Tir.v_name
       |> StringSet.union (vars_of_atoms args)
     in
-    (e', lb)
+    (e'', lb)
 
   | Tir.ECallPtr (a, args) ->
     let all_atoms = a :: args in
@@ -564,20 +616,42 @@ let insert_fbip (fn : Tir.fn_def) : Tir.fn_def =
     globals bridged into the current compilation unit.  They are injected
     into the borrowed set of the [main] function so Perceus never treats
     their last use as an ownership transfer, preventing RC underflow when
-    the same global is passed to multiple successive REPL lines. *)
+    the same global is passed to multiple successive REPL lines.
+
+    Borrow inference (Phase 0) runs first: it analyses the whole module to
+    determine which function parameters are borrowed, then passes that
+    information into the RC insertion phase so that:
+    - Callee: borrowed params are added to the live-at-exit set, suppressing
+      EDecRC / scrutinee-free on those params.
+    - Caller: EIncRC is skipped for args at borrowed positions that are still
+      live after the call; a post-call EDecRC is emitted instead when the arg
+      is the caller's last use. *)
 let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_module =
-  let borrowed_set =
+  (* Phase 0: borrow inference *)
+  let borrow_map = Borrow.infer_module m in
+  _borrow_map := borrow_map;
+  let repl_set =
     List.fold_left (fun s n -> StringSet.add n s) StringSet.empty repl_vars
   in
   let fns' =
     m.Tir.tm_fns
     |> List.map (fun fn ->
+         (* Build the "borrowed" live-at-exit set for this function:
+            - REPL globals (for main)
+            - Params inferred as borrowed by Phase 0 *)
+         let base =
+           if fn.Tir.fn_name = "main" then repl_set else StringSet.empty
+         in
          let borrowed =
-           if fn.Tir.fn_name = "main" then borrowed_set
-           else StringSet.empty
+           List.fold_left (fun s (i, p) ->
+             if Borrow.is_borrowed borrow_map fn.Tir.fn_name i
+             then StringSet.add p.Tir.v_name s
+             else s
+           ) base (List.mapi (fun i p -> (i, p)) fn.Tir.fn_params)
          in
          insert_rc ~borrowed fn)
     |> List.map elide_cancel_pairs
     |> List.map insert_fbip
   in
+  _borrow_map := Borrow.empty;
   { m with Tir.tm_fns = fns' }
