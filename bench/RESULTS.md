@@ -1,6 +1,6 @@
 # Cross-Language Benchmark Results
 
-**Date:** 2026-03-23 (updated after nat-solver + TCE structural-recursion refinement)
+**Date:** 2026-03-24 (updated after constant propagation pass)
 **Machine:** Apple M-series (darwin 24.6.0, 14 cores)
 **Methodology:** Each benchmark run 3 times; median, min, max wall-clock time reported.
 
@@ -41,7 +41,7 @@ Allocates and walks complete binary trees. Exercises the allocator and garbage c
 
 | Language | Median  | Min     | Max     |
 |----------|---------|---------|---------|
-| March    | 275.2 ms | 274.9 ms | 278.4 ms |
+| March    | 265.4 ms | 265.4 ms | 266.5 ms |
 | **OCaml** | **19.8 ms** | 19.3 ms | 22.0 ms |
 | Rust     | 257.5 ms | 255.2 ms | 258.1 ms |
 | Elixir   | 317.1 ms | 316.8 ms | 325.1 ms |
@@ -49,8 +49,9 @@ Allocates and walks complete binary trees. Exercises the allocator and garbage c
 **Notes:**
 - **TCE structural-recursion fix restored this benchmark.** `make(d-1)` is an arithmetic reduction; `check(l) + check(r)` where `l`, `r` are pattern-bound sub-components of the `Node(l, r)` parameter — both now pass structural recursion rules.
 - OCaml dominates due to generational GC; minor-heap handles short-lived tree nodes cheaply.
-- March is competitive with Rust (RC-based allocation); both ≈ 256–275 ms.
-- *Previous:* benchmark was rejected by mandatory TCE enforcement (was 256.7 ms before TCE).
+- March is competitive with Rust (RC-based allocation); both ≈ 256–266 ms.
+- *Previous:* 275.2 ms — constant propagation improved by ~3.6% (275 → 265 ms).
+- *Before TCE:* benchmark was rejected by mandatory TCE enforcement (was 256.7 ms).
 
 ---
 
@@ -61,16 +62,17 @@ This is the primary showcase for March's **Functional But In-Place (FBIP)** opti
 
 | Language | Median    | Min       | Max       |
 |----------|-----------|-----------|-----------|
-| **March** | **523.7 ms** | 520.3 ms | 528.2 ms |
+| **March** | **513.3 ms** | 513.3 ms | 513.5 ms |
 | OCaml    | 3825.0 ms | 3820.5 ms | 3829.0 ms |
 | Rust     | 9977.4 ms | 9916.9 ms | 10010.9 ms |
 | Elixir   | 2579.4 ms | 2502.8 ms | 2648.1 ms |
 
 **Notes:**
 - **TCE structural-recursion fix restored this benchmark.** `inc_leaves(l)` and `inc_leaves(r)` where `l`, `r` are pattern-bound sub-components of `Node(l, r)` — now accepted as structural recursion.
-- **March is 7.3× faster than OCaml and 19× faster than Rust** via Perceus FBIP in-place reuse.
+- **March is 7.5× faster than OCaml and 19× faster than Rust** via Perceus FBIP in-place reuse.
 - When the RC of the input tree node is 1 (unique ownership), Perceus rewrites every node in-place — zero allocation after the first pass.
-- *Previous:* benchmark was rejected by mandatory TCE enforcement (was 480.3 ms before TCE, giving 7.5–18.9× vs others).
+- *Previous:* 523.7 ms — constant propagation improved by ~2% (524 → 513 ms).
+- *Before TCE:* 480.3 ms before TCE enforcement (7.5–18.9× vs others).
 
 ---
 
@@ -80,14 +82,15 @@ This is the primary showcase for March's **Functional But In-Place (FBIP)** opti
 
 | Language | Median   | Min      | Max      |
 |----------|----------|----------|----------|
-| March    | **75.8 ms** *(was 117.3 ms — stream fusion)* | 70.7 ms | 85.9 ms |
+| March    | **67.6 ms** *(was 75.8 ms — constant propagation)* | 67.6 ms | 68.1 ms |
 | **OCaml** | **31.6 ms** | 31.0 ms | 31.6 ms |
 | **Rust** | **5.1 ms** | 4.6 ms   | 5.2 ms   |
 | Elixir   | 340.6 ms | 338.3 ms | 352.5 ms |
 
 **Notes:**
-- **Stream fusion delivered a ~35% speedup** for March on this benchmark (117.3 ms → ~70–76 ms). The `map+filter+fold` chain is fused into a single-loop TIR function with no intermediate list allocations.
-- Rust's iterator pipeline is ~15× faster — LLVM iterator fusion at zero allocation.
+- **Constant propagation delivered a further ~11% speedup** (75.8 ms → ~68 ms). CProp enables the Fold pass to evaluate more arithmetic at compile time, reducing runtime loop overhead.
+- **Stream fusion previously delivered ~35% speedup** (117.3 ms → ~76 ms). Combined with CProp: 117.3 ms → 68 ms (42% total reduction).
+- Rust's iterator pipeline is ~13× faster — LLVM iterator fusion at zero allocation.
 - OCaml allocates two intermediate lists but its generational GC handles them cheaply.
 - Elixir's `Enum.map` + `Enum.filter` builds intermediate lists on the BEAM heap.
 
@@ -98,9 +101,9 @@ This is the primary showcase for March's **Functional But In-Place (FBIP)** opti
 | Benchmark        | March    | OCaml    | Rust     | Elixir   |
 |------------------|----------|----------|----------|----------|
 | fib(40)          | **287.7 ms** ≈ Rust | 368.6 ms | 291.4 ms | 1020.9 ms |
-| binary-trees(15) | 275.2 ms | **19.8 ms** | 257.5 ms | 317.1 ms |
-| tree-transform   | **523.7 ms** 7.3–19× | 3825.0 ms | 9977.4 ms | 2579.4 ms |
-| list-ops(1M)     | 75.8 ms ↓35% | **31.6 ms**  | **5.1 ms** | 340.6 ms |
+| binary-trees(15) | 265.4 ms ↓3.6% | **19.8 ms** | 257.5 ms | 317.1 ms |
+| tree-transform   | **513.3 ms** 7.5–19× ↓2% | 3825.0 ms | 9977.4 ms | 2579.4 ms |
+| list-ops(1M)     | 67.6 ms ↓42% total | **31.6 ms**  | **5.1 ms** | 340.6 ms |
 
 Bold = fastest for that benchmark.
 
@@ -119,13 +122,19 @@ Bold = fastest for that benchmark.
 - **list-ops: 117.3 ms → ~76 ms (~35% speedup)** — the `map+filter+fold` chain is compiled to a single fused loop in the TIR. No intermediate `ICons` chains.
 - This validates the fusion design: the ANF-flatten + pattern-match approach in `lib/tir/fusion.ml` works correctly for all three fusion patterns.
 
+### Constant Propagation Impact (feat/opt — 2026-03-24)
+- **list-ops: 75.8 ms → 67.6 ms (~11% speedup)** — CProp propagates the loop bounds/step constants through the fused map+filter+fold body, enabling further arithmetic folding.
+- **binary-trees: 275.2 ms → 265.4 ms (~3.6% speedup)** — tree-depth constants in `make`/`check` propagate through inlined call chains.
+- **tree-transform: 523.7 ms → 513.3 ms (~2% speedup)** — modest gain; FBIP already dominates this benchmark.
+- Combined with stream fusion, list-ops has improved 42% total from baseline (117.3 → 67.6 ms).
+
 ### Where March wins
-- **FBIP / tree-transform**: Perceus RC's in-place reuse — 7.3–19× faster than OCaml/Rust/Elixir.
+- **FBIP / tree-transform**: Perceus RC's in-place reuse — 7.5–19× faster than OCaml/Rust/Elixir.
 - **Scalar recursion (fib)**: Competitive with Rust (native code, RC-free path for pure arithmetic).
 
 ### Where March trails
-- **Allocation-heavy GC workloads** (binary-trees): OCaml's generational minor-heap is ~14× faster.
-- **List/iterator pipelines**: Fusion closed the gap from ~4× → ~2.4× behind OCaml; Rust's LLVM fusion is ~15× faster.
+- **Allocation-heavy GC workloads** (binary-trees): OCaml's generational minor-heap is ~13× faster.
+- **List/iterator pipelines**: Fusion+CProp closed gap to ~2.1× behind OCaml; Rust's LLVM fusion is ~13× faster.
 
 ---
 
