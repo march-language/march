@@ -1629,6 +1629,309 @@ end
     (List.mem "alive" a.An.unused_fns)
 
 (* ------------------------------------------------------------------ *)
+(* 20. P1.8: Assign to `_` (discard result) action                   *)
+(* ------------------------------------------------------------------ *)
+
+(* Source that triggers unused_binding via an unused function parameter. *)
+let src_unused_param = {|
+mod M do
+  fn greet(name) do
+    "hello"
+  end
+end
+|}
+
+let test_assign_to_underscore_offered () =
+  let a = analyse src_unused_param in
+  let (line, col) = pos_of src_unused_param "name" in
+  (* The unused_binding diagnostic is at the name; pass it as context *)
+  let diags = List.filter (fun (d : Lsp.Types.Diagnostic.t) ->
+      match d.code with Some (`String "unused_binding") -> true | _ -> false
+    ) a.diagnostics in
+  let acts = An.code_actions_at a ~line ~character:col ~diagnostics:diags () in
+  let has_assign_action =
+    List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
+        let low = String.lowercase_ascii ca.title in
+        let n = String.length low in
+        let found = ref false in
+        for i = 0 to n - 7 do
+          if String.sub low i 7 = "assign " then found := true
+        done;
+        !found
+      ) acts
+  in
+  Alcotest.(check bool) "assign-to-_ offered for unused binding" true has_assign_action
+
+let test_assign_to_underscore_edit_replaces_name () =
+  let a = analyse src_unused_param in
+  let (line, col) = pos_of src_unused_param "name" in
+  let diags = List.filter (fun (d : Lsp.Types.Diagnostic.t) ->
+      match d.code with Some (`String "unused_binding") -> true | _ -> false
+    ) a.diagnostics in
+  let acts = An.code_actions_at a ~line ~character:col ~diagnostics:diags () in
+  let assign_act = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+      let low = String.lowercase_ascii ca.title in
+      let n = String.length low in
+      let found = ref false in
+      for i = 0 to n - 7 do
+        if String.sub low i 7 = "assign " then found := true
+      done;
+      !found
+    ) acts in
+  match assign_act with
+  | None -> Alcotest.fail "assign-to-_ action not found"
+  | Some ca ->
+    (match ca.edit with
+     | None -> Alcotest.fail "expected workspace edit"
+     | Some edit ->
+       let replaces_with_underscore =
+         match edit.changes with
+         | None -> false
+         | Some m ->
+           List.exists (fun (_, edits) ->
+               List.exists (fun (e : Lsp.Types.TextEdit.t) ->
+                   e.newText = "_"
+                 ) edits
+             ) m
+       in
+       Alcotest.(check bool) "assign edit replaces with _" true replaces_with_underscore)
+
+(* ------------------------------------------------------------------ *)
+(* 21. P2.10: Remove unused import action                             *)
+(* ------------------------------------------------------------------ *)
+
+let test_unused_import_diagnostic_has_code () =
+  (* March has a Collections module in the stdlib; using it with .* and then
+     not referencing anything should trigger unused_import *)
+  let src = {|
+mod M do
+  fn main() do
+    println("hi")
+  end
+end
+|} in
+  (* We can't easily test unused_import without a real import that gets unused.
+     Instead verify the fix_registry has the code. *)
+  let has_entry = Hashtbl.mem An.fix_registry "unused_import" in
+  Alcotest.(check bool) "registry has unused_import" true has_entry;
+  ignore src
+
+let test_remove_import_action_whole_line () =
+  (* We simulate an unused_import diagnostic pointing at line 1 (0-indexed)
+     and verify the code action deletes that line. *)
+  let src = {|mod M do
+  fn main() do
+    println("hi")
+  end
+end|} in
+  let a = An.analyse ~filename:"test.march" ~src in
+  (* Build a synthetic unused_import diagnostic for line 1 (0-indexed) *)
+  let fake_range = Lsp.Types.Range.create
+    ~start:(Lsp.Types.Position.create ~line:1 ~character:2)
+    ~end_:(Lsp.Types.Position.create ~line:1 ~character:10) in
+  let fake_diag = Lsp.Types.Diagnostic.create
+    ~range:fake_range
+    ~message:(`String "Unused import: nothing from `Foo` is used.\nRemove this import.")
+    ~source:"march"
+    ~code:(`String "unused_import") () in
+  let acts = An.code_actions_at a ~line:1 ~character:5 ~diagnostics:[fake_diag] () in
+  let has_remove_action =
+    List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
+        let low = String.lowercase_ascii ca.title in
+        let n = String.length low in
+        let found = ref false in
+        for i = 0 to n - 6 do
+          if String.sub low i 6 = "remove" then found := true
+        done;
+        !found
+      ) acts
+  in
+  Alcotest.(check bool) "remove import action offered" true has_remove_action
+
+let test_remove_import_edit_deletes_line () =
+  let src = {|mod M do
+  fn main() do
+    println("hi")
+  end
+end|} in
+  let a = An.analyse ~filename:"test.march" ~src in
+  let fake_range = Lsp.Types.Range.create
+    ~start:(Lsp.Types.Position.create ~line:1 ~character:2)
+    ~end_:(Lsp.Types.Position.create ~line:1 ~character:10) in
+  let fake_diag = Lsp.Types.Diagnostic.create
+    ~range:fake_range
+    ~message:(`String "Unused import: nothing from `Foo` is used.\nRemove this import.")
+    ~source:"march"
+    ~code:(`String "unused_import") () in
+  let acts = An.code_actions_at a ~line:1 ~character:5 ~diagnostics:[fake_diag] () in
+  let remove_act = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+      let low = String.lowercase_ascii ca.title in
+      let n = String.length low in
+      let found = ref false in
+      for i = 0 to n - 6 do
+        if String.sub low i 6 = "remove" then found := true
+      done;
+      !found
+    ) acts in
+  match remove_act with
+  | None -> Alcotest.fail "remove import action not found"
+  | Some ca ->
+    (match ca.edit with
+     | None -> Alcotest.fail "expected workspace edit"
+     | Some edit ->
+       let deletes_whole_line =
+         match edit.changes with
+         | None -> false
+         | Some m ->
+           List.exists (fun (_, edits) ->
+               List.exists (fun (e : Lsp.Types.TextEdit.t) ->
+                   e.newText = "" &&
+                   e.range.Lsp.Types.Range.start.line = 1 &&
+                   e.range.Lsp.Types.Range.end_.line = 2
+                 ) edits
+             ) m
+       in
+       Alcotest.(check bool) "edit deletes whole line" true deletes_whole_line)
+
+(* ------------------------------------------------------------------ *)
+(* 22. P3.4: Wrap with inspect / Remove inspect                       *)
+(* ------------------------------------------------------------------ *)
+
+let test_wrap_with_inspect_offered () =
+  let src = {|
+mod M do
+  fn main() do
+    let x = 42
+    x
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "42" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  let has_wrap =
+    List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
+        let low = String.lowercase_ascii ca.title in
+        let n = String.length low in
+        let found = ref false in
+        for i = 0 to n - 4 do
+          if String.sub low i 4 = "wrap" then found := true
+        done;
+        !found
+      ) acts
+  in
+  Alcotest.(check bool) "wrap with inspect offered" true has_wrap
+
+let test_wrap_with_inspect_edit_adds_inspect () =
+  let src = {|
+mod M do
+  fn main() do
+    let x = 42
+    x
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "42" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  let wrap_act = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+      let low = String.lowercase_ascii ca.title in
+      let n = String.length low in
+      let found = ref false in
+      for i = 0 to n - 4 do
+        if String.sub low i 4 = "wrap" then found := true
+      done;
+      !found
+    ) acts in
+  match wrap_act with
+  | None -> Alcotest.fail "wrap action not found"
+  | Some ca ->
+    (match ca.edit with
+     | None -> Alcotest.fail "expected workspace edit"
+     | Some edit ->
+       let inserts_inspect =
+         match edit.changes with
+         | None -> false
+         | Some m ->
+           List.exists (fun (_, edits) ->
+               List.exists (fun (e : Lsp.Types.TextEdit.t) ->
+                   let t = e.newText in
+                   let n = String.length t in
+                   let found = ref false in
+                   for i = 0 to n - 8 do
+                     if String.sub t i 8 = "inspect(" then found := true
+                   done;
+                   !found
+                 ) edits
+             ) m
+       in
+       Alcotest.(check bool) "wrap edit inserts inspect(" true inserts_inspect)
+
+let test_remove_inspect_offered () =
+  let src = {|
+mod M do
+  fn main() do
+    let x = inspect(42, "x")
+    x
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "inspect(" in
+  let acts = An.code_actions_at a ~line ~character:(col + 4) () in
+  let has_remove =
+    List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
+        let low = String.lowercase_ascii ca.title in
+        let n = String.length low in
+        let found = ref false in
+        for i = 0 to n - 6 do
+          if String.sub low i 6 = "remove" then found := true
+        done;
+        !found
+      ) acts
+  in
+  Alcotest.(check bool) "remove inspect offered" true has_remove
+
+let test_remove_inspect_edit_unwraps () =
+  let src = {|
+mod M do
+  fn main() do
+    let x = inspect(42, "x")
+    x
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "inspect(" in
+  let acts = An.code_actions_at a ~line ~character:(col + 4) () in
+  let remove_act = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+      let low = String.lowercase_ascii ca.title in
+      let n = String.length low in
+      let found = ref false in
+      for i = 0 to n - 6 do
+        if String.sub low i 6 = "remove" then found := true
+      done;
+      !found
+    ) acts in
+  match remove_act with
+  | None -> Alcotest.fail "remove inspect action not found"
+  | Some ca ->
+    (match ca.edit with
+     | None -> Alcotest.fail "expected workspace edit"
+     | Some edit ->
+       let unwraps_to_inner =
+         match edit.changes with
+         | None -> false
+         | Some m ->
+           List.exists (fun (_, edits) ->
+               List.exists (fun (e : Lsp.Types.TextEdit.t) ->
+                   e.newText = "42"
+                 ) edits
+             ) m
+       in
+       Alcotest.(check bool) "remove edit unwraps to inner expr" true unwraps_to_inner)
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -1769,5 +2072,20 @@ let () =
       "used private fn: no warning",              `Quick, test_used_private_fn_no_warning;
       "unreachable after panic: warning emitted", `Quick, test_unreachable_code_after_panic_warning;
       "unused_fns field populated correctly",     `Quick, test_unused_fns_field_populated;
+    ];
+    "P1.8: assign to _", [
+      "action offered for unused binding",      `Quick, test_assign_to_underscore_offered;
+      "edit replaces name with _",              `Quick, test_assign_to_underscore_edit_replaces_name;
+    ];
+    "P2.10: remove unused import", [
+      "registry has unused_import code",        `Quick, test_unused_import_diagnostic_has_code;
+      "action offered for unused import",       `Quick, test_remove_import_action_whole_line;
+      "edit deletes the import line",           `Quick, test_remove_import_edit_deletes_line;
+    ];
+    "P3.4: wrap/remove inspect", [
+      "wrap with inspect offered",              `Quick, test_wrap_with_inspect_offered;
+      "wrap edit inserts inspect(",             `Quick, test_wrap_with_inspect_edit_adds_inspect;
+      "remove inspect offered",                 `Quick, test_remove_inspect_offered;
+      "remove inspect edit unwraps to inner",   `Quick, test_remove_inspect_edit_unwraps;
     ];
   ]

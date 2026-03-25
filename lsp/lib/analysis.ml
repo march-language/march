@@ -1531,7 +1531,8 @@ let () =
   register_fix "non_exhaustive_match"  (fun _a _diag -> []);
   register_fix "unused_binding"        (fun _a _diag -> []);
   register_fix "unused_private_fn"     (fun _a _diag -> []);
-  register_fix "unreachable_code"      (fun _a _diag -> [])
+  register_fix "unreachable_code"      (fun _a _diag -> []);
+  register_fix "unused_import"         (fun _a _diag -> [])
 
 (** Generate code actions relevant to the cursor position [line, character].
     Produces:
@@ -1803,13 +1804,333 @@ let code_actions_at (a : t) ~line ~character
                    end
                  ) a.consumption
              in
-             pfx_action :: remove_actions)
+             (* P1.8: Assign to _: replace the name with just `_`, discarding result *)
+             let assign_end_char = diag_char + String.length name in
+             let assign_pos    = Position.create ~line:diag_line ~character:diag_char in
+             let assign_end_ps = Position.create ~line:diag_line ~character:assign_end_char in
+             let assign_range  = Range.create ~start:assign_pos ~end_:assign_end_ps in
+             let assign_edit   = TextEdit.create ~range:assign_range ~newText:"_" in
+             let assign_uri    = DocumentUri.of_path a.filename in
+             let assign_we     = WorkspaceEdit.create ~changes:[(assign_uri, [assign_edit])] () in
+             let assign_action = CodeAction.create
+               ~title:"Assign to `_` (discard result)"
+               ~kind:CodeActionKind.QuickFix
+               ~edit:assign_we
+               () in
+             pfx_action :: assign_action :: remove_actions)
       ) diagnostics
+  in
+  (* ---- P2.10: Remove-unused-import actions ---- *)
+  (* Helper: delete the line that contains [lsp_range_start].
+     Produces a TextEdit that removes characters from column 0 of that line
+     through column 0 of the next line (i.e. the whole line including newline). *)
+  let delete_line (lsp_line : int) =
+    let del_start = Position.create ~line:lsp_line ~character:0 in
+    let del_end   = Position.create ~line:(lsp_line + 1) ~character:0 in
+    let del_range = Range.create ~start:del_start ~end_:del_end in
+    TextEdit.create ~range:del_range ~newText:""
+  in
+  (* Helper: given the byte offset of a name in a `use Mod.{a, b, c}` import,
+     remove just that name (plus the adjacent comma/space) from the brace list.
+     Returns a TextEdit, or None if the context cannot be parsed (fall back to
+     whole-line deletion). *)
+  let remove_name_from_import_list name_start_ofs name_len =
+    let src = a.src in
+    let src_len = String.length src in
+    let name_end_ofs = name_start_ofs + name_len in
+    (* Scan backwards to find ',' or '{' *)
+    let rec scan_back i =
+      if i < 0 then None
+      else match src.[i] with
+        | '{' -> Some (`OpenBrace i)
+        | ',' -> Some (`CommaBefore i)
+        | ' ' | '\t' -> scan_back (i - 1)
+        | _ -> None
+    in
+    (* Scan forwards from name end to find ',' or '}' *)
+    let rec scan_fwd i =
+      if i >= src_len then None
+      else match src.[i] with
+        | '}' -> Some (`CloseBrace i)
+        | ',' -> Some (`CommaAfter i)
+        | ' ' | '\t' -> scan_fwd (i + 1)
+        | _ -> None
+    in
+    match scan_back (name_start_ofs - 1), scan_fwd name_end_ofs with
+    | Some (`OpenBrace _), Some (`CommaAfter comma_ofs) ->
+      (* First name: remove "name, " (and trailing spaces) *)
+      let del_end_ofs =
+        let j = ref (comma_ofs + 1) in
+        while !j < src_len && (src.[!j] = ' ' || src.[!j] = '\t') do incr j done;
+        !j
+      in
+      let start_line = ref 0 and start_col = ref 0 in
+      let cur_l = ref 0 and cur_c = ref 0 in
+      String.iteri (fun i _ ->
+          if i = name_start_ofs then begin start_line := !cur_l; start_col := !cur_c end;
+          if src.[i] = '\n' then begin incr cur_l; cur_c := 0 end else incr cur_c
+        ) src;
+      let end_line = ref 0 and end_col = ref 0 in
+      let cur_l2 = ref 0 and cur_c2 = ref 0 in
+      String.iteri (fun i _ ->
+          if i = del_end_ofs then begin end_line := !cur_l2; end_col := !cur_c2 end;
+          if src.[i] = '\n' then begin incr cur_l2; cur_c2 := 0 end else incr cur_c2
+        ) src;
+      let r = Range.create
+        ~start:(Position.create ~line:!start_line ~character:!start_col)
+        ~end_:(Position.create ~line:!end_line ~character:!end_col) in
+      Some (TextEdit.create ~range:r ~newText:"")
+    | Some (`CommaBefore comma_ofs), _ ->
+      (* Non-first name: remove ", name" (comma + optional spaces + name) *)
+      let del_start_ofs = comma_ofs in
+      let start_line = ref 0 and start_col = ref 0 in
+      let cur_l = ref 0 and cur_c = ref 0 in
+      String.iteri (fun i _ ->
+          if i = del_start_ofs then begin start_line := !cur_l; start_col := !cur_c end;
+          if src.[i] = '\n' then begin incr cur_l; cur_c := 0 end else incr cur_c
+        ) src;
+      let end_line = ref 0 and end_col = ref 0 in
+      let cur_l2 = ref 0 and cur_c2 = ref 0 in
+      String.iteri (fun i _ ->
+          if i = name_end_ofs then begin end_line := !cur_l2; end_col := !cur_c2 end;
+          if src.[i] = '\n' then begin incr cur_l2; cur_c2 := 0 end else incr cur_c2
+        ) src;
+      let r = Range.create
+        ~start:(Position.create ~line:!start_line ~character:!start_col)
+        ~end_:(Position.create ~line:!end_line ~character:!end_col) in
+      Some (TextEdit.create ~range:r ~newText:"")
+    | _ -> None
+  in
+  let unused_import_actions =
+    List.concat_map (fun (diag : Lsp.Types.Diagnostic.t) ->
+        let has_code = match diag.code with
+          | Some (`String "unused_import") -> true
+          | _ -> false
+        in
+        if not has_code || not (diag_cursor_overlap diag) then []
+        else begin
+          let uri   = DocumentUri.of_path a.filename in
+          let msg   = match diag.message with `String s -> s | _ -> "" in
+          let diag_lsp_line = diag.range.Lsp.Types.Range.start.line in
+          let diag_lsp_char = diag.range.Lsp.Types.Range.start.character in
+          (* Messages from warn_unused_imports:
+             "Unused import: nothing from `X` is used." — whole-module import
+             "Unused import `name` from `X`."           — specific name *)
+          let is_whole_module =
+            let prefix = "Unused import: nothing from" in
+            let plen = String.length prefix in
+            String.length msg >= plen && String.sub msg 0 plen = prefix
+          in
+          (* Extract the name from "Unused import `name` from `Mod`" messages *)
+          let extract_import_name m =
+            let prefix = "Unused import `" in
+            let plen = String.length prefix in
+            if String.length m >= plen && String.sub m 0 plen = prefix then
+              let rest = String.sub m plen (String.length m - plen) in
+              match String.index_opt rest '`' with
+              | Some i -> Some (String.sub rest 0 i)
+              | None -> None
+            else None
+          in
+          if is_whole_module then
+            (* Delete the entire import line *)
+            let edit = delete_line diag_lsp_line in
+            let we   = WorkspaceEdit.create ~changes:[(uri, [edit])] () in
+            [CodeAction.create
+               ~title:"Remove unused import"
+               ~kind:CodeActionKind.QuickFix
+               ~edit:we ()]
+          else begin
+            match extract_import_name msg with
+            | None ->
+              (* Fallback: delete whole line *)
+              let edit = delete_line diag_lsp_line in
+              let we   = WorkspaceEdit.create ~changes:[(uri, [edit])] () in
+              [CodeAction.create
+                 ~title:"Remove unused import"
+                 ~kind:CodeActionKind.QuickFix
+                 ~edit:we ()]
+            | Some name ->
+              (* Specific name: try to remove just the name from the import list;
+                 fall back to whole-line removal if context can't be parsed. *)
+              let name_ofs = offset_of_pos a.src diag_lsp_line diag_lsp_char in
+              let smart_edit = remove_name_from_import_list name_ofs (String.length name) in
+              let edit = match smart_edit with
+                | Some e -> e
+                | None   -> delete_line diag_lsp_line
+              in
+              let we = WorkspaceEdit.create ~changes:[(uri, [edit])] () in
+              [CodeAction.create
+                 ~title:(Printf.sprintf "Remove unused import `%s`" name)
+                 ~kind:CodeActionKind.QuickFix
+                 ~edit:we ()]
+          end
+        end
+      ) diagnostics
+  in
+  (* ---- P3.4: Introduce / Remove Debug.inspect ---- *)
+  (* Helper: find the smallest type_map span that contains the cursor,
+     returning (span, lsp_start_position, lsp_end_position). *)
+  let innermost_expr_span_at ~line ~character =
+    let candidates = Hashtbl.fold (fun sp _ acc ->
+        if Pos.span_contains sp ~line ~character then sp :: acc
+        else acc
+      ) a.type_map []
+    in
+    match candidates with
+    | [] -> None
+    | _ ->
+      let best = List.fold_left (fun best sp ->
+          if Pos.span_smaller sp best then sp else best
+        ) (List.hd candidates) (List.tl candidates)
+      in
+      Some best
+  in
+  (* "Wrap with inspect": wrap the innermost expression at cursor. *)
+  let wrap_inspect_actions =
+    match innermost_expr_span_at ~line ~character with
+    | None -> []
+    | Some sp ->
+      (* Only offer if the span is within this file *)
+      if sp.Ast.file <> a.filename && sp.Ast.file <> "" && sp.Ast.file <> "<unknown>"
+      then []
+      else begin
+        (* Extract the source text of the expression for the label hint *)
+        let expr_start_ofs = offset_of_pos a.src (sp.Ast.start_line - 1) sp.Ast.start_col in
+        let expr_end_ofs   = offset_of_pos a.src (sp.Ast.end_line - 1) sp.Ast.end_col in
+        let expr_text =
+          if expr_end_ofs > expr_start_ofs && expr_end_ofs <= String.length a.src
+          then String.sub a.src expr_start_ofs (expr_end_ofs - expr_start_ofs)
+          else "expr"
+        in
+        (* Use first 20 chars of the expression as the label, sanitised *)
+        let raw_label = if String.length expr_text > 20
+                        then String.sub expr_text 0 20 ^ "..."
+                        else expr_text in
+        let label = String.concat "" (List.map (fun c ->
+            if c = '"' || c = '\\' || c = '\n' || c = '\r' || c = '\t'
+            then "_" else String.make 1 c) (List.init (String.length raw_label)
+                                              (String.get raw_label))) in
+        let uri    = DocumentUri.of_path a.filename in
+        let s_line = sp.Ast.start_line - 1 in
+        let s_col  = sp.Ast.start_col in
+        let e_line = sp.Ast.end_line - 1 in
+        let e_col  = sp.Ast.end_col in
+        let prefix_range = Range.create
+          ~start:(Position.create ~line:s_line ~character:s_col)
+          ~end_:(Position.create ~line:s_line ~character:s_col) in
+        let suffix_range = Range.create
+          ~start:(Position.create ~line:e_line ~character:e_col)
+          ~end_:(Position.create ~line:e_line ~character:e_col) in
+        let prefix_edit = TextEdit.create ~range:prefix_range ~newText:"inspect(" in
+        let suffix_edit = TextEdit.create ~range:suffix_range
+            ~newText:(Printf.sprintf ", \"%s\")" label) in
+        let we = WorkspaceEdit.create ~changes:[(uri, [prefix_edit; suffix_edit])] () in
+        [CodeAction.create
+           ~title:"Wrap with inspect"
+           ~kind:CodeActionKind.RefactorRewrite
+           ~edit:we ()]
+      end
+  in
+  (* "Remove inspect": detect `inspect(inner, "label")` around cursor and unwrap. *)
+  let remove_inspect_actions =
+    let src = a.src in
+    let src_len = String.length src in
+    let cursor_ofs = offset_of_pos src line character in
+    (* Scan backwards for "inspect(" — look within same line *)
+    let line_start_ofs = offset_of_pos src line 0 in
+    let inspect_keyword = "inspect(" in
+    let iklen = String.length inspect_keyword in
+    (* Find last occurrence of "inspect(" before cursor on same line *)
+    let inspect_start =
+      let result = ref None in
+      let i = ref (min cursor_ofs (src_len - iklen)) in
+      while !i >= line_start_ofs do
+        if !i + iklen <= src_len
+           && String.sub src !i iklen = inspect_keyword then begin
+          result := Some !i;
+          i := -1
+        end else
+          decr i
+      done;
+      !result
+    in
+    match inspect_start with
+    | None -> []
+    | Some start_ofs ->
+      (* Find matching closing paren, skipping nested parens *)
+      let inner_start = start_ofs + iklen in
+      let depth = ref 1 in
+      let i = ref inner_start in
+      while !i < src_len && !depth > 0 do
+        (match src.[!i] with
+         | '(' -> incr depth
+         | ')' -> decr depth
+         | _ -> ());
+        if !depth > 0 then incr i else ()
+      done;
+      if !depth <> 0 then []
+      else begin
+        let close_ofs = !i in
+        (* The inspect call spans [start_ofs, close_ofs] inclusive.
+           Find the first argument (before the first top-level comma). *)
+        let comma_ofs =
+          let d = ref 0 in
+          let c = ref None in
+          let j = ref inner_start in
+          while !j < close_ofs && !c = None do
+            (match src.[!j] with
+             | '(' | '[' | '{' -> incr d
+             | ')' | ']' | '}' -> decr d
+             | ',' when !d = 0 -> c := Some !j
+             | _ -> ());
+            if !c = None then incr j
+          done;
+          !c
+        in
+        let inner_end = match comma_ofs with
+          | Some co -> co  (* inner expression is [inner_start, co) *)
+          | None    -> close_ofs  (* no comma → whole inner part *)
+        in
+        (* Trim whitespace from inner expression boundaries *)
+        let is_ws c = c = ' ' || c = '\t' || c = '\n' || c = '\r' in
+        let inner_s = ref inner_start in
+        while !inner_s < inner_end && is_ws src.[!inner_s] do incr inner_s done;
+        let inner_e = ref (inner_end - 1) in
+        while !inner_e >= !inner_s && is_ws src.[!inner_e] do decr inner_e done;
+        let inner_text =
+          if !inner_e >= !inner_s
+          then String.sub src !inner_s (!inner_e - !inner_s + 1)
+          else ""
+        in
+        (* Compute LSP positions for the full inspect(…) range *)
+        let mk_lsp_pos ofs =
+          let l = ref 0 and c = ref 0 in
+          let cl = ref 0 and cc = ref 0 in
+          String.iteri (fun i _ ->
+              if i = ofs then begin l := !cl; c := !cc end;
+              if src.[i] = '\n' then begin incr cl; cc := 0 end else incr cc
+            ) src;
+          Position.create ~line:!l ~character:!c
+        in
+        let call_start_pos = mk_lsp_pos start_ofs in
+        let call_end_pos   = mk_lsp_pos (close_ofs + 1) in
+        let call_range     = Range.create ~start:call_start_pos ~end_:call_end_pos in
+        let uri  = DocumentUri.of_path a.filename in
+        let edit = TextEdit.create ~range:call_range ~newText:inner_text in
+        let we   = WorkspaceEdit.create ~changes:[(uri, [edit])] () in
+        [CodeAction.create
+           ~title:"Remove inspect"
+           ~kind:CodeActionKind.RefactorRewrite
+           ~edit:we ()]
+      end
   in
   (* ---- Registry-driven fixes from diagnostics context ---- *)
   let registry_actions = apply_fix_registry a diagnostics in
   make_linear_actions @ exhaustion_actions @ annotation_actions
-  @ unused_binding_actions @ registry_actions
+  @ unused_binding_actions @ unused_import_actions
+  @ wrap_inspect_actions @ remove_inspect_actions
+  @ registry_actions
 
 let actor_info_at (a : t) ~line ~character : string option =
   let found = List.find_opt (fun (name, _) ->

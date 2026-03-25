@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-24 (optimizations spec + constant propagation pass + LSP Phase 2 + cross-file imports)
+**Last updated:** 2026-03-25 (LSP code actions P1.8, P2.10, P3.4)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
