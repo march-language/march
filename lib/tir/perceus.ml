@@ -25,6 +25,15 @@
 
 module StringSet = Set.Make (String)
 
+(* ── Fresh variable counter for RC restructuring ─────────────────────────── *)
+
+let _rc_fresh_ctr = ref 0
+
+let fresh_rc_var (ty : Tir.ty) : Tir.var =
+  incr _rc_fresh_ctr;
+  { Tir.v_name = Printf.sprintf "$rc_%d" !_rc_fresh_ctr;
+    v_ty = ty; v_lin = Tir.Unr }
+
 (* ── Borrow map — module-level state ─────────────────────────────────────── *)
 
 (** The current module's borrow map, set at the start of [perceus] and cleared
@@ -350,7 +359,27 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     in
     let live_for_e1 = StringSet.remove v.Tir.v_name live_into_e2 in
     let (e1', live_before_e1) = insert_rc_expr e1 live_for_e1 in
-    (Tir.ELet (v, e1', e2''), live_before_e1)
+    (* Fix value-discarding ESeq patterns in the processed RHS.
+       Borrow inference may produce ESeq(call, DecRC(arg)) at tail positions
+       of the RHS expression (including inside nested ELet chains).  ESeq
+       returns the LAST expr's value, so the call result is discarded.
+       We restructure by introducing a fresh let binding to capture the value:
+         ESeq(value, cleanup)  →  ELet($rc_N, value, ESeq(cleanup, $rc_N))
+       This preserves the value while still running the cleanup.
+       The restructuring follows ELet chains to find tail ESeqs. *)
+    let rec fix_tail_value (expr : Tir.expr) : Tir.expr =
+      match expr with
+      | Tir.ESeq (value_expr, ((Tir.EDecRC _ | Tir.EAtomicDecRC _
+                                | Tir.EFree _) as cleanup)) ->
+        let fixed = fix_tail_value value_expr in
+        let tmp = fresh_rc_var v.Tir.v_ty in
+        Tir.ELet (tmp, fixed, Tir.ESeq (cleanup, Tir.EAtom (Tir.AVar tmp)))
+      | Tir.ELet (iv, ie1, ibody) ->
+        Tir.ELet (iv, ie1, fix_tail_value ibody)
+      | _ -> expr
+    in
+    let e1_fixed = fix_tail_value e1' in
+    (Tir.ELet (v, e1_fixed, e2''), live_before_e1)
 
   | Tir.ELetRec (fns, body) ->
     let (body', live_body) = insert_rc_expr body live_after in

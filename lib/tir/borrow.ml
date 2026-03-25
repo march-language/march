@@ -64,6 +64,29 @@ let list_any_idx (f : int -> 'a -> bool) (xs : 'a list) : bool =
   in
   go 0 xs
 
+(** Returns true iff [e] contains an [EAlloc(TCon(ctor_name, _), _)] where
+    [ctor_name] starts with [base_type ^ "."]. This detects "reconstruct"
+    patterns where a case branch allocates a same-type constructor, indicating
+    an FBIP reuse opportunity that requires ownership of the scrutinee. *)
+let rec has_matching_alloc (base_type : string) (e : Tir.expr) : bool =
+  let prefix = base_type ^ "." in
+  let prefix_len = String.length prefix in
+  let matches_type name =
+    String.length name >= prefix_len
+    && String.sub name 0 prefix_len = prefix
+  in
+  match e with
+  | Tir.EAlloc (Tir.TCon (name, _), _) -> matches_type name
+  | Tir.ELet (_, e1, e2) | Tir.ESeq (e1, e2) ->
+    has_matching_alloc base_type e1 || has_matching_alloc base_type e2
+  | Tir.ECase (_, branches, default) ->
+    List.exists (fun br -> has_matching_alloc base_type br.Tir.br_body) branches
+    || Option.fold ~none:false ~some:(has_matching_alloc base_type) default
+  | Tir.ELetRec (fns, body) ->
+    has_matching_alloc base_type body
+    || List.exists (fun fn -> has_matching_alloc base_type fn.Tir.fn_body) fns
+  | _ -> false
+
 (** Returns true iff [name] has at least one *owning* use in [e].
 
     An owning use is any position where the value is stored, returned, or
@@ -121,9 +144,25 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
        ) fns
 
   (* ── Pattern matching ─────────────────────────────────────────────────── *)
-  | Tir.ECase (_, branches, default) ->
-    (* The scrutinee itself is a borrow use (read-only).
-       Check branch bodies where the name might escape. *)
+  | Tir.ECase (scrutinee, branches, default) ->
+    (* FBIP-aware: if the scrutinee IS our variable and any branch allocates
+       a constructor of the same base type, this is a "reconstruct" pattern
+       (e.g. match t { Leaf(n) -> Leaf(n+1) }).  FBIP needs ownership of the
+       scrutinee to reuse its memory, so treat this as an owning use. *)
+    let fbip_owns =
+      atom_is name scrutinee &&
+      (match scrutinee with
+       | Tir.AVar v ->
+         (match v.Tir.v_ty with
+          | Tir.TCon (base_type, _) ->
+            List.exists (fun br ->
+              has_matching_alloc base_type br.Tir.br_body
+            ) branches
+          | _ -> false)
+       | _ -> false)
+    in
+    fbip_owns ||
+    (* Check branch bodies where the name might escape. *)
     List.exists (fun br ->
       let shadowed =
         List.exists (fun v -> String.equal v.Tir.v_name name) br.Tir.br_vars

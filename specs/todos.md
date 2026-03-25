@@ -121,6 +121,7 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 - ✅ 36 QCheck2 property-based tests
 - ✅ Interpreter/compiler oracle tests
 - ✅ Perceus RC analysis + FBIP optimization
+- ✅ FBIP reuse correctness: borrow inference FBIP-aware + Perceus post-call DecRC fix
 - ✅ CAS build cache (BLAKE3, 2-tier project/global)
 - ✅ TIR pipeline: lower → mono → defun → perceus → escape → opt → LLVM
 - ✅ Actor system: spawn/send/kill/monitor/link/supervise (interpreter)
