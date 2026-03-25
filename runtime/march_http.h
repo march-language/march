@@ -62,12 +62,40 @@ void *march_http_parse_response(void *raw);
  */
 void *march_http_parse_request(void *raw_string);
 
-/* Serialize an HTTP/1.1 response.
+/* Serialize an HTTP/1.1 response into a single heap buffer.
  * status:  integer status code (200, 404, etc.)
  * headers: March List(Header) — linked list of Header(String, String) pairs
  * body:    march_string*
- * Returns a march_string* containing the full HTTP response. */
+ * Returns a march_string* containing the full HTTP response.
+ *
+ * Prefer march_http_send_response() for the server path — it uses writev()
+ * to avoid the intermediate copy. */
 void *march_http_serialize_response(int64_t status, void *headers, void *body);
+
+/* Send an HTTP/1.1 response directly to client_fd using scatter-gather I/O.
+ *
+ * Builds an iovec array that points directly at the march_string name/value
+ * data and the body — no coalescing copy.  A single writev() syscall sends
+ * the status line, all headers, and the body.
+ *
+ * status:  HTTP status code (200, 404, etc.)
+ * headers: March List(Header) — same layout as march_http_serialize_response
+ * body:    march_string* (may be NULL / empty)
+ *
+ * Returns 0 on success, -1 on error. */
+int march_http_send_response(int fd, int64_t status, void *headers, void *body);
+
+/* Send a static file to client_fd with zero-copy kernel I/O.
+ *
+ * 1. Opens path and fstat()s it for size.
+ * 2. Sends HTTP/1.1 200 response headers (Content-Type inferred from
+ *    file extension, Content-Length from fstat) via writev().
+ * 3. Sends the file body using sendfile() on Linux and macOS; falls back
+ *    to a read/write loop on other platforms.
+ *
+ * Returns 0 on success, -1 on error (errno set, no response sent on open/
+ * fstat failure — caller should send a 404 or 500 instead). */
+int march_http_send_file(int client_fd, const char *path);
 
 /* ── HTTP server ───────────────────────────────────────────────────── */
 

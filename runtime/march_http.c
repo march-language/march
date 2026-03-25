@@ -19,6 +19,9 @@
 
 #include <sys/socket.h>
 #include <sys/select.h>
+#include <sys/uio.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -32,6 +35,9 @@
 #include <stdatomic.h>
 #include <ctype.h>
 #include <alloca.h>
+#if defined(__linux__)
+#  include <sys/sendfile.h>
+#endif
 
 /* Forward declarations for sha1 and base64 (defined in sha1.c / base64.c) */
 void sha1(const uint8_t *msg, size_t len, uint8_t out[20]);
@@ -491,6 +497,260 @@ void *march_http_serialize_response(int64_t status, void *headers, void *body) {
     return result;
 }
 
+/* ── Zero-copy response sending with writev() ─────────────────────────── */
+
+/* Static separator strings used as iovec bases (no copy). */
+static const char COLON_SP[] = ": ";
+static const char CRLF[]     = "\r\n";
+
+static const char *reason_phrase(int64_t status) {
+    switch (status) {
+        case 101: return "Switching Protocols";
+        case 200: return "OK";
+        case 201: return "Created";
+        case 204: return "No Content";
+        case 301: return "Moved Permanently";
+        case 302: return "Found";
+        case 304: return "Not Modified";
+        case 400: return "Bad Request";
+        case 401: return "Unauthorized";
+        case 403: return "Forbidden";
+        case 404: return "Not Found";
+        case 405: return "Method Not Allowed";
+        case 500: return "Internal Server Error";
+        default:  return "";
+    }
+}
+
+/* Drive writev() to completion, retrying on EINTR and partial sends. */
+static int writev_all(int fd, struct iovec *iov, int iovcnt) {
+    while (iovcnt > 0) {
+        ssize_t n = writev(fd, iov, iovcnt);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        /* Advance past the bytes that were written. */
+        while (n > 0 && iovcnt > 0) {
+            if ((size_t)n >= iov->iov_len) {
+                n       -= (ssize_t)iov->iov_len;
+                iov++;
+                iovcnt--;
+            } else {
+                iov->iov_base = (char *)iov->iov_base + n;
+                iov->iov_len -= (size_t)n;
+                n = 0;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Send an HTTP/1.1 response directly to fd using scatter-gather I/O.
+ *
+ * Builds an iovec array whose entries point directly at:
+ *   - a stack-allocated status line  ("HTTP/1.1 200 OK\r\n")
+ *   - each header's name/value in-place from their march_string data
+ *   - static ": " and "\r\n" literals
+ *   - a stack-allocated Content-Length line
+ *   - the body's data pointer (no copy)
+ *
+ * A single writev() syscall sends the lot without ever coalescing into
+ * one large buffer.
+ *
+ * Returns 0 on success, -1 on error. */
+int march_http_send_response(int fd, int64_t status, void *headers, void *body) {
+    const char *reason = reason_phrase(status);
+
+    march_string *body_s = (march_string *)body;
+    int64_t body_len = body_s ? body_s->len : 0;
+
+    /* Count headers so we can size the iovec array exactly. */
+    int n_hdrs = 0;
+    for (void *c = headers; c; ) {
+        if (*(int32_t *)((char *)c + 8) == 0) break;  /* Nil */
+        n_hdrs++;
+        c = *(void **)((char *)c + 24);
+    }
+
+    /* iovec layout:
+     *   [0]             status line
+     *   [1 .. 4*n_hdrs] name, ": ", value, "\r\n" per header
+     *   [4*n+1]         Content-Length line
+     *   [4*n+2]         "\r\n" (end of headers blank line)
+     *   [4*n+3]         body  (present only when body_len > 0)
+     */
+    int n_iov = 3 + 4 * n_hdrs + (body_len > 0 ? 1 : 0);
+    struct iovec *iov = malloc((size_t)n_iov * sizeof(struct iovec));
+    if (!iov) return -1;
+
+    /* Stack buffers for the two generated lines. */
+    char status_line[64];
+    int sl_len = snprintf(status_line, sizeof(status_line),
+                          "HTTP/1.1 %lld %s\r\n", (long long)status, reason);
+    char cl_line[48];
+    int cl_len = snprintf(cl_line, sizeof(cl_line),
+                          "Content-Length: %lld\r\n", (long long)body_len);
+
+    int i = 0;
+    iov[i].iov_base = status_line;
+    iov[i].iov_len  = (size_t)(sl_len > 0 ? sl_len : 0);
+    i++;
+
+    void *cur = headers;
+    while (cur) {
+        if (*(int32_t *)((char *)cur + 8) == 0) break;  /* Nil */
+        void *hdr  = *(void **)((char *)cur + 16);
+        void *tail = *(void **)((char *)cur + 24);
+        march_string *hname = *(march_string **)((char *)hdr + 16);
+        march_string *hval  = *(march_string **)((char *)hdr + 24);
+
+        iov[i].iov_base = hname->data;       iov[i].iov_len = (size_t)hname->len; i++;
+        iov[i].iov_base = (void *)COLON_SP;  iov[i].iov_len = 2;                  i++;
+        iov[i].iov_base = hval->data;        iov[i].iov_len = (size_t)hval->len;  i++;
+        iov[i].iov_base = (void *)CRLF;      iov[i].iov_len = 2;                  i++;
+
+        cur = tail;
+    }
+
+    iov[i].iov_base = cl_line;
+    iov[i].iov_len  = (size_t)(cl_len > 0 ? cl_len : 0);
+    i++;
+
+    iov[i].iov_base = (void *)CRLF;
+    iov[i].iov_len  = 2;
+    i++;
+
+    if (body_len > 0) {
+        iov[i].iov_base = body_s->data;
+        iov[i].iov_len  = (size_t)body_len;
+        i++;
+    }
+
+    int ret = writev_all(fd, iov, i);
+    free(iov);
+    return ret;
+}
+
+/* ── sendfile() for static files ─────────────────────────────────────── */
+
+static const char *content_type_for_ext(const char *path) {
+    const char *ext = strrchr(path, '.');
+    if (!ext) return "application/octet-stream";
+    if (strcmp(ext, ".html") == 0 || strcmp(ext, ".htm")  == 0) return "text/html";
+    if (strcmp(ext, ".css")  == 0)                               return "text/css";
+    if (strcmp(ext, ".js")   == 0)                               return "application/javascript";
+    if (strcmp(ext, ".json") == 0)                               return "application/json";
+    if (strcmp(ext, ".png")  == 0)                               return "image/png";
+    if (strcmp(ext, ".jpg")  == 0 || strcmp(ext, ".jpeg") == 0)  return "image/jpeg";
+    if (strcmp(ext, ".gif")  == 0)                               return "image/gif";
+    if (strcmp(ext, ".svg")  == 0)                               return "image/svg+xml";
+    if (strcmp(ext, ".ico")  == 0)                               return "image/x-icon";
+    if (strcmp(ext, ".txt")  == 0)                               return "text/plain";
+    if (strcmp(ext, ".pdf")  == 0)                               return "application/pdf";
+    if (strcmp(ext, ".wasm") == 0)                               return "application/wasm";
+    if (strcmp(ext, ".webp") == 0)                               return "image/webp";
+    return "application/octet-stream";
+}
+
+/* Transfer a file to client_fd with zero-copy kernel I/O.
+ *
+ * 1. Opens the file and fstat()s it for size.
+ * 2. Sends "HTTP/1.1 200 OK", Content-Type, Content-Length, and the blank
+ *    separator line via writev() — no heap allocation for headers.
+ * 3. Sends the file body via sendfile() on Linux/macOS, falling back to a
+ *    read/write loop on other platforms.
+ *
+ * Returns 0 on success, -1 on error (errno set). */
+int march_http_send_file(int client_fd, const char *path) {
+    int file_fd = open(path, O_RDONLY);
+    if (file_fd < 0) return -1;
+
+    struct stat st;
+    if (fstat(file_fd, &st) < 0) { close(file_fd); return -1; }
+
+    off_t        file_size = st.st_size;
+    const char  *ct        = content_type_for_ext(path);
+
+    /* Build and send headers with writev (all stack storage). */
+    char status_line[] = "HTTP/1.1 200 OK\r\n";
+    char ct_line[160];
+    int  ct_len = snprintf(ct_line, sizeof(ct_line),
+                           "Content-Type: %s\r\n", ct);
+    char cl_line[48];
+    int  cl_len = snprintf(cl_line, sizeof(cl_line),
+                           "Content-Length: %lld\r\n", (long long)file_size);
+    char end_hdr[] = "\r\n";
+
+    struct iovec iov[4];
+    iov[0].iov_base = status_line;  iov[0].iov_len = sizeof(status_line) - 1;
+    iov[1].iov_base = ct_line;      iov[1].iov_len = (size_t)(ct_len > 0 ? ct_len : 0);
+    iov[2].iov_base = cl_line;      iov[2].iov_len = (size_t)(cl_len > 0 ? cl_len : 0);
+    iov[3].iov_base = end_hdr;      iov[3].iov_len = 2;
+
+    if (writev_all(client_fd, iov, 4) < 0) { close(file_fd); return -1; }
+
+    if (file_size == 0) { close(file_fd); return 0; }
+
+    /* Send file body: kernel transfers pages directly without a userspace copy. */
+    int ret = 0;
+
+#if defined(__linux__)
+    {
+        off_t offset    = 0;
+        off_t remaining = file_size;
+        while (remaining > 0) {
+            ssize_t sent = sendfile(client_fd, file_fd, &offset, (size_t)remaining);
+            if (sent < 0) {
+                if (errno == EINTR) continue;
+                ret = -1; break;
+            }
+            remaining -= sent;
+        }
+    }
+#elif defined(__APPLE__)
+    {
+        off_t offset    = 0;
+        off_t remaining = file_size;
+        while (remaining > 0) {
+            off_t len = remaining;
+            /* sendfile(int fd, int s, off_t offset, off_t *len, hdtr, flags) */
+            int r = sendfile(file_fd, client_fd, offset, &len, NULL, 0);
+            if (r < 0 && errno != EAGAIN) {
+                if (errno == EINTR) continue;
+                ret = -1; break;
+            }
+            offset    += len;
+            remaining -= len;
+        }
+    }
+#else
+    /* Generic fallback: read/write loop. */
+    {
+        char    buf[65536];
+        off_t   remaining = file_size;
+        while (remaining > 0) {
+            size_t  to_read = remaining > (off_t)sizeof(buf)
+                              ? sizeof(buf) : (size_t)remaining;
+            ssize_t nr = read(file_fd, buf, to_read);
+            if (nr < 0) { if (errno == EINTR) continue; ret = -1; break; }
+            if (nr == 0) break;
+            ssize_t w = 0;
+            while (w < nr) {
+                ssize_t nw = write(client_fd, buf + w, (size_t)(nr - w));
+                if (nw < 0) { if (errno == EINTR) continue; ret = -1; break; }
+                w += nw;
+            }
+            if (ret < 0) break;
+            remaining -= nr;
+        }
+    }
+#endif
+
+    close(file_fd);
+    return ret;
+}
+
 /* ── HTTP server accept loop ──────────────────────────────────────────── */
 
 typedef struct {
@@ -649,10 +909,8 @@ static void *connection_thread(void *arg) {
     int32_t parse_tag = *(int32_t *)((char *)parse_result + 8);
     if (parse_tag == 0) {
         /* Parse error — send 400 */
-        void *resp = march_http_serialize_response(
-            400, make_nil(),
-            march_string_lit("Bad Request", 11));
-        march_tcp_send_all((int64_t)fd, resp);
+        march_http_send_response(fd, 400, make_nil(),
+                                 march_string_lit("Bad Request", 11));
         close(fd);
         return NULL;
     }
@@ -739,10 +997,8 @@ static void *connection_thread(void *arg) {
 
     if (!result_conn) {
         /* Pipeline returned NULL — send 500 */
-        void *resp = march_http_serialize_response(
-            500, make_nil(),
-            march_string_lit("Internal Server Error", 21));
-        march_tcp_send_all((int64_t)fd, resp);
+        march_http_send_response(fd, 500, make_nil(),
+                                 march_string_lit("Internal Server Error", 21));
         close(fd);
         return NULL;
     }
@@ -786,8 +1042,7 @@ static void *connection_thread(void *arg) {
     /* Default to 200 if pipeline didn't set a status */
     if (resp_status == 0) resp_status = 200;
 
-    void *resp = march_http_serialize_response(resp_status, resp_headers, resp_body);
-    march_tcp_send_all((int64_t)fd, resp);
+    march_http_send_response(fd, resp_status, resp_headers, resp_body);
 
     close(fd);
     return NULL;
