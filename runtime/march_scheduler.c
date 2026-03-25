@@ -384,6 +384,21 @@ march_proc *march_sched_find(int64_t pid) {
     return g_proc_registry[pid];
 }
 
+/* ── Phase 4: compiled-code reduction counting ────────────────────────── */
+
+/* Thread-local reduction budget for LLVM-compiled code.  Initialised to the
+ * full budget so the first quantum runs immediately without an extra reset. */
+_Thread_local int64_t march_tls_reductions = MARCH_REDUCTION_BUDGET;
+
+void march_yield_from_compiled(void) {
+    /* Refill the budget before yielding so the process gets a fresh quantum
+     * when it is rescheduled.  Do this unconditionally — if we are not inside
+     * a scheduler context the yield below is a no-op, but the counter should
+     * still be valid for future use. */
+    march_tls_reductions = MARCH_REDUCTION_BUDGET;
+    march_sched_yield();
+}
+
 int march_sched_send(march_proc *target, void *msg) {
     if (!target || atomic_load_explicit(&target->status, memory_order_acquire) == PROC_DEAD)
         return -1;

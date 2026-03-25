@@ -235,6 +235,55 @@ let atom_is_builtin (atom : Tir.atom) =
   | Tir.AVar v -> is_builtin_fn v.Tir.v_name
   | _ -> false
 
+(** True if [name] refers to a provably-terminating call site that does not
+    need a reduction check: either a March builtin operator or a C-runtime
+    function injected by lower_module (identified by the "march_" prefix, e.g.
+    march_compare_int, march_hash_int). *)
+let is_leaf_callee (name : string) : bool =
+  is_builtin_fn name ||
+  (String.length name >= 6 && String.sub name 0 6 = "march_")
+
+(** Returns [true] if [e] contains any non-leaf function call (EApp with a
+    non-leaf callee, or any ECallPtr indirect call).  Used to decide whether
+    to insert a reduction check: functions whose bodies contain no such calls
+    are provably-terminating leaf functions and can skip the check. *)
+let rec expr_has_call (e : Tir.expr) : bool =
+  match e with
+  | Tir.EApp (f, _)      -> not (is_leaf_callee f.Tir.v_name)
+  | Tir.ECallPtr _       -> true   (* indirect call — always non-trivial *)
+  | Tir.ELet (_, e1, e2) -> expr_has_call e1 || expr_has_call e2
+  | Tir.ELetRec (fns, e2) ->
+      List.exists (fun fn -> expr_has_call fn.Tir.fn_body) fns
+      || expr_has_call e2
+  | Tir.ECase (_, arms, def) ->
+      List.exists (fun (br : Tir.branch) -> expr_has_call br.Tir.br_body) arms
+      || (match def with Some d -> expr_has_call d | None -> false)
+  | Tir.ESeq (e1, e2)    -> expr_has_call e1 || expr_has_call e2
+  | _                    -> false
+
+(** Emit an inline reduction-count check at the current position in [ctx.buf].
+    Decrements [@march_tls_reductions]; when it reaches zero calls
+    [@march_yield_from_compiled()] (which resets the budget and yields).
+    Leaves the IR positioned at the start of a fresh basic block so the
+    caller can continue emitting the function body. *)
+let emit_reduction_check ctx =
+  let yield_blk = fresh_block ctx "sched_yield" in
+  let cont_blk  = fresh_block ctx "sched_cont"  in
+  let red       = fresh ctx "red" in
+  let red_dec   = fresh ctx "red_dec" in
+  let need_yield = fresh ctx "need_yield" in
+  emit ctx (Printf.sprintf "%s = load i64, ptr @march_tls_reductions" red);
+  emit ctx (Printf.sprintf "%s = sub i64 %s, 1" red_dec red);
+  emit ctx (Printf.sprintf "store i64 %s, ptr @march_tls_reductions" red_dec);
+  emit ctx (Printf.sprintf "%s = icmp sle i64 %s, 0" need_yield red_dec);
+  emit_term ctx
+    (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
+       need_yield yield_blk cont_blk);
+  emit_label ctx yield_blk;
+  emit ctx "call void @march_yield_from_compiled()";
+  emit_term ctx (Printf.sprintf "br label %%%s" cont_blk);
+  emit_label ctx cont_blk
+
 (** TIR return type for known builtin/extern functions, overriding type info. *)
 let builtin_ret_ty : string -> Tir.ty option = function
   | "panic"                       -> Some Tir.TUnit
@@ -1926,11 +1975,21 @@ let emit_fn ctx (fn : Tir.fn_def) =
     (v.Tir.v_name, slot, ty)
   ) fn.Tir.fn_params in
 
+  (* Phase 4: leaf-function detection.  A function is a leaf if its body
+     contains no non-builtin calls and no indirect calls (ECallPtr).  Leaf
+     functions are provably-terminating (they finish in O(1) time per call)
+     and therefore do not need a reduction check. *)
+  let is_leaf = not (expr_has_call fn.Tir.fn_body) in
+
   if is_tco then begin
     (* Emit: entry → loop.  The loop block header is the back-edge target. *)
     let loop_lbl = fresh_block ctx "tco_loop" in
     emit_term ctx (Printf.sprintf "br label %%%s" loop_lbl);
     emit_label ctx loop_lbl;
+    (* Phase 4: decrement the reduction budget at every loop iteration.
+       TCO functions are never leaf (they call themselves), so the check is
+       always needed here. *)
+    emit_reduction_check ctx;
     (* Install TCO context so EApp to self emits a back-edge instead of a call. *)
     ctx.tco_fn_name    <- Some fn.Tir.fn_name;
     ctx.tco_loop_label <- loop_lbl;
@@ -1945,6 +2004,10 @@ let emit_fn ctx (fn : Tir.fn_def) =
       emit_term ctx (Printf.sprintf "ret %s %s" ret_ty final_val)
     end
   end else begin
+    (* Phase 4: insert the reduction check at function entry for non-leaf
+       non-TCO functions.  This fires once per call, counting every function
+       invocation against the budget. *)
+    if not is_leaf then emit_reduction_check ctx;
     let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
     if ret_ty = "void" then
       emit_term ctx "ret void"
@@ -2240,6 +2303,9 @@ declare ptr  @march_send(ptr %actor, ptr %msg)
 declare ptr  @march_spawn(ptr %actor)
 declare i64  @march_actor_get_int(ptr %actor, i64 %index)
 declare void @march_run_scheduler()
+; Phase 4: compiled-code reduction counting
+@march_tls_reductions = external thread_local global i64
+declare void @march_yield_from_compiled()
 declare i64  @march_tcp_listen(i64 %port)
 declare i64  @march_tcp_accept(i64 %fd)
 declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)

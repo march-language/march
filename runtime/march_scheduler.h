@@ -138,3 +138,17 @@ void         march_sched_wake(march_proc *target);
 /* Return the process with the given PID, or NULL if not found.
  * O(1) array lookup by PID. */
 march_proc  *march_sched_find(int64_t pid);
+
+/* ── Phase 4: compiled-code reduction counting ────────────────────────── */
+
+/* Thread-local reduction budget for LLVM-compiled code.
+ * The LLVM backend emits a load/decrement/store of this variable at every
+ * function prologue (or TCO loop header). Declared extern so the compiled
+ * LLVM IR module can reference it as an external thread_local global. */
+extern _Thread_local int64_t march_tls_reductions;
+
+/* Called by compiled code when march_tls_reductions hits zero.
+ * Resets the budget to MARCH_REDUCTION_BUDGET and cooperatively yields
+ * back to the scheduler via march_sched_yield(). No-op outside a
+ * scheduler context (e.g. when running without the green-thread runtime). */
+void march_yield_from_compiled(void);
