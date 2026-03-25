@@ -993,81 +993,57 @@ static int detect_keep_alive(void *raw_s, void *req_headers) {
     return keep_alive;
 }
 
-/* Like march_http_send_response() but appends an explicit Connection header.
- * keep_alive=1  → "Connection: keep-alive\r\n"
- * keep_alive=0  → "Connection: close\r\n"
- * The public march_http_send_response() signature is unchanged (used by March
- * code directly); this variant is used only in the server keep-alive path. */
+/* Like march_http_send_response() but uses the zero-copy response builder
+ * (march_response_t) and appends an explicit Connection header.
+ *
+ * Benefits over the old malloc-based path:
+ *   - No per-request heap allocation (fixed iovec array in march_response_t)
+ *   - Pre-serialized status lines for common codes (200/400/404/500)
+ *   - Cached Date header (refreshed at most once/second, no gmtime() cost)
+ *   - Thread-local scratch buffer for Content-Length digits
+ *
+ * keep_alive=1 → "Connection: keep-alive"
+ * keep_alive=0 → "Connection: close"
+ *
+ * The public march_http_send_response() signature is unchanged. */
 static int send_response_with_ka(int fd, int64_t status, void *headers,
                                   void *body, int keep_alive) {
-    static const char KA_HDR[] = "Connection: keep-alive\r\n";
-    static const char CL_HDR[] = "Connection: close\r\n";
-    const char *conn_hdr     = keep_alive ? KA_HDR : CL_HDR;
-    size_t      conn_hdr_len = keep_alive ? (sizeof(KA_HDR)-1) : (sizeof(CL_HDR)-1);
+    march_response_t resp;
+    march_response_init(&resp);
 
-    const char *reason = reason_phrase(status);
-    march_string *body_s = (march_string *)body;
-    int64_t body_len = body_s ? body_s->len : 0;
+    /* Status line (static string for common codes, scratch for others). */
+    march_response_set_status(&resp, (int)status);
 
-    int n_hdrs = 0;
-    for (void *c = headers; c; ) {
-        if (*(int32_t *)((char *)c + 8) == 0) break;
-        n_hdrs++;
-        c = *(void **)((char *)c + 24);
-    }
-
-    /* iovec: status-line | user-hdrs | Content-Length | Connection | \r\n | body */
-    int n_iov = 4 + 4 * n_hdrs + (body_len > 0 ? 1 : 0);
-    struct iovec *iov = malloc((size_t)n_iov * sizeof(struct iovec));
-    if (!iov) return -1;
-
-    char status_line[64];
-    int sl_len = snprintf(status_line, sizeof(status_line),
-                          "HTTP/1.1 %lld %s\r\n", (long long)status, reason);
-    char cl_line[48];
-    int cl_len = snprintf(cl_line, sizeof(cl_line),
-                          "Content-Length: %lld\r\n", (long long)body_len);
-
-    int i = 0;
-    iov[i].iov_base = status_line;
-    iov[i].iov_len  = (size_t)(sl_len > 0 ? sl_len : 0);
-    i++;
-
+    /* User-supplied response headers from the March pipeline. */
     void *cur = headers;
     while (cur) {
-        if (*(int32_t *)((char *)cur + 8) == 0) break;
+        if (*(int32_t *)((char *)cur + 8) == 0) break;  /* Nil */
         void *hdr  = *(void **)((char *)cur + 16);
         void *tail = *(void **)((char *)cur + 24);
         march_string *hname = *(march_string **)((char *)hdr + 16);
         march_string *hval  = *(march_string **)((char *)hdr + 24);
-        iov[i].iov_base = hname->data;       iov[i].iov_len = (size_t)hname->len; i++;
-        iov[i].iov_base = (void *)COLON_SP;  iov[i].iov_len = 2;                  i++;
-        iov[i].iov_base = hval->data;        iov[i].iov_len = (size_t)hval->len;  i++;
-        iov[i].iov_base = (void *)CRLF;      iov[i].iov_len = 2;                  i++;
+        march_response_add_header(&resp,
+                                  hname->data, (size_t)hname->len,
+                                  hval->data,  (size_t)hval->len);
         cur = tail;
     }
 
-    iov[i].iov_base = cl_line;
-    iov[i].iov_len  = (size_t)(cl_len > 0 ? cl_len : 0);
-    i++;
+    /* Date header (cached, zero syscall cost on most requests). */
+    march_response_add_date_header(&resp);
 
-    iov[i].iov_base = (void *)conn_hdr;
-    iov[i].iov_len  = conn_hdr_len;
-    i++;
+    /* Connection header. */
+    if (keep_alive)
+        march_response_add_header(&resp, "Connection", 10, "keep-alive", 10);
+    else
+        march_response_add_header(&resp, "Connection", 10, "close", 5);
 
-    iov[i].iov_base = (void *)CRLF;
-    iov[i].iov_len  = 2;
-    i++;
+    /* Body — also appends Content-Length and the header-terminating CRLF. */
+    march_string *body_s = (march_string *)body;
+    march_response_set_body(&resp,
+                             body_s ? body_s->data : NULL,
+                             body_s ? (size_t)body_s->len : 0);
 
-    if (body_len > 0) {
-        iov[i].iov_base = body_s->data;
-        iov[i].iov_len  = (size_t)body_len;
-        i++;
-    }
-
-    int ret = writev_all(fd, iov, i);
-    free(iov);
-    return ret;
+    return march_response_send(&resp, fd);
 }
 
 /* Each connection worker: keep-alive loop — parse request, run pipeline,
