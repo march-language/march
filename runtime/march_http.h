@@ -99,6 +99,15 @@ int march_http_send_file(int client_fd, const char *path);
 
 /* ── HTTP server ───────────────────────────────────────────────────── */
 
+/* Compile with -DMARCH_HTTP_USE_EVLOOP to switch from the thread-per-connection
+ * model to the kqueue/epoll event-loop model.  The event loop uses SO_REUSEPORT
+ * with one thread per CPU core, each running its own kqueue/epoll instance.
+ * Falls back to thread-per-connection on platforms without kqueue or epoll. */
+#if defined(MARCH_HTTP_USE_EVLOOP)
+/* Declared in march_http_evloop.c. */
+void march_evloop_server_listen(int port, void *pipeline);
+#endif
+
 /* Default number of worker threads in the connection thread pool.
  * Used as a fallback when sysconf(_SC_NPROCESSORS_ONLN) is unavailable. */
 #define MARCH_HTTP_POOL_DEFAULT_SIZE 16

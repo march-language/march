@@ -16,6 +16,7 @@
  *   offset 16: char     data[]   (null-terminated)
  */
 #include "march_http.h"
+#include "march_http_internal.h"
 #include "march_http_parse_simd.h"
 #include "march_http_response.h"
 
@@ -1011,8 +1012,8 @@ static int detect_keep_alive(void *raw_s, void *req_headers) {
  * keep_alive=0 → "Connection: close"
  *
  * The public march_http_send_response() signature is unchanged. */
-static int send_response_with_ka(int fd, int64_t status, void *headers,
-                                  void *body, int keep_alive) {
+int march_send_response_with_ka(int fd, int64_t status, void *headers,
+                                 void *body, int keep_alive) {
     march_response_t resp;
     march_response_init(&resp);
 
@@ -1053,15 +1054,14 @@ static int send_response_with_ka(int fd, int64_t status, void *headers,
 
 /* ── Pipelining helpers ─────────────────────────────────────────────── */
 
-/* Closure apply function signature (pipeline: Conn → Conn). */
-typedef void *(*closure_fn_t)(void *clo, void *arg);
+/* closure_fn_t is defined in march_http_internal.h */
 
 /* Maximum pipelined requests parsed from a single buffer slice. */
 #define PIPELINE_BATCH 32
 
 /* Detect keep-alive directly from a parsed SIMD request (avoids building
  * March string objects just to scan them). */
-static int detect_keep_alive_simd(const march_http_request_t *req) {
+int march_detect_keep_alive_simd(const march_http_request_t *req) {
     /* Default: HTTP/1.1 → keep-alive, HTTP/1.0 → close */
     int keep_alive = (req->minor_version >= 1);
     /* Connection header overrides */
@@ -1081,9 +1081,9 @@ static int detect_keep_alive_simd(const march_http_request_t *req) {
 /* Build a March Conn heap object directly from a parsed SIMD request.
  * Avoids the intermediate Ok(tuple(...)) allocation that the legacy
  * march_http_parse_request() path uses. */
-static void *conn_from_parsed(const march_http_request_t *req,
-                               const char *buf, size_t buf_len,
-                               int fd) {
+void *march_conn_from_parsed(const march_http_request_t *req,
+                              const char *buf, size_t buf_len,
+                              int fd) {
     /* Method string → Method variant */
     void *method_str = march_string_lit(req->method, (int64_t)req->method_len);
     void *method     = method_string_to_variant(method_str);
@@ -1132,11 +1132,11 @@ static void *conn_from_parsed(const march_http_request_t *req,
 
 /* Process a single parsed request through the March pipeline and send
  * the response.  Returns: 1 = keep going, 0 = close connection, -1 = error. */
-static int process_one_request(int fd, void *pipeline, closure_fn_t fn,
-                                const march_http_request_t *req,
-                                const char *buf, size_t buf_len) {
-    int keep_alive = detect_keep_alive_simd(req);
-    void *conn = conn_from_parsed(req, buf, buf_len, fd);
+int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
+                               const march_http_request_t *req,
+                               const char *buf, size_t buf_len) {
+    int keep_alive = march_detect_keep_alive_simd(req);
+    void *conn = march_conn_from_parsed(req, buf, buf_len, fd);
 
     /* Call the pipeline */
     march_incrc(pipeline);
@@ -1171,7 +1171,7 @@ static int process_one_request(int fd, void *pipeline, closure_fn_t fn,
     void   *resp_body    = *(void **)(rc + 88);
     if (resp_status == 0) resp_status = 200;
 
-    if (send_response_with_ka(fd, resp_status, resp_headers, resp_body,
+    if (march_send_response_with_ka(fd, resp_status, resp_headers, resp_body,
                               keep_alive) < 0)
         return -1;
 
@@ -1233,7 +1233,7 @@ static void *connection_thread(void *arg) {
 
             /* 2. Process each parsed request in order (FIFO). */
             for (int i = 0; i < n; i++) {
-                int rc = process_one_request(fd, pipeline, fn,
+                int rc = march_process_one_request(fd, pipeline, fn,
                                               &reqs[i], buf, buf_len);
                 if (rc <= 0) { running = 0; break; }
             }
@@ -1294,7 +1294,7 @@ typedef struct {
 } http_pool_t;
 
 static http_pool_t g_pool;
-static _Atomic int g_http_shutdown = 0;  /* set by signal handler */
+_Atomic int g_http_shutdown = 0;  /* set by signal handler — also used by march_http_evloop.c */
 
 static void http_signal_handler(int sig) {
     (void)sig;
@@ -1403,6 +1403,16 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
     /* Pre-populate response caches (Date header, etc.) before accepting. */
     march_http_response_module_init();
 
+#if defined(MARCH_HTTP_USE_EVLOOP)
+    /* Event-loop mode: SO_REUSEPORT + kqueue/epoll, one thread per core.
+     * The evloop creates its own listener fds — no single listen_fd needed. */
+    fprintf(stderr, "march: HTTP server (event-loop) listening on port %lld\n",
+            (long long)port);
+    march_evloop_server_listen((int)port, pipeline);
+    return;
+#endif
+
+    /* ── Fallback: thread-per-connection with work queue ─────────── */
     int64_t listen_fd = march_tcp_listen(port);
     if (listen_fd < 0) {
         fprintf(stderr, "march_http_server_listen: tcp_listen(%lld) failed: %s\n",
