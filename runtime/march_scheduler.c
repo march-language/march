@@ -1,4 +1,5 @@
-/* march_scheduler.c — Phase 1 cooperative green-thread scheduler.
+/* march_scheduler.c — Phase 2 cooperative green-thread scheduler with
+ * mailbox message passing.
  *
  * Design
  * ──────
@@ -13,6 +14,7 @@
  *   4. Process runs until it calls march_sched_yield() or march_sched_tick()
  *      exhausts its budget, at which point it swapcontext(process → scheduler).
  *   5. If the process is still READY, re-enqueue it; if DEAD, free it.
+ *      If WAITING, leave it parked — a sender will re-enqueue via wake.
  *   6. Repeat until the run queue is empty.
  *
  * Context switching
@@ -25,10 +27,21 @@
  * pointer to the proc struct is passed as two 32-bit halves (hi, lo)
  * and reassembled in the trampoline.
  *
- * Phase 2+ extensions
- * ───────────────────
- * PROC_WAITING / mailbox fields are plumbed but unused in Phase 1.
- * Multi-thread (M>1) and work-stealing arrive in Phase 3.
+ * Phase 2 additions
+ * ─────────────────
+ * - Per-process FIFO mailbox (march_sched_send / march_sched_recv).
+ * - PROC_WAITING state: a process parks itself in march_sched_recv when its
+ *   mailbox is empty and resumes when march_sched_wake re-enqueues it.
+ * - Process registry (g_proc_registry) for O(1) PID lookup via march_sched_find.
+ * - Spinlock on each mailbox (mbox_lock) — Phase 3 will use this for
+ *   cross-thread sends; in Phase 2 (single OS thread) it is always uncontended.
+ * - march_sched_try_recv: non-blocking mailbox peek.
+ *
+ * Phase 3 extensions
+ * ──────────────────
+ * Multi-thread (M>1 OS threads) and work-stealing arrive in Phase 3.
+ * The deadlock break in march_sched_run (all WAITING, empty run queue)
+ * will be replaced by a parking lot / epoll integration.
  */
 
 /* _XOPEN_SOURCE must come before all system headers (see march_scheduler.h).
