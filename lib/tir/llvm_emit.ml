@@ -1982,8 +1982,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Sequence ──────────────────────────────────────────────────────── *)
   | Tir.ESeq (e1, e2) ->
-    ignore (emit_expr ctx e1);
-    emit_expr ctx e2
+    let result1 = emit_expr ctx e1 in
+    (match e2 with
+     | Tir.EDecRC _ | Tir.EIncRC _
+     | Tir.EAtomicDecRC _ | Tir.EAtomicIncRC _ ->
+       (* e2 is a pure side-effect (no meaningful value). Return e1's value so
+          that ELet(v, ESeq(call, dec_rc), body) binds the call result, not 0.
+          Perceus emits this pattern for borrowed-arg post-call decrements. *)
+       ignore (emit_expr ctx e2);
+       result1
+     | _ ->
+       ignore result1;
+       emit_expr ctx e2)
 
   (* ── Arithmetic builtins ───────────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_arith f.Tir.v_name ->
