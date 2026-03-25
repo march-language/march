@@ -124,7 +124,7 @@ end
 
 ```march
 mod MyModule do
-  pub fn greet(name : String) : String do
+  fn greet(name : String) : String do
     "Hello, " ++ name
   end
 end
@@ -189,7 +189,7 @@ let greeting = "Hello, ${name}!"
 
 ```march
 doc "Returns the sum of two integers."
-pub fn add(x : Int, y : Int) : Int do
+fn add(x : Int, y : Int) : Int do
   x + y
 end
 
@@ -197,7 +197,7 @@ doc """
 Multi-line doc comment.
 Supports multiple paragraphs.
 """
-pub fn complex_fn() do ... end
+fn complex_fn() do ... end
 ```
 
 ## Operators
@@ -370,7 +370,7 @@ assert (x == 42)
 
 ### 3. Shadowing builtins
 
-If a stdlib module defines a `pub fn negate(...)`, it shadows the built-in `negate` used for negative literals like `-1`. This breaks integer negation in any file that imports that module. Avoid naming functions `negate`.
+If a stdlib module defines a `fn negate(...)`, it shadows the built-in `negate` used for negative literals like `-1`. This breaks integer negation in any file that imports that module. Avoid naming functions `negate`.
 
 ### 4. Structural recursion warnings
 
@@ -378,7 +378,7 @@ Functions that recurse without an accumulator get a TCE (Tail-Call Enforcement) 
 
 ```march
 -- WARNING: structurally recursive
-pub fn map(xs, f) do
+fn map(xs, f) do
   match xs do
   | Nil -> Nil
   | Cons(h, t) -> Cons(f(h), map(t, f))
@@ -386,7 +386,7 @@ pub fn map(xs, f) do
 end
 
 -- GOOD: accumulator + reverse pattern
-pub fn map(xs, f) do
+fn map(xs, f) do
   fn go(lst, acc) do
     match lst do
     | Nil -> reverse(acc)
