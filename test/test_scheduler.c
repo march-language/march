@@ -366,10 +366,64 @@ static void test_try_recv(void) {
     TEST_PASS();
 }
 
+/* ── Phase 4: Stack growth tests ─────────────────────────────────────── */
+/*
+ * 9.  test_stack_growth_deep   — One process recurses deeply enough to
+ *                                exhaust the initial 4 KiB stack.  Growth
+ *                                via guard-page fault keeps it alive.
+ * 10. test_stack_growth_many   — 50 processes each do deep recursion
+ *                                concurrently; all must complete.
+ */
+
+static _Atomic int g_growth_done = 0;
+
+/* Each call allocates ~512 bytes of stack (volatile prevents elision). */
+static void deep_recurse(int depth) {
+    volatile char buf[512];
+    buf[0]   = (char)depth;
+    buf[511] = (char)(depth ^ 0xAA);
+    if (depth > 0) deep_recurse(depth - 1);
+    /* Use the values to prevent the compiler from optimising away the frame. */
+    (void)(buf[0] + buf[511]);
+}
+
+static void growth_worker(void *arg) {
+    int depth = (int)(intptr_t)arg;
+    deep_recurse(depth);   /* triggers lazy stack growth */
+    atomic_fetch_add_explicit(&g_growth_done, 1, memory_order_relaxed);
+}
+
+static void test_stack_growth_deep(void) {
+    g_growth_done = 0;
+    march_sched_init();
+    /* ~512 bytes × 20 frames ≈ 10 KiB > MARCH_STACK_INITIAL (4 KiB).
+     * Forces at least two guard-page faults and growths. */
+    march_sched_spawn(growth_worker, (void *)(intptr_t)20);
+    march_sched_run();
+
+    TEST_ASSERT(g_growth_done == 1,
+                "deep-recursion process should complete after stack growth");
+    TEST_PASS();
+}
+
+static void test_stack_growth_many(void) {
+    g_growth_done = 0;
+    march_sched_init();
+    /* Spawn 50 processes each using ~10 KiB of stack depth. */
+    for (int i = 0; i < 50; i++) {
+        march_sched_spawn(growth_worker, (void *)(intptr_t)20);
+    }
+    march_sched_run();
+
+    TEST_ASSERT(g_growth_done == 50,
+                "all 50 deep-recursion processes should complete");
+    TEST_PASS();
+}
+
 /* ── Entry point ──────────────────────────────────────────────────────── */
 
 int main(void) {
-    printf("=== March Green Thread Scheduler — Phase 1+2 Tests ===\n");
+    printf("=== March Green Thread Scheduler — Phase 1+2+4 Tests ===\n");
     test_spawn_1000();
     test_yield_interleaving();
     test_reduction_preemption();
@@ -378,6 +432,9 @@ int main(void) {
     test_send_recv_multiple();
     test_waiting_wakeup();
     test_try_recv();
+    printf("\n--- Phase 4: stack growth ---\n");
+    test_stack_growth_deep();
+    test_stack_growth_many();
     printf("\nResults: %d passed, %d failed\n",
            g_tests_passed, g_tests_failed);
     return g_tests_failed > 0 ? 1 : 0;

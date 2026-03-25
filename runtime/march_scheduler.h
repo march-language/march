@@ -15,11 +15,20 @@
 
 /* ── Constants ────────────────────────────────────────────────────────── */
 
-/* Default usable stack size per green thread (64 KiB).
- * Phase 1: fixed-size stacks.  Stack growth via mremap is Phase 2+.
- * Note: the spec calls for 4 KiB, but 64 KiB is the practical minimum on
- * macOS/Linux where ucontext setup itself consumes several hundred bytes. */
-#define MARCH_STACK_SIZE        (64 * 1024)
+/* Initial usable stack per green thread (Phase 4: lazy growth).
+ * Stacks start small and grow on demand via guard-page fault up to
+ * MARCH_STACK_MAX.  The initial 4 KiB is enough for the trampoline
+ * and shallow frames; deep frames trigger one mprotect per new page. */
+#define MARCH_STACK_INITIAL     (4 * 1024)
+
+/* Maximum usable stack per green thread (1 MiB).  The virtual-address
+ * reservation is MARCH_STACK_MAX + one guard page.  Exceeding this limit
+ * produces an unrecoverable stack-overflow crash. */
+#define MARCH_STACK_MAX         (1024 * 1024)
+
+/* Legacy alias — external code that references MARCH_STACK_SIZE still
+ * compiles; the value is now the initial (not fixed) stack size. */
+#define MARCH_STACK_SIZE        MARCH_STACK_INITIAL
 
 /* Reduction budget per quantum.  A process is preempted (yielded) after
  * this many march_sched_tick() calls within a single scheduler turn. */
@@ -60,8 +69,9 @@ typedef struct march_proc {
     _Atomic march_proc_status  status;       /* Process lifecycle state (atomic)      */
     march_proc_priority        priority;
     int64_t                    reductions;   /* Remaining reduction budget this quantum */
-    void                      *stack_base;   /* Start of usable stack (after guard page) */
-    size_t                     stack_alloc;  /* Total mmap allocation size (incl. guard) */
+    void                      *stack_mmap_base; /* Base of full mmap reservation (permanent guard page here) */
+    void                      *stack_base;      /* Current bottom of usable stack region (grows downward) */
+    size_t                     stack_alloc;     /* Total mmap size: MARCH_STACK_MAX + one guard page */
     march_mbox_node           *mailbox;      /* Head of message queue (FIFO)             */
     march_mbox_node           *mbox_tail;    /* Tail of message queue (for O(1) enqueue) */
     int64_t                    mbox_count;   /* Number of messages in mailbox            */
