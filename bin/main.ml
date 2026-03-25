@@ -160,13 +160,17 @@ let ensure_runtime_so () =
     let http_c = Filename.concat runtime_dir "march_http.c" in
     let extra_files =
       if Sys.file_exists http_c then
-        let sha1_c = Filename.concat runtime_dir "sha1.c" in
-        let base64_c = Filename.concat runtime_dir "base64.c" in
-        Printf.sprintf " %s %s %s" http_c sha1_c base64_c
+        let sha1_c    = Filename.concat runtime_dir "sha1.c" in
+        let base64_c  = Filename.concat runtime_dir "base64.c" in
+        let simd_c    = Filename.concat runtime_dir "march_http_parse_simd.c" in
+        let sched_c   = Filename.concat runtime_dir "march_scheduler.c" in
+        let simd_part  = if Sys.file_exists simd_c  then Printf.sprintf " %s" simd_c  else "" in
+        let sched_part = if Sys.file_exists sched_c then Printf.sprintf " %s" sched_c else "" in
+        Printf.sprintf " %s %s %s%s%s" http_c sha1_c base64_c simd_part sched_part
       else ""
     in
     let cmd = Printf.sprintf
-      "clang -shared -O2 -fPIC -I%s %s%s -o %s 2>&1"
+      "clang -shared -O2 -fPIC -msse4.2 -Wno-unused-command-line-argument -I%s %s%s -o %s 2>&1"
       runtime_dir runtime_c extra_files so_path in
     let rc = Sys.command cmd in
     if rc <> 0 then
@@ -778,12 +782,17 @@ let compile filename =
           let http_c = Filename.concat runtime_dir "march_http.c" in
           let extra_c_files =
             if Sys.file_exists http_c then
-              let sha1_c = Filename.concat runtime_dir "sha1.c" in
-              let base64_c = Filename.concat runtime_dir "base64.c" in
-              Printf.sprintf " %s %s %s" http_c sha1_c base64_c
+              let sha1_c    = Filename.concat runtime_dir "sha1.c" in
+              let base64_c  = Filename.concat runtime_dir "base64.c" in
+              let simd_c    = Filename.concat runtime_dir "march_http_parse_simd.c" in
+              let sched_c   = Filename.concat runtime_dir "march_scheduler.c" in
+              let simd_part  = if Sys.file_exists simd_c  then Printf.sprintf " %s" simd_c  else "" in
+              let sched_part = if Sys.file_exists sched_c then Printf.sprintf " %s" sched_c else "" in
+              Printf.sprintf " %s %s %s%s%s" http_c sha1_c base64_c simd_part sched_part
             else ""
           in
-          let cmd = Printf.sprintf "clang%s %s%s %s -o %s"
+          let cmd = Printf.sprintf
+            "clang%s -msse4.2 -Wno-unused-command-line-argument %s%s %s -o %s"
             opt_flag runtime extra_c_files ll_file out_bin in
           let rc = Sys.command cmd in
           if rc <> 0 then begin
