@@ -2412,6 +2412,515 @@ fn col_normalize(col : Column) : Result(Column, String) do
   end
 end
 
+-- ── Phase 8: Missing Data Operations ──────────────────────────────────────
+
+-- Check whether row i of a column is null.
+fn col_has_null_at(col : Column, i : Int) : Bool do
+  match col do
+  | NullableIntCol(_, _, nulls)   -> List.nth(nulls, i)
+  | NullableFloatCol(_, _, nulls) -> List.nth(nulls, i)
+  | NullableStrCol(_, _, nulls)   -> List.nth(nulls, i)
+  | NullableBoolCol(_, _, nulls)  -> List.nth(nulls, i)
+  | _                             -> false
+  end
+end
+
+doc "Remove rows that have a null in any column."
+fn drop_nulls(df : DataFrame) : DataFrame do
+  let n = row_count(df)
+  let all_cols = match df do | DataFrame(cs) -> cs end
+  fn build_kept(i : Int, acc : List(Int)) : List(Int) do
+    if i >= n then List.reverse(acc)
+    else do
+      let has_null = List.any(all_cols, fn c -> col_has_null_at(c, i))
+      if has_null then build_kept(i + 1, acc)
+      else build_kept(i + 1, Cons(i, acc))
+    end
+  end
+  let kept = build_kept(0, Nil)
+  DataFrame(List.map(all_cols, fn c -> filter_col_by_indices(c, kept)))
+end
+
+doc "Remove rows that have a null in any of the specified columns."
+fn drop_nulls_in(df : DataFrame, names : List(String)) : DataFrame do
+  let n = row_count(df)
+  let all_cols = match df do | DataFrame(cs) -> cs end
+  let target_cols = List.filter(all_cols, fn c ->
+    List.any(names, fn nm -> nm == col_name(c)))
+  fn build_kept(i : Int, acc : List(Int)) : List(Int) do
+    if i >= n then List.reverse(acc)
+    else do
+      let has_null = List.any(target_cols, fn c -> col_has_null_at(c, i))
+      if has_null then build_kept(i + 1, acc)
+      else build_kept(i + 1, Cons(i, acc))
+    end
+  end
+  let kept = build_kept(0, Nil)
+  DataFrame(List.map(all_cols, fn c -> filter_col_by_indices(c, kept)))
+end
+
+doc "Replace null values in a nullable column with fill_val. Errors on type mismatch."
+fn fill_null(col : Column, fill_val : Value) : Result(Column, String) do
+  let nm = col_name(col)
+  match col do
+  | NullableIntCol(n, data, nulls) ->
+    match fill_val do
+    | IntVal(x) ->
+      Ok(IntCol(n, List.map(List.zip(data, nulls),
+        fn pair -> match pair do | (v, b) -> if b then x else v end)))
+    | _ -> Err("fill_null: column '" ++ nm ++ "' is Int; expected IntVal")
+    end
+  | NullableFloatCol(n, data, nulls) ->
+    match fill_val do
+    | FloatVal(f) ->
+      Ok(FloatCol(n, List.map(List.zip(data, nulls),
+        fn pair -> match pair do | (v, b) -> if b then f else v end)))
+    | IntVal(x) ->
+      let fx = int_to_float(x)
+      Ok(FloatCol(n, List.map(List.zip(data, nulls),
+        fn pair -> match pair do | (v, b) -> if b then fx else v end)))
+    | _ -> Err("fill_null: column '" ++ nm ++ "' is Float; expected FloatVal or IntVal")
+    end
+  | NullableStrCol(n, data, nulls) ->
+    match fill_val do
+    | StrVal(s) ->
+      Ok(StrCol(n, List.map(List.zip(data, nulls),
+        fn pair -> match pair do | (v, b) -> if b then s else v end)))
+    | _ -> Err("fill_null: column '" ++ nm ++ "' is String; expected StrVal")
+    end
+  | NullableBoolCol(n, data, nulls) ->
+    match fill_val do
+    | BoolVal(bv) ->
+      Ok(BoolCol(n, List.map(List.zip(data, nulls),
+        fn pair -> match pair do | (v, b) -> if b then bv else v end)))
+    | _ -> Err("fill_null: column '" ++ nm ++ "' is Bool; expected BoolVal")
+    end
+  | _ -> Err("fill_null: column '" ++ nm ++ "' has no nulls (non-nullable column)")
+  end
+end
+
+doc "Apply fill_null to a named column in a DataFrame, replacing it in-place."
+fn fill_null_df(df : DataFrame, col_nm : String, fill_val : Value) : Result(DataFrame, String) do
+  match get_column(df, col_nm) do
+  | Err(e) -> Err(e)
+  | Ok(col) ->
+    match fill_null(col, fill_val) do
+    | Err(e) -> Err(e)
+    | Ok(new_col) ->
+      match df do
+      | DataFrame(cs) ->
+        Ok(DataFrame(List.map(cs, fn c ->
+          if col_name(c) == col_nm then new_col else c)))
+      end
+    end
+  end
+end
+
+doc "Forward-fill nulls in a nullable column: propagate the last non-null value downward."
+fn fill_null_forward(col : Column) : Column do
+  match col do
+  | NullableIntCol(name, data, nulls) ->
+    fn go(ds : List(Int), ns : List(Bool), last : Int, acc : List(Int)) : List(Int) do
+      match ds do
+      | Nil -> List.reverse(acc)
+      | Cons(v, rd) ->
+        match ns do
+        | Nil -> List.reverse(acc)
+        | Cons(b, rn) ->
+          if b then go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+        end
+      end
+    end
+    IntCol(name, go(data, nulls, 0, Nil))
+  | NullableFloatCol(name, data, nulls) ->
+    fn go(ds : List(Float), ns : List(Bool), last : Float, acc : List(Float)) : List(Float) do
+      match ds do
+      | Nil -> List.reverse(acc)
+      | Cons(v, rd) ->
+        match ns do
+        | Nil -> List.reverse(acc)
+        | Cons(b, rn) ->
+          if b then go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+        end
+      end
+    end
+    FloatCol(name, go(data, nulls, 0.0, Nil))
+  | NullableStrCol(name, data, nulls) ->
+    fn go(ds : List(String), ns : List(Bool), last : String, acc : List(String)) : List(String) do
+      match ds do
+      | Nil -> List.reverse(acc)
+      | Cons(v, rd) ->
+        match ns do
+        | Nil -> List.reverse(acc)
+        | Cons(b, rn) ->
+          if b then go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+        end
+      end
+    end
+    StrCol(name, go(data, nulls, "", Nil))
+  | NullableBoolCol(name, data, nulls) ->
+    fn go(ds : List(Bool), ns : List(Bool), last : Bool, acc : List(Bool)) : List(Bool) do
+      match ds do
+      | Nil -> List.reverse(acc)
+      | Cons(v, rd) ->
+        match ns do
+        | Nil -> List.reverse(acc)
+        | Cons(b, rn) ->
+          if b then go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+        end
+      end
+    end
+    BoolCol(name, go(data, nulls, false, Nil))
+  | _ -> col
+  end
+end
+
+doc "Backward-fill nulls in a nullable column: propagate the next non-null value upward."
+fn fill_null_backward(col : Column) : Column do
+  -- Strategy: reverse the data, forward-fill, then the Cons-prepend accumulator
+  -- is already in the correct (non-reversed) order because we processed in reverse.
+  match col do
+  | NullableIntCol(name, data, nulls) ->
+    fn go(ds : List(Int), ns : List(Bool), last : Int, acc : List(Int)) : List(Int) do
+      match ds do
+      | Nil -> acc
+      | Cons(v, rd) ->
+        match ns do
+        | Nil -> acc
+        | Cons(b, rn) ->
+          if b then go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+        end
+      end
+    end
+    IntCol(name, go(List.reverse(data), List.reverse(nulls), 0, Nil))
+  | NullableFloatCol(name, data, nulls) ->
+    fn go(ds : List(Float), ns : List(Bool), last : Float, acc : List(Float)) : List(Float) do
+      match ds do
+      | Nil -> acc
+      | Cons(v, rd) ->
+        match ns do
+        | Nil -> acc
+        | Cons(b, rn) ->
+          if b then go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+        end
+      end
+    end
+    FloatCol(name, go(List.reverse(data), List.reverse(nulls), 0.0, Nil))
+  | NullableStrCol(name, data, nulls) ->
+    fn go(ds : List(String), ns : List(Bool), last : String, acc : List(String)) : List(String) do
+      match ds do
+      | Nil -> acc
+      | Cons(v, rd) ->
+        match ns do
+        | Nil -> acc
+        | Cons(b, rn) ->
+          if b then go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+        end
+      end
+    end
+    StrCol(name, go(List.reverse(data), List.reverse(nulls), "", Nil))
+  | NullableBoolCol(name, data, nulls) ->
+    fn go(ds : List(Bool), ns : List(Bool), last : Bool, acc : List(Bool)) : List(Bool) do
+      match ds do
+      | Nil -> acc
+      | Cons(v, rd) ->
+        match ns do
+        | Nil -> acc
+        | Cons(b, rn) ->
+          if b then go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+        end
+      end
+    end
+    BoolCol(name, go(List.reverse(data), List.reverse(nulls), false, Nil))
+  | _ -> col
+  end
+end
+
+-- ── Phase 9: Window Functions ──────────────────────────────────────────────
+
+-- WindowExpr: window function expressions applied over an entire DataFrame
+-- (no partitioning in Phase 9; partitioned windows are a future extension).
+type WindowExpr =
+    RowNum                      -- sequential 0-indexed row number
+  | Rank(String, SortDir)      -- standard competition rank (gaps on ties: 1,2,2,4)
+  | DenseRank(String, SortDir) -- dense rank (no gaps: 1,2,2,3)
+  | RunningSum(String)         -- cumulative sum of Int or Float column
+  | RunningMean(String)        -- cumulative mean of Int or Float column
+  | Lag(String, Int, Value)    -- value n rows before current row (fill_val if OOB)
+  | Lead(String, Int, Value)   -- value n rows after current row (fill_val if OOB)
+
+-- Internal: sort a List((Int, Int)) ascending by the first element.
+fn sort_pairs_asc(pairs : List((Int, Int))) : List((Int, Int)) do
+  List.sort_by(pairs, fn (p1, p2) ->
+    match p1 do | (a, _) ->
+      match p2 do | (b, _) -> a < b end
+    end)
+end
+
+doc """Apply a window function over the full DataFrame, appending the result as
+a new column named out_col. No partitioning (operates over all rows).
+"""
+fn window(df : DataFrame, expr : WindowExpr, out_col : String) : Result(DataFrame, String) do
+  let n = row_count(df)
+  match expr do
+
+  | RowNum ->
+    add_column(df, IntCol(out_col, List.range(0, n)))
+
+  | Rank(key_col, dir) ->
+    let key_spec = Cons((key_col, dir), Nil)
+    let indices = List.range(0, n)
+    let sorted = List.sort_by(indices,
+      fn (a, b) -> compare_rows_by_keys(df, a, b, key_spec) < 0)
+    -- Walk sorted order: each element gets 1 + its 0-based position IF it's
+    -- not tied with the previous element; otherwise it shares the previous rank.
+    fn assign_ranks(remaining : List(Int), pos : Int,
+                    prev_opt : Option(Int), grp_rank : Int,
+                    out : List((Int, Int))) : List((Int, Int)) do
+      match remaining do
+      | Nil -> out
+      | Cons(ri, rest) ->
+        let cur_rank = match prev_opt do
+          | None -> 1
+          | Some(prev_ri) ->
+            if compare_rows_by_keys(df, ri, prev_ri, key_spec) == 0
+            then grp_rank
+            else pos + 1
+          end
+        assign_ranks(rest, pos + 1, Some(ri), cur_rank,
+          Cons((ri, cur_rank), out))
+      end
+    end
+    let rank_map = assign_ranks(sorted, 0, None, 1, Nil)
+    let rank_vals = List.map(sort_pairs_asc(rank_map),
+      fn p -> match p do | (_, r) -> r end)
+    add_column(df, IntCol(out_col, rank_vals))
+
+  | DenseRank(key_col, dir) ->
+    let key_spec = Cons((key_col, dir), Nil)
+    let indices = List.range(0, n)
+    let sorted = List.sort_by(indices,
+      fn (a, b) -> compare_rows_by_keys(df, a, b, key_spec) < 0)
+    fn assign_dense(remaining : List(Int), prev_opt : Option(Int),
+                    dr : Int, out : List((Int, Int))) : List((Int, Int)) do
+      match remaining do
+      | Nil -> out
+      | Cons(ri, rest) ->
+        let new_dr = match prev_opt do
+          | None -> 1
+          | Some(prev_ri) ->
+            if compare_rows_by_keys(df, ri, prev_ri, key_spec) == 0
+            then dr
+            else dr + 1
+          end
+        assign_dense(rest, Some(ri), new_dr, Cons((ri, new_dr), out))
+      end
+    end
+    let rank_map = assign_dense(sorted, None, 0, Nil)
+    let rank_vals = List.map(sort_pairs_asc(rank_map),
+      fn p -> match p do | (_, r) -> r end)
+    add_column(df, IntCol(out_col, rank_vals))
+
+  | RunningSum(src_col) ->
+    match get_column(df, src_col) do
+    | Err(e) -> Err(e)
+    | Ok(col) ->
+      match col do
+      | IntCol(_, data) ->
+        fn go(xs : List(Int), s : Int, acc : List(Int)) : List(Int) do
+          match xs do
+          | Nil -> List.reverse(acc)
+          | Cons(x, rest) ->
+            let ns = s + x
+            go(rest, ns, Cons(ns, acc))
+          end
+        end
+        add_column(df, IntCol(out_col, go(data, 0, Nil)))
+      | FloatCol(_, data) ->
+        fn go(xs : List(Float), s : Float, acc : List(Float)) : List(Float) do
+          match xs do
+          | Nil -> List.reverse(acc)
+          | Cons(x, rest) ->
+            let ns = s +. x
+            go(rest, ns, Cons(ns, acc))
+          end
+        end
+        add_column(df, FloatCol(out_col, go(data, 0.0, Nil)))
+      | _ -> Err("window RunningSum: column '" ++ src_col ++ "' must be Int or Float")
+      end
+    end
+
+  | RunningMean(src_col) ->
+    match get_column(df, src_col) do
+    | Err(e) -> Err(e)
+    | Ok(col) ->
+      let floats_r = match col do
+        | IntCol(_, data)   -> Ok(List.map(data, fn x -> int_to_float(x)))
+        | FloatCol(_, data) -> Ok(data)
+        | _ -> Err("window RunningMean: column '" ++ src_col ++ "' must be Int or Float")
+        end
+      match floats_r do
+      | Err(e) -> Err(e)
+      | Ok(fs) ->
+        fn go(xs : List(Float), sm : Float, cnt : Int, acc : List(Float)) : List(Float) do
+          match xs do
+          | Nil -> List.reverse(acc)
+          | Cons(x, rest) ->
+            let nsm = sm +. x
+            let ncnt = cnt + 1
+            let mean_ = nsm /. int_to_float(ncnt)
+            go(rest, nsm, ncnt, Cons(mean_, acc))
+          end
+        end
+        add_column(df, FloatCol(out_col, go(fs, 0.0, 0, Nil)))
+      end
+    end
+
+  | Lag(src_col, lag_n, fill_val) ->
+    match get_column(df, src_col) do
+    | Err(e) -> Err(e)
+    | Ok(col) ->
+      let vals = col_to_value_list(col)
+      fn build_lag(i : Int, acc : List(Value)) : List(Value) do
+        if i >= n then List.reverse(acc)
+        else do
+          let idx = i - lag_n
+          let v = if idx < 0 then fill_val else List.nth(vals, idx)
+          build_lag(i + 1, Cons(v, acc))
+        end
+      end
+      match values_to_column(out_col, build_lag(0, Nil)) do
+      | Err(e) -> Err(e)
+      | Ok(new_col) -> add_column(df, new_col)
+      end
+    end
+
+  | Lead(src_col, lead_n, fill_val) ->
+    match get_column(df, src_col) do
+    | Err(e) -> Err(e)
+    | Ok(col) ->
+      let vals = col_to_value_list(col)
+      fn build_lead(i : Int, acc : List(Value)) : List(Value) do
+        if i >= n then List.reverse(acc)
+        else do
+          let idx = i + lead_n
+          let v = if idx >= n then fill_val else List.nth(vals, idx)
+          build_lead(i + 1, Cons(v, acc))
+        end
+      end
+      match values_to_column(out_col, build_lead(0, Nil)) do
+      | Err(e) -> Err(e)
+      | Ok(new_col) -> add_column(df, new_col)
+      end
+    end
+
+  end
+end
+
+-- ── Phase 10: Pivot / Melt ────────────────────────────────────────────────
+
+doc """Melt (unpivot): transform a wide DataFrame into a long one.
+id_vars   — columns kept as-is in every output row.
+value_vars — columns whose names become values of var_col and whose values
+             become values of val_col.
+One output row is produced per (input row × value_var).
+
+Example:
+  melt(df, ["id"], ["jan","feb","mar"], "month", "value")
+  turns:  id | jan | feb | mar
+  into:   id | month | value   (3 output rows per original row)
+"""
+fn melt(df : DataFrame, id_vars : List(String), value_vars : List(String),
+        var_col : String, val_col : String) : Result(DataFrame, String) do
+  let n = row_count(df)
+  fn build_melted(i : Int, acc : List(Row)) : List(Row) do
+    if i >= n then List.reverse(acc)
+    else do
+      let row_pairs = match get_row(df, i) do | Row(ps) -> ps end
+      let id_pairs = List.filter(row_pairs, fn pair ->
+        match pair do | (k, _) -> List.any(id_vars, fn iv -> iv == k) end)
+      let new_rows = List.map(value_vars, fn vname -> do
+        let vval = col_value_at_by_name(df, vname, i)
+        Row(List.append(id_pairs,
+          Cons((var_col, StrVal(vname)), Cons((val_col, vval), Nil))))
+      end)
+      build_melted(i + 1, List.append(List.reverse(new_rows), acc))
+    end
+  end
+  from_rows_widen(build_melted(0, Nil))
+end
+
+doc """Pivot: transform a long DataFrame into a wide one.
+index_col — column whose distinct values become output rows.
+cols_col  — column whose distinct values become new output column names.
+vals_col  — column whose values fill the output cells.
+Missing (index, col) combinations get NullVal.
+
+Example:
+  pivot(df, "region", "product", "revenue")
+  turns:  region | product | revenue
+  into:   region | A | B | ...   (one column per distinct product)
+"""
+fn pivot(df : DataFrame, index_col : String, cols_col : String,
+         vals_col : String) : Result(DataFrame, String) do
+  match get_column(df, index_col) do
+  | Err(e) -> Err(e)
+  | Ok(_) ->
+    match get_column(df, cols_col) do
+    | Err(e) -> Err(e)
+    | Ok(_) ->
+      match get_column(df, vals_col) do
+      | Err(e) -> Err(e)
+      | Ok(_) ->
+        let n = row_count(df)
+        -- Collect distinct values for a column in first-appearance order.
+        fn collect_distinct(i : Int, cn : String, seen : List(Value)) : List(Value) do
+          if i >= n then List.reverse(seen)
+          else do
+            let v = col_value_at_by_name(df, cn, i)
+            if List.any(seen, fn s -> values_equal(s, v)) then
+              collect_distinct(i + 1, cn, seen)
+            else
+              collect_distinct(i + 1, cn, Cons(v, seen))
+          end
+        end
+        let pivot_col_vals = collect_distinct(0, cols_col, Nil)
+        let index_vals     = collect_distinct(0, index_col, Nil)
+        -- O(n) scan for the first matching (idx_v, col_v) cell value.
+        fn lookup(idx_v : Value, col_v : Value) : Value do
+          fn scan(i : Int) : Value do
+            if i >= n then NullVal
+            else do
+              let idx_match = values_equal(col_value_at_by_name(df, index_col, i), idx_v)
+              let col_match = values_equal(col_value_at_by_name(df, cols_col, i), col_v)
+              if idx_match && col_match then col_value_at_by_name(df, vals_col, i)
+              else scan(i + 1)
+            end
+          end
+          scan(0)
+        end
+        let pivot_col_names = List.map(pivot_col_vals, fn v -> value_to_string(v))
+        let out_rows = List.map(index_vals, fn idx_v -> do
+          let cell_pairs = List.map(
+            List.zip(pivot_col_vals, pivot_col_names),
+            fn pair ->
+              match pair do | (cv, cn) -> (cn, lookup(idx_v, cv)) end)
+          Row(Cons((index_col, idx_v), cell_pairs))
+        end)
+        from_rows_widen(out_rows)
+      end
+    end
+  end
+end
+
 -- ── Utilities ──────────────────────────────────────────────────────────────
 
 doc "Print a DataFrame as a simple text table."

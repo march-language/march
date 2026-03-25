@@ -1147,7 +1147,60 @@ pub fn train_test_split(df : DataFrame, test_frac : Float, rng : Random.Rng)
 **Dependencies:** Phases 1–6
 **Estimated effort:** 2 days
 
-**Total estimated effort: ~22–26 days (4.5–5 weeks)**
+### Phase 8: Missing Data Operations ✅
+**Deliverables:**
+- `col_has_null_at(col, i)` — internal null-at-index check
+- `drop_nulls(df)` — remove rows with any null
+- `drop_nulls_in(df, names)` — remove rows with null in specified columns
+- `fill_null(col, val)` — fill nullable column with scalar (typed, errors on mismatch)
+- `fill_null_df(df, col_name, val)` — in-place column replacement
+- `fill_null_forward(col)` — forward-fill: propagate last non-null down
+- `fill_null_backward(col)` — backward-fill: propagate next non-null up
+
+**Design notes:**
+- `fill_null_forward` uses a single left-fold with a `(acc, last)` accumulator; result is reversed at the end.
+- `fill_null_backward` reverses the column, forward-fills, then leverages the Cons-prepend property to return in the correct order without a second reverse.
+- Non-nullable columns pass through `fill_null_forward`/`fill_null_backward` unchanged.
+
+**Complexity:** Low.
+**Dependencies:** Phase 1 (nullable column types)
+**Tests:** 6 tests in `test_dataframe.march` (drop_nulls, fill_null scalar, type mismatch, fill_null_df, forward/backward fill)
+**Implemented:** 2026-03-24
+
+### Phase 9: Window Functions ✅
+**Deliverables:**
+- `WindowExpr` ADT: `RowNum | Rank(col, dir) | DenseRank(col, dir) | RunningSum(col) | RunningMean(col) | Lag(col, n, fill) | Lead(col, n, fill)`
+- `window(df, expr, out_col)` — applies window function, appends column
+- `sort_pairs_asc(pairs)` — internal helper for index-rank sorting
+
+**Design notes:**
+- `RowNum`: trivial `List.range(0, n)`.
+- `Rank`/`DenseRank`: sort row indices by the key column, walk sorted order detecting ties via `compare_rows_by_keys(...) == 0`, emit `(original_row_idx, rank)` pairs, then sort by row index to reconstruct original-order rank column.
+- `RunningSum`/`RunningMean`: single left-fold with `(acc, running_value)` state; O(n).
+- `Lag`/`Lead`: materialize source column via `col_to_value_list`, then build result list with index arithmetic; uses `values_to_column` for widening type inference on the result.
+- No partitioning in Phase 9 (all rows form a single partition). Partitioned windows are deferred.
+
+**Complexity:** Medium.
+**Dependencies:** Phase 1, Phase 3 (`compare_rows_by_keys`, `col_to_value_list`, `values_to_column`)
+**Tests:** 6 tests: RowNum, Rank (gaps), DenseRank (no gaps), RunningSum, RunningMean, Lag n=1, Lead n=1
+**Implemented:** 2026-03-24
+
+### Phase 10: Pivot / Melt ✅
+**Deliverables:**
+- `melt(df, id_vars, value_vars, var_col, val_col)` — wide → long (unpivot)
+- `pivot(df, index_col, cols_col, vals_col)` — long → wide
+
+**Design notes:**
+- `melt`: for each input row × each value_var, emit one output row with id_vars + (var_col=vname, val_col=value). Uses `from_rows_widen` for type inference on the output.
+- `pivot`: collects distinct values of `cols_col` (new column names) and `index_col` (new row keys) in first-appearance order. For each (index_val, col_val) cell, does a linear scan to find the first matching row. Missing cells → `NullVal`. Uses `from_rows_widen` for output.
+- Pivot is O(n × rows × cols) due to linear lookup; suitable for small-to-medium DataFrames. A hash-join optimization (building a `Map((index_val, col_val) → val)`) can be added in a future phase.
+
+**Complexity:** Medium.
+**Dependencies:** Phase 1 (`from_rows_widen`, `col_value_at_by_name`, `values_equal`, `value_to_string`)
+**Tests:** 5 tests: melt row count, melt id_vars preserved, pivot column count, pivot cell values, pivot missing column error
+**Implemented:** 2026-03-24
+
+**Total estimated effort (Phases 1–10): ~30–36 days**
 
 ---
 
