@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-24 (optimizations spec + constant propagation pass + LSP Phase 2 + cross-file imports)
+**Last updated:** 2026-03-25 (LSP Performance Insights plan)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -22,6 +22,12 @@ This file tracks everything that still needs to get done. Organized by priority 
 ---
 
 ## P2 — Important / Near-Term
+
+### LSP: Performance Insights
+
+- [ ] **LSP Performance Insights — Phase 1 (AST-level)** — Plan at `specs/plans/lsp-performance-insights-plan.md`. Three AST-only insights: (1) tail call optimization — detect non-tail recursive calls and explain the blocking operation with accumulator suggestion; (2) actor message copying — detect `send()` calls with non-linear heap values and warn about deep copy; (3) closure capture size — hint when a lambda closes over 3+ values. Add `perf_insight` type and `perf_insights` field to `Analysis.t`. Wire into hover and diagnostics.
+- [ ] **LSP Performance Insights — Phase 2 (AST heuristics)** — Three heuristic insights: (1) memory reuse opportunities via `refs_map` use-count analysis; (2) indirect call detection when callee is a function parameter or returned closure; (3) allocation in recursive function arms. Add inlay hints with `"march.inlayHints.performanceAnnotations"` config key.
+- [ ] **LSP Performance Insights — Phase 3 (async TIR pipeline)** — Run `lower → mono → defun → known_call → perceus → escape` asynchronously in the LSP. Surface stack vs heap allocation via `EStackAlloc` detection, precise reuse via `EReuse`, and confirmed direct calls. Push incremental diagnostics via `publishDiagnostics` when TIR completes. Add code lens provider for per-function performance summaries.
 
 ### Compiler: Type System
 
