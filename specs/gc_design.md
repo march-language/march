@@ -138,3 +138,46 @@ For any residual case (unrestricted mutable values, if March ever exposes them v
 3. **Large object handling**: values above a threshold (e.g. 1 MB) may bypass the bump-pointer arena and go directly to the OS. Threshold TBD.
 4. **FFI and foreign heaps**: foreign pointers enter as linear values (enforced by the type system), but the foreign allocator's lifecycle may not align with March's. The linear type ensures the pointer is freed exactly once — the question is which `free` function to call.
 5. **Profiling hooks**: content-addressed code enables allocation profiling keyed by definition hash — the same function at the same type always produces the same code, so allocation profiles are reproducible across builds.
+
+---
+
+## Phase 5 Implementation Notes (2026-03-25)
+
+Layer 3 (Per-Actor Arena Heaps) has been implemented.  The following notes record how the design was realized and where it diverges from or refines the spec above.
+
+### Arena growth policy (Open Question 2 — resolved)
+
+The implementation uses **doubling arenas** from 64 KiB to 4 MiB (capped):
+
+```
+MARCH_HEAP_BLOCK_MIN = 64 KiB   (first block)
+MARCH_HEAP_BLOCK_MAX = 4 MiB    (ceiling)
+```
+
+Each new block is twice the previous until the cap.  Oversized single allocations (larger than the current cap) get their own dedicated block.  This bounds external fragmentation (wasted space between blocks) to a constant factor while keeping allocation fast.
+
+### Per-allocation metadata
+
+A hidden `march_alloc_meta` (8 bytes) is stored immediately before each user-visible object.  The user pointer (returned by `march_process_alloc`) points to the `march_hdr`, not the meta.  The macro `MARCH_ALLOC_META(p)` recovers the meta from a user pointer.
+
+The meta records:
+- `alloc_size` (uint32): total allocation size including the meta prefix and alignment padding
+- `n_fields` (uint32): number of 8-byte fields after the 16-byte `march_hdr`
+
+This enables the arena to be walked for GC without any external type table.
+
+### Semi-space GC and Open Question 1
+
+Open Question 1 (deferred cycle collector algorithm) is not yet answered — the Phase 5 GC is not a cycle collector.  It is a compacting semi-space GC that leverages Perceus RC to identify live objects: any object with `rc > 0` is live.  Because March's immutable-by-default design prevents cycles (as analyzed in "The Cycle Problem" above), the semi-space GC is sufficient for most process heaps.
+
+The GC uses the `n_fields` metadata and a forwarding table to update intra-heap pointers during the copy phase.  It never touches other processes' heaps.
+
+### Large object handling (Open Question 3 — deferred)
+
+Large objects currently go through the same arena path as small objects (using an oversized dedicated block).  A bypass to OS-level allocation above a threshold (e.g. 1 MB) is a future optimization.
+
+### Linear message move: zero-copy send
+
+`march_msg_move` implements the zero-copy path for linear messages: it only adjusts `live_bytes` accounting on both heaps and returns the original pointer unchanged.  The linear type system guarantees no aliasing exists, so no data needs to be moved.
+
+The LLVM emitter now chooses between `march_send_linear` (calls `march_msg_move` semantics) and `march_send` (copy semantics) based on the TIR linearity annotation of the message argument.

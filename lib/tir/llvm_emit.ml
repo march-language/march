@@ -359,6 +359,7 @@ let mangle_extern : string -> string = function
   | "kill"               -> "march_kill"
   | "is_alive"      -> "march_is_alive"
   | "send"          -> "march_send"
+  | "send_linear"   -> "march_send_linear"
   | "spawn"         -> "march_spawn"
   | "actor_get_int" -> "march_actor_get_int"
   | "tcp_listen"              -> "march_tcp_listen"
@@ -1149,6 +1150,25 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | _        -> ("i64",    "0")
     in
     dummy
+
+  (* ── Send with linear message: emit march_send_linear (zero-copy move) ─ *)
+  (* When the message argument is a linear value (v_lin = Lin), the compiler
+     can guarantee that no other reference to the message exists after the
+     send.  We emit march_send_linear (which will call march_msg_move) rather
+     than the default march_send (which copies for non-linear messages).
+     This is the Phase 5 linear-type optimization: zero-copy inter-process
+     message passing for linearly-typed messages. *)
+  | Tir.EApp (f, [actor_atom; msg_atom])
+    when f.Tir.v_name = "send"
+      && (match msg_atom with
+          | Tir.AVar v -> v.Tir.v_lin = Tir.Lin
+          | _ -> false) ->
+    let (actor_ty, actor_v) = emit_atom ctx actor_atom in
+    let (msg_ty,   msg_v)   = emit_atom ctx msg_atom in
+    let r = fresh ctx "cr" in
+    emit ctx (Printf.sprintf "%s = call ptr @march_send_linear(%s %s, %s %s)"
+                r actor_ty actor_v msg_ty msg_v);
+    ("ptr", r)
 
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->
@@ -2237,6 +2257,14 @@ declare ptr  @march_string_join(ptr %list, ptr %sep)
 declare void @march_kill(ptr %actor)
 declare i64  @march_is_alive(ptr %actor)
 declare ptr  @march_send(ptr %actor, ptr %msg)
+; Phase 5: per-process heap allocation and cross-heap message passing
+; march_send_linear: send a linear (zero-copy) message — caller transfers ownership
+declare ptr  @march_send_linear(ptr %actor, ptr %msg)
+; march_msg_copy / march_msg_move: direct cross-heap operations (used by scheduler layer)
+declare ptr  @march_msg_copy(ptr %src_heap, ptr %dst_heap, ptr %value)
+declare ptr  @march_msg_move(ptr %src_heap, ptr %dst_heap, ptr %value)
+; march_process_alloc: per-process bump allocation (non-atomic, no locks)
+declare ptr  @march_process_alloc(ptr %heap, i64 %sz)
 declare ptr  @march_spawn(ptr %actor)
 declare i64  @march_actor_get_int(ptr %actor, i64 %index)
 declare void @march_run_scheduler()
