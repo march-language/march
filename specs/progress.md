@@ -212,17 +212,17 @@ march/
     └── test/test_forge.exe   # 15 tests (scaffold, toml)
 ```
 
-## Current State (as of 2026-03-24, post DataFrame Phase 7 + LSP Phase 1)
+## Current State (as of 2026-03-24, post DataFrame Phase 7 + LSP Phase 1 + LSP Phase 2)
 
 - **Builds clean**
-- **1277 tests across 9 dune suites; 37 known pre-existing failures** (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7**):
+- **1286 tests across 9 dune suites; 37 known pre-existing failures** (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7**):
   - `test_march.exe`: 1050 tests (14 failures: JIT/clang-dependent tests skip gracefully when clang absent)
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests (23 failures: pre-existing formatter round-trip failures)
   - `test_properties.exe`: 36 tests, passing (QCheck2 properties)
   - `test_supervision.exe`: 15 tests, passing (actor supervision)
-  - `test_lsp.exe`: 89 tests, passing (doc strings, find-refs, rename, sig-help, code actions, snippet completions, folding ranges, type annotation action, remove unused binding action)
+  - `test_lsp.exe`: 98 tests, passing (doc strings, find-refs, rename, sig-help, code actions, snippet completions, folding ranges, type annotation action, remove unused binding action, phase2 enhanced match, quickfix framework, dead code detection)
   - `test_stdlib_march.exe`: 7 tests, passing (Http, HttpTransport, HttpClient, HttpServer, WebSocket, Process, Logger)
   - `test_forge.exe`: 15 tests, passing (scaffold/toml)
   - `test_oracle.exe`: requires `MARCH_BIN` env var (oracle/idempotency/pass tests)
@@ -236,8 +236,9 @@ march/
 - **Property-based testing**: 36 QCheck2 properties in `test/test_properties.ml` — ADTs, closures, HOFs, tuples, strings, oracle/idempotency/pass properties
 - **Standard Interfaces (Eq/Ord/Show/Hash) with derive syntax** — merged to main (from `claude/intelligent-austin`); `derive [Eq, Show]` syntax, eval dispatch for `==`/`show`/`hash`/`compare` via `impl_tbl`; 18 tests
 - **LSP Server** (`march-lsp`) — diagnostics, hover (with doc strings), goto-def, completion, inlay hints, semantic tokens, actor info, find references, rename symbol, signature help, code actions (make-linear quickfix, exhaustion quickfix); uses `linol` framework; Zed extension wired up
+- **LSP Phase 2 enhancements** — (1) Enhanced exhaustive match: `match_site.ms_missing_cases : string list` holds ALL missing variants (AST-based `augment_match_sites` pass enumerates type ctors, filters covered constructors, skips qualified `Bit.Zero` keys); "Add all N missing cases" bulk `QuickFix`; "Fix all incomplete `T` matches in file" `RefactorRewrite` when same type appears in multiple match sites; `type_matches` groups match sites by type. (2) Diagnostics-driven quickfix framework: `fix_registry : (string, fix_gen) Hashtbl.t` with `register_fix`/`apply_fix_registry`; pre-registered codes: `non_exhaustive_match`, `unused_binding`, `unused_private_fn`, `unreachable_code`. (3) Dead code detection: call-graph BFS from public roots + `main`; `unused_fns : string list`; `unused_private_fn` Warning diagnostics; post-block scanner emits `unreachable_code` Warning for expressions following `panic`/`panic_`/`unreachable_` calls. +9 tests.
 - **LSP Phase 1 enhancements** — (1) Snippet completions: `insertText` with tabstops for functions (`"fn(${1:Int}, ${2:String})"`) and multi-arg constructors; `insertTextFormat=Snippet`. (2) Folding ranges: `textDocument/foldingRange` handler; `collect_fold_ranges` walks `DFn`/`DMod`/`DActor`/`DDescribe`/`EMatch`/`ELetFn`; `foldingRangeProvider=true`. (3) Add type annotation code action: `collect_annotation_sites` finds untyped `ELet`/`DLet` bindings; `RefactorRewrite` inserts `": TypeName"`. (4) Remove unused binding code action: `code : string option` on `Errors.diagnostic`; `warning_with_code ~code:"unused_binding"`; generates "Prefix with underscore" and "Remove unused binding" `QuickFix` actions. +4 tests.
-- **LSP test suite** — `lsp/test/test_lsp.ml` (89 tests): position utils, diagnostics, document symbols, completions, goto-def, hover types, inlay hints, march-specific features, error recovery, analysis struct, doc strings, find references, rename symbol, signature help, code actions, snippet completions, folding ranges, type annotation action, remove unused binding action
+- **LSP test suite** — `lsp/test/test_lsp.ml` (98 tests): position utils, diagnostics, document symbols, completions, goto-def, hover types, inlay hints, march-specific features, error recovery, analysis struct, doc strings, find references, rename symbol, signature help, code actions, snippet completions, folding ranges, type annotation action, remove unused binding action, phase2 enhanced match, quickfix framework, dead code detection
 - **Module alias declarations** — `alias Long.Module as Short` / `alias Long.Module` (last segment as alias); `DAlias` in AST; resolved in typecheck; unused-alias warning emitted
 - **Pattern matching exhaustiveness checking** — compile-time pattern matrix analysis in `lib/typecheck/typecheck.ml`; warns on non-exhaustive matches, errors on unreachable arms
 - **Multi-level `use` paths** — `use A.B.*` / `use A.B.C` fully supported; grammar ambiguity resolved in parser, full path resolution in typecheck
