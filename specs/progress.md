@@ -161,6 +161,9 @@ march/
 ├── runtime/
 │   ├── march_runtime.c/h    # Core runtime: alloc, RC, strings, actors, value_to_string
 │   ├── march_http.c/h       # HTTP/WS runtime: TCP, HTTP parse/serialize, server, WebSocket
+│   ├── march_heap.c/h       # Phase 5: per-process bump-pointer arena allocator
+│   ├── march_message.c/h    # Phase 5: cross-heap copy/move, MPSC mailbox, selective receive
+│   ├── march_gc.c/h         # Phase 5: semi-space copying GC (per-process, no global pause)
 │   ├── sha1.c               # SHA-1 for WebSocket handshake
 │   └── base64.c             # Base64 for WebSocket handshake
 │   ├── search/
@@ -212,10 +215,10 @@ march/
     └── test/test_forge.exe   # 15 tests (scaffold, toml)
 ```
 
-## Current State (as of 2026-03-25, post FBIP reuse fix + Perceus post-call DecRC correctness fix)
+## Current State (as of 2026-03-25, post Phase 5 per-process heaps + message passing)
 
 - **Builds clean**
-- **1321 tests across 9 dune suites; 37 known pre-existing failures** (+5 mutual_tco_codegen + 10 borrow_inference + 8 known_call/struct_fusion + 6 escape_analysis) (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis**):
+- **1321 OCaml tests + 7 C test groups (Phase 5) across 10 dune suites; 37 known pre-existing OCaml failures** (+5 mutual_tco_codegen + 10 borrow_inference + 8 known_call/struct_fusion + 6 escape_analysis) (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing**):
   - `test_march.exe`: 1088 tests (+5 mutual_tco_codegen, +10 borrow_inference, +8 known_call/struct_fusion, +6 escape_analysis; 14 failures: JIT/clang-dependent tests skip gracefully when clang absent)
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)

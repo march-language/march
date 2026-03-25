@@ -23,6 +23,30 @@
  (deps    (file test_scheduler_runner))
  (action  (run ./test_scheduler_runner)))
 
+; ── Phase 5: per-process heap, message passing, GC tests ─────────────────
+(rule
+ (targets test_heap_runner)
+ (deps    test_heap.c
+          ../runtime/march_heap.c
+          ../runtime/march_heap.h
+          ../runtime/march_message.c
+          ../runtime/march_message.h
+          ../runtime/march_gc.c
+          ../runtime/march_gc.h)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -O2 -I../runtime
+               -o %{targets}
+               test_heap.c
+               ../runtime/march_heap.c
+               ../runtime/march_message.c
+               ../runtime/march_gc.c
+               -lpthread -lm)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_heap_runner))
+ (action  (run ./test_heap_runner)))
+
 ; Phase 3: multi-threaded scheduler tests (4 schedulers)
 (rule
  (targets test_scheduler_mt_runner)

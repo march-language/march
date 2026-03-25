@@ -766,3 +766,104 @@ The runtime works in concert with **Perceus** reference counting (compiler-gener
 This allows actors to mutate their state in-place efficiently while maintaining reference counting invariants.
 
 > **Update (March 20, 2026, Track C):** The FBIP RC data race has been fixed. The save/restore of RC during actor dispatch now uses proper synchronization to prevent concurrent RC modifications from being silently clobbered. The scheduler also now processes multiple messages per cycle (fixing starvation under high throughput) and the `scheduled` flag race has been resolved. All changes passed ThreadSanitizer.
+
+---
+
+## Phase 5: Per-Process Heap and Message Passing (2026-03-25)
+
+This phase adds Layer 3 of the stratified GC design (`specs/gc_design.md`) — per-actor arena heaps — along with cross-heap message passing and a per-process semi-space GC.
+
+### Per-Process Bump Allocator (`runtime/march_heap.h`, `runtime/march_heap.c`)
+
+Each process owns a `march_heap_t` with a linked list of 64 KiB arena blocks.  All allocation uses a bump pointer — no locks, no synchronization.
+
+```c
+march_heap_t h;
+march_heap_init(&h);
+
+/* Allocate a 1-field object (24 bytes: 16-byte header + 8-byte field) */
+void *obj = march_process_alloc(&h, 24);
+
+/* O(1) arena death: frees all blocks regardless of how many objects */
+march_heap_destroy(&h);
+```
+
+Key properties:
+- **Bump pointer**: each allocation is a pointer increment + memset (~5 ns)
+- **No locks**: safe only from the owning process (no cross-thread access)
+- **Hidden metadata**: a `march_alloc_meta` (8 bytes) is stored before each object; the returned pointer is the standard `march_hdr` start
+- **Arena growth**: blocks double from 64 KiB up to 4 MiB; oversized objects get their own block
+- **O(1) process death**: `march_heap_destroy` frees one `malloc` per block, not one per object
+
+#### Fragmentation tracking
+
+`march_heap_record_death(heap, sz)` is called by `march_decrc_local` when an RC hits zero.  It decrements `live_bytes`, enabling `march_heap_should_gc` to detect when >50% of allocated memory is dead.
+
+### Cross-Heap Message Passing (`runtime/march_message.h`, `runtime/march_message.c`)
+
+Two operations for value transfer between process heaps:
+
+**`march_msg_copy(src, dst, value)`** — deep copy for non-linear values:
+- Recursively copies all reachable values from `src` into `dst`
+- Uses a hash-table forwarding map to handle DAG sharing (prevents exponential blowup on shared subgraphs)
+- String objects (tag = -1) are copied as raw byte arrays
+- Unboxed scalars (values < 4096) are returned unchanged
+
+**`march_msg_move(src, dst, value)`** — zero-copy transfer for linear values:
+- Pointer is unchanged (same address, no data movement)
+- Only updates heap accounting: `src.live_bytes -= size`, `dst.live_bytes += size`
+- The linear type system guarantees no other references exist in `src` after the move
+
+The LLVM emitter (`lib/tir/llvm_emit.ml`) chooses between these at compile time: when a `send` call's message argument has `v_lin = Lin` in the TIR, it emits `march_send_linear` (which uses the move path) instead of `march_send` (copy path).
+
+### MPSC Mailbox with Selective Receive (`march_mailbox_t` in `march_message.h`)
+
+A per-process lock-free mailbox:
+- **Producers** push to an atomic Treiber stack (`inbox`)
+- **Consumer** pops from a save queue first, then flips the inbox stack into delivery (FIFO) order
+- **Selective receive**: `march_mailbox_save(mb, msg)` parks a message for later without losing it; the save queue is checked before the inbox on the next `pop`
+
+```c
+march_mailbox_t mb;
+march_mailbox_init(&mb);
+
+/* Multi-producer push (any thread) */
+march_mailbox_push(&mb, msg);
+
+/* Single-consumer pop (owning process only) */
+void *m = march_mailbox_pop(&mb);
+
+/* Skip a message for now (selective receive) */
+march_mailbox_save(&mb, m);
+```
+
+### Semi-Space Copying Collector (`runtime/march_gc.h`, `runtime/march_gc.c`)
+
+When `march_heap_should_gc` returns true, `march_gc_collect` runs a two-pass semi-space collection:
+
+1. **Pass 1 (scan from-space)**: Walk all arena blocks.  For each object with `rc > 0`, copy to `to_heap`.  Record `(from_ptr → to_ptr)` in a forwarding table.
+2. **Pass 2 (fix up pointers)**: Walk `to_heap`.  For each pointer-sized field, look up the forwarding table and update if found.
+3. **Teardown**: Free all from-space blocks.  Install `to_heap` as the new heap.
+
+Properties:
+- **Per-process only**: never pauses other processes
+- **Only runs at safe points**: the owning process must be yielded (PROC_WAITING or similar) — Perceus RC ensures all live objects have `rc > 0`
+- **Exact pointer scan**: uses `n_fields` from `march_alloc_meta` to bound the field scan; the forwarding-table lookup guards against scalar field confusion
+
+### Linear Send Optimization in the LLVM Emitter
+
+`lib/tir/llvm_emit.ml` now has a special `EApp` case:
+
+```ocaml
+(* Send with linear message: emit march_send_linear (zero-copy move) *)
+| Tir.EApp (f, [actor_atom; msg_atom])
+  when f.Tir.v_name = "send"
+    && (match msg_atom with
+        | Tir.AVar v -> v.Tir.v_lin = Tir.Lin
+        | _ -> false) ->
+  (* emit march_send_linear instead of march_send *)
+```
+
+When the TIR typechecker has proved the message is linear, the emitted code calls `march_send_linear` rather than `march_send`.  This is a compile-time hint that propagates to the runtime's message-passing layer without any overhead at the call site.
+
+The LLVM preamble now also declares `march_msg_copy`, `march_msg_move`, and `march_process_alloc` for future use by the compiler backend when direct heap access is needed.
