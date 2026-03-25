@@ -122,5 +122,5 @@ void        *march_sched_try_recv(void);
 void         march_sched_wake(march_proc *target);
 
 /* Return the process with the given PID, or NULL if not found.
- * Linear scan — O(n) in number of live processes. */
+ * O(1) array lookup by PID. */
 march_proc  *march_sched_find(int64_t pid);
