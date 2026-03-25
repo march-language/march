@@ -1,0 +1,15 @@
+mod MathUtils do
+
+fn double(x : Int) : Int do
+  x * 2
+end
+
+fn square(x : Int) : Int do
+  x * x
+end
+
+fn add(x : Int, y : Int) : Int do
+  x + y
+end
+
+end

@@ -1,0 +1,48 @@
+mod TestCrossImport do
+
+-- Basic import: all public fns from Greeting come into scope unqualified
+import Greeting
+
+-- Selective import with dot-brace syntax
+import MathUtils.{double, square}
+
+-- Alias: MathUtils accessible as MU
+alias MathUtils as MU
+
+describe "import Greeting (all)" do
+  test "hello function available unqualified" do
+    assert (hello("World") == "Hello, World!")
+  end
+
+  test "goodbye function available unqualified" do
+    assert (goodbye("Alice") == "Goodbye, Alice!")
+  end
+end
+
+describe "import MathUtils.{double, square}" do
+  test "double available unqualified" do
+    assert (double(5) == 10)
+  end
+
+  test "square available unqualified" do
+    assert (square(4) == 16)
+  end
+end
+
+describe "alias MathUtils as MU" do
+  test "MU.double works as qualified call" do
+    assert (MU.double(3) == 6)
+  end
+
+  test "MU.add works as qualified call" do
+    assert (MU.add(10, 20) == 30)
+  end
+end
+
+describe "qualified access still works after import" do
+  test "Greeting.hello still accessible" do
+    assert (Greeting.hello("Bob") == "Hello, Bob!")
+  end
+end
+
+end

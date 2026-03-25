@@ -10696,6 +10696,51 @@ let test_parse_alias_bare () =
       ad.March_ast.Ast.alias_name.March_ast.Ast.txt
   | _ -> Alcotest.fail "expected DAlias"
 
+(* import Mod.{A, B} — Elixir dot-brace selective import *)
+let test_parse_import_dotbrace () =
+  let src = {|mod Test do
+    import Foo.{bar, Baz}
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DUse (ud, _)] ->
+    (match ud.March_ast.Ast.use_sel with
+     | March_ast.Ast.UseNames names ->
+       Alcotest.(check int) "2 names" 2 (List.length names);
+       let ns = List.map (fun n -> n.March_ast.Ast.txt) names in
+       Alcotest.(check bool) "has bar" true (List.mem "bar" ns);
+       Alcotest.(check bool) "has Baz" true (List.mem "Baz" ns)
+     | _ -> Alcotest.fail "expected UseNames")
+  | _ -> Alcotest.fail "expected DUse UseNames"
+
+(* alias Mod as Short — Elixir-style direct `as` keyword *)
+let test_parse_alias_as_kw () =
+  let src = {|mod Test do
+    alias Foo.Bar as FB
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DAlias (ad, _)] ->
+    Alcotest.(check string) "alias name" "FB"
+      ad.March_ast.Ast.alias_name.March_ast.Ast.txt;
+    Alcotest.(check int) "2 path segments" 2
+      (List.length ad.March_ast.Ast.alias_path)
+  | _ -> Alcotest.fail "expected DAlias"
+
+(* alias Mod as Short — single-segment path *)
+let test_parse_alias_single_as_kw () =
+  let src = {|mod Test do
+    alias Message as Msg
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DAlias (ad, _)] ->
+    Alcotest.(check string) "alias name" "Msg"
+      ad.March_ast.Ast.alias_name.March_ast.Ast.txt;
+    Alcotest.(check int) "1 path segment" 1
+      (List.length ad.March_ast.Ast.alias_path)
+  | _ -> Alcotest.fail "expected DAlias"
+
 (* pfn produces fn_vis = Private *)
 let test_parse_pfn_private () =
   let src = {|mod Test do
@@ -16071,11 +16116,14 @@ let () =
         Alcotest.test_case "lex alias"            `Quick test_lex_alias;
         Alcotest.test_case "lex p_fn"             `Quick test_lex_pfn;
         (* ── Parser ─────────────────────────────────────────────────── *)
-        Alcotest.test_case "parse import all"     `Quick test_parse_import_all;
-        Alcotest.test_case "parse import only"    `Quick test_parse_import_only;
-        Alcotest.test_case "parse import except"  `Quick test_parse_import_except;
-        Alcotest.test_case "parse alias as"       `Quick test_parse_alias_as;
-        Alcotest.test_case "parse alias bare"     `Quick test_parse_alias_bare;
+        Alcotest.test_case "parse import all"       `Quick test_parse_import_all;
+        Alcotest.test_case "parse import only"     `Quick test_parse_import_only;
+        Alcotest.test_case "parse import except"   `Quick test_parse_import_except;
+        Alcotest.test_case "parse import dotbrace" `Quick test_parse_import_dotbrace;
+        Alcotest.test_case "parse alias as"        `Quick test_parse_alias_as;
+        Alcotest.test_case "parse alias bare"      `Quick test_parse_alias_bare;
+        Alcotest.test_case "parse alias as kw"     `Quick test_parse_alias_as_kw;
+        Alcotest.test_case "parse alias single as kw" `Quick test_parse_alias_single_as_kw;
         Alcotest.test_case "parse pfn private"   `Quick test_parse_pfn_private;
         Alcotest.test_case "parse fn public"      `Quick test_parse_fn_public;
         (* ── Visibility ─────────────────────────────────────────────── *)
