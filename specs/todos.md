@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-25 (elm-style error message audit + improvement plan + LSP code actions P1.8, P2.10, P3.4)
+**Last updated:** 2026-03-25 (LSP Performance Insights plan)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -23,21 +23,11 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ## P2 — Important / Near-Term
 
-### Compiler: Error Messages (Elm-style)
+### LSP: Performance Insights
 
-- [ ] **Phase 1 — Infrastructure**: Centralize diagnostic rendering (`render_diagnostic`),
-  thread source text through pipeline, add `did_you_mean` utility, extend `diagnostic`
-  type with `suggestion` field. See `specs/plans/elm-style-errors-plan.md`.
-- [ ] **Phase 2 — P1 errors**: Unknown type (did-you-mean), unknown constructor (did-you-mean),
-  non-exhaustive match (show missing case as code), unused binding (show `_` fix), not-a-function
-  (name the value), wrong arg count (show which arg), unexpected character hints,
-  desugar `main+app` as proper diagnostic.
-- [ ] **Phase 3 — P2 errors**: Constructor arity, clause arity, field access, import errors
-  (show search path), circular import (show cycle), impl errors with examples.
-- [ ] **Phase 4 — P3 errors**: Session type errors (show protocol step), actor handler errors.
-- [ ] **Phase 5 — P4 errors**: Eval builtin type errors (name the function, show the type).
-- [ ] **Error snapshot tests**: Add `test/errors/` with `.march` + `.expected` pairs for
-  each improved message to prevent regression.
+- [ ] **LSP Performance Insights — Phase 1 (AST-level)** — Plan at `specs/plans/lsp-performance-insights-plan.md`. Three AST-only insights: (1) tail call optimization — detect non-tail recursive calls and explain the blocking operation with accumulator suggestion; (2) actor message copying — detect `send()` calls with non-linear heap values and warn about deep copy; (3) closure capture size — hint when a lambda closes over 3+ values. Add `perf_insight` type and `perf_insights` field to `Analysis.t`. Wire into hover and diagnostics.
+- [ ] **LSP Performance Insights — Phase 2 (AST heuristics)** — Three heuristic insights: (1) memory reuse opportunities via `refs_map` use-count analysis; (2) indirect call detection when callee is a function parameter or returned closure; (3) allocation in recursive function arms. Add inlay hints with `"march.inlayHints.performanceAnnotations"` config key.
+- [ ] **LSP Performance Insights — Phase 3 (async TIR pipeline)** — Run `lower → mono → defun → known_call → perceus → escape` asynchronously in the LSP. Surface stack vs heap allocation via `EStackAlloc` detection, precise reuse via `EReuse`, and confirmed direct calls. Push incremental diagnostics via `publishDiagnostics` when TIR completes. Add code lens provider for per-function performance summaries.
 
 ### Compiler: Type System
 
