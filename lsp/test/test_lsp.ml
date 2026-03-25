@@ -2249,6 +2249,258 @@ end
   Alcotest.(check bool) "no batch action for single binding" false has_batch
 
 (* ------------------------------------------------------------------ *)
+(* 24. Code actions: naming convention fix (P2.8)                     *)
+(* ------------------------------------------------------------------ *)
+
+let test_naming_violation_camel_fn_detected () =
+  let src = {|
+mod M do
+  fn myFunction(x: Int): Int do
+    x
+  end
+end
+|} in
+  let a = analyse src in
+  Alcotest.(check bool) "camelCase fn in naming_violations" true
+    (List.exists (fun (nv : An.naming_violation) -> nv.nv_name = "myFunction")
+       a.An.naming_violations)
+
+let test_naming_violation_suggested_name () =
+  let src = {|
+mod M do
+  fn myFunction(x: Int): Int do
+    x
+  end
+end
+|} in
+  let a = analyse src in
+  match List.find_opt
+    (fun (nv : An.naming_violation) -> nv.nv_name = "myFunction")
+    a.An.naming_violations
+  with
+  | None -> Alcotest.fail "expected naming violation for myFunction"
+  | Some nv ->
+    Alcotest.(check string) "suggested name is my_function" "my_function" nv.nv_suggested
+
+let test_naming_violation_deeply_nested_detected () =
+  (* Violations are detected inside nested mod blocks *)
+  let src = {|
+mod M do
+  mod Inner do
+    fn outerFn(x: Int): Int do
+      x
+    end
+  end
+end
+|} in
+  let a = analyse src in
+  Alcotest.(check bool) "camelCase fn inside nested mod detected" true
+    (List.exists (fun (nv : An.naming_violation) -> nv.nv_name = "outerFn")
+       a.An.naming_violations)
+
+let test_naming_violation_no_violation_for_snake_fn () =
+  let src = {|
+mod M do
+  fn already_good(x: Int): Int do
+    x
+  end
+end
+|} in
+  let a = analyse src in
+  Alcotest.(check bool) "no naming violation for snake_case fn" false
+    (List.exists (fun (nv : An.naming_violation) -> nv.nv_name = "already_good")
+       a.An.naming_violations)
+
+let test_naming_action_offered_for_camel_fn () =
+  let src = {|
+mod M do
+  fn myFunction(x: Int): Int do
+    x
+  end
+end
+|} in
+  let a   = analyse src in
+  let (line, col) = pos_of src "myFunction" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  Alcotest.(check bool) "rename action offered for camelCase fn" true
+    (List.exists (fun (act : Lsp.Types.CodeAction.t) ->
+         let t = act.title in
+         String.length t >= 6 && String.sub t 0 6 = "Rename")
+       acts)
+
+let test_naming_action_edit_uses_snake_case () =
+  let src = {|
+mod M do
+  fn myFunction(x: Int): Int do
+    x
+  end
+end
+|} in
+  let a   = analyse src in
+  let (line, col) = pos_of src "myFunction" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  let rename_act = List.find_opt (fun (act : Lsp.Types.CodeAction.t) ->
+      let t = act.title in
+      String.length t >= 6 && String.sub t 0 6 = "Rename") acts in
+  match rename_act with
+  | None -> Alcotest.fail "no rename action found"
+  | Some act ->
+    let has_snake = match act.edit with
+      | None -> false
+      | Some we ->
+        let edits = match we.changes with
+          | None -> []
+          | Some changes -> List.concat_map snd changes
+        in
+        List.exists (fun (e : Lsp.Types.TextEdit.t) ->
+            e.newText = "my_function") edits
+    in
+    Alcotest.(check bool) "edit contains my_function" true has_snake
+
+let test_naming_action_absent_for_snake_fn () =
+  let src = {|
+mod M do
+  fn good_name(x: Int): Int do
+    x
+  end
+end
+|} in
+  let a   = analyse src in
+  let (line, col) = pos_of src "good_name" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  Alcotest.(check bool) "no rename action for already-snake fn" false
+    (List.exists (fun (act : Lsp.Types.CodeAction.t) ->
+         let t = act.title in
+         String.length t >= 6 && String.sub t 0 6 = "Rename")
+       acts)
+
+(* ------------------------------------------------------------------ *)
+(* 25. Code actions: De Morgan's law (P3.10)                          *)
+(* ------------------------------------------------------------------ *)
+
+let test_demorgan_not_and_detected () =
+  let src = {|
+mod M do
+  fn check(a: Bool, b: Bool): Bool do
+    !(a && b)
+  end
+end
+|} in
+  let a = analyse src in
+  Alcotest.(check bool) "!(a && b) detected as De Morgan site" true
+    (List.exists (fun (dm : An.demorgan_site) ->
+         dm.dm_form = `NegatedBinop "&&") a.An.demorgan_sites)
+
+let test_demorgan_not_or_detected () =
+  let src = {|
+mod M do
+  fn check(a: Bool, b: Bool): Bool do
+    !(a || b)
+  end
+end
+|} in
+  let a = analyse src in
+  Alcotest.(check bool) "!(a || b) detected as De Morgan site" true
+    (List.exists (fun (dm : An.demorgan_site) ->
+         dm.dm_form = `NegatedBinop "||") a.An.demorgan_sites)
+
+let test_demorgan_pair_negs_detected () =
+  let src = {|
+mod M do
+  fn check(a: Bool, b: Bool): Bool do
+    !a && !b
+  end
+end
+|} in
+  let a = analyse src in
+  Alcotest.(check bool) "!a && !b detected as De Morgan site" true
+    (List.exists (fun (dm : An.demorgan_site) ->
+         dm.dm_form = `PairOfNegs "&&") a.An.demorgan_sites)
+
+let test_demorgan_action_offered_for_not_and () =
+  let src = {|
+mod M do
+  fn check(a: Bool, b: Bool): Bool do
+    !(a && b)
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "!(a && b)" in
+  let acts = An.code_actions_at a ~line ~character:(col + 1) () in
+  Alcotest.(check bool) "De Morgan action offered for !(a && b)" true
+    (List.exists (fun (act : Lsp.Types.CodeAction.t) ->
+         let t = act.title in
+         String.length t > 10 && String.sub t 0 5 = "Apply")
+       acts)
+
+let test_demorgan_action_rewrite_not_and () =
+  let src = {|
+mod M do
+  fn check(a: Bool, b: Bool): Bool do
+    !(a && b)
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "!(a && b)" in
+  let acts = An.code_actions_at a ~line ~character:(col + 1) () in
+  let dm_act = List.find_opt (fun (act : Lsp.Types.CodeAction.t) ->
+      let t = act.title in
+      String.length t > 10 && String.sub t 0 5 = "Apply") acts in
+  match dm_act with
+  | None -> Alcotest.fail "no De Morgan action found"
+  | Some act ->
+    let new_text = match act.edit with
+      | None -> ""
+      | Some we ->
+        let edits = match we.changes with
+          | None -> []
+          | Some changes -> List.concat_map snd changes
+        in
+        (match edits with e :: _ -> e.newText | [] -> "")
+    in
+    let contains_or =
+      let n = String.length new_text in
+      let found = ref false in
+      for i = 0 to n - 2 do
+        if new_text.[i] = '|' && new_text.[i + 1] = '|' then found := true
+      done;
+      !found
+    in
+    Alcotest.(check bool) "rewrite contains '||'" true
+      (String.length new_text > 0 && contains_or)
+
+let test_demorgan_action_rewrite_pair_negs () =
+  let src = {|
+mod M do
+  fn check(a: Bool, b: Bool): Bool do
+    !a && !b
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "!a && !b" in
+  let acts = An.code_actions_at a ~line ~character:(col + 1) () in
+  let dm_act = List.find_opt (fun (act : Lsp.Types.CodeAction.t) ->
+      let t = act.title in
+      String.length t > 10 && String.sub t 0 5 = "Apply") acts in
+  match dm_act with
+  | None -> Alcotest.fail "no De Morgan action found for !a && !b"
+  | Some act ->
+    let new_text = match act.edit with
+      | None -> ""
+      | Some we ->
+        let edits = match we.changes with
+          | None -> []
+          | Some changes -> List.concat_map snd changes
+        in
+        (match edits with e :: _ -> e.newText | [] -> "")
+    in
+    Alcotest.(check bool) "rewrite is !(... || ...)" true
+      (String.length new_text > 2 && new_text.[0] = '!')
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -2421,5 +2673,22 @@ let () =
     "p1.7: batch annotation", [
       "offered for 2+ bindings",        `Quick, test_batch_annotation_offered_for_multiple_bindings;
       "not offered for single binding", `Quick, test_batch_annotation_not_offered_for_single_binding;
+    ];
+    "code actions: naming convention (P2.8)", [
+      "camelCase fn detected",                    `Quick, test_naming_violation_camel_fn_detected;
+      "suggested name is snake_case",             `Quick, test_naming_violation_suggested_name;
+      "detects fn inside nested mod",             `Quick, test_naming_violation_deeply_nested_detected;
+      "no violation for good snake_case fn",      `Quick, test_naming_violation_no_violation_for_snake_fn;
+      "rename action offered for camelCase fn",   `Quick, test_naming_action_offered_for_camel_fn;
+      "rename edit uses snake_case name",         `Quick, test_naming_action_edit_uses_snake_case;
+      "no action for already-snake fn",           `Quick, test_naming_action_absent_for_snake_fn;
+    ];
+    "code actions: De Morgan (P3.10)", [
+      "!(a && b) detected",                       `Quick, test_demorgan_not_and_detected;
+      "!(a || b) detected",                       `Quick, test_demorgan_not_or_detected;
+      "!a && !b detected",                        `Quick, test_demorgan_pair_negs_detected;
+      "action offered for !(a && b)",             `Quick, test_demorgan_action_offered_for_not_and;
+      "!(a && b) rewrite contains '||'",          `Quick, test_demorgan_action_rewrite_not_and;
+      "!a && !b rewrite is !(... || ...)",        `Quick, test_demorgan_action_rewrite_pair_negs;
     ];
   ]

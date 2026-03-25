@@ -50,6 +50,25 @@ type consumption = {
   con_uses : Ast.span list;
 }
 
+(** A naming convention violation.
+    Functions should be snake_case; types should be PascalCase. *)
+type naming_violation = {
+  nv_name      : string;
+  nv_suggested : string;
+  nv_span      : Ast.span;
+  nv_kind      : [`Function | `Type];
+}
+
+(** A De Morgan rewrite opportunity. *)
+type demorgan_site = {
+  dm_span       : Ast.span;  (** Span of the whole expression *)
+  dm_form       : [`NegatedBinop of string | `PairOfNegs of string];
+  (** [`NegatedBinop op] = !(a op b); offer !a op' !b  (op' = dual of op)
+      [`PairOfNegs  op] = !a op !b;  offer !(a op' b) *)
+  dm_left_span  : Ast.span;  (** Span of the left operand a *)
+  dm_right_span : Ast.span;  (** Span of the right operand b *)
+}
+
 (** Full analysis result for one document. *)
 type t = {
   src         : string;
@@ -93,6 +112,10 @@ type t = {
   (** Private function names that are never reachable from any public root. *)
   type_matches : (string * match_site list) list;
   (** All match sites grouped by matched type name (for bulk file-scope fixes). *)
+  naming_violations : naming_violation list;
+  (** Functions/types that violate the naming convention (camelCase fn, snake_case type). *)
+  demorgan_sites   : demorgan_site list;
+  (** Sites eligible for De Morgan rewriting: !(a&&b), !(a||b), !a&&!b, !a||!b. *)
 }
 
 (* ------------------------------------------------------------------ *)
@@ -629,6 +652,52 @@ let collect_annotation_sites (m : Ast.module_) : annotation_site list =
   !sites
 
 (* ------------------------------------------------------------------ *)
+(* Naming convention helpers (P2.8)                                   *)
+(* ------------------------------------------------------------------ *)
+
+(** True if [name] has a lowercase letter immediately followed by uppercase — camelCase. *)
+let is_camel_case name =
+  let n = String.length name in
+  let rec check i =
+    if i + 1 >= n then false
+    else
+      let lo = Char.code name.[i] and hi = Char.code name.[i + 1] in
+      if lo >= Char.code 'a' && lo <= Char.code 'z'
+         && hi >= Char.code 'A' && hi <= Char.code 'Z'
+      then true
+      else check (i + 1)
+  in
+  check 0
+
+(** Convert camelCase to snake_case. *)
+let camel_to_snake name =
+  let buf = Buffer.create (String.length name + 4) in
+  String.iteri (fun i c ->
+    if i > 0
+       && Char.code c >= Char.code 'A' && Char.code c <= Char.code 'Z'
+    then begin
+      Buffer.add_char buf '_';
+      Buffer.add_char buf (Char.lowercase_ascii c)
+    end else
+      Buffer.add_char buf (Char.lowercase_ascii c)
+  ) name;
+  Buffer.contents buf
+
+(** True if [name] starts with a lowercase letter — not PascalCase (for type names). *)
+let is_non_pascal name =
+  String.length name > 0 &&
+  Char.code name.[0] >= Char.code 'a' && Char.code name.[0] <= Char.code 'z'
+
+(** Convert snake_case (or lowercase) to PascalCase. *)
+let to_pascal name =
+  let parts = String.split_on_char '_' name in
+  String.concat "" (List.map (fun p ->
+    if String.length p = 0 then ""
+    else String.make 1 (Char.uppercase_ascii p.[0])
+         ^ String.sub p 1 (String.length p - 1)
+  ) parts)
+
+(* ------------------------------------------------------------------ *)
 (* Main analysis entry point                                           *)
 (* ------------------------------------------------------------------ *)
 
@@ -668,8 +737,10 @@ let analyse ~filename ~src : t =
       ctor_arities     = [];
       fold_ranges      = [];
       annotation_sites = [];
-      unused_fns       = [];
-      type_matches     = [] }
+      unused_fns        = [];
+      type_matches      = [];
+      naming_violations = [];
+      demorgan_sites    = [] }
   in
   let make_parse_diag pos msg =
     let sp : Ast.span = {
@@ -1109,6 +1180,93 @@ let analyse ~filename ~src : t =
                 ())
         ) unused_fns
     in
+    (* ---- Naming convention violations (P2.8) ---- *)
+    let naming_acc = ref [] in
+    let rec collect_naming_decl (d : Ast.decl) =
+      match d with
+      | Ast.DFn (fn, _) ->
+        let name = fn.fn_name.txt in
+        if is_camel_case name then
+          naming_acc := { nv_name      = name;
+                          nv_suggested = camel_to_snake name;
+                          nv_span      = fn.fn_name.span;
+                          nv_kind      = `Function } :: !naming_acc
+      | Ast.DType (_, _n, _, _, _) -> ()
+        (* Type names must start with uppercase (UPPER_IDENT) per the parser,
+           so non-PascalCase type names cannot appear in valid March source. *)
+      | Ast.DMod (_, _, decls, _) -> List.iter collect_naming_decl decls
+      | _ -> ()
+    in
+    List.iter collect_naming_decl user_decls;
+    let naming_violations = !naming_acc in
+    (* ---- De Morgan rewrite sites (P3.10) ---- *)
+    let demorgan_acc = ref [] in
+    let rec collect_dm_expr (e : Ast.expr) =
+      match e with
+      (* !(a && b) or !(a || b) *)
+      | Ast.EApp (Ast.EVar not_n,
+                  [Ast.EApp (Ast.EVar op_n, [left; right], _)],
+                  outer_sp)
+        when not_n.txt = "not" && (op_n.txt = "&&" || op_n.txt = "||") ->
+        demorgan_acc := {
+          dm_span       = outer_sp;
+          dm_form       = `NegatedBinop op_n.txt;
+          dm_left_span  = span_of_expr left;
+          dm_right_span = span_of_expr right;
+        } :: !demorgan_acc;
+        collect_dm_expr left;
+        collect_dm_expr right
+      (* !a && !b or !a || !b *)
+      | Ast.EApp (Ast.EVar op_n,
+                  [Ast.EApp (Ast.EVar not1, [left],  _);
+                   Ast.EApp (Ast.EVar not2, [right], _)],
+                  outer_sp)
+        when (op_n.txt = "&&" || op_n.txt = "||")
+             && not1.txt = "not" && not2.txt = "not" ->
+        demorgan_acc := {
+          dm_span       = outer_sp;
+          dm_form       = `PairOfNegs op_n.txt;
+          dm_left_span  = span_of_expr left;
+          dm_right_span = span_of_expr right;
+        } :: !demorgan_acc;
+        collect_dm_expr left;
+        collect_dm_expr right
+      (* recurse into sub-expressions *)
+      | Ast.EApp (f, args, _) ->
+        collect_dm_expr f; List.iter collect_dm_expr args
+      | Ast.EBlock (es, _) -> List.iter collect_dm_expr es
+      | Ast.ELet (b, _) -> collect_dm_expr b.bind_expr
+      | Ast.ELetFn (_, _, _, body, _) | Ast.ELam (_, body, _) ->
+        collect_dm_expr body
+      | Ast.EIf (c, t, f, _) ->
+        collect_dm_expr c; collect_dm_expr t; collect_dm_expr f
+      | Ast.EMatch (subj, brs, _) ->
+        collect_dm_expr subj;
+        List.iter (fun (br : Ast.branch) -> collect_dm_expr br.branch_body) brs
+      | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) ->
+        collect_dm_expr a; collect_dm_expr b
+      | Ast.ETuple (es, _) | Ast.ECon (_, es, _) | Ast.EAtom (_, es, _) ->
+        List.iter collect_dm_expr es
+      | Ast.ERecord (fs, _) ->
+        List.iter (fun (_, e2) -> collect_dm_expr e2) fs
+      | Ast.ERecordUpdate (e2, fs, _) ->
+        collect_dm_expr e2; List.iter (fun (_, e3) -> collect_dm_expr e3) fs
+      | Ast.EField (e2, _, _) | Ast.EAnnot (e2, _, _)
+      | Ast.EDbg (Some e2, _) | Ast.ESpawn (e2, _) | Ast.EAssert (e2, _) ->
+        collect_dm_expr e2
+      | _ -> ()
+    in
+    let rec collect_dm_decl (d : Ast.decl) =
+      match d with
+      | Ast.DFn (fn, _) ->
+        List.iter (fun (cl : Ast.fn_clause) ->
+            collect_dm_expr cl.fc_body) fn.fn_clauses
+      | Ast.DLet (_, b, _) -> collect_dm_expr b.bind_expr
+      | Ast.DMod (_, _, decls, _) -> List.iter collect_dm_decl decls
+      | _ -> ()
+    in
+    List.iter collect_dm_decl user_decls;
+    let demorgan_sites = !demorgan_acc in
     let diags =
       (Err.sorted errors |> List.filter_map (diag_to_lsp ~filename))
       @ !dead_code_diags
@@ -1133,7 +1291,9 @@ let analyse ~filename ~src : t =
       fold_ranges      = collect_fold_ranges raw_ast;
       annotation_sites = collect_annotation_sites raw_ast;
       unused_fns;
-      type_matches }
+      type_matches;
+      naming_violations;
+      demorgan_sites }
 
 (* ------------------------------------------------------------------ *)
 (* Query helpers                                                       *)
@@ -2322,9 +2482,82 @@ let code_actions_at (a : t) ~line ~character
   in
   (* ---- Registry-driven fixes from diagnostics context ---- *)
   let registry_actions = apply_fix_registry a diagnostics in
+  (* ---- Naming convention rename actions (P2.8) ---- *)
+  let naming_actions =
+    List.filter_map (fun (nv : naming_violation) ->
+        if not (Pos.span_contains nv.nv_span ~line ~character) then None
+        else begin
+          let def_line = nv.nv_span.Ast.start_line - 1 in
+          let def_char = nv.nv_span.Ast.start_col in
+          let edits = rename_at a ~line:def_line ~character:def_char
+                        ~new_name:nv.nv_suggested in
+          if edits = [] then None
+          else begin
+            let uri = DocumentUri.of_path a.filename in
+            let we  = WorkspaceEdit.create ~changes:[(uri, edits)] () in
+            let kind_str = match nv.nv_kind with
+              | `Function -> "function"
+              | `Type -> "type"
+            in
+            Some (CodeAction.create
+              ~title:(Printf.sprintf "Rename %s to `%s`" kind_str nv.nv_suggested)
+              ~kind:CodeActionKind.RefactorRewrite
+              ~edit:we
+              ())
+          end
+        end
+      ) a.naming_violations
+  in
+  (* ---- De Morgan rewrite actions (P3.10) ---- *)
+  let src_slice (sp : Ast.span) =
+    let s = offset_of_pos a.src (sp.Ast.start_line - 1) sp.Ast.start_col in
+    let e = offset_of_pos a.src (sp.Ast.end_line   - 1) sp.Ast.end_col in
+    let n = String.length a.src in
+    if s >= 0 && e > s && e <= n then String.sub a.src s (e - s) else ""
+  in
+  let demorgan_actions =
+    List.filter_map (fun (dm : demorgan_site) ->
+        if not (Pos.span_contains dm.dm_span ~line ~character) then None
+        else begin
+          let ls = src_slice dm.dm_left_span in
+          let rs = src_slice dm.dm_right_span in
+          if ls = "" || rs = "" then None
+          else begin
+            let (title, new_text) = match dm.dm_form with
+              | `NegatedBinop "&&" ->
+                ("Apply De Morgan: !(a && b) \xe2\x86\x92 !(a) || !(b)",
+                 Printf.sprintf "!(%s) || !(%s)" ls rs)
+              | `NegatedBinop "||" ->
+                ("Apply De Morgan: !(a || b) \xe2\x86\x92 !(a) && !(b)",
+                 Printf.sprintf "!(%s) && !(%s)" ls rs)
+              | `PairOfNegs "&&" ->
+                ("Apply De Morgan: !a && !b \xe2\x86\x92 !(a || b)",
+                 Printf.sprintf "!(%s || %s)" ls rs)
+              | `PairOfNegs "||" ->
+                ("Apply De Morgan: !a || !b \xe2\x86\x92 !(a && b)",
+                 Printf.sprintf "!(%s && %s)" ls rs)
+              | _ -> ("", "")
+            in
+            if title = "" then None
+            else begin
+              let range = Pos.span_to_lsp_range dm.dm_span in
+              let edit  = TextEdit.create ~range ~newText:new_text in
+              let uri   = DocumentUri.of_path a.filename in
+              let we    = WorkspaceEdit.create ~changes:[(uri, [edit])] () in
+              Some (CodeAction.create
+                ~title
+                ~kind:CodeActionKind.RefactorRewrite
+                ~edit:we
+                ())
+            end
+          end
+        end
+      ) a.demorgan_sites
+  in
   make_linear_actions @ exhaustion_actions @ annotation_actions
   @ batch_annotation_action @ unused_binding_actions @ unused_import_actions
   @ wrap_inspect_actions @ remove_inspect_actions
+  @ naming_actions @ demorgan_actions
   @ registry_actions
 
 let actor_info_at (a : t) ~line ~character : string option =
