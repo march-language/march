@@ -2,6 +2,24 @@
  (name test_march)
  (libraries march_lexer march_parser march_ast march_desugar march_typecheck march_errors march_effects march_eval march_tir march_repl march_debug march_scheduler march_cas alcotest str unix))
 
+; ── C scheduler tests ────────────────────────────────────────────────────
+; Compile test_scheduler.c together with the C runtime scheduler and run it
+; as part of `dune runtest`.  Uses %{cc} (the OCaml-configured C compiler).
+(rule
+ (targets test_scheduler_runner)
+ (deps    test_scheduler.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_scheduler.c ../runtime/march_scheduler.c)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_runner))
+ (action  (run ./test_scheduler_runner)))
+
 (test
  (name test_fmt)
  (libraries march_lexer march_parser march_ast march_format alcotest))
