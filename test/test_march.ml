@@ -5071,6 +5071,67 @@ let test_mutual_tco_self_tco_unaffected () =
   Alcotest.(check bool) "self TCO still works: back-edge branch emitted" true
     (ir_contains ir "br label %tco_loop")
 
+(* ── Phase 4: Reduction Counting in Compiled Code ─────────────────────── *)
+
+(** Non-leaf, non-TCO function: reduction check IR must appear. *)
+let test_phase4_nonleaf_has_reduction_check () =
+  let ir = emit_tco_ir {|mod Test do
+    fn fib(n : Int) : Int do
+      if n <= 1 then n
+      else fib(n - 1) + fib(n - 2)
+    end
+    fn main() : Unit do println(int_to_string(fib(10))) end
+  end|} in
+  Alcotest.(check bool) "non-leaf fib: @march_tls_reductions loaded" true
+    (ir_contains ir "@march_tls_reductions");
+  Alcotest.(check bool) "non-leaf fib: march_yield_from_compiled called" true
+    (ir_contains ir "@march_yield_from_compiled");
+  Alcotest.(check bool) "non-leaf fib: sched_yield block emitted" true
+    (ir_contains ir "sched_yield");
+  Alcotest.(check bool) "non-leaf fib: sched_cont block emitted" true
+    (ir_contains ir "sched_cont")
+
+(** All-leaf module (only builtin calls): NO reduction check anywhere.
+    - square(n) = n * n        → only builtin `*`  → leaf
+    - main()    = println(42)  → only builtins      → leaf
+    Neither function should emit the icmp/br reduction check. *)
+let test_phase4_leaf_fn_no_reduction_check () =
+  let ir = emit_tco_ir {|mod Test do
+    fn square(n : Int) : Int do n * n end
+    fn main() : Unit do println(int_to_string(42)) end
+  end|} in
+  (* No non-leaf functions → no reduction check IR anywhere in the output. *)
+  Alcotest.(check bool) "all-leaf module: no icmp reduction check" false
+    (ir_contains ir "icmp sle i64")
+
+(** TCO function: reduction check must be inside the tco_loop block. *)
+let test_phase4_tco_fn_reduction_in_loop () =
+  let ir = emit_tco_ir {|mod Test do
+    @[no_warn_recursion]
+    fn countdown(n : Int) : Int do
+      if n == 0 then 0 else countdown(n - 1)
+    end
+    fn main() : Unit do println(int_to_string(countdown(100))) end
+  end|} in
+  Alcotest.(check bool) "TCO countdown: tco_loop emitted" true
+    (ir_contains ir "tco_loop");
+  Alcotest.(check bool) "TCO countdown: reduction check in loop" true
+    (ir_contains ir "@march_tls_reductions");
+  Alcotest.(check bool) "TCO countdown: yield call present" true
+    (ir_contains ir "@march_yield_from_compiled")
+
+(** Non-recursive function that calls another user function: non-leaf,
+    so it must get a reduction check even though it has no loop. *)
+let test_phase4_nonrecursive_caller_has_check () =
+  let ir = emit_tco_ir {|mod Test do
+    fn double(n : Int) : Int do n + n end
+    fn apply_double(n : Int) : Int do double(n) end
+    fn main() : Unit do println(int_to_string(apply_double(3))) end
+  end|} in
+  (* apply_double calls double (non-builtin) → non-leaf → check emitted. *)
+  Alcotest.(check bool) "apply_double: reduction check present" true
+    (ir_contains ir "@march_tls_reductions")
+
 let test_perceus_preserves_fn_count () =
   (* After perceus, user function count is unchanged.
      The module will also contain 15 builtin interface impl functions
@@ -16259,6 +16320,12 @@ let () =
           Alcotest.test_case "state machine mutual TCO" `Quick test_mutual_tco_state_machine;
           Alcotest.test_case "non-tail mutual: no loop" `Quick test_mutual_tco_non_tail_no_loop;
           Alcotest.test_case "self TCO unaffected"      `Quick test_mutual_tco_self_tco_unaffected;
+        ] );
+      ( "phase4_reduction_codegen", [
+          Alcotest.test_case "non-leaf has reduction check"      `Quick test_phase4_nonleaf_has_reduction_check;
+          Alcotest.test_case "leaf fn no reduction check"        `Quick test_phase4_leaf_fn_no_reduction_check;
+          Alcotest.test_case "TCO fn reduction check in loop"    `Quick test_phase4_tco_fn_reduction_in_loop;
+          Alcotest.test_case "non-recursive caller has check"    `Quick test_phase4_nonrecursive_caller_has_check;
         ] );
       "multiline", [
         Alcotest.test_case "depth zero" `Quick test_multiline_depth_zero;
