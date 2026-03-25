@@ -321,16 +321,38 @@ end
 
 ---
 
-### P3 — Mutual TCO (Trampoline / Shared Loop)
+### P3 — Mutual TCO (Shared Loop with Dispatch)  ✅
 
-**Motivation:** Self-TCO is already implemented. Mutually recursive tail calls (`f` tail-calls `g` which tail-calls `f`) require a different strategy: either a trampoline (return a thunk, loop in a driver) or a shared loop with a "next function" discriminant.
+**Location:** `lib/tir/llvm_emit.ml` (`find_mutual_tco_groups`, `emit_mutual_tco_group`)
+**Stage:** LLVM IR emission
 
-**Why it matters for March:** Mutual recursion is common in state machines and parser combinators. Without mutual TCO, these blow the stack on deep inputs.
+Extends self-TCO to handle mutually recursive tail calls. When a group of ≥ 2 functions form a strongly connected component in the tail-call graph and all cross-group calls are in tail position, the group is compiled into a single combined dispatch function with a shared loop.
 
-**Effort:** High | **Impact:** Medium (niche but correctness-critical when hit)
+**How it works:**
+1. **Detection (Tarjan's SCC):** `tarjan_sccs` builds the tail-call adjacency graph and finds SCCs. `find_mutual_tco_groups` filters SCCs where (a) all cross-group calls are tail calls and (b) all functions share the same LLVM return type.
+2. **Combined function:** `emit_mutual_tco_group` emits one `@__mutco_f_g__` function with an extra `i64 %__tag__.arg` dispatch parameter. Each original function's parameters get their own alloca slots. The loop header switches on the tag to dispatch to each function's body.
+3. **Back-edge:** The `EApp` handler in `emit_expr` detects calls to group members and emits: update dispatch tag → update target's param slots → `br label %mutual_loop`.
+4. **Wrapper functions:** Each original function name emits as a thin wrapper that calls the combined function with the appropriate tag and `undef` for the other functions' params.
+
+**Example IR for `even/odd`:**
+```llvm
+define i64 @__mutco_even_odd__(i64 %__tag__.arg, i64 %even__n.arg, i64 %odd__n.arg) {
+mutual_loop:
+  switch i64 %tag_v [ i64 0, label %case_even   i64 1, label %case_odd ]
+case_even:   ; if n==0: ret 1; else store 1/tag, store n-1/odd_slot; br mutual_loop
+case_odd:    ; if n==0: ret 0; else store 0/tag, store n-1/even_slot; br mutual_loop
+}
+define i64 @even(i64 %n.arg) { %r = call i64 @__mutco_even_odd__(0, %n.arg, undef); ret }
+define i64 @odd(i64 %n.arg)  { %r = call i64 @__mutco_even_odd__(1, undef,  %n.arg); ret }
+```
+
+**Why it matters for March:** Mutual recursion is common in state machines, parser combinators, and parity-style algorithms. Without mutual TCO, these blow the stack on deep inputs. With it, even 10M-iteration mutual loops run in O(1) stack space.
+
+**Effort:** High (done) | **Impact:** Medium (niche but correctness-critical when hit)
 **Dependencies:** Self-TCO; Mono (functions must be monomorphic to share a loop)
-**Stage:** LLVM IR emission (extends `emit_fn` logic)
-**Status:** Planned
+**Tests:** `mutual_tco_codegen` group in `test/test_march.ml` (5 tests)
+**Benchmark:** `bench/mutual_recursion.march`
+**Status:** Implemented
 
 ---
 
@@ -535,5 +557,6 @@ Each pass sets `~changed` when it modifies the TIR. The loop terminates when no 
 | `bench/list_ops.march` | Stream fusion, inlining, fold/simplify |
 | `bench/binary_trees.march` | Allocation, GC pressure, escape |
 | `bench/dataframe_bench.march` | Map/filter chains, nullable joins |
+| `bench/mutual_recursion.march` | Mutual TCO (even/odd, state machine, collatz-like) |
 
 After modifying any optimization pass, run the corresponding benchmark(s) to catch regressions. The cross-language benchmark suite (`bench/run_benchmarks.sh`) compares against OCaml, Rust, and Elixir.

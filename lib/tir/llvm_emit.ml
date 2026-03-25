@@ -68,6 +68,17 @@ type ctx = {
   mutable tco_fn_name   : string option;
   mutable tco_loop_label : string;
   mutable tco_param_info : (string * string * string) list;
+  (* Mutual TCO state — set by emit_mutual_tco_group for the combined function.
+     mutual_tco_group: names of all functions in the current mutual group (empty = not active).
+     mutual_tco_tag_slot: alloca slot name for the dispatch tag.
+     mutual_tco_loop_label: label of the shared loop header.
+     mutual_tco_fn_params: fn_name -> [(tir_var_name, alloca_slot, llvm_ty)] for each function's params.
+     mutual_tco_fn_tags: fn_name -> dispatch integer tag. *)
+  mutable mutual_tco_group      : string list;
+  mutable mutual_tco_tag_slot   : string;
+  mutable mutual_tco_loop_label : string;
+  mutable mutual_tco_fn_params  : (string * (string * string * string) list) list;
+  mutable mutual_tco_fn_tags    : (string * int) list;
 }
 
 let make_ctx ?(fast_math=false) () = {
@@ -91,6 +102,11 @@ let make_ctx ?(fast_math=false) () = {
   tco_fn_name    = None;
   tco_loop_label = "";
   tco_param_info = [];
+  mutual_tco_group      = [];
+  mutual_tco_tag_slot   = "";
+  mutual_tco_loop_label = "";
+  mutual_tco_fn_params  = [];
+  mutual_tco_fn_tags    = [];
 }
 
 (* ── Helpers ─────────────────────────────────────────────────────────── *)
@@ -1061,6 +1077,42 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
        emit ctx (Printf.sprintf "%s = call ptr @march_value_to_string(ptr %s)" r v);
        ("ptr", r))
 
+  (* ── Mutual TCO: tail call to another member of the current group ──── *)
+  (* When we are inside emit_mutual_tco_group and the call target is any
+     function in the mutual group (including self), we redirect it to the
+     shared loop header by: updating the dispatch tag + the target's param
+     slots, then branching back to mutual_loop. *)
+  | Tir.EApp (f, args)
+    when ctx.mutual_tco_group <> []
+         && List.mem f.Tir.v_name ctx.mutual_tco_group ->
+    let target     = f.Tir.v_name in
+    let target_tag = List.assoc target ctx.mutual_tco_fn_tags in
+    let target_slots =
+      try List.assoc target ctx.mutual_tco_fn_params
+      with Not_found -> [] in
+    (* 1. Evaluate all new argument values first (read before write). *)
+    let new_vals = List.map2 (fun (_vname, _slot, param_ty) a ->
+        let (arg_ty, arg_val) = emit_atom ctx a in
+        coerce ctx arg_ty arg_val param_ty
+      ) target_slots args in
+    (* 2. Update the dispatch tag. *)
+    emit ctx (Printf.sprintf "store i64 %d, ptr %%%s.addr"
+      target_tag ctx.mutual_tco_tag_slot);
+    (* 3. Store new argument values into the target function's param slots. *)
+    List.iter2 (fun (_vname, slot, param_ty) new_v ->
+        emit ctx (Printf.sprintf "store %s %s, ptr %%%s.addr"
+          param_ty new_v slot)
+      ) target_slots new_vals;
+    (* 4. Branch back to the shared loop header. *)
+    emit_term ctx (Printf.sprintf "br label %%%s" ctx.mutual_tco_loop_label);
+    (* 5. Open a dead continuation block for syntactic validity. *)
+    emit_label ctx (fresh_block ctx "mutco_cont");
+    let dummy_ty = llvm_ret_ty ctx.ret_ty in
+    (match dummy_ty with
+     | "double" -> ("double", "0x0000000000000000")
+     | "void"   -> ("i64",    "0")
+     | _        -> ("i64",    "0"))
+
   (* ── TCO self-call: back-edge instead of a call instruction ────────── *)
   (* When TCO is active for the current function and this EApp targets it,
      store the new argument values into the parameter alloca slots and
@@ -1671,6 +1723,149 @@ and emit_case ctx scrut_atom branches default_opt =
   emit ctx (Printf.sprintf "%s = load ptr, ptr %s" r result_slot);
   ("ptr", r)
 
+(* ── Mutual TCO: call graph analysis ────────────────────────────────── *)
+
+(** Collect all function names that are called in TAIL position in [expr].
+    Only traverses tail-position sub-expressions. *)
+let rec tail_calls_in (expr : Tir.expr) : string list =
+  match expr with
+  | Tir.EApp (f, _) -> [f.Tir.v_name]
+  | Tir.ELet (_, _, body) -> tail_calls_in body
+  | Tir.ESeq (_, e2) -> tail_calls_in e2
+  | Tir.ECase (_, branches, default_opt) ->
+    List.concat_map (fun br -> tail_calls_in br.Tir.br_body) branches
+    @ (match default_opt with Some d -> tail_calls_in d | None -> [])
+  | Tir.ELetRec (_, body) -> tail_calls_in body
+  | _ -> []
+
+(** True if [expr] contains a call to any member of [group] that is NOT in
+    tail position.  [in_tail] tracks whether we are currently on a tail path.
+    - ELet rhs is non-tail; body inherits [in_tail].
+    - ESeq e1 is non-tail; e2 inherits [in_tail].
+    - ECase arm bodies inherit [in_tail].
+    - ELetRec inner fn bodies: calls there are relative to those fns, not the
+      outer function, so we treat them as non-tail for outer-group purposes. *)
+let rec has_non_tail_group_call (group : string list) ~(in_tail : bool)
+    (expr : Tir.expr) : bool =
+  match expr with
+  | Tir.EApp (f, _) -> List.mem f.Tir.v_name group && not in_tail
+  | Tir.ELet (_, rhs, body) ->
+    has_non_tail_group_call group ~in_tail:false rhs
+    || has_non_tail_group_call group ~in_tail body
+  | Tir.ESeq (e1, e2) ->
+    has_non_tail_group_call group ~in_tail:false e1
+    || has_non_tail_group_call group ~in_tail e2
+  | Tir.ECase (_, branches, default_opt) ->
+    List.exists (fun br -> has_non_tail_group_call group ~in_tail br.Tir.br_body)
+      branches
+    || (match default_opt with
+        | Some d -> has_non_tail_group_call group ~in_tail d
+        | None -> false)
+  | Tir.ELetRec (fns, body) ->
+    (* Calls inside inner local functions are in those functions' own tail
+       positions, not the outer function's.  Conservatively block mutual TCO
+       if any inner fn non-tail-calls a group member (inner bodies are not the
+       outer tail position regardless). *)
+    List.exists (fun fn ->
+      has_non_tail_group_call group ~in_tail:true fn.Tir.fn_body) fns
+    || has_non_tail_group_call group ~in_tail body
+  | _ -> false
+
+(** Tarjan's SCC algorithm over the tail-call graph of [fns].
+    Returns a list of SCCs, each SCC being a list of fn_names. *)
+let tarjan_sccs (fns : Tir.fn_def list) : string list list =
+  let fn_names = List.map (fun fn -> fn.Tir.fn_name) fns in
+  (* tail-call adjacency: name -> [names tail-called within the module] *)
+  let tail_adj = List.map (fun fn ->
+    let tcs = tail_calls_in fn.Tir.fn_body in
+    let within = List.sort_uniq String.compare
+      (List.filter (fun n -> List.mem n fn_names) tcs) in
+    (fn.Tir.fn_name, within)
+  ) fns in
+  let index_ctr = ref 0 in
+  let stack     = ref [] in
+  let on_stack  = Hashtbl.create 16 in
+  let indices   = Hashtbl.create 16 in
+  let lowlinks  = Hashtbl.create 16 in
+  let sccs      = ref [] in
+  let rec strongconnect v =
+    let idx = !index_ctr in
+    Hashtbl.replace indices  v idx;
+    Hashtbl.replace lowlinks v idx;
+    incr index_ctr;
+    stack := v :: !stack;
+    Hashtbl.replace on_stack v true;
+    let neighbors = try List.assoc v tail_adj with Not_found -> [] in
+    List.iter (fun w ->
+      if not (Hashtbl.mem indices w) then begin
+        strongconnect w;
+        let vll = Hashtbl.find lowlinks v in
+        let wll = Hashtbl.find lowlinks w in
+        Hashtbl.replace lowlinks v (min vll wll)
+      end else if Hashtbl.mem on_stack w then begin
+        let vll = Hashtbl.find lowlinks v in
+        let widx = Hashtbl.find indices w in
+        Hashtbl.replace lowlinks v (min vll widx)
+      end
+    ) neighbors;
+    if Hashtbl.find lowlinks v = Hashtbl.find indices v then begin
+      let scc = ref [] in
+      let go  = ref true in
+      while !go do
+        let w = List.hd !stack in
+        stack := List.tl !stack;
+        Hashtbl.remove on_stack w;
+        scc := w :: !scc;
+        if String.equal w v then go := false
+      done;
+      sccs := !scc :: !sccs
+    end
+  in
+  List.iter (fun name ->
+    if not (Hashtbl.mem indices name) then strongconnect name
+  ) fn_names;
+  !sccs
+
+(** Given the full list of top-level functions, return groups of ≥ 2 functions
+    that qualify for mutual TCO.  A group qualifies when:
+    1. Its functions form a non-trivial SCC in the tail-call graph (size ≥ 2).
+    2. No function in the group makes a non-tail call to any other group member.
+    3. All functions in the group have the same LLVM return type (required for
+       the shared loop to produce one result type). *)
+let find_mutual_tco_groups (fns : Tir.fn_def list) : Tir.fn_def list list =
+  let fn_map = List.map (fun fn -> (fn.Tir.fn_name, fn)) fns in
+  let sccs = tarjan_sccs fns in
+  List.filter_map (fun scc ->
+    if List.length scc < 2 then None
+    else begin
+      let group_fns = List.filter_map (fun name ->
+        try Some (List.assoc name fn_map) with Not_found -> None) scc in
+      let group_names = List.map (fun fn -> fn.Tir.fn_name) group_fns in
+      (* All cross-group calls must be tail calls *)
+      let all_tail =
+        List.for_all (fun fn ->
+          not (has_non_tail_group_call group_names ~in_tail:true fn.Tir.fn_body)
+        ) group_fns
+      in
+      (* All functions must have the same LLVM return type *)
+      let ret_tys = List.map (fun fn -> llvm_ret_ty fn.Tir.fn_ret_ty) group_fns in
+      let all_same_ret = match ret_tys with
+        | [] | [_] -> true
+        | h :: t   -> List.for_all (String.equal h) t
+      in
+      if all_tail && all_same_ret then Some group_fns
+      else None
+    end
+  ) sccs
+
+(* ── Mutual TCO: combined function name ─────────────────────────────── *)
+
+(** Stable mangled name for the combined function of a mutual-TCO group. *)
+let mutual_tco_combined_name (group : Tir.fn_def list) : string =
+  "__mutco_" ^
+  String.concat "_" (List.map (fun fn -> llvm_name fn.Tir.fn_name) group) ^
+  "__"
+
 (* ── TCO helper ──────────────────────────────────────────────────────── *)
 
 (** Return true if [expr] contains a tail-position call to [fn_name].
@@ -1764,6 +1959,199 @@ let fn_declare_str (fn : Tir.fn_def) : string =
   let param_tys = String.concat ", " (List.map (fun (v : Tir.var) ->
       llvm_ty v.Tir.v_ty) fn.Tir.fn_params) in
   Printf.sprintf "declare %s @%s(%s)" ret_ty fn_llvm_name param_tys
+
+(* ── Mutual TCO: combined function emitter ───────────────────────────── *)
+
+(** Emit the combined dispatch function and per-function wrapper stubs for
+    [group].  After this call the caller must NOT emit any of the original
+    [group] functions via [emit_fn] — the wrappers have been emitted here.
+
+    Combined function layout:
+      define RET @__mutco_f_g__(i64 %__tag__.arg,
+                                Tf1 %f__p1.arg, ...,
+                                Tg1 %g__p1.arg, ...) {
+      entry:
+        alloca tag_slot, param_slots ...
+        br %mutual_loop
+      mutual_loop:
+        %tag = load tag_slot
+        switch tag [ 0 -> case_f, 1 -> case_g, ... ]
+      case_f:   ; f's body, mutual calls become: store tag+args → br loop
+      case_g:   ; g's body, mutual calls become: store tag+args → br loop
+      dead:
+        unreachable
+      }
+
+    Wrapper for f:
+      define RET @f(Tf1 %p1, ...) {
+        %r = call RET @__mutco__(0, p1, ..., undef, ...)
+        ret RET %r
+      }
+*)
+let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
+  let group_names = List.map (fun fn -> fn.Tir.fn_name) group in
+  let combined    = mutual_tco_combined_name group in
+  let ret_ty      = llvm_ret_ty (List.hd group).Tir.fn_ret_ty in
+
+  (* Assign integer dispatch tags in list order. *)
+  let fn_tags = List.mapi (fun i fn -> (fn.Tir.fn_name, i)) group in
+
+  (* Build a flat list of (fn_name, var, combined_slot_base) for ALL params.
+     Each param slot is prefixed with the owning function's mangled name to
+     avoid collisions between functions with identically-named parameters. *)
+  let all_params : (string * Tir.var * string) list =
+    List.concat_map (fun fn ->
+      List.map (fun (v : Tir.var) ->
+        let base = llvm_name fn.Tir.fn_name ^ "__" ^ llvm_name v.Tir.v_name in
+        (fn.Tir.fn_name, v, base)
+      ) fn.Tir.fn_params
+    ) group
+  in
+
+  (* ── Emit the combined function definition ───────────────────────── *)
+  let tag_param_str = "i64 %__tag__.arg" in
+  let rest_params_str =
+    if all_params = [] then ""
+    else ", " ^ String.concat ", "
+      (List.map (fun (_, (v : Tir.var), base) ->
+        Printf.sprintf "%s %%%s.arg" (llvm_ty v.Tir.v_ty) base
+      ) all_params)
+  in
+  Buffer.add_string ctx.buf
+    (Printf.sprintf "\ndefine %s @%s(%s%s) {\nentry:\n"
+       ret_ty (llvm_name combined) tag_param_str rest_params_str);
+
+  (* Alloca the dispatch tag slot. *)
+  let tag_slot = "mutco_tag" in
+  emit ctx (Printf.sprintf "%%%s.addr = alloca i64" tag_slot);
+  emit ctx (Printf.sprintf "store i64 %%__tag__.arg, ptr %%%s.addr" tag_slot);
+
+  (* Alloca each parameter slot and store the incoming arg. *)
+  let fn_param_slots : (string * (string * string * string) list) list =
+    List.map (fun fn ->
+      let slots = List.map (fun (v : Tir.var) ->
+        let base = llvm_name fn.Tir.fn_name ^ "__" ^ llvm_name v.Tir.v_name in
+        let ty   = llvm_ty v.Tir.v_ty in
+        emit ctx (Printf.sprintf "%%%s.addr = alloca %s" base ty);
+        emit ctx (Printf.sprintf "store %s %%%s.arg, ptr %%%s.addr" ty base base);
+        Hashtbl.replace ctx.var_llvm_ty base ty;
+        (v.Tir.v_name, base, ty)
+      ) fn.Tir.fn_params in
+      (fn.Tir.fn_name, slots)
+    ) group
+  in
+
+  (* Jump to loop header. *)
+  let loop_lbl = fresh_block ctx "mutual_loop" in
+  emit_term ctx (Printf.sprintf "br label %%%s" loop_lbl);
+  emit_label ctx loop_lbl;
+
+  (* Load the dispatch tag and emit a switch. *)
+  let tag_v    = fresh ctx "mutco_tag_v" in
+  let dead_lbl = fresh_block ctx "mutco_dead" in
+  emit ctx (Printf.sprintf "%s = load i64, ptr %%%s.addr" tag_v tag_slot);
+
+  let case_labels = List.map (fun fn ->
+    let lbl = fresh_block ctx ("mutco_case_" ^ llvm_name fn.Tir.fn_name) in
+    (fn, lbl)
+  ) group in
+
+  let switch_entries = String.concat " "
+    (List.map2 (fun (fn, lbl) (_, tag_int) ->
+      Printf.sprintf "i64 %d, label %%%s" tag_int lbl
+      |> (fun s -> ignore fn; s)
+    ) case_labels fn_tags)
+  in
+  emit ctx (Printf.sprintf "switch i64 %s, label %%%s [ %s ]"
+    tag_v dead_lbl switch_entries);
+
+  (* Install mutual TCO context.  The EApp handler uses this to redirect
+     tail calls to group members back to the loop header. *)
+  ctx.mutual_tco_group      <- group_names;
+  ctx.mutual_tco_tag_slot   <- tag_slot;
+  ctx.mutual_tco_loop_label <- loop_lbl;
+  ctx.mutual_tco_fn_params  <- fn_param_slots;
+  ctx.mutual_tco_fn_tags    <- fn_tags;
+
+  (* Emit each case body. *)
+  List.iter (fun (fn, case_lbl) ->
+    emit_label ctx case_lbl;
+    (* Set up a fresh local environment: load params from the combined slots. *)
+    Hashtbl.clear ctx.local_names;
+    Hashtbl.clear ctx.var_slot;
+    Hashtbl.clear ctx.var_llvm_ty;
+    let fn_slots = List.assoc fn.Tir.fn_name fn_param_slots in
+    List.iter (fun (vname, slot, ty) ->
+      Hashtbl.replace ctx.var_slot    vname slot;
+      Hashtbl.replace ctx.var_llvm_ty slot   ty
+    ) fn_slots;
+    (* Re-populate var_llvm_ty for all group slots (needed if a case body
+       loads another group member's slot via a phi / load path). *)
+    List.iter (fun (_, slots) ->
+      List.iter (fun (_, slot, ty) ->
+        Hashtbl.replace ctx.var_llvm_ty slot ty
+      ) slots
+    ) fn_param_slots;
+    ctx.ret_ty <- fn.Tir.fn_ret_ty;
+    let (body_ty, body_val) = emit_expr ctx fn.Tir.fn_body in
+    if ret_ty = "void" then
+      emit_term ctx "ret void"
+    else begin
+      let final_val = coerce ctx body_ty body_val ret_ty in
+      emit_term ctx (Printf.sprintf "ret %s %s" ret_ty final_val)
+    end
+  ) case_labels;
+
+  (* Dead / unreachable default arm. *)
+  emit_label ctx dead_lbl;
+  emit ctx "unreachable";
+
+  Buffer.add_string ctx.buf "}\n";
+
+  (* Clear mutual TCO context. *)
+  ctx.mutual_tco_group <- [];
+
+  (* ── Emit wrapper functions ──────────────────────────────────────── *)
+  (* Each original function name becomes a thin wrapper that sets the
+     dispatch tag and calls the combined function. *)
+  List.iter (fun fn ->
+    let tag_int     = List.assoc fn.Tir.fn_name fn_tags in
+    let fn_llvm     = mangle_extern fn.Tir.fn_name in
+    let params_str  = String.concat ", "
+      (List.map (fun (v : Tir.var) ->
+        Printf.sprintf "%s %%%s.arg" (llvm_ty v.Tir.v_ty) (llvm_name v.Tir.v_name)
+      ) fn.Tir.fn_params)
+    in
+    Buffer.add_string ctx.buf
+      (Printf.sprintf "\ndefine %s @%s(%s) {\nentry:\n" ret_ty fn_llvm params_str);
+
+    (* Build the call arguments: tag first, then ALL params of ALL group fns.
+       For this function's own params, pass the incoming arg.
+       For other functions' params, pass undef (they will not be read). *)
+    let call_args =
+      Printf.sprintf "i64 %d" tag_int ^
+      (if all_params = [] then ""
+       else ", " ^ String.concat ", "
+         (List.map (fun (owner_fn, (v : Tir.var), base) ->
+           let ty = llvm_ty v.Tir.v_ty in
+           if String.equal owner_fn fn.Tir.fn_name then
+             Printf.sprintf "%s %%%s.arg" ty (llvm_name v.Tir.v_name)
+           else
+             Printf.sprintf "%s undef" ty
+           |> (fun s -> ignore base; s)
+         ) all_params))
+    in
+    let result_v = fresh ctx "mutco_wr" in
+    if ret_ty = "void" then begin
+      emit ctx (Printf.sprintf "call void @%s(%s)" (llvm_name combined) call_args);
+      emit_term ctx "ret void"
+    end else begin
+      emit ctx (Printf.sprintf "%s = call %s @%s(%s)"
+        result_v ret_ty (llvm_name combined) call_args);
+      emit_term ctx (Printf.sprintf "ret %s %s" ret_ty result_v)
+    end;
+    Buffer.add_string ctx.buf "}\n"
+  ) group
 
 (* ── Module emitter ──────────────────────────────────────────────────── *)
 
@@ -1973,12 +2361,26 @@ let emit_module ?(fast_math=false) (m : Tir.tir_module) : string =
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
       Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty)
     m.Tir.tm_fns;
+  (* Identify mutual-TCO groups.  Functions in these groups are emitted as
+     combined dispatch functions + thin wrappers — they must NOT also be
+     emitted individually via emit_fn. *)
+  let mutual_groups = find_mutual_tco_groups m.Tir.tm_fns in
+  let mutual_fn_names =
+    List.concat_map (fun g -> List.map (fun fn -> fn.Tir.fn_name) g)
+      mutual_groups
+  in
+  (* Emit the combined function + wrappers for each mutual-TCO group. *)
+  List.iter (emit_mutual_tco_group ctx) mutual_groups;
+
   (* Skip emitting prelude wrapper functions whose runtime name is already
      declared in the preamble.  Only filter short unqualified names that map
-     to march_* builtins — not user-defined qualified names like "CapDemo.main". *)
+     to march_* builtins — not user-defined qualified names like "CapDemo.main".
+     Also skip functions that are members of a mutual-TCO group — those were
+     already emitted (as wrappers) by emit_mutual_tco_group above. *)
   let preamble_declared = ["panic"; "println"; "print"] in
   List.iter (fun fn ->
       if List.mem fn.Tir.fn_name preamble_declared then ()
+      else if List.mem fn.Tir.fn_name mutual_fn_names then ()
       else emit_fn ctx fn
     ) m.Tir.tm_fns;
 

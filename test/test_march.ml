@@ -4818,6 +4818,113 @@ let test_tco_countdown_has_loop () =
   Alcotest.(check bool) "TCO countdown: back-edge branch emitted" true
     (ir_contains ir "br label %tco_loop")
 
+(* ── Mutual TCO codegen tests ──────────────────────────────────────── *)
+
+let emit_mutual_tco_ir = emit_tco_ir
+
+(** Classic even/odd mutual recursion: the combined function, a mutual_loop
+    block, a switch dispatch, and back-edge branches must appear in the IR.
+    The original even/odd names become thin wrapper functions that call the
+    combined __mutco__ function. *)
+let test_mutual_tco_even_odd_loop_emitted () =
+  let ir = emit_mutual_tco_ir {|mod Test do
+    @[no_warn_recursion]
+    fn even(n : Int) : Bool do
+      if n == 0 then true else odd(n - 1)
+    end
+    @[no_warn_recursion]
+    fn odd(n : Int) : Bool do
+      if n == 0 then false else even(n - 1)
+    end
+    fn main() : Unit do println(to_string(even(1000000))) end
+  end|} in
+  Alcotest.(check bool) "mutual TCO even/odd: mutual_loop block emitted" true
+    (ir_contains ir "mutual_loop");
+  Alcotest.(check bool) "mutual TCO even/odd: switch dispatch emitted" true
+    (ir_contains ir "switch");
+  Alcotest.(check bool) "mutual TCO even/odd: back-edge branch emitted" true
+    (ir_contains ir "br label %mutual_loop");
+  Alcotest.(check bool) "mutual TCO even/odd: combined fn declared" true
+    (ir_contains ir "__mutco_");
+  Alcotest.(check bool) "mutual TCO even/odd: even wrapper present" true
+    (ir_contains ir "@even(")
+
+(** Three-way mutual tail recursion: f → g → h → f.
+    All three must end up inside the same combined dispatch function. *)
+let test_mutual_tco_three_way () =
+  let ir = emit_mutual_tco_ir {|mod Test do
+    @[no_warn_recursion]
+    fn fa(n : Int) : Int do
+      if n == 0 then 0 else fb(n - 1)
+    end
+    @[no_warn_recursion]
+    fn fb(n : Int) : Int do
+      if n == 0 then 0 else fc(n - 1)
+    end
+    @[no_warn_recursion]
+    fn fc(n : Int) : Int do
+      if n == 0 then 0 else fa(n - 1)
+    end
+    fn main() : Unit do println(int_to_string(fa(99))) end
+  end|} in
+  Alcotest.(check bool) "three-way mutual TCO: mutual_loop emitted" true
+    (ir_contains ir "mutual_loop");
+  Alcotest.(check bool) "three-way mutual TCO: switch emitted" true
+    (ir_contains ir "switch");
+  Alcotest.(check bool) "three-way mutual TCO: combined fn declared" true
+    (ir_contains ir "__mutco_")
+
+(** A/B state-machine with mutual tail calls. *)
+let test_mutual_tco_state_machine () =
+  let ir = emit_mutual_tco_ir {|mod Test do
+    @[no_warn_recursion]
+    fn state_a(n : Int) : Int do
+      if n <= 0 then 1 else state_b(n - 1)
+    end
+    @[no_warn_recursion]
+    fn state_b(n : Int) : Int do
+      if n <= 0 then 2 else state_a(n - 1)
+    end
+    fn main() : Unit do println(int_to_string(state_a(1000000))) end
+  end|} in
+  Alcotest.(check bool) "state machine mutual TCO: mutual_loop emitted" true
+    (ir_contains ir "mutual_loop");
+  Alcotest.(check bool) "state machine mutual TCO: combined fn declared" true
+    (ir_contains ir "__mutco_")
+
+(** Non-tail mutual recursion must NOT get a mutual_loop block.
+    f calls g in non-tail position (result used in arithmetic). *)
+let test_mutual_tco_non_tail_no_loop () =
+  let ir = emit_mutual_tco_ir {|mod Test do
+    @[no_warn_recursion]
+    fn count_f(n : Int) : Int do
+      if n == 0 then 1 else count_g(n - 1) + 1
+    end
+    @[no_warn_recursion]
+    fn count_g(n : Int) : Int do
+      if n == 0 then 1 else count_f(n - 1) + 1
+    end
+    fn main() : Unit do println(int_to_string(count_f(10))) end
+  end|} in
+  Alcotest.(check bool) "non-tail mutual recursion: no mutual_loop" false
+    (ir_contains ir "mutual_loop")
+
+(** Self-TCO must still work when mutual-TCO detection is also running.
+    A self-recursive function that is NOT part of any mutual group must still
+    get its tco_loop transformation. *)
+let test_mutual_tco_self_tco_unaffected () =
+  let ir = emit_mutual_tco_ir {|mod Test do
+    @[no_warn_recursion]
+    fn countdown(n : Int) : Int do
+      if n == 0 then 0 else countdown(n - 1)
+    end
+    fn main() : Unit do println(int_to_string(countdown(10))) end
+  end|} in
+  Alcotest.(check bool) "self TCO still works: tco_loop emitted" true
+    (ir_contains ir "tco_loop");
+  Alcotest.(check bool) "self TCO still works: back-edge branch emitted" true
+    (ir_contains ir "br label %tco_loop")
+
 let test_perceus_preserves_fn_count () =
   (* After perceus, user function count is unchanged.
      The module will also contain 15 builtin interface impl functions
@@ -15532,6 +15639,13 @@ let () =
           Alcotest.test_case "fold loop emitted"        `Quick test_tco_fold_has_loop;
           Alcotest.test_case "non-tail fib no loop"     `Quick test_tco_nontail_fib_no_loop;
           Alcotest.test_case "countdown loop emitted"   `Quick test_tco_countdown_has_loop;
+        ] );
+      ( "mutual_tco_codegen", [
+          Alcotest.test_case "even/odd loop emitted"    `Quick test_mutual_tco_even_odd_loop_emitted;
+          Alcotest.test_case "three-way mutual TCO"     `Quick test_mutual_tco_three_way;
+          Alcotest.test_case "state machine mutual TCO" `Quick test_mutual_tco_state_machine;
+          Alcotest.test_case "non-tail mutual: no loop" `Quick test_mutual_tco_non_tail_no_loop;
+          Alcotest.test_case "self TCO unaffected"      `Quick test_mutual_tco_self_tco_unaffected;
         ] );
       "multiline", [
         Alcotest.test_case "depth zero" `Quick test_multiline_depth_zero;
