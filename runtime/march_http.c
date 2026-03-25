@@ -17,6 +17,7 @@
  */
 #include "march_http.h"
 #include "march_http_parse_simd.h"
+#include "march_http_response.h"
 
 /* ── SIMD HTTP parser feature gate ────────────────────────────────────
  * Define MARCH_HTTP_DISABLE_SIMD to force the legacy scalar parser path.
@@ -1209,6 +1210,9 @@ void march_http_server_listen(int64_t port, int64_t max_conns,
     signal(SIGPIPE, SIG_IGN);
     signal(SIGTERM, http_signal_handler);
     signal(SIGINT,  http_signal_handler);
+
+    /* Pre-populate response caches (Date header, etc.) before accepting. */
+    march_http_response_module_init();
 
     int64_t listen_fd = march_tcp_listen(port);
     if (listen_fd < 0) {

@@ -84,6 +84,29 @@
  (alias   runtest)
  (deps    (file test_http_simd_runner))
  (action  (run ./test_http_simd_runner)))
+
+; ── Zero-copy response builder tests ────────────────────────────────────
+; Compile test_http_response.c together with march_http_response.c.
+; -msse4.2 is passed for consistency with the SIMD tests; on ARM64
+; -Wno-unused-command-line-argument suppresses the harmless warning.
+(rule
+ (targets test_http_response_runner)
+ (deps    test_http_response.c
+          ../runtime/march_http_response.c
+          ../runtime/march_http_response.h)
+ (action  (run %{cc}
+               -std=gnu11 -Wall -Wextra
+               -Wno-unused-command-line-argument
+               -I../runtime -O2
+               -o %{targets}
+               test_http_response.c ../runtime/march_http_response.c
+               -lpthread)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_http_response_runner))
+ (action  (run ./test_http_response_runner)))
+
 (test
  (name test_fmt)
  (libraries march_lexer march_parser march_ast march_format alcotest))
