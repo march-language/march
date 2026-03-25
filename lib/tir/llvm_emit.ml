@@ -1871,7 +1871,10 @@ let mutual_tco_combined_name (group : Tir.fn_def list) : string =
 (** Return true if [expr] contains a tail-position call to [fn_name].
     Only traverses sub-expressions that are in tail position:
     - ELet body (not rhs)
-    - ESeq second operand (not first)
+    - ESeq: second operand, or first operand when the first is a self-call
+      followed only by RC cleanup (borrow inference may emit
+      ESeq(EApp(self,...), EDecRC(arg)) — the EDecRC lands in dead code
+      after TCO emits the back-edge, so it is safe to treat e1 as a tail call)
     - ECase branch bodies and default
     - ELetRec body
     A bare EApp whose callee name matches is a tail call. *)
@@ -1879,7 +1882,9 @@ let rec has_self_tail_call (fn_name : string) (expr : Tir.expr) : bool =
   match expr with
   | Tir.EApp (f, _) -> String.equal f.Tir.v_name fn_name
   | Tir.ELet (_, _, body) -> has_self_tail_call fn_name body
-  | Tir.ESeq (_, e2) -> has_self_tail_call fn_name e2
+  | Tir.ESeq (e1, e2) ->
+    has_self_tail_call fn_name e2 ||
+    has_self_tail_call fn_name e1
   | Tir.ECase (_, branches, default_opt) ->
     List.exists (fun br -> has_self_tail_call fn_name br.Tir.br_body) branches ||
     (match default_opt with Some d -> has_self_tail_call fn_name d | None -> false)
