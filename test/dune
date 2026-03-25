@@ -23,6 +23,23 @@
  (deps    (file test_scheduler_runner))
  (action  (run ./test_scheduler_runner)))
 
+; Phase 3: multi-threaded scheduler tests (4 schedulers)
+(rule
+ (targets test_scheduler_mt_runner)
+ (deps    test_scheduler_mt.c
+          ../runtime/march_scheduler.c
+          ../runtime/march_scheduler.h
+          ../runtime/march_deque.h)
+ (action  (run %{cc} -std=gnu11 -Wall -Wextra -I../runtime
+               -o %{targets}
+               test_scheduler_mt.c ../runtime/march_scheduler.c
+               -lpthread)))
+
+(rule
+ (alias   runtest)
+ (deps    (file test_scheduler_mt_runner))
+ (action  (run ./test_scheduler_mt_runner)))
+
 (test
  (name test_fmt)
  (libraries march_lexer march_parser march_ast march_format alcotest))
