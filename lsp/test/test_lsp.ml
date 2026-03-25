@@ -1396,6 +1396,239 @@ end
        Alcotest.(check bool) "edit is a match arm" true has_arm)
 
 (* ------------------------------------------------------------------ *)
+(* 17. Phase 2: Enhanced exhaustive match                             *)
+(* ------------------------------------------------------------------ *)
+
+let test_exhaustion_all_cases_action_offered () =
+  (* Two variants missing → "Add all 2 missing cases" should appear *)
+  let src = {|
+mod M do
+  type Season = Spring | Summer | Autumn | Winter
+
+  fn greet(s: Season): String do
+    match s do
+    | Spring -> "bloom"
+    | Summer -> "sun"
+    end
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "match s" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  let has_bulk =
+    List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
+        let low = String.lowercase_ascii ca.title in
+        let n = String.length low and sn = 3 in
+        let found = ref false in
+        for i = 0 to n - sn do
+          if String.sub low i sn = "all" then found := true
+        done;
+        !found
+      ) acts
+  in
+  Alcotest.(check bool) "bulk 'add all' action offered" true has_bulk
+
+let test_exhaustion_all_cases_edit_covers_all () =
+  (* Three variants missing; bulk edit should mention all three *)
+  let src = {|
+mod M do
+  type Dir = North | South | East | West
+
+  fn go(d: Dir): Int do
+    match d do
+    | North -> 0
+    end
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "match d" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  let bulk = List.find_opt (fun (ca : Lsp.Types.CodeAction.t) ->
+      let low = String.lowercase_ascii ca.title in
+      let n = String.length low and sn = 3 in
+      let found = ref false in
+      for i = 0 to n - sn do
+        if String.sub low i sn = "all" then found := true
+      done;
+      !found
+    ) acts in
+  match bulk with
+  | None -> Alcotest.fail "expected bulk quickfix"
+  | Some ca ->
+    (match ca.edit with
+     | None -> Alcotest.fail "expected edit"
+     | Some edit ->
+       match edit.changes with
+       | None -> Alcotest.fail "expected changes"
+       | Some m ->
+         let combined = List.concat_map (fun (_, es) ->
+             List.map (fun (e : Lsp.Types.TextEdit.t) -> e.newText) es
+           ) m |> String.concat "" |> String.lowercase_ascii
+         in
+         let contains sub str =
+           let sn = String.length sub and n = String.length str in
+           let found = ref false in
+           for i = 0 to n - sn do
+             if String.sub str i sn = sub then found := true
+           done;
+           !found
+         in
+         Alcotest.(check bool) "south in edit" true (contains "south" combined);
+         Alcotest.(check bool) "east in edit"  true (contains "east"  combined);
+         Alcotest.(check bool) "west in edit"  true (contains "west"  combined))
+
+let test_exhaustion_single_missing_no_bulk () =
+  (* Only one variant missing → no "Add all N missing cases" bulk action *)
+  let src = {|
+mod M do
+  type Bit = Zero | One
+
+  fn inv(b: Bit): Bit do
+    match b do
+    | Zero -> One
+    end
+  end
+end
+|} in
+  let a = analyse src in
+  let (line, col) = pos_of src "match b" in
+  let acts = An.code_actions_at a ~line ~character:col () in
+  (* "Add all N missing cases" has the prefix "add all" — not a file-scope fix *)
+  let has_add_all =
+    List.exists (fun (ca : Lsp.Types.CodeAction.t) ->
+        let low = String.lowercase_ascii ca.title in
+        let n = String.length low and sn = 7 in
+        let found = ref false in
+        for i = 0 to n - sn do
+          if String.sub low i sn = "add all" then found := true
+        done;
+        !found
+      ) acts
+  in
+  Alcotest.(check bool) "no 'add all' for single missing case" false has_add_all
+
+(* ------------------------------------------------------------------ *)
+(* 18. Phase 2: Diagnostics-driven quickfix framework                 *)
+(* ------------------------------------------------------------------ *)
+
+let test_fix_registry_has_known_codes () =
+  (* The registry should have entries for the standard diagnostic codes *)
+  let codes = ["non_exhaustive_match"; "unused_binding";
+               "unused_private_fn"; "unreachable_code"] in
+  List.iter (fun code ->
+      let has_entry = Hashtbl.mem An.fix_registry code in
+      Alcotest.(check bool) ("registry has " ^ code) true has_entry
+    ) codes
+
+let test_apply_fix_registry_empty_for_unknown_code () =
+  let src = {|
+mod M do
+  fn main() do
+    println("hi")
+  end
+end
+|} in
+  let a = analyse src in
+  let fake_diag = Lsp.Types.Diagnostic.create
+    ~range:(Lsp.Types.Range.create
+      ~start:(Lsp.Types.Position.create ~line:0 ~character:0)
+      ~end_:(Lsp.Types.Position.create ~line:0 ~character:1))
+    ~message:(`String "test") ~source:"march"
+    ~code:(`String "no_such_code")
+    ()
+  in
+  let acts = An.apply_fix_registry a [fake_diag] in
+  Alcotest.(check int) "no actions for unknown code" 0 (List.length acts)
+
+(* ------------------------------------------------------------------ *)
+(* 19. Phase 2: Dead code detection                                   *)
+(* ------------------------------------------------------------------ *)
+
+let test_unused_private_fn_warning () =
+  let src = {|
+mod M do
+  pfn helper(): Int do
+    42
+  end
+
+  fn main() do
+    println("hi")
+  end
+end
+|} in
+  let a = analyse src in
+  let has_unused_warning =
+    List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+        (match d.code with
+         | Some (`String "unused_private_fn") -> true
+         | _ -> false)
+      ) a.diagnostics
+  in
+  Alcotest.(check bool) "unused private fn warning" true has_unused_warning
+
+let test_used_private_fn_no_warning () =
+  let src = {|
+mod M do
+  pfn helper(): Int do
+    42
+  end
+
+  fn main() do
+    let x = helper()
+    println(int_to_string(x))
+  end
+end
+|} in
+  let a = analyse src in
+  let has_unused_warning =
+    List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+        (match d.code with
+         | Some (`String "unused_private_fn") -> true
+         | _ -> false)
+      ) a.diagnostics
+  in
+  Alcotest.(check bool) "used private fn: no warning" false has_unused_warning
+
+let test_unreachable_code_after_panic_warning () =
+  let src = {|
+mod M do
+  fn bad(x: Int): Int do
+    let _ = panic("oops")
+    x + 1
+  end
+end
+|} in
+  let a = analyse src in
+  let has_unreachable =
+    List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+        (match d.code with
+         | Some (`String "unreachable_code") -> true
+         | _ -> false)
+      ) a.diagnostics
+  in
+  Alcotest.(check bool) "unreachable code warning after panic" true has_unreachable
+
+let test_unused_fns_field_populated () =
+  let src = {|
+mod M do
+  pfn dead(): Int do
+    99
+  end
+
+  fn alive(): Int do
+    1
+  end
+end
+|} in
+  let a = analyse src in
+  Alcotest.(check bool) "dead fn in unused_fns" true
+    (List.mem "dead" a.An.unused_fns);
+  Alcotest.(check bool) "alive fn not in unused_fns" false
+    (List.mem "alive" a.An.unused_fns)
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -1521,5 +1754,20 @@ let () =
       "offered for incomplete match",   `Quick, test_exhaustion_quickfix_offered_for_incomplete_match;
       "edit contains missing arm",      `Quick, test_exhaustion_quickfix_edit_contains_missing_arm;
       "edit inserts before end",        `Quick, test_exhaustion_quickfix_edit_inserts_before_end;
+    ];
+    "phase2: enhanced exhaustive match", [
+      "bulk action offered for multiple missing", `Quick, test_exhaustion_all_cases_action_offered;
+      "bulk edit covers all missing cases",       `Quick, test_exhaustion_all_cases_edit_covers_all;
+      "no bulk action when only one missing",     `Quick, test_exhaustion_single_missing_no_bulk;
+    ];
+    "phase2: quickfix framework", [
+      "registry has known codes",                 `Quick, test_fix_registry_has_known_codes;
+      "registry returns empty for unknown code",  `Quick, test_apply_fix_registry_empty_for_unknown_code;
+    ];
+    "phase2: dead code detection", [
+      "unused private fn: warning emitted",       `Quick, test_unused_private_fn_warning;
+      "used private fn: no warning",              `Quick, test_used_private_fn_no_warning;
+      "unreachable after panic: warning emitted", `Quick, test_unreachable_code_after_panic_warning;
+      "unused_fns field populated correctly",     `Quick, test_unused_fns_field_populated;
     ];
   ]
