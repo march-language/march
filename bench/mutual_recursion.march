@@ -1,0 +1,83 @@
+-- Mutual recursion benchmark: measures stack-free mutual tail calls.
+--
+-- Three benchmarks in one file:
+--   1. even/odd — classic 2-function mutual recursion over a large N
+--   2. state_machine — A/B/C 3-state machine with mutual tail calls
+--   3. collatz_like — simulates a step-counting loop via mutual tail calls
+--
+-- With Mutual TCO, all three should run in O(1) stack space.
+-- Without it they would blow the stack for large N.
+--
+-- Usage: march --compile bench/mutual_recursion.march -o bench/mutual_recursion
+--        bench/mutual_recursion
+
+mod MutualRecursion do
+
+-- ── 1. Even / Odd ──────────────────────────────────────────────────────
+-- Classic mutual tail recursion: 2 functions, N = 10_000_000.
+-- Without mutual TCO → stack overflow.  With it → O(1) stack, O(N) time.
+
+@[no_warn_recursion]
+pfn even(n : Int) : Bool do
+  if n == 0 then true else odd(n - 1)
+end
+
+@[no_warn_recursion]
+pfn odd(n : Int) : Bool do
+  if n == 0 then false else even(n - 1)
+end
+
+-- ── 2. Three-state machine ─────────────────────────────────────────────
+-- A cycles through A→B→C→A.  Result is the state ID when n reaches 0.
+
+@[no_warn_recursion]
+pfn state_a(n : Int) : Int do
+  if n <= 0 then 0 else state_b(n - 1)
+end
+
+@[no_warn_recursion]
+pfn state_b(n : Int) : Int do
+  if n <= 0 then 1 else state_c(n - 1)
+end
+
+@[no_warn_recursion]
+pfn state_c(n : Int) : Int do
+  if n <= 0 then 2 else state_a(n - 1)
+end
+
+-- ── 3. Collatz-like counter ─────────────────────────────────────────────
+-- Two functions: step_even reduces n differently than step_odd.
+-- Count steps until n == 1.
+
+@[no_warn_recursion]
+pfn step_even(n : Int, steps : Int) : Int do
+  if n == 1 then steps
+  else if n % 2 == 0 then step_even(n / 2, steps + 1)
+  else step_odd(n, steps)
+end
+
+@[no_warn_recursion]
+pfn step_odd(n : Int, steps : Int) : Int do
+  if n == 1 then steps
+  else step_even(3 * n + 1, steps + 1)
+end
+
+-- ── Main ────────────────────────────────────────────────────────────────
+
+fn main() : Unit do
+  let n = 10000000
+
+  -- Even/odd: n = 10M
+  let r1 = even(n)
+  println("even/odd result: " ++ to_string(r1))
+
+  -- State machine: n = 10M
+  let r2 = state_a(n)
+  println("state_machine result: " ++ int_to_string(r2))
+
+  -- Collatz-like: start from 27 (known long sequence)
+  let r3 = step_even(27, 0)
+  println("collatz steps from 27: " ++ int_to_string(r3))
+end
+
+end
