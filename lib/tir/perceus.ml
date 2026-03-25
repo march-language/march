@@ -41,6 +41,49 @@ let fresh_rc_var (ty : Tir.ty) : Tir.var =
     the helpers' signatures unchanged and avoids pervasive API churn. *)
 let _borrow_map : Borrow.borrow_map ref = ref Borrow.empty
 
+(** Name of the function currently being processed by [insert_rc].
+    Used in the EApp case to detect self-recursive calls, so that
+    ESeq(EApp(self,...), EDecRC(arg)) is left intact for TCO to handle
+    (the EDecRC becomes dead code after the back-edge is emitted). *)
+let _current_fn_name : string ref = ref ""
+
+(** Closure free-variable names for the function currently being processed.
+    Variables in this set are bound by [let fv = $clo.$fvN] in apply functions.
+    They are OWNED by the closure, not by the apply function body.
+    The closure's RC keeps them alive for the duration of every call, so:
+    - They must NOT be decreffed at last use (suppresses post_dec_vars).
+    - They must NOT be increffed when passed as arguments (suppresses find_inc_vars).
+    - A dead binding of such a variable must NOT emit EDecRC / EFree.
+    Removing these RC ops also eliminates the data race between the non-atomic
+    [march_decrc_local] in the generated apply function and the atomic
+    [march_incrc] in the C HTTP runtime's per-request incref loop. *)
+let _closure_fvs : StringSet.t ref = ref StringSet.empty
+
+(** Collect the names of variables loaded directly from the closure parameter
+    [$clo] via EField.  Only apply functions have [$clo] as first param. *)
+let collect_closure_fvs (fn : Tir.fn_def) : StringSet.t =
+  match fn.Tir.fn_params with
+  | p :: _ when String.equal p.Tir.v_name "$clo" ->
+    let clo_name = p.Tir.v_name in
+    let rec scan e acc =
+      match e with
+      | Tir.ELet (v, Tir.EField (Tir.AVar src, _), rest)
+        when String.equal src.Tir.v_name clo_name ->
+        scan rest (StringSet.add v.Tir.v_name acc)
+      | Tir.ELet (_, e1, e2) ->
+        scan e2 (scan e1 acc)
+      | Tir.ESeq (e1, e2) ->
+        scan e2 (scan e1 acc)
+      | Tir.ECase (_, branches, default) ->
+        let from_branches =
+          List.fold_left (fun a br -> scan br.Tir.br_body a) acc branches
+        in
+        (match default with Some d -> scan d from_branches | None -> from_branches)
+      | _ -> acc
+    in
+    scan fn.Tir.fn_body StringSet.empty
+  | _ -> StringSet.empty
+
 (* ── Actor-send analysis ─────────────────────────────────────────────────── *)
 
 (** Variables that appear as message arguments to [send()] in the current
@@ -250,13 +293,16 @@ let wrap_incrcs (incs : Tir.var list) (inner : Tir.expr) : Tir.expr =
   ) incs inner
 
 (** Determine which AVar atoms in a list need EIncRC because they are
-    Unr, needs_rc, and still live after this use. *)
+    Unr, needs_rc, and still live after this use.
+    Closure FVs ([_closure_fvs]) are excluded: the closure already holds
+    their reference and keeps them alive for the duration of every call. *)
 let find_inc_vars (atoms : Tir.atom list) (live_after : live_set) : Tir.var list =
   List.filter_map (function
     | Tir.AVar v
       when v.Tir.v_lin = Tir.Unr
            && needs_rc v.Tir.v_ty
-           && StringSet.mem v.Tir.v_name live_after ->
+           && StringSet.mem v.Tir.v_name live_after
+           && not (StringSet.mem v.Tir.v_name !_closure_fvs) ->
       Some v
     | _ -> None
   ) atoms
@@ -299,7 +345,8 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
       ) indexed_args
     in
     let inc_vars = find_inc_vars ((Tir.AVar f) :: non_borrowed_args) live_after in
-    (* 2. Borrowed args whose last use is this call: caller is responsible for Dec. *)
+    (* 2. Borrowed args whose last use is this call: caller is responsible for Dec.
+          Closure FVs are exempt: the closure owns them and keeps them alive. *)
     let post_dec_vars =
       List.filter_map (fun (i, a) ->
         match a with
@@ -307,17 +354,56 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
           when v.Tir.v_lin = Tir.Unr
                && needs_rc v.Tir.v_ty
                && not (StringSet.mem v.Tir.v_name live_after)
-               && Borrow.is_borrowed !_borrow_map f.Tir.v_name i ->
+               && Borrow.is_borrowed !_borrow_map f.Tir.v_name i
+               && not (StringSet.mem v.Tir.v_name !_closure_fvs) ->
           Some v
         | _ -> None
       ) indexed_args
     in
     let e' = wrap_incrcs inc_vars e in
-    (* Wrap with post-call Decs (ESeq: call first, then dec). *)
+    (* Wrap with post-call Decs.
+       When there are post-call decrefs and the call has a non-unit return
+       type, ESeq would discard the call result (ESeq returns its LAST
+       expression's value).  Instead, bind the result to a fresh temp, run
+       the decrefs, then return the temp.
+       For unit-returning calls ESeq is fine — the result is not used.
+       EXCEPTION: self-recursive tail calls keep the old ESeq form.
+       has_self_tail_call in llvm_emit.ml explicitly handles
+       ESeq(EApp(self,...), EDecRC(arg)) — after TCO emits the back-edge,
+       the EDecRC is dead code and everything is correct.  Wrapping with
+       ELet would hide the self-call from has_self_tail_call and kill TCO. *)
+    let is_self_call = String.equal f.Tir.v_name !_current_fn_name in
     let e'' =
-      List.fold_left (fun acc v ->
-        Tir.ESeq (acc, decrc_for v (Tir.AVar v))
-      ) e' post_dec_vars
+      match post_dec_vars with
+      | [] -> e'
+      | _ when is_self_call ->
+        (* Self-tail-call: keep ESeq so TCO detection finds the call *)
+        List.fold_left (fun acc v ->
+          Tir.ESeq (acc, decrc_for v (Tir.AVar v))
+        ) e' post_dec_vars
+      | _ ->
+        let call_ret_ty = match f.Tir.v_ty with
+          | Tir.TFn (_, r) -> r
+          | _ -> Tir.TVar "_"
+        in
+        (match call_ret_ty with
+         | Tir.TUnit ->
+           (* Unit return: plain ESeq is fine *)
+           List.fold_left (fun acc v ->
+             Tir.ESeq (acc, decrc_for v (Tir.AVar v))
+           ) e' post_dec_vars
+         | _ ->
+           (* Non-unit return: bind result, run decrefs, return result.
+              Build ESeq(EDecRC(v1), ESeq(EDecRC(v2), ..., EAtom($rc)))
+              so that ESeq returns the last expression ($rc), not the
+              last DecRC.  Use fold_right so decrefs wrap the atom. *)
+           let tmp = fresh_rc_var call_ret_ty in
+           let decrcs =
+             List.fold_right (fun v acc ->
+               Tir.ESeq (decrc_for v (Tir.AVar v), acc)
+             ) post_dec_vars (Tir.EAtom (Tir.AVar tmp))
+           in
+           Tir.ELet (tmp, e', decrcs))
     in
     let lb =
       live_after
@@ -342,9 +428,12 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     let (e2', live_into_e2) = insert_rc_expr e2 live_after in
     (* Check if v is dead in e2 *)
     let e2'' =
-      if not (StringSet.mem v.Tir.v_name live_into_e2) then
+      if not (StringSet.mem v.Tir.v_name live_into_e2)
+         && not (StringSet.mem v.Tir.v_name !_closure_fvs) then
         (* Dead binding — insert cleanup at start of e2.
-           Use atomic DecRC for actor-sent values (may be concurrently accessed). *)
+           Use atomic DecRC for actor-sent values (may be concurrently accessed).
+           Closure FVs are exempt: the closure holds the reference; the apply
+           function must not decrement values it does not own. *)
         if v.Tir.v_lin = Tir.Unr && needs_rc v.Tir.v_ty then
           Tir.ESeq (decrc_for v (Tir.AVar v), e2')
         else if v.Tir.v_lin = Tir.Lin || v.Tir.v_lin = Tir.Aff then
@@ -526,9 +615,13 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     Pre-computes the actor-sent variable set so that values sent across actor
     thread boundaries use atomic RC operations. *)
 let insert_rc ?(borrowed = StringSet.empty) (fn : Tir.fn_def) : Tir.fn_def =
-  _actor_sent := collect_actor_sent_vars fn.Tir.fn_body;
+  _actor_sent    := collect_actor_sent_vars fn.Tir.fn_body;
+  _current_fn_name := fn.Tir.fn_name;
+  _closure_fvs   := collect_closure_fvs fn;
   let (body', _) = insert_rc_expr fn.Tir.fn_body borrowed in
-  _actor_sent := StringSet.empty;
+  _actor_sent    := StringSet.empty;
+  _current_fn_name := "";
+  _closure_fvs   := StringSet.empty;
   { fn with Tir.fn_body = body' }
 
 (* ── Phase 3: RC Elision (cancel pairs) ──────────────────────────────────── *)

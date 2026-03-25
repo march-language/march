@@ -399,7 +399,22 @@ and lower_expr (e : Ast.expr) : Tir.expr =
           v_lin = lower_linearity p.param_lin }
       ) params in
     let body' = lower_expr body in
-    let ret_ty = ty_of_expr body in
+    (* Try to get the return type from the lambda body's span first.
+       When that span isn't in the type_map (e.g. desugared lambdas passed to
+       builtins), fall back to the lambda's own inferred type (lam_ty) which
+       the typechecker does annotate.  Without this fallback a lambda such as
+         fn conn -> run_pipeline(conn, plugs)
+       would get fn_ret_ty = TVar "_" → void LLVM return → result silently
+       dropped → NULL returned to the caller. *)
+    let ret_ty =
+      let from_body = ty_of_expr body in
+      match from_body with
+      | Tir.TVar "_" ->
+        (match lam_ty with
+         | Tir.TFn (_, r) -> r
+         | _ -> from_body)
+      | _ -> from_body
+    in
     let fn : Tir.fn_def = {
       fn_name; fn_params = params'; fn_ret_ty = ret_ty; fn_body = body'
     } in

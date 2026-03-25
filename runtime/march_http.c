@@ -1148,23 +1148,12 @@ static void *connection_thread(void *arg) {
         );
 
         /* 8. Call the pipeline: Conn -> Conn.
-         *    inc_rc the shared pipeline + captured vars before each call
-         *    (Perceus "borrow" pattern — callee dec_rcs its argument). */
+         *    inc_rc the shared pipeline closure before each call.
+         *    The closure's captured vars (plugs list etc.) are owned by the
+         *    closure itself — Perceus marks them as _closure_fvs and emits no
+         *    RC ops for them inside the apply function, so no per-request
+         *    incrc of the plugs nodes is needed or safe. */
         march_incrc(pipeline);
-        {
-            void *p = *(void **)(clo + 24);
-            while (p) {
-                march_incrc(p);
-                march_hdr *h = (march_hdr *)p;
-                if (h->tag == 1) {
-                    void *head = *(void **)((char *)p + 16);
-                    if (head) march_incrc(head);
-                    p = *(void **)((char *)p + 24);
-                } else {
-                    break;
-                }
-            }
-        }
         void *result_conn = fn(pipeline, conn);
 
         if (!result_conn) {
