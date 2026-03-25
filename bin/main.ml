@@ -720,6 +720,12 @@ let compile filename =
     let tir = March_tir.Mono.monomorphize tir in
     let tir = if !opt_enabled then March_tir.Fusion.run ~changed:(ref false) tir else tir in
     let tir = March_tir.Defun.defunctionalize tir in
+    (* Known-call pass: run before Perceus so apply functions are still pure
+       and eligible for inlining in the subsequent Opt fixed-point loop.
+       Also included in the Opt coordinator for cases revealed after Perceus. *)
+    let tir = if !opt_enabled
+              then March_tir.Known_call.run ~changed:(ref false) tir
+              else tir in
     let tir = March_tir.Perceus.perceus tir in
     let tir = March_tir.Escape.escape_analysis tir in
     let tir = if !opt_enabled then March_tir.Opt.run tir else tir in

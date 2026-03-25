@@ -3,7 +3,12 @@
     Alpha-renames inlined bodies to avoid variable capture.
     One level of inlining per iteration; chains handled by the fixed-point loop. *)
 
-let inline_size_threshold = 15
+(** Maximum TIR node count for a function to be considered for inlining.
+    Set higher than the original 15 to capture typical HTTP middleware helpers
+    (header accessors, conn builders) that are otherwise too large to inline.
+    Single-expression functions (node_count = 1) are always eligible regardless
+    of this threshold — they are handled by the size check implicitly. *)
+let inline_size_threshold = 50
 
 (** Count TIR nodes (approximate size). *)
 let rec node_count : Tir.expr -> int = function

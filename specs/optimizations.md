@@ -191,6 +191,42 @@ Detects chains of pure list operations where intermediate lists are single-use, 
 
 ---
 
+### 7b. Struct Update Fusion  ✅
+
+**Location:** `lib/tir/fusion.ml` (`run_struct`)
+**Stage:** TIR (Opt coordinator — after Defun, Perceus, Escape)
+
+Detects chains of record-update operations where each intermediate struct is
+single-use, and merges them into a single `EUpdate` that applies all field
+modifications at once.
+
+**Pattern:**
+```
+let conn1 = { conn0 | headers = h }
+let conn2 = { conn1 | status = 200 }     -- conn1 used exactly once
+→
+let conn2 = { conn0 | headers = h; status = 200 }
+```
+
+**Semantics:** When both updates touch the same field, the later write wins
+(`merge_fields` filters duplicates in favour of the downstream update).
+
+**Guards:** The intermediate variable must be used exactly once in the
+continuation (`use_count` check).  Multi-use intermediates are never fused
+(the base record copy would become observable).
+
+**Why it matters for March:** HTTP response building chains multiple helper
+functions (`put_resp_header |> put_resp_header |> text |> send_resp`) where
+each step takes a `Conn` record, modifies one field, and returns the updated
+struct.  Without fusion each step allocates a new copy of the Conn struct.
+Fusion collapses the entire chain to a single allocation with all fields set.
+
+**Effort:** Low (done) | **Impact:** High (HTTP/record-heavy code)
+**Dependencies:** Runs in the Opt coordinator; uses `use_count` from `fusion.ml`
+**Tests:** `struct_fusion` group in `test/test_march.ml`
+
+---
+
 ### 8. Self-TCO (Tail-Call to Loop)  ✅
 
 **Location:** `lib/tir/llvm_emit.ml` (`has_self_tail_call`, `emit_fn`)
@@ -308,16 +344,47 @@ end
 
 ---
 
-### P2 — Known-Call Optimization
+### P2 — Known-Call Optimization  ✅
 
-**Motivation:** When a higher-order argument is statically known (e.g., `List.map(xs, fn x -> x + 1)` where the lambda is visible at the call site), the indirect `ECallPtr` dispatch can be replaced with a direct `EApp` call to the lambda's lifted function.
+**Location:** `lib/tir/known_call.ml`
+**Stage:** TIR pass — runs between Defun and Perceus (for max inlining benefit),
+and again in the Opt coordinator fixed-point loop.
 
-**Why it matters for March:** After Defun, all closure calls go through `ECallPtr` dispatch. Known-call conversion restores direct calls where the closure is visible, enabling further inlining.
+After Defun, every lambda becomes a TDClosure struct allocated with `EAlloc`, and
+every call site becomes `ECallPtr` (indirect dispatch through a function pointer
+stored in field 0 of the struct).  When the closure variable is provably bound to a
+specific `EAlloc` in scope, the indirect dispatch is unnecessary:
 
-**Effort:** Medium | **Impact:** High (combined with Inline)
+```
+ELet(clo, EAlloc("$Clo_foo$N", [AVar(foo$apply$N); fv1; ...]), body)
+  body contains: ECallPtr(AVar clo, args)
+→
+  body contains: EApp(mk_var "foo$apply$N", [AVar clo] ++ args)
+```
+
+**What it detects:**
+- Heap-allocated closures: `ELet(v, EAlloc(TCon("$Clo_...", _), fn_ptr :: _), body)`
+- Stack-promoted closures (after Escape): same pattern with `EStackAlloc`
+- Both covered by `is_clo_name` prefix check
+
+**Pipeline interaction:** Running before Perceus means the apply functions (which
+consist of `EField` loads — pure) are still pure and eligible for inlining by
+`inline.ml`.  Running again in the Opt loop catches closures revealed by other
+optimizations after Perceus/Escape.
+
+**Inline threshold update:** `inline.ml` threshold raised from 15 → 50 TIR nodes
+to cover typical HTTP middleware helpers (header accessors, Conn builders) that are
+slightly larger than utility functions but still profitable to inline.
+
+**Why it matters for March:** HTTP middleware pipelines pass closures (plug handlers)
+as arguments.  Without known-call, every plug dispatch is an indirect call through a
+function pointer loaded from a heap struct — unpredictable for the branch predictor
+and invisible to the inliner.  With known-call, the dispatch becomes a direct call
+that can then be inlined.
+
+**Effort:** Medium (done) | **Impact:** High (combined with Inline)
 **Dependencies:** After Defun; feeds into Inline
-**Stage:** TIR pass, between Defun and Opt
-**Status:** Planned — `lib/tir/known_call.ml`
+**Tests:** `known_call` group in `test/test_march.ml`
 
 ---
 

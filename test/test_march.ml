@@ -6842,6 +6842,197 @@ let test_inline_mutual_recursion_not_inlined () =
   let _ = March_tir.Inline.run ~changed m in
   Alcotest.(check bool) "not changed (mutually recursive)" false !changed
 
+(* ── Known-call optimization ─────────────────────────────────────── *)
+
+(** Helper: build an EAlloc for a Defun-style closure struct.
+    apply_name is the lifted apply function.  clo_struct_name is "$Clo_foo$N". *)
+let mk_closure_alloc clo_struct_name apply_name =
+  let fn_ptr_atom = March_tir.Tir.AVar
+    (mk_var apply_name (March_tir.Tir.TPtr March_tir.Tir.TUnit)) in
+  March_tir.Tir.EAlloc
+    (March_tir.Tir.TCon (clo_struct_name, []),
+     [fn_ptr_atom])
+
+(** A closure created and immediately called via ECallPtr should be
+    rewritten to a direct EApp. *)
+let test_known_call_direct () =
+  let changed = ref false in
+  (* let clo = EAlloc("$Clo_foo$0", [fn_ptr]) in ECallPtr(clo, [5]) *)
+  let clo_var = mk_var "clo" (March_tir.Tir.TCon ("$Clo_foo$0", [])) in
+  let alloc = mk_closure_alloc "$Clo_foo$0" "foo$apply$0" in
+  let callptr = March_tir.Tir.ECallPtr
+    (March_tir.Tir.AVar clo_var, [ilit 5]) in
+  let body = March_tir.Tir.ELet (clo_var, alloc, callptr) in
+  let m = mk_module [mk_fn "main" body] in
+  let m' = March_tir.Known_call.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (* The ECallPtr should be gone — inner expression should be EApp *)
+  let main_body = (List.find (fun fd -> fd.March_tir.Tir.fn_name = "main")
+                    m'.March_tir.Tir.tm_fns).March_tir.Tir.fn_body in
+  (match main_body with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EApp (f, _)) ->
+     Alcotest.(check string) "apply fn name" "foo$apply$0" f.March_tir.Tir.v_name
+   | other ->
+     Alcotest.failf "expected ELet(_,EAlloc,EApp), got: %s"
+       (March_tir.Tir.show_expr other))
+
+(** ECallPtr on a variable NOT in the known-closure map stays unchanged. *)
+let test_known_call_unknown_unchanged () =
+  let changed = ref false in
+  let v = mk_var "f" (March_tir.Tir.TPtr March_tir.Tir.TUnit) in
+  let callptr = March_tir.Tir.ECallPtr (March_tir.Tir.AVar v, [ilit 1]) in
+  let m = mk_module [mk_fn "main" callptr] in
+  let _ = March_tir.Known_call.run ~changed m in
+  Alcotest.(check bool) "not changed (unknown closure)" false !changed
+
+(** Two consecutive closures in the same scope are both tracked. *)
+let test_known_call_two_closures () =
+  let changed = ref false in
+  let clo1 = mk_var "clo1" (March_tir.Tir.TCon ("$Clo_f$0", [])) in
+  let clo2 = mk_var "clo2" (March_tir.Tir.TCon ("$Clo_g$1", [])) in
+  let alloc1 = mk_closure_alloc "$Clo_f$0" "f$apply$0" in
+  let alloc2 = mk_closure_alloc "$Clo_g$1" "g$apply$1" in
+  (* let clo1 = EAlloc($Clo_f$0)
+     let clo2 = EAlloc($Clo_g$1)
+     ECallPtr(clo1, []) *)
+  let body =
+    March_tir.Tir.ELet (clo1, alloc1,
+      March_tir.Tir.ELet (clo2, alloc2,
+        March_tir.Tir.ECallPtr (March_tir.Tir.AVar clo1, []))) in
+  let m = mk_module [mk_fn "main" body] in
+  let m' = March_tir.Known_call.run ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (* Inner expression should reference f$apply$0 *)
+  let inner = match (List.hd m'.March_tir.Tir.tm_fns).March_tir.Tir.fn_body with
+    | March_tir.Tir.ELet (_, _, March_tir.Tir.ELet (_, _, e)) -> e
+    | _ -> Alcotest.fail "unexpected structure" in
+  (match inner with
+   | March_tir.Tir.EApp (f, _) ->
+     Alcotest.(check string) "apply fn" "f$apply$0" f.March_tir.Tir.v_name
+   | _ -> Alcotest.fail "expected EApp")
+
+(** Stack-allocated closures (after Escape) are also recognized. *)
+let test_known_call_stack_alloc () =
+  let changed = ref false in
+  let clo_var = mk_var "clo" (March_tir.Tir.TCon ("$Clo_h$2", [])) in
+  let fn_ptr_atom = March_tir.Tir.AVar
+    (mk_var "h$apply$2" (March_tir.Tir.TPtr March_tir.Tir.TUnit)) in
+  let stack_alloc = March_tir.Tir.EStackAlloc
+    (March_tir.Tir.TCon ("$Clo_h$2", []), [fn_ptr_atom]) in
+  let callptr = March_tir.Tir.ECallPtr (March_tir.Tir.AVar clo_var, [ilit 42]) in
+  let body = March_tir.Tir.ELet (clo_var, stack_alloc, callptr) in
+  let m = mk_module [mk_fn "main" body] in
+  let _ = March_tir.Known_call.run ~changed m in
+  Alcotest.(check bool) "changed (stack-allocated closure)" true !changed
+
+(* ── Struct update fusion ────────────────────────────────────────── *)
+
+(** Two consecutive record updates on the same base record, with the
+    intermediate variable used exactly once, should be merged. *)
+let test_struct_fusion_two_updates () =
+  let changed = ref false in
+  let conn0 = mk_var "conn0" March_tir.Tir.TUnit in
+  let conn1 = mk_var "conn1" March_tir.Tir.TUnit in
+  let conn2 = mk_var "conn2" March_tir.Tir.TUnit in
+  let h_atom = ilit 200 in
+  let s_atom = ilit 42 in
+  (* let conn1 = { conn0 | status = 200 }
+     let conn2 = { conn1 | body_size = 42 }
+     conn2 *)
+  let body =
+    March_tir.Tir.ELet (conn1,
+      March_tir.Tir.EUpdate (March_tir.Tir.AVar conn0, [("status", h_atom)]),
+      March_tir.Tir.ELet (conn2,
+        March_tir.Tir.EUpdate (March_tir.Tir.AVar conn1, [("body_size", s_atom)]),
+        March_tir.Tir.EAtom (March_tir.Tir.AVar conn2))) in
+  let m = mk_module [mk_fn "f" body] in
+  let m' = March_tir.Fusion.run_struct ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (* Result: ELet(conn2, EUpdate(conn0, [(status,200);(body_size,42)]), conn2) *)
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, March_tir.Tir.EUpdate (March_tir.Tir.AVar base, fields), _) ->
+     Alcotest.(check string) "base variable" "conn0" base.March_tir.Tir.v_name;
+     Alcotest.(check int)    "merged field count" 2 (List.length fields)
+   | other ->
+     Alcotest.failf "expected merged EUpdate, got: %s"
+       (March_tir.Tir.show_expr other))
+
+(** Three consecutive updates should be collapsed into one after two
+    fixed-point iterations (each iteration collapses one pair). *)
+let test_struct_fusion_three_updates () =
+  let changed = ref false in
+  let b  = mk_var "b"  March_tir.Tir.TUnit in
+  let v1 = mk_var "v1" March_tir.Tir.TUnit in
+  let v2 = mk_var "v2" March_tir.Tir.TUnit in
+  let v3 = mk_var "v3" March_tir.Tir.TUnit in
+  let body =
+    March_tir.Tir.ELet (v1,
+      March_tir.Tir.EUpdate (March_tir.Tir.AVar b,  [("a", ilit 1)]),
+      March_tir.Tir.ELet (v2,
+        March_tir.Tir.EUpdate (March_tir.Tir.AVar v1, [("b", ilit 2)]),
+        March_tir.Tir.ELet (v3,
+          March_tir.Tir.EUpdate (March_tir.Tir.AVar v2, [("c", ilit 3)]),
+          March_tir.Tir.EAtom (March_tir.Tir.AVar v3)))) in
+  let m = mk_module [mk_fn "f" body] in
+  (* Run twice to fully collapse the 3-step chain *)
+  let m' = March_tir.Fusion.run_struct ~changed m in
+  let m'' = March_tir.Fusion.run_struct ~changed m' in
+  (match first_body m'' with
+   | March_tir.Tir.ELet (_, March_tir.Tir.EUpdate (March_tir.Tir.AVar base, fields), _) ->
+     Alcotest.(check string) "base variable" "b" base.March_tir.Tir.v_name;
+     Alcotest.(check int)    "all three fields merged" 3 (List.length fields)
+   | other ->
+     Alcotest.failf "expected single merged EUpdate, got: %s"
+       (March_tir.Tir.show_expr other))
+
+(** Later updates on the same field override earlier ones. *)
+let test_struct_fusion_field_override () =
+  let changed = ref false in
+  let b  = mk_var "b"  March_tir.Tir.TUnit in
+  let v1 = mk_var "v1" March_tir.Tir.TUnit in
+  let v2 = mk_var "v2" March_tir.Tir.TUnit in
+  (* let v1 = { b | x = 1 }; let v2 = { v1 | x = 99 }; v2
+     After fusion: let v2 = { b | x = 99 }  — second write wins *)
+  let body =
+    March_tir.Tir.ELet (v1,
+      March_tir.Tir.EUpdate (March_tir.Tir.AVar b,  [("x", ilit 1)]),
+      March_tir.Tir.ELet (v2,
+        March_tir.Tir.EUpdate (March_tir.Tir.AVar v1, [("x", ilit 99)]),
+        March_tir.Tir.EAtom (March_tir.Tir.AVar v2))) in
+  let m = mk_module [mk_fn "f" body] in
+  let m' = March_tir.Fusion.run_struct ~changed m in
+  Alcotest.(check bool) "changed" true !changed;
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, March_tir.Tir.EUpdate (_, fields), _) ->
+     Alcotest.(check int) "deduplicated: only one x field" 1 (List.length fields);
+     let (_, v) = List.find (fun (k, _) -> k = "x") fields in
+     Alcotest.(check string) "second value wins"
+       "(Tir.ALit (Ast.LitInt 99))"
+       (March_tir.Tir.show_atom v)
+   | other ->
+     Alcotest.failf "expected merged EUpdate, got: %s"
+       (March_tir.Tir.show_expr other))
+
+(** Multi-use intermediate must NOT be fused. *)
+let test_struct_fusion_no_fuse_multi_use () =
+  let changed = ref false in
+  let b  = mk_var "b"  March_tir.Tir.TUnit in
+  let v1 = mk_var "v1" March_tir.Tir.TUnit in
+  let v2 = mk_var "v2" March_tir.Tir.TUnit in
+  (* v1 is used twice — in the EUpdate and in the final EAtom *)
+  let body =
+    March_tir.Tir.ELet (v1,
+      March_tir.Tir.EUpdate (March_tir.Tir.AVar b, [("x", ilit 1)]),
+      March_tir.Tir.ELet (v2,
+        March_tir.Tir.EUpdate (March_tir.Tir.AVar v1, [("y", ilit 2)]),
+        (* Use v1 a second time — blocks fusion *)
+        March_tir.Tir.ESeq (
+          March_tir.Tir.EAtom (March_tir.Tir.AVar v1),
+          March_tir.Tir.EAtom (March_tir.Tir.AVar v2)))) in
+  let m = mk_module [mk_fn "f" body] in
+  let _ = March_tir.Fusion.run_struct ~changed m in
+  Alcotest.(check bool) "not changed (multi-use)" false !changed
+
 (* ── Dead code elimination ───────────────────────────────────────── *)
 
 let test_dce_dead_pure_let () =
@@ -16031,6 +16222,18 @@ let () =
         Alcotest.test_case "impure_not_inlined"    `Quick test_inline_impure_not_inlined;
         Alcotest.test_case "recursive_not_inlined" `Quick test_inline_recursive_not_inlined;
         Alcotest.test_case "mutual_recursion_not_inlined" `Quick test_inline_mutual_recursion_not_inlined;
+      ]);
+      ("known_call", [
+        Alcotest.test_case "direct"          `Quick test_known_call_direct;
+        Alcotest.test_case "unknown_unchanged" `Quick test_known_call_unknown_unchanged;
+        Alcotest.test_case "two_closures"    `Quick test_known_call_two_closures;
+        Alcotest.test_case "stack_alloc"     `Quick test_known_call_stack_alloc;
+      ]);
+      ("struct_fusion", [
+        Alcotest.test_case "two_updates"       `Quick test_struct_fusion_two_updates;
+        Alcotest.test_case "three_updates"     `Quick test_struct_fusion_three_updates;
+        Alcotest.test_case "field_override"    `Quick test_struct_fusion_field_override;
+        Alcotest.test_case "no_fuse_multi_use" `Quick test_struct_fusion_no_fuse_multi_use;
       ]);
       ("dce", [
         Alcotest.test_case "dead_pure_let"       `Quick test_dce_dead_pure_let;

@@ -675,3 +675,64 @@ let run ~(changed : bool ref) (m : Tir.tir_module) : Tir.tir_module =
         fuse_expr m.Tir.tm_types new_fns_acc ~changed fd.Tir.fn_body }
   ) m.Tir.tm_fns in
   { m with Tir.tm_fns = List.rev !new_fns_acc @ fns' }
+
+(* ── Struct update chain fusion ──────────────────────────────────────────── *)
+
+(** Merge two field-update lists.  When both lists update the same field, the
+    second list (later in the pipeline) wins — its value overwrites the first. *)
+let merge_fields
+    (fields1 : (string * Tir.atom) list)
+    (fields2 : (string * Tir.atom) list)
+    : (string * Tir.atom) list =
+  let keys2 = List.map fst fields2 in
+  let filtered1 = List.filter (fun (k, _) -> not (List.mem k keys2)) fields1 in
+  filtered1 @ fields2
+
+(** Fuse a chain of record-update bindings where each intermediate struct is
+    used exactly once.
+
+    Pattern matched (2-step):
+      ELet(v2, EUpdate(AVar v1, fields1),
+        ELet(v3, EUpdate(AVar v2, fields2), rest))
+      when v2 is used exactly once in the body
+      →
+      ELet(v3, EUpdate(AVar v1, merge_fields fields1 fields2), rest)
+
+    The rewriter recurses so that longer chains (v1→v2→v3→v4) are collapsed
+    incrementally across multiple passes of the fixed-point loop. *)
+let rec fuse_struct_expr ~changed : Tir.expr -> Tir.expr = function
+
+  (* ── 2-step chain: let v2 = {v1 | f1}; let v3 = {v2 | f2}; rest ──── *)
+  | Tir.ELet (v2, Tir.EUpdate (Tir.AVar v1, fields1),
+      (Tir.ELet (v3, Tir.EUpdate (Tir.AVar v2', fields2), rest) as body2))
+    when v2.Tir.v_name = v2'.Tir.v_name
+      && use_count v2.Tir.v_name body2 = 1 ->
+    changed := true;
+    (* Merge fields and recurse so further chains are collapsed *)
+    fuse_struct_expr ~changed
+      (Tir.ELet (v3, Tir.EUpdate (Tir.AVar v1, merge_fields fields1 fields2), rest))
+
+  (* ── Recurse into all other forms ──────────────────────────────────── *)
+  | Tir.ELet (v, rhs, body) ->
+    Tir.ELet (v, fuse_struct_expr ~changed rhs, fuse_struct_expr ~changed body)
+  | Tir.ELetRec (fns, body) ->
+    Tir.ELetRec (
+      List.map (fun fd ->
+        { fd with Tir.fn_body = fuse_struct_expr ~changed fd.Tir.fn_body }) fns,
+      fuse_struct_expr ~changed body)
+  | Tir.ECase (a, branches, default) ->
+    Tir.ECase (a,
+      List.map (fun b ->
+        { b with Tir.br_body = fuse_struct_expr ~changed b.Tir.br_body }) branches,
+      Option.map (fuse_struct_expr ~changed) default)
+  | Tir.ESeq (e1, e2) ->
+    Tir.ESeq (fuse_struct_expr ~changed e1, fuse_struct_expr ~changed e2)
+  | other -> other
+
+(** Module-level struct-update fusion pass.
+    Pipeline position: Opt coordinator (after Defun/Perceus/Escape).
+    Runs in the fixed-point loop alongside Inline/CProp/Fold/Simplify/DCE. *)
+let run_struct ~(changed : bool ref) (m : Tir.tir_module) : Tir.tir_module =
+  { m with Tir.tm_fns = List.map (fun fd ->
+    { fd with Tir.fn_body = fuse_struct_expr ~changed fd.Tir.fn_body }
+  ) m.Tir.tm_fns }
