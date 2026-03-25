@@ -16,6 +16,16 @@
  *   offset 16: char     data[]   (null-terminated)
  */
 #include "march_http.h"
+#include "march_http_parse_simd.h"
+
+/* ── SIMD HTTP parser feature gate ────────────────────────────────────
+ * Define MARCH_HTTP_DISABLE_SIMD to force the legacy scalar parser path.
+ * By default the SIMD parser (march_http_parse_simd.c) is used; it falls
+ * back to scalar automatically on non-SSE4.2 CPUs.
+ */
+#if !defined(MARCH_HTTP_DISABLE_SIMD)
+#  define MARCH_HTTP_USE_SIMD 1
+#endif
 
 #include <sys/socket.h>
 #include <sys/select.h>
@@ -321,14 +331,52 @@ void *march_tcp_connect(void *host_ptr, int64_t port) {
  *       or Err(reason_str)
  *
  * Result tag layout:  Err=0, Ok=1  (Result = Err | Ok in declaration order)
+ *
+ * When MARCH_HTTP_USE_SIMD is defined (default), delegates to the SIMD-
+ * accelerated parser in march_http_parse_simd.c, then converts the raw C
+ * string slices into March heap objects.  Define MARCH_HTTP_DISABLE_SIMD
+ * to use the legacy scalar path instead.
  */
 void *march_http_parse_request(void *raw_string) {
     if (!raw_string) return make_err("null input");
     march_string *raw = (march_string *)raw_string;
+    const char *data     = raw->data;
+    size_t      data_len = (size_t)raw->len;
 
-    /* Find end of headers */
-    const char *data = raw->data;
-    size_t data_len = (size_t)raw->len;
+#if defined(MARCH_HTTP_USE_SIMD)
+    /* ── SIMD fast path ─────────────────────────────────────────────── */
+    march_http_request_t parsed;
+    int result = march_http_parse_request_simd(data, data_len, &parsed);
+    if (result < 0) return make_err("malformed request");
+    if (result == 0) return make_err("incomplete request");
+
+    /* Convert method and path to March strings */
+    void *method_str = march_string_lit(parsed.method,
+                                        (int64_t)parsed.method_len);
+    void *path_str   = march_string_lit(parsed.path,
+                                        (int64_t)parsed.path_len);
+
+    /* Build header list (prepend each header → reverse order,
+     * matching the legacy scalar path behaviour) */
+    void *headers = make_nil();
+    for (size_t i = 0; i < parsed.num_headers; i++) {
+        const march_http_header_t *h = &parsed.headers[i];
+        void *hname = march_string_lit(h->name,  (int64_t)h->name_len);
+        void *hval  = march_string_lit(h->value, (int64_t)h->value_len);
+        void *hdr   = make_header(hname, hval);
+        headers     = make_cons(hdr, headers);
+    }
+
+    /* Body is everything after the header section */
+    const char *body_start = data + parsed.header_end;
+    size_t       body_len  = data_len > parsed.header_end
+                             ? data_len - parsed.header_end : 0;
+    void *body_str = march_string_lit(body_start, (int64_t)body_len);
+
+    void *tup = make_tuple4(method_str, path_str, headers, body_str);
+    return make_ok(tup);
+
+#else /* MARCH_HTTP_DISABLE_SIMD — legacy scalar path */
 
     /* Find \r\n\r\n */
     size_t hdr_end = 0;
@@ -343,10 +391,9 @@ void *march_http_parse_request(void *raw_string) {
     }
     if (!found) hdr_end = data_len;
 
-    /* Parse request line: "METHOD PATH HTTP/1.x\r\n" */
+    /* Parse request line */
     const char *p = data;
     const char *eol = NULL;
-    /* Find first \r\n */
     for (size_t i = 0; i < hdr_end; i++) {
         if (data[i] == '\r' && data[i+1] == '\n') {
             eol = data + i;
@@ -355,59 +402,49 @@ void *march_http_parse_request(void *raw_string) {
     }
     if (!eol) return make_err("malformed request line");
 
-    /* Extract method */
     const char *sp1 = memchr(p, ' ', (size_t)(eol - p));
     if (!sp1) return make_err("missing method");
     void *method_str = march_string_lit(p, (int64_t)(sp1 - p));
 
-    /* Extract path (may include query string) */
     const char *path_start = sp1 + 1;
     const char *sp2 = memchr(path_start, ' ', (size_t)(eol - path_start));
     if (!sp2) sp2 = eol;
     void *path_str = march_string_lit(path_start, (int64_t)(sp2 - path_start));
 
-    /* Parse header lines */
-    void *headers = make_nil();  /* start with Nil */
-    /* We'll build the list in reverse order, then it doesn't matter for this use case */
-    const char *line = eol + 2;  /* skip \r\n after request line */
+    void *headers = make_nil();
+    const char *line = eol + 2;
     const char *headers_end = found ? (data + hdr_end) : (data + data_len);
     while (line < headers_end) {
-        /* Find end of this header line */
         const char *line_end = line;
         while (line_end < headers_end - 1 &&
                !(line_end[0] == '\r' && line_end[1] == '\n'))
             line_end++;
-        if (line_end == line) break;   /* blank line */
+        if (line_end == line) break;
 
-        /* Split at first ':' */
         const char *colon = memchr(line, ':', (size_t)(line_end - line));
         if (colon) {
-            /* Name: trim whitespace */
             void *hname = march_string_lit(line, (int64_t)(colon - line));
-            /* Value: skip ': ' */
             const char *val_start = colon + 1;
             while (val_start < line_end && *val_start == ' ') val_start++;
-            /* Trim trailing whitespace from value */
             const char *val_end = line_end;
             while (val_end > val_start &&
                    (val_end[-1] == ' ' || val_end[-1] == '\r'))
                 val_end--;
             void *hval = march_string_lit(val_start, (int64_t)(val_end - val_start));
             void *hdr  = make_header(hname, hval);
-            headers = make_cons(hdr, headers);  /* prepend — reverse order */
+            headers = make_cons(hdr, headers);
         }
-        line = line_end + 2;  /* skip \r\n */
+        line = line_end + 2;
     }
 
-    /* Extract body */
     const char *body_start = found ? (data + hdr_end + 4) : (data + data_len);
     size_t body_len = (size_t)(data + data_len - body_start);
     if (body_start > data + data_len) body_len = 0;
     void *body_str = march_string_lit(body_start, (int64_t)body_len);
 
-    /* Build Ok(tuple(method, path, headers, body)) */
     void *tup = make_tuple4(method_str, path_str, headers, body_str);
     return make_ok(tup);
+#endif /* MARCH_HTTP_USE_SIMD */
 }
 
 /* Serialize an HTTP/1.1 response.

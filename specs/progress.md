@@ -161,6 +161,7 @@ march/
 ├── runtime/
 │   ├── march_runtime.c/h    # Core runtime: alloc, RC, strings, actors, value_to_string
 │   ├── march_http.c/h       # HTTP/WS runtime: TCP, HTTP parse/serialize, server, WebSocket
+│   ├── march_http_parse_simd.c/h  # SIMD-accelerated HTTP/1.x parser (SSE4.2 fast path + scalar fallback)
 │   ├── sha1.c               # SHA-1 for WebSocket handshake
 │   └── base64.c             # Base64 for WebSocket handshake
 │   ├── search/
@@ -212,7 +213,7 @@ march/
     └── test/test_forge.exe   # 15 tests (scaffold, toml)
 ```
 
-## Current State (as of 2026-03-25, post FBIP reuse fix + Perceus post-call DecRC correctness fix)
+## Current State (as of 2026-03-25, post SIMD HTTP parser)
 
 - **Builds clean**
 - **1321 tests across 9 dune suites; 37 known pre-existing failures** (+5 mutual_tco_codegen + 10 borrow_inference + 8 known_call/struct_fusion + 6 escape_analysis) (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis**):
@@ -257,6 +258,7 @@ march/
 - **Actor handler return type checking** — handlers statically verified to return correct state record type
 - **Linear/affine propagation through record fields** — `EField` access on a linear field consumes it; `EUpdate` respects per-field linearity
 - **Field-index map for records** — `field_index_for` in `llvm_emit.ml` (line 762); all field GEP offsets correct
+- **SIMD HTTP parser** — `runtime/march_http_parse_simd.c` (+ `.h`): SSE4.2 PCMPESTRI fast path processes 16 bytes/cycle to locate delimiters; `__attribute__((target("sse4.2")))` guards on all SIMD helpers; scalar fallback always compiled in (via `#if defined(__SSE4_2__)`). Clean C API: `march_http_parse_request_simd(buf, len, &req)` returns consumed byte count (>0), 0 for incomplete, -1 for error; `march_http_parse_pipelined` parses multiple pipelined requests from one buffer. `march_http.c` uses SIMD parser by default (feature-gated with `MARCH_HTTP_USE_SIMD`; disable with `-DMARCH_HTTP_DISABLE_SIMD`). 20 C tests in `test/test_http_simd.c` (GET/POST, pipelined ×3, malformed ×4, partial ×2, header whitespace, many headers, header limit, TechEmpower plaintext pattern). Compiles cleanly with `-msse4.2` on x86-64; ARM64 uses scalar path without warnings (`-Wno-unused-command-line-argument`).
 - **Atomic refcounting** — C11 atomics (`atomic_fetch_add/sub_explicit`) in `march_runtime.c`; RC thread-safe
 - **Actor TIR lowering** — `lower_actor` in `lib/tir/lower.ml`; actors compile to native code via `ESpawn`/`ESend` lowering
 - **Type-level natural number constraint solver (v1)** — `normalize_tnat` reduces concrete arithmetic (`2+3→5`, `(1+2)*3→9`) and identity/annihilation rules (`n+0→n`, `n*0→0`, `n*1→n`); `solve_nat_eq` in `unify` solves linear equations (`a+2=5 → a=3`, `a*k=n` when divisible); parser extended with `ty_nat_add`/`ty_nat_mul` levels and integer literals in type position; 9 tests in `type_level_nat` group
