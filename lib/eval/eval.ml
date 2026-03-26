@@ -41,6 +41,7 @@ type value =
   | VNativeIntArr   of int array        (** Flat OCaml int array — fast numeric loops *)
   | VNativeFloatArr of float array      (** Flat OCaml float array — fast numeric loops *)
   | VTypedArray of value array          (** Contiguous typed array for columnar DataFrame storage *)
+  | VVaultHandle of int                 (** Opaque handle into vault_registry *)
 
 (** One endpoint of a binary session-typed channel.
     Each channel consists of two linked endpoints; one side's [ce_out_q]
@@ -146,6 +147,33 @@ type task_entry = {
 
 let task_registry : (int, task_entry) Hashtbl.t = Hashtbl.create 16
 let next_task_id : int ref = ref 0
+
+(** Vault: ETS-like in-memory key-value store.
+    Each table is identified by an opaque integer handle.
+    Entries optionally carry an expiry timestamp (Unix time as float).
+    Expiry is checked lazily on read/update — no background sweeper needed. *)
+type vault_row = {
+  vr_value  : value;
+  vr_expiry : float option;  (** None = permanent; Some t = expires at Unix time t *)
+}
+
+type vault_table = {
+  vt_id   : int;
+  vt_name : string;
+  vt_data : (string, vault_row) Hashtbl.t;
+  (** Keys are canonical string representations of March values so that
+      heterogeneous key types (Int, String, Atom, Bool, Tuple, Ctor) are
+      all supported without a custom hash. *)
+}
+
+let vault_registry  : (int, vault_table) Hashtbl.t = Hashtbl.create 8
+let vault_next_id   : int ref = ref 0
+
+(** True if a row is still live (not expired). *)
+let vault_row_live (row : vault_row) : bool =
+  match row.vr_expiry with
+  | None   -> true
+  | Some t -> Unix.gettimeofday () < t
 
 (** Doc registry: fully-qualified name → doc string.
     Populated when [eval_decl] encounters a [DFn] with [fn_doc = Some s]. *)
@@ -429,6 +457,35 @@ let check_reductions () : unit =
 
 let eval_error fmt = Printf.ksprintf (fun s -> raise (Eval_error s)) fmt
 
+(** Canonical string key for a March value used in vault tables.
+    Panics if called with a non-serialisable value (function, pid, …). *)
+let rec vault_key_of_value (v : value) : string =
+  match v with
+  | VInt n    -> Printf.sprintf "i:%d" n
+  | VFloat f  -> Printf.sprintf "f:%h" f
+  | VString s -> Printf.sprintf "s:%d:%s" (String.length s) s
+  | VBool b   -> if b then "b:true" else "b:false"
+  | VAtom a   -> Printf.sprintf "a:%s" a
+  | VUnit     -> "u:"
+  | VTuple vs ->
+    Printf.sprintf "t:(%s)" (String.concat "," (List.map vault_key_of_value vs))
+  | VCon (tag, []) -> Printf.sprintf "c:%s" tag
+  | VCon (tag, args) ->
+    Printf.sprintf "c:%s(%s)" tag (String.concat "," (List.map vault_key_of_value args))
+  | _ ->
+    eval_error "Vault: key must be a plain value (Int/String/Bool/Atom/Tuple/Ctor), got %s"
+      (match v with
+       | VClosure _ | VBuiltin _ -> "a function"
+       | VPid _    -> "a Pid"
+       | VTask _   -> "a Task"
+       | _         -> "an unsupported value")
+
+(** Resolve a vault handle; panics with a clear message on bad handles. *)
+let vault_lookup (id : int) : vault_table =
+  match Hashtbl.find_opt vault_registry id with
+  | None     -> eval_error "Vault: invalid table handle %d" id
+  | Some tbl -> tbl
+
 (* ------------------------------------------------------------------ *)
 (* Pattern matching                                                    *)
 (* ------------------------------------------------------------------ *)
@@ -646,6 +703,10 @@ let rec value_to_string v =
   | VTypedArray arr ->
     let elems = Array.to_list arr in
     "[|" ^ String.concat ", " (List.map value_to_string elems) ^ "|]"
+  | VVaultHandle id ->
+    (match Hashtbl.find_opt vault_registry id with
+     | Some t -> Printf.sprintf "Vault(\"%s\"#%d)" t.vt_name id
+     | None   -> Printf.sprintf "Vault(#%d)" id)
 
 (** Pretty-print a value with indented multi-line layout when the flat
     representation exceeds [width] characters.
@@ -4162,6 +4223,85 @@ let base_env : env =
           VUnit
         | _ -> eval_error "logger_write: expected (String, String, List, List)"))
 
+  (* ── Vault builtins ──────────────────────────────────────────────────────
+     Vault is an ETS-like per-node in-memory KV store.
+     Tables are created once (at startup or on demand) and shared globally.
+     Keys are any plain March value; values are arbitrary.
+     Per-key TTL is supported via vault_set_ttl; expiry is checked lazily. *)
+
+  ; ("vault_new", VBuiltin ("vault_new", function
+      | [VString name] ->
+        let id = !vault_next_id in
+        incr vault_next_id;
+        let tbl = { vt_id = id; vt_name = name;
+                    vt_data = Hashtbl.create 16 } in
+        Hashtbl.replace vault_registry id tbl;
+        VVaultHandle id
+      | _ -> eval_error "vault_new: expected String (table name)"))
+
+  ; ("vault_set", VBuiltin ("vault_set", function
+      | [VVaultHandle id; key; v] ->
+        let tbl = vault_lookup id in
+        let k = vault_key_of_value key in
+        Hashtbl.replace tbl.vt_data k { vr_value = v; vr_expiry = None };
+        VUnit
+      | _ -> eval_error "vault_set: expected (VaultTable, key, value)"))
+
+  ; ("vault_set_ttl", VBuiltin ("vault_set_ttl", function
+      | [VVaultHandle id; key; v; VInt ttl_secs] ->
+        let tbl = vault_lookup id in
+        let k = vault_key_of_value key in
+        let expiry = Unix.gettimeofday () +. float_of_int ttl_secs in
+        Hashtbl.replace tbl.vt_data k { vr_value = v; vr_expiry = Some expiry };
+        VUnit
+      | _ -> eval_error "vault_set_ttl: expected (VaultTable, key, value, Int)"))
+
+  ; ("vault_get", VBuiltin ("vault_get", function
+      | [VVaultHandle id; key] ->
+        let tbl = vault_lookup id in
+        let k = vault_key_of_value key in
+        (match Hashtbl.find_opt tbl.vt_data k with
+         | None -> VCon ("None", [])
+         | Some row when not (vault_row_live row) ->
+           Hashtbl.remove tbl.vt_data k;
+           VCon ("None", [])
+         | Some row -> VCon ("Some", [row.vr_value]))
+      | _ -> eval_error "vault_get: expected (VaultTable, key)"))
+
+  ; ("vault_drop", VBuiltin ("vault_drop", function
+      | [VVaultHandle id; key] ->
+        let tbl = vault_lookup id in
+        let k = vault_key_of_value key in
+        Hashtbl.remove tbl.vt_data k;
+        VUnit
+      | _ -> eval_error "vault_drop: expected (VaultTable, key)"))
+
+  ; ("vault_update", VBuiltin ("vault_update", function
+      | [VVaultHandle id; key; f] ->
+        let tbl = vault_lookup id in
+        let k = vault_key_of_value key in
+        (match Hashtbl.find_opt tbl.vt_data k with
+         | None -> VUnit  (* no-op when key is absent *)
+         | Some row when not (vault_row_live row) ->
+           Hashtbl.remove tbl.vt_data k;
+           VUnit
+         | Some row ->
+           let new_val = !apply_hook f [row.vr_value] in
+           Hashtbl.replace tbl.vt_data k { row with vr_value = new_val };
+           VUnit)
+      | _ -> eval_error "vault_update: expected (VaultTable, key, fn)"))
+
+  ; ("vault_size", VBuiltin ("vault_size", function
+      | [VVaultHandle id] ->
+        let tbl = vault_lookup id in
+        (* Prune expired entries while counting *)
+        let count = Hashtbl.fold (fun k row acc ->
+          if vault_row_live row then acc + 1
+          else (Hashtbl.remove tbl.vt_data k; acc)
+        ) tbl.vt_data 0 in
+        VInt count
+      | _ -> eval_error "vault_size: expected VaultTable"))
+
   (* ---- Actor.call / Actor.cast ---- *)
   (* actor_cast: fire-and-forget async message to an actor. *)
   ; ("actor_cast", VBuiltin ("actor_cast", function
@@ -4946,7 +5086,9 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear pending_replies;
   next_call_ref := 0;
   logger_level := 1;
-  logger_context := []
+  logger_context := [];
+  Hashtbl.clear vault_registry;
+  vault_next_id := 0
 
 (* NOTE: debug_ctx actor event logging is intentionally not reproduced here.
    The old ESend recorded ame_state_before/ame_state_after. When actor debug

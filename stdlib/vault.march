@@ -1,0 +1,85 @@
+-- Vault module: ETS-like in-memory key-value store.
+--
+-- Vault tables are mutable, process-global hash tables.  They are created
+-- once (typically at app startup) and shared across all actors without
+-- message passing — every actor that holds the same VaultTable handle sees
+-- the same data.
+--
+-- Keys can be any plain value: Int, String, Bool, Atom, Tuple, or Ctor.
+-- Function values, Pids, and Tasks cannot be used as keys.
+--
+-- Values are arbitrary March values.
+--
+-- Basic operations:
+--   Vault.new(name)                      — create a named table
+--   Vault.set(table, key, value)         — insert or overwrite
+--   Vault.set_ttl(table, key, value, s)  — insert with TTL in seconds
+--   Vault.get(table, key)                — returns Some(value) or None
+--   Vault.drop(table, key)               — remove a key (no-op if absent)
+--   Vault.update(table, key, fn)         — apply fn to existing value
+--   Vault.size(table)                    — number of live entries
+--
+-- TTL semantics: expiry is checked lazily on get/update/size.  There is
+-- no background sweeper thread; expired entries are evicted on access.
+
+mod Vault do
+
+doc "Create a new named vault table.  Returns an opaque table handle."
+fn new(name) do
+  vault_new(name)
+end
+
+doc "Insert or overwrite a key-value pair.  Removes any previous TTL."
+fn set(table, key, value) do
+  vault_set(table, key, value)
+end
+
+doc """
+Insert or overwrite a key-value pair with a TTL (time-to-live).
+The entry expires automatically after `ttl_secs` seconds.
+Expiry is checked lazily — no background thread required.
+"""
+fn set_ttl(table, key, value, ttl_secs) do
+  vault_set_ttl(table, key, value, ttl_secs)
+end
+
+doc "Look up a key.  Returns Some(value) if present and not expired, None otherwise."
+fn get(table, key) do
+  vault_get(table, key)
+end
+
+doc "Remove a key from the table.  No-op if the key does not exist."
+fn drop(table, key) do
+  vault_drop(table, key)
+end
+
+doc """
+Apply `f` to the current value stored at `key` and replace it with the result.
+No-op if the key is absent or expired.
+"""
+fn update(table, key, f) do
+  vault_update(table, key, f)
+end
+
+doc "Return the number of live (non-expired) entries in the table."
+fn size(table) do
+  vault_size(table)
+end
+
+doc "Return the value at `key`, or `default` if absent or expired."
+fn get_or(table, key, default) do
+  match vault_get(table, key) do
+  Some(v) -> v
+  None    -> default
+  end
+end
+
+doc "Return true if `key` exists in the table and has not expired."
+fn has(table, key) do
+  match vault_get(table, key) do
+  Some(_) -> true
+  None    -> false
+  end
+end
+
+end
