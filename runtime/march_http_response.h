@@ -112,6 +112,22 @@ void march_response_set_body(march_response_t *resp,
  * Returns 0 on success, -1 on error (errno set). */
 int march_response_send(march_response_t *resp, int fd);
 
+/* Reset resp for reuse in a batch without touching scratch_used.
+ * Sets iov_count = 0 but does NOT reset scratch_used — the iovecs already
+ * appended to the batch may still point into the scratch buffer and must
+ * remain valid until the entire batch has been written.
+ *
+ * Use pattern for batch pipelining:
+ *   march_response_t bresp = { .iov_count = 0, .scratch_used = 0 };
+ *   for each request:
+ *     march_response_clear_no_free(&bresp);  // carry scratch_used forward
+ *     build response into bresp ...
+ *     memcpy batch_iov + n, bresp.iov, bresp.iov_count * sizeof(iovec)
+ *     n += bresp.iov_count;
+ *   writev_all(fd, batch_iov, n);            // one syscall for the batch
+ */
+void march_response_clear_no_free(march_response_t *resp);
+
 /* ── Plaintext fast path ──────────────────────────────────────────────── */
 
 /* Send a pre-built HTTP/1.1 200 text/plain "Hello, World!" response to fd.

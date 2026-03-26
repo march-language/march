@@ -999,26 +999,20 @@ static int detect_keep_alive(void *raw_s, void *req_headers) {
     return keep_alive;
 }
 
-/* Like march_http_send_response() but uses the zero-copy response builder
- * (march_response_t) and appends an explicit Connection header.
- *
- * Benefits over the old malloc-based path:
- *   - No per-request heap allocation (fixed iovec array in march_response_t)
- *   - Pre-serialized status lines for common codes (200/400/404/500)
- *   - Cached Date header (refreshed at most once/second, no gmtime() cost)
- *   - Thread-local scratch buffer for Content-Length digits
+/* Populate `resp` with an HTTP/1.1 response, appending an explicit Connection
+ * header.  Resets resp->iov_count to 0 but does NOT touch resp->scratch_used,
+ * so callers can carry the scratch offset forward across a batch of responses
+ * without the TLS scratch regions overlapping.
  *
  * keep_alive=1 → "Connection: keep-alive"
- * keep_alive=0 → "Connection: close"
- *
- * The public march_http_send_response() signature is unchanged. */
-int march_send_response_with_ka(int fd, int64_t status, void *headers,
-                                 void *body, int keep_alive) {
-    march_response_t resp;
-    march_response_init(&resp);
+ * keep_alive=0 → "Connection: close" */
+static void march_populate_response_ka(march_response_t *resp,
+                                        int64_t status, void *headers,
+                                        void *body, int keep_alive) {
+    resp->iov_count = 0;   /* reset iovecs only; scratch_used carries forward */
 
     /* Status line (static string for common codes, scratch for others). */
-    march_response_set_status(&resp, (int)status);
+    march_response_set_status(resp, (int)status);
 
     /* User-supplied response headers from the March pipeline. */
     void *cur = headers;
@@ -1028,27 +1022,44 @@ int march_send_response_with_ka(int fd, int64_t status, void *headers,
         void *tail = *(void **)((char *)cur + 24);
         march_string *hname = *(march_string **)((char *)hdr + 16);
         march_string *hval  = *(march_string **)((char *)hdr + 24);
-        march_response_add_header(&resp,
+        march_response_add_header(resp,
                                   hname->data, (size_t)hname->len,
                                   hval->data,  (size_t)hval->len);
         cur = tail;
     }
 
     /* Date header (cached, zero syscall cost on most requests). */
-    march_response_add_date_header(&resp);
+    march_response_add_date_header(resp);
 
     /* Connection header. */
     if (keep_alive)
-        march_response_add_header(&resp, "Connection", 10, "keep-alive", 10);
+        march_response_add_header(resp, "Connection", 10, "keep-alive", 10);
     else
-        march_response_add_header(&resp, "Connection", 10, "close", 5);
+        march_response_add_header(resp, "Connection", 10, "close", 5);
 
     /* Body — also appends Content-Length and the header-terminating CRLF. */
     march_string *body_s = (march_string *)body;
-    march_response_set_body(&resp,
+    march_response_set_body(resp,
                              body_s ? body_s->data : NULL,
                              body_s ? (size_t)body_s->len : 0);
+}
 
+/* Like march_http_send_response() but uses the zero-copy response builder
+ * (march_response_t) and appends an explicit Connection header.
+ *
+ * Benefits over the old malloc-based path:
+ *   - No per-request heap allocation (fixed iovec array in march_response_t)
+ *   - Pre-serialized status lines for common codes (200/400/404/500)
+ *   - Cached Date header (refreshed at most once/second, no gmtime() cost)
+ *   - Thread-local scratch buffer for Content-Length digits
+ *
+ * The public march_http_send_response() signature is unchanged. */
+int march_send_response_with_ka(int fd, int64_t status, void *headers,
+                                 void *body, int keep_alive) {
+    march_response_t resp;
+    resp.iov_count    = 0;
+    resp.scratch_used = 0;
+    march_populate_response_ka(&resp, status, headers, body, keep_alive);
     return march_response_send(&resp, fd);
 }
 
@@ -1138,8 +1149,8 @@ int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
     int keep_alive = march_detect_keep_alive_simd(req);
     void *conn = march_conn_from_parsed(req, buf, buf_len, fd);
 
-    /* Call the pipeline */
-    march_incrc(pipeline);
+    /* Call the pipeline — the pipeline closure is held for the full connection
+     * lifetime by the caller; no per-request RC bump needed (Phase 0.5). */
     void *result_conn = fn(pipeline, conn);
 
     if (!result_conn) {
@@ -1184,10 +1195,14 @@ int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
  * GET requests in one recv() (wrk sends 16 at a time ≈ 1.5–2 KB). */
 #define CONN_BUF_SIZE (64 * 1024)
 
+/* Maximum iovecs that can accumulate across one pipelined batch.
+ * 32 requests × 16 iovecs typical = 512 entries = 8 KB stack. */
+#define CONN_BATCH_IOV_MAX 512
+
 /* Each connection worker: keep-alive loop with HTTP pipelining support.
  * Reads into a persistent buffer, parses up to PIPELINE_BATCH requests
- * per recv(), processes each in order (FIFO), carries leftover bytes
- * forward for the next parse cycle. */
+ * per recv(), batches all response iovecs into a single writev() call,
+ * and carries leftover bytes forward for the next parse cycle. */
 static void *connection_thread(void *arg) {
     conn_thread_arg_t *a = (conn_thread_arg_t *)arg;
     int fd = a->client_fd;
@@ -1199,6 +1214,14 @@ static void *connection_thread(void *arg) {
     {
         int one = 1;
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    }
+#endif
+
+    /* Increase send buffer to absorb batched multi-response writes. */
+#if defined(SOL_SOCKET) && defined(SO_SNDBUF)
+    {
+        int bufsz = 128 * 1024;
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &bufsz, sizeof(bufsz));
     }
 #endif
 
@@ -1231,11 +1254,121 @@ static void *connection_thread(void *arg) {
                                                 &consumed);
             if (n <= 0) break;  /* incomplete or empty — need more data */
 
-            /* 2. Process each parsed request in order (FIFO). */
-            for (int i = 0; i < n; i++) {
-                int rc = march_process_one_request(fd, pipeline, fn,
-                                              &reqs[i], buf, buf_len);
-                if (rc <= 0) { running = 0; break; }
+            /* 2. Process all parsed requests, batching responses.
+             *
+             * A single march_response_t is reused across the batch:
+             *   - iov_count is reset to 0 for each new response.
+             *   - scratch_used carries forward so every response occupies
+             *     a non-overlapping slice of the TLS scratch buffer.
+             * All iovecs are accumulated in batch_iov[], then sent with
+             * one writev() syscall.  TCP_NOPUSH / TCP_CORK hold the kernel
+             * from flushing partial segments during accumulation. */
+            {
+                struct iovec  batch_iov[CONN_BATCH_IOV_MAX];
+                int           batch_n = 0;
+                march_response_t bresp;
+                bresp.iov_count    = 0;
+                bresp.scratch_used = 0;
+
+#if defined(__APPLE__) && defined(TCP_NOPUSH)
+                { int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NOPUSH,
+                                          &one, sizeof(one)); }
+#elif defined(__linux__) && defined(TCP_CORK)
+                { int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_CORK,
+                                          &one, sizeof(one)); }
+#endif
+
+                for (int i = 0; i < n && running; i++) {
+                    int   keep_alive  = march_detect_keep_alive_simd(&reqs[i]);
+                    void *conn        = march_conn_from_parsed(&reqs[i],
+                                                                buf, buf_len, fd);
+                    void *result_conn = fn(pipeline, conn);
+
+                    if (!result_conn) {
+                        if (batch_n > 0) {
+                            writev_all(fd, batch_iov, batch_n);
+                            batch_n = 0;
+                        }
+                        march_http_send_response(fd, 500, make_nil(),
+                            march_string_lit("Internal Server Error", 21));
+                        running = 0;
+                        break;
+                    }
+
+                    /* WebSocket upgrade check. */
+                    char    *rc_p        = (char *)result_conn;
+                    void    *upgrade_val = *(void **)(rc_p + 112);
+                    int32_t  upgrade_tag =
+                        *(int32_t *)((char *)upgrade_val + 8);
+                    if (upgrade_tag == 1) {
+                        /* Flush pending batch before handing off to WS. */
+                        if (batch_n > 0) {
+                            writev_all(fd, batch_iov, batch_n);
+                            batch_n = 0;
+                        }
+#if defined(__APPLE__) && defined(TCP_NOPUSH)
+                        { int zero = 0; setsockopt(fd, IPPROTO_TCP, TCP_NOPUSH,
+                                                    &zero, sizeof(zero)); }
+#elif defined(__linux__) && defined(TCP_CORK)
+                        { int zero = 0; setsockopt(fd, IPPROTO_TCP, TCP_CORK,
+                                                    &zero, sizeof(zero)); }
+#endif
+                        void *ws_handler =
+                            *(void **)((char *)upgrade_val + 16);
+                        void *ws_key =
+                            find_ws_key_header(*(void **)(rc_p + 56));
+                        if (ws_key) {
+                            march_ws_handshake((int64_t)fd, ws_key);
+                            void *ws_sock = march_alloc(16 + 8);
+                            *(int64_t *)((char *)ws_sock + 16) = (int64_t)fd;
+                            typedef void *(*ws_handler_fn_t)(void *);
+                            ((ws_handler_fn_t)ws_handler)(ws_sock);
+                        }
+                        running = 0;
+                        break;
+                    }
+
+                    /* Build response, carrying scratch_used forward. */
+                    int64_t resp_status  = *(int64_t *)(rc_p + 72);
+                    void   *resp_headers = *(void **)(rc_p + 80);
+                    void   *resp_body    = *(void **)(rc_p + 88);
+                    if (resp_status == 0) resp_status = 200;
+
+                    march_populate_response_ka(&bresp, resp_status,
+                                                resp_headers, resp_body,
+                                                keep_alive);
+
+                    /* If this response would overflow the batch, flush and
+                     * restart.  In normal operation (≤16 headers/response)
+                     * this never triggers; it guards against pathological
+                     * responses with many headers. */
+                    if (batch_n + bresp.iov_count > CONN_BATCH_IOV_MAX) {
+                        writev_all(fd, batch_iov, batch_n);
+                        batch_n            = 0;
+                        bresp.scratch_used = 0;
+                        march_populate_response_ka(&bresp, resp_status,
+                                                    resp_headers, resp_body,
+                                                    keep_alive);
+                    }
+
+                    memcpy(batch_iov + batch_n, bresp.iov,
+                           (size_t)bresp.iov_count * sizeof(struct iovec));
+                    batch_n += bresp.iov_count;
+
+                    if (!keep_alive) { running = 0; break; }
+                }
+
+                /* Single writev() for the entire batch. */
+                if (batch_n > 0) writev_all(fd, batch_iov, batch_n);
+
+                /* Release TCP_NOPUSH / TCP_CORK → kernel flushes. */
+#if defined(__APPLE__) && defined(TCP_NOPUSH)
+                { int zero = 0; setsockopt(fd, IPPROTO_TCP, TCP_NOPUSH,
+                                            &zero, sizeof(zero)); }
+#elif defined(__linux__) && defined(TCP_CORK)
+                { int zero = 0; setsockopt(fd, IPPROTO_TCP, TCP_CORK,
+                                            &zero, sizeof(zero)); }
+#endif
             }
 
             /* 3. Shift unconsumed bytes to the front. */

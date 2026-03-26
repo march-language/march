@@ -260,6 +260,12 @@ int march_response_send(march_response_t *resp, int fd) {
     return writev_all_resp(fd, resp->iov, resp->iov_count);
 }
 
+void march_response_clear_no_free(march_response_t *resp) {
+    resp->iov_count = 0;
+    /* scratch_used intentionally NOT reset — the caller manages the scratch
+     * lifetime and may still have live iovecs pointing into scratch[0..used]. */
+}
+
 /* ── Plaintext fast path ──────────────────────────────────────────────── */
 
 int march_response_send_plaintext(int fd) {
