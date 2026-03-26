@@ -498,21 +498,7 @@ fn from_rows(rows : List(Row)) : Result(DataFrame, String) do
       match pair do
       | (name, val) -> make_builder(name, val)
       end)
-    -- Push first row's values into builders (they define the types)
-    let after_first =
-      List.fold_left(Ok(init_builders), first_pairs, fn (acc, pair) ->
-        match acc do
-        | Err(e) -> Err(e)
-        | Ok(builders) ->
-          match pair do
-          | (_, val) ->
-            -- Builders already initialized from first row; we need to push
-            -- values into them. But we already have make_builder which creates
-            -- a zero-element builder. We need to push all first-row values now.
-            Ok(builders)
-          end
-        end)
-    -- Actually: make_builder creates empty builders. Push first row into them.
+    -- Push first row's values into builders.
     let push_first =
       List.fold_left(Ok(Nil), List.zip(init_builders, first_pairs), fn (acc, pair) ->
         match acc do
