@@ -38,7 +38,7 @@ end
 - `when` guards on function heads and match branches
 
 **Backend**
-- Compiles to LLVM IR, linked to native binaries via `clang`
+- Compiles to LLVM IR, linked to native binaries via `clang` — or to `.wasm` via `--target wasm64-wasi`
 - Perceus reference counting — deterministic memory management, no GC pauses
 - **FBIP (Functional But In-Place)** — when the reference count on a pattern-matched value is 1, destructured nodes are reused in-place rather than freed and reallocated (see below)
 - Escape analysis promotes allocations to the stack where possible
@@ -113,8 +113,13 @@ march file.march
 march --compile file.march        # produces ./file
 march --compile -o hello file.march
 
+# Compile to WebAssembly (requires wasi-sdk + wasmtime — see below)
+march --compile --target wasm64-wasi file.march   # produces file.wasm
+wasmtime --wasm memory64 file.wasm
+
 # Emit LLVM IR
 march --emit-llvm file.march      # produces file.ll
+march --emit-llvm --target wasm64-wasi file.march
 
 # Interactive REPL
 march
@@ -163,6 +168,35 @@ To install `march` into your PATH:
 ```bash
 dune install
 ```
+
+## WebAssembly target
+
+March can compile pure functional programs to `.wasm` via the `--target wasm64-wasi` flag. Actors, networking, and file I/O are not yet available in WASM builds (Tier 1 — pure compute only).
+
+**Install prerequisites**
+
+```bash
+brew install wasi-sdk wasmtime
+# or download from:
+#   https://github.com/WebAssembly/wasi-sdk/releases
+#   https://wasmtime.dev
+```
+
+**Compile and run**
+
+```bash
+march --compile --target wasm64-wasi file.march   # → file.wasm
+wasmtime --wasm memory64 file.wasm
+```
+
+Set `WASI_SDK_PATH` if wasi-sdk is installed somewhere other than `/opt/wasi-sdk`:
+
+```bash
+export WASI_SDK_PATH=/path/to/wasi-sdk
+march --compile --target wasm64-wasi file.march
+```
+
+Available targets: `native` (default), `wasm64-wasi`, `wasm32-wasi`, `wasm32-unknown-unknown`.
 
 ## Running the tests
 
