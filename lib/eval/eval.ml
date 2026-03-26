@@ -4450,6 +4450,7 @@ let span_of_expr (e : expr) : span =
   | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
   | ESpawn (_, sp) | EDbg (_, sp) | ELetFn (_, _, _, _, sp) -> sp
   | EAssert (_, sp) -> sp
+  | ESigil (_, _, sp) -> sp
   | EVar n -> n.span
   | EResultRef _ -> dummy_span
 
@@ -4656,6 +4657,9 @@ and eval_expr_inner (env : env) (e : expr) : value =
 
   | EPipe _ ->
     eval_error "pipe expression reached evaluator (should be desugared)"
+
+  | ESigil _ ->
+    eval_error "sigil expression reached evaluator (should be desugared)"
 
   | EResultRef _ ->
     raise (Eval_error "EResultRef reached evaluator — substitution missing")

@@ -330,6 +330,7 @@ let rec expr_inline = function
     Printf.sprintf "fn %s(%s)%s do ... end"
       n.txt (String.concat ", " (List.map fmt_param ps)) ty
   | EAssert (e, _)              -> Printf.sprintf "assert %s" (expr_inline e)
+  | ESigil (c, content, _)     -> Printf.sprintf "~%c%s" c (expr_inline content)
   | ECond _                     -> "match do ... end"
 
 (** Returns true if the expression must be rendered on multiple lines

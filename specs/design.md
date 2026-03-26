@@ -27,6 +27,7 @@ March is a statically-typed functional programming language built for safe concu
 - **Atoms**: `:name` — lightweight runtime tags used for messaging and symbol comparisons. Not type constructors — ADTs use capitalized constructors instead.
 - **Function head matching**: Multiple `fn` clauses with the same name are grouped into one function with pattern-matched heads (Elixir-style). Desugared into a single function with a `match` immediately after parsing (before type checking), so the type checker and backend each handle one representation.
 - **Guards**: `when` clauses on function heads and match branches
+- **Sigils**: `~H"..."` or `~H"""..."""` — domain-specific string literals. `~X` prefix where X is an uppercase letter. Supports interpolation (`${expr}`). Desugars to `Sigil.x(content)` call. `~H` for HTML templates returns `IOList` for fast wire transfer.
 - **No algebraic effects**: Concurrency is via actors and message passing, not resumable continuations. Side effects are tracked via capability types, not an effect system.
 
 ### Syntax Examples

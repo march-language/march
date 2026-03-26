@@ -367,7 +367,7 @@ let load_stdlib () =
         (* Load only the stable core stdlib; skip WIP modules *)
         let files = [
           "prelude.march"; "option.march"; "result.march"; "list.march";
-          "math.march"; "string.march"; "iolist.march"; "sort.march";
+          "math.march"; "string.march"; "iolist.march"; "sigil.march"; "sort.march";
         ] in
         List.concat_map
           (fun name -> load_stdlib_file (Filename.concat dir name))

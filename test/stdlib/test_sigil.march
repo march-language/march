@@ -1,0 +1,40 @@
+mod TestSigil do
+
+describe "~H sigil" do
+  test "basic string sigil" do
+    let result = ~H"<p>Hello</p>"
+    assert (IOList.to_string(result) == "<p>Hello</p>")
+  end
+
+  test "sigil with interpolation" do
+    let name = "world"
+    let result = ~H"<p>Hello, ${name}</p>"
+    assert (IOList.to_string(result) == "<p>Hello, world</p>")
+  end
+
+  test "sigil with triple-quoted string" do
+    let result = ~H"""<div>
+  <p>Multi-line</p>
+</div>"""
+    assert (IOList.to_string(result) == "<div>\n  <p>Multi-line</p>\n</div>")
+  end
+
+  test "sigil returns IOList type" do
+    let html = ~H"<span>test</span>"
+    assert (!IOList.is_empty(html))
+    assert (IOList.byte_size(html) == 17)
+  end
+
+  test "sigil with empty string" do
+    let html = ~H""
+    assert (IOList.is_empty(html))
+  end
+
+  test "sigil with complex interpolation" do
+    let x = 42
+    let result = ~H"<p>The answer is ${to_string(x)}</p>"
+    assert (IOList.to_string(result) == "<p>The answer is 42</p>")
+  end
+end
+
+end
