@@ -34,3 +34,13 @@ int march_send_response_with_ka(int fd, int64_t status, void *headers,
 int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
                                const march_http_request_t *req,
                                const char *buf, size_t buf_len);
+
+/* Build a response into *resp using the zero-copy builder.
+ * resp->iov_count is reset to 0 (via march_response_clear_no_free before the
+ * call); resp->scratch_used carries forward so iovecs from multiple pipelined
+ * responses share the TLS scratch buffer without overlap.
+ * Use the batch pattern: init bresp once, call clear_no_free + this per req,
+ * accumulate iovecs into batch_iov[], then writev the entire batch at once. */
+void march_populate_response_ka(march_response_t *resp,
+                                 int64_t status, void *headers,
+                                 void *body, int keep_alive);

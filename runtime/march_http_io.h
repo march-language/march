@@ -18,6 +18,13 @@
 #include <stddef.h>
 #include <sys/uio.h>
 
+/* ── Batch write sizing ───────────────────────────────────────────────── */
+
+/* Maximum iovecs in one pipelined response batch.
+ * EVLOOP_PIPELINE_BATCH(32) requests × ~16 iov/request typical = 512.
+ * conn_state_t.wbuf is sized to this so it can hold a full deferred batch. */
+#define CONN_BATCH_IOV_MAX 512
+
 /* ── Connection phases ────────────────────────────────────────────────── */
 
 typedef enum {

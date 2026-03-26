@@ -17,6 +17,7 @@
  */
 #include "march_http.h"
 #include "march_http_internal.h"
+#include "march_http_io.h"
 #include "march_http_parse_simd.h"
 #include "march_http_response.h"
 
@@ -1006,9 +1007,9 @@ static int detect_keep_alive(void *raw_s, void *req_headers) {
  *
  * keep_alive=1 → "Connection: keep-alive"
  * keep_alive=0 → "Connection: close" */
-static void march_populate_response_ka(march_response_t *resp,
-                                        int64_t status, void *headers,
-                                        void *body, int keep_alive) {
+void march_populate_response_ka(march_response_t *resp,
+                                 int64_t status, void *headers,
+                                 void *body, int keep_alive) {
     resp->iov_count = 0;   /* reset iovecs only; scratch_used carries forward */
 
     /* Status line (static string for common codes, scratch for others). */
@@ -1194,10 +1195,6 @@ int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
 /* Per-connection read buffer size.  Large enough to hold many pipelined
  * GET requests in one recv() (wrk sends 16 at a time ≈ 1.5–2 KB). */
 #define CONN_BUF_SIZE (64 * 1024)
-
-/* Maximum iovecs that can accumulate across one pipelined batch.
- * 32 requests × 16 iovecs typical = 512 entries = 8 KB stack. */
-#define CONN_BATCH_IOV_MAX 512
 
 /* Each connection worker: keep-alive loop with HTTP pipelining support.
  * Reads into a persistent buffer, parses up to PIPELINE_BATCH requests
