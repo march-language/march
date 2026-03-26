@@ -38,6 +38,8 @@ type value =
   | VChan   of chan_endpoint            (** Binary session-typed channel endpoint *)
   | VMChan  of mpst_endpoint            (** Multi-party session-typed channel endpoint *)
   | VForeign of string * string         (** FFI extern: (lib_name, symbol_name) *)
+  | VNativeIntArr   of int array        (** Flat OCaml int array — fast numeric loops *)
+  | VNativeFloatArr of float array      (** Flat OCaml float array — fast numeric loops *)
 
 (** One endpoint of a binary session-typed channel.
     Each channel consists of two linked endpoints; one side's [ce_out_q]
@@ -624,6 +626,22 @@ let rec value_to_string v =
     Printf.sprintf "MChan(%s#%d, %s)" me.me_proto me.me_id me.me_role
   | VForeign (lib, sym) ->
     Printf.sprintf "<foreign:%s:%s>" lib sym
+  | VNativeIntArr a ->
+    let n = Array.length a in
+    if n <= 8 then
+      "NativeIntArr[" ^ String.concat ", " (Array.to_list (Array.map string_of_int a)) ^ "]"
+    else
+      Printf.sprintf "NativeIntArr(%d)[%s, ...]" n
+        (String.concat ", " (List.init 4 (fun i -> string_of_int a.(i))))
+  | VNativeFloatArr a ->
+    let n = Array.length a in
+    let fmt f = let s = string_of_float f in
+                if String.contains s '.' || String.contains s 'e' then s else s ^ ".0" in
+    if n <= 8 then
+      "NativeFloatArr[" ^ String.concat ", " (Array.to_list (Array.map fmt a)) ^ "]"
+    else
+      Printf.sprintf "NativeFloatArr(%d)[%s, ...]" n
+        (String.concat ", " (List.init 4 (fun i -> fmt a.(i))))
 
 (** Pretty-print a value with indented multi-line layout when the flat
     representation exceeds [width] characters.
@@ -4108,6 +4126,145 @@ let base_env : env =
         | [VInt ref_id; result] ->
           Hashtbl.replace pending_replies ref_id result; VUnit
         | _ -> eval_error "actor_reply: expected (Int, value)"))
+
+  (* ── NativeArray builtins ────────────────────────────────────────────────
+     Flat OCaml int/float arrays with tight-loop implementations of common
+     numeric operations (sum, map, fold).  These are the fast interpreter
+     path for P10 — while the March Array module uses a 32-way trie that
+     cannot be vectorized, NativeArray maps directly to OCaml's native
+     array type which compiles to cache-friendly sequential memory access.
+
+     Int variants *)
+  ; ("native_int_arr_make", VBuiltin ("native_int_arr_make", function
+        | [VInt n; VInt init] ->
+          if n < 0 then eval_error "native_int_arr_make: negative size %d" n;
+          VNativeIntArr (Array.make n init)
+        | _ -> eval_error "native_int_arr_make: expected (Int, Int)"))
+  ; ("native_int_arr_length", VBuiltin ("native_int_arr_length", function
+        | [VNativeIntArr a] -> VInt (Array.length a)
+        | _ -> eval_error "native_int_arr_length: expected NativeIntArr"))
+  ; ("native_int_arr_get", VBuiltin ("native_int_arr_get", function
+        | [VNativeIntArr a; VInt i] ->
+          if i < 0 || i >= Array.length a then
+            eval_error "native_int_arr_get: index %d out of bounds (len=%d)" i (Array.length a);
+          VInt a.(i)
+        | _ -> eval_error "native_int_arr_get: expected (NativeIntArr, Int)"))
+  ; ("native_int_arr_set", VBuiltin ("native_int_arr_set", function
+        | [VNativeIntArr a; VInt i; VInt v] ->
+          let n = Array.length a in
+          if i < 0 || i >= n then
+            eval_error "native_int_arr_set: index %d out of bounds (len=%d)" i n;
+          let a' = Array.copy a in
+          a'.(i) <- v;
+          VNativeIntArr a'
+        | _ -> eval_error "native_int_arr_set: expected (NativeIntArr, Int, Int)"))
+  ; ("native_int_arr_sum", VBuiltin ("native_int_arr_sum", function
+        | [VNativeIntArr a] ->
+          let s = ref 0 in
+          for i = 0 to Array.length a - 1 do s := !s + a.(i) done;
+          VInt !s
+        | _ -> eval_error "native_int_arr_sum: expected NativeIntArr"))
+  ; ("native_int_arr_map", VBuiltin ("native_int_arr_map", function
+        | [VNativeIntArr a; f] ->
+          let n = Array.length a in
+          let b = Array.make n 0 in
+          for i = 0 to n - 1 do
+            (match !apply_hook f [VInt a.(i)] with
+             | VInt v -> b.(i) <- v
+             | v -> eval_error "native_int_arr_map: function returned non-Int: %s"
+                      (value_to_string v))
+          done;
+          VNativeIntArr b
+        | _ -> eval_error "native_int_arr_map: expected (NativeIntArr, fn)"))
+  ; ("native_int_arr_fold", VBuiltin ("native_int_arr_fold", function
+        | [acc0; VNativeIntArr a; f] ->
+          let acc = ref acc0 in
+          for i = 0 to Array.length a - 1 do
+            acc := !apply_hook f [!acc; VInt a.(i)]
+          done;
+          !acc
+        | _ -> eval_error "native_int_arr_fold: expected (init, NativeIntArr, fn)"))
+  ; ("native_int_arr_from_list", VBuiltin ("native_int_arr_from_list", function
+        | [lst] ->
+          let rec to_ocaml_list = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [VInt h; t]) -> h :: to_ocaml_list t
+            | v -> eval_error "native_int_arr_from_list: expected List(Int), got %s"
+                     (value_to_string v)
+          in
+          VNativeIntArr (Array.of_list (to_ocaml_list lst))
+        | _ -> eval_error "native_int_arr_from_list: expected List(Int)"))
+  ; ("native_int_arr_to_list", VBuiltin ("native_int_arr_to_list", function
+        | [VNativeIntArr a] ->
+          Array.fold_right (fun x acc -> VCon ("Cons", [VInt x; acc]))
+            a (VCon ("Nil", []))
+        | _ -> eval_error "native_int_arr_to_list: expected NativeIntArr"))
+
+  (* Float variants *)
+  ; ("native_float_arr_make", VBuiltin ("native_float_arr_make", function
+        | [VInt n; VFloat init] ->
+          if n < 0 then eval_error "native_float_arr_make: negative size %d" n;
+          VNativeFloatArr (Array.make n init)
+        | _ -> eval_error "native_float_arr_make: expected (Int, Float)"))
+  ; ("native_float_arr_length", VBuiltin ("native_float_arr_length", function
+        | [VNativeFloatArr a] -> VInt (Array.length a)
+        | _ -> eval_error "native_float_arr_length: expected NativeFloatArr"))
+  ; ("native_float_arr_get", VBuiltin ("native_float_arr_get", function
+        | [VNativeFloatArr a; VInt i] ->
+          if i < 0 || i >= Array.length a then
+            eval_error "native_float_arr_get: index %d out of bounds (len=%d)" i (Array.length a);
+          VFloat a.(i)
+        | _ -> eval_error "native_float_arr_get: expected (NativeFloatArr, Int)"))
+  ; ("native_float_arr_set", VBuiltin ("native_float_arr_set", function
+        | [VNativeFloatArr a; VInt i; VFloat v] ->
+          let n = Array.length a in
+          if i < 0 || i >= n then
+            eval_error "native_float_arr_set: index %d out of bounds (len=%d)" i n;
+          let a' = Array.copy a in
+          a'.(i) <- v;
+          VNativeFloatArr a'
+        | _ -> eval_error "native_float_arr_set: expected (NativeFloatArr, Int, Float)"))
+  ; ("native_float_arr_sum", VBuiltin ("native_float_arr_sum", function
+        | [VNativeFloatArr a] ->
+          let s = ref 0.0 in
+          for i = 0 to Array.length a - 1 do s := !s +. a.(i) done;
+          VFloat !s
+        | _ -> eval_error "native_float_arr_sum: expected NativeFloatArr"))
+  ; ("native_float_arr_map", VBuiltin ("native_float_arr_map", function
+        | [VNativeFloatArr a; f] ->
+          let n = Array.length a in
+          let b = Array.make n 0.0 in
+          for i = 0 to n - 1 do
+            (match !apply_hook f [VFloat a.(i)] with
+             | VFloat v -> b.(i) <- v
+             | v -> eval_error "native_float_arr_map: function returned non-Float: %s"
+                      (value_to_string v))
+          done;
+          VNativeFloatArr b
+        | _ -> eval_error "native_float_arr_map: expected (NativeFloatArr, fn)"))
+  ; ("native_float_arr_fold", VBuiltin ("native_float_arr_fold", function
+        | [acc0; VNativeFloatArr a; f] ->
+          let acc = ref acc0 in
+          for i = 0 to Array.length a - 1 do
+            acc := !apply_hook f [!acc; VFloat a.(i)]
+          done;
+          !acc
+        | _ -> eval_error "native_float_arr_fold: expected (init, NativeFloatArr, fn)"))
+  ; ("native_float_arr_from_list", VBuiltin ("native_float_arr_from_list", function
+        | [lst] ->
+          let rec to_ocaml_list = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [VFloat h; t]) -> h :: to_ocaml_list t
+            | v -> eval_error "native_float_arr_from_list: expected List(Float), got %s"
+                     (value_to_string v)
+          in
+          VNativeFloatArr (Array.of_list (to_ocaml_list lst))
+        | _ -> eval_error "native_float_arr_from_list: expected List(Float)"))
+  ; ("native_float_arr_to_list", VBuiltin ("native_float_arr_to_list", function
+        | [VNativeFloatArr a] ->
+          Array.fold_right (fun x acc -> VCon ("Cons", [VFloat x; acc]))
+            a (VCon ("Nil", []))
+        | _ -> eval_error "native_float_arr_to_list: expected NativeFloatArr"))
   ]
 
 (* ------------------------------------------------------------------ *)

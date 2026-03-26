@@ -981,6 +981,56 @@ let builtin_bindings : (string * scheme) list =
     ("process_spawn_lines", poly2 (fun a e ->
         TArrow (t_string, TArrow (t_list t_string,
           t_result (TCon ("Seq", [a])) e))));
+    (* NativeArray builtins — flat OCaml arrays for fast numeric loops (P10).
+       NativeIntArr / NativeFloatArr are opaque types (0-arity constructors).
+       These builtins are interpreter-path only; compiled mode support is
+       tracked in specs/optimizations.md P10 Phase 2. *)
+    (* Int array *)
+    ("native_int_arr_make",
+       Mono (TArrow (t_int, TArrow (t_int, TCon ("NativeIntArr", [])))));
+    ("native_int_arr_length",
+       Mono (TArrow (TCon ("NativeIntArr", []), t_int)));
+    ("native_int_arr_get",
+       Mono (TArrow (TCon ("NativeIntArr", []), TArrow (t_int, t_int))));
+    ("native_int_arr_set",
+       Mono (TArrow (TCon ("NativeIntArr", []),
+             TArrow (t_int, TArrow (t_int, TCon ("NativeIntArr", []))))));
+    ("native_int_arr_sum",
+       Mono (TArrow (TCon ("NativeIntArr", []), t_int)));
+    ("native_int_arr_map",
+       Mono (TArrow (TCon ("NativeIntArr", []),
+             TArrow (TArrow (t_int, t_int), TCon ("NativeIntArr", [])))));
+    ("native_int_arr_fold",
+       poly1 (fun a ->
+         TArrow (a, TArrow (TCon ("NativeIntArr", []),
+                   TArrow (TArrow (a, TArrow (t_int, a)), a)))));
+    ("native_int_arr_from_list",
+       Mono (TArrow (t_list t_int, TCon ("NativeIntArr", []))));
+    ("native_int_arr_to_list",
+       Mono (TArrow (TCon ("NativeIntArr", []), t_list t_int)));
+    (* Float array *)
+    ("native_float_arr_make",
+       Mono (TArrow (t_int, TArrow (t_float, TCon ("NativeFloatArr", [])))));
+    ("native_float_arr_length",
+       Mono (TArrow (TCon ("NativeFloatArr", []), t_int)));
+    ("native_float_arr_get",
+       Mono (TArrow (TCon ("NativeFloatArr", []), TArrow (t_int, t_float))));
+    ("native_float_arr_set",
+       Mono (TArrow (TCon ("NativeFloatArr", []),
+             TArrow (t_int, TArrow (t_float, TCon ("NativeFloatArr", []))))));
+    ("native_float_arr_sum",
+       Mono (TArrow (TCon ("NativeFloatArr", []), t_float)));
+    ("native_float_arr_map",
+       Mono (TArrow (TCon ("NativeFloatArr", []),
+             TArrow (TArrow (t_float, t_float), TCon ("NativeFloatArr", [])))));
+    ("native_float_arr_fold",
+       poly1 (fun a ->
+         TArrow (a, TArrow (TCon ("NativeFloatArr", []),
+                   TArrow (TArrow (a, TArrow (t_float, a)), a)))));
+    ("native_float_arr_from_list",
+       Mono (TArrow (t_list t_float, TCon ("NativeFloatArr", []))));
+    ("native_float_arr_to_list",
+       Mono (TArrow (TCon ("NativeFloatArr", []), t_list t_float)));
   ]
 
 let builtin_types : (string * int) list =
@@ -996,7 +1046,9 @@ let builtin_types : (string * int) list =
     ("IO",            0); ("IO.Console",    0); ("IO.FileSystem", 0);
     ("IO.FileRead",   0); ("IO.FileWrite",  0); ("IO.Network",    0);
     ("IO.NetConnect", 0); ("IO.NetListen",  0); ("IO.Process",    0);
-    ("IO.Clock",      0); ]
+    ("IO.Clock",      0);
+    (* NativeArray opaque types — flat numeric arrays (P10) *)
+    ("NativeIntArr",   0); ("NativeFloatArr", 0); ]
 
 (** Built-in constructor table for Option, Result, and List, which are
     pre-registered types.  User-declared types are added via [DType].
