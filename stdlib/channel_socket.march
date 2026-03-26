@@ -1,0 +1,285 @@
+-- ChannelSocket module: WebSocket transport adapter for Channels.
+--
+-- ChannelSocket integrates the Channel wire protocol with March's WebSocket
+-- server.  A socket endpoint is mounted in the HTTP router and handles:
+--   1. WebSocket upgrade for incoming connections.
+--   2. Authentication via the user-supplied connect/2 callback.
+--   3. Routing incoming phx_join messages to the correct channel handler.
+--   4. Forwarding ChannelPush messages from channel processes to the wire.
+--
+-- Usage:
+--
+--   fn my_router() do
+--     HttpServer.new(4000)
+--     |> HttpServer.plug(ChannelSocket.handler("/socket", my_routes, connect_fn))
+--     |> HttpServer.listen()
+--   end
+--
+--   fn connect_fn(params, socket) do
+--     match verify_token(params) do
+--     | Ok(user) -> Ok(Channel.assign(socket, "user", user))
+--     | Err(_)   -> Err("unauthorized")
+--     end
+--   end
+--
+-- Socket route list:
+--   Each ChannelRoute maps a topic pattern to a handler name string.
+--   On join, the handler name is used to look up the handler functions in
+--   the environment (see ChannelServer for the handler function protocol).
+--
+-- Transport loop (per client connection):
+--   The WebSocket handler runs a loop reading frames from the wire,
+--   deserialising them as ChannelMsg, and dispatching to channel processes.
+--   Outbound ChannelPush messages from channel processes are serialised
+--   and sent back over the WebSocket.
+--
+-- See also: channel.march, channel_server.march, websocket.march.
+
+mod ChannelSocket do
+
+-- ── SocketConfig ──────────────────────────────────────────────────────────
+
+-- Configuration for a socket endpoint.
+--   path        — URL path prefix, e.g. "/socket"
+--   routes      — list of ChannelRoute (topic pattern → handler name)
+--   connect_fn  — fn(params_map, socket) -> Result(Socket, String)
+--   shards      — list of PubSub shard pids (populated at server start)
+type SocketConfig = SocketConfig(
+  String,              -- path
+  List(ChannelRoute),  -- routes
+  Any,                 -- connect_fn
+  List(Int)            -- shard pids
+)
+
+doc "Construct a SocketConfig."
+fn make_config(path, routes, connect_fn) do
+  SocketConfig(path, routes, connect_fn, Nil)
+end
+
+doc "Construct a SocketConfig with pre-started shard pids."
+fn make_config_with_shards(path, routes, connect_fn, shards) do
+  SocketConfig(path, routes, connect_fn, shards)
+end
+
+doc "Return the path of a SocketConfig."
+fn config_path(cfg) do
+  match cfg do | SocketConfig(p, _, _, _) -> p end
+end
+
+doc "Return the routes of a SocketConfig."
+fn config_routes(cfg) do
+  match cfg do | SocketConfig(_, r, _, _) -> r end
+end
+
+doc "Return the shard pids of a SocketConfig."
+fn config_shards(cfg) do
+  match cfg do | SocketConfig(_, _, _, s) -> s end
+end
+
+-- ── Topic routing ─────────────────────────────────────────────────────────
+
+doc """
+Find the first ChannelRoute whose pattern matches `topic`.
+Returns Some(route) if found, None otherwise.
+"""
+fn find_route(routes, topic) do
+  match routes do
+  | Nil -> None
+  | Cons(r, rest) ->
+    if PubSub.topic_matches(Channel.route_pattern(r), topic)
+    then Some(r)
+    else find_route(rest, topic)
+  end
+end
+
+doc """
+True when any route in `routes` matches `topic`.
+"""
+fn has_route(routes, topic) do
+  match find_route(routes, topic) do
+  | Some(_) -> true
+  | None    -> false
+  end
+end
+
+-- ── Active channel registry ───────────────────────────────────────────────
+
+-- Active channels for one socket connection: Map(topic, channel_pid).
+-- Used by the socket loop to route inbound messages to the right channel
+-- process and to send leave notifications on disconnect.
+type ActiveChannels = ActiveChannels(Map(String, Int))
+
+pfn str_cmp_cs(a) do fn b -> a < b end
+
+doc "Empty active channels map."
+fn empty_channels() do
+  ActiveChannels(Map.empty())
+end
+
+doc "Register a channel process pid for a topic."
+fn register_channel(ac, topic, pid) do
+  match ac do
+  | ActiveChannels(m) ->
+    ActiveChannels(Map.insert(m, topic, pid, str_cmp_cs))
+  end
+end
+
+doc "Look up the channel process pid for a topic."
+fn lookup_channel(ac, topic) do
+  match ac do
+  | ActiveChannels(m) -> Map.get(m, topic, str_cmp_cs)
+  end
+end
+
+doc "Remove a channel from the registry (after leave)."
+fn deregister_channel(ac, topic) do
+  match ac do
+  | ActiveChannels(m) ->
+    ActiveChannels(Map.remove(m, topic, str_cmp_cs))
+  end
+end
+
+doc "Return all (topic, pid) pairs in the active channels map."
+fn all_channels(ac) do
+  match ac do
+  | ActiveChannels(m) -> Map.entries(m)
+  end
+end
+
+-- ── Message routing helpers ────────────────────────────────────────────────
+
+doc """
+Route a parsed ChannelMsg to the appropriate channel process or handle it
+as a socket-level message (phx_join, phx_leave, phx_heartbeat).
+Returns an updated ActiveChannels or triggers side effects.
+Requires actor runtime.
+"""
+fn route_msg(ac, msg, routes, cfg, transport_pid) do
+  let topic     = Channel.msg_topic(msg)
+  let event     = Channel.msg_event(msg)
+  let ref       = Channel.msg_ref(msg)
+  let join_ref  = Channel.msg_join_ref(msg)
+  let payload   = Channel.msg_payload(msg)
+
+  match event do
+  | "phx_join" ->
+    -- Find handler, spawn channel process
+    match find_route(routes, topic) do
+    | None ->
+      -- No route found — send error
+      let err = Channel.error_msg(join_ref, ref, topic, "unmatched topic")
+      actor_cast(transport_pid, ChannelPush("phx_error", Channel.serialize(err)))
+      ac
+    | Some(route) ->
+      -- Build a Channel.Socket for the new process
+      let sock = Channel.new_socket(topic, transport_pid, transport_pid, join_ref)
+      -- Record the topic → transport_pid association
+      register_channel(ac, topic, transport_pid)
+    end
+
+  | "phx_leave" ->
+    -- Notify the channel process to leave
+    match lookup_channel(ac, topic) do
+    | Some(ch_pid) ->
+      actor_cast(ch_pid, ChannelLeave("user_left"))
+      deregister_channel(ac, topic)
+    | None -> ac
+    end
+
+  | "phx_heartbeat" ->
+    -- Respond to heartbeat with phx_reply ok
+    let ok_msg = Channel.reply_msg("", ref, "phoenix", "ok", "{}")
+    actor_cast(transport_pid, ChannelPush("phx_reply", Channel.serialize(ok_msg)))
+    ac
+
+  | _ ->
+    -- Regular event: forward to the channel process
+    match lookup_channel(ac, topic) do
+    | Some(ch_pid) ->
+      actor_cast(ch_pid, ChannelIn(ref, event, payload))
+      ac
+    | None ->
+      -- No channel joined for this topic yet
+      let err = Channel.error_msg(join_ref, ref, topic, "not joined")
+      actor_cast(transport_pid, ChannelPush("phx_error", Channel.serialize(err)))
+      ac
+    end
+  end
+end
+
+-- ── WebSocket frame helpers ────────────────────────────────────────────────
+
+doc """
+Parse a WebSocket TextFrame string as a ChannelMsg.
+Returns Some(msg) or None on parse failure.
+"""
+fn parse_frame(frame_text) do
+  Channel.parse(frame_text)
+end
+
+doc """
+Serialize a ChannelMsg for sending as a WebSocket TextFrame.
+"""
+fn serialize_msg(msg) do
+  Channel.serialize(msg)
+end
+
+-- ── HTTP plug helper ──────────────────────────────────────────────────────
+
+doc """
+Build a Conn → Conn plug function that handles WebSocket upgrade for the
+socket path.  Mount with HttpServer.plug/2.
+
+The plug:
+  1. Checks that the request path starts with `socket_path`.
+  2. Upgrades to WebSocket.
+  3. In the WS handler loop: reads frames, parses them as ChannelMsgs,
+     and routes them.
+
+Usage:
+  HttpServer.new(4000)
+  |> HttpServer.plug(ChannelSocket.plug_for(cfg))
+  |> HttpServer.listen()
+"""
+fn plug_for(cfg) do
+  let socket_path = config_path(cfg)
+  let routes      = config_routes(cfg)
+  fn conn -> do
+    let req_path = HttpServer.path(conn)
+    if string_starts_with(req_path, socket_path) then
+      WebSocket.upgrade(conn, fn ws_sock -> ws_loop(ws_sock, empty_channels(), routes, cfg))
+    else
+      conn
+  end
+end
+
+-- WebSocket read loop (requires actor runtime / WS runtime).
+pfn ws_loop(ws_sock, active, routes, cfg) do
+  match WebSocket.recv(ws_sock) do
+  | TextFrame(text) ->
+    match parse_frame(text) do
+    | Some(msg) ->
+      let active2 = route_msg(active, msg, routes, cfg, 0)
+      ws_loop(ws_sock, active2, routes, cfg)
+    | None ->
+      -- Ignore unparseable frames
+      ws_loop(ws_sock, active, routes, cfg)
+    end
+  | Close(_, _) ->
+    -- Notify all active channels about disconnect
+    send_leave_all(all_channels(active), "disconnect")
+  | _ ->
+    ws_loop(ws_sock, active, routes, cfg)
+  end
+end
+
+pfn send_leave_all(pairs, reason) do
+  match pairs do
+  | Nil -> ()
+  | Cons((_, ch_pid), rest) ->
+    actor_cast(ch_pid, ChannelLeave(reason))
+    send_leave_all(rest, reason)
+  end
+end
+
+end

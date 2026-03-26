@@ -1,0 +1,199 @@
+-- Tests for the Presence stdlib module.
+-- Covers: PresenceMeta, PresenceEntry, PresenceState, track_state, untrack_state,
+-- list_state, count_presences, is_present, connection_count, diff helpers.
+-- The runtime API (track/2, untrack/2) requires actor runtime and is not tested.
+
+mod TestPresence do
+
+-- ── PresenceMeta ───────────────────────────────────────────────────────────
+
+describe "PresenceMeta" do
+  test "make_meta stores pid and data" do
+    let m = Presence.make_meta(42, "{\"name\":\"Alice\"}")
+    assert (Presence.meta_pid(m) == 42)
+    assert (Presence.meta_data(m) == "{\"name\":\"Alice\"}")
+  end
+
+  test "meta_pid and meta_data accessors work" do
+    let m = Presence.make_meta(0, "{}")
+    assert (Presence.meta_pid(m) == 0)
+    assert (Presence.meta_data(m) == "{}")
+  end
+end
+
+-- ── PresenceEntry ──────────────────────────────────────────────────────────
+
+describe "PresenceEntry" do
+  test "make_entry wraps a list of metas" do
+    let m1 = Presence.make_meta(1, "{}")
+    let m2 = Presence.make_meta(2, "{}")
+    let e  = Presence.make_entry(Cons(m1, Cons(m2, Nil)))
+    assert (Presence.entry_count(e) == 2)
+  end
+
+  test "entry_metas returns the metas list" do
+    let m = Presence.make_meta(5, "{\"x\":1}")
+    let e = Presence.make_entry(Cons(m, Nil))
+    match Presence.entry_metas(e) do
+    | Cons(first, Nil) -> assert (Presence.meta_pid(first) == 5)
+    | _                -> assert false
+    end
+  end
+
+  test "empty entry has count 0" do
+    let e = Presence.make_entry(Nil)
+    assert (Presence.entry_count(e) == 0)
+  end
+end
+
+-- ── new_state ──────────────────────────────────────────────────────────────
+
+describe "new_state" do
+  test "fresh state has no presences" do
+    let s = Presence.new_state()
+    assert (Presence.count_presences(s, "room:lobby") == 0)
+    assert (!Presence.is_present(s, "room:lobby", "user_1"))
+  end
+
+  test "list_state on fresh state returns empty map" do
+    let s = Presence.new_state()
+    let m = Presence.list_state(s, "room:lobby")
+    assert (Map.is_empty(m))
+  end
+end
+
+-- ── track_state ────────────────────────────────────────────────────────────
+
+describe "track_state" do
+  test "tracking a user marks them as present" do
+    let s  = Presence.new_state()
+    let s1 = Presence.track_state(s, "room:lobby", "alice", 10, "{}")
+    assert Presence.is_present(s1, "room:lobby", "alice")
+  end
+
+  test "count increases after tracking" do
+    let s  = Presence.new_state()
+    let s1 = Presence.track_state(s, "t", "alice", 10, "{}")
+    let s2 = Presence.track_state(s1, "t", "bob",   20, "{}")
+    assert (Presence.count_presences(s2, "t") == 2)
+  end
+
+  test "tracking same key twice (multi-device) adds second meta" do
+    let s  = Presence.new_state()
+    let s1 = Presence.track_state(s,  "t", "alice", 10, "{\"device\":\"phone\"}")
+    let s2 = Presence.track_state(s1, "t", "alice", 11, "{\"device\":\"laptop\"}")
+    -- Count of distinct keys is still 1
+    assert (Presence.count_presences(s2, "t") == 1)
+    -- But connection count is 2
+    assert (Presence.connection_count(s2, "t", "alice") == 2)
+  end
+
+  test "different topics are independent" do
+    let s  = Presence.new_state()
+    let s1 = Presence.track_state(s, "room:a", "alice", 10, "{}")
+    assert Presence.is_present(s1, "room:a", "alice")
+    assert (!Presence.is_present(s1, "room:b", "alice"))
+  end
+
+  test "track_state is pure — original state unchanged" do
+    let s  = Presence.new_state()
+    let _  = Presence.track_state(s, "t", "alice", 10, "{}")
+    assert (!Presence.is_present(s, "t", "alice"))
+  end
+end
+
+-- ── untrack_state ──────────────────────────────────────────────────────────
+
+describe "untrack_state" do
+  test "untracking sole connection removes the key" do
+    let s  = Presence.new_state()
+    let s1 = Presence.track_state(s,  "t", "alice", 10, "{}")
+    let s2 = Presence.untrack_state(s1, "t", "alice", 10)
+    assert (!Presence.is_present(s2, "t", "alice"))
+    assert (Presence.count_presences(s2, "t") == 0)
+  end
+
+  test "untracking one device leaves the other" do
+    let s  = Presence.new_state()
+    let s1 = Presence.track_state(s,  "t", "alice", 10, "{\"device\":\"phone\"}")
+    let s2 = Presence.track_state(s1, "t", "alice", 11, "{\"device\":\"laptop\"}")
+    let s3 = Presence.untrack_state(s2, "t", "alice", 10)
+    assert Presence.is_present(s3, "t", "alice")
+    assert (Presence.connection_count(s3, "t", "alice") == 1)
+  end
+
+  test "untracking a non-present user is a no-op" do
+    let s  = Presence.new_state()
+    let s1 = Presence.track_state(s, "t", "alice", 10, "{}")
+    let s2 = Presence.untrack_state(s1, "t", "bob", 99)
+    assert (Presence.count_presences(s2, "t") == 1)
+  end
+
+  test "untracking from unknown topic is a no-op" do
+    let s  = Presence.new_state()
+    let s1 = Presence.untrack_state(s, "no_such_topic", "alice", 1)
+    assert (Presence.count_presences(s1, "no_such_topic") == 0)
+  end
+
+  test "untrack_state is pure — original state unchanged" do
+    let s  = Presence.new_state()
+    let s1 = Presence.track_state(s, "t", "alice", 10, "{}")
+    let _  = Presence.untrack_state(s1, "t", "alice", 10)
+    assert Presence.is_present(s1, "t", "alice")
+  end
+end
+
+-- ── list_state ─────────────────────────────────────────────────────────────
+
+describe "list_state" do
+  test "returns all tracked keys for a topic" do
+    let s  = Presence.new_state()
+    let s1 = Presence.track_state(s,  "t", "alice", 1, "{}")
+    let s2 = Presence.track_state(s1, "t", "bob",   2, "{}")
+    let m  = Presence.list_state(s2, "t")
+    assert (Map.size(m) == 2)
+  end
+
+  test "unknown topic returns empty map" do
+    let s = Presence.new_state()
+    assert (Map.is_empty(Presence.list_state(s, "no_such")))
+  end
+end
+
+-- ── Diff helpers ───────────────────────────────────────────────────────────
+
+describe "join_diff_json" do
+  test "contains joins key" do
+    let diff = Presence.join_diff_json("alice", "{\"name\":\"Alice\"}")
+    assert (string_contains(diff, "\"joins\""))
+  end
+
+  test "contains leaves with empty object" do
+    let diff = Presence.join_diff_json("alice", "{}")
+    assert (string_contains(diff, "\"leaves\":{}"))
+  end
+
+  test "contains the key name" do
+    let diff = Presence.join_diff_json("alice", "{}")
+    assert (string_contains(diff, "alice"))
+  end
+end
+
+describe "leave_diff_json" do
+  test "contains leaves key" do
+    let diff = Presence.leave_diff_json("bob", "{}")
+    assert (string_contains(diff, "\"leaves\""))
+  end
+
+  test "contains joins with empty object" do
+    let diff = Presence.leave_diff_json("bob", "{}")
+    assert (string_contains(diff, "\"joins\":{}"))
+  end
+
+  test "contains the key name" do
+    let diff = Presence.leave_diff_json("bob", "{}")
+    assert (string_contains(diff, "bob"))
+  end
+end
+
+end

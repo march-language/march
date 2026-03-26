@@ -111,6 +111,11 @@ let all_stdlib_decls =
     "logger.march";
     "flow.march";
     "test.march";
+    "pubsub.march";
+    "channel.march";
+    "channel_server.march";
+    "presence.march";
+    "channel_socket.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -171,6 +176,26 @@ let () =
     ("websocket", [
       Alcotest.test_case "WebSocket module"
         `Quick (run_stdlib_test "test_websocket.march" "TestWebSocket");
+    ]);
+    ("pubsub", [
+      Alcotest.test_case "PubSub module"
+        `Quick (run_stdlib_test "test_pubsub.march" "TestPubSub");
+    ]);
+    ("channel", [
+      Alcotest.test_case "Channel module"
+        `Quick (run_stdlib_test "test_channel.march" "TestChannel");
+    ]);
+    ("channel_server", [
+      Alcotest.test_case "ChannelServer module"
+        `Quick (run_stdlib_test "test_channel_server.march" "TestChannelServer");
+    ]);
+    ("presence", [
+      Alcotest.test_case "Presence module"
+        `Quick (run_stdlib_test "test_presence.march" "TestPresence");
+    ]);
+    ("channel_socket", [
+      Alcotest.test_case "ChannelSocket module"
+        `Quick (run_stdlib_test "test_channel_socket.march" "TestChannelSocket");
     ]);
     ("process", [
       Alcotest.test_case "Process module"

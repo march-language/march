@@ -1,0 +1,183 @@
+-- Tests for the PubSub stdlib module.
+-- Run with: dune exec march -- test test/stdlib/test_pubsub.march
+--
+-- Only the pure data-structure layer is tested here:
+--   new_state, subscribe_state, unsubscribe_state, get_subscribers,
+--   has_subscribers, subscriber_count, topic_shard, topic_matches.
+-- The runtime actor API (subscribe_in_shard, broadcast_in_shard, …) requires
+-- the actor runtime and is not exercised here.
+
+mod TestPubSub do
+
+describe "new_state" do
+  test "initial state has no subscribers for any topic" do
+    let s = PubSub.new_state()
+    assert (PubSub.subscriber_count(s, "room:lobby") == 0)
+    assert (!PubSub.has_subscribers(s, "room:lobby"))
+  end
+
+  test "get_subscribers on empty state returns empty list" do
+    let s = PubSub.new_state()
+    match PubSub.get_subscribers(s, "room:lobby") do
+    | Nil -> ()
+    | _   -> assert false
+    end
+  end
+end
+
+describe "subscribe_state" do
+  test "subscribing one pid adds it to the list" do
+    let s  = PubSub.new_state()
+    let s1 = PubSub.subscribe_state(s, "room:lobby", 101)
+    assert (PubSub.subscriber_count(s1, "room:lobby") == 1)
+    assert PubSub.has_subscribers(s1, "room:lobby")
+  end
+
+  test "subscribing two pids to the same topic gives count 2" do
+    let s  = PubSub.new_state()
+    let s1 = PubSub.subscribe_state(s,  "room:lobby", 101)
+    let s2 = PubSub.subscribe_state(s1, "room:lobby", 102)
+    assert (PubSub.subscriber_count(s2, "room:lobby") == 2)
+  end
+
+  test "subscribing to different topics keeps them independent" do
+    let s  = PubSub.new_state()
+    let s1 = PubSub.subscribe_state(s,  "room:a", 1)
+    let s2 = PubSub.subscribe_state(s1, "room:b", 2)
+    assert (PubSub.subscriber_count(s2, "room:a") == 1)
+    assert (PubSub.subscriber_count(s2, "room:b") == 1)
+    assert (PubSub.subscriber_count(s2, "room:c") == 0)
+  end
+
+  test "subscribe_state is pure — original state unchanged" do
+    let s  = PubSub.new_state()
+    let _  = PubSub.subscribe_state(s, "room:lobby", 101)
+    assert (PubSub.subscriber_count(s, "room:lobby") == 0)
+  end
+end
+
+describe "get_subscribers" do
+  test "returns the list of subscribed pids" do
+    let s  = PubSub.new_state()
+    let s1 = PubSub.subscribe_state(s,  "t", 10)
+    let s2 = PubSub.subscribe_state(s1, "t", 20)
+    let subs = PubSub.get_subscribers(s2, "t")
+    -- Both pids must appear (order not guaranteed)
+    let has10 = match subs do
+      | Cons(10, _) -> true
+      | Cons(_, Cons(10, _)) -> true
+      | _ -> false
+    end
+    let has20 = match subs do
+      | Cons(20, _) -> true
+      | Cons(_, Cons(20, _)) -> true
+      | _ -> false
+    end
+    assert has10
+    assert has20
+  end
+
+  test "unknown topic returns Nil" do
+    let s = PubSub.new_state()
+    match PubSub.get_subscribers(s, "no_such_topic") do
+    | Nil -> ()
+    | _   -> assert false
+    end
+  end
+end
+
+describe "unsubscribe_state" do
+  test "unsubscribing a pid removes it" do
+    let s  = PubSub.new_state()
+    let s1 = PubSub.subscribe_state(s, "t", 1)
+    let s2 = PubSub.unsubscribe_state(s1, "t", 1)
+    assert (PubSub.subscriber_count(s2, "t") == 0)
+    assert (!PubSub.has_subscribers(s2, "t"))
+  end
+
+  test "unsubscribing one pid from two leaves the other" do
+    let s  = PubSub.new_state()
+    let s1 = PubSub.subscribe_state(s,  "t", 1)
+    let s2 = PubSub.subscribe_state(s1, "t", 2)
+    let s3 = PubSub.unsubscribe_state(s2, "t", 1)
+    assert (PubSub.subscriber_count(s3, "t") == 1)
+  end
+
+  test "unsubscribing non-existent pid leaves count unchanged" do
+    let s  = PubSub.new_state()
+    let s1 = PubSub.subscribe_state(s, "t", 42)
+    let s2 = PubSub.unsubscribe_state(s1, "t", 99)
+    assert (PubSub.subscriber_count(s2, "t") == 1)
+  end
+
+  test "unsubscribing from unknown topic is a no-op" do
+    let s  = PubSub.new_state()
+    let s1 = PubSub.unsubscribe_state(s, "no_such_topic", 1)
+    assert (PubSub.subscriber_count(s1, "no_such_topic") == 0)
+  end
+
+  test "unsubscribe_state is pure — original state unchanged" do
+    let s  = PubSub.new_state()
+    let s1 = PubSub.subscribe_state(s, "t", 1)
+    let _  = PubSub.unsubscribe_state(s1, "t", 1)
+    assert (PubSub.subscriber_count(s1, "t") == 1)
+  end
+end
+
+describe "topic_shard" do
+  test "shard is in range [0, num_shards)" do
+    let s0 = PubSub.topic_shard("room:lobby", 4)
+    assert (s0 >= 0)
+    assert (s0 < 4)
+    let s1 = PubSub.topic_shard("game:xyz", 4)
+    assert (s1 >= 0)
+    assert (s1 < 4)
+    let s2 = PubSub.topic_shard("notify:user:99", 4)
+    assert (s2 >= 0)
+    assert (s2 < 4)
+  end
+
+  test "same topic always maps to same shard" do
+    let a = PubSub.topic_shard("room:42", 8)
+    let b = PubSub.topic_shard("room:42", 8)
+    assert (a == b)
+  end
+
+  test "num_shards = 1 always returns 0" do
+    assert (PubSub.topic_shard("anything", 1) == 0)
+    assert (PubSub.topic_shard("room:lobby", 1) == 0)
+  end
+end
+
+describe "topic_matches" do
+  test "exact match returns true" do
+    assert PubSub.topic_matches("room:lobby", "room:lobby")
+  end
+
+  test "exact match different topic returns false" do
+    assert (!PubSub.topic_matches("room:lobby", "room:42"))
+  end
+
+  test "wildcard prefix matches correctly" do
+    assert PubSub.topic_matches("room:*", "room:lobby")
+    assert PubSub.topic_matches("room:*", "room:42")
+    assert PubSub.topic_matches("room:*", "room:")
+  end
+
+  test "wildcard prefix does not match different namespace" do
+    assert (!PubSub.topic_matches("room:*", "game:lobby"))
+    assert (!PubSub.topic_matches("room:*", "notify:user"))
+  end
+
+  test "bare wildcard matches everything" do
+    assert PubSub.topic_matches("*", "room:lobby")
+    assert PubSub.topic_matches("*", "anything")
+  end
+
+  test "empty pattern matches only empty topic" do
+    assert PubSub.topic_matches("", "")
+    assert (!PubSub.topic_matches("", "room:lobby"))
+  end
+end
+
+end
