@@ -981,12 +981,34 @@ let builtin_bindings : (string * scheme) list =
     ("process_spawn_lines", poly2 (fun a e ->
         TArrow (t_string, TArrow (t_list t_string,
           t_result (TCon ("Seq", [a])) e))));
+    (* TypedArray builtins — contiguous native arrays for columnar DataFrame storage *)
+    ("typed_array_create",   poly1 (fun a ->
+        TArrow (t_int, TArrow (a, TCon ("TypedArray", [a])))));
+    ("typed_array_get",      poly1 (fun a ->
+        TArrow (TCon ("TypedArray", [a]), TArrow (t_int, a))));
+    ("typed_array_set",      poly1 (fun a ->
+        TArrow (TCon ("TypedArray", [a]), TArrow (t_int, TArrow (a, TCon ("TypedArray", [a]))))));
+    ("typed_array_length",   poly1 (fun a ->
+        TArrow (TCon ("TypedArray", [a]), t_int)));
+    ("typed_array_slice",    poly1 (fun a ->
+        TArrow (TCon ("TypedArray", [a]), TArrow (t_int, TArrow (t_int, TCon ("TypedArray", [a]))))));
+    ("typed_array_map",      poly2 (fun a b ->
+        TArrow (TCon ("TypedArray", [a]), TArrow (TArrow (a, b), TCon ("TypedArray", [b])))));
+    ("typed_array_filter",   poly1 (fun a ->
+        TArrow (TCon ("TypedArray", [a]), TArrow (TCon ("TypedArray", [t_bool]), TCon ("TypedArray", [a])))));
+    ("typed_array_fold",     poly2 (fun a b ->
+        TArrow (TCon ("TypedArray", [a]), TArrow (b, TArrow (TArrow (b, TArrow (a, b)), b)))));
+    ("typed_array_from_list", poly1 (fun a ->
+        TArrow (t_list a, TCon ("TypedArray", [a]))));
+    ("typed_array_to_list",  poly1 (fun a ->
+        TArrow (TCon ("TypedArray", [a]), t_list a)));
   ]
 
 let builtin_types : (string * int) list =
   [ ("Int",    0); ("Float",  0); ("Bool",  0); ("String", 0);
     ("Char",   0); ("Byte",   0); ("Atom",  0); ("Unit",   0);
     ("List",   1); ("Option", 1); ("Array", 1); ("Set",    1); ("Seq",    1);
+    ("TypedArray", 1);
     ("Result", 2); ("Map",    2);
     ("Pid",    1); ("Cap",    1); ("Future",1); ("Stream", 1);
     ("Task",   1); ("WorkPool", 0); ("Node",   0);
