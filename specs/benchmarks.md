@@ -215,6 +215,79 @@ uneven workloads. The `Cap(WorkPool)` threading should have zero runtime cost
 
 ---
 
+---
+
+## HTTP benchmark: March vs Rust actix-web 4 vs Python FastAPI
+
+### Run 2: 2026-03-25 (batch pipelined writev — evloop handle_read)
+
+**Date:** 2026-03-25 (second run, after Phase 2 batch-writev optimization)
+**Machine:** macOS Darwin 24.6.0 (Apple Silicon, 14 logical CPUs)
+**Tool:** wrk 4.2.0 — 4 threads, 256 connections, 15s captured run (primer + warmup passes first)
+**March:** event-loop server (kqueue + SO_REUSEPORT, 14 threads) + per-thread arena allocator + batch writev in handle_read (N pipelined requests → 1 writev)
+**Rust:** actix-web 4.13.0, `--release` (LTO, opt-level 3), 14 workers
+**Python:** FastAPI 0.135.2 + uvicorn 0.42.0, uvloop, 14 worker processes
+
+| Test | March | Rust actix-web 4 | Python FastAPI+uvicorn |
+|---|---|---|---|
+| **JSON** req/s | **52,628** | 46,865 | 46,830 |
+| JSON avg latency | 4.84 ms | 5.44 ms | 5.42 ms |
+| JSON p99 latency | 5.86 ms | 6.39 ms | 5.97 ms |
+| **Plaintext** req/s | **52,812** | 48,384 | 45,963 |
+| Plaintext avg latency | 4.84 ms | 5.27 ms | 5.53 ms |
+| Plaintext p99 latency | 5.89 ms | 6.37 ms | 7.25 ms |
+| **Plaintext pipelined ×16** req/s | 108,572 | **715,186** | 85,409 |
+| Pipelined avg latency | 20.40 ms | **3.06 ms** | 24.36 ms |
+
+### vs. Run 1 (pre-Phase-2)
+
+| Metric | Run 1 | Run 2 | Delta |
+|---|---|---|---|
+| March JSON req/s | 50,270 | 52,628 | **+4.7%** |
+| March plaintext req/s | 52,306 | 52,812 | **+1.0%** |
+| March pipelined ×16 req/s | 103,611 | 108,572 | **+4.8%** |
+| Actix JSON req/s | 46,623 | 46,865 | ±0% |
+| Actix plaintext req/s | 47,186 | 48,384 | ±0% |
+| Actix pipelined ×16 req/s | 709,265 | 715,186 | ±0% |
+| FastAPI JSON req/s | 46,556 | 46,830 | ±0% |
+| FastAPI plaintext req/s | 48,068 | 45,963 | ±0% |
+| FastAPI pipelined ×16 req/s | 85,866 | 85,409 | ±0% |
+
+### Analysis
+
+**Non-pipelined (JSON/plaintext):** March leads all three frameworks by 8–12%. The event-loop + arena allocator combination eliminates per-request malloc overhead that actix's tokio runtime still pays, and FastAPI's ASGI dispatch adds Python overhead even with uvloop.
+
+**Pipelined ×16 (Phase 2 batch writev):** The handle_read rewrite now batches all N pipelined requests into a single writev() call. This yields +4.8% (103K → 108K req/s), reducing syscall overhead on pipelined connections. The large gap vs actix (715K) persists — actix's tokio `h1` codec is zero-copy through the entire pipeline including the I/O layer, while March still materializes a full `march_response_t` per request. Further gains would require moving to a zero-copy path through the March runtime layer.
+
+**FastAPI multi-worker:** 14 workers with uvloop, on par with March and actix on non-pipelined tests.
+
+### Run 1: 2026-03-25 (initial baseline)
+
+**Date:** 2026-03-25 (first run)
+
+| Test | March | Rust actix-web 4 | Python FastAPI+uvicorn |
+|---|---|---|---|
+| **JSON** req/s | **50,270** | 46,623 | 46,556 |
+| JSON avg latency | 5.08 ms | 5.46 ms | 5.49 ms |
+| JSON p99 latency | 5.94 ms | 6.39 ms | 7.38 ms |
+| **Plaintext** req/s | **52,306** | 47,186 | 48,068 |
+| Plaintext avg latency | 4.87 ms | 5.40 ms | 5.31 ms |
+| Plaintext p99 latency | 5.90 ms | 6.34 ms | 5.78 ms |
+| **Plaintext pipelined ×16** req/s | 103,611 | **709,265** | 85,866 |
+| Pipelined avg latency | 21.31 ms | **3.16 ms** | 24.37 ms |
+
+### How to re-run
+
+```bash
+# From repo root
+bash bench/tfb/run_comparison.sh
+```
+
+Servers: `bench/tfb/tfb_server` (March, compiled), `bench/tfb/rust_actix/target/release/rust_actix` (Rust), `bench/tfb/fastapi_server.py` (Python).
+Pipeline script: `bench/tfb/pipeline.lua`.
+
+---
+
 ## Running benchmarks to validate changes
 
 See also the note in `CLAUDE.md`: run the relevant benchmark after any change

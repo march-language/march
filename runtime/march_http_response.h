@@ -138,6 +138,11 @@ int march_response_send_plaintext(int fd);
 
 /* ── Date header cache ────────────────────────────────────────────────── */
 
+/* Returns a pointer to the calling thread's TLS scratch buffer
+ * (MARCH_RESPONSE_SCRATCH_SIZE bytes).  Used by the event loop to snapshot
+ * scratch before an EAGAIN return so deferred iovecs remain valid. */
+char *march_response_tls_scratch(void);
+
 /* Return a pointer to the current cached Date header string of the form
  *   "Date: Wed, 25 Mar 2026 12:34:56 GMT\r\n"
  * and store its length in *len_out.  The pointer is valid until the next

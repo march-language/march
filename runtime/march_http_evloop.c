@@ -36,6 +36,7 @@
 #include <pthread.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <assert.h>
 
 /* ── Platform event API selection ─────────────────────────────────────── */
 
@@ -195,21 +196,52 @@ static void close_conn(int evfd, conn_state_t *c) {
     conn_state_free(c);
 }
 
+/* ── Defer a partial/EAGAIN write to handle_write ─────────────────────── */
+
+static void evloop_defer_write(int evfd, conn_state_t *c,
+                                struct iovec *remaining, int n_remaining,
+                                size_t scratch_used, int keep_alive) {
+    /* Snapshot TLS scratch so iovecs remain valid after handle_read returns.
+     * scratch_snap is MARCH_RESPONSE_SCRATCH_SIZE bytes — always fits. */
+    if (scratch_used > 0) {
+        assert(scratch_used <= MARCH_RESPONSE_SCRATCH_SIZE);
+        char *tls = march_response_tls_scratch();
+        memcpy(c->scratch_snap, tls, scratch_used);
+        c->scratch_snap_len = scratch_used;
+        /* Fix up iov_base pointers that point into tls_scratch. */
+        for (int j = 0; j < n_remaining; j++) {
+            char *base = (char *)remaining[j].iov_base;
+            if (base >= tls && base < tls + MARCH_RESPONSE_SCRATCH_SIZE)
+                remaining[j].iov_base = c->scratch_snap + (base - tls);
+        }
+    }
+
+    int copy = n_remaining < CONN_BATCH_IOV_MAX ? n_remaining : CONN_BATCH_IOV_MAX;
+    memcpy(c->wbuf, remaining, (size_t)copy * sizeof(struct iovec));
+    c->wbuf_count = copy;
+    c->wbuf_pos   = 0;
+    c->keep_alive = keep_alive;
+    c->phase      = CONN_PHASE_WRITING;
+    arm_write(evfd, c);
+}
+
 /* ── Handle a readable connection ─────────────────────────────────────── */
 
 static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
     io_result_t r = march_recv_nonblocking(c);
 
     if (r == IO_PARTIAL)
-        return;   /* still waiting for more data — stay armed for read */
+        return;
 
     if (r == IO_ERROR) {
         close_conn(evfd, c);
         return;
     }
 
-    /* IO_COMPLETE — we have at least one full request.  Parse and process
-     * all pipelined requests in the buffer synchronously. */
+    /* IO_COMPLETE — at least one full request buffered.  Process all
+     * pipelined requests in the buffer and send responses as one batch.
+     * Same pattern as connection_thread (Phase 0 batch writev), but using
+     * a single non-blocking writev attempt with EAGAIN fallback. */
     char        *clo = (char *)pipeline;
     closure_fn_t fn  = *(closure_fn_t *)(clo + 16);
 
@@ -221,35 +253,127 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
                                             &consumed);
         if (n <= 0) break;
 
-        for (int i = 0; i < n; i++) {
-            /* For the event-loop path we call process_one_request which
-             * does a blocking writev for the response.  This is correct
-             * because the pipeline is synchronous and fast — the write
-             * almost always completes in one syscall for small responses.
-             *
-             * Phase 3 optimization: build response into conn_state_t.wbuf
-             * and drain non-blocking via march_send_nonblocking. */
-            int rc = march_process_one_request(c->fd, pipeline, fn,
-                                                &reqs[i],
-                                                c->rbuf, c->rbuf_len);
-            if (rc <= 0) {
-                close_conn(evfd, c);
-                return;
-            }
-            c->keep_alive = 1;
-        }
-
-        /* Shift unconsumed bytes. */
+        /* Shift consumed bytes NOW — before any send or early return.
+         * Critical: EAGAIN/partial paths return early below; if the shift
+         * were at the bottom of the loop, those paths would leave consumed
+         * bytes in c->rbuf and re-parse the same requests next time. */
         if (consumed > 0 && consumed < c->rbuf_len) {
             memmove(c->rbuf, c->rbuf + consumed, c->rbuf_len - consumed);
             c->rbuf_len -= consumed;
         } else if (consumed >= c->rbuf_len) {
             c->rbuf_len = 0;
         }
-    }
 
-    /* Connection survived — keep reading (keep-alive).
-     * The fd is already armed for read (edge-triggered). */
+        /* Build all N responses into a single iovec batch. */
+        struct iovec     batch_iov[CONN_BATCH_IOV_MAX];
+        int              batch_n = 0;
+        march_response_t bresp;
+        bresp.iov_count    = 0;
+        bresp.scratch_used = 0;
+
+        int batch_keep_alive = 1;
+        int batch_ok         = 1;
+
+        for (int i = 0; i < n; i++) {
+            int   keep_alive  = march_detect_keep_alive_simd(&reqs[i]);
+            void *conn        = march_conn_from_parsed(&reqs[i],
+                                                        c->rbuf, c->rbuf_len,
+                                                        c->fd);
+            void *result_conn = fn(pipeline, conn);
+
+            if (!result_conn) {
+                if (batch_n > 0) { writev(c->fd, batch_iov, batch_n); }
+                march_http_send_response(c->fd, 500, make_nil(),
+                    march_string_lit("Internal Server Error", 21));
+                close_conn(evfd, c);
+                batch_ok = 0;
+                break;
+            }
+
+            /* WebSocket upgrade — fall through to close (full WS async
+             * support requires a separate handler, out of scope here). */
+            char    *rc_p        = (char *)result_conn;
+            void    *upgrade_val = *(void **)(rc_p + 112);
+            int32_t  upgrade_tag = *(int32_t *)((char *)upgrade_val + 8);
+            if (upgrade_tag == 1) {
+                if (batch_n > 0) { writev(c->fd, batch_iov, batch_n); }
+                close_conn(evfd, c);
+                batch_ok = 0;
+                break;
+            }
+
+            int64_t resp_status  = *(int64_t *)(rc_p + 72);
+            void   *resp_headers = *(void **)(rc_p + 80);
+            void   *resp_body    = *(void **)(rc_p + 88);
+            if (resp_status == 0) resp_status = 200;
+
+            /* Overflow guard: flush early if batch is near capacity. */
+            if (batch_n + MARCH_RESPONSE_MAX_IOVEC > CONN_BATCH_IOV_MAX) {
+                writev(c->fd, batch_iov, batch_n);
+                batch_n            = 0;
+                bresp.scratch_used = 0;
+            }
+
+            march_response_clear_no_free(&bresp);
+            march_populate_response_ka(&bresp, resp_status,
+                                        resp_headers, resp_body, keep_alive);
+            memcpy(batch_iov + batch_n, bresp.iov,
+                   (size_t)bresp.iov_count * sizeof(struct iovec));
+            batch_n += bresp.iov_count;
+
+            batch_keep_alive = keep_alive;
+            if (!keep_alive) break;
+        }
+
+        if (!batch_ok) return;
+        if (batch_n == 0) continue;
+
+        /* ── Single non-blocking writev for the entire batch ─────── */
+        ssize_t nsent = writev(c->fd, batch_iov, batch_n);
+
+        if (nsent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            evloop_defer_write(evfd, c, batch_iov, batch_n,
+                               bresp.scratch_used, batch_keep_alive);
+            return;
+        }
+
+        if (nsent < 0) {
+            close_conn(evfd, c);
+            return;
+        }
+
+        /* Partial send — advance past sent iovecs, defer rest. */
+        {
+            size_t total = 0;
+            for (int j = 0; j < batch_n; j++) total += batch_iov[j].iov_len;
+            if ((size_t)nsent < total) {
+                int    rem_pos = 0;
+                size_t rem     = (size_t)nsent;
+                while (rem > 0 && rem_pos < batch_n) {
+                    if (rem >= batch_iov[rem_pos].iov_len) {
+                        rem -= batch_iov[rem_pos].iov_len;
+                        rem_pos++;
+                    } else {
+                        batch_iov[rem_pos].iov_base =
+                            (char *)batch_iov[rem_pos].iov_base + rem;
+                        batch_iov[rem_pos].iov_len -= rem;
+                        rem = 0;
+                    }
+                }
+                evloop_defer_write(evfd, c,
+                                   batch_iov + rem_pos, batch_n - rem_pos,
+                                   bresp.scratch_used, batch_keep_alive);
+                return;
+            }
+        }
+
+        /* Full batch sent in one call (common case). */
+        if (!batch_keep_alive) {
+            close_conn(evfd, c);
+            return;
+        }
+    }
+    /* fd stays armed for read (edge-triggered, already registered). */
 }
 
 /* ── Handle a writable connection ─────────────────────────────────────── */

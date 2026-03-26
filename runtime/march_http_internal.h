@@ -6,11 +6,15 @@
 #pragma once
 
 #include "march_http_parse_simd.h"
+#include "march_runtime.h"
 #include <stddef.h>
 #include <stdint.h>
 
 /* Closure function pointer: fn(closure, arg) → result. */
 typedef void *(*closure_fn_t)(void *clo, void *arg);
+
+/* Build an empty March List (Nil tag=0).  Used for empty headers lists. */
+static inline void *make_nil(void) { return march_alloc(16); }
 
 /* Build a March Conn heap object directly from a parsed SIMD request.
  * This is the fast path that avoids the intermediate Ok(tuple(...)) allocation
@@ -34,3 +38,13 @@ int march_send_response_with_ka(int fd, int64_t status, void *headers,
 int march_process_one_request(int fd, void *pipeline, closure_fn_t fn,
                                const march_http_request_t *req,
                                const char *buf, size_t buf_len);
+
+/* Build a response into *resp using the zero-copy builder.
+ * resp->iov_count is reset to 0 (via march_response_clear_no_free before the
+ * call); resp->scratch_used carries forward so iovecs from multiple pipelined
+ * responses share the TLS scratch buffer without overlap.
+ * Use the batch pattern: init bresp once, call clear_no_free + this per req,
+ * accumulate iovecs into batch_iov[], then writev the entire batch at once. */
+void march_populate_response_ka(march_response_t *resp,
+                                 int64_t status, void *headers,
+                                 void *body, int keep_alive);

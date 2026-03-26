@@ -18,6 +18,13 @@
 #include <stddef.h>
 #include <sys/uio.h>
 
+/* ── Batch write sizing ───────────────────────────────────────────────── */
+
+/* Maximum iovecs in one pipelined response batch.
+ * EVLOOP_PIPELINE_BATCH(32) requests × ~16 iov/request typical = 512.
+ * conn_state_t.wbuf is sized to this so it can hold a full deferred batch. */
+#define CONN_BATCH_IOV_MAX 512
+
 /* ── Connection phases ────────────────────────────────────────────────── */
 
 typedef enum {
@@ -47,17 +54,16 @@ struct conn_state {
     size_t        rbuf_len;              /* valid bytes in rbuf */
 
     /* ── Write state ────────────────────────────────────────────────── */
-    /* We copy the iovec from march_response_t so we can track partial
-     * writes across EAGAIN returns. */
-    struct iovec  wbuf[MARCH_RESPONSE_MAX_IOVEC];
+    /* Holds remaining iovecs when a batch writev returns EAGAIN.
+     * Sized to hold a full CONN_BATCH_IOV_MAX-entry batch (defined above). */
+    struct iovec  wbuf[CONN_BATCH_IOV_MAX];
     int           wbuf_count;
     int           wbuf_pos;              /* next iovec entry to send */
 
-    /* Thread-local scratch snapshot: the response builder writes dynamic
-     * content (Content-Length digits, etc.) into per-thread scratch.
-     * We snapshot the relevant bytes here so they survive across event
-     * loop iterations.  512 bytes is generous for CL + status fallback. */
-    char          scratch_snap[512];
+    /* Snapshot of TLS scratch bytes used by this batch's responses.
+     * Must be exactly MARCH_RESPONSE_SCRATCH_SIZE so the pointer fixup in
+     * evloop_defer_write is always safe — any TLS scratch offset is valid. */
+    char          scratch_snap[MARCH_RESPONSE_SCRATCH_SIZE];
     size_t        scratch_snap_len;
 
     /* ── Free-list link ─────────────────────────────────────────────── */

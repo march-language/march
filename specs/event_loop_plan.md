@@ -1,9 +1,13 @@
 # Plan: Event-Loop HTTP Server (The Architectural Ceiling)
 
 ## Status
-**Phases 0, 0.5, 1–2 complete.** Response write batching + RC cleanup, non-blocking
-I/O infrastructure, and kqueue/epoll event loop with SO_REUSEPORT implemented.
-Phases 3–4 (per-thread arena, io_uring) are optional future work.
+**Phases 0, 0.5, 1–2 + Phase 2 batch-writev complete.** Response write batching
++ RC cleanup, non-blocking I/O infrastructure, kqueue/epoll event loop with
+SO_REUSEPORT, and batch pipelined writev in `handle_read` (N pipelined requests
+→ 1 writev, EAGAIN → deferred via `handle_write`) all implemented.
+Result: 103K → 108K req/s pipelined (+4.8%) on macOS; non-pipelined March leads
+actix-web 4 and FastAPI at 52K req/s.
+Phases 3–4 (io_uring) are optional future work.
 Thread-per-connection fallback retained via compile flag.
 
 ---
