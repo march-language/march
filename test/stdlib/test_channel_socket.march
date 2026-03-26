@@ -1,0 +1,157 @@
+-- Tests for the ChannelSocket stdlib module.
+-- Tests cover pure data-structure functions: route matching, active channel
+-- registry, SocketConfig construction.
+-- Runtime functions (plug_for, ws_loop, route_msg) require actor/WS runtime.
+
+mod TestChannelSocket do
+
+-- ── SocketConfig ───────────────────────────────────────────────────────────
+
+describe "SocketConfig" do
+  test "make_config stores path and routes" do
+    let routes = Cons(Channel.channel_route("room:*", "RoomChannel"), Nil)
+    let connect_fn = fn (params, sock) -> Ok(sock)
+    let cfg = ChannelSocket.make_config("/socket", routes, connect_fn)
+    assert (ChannelSocket.config_path(cfg) == "/socket")
+    assert (List.length(ChannelSocket.config_routes(cfg)) == 1)
+  end
+
+  test "make_config_with_shards stores shards" do
+    let shards = Cons(10, Cons(11, Nil))
+    let cfg = ChannelSocket.make_config_with_shards("/ws", Nil, fn (p, s) -> Ok(s), shards)
+    assert (List.length(ChannelSocket.config_shards(cfg)) == 2)
+  end
+end
+
+-- ── Topic routing ──────────────────────────────────────────────────────────
+
+describe "find_route" do
+  test "finds matching wildcard route" do
+    let routes = Cons(Channel.channel_route("room:*",    "RoomChannel"),
+                 Cons(Channel.channel_route("game:*",    "GameChannel"),
+                 Nil))
+    match ChannelSocket.find_route(routes, "room:lobby") do
+    | Some(r) -> assert (Channel.route_handler(r) == "RoomChannel")
+    | None    -> assert false
+    end
+  end
+
+  test "finds exact-match route" do
+    let routes = Cons(Channel.channel_route("notify:admin", "AdminChannel"), Nil)
+    match ChannelSocket.find_route(routes, "notify:admin") do
+    | Some(r) -> assert (Channel.route_handler(r) == "AdminChannel")
+    | None    -> assert false
+    end
+  end
+
+  test "returns None when no route matches" do
+    let routes = Cons(Channel.channel_route("room:*", "RoomChannel"), Nil)
+    match ChannelSocket.find_route(routes, "game:42") do
+    | None -> ()
+    | _    -> assert false
+    end
+  end
+
+  test "returns first matching route" do
+    let routes = Cons(Channel.channel_route("room:*", "FirstHandler"),
+                 Cons(Channel.channel_route("room:*", "SecondHandler"),
+                 Nil))
+    match ChannelSocket.find_route(routes, "room:lobby") do
+    | Some(r) -> assert (Channel.route_handler(r) == "FirstHandler")
+    | None    -> assert false
+    end
+  end
+end
+
+describe "has_route" do
+  test "true when a matching route exists" do
+    let routes = Cons(Channel.channel_route("room:*", "R"), Nil)
+    assert ChannelSocket.has_route(routes, "room:lobby")
+  end
+
+  test "false when no matching route" do
+    let routes = Cons(Channel.channel_route("room:*", "R"), Nil)
+    assert (!ChannelSocket.has_route(routes, "game:42"))
+  end
+
+  test "empty routes always returns false" do
+    assert (!ChannelSocket.has_route(Nil, "room:lobby"))
+  end
+end
+
+-- ── ActiveChannels registry ────────────────────────────────────────────────
+
+describe "ActiveChannels" do
+  test "empty_channels has no entries" do
+    let ac = ChannelSocket.empty_channels()
+    match ChannelSocket.lookup_channel(ac, "room:lobby") do
+    | None -> ()
+    | _    -> assert false
+    end
+  end
+
+  test "register_channel stores a pid" do
+    let ac  = ChannelSocket.empty_channels()
+    let ac1 = ChannelSocket.register_channel(ac, "room:lobby", 42)
+    match ChannelSocket.lookup_channel(ac1, "room:lobby") do
+    | Some(pid) -> assert (pid == 42)
+    | None      -> assert false
+    end
+  end
+
+  test "deregister_channel removes a pid" do
+    let ac  = ChannelSocket.empty_channels()
+    let ac1 = ChannelSocket.register_channel(ac, "t", 10)
+    let ac2 = ChannelSocket.deregister_channel(ac1, "t")
+    match ChannelSocket.lookup_channel(ac2, "t") do
+    | None -> ()
+    | _    -> assert false
+    end
+  end
+
+  test "multiple topics are independent" do
+    let ac  = ChannelSocket.empty_channels()
+    let ac1 = ChannelSocket.register_channel(ac,  "room:a", 1)
+    let ac2 = ChannelSocket.register_channel(ac1, "room:b", 2)
+    match ChannelSocket.lookup_channel(ac2, "room:a") do
+    | Some(pid) -> assert (pid == 1)
+    | None      -> assert false
+    end
+    match ChannelSocket.lookup_channel(ac2, "room:b") do
+    | Some(pid) -> assert (pid == 2)
+    | None      -> assert false
+    end
+  end
+
+  test "all_channels returns all pairs" do
+    let ac  = ChannelSocket.empty_channels()
+    let ac1 = ChannelSocket.register_channel(ac,  "t1", 10)
+    let ac2 = ChannelSocket.register_channel(ac1, "t2", 20)
+    let pairs = ChannelSocket.all_channels(ac2)
+    assert (List.length(pairs) == 2)
+  end
+end
+
+-- ── Wire format helpers ────────────────────────────────────────────────────
+
+describe "parse_frame / serialize_msg" do
+  test "parse_frame round-trips a channel message" do
+    let m  = Channel.make_msg("0", "1", "room:42", "new_msg", "{}")
+    let json = ChannelSocket.serialize_msg(m)
+    match ChannelSocket.parse_frame(json) do
+    | Some(m2) ->
+      assert (Channel.msg_topic(m2) == "room:42")
+      assert (Channel.msg_event(m2) == "new_msg")
+    | None -> assert false
+    end
+  end
+
+  test "parse_frame returns None for garbage input" do
+    match ChannelSocket.parse_frame("not json") do
+    | None -> ()
+    | _    -> assert false
+    end
+  end
+end
+
+end

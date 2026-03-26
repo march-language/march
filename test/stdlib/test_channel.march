@@ -1,0 +1,252 @@
+-- Tests for the Channel stdlib module.
+-- Covers: Socket, HandleResult, ChannelMsg, ChannelRoute, wire serialization.
+-- Push/broadcast helpers require actor runtime and are not tested here.
+
+mod TestChannel do
+
+-- ── Socket ─────────────────────────────────────────────────────────────────
+
+describe "Socket construction and accessors" do
+  test "new_socket stores topic, pids, and empty assigns" do
+    let s = Channel.new_socket("room:lobby", 1, 2, "0")
+    assert (Channel.socket_topic(s) == "room:lobby")
+    assert (Channel.socket_channel_pid(s) == 1)
+    assert (Channel.socket_transport_pid(s) == 2)
+    assert (Channel.socket_join_ref(s) == "0")
+    match Channel.socket_assigns(s) do
+    | Nil -> ()
+    | _   -> assert false
+    end
+  end
+
+  test "assign adds a key-value pair to assigns" do
+    let s  = Channel.new_socket("room:lobby", 1, 2, "0")
+    let s1 = Channel.assign(s, "user_id", "42")
+    match Channel.get_assign(s1, "user_id") do
+    | Some(v) -> assert (v == "42")
+    | None    -> assert false
+    end
+  end
+
+  test "assign overwrites existing key (first match wins)" do
+    let s  = Channel.new_socket("t", 1, 2, "0")
+    let s1 = Channel.assign(s,  "k", "v1")
+    let s2 = Channel.assign(s1, "k", "v2")
+    -- get_assign returns first match; after two assigns "k" appears twice
+    match Channel.get_assign(s2, "k") do
+    | Some(v) -> assert (v == "v2")
+    | None    -> assert false
+    end
+  end
+
+  test "get_assign returns None for unknown key" do
+    let s = Channel.new_socket("t", 1, 2, "0")
+    match Channel.get_assign(s, "missing") do
+    | None -> ()
+    | _    -> assert false
+    end
+  end
+
+  test "assign is pure — original socket unchanged" do
+    let s  = Channel.new_socket("t", 1, 2, "0")
+    let _  = Channel.assign(s, "k", "v")
+    match Channel.get_assign(s, "k") do
+    | None -> ()
+    | _    -> assert false
+    end
+  end
+
+  test "multiple assigns accumulate" do
+    let s  = Channel.new_socket("t", 1, 2, "0")
+    let s1 = Channel.assign(s,  "a", "1")
+    let s2 = Channel.assign(s1, "b", "2")
+    match Channel.get_assign(s2, "a") do
+    | Some(v) -> assert (v == "1")
+    | None    -> assert false
+    end
+    match Channel.get_assign(s2, "b") do
+    | Some(v) -> assert (v == "2")
+    | None    -> assert false
+    end
+  end
+end
+
+-- ── HandleResult ───────────────────────────────────────────────────────────
+
+describe "HandleResult constructors" do
+  test "reply constructs Reply variant" do
+    let r = Channel.reply(":ok", "{}", "my_state")
+    match r do
+    | Reply(status, payload, st) ->
+      assert (status == ":ok")
+      assert (payload == "{}")
+      assert (st == "my_state")
+    | _ -> assert false
+    end
+  end
+
+  test "noreply constructs NoReply variant" do
+    let r = Channel.noreply("my_state")
+    match r do
+    | NoReply(st) -> assert (st == "my_state")
+    | _              -> assert false
+    end
+  end
+
+  test "stop constructs Stop variant" do
+    let r = Channel.stop("unauthorized", "my_state")
+    match r do
+    | Stop(reason, st) ->
+      assert (reason == "unauthorized")
+      assert (st == "my_state")
+    | _ -> assert false
+    end
+  end
+end
+
+-- ── LeaveReason ────────────────────────────────────────────────────────────
+
+describe "LeaveReason constructors" do
+  test "NormalLeave variant" do
+    let r = NormalLeave
+    match r do
+    | NormalLeave -> ()
+    | _           -> assert false
+    end
+  end
+
+  test "Disconnect variant" do
+    let r = Disconnect
+    match r do
+    | Disconnect -> ()
+    | _          -> assert false
+    end
+  end
+
+  test "Kicked stores message" do
+    let r = Kicked("spam")
+    match r do
+    | Kicked(msg) -> assert (msg == "spam")
+    | _           -> assert false
+    end
+  end
+end
+
+-- ── ChannelRoute ───────────────────────────────────────────────────────────
+
+describe "ChannelRoute" do
+  test "channel_route stores pattern and handler" do
+    let r = Channel.channel_route("room:*", "RoomChannel")
+    assert (Channel.route_pattern(r) == "room:*")
+    assert (Channel.route_handler(r) == "RoomChannel")
+  end
+
+  test "exact pattern stored verbatim" do
+    let r = Channel.channel_route("notify:admin", "AdminChannel")
+    assert (Channel.route_pattern(r) == "notify:admin")
+  end
+end
+
+-- ── ChannelMsg ─────────────────────────────────────────────────────────────
+
+describe "ChannelMsg construction and accessors" do
+  test "make_msg stores all five fields" do
+    let m = Channel.make_msg("0", "1", "room:lobby", "new_msg", "{\"text\":\"hi\"}")
+    assert (Channel.msg_join_ref(m) == "0")
+    assert (Channel.msg_ref(m) == "1")
+    assert (Channel.msg_topic(m) == "room:lobby")
+    assert (Channel.msg_event(m) == "new_msg")
+    assert (Channel.msg_payload(m) == "{\"text\":\"hi\"}")
+  end
+
+  test "system phx_join event stored correctly" do
+    let m = Channel.make_msg("0", "0", "room:lobby", "phx_join", "{}")
+    assert (Channel.msg_event(m) == "phx_join")
+    assert (Channel.msg_topic(m) == "room:lobby")
+  end
+end
+
+-- ── Wire serialization ─────────────────────────────────────────────────────
+
+describe "Channel.serialize" do
+  test "serializes a simple message" do
+    let m = Channel.make_msg("0", "1", "room:lobby", "new_msg", "{\"text\":\"hi\"}")
+    let json = Channel.serialize(m)
+    assert (string_contains(json, "\"join_ref\":\"0\""))
+    assert (string_contains(json, "\"ref\":\"1\""))
+    assert (string_contains(json, "\"topic\":\"room:lobby\""))
+    assert (string_contains(json, "\"event\":\"new_msg\""))
+    assert (string_contains(json, "\"payload\":{\"text\":\"hi\"}"))
+  end
+
+  test "serialized output starts with { and ends with }" do
+    let m    = Channel.make_msg("0", "1", "t", "e", "{}")
+    let json = Channel.serialize(m)
+    assert (string_starts_with(json, "{"))
+    assert (string_ends_with(json, "}"))
+  end
+
+  test "escapes double quotes in event name" do
+    let m    = Channel.make_msg("", "", "t", "ev\"ent", "{}")
+    let json = Channel.serialize(m)
+    assert (string_contains(json, "ev\\\"ent"))
+  end
+end
+
+describe "Channel.parse" do
+  test "round-trips a serialized message" do
+    let m    = Channel.make_msg("0", "7", "room:42", "phx_join", "{}")
+    let json = Channel.serialize(m)
+    match Channel.parse(json) do
+    | Some(m2) ->
+      assert (Channel.msg_join_ref(m2) == "0")
+      assert (Channel.msg_ref(m2) == "7")
+      assert (Channel.msg_topic(m2) == "room:42")
+      assert (Channel.msg_event(m2) == "phx_join")
+    | None -> assert false
+    end
+  end
+
+  test "returns None for empty string" do
+    match Channel.parse("") do
+    | None -> ()
+    | _    -> assert false
+    end
+  end
+
+  test "returns None for malformed JSON" do
+    match Channel.parse("not json at all") do
+    | None -> ()
+    | _    -> assert false
+    end
+  end
+end
+
+-- ── Reply / error / close message helpers ──────────────────────────────────
+
+describe "reply_msg / error_msg / close_msg" do
+  test "reply_msg event is phx_reply" do
+    let m = Channel.reply_msg("0", "1", "room:lobby", "ok", "{\"id\":1}")
+    assert (Channel.msg_event(m) == "phx_reply")
+    assert (Channel.msg_topic(m) == "room:lobby")
+    assert (Channel.msg_ref(m) == "1")
+    let payload = Channel.msg_payload(m)
+    assert (string_contains(payload, "\"status\":\"ok\""))
+  end
+
+  test "error_msg event is phx_error" do
+    let m = Channel.error_msg("0", "2", "room:lobby", "unauthorized")
+    assert (Channel.msg_event(m) == "phx_error")
+    let payload = Channel.msg_payload(m)
+    assert (string_contains(payload, "\"reason\":\"unauthorized\""))
+  end
+
+  test "close_msg event is phx_close and ref is empty" do
+    let m = Channel.close_msg("0", "room:lobby")
+    assert (Channel.msg_event(m) == "phx_close")
+    assert (Channel.msg_ref(m) == "")
+    assert (Channel.msg_join_ref(m) == "0")
+  end
+end
+
+end

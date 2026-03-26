@@ -1,0 +1,141 @@
+-- Tests for the ChannelServer stdlib module.
+-- The runtime actor functions (do_join, do_leave, handle_broadcast, etc.)
+-- require the actor runtime and are not exercised here.
+-- This file verifies that all types compile and constructors work correctly.
+
+mod TestChannelServer do
+
+describe "ChannelMailbox constructors" do
+  test "ChannelIn stores ref, event, payload" do
+    let m = ChannelIn("1", "new_msg", "{\"text\":\"hi\"}")
+    match m do
+    | ChannelIn(ref, event, payload) ->
+      assert (ref == "1")
+      assert (event == "new_msg")
+      assert (payload == "{\"text\":\"hi\"}")
+    | _ -> assert false
+    end
+  end
+
+  test "ChannelBroadcast stores topic, event, payload" do
+    let m = ChannelBroadcast("room:lobby", "shout", "{}")
+    match m do
+    | ChannelBroadcast(topic, event, payload) ->
+      assert (topic == "room:lobby")
+      assert (event == "shout")
+      assert (payload == "{}")
+    | _ -> assert false
+    end
+  end
+
+  test "ChannelBroadcastFrom stores all fields" do
+    let m = ChannelBroadcastFrom("room:lobby", 99, "shout", "{}")
+    match m do
+    | ChannelBroadcastFrom(topic, excl, event, payload) ->
+      assert (topic == "room:lobby")
+      assert (excl == 99)
+      assert (event == "shout")
+      assert (payload == "{}")
+    | _ -> assert false
+    end
+  end
+
+  test "ChannelPush stores event and payload" do
+    let m = ChannelPush("typing", "{\"is_typing\":true}")
+    match m do
+    | ChannelPush(event, payload) ->
+      assert (event == "typing")
+      assert (payload == "{\"is_typing\":true}")
+    | _ -> assert false
+    end
+  end
+
+  test "ChannelLeave stores reason" do
+    let m = ChannelLeave("user_left")
+    match m do
+    | ChannelLeave(reason) -> assert (reason == "user_left")
+    | _                    -> assert false
+    end
+  end
+
+  test "ChannelStop constructor" do
+    let m = ChannelStop
+    match m do
+    | ChannelStop -> ()
+    | _           -> assert false
+    end
+  end
+end
+
+describe "JoinResult constructors" do
+  test "JoinOk stores state" do
+    let r = JoinOk("my_state")
+    match r do
+    | JoinOk(s) -> assert (s == "my_state")
+    | _         -> assert false
+    end
+  end
+
+  test "JoinErr stores reason" do
+    let r = JoinErr("unauthorized")
+    match r do
+    | JoinErr(reason) -> assert (reason == "unauthorized")
+    | _               -> assert false
+    end
+  end
+end
+
+describe "ChannelConfig construction" do
+  test "make_config stores socket and shard" do
+    let sock    = Channel.new_socket("room:lobby", 10, 20, "0")
+    let join_f  = fn (t, p, s) -> Ok("state")
+    let in_f    = fn (r, e, pay, st, s) -> Channel.noreply(st)
+    let info_f  = fn (m, st, s) -> Channel.noreply(st)
+    let leave_f = fn (r, st, s) -> ()
+    let cfg = ChannelServer.make_config(sock, join_f, in_f, info_f, leave_f, 99)
+    assert (Channel.socket_topic(ChannelServer.config_socket(cfg)) == "room:lobby")
+    assert (ChannelServer.config_shard(cfg) == 99)
+  end
+end
+
+describe "shard_handle_subscribe / unsubscribe / broadcast (pure)" do
+  test "subscribe adds pid to state" do
+    let s  = PubSub.new_state()
+    let s1 = ChannelServer.shard_handle_subscribe(s, "room:lobby", 42)
+    assert (PubSub.subscriber_count(s1, "room:lobby") == 1)
+  end
+
+  test "unsubscribe removes pid from state" do
+    let s  = PubSub.new_state()
+    let s1 = ChannelServer.shard_handle_subscribe(s, "t", 10)
+    let s2 = ChannelServer.shard_handle_unsubscribe(s1, "t", 10)
+    assert (PubSub.subscriber_count(s2, "t") == 0)
+  end
+
+  test "shard_handle_broadcast returns unchanged state" do
+    let s  = PubSub.new_state()
+    let s1 = ChannelServer.shard_handle_subscribe(s, "t", 10)
+    -- Exclude the only subscriber so actor_cast is never called
+    let s2 = ChannelServer.shard_handle_broadcast(s1, "t", Some(10), "ping", "{}")
+    assert (PubSub.subscriber_count(s2, "t") == 1)
+  end
+end
+
+describe "select_shard" do
+  test "select_shard returns a valid index from pids list" do
+    let shards = Cons(100, Cons(101, Cons(102, Cons(103, Nil))))
+    let pid = ChannelServer.select_shard(shards, "room:lobby")
+    -- Should be one of the pids
+    let valid = (pid == 100) || (pid == 101) || (pid == 102) || (pid == 103)
+    assert valid
+  end
+
+  test "same topic always goes to same shard" do
+    let shards = Cons(10, Cons(11, Cons(12, Cons(13, Nil))))
+    let a = ChannelServer.select_shard(shards, "room:42")
+    let b = ChannelServer.select_shard(shards, "room:42")
+    assert (a == b)
+  end
+end
+
+end

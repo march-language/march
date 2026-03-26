@@ -173,7 +173,7 @@ march/
 │   └── base64.c             # Base64 for WebSocket handshake
 │   ├── search/
 │   │   └── search.ml        # Search index: Levenshtein fuzzy search, type/doc search, JSON cache
-├── stdlib/                  # 29 modules, ~6200 lines
+├── stdlib/                  # 34 modules, ~7500 lines
 │   ├── prelude.march        # Auto-imported helpers (panic, identity, compose, unwrap, etc.)
 │   ├── option.march         # Option(a) with Some/None
 │   ├── result.march         # Result(a,e) with Ok/Err
@@ -205,6 +205,11 @@ march/
 │   ├── random.march         # Pure PRNG: xoshiro256**, seed/next_int/next_float/next_bool/next_range/shuffle
 │   ├── stats.march          # Descriptive statistics: mean/variance/std_dev/median/mode/percentile/correlation
 │   ├── plot.march           # SVG chart generation: line/scatter/bar/histogram series, pure string building
+│   ├── pubsub.march         # 222 lines: sharded PubSub backbone (subscribe/unsubscribe/broadcast, topic_matches, topic_shard)
+│   ├── channel.march        # 357 lines: Socket type, HandleResult, ChannelMsg/Route, wire serialization/parsing
+│   ├── channel_server.march # 263 lines: ChannelMailbox, JoinResult, ChannelConfig, do_join/leave, apply_result, shard helpers
+│   ├── presence.march       # 281 lines: PresenceMeta/Entry/State, track_state/untrack_state/list_state, diff helpers
+│   ├── channel_socket.march # 287 lines: SocketConfig, ActiveChannels registry, topic routing, plug_for/ws_loop
 │   └── docs/flow.md         # Flow module design doc: concepts, examples, GenStage comparison
 ├── test/
 │   ├── test_march.ml         # 958+ tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, bytes, logger, flow, actor_module, etc.)
@@ -220,7 +225,7 @@ march/
     └── test/test_forge.exe   # 15 tests (scaffold, toml)
 ```
 
-## Current State (as of 2026-03-25, post event-loop HTTP server + SIMD HTTP parser + Phase 5 per-process heaps + message passing + zero-copy response builder + Perceus closure-FV RC fix + LSP code actions P2.8+P3.10 + Phase 4 lazy stack growth + crypto builtins for Depot/PostgreSQL)
+## Current State (as of 2026-03-25, post event-loop HTTP server + SIMD HTTP parser + Phase 5 per-process heaps + message passing + zero-copy response builder + Perceus closure-FV RC fix + LSP code actions P2.8+P3.10 + Phase 4 lazy stack growth + crypto builtins for Depot/PostgreSQL + Phoenix-style Channels stdlib)
 
 - **Builds clean**
 - **1333 OCaml tests + 7 C test groups (Phase 5) + 10 C scheduler tests (Phase 1+2+4) across 10 dune suites; 37 known pre-existing OCaml failures** (+5 mutual_tco_codegen + 10 borrow_inference + 8 known_call/struct_fusion + 6 escape_analysis + 4 phase4_reduction_codegen) (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing** + **Phase 4: reduction counting in compiled code** + **Phase 4: lazy stack growth**):
@@ -231,7 +236,7 @@ march/
   - `test_properties.exe`: 36 tests, passing (QCheck2 properties)
   - `test_supervision.exe`: 15 tests, passing (actor supervision)
   - `test_lsp.exe`: 120 tests, passing (doc strings, find-refs, rename, sig-help, code actions, snippet completions, folding ranges, type annotation action, remove unused binding action, phase2 enhanced match, quickfix framework, dead code detection, p1.1 typed match stubs, p1.7 fn return/param annotation, batch annotation, P2.8 naming convention fix, P3.10 De Morgan rewrite)
-  - `test_stdlib_march.exe`: 7 tests, passing (Http, HttpTransport, HttpClient, HttpServer, WebSocket, Process, Logger)
+  - `test_stdlib_march.exe`: 12 tests, passing (Http, HttpTransport, HttpClient, HttpServer, WebSocket, Process, Logger, PubSub, Channel, ChannelServer, Presence, ChannelSocket)
   - `test_forge.exe`: 15 tests, passing (scaffold/toml)
   - `test_oracle.exe`: requires `MARCH_BIN` env var (oracle/idempotency/pass tests)
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present

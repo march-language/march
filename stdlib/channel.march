@@ -1,0 +1,358 @@
+-- Channel module: Phoenix-style real-time channels for March.
+--
+-- Channels provide multiplexed bidirectional messaging over a single transport
+-- (WebSocket, long-poll, …).  Each channel join creates a green thread that
+-- calls user-defined callbacks:
+--
+--   join/3        — called on join attempt; returns Ok(state) or Err(reason)
+--   handle_in/4   — called when the client sends an event
+--   handle_info/3 — called when the channel process receives an actor message
+--   leave/3       — called on leave / disconnect
+--
+-- Types defined here:
+--   Socket         — per-connection state (topic, assigns, pids)
+--   HandleResult   — return type for channel callbacks
+--   ChannelMsg     — JSON wire message (topic/event/payload/ref/join_ref)
+--   ChannelRoute   — pattern → handler association used by the router
+--   LeaveReason    — reason a channel is leaving
+--
+-- Helper functions (usable inside channel handlers):
+--   reply/3          — reply to client + update state
+--   noreply/1        — no reply, update state
+--   stop/2           — stop channel with reason
+--   assign/3         — add/update a key in socket.assigns
+--   push/3           — push a message to this specific client
+--   broadcast/3      — broadcast to all topic subscribers
+--   broadcast_from/3 — broadcast to all subscribers except self
+--
+-- Wire format (JSON over WebSocket):
+--   { "topic": "room:lobby", "event": "new_msg",
+--     "payload": {...}, "ref": "1", "join_ref": "0" }
+--
+-- Topic pattern matching (ChannelRoute):
+--   "room:*"  matches "room:lobby", "room:42", etc.
+--   "notify:" matches exactly "notify:"
+--
+-- See also: channel_server.march (runtime loop), presence.march.
+
+mod Channel do
+
+-- ── Core types ─────────────────────────────────────────────────────────────
+
+-- Socket: per-connection state for one channel join.
+--   topic         — the joined topic, e.g. "room:lobby"
+--   channel_pid   — the channel process (green thread) pid
+--   transport_pid — the underlying transport (WS frame loop) pid
+--   assigns       — user key-value bag; set with Channel.assign/3
+--   join_ref      — the ref string from the original join message
+type Socket = Socket(
+  String,               -- topic
+  Int,                  -- channel_pid
+  Int,                  -- transport_pid
+  List((String, String)), -- assigns
+  String                -- join_ref
+)
+
+doc "Return the topic of a socket."
+fn socket_topic(sock) do
+  match sock do | Socket(t, _, _, _, _) -> t end
+end
+
+doc "Return the channel pid of a socket."
+fn socket_channel_pid(sock) do
+  match sock do | Socket(_, cp, _, _, _) -> cp end
+end
+
+doc "Return the transport pid of a socket."
+fn socket_transport_pid(sock) do
+  match sock do | Socket(_, _, tp, _, _) -> tp end
+end
+
+doc "Return the assigns list of a socket."
+fn socket_assigns(sock) do
+  match sock do | Socket(_, _, _, a, _) -> a end
+end
+
+doc "Return the join_ref of a socket."
+fn socket_join_ref(sock) do
+  match sock do | Socket(_, _, _, _, jr) -> jr end
+end
+
+doc "Look up a value in socket assigns by key. Returns Some(val) or None."
+fn get_assign(sock, key) do
+  fn find(pairs) do
+    match pairs do
+    | Nil -> None
+    | Cons((k, v), rest) ->
+      if k == key then Some(v)
+      else find(rest)
+    end
+  end
+  find(socket_assigns(sock))
+end
+
+doc "Assign a key-value pair to the socket. Returns an updated socket."
+fn assign(sock, key, value) do
+  match sock do
+  | Socket(t, cp, tp, a, jr) ->
+    Socket(t, cp, tp, Cons((key, value), a), jr)
+  end
+end
+
+doc "Create a new socket with the given topic, channel pid, transport pid."
+fn new_socket(topic, channel_pid, transport_pid, join_ref) do
+  Socket(topic, channel_pid, transport_pid, Nil, join_ref)
+end
+
+-- ── HandleResult ───────────────────────────────────────────────────────────
+
+-- Return type for channel callbacks (handle_in, handle_info, join).
+--   Reply(status, payload, state) — reply to client; status is ":ok" or ":error"
+--   NoReply(state)                — no reply; just update channel state
+--   Stop(reason, state)           — close this channel with a reason string
+type HandleResult = Reply(String, String, Any) | NoReply(Any) | Stop(String, Any)
+
+doc "Construct a Reply result: reply to the client with status and JSON payload."
+fn reply(status, payload, st) do
+  Reply(status, payload, st)
+end
+
+doc "Construct a NoReply result: no response to the client."
+fn noreply(st) do
+  NoReply(st)
+end
+
+doc "Construct a Stop result: close the channel."
+fn stop(reason, st) do
+  Stop(reason, st)
+end
+
+-- ── Push / broadcast helpers ───────────────────────────────────────────────
+
+doc """
+Push a message directly to this client only.
+Sends an actor message to the transport pid: Push(event, payload).
+Requires actor runtime.
+"""
+fn push(sock, event, payload) do
+  actor_cast(socket_transport_pid(sock), ChannelPush(event, payload))
+end
+
+doc """
+Broadcast event+payload to ALL subscribers of the socket's topic (including self).
+Routes through the PubSub shard.
+Requires actor runtime.
+"""
+fn broadcast(sock, event, payload) do
+  actor_cast(socket_channel_pid(sock),
+             ChannelBroadcast(socket_topic(sock), event, payload))
+end
+
+doc """
+Broadcast event+payload to all subscribers of the socket's topic EXCEPT the
+sender (this channel process).
+Requires actor runtime.
+"""
+fn broadcast_from(sock, event, payload) do
+  actor_cast(socket_channel_pid(sock),
+             ChannelBroadcastFrom(socket_topic(sock),
+                                  socket_channel_pid(sock),
+                                  event, payload))
+end
+
+-- ── LeaveReason ────────────────────────────────────────────────────────────
+
+-- Reason a channel is leaving.
+--   NormalLeave  — the client explicitly left
+--   Disconnect   — the transport closed
+--   Kicked(msg)  — server-initiated close with a message
+type LeaveReason = NormalLeave | Disconnect | Kicked(String)
+
+-- ── ChannelRoute ───────────────────────────────────────────────────────────
+
+-- A ChannelRoute maps a topic pattern to a handler module name.
+--   pattern  — e.g. "room:*" or "notify:user"
+--   handler  — the name of the channel handler module (as a string)
+type ChannelRoute = ChannelRoute(String, String)
+
+doc "Construct a ChannelRoute. Pattern may end in '*' for prefix matching."
+fn channel_route(pattern, handler_name) do
+  ChannelRoute(pattern, handler_name)
+end
+
+doc "Return the pattern part of a ChannelRoute."
+fn route_pattern(r) do
+  match r do | ChannelRoute(p, _) -> p end
+end
+
+doc "Return the handler name part of a ChannelRoute."
+fn route_handler(r) do
+  match r do | ChannelRoute(_, h) -> h end
+end
+
+-- ── ChannelMsg (wire format) ───────────────────────────────────────────────
+
+-- A channel message as it travels over the wire (JSON over WebSocket).
+-- Fields mirror the Phoenix channel protocol:
+--   join_ref — ref of the join message (correlates replies)
+--   ref      — per-message ref (for request-reply correlation)
+--   topic    — the topic string, e.g. "room:lobby"
+--   event    — event name, e.g. "new_msg" or "phx_join"
+--   payload  — JSON-encoded payload string
+type ChannelMsg = ChannelMsg(String, String, String, String, String)
+
+doc "Construct a ChannelMsg."
+fn make_msg(join_ref, ref, topic, event, payload) do
+  ChannelMsg(join_ref, ref, topic, event, payload)
+end
+
+doc "Return the join_ref of a ChannelMsg."
+fn msg_join_ref(m) do
+  match m do | ChannelMsg(jr, _, _, _, _) -> jr end
+end
+
+doc "Return the ref of a ChannelMsg."
+fn msg_ref(m) do
+  match m do | ChannelMsg(_, r, _, _, _) -> r end
+end
+
+doc "Return the topic of a ChannelMsg."
+fn msg_topic(m) do
+  match m do | ChannelMsg(_, _, t, _, _) -> t end
+end
+
+doc "Return the event of a ChannelMsg."
+fn msg_event(m) do
+  match m do | ChannelMsg(_, _, _, e, _) -> e end
+end
+
+doc "Return the payload string of a ChannelMsg."
+fn msg_payload(m) do
+  match m do | ChannelMsg(_, _, _, _, p) -> p end
+end
+
+-- ── Wire serialization ─────────────────────────────────────────────────────
+
+-- Escape a string for embedding in JSON (handles " and \).
+pfn json_escape(s) do
+  let s1 = string_replace_all(s, "\\", "\\\\")
+  let s2 = string_replace_all(s1, "\"", "\\\"")
+  s2
+end
+
+doc """
+Serialize a ChannelMsg to a JSON string conforming to the Phoenix channel wire
+format:
+  {"join_ref":"0","ref":"1","topic":"room:lobby","event":"new_msg","payload":{}}
+The payload field is embedded verbatim (it should already be a JSON value).
+"""
+fn serialize(m) do
+  match m do
+  | ChannelMsg(join_ref, ref, topic, event, payload) ->
+    string_concat(
+      string_concat(
+        string_concat(
+          string_concat(
+            string_concat(
+              string_concat(
+                string_concat(
+                  string_concat(
+                    string_concat(
+                      string_concat(
+                        "{\"join_ref\":\"",
+                        json_escape(join_ref)),
+                      "\",\"ref\":\""),
+                    json_escape(ref)),
+                  "\",\"topic\":\""),
+                json_escape(topic)),
+              "\",\"event\":\""),
+            json_escape(event)),
+          "\",\"payload\":"),
+        payload),
+      "}")
+  end
+end
+
+doc """
+Parse a JSON channel message string into a ChannelMsg.
+Returns Some(msg) on success, None on parse failure.
+Performs minimal parsing: extracts the five fields using string search.
+"""
+fn parse(json_str) do
+  -- Helper: extract value between two delimiters after a key
+  let jr  = extract_json_string(json_str, "\"join_ref\"")
+  let ref = extract_json_string(json_str, "\"ref\"")
+  let top = extract_json_string(json_str, "\"topic\"")
+  let evt = extract_json_string(json_str, "\"event\"")
+  let pay = extract_json_payload(json_str, "\"payload\"")
+  match (jr, ref, top, evt, pay) do
+  | (Some(j), Some(r), Some(t), Some(e), Some(p)) ->
+    Some(ChannelMsg(j, r, t, e, p))
+  | _ -> None
+  end
+end
+
+-- Extract the string value associated with `key` in a flat JSON object.
+-- Expects the pattern: "key":"value" (no nesting in the value).
+pfn extract_json_string(json_str, key) do
+  let search = string_concat(key, ":\"")
+  match string_index_of(json_str, search) do
+  | None -> None
+  | Some(idx) ->
+    let start = idx + string_byte_length(search)
+    let rest  = string_slice(json_str, start, string_byte_length(json_str) - start)
+    match string_index_of(rest, "\"") do
+    | None -> None
+    | Some(end_idx) -> Some(string_slice(rest, 0, end_idx))
+    end
+  end
+end
+
+-- Extract the payload portion (any JSON value) associated with "payload" key.
+pfn extract_json_payload(json_str, key) do
+  let search = string_concat(key, ":")
+  match string_index_of(json_str, search) do
+  | None -> None
+  | Some(idx) ->
+    let start = idx + string_byte_length(search)
+    -- Payload extends to the end of the object (drop trailing "}")
+    let rest  = string_slice(json_str, start, string_byte_length(json_str) - start)
+    let tlen  = string_byte_length(rest)
+    if tlen == 0 then None
+    else do
+      -- Strip a trailing "}" if present
+      let last = string_slice(rest, tlen - 1, 1)
+      if last == "}" then
+        Some(string_slice(rest, 0, tlen - 1))
+      else
+        Some(rest)
+    end
+  end
+end
+
+-- ── System event helpers ───────────────────────────────────────────────────
+
+doc "Construct a phx_reply message (sent by server in response to a client ref)."
+fn reply_msg(join_ref, ref, topic, status, response_payload) do
+  let payload = string_concat(
+    string_concat(
+      string_concat("{\"status\":\"", json_escape(status)),
+      string_concat("\",\"response\":", response_payload)),
+    "}")
+  ChannelMsg(join_ref, ref, topic, "phx_reply", payload)
+end
+
+doc "Construct a phx_error message (sent on join rejection or handler Stop)."
+fn error_msg(join_ref, ref, topic, reason) do
+  let payload = string_concat(
+    string_concat("{\"reason\":\"", json_escape(reason)),
+    "\"}")
+  ChannelMsg(join_ref, ref, topic, "phx_error", payload)
+end
+
+doc "Construct a phx_close message (sent when the channel is closed)."
+fn close_msg(join_ref, topic) do
+  ChannelMsg(join_ref, "", topic, "phx_close", "{}")
+end
+
+end
