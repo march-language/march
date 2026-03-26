@@ -307,7 +307,7 @@ let rec expr_inline = function
       (String.concat ", " (List.map f flds))
   | EField (e, n, _)            -> Printf.sprintf "%s.%s" (expr_inline e) n.txt
   | EIf (c, t, e, _)           ->
-    Printf.sprintf "if %s then %s else %s"
+    Printf.sprintf "if %s do %s else %s end"
       (expr_inline c) (expr_inline t) (expr_inline e)
   | EPipe (a, b, _)             ->
     Printf.sprintf "%s |> %s" (expr_inline a) (expr_inline b)
@@ -402,10 +402,11 @@ and emit_match ctx subj arms =
     let pat_s = fmt_pat arm.branch_pat ^ guard in
     let body  = arm.branch_body in
     if should_break (ctx.indent + 1) body then begin
-      line ctx (Printf.sprintf "| %s ->" pat_s);
-      indented ctx (fun () -> emit_body ctx body)
+      line ctx (Printf.sprintf "%s -> do" pat_s);
+      indented ctx (fun () -> emit_body ctx body);
+      line ctx "end"
     end else
-      line ctx (Printf.sprintf "| %s -> %s" pat_s (expr_inline body))
+      line ctx (Printf.sprintf "%s -> %s" pat_s (expr_inline body))
   ) arms;
   line ctx "end"
 

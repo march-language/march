@@ -62,7 +62,8 @@ let test_lexer_arrow () =
 
 let test_lexer_comment () =
   let lexbuf = Lexing.from_string "-- this is a comment\n42" in
-  let tok = March_lexer.Lexer.token lexbuf in
+  let lex = March_parser.Token_filter.make March_lexer.Lexer.token in
+  let tok = lex lexbuf in
   Alcotest.(check int) "skips line comment" 42
     (match tok with March_parser.Parser.INT n -> n | _ -> failwith "expected INT")
 
@@ -377,10 +378,10 @@ let test_eq_user_impl () =
     impl Eq(Color) do
       fn eq(x, y) do
         match (x, y) do
-        | (Red, Red)     -> true
-        | (Green, Green) -> true
-        | (Blue, Blue)   -> true
-        | _              -> false
+        (Red, Red)     -> true
+        (Green, Green) -> true
+        (Blue, Blue)   -> true
+        _              -> false
         end
       end
     end
@@ -461,7 +462,7 @@ let test_standard_interfaces_in_scope () =
     impl Eq(Wrap) do
       fn eq(x, y) do
         match (x, y) do
-        | (Wrap(a), Wrap(b)) -> a == b
+        (Wrap(a), Wrap(b)) -> a == b
         end
       end
     end
@@ -800,8 +801,8 @@ let test_session_choose_protocol_parses () =
     protocol Decision do
       Client -> Server : Int
       choose by Server:
-        | ok  -> Server -> Client : Bool
-        | err -> Server -> Client : Int
+        ok  -> Server -> Client : Bool
+        err -> Server -> Client : Int
       end
     end
   end|} in
@@ -813,8 +814,8 @@ let test_session_choose_advances_state () =
     protocol Decision do
       Client -> Server : Int
       choose by Server:
-        | ok  -> Server -> Client : Bool
-        | err -> Server -> Client : Int
+        ok  -> Server -> Client : Bool
+        err -> Server -> Client : Int
       end
     end
     fn server_side(ch : Chan(Server, Decision)) : Unit do
@@ -831,8 +832,8 @@ let test_session_choose_invalid_label_error () =
   let ctx = typecheck {|mod Test do
     protocol Bin do
       choose by A:
-        | left  -> A -> B : Int
-        | right -> A -> B : Bool
+        left  -> A -> B : Int
+        right -> A -> B : Bool
       end
     end
     fn bad(ch : Chan(A, Bin)) : Unit do
@@ -861,8 +862,8 @@ let test_session_offer_ok () =
     protocol Decision do
       Client -> Server : Int
       choose by Server:
-        | ok  -> Server -> Client : Bool
-        | err -> Server -> Client : Int
+        ok  -> Server -> Client : Bool
+        err -> Server -> Client : Int
       end
     end
     fn client_side(ch : Chan(Client, Decision)) : Unit do
@@ -962,9 +963,9 @@ let test_srec_with_branching_typechecks () =
     protocol Stream do
       loop do
         choose by Server:
-          | data -> Client -> Server : Int
+          data -> Client -> Server : Int
                     Server -> Client : Bool
-          | stop -> Server -> Client : Int
+          stop -> Server -> Client : Int
         end
       end
     end
@@ -1621,8 +1622,8 @@ let test_mpst_choose_offer_three_party_typechecks () =
     protocol Decision do
       A -> B : Int
       choose by B:
-        | yes -> B -> C : String
-        | no  -> B -> C : Int
+        yes -> B -> C : String
+        no  -> B -> C : Int
       end
     end
     fn a_role(ch : Chan(A, Decision)) : Unit do
@@ -1848,7 +1849,7 @@ let test_parse_negative_lit_pattern () =
   let src = {|mod T do
     fn f(n) do
       match n do
-      | -1 -> true
+      -1 -> true
       _  -> false
       end
     end
@@ -1935,9 +1936,9 @@ let test_eval_negative_pattern () =
   let env = eval_module {|mod Test do
     fn sign(n) do
       match n do
-      | 0  -> 0
-      | -1 -> -1
-      | _  -> 1
+      0  -> 0
+      -1 -> -1
+      _  -> 1
       end
     end
   end|} in
@@ -11048,7 +11049,7 @@ let test_array_pop () =
     fn f() do
       let a = Array.from_list([1, 2, 3])
       match Array.pop(a) do
-      | (a2, last) -> last
+      (a2, last) -> last
       end
     end
   end|} in
@@ -11059,7 +11060,7 @@ let test_array_pop_length () =
     fn f() do
       let a = Array.from_list([1, 2, 3])
       match Array.pop(a) do
-      | (a2, _) -> Array.length(a2)
+      (a2, _) -> Array.length(a2)
       end
     end
   end|} in
@@ -12829,9 +12830,9 @@ let test_eval_custom_eq_dispatch () =
     impl Eq(Parity) do
       fn eq(a, b) do
         match (a, b) do
-        | (Even, Even) -> true
-        | (Odd, Odd)   -> true
-        | _            -> false
+        (Even, Even) -> true
+        (Odd, Odd)   -> true
+        _            -> false
         end
       end
     end
@@ -13199,10 +13200,10 @@ let test_exhaust_tuple_bool_bool_complete () =
   let ctx = typecheck {|mod Test do
     fn go(p : (Bool, Bool)) : Int do
       match p do
-      | (true,  true)  -> 0
-      | (true,  false) -> 1
-      | (false, true)  -> 2
-      | (false, false) -> 3
+      (true,  true)  -> 0
+      (true,  false) -> 1
+      (false, true)  -> 2
+      (false, false) -> 3
       end
     end
   end|} in
@@ -13213,8 +13214,8 @@ let test_exhaust_tuple_wildcards_ok () =
   let ctx = typecheck {|mod Test do
     fn go(p : (Bool, Int)) : Int do
       match p do
-      | (true,  _) -> 1
-      | (false, _) -> 0
+      (true,  _) -> 1
+      (false, _) -> 0
       end
     end
   end|} in
@@ -13225,8 +13226,8 @@ let test_exhaust_tuple_partial () =
   let ctx = typecheck {|mod Test do
     fn go(p : (Bool, Bool)) : Int do
       match p do
-      | (true, true)  -> 1
-      | (true, false) -> 0
+      (true, true)  -> 1
+      (true, false) -> 0
       end
     end
   end|} in
@@ -14189,8 +14190,8 @@ let test_parse_large_tuple_match () =
   let src = {|mod Test do
     fn go(a : Int, b : Int, c : Int, d : Int) : Int do
       match (a, b, c, d) do
-      | (0, 0, 0, 0) -> 0
-      | (x, _, _, _) -> x
+      (0, 0, 0, 0) -> 0
+      (x, _, _, _) -> x
       end
     end
   end|} in
