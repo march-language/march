@@ -251,6 +251,23 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
         Printf.eprintf "parse error in %s: %s\n%!" path (Printexc.to_string exn); None) with
       | None -> ()
       | Some desugared ->
+        (* Resolve cross-file imports relative to the loaded file's directory *)
+        let (import_errs, extra_decls) =
+          March_resolver.Resolver.resolve_imports ~source_file:path desugared in
+        List.iter (fun (_, span, msg) ->
+          Printf.eprintf "%s:%d: import error: %s\n%!"
+            span.March_ast.Ast.file span.March_ast.Ast.start_line msg
+        ) import_errs;
+        (* Wrap the file's declarations in a DMod using the file's module name,
+           so that `Repl.pg_connect` etc. are exported with the qualified prefix. *)
+        let file_mod =
+          March_ast.Ast.DMod (
+            desugared.March_ast.Ast.mod_name,
+            March_ast.Ast.Public,
+            desugared.March_ast.Ast.mod_decls,
+            March_ast.Ast.dummy_span)
+        in
+        let all_decls = extra_decls @ [file_mod] in
         List.iter (fun decl ->
           let input_ctx = March_errors.Errors.create () in
           let input_tc  = { !tc_env with errors = input_ctx } in
@@ -263,7 +280,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
               Printf.eprintf "runtime error loading %s: %s\n%!" path (Printexc.to_string exn))
           end else
             List.iter print_diag (March_errors.Errors.sorted input_ctx)
-        ) desugared.March_ast.Ast.mod_decls;
+        ) all_decls;
         Printf.printf "loaded %s\n%!" path;
         loaded_file := Some path)
   in
@@ -619,6 +636,55 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                | None | Some March_ast.Ast.ReplEOF -> ()
                | Some (March_ast.Ast.ReplDecl d) ->
                  let d' = March_desugar.Desugar.desugar_decl d in
+                 (* Auto-load user modules on `import Foo` / `import Foo.{bar}` etc.
+                    Synthesise a dummy module containing just this declaration, run
+                    resolve_imports (which finds Foo in the CWD), then process the
+                    resulting DMod stubs before the DUse itself. *)
+                 (match d' with
+                  | March_ast.Ast.DUse _ | March_ast.Ast.DAlias _ ->
+                    (* Search CWD and common subdirectories for .march source files. *)
+                    let cwd = Sys.getcwd () in
+                    let env_lib_paths =
+                      match Sys.getenv_opt "MARCH_LIB_PATH" with
+                      | None -> []
+                      | Some s -> List.filter (fun d -> d <> "") (String.split_on_char ':' s)
+                    in
+                    let candidates = [cwd; Filename.concat cwd "src"; Filename.concat cwd "lib"] @ env_lib_paths in
+                    let search_dir =
+                      let mod_name = match d' with
+                        | March_ast.Ast.DUse (ud, _) ->
+                          (match ud.March_ast.Ast.use_path with
+                           | n :: _ -> Some n.March_ast.Ast.txt | [] -> None)
+                        | March_ast.Ast.DAlias (ad, _) ->
+                          (match ad.March_ast.Ast.alias_path with
+                           | n :: _ -> Some n.March_ast.Ast.txt | [] -> None)
+                        | _ -> None
+                      in
+                      match mod_name with
+                      | None -> cwd
+                      | Some mname ->
+                        let fname = March_resolver.Resolver.module_name_to_filename mname in
+                        match List.find_opt (fun d -> Sys.file_exists (Filename.concat d fname)) candidates with
+                        | Some d -> d
+                        | None   -> cwd
+                    in
+                    let dummy_src = Filename.concat search_dir "_repl_.march" in
+                    let dummy_mod = { March_ast.Ast.mod_name  = { txt = "Repl"; span = March_ast.Ast.dummy_span }
+                                    ; mod_decls = [d'] } in
+                    let (_, extra_decls) =
+                      March_resolver.Resolver.resolve_imports ~source_file:dummy_src dummy_mod in
+                    List.iter (fun decl ->
+                      let ictx = March_errors.Errors.create () in
+                      let itc  = { !tc_env with errors = ictx } in
+                      let ntc  = March_typecheck.Typecheck.check_decl itc decl in
+                      if not (March_errors.Errors.has_errors ictx) then begin
+                        (try
+                           env    := March_eval.Eval.eval_decl !env decl;
+                           tc_env := { ntc with errors = March_errors.Errors.create () }
+                         with _ -> ())
+                      end
+                    ) extra_decls
+                  | _ -> ());
                  let input_ctx = March_errors.Errors.create () in
                  let input_tc  = { !tc_env with errors = input_ctx } in
                  let new_tc    = March_typecheck.Typecheck.check_decl input_tc d' in
@@ -656,8 +722,9 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                           | _ -> assert false
                         in
                         let m = wrap_expr_as_module ~stdlib_decls bind_expr in
-                        March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m;
-                        (* Also update interpreter env for scope display / debug mode *)
+                        (try March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m
+                         with Failure _ -> ());
+                        (* Always update interpreter env (source of truth for value display) *)
                         env := March_eval.Eval.eval_decl !env d';
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
@@ -730,32 +797,41 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                  if (not tc_ok) && (not is_debug) then
                    Printf.eprintf "note: inferred type was %s\n%!" ty_str
                  else
+                   (* Interpreter fallback: used when JIT is unavailable or when
+                      JIT compilation fails (e.g. codegen bug for a specific builtin). *)
+                   let eval_via_interp () =
+                     let v = March_eval.Eval.eval_expr !env e' in
+                     let vs = March_eval.Eval.value_to_string_pretty v in
+                     Printf.printf "= %s\n%!" vs;
+                     if !show_type then
+                       Printf.printf "- : %s\n%!" ty_str;
+                     Result_vars.push result_h v ty_str;
+                     env    := ("v", v)
+                              :: (List.remove_assoc "v" !env);
+                     if tc_ok then
+                       tc_env := { !tc_env with
+                         vars = ("v", March_typecheck.Typecheck.Mono inferred)
+                                :: (List.remove_assoc "v" !tc_env.vars) }
+                   in
                    (try
                       (match jit_ctx with
                       | Some jit ->
-                        let m = wrap_expr_as_module ~stdlib_decls e' in
-                        let (_ty, result_str) =
-                          March_jit.Repl_jit.run_expr jit ~type_map m in
-                        Printf.printf "= %s\n%!" result_str;
-                        if !show_type then
-                          Printf.printf "- : %s\n%!" ty_str;
-                        if tc_ok then
-                          tc_env := { !tc_env with
-                            vars = ("v", March_typecheck.Typecheck.Mono inferred)
-                                   :: (List.remove_assoc "v" !tc_env.vars) }
+                        (try
+                          let m = wrap_expr_as_module ~stdlib_decls e' in
+                          let (_ty, result_str) =
+                            March_jit.Repl_jit.run_expr jit ~type_map m in
+                          Printf.printf "= %s\n%!" result_str;
+                          if !show_type then
+                            Printf.printf "- : %s\n%!" ty_str;
+                          if tc_ok then
+                            tc_env := { !tc_env with
+                              vars = ("v", March_typecheck.Typecheck.Mono inferred)
+                                     :: (List.remove_assoc "v" !tc_env.vars) }
+                        with Failure _ ->
+                          (* JIT compilation failed — fall back to tree-walking interpreter *)
+                          eval_via_interp ())
                       | None ->
-                        let v = March_eval.Eval.eval_expr !env e' in
-                        let vs = March_eval.Eval.value_to_string_pretty v in
-                        Printf.printf "= %s\n%!" vs;
-                        if !show_type then
-                          Printf.printf "- : %s\n%!" ty_str;
-                        Result_vars.push result_h v ty_str;
-                        env    := ("v", v)
-                                 :: (List.remove_assoc "v" !env);
-                        if tc_ok then
-                          tc_env := { !tc_env with
-                            vars = ("v", March_typecheck.Typecheck.Mono inferred)
-                                   :: (List.remove_assoc "v" !tc_env.vars) })
+                        eval_via_interp ())
                     with
                     | March_eval.Eval.Eval_error msg ->
                       Printf.eprintf "runtime error: %s\n%!" msg
@@ -943,6 +1019,48 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
     | None | Some March_ast.Ast.ReplEOF -> ()
     | Some (March_ast.Ast.ReplDecl d) ->
       let d' = March_desugar.Desugar.desugar_decl d in
+      (* Auto-load user modules on `import Foo` typed directly in the REPL. *)
+      (match d' with
+       | March_ast.Ast.DUse _ | March_ast.Ast.DAlias _ ->
+         let cwd = Sys.getcwd () in
+         let env_lib_paths =
+           match Sys.getenv_opt "MARCH_LIB_PATH" with
+           | None -> []
+           | Some s -> List.filter (fun d -> d <> "") (String.split_on_char ':' s)
+         in
+         let candidates = [cwd; Filename.concat cwd "src"; Filename.concat cwd "lib"] @ env_lib_paths in
+         let search_dir =
+           let mod_name = match d' with
+             | March_ast.Ast.DUse (ud, _) ->
+               (match ud.March_ast.Ast.use_path with
+                | n :: _ -> Some n.March_ast.Ast.txt | [] -> None)
+             | March_ast.Ast.DAlias (ad, _) ->
+               (match ad.March_ast.Ast.alias_path with
+                | n :: _ -> Some n.March_ast.Ast.txt | [] -> None)
+             | _ -> None
+           in
+           match mod_name with
+           | None -> cwd
+           | Some mname ->
+             let fname = March_resolver.Resolver.module_name_to_filename mname in
+             match List.find_opt (fun d -> Sys.file_exists (Filename.concat d fname)) candidates with
+             | Some d -> d | None -> cwd
+         in
+         let dummy_src = Filename.concat search_dir "_repl_.march" in
+         let dummy_mod = { March_ast.Ast.mod_name = { txt = "Repl"; span = March_ast.Ast.dummy_span }
+                         ; mod_decls = [d'] } in
+         let (_, extra_decls) =
+           March_resolver.Resolver.resolve_imports ~source_file:dummy_src dummy_mod in
+         List.iter (fun decl ->
+           let ictx = March_errors.Errors.create () in
+           let itc  = { !tc_env with errors = ictx } in
+           let ntc  = March_typecheck.Typecheck.check_decl itc decl in
+           if not (March_errors.Errors.has_errors ictx) then
+             (try env    := March_eval.Eval.eval_decl !env decl;
+                  tc_env := { ntc with errors = March_errors.Errors.create () }
+              with _ -> ())
+         ) extra_decls
+       | _ -> ());
       let input_ctx = March_errors.Errors.create () in
       let input_tc  = { !tc_env with errors = input_ctx } in
       let new_tc    = March_typecheck.Typecheck.check_decl input_tc d' in
@@ -967,7 +1085,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                | _ -> assert false
              in
              let m = wrap_decl_as_module ~stdlib_decls d' in
-             March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:true ~bind_name m;
+             (try March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:true ~bind_name m
+              with Failure _ -> ());
              if tc_ok then
                tc_env := { new_tc with errors = March_errors.Errors.create () };
              add_line Notty.A.empty (Printf.sprintf "val %s = <fn>" bind_name)
@@ -986,7 +1105,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                | _ -> assert false
              in
              let m = wrap_expr_as_module ~stdlib_decls bind_expr in
-             March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m;
+             (try March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m
+              with Failure _ -> ());
              env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
              if tc_ok then
                tc_env := { new_tc with errors = March_errors.Errors.create () };
@@ -1421,6 +1541,16 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
               with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
               | None -> ()
               | Some desugared ->
+                let (_, extra_decls) =
+                  March_resolver.Resolver.resolve_imports ~source_file:path desugared in
+                let file_mod =
+                  March_ast.Ast.DMod (
+                    desugared.March_ast.Ast.mod_name,
+                    March_ast.Ast.Public,
+                    desugared.March_ast.Ast.mod_decls,
+                    March_ast.Ast.dummy_span)
+                in
+                let all_decls = extra_decls @ [file_mod] in
                 List.iter (fun decl ->
                   let input_ctx = March_errors.Errors.create () in
                   let input_tc  = { !tc_env with errors = input_ctx } in
@@ -1435,7 +1565,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                       add_line Notty.A.(fg red)
                         (Printf.sprintf "error: %s" d.message)
                     ) (March_errors.Errors.sorted input_ctx)
-                ) desugared.March_ast.Ast.mod_decls;
+                ) all_decls;
                 add_line Notty.A.(fg green) (Printf.sprintf "loaded %s" path);
                 loaded_file := Some path))
         | ":reload" ->
@@ -1461,6 +1591,16 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
                | None -> ()
                | Some desugared ->
+                 let (_, extra_decls) =
+                   March_resolver.Resolver.resolve_imports ~source_file:path desugared in
+                 let file_mod =
+                   March_ast.Ast.DMod (
+                     desugared.March_ast.Ast.mod_name,
+                     March_ast.Ast.Public,
+                     desugared.March_ast.Ast.mod_decls,
+                     March_ast.Ast.dummy_span)
+                 in
+                 let all_decls = extra_decls @ [file_mod] in
                  List.iter (fun decl ->
                    let input_ctx = March_errors.Errors.create () in
                    let input_tc  = { !tc_env with errors = input_ctx } in
@@ -1475,7 +1615,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                        add_line Notty.A.(fg red)
                          (Printf.sprintf "error: %s" d.message)
                      ) (March_errors.Errors.sorted input_ctx)
-                 ) desugared.March_ast.Ast.mod_decls;
+                 ) all_decls;
                  add_line Notty.A.(fg green) (Printf.sprintf "reloaded %s" path))))
         | src when (let t = String.trim src in
                       (String.length t >= 8 && String.sub t 0 8 = ":inspect")

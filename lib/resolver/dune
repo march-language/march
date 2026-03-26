@@ -1,0 +1,8 @@
+(library
+ (name march_resolver)
+ (libraries
+   march_ast
+   march_lexer
+   march_parser
+   march_desugar
+   march_errors))

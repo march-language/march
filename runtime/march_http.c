@@ -81,11 +81,6 @@ static void *make_unit(void) {
     return march_alloc(16);
 }
 
-/* Build a March List Nil node: tag=0, no fields. */
-static void *make_nil(void) {
-    return march_alloc(16);
-}
-
 /* Build a March List Cons node: tag=1, field0=head, field1=tail. */
 static void *make_cons(void *head, void *tail) {
     void *c = march_alloc(16 + 16);

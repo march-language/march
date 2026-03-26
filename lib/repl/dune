@@ -12,4 +12,5 @@
    march_typecheck
    march_errors
    march_eval
-   march_jit))
+   march_jit
+   march_resolver))

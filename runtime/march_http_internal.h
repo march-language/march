@@ -6,6 +6,7 @@
 #pragma once
 
 #include "march_http_parse_simd.h"
+#include "march_http_response.h"
 #include "march_runtime.h"
 #include <stddef.h>
 #include <stdint.h>
