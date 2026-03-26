@@ -801,8 +801,8 @@ let test_session_choose_protocol_parses () =
     protocol Decision do
       Client -> Server : Int
       choose by Server:
-        ok  -> Server -> Client : Bool
-        err -> Server -> Client : Int
+        | ok  -> Server -> Client : Bool
+        | err -> Server -> Client : Int
       end
     end
   end|} in
@@ -814,8 +814,8 @@ let test_session_choose_advances_state () =
     protocol Decision do
       Client -> Server : Int
       choose by Server:
-        ok  -> Server -> Client : Bool
-        err -> Server -> Client : Int
+        | ok  -> Server -> Client : Bool
+        | err -> Server -> Client : Int
       end
     end
     fn server_side(ch : Chan(Server, Decision)) : Unit do
@@ -832,8 +832,8 @@ let test_session_choose_invalid_label_error () =
   let ctx = typecheck {|mod Test do
     protocol Bin do
       choose by A:
-        left  -> A -> B : Int
-        right -> A -> B : Bool
+        | left  -> A -> B : Int
+        | right -> A -> B : Bool
       end
     end
     fn bad(ch : Chan(A, Bin)) : Unit do
@@ -862,8 +862,8 @@ let test_session_offer_ok () =
     protocol Decision do
       Client -> Server : Int
       choose by Server:
-        ok  -> Server -> Client : Bool
-        err -> Server -> Client : Int
+        | ok  -> Server -> Client : Bool
+        | err -> Server -> Client : Int
       end
     end
     fn client_side(ch : Chan(Client, Decision)) : Unit do
@@ -963,9 +963,9 @@ let test_srec_with_branching_typechecks () =
     protocol Stream do
       loop do
         choose by Server:
-          data -> Client -> Server : Int
+          | data -> Client -> Server : Int
                     Server -> Client : Bool
-          stop -> Server -> Client : Int
+          | stop -> Server -> Client : Int
         end
       end
     end
@@ -1622,8 +1622,8 @@ let test_mpst_choose_offer_three_party_typechecks () =
     protocol Decision do
       A -> B : Int
       choose by B:
-        yes -> B -> C : String
-        no  -> B -> C : Int
+        | yes -> B -> C : String
+        | no  -> B -> C : Int
       end
     end
     fn a_role(ch : Chan(A, Decision)) : Unit do
@@ -2636,7 +2636,7 @@ let repl_type_of expr_src =
   let tc_env = ref (March_typecheck.Typecheck.base_env
     (March_errors.Errors.create ()) type_map) in
   let lexbuf = Lexing.from_string expr_src in
-  match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+  match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
          with _ -> None) with
   | Some (March_ast.Ast.ReplExpr e) ->
     let e' = March_desugar.Desugar.desugar_expr e in
@@ -2709,7 +2709,7 @@ let repl_eval_exprs ?(stdlib_src="") exprs_src =
   let tc_env = ref base_tc in
   List.map (fun src ->
     let lexbuf = Lexing.from_string src in
-    match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+    match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
            with _ -> None) with
     | Some (March_ast.Ast.ReplExpr e) ->
       let e' = March_desugar.Desugar.desugar_expr e in
@@ -2815,7 +2815,7 @@ let test_repl_inspect_type_and_value () =
   let env = ref March_eval.Eval.base_env in
   let src = "42 + 1" in
   let lexbuf = Lexing.from_string src in
-  match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+  match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
          with _ -> None) with
   | Some (March_ast.Ast.ReplExpr e) ->
     let e' = March_desugar.Desugar.desugar_expr e in
@@ -5492,7 +5492,7 @@ let make_jit_test_module (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
 
 let parse_repl src =
   let lexbuf = Lexing.from_string src in
-  March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf
+  March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
 
 (** Test: `let x = 21` on line 1, then `x + 21` on line 2 should give 42. *)
 let test_repl_jit_cross_line_let () =
@@ -14343,7 +14343,7 @@ let interp_eval_expr src =
 let jit_eval_simple_expr ~runtime_so src =
   let type_map = Hashtbl.create 16 in
   let lexbuf   = Lexing.from_string src in
-  match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+  match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
          with _ -> None) with
   | Some (March_ast.Ast.ReplExpr e) ->
     let e' = March_desugar.Desugar.desugar_expr e in

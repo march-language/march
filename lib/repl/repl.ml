@@ -403,7 +403,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                 | Some h ->
                   let expr_src = String.trim (String.sub s 6 (String.length s - 6)) in
                   let lexbuf = Lexing.from_string expr_src in
-                  (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+                  (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
                           with _ -> None) with
                    | Some (March_ast.Ast.ReplExpr e) ->
                      let e' = March_desugar.Desugar.desugar_expr e in
@@ -539,7 +539,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                  Printf.eprintf "usage: :type <expr>\n%!"
                else begin
                  let lexbuf = Lexing.from_string expr_src in
-                 (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+                 (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
                          with _ -> None) with
                  | Some (March_ast.Ast.ReplExpr e) ->
                    let e' = March_desugar.Desugar.desugar_expr e in
@@ -570,7 +570,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                  Printf.eprintf "usage: :inspect <expr>\n%!"
                else begin
                  let lexbuf = Lexing.from_string expr_src in
-                 (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+                 (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
                          with _ -> None) with
                  | Some (March_ast.Ast.ReplExpr e) ->
                    let e' = March_desugar.Desugar.desugar_expr e in
@@ -606,7 +606,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
              | src when String.trim src = "" -> ()
              | src ->
                let lexbuf = Lexing.from_string src in
-               (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+               (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
                        with
                        | March_errors.Errors.ParseError (msg, hint, _) ->
                          let rendered = March_errors.Errors.render_parse_error ~src ?hint ~msg lexbuf in
@@ -930,7 +930,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
 
   let process_src src =
     let lexbuf = Lexing.from_string src in
-    (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+    (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
             with
             | March_errors.Errors.ParseError (msg, hint, _) ->
               let rendered = March_errors.Errors.render_parse_error ~src ?hint ~msg lexbuf in
@@ -1171,7 +1171,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
         | s when is_debug && String.length s > 7 && String.sub s 0 7 = ":watch " ->
           let expr_src = String.trim (String.sub s 7 (String.length s - 7)) in
           let lexbuf = Lexing.from_string expr_src in
-          (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+          (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
                   with _ -> None) with
            | Some (March_ast.Ast.ReplExpr e) ->
              let e' = March_desugar.Desugar.desugar_expr e in
@@ -1260,7 +1260,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
            | Some h ->
              let expr_src = String.trim (String.sub s 6 (String.length s - 6)) in
              let lexbuf = Lexing.from_string expr_src in
-             (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+             (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
                      with _ -> None) with
               | Some (March_ast.Ast.ReplExpr e) ->
                 let e' = March_desugar.Desugar.desugar_expr e in
@@ -1383,7 +1383,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
             add_line Notty.A.(fg red) "usage: :type <expr>"
           else begin
             let lexbuf = Lexing.from_string expr_src in
-            (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+            (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
                     with _ -> None) with
             | Some (March_ast.Ast.ReplExpr e) ->
               let e' = March_desugar.Desugar.desugar_expr e in
@@ -1493,7 +1493,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
             add_line Notty.A.(fg red) "usage: :inspect <expr>"
           else begin
             let lexbuf = Lexing.from_string expr_src in
-            (match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+            (match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
                     with _ -> None) with
             | Some (March_ast.Ast.ReplExpr e) ->
               let e' = March_desugar.Desugar.desugar_expr e in

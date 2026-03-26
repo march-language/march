@@ -43,6 +43,21 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
       Stack.push !paren_depth pending_match_depths;
       tok
 
+    (* CHOOSE BY chooser: ... END has END without DO — peek ahead
+       for BY to distinguish from Chan.choose(...) expressions. *)
+    | Parser.CHOOSE ->
+      suppress_nl := false;
+      let next_tok = raw lexbuf in
+      (match next_tok with
+       | Parser.BY ->
+         (* Protocol choose block — push Block for its END *)
+         Stack.push Block stack;
+         buffered := Some Parser.BY;
+         tok
+       | other ->
+         buffered := Some other;
+         tok)
+
     | Parser.DO ->
       suppress_nl := false;
       if not (Stack.is_empty pending_match_depths)

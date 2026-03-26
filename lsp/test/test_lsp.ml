@@ -383,8 +383,8 @@ let test_definition_at_constructor_pattern () =
   type Opt = None | Some(Int)
   fn unwrap(x: Opt) : Int do
     match x do
-    | Some(v) -> v
-    | None -> 0
+    Some(v) -> v
+    None -> 0
     end
   end
 end|} in
@@ -1262,9 +1262,9 @@ mod M do
 
   fn describe(c: Color): String do
     match c do
-    | Red   -> "red"
-    | Green -> "green"
-    | Blue  -> "blue"
+    Red   -> "red"
+    Green -> "green"
+    Blue  -> "blue"
     end
   end
 end
@@ -1292,8 +1292,8 @@ mod M do
 
   fn area(s: Shape): Int do
     match s do
-    | Circle -> 1
-    | Square -> 2
+    Circle -> 1
+    Square -> 2
     end
   end
 end
@@ -1323,9 +1323,9 @@ mod M do
 
   fn label(d: Dir): String do
     match d do
-    | North -> "N"
-    | South -> "S"
-    | East  -> "E"
+    North -> "N"
+    South -> "S"
+    East  -> "E"
     end
   end
 end
@@ -1367,7 +1367,7 @@ mod M do
 
   fn flip(b: Bit): Bit do
     match b do
-    | Zero -> One
+    Zero -> One
     end
   end
 end
@@ -1407,8 +1407,8 @@ mod M do
 
   fn greet(s: Season): String do
     match s do
-    | Spring -> "bloom"
-    | Summer -> "sun"
+    Spring -> "bloom"
+    Summer -> "sun"
     end
   end
 end
@@ -1437,7 +1437,7 @@ mod M do
 
   fn go(d: Dir): Int do
     match d do
-    | North -> 0
+    North -> 0
     end
   end
 end
@@ -1487,7 +1487,7 @@ mod M do
 
   fn inv(b: Bit): Bit do
     match b do
-    | Zero -> One
+    Zero -> One
     end
   end
 end
@@ -1943,7 +1943,7 @@ mod M do
 
   fn area(s: Shape): Int do
     match s do
-    | Circle(r) -> r * r
+    Circle(r) -> r * r
     end
   end
 end
@@ -1994,8 +1994,8 @@ mod M do
 
   fn area(s: Shape): Int do
     match s do
-    | Circle(r) -> r * r
-    | Square(w) -> w * w
+    Circle(r) -> r * r
+    Square(w) -> w * w
     end
   end
 end
