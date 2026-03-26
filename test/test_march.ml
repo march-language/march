@@ -255,6 +255,7 @@ let test_tc_if_bad_cond () =
      if/then/else needs no `end`; only fn do…end and match…end do. *)
   let ctx = typecheck {|mod Test do
     fn bad(x) do if x + 1 do 0 else 1 end end
+    fn bad(x) do if x + 1 then 0 else 1 end
   end|} in
   Alcotest.(check bool) "non-Bool condition is an error" true (has_errors ctx)
 
@@ -268,7 +269,7 @@ let test_tc_match () =
   let ctx = typecheck {|mod Test do
     fn f(x) do
       match x do
-      0 -> 1
+      | 0 -> 1
       n -> n + 1
       end
     end
@@ -380,7 +381,7 @@ let test_eq_user_impl () =
         | (Red, Red)     -> true
         | (Green, Green) -> true
         | (Blue, Blue)   -> true
-        | _              -> false
+        _              -> false
         end
       end
     end
@@ -800,8 +801,8 @@ let test_session_choose_protocol_parses () =
     protocol Decision do
       Client -> Server : Int
       choose by Server:
-        | ok  -> Server -> Client : Bool
-        | err -> Server -> Client : Int
+        ok  -> Server -> Client : Bool
+        err -> Server -> Client : Int
       end
     end
   end|} in
@@ -813,8 +814,8 @@ let test_session_choose_advances_state () =
     protocol Decision do
       Client -> Server : Int
       choose by Server:
-        | ok  -> Server -> Client : Bool
-        | err -> Server -> Client : Int
+        ok  -> Server -> Client : Bool
+        err -> Server -> Client : Int
       end
     end
     fn server_side(ch : Chan(Server, Decision)) : Unit do
@@ -831,8 +832,8 @@ let test_session_choose_invalid_label_error () =
   let ctx = typecheck {|mod Test do
     protocol Bin do
       choose by A:
-        | left  -> A -> B : Int
-        | right -> A -> B : Bool
+        left  -> A -> B : Int
+        right -> A -> B : Bool
       end
     end
     fn bad(ch : Chan(A, Bin)) : Unit do
@@ -861,8 +862,8 @@ let test_session_offer_ok () =
     protocol Decision do
       Client -> Server : Int
       choose by Server:
-        | ok  -> Server -> Client : Bool
-        | err -> Server -> Client : Int
+        ok  -> Server -> Client : Bool
+        err -> Server -> Client : Int
       end
     end
     fn client_side(ch : Chan(Client, Decision)) : Unit do
@@ -962,9 +963,9 @@ let test_srec_with_branching_typechecks () =
     protocol Stream do
       loop do
         choose by Server:
-          | data -> Client -> Server : Int
+          data -> Client -> Server : Int
                     Server -> Client : Bool
-          | stop -> Server -> Client : Int
+          stop -> Server -> Client : Int
         end
       end
     end
@@ -1621,8 +1622,8 @@ let test_mpst_choose_offer_three_party_typechecks () =
     protocol Decision do
       A -> B : Int
       choose by B:
-        | yes -> B -> C : String
-        | no  -> B -> C : Int
+        yes -> B -> C : String
+        no  -> B -> C : Int
       end
     end
     fn a_role(ch : Chan(A, Decision)) : Unit do
@@ -1782,6 +1783,7 @@ let test_eval_recursion () =
 let test_eval_if () =
   let env = eval_module {|mod Test do
     fn abs(x) do if x < 0 do negate(x) else x end end
+    fn abs(x) do if x < 0 then negate(x) else x end
   end|} in
   let v = call_fn env "abs" [March_eval.Eval.VInt (-5)] in
   Alcotest.(check int) "abs(-5) = 5" 5
@@ -1895,14 +1897,12 @@ let test_eval_multi_stmt_match_arm () =
   let env = eval_module {|mod Test do
     fn classify(n) do
       match n do
-      0 -> do
+      | 0 ->
         let tag = 0
         tag
-      end
-      _ -> do
+      _ ->
         let tag = 1
         tag
-      end
       end
     end
   end|} in
@@ -1937,7 +1937,7 @@ let test_eval_negative_pattern () =
       match n do
       | 0  -> 0
       | -1 -> -1
-      | _  -> 1
+      _  -> 1
       end
     end
   end|} in
@@ -2179,6 +2179,7 @@ let test_tir_lower_let () =
 let test_tir_lower_if () =
   let m = lower_module {|mod Test do
     fn pick(b : Bool) : Int do if b do 1 else 0 end end
+    fn pick(b : Bool) : Int do if b then 1 else 0 end
   end|} in
   let f = find_fn "pick" m in
   let rec has_case = function
@@ -2320,7 +2321,7 @@ let test_tir_lower_patvar_default () =
   let m = lower_module {|mod Test do
     fn label(n) do
       match n do
-      0 -> 0
+      | 0 -> 0
       other -> other
       end
     end
@@ -2939,7 +2940,8 @@ let test_repl_parity_records () =
 
 let test_repl_parity_if_else () =
   match repl_eval_exprs [
-    {|if 1 < 2 do "yes" else "no" end|};
+    {|if 1 < 2 do "yes" else "no" end
+if 1 < 2 then "yes" else "no"|};
   ] with
   | [`Ok ({|"yes"|}, "String")] -> ()
   | _ -> Alcotest.fail "if/else in REPL"
@@ -3595,10 +3597,9 @@ let test_fusion_filter_fold () =
     fn ifilter(xs : IntList, p : Int -> Bool) : IntList do
       match xs do
       INil        -> INil
-      ICons(h, t) -> do
+      ICons(h, t) ->
         if p(h) do ICons(h, ifilter(t, p))
         else ifilter(t, p) end
-        end
       end
     end
 
@@ -3693,10 +3694,9 @@ let test_fusion_no_fuse_impure () =
     fn imap_print(xs : IntList, f : Int -> Int) : IntList do
       match xs do
       INil        -> INil
-      ICons(h, t) -> do
+      ICons(h, t) ->
         let _ = println(int_to_string(h))
         ICons(f(h), imap_print(t, f))
-      end
       end
     end
 
@@ -3770,10 +3770,9 @@ let test_fusion_map_filter_fold () =
     fn ifilter(xs : IntList, p : Int -> Bool) : IntList do
       match xs do
       INil        -> INil
-      ICons(h, t) -> do
+      ICons(h, t) ->
         if p(h) do ICons(h, ifilter(t, p))
         else ifilter(t, p) end
-        end
       end
     end
 
@@ -4982,10 +4981,12 @@ let test_mutual_tco_even_odd_loop_emitted () =
     @[no_warn_recursion]
     fn even(n : Int) : Bool do
       if n == 0 do true else odd(n - 1) end
+      if n == 0 then true else odd(n - 1)
     end
     @[no_warn_recursion]
     fn odd(n : Int) : Bool do
       if n == 0 do false else even(n - 1) end
+      if n == 0 then false else even(n - 1)
     end
     fn main() : Unit do println(to_string(even(1000000))) end
   end|} in
@@ -5007,14 +5008,17 @@ let test_mutual_tco_three_way () =
     @[no_warn_recursion]
     fn fa(n : Int) : Int do
       if n == 0 do 0 else fb(n - 1) end
+      if n == 0 then 0 else fb(n - 1)
     end
     @[no_warn_recursion]
     fn fb(n : Int) : Int do
       if n == 0 do 0 else fc(n - 1) end
+      if n == 0 then 0 else fc(n - 1)
     end
     @[no_warn_recursion]
     fn fc(n : Int) : Int do
       if n == 0 do 0 else fa(n - 1) end
+      if n == 0 then 0 else fa(n - 1)
     end
     fn main() : Unit do println(int_to_string(fa(99))) end
   end|} in
@@ -5031,10 +5035,12 @@ let test_mutual_tco_state_machine () =
     @[no_warn_recursion]
     fn state_a(n : Int) : Int do
       if n <= 0 do 1 else state_b(n - 1) end
+      if n <= 0 then 1 else state_b(n - 1)
     end
     @[no_warn_recursion]
     fn state_b(n : Int) : Int do
       if n <= 0 do 2 else state_a(n - 1) end
+      if n <= 0 then 2 else state_a(n - 1)
     end
     fn main() : Unit do println(int_to_string(state_a(1000000))) end
   end|} in
@@ -5050,10 +5056,12 @@ let test_mutual_tco_non_tail_no_loop () =
     @[no_warn_recursion]
     fn count_f(n : Int) : Int do
       if n == 0 do 1 else count_g(n - 1) + 1 end
+      if n == 0 then 1 else count_g(n - 1) + 1
     end
     @[no_warn_recursion]
     fn count_g(n : Int) : Int do
       if n == 0 do 1 else count_f(n - 1) + 1 end
+      if n == 0 then 1 else count_f(n - 1) + 1
     end
     fn main() : Unit do println(int_to_string(count_f(10))) end
   end|} in
@@ -5068,6 +5076,7 @@ let test_mutual_tco_self_tco_unaffected () =
     @[no_warn_recursion]
     fn countdown(n : Int) : Int do
       if n == 0 do 0 else countdown(n - 1) end
+      if n == 0 then 0 else countdown(n - 1)
     end
     fn main() : Unit do println(int_to_string(countdown(10))) end
   end|} in
@@ -5115,6 +5124,7 @@ let test_phase4_tco_fn_reduction_in_loop () =
     @[no_warn_recursion]
     fn countdown(n : Int) : Int do
       if n == 0 do 0 else countdown(n - 1) end
+      if n == 0 then 0 else countdown(n - 1)
     end
     fn main() : Unit do println(int_to_string(countdown(100))) end
   end|} in
@@ -5194,7 +5204,7 @@ let test_borrow_read_only_param_is_borrowed () =
   let bm = borrow_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do Conn(s) -> println(s) end
+      match conn do | Conn(s) -> println(s) end
     end
   end|} in
   Alcotest.(check bool) "log's conn param is borrowed" true
@@ -5237,7 +5247,7 @@ let test_borrow_passed_to_borrowed_callee_stays_borrowed () =
   let bm = borrow_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do Conn(s) -> println(s) end
+      match conn do | Conn(s) -> println(s) end
     end
     fn log_twice(conn : Conn) : Unit do
       log(conn)
@@ -5275,7 +5285,7 @@ let test_borrow_no_incrc_at_call_site () =
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do Conn(s) -> println(s) end
+      match conn do | Conn(s) -> println(s) end
     end
     fn handle(conn : Conn) : Conn do
       log(conn)
@@ -5297,7 +5307,7 @@ let test_borrow_no_decrc_in_callee () =
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do Conn(s) -> println(s) end
+      match conn do | Conn(s) -> println(s) end
     end
   end|} in
   let log_fn =
@@ -5337,10 +5347,10 @@ let test_borrow_conn_middleware_pattern () =
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log_middleware(conn : Conn) : Unit do
-      match conn do Conn(s) -> println(s) end
+      match conn do | Conn(s) -> println(s) end
     end
     fn auth_middleware(conn : Conn) : Unit do
-      match conn do Conn(s) -> println(s) end
+      match conn do | Conn(s) -> println(s) end
     end
     fn handle(conn : Conn) : Conn do
       log_middleware(conn)
@@ -7921,11 +7931,10 @@ let test_http_parse_url_scheme () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.parse_url("http://localhost:8080/api") do
-      Ok(req) -> do
+      Ok(req) ->
         match Http.scheme(req) do
         SchemeHttp -> "http"
         SchemeHttps -> "https"
-        end
         end
       Err(_) -> "fail"
       end
@@ -7948,11 +7957,10 @@ let test_http_parse_url_port () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.parse_url("http://localhost:3000/") do
-      Ok(req) -> do
+      Ok(req) ->
         match Http.port(req) do
         Some(p) -> p
         None -> 0
-        end
         end
       Err(_) -> -1
       end
@@ -7976,12 +7984,11 @@ let test_http_set_header () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.get("https://example.com") do
-      Ok(req) -> do
+      Ok(req) ->
         let req = Http.set_header(req, "Accept", "application/json")
         match Http.get_request_header(req, "accept") do
         Some(v) -> v
         None -> "none"
-        end
         end
       Err(_) -> "error"
       end
@@ -8128,7 +8135,7 @@ let test_http_client_request_step_transforms () =
     fn f() do
       match Http.get("http://example.com") do
       Err(_) -> "fail"
-      Ok(req) -> do
+      Ok(req) ->
         let step = HttpClient.step_bearer_auth("my-token")
         match step(req) do
         Err(_) -> "fail"
@@ -8137,7 +8144,6 @@ let test_http_client_request_step_transforms () =
           Some(v) -> v
           None -> "none"
           end
-        end
         end
       end
     end
@@ -8149,13 +8155,12 @@ let test_http_client_raise_on_error_status () =
     fn f() do
       match Http.get("http://example.com") do
       Err(_) -> "url_fail"
-      Ok(req) -> do
+      Ok(req) ->
         let resp = Response(Status(500), Nil, "Internal Server Error")
         match HttpClient.step_raise_on_error(req, resp) do
         Ok(_) -> "ok"
         Err(StepError(name, code)) -> name ++ ":" ++ code
         Err(_) -> "other_error"
-        end
         end
       end
     end
@@ -8195,11 +8200,10 @@ let test_http_client_content_type_step () =
       let step = HttpClient.step_content_type("application/json")
       let req = Request(Post, SchemeHttp, "example.com", None, "/api", None, Nil, "{}")
       match step(req) do
-      Ok(transformed) -> do
+      Ok(transformed) ->
         match Http.get_request_header(transformed, "content-type") do
         Some(v) -> v
         None -> "none"
-        end
         end
       Err(_) -> "fail"
       end
@@ -8229,6 +8233,7 @@ let test_reduction_counter_exhausts () =
 let test_eval_yields_after_budget () =
   let src = {|mod Test do
     fn countdown(n) do if n <= 0 do 0 else countdown(n - 1) end end
+    fn countdown(n) do if n <= 0 then 0 else countdown(n - 1) end
   end|} in
   let env = eval_module src in
   March_eval.Eval.set_reduction_counting true;
@@ -8244,6 +8249,7 @@ let test_eval_no_yield_when_disabled () =
   March_eval.Eval.set_reduction_counting false;
   let src = {|mod Test do
     fn countdown(n) do if n <= 0 do 0 else countdown(n - 1) end end
+    fn countdown(n) do if n <= 0 then 0 else countdown(n - 1) end
   end|} in
   let env = eval_module src in
   let v = call_fn env "countdown" [March_eval.Eval.VInt 100_000] in
@@ -9746,10 +9752,9 @@ let test_supervision_send_checked_dead_actor () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :error
-      Some(cap) -> do
+      Some(cap) ->
         kill(pid)
         send_checked(cap, Noop())
-        end
       end
     end
   end|} in
@@ -9831,10 +9836,9 @@ let test_supervision_revoke_cap_blocks_send () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :error
-      Some(cap) -> do
+      Some(cap) ->
         revoke_cap(cap)
         send_checked(cap, Noop())
-        end
       end
     end
   end|} in
@@ -9857,11 +9861,10 @@ let test_supervision_revoke_cap_idempotent () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :error
-      Some(cap) -> do
+      Some(cap) ->
         revoke_cap(cap)
         revoke_cap(cap)
         :ok
-        end
       end
     end
   end|} in
@@ -9882,14 +9885,14 @@ let test_supervision_is_cap_valid () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :error
-      Some(cap) -> do
+      Some(cap) ->
         let before = is_cap_valid(cap)
         revoke_cap(cap)
         let after = is_cap_valid(cap)
-        if before == true do
+        if before == true then
           if after == false do :ok else :bad_after end
-        else :bad_before end
-        end
+          if after == false then :ok else :bad_after
+        else :bad_before
       end
     end
   end|} in
@@ -9910,10 +9913,9 @@ let test_supervision_send_revoked_cap_errors () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :setup_error
-      Some(cap) -> do
+      Some(cap) ->
         revoke_cap(cap)
         cap
-        end
       end
     end
   end|} in
@@ -9946,14 +9948,14 @@ let test_supervision_revoke_without_kill () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :error
-      Some(cap) -> do
+      Some(cap) ->
         revoke_cap(cap)
         let alive = is_alive(pid)
         let valid = is_cap_valid(cap)
-        if alive == true do
+        if alive == true then
           if valid == false do :ok else :still_valid end
-        else :actor_dead end
-        end
+          if valid == false then :ok else :still_valid
+        else :actor_dead
       end
     end
   end|} in
@@ -10215,10 +10217,9 @@ let test_seq_fold_while () =
   let env = eval_with_seq {|mod T do
     fn f() do
       let s = Seq.from_list([1,2,3,4,5])
-      Seq.fold_while(s, 0, fn(sum, x) -> do
+      Seq.fold_while(s, 0, fn(sum, x) ->
         if sum + x > 6 do Halt(sum)
         else Continue(sum + x) end
-        end
       )
     end
   end|} in
@@ -10345,11 +10346,10 @@ let test_file_write_read () =
      let env = eval_with_file (Printf.sprintf {|mod T do
        fn f() do
          match File.write("%s", "written data") do
-         Ok(ig) -> do
+         Ok(ig) ->
            match File.read("%s") do
            Ok(s) -> s
            Err(ig) -> "read fail"
-           end
            end
          Err(ig) -> "write fail"
          end
@@ -10437,7 +10437,7 @@ let test_dir_mkdir_list_rmdir () =
     fn f() do
       match Dir.mkdir("%s") do
       Err(e) -> "mkdir failed: " ++ to_string(e)
-      Ok(ig) -> do
+      Ok(ig) ->
         match Dir.list("%s") do
         Err(ig) -> "list failed"
         Ok(ig) ->
@@ -10445,7 +10445,6 @@ let test_dir_mkdir_list_rmdir () =
           Err(ig) -> "rmdir failed"
           Ok(ig) -> "ok"
           end
-        end
         end
       end
     end
@@ -10535,7 +10534,7 @@ let test_integration_file_pipeline () =
     fn f() do
       match Dir.list_full("%s") do
       Err(ig) -> Nil
-      Ok(files) -> do
+      Ok(files) ->
         let txt_files = List.filter(files, fn(p) -> Path.extension(p) == "txt")
         fn collect(ps, acc) do
           match ps do
@@ -10548,7 +10547,6 @@ let test_integration_file_pipeline () =
           end
         end
         collect(txt_files, Nil)
-        end
       end
     end
   end|} base) in
@@ -11190,7 +11188,7 @@ let test_fn_when_constraint_satisfied () =
     fn contains(xs : List(a), x : a) : Bool when Eq(a) do
       match xs do
       Nil -> false
-      Cons(h, t) -> if eq(h, x) do true else contains(t, x) end
+      Cons(h, t) -> if eq(h, x) then true else contains(t, x)
       end
     end
     fn main() : Bool do
@@ -11206,7 +11204,7 @@ let test_fn_when_constraint_unsatisfied () =
     fn contains(xs : List(a), x : a) : Bool when Eq(a) do
       match xs do
       Nil -> false
-      Cons(h, t) -> if eq(h, x) do true else contains(t, x) end
+      Cons(h, t) -> if eq(h, x) then true else contains(t, x)
       end
     end
     fn main() : Bool do
@@ -12831,7 +12829,7 @@ let test_eval_custom_eq_dispatch () =
         match (a, b) do
         | (Even, Even) -> true
         | (Odd, Odd)   -> true
-        | _            -> false
+        _            -> false
         end
       end
     end
@@ -13135,8 +13133,8 @@ let test_exhaust_int_needs_wildcard () =
   let ctx = typecheck {|mod Test do
     fn go(n : Int) : Int do
       match n do
-      0 -> 1
-      1 -> 2
+      | 0 -> 1
+      | 1 -> 2
       end
     end
   end|} in
@@ -13147,7 +13145,7 @@ let test_exhaust_int_wildcard_ok () =
   let ctx = typecheck {|mod Test do
     fn go(n : Int) : Int do
       match n do
-      0 -> 1
+      | 0 -> 1
       _ -> n
       end
     end
@@ -13598,7 +13596,8 @@ let test_eq_prop_transitivity_same () =
       let ab = Red == Red
       let bc = Red == Red
       let ac = Red == Red
-      if ab do if bc do ac else false end else true end
+      if ab do if bc do ac else false else true end end
+      if ab then if bc then ac else false else true
     end
   end|} in
   Alcotest.(check bool) "Eq transitivity: a==b && b==c => a==c" true
@@ -13773,6 +13772,7 @@ let test_hash_prop_eq_consistency () =
       let a = Red
       let b = Red
       if a == b do hash(a) == hash(b) else true end
+      if a == b then hash(a) == hash(b) else true
     end
   end|} in
   Alcotest.(check bool) "Hash/Eq consistency: a==b => hash(a)==hash(b)" true
@@ -13989,21 +13989,22 @@ let test_parse_deeply_nested_if () =
   (* 8 levels of nested if/then/else *)
   let src = {|mod Test do
     fn deep(x : Int) : Int do
-      if x > 0 do
-        if x > 1 do
-          if x > 2 do
-            if x > 3 do
-              if x > 4 do
-                if x > 5 do
-                  if x > 6 do
+      if x > 0 then
+        if x > 1 then
+          if x > 2 then
+            if x > 3 then
+              if x > 4 then
+                if x > 5 then
+                  if x > 6 then
                     if x > 7 do x else 7 end
-                  else 6 end
-                else 5 end
-              else 4 end
-            else 3 end
-          else 2 end
-        else 1 end
-      else 0 end
+                    if x > 7 then x else 7
+                  else 6
+                else 5
+              else 4
+            else 3
+          else 2
+        else 1
+      else 0
     end
   end|} in
   let m = parse_module src in
@@ -14014,15 +14015,14 @@ let test_parse_deeply_nested_match () =
   let src = {|mod Test do
     fn classify(x : Int) : Int do
       match x do
-      0 -> do
+      | 0 ->
         match x do
-        0 ->
+        | 0 ->
           match x do
-          0 -> 0
+          | 0 -> 0
           _ -> 1
           end
         _ -> 2
-        end
         end
       _ -> 3
       end
@@ -14640,6 +14640,7 @@ let test_tc_tail_let_continuation_ok () =
     fn count_up(n, limit) do
       let m = n + 1
       if m >= limit do m else count_up(m, limit) end
+      if m >= limit then m else count_up(m, limit)
     end
   end|} in
   Alcotest.(check bool) "tail call after let: no errors" false (has_errors ctx)
@@ -15202,11 +15203,11 @@ let test_queue_peek () =
   let env = eval_with_queue {|mod Test do
     fn front() do
       let q = Queue.push_back(Queue.push_back(Queue.empty(), 10), 20)
-      match Queue.peek_front(q) do None -> -1 | Some(x) -> x end
+      match Queue.peek_front(q) do | None -> -1 | Some(x) -> x end
     end
     fn back() do
       let q = Queue.push_back(Queue.push_back(Queue.empty(), 10), 20)
-      match Queue.peek_back(q) do None -> -1 | Some(x) -> x end
+      match Queue.peek_back(q) do | None -> -1 | Some(x) -> x end
     end
   end|} in
   Alcotest.(check int) "peek_front = 10" 10 (vint (call_fn env "front" []));
@@ -15251,11 +15252,10 @@ let test_queue_rebalance () =
       let q3 = Queue.push_back(q2, 30)
       -- Pop all from front; the second pop forces rebalancing
       match Queue.pop_front(q3) do
-      Some((_, q4)) -> do
+      Some((_, q4)) ->
         match Queue.pop_front(q4) do
         Some((x, _)) -> x
         None -> -1
-        end
         end
       None -> -1
       end
@@ -15554,12 +15554,11 @@ let test_json_parse_array () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("[1, 2, 3]") do
-      Ok(Array(xs)) -> do
+      Ok(Array(xs)) ->
         match xs do
         Cons(Number(a), Cons(Number(b), Cons(Number(c), Nil))) ->
           float_to_int(a) + float_to_int(b) + float_to_int(c)
         _ -> -1
-        end
         end
       _ -> -2
       end
@@ -15583,11 +15582,10 @@ let test_json_parse_object () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("{\"x\": 1}") do
-      Ok(obj) -> do
+      Ok(obj) ->
         match Json.get(obj, "x") do
         Some(Number(n)) -> float_to_int(n)
         _ -> -1
-        end
         end
       _ -> -2
       end
@@ -15599,11 +15597,10 @@ let test_json_parse_nested () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("{\"a\":{\"b\":42}}") do
-      Ok(obj) -> do
+      Ok(obj) ->
         match Json.get_in(obj, Cons("a", Cons("b", Nil))) do
         Some(Number(n)) -> float_to_int(n)
         _ -> -1
-        end
         end
       _ -> -2
       end
@@ -15615,11 +15612,10 @@ let test_json_parse_whitespace () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("  {  \"k\"  :  true  }  ") do
-      Ok(obj) -> do
+      Ok(obj) ->
         match Json.get(obj, "k") do
         Some(Bool(b)) -> b
         _ -> false
-        end
         end
       _ -> false
       end
@@ -16045,8 +16041,8 @@ let test_df_from_columns_ok () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
       match DataFrame.from_columns([IntCol("x", [1,2,3]), StrCol("y", ["a","b","c"])]) do
-      | Ok(df) -> DataFrame.row_count(df)
-      | Err(_) -> -1
+      Ok(df) -> DataFrame.row_count(df)
+      Err(_) -> -1
       end
     end
   end|} in
@@ -16056,8 +16052,8 @@ let test_df_from_columns_err_mismatch () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
       match DataFrame.from_columns([IntCol("x", [1,2]), IntCol("y", [3,4,5])]) do
-      | Ok(_)  -> false
-      | Err(_) -> true
+      Ok(_)  -> false
+      Err(_) -> true
       end
     end
   end|} in
@@ -16070,8 +16066,8 @@ let test_df_from_rows () =
         Row([("id", IntVal(1)), ("name", StrVal("alice"))]),
         Row([("id", IntVal(2)), ("name", StrVal("bob"))])
       ]) do
-      | Ok(df) -> DataFrame.row_count(df)
-      | Err(_) -> -1
+      Ok(df) -> DataFrame.row_count(df)
+      Err(_) -> -1
       end
     end
   end|} in
@@ -16093,8 +16089,8 @@ let test_df_get_column_ok () =
     fn f() do
       let df = DataFrame.make_df([IntCol("score", [10, 20, 30])])
       match DataFrame.get_column(df, "score") do
-      | Ok(col) -> DataFrame.col_len(col)
-      | Err(_)  -> -1
+      Ok(col) -> DataFrame.col_len(col)
+      Err(_)  -> -1
       end
     end
   end|} in
@@ -16105,8 +16101,8 @@ let test_df_get_column_missing () =
     fn f() do
       let df = DataFrame.make_df([IntCol("x", [1,2])])
       match DataFrame.get_column(df, "missing") do
-      | Ok(_)  -> false
-      | Err(_) -> true
+      Ok(_)  -> false
+      Err(_) -> true
       end
     end
   end|} in
@@ -16117,8 +16113,8 @@ let test_df_add_column () =
     fn f() do
       let df = DataFrame.make_df([IntCol("x", [1,2,3])])
       match DataFrame.add_column(df, IntCol("y", [4,5,6])) do
-      | Ok(df2) -> DataFrame.col_count(df2)
-      | Err(_)  -> -1
+      Ok(df2) -> DataFrame.col_count(df2)
+      Err(_)  -> -1
       end
     end
   end|} in
@@ -16160,8 +16156,8 @@ let test_df_slice_value () =
       let df = DataFrame.make_df([IntCol("x", [10,20,30,40,50])])
       let s  = DataFrame.slice(df, 1, 3)
       match DataFrame.get_int_col(s, "x") do
-      | Ok(xs) -> List.nth(xs, 0)
-      | Err(_) -> -1
+      Ok(xs) -> List.nth(xs, 0)
+      Err(_) -> -1
       end
     end
   end|} in
@@ -16175,8 +16171,8 @@ let test_df_lazy_filter () =
       let df = DataFrame.make_df([IntCol("x", [1,2,3,4,5])])
       let lf = DataFrame.lazy(df) |> DataFrame.filter(Gt(Col("x"), LitInt(3)))
       match DataFrame.collect(lf) do
-      | Ok(df2) -> DataFrame.row_count(df2)
-      | Err(_)  -> -1
+      Ok(df2) -> DataFrame.row_count(df2)
+      Err(_)  -> -1
       end
     end
   end|} in
@@ -16188,8 +16184,8 @@ let test_df_lazy_select () =
       let df = DataFrame.make_df([IntCol("a",[1,2]), IntCol("b",[3,4]), IntCol("c",[5,6])])
       let lf = DataFrame.lazy(df) |> DataFrame.select(["a","c"])
       match DataFrame.collect(lf) do
-      | Ok(df2) -> DataFrame.col_count(df2)
-      | Err(_)  -> -1
+      Ok(df2) -> DataFrame.col_count(df2)
+      Err(_)  -> -1
       end
     end
   end|} in
@@ -16201,12 +16197,12 @@ let test_df_lazy_sort_by () =
       let df = DataFrame.make_df([IntCol("v", [3,1,2])])
       let lf = DataFrame.lazy(df) |> DataFrame.sort_by([("v", Asc)])
       match DataFrame.collect(lf) do
-      | Ok(df2) ->
+      Ok(df2) ->
         match DataFrame.get_int_col(df2, "v") do
-        | Ok(xs) -> List.nth(xs, 0)
-        | Err(_) -> -1
+        Ok(xs) -> List.nth(xs, 0)
+        Err(_) -> -1
         end
-      | Err(_) -> -1
+      Err(_) -> -1
       end
     end
   end|} in
@@ -16218,8 +16214,8 @@ let test_df_lazy_limit () =
       let df = DataFrame.make_df([IntCol("x", [10,20,30,40,50])])
       let lf = DataFrame.lazy(df) |> DataFrame.limit(3)
       match DataFrame.collect(lf) do
-      | Ok(df2) -> DataFrame.row_count(df2)
-      | Err(_)  -> -1
+      Ok(df2) -> DataFrame.row_count(df2)
+      Err(_)  -> -1
       end
     end
   end|} in
@@ -16234,12 +16230,12 @@ let test_df_lazy_chain () =
                |> DataFrame.sort_by([("x", Asc)])
                |> DataFrame.limit(2)
       match DataFrame.collect(lf) do
-      | Ok(df2) ->
+      Ok(df2) ->
         match DataFrame.get_int_col(df2, "x") do
-        | Ok(xs) -> List.nth(xs, 0)
-        | Err(_) -> -1
+        Ok(xs) -> List.nth(xs, 0)
+        Err(_) -> -1
         end
-      | Err(_) -> -1
+      Err(_) -> -1
       end
     end
   end|} in
@@ -16252,16 +16248,16 @@ let test_df_with_column () =
       let lf = DataFrame.lazy(df)
                |> DataFrame.with_column("doubled", fn row ->
                     match DataFrame.row_get_int(row, "x") do
-                    | Some(v) -> IntVal(v * 2)
-                    | None    -> IntVal(0)
+                    Some(v) -> IntVal(v * 2)
+                    None    -> IntVal(0)
                     end)
       match DataFrame.collect(lf) do
-      | Ok(df2) ->
+      Ok(df2) ->
         match DataFrame.get_int_col(df2, "doubled") do
-        | Ok(xs) -> List.nth(xs, 2)
-        | Err(_) -> -1
+        Ok(xs) -> List.nth(xs, 2)
+        Err(_) -> -1
         end
-      | Err(_) -> -1
+      Err(_) -> -1
       end
     end
   end|} in
@@ -16275,8 +16271,8 @@ let test_df_groupby_count () =
       let df = DataFrame.make_df([StrCol("cat", ["a","b","a","b","a"])])
       let gb = DataFrame.group_by(df, ["cat"])
       match DataFrame.agg(gb, [Count]) do
-      | Ok(df2) -> DataFrame.row_count(df2)
-      | Err(_)  -> -1
+      Ok(df2) -> DataFrame.row_count(df2)
+      Err(_)  -> -1
       end
     end
   end|} in
@@ -16291,12 +16287,12 @@ let test_df_groupby_sum () =
       ])
       let gb = DataFrame.group_by(df, ["cat"])
       match DataFrame.agg(gb, [Sum("val")]) do
-      | Ok(df2) ->
+      Ok(df2) ->
         match DataFrame.float_list(df2, "val") do
-        | Ok(xs) -> float_to_int(List.fold_left(0.0, xs, fn (acc, x) -> acc +. x))
-        | Err(_) -> -1
+        Ok(xs) -> float_to_int(List.fold_left(0.0, xs, fn (acc, x) -> acc +. x))
+        Err(_) -> -1
         end
-      | Err(_) -> -1
+      Err(_) -> -1
       end
     end
   end|} in
@@ -16311,8 +16307,8 @@ let test_df_inner_join () =
       let right = DataFrame.make_df([IntCol("id",[2,3,4]), IntCol("score",[10,20,30])])
       let lf    = DataFrame.lazy(left) |> DataFrame.inner_join(right, ["id"])
       match DataFrame.collect(lf) do
-      | Ok(df) -> DataFrame.row_count(df)
-      | Err(_) -> -1
+      Ok(df) -> DataFrame.row_count(df)
+      Err(_) -> -1
       end
     end
   end|} in
@@ -16325,8 +16321,8 @@ let test_df_left_join_row_count () =
       let right = DataFrame.make_df([IntCol("id",[2,3]), StrCol("tag",["x","y"])])
       let lf    = DataFrame.lazy(left) |> DataFrame.left_join(right, ["id"])
       match DataFrame.collect(lf) do
-      | Ok(df) -> DataFrame.row_count(df)
-      | Err(_) -> -1
+      Ok(df) -> DataFrame.row_count(df)
+      Err(_) -> -1
       end
     end
   end|} in
@@ -16339,12 +16335,12 @@ let test_df_left_join_null_count () =
       let right = DataFrame.make_df([IntCol("id",[2,3]), StrCol("tag",["x","y"])])
       let lf    = DataFrame.lazy(left) |> DataFrame.left_join(right, ["id"])
       match DataFrame.collect(lf) do
-      | Ok(df) ->
+      Ok(df) ->
         match DataFrame.get_column(df, "tag") do
-        | Ok(col) -> DataFrame.col_null_count(col)
-        | Err(_)  -> -1
+        Ok(col) -> DataFrame.col_null_count(col)
+        Err(_)  -> -1
         end
-      | Err(_) -> -1
+      Err(_) -> -1
       end
     end
   end|} in
@@ -16357,8 +16353,8 @@ let test_df_right_join_row_count () =
       let right = DataFrame.make_df([IntCol("id",[1,2,3,4])])
       let lf    = DataFrame.lazy(left) |> DataFrame.right_join(right, ["id"])
       match DataFrame.collect(lf) do
-      | Ok(df) -> DataFrame.row_count(df)
-      | Err(_) -> -1
+      Ok(df) -> DataFrame.row_count(df)
+      Err(_) -> -1
       end
     end
   end|} in
@@ -16371,8 +16367,8 @@ let test_df_outer_join_row_count () =
       let right = DataFrame.make_df([IntCol("id", [2,3])])
       let lf    = DataFrame.lazy(left) |> DataFrame.outer_join(right, ["id"])
       match DataFrame.collect(lf) do
-      | Ok(df) -> DataFrame.row_count(df)
-      | Err(_) -> -1
+      Ok(df) -> DataFrame.row_count(df)
+      Err(_) -> -1
       end
     end
   end|} in
@@ -16385,8 +16381,8 @@ let test_df_inner_join_col_count () =
       let right = DataFrame.make_df([IntCol("id",[1,2]), IntCol("score",[10,20])])
       let lf    = DataFrame.lazy(left) |> DataFrame.inner_join(right, ["id"])
       match DataFrame.collect(lf) do
-      | Ok(df) -> DataFrame.col_count(df)
-      | Err(_) -> -1
+      Ok(df) -> DataFrame.col_count(df)
+      Err(_) -> -1
       end
     end
   end|} in
@@ -16419,8 +16415,8 @@ let test_df_describe_column_name () =
       let df = DataFrame.make_df([IntCol("score", [1,2,3])])
       let d  = DataFrame.summarize(df)
       match DataFrame.get_string_col(d, "column") do
-      | Ok(names) -> List.nth(names, 0)
-      | Err(_)    -> "err"
+      Ok(names) -> List.nth(names, 0)
+      Err(_)    -> "err"
       end
     end
   end|} in
@@ -16470,8 +16466,8 @@ let test_df_col_add_float () =
     fn f() do
       let col = FloatCol("p", [1.0, 2.0, 3.0])
       match DataFrame.col_add_float(col, 10.0) do
-      | Ok(FloatCol(_, data)) -> float_to_int(List.nth(data, 0))
-      | _ -> -1
+      Ok(FloatCol(_, data)) -> float_to_int(List.nth(data, 0))
+      _ -> -1
       end
     end
   end|} in
@@ -16482,8 +16478,8 @@ let test_df_col_mul_float () =
     fn f() do
       let col = IntCol("q", [2, 4, 6])
       match DataFrame.col_mul_float(col, 3.0) do
-      | Ok(FloatCol(_, data)) -> float_to_int(List.nth(data, 1))
-      | _ -> -1
+      Ok(FloatCol(_, data)) -> float_to_int(List.nth(data, 1))
+      _ -> -1
       end
     end
   end|} in
@@ -16495,8 +16491,8 @@ let test_df_col_add_col_int () =
       let a = IntCol("a", [1, 2, 3])
       let b = IntCol("b", [10, 20, 30])
       match DataFrame.col_add_col(a, b) do
-      | Ok(IntCol(_, data)) -> List.nth(data, 2)
-      | _ -> -1
+      Ok(IntCol(_, data)) -> List.nth(data, 2)
+      _ -> -1
       end
     end
   end|} in
@@ -16508,8 +16504,8 @@ let test_df_col_add_col_length_mismatch () =
       let a = IntCol("a", [1,2,3])
       let b = IntCol("b", [10,20])
       match DataFrame.col_add_col(a, b) do
-      | Ok(_)  -> false
-      | Err(_) -> true
+      Ok(_)  -> false
+      Err(_) -> true
       end
     end
   end|} in
@@ -16522,10 +16518,11 @@ let test_df_col_z_score () =
     fn f() do
       let col = FloatCol("v", [1.0, 2.0, 3.0])
       match DataFrame.col_z_score(col) do
-      | Ok(FloatCol(_, data)) ->
+      Ok(FloatCol(_, data)) ->
         let mid = List.nth(data, 1)
+        if mid > -0.001 && mid < 0.001 do 1 else 0 end
         if mid > -0.001 && mid < 0.001 then 1 else 0
-      | _ -> -1
+      _ -> -1
       end
     end
   end|} in
@@ -16536,11 +16533,12 @@ let test_df_col_normalize () =
     fn f() do
       let col = FloatCol("v", [0.0, 5.0, 10.0])
       match DataFrame.col_normalize(col) do
-      | Ok(FloatCol(_, data)) ->
+      Ok(FloatCol(_, data)) ->
         let mn = List.nth(data, 0)
         let mx = List.nth(data, 2)
+        if mn > -0.001 && mn < 0.001 && mx > 0.999 && mx < 1.001 do 1 else 0 end
         if mn > -0.001 && mn < 0.001 && mx > 0.999 && mx < 1.001 then 1 else 0
-      | _ -> -1
+      _ -> -1
       end
     end
   end|} in
@@ -16553,8 +16551,8 @@ let test_df_value_counts () =
     fn f() do
       let df = DataFrame.make_df([StrCol("color", ["red","blue","red","red","blue"])])
       match DataFrame.value_counts(df, "color") do
-      | Ok(vc) -> DataFrame.row_count(vc)
-      | Err(_) -> -1
+      Ok(vc) -> DataFrame.row_count(vc)
+      Err(_) -> -1
       end
     end
   end|} in
@@ -16574,8 +16572,8 @@ let test_df_empty_filter () =
       let df = DataFrame.make_df([IntCol("x", Nil)])
       let lf = DataFrame.lazy(df) |> DataFrame.filter(Gt(Col("x"), LitInt(0)))
       match DataFrame.collect(lf) do
-      | Ok(df2) -> DataFrame.row_count(df2)
-      | Err(_)  -> -1
+      Ok(df2) -> DataFrame.row_count(df2)
+      Err(_)  -> -1
       end
     end
   end|} in
@@ -16586,8 +16584,8 @@ let test_df_single_row () =
     fn f() do
       let df = DataFrame.make_df([IntCol("v", [42])])
       match DataFrame.get_int_col(df, "v") do
-      | Ok(xs) -> List.nth(xs, 0)
-      | Err(_) -> -1
+      Ok(xs) -> List.nth(xs, 0)
+      Err(_) -> -1
       end
     end
   end|} in
@@ -16598,8 +16596,8 @@ let test_df_rename_column () =
     fn f() do
       let df = DataFrame.make_df([IntCol("old_name", [1,2,3])])
       match DataFrame.rename_column(df, "old_name", "new_name") do
-      | Ok(df2) -> List.nth(DataFrame.schema(df2), 0)
-      | Err(_)  -> "err"
+      Ok(df2) -> List.nth(DataFrame.schema(df2), 0)
+      Err(_)  -> "err"
       end
     end
   end|} in

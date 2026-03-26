@@ -32,7 +32,7 @@ describe "from_rows" do
       assert (DataFrame.row_count(df) == 2)
       assert (DataFrame.col_count(df) == 2)
       assert (DataFrame.schema(df) == ["x", "y"])
-    end
+      end
     end
   end
 
@@ -168,19 +168,19 @@ end
 
 describe "add_column and drop_column" do
   test "add_column appends a new column" do
-    let df = DataFrame.make_df([IntCol("a", [1, 2])])
-    match DataFrame.add_column(df, StrCol("b", ["x", "y"])) do
+    let df = DataFrame.make_df([IntCol("a", typed_array_from_list([1, 2]))])
+    match DataFrame.add_column(df, StrCol("b", typed_array_from_list(["x", "y"]))) do
     Err(_) -> assert false
     Ok(df2) -> do
       assert (DataFrame.col_count(df2) == 2)
       assert (DataFrame.schema(df2) == ["a", "b"])
-    end
+      end
     end
   end
 
   test "add_column errors on length mismatch" do
-    let df = DataFrame.make_df([IntCol("a", [1, 2])])
-    match DataFrame.add_column(df, IntCol("b", [1])) do
+    let df = DataFrame.make_df([IntCol("a", typed_array_from_list([1, 2]))])
+    match DataFrame.add_column(df, IntCol("b", typed_array_from_list([1]))) do
     Err(_) -> assert true
     Ok(_)  -> assert false
     end
@@ -227,7 +227,7 @@ describe "select_columns" do
     Ok(df2) -> do
       assert (DataFrame.col_count(df2) == 2)
       assert (DataFrame.schema(df2) == ["c", "a"])
-    end
+      end
     end
   end
 end
@@ -264,7 +264,7 @@ describe "from_csv_string" do
     Ok(df) -> do
       assert (DataFrame.row_count(df) == 2)
       assert (DataFrame.col_count(df) == 3)
-    end
+      end
     end
   end
 
@@ -277,7 +277,7 @@ describe "from_csv_string" do
       Err(_) -> assert false
       Ok(lst) -> assert (lst == [1, 2, 3])
       end
-    end
+      end
     end
   end
 
@@ -290,7 +290,7 @@ describe "from_csv_string" do
       Err(_)  -> assert false
       Ok(lst) -> assert (List.length(lst) == 2)
       end
-    end
+      end
     end
   end
 
@@ -303,7 +303,7 @@ describe "from_csv_string" do
       Err(_)  -> assert false
       Ok(lst) -> assert (lst == ["Paris", "London"])
       end
-    end
+      end
     end
   end
 
@@ -327,7 +327,7 @@ describe "to_csv_string" do
     Ok(df2) -> do
       assert (DataFrame.row_count(df2) == 2)
       assert (DataFrame.schema(df2) == ["name", "age"])
-    end
+      end
     end
   end
 end
@@ -376,7 +376,7 @@ describe "LazyFrame select" do
     Ok(df2) -> do
       assert (DataFrame.col_count(df2) == 2)
       assert (DataFrame.schema(df2) == ["a", "c"])
-    end
+      end
     end
   end
 end
@@ -395,7 +395,7 @@ describe "LazyFrame filter" do
       Err(_)  -> assert false
       Ok(lst) -> assert (lst == [4, 5])
       end
-    end
+      end
     end
   end
 
@@ -434,7 +434,7 @@ describe "LazyFrame limit and offset" do
       Err(_)  -> assert false
       Ok(lst) -> assert (lst == [10, 20])
       end
-    end
+      end
     end
   end
 
@@ -449,7 +449,7 @@ describe "LazyFrame limit and offset" do
       Err(_)  -> assert false
       Ok(lst) -> assert (lst == [30, 40])
       end
-    end
+      end
     end
   end
 end
@@ -467,7 +467,7 @@ describe "LazyFrame sort_by" do
       Err(_)  -> assert false
       Ok(lst) -> assert (lst == [1, 2, 3])
       end
-    end
+      end
     end
   end
 
@@ -483,7 +483,7 @@ describe "LazyFrame sort_by" do
       Err(_)  -> assert false
       Ok(lst) -> assert (lst == [3, 2, 1])
       end
-    end
+      end
     end
   end
 end
@@ -575,7 +575,7 @@ describe "value_counts" do
       None -> assert false
       Some(cnt) -> assert (cnt == 3)
       end
-    end
+      end
     end
   end
 end
@@ -616,13 +616,14 @@ describe "fill_null" do
     Err(_) -> assert false
     Ok(filled) -> do
       match filled do
-      IntCol(_, data) ->
-        assert (List.nth(data, 0) == 99)
-        assert (List.nth(data, 1) == 99)
-        assert (List.nth(data, 2) == 5)
+      IntCol(_, data) -> do
+        assert (typed_array_get(data, 0) == 99)
+        assert (typed_array_get(data, 1) == 99)
+        assert (typed_array_get(data, 2) == 5)
+        end
       _ -> assert false
       end
-    end
+      end
     end
   end
 
@@ -647,7 +648,7 @@ describe "fill_null" do
       Err(_) -> assert false
       Ok(data) -> assert (List.nth(data, 1) == 0.0)
       end
-    end
+      end
     end
   end
 end
@@ -658,11 +659,11 @@ describe "fill_null_forward and fill_null_backward" do
     let filled = DataFrame.fill_null_forward(col)
     match filled do
     IntCol(_, data) -> do
-      assert (List.nth(data, 0) == 1)
-      assert (List.nth(data, 1) == 1)
-      assert (List.nth(data, 2) == 1)
-      assert (List.nth(data, 3) == 4)
-    end
+      assert (typed_array_get(data, 0) == 1)
+      assert (typed_array_get(data, 1) == 1)
+      assert (typed_array_get(data, 2) == 1)
+      assert (typed_array_get(data, 3) == 4)
+      end
     _ -> assert false
     end
   end
@@ -672,11 +673,11 @@ describe "fill_null_forward and fill_null_backward" do
     let filled = DataFrame.fill_null_backward(col)
     match filled do
     IntCol(_, data) -> do
-      assert (List.nth(data, 0) == 4)
-      assert (List.nth(data, 1) == 4)
-      assert (List.nth(data, 2) == 4)
-      assert (List.nth(data, 3) == 0)
-    end
+      assert (typed_array_get(data, 0) == 4)
+      assert (typed_array_get(data, 1) == 4)
+      assert (typed_array_get(data, 2) == 4)
+      assert (typed_array_get(data, 3) == 0)
+      end
     _ -> assert false
     end
   end
@@ -685,7 +686,7 @@ describe "fill_null_forward and fill_null_backward" do
     let col = IntCol("x", typed_array_from_list([1, 2, 3]))
     let result = DataFrame.fill_null_forward(col)
     match result do
-    IntCol(_, data) -> assert (List.nth(data, 1) == 2)
+    IntCol(_, data) -> assert (typed_array_get(data, 1) == 2)
     _ -> assert false
     end
   end
@@ -701,12 +702,13 @@ describe "window RowNum" do
     Ok(df2) -> do
       match DataFrame.get_int_col(df2, "rn") do
       Err(_) -> assert false
-      Ok(data) ->
+      Ok(data) -> do
         assert (List.nth(data, 0) == 0)
         assert (List.nth(data, 1) == 1)
         assert (List.nth(data, 2) == 2)
+        end
       end
-    end
+      end
     end
   end
 end
@@ -720,14 +722,15 @@ describe "window Rank" do
     Ok(df2) -> do
       match DataFrame.get_int_col(df2, "rk") do
       Err(_) -> assert false
-      Ok(data) ->
+      Ok(data) -> do
         -- The two 1s should share rank 1; 2 gets rank 3; 3 gets rank 4
         assert (List.nth(data, 1) == 1)  -- first 1
         assert (List.nth(data, 2) == 1)  -- second 1 (tie)
         assert (List.nth(data, 3) == 3)  -- 2 (skips rank 2)
         assert (List.nth(data, 0) == 4)  -- 3
+        end
       end
-    end
+      end
     end
   end
 
@@ -738,13 +741,14 @@ describe "window Rank" do
     Ok(df2) -> do
       match DataFrame.get_int_col(df2, "dr") do
       Err(_) -> assert false
-      Ok(data) ->
+      Ok(data) -> do
         assert (List.nth(data, 1) == 1)  -- first 1
         assert (List.nth(data, 2) == 1)  -- second 1 (tie)
         assert (List.nth(data, 3) == 2)  -- 2 (dense: no gap)
         assert (List.nth(data, 0) == 3)  -- 3
+        end
       end
-    end
+      end
     end
   end
 end
@@ -757,13 +761,14 @@ describe "window RunningSum and RunningMean" do
     Ok(df2) -> do
       match DataFrame.get_int_col(df2, "cs") do
       Err(_) -> assert false
-      Ok(data) ->
+      Ok(data) -> do
         assert (List.nth(data, 0) == 1)
         assert (List.nth(data, 1) == 3)
         assert (List.nth(data, 2) == 6)
         assert (List.nth(data, 3) == 10)
+        end
       end
-    end
+      end
     end
   end
 
@@ -774,12 +779,13 @@ describe "window RunningSum and RunningMean" do
     Ok(df2) -> do
       match DataFrame.get_float_col(df2, "cm") do
       Err(_) -> assert false
-      Ok(data) ->
+      Ok(data) -> do
         assert (List.nth(data, 0) == 2.0)
         assert (List.nth(data, 1) == 3.0)
         assert (List.nth(data, 2) == 4.0)
+        end
       end
-    end
+      end
     end
   end
 end
@@ -792,12 +798,13 @@ describe "window Lag and Lead" do
     Ok(df2) -> do
       match DataFrame.get_int_col(df2, "prev") do
       Err(_) -> assert false
-      Ok(data) ->
+      Ok(data) -> do
         assert (List.nth(data, 0) == 0)   -- OOB: fill
         assert (List.nth(data, 1) == 10)
         assert (List.nth(data, 2) == 20)
+        end
       end
-    end
+      end
     end
   end
 
@@ -808,12 +815,13 @@ describe "window Lag and Lead" do
     Ok(df2) -> do
       match DataFrame.get_int_col(df2, "nxt") do
       Err(_) -> assert false
-      Ok(data) ->
+      Ok(data) -> do
         assert (List.nth(data, 0) == 20)
         assert (List.nth(data, 1) == 30)
         assert (List.nth(data, 2) == 0)   -- OOB: fill
+        end
       end
-    end
+      end
     end
   end
 end
@@ -833,7 +841,7 @@ describe "melt" do
       -- 2 rows × 2 value vars = 4 output rows
       assert (DataFrame.row_count(long) == 4)
       assert (DataFrame.col_count(long) == 3)
-    end
+      end
     end
   end
 
@@ -853,7 +861,7 @@ describe "melt" do
       None    -> assert false
       Some(s) -> assert (s == "Alice")
       end
-    end
+      end
     end
   end
 end
@@ -871,7 +879,7 @@ describe "pivot" do
       -- 2 distinct regions → 2 rows; 2 distinct products + index col → 3 cols
       assert (DataFrame.row_count(wide) == 2)
       assert (DataFrame.col_count(wide) == 3)
-    end
+      end
     end
   end
 
@@ -892,7 +900,7 @@ describe "pivot" do
       None    -> assert false
       Some(v) -> assert (v == 1)
       end
-    end
+      end
     end
   end
 

@@ -2298,23 +2298,11 @@ let build_ctor_info ctx (m : Tir.tir_module) =
         { ce_tag = 0; ce_fields = field_tys }
   ) m.Tir.tm_types
 
-(** Compilation target.  Native targets the current host; the Wasm variants
-    emit WebAssembly via the respective LLVM target triple. *)
-type target_config =
-  | Native          (** Host native binary (default) *)
-  | Wasm64Wasi      (** wasm64-wasi — 64-bit pointers, WASI system interface *)
-  | Wasm32Wasi      (** wasm32-wasi — 32-bit pointers, WASI system interface *)
-  | Wasm32Unknown   (** wasm32-unknown-unknown — browser/no-OS target, JS interop *)
+let emit_preamble (buf : Buffer.t) =
+  Buffer.add_string buf {|; March compiler output
+target triple = "arm64-apple-macosx15.0.0"
 
-let target_triple = function
-  | Native        -> "arm64-apple-macosx15.0.0"
-  | Wasm64Wasi    -> "wasm64-wasi"
-  | Wasm32Wasi    -> "wasm32-wasi"
-  | Wasm32Unknown -> "wasm32-unknown-unknown"
-
-let emit_preamble ?(target=Native) (buf : Buffer.t) =
-  Buffer.add_string buf ("; March compiler output\ntarget triple = \"" ^ target_triple target ^ "\"\n\n");
-  Buffer.add_string buf {|; Runtime declarations
+; Runtime declarations
 declare ptr  @march_alloc(i64 %sz)
 declare void @march_incrc(ptr %p)
 declare void @march_decrc(ptr %p)
@@ -2358,14 +2346,8 @@ declare ptr  @march_spawn(ptr %actor)
 declare i64  @march_actor_get_int(ptr %actor, i64 %index)
 declare void @march_run_scheduler()
 ; Phase 4: compiled-code reduction counting
-|};
-  (* thread_local is not valid in core WASM; emit a plain global for WASM targets *)
-  (match target with
-  | Wasm64Wasi | Wasm32Wasi | Wasm32Unknown ->
-    Buffer.add_string buf "@march_tls_reductions = external global i64\n"
-  | Native ->
-    Buffer.add_string buf "@march_tls_reductions = external thread_local global i64\n");
-  Buffer.add_string buf {|declare void @march_yield_from_compiled()
+@march_tls_reductions = external thread_local global i64
+declare void @march_yield_from_compiled()
 declare i64  @march_tcp_listen(i64 %port)
 declare i64  @march_tcp_accept(i64 %fd)
 declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)
@@ -2479,7 +2461,7 @@ let emit_main_wrapper (buf : Buffer.t) =
   Buffer.add_string buf
     "\ndefine i32 @main() {\nentry:\n  call void @march_main()\n  call void @march_run_scheduler()\n  ret i32 0\n}\n"
 
-let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : string =
+let emit_module ?(fast_math=false) (m : Tir.tir_module) : string =
   let ctx = make_ctx ~fast_math () in
   build_ctor_info ctx m;
   (* Register user-defined extern functions *)
@@ -2516,7 +2498,7 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
     ) m.Tir.tm_fns;
 
   let out = Buffer.create 8192 in
-  emit_preamble ~target out;
+  emit_preamble out;
   (* Emit user-defined extern function declarations *)
   List.iter (fun (ed : Tir.extern_decl) ->
       let ret_llty = llvm_ret_ty ed.ed_ret in

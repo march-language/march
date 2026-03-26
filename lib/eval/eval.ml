@@ -3191,29 +3191,31 @@ let base_env : env =
         | [VString s] ->
           VString (Digestif.MD5.(to_hex (digest_string s)))
         | _ -> eval_error "md5(s: String): String"))
-    (* ---- SHA-256 hash (raw bytes output) ---- *)
+    (* ---- SHA-256 hash (hex string output) ---- *)
   ; ("sha256", VBuiltin ("sha256", function
         | [v] ->
           (match march_val_to_raw v with
-           | Ok s -> march_bytes_of_string Digestif.SHA256.(to_raw_string (digest_string s))
+           | Ok s -> VString (Digestif.SHA256.(to_hex (digest_string s)))
            | Error e -> eval_error "sha256: %s" e)
-        | _ -> eval_error "sha256(s: Bytes): Bytes"))
-    (* ---- HMAC-SHA-256: returns raw Bytes ---- *)
+        | _ -> eval_error "sha256(s: String | Bytes): String"))
+    (* ---- HMAC-SHA-256: returns hex string ---- *)
   ; ("hmac_sha256", VBuiltin ("hmac_sha256", function
         | [key_v; msg_v] ->
           (match march_val_to_raw key_v, march_val_to_raw msg_v with
            | Ok key, Ok msg ->
-             march_bytes_of_string Digestif.SHA256.(to_raw_string (hmac_string ~key msg))
+             VString (Digestif.SHA256.(to_hex (hmac_string ~key msg)))
            | Error e, _ | _, Error e -> eval_error "hmac_sha256: %s" e)
-        | _ -> eval_error "hmac_sha256(key: Bytes, msg: Bytes): Bytes"))
-    (* ---- PBKDF2-HMAC-SHA256: returns raw Bytes ---- *)
+        | _ -> eval_error "hmac_sha256(key: String | Bytes, msg: String | Bytes): String"))
+    (* ---- PBKDF2-HMAC-SHA256: returns hex string ---- *)
   ; ("pbkdf2_sha256", VBuiltin ("pbkdf2_sha256", function
         | [pwd_v; salt_v; VInt iters; VInt dklen] ->
           (match march_val_to_raw pwd_v, march_val_to_raw salt_v with
            | Ok password, Ok salt ->
-             march_bytes_of_string (pbkdf2_hmac_sha256 ~password ~salt ~iterations:iters ~dklen)
+             VString (pbkdf2_hmac_sha256 ~password ~salt ~iterations:iters ~dklen
+                      |> String.to_seq |> Seq.map (fun c -> Printf.sprintf "%02x" (Char.code c))
+                      |> List.of_seq |> String.concat "")
            | Error e, _ | _, Error e -> eval_error "pbkdf2_sha256: %s" e)
-        | _ -> eval_error "pbkdf2_sha256(password: String, salt: Bytes, iterations: Int, dklen: Int): Bytes"))
+        | _ -> eval_error "pbkdf2_sha256(password: String, salt: String | Bytes, iterations: Int, dklen: Int): String"))
     (* ---- Base64 encode: Bytes -> String ---- *)
   ; ("base64_encode", VBuiltin ("base64_encode", function
         | [v] ->

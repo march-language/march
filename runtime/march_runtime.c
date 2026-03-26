@@ -1,20 +1,18 @@
 #include "march_runtime.h"
+#include "march_scheduler.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <ctype.h>
 #include <stdatomic.h>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <errno.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <fcntl.h>
-#ifndef MARCH_WASM
-#  include "march_scheduler.h"
-#  include <pthread.h>
-#endif
 
 /* ── Allocation ──────────────────────────────────────────────────────── */
 
@@ -311,14 +309,7 @@ void march_panic(void *s) {
     exit(1);
 }
 
-/* ── Actor runtime ───────────────────────────────────────────────────────── */
-/*
- * Under MARCH_WASM: actors, pthreads, and the scheduler are not available.
- * Stub implementations below keep the runtime ABI intact so pure-compute
- * programs (no actors) compile and run correctly in WASM environments.
- */
-#ifndef MARCH_WASM
-/* ── Actor runtime — green thread based (native only) ────────────────────── */
+/* ── Actor runtime — green thread based ──────────────────────────────────── */
 /*
  * Design overview
  * ───────────────
@@ -1690,58 +1681,6 @@ void *march_value_to_string(void *v) {
     int n = snprintf(buf, sizeof(buf), "#<tag:%d>", tag);
     return march_string_lit(buf, n);
 }
-
-#else  /* MARCH_WASM — stub implementations of actor/scheduler API */
-
-/* march_tls_reductions: normally a thread-local in the scheduler.
- * Under WASM we provide a plain global; single-threaded so no races. */
-int64_t march_tls_reductions = 0;
-
-void march_kill(void *actor)                      { (void)actor; }
-void *march_spawn(void *actor)                    { return actor; }
-int64_t march_is_alive(void *actor)               { (void)actor; return 0; }
-int64_t march_actor_get_int(void *actor, int64_t index) {
-    return ((int64_t *)actor)[index];
-}
-void march_run_scheduler(void)                    { }
-void *march_send(void *actor, void *msg) {
-    (void)actor; (void)msg;
-    void *none = march_alloc(16); /* tag=0 = None */
-    return none;
-}
-void *march_send_linear(void *actor, void *msg)   { return march_send(actor, msg); }
-void *march_msg_copy(void *sh, void *dh, void *v) { (void)sh; (void)dh; return v; }
-void *march_msg_move(void *sh, void *dh, void *v) { (void)sh; (void)dh; return v; }
-void *march_process_alloc(void *heap, int64_t sz) { (void)heap; return march_alloc(sz); }
-void march_demonitor(int64_t ref)                 { (void)ref; }
-void march_link(void *a, void *b)                 { (void)a; (void)b; }
-void march_unlink(void *a, void *b)               { (void)a; (void)b; }
-void march_register_supervisor(void *s, int64_t st, int64_t mr, int64_t ws) {
-    (void)s; (void)st; (void)mr; (void)ws;
-}
-int64_t march_monitor(void *w, void *t)           { (void)w; (void)t; return 0; }
-int64_t march_mailbox_size(void *pid)             { (void)pid; return 0; }
-void march_run_until_idle(void)                   { }
-void march_register_resource(void *pid, void *name, void *cleanup) {
-    (void)pid; (void)name; (void)cleanup;
-}
-void *march_get_cap(void *pid)                    { (void)pid; return march_alloc(16); }
-void march_revoke_cap(int64_t pi, int64_t ep)     { (void)pi; (void)ep; }
-int64_t march_is_cap_valid(int64_t pi, int64_t ep){ (void)pi; (void)ep; return 0; }
-void march_send_checked(void *cap, void *msg)     { (void)cap; (void)msg; }
-void *march_pid_of_int(int64_t n)                 { return (void *)(intptr_t)n; }
-void *march_get_actor_field(void *pid, void *name){ (void)pid; (void)name; return march_alloc(16); }
-void *march_cap_narrow(void *cap)                 { return cap; }
-void march_yield_from_compiled(void)              { }
-void *march_value_to_string(void *v) {
-    if (!v) return march_string_lit("nil", 3);
-    march_hdr *h = (march_hdr *)v;
-    char buf[128];
-    int n = snprintf(buf, sizeof(buf), "#<tag:%d>", h->tag);
-    return march_string_lit(buf, n);
-}
-
-#endif  /* MARCH_WASM */
 
 /* ── Resource ownership ──────────────────────────────────────────────── */
 
