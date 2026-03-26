@@ -150,24 +150,58 @@ let next_task_id : int ref = ref 0
 
 (** Vault: ETS-like in-memory key-value store.
     Each table is identified by an opaque integer handle.
-    Entries optionally carry an expiry timestamp (Unix time as float).
-    Expiry is checked lazily on read/update — no background sweeper needed. *)
+
+    Concurrency design — sharded hash map with fine-grained locking:
+    ─────────────────────────────────────────────────────────────────
+    A vault_table is split into [vault_num_stripes] independent shards.
+    Each shard is its own Hashtbl guarded by its own Mutex.
+
+    Key → shard mapping: Hashtbl.hash(key_string) mod vault_num_stripes
+
+    Properties:
+    • Writes to different shards are fully parallel (no shared state).
+    • Writes to the same shard serialize via that shard's Mutex.
+    • vault_update reads under the lock, applies [f] outside the lock
+      (so [f] may safely call other vault operations without deadlocking),
+      then re-acquires the lock to commit. This is "optimistic": a concurrent
+      write between the read and the commit would be seen as a lost-update in
+      a truly parallel setting. In the cooperative interpreter this never
+      happens; in compiled multi-threaded code callers should use explicit
+      serialization for true atomicity.
+    • vault_size acquires each shard's lock in turn for a consistent snapshot.
+
+    In the cooperative single-threaded interpreter the Mutexes are always
+    uncontended (near-zero overhead). They provide correct behavior when
+    compiled March code eventually runs on real OS threads. *)
+
+let vault_num_stripes = 16
+
 type vault_row = {
   vr_value  : value;
-  vr_expiry : float option;  (** None = permanent; Some t = expires at Unix time t *)
+  vr_expiry : float option;  (** None = permanent; Some t = Unix expiry time *)
+}
+
+type vault_shard = {
+  vs_data  : (string, vault_row) Hashtbl.t;
+  vs_mutex : Mutex.t;
 }
 
 type vault_table = {
-  vt_id   : int;
-  vt_name : string;
-  vt_data : (string, vault_row) Hashtbl.t;
-  (** Keys are canonical string representations of March values so that
-      heterogeneous key types (Int, String, Atom, Bool, Tuple, Ctor) are
-      all supported without a custom hash. *)
+  vt_id     : int;
+  vt_name   : string;
+  vt_shards : vault_shard array;  (** vault_num_stripes independent shards *)
 }
 
-let vault_registry  : (int, vault_table) Hashtbl.t = Hashtbl.create 8
-let vault_next_id   : int ref = ref 0
+(** Allocate a fresh vault_table with [vault_num_stripes] empty shards. *)
+let vault_make_table (id : int) (name : string) : vault_table = {
+  vt_id     = id;
+  vt_name   = name;
+  vt_shards = Array.init vault_num_stripes (fun _ ->
+    { vs_data = Hashtbl.create 16; vs_mutex = Mutex.create () });
+}
+
+let vault_registry : (int, vault_table) Hashtbl.t = Hashtbl.create 8
+let vault_next_id  : int ref = ref 0
 
 (** True if a row is still live (not expired). *)
 let vault_row_live (row : vault_row) : bool =
@@ -485,6 +519,12 @@ let vault_lookup (id : int) : vault_table =
   match Hashtbl.find_opt vault_registry id with
   | None     -> eval_error "Vault: invalid table handle %d" id
   | Some tbl -> tbl
+
+(** Return the shard responsible for the pre-computed key string [k].
+    Uses the string's structural hash masked to a non-negative value. *)
+let vault_shard_for (k : string) (shards : vault_shard array) : vault_shard =
+  let h = Hashtbl.hash k land 0x7FFFFFFF in
+  shards.(h mod vault_num_stripes)
 
 (* ------------------------------------------------------------------ *)
 (* Pattern matching                                                    *)
@@ -4224,17 +4264,21 @@ let base_env : env =
         | _ -> eval_error "logger_write: expected (String, String, List, List)"))
 
   (* ── Vault builtins ──────────────────────────────────────────────────────
-     Vault is an ETS-like per-node in-memory KV store.
-     Tables are created once (at startup or on demand) and shared globally.
-     Keys are any plain March value; values are arbitrary.
-     Per-key TTL is supported via vault_set_ttl; expiry is checked lazily. *)
+     Vault is an ETS-like per-node in-memory KV store backed by a sharded
+     concurrent hash map.  Each vault_table has vault_num_stripes = 16
+     independent (Hashtbl + Mutex) shards.  Key → shard mapping is by hash,
+     so writes to different keys in different shards run in parallel.
+
+     vault_update applies [f] outside the shard lock to prevent deadlocks
+     when [f] itself calls vault operations.  This makes update "optimistic":
+     truly atomic compound operations require external serialisation in a
+     multi-threaded compiled runtime. *)
 
   ; ("vault_new", VBuiltin ("vault_new", function
       | [VString name] ->
         let id = !vault_next_id in
         incr vault_next_id;
-        let tbl = { vt_id = id; vt_name = name;
-                    vt_data = Hashtbl.create 16 } in
+        let tbl = vault_make_table id name in
         Hashtbl.replace vault_registry id tbl;
         VVaultHandle id
       | _ -> eval_error "vault_new: expected String (table name)"))
@@ -4243,7 +4287,10 @@ let base_env : env =
       | [VVaultHandle id; key; v] ->
         let tbl = vault_lookup id in
         let k = vault_key_of_value key in
-        Hashtbl.replace tbl.vt_data k { vr_value = v; vr_expiry = None };
+        let shard = vault_shard_for k tbl.vt_shards in
+        Mutex.lock shard.vs_mutex;
+        Hashtbl.replace shard.vs_data k { vr_value = v; vr_expiry = None };
+        Mutex.unlock shard.vs_mutex;
         VUnit
       | _ -> eval_error "vault_set: expected (VaultTable, key, value)"))
 
@@ -4251,8 +4298,11 @@ let base_env : env =
       | [VVaultHandle id; key; v; VInt ttl_secs] ->
         let tbl = vault_lookup id in
         let k = vault_key_of_value key in
+        let shard = vault_shard_for k tbl.vt_shards in
         let expiry = Unix.gettimeofday () +. float_of_int ttl_secs in
-        Hashtbl.replace tbl.vt_data k { vr_value = v; vr_expiry = Some expiry };
+        Mutex.lock shard.vs_mutex;
+        Hashtbl.replace shard.vs_data k { vr_value = v; vr_expiry = Some expiry };
+        Mutex.unlock shard.vs_mutex;
         VUnit
       | _ -> eval_error "vault_set_ttl: expected (VaultTable, key, value, Int)"))
 
@@ -4260,19 +4310,28 @@ let base_env : env =
       | [VVaultHandle id; key] ->
         let tbl = vault_lookup id in
         let k = vault_key_of_value key in
-        (match Hashtbl.find_opt tbl.vt_data k with
-         | None -> VCon ("None", [])
-         | Some row when not (vault_row_live row) ->
-           Hashtbl.remove tbl.vt_data k;
-           VCon ("None", [])
-         | Some row -> VCon ("Some", [row.vr_value]))
+        let shard = vault_shard_for k tbl.vt_shards in
+        Mutex.lock shard.vs_mutex;
+        let result =
+          match Hashtbl.find_opt shard.vs_data k with
+          | None -> VCon ("None", [])
+          | Some row when not (vault_row_live row) ->
+            Hashtbl.remove shard.vs_data k;
+            VCon ("None", [])
+          | Some row -> VCon ("Some", [row.vr_value])
+        in
+        Mutex.unlock shard.vs_mutex;
+        result
       | _ -> eval_error "vault_get: expected (VaultTable, key)"))
 
   ; ("vault_drop", VBuiltin ("vault_drop", function
       | [VVaultHandle id; key] ->
         let tbl = vault_lookup id in
         let k = vault_key_of_value key in
-        Hashtbl.remove tbl.vt_data k;
+        let shard = vault_shard_for k tbl.vt_shards in
+        Mutex.lock shard.vs_mutex;
+        Hashtbl.remove shard.vs_data k;
+        Mutex.unlock shard.vs_mutex;
         VUnit
       | _ -> eval_error "vault_drop: expected (VaultTable, key)"))
 
@@ -4280,25 +4339,45 @@ let base_env : env =
       | [VVaultHandle id; key; f] ->
         let tbl = vault_lookup id in
         let k = vault_key_of_value key in
-        (match Hashtbl.find_opt tbl.vt_data k with
-         | None -> VUnit  (* no-op when key is absent *)
-         | Some row when not (vault_row_live row) ->
-           Hashtbl.remove tbl.vt_data k;
-           VUnit
+        let shard = vault_shard_for k tbl.vt_shards in
+        (* Phase 1: read current value under lock *)
+        Mutex.lock shard.vs_mutex;
+        let row_opt =
+          match Hashtbl.find_opt shard.vs_data k with
+          | None -> None
+          | Some row when not (vault_row_live row) ->
+            Hashtbl.remove shard.vs_data k; None
+          | Some row -> Some row
+        in
+        Mutex.unlock shard.vs_mutex;
+        (* Phase 2: apply f OUTSIDE the lock — safe even if f calls vault ops *)
+        (match row_opt with
+         | None -> VUnit
          | Some row ->
            let new_val = !apply_hook f [row.vr_value] in
-           Hashtbl.replace tbl.vt_data k { row with vr_value = new_val };
+           (* Phase 3: commit result under lock *)
+           Mutex.lock shard.vs_mutex;
+           (match Hashtbl.find_opt shard.vs_data k with
+            | Some r when vault_row_live r ->
+              Hashtbl.replace shard.vs_data k { r with vr_value = new_val }
+            | _ -> ());  (* key deleted/expired during computation — skip *)
+           Mutex.unlock shard.vs_mutex;
            VUnit)
       | _ -> eval_error "vault_update: expected (VaultTable, key, fn)"))
 
   ; ("vault_size", VBuiltin ("vault_size", function
       | [VVaultHandle id] ->
         let tbl = vault_lookup id in
-        (* Prune expired entries while counting *)
-        let count = Hashtbl.fold (fun k row acc ->
-          if vault_row_live row then acc + 1
-          else (Hashtbl.remove tbl.vt_data k; acc)
-        ) tbl.vt_data 0 in
+        (* Lock each shard in turn — prune expired entries while counting *)
+        let count = Array.fold_left (fun acc shard ->
+          Mutex.lock shard.vs_mutex;
+          let n = Hashtbl.fold (fun k row c ->
+            if vault_row_live row then c + 1
+            else (Hashtbl.remove shard.vs_data k; c)
+          ) shard.vs_data 0 in
+          Mutex.unlock shard.vs_mutex;
+          acc + n
+        ) 0 tbl.vt_shards in
         VInt count
       | _ -> eval_error "vault_size: expected VaultTable"))
 

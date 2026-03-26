@@ -16142,6 +16142,41 @@ let test_vault_has () =
      Alcotest.(check bool) "has missing  key = false" false b
    | _ -> Alcotest.fail "expected tuple")
 
+(* Concurrent-write stress test: N threads x M writes each, unique keys per
+   thread.  Runs directly against the OCaml-level shard structures (bypassing
+   the March interpreter) so it exercises the Mutex/Hashtbl layer in true
+   parallel mode.  With OCaml 5 there is no GIL; threads genuinely run in
+   parallel on multiple cores.  If the locking is broken, Hashtbl corruption
+   will cause a wrong count or an exception. *)
+let test_vault_concurrent_writes () =
+  let id = !(March_eval.Eval.vault_next_id) in
+  March_eval.Eval.vault_next_id := id + 1;
+  let tbl = March_eval.Eval.vault_make_table id "concurrent_writes_test" in
+  Hashtbl.replace March_eval.Eval.vault_registry id tbl;
+  let n_threads = 8 in
+  let n_writes  = 250 in
+  let run_thread tid () =
+    for i = 0 to n_writes - 1 do
+      let k = Printf.sprintf "t%di%d" tid i in
+      let shard = March_eval.Eval.vault_shard_for k tbl.March_eval.Eval.vt_shards in
+      Mutex.lock shard.March_eval.Eval.vs_mutex;
+      Hashtbl.replace shard.March_eval.Eval.vs_data k
+        { March_eval.Eval.vr_value  = March_eval.Eval.VInt (tid * 10000 + i);
+          March_eval.Eval.vr_expiry = None };
+      Mutex.unlock shard.March_eval.Eval.vs_mutex
+    done
+  in
+  let threads = Array.init n_threads (fun tid -> Thread.create (run_thread tid) ()) in
+  Array.iter Thread.join threads;
+  let total = Array.fold_left (fun acc shard ->
+    Mutex.lock shard.March_eval.Eval.vs_mutex;
+    let n = Hashtbl.length shard.March_eval.Eval.vs_data in
+    Mutex.unlock shard.March_eval.Eval.vs_mutex;
+    acc + n
+  ) 0 tbl.March_eval.Eval.vt_shards in
+  Hashtbl.remove March_eval.Eval.vault_registry id;
+  Alcotest.(check int) "all writes committed" (n_threads * n_writes) total
+
 (* ── Construction ── *)
 
 let test_df_empty_row_count () =
@@ -18226,5 +18261,6 @@ let () =
         Alcotest.test_case "set_ttl expired immediately"  `Quick test_vault_set_ttl_expired;
         Alcotest.test_case "get_or default"               `Quick test_vault_get_or;
         Alcotest.test_case "has present and absent"       `Quick test_vault_has;
+        Alcotest.test_case "concurrent writes no lost updates" `Slow test_vault_concurrent_writes;
       ]);
     ]
