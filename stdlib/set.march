@@ -22,13 +22,13 @@ mod Set do
 -- We inline the same HAMT structure directly rather than nesting the Map
 -- wrapper to avoid an extra allocation layer.
 
-ptype HEntry(a) =
-  HEmpty
-  | HLeaf(Int, a)
-  | HBranch(Int, List(HEntry(a)))
-  | HCollision(Int, List(a))
+ptype SEntry(a) =
+  SEmpty
+  | SLeaf(Int, a)
+  | SBranch(Int, List(SEntry(a)))
+  | SCollision(Int, List(a))
 
-ptype Set(a) = HamtSet(HEntry(a))
+ptype Set(a) = HamtSet(SEntry(a))
 
 -- ── Private helpers ────────────────────────────────────────────────────────
 
@@ -170,12 +170,12 @@ end
 
 pfn node_contains(node, x, h, eq, level) do
   match node do
-  | HEmpty -> false
-  | HLeaf(lh, lx) ->
+  | SEmpty -> false
+  | SLeaf(lh, lx) ->
     lh == h && eq(lx, x)
-  | HCollision(ch, elems) ->
+  | SCollision(ch, elems) ->
     ch == h && coll_has(elems, x, eq)
-  | HBranch(bitmap, children) ->
+  | SBranch(bitmap, children) ->
     let slot = hash_slot(h, level)
     if bitmap_has(bitmap, slot) then do
       let idx = bitmap_rank(bitmap, slot)
@@ -190,24 +190,24 @@ pfn make_branch(h1, x1, h2, x2, level) do
     match slots do
     | Nil -> node
     | Cons(s, rest) ->
-      apply_slots(HBranch(bitmap_set(0, s), Cons(node, Nil)), rest)
+      apply_slots(SBranch(bitmap_set(0, s), Cons(node, Nil)), rest)
     end
   end
   fn go(lvl, slots_acc) do
     if lvl > 6 then
-      apply_slots(HCollision(h1, Cons(x1, Cons(x2, Nil))), slots_acc)
+      apply_slots(SCollision(h1, Cons(x1, Cons(x2, Nil))), slots_acc)
     else do
       let s1 = hash_slot(h1, lvl)
       let s2 = hash_slot(h2, lvl)
       if s1 == s2 then
         go(lvl + 1, Cons(s1, slots_acc))
       else do
-        let leaf1 = HLeaf(h1, x1)
-        let leaf2 = HLeaf(h2, x2)
+        let leaf1 = SLeaf(h1, x1)
+        let leaf2 = SLeaf(h2, x2)
         let bm = bitmap_set(bitmap_set(0, s1), s2)
         let base_node =
-          if s1 < s2 then HBranch(bm, Cons(leaf1, Cons(leaf2, Nil)))
-          else HBranch(bm, Cons(leaf2, Cons(leaf1, Nil)))
+          if s1 < s2 then SBranch(bm, Cons(leaf1, Cons(leaf2, Nil)))
+          else SBranch(bm, Cons(leaf2, Cons(leaf1, Nil)))
         apply_slots(base_node, slots_acc)
       end
     end
@@ -217,16 +217,16 @@ end
 
 pfn node_insert(node, x, h, eq, level) do
   match node do
-  | HEmpty -> HLeaf(h, x)
-  | HLeaf(lh, lx) ->
+  | SEmpty -> SLeaf(h, x)
+  | SLeaf(lh, lx) ->
     if lh == h then
       if eq(lx, x) then node
-      else HCollision(h, Cons(lx, Cons(x, Nil)))
+      else SCollision(h, Cons(lx, Cons(x, Nil)))
     else
       make_branch(lh, lx, h, x, level)
-  | HCollision(ch, elems) ->
+  | SCollision(ch, elems) ->
     if ch == h then
-      HCollision(ch, coll_insert_elem(elems, x, eq))
+      SCollision(ch, coll_insert_elem(elems, x, eq))
     else do
       fn expand(nd, es) do
         match es do
@@ -235,59 +235,59 @@ pfn node_insert(node, x, h, eq, level) do
           expand(node_insert(nd, e, ch, eq, level), rest)
         end
       end
-      expand(node_insert(HEmpty, x, h, eq, level), elems)
+      expand(node_insert(SEmpty, x, h, eq, level), elems)
     end
-  | HBranch(bitmap, children) ->
+  | SBranch(bitmap, children) ->
     let slot = hash_slot(h, level)
     if bitmap_has(bitmap, slot) then do
       let idx = bitmap_rank(bitmap, slot)
       let child = list_nth_safe(children, idx)
       let new_child = node_insert(child, x, h, eq, level + 1)
-      HBranch(bitmap, list_replace_at(children, idx, new_child))
+      SBranch(bitmap, list_replace_at(children, idx, new_child))
     end else do
       let idx = bitmap_rank(bitmap, slot)
-      HBranch(bitmap_set(bitmap, slot), list_insert_at(children, idx, HLeaf(h, x)))
+      SBranch(bitmap_set(bitmap, slot), list_insert_at(children, idx, SLeaf(h, x)))
     end
   end
 end
 
 pfn node_remove(node, x, h, eq, level) do
   match node do
-  | HEmpty -> HEmpty
-  | HLeaf(lh, lx) ->
-    if lh == h && eq(lx, x) then HEmpty else node
-  | HCollision(ch, elems) ->
+  | SEmpty -> SEmpty
+  | SLeaf(lh, lx) ->
+    if lh == h && eq(lx, x) then SEmpty else node
+  | SCollision(ch, elems) ->
     if ch != h then node
     else do
       let new_elems = coll_remove_elem(elems, x, eq)
       match new_elems do
-      | Nil -> HEmpty
-      | Cons(sole, Nil) -> HLeaf(ch, sole)
-      | _ -> HCollision(ch, new_elems)
+      | Nil -> SEmpty
+      | Cons(sole, Nil) -> SLeaf(ch, sole)
+      | _ -> SCollision(ch, new_elems)
       end
     end
-  | HBranch(bitmap, children) ->
+  | SBranch(bitmap, children) ->
     let slot = hash_slot(h, level)
     if bitmap_has(bitmap, slot) then do
       let idx = bitmap_rank(bitmap, slot)
       let child = list_nth_safe(children, idx)
       let new_child = node_remove(child, x, h, eq, level + 1)
       match new_child do
-      | HEmpty ->
+      | SEmpty ->
         let new_bm = bitmap_clear(bitmap, slot)
         let new_children = list_delete_at(children, idx)
         match new_children do
-        | Nil -> HEmpty
+        | Nil -> SEmpty
         | Cons(sole, Nil) ->
           match sole do
-          | HLeaf(_, _) -> sole
-          | HCollision(_, _) -> sole
-          | _ -> HBranch(new_bm, new_children)
+          | SLeaf(_, _) -> sole
+          | SCollision(_, _) -> sole
+          | _ -> SBranch(new_bm, new_children)
           end
-        | _ -> HBranch(new_bm, new_children)
+        | _ -> SBranch(new_bm, new_children)
         end
       | _ ->
-        HBranch(bitmap, list_replace_at(children, idx, new_child))
+        SBranch(bitmap, list_replace_at(children, idx, new_child))
       end
     end else node
   end
@@ -295,9 +295,9 @@ end
 
 pfn node_fold(acc, node, f) do
   match node do
-  | HEmpty -> acc
-  | HLeaf(_, x) -> f(acc, x)
-  | HCollision(_, elems) ->
+  | SEmpty -> acc
+  | SLeaf(_, x) -> f(acc, x)
+  | SCollision(_, elems) ->
     fn go(a, es) do
       match es do
       | Nil -> a
@@ -305,7 +305,7 @@ pfn node_fold(acc, node, f) do
       end
     end
     go(acc, elems)
-  | HBranch(_, children) ->
+  | SBranch(_, children) ->
     fn go(a, cs) do
       match cs do
       | Nil -> a
@@ -319,9 +319,9 @@ end
 
 pfn node_size(node) do
   match node do
-  | HEmpty -> 0
-  | HLeaf(_, _) -> 1
-  | HCollision(_, elems) ->
+  | SEmpty -> 0
+  | SLeaf(_, _) -> 1
+  | SCollision(_, elems) ->
     fn count(es, n) do
       match es do
       | Nil -> n
@@ -329,7 +329,7 @@ pfn node_size(node) do
       end
     end
     count(elems, 0)
-  | HBranch(_, children) ->
+  | SBranch(_, children) ->
     fn go(acc, cs) do
       match cs do
       | Nil -> acc
@@ -344,13 +344,13 @@ end
 
 doc "Returns an empty set."
 fn empty() do
-  HamtSet(HEmpty)
+  HamtSet(SEmpty)
 end
 
 doc "Returns a set containing exactly one element."
 fn singleton(x) do
   let h = key_hash(x)
-  HamtSet(HLeaf(h, x))
+  HamtSet(SLeaf(h, x))
 end
 
 -- ---- Query ----
@@ -358,7 +358,7 @@ end
 doc "Returns true if the set contains no elements."
 fn is_empty(s) do
   match s do
-  | HamtSet(HEmpty) -> true
+  | HamtSet(SEmpty) -> true
   | _               -> false
   end
 end
