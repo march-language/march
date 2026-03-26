@@ -1,0 +1,30 @@
+================================================================================
+Sigil expression with string
+================================================================================
+fn main() do
+  let x = ~H"<div>hello</div>"
+  x
+end
+--------------------------------------------------------------------------------
+(source_file
+  (function_def
+    name: (identifier)
+    body: (block_body
+      (let_declaration
+        pattern: (variable_pattern (variable_pattern))
+        value: (sigil_expression
+          prefix: (sigil_prefix)
+          content: (string)))
+      (identifier))))
+
+================================================================================
+Sigil expression in expression position
+================================================================================
+let y = ~R"[a-z]+"
+--------------------------------------------------------------------------------
+(source_file
+  (let_declaration
+    pattern: (variable_pattern (variable_pattern))
+    value: (sigil_expression
+      prefix: (sigil_prefix)
+      content: (string))))

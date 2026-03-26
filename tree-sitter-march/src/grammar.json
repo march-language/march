@@ -2273,6 +2273,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "sigil_expression"
+        },
+        {
+          "type": "SYMBOL",
           "name": "atom"
         },
         {
@@ -3184,6 +3188,36 @@
         }
       ]
     },
+    "sigil_expression": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "FIELD",
+          "name": "prefix",
+          "content": {
+            "type": "SYMBOL",
+            "name": "sigil_prefix"
+          }
+        },
+        {
+          "type": "FIELD",
+          "name": "content",
+          "content": {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SYMBOL",
+                "name": "string"
+              },
+              {
+                "type": "SYMBOL",
+                "name": "triple_string"
+              }
+            ]
+          }
+        }
+      ]
+    },
     "match_expression": {
       "type": "SEQ",
       "members": [
@@ -3497,6 +3531,10 @@
     {
       "type": "SYMBOL",
       "name": "block_comment"
+    },
+    {
+      "type": "SYMBOL",
+      "name": "sigil_prefix"
     }
   ],
   "inline": [],

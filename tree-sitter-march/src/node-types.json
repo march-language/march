@@ -168,6 +168,10 @@
           "named": true
         },
         {
+          "type": "sigil_expression",
+          "named": true
+        },
+        {
           "type": "spawn_expression",
           "named": true
         },
@@ -311,6 +315,10 @@
           },
           {
             "type": "send_expression",
+            "named": true
+          },
+          {
+            "type": "sigil_expression",
             "named": true
           },
           {
@@ -458,6 +466,10 @@
             "named": true
           },
           {
+            "type": "sigil_expression",
+            "named": true
+          },
+          {
             "type": "spawn_expression",
             "named": true
           },
@@ -590,6 +602,10 @@
             "named": true
           },
           {
+            "type": "sigil_expression",
+            "named": true
+          },
+          {
             "type": "spawn_expression",
             "named": true
           },
@@ -713,6 +729,10 @@
           },
           {
             "type": "send_expression",
+            "named": true
+          },
+          {
+            "type": "sigil_expression",
             "named": true
           },
           {
@@ -910,6 +930,10 @@
             "named": true
           },
           {
+            "type": "sigil_expression",
+            "named": true
+          },
+          {
             "type": "spawn_expression",
             "named": true
           },
@@ -1043,6 +1067,10 @@
         },
         {
           "type": "send_expression",
+          "named": true
+        },
+        {
+          "type": "sigil_expression",
           "named": true
         },
         {
@@ -1241,6 +1269,10 @@
           "named": true
         },
         {
+          "type": "sigil_expression",
+          "named": true
+        },
+        {
           "type": "spawn_expression",
           "named": true
         },
@@ -1392,6 +1424,10 @@
             "named": true
           },
           {
+            "type": "sigil_expression",
+            "named": true
+          },
+          {
             "type": "spawn_expression",
             "named": true
           },
@@ -1516,6 +1552,10 @@
         },
         {
           "type": "send_expression",
+          "named": true
+        },
+        {
+          "type": "sigil_expression",
           "named": true
         },
         {
@@ -1647,6 +1687,10 @@
           },
           {
             "type": "send_expression",
+            "named": true
+          },
+          {
+            "type": "sigil_expression",
             "named": true
           },
           {
@@ -1806,6 +1850,10 @@
             "named": true
           },
           {
+            "type": "sigil_expression",
+            "named": true
+          },
+          {
             "type": "spawn_expression",
             "named": true
           },
@@ -1946,6 +1994,10 @@
         },
         {
           "type": "send_expression",
+          "named": true
+        },
+        {
+          "type": "sigil_expression",
           "named": true
         },
         {
@@ -2338,6 +2390,10 @@
             "named": true
           },
           {
+            "type": "sigil_expression",
+            "named": true
+          },
+          {
             "type": "spawn_expression",
             "named": true
           },
@@ -2576,6 +2632,10 @@
           },
           {
             "type": "send_expression",
+            "named": true
+          },
+          {
+            "type": "sigil_expression",
             "named": true
           },
           {
@@ -2865,6 +2925,10 @@
             "named": true
           },
           {
+            "type": "sigil_expression",
+            "named": true
+          },
+          {
             "type": "spawn_expression",
             "named": true
           },
@@ -3047,6 +3111,10 @@
             "named": true
           },
           {
+            "type": "sigil_expression",
+            "named": true
+          },
+          {
             "type": "spawn_expression",
             "named": true
           },
@@ -3221,6 +3289,10 @@
           "named": true
         },
         {
+          "type": "sigil_expression",
+          "named": true
+        },
+        {
           "type": "spawn_expression",
           "named": true
         },
@@ -3376,6 +3448,10 @@
           },
           {
             "type": "send_expression",
+            "named": true
+          },
+          {
+            "type": "sigil_expression",
             "named": true
           },
           {
@@ -3548,6 +3624,10 @@
           },
           {
             "type": "send_expression",
+            "named": true
+          },
+          {
+            "type": "sigil_expression",
             "named": true
           },
           {
@@ -3821,6 +3901,10 @@
             "named": true
           },
           {
+            "type": "sigil_expression",
+            "named": true
+          },
+          {
             "type": "spawn_expression",
             "named": true
           },
@@ -3962,6 +4046,10 @@
           },
           {
             "type": "send_expression",
+            "named": true
+          },
+          {
+            "type": "sigil_expression",
             "named": true
           },
           {
@@ -4143,6 +4231,10 @@
             "named": true
           },
           {
+            "type": "sigil_expression",
+            "named": true
+          },
+          {
             "type": "spawn_expression",
             "named": true
           },
@@ -4266,6 +4358,10 @@
           },
           {
             "type": "send_expression",
+            "named": true
+          },
+          {
+            "type": "sigil_expression",
             "named": true
           },
           {
@@ -4401,6 +4497,10 @@
             "named": true
           },
           {
+            "type": "sigil_expression",
+            "named": true
+          },
+          {
             "type": "spawn_expression",
             "named": true
           },
@@ -4524,6 +4624,10 @@
           },
           {
             "type": "send_expression",
+            "named": true
+          },
+          {
+            "type": "sigil_expression",
             "named": true
           },
           {
@@ -4804,6 +4908,10 @@
             "named": true
           },
           {
+            "type": "sigil_expression",
+            "named": true
+          },
+          {
             "type": "spawn_expression",
             "named": true
           },
@@ -4982,6 +5090,10 @@
             "named": true
           },
           {
+            "type": "sigil_expression",
+            "named": true
+          },
+          {
             "type": "spawn_expression",
             "named": true
           },
@@ -5124,6 +5236,10 @@
           "named": true
         },
         {
+          "type": "sigil_expression",
+          "named": true
+        },
+        {
           "type": "spawn_expression",
           "named": true
         },
@@ -5229,6 +5345,36 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "sigil_expression",
+    "named": true,
+    "fields": {
+      "content": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "string",
+            "named": true
+          },
+          {
+            "type": "triple_string",
+            "named": true
+          }
+        ]
+      },
+      "prefix": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "sigil_prefix",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -5409,6 +5555,10 @@
         },
         {
           "type": "send_expression",
+          "named": true
+        },
+        {
+          "type": "sigil_expression",
           "named": true
         },
         {
@@ -5605,6 +5755,10 @@
         },
         {
           "type": "send_expression",
+          "named": true
+        },
+        {
+          "type": "sigil_expression",
           "named": true
         },
         {
@@ -6008,6 +6162,10 @@
             "named": true
           },
           {
+            "type": "sigil_expression",
+            "named": true
+          },
+          {
             "type": "spawn_expression",
             "named": true
           },
@@ -6240,6 +6398,10 @@
         },
         {
           "type": "send_expression",
+          "named": true
+        },
+        {
+          "type": "sigil_expression",
           "named": true
         },
         {
@@ -6498,6 +6660,10 @@
   {
     "type": "sig",
     "named": false
+  },
+  {
+    "type": "sigil_prefix",
+    "named": true
   },
   {
     "type": "spawn",
