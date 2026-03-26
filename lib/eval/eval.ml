@@ -3660,6 +3660,74 @@ let base_env : env =
           VCon ("WsData", [ws_recv_frame sock])
       | _ -> eval_error "ws_select(fd, actor_fd, timeout_ms)"))
 
+  (* ---- TLS builtins ----
+   *
+   * In the interpreter these are stubs that return dummy handles so that
+   * unit tests for the March Tls module can exercise the wrapping logic
+   * without requiring an OpenSSL-linked OCaml runtime.
+   * Real TLS runs via march_tls.c in the compiled native binary.
+   *)
+
+  (* tls_client_ctx(ca_file, alpn_list, min_ver, verify_peer) → Ok(Int)|Err(String) *)
+  ; ("tls_client_ctx", VBuiltin ("tls_client_ctx", function
+        | [_ca; _alpn; _ver; _vp] ->
+          (* Return a stub handle of 1; tests verify wrapping, not real TLS *)
+          VCon ("Ok", [VInt 1])
+        | _ -> eval_error "tls_client_ctx(ca_file, alpn_list, min_ver, verify_peer)"))
+
+  (* tls_server_ctx(cert, key, ca, alpn, min_ver) → Ok(Int)|Err(String) *)
+  ; ("tls_server_ctx", VBuiltin ("tls_server_ctx", function
+        | [VString cert; _key; _ca; _alpn; _ver] ->
+          if cert = "" then
+            VCon ("Err", [VString "server_ctx: cert_file is required"])
+          else
+            VCon ("Ok", [VInt 2])
+        | _ -> eval_error "tls_server_ctx(cert, key, ca, alpn, min_ver)"))
+
+  (* tls_connect(fd, ctx_handle, hostname) → Ok(Int)|Err(String) *)
+  ; ("tls_connect", VBuiltin ("tls_connect", function
+        | [VInt _fd; VInt _ctx; VString _host] ->
+          VCon ("Ok", [VInt 3])
+        | _ -> eval_error "tls_connect(fd, ctx_handle, hostname)"))
+
+  (* tls_accept(fd, ctx_handle) → Ok(Int)|Err(String) *)
+  ; ("tls_accept", VBuiltin ("tls_accept", function
+        | [VInt _fd; VInt _ctx] ->
+          VCon ("Ok", [VInt 4])
+        | _ -> eval_error "tls_accept(fd, ctx_handle)"))
+
+  (* tls_read(ssl_handle, max_bytes) → Ok(String)|Err(String) *)
+  ; ("tls_read", VBuiltin ("tls_read", function
+        | [VInt _ssl; VInt _max] ->
+          VCon ("Ok", [VString ""])
+        | _ -> eval_error "tls_read(ssl_handle, max_bytes)"))
+
+  (* tls_write(ssl_handle, data) → Ok(Int)|Err(String) *)
+  ; ("tls_write", VBuiltin ("tls_write", function
+        | [VInt _ssl; VString data] ->
+          VCon ("Ok", [VInt (String.length data)])
+        | _ -> eval_error "tls_write(ssl_handle, data)"))
+
+  (* tls_close(ssl_handle) → Unit *)
+  ; ("tls_close", VBuiltin ("tls_close", function
+        | [VInt _ssl] -> VUnit
+        | _ -> eval_error "tls_close(ssl_handle)"))
+
+  (* tls_ctx_free(ctx_handle) → Unit *)
+  ; ("tls_ctx_free", VBuiltin ("tls_ctx_free", function
+        | [VInt _ctx] -> VUnit
+        | _ -> eval_error "tls_ctx_free(ctx_handle)"))
+
+  (* tls_negotiated_alpn(ssl_handle) → Option(String) *)
+  ; ("tls_negotiated_alpn", VBuiltin ("tls_negotiated_alpn", function
+        | [VInt _ssl] -> VCon ("None", [])
+        | _ -> eval_error "tls_negotiated_alpn(ssl_handle)"))
+
+  (* tls_peer_cn(ssl_handle) → Option(String) *)
+  ; ("tls_peer_cn", VBuiltin ("tls_peer_cn", function
+        | [VInt _ssl] -> VCon ("None", [])
+        | _ -> eval_error "tls_peer_cn(ssl_handle)"))
+
   (* ---- Option combinators ---- *)
   ; ("Option.map", VBuiltin ("Option.map", function
         | [VCon ("Some", [v]); f] -> VCon ("Some", [!apply_hook f [v]])

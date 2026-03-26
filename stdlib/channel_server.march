@@ -116,14 +116,18 @@ Must be called from within an actor handler (requires actor runtime).
 fn do_join(cfg, topic, params_json) do
   match cfg do
   | ChannelConfig(socket, join_fn, _, _, _, shard_pid) ->
-    let result = join_fn(topic, params_json, socket)
-    match result do
-    | Ok(st) ->
-      let my_pid = self()
-      PubSub.subscribe_in_shard(shard_pid, topic, my_pid)
-      JoinOk(st)
-    | Err(reason) ->
-      JoinErr(reason)
+    do
+      let result = join_fn(topic, params_json, socket)
+      match result do
+      | Ok(st) ->
+        do
+          let my_pid = self()
+          PubSub.subscribe_in_shard(shard_pid, topic, my_pid)
+          JoinOk(st)
+        end
+      | Err(reason) ->
+        JoinErr(reason)
+      end
     end
   end
 end
@@ -137,10 +141,12 @@ Must be called from within an actor handler (requires actor runtime).
 fn do_leave(cfg, st, reason_str) do
   match cfg do
   | ChannelConfig(socket, _, _, _, leave_fn, shard_pid) ->
-    let my_pid = self()
-    let topic  = Channel.socket_topic(socket)
-    PubSub.unsubscribe_in_shard(shard_pid, topic, my_pid)
-    leave_fn(reason_str, st, socket)
+    do
+      let my_pid = self()
+      let topic  = Channel.socket_topic(socket)
+      PubSub.unsubscribe_in_shard(shard_pid, topic, my_pid)
+      leave_fn(reason_str, st, socket)
+    end
   end
 end
 
@@ -155,19 +161,25 @@ Must be called from within an actor handler (requires actor runtime).
 fn apply_result(cfg, result, ref) do
   match cfg do
   | ChannelConfig(socket, _, _, _, _, _) ->
-    let transport_pid = Channel.socket_transport_pid(socket)
-    let topic         = Channel.socket_topic(socket)
-    let join_ref      = Channel.socket_join_ref(socket)
-    match result do
-    | Reply(status, payload_json, new_st) ->
-      let reply_m = Channel.reply_msg(join_ref, ref, topic, status, payload_json)
-      actor_cast(transport_pid, ChannelPush("phx_reply", Channel.serialize(reply_m)))
-      new_st
-    | NoReply(new_st) ->
-      new_st
-    | Stop(reason, new_st) ->
-      do_leave(cfg, new_st, reason)
-      new_st
+    do
+      let transport_pid = Channel.socket_transport_pid(socket)
+      let topic         = Channel.socket_topic(socket)
+      let join_ref      = Channel.socket_join_ref(socket)
+      match result do
+      | Reply(status, payload_json, new_st) ->
+        do
+          let reply_m = Channel.reply_msg(join_ref, ref, topic, status, payload_json)
+          actor_cast(transport_pid, ChannelPush("phx_reply", Channel.serialize(reply_m)))
+          new_st
+        end
+      | NoReply(new_st) ->
+        new_st
+      | Stop(reason, new_st) ->
+        do
+          do_leave(cfg, new_st, reason)
+          new_st
+        end
+      end
     end
   end
 end
@@ -194,9 +206,11 @@ Must be called from within an actor handler (requires actor runtime).
 fn handle_broadcast_from(cfg, excl_pid, event, payload_json) do
   match cfg do
   | ChannelConfig(socket, _, _, _, _, _) ->
-    let my_pid = self()
-    if my_pid == excl_pid then ()
-    else actor_cast(Channel.socket_transport_pid(socket), ChannelPush(event, payload_json))
+    do
+      let my_pid = self()
+      if my_pid == excl_pid then ()
+      else actor_cast(Channel.socket_transport_pid(socket), ChannelPush(event, payload_json))
+    end
   end
 end
 

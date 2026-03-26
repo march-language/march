@@ -10,9 +10,11 @@ describe "ChannelMailbox constructors" do
     let m = ChannelIn("1", "new_msg", "{\"text\":\"hi\"}")
     match m do
     | ChannelIn(ref, event, payload) ->
-      assert (ref == "1")
-      assert (event == "new_msg")
-      assert (payload == "{\"text\":\"hi\"}")
+      do
+        assert (ref == "1")
+        assert (event == "new_msg")
+        assert (payload == "{\"text\":\"hi\"}")
+      end
     | _ -> assert false
     end
   end
@@ -21,9 +23,11 @@ describe "ChannelMailbox constructors" do
     let m = ChannelBroadcast("room:lobby", "shout", "{}")
     match m do
     | ChannelBroadcast(topic, event, payload) ->
-      assert (topic == "room:lobby")
-      assert (event == "shout")
-      assert (payload == "{}")
+      do
+        assert (topic == "room:lobby")
+        assert (event == "shout")
+        assert (payload == "{}")
+      end
     | _ -> assert false
     end
   end
@@ -32,10 +36,12 @@ describe "ChannelMailbox constructors" do
     let m = ChannelBroadcastFrom("room:lobby", 99, "shout", "{}")
     match m do
     | ChannelBroadcastFrom(topic, excl, event, payload) ->
-      assert (topic == "room:lobby")
-      assert (excl == 99)
-      assert (event == "shout")
-      assert (payload == "{}")
+      do
+        assert (topic == "room:lobby")
+        assert (excl == 99)
+        assert (event == "shout")
+        assert (payload == "{}")
+      end
     | _ -> assert false
     end
   end
@@ -44,8 +50,10 @@ describe "ChannelMailbox constructors" do
     let m = ChannelPush("typing", "{\"is_typing\":true}")
     match m do
     | ChannelPush(event, payload) ->
-      assert (event == "typing")
-      assert (payload == "{\"is_typing\":true}")
+      do
+        assert (event == "typing")
+        assert (payload == "{\"is_typing\":true}")
+      end
     | _ -> assert false
     end
   end

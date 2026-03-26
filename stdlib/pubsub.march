@@ -79,12 +79,14 @@ broadcasts are once-per-pid after deduplication at send time).
 fn subscribe_state(ps, topic, pid) do
   match ps do
   | PubSubState(m) ->
-    let current = match Map.get(m, topic, str_cmp) do
-      | Some(lst) -> lst
-      | None      -> Nil
+    do
+      let current = match Map.get(m, topic, str_cmp) do
+        | Some(lst) -> lst
+        | None      -> Nil
+      end
+      let updated = Cons(pid, current)
+      PubSubState(Map.insert(m, topic, updated, str_cmp))
     end
-    let updated = Cons(pid, current)
-    PubSubState(Map.insert(m, topic, updated, str_cmp))
   end
 end
 
@@ -92,16 +94,18 @@ doc "Unsubscribe `pid` from `topic`.  Removes the first matching entry."
 fn unsubscribe_state(ps, topic, pid) do
   match ps do
   | PubSubState(m) ->
-    let current = match Map.get(m, topic, str_cmp) do
-      | Some(lst) -> lst
-      | None      -> Nil
-    end
-    let trimmed = list_remove_first(current, pid)
-    match trimmed do
-    | Nil ->
-      PubSubState(Map.remove(m, topic, str_cmp))
-    | _ ->
-      PubSubState(Map.insert(m, topic, trimmed, str_cmp))
+    do
+      let current = match Map.get(m, topic, str_cmp) do
+        | Some(lst) -> lst
+        | None      -> Nil
+      end
+      let trimmed = list_remove_first(current, pid)
+      match trimmed do
+      | Nil ->
+        PubSubState(Map.remove(m, topic, str_cmp))
+      | _ ->
+        PubSubState(Map.insert(m, topic, trimmed, str_cmp))
+      end
     end
   end
 end
@@ -153,16 +157,16 @@ Examples:
 fn topic_matches(pattern, topic) do
   let plen = string_byte_length(pattern)
   let tlen = string_byte_length(topic)
-  if plen == 0 then
+  if plen == 0 do
     tlen == 0
-  else do
+  else
     let last_char = string_slice(pattern, plen - 1, 1)
-    if last_char == "*" then do
+    if last_char == "*" do
       let prefix = string_slice(pattern, 0, plen - 1)
       string_starts_with(topic, prefix)
-    end
     else
       pattern == topic
+    end
   end
 end
 
@@ -178,13 +182,15 @@ fn broadcast_to(pids, excluded_pid, event, payload) do
   match pids do
   | Nil -> ()
   | Cons(pid, rest) ->
-    let should_skip = match excluded_pid do
-      | Some(excl) -> pid == excl
-      | None       -> false
+    do
+      let should_skip = match excluded_pid do
+        | Some(excl) -> pid == excl
+        | None       -> false
+      end
+      if should_skip then ()
+      else actor_cast(pid, BroadcastMsg(event, payload))
+      broadcast_to(rest, excluded_pid, event, payload)
     end
-    if should_skip then ()
-    else actor_cast(pid, BroadcastMsg(event, payload))
-    broadcast_to(rest, excluded_pid, event, payload)
   end
 end
 

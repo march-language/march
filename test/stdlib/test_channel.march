@@ -78,9 +78,11 @@ describe "HandleResult constructors" do
     let r = Channel.reply(":ok", "{}", "my_state")
     match r do
     | Reply(status, payload, st) ->
-      assert (status == ":ok")
-      assert (payload == "{}")
-      assert (st == "my_state")
+      do
+        assert (status == ":ok")
+        assert (payload == "{}")
+        assert (st == "my_state")
+      end
     | _ -> assert false
     end
   end
@@ -97,8 +99,10 @@ describe "HandleResult constructors" do
     let r = Channel.stop("unauthorized", "my_state")
     match r do
     | Stop(reason, st) ->
-      assert (reason == "unauthorized")
-      assert (st == "my_state")
+      do
+        assert (reason == "unauthorized")
+        assert (st == "my_state")
+      end
     | _ -> assert false
     end
   end
@@ -199,10 +203,12 @@ describe "Channel.parse" do
     let json = Channel.serialize(m)
     match Channel.parse(json) do
     | Some(m2) ->
-      assert (Channel.msg_join_ref(m2) == "0")
-      assert (Channel.msg_ref(m2) == "7")
-      assert (Channel.msg_topic(m2) == "room:42")
-      assert (Channel.msg_event(m2) == "phx_join")
+      do
+        assert (Channel.msg_join_ref(m2) == "0")
+        assert (Channel.msg_ref(m2) == "7")
+        assert (Channel.msg_topic(m2) == "room:42")
+        assert (Channel.msg_event(m2) == "phx_join")
+      end
     | None -> assert false
     end
   end
