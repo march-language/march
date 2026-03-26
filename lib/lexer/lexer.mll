@@ -33,7 +33,6 @@ let () =
       ("spawn", SPAWN);
       ("state", STATE);
       ("init", INIT);
-      ("respond", RESPOND);
       ("protocol", PROTOCOL);
       ("loop", LOOP);
       ("true", BOOL true);
@@ -44,7 +43,6 @@ let () =
       ("impl", IMPL);
       ("sig", SIG);
       ("extern", EXTERN);
-      ("unsafe", UNSAFE);
       ("as", AS);
       ("use", USE);
       ("needs", NEEDS);
@@ -57,7 +55,6 @@ let () =
       ("one_for_one", ONE_FOR_ONE);
       ("one_for_all", ONE_FOR_ALL);
       ("rest_for_one", REST_FOR_ONE);
-      ("restart", RESTART_KW);
       ("requires", REQUIRES);
       ("import", IMPORT);
       ("alias", ALIAS);

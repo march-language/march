@@ -14,7 +14,7 @@ CAMLprim value march_blake3_hash(value input)
     CAMLparam1(input);
     CAMLlocal1(result);
 
-    const char *data   = Bytes_val(input);
+    const char *data   = (const char *)Bytes_val(input);
     size_t      len    = caml_string_length(input);
     uint8_t     out[BLAKE3_OUT_LEN];
 
@@ -26,7 +26,7 @@ CAMLprim value march_blake3_hash(value input)
     /* Encode as 64-char hex string */
     static const char hex[] = "0123456789abcdef";
     result = caml_alloc_string(BLAKE3_OUT_LEN * 2);
-    char *dst = Bytes_val(result);
+    char *dst = (char *)Bytes_val(result);
     for (int i = 0; i < BLAKE3_OUT_LEN; i++) {
         dst[i * 2]     = hex[(out[i] >> 4) & 0xf];
         dst[i * 2 + 1] = hex[out[i] & 0xf];

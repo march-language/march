@@ -40,9 +40,9 @@ let attr_of_token tok =
   let open March_parser.Parser in
   match tok with
   | FN | LET | DO | END | IF | THEN | ELSE | MATCH | WITH | WHEN
-  | TYPE | MOD | ACTOR | ON | SEND | SPAWN | STATE | INIT | RESPOND
+  | TYPE | MOD | ACTOR | ON | SEND | SPAWN | STATE | INIT
   | PROTOCOL | LOOP | LINEAR | AFFINE | INTERFACE | IMPL | SIG
-  | EXTERN | UNSAFE | AS | USE | BOOL _ -> attr_keyword
+  | EXTERN | AS | USE | BOOL _ -> attr_keyword
   | INT _ | FLOAT _ -> attr_number
   | STRING _ | INTERP_START _ | INTERP_MID _ | INTERP_END _ -> attr_string
   | ATOM _ -> attr_atom

@@ -76,16 +76,16 @@
 %token <string> UPPER_IDENT
 %token FN LET DO END IF THEN ELSE MATCH WITH WHEN
 %token TYPE MOD ACTOR ON SEND SPAWN
-%token STATE INIT RESPOND PROTOCOL LOOP
+%token STATE INIT PROTOCOL LOOP
 %token LINEAR AFFINE
-%token INTERFACE IMPL SIG EXTERN UNSAFE AS USE NEEDS REQUIRES
+%token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES
 %token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE FOR
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
 %token TEST DESCRIBE ASSERT SETUP SETUP_ALL
 %token DBG DOC
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
-%token ONE_FOR_ONE ONE_FOR_ALL REST_FOR_ONE RESTART_KW
+%token ONE_FOR_ONE ONE_FOR_ALL REST_FOR_ONE
 %token <string> INTERP_START
 %token <string> INTERP_MID
 %token <string> INTERP_END
@@ -99,6 +99,22 @@
 %token AND OR BANG
 %token UNDERSCORE QUESTION
 %token EOF
+
+(* Precedence declarations. Listed lowest to highest.
+   Virtual tokens (prec_hole, prec_atom, prec_app) are never emitted by
+   the lexer; they exist solely to annotate grammar rules with %prec so
+   that menhir can resolve shift/reduce conflicts explicitly rather than
+   arbitrarily.
+     prec_hole: bare ? hole; below LOWER_IDENT so ?foo shifts the ident.
+     prec_atom: bare UPPER_IDENT or ATOM; below LPAREN so Foo() shifts (.
+     prec_app:  expr_field pass-through; below LPAREN so f() shifts (. *)
+%nonassoc prec_hole
+%nonassoc LOWER_IDENT
+%nonassoc prec_atom
+%nonassoc EQEQ NEQ LT GT LEQ GEQ
+%left     MINUS
+%nonassoc prec_app
+%nonassoc LPAREN
 
 %start <March_ast.Ast.module_> module_
 %start <March_ast.Ast.expr> expr_eof
@@ -740,7 +756,7 @@ expr_cmp:
   | a = expr_add; GT; b = expr_add { EApp (EVar (mk_name ">" $loc), [a; b], mk_span ($loc)) }
   | a = expr_add; LEQ; b = expr_add { EApp (EVar (mk_name "<=" $loc), [a; b], mk_span ($loc)) }
   | a = expr_add; GEQ; b = expr_add { EApp (EVar (mk_name ">=" $loc), [a; b], mk_span ($loc)) }
-  | e = expr_add { e }
+  | e = expr_add %prec EQEQ { e }
 
 expr_add:
   | a = expr_add; PLUS;     b = expr_mul { EApp (EVar (mk_name "+"  $loc), [a; b], mk_span ($loc)) }
@@ -773,7 +789,7 @@ expr_app:
     { ECon (mk_name con $loc, [], mk_span ($loc)) }
   | con = UPPER_IDENT; LPAREN; args = separated_nonempty_list(COMMA, expr); RPAREN
     { ECon (mk_name con $loc, args, mk_span ($loc)) }
-  | e = expr_field { e }
+  | e = expr_field %prec prec_app { e }
 
 (** Field access: x.name — left-recursive for chained access: x.y.z
     Contextual keywords (send) are allowed as field names to support Chan.send(…). *)
@@ -805,12 +821,15 @@ expr_atom:
   | b = BOOL { ELit (LitBool b, mk_span ($loc)) }
   | a = ATOM; LPAREN; args = separated_list(COMMA, expr); RPAREN
     { EAtom (a, args, mk_span ($loc)) }
-  | a = ATOM
+  | a = ATOM %prec prec_atom
     { EAtom (a, [], mk_span ($loc)) }
   | id = LOWER_IDENT { EVar (mk_name id $loc) }
-  | con = UPPER_IDENT { ECon (mk_name con $loc, [], mk_span ($loc)) }
-  | QUESTION; id = option(LOWER_IDENT)
-    { EHole (Option.map (fun i -> mk_name i $loc) id, mk_span ($loc)) }
+  | con = UPPER_IDENT %prec prec_atom
+    { ECon (mk_name con $loc, [], mk_span ($loc)) }
+  | QUESTION; id = LOWER_IDENT
+    { EHole (Some (mk_name id $loc), mk_span ($loc)) }
+  | QUESTION %prec prec_hole
+    { EHole (None, mk_span ($loc)) }
   | LPAREN; e = expr; RPAREN { e }
   | LPAREN; e = expr; COMMA; es = separated_nonempty_list(COMMA, expr); RPAREN
     { ETuple (e :: es, mk_span ($loc)) }
