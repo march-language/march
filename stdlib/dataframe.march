@@ -8,7 +8,7 @@
 -- Phase 2 : CSV and JSON I/O
 -- Phase 3 : ColExpr, LazyFrame, Plan interpreter
 -- Phase 4 : GroupBy + aggregation (uses Stats module)
--- Phase 5 : inner_join (left/right/outer stubbed)
+-- Phase 5 : inner_join, left_join, right_join, outer_join
 -- Phase 6 : describe, value_counts, col_z_score, col_normalize
 
 mod DataFrame do
@@ -1005,28 +1005,71 @@ fn collect(lf : LazyFrame) : Result(DataFrame, String) do
   match lf do | LazyFrame(plan) -> eval_plan(plan) end
 end
 
-doc "inner_join: adds an inner join step to the pipeline."
+doc """inner_join: keep only rows whose key values appear in both frames.
+
+Only rows where every key column matches in both left and right are
+included in the output. Right key columns are not duplicated.
+
+Example:
+  let lf     = DataFrame.lazy(orders_df)
+               |> DataFrame.inner_join(products_df, ["product_id"])
+  let result = DataFrame.collect(lf)
+  -- Only orders that reference a known product_id are included
+"""
 fn inner_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
   match lf do
   | LazyFrame(plan) -> LazyFrame(Join(plan, Source(right), keys, Inner))
   end
 end
 
-doc "left_join: stubbed until nullable columns are fully supported."
+doc """left_join: keep all rows from the left frame; unmatched right columns get Null.
+
+Rows in the left frame that have no match in the right frame are still
+included, with all right-only columns set to Null (NullableXxxCol).
+Right columns that are join keys are not duplicated.
+
+Example:
+  let lf   = DataFrame.lazy(orders_df)
+             |> DataFrame.left_join(customers_df, ["customer_id"])
+  let result = DataFrame.collect(lf)
+  -- Every order row is present; customer_name is Null for unknown customers
+"""
 fn left_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
   match lf do
   | LazyFrame(plan) -> LazyFrame(Join(plan, Source(right), keys, Left))
   end
 end
 
-doc "right_join: stubbed until nullable columns are fully supported."
+doc """right_join: keep all rows from the right frame; unmatched left columns get Null.
+
+The mirror image of left_join. Every row in `right` appears in the
+output; rows with no match in the left frame get Null for every
+left-only column.
+
+Example:
+  let lf   = DataFrame.lazy(transactions_df)
+             |> DataFrame.right_join(reference_df, ["code"])
+  let result = DataFrame.collect(lf)
+  -- Every reference row is included; transaction cols are Null for unmatched codes
+"""
 fn right_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
   match lf do
   | LazyFrame(plan) -> LazyFrame(Join(plan, Source(right), keys, Right))
   end
 end
 
-doc "outer_join: stubbed until nullable columns are fully supported."
+doc """outer_join: full outer join — keep all rows from both frames, Null-filling unmatched sides.
+
+The union of left_join and right_join: every row from both the left
+and right frames appears in the output. Rows with no match on the other
+side get Null for all columns from that side.
+
+Example:
+  let lf   = DataFrame.lazy(employees_df)
+             |> DataFrame.outer_join(departments_df, ["dept_id"])
+  let result = DataFrame.collect(lf)
+  -- All employees and all departments appear; Nulls where there is no match
+"""
 fn outer_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
   match lf do
   | LazyFrame(plan) -> LazyFrame(Join(plan, Source(right), keys, Outer))
@@ -2004,7 +2047,7 @@ fn value_counts(df : DataFrame, col : String) : Result(DataFrame, String) do
   end
 end
 
--- ── Phase 5: Joins (inner_join complete, others stub) ─────────────────────
+-- ── Phase 5: Joins (all four kinds implemented) ────────────────────────────
 
 fn apply_join(left : DataFrame, right : DataFrame, on_cols : List(String), kind : JoinKind) : Result(DataFrame, String) do
   match kind do
@@ -2395,6 +2438,173 @@ fn col_normalize(col : Column) : Result(Column, String) do
     if range_ == 0.0 then Ok(FloatCol(name, List.repeat(0.0, List.length(xs))))
     else Ok(FloatCol(name, List.map(xs, fn x -> (x -. mn) /. range_)))
   | _ -> Err("col_normalize: column must be IntCol or FloatCol")
+  end
+end
+
+doc """Returns a summary-statistics DataFrame with one row per column.
+
+Columns in the result: "column", "type", "count", "mean", "std",
+"min", "p25", "median", "p75", "max".  Non-numeric columns get
+NullVal for every numeric stat.
+
+Example:
+  let df = DataFrame.make_df([IntCol("x", [1,2,3,4,5])])
+  let d  = DataFrame.summarize(df)
+  -- d has 1 row: column="x", type="Int", count=5, mean=3.0, ...
+"""
+fn summarize(df : DataFrame) : DataFrame do
+  let stats = col_describe(df)
+  let n_stats = List.length(stats)
+  fn opt_val(o : Option(Float)) : Value do
+    match o do | None -> NullVal | Some(f) -> FloatVal(f) end
+  end
+  let rows = List.map(List.range(0, n_stats), fn i -> do
+    let s = List.nth(stats, i)
+    match s do
+    | ColStats(nm, tp, cnt, mean_, std_, mn, p25_, med, p75_, mx) ->
+      Row(Cons(("column",  StrVal(nm)),
+          Cons(("type",    StrVal(tp)),
+          Cons(("count",   IntVal(cnt)),
+          Cons(("mean",    opt_val(mean_)),
+          Cons(("std",     opt_val(std_)),
+          Cons(("min",     opt_val(mn)),
+          Cons(("p25",     opt_val(p25_)),
+          Cons(("median",  opt_val(med)),
+          Cons(("p75",     opt_val(p75_)),
+          Cons(("max",     opt_val(mx)),
+          Nil)))))))))))
+    end
+  end)
+  match from_rows_widen(rows) do
+  | Ok(result_df) -> result_df
+  | Err(_) -> empty()
+  end
+end
+
+doc """Random systematic sample of n rows. Deterministic (no RNG state).
+
+Selects n rows at evenly-spaced positions across the DataFrame.
+Returns the full DataFrame unchanged when n >= row_count(df).
+
+Example:
+  let df  = DataFrame.make_df([IntCol("v", [0,1,2,3,4,5,6,7,8,9])])
+  let s   = DataFrame.sample(df, 3)
+  -- picks rows 0, 3, 6  ->  IntCol("v", [0, 3, 6])
+"""
+fn sample(df : DataFrame, n : Int) : DataFrame do
+  let total = row_count(df)
+  if n <= 0 then match df do | DataFrame(cols) ->
+    DataFrame(List.map(cols, fn c -> filter_col_by_indices(c, Nil)))
+    end
+  else if n >= total then df
+  else do
+    let step = total / n
+    let indices = List.map(List.range(0, n), fn i -> i * step)
+    match df do
+    | DataFrame(cols) ->
+      DataFrame(List.map(cols, fn c -> filter_col_by_indices(c, indices)))
+    end
+  end
+end
+
+doc """Split a DataFrame into (train, test) using the given ratio.
+
+ratio is the fraction of rows placed in the training set (0.0 < ratio < 1.0).
+The first `floor(row_count * ratio)` rows become the training set;
+the remainder become the test set. Row order is preserved.
+
+Example:
+  let (train, test) = DataFrame.train_test_split(df, 0.8)
+  -- 80% of rows → train, 20% → test
+"""
+fn train_test_split(df : DataFrame, ratio : Float) : (DataFrame, DataFrame) do
+  let total = row_count(df)
+  let train_n = float_to_int(int_to_float(total) *. ratio)
+  let train_df = head(df, train_n)
+  let test_df  = slice(df, train_n, total - train_n)
+  (train_df, test_df)
+end
+
+doc """Add a scalar Float to every element of an Int or Float column.
+Returns a FloatCol. Errors on other column types.
+
+Example:
+  let c  = FloatCol("price", [1.0, 2.0, 3.0])
+  let c2 = DataFrame.col_add_float(c, 10.0)  -- Ok(FloatCol("price", [11.0, 12.0, 13.0]))
+"""
+fn col_add_float(col : Column, f : Float) : Result(Column, String) do
+  match col do
+  | FloatCol(name, data) ->
+    Ok(FloatCol(name, List.map(data, fn x -> x +. f)))
+  | IntCol(name, data) ->
+    Ok(FloatCol(name, List.map(data, fn x -> int_to_float(x) +. f)))
+  | _ -> Err("col_add_float: column must be IntCol or FloatCol")
+  end
+end
+
+doc """Multiply every element of an Int or Float column by a scalar Float.
+Returns a FloatCol. Errors on other column types.
+
+Example:
+  let c  = IntCol("qty", [1, 2, 3])
+  let c2 = DataFrame.col_mul_float(c, 2.5)  -- Ok(FloatCol("qty", [2.5, 5.0, 7.5]))
+"""
+fn col_mul_float(col : Column, f : Float) : Result(Column, String) do
+  match col do
+  | FloatCol(name, data) ->
+    Ok(FloatCol(name, List.map(data, fn x -> x *. f)))
+  | IntCol(name, data) ->
+    Ok(FloatCol(name, List.map(data, fn x -> int_to_float(x) *. f)))
+  | _ -> Err("col_mul_float: column must be IntCol or FloatCol")
+  end
+end
+
+doc """Element-wise addition of two numeric columns.
+
+- Int + Int → IntCol (named after col1)
+- Float + Float, Int + Float, Float + Int → FloatCol (named after col1)
+Errors if the columns have different lengths or are non-numeric.
+
+Example:
+  let a   = IntCol("a", [1, 2, 3])
+  let b   = IntCol("b", [10, 20, 30])
+  let sum = DataFrame.col_add_col(a, b)  -- Ok(IntCol("a", [11, 22, 33]))
+"""
+fn col_add_col(col1 : Column, col2 : Column) : Result(Column, String) do
+  let n1 = col_len(col1)
+  let n2 = col_len(col2)
+  if n1 != n2 then
+    Err("col_add_col: columns have different lengths (" ++
+        int_to_string(n1) ++ " vs " ++ int_to_string(n2) ++ ")")
+  else do
+    let name = col_name(col1)
+    match col1 do
+    | IntCol(_, data1) ->
+      match col2 do
+      | IntCol(_, data2) ->
+        let pairs = List.zip(data1, data2)
+        Ok(IntCol(name, List.map(pairs, fn pair ->
+          match pair do | (a, b) -> a + b end)))
+      | FloatCol(_, data2) ->
+        let pairs = List.zip(data1, data2)
+        Ok(FloatCol(name, List.map(pairs, fn pair ->
+          match pair do | (a, b) -> int_to_float(a) +. b end)))
+      | _ -> Err("col_add_col: col2 must be IntCol or FloatCol")
+      end
+    | FloatCol(_, data1) ->
+      match col2 do
+      | FloatCol(_, data2) ->
+        let pairs = List.zip(data1, data2)
+        Ok(FloatCol(name, List.map(pairs, fn pair ->
+          match pair do | (a, b) -> a +. b end)))
+      | IntCol(_, data2) ->
+        let pairs = List.zip(data1, data2)
+        Ok(FloatCol(name, List.map(pairs, fn pair ->
+          match pair do | (a, b) -> a +. int_to_float(b) end)))
+      | _ -> Err("col_add_col: col2 must be IntCol or FloatCol")
+      end
+    | _ -> Err("col_add_col: col1 must be IntCol or FloatCol")
+    end
   end
 end
 
