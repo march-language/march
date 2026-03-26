@@ -8,7 +8,7 @@
 -- Phase 2 : CSV and JSON I/O
 -- Phase 3 : ColExpr, LazyFrame, Plan interpreter
 -- Phase 4 : GroupBy + aggregation (uses Stats module)
--- Phase 5 : inner_join (left/right/outer stubbed)
+-- Phase 5 : inner_join, left_join, right_join, outer_join
 -- Phase 6 : describe, value_counts, col_z_score, col_normalize
 
 mod DataFrame do
@@ -25,16 +25,17 @@ type Value =
   | NullVal
 
 -- Column: typed columnar storage. Each variant holds (name, data [, null_bitmap]).
--- Null bitmap: parallel List(Bool) where true = that row is null.
+-- Data is stored as a contiguous TypedArray for O(1) random access and cache efficiency.
+-- Null bitmap: parallel TypedArray(Bool) where true = that row is null.
 type Column =
-    IntCol(String, List(Int))
-  | FloatCol(String, List(Float))
-  | StrCol(String, List(String))
-  | BoolCol(String, List(Bool))
-  | NullableIntCol(String, List(Int), List(Bool))
-  | NullableFloatCol(String, List(Float), List(Bool))
-  | NullableStrCol(String, List(String), List(Bool))
-  | NullableBoolCol(String, List(Bool), List(Bool))
+    IntCol(String, TypedArray(Int))
+  | FloatCol(String, TypedArray(Float))
+  | StrCol(String, TypedArray(String))
+  | BoolCol(String, TypedArray(Bool))
+  | NullableIntCol(String, TypedArray(Int), TypedArray(Bool))
+  | NullableFloatCol(String, TypedArray(Float), TypedArray(Bool))
+  | NullableStrCol(String, TypedArray(String), TypedArray(Bool))
+  | NullableBoolCol(String, TypedArray(Bool), TypedArray(Bool))
 
 -- Row: a snapshot of one row, as an ordered assoc list. Slow path only.
 type Row = Row(List((String, Value)))
@@ -66,80 +67,110 @@ end
 doc "Returns the length (number of rows) of a column."
 fn col_len(col : Column) : Int do
   match col do
-  IntCol(_, data)         -> List.length(data)
-  FloatCol(_, data)       -> List.length(data)
-  StrCol(_, data)         -> List.length(data)
-  BoolCol(_, data)        -> List.length(data)
-  NullableIntCol(_, data, _)   -> List.length(data)
-  NullableFloatCol(_, data, _) -> List.length(data)
-  NullableStrCol(_, data, _)   -> List.length(data)
-  NullableBoolCol(_, data, _)  -> List.length(data)
+  IntCol(_, data)         -> typed_array_length(data)
+  FloatCol(_, data)       -> typed_array_length(data)
+  StrCol(_, data)         -> typed_array_length(data)
+  BoolCol(_, data)        -> typed_array_length(data)
+  NullableIntCol(_, data, _)   -> typed_array_length(data)
+  NullableFloatCol(_, data, _) -> typed_array_length(data)
+  NullableStrCol(_, data, _)   -> typed_array_length(data)
+  NullableBoolCol(_, data, _)  -> typed_array_length(data)
   end
 end
 
--- Get the i-th value from a column as a Value. O(n) - slow path.
+-- Get the i-th value from a column as a Value. O(1) with contiguous TypedArray.
 fn col_value_at(col : Column, i : Int) : Value do
   match col do
-  IntCol(_, data)   -> IntVal(List.nth(data, i))
-  FloatCol(_, data) -> FloatVal(List.nth(data, i))
-  StrCol(_, data)   -> StrVal(List.nth(data, i))
-  BoolCol(_, data)  -> BoolVal(List.nth(data, i))
+  IntCol(_, data)   -> IntVal(typed_array_get(data, i))
+  FloatCol(_, data) -> FloatVal(typed_array_get(data, i))
+  StrCol(_, data)   -> StrVal(typed_array_get(data, i))
+  BoolCol(_, data)  -> BoolVal(typed_array_get(data, i))
   NullableIntCol(_, data, nulls) ->
-    if List.nth(nulls, i) do NullVal else IntVal(List.nth(data, i)) end
+    if typed_array_get(nulls, i) do NullVal else IntVal(typed_array_get(data, i)) end
   NullableFloatCol(_, data, nulls) ->
-    if List.nth(nulls, i) do NullVal else FloatVal(List.nth(data, i)) end
+    if typed_array_get(nulls, i) do NullVal else FloatVal(typed_array_get(data, i)) end
   NullableStrCol(_, data, nulls) ->
-    if List.nth(nulls, i) do NullVal else StrVal(List.nth(data, i)) end
+    if typed_array_get(nulls, i) do NullVal else StrVal(typed_array_get(data, i)) end
   NullableBoolCol(_, data, nulls) ->
-    if List.nth(nulls, i) do NullVal else BoolVal(List.nth(data, i)) end
+    if typed_array_get(nulls, i) do NullVal else BoolVal(typed_array_get(data, i)) end
   end
 end
 
 -- Convert a column to List(Value). O(n).
 fn col_to_value_list(col : Column) : List(Value) do
   match col do
-  IntCol(_, data)   -> List.map(data, fn x -> IntVal(x))
-  FloatCol(_, data) -> List.map(data, fn x -> FloatVal(x))
-  StrCol(_, data)   -> List.map(data, fn x -> StrVal(x))
-  BoolCol(_, data)  -> List.map(data, fn x -> BoolVal(x))
-  NullableIntCol(_, data, nulls) ->
-    List.zip_with(data, nulls, fn (x, is_null) -> if is_null do NullVal else IntVal(x) end)
-  NullableFloatCol(_, data, nulls) ->
-    List.zip_with(data, nulls, fn (x, is_null) -> if is_null do NullVal else FloatVal(x) end)
-  NullableStrCol(_, data, nulls) ->
-    List.zip_with(data, nulls, fn (x, is_null) -> if is_null do NullVal else StrVal(x) end)
-  NullableBoolCol(_, data, nulls) ->
-    List.zip_with(data, nulls, fn (x, is_null) -> if is_null do NullVal else BoolVal(x) end)
+  IntCol(_, data)   -> List.map(typed_array_to_list(data), fn x -> IntVal(x))
+  FloatCol(_, data) -> List.map(typed_array_to_list(data), fn x -> FloatVal(x))
+  StrCol(_, data)   -> List.map(typed_array_to_list(data), fn x -> StrVal(x))
+  BoolCol(_, data)  -> List.map(typed_array_to_list(data), fn x -> BoolVal(x))
+  NullableIntCol(_, data, nulls) -> do
+    List.zip_with(typed_array_to_list(data), typed_array_to_list(nulls),
+      fn (x, is_null) -> if is_null do NullVal else IntVal(x) end)
+    end
+  NullableFloatCol(_, data, nulls) -> do
+    List.zip_with(typed_array_to_list(data), typed_array_to_list(nulls),
+      fn (x, is_null) -> if is_null do NullVal else FloatVal(x) end)
+    end
+  NullableStrCol(_, data, nulls) -> do
+    List.zip_with(typed_array_to_list(data), typed_array_to_list(nulls),
+      fn (x, is_null) -> if is_null do NullVal else StrVal(x) end)
+    end
+  NullableBoolCol(_, data, nulls) -> do
+    List.zip_with(typed_array_to_list(data), typed_array_to_list(nulls),
+      fn (x, is_null) -> if is_null do NullVal else BoolVal(x) end)
+    end
   end
 end
 
--- Keep only rows whose index is in the (sorted ascending) index list.
+-- Keep only rows whose index is in the index list. O(1) per access with TypedArray.
 fn filter_col_by_indices(col : Column, indices : List(Int)) : Column do
   match col do
   IntCol(name, data) ->
-    IntCol(name, List.map(indices, fn i -> List.nth(data, i)))
+    IntCol(name, typed_array_from_list(List.map(indices, fn i -> typed_array_get(data, i))))
   FloatCol(name, data) ->
-    FloatCol(name, List.map(indices, fn i -> List.nth(data, i)))
+    FloatCol(name, typed_array_from_list(List.map(indices, fn i -> typed_array_get(data, i))))
   StrCol(name, data) ->
-    StrCol(name, List.map(indices, fn i -> List.nth(data, i)))
+    StrCol(name, typed_array_from_list(List.map(indices, fn i -> typed_array_get(data, i))))
   BoolCol(name, data) ->
-    BoolCol(name, List.map(indices, fn i -> List.nth(data, i)))
-  NullableIntCol(name, data, nulls) ->
+    BoolCol(name, typed_array_from_list(List.map(indices, fn i -> typed_array_get(data, i))))
+  NullableIntCol(name, data, nulls) -> do
     NullableIntCol(name,
-      List.map(indices, fn i -> List.nth(data, i)),
-      List.map(indices, fn i -> List.nth(nulls, i)))
-  NullableFloatCol(name, data, nulls) ->
+      typed_array_from_list(List.map(indices, fn i -> typed_array_get(data, i))),
+      typed_array_from_list(List.map(indices, fn i -> typed_array_get(nulls, i))))
+    end
+  NullableFloatCol(name, data, nulls) -> do
     NullableFloatCol(name,
-      List.map(indices, fn i -> List.nth(data, i)),
-      List.map(indices, fn i -> List.nth(nulls, i)))
-  NullableStrCol(name, data, nulls) ->
+      typed_array_from_list(List.map(indices, fn i -> typed_array_get(data, i))),
+      typed_array_from_list(List.map(indices, fn i -> typed_array_get(nulls, i))))
+    end
+  NullableStrCol(name, data, nulls) -> do
     NullableStrCol(name,
-      List.map(indices, fn i -> List.nth(data, i)),
-      List.map(indices, fn i -> List.nth(nulls, i)))
-  NullableBoolCol(name, data, nulls) ->
+      typed_array_from_list(List.map(indices, fn i -> typed_array_get(data, i))),
+      typed_array_from_list(List.map(indices, fn i -> typed_array_get(nulls, i))))
+    end
+  NullableBoolCol(name, data, nulls) -> do
     NullableBoolCol(name,
-      List.map(indices, fn i -> List.nth(data, i)),
-      List.map(indices, fn i -> List.nth(nulls, i)))
+      typed_array_from_list(List.map(indices, fn i -> typed_array_get(data, i))),
+      typed_array_from_list(List.map(indices, fn i -> typed_array_get(nulls, i))))
+    end
+  end
+end
+
+-- Filter a column by a boolean mask TypedArray. Single-pass vectorizable operation.
+fn filter_col_by_mask(col : Column, mask : TypedArray(Bool)) : Column do
+  match col do
+  IntCol(name, data)   -> IntCol(name, typed_array_filter(data, mask))
+  FloatCol(name, data) -> FloatCol(name, typed_array_filter(data, mask))
+  StrCol(name, data)   -> StrCol(name, typed_array_filter(data, mask))
+  BoolCol(name, data)  -> BoolCol(name, typed_array_filter(data, mask))
+  NullableIntCol(name, data, nulls) ->
+    NullableIntCol(name, typed_array_filter(data, mask), typed_array_filter(nulls, mask))
+  NullableFloatCol(name, data, nulls) ->
+    NullableFloatCol(name, typed_array_filter(data, mask), typed_array_filter(nulls, mask))
+  NullableStrCol(name, data, nulls) ->
+    NullableStrCol(name, typed_array_filter(data, mask), typed_array_filter(nulls, mask))
+  NullableBoolCol(name, data, nulls) ->
+    NullableBoolCol(name, typed_array_filter(data, mask), typed_array_filter(nulls, mask))
   end
 end
 
@@ -162,10 +193,10 @@ end
 doc "Returns the number of null entries in a nullable column (0 for non-nullable)."
 fn col_null_count(col : Column) : Int do
   match col do
-  NullableIntCol(_, _, nulls)   -> List.length(List.filter(nulls, fn b -> b))
-  NullableFloatCol(_, _, nulls) -> List.length(List.filter(nulls, fn b -> b))
-  NullableStrCol(_, _, nulls)   -> List.length(List.filter(nulls, fn b -> b))
-  NullableBoolCol(_, _, nulls)  -> List.length(List.filter(nulls, fn b -> b))
+  NullableIntCol(_, _, nulls)   -> typed_array_fold(nulls, 0, fn (acc, b) -> if b do acc + 1 else acc end)
+  NullableFloatCol(_, _, nulls) -> typed_array_fold(nulls, 0, fn (acc, b) -> if b do acc + 1 else acc end)
+  NullableStrCol(_, _, nulls)   -> typed_array_fold(nulls, 0, fn (acc, b) -> if b do acc + 1 else acc end)
+  NullableBoolCol(_, _, nulls)  -> typed_array_fold(nulls, 0, fn (acc, b) -> if b do acc + 1 else acc end)
   _                             -> 0
   end
 end
@@ -173,10 +204,10 @@ end
 doc "Wrap a non-nullable column in a nullable variant (all-false bitmap). No-op on already-nullable columns."
 fn col_to_nullable(col : Column) : Column do
   match col do
-  IntCol(name, data)   -> NullableIntCol(name, data, List.repeat(false, List.length(data)))
-  FloatCol(name, data) -> NullableFloatCol(name, data, List.repeat(false, List.length(data)))
-  StrCol(name, data)   -> NullableStrCol(name, data, List.repeat(false, List.length(data)))
-  BoolCol(name, data)  -> NullableBoolCol(name, data, List.repeat(false, List.length(data)))
+  IntCol(name, data)   -> NullableIntCol(name, data, typed_array_create(typed_array_length(data), false))
+  FloatCol(name, data) -> NullableFloatCol(name, data, typed_array_create(typed_array_length(data), false))
+  StrCol(name, data)   -> NullableStrCol(name, data, typed_array_create(typed_array_length(data), false))
+  BoolCol(name, data)  -> NullableBoolCol(name, data, typed_array_create(typed_array_length(data), false))
   NullableIntCol(_, _, _)   -> col
   NullableFloatCol(_, _, _) -> col
   NullableStrCol(_, _, _)   -> col
@@ -211,30 +242,35 @@ end
 -- Value equality.
 fn values_equal(a : Value, b : Value) : Bool do
   match a do
-  IntVal(x) ->
+  IntVal(x) -> do
     match b do
     IntVal(y) -> x == y
     _ -> false
     end
-  FloatVal(x) ->
+    end
+  FloatVal(x) -> do
     match b do
     FloatVal(y) -> x == y
     _ -> false
     end
-  StrVal(x) ->
+    end
+  StrVal(x) -> do
     match b do
     StrVal(y) -> x == y
     _ -> false
     end
-  BoolVal(x) ->
+    end
+  BoolVal(x) -> do
     match b do
     BoolVal(y) -> x == y
     _ -> false
     end
-  NullVal ->
+    end
+  NullVal -> do
     match b do
     NullVal -> true
     _ -> false
+    end
     end
   end
 end
@@ -242,12 +278,13 @@ end
 -- Compare two values for sort: returns -1, 0, or 1.
 fn compare_values(a : Value, b : Value) : Int do
   match a do
-  NullVal ->
+  NullVal -> do
     match b do
     NullVal -> 0
     _ -> -1
     end
-  IntVal(x) ->
+    end
+  IntVal(x) -> do
     match b do
     IntVal(y) ->
       if x < y do -1 else if x > y do 1 else 0 end end
@@ -258,7 +295,8 @@ fn compare_values(a : Value, b : Value) : Int do
     NullVal -> 1
     _ -> 1
     end
-  FloatVal(x) ->
+    end
+  FloatVal(x) -> do
     match b do
     FloatVal(y) ->
       if x < y do -1 else if x > y do 1 else 0 end end
@@ -269,19 +307,22 @@ fn compare_values(a : Value, b : Value) : Int do
     NullVal -> 1
     _ -> 1
     end
-  StrVal(x) ->
+    end
+  StrVal(x) -> do
     match b do
     StrVal(y) ->
       if x < y do -1 else if x > y do 1 else 0 end end
     NullVal -> 1
     _ -> 1
     end
-  BoolVal(x) ->
+    end
+  BoolVal(x) -> do
     match b do
     BoolVal(y) ->
       if x == y do 0 else if !x do -1 else 1 end end
     NullVal -> 1
     _ -> 1
+    end
     end
   end
 end
@@ -296,7 +337,7 @@ fn value_hash(v : Value) : Int do
     let chars = string_chars(s)
     List.fold_left(5381, chars, fn (h, c) ->
       int_and(int_xor(h * 33, char_to_int(c)), 2147483647))
-  end
+    end
   BoolVal(b) -> if b do 1 else 0 end
   NullVal    -> 0
   end
@@ -305,16 +346,18 @@ end
 -- List(Value) equality (for GroupKey comparison).
 fn values_list_eq(as_ : List(Value), bs : List(Value)) : Bool do
   match as_ do
-  Nil ->
+  Nil -> do
     match bs do
     Nil -> true
     _   -> false
     end
-  Cons(a, at) ->
+    end
+  Cons(a, at) -> do
     match bs do
     Nil -> false
     Cons(b, bt) ->
       if values_equal(a, b) do values_list_eq(at, bt) else false end
+    end
     end
   end
 end
@@ -343,32 +386,36 @@ end
 fn builder_push_strict(b : ColumnBuilder, val : Value) : Result(ColumnBuilder, String) do
   let name = builder_name(b)
   match b do
-  IntBuilder(n, xs) ->
+  IntBuilder(n, xs) -> do
     match val do
     IntVal(x) -> Ok(IntBuilder(n, Cons(x, xs)))
     NullVal   -> Err("from_rows: column '" ++ name ++ "' is Int but got Null")
     _         -> Err("from_rows: column '" ++ name ++ "' is Int but got " ++ value_type_str(val))
     end
-  FloatBuilder(n, xs) ->
+    end
+  FloatBuilder(n, xs) -> do
     match val do
     FloatVal(f) -> Ok(FloatBuilder(n, Cons(f, xs)))
     IntVal(x)   -> Err("from_rows: column '" ++ name ++ "' is Float but got Int (use FloatVal)")
     NullVal     -> Err("from_rows: column '" ++ name ++ "' is Float but got Null")
     _           -> Err("from_rows: column '" ++ name ++ "' is Float but got " ++ value_type_str(val))
     end
-  StrBuilder(n, xs) ->
+    end
+  StrBuilder(n, xs) -> do
     match val do
     StrVal(s) -> Ok(StrBuilder(n, Cons(s, xs)))
     NullVal   -> Err("from_rows: column '" ++ name ++ "' is String but got Null")
     _         -> Err("from_rows: column '" ++ name ++ "' is String but got " ++ value_type_str(val))
     end
-  BoolBuilder(n, xs) ->
+    end
+  BoolBuilder(n, xs) -> do
     match val do
     BoolVal(b) -> Ok(BoolBuilder(n, Cons(b, xs)))
     NullVal    -> Err("from_rows: column '" ++ name ++ "' is Bool but got Null")
     _          -> Err("from_rows: column '" ++ name ++ "' is Bool but got " ++ value_type_str(val))
     end
-  NullBuilder(n, count) ->
+    end
+  NullBuilder(n, count) -> do
     -- First non-null value determines the type; backfill nulls
     match val do
     NullVal     -> Ok(NullBuilder(n, count + 1))
@@ -376,6 +423,7 @@ fn builder_push_strict(b : ColumnBuilder, val : Value) : Result(ColumnBuilder, S
     FloatVal(_) -> Err("from_rows: column '" ++ name ++ "' started as all-null; nullable columns not yet supported in strict mode")
     StrVal(_)   -> Err("from_rows: column '" ++ name ++ "' started as all-null; nullable columns not yet supported in strict mode")
     BoolVal(_)  -> Err("from_rows: column '" ++ name ++ "' started as all-null; nullable columns not yet supported in strict mode")
+    end
     end
   end
 end
@@ -385,7 +433,7 @@ end
 fn builder_push_widen(b : ColumnBuilder, val : Value) : ColumnBuilder do
   let name = builder_name(b)
   match b do
-  IntBuilder(n, xs) ->
+  IntBuilder(n, xs) -> do
     match val do
     IntVal(x) -> IntBuilder(n, Cons(x, xs))
     FloatVal(f) ->
@@ -394,29 +442,35 @@ fn builder_push_widen(b : ColumnBuilder, val : Value) : ColumnBuilder do
     StrVal(s) ->
       -- Widen to String: stringify existing values
       StrBuilder(n, Cons(s, List.map(xs, fn x -> int_to_string(x))))
-    BoolVal(bv) ->
+    BoolVal(bv) -> do
       -- Bool seen after Int: widen to String
-      StrBuilder(n, Cons(if bv do "true" else "false" end,
-                         List.map(xs, fn x -> int_to_string(x))))
+      let s = if bv do "true" else "false" end
+      StrBuilder(n, Cons(s, List.map(xs, fn x -> int_to_string(x))))
+    end
     NullVal ->
       -- Null after Int: keep as Int (null handling deferred)
       IntBuilder(n, Cons(0, xs))
     end
-  FloatBuilder(n, xs) ->
+    end
+  FloatBuilder(n, xs) -> do
     match val do
     FloatVal(f) -> FloatBuilder(n, Cons(f, xs))
     IntVal(x)   -> FloatBuilder(n, Cons(int_to_float(x), xs))
     StrVal(s)   -> StrBuilder(n, Cons(s, List.map(xs, fn x -> float_to_string(x))))
-    BoolVal(bv) -> StrBuilder(n, Cons(if bv do "true" else "false" end,
-                                        List.map(xs, fn x -> float_to_string(x))))
+    BoolVal(bv) -> do
+      let s = if bv do "true" else "false" end
+      StrBuilder(n, Cons(s, List.map(xs, fn x -> float_to_string(x))))
+    end
     NullVal -> FloatBuilder(n, Cons(0.0, xs))
     end
-  StrBuilder(n, xs) ->
+    end
+  StrBuilder(n, xs) -> do
     match val do
     StrVal(s) -> StrBuilder(n, Cons(s, xs))
     _         -> StrBuilder(n, Cons(value_to_string(val), xs))
     end
-  BoolBuilder(n, xs) ->
+    end
+  BoolBuilder(n, xs) -> do
     match val do
     BoolVal(b) -> BoolBuilder(n, Cons(b, xs))
     IntVal(x)  -> IntBuilder(n, Cons(x, List.map(xs, fn b -> if b do 1 else 0 end)))
@@ -424,7 +478,8 @@ fn builder_push_widen(b : ColumnBuilder, val : Value) : ColumnBuilder do
     StrVal(s)  -> StrBuilder(n, Cons(s, List.map(xs, fn b -> if b do "true" else "false" end)))
     NullVal    -> BoolBuilder(n, Cons(false, xs))
     end
-  NullBuilder(n, count) ->
+    end
+  NullBuilder(n, count) -> do
     match val do
     NullVal     -> NullBuilder(n, count + 1)
     IntVal(x)   -> IntBuilder(n, Cons(x, List.repeat(0, count)))
@@ -432,17 +487,18 @@ fn builder_push_widen(b : ColumnBuilder, val : Value) : ColumnBuilder do
     StrVal(s)   -> StrBuilder(n, Cons(s, List.repeat("", count)))
     BoolVal(b)  -> BoolBuilder(n, Cons(b, List.repeat(false, count)))
     end
+    end
   end
 end
 
 -- Finalize a builder into a Column.
 fn builder_to_column(b : ColumnBuilder) : Column do
   match b do
-  IntBuilder(name, xs)   -> IntCol(name, List.reverse(xs))
-  FloatBuilder(name, xs) -> FloatCol(name, List.reverse(xs))
-  StrBuilder(name, xs)   -> StrCol(name, List.reverse(xs))
-  BoolBuilder(name, xs)  -> BoolCol(name, List.reverse(xs))
-  NullBuilder(name, n)   -> StrCol(name, List.repeat("", n))
+  IntBuilder(name, xs)   -> IntCol(name, typed_array_from_list(List.reverse(xs)))
+  FloatBuilder(name, xs) -> FloatCol(name, typed_array_from_list(List.reverse(xs)))
+  StrBuilder(name, xs)   -> StrCol(name, typed_array_from_list(List.reverse(xs)))
+  BoolBuilder(name, xs)  -> BoolCol(name, typed_array_from_list(List.reverse(xs)))
+  NullBuilder(name, n)   -> StrCol(name, typed_array_create(n, ""))
   end
 end
 
@@ -480,7 +536,7 @@ fn from_columns(cols : List(Column)) : Result(DataFrame, String) do
           ++ int_to_string(col_len(c)) ++ ", expected " ++ int_to_string(expected))
     None -> Ok(DataFrame(cols))
     end
-  end
+    end
   end
 end
 
@@ -499,21 +555,7 @@ fn from_rows(rows : List(Row)) : Result(DataFrame, String) do
       match pair do
       (name, val) -> make_builder(name, val)
       end)
-    -- Push first row's values into builders (they define the types)
-    let after_first =
-      List.fold_left(Ok(init_builders), first_pairs, fn (acc, pair) ->
-        match acc do
-        Err(e) -> Err(e)
-        Ok(builders) ->
-          match pair do
-          (_, val) ->
-            -- Builders already initialized from first row; we need to push
-            -- values into them. But we already have make_builder which creates
-            -- a zero-element builder. We need to push all first-row values now.
-            Ok(builders)
-          end
-        end)
-    -- Actually: make_builder creates empty builders. Push first row into them.
+    -- Push first row's values into builders.
     let push_first =
       List.fold_left(Ok(Nil), List.zip(init_builders, first_pairs), fn (acc, pair) ->
         match acc do
@@ -531,7 +573,7 @@ fn from_rows(rows : List(Row)) : Result(DataFrame, String) do
     Err(e) -> Err(e)
     Ok(builders_after_first) -> do
       -- Process remaining rows
-      fn process_rows(remaining, builders) do
+      fn process_rows(remaining : List(Row), builders : List(ColumnBuilder)) : Result(List(Column), String) do
         match remaining do
         Nil ->
           Ok(List.map(builders, fn b -> builder_to_column(b)))
@@ -541,7 +583,7 @@ fn from_rows(rows : List(Row)) : Result(DataFrame, String) do
           if n_cols != n_vals do
             Err("from_rows: row has " ++ int_to_string(n_vals)
                 ++ " values but schema has " ++ int_to_string(n_cols) ++ " columns")
-          else do
+          else
             let zipped = List.zip(builders, pairs)
             let updated =
               List.fold_left(Ok(Nil), zipped, fn (acc, pair) ->
@@ -560,7 +602,6 @@ fn from_rows(rows : List(Row)) : Result(DataFrame, String) do
             Err(e) -> Err(e)
             Ok(new_builders) -> process_rows(more, new_builders)
             end
-          end
           end
         end
         end
@@ -597,7 +638,7 @@ fn from_rows_widen(rows : List(Row)) : Result(DataFrame, String) do
     match push_first do
     Err(e) -> Err(e)
     Ok(builders_after_first) -> do
-      fn process_rows(remaining, builders) do
+      fn process_rows(remaining : List(Row), builders : List(ColumnBuilder)) : Result(List(Column), String) do
         match remaining do
         Nil -> Ok(List.map(builders, fn b -> builder_to_column(b)))
         Cons(Row(pairs), more) -> do
@@ -606,13 +647,12 @@ fn from_rows_widen(rows : List(Row)) : Result(DataFrame, String) do
           if n_cols != n_vals do
             Err("from_rows_widen: row has " ++ int_to_string(n_vals)
                 ++ " values but schema has " ++ int_to_string(n_cols))
-          else do
+          else
             let new_builders = List.map(List.zip(builders, pairs), fn pair ->
               match pair do
               (b, (_, val)) -> builder_push_widen(b, val)
               end)
             process_rows(more, new_builders)
-          end
           end
         end
         end
@@ -622,7 +662,7 @@ fn from_rows_widen(rows : List(Row)) : Result(DataFrame, String) do
       Ok(cols) -> Ok(DataFrame(cols))
       end
     end
-  end
+    end
   end
   end
 end
@@ -656,10 +696,11 @@ end
 doc "Returns the column with the given name, or Err if not found."
 fn get_column(df : DataFrame, name : String) : Result(Column, String) do
   match df do
-  DataFrame(cols) ->
+  DataFrame(cols) -> do
     match List.find(cols, fn c -> col_name(c) == name) do
     None    -> Err("DataFrame: no column named '" ++ name ++ "'")
     Some(c) -> Ok(c)
+    end
     end
   end
 end
@@ -668,10 +709,11 @@ doc "Returns the Int data list for a named column, or Err."
 fn get_int_col(df : DataFrame, name : String) : Result(List(Int), String) do
   match get_column(df, name) do
   Err(e) -> Err(e)
-  Ok(col) ->
+  Ok(col) -> do
     match col do
-    IntCol(_, data) -> Ok(data)
+    IntCol(_, data) -> Ok(typed_array_to_list(data))
     _ -> Err("DataFrame: column '" ++ name ++ "' is not IntCol")
+    end
     end
   end
 end
@@ -680,10 +722,11 @@ doc "Returns the Float data list for a named column, or Err."
 fn get_float_col(df : DataFrame, name : String) : Result(List(Float), String) do
   match get_column(df, name) do
   Err(e) -> Err(e)
-  Ok(col) ->
+  Ok(col) -> do
     match col do
-    FloatCol(_, data) -> Ok(data)
+    FloatCol(_, data) -> Ok(typed_array_to_list(data))
     _ -> Err("DataFrame: column '" ++ name ++ "' is not FloatCol")
+    end
     end
   end
 end
@@ -692,10 +735,11 @@ doc "Returns the String data list for a named column, or Err."
 fn get_string_col(df : DataFrame, name : String) : Result(List(String), String) do
   match get_column(df, name) do
   Err(e) -> Err(e)
-  Ok(col) ->
+  Ok(col) -> do
     match col do
-    StrCol(_, data) -> Ok(data)
+    StrCol(_, data) -> Ok(typed_array_to_list(data))
     _ -> Err("DataFrame: column '" ++ name ++ "' is not StrCol")
+    end
     end
   end
 end
@@ -704,10 +748,11 @@ doc "Returns the Bool data list for a named column, or Err."
 fn get_bool_col(df : DataFrame, name : String) : Result(List(Bool), String) do
   match get_column(df, name) do
   Err(e) -> Err(e)
-  Ok(col) ->
+  Ok(col) -> do
     match col do
-    BoolCol(_, data) -> Ok(data)
+    BoolCol(_, data) -> Ok(typed_array_to_list(data))
     _ -> Err("DataFrame: column '" ++ name ++ "' is not BoolCol")
+    end
     end
   end
 end
@@ -716,11 +761,12 @@ doc "Returns a column as List(Float) for use with Stats functions. Int columns a
 fn float_list(df : DataFrame, name : String) : Result(List(Float), String) do
   match get_column(df, name) do
   Err(e) -> Err(e)
-  Ok(col) ->
+  Ok(col) -> do
     match col do
-    FloatCol(_, data) -> Ok(data)
-    IntCol(_, data)   -> Ok(List.map(data, fn x -> int_to_float(x)))
+    FloatCol(_, data) -> Ok(typed_array_to_list(data))
+    IntCol(_, data)   -> Ok(List.map(typed_array_to_list(data), fn x -> int_to_float(x)))
     _ -> Err("DataFrame: column '" ++ name ++ "' cannot be converted to Float")
+    end
     end
   end
 end
@@ -738,7 +784,7 @@ end
 doc "Returns all rows as a list of Row values. O(rows × cols). Slow path."
 fn to_rows(df : DataFrame) : List(Row) do
   let n = row_count(df)
-  fn go(i, acc) do
+  fn go(i : Int, acc : List(Row)) : List(Row) do
     if i < 0 do acc else go(i - 1, Cons(get_row(df, i), acc)) end
   end
   go(n - 1, Nil)
@@ -747,9 +793,10 @@ end
 doc "Look up a field in a Row by name. Returns None if not found."
 fn row_get(row : Row, name : String) : Option(Value) do
   match row do
-  Row(pairs) ->
+  Row(pairs) -> do
     List.find_index(pairs, fn pair -> match pair do (k, _) -> k == name end)
     |> Option.map(fn i -> match List.nth(pairs, i) do (_, v) -> v end)
+    end
   end
 end
 
@@ -757,10 +804,11 @@ doc "Look up an Int field in a Row."
 fn row_get_int(row : Row, name : String) : Option(Int) do
   match row_get(row, name) do
   None -> None
-  Some(v) ->
+  Some(v) -> do
     match v do
     IntVal(n) -> Some(n)
     _ -> None
+    end
     end
   end
 end
@@ -769,11 +817,12 @@ doc "Look up a Float field in a Row. Int values are promoted to Float."
 fn row_get_float(row : Row, name : String) : Option(Float) do
   match row_get(row, name) do
   None -> None
-  Some(v) ->
+  Some(v) -> do
     match v do
     FloatVal(f) -> Some(f)
     IntVal(n)   -> Some(int_to_float(n))
     _ -> None
+    end
     end
   end
 end
@@ -782,10 +831,11 @@ doc "Look up a String field in a Row."
 fn row_get_string(row : Row, name : String) : Option(String) do
   match row_get(row, name) do
   None -> None
-  Some(v) ->
+  Some(v) -> do
     match v do
     StrVal(s) -> Some(s)
     _ -> None
+    end
     end
   end
 end
@@ -794,10 +844,11 @@ doc "Look up a Bool field in a Row."
 fn row_get_bool(row : Row, name : String) : Option(Bool) do
   match row_get(row, name) do
   None -> None
-  Some(v) ->
+  Some(v) -> do
     match v do
     BoolVal(b) -> Some(b)
     _ -> None
+    end
     end
   end
 end
@@ -811,15 +862,14 @@ fn add_column(df : DataFrame, col : Column) : Result(DataFrame, String) do
     let n = row_count(df)
     let new_len = col_len(col)
     let exists = List.any(cols, fn c -> col_name(c) == col_name(col))
-    if exists do
+    if exists then
       Err("DataFrame.add_column: column '" ++ col_name(col) ++ "' already exists")
-    else if n > 0 && new_len != n do
+    else if n > 0 && new_len != n then
       Err("DataFrame.add_column: column has length " ++ int_to_string(new_len)
           ++ ", expected " ++ int_to_string(n))
     else
       Ok(DataFrame(List.append(cols, Cons(col, Nil))))
-    end end
-  end
+    end
   end
 end
 
@@ -837,15 +887,14 @@ fn rename_column(df : DataFrame, old_name : String, new_name : String) : Result(
   DataFrame(cols) -> do
     let found = List.any(cols, fn c -> col_name(c) == old_name)
     let clash = List.any(cols, fn c -> col_name(c) == new_name)
-    if !found do
+    if !found then
       Err("DataFrame.rename_column: column '" ++ old_name ++ "' not found")
-    else if clash do
+    else if clash then
       Err("DataFrame.rename_column: column '" ++ new_name ++ "' already exists")
     else
       Ok(DataFrame(List.map(cols, fn c ->
         if col_name(c) == old_name do rename_col(c, new_name) else c end)))
-    end end
-  end
+    end
   end
 end
 
@@ -864,7 +913,7 @@ end
 
 doc "Returns a DataFrame with columns reordered/selected by name list. Errors on missing names."
 fn select_columns(df : DataFrame, names : List(String)) : Result(DataFrame, String) do
-  fn find_col(name) do
+  fn find_col(name : String) : Result(Column, String) do
     get_column(df, name)
   end
   let results = List.map(names, fn name -> find_col(name))
@@ -875,7 +924,7 @@ fn select_columns(df : DataFrame, names : List(String)) : Result(DataFrame, Stri
     let cols = List.filter_map(results, fn r ->
       match r do Ok(c) -> Some(c) | _ -> None end)
     Ok(DataFrame(cols))
-  end
+    end
   end
 end
 
@@ -1032,28 +1081,71 @@ fn collect(lf : LazyFrame) : Result(DataFrame, String) do
   match lf do LazyFrame(plan) -> eval_plan(plan) end
 end
 
-doc "inner_join: adds an inner join step to the pipeline."
+doc """inner_join: keep only rows whose key values appear in both frames.
+
+Only rows where every key column matches in both left and right are
+included in the output. Right key columns are not duplicated.
+
+Example:
+  let lf     = DataFrame.lazy(orders_df)
+               |> DataFrame.inner_join(products_df, ["product_id"])
+  let result = DataFrame.collect(lf)
+  -- Only orders that reference a known product_id are included
+"""
 fn inner_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
   match lf do
   LazyFrame(plan) -> LazyFrame(Join(plan, Source(right), keys, Inner))
   end
 end
 
-doc "left_join: stubbed until nullable columns are fully supported."
+doc """left_join: keep all rows from the left frame; unmatched right columns get Null.
+
+Rows in the left frame that have no match in the right frame are still
+included, with all right-only columns set to Null (NullableXxxCol).
+Right columns that are join keys are not duplicated.
+
+Example:
+  let lf   = DataFrame.lazy(orders_df)
+             |> DataFrame.left_join(customers_df, ["customer_id"])
+  let result = DataFrame.collect(lf)
+  -- Every order row is present; customer_name is Null for unknown customers
+"""
 fn left_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
   match lf do
   LazyFrame(plan) -> LazyFrame(Join(plan, Source(right), keys, Left))
   end
 end
 
-doc "right_join: stubbed until nullable columns are fully supported."
+doc """right_join: keep all rows from the right frame; unmatched left columns get Null.
+
+The mirror image of left_join. Every row in `right` appears in the
+output; rows with no match in the left frame get Null for every
+left-only column.
+
+Example:
+  let lf   = DataFrame.lazy(transactions_df)
+             |> DataFrame.right_join(reference_df, ["code"])
+  let result = DataFrame.collect(lf)
+  -- Every reference row is included; transaction cols are Null for unmatched codes
+"""
 fn right_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
   match lf do
   LazyFrame(plan) -> LazyFrame(Join(plan, Source(right), keys, Right))
   end
 end
 
-doc "outer_join: stubbed until nullable columns are fully supported."
+doc """outer_join: full outer join — keep all rows from both frames, Null-filling unmatched sides.
+
+The union of left_join and right_join: every row from both the left
+and right frames appears in the output. Rows with no match on the other
+side get Null for all columns from that side.
+
+Example:
+  let lf   = DataFrame.lazy(employees_df)
+             |> DataFrame.outer_join(departments_df, ["dept_id"])
+  let result = DataFrame.collect(lf)
+  -- All employees and all departments appear; Nulls where there is no match
+"""
 fn outer_join(lf : LazyFrame, right : DataFrame, keys : List(String)) : LazyFrame do
   match lf do
   LazyFrame(plan) -> LazyFrame(Join(plan, Source(right), keys, Outer))
@@ -1067,55 +1159,63 @@ fn eval_plan(plan : Plan) : Result(DataFrame, String) do
   match plan do
   Source(df) -> Ok(df)
 
-  Select(child, cols) ->
+  Select(child, cols) -> do
     match eval_plan(child) do
     Err(e) -> Err(e)
     Ok(df) -> select_columns(df, cols)
     end
 
-  Filter(child, expr) ->
+    end
+  Filter(child, expr) -> do
     match eval_plan(child) do
     Err(e) -> Err(e)
     Ok(df) -> apply_filter(df, expr)
     end
 
-  WithColumn(child, name, f) ->
+    end
+  WithColumn(child, name, f) -> do
     match eval_plan(child) do
     Err(e) -> Err(e)
     Ok(df) -> apply_with_column(df, name, f)
     end
 
-  SortBy(child, keys) ->
+    end
+  SortBy(child, keys) -> do
     match eval_plan(child) do
     Err(e) -> Err(e)
     Ok(df) -> apply_sort(df, keys)
     end
 
-  Limit(child, n) ->
+    end
+  Limit(child, n) -> do
     match eval_plan(child) do
     Err(e) -> Err(e)
     Ok(df) -> Ok(head(df, n))
     end
 
-  Offset(child, n) ->
+    end
+  Offset(child, n) -> do
     match eval_plan(child) do
     Err(e) -> Err(e)
     Ok(df) -> Ok(drop_rows(df, n))
     end
 
-  Rename(child, old_name, new_name) ->
+    end
+  Rename(child, old_name, new_name) -> do
     match eval_plan(child) do
     Err(e) -> Err(e)
     Ok(df) -> rename_column(df, old_name, new_name)
     end
 
-  DropCols(child, cols) ->
+    end
+  DropCols(child, cols) -> do
     match eval_plan(child) do
     Err(e) -> Err(e)
     Ok(df) -> Ok(List.fold_left(df, cols, fn (d, c) -> drop_column(d, c)))
     end
 
-  Join(left_plan, right_plan, on_cols, kind) ->
+    end
+  Join(left_plan, right_plan, on_cols, kind) -> do
     match eval_plan(left_plan) do
     Err(e) -> Err(e)
     Ok(ldf) ->
@@ -1123,6 +1223,7 @@ fn eval_plan(plan : Plan) : Result(DataFrame, String) do
       Err(e) -> Err(e)
       Ok(rdf) -> apply_join(ldf, rdf, on_cols, kind)
       end
+    end
     end
   end
 end
@@ -1136,12 +1237,12 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
   let n = row_count(df)
   match expr do
   Col(name) -> get_column(df, name)
-  LitInt(x)  -> Ok(IntCol("_lit", List.repeat(x, n)))
-  LitFloat(f) -> Ok(FloatCol("_lit", List.repeat(f, n)))
-  LitStr(s)   -> Ok(StrCol("_lit", List.repeat(s, n)))
-  LitBool(b)  -> Ok(BoolCol("_lit", List.repeat(b, n)))
+  LitInt(x)  -> Ok(IntCol("_lit", typed_array_create(n, x)))
+  LitFloat(f) -> Ok(FloatCol("_lit", typed_array_create(n, f)))
+  LitStr(s)   -> Ok(StrCol("_lit", typed_array_create(n, s)))
+  LitBool(b)  -> Ok(BoolCol("_lit", typed_array_create(n, b)))
 
-  Eq(l, r) ->
+  Eq(l, r) -> do
     match eval_col_expr(df, l) do
     Err(e) -> Err(e)
     Ok(lcol) ->
@@ -1153,12 +1254,12 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
         let pairs = List.zip(lvals, rvals)
         let mask = List.map(pairs, fn pair ->
           match pair do (lv, rv) -> compare_values(lv, rv) == 0 end)
-        Ok(BoolCol("_cmp", mask))
+        Ok(BoolCol("_cmp", typed_array_from_list(mask)))
       end
       end
     end
-
-  Neq(l, r) ->
+    end
+  Neq(l, r) -> do
     match eval_col_expr(df, l) do
     Err(e) -> Err(e)
     Ok(lcol) ->
@@ -1170,12 +1271,12 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
         let pairs = List.zip(lvals, rvals)
         let mask = List.map(pairs, fn pair ->
           match pair do (lv, rv) -> compare_values(lv, rv) != 0 end)
-        Ok(BoolCol("_cmp", mask))
+        Ok(BoolCol("_cmp", typed_array_from_list(mask)))
       end
       end
     end
-
-  Lt(l, r) ->
+    end
+  Lt(l, r) -> do
     match eval_col_expr(df, l) do
     Err(e) -> Err(e)
     Ok(lcol) ->
@@ -1187,12 +1288,12 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
         let pairs = List.zip(lvals, rvals)
         let mask = List.map(pairs, fn pair ->
           match pair do (lv, rv) -> compare_values(lv, rv) < 0 end)
-        Ok(BoolCol("_cmp", mask))
+        Ok(BoolCol("_cmp", typed_array_from_list(mask)))
       end
       end
     end
-
-  Lte(l, r) ->
+    end
+  Lte(l, r) -> do
     match eval_col_expr(df, l) do
     Err(e) -> Err(e)
     Ok(lcol) ->
@@ -1204,12 +1305,12 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
         let pairs = List.zip(lvals, rvals)
         let mask = List.map(pairs, fn pair ->
           match pair do (lv, rv) -> compare_values(lv, rv) <= 0 end)
-        Ok(BoolCol("_cmp", mask))
+        Ok(BoolCol("_cmp", typed_array_from_list(mask)))
       end
       end
     end
-
-  Gt(l, r) ->
+    end
+  Gt(l, r) -> do
     match eval_col_expr(df, l) do
     Err(e) -> Err(e)
     Ok(lcol) ->
@@ -1221,12 +1322,12 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
         let pairs = List.zip(lvals, rvals)
         let mask = List.map(pairs, fn pair ->
           match pair do (lv, rv) -> compare_values(lv, rv) > 0 end)
-        Ok(BoolCol("_cmp", mask))
+        Ok(BoolCol("_cmp", typed_array_from_list(mask)))
       end
       end
     end
-
-  Gte(l, r) ->
+    end
+  Gte(l, r) -> do
     match eval_col_expr(df, l) do
     Err(e) -> Err(e)
     Ok(lcol) ->
@@ -1238,12 +1339,12 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
         let pairs = List.zip(lvals, rvals)
         let mask = List.map(pairs, fn pair ->
           match pair do (lv, rv) -> compare_values(lv, rv) >= 0 end)
-        Ok(BoolCol("_cmp", mask))
+        Ok(BoolCol("_cmp", typed_array_from_list(mask)))
       end
       end
     end
-
-  And(l, r) ->
+    end
+  And(l, r) -> do
     match eval_col_expr(df, l) do
     Err(e) -> Err(e)
     Ok(lcol) ->
@@ -1254,10 +1355,10 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
         BoolCol(_, ldata) ->
           match rcol do
           BoolCol(_, rdata) -> do
-            let pairs = List.zip(ldata, rdata)
+            let pairs = List.zip(typed_array_to_list(ldata), typed_array_to_list(rdata))
             let result = List.map(pairs, fn pair ->
               match pair do (a, b) -> a && b end)
-            Ok(BoolCol("_bool", result))
+            Ok(BoolCol("_bool", typed_array_from_list(result)))
           end
           _ -> Err("And: right side must produce a Bool column")
           end
@@ -1265,8 +1366,8 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
         end
       end
     end
-
-  Or(l, r) ->
+    end
+  Or(l, r) -> do
     match eval_col_expr(df, l) do
     Err(e) -> Err(e)
     Ok(lcol) ->
@@ -1277,10 +1378,10 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
         BoolCol(_, ldata) ->
           match rcol do
           BoolCol(_, rdata) -> do
-            let pairs = List.zip(ldata, rdata)
+            let pairs = List.zip(typed_array_to_list(ldata), typed_array_to_list(rdata))
             let result = List.map(pairs, fn pair ->
               match pair do (a, b) -> a || b end)
-            Ok(BoolCol("_bool", result))
+            Ok(BoolCol("_bool", typed_array_from_list(result)))
           end
           _ -> Err("Or: right side must produce a Bool column")
           end
@@ -1288,18 +1389,19 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
         end
       end
     end
-
-  Not(inner) ->
+    end
+  Not(inner) -> do
     match eval_col_expr(df, inner) do
     Err(e) -> Err(e)
     Ok(col) ->
       match col do
-      BoolCol(_, data) -> Ok(BoolCol("_not", List.map(data, fn b -> !b)))
+      BoolCol(_, data) -> Ok(BoolCol("_not", typed_array_map(data, fn b -> !b)))
       _ -> Err("Not: expression must produce a Bool column")
       end
     end
 
-  Add(l, r) ->
+    end
+  Add(l, r) -> do
     match eval_col_expr(df, l) do
     Err(e) -> Err(e)
     Ok(lcol) ->
@@ -1308,58 +1410,36 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
       Ok(rcol) -> do
         let lvals = col_to_value_list(lcol)
         let rvals = col_to_value_list(rcol)
-        let has_float = List.any(lvals, fn v -> match v do
-                                                    FloatVal(_) -> true
-                                                    _ -> false
-                                                    end)
-                     || List.any(rvals, fn v -> match v do
-                                                    FloatVal(_) -> true
-                                                    _ -> false
-                                                    end)
-        if has_float do do
+        let has_float = List.any(lvals, fn v -> match v do FloatVal(_) -> true | _ -> false end)
+                     || List.any(rvals, fn v -> match v do FloatVal(_) -> true | _ -> false end)
+        if has_float do
           let pairs = List.zip(lvals, rvals)
           let result = List.map(pairs, fn pair ->
             match pair do
             (lv, rv) -> do
-              let lf = match lv do
-                           FloatVal(f) -> f
-                           IntVal(x) -> int_to_float(x)
-                           _ -> 0.0
-                           end
-              let rf = match rv do
-                           FloatVal(f) -> f
-                           IntVal(x) -> int_to_float(x)
-                           _ -> 0.0
-                           end
+              let lf = match lv do FloatVal(f) -> f | IntVal(x) -> int_to_float(x) | _ -> 0.0 end
+              let rf = match rv do FloatVal(f) -> f | IntVal(x) -> int_to_float(x) | _ -> 0.0 end
               lf +. rf
             end
             end)
-          Ok(FloatCol("_arith", result))
-        end
-        else do
+          Ok(FloatCol("_arith", typed_array_from_list(result)))
+        else
           let pairs = List.zip(lvals, rvals)
           let result = List.map(pairs, fn pair ->
             match pair do
             (lv, rv) -> do
-              let li = match lv do
-                           IntVal(x) -> x
-                           _ -> 0
-                           end
-              let ri = match rv do
-                           IntVal(x) -> x
-                           _ -> 0
-                           end
+              let li = match lv do IntVal(x) -> x | _ -> 0 end
+              let ri = match rv do IntVal(x) -> x | _ -> 0 end
               li + ri
             end
             end)
-          Ok(IntCol("_arith", result))
-        end
+          Ok(IntCol("_arith", typed_array_from_list(result)))
         end
       end
       end
     end
-
-  Sub(l, r) ->
+    end
+  Sub(l, r) -> do
     match eval_col_expr(df, l) do
     Err(e) -> Err(e)
     Ok(lcol) ->
@@ -1368,58 +1448,36 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
       Ok(rcol) -> do
         let lvals = col_to_value_list(lcol)
         let rvals = col_to_value_list(rcol)
-        let has_float = List.any(lvals, fn v -> match v do
-                                                    FloatVal(_) -> true
-                                                    _ -> false
-                                                    end)
-                     || List.any(rvals, fn v -> match v do
-                                                    FloatVal(_) -> true
-                                                    _ -> false
-                                                    end)
-        if has_float do do
+        let has_float = List.any(lvals, fn v -> match v do FloatVal(_) -> true | _ -> false end)
+                     || List.any(rvals, fn v -> match v do FloatVal(_) -> true | _ -> false end)
+        if has_float do
           let pairs = List.zip(lvals, rvals)
           let result = List.map(pairs, fn pair ->
             match pair do
             (lv, rv) -> do
-              let lf = match lv do
-                           FloatVal(f) -> f
-                           IntVal(x) -> int_to_float(x)
-                           _ -> 0.0
-                           end
-              let rf = match rv do
-                           FloatVal(f) -> f
-                           IntVal(x) -> int_to_float(x)
-                           _ -> 0.0
-                           end
+              let lf = match lv do FloatVal(f) -> f | IntVal(x) -> int_to_float(x) | _ -> 0.0 end
+              let rf = match rv do FloatVal(f) -> f | IntVal(x) -> int_to_float(x) | _ -> 0.0 end
               lf -. rf
             end
             end)
-          Ok(FloatCol("_arith", result))
-        end
-        else do
+          Ok(FloatCol("_arith", typed_array_from_list(result)))
+        else
           let pairs = List.zip(lvals, rvals)
           let result = List.map(pairs, fn pair ->
             match pair do
             (lv, rv) -> do
-              let li = match lv do
-                           IntVal(x) -> x
-                           _ -> 0
-                           end
-              let ri = match rv do
-                           IntVal(x) -> x
-                           _ -> 0
-                           end
+              let li = match lv do IntVal(x) -> x | _ -> 0 end
+              let ri = match rv do IntVal(x) -> x | _ -> 0 end
               li - ri
             end
             end)
-          Ok(IntCol("_arith", result))
-        end
+          Ok(IntCol("_arith", typed_array_from_list(result)))
         end
       end
       end
     end
-
-  Mul(l, r) ->
+    end
+  Mul(l, r) -> do
     match eval_col_expr(df, l) do
     Err(e) -> Err(e)
     Ok(lcol) ->
@@ -1428,58 +1486,36 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
       Ok(rcol) -> do
         let lvals = col_to_value_list(lcol)
         let rvals = col_to_value_list(rcol)
-        let has_float = List.any(lvals, fn v -> match v do
-                                                    FloatVal(_) -> true
-                                                    _ -> false
-                                                    end)
-                     || List.any(rvals, fn v -> match v do
-                                                    FloatVal(_) -> true
-                                                    _ -> false
-                                                    end)
-        if has_float do do
+        let has_float = List.any(lvals, fn v -> match v do FloatVal(_) -> true | _ -> false end)
+                     || List.any(rvals, fn v -> match v do FloatVal(_) -> true | _ -> false end)
+        if has_float do
           let pairs = List.zip(lvals, rvals)
           let result = List.map(pairs, fn pair ->
             match pair do
             (lv, rv) -> do
-              let lf = match lv do
-                           FloatVal(f) -> f
-                           IntVal(x) -> int_to_float(x)
-                           _ -> 0.0
-                           end
-              let rf = match rv do
-                           FloatVal(f) -> f
-                           IntVal(x) -> int_to_float(x)
-                           _ -> 0.0
-                           end
+              let lf = match lv do FloatVal(f) -> f | IntVal(x) -> int_to_float(x) | _ -> 0.0 end
+              let rf = match rv do FloatVal(f) -> f | IntVal(x) -> int_to_float(x) | _ -> 0.0 end
               lf *. rf
             end
             end)
-          Ok(FloatCol("_arith", result))
-        end
-        else do
+          Ok(FloatCol("_arith", typed_array_from_list(result)))
+        else
           let pairs = List.zip(lvals, rvals)
           let result = List.map(pairs, fn pair ->
             match pair do
             (lv, rv) -> do
-              let li = match lv do
-                           IntVal(x) -> x
-                           _ -> 0
-                           end
-              let ri = match rv do
-                           IntVal(x) -> x
-                           _ -> 0
-                           end
+              let li = match lv do IntVal(x) -> x | _ -> 0 end
+              let ri = match rv do IntVal(x) -> x | _ -> 0 end
               li * ri
             end
             end)
-          Ok(IntCol("_arith", result))
-        end
+          Ok(IntCol("_arith", typed_array_from_list(result)))
         end
       end
       end
     end
-
-  Div(l, r) ->
+    end
+  Div(l, r) -> do
     match eval_col_expr(df, l) do
     Err(e) -> Err(e)
     Ok(lcol) ->
@@ -1492,58 +1528,53 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
         let result = List.map(pairs, fn pair ->
           match pair do
           (lv, rv) -> do
-            let lf = match lv do
-                         FloatVal(f) -> f
-                         IntVal(x) -> int_to_float(x)
-                         _ -> 0.0
-                         end
-            let rf = match rv do
-                         FloatVal(f) -> f
-                         IntVal(x) -> int_to_float(x)
-                         _ -> 1.0
-                         end
+            let lf = match lv do FloatVal(f) -> f | IntVal(x) -> int_to_float(x) | _ -> 0.0 end
+            let rf = match rv do FloatVal(f) -> f | IntVal(x) -> int_to_float(x) | _ -> 1.0 end
             lf /. rf
           end
           end)
-        Ok(FloatCol("_arith", result))
+        Ok(FloatCol("_arith", typed_array_from_list(result)))
       end
       end
     end
-
-  StrContains(inner, pat) ->
+    end
+  StrContains(inner, pat) -> do
     match eval_col_expr(df, inner) do
     Err(e) -> Err(e)
     Ok(col) ->
       match col do
       StrCol(_, data) ->
-        Ok(BoolCol("_contains", List.map(data, fn s -> string_contains(s, pat))))
+        Ok(BoolCol("_contains", typed_array_from_list(List.map(typed_array_to_list(data), fn s -> string_contains(s, pat)))))
       _ -> Err("StrContains: expression must produce a String column")
       end
     end
 
-  StrStartsWith(inner, pat) ->
+    end
+  StrStartsWith(inner, pat) -> do
     match eval_col_expr(df, inner) do
     Err(e) -> Err(e)
     Ok(col) ->
       match col do
       StrCol(_, data) ->
-        Ok(BoolCol("_starts", List.map(data, fn s -> string_starts_with(s, pat))))
+        Ok(BoolCol("_starts", typed_array_from_list(List.map(typed_array_to_list(data), fn s -> string_starts_with(s, pat)))))
       _ -> Err("StrStartsWith: expression must produce a String column")
       end
     end
 
-  StrEndsWith(inner, pat) ->
+    end
+  StrEndsWith(inner, pat) -> do
     match eval_col_expr(df, inner) do
     Err(e) -> Err(e)
     Ok(col) ->
       match col do
       StrCol(_, data) ->
-        Ok(BoolCol("_ends", List.map(data, fn s -> string_ends_with(s, pat))))
+        Ok(BoolCol("_ends", typed_array_from_list(List.map(typed_array_to_list(data), fn s -> string_ends_with(s, pat)))))
       _ -> Err("StrEndsWith: expression must produce a String column")
       end
     end
 
-  IsNull(inner) ->
+    end
+  IsNull(inner) -> do
     match eval_col_expr(df, inner) do
     Err(e) -> Err(e)
     Ok(col) ->
@@ -1552,23 +1583,25 @@ fn eval_col_expr(df : DataFrame, expr : ColExpr) : Result(Column, String) do
       NullableFloatCol(_, _, nulls) -> Ok(BoolCol("_isnull", nulls))
       NullableStrCol(_, _, nulls)   -> Ok(BoolCol("_isnull", nulls))
       NullableBoolCol(_, _, nulls)  -> Ok(BoolCol("_isnull", nulls))
-      _ -> Ok(BoolCol("_isnull", List.repeat(false, col_len(col))))
+      _ -> Ok(BoolCol("_isnull", typed_array_create(col_len(col), false)))
       end
     end
 
-  IsNotNull(inner) ->
+    end
+  IsNotNull(inner) -> do
     match eval_col_expr(df, inner) do
     Err(e) -> Err(e)
     Ok(col) ->
       match col do
-      NullableIntCol(_, _, nulls)   -> Ok(BoolCol("_isnotnull", List.map(nulls, fn b -> !b)))
-      NullableFloatCol(_, _, nulls) -> Ok(BoolCol("_isnotnull", List.map(nulls, fn b -> !b)))
-      NullableStrCol(_, _, nulls)   -> Ok(BoolCol("_isnotnull", List.map(nulls, fn b -> !b)))
-      NullableBoolCol(_, _, nulls)  -> Ok(BoolCol("_isnotnull", List.map(nulls, fn b -> !b)))
-      _ -> Ok(BoolCol("_isnotnull", List.repeat(true, col_len(col))))
+      NullableIntCol(_, _, nulls)   -> Ok(BoolCol("_isnotnull", typed_array_map(nulls, fn b -> !b)))
+      NullableFloatCol(_, _, nulls) -> Ok(BoolCol("_isnotnull", typed_array_map(nulls, fn b -> !b)))
+      NullableStrCol(_, _, nulls)   -> Ok(BoolCol("_isnotnull", typed_array_map(nulls, fn b -> !b)))
+      NullableBoolCol(_, _, nulls)  -> Ok(BoolCol("_isnotnull", typed_array_map(nulls, fn b -> !b)))
+      _ -> Ok(BoolCol("_isnotnull", typed_array_create(col_len(col), true)))
       end
     end
 
+    end
   end
 end
 
@@ -1577,22 +1610,15 @@ end
 fn apply_filter(df : DataFrame, expr : ColExpr) : Result(DataFrame, String) do
   match eval_col_expr(df, expr) do
   Err(e) -> Err(e)
-  Ok(mask_col) ->
+  Ok(mask_col) -> do
     match mask_col do
-    BoolCol(_, mask) -> do
-      -- Build kept-index list from boolean mask
-      let indexed = List.enumerate(mask)
-      let kept = List.filter_map(indexed, fn pair ->
-        match pair do
-        (i, true)  -> Some(i)
-        (_, false) -> None
-        end)
+    BoolCol(_, mask) ->
       match df do
       DataFrame(cols) ->
-        Ok(DataFrame(List.map(cols, fn c -> filter_col_by_indices(c, kept))))
+        Ok(DataFrame(List.map(cols, fn c -> filter_col_by_mask(c, mask))))
       end
-    end
     _ -> Err("filter: ColExpr must evaluate to a Bool column")
+    end
     end
   end
 end
@@ -1601,12 +1627,12 @@ end
 
 fn apply_with_column(df : DataFrame, name : String, f : Row -> Value) : Result(DataFrame, String) do
   let n = row_count(df)
-  fn build_values(i, acc) do
+  fn build_values(i : Int, acc : List(Value)) : List(Value) do
     if i >= n do List.reverse(acc)
-    else do
+    else
       let row = get_row(df, i)
       build_values(i + 1, Cons(f(row), acc))
-    end end
+    end
   end
   let values = build_values(0, Nil)
   match values_to_column(name, values) do
@@ -1614,19 +1640,19 @@ fn apply_with_column(df : DataFrame, name : String, f : Row -> Value) : Result(D
   Ok(new_col) -> do
     let df2 = drop_column(df, name)
     add_column(df2, new_col)
-  end
+    end
   end
 end
 
 -- Convert a List(Value) to a typed Column using widening inference.
 fn values_to_column(name : String, values : List(Value)) : Result(Column, String) do
   match values do
-  Nil -> Ok(StrCol(name, Nil))
+  Nil -> Ok(StrCol(name, typed_array_create(0, "")))
   _ -> do
     let builder = List.fold_left(NullBuilder(name, 0), values, fn (b, v) ->
       builder_push_widen(b, v))
     Ok(builder_to_column(builder))
-  end
+    end
   end
 end
 
@@ -1635,7 +1661,7 @@ end
 fn apply_sort(df : DataFrame, keys : List((String, SortDir))) : Result(DataFrame, String) do
   let n = row_count(df)
   let indices = List.range(0, n)
-  let cmp = fn (a, b) ->
+  let cmp = fn (a : Int, b : Int) ->
     compare_rows_by_keys(df, a, b, keys) < 0
   let sorted_indices = List.sort_by(indices, cmp)
   match df do
@@ -1655,7 +1681,9 @@ fn compare_rows_by_keys(df : DataFrame, i : Int, j : Int, keys : List((String, S
       Asc  -> raw_cmp
       Desc -> -1 * raw_cmp
       end
-    if adjusted != 0 do adjusted else compare_rows_by_keys(df, i, j, rest) end
+    if adjusted != 0 do adjusted
+    else compare_rows_by_keys(df, i, j, rest)
+    end
   end
   end
 end
@@ -1703,7 +1731,7 @@ fn from_csv_string(s : String) : Result(DataFrame, String) do
         end))
     end)
     from_rows_widen(rows)
-  end
+    end
   end
 end
 
@@ -1712,15 +1740,15 @@ fn parse_cell(s : String) : Value do
   if string_is_empty(s) do NullVal
   else match string_to_int(s) do
   Some(n) -> IntVal(n)
-  None ->
+  None -> do
     match string_to_float(s) do
     Some(f) -> FloatVal(f)
     None ->
       if s == "true" || s == "True" || s == "TRUE" do BoolVal(true)
       else if s == "false" || s == "False" || s == "FALSE" do BoolVal(false)
       else StrVal(s)
-      end
-      end
+      end end
+    end
     end
   end
   end
@@ -1743,7 +1771,7 @@ fn to_csv_string_opts(df : DataFrame, opts : CsvWriteOpts) : String do
         data_rows_to_strings(df, delim, quote)
       end
     string_join(lines, "\n")
-  end
+    end
   end
 end
 
@@ -1782,10 +1810,11 @@ doc "Parse a JSON string (array of objects) into a DataFrame."
 fn from_json_string(s : String) : Result(DataFrame, String) do
   match Json.parse(s) do
   Err(e) -> Err("DataFrame.from_json_string: JSON parse error: " ++ e)
-  Ok(jv) ->
+  Ok(jv) -> do
     match jv do
     Array(items) -> json_array_to_df(items)
     _ -> Err("DataFrame.from_json_string: expected a JSON array of objects")
+    end
     end
   end
 end
@@ -1819,7 +1848,7 @@ fn json_value_to_value(jv : JsonValue) : Value do
   Number(f) -> do
     let i = float_to_int(f)
     if int_to_float(i) == f do IntVal(i) else FloatVal(f) end
-  end
+    end
   JsonValue.Str(s) -> StrVal(s)
   _                -> StrVal(Json.to_string(jv))
   end
@@ -1872,17 +1901,19 @@ type GroupKey = GroupKey(List(Value))
 -- Polynomial hash combining per-Value hashes.
 fn group_key_hash(gk : GroupKey) : Int do
   match gk do
-  GroupKey(vals) ->
+  GroupKey(vals) -> do
     List.fold_left(2166136261, vals, fn (h, v) ->
       int_and(int_xor(h * 16777619, value_hash(v)), 2147483647))
+    end
   end
 end
 
 fn group_key_eq(a : GroupKey, b : GroupKey) : Bool do
   match a do
-  GroupKey(av) ->
+  GroupKey(av) -> do
     match b do
     GroupKey(bv) -> values_list_eq(av, bv)
+    end
     end
   end
 end
@@ -1951,10 +1982,7 @@ end
 fn apply_group_by(df : DataFrame, group_cols : List(String), agg_exprs : List(AggExpr)) : Result(DataFrame, String) do
   -- Step 1: Validate group columns exist
   let bad_col = List.find(group_cols, fn name ->
-    match get_column(df, name) do
-        Err(_) -> true
-        Ok(_) -> false
-        end)
+    match get_column(df, name) do Err(_) -> true | Ok(_) -> false end)
   match bad_col do
   Some(name) -> Err("group_by: column '" ++ name ++ "' not found")
   None -> do
@@ -1988,7 +2016,7 @@ fn apply_group_by(df : DataFrame, group_cols : List(String), agg_exprs : List(Ag
       end
       end)
     from_rows_widen(result_rows)
-  end
+    end
   end
 end
 
@@ -2009,7 +2037,7 @@ fn eval_agg_exprs(sub_df : DataFrame, exprs : List(AggExpr), group_cols : List(S
       let out_name = agg_output_name(expr, List.append(group_cols, seen_names))
       let val = eval_agg(sub_df, expr, out_name)
       go(rest, Cons(out_name, seen_names), Cons((out_name, val), acc))
-    end
+      end
     end
   end
   go(exprs, Nil, Nil)
@@ -2019,13 +2047,14 @@ fn eval_agg(sub_df : DataFrame, expr : AggExpr, _out_name : String) : Value do
   match expr do
   Count -> IntVal(row_count(sub_df))
 
-  Sum(col_name_) ->
+  Sum(col_name_) -> do
     match float_list(sub_df, col_name_) do
     Err(_) -> NullVal
     Ok(xs) -> FloatVal(Stats.sum(xs))
     end
 
-  Mean(col_name_) ->
+    end
+  Mean(col_name_) -> do
     match float_list(sub_df, col_name_) do
     Err(_) -> NullVal
     Ok(xs) ->
@@ -2035,7 +2064,8 @@ fn eval_agg(sub_df : DataFrame, expr : AggExpr, _out_name : String) : Value do
       end
     end
 
-  Min(col_name_) ->
+    end
+  Min(col_name_) -> do
     match float_list(sub_df, col_name_) do
     Err(_) -> NullVal
     Ok(xs) ->
@@ -2045,7 +2075,8 @@ fn eval_agg(sub_df : DataFrame, expr : AggExpr, _out_name : String) : Value do
       end
     end
 
-  Max(col_name_) ->
+    end
+  Max(col_name_) -> do
     match float_list(sub_df, col_name_) do
     Err(_) -> NullVal
     Ok(xs) ->
@@ -2055,7 +2086,8 @@ fn eval_agg(sub_df : DataFrame, expr : AggExpr, _out_name : String) : Value do
       end
     end
 
-  Std(col_name_) ->
+    end
+  Std(col_name_) -> do
     match float_list(sub_df, col_name_) do
     Err(_) -> NullVal
     Ok(xs) ->
@@ -2065,7 +2097,8 @@ fn eval_agg(sub_df : DataFrame, expr : AggExpr, _out_name : String) : Value do
       end
     end
 
-  Variance(col_name_) ->
+    end
+  Variance(col_name_) -> do
     match float_list(sub_df, col_name_) do
     Err(_) -> NullVal
     Ok(xs) ->
@@ -2075,37 +2108,36 @@ fn eval_agg(sub_df : DataFrame, expr : AggExpr, _out_name : String) : Value do
       end
     end
 
-  Median(col_name_) ->
+    end
+  Median(col_name_) -> do
     match float_list(sub_df, col_name_) do
     Err(_) -> NullVal
     Ok(xs) -> FloatVal(Stats.median(xs))
     end
 
+    end
   First(col_name_) ->
     if row_count(sub_df) == 0 do NullVal
     else col_value_at_by_name(sub_df, col_name_, 0)
     end
-
   Last(col_name_) -> do
     let n = row_count(sub_df)
     if n == 0 do NullVal
     else col_value_at_by_name(sub_df, col_name_, n - 1)
     end
-  end
-
-  CountDistinct(col_name_) ->
+    end
+  CountDistinct(col_name_) -> do
     match get_column(sub_df, col_name_) do
     Err(_) -> NullVal
     Ok(col) -> do
       let vals = col_to_value_list(col)
       let unique = List.fold_left(Nil, vals, fn (acc, v) ->
         if List.any(acc, fn u -> values_equal(u, v)) do acc
-        else Cons(v, acc)
-        end)
+        else Cons(v, acc) end)
       IntVal(List.length(unique))
     end
     end
-
+    end
   AggAs(inner, agg_alias) -> eval_agg(sub_df, inner, agg_alias)
   end
 end
@@ -2146,11 +2178,11 @@ fn value_counts(df : DataFrame, col : String) : Result(DataFrame, String) do
         Row(Cons((col, StrVal(k)), Cons(("count", IntVal(cnt)), Nil)))
       end)
     from_rows_widen(result_rows)
-  end
+    end
   end
 end
 
--- ── Phase 5: Joins (inner_join complete, others stub) ─────────────────────
+-- ── Phase 5: Joins (all four kinds implemented) ────────────────────────────
 
 fn apply_join(left : DataFrame, right : DataFrame, on_cols : List(String), kind : JoinKind) : Result(DataFrame, String) do
   match kind do
@@ -2165,110 +2197,56 @@ end
 pfn col_from_idx_opts(col : Column, idx_opts : List(Option(Int))) : Column do
   match col do
   IntCol(name, data) -> do
-    let vals = List.map(idx_opts, fn opt -> match opt do
-                                                None -> 0
-                                                Some(i) -> List.nth(data, i)
-                                                end)
-    let nulls = List.map(idx_opts, fn opt -> match opt do
-                                                 None -> true
-                                                 Some(_) -> false
-                                                 end)
-    NullableIntCol(name, vals, nulls)
-  end
+    let vals = List.map(idx_opts, fn opt -> match opt do None -> 0 | Some(i) -> typed_array_get(data, i) end)
+    let nulls = List.map(idx_opts, fn opt -> match opt do None -> true | Some(_) -> false end)
+    NullableIntCol(name, typed_array_from_list(vals), typed_array_from_list(nulls))
+    end
   FloatCol(name, data) -> do
-    let vals = List.map(idx_opts, fn opt -> match opt do
-                                                None -> 0.0
-                                                Some(i) -> List.nth(data, i)
-                                                end)
-    let nulls = List.map(idx_opts, fn opt -> match opt do
-                                                 None -> true
-                                                 Some(_) -> false
-                                                 end)
-    NullableFloatCol(name, vals, nulls)
-  end
+    let vals = List.map(idx_opts, fn opt -> match opt do None -> 0.0 | Some(i) -> typed_array_get(data, i) end)
+    let nulls = List.map(idx_opts, fn opt -> match opt do None -> true | Some(_) -> false end)
+    NullableFloatCol(name, typed_array_from_list(vals), typed_array_from_list(nulls))
+    end
   StrCol(name, data) -> do
-    let vals = List.map(idx_opts, fn opt -> match opt do
-                                                None -> ""
-                                                Some(i) -> List.nth(data, i)
-                                                end)
-    let nulls = List.map(idx_opts, fn opt -> match opt do
-                                                 None -> true
-                                                 Some(_) -> false
-                                                 end)
-    NullableStrCol(name, vals, nulls)
-  end
+    let vals = List.map(idx_opts, fn opt -> match opt do None -> "" | Some(i) -> typed_array_get(data, i) end)
+    let nulls = List.map(idx_opts, fn opt -> match opt do None -> true | Some(_) -> false end)
+    NullableStrCol(name, typed_array_from_list(vals), typed_array_from_list(nulls))
+    end
   BoolCol(name, data) -> do
-    let vals = List.map(idx_opts, fn opt -> match opt do
-                                                None -> false
-                                                Some(i) -> List.nth(data, i)
-                                                end)
-    let nulls = List.map(idx_opts, fn opt -> match opt do
-                                                 None -> true
-                                                 Some(_) -> false
-                                                 end)
-    NullableBoolCol(name, vals, nulls)
-  end
+    let vals = List.map(idx_opts, fn opt -> match opt do None -> false | Some(i) -> typed_array_get(data, i) end)
+    let nulls = List.map(idx_opts, fn opt -> match opt do None -> true | Some(_) -> false end)
+    NullableBoolCol(name, typed_array_from_list(vals), typed_array_from_list(nulls))
+    end
   NullableIntCol(name, data, col_nulls) -> do
-    let vals = List.map(idx_opts, fn opt -> match opt do
-                                                None -> 0
-                                                Some(i) -> List.nth(data, i)
-                                                end)
-    let nulls = List.map(idx_opts, fn opt -> match opt do
-                                                 None -> true
-                                                 Some(i) -> List.nth(col_nulls, i)
-                                                 end)
-    NullableIntCol(name, vals, nulls)
-  end
+    let vals = List.map(idx_opts, fn opt -> match opt do None -> 0 | Some(i) -> typed_array_get(data, i) end)
+    let nulls = List.map(idx_opts, fn opt -> match opt do None -> true | Some(i) -> typed_array_get(col_nulls, i) end)
+    NullableIntCol(name, typed_array_from_list(vals), typed_array_from_list(nulls))
+    end
   NullableFloatCol(name, data, col_nulls) -> do
-    let vals = List.map(idx_opts, fn opt -> match opt do
-                                                None -> 0.0
-                                                Some(i) -> List.nth(data, i)
-                                                end)
-    let nulls = List.map(idx_opts, fn opt -> match opt do
-                                                 None -> true
-                                                 Some(i) -> List.nth(col_nulls, i)
-                                                 end)
-    NullableFloatCol(name, vals, nulls)
-  end
+    let vals = List.map(idx_opts, fn opt -> match opt do None -> 0.0 | Some(i) -> typed_array_get(data, i) end)
+    let nulls = List.map(idx_opts, fn opt -> match opt do None -> true | Some(i) -> typed_array_get(col_nulls, i) end)
+    NullableFloatCol(name, typed_array_from_list(vals), typed_array_from_list(nulls))
+    end
   NullableStrCol(name, data, col_nulls) -> do
-    let vals = List.map(idx_opts, fn opt -> match opt do
-                                                None -> ""
-                                                Some(i) -> List.nth(data, i)
-                                                end)
-    let nulls = List.map(idx_opts, fn opt -> match opt do
-                                                 None -> true
-                                                 Some(i) -> List.nth(col_nulls, i)
-                                                 end)
-    NullableStrCol(name, vals, nulls)
-  end
+    let vals = List.map(idx_opts, fn opt -> match opt do None -> "" | Some(i) -> typed_array_get(data, i) end)
+    let nulls = List.map(idx_opts, fn opt -> match opt do None -> true | Some(i) -> typed_array_get(col_nulls, i) end)
+    NullableStrCol(name, typed_array_from_list(vals), typed_array_from_list(nulls))
+    end
   NullableBoolCol(name, data, col_nulls) -> do
-    let vals = List.map(idx_opts, fn opt -> match opt do
-                                                None -> false
-                                                Some(i) -> List.nth(data, i)
-                                                end)
-    let nulls = List.map(idx_opts, fn opt -> match opt do
-                                                 None -> true
-                                                 Some(i) -> List.nth(col_nulls, i)
-                                                 end)
-    NullableBoolCol(name, vals, nulls)
-  end
+    let vals = List.map(idx_opts, fn opt -> match opt do None -> false | Some(i) -> typed_array_get(data, i) end)
+    let nulls = List.map(idx_opts, fn opt -> match opt do None -> true | Some(i) -> typed_array_get(col_nulls, i) end)
+    NullableBoolCol(name, typed_array_from_list(vals), typed_array_from_list(nulls))
+    end
   end
 end
 
 fn apply_left_join(left : DataFrame, right : DataFrame, on_cols : List(String)) : Result(DataFrame, String) do
   let bad_left = List.find(on_cols, fn name ->
-    match get_column(left, name) do
-        Err(_) -> true
-        Ok(_) -> false
-        end)
+    match get_column(left, name) do Err(_) -> true | Ok(_) -> false end)
   match bad_left do
   Some(name) -> Err("left_join: key column '" ++ name ++ "' not found in left frame")
   None -> do
     let bad_right = List.find(on_cols, fn name ->
-      match get_column(right, name) do
-          Err(_) -> true
-          Ok(_) -> false
-          end)
+      match get_column(right, name) do Err(_) -> true | Ok(_) -> false end)
     match bad_right do
     Some(name) -> Err("left_join: key column '" ++ name ++ "' not found in right frame")
     None -> do
@@ -2319,8 +2297,7 @@ fn apply_left_join(left : DataFrame, right : DataFrame, on_cols : List(String)) 
       let right_result_cols = List.filter_map(right_cols, fn col ->
         if List.any(right_only_names, fn n -> n == col_name(col)) do
           Some(col_from_idx_opts(col, right_idx_opts))
-        else None
-        end)
+        else None end)
       Ok(DataFrame(List.append(left_result_cols, right_result_cols)))
     end
     end
@@ -2330,18 +2307,12 @@ end
 
 fn apply_right_join(left : DataFrame, right : DataFrame, on_cols : List(String)) : Result(DataFrame, String) do
   let bad_left = List.find(on_cols, fn name ->
-    match get_column(left, name) do
-        Err(_) -> true
-        Ok(_) -> false
-        end)
+    match get_column(left, name) do Err(_) -> true | Ok(_) -> false end)
   match bad_left do
   Some(name) -> Err("right_join: key column '" ++ name ++ "' not found in left frame")
   None -> do
     let bad_right = List.find(on_cols, fn name ->
-      match get_column(right, name) do
-          Err(_) -> true
-          Ok(_) -> false
-          end)
+      match get_column(right, name) do Err(_) -> true | Ok(_) -> false end)
     match bad_right do
     Some(name) -> Err("right_join: key column '" ++ name ++ "' not found in right frame")
     None -> do
@@ -2389,8 +2360,7 @@ fn apply_right_join(left : DataFrame, right : DataFrame, on_cols : List(String))
       let left_result_cols = List.filter_map(left_cols, fn col ->
         if List.any(left_only_names, fn n -> n == col_name(col)) do
           Some(col_from_idx_opts(col, left_idx_opts))
-        else None
-        end)
+        else None end)
       let right_cols = match right do DataFrame(cs) -> cs end
       let right_result_cols = List.map(right_cols, fn col ->
         filter_col_by_indices(col, right_idxs))
@@ -2403,18 +2373,12 @@ end
 
 fn apply_outer_join(left : DataFrame, right : DataFrame, on_cols : List(String)) : Result(DataFrame, String) do
   let bad_left = List.find(on_cols, fn name ->
-    match get_column(left, name) do
-        Err(_) -> true
-        Ok(_) -> false
-        end)
+    match get_column(left, name) do Err(_) -> true | Ok(_) -> false end)
   match bad_left do
   Some(name) -> Err("outer_join: key column '" ++ name ++ "' not found in left frame")
   None -> do
     let bad_right = List.find(on_cols, fn name ->
-      match get_column(right, name) do
-          Err(_) -> true
-          Ok(_) -> false
-          end)
+      match get_column(right, name) do Err(_) -> true | Ok(_) -> false end)
     match bad_right do
     Some(name) -> Err("outer_join: key column '" ++ name ++ "' not found in right frame")
     None -> do
@@ -2459,8 +2423,7 @@ fn apply_outer_join(left : DataFrame, right : DataFrame, on_cols : List(String))
         if i >= r_n do List.reverse(acc)
         else if List.any(matched_rights, fn m -> m == i) do collect_unmatched(i + 1, acc)
         else collect_unmatched(i + 1, Cons(i, acc))
-        end
-        end
+        end end
       end
       let unmatched_rights = collect_unmatched(0, Nil)
       let right_extra_pairs = List.map(unmatched_rights, fn j -> (None, Some(j)))
@@ -2477,8 +2440,7 @@ fn apply_outer_join(left : DataFrame, right : DataFrame, on_cols : List(String))
       let right_result_cols = List.filter_map(right_cols, fn col ->
         if List.any(right_only_names, fn n -> n == col_name(col)) do
           Some(col_from_idx_opts(col, right_idx_opts))
-        else None
-        end)
+        else None end)
       Ok(DataFrame(List.append(left_result_cols, right_result_cols)))
     end
     end
@@ -2489,18 +2451,12 @@ end
 fn apply_inner_join(left : DataFrame, right : DataFrame, on_cols : List(String)) : Result(DataFrame, String) do
   -- Validate on_cols exist in both
   let bad_left = List.find(on_cols, fn name ->
-    match get_column(left, name) do
-        Err(_) -> true
-        Ok(_) -> false
-        end)
+    match get_column(left, name) do Err(_) -> true | Ok(_) -> false end)
   match bad_left do
   Some(name) -> Err("inner_join: key column '" ++ name ++ "' not found in left frame")
   None -> do
     let bad_right = List.find(on_cols, fn name ->
-      match get_column(right, name) do
-          Err(_) -> true
-          Ok(_) -> false
-          end)
+      match get_column(right, name) do Err(_) -> true | Ok(_) -> false end)
     match bad_right do
     Some(name) -> Err("inner_join: key column '" ++ name ++ "' not found in right frame")
     None -> do
@@ -2536,7 +2492,8 @@ fn apply_inner_join(left : DataFrame, right : DataFrame, on_cols : List(String))
             Some(xs) -> xs
             end
           let left_row = get_row(left, i)
-          let new_rows = List.map(matching_right_indices, fn j -> do
+          let new_rows = List.map(matching_right_indices, fn j ->
+            do
             let right_row = get_row(right, j)
             -- Merge: all left columns + right-only columns
             let right_extra_pairs = List.filter_map(
@@ -2545,12 +2502,11 @@ fn apply_inner_join(left : DataFrame, right : DataFrame, on_cols : List(String))
                 match pair do
                 (k, v) ->
                   if List.any(right_only_names, fn n -> n == k) do Some((k, v))
-                  else None
-                  end
+                  else None end
                 end)
             let left_pairs = match left_row do Row(pairs) -> pairs end
             Row(List.append(left_pairs, right_extra_pairs))
-          end)
+            end)
           probe(i + 1, List.append(List.reverse(new_rows), acc))
         end
       end
@@ -2582,19 +2538,21 @@ fn col_describe_column(col : Column) : ColStats do
   let n = col_len(col)
   match col do
   IntCol(_, data) -> do
-    let xs = List.map(data, fn x -> int_to_float(x))
+    let xs = List.map(typed_array_to_list(data), fn x -> int_to_float(x))
     ColStats(name, "Int", n,
       Some(Stats.mean(xs)), Some(Stats.std_dev(xs)),
       Some(Stats.min_val(xs)), Some(Stats.percentile(xs, 25.0)),
       Some(Stats.median(xs)), Some(Stats.percentile(xs, 75.0)),
       Some(Stats.max_val(xs)))
-  end
-  FloatCol(_, data) ->
+    end
+  FloatCol(_, data) -> do
+    let lst = typed_array_to_list(data)
     ColStats(name, "Float", n,
-      Some(Stats.mean(data)), Some(Stats.std_dev(data)),
-      Some(Stats.min_val(data)), Some(Stats.percentile(data, 25.0)),
-      Some(Stats.median(data)), Some(Stats.percentile(data, 75.0)),
-      Some(Stats.max_val(data)))
+      Some(Stats.mean(lst)), Some(Stats.std_dev(lst)),
+      Some(Stats.min_val(lst)), Some(Stats.percentile(lst, 25.0)),
+      Some(Stats.median(lst)), Some(Stats.percentile(lst, 75.0)),
+      Some(Stats.max_val(lst)))
+    end
   StrCol(_, _) ->
     ColStats(name, "String", n, None, None, None, None, None, None, None)
   BoolCol(_, _) ->
@@ -2608,20 +2566,23 @@ doc "Z-score normalize an IntCol or FloatCol. Returns FloatCol."
 fn col_z_score(col : Column) : Result(Column, String) do
   match col do
   FloatCol(name, data) -> do
-    let m = Stats.mean(data)
-    let s = Stats.std_dev(data)
-    if s == 0.0 do Ok(FloatCol(name, List.repeat(0.0, List.length(data))))
-    else Ok(FloatCol(name, List.map(data, fn x -> (x -. m) /. s)))
+    let lst = typed_array_to_list(data)
+    let m = Stats.mean(lst)
+    let s = Stats.std_dev(lst)
+    let n = typed_array_length(data)
+    if s == 0.0 do Ok(FloatCol(name, typed_array_create(n, 0.0)))
+    else Ok(FloatCol(name, typed_array_from_list(List.map(lst, fn x -> (x -. m) /. s))))
     end
-  end
+    end
   IntCol(name, data) -> do
-    let xs = List.map(data, fn x -> int_to_float(x))
+    let xs = List.map(typed_array_to_list(data), fn x -> int_to_float(x))
     let m = Stats.mean(xs)
     let s = Stats.std_dev(xs)
-    if s == 0.0 do Ok(FloatCol(name, List.repeat(0.0, List.length(xs))))
-    else Ok(FloatCol(name, List.map(xs, fn x -> (x -. m) /. s)))
+    let n = typed_array_length(data)
+    if s == 0.0 do Ok(FloatCol(name, typed_array_create(n, 0.0)))
+    else Ok(FloatCol(name, typed_array_from_list(List.map(xs, fn x -> (x -. m) /. s))))
     end
-  end
+    end
   _ -> Err("col_z_score: column must be IntCol or FloatCol")
   end
 end
@@ -2630,23 +2591,202 @@ doc "Min-max normalize a column to [0, 1]. Returns FloatCol."
 fn col_normalize(col : Column) : Result(Column, String) do
   match col do
   FloatCol(name, data) -> do
-    let mn = Stats.min_val(data)
-    let mx = Stats.max_val(data)
+    let lst = typed_array_to_list(data)
+    let mn = Stats.min_val(lst)
+    let mx = Stats.max_val(lst)
     let range_ = mx -. mn
-    if range_ == 0.0 do Ok(FloatCol(name, List.repeat(0.0, List.length(data))))
-    else Ok(FloatCol(name, List.map(data, fn x -> (x -. mn) /. range_)))
+    let n = typed_array_length(data)
+    if range_ == 0.0 do Ok(FloatCol(name, typed_array_create(n, 0.0)))
+    else Ok(FloatCol(name, typed_array_from_list(List.map(lst, fn x -> (x -. mn) /. range_))))
     end
-  end
+    end
   IntCol(name, data) -> do
-    let xs = List.map(data, fn x -> int_to_float(x))
+    let xs = List.map(typed_array_to_list(data), fn x -> int_to_float(x))
     let mn = Stats.min_val(xs)
     let mx = Stats.max_val(xs)
     let range_ = mx -. mn
-    if range_ == 0.0 do Ok(FloatCol(name, List.repeat(0.0, List.length(xs))))
-    else Ok(FloatCol(name, List.map(xs, fn x -> (x -. mn) /. range_)))
+    let n = typed_array_length(data)
+    if range_ == 0.0 do Ok(FloatCol(name, typed_array_create(n, 0.0)))
+    else Ok(FloatCol(name, typed_array_from_list(List.map(xs, fn x -> (x -. mn) /. range_))))
     end
-  end
+    end
   _ -> Err("col_normalize: column must be IntCol or FloatCol")
+  end
+end
+
+doc """Returns a summary-statistics DataFrame with one row per column.
+
+Columns in the result: "column", "type", "count", "mean", "std",
+"min", "p25", "median", "p75", "max".  Non-numeric columns get
+NullVal for every numeric stat.
+
+Example:
+  let df = DataFrame.make_df([IntCol("x", [1,2,3,4,5])])
+  let d  = DataFrame.summarize(df)
+  -- d has 1 row: column="x", type="Int", count=5, mean=3.0, ...
+"""
+fn summarize(df : DataFrame) : DataFrame do
+  let stats = col_describe(df)
+  let n_stats = List.length(stats)
+  fn opt_val(o : Option(Float)) : Value do
+    match o do None -> NullVal | Some(f) -> FloatVal(f) end
+  end
+  let rows = List.map(List.range(0, n_stats), fn i -> do
+    let s = List.nth(stats, i)
+    match s do
+    ColStats(nm, tp, cnt, mean_, std_, mn, p25_, med, p75_, mx) -> do
+      Row(Cons(("column",  StrVal(nm)),
+          Cons(("type",    StrVal(tp)),
+          Cons(("count",   IntVal(cnt)),
+          Cons(("mean",    opt_val(mean_)),
+          Cons(("std",     opt_val(std_)),
+          Cons(("min",     opt_val(mn)),
+          Cons(("p25",     opt_val(p25_)),
+          Cons(("median",  opt_val(med)),
+          Cons(("p75",     opt_val(p75_)),
+          Cons(("max",     opt_val(mx)),
+          Nil)))))))))))
+      end
+    end
+  end)
+  match from_rows_widen(rows) do
+  Ok(result_df) -> result_df
+  Err(_) -> empty()
+  end
+end
+
+doc """Random systematic sample of n rows. Deterministic (no RNG state).
+
+Selects n rows at evenly-spaced positions across the DataFrame.
+Returns the full DataFrame unchanged when n >= row_count(df).
+
+Example:
+  let df  = DataFrame.make_df([IntCol("v", [0,1,2,3,4,5,6,7,8,9])])
+  let s   = DataFrame.sample(df, 3)
+  -- picks rows 0, 3, 6  ->  IntCol("v", [0, 3, 6])
+"""
+fn sample(df : DataFrame, n : Int) : DataFrame do
+  let total = row_count(df)
+  if n <= 0 do
+    match df do
+    DataFrame(cols) ->
+      DataFrame(List.map(cols, fn c -> filter_col_by_indices(c, Nil)))
+    end
+  else if n >= total do df
+  else
+    let step = total / n
+    let indices = List.map(List.range(0, n), fn i -> i * step)
+    match df do
+    DataFrame(cols) ->
+      DataFrame(List.map(cols, fn c -> filter_col_by_indices(c, indices)))
+    end
+  end end
+end
+
+doc """Split a DataFrame into (train, test) using the given ratio.
+
+ratio is the fraction of rows placed in the training set (0.0 < ratio < 1.0).
+The first `floor(row_count * ratio)` rows become the training set;
+the remainder become the test set. Row order is preserved.
+
+Example:
+  let (train, test) = DataFrame.train_test_split(df, 0.8)
+  -- 80% of rows → train, 20% → test
+"""
+fn train_test_split(df : DataFrame, ratio : Float) : (DataFrame, DataFrame) do
+  let total = row_count(df)
+  let train_n = float_to_int(int_to_float(total) *. ratio)
+  let train_df = head(df, train_n)
+  let test_df  = slice(df, train_n, total - train_n)
+  (train_df, test_df)
+end
+
+doc """Add a scalar Float to every element of an Int or Float column.
+Returns a FloatCol. Errors on other column types.
+
+Example:
+  let c  = FloatCol("price", [1.0, 2.0, 3.0])
+  let c2 = DataFrame.col_add_float(c, 10.0)  -- Ok(FloatCol("price", [11.0, 12.0, 13.0]))
+"""
+fn col_add_float(col : Column, f : Float) : Result(Column, String) do
+  match col do
+  FloatCol(name, data) ->
+    Ok(FloatCol(name, List.map(data, fn x -> x +. f)))
+  IntCol(name, data) ->
+    Ok(FloatCol(name, List.map(data, fn x -> int_to_float(x) +. f)))
+  _ -> Err("col_add_float: column must be IntCol or FloatCol")
+  end
+end
+
+doc """Multiply every element of an Int or Float column by a scalar Float.
+Returns a FloatCol. Errors on other column types.
+
+Example:
+  let c  = IntCol("qty", [1, 2, 3])
+  let c2 = DataFrame.col_mul_float(c, 2.5)  -- Ok(FloatCol("qty", [2.5, 5.0, 7.5]))
+"""
+fn col_mul_float(col : Column, f : Float) : Result(Column, String) do
+  match col do
+  FloatCol(name, data) ->
+    Ok(FloatCol(name, List.map(data, fn x -> x *. f)))
+  IntCol(name, data) ->
+    Ok(FloatCol(name, List.map(data, fn x -> int_to_float(x) *. f)))
+  _ -> Err("col_mul_float: column must be IntCol or FloatCol")
+  end
+end
+
+doc """Element-wise addition of two numeric columns.
+
+- Int + Int → IntCol (named after col1)
+- Float + Float, Int + Float, Float + Int → FloatCol (named after col1)
+Errors if the columns have different lengths or are non-numeric.
+
+Example:
+  let a   = IntCol("a", [1, 2, 3])
+  let b   = IntCol("b", [10, 20, 30])
+  let sum = DataFrame.col_add_col(a, b)  -- Ok(IntCol("a", [11, 22, 33]))
+"""
+fn col_add_col(col1 : Column, col2 : Column) : Result(Column, String) do
+  let n1 = col_len(col1)
+  let n2 = col_len(col2)
+  if n1 != n2 do
+    Err("col_add_col: columns have different lengths (" ++
+        int_to_string(n1) ++ " vs " ++ int_to_string(n2) ++ ")")
+  else
+    let name = col_name(col1)
+    match col1 do
+    IntCol(_, data1) -> do
+      match col2 do
+      IntCol(_, data2) -> do
+        let pairs = List.zip(data1, data2)
+        Ok(IntCol(name, List.map(pairs, fn pair ->
+          match pair do (a, b) -> a + b end)))
+      end
+      FloatCol(_, data2) -> do
+        let pairs = List.zip(data1, data2)
+        Ok(FloatCol(name, List.map(pairs, fn pair ->
+          match pair do (a, b) -> int_to_float(a) +. b end)))
+      end
+      _ -> Err("col_add_col: col2 must be IntCol or FloatCol")
+      end
+      end
+    FloatCol(_, data1) -> do
+      match col2 do
+      FloatCol(_, data2) -> do
+        let pairs = List.zip(data1, data2)
+        Ok(FloatCol(name, List.map(pairs, fn pair ->
+          match pair do (a, b) -> a +. b end)))
+      end
+      IntCol(_, data2) -> do
+        let pairs = List.zip(data1, data2)
+        Ok(FloatCol(name, List.map(pairs, fn pair ->
+          match pair do (a, b) -> a +. int_to_float(b) end)))
+      end
+      _ -> Err("col_add_col: col2 must be IntCol or FloatCol")
+      end
+      end
+    _ -> Err("col_add_col: col1 must be IntCol or FloatCol")
+    end
   end
 end
 
@@ -2655,10 +2795,10 @@ end
 -- Check whether row i of a column is null.
 fn col_has_null_at(col : Column, i : Int) : Bool do
   match col do
-  NullableIntCol(_, _, nulls)   -> List.nth(nulls, i)
-  NullableFloatCol(_, _, nulls) -> List.nth(nulls, i)
-  NullableStrCol(_, _, nulls)   -> List.nth(nulls, i)
-  NullableBoolCol(_, _, nulls)  -> List.nth(nulls, i)
+  NullableIntCol(_, _, nulls)   -> typed_array_get(nulls, i)
+  NullableFloatCol(_, _, nulls) -> typed_array_get(nulls, i)
+  NullableStrCol(_, _, nulls)   -> typed_array_get(nulls, i)
+  NullableBoolCol(_, _, nulls)  -> typed_array_get(nulls, i)
   _                             -> false
   end
 end
@@ -2703,38 +2843,51 @@ doc "Replace null values in a nullable column with fill_val. Errors on type mism
 fn fill_null(col : Column, fill_val : Value) : Result(Column, String) do
   let nm = col_name(col)
   match col do
-  NullableIntCol(n, data, nulls) ->
+  NullableIntCol(n, data, nulls) -> do
     match fill_val do
-    IntVal(x) ->
-      Ok(IntCol(n, List.map(List.zip(data, nulls),
-        fn pair -> match pair do (v, b) -> if b do x else v end end)))
+    IntVal(x) -> do
+      let pairs = List.zip(typed_array_to_list(data), typed_array_to_list(nulls))
+      Ok(IntCol(n, typed_array_from_list(List.map(pairs,
+        fn pair -> match pair do (v, b) -> if b do x else v end end))))
+    end
     _ -> Err("fill_null: column '" ++ nm ++ "' is Int; expected IntVal")
     end
-  NullableFloatCol(n, data, nulls) ->
+    end
+  NullableFloatCol(n, data, nulls) -> do
     match fill_val do
-    FloatVal(f) ->
-      Ok(FloatCol(n, List.map(List.zip(data, nulls),
-        fn pair -> match pair do (v, b) -> if b do f else v end end)))
+    FloatVal(f) -> do
+      let pairs = List.zip(typed_array_to_list(data), typed_array_to_list(nulls))
+      Ok(FloatCol(n, typed_array_from_list(List.map(pairs,
+        fn pair -> match pair do (v, b) -> if b do f else v end end))))
+    end
     IntVal(x) -> do
       let fx = int_to_float(x)
-      Ok(FloatCol(n, List.map(List.zip(data, nulls),
-        fn pair -> match pair do (v, b) -> if b do fx else v end end)))
+      let pairs = List.zip(typed_array_to_list(data), typed_array_to_list(nulls))
+      Ok(FloatCol(n, typed_array_from_list(List.map(pairs,
+        fn pair -> match pair do (v, b) -> if b do fx else v end end))))
     end
     _ -> Err("fill_null: column '" ++ nm ++ "' is Float; expected FloatVal or IntVal")
     end
-  NullableStrCol(n, data, nulls) ->
+    end
+  NullableStrCol(n, data, nulls) -> do
     match fill_val do
-    StrVal(s) ->
-      Ok(StrCol(n, List.map(List.zip(data, nulls),
-        fn pair -> match pair do (v, b) -> if b do s else v end end)))
+    StrVal(s) -> do
+      let pairs = List.zip(typed_array_to_list(data), typed_array_to_list(nulls))
+      Ok(StrCol(n, typed_array_from_list(List.map(pairs,
+        fn pair -> match pair do (v, b) -> if b do s else v end end))))
+    end
     _ -> Err("fill_null: column '" ++ nm ++ "' is String; expected StrVal")
     end
-  NullableBoolCol(n, data, nulls) ->
+    end
+  NullableBoolCol(n, data, nulls) -> do
     match fill_val do
-    BoolVal(bv) ->
-      Ok(BoolCol(n, List.map(List.zip(data, nulls),
-        fn pair -> match pair do (v, b) -> if b do bv else v end end)))
+    BoolVal(bv) -> do
+      let pairs = List.zip(typed_array_to_list(data), typed_array_to_list(nulls))
+      Ok(BoolCol(n, typed_array_from_list(List.map(pairs,
+        fn pair -> match pair do (v, b) -> if b do bv else v end end))))
+    end
     _ -> Err("fill_null: column '" ++ nm ++ "' is Bool; expected BoolVal")
+    end
     end
   _ -> Err("fill_null: column '" ++ nm ++ "' has no nulls (non-nullable column)")
   end
@@ -2744,7 +2897,7 @@ doc "Apply fill_null to a named column in a DataFrame, replacing it in-place."
 fn fill_null_df(df : DataFrame, col_nm : String, fill_val : Value) : Result(DataFrame, String) do
   match get_column(df, col_nm) do
   Err(e) -> Err(e)
-  Ok(col) ->
+  Ok(col) -> do
     match fill_null(col, fill_val) do
     Err(e) -> Err(e)
     Ok(new_col) ->
@@ -2753,6 +2906,7 @@ fn fill_null_df(df : DataFrame, col_nm : String, fill_val : Value) : Result(Data
         Ok(DataFrame(List.map(cs, fn c ->
           if col_name(c) == col_nm do new_col else c end)))
       end
+    end
     end
   end
 end
@@ -2774,8 +2928,8 @@ fn fill_null_forward(col : Column) : Column do
         end
       end
     end
-    IntCol(name, go(data, nulls, 0, Nil))
-  end
+    IntCol(name, typed_array_from_list(go(typed_array_to_list(data), typed_array_to_list(nulls), 0, Nil)))
+    end
   NullableFloatCol(name, data, nulls) -> do
     fn go(ds : List(Float), ns : List(Bool), last : Float, acc : List(Float)) : List(Float) do
       match ds do
@@ -2790,8 +2944,8 @@ fn fill_null_forward(col : Column) : Column do
         end
       end
     end
-    FloatCol(name, go(data, nulls, 0.0, Nil))
-  end
+    FloatCol(name, typed_array_from_list(go(typed_array_to_list(data), typed_array_to_list(nulls), 0.0, Nil)))
+    end
   NullableStrCol(name, data, nulls) -> do
     fn go(ds : List(String), ns : List(Bool), last : String, acc : List(String)) : List(String) do
       match ds do
@@ -2806,8 +2960,8 @@ fn fill_null_forward(col : Column) : Column do
         end
       end
     end
-    StrCol(name, go(data, nulls, "", Nil))
-  end
+    StrCol(name, typed_array_from_list(go(typed_array_to_list(data), typed_array_to_list(nulls), "", Nil)))
+    end
   NullableBoolCol(name, data, nulls) -> do
     fn go(ds : List(Bool), ns : List(Bool), last : Bool, acc : List(Bool)) : List(Bool) do
       match ds do
@@ -2822,8 +2976,8 @@ fn fill_null_forward(col : Column) : Column do
         end
       end
     end
-    BoolCol(name, go(data, nulls, false, Nil))
-  end
+    BoolCol(name, typed_array_from_list(go(typed_array_to_list(data), typed_array_to_list(nulls), false, Nil)))
+    end
   _ -> col
   end
 end
@@ -2847,8 +3001,10 @@ fn fill_null_backward(col : Column) : Column do
         end
       end
     end
-    IntCol(name, go(List.reverse(data), List.reverse(nulls), 0, Nil))
-  end
+    let dl = typed_array_to_list(data)
+    let nl = typed_array_to_list(nulls)
+    IntCol(name, typed_array_from_list(go(List.reverse(dl), List.reverse(nl), 0, Nil)))
+    end
   NullableFloatCol(name, data, nulls) -> do
     fn go(ds : List(Float), ns : List(Bool), last : Float, acc : List(Float)) : List(Float) do
       match ds do
@@ -2863,8 +3019,10 @@ fn fill_null_backward(col : Column) : Column do
         end
       end
     end
-    FloatCol(name, go(List.reverse(data), List.reverse(nulls), 0.0, Nil))
-  end
+    let dl = typed_array_to_list(data)
+    let nl = typed_array_to_list(nulls)
+    FloatCol(name, typed_array_from_list(go(List.reverse(dl), List.reverse(nl), 0.0, Nil)))
+    end
   NullableStrCol(name, data, nulls) -> do
     fn go(ds : List(String), ns : List(Bool), last : String, acc : List(String)) : List(String) do
       match ds do
@@ -2879,8 +3037,10 @@ fn fill_null_backward(col : Column) : Column do
         end
       end
     end
-    StrCol(name, go(List.reverse(data), List.reverse(nulls), "", Nil))
-  end
+    let dl = typed_array_to_list(data)
+    let nl = typed_array_to_list(nulls)
+    StrCol(name, typed_array_from_list(go(List.reverse(dl), List.reverse(nl), "", Nil)))
+    end
   NullableBoolCol(name, data, nulls) -> do
     fn go(ds : List(Bool), ns : List(Bool), last : Bool, acc : List(Bool)) : List(Bool) do
       match ds do
@@ -2895,8 +3055,10 @@ fn fill_null_backward(col : Column) : Column do
         end
       end
     end
-    BoolCol(name, go(List.reverse(data), List.reverse(nulls), false, Nil))
-  end
+    let dl = typed_array_to_list(data)
+    let nl = typed_array_to_list(nulls)
+    BoolCol(name, typed_array_from_list(go(List.reverse(dl), List.reverse(nl), false, Nil)))
+    end
   _ -> col
   end
 end
@@ -2930,7 +3092,7 @@ fn window(df : DataFrame, expr : WindowExpr, out_col : String) : Result(DataFram
   match expr do
 
   RowNum ->
-    add_column(df, IntCol(out_col, List.range(0, n)))
+    add_column(df, IntCol(out_col, typed_array_from_list(List.range(0, n))))
 
   Rank(key_col, dir) -> do
     let key_spec = Cons((key_col, dir), Nil)
@@ -2960,9 +3122,9 @@ fn window(df : DataFrame, expr : WindowExpr, out_col : String) : Result(DataFram
     let rank_map = assign_ranks(sorted, 0, None, 1, Nil)
     let rank_vals = List.map(sort_pairs_asc(rank_map),
       fn p -> match p do (_, r) -> r end)
-    add_column(df, IntCol(out_col, rank_vals))
-  end
+    add_column(df, IntCol(out_col, typed_array_from_list(rank_vals)))
 
+    end
   DenseRank(key_col, dir) -> do
     let key_spec = Cons((key_col, dir), Nil)
     let indices = List.range(0, n)
@@ -2987,10 +3149,10 @@ fn window(df : DataFrame, expr : WindowExpr, out_col : String) : Result(DataFram
     let rank_map = assign_dense(sorted, None, 0, Nil)
     let rank_vals = List.map(sort_pairs_asc(rank_map),
       fn p -> match p do (_, r) -> r end)
-    add_column(df, IntCol(out_col, rank_vals))
-  end
+    add_column(df, IntCol(out_col, typed_array_from_list(rank_vals)))
 
-  RunningSum(src_col) ->
+    end
+  RunningSum(src_col) -> do
     match get_column(df, src_col) do
     Err(e) -> Err(e)
     Ok(col) ->
@@ -3005,7 +3167,7 @@ fn window(df : DataFrame, expr : WindowExpr, out_col : String) : Result(DataFram
           end
           end
         end
-        add_column(df, IntCol(out_col, go(data, 0, Nil)))
+        add_column(df, IntCol(out_col, typed_array_from_list(go(typed_array_to_list(data), 0, Nil))))
       end
       FloatCol(_, data) -> do
         fn go(xs : List(Float), s : Float, acc : List(Float)) : List(Float) do
@@ -3017,19 +3179,20 @@ fn window(df : DataFrame, expr : WindowExpr, out_col : String) : Result(DataFram
           end
           end
         end
-        add_column(df, FloatCol(out_col, go(data, 0.0, Nil)))
+        add_column(df, FloatCol(out_col, typed_array_from_list(go(typed_array_to_list(data), 0.0, Nil))))
       end
       _ -> Err("window RunningSum: column '" ++ src_col ++ "' must be Int or Float")
       end
     end
 
-  RunningMean(src_col) ->
+    end
+  RunningMean(src_col) -> do
     match get_column(df, src_col) do
     Err(e) -> Err(e)
     Ok(col) -> do
       let floats_r = match col do
-        IntCol(_, data)   -> Ok(List.map(data, fn x -> int_to_float(x)))
-        FloatCol(_, data) -> Ok(data)
+        IntCol(_, data)   -> Ok(List.map(typed_array_to_list(data), fn x -> int_to_float(x)))
+        FloatCol(_, data) -> Ok(typed_array_to_list(data))
         _ -> Err("window RunningMean: column '" ++ src_col ++ "' must be Int or Float")
         end
       match floats_r do
@@ -3046,13 +3209,13 @@ fn window(df : DataFrame, expr : WindowExpr, out_col : String) : Result(DataFram
           end
           end
         end
-        add_column(df, FloatCol(out_col, go(fs, 0.0, 0, Nil)))
+        add_column(df, FloatCol(out_col, typed_array_from_list(go(fs, 0.0, 0, Nil))))
       end
       end
     end
     end
-
-  Lag(src_col, lag_n, fill_val) ->
+    end
+  Lag(src_col, lag_n, fill_val) -> do
     match get_column(df, src_col) do
     Err(e) -> Err(e)
     Ok(col) -> do
@@ -3071,8 +3234,8 @@ fn window(df : DataFrame, expr : WindowExpr, out_col : String) : Result(DataFram
       end
     end
     end
-
-  Lead(src_col, lead_n, fill_val) ->
+    end
+  Lead(src_col, lead_n, fill_val) -> do
     match get_column(df, src_col) do
     Err(e) -> Err(e)
     Ok(col) -> do
@@ -3091,7 +3254,7 @@ fn window(df : DataFrame, expr : WindowExpr, out_col : String) : Result(DataFram
       end
     end
     end
-
+    end
   end
 end
 
@@ -3117,11 +3280,12 @@ fn melt(df : DataFrame, id_vars : List(String), value_vars : List(String),
       let row_pairs = match get_row(df, i) do Row(ps) -> ps end
       let id_pairs = List.filter(row_pairs, fn pair ->
         match pair do (k, _) -> List.any(id_vars, fn iv -> iv == k) end)
-      let new_rows = List.map(value_vars, fn vname -> do
+      let new_rows = List.map(value_vars, fn vname ->
+        do
         let vval = col_value_at_by_name(df, vname, i)
         Row(List.append(id_pairs,
           Cons((var_col, StrVal(vname)), Cons((val_col, vval), Nil))))
-      end)
+        end)
       build_melted(i + 1, List.append(List.reverse(new_rows), acc))
     end
   end
@@ -3143,7 +3307,7 @@ fn pivot(df : DataFrame, index_col : String, cols_col : String,
          vals_col : String) : Result(DataFrame, String) do
   match get_column(df, index_col) do
   Err(e) -> Err(e)
-  Ok(_) ->
+  Ok(_) -> do
     match get_column(df, cols_col) do
     Err(e) -> Err(e)
     Ok(_) ->
@@ -3180,16 +3344,18 @@ fn pivot(df : DataFrame, index_col : String, cols_col : String,
           scan(0)
         end
         let pivot_col_names = List.map(pivot_col_vals, fn v -> value_to_string(v))
-        let out_rows = List.map(index_vals, fn idx_v -> do
+        let out_rows = List.map(index_vals, fn idx_v ->
+          do
           let cell_pairs = List.map(
             List.zip(pivot_col_vals, pivot_col_names),
             fn pair ->
               match pair do (cv, cn) -> (cn, lookup(idx_v, cv)) end)
           Row(Cons((index_col, idx_v), cell_pairs))
-        end)
+          end)
         from_rows_widen(out_rows)
       end
       end
+    end
     end
   end
 end

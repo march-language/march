@@ -26,7 +26,7 @@ module Errors = March_errors.Errors
     Raises [March_parser.Parser.Error] on syntax error. *)
 let parse_src src =
   let lexbuf = Lexing.from_string src in
-  March_parser.Parser.module_ March_lexer.Lexer.token lexbuf
+  March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
 
 (** Full pipeline through typecheck; returns [None] on parse error. *)
 let pipeline_up_to_typecheck src =

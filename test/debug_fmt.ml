@@ -13,7 +13,7 @@ let () =
     lexbuf.Lexing.lex_curr_p <-
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = "<formatted>" };
     (try
-       ignore (March_parser.Parser.module_ March_lexer.Lexer.token lexbuf);
+       ignore (March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf);
        Printf.printf "%s: PARSES OK\n%!" path
      with March_parser.Parser.Error ->
        let pos = lexbuf.Lexing.lex_curr_p in

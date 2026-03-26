@@ -221,7 +221,7 @@ let parse_file path =
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
     (try
        let m = March_parser.Parser.module_
-           March_lexer.Lexer.token lexbuf in
+           (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
        let m = March_desugar.Desugar.desugar_module m in
        let basename = Filename.basename path in
        if basename = "prelude.march" then

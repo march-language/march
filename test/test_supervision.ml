@@ -44,7 +44,7 @@ let add_fresh_actor pid name =
 
 let parse_and_desugar src =
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   March_desugar.Desugar.desugar_module m
 
 let eval_module src =

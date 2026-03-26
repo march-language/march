@@ -98,6 +98,7 @@
 %token LT GT EQEQ NEQ LEQ GEQ
 %token AND OR BANG
 %token UNDERSCORE QUESTION
+%token NL
 %token EOF
 
 %start <March_ast.Ast.module_> module_
@@ -713,15 +714,15 @@ expr:
         "I was expecting `do` after the condition here:"
         (Some "if cond do\n    expr1\nelse\n    expr2\nend")
         $startpos($3) }
-  | MATCH; e = expr; DO; bs = nonempty_list(branch); END
+  | MATCH; e = expr; DO; option(arm_sep); bs = separated_nonempty_list(arm_sep, branch); END
     { EMatch (e, bs, mk_span ($loc)) }
-  | MATCH; DO; bs = nonempty_list(cond_branch); END
+  | MATCH; DO; option(arm_sep); bs = separated_nonempty_list(arm_sep, cond_branch); END
     { ECond (bs, mk_span ($loc)) }
-  | MATCH; _e = expr; DO; _bs = nonempty_list(branch); error
+  | MATCH; _e = expr; DO; option(arm_sep); _bs = separated_nonempty_list(arm_sep, branch); error
     { error_raise
         "I was expecting `end` to close the match here:"
         None
-        $startpos($5) }
+        $startpos(_bs) }
   | MATCH; _e = expr; error
     { error_raise
         "I was expecting `do` after the match expression here:"
@@ -866,14 +867,18 @@ interp_parts:
   | e = expr; suffix = INTERP_END         { [(e, suffix)] }
   | e = expr; mid = INTERP_MID; rest = interp_parts { (e, mid) :: rest }
 
+%inline arm_sep:
+  | NL { () }
+  | PIPE { () }
+
 branch:
-  | option(PIPE); p = pattern; guard = option(when_guard); ARROW; e = expr
+  | p = pattern; guard = option(when_guard); ARROW; e = expr
     { { branch_pat = p; branch_guard = guard; branch_body = e } }
-  | option(PIPE); _p = pattern; _guard = option(when_guard); error
+  | _p = pattern; _guard = option(when_guard); error
     { error_raise
         "I was expecting `->` in the match arm here:"
         (Some "Pattern -> result")
-        $startpos($4) }
+        $startpos($3) }
 
 cond_branch:
   | e = expr; ARROW; body = expr

@@ -713,7 +713,7 @@ let analyse ~filename ~src : t =
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
   let parse_result =
     try
-      Ok (March_parser.Parser.module_ March_lexer.Lexer.token lexbuf)
+      Ok (March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
     with
     | Err.ParseError (msg, hint, pos) ->
       Error (`ParseError (msg, hint, pos))

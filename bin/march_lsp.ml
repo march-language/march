@@ -343,7 +343,7 @@ let load_stdlib_file path =
     lexbuf.Lexing.lex_curr_p <-
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
     (try
-       let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+       let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
        let m = March_desugar.Desugar.desugar_module m in
        let basename = Filename.basename path in
        if basename = "prelude.march" then
@@ -476,7 +476,7 @@ let try_parse_module path src errors =
   in
   let do_parse lexbuf text =
     try
-      let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+      let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
       Some (m, text, false (* not wrapped *))
     with
     | Err.ParseError _ | March_parser.Parser.Error ->
@@ -498,7 +498,7 @@ let try_parse_module path src errors =
     if starts_with_mod then begin
       (* Real parse error in a proper module file — report it *)
       let lexbuf = make_lexbuf src in
-      (try ignore (March_parser.Parser.module_ March_lexer.Lexer.token lexbuf)
+      (try ignore (March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
        with
        | Err.ParseError (msg, _hint, pos) ->
          let line = pos.Lexing.pos_lnum in
@@ -531,7 +531,7 @@ let try_parse_module path src errors =
       | None ->
         (* Still fails — report error relative to original src *)
         let lexbuf = make_lexbuf src in
-        (try ignore (March_parser.Parser.module_ March_lexer.Lexer.token lexbuf)
+        (try ignore (March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
          with
          | March_parser.Parser.Error ->
            let pos  = Lexing.lexeme_start_p lexbuf in

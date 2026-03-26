@@ -245,7 +245,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
     | Some file_src ->
       let lexbuf = Lexing.from_string file_src in
       (match (try
-        let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+        let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
         Some (March_desugar.Desugar.desugar_module m)
       with exn ->
         Printf.eprintf "parse error in %s: %s\n%!" path (Printexc.to_string exn); None) with
@@ -1416,7 +1416,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
             | Some file_src ->
               let lexbuf = Lexing.from_string file_src in
               (match (try
-                let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+                let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
                 Some (March_desugar.Desugar.desugar_module m)
               with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
               | None -> ()
@@ -1456,7 +1456,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              | Some file_src ->
                let lexbuf = Lexing.from_string file_src in
                (match (try
-                 let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+                 let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
                  Some (March_desugar.Desugar.desugar_module m)
                with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
                | None -> ()

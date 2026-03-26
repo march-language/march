@@ -50,7 +50,7 @@ let load_stdlib_file path =
     lexbuf.Lexing.lex_curr_p <-
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
     (try
-       let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+       let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
        let m = March_desugar.Desugar.desugar_module m in
        let basename = Filename.basename path in
        if basename = "prelude.march" then
@@ -265,7 +265,7 @@ let parse_march_file path src =
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-  try Ok (March_parser.Parser.module_ March_lexer.Lexer.token lexbuf)
+  try Ok (March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
   with
   | March_errors.Errors.ParseError (msg, _hint, pos) ->
     let open Lexing in
@@ -449,7 +449,7 @@ let run_test_cmd args =
     lexbuf.Lexing.lex_curr_p <-
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
     let module_ast =
-      try March_parser.Parser.module_ March_lexer.Lexer.token lexbuf
+      try March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
       with
       | March_errors.Errors.ParseError (msg, hint, _) ->
         Printf.eprintf "\n%s\n"
@@ -540,7 +540,7 @@ let run_test_cmd args =
     (* Run doctests extracted from fn_doc fields *)
     let parse_expr src =
       let lexbuf = Lexing.from_string src in
-      try March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf
+      try March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
       with
       | March_errors.Errors.ParseError (msg, _, _) ->
         failwith ("doctest parse error: " ^ msg)
@@ -647,7 +647,7 @@ let compile filename =
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
   (* Parse *)
   let module_ast =
-    try March_parser.Parser.module_ March_lexer.Lexer.token lexbuf
+    try March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
     with
     | March_errors.Errors.ParseError (msg, hint, _) ->
       Printf.eprintf "%s\n"
@@ -867,7 +867,7 @@ let run_check_cmd files =
     lexbuf.Lexing.lex_curr_p <-
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
     let module_ast =
-      try March_parser.Parser.module_ March_lexer.Lexer.token lexbuf
+      try March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
       with
       | March_errors.Errors.ParseError (msg, hint, _) ->
         Printf.eprintf "%s\n"
