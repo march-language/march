@@ -25,7 +25,7 @@ mod LinearDropDemo do
   impl Drop(DbConnection) do
     fn drop(conn) do
       match conn do
-      | DbConnection(id) ->
+      DbConnection(id) ->
         println("[Drop] Closing database connection " ++ to_string(id))
       end
     end
@@ -36,7 +36,7 @@ mod LinearDropDemo do
   impl Drop(FileHandle) do
     fn drop(h) do
       match h do
-      | FileHandle(path) ->
+      FileHandle(path) ->
         println("[Drop] Closing file: " ++ path)
       end
     end

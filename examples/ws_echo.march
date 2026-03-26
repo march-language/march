@@ -19,19 +19,19 @@ mod WsEcho do
 -- Recursive message loop: handles frames until the connection closes.
 pfn ws_loop(socket) do
   match WebSocket.recv(socket) do
-  | TextFrame(msg) ->
+  TextFrame(msg) ->
     WebSocket.send_frame(socket, TextFrame("Echo: " ++ msg))
     ws_loop(socket)
-  | BinaryFrame(data) ->
+  BinaryFrame(data) ->
     WebSocket.send_frame(socket, BinaryFrame(data))
     ws_loop(socket)
-  | Ping ->
+  Ping ->
     WebSocket.send_frame(socket, Pong)
     ws_loop(socket)
-  | Pong ->
+  Pong ->
     -- unsolicited pong — ignore and keep going
     ws_loop(socket)
-  | Close(code, reason) ->
+  Close(code, reason) ->
     WebSocket.close(socket, code, reason)
   end
 end
@@ -42,11 +42,11 @@ end
 
 pfn router(conn) do
   match (HttpServer.method(conn), HttpServer.path_info(conn)) do
-  | (Get, Cons("ws", Nil)) ->
+  (Get, Cons("ws", Nil)) ->
     WebSocket.upgrade(conn, fn socket -> ws_handler(socket))
-  | (Get, Nil) ->
+  (Get, Nil) ->
     conn |> HttpServer.text(200, "WebSocket echo server — connect to /ws")
-  | _ ->
+  _ ->
     conn |> HttpServer.text(404, "Not Found")
   end
 end

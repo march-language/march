@@ -32,32 +32,32 @@ end
 
 doc "Returns the smaller of two values."
 fn min_int(a : Int, b : Int) : Int do
-  if a < b then a else b
+  if a < b do a else b end
 end
 
 doc "Returns the larger of two values."
 fn max_int(a : Int, b : Int) : Int do
-  if a > b then a else b
+  if a > b do a else b end
 end
 
 doc "Returns the smaller of two floats."
 fn min_float(a : Float, b : Float) : Float do
-  if a < b then a else b
+  if a < b do a else b end
 end
 
 doc "Returns the larger of two floats."
 fn max_float(a : Float, b : Float) : Float do
-  if a > b then a else b
+  if a > b do a else b end
 end
 
 doc "Clamps `x` to the range [low, high]."
 fn clamp_int(x : Int, low : Int, high : Int) : Int do
-  if x < low then low else if x > high then high else x
+  if x < low do low else if x > high do high else x end end
 end
 
 doc "Clamps `x` to the range [low, high]."
 fn clamp_float(x : Float, low : Float, high : Float) : Float do
-  if x < low then low else if x > high then high else x
+  if x < low do low else if x > high do high else x end end
 end
 
 -- ---- Powers & roots ----

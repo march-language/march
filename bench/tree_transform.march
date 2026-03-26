@@ -9,31 +9,31 @@
 
 mod TreeTransform do
 
-ptype Tree = Leaf(Int) | Node(Tree, Tree)
+ptype Tree = Leaf(Int) Node(Tree, Tree)
 
 pfn make(d : Int) : Tree do
-  if d == 0 then Leaf(0)
-  else Node(make(d - 1), make(d - 1))
+  if d == 0 do Leaf(0)
+  else Node(make(d - 1), make(d - 1)) end
 end
 
 -- FBIP: each pass reuses every node in-place when RC=1.
 pfn inc_leaves(t : Tree) : Tree do
   match t do
-  | Leaf(n)    -> Leaf(n + 1)
-  | Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
+  Leaf(n)    -> Leaf(n + 1)
+  Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
   end
 end
 
 pfn sum_leaves(t : Tree) : Int do
   match t do
-  | Leaf(n)    -> n
-  | Node(l, r) -> sum_leaves(l) + sum_leaves(r)
+  Leaf(n)    -> n
+  Node(l, r) -> sum_leaves(l) + sum_leaves(r)
   end
 end
 
 pfn repeat(t : Tree, n : Int) : Tree do
-  if n == 0 then t
-  else repeat(inc_leaves(t), n - 1)
+  if n == 0 do t
+  else repeat(inc_leaves(t), n - 1) end
 end
 
 pfn main() : Unit do

@@ -124,22 +124,22 @@ describe "Bytes" do
       let b = Bytes.from_string("hello")
       let hex = Bytes.to_hex(b)
       match Bytes.from_hex(hex) do
-      | Err(e) -> panic("from_hex failed: " ++ e)
-      | Ok(b2) -> assert (Bytes.to_string(b2) == "hello")
+      Err(e) -> panic("from_hex failed: " ++ e)
+      Ok(b2) -> assert (Bytes.to_string(b2) == "hello")
       end
     end
 
     test "from_hex invalid returns Err" do
       match Bytes.from_hex("xyz") do
-      | Err(_) -> ()
-      | Ok(_) -> panic("invalid hex should return Err")
+      Err(_) -> ()
+      Ok(_) -> panic("invalid hex should return Err")
       end
     end
 
     test "from_hex odd length returns Err" do
       match Bytes.from_hex("abc") do
-      | Err(_) -> ()
-      | Ok(_) -> panic("odd-length hex should return Err")
+      Err(_) -> ()
+      Ok(_) -> panic("odd-length hex should return Err")
       end
     end
 
@@ -151,8 +151,8 @@ describe "Bytes" do
       let b = Bytes.from_string("hello")
       let encoded = Bytes.encode_base64(b)
       match Bytes.decode_base64(encoded) do
-      | Err(e) -> panic("decode_base64 failed: " ++ e)
-      | Ok(b2) -> assert (Bytes.to_string(b2) == "hello")
+      Err(e) -> panic("decode_base64 failed: " ++ e)
+      Ok(b2) -> assert (Bytes.to_string(b2) == "hello")
       end
     end
 
@@ -164,8 +164,8 @@ describe "Bytes" do
 
     test "decode_base64 invalid returns Err" do
       match Bytes.decode_base64("!!!") do
-      | Err(_) -> ()
-      | Ok(_) -> panic("invalid base64 should return Err")
+      Err(_) -> ()
+      Ok(_) -> panic("invalid base64 should return Err")
       end
     end
 
@@ -181,8 +181,8 @@ describe "Bytes" do
     test "decode_utf8" do
       let b = Bytes.from_string("world")
       match Bytes.decode_utf8(b) do
-      | Err(e) -> panic("decode_utf8 failed: " ++ e)
-      | Ok(s) -> assert (s == "world")
+      Err(e) -> panic("decode_utf8 failed: " ++ e)
+      Ok(s) -> assert (s == "world")
       end
     end
 

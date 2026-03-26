@@ -43,16 +43,16 @@ end
 doc "Extracts the value from Some(x), panicking if None."
 fn unwrap(opt : Option(a)) : a do
   match opt do
-  | Some(x) -> x
-  | None    -> panic("unwrap called on None")
+  Some(x) -> x
+  None    -> panic("unwrap called on None")
   end
 end
 
 doc "Returns the contained value, or `default` if None."
 fn unwrap_or(opt : Option(a), default : a) : a do
   match opt do
-  | Some(x) -> x
-  | None    -> default
+  Some(x) -> x
+  None    -> default
   end
 end
 
@@ -61,24 +61,24 @@ end
 doc "Returns the first element of the list. Panics if empty."
 fn head(xs : List(a)) : a do
   match xs do
-  | Cons(h, _) -> h
-  | Nil        -> panic("head: empty list")
+  Cons(h, _) -> h
+  Nil        -> panic("head: empty list")
   end
 end
 
 doc "Returns all but the first element. Panics if empty."
 fn tail(xs : List(a)) : List(a) do
   match xs do
-  | Cons(_, t) -> t
-  | Nil        -> panic("tail: empty list")
+  Cons(_, t) -> t
+  Nil        -> panic("tail: empty list")
   end
 end
 
 doc "Returns true if the list is empty."
 fn is_nil(xs : List(a)) : Bool do
   match xs do
-  | Nil -> true
-  | Cons(_, _) -> false
+  Nil -> true
+  Cons(_, _) -> false
   end
 end
 
@@ -86,8 +86,8 @@ doc "Returns the number of elements in the list."
 fn length(xs : List(a)) : Int do
   fn go(lst : List(a), acc : Int) : Int do
     match lst do
-    | Nil        -> acc
-    | Cons(_, t) -> go(t, acc + 1)
+    Nil        -> acc
+    Cons(_, t) -> go(t, acc + 1)
     end
   end
   go(xs, 0)
@@ -97,8 +97,8 @@ doc "Reverses a list."
 fn reverse(xs : List(a)) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
-    | Nil        -> acc
-    | Cons(h, t) -> go(t, Cons(h, acc))
+    Nil        -> acc
+    Cons(h, t) -> go(t, Cons(h, acc))
     end
   end
   go(xs, Nil)
@@ -107,8 +107,8 @@ end
 doc "Left fold over a list."
 fn fold_left(acc : b, xs : List(a), f : b -> a -> b) : b do
   match xs do
-  | Nil        -> acc
-  | Cons(h, t) -> fold_left(f(acc, h), t, f)
+  Nil        -> acc
+  Cons(h, t) -> fold_left(f(acc, h), t, f)
   end
 end
 
@@ -116,8 +116,8 @@ doc "Returns only the elements satisfying `pred`."
 fn filter(xs : List(a), pred : a -> Bool) : List(a) do
   fn go(acc : List(a), remaining : List(a)) : List(a) do
     match remaining do
-    | Nil        -> reverse(acc)
-    | Cons(h, t) -> if pred(h) then go(Cons(h, acc), t) else go(acc, t)
+    Nil        -> reverse(acc)
+    Cons(h, t) -> if pred(h) do go(Cons(h, acc), t) else go(acc, t) end
     end
   end
   go(Nil, xs)
@@ -127,8 +127,8 @@ doc "Applies `f` to every element of the list."
 fn map(xs : List(a), f : a -> b) : List(b) do
   fn go(acc : List(b), remaining : List(a)) : List(b) do
     match remaining do
-    | Nil        -> reverse(acc)
-    | Cons(h, t) -> go(Cons(f(h), acc), t)
+    Nil        -> reverse(acc)
+    Cons(h, t) -> go(Cons(f(h), acc), t)
     end
   end
   go(Nil, xs)

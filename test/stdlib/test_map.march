@@ -35,16 +35,16 @@ describe "insert and get" do
     let m2 = Map.insert(m1, 2, "two", int_cmp)
     let m3 = Map.insert(m2, 3, "three", int_cmp)
     match Map.get(m3, 1, int_cmp) do
-    | Some(v) -> assert (v == "one")
-    | None -> assert false
+    Some(v) -> assert (v == "one")
+    None -> assert false
     end
     match Map.get(m3, 2, int_cmp) do
-    | Some(v) -> assert (v == "two")
-    | None -> assert false
+    Some(v) -> assert (v == "two")
+    None -> assert false
     end
     match Map.get(m3, 3, int_cmp) do
-    | Some(v) -> assert (v == "three")
-    | None -> assert false
+    Some(v) -> assert (v == "three")
+    None -> assert false
     end
   end
 
@@ -58,8 +58,8 @@ describe "insert and get" do
     let m2 = Map.insert(m, 1, "new", int_cmp)
     assert (Map.size(m2) == 1)
     match Map.get(m2, 1, int_cmp) do
-    | Some(v) -> assert (v == "new")
-    | None -> assert false
+    Some(v) -> assert (v == "new")
+    None -> assert false
     end
   end
 
@@ -126,7 +126,7 @@ describe "size" do
   test "size of 10-entry map is 10" do
     fn insert_n(n) do
       fn go(i, m) do
-        if i > n then m else go(i + 1, Map.insert(m, i, i * 10, int_cmp))
+        if i > n do m else go(i + 1, Map.insert(m, i, i * 10, int_cmp)) end
       end
       go(1, Map.empty())
     end
@@ -167,9 +167,10 @@ describe "keys, values, entries" do
     let es = Map.entries(m)
     assert (length(es) == 1)
     match head(es) do
-    | (k, v) ->
+    (k, v) -> do
       assert (k == 42)
       assert (v == 99)
+    end
     end
   end
 end
@@ -188,8 +189,8 @@ describe "from_list and to_list" do
     let m = Map.from_list(pairs, int_cmp)
     assert (Map.size(m) == 1)
     match Map.get(m, 1, int_cmp) do
-    | Some(v) -> assert (v == "second")
-    | None -> assert false
+    Some(v) -> assert (v == "second")
+    None -> assert false
     end
   end
 
@@ -205,12 +206,12 @@ describe "map_values" do
     let doubled = Map.map_values(m, fn x -> x * 2)
     assert (Map.size(doubled) == 2)
     match Map.get(doubled, 1, int_cmp) do
-    | Some(v) -> assert (v == 20)
-    | None -> assert false
+    Some(v) -> assert (v == 20)
+    None -> assert false
     end
     match Map.get(doubled, 2, int_cmp) do
-    | Some(v) -> assert (v == 40)
-    | None -> assert false
+    Some(v) -> assert (v == 40)
+    None -> assert false
     end
   end
 end
@@ -240,8 +241,8 @@ describe "merge" do
     let c = Map.merge(a, b, int_cmp)
     assert (Map.size(c) == 1)
     match Map.get(c, 1, int_cmp) do
-    | Some(v) -> assert (v == "from_b")
-    | None -> assert false
+    Some(v) -> assert (v == "from_b")
+    None -> assert false
     end
   end
 
@@ -251,8 +252,8 @@ describe "merge" do
     let c = Map.merge_with(a, b, fn va -> fn vb -> va + vb, int_cmp)
     assert (Map.size(c) == 1)
     match Map.get(c, 1, int_cmp) do
-    | Some(v) -> assert (v == 15)
-    | None -> assert false
+    Some(v) -> assert (v == 15)
+    None -> assert false
     end
   end
 
@@ -269,12 +270,12 @@ describe "string keys" do
     let m = Map.insert(Map.insert(Map.empty(), "hello", 1, str_cmp), "world", 2, str_cmp)
     assert (Map.size(m) == 2)
     match Map.get(m, "hello", str_cmp) do
-    | Some(v) -> assert (v == 1)
-    | None -> assert false
+    Some(v) -> assert (v == 1)
+    None -> assert false
     end
     match Map.get(m, "world", str_cmp) do
-    | Some(v) -> assert (v == 2)
-    | None -> assert false
+    Some(v) -> assert (v == 2)
+    None -> assert false
     end
     assert Option.is_none(Map.get(m, "missing", str_cmp))
   end

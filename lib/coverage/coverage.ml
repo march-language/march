@@ -70,7 +70,7 @@ let span_of_expr (e : expr) : span =
   | ELam (_, _, sp) | EBlock (_, sp) | ELet (_, sp)
   | EMatch (_, _, sp) | ETuple (_, sp) | ERecord (_, sp)
   | ERecordUpdate (_, _, sp) | EField (_, _, sp)
-  | EIf (_, _, _, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
+  | EIf (_, _, _, sp) | ECond (_, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
   | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
   | ESpawn (_, sp) | EDbg (_, sp) | ELetFn (_, _, _, _, sp) -> sp
   | EAssert (_, sp) -> sp
@@ -98,6 +98,12 @@ let rec walk_expr ~file acc_e acc_b (e : expr) : unit =
     walk_expr ~file acc_e acc_b cond;
     walk_expr ~file acc_e acc_b then_;
     walk_expr ~file acc_e acc_b else_
+  | ECond (arms, _) ->
+    acc_b := !acc_b + List.length arms;
+    List.iter (fun (ce, be) ->
+      walk_expr ~file acc_e acc_b ce;
+      walk_expr ~file acc_e acc_b be
+    ) arms
   | EMatch (scrut, branches, _) ->
     walk_expr ~file acc_e acc_b scrut;
     List.iter (fun br ->

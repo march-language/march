@@ -5,8 +5,8 @@
 mod Fib do
 
 pfn fib(n : Int) : Int do
-  if n < 2 then n
-  else fib(n - 1) + fib(n - 2)
+  if n < 2 do n
+  else fib(n - 1) + fib(n - 2) end
 end
 
 pfn main() : Unit do

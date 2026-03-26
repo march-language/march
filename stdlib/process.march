@@ -64,22 +64,30 @@ end
 
 doc "Extract the exit code from a ProcessResult."
 fn exit_code(r) do
-  match r do | ProcessResult(code, _, _) -> code end
+  match r do
+  ProcessResult(code, _, _) -> code
+  end
 end
 
 doc "Extract captured stdout from a ProcessResult."
 fn stdout(r) do
-  match r do | ProcessResult(_, out, _) -> out end
+  match r do
+  ProcessResult(_, out, _) -> out
+  end
 end
 
 doc "Extract captured stderr from a ProcessResult."
 fn stderr(r) do
-  match r do | ProcessResult(_, _, err) -> err end
+  match r do
+  ProcessResult(_, _, err) -> err
+  end
 end
 
 doc "True if the command exited with code 0."
 fn ok(r) do
-  match r do | ProcessResult(code, _, _) -> code == 0 end
+  match r do
+  ProcessResult(code, _, _) -> code == 0
+  end
 end
 
 end

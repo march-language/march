@@ -4,7 +4,7 @@
 mod TestMath do
 
 pfn approx_eq(a : Float, b : Float) : Bool do
-  let diff = if a > b then a - b else b - a
+  let diff = if a > b do a - b else b - a end
   diff < 0.0001
 end
 

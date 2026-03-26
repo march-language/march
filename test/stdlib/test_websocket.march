@@ -15,57 +15,58 @@ describe "WsFrame constructors" do
   test "TextFrame stores content" do
     let f = TextFrame("hello")
     match f do
-    | TextFrame(s) -> assert (s == "hello")
-    | _            -> assert false
+    TextFrame(s) -> assert (s == "hello")
+    _            -> assert false
     end
   end
 
   test "BinaryFrame stores content" do
     let f = BinaryFrame("\x00\x01\x02")
     match f do
-    | BinaryFrame(s) -> assert (s == "\x00\x01\x02")
-    | _              -> assert false
+    BinaryFrame(s) -> assert (s == "\x00\x01\x02")
+    _              -> assert false
     end
   end
 
   test "Ping constructor" do
     let f = Ping
     match f do
-    | Ping -> ()
-    | _    -> assert false
+    Ping -> ()
+    _    -> assert false
     end
   end
 
   test "Pong constructor" do
     let f = Pong
     match f do
-    | Pong -> ()
-    | _    -> assert false
+    Pong -> ()
+    _    -> assert false
     end
   end
 
   test "Close stores code and reason" do
     let f = Close(1000, "normal closure")
     match f do
-    | Close(code, reason) ->
+    Close(code, reason) -> do
       assert (code == 1000)
       assert (reason == "normal closure")
-    | _ -> assert false
+    end
+    _ -> assert false
     end
   end
 
   test "empty TextFrame" do
     let f = TextFrame("")
     match f do
-    | TextFrame(s) -> assert (s == "")
-    | _            -> assert false
+    TextFrame(s) -> assert (s == "")
+    _            -> assert false
     end
   end
 
   test "Close code variants" do
-    match Close(1000, "normal") do | Close(c, _) -> assert (c == 1000) | _ -> () end
-    match Close(1001, "going away") do | Close(c, _) -> assert (c == 1001) | _ -> () end
-    match Close(1011, "server error") do | Close(c, _) -> assert (c == 1011) | _ -> () end
+    match Close(1000, "normal") do Close(c, _) -> assert (c == 1000) _ -> () end
+    match Close(1001, "going away") do Close(c, _) -> assert (c == 1001) _ -> () end
+    match Close(1011, "server error") do Close(c, _) -> assert (c == 1011) _ -> () end
   end
 end
 
@@ -73,7 +74,7 @@ describe "WsSocket constructor" do
   test "WsSocket stores fd" do
     let s = WsSocket(42)
     match s do
-    | WsSocket(fd) -> assert (fd == 42)
+    WsSocket(fd) -> assert (fd == 42)
     end
   end
 end
@@ -82,45 +83,46 @@ describe "SelectResult constructors" do
   test "WsData wraps a frame" do
     let r = WsData(TextFrame("hi"))
     match r do
-    | WsData(f) ->
+    WsData(f) -> do
       match f do
-      | TextFrame(s) -> assert (s == "hi")
-      | _            -> assert false
+      TextFrame(s) -> assert (s == "hi")
+      _            -> assert false
       end
-    | _ -> assert false
+    end
+    _ -> assert false
     end
   end
 
   test "ActorMsg constructor" do
     let r = ActorMsg
     match r do
-    | ActorMsg -> ()
-    | _        -> assert false
+    ActorMsg -> ()
+    _        -> assert false
     end
   end
 
   test "Timeout constructor" do
     let r = Timeout
     match r do
-    | Timeout -> ()
-    | _       -> assert false
+    Timeout -> ()
+    _       -> assert false
     end
   end
 end
 
 pfn is_text_frame(f) do
   match f do
-  | TextFrame(_) -> true
-  | _            -> false
+  TextFrame(_) -> true
+  _            -> false
   end
 end
 
 pfn is_control_frame(f) do
   match f do
-  | Ping        -> true
-  | Pong        -> true
-  | Close(_, _) -> true
-  | _           -> false
+  Ping        -> true
+  Pong        -> true
+  Close(_, _) -> true
+  _           -> false
   end
 end
 

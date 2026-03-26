@@ -18,12 +18,12 @@ ptype TransportError =
 
 pfn show_error(e) do
   match e do
-  | ConnectionRefused(s) -> "refused:" ++ s
-  | ConnTimeout(s)       -> "timeout:" ++ s
-  | SendError(s)         -> "send:" ++ s
-  | RecvError(s)         -> "recv:" ++ s
-  | ConnParseError(s)    -> "parse:" ++ s
-  | Closed               -> "closed"
+  ConnectionRefused(s) -> "refused:" ++ s
+  ConnTimeout(s)       -> "timeout:" ++ s
+  SendError(s)         -> "send:" ++ s
+  RecvError(s)         -> "recv:" ++ s
+  ConnParseError(s)    -> "parse:" ++ s
+  Closed               -> "closed"
   end
 end
 
@@ -31,48 +31,48 @@ describe "TransportError constructors" do
   test "ConnectionRefused stores message" do
     let e = ConnectionRefused("localhost:8080")
     match e do
-    | ConnectionRefused(msg) -> assert (msg == "localhost:8080")
-    | _ -> assert false
+    ConnectionRefused(msg) -> assert (msg == "localhost:8080")
+    _ -> assert false
     end
   end
 
   test "ConnTimeout stores message" do
     let e = ConnTimeout("timed out after 30s")
     match e do
-    | ConnTimeout(msg) -> assert (msg == "timed out after 30s")
-    | _ -> assert false
+    ConnTimeout(msg) -> assert (msg == "timed out after 30s")
+    _ -> assert false
     end
   end
 
   test "SendError stores message" do
     let e = SendError("broken pipe")
     match e do
-    | SendError(msg) -> assert (msg == "broken pipe")
-    | _ -> assert false
+    SendError(msg) -> assert (msg == "broken pipe")
+    _ -> assert false
     end
   end
 
   test "RecvError stores message" do
     let e = RecvError("connection reset")
     match e do
-    | RecvError(msg) -> assert (msg == "connection reset")
-    | _ -> assert false
+    RecvError(msg) -> assert (msg == "connection reset")
+    _ -> assert false
     end
   end
 
   test "ConnParseError stores message" do
     let e = ConnParseError("unexpected EOF")
     match e do
-    | ConnParseError(msg) -> assert (msg == "unexpected EOF")
-    | _ -> assert false
+    ConnParseError(msg) -> assert (msg == "unexpected EOF")
+    _ -> assert false
     end
   end
 
   test "Closed constructor" do
     let e = Closed
     match e do
-    | Closed -> ()
-    | _ -> assert false
+    Closed -> ()
+    _ -> assert false
     end
   end
 end

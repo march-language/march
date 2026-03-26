@@ -3,8 +3,8 @@ mod HttpHello do
 
   fn router(conn) do
     match (HttpServer.method(conn), HttpServer.path_info(conn)) do
-    | (Get, Nil) -> conn |> HttpServer.text(200, "Hello from compiled March!")
-    | _ -> conn |> HttpServer.text(404, "Not Found")
+    (Get, Nil) -> conn |> HttpServer.text(200, "Hello from compiled March!")
+    _ -> conn |> HttpServer.text(404, "Not Found")
     end
   end
 

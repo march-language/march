@@ -8,7 +8,7 @@ mod Example do
     fn square(x : Int) : Int do x * x end
     fn cube(x : Int) : Int do x * x * x end
     fn abs_val(n : Int) : Int do
-      if n < 0 then 0 - n else n
+      if n < 0 do 0 - n else n end
     end
   end
 

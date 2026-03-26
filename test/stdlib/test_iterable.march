@@ -57,7 +57,7 @@ describe "flat_map" do
   end
 
   test "flat_map returning mixed empty and non-empty" do
-    assert (Iterable.flat_map([1, 2, 3], fn x -> if x == 2 then Nil else [x]) == [1, 3])
+    assert (Iterable.flat_map([1, 2, 3], fn x -> if x == 2 do Nil else [x]) == [1, 3]) end
   end
 end
 
@@ -397,7 +397,7 @@ describe "enumerate" do
 
   test "enumerate indices are sequential" do
     let indexed = Iterable.enumerate([10, 20, 30, 40])
-    let indices = Iterable.map(indexed, fn p -> match p do | (i, _) -> i end)
+    let indices = Iterable.map(indexed, fn p -> match p do (i, _) -> i end)
     assert (indices == [0, 1, 2, 3])
   end
 end

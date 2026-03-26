@@ -254,7 +254,7 @@ let test_tc_if_bad_cond () =
   (* Condition must be Bool — using Int + 1 should produce an error.
      if/then/else needs no `end`; only fn do…end and match…end do. *)
   let ctx = typecheck {|mod Test do
-    fn bad(x) do if x + 1 then 0 else 1 end
+    fn bad(x) do if x + 1 do 0 else 1 end end
   end|} in
   Alcotest.(check bool) "non-Bool condition is an error" true (has_errors ctx)
 
@@ -268,8 +268,8 @@ let test_tc_match () =
   let ctx = typecheck {|mod Test do
     fn f(x) do
       match x do
-      | 0 -> 1
-      | n -> n + 1
+      0 -> 1
+      n -> n + 1
       end
     end
   end|} in
@@ -477,7 +477,7 @@ let test_linear_pattern_match_ok () =
   let ctx = typecheck {|mod Test do
     fn consume(linear x: Int) : Int do
       match x do
-      | n -> n
+      n -> n
       end
     end
   end|} in
@@ -488,7 +488,7 @@ let test_linear_pattern_match_double_use () =
   let ctx = typecheck {|mod Test do
     fn bad(linear x: Int) : Int do
       match x do
-      | n -> n + n
+      n -> n + n
       end
     end
   end|} in
@@ -1781,7 +1781,7 @@ let test_eval_recursion () =
 
 let test_eval_if () =
   let env = eval_module {|mod Test do
-    fn abs(x) do if x < 0 then negate(x) else x end
+    fn abs(x) do if x < 0 do negate(x) else x end end
   end|} in
   let v = call_fn env "abs" [March_eval.Eval.VInt (-5)] in
   Alcotest.(check int) "abs(-5) = 5" 5
@@ -1792,8 +1792,8 @@ let test_eval_match_adt () =
     type Shape = Circle(Int) | Square(Int)
     fn area(s) do
       match s do
-      | Circle(r) -> r * r
-      | Square(side) -> side * side
+      Circle(r) -> r * r
+      Square(side) -> side * side
       end
     end
   end|} in
@@ -1849,7 +1849,7 @@ let test_parse_negative_lit_pattern () =
     fn f(n) do
       match n do
       | -1 -> true
-      | _  -> false
+      _  -> false
       end
     end
   end|} in
@@ -1895,12 +1895,14 @@ let test_eval_multi_stmt_match_arm () =
   let env = eval_module {|mod Test do
     fn classify(n) do
       match n do
-      | 0 ->
+      0 -> do
         let tag = 0
         tag
-      | _ ->
+      end
+      _ -> do
         let tag = 1
         tag
+      end
       end
     end
   end|} in
@@ -2176,7 +2178,7 @@ let test_tir_lower_let () =
 
 let test_tir_lower_if () =
   let m = lower_module {|mod Test do
-    fn pick(b : Bool) : Int do if b then 1 else 0 end
+    fn pick(b : Bool) : Int do if b do 1 else 0 end end
   end|} in
   let f = find_fn "pick" m in
   let rec has_case = function
@@ -2230,8 +2232,8 @@ let test_tir_lower_match () =
     type Shape = Circle(Int) | Square(Int)
     fn area(s) do
       match s do
-      | Circle(r) -> r
-      | Square(side) -> side
+      Circle(r) -> r
+      Square(side) -> side
       end
     end
   end|} in
@@ -2318,8 +2320,8 @@ let test_tir_lower_patvar_default () =
   let m = lower_module {|mod Test do
     fn label(n) do
       match n do
-      | 0 -> 0
-      | other -> other
+      0 -> 0
+      other -> other
       end
     end
   end|} in
@@ -2379,15 +2381,15 @@ let test_tir_lower_list_ops () =
 
     fn map(f, xs) do
       match xs do
-      | Nil -> Nil()
-      | Cons(h, t) -> Cons(f(h), map(f, t))
+      Nil -> Nil()
+      Cons(h, t) -> Cons(f(h), map(f, t))
       end
     end
 
     fn length(xs) do
       match xs do
-      | Nil -> 0
-      | Cons(h, t) -> 1 + length(t)
+      Nil -> 0
+      Cons(h, t) -> 1 + length(t)
       end
     end
   end|} in
@@ -2875,9 +2877,9 @@ let test_repl_parity_match () =
   match repl_eval_exprs [
     {|type Color = Red | Green | Blue|};
     {|match Red do
-  | Red   -> "red"
-  | Green -> "green"
-  | Blue  -> "blue"
+  Red   -> "red"
+  Green -> "green"
+  Blue  -> "blue"
 end|};
   ] with
   | [`DeclOk; `Ok ({|"red"|}, "String")] -> ()
@@ -2897,12 +2899,12 @@ let test_repl_parity_mutual_recursion () =
   match repl_eval_exprs [
     {|mod MutRec do
   fn is_even(n) do
-    if n == 0 then true
-    else is_odd(n - 1)
+    if n == 0 do true
+    else is_odd(n - 1) end
   end
   fn is_odd(n) do
-    if n == 0 then false
-    else is_even(n - 1)
+    if n == 0 do false
+    else is_even(n - 1) end
   end
 end|};
     {|MutRec.is_even(4)|};
@@ -2937,7 +2939,7 @@ let test_repl_parity_records () =
 
 let test_repl_parity_if_else () =
   match repl_eval_exprs [
-    {|if 1 < 2 then "yes" else "no"|};
+    {|if 1 < 2 do "yes" else "no" end|};
   ] with
   | [`Ok ({|"yes"|}, "String")] -> ()
   | _ -> Alcotest.fail "if/else in REPL"
@@ -3565,15 +3567,15 @@ let test_fusion_map_fold () =
 
     fn imap(xs : IntList, f : Int -> Int) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) -> ICons(f(h), imap(t, f))
+      INil        -> INil
+      ICons(h, t) -> ICons(f(h), imap(t, f))
       end
     end
 
     fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
       match xs do
-      | INil        -> acc
-      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
       end
     end
 
@@ -3592,17 +3594,18 @@ let test_fusion_filter_fold () =
 
     fn ifilter(xs : IntList, p : Int -> Bool) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) ->
-        if p(h) then ICons(h, ifilter(t, p))
-        else ifilter(t, p)
+      INil        -> INil
+      ICons(h, t) -> do
+        if p(h) do ICons(h, ifilter(t, p))
+        else ifilter(t, p) end
+        end
       end
     end
 
     fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
       match xs do
-      | INil        -> acc
-      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
       end
     end
 
@@ -3621,15 +3624,15 @@ let test_fusion_eliminates_intermediate () =
 
     fn imap(xs : IntList, f : Int -> Int) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) -> ICons(f(h), imap(t, f))
+      INil        -> INil
+      ICons(h, t) -> ICons(f(h), imap(t, f))
       end
     end
 
     fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
       match xs do
-      | INil        -> acc
-      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
       end
     end
 
@@ -3652,22 +3655,22 @@ let test_fusion_no_fuse_multi_use () =
 
     fn imap(xs : IntList, f : Int -> Int) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) -> ICons(f(h), imap(t, f))
+      INil        -> INil
+      ICons(h, t) -> ICons(f(h), imap(t, f))
       end
     end
 
     fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
       match xs do
-      | INil        -> acc
-      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
       end
     end
 
     fn ilength(xs : IntList) : Int do
       match xs do
-      | INil        -> 0
-      | ICons(_, t) -> 1 + ilength(t)
+      INil        -> 0
+      ICons(_, t) -> 1 + ilength(t)
       end
     end
 
@@ -3689,17 +3692,18 @@ let test_fusion_no_fuse_impure () =
 
     fn imap_print(xs : IntList, f : Int -> Int) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) ->
+      INil        -> INil
+      ICons(h, t) -> do
         let _ = println(int_to_string(h))
         ICons(f(h), imap_print(t, f))
+      end
       end
     end
 
     fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
       match xs do
-      | INil        -> acc
-      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
       end
     end
 
@@ -3719,15 +3723,15 @@ let test_fusion_fused_fn_in_tm_fns () =
 
     fn imap(xs : IntList, f : Int -> Int) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) -> ICons(f(h), imap(t, f))
+      INil        -> INil
+      ICons(h, t) -> ICons(f(h), imap(t, f))
       end
     end
 
     fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
       match xs do
-      | INil        -> acc
-      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
       end
     end
 
@@ -3758,24 +3762,25 @@ let test_fusion_map_filter_fold () =
 
     fn imap(xs : IntList, f : Int -> Int) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) -> ICons(f(h), imap(t, f))
+      INil        -> INil
+      ICons(h, t) -> ICons(f(h), imap(t, f))
       end
     end
 
     fn ifilter(xs : IntList, p : Int -> Bool) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) ->
-        if p(h) then ICons(h, ifilter(t, p))
-        else ifilter(t, p)
+      INil        -> INil
+      ICons(h, t) -> do
+        if p(h) do ICons(h, ifilter(t, p))
+        else ifilter(t, p) end
+        end
       end
     end
 
     fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
       match xs do
-      | INil        -> acc
-      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
       end
     end
 
@@ -4905,8 +4910,8 @@ let test_tco_factorial_has_loop () =
   let ir = emit_tco_ir {|mod Test do
     @[no_warn_recursion]
     fn factorial(n : Int, acc : Int) : Int do
-      if n == 0 then acc
-      else factorial(n - 1, n * acc)
+      if n == 0 do acc
+      else factorial(n - 1, n * acc) end
     end
     fn main() : Unit do println(int_to_string(factorial(10, 1))) end
   end|} in
@@ -4923,8 +4928,8 @@ let test_tco_fold_has_loop () =
     @[no_warn_recursion]
     fn fold(xs : L, acc : Int) : Int do
       match xs do
-      | Nil        -> acc
-      | Cons(h, t) -> fold(t, acc + h)
+      Nil        -> acc
+      Cons(h, t) -> fold(t, acc + h)
       end
     end
     fn main() : Unit do println(int_to_string(fold(Cons(1, Cons(2, Nil)), 0))) end
@@ -4939,8 +4944,8 @@ let test_tco_nontail_fib_no_loop () =
   let ir = emit_tco_ir {|mod Test do
     @[no_warn_recursion]
     fn fib(n : Int) : Int do
-      if n < 2 then n
-      else fib(n - 1) + fib(n - 2)
+      if n < 2 do n
+      else fib(n - 1) + fib(n - 2) end
     end
     fn main() : Unit do println(int_to_string(fib(10))) end
   end|} in
@@ -4954,8 +4959,8 @@ let test_tco_countdown_has_loop () =
   let ir = emit_tco_ir {|mod Test do
     @[no_warn_recursion]
     fn count(n : Int) : Int do
-      if n == 0 then 0
-      else count(n - 1)
+      if n == 0 do 0
+      else count(n - 1) end
     end
     fn main() : Unit do println(int_to_string(count(100))) end
   end|} in
@@ -4976,11 +4981,11 @@ let test_mutual_tco_even_odd_loop_emitted () =
   let ir = emit_mutual_tco_ir {|mod Test do
     @[no_warn_recursion]
     fn even(n : Int) : Bool do
-      if n == 0 then true else odd(n - 1)
+      if n == 0 do true else odd(n - 1) end
     end
     @[no_warn_recursion]
     fn odd(n : Int) : Bool do
-      if n == 0 then false else even(n - 1)
+      if n == 0 do false else even(n - 1) end
     end
     fn main() : Unit do println(to_string(even(1000000))) end
   end|} in
@@ -5001,15 +5006,15 @@ let test_mutual_tco_three_way () =
   let ir = emit_mutual_tco_ir {|mod Test do
     @[no_warn_recursion]
     fn fa(n : Int) : Int do
-      if n == 0 then 0 else fb(n - 1)
+      if n == 0 do 0 else fb(n - 1) end
     end
     @[no_warn_recursion]
     fn fb(n : Int) : Int do
-      if n == 0 then 0 else fc(n - 1)
+      if n == 0 do 0 else fc(n - 1) end
     end
     @[no_warn_recursion]
     fn fc(n : Int) : Int do
-      if n == 0 then 0 else fa(n - 1)
+      if n == 0 do 0 else fa(n - 1) end
     end
     fn main() : Unit do println(int_to_string(fa(99))) end
   end|} in
@@ -5025,11 +5030,11 @@ let test_mutual_tco_state_machine () =
   let ir = emit_mutual_tco_ir {|mod Test do
     @[no_warn_recursion]
     fn state_a(n : Int) : Int do
-      if n <= 0 then 1 else state_b(n - 1)
+      if n <= 0 do 1 else state_b(n - 1) end
     end
     @[no_warn_recursion]
     fn state_b(n : Int) : Int do
-      if n <= 0 then 2 else state_a(n - 1)
+      if n <= 0 do 2 else state_a(n - 1) end
     end
     fn main() : Unit do println(int_to_string(state_a(1000000))) end
   end|} in
@@ -5044,11 +5049,11 @@ let test_mutual_tco_non_tail_no_loop () =
   let ir = emit_mutual_tco_ir {|mod Test do
     @[no_warn_recursion]
     fn count_f(n : Int) : Int do
-      if n == 0 then 1 else count_g(n - 1) + 1
+      if n == 0 do 1 else count_g(n - 1) + 1 end
     end
     @[no_warn_recursion]
     fn count_g(n : Int) : Int do
-      if n == 0 then 1 else count_f(n - 1) + 1
+      if n == 0 do 1 else count_f(n - 1) + 1 end
     end
     fn main() : Unit do println(int_to_string(count_f(10))) end
   end|} in
@@ -5062,7 +5067,7 @@ let test_mutual_tco_self_tco_unaffected () =
   let ir = emit_mutual_tco_ir {|mod Test do
     @[no_warn_recursion]
     fn countdown(n : Int) : Int do
-      if n == 0 then 0 else countdown(n - 1)
+      if n == 0 do 0 else countdown(n - 1) end
     end
     fn main() : Unit do println(int_to_string(countdown(10))) end
   end|} in
@@ -5077,8 +5082,8 @@ let test_mutual_tco_self_tco_unaffected () =
 let test_phase4_nonleaf_has_reduction_check () =
   let ir = emit_tco_ir {|mod Test do
     fn fib(n : Int) : Int do
-      if n <= 1 then n
-      else fib(n - 1) + fib(n - 2)
+      if n <= 1 do n
+      else fib(n - 1) + fib(n - 2) end
     end
     fn main() : Unit do println(int_to_string(fib(10))) end
   end|} in
@@ -5109,7 +5114,7 @@ let test_phase4_tco_fn_reduction_in_loop () =
   let ir = emit_tco_ir {|mod Test do
     @[no_warn_recursion]
     fn countdown(n : Int) : Int do
-      if n == 0 then 0 else countdown(n - 1)
+      if n == 0 do 0 else countdown(n - 1) end
     end
     fn main() : Unit do println(int_to_string(countdown(100))) end
   end|} in
@@ -5189,7 +5194,7 @@ let test_borrow_read_only_param_is_borrowed () =
   let bm = borrow_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do Conn(s) -> println(s) end
     end
   end|} in
   Alcotest.(check bool) "log's conn param is borrowed" true
@@ -5232,7 +5237,7 @@ let test_borrow_passed_to_borrowed_callee_stays_borrowed () =
   let bm = borrow_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do Conn(s) -> println(s) end
     end
     fn log_twice(conn : Conn) : Unit do
       log(conn)
@@ -5270,7 +5275,7 @@ let test_borrow_no_incrc_at_call_site () =
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do Conn(s) -> println(s) end
     end
     fn handle(conn : Conn) : Conn do
       log(conn)
@@ -5292,7 +5297,7 @@ let test_borrow_no_decrc_in_callee () =
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do Conn(s) -> println(s) end
     end
   end|} in
   let log_fn =
@@ -5332,10 +5337,10 @@ let test_borrow_conn_middleware_pattern () =
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log_middleware(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do Conn(s) -> println(s) end
     end
     fn auth_middleware(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do Conn(s) -> println(s) end
     end
     fn handle(conn : Conn) : Conn do
       log_middleware(conn)
@@ -6527,8 +6532,8 @@ let test_replay () =
 mod Test do
   fn factorial(n) do
     dbg()
-    if n <= 1 then 1
-    else n * factorial(n - 1)
+    if n <= 1 do 1
+    else n * factorial(n - 1) end
   end
   fn main() do
     factorial(3)
@@ -7905,8 +7910,8 @@ let test_http_parse_url () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.parse_url("https://example.com/path?q=1") do
-      | Ok(req) -> Http.host(req)
-      | Err(_) -> "fail"
+      Ok(req) -> Http.host(req)
+      Err(_) -> "fail"
       end
     end
   end|} in
@@ -7916,12 +7921,13 @@ let test_http_parse_url_scheme () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.parse_url("http://localhost:8080/api") do
-      | Ok(req) ->
+      Ok(req) -> do
         match Http.scheme(req) do
-        | SchemeHttp -> "http"
-        | SchemeHttps -> "https"
+        SchemeHttp -> "http"
+        SchemeHttps -> "https"
         end
-      | Err(_) -> "fail"
+        end
+      Err(_) -> "fail"
       end
     end
   end|} in
@@ -7931,8 +7937,8 @@ let test_http_parse_url_path () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.parse_url("https://example.com/api/v1") do
-      | Ok(req) -> Http.path(req)
-      | Err(_) -> "fail"
+      Ok(req) -> Http.path(req)
+      Err(_) -> "fail"
       end
     end
   end|} in
@@ -7942,12 +7948,13 @@ let test_http_parse_url_port () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.parse_url("http://localhost:3000/") do
-      | Ok(req) ->
+      Ok(req) -> do
         match Http.port(req) do
-        | Some(p) -> p
-        | None -> 0
+        Some(p) -> p
+        None -> 0
         end
-      | Err(_) -> -1
+        end
+      Err(_) -> -1
       end
     end
   end|} in
@@ -7957,9 +7964,9 @@ let test_http_parse_url_invalid () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.parse_url("ftp://bad") do
-      | Ok(_) -> "ok"
-      | Err(InvalidScheme(_)) -> "invalid_scheme"
-      | Err(_) -> "other_error"
+      Ok(_) -> "ok"
+      Err(InvalidScheme(_)) -> "invalid_scheme"
+      Err(_) -> "other_error"
       end
     end
   end|} in
@@ -7969,13 +7976,14 @@ let test_http_set_header () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.get("https://example.com") do
-      | Ok(req) ->
+      Ok(req) -> do
         let req = Http.set_header(req, "Accept", "application/json")
         match Http.get_request_header(req, "accept") do
-        | Some(v) -> v
-        | None -> "none"
+        Some(v) -> v
+        None -> "none"
         end
-      | Err(_) -> "error"
+        end
+      Err(_) -> "error"
       end
     end
   end|} in
@@ -7985,8 +7993,8 @@ let test_http_method_to_string () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.post("https://example.com", ()) do
-      | Ok(req) -> Http.method_to_string(Http.method(req))
-      | Err(_) -> "fail"
+      Ok(req) -> Http.method_to_string(Http.method(req))
+      Err(_) -> "fail"
       end
     end
   end|} in
@@ -8002,8 +8010,8 @@ let test_http_post_constructor () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.post("https://example.com/api", "body data") do
-      | Ok(req) -> Http.method_to_string(Http.method(req))
-      | Err(_) -> "fail"
+      Ok(req) -> Http.method_to_string(Http.method(req))
+      Err(_) -> "fail"
       end
     end
   end|} in
@@ -8106,8 +8114,8 @@ let test_http_client_add_steps () =
       let c = HttpClient.add_request_step(c, "headers", HttpClient.step_default_headers)
       fn count(xs) do
         match xs do
-        | Nil -> 0
-        | Cons(_, t) -> 1 + count(t)
+        Nil -> 0
+        Cons(_, t) -> 1 + count(t)
         end
       end
       count(HttpClient.list_steps(c))
@@ -8119,16 +8127,17 @@ let test_http_client_request_step_transforms () =
   let env = eval_with_http_client {|mod Test do
     fn f() do
       match Http.get("http://example.com") do
-      | Err(_) -> "fail"
-      | Ok(req) ->
+      Err(_) -> "fail"
+      Ok(req) -> do
         let step = HttpClient.step_bearer_auth("my-token")
         match step(req) do
-        | Err(_) -> "fail"
-        | Ok(transformed) ->
+        Err(_) -> "fail"
+        Ok(transformed) ->
           match Http.get_request_header(transformed, "authorization") do
-          | Some(v) -> v
-          | None -> "none"
+          Some(v) -> v
+          None -> "none"
           end
+        end
         end
       end
     end
@@ -8139,13 +8148,14 @@ let test_http_client_raise_on_error_status () =
   let env = eval_with_http_client {|mod Test do
     fn f() do
       match Http.get("http://example.com") do
-      | Err(_) -> "url_fail"
-      | Ok(req) ->
+      Err(_) -> "url_fail"
+      Ok(req) -> do
         let resp = Response(Status(500), Nil, "Internal Server Error")
         match HttpClient.step_raise_on_error(req, resp) do
-        | Ok(_) -> "ok"
-        | Err(StepError(name, code)) -> name ++ ":" ++ code
-        | Err(_) -> "other_error"
+        Ok(_) -> "ok"
+        Err(StepError(name, code)) -> name ++ ":" ++ code
+        Err(_) -> "other_error"
+        end
         end
       end
     end
@@ -8158,8 +8168,8 @@ let test_http_client_with_redirects () =
       let c = HttpClient.new_client()
       let c = HttpClient.with_redirects(c, 5)
       match HttpClient.list_steps(c) do
-      | Nil -> "empty"
-      | _ -> "has_steps"
+      Nil -> "empty"
+      _ -> "has_steps"
       end
     end
   end|} in
@@ -8172,8 +8182,8 @@ let test_http_client_base_url_step () =
       -- Create a request with just a path
       let req = Request(Get, SchemeHttp, "", None, "/users", None, Nil, "")
       match step(req) do
-      | Ok(transformed) -> Http.host(transformed)
-      | Err(_) -> "fail"
+      Ok(transformed) -> Http.host(transformed)
+      Err(_) -> "fail"
       end
     end
   end|} in
@@ -8185,12 +8195,13 @@ let test_http_client_content_type_step () =
       let step = HttpClient.step_content_type("application/json")
       let req = Request(Post, SchemeHttp, "example.com", None, "/api", None, Nil, "{}")
       match step(req) do
-      | Ok(transformed) ->
+      Ok(transformed) -> do
         match Http.get_request_header(transformed, "content-type") do
-        | Some(v) -> v
-        | None -> "none"
+        Some(v) -> v
+        None -> "none"
         end
-      | Err(_) -> "fail"
+        end
+      Err(_) -> "fail"
       end
     end
   end|} in
@@ -8217,7 +8228,7 @@ let test_reduction_counter_exhausts () =
 
 let test_eval_yields_after_budget () =
   let src = {|mod Test do
-    fn countdown(n) do if n <= 0 then 0 else countdown(n - 1) end
+    fn countdown(n) do if n <= 0 do 0 else countdown(n - 1) end end
   end|} in
   let env = eval_module src in
   March_eval.Eval.set_reduction_counting true;
@@ -8232,7 +8243,7 @@ let test_eval_yields_after_budget () =
 let test_eval_no_yield_when_disabled () =
   March_eval.Eval.set_reduction_counting false;
   let src = {|mod Test do
-    fn countdown(n) do if n <= 0 then 0 else countdown(n - 1) end
+    fn countdown(n) do if n <= 0 do 0 else countdown(n - 1) end end
   end|} in
   let env = eval_module src in
   let v = call_fn env "countdown" [March_eval.Eval.VInt 100_000] in
@@ -8501,7 +8512,7 @@ let test_receive_inside_handler () =
       on Dispatch() do
         let follow = receive()
         match follow do
-        | Followup(n) -> { got = n }
+        Followup(n) -> { got = n }
         end
       end
     end
@@ -8715,8 +8726,8 @@ let test_self_send_from_handler () =
 let test_eval_reduction_count () =
   let src = {|mod Test do
     fn countdown(n) do
-      if n <= 0 then 0
-      else countdown(n - 1)
+      if n <= 0 do 0
+      else countdown(n - 1) end
     end
 
     fn main() do
@@ -9708,8 +9719,8 @@ let test_supervision_send_checked_ok () =
     fn main() do
       let pid = spawn(Counter)
       match get_cap(pid) do
-      | None -> :error
-      | Some(cap) -> send_checked(cap, Inc())
+      None -> :error
+      Some(cap) -> send_checked(cap, Inc())
       end
     end
   end|} in
@@ -9734,10 +9745,11 @@ let test_supervision_send_checked_dead_actor () =
     fn main() do
       let pid = spawn(A)
       match get_cap(pid) do
-      | None -> :error
-      | Some(cap) ->
+      None -> :error
+      Some(cap) -> do
         kill(pid)
         send_checked(cap, Noop())
+        end
       end
     end
   end|} in
@@ -9818,10 +9830,11 @@ let test_supervision_revoke_cap_blocks_send () =
     fn main() do
       let pid = spawn(A)
       match get_cap(pid) do
-      | None -> :error
-      | Some(cap) ->
+      None -> :error
+      Some(cap) -> do
         revoke_cap(cap)
         send_checked(cap, Noop())
+        end
       end
     end
   end|} in
@@ -9843,11 +9856,12 @@ let test_supervision_revoke_cap_idempotent () =
     fn main() do
       let pid = spawn(A)
       match get_cap(pid) do
-      | None -> :error
-      | Some(cap) ->
+      None -> :error
+      Some(cap) -> do
         revoke_cap(cap)
         revoke_cap(cap)
         :ok
+        end
       end
     end
   end|} in
@@ -9867,14 +9881,15 @@ let test_supervision_is_cap_valid () =
     fn main() do
       let pid = spawn(A)
       match get_cap(pid) do
-      | None -> :error
-      | Some(cap) ->
+      None -> :error
+      Some(cap) -> do
         let before = is_cap_valid(cap)
         revoke_cap(cap)
         let after = is_cap_valid(cap)
-        if before == true then
-          if after == false then :ok else :bad_after
-        else :bad_before
+        if before == true do
+          if after == false do :ok else :bad_after end
+        else :bad_before end
+        end
       end
     end
   end|} in
@@ -9894,10 +9909,11 @@ let test_supervision_send_revoked_cap_errors () =
     fn main() do
       let pid = spawn(A)
       match get_cap(pid) do
-      | None -> :setup_error
-      | Some(cap) ->
+      None -> :setup_error
+      Some(cap) -> do
         revoke_cap(cap)
         cap
+        end
       end
     end
   end|} in
@@ -9929,14 +9945,15 @@ let test_supervision_revoke_without_kill () =
     fn main() do
       let pid = spawn(A)
       match get_cap(pid) do
-      | None -> :error
-      | Some(cap) ->
+      None -> :error
+      Some(cap) -> do
         revoke_cap(cap)
         let alive = is_alive(pid)
         let valid = is_cap_valid(cap)
-        if alive == true then
-          if valid == false then :ok else :still_valid
-        else :actor_dead
+        if alive == true do
+          if valid == false do :ok else :still_valid end
+        else :actor_dead end
+        end
       end
     end
   end|} in
@@ -10198,9 +10215,10 @@ let test_seq_fold_while () =
   let env = eval_with_seq {|mod T do
     fn f() do
       let s = Seq.from_list([1,2,3,4,5])
-      Seq.fold_while(s, 0, fn(sum, x) ->
-        if sum + x > 6 then Halt(sum)
-        else Continue(sum + x)
+      Seq.fold_while(s, 0, fn(sum, x) -> do
+        if sum + x > 6 do Halt(sum)
+        else Continue(sum + x) end
+        end
       )
     end
   end|} in
@@ -10313,8 +10331,8 @@ let test_file_read () =
     let env = eval_with_file (Printf.sprintf {|mod T do
       fn f() do
         match File.read("%s") do
-        | Ok(s) -> s
-        | Err(ig) -> "fail"
+        Ok(s) -> s
+        Err(ig) -> "fail"
         end
       end
     end|} path) in
@@ -10327,12 +10345,13 @@ let test_file_write_read () =
      let env = eval_with_file (Printf.sprintf {|mod T do
        fn f() do
          match File.write("%s", "written data") do
-         | Ok(ig) ->
+         Ok(ig) -> do
            match File.read("%s") do
-           | Ok(s) -> s
-           | Err(ig) -> "read fail"
+           Ok(s) -> s
+           Err(ig) -> "read fail"
            end
-         | Err(ig) -> "write fail"
+           end
+         Err(ig) -> "write fail"
          end
        end
      end|} path path) in
@@ -10356,8 +10375,8 @@ let test_file_with_lines () =
       fn collect_lines(lines) do Seq.to_list(Seq.map(lines, fn l -> append_bang(l))) end
       fn f() do
         match File.with_lines("%s", fn lines -> collect_lines(lines)) do
-        | Ok(xs) -> xs
-        | Err(ig) -> Nil
+        Ok(xs) -> xs
+        Err(ig) -> Nil
         end
       end
     end|} path) in
@@ -10368,8 +10387,8 @@ let test_file_not_found () =
   let env = eval_with_file {|mod T do
     fn f() do
       match File.read("/nonexistent/path/xyz_march_test.txt") do
-      | Ok(ig) -> "ok"
-      | Err(ig) -> "err"
+      Ok(ig) -> "ok"
+      Err(ig) -> "err"
       end
     end
   end|} in
@@ -10384,8 +10403,8 @@ let test_file_append () =
          File.write("%s", "line1\n")
          File.append("%s", "line2\n")
          match File.read("%s") do
-         | Ok(s) -> s
-         | Err(ig) -> "fail"
+         Ok(s) -> s
+         Err(ig) -> "fail"
          end
        end
      end|} path path path) in
@@ -10417,15 +10436,16 @@ let test_dir_mkdir_list_rmdir () =
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
       match Dir.mkdir("%s") do
-      | Err(e) -> "mkdir failed: " ++ to_string(e)
-      | Ok(ig) ->
+      Err(e) -> "mkdir failed: " ++ to_string(e)
+      Ok(ig) -> do
         match Dir.list("%s") do
-        | Err(ig) -> "list failed"
-        | Ok(ig) ->
+        Err(ig) -> "list failed"
+        Ok(ig) ->
           match Dir.rmdir("%s") do
-          | Err(ig) -> "rmdir failed"
-          | Ok(ig) -> "ok"
+          Err(ig) -> "rmdir failed"
+          Ok(ig) -> "ok"
           end
+        end
         end
       end
     end
@@ -10444,8 +10464,8 @@ let test_dir_rm_rf () =
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
       match Dir.rm_rf("%s") do
-      | Ok(ig) -> "ok"
-      | Err(ig) -> "err"
+      Ok(ig) -> "ok"
+      Err(ig) -> "err"
       end
     end
   end|} base) in
@@ -10456,8 +10476,8 @@ let test_dir_rm_rf_refuses_root () =
   let env = eval_with_dir {|mod T do
     fn f() do
       match Dir.rm_rf("/") do
-      | Ok(ig) -> "deleted root"
-      | Err(ig) -> "refused"
+      Ok(ig) -> "deleted root"
+      Err(ig) -> "refused"
       end
     end
   end|} in
@@ -10486,8 +10506,8 @@ let test_dir_mkdir_p () =
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
       match Dir.mkdir_p("%s") do
-      | Ok(ig) -> Dir.exists("%s")
-      | Err(ig) -> false
+      Ok(ig) -> Dir.exists("%s")
+      Err(ig) -> false
       end
     end
   end|} deep deep) in
@@ -10514,20 +10534,21 @@ let test_integration_file_pipeline () =
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
       match Dir.list_full("%s") do
-      | Err(ig) -> Nil
-      | Ok(files) ->
+      Err(ig) -> Nil
+      Ok(files) -> do
         let txt_files = List.filter(files, fn(p) -> Path.extension(p) == "txt")
         fn collect(ps, acc) do
           match ps do
-          | Nil -> List.reverse(acc)
-          | Cons(p, rest) ->
+          Nil -> List.reverse(acc)
+          Cons(p, rest) ->
             match File.read_lines(p) do
-            | Ok(ls) -> collect(rest, List.append(List.reverse(ls), acc))
-            | Err(ig) -> collect(rest, acc)
+            Ok(ls) -> collect(rest, List.append(List.reverse(ls), acc))
+            Err(ig) -> collect(rest, acc)
             end
           end
         end
         collect(txt_files, Nil)
+        end
       end
     end
   end|} base) in
@@ -11076,8 +11097,8 @@ let test_array_large () =
   (* Push 40 elements (crosses one full tail flush) and verify get/length *)
   let env = eval_with_array {|mod T do
     fn build(a, i) do
-      if i > 40 then a
-      else build(Array.push(a, i), i + 1)
+      if i > 40 do a
+      else build(Array.push(a, i), i + 1) end
     end
     fn f() do
       let a = build(Array.empty(), 1)
@@ -11127,15 +11148,15 @@ let test_shared_ctor_name_eval () =
     type Color = Red | Green | Blue
     fn shape_val() do
       match Circle(42) do
-      | Circle(r) -> r
-      | Square(s) -> s
+      Circle(r) -> r
+      Square(s) -> s
       end
     end
     fn color_val() do
       match Red do
-      | Red   -> 1
-      | Green -> 2
-      | Blue  -> 3
+      Red   -> 1
+      Green -> 2
+      Blue  -> 3
       end
     end
   end|} in
@@ -11168,8 +11189,8 @@ let test_fn_when_constraint_satisfied () =
     end
     fn contains(xs : List(a), x : a) : Bool when Eq(a) do
       match xs do
-      | Nil -> false
-      | Cons(h, t) -> if eq(h, x) then true else contains(t, x)
+      Nil -> false
+      Cons(h, t) -> if eq(h, x) do true else contains(t, x) end
       end
     end
     fn main() : Bool do
@@ -11184,8 +11205,8 @@ let test_fn_when_constraint_unsatisfied () =
     type Color = Red | Green
     fn contains(xs : List(a), x : a) : Bool when Eq(a) do
       match xs do
-      | Nil -> false
-      | Cons(h, t) -> if eq(h, x) then true else contains(t, x)
+      Nil -> false
+      Cons(h, t) -> if eq(h, x) do true else contains(t, x) end
       end
     end
     fn main() : Bool do
@@ -11242,7 +11263,7 @@ let test_linear_match_arm_double_use () =
   let ctx = typecheck {|mod Test do
     fn double_linear(linear x: Int) : Int do
       match x do
-      | n -> n + n
+      n -> n + n
       end
     end
   end|} in
@@ -12922,7 +12943,7 @@ let test_exhaust_wildcard_ok () =
   let ctx = typecheck {|mod Test do
     fn go(x : Int) : Int do
       match x do
-      | _ -> 0
+      _ -> 0
       end
     end
   end|} in
@@ -12933,7 +12954,7 @@ let test_exhaust_var_ok () =
   let ctx = typecheck {|mod Test do
     fn go(x : Int) : Int do
       match x do
-      | n -> n
+      n -> n
       end
     end
   end|} in
@@ -12946,8 +12967,8 @@ let test_exhaust_bool_complete () =
   let ctx = typecheck {|mod Test do
     fn go(b : Bool) : Int do
       match b do
-      | true  -> 1
-      | false -> 0
+      true  -> 1
+      false -> 0
       end
     end
   end|} in
@@ -12958,7 +12979,7 @@ let test_exhaust_bool_missing_false () =
   let ctx = typecheck {|mod Test do
     fn go(b : Bool) : Int do
       match b do
-      | true -> 1
+      true -> 1
       end
     end
   end|} in
@@ -12969,7 +12990,7 @@ let test_exhaust_bool_missing_true () =
   let ctx = typecheck {|mod Test do
     fn go(b : Bool) : Int do
       match b do
-      | false -> 0
+      false -> 0
       end
     end
   end|} in
@@ -12983,7 +13004,7 @@ let test_exhaust_bool_empty () =
   let ctx = typecheck {|mod Test do
     fn go(b : Bool) : Int do
       match b do
-      | true -> 1
+      true -> 1
       end
     end
   end|} in
@@ -12997,8 +13018,8 @@ let test_exhaust_option_complete () =
   let ctx = typecheck {|mod Test do
     fn go(x : Option(Int)) : Int do
       match x do
-      | None    -> 0
-      | Some(n) -> n
+      None    -> 0
+      Some(n) -> n
       end
     end
   end|} in
@@ -13009,7 +13030,7 @@ let test_exhaust_option_missing_none () =
   let ctx = typecheck {|mod Test do
     fn go(x : Option(Int)) : Int do
       match x do
-      | Some(n) -> n
+      Some(n) -> n
       end
     end
   end|} in
@@ -13020,7 +13041,7 @@ let test_exhaust_option_missing_some () =
   let ctx = typecheck {|mod Test do
     fn go(x : Option(Int)) : Int do
       match x do
-      | None -> 0
+      None -> 0
       end
     end
   end|} in
@@ -13031,8 +13052,8 @@ let test_exhaust_option_wildcard () =
   let ctx = typecheck {|mod Test do
     fn go(x : Option(Int)) : Int do
       match x do
-      | Some(n) -> n
-      | _       -> 0
+      Some(n) -> n
+      _       -> 0
       end
     end
   end|} in
@@ -13046,9 +13067,9 @@ let test_exhaust_3ctor_complete () =
     type Color = Red | Green | Blue
     fn go(c : Color) : Int do
       match c do
-      | Red   -> 0
-      | Green -> 1
-      | Blue  -> 2
+      Red   -> 0
+      Green -> 1
+      Blue  -> 2
       end
     end
   end|} in
@@ -13060,8 +13081,8 @@ let test_exhaust_3ctor_missing_one () =
     type Color = Red | Green | Blue
     fn go(c : Color) : Int do
       match c do
-      | Red   -> 0
-      | Green -> 1
+      Red   -> 0
+      Green -> 1
       end
     end
   end|} in
@@ -13074,9 +13095,9 @@ let test_exhaust_nested_complete () =
   let ctx = typecheck {|mod Test do
     fn go(x : Option(Option(Int))) : Int do
       match x do
-      | None          -> 0
-      | Some(None)    -> 1
-      | Some(Some(n)) -> n
+      None          -> 0
+      Some(None)    -> 1
+      Some(Some(n)) -> n
       end
     end
   end|} in
@@ -13087,8 +13108,8 @@ let test_exhaust_nested_wildcard_inner () =
   let ctx = typecheck {|mod Test do
     fn go(x : Option(Option(Int))) : Int do
       match x do
-      | None    -> 0
-      | Some(_) -> 1
+      None    -> 0
+      Some(_) -> 1
       end
     end
   end|} in
@@ -13099,8 +13120,8 @@ let test_exhaust_nested_missing () =
   let ctx = typecheck {|mod Test do
     fn go(x : Option(Option(Int))) : Int do
       match x do
-      | None       -> 0
-      | Some(None) -> 1
+      None       -> 0
+      Some(None) -> 1
       end
     end
   end|} in
@@ -13114,8 +13135,8 @@ let test_exhaust_int_needs_wildcard () =
   let ctx = typecheck {|mod Test do
     fn go(n : Int) : Int do
       match n do
-      | 0 -> 1
-      | 1 -> 2
+      0 -> 1
+      1 -> 2
       end
     end
   end|} in
@@ -13126,8 +13147,8 @@ let test_exhaust_int_wildcard_ok () =
   let ctx = typecheck {|mod Test do
     fn go(n : Int) : Int do
       match n do
-      | 0 -> 1
-      | _ -> n
+      0 -> 1
+      _ -> n
       end
     end
   end|} in
@@ -13138,8 +13159,8 @@ let test_exhaust_string_needs_wildcard () =
   let ctx = typecheck {|mod Test do
     fn go(s : String) : Int do
       match s do
-      | "hello" -> 1
-      | "world" -> 2
+      "hello" -> 1
+      "world" -> 2
       end
     end
   end|} in
@@ -13150,8 +13171,8 @@ let test_exhaust_string_wildcard_ok () =
   let ctx = typecheck {|mod Test do
     fn go(s : String) : Int do
       match s do
-      | "hello" -> 1
-      | _       -> 0
+      "hello" -> 1
+      _       -> 0
       end
     end
   end|} in
@@ -13165,7 +13186,7 @@ let test_exhaust_guard_skipped () =
   let ctx = typecheck {|mod Test do
     fn go(n : Int) : Int do
       match n do
-      | x when x > 0 -> x
+      x when x > 0 -> x
       end
     end
   end|} in
@@ -13219,8 +13240,8 @@ let test_exhaust_result_complete () =
   let ctx = typecheck {|mod Test do
     fn go(r : Result(Int, String)) : Int do
       match r do
-      | Ok(n)  -> n
-      | Err(_) -> 0
+      Ok(n)  -> n
+      Err(_) -> 0
       end
     end
   end|} in
@@ -13231,7 +13252,7 @@ let test_exhaust_result_missing_err () =
   let ctx = typecheck {|mod Test do
     fn go(r : Result(Int, String)) : Int do
       match r do
-      | Ok(n) -> n
+      Ok(n) -> n
       end
     end
   end|} in
@@ -13380,8 +13401,8 @@ let test_parse_qualified_pat_con () =
   let src = {|mod Test do
     fn f(x) do
       match x do
-      | Result.Ok(v) -> v
-      | Result.Err(e) -> 0
+      Result.Ok(v) -> v
+      Result.Err(e) -> 0
       end
     end
   end|} in
@@ -13421,8 +13442,8 @@ let test_tc_qualified_ctor_pat () =
     type Shape = Circle(Int) | Square(Int)
     fn area(s) do
       match s do
-      | Shape.Circle(r) -> r * r
-      | Shape.Square(side) -> side * side
+      Shape.Circle(r) -> r * r
+      Shape.Square(side) -> side * side
       end
     end
   end|} in
@@ -13456,8 +13477,8 @@ let test_eval_qualified_ctor_expr () =
     fn make() do Color.Green end
     fn is_green(c) do
       match c do
-      | Green -> true
-      | _ -> false
+      Green -> true
+      _ -> false
       end
     end
   end|} in
@@ -13471,8 +13492,8 @@ let test_eval_qualified_ctor_pat () =
     type Shape = Circle(Int) | Square(Int)
     fn area(s) do
       match s do
-      | Shape.Circle(r) -> r * r
-      | Shape.Square(side) -> side * side
+      Shape.Circle(r) -> r * r
+      Shape.Square(side) -> side * side
       end
     end
     fn go() do
@@ -13491,8 +13512,8 @@ let test_eval_qualified_ctor_interop () =
     fn go() do
       let v = Ok(99)
       match v do
-      | Msg.Ok(n) -> n
-      | Msg.Fail -> 0
+      Msg.Ok(n) -> n
+      Msg.Fail -> 0
       end
     end
   end|} in
@@ -13506,8 +13527,8 @@ let test_eval_qualified_and_bare_match () =
     fn go() do
       let v = Msg.Ok(42)
       match v do
-      | Ok(n) -> n
-      | Fail -> 0
+      Ok(n) -> n
+      Fail -> 0
       end
     end
   end|} in
@@ -13529,8 +13550,8 @@ let test_eval_builtin_qualified_ctors () =
     fn wrap(x) do Option.Some(x) end
     fn go() do
       match wrap(7) do
-      | Some(v) -> v
-      | None -> 0
+      Some(v) -> v
+      None -> 0
       end
     end
   end|} in
@@ -13577,7 +13598,7 @@ let test_eq_prop_transitivity_same () =
       let ab = Red == Red
       let bc = Red == Red
       let ac = Red == Red
-      if ab then if bc then ac else false else true
+      if ab do if bc do ac else false end else true end
     end
   end|} in
   Alcotest.(check bool) "Eq transitivity: a==b && b==c => a==c" true
@@ -13751,7 +13772,7 @@ let test_hash_prop_eq_consistency () =
     fn result() : Bool do
       let a = Red
       let b = Red
-      if a == b then hash(a) == hash(b) else true
+      if a == b do hash(a) == hash(b) else true end
     end
   end|} in
   Alcotest.(check bool) "Hash/Eq consistency: a==b => hash(a)==hash(b)" true
@@ -13968,21 +13989,21 @@ let test_parse_deeply_nested_if () =
   (* 8 levels of nested if/then/else *)
   let src = {|mod Test do
     fn deep(x : Int) : Int do
-      if x > 0 then
-        if x > 1 then
-          if x > 2 then
-            if x > 3 then
-              if x > 4 then
-                if x > 5 then
-                  if x > 6 then
-                    if x > 7 then x else 7
-                  else 6
-                else 5
-              else 4
-            else 3
-          else 2
-        else 1
-      else 0
+      if x > 0 do
+        if x > 1 do
+          if x > 2 do
+            if x > 3 do
+              if x > 4 do
+                if x > 5 do
+                  if x > 6 do
+                    if x > 7 do x else 7 end
+                  else 6 end
+                else 5 end
+              else 4 end
+            else 3 end
+          else 2 end
+        else 1 end
+      else 0 end
     end
   end|} in
   let m = parse_module src in
@@ -13993,16 +14014,17 @@ let test_parse_deeply_nested_match () =
   let src = {|mod Test do
     fn classify(x : Int) : Int do
       match x do
-      | 0 ->
+      0 -> do
         match x do
-        | 0 ->
+        0 ->
           match x do
-          | 0 -> 0
-          | _ -> 1
+          0 -> 0
+          _ -> 1
           end
-        | _ -> 2
+        _ -> 2
         end
-      | _ -> 3
+        end
+      _ -> 3
       end
     end
   end|} in
@@ -14081,7 +14103,7 @@ let test_parse_match_wildcard_only () =
   let src = {|mod Test do
     fn always(x : Int) : Int do
       match x do
-      | _ -> 42
+      _ -> 42
       end
     end
   end|} in
@@ -14412,9 +14434,9 @@ let test_parity_if_else () =
     List.iter (fun src ->
       check_parity ~ctx:"if_else" ~runtime_so src
     ) [
-      "if true then 1 else 2";
-      "if false then 1 else 2";
-      "if 3 > 2 then \"yes\" else \"no\"";
+      "if true do 1 else 2 end";
+      "if false do 1 else 2 end";
+      "if 3 > 2 do \"yes\" else \"no\" end";
     ]
 
 (* Document: parity testing approach.
@@ -14453,8 +14475,8 @@ let test_parity_bitwise_builtins () =
 let test_tc_tail_factorial_ok () =
   let ctx = typecheck {|mod Test do
     fn fact(n, acc) do
-      if n == 0 then acc
-      else fact(n - 1, n * acc)
+      if n == 0 do acc
+      else fact(n - 1, n * acc) end
     end
   end|} in
   Alcotest.(check bool) "tail-recursive factorial: no errors" false (has_errors ctx)
@@ -14463,8 +14485,8 @@ let test_tc_tail_factorial_fail () =
   (* factorial(n) with no reduction — truly unbounded *)
   let ctx = typecheck {|mod Test do
     fn factorial(n) do
-      if n == 0 then 1
-      else n * factorial(n)
+      if n == 0 do 1
+      else n * factorial(n) end
     end
   end|} in
   Alcotest.(check bool) "truly unbounded factorial: has error" true (has_errors ctx)
@@ -14473,14 +14495,14 @@ let test_tc_tail_map_ok () =
   let ctx = typecheck {|mod Test do
     fn rev(xs, acc) do
       match xs do
-      | Nil -> acc
-      | Cons(h, t) -> rev(t, Cons(h, acc))
+      Nil -> acc
+      Cons(h, t) -> rev(t, Cons(h, acc))
       end
     end
     fn map(xs, f, acc) do
       match xs do
-      | Nil -> rev(acc, Nil)
-      | Cons(h, t) -> map(t, f, Cons(f(h), acc))
+      Nil -> rev(acc, Nil)
+      Cons(h, t) -> map(t, f, Cons(f(h), acc))
       end
     end
   end|} in
@@ -14491,8 +14513,8 @@ let test_tc_tail_map_fail () =
   let ctx = typecheck {|mod Test do
     fn map(xs, f) do
       match xs do
-      | Nil -> Nil
-      | Cons(h, _) -> Cons(f(h), map(xs, f))
+      Nil -> Nil
+      Cons(h, _) -> Cons(f(h), map(xs, f))
       end
     end
   end|} in
@@ -14501,12 +14523,12 @@ let test_tc_tail_map_fail () =
 let test_tc_tail_mutual_ok () =
   let ctx = typecheck {|mod Test do
     fn is_even(n) do
-      if n == 0 then true
-      else is_odd(n - 1)
+      if n == 0 do true
+      else is_odd(n - 1) end
     end
     fn is_odd(n) do
-      if n == 0 then false
-      else is_even(n - 1)
+      if n == 0 do false
+      else is_even(n - 1) end
     end
   end|} in
   Alcotest.(check bool) "mutual recursion both tail: no errors" false (has_errors ctx)
@@ -14515,12 +14537,12 @@ let test_tc_tail_mutual_fail () =
   (* pong(n) — no reduction, same argument each call: truly unbounded *)
   let ctx = typecheck {|mod Test do
     fn ping(n) do
-      if n == 0 then 0
-      else pong(n) + 1
+      if n == 0 do 0
+      else pong(n) + 1 end
     end
     fn pong(n) do
-      if n == 0 then 0
-      else ping(n - 1)
+      if n == 0 do 0
+      else ping(n - 1) end
     end
   end|} in
   Alcotest.(check bool) "truly unbounded mutual recursion: has error" true (has_errors ctx)
@@ -14530,8 +14552,8 @@ let test_tc_tail_match_arms_ok () =
     type Tree = Leaf | Node(Tree, Tree)
     fn depth(t) do
       match t do
-      | Leaf -> 0
-      | Node(l, _) -> depth(l)
+      Leaf -> 0
+      Node(l, _) -> depth(l)
       end
     end
   end|} in
@@ -14542,8 +14564,8 @@ let test_tc_tail_match_arms_fail () =
   let ctx = typecheck {|mod Test do
     fn sum_list(xs) do
       match xs do
-      | Nil -> 0
-      | Cons(h, _) -> h + sum_list(xs)
+      Nil -> 0
+      Cons(h, _) -> h + sum_list(xs)
       end
     end
   end|} in
@@ -14554,8 +14576,8 @@ let test_tc_tail_match_arms_fail () =
 let test_tc_structural_fib_ok () =
   let ctx = typecheck {|mod Test do
     fn fib(n : Int) : Int do
-      if n < 2 then n
-      else fib(n - 1) + fib(n - 2)
+      if n < 2 do n
+      else fib(n - 1) + fib(n - 2) end
     end
   end|} in
   Alcotest.(check bool) "fib arithmetic reduction: no errors" false (has_errors ctx)
@@ -14564,8 +14586,8 @@ let test_tc_structural_tree_make_ok () =
   let ctx = typecheck {|mod Test do
     type Tree = Leaf | Node(Tree, Tree)
     fn make(d : Int) : Tree do
-      if d == 0 then Leaf
-      else Node(make(d - 1), make(d - 1))
+      if d == 0 do Leaf
+      else Node(make(d - 1), make(d - 1)) end
     end
   end|} in
   Alcotest.(check bool) "tree make arithmetic reduction: no errors" false (has_errors ctx)
@@ -14575,8 +14597,8 @@ let test_tc_structural_tree_map_ok () =
     type Tree = Leaf(Int) | Node(Tree, Tree)
     fn inc_leaves(t : Tree) : Tree do
       match t do
-      | Leaf(n)    -> Leaf(n + 1)
-      | Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
+      Leaf(n)    -> Leaf(n + 1)
+      Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
       end
     end
   end|} in
@@ -14586,8 +14608,8 @@ let test_tc_structural_sum_list_ok () =
   let ctx = typecheck {|mod Test do
     fn sum_list(xs) do
       match xs do
-      | Nil -> 0
-      | Cons(h, t) -> h + sum_list(t)
+      Nil -> 0
+      Cons(h, t) -> h + sum_list(t)
       end
     end
   end|} in
@@ -14617,7 +14639,7 @@ let test_tc_tail_let_continuation_ok () =
   let ctx = typecheck {|mod Test do
     fn count_up(n, limit) do
       let m = n + 1
-      if m >= limit then m else count_up(m, limit)
+      if m >= limit do m else count_up(m, limit) end
     end
   end|} in
   Alcotest.(check bool) "tail call after let: no errors" false (has_errors ctx)
@@ -14886,8 +14908,8 @@ let test_bytes_encode_decode_base64 () =
       let b = Bytes.from_string("Hello")
       let encoded = Bytes.encode_base64(b)
       match Bytes.decode_base64(encoded) do
-      | Ok(decoded) -> Bytes.to_string(decoded)
-      | Err(e) -> e
+      Ok(decoded) -> Bytes.to_string(decoded)
+      Err(e) -> e
       end
     end
   end|} in
@@ -15119,8 +15141,8 @@ let test_actor_call_get () =
         Actor.cast(pid, Inc())
         let result = Actor.call(pid, Inc(), 1000)
         match result do
-        | Ok(n) -> n
-        | Err(_) -> -1
+        Ok(n) -> n
+        Err(_) -> -1
         end
       end
     end|} in
@@ -15145,8 +15167,8 @@ let test_queue_push_back_pop_front () =
     fn f() do
       let q = Queue.push_back(Queue.push_back(Queue.empty(), 1), 2)
       match Queue.pop_front(q) do
-      | None -> -1
-      | Some((x, _)) -> x
+      None -> -1
+      Some((x, _)) -> x
       end
     end
   end|} in
@@ -15157,8 +15179,8 @@ let test_queue_push_front_pop_front () =
     fn f() do
       let q = Queue.push_front(Queue.push_front(Queue.empty(), 2), 1)
       match Queue.pop_front(q) do
-      | None -> -1
-      | Some((x, _)) -> x
+      None -> -1
+      Some((x, _)) -> x
       end
     end
   end|} in
@@ -15169,8 +15191,8 @@ let test_queue_pop_back () =
     fn f() do
       let q = Queue.push_back(Queue.push_back(Queue.empty(), 1), 2)
       match Queue.pop_back(q) do
-      | None -> -1
-      | Some((x, _)) -> x
+      None -> -1
+      Some((x, _)) -> x
       end
     end
   end|} in
@@ -15180,11 +15202,11 @@ let test_queue_peek () =
   let env = eval_with_queue {|mod Test do
     fn front() do
       let q = Queue.push_back(Queue.push_back(Queue.empty(), 10), 20)
-      match Queue.peek_front(q) do | None -> -1 | Some(x) -> x end
+      match Queue.peek_front(q) do None -> -1 | Some(x) -> x end
     end
     fn back() do
       let q = Queue.push_back(Queue.push_back(Queue.empty(), 10), 20)
-      match Queue.peek_back(q) do | None -> -1 | Some(x) -> x end
+      match Queue.peek_back(q) do None -> -1 | Some(x) -> x end
     end
   end|} in
   Alcotest.(check int) "peek_front = 10" 10 (vint (call_fn env "front" []));
@@ -15229,12 +15251,13 @@ let test_queue_rebalance () =
       let q3 = Queue.push_back(q2, 30)
       -- Pop all from front; the second pop forces rebalancing
       match Queue.pop_front(q3) do
-      | Some((_, q4)) ->
+      Some((_, q4)) -> do
         match Queue.pop_front(q4) do
-        | Some((x, _)) -> x
-        | None -> -1
+        Some((x, _)) -> x
+        None -> -1
         end
-      | None -> -1
+        end
+      None -> -1
       end
     end
   end|} in
@@ -15360,8 +15383,8 @@ let test_datetime_parse_date () =
   let env = eval_with_datetime {|mod Test do
     fn f() do
       match DateTime.parse("2024-03-15") do
-      | Err(_) -> -1
-      | Ok(dt) -> DateTime.to_timestamp(dt)
+      Err(_) -> -1
+      Ok(dt) -> DateTime.to_timestamp(dt)
       end
     end
   end|} in
@@ -15374,8 +15397,8 @@ let test_datetime_parse_datetime () =
   let env = eval_with_datetime {|mod Test do
     fn f() do
       match DateTime.parse("1970-01-01 00:00:00") do
-      | Err(_) -> -1
-      | Ok(dt) -> DateTime.to_timestamp(dt)
+      Err(_) -> -1
+      Ok(dt) -> DateTime.to_timestamp(dt)
       end
     end
   end|} in
@@ -15398,7 +15421,7 @@ let test_datetime_leap_year () =
       -- 1972-03-01 00:00:00 should be 366+31+29 days after epoch
       let dt = DateTime.from_timestamp(68169600)
       match dt do
-      | DateTime(Date(y, m, d), _) -> y * 10000 + m * 100 + d
+      DateTime(Date(y, m, d), _) -> y * 10000 + m * 100 + d
       end
     end
   end|} in
@@ -15410,7 +15433,7 @@ let test_datetime_leap_year () =
       -- 1972-02-29 timestamp: (365 + 365 + 31 + 28) * 86400 = 789 * 86400
       let ts = 789 * 86400
       match DateTime.from_timestamp(ts) do
-      | DateTime(Date(_, m, d), _) -> m * 100 + d
+      DateTime(Date(_, m, d), _) -> m * 100 + d
       end
     end
   end|} in
@@ -15460,8 +15483,8 @@ let test_json_parse_int () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("42") do
-      | Ok(Number(n)) -> float_to_int(n)
-      | _ -> -1
+      Ok(Number(n)) -> float_to_int(n)
+      _ -> -1
       end
     end
   end|} in
@@ -15471,8 +15494,8 @@ let test_json_parse_float () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("3.14") do
-      | Ok(Number(n)) -> n
-      | _ -> 0.0
+      Ok(Number(n)) -> n
+      _ -> 0.0
       end
     end
   end|} in
@@ -15486,8 +15509,8 @@ let test_json_parse_negative () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("-7") do
-      | Ok(Number(n)) -> float_to_int(n)
-      | _ -> 999
+      Ok(Number(n)) -> float_to_int(n)
+      _ -> 999
       end
     end
   end|} in
@@ -15497,8 +15520,8 @@ let test_json_parse_string () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("\"hello\"") do
-      | Ok(Str(s)) -> s
-      | _ -> "FAIL"
+      Ok(Str(s)) -> s
+      _ -> "FAIL"
       end
     end
   end|} in
@@ -15508,8 +15531,8 @@ let test_json_parse_string_escape () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("\"a\\nb\"") do
-      | Ok(Str(s)) -> string_byte_length(s)
-      | _ -> -1
+      Ok(Str(s)) -> string_byte_length(s)
+      _ -> -1
       end
     end
   end|} in
@@ -15519,8 +15542,8 @@ let test_json_parse_empty_array () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("[]") do
-      | Ok(Array(xs)) -> xs
-      | _ -> Cons(Null, Nil)
+      Ok(Array(xs)) -> xs
+      _ -> Cons(Null, Nil)
       end
     end
   end|} in
@@ -15531,13 +15554,14 @@ let test_json_parse_array () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("[1, 2, 3]") do
-      | Ok(Array(xs)) ->
+      Ok(Array(xs)) -> do
         match xs do
-        | Cons(Number(a), Cons(Number(b), Cons(Number(c), Nil))) ->
+        Cons(Number(a), Cons(Number(b), Cons(Number(c), Nil))) ->
           float_to_int(a) + float_to_int(b) + float_to_int(c)
-        | _ -> -1
+        _ -> -1
         end
-      | _ -> -2
+        end
+      _ -> -2
       end
     end
   end|} in
@@ -15547,8 +15571,8 @@ let test_json_parse_empty_object () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("{}") do
-      | Ok(Object(kvs)) -> kvs
-      | _ -> Cons(("x", Null), Nil)
+      Ok(Object(kvs)) -> kvs
+      _ -> Cons(("x", Null), Nil)
       end
     end
   end|} in
@@ -15559,12 +15583,13 @@ let test_json_parse_object () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("{\"x\": 1}") do
-      | Ok(obj) ->
+      Ok(obj) -> do
         match Json.get(obj, "x") do
-        | Some(Number(n)) -> float_to_int(n)
-        | _ -> -1
+        Some(Number(n)) -> float_to_int(n)
+        _ -> -1
         end
-      | _ -> -2
+        end
+      _ -> -2
       end
     end
   end|} in
@@ -15574,12 +15599,13 @@ let test_json_parse_nested () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("{\"a\":{\"b\":42}}") do
-      | Ok(obj) ->
+      Ok(obj) -> do
         match Json.get_in(obj, Cons("a", Cons("b", Nil))) do
-        | Some(Number(n)) -> float_to_int(n)
-        | _ -> -1
+        Some(Number(n)) -> float_to_int(n)
+        _ -> -1
         end
-      | _ -> -2
+        end
+      _ -> -2
       end
     end
   end|} in
@@ -15589,12 +15615,13 @@ let test_json_parse_whitespace () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("  {  \"k\"  :  true  }  ") do
-      | Ok(obj) ->
+      Ok(obj) -> do
         match Json.get(obj, "k") do
-        | Some(Bool(b)) -> b
-        | _ -> false
+        Some(Bool(b)) -> b
+        _ -> false
         end
-      | _ -> false
+        end
+      _ -> false
       end
     end
   end|} in
@@ -15604,8 +15631,8 @@ let test_json_parse_error () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("not json") do
-      | Err(_) -> true
-      | Ok(_) -> false
+      Err(_) -> true
+      Ok(_) -> false
       end
     end
   end|} in
@@ -15659,8 +15686,8 @@ let test_json_get () =
     fn f() do
       let obj = Object(Cons(("x", Number(5.0)), Cons(("y", Number(10.0)), Nil)))
       match Json.get(obj, "y") do
-      | Some(Number(n)) -> float_to_int(n)
-      | _ -> -1
+      Some(Number(n)) -> float_to_int(n)
+      _ -> -1
       end
     end
   end|} in
@@ -15672,8 +15699,8 @@ let test_json_get_in () =
       let inner = Object(Cons(("b", Number(99.0)), Nil))
       let outer = Object(Cons(("a", inner), Nil))
       match Json.get_in(outer, Cons("a", Cons("b", Nil))) do
-      | Some(Number(n)) -> float_to_int(n)
-      | _ -> -1
+      Some(Number(n)) -> float_to_int(n)
+      _ -> -1
       end
     end
   end|} in

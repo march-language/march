@@ -6,20 +6,20 @@
 mod HttpGetBench do
 
 pfn run_requests(n, client, url) do
-  if n == 0 then Ok(0)
+  if n == 0 do Ok(0) end
   else
     match HttpClient.get(client, url) do
-    | Ok(_) -> run_requests(n - 1, client, url)
-    | Err(e) -> Err(e)
+    Ok(_) -> run_requests(n - 1, client, url)
+    Err(e) -> Err(e)
     end
 end
 
 pfn run_keepalive(n, do_request, req) do
-  if n == 0 then Ok(0)
+  if n == 0 do Ok(0) end
   else
     match do_request(req) do
-    | Ok(_) -> run_keepalive(n - 1, do_request, req)
-    | Err(e) -> Err(e)
+    Ok(_) -> run_keepalive(n - 1, do_request, req)
+    Err(e) -> Err(e)
     end
 end
 
@@ -33,23 +33,23 @@ pfn main() do
   -- Mode 1: connection-per-request
   print("March HTTP GET (connection-per-request): " ++ int_to_string(n) ++ " requests")
   match run_requests(n, client, url) do
-  | Ok(_) -> print("done")
-  | Err(_) -> print("error")
+  Ok(_) -> print("done")
+  Err(_) -> print("error")
   end
 
   -- Mode 2: keep-alive (single connection)
   print("")
   print("March HTTP GET (keep-alive): " ++ int_to_string(n) ++ " requests")
   match Http.get(url) do
-  | Err(_) -> print("error parsing url")
-  | Ok(req) ->
+  Err(_) -> print("error parsing url")
+  Ok(req) ->
     let req = Http.set_body(req, "")
     fn callback(do_request) do
       run_keepalive(n, do_request, req)
     end
     match HttpClient.with_connection(client, url, callback) do
-    | Ok(Ok(_)) -> print("done")
-    | _ -> print("error")
+    Ok(Ok(_)) -> print("done")
+    _ -> print("error")
     end
   end
 end

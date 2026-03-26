@@ -5,7 +5,7 @@ mod TestArray do
 
 pfn make_vec(n : Int) do
   fn go(i : Int, v) do
-    if i > n then v else go(i + 1, Array.push(v, i))
+    if i > n do v else go(i + 1, Array.push(v, i)) end
   end
   go(1, Array.empty())
 end
@@ -84,28 +84,31 @@ describe "pop" do
   test "pop removes and returns last element" do
     let v = make_vec(5)
     match Array.pop(v) do
-    | (v2, last) ->
+    (v2, last) -> do
       assert (last == 5)
       assert (Array.length(v2) == 4)
       assert (Array.get(v2, 0) == 1)
+    end
     end
   end
 
   test "pop from single-element vector gives empty vector" do
     let v = Array.push(Array.empty(), 42)
     match Array.pop(v) do
-    | (v2, last) ->
+    (v2, last) -> do
       assert (last == 42)
       assert Array.is_empty(v2)
+    end
     end
   end
 
   test "pop across trie boundary" do
     let v = make_vec(33)
     match Array.pop(v) do
-    | (v2, last) ->
+    (v2, last) -> do
       assert (last == 33)
       assert (Array.length(v2) == 32)
+    end
     end
   end
 end

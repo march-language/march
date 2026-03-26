@@ -330,6 +330,7 @@ let rec expr_inline = function
     Printf.sprintf "fn %s(%s)%s do ... end"
       n.txt (String.concat ", " (List.map fmt_param ps)) ty
   | EAssert (e, _)              -> Printf.sprintf "assert %s" (expr_inline e)
+  | ECond _                     -> "match do ... end"
 
 (** Returns true if the expression must be rendered on multiple lines
     (match, multi-statement block, local fn definition). *)
@@ -413,15 +414,16 @@ and emit_if ctx cond then_ else_ =
   let ts = expr_inline then_ in
   let es = expr_inline else_ in
   let inline_len =
-    ctx.indent * 2 + 3 + String.length cs + 6 + String.length ts + 6 + String.length es
+    ctx.indent * 2 + 3 + String.length cs + 4 + String.length ts + 6 + String.length es + 4
   in
   if not (is_multiline then_) && not (is_multiline else_) && inline_len <= 80 then
-    line ctx (Printf.sprintf "if %s then %s else %s" cs ts es)
+    line ctx (Printf.sprintf "if %s do %s else %s end" cs ts es)
   else begin
-    line ctx (Printf.sprintf "if %s then" cs);
+    line ctx (Printf.sprintf "if %s do" cs);
     emit_if_branch ctx then_;
     line ctx "else";
-    emit_if_branch ctx else_
+    emit_if_branch ctx else_;
+    line ctx "end"
   end
 
 (** Emit an if/then/else branch.  Multi-statement blocks must be wrapped in

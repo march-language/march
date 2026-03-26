@@ -26,46 +26,46 @@ type Level = Debug | Info | Warn | Error
 
 fn level_to_int(l) do
   match l do
-  | Debug -> 0
-  | Info  -> 1
-  | Warn  -> 2
-  | Error -> 3
+  Debug -> 0
+  Info  -> 1
+  Warn  -> 2
+  Error -> 3
   end
 end
 
 fn level_to_string(l) do
   match l do
-  | Debug -> "DEBUG"
-  | Info  -> "INFO"
-  | Warn  -> "WARN"
-  | Error -> "ERROR"
+  Debug -> "DEBUG"
+  Info  -> "INFO"
+  Warn  -> "WARN"
+  Error -> "ERROR"
   end
 end
 
 fn int_to_level(n) do
-  if n <= 0 then Debug
-  else if n == 1 then Info
-  else if n == 2 then Warn
-  else Error
+  if n <= 0 do Debug
+  else if n == 1 do Info
+  else if n == 2 do Warn
+  else Error end end end
 end
 
 doc "Parse a log level from a string (case-insensitive). Returns None for unknown strings."
 fn level_from_string(s) do
   let lower = string_to_lowercase(s)
-  if lower == "debug" then Some(Debug)
-  else if lower == "info" then Some(Info)
-  else if lower == "warn" || lower == "warning" then Some(Warn)
-  else if lower == "error" then Some(Error)
-  else None
+  if lower == "debug" do Some(Debug)
+  else if lower == "info" do Some(Info)
+  else if lower == "warn" || lower == "warning" do Some(Warn)
+  else if lower == "error" do Some(Error)
+  else None end end end end
 end
 
 doc "Return the numeric rank of a log level: Debug=0, Info=1, Warn=2, Error=3."
 fn level_rank(l) do
   match l do
-  | Debug -> 0
-  | Info  -> 1
-  | Warn  -> 2
-  | Error -> 3
+  Debug -> 0
+  Info  -> 1
+  Warn  -> 2
+  Error -> 3
   end
 end
 
@@ -81,8 +81,8 @@ end
 
 doc "Log at `level` only if `level` is enabled relative to `min_level`."
 fn log_if(level, min_level, msg) do
-  if level_enabled(level, min_level) then log(level, msg)
-  else ()
+  if level_enabled(level, min_level) do log(level, msg)
+  else () end
 end
 
 -- ---- Level control ----
@@ -116,10 +116,11 @@ pfn should_log(level) do
 end
 
 pfn do_log(level, msg, extra) do
-  if should_log(level) then do
+  if should_log(level) do
     let ctx = logger_get_context()
     logger_write(level_to_string(level), msg, ctx, extra)
-  end else ()
+  else ()
+  end
 end
 
 doc "Log a Debug-level message."

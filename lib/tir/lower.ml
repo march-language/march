@@ -278,6 +278,23 @@ and lower_expr (e : Ast.expr) : Tir.expr =
         [{ br_tag = "True"; br_vars = []; br_body = then' }],
         Some else'))
 
+  (* --- match do cond_arm* end → nested ECase on bools --- *)
+  | Ast.ECond (arms, _) ->
+    let panic_var : Tir.var = {
+      Tir.v_name = "panic"; Tir.v_ty = Tir.TCon ("Never", []); Tir.v_lin = Tir.Unr } in
+    let no_match = Tir.EApp (panic_var, [Tir.ALit (Ast.LitString "non-exhaustive match do")]) in
+    let rec lower_cond = function
+      | [] -> no_match
+      | (cond_e, body_e) :: rest ->
+        lower_to_atom_k cond_e (fun cond_atom ->
+          let body' = lower_expr body_e in
+          let rest' = lower_cond rest in
+          Tir.ECase (cond_atom,
+            [{ br_tag = "True"; br_vars = []; br_body = body' }],
+            Some rest'))
+    in
+    lower_cond arms
+
   (* --- Tuples (CPS for elements) --- *)
   | Ast.ETuple (es, _) ->
     lower_atoms_k es (fun atoms -> Tir.ETuple atoms)

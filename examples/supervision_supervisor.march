@@ -47,8 +47,8 @@ mod SupervisorDemo do
   -- Helper: read the current worker pid from supervisor state directly.
   fn get_worker_pid(sup) do
     match get_actor_field(sup, "worker") do
-    | None    -> pid_of_int(-1)
-    | Some(n) -> pid_of_int(n)
+    None    -> pid_of_int(-1)
+    Some(n) -> pid_of_int(n)
     end
   end
 

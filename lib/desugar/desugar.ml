@@ -115,6 +115,26 @@ let rec desugar_expr (e : expr) : expr =
     let r' = desugar_expr r in
     (match r' with
      | EApp (f, args, _) -> EApp (f, l' :: args, sp)
+     | ECond (arms, cond_sp) ->
+       (* x |> match do Pat -> body end  ⟶  match x do Pat -> body end
+          Convert cond-arm exprs to patterns for the LHS scrutinee. *)
+       let rec expr_to_pat e = match e with
+         | ECon (name, args, _) -> PatCon (name, List.map expr_to_pat args)
+         | EVar name -> PatVar name
+         | ELit (lit, litsp) -> PatLit (lit, litsp)
+         | EAtom (a, args, epsp) -> PatAtom (a, List.map expr_to_pat args, epsp)
+         | ETuple (es, epsp) -> PatTuple (List.map expr_to_pat es, epsp)
+         | _ -> failwith ("pipe-to-match: cannot convert to pattern: " ^ show_expr e)
+       in
+       let branches = List.map (fun (cond_e, body) ->
+           { branch_pat = expr_to_pat cond_e
+           ; branch_guard = None
+           ; branch_body = body }) arms in
+       EMatch (l', branches, cond_sp)
+     | EMatch (_, branches, match_sp) ->
+       (* x |> match scrutinee do ... end where scrutinee may be a hole;
+          but more importantly: x |> match do ... end with pattern branches *)
+       EMatch (l', branches, match_sp)
      | _ -> EApp (r', [l'], sp))
 
   (* --- Recurse into all other nodes --- *)
@@ -188,6 +208,9 @@ let rec desugar_expr (e : expr) : expr =
 
   | EIf (cond, t, f, sp) ->
     EIf (desugar_expr cond, desugar_expr t, desugar_expr f, sp)
+
+  | ECond (arms, sp) ->
+    ECond (List.map (fun (cond_e, body) -> (desugar_expr cond_e, desugar_expr body)) arms, sp)
 
   | EAnnot (ex, ty, sp) ->
     EAnnot (desugar_expr ex, ty, sp)

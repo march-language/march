@@ -9,8 +9,8 @@ describe "Json" do
 
     test "parse null" do
       match Json.parse("null") do
-      | Err(e) -> panic("parse null failed: " ++ e)
-      | Ok(v) -> match v do | Null -> () | _ -> panic("expected Null") end
+      Err(e) -> panic("parse null failed: " ++ e)
+      Ok(v) -> match v do Null -> () _ -> panic("expected Null") end
       end
     end
 
@@ -20,15 +20,15 @@ describe "Json" do
 
     test "parse true" do
       match Json.parse("true") do
-      | Err(e) -> panic("parse true failed: " ++ e)
-      | Ok(v) -> match v do | Bool(b) -> assert b | _ -> panic("expected Bool") end
+      Err(e) -> panic("parse true failed: " ++ e)
+      Ok(v) -> match v do Bool(b) -> assert b | _ -> panic("expected Bool") end
       end
     end
 
     test "parse false" do
       match Json.parse("false") do
-      | Err(e) -> panic("parse false failed: " ++ e)
-      | Ok(v) -> match v do | Bool(b) -> assert not(b) | _ -> panic("expected Bool") end
+      Err(e) -> panic("parse false failed: " ++ e)
+      Ok(v) -> match v do Bool(b) -> assert not(b) _ -> panic("expected Bool") end
       end
     end
 
@@ -38,45 +38,49 @@ describe "Json" do
 
     test "parse integer" do
       match Json.parse("42") do
-      | Err(e) -> panic("parse int failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("parse int failed: " ++ e)
+      Ok(v) -> do
         match v do
-        | Number(f) -> assert (f == 42.0)
-        | _ -> panic("expected Number")
+        Number(f) -> assert (f == 42.0)
+        _ -> panic("expected Number")
         end
+      end
       end
     end
 
     test "parse negative integer" do
       match Json.parse("-7") do
-      | Err(e) -> panic("parse neg failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("parse neg failed: " ++ e)
+      Ok(v) -> do
         match v do
-        | Number(f) -> assert (f == -7.0)
-        | _ -> panic("expected Number")
+        Number(f) -> assert (f == -7.0)
+        _ -> panic("expected Number")
         end
+      end
       end
     end
 
     test "parse zero" do
       match Json.parse("0") do
-      | Err(e) -> panic("parse zero failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("parse zero failed: " ++ e)
+      Ok(v) -> do
         match v do
-        | Number(f) -> assert (f == 0.0)
-        | _ -> panic("expected Number")
+        Number(f) -> assert (f == 0.0)
+        _ -> panic("expected Number")
         end
+      end
       end
     end
 
     test "parse float" do
       match Json.parse("3.14") do
-      | Err(e) -> panic("parse float failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("parse float failed: " ++ e)
+      Ok(v) -> do
         match v do
-        | Number(f) -> assert (f > 3.13 && f < 3.15)
-        | _ -> panic("expected Number")
+        Number(f) -> assert (f > 3.13 && f < 3.15)
+        _ -> panic("expected Number")
         end
+      end
       end
     end
 
@@ -86,23 +90,25 @@ describe "Json" do
 
     test "parse basic string" do
       match Json.parse("\"hello\"") do
-      | Err(e) -> panic("parse string failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("parse string failed: " ++ e)
+      Ok(v) -> do
         match v do
-        | Str(s) -> assert (s == "hello")
-        | _ -> panic("expected Str")
+        Str(s) -> assert (s == "hello")
+        _ -> panic("expected Str")
         end
+      end
       end
     end
 
     test "parse empty string" do
       match Json.parse("\"\"") do
-      | Err(e) -> panic("parse empty string failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("parse empty string failed: " ++ e)
+      Ok(v) -> do
         match v do
-        | Str(s) -> assert (s == "")
-        | _ -> panic("expected Str")
+        Str(s) -> assert (s == "")
+        _ -> panic("expected Str")
         end
+      end
       end
     end
 
@@ -112,34 +118,37 @@ describe "Json" do
 
     test "parse empty array" do
       match Json.parse("[]") do
-      | Err(e) -> panic("parse empty array failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("parse empty array failed: " ++ e)
+      Ok(v) -> do
         match v do
-        | Array(xs) -> assert (List.length(xs) == 0)
-        | _ -> panic("expected Array")
+        Array(xs) -> assert (List.length(xs) == 0)
+        _ -> panic("expected Array")
         end
+      end
       end
     end
 
     test "parse int array" do
       match Json.parse("[1, 2, 3]") do
-      | Err(e) -> panic("parse int array failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("parse int array failed: " ++ e)
+      Ok(v) -> do
         match v do
-        | Array(xs) -> assert (List.length(xs) == 3)
-        | _ -> panic("expected Array")
+        Array(xs) -> assert (List.length(xs) == 3)
+        _ -> panic("expected Array")
         end
+      end
       end
     end
 
     test "parse mixed array" do
       match Json.parse("[1, \"two\", true, null]") do
-      | Err(e) -> panic("parse mixed array failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("parse mixed array failed: " ++ e)
+      Ok(v) -> do
         match v do
-        | Array(xs) -> assert (List.length(xs) == 4)
-        | _ -> panic("expected Array")
+        Array(xs) -> assert (List.length(xs) == 4)
+        _ -> panic("expected Array")
         end
+      end
       end
     end
 
@@ -149,61 +158,65 @@ describe "Json" do
 
     test "parse empty object" do
       match Json.parse("{}") do
-      | Err(e) -> panic("parse empty object failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("parse empty object failed: " ++ e)
+      Ok(v) -> do
         match v do
-        | Object(kvs) -> assert (List.length(kvs) == 0)
-        | _ -> panic("expected Object")
+        Object(kvs) -> assert (List.length(kvs) == 0)
+        _ -> panic("expected Object")
         end
+      end
       end
     end
 
     test "parse and get key" do
       match Json.parse("{\"key\": \"value\"}") do
-      | Err(e) -> panic("parse object failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("parse object failed: " ++ e)
+      Ok(v) -> do
         match Json.get(v, "key") do
-        | None -> panic("key not found")
-        | Some(val) ->
+        None -> panic("key not found")
+        Some(val) ->
           match val do
-          | Str(s) -> assert (s == "value")
-          | _ -> panic("expected Str")
+          Str(s) -> assert (s == "value")
+          _ -> panic("expected Str")
           end
         end
+      end
       end
     end
 
     test "missing key returns None" do
       match Json.parse("{\"key\": \"value\"}") do
-      | Err(e) -> panic("parse failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("parse failed: " ++ e)
+      Ok(v) -> do
         match Json.get(v, "missing") do
-        | None -> ()
-        | Some(_) -> panic("missing key should be None")
+        None -> ()
+        Some(_) -> panic("missing key should be None")
         end
+      end
       end
     end
 
     test "parse multi-field object" do
       match Json.parse("{\"x\": 1, \"y\": 2, \"z\": 3}") do
-      | Err(e) -> panic("parse multi-field failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("parse multi-field failed: " ++ e)
+      Ok(v) -> do
         match Json.get(v, "x") do
-        | None -> panic("x missing")
-        | Some(val) ->
+        None -> panic("x missing")
+        Some(val) ->
           match val do
-          | Number(f) -> assert (f == 1.0)
-          | _ -> panic("x not Number")
+          Number(f) -> assert (f == 1.0)
+          _ -> panic("x not Number")
           end
         end
         match Json.get(v, "z") do
-        | None -> panic("z missing")
-        | Some(val) ->
+        None -> panic("z missing")
+        Some(val) ->
           match val do
-          | Number(f) -> assert (f == 3.0)
-          | _ -> panic("z not Number")
+          Number(f) -> assert (f == 3.0)
+          _ -> panic("z not Number")
           end
         end
+      end
       end
     end
 
@@ -213,35 +226,37 @@ describe "Json" do
 
     test "nested object" do
       match Json.parse("{\"person\": {\"name\": \"Alice\", \"age\": 30}}") do
-      | Err(e) -> panic("parse nested failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("parse nested failed: " ++ e)
+      Ok(v) -> do
         match Json.get(v, "person") do
-        | None -> panic("person missing")
-        | Some(person) ->
+        None -> panic("person missing")
+        Some(person) ->
           match Json.get(person, "name") do
-          | None -> panic("name missing")
-          | Some(name_val) ->
+          None -> panic("name missing")
+          Some(name_val) ->
             match name_val do
-            | Str(s) -> assert (s == "Alice")
-            | _ -> panic("name not Str")
+            Str(s) -> assert (s == "Alice")
+            _ -> panic("name not Str")
             end
           end
         end
+      end
       end
     end
 
     test "get_in nested path" do
       match Json.parse("{\"person\": {\"name\": \"Alice\"}}") do
-      | Err(e) -> panic("parse failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("parse failed: " ++ e)
+      Ok(v) -> do
         match Json.get_in(v, Cons("person", Cons("name", Nil))) do
-        | None -> panic("nested path missing")
-        | Some(val) ->
+        None -> panic("nested path missing")
+        Some(val) ->
           match val do
-          | Str(s) -> assert (s == "Alice")
-          | _ -> panic("expected Str")
+          Str(s) -> assert (s == "Alice")
+          _ -> panic("expected Str")
           end
         end
+      end
       end
     end
 
@@ -303,13 +318,14 @@ describe "Json" do
     test "parse then to_string roundtrip" do
       let original = "{\"x\":1,\"y\":true}"
       match Json.parse(original) do
-      | Err(e) -> panic("roundtrip parse failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("roundtrip parse failed: " ++ e)
+      Ok(v) -> do
         let re_encoded = Json.to_string(v)
         match Json.parse(re_encoded) do
-        | Err(e) -> panic("roundtrip re-parse failed: " ++ e)
-        | Ok(_) -> ()
+        Err(e) -> panic("roundtrip re-parse failed: " ++ e)
+        Ok(_) -> ()
         end
+      end
       end
     end
 
@@ -319,22 +335,22 @@ describe "Json" do
 
     test "invalid json returns Err" do
       match Json.parse("{invalid}") do
-      | Err(_) -> ()
-      | Ok(_) -> panic("invalid json should return Err")
+      Err(_) -> ()
+      Ok(_) -> panic("invalid json should return Err")
       end
     end
 
     test "empty string returns Err" do
       match Json.parse("") do
-      | Err(_) -> ()
-      | Ok(_) -> panic("empty json should return Err")
+      Err(_) -> ()
+      Ok(_) -> panic("empty json should return Err")
       end
     end
 
     test "unclosed string returns Err" do
       match Json.parse("{\"unclosed\": \"string") do
-      | Err(_) -> ()
-      | Ok(_) -> panic("unclosed string should return Err")
+      Err(_) -> ()
+      Ok(_) -> panic("unclosed string should return Err")
       end
     end
 
@@ -344,16 +360,17 @@ describe "Json" do
 
     test "whitespace around tokens" do
       match Json.parse("  {  \"k\"  :  42  }  ") do
-      | Err(e) -> panic("whitespace parse failed: " ++ e)
-      | Ok(v) ->
+      Err(e) -> panic("whitespace parse failed: " ++ e)
+      Ok(v) -> do
         match Json.get(v, "k") do
-        | None -> panic("key missing")
-        | Some(val) ->
+        None -> panic("key missing")
+        Some(val) ->
           match val do
-          | Number(f) -> assert (f == 42.0)
-          | _ -> panic("not Number")
+          Number(f) -> assert (f == 42.0)
+          _ -> panic("not Number")
           end
         end
+      end
       end
     end
 

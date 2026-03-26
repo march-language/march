@@ -1,4 +1,4 @@
--- Result module: operations on Result(a, e) = Ok(a) | Err(e)
+-- Result module: operations on Result(a, e) = Ok(a) Err(e)
 --
 -- Result is the primary error-handling mechanism. Use it for any
 -- operation that can reasonably fail. Panics are reserved for
@@ -9,16 +9,16 @@ mod Result do
 doc "Returns true if the result is Ok."
 fn is_ok(res : Result(a, e)) : Bool do
   match res do
-  | Ok(_)  -> true
-  | Err(_) -> false
+  Ok(_)  -> true
+  Err(_) -> false
   end
 end
 
 doc "Returns true if the result is Err."
 fn is_err(res : Result(a, e)) : Bool do
   match res do
-  | Err(_) -> true
-  | Ok(_)  -> false
+  Err(_) -> true
+  Ok(_)  -> false
   end
 end
 
@@ -28,64 +28,64 @@ Use when you are certain the result is Ok.
 """
 fn expect(res : Result(a, e), msg : String) : a do
   match res do
-  | Ok(x)  -> x
-  | Err(_) -> panic(msg)
+  Ok(x)  -> x
+  Err(_) -> panic(msg)
   end
 end
 
 doc "Extracts the Ok value, panicking if Err."
 fn unwrap(res : Result(a, e)) : a do
   match res do
-  | Ok(x)  -> x
-  | Err(e) -> panic("Result.unwrap called on Err: " ++ to_string(e))
+  Ok(x)  -> x
+  Err(e) -> panic("Result.unwrap called on Err: " ++ to_string(e))
   end
 end
 
 doc "Extracts the Err value, panicking if Ok."
 fn unwrap_err(res : Result(a, e)) : e do
   match res do
-  | Err(e) -> e
-  | Ok(_)  -> panic("Result.unwrap_err called on Ok")
+  Err(e) -> e
+  Ok(_)  -> panic("Result.unwrap_err called on Ok")
   end
 end
 
 doc "Returns the Ok value, or `default` if Err."
 fn unwrap_or(res : Result(a, e), default : a) : a do
   match res do
-  | Ok(x)  -> x
-  | Err(_) -> default
+  Ok(x)  -> x
+  Err(_) -> default
   end
 end
 
 doc "Applies `f` to the Ok value, leaving Err unchanged."
 fn map(res : Result(a, e), f : a -> b) : Result(b, e) do
   match res do
-  | Ok(x)  -> Ok(f(x))
-  | Err(e) -> Err(e)
+  Ok(x)  -> Ok(f(x))
+  Err(e) -> Err(e)
   end
 end
 
 doc "Applies `f` to the Err value, leaving Ok unchanged."
 fn map_err(res : Result(a, e), f : e -> f2) : Result(a, f2) do
   match res do
-  | Ok(x)  -> Ok(x)
-  | Err(e) -> Err(f(e))
+  Ok(x)  -> Ok(x)
+  Err(e) -> Err(f(e))
   end
 end
 
 doc "Applies `f` (which returns a Result) to the Ok value, flattening the result."
 fn flat_map(res : Result(a, e), f : a -> Result(b, e)) : Result(b, e) do
   match res do
-  | Ok(x)  -> f(x)
-  | Err(e) -> Err(e)
+  Ok(x)  -> f(x)
+  Err(e) -> Err(e)
   end
 end
 
 doc "Returns `f(err)` if Err, or the original Ok value."
 fn or_else(res : Result(a, e), f : e -> Result(a, f2)) : Result(a, f2) do
   match res do
-  | Ok(x)  -> Ok(x)
-  | Err(e) -> f(e)
+  Ok(x)  -> Ok(x)
+  Err(e) -> f(e)
   end
 end
 
@@ -96,12 +96,13 @@ Returns the first Err encountered, or Ok with all values if all are Ok.
 fn collect(results : List(Result(a, e))) : Result(List(a), e) do
   fn go(xs : List(Result(a, e)), acc : List(a)) : Result(List(a), e) do
     match xs do
-    | Nil -> Ok(reverse(acc))
-    | Cons(r, rest) ->
+    Nil -> Ok(reverse(acc))
+    Cons(r, rest) -> do
       match r do
-      | Err(e) -> Err(e)
-      | Ok(x)  -> go(rest, Cons(x, acc))
+      Err(e) -> Err(e)
+      Ok(x)  -> go(rest, Cons(x, acc))
       end
+    end
     end
   end
   go(results, Nil)
@@ -110,8 +111,8 @@ end
 doc "Converts Result(a, e) to Option(a), discarding the error."
 fn to_option(res : Result(a, e)) : Option(a) do
   match res do
-  | Ok(x)  -> Some(x)
-  | Err(_) -> None
+  Ok(x)  -> Some(x)
+  Err(_) -> None
   end
 end
 

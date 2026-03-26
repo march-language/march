@@ -122,10 +122,11 @@ end
 describe "zip" do
   test "zip of two Some values gives Some pair" do
     match Option.zip(Some(1), Some(2)) do
-    | Some((a, b)) ->
+    Some((a, b)) -> do
       assert (a == 1)
       assert (b == 2)
-    | None -> assert false
+    end
+    None -> assert false
     end
   end
 

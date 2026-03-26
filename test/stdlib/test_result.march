@@ -103,17 +103,18 @@ describe "collect" do
   test "collect all Ok gives Ok list" do
     let results = Cons(Ok(1), Cons(Ok(2), Cons(Ok(3), Nil)))
     match Result.collect(results) do
-    | Ok(lst) ->
+    Ok(lst) -> do
       assert (length(lst) == 3)
       assert (head(lst) == 1)
-    | Err(_) -> assert false
+    end
+    Err(_) -> assert false
     end
   end
 
   test "collect empty list gives Ok empty list" do
     match Result.collect(Nil) do
-    | Ok(lst) -> assert (length(lst) == 0)
-    | Err(_) -> assert false
+    Ok(lst) -> assert (length(lst) == 0)
+    Err(_) -> assert false
     end
   end
 

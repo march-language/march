@@ -50,22 +50,22 @@ fn handle_post(counter, conn) do
   let body = HttpServer.req_body(conn)
   let maybe_n = string_to_int(body)
   match maybe_n do
-  | None -> HttpServer.text(conn, 400, "Bad Request: body must be an integer")
-  | Some(n) ->
-    if p == "/increment" then HttpServer.text(conn, 200, do_increment(counter, n))
-    else if p == "/decrement" then HttpServer.text(conn, 200, do_decrement(counter, n))
-    else HttpServer.text(conn, 404, "Not Found")
+  None -> HttpServer.text(conn, 400, "Bad Request: body must be an integer")
+  Some(n) ->
+    if p == "/increment" do HttpServer.text(conn, 200, do_increment(counter, n))
+    else if p == "/decrement" do HttpServer.text(conn, 200, do_decrement(counter, n))
+    else HttpServer.text(conn, 404, "Not Found") end end
   end
 end
 
 fn router(counter, conn) do
   let m = Http.method_to_string(HttpServer.method(conn))
   let p = HttpServer.path(conn)
-  if m == "GET" then
-    if p == "/count" then HttpServer.text(conn, 200, get_count(counter))
-    else HttpServer.text(conn, 404, "Not Found")
-  else if m == "POST" then handle_post(counter, conn)
-  else HttpServer.text(conn, 405, "Method Not Allowed")
+  if m == "GET" do
+    if p == "/count" do HttpServer.text(conn, 200, get_count(counter))
+    else HttpServer.text(conn, 404, "Not Found") end
+  else if m == "POST" do handle_post(counter, conn)
+  else HttpServer.text(conn, 405, "Method Not Allowed") end end
 end
 
 fn main() : Unit do

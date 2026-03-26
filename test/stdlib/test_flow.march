@@ -143,16 +143,16 @@ describe "Flow" do
     test "find first match" do
       let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
       match Flow.find(s, fn x -> x > 1) do
-      | None -> panic("expected Some")
-      | Some(v) -> assert (v == 2)
+      None -> panic("expected Some")
+      Some(v) -> assert (v == 2)
       end
     end
 
     test "find no match returns None" do
       let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
       match Flow.find(s, fn x -> x > 10) do
-      | None -> ()
-      | Some(_) -> panic("expected None")
+      None -> ()
+      Some(_) -> panic("expected None")
       end
     end
 
