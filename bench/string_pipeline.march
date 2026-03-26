@@ -14,22 +14,22 @@ mod StringPipeline do
 -- Build ["n", "n-1", ..., "1"] as a list (reversed, but order doesn't
 -- affect byte-length of the result).
 pfn build_list(lo : Int, hi : Int, acc : List(String)) : List(String) do
-  if lo > hi then acc
-  else build_list(lo + 1, hi, Cons(int_to_string(lo), acc))
+  if lo > hi do acc
+  else build_list(lo + 1, hi, Cons(int_to_string(lo), acc)) end
 end
 
 -- Double the integer value of a decimal string.
 pfn double_str(s : String) : String do
   match string_to_int(s) do
-  | Some(n) -> int_to_string(n * 2)
-  | None    -> s
+  Some(n) -> int_to_string(n * 2)
+  None    -> s
   end
 end
 
 pfn map_strings(xs : List(String)) : List(String) do
   match xs do
-  | Nil        -> Nil
-  | Cons(h, t) -> Cons(double_str(h), map_strings(t))
+  Nil        -> Nil
+  Cons(h, t) -> Cons(double_str(h), map_strings(t))
   end
 end
 

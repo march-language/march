@@ -365,6 +365,12 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
     collect_expr ~def_map ~use_map ~calls e1;
     collect_expr ~def_map ~use_map ~calls e2
 
+  | Ast.ECond (arms, _) ->
+    List.iter (fun (ce, be) ->
+      collect_expr ~def_map ~use_map ~calls ce;
+      collect_expr ~def_map ~use_map ~calls be
+    ) arms
+
   | Ast.EPipe (e1, e2, _) | Ast.ESend (e1, e2, _) ->
     collect_expr ~def_map ~use_map ~calls e1;
     collect_expr ~def_map ~use_map ~calls e2
@@ -526,7 +532,7 @@ let span_of_expr = function
   | Ast.ELam (_, _, sp) | Ast.EBlock (_, sp) | Ast.ELet (_, sp)
   | Ast.EMatch (_, _, sp) | Ast.ETuple (_, sp) | Ast.ERecord (_, sp)
   | Ast.ERecordUpdate (_, _, sp) | Ast.EField (_, _, sp)
-  | Ast.EIf (_, _, _, sp) | Ast.EPipe (_, _, sp) | Ast.EAnnot (_, _, sp)
+  | Ast.EIf (_, _, _, sp) | Ast.ECond (_, sp) | Ast.EPipe (_, _, sp) | Ast.EAnnot (_, _, sp)
   | Ast.EHole (_, sp) | Ast.EAtom (_, _, sp) | Ast.ESend (_, _, sp)
   | Ast.ESpawn (_, sp) | Ast.EDbg (_, sp) | Ast.ELetFn (_, _, _, _, sp)
   | Ast.EAssert (_, sp) -> sp

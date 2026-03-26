@@ -11,40 +11,40 @@ mod ForkJoin do
 
 -- Sum integers from lo to hi (sequential baseline).
 fn sum_range(lo : Int, hi : Int) : Int do
-  if lo > hi then 0
-  else lo + sum_range(lo + 1, hi)
+  if lo > hi do 0
+  else lo + sum_range(lo + 1, hi) end
 end
 
 -- Parallel sum: fork at midpoint, join results.
 -- Falls back to sequential when range is small enough.
 fn par_sum(lo : Int, hi : Int, threshold : Int) : Int do
-  if hi - lo <= threshold then sum_range(lo, hi)
+  if hi - lo <= threshold do sum_range(lo, hi)
   else do
     let mid = lo + (hi - lo) / 2
     let left  = task_spawn(fn x -> par_sum(lo, mid, threshold))
     let right = task_spawn(fn x -> par_sum(mid + 1, hi, threshold))
     let l = task_await_unwrap(left)
     let r = task_await_unwrap(right)
-    l + r
+    l + r end
   end
 end
 
 -- Parallel max: find the maximum in a range using fork-join.
 fn max_val(a : Int, b : Int) : Int do
-  if a > b then a else b
+  if a > b do a else b end
 end
 
 fn collatz(n : Int, steps : Int) : Int do
-  if n == 1 then steps
-  else if n % 2 == 0 then collatz(n / 2, steps + 1)
-  else collatz(3 * n + 1, steps + 1)
+  if n == 1 do steps
+  else if n % 2 == 0 do collatz(n / 2, steps + 1)
+  else collatz(3 * n + 1, steps + 1) end end
 end
 
 -- Find the number with the most Collatz steps in range [lo, hi].
 fn max_collatz(lo : Int, hi : Int, threshold : Int) : Int do
-  if hi - lo <= threshold then do
+  if hi - lo <= threshold do do
     -- Sequential scan
-    max_collatz_seq(lo, hi, 0)
+    max_collatz_seq(lo, hi, 0) end
   end
   else do
     let mid = lo + (hi - lo) / 2
@@ -57,10 +57,10 @@ fn max_collatz(lo : Int, hi : Int, threshold : Int) : Int do
 end
 
 fn max_collatz_seq(lo : Int, hi : Int, best : Int) : Int do
-  if lo > hi then best
+  if lo > hi do best
   else do
     let steps = collatz(lo, 0)
-    max_collatz_seq(lo + 1, hi, max_val(steps, best))
+    max_collatz_seq(lo + 1, hi, max_val(steps, best)) end
   end
 end
 

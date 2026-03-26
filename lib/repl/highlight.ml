@@ -39,7 +39,7 @@ let find_comment_start src =
 let attr_of_token tok =
   let open March_parser.Parser in
   match tok with
-  | FN | LET | DO | END | IF | THEN | ELSE | MATCH | WITH | WHEN
+  | FN | LET | DO | END | IF | ELSE | MATCH | WITH | WHEN
   | TYPE | MOD | ACTOR | ON | SEND | SPAWN | STATE | INIT | RESPOND
   | PROTOCOL | LOOP | LINEAR | AFFINE | INTERFACE | IMPL | SIG
   | EXTERN | UNSAFE | AS | USE | BOOL _ -> attr_keyword

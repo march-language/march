@@ -29,14 +29,14 @@ end
 -- N rows: id (Int), value (Float), category (String)
 pfn make_frame(n : Int) : DataFrame do
   fn gen_ids(i : Int, acc : List(Int)) : List(Int) do
-    if i < 0 then acc else gen_ids(i - 1, Cons(i, acc))
+    if i < 0 do acc else gen_ids(i - 1, Cons(i, acc)) end
   end
   fn gen_values(i : Int, acc : List(Float)) : List(Float) do
-    if i < 0 then acc else gen_values(i - 1, Cons(int_to_float(i % 100), acc))
+    if i < 0 do acc else gen_values(i - 1, Cons(int_to_float(i % 100), acc)) end
   end
   fn gen_cats(i : Int, acc : List(String)) : List(String) do
-    if i < 0 then acc
-    else gen_cats(i - 1, Cons("cat_" ++ int_to_string(i % 5), acc))
+    if i < 0 do acc
+    else gen_cats(i - 1, Cons("cat_" ++ int_to_string(i % 5), acc)) end
   end
   let ids  = gen_ids(n - 1, Nil)
   let vals = gen_values(n - 1, Nil)
@@ -49,10 +49,10 @@ end
 -- N rows: key (Int), extra (Float)
 pfn make_join_frame(n : Int, label : String) : DataFrame do
   fn gen_keys(i : Int, acc : List(Int)) : List(Int) do
-    if i < 0 then acc else gen_keys(i - 1, Cons(i % 50, acc))
+    if i < 0 do acc else gen_keys(i - 1, Cons(i % 50, acc)) end
   end
   fn gen_extras(i : Int, acc : List(Float)) : List(Float) do
-    if i < 0 then acc else gen_extras(i - 1, Cons(int_to_float(i) *. 0.5, acc))
+    if i < 0 do acc else gen_extras(i - 1, Cons(int_to_float(i) *. 0.5, acc)) end
   end
   let keys   = gen_keys(n - 1, Nil)
   let extras = gen_extras(n - 1, Nil)
@@ -71,8 +71,8 @@ pfn bench_filter(df : DataFrame) : Unit do
   let t1 = unix_time(())
   let ms = elapsed_ms(t0, t1)
   match result do
-  | Err(e)  -> println("Error: " ++ e)
-  | Ok(out) -> println("Result rows: " ++ int_to_string(DataFrame.row_count(out)))
+  Err(e)  -> println("Error: " ++ e)
+  Ok(out) -> println("Result rows: " ++ int_to_string(DataFrame.row_count(out)))
   end
   report("Filter", ms)
 end
@@ -86,8 +86,8 @@ pfn bench_sort(df : DataFrame) : Unit do
   let t1 = unix_time(())
   let ms = elapsed_ms(t0, t1)
   match result do
-  | Err(e)  -> println("Error: " ++ e)
-  | Ok(out) -> println("Result rows: " ++ int_to_string(DataFrame.row_count(out)))
+  Err(e)  -> println("Error: " ++ e)
+  Ok(out) -> println("Result rows: " ++ int_to_string(DataFrame.row_count(out)))
   end
   report("Sort", ms)
 end
@@ -100,8 +100,8 @@ pfn bench_groupby(df : DataFrame) : Unit do
   let t1 = unix_time(())
   let ms = elapsed_ms(t0, t1)
   match result do
-  | Err(e)  -> println("Error: " ++ e)
-  | Ok(out) ->
+  Err(e)  -> println("Error: " ++ e)
+  Ok(out) ->
     println("Groups: " ++ int_to_string(DataFrame.row_count(out)))
     DataFrame.print_table(out)
   end
@@ -116,8 +116,8 @@ pfn bench_inner_join(left : DataFrame, right : DataFrame) : Unit do
   let t1 = unix_time(())
   let ms = elapsed_ms(t0, t1)
   match result do
-  | Err(e)  -> println("Error: " ++ e)
-  | Ok(out) -> println("Result rows: " ++ int_to_string(DataFrame.row_count(out)))
+  Err(e)  -> println("Error: " ++ e)
+  Ok(out) -> println("Result rows: " ++ int_to_string(DataFrame.row_count(out)))
   end
   report("Inner join", ms)
 end

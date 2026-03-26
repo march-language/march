@@ -10,26 +10,26 @@ pfn approx_eq(a : Float, b : Float) : Bool do
 end
 
 pfn gen_ints(rng, n : Int, acc : List(Int)) : List(Int) do
-  if n <= 0 then List.reverse(acc)
+  if n <= 0 do List.reverse(acc)
   else do
     let (v, rng2) = Random.next_int(rng)
-    gen_ints(rng2, n - 1, Cons(v, acc))
+    gen_ints(rng2, n - 1, Cons(v, acc)) end
   end
 end
 
 pfn gen_floats(rng, n : Int, acc : List(Float)) : List(Float) do
-  if n <= 0 then List.reverse(acc)
+  if n <= 0 do List.reverse(acc)
   else do
     let (v, rng2) = Random.next_float(rng)
-    gen_floats(rng2, n - 1, Cons(v, acc))
+    gen_floats(rng2, n - 1, Cons(v, acc)) end
   end
 end
 
 pfn gen_ranges(rng, lo : Int, hi : Int, n : Int, acc : List(Int)) : List(Int) do
-  if n <= 0 then List.reverse(acc)
+  if n <= 0 do List.reverse(acc)
   else do
     let (v, rng2) = Random.range(rng, lo, hi)
-    gen_ranges(rng2, lo, hi, n - 1, Cons(v, acc))
+    gen_ranges(rng2, lo, hi, n - 1, Cons(v, acc)) end
   end
 end
 

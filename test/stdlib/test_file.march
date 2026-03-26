@@ -11,15 +11,15 @@ ptype FileStat = FileStat(Int, FileKind, Int, Int)
 
 pfn write_ok(path, content) do
   match File.write(path, content) do
-  | Ok(_)  -> ()
-  | Err(e) -> panic("File.write failed: " ++ to_string(e))
+  Ok(_)  -> ()
+  Err(e) -> panic("File.write failed: " ++ to_string(e))
   end
 end
 
 pfn read_ok(path) do
   match File.read(path) do
-  | Ok(s)  -> s
-  | Err(e) -> panic("File.read failed: " ++ to_string(e))
+  Ok(s)  -> s
+  Err(e) -> panic("File.read failed: " ++ to_string(e))
   end
 end
 
@@ -53,8 +53,8 @@ describe "File.write and File.read" do
 
   test "read on nonexistent returns Err" do
     match File.read("/tmp/march_tf_rw_noexist_04") do
-    | Err(_) -> ()
-    | Ok(_)  -> assert false
+    Err(_) -> ()
+    Ok(_)  -> assert false
     end
   end
 
@@ -71,8 +71,8 @@ describe "File.read_lines" do
     let path = "/tmp/march_tf_lines_06"
     write_ok(path, "line1\nline2\nline3")
     let lines = match File.read_lines(path) do
-      | Ok(ls) -> ls
-      | Err(_) -> panic("File.read_lines failed")
+      Ok(ls) -> ls
+      Err(_) -> panic("File.read_lines failed")
     end
     assert (List.length(lines) == 3)
     assert (List.nth(lines, 0) == "line1")
@@ -85,8 +85,8 @@ describe "File.read_lines" do
     let path = "/tmp/march_tf_lines_trail_07"
     write_ok(path, "a\nb\n")
     let lines = match File.read_lines(path) do
-      | Ok(ls) -> ls
-      | Err(_) -> panic("File.read_lines trailing failed")
+      Ok(ls) -> ls
+      Err(_) -> panic("File.read_lines trailing failed")
     end
     assert (List.length(lines) == 2)
     let _ = File.delete(path)
@@ -96,8 +96,8 @@ describe "File.read_lines" do
     let path = "/tmp/march_tf_lines_empty_08"
     write_ok(path, "")
     let lines = match File.read_lines(path) do
-      | Ok(ls) -> ls
-      | Err(_) -> panic("File.read_lines empty failed")
+      Ok(ls) -> ls
+      Err(_) -> panic("File.read_lines empty failed")
     end
     assert (List.length(lines) == 0)
     let _ = File.delete(path)
@@ -109,8 +109,8 @@ describe "File.append" do
     let path = "/tmp/march_tf_append_09"
     write_ok(path, "first")
     match File.append(path, " second") do
-    | Err(_) -> assert false
-    | Ok(_)  -> ()
+    Err(_) -> assert false
+    Ok(_)  -> ()
     end
     assert (read_ok(path) == "first second")
     let _ = File.delete(path)
@@ -123,8 +123,8 @@ describe "File.copy" do
     let dest = "/tmp/march_tf_copy_dst_10"
     write_ok(src, "hello world")
     match File.copy(src, dest) do
-    | Err(_) -> assert false
-    | Ok(_)  -> ()
+    Err(_) -> assert false
+    Ok(_)  -> ()
     end
     assert (File.exists(dest))
     assert (read_ok(dest) == "hello world")
@@ -139,8 +139,8 @@ describe "File.rename" do
     let dest = "/tmp/march_tf_rename_dst_11"
     write_ok(src, "data")
     match File.rename(src, dest) do
-    | Err(_) -> assert false
-    | Ok(_)  -> ()
+    Err(_) -> assert false
+    Ok(_)  -> ()
     end
     assert (File.exists(dest))
     assert (not (File.exists(src)))
@@ -153,18 +153,19 @@ describe "File.stat" do
     let path = "/tmp/march_tf_stat_12"
     write_ok(path, "hello world")
     match File.stat(path) do
-    | Err(_) -> assert false
-    | Ok(FileStat(size, kind, _, _)) ->
+    Err(_) -> assert false
+    Ok(FileStat(size, kind, _, _)) -> do
       assert (size == 11)
       assert (kind == RegularFile)
+    end
     end
     let _ = File.delete(path)
   end
 
   test "returns Err for nonexistent" do
     match File.stat("/tmp/march_tf_stat_noexist_13") do
-    | Err(_) -> ()
-    | Ok(_)  -> assert false
+    Err(_) -> ()
+    Ok(_)  -> assert false
     end
   end
 end
@@ -174,16 +175,16 @@ describe "File.delete" do
     let path = "/tmp/march_tf_delete_14"
     write_ok(path, "bye")
     match File.delete(path) do
-    | Err(_) -> assert false
-    | Ok(_)  -> ()
+    Err(_) -> assert false
+    Ok(_)  -> ()
     end
     assert (not (File.exists(path)))
   end
 
   test "returns Err for nonexistent" do
     match File.delete("/tmp/march_tf_delete_noexist_15") do
-    | Err(_) -> ()
-    | Ok(_)  -> assert false
+    Err(_) -> ()
+    Ok(_)  -> assert false
     end
   end
 end
@@ -193,8 +194,8 @@ describe "File.with_lines" do
     let path = "/tmp/march_tf_wlines_16"
     write_ok(path, "line1\nline2\nline3")
     let lines = match File.with_lines(path, fn seq -> Seq.to_list(seq)) do
-      | Ok(ls) -> ls
-      | Err(_) -> panic("File.with_lines failed")
+      Ok(ls) -> ls
+      Err(_) -> panic("File.with_lines failed")
     end
     assert (List.length(lines) == 3)
     assert (List.nth(lines, 0) == "line1")
@@ -203,8 +204,8 @@ describe "File.with_lines" do
 
   test "returns Err for nonexistent" do
     match File.with_lines("/tmp/march_tf_wlines_noexist_17", fn _seq -> ()) do
-    | Err(_) -> ()
-    | Ok(_)  -> assert false
+    Err(_) -> ()
+    Ok(_)  -> assert false
     end
   end
 end
@@ -214,8 +215,8 @@ describe "File.each_line" do
     let path = "/tmp/march_tf_eline_18"
     write_ok(path, "a\nb\nc")
     match File.each_line(path, fn _line -> ()) do
-    | Err(_) -> assert false
-    | Ok(_)  -> ()
+    Err(_) -> assert false
+    Ok(_)  -> ()
     end
     let _ = File.delete(path)
   end

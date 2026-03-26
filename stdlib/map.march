@@ -45,8 +45,8 @@ ptype HEntry(k, v) =
 pfn lst_rev(lst) do
   fn go(xs, acc) do
     match xs do
-    | Nil -> acc
-    | Cons(h, t) -> go(t, Cons(h, acc))
+    Nil -> acc
+    Cons(h, t) -> go(t, Cons(h, acc))
     end
   end
   go(lst, Nil)
@@ -56,9 +56,9 @@ end
 pfn cmp_eq(cmp, a, b) do
   let lt_ab = cmp(a)
   let lt_ba = cmp(b)
-  if lt_ab(b) then false
-  else if lt_ba(a) then false
-  else true
+  if lt_ab(b) do false
+  else if lt_ba(a) do false
+  else true end end
 end
 
 -- Hash a key (uses the built-in polymorphic hash, masked to 30 bits).
@@ -93,16 +93,16 @@ end
 pfn list_insert_at(lst, idx, elem) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
-    | Nil -> ys
-    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    Nil -> ys
+    Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
   fn go(xs, i, acc) do
-    if i == 0 then rev_onto(acc, Cons(elem, xs))
+    if i == 0 do rev_onto(acc, Cons(elem, xs))
     else match xs do
-      | Nil        -> rev_onto(acc, Cons(elem, Nil))
-      | Cons(h, t) -> go(t, i - 1, Cons(h, acc))
-      end
+      Nil        -> rev_onto(acc, Cons(elem, Nil))
+      Cons(h, t) -> go(t, i - 1, Cons(h, acc))
+      end end
   end
   go(lst, idx, Nil)
 end
@@ -110,16 +110,17 @@ end
 pfn list_replace_at(lst, idx, elem) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
-    | Nil -> ys
-    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    Nil -> ys
+    Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
   fn go(xs, i, acc) do
     match xs do
-    | Nil -> rev_onto(acc, Nil)
-    | Cons(h, t) ->
-      if i == 0 then rev_onto(acc, Cons(elem, t))
-      else go(t, i - 1, Cons(h, acc))
+    Nil -> rev_onto(acc, Nil)
+    Cons(h, t) -> do
+      if i == 0 do rev_onto(acc, Cons(elem, t))
+      else go(t, i - 1, Cons(h, acc)) end
+    end
     end
   end
   go(lst, idx, Nil)
@@ -128,16 +129,17 @@ end
 pfn list_delete_at(lst, idx) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
-    | Nil -> ys
-    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    Nil -> ys
+    Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
   fn go(xs, i, acc) do
     match xs do
-    | Nil -> rev_onto(acc, Nil)
-    | Cons(h, t) ->
-      if i == 0 then rev_onto(acc, t)
-      else go(t, i - 1, Cons(h, acc))
+    Nil -> rev_onto(acc, Nil)
+    Cons(h, t) -> do
+      if i == 0 do rev_onto(acc, t)
+      else go(t, i - 1, Cons(h, acc)) end
+    end
     end
   end
   go(lst, idx, Nil)
@@ -145,9 +147,9 @@ end
 
 pfn list_nth_safe(lst, n) do
   match lst do
-  | Nil -> panic("Map: HAMT node index out of range")
-  | Cons(h, t) ->
-    if n == 0 then h else list_nth_safe(t, n - 1)
+  Nil -> panic("Map: HAMT node index out of range")
+  Cons(h, t) ->
+    if n == 0 do h else list_nth_safe(t, n - 1) end
   end
 end
 
@@ -155,28 +157,30 @@ end
 
 pfn coll_find(pairs, key, eq) do
   match pairs do
-  | Nil -> None
-  | Cons(pair, rest) ->
+  Nil -> None
+  Cons(pair, rest) -> do
     let (k, v) = pair
-    if eq(k, key) then Some(v)
-    else coll_find(rest, key, eq)
+    if eq(k, key) do Some(v)
+    else coll_find(rest, key, eq) end
+  end
   end
 end
 
 pfn coll_insert(pairs, key, val, eq) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
-    | Nil -> ys
-    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    Nil -> ys
+    Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
   fn go(ps, acc) do
     match ps do
-    | Nil -> rev_onto(acc, Cons((key, val), Nil))
-    | Cons(pair, rest) ->
+    Nil -> rev_onto(acc, Cons((key, val), Nil))
+    Cons(pair, rest) -> do
       let (k, v) = pair
-      if eq(k, key) then rev_onto(acc, Cons((key, val), rest))
-      else go(rest, Cons(pair, acc))
+      if eq(k, key) do rev_onto(acc, Cons((key, val), rest))
+      else go(rest, Cons(pair, acc)) end
+    end
     end
   end
   go(pairs, Nil)
@@ -185,17 +189,18 @@ end
 pfn coll_remove(pairs, key, eq) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
-    | Nil -> ys
-    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    Nil -> ys
+    Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
   fn go(ps, acc) do
     match ps do
-    | Nil -> rev_onto(acc, Nil)
-    | Cons(pair, rest) ->
+    Nil -> rev_onto(acc, Nil)
+    Cons(pair, rest) -> do
       let (k, v) = pair
-      if eq(k, key) then rev_onto(acc, rest)
-      else go(rest, Cons(pair, acc))
+      if eq(k, key) do rev_onto(acc, rest)
+      else go(rest, Cons(pair, acc)) end
+    end
     end
   end
   go(pairs, Nil)
@@ -205,49 +210,52 @@ end
 
 pfn node_get(node, key, h, eq, level) do
   match node do
-  | HEmpty -> None
-  | HLeaf(lh, lk, lv) ->
-    if lh == h then
-      if eq(lk, key) then Some(lv) else None
-    else None
-  | HCollision(ch, pairs) ->
-    if ch == h then coll_find(pairs, key, eq)
-    else None
-  | HBranch(bitmap, children) ->
+  HEmpty -> None
+  HLeaf(lh, lk, lv) -> do
+    if lh == h do
+      if eq(lk, key) do Some(lv) else None end
+    else None end
+  end
+  HCollision(ch, pairs) -> do
+    if ch == h do coll_find(pairs, key, eq)
+    else None end
+  end
+  HBranch(bitmap, children) -> do
     let slot = hash_slot(h, level)
-    if bitmap_has(bitmap, slot) then do
+    if bitmap_has(bitmap, slot) do
       let idx = bitmap_rank(bitmap, slot)
       let child = list_nth_safe(children, idx)
       node_get(child, key, h, eq, level + 1)
-    end else None
+    else None end
+  end
   end
 end
 
 pfn make_branch(h1, k1, v1, h2, k2, v2, level) do
   fn apply_slots(node, slots) do
     match slots do
-    | Nil -> node
-    | Cons(s, rest) ->
+    Nil -> node
+    Cons(s, rest) ->
       apply_slots(HBranch(bitmap_set(0, s), Cons(node, Nil)), rest)
     end
   end
   fn go(lvl, slots_acc) do
-    if lvl > 6 then
+    if lvl > 6 do
       apply_slots(HCollision(h1, Cons((k1, v1), Cons((k2, v2), Nil))), slots_acc)
     else do
       let s1 = hash_slot(h1, lvl)
       let s2 = hash_slot(h2, lvl)
-      if s1 == s2 then
+      if s1 == s2 do
         go(lvl + 1, Cons(s1, slots_acc))
       else do
         let leaf1 = HLeaf(h1, k1, v1)
         let leaf2 = HLeaf(h2, k2, v2)
         let bm = bitmap_set(bitmap_set(0, s1), s2)
         let base_node =
-          if s1 < s2 then HBranch(bm, Cons(leaf1, Cons(leaf2, Nil)))
-          else HBranch(bm, Cons(leaf2, Cons(leaf1, Nil)))
-        apply_slots(base_node, slots_acc)
-      end
+          if s1 < s2 do HBranch(bm, Cons(leaf1, Cons(leaf2, Nil)))
+          else HBranch(bm, Cons(leaf2, Cons(leaf1, Nil))) end
+        apply_slots(base_node, slots_acc) end
+      end end
     end
   end
   go(level, Nil)
@@ -255,139 +263,155 @@ end
 
 pfn node_insert(node, key, val, h, eq, level) do
   match node do
-  | HEmpty -> HLeaf(h, key, val)
-  | HLeaf(lh, lk, lv) ->
-    if lh == h then
-      if eq(lk, key) then HLeaf(h, key, val)
-      else HCollision(h, Cons((lk, lv), Cons((key, val), Nil)))
+  HEmpty -> HLeaf(h, key, val)
+  HLeaf(lh, lk, lv) -> do
+    if lh == h do
+      if eq(lk, key) do HLeaf(h, key, val)
+      else HCollision(h, Cons((lk, lv), Cons((key, val), Nil))) end
     else
       make_branch(lh, lk, lv, h, key, val, level)
-  | HCollision(ch, pairs) ->
-    if ch == h then
+    end
+  end
+  HCollision(ch, pairs) -> do
+    if ch == h do
       HCollision(ch, coll_insert(pairs, key, val, eq))
     else do
       fn expand(nd, ps) do
         match ps do
-        | Nil -> nd
-        | Cons(pair, rest) ->
+        Nil -> nd
+        Cons(pair, rest) -> do
           let (ck, cv) = pair
           expand(node_insert(nd, ck, cv, ch, eq, level), rest)
         end
+        end
       end
-      expand(node_insert(HEmpty, key, val, h, eq, level), pairs)
+      expand(node_insert(HEmpty, key, val, h, eq, level), pairs) end
     end
-  | HBranch(bitmap, children) ->
+  end
+  HBranch(bitmap, children) -> do
     let slot = hash_slot(h, level)
-    if bitmap_has(bitmap, slot) then do
+    if bitmap_has(bitmap, slot) do
       let idx = bitmap_rank(bitmap, slot)
       let child = list_nth_safe(children, idx)
       let new_child = node_insert(child, key, val, h, eq, level + 1)
       HBranch(bitmap, list_replace_at(children, idx, new_child))
-    end else do
+    else do
       let idx = bitmap_rank(bitmap, slot)
       HBranch(bitmap_set(bitmap, slot), list_insert_at(children, idx, HLeaf(h, key, val)))
-    end
+    end end
+  end
   end
 end
 
 pfn node_remove(node, key, h, eq, level) do
   match node do
-  | HEmpty -> HEmpty
-  | HLeaf(lh, lk, lv) ->
-    if lh == h then
-      if eq(lk, key) then HEmpty else node
-    else node
-  | HCollision(ch, pairs) ->
-    if ch != h then node
+  HEmpty -> HEmpty
+  HLeaf(lh, lk, lv) -> do
+    if lh == h do
+      if eq(lk, key) do HEmpty else node end
+    else node end
+  end
+  HCollision(ch, pairs) -> do
+    if ch != h do node
     else do
       let new_pairs = coll_remove(pairs, key, eq)
       match new_pairs do
-      | Nil -> HEmpty
-      | Cons(sole, Nil) ->
+      Nil -> HEmpty
+      Cons(sole, Nil) -> do
         let (ok, ov) = sole
         HLeaf(ch, ok, ov)
-      | _ -> HCollision(ch, new_pairs)
       end
+      _ -> HCollision(ch, new_pairs)
+      end end
     end
-  | HBranch(bitmap, children) ->
+  end
+  HBranch(bitmap, children) -> do
     let slot = hash_slot(h, level)
-    if bitmap_has(bitmap, slot) then do
+    if bitmap_has(bitmap, slot) do
       let idx = bitmap_rank(bitmap, slot)
       let child = list_nth_safe(children, idx)
       let new_child = node_remove(child, key, h, eq, level + 1)
       match new_child do
-      | HEmpty ->
+      HEmpty -> do
         let new_bm = bitmap_clear(bitmap, slot)
         let new_children = list_delete_at(children, idx)
         match new_children do
-        | Nil -> HEmpty
-        | Cons(sole, Nil) ->
+        Nil -> HEmpty
+        Cons(sole, Nil) ->
           match sole do
-          | HLeaf(_, _, _) -> sole
-          | HCollision(_, _) -> sole
-          | _ -> HBranch(new_bm, new_children)
+          HLeaf(_, _, _) -> sole
+          HCollision(_, _) -> sole
+          _ -> HBranch(new_bm, new_children)
           end
-        | _ -> HBranch(new_bm, new_children)
+        _ -> HBranch(new_bm, new_children)
         end
-      | _ ->
+      end
+      _ ->
         HBranch(bitmap, list_replace_at(children, idx, new_child))
       end
-    end else node
+    else node end
+  end
   end
 end
 
 -- Left fold over all (key, value) pairs.  f(acc)(key)(val) = new_acc
 pfn node_fold(acc, node, f) do
   match node do
-  | HEmpty -> acc
-  | HLeaf(_, k, v) ->
+  HEmpty -> acc
+  HLeaf(_, k, v) -> do
     let f1 = f(acc)
     let f2 = f1(k)
     f2(v)
-  | HCollision(_, pairs) ->
+  end
+  HCollision(_, pairs) -> do
     fn go(a, ps) do
       match ps do
-      | Nil -> a
-      | Cons(pair, rest) ->
+      Nil -> a
+      Cons(pair, rest) -> do
         let (k, v) = pair
         let f1 = f(a)
         let f2 = f1(k)
         go(f2(v), rest)
       end
+      end
     end
     go(acc, pairs)
-  | HBranch(_, children) ->
+  end
+  HBranch(_, children) -> do
     fn go(a, cs) do
       match cs do
-      | Nil -> a
-      | Cons(child, rest) ->
+      Nil -> a
+      Cons(child, rest) ->
         go(node_fold(a, child, f), rest)
       end
     end
     go(acc, children)
   end
+  end
 end
 
 pfn node_size(node) do
   match node do
-  | HEmpty -> 0
-  | HLeaf(_, _, _) -> 1
-  | HCollision(_, pairs) ->
+  HEmpty -> 0
+  HLeaf(_, _, _) -> 1
+  HCollision(_, pairs) -> do
     fn count(ps, n) do
       match ps do
-      | Nil -> n
-      | Cons(_, rest) -> count(rest, n + 1)
+      Nil -> n
+      Cons(_, rest) -> count(rest, n + 1)
       end
     end
     count(pairs, 0)
-  | HBranch(_, children) ->
+  end
+  HBranch(_, children) -> do
     fn go(acc, cs) do
       match cs do
-      | Nil -> acc
-      | Cons(child, rest) -> go(acc + node_size(child), rest)
+      Nil -> acc
+      Cons(child, rest) -> go(acc + node_size(child), rest)
       end
     end
     go(0, children)
+  end
   end
 end
 
@@ -409,15 +433,15 @@ end
 doc "Returns true if the map contains no entries."
 fn is_empty(m) do
   match m do
-  | HamtMap(HEmpty) -> true
-  | _               -> false
+  HamtMap(HEmpty) -> true
+  _               -> false
   end
 end
 
 doc "Returns the number of key-value pairs in the map. O(n)."
 fn size(m) do
   match m do
-  | HamtMap(node) -> node_size(node)
+  HamtMap(node) -> node_size(node)
   end
 end
 
@@ -427,26 +451,27 @@ cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 """
 fn get(m, key, cmp) do
   match m do
-  | HamtMap(node) ->
+  HamtMap(node) -> do
     let h = key_hash(key)
     let eq = fn (a, b) -> cmp_eq(cmp, a, b)
     node_get(node, key, h, eq, 0)
+  end
   end
 end
 
 doc "Returns the value for key, or default if the key is absent."
 fn get_or(m, key, default, cmp) do
   match get(m, key, cmp) do
-  | Some(v) -> v
-  | None    -> default
+  Some(v) -> v
+  None    -> default
   end
 end
 
 doc "Returns true if key is present in the map."
 fn contains_key(m, key, cmp) do
   match get(m, key, cmp) do
-  | Some(_) -> true
-  | None    -> false
+  Some(_) -> true
+  None    -> false
   end
 end
 
@@ -459,10 +484,11 @@ cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 """
 fn insert(m, key, val, cmp) do
   match m do
-  | HamtMap(node) ->
+  HamtMap(node) -> do
     let h = key_hash(key)
     let eq = fn (a, b) -> cmp_eq(cmp, a, b)
     HamtMap(node_insert(node, key, val, h, eq, 0))
+  end
   end
 end
 
@@ -472,10 +498,11 @@ cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 """
 fn remove(m, key, cmp) do
   match m do
-  | HamtMap(node) ->
+  HamtMap(node) -> do
     let h = key_hash(key)
     let eq = fn (a, b) -> cmp_eq(cmp, a, b)
     HamtMap(node_remove(node, key, h, eq, 0))
+  end
   end
 end
 
@@ -487,7 +514,7 @@ f is curried: fn acc -> fn key -> fn val -> new_acc
 """
 fn fold(acc, m, f) do
   match m do
-  | HamtMap(node) -> node_fold(acc, node, f)
+  HamtMap(node) -> node_fold(acc, node, f)
   end
 end
 
@@ -519,10 +546,11 @@ cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 fn from_list(pairs, cmp) do
   fn go(lst, acc) do
     match lst do
-    | Nil -> acc
-    | Cons(pair, rest) ->
+    Nil -> acc
+    Cons(pair, rest) -> do
       let (k, v) = pair
       go(rest, insert(acc, k, v, cmp))
+    end
     end
   end
   go(pairs, empty())
@@ -539,36 +567,39 @@ doc "Applies f to each value, returning a new map with the same keys."
 fn map_values(m, f) do
   fn go(node) do
     match node do
-    | HEmpty -> HEmpty
-    | HLeaf(h, k, v) -> HLeaf(h, k, f(v))
-    | HBranch(bm, children) ->
+    HEmpty -> HEmpty
+    HLeaf(h, k, v) -> HLeaf(h, k, f(v))
+    HBranch(bm, children) -> do
       fn map_cs(cs) do
         fn go_cs(lst, acc) do
           match lst do
-          | Nil -> lst_rev(acc)
-          | Cons(c, rest) -> go_cs(rest, Cons(go(c), acc))
+          Nil -> lst_rev(acc)
+          Cons(c, rest) -> go_cs(rest, Cons(go(c), acc))
           end
         end
         go_cs(cs, Nil)
       end
       HBranch(bm, map_cs(children))
-    | HCollision(h, pairs) ->
+    end
+    HCollision(h, pairs) -> do
       fn map_ps(ps) do
         fn go_ps(lst, acc) do
           match lst do
-          | Nil -> lst_rev(acc)
-          | Cons(pair, rest) ->
+          Nil -> lst_rev(acc)
+          Cons(pair, rest) -> do
             let (k, v) = pair
             go_ps(rest, Cons((k, f(v)), acc))
+          end
           end
         end
         go_ps(ps, Nil)
       end
       HCollision(h, map_ps(pairs))
     end
+    end
   end
   match m do
-  | HamtMap(node) -> HamtMap(go(node))
+  HamtMap(node) -> HamtMap(go(node))
   end
 end
 
@@ -580,12 +611,13 @@ pred : k -> v -> Bool (curried).
 fn filter(m, pred, cmp) do
   fn go(lst, acc) do
     match lst do
-    | Nil -> acc
-    | Cons(pair, rest) ->
+    Nil -> acc
+    Cons(pair, rest) -> do
       let (k, v) = pair
       let p = pred(k)
-      if p(v) then go(rest, insert(acc, k, v, cmp))
-      else go(rest, acc)
+      if p(v) do go(rest, insert(acc, k, v, cmp))
+      else go(rest, acc) end
+    end
     end
   end
   go(entries(m), empty())
@@ -599,10 +631,11 @@ cmp : k -> k -> Bool where cmp(a)(b) = true means a < b.
 fn merge(a, b, cmp) do
   fn go(lst, acc) do
     match lst do
-    | Nil -> acc
-    | Cons(pair, rest) ->
+    Nil -> acc
+    Cons(pair, rest) -> do
       let (k, v) = pair
       go(rest, insert(acc, k, v, cmp))
+    end
     end
   end
   go(entries(b), a)
@@ -616,17 +649,19 @@ cmp : k -> k -> Bool; f : v -> v -> v (curried).
 fn merge_with(a, b, f, cmp) do
   fn go(lst, acc) do
     match lst do
-    | Nil -> acc
-    | Cons(pair, rest) ->
+    Nil -> acc
+    Cons(pair, rest) -> do
       let (k, v) = pair
       let new_val =
         match get(acc, k, cmp) do
-        | None    -> v
-        | Some(existing) ->
+        None    -> v
+        Some(existing) -> do
           let combine = f(existing)
           combine(v)
         end
+        end
       go(rest, insert(acc, k, new_val, cmp))
+    end
     end
   end
   go(entries(b), a)

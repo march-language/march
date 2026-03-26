@@ -45,7 +45,7 @@ fn seed(n : Int) : Rng do
   let s2 = mix(n + 2)
   let s3 = mix(n + 3)
   -- Ensure non-zero state: xoshiro256** requires at least one non-zero word
-  let s0 = if s0 == 0 && s1 == 0 && s2 == 0 && s3 == 0 then 1 else s0
+  let s0 = if s0 == 0 && s1 == 0 && s2 == 0 && s3 == 0 do 1 else s0 end
   { s0 = s0, s1 = s1, s2 = s2, s3 = s3 }
 end
 
@@ -94,10 +94,11 @@ end
 pfn remove_nth(xs : List(a), n : Int) : (a, List(a)) do
   fn go(lst : List(a), i : Int, acc : List(a)) : (a, List(a)) do
     match lst do
-    | Nil -> panic("Random.remove_nth: index out of bounds")
-    | Cons(h, t) ->
-      if i == n then (h, List.append(List.reverse(acc), t))
-      else go(t, i + 1, Cons(h, acc))
+    Nil -> panic("Random.remove_nth: index out of bounds")
+    Cons(h, t) -> do
+      if i == n do (h, List.append(List.reverse(acc), t))
+      else go(t, i + 1, Cons(h, acc)) end
+    end
     end
   end
   go(xs, 0, Nil)
@@ -111,14 +112,15 @@ Same seed + same list always produces the same shuffle.
 fn shuffle(rng : Rng, xs : List(a)) : (List(a), Rng) do
   fn go(rest : List(a), remaining : Int, acc : List(a), r : Rng) : (List(a), Rng) do
     match rest do
-    | Nil -> (List.reverse(acc), r)
-    | _ ->
+    Nil -> (List.reverse(acc), r)
+    _ -> do
       let (raw, r2) = next_raw(r)
       let max_v = int_max_value(())
       let pos = int_and(raw, max_v)
       let idx = int_mod(pos, remaining)
       let (picked, new_rest) = remove_nth(rest, idx)
       go(new_rest, remaining - 1, Cons(picked, acc), r2)
+    end
     end
   end
   go(xs, List.length(xs), Nil, rng)
@@ -131,7 +133,7 @@ Returns (sample, new_rng).
 """
 fn sample(rng : Rng, xs : List(a), n : Int) : (List(a), Rng) do
   let len = List.length(xs)
-  let count = if n > len then len else n
+  let count = if n > len do len else n end
   let (shuffled, rng2) = shuffle(rng, xs)
   (List.take(shuffled, count), rng2)
 end

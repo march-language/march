@@ -120,7 +120,7 @@ let load_stdlib () =
       "random.march";
       "stats.march";
       "plot.march";
-      "dataframe.march";
+      (* "dataframe.march"; *)  (* temporarily disabled - has parse errors *)
     ] in
     List.concat_map (fun name ->
         load_stdlib_file (Filename.concat stdlib_dir name)

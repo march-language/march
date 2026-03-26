@@ -204,7 +204,7 @@ describe "transforming" do
 
   test "filter_map keeps Some values" do
     let xs = Cons(1, Cons(2, Cons(3, Cons(4, Nil))))
-    let r = List.filter_map(xs, fn x -> if x % 2 == 0 then Some(x * 10) else None)
+    let r = List.filter_map(xs, fn x -> if x % 2 == 0 do Some(x * 10) else None) end
     assert (List.length(r) == 2)
     assert (List.head(r) == 20)
     assert (List.last(r) == 40)
@@ -370,21 +370,23 @@ describe "splitting" do
 
   test "split_at splits at position" do
     match List.split_at(five(), 3) do
-    | (left, right) ->
+    (left, right) -> do
       assert (List.length(left) == 3)
       assert (List.length(right) == 2)
       assert (List.last(left) == 3)
       assert (List.head(right) == 4)
     end
+    end
   end
 
   test "partition separates by predicate" do
     match List.partition(five(), fn x -> x % 2 == 0) do
-    | (evens, odds) ->
+    (evens, odds) -> do
       assert (List.length(evens) == 2)
       assert (List.length(odds) == 3)
       assert (List.head(evens) == 2)
       assert (List.head(odds) == 1)
+    end
     end
   end
 
@@ -414,9 +416,10 @@ describe "combining" do
     let r = List.zip(a, b)
     assert (List.length(r) == 3)
     match List.head(r) do
-    | (x, y) ->
+    (x, y) -> do
       assert (x == 1)
       assert (y == 10)
+    end
     end
   end
 
@@ -437,19 +440,21 @@ describe "combining" do
   test "unzip splits list of pairs" do
     let pairs = Cons((1, 10), Cons((2, 20), Cons((3, 30), Nil)))
     match List.unzip(pairs) do
-    | (as_, bs) ->
+    (as_, bs) -> do
       assert (List.head(as_) == 1)
       assert (List.head(bs) == 10)
       assert (List.length(as_) == 3)
+    end
     end
   end
 
   test "enumerate pairs elements with indices" do
     let r = List.enumerate(three())
     match List.head(r) do
-    | (i, v) ->
+    (i, v) -> do
       assert (i == 0)
       assert (v == 10)
+    end
     end
     assert (List.length(r) == 3)
   end

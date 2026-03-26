@@ -303,8 +303,8 @@ mod String do
   """
   fn to_int(s) do
     match string_to_int(s) do
-    | Some(n) -> Ok(n)
-    | None    -> Err("not a valid integer: " ++ s)
+    Some(n) -> Ok(n)
+    None    -> Err("not a valid integer: " ++ s)
     end
   end
 
@@ -320,8 +320,8 @@ mod String do
   """
   fn to_float(s) do
     match string_to_float(s) do
-    | Some(f) -> Ok(f)
-    | None    -> Err("not a valid float: " ++ s)
+    Some(f) -> Ok(f)
+    None    -> Err("not a valid float: " ++ s)
     end
   end
 

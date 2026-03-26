@@ -4013,7 +4013,7 @@ let span_of_expr (e : expr) : span =
   | ELam (_, _, sp) | EBlock (_, sp) | ELet (_, sp)
   | EMatch (_, _, sp) | ETuple (_, sp) | ERecord (_, sp)
   | ERecordUpdate (_, _, sp) | EField (_, _, sp)
-  | EIf (_, _, _, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
+  | EIf (_, _, _, sp) | ECond (_, sp) | EPipe (_, _, sp) | EAnnot (_, _, sp)
   | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
   | ESpawn (_, sp) | EDbg (_, sp) | ELetFn (_, _, _, _, sp) -> sp
   | EAssert (_, sp) -> sp
@@ -4209,6 +4209,17 @@ and eval_expr_inner (env : env) (e : expr) : value =
          March_coverage.Coverage.record_branch sp false);
        eval_expr env else_
      | _           -> eval_error "if condition must be a boolean")
+
+  | ECond (arms, _) ->
+    let rec go = function
+      | [] -> eval_error "non-exhaustive `match do` — no arm matched"
+      | (cond_e, body_e) :: rest ->
+        (match eval_expr env cond_e with
+         | VBool true  -> eval_expr env body_e
+         | VBool false -> go rest
+         | _           -> eval_error "`match do` condition must be Bool")
+    in
+    go arms
 
   | EPipe _ ->
     eval_error "pipe expression reached evaluator (should be desugared)"

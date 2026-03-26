@@ -19,22 +19,22 @@ end
 
 pfn first(row) do
   match row do
-  | Cons(x, _) -> x
-  | Nil -> ""
+  Cons(x, _) -> x
+  Nil -> ""
   end
 end
 
 pfn second(row) do
   match row do
-  | Cons(_, Cons(x, _)) -> x
-  | _ -> ""
+  Cons(_, Cons(x, _)) -> x
+  _ -> ""
   end
 end
 
 pfn parse_score(s) do
   match String.to_int(String.trim(s)) do
-  | Ok(n) -> n
-  | Err(_) -> 0
+  Ok(n) -> n
+  Err(_) -> 0
   end
 end
 
@@ -45,8 +45,8 @@ end
 
 pfn max_score_loop(rows, best) do
   match rows do
-  | Nil -> best
-  | Cons(row, rest) ->
+  Nil -> best
+  Cons(row, rest) ->
     let s = parse_score(second(row))
     if s > best
     then max_score_loop(rest, s)
@@ -56,8 +56,8 @@ end
 
 pfn min_score_loop(rows, best) do
   match rows do
-  | Nil -> best
-  | Cons(row, rest) ->
+  Nil -> best
+  Cons(row, rest) ->
     let s = parse_score(second(row))
     if s < best
     then min_score_loop(rest, s)
@@ -80,27 +80,27 @@ end
 
 pfn router(conn) do
   match (HttpServer.method(conn), HttpServer.path_info(conn)) do
-  | (Post, Cons("csv", Nil)) ->
+  (Post, Cons("csv", Nil)) ->
     let body = HttpServer.req_body(conn)
     let csv_path = save_csv(body)
     match Csv.read_all(csv_path, ",", :rfc4180) do
-    | Err(e) ->
+    Err(e) ->
       conn |> HttpServer.text(400, "CSV error: " ++ to_string(e))
-    | Ok(all_rows) ->
+    Ok(all_rows) ->
       let data_rows = match all_rows do
-      | Nil -> Nil
-      | Cons(_, rest) -> rest
+      Nil -> Nil
+      Cons(_, rest) -> rest
       end
       let row_count = List.length(data_rows)
       let total = sum_scores(data_rows)
       let mx = match data_rows do
-      | Nil -> 0
-      | Cons(first_row, rest) ->
+      Nil -> 0
+      Cons(first_row, rest) ->
         max_score_loop(rest, parse_score(second(first_row)))
       end
       let mn = match data_rows do
-      | Nil -> 0
-      | Cons(first_row, rest) ->
+      Nil -> 0
+      Cons(first_row, rest) ->
         min_score_loop(rest, parse_score(second(first_row)))
       end
       let high_rows = List.filter(data_rows, fn row ->
@@ -121,9 +121,9 @@ pfn router(conn) do
       File.write("/tmp/march_csv_results.txt", result)
       conn |> HttpServer.text(200, result)
     end
-  | (Get, Nil) ->
+  (Get, Nil) ->
     conn |> HttpServer.text(200, "POST /csv with a CSV body (name,score rows)")
-  | _ ->
+  _ ->
     conn |> HttpServer.text(404, "Not Found")
   end
 end

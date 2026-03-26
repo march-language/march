@@ -4,17 +4,17 @@
 mod BenchTimsort do
 
 pfn gen_list(n : Int, seed : Int, acc : List(Int)) : List(Int) do
-  if n == 0 then acc
+  if n == 0 do acc
   else do
     let next = (seed * 1664525 + 1013904223) % 1000000
-    gen_list(n - 1, next, Cons(next % 100000, acc))
+    gen_list(n - 1, next, Cons(next % 100000, acc)) end
   end
 end
 
 pfn head(xs : List(Int)) : Int do
   match xs do
-  | Nil        -> 0
-  | Cons(h, _) -> h
+  Nil        -> 0
+  Cons(h, _) -> h
   end
 end
 

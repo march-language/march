@@ -47,9 +47,9 @@ let test_match_expr () =
   let src = {|mod Test do
 fn label(x : Int) : String do
   match x do
-  | 0 -> "zero"
-  | 1 -> "one"
-  | _ -> "many"
+  0 -> "zero"
+  1 -> "one"
+  _ -> "many"
   end
 end
 end|} in
@@ -59,7 +59,7 @@ end|} in
 let test_if_expr () =
   let src = {|mod Test do
 fn sign(x : Int) : String do
-  if x > 0 then "positive" else if x < 0 then "negative" else "zero"
+  if x > 0 do "positive" else if x < 0 do "negative" else "zero" end end
 end
 end|} in
   check_parses "if" src;
@@ -120,12 +120,13 @@ let test_nested_match () =
   let src = {|mod Test do
 fn classify(x : Int, y : Int) : String do
   match x do
-  | 0 ->
+  0 -> do
     match y do
-    | 0 -> "origin"
-    | _ -> "x-axis"
+    0 -> "origin"
+    _ -> "x-axis"
     end
-  | _ -> "other"
+  end
+  _ -> "other"
   end
 end
 end|} in
@@ -154,7 +155,7 @@ let test_local_fn () =
   let src = {|mod Test do
 fn fib(n : Int) : Int do
   fn go(n : Int) : Int do
-    if n <= 1 then n else go(n - 1) + go(n - 2)
+    if n <= 1 do n else go(n - 1) + go(n - 2) end
   end
   go(n)
 end
@@ -201,8 +202,8 @@ type Shape = Circle(Float) | Rect(Float, Float)
 
 fn area(s : Shape) : Float do
   match s do
-  | Circle(r) -> 3.14159 * r * r
-  | Rect(w, h) -> w * h
+  Circle(r) -> 3.14159 * r * r
+  Rect(w, h) -> w * h
   end
 end
 

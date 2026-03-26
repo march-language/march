@@ -1656,6 +1656,7 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.ERecordUpdate (_, _, sp) -> sp
   | Ast.EField (_, _, sp)       -> sp
   | Ast.EIf   (_, _, _, sp)     -> sp
+  | Ast.ECond (_, sp)           -> sp
   | Ast.EPipe (_, _, sp)        -> sp
   | Ast.EAnnot (_, _, sp)       -> sp
   | Ast.EHole (_, sp)           -> sp
@@ -2698,7 +2699,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
       (* close the None branch of mod_access match *)
       )
 
-    (* ── if/then/else ─────────────────────────────────────────────── *)
+    (* ── if/do/else/end ───────────────────────────────────────────── *)
     | Ast.EIf (cond, then_, else_, sp) ->
       check_expr env cond t_bool
         ~reason:(Some (RBuiltin "The condition of an if expression must be Bool."));
@@ -2706,6 +2707,25 @@ let rec infer_expr env (e : Ast.expr) : ty =
       let e_ty = infer_expr env else_ in
       unify env ~span:sp ~reason:(Some (RMatchArm sp)) t_ty e_ty;
       t_ty
+
+    (* ── match do cond_arm* end ───────────────────────────────────── *)
+    | Ast.ECond (arms, sp) ->
+      (match arms with
+       | [] ->
+         Err.error env.errors ~span:sp
+           "A `match do` expression needs at least one arm.";
+         TError
+       | (first_cond, first_body) :: rest ->
+         check_expr env first_cond t_bool
+           ~reason:(Some (RBuiltin "Each condition in `match do` must be Bool."));
+         let result_ty = infer_expr env first_body in
+         List.iter (fun (cond_e, body_e) ->
+             check_expr env cond_e t_bool
+               ~reason:(Some (RBuiltin "Each condition in `match do` must be Bool."));
+             let arm_ty = infer_expr env body_e in
+             unify env ~span:sp ~reason:(Some (RMatchArm sp)) result_ty arm_ty
+           ) rest;
+         result_ty)
 
     (* ── Pipes — must be desugared before reaching us ─────────────── *)
     | Ast.EPipe _ ->
@@ -2985,6 +3005,9 @@ let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
   | Ast.EField (ex, _, _) -> free_vars_expr bound ex
   | Ast.EIf (c, t, f, _) ->
     free_vars_expr bound c @ free_vars_expr bound t @ free_vars_expr bound f
+  | Ast.ECond (arms, _) ->
+    List.concat_map (fun (ce, be) ->
+        free_vars_expr bound ce @ free_vars_expr bound be) arms
   | Ast.EAnnot (ex, _, _) -> free_vars_expr bound ex
   | Ast.EAtom (_, args, _) -> List.concat_map (free_vars_expr bound) args
   | Ast.ESend (a, b, _) ->
@@ -4258,6 +4281,12 @@ let rec collect_direct_fn_calls (fn_names : StringSet.t) (e : Ast.expr) : String
     StringSet.union (collect_direct_fn_calls fn_names c)
       (StringSet.union (collect_direct_fn_calls fn_names t)
                        (collect_direct_fn_calls fn_names f))
+  | Ast.ECond (arms, _) ->
+    List.fold_left (fun acc (ce, be) ->
+      StringSet.union acc
+        (StringSet.union (collect_direct_fn_calls fn_names ce)
+                         (collect_direct_fn_calls fn_names be))
+    ) StringSet.empty arms
   | Ast.EMatch (scrut, branches, _) ->
     List.fold_left (fun acc br ->
       let g = Option.fold ~none:StringSet.empty
@@ -4487,11 +4516,17 @@ let rec check_tail_position
     | Ast.ECon (name, args, _) ->
       let arg_ctx = Printf.sprintf "wrapped in constructor `%s`" name.txt in
       List.iter (chk false smaller arg_ctx) args
-    (* ── if/then/else: condition not tail; branches inherit ── *)
+    (* ── if/do/else/end: condition not tail; branches inherit ── *)
     | Ast.EIf (cond, then_, else_, _) ->
       chk false smaller "condition of `if`" cond;
       chk in_tail smaller ctx then_;
       chk in_tail smaller ctx else_
+    (* ── match do cond_arm* end ── *)
+    | Ast.ECond (arms, _) ->
+      List.iter (fun (ce, be) ->
+        chk false smaller "condition in `match do`" ce;
+        chk in_tail smaller ctx be
+      ) arms
     (* ── match: scrutinee not tail; if scrutinee is a parameter or smaller
           variable, extend [smaller] with all vars bound in each arm's pattern ── *)
     | Ast.EMatch (scrut, branches, _) ->

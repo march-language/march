@@ -55,41 +55,46 @@ end
 describe "unfold" do
 
   test "countdown from 3 to 1" do
-    let s = Seq.unfold(3, fn seed ->
-      if seed <= 0 then None
-      else Some((seed, seed - 1))
+    let s = Seq.unfold(3, fn seed -> do
+      if seed <= 0 do None
+      else Some((seed, seed - 1)) end
+    end
     )
     assert (Seq.to_list(s) == [3, 2, 1])
   end
 
   test "unfold empty when seed produces None immediately" do
-    let s = Seq.unfold(0, fn seed ->
-      if seed <= 0 then None
-      else Some((seed, seed - 1))
+    let s = Seq.unfold(0, fn seed -> do
+      if seed <= 0 do None
+      else Some((seed, seed - 1)) end
+    end
     )
     assert (Seq.to_list(s) == [])
   end
 
   test "unfold single element" do
-    let s = Seq.unfold(1, fn seed ->
-      if seed <= 0 then None
-      else Some((seed, seed - 1))
+    let s = Seq.unfold(1, fn seed -> do
+      if seed <= 0 do None
+      else Some((seed, seed - 1)) end
+    end
     )
     assert (Seq.to_list(s) == [1])
   end
 
   test "unfold range 1 to 5" do
-    let s = Seq.unfold(1, fn seed ->
-      if seed > 5 then None
-      else Some((seed, seed + 1))
+    let s = Seq.unfold(1, fn seed -> do
+      if seed > 5 do None
+      else Some((seed, seed + 1)) end
+    end
     )
     assert (Seq.to_list(s) == [1, 2, 3, 4, 5])
   end
 
   test "unfold count matches generated elements" do
-    let s = Seq.unfold(1, fn seed ->
-      if seed > 10 then None
-      else Some((seed, seed + 1))
+    let s = Seq.unfold(1, fn seed -> do
+      if seed > 10 do None
+      else Some((seed, seed + 1)) end
+    end
     )
     assert (Seq.count(s) == 10)
   end
@@ -427,9 +432,10 @@ describe "fold_while" do
 
   test "fold_while halts when threshold reached" do
     -- Sum until adding next element would exceed 5; halt returns acc (before adding)
-    let result = Seq.fold_while(Seq.from_list([1, 2, 3, 4, 5]), 0, fn (acc, x) ->
-      if acc + x > 5 then Halt(acc)
-      else Continue(acc + x)
+    let result = Seq.fold_while(Seq.from_list([1, 2, 3, 4, 5]), 0, fn (acc, x) -> do
+      if acc + x > 5 do Halt(acc)
+      else Continue(acc + x) end
+    end
     )
     assert (result == 3)
   end
@@ -448,9 +454,10 @@ describe "fold_while" do
 
   test "fold_while halt captures accumulated value" do
     -- halt at x==3: sum is 1+2+3=6
-    let result = Seq.fold_while(Seq.from_list([1, 2, 3, 4, 5]), 0, fn (acc, x) ->
-      if x == 3 then Halt(acc + x)
-      else Continue(acc + x)
+    let result = Seq.fold_while(Seq.from_list([1, 2, 3, 4, 5]), 0, fn (acc, x) -> do
+      if x == 3 do Halt(acc + x)
+      else Continue(acc + x) end
+    end
     )
     assert (result == 6)
   end
@@ -509,36 +516,36 @@ describe "find" do
 
   test "find on empty returns None" do
     match Seq.find(Seq.empty(), fn (x : Int) -> x > 0) do
-    | None -> ()
-    | Some(_) -> panic("expected None")
+    None -> ()
+    Some(_) -> panic("expected None")
     end
   end
 
   test "find first match" do
     match Seq.find(Seq.from_list([1, 2, 3, 4]), fn x -> x > 2) do
-    | None -> panic("expected Some")
-    | Some(v) -> assert (v == 3)
+    None -> panic("expected Some")
+    Some(v) -> assert (v == 3)
     end
   end
 
   test "find no match returns None" do
     match Seq.find(Seq.from_list([1, 2, 3]), fn x -> x > 10) do
-    | None -> ()
-    | Some(_) -> panic("expected None")
+    None -> ()
+    Some(_) -> panic("expected None")
     end
   end
 
   test "find first element" do
     match Seq.find(Seq.from_list([5, 3, 1]), fn x -> x > 0) do
-    | None -> panic("expected Some")
-    | Some(v) -> assert (v == 5)
+    None -> panic("expected Some")
+    Some(v) -> assert (v == 5)
     end
   end
 
   test "find single match" do
     match Seq.find(Seq.from_list([1, 2, 3, 4, 5]), fn x -> x == 3) do
-    | None -> panic("expected Some")
-    | Some(v) -> assert (v == 3)
+    None -> panic("expected Some")
+    Some(v) -> assert (v == 3)
     end
   end
 
@@ -620,13 +627,13 @@ describe "chaining" do
   -- NOTE: Seq uses church-encoded folds that visit ALL elements even with take.
   -- Infinite unfold + take would loop forever. Use bounded unfold instead.
   test "unfold bounded then take then count" do
-    let first20 = Seq.unfold(1, fn s -> if s > 20 then None else Some((s, s + 1)))
+    let first20 = Seq.unfold(1, fn s -> if s > 20 do None else Some((s, s + 1))) end
     let taken = Seq.take(first20, 10)
     assert (Seq.count(taken) == 10)
   end
 
   test "unfold bounded then take then fold" do
-    let first20 = Seq.unfold(1, fn s -> if s > 20 then None else Some((s, s + 1)))
+    let first20 = Seq.unfold(1, fn s -> if s > 20 do None else Some((s, s + 1))) end
     let first5 = Seq.take(first20, 5)
     let sum = Seq.fold(first5, 0, fn (acc, x) -> acc + x)
     assert (sum == 15)

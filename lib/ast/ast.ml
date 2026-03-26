@@ -86,7 +86,8 @@ type expr =
   | ERecordUpdate of expr * (name * expr) list * span
       (** Record update: { state with count = state.count + 1 } *)
   | EField of expr * name * span           (** Field access: x.name *)
-  | EIf of expr * expr * expr * span       (** if/then/else *)
+  | EIf of expr * expr * expr * span       (** if/do/else/end *)
+  | ECond of (expr * expr) list * span     (** match do cond_arm* end — boolean chain *)
   | EPipe of expr * expr * span            (** x |> f *)
   | EAnnot of expr * ty * span             (** Type annotation *)
   | EHole of name option * span            (** Typed hole: ?name or ? *)

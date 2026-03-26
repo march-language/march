@@ -19,12 +19,12 @@ mod MutualRecursion do
 
 @[no_warn_recursion]
 pfn even(n : Int) : Bool do
-  if n == 0 then true else odd(n - 1)
+  if n == 0 do true else odd(n - 1) end
 end
 
 @[no_warn_recursion]
 pfn odd(n : Int) : Bool do
-  if n == 0 then false else even(n - 1)
+  if n == 0 do false else even(n - 1) end
 end
 
 -- ── 2. Three-state machine ─────────────────────────────────────────────
@@ -32,17 +32,17 @@ end
 
 @[no_warn_recursion]
 pfn state_a(n : Int) : Int do
-  if n <= 0 then 0 else state_b(n - 1)
+  if n <= 0 do 0 else state_b(n - 1) end
 end
 
 @[no_warn_recursion]
 pfn state_b(n : Int) : Int do
-  if n <= 0 then 1 else state_c(n - 1)
+  if n <= 0 do 1 else state_c(n - 1) end
 end
 
 @[no_warn_recursion]
 pfn state_c(n : Int) : Int do
-  if n <= 0 then 2 else state_a(n - 1)
+  if n <= 0 do 2 else state_a(n - 1) end
 end
 
 -- ── 3. Collatz-like counter ─────────────────────────────────────────────
@@ -51,15 +51,15 @@ end
 
 @[no_warn_recursion]
 pfn step_even(n : Int, steps : Int) : Int do
-  if n == 1 then steps
-  else if n % 2 == 0 then step_even(n / 2, steps + 1)
-  else step_odd(n, steps)
+  if n == 1 do steps
+  else if n % 2 == 0 do step_even(n / 2, steps + 1)
+  else step_odd(n, steps) end end
 end
 
 @[no_warn_recursion]
 pfn step_odd(n : Int, steps : Int) : Int do
-  if n == 1 then steps
-  else step_even(3 * n + 1, steps + 1)
+  if n == 1 do steps
+  else step_even(3 * n + 1, steps + 1) end
 end
 
 -- ── Main ────────────────────────────────────────────────────────────────

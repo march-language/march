@@ -21,7 +21,7 @@
 
   (** Delegate to Parse_errors module so callers outside the parser can
       access collected errors via March_parser.Parse_errors.take_parse_errors. *)
-  let collect_parse_error = Parse_errors.collect_parse_error
+  let _collect_parse_error = Parse_errors.collect_parse_error
 
   (** Collect a parse error into the buffer and then raise [ParseError].
       Use this in sub-production error rules where Menhir requires the action
@@ -131,8 +131,8 @@ decl_list_r:
   | { [] }
   | ds = decl_list_r; d = decl { ds @ [d] }
   | ds = decl_list_r; error
-    { collect_parse_error "Parse error in declaration" None $startpos($2);
-      ds }
+    { ignore ds;
+      error_raise "Parse error in declaration" None $startpos($2) }
 
 (* ---- Declarations ---- *)
 
@@ -689,8 +689,20 @@ expr:
         "I was expecting `->` to start the lambda body here:"
         (Some hint)
         $startpos($3) }
+  | IF; cond = expr; DO; t = block_body; ELSE; f = block_body; END
+    { EIf (cond, t, f, mk_span ($loc)) }
   | IF; cond = expr; THEN; t = expr; ELSE; f = expr
     { EIf (cond, t, f, mk_span ($loc)) }
+  | IF; _c = expr; DO; _t = block_body; ELSE; _f = block_body; error
+    { error_raise
+        "I was expecting `end` to close the if expression here:"
+        (Some "if cond do\n    expr1\nelse\n    expr2\nend")
+        $startpos($7) }
+  | IF; _c = expr; DO; _t = block_body; error
+    { error_raise
+        "March `if` expressions always need an `else` branch:"
+        (Some "if cond do\n    expr1\nelse\n    expr2\nend")
+        $startpos($5) }
   | IF; _c = expr; THEN; _t = expr; error
     { error_raise
         "March `if` expressions always need an `else` branch:"
@@ -698,11 +710,13 @@ expr:
         $startpos($5) }
   | IF; _c = expr; error
     { error_raise
-        "I was expecting `then` after the condition here:"
-        (Some "if cond then\n    expr1\nelse\n    expr2")
+        "I was expecting `do` after the condition here:"
+        (Some "if cond do\n    expr1\nelse\n    expr2\nend")
         $startpos($3) }
   | MATCH; e = expr; DO; bs = nonempty_list(branch); END
     { EMatch (e, bs, mk_span ($loc)) }
+  | MATCH; DO; bs = nonempty_list(cond_branch); END
+    { ECond (bs, mk_span ($loc)) }
   | MATCH; _e = expr; DO; _bs = nonempty_list(branch); error
     { error_raise
         "I was expecting `end` to close the match here:"
@@ -853,13 +867,19 @@ interp_parts:
   | e = expr; mid = INTERP_MID; rest = interp_parts { (e, mid) :: rest }
 
 branch:
-  | option(PIPE); p = pattern; guard = option(when_guard); ARROW; e = block_body
+  | p = pattern; guard = option(when_guard); ARROW; e = expr
     { { branch_pat = p; branch_guard = guard; branch_body = e } }
-  | option(PIPE); _p = pattern; _guard = option(when_guard); error
+  | _p = pattern; _guard = option(when_guard); error
     { error_raise
         "I was expecting `->` in the match arm here:"
         (Some "Pattern -> result")
-        $startpos($4) }
+        $startpos($3) }
+
+cond_branch:
+  | e = expr; ARROW; body = expr
+    { (e, body) }
+  | UNDERSCORE; ARROW; body = expr
+    { (ELit (LitBool true, mk_span ($loc($1))), body) }
 
 (* ---- Patterns ---- *)
 

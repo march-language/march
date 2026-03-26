@@ -20,8 +20,8 @@ pfn render_row(i : Int) : IOList do
 end
 
 pfn build_rows(n : Int, acc : IOList) : IOList do
-  if n == 0 then acc
-  else build_rows(n - 1, IOList.append(acc, render_row(n)))
+  if n == 0 do acc
+  else build_rows(n - 1, IOList.append(acc, render_row(n))) end
 end
 
 pfn main() : Unit do

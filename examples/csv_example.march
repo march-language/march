@@ -24,8 +24,8 @@ end
 pfn demo_each_row(path) do
   println("--- Example 1: each_row (streaming) ---")
   match Csv.each_row(path, ",", :rfc4180, fn row -> print_row(row)) do
-  | Ok(:ok) -> println("Done.")
-  | Err(e) -> println("Error: " ++ to_string(e))
+  Ok(:ok) -> println("Done.")
+  Err(e) -> println("Error: " ++ to_string(e))
   end
 end
 
@@ -33,25 +33,25 @@ end
 
 pfn get_age(row) do
   match row do
-  | Cons(_, Cons(age_str, _)) -> String.to_int(age_str)
-  | _ -> Err("no age")
+  Cons(_, Cons(age_str, _)) -> String.to_int(age_str)
+  _ -> Err("no age")
   end
 end
 
 pfn get_name(row) do
   match row do
-  | Cons(name, _) -> name
-  | _ -> ""
+  Cons(name, _) -> name
+  _ -> ""
   end
 end
 
 pfn find_oldest_loop(rows, best_name, best_age) do
   match rows do
-  | Nil -> best_name
-  | Cons(row, rest) ->
+  Nil -> best_name
+  Cons(row, rest) ->
     match get_age(row) do
-    | Err(_) -> find_oldest_loop(rest, best_name, best_age)
-    | Ok(age) ->
+    Err(_) -> find_oldest_loop(rest, best_name, best_age)
+    Ok(age) ->
       if age > best_age
       then find_oldest_loop(rest, get_name(row), age)
       else find_oldest_loop(rest, best_name, best_age)
@@ -62,12 +62,12 @@ end
 pfn demo_read_all(path) do
   println("--- Example 2: read_all (eager) ---")
   match Csv.read_all(path, ",", :rfc4180) do
-  | Err(e) -> println("Error: " ++ to_string(e))
-  | Ok(rows) ->
+  Err(e) -> println("Error: " ++ to_string(e))
+  Ok(rows) ->
     println("Total rows (incl. header): " ++ to_string(List.length(rows)))
     match rows do
-    | Nil -> println("No data.")
-    | Cons(_, data_rows) ->
+    Nil -> println("No data.")
+    Cons(_, data_rows) ->
       let oldest = find_oldest_loop(data_rows, "nobody", -1)
       println("Oldest person: " ++ oldest)
     end
@@ -78,12 +78,12 @@ end
 
 pfn get_field_loop(hs, rs, name) do
   match hs do
-  | Nil -> None
-  | Cons(h, rh) ->
+  Nil -> None
+  Cons(h, rh) ->
     match rs do
-    | Nil -> None
-    | Cons(v, rv) ->
-      if h == name then Some(v) else get_field_loop(rh, rv, name)
+    Nil -> None
+    Cons(v, rv) ->
+      if h == name do Some(v) else get_field_loop(rh, rv, name) end
     end
   end
 end
@@ -94,12 +94,12 @@ end
 
 pfn print_name_city(header, row) do
   let name = match get_field(header, row, "name") do
-  | Some(v) -> v
-  | None -> "?"
+  Some(v) -> v
+  None -> "?"
   end
   let city = match get_field(header, row, "city") do
-  | Some(v) -> v
-  | None -> "?"
+  Some(v) -> v
+  None -> "?"
   end
   println(name ++ " lives in " ++ city)
 end

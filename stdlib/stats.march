@@ -26,28 +26,29 @@ end
 doc "Arithmetic mean. Panics on empty list."
 fn mean(xs : List(Float)) : Float do
   match xs do
-  | Nil -> panic("Stats.mean: empty list")
-  | _   ->
+  Nil -> panic("Stats.mean: empty list")
+  _   -> do
     let n = int_to_float(List.length(xs))
     sum(xs) /. n
+  end
   end
 end
 
 doc "Minimum value. Panics on empty list."
 fn min_val(xs : List(Float)) : Float do
   match xs do
-  | Nil -> panic("Stats.min_val: empty list")
-  | Cons(h, t) ->
-    List.fold_left(h, t, fn (acc, x) -> if x < acc then x else acc)
+  Nil -> panic("Stats.min_val: empty list")
+  Cons(h, t) ->
+    List.fold_left(h, t, fn (acc, x) -> if x < acc do x else acc end)
   end
 end
 
 doc "Maximum value. Panics on empty list."
 fn max_val(xs : List(Float)) : Float do
   match xs do
-  | Nil -> panic("Stats.max_val: empty list")
-  | Cons(h, t) ->
-    List.fold_left(h, t, fn (acc, x) -> if x > acc then x else acc)
+  Nil -> panic("Stats.max_val: empty list")
+  Cons(h, t) ->
+    List.fold_left(h, t, fn (acc, x) -> if x > acc do x else acc end)
   end
 end
 
@@ -65,9 +66,9 @@ p must be in [0.0, 100.0]. Panics on empty list or out-of-range p.
 """
 fn percentile(xs : List(Float), p : Float) : Float do
   match xs do
-  | Nil -> panic("Stats.percentile: empty list")
-  | _ ->
-    if p < 0.0 || p > 100.0 then panic("Stats.percentile: p must be in [0, 100]")
+  Nil -> panic("Stats.percentile: empty list")
+  _ -> do
+    if p < 0.0 || p > 100.0 do panic("Stats.percentile: p must be in [0, 100]")
     else do
       let sorted = sort_floats(xs)
       let n = List.length(sorted)
@@ -75,12 +76,13 @@ fn percentile(xs : List(Float), p : Float) : Float do
       let i = float_floor(h)
       let frac = h -. int_to_float(i)
       let lo = List.nth(sorted, i)
-      if i >= n - 1 then lo
+      if i >= n - 1 do lo
       else do
         let hi = List.nth(sorted, i + 1)
-        lo +. frac *. (hi -. lo)
-      end
+        lo +. frac *. (hi -. lo) end
+      end end
     end
+  end
   end
 end
 
@@ -98,13 +100,14 @@ Panics on empty list.
 """
 fn variance(xs : List(Float)) : Float do
   match xs do
-  | Nil -> panic("Stats.variance: empty list")
-  | Cons(_, Nil) -> 0.0
-  | _ ->
+  Nil -> panic("Stats.variance: empty list")
+  Cons(_, Nil) -> 0.0
+  _ -> do
     let m = mean(xs)
     let n = int_to_float(List.length(xs))
     let sq_sum = List.fold_left(0.0, xs, fn (acc, x) -> acc +. (x -. m) *. (x -. m))
     sq_sum /. (n -. 1.0)
+  end
   end
 end
 
@@ -114,13 +117,14 @@ Returns 0.0 for a single element or empty list.
 """
 fn variance_pop(xs : List(Float)) : Float do
   match xs do
-  | Nil -> 0.0
-  | Cons(_, Nil) -> 0.0
-  | _ ->
+  Nil -> 0.0
+  Cons(_, Nil) -> 0.0
+  _ -> do
     let m = mean(xs)
     let n = int_to_float(List.length(xs))
     let sq_sum = List.fold_left(0.0, xs, fn (acc, x) -> acc +. (x -. m) *. (x -. m))
     sq_sum /. n
+  end
   end
 end
 
@@ -143,29 +147,30 @@ Panics on empty list.
 """
 fn mode(xs : List(Float)) : Float do
   match xs do
-  | Nil -> panic("Stats.mode: empty list")
-  | _ ->
+  Nil -> panic("Stats.mode: empty list")
+  _ -> do
     let sorted = sort_floats(xs)
     -- Walk through sorted list tracking (current_val, current_count, best_val, best_count)
     fn scan(lst : List(Float), cur : Float, cur_count : Int, best : Float, best_count : Int) : Float do
       match lst do
-      | Nil ->
-        if cur_count > best_count then cur else best
-      | Cons(h, t) ->
-        if h == cur then
+      Nil ->
+        if cur_count > best_count do cur else best end
+      Cons(h, t) ->
+        if h == cur do
           scan(t, cur, cur_count + 1, best, best_count)
         else do
           let (new_best, new_best_count) =
-            if cur_count > best_count then (cur, cur_count)
-            else (best, best_count)
-          scan(t, h, 1, new_best, new_best_count)
+            if cur_count > best_count do (cur, cur_count)
+            else (best, best_count) end
+          scan(t, h, 1, new_best, new_best_count) end
         end
       end
     end
     match sorted do
-    | Nil -> panic("Stats.mode: empty list")
-    | Cons(h, t) -> scan(t, h, 1, h, 0)
+    Nil -> panic("Stats.mode: empty list")
+    Cons(h, t) -> scan(t, h, 1, h, 0)
     end
+  end
   end
 end
 
@@ -178,8 +183,8 @@ Panics if lengths differ or if either list has fewer than 2 elements.
 fn covariance(xs : List(Float), ys : List(Float)) : Float do
   let nx = List.length(xs)
   let ny = List.length(ys)
-  if nx != ny then panic("Stats.covariance: lists must have equal length")
-  else if nx < 2 then panic("Stats.covariance: need at least 2 elements")
+  if nx != ny do panic("Stats.covariance: lists must have equal length")
+  else if nx < 2 do panic("Stats.covariance: need at least 2 elements")
   else do
     let mx = mean(xs)
     let my = mean(ys)
@@ -187,9 +192,9 @@ fn covariance(xs : List(Float), ys : List(Float)) : Float do
     let pairs = List.zip(xs, ys)
     let cov_sum = List.fold_left(0.0, pairs, fn (acc, p) ->
       match p do
-      | (x, y) -> acc +. (x -. mx) *. (y -. my)
+      (x, y) -> acc +. (x -. mx) *. (y -. my)
       end)
-    cov_sum /. (n -. 1.0)
+    cov_sum /. (n -. 1.0) end end
   end
 end
 
@@ -202,8 +207,8 @@ or if either list has zero standard deviation.
 fn correlation(xs : List(Float), ys : List(Float)) : Float do
   let sx = std_dev(xs)
   let sy = std_dev(ys)
-  if sx == 0.0 || sy == 0.0 then panic("Stats.correlation: zero standard deviation")
-  else covariance(xs, ys) /. (sx *. sy)
+  if sx == 0.0 || sy == 0.0 do panic("Stats.correlation: zero standard deviation")
+  else covariance(xs, ys) /. (sx *. sy) end
 end
 
 -- ---- Linear regression ----
@@ -217,23 +222,25 @@ or if xs has zero variance (vertical line).
 fn linear_regression(xs : List(Float), ys : List(Float)) : (Float, Float) do
   let nx = List.length(xs)
   let ny = List.length(ys)
-  if nx != ny then panic("Stats.linear_regression: lists must have equal length")
-  else if nx < 2 then panic("Stats.linear_regression: need at least 2 points")
+  if nx != ny do panic("Stats.linear_regression: lists must have equal length")
+  else if nx < 2 do panic("Stats.linear_regression: need at least 2 points")
   else do
     let n = int_to_float(nx)
     let sum_x  = sum(xs)
     let sum_y  = sum(ys)
     let sum_xy = List.fold_left(0.0, List.zip(xs, ys), fn (acc, p) ->
-      match p do | (x, y) -> acc +. x *. y end)
+      match p do
+      (x, y) -> acc +. x *. y
+      end)
     let sum_xx = List.fold_left(0.0, xs, fn (acc, x) -> acc +. x *. x)
     let denom = n *. sum_xx -. sum_x *. sum_x
-    if denom == 0.0 then panic("Stats.linear_regression: xs have zero variance")
+    if denom == 0.0 do panic("Stats.linear_regression: xs have zero variance")
     else do
       let slope = (n *. sum_xy -. sum_x *. sum_y) /. denom
       let intercept = (sum_y -. slope *. sum_x) /. n
       let r = (slope, intercept)
-      r
-    end
+      r end
+    end end end
   end
 end
 
@@ -242,41 +249,41 @@ end
 doc "Mean, returning Err on empty list instead of panicking."
 fn mean_safe(xs : List(Float)) : Result(Float, String) do
   match xs do
-  | Nil -> Err("Stats.mean_safe: empty list")
-  | _   -> Ok(mean(xs))
+  Nil -> Err("Stats.mean_safe: empty list")
+  _   -> Ok(mean(xs))
   end
 end
 
 doc "Sample variance, returning Err on empty list."
 fn variance_safe(xs : List(Float)) : Result(Float, String) do
   match xs do
-  | Nil -> Err("Stats.variance_safe: empty list")
-  | _   -> Ok(variance(xs))
+  Nil -> Err("Stats.variance_safe: empty list")
+  _   -> Ok(variance(xs))
   end
 end
 
 doc "Sample standard deviation, returning Err on empty or single-element list."
 fn std_dev_safe(xs : List(Float)) : Result(Float, String) do
   match xs do
-  | Nil -> Err("Stats.std_dev_safe: empty list")
-  | Cons(_, Nil) -> Err("Stats.std_dev_safe: need at least 2 elements")
-  | _ -> Ok(std_dev(xs))
+  Nil -> Err("Stats.std_dev_safe: empty list")
+  Cons(_, Nil) -> Err("Stats.std_dev_safe: need at least 2 elements")
+  _ -> Ok(std_dev(xs))
   end
 end
 
 doc "Minimum value, returning Err on empty list."
 fn min_safe(xs : List(Float)) : Result(Float, String) do
   match xs do
-  | Nil -> Err("Stats.min_safe: empty list")
-  | _   -> Ok(min_val(xs))
+  Nil -> Err("Stats.min_safe: empty list")
+  _   -> Ok(min_val(xs))
   end
 end
 
 doc "Maximum value, returning Err on empty list."
 fn max_safe(xs : List(Float)) : Result(Float, String) do
   match xs do
-  | Nil -> Err("Stats.max_safe: empty list")
-  | _   -> Ok(max_val(xs))
+  Nil -> Err("Stats.max_safe: empty list")
+  _   -> Ok(max_val(xs))
   end
 end
 

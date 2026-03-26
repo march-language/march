@@ -11,18 +11,18 @@ mod BenchNearlySorted do
 
 -- Build [0,1,2,3,...,2n-1] as consecutive (even,odd) pairs.
 pfn build_pairs(n : Int, acc : List(Int)) : List(Int) do
-  if n < 0 then acc
+  if n < 0 do acc
   else do
     let even = n * 2
     let odd  = n * 2 + 1
-    build_pairs(n - 1, Cons(even, Cons(odd, acc)))
+    build_pairs(n - 1, Cons(even, Cons(odd, acc))) end
   end
 end
 
 pfn head(xs : List(Int)) : Int do
   match xs do
-  | Nil        -> 0
-  | Cons(h, _) -> h
+  Nil        -> 0
+  Cons(h, _) -> h
   end
 end
 
