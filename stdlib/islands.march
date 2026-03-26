@@ -1,0 +1,214 @@
+-- Islands: WASM island framework for March web applications.
+--
+-- Islands are interactive UI components rendered server-side in HTML and then
+-- hydrated on the client by compiled March WASM modules. The server embeds
+-- hydration markers and initial state in the HTML; the JS bootstrap loads the
+-- corresponding .wasm file and wires up the actor-per-island message loop.
+--
+-- Quick start:
+--
+--   -- 1. Define your island module:
+--   mod Counter do
+--     type State = { count : Int }
+--     type Msg = Increment | Decrement
+--
+--     fn render(state : State) : String do
+--       "<button data-on-click='Increment'>${state.count}</button>"
+--     end
+--
+--     fn update(state : State, msg : Msg) : State do
+--       match msg do
+--       Increment -> { state with count = state.count + 1 }
+--       Decrement -> { state with count = state.count - 1 }
+--       end
+--     end
+--   end
+--
+--   -- 2. Implement the Island interface for the state type:
+--   impl Island(Counter.State) do
+--     fn render(state) do Counter.render(state) end
+--     fn update(state, msg_json) do
+--       Counter.update(state, Counter.msg_from_json(msg_json))
+--     end
+--   end
+--
+--   -- 3. Server-side: render with hydration markers:
+--   let initial = { count = 0 }
+--   let html = Islands.wrap("Counter", Islands.Eager, Json.stringify(initial),
+--                           Counter.render(initial))
+--
+--   -- 4. In your page <head>:
+--   Islands.bootstrap_script("/_march/islands")
+
+mod Islands do
+
+  -- Hydration strategy: controls when a WASM module is loaded and the DOM patched.
+  --
+  --   Eager         — immediately on DOMContentLoaded (best for above-the-fold UI)
+  --   Lazy          — when the island enters the viewport (IntersectionObserver)
+  --   OnIdle        — during browser idle time (requestIdleCallback)
+  --   OnInteraction — on the first user interaction with the island (click, focus, …)
+  type HydrateOn = Eager | Lazy | OnIdle | OnInteraction
+
+  -- Metadata descriptor for one registered island.
+  --   name      : module name used to locate the .wasm file (e.g. "Counter")
+  --   hydrate   : default hydration strategy for this island
+  --   wasm_path : path to the compiled .wasm file.
+  --               Empty string until WASM codegen (Tier 4 browser target) lands.
+  type Descriptor = Descriptor(String, HydrateOn, String)
+
+  fn descriptor_name(d) do
+    match d do
+    Descriptor(n, _, _) -> n
+    end
+  end
+
+  fn descriptor_hydrate(d) do
+    match d do
+    Descriptor(_, h, _) -> h
+    end
+  end
+
+  fn descriptor_wasm_path(d) do
+    match d do
+    Descriptor(_, _, p) -> p
+    end
+  end
+
+  -- Convert a HydrateOn value to the string used in the data-march-hydrate attribute.
+  fn hydrate_attr(h) do
+    match h do
+    Eager         -> "eager"
+    Lazy          -> "lazy"
+    OnIdle        -> "idle"
+    OnInteraction -> "interaction"
+    end
+  end
+
+  -- Escape single-quote characters in a JSON string so it can be safely embedded
+  -- in a single-quoted HTML attribute (data-march-state='...').
+  pfn escape_state(json) do
+    String.replace_all(json, "'", "&#39;")
+  end
+
+  -- Wrap server-rendered HTML with island hydration markers.
+  --
+  -- name       : island name; must match the WASM module filename (e.g. "Counter")
+  -- hydrate    : when to hydrate this island on the client
+  -- state_json : JSON-encoded initial state passed to the WASM module on hydration
+  -- inner_html : server-side rendered HTML (shown before WASM loads)
+  --
+  -- Produces:
+  --   <div data-march-island="Name"
+  --        data-march-hydrate="strategy"
+  --        data-march-state='{"key":"val"}'>
+  --     ...inner_html...
+  --   </div>
+  fn wrap(name, hydrate, state_json, inner_html) do
+    let strat = hydrate_attr(hydrate)
+    let escaped = escape_state(state_json)
+    "<div data-march-island=\"${name}\" data-march-hydrate=\"${strat}\" data-march-state='${escaped}'>${inner_html}</div>"
+  end
+
+  -- Wrap with Eager hydration (most common; best for interactive-heavy pages).
+  fn wrap_eager(name, state_json, inner_html) do
+    wrap(name, Eager, state_json, inner_html)
+  end
+
+  -- Wrap with no server-rendered content (client-only island).
+  -- The island root is empty until WASM loads and renders the initial state.
+  fn client_only(name, hydrate, state_json) do
+    wrap(name, hydrate, state_json, "")
+  end
+
+  -- Generate the <script type="module"> tag that loads the island bootstrap runtime.
+  -- base_url is the URL prefix where march-islands.js is served, e.g. "/_march/islands".
+  -- Place this tag in your page's <head> or at the end of <body>.
+  fn bootstrap_script(base_url) do
+    "<script type=\"module\" src=\"${base_url}/march-islands.js\"></script>"
+  end
+
+  -- Generate a <link rel="modulepreload"> hint for an island's WASM file.
+  -- Placed in <head> so browsers fetch the WASM in parallel with page parsing.
+  --
+  -- TODO: When WASM codegen (Tier 4) lands, auto-generate preload hints for all
+  -- islands registered in the page's Registry.
+  fn preload_hint(base_url, island_name) do
+    let wasm_url = "${base_url}/${island_name}.wasm"
+    "<link rel=\"modulepreload\" href=\"${wasm_url}\">"
+  end
+
+  -- ── Registry ─────────────────────────────────────────────────────────────
+
+  -- A registry collects Descriptor values for every island used in the app.
+  -- Build it at server startup; pass it to your router or template engine to
+  -- auto-generate preload hints and validate island names.
+  type Registry = Registry(List(Descriptor))
+
+  fn empty_registry() do
+    Registry(Nil)
+  end
+
+  fn register(registry, descriptor) do
+    match registry do
+    Registry(ds) -> Registry(Cons(descriptor, ds))
+    end
+  end
+
+  fn registry_descriptors(registry) do
+    match registry do
+    Registry(ds) -> ds
+    end
+  end
+
+  -- Find a registered island by name. Returns None if not registered.
+  fn find_island(registry, name) do
+    let ds = registry_descriptors(registry)
+    fn go(xs) do
+      match xs do
+      Nil -> None
+      Cons(d, rest) ->
+        if descriptor_name(d) == name do Some(d)
+        else go(rest) end
+      end
+    end
+    go(ds)
+  end
+
+  -- Collect preload hints for every island in the registry.
+  -- Concatenate the result into your page's <head>.
+  fn registry_preload_hints(registry, base_url) do
+    let ds = registry_descriptors(registry)
+    let hints = List.map(ds, fn d -> preload_hint(base_url, descriptor_name(d)))
+    String.join(hints, "\n")
+  end
+
+  -- ── Island interface ─────────────────────────────────────────────────────
+  --
+  -- Implement Island(s) for any module that serves as a WASM island.
+  -- The type parameter s is the island's state type.
+  --
+  -- Required methods:
+  --   render(state : s) : String
+  --       Server-side HTML from state; also called after every client update.
+  --
+  --   update(state : s, msg : String) : s
+  --       Apply a JSON-encoded event message, return next state.
+  --       JS runtime calls this with serialized user events.
+  --
+  -- Example:
+  --   impl Island(Counter.State) do
+  --     fn render(state) do Counter.render(state) end
+  --     fn update(state, msg_json) do
+  --       Counter.update(state, Counter.decode_msg(msg_json))
+  --     end
+  --   end
+  --
+  -- TODO: When WASM codegen (Tier 4) lands, the compiler will verify impl Island(T)
+  -- exports match the expected WASM function signatures.
+  interface Island(s) do
+    fn render : s -> String
+    fn update : s -> String -> s
+  end
+
+end

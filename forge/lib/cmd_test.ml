@@ -14,12 +14,38 @@ let rec find_test_files dir =
     else if is_test_file entry then [path]
     else [])
 
+let rec find_lib_files dir =
+  Array.to_list (Sys.readdir dir)
+  |> List.concat_map (fun entry ->
+    let path = Filename.concat dir entry in
+    if Sys.file_exists path && Sys.is_directory path then
+      find_lib_files path
+    else if Filename.check_suffix entry ".march" then [path]
+    else [])
+
+(** Find lib .march files for library projects.
+    For [type = "lib"] projects, returns all .march files under lib/ so they
+    are loaded before the test files (making the library's module available). *)
+let find_lib_sources () =
+  match Project.load () with
+  | Error _ -> []
+  | Ok proj ->
+    if proj.Project.project_type <> Project.Lib then []
+    else
+      let lib_dir = Filename.concat proj.Project.root "lib" in
+      if Sys.file_exists lib_dir && Sys.is_directory lib_dir then
+        find_lib_files lib_dir
+      else []
+
 let invoke_march ?(verbose=false) ?(filter="") ?(coverage=false) files =
   let verbose_flag  = if verbose  then " --verbose"  else "" in
   let coverage_flag = if coverage then " --coverage" else "" in
   let filter_flag   = if filter = "" then ""
                       else Printf.sprintf " --filter=%s" (Filename.quote filter) in
-  let files_str = String.concat " " (List.map Filename.quote files) in
+  (* Prepend lib source files for library projects so the lib module is in scope. *)
+  let lib_files = find_lib_sources () in
+  let all_files = lib_files @ files in
+  let files_str = String.concat " " (List.map Filename.quote all_files) in
   let cmd = Printf.sprintf "march test%s%s%s %s" verbose_flag coverage_flag filter_flag files_str in
   let rc = Sys.command cmd in
   if rc = 0 then Ok ()

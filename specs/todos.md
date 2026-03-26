@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-25 (LSP Performance Insights plan + LSP code actions: P2.8 case correction + P3.10 De Morgan's law)
+**Last updated:** 2026-03-26 (Bastion WASM Islands library — Islands framework infrastructure, JS runtime, specs)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -13,6 +13,13 @@ This file tracks everything that still needs to get done. Organized by priority 
 ---
 
 ## P1 — High Impact / Near-Term
+
+### Web Framework: Islands Library
+
+- ✅ **Islands library (`islands/`)** — `forge new islands --lib`. Core: `Islands.wrap`, `Islands.wrap_eager`, `Islands.client_only`, `Islands.bootstrap_script`, `Islands.preload_hint`, `Islands.Registry`. `HydrateOn` type (`Eager | Lazy | OnIdle | OnInteraction`). `interface Island(s)` typeclass. `islands/runtime/march_islands.js` — actor-per-island JS runtime with configurable hydration strategies (eager, lazy, idle, interaction), event delegation (`data-on-click`, `data-on-input`, `data-on-change`, `data-on-submit`), cross-island messaging API. 34 tests in `islands/test/islands_test.march`. Specs: `specs/bastion/architecture.md`, `specs/bastion/wasm-islands.md`, `specs/bastion/templates.md`. WASM loading stub plugs in when Tier 4 browser target lands.
+- [ ] **WASM Tier 4 (browser target)** — `wasm32-unknown-unknown` + JS glue codegen. Emit `march_island_render` / `march_island_update` / `march_island_init` from compiled island modules. Memory bridge (`march_alloc`/`march_dealloc`) for string passing across the WASM boundary. Integrate into `Islands.loadWasmModule` stub in `march_islands.js`. Depends on Tier 1 end-to-end validation (install wasi-sdk + wasmtime).
+- [ ] **Bastion.Router** — Pattern-match router for HTTP handlers. `Router.get("/users/:id", fn conn -> ...)`, `Router.scope("/api", fn r -> ...)`. Builds on `HttpServer` Conn/plug pipeline.
+- [ ] **`Html` stdlib module** — `Html.escape`, `Html.Safe` type for injection-safe HTML construction. Used by templates to escape user-supplied content.
 
 ### Tooling: Forge Build Tool
 
