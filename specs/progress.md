@@ -220,11 +220,11 @@ march/
     └── test/test_forge.exe   # 15 tests (scaffold, toml)
 ```
 
-## Current State (as of 2026-03-25, post event-loop HTTP server + SIMD HTTP parser + Phase 5 per-process heaps + message passing + zero-copy response builder + Perceus closure-FV RC fix + LSP code actions P2.8+P3.10 + Phase 4 lazy stack growth)
+## Current State (as of 2026-03-25, post event-loop HTTP server + SIMD HTTP parser + Phase 5 per-process heaps + message passing + zero-copy response builder + Perceus closure-FV RC fix + LSP code actions P2.8+P3.10 + Phase 4 lazy stack growth + crypto builtins for Depot/PostgreSQL)
 
 - **Builds clean**
-- **1321 OCaml tests + 7 C test groups (Phase 5) + 10 C scheduler tests (Phase 1+2+4) across 10 dune suites; 37 known pre-existing OCaml failures** (+5 mutual_tco_codegen + 10 borrow_inference + 8 known_call/struct_fusion + 6 escape_analysis + 4 phase4_reduction_codegen) (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing** + **Phase 4: reduction counting in compiled code** + **Phase 4: lazy stack growth**):
-  - `test_march.exe`: 1092 tests (+5 mutual_tco_codegen, +10 borrow_inference, +8 known_call/struct_fusion, +6 escape_analysis, +4 phase4_reduction_codegen; 14 failures: JIT/clang-dependent tests skip gracefully when clang absent)
+- **1333 OCaml tests + 7 C test groups (Phase 5) + 10 C scheduler tests (Phase 1+2+4) across 10 dune suites; 37 known pre-existing OCaml failures** (+5 mutual_tco_codegen + 10 borrow_inference + 8 known_call/struct_fusion + 6 escape_analysis + 4 phase4_reduction_codegen) (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing** + **Phase 4: reduction counting in compiled code** + **Phase 4: lazy stack growth**):
+  - `test_march.exe`: 1104 tests (+5 mutual_tco_codegen, +10 borrow_inference, +8 known_call/struct_fusion, +6 escape_analysis, +4 phase4_reduction_codegen; 14 failures: JIT/clang-dependent tests skip gracefully when clang absent)
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests (23 failures: pre-existing formatter round-trip failures)
@@ -390,6 +390,7 @@ First-ever compilation of a full March program (HTTP server with stdlib dependen
 - **Mono ECallPtr discovery**: Added handling so indirect call targets are specialized
 - **Pipe desugar**: Changed from curried `f(b)(a)` to saturated `f(a, b)` (Elixir convention)
 - **Constructor name collisions**: Renamed across stdlib (`Other`→`OtherKind`, `Timeout`→`ConnTimeout`, etc.)
+- **Crypto builtins for PostgreSQL/SCRAM auth** — `sha256(String|Bytes)→String`, `hmac_sha256(key, msg)→Result(Bytes,String)`, `pbkdf2_sha256(password, salt, iterations, dklen)→Result(Bytes,String)`, `base64_encode(String|Bytes)→String`, `base64_decode(String)→Result(Bytes,String)`; all using Digestif 1.3.0; `tcp_recv_exact` and `md5` were already present; 12 new tests in `crypto builtins` group
 - **49 C runtime builtins**: Float, math, string, list, file/dir functions
 - **HTTP pipeline dispatch**: Closure-based invocation with refcount borrowing for thread safety
 

@@ -15834,6 +15834,143 @@ let test_regex_split () =
   Alcotest.(check string) "part 1 = b" "b" (vstr (List.nth lst 1));
   Alcotest.(check string) "part 2 = c" "c" (vstr (List.nth lst 2))
 
+(* ── Crypto builtin tests ────────────────────────────────────────── *)
+
+(** Helper: extract raw string from a March Bytes value. *)
+let bytes_val_to_string bv =
+  let open March_eval.Eval in
+  match bv with
+  | VCon ("Bytes", [lst]) ->
+    let buf = Buffer.create 8 in
+    let rec go = function
+      | VCon ("Nil", []) -> ()
+      | VCon ("Cons", [VInt b; rest]) -> Buffer.add_char buf (Char.chr b); go rest
+      | _ -> Alcotest.fail "bytes_val_to_string: unexpected list element"
+    in
+    go lst; Buffer.contents buf
+  | _ -> Alcotest.fail "expected Bytes value"
+
+let call_builtin name args =
+  let open March_eval.Eval in
+  match List.assoc_opt name base_env with
+  | Some (VBuiltin (_, f)) -> f args
+  | Some _ -> Alcotest.fail (Printf.sprintf "%s is not a VBuiltin" name)
+  | None -> Alcotest.fail (Printf.sprintf "builtin %s not found" name)
+
+let test_crypto_md5 () =
+  let open March_eval.Eval in
+  let r = call_builtin "md5" [VString "hello"] in
+  Alcotest.(check string) "md5(hello)" "5d41402abc4b2a76b9719d911017c592" (vstr r)
+
+let test_crypto_sha256 () =
+  let open March_eval.Eval in
+  let r = call_builtin "sha256" [VString "hello"] in
+  Alcotest.(check string) "sha256(hello)"
+    "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    (vstr r)
+
+let test_crypto_sha256_bytes_input () =
+  (* Pass bytes instead of string — same result *)
+  let open March_eval.Eval in
+  let bv =
+    let lst = List.fold_right (fun c acc -> VCon ("Cons", [VInt (Char.code c); acc]))
+                (String.to_seq "hello" |> List.of_seq) (VCon ("Nil", [])) in
+    VCon ("Bytes", [lst])
+  in
+  let r = call_builtin "sha256" [bv] in
+  Alcotest.(check string) "sha256(Bytes hello)"
+    "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    (vstr r)
+
+let test_crypto_hmac_sha256 () =
+  (* HMAC-SHA256("", "") known value *)
+  let open March_eval.Eval in
+  let r = call_builtin "hmac_sha256" [VString ""; VString ""] in
+  (match r with
+   | VCon ("Ok", [bv]) ->
+     let raw = bytes_val_to_string bv in
+     (* hex-encode the raw bytes for comparison *)
+     let hex = String.concat "" (List.init (String.length raw)
+                  (fun i -> Printf.sprintf "%02x" (Char.code raw.[i]))) in
+     Alcotest.(check string) "hmac_sha256('','')"
+       "b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad"
+       hex
+   | _ -> Alcotest.fail "expected Ok(Bytes)")
+
+let test_crypto_hmac_sha256_length () =
+  let open March_eval.Eval in
+  let r = call_builtin "hmac_sha256" [VString "secret"; VString "message"] in
+  (match r with
+   | VCon ("Ok", [bv]) ->
+     let raw = bytes_val_to_string bv in
+     Alcotest.(check int) "hmac_sha256 output is 32 bytes" 32 (String.length raw)
+   | _ -> Alcotest.fail "expected Ok(Bytes)")
+
+let test_crypto_pbkdf2_sha256_length () =
+  let open March_eval.Eval in
+  let r = call_builtin "pbkdf2_sha256"
+            [VString "password"; VString "salt"; VInt 1; VInt 32] in
+  (match r with
+   | VCon ("Ok", [bv]) ->
+     let raw = bytes_val_to_string bv in
+     Alcotest.(check int) "pbkdf2 output is 32 bytes" 32 (String.length raw)
+   | _ -> Alcotest.fail "expected Ok(Bytes)")
+
+let test_crypto_pbkdf2_sha256_known () =
+  (* RFC test vector: PBKDF2-HMAC-SHA256 "password" "salt" 1 iter 32 bytes
+     Expected (from Python hashlib): 120fb6cffccd925779... *)
+  let open March_eval.Eval in
+  let r = call_builtin "pbkdf2_sha256"
+            [VString "password"; VString "salt"; VInt 1; VInt 32] in
+  (match r with
+   | VCon ("Ok", [bv]) ->
+     let raw = bytes_val_to_string bv in
+     let hex = String.concat "" (List.init (String.length raw)
+                  (fun i -> Printf.sprintf "%02x" (Char.code raw.[i]))) in
+     (* Vector from Anti-weakpasswords PBKDF2-SHA256 test vectors *)
+     Alcotest.(check string) "pbkdf2 known vector"
+       "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
+       hex
+   | _ -> Alcotest.fail "expected Ok(Bytes)")
+
+let test_crypto_base64_encode () =
+  let open March_eval.Eval in
+  let r = call_builtin "base64_encode" [VString "hello"] in
+  Alcotest.(check string) "base64_encode(hello)" "aGVsbG8=" (vstr r)
+
+let test_crypto_base64_encode_empty () =
+  let open March_eval.Eval in
+  let r = call_builtin "base64_encode" [VString ""] in
+  Alcotest.(check string) "base64_encode('')" "" (vstr r)
+
+let test_crypto_base64_decode () =
+  let open March_eval.Eval in
+  let r = call_builtin "base64_decode" [VString "aGVsbG8="] in
+  (match r with
+   | VCon ("Ok", [bv]) ->
+     let raw = bytes_val_to_string bv in
+     Alcotest.(check string) "base64_decode roundtrip" "hello" raw
+   | _ -> Alcotest.fail "expected Ok(Bytes)")
+
+let test_crypto_base64_decode_invalid () =
+  let open March_eval.Eval in
+  let r = call_builtin "base64_decode" [VString "!!!"] in
+  (match r with
+   | VCon ("Err", [VString _]) -> ()
+   | _ -> Alcotest.fail "expected Err on invalid base64")
+
+let test_crypto_base64_roundtrip () =
+  (* encode then decode should give back the original string *)
+  let open March_eval.Eval in
+  let orig = "The quick brown fox\x00\xFF" in
+  let enc = vstr (call_builtin "base64_encode" [VString orig]) in
+  let r = call_builtin "base64_decode" [VString enc] in
+  (match r with
+   | VCon ("Ok", [bv]) ->
+     let raw = bytes_val_to_string bv in
+     Alcotest.(check string) "base64 roundtrip" orig raw
+   | _ -> Alcotest.fail "expected Ok(Bytes)")
+
 let () =
   Alcotest.run "march"
     [
@@ -17239,5 +17376,19 @@ let () =
         Alcotest.test_case "replace first"           `Quick test_regex_replace;
         Alcotest.test_case "replace_all"             `Quick test_regex_replace_all;
         Alcotest.test_case "split basic"             `Quick test_regex_split;
+      ]);
+      ("crypto builtins", [
+        Alcotest.test_case "md5 known"                `Quick test_crypto_md5;
+        Alcotest.test_case "sha256 known"             `Quick test_crypto_sha256;
+        Alcotest.test_case "sha256 bytes input"       `Quick test_crypto_sha256_bytes_input;
+        Alcotest.test_case "hmac_sha256 known"        `Quick test_crypto_hmac_sha256;
+        Alcotest.test_case "hmac_sha256 length"       `Quick test_crypto_hmac_sha256_length;
+        Alcotest.test_case "pbkdf2_sha256 length"     `Quick test_crypto_pbkdf2_sha256_length;
+        Alcotest.test_case "pbkdf2_sha256 known"      `Quick test_crypto_pbkdf2_sha256_known;
+        Alcotest.test_case "base64_encode"            `Quick test_crypto_base64_encode;
+        Alcotest.test_case "base64_encode empty"      `Quick test_crypto_base64_encode_empty;
+        Alcotest.test_case "base64_decode"            `Quick test_crypto_base64_decode;
+        Alcotest.test_case "base64_decode invalid"    `Quick test_crypto_base64_decode_invalid;
+        Alcotest.test_case "base64 roundtrip"         `Quick test_crypto_base64_roundtrip;
       ]);
     ]

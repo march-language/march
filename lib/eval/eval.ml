@@ -1533,6 +1533,89 @@ let base64_encode s =
    | _ -> ());
   Buffer.contents out
 
+(** Decode a base64 string to raw bytes. Returns [Error msg] on bad input. *)
+let base64_decode (s : string) : (string, string) result =
+  let dec = Array.make 256 (-1) in
+  String.iteri (fun i c ->
+    dec.(Char.code c) <- i
+  ) "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  (* strip trailing padding *)
+  let n = String.length s in
+  let pad = if n > 0 && s.[n-1] = '=' then (if n > 1 && s.[n-2] = '=' then 2 else 1) else 0 in
+  let out_len = (n / 4 * 3) - pad in
+  let out = Bytes.create out_len in
+  let o = ref 0 in
+  (try
+    let i = ref 0 in
+    while !i < n - pad do
+      let a = dec.(Char.code s.[!i]) in
+      let b = dec.(Char.code s.[!i+1]) in
+      if a < 0 || b < 0 then raise Exit;
+      let c = if !i+2 < n && s.[!i+2] <> '=' then dec.(Char.code s.[!i+2]) else 0 in
+      let d = if !i+3 < n && s.[!i+3] <> '=' then dec.(Char.code s.[!i+3]) else 0 in
+      if !o < out_len then begin Bytes.set out !o (Char.chr ((a lsl 2) lor (b lsr 4))); incr o end;
+      if !o < out_len then begin Bytes.set out !o (Char.chr (((b land 0xF) lsl 4) lor (c lsr 2))); incr o end;
+      if !o < out_len then begin Bytes.set out !o (Char.chr (((c land 3) lsl 6) lor d)); incr o end;
+      i := !i + 4
+    done;
+    Ok (Bytes.to_string out)
+  with Exit -> Error "base64_decode: invalid character")
+
+(** Convert an OCaml raw string to a March Bytes(List(Int)) value. *)
+let march_bytes_of_string (s : string) : value =
+  let n = String.length s in
+  let lst = ref (VCon ("Nil", [])) in
+  for i = n - 1 downto 0 do
+    lst := VCon ("Cons", [VInt (Char.code s.[i]); !lst])
+  done;
+  VCon ("Bytes", [!lst])
+
+(** Extract raw bytes from a March value (String or Bytes). *)
+let march_val_to_raw (v : value) : (string, string) result =
+  match v with
+  | VString s -> Ok s
+  | VCon ("Bytes", [lst]) ->
+    let buf = Buffer.create 16 in
+    let rec go = function
+      | VCon ("Nil", []) -> Ok ()
+      | VCon ("Cons", [VInt b; rest]) ->
+        Buffer.add_char buf (Char.chr (b land 0xFF)); go rest
+      | _ -> Error "Bytes: expected list of Int"
+    in
+    (match go lst with Ok () -> Ok (Buffer.contents buf) | Error e -> Error e)
+  | _ -> Error (Printf.sprintf "expected String or Bytes, got %s" (value_to_string v))
+
+(** PBKDF2-HMAC-SHA256: derive [dklen] bytes from [password] and [salt]
+    using [iters] iterations of HMAC-SHA256. *)
+let pbkdf2_hmac_sha256 ~password ~salt ~iterations ~dklen : string =
+  let hash_len = 32 in (* SHA-256 output bytes *)
+  let blocks = (dklen + hash_len - 1) / hash_len in
+  let buf = Buffer.create dklen in
+  for block_idx = 1 to blocks do
+    (* U1 = HMAC(password, salt || INT(block_idx)) *)
+    let block_num = Bytes.create 4 in
+    Bytes.set block_num 0 (Char.chr ((block_idx lsr 24) land 0xFF));
+    Bytes.set block_num 1 (Char.chr ((block_idx lsr 16) land 0xFF));
+    Bytes.set block_num 2 (Char.chr ((block_idx lsr  8) land 0xFF));
+    Bytes.set block_num 3 (Char.chr ( block_idx         land 0xFF));
+    let u1 =
+      Digestif.SHA256.(to_raw_string
+        (hmac_string ~key:password (salt ^ Bytes.to_string block_num)))
+    in
+    let xor_block = Bytes.of_string u1 in
+    let prev = ref u1 in
+    for _ = 2 to iterations do
+      let ui = Digestif.SHA256.(to_raw_string (hmac_string ~key:password !prev)) in
+      let uib = Bytes.of_string ui in
+      Bytes.iteri (fun i c ->
+        Bytes.set xor_block i (Char.chr (Char.code c lxor Char.code (Bytes.get uib i)))
+      ) xor_block;
+      prev := ui
+    done;
+    Buffer.add_string buf (Bytes.to_string xor_block)
+  done;
+  String.sub (Buffer.contents buf) 0 dklen
+
 (** Compute the WebSocket accept key: SHA1(key + magic) |> base64. *)
 let ws_accept_key (client_key : string) : string =
   let magic = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11" in
@@ -3086,6 +3169,45 @@ let base_env : env =
         | [VString s] ->
           VString (Digestif.MD5.(to_hex (digest_string s)))
         | _ -> eval_error "md5(s: String): String"))
+    (* ---- SHA-256 hash (hex string output) ---- *)
+  ; ("sha256", VBuiltin ("sha256", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s -> VString (Digestif.SHA256.(to_hex (digest_string s)))
+           | Error e -> eval_error "sha256: %s" e)
+        | _ -> eval_error "sha256(s: String | Bytes): String"))
+    (* ---- HMAC-SHA-256: returns Bytes ---- *)
+  ; ("hmac_sha256", VBuiltin ("hmac_sha256", function
+        | [key_v; msg_v] ->
+          (match march_val_to_raw key_v, march_val_to_raw msg_v with
+           | Ok key, Ok msg ->
+             let raw = Digestif.SHA256.(to_raw_string (hmac_string ~key msg)) in
+             VCon ("Ok", [march_bytes_of_string raw])
+           | Error e, _ | _, Error e -> VCon ("Err", [VString e]))
+        | _ -> eval_error "hmac_sha256(key, msg): Result(Bytes, String)"))
+    (* ---- PBKDF2-HMAC-SHA256: returns Bytes ---- *)
+  ; ("pbkdf2_sha256", VBuiltin ("pbkdf2_sha256", function
+        | [pwd_v; salt_v; VInt iters; VInt dklen] ->
+          (match march_val_to_raw pwd_v, march_val_to_raw salt_v with
+           | Ok password, Ok salt ->
+             let raw = pbkdf2_hmac_sha256 ~password ~salt ~iterations:iters ~dklen in
+             VCon ("Ok", [march_bytes_of_string raw])
+           | Error e, _ | _, Error e -> VCon ("Err", [VString e]))
+        | _ -> eval_error "pbkdf2_sha256(password, salt, iterations, dklen): Result(Bytes, String)"))
+    (* ---- Base64 encode: String or Bytes -> String ---- *)
+  ; ("base64_encode", VBuiltin ("base64_encode", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s -> VString (base64_encode s)
+           | Error e -> eval_error "base64_encode: %s" e)
+        | _ -> eval_error "base64_encode(s: String | Bytes): String"))
+    (* ---- Base64 decode: String -> Result(Bytes, String) ---- *)
+  ; ("base64_decode", VBuiltin ("base64_decode", function
+        | [VString s] ->
+          (match base64_decode s with
+           | Ok raw -> VCon ("Ok", [march_bytes_of_string raw])
+           | Error e -> VCon ("Err", [VString e]))
+        | _ -> eval_error "base64_decode(s: String): Result(Bytes, String)"))
   ; ("tcp_recv_http", VBuiltin ("tcp_recv_http", function
         | [VInt fd; VInt max_bytes] ->
           (* Read an HTTP response on a keep-alive connection:
