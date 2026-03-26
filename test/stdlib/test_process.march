@@ -29,16 +29,16 @@ describe "Process" do
     test "PATH is non-empty" do
       let path_opt = Process.env("PATH")
       match path_opt do
-      | None -> ()
-      | Some(p) -> assert not(string_is_empty(p))
+      None -> ()
+      Some(p) -> assert not(string_is_empty(p))
       end
     end
 
     test "HOME if set is non-empty" do
       let home = Process.env("HOME")
       match home do
-      | None    -> ()
-      | Some(h) -> assert not(string_is_empty(h))
+      None    -> ()
+      Some(h) -> assert not(string_is_empty(h))
       end
     end
 
@@ -50,8 +50,8 @@ describe "Process" do
     test "env returns Option" do
       let result = Process.env("PATH")
       match result do
-      | Some(_) -> ()
-      | None    -> ()
+      Some(_) -> ()
+      None    -> ()
       end
     end
 
@@ -67,8 +67,8 @@ describe "Process" do
     test "argv first element is non-empty string" do
       let args = Process.argv()
       match args do
-      | Nil        -> panic("argv is empty — expected at least argv[0]")
-      | Cons(a, _) -> assert not(string_is_empty(a))
+      Nil        -> panic("argv is empty — expected at least argv[0]")
+      Cons(a, _) -> assert not(string_is_empty(a))
       end
     end
 

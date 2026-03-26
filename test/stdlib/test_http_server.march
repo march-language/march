@@ -95,7 +95,7 @@ describe "HttpServer Conn transforms" do
     let hdrs = HttpServer.resp_headers(conn2)
     assert (not (is_nil(hdrs)))
     match head(hdrs) do
-    | Header(n, v) -> do
+    Header(n, v) -> do
       assert (string_to_lowercase(n) == "x-custom")
       assert (v == "hello")
     end
@@ -139,7 +139,7 @@ describe "HttpServer convenience response builders" do
     let hdrs = HttpServer.resp_headers(conn2)
     assert (not (is_nil(hdrs)))
     match head(hdrs) do
-    | Header(n, _) -> assert (string_to_lowercase(n) == "content-type")
+    Header(n, _) -> assert (string_to_lowercase(n) == "content-type")
     end
   end
 
@@ -181,7 +181,7 @@ describe "HttpServer pipeline execution" do
     assert (HttpServer.halted(conn2))
     let hdrs = HttpServer.resp_headers(conn2)
     let has_bad = List.any(hdrs, fn h ->
-      | match h do | Header(n, _) -> string_to_lowercase(n) == "x-after-halt" end)
+      match h do Header(n, _) -> string_to_lowercase(n) == "x-after-halt" end)
     assert (not(has_bad))
   end
 

@@ -10,7 +10,7 @@ describe "DateTime" do
     test "epoch is timestamp 0" do
       let epoch = DateTime.from_timestamp(0)
       match epoch do
-      | DateTime(Date(y, m, d), Time(h, mn, s)) -> do
+      DateTime(Date(y, m, d), Time(h, mn, s)) -> do
         assert (y == 1970)
         assert (m == 1)
         assert (d == 1)
@@ -30,7 +30,7 @@ describe "DateTime" do
     test "one day is 86400 seconds" do
       let dt = DateTime.from_timestamp(86400)
       match dt do
-      | DateTime(Date(y, m, d), Time(h, mn, s)) -> do
+      DateTime(Date(y, m, d), Time(h, mn, s)) -> do
         assert (y == 1970)
         assert (m == 1)
         assert (d == 2)
@@ -44,7 +44,7 @@ describe "DateTime" do
     test "one hour" do
       let dt = DateTime.from_timestamp(3600)
       match dt do
-      | DateTime(Date(_, _, _), Time(h, mn, s)) -> do
+      DateTime(Date(_, _, _), Time(h, mn, s)) -> do
         assert (h == 1)
         assert (mn == 0)
         assert (s == 0)
@@ -60,7 +60,7 @@ describe "DateTime" do
       let base = DateTime.from_timestamp(0)
       let plus60 = DateTime.add_seconds(base, 60)
       match plus60 do
-      | DateTime(Date(_, _, _), Time(_, mn, s)) -> do
+      DateTime(Date(_, _, _), Time(_, mn, s)) -> do
         assert (mn == 1)
         assert (s == 0)
       end
@@ -71,7 +71,7 @@ describe "DateTime" do
       let base = DateTime.from_timestamp(0)
       let plus_day = DateTime.add_seconds(base, 86400)
       match plus_day do
-      | DateTime(Date(_, _, d), Time(_, _, _)) ->
+      DateTime(Date(_, _, d), Time(_, _, _)) ->
         assert (d == 2)
       end
     end
@@ -80,7 +80,7 @@ describe "DateTime" do
       let base = DateTime.from_timestamp(60)
       let minus60 = DateTime.add_seconds(base, -60)
       match minus60 do
-      | DateTime(Date(_, _, _), Time(_, mn, s)) -> do
+      DateTime(Date(_, _, _), Time(_, mn, s)) -> do
         assert (mn == 0)
         assert (s == 0)
       end
@@ -95,7 +95,7 @@ describe "DateTime" do
       let base = DateTime.from_timestamp(0)
       let next = DateTime.add_days(base, 1)
       match next do
-      | DateTime(Date(_, _, d), Time(_, _, _)) ->
+      DateTime(Date(_, _, d), Time(_, _, _)) ->
         assert (d == 2)
       end
     end
@@ -105,7 +105,7 @@ describe "DateTime" do
       let jan1 = DateTime.from_timestamp(0)
       let feb1 = DateTime.add_days(jan1, 31)
       match feb1 do
-      | DateTime(Date(_, m, d), Time(_, _, _)) -> do
+      DateTime(Date(_, m, d), Time(_, _, _)) -> do
         assert (d == 1)
         assert (m == 2)
       end
@@ -117,7 +117,7 @@ describe "DateTime" do
       let jan1 = DateTime.from_timestamp(0)
       let next_year = DateTime.add_days(jan1, 365)
       match next_year do
-      | DateTime(Date(y, m, d), Time(_, _, _)) -> do
+      DateTime(Date(y, m, d), Time(_, _, _)) -> do
         assert (y == 1971)
         assert (m == 1)
         assert (d == 1)
@@ -199,10 +199,10 @@ describe "DateTime" do
 
     test "parse date only" do
       match DateTime.parse("2024-03-15") do
-      | Err(e) -> panic("parse date failed: " ++ e)
-      | Ok(dt) -> do
+      Err(e) -> panic("parse date failed: " ++ e)
+      Ok(dt) -> do
         match dt do
-        | DateTime(Date(y, m, d), Time(_, _, _)) ->
+        DateTime(Date(y, m, d), Time(_, _, _)) ->
           assert (y == 2024)
           assert (m == 3)
           assert (d == 15)
@@ -213,10 +213,10 @@ describe "DateTime" do
 
     test "parse datetime" do
       match DateTime.parse("2024-03-15 10:30:45") do
-      | Err(e) -> panic("parse datetime failed: " ++ e)
-      | Ok(dt) -> do
+      Err(e) -> panic("parse datetime failed: " ++ e)
+      Ok(dt) -> do
         match dt do
-        | DateTime(Date(y, m, d), Time(h, mn, s)) ->
+        DateTime(Date(y, m, d), Time(h, mn, s)) ->
           assert (y == 2024)
           assert (m == 3)
           assert (d == 15)
@@ -230,15 +230,15 @@ describe "DateTime" do
 
     test "parse invalid returns Err" do
       match DateTime.parse("not-a-date") do
-      | Err(_) -> ()
-      | Ok(_) -> panic("invalid date should return Err")
+      Err(_) -> ()
+      Ok(_) -> panic("invalid date should return Err")
       end
     end
 
     test "parse short string returns Err" do
       match DateTime.parse("2024") do
-      | Err(_) -> ()
-      | Ok(_) -> panic("short string should return Err")
+      Err(_) -> ()
+      Ok(_) -> panic("short string should return Err")
       end
     end
 
@@ -255,7 +255,7 @@ describe "DateTime" do
     test "now as DateTime has valid fields" do
       let dt = DateTime.from_timestamp(DateTime.now())
       match dt do
-      | DateTime(Date(y, m, d), Time(h, mn, s)) -> do
+      DateTime(Date(y, m, d), Time(h, mn, s)) -> do
         assert (y >= 2024)
         assert (m >= 1 && m <= 12)
         assert (d >= 1 && d <= 31)

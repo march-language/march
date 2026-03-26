@@ -21,8 +21,8 @@ end
 
 pfn head(xs : List(Int)) : Int do
   match xs do
-  | Nil        -> 0
-  | Cons(h, _) -> h
+  Nil        -> 0
+  Cons(h, _) -> h
   end
 end
 

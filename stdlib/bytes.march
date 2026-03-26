@@ -15,46 +15,46 @@ type Bytes = Bytes(List(Int))
 
 pfn rev(xs, acc) do
   match xs do
-  | Nil -> acc
-  | Cons(h, t) -> rev(t, Cons(h, acc))
+  Nil -> acc
+  Cons(h, t) -> rev(t, Cons(h, acc))
   end
 end
 
 pfn list_len(xs, n) do
   match xs do
-  | Nil -> n
-  | Cons(_, t) -> list_len(t, n + 1)
+  Nil -> n
+  Cons(_, t) -> list_len(t, n + 1)
   end
 end
 
 pfn list_nth(xs, i) do
   match xs do
-  | Nil -> panic("Bytes.get: index out of bounds")
-  | Cons(h, t) -> if i == 0 do h else list_nth(t, i - 1) end
+  Nil -> panic("Bytes.get: index out of bounds")
+  Cons(h, t) -> if i == 0 do h else list_nth(t, i - 1) end
   end
 end
 
 pfn list_drop(xs, n) do
   if n <= 0 do xs
   else match xs do
-    | Nil -> Nil
-    | Cons(_, t) -> list_drop(t, n - 1)
+    Nil -> Nil
+    Cons(_, t) -> list_drop(t, n - 1)
     end end
 end
 
 pfn list_take(xs, n, acc) do
   if n <= 0 do rev(acc, Nil)
   else match xs do
-    | Nil -> rev(acc, Nil)
-    | Cons(h, t) -> list_take(t, n - 1, Cons(h, acc))
+    Nil -> rev(acc, Nil)
+    Cons(h, t) -> list_take(t, n - 1, Cons(h, acc))
     end end
 end
 
 pfn list_append(xs, ys) do
   fn go(rxs, acc) do
     match rxs do
-    | Nil -> acc
-    | Cons(h, t) -> go(t, Cons(h, acc))
+    Nil -> acc
+    Cons(h, t) -> go(t, Cons(h, acc))
     end
   end
   go(rev(xs, Nil), ys)
@@ -63,8 +63,8 @@ end
 pfn join_strings(xs) do
   fn go(lst, acc) do
     match lst do
-    | Nil -> acc
-    | Cons(s, rest) -> go(rest, acc ++ s)
+    Nil -> acc
+    Cons(s, rest) -> go(rest, acc ++ s)
     end
   end
   go(xs, "")
@@ -78,7 +78,7 @@ fn from_list(xs) do Bytes(xs) end
 doc "Unwrap Bytes to the underlying List(Int)."
 fn to_list(b) do
   match b do
-  | Bytes(xs) -> xs
+  Bytes(xs) -> xs
   end
 end
 
@@ -90,8 +90,8 @@ fn from_string(s) do
   let chars = string_chars(s)
   fn go(cs, acc) do
     match cs do
-    | Nil -> rev(acc, Nil)
-    | Cons(c, rest) -> go(rest, Cons(char_to_int(c), acc))
+    Nil -> rev(acc, Nil)
+    Cons(c, rest) -> go(rest, Cons(char_to_int(c), acc))
     end
   end
   Bytes(go(chars, Nil))
@@ -100,11 +100,11 @@ end
 doc "Convert Bytes back to a String (bytes interpreted as UTF-8)."
 fn to_string(b) do
   match b do
-  | Bytes(xs) -> do
+  Bytes(xs) -> do
     fn go(bs, acc) do
       match bs do
-      | Nil -> rev(acc, Nil)
-      | Cons(n, rest) -> go(rest, Cons(byte_to_char(n), acc))
+      Nil -> rev(acc, Nil)
+      Cons(n, rest) -> go(rest, Cons(byte_to_char(n), acc))
       end
     end
     string_from_chars(go(xs, Nil))
@@ -117,15 +117,15 @@ end
 doc "Number of bytes."
 fn length(b) do
   match b do
-  | Bytes(xs) -> list_len(xs, 0)
+  Bytes(xs) -> list_len(xs, 0)
   end
 end
 
 doc "True if the Bytes is empty."
 fn is_empty(b) do
   match b do
-  | Bytes(Nil) -> true
-  | _          -> false
+  Bytes(Nil) -> true
+  _          -> false
   end
 end
 
@@ -134,14 +134,14 @@ end
 doc "Byte at position i (0-based). Panics if out of bounds."
 fn get(b, i) do
   match b do
-  | Bytes(xs) -> list_nth(xs, i)
+  Bytes(xs) -> list_nth(xs, i)
   end
 end
 
 doc "Sub-slice: bytes from position start with given length."
 fn slice(b, start, len) do
   match b do
-  | Bytes(xs) -> Bytes(list_take(list_drop(xs, start), len, Nil))
+  Bytes(xs) -> Bytes(list_take(list_drop(xs, start), len, Nil))
   end
 end
 
@@ -150,7 +150,7 @@ end
 doc "Concatenate two Bytes values."
 fn concat(b1, b2) do
   match (b1, b2) do
-  | (Bytes(xs), Bytes(ys)) -> Bytes(list_append(xs, ys))
+  (Bytes(xs), Bytes(ys)) -> Bytes(list_append(xs, ys))
   end
 end
 
@@ -177,11 +177,11 @@ end
 doc "Encode Bytes as a lowercase hexadecimal string."
 fn to_hex(b) do
   match b do
-  | Bytes(xs) -> do
+  Bytes(xs) -> do
     fn go(bs, acc) do
       match bs do
-      | Nil -> rev(acc, Nil)
-      | Cons(n, rest) -> go(rest, Cons(byte_to_hex_str(n), acc))
+      Nil -> rev(acc, Nil)
+      Cons(n, rest) -> go(rest, Cons(byte_to_hex_str(n), acc))
       end
     end
     join_strings(go(xs, Nil))
@@ -202,14 +202,14 @@ fn from_hex(s) do
   let chars = string_chars(s)
   fn go(cs, acc) do
     match cs do
-    | Nil -> Ok(Bytes(rev(acc, Nil)))
-    | Cons(hi_c, Cons(lo_c, rest)) -> do
+    Nil -> Ok(Bytes(rev(acc, Nil)))
+    Cons(hi_c, Cons(lo_c, rest)) -> do
       let hi = hex_val(hi_c)
       let lo = hex_val(lo_c)
       if hi < 0 || lo < 0 do Err("invalid hex character")
       else go(rest, Cons(hi * 16 + lo, acc)) end
     end
-    | _ -> Err("hex string must have even length")
+    _ -> Err("hex string must have even length")
     end
   end
   go(chars, Nil)
@@ -226,25 +226,25 @@ end
 doc "Encode Bytes as a Base64 string (with padding)."
 fn encode_base64(b) do
   match b do
-  | Bytes(xs) -> do
+  Bytes(xs) -> do
     fn go(bs, acc) do
       match bs do
-      | Nil ->
+      Nil ->
         join_strings(rev(acc, Nil))
-      | Cons(b0, Cons(b1, Cons(b2, rest))) -> do
+      Cons(b0, Cons(b1, Cons(b2, rest))) -> do
         let c0 = b64_char(b0 / 4)
         let c1 = b64_char((b0 % 4) * 16 + b1 / 16)
         let c2 = b64_char((b1 % 16) * 4 + b2 / 64)
         let c3 = b64_char(b2 % 64)
         go(rest, Cons(c3, Cons(c2, Cons(c1, Cons(c0, acc)))))
       end
-      | Cons(b0, Cons(b1, Nil)) -> do
+      Cons(b0, Cons(b1, Nil)) -> do
         let c0 = b64_char(b0 / 4)
         let c1 = b64_char((b0 % 4) * 16 + b1 / 16)
         let c2 = b64_char((b1 % 16) * 4)
         join_strings(rev(Cons("=", Cons(c2, Cons(c1, Cons(c0, acc)))), Nil))
       end
-      | Cons(b0, Nil) -> do
+      Cons(b0, Nil) -> do
         let c0 = b64_char(b0 / 4)
         let c1 = b64_char((b0 % 4) * 16)
         join_strings(rev(Cons("=", Cons("=", Cons(c1, Cons(c0, acc)))), Nil))
@@ -271,8 +271,8 @@ fn decode_base64(s) do
   let chars = string_chars(s)
   fn go(cs, acc) do
     match cs do
-    | Nil -> Ok(Bytes(rev(acc, Nil)))
-    | Cons(c0, Cons(c1, Cons(c2, Cons(c3, rest)))) -> do
+    Nil -> Ok(Bytes(rev(acc, Nil)))
+    Cons(c0, Cons(c1, Cons(c2, Cons(c3, rest)))) -> do
       let v0 = b64_val(c0)
       let v1 = b64_val(c1)
       if v0 < 0 || v1 < 0 do Err("invalid base64 character")
@@ -303,7 +303,7 @@ fn decode_base64(s) do
       end
     end
     end
-    | _ -> Err("invalid base64: length must be a multiple of 4")
+    _ -> Err("invalid base64: length must be a multiple of 4")
     end
   end
   go(chars, Nil)

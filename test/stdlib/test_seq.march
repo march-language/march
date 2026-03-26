@@ -4,7 +4,7 @@
 mod TestSeq do
 
 -- Step type mirrors Seq.Step so Continue/Halt constructors are in scope.
-ptype Step(a) = Continue(a) | Halt(a)
+ptype Step(a) = Continue(a) Halt(a)
 
 describe "from_list and to_list" do
 
@@ -299,9 +299,9 @@ describe "zip" do
     let s = Seq.zip(Seq.from_list([1, 2, 3]), Seq.from_list([4, 5, 6]))
     let result = Seq.to_list(s)
     assert (List.length(result) == 3)
-    | match List.nth(result, 0) do | (a, b) -> assert (a == 1) assert (b == 4) end
-    | match List.nth(result, 1) do | (a, b) -> assert (a == 2) assert (b == 5) end
-    | match List.nth(result, 2) do | (a, b) -> assert (a == 3) assert (b == 6) end
+    match List.nth(result, 0) do (a, b) -> assert (a == 1) assert (b == 4) end
+    match List.nth(result, 1) do (a, b) -> assert (a == 2) assert (b == 5) end
+    match List.nth(result, 2) do (a, b) -> assert (a == 3) assert (b == 6) end
   end
 
   test "zip s1 shorter stops at s1" do
@@ -334,7 +334,7 @@ describe "zip" do
   test "zip first elements match" do
     let s = Seq.zip(Seq.from_list([10, 20]), Seq.from_list([100, 200]))
     let result = Seq.to_list(s)
-    | match List.nth(result, 0) do | (a, b) -> assert (a == 10) assert (b == 100) end
+    match List.nth(result, 0) do (a, b) -> assert (a == 10) assert (b == 100) end
   end
 
 end
@@ -515,37 +515,37 @@ end
 describe "find" do
 
   test "find on empty returns None" do
-    | match Seq.find(Seq.empty(), fn (x : Int) -> x > 0) do
-    | None -> ()
-    | Some(_) -> panic("expected None")
+    match Seq.find(Seq.empty(), fn (x : Int) -> x > 0) do
+    None -> ()
+    Some(_) -> panic("expected None")
     end
   end
 
   test "find first match" do
-    | match Seq.find(Seq.from_list([1, 2, 3, 4]), fn x -> x > 2) do
-    | None -> panic("expected Some")
-    | Some(v) -> assert (v == 3)
+    match Seq.find(Seq.from_list([1, 2, 3, 4]), fn x -> x > 2) do
+    None -> panic("expected Some")
+    Some(v) -> assert (v == 3)
     end
   end
 
   test "find no match returns None" do
-    | match Seq.find(Seq.from_list([1, 2, 3]), fn x -> x > 10) do
-    | None -> ()
-    | Some(_) -> panic("expected None")
+    match Seq.find(Seq.from_list([1, 2, 3]), fn x -> x > 10) do
+    None -> ()
+    Some(_) -> panic("expected None")
     end
   end
 
   test "find first element" do
-    | match Seq.find(Seq.from_list([5, 3, 1]), fn x -> x > 0) do
-    | None -> panic("expected Some")
-    | Some(v) -> assert (v == 5)
+    match Seq.find(Seq.from_list([5, 3, 1]), fn x -> x > 0) do
+    None -> panic("expected Some")
+    Some(v) -> assert (v == 5)
     end
   end
 
   test "find single match" do
-    | match Seq.find(Seq.from_list([1, 2, 3, 4, 5]), fn x -> x == 3) do
-    | None -> panic("expected Some")
-    | Some(v) -> assert (v == 3)
+    match Seq.find(Seq.from_list([1, 2, 3, 4, 5]), fn x -> x == 3) do
+    None -> panic("expected Some")
+    Some(v) -> assert (v == 3)
     end
   end
 
@@ -554,27 +554,27 @@ end
 describe "any" do
 
   test "any on empty is false" do
-    | assert !Seq.any(Seq.empty(), fn (x : Int) -> x > 0)
+    assert !Seq.any(Seq.empty(), fn (x : Int) -> x > 0)
   end
 
   test "any with always-true pred" do
-    | assert Seq.any(Seq.from_list([1, 2, 3]), fn _ -> true)
+    assert Seq.any(Seq.from_list([1, 2, 3]), fn _ -> true)
   end
 
   test "any with always-false pred" do
-    | assert !Seq.any(Seq.from_list([1, 2, 3]), fn _ -> false)
+    assert !Seq.any(Seq.from_list([1, 2, 3]), fn _ -> false)
   end
 
   test "any true when last element matches" do
-    | assert Seq.any(Seq.from_list([1, 2, 3, 4, 5]), fn x -> x == 5)
+    assert Seq.any(Seq.from_list([1, 2, 3, 4, 5]), fn x -> x == 5)
   end
 
   test "any false when nothing matches" do
-    | assert !Seq.any(Seq.from_list([1, 2, 3]), fn x -> x > 10)
+    assert !Seq.any(Seq.from_list([1, 2, 3]), fn x -> x > 10)
   end
 
   test "any true when first element matches" do
-    | assert Seq.any(Seq.from_list([10, 1, 2]), fn x -> x > 9)
+    assert Seq.any(Seq.from_list([10, 1, 2]), fn x -> x > 9)
   end
 
 end
@@ -582,27 +582,27 @@ end
 describe "all" do
 
   test "all on empty is true" do
-    | assert Seq.all(Seq.empty(), fn (x : Int) -> x > 0)
+    assert Seq.all(Seq.empty(), fn (x : Int) -> x > 0)
   end
 
   test "all with always-true pred" do
-    | assert Seq.all(Seq.from_list([1, 2, 3]), fn _ -> true)
+    assert Seq.all(Seq.from_list([1, 2, 3]), fn _ -> true)
   end
 
   test "all with always-false pred" do
-    | assert !Seq.all(Seq.from_list([1, 2, 3]), fn _ -> false)
+    assert !Seq.all(Seq.from_list([1, 2, 3]), fn _ -> false)
   end
 
   test "all true when all match" do
-    | assert Seq.all(Seq.from_list([2, 4, 6]), fn x -> x % 2 == 0)
+    assert Seq.all(Seq.from_list([2, 4, 6]), fn x -> x % 2 == 0)
   end
 
   test "all false when one does not match" do
-    | assert !Seq.all(Seq.from_list([2, 3, 4]), fn x -> x % 2 == 0)
+    assert !Seq.all(Seq.from_list([2, 3, 4]), fn x -> x % 2 == 0)
   end
 
   test "all false when last does not match" do
-    | assert !Seq.all(Seq.from_list([2, 4, 5]), fn x -> x % 2 == 0)
+    assert !Seq.all(Seq.from_list([2, 4, 5]), fn x -> x % 2 == 0)
   end
 
 end

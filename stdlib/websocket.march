@@ -26,7 +26,7 @@ mod WebSocket do
   -- Validates upgrade headers, marks conn as halted with WebSocketUpgrade.
   fn upgrade(conn, handler) do
     match conn do
-    | Conn(fd, m, p, pi, qs, rh, rb, _, _, _, _, assigns, _) ->
+    Conn(fd, m, p, pi, qs, rh, rb, _, _, _, _, assigns, _) ->
       Conn(fd, m, p, pi, qs, rh, rb, 101, Nil, "", true, assigns,
            WebSocketUpgrade(handler))
     end
@@ -35,14 +35,14 @@ mod WebSocket do
   -- Receive a frame (blocks until one arrives)
   fn recv(socket) do
     match socket do
-    | WsSocket(fd) -> ws_recv(fd)
+    WsSocket(fd) -> ws_recv(fd)
     end
   end
 
   -- Send a frame
   fn send_frame(socket, frame) do
     match socket do
-    | WsSocket(fd) -> ws_send(fd, frame)
+    WsSocket(fd) -> ws_send(fd, frame)
     end
   end
 
@@ -55,7 +55,7 @@ mod WebSocket do
   -- Returns WsData(frame), ActorMsg, or Timeout.
   fn select(socket, timeout_ms) do
     match socket do
-    | WsSocket(fd) -> ws_select(fd, 0, timeout_ms)
+    WsSocket(fd) -> ws_select(fd, 0, timeout_ms)
     end
   end
 

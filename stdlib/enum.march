@@ -14,8 +14,8 @@ mod Enum do
 pfn rev(xs : List(a)) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
-    | Nil        -> acc
-    | Cons(h, t) -> go(t, Cons(h, acc))
+    Nil        -> acc
+    Cons(h, t) -> go(t, Cons(h, acc))
     end
   end
   go(xs, Nil)
@@ -31,8 +31,8 @@ This is the primary way to transform a collection element-by-element.
 fn map(xs : List(a), f : a -> b) : List(b) do
   fn go(lst : List(a), acc : List(b)) : List(b) do
     match lst do
-    | Nil        -> rev(acc)
-    | Cons(h, t) -> go(t, Cons(f(h), acc))
+    Nil        -> rev(acc)
+    Cons(h, t) -> go(t, Cons(f(h), acc))
     end
   end
   go(xs, Nil)
@@ -50,22 +50,22 @@ fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
   fn append_list(left : List(b), right : List(b)) : List(b) do
     fn rev_onto(rev_xs, ys) do
       match rev_xs do
-      | Nil -> ys
-      | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+      Nil -> ys
+      Cons(h, t) -> rev_onto(t, Cons(h, ys))
       end
     end
     fn rev_left(xs, acc) do
       match xs do
-      | Nil -> acc
-      | Cons(h, t) -> rev_left(t, Cons(h, acc))
+      Nil -> acc
+      Cons(h, t) -> rev_left(t, Cons(h, acc))
       end
     end
     rev_onto(rev_left(left, Nil), right)
   end
   fn go(lst : List(a), acc : List(b)) : List(b) do
     match lst do
-    | Nil        -> acc
-    | Cons(h, t) -> go(t, append_list(acc, f(h)))
+    Nil        -> acc
+    Cons(h, t) -> go(t, append_list(acc, f(h)))
     end
   end
   go(xs, Nil)
@@ -79,8 +79,8 @@ Preserves order and is stable (equal elements stay in original relative order).
 fn filter(xs : List(a), pred : a -> Bool) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
-    | Nil        -> rev(acc)
-    | Cons(h, t) -> do
+    Nil        -> rev(acc)
+    Cons(h, t) -> do
       if pred(h) do go(t, Cons(h, acc))
       else go(t, acc) end
     end
@@ -99,8 +99,8 @@ Use fold when you need to accumulate a single value from all elements.
 fn fold(zero : b, xs : List(a), f : b -> a -> b) : b do
   fn go(lst : List(a), acc : b) : b do
     match lst do
-    | Nil        -> acc
-    | Cons(h, t) -> do
+    Nil        -> acc
+    Cons(h, t) -> do
       let g = f(acc)
       go(t, g(h))
     end
@@ -118,12 +118,12 @@ string concatenation without a starting value).
 """
 fn reduce(xs : List(a), f : a -> a -> a) : Option(a) do
   match xs do
-  | Nil        -> None
-  | Cons(h, t) -> do
+  Nil        -> None
+  Cons(h, t) -> do
     fn go(lst : List(a), acc : a) : a do
       match lst do
-      | Nil        -> acc
-      | Cons(x, r) -> do
+      Nil        -> acc
+      Cons(x, r) -> do
         let g = f(acc)
         go(r, g(x))
       end
@@ -142,8 +142,8 @@ and don't care about the result. Returns Unit regardless of f's return type.
 """
 fn each(xs : List(a), f : a -> b) : Unit do
   match xs do
-  | Nil        -> ()
-  | Cons(h, t) -> do
+  Nil        -> ()
+  Cons(h, t) -> do
     let _ = f(h)
     each(t, f)
   end
@@ -160,8 +160,8 @@ Prefer this over computing length inside a recursive helper when possible.
 fn count(xs : List(a)) : Int do
   fn go(lst : List(a), acc : Int) : Int do
     match lst do
-    | Nil        -> acc
-    | Cons(_, t) -> go(t, acc + 1)
+    Nil        -> acc
+    Cons(_, t) -> go(t, acc + 1)
     end
   end
   go(xs, 0)
@@ -175,8 +175,8 @@ any stops at the first match.
 """
 fn any(xs : List(a), pred : a -> Bool) : Bool do
   match xs do
-  | Nil        -> false
-  | Cons(h, t) -> do
+  Nil        -> false
+  Cons(h, t) -> do
     if pred(h) do true
     else any(t, pred) end
   end
@@ -190,8 +190,8 @@ Use all to validate a collection without counting or filtering.
 """
 fn all(xs : List(a), pred : a -> Bool) : Bool do
   match xs do
-  | Nil        -> true
-  | Cons(h, t) -> do
+  Nil        -> true
+  Cons(h, t) -> do
     if pred(h) do all(t, pred)
     else false end
   end
@@ -206,8 +206,8 @@ need all matching elements, use filter instead.
 """
 fn find(xs : List(a), pred : a -> Bool) : Option(a) do
   match xs do
-  | Nil        -> None
-  | Cons(h, t) -> do
+  Nil        -> None
+  Cons(h, t) -> do
     if pred(h) do Some(h)
     else find(t, pred) end
   end
@@ -230,11 +230,11 @@ keeping this function pure and O(n) without sorting.
 fn group_by(xs : List(a), key : a -> k) : List((k, List(a))) do
   fn go(lst : List(a), cur_key : k, cur_group : List(a), acc : List((k, List(a)))) : List((k, List(a))) do
     match lst do
-    | Nil -> do
+    Nil -> do
       let finished = Cons((cur_key, rev(cur_group)), acc)
       rev(finished)
     end
-    | Cons(h, t) -> do
+    Cons(h, t) -> do
       let k = key(h)
       -- compare keys with structural equality (==)
       if k == cur_key do
@@ -247,8 +247,8 @@ fn group_by(xs : List(a), key : a -> k) : List((k, List(a))) do
     end
   end
   match xs do
-  | Nil        -> Nil
-  | Cons(h, t) -> do
+  Nil        -> Nil
+  Cons(h, t) -> do
     let k = key(h)
     go(t, k, Cons(h, Nil), Nil)
   end
@@ -266,11 +266,11 @@ Equivalent to Haskell's zipWith.
 fn zip_with(xs : List(a), ys : List(b), f : a -> b -> c) : List(c) do
   fn go(as_ : List(a), bs : List(b), acc : List(c)) : List(c) do
     match as_ do
-    | Nil -> rev(acc)
-    | Cons(x, xt) -> do
+    Nil -> rev(acc)
+    Cons(x, xt) -> do
       match bs do
-      | Nil -> rev(acc)
-      | Cons(y, yt) -> do
+      Nil -> rev(acc)
+      Cons(y, yt) -> do
         let g = f(x)
         go(xt, yt, Cons(g(y), acc))
       end

@@ -49,15 +49,15 @@ ptype RegexPattern = RegexPattern(Bool, List(RegexItem), Bool)
 
 pfn rev(xs, acc) do
   match xs do
-  | Nil -> acc
-  | Cons(h, t) -> rev(t, Cons(h, acc))
+  Nil -> acc
+  Cons(h, t) -> rev(t, Cons(h, acc))
   end
 end
 
 pfn list_contains_str(xs, x) do
   match xs do
-  | Nil -> false
-  | Cons(h, t) -> if h == x do true else list_contains_str(t, x) end
+  Nil -> false
+  Cons(h, t) -> if h == x do true else list_contains_str(t, x) end
   end
 end
 
@@ -74,15 +74,15 @@ pfn atom_matches(atom, s, pos) do
   let c = char_at(s, pos)
   if c == "" do false
   else match atom do
-  | RALit(lit) -> c == lit
-  | RAAny -> true
-  | RADigit -> char_is_digit(c)
-  | RAWord -> char_is_alphanumeric(c) || c == "_"
-  | RASpace -> char_is_whitespace(c)
-  | RANotDigit -> !char_is_digit(c)
-  | RANotWord -> !(char_is_alphanumeric(c) || c == "_")
-  | RANotSpace -> !char_is_whitespace(c)
-  | RAClass(negated, class_chars) -> do
+  RALit(lit) -> c == lit
+  RAAny -> true
+  RADigit -> char_is_digit(c)
+  RAWord -> char_is_alphanumeric(c) || c == "_"
+  RASpace -> char_is_whitespace(c)
+  RANotDigit -> !char_is_digit(c)
+  RANotWord -> !(char_is_alphanumeric(c) || c == "_")
+  RANotSpace -> !char_is_whitespace(c)
+  RAClass(negated, class_chars) -> do
     let found = list_contains_str(class_chars, c)
     if negated do !found else found end
   end
@@ -104,44 +104,44 @@ end
 -- Returns Some(end_pos) on success, None on failure.
 pfn match_at(items, s, slen, pos, anchor_end) do
   match items do
-  | Nil -> do
+  Nil -> do
     if anchor_end do
       if pos == slen do Some(pos) else None end
     else Some(pos) end
   end
-  | Cons(RegexItem(atom, quant), rest_items) -> do
+  Cons(RegexItem(atom, quant), rest_items) -> do
     match quant do
-    | QOne ->
+    QOne ->
       if atom_matches(atom, s, pos) do
         match_at(rest_items, s, slen, pos + 1, anchor_end)
       else None end
-    | QOptional ->
+    QOptional ->
       if atom_matches(atom, s, pos) do
         match match_at(rest_items, s, slen, pos + 1, anchor_end) do
-        | Some(r) -> Some(r)
-        | None -> match_at(rest_items, s, slen, pos, anchor_end)
+        Some(r) -> Some(r)
+        None -> match_at(rest_items, s, slen, pos, anchor_end)
         end
       else match_at(rest_items, s, slen, pos, anchor_end) end
-    | QZeroOrMore -> do
+    QZeroOrMore -> do
       let max_n = count_atom_max(atom, s, pos)
       fn try_n(n) do
         if n < 0 do None
         else match match_at(rest_items, s, slen, pos + n, anchor_end) do
-          | Some(r) -> Some(r)
-          | None -> try_n(n - 1)
+          Some(r) -> Some(r)
+          None -> try_n(n - 1)
           end end
       end
       try_n(max_n)
     end
-    | QOneOrMore ->
+    QOneOrMore ->
       if !atom_matches(atom, s, pos) do None
       else do
         let max_n = count_atom_max(atom, s, pos)
         fn try_n(n) do
           if n < 1 do None
           else match match_at(rest_items, s, slen, pos + n, anchor_end) do
-            | Some(r) -> Some(r)
-            | None -> try_n(n - 1)
+            Some(r) -> Some(r)
+            None -> try_n(n - 1)
             end end
         end
         try_n(max_n) end
@@ -155,19 +155,19 @@ end
 -- Returns Some((match_start, match_end)) or None.
 pfn find_match(rpat, s, slen, start) do
   match rpat do
-  | RegexPattern(anchor_start, items, anchor_end) -> do
+  RegexPattern(anchor_start, items, anchor_end) -> do
     if anchor_start do
       if start > 0 do None
       else match match_at(items, s, slen, 0, anchor_end) do
-        | None -> None
-        | Some(end_pos) -> Some((0, end_pos))
+        None -> None
+        Some(end_pos) -> Some((0, end_pos))
         end end
     else do
       fn try_pos(pos) do
         if pos > slen do None
         else match match_at(items, s, slen, pos, anchor_end) do
-          | Some(end_pos) -> Some((pos, end_pos))
-          | None -> try_pos(pos + 1)
+          Some(end_pos) -> Some((pos, end_pos))
+          None -> try_pos(pos + 1)
           end end
       end
       try_pos(start) end
@@ -182,9 +182,9 @@ end
 -- Returns Ok((class_chars, remaining_chars)) or Err(message).
 pfn parse_class_body(chars, acc) do
   match chars do
-  | Nil -> Err("unterminated character class '[...]'")
-  | Cons("]", rest) -> Ok((rev(acc, Nil), rest))
-  | Cons("\\", Cons(e, rest2)) -> do
+  Nil -> Err("unterminated character class '[...]'")
+  Cons("]", rest) -> Ok((rev(acc, Nil), rest))
+  Cons("\\", Cons(e, rest2)) -> do
     let ch =
       if e == "n" do char_from_int(10)
       else if e == "r" do char_from_int(13)
@@ -192,7 +192,7 @@ pfn parse_class_body(chars, acc) do
       else e end end end
     parse_class_body(rest2, Cons(ch, acc))
   end
-  | Cons(c1, Cons("-", Cons(c2, rest2))) -> do
+  Cons(c1, Cons("-", Cons(c2, rest2))) -> do
     -- Range notation: expand c1..c2
     if c2 == "]" do
       -- '-' at end: treat as literal
@@ -207,7 +207,7 @@ pfn parse_class_body(chars, acc) do
       parse_class_body(rest2, add_range(lo, acc)) end
     end
   end
-  | Cons(c, rest) -> parse_class_body(rest, Cons(c, acc))
+  Cons(c, rest) -> parse_class_body(rest, Cons(c, acc))
   end
 end
 
@@ -215,9 +215,9 @@ end
 -- Returns Ok((atom, remaining_chars)) or Err(message).
 pfn parse_atom(chars) do
   match chars do
-  | Nil -> Err("expected atom but reached end of pattern")
-  | Cons(".", rest) -> Ok((RAAny, rest))
-  | Cons("\\", Cons(e, rest)) -> do
+  Nil -> Err("expected atom but reached end of pattern")
+  Cons(".", rest) -> Ok((RAAny, rest))
+  Cons("\\", Cons(e, rest)) -> do
     let atom =
       if e == "d" do Ok(RADigit)
       else if e == "D" do Ok(RANotDigit)
@@ -227,22 +227,22 @@ pfn parse_atom(chars) do
       else if e == "S" do Ok(RANotSpace)
       else Ok(RALit(e)) end end end end end end
     match atom do
-    | Err(msg) -> Err(msg)
-    | Ok(a) -> Ok((a, rest))
+    Err(msg) -> Err(msg)
+    Ok(a) -> Ok((a, rest))
     end
   end
-  | Cons("[", rest) -> do
+  Cons("[", rest) -> do
     let (negated, rest2) =
       match rest do
-      | Cons("^", r) -> (true, r)
-      | _ -> (false, rest)
+      Cons("^", r) -> (true, r)
+      _ -> (false, rest)
       end
     match parse_class_body(rest2, Nil) do
-    | Err(e) -> Err(e)
-    | Ok((class_chars, remaining)) -> Ok((RAClass(negated, class_chars), remaining))
+    Err(e) -> Err(e)
+    Ok((class_chars, remaining)) -> Ok((RAClass(negated, class_chars), remaining))
     end
   end
-  | Cons(c, rest) -> do
+  Cons(c, rest) -> do
     if c == "*" || c == "+" || c == "?" do
       Err("quantifier '" ++ c ++ "' without preceding atom")
     else Ok((RALit(c), rest)) end
@@ -253,26 +253,26 @@ end
 -- Parse the quantifier after an atom.
 pfn parse_quant(chars) do
   match chars do
-  | Cons("*", rest) -> (QZeroOrMore, rest)
-  | Cons("+", rest) -> (QOneOrMore, rest)
-  | Cons("?", rest) -> (QOptional, rest)
-  | _ -> (QOne, chars)
+  Cons("*", rest) -> (QZeroOrMore, rest)
+  Cons("+", rest) -> (QOneOrMore, rest)
+  Cons("?", rest) -> (QOptional, rest)
+  _ -> (QOne, chars)
   end
 end
 
 -- Parse all items from the pattern, stopping at end or '$'.
 pfn parse_items(chars, acc) do
   match chars do
-  | Nil -> Ok((rev(acc, Nil), false, Nil))
-  | Cons("$", Nil) -> Ok((rev(acc, Nil), true, Nil))
-  | Cons("$", rest) -> do
+  Nil -> Ok((rev(acc, Nil), false, Nil))
+  Cons("$", Nil) -> Ok((rev(acc, Nil), true, Nil))
+  Cons("$", rest) -> do
     -- '$' in the middle: treat rest as literal (simplification)
     Ok((rev(acc, Nil), true, rest))
   end
-  | _ -> do
+  _ -> do
     match parse_atom(chars) do
-    | Err(e) -> Err(e)
-    | Ok((atom, rest_cs)) -> do
+    Err(e) -> Err(e)
+    Ok((atom, rest_cs)) -> do
       let (quant, rest_cs2) = parse_quant(rest_cs)
       parse_items(rest_cs2, Cons(RegexItem(atom, quant), acc))
     end
@@ -287,12 +287,12 @@ pfn compile(pattern) do
   let chars = string_chars(pattern)
   let (anchor_start, chars2) =
     match chars do
-    | Cons("^", rest) -> (true, rest)
-    | _ -> (false, chars)
+    Cons("^", rest) -> (true, rest)
+    _ -> (false, chars)
     end
   match parse_items(chars2, Nil) do
-  | Err(e) -> Err(e)
-  | Ok((items, anchor_end, _)) -> Ok(RegexPattern(anchor_start, items, anchor_end))
+  Err(e) -> Err(e)
+  Ok((items, anchor_end, _)) -> Ok(RegexPattern(anchor_start, items, anchor_end))
   end
 end
 
@@ -309,12 +309,12 @@ If pattern ends with '$', the match is anchored to the end.
 """
 fn matches(pattern, string) do
   match compile(pattern) do
-  | Err(_) -> false
-  | Ok(rpat) -> do
+  Err(_) -> false
+  Ok(rpat) -> do
     let slen = string_byte_length(string)
     match find_match(rpat, string, slen, 0) do
-    | None -> false
-    | Some(_) -> true
+    None -> false
+    Some(_) -> true
     end
   end
   end
@@ -329,12 +329,12 @@ Returns Some(matched_substring) or None.
 """
 fn find(pattern, string) do
   match compile(pattern) do
-  | Err(_) -> None
-  | Ok(rpat) -> do
+  Err(_) -> None
+  Ok(rpat) -> do
     let slen = string_byte_length(string)
     match find_match(rpat, string, slen, 0) do
-    | None -> None
-    | Some((s, e)) -> Some(string_slice(string, s, e - s))
+    None -> None
+    Some((s, e)) -> Some(string_slice(string, s, e - s))
     end
   end
   end
@@ -348,14 +348,14 @@ Returns a list of matched substrings in order.
 """
 fn find_all(pattern, string) do
   match compile(pattern) do
-  | Err(_) -> Nil
-  | Ok(rpat) -> do
+  Err(_) -> Nil
+  Ok(rpat) -> do
     let slen = string_byte_length(string)
     fn go(pos, acc) do
       if pos > slen do rev(acc, Nil)
       else match find_match(rpat, string, slen, pos) do
-        | None -> rev(acc, Nil)
-        | Some((s, e)) -> do
+        None -> rev(acc, Nil)
+        Some((s, e)) -> do
           let matched = string_slice(string, s, e - s)
           -- Advance at least 1 to avoid infinite loops on zero-length matches
           let next = if e > s do e else s + 1 end
@@ -377,12 +377,12 @@ Returns the resulting string.
 """
 fn replace(pattern, replacement, string) do
   match compile(pattern) do
-  | Err(_) -> string
-  | Ok(rpat) -> do
+  Err(_) -> string
+  Ok(rpat) -> do
     let slen = string_byte_length(string)
     match find_match(rpat, string, slen, 0) do
-    | None -> string
-    | Some((s, e)) ->
+    None -> string
+    Some((s, e)) ->
       string_slice(string, 0, s) ++ replacement ++ string_slice(string, e, slen - e)
     end
   end
@@ -397,20 +397,20 @@ Returns the resulting string.
 """
 fn replace_all(pattern, replacement, string) do
   match compile(pattern) do
-  | Err(_) -> string
-  | Ok(rpat) -> do
+  Err(_) -> string
+  Ok(rpat) -> do
     let slen = string_byte_length(string)
     fn go(pos, acc_parts) do
       if pos > slen do
         let parts = rev(acc_parts, Nil)
         string_join(parts, "")
       else match find_match(rpat, string, slen, pos) do
-        | None -> do
+        None -> do
           let tail = string_slice(string, pos, slen - pos)
           let parts = rev(Cons(tail, acc_parts), Nil)
           string_join(parts, "")
         end
-        | Some((s, e)) -> do
+        Some((s, e)) -> do
           let before = string_slice(string, pos, s - pos)
           let next = if e > s do e else s + 1 end
           go(next, Cons(replacement, Cons(before, acc_parts)))
@@ -432,17 +432,17 @@ Returns the list of substrings between matches.
 """
 fn split(pattern, string) do
   match compile(pattern) do
-  | Err(_) -> Cons(string, Nil)
-  | Ok(rpat) -> do
+  Err(_) -> Cons(string, Nil)
+  Ok(rpat) -> do
     let slen = string_byte_length(string)
     fn go(pos, acc) do
       if pos > slen do rev(acc, Nil)
       else match find_match(rpat, string, slen, pos) do
-        | None -> do
+        None -> do
           let tail = string_slice(string, pos, slen - pos)
           rev(Cons(tail, acc), Nil)
         end
-        | Some((s, e)) -> do
+        Some((s, e)) -> do
           let segment = string_slice(string, pos, s - pos)
           let next = if e > s do e else s + 1 end
           go(next, Cons(segment, acc))

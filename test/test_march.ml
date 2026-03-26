@@ -268,8 +268,8 @@ let test_tc_match () =
   let ctx = typecheck {|mod Test do
     fn f(x) do
       match x do
-      | 0 -> 1
-      | n -> n + 1
+      0 -> 1
+      n -> n + 1
       end
     end
   end|} in
@@ -377,10 +377,10 @@ let test_eq_user_impl () =
     impl Eq(Color) do
       fn eq(x, y) do
         match (x, y) do
-        | (Red, Red)     -> true
-        | (Green, Green) -> true
-        | (Blue, Blue)   -> true
-        | _              -> false
+        (Red, Red)     -> true
+        (Green, Green) -> true
+        (Blue, Blue)   -> true
+        _              -> false
         end
       end
     end
@@ -461,7 +461,7 @@ let test_standard_interfaces_in_scope () =
     impl Eq(Wrap) do
       fn eq(x, y) do
         match (x, y) do
-        | (Wrap(a), Wrap(b)) -> a == b
+        (Wrap(a), Wrap(b)) -> a == b
         end
       end
     end
@@ -477,7 +477,7 @@ let test_linear_pattern_match_ok () =
   let ctx = typecheck {|mod Test do
     fn consume(linear x: Int) : Int do
       match x do
-      | n -> n
+      n -> n
       end
     end
   end|} in
@@ -488,7 +488,7 @@ let test_linear_pattern_match_double_use () =
   let ctx = typecheck {|mod Test do
     fn bad(linear x: Int) : Int do
       match x do
-      | n -> n + n
+      n -> n + n
       end
     end
   end|} in
@@ -522,7 +522,7 @@ let test_protocol_self_message_error () =
   (* A participant sending a message to itself should be an error. *)
   let ctx = typecheck {|mod Test do
     protocol SelfTalk do
-      | Client -> Client : Int
+      Client -> Client : Int
     end
   end|} in
   Alcotest.(check bool) "self-message in protocol: error" true (has_errors ctx)
@@ -541,8 +541,8 @@ let test_protocol_valid () =
   (* A well-formed two-party protocol should produce no errors. *)
   let ctx = typecheck {|mod Test do
     protocol Ping do
-      | Client -> Server : Int
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> Client : Bool
     end
   end|} in
   Alcotest.(check bool) "valid two-party protocol: no errors" false (has_errors ctx)
@@ -551,10 +551,10 @@ let test_protocol_duplicate_error () =
   (* Duplicate protocol names should error. *)
   let ctx = typecheck {|mod Test do
     protocol P do
-      | A -> B : Int
+      A -> B : Int
     end
     protocol P do
-      | A -> B : Bool
+      A -> B : Bool
     end
   end|} in
   Alcotest.(check bool) "duplicate protocol name: error" true (has_errors ctx)
@@ -590,7 +590,7 @@ let test_protocol_unknown_participant_hint () =
      should produce a hint (not an error). *)
   let ctx = typecheck {|mod Test do
     protocol Mystery do
-      | Unicorn -> Dragon : Int
+      Unicorn -> Dragon : Int
     end
   end|} in
   (* Should have hints (unknown participants) but no hard errors *)
@@ -602,7 +602,7 @@ let test_protocol_known_participant_no_hint () =
     type Client = {}
     type Server = {}
     protocol Ping do
-      | Client -> Server : Int
+      Client -> Server : Int
     end
   end|} in
   Alcotest.(check bool) "known participant types: no errors" false (has_errors ctx)
@@ -622,8 +622,8 @@ let test_session_projection_simple () =
      Server projection: Recv(Int, Send(Bool, End)) *)
   let (_ctx, env) = typecheck_full {|mod Test do
     protocol Ping do
-      | Client -> Server : Int
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> Client : Bool
     end
   end|} in
   let pi = List.assoc "Ping" env.March_typecheck.Typecheck.protocols in
@@ -640,8 +640,8 @@ let test_session_duality_holds () =
   (* dual(client) should equal server *)
   let (_ctx, env) = typecheck_full {|mod Test do
     protocol Counter do
-      | Client -> Server : Int
-      | Server -> Client : Int
+      Client -> Server : Int
+      Server -> Client : Int
     end
   end|} in
   let pi = List.assoc "Counter" env.March_typecheck.Typecheck.protocols in
@@ -657,7 +657,7 @@ let test_session_loop_projection () =
   let (ctx, env) = typecheck_full {|mod Test do
     protocol Stream do
       loop do
-        | Source -> Sink : Int
+        Source -> Sink : Int
       end
     end
   end|} in
@@ -675,8 +675,8 @@ let test_session_chan_type_annotation () =
   (* Chan(Client, Ping) in a type annotation should resolve correctly — no errors *)
   let ctx = typecheck {|mod Test do
     protocol Ping do
-      | Client -> Server : Int
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> Client : Bool
     end
     fn use_chan(ch : Chan(Client, Ping)) : Unit do
       ()
@@ -697,7 +697,7 @@ let test_session_chan_unknown_role_error () =
   (* Chan(Ghost, Ping) where Ghost is not a role in Ping should error *)
   let ctx = typecheck {|mod Test do
     protocol Ping do
-      | Client -> Server : Int
+      Client -> Server : Int
     end
     fn bad(ch : Chan(Ghost, Ping)) : Unit do
       ()
@@ -711,8 +711,8 @@ let test_session_send_recv_close_ok () =
   (* A well-typed send/recv/close sequence: no errors *)
   let ctx = typecheck {|mod Test do
     protocol Ping do
-      | Client -> Server : Int
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> Client : Bool
     end
     fn client_side(ch : Chan(Client, Ping)) : Bool do
       let ch2 = Chan.send(ch, 42)
@@ -732,7 +732,7 @@ let test_session_send_wrong_type_error () =
   (* Sending wrong type: Int where Bool expected *)
   let ctx = typecheck {|mod Test do
     protocol BoolChan do
-      | A -> B : Bool
+      A -> B : Bool
     end
     fn bad(ch : Chan(A, BoolChan)) : Unit do
       let ch2 = Chan.send(ch, 42)
@@ -745,8 +745,8 @@ let test_session_send_at_recv_state_error () =
   (* Calling send on a channel at Recv state is a protocol violation *)
   let ctx = typecheck {|mod Test do
     protocol PingB do
-      | A -> B : Int
-      | B -> A : Int
+      A -> B : Int
+      B -> A : Int
     end
     fn bad(ch : Chan(B, PingB)) : Unit do
       -- B's first action is Recv(Int, ...) but we try to send
@@ -760,7 +760,7 @@ let test_session_close_at_wrong_state_error () =
   (* Calling close on a channel that is not at End *)
   let ctx = typecheck {|mod Test do
     protocol NotDone do
-      | A -> B : Int
+      A -> B : Int
     end
     fn bad(ch : Chan(A, NotDone)) : Unit do
       Chan.close(ch)
@@ -772,8 +772,8 @@ let test_session_chan_new_ok () =
   (* Chan.new with a valid protocol produces no errors *)
   let ctx = typecheck {|mod Test do
     protocol Counter do
-      | Client -> Server : Int
-      | Server -> Client : Int
+      Client -> Server : Int
+      Server -> Client : Int
     end
     fn make_chan() : Unit do
       let _ = Chan.new(Counter)
@@ -798,7 +798,7 @@ let test_session_choose_protocol_parses () =
   (* A protocol with choose by syntax should parse and typecheck without errors. *)
   let ctx = typecheck {|mod Test do
     protocol Decision do
-      | Client -> Server : Int
+      Client -> Server : Int
       choose by Server:
         | ok  -> Server -> Client : Bool
         | err -> Server -> Client : Int
@@ -811,7 +811,7 @@ let test_session_choose_advances_state () =
   (* Chan.choose(ch, :ok) on a SChoose channel should produce no errors *)
   let ctx = typecheck {|mod Test do
     protocol Decision do
-      | Client -> Server : Int
+      Client -> Server : Int
       choose by Server:
         | ok  -> Server -> Client : Bool
         | err -> Server -> Client : Int
@@ -846,7 +846,7 @@ let test_session_choose_at_wrong_state_error () =
   (* Chan.choose on a channel not at SChoose should error *)
   let ctx = typecheck {|mod Test do
     protocol Simple do
-      | A -> B : Int
+      A -> B : Int
     end
     fn bad(ch : Chan(A, Simple)) : Unit do
       let ch2 = Chan.choose(ch, :ok)
@@ -859,7 +859,7 @@ let test_session_offer_ok () =
   (* Chan.offer on a SOffer channel should produce no errors *)
   let ctx = typecheck {|mod Test do
     protocol Decision do
-      | Client -> Server : Int
+      Client -> Server : Int
       choose by Server:
         | ok  -> Server -> Client : Bool
         | err -> Server -> Client : Int
@@ -877,7 +877,7 @@ let test_session_offer_at_wrong_state_error () =
   (* Chan.offer on a channel not at SOffer should error *)
   let ctx = typecheck {|mod Test do
     protocol Simple do
-      | A -> B : Int
+      A -> B : Int
     end
     fn bad(ch : Chan(A, Simple)) : Unit do
       let (_, ch2) = Chan.offer(ch)
@@ -895,8 +895,8 @@ let test_srec_pingpong_loop_typechecks () =
   let ctx = typecheck {|mod Test do
     protocol PingLoop do
       loop do
-        | Client -> Server : Int
-        | Server -> Client : Bool
+        Client -> Server : Int
+        Server -> Client : Bool
       end
     end
     fn client_step(ch : Chan(Client, PingLoop), val : Int) : Bool do
@@ -963,7 +963,7 @@ let test_srec_with_branching_typechecks () =
       loop do
         choose by Server:
           | data -> Client -> Server : Int
-                    | Server -> Client : Bool
+                    Server -> Client : Bool
           | stop -> Server -> Client : Int
         end
       end
@@ -976,8 +976,8 @@ let test_srec_wrong_type_in_loop_error () =
   let ctx = typecheck {|mod Test do
     protocol Counter do
       loop do
-        | Client -> Server : Int
-        | Server -> Client : Int
+        Client -> Server : Int
+        Server -> Client : Int
       end
     end
     fn bad(ch : Chan(Client, Counter)) : Unit do
@@ -1136,8 +1136,8 @@ let test_session_eval_send_recv () =
   (* End-to-end eval: send an Int on one endpoint, receive it on the other *)
   let env = eval_module {|mod Test do
     protocol Echo do
-      | Sender -> Receiver : Int
-      | Receiver -> Sender : Int
+      Sender -> Receiver : Int
+      Receiver -> Sender : Int
     end
     fn run() do
       let (sc, rc) = Chan.new(Echo)
@@ -1184,8 +1184,8 @@ let test_srec_ping_pong_protocol () =
   let (ctx, env) = typecheck_full {|mod Test do
     protocol PingPong do
       loop do
-        | Client -> Server : Int
-        | Server -> Client : Bool
+        Client -> Server : Int
+        Server -> Client : Bool
       end
     end
   end|} in
@@ -1301,8 +1301,8 @@ let test_srec_choose_loop_protocol () =
   let (ctx, env) = typecheck_full {|mod Test do
     protocol Negotiation do
       loop do
-        | Client -> Server : Int
-        | Server -> Client : Bool
+        Client -> Server : Int
+        Server -> Client : Bool
       end
     end
   end|} in
@@ -1334,7 +1334,7 @@ let test_srec_multi_turn_typechecks () =
   let ctx = typecheck {|mod Test do
     protocol Ping do
       loop do
-        | Client -> Server : Int
+        Client -> Server : Int
       end
     end
     fn one_ping(ch : Chan(Client, Ping)) : Unit do
@@ -1354,10 +1354,10 @@ let test_mpst_three_party_parses () =
   (* A 3-party protocol should parse and typecheck without errors. *)
   let ctx = typecheck {|mod Test do
     protocol ThreePartyAuth do
-      | Client -> Server : Int
-      | Server -> AuthDB : String
-      | AuthDB -> Server : Bool
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
     end
   end|} in
   Alcotest.(check bool) "3-party protocol: no errors" false (has_errors ctx)
@@ -1366,10 +1366,10 @@ let test_mpst_projection_client () =
   (* Client projection: MSend(Server, Int, MRecv(Server, Bool, End)) *)
   let (_ctx, env) = typecheck_full {|mod Test do
     protocol Auth do
-      | Client -> Server : Int
-      | Server -> AuthDB : String
-      | AuthDB -> Server : Bool
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
     end
   end|} in
   let pi = List.assoc "Auth" env.March_typecheck.Typecheck.protocols in
@@ -1382,10 +1382,10 @@ let test_mpst_projection_authdb () =
   (* AuthDB projection: MRecv(Server, String, MSend(Server, Bool, End)) *)
   let (_ctx, env) = typecheck_full {|mod Test do
     protocol Auth do
-      | Client -> Server : Int
-      | Server -> AuthDB : String
-      | AuthDB -> Server : Bool
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
     end
   end|} in
   let pi = List.assoc "Auth" env.March_typecheck.Typecheck.protocols in
@@ -1398,10 +1398,10 @@ let test_mpst_projection_server () =
   (* Server projection: MRecv(Client, Int, MSend(AuthDB, String, MRecv(AuthDB, Bool, MSend(Client, Bool, End)))) *)
   let (_ctx, env) = typecheck_full {|mod Test do
     protocol Auth do
-      | Client -> Server : Int
-      | Server -> AuthDB : String
-      | AuthDB -> Server : Bool
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
     end
   end|} in
   let pi = List.assoc "Auth" env.March_typecheck.Typecheck.protocols in
@@ -1414,10 +1414,10 @@ let test_mpst_four_party_parses () =
   (* A 4-party protocol should also typecheck without errors. *)
   let ctx = typecheck {|mod Test do
     protocol FourParty do
-      | A -> B : Int
-      | B -> C : String
-      | C -> D : Bool
-      | D -> A : Float
+      A -> B : Int
+      B -> C : String
+      C -> D : Bool
+      D -> A : Float
     end
   end|} in
   Alcotest.(check bool) "4-party protocol: no errors" false (has_errors ctx)
@@ -1428,10 +1428,10 @@ let test_mpst_new_ok () =
   (* MPST.new on a 3-party protocol typechecks fine. *)
   let ctx = typecheck {|mod Test do
     protocol Auth do
-      | Client -> Server : Int
-      | Server -> AuthDB : String
-      | AuthDB -> Server : Bool
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
     end
     fn make() do
       let _ = MPST.new(Auth)
@@ -1444,7 +1444,7 @@ let test_mpst_new_binary_error () =
   (* MPST.new on a 2-party protocol is an error (use Chan.new instead). *)
   let ctx = typecheck {|mod Test do
     protocol Binary do
-      | A -> B : Int
+      A -> B : Int
     end
     fn bad() do
       let _ = MPST.new(Binary)
@@ -1468,10 +1468,10 @@ let test_mpst_send_ok () =
   (* Client sending Int to Server should typecheck. *)
   let ctx = typecheck {|mod Test do
     protocol Auth do
-      | Client -> Server : Int
-      | Server -> AuthDB : String
-      | AuthDB -> Server : Bool
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
     end
     fn client_step(ch : Chan(Client, Auth)) : Unit do
       let ch2 = MPST.send(ch, Server, 42)
@@ -1484,10 +1484,10 @@ let test_mpst_send_wrong_role_error () =
   (* Client sending to AuthDB instead of Server is a type error. *)
   let ctx = typecheck {|mod Test do
     protocol Auth do
-      | Client -> Server : Int
-      | Server -> AuthDB : String
-      | AuthDB -> Server : Bool
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
     end
     fn bad(ch : Chan(Client, Auth)) : Unit do
       let _ = MPST.send(ch, AuthDB, 42)
@@ -1500,10 +1500,10 @@ let test_mpst_send_wrong_type_error () =
   (* Client sending String instead of Int is a type error. *)
   let ctx = typecheck {|mod Test do
     protocol Auth do
-      | Client -> Server : Int
-      | Server -> AuthDB : String
-      | AuthDB -> Server : Bool
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
     end
     fn bad(ch : Chan(Client, Auth)) : Unit do
       let _ = MPST.send(ch, Server, "hello")
@@ -1518,10 +1518,10 @@ let test_mpst_recv_ok () =
   (* AuthDB receiving String from Server then completing its session typechecks. *)
   let ctx = typecheck {|mod Test do
     protocol Auth do
-      | Client -> Server : Int
-      | Server -> AuthDB : String
-      | AuthDB -> Server : Bool
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
     end
     fn authdb_step(ch : Chan(AuthDB, Auth)) : Unit do
       let (_, ch2) = MPST.recv(ch, Server)
@@ -1535,10 +1535,10 @@ let test_mpst_recv_wrong_role_error () =
   (* AuthDB receiving from Client instead of Server is a type error. *)
   let ctx = typecheck {|mod Test do
     protocol Auth do
-      | Client -> Server : Int
-      | Server -> AuthDB : String
-      | AuthDB -> Server : Bool
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
     end
     fn bad(ch : Chan(AuthDB, Auth)) : Unit do
       let (_, ch2) = MPST.recv(ch, Client)
@@ -1554,10 +1554,10 @@ let test_mpst_close_ok () =
   (* AuthDB can close after finishing all its communications. *)
   let ctx = typecheck {|mod Test do
     protocol Auth do
-      | Client -> Server : Int
-      | Server -> AuthDB : String
-      | AuthDB -> Server : Bool
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
     end
     fn authdb_role(ch : Chan(AuthDB, Auth)) : Unit do
       let (_, ch2) = MPST.recv(ch, Server)
@@ -1571,10 +1571,10 @@ let test_mpst_close_wrong_state_error () =
   (* Closing when not at SEnd is an error. *)
   let ctx = typecheck {|mod Test do
     protocol Auth do
-      | Client -> Server : Int
-      | Server -> AuthDB : String
-      | AuthDB -> Server : Bool
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
     end
     fn bad(ch : Chan(Client, Auth)) : Unit do
       MPST.close(ch)
@@ -1588,10 +1588,10 @@ let test_mpst_full_auth_protocol_typechecks () =
   (* A complete function for each role should typecheck without errors. *)
   let ctx = typecheck {|mod Test do
     protocol Auth do
-      | Client -> Server : Int
-      | Server -> AuthDB : String
-      | AuthDB -> Server : Bool
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
     end
     fn client_role(ch : Chan(Client, Auth)) : Bool do
       let ch2 = MPST.send(ch, Server, 42)
@@ -1619,7 +1619,7 @@ let test_mpst_choose_offer_three_party_typechecks () =
   (* 3-party protocol with choose/offer branching typechecks. *)
   let ctx = typecheck {|mod Test do
     protocol Decision do
-      | A -> B : Int
+      A -> B : Int
       choose by B:
         | yes -> B -> C : String
         | no  -> B -> C : Int
@@ -1639,10 +1639,10 @@ let test_mpst_eval_three_party () =
      authdb approves (true), client receives true back. *)
   let env = eval_module {|mod Test do
     protocol Auth do
-      | Client -> Server : Int
-      | Server -> AuthDB : String
-      | AuthDB -> Server : Bool
-      | Server -> Client : Bool
+      Client -> Server : Int
+      Server -> AuthDB : String
+      AuthDB -> Server : Bool
+      Server -> Client : Bool
     end
     fn run() do
       let (ep_authdb, ep_client, ep_server) = MPST.new(Auth)
@@ -1675,8 +1675,8 @@ let test_mpst_eval_two_messages_same_pair () =
   (* Three parties where one pair exchanges two messages in sequence. *)
   let env = eval_module {|mod Test do
     protocol Relay do
-      | Sender -> Relay : Int
-      | Relay -> Sink : Int
+      Sender -> Relay : Int
+      Relay -> Sink : Int
     end
     fn run() do
       let (ep_relay, ep_sender, ep_sink) = MPST.new(Relay)
@@ -1701,9 +1701,9 @@ let test_mpst_eval_four_party () =
   (* 4-party linear chain: A→B→C→D *)
   let env = eval_module {|mod Test do
     protocol Chain do
-      | A -> B : Int
-      | B -> C : Int
-      | C -> D : Int
+      A -> B : Int
+      B -> C : Int
+      C -> D : Int
     end
     fn run() do
       let (ep_a, ep_b, ep_c, ep_d) = MPST.new(Chain)
@@ -1727,8 +1727,8 @@ let test_mpst_eval_wrong_order_error () =
   (* Receiving before sender sends should produce a runtime error. *)
   let env = eval_module {|mod Test do
     protocol Simple do
-      | X -> Y : Int
-      | Y -> Z : Int
+      X -> Y : Int
+      Y -> Z : Int
     end
     fn run() do
       let (ep_x, ep_y, ep_z) = MPST.new(Simple)
@@ -1792,8 +1792,8 @@ let test_eval_match_adt () =
     type Shape = Circle(Int) | Square(Int)
     fn area(s) do
       match s do
-      | Circle(r) -> r * r
-      | Square(side) -> side * side
+      Circle(r) -> r * r
+      Square(side) -> side * side
       end
     end
   end|} in
@@ -1848,8 +1848,8 @@ let test_parse_negative_lit_pattern () =
   let src = {|mod T do
     fn f(n) do
       match n do
-      | -1 -> true
-      | _  -> false
+      -1 -> true
+      _  -> false
       end
     end
   end|} in
@@ -1895,10 +1895,10 @@ let test_eval_multi_stmt_match_arm () =
   let env = eval_module {|mod Test do
     fn classify(n) do
       match n do
-      | 0 ->
+      0 ->
         let tag = 0
         tag
-      | _ ->
+      _ ->
         let tag = 1
         tag
       end
@@ -1933,9 +1933,9 @@ let test_eval_negative_pattern () =
   let env = eval_module {|mod Test do
     fn sign(n) do
       match n do
-      | 0  -> 0
-      | -1 -> -1
-      | _  -> 1
+      0  -> 0
+      -1 -> -1
+      _  -> 1
       end
     end
   end|} in
@@ -2230,8 +2230,8 @@ let test_tir_lower_match () =
     type Shape = Circle(Int) | Square(Int)
     fn area(s) do
       match s do
-      | Circle(r) -> r
-      | Square(side) -> side
+      Circle(r) -> r
+      Square(side) -> side
       end
     end
   end|} in
@@ -2318,8 +2318,8 @@ let test_tir_lower_patvar_default () =
   let m = lower_module {|mod Test do
     fn label(n) do
       match n do
-      | 0 -> 0
-      | other -> other
+      0 -> 0
+      other -> other
       end
     end
   end|} in
@@ -2379,15 +2379,15 @@ let test_tir_lower_list_ops () =
 
     fn map(f, xs) do
       match xs do
-      | Nil -> Nil()
-      | Cons(h, t) -> Cons(f(h), map(f, t))
+      Nil -> Nil()
+      Cons(h, t) -> Cons(f(h), map(f, t))
       end
     end
 
     fn length(xs) do
       match xs do
-      | Nil -> 0
-      | Cons(h, t) -> 1 + length(t)
+      Nil -> 0
+      Cons(h, t) -> 1 + length(t)
       end
     end
   end|} in
@@ -2875,9 +2875,9 @@ let test_repl_parity_match () =
   match repl_eval_exprs [
     {|type Color = Red | Green | Blue|};
     {|match Red do
-  | Red   -> "red"
-  | Green -> "green"
-  | Blue  -> "blue"
+  Red   -> "red"
+  Green -> "green"
+  Blue  -> "blue"
 end|};
   ] with
   | [`DeclOk; `Ok ({|"red"|}, "String")] -> ()
@@ -2991,8 +2991,8 @@ let test_tc_mod_private () =
 let test_parse_protocol_decl () =
   let src = {|mod Test do
     protocol Transfer do
-      | Client -> Server : String
-      | Server -> Client : Int
+      Client -> Server : String
+      Server -> Client : Int
     end
   end|} in
   let m = parse_module src in
@@ -3006,7 +3006,7 @@ let test_parse_protocol_loop () =
   let src = {|mod Test do
     protocol P do
       loop do
-        | A -> B : Int
+        A -> B : Int
       end
     end
   end|} in
@@ -3565,22 +3565,22 @@ let test_fusion_map_fold () =
 
     fn imap(xs : IntList, f : Int -> Int) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) -> ICons(f(h), imap(t, f))
+      INil        -> INil
+      ICons(h, t) -> ICons(f(h), imap(t, f))
       end
     end
 
     fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
       match xs do
-      | INil        -> acc
-      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
       end
     end
 
     fn main() : Int do
       let xs = ICons(1, ICons(2, ICons(3, INil)))
       let ys = imap(xs, fn x -> x * 2)
-      | ifold(ys, 0, fn (a, b) -> a + b)
+      ifold(ys, 0, fn (a, b) -> a + b)
     end
   end|} in
   Alcotest.(check bool) "fused fn emitted for map+fold" true (has_fused_fn m)
@@ -3592,8 +3592,8 @@ let test_fusion_filter_fold () =
 
     fn ifilter(xs : IntList, p : Int -> Bool) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) ->
+      INil        -> INil
+      ICons(h, t) ->
         if p(h) do ICons(h, ifilter(t, p))
         else ifilter(t, p) end
       end
@@ -3601,15 +3601,15 @@ let test_fusion_filter_fold () =
 
     fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
       match xs do
-      | INil        -> acc
-      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
       end
     end
 
     fn main() : Int do
       let xs = ICons(1, ICons(2, ICons(3, INil)))
       let ys = ifilter(xs, fn x -> x > 1)
-      | ifold(ys, 0, fn (a, b) -> a + b)
+      ifold(ys, 0, fn (a, b) -> a + b)
     end
   end|} in
   Alcotest.(check bool) "fused fn emitted for filter+fold" true (has_fused_fn m)
@@ -3621,22 +3621,22 @@ let test_fusion_eliminates_intermediate () =
 
     fn imap(xs : IntList, f : Int -> Int) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) -> ICons(f(h), imap(t, f))
+      INil        -> INil
+      ICons(h, t) -> ICons(f(h), imap(t, f))
       end
     end
 
     fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
       match xs do
-      | INil        -> acc
-      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
       end
     end
 
     fn main() : Int do
       let xs = ICons(1, ICons(2, INil))
       let ys = imap(xs, fn x -> x * 2)
-      | ifold(ys, 0, fn (a, b) -> a + b)
+      ifold(ys, 0, fn (a, b) -> a + b)
     end
   end|} in
   (* After fusion, main should NOT call imap directly (the intermediate is gone) *)
@@ -3652,22 +3652,22 @@ let test_fusion_no_fuse_multi_use () =
 
     fn imap(xs : IntList, f : Int -> Int) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) -> ICons(f(h), imap(t, f))
+      INil        -> INil
+      ICons(h, t) -> ICons(f(h), imap(t, f))
       end
     end
 
     fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
       match xs do
-      | INil        -> acc
-      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
       end
     end
 
     fn ilength(xs : IntList) : Int do
       match xs do
-      | INil        -> 0
-      | ICons(_, t) -> 1 + ilength(t)
+      INil        -> 0
+      ICons(_, t) -> 1 + ilength(t)
       end
     end
 
@@ -3689,8 +3689,8 @@ let test_fusion_no_fuse_impure () =
 
     fn imap_print(xs : IntList, f : Int -> Int) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) ->
+      INil        -> INil
+      ICons(h, t) ->
         let _ = println(int_to_string(h))
         ICons(f(h), imap_print(t, f))
       end
@@ -3698,15 +3698,15 @@ let test_fusion_no_fuse_impure () =
 
     fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
       match xs do
-      | INil        -> acc
-      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
       end
     end
 
     fn main() : Int do
       let xs = ICons(1, ICons(2, INil))
       let ys = imap_print(xs, fn x -> x * 2)
-      | ifold(ys, 0, fn (a, b) -> a + b)
+      ifold(ys, 0, fn (a, b) -> a + b)
     end
   end|} in
   (* imap_print is not in the fusible producers list — no fusion *)
@@ -3719,22 +3719,22 @@ let test_fusion_fused_fn_in_tm_fns () =
 
     fn imap(xs : IntList, f : Int -> Int) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) -> ICons(f(h), imap(t, f))
+      INil        -> INil
+      ICons(h, t) -> ICons(f(h), imap(t, f))
       end
     end
 
     fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
       match xs do
-      | INil        -> acc
-      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
       end
     end
 
     fn main() : Int do
       let xs = ICons(1, ICons(2, ICons(3, INil)))
       let ys = imap(xs, fn x -> x)
-      | ifold(ys, 0, fn (a, b) -> a + b)
+      ifold(ys, 0, fn (a, b) -> a + b)
     end
   end|} in
   let fused_fns = List.filter (fun (fd : March_tir.Tir.fn_def) ->
@@ -3758,15 +3758,15 @@ let test_fusion_map_filter_fold () =
 
     fn imap(xs : IntList, f : Int -> Int) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) -> ICons(f(h), imap(t, f))
+      INil        -> INil
+      ICons(h, t) -> ICons(f(h), imap(t, f))
       end
     end
 
     fn ifilter(xs : IntList, p : Int -> Bool) : IntList do
       match xs do
-      | INil        -> INil
-      | ICons(h, t) ->
+      INil        -> INil
+      ICons(h, t) ->
         if p(h) do ICons(h, ifilter(t, p))
         else ifilter(t, p) end
       end
@@ -3774,8 +3774,8 @@ let test_fusion_map_filter_fold () =
 
     fn ifold(xs : IntList, acc : Int, f : Int -> Int -> Int) : Int do
       match xs do
-      | INil        -> acc
-      | ICons(h, t) -> ifold(t, f(acc, h), f)
+      INil        -> acc
+      ICons(h, t) -> ifold(t, f(acc, h), f)
       end
     end
 
@@ -3783,7 +3783,7 @@ let test_fusion_map_filter_fold () =
       let xs = ICons(1, ICons(2, ICons(3, ICons(4, ICons(5, INil)))))
       let ys = imap(xs, fn x -> x * 2)
       let zs = ifilter(ys, fn x -> x > 4)
-      | ifold(zs, 0, fn (a, b) -> a + b)
+      ifold(zs, 0, fn (a, b) -> a + b)
     end
   end|} in
   Alcotest.(check bool) "fused fn emitted for map+filter+fold" true (has_fused_fn m);
@@ -4259,7 +4259,7 @@ let test_atomic_rc_local_decrc_not_atomic () =
     type Pair = Pair(Int, Int)
     fn sum_pair(p : Pair) : Int do
       match p do
-        | Pair(a, b) -> a + b
+        Pair(a, b) -> a + b
       end
     end
   end|} in
@@ -4362,7 +4362,7 @@ let test_escape_match_field_promoted () =
     fn get_status(s : Int, b : Int) : Int do
       let conn = Conn(s, b)
       match conn do
-        | Conn(status, _body) -> status
+        Conn(status, _body) -> status
       end
     end
   end|} in
@@ -4923,8 +4923,8 @@ let test_tco_fold_has_loop () =
     @[no_warn_recursion]
     fn fold(xs : L, acc : Int) : Int do
       match xs do
-      | Nil        -> acc
-      | Cons(h, t) -> fold(t, acc + h)
+      Nil        -> acc
+      Cons(h, t) -> fold(t, acc + h)
       end
     end
     fn main() : Unit do println(int_to_string(fold(Cons(1, Cons(2, Nil)), 0))) end
@@ -5189,7 +5189,7 @@ let test_borrow_read_only_param_is_borrowed () =
   let bm = borrow_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      | match conn do | Conn(s) -> println(s) end
+      match conn do | Conn(s) -> println(s) end
     end
   end|} in
   Alcotest.(check bool) "log's conn param is borrowed" true
@@ -5232,7 +5232,7 @@ let test_borrow_passed_to_borrowed_callee_stays_borrowed () =
   let bm = borrow_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      | match conn do | Conn(s) -> println(s) end
+      match conn do | Conn(s) -> println(s) end
     end
     fn log_twice(conn : Conn) : Unit do
       log(conn)
@@ -5270,7 +5270,7 @@ let test_borrow_no_incrc_at_call_site () =
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      | match conn do | Conn(s) -> println(s) end
+      match conn do | Conn(s) -> println(s) end
     end
     fn handle(conn : Conn) : Conn do
       log(conn)
@@ -5292,7 +5292,7 @@ let test_borrow_no_decrc_in_callee () =
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      | match conn do | Conn(s) -> println(s) end
+      match conn do | Conn(s) -> println(s) end
     end
   end|} in
   let log_fn =
@@ -5332,10 +5332,10 @@ let test_borrow_conn_middleware_pattern () =
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log_middleware(conn : Conn) : Unit do
-      | match conn do | Conn(s) -> println(s) end
+      match conn do | Conn(s) -> println(s) end
     end
     fn auth_middleware(conn : Conn) : Unit do
-      | match conn do | Conn(s) -> println(s) end
+      match conn do | Conn(s) -> println(s) end
     end
     fn handle(conn : Conn) : Conn do
       log_middleware(conn)
@@ -7905,8 +7905,8 @@ let test_http_parse_url () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.parse_url("https://example.com/path?q=1") do
-      | Ok(req) -> Http.host(req)
-      | Err(_) -> "fail"
+      Ok(req) -> Http.host(req)
+      Err(_) -> "fail"
       end
     end
   end|} in
@@ -7916,12 +7916,12 @@ let test_http_parse_url_scheme () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.parse_url("http://localhost:8080/api") do
-      | Ok(req) ->
+      Ok(req) ->
         match Http.scheme(req) do
-        | SchemeHttp -> "http"
-        | SchemeHttps -> "https"
+        SchemeHttp -> "http"
+        SchemeHttps -> "https"
         end
-      | Err(_) -> "fail"
+      Err(_) -> "fail"
       end
     end
   end|} in
@@ -7931,8 +7931,8 @@ let test_http_parse_url_path () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.parse_url("https://example.com/api/v1") do
-      | Ok(req) -> Http.path(req)
-      | Err(_) -> "fail"
+      Ok(req) -> Http.path(req)
+      Err(_) -> "fail"
       end
     end
   end|} in
@@ -7942,12 +7942,12 @@ let test_http_parse_url_port () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.parse_url("http://localhost:3000/") do
-      | Ok(req) ->
+      Ok(req) ->
         match Http.port(req) do
-        | Some(p) -> p
-        | None -> 0
+        Some(p) -> p
+        None -> 0
         end
-      | Err(_) -> -1
+      Err(_) -> -1
       end
     end
   end|} in
@@ -7957,9 +7957,9 @@ let test_http_parse_url_invalid () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.parse_url("ftp://bad") do
-      | Ok(_) -> "ok"
-      | Err(InvalidScheme(_)) -> "invalid_scheme"
-      | Err(_) -> "other_error"
+      Ok(_) -> "ok"
+      Err(InvalidScheme(_)) -> "invalid_scheme"
+      Err(_) -> "other_error"
       end
     end
   end|} in
@@ -7969,13 +7969,13 @@ let test_http_set_header () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.get("https://example.com") do
-      | Ok(req) ->
+      Ok(req) ->
         let req = Http.set_header(req, "Accept", "application/json")
         match Http.get_request_header(req, "accept") do
-        | Some(v) -> v
-        | None -> "none"
+        Some(v) -> v
+        None -> "none"
         end
-      | Err(_) -> "error"
+      Err(_) -> "error"
       end
     end
   end|} in
@@ -7985,8 +7985,8 @@ let test_http_method_to_string () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.post("https://example.com", ()) do
-      | Ok(req) -> Http.method_to_string(Http.method(req))
-      | Err(_) -> "fail"
+      Ok(req) -> Http.method_to_string(Http.method(req))
+      Err(_) -> "fail"
       end
     end
   end|} in
@@ -8002,8 +8002,8 @@ let test_http_post_constructor () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.post("https://example.com/api", "body data") do
-      | Ok(req) -> Http.method_to_string(Http.method(req))
-      | Err(_) -> "fail"
+      Ok(req) -> Http.method_to_string(Http.method(req))
+      Err(_) -> "fail"
       end
     end
   end|} in
@@ -8106,8 +8106,8 @@ let test_http_client_add_steps () =
       let c = HttpClient.add_request_step(c, "headers", HttpClient.step_default_headers)
       fn count(xs) do
         match xs do
-        | Nil -> 0
-        | Cons(_, t) -> 1 + count(t)
+        Nil -> 0
+        Cons(_, t) -> 1 + count(t)
         end
       end
       count(HttpClient.list_steps(c))
@@ -8119,15 +8119,15 @@ let test_http_client_request_step_transforms () =
   let env = eval_with_http_client {|mod Test do
     fn f() do
       match Http.get("http://example.com") do
-      | Err(_) -> "fail"
-      | Ok(req) ->
+      Err(_) -> "fail"
+      Ok(req) ->
         let step = HttpClient.step_bearer_auth("my-token")
         match step(req) do
-        | Err(_) -> "fail"
-        | Ok(transformed) ->
+        Err(_) -> "fail"
+        Ok(transformed) ->
           match Http.get_request_header(transformed, "authorization") do
-          | Some(v) -> v
-          | None -> "none"
+          Some(v) -> v
+          None -> "none"
           end
         end
       end
@@ -8139,13 +8139,13 @@ let test_http_client_raise_on_error_status () =
   let env = eval_with_http_client {|mod Test do
     fn f() do
       match Http.get("http://example.com") do
-      | Err(_) -> "url_fail"
-      | Ok(req) ->
+      Err(_) -> "url_fail"
+      Ok(req) ->
         let resp = Response(Status(500), Nil, "Internal Server Error")
         match HttpClient.step_raise_on_error(req, resp) do
-        | Ok(_) -> "ok"
-        | Err(StepError(name, code)) -> name ++ ":" ++ code
-        | Err(_) -> "other_error"
+        Ok(_) -> "ok"
+        Err(StepError(name, code)) -> name ++ ":" ++ code
+        Err(_) -> "other_error"
         end
       end
     end
@@ -8158,8 +8158,8 @@ let test_http_client_with_redirects () =
       let c = HttpClient.new_client()
       let c = HttpClient.with_redirects(c, 5)
       match HttpClient.list_steps(c) do
-      | Nil -> "empty"
-      | _ -> "has_steps"
+      Nil -> "empty"
+      _ -> "has_steps"
       end
     end
   end|} in
@@ -8172,8 +8172,8 @@ let test_http_client_base_url_step () =
       -- Create a request with just a path
       let req = Request(Get, SchemeHttp, "", None, "/users", None, Nil, "")
       match step(req) do
-      | Ok(transformed) -> Http.host(transformed)
-      | Err(_) -> "fail"
+      Ok(transformed) -> Http.host(transformed)
+      Err(_) -> "fail"
       end
     end
   end|} in
@@ -8185,12 +8185,12 @@ let test_http_client_content_type_step () =
       let step = HttpClient.step_content_type("application/json")
       let req = Request(Post, SchemeHttp, "example.com", None, "/api", None, Nil, "{}")
       match step(req) do
-      | Ok(transformed) ->
+      Ok(transformed) ->
         match Http.get_request_header(transformed, "content-type") do
-        | Some(v) -> v
-        | None -> "none"
+        Some(v) -> v
+        None -> "none"
         end
-      | Err(_) -> "fail"
+      Err(_) -> "fail"
       end
     end
   end|} in
@@ -8291,7 +8291,7 @@ let test_eval_task_captures_env () =
 let test_eval_spawn_steal_requires_pool () =
   let src = {|mod Test do
     fn main() do
-      | task_spawn_steal(42, fn x -> 1)
+      task_spawn_steal(42, fn x -> 1)
     end
   end|} in
   let env = eval_module src in
@@ -8501,7 +8501,7 @@ let test_receive_inside_handler () =
       on Dispatch() do
         let follow = receive()
         match follow do
-        | Followup(n) -> { got = n }
+        Followup(n) -> { got = n }
         end
       end
     end
@@ -9708,8 +9708,8 @@ let test_supervision_send_checked_ok () =
     fn main() do
       let pid = spawn(Counter)
       match get_cap(pid) do
-      | None -> :error
-      | Some(cap) -> send_checked(cap, Inc())
+      None -> :error
+      Some(cap) -> send_checked(cap, Inc())
       end
     end
   end|} in
@@ -9734,8 +9734,8 @@ let test_supervision_send_checked_dead_actor () =
     fn main() do
       let pid = spawn(A)
       match get_cap(pid) do
-      | None -> :error
-      | Some(cap) ->
+      None -> :error
+      Some(cap) ->
         kill(pid)
         send_checked(cap, Noop())
       end
@@ -9818,8 +9818,8 @@ let test_supervision_revoke_cap_blocks_send () =
     fn main() do
       let pid = spawn(A)
       match get_cap(pid) do
-      | None -> :error
-      | Some(cap) ->
+      None -> :error
+      Some(cap) ->
         revoke_cap(cap)
         send_checked(cap, Noop())
       end
@@ -9843,8 +9843,8 @@ let test_supervision_revoke_cap_idempotent () =
     fn main() do
       let pid = spawn(A)
       match get_cap(pid) do
-      | None -> :error
-      | Some(cap) ->
+      None -> :error
+      Some(cap) ->
         revoke_cap(cap)
         revoke_cap(cap)
         :ok
@@ -9867,8 +9867,8 @@ let test_supervision_is_cap_valid () =
     fn main() do
       let pid = spawn(A)
       match get_cap(pid) do
-      | None -> :error
-      | Some(cap) ->
+      None -> :error
+      Some(cap) ->
         let before = is_cap_valid(cap)
         revoke_cap(cap)
         let after = is_cap_valid(cap)
@@ -9894,8 +9894,8 @@ let test_supervision_send_revoked_cap_errors () =
     fn main() do
       let pid = spawn(A)
       match get_cap(pid) do
-      | None -> :setup_error
-      | Some(cap) ->
+      None -> :setup_error
+      Some(cap) ->
         revoke_cap(cap)
         cap
       end
@@ -9929,8 +9929,8 @@ let test_supervision_revoke_without_kill () =
     fn main() do
       let pid = spawn(A)
       match get_cap(pid) do
-      | None -> :error
-      | Some(cap) ->
+      None -> :error
+      Some(cap) ->
         revoke_cap(cap)
         let alive = is_alive(pid)
         let valid = is_cap_valid(cap)
@@ -10313,8 +10313,8 @@ let test_file_read () =
     let env = eval_with_file (Printf.sprintf {|mod T do
       fn f() do
         match File.read("%s") do
-        | Ok(s) -> s
-        | Err(ig) -> "fail"
+        Ok(s) -> s
+        Err(ig) -> "fail"
         end
       end
     end|} path) in
@@ -10327,12 +10327,12 @@ let test_file_write_read () =
      let env = eval_with_file (Printf.sprintf {|mod T do
        fn f() do
          match File.write("%s", "written data") do
-         | Ok(ig) ->
+         Ok(ig) ->
            match File.read("%s") do
-           | Ok(s) -> s
-           | Err(ig) -> "read fail"
+           Ok(s) -> s
+           Err(ig) -> "read fail"
            end
-         | Err(ig) -> "write fail"
+         Err(ig) -> "write fail"
          end
        end
      end|} path path) in
@@ -10355,9 +10355,9 @@ let test_file_with_lines () =
       fn append_bang(l) do l ++ "!" end
       fn collect_lines(lines) do Seq.to_list(Seq.map(lines, fn l -> append_bang(l))) end
       fn f() do
-        | match File.with_lines("%s", fn lines -> collect_lines(lines)) do
-        | Ok(xs) -> xs
-        | Err(ig) -> Nil
+        match File.with_lines("%s", fn lines -> collect_lines(lines)) do
+        Ok(xs) -> xs
+        Err(ig) -> Nil
         end
       end
     end|} path) in
@@ -10368,8 +10368,8 @@ let test_file_not_found () =
   let env = eval_with_file {|mod T do
     fn f() do
       match File.read("/nonexistent/path/xyz_march_test.txt") do
-      | Ok(ig) -> "ok"
-      | Err(ig) -> "err"
+      Ok(ig) -> "ok"
+      Err(ig) -> "err"
       end
     end
   end|} in
@@ -10384,8 +10384,8 @@ let test_file_append () =
          File.write("%s", "line1\n")
          File.append("%s", "line2\n")
          match File.read("%s") do
-         | Ok(s) -> s
-         | Err(ig) -> "fail"
+         Ok(s) -> s
+         Err(ig) -> "fail"
          end
        end
      end|} path path path) in
@@ -10417,14 +10417,14 @@ let test_dir_mkdir_list_rmdir () =
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
       match Dir.mkdir("%s") do
-      | Err(e) -> "mkdir failed: " ++ to_string(e)
-      | Ok(ig) ->
+      Err(e) -> "mkdir failed: " ++ to_string(e)
+      Ok(ig) ->
         match Dir.list("%s") do
-        | Err(ig) -> "list failed"
-        | Ok(ig) ->
+        Err(ig) -> "list failed"
+        Ok(ig) ->
           match Dir.rmdir("%s") do
-          | Err(ig) -> "rmdir failed"
-          | Ok(ig) -> "ok"
+          Err(ig) -> "rmdir failed"
+          Ok(ig) -> "ok"
           end
         end
       end
@@ -10444,8 +10444,8 @@ let test_dir_rm_rf () =
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
       match Dir.rm_rf("%s") do
-      | Ok(ig) -> "ok"
-      | Err(ig) -> "err"
+      Ok(ig) -> "ok"
+      Err(ig) -> "err"
       end
     end
   end|} base) in
@@ -10456,8 +10456,8 @@ let test_dir_rm_rf_refuses_root () =
   let env = eval_with_dir {|mod T do
     fn f() do
       match Dir.rm_rf("/") do
-      | Ok(ig) -> "deleted root"
-      | Err(ig) -> "refused"
+      Ok(ig) -> "deleted root"
+      Err(ig) -> "refused"
       end
     end
   end|} in
@@ -10486,8 +10486,8 @@ let test_dir_mkdir_p () =
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
       match Dir.mkdir_p("%s") do
-      | Ok(ig) -> Dir.exists("%s")
-      | Err(ig) -> false
+      Ok(ig) -> Dir.exists("%s")
+      Err(ig) -> false
       end
     end
   end|} deep deep) in
@@ -10514,16 +10514,16 @@ let test_integration_file_pipeline () =
   let env = eval_with_dir (Printf.sprintf {|mod T do
     fn f() do
       match Dir.list_full("%s") do
-      | Err(ig) -> Nil
-      | Ok(files) ->
+      Err(ig) -> Nil
+      Ok(files) ->
         let txt_files = List.filter(files, fn(p) -> Path.extension(p) == "txt")
         fn collect(ps, acc) do
           match ps do
-          | Nil -> List.reverse(acc)
-          | Cons(p, rest) ->
+          Nil -> List.reverse(acc)
+          Cons(p, rest) ->
             match File.read_lines(p) do
-            | Ok(ls) -> collect(rest, List.append(List.reverse(ls), acc))
-            | Err(ig) -> collect(rest, acc)
+            Ok(ls) -> collect(rest, List.append(List.reverse(ls), acc))
+            Err(ig) -> collect(rest, acc)
             end
           end
         end
@@ -10555,7 +10555,7 @@ let lower_map_typed src =
   March_tir.Lower.lower_module ~type_map m
 
 (* Standard int comparator: fn a -> fn b -> a < b *)
-let int_cmp = {|| fn(a) -> fn(b) -> a < b|}
+let int_cmp = {|fn(a) -> fn(b) -> a < b|}
 
 (* Helper: extract Some(v) payload *)
 let vsome = function
@@ -10791,7 +10791,7 @@ let test_map_merge_with () =
   Alcotest.(check (list int)) "merge_with sums conflict" [10; 25; 30] vs
 
 let test_map_string_keys () =
-  let str_cmp = {|| fn(a) -> fn(b) -> a < b|} in
+  let str_cmp = {|fn(a) -> fn(b) -> a < b|} in
   let env = eval_with_map (Printf.sprintf {|mod T do
     fn f() do
       let m = Map.from_list([("banana", 2), ("apple", 1), ("cherry", 3)], %s)
@@ -11027,7 +11027,7 @@ let test_array_pop () =
     fn f() do
       let a = Array.from_list([1, 2, 3])
       match Array.pop(a) do
-      | (a2, last) -> last
+      (a2, last) -> last
       end
     end
   end|} in
@@ -11038,7 +11038,7 @@ let test_array_pop_length () =
     fn f() do
       let a = Array.from_list([1, 2, 3])
       match Array.pop(a) do
-      | (a2, _) -> Array.length(a2)
+      (a2, _) -> Array.length(a2)
       end
     end
   end|} in
@@ -11127,15 +11127,15 @@ let test_shared_ctor_name_eval () =
     type Color = Red | Green | Blue
     fn shape_val() do
       match Circle(42) do
-      | Circle(r) -> r
-      | Square(s) -> s
+      Circle(r) -> r
+      Square(s) -> s
       end
     end
     fn color_val() do
       match Red do
-      | Red   -> 1
-      | Green -> 2
-      | Blue  -> 3
+      Red   -> 1
+      Green -> 2
+      Blue  -> 3
       end
     end
   end|} in
@@ -11168,8 +11168,8 @@ let test_fn_when_constraint_satisfied () =
     end
     fn contains(xs : List(a), x : a) : Bool when Eq(a) do
       match xs do
-      | Nil -> false
-      | Cons(h, t) -> if eq(h, x) do true else contains(t, x) end
+      Nil -> false
+      Cons(h, t) -> if eq(h, x) do true else contains(t, x) end
       end
     end
     fn main() : Bool do
@@ -11184,8 +11184,8 @@ let test_fn_when_constraint_unsatisfied () =
     type Color = Red | Green
     fn contains(xs : List(a), x : a) : Bool when Eq(a) do
       match xs do
-      | Nil -> false
-      | Cons(h, t) -> if eq(h, x) do true else contains(t, x) end
+      Nil -> false
+      Cons(h, t) -> if eq(h, x) do true else contains(t, x) end
       end
     end
     fn main() : Bool do
@@ -11242,7 +11242,7 @@ let test_linear_match_arm_double_use () =
   let ctx = typecheck {|mod Test do
     fn double_linear(linear x: Int) : Int do
       match x do
-      | n -> n + n
+      n -> n + n
       end
     end
   end|} in
@@ -12808,9 +12808,9 @@ let test_eval_custom_eq_dispatch () =
     impl Eq(Parity) do
       fn eq(a, b) do
         match (a, b) do
-        | (Even, Even) -> true
-        | (Odd, Odd)   -> true
-        | _            -> false
+        (Even, Even) -> true
+        (Odd, Odd)   -> true
+        _            -> false
         end
       end
     end
@@ -12922,7 +12922,7 @@ let test_exhaust_wildcard_ok () =
   let ctx = typecheck {|mod Test do
     fn go(x : Int) : Int do
       match x do
-      | _ -> 0
+      _ -> 0
       end
     end
   end|} in
@@ -12933,7 +12933,7 @@ let test_exhaust_var_ok () =
   let ctx = typecheck {|mod Test do
     fn go(x : Int) : Int do
       match x do
-      | n -> n
+      n -> n
       end
     end
   end|} in
@@ -12946,8 +12946,8 @@ let test_exhaust_bool_complete () =
   let ctx = typecheck {|mod Test do
     fn go(b : Bool) : Int do
       match b do
-      | true  -> 1
-      | false -> 0
+      true  -> 1
+      false -> 0
       end
     end
   end|} in
@@ -12958,7 +12958,7 @@ let test_exhaust_bool_missing_false () =
   let ctx = typecheck {|mod Test do
     fn go(b : Bool) : Int do
       match b do
-      | true -> 1
+      true -> 1
       end
     end
   end|} in
@@ -12969,7 +12969,7 @@ let test_exhaust_bool_missing_true () =
   let ctx = typecheck {|mod Test do
     fn go(b : Bool) : Int do
       match b do
-      | false -> 0
+      false -> 0
       end
     end
   end|} in
@@ -12983,7 +12983,7 @@ let test_exhaust_bool_empty () =
   let ctx = typecheck {|mod Test do
     fn go(b : Bool) : Int do
       match b do
-      | true -> 1
+      true -> 1
       end
     end
   end|} in
@@ -12997,8 +12997,8 @@ let test_exhaust_option_complete () =
   let ctx = typecheck {|mod Test do
     fn go(x : Option(Int)) : Int do
       match x do
-      | None    -> 0
-      | Some(n) -> n
+      None    -> 0
+      Some(n) -> n
       end
     end
   end|} in
@@ -13009,7 +13009,7 @@ let test_exhaust_option_missing_none () =
   let ctx = typecheck {|mod Test do
     fn go(x : Option(Int)) : Int do
       match x do
-      | Some(n) -> n
+      Some(n) -> n
       end
     end
   end|} in
@@ -13020,7 +13020,7 @@ let test_exhaust_option_missing_some () =
   let ctx = typecheck {|mod Test do
     fn go(x : Option(Int)) : Int do
       match x do
-      | None -> 0
+      None -> 0
       end
     end
   end|} in
@@ -13031,8 +13031,8 @@ let test_exhaust_option_wildcard () =
   let ctx = typecheck {|mod Test do
     fn go(x : Option(Int)) : Int do
       match x do
-      | Some(n) -> n
-      | _       -> 0
+      Some(n) -> n
+      _       -> 0
       end
     end
   end|} in
@@ -13046,9 +13046,9 @@ let test_exhaust_3ctor_complete () =
     type Color = Red | Green | Blue
     fn go(c : Color) : Int do
       match c do
-      | Red   -> 0
-      | Green -> 1
-      | Blue  -> 2
+      Red   -> 0
+      Green -> 1
+      Blue  -> 2
       end
     end
   end|} in
@@ -13060,8 +13060,8 @@ let test_exhaust_3ctor_missing_one () =
     type Color = Red | Green | Blue
     fn go(c : Color) : Int do
       match c do
-      | Red   -> 0
-      | Green -> 1
+      Red   -> 0
+      Green -> 1
       end
     end
   end|} in
@@ -13074,9 +13074,9 @@ let test_exhaust_nested_complete () =
   let ctx = typecheck {|mod Test do
     fn go(x : Option(Option(Int))) : Int do
       match x do
-      | None          -> 0
-      | Some(None)    -> 1
-      | Some(Some(n)) -> n
+      None          -> 0
+      Some(None)    -> 1
+      Some(Some(n)) -> n
       end
     end
   end|} in
@@ -13087,8 +13087,8 @@ let test_exhaust_nested_wildcard_inner () =
   let ctx = typecheck {|mod Test do
     fn go(x : Option(Option(Int))) : Int do
       match x do
-      | None    -> 0
-      | Some(_) -> 1
+      None    -> 0
+      Some(_) -> 1
       end
     end
   end|} in
@@ -13099,8 +13099,8 @@ let test_exhaust_nested_missing () =
   let ctx = typecheck {|mod Test do
     fn go(x : Option(Option(Int))) : Int do
       match x do
-      | None       -> 0
-      | Some(None) -> 1
+      None       -> 0
+      Some(None) -> 1
       end
     end
   end|} in
@@ -13114,8 +13114,8 @@ let test_exhaust_int_needs_wildcard () =
   let ctx = typecheck {|mod Test do
     fn go(n : Int) : Int do
       match n do
-      | 0 -> 1
-      | 1 -> 2
+      0 -> 1
+      1 -> 2
       end
     end
   end|} in
@@ -13126,8 +13126,8 @@ let test_exhaust_int_wildcard_ok () =
   let ctx = typecheck {|mod Test do
     fn go(n : Int) : Int do
       match n do
-      | 0 -> 1
-      | _ -> n
+      0 -> 1
+      _ -> n
       end
     end
   end|} in
@@ -13138,8 +13138,8 @@ let test_exhaust_string_needs_wildcard () =
   let ctx = typecheck {|mod Test do
     fn go(s : String) : Int do
       match s do
-      | "hello" -> 1
-      | "world" -> 2
+      "hello" -> 1
+      "world" -> 2
       end
     end
   end|} in
@@ -13150,8 +13150,8 @@ let test_exhaust_string_wildcard_ok () =
   let ctx = typecheck {|mod Test do
     fn go(s : String) : Int do
       match s do
-      | "hello" -> 1
-      | _       -> 0
+      "hello" -> 1
+      _       -> 0
       end
     end
   end|} in
@@ -13165,7 +13165,7 @@ let test_exhaust_guard_skipped () =
   let ctx = typecheck {|mod Test do
     fn go(n : Int) : Int do
       match n do
-      | x when x > 0 -> x
+      x when x > 0 -> x
       end
     end
   end|} in
@@ -13178,10 +13178,10 @@ let test_exhaust_tuple_bool_bool_complete () =
   let ctx = typecheck {|mod Test do
     fn go(p : (Bool, Bool)) : Int do
       match p do
-      | (true,  true)  -> 0
-      | (true,  false) -> 1
-      | (false, true)  -> 2
-      | (false, false) -> 3
+      (true,  true)  -> 0
+      (true,  false) -> 1
+      (false, true)  -> 2
+      (false, false) -> 3
       end
     end
   end|} in
@@ -13192,8 +13192,8 @@ let test_exhaust_tuple_wildcards_ok () =
   let ctx = typecheck {|mod Test do
     fn go(p : (Bool, Int)) : Int do
       match p do
-      | (true,  _) -> 1
-      | (false, _) -> 0
+      (true,  _) -> 1
+      (false, _) -> 0
       end
     end
   end|} in
@@ -13204,8 +13204,8 @@ let test_exhaust_tuple_partial () =
   let ctx = typecheck {|mod Test do
     fn go(p : (Bool, Bool)) : Int do
       match p do
-      | (true, true)  -> 1
-      | (true, false) -> 0
+      (true, true)  -> 1
+      (true, false) -> 0
       end
     end
   end|} in
@@ -13219,8 +13219,8 @@ let test_exhaust_result_complete () =
   let ctx = typecheck {|mod Test do
     fn go(r : Result(Int, String)) : Int do
       match r do
-      | Ok(n)  -> n
-      | Err(_) -> 0
+      Ok(n)  -> n
+      Err(_) -> 0
       end
     end
   end|} in
@@ -13231,7 +13231,7 @@ let test_exhaust_result_missing_err () =
   let ctx = typecheck {|mod Test do
     fn go(r : Result(Int, String)) : Int do
       match r do
-      | Ok(n) -> n
+      Ok(n) -> n
       end
     end
   end|} in
@@ -13380,8 +13380,8 @@ let test_parse_qualified_pat_con () =
   let src = {|mod Test do
     fn f(x) do
       match x do
-      | Result.Ok(v) -> v
-      | Result.Err(e) -> 0
+      Result.Ok(v) -> v
+      Result.Err(e) -> 0
       end
     end
   end|} in
@@ -13421,8 +13421,8 @@ let test_tc_qualified_ctor_pat () =
     type Shape = Circle(Int) | Square(Int)
     fn area(s) do
       match s do
-      | Shape.Circle(r) -> r * r
-      | Shape.Square(side) -> side * side
+      Shape.Circle(r) -> r * r
+      Shape.Square(side) -> side * side
       end
     end
   end|} in
@@ -13456,8 +13456,8 @@ let test_eval_qualified_ctor_expr () =
     fn make() do Color.Green end
     fn is_green(c) do
       match c do
-      | Green -> true
-      | _ -> false
+      Green -> true
+      _ -> false
       end
     end
   end|} in
@@ -13471,8 +13471,8 @@ let test_eval_qualified_ctor_pat () =
     type Shape = Circle(Int) | Square(Int)
     fn area(s) do
       match s do
-      | Shape.Circle(r) -> r * r
-      | Shape.Square(side) -> side * side
+      Shape.Circle(r) -> r * r
+      Shape.Square(side) -> side * side
       end
     end
     fn go() do
@@ -13491,8 +13491,8 @@ let test_eval_qualified_ctor_interop () =
     fn go() do
       let v = Ok(99)
       match v do
-      | Msg.Ok(n) -> n
-      | Msg.Fail -> 0
+      Msg.Ok(n) -> n
+      Msg.Fail -> 0
       end
     end
   end|} in
@@ -13506,8 +13506,8 @@ let test_eval_qualified_and_bare_match () =
     fn go() do
       let v = Msg.Ok(42)
       match v do
-      | Ok(n) -> n
-      | Fail -> 0
+      Ok(n) -> n
+      Fail -> 0
       end
     end
   end|} in
@@ -13529,8 +13529,8 @@ let test_eval_builtin_qualified_ctors () =
     fn wrap(x) do Option.Some(x) end
     fn go() do
       match wrap(7) do
-      | Some(v) -> v
-      | None -> 0
+      Some(v) -> v
+      None -> 0
       end
     end
   end|} in
@@ -13993,16 +13993,16 @@ let test_parse_deeply_nested_match () =
   let src = {|mod Test do
     fn classify(x : Int) : Int do
       match x do
-      | 0 ->
+      0 ->
         match x do
-        | 0 ->
+        0 ->
           match x do
-          | 0 -> 0
-          | _ -> 1
+          0 -> 0
+          _ -> 1
           end
-        | _ -> 2
+        _ -> 2
         end
-      | _ -> 3
+      _ -> 3
       end
     end
   end|} in
@@ -14081,7 +14081,7 @@ let test_parse_match_wildcard_only () =
   let src = {|mod Test do
     fn always(x : Int) : Int do
       match x do
-      | _ -> 42
+      _ -> 42
       end
     end
   end|} in
@@ -14167,8 +14167,8 @@ let test_parse_large_tuple_match () =
   let src = {|mod Test do
     fn go(a : Int, b : Int, c : Int, d : Int) : Int do
       match (a, b, c, d) do
-      | (0, 0, 0, 0) -> 0
-      | (x, _, _, _) -> x
+      (0, 0, 0, 0) -> 0
+      (x, _, _, _) -> x
       end
     end
   end|} in
@@ -14473,14 +14473,14 @@ let test_tc_tail_map_ok () =
   let ctx = typecheck {|mod Test do
     fn rev(xs, acc) do
       match xs do
-      | Nil -> acc
-      | Cons(h, t) -> rev(t, Cons(h, acc))
+      Nil -> acc
+      Cons(h, t) -> rev(t, Cons(h, acc))
       end
     end
     fn map(xs, f, acc) do
       match xs do
-      | Nil -> rev(acc, Nil)
-      | Cons(h, t) -> map(t, f, Cons(f(h), acc))
+      Nil -> rev(acc, Nil)
+      Cons(h, t) -> map(t, f, Cons(f(h), acc))
       end
     end
   end|} in
@@ -14491,8 +14491,8 @@ let test_tc_tail_map_fail () =
   let ctx = typecheck {|mod Test do
     fn map(xs, f) do
       match xs do
-      | Nil -> Nil
-      | Cons(h, _) -> Cons(f(h), map(xs, f))
+      Nil -> Nil
+      Cons(h, _) -> Cons(f(h), map(xs, f))
       end
     end
   end|} in
@@ -14530,8 +14530,8 @@ let test_tc_tail_match_arms_ok () =
     type Tree = Leaf | Node(Tree, Tree)
     fn depth(t) do
       match t do
-      | Leaf -> 0
-      | Node(l, _) -> depth(l)
+      Leaf -> 0
+      Node(l, _) -> depth(l)
       end
     end
   end|} in
@@ -14542,8 +14542,8 @@ let test_tc_tail_match_arms_fail () =
   let ctx = typecheck {|mod Test do
     fn sum_list(xs) do
       match xs do
-      | Nil -> 0
-      | Cons(h, _) -> h + sum_list(xs)
+      Nil -> 0
+      Cons(h, _) -> h + sum_list(xs)
       end
     end
   end|} in
@@ -14575,8 +14575,8 @@ let test_tc_structural_tree_map_ok () =
     type Tree = Leaf(Int) | Node(Tree, Tree)
     fn inc_leaves(t : Tree) : Tree do
       match t do
-      | Leaf(n)    -> Leaf(n + 1)
-      | Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
+      Leaf(n)    -> Leaf(n + 1)
+      Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))
       end
     end
   end|} in
@@ -14586,8 +14586,8 @@ let test_tc_structural_sum_list_ok () =
   let ctx = typecheck {|mod Test do
     fn sum_list(xs) do
       match xs do
-      | Nil -> 0
-      | Cons(h, t) -> h + sum_list(t)
+      Nil -> 0
+      Cons(h, t) -> h + sum_list(t)
       end
     end
   end|} in
@@ -14886,8 +14886,8 @@ let test_bytes_encode_decode_base64 () =
       let b = Bytes.from_string("Hello")
       let encoded = Bytes.encode_base64(b)
       match Bytes.decode_base64(encoded) do
-      | Ok(decoded) -> Bytes.to_string(decoded)
-      | Err(e) -> e
+      Ok(decoded) -> Bytes.to_string(decoded)
+      Err(e) -> e
       end
     end
   end|} in
@@ -15119,8 +15119,8 @@ let test_actor_call_get () =
         Actor.cast(pid, Inc())
         let result = Actor.call(pid, Inc(), 1000)
         match result do
-        | Ok(n) -> n
-        | Err(_) -> -1
+        Ok(n) -> n
+        Err(_) -> -1
         end
       end
     end|} in
@@ -15145,8 +15145,8 @@ let test_queue_push_back_pop_front () =
     fn f() do
       let q = Queue.push_back(Queue.push_back(Queue.empty(), 1), 2)
       match Queue.pop_front(q) do
-      | None -> -1
-      | Some((x, _)) -> x
+      None -> -1
+      Some((x, _)) -> x
       end
     end
   end|} in
@@ -15157,8 +15157,8 @@ let test_queue_push_front_pop_front () =
     fn f() do
       let q = Queue.push_front(Queue.push_front(Queue.empty(), 2), 1)
       match Queue.pop_front(q) do
-      | None -> -1
-      | Some((x, _)) -> x
+      None -> -1
+      Some((x, _)) -> x
       end
     end
   end|} in
@@ -15169,8 +15169,8 @@ let test_queue_pop_back () =
     fn f() do
       let q = Queue.push_back(Queue.push_back(Queue.empty(), 1), 2)
       match Queue.pop_back(q) do
-      | None -> -1
-      | Some((x, _)) -> x
+      None -> -1
+      Some((x, _)) -> x
       end
     end
   end|} in
@@ -15180,11 +15180,11 @@ let test_queue_peek () =
   let env = eval_with_queue {|mod Test do
     fn front() do
       let q = Queue.push_back(Queue.push_back(Queue.empty(), 10), 20)
-      | match Queue.peek_front(q) do | None -> -1 | Some(x) -> x end
+      match Queue.peek_front(q) do | None -> -1 | Some(x) -> x end
     end
     fn back() do
       let q = Queue.push_back(Queue.push_back(Queue.empty(), 10), 20)
-      | match Queue.peek_back(q) do | None -> -1 | Some(x) -> x end
+      match Queue.peek_back(q) do | None -> -1 | Some(x) -> x end
     end
   end|} in
   Alcotest.(check int) "peek_front = 10" 10 (vint (call_fn env "front" []));
@@ -15229,12 +15229,12 @@ let test_queue_rebalance () =
       let q3 = Queue.push_back(q2, 30)
       -- Pop all from front; the second pop forces rebalancing
       match Queue.pop_front(q3) do
-      | Some((_, q4)) ->
+      Some((_, q4)) ->
         match Queue.pop_front(q4) do
-        | Some((x, _)) -> x
-        | None -> -1
+        Some((x, _)) -> x
+        None -> -1
         end
-      | None -> -1
+      None -> -1
       end
     end
   end|} in
@@ -15360,8 +15360,8 @@ let test_datetime_parse_date () =
   let env = eval_with_datetime {|mod Test do
     fn f() do
       match DateTime.parse("2024-03-15") do
-      | Err(_) -> -1
-      | Ok(dt) -> DateTime.to_timestamp(dt)
+      Err(_) -> -1
+      Ok(dt) -> DateTime.to_timestamp(dt)
       end
     end
   end|} in
@@ -15374,8 +15374,8 @@ let test_datetime_parse_datetime () =
   let env = eval_with_datetime {|mod Test do
     fn f() do
       match DateTime.parse("1970-01-01 00:00:00") do
-      | Err(_) -> -1
-      | Ok(dt) -> DateTime.to_timestamp(dt)
+      Err(_) -> -1
+      Ok(dt) -> DateTime.to_timestamp(dt)
       end
     end
   end|} in
@@ -15398,7 +15398,7 @@ let test_datetime_leap_year () =
       -- 1972-03-01 00:00:00 should be 366+31+29 days after epoch
       let dt = DateTime.from_timestamp(68169600)
       match dt do
-      | DateTime(Date(y, m, d), _) -> y * 10000 + m * 100 + d
+      DateTime(Date(y, m, d), _) -> y * 10000 + m * 100 + d
       end
     end
   end|} in
@@ -15410,7 +15410,7 @@ let test_datetime_leap_year () =
       -- 1972-02-29 timestamp: (365 + 365 + 31 + 28) * 86400 = 789 * 86400
       let ts = 789 * 86400
       match DateTime.from_timestamp(ts) do
-      | DateTime(Date(_, m, d), _) -> m * 100 + d
+      DateTime(Date(_, m, d), _) -> m * 100 + d
       end
     end
   end|} in
@@ -15460,8 +15460,8 @@ let test_json_parse_int () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("42") do
-      | Ok(Number(n)) -> float_to_int(n)
-      | _ -> -1
+      Ok(Number(n)) -> float_to_int(n)
+      _ -> -1
       end
     end
   end|} in
@@ -15471,8 +15471,8 @@ let test_json_parse_float () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("3.14") do
-      | Ok(Number(n)) -> n
-      | _ -> 0.0
+      Ok(Number(n)) -> n
+      _ -> 0.0
       end
     end
   end|} in
@@ -15486,8 +15486,8 @@ let test_json_parse_negative () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("-7") do
-      | Ok(Number(n)) -> float_to_int(n)
-      | _ -> 999
+      Ok(Number(n)) -> float_to_int(n)
+      _ -> 999
       end
     end
   end|} in
@@ -15497,8 +15497,8 @@ let test_json_parse_string () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("\"hello\"") do
-      | Ok(Str(s)) -> s
-      | _ -> "FAIL"
+      Ok(Str(s)) -> s
+      _ -> "FAIL"
       end
     end
   end|} in
@@ -15508,8 +15508,8 @@ let test_json_parse_string_escape () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("\"a\\nb\"") do
-      | Ok(Str(s)) -> string_byte_length(s)
-      | _ -> -1
+      Ok(Str(s)) -> string_byte_length(s)
+      _ -> -1
       end
     end
   end|} in
@@ -15519,8 +15519,8 @@ let test_json_parse_empty_array () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("[]") do
-      | Ok(Array(xs)) -> xs
-      | _ -> Cons(Null, Nil)
+      Ok(Array(xs)) -> xs
+      _ -> Cons(Null, Nil)
       end
     end
   end|} in
@@ -15531,13 +15531,13 @@ let test_json_parse_array () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("[1, 2, 3]") do
-      | Ok(Array(xs)) ->
+      Ok(Array(xs)) ->
         match xs do
-        | Cons(Number(a), Cons(Number(b), Cons(Number(c), Nil))) ->
+        Cons(Number(a), Cons(Number(b), Cons(Number(c), Nil))) ->
           float_to_int(a) + float_to_int(b) + float_to_int(c)
-        | _ -> -1
+        _ -> -1
         end
-      | _ -> -2
+      _ -> -2
       end
     end
   end|} in
@@ -15547,8 +15547,8 @@ let test_json_parse_empty_object () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("{}") do
-      | Ok(Object(kvs)) -> kvs
-      | _ -> Cons(("x", Null), Nil)
+      Ok(Object(kvs)) -> kvs
+      _ -> Cons(("x", Null), Nil)
       end
     end
   end|} in
@@ -15559,12 +15559,12 @@ let test_json_parse_object () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("{\"x\": 1}") do
-      | Ok(obj) ->
+      Ok(obj) ->
         match Json.get(obj, "x") do
-        | Some(Number(n)) -> float_to_int(n)
-        | _ -> -1
+        Some(Number(n)) -> float_to_int(n)
+        _ -> -1
         end
-      | _ -> -2
+      _ -> -2
       end
     end
   end|} in
@@ -15574,12 +15574,12 @@ let test_json_parse_nested () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("{\"a\":{\"b\":42}}") do
-      | Ok(obj) ->
+      Ok(obj) ->
         match Json.get_in(obj, Cons("a", Cons("b", Nil))) do
-        | Some(Number(n)) -> float_to_int(n)
-        | _ -> -1
+        Some(Number(n)) -> float_to_int(n)
+        _ -> -1
         end
-      | _ -> -2
+      _ -> -2
       end
     end
   end|} in
@@ -15589,12 +15589,12 @@ let test_json_parse_whitespace () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("  {  \"k\"  :  true  }  ") do
-      | Ok(obj) ->
+      Ok(obj) ->
         match Json.get(obj, "k") do
-        | Some(Bool(b)) -> b
-        | _ -> false
+        Some(Bool(b)) -> b
+        _ -> false
         end
-      | _ -> false
+      _ -> false
       end
     end
   end|} in
@@ -15604,8 +15604,8 @@ let test_json_parse_error () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("not json") do
-      | Err(_) -> true
-      | Ok(_) -> false
+      Err(_) -> true
+      Ok(_) -> false
       end
     end
   end|} in
@@ -15659,8 +15659,8 @@ let test_json_get () =
     fn f() do
       let obj = Object(Cons(("x", Number(5.0)), Cons(("y", Number(10.0)), Nil)))
       match Json.get(obj, "y") do
-      | Some(Number(n)) -> float_to_int(n)
-      | _ -> -1
+      Some(Number(n)) -> float_to_int(n)
+      _ -> -1
       end
     end
   end|} in
@@ -15672,8 +15672,8 @@ let test_json_get_in () =
       let inner = Object(Cons(("b", Number(99.0)), Nil))
       let outer = Object(Cons(("a", inner), Nil))
       match Json.get_in(outer, Cons("a", Cons("b", Nil))) do
-      | Some(Number(n)) -> float_to_int(n)
-      | _ -> -1
+      Some(Number(n)) -> float_to_int(n)
+      _ -> -1
       end
     end
   end|} in

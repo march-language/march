@@ -94,8 +94,8 @@ end
 pfn remove_nth(xs : List(a), n : Int) : (a, List(a)) do
   fn go(lst : List(a), i : Int, acc : List(a)) : (a, List(a)) do
     match lst do
-    | Nil -> panic("Random.remove_nth: index out of bounds")
-    | Cons(h, t) -> do
+    Nil -> panic("Random.remove_nth: index out of bounds")
+    Cons(h, t) -> do
       if i == n do (h, List.append(List.reverse(acc), t))
       else go(t, i + 1, Cons(h, acc)) end
     end
@@ -112,8 +112,8 @@ Same seed + same list always produces the same shuffle.
 fn shuffle(rng : Rng, xs : List(a)) : (List(a), Rng) do
   fn go(rest : List(a), remaining : Int, acc : List(a), r : Rng) : (List(a), Rng) do
     match rest do
-    | Nil -> (List.reverse(acc), r)
-    | _ -> do
+    Nil -> (List.reverse(acc), r)
+    _ -> do
       let (raw, r2) = next_raw(r)
       let max_v = int_max_value(())
       let pos = int_and(raw, max_v)

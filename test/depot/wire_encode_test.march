@@ -24,7 +24,7 @@ type FrontendMessage =
   | SASLInitialResponse(String, Bytes)
   | SASLResponse(Bytes)
 
-type DescribeTarget = DescribeStatement(String) | DescribePortal(String)
+type DescribeTarget = DescribeStatement(String) DescribePortal(String)
 type CloseTarget    = CloseStatement(String)    | ClosePortal(String)
 
 type Param =
@@ -65,16 +65,16 @@ end
 
 fn encode(msg : FrontendMessage) : Bytes do
   match msg do
-  | Startup(params) -> do
+  Startup(params) -> do
     let pairs = Map.fold(Bytes.empty(), params, fn acc -> fn k -> fn v ->
       Bytes.concat(acc, Bytes.concat(cstring(k), cstring(v)))
     )
     let payload = Bytes.concat(i32_be(196608), Bytes.concat(pairs, Bytes.from_list([0])))
     length_prefix(payload)
   end
-  | Query(sql) ->
+  Query(sql) ->
     frame(81, cstring(sql))
-  | Parse(name, sql, oids) -> do
+  Parse(name, sql, oids) -> do
     let oid_bytes = List.fold_left(Bytes.empty(), oids, fn (acc, oid) ->
       Bytes.concat(acc, i32_be(oid)))
     let payload = Bytes.concat(
@@ -82,20 +82,20 @@ fn encode(msg : FrontendMessage) : Bytes do
       Bytes.concat(i16_be(List.length(oids)), oid_bytes))
     frame(80, payload)
   end
-  | Bind(portal, stmt, params) ->
+  Bind(portal, stmt, params) ->
     encode_bind(portal, stmt, params)
-  | Execute(portal, max_rows) ->
+  Execute(portal, max_rows) ->
     frame(69, Bytes.concat(cstring(portal), i32_be(max_rows)))
-  | Sync      -> frame(83, Bytes.empty())
-  | Flush     -> frame(72, Bytes.empty())
-  | Terminate -> frame(88, Bytes.empty())
-  | PasswordMessage(pw) ->
+  Sync      -> frame(83, Bytes.empty())
+  Flush     -> frame(72, Bytes.empty())
+  Terminate -> frame(88, Bytes.empty())
+  PasswordMessage(pw) ->
     frame(112, cstring(pw))
-  | Describe(DescribeStatement(name)) ->
+  Describe(DescribeStatement(name)) ->
     frame(68, Bytes.concat(Bytes.from_list([83]), cstring(name)))
-  | Describe(DescribePortal(name)) ->
+  Describe(DescribePortal(name)) ->
     frame(68, Bytes.concat(Bytes.from_list([80]), cstring(name)))
-  | _ -> panic("encode: unimplemented message type")
+  _ -> panic("encode: unimplemented message type")
   end
 end
 
@@ -103,11 +103,11 @@ fn encode_bind(portal, stmt, params) do
   let n = List.length(params)
   let param_bytes = List.fold_left(Bytes.empty(), params, fn (acc, p) -> do
     match p do
-    | ParamNull    -> Bytes.concat(acc, i32_be(-1))
-    | ParamText(s) ->
+    ParamNull    -> Bytes.concat(acc, i32_be(-1))
+    ParamText(s) ->
       let b = Bytes.from_string(s)
       Bytes.concat(acc, Bytes.concat(i32_be(Bytes.length(b)), b))
-    | ParamBinary(b) ->
+    ParamBinary(b) ->
       Bytes.concat(acc, Bytes.concat(i32_be(Bytes.length(b)), b))
     end
   end

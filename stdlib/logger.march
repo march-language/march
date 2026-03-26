@@ -26,19 +26,19 @@ type Level = Debug | Info | Warn | Error
 
 fn level_to_int(l) do
   match l do
-  | Debug -> 0
-  | Info  -> 1
-  | Warn  -> 2
-  | Error -> 3
+  Debug -> 0
+  Info  -> 1
+  Warn  -> 2
+  Error -> 3
   end
 end
 
 fn level_to_string(l) do
   match l do
-  | Debug -> "DEBUG"
-  | Info  -> "INFO"
-  | Warn  -> "WARN"
-  | Error -> "ERROR"
+  Debug -> "DEBUG"
+  Info  -> "INFO"
+  Warn  -> "WARN"
+  Error -> "ERROR"
   end
 end
 
@@ -62,10 +62,10 @@ end
 doc "Return the numeric rank of a log level: Debug=0, Info=1, Warn=2, Error=3."
 fn level_rank(l) do
   match l do
-  | Debug -> 0
-  | Info  -> 1
-  | Warn  -> 2
-  | Error -> 3
+  Debug -> 0
+  Info  -> 1
+  Warn  -> 2
+  Error -> 3
   end
 end
 

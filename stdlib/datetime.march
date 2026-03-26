@@ -111,8 +111,8 @@ pfn parse_digits(s, n) do
     let digits = string_slice(s, 0, n)
     let rest = string_slice(s, n, len - n)
     match string_to_int(digits) do
-    | None -> None
-    | Some(v) -> Some((v, rest))
+    None -> None
+    Some(v) -> Some((v, rest))
     end end
   end
 end
@@ -154,7 +154,7 @@ Convert a DateTime to a Unix timestamp (Int seconds since 1970-01-01 UTC).
 """
 fn to_timestamp(dt) do
   match dt do
-  | DateTime(Date(y, m, d), Time(h, mi, s)) ->
+  DateTime(Date(y, m, d), Time(h, mi, s)) ->
     date_to_days(y, m, d) * 86400 + h * 3600 + mi * 60 + s
   end
 end
@@ -201,7 +201,7 @@ Return the day of the week for the date component of a DateTime.
 """
 fn day_of_week(dt) do
   match dt do
-  | DateTime(Date(y, m, d), _) -> do
+  DateTime(Date(y, m, d), _) -> do
     let days = date_to_days(y, m, d)
     int_mod(days + 4, 7)
   end
@@ -216,7 +216,7 @@ Example: DateTime.format(dt, "%Y-%m-%d %H:%M:%S")
 """
 fn format(dt, fmt) do
   match dt do
-  | DateTime(Date(yr, mo, dy), Time(hr, mn, sc)) -> do
+  DateTime(Date(yr, mo, dy), Time(hr, mn, sc)) -> do
     let s1 = string_replace_all(fmt, "%Y", pad_int(yr, 4))
     let s2 = string_replace_all(s1, "%m", pad_int(mo, 2))
     let s3 = string_replace_all(s2, "%d", pad_int(dy, 2))
@@ -237,41 +237,41 @@ fn parse(s) do
   if len < 10 do Err("string too short to be a date: " ++ s)
   else
     match parse_digits(s, 4) do
-    | None -> Err("expected 4-digit year in: " ++ s)
-    | Some((y, r1)) -> do
+    None -> Err("expected 4-digit year in: " ++ s)
+    Some((y, r1)) -> do
       match expect_prefix(r1, "-") do
-      | None -> Err("expected '-' after year")
-      | Some(r2) ->
+      None -> Err("expected '-' after year")
+      Some(r2) ->
         match parse_digits(r2, 2) do
-        | None -> Err("expected 2-digit month")
-        | Some((m, r3)) ->
+        None -> Err("expected 2-digit month")
+        Some((m, r3)) ->
           match expect_prefix(r3, "-") do
-          | None -> Err("expected '-' after month")
-          | Some(r4) ->
+          None -> Err("expected '-' after month")
+          Some(r4) ->
             match parse_digits(r4, 2) do
-            | None -> Err("expected 2-digit day")
-            | Some((d, r5)) ->
+            None -> Err("expected 2-digit day")
+            Some((d, r5)) ->
               if string_is_empty(r5) do
                 Ok(DateTime(Date(y, m, d), Time(0, 0, 0)))
               else
                 match expect_prefix(r5, " ") do
-                | None -> Err("expected ' ' or end after date")
-                | Some(r6) ->
+                None -> Err("expected ' ' or end after date")
+                Some(r6) ->
                   match parse_digits(r6, 2) do
-                  | None -> Err("expected 2-digit hour")
-                  | Some((h, r7)) ->
+                  None -> Err("expected 2-digit hour")
+                  Some((h, r7)) ->
                     match expect_prefix(r7, ":") do
-                    | None -> Err("expected ':' after hour")
-                    | Some(r8) ->
+                    None -> Err("expected ':' after hour")
+                    Some(r8) ->
                       match parse_digits(r8, 2) do
-                      | None -> Err("expected 2-digit minute")
-                      | Some((mi, r9)) ->
+                      None -> Err("expected 2-digit minute")
+                      Some((mi, r9)) ->
                         match expect_prefix(r9, ":") do
-                        | None -> Err("expected ':' after minute")
-                        | Some(r10) ->
+                        None -> Err("expected ':' after minute")
+                        Some(r10) ->
                           match parse_digits(r10, 2) do
-                          | None -> Err("expected 2-digit second")
-                          | Some((sc, _)) ->
+                          None -> Err("expected 2-digit second")
+                          Some((sc, _)) ->
                             Ok(DateTime(Date(y, m, d), Time(h, mi, sc)))
                           end
                         end

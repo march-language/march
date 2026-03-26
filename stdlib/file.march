@@ -22,15 +22,15 @@ end
 
 fn read_lines(path) do
   match file_read(path) do
-  | Err(e) -> Err(e)
-  | Ok(s) -> do
+  Err(e) -> Err(e)
+  Ok(s) -> do
     let lines = String.split(s, "\n")
     -- Strip all trailing empty strings (from trailing newlines)
     fn strip_trailing(xs) do
       match List.reverse(xs) do
-      | Nil -> Nil
-      | Cons("", rest) -> strip_trailing(List.reverse(rest))
-      | ig -> xs
+      Nil -> Nil
+      Cons("", rest) -> strip_trailing(List.reverse(rest))
+      ig -> xs
       end
     end
     Ok(strip_trailing(lines))
@@ -66,12 +66,12 @@ ptype Seq(a) = Seq(a)
 -- empty results on the second pass.
 fn with_lines(path, callback) do
   match file_open(path) do
-  | Err(e) -> Err(e)
-  | Ok(fd) -> do
+  Err(e) -> Err(e)
+  Ok(fd) -> do
     fn do_lines(a, f) do
       match file_read_line(fd) do
-      | None -> a
-      | Some(line) -> do_lines(f(a, line), f)
+      None -> a
+      Some(line) -> do_lines(f(a, line), f)
       end
     end
     let seq = Seq(fn(acc, f) -> do_lines(acc, f))
@@ -84,12 +84,12 @@ end
 
 fn with_chunks(path, size, callback) do
   match file_open(path) do
-  | Err(e) -> Err(e)
-  | Ok(fd) -> do
+  Err(e) -> Err(e)
+  Ok(fd) -> do
     fn do_chunks(a, f) do
       match file_read_chunk(fd, size) do
-      | None -> a
-      | Some(chunk) -> do_chunks(f(a, chunk), f)
+      None -> a
+      Some(chunk) -> do_chunks(f(a, chunk), f)
       end
     end
     let seq = Seq(fn(acc, f) -> do_chunks(acc, f))
@@ -105,8 +105,8 @@ end
 -- Internal helper: recursively reads lines. Used by each_line.
 pfn each_line_loop(fd, f) do
   match file_read_line(fd) do
-  | None -> :ok
-  | Some(line) -> do
+  None -> :ok
+  Some(line) -> do
     f(line)
     each_line_loop(fd, f)
   end
@@ -115,8 +115,8 @@ end
 
 fn each_line(path, f) do
   match file_open(path) do
-  | Err(e) -> Err(e)
-  | Ok(fd) -> do
+  Err(e) -> Err(e)
+  Ok(fd) -> do
     each_line_loop(fd, f)
     file_close(fd)
     Ok(:ok)
@@ -127,8 +127,8 @@ end
 -- Internal helper: recursively reads chunks. Used by each_chunk.
 pfn each_chunk_loop(fd, size, f) do
   match file_read_chunk(fd, size) do
-  | None -> :ok
-  | Some(chunk) -> do
+  None -> :ok
+  Some(chunk) -> do
     f(chunk)
     each_chunk_loop(fd, size, f)
   end
@@ -137,8 +137,8 @@ end
 
 fn each_chunk(path, size, f) do
   match file_open(path) do
-  | Err(e) -> Err(e)
-  | Ok(fd) -> do
+  Err(e) -> Err(e)
+  Ok(fd) -> do
     each_chunk_loop(fd, size, f)
     file_close(fd)
     Ok(:ok)

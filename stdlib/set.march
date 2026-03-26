@@ -35,8 +35,8 @@ ptype Set(a) = HamtSet(HEntry(a))
 pfn lst_rev(lst) do
   fn go(xs, acc) do
     match xs do
-    | Nil -> acc
-    | Cons(h, t) -> go(t, Cons(h, acc))
+    Nil -> acc
+    Cons(h, t) -> go(t, Cons(h, acc))
     end
   end
   go(lst, Nil)
@@ -77,15 +77,15 @@ end
 pfn list_insert_at(lst, idx, elem) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
-    | Nil -> ys
-    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    Nil -> ys
+    Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
   fn go(xs, i, acc) do
     if i == 0 do rev_onto(acc, Cons(elem, xs))
     else match xs do
-      | Nil        -> rev_onto(acc, Cons(elem, Nil))
-      | Cons(h, t) -> go(t, i - 1, Cons(h, acc))
+      Nil        -> rev_onto(acc, Cons(elem, Nil))
+      Cons(h, t) -> go(t, i - 1, Cons(h, acc))
       end end
   end
   go(lst, idx, Nil)
@@ -94,14 +94,14 @@ end
 pfn list_replace_at(lst, idx, elem) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
-    | Nil -> ys
-    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    Nil -> ys
+    Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
   fn go(xs, i, acc) do
     match xs do
-    | Nil -> rev_onto(acc, Nil)
-    | Cons(h, t) -> do
+    Nil -> rev_onto(acc, Nil)
+    Cons(h, t) -> do
       if i == 0 do rev_onto(acc, Cons(elem, t))
       else go(t, i - 1, Cons(h, acc)) end
     end
@@ -113,14 +113,14 @@ end
 pfn list_delete_at(lst, idx) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
-    | Nil -> ys
-    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    Nil -> ys
+    Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
   fn go(xs, i, acc) do
     match xs do
-    | Nil -> rev_onto(acc, Nil)
-    | Cons(h, t) -> do
+    Nil -> rev_onto(acc, Nil)
+    Cons(h, t) -> do
       if i == 0 do rev_onto(acc, t)
       else go(t, i - 1, Cons(h, acc)) end
     end
@@ -131,16 +131,16 @@ end
 
 pfn list_nth_safe(lst, n) do
   match lst do
-  | Nil -> panic("Set: HAMT node index out of range")
-  | Cons(h, t) ->
+  Nil -> panic("Set: HAMT node index out of range")
+  Cons(h, t) ->
     if n == 0 do h else list_nth_safe(t, n - 1) end
   end
 end
 
 pfn coll_has(elems, x, eq) do
   match elems do
-  | Nil -> false
-  | Cons(e, rest) ->
+  Nil -> false
+  Cons(e, rest) ->
     if eq(e, x) do true else coll_has(rest, x, eq) end
   end
 end
@@ -153,14 +153,14 @@ end
 pfn coll_remove_elem(elems, x, eq) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
-    | Nil -> ys
-    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    Nil -> ys
+    Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
   fn go(es, acc) do
     match es do
-    | Nil -> rev_onto(acc, Nil)
-    | Cons(e, rest) -> do
+    Nil -> rev_onto(acc, Nil)
+    Cons(e, rest) -> do
       if eq(e, x) do rev_onto(acc, rest)
       else go(rest, Cons(e, acc)) end
     end
@@ -173,12 +173,12 @@ end
 
 pfn node_contains(node, x, h, eq, level) do
   match node do
-  | HEmpty -> false
-  | HLeaf(lh, lx) ->
+  HEmpty -> false
+  HLeaf(lh, lx) ->
     lh == h && eq(lx, x)
-  | HCollision(ch, elems) ->
+  HCollision(ch, elems) ->
     ch == h && coll_has(elems, x, eq)
-  | HBranch(bitmap, children) -> do
+  HBranch(bitmap, children) -> do
     let slot = hash_slot(h, level)
     if bitmap_has(bitmap, slot) do
       let idx = bitmap_rank(bitmap, slot)
@@ -192,8 +192,8 @@ end
 pfn make_branch(h1, x1, h2, x2, level) do
   fn apply_slots(node, slots) do
     match slots do
-    | Nil -> node
-    | Cons(s, rest) ->
+    Nil -> node
+    Cons(s, rest) ->
       apply_slots(HBranch(bitmap_set(0, s), Cons(node, Nil)), rest)
     end
   end
@@ -221,8 +221,8 @@ end
 
 pfn node_insert(node, x, h, eq, level) do
   match node do
-  | HEmpty -> HLeaf(h, x)
-  | HLeaf(lh, lx) -> do
+  HEmpty -> HLeaf(h, x)
+  HLeaf(lh, lx) -> do
     if lh == h do
       if eq(lx, x) do node
       else HCollision(h, Cons(lx, Cons(x, Nil))) end
@@ -230,21 +230,21 @@ pfn node_insert(node, x, h, eq, level) do
       make_branch(lh, lx, h, x, level)
     end
   end
-  | HCollision(ch, elems) -> do
+  HCollision(ch, elems) -> do
     if ch == h do
       HCollision(ch, coll_insert_elem(elems, x, eq))
     else do
       fn expand(nd, es) do
         match es do
-        | Nil -> nd
-        | Cons(e, rest) ->
+        Nil -> nd
+        Cons(e, rest) ->
           expand(node_insert(nd, e, ch, eq, level), rest)
         end
       end
       expand(node_insert(HEmpty, x, h, eq, level), elems) end
     end
   end
-  | HBranch(bitmap, children) -> do
+  HBranch(bitmap, children) -> do
     let slot = hash_slot(h, level)
     if bitmap_has(bitmap, slot) do
       let idx = bitmap_rank(bitmap, slot)
@@ -261,42 +261,42 @@ end
 
 pfn node_remove(node, x, h, eq, level) do
   match node do
-  | HEmpty -> HEmpty
-  | HLeaf(lh, lx) ->
+  HEmpty -> HEmpty
+  HLeaf(lh, lx) ->
     if lh == h && eq(lx, x) do HEmpty else node end
-  | HCollision(ch, elems) -> do
+  HCollision(ch, elems) -> do
     if ch != h do node
     else do
       let new_elems = coll_remove_elem(elems, x, eq)
       match new_elems do
-      | Nil -> HEmpty
-      | Cons(sole, Nil) -> HLeaf(ch, sole)
-      | _ -> HCollision(ch, new_elems)
+      Nil -> HEmpty
+      Cons(sole, Nil) -> HLeaf(ch, sole)
+      _ -> HCollision(ch, new_elems)
       end end
     end
   end
-  | HBranch(bitmap, children) -> do
+  HBranch(bitmap, children) -> do
     let slot = hash_slot(h, level)
     if bitmap_has(bitmap, slot) do
       let idx = bitmap_rank(bitmap, slot)
       let child = list_nth_safe(children, idx)
       let new_child = node_remove(child, x, h, eq, level + 1)
       match new_child do
-      | HEmpty -> do
+      HEmpty -> do
         let new_bm = bitmap_clear(bitmap, slot)
         let new_children = list_delete_at(children, idx)
         match new_children do
-        | Nil -> HEmpty
-        | Cons(sole, Nil) ->
+        Nil -> HEmpty
+        Cons(sole, Nil) ->
           match sole do
-          | HLeaf(_, _) -> sole
-          | HCollision(_, _) -> sole
-          | _ -> HBranch(new_bm, new_children)
+          HLeaf(_, _) -> sole
+          HCollision(_, _) -> sole
+          _ -> HBranch(new_bm, new_children)
           end
-        | _ -> HBranch(new_bm, new_children)
+        _ -> HBranch(new_bm, new_children)
         end
       end
-      | _ ->
+      _ ->
         HBranch(bitmap, list_replace_at(children, idx, new_child))
       end
     else node end
@@ -306,22 +306,22 @@ end
 
 pfn node_fold(acc, node, f) do
   match node do
-  | HEmpty -> acc
-  | HLeaf(_, x) -> f(acc, x)
-  | HCollision(_, elems) -> do
+  HEmpty -> acc
+  HLeaf(_, x) -> f(acc, x)
+  HCollision(_, elems) -> do
     fn go(a, es) do
       match es do
-      | Nil -> a
-      | Cons(e, rest) -> go(f(a, e), rest)
+      Nil -> a
+      Cons(e, rest) -> go(f(a, e), rest)
       end
     end
     go(acc, elems)
   end
-  | HBranch(_, children) -> do
+  HBranch(_, children) -> do
     fn go(a, cs) do
       match cs do
-      | Nil -> a
-      | Cons(child, rest) ->
+      Nil -> a
+      Cons(child, rest) ->
         go(node_fold(a, child, f), rest)
       end
     end
@@ -332,22 +332,22 @@ end
 
 pfn node_size(node) do
   match node do
-  | HEmpty -> 0
-  | HLeaf(_, _) -> 1
-  | HCollision(_, elems) -> do
+  HEmpty -> 0
+  HLeaf(_, _) -> 1
+  HCollision(_, elems) -> do
     fn count(es, n) do
       match es do
-      | Nil -> n
-      | Cons(_, rest) -> count(rest, n + 1)
+      Nil -> n
+      Cons(_, rest) -> count(rest, n + 1)
       end
     end
     count(elems, 0)
   end
-  | HBranch(_, children) -> do
+  HBranch(_, children) -> do
     fn go(acc, cs) do
       match cs do
-      | Nil -> acc
-      | Cons(child, rest) -> go(acc + node_size(child), rest)
+      Nil -> acc
+      Cons(child, rest) -> go(acc + node_size(child), rest)
       end
     end
     go(0, children)
@@ -373,25 +373,25 @@ end
 doc "Returns true if the set contains no elements."
 fn is_empty(s) do
   match s do
-  | HamtSet(HEmpty) -> true
-  | _               -> false
+  HamtSet(HEmpty) -> true
+  _               -> false
   end
 end
 
 doc "Returns the number of elements in the set. O(n)."
 fn size(s) do
   match s do
-  | HamtSet(node) -> node_size(node)
+  HamtSet(node) -> node_size(node)
   end
 end
 
 doc """
 Returns true if the set contains elem.
-| cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
 fn contains(s, elem, cmp) do
   match s do
-  | HamtSet(node) -> do
+  HamtSet(node) -> do
     let h = key_hash(elem)
     let eq = fn (a, b) -> cmp_eq(cmp, a, b)
     node_contains(node, elem, h, eq, 0)
@@ -403,11 +403,11 @@ end
 
 doc """
 Inserts elem into the set. Returns the set unchanged if elem is already present.
-| cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
 fn insert(s, elem, cmp) do
   match s do
-  | HamtSet(node) -> do
+  HamtSet(node) -> do
     let h = key_hash(elem)
     let eq = fn (a, b) -> cmp_eq(cmp, a, b)
     HamtSet(node_insert(node, elem, h, eq, 0))
@@ -417,11 +417,11 @@ end
 
 doc """
 Removes elem from the set. Returns the set unchanged if elem is absent.
-| cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
 fn remove(s, elem, cmp) do
   match s do
-  | HamtSet(node) -> do
+  HamtSet(node) -> do
     let h = key_hash(elem)
     let eq = fn (a, b) -> cmp_eq(cmp, a, b)
     HamtSet(node_remove(node, elem, h, eq, 0))
@@ -433,20 +433,20 @@ end
 
 doc """
 Returns the union of two sets (all elements in either set).
-| cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
 fn union(a, b, cmp) do
   fn go(acc, x) do
     insert(acc, x, cmp)
   end
   match b do
-  | HamtSet(node) -> node_fold(a, node, go)
+  HamtSet(node) -> node_fold(a, node, go)
   end
 end
 
 doc """
 Returns the intersection of two sets (elements in both sets).
-| cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
 fn intersection(a, b, cmp) do
   fn go(acc, x) do
@@ -454,14 +454,14 @@ fn intersection(a, b, cmp) do
     else acc end
   end
   match a do
-  | HamtSet(node) ->
+  HamtSet(node) ->
     node_fold(empty(), node, go)
   end
 end
 
 doc """
 Returns elements in a that are not in b (set difference a \\ b).
-| cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
 fn difference(a, b, cmp) do
   fn go(acc, x) do
@@ -469,7 +469,7 @@ fn difference(a, b, cmp) do
     else insert(acc, x, cmp) end
   end
   match a do
-  | HamtSet(node) ->
+  HamtSet(node) ->
     node_fold(empty(), node, go)
   end
 end
@@ -480,7 +480,7 @@ fn is_subset(a, b, cmp) do
     ok && contains(b, x, cmp)
   end
   match a do
-  | HamtSet(node) ->
+  HamtSet(node) ->
     node_fold(true, node, check)
   end
 end
@@ -490,7 +490,7 @@ end
 doc "Returns all elements as a list (hash-traversal order)."
 fn to_list(s) do
   match s do
-  | HamtSet(node) -> do
+  HamtSet(node) -> do
     let acc = node_fold(Nil, node, fn (xs, x) -> Cons(x, xs))
     lst_rev(acc)
   end
@@ -499,13 +499,13 @@ end
 
 doc """
 Builds a set from a list of elements.
-| cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
 fn from_list(xs, cmp) do
   fn go(lst, acc) do
     match lst do
-    | Nil -> acc
-    | Cons(x, rest) -> go(rest, insert(acc, x, cmp))
+    Nil -> acc
+    Cons(x, rest) -> go(rest, insert(acc, x, cmp))
     end
   end
   go(xs, empty())
@@ -516,14 +516,14 @@ Left fold over all elements. f(acc)(elem) = new_acc.
 """
 fn fold(acc, s, f) do
   match s do
-  | HamtSet(node) ->
+  HamtSet(node) ->
     node_fold(acc, node, f)
   end
 end
 
 doc """
 Returns true if the two sets contain the same elements.
-| cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
 """
 fn eq(a, b, cmp) do
   let sa = size(a)
@@ -534,7 +534,7 @@ fn eq(a, b, cmp) do
       ok && contains(b, x, cmp)
     end
     match a do
-    | HamtSet(node) ->
+    HamtSet(node) ->
       node_fold(true, node, check)
     end end
   end

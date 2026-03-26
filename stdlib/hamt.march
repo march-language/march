@@ -78,15 +78,15 @@ end
 pfn list_insert_at(lst, idx, elem) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
-    | Nil -> ys
-    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    Nil -> ys
+    Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
   fn go(xs, i, acc) do
     if i == 0 do rev_onto(acc, Cons(elem, xs))
     else match xs do
-      | Nil        -> rev_onto(acc, Cons(elem, Nil))
-      | Cons(h, t) -> go(t, i - 1, Cons(h, acc))
+      Nil        -> rev_onto(acc, Cons(elem, Nil))
+      Cons(h, t) -> go(t, i - 1, Cons(h, acc))
       end end
   end
   go(lst, idx, Nil)
@@ -95,14 +95,14 @@ end
 pfn list_replace_at(lst, idx, elem) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
-    | Nil -> ys
-    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    Nil -> ys
+    Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
   fn go(xs, i, acc) do
     match xs do
-    | Nil -> rev_onto(acc, Nil)
-    | Cons(h, t) -> do
+    Nil -> rev_onto(acc, Nil)
+    Cons(h, t) -> do
       if i == 0 do rev_onto(acc, Cons(elem, t))
       else go(t, i - 1, Cons(h, acc)) end
     end
@@ -114,14 +114,14 @@ end
 pfn list_delete_at(lst, idx) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
-    | Nil -> ys
-    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    Nil -> ys
+    Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
   fn go(xs, i, acc) do
     match xs do
-    | Nil -> rev_onto(acc, Nil)
-    | Cons(h, t) -> do
+    Nil -> rev_onto(acc, Nil)
+    Cons(h, t) -> do
       if i == 0 do rev_onto(acc, t)
       else go(t, i - 1, Cons(h, acc)) end
     end
@@ -134,8 +134,8 @@ end
 
 pfn collision_find(pairs, key, eq) do
   match pairs do
-  | Nil -> None
-  | Cons(pair, rest) -> do
+  Nil -> None
+  Cons(pair, rest) -> do
     let (k, v) = pair
     if eq(k, key) do Some(v)
     else collision_find(rest, key, eq) end
@@ -146,14 +146,14 @@ end
 pfn collision_insert(pairs, key, val, eq) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
-    | Nil -> ys
-    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    Nil -> ys
+    Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
   fn go(ps, acc) do
     match ps do
-    | Nil -> rev_onto(acc, Cons((key, val), Nil))
-    | Cons(pair, rest) -> do
+    Nil -> rev_onto(acc, Cons((key, val), Nil))
+    Cons(pair, rest) -> do
       let (k, v) = pair
       if eq(k, key) do rev_onto(acc, Cons((key, val), rest))
       else go(rest, Cons(pair, acc)) end
@@ -166,14 +166,14 @@ end
 pfn collision_remove(pairs, key, eq) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
-    | Nil -> ys
-    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    Nil -> ys
+    Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
   fn go(ps, acc) do
     match ps do
-    | Nil -> rev_onto(acc, Nil)
-    | Cons(pair, rest) -> do
+    Nil -> rev_onto(acc, Nil)
+    Cons(pair, rest) -> do
       let (k, v) = pair
       if eq(k, key) do rev_onto(acc, rest)
       else go(rest, Cons(pair, acc)) end
@@ -189,17 +189,17 @@ end
 @[no_warn_recursion]
 pfn hamt_get(node, key, h, eq, level) do
   match node do
-  | HEmpty -> None
-  | HLeaf(lh, lk, lv) -> do
+  HEmpty -> None
+  HLeaf(lh, lk, lv) -> do
     if lh == h do
       if eq(lk, key) do Some(lv) else None end
     else None end
   end
-  | HCollision(ch, pairs) -> do
+  HCollision(ch, pairs) -> do
     if ch == h do collision_find(pairs, key, eq)
     else None end
   end
-  | HBranch(bitmap, children) -> do
+  HBranch(bitmap, children) -> do
     let slot = hash_slot(h, level)
     if bitmap_has(bitmap, slot) do
       let idx = bitmap_rank(bitmap, slot)
@@ -214,14 +214,14 @@ end
 pfn make_branch(h1, k1, v1, h2, k2, v2, level) do
   fn rev_onto(rev_xs, ys) do
     match rev_xs do
-    | Nil -> ys
-    | Cons(h, t) -> rev_onto(t, Cons(h, ys))
+    Nil -> ys
+    Cons(h, t) -> rev_onto(t, Cons(h, ys))
     end
   end
   fn apply_slots(node, slots) do
     match slots do
-    | Nil -> node
-    | Cons(s, rest) ->
+    Nil -> node
+    Cons(s, rest) ->
       apply_slots(HBranch(bitmap_set(0, s), Cons(node, Nil)), rest)
     end
   end
@@ -251,9 +251,9 @@ end
 @[no_warn_recursion]
 pfn hamt_insert(node, key, val, h, eq, level) do
   match node do
-  | HEmpty ->
+  HEmpty ->
     HLeaf(h, key, val)
-  | HLeaf(lh, lk, lv) -> do
+  HLeaf(lh, lk, lv) -> do
     if lh == h do
       -- Same hash: replace if same key, else collision
       if eq(lk, key) do HLeaf(h, key, val)
@@ -263,7 +263,7 @@ pfn hamt_insert(node, key, val, h, eq, level) do
       make_branch(lh, lk, lv, h, key, val, level)
     end
   end
-  | HCollision(ch, pairs) -> do
+  HCollision(ch, pairs) -> do
     if ch == h do
       HCollision(ch, collision_insert(pairs, key, val, eq))
     else do
@@ -273,8 +273,8 @@ pfn hamt_insert(node, key, val, h, eq, level) do
       -- We first insert the new key, then re-insert every collision pair.
       fn coll_expand(nd, ps) do
         match ps do
-        | Nil -> nd
-        | Cons(pair, rest) -> do
+        Nil -> nd
+        Cons(pair, rest) -> do
           let (ck, cv) = pair
           coll_expand(hamt_insert(nd, ck, cv, ch, eq, level), rest)
         end
@@ -284,7 +284,7 @@ pfn hamt_insert(node, key, val, h, eq, level) do
       coll_expand(base, pairs) end
     end
   end
-  | HBranch(bitmap, children) -> do
+  HBranch(bitmap, children) -> do
     let slot = hash_slot(h, level)
     if bitmap_has(bitmap, slot) do
       let idx = bitmap_rank(bitmap, slot)
@@ -304,49 +304,49 @@ end
 @[no_warn_recursion]
 pfn hamt_remove(node, key, h, eq, level) do
   match node do
-  | HEmpty -> HEmpty
-  | HLeaf(lh, lk, lv) -> do
+  HEmpty -> HEmpty
+  HLeaf(lh, lk, lv) -> do
     if lh == h do
       if eq(lk, key) do HEmpty else node end
     else node end
   end
-  | HCollision(ch, pairs) -> do
+  HCollision(ch, pairs) -> do
     if ch != h do node
     else do
       let new_pairs = collision_remove(pairs, key, eq)
       match new_pairs do
-      | Nil -> HEmpty
-      | Cons(sole, Nil) -> do
+      Nil -> HEmpty
+      Cons(sole, Nil) -> do
         let (ok, ov) = sole
         HLeaf(ch, ok, ov)
       end
-      | _ -> HCollision(ch, new_pairs)
+      _ -> HCollision(ch, new_pairs)
       end end
     end
   end
-  | HBranch(bitmap, children) -> do
+  HBranch(bitmap, children) -> do
     let slot = hash_slot(h, level)
     if bitmap_has(bitmap, slot) do
       let idx = bitmap_rank(bitmap, slot)
       let child = List.nth(children, idx)
       let new_child = hamt_remove(child, key, h, eq, level + 1)
       match new_child do
-      | HEmpty -> do
+      HEmpty -> do
         let new_bm = bitmap_clear(bitmap, slot)
         let new_children = list_delete_at(children, idx)
         match new_children do
-        | Nil -> HEmpty
-        | Cons(sole, Nil) ->
+        Nil -> HEmpty
+        Cons(sole, Nil) ->
           -- If the sole child is a leaf or collision, inline it up
           match sole do
-          | HLeaf(_, _, _) -> sole
-          | HCollision(_, _) -> sole
-          | _ -> HBranch(new_bm, new_children)
+          HLeaf(_, _, _) -> sole
+          HCollision(_, _) -> sole
+          _ -> HBranch(new_bm, new_children)
           end
-        | _ -> HBranch(new_bm, new_children)
+        _ -> HBranch(new_bm, new_children)
         end
       end
-      | _ ->
+      _ ->
         HBranch(bitmap, list_replace_at(children, idx, new_child))
       end
     else node end
@@ -359,17 +359,17 @@ end
 @[no_warn_recursion]
 pfn hamt_fold(acc, node, f) do
   match node do
-  | HEmpty -> acc
-  | HLeaf(_, k, v) -> do
+  HEmpty -> acc
+  HLeaf(_, k, v) -> do
     let f1 = f(acc)
     let f2 = f1(k)
     f2(v)
   end
-  | HCollision(_, pairs) -> do
+  HCollision(_, pairs) -> do
     fn go(a, ps) do
       match ps do
-      | Nil -> a
-      | Cons(pair, rest) -> do
+      Nil -> a
+      Cons(pair, rest) -> do
         let (k, v) = pair
         let f1 = f(a)
         let f2 = f1(k)
@@ -379,11 +379,11 @@ pfn hamt_fold(acc, node, f) do
     end
     go(acc, pairs)
   end
-  | HBranch(_, children) -> do
+  HBranch(_, children) -> do
     fn go(a, cs) do
       match cs do
-      | Nil -> a
-      | Cons(child, rest) ->
+      Nil -> a
+      Cons(child, rest) ->
         go(hamt_fold(a, child, f), rest)
       end
     end
@@ -396,14 +396,14 @@ end
 @[no_warn_recursion]
 pfn hamt_size(node) do
   match node do
-  | HEmpty -> 0
-  | HLeaf(_, _, _) -> 1
-  | HCollision(_, pairs) -> length(pairs)
-  | HBranch(_, children) -> do
+  HEmpty -> 0
+  HLeaf(_, _, _) -> 1
+  HCollision(_, pairs) -> length(pairs)
+  HBranch(_, children) -> do
     fn go(acc, cs) do
       match cs do
-      | Nil -> acc
-      | Cons(child, rest) -> go(acc + hamt_size(child), rest)
+      Nil -> acc
+      Cons(child, rest) -> go(acc + hamt_size(child), rest)
       end
     end
     go(0, children)
@@ -420,8 +420,8 @@ end
 
 doc """
 Look up a key.  Returns Some(value) if found, None otherwise.
-| hash_fn  : k -> Int
-| eq_fn    : k -> k -> Bool
+hash_fn  : k -> Int
+eq_fn    : k -> k -> Bool
 """
 fn get(node, key, hash_fn, eq_fn) do
   let h = hash_fn(key)
@@ -430,8 +430,8 @@ end
 
 doc """
 Insert or update key→val.
-| hash_fn  : k -> Int
-| eq_fn    : k -> k -> Bool
+hash_fn  : k -> Int
+eq_fn    : k -> k -> Bool
 """
 fn insert(node, key, val, hash_fn, eq_fn) do
   let h = hash_fn(key)
@@ -440,8 +440,8 @@ end
 
 doc """
 Remove a key.  Returns the trie unchanged if the key is absent.
-| hash_fn  : k -> Int
-| eq_fn    : k -> k -> Bool
+hash_fn  : k -> Int
+eq_fn    : k -> k -> Bool
 """
 fn remove(node, key, hash_fn, eq_fn) do
   let h = hash_fn(key)

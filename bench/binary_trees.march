@@ -14,8 +14,8 @@ end
 
 pfn check(t : Tree) : Int do
   match t do
-  | Leaf       -> 1
-  | Node(l, r) -> check(l) + check(r) + 1
+  Leaf       -> 1
+  Node(l, r) -> check(l) + check(r) + 1
   end
 end
 

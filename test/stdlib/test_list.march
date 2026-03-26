@@ -173,7 +173,7 @@ describe "transforming" do
 
   test "map over empty list gives empty list" do
     let empty : List(Int) = Nil
-    | assert List.is_empty(List.map(empty, fn x -> x + 1))
+    assert List.is_empty(List.map(empty, fn x -> x + 1))
   end
 
   test "flat_map expands each element" do
@@ -199,7 +199,7 @@ describe "transforming" do
 
   test "filter on empty list gives empty list" do
     let empty : List(Int) = Nil
-    | assert List.is_empty(List.filter(empty, fn x -> x > 0))
+    assert List.is_empty(List.filter(empty, fn x -> x > 0))
   end
 
   test "filter_map keeps Some values" do
@@ -250,49 +250,49 @@ end
 
 describe "searching" do
   test "find returns Some when element exists" do
-    | assert Option.is_some(List.find(five(), fn x -> x == 3))
+    assert Option.is_some(List.find(five(), fn x -> x == 3))
   end
 
   test "find returns None when element is absent" do
-    | assert Option.is_none(List.find(five(), fn x -> x == 99))
+    assert Option.is_none(List.find(five(), fn x -> x == 99))
   end
 
   test "find returns correct value" do
-    | assert (Option.unwrap(List.find(five(), fn x -> x > 3)) == 4)
+    assert (Option.unwrap(List.find(five(), fn x -> x > 3)) == 4)
   end
 
   test "find_index returns correct index" do
-    | assert (Option.unwrap(List.find_index(five(), fn x -> x == 3)) == 2)
+    assert (Option.unwrap(List.find_index(five(), fn x -> x == 3)) == 2)
   end
 
   test "find_index returns None when absent" do
-    | assert Option.is_none(List.find_index(five(), fn x -> x > 100))
+    assert Option.is_none(List.find_index(five(), fn x -> x > 100))
   end
 
   test "any returns true when an element satisfies predicate" do
-    | assert List.any(five(), fn x -> x > 4)
+    assert List.any(five(), fn x -> x > 4)
   end
 
   test "any returns false when no element satisfies predicate" do
-    | assert !List.any(five(), fn x -> x > 10)
+    assert !List.any(five(), fn x -> x > 10)
   end
 
   test "any on empty list returns false" do
     let empty : List(Int) = Nil
-    | assert !List.any(empty, fn x -> x > 0)
+    assert !List.any(empty, fn x -> x > 0)
   end
 
   test "all returns true when all elements satisfy predicate" do
-    | assert List.all(five(), fn x -> x > 0)
+    assert List.all(five(), fn x -> x > 0)
   end
 
   test "all returns false when some element fails" do
-    | assert !List.all(five(), fn x -> x > 3)
+    assert !List.all(five(), fn x -> x > 3)
   end
 
   test "all on empty list returns true vacuously" do
     let empty : List(Int) = Nil
-    | assert List.all(empty, fn x -> x > 0)
+    assert List.all(empty, fn x -> x > 0)
   end
 end
 
@@ -313,7 +313,7 @@ describe "sorting" do
 
   test "sort_by empty list gives empty list" do
     let empty : List(Int) = Nil
-    | assert List.is_empty(List.sort_by(empty, fn (a, b) -> a < b))
+    assert List.is_empty(List.sort_by(empty, fn (a, b) -> a < b))
   end
 end
 
@@ -355,11 +355,11 @@ describe "splitting" do
   end
 
   test "take_while with always-false predicate gives empty" do
-    | assert List.is_empty(List.take_while(five(), fn x -> x > 10))
+    assert List.is_empty(List.take_while(five(), fn x -> x > 10))
   end
 
   test "take_while with always-true predicate gives all" do
-    | assert (List.length(List.take_while(five(), fn x -> x > 0)) == 5)
+    assert (List.length(List.take_while(five(), fn x -> x > 0)) == 5)
   end
 
   test "drop_while drops while predicate holds" do
@@ -370,7 +370,7 @@ describe "splitting" do
 
   test "split_at splits at position" do
     match List.split_at(five(), 3) do
-    | (left, right) -> do
+    (left, right) -> do
       assert (List.length(left) == 3)
       assert (List.length(right) == 2)
       assert (List.last(left) == 3)
@@ -380,8 +380,8 @@ describe "splitting" do
   end
 
   test "partition separates by predicate" do
-    | match List.partition(five(), fn x -> x % 2 == 0) do
-    | (evens, odds) -> do
+    match List.partition(five(), fn x -> x % 2 == 0) do
+    (evens, odds) -> do
       assert (List.length(evens) == 2)
       assert (List.length(odds) == 3)
       assert (List.head(evens) == 2)
@@ -416,7 +416,7 @@ describe "combining" do
     let r = List.zip(a, b)
     assert (List.length(r) == 3)
     match List.head(r) do
-    | (x, y) -> do
+    (x, y) -> do
       assert (x == 1)
       assert (y == 10)
     end
@@ -440,7 +440,7 @@ describe "combining" do
   test "unzip splits list of pairs" do
     let pairs = Cons((1, 10), Cons((2, 20), Cons((3, 30), Nil)))
     match List.unzip(pairs) do
-    | (as_, bs) -> do
+    (as_, bs) -> do
       assert (List.head(as_) == 1)
       assert (List.head(bs) == 10)
       assert (List.length(as_) == 3)
@@ -451,7 +451,7 @@ describe "combining" do
   test "enumerate pairs elements with indices" do
     let r = List.enumerate(three())
     match List.head(r) do
-    | (i, v) -> do
+    (i, v) -> do
       assert (i == 0)
       assert (v == 10)
     end

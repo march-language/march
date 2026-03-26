@@ -1,4 +1,4 @@
--- Option module: operations on Option(a) = Some(a) | None
+-- Option module: operations on Option(a) = Some(a) None
 --
 -- All functions are pure. The type Option(a) is a builtin
 -- with constructors Some and None.
@@ -16,8 +16,8 @@ Returns true if the option contains a value.
 """
 fn is_some(opt : Option(a)) : Bool do
   match opt do
-  | Some(_) -> true
-  | None    -> false
+  Some(_) -> true
+  None    -> false
   end
 end
 
@@ -32,8 +32,8 @@ Returns true if the option is None.
 """
 fn is_none(opt : Option(a)) : Bool do
   match opt do
-  | None    -> true
-  | Some(_) -> false
+  None    -> true
+  Some(_) -> false
   end
 end
 
@@ -43,8 +43,8 @@ Use when you are certain the option is Some.
 """
 fn expect(opt : Option(a), msg : String) : a do
   match opt do
-  | Some(x) -> x
-  | None    -> panic(msg)
+  Some(x) -> x
+  None    -> panic(msg)
   end
 end
 
@@ -59,8 +59,8 @@ Extracts the value from Some(x), panicking if None.
 """
 fn unwrap(opt : Option(a)) : a do
   match opt do
-  | Some(x) -> x
-  | None    -> panic("Option.unwrap called on None")
+  Some(x) -> x
+  None    -> panic("Option.unwrap called on None")
   end
 end
 
@@ -75,59 +75,59 @@ Returns the contained value, or `default` if None.
 """
 fn unwrap_or(opt : Option(a), default : a) : a do
   match opt do
-  | Some(x) -> x
-  | None    -> default
+  Some(x) -> x
+  None    -> default
   end
 end
 
 doc "Returns the contained value, or calls `f` to produce a default."
 fn unwrap_or_else(opt : Option(a), f : () -> a) : a do
   match opt do
-  | Some(x) -> x
-  | None    -> f(())
+  Some(x) -> x
+  None    -> f(())
   end
 end
 
 doc "Applies `f` to the contained value, or returns None."
 fn map(opt : Option(a), f : a -> b) : Option(b) do
   match opt do
-  | Some(x) -> Some(f(x))
-  | None    -> None
+  Some(x) -> Some(f(x))
+  None    -> None
   end
 end
 
 doc "Applies `f` (which itself returns an Option) and flattens the result."
 fn flat_map(opt : Option(a), f : a -> Option(b)) : Option(b) do
   match opt do
-  | Some(x) -> f(x)
-  | None    -> None
+  Some(x) -> f(x)
+  None    -> None
   end
 end
 
 doc "Returns None if the value does not satisfy `pred`."
 fn filter(opt : Option(a), pred : a -> Bool) : Option(a) do
   match opt do
-  | Some(x) -> if pred(x) do Some(x) else None end
-  | None    -> None
+  Some(x) -> if pred(x) do Some(x) else None end
+  None    -> None
   end
 end
 
 doc "Returns `f()` if None, or the original Some value."
 fn or_else(opt : Option(a), f : () -> Option(a)) : Option(a) do
   match opt do
-  | Some(_) -> opt
-  | None    -> f(())
+  Some(_) -> opt
+  None    -> f(())
   end
 end
 
 doc "Combines two Options into a tuple Option, returning None if either is None."
 fn zip(a : Option(a), b : Option(b)) : Option((a, b)) do
   match a do
-  | None    -> None
-  | Some(x) -> do
+  None    -> None
+  Some(x) -> do
     match b do
-    | None    -> None
-    | Some(y) -> Some((x, y))
+    None    -> None
+    Some(y) -> Some((x, y))
     end
   end
   end
@@ -136,16 +136,16 @@ end
 doc "Converts Option(a) to Result(a, e) using the provided error value."
 fn to_result(opt : Option(a), err : e) : Result(a, e) do
   match opt do
-  | Some(x) -> Ok(x)
-  | None    -> Err(err)
+  Some(x) -> Ok(x)
+  None    -> Err(err)
   end
 end
 
 doc "Converts Option(a) to a List: Some(x) becomes [x], None becomes []."
 fn to_list(opt : Option(a)) : List(a) do
   match opt do
-  | Some(x) -> Cons(x, Nil)
-  | None    -> Nil
+  Some(x) -> Cons(x, Nil)
+  None    -> Nil
   end
 end
 

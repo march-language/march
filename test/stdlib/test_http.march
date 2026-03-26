@@ -242,8 +242,8 @@ end
 describe "Http URL parsing" do
   test "parse http url" do
     let req = match Http.parse_url("http://example.com/path") do
-      | Ok(r)  -> r
-      | Err(_) -> panic("parse http url: expected Ok")
+      Ok(r)  -> r
+      Err(_) -> panic("parse http url: expected Ok")
     end
     assert (Http.host(req) == "example.com")
     assert (Http.path(req) == "/path")
@@ -252,8 +252,8 @@ describe "Http URL parsing" do
 
   test "parse https url" do
     let req = match Http.parse_url("https://api.example.com/v1") do
-      | Ok(r)  -> r
-      | Err(_) -> panic("parse https url: expected Ok")
+      Ok(r)  -> r
+      Err(_) -> panic("parse https url: expected Ok")
     end
     assert (Http.host(req) == "api.example.com")
     assert (Http.path(req) == "/v1")
@@ -261,8 +261,8 @@ describe "Http URL parsing" do
 
   test "parse url with port" do
     let req = match Http.parse_url("http://localhost:3000/hello") do
-      | Ok(r)  -> r
-      | Err(_) -> panic("parse url with port: expected Ok")
+      Ok(r)  -> r
+      Err(_) -> panic("parse url with port: expected Ok")
     end
     assert (Http.host(req) == "localhost")
     assert (Http.port(req) == Some(3000))
@@ -270,8 +270,8 @@ describe "Http URL parsing" do
 
   test "parse url with query string" do
     let req = match Http.parse_url("http://example.com/search?q=march&limit=10") do
-      | Ok(r)  -> r
-      | Err(_) -> panic("parse url with query: expected Ok")
+      Ok(r)  -> r
+      Err(_) -> panic("parse url with query: expected Ok")
     end
     assert (Http.path(req) == "/search")
     assert (Http.query(req) == Some("q=march&limit=10"))
@@ -279,15 +279,15 @@ describe "Http URL parsing" do
 
   test "invalid scheme returns Err" do
     match Http.parse_url("ftp://example.com") do
-    | Err(_) -> ()
-    | Ok(_)  -> assert false
+    Err(_) -> ()
+    Ok(_)  -> assert false
     end
   end
 
   test "missing host returns Err" do
     match Http.parse_url("http:///path") do
-    | Err(_) -> ()
-    | Ok(_)  -> assert false
+    Err(_) -> ()
+    Ok(_)  -> assert false
     end
   end
 end
@@ -295,16 +295,16 @@ end
 describe "Http convenience constructors" do
   test "Http.get creates GET request" do
     let req = match Http.get("http://example.com/") do
-      | Ok(r)  -> r
-      | Err(_) -> panic("Http.get: expected Ok")
+      Ok(r)  -> r
+      Err(_) -> panic("Http.get: expected Ok")
     end
     assert (Http.method_to_string(Http.method(req)) == "GET")
   end
 
   test "Http.post creates POST with body" do
     let req = match Http.post("http://example.com/", "payload") do
-      | Ok(r)  -> r
-      | Err(_) -> panic("Http.post: expected Ok")
+      Ok(r)  -> r
+      Err(_) -> panic("Http.post: expected Ok")
     end
     assert (Http.method_to_string(Http.method(req)) == "POST")
     assert (Http.body(req) == "payload")
@@ -312,8 +312,8 @@ describe "Http convenience constructors" do
 
   test "Http.delete creates DELETE request" do
     let req = match Http.delete("http://example.com/res/1") do
-      | Ok(r)  -> r
-      | Err(_) -> panic("Http.delete: expected Ok")
+      Ok(r)  -> r
+      Err(_) -> panic("Http.delete: expected Ok")
     end
     assert (Http.method_to_string(Http.method(req)) == "DELETE")
   end

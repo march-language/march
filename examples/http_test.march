@@ -13,13 +13,13 @@ mod HttpTest do
 
   fn router(conn) do
     match (HttpServer.method(conn), HttpServer.path_info(conn)) do
-    | (Get, Nil) ->
+    (Get, Nil) ->
       HttpServer.text(conn, 200, "hello")
-    | (Get, Cons("ping", Nil)) ->
+    (Get, Cons("ping", Nil)) ->
       HttpServer.text(conn, 200, "pong")
-    | (Post, Cons("echo", Nil)) ->
+    (Post, Cons("echo", Nil)) ->
       HttpServer.text(conn, 200, HttpServer.req_body(conn))
-    | _ ->
+    _ ->
       HttpServer.text(conn, 404, "not found")
     end
   end
@@ -41,25 +41,25 @@ mod HttpTest do
 
     -- GET / → "hello"
     match HttpClient.get(client, "http://localhost:18080/") do
-    | Ok(resp) ->
+    Ok(resp) ->
       assert_eq("GET /", "hello", Http.response_body(resp))
-    | Err(_) ->
+    Err(_) ->
       print("[FAIL] GET / - request error")
     end
 
     -- GET /ping → "pong"
     match HttpClient.get(client, "http://localhost:18080/ping") do
-    | Ok(resp) ->
+    Ok(resp) ->
       assert_eq("GET /ping", "pong", Http.response_body(resp))
-    | Err(_) ->
+    Err(_) ->
       print("[FAIL] GET /ping - request error")
     end
 
     -- POST /echo → echoes the body
     match HttpClient.post(client, "http://localhost:18080/echo", "hello echo") do
-    | Ok(resp) ->
+    Ok(resp) ->
       assert_eq("POST /echo", "hello echo", Http.response_body(resp))
-    | Err(_) ->
+    Err(_) ->
       print("[FAIL] POST /echo - request error")
     end
 

@@ -57,45 +57,45 @@ end
 
 describe "map" do
   test "map transforms Ok value" do
-    | assert (Result.unwrap(Result.map(Ok(3), fn x -> x * 2)) == 6)
+    assert (Result.unwrap(Result.map(Ok(3), fn x -> x * 2)) == 6)
   end
 
   test "map leaves Err unchanged" do
-    | assert Result.is_err(Result.map(Err("e"), fn (x : Int) -> x + 1))
+    assert Result.is_err(Result.map(Err("e"), fn (x : Int) -> x + 1))
   end
 end
 
 describe "map_err" do
   test "map_err leaves Ok unchanged" do
-    | assert Result.is_ok(Result.map_err(Ok(10), fn (e : String) -> "mapped: " ++ e))
+    assert Result.is_ok(Result.map_err(Ok(10), fn (e : String) -> "mapped: " ++ e))
   end
 
   test "map_err transforms Err value" do
-    | assert Result.is_err(Result.map_err(Err("old"), fn e -> "new: " ++ e))
+    assert Result.is_err(Result.map_err(Err("old"), fn e -> "new: " ++ e))
   end
 end
 
 describe "flat_map" do
   test "flat_map Ok to Ok" do
-    | assert (Result.unwrap(Result.flat_map(Ok(4), fn x -> Ok(x + 1))) == 5)
+    assert (Result.unwrap(Result.flat_map(Ok(4), fn x -> Ok(x + 1))) == 5)
   end
 
   test "flat_map Ok to Err gives Err" do
-    | assert Result.is_err(Result.flat_map(Ok(1), fn (x : Int) -> Err("fail")))
+    assert Result.is_err(Result.flat_map(Ok(1), fn (x : Int) -> Err("fail")))
   end
 
   test "flat_map Err gives Err" do
-    | assert Result.is_err(Result.flat_map(Err("e"), fn (x : Int) -> Ok(x)))
+    assert Result.is_err(Result.flat_map(Err("e"), fn (x : Int) -> Ok(x)))
   end
 end
 
 describe "or_else" do
   test "or_else returns original Ok" do
-    | assert (Result.unwrap(Result.or_else(Ok(3), fn (e : String) -> Ok(99))) == 3)
+    assert (Result.unwrap(Result.or_else(Ok(3), fn (e : String) -> Ok(99))) == 3)
   end
 
   test "or_else calls function for Err" do
-    | assert (Result.unwrap(Result.or_else(Err("e"), fn _e -> Ok(7))) == 7)
+    assert (Result.unwrap(Result.or_else(Err("e"), fn _e -> Ok(7))) == 7)
   end
 end
 
@@ -103,18 +103,18 @@ describe "collect" do
   test "collect all Ok gives Ok list" do
     let results = Cons(Ok(1), Cons(Ok(2), Cons(Ok(3), Nil)))
     match Result.collect(results) do
-    | Ok(lst) -> do
+    Ok(lst) -> do
       assert (length(lst) == 3)
       assert (head(lst) == 1)
     end
-    | Err(_) -> assert false
+    Err(_) -> assert false
     end
   end
 
   test "collect empty list gives Ok empty list" do
     match Result.collect(Nil) do
-    | Ok(lst) -> assert (length(lst) == 0)
-    | Err(_) -> assert false
+    Ok(lst) -> assert (length(lst) == 0)
+    Err(_) -> assert false
     end
   end
 

@@ -133,7 +133,7 @@ describe "Flow" do
 
     test "count after filter" do
       let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Cons(4, Nil)))))
-      | assert (Flow.count(Flow.filter(s, fn x -> x > 2)) == 2)
+      assert (Flow.count(Flow.filter(s, fn x -> x > 2)) == 2)
     end
 
   end
@@ -142,17 +142,17 @@ describe "Flow" do
 
     test "find first match" do
       let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
-      | match Flow.find(s, fn x -> x > 1) do
-      | None -> panic("expected Some")
-      | Some(v) -> assert (v == 2)
+      match Flow.find(s, fn x -> x > 1) do
+      None -> panic("expected Some")
+      Some(v) -> assert (v == 2)
       end
     end
 
     test "find no match returns None" do
       let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
-      | match Flow.find(s, fn x -> x > 10) do
-      | None -> ()
-      | Some(_) -> panic("expected None")
+      match Flow.find(s, fn x -> x > 10) do
+      None -> ()
+      Some(_) -> panic("expected None")
       end
     end
 
@@ -162,22 +162,22 @@ describe "Flow" do
 
     test "any true" do
       let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
-      | assert Flow.any(s, fn x -> x > 2)
+      assert Flow.any(s, fn x -> x > 2)
     end
 
     test "any false" do
       let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
-      | assert not(Flow.any(s, fn x -> x > 10))
+      assert not(Flow.any(s, fn x -> x > 10))
     end
 
     test "all true" do
       let s = Flow.from_list(Cons(2, Cons(4, Cons(6, Nil))))
-      | assert Flow.all(s, fn x -> x % 2 == 0)
+      assert Flow.all(s, fn x -> x % 2 == 0)
     end
 
     test "all false" do
       let s = Flow.from_list(Cons(1, Cons(2, Cons(3, Nil))))
-      | assert not(Flow.all(s, fn x -> x % 2 == 0))
+      assert not(Flow.all(s, fn x -> x % 2 == 0))
     end
 
   end

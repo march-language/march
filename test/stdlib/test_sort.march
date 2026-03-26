@@ -15,7 +15,7 @@ end
 
 -- Helper to extract the first element of an (Int, Int) pair.
 pfn fst(p : (Int, Int)) : Int do
-  | match p do | (x, _) -> x end
+  match p do (x, _) -> x end
 end
 
 -- Curried pair comparator by first element: cmp(a)(b) = fst(a) <= fst(b)

@@ -22,8 +22,8 @@ ptype CsvRow = CsvEof | Row(List(String))
 -- Internal streaming loop: call callback(fields) for each row.
 pfn each_row_loop(handle, callback) do
   match csv_next_row(handle) do
-  | CsvEof -> :ok
-  | Row(fields) -> do
+  CsvEof -> :ok
+  Row(fields) -> do
     callback(fields)
     each_row_loop(handle, callback)
   end
@@ -35,8 +35,8 @@ end
 -- File is always closed after all rows or on :eof.
 fn each_row(path, delimiter, mode, callback) do
   match csv_open(path, delimiter, mode) do
-  | Err(e) -> Err(e)
-  | Ok(handle) -> do
+  Err(e) -> Err(e)
+  Ok(handle) -> do
     each_row_loop(handle, callback)
     csv_close(handle)
     Ok(:ok)
@@ -47,8 +47,8 @@ end
 -- Internal accumulator loop for read_all.
 pfn collect_loop(handle, acc) do
   match csv_next_row(handle) do
-  | CsvEof -> List.reverse(acc)
-  | Row(fields) -> collect_loop(handle, Cons(fields, acc))
+  CsvEof -> List.reverse(acc)
+  Row(fields) -> collect_loop(handle, Cons(fields, acc))
   end
 end
 
@@ -56,8 +56,8 @@ end
 -- Only for small files.
 fn read_all(path, delimiter, mode) do
   match csv_open(path, delimiter, mode) do
-  | Err(e) -> Err(e)
-  | Ok(handle) -> do
+  Err(e) -> Err(e)
+  Ok(handle) -> do
     let rows = collect_loop(handle, Nil)
     csv_close(handle)
     Ok(rows)
@@ -68,8 +68,8 @@ end
 -- Internal loop for each_row_with_header: calls callback(header, fields) per row.
 pfn with_header_loop(handle, header, callback) do
   match csv_next_row(handle) do
-  | CsvEof -> :ok
-  | Row(fields) -> do
+  CsvEof -> :ok
+  Row(fields) -> do
     callback(header, fields)
     with_header_loop(handle, header, callback)
   end
@@ -80,14 +80,14 @@ end
 -- callback receives (header : List(String), row : List(String)).
 fn each_row_with_header(path, delimiter, mode, callback) do
   match csv_open(path, delimiter, mode) do
-  | Err(e) -> Err(e)
-  | Ok(handle) -> do
+  Err(e) -> Err(e)
+  Ok(handle) -> do
     match csv_next_row(handle) do
-    | CsvEof -> do
+    CsvEof -> do
       csv_close(handle)
       Ok(:ok)
     end
-    | Row(header) -> do
+    Row(header) -> do
       with_header_loop(handle, header, callback)
       csv_close(handle)
       Ok(:ok)

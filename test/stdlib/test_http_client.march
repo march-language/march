@@ -7,7 +7,7 @@
 mod TestHttpClient do
 
 -- Local mirror of HttpClient.ErrorRecovery (private type).
-ptype ErrorRecovery = Recover(a) | Fail(b)
+ptype ErrorRecovery = Recover(a) Fail(b)
 
 pfn make_bare_req() do
   Request(Get, SchemeHttp, "example.com", None, "/", None, Nil, "")
@@ -81,8 +81,8 @@ describe "HttpClient built-in step helpers" do
   test "step_default_headers adds User-Agent and Accept" do
     let req = make_bare_req()
     let req2 = match HttpClient.step_default_headers(req) do
-      | Ok(r)  -> r
-      | Err(_) -> panic("step_default_headers: expected Ok")
+      Ok(r)  -> r
+      Err(_) -> panic("step_default_headers: expected Ok")
     end
     assert (Http.get_request_header(req2, "user-agent") == Some("march/0.1"))
     assert (Http.get_request_header(req2, "accept") == Some("*/*"))
@@ -92,8 +92,8 @@ describe "HttpClient built-in step helpers" do
     let req = make_bare_req()
     let step = HttpClient.step_bearer_auth("my-secret-token")
     let req2 = match step(req) do
-      | Ok(r)  -> r
-      | Err(_) -> panic("step_bearer_auth: expected Ok")
+      Ok(r)  -> r
+      Err(_) -> panic("step_bearer_auth: expected Ok")
     end
     assert (Http.get_request_header(req2, "authorization") == Some("Bearer my-secret-token"))
   end
@@ -102,8 +102,8 @@ describe "HttpClient built-in step helpers" do
     let req = make_bare_req()
     let step = HttpClient.step_basic_auth("user", "pass")
     let req2 = match step(req) do
-      | Ok(r)  -> r
-      | Err(_) -> panic("step_basic_auth: expected Ok")
+      Ok(r)  -> r
+      Err(_) -> panic("step_basic_auth: expected Ok")
     end
     assert (Http.get_request_header(req2, "authorization") == Some("Basic user:pass"))
   end
@@ -112,8 +112,8 @@ describe "HttpClient built-in step helpers" do
     let req = make_bare_req()
     let step = HttpClient.step_content_type("application/json")
     let req2 = match step(req) do
-      | Ok(r)  -> r
-      | Err(_) -> panic("step_content_type: expected Ok")
+      Ok(r)  -> r
+      Err(_) -> panic("step_content_type: expected Ok")
     end
     assert (Http.get_request_header(req2, "content-type") == Some("application/json"))
   end
@@ -122,8 +122,8 @@ describe "HttpClient built-in step helpers" do
     let req = make_bare_req()
     let resp = Response(Status(200), Nil, "ok")
     match HttpClient.step_raise_on_error(req, resp) do
-    | Ok(_)  -> ()
-    | Err(_) -> assert false
+    Ok(_)  -> ()
+    Err(_) -> assert false
     end
   end
 
@@ -131,8 +131,8 @@ describe "HttpClient built-in step helpers" do
     let req = make_bare_req()
     let resp = Response(Status(404), Nil, "not found")
     match HttpClient.step_raise_on_error(req, resp) do
-    | Err(_) -> ()
-    | Ok(_)  -> assert false
+    Err(_) -> ()
+    Ok(_)  -> assert false
     end
   end
 
@@ -140,8 +140,8 @@ describe "HttpClient built-in step helpers" do
     let req = make_bare_req()
     let resp = Response(Status(500), Nil, "server error")
     match HttpClient.step_raise_on_error(req, resp) do
-    | Err(_) -> ()
-    | Ok(_)  -> assert false
+    Err(_) -> ()
+    Ok(_)  -> assert false
     end
   end
 end
