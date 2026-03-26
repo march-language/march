@@ -356,7 +356,27 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
     collect_expr ~def_map ~use_map ~calls e;
     List.iter (fun (_, e2) -> collect_expr ~def_map ~use_map ~calls e2) fields
 
-  | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _) | Ast.EDbg (Some e, _)
+  | Ast.EField (base, field, _) ->
+    (* Record the qualified name in use_map so that go-to-definition and
+       find-references work for module-qualified access like File.with_lines
+       or HttpServer.req_body.  Walk the base expression to build the full
+       dot-separated prefix (handles chained access: A.B.fn). *)
+    let rec module_prefix = function
+      | Ast.EVar n            -> Some n.txt
+      | Ast.ECon (n, [], _)   -> Some n.txt
+      | Ast.EField (inner, f, _) ->
+        (match module_prefix inner with
+         | Some p -> Some (p ^ "." ^ f.txt)
+         | None   -> None)
+      | _ -> None
+    in
+    (match module_prefix base with
+     | Some prefix ->
+       Hashtbl.replace use_map field.span (prefix ^ "." ^ field.txt)
+     | None -> ());
+    collect_expr ~def_map ~use_map ~calls base
+
+  | Ast.EAnnot (e, _, _) | Ast.EDbg (Some e, _)
   | Ast.ESpawn (e, _) ->
     collect_expr ~def_map ~use_map ~calls e
 
@@ -887,12 +907,18 @@ let analyse ~filename ~src : t =
     let missing_cases_for_match scrut branches =
       if has_wildcard_pat branches then []  (* already exhaustive *)
       else begin
-        (* Look up scrutinee type *)
+        (* Look up scrutinee type — filter to user-file spans only to avoid
+           spurious matches against stdlib spans that happen to share the
+           same line/col numbers as the current file. *)
         let scrut_sp = span_of_expr scrut in
         let scrut_line = scrut_sp.Ast.start_line - 1 in
         let scrut_char = scrut_sp.Ast.start_col in
+        let is_user_span (sp : Ast.span) =
+          sp.Ast.file = filename || sp.Ast.file = "" || sp.Ast.file = "<unknown>"
+        in
         let candidates = Hashtbl.fold (fun sp ty acc ->
-            if Pos.span_contains sp ~line:scrut_line ~character:scrut_char
+            if is_user_span sp &&
+               Pos.span_contains sp ~line:scrut_line ~character:scrut_char
             then (sp, ty) :: acc else acc
           ) type_map []
         in
@@ -906,8 +932,13 @@ let analyse ~filename ~src : t =
         match ty_opt with
         | None -> []
         | Some ty ->
-          let type_name = Tc.pp_ty ty in
-          (match Hashtbl.find_opt type_ctors_map type_name with
+          (* Use the base type constructor name for the type_ctors_map lookup.
+             Tc.pp_ty renders "Option(Int)" but the map key is just "Option". *)
+          let base_type_name = match Tc.repr ty with
+            | Tc.TCon (name, _) -> name
+            | other -> Tc.pp_ty other
+          in
+          (match Hashtbl.find_opt type_ctors_map base_type_name with
            | None -> []
            | Some all_ctors ->
              let covered = List.filter_map (fun (br : Ast.branch) ->
@@ -974,27 +1005,38 @@ let analyse ~filename ~src : t =
     List.iter augment_decl user_decls;
     (* Build match_sites: use augmented data if available, else fall back to
        the span-only data from typecheck warnings *)
+    (* Extract a single missing case name from the typecheck diagnostic message
+       for a given span, as a fallback when AST analysis cannot determine it. *)
+    let diag_fallback_case sp =
+      let prefix = "Non-exhaustive pattern match — missing case: " in
+      let plen = String.length prefix in
+      List.find_map (fun (d : March_errors.Errors.diagnostic) ->
+          if d.span = sp &&
+             String.length d.message >= plen &&
+             String.sub d.message 0 plen = prefix
+          then Some (String.sub d.message plen (String.length d.message - plen))
+          else None
+        ) (March_errors.Errors.sorted errors)
+    in
     let match_sites =
       List.map (fun sp ->
           match Hashtbl.find_opt match_span_tbl sp with
           | Some (missing, ms_matched_type, ms_ctor_sigs) ->
-            { ms_span = sp; ms_missing_cases = missing; ms_matched_type; ms_ctor_sigs }
+            (* If AST analysis produced an empty missing list (e.g. the type
+               lookup failed), fall back to the diagnostic message so that the
+               quickfix still appears. *)
+            let effective_missing =
+              if missing <> [] then missing
+              else
+                match diag_fallback_case sp with
+                | Some c -> [c]
+                | None   -> []
+            in
+            { ms_span = sp; ms_missing_cases = effective_missing; ms_matched_type; ms_ctor_sigs }
           | None ->
             (* Fallback: no AST info found — use the single case from typecheck *)
-            let prefix = "Non-exhaustive pattern match — missing case: " in
-            let plen = String.length prefix in
-            let fallback_case =
-              List.find_map (fun (d : March_errors.Errors.diagnostic) ->
-                  if d.span = sp &&
-                     String.length d.message >= plen &&
-                     String.sub d.message 0 plen = prefix
-                  then
-                    Some (String.sub d.message plen (String.length d.message - plen))
-                  else None
-                ) (March_errors.Errors.sorted errors)
-            in
             { ms_span = sp;
-              ms_missing_cases = (match fallback_case with Some c -> [c] | None -> []);
+              ms_missing_cases = (match diag_fallback_case sp with Some c -> [c] | None -> []);
               ms_matched_type = None;
               ms_ctor_sigs = [] }
         ) match_site_spans
@@ -1308,8 +1350,14 @@ let rec unwrap_arrows (ty : Tc.ty) : string list * string =
   | _                       -> ([], Tc.pp_ty ty)
 
 let type_at (a : t) ~line ~character : string option =
+  (* Only consider spans from the current file — the type_map is shared with
+     stdlib declarations whose spans have the same line/col numbers as user
+     code, causing false matches if we don't filter by file. *)
+  let is_user_span (sp : Ast.span) =
+    sp.Ast.file = a.filename || sp.Ast.file = "" || sp.Ast.file = "<unknown>"
+  in
   let candidates = Hashtbl.fold (fun sp ty acc ->
-      if Pos.span_contains sp ~line ~character then (sp, ty) :: acc
+      if is_user_span sp && Pos.span_contains sp ~line ~character then (sp, ty) :: acc
       else acc
     ) a.type_map []
   in
