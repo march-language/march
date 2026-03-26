@@ -77,14 +77,16 @@ fn print_list(lst : List(Int)) : Unit do
   print("[")
   match lst do
   Nil -> ()
-  Cons(h, t) ->
+  Cons(h, t) -> do
     print(int_to_string(h))
     match t do
     Nil -> ()
-    _   ->
+    _   -> do
       print(", ")
       print_list_tail(t)
     end
+    end
+  end
   end
   print("]")
 end
@@ -92,14 +94,16 @@ end
 fn print_list_tail(lst : List(Int)) : Unit do
   match lst do
   Nil        -> ()
-  Cons(h, t) ->
+  Cons(h, t) -> do
     print(int_to_string(h))
     match t do
     Nil -> ()
-    _   ->
+    _   -> do
       print(", ")
       print_list_tail(t)
     end
+    end
+  end
   end
 end
 

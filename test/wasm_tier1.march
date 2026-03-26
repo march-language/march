@@ -7,8 +7,8 @@ mod WasmTier1 do
 fn add(a, b) do a + b end
 
 fn fib(n) do
-  if n <= 1 do n end
-  else fib(n - 1) + fib(n - 2)
+  if n <= 1 do n
+  else fib(n - 1) + fib(n - 2) end
 end
 
 -- Closures / higher-order functions
@@ -21,21 +21,21 @@ type Shape = Circle(Float) | Rect(Float, Float)
 
 fn area(s) do
   match s do
-  | Circle(r) -> 3.14159 *. r *. r
-  | Rect(w, h) -> w *. h
+  Circle(r) -> 3.14159 *. r *. r
+  Rect(w, h) -> w *. h
   end
 end
 
 -- Option chaining
 fn safe_div(a, b) do
-  if b == 0 do None end
-  else Some(a / b)
+  if b == 0 do None
+  else Some(a / b) end
 end
 
 fn unwrap_or(opt, default) do
   match opt do
-  | None    -> default
-  | Some(v) -> v
+  None    -> default
+  Some(v) -> v
   end
 end
 
@@ -45,8 +45,8 @@ fn greet(name) do "Hello, " ++ name ++ "!" end
 -- Recursive sum via list (exercises RC)
 fn sum_list(lst) do
   match lst do
-  | Nil        -> 0
-  | Cons(h, t) -> h + sum_list(t)
+  Nil        -> 0
+  Cons(h, t) -> h + sum_list(t)
   end
 end
 

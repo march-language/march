@@ -71,7 +71,7 @@ end
 
 fn run_with_logging(cap : Cap(IO.Console), items : List(Int), label : String) : Unit do
   if is_nil(items) do println(label ++ ": empty")
-  else print_result(cap, label ++ " first", head(items))
+  else print_result(cap, label ++ " first", head(items)) end
 end
 
 -- ─── Main — receives the root capability from the runtime ─────────────────

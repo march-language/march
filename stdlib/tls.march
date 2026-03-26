@@ -183,7 +183,7 @@ mod Tls do
   """
   fn connect(fd, ctx, hostname) do
     match ctx do
-    | TlsCtx(h) ->
+    TlsCtx(h) ->
       match tls_connect(fd, h, hostname) do
       Err(msg) -> Err(TlsHandshakeFailed(msg))
       Ok(ssl)  -> Ok(TlsConn(ssl))
@@ -197,7 +197,7 @@ mod Tls do
   """
   fn accept(fd, ctx) do
     match ctx do
-    | TlsCtx(h) ->
+    TlsCtx(h) ->
       match tls_accept(fd, h) do
       Err(msg) -> Err(TlsHandshakeFailed(msg))
       Ok(ssl)  -> Ok(TlsConn(ssl))
@@ -213,7 +213,7 @@ mod Tls do
   """
   fn read(conn, max_bytes) do
     match conn do
-    | TlsConn(h) ->
+    TlsConn(h) ->
       match tls_read(h, max_bytes) do
       Err(msg) -> Err(TlsReadError(msg))
       Ok(data) -> Ok(data)
@@ -227,7 +227,7 @@ mod Tls do
   """
   fn write(conn, data) do
     match conn do
-    | TlsConn(h) ->
+    TlsConn(h) ->
       match tls_write(h, data) do
       Err(msg) -> Err(TlsWriteError(msg))
       Ok(n)    -> Ok(n)

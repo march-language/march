@@ -35,8 +35,8 @@ pfn make_frame(n : Int) : DataFrame do
     if i < 0 do acc else gen_values(i - 1, Cons(int_to_float(i % 100), acc)) end
   end
   fn gen_cats(i : Int, acc : List(String)) : List(String) do
-    if i < 0 do acc end
-    else gen_cats(i - 1, Cons("cat_" ++ int_to_string(i % 5), acc))
+    if i < 0 do acc
+    else gen_cats(i - 1, Cons("cat_" ++ int_to_string(i % 5), acc)) end
   end
   let ids  = gen_ids(n - 1, Nil)
   let vals = gen_values(n - 1, Nil)

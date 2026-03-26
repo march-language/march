@@ -92,8 +92,8 @@ pfn str_cmp(a) do fn b -> a < b end
 pfn list_len_pr(lst) do
   fn go(xs, acc) do
     match xs do
-    | Nil -> acc
-    | Cons(_, t) -> go(t, acc + 1)
+    Nil -> acc
+    Cons(_, t) -> go(t, acc + 1)
     end
   end
   go(lst, 0)
@@ -101,20 +101,20 @@ end
 
 pfn list_remove_meta(lst, pid) do
   match lst do
-  | Nil -> Nil
-  | Cons(m, rest) ->
-    if meta_pid(m) == pid do list_remove_meta(rest, pid) end
-    else Cons(m, list_remove_meta(rest, pid))
+  Nil -> Nil
+  Cons(m, rest) ->
+    if meta_pid(m) == pid do list_remove_meta(rest, pid)
+    else Cons(m, list_remove_meta(rest, pid)) end
   end
 end
 
 -- Get or create the inner Map(key, PresenceEntry) for a topic.
 pfn get_topic_map(pst, topic) do
   match pst do
-  | PresenceState(outer) ->
+  PresenceState(outer) ->
     match Map.get(outer, topic, str_cmp) do
-    | Some(inner) -> inner
-    | None        -> Map.empty()
+    Some(inner) -> inner
+    None        -> Map.empty()
     end
   end
 end
@@ -128,13 +128,13 @@ Multiple calls with different pids add multiple entries (multi-device support).
 """
 fn track_state(pst, topic, key, pid, meta_json) do
   match pst do
-  | PresenceState(outer) ->
+  PresenceState(outer) ->
     do
       let inner    = get_topic_map(pst, topic)
       let new_meta = PresenceMeta(pid, meta_json)
       let entry    = match Map.get(inner, key, str_cmp) do
-        | Some(PresenceEntry(metas)) -> PresenceEntry(Cons(new_meta, metas))
-        | None                       -> PresenceEntry(Cons(new_meta, Nil))
+        Some(PresenceEntry(metas)) -> PresenceEntry(Cons(new_meta, metas))
+        None                       -> PresenceEntry(Cons(new_meta, Nil))
       end
       let new_inner = Map.insert(inner, key, entry, str_cmp)
       PresenceState(Map.insert(outer, topic, new_inner, str_cmp))
@@ -151,17 +151,17 @@ Returns the updated state.
 """
 fn untrack_state(pst, topic, key, pid) do
   match pst do
-  | PresenceState(outer) ->
+  PresenceState(outer) ->
     do
       let inner = get_topic_map(pst, topic)
       match Map.get(inner, key, str_cmp) do
-      | None -> pst
-      | Some(PresenceEntry(metas)) ->
+      None -> pst
+      Some(PresenceEntry(metas)) ->
         do
           let trimmed = list_remove_meta(metas, pid)
           let new_inner = match trimmed do
-            | Nil -> Map.remove(inner, key, str_cmp)
-            | _   -> Map.insert(inner, key, PresenceEntry(trimmed), str_cmp)
+            Nil -> Map.remove(inner, key, str_cmp)
+            _   -> Map.insert(inner, key, PresenceEntry(trimmed), str_cmp)
           end
           PresenceState(Map.insert(outer, topic, new_inner, str_cmp))
         end
@@ -178,10 +178,10 @@ Empty map if no one is present.
 """
 fn list_state(pst, topic) do
   match pst do
-  | PresenceState(outer) ->
+  PresenceState(outer) ->
     match Map.get(outer, topic, str_cmp) do
-    | Some(inner) -> inner
-    | None        -> Map.empty()
+    Some(inner) -> inner
+    None        -> Map.empty()
     end
   end
 end
@@ -199,8 +199,8 @@ True when `key` has at least one active presence on `topic`.
 fn is_present(pst, topic, key) do
   let inner = list_state(pst, topic)
   match Map.get(inner, key, str_cmp) do
-  | Some(_) -> true
-  | None    -> false
+  Some(_) -> true
+  None    -> false
   end
 end
 
@@ -211,8 +211,8 @@ Useful for multi-device detection (> 1 means multiple devices).
 fn connection_count(pst, topic, key) do
   let inner = list_state(pst, topic)
   match Map.get(inner, key, str_cmp) do
-  | Some(entry) -> entry_count(entry)
-  | None        -> 0
+  Some(entry) -> entry_count(entry)
+  None        -> 0
   end
 end
 

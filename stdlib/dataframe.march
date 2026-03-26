@@ -862,14 +862,17 @@ fn add_column(df : DataFrame, col : Column) : Result(DataFrame, String) do
     let n = row_count(df)
     let new_len = col_len(col)
     let exists = List.any(cols, fn c -> col_name(c) == col_name(col))
-    if exists then
+    if exists do
       Err("DataFrame.add_column: column '" ++ col_name(col) ++ "' already exists")
-    else if n > 0 && new_len != n then
-      Err("DataFrame.add_column: column has length " ++ int_to_string(new_len)
-          ++ ", expected " ++ int_to_string(n))
     else
-      Ok(DataFrame(List.append(cols, Cons(col, Nil))))
+      if n > 0 && new_len != n do
+        Err("DataFrame.add_column: column has length " ++ int_to_string(new_len)
+            ++ ", expected " ++ int_to_string(n))
+      else
+        Ok(DataFrame(List.append(cols, Cons(col, Nil))))
+      end
     end
+  end
   end
 end
 
@@ -887,14 +890,17 @@ fn rename_column(df : DataFrame, old_name : String, new_name : String) : Result(
   DataFrame(cols) -> do
     let found = List.any(cols, fn c -> col_name(c) == old_name)
     let clash = List.any(cols, fn c -> col_name(c) == new_name)
-    if !found then
+    if !found do
       Err("DataFrame.rename_column: column '" ++ old_name ++ "' not found")
-    else if clash then
-      Err("DataFrame.rename_column: column '" ++ new_name ++ "' already exists")
     else
-      Ok(DataFrame(List.map(cols, fn c ->
-        if col_name(c) == old_name do rename_col(c, new_name) else c end)))
+      if clash do
+        Err("DataFrame.rename_column: column '" ++ new_name ++ "' already exists")
+      else
+        Ok(DataFrame(List.map(cols, fn c ->
+          if col_name(c) == old_name do rename_col(c, new_name) else c end)))
+      end
     end
+  end
   end
 end
 
@@ -1939,10 +1945,11 @@ end
 -- Determine the output column name for an AggExpr (with duplicate-suffix logic).
 fn agg_output_name(expr : AggExpr, existing_names : List(String)) : String do
   let base_name = agg_base_name(expr)
-  if List.any(existing_names, fn n -> n == base_name) then
+  if List.any(existing_names, fn n -> n == base_name) do
     base_name ++ "_" ++ agg_type_suffix(expr)
   else
     base_name
+  end
 end
 
 fn agg_base_name(expr : AggExpr) : String do
@@ -1989,8 +1996,7 @@ fn apply_group_by(df : DataFrame, group_cols : List(String), agg_exprs : List(Ag
     let n = row_count(df)
     -- Step 2: Build HAMT map: GroupKey → List(Int) of row indices
     fn build_groups(i : Int, trie) do
-      if i >= n do
-        trie
+      if i >= n do trie
       else
         let key = make_group_key(df, i, group_cols)
         let existing =
@@ -2253,8 +2259,7 @@ fn apply_left_join(left : DataFrame, right : DataFrame, on_cols : List(String)) 
     None -> do
       let r_n = row_count(right)
       fn build_right_hash(i : Int, trie) do
-        if i >= r_n do
-          trie
+        if i >= r_n do trie
         else
           let key = make_group_key(right, i, on_cols)
           let existing =
@@ -2269,8 +2274,7 @@ fn apply_left_join(left : DataFrame, right : DataFrame, on_cols : List(String)) 
       let right_hash = build_right_hash(0, Hamt.empty())
       let l_n = row_count(left)
       fn probe(i : Int, acc : List((Int, Option(Int)))) : List((Int, Option(Int))) do
-        if i >= l_n do
-          List.reverse(acc)
+        if i >= l_n do List.reverse(acc)
         else
           let key = make_group_key(left, i, on_cols)
           let matching =
@@ -2321,8 +2325,7 @@ fn apply_right_join(left : DataFrame, right : DataFrame, on_cols : List(String))
     None -> do
       let l_n = row_count(left)
       fn build_left_hash(i : Int, trie) do
-        if i >= l_n do
-          trie
+        if i >= l_n do trie
         else
           let key = make_group_key(left, i, on_cols)
           let existing =
@@ -2337,8 +2340,7 @@ fn apply_right_join(left : DataFrame, right : DataFrame, on_cols : List(String))
       let left_hash = build_left_hash(0, Hamt.empty())
       let r_n = row_count(right)
       fn probe(i : Int, acc : List((Option(Int), Int))) : List((Option(Int), Int)) do
-        if i >= r_n do
-          List.reverse(acc)
+        if i >= r_n do List.reverse(acc)
         else
           let key = make_group_key(right, i, on_cols)
           let matching =
@@ -2389,8 +2391,7 @@ fn apply_outer_join(left : DataFrame, right : DataFrame, on_cols : List(String))
     None -> do
       let r_n = row_count(right)
       fn build_right_hash(i : Int, trie) do
-        if i >= r_n do
-          trie
+        if i >= r_n do trie
         else
           let key = make_group_key(right, i, on_cols)
           let existing =
@@ -2405,8 +2406,7 @@ fn apply_outer_join(left : DataFrame, right : DataFrame, on_cols : List(String))
       let right_hash = build_right_hash(0, Hamt.empty())
       let l_n = row_count(left)
       fn probe(i : Int, acc : List((Option(Int), Option(Int))), matched : List(Int)) : (List((Option(Int), Option(Int))), List(Int)) do
-        if i >= l_n do
-          (List.reverse(acc), matched)
+        if i >= l_n do (List.reverse(acc), matched)
         else
           let key = make_group_key(left, i, on_cols)
           let matching =
@@ -2470,8 +2470,7 @@ fn apply_inner_join(left : DataFrame, right : DataFrame, on_cols : List(String))
       -- Build hash table: right GroupKey → List(Int) of right row indices
       let r_n = row_count(right)
       fn build_right_hash(i : Int, trie) do
-        if i >= r_n do
-          trie
+        if i >= r_n do trie
         else
           let key = make_group_key(right, i, on_cols)
           let existing =
@@ -2491,8 +2490,7 @@ fn apply_inner_join(left : DataFrame, right : DataFrame, on_cols : List(String))
       let right_only_names = List.filter(right_schema, fn name ->
         !List.any(on_cols, fn k -> k == name))
       fn probe(i : Int, acc : List(Row)) : List(Row) do
-        if i >= l_n do
-          List.reverse(acc)
+        if i >= l_n do List.reverse(acc)
         else
           let key = make_group_key(left, i, on_cols)
           let matching_right_indices =
@@ -2817,11 +2815,12 @@ fn drop_nulls(df : DataFrame) : DataFrame do
   let n = row_count(df)
   let all_cols = match df do DataFrame(cs) -> cs end
   fn build_kept(i : Int, acc : List(Int)) : List(Int) do
-    if i >= n do
-      List.reverse(acc)
+    if i >= n do List.reverse(acc)
     else
       let has_null = List.any(all_cols, fn c -> col_has_null_at(c, i))
-      if has_null do build_kept(i + 1, acc) else build_kept(i + 1, Cons(i, acc)) end
+      if has_null do build_kept(i + 1, acc)
+      else build_kept(i + 1, Cons(i, acc))
+      end
     end
   end
   let kept = build_kept(0, Nil)
@@ -2835,11 +2834,12 @@ fn drop_nulls_in(df : DataFrame, names : List(String)) : DataFrame do
   let target_cols = List.filter(all_cols, fn c ->
     List.any(names, fn nm -> nm == col_name(c)))
   fn build_kept(i : Int, acc : List(Int)) : List(Int) do
-    if i >= n do
-      List.reverse(acc)
+    if i >= n do List.reverse(acc)
     else
       let has_null = List.any(target_cols, fn c -> col_has_null_at(c, i))
-      if has_null do build_kept(i + 1, acc) else build_kept(i + 1, Cons(i, acc)) end
+      if has_null do build_kept(i + 1, acc)
+      else build_kept(i + 1, Cons(i, acc))
+      end
     end
   end
   let kept = build_kept(0, Nil)
@@ -2929,7 +2929,9 @@ fn fill_null_forward(col : Column) : Column do
         match ns do
         Nil -> List.reverse(acc)
         Cons(b, rn) ->
-          if b do go(rd, rn, last, Cons(last, acc)) else go(rd, rn, v, Cons(v, acc)) end
+          if b do go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+          end
         end
       end
     end
@@ -2943,7 +2945,9 @@ fn fill_null_forward(col : Column) : Column do
         match ns do
         Nil -> List.reverse(acc)
         Cons(b, rn) ->
-          if b do go(rd, rn, last, Cons(last, acc)) else go(rd, rn, v, Cons(v, acc)) end
+          if b do go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+          end
         end
       end
     end
@@ -2957,7 +2961,9 @@ fn fill_null_forward(col : Column) : Column do
         match ns do
         Nil -> List.reverse(acc)
         Cons(b, rn) ->
-          if b do go(rd, rn, last, Cons(last, acc)) else go(rd, rn, v, Cons(v, acc)) end
+          if b do go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+          end
         end
       end
     end
@@ -2971,7 +2977,9 @@ fn fill_null_forward(col : Column) : Column do
         match ns do
         Nil -> List.reverse(acc)
         Cons(b, rn) ->
-          if b do go(rd, rn, last, Cons(last, acc)) else go(rd, rn, v, Cons(v, acc)) end
+          if b do go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+          end
         end
       end
     end
@@ -2994,7 +3002,9 @@ fn fill_null_backward(col : Column) : Column do
         match ns do
         Nil -> acc
         Cons(b, rn) ->
-          if b do go(rd, rn, last, Cons(last, acc)) else go(rd, rn, v, Cons(v, acc)) end
+          if b do go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+          end
         end
       end
     end
@@ -3010,7 +3020,9 @@ fn fill_null_backward(col : Column) : Column do
         match ns do
         Nil -> acc
         Cons(b, rn) ->
-          if b do go(rd, rn, last, Cons(last, acc)) else go(rd, rn, v, Cons(v, acc)) end
+          if b do go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+          end
         end
       end
     end
@@ -3026,7 +3038,9 @@ fn fill_null_backward(col : Column) : Column do
         match ns do
         Nil -> acc
         Cons(b, rn) ->
-          if b do go(rd, rn, last, Cons(last, acc)) else go(rd, rn, v, Cons(v, acc)) end
+          if b do go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+          end
         end
       end
     end
@@ -3042,7 +3056,9 @@ fn fill_null_backward(col : Column) : Column do
         match ns do
         Nil -> acc
         Cons(b, rn) ->
-          if b do go(rd, rn, last, Cons(last, acc)) else go(rd, rn, v, Cons(v, acc)) end
+          if b do go(rd, rn, last, Cons(last, acc))
+          else go(rd, rn, v, Cons(v, acc))
+          end
         end
       end
     end
@@ -3090,6 +3106,8 @@ fn window(df : DataFrame, expr : WindowExpr, out_col : String) : Result(DataFram
     let indices = List.range(0, n)
     let sorted = List.sort_by(indices,
       fn (a, b) -> compare_rows_by_keys(df, a, b, key_spec) < 0)
+    -- Walk sorted order: each element gets 1 + its 0-based position IF it's
+    -- not tied with the previous element; otherwise it shares the previous rank.
     fn assign_ranks(remaining : List(Int), pos : Int,
                     prev_opt : Option(Int), grp_rank : Int,
                     out : List((Int, Int))) : List((Int, Int)) do
@@ -3099,7 +3117,9 @@ fn window(df : DataFrame, expr : WindowExpr, out_col : String) : Result(DataFram
         let cur_rank = match prev_opt do
           None -> 1
           Some(prev_ri) ->
-            if compare_rows_by_keys(df, ri, prev_ri, key_spec) == 0 do grp_rank else pos + 1 end
+            if compare_rows_by_keys(df, ri, prev_ri, key_spec) == 0 do grp_rank
+            else pos + 1
+            end
           end
         assign_ranks(rest, pos + 1, Some(ri), cur_rank,
           Cons((ri, cur_rank), out))
@@ -3125,7 +3145,9 @@ fn window(df : DataFrame, expr : WindowExpr, out_col : String) : Result(DataFram
         let new_dr = match prev_opt do
           None -> 1
           Some(prev_ri) ->
-            if compare_rows_by_keys(df, ri, prev_ri, key_spec) == 0 do dr else dr + 1 end
+            if compare_rows_by_keys(df, ri, prev_ri, key_spec) == 0 do dr
+            else dr + 1
+            end
           end
         assign_dense(rest, Some(ri), new_dr, Cons((ri, new_dr), out))
       end
@@ -3206,8 +3228,7 @@ fn window(df : DataFrame, expr : WindowExpr, out_col : String) : Result(DataFram
     Ok(col) -> do
       let vals = col_to_value_list(col)
       fn build_lag(i : Int, acc : List(Value)) : List(Value) do
-        if i >= n do
-          List.reverse(acc)
+        if i >= n do List.reverse(acc)
         else
           let idx = i - lag_n
           let v = if idx < 0 do fill_val else List.nth(vals, idx) end
@@ -3227,8 +3248,7 @@ fn window(df : DataFrame, expr : WindowExpr, out_col : String) : Result(DataFram
     Ok(col) -> do
       let vals = col_to_value_list(col)
       fn build_lead(i : Int, acc : List(Value)) : List(Value) do
-        if i >= n do
-          List.reverse(acc)
+        if i >= n do List.reverse(acc)
         else
           let idx = i + lead_n
           let v = if idx >= n do fill_val else List.nth(vals, idx) end
@@ -3262,8 +3282,7 @@ fn melt(df : DataFrame, id_vars : List(String), value_vars : List(String),
         var_col : String, val_col : String) : Result(DataFrame, String) do
   let n = row_count(df)
   fn build_melted(i : Int, acc : List(Row)) : List(Row) do
-    if i >= n do
-      List.reverse(acc)
+    if i >= n do List.reverse(acc)
     else
       let row_pairs = match get_row(df, i) do Row(ps) -> ps end
       let id_pairs = List.filter(row_pairs, fn pair ->
@@ -3305,8 +3324,7 @@ fn pivot(df : DataFrame, index_col : String, cols_col : String,
         let n = row_count(df)
         -- Collect distinct values for a column in first-appearance order.
         fn collect_distinct(i : Int, cn : String, seen : List(Value)) : List(Value) do
-          if i >= n do
-            List.reverse(seen)
+          if i >= n do List.reverse(seen)
           else
             let v = col_value_at_by_name(df, cn, i)
             if List.any(seen, fn s -> values_equal(s, v)) do
@@ -3321,12 +3339,13 @@ fn pivot(df : DataFrame, index_col : String, cols_col : String,
         -- O(n) scan for the first matching (idx_v, col_v) cell value.
         fn lookup(idx_v : Value, col_v : Value) : Value do
           fn scan(i : Int) : Value do
-            if i >= n do
-              NullVal
+            if i >= n do NullVal
             else
               let idx_match = values_equal(col_value_at_by_name(df, index_col, i), idx_v)
               let col_match = values_equal(col_value_at_by_name(df, cols_col, i), col_v)
-              if idx_match && col_match do col_value_at_by_name(df, vals_col, i) else scan(i + 1) end
+              if idx_match && col_match do col_value_at_by_name(df, vals_col, i)
+              else scan(i + 1)
+              end
             end
           end
           scan(0)

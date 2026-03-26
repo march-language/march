@@ -33,27 +33,27 @@ pfn str_cmp(a) do fn b -> a < b end
 -- Remove the first occurrence of `elem` from `lst` using structural equality.
 pfn list_remove_first(lst, elem) do
   match lst do
-  | Nil -> Nil
-  | Cons(h, t) ->
-    if h == elem do t end
-    else Cons(h, list_remove_first(t, elem))
+  Nil -> Nil
+  Cons(h, t) ->
+    if h == elem do t
+    else Cons(h, list_remove_first(t, elem)) end
   end
 end
 
 pfn list_contains(lst, elem) do
   match lst do
-  | Nil -> false
-  | Cons(h, t) ->
-    if h == elem do true end
-    else list_contains(t, elem)
+  Nil -> false
+  Cons(h, t) ->
+    if h == elem do true
+    else list_contains(t, elem) end
   end
 end
 
 pfn list_length(lst) do
   fn go(xs, acc) do
     match xs do
-    | Nil -> acc
-    | Cons(_, t) -> go(t, acc + 1)
+    Nil -> acc
+    Cons(_, t) -> go(t, acc + 1)
     end
   end
   go(lst, 0)
@@ -78,11 +78,11 @@ broadcasts are once-per-pid after deduplication at send time).
 """
 fn subscribe_state(ps, topic, pid) do
   match ps do
-  | PubSubState(m) ->
+  PubSubState(m) ->
     do
       let current = match Map.get(m, topic, str_cmp) do
-        | Some(lst) -> lst
-        | None      -> Nil
+        Some(lst) -> lst
+        None      -> Nil
       end
       let updated = Cons(pid, current)
       PubSubState(Map.insert(m, topic, updated, str_cmp))
@@ -93,17 +93,17 @@ end
 doc "Unsubscribe `pid` from `topic`.  Removes the first matching entry."
 fn unsubscribe_state(ps, topic, pid) do
   match ps do
-  | PubSubState(m) ->
+  PubSubState(m) ->
     do
       let current = match Map.get(m, topic, str_cmp) do
-        | Some(lst) -> lst
-        | None      -> Nil
+        Some(lst) -> lst
+        None      -> Nil
       end
       let trimmed = list_remove_first(current, pid)
       match trimmed do
-      | Nil ->
+      Nil ->
         PubSubState(Map.remove(m, topic, str_cmp))
-      | _ ->
+      _ ->
         PubSubState(Map.insert(m, topic, trimmed, str_cmp))
       end
     end
@@ -113,10 +113,10 @@ end
 doc "Return the list of subscriber pids for `topic`.  Empty list if none."
 fn get_subscribers(ps, topic) do
   match ps do
-  | PubSubState(m) ->
+  PubSubState(m) ->
     match Map.get(m, topic, str_cmp) do
-    | Some(lst) -> lst
-    | None      -> Nil
+    Some(lst) -> lst
+    None      -> Nil
     end
   end
 end
@@ -124,8 +124,8 @@ end
 doc "True when at least one pid is subscribed to `topic`."
 fn has_subscribers(ps, topic) do
   match get_subscribers(ps, topic) do
-  | Nil -> false
-  | _   -> true
+  Nil -> false
+  _   -> true
   end
 end
 
@@ -180,15 +180,15 @@ Requires actor runtime.
 """
 fn broadcast_to(pids, excluded_pid, event, payload) do
   match pids do
-  | Nil -> ()
-  | Cons(pid, rest) ->
+  Nil -> ()
+  Cons(pid, rest) ->
     do
       let should_skip = match excluded_pid do
-        | Some(excl) -> pid == excl
-        | None       -> false
+        Some(excl) -> pid == excl
+        None       -> false
       end
-      if should_skip do () end
-      else actor_cast(pid, BroadcastMsg(event, payload))
+      if should_skip do ()
+      else actor_cast(pid, BroadcastMsg(event, payload)) end
       broadcast_to(rest, excluded_pid, event, payload)
     end
   end

@@ -38,7 +38,7 @@ end
 
 fn factorial(n : Int) : Int do
   if n <= 1 do 1
-  else dbg(n) * factorial(n - 1)
+  else dbg(n) * factorial(n - 1) end
 end
 
 -- ─── 3. dbg(bool_expr) — conditional breakpoint ──────────────────────────────
@@ -51,9 +51,10 @@ type IntList = INil | ICons(Int, IntList)
 fn find_large(lst : IntList, threshold : Int) : Int do
   match lst do
   INil        -> 0
-  ICons(h, t) ->
+  ICons(h, t) -> do
     dbg(h > threshold)
     h + find_large(t, threshold)
+  end
   end
 end
 

@@ -53,7 +53,7 @@ pfn find_oldest_loop(rows, best_name, best_age) do
     Err(_) -> find_oldest_loop(rest, best_name, best_age)
     Ok(age) ->
       if age > best_age do find_oldest_loop(rest, get_name(row), age)
-      else find_oldest_loop(rest, best_name, best_age)
+      else find_oldest_loop(rest, best_name, best_age) end
     end
   end
 end
@@ -62,14 +62,16 @@ pfn demo_read_all(path) do
   println("--- Example 2: read_all (eager) ---")
   match Csv.read_all(path, ",", :rfc4180) do
   Err(e) -> println("Error: " ++ to_string(e))
-  Ok(rows) ->
+  Ok(rows) -> do
     println("Total rows (incl. header): " ++ to_string(List.length(rows)))
     match rows do
     Nil -> println("No data.")
-    Cons(_, data_rows) ->
+    Cons(_, data_rows) -> do
       let oldest = find_oldest_loop(data_rows, "nobody", -1)
       println("Oldest person: " ++ oldest)
     end
+    end
+  end
   end
 end
 

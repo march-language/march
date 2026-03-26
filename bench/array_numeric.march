@@ -27,8 +27,8 @@ end
 -- Build a list of N floats: value[i] = (i % 100) / 100.0
 pfn make_float_list(n : Int) : List(Float) do
   fn go(i : Int, acc : List(Float)) : List(Float) do
-    if i < 0 do acc end
-    else go(i - 1, Cons(int_to_float(i % 100) /. 100.0, acc))
+    if i < 0 do acc
+    else go(i - 1, Cons(int_to_float(i % 100) /. 100.0, acc)) end
   end
   go(n - 1, Nil)
 end
@@ -47,8 +47,8 @@ end
 pfn list_sum_float(lst : List(Float)) : Float do
   fn go(xs : List(Float), acc : Float) : Float do
     match xs do
-    | Nil -> acc
-    | Cons(h, t) -> go(t, acc +. h)
+    Nil -> acc
+    Cons(h, t) -> go(t, acc +. h)
     end
   end
   go(lst, 0.0)
@@ -78,14 +78,14 @@ end
 pfn list_map_double(lst : List(Float)) : List(Float) do
   fn rev(ys : List(Float), a : List(Float)) : List(Float) do
     match ys do
-    | Nil -> a
-    | Cons(h, t) -> rev(t, Cons(h, a))
+    Nil -> a
+    Cons(h, t) -> rev(t, Cons(h, a))
     end
   end
   fn go(xs : List(Float), acc : List(Float)) : List(Float) do
     match xs do
-    | Nil -> rev(acc, Nil)
-    | Cons(h, t) -> go(t, Cons(h *. 2.0, acc))
+    Nil -> rev(acc, Nil)
+    Cons(h, t) -> go(t, Cons(h *. 2.0, acc))
     end
   end
   go(lst, Nil)
@@ -118,8 +118,8 @@ pfn bench_fold_list(lst : List(Int)) : Unit do
   let t0 = unix_time(())
   fn go(xs : List(Int), acc : Int) : Int do
     match xs do
-    | Nil -> acc
-    | Cons(h, t) -> go(t, acc + h)
+    Nil -> acc
+    Cons(h, t) -> go(t, acc + h)
     end
   end
   let s  = go(lst, 0)
