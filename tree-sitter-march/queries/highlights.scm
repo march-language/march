@@ -1,5 +1,5 @@
 ; Keywords — control flow
-["fn" "let" "do" "end" "if" "then" "else" "match" "with" "when"] @keyword
+["fn" "let" "do" "end" "if" "else" "match" "when"] @keyword
 
 ; Keywords — declarations
 ["type" "mod" "actor" "protocol" "interface" "impl" "sig" "extern"] @keyword
@@ -8,7 +8,7 @@
 ["pub" "linear" "affine"] @keyword
 
 ; Keywords — actor / concurrency
-["send" "spawn" "respond" "loop" "for" "use"] @keyword
+["send" "spawn" "loop" "for" "use"] @keyword
 
 ; Doc annotations
 (doc_annotation "doc" @keyword.documentation)

@@ -1,8 +1,7 @@
 ; Indent after 'do' keyword (covers fn, mod, actor, match, block bodies)
 (_ "do" @indent)
 
-; Indent after 'then' and 'else' in if expressions
-(_ "then" @indent)
+; Indent after 'else' in if expressions (do already handled above)
 (_ "else" @indent)
 
 ; Indent after '->' in match arms and lambdas
