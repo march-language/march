@@ -62,7 +62,8 @@ let test_lexer_arrow () =
 
 let test_lexer_comment () =
   let lexbuf = Lexing.from_string "-- this is a comment\n42" in
-  let tok = March_lexer.Lexer.token lexbuf in
+  let lex = March_parser.Token_filter.make March_lexer.Lexer.token in
+  let tok = lex lexbuf in
   Alcotest.(check int) "skips line comment" 42
     (match tok with March_parser.Parser.INT n -> n | _ -> failwith "expected INT")
 
@@ -84,21 +85,21 @@ let test_ast_span () =
 
 let test_parse_expr_int () =
   let lexbuf = Lexing.from_string "42" in
-  let expr = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   match expr with
   | March_ast.Ast.ELit (LitInt 42, _) -> ()
   | _ -> Alcotest.fail "expected ELit(LitInt 42)"
 
 let test_parse_expr_atom () =
   let lexbuf = Lexing.from_string ":ok" in
-  let expr = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   match expr with
   | March_ast.Ast.EAtom ("ok", [], _) -> ()
   | _ -> Alcotest.fail "expected EAtom(ok)"
 
 let test_parse_expr_pipe () =
   let lexbuf = Lexing.from_string "x |> f" in
-  let expr = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   match expr with
   | March_ast.Ast.EPipe (_, _, _) -> ()
   | _ -> Alcotest.fail "expected EPipe"
@@ -106,14 +107,14 @@ let test_parse_expr_pipe () =
 let test_parse_expr_lambda () =
   (* Lambdas use fn keyword: fn x -> body *)
   let lexbuf = Lexing.from_string "map(fn x -> x)" in
-  let expr = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   match expr with
   | March_ast.Ast.EApp (_, [March_ast.Ast.ELam (_, _, _)], _) -> ()
   | _ -> Alcotest.fail "expected EApp with ELam argument"
 
 let test_parse_expr_app () =
   let lexbuf = Lexing.from_string "f(x, y)" in
-  let expr = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   match expr with
   | March_ast.Ast.EApp (_, [_; _], _) -> ()
   | _ -> Alcotest.fail "expected EApp with 2 args"
@@ -125,7 +126,7 @@ let test_parse_module_multi_head () =
     fn fib(n) do n end
   end|} in
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   (* Three fn fib clauses should be grouped into one DFn with 3 clauses *)
   match m.mod_decls with
   | [March_ast.Ast.DFn (def, _)] ->
@@ -138,7 +139,7 @@ let test_parse_module_single_fn () =
     fn greet(name) do name end
   end|} in
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   match m.mod_decls with
   | [March_ast.Ast.DFn (def, _)] ->
     Alcotest.(check string) "fn name" "greet" def.fn_name.txt;
@@ -150,7 +151,7 @@ let test_parse_underscore_param () =
     fn greet(_name : String) do "hello" end
   end|} in
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   match m.mod_decls with
   | [March_ast.Ast.DFn (def, _)] ->
     Alcotest.(check string) "fn name" "greet" def.fn_name.txt;
@@ -161,7 +162,7 @@ let test_parse_underscore_param () =
 
 let parse_module src =
   let lexbuf = Lexing.from_string src in
-  March_parser.Parser.module_ March_lexer.Lexer.token lexbuf
+  March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
 
 let parse_and_desugar src =
   March_desugar.Desugar.desugar_module (parse_module src)
@@ -378,9 +379,9 @@ let test_eq_user_impl () =
     impl Eq(Color) do
       fn eq(x, y) do
         match (x, y) do
-        | (Red, Red)     -> true
-        | (Green, Green) -> true
-        | (Blue, Blue)   -> true
+        (Red, Red)     -> true
+        (Green, Green) -> true
+        (Blue, Blue)   -> true
         _              -> false
         end
       end
@@ -462,7 +463,7 @@ let test_standard_interfaces_in_scope () =
     impl Eq(Wrap) do
       fn eq(x, y) do
         match (x, y) do
-        | (Wrap(a), Wrap(b)) -> a == b
+        (Wrap(a), Wrap(b)) -> a == b
         end
       end
     end
@@ -1099,7 +1100,7 @@ let load_stdlib_file_for_test name =
     let lexbuf = Lexing.from_string src in
     lexbuf.Lexing.lex_curr_p <-
       { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-    let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+    let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
     let m = March_desugar.Desugar.desugar_module m in
     (* Wrap as DMod so names are accessible as Module.name *)
     March_ast.Ast.DMod (m.March_ast.Ast.mod_name,
@@ -1839,7 +1840,7 @@ let test_eval_closure () =
 let test_parse_unary_minus () =
   (* -x  parses as  negate(x) *)
   let lexbuf = Lexing.from_string "-x" in
-  let expr = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   match expr with
   | March_ast.Ast.EApp (March_ast.Ast.EVar n, [_], _) ->
     Alcotest.(check string) "unary minus becomes negate" "negate" n.txt
@@ -1850,7 +1851,7 @@ let test_parse_negative_lit_pattern () =
   let src = {|mod T do
     fn f(n) do
       match n do
-      | -1 -> true
+      -1 -> true
       _  -> false
       end
     end
@@ -1873,7 +1874,7 @@ let test_parse_negative_lit_pattern () =
 let test_parse_list_literal () =
   (* [1, 2, 3]  →  Cons(1, Cons(2, Cons(3, Nil))) *)
   let lexbuf = Lexing.from_string "[1, 2, 3]" in
-  let expr = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   match expr with
   | March_ast.Ast.ECon (n, [_; _], _) when n.txt = "Cons" -> ()
   | _ -> Alcotest.fail "expected Cons(1, Cons(...))"
@@ -1935,8 +1936,8 @@ let test_eval_negative_pattern () =
   let env = eval_module {|mod Test do
     fn sign(n) do
       match n do
-      | 0  -> 0
-      | -1 -> -1
+      0  -> 0
+      -1 -> -1
       _  -> 1
       end
     end
@@ -2596,7 +2597,7 @@ let test_parse_use_names () =
 (* String interpolation *)
 let test_parse_string_interp () =
   let lexbuf = Lexing.from_string {|"hi ${name}!"|} in
-  let expr = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   (* Should desugar to: "hi " ++ to_string(name) ++ "!" *)
   match expr with
   | March_ast.Ast.EApp (March_ast.Ast.EVar cat2, [_; _], _)
@@ -2636,7 +2637,7 @@ let repl_type_of expr_src =
   let tc_env = ref (March_typecheck.Typecheck.base_env
     (March_errors.Errors.create ()) type_map) in
   let lexbuf = Lexing.from_string expr_src in
-  match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+  match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
          with _ -> None) with
   | Some (March_ast.Ast.ReplExpr e) ->
     let e' = March_desugar.Desugar.desugar_expr e in
@@ -2709,7 +2710,7 @@ let repl_eval_exprs ?(stdlib_src="") exprs_src =
   let tc_env = ref base_tc in
   List.map (fun src ->
     let lexbuf = Lexing.from_string src in
-    match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+    match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
            with _ -> None) with
     | Some (March_ast.Ast.ReplExpr e) ->
       let e' = March_desugar.Desugar.desugar_expr e in
@@ -2815,7 +2816,7 @@ let test_repl_inspect_type_and_value () =
   let env = ref March_eval.Eval.base_env in
   let src = "42 + 1" in
   let lexbuf = Lexing.from_string src in
-  match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+  match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
          with _ -> None) with
   | Some (March_ast.Ast.ReplExpr e) ->
     let e' = March_desugar.Desugar.desugar_expr e in
@@ -3289,7 +3290,7 @@ let test_type_map_populated () =
   end|} in
   let m = March_desugar.Desugar.desugar_module
     (let lexbuf = Lexing.from_string src in
-     March_parser.Parser.module_ March_lexer.Lexer.token lexbuf) in
+     March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf) in
   let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
   Alcotest.(check bool) "type map is non-empty" true
     (Hashtbl.length type_map > 0)
@@ -3300,7 +3301,7 @@ let test_type_map_fn_recorded () =
   end|} in
   let m = March_desugar.Desugar.desugar_module
     (let lexbuf = Lexing.from_string src in
-     March_parser.Parser.module_ March_lexer.Lexer.token lexbuf) in
+     March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf) in
   let (_errors, type_map) = March_typecheck.Typecheck.check_module m in
   Alcotest.(check bool) "type map has many entries" true
     (Hashtbl.length type_map >= 3)
@@ -5501,7 +5502,7 @@ let make_jit_test_module (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
 
 let parse_repl src =
   let lexbuf = Lexing.from_string src in
-  March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf
+  March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
 
 (** Test: `let x = 21` on line 1, then `x + 21` on line 2 should give 42. *)
 let test_repl_jit_cross_line_let () =
@@ -6451,7 +6452,7 @@ let test_lexer_keyword_dbg () =
 
 let test_parse_dbg () =
   let lexbuf = Lexing.from_string "dbg()" in
-  let e = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  let e = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   Alcotest.(check bool) "parses dbg() as EDbg" true
     (match e with March_ast.Ast.EDbg _ -> true | _ -> false)
 
@@ -6507,7 +6508,7 @@ let test_trace_recording () =
   March_eval.Eval.debug_ctx := Some ctx;
   let src = "1 + 2" in
   let lexbuf = Lexing.from_string src in
-  let e = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  let e = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   let e' = March_desugar.Desugar.desugar_expr e in
   let _v = March_eval.Eval.eval_expr March_eval.Eval.base_env e' in
   let frames_recorded = ctx.March_eval.Eval.dc_trace.March_eval.Eval.rb_size in
@@ -6519,7 +6520,7 @@ let test_trace_navigation () =
   March_debug.Debug.install ctx;
   let src = "1 + 2 + 3" in
   let lexbuf = Lexing.from_string src in
-  let e = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  let e = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   let e' = March_desugar.Desugar.desugar_expr e in
   ignore (March_eval.Eval.eval_expr March_eval.Eval.base_env e');
   let n = March_debug.Debug.frame_count ctx in
@@ -6551,7 +6552,7 @@ mod Test do
 end
 |} in
   let lexbuf = Lexing.from_string src in
-  let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   let m' = March_desugar.Desugar.desugar_module m in
   (try March_eval.Eval.run_module m'
    with
@@ -6584,7 +6585,7 @@ mod DebugTest do
 end
 |} in
   let lexbuf = Lexing.from_string src in
-  let m  = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+  let m  = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   let m' = March_desugar.Desugar.desugar_module m in
   (try March_eval.Eval.run_module m'
    with
@@ -6605,7 +6606,7 @@ let test_trace_overflow () =
   March_debug.Debug.install ctx;
   let src = "1 + 2 + 3 + 4" in
   let lexbuf = Lexing.from_string src in
-  let e = March_parser.Parser.expr_eof March_lexer.Lexer.token lexbuf in
+  let e = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   let e' = March_desugar.Desugar.desugar_expr e in
   ignore (March_eval.Eval.eval_expr March_eval.Eval.base_env e');
   March_debug.Debug.uninstall ();
@@ -11046,7 +11047,7 @@ let test_array_pop () =
     fn f() do
       let a = Array.from_list([1, 2, 3])
       match Array.pop(a) do
-      | (a2, last) -> last
+      (a2, last) -> last
       end
     end
   end|} in
@@ -11057,7 +11058,7 @@ let test_array_pop_length () =
     fn f() do
       let a = Array.from_list([1, 2, 3])
       match Array.pop(a) do
-      | (a2, _) -> Array.length(a2)
+      (a2, _) -> Array.length(a2)
       end
     end
   end|} in
@@ -12146,7 +12147,7 @@ let test_app_main_exclusive () =
   let raised =
     try
       let lexbuf = Lexing.from_string src in
-      let ast = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+      let ast = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
       ignore (March_desugar.Desugar.desugar_module ast);
       false
     with Failure _ -> true
@@ -12199,7 +12200,7 @@ let test_whereis_named () =
   end|} in
   let m =
     let lexbuf = Lexing.from_string src in
-    let ast = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+    let ast = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
     March_desugar.Desugar.desugar_module ast
   in
   March_eval.Eval.run_module m;
@@ -12557,7 +12558,7 @@ let test_dyn_sup_in_app () =
   end|} in
   let m =
     let lexbuf = Lexing.from_string src in
-    let ast = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+    let ast = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
     March_desugar.Desugar.desugar_module ast
   in
   March_eval.Eval.run_module m;
@@ -12827,8 +12828,8 @@ let test_eval_custom_eq_dispatch () =
     impl Eq(Parity) do
       fn eq(a, b) do
         match (a, b) do
-        | (Even, Even) -> true
-        | (Odd, Odd)   -> true
+        (Even, Even) -> true
+        (Odd, Odd)   -> true
         _            -> false
         end
       end
@@ -13197,10 +13198,10 @@ let test_exhaust_tuple_bool_bool_complete () =
   let ctx = typecheck {|mod Test do
     fn go(p : (Bool, Bool)) : Int do
       match p do
-      | (true,  true)  -> 0
-      | (true,  false) -> 1
-      | (false, true)  -> 2
-      | (false, false) -> 3
+      (true,  true)  -> 0
+      (true,  false) -> 1
+      (false, true)  -> 2
+      (false, false) -> 3
       end
     end
   end|} in
@@ -13211,8 +13212,8 @@ let test_exhaust_tuple_wildcards_ok () =
   let ctx = typecheck {|mod Test do
     fn go(p : (Bool, Int)) : Int do
       match p do
-      | (true,  _) -> 1
-      | (false, _) -> 0
+      (true,  _) -> 1
+      (false, _) -> 0
       end
     end
   end|} in
@@ -13223,8 +13224,8 @@ let test_exhaust_tuple_partial () =
   let ctx = typecheck {|mod Test do
     fn go(p : (Bool, Bool)) : Int do
       match p do
-      | (true, true)  -> 1
-      | (true, false) -> 0
+      (true, true)  -> 1
+      (true, false) -> 0
       end
     end
   end|} in
@@ -14189,8 +14190,8 @@ let test_parse_large_tuple_match () =
   let src = {|mod Test do
     fn go(a : Int, b : Int, c : Int, d : Int) : Int do
       match (a, b, c, d) do
-      | (0, 0, 0, 0) -> 0
-      | (x, _, _, _) -> x
+      (0, 0, 0, 0) -> 0
+      (x, _, _, _) -> x
       end
     end
   end|} in
@@ -14342,7 +14343,7 @@ let interp_eval_expr src =
 let jit_eval_simple_expr ~runtime_so src =
   let type_map = Hashtbl.create 16 in
   let lexbuf   = Lexing.from_string src in
-  match (try Some (March_parser.Parser.repl_input March_lexer.Lexer.token lexbuf)
+  match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
          with _ -> None) with
   | Some (March_ast.Ast.ReplExpr e) ->
     let e' = March_desugar.Desugar.desugar_expr e in

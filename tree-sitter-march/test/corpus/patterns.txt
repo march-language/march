@@ -1,7 +1,7 @@
 ================================================================================
 Wildcard pattern
 ================================================================================
-mod Foo do fn f(x) do match x with | _ -> 1 end end end
+mod Foo do fn f(x) do match x do _ -> 1 end end end
 --------------------------------------------------------------------------------
 (source_file (module_def name: (type_identifier)
   (function_def name: (identifier)
@@ -9,12 +9,12 @@ mod Foo do fn f(x) do match x with | _ -> 1 end end end
     body: (block_body
       (match_expression
         value: (identifier)
-        (match_arm pattern: (wildcard_pattern) body: (block_body (integer))))))))
+        (match_arm pattern: (wildcard_pattern) body: (integer)))))))
 
 ================================================================================
 Variable pattern
 ================================================================================
-mod Foo do fn f(x) do match x with | n -> n end end end
+mod Foo do fn f(x) do match x do n -> n end end end
 --------------------------------------------------------------------------------
 (source_file (module_def name: (type_identifier)
   (function_def name: (identifier)
@@ -24,12 +24,12 @@ mod Foo do fn f(x) do match x with | n -> n end end end
         value: (identifier)
         (match_arm
           pattern: (variable_pattern (variable_pattern))
-          body: (block_body (identifier))))))))
+          body: (identifier)))))))
 
 ================================================================================
 Constructor pattern with args
 ================================================================================
-mod Foo do fn f(x) do match x with | Some(n) -> n end end end
+mod Foo do fn f(x) do match x do Some(n) -> n end end end
 --------------------------------------------------------------------------------
 (source_file (module_def name: (type_identifier)
   (function_def name: (identifier)
@@ -39,12 +39,12 @@ mod Foo do fn f(x) do match x with | Some(n) -> n end end end
         value: (identifier)
         (match_arm
           pattern: (constructor_pattern name: (type_identifier) (variable_pattern (variable_pattern)))
-          body: (block_body (identifier))))))))
+          body: (identifier)))))))
 
 ================================================================================
 Tuple pattern
 ================================================================================
-mod Foo do fn f(x) do match x with | (a, b) -> a end end end
+mod Foo do fn f(x) do match x do (a, b) -> a end end end
 --------------------------------------------------------------------------------
 (source_file (module_def name: (type_identifier)
   (function_def name: (identifier)
@@ -56,12 +56,12 @@ mod Foo do fn f(x) do match x with | (a, b) -> a end end end
           pattern: (tuple_pattern
             (variable_pattern (variable_pattern))
             (variable_pattern (variable_pattern)))
-          body: (block_body (identifier))))))))
+          body: (identifier)))))))
 
 ================================================================================
 Negative literal pattern
 ================================================================================
-mod Foo do fn f(x) do match x with | -1 -> true end end end
+mod Foo do fn f(x) do match x do -1 -> true end end end
 --------------------------------------------------------------------------------
 (source_file (module_def name: (type_identifier)
   (function_def name: (identifier)
@@ -71,12 +71,12 @@ mod Foo do fn f(x) do match x with | -1 -> true end end end
         value: (identifier)
         (match_arm
           pattern: (literal_pattern (integer))
-          body: (block_body (boolean))))))))
+          body: (boolean)))))))
 
 ================================================================================
 Atom pattern bare
 ================================================================================
-mod Foo do fn f(x) do match x with | :ok -> true end end end
+mod Foo do fn f(x) do match x do :ok -> true end end end
 --------------------------------------------------------------------------------
 (source_file (module_def name: (type_identifier)
   (function_def name: (identifier)
@@ -86,4 +86,4 @@ mod Foo do fn f(x) do match x with | :ok -> true end end end
         value: (identifier)
         (match_arm
           pattern: (atom_pattern (atom_literal))
-          body: (block_body (boolean))))))))
+          body: (boolean)))))))

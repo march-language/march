@@ -2273,10 +2273,6 @@
         },
         {
           "type": "SYMBOL",
-          "name": "respond_expression"
-        },
-        {
-          "type": "SYMBOL",
           "name": "atom"
         },
         {
@@ -2850,14 +2846,14 @@
         },
         {
           "type": "STRING",
-          "value": "then"
+          "value": "do"
         },
         {
           "type": "FIELD",
           "name": "then",
           "content": {
             "type": "SYMBOL",
-            "name": "_expr"
+            "name": "block_body"
           }
         },
         {
@@ -2869,8 +2865,12 @@
           "name": "else",
           "content": {
             "type": "SYMBOL",
-            "name": "_expr"
+            "name": "block_body"
           }
+        },
+        {
+          "type": "STRING",
+          "value": "end"
         }
       ]
     },
@@ -3167,27 +3167,6 @@
         }
       ]
     },
-    "respond_expression": {
-      "type": "SEQ",
-      "members": [
-        {
-          "type": "STRING",
-          "value": "respond"
-        },
-        {
-          "type": "STRING",
-          "value": "("
-        },
-        {
-          "type": "SYMBOL",
-          "name": "_expr"
-        },
-        {
-          "type": "STRING",
-          "value": ")"
-        }
-      ]
-    },
     "assert_expression": {
       "type": "SEQ",
       "members": [
@@ -3222,44 +3201,14 @@
         },
         {
           "type": "STRING",
-          "value": "with"
+          "value": "do"
         },
         {
-          "type": "CHOICE",
-          "members": [
-            {
-              "type": "STRING",
-              "value": "|"
-            },
-            {
-              "type": "BLANK"
-            }
-          ]
-        },
-        {
-          "type": "SEQ",
-          "members": [
-            {
-              "type": "SYMBOL",
-              "name": "match_arm"
-            },
-            {
-              "type": "REPEAT",
-              "content": {
-                "type": "SEQ",
-                "members": [
-                  {
-                    "type": "STRING",
-                    "value": "|"
-                  },
-                  {
-                    "type": "SYMBOL",
-                    "name": "match_arm"
-                  }
-                ]
-              }
-            }
-          ]
+          "type": "REPEAT1",
+          "content": {
+            "type": "SYMBOL",
+            "name": "match_arm"
+          }
         },
         {
           "type": "STRING",
@@ -3299,7 +3248,7 @@
           "name": "body",
           "content": {
             "type": "SYMBOL",
-            "name": "block_body"
+            "name": "_expr"
           }
         }
       ]
@@ -3608,15 +3557,7 @@
       },
       {
         "type": "STRING",
-        "value": "with"
-      },
-      {
-        "type": "STRING",
         "value": "if"
-      },
-      {
-        "type": "STRING",
-        "value": "then"
       },
       {
         "type": "STRING",
@@ -3629,10 +3570,6 @@
       {
         "type": "STRING",
         "value": "spawn"
-      },
-      {
-        "type": "STRING",
-        "value": "respond"
       },
       {
         "type": "STRING",

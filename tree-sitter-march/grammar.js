@@ -30,9 +30,9 @@ module.exports = grammar({
       'fn', 'let', 'do', 'end', 'type', 'mod', 'pub',
       'true', 'false',
       'when', 'linear', 'affine',
-      'match', 'with',
-      'if', 'then', 'else',
-      'send', 'spawn', 'respond',
+      'match',
+      'if', 'else',
+      'send', 'spawn',
       'actor', 'interface', 'impl', 'sig', 'extern', 'protocol', 'use',
       'for', 'loop', 'doc',
       'test', 'describe', 'assert', 'setup', 'setup_all',
@@ -354,7 +354,6 @@ module.exports = grammar({
       $.list_expression,
       $.send_expression,
       $.spawn_expression,
-      $.respond_expression,
       $.atom,
       $.typed_hole,
       $.integer,
@@ -418,8 +417,9 @@ module.exports = grammar({
     ),
     if_expression: $ => seq(
       'if', field('condition', $._expr),
-      'then', field('then', $._expr),
-      'else', field('else', $._expr),
+      'do', field('then', $.block_body),
+      'else', field('else', $.block_body),
+      'end',
     ),
     block_expression: $ => seq('do', $.block_body, 'end'),
     unit_expression: _ => seq('(', ')'),
@@ -437,12 +437,11 @@ module.exports = grammar({
 
     send_expression: $ => seq('send', '(', $._expr, ',', $._expr, ')'),
     spawn_expression: $ => seq('spawn', '(', $._expr, ')'),
-    respond_expression: $ => seq('respond', '(', $._expr, ')'),
     assert_expression: $ => seq('assert', field('value', $._expr)),
 
     match_expression: $ => seq(
-      'match', field('value', $._expr), 'with',
-      optional('|'), pipeSep1($.match_arm),
+      'match', field('value', $._expr), 'do',
+      repeat1($.match_arm),
       'end',
     ),
 
@@ -450,7 +449,7 @@ module.exports = grammar({
       field('pattern', $._pattern),
       optional($.when_guard),
       '->',
-      field('body', $.block_body),
+      field('body', $._expr),
     ),
 
     // Literals
@@ -501,7 +500,4 @@ function commaSep(rule) {
 function commaSep1(rule) {
   return seq(rule, repeat(seq(',', rule)));
 }
-function pipeSep1(rule) {
-  // Pipe-separated list: used for match arms (optional leading | handled at call site)
-  return seq(rule, repeat(seq('|', rule)));
-}
+

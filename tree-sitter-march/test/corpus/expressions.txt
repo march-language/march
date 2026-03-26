@@ -61,14 +61,14 @@ mod Foo do let f = fn x -> x end
     value: (lambda_expression param: (identifier) body: (identifier)))))
 
 ================================================================================
-If then else
+If do else end
 ================================================================================
-mod Foo do let x = if true then 1 else 2 end
+mod Foo do let x = if true do 1 else 2 end end
 --------------------------------------------------------------------------------
 (source_file (module_def name: (type_identifier)
   (let_declaration
     pattern: (variable_pattern (variable_pattern))
-    value: (if_expression condition: (boolean) then: (integer) else: (integer)))))
+    value: (if_expression condition: (boolean) then: (block_body (integer)) else: (block_body (integer))))))
 
 ================================================================================
 Tuple expression

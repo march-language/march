@@ -87,7 +87,7 @@ let atom_name = ['a'-'z'] (alpha | digit)*
 
 rule token = parse
   | whitespace    { token lexbuf }
-  | newline       { Lexing.new_line lexbuf; token lexbuf }
+  | newline       { Lexing.new_line lexbuf; NL }
   | "--"          { line_comment lexbuf }
   | "{-"          { block_comment 0 lexbuf }
   | digit+ '.' digit+ as f { FLOAT (float_of_string f) }
@@ -152,7 +152,7 @@ rule token = parse
   | _ as c        { raise (Lexer_error (Printf.sprintf "Unexpected character: %c" c)) }
 
 and line_comment = parse
-  | newline       { Lexing.new_line lexbuf; token lexbuf }
+  | newline       { Lexing.new_line lexbuf; NL }
   | eof           { EOF }
   | _             { line_comment lexbuf }
 

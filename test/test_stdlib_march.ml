@@ -67,17 +67,7 @@ let load_stdlib_decls name =
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-  let m =
-    (try March_parser.Parser.module_ March_lexer.Lexer.token lexbuf
-     with e ->
-       let pos = lexbuf.Lexing.lex_curr_p in
-       Printf.eprintf "PARSE ERROR in %s at line %d col %d: %s\n%!"
-         name pos.Lexing.pos_lnum
-         (pos.Lexing.pos_cnum - pos.Lexing.pos_bol)
-         (Printexc.to_string e);
-       raise e)
-  in
-  Printf.eprintf "Parsed OK:     %s\n%!" name;
+  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   let m = March_desugar.Desugar.desugar_module m in
   if name = "prelude.march" then
     (* Unwrap outer mod so prelude globals are in scope directly *)
@@ -143,7 +133,7 @@ let parse_test_file filename =
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-  let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
   March_desugar.Desugar.desugar_module m
 
 (** Run a stdlib test file using the native test runner.

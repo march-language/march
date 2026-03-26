@@ -4,5 +4,5 @@
 
 (library
  (name march_parser)
- (modules parse_errors parser)
+ (modules parse_errors parser token_filter)
  (libraries march_ast march_errors))

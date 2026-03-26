@@ -11,7 +11,7 @@
 
 let parse_module src =
   let lexbuf = Lexing.from_string src in
-  March_parser.Parser.module_ March_lexer.Lexer.token lexbuf
+  March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
 
 let fmt src =
   let m = parse_module src in
