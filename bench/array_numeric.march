@@ -1,0 +1,163 @@
+-- P10 Array Numeric benchmark: compare List vs NativeArray for numeric ops.
+--
+-- Exercises the patterns that P10 targets:
+--   - Sum over a large numeric array (memory-bandwidth bound, vectorizable)
+--   - Map with scalar arithmetic (element-wise, vectorizable)
+--   - Fold with arithmetic accumulator (sequential, loop-carried dependency)
+--
+-- Both List and NativeArray variants start from the same generated list so
+-- the comparison only measures the actual operation, not data generation.
+--
+-- Run: dune exec march -- bench/array_numeric.march
+-- (interpreter path; shows fast-path speedup from NativeArray builtins)
+
+mod ArrayNumeric do
+
+pfn elapsed_ms(t0 : Float, t1 : Float) : Int do
+  float_to_int((t1 -. t0) *. 1000.0)
+end
+
+pfn banner(name : String) : Unit do
+  println("")
+  println("=== " ++ name ++ " ===")
+end
+
+-- ── Data generation ────────────────────────────────────────────────────────
+
+-- Build a list of N floats: value[i] = (i % 100) / 100.0
+pfn make_float_list(n : Int) : List(Float) do
+  fn go(i : Int, acc : List(Float)) : List(Float) do
+    if i < 0 then acc
+    else go(i - 1, Cons(int_to_float(i % 100) /. 100.0, acc))
+  end
+  go(n - 1, Nil)
+end
+
+-- Build a list of N ints: value[i] = i
+pfn make_int_list(n : Int) : List(Int) do
+  fn go(i : Int, acc : List(Int)) : List(Int) do
+    if i < 0 then acc else go(i - 1, Cons(i, acc))
+  end
+  go(n - 1, Nil)
+end
+
+-- ── Sum ────────────────────────────────────────────────────────────────────
+
+-- Sum a list of floats via tail-recursive accumulator.
+pfn list_sum_float(lst : List(Float)) : Float do
+  fn go(xs : List(Float), acc : Float) : Float do
+    match xs do
+    | Nil -> acc
+    | Cons(h, t) -> go(t, acc +. h)
+    end
+  end
+  go(lst, 0.0)
+end
+
+pfn bench_sum_list(lst : List(Float)) : Unit do
+  banner("Sum floats — List fold")
+  let t0 = unix_time(())
+  let s  = list_sum_float(lst)
+  let t1 = unix_time(())
+  println("result: " ++ float_to_string(s))
+  println("time:   " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
+end
+
+pfn bench_sum_native(arr) : Unit do
+  banner("Sum floats — NativeFloatArr (tight loop)")
+  let t0 = unix_time(())
+  let s  = native_float_arr_sum(arr)
+  let t1 = unix_time(())
+  println("result: " ++ float_to_string(s))
+  println("time:   " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
+end
+
+-- ── Map ────────────────────────────────────────────────────────────────────
+
+-- Map (*2.0) over a list of floats (tail-recursive, reversed).
+pfn list_map_double(lst : List(Float)) : List(Float) do
+  fn rev(ys : List(Float), a : List(Float)) : List(Float) do
+    match ys do
+    | Nil -> a
+    | Cons(h, t) -> rev(t, Cons(h, a))
+    end
+  end
+  fn go(xs : List(Float), acc : List(Float)) : List(Float) do
+    match xs do
+    | Nil -> rev(acc, Nil)
+    | Cons(h, t) -> go(t, Cons(h *. 2.0, acc))
+    end
+  end
+  go(lst, Nil)
+end
+
+pfn bench_map_list(lst : List(Float)) : Unit do
+  banner("Map (*2.0) floats — List map")
+  let t0   = unix_time(())
+  let lst2 = list_map_double(lst)
+  let t1   = unix_time(())
+  let s    = list_sum_float(lst2)
+  println("checksum: " ++ float_to_string(s))
+  println("time:     " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
+end
+
+pfn bench_map_native(arr) : Unit do
+  banner("Map (*2.0) floats — NativeFloatArr map (tight loop)")
+  let t0   = unix_time(())
+  let arr2 = native_float_arr_map(arr, fn x -> x *. 2.0)
+  let t1   = unix_time(())
+  let s    = native_float_arr_sum(arr2)
+  println("checksum: " ++ float_to_string(s))
+  println("time:     " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
+end
+
+-- ── Fold ───────────────────────────────────────────────────────────────────
+
+pfn bench_fold_list(lst : List(Int)) : Unit do
+  banner("Fold (+) ints — List fold")
+  let t0 = unix_time(())
+  fn go(xs : List(Int), acc : Int) : Int do
+    match xs do
+    | Nil -> acc
+    | Cons(h, t) -> go(t, acc + h)
+    end
+  end
+  let s  = go(lst, 0)
+  let t1 = unix_time(())
+  println("result: " ++ int_to_string(s))
+  println("time:   " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
+end
+
+pfn bench_fold_native(arr) : Unit do
+  banner("Fold (+) ints — NativeIntArr fold (tight loop)")
+  let t0 = unix_time(())
+  let s  = native_int_arr_fold(0, arr, fn (acc, x) -> acc + x)
+  let t1 = unix_time(())
+  println("result: " ++ int_to_string(s))
+  println("time:   " ++ int_to_string(elapsed_ms(t0, t1)) ++ " ms")
+end
+
+-- ── Main ───────────────────────────────────────────────────────────────────
+
+fn main() : Unit do
+  let n = 100000
+  println("P10 Array Numeric Benchmark  (n = " ++ int_to_string(n) ++ ")")
+  println("Generating data...")
+  let float_lst = make_float_list(n)
+  let int_lst   = make_int_list(n)
+  -- Convert to native arrays once (not timed — this is setup).
+  let float_arr = native_float_arr_from_list(float_lst)
+  let int_arr   = native_int_arr_from_list(int_lst)
+  println("Data ready.")
+
+  bench_sum_list(float_lst)
+  bench_sum_native(float_arr)
+  bench_map_list(float_lst)
+  bench_map_native(float_arr)
+  bench_fold_list(int_lst)
+  bench_fold_native(int_arr)
+  println("")
+  println("Done.")
+end
+
+end -- mod ArrayNumeric

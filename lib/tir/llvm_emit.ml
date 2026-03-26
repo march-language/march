@@ -159,6 +159,20 @@ let llvm_ret_ty : Tir.ty -> string = function
   | Tir.TUnit -> "void"
   | t -> llvm_ty t
 
+(** LLVM type string for a function *parameter*, augmented with alias-analysis
+    attributes for pointer types.
+    - [nonnull]: March allocators call exit(1) on OOM, so heap pointers are
+      never null; this lets LLVM elide null checks in alias analysis.
+    - [dereferenceable(16)]: every March heap object has at least a 16-byte
+      header (rc:i64 + tag:i32 + pad:i32), so the pointer can always be
+      safely dereferenced for 16 bytes. *)
+let llvm_param_ty (ty : Tir.ty) : string =
+  match ty with
+  | Tir.TString | Tir.TCon _ | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _
+  | Tir.TPtr _ | Tir.TVar _ ->
+    "ptr nonnull dereferenceable(16)"
+  | other -> llvm_ty other
+
 (** Return type of a function variable's type. *)
 let fn_ret_tir (ty : Tir.ty) : Tir.ty =
   match ty with
@@ -1979,7 +1993,7 @@ let emit_fn ctx (fn : Tir.fn_def) =
 
   let params_str = String.concat ", " (List.map (fun (v : Tir.var) ->
       let vn = llvm_name v.Tir.v_name in
-      llvm_ty v.Tir.v_ty ^ " %" ^ vn ^ ".arg"
+      llvm_param_ty v.Tir.v_ty ^ " %" ^ vn ^ ".arg"
     ) fn.Tir.fn_params) in
 
   Buffer.add_string ctx.buf
@@ -2045,7 +2059,7 @@ let fn_declare_str (fn : Tir.fn_def) : string =
   let fn_llvm_name = mangle_extern fn.Tir.fn_name in
   let ret_ty = llvm_ret_ty fn.Tir.fn_ret_ty in
   let param_tys = String.concat ", " (List.map (fun (v : Tir.var) ->
-      llvm_ty v.Tir.v_ty) fn.Tir.fn_params) in
+      llvm_param_ty v.Tir.v_ty) fn.Tir.fn_params) in
   Printf.sprintf "declare %s @%s(%s)" ret_ty fn_llvm_name param_tys
 
 (* ── Mutual TCO: combined function emitter ───────────────────────────── *)
@@ -2102,7 +2116,7 @@ let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
     if all_params = [] then ""
     else ", " ^ String.concat ", "
       (List.map (fun (_, (v : Tir.var), base) ->
-        Printf.sprintf "%s %%%s.arg" (llvm_ty v.Tir.v_ty) base
+        Printf.sprintf "%s %%%s.arg" (llvm_param_ty v.Tir.v_ty) base
       ) all_params)
   in
   Buffer.add_string ctx.buf
@@ -2207,7 +2221,7 @@ let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
     let fn_llvm     = mangle_extern fn.Tir.fn_name in
     let params_str  = String.concat ", "
       (List.map (fun (v : Tir.var) ->
-        Printf.sprintf "%s %%%s.arg" (llvm_ty v.Tir.v_ty) (llvm_name v.Tir.v_name)
+        Printf.sprintf "%s %%%s.arg" (llvm_param_ty v.Tir.v_ty) (llvm_name v.Tir.v_name)
       ) fn.Tir.fn_params)
     in
     Buffer.add_string ctx.buf

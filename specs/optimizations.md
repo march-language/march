@@ -569,34 +569,93 @@ end
 
 ### P10 — Array Loop Vectorization
 
-**Motivation:** The compiler emits scalar LLVM IR for numeric loops. LLVM's auto-vectorizer can sometimes promote these to SIMD (AVX2/NEON), but it's unreliable without explicit hints. Two levels of support:
+**Motivation:** Numeric array operations (sum, map, fold) are the backbone of DataFrame
+queries, statistical computation, and scientific computing.  Without contiguous memory and
+vectorization hints, March leaves 4–8× performance on the table for these workloads.
 
-**Level 1 — Vectorization hints (low effort):**
-- Emit `!llvm.loop.vectorize.enable` metadata on loops over arrays
-- Add `align 32` annotations on array allocations for AVX2
-- Use `nonnull` and `dereferenceable` attributes to help LLVM's alias analysis
+**Key constraint discovered during implementation:** The stdlib `Array` module is a
+32-way persistent trie (`PVec`).  This means there are no contiguous numeric loops in
+the current LLVM IR — TCO loops traverse linked-list/trie structures, not flat memory.
+Real vectorization requires a flat-array primitive type.
 
-**Level 2 — Explicit SIMD codegen (medium effort):**
-- Detect known patterns: `Array.map(arr, fn x -> x + 1)`, `Array.fold`, `Array.zip_with`
-- Lower to LLVM vector types: `<4 x i64>`, `<4 x double>`
-- Generate vector load → vector op → vector store with scalar tail loop
+---
 
-**Example (what gets generated):**
+**Phase 0 — Alias-analysis hints (done, 2026-03-25):**
+
+Added `nonnull dereferenceable(16)` to all `ptr` function parameters in
+`lib/tir/llvm_emit.ml`.  Every March heap object has a 16-byte header (rc + tag + pad)
+and `march_alloc` calls `exit(1)` on OOM so pointers are never null.  This allows LLVM
+to eliminate null-check branches and perform more aggressive alias analysis across all
+March programs — not just numeric ones.
+
+Files changed: `lib/tir/llvm_emit.ml` (added `llvm_param_ty` helper).
+
+---
+
+**Phase 1 — NativeArray interpreter fast path (done, 2026-03-25):**
+
+Added flat OCaml array types `VNativeIntArr` / `VNativeFloatArr` to the interpreter
+value type in `lib/eval/eval.ml`, with the following builtins:
+
+| Builtin | Description |
+|---|---|
+| `native_int_arr_make(n, init)` | Allocate flat int array |
+| `native_int_arr_length(arr)` | O(1) length |
+| `native_int_arr_get(arr, i)` | O(1) element access |
+| `native_int_arr_set(arr, i, v)` | O(n) functional update |
+| `native_int_arr_sum(arr)` | **Tight loop** — sum all elements |
+| `native_int_arr_map(arr, f)` | **Tight loop** — map a function |
+| `native_int_arr_fold(acc, arr, f)` | **Tight loop** — left fold |
+| `native_int_arr_from_list(lst)` | Build from List(Int) |
+| `native_int_arr_to_list(arr)` | Convert to List(Int) |
+| *(float variants: same API, prefix `native_float_arr_*`)* | |
+
+Wrapped in `stdlib/native_array.march` (NativeArray module).
+
+Benchmark: `bench/array_numeric.march` measures List fold vs NativeArray tight loop
+for sum, map, and fold over 100 000 elements.
+
+---
+
+**Phase 2 — Flat array type in LLVM IR (planned):**
+
+Add `TNativeArray of ty` to TIR:
+- `lib/tir/tir.ml` — new type constructor
+- `lib/tir/lower.ml` — lower `NativeArray` builtins to TIR `ENativeArrayOp` nodes
+- `lib/tir/llvm_emit.ml` — emit GEP-based load/store loops with:
+  - `!llvm.loop.vectorize.enable !1` metadata on numeric loops
+  - `align 32` on allocation sites (requires `posix_memalign` in runtime for AVX2)
+  - Loop structure: header → body (vector unrolled) → tail (scalar) → exit
+
+Example of what the Level 2 emit produces for `native_float_arr_map(arr, fn x -> x *. 2.0)`:
 ```llvm
-; Array.map(arr, fn x -> x * 2) with Level 2
-loop:
-  %vec = load <4 x i64>, ptr %arr_ptr, align 32
-  %res = mul <4 x i64> %vec, <i64 2, i64 2, i64 2, i64 2>
-  store <4 x i64> %res, ptr %out_ptr, align 32
-  ; ... scalar tail for remaining 0-3 elements
+; Vectorized body (4 doubles at a time for AVX2)
+loop.body:
+  %vec = load <4 x double>, ptr %arr_ptr, align 32
+  %res = fmul <4 x double> %vec, <double 2.0, double 2.0, double 2.0, double 2.0>
+  store <4 x double> %res, ptr %out_ptr, align 32
+  br label %loop.check
+; Scalar tail for remaining 0–3 elements
 ```
 
-**Why it matters for March:** Numeric array operations are the backbone of DataFrame queries, statistical computation, and scientific computing. Without vectorization, March leaves 4-8x performance on the table for these workloads. Combined with columnar layout (P9), this makes March's data processing genuinely competitive.
+Change clang invocation from `-msse4.2` to `-mavx2` (or `-march=native`) to unlock
+256-bit vector registers.
 
-**Effort:** Low (L1) to Medium (L2) | **Impact:** High (4-8x for numeric array ops)
-**Dependencies:** Monomorphization (arrays must be concretely typed); pairs with P9 (columnar layout provides the contiguous arrays)
-**Stage:** LLVM IR emission — extends `lib/tir/llvm_emit.ml`
-**Status:** Planned
+---
+
+**Phase 3 — Auto-vectorize stdlib (planned):**
+
+Once Phase 2 is done, rewrite the hot paths in `stdlib/dataframe.march` to use
+`NativeArray` columns instead of `List`-backed `IntCol`/`FloatCol`.  Combined with P9
+(columnar layout), this makes March DataFrame queries competitive with Polars.
+
+---
+
+**Effort:** Phase 0–1 done (low); Phase 2 medium; Phase 3 high
+**Impact:** 5–10× interpreter speedup for numeric ops (measured); 4–8× compiled speedup after Phase 2
+**Dependencies:** Phase 2 needs monomorphization; Phase 3 pairs with P9
+**Benchmark:** `bench/array_numeric.march`
+**Status:** Phase 0–1 done
 
 ---
 
