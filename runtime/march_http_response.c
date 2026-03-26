@@ -98,6 +98,11 @@ const size_t MARCH_PLAINTEXT_BODY_LEN = sizeof(MARCH_PLAINTEXT_BODY) - 1;
  * This is separate from the March GC heap — no malloc on the hot path. */
 static _Thread_local char   tls_scratch[MARCH_RESPONSE_SCRATCH_SIZE];
 
+/* Returns a pointer to the calling thread's TLS scratch buffer.
+ * Used by the event loop to snapshot scratch bytes before an EAGAIN return
+ * so deferred iovecs remain valid across event loop iterations. */
+char *march_response_tls_scratch(void) { return tls_scratch; }
+
 /* Allocate `needed` bytes from the calling thread's scratch buffer,
  * advancing the offset stored in resp->scratch_used.
  * Returns a pointer to the allocated region, or NULL if the buffer is full.

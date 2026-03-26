@@ -6,11 +6,15 @@
 #pragma once
 
 #include "march_http_parse_simd.h"
+#include "march_runtime.h"
 #include <stddef.h>
 #include <stdint.h>
 
 /* Closure function pointer: fn(closure, arg) → result. */
 typedef void *(*closure_fn_t)(void *clo, void *arg);
+
+/* Build an empty March List (Nil tag=0).  Used for empty headers lists. */
+static inline void *make_nil(void) { return march_alloc(16); }
 
 /* Build a March Conn heap object directly from a parsed SIMD request.
  * This is the fast path that avoids the intermediate Ok(tuple(...)) allocation
