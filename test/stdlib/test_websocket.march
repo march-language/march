@@ -7,9 +7,9 @@
 mod TestWebSocket do
 
 -- Local mirrors of WebSocket private types (matched structurally at runtime).
-ptype WsFrame = TextFrame(String) BinaryFrame(String) Ping | Pong | Close(Int, String)
+ptype WsFrame = TextFrame(String) | BinaryFrame(String) | Ping | Pong | Close(Int, String)
 ptype WsSocket = WsSocket(Int)
-ptype SelectResult = WsData(WsFrame) ActorMsg | Timeout
+ptype SelectResult = WsData(WsFrame) | ActorMsg | Timeout
 
 describe "WsFrame constructors" do
   test "TextFrame stores content" do

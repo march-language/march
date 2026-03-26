@@ -7,7 +7,7 @@
 mod TestHttpClient do
 
 -- Local mirror of HttpClient.ErrorRecovery (private type).
-ptype ErrorRecovery = Recover(a) Fail(b)
+ptype ErrorRecovery = Recover(a) | Fail(b)
 
 pfn make_bare_req() do
   Request(Get, SchemeHttp, "example.com", None, "/", None, Nil, "")

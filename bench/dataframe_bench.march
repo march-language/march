@@ -71,8 +71,8 @@ pfn bench_filter(df : DataFrame) : Unit do
   let t1 = unix_time(())
   let ms = elapsed_ms(t0, t1)
   match result do
-  | Err(e)  -> println("Error: " ++ e)
-  | Ok(out) -> println("Result rows: " ++ int_to_string(DataFrame.row_count(out)))
+  Err(e)  -> println("Error: " ++ e)
+  Ok(out) -> println("Result rows: " ++ int_to_string(DataFrame.row_count(out)))
   end
   report("Filter", ms)
 end
@@ -86,8 +86,8 @@ pfn bench_sort(df : DataFrame) : Unit do
   let t1 = unix_time(())
   let ms = elapsed_ms(t0, t1)
   match result do
-  | Err(e)  -> println("Error: " ++ e)
-  | Ok(out) -> println("Result rows: " ++ int_to_string(DataFrame.row_count(out)))
+  Err(e)  -> println("Error: " ++ e)
+  Ok(out) -> println("Result rows: " ++ int_to_string(DataFrame.row_count(out)))
   end
   report("Sort", ms)
 end
@@ -100,8 +100,8 @@ pfn bench_groupby(df : DataFrame) : Unit do
   let t1 = unix_time(())
   let ms = elapsed_ms(t0, t1)
   match result do
-  | Err(e)  -> println("Error: " ++ e)
-  | Ok(out) ->
+  Err(e)  -> println("Error: " ++ e)
+  Ok(out) ->
     println("Groups: " ++ int_to_string(DataFrame.row_count(out)))
     DataFrame.print_table(out)
   end
@@ -116,8 +116,8 @@ pfn bench_inner_join(left : DataFrame, right : DataFrame) : Unit do
   let t1 = unix_time(())
   let ms = elapsed_ms(t0, t1)
   match result do
-  | Err(e)  -> println("Error: " ++ e)
-  | Ok(out) -> println("Result rows: " ++ int_to_string(DataFrame.row_count(out)))
+  Err(e)  -> println("Error: " ++ e)
+  Ok(out) -> println("Result rows: " ++ int_to_string(DataFrame.row_count(out)))
   end
   report("Inner join", ms)
 end

@@ -461,7 +461,7 @@ let test_standard_interfaces_in_scope () =
     impl Eq(Wrap) do
       fn eq(x, y) do
         match (x, y) do
-        (Wrap(a), Wrap(b)) -> a == b
+        | (Wrap(a), Wrap(b)) -> a == b
         end
       end
     end
@@ -1848,7 +1848,7 @@ let test_parse_negative_lit_pattern () =
   let src = {|mod T do
     fn f(n) do
       match n do
-      -1 -> true
+      | -1 -> true
       _  -> false
       end
     end
@@ -3595,9 +3595,10 @@ let test_fusion_filter_fold () =
     fn ifilter(xs : IntList, p : Int -> Bool) : IntList do
       match xs do
       INil        -> INil
-      ICons(h, t) ->
+      ICons(h, t) -> do
         if p(h) do ICons(h, ifilter(t, p))
         else ifilter(t, p) end
+        end
       end
     end
 
@@ -3769,9 +3770,10 @@ let test_fusion_map_filter_fold () =
     fn ifilter(xs : IntList, p : Int -> Bool) : IntList do
       match xs do
       INil        -> INil
-      ICons(h, t) ->
+      ICons(h, t) -> do
         if p(h) do ICons(h, ifilter(t, p))
         else ifilter(t, p) end
+        end
       end
     end
 
@@ -7919,10 +7921,11 @@ let test_http_parse_url_scheme () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.parse_url("http://localhost:8080/api") do
-      Ok(req) ->
+      Ok(req) -> do
         match Http.scheme(req) do
         SchemeHttp -> "http"
         SchemeHttps -> "https"
+        end
         end
       Err(_) -> "fail"
       end
@@ -7945,10 +7948,11 @@ let test_http_parse_url_port () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.parse_url("http://localhost:3000/") do
-      Ok(req) ->
+      Ok(req) -> do
         match Http.port(req) do
         Some(p) -> p
         None -> 0
+        end
         end
       Err(_) -> -1
       end
@@ -7972,11 +7976,12 @@ let test_http_set_header () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.get("https://example.com") do
-      Ok(req) ->
+      Ok(req) -> do
         let req = Http.set_header(req, "Accept", "application/json")
         match Http.get_request_header(req, "accept") do
         Some(v) -> v
         None -> "none"
+        end
         end
       Err(_) -> "error"
       end
@@ -8123,7 +8128,7 @@ let test_http_client_request_step_transforms () =
     fn f() do
       match Http.get("http://example.com") do
       Err(_) -> "fail"
-      Ok(req) ->
+      Ok(req) -> do
         let step = HttpClient.step_bearer_auth("my-token")
         match step(req) do
         Err(_) -> "fail"
@@ -8132,6 +8137,7 @@ let test_http_client_request_step_transforms () =
           Some(v) -> v
           None -> "none"
           end
+        end
         end
       end
     end
@@ -8143,12 +8149,13 @@ let test_http_client_raise_on_error_status () =
     fn f() do
       match Http.get("http://example.com") do
       Err(_) -> "url_fail"
-      Ok(req) ->
+      Ok(req) -> do
         let resp = Response(Status(500), Nil, "Internal Server Error")
         match HttpClient.step_raise_on_error(req, resp) do
         Ok(_) -> "ok"
         Err(StepError(name, code)) -> name ++ ":" ++ code
         Err(_) -> "other_error"
+        end
         end
       end
     end
@@ -8188,10 +8195,11 @@ let test_http_client_content_type_step () =
       let step = HttpClient.step_content_type("application/json")
       let req = Request(Post, SchemeHttp, "example.com", None, "/api", None, Nil, "{}")
       match step(req) do
-      Ok(transformed) ->
+      Ok(transformed) -> do
         match Http.get_request_header(transformed, "content-type") do
         Some(v) -> v
         None -> "none"
+        end
         end
       Err(_) -> "fail"
       end
@@ -9033,7 +9041,7 @@ let check_int_list msg expected actual =
 let sort_small xs =
   let src = Printf.sprintf {|mod Test do
     fn f() do
-      | Sort.sort_small_by([%s], fn a -> fn b -> a <= b)
+      Sort.sort_small_by([%s], fn a -> fn b -> a <= b)
     end
   end|} (String.concat ", " (List.map string_of_int xs)) in
   let env = eval_with_sort src in
@@ -9043,7 +9051,7 @@ let sort_small xs =
 let timsort xs =
   let src = Printf.sprintf {|mod Test do
     fn f() do
-      | Sort.timsort_by([%s], fn a -> fn b -> a <= b)
+      Sort.timsort_by([%s], fn a -> fn b -> a <= b)
     end
   end|} (String.concat ", " (List.map string_of_int xs)) in
   let env = eval_with_sort src in
@@ -9053,7 +9061,7 @@ let timsort xs =
 let introsort xs =
   let src = Printf.sprintf {|mod Test do
     fn f() do
-      | Sort.introsort_by([%s], fn a -> fn b -> a <= b)
+      Sort.introsort_by([%s], fn a -> fn b -> a <= b)
     end
   end|} (String.concat ", " (List.map string_of_int xs)) in
   let env = eval_with_sort src in
@@ -9224,7 +9232,7 @@ let test_enum_each () =
   (* each is for side effects; we verify it returns Unit *)
   let env = eval_with_enum {|mod Test do
     fn f() do
-      | Enum.each([1, 2, 3], fn x -> x)
+      Enum.each([1, 2, 3], fn x -> x)
     end
   end|} in
   let v = call_fn env "f" [] in
@@ -9738,9 +9746,10 @@ let test_supervision_send_checked_dead_actor () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :error
-      Some(cap) ->
+      Some(cap) -> do
         kill(pid)
         send_checked(cap, Noop())
+        end
       end
     end
   end|} in
@@ -9822,9 +9831,10 @@ let test_supervision_revoke_cap_blocks_send () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :error
-      Some(cap) ->
+      Some(cap) -> do
         revoke_cap(cap)
         send_checked(cap, Noop())
+        end
       end
     end
   end|} in
@@ -9847,10 +9857,11 @@ let test_supervision_revoke_cap_idempotent () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :error
-      Some(cap) ->
+      Some(cap) -> do
         revoke_cap(cap)
         revoke_cap(cap)
         :ok
+        end
       end
     end
   end|} in
@@ -9871,13 +9882,14 @@ let test_supervision_is_cap_valid () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :error
-      Some(cap) ->
+      Some(cap) -> do
         let before = is_cap_valid(cap)
         revoke_cap(cap)
         let after = is_cap_valid(cap)
         if before == true do
           if after == false do :ok else :bad_after end
         else :bad_before end
+        end
       end
     end
   end|} in
@@ -9898,9 +9910,10 @@ let test_supervision_send_revoked_cap_errors () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :setup_error
-      Some(cap) ->
+      Some(cap) -> do
         revoke_cap(cap)
         cap
+        end
       end
     end
   end|} in
@@ -9933,13 +9946,14 @@ let test_supervision_revoke_without_kill () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :error
-      Some(cap) ->
+      Some(cap) -> do
         revoke_cap(cap)
         let alive = is_alive(pid)
         let valid = is_cap_valid(cap)
         if alive == true do
           if valid == false do :ok else :still_valid end
         else :actor_dead end
+        end
       end
     end
   end|} in
@@ -10171,7 +10185,7 @@ let test_seq_map () =
   let env = eval_with_seq {|mod T do
     fn f() do
       let s = Seq.from_list([1, 2, 3])
-      | Seq.to_list(Seq.map(s, fn x -> x * 2))
+      Seq.to_list(Seq.map(s, fn x -> x * 2))
     end
   end|} in
   Alcotest.(check (list int)) "map doubles" [2; 4; 6]
@@ -10181,7 +10195,7 @@ let test_seq_filter () =
   let env = eval_with_seq {|mod T do
     fn f() do
       let s = Seq.from_list([1,2,3,4,5])
-      | Seq.to_list(Seq.filter(s, fn x -> x > 2))
+      Seq.to_list(Seq.filter(s, fn x -> x > 2))
     end
   end|} in
   Alcotest.(check (list int)) "filter" [3; 4; 5]
@@ -10201,9 +10215,10 @@ let test_seq_fold_while () =
   let env = eval_with_seq {|mod T do
     fn f() do
       let s = Seq.from_list([1,2,3,4,5])
-      | Seq.fold_while(s, 0, fn(sum, x) ->
+      Seq.fold_while(s, 0, fn(sum, x) -> do
         if sum + x > 6 do Halt(sum)
         else Continue(sum + x) end
+        end
       )
     end
   end|} in
@@ -10330,10 +10345,11 @@ let test_file_write_read () =
      let env = eval_with_file (Printf.sprintf {|mod T do
        fn f() do
          match File.write("%s", "written data") do
-         Ok(ig) ->
+         Ok(ig) -> do
            match File.read("%s") do
            Ok(s) -> s
            Err(ig) -> "read fail"
+           end
            end
          Err(ig) -> "write fail"
          end
@@ -10421,7 +10437,7 @@ let test_dir_mkdir_list_rmdir () =
     fn f() do
       match Dir.mkdir("%s") do
       Err(e) -> "mkdir failed: " ++ to_string(e)
-      Ok(ig) ->
+      Ok(ig) -> do
         match Dir.list("%s") do
         Err(ig) -> "list failed"
         Ok(ig) ->
@@ -10429,6 +10445,7 @@ let test_dir_mkdir_list_rmdir () =
           Err(ig) -> "rmdir failed"
           Ok(ig) -> "ok"
           end
+        end
         end
       end
     end
@@ -10518,7 +10535,7 @@ let test_integration_file_pipeline () =
     fn f() do
       match Dir.list_full("%s") do
       Err(ig) -> Nil
-      Ok(files) ->
+      Ok(files) -> do
         let txt_files = List.filter(files, fn(p) -> Path.extension(p) == "txt")
         fn collect(ps, acc) do
           match ps do
@@ -10531,6 +10548,7 @@ let test_integration_file_pipeline () =
           end
         end
         collect(txt_files, Nil)
+        end
       end
     end
   end|} base) in
@@ -10754,7 +10772,7 @@ let test_map_fold () =
   let env = eval_with_map (Printf.sprintf {|mod T do
     fn f() do
       let m = Map.from_list([(1, 10), (2, 20), (3, 30)], %s)
-      | Map.fold(0, m, fn(acc) -> fn(k) -> fn(v) -> acc + v)
+      Map.fold(0, m, fn(acc) -> fn(k) -> fn(v) -> acc + v)
     end
   end|} int_cmp) in
   Alcotest.(check int) "fold sums values" 60 (vint (call_fn env "f" []))
@@ -10971,7 +10989,7 @@ let test_set_fold () =
   let env = eval_with_set (Printf.sprintf {|mod T do
     fn f() do
       let s = Set.from_list([1, 2, 3, 4, 5], %s)
-      | Set.fold(0, s, fn(acc, x) -> acc + x)
+      Set.fold(0, s, fn(acc, x) -> acc + x)
     end
   end|} int_cmp) in
   Alcotest.(check int) "fold sum" 15 (vint (call_fn env "f" []))
@@ -11030,7 +11048,7 @@ let test_array_pop () =
     fn f() do
       let a = Array.from_list([1, 2, 3])
       match Array.pop(a) do
-      (a2, last) -> last
+      | (a2, last) -> last
       end
     end
   end|} in
@@ -11041,7 +11059,7 @@ let test_array_pop_length () =
     fn f() do
       let a = Array.from_list([1, 2, 3])
       match Array.pop(a) do
-      (a2, _) -> Array.length(a2)
+      | (a2, _) -> Array.length(a2)
       end
     end
   end|} in
@@ -11060,7 +11078,7 @@ let test_array_map () =
   let env = eval_with_array {|mod T do
     fn f() do
       let a = Array.from_list([1, 2, 3])
-      | Array.to_list(Array.map(a, fn(x) -> x * 2))
+      Array.to_list(Array.map(a, fn(x) -> x * 2))
     end
   end|} in
   let elems = List.map vint (vlist (call_fn env "f" [])) in
@@ -11070,7 +11088,7 @@ let test_array_fold_left () =
   let env = eval_with_array {|mod T do
     fn f() do
       let a = Array.from_list([1, 2, 3, 4, 5])
-      | Array.fold_left(0, a, fn(acc, x) -> acc + x)
+      Array.fold_left(0, a, fn(acc, x) -> acc + x)
     end
   end|} in
   Alcotest.(check int) "fold_left sum" 15 (vint (call_fn env "f" []))
@@ -13181,10 +13199,10 @@ let test_exhaust_tuple_bool_bool_complete () =
   let ctx = typecheck {|mod Test do
     fn go(p : (Bool, Bool)) : Int do
       match p do
-      (true,  true)  -> 0
-      (true,  false) -> 1
-      (false, true)  -> 2
-      (false, false) -> 3
+      | (true,  true)  -> 0
+      | (true,  false) -> 1
+      | (false, true)  -> 2
+      | (false, false) -> 3
       end
     end
   end|} in
@@ -13195,8 +13213,8 @@ let test_exhaust_tuple_wildcards_ok () =
   let ctx = typecheck {|mod Test do
     fn go(p : (Bool, Int)) : Int do
       match p do
-      (true,  _) -> 1
-      (false, _) -> 0
+      | (true,  _) -> 1
+      | (false, _) -> 0
       end
     end
   end|} in
@@ -13207,8 +13225,8 @@ let test_exhaust_tuple_partial () =
   let ctx = typecheck {|mod Test do
     fn go(p : (Bool, Bool)) : Int do
       match p do
-      (true, true)  -> 1
-      (true, false) -> 0
+      | (true, true)  -> 1
+      | (true, false) -> 0
       end
     end
   end|} in
@@ -13996,7 +14014,7 @@ let test_parse_deeply_nested_match () =
   let src = {|mod Test do
     fn classify(x : Int) : Int do
       match x do
-      0 ->
+      0 -> do
         match x do
         0 ->
           match x do
@@ -14004,6 +14022,7 @@ let test_parse_deeply_nested_match () =
           _ -> 1
           end
         _ -> 2
+        end
         end
       _ -> 3
       end
@@ -15232,10 +15251,11 @@ let test_queue_rebalance () =
       let q3 = Queue.push_back(q2, 30)
       -- Pop all from front; the second pop forces rebalancing
       match Queue.pop_front(q3) do
-      Some((_, q4)) ->
+      Some((_, q4)) -> do
         match Queue.pop_front(q4) do
         Some((x, _)) -> x
         None -> -1
+        end
         end
       None -> -1
       end
@@ -15534,11 +15554,12 @@ let test_json_parse_array () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("[1, 2, 3]") do
-      Ok(Array(xs)) ->
+      Ok(Array(xs)) -> do
         match xs do
         Cons(Number(a), Cons(Number(b), Cons(Number(c), Nil))) ->
           float_to_int(a) + float_to_int(b) + float_to_int(c)
         _ -> -1
+        end
         end
       _ -> -2
       end
@@ -15562,10 +15583,11 @@ let test_json_parse_object () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("{\"x\": 1}") do
-      Ok(obj) ->
+      Ok(obj) -> do
         match Json.get(obj, "x") do
         Some(Number(n)) -> float_to_int(n)
         _ -> -1
+        end
         end
       _ -> -2
       end
@@ -15577,10 +15599,11 @@ let test_json_parse_nested () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("{\"a\":{\"b\":42}}") do
-      Ok(obj) ->
+      Ok(obj) -> do
         match Json.get_in(obj, Cons("a", Cons("b", Nil))) do
         Some(Number(n)) -> float_to_int(n)
         _ -> -1
+        end
         end
       _ -> -2
       end
@@ -15592,10 +15615,11 @@ let test_json_parse_whitespace () =
   let env = eval_with_json {|mod Test do
     fn f() do
       match Json.parse("  {  \"k\"  :  true  }  ") do
-      Ok(obj) ->
+      Ok(obj) -> do
         match Json.get(obj, "k") do
         Some(Bool(b)) -> b
         _ -> false
+        end
         end
       _ -> false
       end
