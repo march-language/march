@@ -88,7 +88,7 @@ doc "Returns the last element. Panics on empty list."
 fn last(xs : List(a)) : a do
   match xs do
   | Nil        -> panic("List.last: empty list")
-  Cons(x, Nil) -> x
+  | Cons(x, Nil) -> x
   | Cons(_, t)   -> last(t)
   end
 end
@@ -244,7 +244,7 @@ fn intersperse(xs : List(a), sep : a) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
     | Nil           -> reverse(acc)
-    Cons(x, Nil)  -> reverse(Cons(x, acc))
+    | Cons(x, Nil)  -> reverse(Cons(x, acc))
     | Cons(h, t)    -> go(t, Cons(sep, Cons(h, acc)))
     end
   end
@@ -317,14 +317,14 @@ fn sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   fn step_pairs(groups : List(List(a)), acc : List(List(a))) : List(List(a)) do
     match groups do
     | Nil -> reverse(acc)
-    Cons(g, Nil) -> reverse(Cons(g, acc))
+    | Cons(g, Nil) -> reverse(Cons(g, acc))
     | Cons(g1, Cons(g2, rest)) -> step_pairs(rest, Cons(merge(g1, g2), acc))
     end
   end
   fn sort_loop(groups : List(List(a))) : List(a) do
     match groups do
     | Nil -> Nil
-    Cons(sole, Nil) -> sole
+    | Cons(sole, Nil) -> sole
     | _ -> sort_loop(step_pairs(groups, Nil))
     end
   end

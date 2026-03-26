@@ -270,7 +270,7 @@ pfn node_remove(node, x, h, eq, level) do
       let new_elems = coll_remove_elem(elems, x, eq)
       match new_elems do
       | Nil -> HEmpty
-      Cons(sole, Nil) -> HLeaf(ch, sole)
+      | Cons(sole, Nil) -> HLeaf(ch, sole)
       | _ -> HCollision(ch, new_elems)
       end end
     end
@@ -287,7 +287,7 @@ pfn node_remove(node, x, h, eq, level) do
         let new_children = list_delete_at(children, idx)
         match new_children do
         | Nil -> HEmpty
-        Cons(sole, Nil) ->
+        | Cons(sole, Nil) ->
           match sole do
           | HLeaf(_, _) -> sole
           | HCollision(_, _) -> sole

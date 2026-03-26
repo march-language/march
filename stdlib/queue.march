@@ -93,14 +93,14 @@ Returns Some((element, new_queue)) if non-empty, or None if empty.
 fn pop_back(q) do
   match q do
   | Queue(Nil, Nil) -> None
-  Queue(front, Nil) -> do
+  | Queue(front, Nil) -> do
     let back2 = rev(front, Nil)
     match back2 do
     | Nil -> None
     | Cons(h, t) -> Some((h, Queue(Nil, t)))
     end
   end
-  Queue(front, Cons(h, t)) -> Some((h, Queue(front, t)))
+  | Queue(front, Cons(h, t)) -> Some((h, Queue(front, t)))
   end
 end
 
@@ -124,7 +124,7 @@ fn peek_back(q) do
   match q do
   | Queue(Nil, Nil) -> None
   | Queue(_, Cons(h, _)) -> Some(h)
-  Queue(front, Nil) -> do
+  | Queue(front, Nil) -> do
     let back2 = rev(front, Nil)
     match back2 do
     | Nil -> None

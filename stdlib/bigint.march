@@ -339,7 +339,7 @@ fn div(a : BigInt, b : BigInt) : BigInt do
     | BigInt(sa, da) -> do
       -- Simple single-limb fast path
       match db do
-      Cons(d, Nil) -> do
+      | Cons(d, Nil) -> do
         let (q, _) = div_digit(da, d)
         match q do
         | Nil -> BigInt(true, Nil)
@@ -367,7 +367,7 @@ fn mod_(a : BigInt, b : BigInt) : BigInt do
     match a do
     | BigInt(sa, da) -> do
       match db do
-      Cons(d, Nil) -> do
+      | Cons(d, Nil) -> do
         let (_, r) = div_digit(da, d)
         if r == 0 do BigInt(true, Nil)
         else BigInt(sa, Cons(r, Nil)) end
@@ -495,7 +495,7 @@ end
 doc "Returns true if the BigInt is negative."
 fn is_negative(n : BigInt) : Bool do
   match n do
-  BigInt(false, Nil) -> false
+  | BigInt(false, Nil) -> false
   | BigInt(false, _)   -> true
   | _                  -> false
   end
@@ -504,7 +504,7 @@ end
 doc "Returns true if the BigInt is positive (> 0)."
 fn is_positive(n : BigInt) : Bool do
   match n do
-  BigInt(true, Nil) -> false
+  | BigInt(true, Nil) -> false
   | BigInt(true, _)   -> true
   | _                 -> false
   end

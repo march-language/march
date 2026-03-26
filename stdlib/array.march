@@ -107,7 +107,7 @@ end
 pfn lst_last(lst) do
   match lst do
   | Nil -> panic("Array.pop: empty")
-  Cons(h, Nil) -> h
+  | Cons(h, Nil) -> h
   | Cons(_, t) -> lst_last(t)
   end
 end

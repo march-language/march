@@ -162,7 +162,7 @@ fn histogram_series(values : List(Float), bins : Int) : Series do
   fn list_last_val(lst : List(Float)) : Option(Float) do
     match lst do
     | Nil -> None
-    Cons(h, Nil) -> Some(h)
+    | Cons(h, Nil) -> Some(h)
     | Cons(_, t) -> list_last_val(t)
     end
   end
@@ -367,7 +367,7 @@ end
 pfn join_strs(lst : List(String), sep : String) : String do
   match lst do
   | Nil -> ""
-  Cons(s, Nil) -> s
+  | Cons(s, Nil) -> s
   | Cons(s, rest) -> s ++ sep ++ join_strs(rest, sep)
   end
 end
@@ -414,7 +414,7 @@ end
 pfn list_last_f(lst : List(Float)) : Option(Float) do
   match lst do
   | Nil -> None
-  Cons(h, Nil) -> Some(h)
+  | Cons(h, Nil) -> Some(h)
   | Cons(_, t) -> list_last_f(t)
   end
 end

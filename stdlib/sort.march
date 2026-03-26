@@ -112,14 +112,14 @@ fn mergesort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   fn step_pairs(groups : List(List(a)), acc : List(List(a))) : List(List(a)) do
     match groups do
     | Nil -> reverse_list(acc)
-    Cons(g, Nil) -> reverse_list(Cons(g, acc))
+    | Cons(g, Nil) -> reverse_list(Cons(g, acc))
     | Cons(g1, Cons(g2, rest)) -> step_pairs(rest, Cons(merge_sorted(g1, g2, cmp), acc))
     end
   end
   fn sort_loop(groups : List(List(a))) : List(a) do
     match groups do
     | Nil -> Nil
-    Cons(sole, Nil) -> sole
+    | Cons(sole, Nil) -> sole
     | _ -> sort_loop(step_pairs(groups, Nil))
     end
   end
@@ -278,20 +278,20 @@ Prefer timsort_by or mergesort_by for general-purpose sorting.
 fn sort_small_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   match xs do
   | Nil -> Nil
-  Cons(a, Nil) -> xs
-  Cons(a, Cons(b, Nil)) ->
+  | Cons(a, Nil) -> xs
+  | Cons(a, Cons(b, Nil)) ->
     sort2(a, b, cmp)
-  Cons(a, Cons(b, Cons(c, Nil))) ->
+  | Cons(a, Cons(b, Cons(c, Nil))) ->
     sort3(a, b, c, cmp)
-  Cons(a, Cons(b, Cons(c, Cons(d, Nil)))) ->
+  | Cons(a, Cons(b, Cons(c, Cons(d, Nil)))) ->
     sort4(a, b, c, d, cmp)
-  Cons(a, Cons(b, Cons(c, Cons(d, Cons(e, Nil))))) ->
+  | Cons(a, Cons(b, Cons(c, Cons(d, Cons(e, Nil))))) ->
     sort5(a, b, c, d, e, cmp)
-  Cons(a, Cons(b, Cons(c, Cons(d, Cons(e, Cons(f, Nil)))))) ->
+  | Cons(a, Cons(b, Cons(c, Cons(d, Cons(e, Cons(f, Nil)))))) ->
     sort6(a, b, c, d, e, f, cmp)
-  Cons(a, Cons(b, Cons(c, Cons(d, Cons(e, Cons(f, Cons(g, Nil))))))) ->
+  | Cons(a, Cons(b, Cons(c, Cons(d, Cons(e, Cons(f, Cons(g, Nil))))))) ->
     sort7(a, b, c, d, e, f, g, cmp)
-  Cons(a, Cons(b, Cons(c, Cons(d, Cons(e, Cons(f, Cons(g, Cons(h, Nil)))))))) ->
+  | Cons(a, Cons(b, Cons(c, Cons(d, Cons(e, Cons(f, Cons(g, Cons(h, Nil)))))))) ->
     sort8(a, b, c, d, e, f, g, h, cmp)
   | _ ->
     mergesort_by(xs, cmp)
