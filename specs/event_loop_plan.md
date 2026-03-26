@@ -1,9 +1,10 @@
 # Plan: Event-Loop HTTP Server (The Architectural Ceiling)
 
 ## Status
-**Phases 1–2 complete.** Non-blocking I/O infrastructure + kqueue/epoll event loop
-with SO_REUSEPORT implemented. Phases 3–4 (per-thread arena, io_uring) are optional
-future work. Thread-per-connection fallback retained via compile flag.
+**Phases 0, 0.5, 1–2 complete.** Response write batching + RC cleanup, non-blocking
+I/O infrastructure, and kqueue/epoll event loop with SO_REUSEPORT implemented.
+Phases 3–4 (per-thread arena, io_uring) are optional future work.
+Thread-per-connection fallback retained via compile flag.
 
 ---
 
@@ -77,6 +78,59 @@ The gap to TechEmpower top is mostly: (a) 28-core server vs 8-core laptop,
 ---
 
 ## Implementation Phases
+
+---
+
+### Phase 0 — Response write batching ✓ DONE
+
+**Files**: `runtime/march_http.c`, `runtime/march_http_response.h`,
+`runtime/march_http_response.c`
+
+**Problem**: The pipelining loop in `connection_thread` called `writev()` once
+per pipelined request. With wrk sending 16–32 requests per `recv()`, that is
+16–32 separate `writev()` syscalls per kernel round-trip — even though all
+responses are ready simultaneously.
+
+**Fix**: Accumulate all response iovecs for a pipelined batch into a single
+stack array and issue one `writev_all()` for the entire batch.
+
+1. Added `march_response_clear_no_free(march_response_t *)` — resets
+   `iov_count` to 0 without touching `scratch_used`, enabling a single
+   `march_response_t` to be reused across N responses while their iovecs
+   pointing into the TLS scratch buffer remain valid.
+
+2. Added `march_populate_response_ka()` static helper — builds a response
+   into an existing `march_response_t` (resetting only `iov_count`) so the
+   TLS scratch offset carries forward across the batch.  Each response in
+   the batch therefore uses a non-overlapping slice of the scratch buffer.
+
+3. Replaced the per-request `march_process_one_request()` loop with an
+   inline batching loop:
+   - Stack array `batch_iov[512]` (32 req × 16 iov typical = 8 KB stack).
+   - `memcpy` each response's `resp.iov[]` into the batch array.
+   - Single `writev_all(fd, batch_iov, batch_n)` after the loop.
+   - Fallback: if a batch would exceed `CONN_BATCH_IOV_MAX`, flush and reset.
+
+4. Socket tuning in `connection_thread`:
+   - `TCP_NOPUSH` (macOS) / `TCP_CORK` (Linux) bracketing the batched write.
+   - `SO_SNDBUF` ≥ 128 KB to absorb multi-response batches.
+
+**Expected gain**: eliminates N−1 extra `writev()` syscalls per pipelined
+batch, reducing kernel transitions from ~32 to 1 per `recv()` cycle.
+
+---
+
+### Phase 0.5 — Remove per-request pipeline RC increment ✓ DONE
+
+**File**: `runtime/march_http.c`
+
+Removed `march_incrc(pipeline)` before each `fn(pipeline, conn)` call in
+`march_process_one_request`.  The pipeline closure is held for the full
+lifetime of the connection (and the server pool), so the per-request
+increment/decrement pair is pure overhead — an atomic RMW on every request
+with no effect on lifetime.
+
+---
 
 ### Phase 1 — Non-blocking recv/send infrastructure (prereq)
 
