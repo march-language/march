@@ -1,0 +1,168 @@
+# Bastion: Caching
+
+**Status**: Draft | **Version**: 0.1 | **Part of**: [Bastion Design Spec](README.md)
+
+---
+
+## Overview
+
+Bastion provides three layers of caching, all backed by [Vault](vault.md):
+
+1. **HTTP cache headers** — ETag and Cache-Control on responses
+2. **Response caching** — full response caching for expensive routes
+3. **Fragment caching** — caching rendered template partials
+
+---
+
+## HTTP Cache Headers (ETag)
+
+Bastion can automatically generate ETags from response bodies. When a client sends `If-None-Match` with a matching ETag, Bastion returns a `304 Not Modified` with no body — saving bandwidth and render time.
+
+```march
+mod Bastion.Cache do
+  # Middleware: auto-generates ETag from response body hash
+  fn etag(conn: Conn) -> Conn do
+    # Computes ETag after the response is rendered, before sending
+    # If request includes If-None-Match and it matches, short-circuits to 304
+  end
+
+  # Middleware: sets Cache-Control header
+  fn cache_control(conn: Conn, directives: String) -> Conn do
+    conn |> put_resp_header("cache-control", directives)
+  end
+end
+
+# Usage in endpoint
+fn call(conn) do
+  conn
+  |> parse_body()
+  |> Bastion.Cache.etag()
+  |> Bastion.Cache.cache_control("public, max-age=3600")
+  |> MyApp.Router.route()
+end
+
+# Or per-route
+fn route(conn, :get, ["posts", slug]) do
+  post = MyApp.Blog.get_by_slug(conn.assigns.db, slug)
+  conn
+  |> Bastion.Cache.cache_control("public, max-age=600")
+  |> html(~H"""<PostPage post={post} />""")
+end
+```
+
+The ETag middleware computes a hash of the rendered response body, stores it in Vault for fast comparison on subsequent requests, and handles the `If-None-Match` / `304` flow automatically.
+
+---
+
+## Response Caching
+
+For expensive routes (e.g., pages requiring multiple DB queries), Bastion can cache the entire rendered response in Vault:
+
+```march
+mod Bastion.Cache do
+  # Cache the full response for this route
+  fn cached(conn: Conn, key: String, ttl: Int, generator: fn(Conn) -> Conn) -> Conn do
+    case Vault.get(:response_cache, key) do
+      Some(%{status: status, headers: headers, body: body}) ->
+        conn
+        |> put_status(status)
+        |> merge_resp_headers(headers)
+        |> send_resp(body)
+      None ->
+        result_conn = generator(conn)
+        Vault.put(:response_cache, key, %{
+          status: result_conn.status,
+          headers: result_conn.resp_headers,
+          body: result_conn.resp_body
+        }, ttl: ttl)
+        result_conn
+    end
+  end
+end
+
+# Usage
+fn route(conn, :get, ["posts"]) do
+  Bastion.Cache.cached(conn, "posts:index", 60_000, fn conn ->
+    posts = MyApp.Blog.list_all(conn.assigns.db)
+    conn |> html(~H"""<PostIndex posts={posts} />""")
+  end)
+end
+```
+
+---
+
+## Fragment Caching
+
+Cache expensive template fragments without caching the entire response. Useful when most of a page is dynamic but one section is expensive to render:
+
+```march
+mod Bastion.Cache do
+  # Cache a rendered template fragment
+  fn fragment(key: String, ttl: Int, generator: fn() -> Fragment) -> Fragment do
+    case Vault.get(:fragment_cache, key) do
+      Some(cached_fragment) -> cached_fragment
+      None ->
+        fragment = generator()
+        Vault.put(:fragment_cache, key, fragment, ttl: ttl)
+        fragment
+    end
+  end
+end
+
+# Usage inside a template
+fn index(conn) do
+  user = conn.assigns.current_user
+  conn |> html(~H"""
+  <PageLayout title="Dashboard">
+    <h1>Welcome, {user.name}</h1>
+
+    <!-- This fragment is cached for 5 minutes -->
+    {Bastion.Cache.fragment("stats:global", 300_000, fn ->
+      stats = MyApp.Stats.compute_global()
+      ~H"""
+      <div class="global-stats">
+        <StatCard label="Total Users" value={stats.total_users} />
+        <StatCard label="Posts Today" value={stats.posts_today} />
+        <StatCard label="Active Now" value={stats.active_now} />
+      </div>
+      """
+    end)}
+
+    <!-- This part renders fresh every time -->
+    <UserActivity user={user} />
+  </PageLayout>
+  """)
+end
+```
+
+---
+
+## Cache Invalidation
+
+Vault's TTL handles time-based expiration. For event-based invalidation (e.g., "clear the posts cache when a new post is created"), use explicit deletion:
+
+```march
+mod MyApp.Blog do
+  fn create_post(db, params) do
+    post = Depot.query(db, "INSERT INTO posts ...")
+    # Invalidate relevant caches
+    Vault.delete(:response_cache, "posts:index")
+    Vault.delete(:fragment_cache, "stats:global")
+    post
+  end
+end
+```
+
+For more complex invalidation patterns, cache keys can use prefixes and Vault's `match` function:
+
+```march
+# Invalidate all cached fragments for a specific user
+Vault.match(:fragment_cache, "user:#{user_id}:*")
+|> List.each(fn {key, _} -> Vault.delete(:fragment_cache, key) end)
+```
+
+---
+
+## Static Asset Cache Busting
+
+Static files and WASM island bundles use content-hash URLs (generated by Forge at build time) with long-lived `Cache-Control` headers. This is handled by `Bastion.Static` automatically — see [static-files.md](static-files.md) for details.
