@@ -129,14 +129,16 @@ Multiple calls with different pids add multiple entries (multi-device support).
 fn track_state(pst, topic, key, pid, meta_json) do
   match pst do
   | PresenceState(outer) ->
-    let inner   = get_topic_map(pst, topic)
-    let new_meta = PresenceMeta(pid, meta_json)
-    let entry   = match Map.get(inner, key, str_cmp) do
-      | Some(PresenceEntry(metas)) -> PresenceEntry(Cons(new_meta, metas))
-      | None                       -> PresenceEntry(Cons(new_meta, Nil))
+    do
+      let inner    = get_topic_map(pst, topic)
+      let new_meta = PresenceMeta(pid, meta_json)
+      let entry    = match Map.get(inner, key, str_cmp) do
+        | Some(PresenceEntry(metas)) -> PresenceEntry(Cons(new_meta, metas))
+        | None                       -> PresenceEntry(Cons(new_meta, Nil))
+      end
+      let new_inner = Map.insert(inner, key, entry, str_cmp)
+      PresenceState(Map.insert(outer, topic, new_inner, str_cmp))
     end
-    let new_inner = Map.insert(inner, key, entry, str_cmp)
-    PresenceState(Map.insert(outer, topic, new_inner, str_cmp))
   end
 end
 
@@ -150,16 +152,20 @@ Returns the updated state.
 fn untrack_state(pst, topic, key, pid) do
   match pst do
   | PresenceState(outer) ->
-    let inner = get_topic_map(pst, topic)
-    match Map.get(inner, key, str_cmp) do
-    | None -> pst
-    | Some(PresenceEntry(metas)) ->
-      let trimmed = list_remove_meta(metas, pid)
-      let new_inner = match trimmed do
-        | Nil -> Map.remove(inner, key, str_cmp)
-        | _   -> Map.insert(inner, key, PresenceEntry(trimmed), str_cmp)
+    do
+      let inner = get_topic_map(pst, topic)
+      match Map.get(inner, key, str_cmp) do
+      | None -> pst
+      | Some(PresenceEntry(metas)) ->
+        do
+          let trimmed = list_remove_meta(metas, pid)
+          let new_inner = match trimmed do
+            | Nil -> Map.remove(inner, key, str_cmp)
+            | _   -> Map.insert(inner, key, PresenceEntry(trimmed), str_cmp)
+          end
+          PresenceState(Map.insert(outer, topic, new_inner, str_cmp))
+        end
       end
-      PresenceState(Map.insert(outer, topic, new_inner, str_cmp))
     end
   end
 end

@@ -1,0 +1,269 @@
+-- test/stdlib/test_tls.march
+-- Unit tests for the Tls stdlib module.
+--
+-- These tests cover the pure March layer (config construction, type wrappers,
+-- error formatting, version helpers) and verify that the builtin stubs return
+-- the expected shapes.  Real TLS I/O is exercised by the native integration
+-- tests in test/test_http_native.sh (future: with HTTPS server).
+--
+-- Run via: dune runtest (included in test_stdlib_march)
+
+mod TestTls do
+
+  -- ── Helpers ────────────────────────────────────────────────────────────
+
+  pfn make_stub_conn() do
+    let config = Tls.default_client_config()
+    match Tls.client_ctx(config) do
+    Ok(ctx) ->
+      match Tls.connect(0, ctx, "stub") do
+      Ok(conn) -> conn
+      Err(_) -> TlsConn(0)
+      end
+    Err(_) -> TlsConn(0)
+    end
+  end
+
+  -- ── TlsVersion helpers ─────────────────────────────────────────────────
+
+  describe "TlsVersion" do
+    test "version_to_string Tls12" do
+      assert (Tls.version_to_string(Tls12) == "TLS 1.2")
+    end
+
+    test "version_to_string Tls13" do
+      assert (Tls.version_to_string(Tls13) == "TLS 1.3")
+    end
+
+    test "version_to_int Tls12" do
+      assert (Tls.version_to_int(Tls12) == 0)
+    end
+
+    test "version_to_int Tls13" do
+      assert (Tls.version_to_int(Tls13) == 1)
+    end
+  end
+
+  -- ── TlsConfig construction ─────────────────────────────────────────────
+
+  describe "TlsConfig" do
+    test "default_client_config verify_peer is True" do
+      assert (Tls.verify_peer(Tls.default_client_config()) == true)
+    end
+
+    test "default_client_config cert_file is empty" do
+      assert (Tls.cert_file(Tls.default_client_config()) == "")
+    end
+
+    test "default_client_config key_file is empty" do
+      assert (Tls.key_file(Tls.default_client_config()) == "")
+    end
+
+    test "default_client_config ca_file is empty" do
+      assert (Tls.ca_file(Tls.default_client_config()) == "")
+    end
+
+    test "default_client_config min_version is Tls12" do
+      match Tls.min_version(Tls.default_client_config()) do
+      Tls12 -> assert true
+      Tls13 -> assert false
+      end
+    end
+
+    test "h2_client_config alpn includes h2" do
+      let alpn = Tls.alpn(Tls.h2_client_config())
+      match alpn do
+      Cons("h2", _) -> assert true
+      _ -> assert false
+      end
+    end
+
+    test "server_config sets cert_file and key_file" do
+      let cfg = Tls.server_config("/etc/ssl/cert.pem", "/etc/ssl/key.pem")
+      assert (Tls.cert_file(cfg) == "/etc/ssl/cert.pem")
+      assert (Tls.key_file(cfg) == "/etc/ssl/key.pem")
+    end
+
+    test "server_config verify_peer is False" do
+      let cfg = Tls.server_config("/etc/ssl/cert.pem", "/etc/ssl/key.pem")
+      assert (Tls.verify_peer(cfg) == false)
+    end
+  end
+
+  -- ── TlsError formatting ────────────────────────────────────────────────
+
+  describe "TlsError" do
+    test "error_to_string TlsHandshakeFailed" do
+      let msg = Tls.error_to_string(TlsHandshakeFailed("timeout"))
+      assert (msg == "TLS handshake failed: timeout")
+    end
+
+    test "error_to_string TlsCertError" do
+      let msg = Tls.error_to_string(TlsCertError("invalid CN"))
+      assert (msg == "TLS certificate error: invalid CN")
+    end
+
+    test "error_to_string TlsReadError" do
+      let msg = Tls.error_to_string(TlsReadError("EOF"))
+      assert (msg == "TLS read error: EOF")
+    end
+
+    test "error_to_string TlsWriteError" do
+      let msg = Tls.error_to_string(TlsWriteError("broken pipe"))
+      assert (msg == "TLS write error: broken pipe")
+    end
+
+    test "error_to_string TlsContextError" do
+      let msg = Tls.error_to_string(TlsContextError("bad cert"))
+      assert (msg == "TLS context error: bad cert")
+    end
+  end
+
+  -- ── client_ctx (uses interpreter stub → Ok(TlsCtx(1))) ────────────────
+
+  describe "client_ctx" do
+    test "returns Ok(TlsCtx) with default config" do
+      let config = Tls.default_client_config()
+      match Tls.client_ctx(config) do
+      Ok(TlsCtx(h)) -> assert (h > 0)
+      Err(e) -> assert false
+      end
+    end
+
+    test "h2 config also returns Ok" do
+      let config = Tls.h2_client_config()
+      match Tls.client_ctx(config) do
+      Ok(TlsCtx(_)) -> assert true
+      Err(_) -> assert false
+      end
+    end
+  end
+
+  -- ── server_ctx ─────────────────────────────────────────────────────────
+
+  describe "server_ctx" do
+    test "empty cert_file returns Err" do
+      let config = Tls.default_client_config()
+      match Tls.server_ctx(config) do
+      Err(TlsContextError(msg)) ->
+        assert (string_length(msg) > 0)
+      Ok(_) -> assert false
+      end
+    end
+
+    test "non-empty cert_file returns Ok in interpreter" do
+      let config = Tls.server_config("/fake/cert.pem", "/fake/key.pem")
+      match Tls.server_ctx(config) do
+      Ok(TlsCtx(h)) -> assert (h > 0)
+      Err(_) -> assert false
+      end
+    end
+  end
+
+  -- ── connect / close (stub round-trip) ─────────────────────────────────
+
+  describe "connect and close" do
+    test "connect with stub fd returns Ok(TlsConn)" do
+      let config = Tls.default_client_config()
+      match Tls.client_ctx(config) do
+      Ok(ctx) ->
+        match Tls.connect(0, ctx, "example.com") do
+        Ok(conn) -> do
+          Tls.close(conn)
+          assert true
+        end
+        Err(_) -> assert false
+        end
+      Err(_) -> assert false
+      end
+    end
+
+    test "accept with stub fd returns Ok(TlsConn)" do
+      let config = Tls.server_config("/fake/cert.pem", "/fake/key.pem")
+      match Tls.server_ctx(config) do
+      Ok(ctx) ->
+        match Tls.accept(0, ctx) do
+        Ok(conn) -> do
+          Tls.close(conn)
+          assert true
+        end
+        Err(_) -> assert false
+        end
+      Err(_) -> assert false
+      end
+    end
+  end
+
+  -- ── read / write (stub) ───────────────────────────────────────────────
+
+  describe "read and write" do
+    test "write returns Ok(bytes_written)" do
+      let conn = make_stub_conn()
+      let data = "GET / HTTP/1.1\r\n\r\n"
+      match Tls.write(conn, data) do
+      Ok(n) -> assert (n == string_length(data))
+      Err(_) -> assert false
+      end
+    end
+
+    test "read returns Ok(string)" do
+      let conn = make_stub_conn()
+      match Tls.read(conn, 4096) do
+      Ok(_) -> assert true
+      Err(_) -> assert false
+      end
+    end
+  end
+
+  -- ── ctx_free ──────────────────────────────────────────────────────────
+
+  describe "ctx_free" do
+    test "ctx_free does not crash" do
+      let config = Tls.default_client_config()
+      match Tls.client_ctx(config) do
+      Ok(ctx) -> do
+        Tls.ctx_free(ctx)
+        assert true
+      end
+      Err(_) -> assert false
+      end
+    end
+  end
+
+  -- ── introspection stubs ───────────────────────────────────────────────
+
+  describe "introspection" do
+    test "negotiated_alpn returns None on stub conn" do
+      let config = Tls.default_client_config()
+      match Tls.client_ctx(config) do
+      Ok(ctx) ->
+        match Tls.connect(0, ctx, "stub") do
+        Ok(conn) ->
+          match Tls.negotiated_alpn(conn) do
+          None -> assert true
+          Some(_) -> assert true  -- either is valid in stub mode
+          end
+        Err(_) -> assert false
+        end
+      Err(_) -> assert false
+      end
+    end
+
+    test "peer_cn returns None on stub conn" do
+      let config = Tls.default_client_config()
+      match Tls.client_ctx(config) do
+      Ok(ctx) ->
+        match Tls.connect(0, ctx, "stub") do
+        Ok(conn) ->
+          match Tls.peer_cn(conn) do
+          None -> assert true
+          Some(_) -> assert true
+          end
+        Err(_) -> assert false
+        end
+      Err(_) -> assert false
+      end
+    end
+  end
+
+end

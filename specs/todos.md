@@ -143,6 +143,7 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 - ✅ Time-travel debugger
 - ✅ Full TUI REPL with JIT
 - ✅ HTTP/WebSocket stdlib + C runtime
+- ✅ **TLS stdlib** — `stdlib/tls.march` (TlsConfig, TlsCtx, TlsConn, TlsVersion, TlsError types; `default_client_config`, `h2_client_config`, `server_config`, `client_ctx`, `server_ctx`, `connect`, `accept`, `read`, `write`, `close`, `ctx_free`, `negotiated_alpn`, `peer_cn`, `https_get`, `error_to_string`, `version_to_string`); `runtime/march_tls.{h,c}` (OpenSSL 3 builtins: `tls_client_ctx`, `tls_server_ctx`, `tls_connect`, `tls_accept`, `tls_read`, `tls_write`, `tls_close`, `tls_ctx_free`, `tls_negotiated_alpn`, `tls_peer_cn`); interpreter stubs in `lib/eval/eval.ml` for all 10 builtins; `test/stdlib/test_tls.march` (27 tests: TlsVersion helpers, TlsConfig accessors, TlsError formatting, client_ctx/server_ctx/connect/accept/read/write/close/ctx_free/negotiated_alpn/peer_cn stubs); `test_stdlib_march.exe` now has 13 tests (added Tls)
 - ✅ Zed editor extension (Tree-sitter grammar)
 - ✅ **Standard Interfaces Eq/Ord/Show/Hash** — merged from `claude/intelligent-austin`; `derive` syntax, eval dispatch for `==`/`show`/`hash`/`compare`, 18 tests
 - ✅ **LSP server** (`march-lsp`) — merged from `claude/vibrant-bartik`; diagnostics, hover, goto-def, completion, inlay hints, semantic tokens, actor info; Zed extension wired up

@@ -167,42 +167,54 @@ fn route_msg(ac, msg, routes, cfg, transport_pid) do
     match find_route(routes, topic) do
     | None ->
       -- No route found — send error
-      let err = Channel.error_msg(join_ref, ref, topic, "unmatched topic")
-      actor_cast(transport_pid, ChannelPush("phx_error", Channel.serialize(err)))
-      ac
+      do
+        let err = Channel.error_msg(join_ref, ref, topic, "unmatched topic")
+        actor_cast(transport_pid, ChannelPush("phx_error", Channel.serialize(err)))
+        ac
+      end
     | Some(route) ->
       -- Build a Channel.Socket for the new process
-      let sock = Channel.new_socket(topic, transport_pid, transport_pid, join_ref)
-      -- Record the topic → transport_pid association
-      register_channel(ac, topic, transport_pid)
+      do
+        let sock = Channel.new_socket(topic, transport_pid, transport_pid, join_ref)
+        -- Record the topic → transport_pid association
+        register_channel(ac, topic, transport_pid)
+      end
     end
 
   | "phx_leave" ->
     -- Notify the channel process to leave
     match lookup_channel(ac, topic) do
     | Some(ch_pid) ->
-      actor_cast(ch_pid, ChannelLeave("user_left"))
-      deregister_channel(ac, topic)
+      do
+        actor_cast(ch_pid, ChannelLeave("user_left"))
+        deregister_channel(ac, topic)
+      end
     | None -> ac
     end
 
   | "phx_heartbeat" ->
     -- Respond to heartbeat with phx_reply ok
-    let ok_msg = Channel.reply_msg("", ref, "phoenix", "ok", "{}")
-    actor_cast(transport_pid, ChannelPush("phx_reply", Channel.serialize(ok_msg)))
-    ac
+    do
+      let ok_msg = Channel.reply_msg("", ref, "phoenix", "ok", "{}")
+      actor_cast(transport_pid, ChannelPush("phx_reply", Channel.serialize(ok_msg)))
+      ac
+    end
 
   | _ ->
     -- Regular event: forward to the channel process
     match lookup_channel(ac, topic) do
     | Some(ch_pid) ->
-      actor_cast(ch_pid, ChannelIn(ref, event, payload))
-      ac
+      do
+        actor_cast(ch_pid, ChannelIn(ref, event, payload))
+        ac
+      end
     | None ->
       -- No channel joined for this topic yet
-      let err = Channel.error_msg(join_ref, ref, topic, "not joined")
-      actor_cast(transport_pid, ChannelPush("phx_error", Channel.serialize(err)))
-      ac
+      do
+        let err = Channel.error_msg(join_ref, ref, topic, "not joined")
+        actor_cast(transport_pid, ChannelPush("phx_error", Channel.serialize(err)))
+        ac
+      end
     end
   end
 end
@@ -259,8 +271,10 @@ pfn ws_loop(ws_sock, active, routes, cfg) do
   | TextFrame(text) ->
     match parse_frame(text) do
     | Some(msg) ->
-      let active2 = route_msg(active, msg, routes, cfg, 0)
-      ws_loop(ws_sock, active2, routes, cfg)
+      do
+        let active2 = route_msg(active, msg, routes, cfg, 0)
+        ws_loop(ws_sock, active2, routes, cfg)
+      end
     | None ->
       -- Ignore unparseable frames
       ws_loop(ws_sock, active, routes, cfg)
@@ -277,8 +291,10 @@ pfn send_leave_all(pairs, reason) do
   match pairs do
   | Nil -> ()
   | Cons((_, ch_pid), rest) ->
-    actor_cast(ch_pid, ChannelLeave(reason))
-    send_leave_all(rest, reason)
+    do
+      actor_cast(ch_pid, ChannelLeave(reason))
+      send_leave_all(rest, reason)
+    end
   end
 end
 

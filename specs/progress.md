@@ -225,7 +225,7 @@ march/
     └── test/test_forge.exe   # 15 tests (scaffold, toml)
 ```
 
-## Current State (as of 2026-03-25, post event-loop HTTP server + SIMD HTTP parser + Phase 5 per-process heaps + message passing + zero-copy response builder + Perceus closure-FV RC fix + LSP code actions P2.8+P3.10 + Phase 4 lazy stack growth + crypto builtins for Depot/PostgreSQL + P9 columnar DataFrame + Phoenix-style Channels stdlib)
+## Current State (as of 2026-03-26, post event-loop HTTP server + SIMD HTTP parser + Phase 5 per-process heaps + message passing + zero-copy response builder + Perceus closure-FV RC fix + LSP code actions P2.8+P3.10 + Phase 4 lazy stack growth + crypto builtins for Depot/PostgreSQL + P9 columnar DataFrame + Phoenix-style Channels stdlib + TLS stdlib)
 
 - **Builds clean**
 - **1333 OCaml tests + 7 C test groups (Phase 5) + 10 C scheduler tests (Phase 1+2+4) across 10 dune suites; 37 known pre-existing OCaml failures** (+5 mutual_tco_codegen + 10 borrow_inference + 8 known_call/struct_fusion + 6 escape_analysis + 4 phase4_reduction_codegen) (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing** + **Phase 4: reduction counting in compiled code** + **Phase 4: lazy stack growth**):
@@ -236,7 +236,7 @@ march/
   - `test_properties.exe`: 36 tests, passing (QCheck2 properties)
   - `test_supervision.exe`: 15 tests, passing (actor supervision)
   - `test_lsp.exe`: 120 tests, passing (doc strings, find-refs, rename, sig-help, code actions, snippet completions, folding ranges, type annotation action, remove unused binding action, phase2 enhanced match, quickfix framework, dead code detection, p1.1 typed match stubs, p1.7 fn return/param annotation, batch annotation, P2.8 naming convention fix, P3.10 De Morgan rewrite)
-  - `test_stdlib_march.exe`: 12 tests, passing (Http, HttpTransport, HttpClient, HttpServer, WebSocket, Process, Logger, PubSub, Channel, ChannelServer, Presence, ChannelSocket)
+  - `test_stdlib_march.exe`: 13 tests, passing (Http, HttpTransport, HttpClient, HttpServer, WebSocket, Tls, Process, Logger, PubSub, Channel, ChannelServer, Presence, ChannelSocket)
   - `test_forge.exe`: 15 tests, passing (scaffold/toml)
   - `test_oracle.exe`: requires `MARCH_BIN` env var (oracle/idempotency/pass tests)
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present

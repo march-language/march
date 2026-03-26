@@ -61,12 +61,23 @@ let read_file path =
     Prelude's functions land in global scope (matching bin/main.ml behaviour).
     All other files are returned as a single [DMod] so names are qualified. *)
 let load_stdlib_decls name =
+  Printf.eprintf "Parsing stdlib: %s\n%!" name;
   let path = find_stdlib_file name in
   let src  = read_file path in
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-  let m = March_parser.Parser.module_ March_lexer.Lexer.token lexbuf in
+  let m =
+    (try March_parser.Parser.module_ March_lexer.Lexer.token lexbuf
+     with e ->
+       let pos = lexbuf.Lexing.lex_curr_p in
+       Printf.eprintf "PARSE ERROR in %s at line %d col %d: %s\n%!"
+         name pos.Lexing.pos_lnum
+         (pos.Lexing.pos_cnum - pos.Lexing.pos_bol)
+         (Printexc.to_string e);
+       raise e)
+  in
+  Printf.eprintf "Parsed OK:     %s\n%!" name;
   let m = March_desugar.Desugar.desugar_module m in
   if name = "prelude.march" then
     (* Unwrap outer mod so prelude globals are in scope directly *)
@@ -101,6 +112,7 @@ let all_stdlib_decls =
     "sort.march";
     "csv.march";
     "websocket.march";
+    "tls.march";
     "http_server.march";
     "iterable.march";
     "set.march";
@@ -176,6 +188,10 @@ let () =
     ("websocket", [
       Alcotest.test_case "WebSocket module"
         `Quick (run_stdlib_test "test_websocket.march" "TestWebSocket");
+    ]);
+    ("tls", [
+      Alcotest.test_case "Tls module"
+        `Quick (run_stdlib_test "test_tls.march" "TestTls");
     ]);
     ("pubsub", [
       Alcotest.test_case "PubSub module"

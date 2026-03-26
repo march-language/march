@@ -140,8 +140,10 @@ describe "parse_frame / serialize_msg" do
     let json = ChannelSocket.serialize_msg(m)
     match ChannelSocket.parse_frame(json) do
     | Some(m2) ->
-      assert (Channel.msg_topic(m2) == "room:42")
-      assert (Channel.msg_event(m2) == "new_msg")
+      do
+        assert (Channel.msg_topic(m2) == "room:42")
+        assert (Channel.msg_event(m2) == "new_msg")
+      end
     | None -> assert false
     end
   end

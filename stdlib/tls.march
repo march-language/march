@@ -1,0 +1,348 @@
+-- stdlib/tls.march — TLS (Transport Layer Security) support for March.
+--
+-- Wraps OpenSSL 3 via C builtins to provide TLS client and server
+-- functionality over existing TCP file descriptors.
+--
+-- Architecture:
+--   TlsCtx  — an SSL_CTX (configuration + CA store), long-lived, shareable
+--   TlsConn — a single SSL * connection wrapping one TCP fd
+--
+-- Typical client usage:
+--   let config = Tls.default_client_config()
+--   match Tls.client_ctx(config) do
+--   Ok(ctx) ->
+--     match tcp_connect("example.com", 443) do
+--     Ok(fd) ->
+--       match Tls.connect(fd, ctx, "example.com") do
+--       Ok(conn) ->
+--         Tls.write(conn, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+--         Tls.read(conn, 4096)
+--         Tls.close(conn)
+--       Err(e) -> Err(e)
+--       end
+--     Err(e) -> Err(TlsHandshakeFailed(e))
+--     end
+--   Err(e) -> Err(e)
+--   end
+
+mod Tls do
+
+  -- TlsVersion: minimum accepted TLS protocol version
+  type TlsVersion = Tls12 | Tls13
+
+  -- TlsError: all failure modes for TLS operations
+  type TlsError =
+    TlsHandshakeFailed(String)
+    | TlsCertError(String)
+    | TlsReadError(String)
+    | TlsWriteError(String)
+    | TlsContextError(String)
+
+  -- TlsConfig: configuration for creating a TLS context
+  --
+  -- Fields:
+  --   cert_file    — path to PEM certificate (chain); "" for client-only ctx
+  --   key_file     — path to PEM private key; "" for client-only ctx
+  --   ca_file      — path to PEM CA bundle; "" → system/default roots
+  --   alpn         — ALPN protocol list, e.g. ["h2", "http/1.1"]
+  --   min_version  — minimum TLS version (Tls12 or Tls13)
+  --   verify_peer  — True → verify server cert (always True for clients)
+  type TlsConfig =
+    TlsConfig(
+      String,
+      String,
+      String,
+      List(String),
+      TlsVersion,
+      Bool
+    )
+
+  -- TlsCtx: opaque TLS context handle (wraps SSL_CTX *)
+  type TlsCtx = TlsCtx(Int)
+
+  -- TlsConn: opaque TLS connection handle (wraps SSL *)
+  type TlsConn = TlsConn(Int)
+
+  -- ── Config accessors ──────────────────────────────────────────────────
+
+  fn cert_file(c) do
+    match c do TlsConfig(cert, _, _, _, _, _) -> cert end
+  end
+
+  fn key_file(c) do
+    match c do TlsConfig(_, key, _, _, _, _) -> key end
+  end
+
+  fn ca_file(c) do
+    match c do TlsConfig(_, _, ca, _, _, _) -> ca end
+  end
+
+  fn alpn(c) do
+    match c do TlsConfig(_, _, _, a, _, _) -> a end
+  end
+
+  fn min_version(c) do
+    match c do TlsConfig(_, _, _, _, v, _) -> v end
+  end
+
+  fn verify_peer(c) do
+    match c do TlsConfig(_, _, _, _, _, vp) -> vp end
+  end
+
+  -- ── Default configs ───────────────────────────────────────────────────
+
+  doc """
+  Default client configuration: verify server cert, TLS 1.2+, HTTP/1.1 ALPN.
+
+  >>> Tls.verify_peer(Tls.default_client_config())
+  True
+  """
+  fn default_client_config() do
+    TlsConfig("", "", "", ["http/1.1"], Tls12, true)
+  end
+
+  doc """
+  Client config for HTTPS with H2+HTTP1.1 ALPN negotiation.
+  """
+  fn h2_client_config() do
+    TlsConfig("", "", "", ["h2", "http/1.1"], Tls12, true)
+  end
+
+  doc """
+  Server configuration with a PEM cert+key and no client-cert verification.
+  """
+  fn server_config(cert_path, key_path) do
+    TlsConfig(cert_path, key_path, "", ["http/1.1"], Tls12, false)
+  end
+
+  -- ── TlsVersion helpers ────────────────────────────────────────────────
+
+  doc """
+  Convert a TlsVersion to a human-readable string.
+
+  >>> Tls.version_to_string(Tls12)
+  "TLS 1.2"
+  >>> Tls.version_to_string(Tls13)
+  "TLS 1.3"
+  """
+  fn version_to_string(v) do
+    match v do
+    Tls12 -> "TLS 1.2"
+    Tls13 -> "TLS 1.3"
+    end
+  end
+
+  fn version_to_int(v) do
+    match v do
+    Tls12 -> 0
+    Tls13 -> 1
+    end
+  end
+
+  -- ── Context creation ──────────────────────────────────────────────────
+
+  doc """
+  Create a client-side TLS context from a TlsConfig.
+  Returns Ok(TlsCtx) or Err(TlsError).
+  The ctx can be shared across many connections (thread-safe).
+  """
+  fn client_ctx(config) do
+    let ca    = ca_file(config)
+    let a     = alpn(config)
+    let ver   = version_to_int(min_version(config))
+    let vp    = if verify_peer(config) then 1 else 0
+    match tls_client_ctx(ca, a, ver, vp) do
+    Err(msg) -> Err(TlsContextError(msg))
+    Ok(h)    -> Ok(TlsCtx(h))
+    end
+  end
+
+  doc """
+  Create a server-side TLS context from a TlsConfig.
+  cert_file and key_file must be non-empty PEM paths.
+  Returns Ok(TlsCtx) or Err(TlsError).
+  """
+  fn server_ctx(config) do
+    let cert  = cert_file(config)
+    let key   = key_file(config)
+    let ca    = ca_file(config)
+    let a     = alpn(config)
+    let ver   = version_to_int(min_version(config))
+    match tls_server_ctx(cert, key, ca, a, ver) do
+    Err(msg) -> Err(TlsContextError(msg))
+    Ok(h)    -> Ok(TlsCtx(h))
+    end
+  end
+
+  -- ── Handshake ─────────────────────────────────────────────────────────
+
+  doc """
+  Perform a TLS client handshake on an already-connected TCP fd.
+  `hostname` is used for SNI and certificate hostname verification.
+  Returns Ok(TlsConn) or Err(TlsError).
+  """
+  fn connect(fd, ctx, hostname) do
+    match ctx do
+    | TlsCtx(h) ->
+      match tls_connect(fd, h, hostname) do
+      Err(msg) -> Err(TlsHandshakeFailed(msg))
+      Ok(ssl)  -> Ok(TlsConn(ssl))
+      end
+    end
+  end
+
+  doc """
+  Perform a TLS server handshake on an accepted TCP fd.
+  Returns Ok(TlsConn) or Err(TlsError).
+  """
+  fn accept(fd, ctx) do
+    match ctx do
+    | TlsCtx(h) ->
+      match tls_accept(fd, h) do
+      Err(msg) -> Err(TlsHandshakeFailed(msg))
+      Ok(ssl)  -> Ok(TlsConn(ssl))
+      end
+    end
+  end
+
+  -- ── I/O ───────────────────────────────────────────────────────────────
+
+  doc """
+  Read up to max_bytes from a TLS connection.
+  Returns Ok(String) or Err(TlsError). Ok("") signals a clean shutdown.
+  """
+  fn read(conn, max_bytes) do
+    match conn do
+    | TlsConn(h) ->
+      match tls_read(h, max_bytes) do
+      Err(msg) -> Err(TlsReadError(msg))
+      Ok(data) -> Ok(data)
+      end
+    end
+  end
+
+  doc """
+  Write data to a TLS connection.
+  Returns Ok(Int) — bytes written — or Err(TlsError).
+  """
+  fn write(conn, data) do
+    match conn do
+    | TlsConn(h) ->
+      match tls_write(h, data) do
+      Err(msg) -> Err(TlsWriteError(msg))
+      Ok(n)    -> Ok(n)
+      end
+    end
+  end
+
+  -- ── Teardown ──────────────────────────────────────────────────────────
+
+  doc """
+  Perform TLS shutdown and free the connection object.
+  Does NOT close the underlying TCP fd — caller must call tcp_close(fd).
+  """
+  fn close(conn) do
+    match conn do | TlsConn(h) -> tls_close(h) end
+  end
+
+  doc """
+  Free a TLS context.
+  Call after all connections using this ctx have been closed.
+  """
+  fn ctx_free(ctx) do
+    match ctx do | TlsCtx(h) -> tls_ctx_free(h) end
+  end
+
+  -- ── Introspection ─────────────────────────────────────────────────────
+
+  doc """
+  Return the negotiated ALPN protocol, or None if none was selected.
+  """
+  fn negotiated_alpn(conn) do
+    match conn do | TlsConn(h) -> tls_negotiated_alpn(h) end
+  end
+
+  doc """
+  Return the peer's certificate Common Name, or None if unavailable.
+  """
+  fn peer_cn(conn) do
+    match conn do | TlsConn(h) -> tls_peer_cn(h) end
+  end
+
+  -- ── High-level helpers ────────────────────────────────────────────────
+
+  doc """
+  Full HTTPS GET convenience function.
+  Connects to host:port, performs TLS handshake, sends a minimal HTTP/1.1
+  GET request, reads the response, tears down TLS, closes the TCP fd.
+  Returns Ok(response_string) or Err(TlsError).
+  """
+  fn https_get(host, port, path) do
+    let config = default_client_config()
+    match client_ctx(config) do
+    Err(e) -> Err(e)
+    Ok(ctx) ->
+      match tcp_connect(host, port) do
+      Err(msg) -> Err(TlsHandshakeFailed("tcp_connect: " ++ msg))
+      Ok(fd) ->
+        match connect(fd, ctx, host) do
+        Err(e) -> do
+          tcp_close(fd)
+          Err(e)
+        end
+        Ok(conn) -> do
+          let req = "GET " ++ path ++ " HTTP/1.1\r\nHost: " ++ host ++
+                    "\r\nConnection: close\r\n\r\n"
+          match write(conn, req) do
+          Err(e) -> do
+            close(conn)
+            tcp_close(fd)
+            Err(e)
+          end
+          Ok(_) ->
+            match read(conn, 1048576) do
+            Err(e) -> do
+              close(conn)
+              tcp_close(fd)
+              Err(e)
+            end
+            Ok(body) -> do
+              close(conn)
+              tcp_close(fd)
+              Ok(body)
+            end
+            end
+          end
+        end
+        end
+      end
+    end
+  end
+
+  -- ── Error helpers ─────────────────────────────────────────────────────
+
+  doc """
+  Convert a TlsError to a human-readable string.
+
+  >>> Tls.error_to_string(TlsHandshakeFailed("timeout"))
+  "TLS handshake failed: timeout"
+  >>> Tls.error_to_string(TlsCertError("invalid CN"))
+  "TLS certificate error: invalid CN"
+  >>> Tls.error_to_string(TlsReadError("EOF"))
+  "TLS read error: EOF"
+  >>> Tls.error_to_string(TlsWriteError("broken pipe"))
+  "TLS write error: broken pipe"
+  >>> Tls.error_to_string(TlsContextError("bad cert"))
+  "TLS context error: bad cert"
+  """
+  fn error_to_string(e) do
+    match e do
+    TlsHandshakeFailed(msg) -> "TLS handshake failed: " ++ msg
+    TlsCertError(msg)       -> "TLS certificate error: " ++ msg
+    TlsReadError(msg)       -> "TLS read error: " ++ msg
+    TlsWriteError(msg)      -> "TLS write error: " ++ msg
+    TlsContextError(msg)    -> "TLS context error: " ++ msg
+    end
+  end
+
+end

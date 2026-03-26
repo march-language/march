@@ -299,11 +299,13 @@ pfn extract_json_string(json_str, key) do
   match string_index_of(json_str, search) do
   | None -> None
   | Some(idx) ->
-    let start = idx + string_byte_length(search)
-    let rest  = string_slice(json_str, start, string_byte_length(json_str) - start)
-    match string_index_of(rest, "\"") do
-    | None -> None
-    | Some(end_idx) -> Some(string_slice(rest, 0, end_idx))
+    do
+      let start = idx + string_byte_length(search)
+      let rest  = string_slice(json_str, start, string_byte_length(json_str) - start)
+      match string_index_of(rest, "\"") do
+      | None -> None
+      | Some(end_idx) -> Some(string_slice(rest, 0, end_idx))
+      end
     end
   end
 end
@@ -314,18 +316,20 @@ pfn extract_json_payload(json_str, key) do
   match string_index_of(json_str, search) do
   | None -> None
   | Some(idx) ->
-    let start = idx + string_byte_length(search)
-    -- Payload extends to the end of the object (drop trailing "}")
-    let rest  = string_slice(json_str, start, string_byte_length(json_str) - start)
-    let tlen  = string_byte_length(rest)
-    if tlen == 0 then None
-    else do
-      -- Strip a trailing "}" if present
-      let last = string_slice(rest, tlen - 1, 1)
-      if last == "}" then
-        Some(string_slice(rest, 0, tlen - 1))
+    do
+      let start = idx + string_byte_length(search)
+      -- Payload extends to the end of the object (drop trailing "}")
+      let rest  = string_slice(json_str, start, string_byte_length(json_str) - start)
+      let tlen  = string_byte_length(rest)
+      if tlen == 0 do None
       else
-        Some(rest)
+        -- Strip a trailing "}" if present
+        let last = string_slice(rest, tlen - 1, 1)
+        if last == "}" then
+          Some(string_slice(rest, 0, tlen - 1))
+        else
+          Some(rest)
+      end
     end
   end
 end
