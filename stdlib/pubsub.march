@@ -62,7 +62,7 @@ end
 -- ── PubSubState ────────────────────────────────────────────────────────────
 
 -- Immutable PubSub state: Map(topic, List(subscriber_pid)).
-type PubSubState = PubSubState(Map(String, List))
+type PubSubState = PubSubState(Map(String, List(Int)))
 
 doc "Create an empty PubSub state."
 fn new_state() do

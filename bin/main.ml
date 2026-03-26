@@ -121,6 +121,12 @@ let load_stdlib () =
       "stats.march";
       "plot.march";
       "dataframe.march";
+      "tls.march";
+      "channel.march";
+      "pubsub.march";
+      "channel_server.march";
+      "channel_socket.march";
+      "presence.march";
     ] in
     List.concat_map (fun name ->
         load_stdlib_file (Filename.concat stdlib_dir name)

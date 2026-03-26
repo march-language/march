@@ -2718,9 +2718,9 @@ Example:
 fn col_add_float(col : Column, f : Float) : Result(Column, String) do
   match col do
   FloatCol(name, data) ->
-    Ok(FloatCol(name, List.map(data, fn x -> x +. f)))
+    Ok(FloatCol(name, typed_array_map(data, fn x -> x +. f)))
   IntCol(name, data) ->
-    Ok(FloatCol(name, List.map(data, fn x -> int_to_float(x) +. f)))
+    Ok(FloatCol(name, typed_array_map(data, fn x -> int_to_float(x) +. f)))
   _ -> Err("col_add_float: column must be IntCol or FloatCol")
   end
 end
@@ -2735,9 +2735,9 @@ Example:
 fn col_mul_float(col : Column, f : Float) : Result(Column, String) do
   match col do
   FloatCol(name, data) ->
-    Ok(FloatCol(name, List.map(data, fn x -> x *. f)))
+    Ok(FloatCol(name, typed_array_map(data, fn x -> x *. f)))
   IntCol(name, data) ->
-    Ok(FloatCol(name, List.map(data, fn x -> int_to_float(x) *. f)))
+    Ok(FloatCol(name, typed_array_map(data, fn x -> int_to_float(x) *. f)))
   _ -> Err("col_mul_float: column must be IntCol or FloatCol")
   end
 end
@@ -2765,14 +2765,14 @@ fn col_add_col(col1 : Column, col2 : Column) : Result(Column, String) do
     IntCol(_, data1) -> do
       match col2 do
       IntCol(_, data2) -> do
-        let pairs = List.zip(data1, data2)
-        Ok(IntCol(name, List.map(pairs, fn pair ->
-          match pair do (a, b) -> a + b end)))
+        let pairs = List.zip(typed_array_to_list(data1), typed_array_to_list(data2))
+        Ok(IntCol(name, typed_array_from_list(List.map(pairs, fn pair ->
+          match pair do (a, b) -> a + b end))))
       end
       FloatCol(_, data2) -> do
-        let pairs = List.zip(data1, data2)
-        Ok(FloatCol(name, List.map(pairs, fn pair ->
-          match pair do (a, b) -> int_to_float(a) +. b end)))
+        let pairs = List.zip(typed_array_to_list(data1), typed_array_to_list(data2))
+        Ok(FloatCol(name, typed_array_from_list(List.map(pairs, fn pair ->
+          match pair do (a, b) -> int_to_float(a) +. b end))))
       end
       _ -> Err("col_add_col: col2 must be IntCol or FloatCol")
       end
@@ -2780,14 +2780,14 @@ fn col_add_col(col1 : Column, col2 : Column) : Result(Column, String) do
     FloatCol(_, data1) -> do
       match col2 do
       FloatCol(_, data2) -> do
-        let pairs = List.zip(data1, data2)
-        Ok(FloatCol(name, List.map(pairs, fn pair ->
-          match pair do (a, b) -> a +. b end)))
+        let pairs = List.zip(typed_array_to_list(data1), typed_array_to_list(data2))
+        Ok(FloatCol(name, typed_array_from_list(List.map(pairs, fn pair ->
+          match pair do (a, b) -> a +. b end))))
       end
       IntCol(_, data2) -> do
-        let pairs = List.zip(data1, data2)
-        Ok(FloatCol(name, List.map(pairs, fn pair ->
-          match pair do (a, b) -> a +. int_to_float(b) end)))
+        let pairs = List.zip(typed_array_to_list(data1), typed_array_to_list(data2))
+        Ok(FloatCol(name, typed_array_from_list(List.map(pairs, fn pair ->
+          match pair do (a, b) -> a +. int_to_float(b) end))))
       end
       _ -> Err("col_add_col: col2 must be IntCol or FloatCol")
       end

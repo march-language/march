@@ -44,11 +44,11 @@ mod ChannelSocket do
 --   routes      — list of ChannelRoute (topic pattern → handler name)
 --   connect_fn  — fn(params_map, socket) -> Result(Socket, String)
 --   shards      — list of PubSub shard pids (populated at server start)
-type SocketConfig = SocketConfig(
-  String,              -- path
-  List(ChannelRoute),  -- routes
-  Any,                 -- connect_fn
-  List(Int)            -- shard pids
+type SocketConfig(a) = SocketConfig(
+  String,                          -- path
+  List(ChannelRoute),               -- routes
+  a,                               -- connect_fn
+  List(Int)                        -- shard pids
 )
 
 doc "Construct a SocketConfig."

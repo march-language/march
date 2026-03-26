@@ -109,7 +109,7 @@ end
 --   Reply(status, payload, state) — reply to client; status is ":ok" or ":error"
 --   NoReply(state)                — no reply; just update channel state
 --   Stop(reason, state)           — close this channel with a reason string
-type HandleResult = Reply(String, String, Any) | NoReply(Any) | Stop(String, Any)
+type HandleResult(a) = Reply(String, String, a) | NoReply(a) | Stop(String, a)
 
 doc "Construct a Reply result: reply to the client with status and JSON payload."
 fn reply(status, payload, st) do
@@ -158,6 +158,34 @@ fn broadcast_from(sock, event, payload) do
                                   socket_channel_pid(sock),
                                   event, payload))
 end
+
+-- ── ChannelMailbox ────────────────────────────────────────────────────────
+
+-- Messages that a channel process can receive in its mailbox.
+-- Defined here so they are available to push/broadcast helpers above
+-- and to ChannelServer/ChannelSocket which reference them.
+type ChannelMailbox =
+  ChannelIn(String, String, String)          -- (ref, event, payload_json)
+  | ChannelBroadcast(String, String, String) -- (topic, event, payload_json)
+  | ChannelBroadcastFrom(String, Int, String, String)
+    -- (topic, excl_pid, event, payload_json)
+  | ChannelPush(String, String)              -- (event, payload_json)
+  | ChannelLeave(String)                     -- (reason_string)
+  | ChannelStop
+
+-- ── PubSub messages ──────────────────────────────────────────────────────
+
+-- Messages that a PubSub shard actor can receive.
+type PubSubMsg(a) =
+  PubSubSubscribe(String, Int)               -- (topic, subscriber_pid)
+  | PubSubUnsubscribe(String, Int)           -- (topic, subscriber_pid)
+  | PubSubBroadcast(String, a, String, String)
+    -- (topic, excluded_opt, event, payload_json)
+
+-- ── BroadcastMsg ─────────────────────────────────────────────────────────
+
+-- Wire message sent to subscribers on broadcast.
+type BroadcastMsg = BroadcastMsg(String, String)
 
 -- ── LeaveReason ────────────────────────────────────────────────────────────
 
