@@ -40,6 +40,7 @@ type value =
   | VForeign of string * string         (** FFI extern: (lib_name, symbol_name) *)
   | VNativeIntArr   of int array        (** Flat OCaml int array — fast numeric loops *)
   | VNativeFloatArr of float array      (** Flat OCaml float array — fast numeric loops *)
+  | VTypedArray of value array          (** Contiguous typed array for columnar DataFrame storage *)
 
 (** One endpoint of a binary session-typed channel.
     Each channel consists of two linked endpoints; one side's [ce_out_q]
@@ -642,6 +643,9 @@ let rec value_to_string v =
     else
       Printf.sprintf "NativeFloatArr(%d)[%s, ...]" n
         (String.concat ", " (List.init 4 (fun i -> fmt a.(i))))
+  | VTypedArray arr ->
+    let elems = Array.to_list arr in
+    "[|" ^ String.concat ", " (List.map value_to_string elems) ^ "|]"
 
 (** Pretty-print a value with indented multi-line layout when the flat
     representation exceeds [width] characters.
@@ -4272,6 +4276,79 @@ let base_env : env =
           Array.fold_right (fun x acc -> VCon ("Cons", [VFloat x; acc]))
             a (VCon ("Nil", []))
         | _ -> eval_error "native_float_arr_to_list: expected NativeFloatArr"))
+
+  (* ── TypedArray builtins — contiguous native arrays for columnar DataFrame storage ── *)
+  (* typed_array_create(length, default) → TypedArray filled with default value *)
+  ; ("typed_array_create", VBuiltin ("typed_array_create", function
+        | [VInt n; default] when n >= 0 -> VTypedArray (Array.make n default)
+        | [VInt _; _] -> eval_error "typed_array_create: length must be non-negative"
+        | _ -> eval_error "typed_array_create: expected (Int, value)"))
+  (* typed_array_get(arr, index) → O(1) element access *)
+  ; ("typed_array_get", VBuiltin ("typed_array_get", function
+        | [VTypedArray arr; VInt i] ->
+          if i >= 0 && i < Array.length arr then arr.(i)
+          else eval_error "typed_array_get: index %d out of bounds (length %d)" i (Array.length arr)
+        | _ -> eval_error "typed_array_get: expected (TypedArray, Int)"))
+  (* typed_array_set(arr, index, value) → returns new array with element replaced (functional) *)
+  ; ("typed_array_set", VBuiltin ("typed_array_set", function
+        | [VTypedArray arr; VInt i; v] ->
+          if i >= 0 && i < Array.length arr then begin
+            let arr2 = Array.copy arr in
+            arr2.(i) <- v;
+            VTypedArray arr2
+          end else eval_error "typed_array_set: index %d out of bounds (length %d)" i (Array.length arr)
+        | _ -> eval_error "typed_array_set: expected (TypedArray, Int, value)"))
+  (* typed_array_length(arr) → Int *)
+  ; ("typed_array_length", VBuiltin ("typed_array_length", function
+        | [VTypedArray arr] -> VInt (Array.length arr)
+        | _ -> eval_error "typed_array_length: expected TypedArray"))
+  (* typed_array_slice(arr, start, len) → sub-array copy *)
+  ; ("typed_array_slice", VBuiltin ("typed_array_slice", function
+        | [VTypedArray arr; VInt start; VInt len] ->
+          let alen = Array.length arr in
+          let s = max 0 (min start alen) in
+          let e = max s (min (s + len) alen) in
+          VTypedArray (Array.sub arr s (e - s))
+        | _ -> eval_error "typed_array_slice: expected (TypedArray, Int, Int)"))
+  (* typed_array_map(arr, fn) → new TypedArray with fn applied to each element *)
+  ; ("typed_array_map", VBuiltin ("typed_array_map", function
+        | [VTypedArray arr; f] ->
+          VTypedArray (Array.map (fun v -> !apply_hook f [v]) arr)
+        | _ -> eval_error "typed_array_map: expected (TypedArray, fn)"))
+  (* typed_array_filter(arr, bool_arr) → new TypedArray keeping elements where bool_arr is true *)
+  ; ("typed_array_filter", VBuiltin ("typed_array_filter", function
+        | [VTypedArray arr; VTypedArray mask] ->
+          let n = Array.length arr in
+          if n <> Array.length mask then
+            eval_error "typed_array_filter: array length %d != mask length %d" n (Array.length mask);
+          let kept = Array.to_seq arr
+            |> Seq.zip (Array.to_seq mask)
+            |> Seq.filter (fun (b, _) -> b = VBool true)
+            |> Seq.map snd
+            |> Array.of_seq in
+          VTypedArray kept
+        | _ -> eval_error "typed_array_filter: expected (TypedArray, TypedArray)"))
+  (* typed_array_fold(arr, init, fn) → fold left: fn(acc, elem) → new_acc *)
+  ; ("typed_array_fold", VBuiltin ("typed_array_fold", function
+        | [VTypedArray arr; init; f] ->
+          Array.fold_left (fun acc v -> !apply_hook f [acc; v]) init arr
+        | _ -> eval_error "typed_array_fold: expected (TypedArray, value, fn)"))
+  (* typed_array_from_list(list) → TypedArray *)
+  ; ("typed_array_from_list", VBuiltin ("typed_array_from_list", function
+        | [lst] ->
+          let rec to_ocaml_list acc = function
+            | VCon ("Nil", []) -> List.rev acc
+            | VCon ("Cons", [h; t]) -> to_ocaml_list (h :: acc) t
+            | _ -> eval_error "typed_array_from_list: expected a List"
+          in
+          VTypedArray (Array.of_list (to_ocaml_list [] lst))
+        | _ -> eval_error "typed_array_from_list: expected one list argument"))
+  (* typed_array_to_list(arr) → List *)
+  ; ("typed_array_to_list", VBuiltin ("typed_array_to_list", function
+        | [VTypedArray arr] ->
+          Array.fold_right (fun v acc -> VCon ("Cons", [v; acc]))
+            arr (VCon ("Nil", []))
+        | _ -> eval_error "typed_array_to_list: expected TypedArray"))
   ]
 
 (* ------------------------------------------------------------------ *)

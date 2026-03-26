@@ -563,7 +563,7 @@ end
 **Effort:** High | **Impact:** Very high (10-100x for analytical workloads)
 **Dependencies:** Array primitives in runtime; benefits from loop vectorization (P10)
 **Stage:** Stdlib + runtime — `stdlib/dataframe.march` rewrite + native array builtins
-**Status:** Planned
+**Status:** Implemented (interpreter-level) — `VTypedArray of value array` added to `lib/eval/eval.ml` with 10 builtins (`typed_array_create/get/set/length/slice/map/filter/fold/from_list/to_list`); `TypedArray(a)` registered in `lib/typecheck/typecheck.ml`; `stdlib/dataframe.march` Column variants rewritten from `List(X)` to `TypedArray(X)` with null bitmaps as `TypedArray(Bool)`; `filter_col_by_mask` using single-pass `typed_array_filter`; all operations updated. 75/75 DataFrame tests pass.
 
 ---
 
