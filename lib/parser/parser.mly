@@ -867,13 +867,13 @@ interp_parts:
   | e = expr; mid = INTERP_MID; rest = interp_parts { (e, mid) :: rest }
 
 branch:
-  | p = pattern; guard = option(when_guard); ARROW; e = expr
+  | option(PIPE); p = pattern; guard = option(when_guard); ARROW; e = expr
     { { branch_pat = p; branch_guard = guard; branch_body = e } }
-  | _p = pattern; _guard = option(when_guard); error
+  | option(PIPE); _p = pattern; _guard = option(when_guard); error
     { error_raise
         "I was expecting `->` in the match arm here:"
         (Some "Pattern -> result")
-        $startpos($3) }
+        $startpos($4) }
 
 cond_branch:
   | e = expr; ARROW; body = expr

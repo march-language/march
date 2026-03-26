@@ -377,10 +377,10 @@ let test_eq_user_impl () =
     impl Eq(Color) do
       fn eq(x, y) do
         match (x, y) do
-        (Red, Red)     -> true
-        (Green, Green) -> true
-        (Blue, Blue)   -> true
-        _              -> false
+        | (Red, Red)     -> true
+        | (Green, Green) -> true
+        | (Blue, Blue)   -> true
+        | _              -> false
         end
       end
     end
@@ -1895,12 +1895,14 @@ let test_eval_multi_stmt_match_arm () =
   let env = eval_module {|mod Test do
     fn classify(n) do
       match n do
-      0 ->
+      0 -> do
         let tag = 0
         tag
-      _ ->
+      end
+      _ -> do
         let tag = 1
         tag
+      end
       end
     end
   end|} in
@@ -1933,9 +1935,9 @@ let test_eval_negative_pattern () =
   let env = eval_module {|mod Test do
     fn sign(n) do
       match n do
-      0  -> 0
-      -1 -> -1
-      _  -> 1
+      | 0  -> 0
+      | -1 -> -1
+      | _  -> 1
       end
     end
   end|} in
@@ -3690,9 +3692,10 @@ let test_fusion_no_fuse_impure () =
     fn imap_print(xs : IntList, f : Int -> Int) : IntList do
       match xs do
       INil        -> INil
-      ICons(h, t) ->
+      ICons(h, t) -> do
         let _ = println(int_to_string(h))
         ICons(f(h), imap_print(t, f))
+      end
       end
     end
 
@@ -5189,7 +5192,7 @@ let test_borrow_read_only_param_is_borrowed () =
   let bm = borrow_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do Conn(s) -> println(s) end
     end
   end|} in
   Alcotest.(check bool) "log's conn param is borrowed" true
@@ -5232,7 +5235,7 @@ let test_borrow_passed_to_borrowed_callee_stays_borrowed () =
   let bm = borrow_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do Conn(s) -> println(s) end
     end
     fn log_twice(conn : Conn) : Unit do
       log(conn)
@@ -5270,7 +5273,7 @@ let test_borrow_no_incrc_at_call_site () =
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do Conn(s) -> println(s) end
     end
     fn handle(conn : Conn) : Conn do
       log(conn)
@@ -5292,7 +5295,7 @@ let test_borrow_no_decrc_in_callee () =
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do Conn(s) -> println(s) end
     end
   end|} in
   let log_fn =
@@ -5332,10 +5335,10 @@ let test_borrow_conn_middleware_pattern () =
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log_middleware(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do Conn(s) -> println(s) end
     end
     fn auth_middleware(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do Conn(s) -> println(s) end
     end
     fn handle(conn : Conn) : Conn do
       log_middleware(conn)
@@ -12808,9 +12811,9 @@ let test_eval_custom_eq_dispatch () =
     impl Eq(Parity) do
       fn eq(a, b) do
         match (a, b) do
-        (Even, Even) -> true
-        (Odd, Odd)   -> true
-        _            -> false
+        | (Even, Even) -> true
+        | (Odd, Odd)   -> true
+        | _            -> false
         end
       end
     end
@@ -13577,7 +13580,7 @@ let test_eq_prop_transitivity_same () =
       let ab = Red == Red
       let bc = Red == Red
       let ac = Red == Red
-      if ab do if bc do ac else false else true end end
+      if ab do if bc do ac else false end else true end
     end
   end|} in
   Alcotest.(check bool) "Eq transitivity: a==b && b==c => a==c" true
@@ -14167,8 +14170,8 @@ let test_parse_large_tuple_match () =
   let src = {|mod Test do
     fn go(a : Int, b : Int, c : Int, d : Int) : Int do
       match (a, b, c, d) do
-      (0, 0, 0, 0) -> 0
-      (x, _, _, _) -> x
+      | (0, 0, 0, 0) -> 0
+      | (x, _, _, _) -> x
       end
     end
   end|} in
@@ -15180,11 +15183,11 @@ let test_queue_peek () =
   let env = eval_with_queue {|mod Test do
     fn front() do
       let q = Queue.push_back(Queue.push_back(Queue.empty(), 10), 20)
-      match Queue.peek_front(q) do | None -> -1 | Some(x) -> x end
+      match Queue.peek_front(q) do None -> -1 | Some(x) -> x end
     end
     fn back() do
       let q = Queue.push_back(Queue.push_back(Queue.empty(), 10), 20)
-      match Queue.peek_back(q) do | None -> -1 | Some(x) -> x end
+      match Queue.peek_back(q) do None -> -1 | Some(x) -> x end
     end
   end|} in
   Alcotest.(check int) "peek_front = 10" 10 (vint (call_fn env "front" []));
