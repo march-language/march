@@ -59,6 +59,7 @@ A statically-typed functional programming language. The compiler is implemented 
 - `when` guards on function heads and match branches
 - `--` line comments, `{- -}` nested block comments
 - Type variants: `type Foo = A | B(Int)` — no leading `|`
+- **Sigils**: `~H"..."` / `~H"""..."""` — generic `~X` prefix syntax for domain-specific literals. Supports interpolation (`${expr}`). Desugars to `Sigil.x(content)` call. `~H` for HTML templates returns `IOList` for fast wire sending.
 
 ### Compiler Backend
 - **Whole-program monomorphization** — all polymorphic functions specialized to concrete types (like Rust/MLton)
@@ -173,7 +174,7 @@ march/
 │   └── base64.c             # Base64 for WebSocket handshake
 │   ├── search/
 │   │   └── search.ml        # Search index: Levenshtein fuzzy search, type/doc search, JSON cache
-├── stdlib/                  # 34 modules, ~7500 lines
+├── stdlib/                  # 35 modules, ~7500 lines
 │   ├── prelude.march        # Auto-imported helpers (panic, identity, compose, unwrap, etc.)
 │   ├── option.march         # Option(a) with Some/None
 │   ├── result.march         # Result(a,e) with Ok/Err

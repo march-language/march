@@ -74,6 +74,7 @@ let span_of_expr (e : expr) : span =
   | EHole (_, sp) | EAtom (_, _, sp) | ESend (_, _, sp)
   | ESpawn (_, sp) | EDbg (_, sp) | ELetFn (_, _, _, _, sp) -> sp
   | EAssert (_, sp) -> sp
+  | ESigil (_, _, sp) -> sp
   | EVar n -> n.span
   | EResultRef _ -> dummy_span
 
@@ -146,6 +147,8 @@ let rec walk_expr ~file acc_e acc_b (e : expr) : unit =
     walk_expr ~file acc_e acc_b ex
   | EAtom (_, args, _) ->
     List.iter (walk_expr ~file acc_e acc_b) args
+  | ESigil (_, content, _) ->
+    walk_expr ~file acc_e acc_b content
   | ELit _ | EVar _ | EHole _ | EDbg (None, _) | EResultRef _ -> ()
 
 let walk_fn_clauses ~file acc_e acc_b (fn : fn_def) =

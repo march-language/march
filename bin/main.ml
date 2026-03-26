@@ -91,6 +91,7 @@ let load_stdlib () =
       "math.march";
       "string.march";
       "iolist.march";
+      "sigil.march";
       "http.march";
       "http_transport.march";
       "http_client.march";

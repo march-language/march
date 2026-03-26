@@ -230,6 +230,12 @@ let rec desugar_expr (e : expr) : expr =
   | EAssert (e, sp) ->
     EAssert (desugar_expr e, sp)
 
+  | ESigil (c, content, sp) ->
+    (* Desugar ~H"..." → Sigil.h(content), ~R"..." → Sigil.r(content), etc. *)
+    let fn_name = Printf.sprintf "Sigil.%c" (Char.lowercase_ascii c) in
+    let content' = desugar_expr content in
+    EApp (EVar { txt = fn_name; span = sp }, [content'], sp)
+
 (* ---- Multi-head fn desugaring ---- *)
 
 (** Desugar a [fn_def] that may have multiple clauses (or pattern params)

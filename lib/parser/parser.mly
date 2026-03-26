@@ -84,6 +84,7 @@
 %token CHOOSE BY OFFER
 %token TEST DESCRIBE ASSERT SETUP SETUP_ALL
 %token DBG DOC
+%token <char> SIGIL_PREFIX
 %token SUPERVISE STRATEGY MAX_RESTARTS WITHIN
 %token ONE_FOR_ONE ONE_FOR_ALL REST_FOR_ONE
 %token <string> INTERP_START
@@ -833,6 +834,12 @@ expr_atom:
   | prefix = INTERP_START; parts = interp_parts
     { let sp = mk_span ($loc) in
       desugar_interp (ELit (LitString prefix, sp)) parts sp }
+  (* Sigil expressions: ~H"...", ~H"""...""", ~H"hello ${name}" *)
+  | c = SIGIL_PREFIX; s = STRING
+    { ESigil (c, ELit (LitString s, mk_span ($loc)), mk_span ($loc)) }
+  | c = SIGIL_PREFIX; prefix = INTERP_START; parts = interp_parts
+    { let sp = mk_span ($loc) in
+      ESigil (c, desugar_interp (ELit (LitString prefix, sp)) parts sp, sp) }
   | b = BOOL { ELit (LitBool b, mk_span ($loc)) }
   | a = ATOM; LPAREN; args = separated_list(COMMA, expr); RPAREN
     { EAtom (a, args, mk_span ($loc)) }

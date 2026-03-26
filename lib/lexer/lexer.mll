@@ -140,6 +140,7 @@ rule token = parse
   | '!'           { BANG }
   | '_'           { UNDERSCORE }
   | '?'           { QUESTION }
+  | '~' (['A'-'Z'] as c) { SIGIL_PREFIX c }
   | ident as id   {
       match Hashtbl.find_opt keyword_table id with
       | Some tok -> tok

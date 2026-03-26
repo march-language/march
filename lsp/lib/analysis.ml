@@ -398,6 +398,9 @@ and collect_expr ~def_map ~use_map ~calls (e : Ast.expr) =
   | Ast.EAssert (e, _) ->
     collect_expr ~def_map ~use_map ~calls e
 
+  | Ast.ESigil (_, content, _) ->
+    collect_expr ~def_map ~use_map ~calls content
+
   | Ast.ELit _ | Ast.EHole _ | Ast.EDbg (None, _)
   | Ast.EResultRef _ -> ()
 
@@ -556,6 +559,7 @@ let span_of_expr = function
   | Ast.EHole (_, sp) | Ast.EAtom (_, _, sp) | Ast.ESend (_, _, sp)
   | Ast.ESpawn (_, sp) | Ast.EDbg (_, sp) | Ast.ELetFn (_, _, _, _, sp)
   | Ast.EAssert (_, sp) -> sp
+  | Ast.ESigil (_, _, sp) -> sp
   | Ast.EVar name -> name.Ast.span
   | Ast.EResultRef _ -> Ast.dummy_span
 

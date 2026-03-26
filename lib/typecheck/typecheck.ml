@@ -1774,6 +1774,7 @@ let span_of_expr : Ast.expr -> Ast.span = function
   | Ast.EDbg (_, sp)            -> sp
   | Ast.ELetFn (_, _, _, _, sp) -> sp
   | Ast.EAssert (_, sp)         -> sp
+  | Ast.ESigil (_, _, sp)       -> sp
 
 (* ══════════════════════════════════════════════════════════════════
    §E  Pattern exhaustiveness checking
@@ -2834,10 +2835,15 @@ let rec infer_expr env (e : Ast.expr) : ty =
            ) rest;
          result_ty)
 
-    (* ── Pipes — must be desugared before reaching us ─────────────── *)
+    (* ── Pipes / Sigils — must be desugared before reaching us ───── *)
     | Ast.EPipe _ ->
       failwith
         "March type checker: encountered EPipe — \
+         the desugaring pass must run before type checking."
+
+    | Ast.ESigil _ ->
+      failwith
+        "March type checker: encountered ESigil — \
          the desugaring pass must run before type checking."
 
     (* ── Atoms ────────────────────────────────────────────────────── *)
@@ -3126,6 +3132,7 @@ let rec free_vars_expr (bound : string list) (e : Ast.expr) : string list =
   | Ast.EPipe (l, r, _) ->
     free_vars_expr bound l @ free_vars_expr bound r
   | Ast.EAssert (e, _) -> free_vars_expr bound e
+  | Ast.ESigil (_, content, _) -> free_vars_expr bound content
 
 and free_vars_block (bound : string list) (es : Ast.expr list) : string list =
   match es with
@@ -4435,6 +4442,7 @@ let rec collect_direct_fn_calls (fn_names : StringSet.t) (e : Ast.expr) : String
   | Ast.ESpawn (ex, _)       -> collect_direct_fn_calls fn_names ex
   | Ast.EDbg (Some ex, _)    -> collect_direct_fn_calls fn_names ex
   | Ast.EAssert (ex, _) -> collect_direct_fn_calls fn_names ex
+  | Ast.ESigil (_, content, _) -> collect_direct_fn_calls fn_names content
   | Ast.ELit _ | Ast.EVar _ | Ast.EHole _ | Ast.EResultRef _
   | Ast.EDbg (None, _)       -> StringSet.empty
 
@@ -4705,6 +4713,7 @@ let rec check_tail_position
     | Ast.ESpawn (ex, _)      -> chk false smaller "argument to `spawn`" ex
     | Ast.EDbg (Some ex, _)   -> chk false smaller "argument to `dbg`" ex
     | Ast.EAssert (ex, _)     -> chk false smaller "assert expression" ex
+    | Ast.ESigil (_, content, _) -> chk false smaller "sigil content" content
     (* ── leaves ── *)
     | Ast.EDbg (None, _) | Ast.ELit _ | Ast.EVar _ | Ast.EHole _
     | Ast.EResultRef _ -> ()

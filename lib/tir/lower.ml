@@ -548,6 +548,9 @@ and lower_expr (e : Ast.expr) : Tir.expr =
         [{ br_tag = "True"; br_vars = []; br_body = unit_v }],
         Some panic_v))
 
+  | Ast.ESigil _ ->
+    failwith "lower_expr: ESigil should be desugared before lowering"
+
 (* ── Match lowering ─────────────────────────────────────────────── *)
 
 (** True if [pat] matches everything without discriminating (wildcard / var / as-var). *)
