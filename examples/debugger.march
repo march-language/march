@@ -37,8 +37,7 @@ end
 -- No REPL is launched; execution continues uninterrupted.
 
 fn factorial(n : Int) : Int do
-  if n <= 1
-  then 1
+  if n <= 1 do 1
   else dbg(n) * factorial(n - 1)
 end
 

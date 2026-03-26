@@ -41,7 +41,7 @@ end
 pfn main() : Unit do
   let n         = 15
   let min_depth = 4
-  let max_depth = if n > min_depth + 2 then n else min_depth + 2
+  let max_depth = if n > min_depth + 2 do n else min_depth + 2 end
 
   -- stretch tree
   let stretch = max_depth + 1

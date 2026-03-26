@@ -19,8 +19,8 @@ describe "new_state" do
   test "get_subscribers on empty state returns empty list" do
     let s = PubSub.new_state()
     match PubSub.get_subscribers(s, "room:lobby") do
-    | Nil -> ()
-    | _   -> assert false
+    Nil -> ()
+    _   -> assert false
     end
   end
 end
@@ -64,14 +64,14 @@ describe "get_subscribers" do
     let subs = PubSub.get_subscribers(s2, "t")
     -- Both pids must appear (order not guaranteed)
     let has10 = match subs do
-      | Cons(10, _) -> true
-      | Cons(_, Cons(10, _)) -> true
-      | _ -> false
+      Cons(10, _) -> true
+      Cons(_, Cons(10, _)) -> true
+      _ -> false
     end
     let has20 = match subs do
-      | Cons(20, _) -> true
-      | Cons(_, Cons(20, _)) -> true
-      | _ -> false
+      Cons(20, _) -> true
+      Cons(_, Cons(20, _)) -> true
+      _ -> false
     end
     assert has10
     assert has20
@@ -80,8 +80,8 @@ describe "get_subscribers" do
   test "unknown topic returns Nil" do
     let s = PubSub.new_state()
     match PubSub.get_subscribers(s, "no_such_topic") do
-    | Nil -> ()
-    | _   -> assert false
+    Nil -> ()
+    _   -> assert false
     end
   end
 end

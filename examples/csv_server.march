@@ -46,22 +46,20 @@ end
 pfn max_score_loop(rows, best) do
   match rows do
   Nil -> best
-  Cons(row, rest) ->
+  Cons(row, rest) -> do
     let s = parse_score(second(row))
-    if s > best
-    then max_score_loop(rest, s)
-    else max_score_loop(rest, best)
+    if s > best do max_score_loop(rest, s) else max_score_loop(rest, best) end
+  end
   end
 end
 
 pfn min_score_loop(rows, best) do
   match rows do
   Nil -> best
-  Cons(row, rest) ->
+  Cons(row, rest) -> do
     let s = parse_score(second(row))
-    if s < best
-    then min_score_loop(rest, s)
-    else min_score_loop(rest, best)
+    if s < best do min_score_loop(rest, s) else min_score_loop(rest, best) end
+  end
   end
 end
 
@@ -78,49 +76,56 @@ pfn build_names_section(rows) do
     acc ++ "  " ++ format_row(row) ++ "\n")
 end
 
+pfn analyze_csv(conn, body) do
+  let csv_path = save_csv(body)
+  match Csv.read_all(csv_path, ",", :rfc4180) do
+  Err(e) ->
+    conn |> HttpServer.text(400, "CSV error: " ++ to_string(e))
+  Ok(all_rows) ->
+    analyze_rows(conn, all_rows)
+  end
+end
+
+pfn analyze_rows(conn, all_rows) do
+  let data_rows = match all_rows do
+  Nil -> Nil
+  Cons(_, rest) -> rest
+  end
+  let row_count = List.length(data_rows)
+  let total = sum_scores(data_rows)
+  let mx = match data_rows do
+  Nil -> 0
+  Cons(first_row, rest) ->
+    max_score_loop(rest, parse_score(second(first_row)))
+  end
+  let mn = match data_rows do
+  Nil -> 0
+  Cons(first_row, rest) ->
+    min_score_loop(rest, parse_score(second(first_row)))
+  end
+  let high_rows = List.filter(data_rows, fn row ->
+    parse_score(second(row)) > 80)
+  let high_count = List.length(high_rows)
+  let names_section = build_names_section(data_rows)
+  let avg = if row_count > 0 do total / row_count else 0 end
+  let result =
+    "=== CSV Analysis Results ===\n" ++
+    "Rows parsed: " ++ to_string(row_count) ++ "\n" ++
+    "Sum of scores: " ++ to_string(total) ++ "\n" ++
+    "Average score: " ++ to_string(avg) ++ "\n" ++
+    "Max score: " ++ to_string(mx) ++ "\n" ++
+    "Min score: " ++ to_string(mn) ++ "\n" ++
+    "High scorers (>80): " ++ to_string(high_count) ++ "\n" ++
+    "Names (uppercase, byte sizes):\n" ++
+    names_section
+  File.write("/tmp/march_csv_results.txt", result)
+  conn |> HttpServer.text(200, result)
+end
+
 pfn router(conn) do
   match (HttpServer.method(conn), HttpServer.path_info(conn)) do
   (Post, Cons("csv", Nil)) ->
-    let body = HttpServer.req_body(conn)
-    let csv_path = save_csv(body)
-    match Csv.read_all(csv_path, ",", :rfc4180) do
-    Err(e) ->
-      conn |> HttpServer.text(400, "CSV error: " ++ to_string(e))
-    Ok(all_rows) ->
-      let data_rows = match all_rows do
-      Nil -> Nil
-      Cons(_, rest) -> rest
-      end
-      let row_count = List.length(data_rows)
-      let total = sum_scores(data_rows)
-      let mx = match data_rows do
-      Nil -> 0
-      Cons(first_row, rest) ->
-        max_score_loop(rest, parse_score(second(first_row)))
-      end
-      let mn = match data_rows do
-      Nil -> 0
-      Cons(first_row, rest) ->
-        min_score_loop(rest, parse_score(second(first_row)))
-      end
-      let high_rows = List.filter(data_rows, fn row ->
-        parse_score(second(row)) > 80)
-      let high_count = List.length(high_rows)
-      let names_section = build_names_section(data_rows)
-      let avg = if row_count > 0 then total / row_count else 0
-      let result =
-        "=== CSV Analysis Results ===\n" ++
-        "Rows parsed: " ++ to_string(row_count) ++ "\n" ++
-        "Sum of scores: " ++ to_string(total) ++ "\n" ++
-        "Average score: " ++ to_string(avg) ++ "\n" ++
-        "Max score: " ++ to_string(mx) ++ "\n" ++
-        "Min score: " ++ to_string(mn) ++ "\n" ++
-        "High scorers (>80): " ++ to_string(high_count) ++ "\n" ++
-        "Names (uppercase, byte sizes):\n" ++
-        names_section
-      File.write("/tmp/march_csv_results.txt", result)
-      conn |> HttpServer.text(200, result)
-    end
+    analyze_csv(conn, HttpServer.req_body(conn))
   (Get, Nil) ->
     conn |> HttpServer.text(200, "POST /csv with a CSV body (name,score rows)")
   _ ->

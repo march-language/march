@@ -202,10 +202,11 @@ describe "DateTime" do
       Err(e) -> panic("parse date failed: " ++ e)
       Ok(dt) -> do
         match dt do
-        DateTime(Date(y, m, d), Time(_, _, _)) ->
+        DateTime(Date(y, m, d), Time(_, _, _)) -> do
           assert (y == 2024)
           assert (m == 3)
           assert (d == 15)
+        end
         end
       end
       end
@@ -216,13 +217,14 @@ describe "DateTime" do
       Err(e) -> panic("parse datetime failed: " ++ e)
       Ok(dt) -> do
         match dt do
-        DateTime(Date(y, m, d), Time(h, mn, s)) ->
+        DateTime(Date(y, m, d), Time(h, mn, s)) -> do
           assert (y == 2024)
           assert (m == 3)
           assert (d == 15)
           assert (h == 10)
           assert (mn == 30)
           assert (s == 45)
+        end
         end
       end
       end

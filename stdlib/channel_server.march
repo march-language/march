@@ -115,17 +115,17 @@ Must be called from within an actor handler (requires actor runtime).
 """
 fn do_join(cfg, topic, params_json) do
   match cfg do
-  | ChannelConfig(socket, join_fn, _, _, _, shard_pid) ->
+  ChannelConfig(socket, join_fn, _, _, _, shard_pid) ->
     do
       let result = join_fn(topic, params_json, socket)
       match result do
-      | Ok(st) ->
+      Ok(st) ->
         do
           let my_pid = self()
           PubSub.subscribe_in_shard(shard_pid, topic, my_pid)
           JoinOk(st)
         end
-      | Err(reason) ->
+      Err(reason) ->
         JoinErr(reason)
       end
     end
@@ -140,7 +140,7 @@ Must be called from within an actor handler (requires actor runtime).
 """
 fn do_leave(cfg, st, reason_str) do
   match cfg do
-  | ChannelConfig(socket, _, _, _, leave_fn, shard_pid) ->
+  ChannelConfig(socket, _, _, _, leave_fn, shard_pid) ->
     do
       let my_pid = self()
       let topic  = Channel.socket_topic(socket)
@@ -160,21 +160,21 @@ Must be called from within an actor handler (requires actor runtime).
 """
 fn apply_result(cfg, result, ref) do
   match cfg do
-  | ChannelConfig(socket, _, _, _, _, _) ->
+  ChannelConfig(socket, _, _, _, _, _) ->
     do
       let transport_pid = Channel.socket_transport_pid(socket)
       let topic         = Channel.socket_topic(socket)
       let join_ref      = Channel.socket_join_ref(socket)
       match result do
-      | Reply(status, payload_json, new_st) ->
+      Reply(status, payload_json, new_st) ->
         do
           let reply_m = Channel.reply_msg(join_ref, ref, topic, status, payload_json)
           actor_cast(transport_pid, ChannelPush("phx_reply", Channel.serialize(reply_m)))
           new_st
         end
-      | NoReply(new_st) ->
+      NoReply(new_st) ->
         new_st
-      | Stop(reason, new_st) ->
+      Stop(reason, new_st) ->
         do
           do_leave(cfg, new_st, reason)
           new_st
@@ -193,7 +193,7 @@ Must be called from within an actor handler (requires actor runtime).
 """
 fn handle_broadcast(cfg, event, payload_json) do
   match cfg do
-  | ChannelConfig(socket, _, _, _, _, _) ->
+  ChannelConfig(socket, _, _, _, _, _) ->
     actor_cast(Channel.socket_transport_pid(socket), ChannelPush(event, payload_json))
   end
 end
@@ -205,11 +205,10 @@ Must be called from within an actor handler (requires actor runtime).
 """
 fn handle_broadcast_from(cfg, excl_pid, event, payload_json) do
   match cfg do
-  | ChannelConfig(socket, _, _, _, _, _) ->
+  ChannelConfig(socket, _, _, _, _, _) ->
     do
       let my_pid = self()
-      if my_pid == excl_pid then ()
-      else actor_cast(Channel.socket_transport_pid(socket), ChannelPush(event, payload_json))
+      if my_pid == excl_pid do () else actor_cast(Channel.socket_transport_pid(socket), ChannelPush(event, payload_json)) end
     end
   end
 end
@@ -258,8 +257,8 @@ end
 pfn shard_list_length(lst) do
   fn go(xs, acc) do
     match xs do
-    | Nil -> acc
-    | Cons(_, t) -> go(t, acc + 1)
+    Nil -> acc
+    Cons(_, t) -> go(t, acc + 1)
     end
   end
   go(lst, 0)
@@ -267,10 +266,9 @@ end
 
 pfn shard_list_nth(lst, n) do
   match lst do
-  | Nil -> 0
-  | Cons(h, t) ->
-    if n == 0 then h
-    else shard_list_nth(t, n - 1)
+  Nil -> 0
+  Cons(h, t) ->
+    if n == 0 do h else shard_list_nth(t, n - 1) end
   end
 end
 

@@ -70,8 +70,7 @@ end
 -- that flows through the call graph — closures can capture it freely.
 
 fn run_with_logging(cap : Cap(IO.Console), items : List(Int), label : String) : Unit do
-  if is_nil(items)
-  then println(label ++ ": empty")
+  if is_nil(items) do println(label ++ ": empty")
   else print_result(cap, label ++ " first", head(items))
 end
 

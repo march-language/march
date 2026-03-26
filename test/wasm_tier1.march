@@ -7,7 +7,7 @@ mod WasmTier1 do
 fn add(a, b) do a + b end
 
 fn fib(n) do
-  if n <= 1 then n
+  if n <= 1 do n end
   else fib(n - 1) + fib(n - 2)
 end
 
@@ -28,7 +28,7 @@ end
 
 -- Option chaining
 fn safe_div(a, b) do
-  if b == 0 then None
+  if b == 0 do None end
   else Some(a / b)
 end
 

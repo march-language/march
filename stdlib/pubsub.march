@@ -35,7 +35,7 @@ pfn list_remove_first(lst, elem) do
   match lst do
   | Nil -> Nil
   | Cons(h, t) ->
-    if h == elem then t
+    if h == elem do t end
     else Cons(h, list_remove_first(t, elem))
   end
 end
@@ -44,7 +44,7 @@ pfn list_contains(lst, elem) do
   match lst do
   | Nil -> false
   | Cons(h, t) ->
-    if h == elem then true
+    if h == elem do true end
     else list_contains(t, elem)
   end
 end
@@ -187,7 +187,7 @@ fn broadcast_to(pids, excluded_pid, event, payload) do
         | Some(excl) -> pid == excl
         | None       -> false
       end
-      if should_skip then ()
+      if should_skip do () end
       else actor_cast(pid, BroadcastMsg(event, payload))
       broadcast_to(rest, excluded_pid, event, payload)
     end

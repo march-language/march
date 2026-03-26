@@ -27,7 +27,7 @@ end
 -- Build a list of N floats: value[i] = (i % 100) / 100.0
 pfn make_float_list(n : Int) : List(Float) do
   fn go(i : Int, acc : List(Float)) : List(Float) do
-    if i < 0 then acc
+    if i < 0 do acc end
     else go(i - 1, Cons(int_to_float(i % 100) /. 100.0, acc))
   end
   go(n - 1, Nil)
@@ -36,7 +36,7 @@ end
 -- Build a list of N ints: value[i] = i
 pfn make_int_list(n : Int) : List(Int) do
   fn go(i : Int, acc : List(Int)) : List(Int) do
-    if i < 0 then acc else go(i - 1, Cons(i, acc))
+    if i < 0 do acc else go(i - 1, Cons(i, acc)) end
   end
   go(n - 1, Nil)
 end

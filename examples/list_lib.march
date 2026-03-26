@@ -24,7 +24,7 @@ end
 fn filter(pred : Int -> Bool, lst : List(Int)) : List(Int) do
   match lst do
   Nil        -> Nil
-  Cons(h, t) -> if pred(h) then Cons(h, filter(pred, t)) else filter(pred, t)
+  Cons(h, t) -> if pred(h) do Cons(h, filter(pred, t)) else filter(pred, t) end
   end
 end
 
@@ -64,7 +64,7 @@ end
 fn find(pred : Int -> Bool, lst : List(Int)) : Option(Int) do
   match lst do
   Nil        -> None
-  Cons(h, t) -> if pred(h) then Some(h) else find(pred, t)
+  Cons(h, t) -> if pred(h) do Some(h) else find(pred, t) end
   end
 end
 

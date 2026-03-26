@@ -31,24 +31,24 @@ describe "find_route" do
                  Cons(Channel.channel_route("game:*",    "GameChannel"),
                  Nil))
     match ChannelSocket.find_route(routes, "room:lobby") do
-    | Some(r) -> assert (Channel.route_handler(r) == "RoomChannel")
-    | None    -> assert false
+    Some(r) -> assert (Channel.route_handler(r) == "RoomChannel")
+    None    -> assert false
     end
   end
 
   test "finds exact-match route" do
     let routes = Cons(Channel.channel_route("notify:admin", "AdminChannel"), Nil)
     match ChannelSocket.find_route(routes, "notify:admin") do
-    | Some(r) -> assert (Channel.route_handler(r) == "AdminChannel")
-    | None    -> assert false
+    Some(r) -> assert (Channel.route_handler(r) == "AdminChannel")
+    None    -> assert false
     end
   end
 
   test "returns None when no route matches" do
     let routes = Cons(Channel.channel_route("room:*", "RoomChannel"), Nil)
     match ChannelSocket.find_route(routes, "game:42") do
-    | None -> ()
-    | _    -> assert false
+    None -> ()
+    _    -> assert false
     end
   end
 
@@ -57,8 +57,8 @@ describe "find_route" do
                  Cons(Channel.channel_route("room:*", "SecondHandler"),
                  Nil))
     match ChannelSocket.find_route(routes, "room:lobby") do
-    | Some(r) -> assert (Channel.route_handler(r) == "FirstHandler")
-    | None    -> assert false
+    Some(r) -> assert (Channel.route_handler(r) == "FirstHandler")
+    None    -> assert false
     end
   end
 end
@@ -85,8 +85,8 @@ describe "ActiveChannels" do
   test "empty_channels has no entries" do
     let ac = ChannelSocket.empty_channels()
     match ChannelSocket.lookup_channel(ac, "room:lobby") do
-    | None -> ()
-    | _    -> assert false
+    None -> ()
+    _    -> assert false
     end
   end
 
@@ -94,8 +94,8 @@ describe "ActiveChannels" do
     let ac  = ChannelSocket.empty_channels()
     let ac1 = ChannelSocket.register_channel(ac, "room:lobby", 42)
     match ChannelSocket.lookup_channel(ac1, "room:lobby") do
-    | Some(pid) -> assert (pid == 42)
-    | None      -> assert false
+    Some(pid) -> assert (pid == 42)
+    None      -> assert false
     end
   end
 
@@ -104,8 +104,8 @@ describe "ActiveChannels" do
     let ac1 = ChannelSocket.register_channel(ac, "t", 10)
     let ac2 = ChannelSocket.deregister_channel(ac1, "t")
     match ChannelSocket.lookup_channel(ac2, "t") do
-    | None -> ()
-    | _    -> assert false
+    None -> ()
+    _    -> assert false
     end
   end
 
@@ -114,12 +114,12 @@ describe "ActiveChannels" do
     let ac1 = ChannelSocket.register_channel(ac,  "room:a", 1)
     let ac2 = ChannelSocket.register_channel(ac1, "room:b", 2)
     match ChannelSocket.lookup_channel(ac2, "room:a") do
-    | Some(pid) -> assert (pid == 1)
-    | None      -> assert false
+    Some(pid) -> assert (pid == 1)
+    None      -> assert false
     end
     match ChannelSocket.lookup_channel(ac2, "room:b") do
-    | Some(pid) -> assert (pid == 2)
-    | None      -> assert false
+    Some(pid) -> assert (pid == 2)
+    None      -> assert false
     end
   end
 
@@ -139,19 +139,19 @@ describe "parse_frame / serialize_msg" do
     let m  = Channel.make_msg("0", "1", "room:42", "new_msg", "{}")
     let json = ChannelSocket.serialize_msg(m)
     match ChannelSocket.parse_frame(json) do
-    | Some(m2) ->
+    Some(m2) ->
       do
         assert (Channel.msg_topic(m2) == "room:42")
         assert (Channel.msg_event(m2) == "new_msg")
       end
-    | None -> assert false
+    None -> assert false
     end
   end
 
   test "parse_frame returns None for garbage input" do
     match ChannelSocket.parse_frame("not json") do
-    | None -> ()
-    | _    -> assert false
+    None -> ()
+    _    -> assert false
     end
   end
 end

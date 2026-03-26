@@ -4,7 +4,7 @@
 mod TestSeq do
 
 -- Step type mirrors Seq.Step so Continue/Halt constructors are in scope.
-ptype Step(a) = Continue(a) Halt(a)
+ptype Step(a) = Continue(a) | Halt(a)
 
 describe "from_list and to_list" do
 
@@ -299,9 +299,9 @@ describe "zip" do
     let s = Seq.zip(Seq.from_list([1, 2, 3]), Seq.from_list([4, 5, 6]))
     let result = Seq.to_list(s)
     assert (List.length(result) == 3)
-    match List.nth(result, 0) do (a, b) -> assert (a == 1) assert (b == 4) end
-    match List.nth(result, 1) do (a, b) -> assert (a == 2) assert (b == 5) end
-    match List.nth(result, 2) do (a, b) -> assert (a == 3) assert (b == 6) end
+    match List.nth(result, 0) do (a, b) -> do assert (a == 1) assert (b == 4) end end
+    match List.nth(result, 1) do (a, b) -> do assert (a == 2) assert (b == 5) end end
+    match List.nth(result, 2) do (a, b) -> do assert (a == 3) assert (b == 6) end end
   end
 
   test "zip s1 shorter stops at s1" do
@@ -334,7 +334,7 @@ describe "zip" do
   test "zip first elements match" do
     let s = Seq.zip(Seq.from_list([10, 20]), Seq.from_list([100, 200]))
     let result = Seq.to_list(s)
-    match List.nth(result, 0) do (a, b) -> assert (a == 10) assert (b == 100) end
+    match List.nth(result, 0) do (a, b) -> do assert (a == 10) assert (b == 100) end end
   end
 
 end
@@ -627,13 +627,13 @@ describe "chaining" do
   -- NOTE: Seq uses church-encoded folds that visit ALL elements even with take.
   -- Infinite unfold + take would loop forever. Use bounded unfold instead.
   test "unfold bounded then take then count" do
-    let first20 = Seq.unfold(1, fn s -> if s > 20 do None else Some((s, s + 1))) end
+    let first20 = Seq.unfold(1, fn s -> if s > 20 do None else Some((s, s + 1)) end)
     let taken = Seq.take(first20, 10)
     assert (Seq.count(taken) == 10)
   end
 
   test "unfold bounded then take then fold" do
-    let first20 = Seq.unfold(1, fn s -> if s > 20 do None else Some((s, s + 1))) end
+    let first20 = Seq.unfold(1, fn s -> if s > 20 do None else Some((s, s + 1)) end)
     let first5 = Seq.take(first20, 5)
     let sum = Seq.fold(first5, 0, fn (acc, x) -> acc + x)
     assert (sum == 15)

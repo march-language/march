@@ -204,7 +204,7 @@ describe "transforming" do
 
   test "filter_map keeps Some values" do
     let xs = Cons(1, Cons(2, Cons(3, Cons(4, Nil))))
-    let r = List.filter_map(xs, fn x -> if x % 2 == 0 do Some(x * 10) else None) end
+    let r = List.filter_map(xs, fn x -> if x % 2 == 0 do Some(x * 10) else None end)
     assert (List.length(r) == 2)
     assert (List.head(r) == 20)
     assert (List.last(r) == 40)

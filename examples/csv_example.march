@@ -52,8 +52,7 @@ pfn find_oldest_loop(rows, best_name, best_age) do
     match get_age(row) do
     Err(_) -> find_oldest_loop(rest, best_name, best_age)
     Ok(age) ->
-      if age > best_age
-      then find_oldest_loop(rest, get_name(row), age)
+      if age > best_age do find_oldest_loop(rest, get_name(row), age)
       else find_oldest_loop(rest, best_name, best_age)
     end
   end

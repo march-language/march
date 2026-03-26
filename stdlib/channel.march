@@ -82,10 +82,9 @@ doc "Look up a value in socket assigns by key. Returns Some(val) or None."
 fn get_assign(sock, key) do
   fn find(pairs) do
     match pairs do
-    | Nil -> None
-    | Cons((k, v), rest) ->
-      if k == key then Some(v)
-      else find(rest)
+    Nil -> None
+    Cons((k, v), rest) ->
+      if k == key do Some(v) else find(rest) end
     end
   end
   find(socket_assigns(sock))
@@ -94,7 +93,7 @@ end
 doc "Assign a key-value pair to the socket. Returns an updated socket."
 fn assign(sock, key, value) do
   match sock do
-  | Socket(t, cp, tp, a, jr) ->
+  Socket(t, cp, tp, a, jr) ->
     Socket(t, cp, tp, Cons((key, value), a), jr)
   end
 end
@@ -248,7 +247,7 @@ The payload field is embedded verbatim (it should already be a JSON value).
 """
 fn serialize(m) do
   match m do
-  | ChannelMsg(join_ref, ref, topic, event, payload) ->
+  ChannelMsg(join_ref, ref, topic, event, payload) ->
     string_concat(
       string_concat(
         string_concat(
@@ -286,9 +285,9 @@ fn parse(json_str) do
   let evt = extract_json_string(json_str, "\"event\"")
   let pay = extract_json_payload(json_str, "\"payload\"")
   match (jr, ref, top, evt, pay) do
-  | (Some(j), Some(r), Some(t), Some(e), Some(p)) ->
+  (Some(j), Some(r), Some(t), Some(e), Some(p)) ->
     Some(ChannelMsg(j, r, t, e, p))
-  | _ -> None
+  _ -> None
   end
 end
 
@@ -297,14 +296,14 @@ end
 pfn extract_json_string(json_str, key) do
   let search = string_concat(key, ":\"")
   match string_index_of(json_str, search) do
-  | None -> None
-  | Some(idx) ->
+  None -> None
+  Some(idx) ->
     do
       let start = idx + string_byte_length(search)
       let rest  = string_slice(json_str, start, string_byte_length(json_str) - start)
       match string_index_of(rest, "\"") do
-      | None -> None
-      | Some(end_idx) -> Some(string_slice(rest, 0, end_idx))
+      None -> None
+      Some(end_idx) -> Some(string_slice(rest, 0, end_idx))
       end
     end
   end
@@ -314,8 +313,8 @@ end
 pfn extract_json_payload(json_str, key) do
   let search = string_concat(key, ":")
   match string_index_of(json_str, search) do
-  | None -> None
-  | Some(idx) ->
+  None -> None
+  Some(idx) ->
     do
       let start = idx + string_byte_length(search)
       -- Payload extends to the end of the object (drop trailing "}")
@@ -325,10 +324,11 @@ pfn extract_json_payload(json_str, key) do
       else
         -- Strip a trailing "}" if present
         let last = string_slice(rest, tlen - 1, 1)
-        if last == "}" then
+        if last == "}" do
           Some(string_slice(rest, 0, tlen - 1))
         else
           Some(rest)
+        end
       end
     end
   end

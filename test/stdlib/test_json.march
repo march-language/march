@@ -10,7 +10,7 @@ describe "Json" do
     test "parse null" do
       match Json.parse("null") do
       Err(e) -> panic("parse null failed: " ++ e)
-      Ok(v) -> match v do Null -> () _ -> panic("expected Null") end
+      Ok(v) -> match v do Null -> () | _ -> panic("expected Null") end
       end
     end
 
@@ -28,7 +28,7 @@ describe "Json" do
     test "parse false" do
       match Json.parse("false") do
       Err(e) -> panic("parse false failed: " ++ e)
-      Ok(v) -> match v do Bool(b) -> assert not(b) _ -> panic("expected Bool") end
+      Ok(v) -> match v do Bool(b) -> assert not(b) | _ -> panic("expected Bool") end
       end
     end
 

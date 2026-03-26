@@ -150,7 +150,7 @@ mod Tls do
     let ca    = ca_file(config)
     let a     = alpn(config)
     let ver   = version_to_int(min_version(config))
-    let vp    = if verify_peer(config) then 1 else 0
+    let vp    = if verify_peer(config) do 1 else 0 end
     match tls_client_ctx(ca, a, ver, vp) do
     Err(msg) -> Err(TlsContextError(msg))
     Ok(h)    -> Ok(TlsCtx(h))

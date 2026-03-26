@@ -606,7 +606,6 @@ fn from_rows(rows : List(Row)) : Result(DataFrame, String) do
         end
         end
       end
-      end
       match process_rows(rest_rows, builders_after_first) do
       Err(e) -> Err(e)
       Ok(cols) -> Ok(DataFrame(cols))
@@ -657,7 +656,6 @@ fn from_rows_widen(rows : List(Row)) : Result(DataFrame, String) do
           end
         end
         end
-      end
       end
       match process_rows(rest_rows, builders_after_first) do
       Err(e) -> Err(e)

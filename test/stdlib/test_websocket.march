@@ -64,9 +64,9 @@ describe "WsFrame constructors" do
   end
 
   test "Close code variants" do
-    match Close(1000, "normal") do Close(c, _) -> assert (c == 1000) _ -> () end
-    match Close(1001, "going away") do Close(c, _) -> assert (c == 1001) _ -> () end
-    match Close(1011, "server error") do Close(c, _) -> assert (c == 1011) _ -> () end
+    match Close(1000, "normal") do Close(c, _) -> assert (c == 1000) | _ -> () end
+    match Close(1001, "going away") do Close(c, _) -> assert (c == 1001) | _ -> () end
+    match Close(1011, "server error") do Close(c, _) -> assert (c == 1011) | _ -> () end
   end
 end
 

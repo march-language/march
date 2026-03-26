@@ -9,68 +9,68 @@ describe "ChannelMailbox constructors" do
   test "ChannelIn stores ref, event, payload" do
     let m = ChannelIn("1", "new_msg", "{\"text\":\"hi\"}")
     match m do
-    | ChannelIn(ref, event, payload) ->
+    ChannelIn(ref, event, payload) ->
       do
         assert (ref == "1")
         assert (event == "new_msg")
         assert (payload == "{\"text\":\"hi\"}")
       end
-    | _ -> assert false
+    _ -> assert false
     end
   end
 
   test "ChannelBroadcast stores topic, event, payload" do
     let m = ChannelBroadcast("room:lobby", "shout", "{}")
     match m do
-    | ChannelBroadcast(topic, event, payload) ->
+    ChannelBroadcast(topic, event, payload) ->
       do
         assert (topic == "room:lobby")
         assert (event == "shout")
         assert (payload == "{}")
       end
-    | _ -> assert false
+    _ -> assert false
     end
   end
 
   test "ChannelBroadcastFrom stores all fields" do
     let m = ChannelBroadcastFrom("room:lobby", 99, "shout", "{}")
     match m do
-    | ChannelBroadcastFrom(topic, excl, event, payload) ->
+    ChannelBroadcastFrom(topic, excl, event, payload) ->
       do
         assert (topic == "room:lobby")
         assert (excl == 99)
         assert (event == "shout")
         assert (payload == "{}")
       end
-    | _ -> assert false
+    _ -> assert false
     end
   end
 
   test "ChannelPush stores event and payload" do
     let m = ChannelPush("typing", "{\"is_typing\":true}")
     match m do
-    | ChannelPush(event, payload) ->
+    ChannelPush(event, payload) ->
       do
         assert (event == "typing")
         assert (payload == "{\"is_typing\":true}")
       end
-    | _ -> assert false
+    _ -> assert false
     end
   end
 
   test "ChannelLeave stores reason" do
     let m = ChannelLeave("user_left")
     match m do
-    | ChannelLeave(reason) -> assert (reason == "user_left")
-    | _                    -> assert false
+    ChannelLeave(reason) -> assert (reason == "user_left")
+    _                    -> assert false
     end
   end
 
   test "ChannelStop constructor" do
     let m = ChannelStop
     match m do
-    | ChannelStop -> ()
-    | _           -> assert false
+    ChannelStop -> ()
+    _           -> assert false
     end
   end
 end
@@ -79,16 +79,16 @@ describe "JoinResult constructors" do
   test "JoinOk stores state" do
     let r = JoinOk("my_state")
     match r do
-    | JoinOk(s) -> assert (s == "my_state")
-    | _         -> assert false
+    JoinOk(s) -> assert (s == "my_state")
+    _         -> assert false
     end
   end
 
   test "JoinErr stores reason" do
     let r = JoinErr("unauthorized")
     match r do
-    | JoinErr(reason) -> assert (reason == "unauthorized")
-    | _               -> assert false
+    JoinErr(reason) -> assert (reason == "unauthorized")
+    _               -> assert false
     end
   end
 end

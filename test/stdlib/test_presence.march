@@ -35,8 +35,8 @@ describe "PresenceEntry" do
     let m = Presence.make_meta(5, "{\"x\":1}")
     let e = Presence.make_entry(Cons(m, Nil))
     match Presence.entry_metas(e) do
-    | Cons(first, Nil) -> assert (Presence.meta_pid(first) == 5)
-    | _                -> assert false
+    Cons(first, Nil) -> assert (Presence.meta_pid(first) == 5)
+    _                -> assert false
     end
   end
 

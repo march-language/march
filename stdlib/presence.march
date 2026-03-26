@@ -103,7 +103,7 @@ pfn list_remove_meta(lst, pid) do
   match lst do
   | Nil -> Nil
   | Cons(m, rest) ->
-    if meta_pid(m) == pid then list_remove_meta(rest, pid)
+    if meta_pid(m) == pid do list_remove_meta(rest, pid) end
     else Cons(m, list_remove_meta(rest, pid))
   end
 end
