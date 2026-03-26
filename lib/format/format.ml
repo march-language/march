@@ -402,11 +402,10 @@ and emit_match ctx subj arms =
     let pat_s = fmt_pat arm.branch_pat ^ guard in
     let body  = arm.branch_body in
     if should_break (ctx.indent + 1) body then begin
-      line ctx (Printf.sprintf "%s -> do" pat_s);
-      indented ctx (fun () -> emit_body ctx body);
-      line ctx "end"
+      line ctx (Printf.sprintf "| %s ->" pat_s);
+      indented ctx (fun () -> emit_body ctx body)
     end else
-      line ctx (Printf.sprintf "%s -> %s" pat_s (expr_inline body))
+      line ctx (Printf.sprintf "| %s -> %s" pat_s (expr_inline body))
   ) arms;
   line ctx "end"
 

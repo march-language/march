@@ -14,7 +14,7 @@ type Wrap = Wrap(Box)
 fn sum_pair(x : Int, y : Int) : Int do
   let p = MkPair(x, y)
   match p do
-  MkPair(a, b) -> a + b
+  | MkPair(a, b) -> a + b
   end
 end
 

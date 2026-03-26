@@ -146,8 +146,8 @@ test "save writes file" do
   let _ = Plot.save(p, path)
   -- verify the file was written
   let contents = match File.read(path) do
-    Ok(s) -> s
-    Err(_) -> ""
+    | Ok(s) -> s
+    | Err(_) -> ""
     end
   assert contains(contents, "<svg")
 end

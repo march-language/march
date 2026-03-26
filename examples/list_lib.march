@@ -9,29 +9,29 @@ type Option(a) = None | Some(a)
 
 fn length(lst : List(Int)) : Int do
   match lst do
-  Nil        -> 0
-  Cons(_, t) -> 1 + length(t)
+  | Nil        -> 0
+  | Cons(_, t) -> 1 + length(t)
   end
 end
 
 fn map(f : Int -> Int, lst : List(Int)) : List(Int) do
   match lst do
-  Nil        -> Nil
-  Cons(h, t) -> Cons(f(h), map(f, t))
+  | Nil        -> Nil
+  | Cons(h, t) -> Cons(f(h), map(f, t))
   end
 end
 
 fn filter(pred : Int -> Bool, lst : List(Int)) : List(Int) do
   match lst do
-  Nil        -> Nil
-  Cons(h, t) -> if pred(h) then Cons(h, filter(pred, t)) else filter(pred, t)
+  | Nil        -> Nil
+  | Cons(h, t) -> if pred(h) then Cons(h, filter(pred, t)) else filter(pred, t)
   end
 end
 
 fn fold_left(f : Int -> Int -> Int, acc : Int, lst : List(Int)) : Int do
   match lst do
-  Nil        -> acc
-  Cons(h, t) -> fold_left(f, f(acc, h), t)
+  | Nil        -> acc
+  | Cons(h, t) -> fold_left(f, f(acc, h), t)
   end
 end
 
@@ -45,15 +45,15 @@ end
 
 fn append(xs : List(Int), ys : List(Int)) : List(Int) do
   match xs do
-  Nil        -> ys
-  Cons(h, t) -> Cons(h, append(t, ys))
+  | Nil        -> ys
+  | Cons(h, t) -> Cons(h, append(t, ys))
   end
 end
 
 fn reverse_acc(lst : List(Int), acc : List(Int)) : List(Int) do
   match lst do
-  Nil        -> acc
-  Cons(h, t) -> reverse_acc(t, Cons(h, acc))
+  | Nil        -> acc
+  | Cons(h, t) -> reverse_acc(t, Cons(h, acc))
   end
 end
 
@@ -63,8 +63,8 @@ end
 
 fn find(pred : Int -> Bool, lst : List(Int)) : Option(Int) do
   match lst do
-  Nil        -> None
-  Cons(h, t) -> if pred(h) then Some(h) else find(pred, t)
+  | Nil        -> None
+  | Cons(h, t) -> if pred(h) then Some(h) else find(pred, t)
   end
 end
 
@@ -76,12 +76,12 @@ end
 fn print_list(lst : List(Int)) : Unit do
   print("[")
   match lst do
-  Nil -> ()
-  Cons(h, t) ->
+  | Nil -> ()
+  | Cons(h, t) ->
     print(int_to_string(h))
     match t do
-    Nil -> ()
-    _   ->
+    | Nil -> ()
+    | _   ->
       print(", ")
       print_list_tail(t)
     end
@@ -91,12 +91,12 @@ end
 
 fn print_list_tail(lst : List(Int)) : Unit do
   match lst do
-  Nil        -> ()
-  Cons(h, t) ->
+  | Nil        -> ()
+  | Cons(h, t) ->
     print(int_to_string(h))
     match t do
-    Nil -> ()
-    _   ->
+    | Nil -> ()
+    | _   ->
       print(", ")
       print_list_tail(t)
     end
@@ -105,8 +105,8 @@ end
 
 fn option_to_string(o : Option(Int)) : String do
   match o do
-  None    -> "None"
-  Some(x) -> "Some(" ++ int_to_string(x) ++ ")"
+  | None    -> "None"
+  | Some(x) -> "Some(" ++ int_to_string(x) ++ ")"
   end
 end
 

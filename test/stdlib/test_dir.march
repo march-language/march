@@ -31,8 +31,8 @@ describe "Dir.mkdir" do
     let path = "/tmp/march_td_mkdir_03"
     let _ = Dir.rm_rf(path)
     match Dir.mkdir(path) do
-    Err(_) -> assert false
-    Ok(_)  -> ()
+    | Err(_) -> assert false
+    | Ok(_)  -> ()
     end
     assert (Dir.exists(path))
     let _ = Dir.rm_rf(path)
@@ -43,8 +43,8 @@ describe "Dir.mkdir" do
     let _ = Dir.rm_rf(path)
     let _ = Dir.mkdir(path)
     match Dir.mkdir(path) do
-    Err(_) -> ()
-    Ok(_)  -> assert false
+    | Err(_) -> ()
+    | Ok(_)  -> assert false
     end
     let _ = Dir.rm_rf(path)
   end
@@ -56,8 +56,8 @@ describe "Dir.list" do
     let _ = Dir.rm_rf(path)
     let _ = Dir.mkdir(path)
     let names = match Dir.list(path) do
-      Ok(ns) -> ns
-      Err(_) -> panic("Dir.list failed")
+      | Ok(ns) -> ns
+      | Err(_) -> panic("Dir.list failed")
     end
     assert (List.length(names) == 0)
     let _ = Dir.rm_rf(path)
@@ -70,8 +70,8 @@ describe "Dir.list" do
     let _ = File.write(path ++ "/a.txt", "A")
     let _ = File.write(path ++ "/b.txt", "B")
     let names = match Dir.list(path) do
-      Ok(ns) -> ns
-      Err(_) -> panic("Dir.list after writes failed")
+      | Ok(ns) -> ns
+      | Err(_) -> panic("Dir.list after writes failed")
     end
     assert (List.length(names) == 2)
     let _ = Dir.rm_rf(path)
@@ -79,8 +79,8 @@ describe "Dir.list" do
 
   test "list on nonexistent returns Err" do
     match Dir.list("/tmp/march_td_list_noexist_07") do
-    Err(_) -> ()
-    Ok(_)  -> assert false
+    | Err(_) -> ()
+    | Ok(_)  -> assert false
     end
   end
 end
@@ -93,11 +93,11 @@ describe "Dir.list_full" do
     let _ = File.write(path ++ "/a.txt", "A")
     let _ = File.write(path ++ "/b.txt", "B")
     let paths = match Dir.list_full(path) do
-      Ok(ps) -> ps
-      Err(_) -> panic("Dir.list_full failed")
+      | Ok(ps) -> ps
+      | Err(_) -> panic("Dir.list_full failed")
     end
     assert (List.length(paths) == 2)
-    assert (List.all(paths, fn p -> String.starts_with(p, path)))
+    | assert (List.all(paths, fn p -> String.starts_with(p, path)))
     let _ = Dir.rm_rf(path)
   end
 end
@@ -108,8 +108,8 @@ describe "Dir.mkdir_p" do
     let nested = base ++ "/deep/nested/path"
     let _ = Dir.rm_rf(base)
     match Dir.mkdir_p(nested) do
-    Err(_) -> assert false
-    Ok(_)  -> ()
+    | Err(_) -> assert false
+    | Ok(_)  -> ()
     end
     assert (Dir.exists(nested))
     let _ = Dir.rm_rf(base)
@@ -122,8 +122,8 @@ describe "Dir.rmdir" do
     let _ = Dir.rm_rf(path)
     let _ = Dir.mkdir(path)
     match Dir.rmdir(path) do
-    Err(_) -> assert false
-    Ok(_)  -> ()
+    | Err(_) -> assert false
+    | Ok(_)  -> ()
     end
     assert (not (Dir.exists(path)))
   end
@@ -134,8 +134,8 @@ describe "Dir.rmdir" do
     let _ = Dir.mkdir(path)
     let _ = File.write(path ++ "/file.txt", "data")
     match Dir.rmdir(path) do
-    Err(_) -> ()
-    Ok(_)  -> assert false
+    | Err(_) -> ()
+    | Ok(_)  -> assert false
     end
     let _ = Dir.rm_rf(path)
   end
@@ -150,16 +150,16 @@ describe "Dir.rm_rf" do
     let _ = Dir.mkdir(path ++ "/sub")
     let _ = File.write(path ++ "/sub/f2.txt", "y")
     match Dir.rm_rf(path) do
-    Err(_) -> assert false
-    Ok(_)  -> ()
+    | Err(_) -> assert false
+    | Ok(_)  -> ()
     end
     assert (not (Dir.exists(path)))
   end
 
   test "rm_rf on nonexistent does not panic" do
     match Dir.rm_rf("/tmp/march_td_rmrf_noexist_13") do
-    Err(_) -> ()
-    Ok(_)  -> ()
+    | Err(_) -> ()
+    | Ok(_)  -> ()
     end
   end
 end

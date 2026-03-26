@@ -57,22 +57,22 @@ describe "Regex" do
 
     test "find single digit" do
       match Regex.find("[0-9]", "price: 42 dollars") do
-      None -> panic("find digit not found")
-      Some(m) -> assert (m == "4")
+      | None -> panic("find digit not found")
+      | Some(m) -> assert (m == "4")
       end
     end
 
     test "find literal" do
       match Regex.find("world", "hello world") do
-      None -> panic("find literal not found")
-      Some(m) -> assert (m == "world")
+      | None -> panic("find literal not found")
+      | Some(m) -> assert (m == "world")
       end
     end
 
     test "find no match returns None" do
       match Regex.find("xyz", "hello world") do
-      None -> ()
-      Some(_) -> panic("find no match should be None")
+      | None -> ()
+      | Some(_) -> panic("find no match should be None")
       end
     end
 

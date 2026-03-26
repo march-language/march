@@ -34,16 +34,16 @@ type JsonValue =
 
 pfn rev(xs, acc) do
   match xs do
-  Nil -> acc
-  Cons(h, t) -> rev(t, Cons(h, acc))
+  | Nil -> acc
+  | Cons(h, t) -> rev(t, Cons(h, acc))
   end
 end
 
 -- Skip ASCII whitespace characters.
 pfn skip_ws(chars) do
   match chars do
-  Nil -> Nil
-  Cons(c, rest) -> do
+  | Nil -> Nil
+  | Cons(c, rest) -> do
     if c == " " || c == "\t" || c == "\n" || c == "\r" do skip_ws(rest)
     else chars end
   end
@@ -56,11 +56,11 @@ pfn match_literal(chars, expected) do
   let exp_chars = string_chars(expected)
   fn go(cs, es) do
     match es do
-    Nil -> Ok(cs)
-    Cons(e, et) -> do
+    | Nil -> Ok(cs)
+    | Cons(e, et) -> do
       match cs do
-      Nil -> Err("unexpected end of input, expected: " ++ expected)
-      Cons(c, ct) ->
+      | Nil -> Err("unexpected end of input, expected: " ++ expected)
+      | Cons(c, ct) ->
         if c == e do go(ct, et)
         else Err("expected '" ++ e ++ "' but found '" ++ c ++ "'") end
       end
@@ -75,14 +75,14 @@ end
 pfn parse_string_inner(chars) do
   fn go(cs, acc) do
     match cs do
-    Nil -> Err("unterminated string literal")
-    Cons(c, rest) -> do
+    | Nil -> Err("unterminated string literal")
+    | Cons(c, rest) -> do
       if c == "\"" do
         Ok((string_join(rev(acc, Nil), ""), rest))
       else if c == "\\" do
         match rest do
-        Nil -> Err("unexpected end of input in string escape")
-        Cons(e, rest2) -> do
+        | Nil -> Err("unexpected end of input in string escape")
+        | Cons(e, rest2) -> do
           let ec =
             if e == "\"" do Ok("\"")
             else if e == "\\" do Ok("\\")
@@ -94,8 +94,8 @@ pfn parse_string_inner(chars) do
             else if e == "f" do Ok(char_from_int(12))
             else Err("unknown escape sequence: \\" ++ e) end end end end end end end end
           match ec do
-          Err(msg) -> Err(msg)
-          Ok(ch) -> go(rest2, Cons(ch, acc))
+          | Err(msg) -> Err(msg)
+          | Ok(ch) -> go(rest2, Cons(ch, acc))
           end
         end
         end
@@ -114,8 +114,8 @@ pfn parse_number(chars) do
   end
   fn collect(cs, acc) do
     match cs do
-    Nil -> (rev(acc, Nil), Nil)
-    Cons(c, rest) -> do
+    | Nil -> (rev(acc, Nil), Nil)
+    | Cons(c, rest) -> do
       if is_num_char(c) do collect(rest, Cons(c, acc))
       else (rev(acc, Nil), cs) end
     end
@@ -124,14 +124,14 @@ pfn parse_number(chars) do
   -- Handle optional leading minus
   let (sign, chars2) =
     match chars do
-    Cons(c, rest) -> if c == "-" do ("-", rest) else ("", chars) end
-    Nil -> ("", Nil)
+    | Cons(c, rest) -> if c == "-" do ("-", rest) else ("", chars) end
+    | Nil -> ("", Nil)
     end
   let (num_chars, remaining) = collect(chars2, Nil)
   let num_str = sign ++ string_join(num_chars, "")
   match string_to_float(num_str) do
-  None -> Err("invalid number: " ++ num_str)
-  Some(f) -> Ok((Number(f), remaining))
+  | None -> Err("invalid number: " ++ num_str)
+  | Some(f) -> Ok((Number(f), remaining))
   end
 end
 
@@ -140,27 +140,27 @@ end
 pfn parse_value(chars) do
   let cs = skip_ws(chars)
   match cs do
-  Nil -> Err("unexpected end of input")
-  Cons(c, rest) -> do
+  | Nil -> Err("unexpected end of input")
+  | Cons(c, rest) -> do
     if c == "n" do
       match match_literal(cs, "null") do
-      Err(e) -> Err(e)
-      Ok(remaining) -> Ok((Null, remaining))
+      | Err(e) -> Err(e)
+      | Ok(remaining) -> Ok((Null, remaining))
       end
     else if c == "t" do
       match match_literal(cs, "true") do
-      Err(e) -> Err(e)
-      Ok(remaining) -> Ok((Bool(true), remaining))
+      | Err(e) -> Err(e)
+      | Ok(remaining) -> Ok((Bool(true), remaining))
       end
     else if c == "f" do
       match match_literal(cs, "false") do
-      Err(e) -> Err(e)
-      Ok(remaining) -> Ok((Bool(false), remaining))
+      | Err(e) -> Err(e)
+      | Ok(remaining) -> Ok((Bool(false), remaining))
       end
     else if c == "\"" do
       match parse_string_inner(rest) do
-      Err(e) -> Err(e)
-      Ok((s, remaining)) -> Ok((Str(s), remaining))
+      | Err(e) -> Err(e)
+      | Ok((s, remaining)) -> Ok((Str(s), remaining))
       end
     else if c == "[" do
       parse_array(skip_ws(rest))
@@ -176,18 +176,18 @@ end
 -- Parse a JSON array (chars is AFTER the '[').
 pfn parse_array(chars) do
   match chars do
-  Nil -> Err("unterminated array")
-  Cons(c, rest) -> do
+  | Nil -> Err("unterminated array")
+  | Cons(c, rest) -> do
     if c == "]" do Ok((Array(Nil), rest))
     else do
       fn parse_elements(cs, acc) do
         match parse_value(cs) do
-        Err(e) -> Err(e)
-        Ok((v, remaining)) -> do
+        | Err(e) -> Err(e)
+        | Ok((v, remaining)) -> do
           let cs2 = skip_ws(remaining)
           match cs2 do
-          Nil -> Err("unterminated array, expected ',' or ']'")
-          Cons(sep, rest2) ->
+          | Nil -> Err("unterminated array, expected ',' or ']'")
+          | Cons(sep, rest2) ->
             if sep == "]" do Ok((Array(rev(Cons(v, acc), Nil)), rest2))
             else if sep == "," do parse_elements(skip_ws(rest2), Cons(v, acc))
             else Err("expected ',' or ']' in array, found: '" ++ sep ++ "'") end end
@@ -204,31 +204,31 @@ end
 -- Parse a JSON object (chars is AFTER the '{').
 pfn parse_object(chars) do
   match chars do
-  Nil -> Err("unterminated object")
-  Cons(c, rest) -> do
+  | Nil -> Err("unterminated object")
+  | Cons(c, rest) -> do
     if c == "}" do Ok((Object(Nil), rest))
     else do
       fn parse_pairs(cs, acc) do
         let cs2 = skip_ws(cs)
         match cs2 do
-        Nil -> Err("unterminated object")
-        Cons(q, rest2) ->
+        | Nil -> Err("unterminated object")
+        | Cons(q, rest2) ->
           if q == "\"" do
             match parse_string_inner(rest2) do
-            Err(e) -> Err(e)
-            Ok((key, after_key)) -> do
+            | Err(e) -> Err(e)
+            | Ok((key, after_key)) -> do
               let cs3 = skip_ws(after_key)
               match cs3 do
-              Nil -> Err("expected ':' after object key")
-              Cons(colon, rest3) ->
+              | Nil -> Err("expected ':' after object key")
+              | Cons(colon, rest3) ->
                 if colon == ":" do
                   match parse_value(skip_ws(rest3)) do
-                  Err(e) -> Err(e)
-                  Ok((v, after_val)) -> do
+                  | Err(e) -> Err(e)
+                  | Ok((v, after_val)) -> do
                     let cs4 = skip_ws(after_val)
                     match cs4 do
-                    Nil -> Err("unterminated object, expected ',' or '}'")
-                    Cons(sep, rest4) ->
+                    | Nil -> Err("unterminated object, expected ',' or '}'")
+                    | Cons(sep, rest4) ->
                       if sep == "}" do
                         Ok((Object(rev(Cons((key, v), acc), Nil)), rest4))
                       else if sep == "," do
@@ -253,8 +253,8 @@ end
 -- Escape a string for JSON output.
 pfn escape_string_chars(chars, acc) do
   match chars do
-  Nil -> string_join(rev(acc, Nil), "")
-  Cons(c, rest) -> do
+  | Nil -> string_join(rev(acc, Nil), "")
+  | Cons(c, rest) -> do
     let code = char_to_int(c)
     let esc =
       if c == "\"" do "\\\""
@@ -276,8 +276,8 @@ end
 
 pfn map_list(xs, f, acc) do
   match xs do
-  Nil -> rev(acc, Nil)
-  Cons(h, t) -> map_list(t, f, Cons(f(h), acc))
+  | Nil -> rev(acc, Nil)
+  | Cons(h, t) -> map_list(t, f, Cons(f(h), acc))
   end
 end
 
@@ -295,12 +295,12 @@ Returns Ok(value) on success, Err(message) on parse error.
 fn parse(s) do
   let chars = string_chars(s)
   match parse_value(chars) do
-  Err(e) -> Err(e)
-  Ok((v, remaining)) -> do
+  | Err(e) -> Err(e)
+  | Ok((v, remaining)) -> do
     let rest = skip_ws(remaining)
     match rest do
-    Nil -> Ok(v)
-    Cons(c, _) -> Err("unexpected character after JSON value: '" ++ c ++ "'")
+    | Nil -> Ok(v)
+    | Cons(c, _) -> Err("unexpected character after JSON value: '" ++ c ++ "'")
     end
   end
   end
@@ -316,21 +316,21 @@ Convert a JsonValue to its JSON string representation.
 """
 fn to_string(jv) do
   match jv do
-  Null -> "null"
-  Bool(b) -> if b do "true" else "false" end
-  Number(f) -> do
+  | Null -> "null"
+  | Bool(b) -> if b do "true" else "false" end
+  | Number(f) -> do
     let fi = float_to_int(f)
     if int_to_float(fi) == f do int_to_string(fi)
     else float_to_string(f) end
   end
-  Str(s) -> "\"" ++ escape_str(s) ++ "\""
-  Array(xs) -> do
+  | Str(s) -> "\"" ++ escape_str(s) ++ "\""
+  | Array(xs) -> do
     let strs = map_list(xs, fn x -> to_string(x), Nil)
     "[" ++ string_join(strs, ",") ++ "]"
   end
-  Object(kvs) -> do
+  | Object(kvs) -> do
     let strs = map_list(kvs, fn kv -> match kv do
-      (k, v) -> "\"" ++ escape_str(k) ++ "\":" ++ to_string(v)
+      | (k, v) -> "\"" ++ escape_str(k) ++ "\":" ++ to_string(v)
       end, Nil)
     "{" ++ string_join(strs, ",") ++ "}"
   end
@@ -347,11 +347,11 @@ If jv is not an Object, returns None.
 """
 fn get(jv, key) do
   match jv do
-  Object(kvs) -> do
+  | Object(kvs) -> do
     fn find(pairs) do
       match pairs do
-      Nil -> None
-      Cons(kv, rest) -> do
+      | Nil -> None
+      | Cons(kv, rest) -> do
         let (k, v) = kv
         if k == key do Some(v)
         else find(rest) end
@@ -360,7 +360,7 @@ fn get(jv, key) do
     end
     find(kvs)
   end
-  _ -> None
+  | _ -> None
   end
 end
 
@@ -372,11 +372,11 @@ Returns Some(value) if the full path exists, or None if any step fails.
 """
 fn get_in(jv, keys) do
   match keys do
-  Nil -> Some(jv)
-  Cons(k, rest) -> do
+  | Nil -> Some(jv)
+  | Cons(k, rest) -> do
     match get(jv, k) do
-    None -> None
-    Some(v) -> get_in(v, rest)
+    | None -> None
+    | Some(v) -> get_in(v, rest)
     end
   end
   end

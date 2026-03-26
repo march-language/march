@@ -14,8 +14,8 @@ end
 
 pfn head(xs : List(Int)) : Int do
   match xs do
-  Nil        -> 0
-  Cons(h, _) -> h
+  | Nil        -> 0
+  | Cons(h, _) -> h
   end
 end
 
@@ -23,8 +23,8 @@ end
 pfn take_k(xs : List(Int), k : Int, acc : List(Int)) : (List(Int), List(Int)) do
   if k == 0 do (acc, xs)
   else match xs do
-    Nil        -> (acc, Nil)
-    Cons(h, t) -> take_k(t, k - 1, Cons(h, acc)) end
+    | Nil        -> (acc, Nil)
+    | Cons(h, t) -> take_k(t, k - 1, Cons(h, acc)) end
   end
 end
 
@@ -33,8 +33,8 @@ end
 pfn sort_batched(xs : List(Int), cmp : Int -> Int -> Bool) : List(Int) do
   fn go(lst : List(Int), acc : List(Int)) : List(Int) do
     match lst do
-    Nil -> Sort.mergesort_by(acc, cmp)
-    _ ->
+    | Nil -> Sort.mergesort_by(acc, cmp)
+    | _ ->
       let (chunk, rest) = take_k(lst, 8, Nil)
       let sorted_chunk  = Sort.sort_small_by(Sort.reverse_list(chunk), cmp)
       go(rest, Sort.append_list(acc, sorted_chunk))

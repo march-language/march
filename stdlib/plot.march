@@ -70,8 +70,8 @@ pfn palette_color(idx : Int) : Color do
     Nil))))))))))
   fn nth(lst : List(Color), n : Int) : Color do
     match lst do
-    Nil        -> { r = 70, g = 130, b = 180 }
-    Cons(h, t) -> if n == 0 do h else nth(t, n - 1) end
+    | Nil        -> { r = 70, g = 130, b = 180 }
+    | Cons(h, t) -> if n == 0 do h else nth(t, n - 1) end
     end
   end
   nth(colors, idx % 10)
@@ -155,26 +155,26 @@ fn histogram_series(values : List(Float), bins : Int) : Series do
   let sorted = Sort.timsort_by(values, fn a -> fn b -> a <= b)
   fn list_first(lst : List(Float)) : Option(Float) do
     match lst do
-    Nil -> None
-    Cons(h, _) -> Some(h)
+    | Nil -> None
+    | Cons(h, _) -> Some(h)
     end
   end
   fn list_last_val(lst : List(Float)) : Option(Float) do
     match lst do
-    Nil -> None
+    | Nil -> None
     Cons(h, Nil) -> Some(h)
-    Cons(_, t) -> list_last_val(t)
+    | Cons(_, t) -> list_last_val(t)
     end
   end
   let lo_opt = list_first(sorted)
   let hi_opt = list_last_val(sorted)
   match lo_opt do
-  None ->
+  | None ->
     { kind = Bar, xs = Nil, ys = Nil, label = None, style = default_style(0) }
-  Some(lo_v) -> match hi_opt do
-    None ->
+  | Some(lo_v) -> match hi_opt do
+    | None ->
       { kind = Bar, xs = Nil, ys = Nil, label = None, style = default_style(0) }
-    Some(hi_v) -> do
+    | Some(hi_v) -> do
     let range = hi_v -. lo_v
     let bin_w = if range == 0.0 do 1.0 else range /. int_to_float(bins) end
     fn bin_of(x : Float) : Int do
@@ -184,16 +184,16 @@ fn histogram_series(values : List(Float), bins : Int) : Series do
     end
     fn update_at(idx : Int, cs : List(Int)) : List(Int) do
       match cs do
-      Nil -> Nil
-      Cons(c, t) ->
+      | Nil -> Nil
+      | Cons(c, t) ->
         if idx == 0 do Cons(c + 1, t)
         else Cons(c, update_at(idx - 1, t)) end
       end
     end
     fn count_bins(lst : List(Float), counts : List(Int)) : List(Int) do
       match lst do
-      Nil -> counts
-      Cons(x, rest) -> count_bins(rest, update_at(bin_of(x), counts))
+      | Nil -> counts
+      | Cons(x, rest) -> count_bins(rest, update_at(bin_of(x), counts))
       end
     end
     fn make_zeros(n : Int, acc : List(Int)) : List(Int) do
@@ -338,18 +338,18 @@ end
 
 pfn pts_to_str(pts : List((Float, Float))) : String do
   match pts do
-  Nil -> ""
-  Cons((x, y), Nil) ->
+  | Nil -> ""
+  | Cons((x, y), Nil) ->
     fmt_float(x) ++ "," ++ fmt_float(y)
-  Cons((x, y), rest) ->
+  | Cons((x, y), rest) ->
     fmt_float(x) ++ "," ++ fmt_float(y) ++ " " ++ pts_to_str(rest)
   end
 end
 
 pfn svg_polyline_el(points : List((Float, Float)), stroke : String, sw : Float) : String do
   match points do
-  Nil -> ""
-  _ -> do
+  | Nil -> ""
+  | _ -> do
     "<polyline points=\"" ++ pts_to_str(points) ++
     "\" fill=\"none\" stroke=\"" ++ stroke ++
     "\" stroke-width=\"" ++ fmt_float(sw) ++ "\"/>"
@@ -366,9 +366,9 @@ end
 
 pfn join_strs(lst : List(String), sep : String) : String do
   match lst do
-  Nil -> ""
+  | Nil -> ""
   Cons(s, Nil) -> s
-  Cons(s, rest) -> s ++ sep ++ join_strs(rest, sep)
+  | Cons(s, rest) -> s ++ sep ++ join_strs(rest, sep)
   end
 end
 
@@ -383,12 +383,12 @@ end
 
 pfn list_min_f(lst : List(Float)) : Option(Float) do
   match lst do
-  Nil -> None
-  Cons(h, t) -> do
+  | Nil -> None
+  | Cons(h, t) -> do
     fn go(xs : List(Float), acc : Float) : Float do
       match xs do
-      Nil -> acc
-      Cons(x, rest) -> go(rest, if x < acc do x else acc end)
+      | Nil -> acc
+      | Cons(x, rest) -> go(rest, if x < acc do x else acc end)
       end
     end
     Some(go(t, h))
@@ -398,12 +398,12 @@ end
 
 pfn list_max_f(lst : List(Float)) : Option(Float) do
   match lst do
-  Nil -> None
-  Cons(h, t) -> do
+  | Nil -> None
+  | Cons(h, t) -> do
     fn go(xs : List(Float), acc : Float) : Float do
       match xs do
-      Nil -> acc
-      Cons(x, rest) -> go(rest, if x > acc do x else acc end)
+      | Nil -> acc
+      | Cons(x, rest) -> go(rest, if x > acc do x else acc end)
       end
     end
     Some(go(t, h))
@@ -413,9 +413,9 @@ end
 
 pfn list_last_f(lst : List(Float)) : Option(Float) do
   match lst do
-  Nil -> None
+  | Nil -> None
   Cons(h, Nil) -> Some(h)
-  Cons(_, t) -> list_last_f(t)
+  | Cons(_, t) -> list_last_f(t)
   end
 end
 
@@ -435,22 +435,22 @@ pfn data_range(vals : List(Float),
               user_min : Option(Float),
               user_max : Option(Float)) : (Float, Float) do
   let lo = match user_min do
-    Some(v) -> v
-    None -> Option.unwrap_or(list_min_f(vals), 0.0)
+    | Some(v) -> v
+    | None -> Option.unwrap_or(list_min_f(vals), 0.0)
     end
   let hi = match user_max do
-    Some(v) -> v
-    None -> Option.unwrap_or(list_max_f(vals), 1.0)
+    | Some(v) -> v
+    | None -> Option.unwrap_or(list_max_f(vals), 1.0)
     end
   let span = hi -. lo
   let pad = if span == 0.0 do 0.5 else span *. 0.05 end
   let lo2 = match user_min do
-    Some(_) -> lo
-    None -> lo -. pad
+    | Some(_) -> lo
+    | None -> lo -. pad
     end
   let hi2 = match user_max do
-    Some(_) -> hi
-    None -> hi +. pad
+    | Some(_) -> hi
+    | None -> hi +. pad
     end
   (lo2, hi2)
 end
@@ -517,8 +517,8 @@ pfn render_x_axis(ticks : List(Float), sx : Float -> Float,
     "\n" ++ svg_text_el(px, y_bot +. fs +. 5.0, fmt_float(v), fs *. 0.85, "middle")
     end)
   let lbl_parts = match lbl do
-    None -> Nil
-    Some(l) -> do
+    | None -> Nil
+    | Some(l) -> do
       let mid = (sx(first_x) +. sx(last_x)) /. 2.0
       Cons(svg_text_el(mid, y_bot +. fs *. 2.5, l, fs, "middle"), Nil)
     end
@@ -538,8 +538,8 @@ pfn render_y_axis(ticks : List(Float), sy : Float -> Float,
     "\n" ++ svg_text_el(x_left -. 8.0, py +. fs *. 0.35, fmt_float(v), fs *. 0.85, "end")
     end)
   let lbl_parts = match lbl do
-    None -> Nil
-    Some(l) -> do
+    | None -> Nil
+    | Some(l) -> do
       let lx = x_left -. fs *. 3.0
       Cons("<text x=\"0\" y=\"0\" font-size=\"" ++ fmt_float(fs) ++
            "\" text-anchor=\"middle\" transform=\"translate(" ++
@@ -555,9 +555,9 @@ end
 pfn zip_pts(xs : List(Float), ys : List(Float)) : List((Float, Float)) do
   fn go(xs, ys, acc) do
     match (xs, ys) do
-    (Nil, _) -> List.reverse(acc)
-    (_, Nil) -> List.reverse(acc)
-    (Cons(x, xr), Cons(y, yr)) -> go(xr, yr, Cons((x, y), acc))
+    | (Nil, _) -> List.reverse(acc)
+    | (_, Nil) -> List.reverse(acc)
+    | (Cons(x, xr), Cons(y, yr)) -> go(xr, yr, Cons((x, y), acc))
     end
   end
   go(xs, ys, Nil)
@@ -566,17 +566,17 @@ end
 pfn render_series(s : Series, sx : Float -> Float, sy : Float -> Float) : List(String) do
   let col = color_hex(s.style.line_color)
   match s.kind do
-  Line -> do
+  | Line -> do
     let screen_pts = List.map(zip_pts(s.xs, s.ys), fn p -> match p do
-      (x, y) -> (sx(x), sy(y))
+      | (x, y) -> (sx(x), sy(y))
       end)
     Cons(svg_polyline_el(screen_pts, col, s.style.line_width), Nil)
   end
-  Scatter ->
+  | Scatter ->
     List.map(zip_pts(s.xs, s.ys), fn p -> match p do
-      (x, y) -> svg_circle_el(sx(x), sy(y), s.style.point_radius, col, col)
+      | (x, y) -> svg_circle_el(sx(x), sy(y), s.style.point_radius, col, col)
       end)
-  Bar -> do
+  | Bar -> do
     let n = List.length(s.xs)
     let bar_w = if n <= 1 do 20.0
       else do
@@ -598,7 +598,7 @@ pfn render_series(s : Series, sx : Float -> Float, sy : Float -> Float) : List(S
       svg_rect_el(px, rect_y, bar_w, h, col, "#ffffff", 0.5)
       end)
   end
-  HistogramSeries ->
+  | HistogramSeries ->
     Nil
   end
 end
@@ -608,11 +608,11 @@ end
 pfn render_legend(series : List(Series), x : Float, y_start : Float, fs : Float) : List(String) do
   fn go(lst : List(Series), yi : Float) : List(String) do
     match lst do
-    Nil -> Nil
-    Cons(s, rest) -> do
+    | Nil -> Nil
+    | Cons(s, rest) -> do
       match s.label do
-      None -> go(rest, yi)
-      Some(lbl) -> do
+      | None -> go(rest, yi)
+      | Some(lbl) -> do
         let col = color_hex(s.style.line_color)
         let swatch = svg_rect_el(x, yi -. fs, fs *. 1.5, fs, col, "none", 0.0)
         let txt = svg_text_el(x +. fs *. 2.0, yi, lbl, fs, "start")
@@ -673,8 +673,8 @@ fn to_svg(p : Plot) : String do
 
   -- title
   let title_svg = match p.title do
-    None -> Nil
-    Some(t) -> Cons(svg_text_el(wf /. 2.0, fs *. 1.5, t, fs *. 1.3, "middle"), Nil)
+    | None -> Nil
+    | Some(t) -> Cons(svg_text_el(wf /. 2.0, fs *. 1.5, t, fs *. 1.3, "middle"), Nil)
     end
 
   -- legend
@@ -698,8 +698,8 @@ end
 
 fn save(p : Plot, path : String) : Result(Unit, String) do
   match File.write(path, to_svg(p)) do
-  Ok(_) -> Ok(())
-  Err(e) -> Err(e)
+  | Ok(_) -> Ok(())
+  | Err(e) -> Err(e)
   end
 end
 

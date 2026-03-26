@@ -59,74 +59,74 @@ end
 
 describe "unwrap_or_else" do
   test "unwrap_or_else returns value when Some" do
-    assert (Option.unwrap_or_else(Some(7), fn _u -> 99) == 7)
+    | assert (Option.unwrap_or_else(Some(7), fn _u -> 99) == 7)
   end
 
   test "unwrap_or_else calls function when None" do
-    assert (Option.unwrap_or_else(None, fn _u -> 10) == 10)
+    | assert (Option.unwrap_or_else(None, fn _u -> 10) == 10)
   end
 end
 
 describe "map" do
   test "map transforms Some value" do
-    assert (Option.unwrap(Option.map(Some(3), fn x -> x * 2)) == 6)
+    | assert (Option.unwrap(Option.map(Some(3), fn x -> x * 2)) == 6)
   end
 
   test "map of None is None" do
-    assert Option.is_none(Option.map(None, fn (x : Int) -> x * 2))
+    | assert Option.is_none(Option.map(None, fn (x : Int) -> x * 2))
   end
 
   test "map can return zero" do
-    assert (Option.unwrap(Option.map(Some(5), fn _ -> 0)) == 0)
+    | assert (Option.unwrap(Option.map(Some(5), fn _ -> 0)) == 0)
   end
 end
 
 describe "flat_map" do
   test "flat_map Some to Some" do
-    assert (Option.unwrap(Option.flat_map(Some(4), fn x -> Some(x + 1))) == 5)
+    | assert (Option.unwrap(Option.flat_map(Some(4), fn x -> Some(x + 1))) == 5)
   end
 
   test "flat_map Some to None gives None" do
-    assert Option.is_none(Option.flat_map(Some(1), fn (x : Int) -> None))
+    | assert Option.is_none(Option.flat_map(Some(1), fn (x : Int) -> None))
   end
 
   test "flat_map None gives None" do
-    assert Option.is_none(Option.flat_map(None, fn (x : Int) -> Some(x)))
+    | assert Option.is_none(Option.flat_map(None, fn (x : Int) -> Some(x)))
   end
 end
 
 describe "filter" do
   test "filter keeps value when predicate passes" do
-    assert (Option.unwrap(Option.filter(Some(4), fn x -> x > 2)) == 4)
+    | assert (Option.unwrap(Option.filter(Some(4), fn x -> x > 2)) == 4)
   end
 
   test "filter gives None when predicate fails" do
-    assert Option.is_none(Option.filter(Some(1), fn x -> x > 2))
+    | assert Option.is_none(Option.filter(Some(1), fn x -> x > 2))
   end
 
   test "filter of None is None" do
-    assert Option.is_none(Option.filter(None, fn (x : Int) -> true))
+    | assert Option.is_none(Option.filter(None, fn (x : Int) -> true))
   end
 end
 
 describe "or_else" do
   test "or_else returns original Some" do
-    assert (Option.unwrap(Option.or_else(Some(5), fn _u -> Some(99))) == 5)
+    | assert (Option.unwrap(Option.or_else(Some(5), fn _u -> Some(99))) == 5)
   end
 
   test "or_else calls function for None" do
-    assert (Option.unwrap(Option.or_else(None, fn _u -> Some(7))) == 7)
+    | assert (Option.unwrap(Option.or_else(None, fn _u -> Some(7))) == 7)
   end
 end
 
 describe "zip" do
   test "zip of two Some values gives Some pair" do
     match Option.zip(Some(1), Some(2)) do
-    Some((a, b)) -> do
+    | Some((a, b)) -> do
       assert (a == 1)
       assert (b == 2)
     end
-    None -> assert false
+    | None -> assert false
     end
   end
 

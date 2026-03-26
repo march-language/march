@@ -5,8 +5,8 @@ mod TestCsv do
 
 pfn do_write(path, content) do
   match File.write(path, content) do
-  Err(e) -> panic("write failed: " ++ to_string(e))
-  Ok(_) -> :ok
+  | Err(e) -> panic("write failed: " ++ to_string(e))
+  | Ok(_) -> :ok
   end
 end
 
@@ -18,8 +18,8 @@ describe "Csv" do
       let base = "/tmp/march_test_csv_basic.csv"
       do_write(base, "a,b,c\n1,2,3\n4,5,6\n")
       match Csv.read_csv(base) do
-      Err(e) -> panic("read_csv basic failed: " ++ to_string(e))
-      Ok(rows) -> do
+      | Err(e) -> panic("read_csv basic failed: " ++ to_string(e))
+      | Ok(rows) -> do
         assert (List.length(rows) == 3)
         let row0 = List.nth(rows, 0)
         assert (List.length(row0) == 3)
@@ -34,7 +34,7 @@ describe "Csv" do
         assert (List.nth(row2, 0) == "4")
       end
       end
-      match File.delete(base) do | _ -> () end
+      | match File.delete(base) do | _ -> () end
     end
 
   end
@@ -45,8 +45,8 @@ describe "Csv" do
       let base = "/tmp/march_test_csv_quoted.csv"
       do_write(base, "\"hello, world\",plain\n\"has \"\"quotes\"\"\",end\n")
       match Csv.read_csv(base) do
-      Err(e) -> panic("read_csv quoted failed: " ++ to_string(e))
-      Ok(rows) -> do
+      | Err(e) -> panic("read_csv quoted failed: " ++ to_string(e))
+      | Ok(rows) -> do
         assert (List.length(rows) == 2)
         let row0 = List.nth(rows, 0)
         assert (List.nth(row0, 0) == "hello, world")
@@ -55,7 +55,7 @@ describe "Csv" do
         assert (List.nth(row1, 0) == "has \"quotes\"")
       end
       end
-      match File.delete(base) do | _ -> () end
+      | match File.delete(base) do | _ -> () end
     end
 
   end
@@ -66,15 +66,15 @@ describe "Csv" do
       let base = "/tmp/march_test_csv_single.csv"
       do_write(base, "name\nalice\nbob\n")
       match Csv.read_csv(base) do
-      Err(e) -> panic("read_csv single col failed: " ++ to_string(e))
-      Ok(rows) -> do
+      | Err(e) -> panic("read_csv single col failed: " ++ to_string(e))
+      | Ok(rows) -> do
         assert (List.length(rows) == 3)
         assert (List.nth(List.nth(rows, 0), 0) == "name")
         assert (List.nth(List.nth(rows, 1), 0) == "alice")
         assert (List.nth(List.nth(rows, 2), 0) == "bob")
       end
       end
-      match File.delete(base) do | _ -> () end
+      | match File.delete(base) do | _ -> () end
     end
 
   end
@@ -85,10 +85,10 @@ describe "Csv" do
       let base = "/tmp/march_test_csv_empty.csv"
       do_write(base, "")
       match Csv.read_csv(base) do
-      Err(e) -> panic("read_csv empty failed: " ++ to_string(e))
-      Ok(rows) -> assert (List.length(rows) == 0)
+      | Err(e) -> panic("read_csv empty failed: " ++ to_string(e))
+      | Ok(rows) -> assert (List.length(rows) == 0)
       end
-      match File.delete(base) do | _ -> () end
+      | match File.delete(base) do | _ -> () end
     end
 
   end
@@ -99,43 +99,43 @@ describe "Csv" do
       let base = "/tmp/march_test_csv_tab.csv"
       do_write(base, "x\ty\n1\t2\n3\t4\n")
       match Csv.read_all(base, "\t", :simple) do
-      Err(e) -> panic("read_all tab failed: " ++ to_string(e))
-      Ok(rows) -> do
+      | Err(e) -> panic("read_all tab failed: " ++ to_string(e))
+      | Ok(rows) -> do
         assert (List.length(rows) == 3)
         let row1 = List.nth(rows, 1)
         assert (List.nth(row1, 0) == "1")
         assert (List.nth(row1, 1) == "2")
       end
       end
-      match File.delete(base) do | _ -> () end
+      | match File.delete(base) do | _ -> () end
     end
 
     test "simple mode" do
       let base = "/tmp/march_test_csv_simple.csv"
       do_write(base, "a,b\n1,2\n")
       match Csv.read_all(base, ",", :simple) do
-      Err(e) -> panic("read_all simple failed: " ++ to_string(e))
-      Ok(rows) -> do
+      | Err(e) -> panic("read_all simple failed: " ++ to_string(e))
+      | Ok(rows) -> do
         assert (List.length(rows) == 2)
         assert (List.nth(List.nth(rows, 0), 0) == "a")
       end
       end
-      match File.delete(base) do | _ -> () end
+      | match File.delete(base) do | _ -> () end
     end
 
     test "semicolon delimiter" do
       let base = "/tmp/march_test_csv_semi.csv"
       do_write(base, "x;y;z\n1;2;3\n")
       match Csv.read_all(base, ";", :simple) do
-      Err(e) -> panic("semicolon csv failed: " ++ to_string(e))
-      Ok(rows) -> do
+      | Err(e) -> panic("semicolon csv failed: " ++ to_string(e))
+      | Ok(rows) -> do
         assert (List.length(rows) == 2)
         let row1 = List.nth(rows, 1)
         assert (List.nth(row1, 0) == "1")
         assert (List.nth(row1, 2) == "3")
       end
       end
-      match File.delete(base) do | _ -> () end
+      | match File.delete(base) do | _ -> () end
     end
 
   end
@@ -145,21 +145,21 @@ describe "Csv" do
     test "each_csv_row no error" do
       let base = "/tmp/march_test_csv_stream.csv"
       do_write(base, "a,b,c\n1,2,3\n4,5,6\n")
-      match Csv.each_csv_row(base, fn _row -> :ok) do
-      Err(e) -> panic("each_csv_row failed: " ++ to_string(e))
-      Ok(_) -> ()
+      | match Csv.each_csv_row(base, fn _row -> :ok) do
+      | Err(e) -> panic("each_csv_row failed: " ++ to_string(e))
+      | Ok(_) -> ()
       end
-      match File.delete(base) do | _ -> () end
+      | match File.delete(base) do | _ -> () end
     end
 
     test "each_row_with_header no error" do
       let base = "/tmp/march_test_csv_hdr.csv"
       do_write(base, "a,b,c\n1,2,3\n4,5,6\n")
-      match Csv.each_row_with_header(base, ",", :rfc4180, fn (_hdr, _row) -> :ok) do
-      Err(e) -> panic("each_row_with_header failed: " ++ to_string(e))
-      Ok(_) -> ()
+      | match Csv.each_row_with_header(base, ",", :rfc4180, fn (_hdr, _row) -> :ok) do
+      | Err(e) -> panic("each_row_with_header failed: " ++ to_string(e))
+      | Ok(_) -> ()
       end
-      match File.delete(base) do | _ -> () end
+      | match File.delete(base) do | _ -> () end
     end
 
   end
@@ -168,8 +168,8 @@ describe "Csv" do
 
     test "nonexistent file returns Err" do
       match Csv.read_csv("/tmp/march_test_csv_noexist.csv") do
-      Err(_) -> ()
-      Ok(_) -> panic("read_csv nonexistent should return Err")
+      | Err(_) -> ()
+      | Ok(_) -> panic("read_csv nonexistent should return Err")
       end
     end
 

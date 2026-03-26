@@ -38,79 +38,79 @@ mod HttpServer do
 
   fn method(conn) do
     match conn do
-    Conn(_, m, _, _, _, _, _, _, _, _, _, _, _) -> m
+    | Conn(_, m, _, _, _, _, _, _, _, _, _, _, _) -> m
     end
   end
 
   fn path(conn) do
     match conn do
-    Conn(_, _, p, _, _, _, _, _, _, _, _, _, _) -> p
+    | Conn(_, _, p, _, _, _, _, _, _, _, _, _, _) -> p
     end
   end
 
   fn path_info(conn) do
     match conn do
-    Conn(_, _, _, pi, _, _, _, _, _, _, _, _, _) -> pi
+    | Conn(_, _, _, pi, _, _, _, _, _, _, _, _, _) -> pi
     end
   end
 
   fn query_string(conn) do
     match conn do
-    Conn(_, _, _, _, qs, _, _, _, _, _, _, _, _) -> qs
+    | Conn(_, _, _, _, qs, _, _, _, _, _, _, _, _) -> qs
     end
   end
 
   fn req_headers(conn) do
     match conn do
-    Conn(_, _, _, _, _, rh, _, _, _, _, _, _, _) -> rh
+    | Conn(_, _, _, _, _, rh, _, _, _, _, _, _, _) -> rh
     end
   end
 
   fn req_body(conn) do
     match conn do
-    Conn(_, _, _, _, _, _, rb, _, _, _, _, _, _) -> rb
+    | Conn(_, _, _, _, _, _, rb, _, _, _, _, _, _) -> rb
     end
   end
 
   fn status(conn) do
     match conn do
-    Conn(_, _, _, _, _, _, _, s, _, _, _, _, _) -> s
+    | Conn(_, _, _, _, _, _, _, s, _, _, _, _, _) -> s
     end
   end
 
   fn resp_headers(conn) do
     match conn do
-    Conn(_, _, _, _, _, _, _, _, rh, _, _, _, _) -> rh
+    | Conn(_, _, _, _, _, _, _, _, rh, _, _, _, _) -> rh
     end
   end
 
   fn resp_body(conn) do
     match conn do
-    Conn(_, _, _, _, _, _, _, _, _, rb, _, _, _) -> rb
+    | Conn(_, _, _, _, _, _, _, _, _, rb, _, _, _) -> rb
     end
   end
 
   fn halted(conn) do
     match conn do
-    Conn(_, _, _, _, _, _, _, _, _, _, h, _, _) -> h
+    | Conn(_, _, _, _, _, _, _, _, _, _, h, _, _) -> h
     end
   end
 
   fn assigns(conn) do
     match conn do
-    Conn(_, _, _, _, _, _, _, _, _, _, _, a, _) -> a
+    | Conn(_, _, _, _, _, _, _, _, _, _, _, a, _) -> a
     end
   end
 
   fn conn_upgrade(conn) do
     match conn do
-    Conn(_, _, _, _, _, _, _, _, _, _, _, _, u) -> u
+    | Conn(_, _, _, _, _, _, _, _, _, _, _, _, u) -> u
     end
   end
 
   fn fd(conn) do
     match conn do
-    Conn(f, _, _, _, _, _, _, _, _, _, _, _, _) -> f
+    | Conn(f, _, _, _, _, _, _, _, _, _, _, _, _) -> f
     end
   end
 
@@ -119,8 +119,8 @@ mod HttpServer do
     let lower_name = string_to_lowercase(name)
     fn find(hs) do
       match hs do
-      Nil -> None
-      Cons(Header(n, v), rest) -> do
+      | Nil -> None
+      | Cons(Header(n, v), rest) -> do
         if string_to_lowercase(n) == lower_name do Some(v)
         else find(rest) end
       end
@@ -133,8 +133,8 @@ mod HttpServer do
   fn get_assign(conn, key) do
     fn find(pairs) do
       match pairs do
-      Nil -> None
-      Cons((k, v), rest) -> do
+      | Nil -> None
+      | Cons((k, v), rest) -> do
         if k == key do Some(v)
         else find(rest) end
       end
@@ -147,14 +147,14 @@ mod HttpServer do
 
   fn put_resp_header(conn, name, value) do
     match conn do
-    Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, a, u) ->
+    | Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, a, u) ->
       Conn(fd, m, p, pi, qs, rh, rb, s, Cons(Header(name, value), rhs), rbody, h, a, u)
     end
   end
 
   fn assign(conn, key, value) do
     match conn do
-    Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, a, u) ->
+    | Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, a, u) ->
       Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, h, Cons((key, value), a), u)
     end
   end
@@ -163,7 +163,7 @@ mod HttpServer do
   -- This is the primary way to "respond".
   fn send_resp(conn, resp_status, body) do
     match conn do
-    Conn(fd, m, p, pi, qs, rh, rb, _, rhs, _, _, a, u) ->
+    | Conn(fd, m, p, pi, qs, rh, rb, _, rhs, _, _, a, u) ->
       Conn(fd, m, p, pi, qs, rh, rb, resp_status, rhs, body, true, a, u)
     end
   end
@@ -171,7 +171,7 @@ mod HttpServer do
   -- Mark as halted without setting a response.
   fn halt(conn) do
     match conn do
-    Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, _, a, u) ->
+    | Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, _, a, u) ->
       Conn(fd, m, p, pi, qs, rh, rb, s, rhs, rbody, true, a, u)
     end
   end
@@ -206,8 +206,8 @@ mod HttpServer do
   -- Stops at the first halted conn.
   fn run_pipeline(conn, plugs) do
     match plugs do
-    Nil -> conn
-    Cons(f, rest) -> do
+    | Nil -> conn
+    | Cons(f, rest) -> do
       if halted(conn) do conn
       else run_pipeline(f(conn), rest) end
     end
@@ -228,20 +228,20 @@ mod HttpServer do
 
   fn plug(server, p) do
     match server do
-    Server(port, plugs, mc, it) ->
+    | Server(port, plugs, mc, it) ->
       Server(port, List.append(plugs, Cons(p, Nil)), mc, it)
     end
   end
 
   fn max_connections(server, n) do
     match server do
-    Server(port, plugs, _, it) -> Server(port, plugs, n, it)
+    | Server(port, plugs, _, it) -> Server(port, plugs, n, it)
     end
   end
 
   fn idle_timeout(server, secs) do
     match server do
-    Server(port, plugs, mc, _) -> Server(port, plugs, mc, secs)
+    | Server(port, plugs, mc, _) -> Server(port, plugs, mc, secs)
     end
   end
 
@@ -249,7 +249,7 @@ mod HttpServer do
   -- Extracts config and calls the C runtime http_server_listen builtin.
   fn listen(server) do
     match server do
-    Server(port, plugs, mc, it) -> do
+    | Server(port, plugs, mc, it) -> do
       -- Build a server config heap object for the C runtime:
       -- The C runtime expects (port, max_conns, idle_timeout) at fields 0,1,2.
       -- The pipeline is passed separately.
@@ -265,7 +265,7 @@ mod HttpServer do
   -- A readiness pipe ensures the parent does not race ahead of the child's bind.
   fn spawn_n(server, n) do
     match server do
-    Server(port, plugs, mc, it) -> do
+    | Server(port, plugs, mc, it) -> do
       let pipeline_fn = fn conn -> run_pipeline(conn, plugs)
       http_server_spawn_n(port, n, mc, it, pipeline_fn)
     end

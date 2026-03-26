@@ -32,16 +32,16 @@ describe "push_back and peek_front" do
   test "push_back then peek_front returns first element" do
     let q = Queue.push_back(Queue.push_back(Queue.empty(), 1), 2)
     match Queue.peek_front(q) do
-    None -> assert false
-    Some(v) -> assert (v == 1)
+    | None -> assert false
+    | Some(v) -> assert (v == 1)
     end
   end
 
   test "push_front then peek_front returns new front" do
     let q = Queue.push_front(Queue.push_back(Queue.empty(), 1), 0)
     match Queue.peek_front(q) do
-    None -> assert false
-    Some(v) -> assert (v == 0)
+    | None -> assert false
+    | Some(v) -> assert (v == 0)
     end
   end
 end
@@ -50,8 +50,8 @@ describe "pop_front" do
   test "pop_front returns front element and remainder" do
     let q = Queue.push_back(Queue.push_back(Queue.empty(), 10), 20)
     match Queue.pop_front(q) do
-    None -> assert false
-    Some((v, rest)) -> do
+    | None -> assert false
+    | Some((v, rest)) -> do
       assert (v == 10)
       assert (Queue.size(rest) == 1)
     end
@@ -60,8 +60,8 @@ describe "pop_front" do
 
   test "pop_front of empty queue returns None" do
     match Queue.pop_front(Queue.empty()) do
-    None -> assert true
-    Some(_) -> assert false
+    | None -> assert true
+    | Some(_) -> assert false
     end
   end
 end
@@ -70,23 +70,23 @@ describe "peek_back and pop_back" do
   test "peek_back returns last element" do
     let q = Queue.push_back(Queue.push_back(Queue.empty(), 1), 5)
     match Queue.peek_back(q) do
-    None -> assert false
-    Some(v) -> assert (v == 5)
+    | None -> assert false
+    | Some(v) -> assert (v == 5)
     end
   end
 
   test "peek_back of empty queue returns None" do
     match Queue.peek_back(Queue.empty()) do
-    None -> assert true
-    Some(_) -> assert false
+    | None -> assert true
+    | Some(_) -> assert false
     end
   end
 
   test "pop_back returns last element and remainder" do
     let q = Queue.push_back(Queue.push_back(Queue.empty(), 1), 99)
     match Queue.pop_back(q) do
-    None -> assert false
-    Some((v, rest)) -> do
+    | None -> assert false
+    | Some((v, rest)) -> do
       assert (v == 99)
       assert (Queue.size(rest) == 1)
     end
@@ -107,8 +107,8 @@ describe "to_list and from_list" do
     let q = Queue.from_list(lst)
     assert (Queue.size(q) == 3)
     match Queue.peek_front(q) do
-    None -> assert false
-    Some(v) -> assert (v == 1)
+    | None -> assert false
+    | Some(v) -> assert (v == 1)
     end
   end
 

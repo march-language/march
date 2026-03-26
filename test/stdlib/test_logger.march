@@ -7,8 +7,8 @@ mod TestLogger do
 -- Helper: get a Level from a string, panic if unknown
 pfn get_level(s) do
   match Logger.level_from_string(s) do
-  None -> panic("unknown level: " ++ s)
-  Some(l) -> l
+  | None -> panic("unknown level: " ++ s)
+  | Some(l) -> l
   end
 end
 
@@ -18,38 +18,38 @@ describe "Logger" do
 
     test "level_from_string exact lowercase" do
       match Logger.level_from_string("debug") do
-      None -> panic("expected Some for debug")
-      Some(l) -> assert (Logger.level_to_string(l) == "DEBUG")
+      | None -> panic("expected Some for debug")
+      | Some(l) -> assert (Logger.level_to_string(l) == "DEBUG")
       end
       match Logger.level_from_string("info") do
-      None -> panic("expected Some for info")
-      Some(l) -> assert (Logger.level_to_string(l) == "INFO")
+      | None -> panic("expected Some for info")
+      | Some(l) -> assert (Logger.level_to_string(l) == "INFO")
       end
       match Logger.level_from_string("warn") do
-      None -> panic("expected Some for warn")
-      Some(l) -> assert (Logger.level_to_string(l) == "WARN")
+      | None -> panic("expected Some for warn")
+      | Some(l) -> assert (Logger.level_to_string(l) == "WARN")
       end
       match Logger.level_from_string("error") do
-      None -> panic("expected Some for error")
-      Some(l) -> assert (Logger.level_to_string(l) == "ERROR")
+      | None -> panic("expected Some for error")
+      | Some(l) -> assert (Logger.level_to_string(l) == "ERROR")
       end
     end
 
     test "level_from_string uppercase" do
       match Logger.level_from_string("DEBUG") do
-      None -> panic("expected Some for DEBUG")
-      Some(l) -> assert (Logger.level_to_string(l) == "DEBUG")
+      | None -> panic("expected Some for DEBUG")
+      | Some(l) -> assert (Logger.level_to_string(l) == "DEBUG")
       end
       match Logger.level_from_string("INFO") do
-      None -> panic("expected Some for INFO")
-      Some(l) -> assert (Logger.level_to_string(l) == "INFO")
+      | None -> panic("expected Some for INFO")
+      | Some(l) -> assert (Logger.level_to_string(l) == "INFO")
       end
     end
 
     test "level_from_string warning alias" do
       match Logger.level_from_string("warning") do
-      None -> panic("expected Some for warning")
-      Some(l) -> assert (Logger.level_to_string(l) == "WARN")
+      | None -> panic("expected Some for warning")
+      | Some(l) -> assert (Logger.level_to_string(l) == "WARN")
       end
     end
 

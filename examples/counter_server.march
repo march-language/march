@@ -50,8 +50,8 @@ fn handle_post(counter, conn) do
   let body = HttpServer.req_body(conn)
   let maybe_n = string_to_int(body)
   match maybe_n do
-  None -> HttpServer.text(conn, 400, "Bad Request: body must be an integer")
-  Some(n) ->
+  | None -> HttpServer.text(conn, 400, "Bad Request: body must be an integer")
+  | Some(n) ->
     if p == "/increment" do HttpServer.text(conn, 200, do_increment(counter, n))
     else if p == "/decrement" do HttpServer.text(conn, 200, do_decrement(counter, n))
     else HttpServer.text(conn, 404, "Not Found") end end

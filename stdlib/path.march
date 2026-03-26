@@ -20,8 +20,8 @@ end
 fn basename(path) do
   let parts = components(path)
   match parts do
-  Nil -> path
-  _ -> do
+  | Nil -> path
+  | _ -> do
     -- fold_left to get the last element safely (List.last panics on empty)
     -- List.fold_left(acc, list, f) — accumulator first
     List.fold_left("", parts, fn(ig, s) -> s)
@@ -32,8 +32,8 @@ end
 fn dirname(path) do
   let parts = components(path)
   match List.drop_last(parts) do
-  Nil -> if is_absolute(path) do "/" else "." end
-  dirs -> do
+  | Nil -> if is_absolute(path) do "/" else "." end
+  | dirs -> do
     let joined = String.join(dirs, "/")
     if is_absolute(path) do "/" ++ joined else joined end
   end
@@ -43,9 +43,9 @@ end
 fn extension(path) do
   let base = basename(path)
   match String.last_index_of(base, ".") do
-  None -> ""
-  Some(0) -> ""          -- leading dot is not an extension (e.g. .bashrc)
-  Some(i) -> do
+  | None -> ""
+  | Some(0) -> ""          -- leading dot is not an extension (e.g. .bashrc)
+  | Some(i) -> do
     -- String.slice_bytes(s, start, len) — third arg is LENGTH not end index
     let len = String.byte_size(base) - i - 1
     String.slice_bytes(base, i + 1, len)
@@ -57,9 +57,9 @@ fn strip_extension(path) do
   let base = basename(path)
   let dir = dirname(path)
   match String.last_index_of(base, ".") do
-  None -> path
-  Some(0) -> path          -- leading dot is not an extension (e.g. .bashrc)
-  Some(i) -> do
+  | None -> path
+  | Some(0) -> path          -- leading dot is not an extension (e.g. .bashrc)
+  | Some(i) -> do
     let stem = String.slice_bytes(base, 0, i)
     if dir == "." do stem else dir ++ "/" ++ stem end
   end
@@ -71,18 +71,18 @@ fn normalize(path) do
   let parts = components(path)
   fn process(remaining, stack) do
     match remaining do
-    Nil -> stack
-    Cons(".", rest) -> process(rest, stack)
-    Cons("..", rest) -> do
+    | Nil -> stack
+    | Cons(".", rest) -> process(rest, stack)
+    | Cons("..", rest) -> do
       match stack do
-      Nil ->
+      | Nil ->
         if abs do process(rest, Nil)
         else process(rest, Cons("..", Nil)) end
-      Cons("..", _) -> process(rest, Cons("..", stack))
-      Cons(_, parent) -> process(rest, parent)
+      | Cons("..", _) -> process(rest, Cons("..", stack))
+      | Cons(_, parent) -> process(rest, parent)
       end
     end
-    Cons(seg, rest) -> process(rest, Cons(seg, stack))
+    | Cons(seg, rest) -> process(rest, Cons(seg, stack))
     end
   end
   let stack = process(parts, Nil)

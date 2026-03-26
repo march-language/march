@@ -6,125 +6,125 @@ mod TestIterable do
 describe "map" do
   test "map on empty list" do
     let empty : List(Int) = Nil
-    assert (Iterable.map(empty, fn x -> x + 1) == Nil)
+    | assert (Iterable.map(empty, fn x -> x + 1) == Nil)
   end
 
   test "map identity is identity" do
-    assert (Iterable.map([1, 2, 3], fn x -> x) == [1, 2, 3])
+    | assert (Iterable.map([1, 2, 3], fn x -> x) == [1, 2, 3])
   end
 
   test "map transforms elements" do
-    assert (Iterable.map([1, 2, 3], fn x -> x * 2) == [2, 4, 6])
+    | assert (Iterable.map([1, 2, 3], fn x -> x * 2) == [2, 4, 6])
   end
 
   test "map on singleton" do
-    assert (Iterable.map([5], fn x -> x * 3) == [15])
+    | assert (Iterable.map([5], fn x -> x * 3) == [15])
   end
 
   test "map preserves order" do
-    assert (Iterable.map([3, 1, 2], fn x -> x + 10) == [13, 11, 12])
+    | assert (Iterable.map([3, 1, 2], fn x -> x + 10) == [13, 11, 12])
   end
 
   test "map to different type" do
-    assert (Iterable.map([1, 2, 3], fn x -> int_to_string(x)) == ["1", "2", "3"])
+    | assert (Iterable.map([1, 2, 3], fn x -> int_to_string(x)) == ["1", "2", "3"])
   end
 
   test "map does not change length" do
-    assert (Iterable.count(Iterable.map([1, 2, 3, 4, 5], fn x -> x)) == 5)
+    | assert (Iterable.count(Iterable.map([1, 2, 3, 4, 5], fn x -> x)) == 5)
   end
 end
 
 describe "flat_map" do
   test "flat_map on empty list" do
     let empty : List(Int) = Nil
-    assert (Iterable.flat_map(empty, fn x -> [x]) == Nil)
+    | assert (Iterable.flat_map(empty, fn x -> [x]) == Nil)
   end
 
   test "flat_map returning empty lists flattens to empty" do
-    assert (Iterable.flat_map([1, 2, 3], fn _ -> Nil) == Nil)
+    | assert (Iterable.flat_map([1, 2, 3], fn _ -> Nil) == Nil)
   end
 
   test "flat_map returning single-element lists" do
-    assert (Iterable.flat_map([1, 2, 3], fn x -> [x * 2]) == [2, 4, 6])
+    | assert (Iterable.flat_map([1, 2, 3], fn x -> [x * 2]) == [2, 4, 6])
   end
 
   test "flat_map returning multiple-element lists" do
-    assert (Iterable.flat_map([1, 2], fn x -> [x, x * 10]) == [1, 10, 2, 20])
+    | assert (Iterable.flat_map([1, 2], fn x -> [x, x * 10]) == [1, 10, 2, 20])
   end
 
   test "flat_map on singleton returning multiple elements" do
-    assert (Iterable.flat_map([5], fn x -> [x, x + 1, x + 2]) == [5, 6, 7])
+    | assert (Iterable.flat_map([5], fn x -> [x, x + 1, x + 2]) == [5, 6, 7])
   end
 
   test "flat_map returning mixed empty and non-empty" do
-    assert (Iterable.flat_map([1, 2, 3], fn x -> if x == 2 do Nil else [x]) == [1, 3]) end
+    | assert (Iterable.flat_map([1, 2, 3], fn x -> if x == 2 do Nil else [x]) == [1, 3]) end
   end
 end
 
 describe "filter" do
   test "filter on empty list" do
     let empty : List(Int) = Nil
-    assert (Iterable.filter(empty, fn x -> x > 0) == Nil)
+    | assert (Iterable.filter(empty, fn x -> x > 0) == Nil)
   end
 
   test "filter keeping all elements" do
-    assert (Iterable.filter([1, 2, 3], fn x -> x > 0) == [1, 2, 3])
+    | assert (Iterable.filter([1, 2, 3], fn x -> x > 0) == [1, 2, 3])
   end
 
   test "filter keeping no elements" do
-    assert (Iterable.filter([1, 2, 3], fn x -> x > 10) == Nil)
+    | assert (Iterable.filter([1, 2, 3], fn x -> x > 10) == Nil)
   end
 
   test "filter keeping some elements" do
-    assert (Iterable.filter([1, 2, 3, 4, 5], fn x -> x > 3) == [4, 5])
+    | assert (Iterable.filter([1, 2, 3, 4, 5], fn x -> x > 3) == [4, 5])
   end
 
   test "filter preserves relative order" do
-    assert (Iterable.filter([5, 1, 4, 2, 3], fn x -> x > 2) == [5, 4, 3])
+    | assert (Iterable.filter([5, 1, 4, 2, 3], fn x -> x > 2) == [5, 4, 3])
   end
 
   test "filter on singleton that matches" do
-    assert (Iterable.filter([42], fn x -> x == 42) == [42])
+    | assert (Iterable.filter([42], fn x -> x == 42) == [42])
   end
 
   test "filter on singleton that does not match" do
-    assert (Iterable.filter([42], fn x -> x == 0) == Nil)
+    | assert (Iterable.filter([42], fn x -> x == 0) == Nil)
   end
 
   test "filter by even" do
-    assert (Iterable.filter([1, 2, 3, 4, 5, 6], fn x -> x % 2 == 0) == [2, 4, 6])
+    | assert (Iterable.filter([1, 2, 3, 4, 5, 6], fn x -> x % 2 == 0) == [2, 4, 6])
   end
 end
 
 describe "fold" do
   test "fold on empty list returns zero" do
     let empty : List(Int) = Nil
-    assert (Iterable.fold(0, empty, fn (acc, x) -> acc + x) == 0)
+    | assert (Iterable.fold(0, empty, fn (acc, x) -> acc + x) == 0)
   end
 
   test "fold sum of list" do
-    assert (Iterable.fold(0, [1, 2, 3, 4, 5], fn (acc, x) -> acc + x) == 15)
+    | assert (Iterable.fold(0, [1, 2, 3, 4, 5], fn (acc, x) -> acc + x) == 15)
   end
 
   test "fold singleton" do
-    assert (Iterable.fold(0, [42], fn (acc, x) -> acc + x) == 42)
+    | assert (Iterable.fold(0, [42], fn (acc, x) -> acc + x) == 42)
   end
 
   test "fold is left-associative" do
     -- (((10 - 1) - 2) - 3) = 4
-    assert (Iterable.fold(10, [1, 2, 3], fn (acc, x) -> acc - x) == 4)
+    | assert (Iterable.fold(10, [1, 2, 3], fn (acc, x) -> acc - x) == 4)
   end
 
   test "fold builds string in order" do
-    assert (Iterable.fold("", ["a", "b", "c"], fn (acc, x) -> acc ++ x) == "abc")
+    | assert (Iterable.fold("", ["a", "b", "c"], fn (acc, x) -> acc ++ x) == "abc")
   end
 
   test "fold count elements" do
-    assert (Iterable.fold(0, [1, 2, 3, 4], fn (acc, x) -> acc + 1) == 4)
+    | assert (Iterable.fold(0, [1, 2, 3, 4], fn (acc, x) -> acc + 1) == 4)
   end
 
   test "fold with non-zero initial value" do
-    assert (Iterable.fold(100, [1, 2, 3], fn (acc, x) -> acc + x) == 106)
+    | assert (Iterable.fold(100, [1, 2, 3], fn (acc, x) -> acc + x) == 106)
   end
 end
 
@@ -150,85 +150,85 @@ end
 describe "any" do
   test "any on empty list is false" do
     let empty : List(Int) = Nil
-    assert !Iterable.any(empty, fn x -> x > 0)
+    | assert !Iterable.any(empty, fn x -> x > 0)
   end
 
   test "any with always-true predicate" do
-    assert Iterable.any([1, 2, 3], fn _ -> true)
+    | assert Iterable.any([1, 2, 3], fn _ -> true)
   end
 
   test "any with always-false predicate" do
-    assert !Iterable.any([1, 2, 3], fn _ -> false)
+    | assert !Iterable.any([1, 2, 3], fn _ -> false)
   end
 
   test "any with some matching" do
-    assert Iterable.any([1, 2, 3], fn x -> x == 2)
+    | assert Iterable.any([1, 2, 3], fn x -> x == 2)
   end
 
   test "any with none matching" do
-    assert !Iterable.any([1, 2, 3], fn x -> x > 10)
+    | assert !Iterable.any([1, 2, 3], fn x -> x > 10)
   end
 
   test "any finds first element" do
-    assert Iterable.any([5, 1, 2], fn x -> x > 3)
+    | assert Iterable.any([5, 1, 2], fn x -> x > 3)
   end
 
   test "any finds last element" do
-    assert Iterable.any([1, 2, 5], fn x -> x > 3)
+    | assert Iterable.any([1, 2, 5], fn x -> x > 3)
   end
 
   test "any on singleton that matches" do
-    assert Iterable.any([42], fn x -> x == 42)
+    | assert Iterable.any([42], fn x -> x == 42)
   end
 
   test "any on singleton that does not match" do
-    assert !Iterable.any([42], fn x -> x == 0)
+    | assert !Iterable.any([42], fn x -> x == 0)
   end
 end
 
 describe "all" do
   test "all on empty list is true" do
     let empty : List(Int) = Nil
-    assert Iterable.all(empty, fn x -> x > 0)
+    | assert Iterable.all(empty, fn x -> x > 0)
   end
 
   test "all with always-true predicate" do
-    assert Iterable.all([1, 2, 3], fn _ -> true)
+    | assert Iterable.all([1, 2, 3], fn _ -> true)
   end
 
   test "all with always-false predicate" do
-    assert !Iterable.all([1, 2, 3], fn _ -> false)
+    | assert !Iterable.all([1, 2, 3], fn _ -> false)
   end
 
   test "all with all matching" do
-    assert Iterable.all([1, 2, 3], fn x -> x > 0)
+    | assert Iterable.all([1, 2, 3], fn x -> x > 0)
   end
 
   test "all with none matching" do
-    assert !Iterable.all([1, 2, 3], fn x -> x > 10)
+    | assert !Iterable.all([1, 2, 3], fn x -> x > 10)
   end
 
   test "all with some matching fails" do
-    assert !Iterable.all([1, 2, 10], fn x -> x < 5)
+    | assert !Iterable.all([1, 2, 10], fn x -> x < 5)
   end
 
   test "all on singleton that matches" do
-    assert Iterable.all([42], fn x -> x == 42)
+    | assert Iterable.all([42], fn x -> x == 42)
   end
 
   test "all on singleton that does not match" do
-    assert !Iterable.all([42], fn x -> x == 0)
+    | assert !Iterable.all([42], fn x -> x == 0)
   end
 end
 
 describe "find" do
   test "find on empty list returns None" do
     let empty : List(Int) = Nil
-    assert Option.is_none(Iterable.find(empty, fn x -> x > 0))
+    | assert Option.is_none(Iterable.find(empty, fn x -> x > 0))
   end
 
   test "find with no match returns None" do
-    assert Option.is_none(Iterable.find([1, 2, 3], fn x -> x > 10))
+    | assert Option.is_none(Iterable.find([1, 2, 3], fn x -> x > 10))
   end
 
   test "find returns first match" do
@@ -256,7 +256,7 @@ describe "find" do
   end
 
   test "find on singleton that does not match" do
-    assert Option.is_none(Iterable.find([99], fn x -> x < 0))
+    | assert Option.is_none(Iterable.find([99], fn x -> x < 0))
   end
 end
 

@@ -56,8 +56,8 @@ end
 fn safe_send(pid, msg, desc : String) : Unit do
   let result = send(pid, msg)
   match result do
-  None    -> println("  !! DROP: " ++ desc ++ " — actor is dead")
-  Some(_) -> ()
+  | None    -> println("  !! DROP: " ++ desc ++ " — actor is dead")
+  | Some(_) -> ()
   end
 end
 

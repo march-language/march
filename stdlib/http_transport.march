@@ -26,12 +26,12 @@ mod HttpTransport do
   fn connect(req) do
     let req_host = Http.host(req)
     let req_port = match Http.port(req) do
-      Some(p) -> p
-      None -> 80
+      | Some(p) -> p
+      | None -> 80
       end
     match tcp_connect(req_host, req_port) do
-    Err(msg) -> Err(ConnectionRefused(msg))
-    Ok(fd) -> Ok(fd)
+    | Err(msg) -> Err(ConnectionRefused(msg))
+    | Ok(fd) -> Ok(fd)
     end
   end
 
@@ -51,14 +51,14 @@ mod HttpTransport do
     let raw_request = http_serialize_request(meth, req_host, req_path, req_query, req_headers, req_body)
 
     match tcp_send_all(fd, raw_request) do
-    Err(msg) -> Err(SendError(msg))
-    Ok(_) -> do
+    | Err(msg) -> Err(SendError(msg))
+    | Ok(_) -> do
       match tcp_recv_http(fd, 1048576) do
-      Err(msg) -> Err(RecvError(msg))
-      Ok(raw_response) ->
+      | Err(msg) -> Err(RecvError(msg))
+      | Ok(raw_response) ->
         match http_parse_response(raw_response) do
-        Err(msg) -> Err(ConnParseError(msg))
-        Ok((status_code, resp_headers, resp_body)) ->
+        | Err(msg) -> Err(ConnParseError(msg))
+        | Ok((status_code, resp_headers, resp_body)) ->
           Ok(Response(Status(status_code), resp_headers, resp_body))
         end
       end
@@ -83,14 +83,14 @@ mod HttpTransport do
     let raw_request = http_serialize_request(meth, req_host, req_path, req_query, req_headers, req_body)
 
     match tcp_send_all(fd, raw_request) do
-    Err(msg) -> Err(SendError(msg))
-    Ok(_) -> do
+    | Err(msg) -> Err(SendError(msg))
+    | Ok(_) -> do
       match tcp_recv_http_headers(fd) do
-      Err(msg) -> Err(RecvError(msg))
-      Ok((headers_str, content_length, is_chunked)) ->
+      | Err(msg) -> Err(RecvError(msg))
+      | Ok((headers_str, content_length, is_chunked)) ->
         match http_parse_response(headers_str) do
-        Err(msg) -> Err(ConnParseError(msg))
-        Ok((status_code, resp_headers, _)) ->
+        | Err(msg) -> Err(ConnParseError(msg))
+        | Ok((status_code, resp_headers, _)) ->
           if is_chunked do
             stream_chunked_body(fd, on_chunk, status_code, resp_headers)
           else
@@ -104,9 +104,9 @@ mod HttpTransport do
 
   fn stream_chunked_body(fd, on_chunk, status_code, resp_headers) do
     match tcp_recv_chunked_frame(fd) do
-    Err(msg) -> Err(RecvError(msg))
-    Ok("") -> Ok((status_code, resp_headers, ()))
-    Ok(chunk) -> do
+    | Err(msg) -> Err(RecvError(msg))
+    | Ok("") -> Ok((status_code, resp_headers, ()))
+    | Ok(chunk) -> do
       on_chunk(chunk)
       stream_chunked_body(fd, on_chunk, status_code, resp_headers)
     end
@@ -117,9 +117,9 @@ mod HttpTransport do
     if remaining == 0 do Ok((status_code, resp_headers, ()))
     else
       match tcp_recv_chunk(fd, remaining) do
-      Err(msg) -> Err(RecvError(msg))
-      Ok("") -> Ok((status_code, resp_headers, ()))
-      Ok(chunk) -> do
+      | Err(msg) -> Err(RecvError(msg))
+      | Ok("") -> Ok((status_code, resp_headers, ()))
+      | Ok(chunk) -> do
         on_chunk(chunk)
         stream_fixed_body(fd, remaining - string_length(chunk), on_chunk, status_code, resp_headers)
       end
@@ -136,8 +136,8 @@ mod HttpTransport do
     let req = Http.set_header(req, "Connection", "close")
     let req_host = Http.host(req)
     let req_port = match Http.port(req) do
-      Some(p) -> p
-      None -> 80
+      | Some(p) -> p
+      | None -> 80
       end
 
     let raw_request = http_serialize_request(
@@ -146,24 +146,24 @@ mod HttpTransport do
       Http.headers(req), Http.body(req))
 
     match tcp_connect(req_host, req_port) do
-    Err(msg) -> Err(ConnectionRefused(msg))
-    Ok(fd) -> do
+    | Err(msg) -> Err(ConnectionRefused(msg))
+    | Ok(fd) -> do
       match tcp_send_all(fd, raw_request) do
-      Err(msg) -> do
+      | Err(msg) -> do
         tcp_close(fd)
         Err(SendError(msg))
       end
-      Ok(_) ->
+      | Ok(_) ->
         match tcp_recv_all(fd, 1048576, 30000) do
-        Err(msg) -> do
+        | Err(msg) -> do
           tcp_close(fd)
           Err(RecvError(msg))
         end
-        Ok(raw_response) -> do
+        | Ok(raw_response) -> do
           tcp_close(fd)
           match http_parse_response(raw_response) do
-          Err(msg) -> Err(ConnParseError(msg))
-          Ok((status_code, resp_headers, resp_body)) ->
+          | Err(msg) -> Err(ConnParseError(msg))
+          | Ok((status_code, resp_headers, resp_body)) ->
             Ok(Response(Status(status_code), resp_headers, resp_body))
           end
         end
@@ -179,11 +179,11 @@ mod HttpTransport do
   """
   fn simple_get(url) do
     match Http.get(url) do
-    Err(InvalidScheme(s)) -> Err(ConnParseError("invalid scheme: " ++ s))
-    Err(MissingHost) -> Err(ConnParseError("missing host"))
-    Err(InvalidPort(s)) -> Err(ConnParseError("invalid port: " ++ s))
-    Err(MalformedUrl(s)) -> Err(ConnParseError("malformed url: " ++ s))
-    Ok(req) -> request(Http.set_body(req, ""))
+    | Err(InvalidScheme(s)) -> Err(ConnParseError("invalid scheme: " ++ s))
+    | Err(MissingHost) -> Err(ConnParseError("missing host"))
+    | Err(InvalidPort(s)) -> Err(ConnParseError("invalid port: " ++ s))
+    | Err(MalformedUrl(s)) -> Err(ConnParseError("malformed url: " ++ s))
+    | Ok(req) -> request(Http.set_body(req, ""))
     end
   end
 

@@ -5,8 +5,8 @@ pfn run_keepalive(n, do_request, req) do
   if n == 0 do Ok(0) end
   else
     match do_request(req) do
-    Ok(_) -> run_keepalive(n - 1, do_request, req)
-    Err(e) -> Err(e)
+    | Ok(_) -> run_keepalive(n - 1, do_request, req)
+    | Err(e) -> Err(e)
     end
 end
 
@@ -18,15 +18,15 @@ pfn main() do
     HttpClient.step_default_headers)
   print("keep-alive: " ++ int_to_string(n) ++ " GETs")
   match Http.get(url) do
-  Err(_) -> print("error parsing url")
-  Ok(req) ->
+  | Err(_) -> print("error parsing url")
+  | Ok(req) ->
     let req = Http.set_body(req, "")
     fn callback(do_request) do
       run_keepalive(n, do_request, req)
     end
     match HttpClient.with_connection(client, url, callback) do
-    Ok(Ok(_)) -> print("done")
-    _ -> print("error")
+    | Ok(Ok(_)) -> print("done")
+    | _ -> print("error")
     end
   end
 end

@@ -15,8 +15,8 @@ ptype Seq(a) = Seq(a)
 pfn rev(xs) do
   fn go(lst, acc) do
     match lst do
-    Nil -> acc
-    Cons(h, t) -> go(t, Cons(h, acc))
+    | Nil -> acc
+    | Cons(h, t) -> go(t, Cons(h, acc))
     end
   end
   go(xs, Nil)
@@ -27,8 +27,8 @@ end
 fn from_list(xs) do
   fn go(lst, a, f) do
     match lst do
-    Nil -> a
-    Cons(h, t) -> go(t, f(a, h), f)
+    | Nil -> a
+    | Cons(h, t) -> go(t, f(a, h), f)
     end
   end
   Seq(fn(acc, f) -> go(xs, acc, f))
@@ -41,8 +41,8 @@ end
 fn unfold(seed, next) do
   fn go(s, a, f) do
     match next(s) do
-    None -> a
-    Some(pair) -> do
+    | None -> a
+    | Some(pair) -> do
       let (value, s2) = pair
       go(s2, f(a, value), f)
     end
@@ -57,9 +57,9 @@ fn concat(s1, s2) do
     fold2(mid, f)
   end
   match s1 do
-  Seq(fold1) -> do
+  | Seq(fold1) -> do
     match s2 do
-    Seq(fold2) ->
+    | Seq(fold2) ->
       Seq(fn(acc, f) -> run_concat(fold1, fold2, acc, f))
     end
   end
@@ -70,14 +70,14 @@ end
 
 fn map(seq, f) do
   match seq do
-  Seq(fold) ->
+  | Seq(fold) ->
     Seq(fn(acc, g) -> fold(acc, fn(a, x) -> g(a, f(x))))
   end
 end
 
 fn filter(seq, pred) do
   match seq do
-  Seq(fold) -> do
+  | Seq(fold) -> do
     Seq(fn(acc, f) ->
       fold(acc, fn(a, x) -> if pred(x) do f(a, x) else a end)
     )
@@ -87,11 +87,11 @@ end
 
 fn flat_map(seq, f) do
   match seq do
-  Seq(fold) -> do
+  | Seq(fold) -> do
     Seq(fn(acc, g) ->
       fold(acc, fn(a, x) ->
         match f(x) do
-        Seq(inner_fold) -> inner_fold(a, g)
+        | Seq(inner_fold) -> inner_fold(a, g)
         end
       )
     )
@@ -111,7 +111,7 @@ fn take(seq, n) do
     a
   end
   match seq do
-  Seq(fold) ->
+  | Seq(fold) ->
     Seq(fn(acc, f) -> run_take(fold, acc, f))
   end
 end
@@ -128,7 +128,7 @@ fn drop(seq, n) do
     a
   end
   match seq do
-  Seq(fold) ->
+  | Seq(fold) ->
     Seq(fn(acc, f) -> run_drop(fold, acc, f))
   end
 end
@@ -137,8 +137,8 @@ fn zip(s1, s2) do
   fn step_zip(pair, x, f) do
     let (a, remaining) = pair
     match remaining do
-    Nil -> (a, Nil)
-    Cons(y, rest) -> do
+    | Nil -> (a, Nil)
+    | Cons(y, rest) -> do
       let new_a = f(a, (x, y))
       (new_a, rest)
     end
@@ -152,7 +152,7 @@ fn zip(s1, s2) do
     a
   end
   match s1 do
-  Seq(fold) ->
+  | Seq(fold) ->
     Seq(fn(acc, f) -> run_zip(fold, s2, acc, f))
   end
 end
@@ -170,8 +170,8 @@ fn batch(seq, n) do
   fn flush_batch(triple, f) do
     let (a, buf, ig) = triple
     match buf do
-    Nil -> a
-    _ -> f(a, rev(buf))
+    | Nil -> a
+    | _ -> f(a, rev(buf))
     end
   end
   fn run_batch(fold, acc, f) do
@@ -179,7 +179,7 @@ fn batch(seq, n) do
     flush_batch(result, f)
   end
   match seq do
-  Seq(fold) ->
+  | Seq(fold) ->
     Seq(fn(acc, f) -> run_batch(fold, acc, f))
   end
 end
@@ -188,14 +188,14 @@ end
 
 fn to_list(seq) do
   match seq do
-  Seq(fold) ->
+  | Seq(fold) ->
     rev(fold(Nil, fn(acc, x) -> Cons(x, acc)))
   end
 end
 
 fn fold(seq, start, f) do
   match seq do
-  Seq(folder) -> folder(start, f)
+  | Seq(folder) -> folder(start, f)
   end
 end
 
@@ -206,16 +206,16 @@ end
 fn fold_while(seq, start, f) do
   fn step_fold_while(step, x, f) do
     match step do
-    Halt(a) -> Halt(a)
-    Continue(a) -> f(a, x)
+    | Halt(a) -> Halt(a)
+    | Continue(a) -> f(a, x)
     end
   end
   match seq do
-  Seq(folder) -> do
+  | Seq(folder) -> do
     let result = folder(Continue(start), fn(step, x) -> step_fold_while(step, x, f))
     match result do
-    Continue(a) -> a
-    Halt(a) -> a
+    | Continue(a) -> a
+    | Halt(a) -> a
     end
   end
   end
@@ -223,7 +223,7 @@ end
 
 fn each(seq, f) do
   match seq do
-  Seq(folder) -> do
+  | Seq(folder) -> do
     folder(:ok, fn(ig, x) -> f(x))
     :ok
   end
@@ -232,7 +232,7 @@ end
 
 fn count(seq) do
   match seq do
-  Seq(folder) ->
+  | Seq(folder) ->
     folder(0, fn(n, ig) -> n + 1)
   end
 end

@@ -27,8 +27,8 @@ describe "from_rows" do
       Row([("x", IntVal(2)), ("y", FloatVal(2.5))])
     ]
     match DataFrame.from_rows(rows) do
-    Err(_) -> assert false
-    Ok(df) -> do
+    | Err(_) -> assert false
+    | Ok(df) -> do
       assert (DataFrame.row_count(df) == 2)
       assert (DataFrame.col_count(df) == 2)
       assert (DataFrame.schema(df) == ["x", "y"])
@@ -39,8 +39,8 @@ describe "from_rows" do
   test "from_rows with empty list gives empty DataFrame" do
     let rows : List(Row) = Nil
     match DataFrame.from_rows(rows) do
-    Err(_) -> assert false
-    Ok(df) -> assert (DataFrame.row_count(df) == 0)
+    | Err(_) -> assert false
+    | Ok(df) -> assert (DataFrame.row_count(df) == 0)
     end
   end
 
@@ -50,8 +50,8 @@ describe "from_rows" do
       Row([("x", StrVal("hello"))])
     ]
     match DataFrame.from_rows(rows) do
-    Err(_) -> assert true
-    Ok(_)  -> assert false
+    | Err(_) -> assert true
+    | Ok(_)  -> assert false
     end
   end
 end
@@ -95,16 +95,16 @@ describe "get_column" do
       StrCol("name", ["Alice", "Bob"])
     ])
     match DataFrame.get_column(df, "age") do
-    Err(_) -> assert false
-    Ok(col) -> assert (DataFrame.col_name(col) == "age")
+    | Err(_) -> assert false
+    | Ok(col) -> assert (DataFrame.col_name(col) == "age")
     end
   end
 
   test "get_column returns Err for missing column" do
     let df = DataFrame.empty()
     match DataFrame.get_column(df, "missing") do
-    Err(_) -> assert true
-    Ok(_)  -> assert false
+    | Err(_) -> assert true
+    | Ok(_)  -> assert false
     end
   end
 end
@@ -113,16 +113,16 @@ describe "get_int_col" do
   test "get_int_col returns Int data" do
     let df = DataFrame.make_df([IntCol("n", [10, 20, 30])])
     match DataFrame.get_int_col(df, "n") do
-    Err(_) -> assert false
-    Ok(lst) -> assert (lst == [10, 20, 30])
+    | Err(_) -> assert false
+    | Ok(lst) -> assert (lst == [10, 20, 30])
     end
   end
 
   test "get_int_col errors on non-Int column" do
     let df = DataFrame.make_df([StrCol("s", ["a"])])
     match DataFrame.get_int_col(df, "s") do
-    Err(_) -> assert true
-    Ok(_)  -> assert false
+    | Err(_) -> assert true
+    | Ok(_)  -> assert false
     end
   end
 end
@@ -131,8 +131,8 @@ describe "get_float_col" do
   test "get_float_col returns Float data" do
     let df = DataFrame.make_df([FloatCol("f", [1.5, 2.5])])
     match DataFrame.get_float_col(df, "f") do
-    Err(_) -> assert false
-    Ok(lst) ->
+    | Err(_) -> assert false
+    | Ok(lst) ->
       assert (List.length(lst) == 2)
     end
   end
@@ -148,12 +148,12 @@ describe "get_row and to_rows" do
     ])
     let row = DataFrame.get_row(df, 1)
     match DataFrame.row_get_int(row, "x") do
-    None    -> assert false
-    Some(v) -> assert (v == 2)
+    | None    -> assert false
+    | Some(v) -> assert (v == 2)
     end
     match DataFrame.row_get_string(row, "y") do
-    None    -> assert false
-    Some(v) -> assert (v == "b")
+    | None    -> assert false
+    | Some(v) -> assert (v == "b")
     end
   end
 
@@ -170,8 +170,8 @@ describe "add_column and drop_column" do
   test "add_column appends a new column" do
     let df = DataFrame.make_df([IntCol("a", [1, 2])])
     match DataFrame.add_column(df, StrCol("b", ["x", "y"])) do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       assert (DataFrame.col_count(df2) == 2)
       assert (DataFrame.schema(df2) == ["a", "b"])
     end
@@ -181,8 +181,8 @@ describe "add_column and drop_column" do
   test "add_column errors on length mismatch" do
     let df = DataFrame.make_df([IntCol("a", [1, 2])])
     match DataFrame.add_column(df, IntCol("b", [1])) do
-    Err(_) -> assert true
-    Ok(_)  -> assert false
+    | Err(_) -> assert true
+    | Ok(_)  -> assert false
     end
   end
 
@@ -201,16 +201,16 @@ describe "rename_column" do
   test "rename_column renames an existing column" do
     let df = DataFrame.make_df([IntCol("old", [1, 2])])
     match DataFrame.rename_column(df, "old", "new") do
-    Err(_) -> assert false
-    Ok(df2) -> assert (DataFrame.schema(df2) == ["new"])
+    | Err(_) -> assert false
+    | Ok(df2) -> assert (DataFrame.schema(df2) == ["new"])
     end
   end
 
   test "rename_column errors on missing column" do
     let df = DataFrame.empty()
     match DataFrame.rename_column(df, "missing", "new") do
-    Err(_) -> assert true
-    Ok(_)  -> assert false
+    | Err(_) -> assert true
+    | Ok(_)  -> assert false
     end
   end
 end
@@ -223,8 +223,8 @@ describe "select_columns" do
       IntCol("c", [3])
     ])
     match DataFrame.select_columns(df, ["c", "a"]) do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       assert (DataFrame.col_count(df2) == 2)
       assert (DataFrame.schema(df2) == ["c", "a"])
     end
@@ -238,8 +238,8 @@ describe "head and tail" do
     let h = DataFrame.head(df, 3)
     assert (DataFrame.row_count(h) == 3)
     match DataFrame.get_int_col(h, "n") do
-    Err(_) -> assert false
-    Ok(lst) -> assert (lst == [1, 2, 3])
+    | Err(_) -> assert false
+    | Ok(lst) -> assert (lst == [1, 2, 3])
     end
   end
 
@@ -248,8 +248,8 @@ describe "head and tail" do
     let t = DataFrame.tail(df, 2)
     assert (DataFrame.row_count(t) == 2)
     match DataFrame.get_int_col(t, "n") do
-    Err(_) -> assert false
-    Ok(lst) -> assert (lst == [4, 5])
+    | Err(_) -> assert false
+    | Ok(lst) -> assert (lst == [4, 5])
     end
   end
 end
@@ -260,8 +260,8 @@ describe "from_csv_string" do
   test "parses a basic CSV into a DataFrame" do
     let csv = "name,age,score\nAlice,30,9.5\nBob,25,8.0\n"
     match DataFrame.from_csv_string(csv) do
-    Err(_) -> assert false
-    Ok(df) -> do
+    | Err(_) -> assert false
+    | Ok(df) -> do
       assert (DataFrame.row_count(df) == 2)
       assert (DataFrame.col_count(df) == 3)
     end
@@ -271,11 +271,11 @@ describe "from_csv_string" do
   test "infers Int column type" do
     let csv = "x\n1\n2\n3\n"
     match DataFrame.from_csv_string(csv) do
-    Err(_) -> assert false
-    Ok(df) -> do
+    | Err(_) -> assert false
+    | Ok(df) -> do
       match DataFrame.get_int_col(df, "x") do
-      Err(_) -> assert false
-      Ok(lst) -> assert (lst == [1, 2, 3])
+      | Err(_) -> assert false
+      | Ok(lst) -> assert (lst == [1, 2, 3])
       end
     end
     end
@@ -284,11 +284,11 @@ describe "from_csv_string" do
   test "infers Float column type" do
     let csv = "v\n1.5\n2.5\n"
     match DataFrame.from_csv_string(csv) do
-    Err(_) -> assert false
-    Ok(df) -> do
+    | Err(_) -> assert false
+    | Ok(df) -> do
       match DataFrame.get_float_col(df, "v") do
-      Err(_)  -> assert false
-      Ok(lst) -> assert (List.length(lst) == 2)
+      | Err(_)  -> assert false
+      | Ok(lst) -> assert (List.length(lst) == 2)
       end
     end
     end
@@ -297,11 +297,11 @@ describe "from_csv_string" do
   test "infers String column type" do
     let csv = "city\nParis\nLondon\n"
     match DataFrame.from_csv_string(csv) do
-    Err(_) -> assert false
-    Ok(df) -> do
+    | Err(_) -> assert false
+    | Ok(df) -> do
       match DataFrame.get_string_col(df, "city") do
-      Err(_)  -> assert false
-      Ok(lst) -> assert (lst == ["Paris", "London"])
+      | Err(_)  -> assert false
+      | Ok(lst) -> assert (lst == ["Paris", "London"])
       end
     end
     end
@@ -309,8 +309,8 @@ describe "from_csv_string" do
 
   test "empty CSV gives empty DataFrame" do
     match DataFrame.from_csv_string("") do
-    Err(_) -> assert false
-    Ok(df) -> assert (DataFrame.row_count(df) == 0)
+    | Err(_) -> assert false
+    | Ok(df) -> assert (DataFrame.row_count(df) == 0)
     end
   end
 end
@@ -323,8 +323,8 @@ describe "to_csv_string" do
     ])
     let csv = DataFrame.to_csv_string(df)
     match DataFrame.from_csv_string(csv) do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       assert (DataFrame.row_count(df2) == 2)
       assert (DataFrame.schema(df2) == ["name", "age"])
     end
@@ -338,23 +338,23 @@ describe "from_json_string" do
   test "parses a JSON array of objects into a DataFrame" do
     let json = "[{\"name\":\"Alice\",\"age\":30},{\"name\":\"Bob\",\"age\":25}]"
     match DataFrame.from_json_string(json) do
-    Err(_) -> assert false
-    Ok(df) ->
+    | Err(_) -> assert false
+    | Ok(df) ->
       assert (DataFrame.row_count(df) == 2)
     end
   end
 
   test "empty JSON array gives empty DataFrame" do
     match DataFrame.from_json_string("[]") do
-    Err(_) -> assert false
-    Ok(df) -> assert (DataFrame.row_count(df) == 0)
+    | Err(_) -> assert false
+    | Ok(df) -> assert (DataFrame.row_count(df) == 0)
     end
   end
 
   test "non-array JSON gives Err" do
     match DataFrame.from_json_string("{\"x\": 1}") do
-    Err(_) -> assert true
-    Ok(_)  -> assert false
+    | Err(_) -> assert true
+    | Ok(_)  -> assert false
     end
   end
 end
@@ -372,8 +372,8 @@ describe "LazyFrame select" do
       |> DataFrame.select(["a", "c"])
       |> DataFrame.collect()
     match result do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       assert (DataFrame.col_count(df2) == 2)
       assert (DataFrame.schema(df2) == ["a", "c"])
     end
@@ -388,12 +388,12 @@ describe "LazyFrame filter" do
       |> DataFrame.filter(Gt(Col("n"), LitInt(3)))
       |> DataFrame.collect()
     match result do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       assert (DataFrame.row_count(df2) == 2)
       match DataFrame.get_int_col(df2, "n") do
-      Err(_)  -> assert false
-      Ok(lst) -> assert (lst == [4, 5])
+      | Err(_)  -> assert false
+      | Ok(lst) -> assert (lst == [4, 5])
       end
     end
     end
@@ -405,8 +405,8 @@ describe "LazyFrame filter" do
       |> DataFrame.filter(Eq(Col("cat"), LitStr("a")))
       |> DataFrame.collect()
     match result do
-    Err(_) -> assert false
-    Ok(df2) -> assert (DataFrame.row_count(df2) == 2)
+    | Err(_) -> assert false
+    | Ok(df2) -> assert (DataFrame.row_count(df2) == 2)
     end
   end
 
@@ -416,8 +416,8 @@ describe "LazyFrame filter" do
       |> DataFrame.filter(And(Gt(Col("n"), LitInt(1)), Lt(Col("n"), LitInt(5))))
       |> DataFrame.collect()
     match result do
-    Err(_) -> assert false
-    Ok(df2) -> assert (DataFrame.row_count(df2) == 3)
+    | Err(_) -> assert false
+    | Ok(df2) -> assert (DataFrame.row_count(df2) == 3)
     end
   end
 end
@@ -427,12 +427,12 @@ describe "LazyFrame limit and offset" do
     let df = DataFrame.make_df([IntCol("x", [10, 20, 30, 40])])
     let result = DataFrame.lazy(df) |> DataFrame.limit(2) |> DataFrame.collect()
     match result do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       assert (DataFrame.row_count(df2) == 2)
       match DataFrame.get_int_col(df2, "x") do
-      Err(_)  -> assert false
-      Ok(lst) -> assert (lst == [10, 20])
+      | Err(_)  -> assert false
+      | Ok(lst) -> assert (lst == [10, 20])
       end
     end
     end
@@ -442,12 +442,12 @@ describe "LazyFrame limit and offset" do
     let df = DataFrame.make_df([IntCol("x", [10, 20, 30, 40])])
     let result = DataFrame.lazy(df) |> DataFrame.offset(2) |> DataFrame.collect()
     match result do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       assert (DataFrame.row_count(df2) == 2)
       match DataFrame.get_int_col(df2, "x") do
-      Err(_)  -> assert false
-      Ok(lst) -> assert (lst == [30, 40])
+      | Err(_)  -> assert false
+      | Ok(lst) -> assert (lst == [30, 40])
       end
     end
     end
@@ -461,11 +461,11 @@ describe "LazyFrame sort_by" do
       |> DataFrame.sort_by([("n", Asc)])
       |> DataFrame.collect()
     match result do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       match DataFrame.get_int_col(df2, "n") do
-      Err(_)  -> assert false
-      Ok(lst) -> assert (lst == [1, 2, 3])
+      | Err(_)  -> assert false
+      | Ok(lst) -> assert (lst == [1, 2, 3])
       end
     end
     end
@@ -477,11 +477,11 @@ describe "LazyFrame sort_by" do
       |> DataFrame.sort_by([("n", Desc)])
       |> DataFrame.collect()
     match result do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       match DataFrame.get_int_col(df2, "n") do
-      Err(_)  -> assert false
-      Ok(lst) -> assert (lst == [3, 2, 1])
+      | Err(_)  -> assert false
+      | Ok(lst) -> assert (lst == [3, 2, 1])
       end
     end
     end
@@ -495,8 +495,8 @@ describe "LazyFrame rename" do
       |> DataFrame.rename("a", "b")
       |> DataFrame.collect()
     match result do
-    Err(_) -> assert false
-    Ok(df2) -> assert (DataFrame.schema(df2) == ["b"])
+    | Err(_) -> assert false
+    | Ok(df2) -> assert (DataFrame.schema(df2) == ["b"])
     end
   end
 end
@@ -510,8 +510,8 @@ describe "group_by and agg" do
       IntCol("val", [1, 2, 3, 4, 5])
     ])
     match DataFrame.agg(DataFrame.group_by(df, ["cat"]), [Count]) do
-    Err(_)  -> assert false
-    Ok(agg) -> assert (DataFrame.row_count(agg) == 2)
+    | Err(_)  -> assert false
+    | Ok(agg) -> assert (DataFrame.row_count(agg) == 2)
     end
   end
 
@@ -521,8 +521,8 @@ describe "group_by and agg" do
       IntCol("val", [10, 20, 5])
     ])
     match DataFrame.agg(DataFrame.group_by(df, ["cat"]), [Sum("val")]) do
-    Err(_)  -> assert false
-    Ok(agg) -> assert (DataFrame.row_count(agg) == 2)
+    | Err(_)  -> assert false
+    | Ok(agg) -> assert (DataFrame.row_count(agg) == 2)
     end
   end
 end
@@ -543,8 +543,8 @@ describe "inner_join" do
       |> DataFrame.inner_join(right, ["id"])
       |> DataFrame.collect()
     match result do
-    Err(_)  -> assert false
-    Ok(df2) -> assert (DataFrame.row_count(df2) == 2)
+    | Err(_)  -> assert false
+    | Ok(df2) -> assert (DataFrame.row_count(df2) == 2)
     end
   end
 end
@@ -557,8 +557,8 @@ describe "value_counts" do
       StrCol("color", ["red", "blue", "red", "red", "blue"])
     ])
     match DataFrame.value_counts(df, "color") do
-    Err(_) -> assert false
-    Ok(vc) ->
+    | Err(_) -> assert false
+    | Ok(vc) ->
       assert (DataFrame.row_count(vc) == 2)
     end
   end
@@ -568,12 +568,12 @@ describe "value_counts" do
       StrCol("color", ["red", "blue", "red", "red", "blue"])
     ])
     match DataFrame.value_counts(df, "color") do
-    Err(_) -> assert false
-    Ok(vc) -> do
+    | Err(_) -> assert false
+    | Ok(vc) -> do
       let row0 = DataFrame.get_row(vc, 0)
       match DataFrame.row_get_int(row0, "count") do
-      None -> assert false
-      Some(cnt) -> assert (cnt == 3)
+      | None -> assert false
+      | Some(cnt) -> assert (cnt == 3)
       end
     end
     end
@@ -613,14 +613,14 @@ describe "fill_null" do
   test "fill_null fills Int nulls with scalar" do
     let col = NullableIntCol("n", [0, 0, 5], [true, true, false])
     match DataFrame.fill_null(col, IntVal(99)) do
-    Err(_) -> assert false
-    Ok(filled) -> do
+    | Err(_) -> assert false
+    | Ok(filled) -> do
       match filled do
-      IntCol(_, data) ->
+      | IntCol(_, data) ->
         assert (List.nth(data, 0) == 99)
         assert (List.nth(data, 1) == 99)
         assert (List.nth(data, 2) == 5)
-      _ -> assert false
+      | _ -> assert false
       end
     end
     end
@@ -629,8 +629,8 @@ describe "fill_null" do
   test "fill_null type mismatch returns Err" do
     let col = NullableIntCol("n", [0], [true])
     match DataFrame.fill_null(col, StrVal("oops")) do
-    Ok(_)  -> assert false
-    Err(_) -> assert true
+    | Ok(_)  -> assert false
+    | Err(_) -> assert true
     end
   end
 
@@ -640,12 +640,12 @@ describe "fill_null" do
       StrCol("tag", ["a", "b"])
     ])
     match DataFrame.fill_null_df(df, "v", FloatVal(0.0)) do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       assert (DataFrame.schema(df2) == ["v", "tag"])
       match DataFrame.get_float_col(df2, "v") do
-      Err(_) -> assert false
-      Ok(data) -> assert (List.nth(data, 1) == 0.0)
+      | Err(_) -> assert false
+      | Ok(data) -> assert (List.nth(data, 1) == 0.0)
       end
     end
     end
@@ -657,13 +657,13 @@ describe "fill_null_forward and fill_null_backward" do
     let col = NullableIntCol("x", [1, 0, 0, 4], [false, true, true, false])
     let filled = DataFrame.fill_null_forward(col)
     match filled do
-    IntCol(_, data) -> do
+    | IntCol(_, data) -> do
       assert (List.nth(data, 0) == 1)
       assert (List.nth(data, 1) == 1)
       assert (List.nth(data, 2) == 1)
       assert (List.nth(data, 3) == 4)
     end
-    _ -> assert false
+    | _ -> assert false
     end
   end
 
@@ -671,13 +671,13 @@ describe "fill_null_forward and fill_null_backward" do
     let col = NullableIntCol("x", [0, 0, 4, 0], [true, true, false, true])
     let filled = DataFrame.fill_null_backward(col)
     match filled do
-    IntCol(_, data) -> do
+    | IntCol(_, data) -> do
       assert (List.nth(data, 0) == 4)
       assert (List.nth(data, 1) == 4)
       assert (List.nth(data, 2) == 4)
       assert (List.nth(data, 3) == 0)
     end
-    _ -> assert false
+    | _ -> assert false
     end
   end
 
@@ -685,8 +685,8 @@ describe "fill_null_forward and fill_null_backward" do
     let col = IntCol("x", [1, 2, 3])
     let result = DataFrame.fill_null_forward(col)
     match result do
-    IntCol(_, data) -> assert (List.nth(data, 1) == 2)
-    _ -> assert false
+    | IntCol(_, data) -> assert (List.nth(data, 1) == 2)
+    | _ -> assert false
     end
   end
 end
@@ -697,11 +697,11 @@ describe "window RowNum" do
   test "RowNum appends 0-indexed sequential column" do
     let df = DataFrame.make_df([StrCol("x", ["a", "b", "c"])])
     match DataFrame.window(df, RowNum, "rn") do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       match DataFrame.get_int_col(df2, "rn") do
-      Err(_) -> assert false
-      Ok(data) ->
+      | Err(_) -> assert false
+      | Ok(data) ->
         assert (List.nth(data, 0) == 0)
         assert (List.nth(data, 1) == 1)
         assert (List.nth(data, 2) == 2)
@@ -716,11 +716,11 @@ describe "window Rank" do
     -- values [3, 1, 1, 2] sorted asc → [1,1,2,3], ranks → [4,1,1,3]
     let df = DataFrame.make_df([IntCol("v", [3, 1, 1, 2])])
     match DataFrame.window(df, Rank("v", Asc), "rk") do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       match DataFrame.get_int_col(df2, "rk") do
-      Err(_) -> assert false
-      Ok(data) ->
+      | Err(_) -> assert false
+      | Ok(data) ->
         -- The two 1s should share rank 1; 2 gets rank 3; 3 gets rank 4
         assert (List.nth(data, 1) == 1)  -- first 1
         assert (List.nth(data, 2) == 1)  -- second 1 (tie)
@@ -734,11 +734,11 @@ describe "window Rank" do
   test "DenseRank assigns 1-based ranks without gaps" do
     let df = DataFrame.make_df([IntCol("v", [3, 1, 1, 2])])
     match DataFrame.window(df, DenseRank("v", Asc), "dr") do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       match DataFrame.get_int_col(df2, "dr") do
-      Err(_) -> assert false
-      Ok(data) ->
+      | Err(_) -> assert false
+      | Ok(data) ->
         assert (List.nth(data, 1) == 1)  -- first 1
         assert (List.nth(data, 2) == 1)  -- second 1 (tie)
         assert (List.nth(data, 3) == 2)  -- 2 (dense: no gap)
@@ -753,11 +753,11 @@ describe "window RunningSum and RunningMean" do
   test "RunningSum computes cumulative Int sum" do
     let df = DataFrame.make_df([IntCol("x", [1, 2, 3, 4])])
     match DataFrame.window(df, RunningSum("x"), "cs") do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       match DataFrame.get_int_col(df2, "cs") do
-      Err(_) -> assert false
-      Ok(data) ->
+      | Err(_) -> assert false
+      | Ok(data) ->
         assert (List.nth(data, 0) == 1)
         assert (List.nth(data, 1) == 3)
         assert (List.nth(data, 2) == 6)
@@ -770,11 +770,11 @@ describe "window RunningSum and RunningMean" do
   test "RunningMean computes cumulative mean" do
     let df = DataFrame.make_df([FloatCol("x", [2.0, 4.0, 6.0])])
     match DataFrame.window(df, RunningMean("x"), "cm") do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       match DataFrame.get_float_col(df2, "cm") do
-      Err(_) -> assert false
-      Ok(data) ->
+      | Err(_) -> assert false
+      | Ok(data) ->
         assert (List.nth(data, 0) == 2.0)
         assert (List.nth(data, 1) == 3.0)
         assert (List.nth(data, 2) == 4.0)
@@ -788,11 +788,11 @@ describe "window Lag and Lead" do
   test "Lag n=1 shifts values down" do
     let df = DataFrame.make_df([IntCol("x", [10, 20, 30])])
     match DataFrame.window(df, Lag("x", 1, IntVal(0)), "prev") do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       match DataFrame.get_int_col(df2, "prev") do
-      Err(_) -> assert false
-      Ok(data) ->
+      | Err(_) -> assert false
+      | Ok(data) ->
         assert (List.nth(data, 0) == 0)   -- OOB: fill
         assert (List.nth(data, 1) == 10)
         assert (List.nth(data, 2) == 20)
@@ -804,11 +804,11 @@ describe "window Lag and Lead" do
   test "Lead n=1 shifts values up" do
     let df = DataFrame.make_df([IntCol("x", [10, 20, 30])])
     match DataFrame.window(df, Lead("x", 1, IntVal(0)), "nxt") do
-    Err(_) -> assert false
-    Ok(df2) -> do
+    | Err(_) -> assert false
+    | Ok(df2) -> do
       match DataFrame.get_int_col(df2, "nxt") do
-      Err(_) -> assert false
-      Ok(data) ->
+      | Err(_) -> assert false
+      | Ok(data) ->
         assert (List.nth(data, 0) == 20)
         assert (List.nth(data, 1) == 30)
         assert (List.nth(data, 2) == 0)   -- OOB: fill
@@ -828,8 +828,8 @@ describe "melt" do
       IntCol("feb", [20, 25])
     ])
     match DataFrame.melt(df, ["id"], ["jan", "feb"], "month", "val") do
-    Err(_) -> assert false
-    Ok(long) -> do
+    | Err(_) -> assert false
+    | Ok(long) -> do
       -- 2 rows × 2 value vars = 4 output rows
       assert (DataFrame.row_count(long) == 4)
       assert (DataFrame.col_count(long) == 3)
@@ -844,14 +844,14 @@ describe "melt" do
       IntCol("q2", [200])
     ])
     match DataFrame.melt(df, ["name"], ["q1", "q2"], "quarter", "score") do
-    Err(_) -> assert false
-    Ok(long) -> do
+    | Err(_) -> assert false
+    | Ok(long) -> do
       assert (DataFrame.row_count(long) == 2)
       -- Every row should have "name" = "Alice"
       let row0 = DataFrame.get_row(long, 0)
       match DataFrame.row_get_string(row0, "name") do
-      None    -> assert false
-      Some(s) -> assert (s == "Alice")
+      | None    -> assert false
+      | Some(s) -> assert (s == "Alice")
       end
     end
     end
@@ -866,8 +866,8 @@ describe "pivot" do
       IntCol("revenue", [100,    200,    150])
     ])
     match DataFrame.pivot(df, "region", "product", "revenue") do
-    Err(_) -> assert false
-    Ok(wide) -> do
+    | Err(_) -> assert false
+    | Ok(wide) -> do
       -- 2 distinct regions → 2 rows; 2 distinct products + index col → 3 cols
       assert (DataFrame.row_count(wide) == 2)
       assert (DataFrame.col_count(wide) == 3)
@@ -882,15 +882,15 @@ describe "pivot" do
       IntCol("v", [1,   2,   3])
     ])
     match DataFrame.pivot(df, "r", "c", "v") do
-    Err(_) -> assert false
-    Ok(wide) -> do
+    | Err(_) -> assert false
+    | Ok(wide) -> do
       -- Row "X": a=1, b=2; Row "Y": a=3, b=NullVal
       assert (DataFrame.row_count(wide) == 2)
       -- Can at least access first row without error
       let row0 = DataFrame.get_row(wide, 0)
       match DataFrame.row_get_int(row0, "a") do
-      None    -> assert false
-      Some(v) -> assert (v == 1)
+      | None    -> assert false
+      | Some(v) -> assert (v == 1)
       end
     end
     end
@@ -899,8 +899,8 @@ describe "pivot" do
   test "pivot missing column returns Err" do
     let df = DataFrame.make_df([IntCol("x", [1, 2])])
     match DataFrame.pivot(df, "missing", "x", "x") do
-    Ok(_)  -> assert false
-    Err(_) -> assert true
+    | Ok(_)  -> assert false
+    | Err(_) -> assert true
     end
   end
 end

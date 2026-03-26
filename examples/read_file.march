@@ -9,28 +9,28 @@ mod ReadFile do
 
     -- Read the whole file at once
     match File.read(path) do
-    Err(e) ->
+    | Err(e) ->
       println("Error reading file: " ++ to_string(e))
-    Ok(contents) ->
+    | Ok(contents) ->
       println("=== Full file contents ===")
       println(contents)
     end
 
     -- Read as a list of lines
     match File.read_lines(path) do
-    Err(e) ->
+    | Err(e) ->
       println("Error: " ++ to_string(e))
-    Ok(lines) ->
+    | Ok(lines) ->
       println("=== Line count ===")
       println(int_to_string(List.length(lines)) ++ " lines")
     end
     -- dbg()
     -- Stream lines with with_lines, collect first 3
     println("=== First 3 lines (streaming) ===")
-    match File.with_lines(path, fn(lines) -> Seq.to_list(Seq.take(lines, 3))) do
-    Err(e) ->
+    | match File.with_lines(path, fn(lines) -> Seq.to_list(Seq.take(lines, 3))) do
+    | Err(e) ->
       println("Error: " ++ to_string(e))
-    Ok(first3) ->
+    | Ok(first3) ->
       let joined = List.fold_left("", first3, fn(acc, line) -> acc ++ line ++ "\n")
       println(joined)
     end

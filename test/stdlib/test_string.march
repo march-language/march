@@ -173,22 +173,22 @@ end
 describe "to_int and to_float" do
   test "to_int parses valid integer string" do
     match String.to_int("42") do
-    Err(_) -> assert false
-    Ok(n) -> assert (n == 42)
+    | Err(_) -> assert false
+    | Ok(n) -> assert (n == 42)
     end
   end
 
   test "to_int returns Err for invalid string" do
     match String.to_int("abc") do
-    Err(_) -> assert true
-    Ok(_) -> assert false
+    | Err(_) -> assert true
+    | Ok(_) -> assert false
     end
   end
 
   test "to_int parses negative integer" do
     match String.to_int("-7") do
-    Err(_) -> assert false
-    Ok(n) -> assert (n == -7)
+    | Err(_) -> assert false
+    | Ok(n) -> assert (n == -7)
     end
   end
 end
@@ -206,15 +206,15 @@ end
 describe "index_of" do
   test "index_of returns byte offset when found" do
     match String.index_of("hello world", "world") do
-    None -> assert false
-    Some(i) -> assert (i == 6)
+    | None -> assert false
+    | Some(i) -> assert (i == 6)
     end
   end
 
   test "index_of returns None when not found" do
     match String.index_of("hello", "xyz") do
-    None -> assert true
-    Some(_) -> assert false
+    | None -> assert true
+    | Some(_) -> assert false
     end
   end
 end

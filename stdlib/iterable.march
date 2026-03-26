@@ -29,8 +29,8 @@ mod Iterable do
 pfn rev(xs : List(a)) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, Cons(h, acc))
+    | Nil        -> acc
+    | Cons(h, t) -> go(t, Cons(h, acc))
     end
   end
   go(xs, Nil)
@@ -42,8 +42,8 @@ doc "Applies f to each element, returning a new list of results."
 fn map(xs : List(a), f : a -> b) : List(b) do
   fn go(lst : List(a), acc : List(b)) : List(b) do
     match lst do
-    Nil        -> rev(acc)
-    Cons(h, t) -> go(t, Cons(f(h), acc))
+    | Nil        -> rev(acc)
+    | Cons(h, t) -> go(t, Cons(f(h), acc))
     end
   end
   go(xs, Nil)
@@ -53,14 +53,14 @@ doc "Applies f to each element; collects the resulting lists and concatenates th
 fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
   fn append_list(left : List(b), right : List(b)) : List(b) do
     match left do
-    Nil        -> right
-    Cons(x, r) -> Cons(x, append_list(r, right))
+    | Nil        -> right
+    | Cons(x, r) -> Cons(x, append_list(r, right))
     end
   end
   fn go(lst : List(a), acc : List(b)) : List(b) do
     match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, append_list(acc, f(h)))
+    | Nil        -> acc
+    | Cons(h, t) -> go(t, append_list(acc, f(h)))
     end
   end
   go(xs, Nil)
@@ -70,8 +70,8 @@ doc "Returns only the elements for which pred returns true."
 fn filter(xs : List(a), pred : a -> Bool) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
-    Nil        -> rev(acc)
-    Cons(h, t) -> do
+    | Nil        -> rev(acc)
+    | Cons(h, t) -> do
       if pred(h) do go(t, Cons(h, acc))
       else go(t, acc) end
     end
@@ -89,8 +89,8 @@ f is called as f(acc, x) returning the new accumulator.
 fn fold(zero : b, xs : List(a), f : b -> a -> b) : b do
   fn go(lst : List(a), acc : b) : b do
     match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, f(acc, h))
+    | Nil        -> acc
+    | Cons(h, t) -> go(t, f(acc, h))
     end
   end
   go(xs, zero)
@@ -100,8 +100,8 @@ doc "Returns the number of elements in the list."
 fn count(xs : List(a)) : Int do
   fn go(lst : List(a), acc : Int) : Int do
     match lst do
-    Nil        -> acc
-    Cons(_, t) -> go(t, acc + 1)
+    | Nil        -> acc
+    | Cons(_, t) -> go(t, acc + 1)
     end
   end
   go(xs, 0)
@@ -110,8 +110,8 @@ end
 doc "Returns true if any element satisfies pred (short-circuits)."
 fn any(xs : List(a), pred : a -> Bool) : Bool do
   match xs do
-  Nil        -> false
-  Cons(h, t) -> do
+  | Nil        -> false
+  | Cons(h, t) -> do
     if pred(h) do true
     else any(t, pred) end
   end
@@ -121,8 +121,8 @@ end
 doc "Returns true if all elements satisfy pred (short-circuits on failure)."
 fn all(xs : List(a), pred : a -> Bool) : Bool do
   match xs do
-  Nil        -> true
-  Cons(h, t) -> do
+  | Nil        -> true
+  | Cons(h, t) -> do
     if pred(h) do all(t, pred)
     else false end
   end
@@ -132,8 +132,8 @@ end
 doc "Returns the first element satisfying pred, or None."
 fn find(xs : List(a), pred : a -> Bool) : Option(a) do
   match xs do
-  Nil        -> None
-  Cons(h, t) -> do
+  | Nil        -> None
+  | Cons(h, t) -> do
     if pred(h) do Some(h)
     else find(t, pred) end
   end
@@ -146,8 +146,8 @@ doc "Returns the first n elements. Returns the whole list if n >= length."
 fn take(xs : List(a), n : Int) : List(a) do
   if n <= 0 do Nil
   else match xs do
-    Nil        -> Nil
-    Cons(h, t) -> Cons(h, take(t, n - 1))
+    | Nil        -> Nil
+    | Cons(h, t) -> Cons(h, take(t, n - 1))
     end end
 end
 
@@ -155,8 +155,8 @@ doc "Drops the first n elements. Returns [] if n >= length."
 fn drop(xs : List(a), n : Int) : List(a) do
   if n <= 0 do xs
   else match xs do
-    Nil        -> Nil
-    Cons(_, t) -> drop(t, n - 1)
+    | Nil        -> Nil
+    | Cons(_, t) -> drop(t, n - 1)
     end end
 end
 
@@ -165,11 +165,11 @@ end
 doc "Pairs up elements from two lists. Stops at the shorter list."
 fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
   match xs do
-  Nil -> Nil
-  Cons(x, xt) -> do
+  | Nil -> Nil
+  | Cons(x, xt) -> do
     match ys do
-    Nil -> Nil
-    Cons(y, yt) -> Cons((x, y), zip(xt, yt))
+    | Nil -> Nil
+    | Cons(y, yt) -> Cons((x, y), zip(xt, yt))
     end
   end
   end
@@ -179,8 +179,8 @@ doc "Pairs each element with its 0-based index: [a, b] -> [(0, a), (1, b)]."
 fn enumerate(xs : List(a)) : List((Int, a)) do
   fn go(lst : List(a), i : Int, acc : List((Int, a))) : List((Int, a)) do
     match lst do
-    Nil        -> rev(acc)
-    Cons(h, t) -> go(t, i + 1, Cons((i, h), acc))
+    | Nil        -> rev(acc)
+    | Cons(h, t) -> go(t, i + 1, Cons((i, h), acc))
     end
   end
   go(xs, 0, Nil)

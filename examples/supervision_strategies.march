@@ -70,8 +70,8 @@ mod StrategyDemo do
   -- Read the raw integer pid stored in a supervisor state field.
   fn child_int(sup, field) do
     match get_actor_field(sup, field) do
-    None    -> -1
-    Some(n) -> n
+    | None    -> -1
+    | Some(n) -> n
     end
   end
 

@@ -45,16 +45,16 @@ end
 -- Sum a list of integers.
 pfn sum(xs : List(Int), acc : Int) : Int do
   match xs do
-  Nil -> acc
-  Cons(x, rest) -> sum(rest, acc + x)
+  | Nil -> acc
+  | Cons(x, rest) -> sum(rest, acc + x)
   end
 end
 
 -- Map collatz_steps over a list, collecting step counts.
 pfn map_collatz(xs : List(Int), acc : List(Int)) : List(Int) do
   match xs do
-  Nil -> acc
-  Cons(x, rest) -> map_collatz(rest, Cons(collatz_steps(x, 0), acc))
+  | Nil -> acc
+  | Cons(x, rest) -> map_collatz(rest, Cons(collatz_steps(x, 0), acc))
   end
 end
 
@@ -64,14 +64,14 @@ end
 pfn par_map_inner(xs : List(Int), chunk_size : Int,
                  chunk_acc : List(Int), chunk_left : Int) : Int do
   match xs do
-  Nil ->
+  | Nil ->
     -- Process final partial chunk
     if chunk_left == chunk_size do 0
     else do
       let t = task_spawn(fn x -> sum(map_collatz(chunk_acc, Nil), 0))
       task_await_unwrap(t) end
     end
-  Cons(h, tl) ->
+  | Cons(h, tl) ->
     if chunk_left == 0 do do
       -- Chunk full — spawn task, continue with next chunk
       let t = task_spawn(fn x -> sum(map_collatz(chunk_acc, Nil), 0))

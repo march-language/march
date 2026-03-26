@@ -22,10 +22,10 @@ fn main() do
   end
 
   match HttpClient.stream_get(client, "http://httpbin.org/get", on_chunk) do
-  Ok((status, headers, _)) ->
+  | Ok((status, headers, _)) ->
     print("---")
     print("Status: " ++ int_to_string(status))
-  Err(e) ->
+  | Err(e) ->
     print("Error!")
   end
 end

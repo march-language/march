@@ -20,8 +20,8 @@ doc "Reverses a list. O(n)."
 fn reverse_list(xs : List(a)) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, Cons(h, acc))
+    | Nil        -> acc
+    | Cons(h, t) -> go(t, Cons(h, acc))
     end
   end
   go(xs, Nil)
@@ -31,8 +31,8 @@ doc "Appends two lists. O(|xs|)."
 fn append_list(xs : List(a), ys : List(a)) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, Cons(h, acc))
+    | Nil        -> acc
+    | Cons(h, t) -> go(t, Cons(h, acc))
     end
   end
   go(reverse_list(xs), ys)
@@ -42,8 +42,8 @@ doc "Returns the length of a list."
 pfn list_len(xs : List(a)) : Int do
   fn go(lst : List(a), acc : Int) : Int do
     match lst do
-    Nil        -> acc
-    Cons(_, t) -> go(t, acc + 1)
+    | Nil        -> acc
+    | Cons(_, t) -> go(t, acc + 1)
     end
   end
   go(xs, 0)
@@ -52,8 +52,8 @@ end
 doc "Returns the nth element (0-indexed) without bounds checking."
 pfn nth_unsafe(xs : List(a), k : Int) : a do
   match xs do
-  Nil        -> panic("nth_unsafe: index out of bounds")
-  Cons(h, t) -> if k == 0 do h else nth_unsafe(t, k - 1) end
+  | Nil        -> panic("nth_unsafe: index out of bounds")
+  | Cons(h, t) -> if k == 0 do h else nth_unsafe(t, k - 1) end
   end
 end
 
@@ -83,17 +83,17 @@ Stable: left-list elements are preferred on equal keys.
 pfn merge_sorted(xs : List(a), ys : List(a), cmp : a -> a -> Bool) : List(a) do
   fn rev_onto(rev_pfx : List(a), tail : List(a)) : List(a) do
     match rev_pfx do
-    Nil        -> tail
-    Cons(h, t) -> rev_onto(t, Cons(h, tail))
+    | Nil        -> tail
+    | Cons(h, t) -> rev_onto(t, Cons(h, tail))
     end
   end
   fn go(l : List(a), r : List(a), acc : List(a)) : List(a) do
     match l do
-    Nil -> rev_onto(acc, r)
-    Cons(x, xl) -> do
+    | Nil -> rev_onto(acc, r)
+    | Cons(x, xl) -> do
       match r do
-      Nil -> rev_onto(acc, l)
-      Cons(y, yl) ->
+      | Nil -> rev_onto(acc, l)
+      | Cons(y, yl) ->
         if cmp2(cmp, x, y) do go(xl, r, Cons(x, acc))
         else go(l, yl, Cons(y, acc)) end
       end
@@ -111,22 +111,22 @@ and as the heapsort-free path for introsort on very small inputs.
 fn mergesort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   fn step_pairs(groups : List(List(a)), acc : List(List(a))) : List(List(a)) do
     match groups do
-    Nil -> reverse_list(acc)
+    | Nil -> reverse_list(acc)
     Cons(g, Nil) -> reverse_list(Cons(g, acc))
-    Cons(g1, Cons(g2, rest)) -> step_pairs(rest, Cons(merge_sorted(g1, g2, cmp), acc))
+    | Cons(g1, Cons(g2, rest)) -> step_pairs(rest, Cons(merge_sorted(g1, g2, cmp), acc))
     end
   end
   fn sort_loop(groups : List(List(a))) : List(a) do
     match groups do
-    Nil -> Nil
+    | Nil -> Nil
     Cons(sole, Nil) -> sole
-    _ -> sort_loop(step_pairs(groups, Nil))
+    | _ -> sort_loop(step_pairs(groups, Nil))
     end
   end
   fn to_singletons(lst : List(a), acc : List(List(a))) : List(List(a)) do
     match lst do
-    Nil        -> reverse_list(acc)
-    Cons(h, t) -> to_singletons(t, Cons(Cons(h, Nil), acc))
+    | Nil        -> reverse_list(acc)
+    | Cons(h, t) -> to_singletons(t, Cons(Cons(h, Nil), acc))
     end
   end
   sort_loop(to_singletons(xs, Nil))
@@ -277,7 +277,7 @@ Prefer timsort_by or mergesort_by for general-purpose sorting.
 """
 fn sort_small_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   match xs do
-  Nil -> Nil
+  | Nil -> Nil
   Cons(a, Nil) -> xs
   Cons(a, Cons(b, Nil)) ->
     sort2(a, b, cmp)
@@ -293,7 +293,7 @@ fn sort_small_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
     sort7(a, b, c, d, e, f, g, cmp)
   Cons(a, Cons(b, Cons(c, Cons(d, Cons(e, Cons(f, Cons(g, Cons(h, Nil)))))))) ->
     sort8(a, b, c, d, e, f, g, h, cmp)
-  _ ->
+  | _ ->
     mergesort_by(xs, cmp)
   end
 end
@@ -307,8 +307,8 @@ O(n) per insertion.
 """
 pfn insert_sorted(x : a, sorted : List(a), cmp : a -> a -> Bool) : List(a) do
   match sorted do
-  Nil -> Cons(x, Nil)
-  Cons(h, t) -> do
+  | Nil -> Cons(x, Nil)
+  | Cons(h, t) -> do
     if cmp2(cmp, x, h) do Cons(x, sorted)
     else Cons(h, insert_sorted(x, t, cmp)) end
   end
@@ -322,8 +322,8 @@ Used for small sublists (n < 16) where quadratic cost is bounded.
 fn insertion_sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, insert_sorted(h, acc, cmp))
+    | Nil        -> acc
+    | Cons(h, t) -> go(t, insert_sorted(h, acc, cmp))
     end
   end
   go(xs, Nil)
@@ -345,8 +345,8 @@ as CPython does) to keep the quadratic cost small.
 pfn extend_run(run : List(a), run_len : Int, rest : List(a), cmp : a -> a -> Bool) : (List(a), Int, List(a)) do
   if run_len >= 16 do (run, run_len, rest)
   else match rest do
-    Nil -> (run, run_len, Nil)
-    Cons(h, t) ->
+    | Nil -> (run, run_len, Nil)
+    | Cons(h, t) ->
       extend_run(insert_sorted(h, run, cmp), run_len + 1, t, cmp)
     end end
 end
@@ -359,11 +359,11 @@ Returns a list of (run, length) pairs in input order.
 pfn detect_runs(xs : List(a), cmp : a -> a -> Bool) : List((List(a), Int)) do
   fn scan_run(lst : List(a), run : List(a), run_len : Int) : (List(a), Int, List(a)) do
     match lst do
-    Nil -> (reverse_list(run), run_len, Nil)
-    Cons(h, t) -> do
+    | Nil -> (reverse_list(run), run_len, Nil)
+    | Cons(h, t) -> do
       match run do
-      Nil -> scan_run(t, Cons(h, Nil), 1)
-      Cons(prev, _) ->
+      | Nil -> scan_run(t, Cons(h, Nil), 1)
+      | Cons(prev, _) ->
         if cmp2(cmp, prev, h) do
           -- ascending: add to run
           scan_run(t, Cons(h, run), run_len + 1)
@@ -377,8 +377,8 @@ pfn detect_runs(xs : List(a), cmp : a -> a -> Bool) : List((List(a), Int)) do
   end
   fn collect(lst : List(a), acc : List((List(a), Int))) : List((List(a), Int)) do
     match lst do
-    Nil -> reverse_list(acc)
-    _ -> do
+    | Nil -> reverse_list(acc)
+    | _ -> do
       let (run, n, rest) = scan_run(lst, Nil, 0)
       let (ext_run, ext_n, remaining) = extend_run(run, n, rest, cmp)
       collect(remaining, Cons((ext_run, ext_n), acc))
@@ -413,7 +413,7 @@ of Timsort that guarantees worst-case O(n log n).
 """
 pfn enforce_invariants(stack : List((List(a), Int)), cmp : a -> a -> Bool) : List((List(a), Int)) do
   match stack do
-  Cons((x, xn), Cons((y, yn), Cons((z, zn), rest))) -> do
+  | Cons((x, xn), Cons((y, yn), Cons((z, zn), rest))) -> do
     if yn <= xn do
     -- B violated: merge X and Y
     let merged = tim_merge(y, x, cmp)
@@ -426,7 +426,7 @@ pfn enforce_invariants(stack : List((List(a), Int)), cmp : a -> a -> Bool) : Lis
     stack
   end end
   end
-  Cons((x, xn), Cons((y, yn), Nil)) -> do
+  | Cons((x, xn), Cons((y, yn), Nil)) -> do
     if yn <= xn do
       let merged = tim_merge(y, x, cmp)
       Cons((merged, xn + yn), Nil)
@@ -434,7 +434,7 @@ pfn enforce_invariants(stack : List((List(a), Int)), cmp : a -> a -> Bool) : Lis
       stack
     end
   end
-  _ -> stack
+  | _ -> stack
   end
 end
 
@@ -443,13 +443,13 @@ pfn drain_stack(stack : List((List(a), Int)), cmp : a -> a -> Bool) : List(a) do
   let rev = reverse_list(stack)
   fn go(stk : List((List(a), Int)), acc : List(a)) : List(a) do
     match stk do
-    Nil -> acc
-    Cons((run, _), rest) -> go(rest, tim_merge(acc, run, cmp))
+    | Nil -> acc
+    | Cons((run, _), rest) -> go(rest, tim_merge(acc, run, cmp))
     end
   end
   match rev do
-  Nil -> Nil
-  Cons((first, _), rest) -> go(rest, first)
+  | Nil -> Nil
+  | Cons((first, _), rest) -> go(rest, first)
   end
 end
 
@@ -468,8 +468,8 @@ fn timsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   let runs = detect_runs(xs, cmp)
   fn process(run_list : List((List(a), Int)), stack : List((List(a), Int))) : List((List(a), Int)) do
     match run_list do
-    Nil -> stack
-    Cons(run, rest) -> do
+    | Nil -> stack
+    | Cons(run, rest) -> do
       let new_stack = enforce_invariants(Cons(run, stack), cmp)
       process(rest, new_stack)
     end
@@ -492,8 +492,8 @@ ptype Heap(a) = HLeaf | HNode(Int, a, Heap(a), Heap(a))
 
 pfn heap_rank(h : Heap(a)) : Int do
   match h do
-  HLeaf -> 0
-  HNode(r, _, _, _) -> r
+  | HLeaf -> 0
+  | HNode(r, _, _, _) -> r
   end
 end
 
@@ -507,11 +507,11 @@ end
 
 pfn heap_merge_h(h1 : Heap(a), h2 : Heap(a), cmp : a -> a -> Bool) : Heap(a) do
   match h1 do
-  HLeaf -> h2
-  HNode(_, x, l1, r1) -> do
+  | HLeaf -> h2
+  | HNode(_, x, l1, r1) -> do
     match h2 do
-    HLeaf -> h1
-    HNode(_, y, l2, r2) ->
+    | HLeaf -> h1
+    | HNode(_, y, l2, r2) ->
       if cmp2(cmp, x, y) do
         make_hnode(x, l1, heap_merge_h(r1, h2, cmp))
       else
@@ -528,16 +528,16 @@ end
 
 pfn heap_extract_min(h : Heap(a), cmp : a -> a -> Bool) : (a, Heap(a)) do
   match h do
-  HLeaf -> panic("heap_extract_min: empty heap")
-  HNode(_, x, l, r) -> (x, heap_merge_h(l, r, cmp))
+  | HLeaf -> panic("heap_extract_min: empty heap")
+  | HNode(_, x, l, r) -> (x, heap_merge_h(l, r, cmp))
   end
 end
 
 pfn heap_build(xs : List(a), cmp : a -> a -> Bool) : Heap(a) do
   fn go(lst : List(a), h : Heap(a)) : Heap(a) do
     match lst do
-    Nil        -> h
-    Cons(x, t) -> go(t, heap_insert(x, h, cmp))
+    | Nil        -> h
+    | Cons(x, t) -> go(t, heap_insert(x, h, cmp))
     end
   end
   go(xs, HLeaf)
@@ -545,8 +545,8 @@ end
 
 pfn heap_drain(h : Heap(a), cmp : a -> a -> Bool, acc : List(a)) : List(a) do
   match h do
-  HLeaf -> reverse_list(acc)
-  _ -> do
+  | HLeaf -> reverse_list(acc)
+  | _ -> do
     let (x, h2) = heap_extract_min(h, cmp)
     heap_drain(h2, cmp, Cons(x, acc))
   end
@@ -572,8 +572,8 @@ Equality: x == pivot means neither cmp(x,pivot) nor cmp(pivot,x) holds.
 pfn partition3(xs : List(a), pivot : a, cmp : a -> a -> Bool) : (List(a), List(a), List(a)) do
   fn go(lst : List(a), lt : List(a), eq : List(a), gt : List(a)) : (List(a), List(a), List(a)) do
     match lst do
-    Nil -> (reverse_list(lt), reverse_list(eq), reverse_list(gt))
-    Cons(h, t) -> do
+    | Nil -> (reverse_list(lt), reverse_list(eq), reverse_list(gt))
+    | Cons(h, t) -> do
       if cmp2(cmp, h, pivot) do go(t, Cons(h, lt), eq, gt)
       else if cmp2(cmp, pivot, h) do go(t, lt, eq, Cons(h, gt))
       else go(t, lt, Cons(h, eq), gt) end end
@@ -590,8 +590,8 @@ Used for pivot selection in Introsort's quicksort phase.
 pfn median_of_3(a : a, b : a, c : a, cmp : a -> a -> Bool) : a do
   let sorted = sort3(a, b, c, cmp)
   match sorted do
-  Cons(_, Cons(m, _)) -> m
-  _ -> a
+  | Cons(_, Cons(m, _)) -> m
+  | _ -> a
   end
 end
 
@@ -611,8 +611,8 @@ pfn introsort_go(xs : List(a), n : Int, depth : Int, cmp : a -> a -> Bool) : Lis
     -- Middle element found by walking n/2 steps (O(n/2) on linked lists —
     -- this is the inherent cost of random access on singly-linked lists).
     let first  = match xs do
-      Cons(h, _) -> h
-      Nil -> panic("introsort: empty")
+      | Cons(h, _) -> h
+      | Nil -> panic("introsort: empty")
     end
     let middle = nth_unsafe(xs, n / 2)
     let last   = nth_unsafe(xs, n - 1)

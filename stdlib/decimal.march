@@ -40,9 +40,9 @@ end
 -- Align two decimals to the same scale, returning (coef_a, coef_b, scale)
 pfn align(a : Decimal, b : Decimal) : (Int, Int, Int) do
   match a do
-  Decimal(ca, sa) -> do
+  | Decimal(ca, sa) -> do
     match b do
-    Decimal(cb, sb) ->
+    | Decimal(cb, sb) ->
       if sa == sb do (ca, cb, sa)
       else if sa > sb do
         (ca, scale_up(cb, sa - sb), sa)
@@ -61,8 +61,8 @@ fn from_string(s : String) : Decimal do
   -- Find the decimal point position
   fn find_dot(chars : List(String), pos : Int) : Option(Int) do
     match chars do
-    Nil -> None
-    Cons(c, rest) -> do
+    | Nil -> None
+    | Cons(c, rest) -> do
       if c == "." do Some(pos)
       else find_dot(rest, pos + 1) end
     end
@@ -70,15 +70,15 @@ fn from_string(s : String) : Decimal do
   end
   let chars = string_chars(s)
   match find_dot(chars, 0) do
-  None -> do
+  | None -> do
     -- No decimal point — scale 0
     let coef = match string_to_int(s) do
-      Some(n) -> n
-      None    -> 0
+      | Some(n) -> n
+      | None    -> 0
       end
     Decimal(coef, 0)
   end
-  Some(dot_pos) -> do
+  | Some(dot_pos) -> do
     let total_len = string_length(s)
     let scale = total_len - dot_pos - 1
     -- Remove the dot and parse as integer
@@ -89,8 +89,8 @@ fn from_string(s : String) : Decimal do
       else if int_part == "" do frac_part
       else int_part ++ frac_part end end
     let coef = match string_to_int(combined_str) do
-      Some(n) -> n
-      None    -> 0
+      | Some(n) -> n
+      | None    -> 0
       end
     Decimal(coef, scale)
   end
@@ -124,9 +124,9 @@ end
 doc "Multiplies two Decimals. Result scale is the sum of the two scales."
 fn mul(a : Decimal, b : Decimal) : Decimal do
   match a do
-  Decimal(ca, sa) -> do
+  | Decimal(ca, sa) -> do
     match b do
-    Decimal(cb, sb) ->
+    | Decimal(cb, sb) ->
       Decimal(ca * cb, sa + sb)
     end
   end
@@ -139,9 +139,9 @@ Panics if b is zero.
 """
 fn div(a : Decimal, b : Decimal, precision : Int) : Decimal do
   match a do
-  Decimal(ca, sa) -> do
+  | Decimal(ca, sa) -> do
     match b do
-    Decimal(cb, sb) ->
+    | Decimal(cb, sb) ->
       if cb == 0 do panic("Decimal.div: division by zero")
       else do
         -- Scale up numerator to get desired precision: (ca * 10^(precision+sb)) / cb
@@ -160,7 +160,7 @@ Rounds a Decimal to `places` decimal places using half-up rounding
 """
 fn round(d : Decimal, places : Int) : Decimal do
   match d do
-  Decimal(coef, scale) -> do
+  | Decimal(coef, scale) -> do
     if scale <= places do d
     else do
       let diff = scale - places
@@ -213,7 +213,7 @@ end
 doc "Converts a Decimal to its string representation (e.g. \"1.23\", \"-0.50\")."
 fn to_string(d : Decimal) : String do
   match d do
-  Decimal(coef, scale) -> do
+  | Decimal(coef, scale) -> do
     let coef_str = int_to_string(coef)
     if scale == 0 do coef_str
     else do
@@ -246,28 +246,28 @@ end
 doc "Returns the scale (number of decimal places) of a Decimal."
 fn scale(d : Decimal) : Int do
   match d do
-  Decimal(_, s) -> s
+  | Decimal(_, s) -> s
   end
 end
 
 doc "Returns the unscaled Int coefficient."
 fn coefficient(d : Decimal) : Int do
   match d do
-  Decimal(c, _) -> c
+  | Decimal(c, _) -> c
   end
 end
 
 doc "Returns true if the Decimal is zero."
 fn is_zero(d : Decimal) : Bool do
   match d do
-  Decimal(c, _) -> c == 0
+  | Decimal(c, _) -> c == 0
   end
 end
 
 doc "Returns the absolute value."
 fn abs(d : Decimal) : Decimal do
   match d do
-  Decimal(c, s) -> Decimal(if c < 0 do 0 - c else c end, s)
+  | Decimal(c, s) -> Decimal(if c < 0 do 0 - c else c end, s)
   end
 end
 

@@ -48,7 +48,7 @@ end
 
 doc """
 Create a stage by unfolding a seed value.
-next : seed -> Option((item, new_seed))
+| next : seed -> Option((item, new_seed))
 Produces items until next returns None.
 
 Example — integers from 0 to 4:
@@ -71,24 +71,24 @@ end
 doc "Apply f to every item."
 fn map(stage, f) do
   match stage do
-  Stage(seq) -> Stage(Seq.map(seq, f))
+  | Stage(seq) -> Stage(Seq.map(seq, f))
   end
 end
 
 doc "Keep only items where pred returns true."
 fn filter(stage, pred) do
   match stage do
-  Stage(seq) -> Stage(Seq.filter(seq, pred))
+  | Stage(seq) -> Stage(Seq.filter(seq, pred))
   end
 end
 
 doc "Apply f to each item (f returns a list) and flatten the results."
 fn flat_map(stage, f) do
   match stage do
-  Stage(seq) ->
+  | Stage(seq) ->
     Stage(Seq.flat_map(seq, fn x ->
       match f(x) do
-      Stage(inner) -> inner
+      | Stage(inner) -> inner
       end))
   end
 end
@@ -96,21 +96,21 @@ end
 doc "Keep at most n items."
 fn take(stage, n) do
   match stage do
-  Stage(seq) -> Stage(Seq.take(seq, n))
+  | Stage(seq) -> Stage(Seq.take(seq, n))
   end
 end
 
 doc "Skip the first n items."
 fn drop(stage, n) do
   match stage do
-  Stage(seq) -> Stage(Seq.drop(seq, n))
+  | Stage(seq) -> Stage(Seq.drop(seq, n))
   end
 end
 
 doc "Group items into lists of at most n elements."
 fn batch(stage, n) do
   match stage do
-  Stage(seq) -> Stage(Seq.batch(seq, n))
+  | Stage(seq) -> Stage(Seq.batch(seq, n))
   end
 end
 
@@ -130,21 +130,21 @@ fn with_concurrency(stage, _n) do stage end
 doc "Collect all items into a List."
 fn collect(stage) do
   match stage do
-  Stage(seq) -> Seq.to_list(seq)
+  | Stage(seq) -> Seq.to_list(seq)
   end
 end
 
 doc "Run the pipeline for side effects; discard all items."
 fn run(stage) do
   match stage do
-  Stage(seq) -> Seq.each(seq, fn _ -> ())
+  | Stage(seq) -> Seq.each(seq, fn _ -> ())
   end
 end
 
 doc "Reduce all items to a single value using f(accumulator, item) -> accumulator."
 fn reduce(stage, start, f) do
   match stage do
-  Stage(seq) -> Seq.fold(seq, start, f)
+  | Stage(seq) -> Seq.fold(seq, start, f)
   end
 end
 
@@ -156,35 +156,35 @@ end
 doc "Run f on each item for its side effects."
 fn each(stage, f) do
   match stage do
-  Stage(seq) -> Seq.each(seq, f)
+  | Stage(seq) -> Seq.each(seq, f)
   end
 end
 
 doc "Count the total number of items produced."
 fn count(stage) do
   match stage do
-  Stage(seq) -> Seq.count(seq)
+  | Stage(seq) -> Seq.count(seq)
   end
 end
 
 doc "Return the first item satisfying pred, or None."
 fn find(stage, pred) do
   match stage do
-  Stage(seq) -> Seq.find(seq, pred)
+  | Stage(seq) -> Seq.find(seq, pred)
   end
 end
 
 doc "True if any item satisfies pred."
 fn any(stage, pred) do
   match stage do
-  Stage(seq) -> Seq.any(seq, pred)
+  | Stage(seq) -> Seq.any(seq, pred)
   end
 end
 
 doc "True if all items satisfy pred."
 fn all(stage, pred) do
   match stage do
-  Stage(seq) -> Seq.all(seq, pred)
+  | Stage(seq) -> Seq.all(seq, pred)
   end
 end
 

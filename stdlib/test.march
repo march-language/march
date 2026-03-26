@@ -49,32 +49,32 @@ mod Test do
   doc "Assert an Option is Some and return the inner value."
   fn assert_some(opt : Option(a), msg : String) : a do
     match opt do
-    Some(x) -> x
-    None    -> panic("Assertion failed: expected Some but got None — " ++ msg)
+    | Some(x) -> x
+    | None    -> panic("Assertion failed: expected Some but got None — " ++ msg)
     end
   end
 
   doc "Assert an Option is None."
   fn assert_none(opt : Option(a), msg : String) : Unit do
     match opt do
-    None    -> ()
-    Some(_) -> panic("Assertion failed: expected None but got Some — " ++ msg)
+    | None    -> ()
+    | Some(_) -> panic("Assertion failed: expected None but got Some — " ++ msg)
     end
   end
 
   doc "Assert a Result is Ok and return the inner value."
   fn assert_ok(res : Result(a, e), msg : String) : a do
     match res do
-    Ok(x)  -> x
-    Err(_) -> panic("Assertion failed: expected Ok but got Err — " ++ msg)
+    | Ok(x)  -> x
+    | Err(_) -> panic("Assertion failed: expected Ok but got Err — " ++ msg)
     end
   end
 
   doc "Assert a Result is Err and return the error value."
   fn assert_err(res : Result(a, e), msg : String) : e do
     match res do
-    Err(e) -> e
-    Ok(_)  -> panic("Assertion failed: expected Err but got Ok — " ++ msg)
+    | Err(e) -> e
+    | Ok(_)  -> panic("Assertion failed: expected Err but got Ok — " ++ msg)
     end
   end
 

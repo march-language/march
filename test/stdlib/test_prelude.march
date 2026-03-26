@@ -87,17 +87,17 @@ end
 describe "fold_left" do
   test "fold_left sums a list" do
     let xs = Cons(1, Cons(2, Cons(3, Cons(4, Nil))))
-    assert (fold_left(0, xs, fn (acc, x) -> acc + x) == 10)
+    | assert (fold_left(0, xs, fn (acc, x) -> acc + x) == 10)
   end
 
   test "fold_left on empty list returns accumulator" do
     let empty_ints : List(Int) = Nil
-    assert (fold_left(0, empty_ints, fn (acc, x) -> acc + x) == 0)
+    | assert (fold_left(0, empty_ints, fn (acc, x) -> acc + x) == 0)
   end
 
   test "fold_left computes product" do
     let xs = Cons(1, Cons(2, Cons(3, Nil)))
-    assert (fold_left(1, xs, fn (acc, x) -> acc * x) == 6)
+    | assert (fold_left(1, xs, fn (acc, x) -> acc * x) == 6)
   end
 end
 
@@ -111,12 +111,12 @@ describe "filter" do
 
   test "filter with no passing elements gives empty list" do
     let xs = Cons(1, Cons(3, Cons(5, Nil)))
-    assert is_nil(filter(xs, fn x -> x % 2 == 0))
+    | assert is_nil(filter(xs, fn x -> x % 2 == 0))
   end
 
   test "filter where all pass keeps all elements" do
     let xs = Cons(2, Cons(4, Cons(6, Nil)))
-    assert (length(filter(xs, fn x -> x % 2 == 0)) == 3)
+    | assert (length(filter(xs, fn x -> x % 2 == 0)) == 3)
   end
 end
 
@@ -130,7 +130,7 @@ describe "map" do
 
   test "map over empty list gives empty list" do
     let empty_ints : List(Int) = Nil
-    assert is_nil(map(empty_ints, fn x -> x * 2))
+    | assert is_nil(map(empty_ints, fn x -> x * 2))
   end
 end
 

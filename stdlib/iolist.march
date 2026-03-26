@@ -63,11 +63,11 @@ mod IOList do
   """
   fn append(a : IOList, b : IOList) : IOList do
     match a do
-    Empty -> b
-    _ ->
+    | Empty -> b
+    | _ ->
       match b do
-      Empty -> a
-      _ -> Segments(Cons(a, Cons(b, Nil)))
+      | Empty -> a
+      | _ -> Segments(Cons(a, Cons(b, Nil)))
       end
     end
   end
@@ -107,13 +107,13 @@ mod IOList do
   fn from_strings(xs : List(String)) : IOList do
     fn map_strings(ys : List(String)) : List(IOList) do
       match ys do
-      Nil        -> Nil
-      Cons(s, t) -> Cons(Str(s), map_strings(t))
+      | Nil        -> Nil
+      | Cons(s, t) -> Cons(Str(s), map_strings(t))
       end
     end
     match xs do
-    Nil -> Empty
-    _   -> Segments(map_strings(xs))
+    | Nil -> Empty
+    | _   -> Segments(map_strings(xs))
     end
   end
 
@@ -134,20 +134,20 @@ mod IOList do
     -- Must be defined before collect_list which calls it.
     fn list_append(a : List(String), b : List(String)) : List(String) do
       match a do
-      Nil        -> b
-      Cons(h, t) -> Cons(h, list_append(t, b))
+      | Nil        -> b
+      | Cons(h, t) -> Cons(h, list_append(t, b))
       end
     end
     -- collect_list: flatten a List(IOList) to a forward List(String).
     -- Defined before collect so collect can call it.
     fn collect_list(nodes : List(IOList)) : List(String) do
       match nodes do
-      Nil        -> Nil
-      Cons(h, t) -> do
+      | Nil        -> Nil
+      | Cons(h, t) -> do
         let parts = match h do
-          Empty        -> Nil
-          Str(s)       -> Cons(s, Nil)
-          Segments(ys) -> collect_list(ys)
+          | Empty        -> Nil
+          | Str(s)       -> Cons(s, Nil)
+          | Segments(ys) -> collect_list(ys)
           end
         list_append(parts, collect_list(t))
       end
@@ -156,9 +156,9 @@ mod IOList do
     -- collect: flatten one IOList node to a List(String).
     fn collect(node : IOList) : List(String) do
       match node do
-      Empty        -> Nil
-      Str(s)       -> Cons(s, Nil)
-      Segments(xs) -> collect_list(xs)
+      | Empty        -> Nil
+      | Str(s)       -> Cons(s, Nil)
+      | Segments(xs) -> collect_list(xs)
       end
     end
     string_join(collect(iol), "")
@@ -176,21 +176,21 @@ mod IOList do
   fn byte_size(iol : IOList) : Int do
     fn size_list(nodes : List(IOList)) : Int do
       match nodes do
-      Nil        -> 0
-      Cons(h, t) -> do
+      | Nil        -> 0
+      | Cons(h, t) -> do
         let hs = match h do
-          Empty        -> 0
-          Str(s)       -> string_byte_length(s)
-          Segments(ys) -> size_list(ys)
+          | Empty        -> 0
+          | Str(s)       -> string_byte_length(s)
+          | Segments(ys) -> size_list(ys)
           end
         hs + size_list(t)
       end
       end
     end
     match iol do
-    Empty        -> 0
-    Str(s)       -> string_byte_length(s)
-    Segments(xs) -> size_list(xs)
+    | Empty        -> 0
+    | Str(s)       -> string_byte_length(s)
+    | Segments(xs) -> size_list(xs)
     end
   end
 
@@ -206,21 +206,21 @@ mod IOList do
   fn is_empty(iol : IOList) : Bool do
     fn all_empty_list(nodes : List(IOList)) : Bool do
       match nodes do
-      Nil        -> true
-      Cons(h, t) -> do
+      | Nil        -> true
+      | Cons(h, t) -> do
         let he = match h do
-          Empty        -> true
-          Str(s)       -> string_is_empty(s)
-          Segments(ys) -> all_empty_list(ys)
+          | Empty        -> true
+          | Str(s)       -> string_is_empty(s)
+          | Segments(ys) -> all_empty_list(ys)
           end
         he && all_empty_list(t)
       end
       end
     end
     match iol do
-    Empty        -> true
-    Str(s)       -> string_is_empty(s)
-    Segments(xs) -> all_empty_list(xs)
+    | Empty        -> true
+    | Str(s)       -> string_is_empty(s)
+    | Segments(xs) -> all_empty_list(xs)
     end
   end
 
