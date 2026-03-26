@@ -44,34 +44,16 @@
 
 mod ChannelServer do
 
--- ── Internal message types ─────────────────────────────────────────────────
-
--- Messages that a channel process can receive in its mailbox.
--- These are the variants an actor's `on` handlers should match.
-type ChannelMailbox =
-  ChannelIn(String, String, String)          -- (ref, event, payload_json)
-  | ChannelBroadcast(String, String, String) -- (topic, event, payload_json)
-  | ChannelBroadcastFrom(String, Int, String, String)
-    -- (topic, excl_pid, event, payload_json)
-  | ChannelPush(String, String)              -- (event, payload_json)
-  | ChannelLeave(String)                     -- (reason_string)
-  | ChannelStop
-
--- ── PubSub messages ────────────────────────────────────────────────────────
-
--- Messages that a PubSub shard actor can receive.
-type PubSubMsg =
-  PubSubSubscribe(String, Int)               -- (topic, subscriber_pid)
-  | PubSubUnsubscribe(String, Int)           -- (topic, subscriber_pid)
-  | PubSubBroadcast(String, Any, String, String)
-    -- (topic, excluded_opt, event, payload_json)
+-- ── Message types ──────────────────────────────────────────────────────────
+-- ChannelMailbox, PubSubMsg, and BroadcastMsg are defined in channel.march
+-- and available here as Channel.ChannelMailbox etc.
 
 -- ── JoinResult ────────────────────────────────────────────────────────────
 
 -- Result of a channel join attempt.
 --   JoinOk(state)     — join accepted; state is the handler's initial state
 --   JoinErr(reason)   — join rejected with a reason string
-type JoinResult = JoinOk(Any) | JoinErr(String)
+type JoinResult(a) = JoinOk(a) | JoinErr(String)
 
 -- ── Channel configuration ──────────────────────────────────────────────────
 
@@ -82,12 +64,12 @@ type JoinResult = JoinOk(Any) | JoinErr(String)
 --   handle_info_fn — fn(msg, state, socket) -> HandleResult
 --   leave_fn       — fn(reason, state, socket) -> Unit
 --   pubsub_shard   — pid of the PubSub shard actor for this topic
-type ChannelConfig = ChannelConfig(
-  Any,  -- socket (Channel.Socket)
-  Any,  -- join_fn
-  Any,  -- handle_in_fn
-  Any,  -- handle_info_fn
-  Any,  -- leave_fn
+type ChannelConfig(a, b, c, d, e) = ChannelConfig(
+  a,    -- socket (Channel.Socket)
+  b,    -- join_fn
+  c,    -- handle_in_fn
+  d,    -- handle_info_fn
+  e,    -- leave_fn
   Int   -- pubsub_shard_pid
 )
 

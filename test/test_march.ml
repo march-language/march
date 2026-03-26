@@ -16465,9 +16465,9 @@ let test_df_train_test_split () =
 let test_df_col_add_float () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let col = FloatCol("p", [1.0, 2.0, 3.0])
+      let col = FloatCol("p", typed_array_from_list([1.0, 2.0, 3.0]))
       match DataFrame.col_add_float(col, 10.0) do
-      Ok(FloatCol(_, data)) -> float_to_int(List.nth(data, 0))
+      Ok(FloatCol(_, data)) -> float_to_int(typed_array_get(data, 0))
       _ -> -1
       end
     end
@@ -16477,9 +16477,9 @@ let test_df_col_add_float () =
 let test_df_col_mul_float () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let col = IntCol("q", [2, 4, 6])
+      let col = IntCol("q", typed_array_from_list([2, 4, 6]))
       match DataFrame.col_mul_float(col, 3.0) do
-      Ok(FloatCol(_, data)) -> float_to_int(List.nth(data, 1))
+      Ok(FloatCol(_, data)) -> float_to_int(typed_array_get(data, 1))
       _ -> -1
       end
     end

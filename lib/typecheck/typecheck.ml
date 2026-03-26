@@ -983,7 +983,7 @@ let builtin_bindings : (string * scheme) list =
           t_result (TCon ("Seq", [a])) e))));
     (* Actor self/receive builtins — 0-arg: foo() parses as EApp(f,[])
        so infer_app returns the type directly without unwrapping TArrow *)
-    ("self",    poly1 (fun a -> TCon ("Pid", [a])));
+    ("self",    Mono t_int);
     ("receive", poly1 (fun a -> a));
     (* Crypto / encoding builtins *)
     ("sha256",          Mono (TArrow (TCon ("Bytes", []), TCon ("Bytes", []))));
@@ -1066,6 +1066,25 @@ let builtin_bindings : (string * scheme) list =
         TArrow (t_list a, TCon ("TypedArray", [a]))));
     ("typed_array_to_list",  poly1 (fun a ->
         TArrow (TCon ("TypedArray", [a]), t_list a)));
+    (* TLS builtins — tls_client_ctx, tls_server_ctx, etc. *)
+    ("tls_client_ctx",       poly1 (fun e ->
+        TArrow (t_string, TArrow (t_list t_string, TArrow (t_int, TArrow (t_int,
+          t_result t_int e))))));
+    ("tls_server_ctx",       poly1 (fun e ->
+        TArrow (t_string, TArrow (t_string, TArrow (t_string, TArrow (t_list t_string,
+          TArrow (t_int, t_result t_int e)))))));
+    ("tls_connect",          poly1 (fun e ->
+        TArrow (t_int, TArrow (t_int, TArrow (t_string, t_result t_int e)))));
+    ("tls_accept",           poly1 (fun e ->
+        TArrow (t_int, TArrow (t_int, t_result t_int e))));
+    ("tls_read",             poly1 (fun e ->
+        TArrow (t_int, TArrow (t_int, t_result t_string e))));
+    ("tls_write",            poly1 (fun e ->
+        TArrow (t_int, TArrow (t_string, t_result t_int e))));
+    ("tls_close",            Mono (TArrow (t_int, t_unit)));
+    ("tls_ctx_free",         Mono (TArrow (t_int, t_unit)));
+    ("tls_negotiated_alpn",  Mono (TArrow (t_int, t_option t_string)));
+    ("tls_peer_cn",          Mono (TArrow (t_int, t_option t_string)));
   ]
 
 let builtin_types : (string * int) list =
