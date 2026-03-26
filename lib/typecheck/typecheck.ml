@@ -981,6 +981,20 @@ let builtin_bindings : (string * scheme) list =
     ("process_spawn_lines", poly2 (fun a e ->
         TArrow (t_string, TArrow (t_list t_string,
           t_result (TCon ("Seq", [a])) e))));
+    (* Actor self/receive builtins — 0-arg: foo() parses as EApp(f,[])
+       so infer_app returns the type directly without unwrapping TArrow *)
+    ("self",    poly1 (fun a -> TCon ("Pid", [a])));
+    ("receive", poly1 (fun a -> a));
+    (* Crypto / encoding builtins *)
+    ("sha256",          Mono (TArrow (TCon ("Bytes", []), TCon ("Bytes", []))));
+    ("hmac_sha256",     Mono (TArrow (TCon ("Bytes", []), TArrow (TCon ("Bytes", []),
+        TCon ("Bytes", [])))));
+    ("pbkdf2_sha256",   Mono (TArrow (t_string, TArrow (TCon ("Bytes", []),
+        TArrow (t_int, TArrow (t_int,
+        TCon ("Bytes", [])))))));
+    ("base64_encode",   Mono (TArrow (TCon ("Bytes", []), t_string)));
+    ("base64_decode",   Mono (TArrow (t_string, TCon ("Bytes", []))));
+    ("random_bytes",    Mono (TArrow (t_int, TCon ("Bytes", []))));
   ]
 
 let builtin_types : (string * int) list =

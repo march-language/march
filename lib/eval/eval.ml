@@ -3169,45 +3169,52 @@ let base_env : env =
         | [VString s] ->
           VString (Digestif.MD5.(to_hex (digest_string s)))
         | _ -> eval_error "md5(s: String): String"))
-    (* ---- SHA-256 hash (hex string output) ---- *)
+    (* ---- SHA-256 hash (raw bytes output) ---- *)
   ; ("sha256", VBuiltin ("sha256", function
         | [v] ->
           (match march_val_to_raw v with
-           | Ok s -> VString (Digestif.SHA256.(to_hex (digest_string s)))
+           | Ok s -> march_bytes_of_string Digestif.SHA256.(to_raw_string (digest_string s))
            | Error e -> eval_error "sha256: %s" e)
-        | _ -> eval_error "sha256(s: String | Bytes): String"))
-    (* ---- HMAC-SHA-256: returns Bytes ---- *)
+        | _ -> eval_error "sha256(s: Bytes): Bytes"))
+    (* ---- HMAC-SHA-256: returns raw Bytes ---- *)
   ; ("hmac_sha256", VBuiltin ("hmac_sha256", function
         | [key_v; msg_v] ->
           (match march_val_to_raw key_v, march_val_to_raw msg_v with
            | Ok key, Ok msg ->
-             let raw = Digestif.SHA256.(to_raw_string (hmac_string ~key msg)) in
-             VCon ("Ok", [march_bytes_of_string raw])
-           | Error e, _ | _, Error e -> VCon ("Err", [VString e]))
-        | _ -> eval_error "hmac_sha256(key, msg): Result(Bytes, String)"))
-    (* ---- PBKDF2-HMAC-SHA256: returns Bytes ---- *)
+             march_bytes_of_string Digestif.SHA256.(to_raw_string (hmac_string ~key msg))
+           | Error e, _ | _, Error e -> eval_error "hmac_sha256: %s" e)
+        | _ -> eval_error "hmac_sha256(key: Bytes, msg: Bytes): Bytes"))
+    (* ---- PBKDF2-HMAC-SHA256: returns raw Bytes ---- *)
   ; ("pbkdf2_sha256", VBuiltin ("pbkdf2_sha256", function
         | [pwd_v; salt_v; VInt iters; VInt dklen] ->
           (match march_val_to_raw pwd_v, march_val_to_raw salt_v with
            | Ok password, Ok salt ->
-             let raw = pbkdf2_hmac_sha256 ~password ~salt ~iterations:iters ~dklen in
-             VCon ("Ok", [march_bytes_of_string raw])
-           | Error e, _ | _, Error e -> VCon ("Err", [VString e]))
-        | _ -> eval_error "pbkdf2_sha256(password, salt, iterations, dklen): Result(Bytes, String)"))
-    (* ---- Base64 encode: String or Bytes -> String ---- *)
+             march_bytes_of_string (pbkdf2_hmac_sha256 ~password ~salt ~iterations:iters ~dklen)
+           | Error e, _ | _, Error e -> eval_error "pbkdf2_sha256: %s" e)
+        | _ -> eval_error "pbkdf2_sha256(password: String, salt: Bytes, iterations: Int, dklen: Int): Bytes"))
+    (* ---- Base64 encode: Bytes -> String ---- *)
   ; ("base64_encode", VBuiltin ("base64_encode", function
         | [v] ->
           (match march_val_to_raw v with
            | Ok s -> VString (base64_encode s)
            | Error e -> eval_error "base64_encode: %s" e)
-        | _ -> eval_error "base64_encode(s: String | Bytes): String"))
-    (* ---- Base64 decode: String -> Result(Bytes, String) ---- *)
+        | _ -> eval_error "base64_encode(s: Bytes): String"))
+    (* ---- Base64 decode: String -> Bytes ---- *)
   ; ("base64_decode", VBuiltin ("base64_decode", function
         | [VString s] ->
           (match base64_decode s with
-           | Ok raw -> VCon ("Ok", [march_bytes_of_string raw])
-           | Error e -> VCon ("Err", [VString e]))
-        | _ -> eval_error "base64_decode(s: String): Result(Bytes, String)"))
+           | Ok raw -> march_bytes_of_string raw
+           | Error e -> eval_error "base64_decode: %s" e)
+        | _ -> eval_error "base64_decode(s: String): Bytes"))
+    (* ---- random_bytes(n): generate n random bytes ---- *)
+  ; ("random_bytes", VBuiltin ("random_bytes", function
+        | [VInt n] ->
+          let buf = Bytes.create n in
+          for i = 0 to n - 1 do
+            Bytes.set buf i (Char.chr (Random.int 256))
+          done;
+          march_bytes_of_string (Bytes.to_string buf)
+        | _ -> eval_error "random_bytes(n: Int): Bytes"))
   ; ("tcp_recv_http", VBuiltin ("tcp_recv_http", function
         | [VInt fd; VInt max_bytes] ->
           (* Read an HTTP response on a keep-alive connection:
