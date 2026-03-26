@@ -1,6 +1,6 @@
 # WebAssembly Target
 
-## Status: Not Started (Assessment Only)
+## Status: Tier 1 Complete (code changes done; awaiting wasi-sdk + wasmtime for end-to-end test)
 
 ## Overview
 
@@ -38,17 +38,33 @@ The C runtime (`runtime/march_runtime.c` ~2,000 lines, `runtime/march_http.c` ~1
 
 ## Implementation tiers
 
-### Tier 1 — Pure compute (~1 week)
+### Tier 1 — Pure compute ✅ (code complete; end-to-end pending toolchain install)
 
 Get pure functional March programs compiling to WASM. No actors, no networking, no file I/O.
 
-- Parameterize target triple in `llvm_emit.ml`.
-- Compile runtime with wasi-sdk (`clang --target=wasm32-wasi --sysroot=…`).
-- `#ifdef` out pthreads, networking, file ops (or provide stubs that panic).
-- Fix pointer-size assumptions or use wasm64.
-- Test with `wasmtime` / `wasmer`.
+**Implemented:**
+- `lib/tir/llvm_emit.ml`: `target_config` type (`Native | Wasm64Wasi | Wasm32Wasi | Wasm32Unknown`).
+  `emit_preamble` and `emit_module` accept `~target`; triple is dynamic.
+  `@march_tls_reductions` emitted as plain global (not `thread_local`) for WASM targets.
+- `bin/main.ml`: `--target wasm64-wasi | wasm32-wasi | wasm32-unknown-unknown | native`.
+  Detects wasi-sdk via `WASI_SDK_PATH` or `/opt/wasi-sdk`; outputs `.wasm`; skips HTTP/scheduler C files; passes `-DMARCH_WASM`.
+- `runtime/march_runtime.c`: `#ifndef MARCH_WASM` guards around `pthread.h`, `march_scheduler.h`, and the entire actor/capability section.
+  `#else` section provides no-op / panic stubs for all actor API functions.
+- `test/wasm_tier1.march`: smoke test covering arithmetic, fib, closures, variants, Option, strings, RC list traversal.
+- `runtime/build_wasm.sh`: standalone script to build runtime .o and compile+run a `.march` file via wasi-sdk.
 
-What works: arithmetic, strings, closures, pattern matching, variants, records, Perceus RC, TCO, all pure stdlib.
+**Verified:** `--emit-llvm --target wasm64-wasi` emits correct triple; `@march_tls_reductions` is plain global; all 50 native tests still pass.
+
+**Pending:** Install wasi-sdk + wasmtime to run the end-to-end test:
+```sh
+brew install wasi-sdk wasmtime
+./runtime/build_wasm.sh test/wasm_tier1.march
+# or:
+march --compile --target wasm64-wasi test/wasm_tier1.march
+wasmtime --wasm memory64 wasm_tier1.wasm
+```
+
+What works in Tier 1: arithmetic, strings, closures, pattern matching, variants, records, Perceus RC, TCO, all pure stdlib.
 
 ### Tier 2 — WASI CLI programs (~2–3 weeks)
 
@@ -69,12 +85,19 @@ Actor concurrency is the hard problem. Options:
 
 Recommendation: option 1 (cooperative scheduler) is the most portable and aligns with March's actor semantics. Real parallelism can come later when WASI-threads stabilizes.
 
-### Tier 4 — Browser target (additional ~2–3 weeks on top of Tier 1–3)
+### Tier 4 — Browser target / JS interop (additional ~2–3 weeks on top of Tier 1–3)
 
-- Emit JS glue code for imports/exports.
-- DOM interop via extern declarations.
-- Asset pipeline (`.wasm` + `.js` loader).
-- This is a separate effort from WASI and would likely need a `--target wasm32-unknown-unknown` path.
+**Goal:** Compile March FE code to WASM for use in browsers with JS interop.
+
+The `wasm32-unknown-unknown` target is already wired in (`--target wasm32-unknown-unknown`).
+Remaining work:
+
+- Emit JS glue code for imports/exports (a `march_glue.js` sidecar generated alongside `.wasm`).
+- `extern` declarations for JS imports: `extern fn alert(msg : String) : Unit = "alert"`.
+- DOM interop via extern declarations (or a `dom.march` stdlib module).
+- Asset pipeline (`.wasm` + `.js` loader, `<script type="module">` integration).
+- `wasm-bindgen`-style marshalling for complex types (strings, closures across the boundary).
+- Note: `wasm32-unknown-unknown` has no OS; file I/O and networking must come from JS imports.
 
 ## Dependencies
 

@@ -196,6 +196,7 @@ let opt_enabled    = ref true
 let fast_math      = ref false
 let opt_level      = ref (-1)   (* -1 = not set; 0..3 = explicit clang -ON *)
 let do_fmt         = ref false   (* --fmt: format source before compiling *)
+let wasm_target    = ref "native" (* --target: native | wasm64-wasi | wasm32-wasi | wasm32-unknown-unknown *)
 
 (* ------------------------------------------------------------------ *)
 (* Formatter helpers                                                   *)
@@ -751,9 +752,18 @@ let compile filename =
     end else begin
       let basename = Filename.remove_extension filename in
       let ll_file  = basename ^ ".ll" in
+      (* Parse the --target flag into a typed config *)
+      let tgt = match !wasm_target with
+        | "wasm64-wasi"           -> March_tir.Llvm_emit.Wasm64Wasi
+        | "wasm32-wasi"           -> March_tir.Llvm_emit.Wasm32Wasi
+        | "wasm32-unknown-unknown" -> March_tir.Llvm_emit.Wasm32Unknown
+        | "native" | _            -> March_tir.Llvm_emit.Native
+      in
+      let is_wasm = tgt <> March_tir.Llvm_emit.Native in
       if !do_compile then begin
         let out_bin =
           if !output_file <> "" then !output_file
+          else if is_wasm then basename ^ ".wasm"
           else basename
         in
         (* CAS: check for a cached binary before running clang *)
@@ -762,14 +772,14 @@ let compile filename =
         let mod_hash = String.concat "" (List.map March_cas.Pipeline.scc_impl_hash h_sccs) in
         let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
         let cas_flags = [if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt"] in
-        let ch = March_cas.Cas.compilation_hash mod_hash ~target:"native" ~flags:cas_flags in
+        let ch = March_cas.Cas.compilation_hash mod_hash ~target:!wasm_target ~flags:cas_flags in
         (match March_cas.Cas.lookup_artifact store ch with
         | Some cached_bin ->
           let _ = Sys.command (Printf.sprintf "cp %s %s" cached_bin out_bin) in
           Printf.eprintf "compiled %s (cached)\n" out_bin
         | None ->
           (* Cache miss: emit LLVM IR, call clang, then cache the binary *)
-          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math tir in
+          let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~target:tgt tir in
           let oc = open_out ll_file in
           output_string oc ir;
           close_out oc;
@@ -787,29 +797,56 @@ let compile filename =
           in
           let opt_flag = Printf.sprintf " -O%d" effective_opt in
           let runtime_dir = Filename.dirname runtime in
-          let http_c = Filename.concat runtime_dir "march_http.c" in
-          let extra_c_files =
-            if Sys.file_exists http_c then
-              let sha1_c    = Filename.concat runtime_dir "sha1.c" in
-              let base64_c  = Filename.concat runtime_dir "base64.c" in
-              let simd_c    = Filename.concat runtime_dir "march_http_parse_simd.c" in
-              let sched_c   = Filename.concat runtime_dir "march_scheduler.c" in
-              let resp_c    = Filename.concat runtime_dir "march_http_response.c" in
-              let io_c      = Filename.concat runtime_dir "march_http_io.c" in
-              let evloop_c  = Filename.concat runtime_dir "march_http_evloop.c" in
-              let opt_file f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
-              Printf.sprintf " %s %s %s%s%s%s%s%s" http_c sha1_c base64_c
-                (opt_file simd_c) (opt_file sched_c) (opt_file resp_c)
-                (opt_file io_c) (opt_file evloop_c)
-            else ""
+          let cmd =
+            if is_wasm then begin
+              (* WASM build: use wasi-sdk clang; skip HTTP/scheduler files *)
+              let wasi_sdk =
+                match Sys.getenv_opt "WASI_SDK_PATH" with
+                | Some p -> p
+                | None ->
+                  if Sys.file_exists "/opt/wasi-sdk" then "/opt/wasi-sdk"
+                  else begin
+                    Printf.eprintf
+                      "march: wasi-sdk not found.\n\
+                       Install with: brew install wasi-sdk\n\
+                       or download from https://github.com/WebAssembly/wasi-sdk/releases\n\
+                       or set WASI_SDK_PATH=/path/to/wasi-sdk\n";
+                    exit 1
+                  end
+              in
+              let wasi_clang = Filename.concat wasi_sdk "bin/clang" in
+              let triple     = March_tir.Llvm_emit.target_triple tgt in
+              let sysroot    = Filename.concat wasi_sdk "share/wasi-sysroot" in
+              Printf.sprintf
+                "%s --target=%s --sysroot=%s%s -DMARCH_WASM \
+                 -Wno-unused-command-line-argument %s %s -o %s"
+                wasi_clang triple sysroot opt_flag runtime ll_file out_bin
+            end else begin
+              let http_c = Filename.concat runtime_dir "march_http.c" in
+              let extra_c_files =
+                if Sys.file_exists http_c then
+                  let sha1_c    = Filename.concat runtime_dir "sha1.c" in
+                  let base64_c  = Filename.concat runtime_dir "base64.c" in
+                  let simd_c    = Filename.concat runtime_dir "march_http_parse_simd.c" in
+                  let sched_c   = Filename.concat runtime_dir "march_scheduler.c" in
+                  let resp_c    = Filename.concat runtime_dir "march_http_response.c" in
+                  let io_c      = Filename.concat runtime_dir "march_http_io.c" in
+                  let evloop_c  = Filename.concat runtime_dir "march_http_evloop.c" in
+                  let opt_file f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
+                  Printf.sprintf " %s %s %s%s%s%s%s%s" http_c sha1_c base64_c
+                    (opt_file simd_c) (opt_file sched_c) (opt_file resp_c)
+                    (opt_file io_c) (opt_file evloop_c)
+                else ""
+              in
+              let evloop_flag =
+                let evloop_c = Filename.concat runtime_dir "march_http_evloop.c" in
+                if Sys.file_exists evloop_c then " -DMARCH_HTTP_USE_EVLOOP" else ""
+              in
+              Printf.sprintf
+                "clang%s -msse4.2 -Wno-unused-command-line-argument%s %s%s %s -o %s"
+                opt_flag evloop_flag runtime extra_c_files ll_file out_bin
+            end
           in
-          let evloop_flag =
-            let evloop_c = Filename.concat runtime_dir "march_http_evloop.c" in
-            if Sys.file_exists evloop_c then " -DMARCH_HTTP_USE_EVLOOP" else ""
-          in
-          let cmd = Printf.sprintf
-            "clang%s -msse4.2 -Wno-unused-command-line-argument%s %s%s %s -o %s"
-            opt_flag evloop_flag runtime extra_c_files ll_file out_bin in
           let rc = Sys.command cmd in
           if rc <> 0 then begin
             Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
@@ -819,7 +856,7 @@ let compile filename =
           end)
       end else begin
         (* --emit-llvm only: write IR and exit *)
-        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math tir in
+        let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~target:tgt tir in
         let oc = open_out ll_file in
         output_string oc ir;
         close_out oc;
@@ -949,6 +986,8 @@ let () =
     ("--debug",     Arg.Set debug_mode,     " Enable time-travel debugger (simple mode)");
     ("--debug-tui", Arg.Set debug_tui_mode, " Enable time-travel debugger (TUI mode)");
     ("--fmt",       Arg.Set do_fmt,         " Format source file in-place before compiling");
+    ("--target",    Arg.Set_string wasm_target,
+                    "<target>  Compilation target: native (default), wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown");
   ] in
   Arg.parse specs (fun f -> files := f :: !files) "Usage: march [options] [file.march]";
   match !files with
