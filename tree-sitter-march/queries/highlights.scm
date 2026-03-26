@@ -30,6 +30,11 @@
 (atom_literal) @label
 (atom) @label
 
+; Sigil expressions — prefix (~H, ~R, etc.) highlighted as keyword, content as string.special
+(sigil_expression prefix: (sigil_prefix) @keyword)
+(sigil_expression content: (string) @string.special)
+(sigil_expression content: (triple_string) @string.special)
+
 ; Typed holes
 (typed_hole) @string.special
 
