@@ -15971,6 +15971,625 @@ let test_crypto_base64_roundtrip () =
      Alcotest.(check string) "base64 roundtrip" orig raw
    | _ -> Alcotest.fail "expected Ok(Bytes)")
 
+(* ── DataFrame stdlib tests ──────────────────────────────────────────────── *)
+
+let list_decl_df = lazy (load_stdlib_file_for_test "list.march")
+let hamt_decl    = lazy (load_stdlib_file_for_test "hamt.march")
+let map_decl_df  = lazy (load_stdlib_file_for_test "map.march")
+let stats_decl   = lazy (load_stdlib_file_for_test "stats.march")
+let df_decl      = lazy (load_stdlib_file_for_test "dataframe.march")
+
+let eval_with_dataframe src =
+  eval_with_stdlib [
+    Lazy.force list_decl_df;
+    Lazy.force hamt_decl;
+    Lazy.force map_decl_df;
+    Lazy.force stats_decl;
+    Lazy.force df_decl;
+  ] src
+
+(* ── Construction ── *)
+
+let test_df_empty_row_count () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do DataFrame.row_count(DataFrame.empty()) end
+  end|} in
+  Alcotest.(check int) "empty df row_count = 0" 0 (vint (call_fn env "f" []))
+
+let test_df_make_df_row_count () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x", [1, 2, 3])])
+      DataFrame.row_count(df)
+    end
+  end|} in
+  Alcotest.(check int) "make_df row_count = 3" 3 (vint (call_fn env "f" []))
+
+let test_df_make_df_col_count () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("a", [1,2]), FloatCol("b", [3.0, 4.0])])
+      DataFrame.col_count(df)
+    end
+  end|} in
+  Alcotest.(check int) "make_df col_count = 2" 2 (vint (call_fn env "f" []))
+
+let test_df_from_columns_ok () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      match DataFrame.from_columns([IntCol("x", [1,2,3]), StrCol("y", ["a","b","c"])]) do
+      | Ok(df) -> DataFrame.row_count(df)
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "from_columns ok row_count = 3" 3 (vint (call_fn env "f" []))
+
+let test_df_from_columns_err_mismatch () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      match DataFrame.from_columns([IntCol("x", [1,2]), IntCol("y", [3,4,5])]) do
+      | Ok(_)  -> false
+      | Err(_) -> true
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "from_columns length mismatch = Err" true (vbool (call_fn env "f" []))
+
+let test_df_from_rows () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      match DataFrame.from_rows([
+        Row([("id", IntVal(1)), ("name", StrVal("alice"))]),
+        Row([("id", IntVal(2)), ("name", StrVal("bob"))])
+      ]) do
+      | Ok(df) -> DataFrame.row_count(df)
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "from_rows row_count = 2" 2 (vint (call_fn env "f" []))
+
+(* ── Schema / column access ── *)
+
+let test_df_schema_length () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("a",[1]), StrCol("b",["x"]), FloatCol("c",[1.0])])
+      List.length(DataFrame.schema(df))
+    end
+  end|} in
+  Alcotest.(check int) "schema length = 3" 3 (vint (call_fn env "f" []))
+
+let test_df_get_column_ok () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("score", [10, 20, 30])])
+      match DataFrame.get_column(df, "score") do
+      | Ok(col) -> DataFrame.col_len(col)
+      | Err(_)  -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "get_column found col_len = 3" 3 (vint (call_fn env "f" []))
+
+let test_df_get_column_missing () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x", [1,2])])
+      match DataFrame.get_column(df, "missing") do
+      | Ok(_)  -> false
+      | Err(_) -> true
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "get_column missing = Err" true (vbool (call_fn env "f" []))
+
+let test_df_add_column () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x", [1,2,3])])
+      match DataFrame.add_column(df, IntCol("y", [4,5,6])) do
+      | Ok(df2) -> DataFrame.col_count(df2)
+      | Err(_)  -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "add_column col_count = 2" 2 (vint (call_fn env "f" []))
+
+let test_df_drop_column () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x",[1,2]), IntCol("y",[3,4]), IntCol("z",[5,6])])
+      let df2 = DataFrame.drop_column(df, "y")
+      DataFrame.col_count(df2)
+    end
+  end|} in
+  Alcotest.(check int) "drop_column col_count = 2" 2 (vint (call_fn env "f" []))
+
+(* ── head / tail / slice ── *)
+
+let test_df_head () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x", [1,2,3,4,5])])
+      DataFrame.row_count(DataFrame.head(df, 3))
+    end
+  end|} in
+  Alcotest.(check int) "head(3) row_count = 3" 3 (vint (call_fn env "f" []))
+
+let test_df_tail () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x", [1,2,3,4,5])])
+      DataFrame.row_count(DataFrame.tail(df, 2))
+    end
+  end|} in
+  Alcotest.(check int) "tail(2) row_count = 2" 2 (vint (call_fn env "f" []))
+
+let test_df_slice_value () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x", [10,20,30,40,50])])
+      let s  = DataFrame.slice(df, 1, 3)
+      match DataFrame.get_int_col(s, "x") do
+      | Ok(xs) -> List.nth(xs, 0)
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "slice(1,3) first element = 20" 20 (vint (call_fn env "f" []))
+
+(* ── LazyFrame / Plan ── *)
+
+let test_df_lazy_filter () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x", [1,2,3,4,5])])
+      let lf = DataFrame.lazy(df) |> DataFrame.filter(Gt(Col("x"), LitInt(3)))
+      match DataFrame.collect(lf) do
+      | Ok(df2) -> DataFrame.row_count(df2)
+      | Err(_)  -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "filter x>3 row_count = 2" 2 (vint (call_fn env "f" []))
+
+let test_df_lazy_select () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("a",[1,2]), IntCol("b",[3,4]), IntCol("c",[5,6])])
+      let lf = DataFrame.lazy(df) |> DataFrame.select(["a","c"])
+      match DataFrame.collect(lf) do
+      | Ok(df2) -> DataFrame.col_count(df2)
+      | Err(_)  -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "select [a,c] col_count = 2" 2 (vint (call_fn env "f" []))
+
+let test_df_lazy_sort_by () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("v", [3,1,2])])
+      let lf = DataFrame.lazy(df) |> DataFrame.sort_by([("v", Asc)])
+      match DataFrame.collect(lf) do
+      | Ok(df2) ->
+        match DataFrame.get_int_col(df2, "v") do
+        | Ok(xs) -> List.nth(xs, 0)
+        | Err(_) -> -1
+        end
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "sort_by Asc first = 1" 1 (vint (call_fn env "f" []))
+
+let test_df_lazy_limit () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x", [10,20,30,40,50])])
+      let lf = DataFrame.lazy(df) |> DataFrame.limit(3)
+      match DataFrame.collect(lf) do
+      | Ok(df2) -> DataFrame.row_count(df2)
+      | Err(_)  -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "limit(3) row_count = 3" 3 (vint (call_fn env "f" []))
+
+let test_df_lazy_chain () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x", [5,1,4,2,3])])
+      let lf = DataFrame.lazy(df)
+               |> DataFrame.filter(Gt(Col("x"), LitInt(2)))
+               |> DataFrame.sort_by([("x", Asc)])
+               |> DataFrame.limit(2)
+      match DataFrame.collect(lf) do
+      | Ok(df2) ->
+        match DataFrame.get_int_col(df2, "x") do
+        | Ok(xs) -> List.nth(xs, 0)
+        | Err(_) -> -1
+        end
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "chain filter+sort+limit first = 3" 3 (vint (call_fn env "f" []))
+
+let test_df_with_column () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x", [1,2,3])])
+      let lf = DataFrame.lazy(df)
+               |> DataFrame.with_column("doubled", fn row ->
+                    match DataFrame.row_get_int(row, "x") do
+                    | Some(v) -> IntVal(v * 2)
+                    | None    -> IntVal(0)
+                    end)
+      match DataFrame.collect(lf) do
+      | Ok(df2) ->
+        match DataFrame.get_int_col(df2, "doubled") do
+        | Ok(xs) -> List.nth(xs, 2)
+        | Err(_) -> -1
+        end
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "with_column doubled[2] = 6" 6 (vint (call_fn env "f" []))
+
+(* ── GroupBy ── *)
+
+let test_df_groupby_count () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([StrCol("cat", ["a","b","a","b","a"])])
+      let gb = DataFrame.group_by(df, ["cat"])
+      match DataFrame.agg(gb, [Count]) do
+      | Ok(df2) -> DataFrame.row_count(df2)
+      | Err(_)  -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "groupby count 2 groups" 2 (vint (call_fn env "f" []))
+
+let test_df_groupby_sum () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([
+        StrCol("cat", ["a","b","a"]),
+        IntCol("val", [10, 20, 30])
+      ])
+      let gb = DataFrame.group_by(df, ["cat"])
+      match DataFrame.agg(gb, [Sum("val")]) do
+      | Ok(df2) ->
+        match DataFrame.float_list(df2, "val") do
+        | Ok(xs) -> float_to_int(List.fold_left(0.0, xs, fn (acc, x) -> acc +. x))
+        | Err(_) -> -1
+        end
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "groupby sum total = 60" 60 (vint (call_fn env "f" []))
+
+(* ── Joins ── *)
+
+let test_df_inner_join () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let left  = DataFrame.make_df([IntCol("id",[1,2,3]), StrCol("name",["a","b","c"])])
+      let right = DataFrame.make_df([IntCol("id",[2,3,4]), IntCol("score",[10,20,30])])
+      let lf    = DataFrame.lazy(left) |> DataFrame.inner_join(right, ["id"])
+      match DataFrame.collect(lf) do
+      | Ok(df) -> DataFrame.row_count(df)
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "inner_join row_count = 2" 2 (vint (call_fn env "f" []))
+
+let test_df_left_join_row_count () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let left  = DataFrame.make_df([IntCol("id", [1,2,3])])
+      let right = DataFrame.make_df([IntCol("id",[2,3]), StrCol("tag",["x","y"])])
+      let lf    = DataFrame.lazy(left) |> DataFrame.left_join(right, ["id"])
+      match DataFrame.collect(lf) do
+      | Ok(df) -> DataFrame.row_count(df)
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "left_join preserves 3 left rows" 3 (vint (call_fn env "f" []))
+
+let test_df_left_join_null_count () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let left  = DataFrame.make_df([IntCol("id", [1,2,3])])
+      let right = DataFrame.make_df([IntCol("id",[2,3]), StrCol("tag",["x","y"])])
+      let lf    = DataFrame.lazy(left) |> DataFrame.left_join(right, ["id"])
+      match DataFrame.collect(lf) do
+      | Ok(df) ->
+        match DataFrame.get_column(df, "tag") do
+        | Ok(col) -> DataFrame.col_null_count(col)
+        | Err(_)  -> -1
+        end
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "left_join unmatched row has 1 null in tag" 1 (vint (call_fn env "f" []))
+
+let test_df_right_join_row_count () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let left  = DataFrame.make_df([IntCol("id",[2,3]), StrCol("name",["b","c"])])
+      let right = DataFrame.make_df([IntCol("id",[1,2,3,4])])
+      let lf    = DataFrame.lazy(left) |> DataFrame.right_join(right, ["id"])
+      match DataFrame.collect(lf) do
+      | Ok(df) -> DataFrame.row_count(df)
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "right_join preserves 4 right rows" 4 (vint (call_fn env "f" []))
+
+let test_df_outer_join_row_count () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let left  = DataFrame.make_df([IntCol("id", [1,2])])
+      let right = DataFrame.make_df([IntCol("id", [2,3])])
+      let lf    = DataFrame.lazy(left) |> DataFrame.outer_join(right, ["id"])
+      match DataFrame.collect(lf) do
+      | Ok(df) -> DataFrame.row_count(df)
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "outer_join row_count = 3" 3 (vint (call_fn env "f" []))
+
+let test_df_inner_join_col_count () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let left  = DataFrame.make_df([IntCol("id",[1,2]), StrCol("name",["a","b"])])
+      let right = DataFrame.make_df([IntCol("id",[1,2]), IntCol("score",[10,20])])
+      let lf    = DataFrame.lazy(left) |> DataFrame.inner_join(right, ["id"])
+      match DataFrame.collect(lf) do
+      | Ok(df) -> DataFrame.col_count(df)
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  (* id + name + score = 3, key col not duplicated *)
+  Alcotest.(check int) "inner_join col_count = 3 (no dup key)" 3 (vint (call_fn env "f" []))
+
+(* ── Stats ── *)
+
+let test_df_col_describe_count () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("v",[1,2,3,4,5])])
+      List.length(DataFrame.col_describe(df))
+    end
+  end|} in
+  Alcotest.(check int) "col_describe 1 entry per column" 1 (vint (call_fn env "f" []))
+
+let test_df_describe_row_count () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x",[1,2,3]), FloatCol("y",[4.0,5.0,6.0])])
+      DataFrame.row_count(DataFrame.summarize(df))
+    end
+  end|} in
+  Alcotest.(check int) "describe row_count = num_columns" 2 (vint (call_fn env "f" []))
+
+let test_df_describe_column_name () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("score", [1,2,3])])
+      let d  = DataFrame.summarize(df)
+      match DataFrame.get_string_col(d, "column") do
+      | Ok(names) -> List.nth(names, 0)
+      | Err(_)    -> "err"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "describe first column name = score" "score" (vstr (call_fn env "f" []))
+
+let test_df_sample_count () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x", [0,1,2,3,4,5,6,7,8,9])])
+      DataFrame.row_count(DataFrame.sample(df, 3))
+    end
+  end|} in
+  Alcotest.(check int) "sample(3) row_count = 3" 3 (vint (call_fn env "f" []))
+
+let test_df_sample_n_ge_total () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x", [1,2,3])])
+      DataFrame.row_count(DataFrame.sample(df, 10))
+    end
+  end|} in
+  Alcotest.(check int) "sample n>=total returns full df" 3 (vint (call_fn env "f" []))
+
+let test_df_sample_zero () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x", [1,2,3])])
+      DataFrame.row_count(DataFrame.sample(df, 0))
+    end
+  end|} in
+  Alcotest.(check int) "sample(0) row_count = 0" 0 (vint (call_fn env "f" []))
+
+let test_df_train_test_split () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x", [0,1,2,3,4,5,6,7,8,9])])
+      let (train_df, test_df) = DataFrame.train_test_split(df, 0.8)
+      DataFrame.row_count(train_df) * 100 + DataFrame.row_count(test_df)
+    end
+  end|} in
+  let result = vint (call_fn env "f" []) in
+  Alcotest.(check int) "train_test_split train = 8" 8 (result / 100);
+  Alcotest.(check int) "train_test_split test = 2" 2 (result mod 100)
+
+let test_df_col_add_float () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let col = FloatCol("p", [1.0, 2.0, 3.0])
+      match DataFrame.col_add_float(col, 10.0) do
+      | Ok(FloatCol(_, data)) -> float_to_int(List.nth(data, 0))
+      | _ -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "col_add_float 1.0+10.0 = 11" 11 (vint (call_fn env "f" []))
+
+let test_df_col_mul_float () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let col = IntCol("q", [2, 4, 6])
+      match DataFrame.col_mul_float(col, 3.0) do
+      | Ok(FloatCol(_, data)) -> float_to_int(List.nth(data, 1))
+      | _ -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "col_mul_float 4*3.0 = 12" 12 (vint (call_fn env "f" []))
+
+let test_df_col_add_col_int () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let a = IntCol("a", [1, 2, 3])
+      let b = IntCol("b", [10, 20, 30])
+      match DataFrame.col_add_col(a, b) do
+      | Ok(IntCol(_, data)) -> List.nth(data, 2)
+      | _ -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "col_add_col [3+30] = 33" 33 (vint (call_fn env "f" []))
+
+let test_df_col_add_col_length_mismatch () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let a = IntCol("a", [1,2,3])
+      let b = IntCol("b", [10,20])
+      match DataFrame.col_add_col(a, b) do
+      | Ok(_)  -> false
+      | Err(_) -> true
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "col_add_col length mismatch = Err" true (vbool (call_fn env "f" []))
+
+(* ── z-score / normalize ── *)
+
+let test_df_col_z_score () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let col = FloatCol("v", [1.0, 2.0, 3.0])
+      match DataFrame.col_z_score(col) do
+      | Ok(FloatCol(_, data)) ->
+        let mid = List.nth(data, 1)
+        if mid > -0.001 && mid < 0.001 then 1 else 0
+      | _ -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "z_score of median = 0" 1 (vint (call_fn env "f" []))
+
+let test_df_col_normalize () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let col = FloatCol("v", [0.0, 5.0, 10.0])
+      match DataFrame.col_normalize(col) do
+      | Ok(FloatCol(_, data)) ->
+        let mn = List.nth(data, 0)
+        let mx = List.nth(data, 2)
+        if mn > -0.001 && mn < 0.001 && mx > 0.999 && mx < 1.001 then 1 else 0
+      | _ -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "normalize min=0.0 max=1.0" 1 (vint (call_fn env "f" []))
+
+(* ── value_counts ── *)
+
+let test_df_value_counts () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([StrCol("color", ["red","blue","red","red","blue"])])
+      match DataFrame.value_counts(df, "color") do
+      | Ok(vc) -> DataFrame.row_count(vc)
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "value_counts 2 distinct" 2 (vint (call_fn env "f" []))
+
+(* ── Edge cases ── *)
+
+let test_df_empty_head () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do DataFrame.row_count(DataFrame.head(DataFrame.empty(), 5)) end
+  end|} in
+  Alcotest.(check int) "head on empty = 0" 0 (vint (call_fn env "f" []))
+
+let test_df_empty_filter () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("x", Nil)])
+      let lf = DataFrame.lazy(df) |> DataFrame.filter(Gt(Col("x"), LitInt(0)))
+      match DataFrame.collect(lf) do
+      | Ok(df2) -> DataFrame.row_count(df2)
+      | Err(_)  -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "filter on empty col = 0" 0 (vint (call_fn env "f" []))
+
+let test_df_single_row () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("v", [42])])
+      match DataFrame.get_int_col(df, "v") do
+      | Ok(xs) -> List.nth(xs, 0)
+      | Err(_) -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "single-row df value = 42" 42 (vint (call_fn env "f" []))
+
+let test_df_rename_column () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([IntCol("old_name", [1,2,3])])
+      match DataFrame.rename_column(df, "old_name", "new_name") do
+      | Ok(df2) -> List.nth(DataFrame.schema(df2), 0)
+      | Err(_)  -> "err"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "rename_column schema[0] = new_name" "new_name" (vstr (call_fn env "f" []))
+
+let test_df_drop_nulls () =
+  let env = eval_with_dataframe {|mod Test do
+    fn f() do
+      let df = DataFrame.make_df([
+        NullableIntCol("x", [1,0,3], [false,true,false])
+      ])
+      let clean = DataFrame.drop_nulls(df)
+      DataFrame.row_count(clean)
+    end
+  end|} in
+  Alcotest.(check int) "drop_nulls removes 1 null row" 2 (vint (call_fn env "f" []))
+
 let () =
   Alcotest.run "march"
     [
@@ -17390,5 +18009,54 @@ let () =
         Alcotest.test_case "base64_decode"            `Quick test_crypto_base64_decode;
         Alcotest.test_case "base64_decode invalid"    `Quick test_crypto_base64_decode_invalid;
         Alcotest.test_case "base64 roundtrip"         `Quick test_crypto_base64_roundtrip;
+      ]);
+      ("stdlib_dataframe", [
+        Alcotest.test_case "empty row_count=0"              `Quick test_df_empty_row_count;
+        Alcotest.test_case "make_df row_count"              `Quick test_df_make_df_row_count;
+        Alcotest.test_case "make_df col_count"              `Quick test_df_make_df_col_count;
+        Alcotest.test_case "from_columns ok"                `Quick test_df_from_columns_ok;
+        Alcotest.test_case "from_columns length mismatch"   `Quick test_df_from_columns_err_mismatch;
+        Alcotest.test_case "from_rows"                      `Quick test_df_from_rows;
+        Alcotest.test_case "schema length"                  `Quick test_df_schema_length;
+        Alcotest.test_case "get_column found"               `Quick test_df_get_column_ok;
+        Alcotest.test_case "get_column missing"             `Quick test_df_get_column_missing;
+        Alcotest.test_case "add_column"                     `Quick test_df_add_column;
+        Alcotest.test_case "drop_column"                    `Quick test_df_drop_column;
+        Alcotest.test_case "rename_column"                  `Quick test_df_rename_column;
+        Alcotest.test_case "head"                           `Quick test_df_head;
+        Alcotest.test_case "tail"                           `Quick test_df_tail;
+        Alcotest.test_case "slice value"                    `Quick test_df_slice_value;
+        Alcotest.test_case "lazy filter"                    `Quick test_df_lazy_filter;
+        Alcotest.test_case "lazy select"                    `Quick test_df_lazy_select;
+        Alcotest.test_case "lazy sort_by"                   `Quick test_df_lazy_sort_by;
+        Alcotest.test_case "lazy limit"                     `Quick test_df_lazy_limit;
+        Alcotest.test_case "lazy chain filter+sort+limit"   `Quick test_df_lazy_chain;
+        Alcotest.test_case "with_column"                    `Quick test_df_with_column;
+        Alcotest.test_case "groupby count"                  `Quick test_df_groupby_count;
+        Alcotest.test_case "groupby sum"                    `Quick test_df_groupby_sum;
+        Alcotest.test_case "inner_join row_count"           `Quick test_df_inner_join;
+        Alcotest.test_case "inner_join no dup key col"      `Quick test_df_inner_join_col_count;
+        Alcotest.test_case "left_join row_count"            `Quick test_df_left_join_row_count;
+        Alcotest.test_case "left_join null count"           `Quick test_df_left_join_null_count;
+        Alcotest.test_case "right_join row_count"           `Quick test_df_right_join_row_count;
+        Alcotest.test_case "outer_join row_count"           `Quick test_df_outer_join_row_count;
+        Alcotest.test_case "col_describe count"             `Quick test_df_col_describe_count;
+        Alcotest.test_case "describe row_count"             `Quick test_df_describe_row_count;
+        Alcotest.test_case "describe column name"           `Quick test_df_describe_column_name;
+        Alcotest.test_case "sample count"                   `Quick test_df_sample_count;
+        Alcotest.test_case "sample n>=total"                `Quick test_df_sample_n_ge_total;
+        Alcotest.test_case "sample zero"                    `Quick test_df_sample_zero;
+        Alcotest.test_case "train_test_split"               `Quick test_df_train_test_split;
+        Alcotest.test_case "col_add_float"                  `Quick test_df_col_add_float;
+        Alcotest.test_case "col_mul_float"                  `Quick test_df_col_mul_float;
+        Alcotest.test_case "col_add_col int+int"            `Quick test_df_col_add_col_int;
+        Alcotest.test_case "col_add_col length mismatch"    `Quick test_df_col_add_col_length_mismatch;
+        Alcotest.test_case "col_z_score"                    `Quick test_df_col_z_score;
+        Alcotest.test_case "col_normalize"                  `Quick test_df_col_normalize;
+        Alcotest.test_case "value_counts"                   `Quick test_df_value_counts;
+        Alcotest.test_case "empty head"                     `Quick test_df_empty_head;
+        Alcotest.test_case "empty filter"                   `Quick test_df_empty_filter;
+        Alcotest.test_case "single row"                     `Quick test_df_single_row;
+        Alcotest.test_case "drop_nulls"                     `Quick test_df_drop_nulls;
       ]);
     ]
