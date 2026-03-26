@@ -1,0 +1,88 @@
+-- Tier 1 WASM smoke test: pure compute — no actors, no I/O, no networking.
+-- Covers: arithmetic, closures, pattern matching, variants, strings, Perceus RC.
+
+mod WasmTier1 do
+
+-- Arithmetic
+fn add(a, b) do a + b end
+
+fn fib(n) do
+  if n <= 1 then n
+  else fib(n - 1) + fib(n - 2)
+end
+
+-- Closures / higher-order functions
+fn apply(f, x) do f(x) end
+
+fn make_adder(n) do fn x -> x + n end
+
+-- Pattern matching on variants
+type Shape = Circle(Float) | Rect(Float, Float)
+
+fn area(s) do
+  match s do
+  | Circle(r) -> 3.14159 *. r *. r
+  | Rect(w, h) -> w *. h
+  end
+end
+
+-- Option chaining
+fn safe_div(a, b) do
+  if b == 0 then None
+  else Some(a / b)
+end
+
+fn unwrap_or(opt, default) do
+  match opt do
+  | None    -> default
+  | Some(v) -> v
+  end
+end
+
+-- String operations
+fn greet(name) do "Hello, " ++ name ++ "!" end
+
+-- Recursive sum via list (exercises RC)
+fn sum_list(lst) do
+  match lst do
+  | Nil        -> 0
+  | Cons(h, t) -> h + sum_list(t)
+  end
+end
+
+fn main() do
+  -- Arithmetic
+  let x = add(3, 4)
+  println(int_to_string(x))            -- 7
+
+  -- Fibonacci
+  let f = fib(10)
+  println(int_to_string(f))            -- 55
+
+  -- Closures
+  let add5 = make_adder(5)
+  let r = apply(add5, 10)
+  println(int_to_string(r))            -- 15
+
+  -- Variants
+  let c = Circle(2.0)
+  let rect = Rect(3.0, 4.0)
+  println(float_to_string(area(c)))    -- ~12.566
+  println(float_to_string(area(rect))) -- 12
+
+  -- Option
+  let d1 = safe_div(10, 2)
+  let d2 = safe_div(10, 0)
+  println(int_to_string(unwrap_or(d1, -1)))  -- 5
+  println(int_to_string(unwrap_or(d2, -1)))  -- -1
+
+  -- Strings
+  println(greet("WASM"))               -- Hello, WASM!
+
+  -- List / RC stress
+  let lst = Cons(1, Cons(2, Cons(3, Cons(4, Cons(5, Nil)))))
+  let s = sum_list(lst)
+  println(int_to_string(s))            -- 15
+end
+
+end
