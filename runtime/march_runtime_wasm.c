@@ -295,6 +295,94 @@ void *march_string_index_of(void *s, void *sub) { (void)s; (void)sub; return mar
 void *march_string_last_index_of(void *s, void *sub) { (void)s; (void)sub; return march_alloc(24); /* None */ }
 void *march_string_to_float(void *s) { (void)s; return march_alloc(24); /* None */ }
 
+/* ── IOList flattening for island WASM boundary ─────────────────────── */
+
+/* March IOList variant tags:
+     0 = Empty        (no fields)
+     1 = Str(String)  (field[0] = String ptr at offset 16)
+     2 = Segments(List(IOList))  (field[0] = List ptr at offset 16)
+   March List(IOList) variant tags:
+     0 = Nil
+     1 = Cons(head: IOList, tail: List(IOList))  fields at 16, 24 */
+
+static int64_t march_iolist_size(void *iolist) {
+    if (!iolist) return 0;
+    int32_t tag = *(int32_t *)((char *)iolist + 8);
+    switch (tag) {
+    case 0: return 0;  /* Empty */
+    case 1: {  /* Str(String) */
+        void *str = *(void **)((char *)iolist + 16);
+        if (!str) return 0;
+        return ((march_string *)str)->length;
+    }
+    case 2: {  /* Segments(List(IOList)) */
+        void *list = *(void **)((char *)iolist + 16);
+        int64_t total = 0;
+        while (list) {
+            int32_t ltag = *(int32_t *)((char *)list + 8);
+            if (ltag == 0) break;  /* Nil */
+            void *head = *(void **)((char *)list + 16);
+            list = *(void **)((char *)list + 24);
+            total += march_iolist_size(head);
+        }
+        return total;
+    }
+    default: return 0;
+    }
+}
+
+static int64_t march_iolist_copy(void *iolist, char *buf, int64_t offset) {
+    if (!iolist) return offset;
+    int32_t tag = *(int32_t *)((char *)iolist + 8);
+    switch (tag) {
+    case 0: return offset;  /* Empty */
+    case 1: {  /* Str(String) */
+        march_string *str = (march_string *)*(void **)((char *)iolist + 16);
+        if (!str) return offset;
+        for (int64_t i = 0; i < str->length; i++)
+            buf[offset++] = str->data[i];
+        return offset;
+    }
+    case 2: {  /* Segments(List(IOList)) */
+        void *list = *(void **)((char *)iolist + 16);
+        while (list) {
+            int32_t ltag = *(int32_t *)((char *)list + 8);
+            if (ltag == 0) break;  /* Nil */
+            void *head = *(void **)((char *)list + 16);
+            list = *(void **)((char *)list + 24);
+            offset = march_iolist_copy(head, buf, offset);
+        }
+        return offset;
+    }
+    default: return offset;
+    }
+}
+
+/* Flatten an IOList tree to a March String (for march_island_render_html). */
+void *march_iolist_flatten(void *iolist) {
+    if (!iolist) return march_string_lit("", 0);
+    int64_t total = march_iolist_size(iolist);
+    char *buf = (char *)march_alloc(total + 1);
+    int64_t written = march_iolist_copy(iolist, buf, 0);
+    buf[written] = '\0';
+    march_string *result = (march_string *)march_alloc(sizeof(march_string));
+    result->rc  = 1;
+    result->tag = 0;
+    result->pad = 0;
+    result->length = written;
+    result->data   = buf;
+    return result;
+}
+
+/* String accessor helpers — used by island JS bridge to read HTML back. */
+int32_t march_string_length_i32(void *str) {
+    return str ? (int32_t)((march_string *)str)->length : 0;
+}
+
+const char *march_string_data_ptr(void *str) {
+    return str ? ((march_string *)str)->data : 0;
+}
+
 /* ── Comparison / hash builtins ─────────────────────────────────────── */
 
 int64_t march_compare_int(int64_t x, int64_t y) {

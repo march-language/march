@@ -2649,6 +2649,83 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
        "\ndefine dllexport ptr @march_alloc_export(i64 %sz) {\nentry:\n  %r = call ptr @march_alloc(i64 %sz)\n  ret ptr %r\n}\n";
      Buffer.add_string out
        "\ndefine dllexport ptr @march_string_lit_export(ptr %s, i64 %len) {\nentry:\n  %r = call ptr @march_string_lit(ptr %s, i64 %len)\n  ret ptr %r\n}\n";
+     (* march_island_render_html: calls render + iolist_flatten, returns a flat String *)
+     (match find_fn "render" with
+      | Some fn ->
+        let mangled = llvm_name (mangle_extern fn.Tir.fn_name) in
+        Buffer.add_string out
+          (Printf.sprintf "\ndeclare ptr @march_iolist_flatten(ptr)\ndeclare i32 @march_string_length_i32(ptr)\ndeclare ptr @march_string_data_ptr(ptr)\n\ndefine dllexport ptr @march_island_render_html(ptr %%state) {\nentry:\n  %%iolist = call ptr @%s(ptr %%state)\n  %%str = call ptr @march_iolist_flatten(ptr %%iolist)\n  ret ptr %%str\n}\n\ndefine dllexport i32 @march_island_string_length(ptr %%str) {\nentry:\n  %%r = call i32 @march_string_length_i32(ptr %%str)\n  ret i32 %%r\n}\n\ndefine dllexport ptr @march_island_string_data(ptr %%str) {\nentry:\n  %%r = call ptr @march_string_data_ptr(ptr %%str)\n  ret ptr %%r\n}\n" mangled)
+      | None -> ());
+     (* march_island_msg_from_name: construct a Msg variant from its name string.
+        Emits a chain of string comparisons for all zero-field (enum) Msg constructors.
+        Variants with fields are not supported here — use JSON wire format instead. *)
+     let msg_type_opt = List.find_opt (fun td ->
+       match td with
+       | Tir.TDVariant (name, _) ->
+         (* Strip module prefix, e.g. "Counter.Msg" -> "Msg" *)
+         let base = match String.rindex_opt name '.' with
+           | Some i -> String.sub name (i+1) (String.length name - i - 1)
+           | None -> name
+         in
+         (* Strip mono suffix like Msg$0 *)
+         let base2 = match String.index_opt base '$' with
+           | Some i -> String.sub base 0 i
+           | None -> base
+         in
+         base2 = "Msg"
+       | _ -> false
+     ) m.Tir.tm_types in
+     (match msg_type_opt with
+      | Some (Tir.TDVariant (_, ctors)) ->
+        (* Filter to enum constructors (no fields) *)
+        let enum_ctors = List.filter (fun (_, fields) -> fields = []) ctors in
+        if enum_ctors <> [] then begin
+          let buf2 = Buffer.create 512 in
+          (* Emit string constants for each constructor name *)
+          List.iter (fun (name, _) ->
+            (* Strip module prefix from ctor name *)
+            let base_name = match String.rindex_opt name '.' with
+              | Some i -> String.sub name (i+1) (String.length name - i - 1)
+              | None -> name
+            in
+            Buffer.add_string buf2
+              (Printf.sprintf "@.msg_name_%s = private constant [%d x i8] c\"%s\\00\"\n"
+                 base_name (String.length base_name + 1) base_name)
+          ) enum_ctors;
+          Buffer.add_string buf2
+            "\ndeclare i64 @march_string_eq(ptr, ptr)\n";
+          Buffer.add_string buf2
+            "\ndefine dllexport ptr @march_island_msg_from_name(ptr %data, i32 %len) {\nentry:\n";
+          (* Allocate a temporary string for the input *)
+          Buffer.add_string buf2
+            "  %ilen = sext i32 %len to i64\n  %tmp = call ptr @march_string_lit(ptr %data, i64 %ilen)\n";
+          List.iteri (fun i (name, _) ->
+            let base_name = match String.rindex_opt name '.' with
+              | Some j -> String.sub name (j+1) (String.length name - j - 1)
+              | None -> name
+            in
+            let nlen = String.length base_name in
+            Buffer.add_string buf2
+              (Printf.sprintf "  %%slit%d = call ptr @march_string_lit(ptr @.msg_name_%s, i64 %d)\n"
+                 i base_name nlen);
+            Buffer.add_string buf2
+              (Printf.sprintf "  %%eq%d = call i64 @march_string_eq(ptr %%slit%d, ptr %%tmp)\n" i i);
+            Buffer.add_string buf2
+              (Printf.sprintf "  %%b%d = icmp ne i64 %%eq%d, 0\n" i i);
+            Buffer.add_string buf2
+              (Printf.sprintf "  br i1 %%b%d, label %%match%d, label %%next%d\n" i i i);
+            Buffer.add_string buf2
+              (Printf.sprintf "match%d:\n  %%cell%d = call ptr @march_alloc(i64 16)\n" i i);
+            Buffer.add_string buf2
+              (Printf.sprintf "  %%tp%d = getelementptr i8, ptr %%cell%d, i64 8\n" i i);
+            Buffer.add_string buf2
+              (Printf.sprintf "  store i32 %d, ptr %%tp%d\n  ret ptr %%cell%d\nnext%d:\n" i i i i)
+          ) enum_ctors;
+          (* Default: return null (unknown message) *)
+          Buffer.add_string buf2 "  ret ptr null\n}\n";
+          Buffer.add_string out (Buffer.contents buf2)
+        end
+      | _ -> ());
      (* If there's a main function, still call it for module-level init *)
      (match main_fn_name with
       | Some name ->
