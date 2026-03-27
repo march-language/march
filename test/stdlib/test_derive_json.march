@@ -132,7 +132,7 @@ mod TestDeriveJson do
     end
   end
 
-  -- Record type (derive last so typechecker sees correct from_json for records)
+  -- Record type
   type User = { name : String, age : Int, active : Bool }
   derive Eq for User
   derive Json for User

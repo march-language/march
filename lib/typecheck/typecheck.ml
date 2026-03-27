@@ -739,6 +739,10 @@ let builtin_bindings : (string * scheme) list =
     ("is_nil", poly1 (fun a -> TArrow (t_list a, t_bool)));
     (* Generic to_string: ∀a. a -> String *)
     ("to_string", poly1 (fun a -> TArrow (a, t_string)));
+    (* Generic to_json/from_json: fully polymorphic — runtime dispatches via impl_tbl.
+       ∀a b. a -> b  — this avoids shadowing when multiple types derive Json. *)
+    ("to_json",   poly2 (fun a b -> TArrow (a, b)));
+    ("from_json",  poly2 (fun a b -> TArrow (a, b)));
     (* Actor/respond: ∀a. a -> Unit *)
     ("respond", poly1 (fun a -> TArrow (a, t_unit)));
     (* Actor builtins *)
@@ -4233,18 +4237,22 @@ let rec check_decl env (d : Ast.decl) : env =
                      (Printf.sprintf "`%s` in `impl %s` must match the interface signature"
                         mname.txt idef.impl_iface.txt))))
          ) idef.impl_methods);
-    (* For Json derive pseudo-interfaces, also bind each method in the env
-       so that to_json/from_json are visible as regular functions at call sites. *)
+    (* For Json derive pseudo-interfaces, to_json/from_json are already bound
+       as polymorphic builtins in the base environment (∀a b. a -> b).
+       We still type-check each method body for local correctness, but we do NOT
+       re-bind the name — that would shadow the polymorphic builtin with a
+       monomorphic version, breaking modules that derive Json for multiple types. *)
     let is_json_derive =
       String.length idef.impl_iface.txt >= 4
       && String.sub idef.impl_iface.txt 0 4 = "Json"
     in
-    if is_json_derive then
-      List.fold_left (fun env ((_mname : Ast.name), (def : Ast.fn_def)) ->
-          let sch = check_fn env def _sp in
-          bind_var def.fn_name.txt sch env
-        ) env_with_impl idef.impl_methods
-    else
+    if is_json_derive then begin
+      (* Type-check the method bodies for correctness, but discard the schemes *)
+      List.iter (fun ((_mname : Ast.name), (def : Ast.fn_def)) ->
+          ignore (check_fn env def _sp)
+        ) idef.impl_methods;
+      env_with_impl
+    end else
       env_with_impl
 
   | Ast.DExtern (edef, _sp) ->

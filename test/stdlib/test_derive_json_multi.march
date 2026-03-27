@@ -1,0 +1,52 @@
+mod TestMultiJson do
+  -- Test that multiple types can derive Json in the same module
+  -- without the last derive shadowing previous ones.
+
+  type Point = { x : Int, y : Int }
+  derive Json for Point
+
+  type Color = Red | Green | Blue
+  derive Eq for Color
+  derive Json for Color
+
+  type Shape = Circle(Int) | Rect(Int, Int)
+  derive Eq for Shape
+  derive Json for Shape
+
+  fn main() do
+    -- All three should work in the same module
+    let p = { x = 42, y = 99 }
+    let pj = to_json(p)
+    println("Point: " ++ Json.to_string(pj))
+
+    let c = Green
+    let cj = to_json(c)
+    println("Color: " ++ Json.to_string(cj))
+
+    let s = Circle(5)
+    let sj = to_json(s)
+    println("Shape: " ++ Json.to_string(sj))
+
+    -- Roundtrips
+    match from_json(pj) do
+    Ok(p2) -> println("Point roundtrip: x=" ++ int_to_string(p2.x))
+    Err(e) -> println("Point error: " ++ e)
+    end
+
+    match from_json(cj) do
+    Ok(c2) -> do
+      let label = match c2 do Red -> "Red" | Green -> "Green" | Blue -> "Blue" end
+      println("Color roundtrip: " ++ label)
+    end
+    Err(e) -> println("Color error: " ++ e)
+    end
+
+    match from_json(sj) do
+    Ok(s2) -> do
+      let label = match s2 do Circle(r) -> "Circle(" ++ int_to_string(r) ++ ")" | Rect(w, h) -> "Rect(" ++ int_to_string(w) ++ "," ++ int_to_string(h) ++ ")" end
+      println("Shape roundtrip: " ++ label)
+    end
+    Err(e) -> println("Shape error: " ++ e)
+    end
+  end
+end
