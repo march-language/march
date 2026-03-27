@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-25 (LSP Performance Insights plan + LSP code actions: P2.8 case correction + P3.10 De Morgan's law)
+**Last updated:** 2026-03-26 (syntax overhaul: NL token filter, no `|` in match arms, if/then/else; LSP stdlib Token_filter fix; crypto builtins return Ok(Bytes); all 1151 tests passing)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 

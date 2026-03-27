@@ -270,7 +270,7 @@ let test_tc_match () =
   let ctx = typecheck {|mod Test do
     fn f(x) do
       match x do
-      | 0 -> 1
+      0 -> 1
       n -> n + 1
       end
     end
@@ -964,8 +964,7 @@ let test_srec_with_branching_typechecks () =
     protocol Stream do
       loop do
         choose by Server:
-          data -> Client -> Server : Int
-                    Server -> Client : Bool
+          data -> Client -> Server : Bool
           stop -> Server -> Client : Int
         end
       end
@@ -1898,12 +1897,14 @@ let test_eval_multi_stmt_match_arm () =
   let env = eval_module {|mod Test do
     fn classify(n) do
       match n do
-      | 0 ->
+      0 -> do
         let tag = 0
         tag
-      _ ->
+      end
+      _ -> do
         let tag = 1
         tag
+      end
       end
     end
   end|} in
@@ -2322,7 +2323,7 @@ let test_tir_lower_patvar_default () =
   let m = lower_module {|mod Test do
     fn label(n) do
       match n do
-      | 0 -> 0
+      0 -> 0
       other -> other
       end
     end
@@ -2941,8 +2942,7 @@ let test_repl_parity_records () =
 
 let test_repl_parity_if_else () =
   match repl_eval_exprs [
-    {|if 1 < 2 do "yes" else "no" end
-if 1 < 2 then "yes" else "no"|};
+    {|if 1 < 2 do "yes" else "no" end|};
   ] with
   | [`Ok ({|"yes"|}, "String")] -> ()
   | _ -> Alcotest.fail "if/else in REPL"
@@ -3695,9 +3695,10 @@ let test_fusion_no_fuse_impure () =
     fn imap_print(xs : IntList, f : Int -> Int) : IntList do
       match xs do
       INil        -> INil
-      ICons(h, t) ->
+      ICons(h, t) -> do
         let _ = println(int_to_string(h))
         ICons(f(h), imap_print(t, f))
+      end
       end
     end
 
@@ -4982,12 +4983,10 @@ let test_mutual_tco_even_odd_loop_emitted () =
     @[no_warn_recursion]
     fn even(n : Int) : Bool do
       if n == 0 do true else odd(n - 1) end
-      if n == 0 then true else odd(n - 1)
     end
     @[no_warn_recursion]
     fn odd(n : Int) : Bool do
       if n == 0 do false else even(n - 1) end
-      if n == 0 then false else even(n - 1)
     end
     fn main() : Unit do println(to_string(even(1000000))) end
   end|} in
@@ -5009,17 +5008,14 @@ let test_mutual_tco_three_way () =
     @[no_warn_recursion]
     fn fa(n : Int) : Int do
       if n == 0 do 0 else fb(n - 1) end
-      if n == 0 then 0 else fb(n - 1)
     end
     @[no_warn_recursion]
     fn fb(n : Int) : Int do
       if n == 0 do 0 else fc(n - 1) end
-      if n == 0 then 0 else fc(n - 1)
     end
     @[no_warn_recursion]
     fn fc(n : Int) : Int do
       if n == 0 do 0 else fa(n - 1) end
-      if n == 0 then 0 else fa(n - 1)
     end
     fn main() : Unit do println(int_to_string(fa(99))) end
   end|} in
@@ -5036,12 +5032,10 @@ let test_mutual_tco_state_machine () =
     @[no_warn_recursion]
     fn state_a(n : Int) : Int do
       if n <= 0 do 1 else state_b(n - 1) end
-      if n <= 0 then 1 else state_b(n - 1)
     end
     @[no_warn_recursion]
     fn state_b(n : Int) : Int do
       if n <= 0 do 2 else state_a(n - 1) end
-      if n <= 0 then 2 else state_a(n - 1)
     end
     fn main() : Unit do println(int_to_string(state_a(1000000))) end
   end|} in
@@ -7985,12 +7979,13 @@ let test_http_set_header () =
   let env = eval_with_http {|mod Test do
     fn f() do
       match Http.get("https://example.com") do
-      Ok(req) ->
+      Ok(req) -> do
         let req = Http.set_header(req, "Accept", "application/json")
         match Http.get_request_header(req, "accept") do
         Some(v) -> v
         None -> "none"
         end
+      end
       Err(_) -> "error"
       end
     end
@@ -8136,7 +8131,7 @@ let test_http_client_request_step_transforms () =
     fn f() do
       match Http.get("http://example.com") do
       Err(_) -> "fail"
-      Ok(req) ->
+      Ok(req) -> do
         let step = HttpClient.step_bearer_auth("my-token")
         match step(req) do
         Err(_) -> "fail"
@@ -8147,6 +8142,7 @@ let test_http_client_request_step_transforms () =
           end
         end
       end
+      end
     end
   end|} in
   Alcotest.(check string) "bearer auth header" "Bearer my-token" (vstr (call_fn env "f" []))
@@ -8156,13 +8152,14 @@ let test_http_client_raise_on_error_status () =
     fn f() do
       match Http.get("http://example.com") do
       Err(_) -> "url_fail"
-      Ok(req) ->
+      Ok(req) -> do
         let resp = Response(Status(500), Nil, "Internal Server Error")
         match HttpClient.step_raise_on_error(req, resp) do
         Ok(_) -> "ok"
         Err(StepError(name, code)) -> name ++ ":" ++ code
         Err(_) -> "other_error"
         end
+      end
       end
     end
   end|} in
@@ -9753,9 +9750,10 @@ let test_supervision_send_checked_dead_actor () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :error
-      Some(cap) ->
+      Some(cap) -> do
         kill(pid)
         send_checked(cap, Noop())
+      end
       end
     end
   end|} in
@@ -9837,9 +9835,10 @@ let test_supervision_revoke_cap_blocks_send () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :error
-      Some(cap) ->
+      Some(cap) -> do
         revoke_cap(cap)
         send_checked(cap, Noop())
+      end
       end
     end
   end|} in
@@ -9862,10 +9861,11 @@ let test_supervision_revoke_cap_idempotent () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :error
-      Some(cap) ->
+      Some(cap) -> do
         revoke_cap(cap)
         revoke_cap(cap)
         :ok
+      end
       end
     end
   end|} in
@@ -9886,14 +9886,14 @@ let test_supervision_is_cap_valid () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :error
-      Some(cap) ->
+      Some(cap) -> do
         let before = is_cap_valid(cap)
         revoke_cap(cap)
         let after = is_cap_valid(cap)
-        if before == true then
+        if before == true do
           if after == false do :ok else :bad_after end
-          if after == false then :ok else :bad_after
-        else :bad_before
+        else :bad_before end
+      end
       end
     end
   end|} in
@@ -9914,9 +9914,10 @@ let test_supervision_send_revoked_cap_errors () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :setup_error
-      Some(cap) ->
+      Some(cap) -> do
         revoke_cap(cap)
         cap
+      end
       end
     end
   end|} in
@@ -9949,14 +9950,14 @@ let test_supervision_revoke_without_kill () =
       let pid = spawn(A)
       match get_cap(pid) do
       None -> :error
-      Some(cap) ->
+      Some(cap) -> do
         revoke_cap(cap)
         let alive = is_alive(pid)
         let valid = is_cap_valid(cap)
-        if alive == true then
+        if alive == true do
           if valid == false do :ok else :still_valid end
-          if valid == false then :ok else :still_valid
-        else :actor_dead
+        else :actor_dead end
+      end
       end
     end
   end|} in
@@ -10535,7 +10536,7 @@ let test_integration_file_pipeline () =
     fn f() do
       match Dir.list_full("%s") do
       Err(ig) -> Nil
-      Ok(files) ->
+      Ok(files) -> do
         let txt_files = List.filter(files, fn(p) -> Path.extension(p) == "txt")
         fn collect(ps, acc) do
           match ps do
@@ -10548,6 +10549,7 @@ let test_integration_file_pipeline () =
           end
         end
         collect(txt_files, Nil)
+      end
       end
     end
   end|} base) in
@@ -13134,8 +13136,8 @@ let test_exhaust_int_needs_wildcard () =
   let ctx = typecheck {|mod Test do
     fn go(n : Int) : Int do
       match n do
-      | 0 -> 1
-      | 1 -> 2
+      0 -> 1
+      1 -> 2
       end
     end
   end|} in
@@ -13146,7 +13148,7 @@ let test_exhaust_int_wildcard_ok () =
   let ctx = typecheck {|mod Test do
     fn go(n : Int) : Int do
       match n do
-      | 0 -> 1
+      0 -> 1
       _ -> n
       end
     end
@@ -13597,8 +13599,7 @@ let test_eq_prop_transitivity_same () =
       let ab = Red == Red
       let bc = Red == Red
       let ac = Red == Red
-      if ab do if bc do ac else false else true end end
-      if ab then if bc then ac else false else true
+      if ab do if bc do ac else false end else true end
     end
   end|} in
   Alcotest.(check bool) "Eq transitivity: a==b && b==c => a==c" true
@@ -13998,7 +13999,6 @@ let test_parse_deeply_nested_if () =
                 if x > 5 then
                   if x > 6 then
                     if x > 7 do x else 7 end
-                    if x > 7 then x else 7
                   else 6
                 else 5
               else 4
@@ -14016,11 +14016,11 @@ let test_parse_deeply_nested_match () =
   let src = {|mod Test do
     fn classify(x : Int) : Int do
       match x do
-      | 0 ->
+      0 ->
         match x do
-        | 0 ->
+        0 ->
           match x do
-          | 0 -> 0
+          0 -> 0
           _ -> 1
           end
         _ -> 2
@@ -14641,7 +14641,6 @@ let test_tc_tail_let_continuation_ok () =
     fn count_up(n, limit) do
       let m = n + 1
       if m >= limit do m else count_up(m, limit) end
-      if m >= limit then m else count_up(m, limit)
     end
   end|} in
   Alcotest.(check bool) "tail call after let: no errors" false (has_errors ctx)
@@ -16023,7 +16022,7 @@ let test_df_empty_row_count () =
 let test_df_make_df_row_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", [1, 2, 3])])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1, 2, 3]))])
       DataFrame.row_count(df)
     end
   end|} in
@@ -16032,7 +16031,7 @@ let test_df_make_df_row_count () =
 let test_df_make_df_col_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("a", [1,2]), FloatCol("b", [3.0, 4.0])])
+      let df = DataFrame.make_df([IntCol("a", typed_array_from_list([1,2])), FloatCol("b", typed_array_from_list([3.0, 4.0]))])
       DataFrame.col_count(df)
     end
   end|} in
@@ -16041,7 +16040,7 @@ let test_df_make_df_col_count () =
 let test_df_from_columns_ok () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      match DataFrame.from_columns([IntCol("x", [1,2,3]), StrCol("y", ["a","b","c"])]) do
+      match DataFrame.from_columns([IntCol("x", typed_array_from_list([1,2,3])), StrCol("y", typed_array_from_list(["a","b","c"]))]) do
       Ok(df) -> DataFrame.row_count(df)
       Err(_) -> -1
       end
@@ -16052,7 +16051,7 @@ let test_df_from_columns_ok () =
 let test_df_from_columns_err_mismatch () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      match DataFrame.from_columns([IntCol("x", [1,2]), IntCol("y", [3,4,5])]) do
+      match DataFrame.from_columns([IntCol("x", typed_array_from_list([1,2])), IntCol("y", typed_array_from_list([3,4,5]))]) do
       Ok(_)  -> false
       Err(_) -> true
       end
@@ -16079,7 +16078,7 @@ let test_df_from_rows () =
 let test_df_schema_length () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("a",[1]), StrCol("b",["x"]), FloatCol("c",[1.0])])
+      let df = DataFrame.make_df([IntCol("a", typed_array_from_list([1])), StrCol("b", typed_array_from_list(["x"])), FloatCol("c", typed_array_from_list([1.0]))])
       List.length(DataFrame.schema(df))
     end
   end|} in
@@ -16088,7 +16087,7 @@ let test_df_schema_length () =
 let test_df_get_column_ok () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("score", [10, 20, 30])])
+      let df = DataFrame.make_df([IntCol("score", typed_array_from_list([10, 20, 30]))])
       match DataFrame.get_column(df, "score") do
       Ok(col) -> DataFrame.col_len(col)
       Err(_)  -> -1
@@ -16100,7 +16099,7 @@ let test_df_get_column_ok () =
 let test_df_get_column_missing () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", [1,2])])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2]))])
       match DataFrame.get_column(df, "missing") do
       Ok(_)  -> false
       Err(_) -> true
@@ -16112,8 +16111,8 @@ let test_df_get_column_missing () =
 let test_df_add_column () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", [1,2,3])])
-      match DataFrame.add_column(df, IntCol("y", [4,5,6])) do
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3]))])
+      match DataFrame.add_column(df, IntCol("y", typed_array_from_list([4,5,6]))) do
       Ok(df2) -> DataFrame.col_count(df2)
       Err(_)  -> -1
       end
@@ -16124,7 +16123,7 @@ let test_df_add_column () =
 let test_df_drop_column () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x",[1,2]), IntCol("y",[3,4]), IntCol("z",[5,6])])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2])), IntCol("y", typed_array_from_list([3,4])), IntCol("z", typed_array_from_list([5,6]))])
       let df2 = DataFrame.drop_column(df, "y")
       DataFrame.col_count(df2)
     end
@@ -16136,7 +16135,7 @@ let test_df_drop_column () =
 let test_df_head () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", [1,2,3,4,5])])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3,4,5]))])
       DataFrame.row_count(DataFrame.head(df, 3))
     end
   end|} in
@@ -16145,7 +16144,7 @@ let test_df_head () =
 let test_df_tail () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", [1,2,3,4,5])])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3,4,5]))])
       DataFrame.row_count(DataFrame.tail(df, 2))
     end
   end|} in
@@ -16154,7 +16153,7 @@ let test_df_tail () =
 let test_df_slice_value () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", [10,20,30,40,50])])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([10,20,30,40,50]))])
       let s  = DataFrame.slice(df, 1, 3)
       match DataFrame.get_int_col(s, "x") do
       Ok(xs) -> List.nth(xs, 0)
@@ -16169,7 +16168,7 @@ let test_df_slice_value () =
 let test_df_lazy_filter () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", [1,2,3,4,5])])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3,4,5]))])
       let lf = DataFrame.lazy(df) |> DataFrame.filter(Gt(Col("x"), LitInt(3)))
       match DataFrame.collect(lf) do
       Ok(df2) -> DataFrame.row_count(df2)
@@ -16182,7 +16181,7 @@ let test_df_lazy_filter () =
 let test_df_lazy_select () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("a",[1,2]), IntCol("b",[3,4]), IntCol("c",[5,6])])
+      let df = DataFrame.make_df([IntCol("a", typed_array_from_list([1,2])), IntCol("b", typed_array_from_list([3,4])), IntCol("c", typed_array_from_list([5,6]))])
       let lf = DataFrame.lazy(df) |> DataFrame.select(["a","c"])
       match DataFrame.collect(lf) do
       Ok(df2) -> DataFrame.col_count(df2)
@@ -16195,7 +16194,7 @@ let test_df_lazy_select () =
 let test_df_lazy_sort_by () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("v", [3,1,2])])
+      let df = DataFrame.make_df([IntCol("v", typed_array_from_list([3,1,2]))])
       let lf = DataFrame.lazy(df) |> DataFrame.sort_by([("v", Asc)])
       match DataFrame.collect(lf) do
       Ok(df2) ->
@@ -16212,7 +16211,7 @@ let test_df_lazy_sort_by () =
 let test_df_lazy_limit () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", [10,20,30,40,50])])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([10,20,30,40,50]))])
       let lf = DataFrame.lazy(df) |> DataFrame.limit(3)
       match DataFrame.collect(lf) do
       Ok(df2) -> DataFrame.row_count(df2)
@@ -16225,7 +16224,7 @@ let test_df_lazy_limit () =
 let test_df_lazy_chain () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", [5,1,4,2,3])])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([5,1,4,2,3]))])
       let lf = DataFrame.lazy(df)
                |> DataFrame.filter(Gt(Col("x"), LitInt(2)))
                |> DataFrame.sort_by([("x", Asc)])
@@ -16245,7 +16244,7 @@ let test_df_lazy_chain () =
 let test_df_with_column () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", [1,2,3])])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3]))])
       let lf = DataFrame.lazy(df)
                |> DataFrame.with_column("doubled", fn row ->
                     match DataFrame.row_get_int(row, "x") do
@@ -16269,7 +16268,7 @@ let test_df_with_column () =
 let test_df_groupby_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([StrCol("cat", ["a","b","a","b","a"])])
+      let df = DataFrame.make_df([StrCol("cat", typed_array_from_list(["a","b","a","b","a"]))])
       let gb = DataFrame.group_by(df, ["cat"])
       match DataFrame.agg(gb, [Count]) do
       Ok(df2) -> DataFrame.row_count(df2)
@@ -16283,8 +16282,8 @@ let test_df_groupby_sum () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
       let df = DataFrame.make_df([
-        StrCol("cat", ["a","b","a"]),
-        IntCol("val", [10, 20, 30])
+        StrCol("cat", typed_array_from_list(["a","b","a"])),
+        IntCol("val", typed_array_from_list([10, 20, 30]))
       ])
       let gb = DataFrame.group_by(df, ["cat"])
       match DataFrame.agg(gb, [Sum("val")]) do
@@ -16304,8 +16303,8 @@ let test_df_groupby_sum () =
 let test_df_inner_join () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let left  = DataFrame.make_df([IntCol("id",[1,2,3]), StrCol("name",["a","b","c"])])
-      let right = DataFrame.make_df([IntCol("id",[2,3,4]), IntCol("score",[10,20,30])])
+      let left  = DataFrame.make_df([IntCol("id", typed_array_from_list([1,2,3])), StrCol("name", typed_array_from_list(["a","b","c"]))])
+      let right = DataFrame.make_df([IntCol("id", typed_array_from_list([2,3,4])), IntCol("score", typed_array_from_list([10,20,30]))])
       let lf    = DataFrame.lazy(left) |> DataFrame.inner_join(right, ["id"])
       match DataFrame.collect(lf) do
       Ok(df) -> DataFrame.row_count(df)
@@ -16318,8 +16317,8 @@ let test_df_inner_join () =
 let test_df_left_join_row_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let left  = DataFrame.make_df([IntCol("id", [1,2,3])])
-      let right = DataFrame.make_df([IntCol("id",[2,3]), StrCol("tag",["x","y"])])
+      let left  = DataFrame.make_df([IntCol("id", typed_array_from_list([1,2,3]))])
+      let right = DataFrame.make_df([IntCol("id", typed_array_from_list([2,3])), StrCol("tag", typed_array_from_list(["x","y"]))])
       let lf    = DataFrame.lazy(left) |> DataFrame.left_join(right, ["id"])
       match DataFrame.collect(lf) do
       Ok(df) -> DataFrame.row_count(df)
@@ -16332,8 +16331,8 @@ let test_df_left_join_row_count () =
 let test_df_left_join_null_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let left  = DataFrame.make_df([IntCol("id", [1,2,3])])
-      let right = DataFrame.make_df([IntCol("id",[2,3]), StrCol("tag",["x","y"])])
+      let left  = DataFrame.make_df([IntCol("id", typed_array_from_list([1,2,3]))])
+      let right = DataFrame.make_df([IntCol("id", typed_array_from_list([2,3])), StrCol("tag", typed_array_from_list(["x","y"]))])
       let lf    = DataFrame.lazy(left) |> DataFrame.left_join(right, ["id"])
       match DataFrame.collect(lf) do
       Ok(df) ->
@@ -16350,8 +16349,8 @@ let test_df_left_join_null_count () =
 let test_df_right_join_row_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let left  = DataFrame.make_df([IntCol("id",[2,3]), StrCol("name",["b","c"])])
-      let right = DataFrame.make_df([IntCol("id",[1,2,3,4])])
+      let left  = DataFrame.make_df([IntCol("id", typed_array_from_list([2,3])), StrCol("name", typed_array_from_list(["b","c"]))])
+      let right = DataFrame.make_df([IntCol("id", typed_array_from_list([1,2,3,4]))])
       let lf    = DataFrame.lazy(left) |> DataFrame.right_join(right, ["id"])
       match DataFrame.collect(lf) do
       Ok(df) -> DataFrame.row_count(df)
@@ -16364,8 +16363,8 @@ let test_df_right_join_row_count () =
 let test_df_outer_join_row_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let left  = DataFrame.make_df([IntCol("id", [1,2])])
-      let right = DataFrame.make_df([IntCol("id", [2,3])])
+      let left  = DataFrame.make_df([IntCol("id", typed_array_from_list([1,2]))])
+      let right = DataFrame.make_df([IntCol("id", typed_array_from_list([2,3]))])
       let lf    = DataFrame.lazy(left) |> DataFrame.outer_join(right, ["id"])
       match DataFrame.collect(lf) do
       Ok(df) -> DataFrame.row_count(df)
@@ -16378,8 +16377,8 @@ let test_df_outer_join_row_count () =
 let test_df_inner_join_col_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let left  = DataFrame.make_df([IntCol("id",[1,2]), StrCol("name",["a","b"])])
-      let right = DataFrame.make_df([IntCol("id",[1,2]), IntCol("score",[10,20])])
+      let left  = DataFrame.make_df([IntCol("id", typed_array_from_list([1,2])), StrCol("name", typed_array_from_list(["a","b"]))])
+      let right = DataFrame.make_df([IntCol("id", typed_array_from_list([1,2])), IntCol("score", typed_array_from_list([10,20]))])
       let lf    = DataFrame.lazy(left) |> DataFrame.inner_join(right, ["id"])
       match DataFrame.collect(lf) do
       Ok(df) -> DataFrame.col_count(df)
@@ -16395,7 +16394,7 @@ let test_df_inner_join_col_count () =
 let test_df_col_describe_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("v",[1,2,3,4,5])])
+      let df = DataFrame.make_df([IntCol("v", typed_array_from_list([1,2,3,4,5]))])
       List.length(DataFrame.col_describe(df))
     end
   end|} in
@@ -16404,7 +16403,7 @@ let test_df_col_describe_count () =
 let test_df_describe_row_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x",[1,2,3]), FloatCol("y",[4.0,5.0,6.0])])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3])), FloatCol("y", typed_array_from_list([4.0,5.0,6.0]))])
       DataFrame.row_count(DataFrame.summarize(df))
     end
   end|} in
@@ -16413,7 +16412,7 @@ let test_df_describe_row_count () =
 let test_df_describe_column_name () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("score", [1,2,3])])
+      let df = DataFrame.make_df([IntCol("score", typed_array_from_list([1,2,3]))])
       let d  = DataFrame.summarize(df)
       match DataFrame.get_string_col(d, "column") do
       Ok(names) -> List.nth(names, 0)
@@ -16426,7 +16425,7 @@ let test_df_describe_column_name () =
 let test_df_sample_count () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", [0,1,2,3,4,5,6,7,8,9])])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([0,1,2,3,4,5,6,7,8,9]))])
       DataFrame.row_count(DataFrame.sample(df, 3))
     end
   end|} in
@@ -16435,7 +16434,7 @@ let test_df_sample_count () =
 let test_df_sample_n_ge_total () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", [1,2,3])])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3]))])
       DataFrame.row_count(DataFrame.sample(df, 10))
     end
   end|} in
@@ -16444,7 +16443,7 @@ let test_df_sample_n_ge_total () =
 let test_df_sample_zero () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", [1,2,3])])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([1,2,3]))])
       DataFrame.row_count(DataFrame.sample(df, 0))
     end
   end|} in
@@ -16453,7 +16452,7 @@ let test_df_sample_zero () =
 let test_df_train_test_split () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", [0,1,2,3,4,5,6,7,8,9])])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([0,1,2,3,4,5,6,7,8,9]))])
       let (train_df, test_df) = DataFrame.train_test_split(df, 0.8)
       DataFrame.row_count(train_df) * 100 + DataFrame.row_count(test_df)
     end
@@ -16489,10 +16488,10 @@ let test_df_col_mul_float () =
 let test_df_col_add_col_int () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let a = IntCol("a", [1, 2, 3])
-      let b = IntCol("b", [10, 20, 30])
+      let a = IntCol("a", typed_array_from_list([1, 2, 3]))
+      let b = IntCol("b", typed_array_from_list([10, 20, 30]))
       match DataFrame.col_add_col(a, b) do
-      Ok(IntCol(_, data)) -> List.nth(data, 2)
+      Ok(IntCol(_, data)) -> typed_array_get(data, 2)
       _ -> -1
       end
     end
@@ -16502,8 +16501,8 @@ let test_df_col_add_col_int () =
 let test_df_col_add_col_length_mismatch () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let a = IntCol("a", [1,2,3])
-      let b = IntCol("b", [10,20])
+      let a = IntCol("a", typed_array_from_list([1,2,3]))
+      let b = IntCol("b", typed_array_from_list([10,20]))
       match DataFrame.col_add_col(a, b) do
       Ok(_)  -> false
       Err(_) -> true
@@ -16517,12 +16516,12 @@ let test_df_col_add_col_length_mismatch () =
 let test_df_col_z_score () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let col = FloatCol("v", [1.0, 2.0, 3.0])
+      let col = FloatCol("v", typed_array_from_list([1.0, 2.0, 3.0]))
       match DataFrame.col_z_score(col) do
-      Ok(FloatCol(_, data)) ->
-        let mid = List.nth(data, 1)
+      Ok(FloatCol(_, data)) -> do
+        let mid = typed_array_get(data, 1)
         if mid > -0.001 && mid < 0.001 do 1 else 0 end
-        if mid > -0.001 && mid < 0.001 then 1 else 0
+      end
       _ -> -1
       end
     end
@@ -16532,13 +16531,13 @@ let test_df_col_z_score () =
 let test_df_col_normalize () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let col = FloatCol("v", [0.0, 5.0, 10.0])
+      let col = FloatCol("v", typed_array_from_list([0.0, 5.0, 10.0]))
       match DataFrame.col_normalize(col) do
-      Ok(FloatCol(_, data)) ->
-        let mn = List.nth(data, 0)
-        let mx = List.nth(data, 2)
+      Ok(FloatCol(_, data)) -> do
+        let mn = typed_array_get(data, 0)
+        let mx = typed_array_get(data, 2)
         if mn > -0.001 && mn < 0.001 && mx > 0.999 && mx < 1.001 do 1 else 0 end
-        if mn > -0.001 && mn < 0.001 && mx > 0.999 && mx < 1.001 then 1 else 0
+      end
       _ -> -1
       end
     end
@@ -16550,7 +16549,7 @@ let test_df_col_normalize () =
 let test_df_value_counts () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([StrCol("color", ["red","blue","red","red","blue"])])
+      let df = DataFrame.make_df([StrCol("color", typed_array_from_list(["red","blue","red","red","blue"]))])
       match DataFrame.value_counts(df, "color") do
       Ok(vc) -> DataFrame.row_count(vc)
       Err(_) -> -1
@@ -16570,7 +16569,7 @@ let test_df_empty_head () =
 let test_df_empty_filter () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("x", Nil)])
+      let df = DataFrame.make_df([IntCol("x", typed_array_from_list([]))])
       let lf = DataFrame.lazy(df) |> DataFrame.filter(Gt(Col("x"), LitInt(0)))
       match DataFrame.collect(lf) do
       Ok(df2) -> DataFrame.row_count(df2)
@@ -16583,7 +16582,7 @@ let test_df_empty_filter () =
 let test_df_single_row () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("v", [42])])
+      let df = DataFrame.make_df([IntCol("v", typed_array_from_list([42]))])
       match DataFrame.get_int_col(df, "v") do
       Ok(xs) -> List.nth(xs, 0)
       Err(_) -> -1
@@ -16595,7 +16594,7 @@ let test_df_single_row () =
 let test_df_rename_column () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
-      let df = DataFrame.make_df([IntCol("old_name", [1,2,3])])
+      let df = DataFrame.make_df([IntCol("old_name", typed_array_from_list([1,2,3]))])
       match DataFrame.rename_column(df, "old_name", "new_name") do
       Ok(df2) -> List.nth(DataFrame.schema(df2), 0)
       Err(_)  -> "err"
@@ -16608,7 +16607,7 @@ let test_df_drop_nulls () =
   let env = eval_with_dataframe {|mod Test do
     fn f() do
       let df = DataFrame.make_df([
-        NullableIntCol("x", [1,0,3], [false,true,false])
+        NullableIntCol("x", typed_array_from_list([1,0,3]), typed_array_from_list([false,true,false]))
       ])
       let clean = DataFrame.drop_nulls(df)
       DataFrame.row_count(clean)

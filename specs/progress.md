@@ -226,11 +226,11 @@ march/
     └── test/test_forge.exe   # 15 tests (scaffold, toml)
 ```
 
-## Current State (as of 2026-03-26, post event-loop HTTP server + SIMD HTTP parser + Phase 5 per-process heaps + message passing + zero-copy response builder + Perceus closure-FV RC fix + LSP code actions P2.8+P3.10 + Phase 4 lazy stack growth + crypto builtins for Depot/PostgreSQL + P9 columnar DataFrame + Phoenix-style Channels stdlib + TLS stdlib)
+## Current State (as of 2026-03-26, post event-loop HTTP server + SIMD HTTP parser + Phase 5 per-process heaps + message passing + zero-copy response builder + Perceus closure-FV RC fix + LSP code actions P2.8+P3.10 + Phase 4 lazy stack growth + crypto builtins for Depot/PostgreSQL + P9 columnar DataFrame + Phoenix-style Channels stdlib + TLS stdlib + syntax overhaul NL token filter + LSP stdlib Token_filter fix)
 
 - **Builds clean**
-- **1333 OCaml tests + 7 C test groups (Phase 5) + 10 C scheduler tests (Phase 1+2+4) across 10 dune suites; 37 known pre-existing OCaml failures** (+5 mutual_tco_codegen + 10 borrow_inference + 8 known_call/struct_fusion + 6 escape_analysis + 4 phase4_reduction_codegen) (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing** + **Phase 4: reduction counting in compiled code** + **Phase 4: lazy stack growth**):
-  - `test_march.exe`: 1104 tests (+5 mutual_tco_codegen, +10 borrow_inference, +8 known_call/struct_fusion, +6 escape_analysis, +4 phase4_reduction_codegen; 14 failures: JIT/clang-dependent tests skip gracefully when clang absent)
+- **0 known failures** across all test suites (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing** + **Phase 4: reduction counting in compiled code** + **Phase 4: lazy stack growth**):
+  - `test_march.exe`: 1151 tests, 0 failures
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests (23 failures: pre-existing formatter round-trip failures)
@@ -241,7 +241,7 @@ march/
   - `test_forge.exe`: 15 tests, passing (scaffold/toml)
   - `test_oracle.exe`: requires `MARCH_BIN` env var (oracle/idempotency/pass tests)
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present
-- **Match syntax**: `match expr do | Pat -> body end` (changed from `with` to `do` in 2026-03-21 — Elixir case-style)
+- **Match syntax**: `match expr do Pat -> body end` — no leading `|` on arms; NL separates arms inside match body; multi-statement arms use `-> do ... end` wrapper (2026-03-26 syntax overhaul)
 - **String interpolation**: `${}` syntax fully implemented — `INTERP_START`/`INTERP_MID`/`INTERP_END` tokens in lexer; desugars to `++`/`to_string` chains (`lib/desugar/desugar.ml`)
 - **Code formatter**: `march fmt [--check] <files>` — reformats source in-place (`lib/format/format.ml`, `bin/main.ml`)
 - **Doctest extraction and execution** — `lib/doctest/doctest.ml` extracts `march>` examples from `fn_doc` strings; supports multi-line expressions (`...>` continuations), expected output matching, and panic expectations (`** panic: message`); `run_doctests` in `eval.ml` evaluates examples in the module environment; `march test` automatically runs doctests after regular tests per file; `stdlib/option.march` has 8 example doctests
