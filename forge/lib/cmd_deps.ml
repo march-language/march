@@ -42,8 +42,14 @@ let resolve_commit path =
   | (0, sha) when String.length sha >= 7 -> Some sha
   | _ -> None
 
-(** Placeholder hash until Phase 3 CAS integration. *)
-let placeholder_hash name = Printf.sprintf "pending:%s" name
+(** Compute the content hash for a resolved dep directory.
+    Uses the CAS canonical archive hash; falls back to a placeholder if
+    the directory doesn't exist yet (e.g. registry deps not yet fetched). *)
+let content_hash ~name ~source dir =
+  if Sys.file_exists dir then
+    Resolver_cas_package.store_directory ~name ~source dir
+  else
+    Printf.sprintf "pending:%s" name
 
 (* ------------------------------------------------------------------ *)
 (*  Install / update per dep type                                      *)
@@ -63,7 +69,7 @@ let install_dep name (dep : Project.dep) =
     let e = Resolver_lockfile.{ name; version = None;
                                  source = "registry:forge";
                                  commit = None;
-                                 hash = placeholder_hash name } in
+                                 hash = Printf.sprintf "pending:%s" name } in
     Ok e
 
   | Project.GitTagDep { url; tag } ->
@@ -72,7 +78,7 @@ let install_dep name (dep : Project.dep) =
       let commit = resolve_commit dest in
       let e = Resolver_lockfile.{ name; version = Some tag;
                                    source = "git:" ^ url;
-                                   commit; hash = placeholder_hash name } in
+                                   commit; hash = content_hash ~name ~source:("git:" ^ url) dest } in
       Ok e
     end else begin
       Printf.printf "  %s: cloning %s @ %s...\n%!" name url tag;
@@ -91,7 +97,7 @@ let install_dep name (dep : Project.dep) =
         in
         let e = Resolver_lockfile.{ name; version = ver_str;
                                      source = "git:" ^ url;
-                                     commit; hash = placeholder_hash name } in
+                                     commit; hash = content_hash ~name ~source:("git:" ^ url) dest } in
         Ok e
       end else
         Error (Printf.sprintf "failed to clone %s @ %s (exit %d)" url tag rc)
@@ -103,7 +109,7 @@ let install_dep name (dep : Project.dep) =
       let commit = resolve_commit dest in
       let e = Resolver_lockfile.{ name; version = None;
                                    source = "git:" ^ url;
-                                   commit; hash = placeholder_hash name } in
+                                   commit; hash = content_hash ~name ~source:("git:" ^ url) dest } in
       Ok e
     end else begin
       Printf.printf "  %s: cloning %s @ branch %s...\n%!" name url branch;
@@ -114,7 +120,7 @@ let install_dep name (dep : Project.dep) =
         let commit = resolve_commit dest in
         let e = Resolver_lockfile.{ name; version = None;
                                      source = "git:" ^ url;
-                                     commit; hash = placeholder_hash name } in
+                                     commit; hash = content_hash ~name ~source:("git:" ^ url) dest } in
         Ok e
       end else
         Error (Printf.sprintf "failed to clone %s (branch %s, exit %d)" url branch rc)
@@ -126,7 +132,7 @@ let install_dep name (dep : Project.dep) =
       let e = Resolver_lockfile.{ name; version = None;
                                    source = "git:" ^ url;
                                    commit = Some rev;
-                                   hash = placeholder_hash name } in
+                                   hash = content_hash ~name ~source:("git:" ^ url) dest } in
       Ok e
     end else begin
       Printf.printf "  %s: cloning %s @ %s...\n%!" name url rev;
@@ -140,7 +146,7 @@ let install_dep name (dep : Project.dep) =
         let e = Resolver_lockfile.{ name; version = None;
                                      source = "git:" ^ url;
                                      commit = Some rev;
-                                     hash = placeholder_hash name } in
+                                     hash = content_hash ~name ~source:("git:" ^ url) dest } in
         Ok e
       end else
         Error (Printf.sprintf "failed to clone %s @ %s (exit %d)" url rev rc)
@@ -149,10 +155,11 @@ let install_dep name (dep : Project.dep) =
   | Project.PathDep path ->
     if Sys.file_exists path then begin
       Printf.printf "  %s: found at %s\n%!" name path;
+      let hash = content_hash ~name ~source:("path:" ^ path) path in
       let e = Resolver_lockfile.{ name; version = None;
                                    source = "path:" ^ path;
                                    commit = None;
-                                   hash = placeholder_hash name } in
+                                   hash } in
       Ok e
     end else
       Error (Printf.sprintf "path dep '%s' not found: %s" name path)
