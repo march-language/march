@@ -3,7 +3,6 @@ module.exports = grammar({
 
   externals: $ => [
     $.block_comment,
-    $.sigil_prefix,
   ],
 
   extras: $ => [
@@ -442,12 +441,11 @@ module.exports = grammar({
     assert_expression: $ => seq('assert', field('value', $._expr)),
 
     // Sigil expressions: ~H"...", ~H"""..."""
-    // Uses external scanner for sigil_prefix (~H, ~R, etc.) to avoid
-    // lexer conflicts with type_identifier.
     sigil_expression: $ => seq(
       field('prefix', $.sigil_prefix),
       field('content', choice($.string, $.triple_string)),
     ),
+    sigil_prefix: _ => token(prec(10, /~[A-Z]/)),
 
     match_expression: $ => seq(
       'match', field('value', $._expr), 'do',
