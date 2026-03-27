@@ -169,6 +169,13 @@ let load_from root =
   { name; version; project_type = project_type_of_string type_str;
     description; author; root; deps; dev_deps; patches }
 
+let load_from_dir dir =
+  try Ok (load_from dir)
+  with
+  | Sys_error msg -> Error msg
+  | Failure msg   -> Error msg
+  | Toml.Parse_error msg -> Error ("forge.toml parse error: " ^ msg)
+
 let load () =
   match find_forge_toml () with
   | None -> Error "no forge.toml found in current directory or any parent"
