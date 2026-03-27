@@ -16011,6 +16011,171 @@ let eval_with_dataframe src =
     Lazy.force df_decl;
   ] src
 
+(* ── Vault stdlib tests ─────────────────────────────────────────────────── *)
+
+let vault_decl = lazy (load_stdlib_file_for_test "vault.march")
+let eval_with_vault src = eval_with_stdlib [Lazy.force vault_decl] src
+
+let test_vault_set_get () =
+  let env = eval_with_vault {|mod Test do
+    fn f() do
+      let t = Vault.new("users")
+      Vault.set(t, "alice", 42)
+      Vault.get(t, "alice")
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "get after set returns value" 42
+    (vint (vsome v))
+
+let test_vault_get_missing () =
+  let env = eval_with_vault {|mod Test do
+    fn f() do
+      let t = Vault.new("cache")
+      Vault.get(t, "nobody")
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check bool) "get missing key returns None" true
+    (match v with March_eval.Eval.VCon ("None", []) -> true | _ -> false)
+
+let test_vault_drop () =
+  let env = eval_with_vault {|mod Test do
+    fn f() do
+      let t = Vault.new("store")
+      Vault.set(t, 1, "one")
+      Vault.drop(t, 1)
+      Vault.get(t, 1)
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check bool) "get after drop returns None" true
+    (match v with March_eval.Eval.VCon ("None", []) -> true | _ -> false)
+
+let test_vault_update () =
+  let env = eval_with_vault {|mod Test do
+    fn f() do
+      let t = Vault.new("counters")
+      Vault.set(t, :hits, 0)
+      Vault.update(t, :hits, fn n -> n + 1)
+      Vault.update(t, :hits, fn n -> n + 1)
+      Vault.get(t, :hits)
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "update increments value twice" 2
+    (vint (vsome v))
+
+let test_vault_update_noop_on_missing () =
+  let env = eval_with_vault {|mod Test do
+    fn f() do
+      let t = Vault.new("empty_t")
+      Vault.update(t, "absent", fn n -> n + 1)
+      Vault.size(t)
+    end
+  end|} in
+  Alcotest.(check int) "update on missing key is no-op" 0
+    (vint (call_fn env "f" []))
+
+let test_vault_size () =
+  let env = eval_with_vault {|mod Test do
+    fn f() do
+      let t = Vault.new("things")
+      Vault.set(t, 1, "a")
+      Vault.set(t, 2, "b")
+      Vault.set(t, 3, "c")
+      Vault.size(t)
+    end
+  end|} in
+  Alcotest.(check int) "size counts three entries" 3
+    (vint (call_fn env "f" []))
+
+let test_vault_set_ttl_live () =
+  (* TTL of 60 seconds — entry is still live immediately after insertion *)
+  let env = eval_with_vault {|mod Test do
+    fn f() do
+      let t = Vault.new("session")
+      Vault.set_ttl(t, "tok", "abc", 60)
+      Vault.get(t, "tok")
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check string) "set_ttl: entry live within TTL" "abc"
+    (vstr (vsome v))
+
+let test_vault_set_ttl_expired () =
+  (* TTL of -1 seconds — entry is already expired at insertion time *)
+  let env = eval_with_vault {|mod Test do
+    fn f() do
+      let t = Vault.new("expired_cache")
+      Vault.set_ttl(t, "stale", "old", -1)
+      Vault.get(t, "stale")
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check bool) "set_ttl with negative TTL: entry expired immediately" true
+    (match v with March_eval.Eval.VCon ("None", []) -> true | _ -> false)
+
+let test_vault_get_or () =
+  let env = eval_with_vault {|mod Test do
+    fn f() do
+      let t = Vault.new("defaults")
+      Vault.get_or(t, "missing", 99)
+    end
+  end|} in
+  Alcotest.(check int) "get_or returns default for absent key" 99
+    (vint (call_fn env "f" []))
+
+let test_vault_has () =
+  let env = eval_with_vault {|mod Test do
+    fn f() do
+      let t = Vault.new("presence")
+      Vault.set(t, "key", true)
+      (Vault.has(t, "key"), Vault.has(t, "other"))
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  (match v with
+   | March_eval.Eval.VTuple [March_eval.Eval.VBool a; March_eval.Eval.VBool b] ->
+     Alcotest.(check bool) "has existing key = true"  true  a;
+     Alcotest.(check bool) "has missing  key = false" false b
+   | _ -> Alcotest.fail "expected tuple")
+
+(* Concurrent-write stress test: N threads x M writes each, unique keys per
+   thread.  Runs directly against the OCaml-level shard structures (bypassing
+   the March interpreter) so it exercises the Mutex/Hashtbl layer in true
+   parallel mode.  With OCaml 5 there is no GIL; threads genuinely run in
+   parallel on multiple cores.  If the locking is broken, Hashtbl corruption
+   will cause a wrong count or an exception. *)
+let test_vault_concurrent_writes () =
+  let id = !(March_eval.Eval.vault_next_id) in
+  March_eval.Eval.vault_next_id := id + 1;
+  let tbl = March_eval.Eval.vault_make_table id "concurrent_writes_test" in
+  Hashtbl.replace March_eval.Eval.vault_registry id tbl;
+  let n_threads = 8 in
+  let n_writes  = 250 in
+  let run_thread tid () =
+    for i = 0 to n_writes - 1 do
+      let k = Printf.sprintf "t%di%d" tid i in
+      let shard = March_eval.Eval.vault_shard_for k tbl.March_eval.Eval.vt_shards in
+      Mutex.lock shard.March_eval.Eval.vs_mutex;
+      Hashtbl.replace shard.March_eval.Eval.vs_data k
+        { March_eval.Eval.vr_value  = March_eval.Eval.VInt (tid * 10000 + i);
+          March_eval.Eval.vr_expiry = None };
+      Mutex.unlock shard.March_eval.Eval.vs_mutex
+    done
+  in
+  let threads = Array.init n_threads (fun tid -> Thread.create (run_thread tid) ()) in
+  Array.iter Thread.join threads;
+  let total = Array.fold_left (fun acc shard ->
+    Mutex.lock shard.March_eval.Eval.vs_mutex;
+    let n = Hashtbl.length shard.March_eval.Eval.vs_data in
+    Mutex.unlock shard.March_eval.Eval.vs_mutex;
+    acc + n
+  ) 0 tbl.March_eval.Eval.vt_shards in
+  Hashtbl.remove March_eval.Eval.vault_registry id;
+  Alcotest.(check int) "all writes committed" (n_threads * n_writes) total
+
 (* ── Construction ── *)
 
 let test_df_empty_row_count () =
@@ -18083,5 +18248,18 @@ let () =
         Alcotest.test_case "empty filter"                   `Quick test_df_empty_filter;
         Alcotest.test_case "single row"                     `Quick test_df_single_row;
         Alcotest.test_case "drop_nulls"                     `Quick test_df_drop_nulls;
+      ]);
+      ("vault stdlib", [
+        Alcotest.test_case "set and get"                  `Quick test_vault_set_get;
+        Alcotest.test_case "get missing key"              `Quick test_vault_get_missing;
+        Alcotest.test_case "drop removes key"             `Quick test_vault_drop;
+        Alcotest.test_case "update applies fn"            `Quick test_vault_update;
+        Alcotest.test_case "update noop on missing"       `Quick test_vault_update_noop_on_missing;
+        Alcotest.test_case "size counts entries"          `Quick test_vault_size;
+        Alcotest.test_case "set_ttl live within window"   `Quick test_vault_set_ttl_live;
+        Alcotest.test_case "set_ttl expired immediately"  `Quick test_vault_set_ttl_expired;
+        Alcotest.test_case "get_or default"               `Quick test_vault_get_or;
+        Alcotest.test_case "has present and absent"       `Quick test_vault_has;
+        Alcotest.test_case "concurrent writes no lost updates" `Slow test_vault_concurrent_writes;
       ]);
     ]
