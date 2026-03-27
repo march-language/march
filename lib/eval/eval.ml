@@ -3576,11 +3576,13 @@ let base_env : env =
                try
                  let (r, _, _) = select [server_sock] [] [] 1.0 in r
                with Unix_error (EINTR, _, _) -> []
+                  | _ -> []
              in
              if readable <> [] && not !shutdown_requested then
                (match
                  (try Some (accept server_sock)
-                  with Unix_error (EINTR, _, _) -> None)
+                  with Unix_error (EINTR, _, _) -> None
+                     | _ -> None)
                with
                | None -> ()
                | Some (client_sock, _addr) ->
@@ -3589,7 +3591,14 @@ let base_env : env =
                  (try close client_sock with _ -> ()))
            done;
            Printf.eprintf "march: Shutting down...\n%!"
-         with exn ->
+         with
+         (* EINTR from accept/select that slipped past inner handlers —
+            treat as a clean shutdown rather than re-raising as a fatal error *)
+         | Unix_error (EINTR, _, _) ->
+           Printf.eprintf "march: Shutting down...\n%!";
+           (try close server_sock with _ -> ());
+           exit 0
+         | exn ->
            (try close server_sock with _ -> ());
            raise exn);
         (try close server_sock with _ -> ());

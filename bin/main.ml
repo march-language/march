@@ -989,7 +989,13 @@ let compile filename =
      | March_eval.Eval.Eval_error msg ->
        Printf.eprintf "%s: runtime error: %s\n" filename msg; exit 1
      | March_eval.Eval.Match_failure msg ->
-       Printf.eprintf "%s: match failure: %s\n" filename msg; exit 1);
+       Printf.eprintf "%s: match failure: %s\n" filename msg; exit 1
+     | Unix.Unix_error (Unix.EINTR, syscall, _) ->
+       (* SIGINT interrupted a blocking syscall (accept/select/recv) —
+          print nothing if shutdown was requested, otherwise show the call *)
+       if not !March_eval.Eval.shutdown_requested then
+         Printf.eprintf "%s: interrupted syscall: %s\n" filename syscall;
+       exit 0);
     March_debug.Debug.uninstall ()
   end
 
