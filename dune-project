@@ -32,7 +32,8 @@
   (ocaml (>= 5.3.0))
   (dune (>= 3.0))
   (cmdliner (>= 1.3.0))
-  (alcotest (>= 1.7.0))))
+  (alcotest (>= 1.7.0))
+  (digestif (>= 1.0))))
 
 (package
  (name march-lsp)

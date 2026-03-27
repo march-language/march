@@ -41,7 +41,7 @@ let build ~release =
             in
             let d = Filename.concat abs_path "lib" in
             if Sys.file_exists d then Some d else None
-          | Project.GitDep _ -> None
+          | _ -> None
         ) proj.Project.deps in
       (* MARCH_LIB_PATH: dep libs + lib/ + config/ (if present) *)
       let all_lib_paths =

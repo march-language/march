@@ -19,7 +19,7 @@ let run () =
           in
           let d = Filename.concat abs_path "lib" in
           if Sys.file_exists d then Some d else None
-        | Project.GitDep _ -> None
+        | _ -> None
       ) proj.Project.deps in
     let all_lib_paths =
       dep_lib_paths @ [lib_dir]
