@@ -2662,6 +2662,10 @@ let rec infer_expr env (e : Ast.expr) : ty =
       let bindings, pat_ty = infer_pattern env b.bind_pat in
       let reason = Some (RLetBind sp) in
       unify env ~span:sp ~reason rhs_ty pat_ty;
+      (* Record variable name type for hover even in tail position *)
+      (match b.bind_pat with
+       | Ast.PatVar name -> Hashtbl.replace env.type_map name.span (repr rhs_ty)
+       | _ -> ());
       ignore bindings;
       t_unit
 
@@ -3005,6 +3009,12 @@ and infer_block env exprs =
     let rhs_ty  = infer_expr env b.bind_expr in
     let bindings, pat_ty = infer_pattern env b.bind_pat in
     unify env ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
+    (* Record the binding type in type_map so LSP hover over `let x = …` shows
+       the RHS type rather than the enclosing block's return type. *)
+    Hashtbl.replace env.type_map sp (repr rhs_ty);
+    (match b.bind_pat with
+     | Ast.PatVar name -> Hashtbl.replace env.type_map name.span (repr rhs_ty)
+     | _ -> ());
     (* Generalise the binding if it's a simple variable — let-polymorphism *)
     let gen_binding bnd = match bnd with
       | (name, Mono t) -> (name, generalize (env.level - 1) t)
