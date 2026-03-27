@@ -7,7 +7,7 @@ description = "March language support for Zed"
 
 [grammars.march]
 repository = "file:///Users/80197052/code/march"
-rev = "41e6be9181ebc1ee46c966e6ba6864af4dea93a3"
+rev = "ad60a650de3abdae96bd479f6d09791a2affcd45"
 path = "tree-sitter-march"
 
 [language_servers.march-lsp]
