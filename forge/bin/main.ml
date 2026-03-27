@@ -17,9 +17,11 @@ let new_cmd =
   let app_flag  = Arg.(value & flag & info ["app"]  ~doc:"Application project (default)") in
   let lib_flag  = Arg.(value & flag & info ["lib"]  ~doc:"Library project") in
   let tool_flag = Arg.(value & flag & info ["tool"] ~doc:"CLI tool project") in
-  let run name _is_app is_lib is_tool =
+  let lib_tool_flag = Arg.(value & flag & info ["lib-tool"] ~doc:"Library + CLI tool project") in
+  let run name _is_app is_lib is_tool is_lib_tool =
     let pt =
-      if is_lib  then Project.Lib
+      if is_lib_tool then Project.LibTool
+      else if is_lib  then Project.Lib
       else if is_tool then Project.Tool
       else Project.App
     in
@@ -30,7 +32,7 @@ let new_cmd =
      | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1)
   in
   Cmd.v (Cmd.info "new" ~doc:"Create a new March project")
-    Term.(const run $ name $ app_flag $ lib_flag $ tool_flag)
+    Term.(const run $ name $ app_flag $ lib_flag $ tool_flag $ lib_tool_flag)
 
 (* ----------------------------------------------------------------- forge build *)
 

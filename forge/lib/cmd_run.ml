@@ -5,7 +5,7 @@ let run () =
   | Error msg -> Error msg
   | Ok proj ->
     if proj.Project.project_type = Project.Lib then
-      Error "cannot run a library project (use 'forge test' instead)"
+      Error "cannot run a library project (use 'forge build' or 'forge test' instead)"
     else begin
       let lib_dir    = Filename.concat proj.Project.root "lib" in
       let config_dir = Filename.concat proj.Project.root "config" in

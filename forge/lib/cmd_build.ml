@@ -56,7 +56,7 @@ let build ~release =
           (* Type-check all lib sources together (no binary output) *)
           let files_str = String.concat " " (List.map Filename.quote files) in
           Printf.sprintf "%smarch check %s" lib_path_env files_str
-        | Project.App | Project.Tool ->
+        | Project.App | Project.Tool | Project.LibTool ->
           (* Entry point is lib/<name>.march; resolver finds imports via MARCH_LIB_PATH *)
           let entry = Filename.concat lib_dir (proj.Project.name ^ ".march") in
           Printf.sprintf "%smarch --compile -o %s%s %s"
