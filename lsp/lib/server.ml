@@ -119,7 +119,7 @@ class march_server =
 
     method config_completion =
       Some (Lsp.Types.CompletionOptions.create
-              ~triggerCharacters:["." ; "|" ; " "]
+              ~triggerCharacters:["." ; "|" ; " " ; "~"]
               ())
 
     method config_inlay_hints =

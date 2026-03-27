@@ -1483,7 +1483,17 @@ let completions_at (a : t) ~line:_ ~character:_ =
   let iface_items = List.map (fun (name, _) ->
       CompletionItem.create ~label:name ~kind:CompletionItemKind.Interface ()
     ) a.interfaces in
-  kw_items @ var_items @ type_items @ ctor_items @ iface_items
+  let sigil_items = List.map (fun (label, detail, insert) ->
+      CompletionItem.create ~label ~detail
+        ~kind:CompletionItemKind.Snippet
+        ~insertText:insert
+        ~insertTextFormat:InsertTextFormat.Snippet ()
+    ) [
+      ("~H", "HTML template sigil → IOList", "~H\"${1:html}\"");
+      ("~R", "Regex sigil", "~R\"${1:pattern}\"");
+      ("~J", "JSON sigil", "~J\"${1:json}\"");
+    ] in
+  kw_items @ var_items @ type_items @ ctor_items @ iface_items @ sigil_items
 
 let inlay_hints_for (a : t) (range : Lsp.Types.Range.t) =
   let open Lsp.Types in

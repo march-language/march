@@ -354,6 +354,7 @@ module.exports = grammar({
       $.list_expression,
       $.send_expression,
       $.spawn_expression,
+      $.sigil_expression,
       $.atom,
       $.typed_hole,
       $.integer,
@@ -438,6 +439,13 @@ module.exports = grammar({
     send_expression: $ => seq('send', '(', $._expr, ',', $._expr, ')'),
     spawn_expression: $ => seq('spawn', '(', $._expr, ')'),
     assert_expression: $ => seq('assert', field('value', $._expr)),
+
+    // Sigil expressions: ~H"...", ~H"""..."""
+    sigil_expression: $ => seq(
+      field('prefix', $.sigil_prefix),
+      field('content', choice($.string, $.triple_string)),
+    ),
+    sigil_prefix: _ => token(prec(10, /~[A-Z]/)),
 
     match_expression: $ => seq(
       'match', field('value', $._expr), 'do',
