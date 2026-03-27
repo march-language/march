@@ -69,15 +69,19 @@ let read_file path =
 (** Resolve cross-file imports.
     Scans [m.mod_decls] for DUse/DAlias that name user modules (not stdlib),
     finds their .march files, parses and desugars them, detects cycles.
-    Returns (errors, extra_dmods_to_prepend). *)
-let resolve_imports ~source_file (m : March_ast.Ast.module_) =
+    Returns (errors, extra_dmods_to_prepend).
+
+    [extra_lib_paths] are prepended to the search path before [MARCH_LIB_PATH].
+    This lets callers (e.g. the LSP) inject paths derived from forge.toml deps
+    without requiring the env var to be set. *)
+let resolve_imports ?(extra_lib_paths=[]) ~source_file (m : March_ast.Ast.module_) =
   let source_dir = Filename.dirname source_file in
-  let extra_lib_paths =
+  let env_lib_paths =
     match Sys.getenv_opt "MARCH_LIB_PATH" with
     | None -> []
     | Some s -> List.filter (fun d -> d <> "") (String.split_on_char ':' s)
   in
-  let search_path = source_dir :: extra_lib_paths in
+  let search_path = source_dir :: (extra_lib_paths @ env_lib_paths) in
   let resolved : (string, March_ast.Ast.decl list) Hashtbl.t = Hashtbl.create 8 in
   let in_progress : (string, unit) Hashtbl.t = Hashtbl.create 4 in
   let errors : (string * March_ast.Ast.span * string) list ref = ref [] in

@@ -10,6 +10,7 @@
   march_typecheck
   march_errors
   march_format
+  march_resolver
   linol.lsp
   linol
   linol-lwt

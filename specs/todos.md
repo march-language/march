@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-26 (Bastion WASM Islands library — Islands framework infrastructure, JS runtime, specs)
+**Last updated:** 2026-03-26 (Bastion WASM Islands library — Islands framework infrastructure, JS runtime, specs; LSP forge.toml dep resolution — cross-file imports from forge deps now work in the LSP)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
