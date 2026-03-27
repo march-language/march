@@ -3556,6 +3556,11 @@ let base_env : env =
         | _ -> eval_error "http_parse_response(raw_string)"))
 
   (* ── HTTP server (interpreter mode: pure-OCaml implementation) ──── *)
+  (* Uses select with a 1-second timeout so the loop can check
+     [shutdown_requested] between iterations.  This lets Ctrl+C (SIGINT)
+     — which sets [shutdown_requested] via the handler installed in
+     [run_module] — exit the server cleanly instead of blocking forever
+     on [accept].  Mirrors the C runtime's g_http_shutdown pattern. *)
   ; ("http_server_listen", VBuiltin ("http_server_listen", function
       | [VInt port; VInt _max_conns; VInt _idle_timeout; pipeline_fn] ->
         let open Unix in
@@ -3565,15 +3570,29 @@ let base_env : env =
         listen server_sock 128;
         Printf.eprintf "march: HTTP server listening on port %d\n%!" port;
         (try
-           while true do
-             let (client_sock, _addr) = accept server_sock in
-             (try handle_http_connection client_sock pipeline_fn
-              with _ -> ());
-             (try close client_sock with _ -> ())
-           done
+           while not !shutdown_requested do
+             (* select with 1s timeout — returns early on EINTR (signal) *)
+             let readable =
+               try
+                 let (r, _, _) = select [server_sock] [] [] 1.0 in r
+               with Unix_error (EINTR, _, _) -> []
+             in
+             if readable <> [] && not !shutdown_requested then
+               (match
+                 (try Some (accept server_sock)
+                  with Unix_error (EINTR, _, _) -> None)
+               with
+               | None -> ()
+               | Some (client_sock, _addr) ->
+                 (try handle_http_connection client_sock pipeline_fn
+                  with _ -> ());
+                 (try close client_sock with _ -> ()))
+           done;
+           Printf.eprintf "march: Shutting down...\n%!"
          with exn ->
            (try close server_sock with _ -> ());
            raise exn);
+        (try close server_sock with _ -> ());
         VUnit
       | _ -> eval_error "http_server_listen(port, max_conns, idle_timeout, pipeline)"))
 
