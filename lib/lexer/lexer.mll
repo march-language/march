@@ -9,6 +9,8 @@ exception Lexer_error of string
     string literal, depth is set to 1; each `{` increments it; `}` that
     would bring it below 1 closes the interpolation. *)
 let interp_depth = ref 0
+(* Whether the current interpolation is inside a triple-quoted string. *)
+let interp_triple = ref false
 
 let keyword_table = Hashtbl.create 32
 let () =
@@ -103,7 +105,10 @@ rule token = parse
         decr interp_depth;
         if !interp_depth = 0 then
           (* Closing brace of interpolation — resume reading the string *)
-          read_string_interp (Buffer.create 16) lexbuf
+          if !interp_triple then
+            read_triple_string_interp (Buffer.create 64) lexbuf
+          else
+            read_string_interp (Buffer.create 16) lexbuf
         else
           RBRACE
       end else
@@ -169,33 +174,56 @@ and read_string buf = parse
   | "${"          {
       (* Begin a string interpolation: emit INTERP_START carrying the prefix *)
       interp_depth := 1;
+      interp_triple := false;
       INTERP_START (Buffer.contents buf)
     }
   | "\\n"         { Buffer.add_char buf '\n'; read_string buf lexbuf }
   | "\\t"         { Buffer.add_char buf '\t'; read_string buf lexbuf }
   | "\\\\"        { Buffer.add_char buf '\\'; read_string buf lexbuf }
   | "\\\""        { Buffer.add_char buf '"'; read_string buf lexbuf }
+  | "\\$"         { Buffer.add_char buf '$'; read_string buf lexbuf }
   | eof           { raise (Lexer_error "Unterminated string literal") }
   | _ as c        { Buffer.add_char buf c; read_string buf lexbuf }
 
 (** Resume reading a string literal after the closing `}` of an interpolation. *)
-(** Triple-quoted string: """..."""  — no interpolation, newlines preserved. *)
+(** Triple-quoted string: """..."""  — interpolation and newlines preserved. *)
 and read_triple_string buf = parse
   | "\"\"\""      { STRING (Buffer.contents buf) }
+  | "${"          {
+      interp_depth := 1;
+      interp_triple := true;
+      INTERP_START (Buffer.contents buf)
+    }
+  | "\\$"         { Buffer.add_char buf '$'; read_triple_string buf lexbuf }
   | newline       { Lexing.new_line lexbuf; Buffer.add_char buf '\n'; read_triple_string buf lexbuf }
   | eof           { raise (Lexer_error "Unterminated triple-quoted string") }
   | _ as c        { Buffer.add_char buf c; read_triple_string buf lexbuf }
+
+(** Resume reading a triple-quoted string after the closing `}` of an interpolation. *)
+and read_triple_string_interp buf = parse
+  | "\"\"\""      { INTERP_END (Buffer.contents buf) }
+  | "${"          {
+      interp_depth := 1;
+      interp_triple := true;
+      INTERP_MID (Buffer.contents buf)
+    }
+  | "\\$"         { Buffer.add_char buf '$'; read_triple_string_interp buf lexbuf }
+  | newline       { Lexing.new_line lexbuf; Buffer.add_char buf '\n'; read_triple_string_interp buf lexbuf }
+  | eof           { raise (Lexer_error "Unterminated triple-quoted string interpolation") }
+  | _ as c        { Buffer.add_char buf c; read_triple_string_interp buf lexbuf }
 
 and read_string_interp buf = parse
   | '"'           { INTERP_END (Buffer.contents buf) }
   | "${"          {
       (* Another interpolation segment *)
       interp_depth := 1;
+      interp_triple := false;
       INTERP_MID (Buffer.contents buf)
     }
   | "\\n"         { Buffer.add_char buf '\n'; read_string_interp buf lexbuf }
   | "\\t"         { Buffer.add_char buf '\t'; read_string_interp buf lexbuf }
   | "\\\\"        { Buffer.add_char buf '\\'; read_string_interp buf lexbuf }
   | "\\\""        { Buffer.add_char buf '"'; read_string_interp buf lexbuf }
+  | "\\$"         { Buffer.add_char buf '$'; read_string_interp buf lexbuf }
   | eof           { raise (Lexer_error "Unterminated string interpolation") }
   | _ as c        { Buffer.add_char buf c; read_string_interp buf lexbuf }

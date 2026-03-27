@@ -11,7 +11,7 @@ mod Sigil do
   doc """
   HTML template sigil handler.
 
-  ~H"<p>Hello, ${name}</p>" desugars to Sigil.h("<p>Hello, " ++ name ++ "</p>")
+  ~H"<p>Hello, \${name}</p>" desugars to Sigil.h("<p>Hello, " ++ name ++ "</p>")
 
   Returns an IOList for zero-copy wire sending. The IOList wraps
   the interpolated string as a single segment — future versions
