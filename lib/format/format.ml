@@ -154,7 +154,14 @@ let fmt_lit = function
       if s.[String.length s - 1] = '.' then s ^ "0"
       else s
     end
-  | LitString s -> "\"" ^ String.escaped s ^ "\""
+  | LitString s ->
+    (* Use triple quotes for multi-line strings that are actual content blocks,
+       not short strings that just contain a \n *)
+    if String.contains s '\n' && String.length s > 10 then
+      let triple = "\"\"\"" in
+      triple ^ s ^ triple
+    else
+      "\"" ^ String.escaped s ^ "\""
   | LitBool b   -> if b then "true" else "false"
   | LitAtom s   -> ":" ^ s
 
@@ -251,11 +258,27 @@ let expr_infix_prec = function
 (* Expressions — inline (single-line) renderer                        *)
 (* ------------------------------------------------------------------ *)
 
+(** Try to reconstruct a list literal from Cons(a, Cons(b, Nil)) *)
+let rec try_collect_list acc = function
+  | ECon ({ txt = "Nil"; _ }, [], _) -> Some (List.rev acc)
+  | ECon ({ txt = "Cons"; _ }, [hd; tl], _) -> try_collect_list (hd :: acc) tl
+  | _ -> None
+
+
 (** Render an expression as a single line.  Used to measure width and
     decide whether to emit inline or break across multiple lines. *)
 let rec expr_inline = function
   | ELit (lit, _)               -> fmt_lit lit
   | EVar { txt; _ }             -> txt
+  (* Reconstruct list literals: Cons(a, Cons(b, Nil)) → [a, b] *)
+  | ECon ({ txt = "Cons"; _ }, [_; _], _) as e ->
+    (match try_collect_list [] e with
+     | Some elems ->
+       Printf.sprintf "[%s]" (String.concat ", " (List.map expr_inline elems))
+     | None ->
+       let[@warning "-8"] ECon ({ txt; _ }, args, _) = e in
+       Printf.sprintf "%s(%s)" txt (String.concat ", " (List.map expr_inline args)))
+  | ECon ({ txt = "Nil"; _ }, [], _) -> "[]"
   | EApp (EVar { txt = op; _ }, [a; b], _) when infix_prec op <> None ->
     (* Binary infix operator — render as  a op b  with precedence-correct parens *)
     let p    = Option.get (infix_prec op) in
@@ -331,8 +354,11 @@ let rec expr_inline = function
       n.txt (String.concat ", " (List.map fmt_param ps)) ty
   | EAssert (e, _)              -> Printf.sprintf "assert %s" (expr_inline e)
   | ESigil (c, content, _)     ->
-    let s = expr_inline content in
-    Printf.sprintf "~%c%s" c s
+    (match content with
+     | ELit (LitString s, _) when String.contains s '\n' ->
+       let triple = "\"\"\"" in
+       Printf.sprintf "~%c%s%s%s" c triple s triple
+     | _ -> Printf.sprintf "~%c%s" c (expr_inline content))
   | ECond _                     -> "match do ... end"
 
 (** Returns true if the expression must be rendered on multiple lines
