@@ -56,6 +56,8 @@ let builtin_names : StringSet.t =
       "file_open"; "file_close"; "file_read"; "file_read_line"; "file_read_chunk";
       "file_write"; "file_append"; "file_delete"; "file_copy"; "file_rename"; "file_stat";
       "file_create_dir"; "file_create_dir_all";
+      "dir_mkdir"; "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list"; "dir_list_full";
+      "process_argv";
       (* TCP/network builtins *)
       "tcp_connect"; "tcp_close"; "tcp_listen"; "tcp_accept";
       "tcp_send_all"; "tcp_recv_all"; "tcp_recv_http"; "tcp_recv_http_headers";

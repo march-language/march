@@ -168,3 +168,7 @@ void    march_send_checked(void *cap, void *msg);
 
 /* Value pretty-printing. */
 void *march_value_to_string(void *v);
+
+/* Process builtins */
+void  march_process_argv_init(int argc, char **argv);
+void *march_process_argv(void);

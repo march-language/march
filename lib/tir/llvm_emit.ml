@@ -260,6 +260,9 @@ let is_builtin_fn name =
                  "file_exists"; "dir_exists";
                  "file_open"; "file_close"; "file_read"; "file_read_line"; "file_read_chunk";
                  "file_write"; "file_append"; "file_delete"; "file_copy"; "file_rename"; "file_stat";
+                 "dir_mkdir"; "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list"; "dir_list_full";
+                 (* Process builtins *)
+                 "process_argv";
                  (* TCP/network builtins *)
                  "tcp_connect"; "tcp_close";
                  (* HTTP builtins *)
@@ -406,6 +409,13 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "file_copy"                   -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
   | "file_rename"                 -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
   | "file_stat"                   -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]))
+  | "dir_mkdir"                   -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
+  | "dir_mkdir_p"                 -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
+  | "dir_rmdir"                   -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
+  | "dir_rm_rf"                   -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
+  | "dir_list"                    -> Some (Tir.TCon ("Result", [Tir.TCon ("List", [Tir.TString]); Tir.TString]))
+  | "dir_list_full"               -> Some (Tir.TCon ("Result", [Tir.TCon ("List", [Tir.TString]); Tir.TString]))
+  | "process_argv"                -> Some (Tir.TCon ("List", [Tir.TString]))
   (* TCP/network builtins *)
   | "tcp_connect"                 -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
   (* HTTP builtins *)
@@ -538,6 +548,13 @@ let mangle_extern : string -> string = function
   | "file_copy"         -> "march_file_copy"
   | "file_rename"       -> "march_file_rename"
   | "file_stat"         -> "march_file_stat"
+  | "dir_mkdir"         -> "march_dir_mkdir"
+  | "dir_mkdir_p"       -> "march_dir_mkdir_p"
+  | "dir_rmdir"         -> "march_dir_rmdir"
+  | "dir_rm_rf"         -> "march_dir_rm_rf"
+  | "dir_list"          -> "march_dir_list"
+  | "dir_list_full"     -> "march_dir_list_full"
+  | "process_argv"      -> "march_process_argv"
   (* TCP/network builtins *)
   | "tcp_connect"       -> "march_tcp_connect"
   (* HTTP builtins *)
@@ -2463,6 +2480,13 @@ declare ptr  @march_file_delete(ptr %path)
 declare ptr  @march_file_copy(ptr %src, ptr %dst)
 declare ptr  @march_file_rename(ptr %src, ptr %dst)
 declare ptr  @march_file_stat(ptr %path)
+declare ptr  @march_dir_mkdir(ptr %path)
+declare ptr  @march_dir_mkdir_p(ptr %path)
+declare ptr  @march_dir_rmdir(ptr %path)
+declare ptr  @march_dir_rm_rf(ptr %path)
+declare ptr  @march_dir_list(ptr %path)
+declare ptr  @march_dir_list_full(ptr %path)
+declare ptr  @march_process_argv()
 declare ptr  @march_tcp_connect(ptr %host, i64 %port)
 ; HTTP client builtins
 declare ptr  @march_http_serialize_request(ptr %method, ptr %host, ptr %path, ptr %query, ptr %headers, ptr %body)
@@ -2500,7 +2524,12 @@ declare void @march_run_scheduler()
 
 let emit_main_wrapper (buf : Buffer.t) =
   Buffer.add_string buf
-    "\ndefine i32 @main() {\nentry:\n  call void @march_main()\n  call void @march_run_scheduler()\n  ret i32 0\n}\n"
+    "\ndeclare void @march_process_argv_init(i32 %argc, ptr %argv)\n\
+     define i32 @main(i32 %argc, ptr %argv) {\nentry:\n\
+       call void @march_process_argv_init(i32 %argc, ptr %argv)\n\
+       call void @march_main()\n\
+       call void @march_run_scheduler()\n\
+       ret i32 0\n}\n"
 
 let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : string =
   let ctx = make_ctx ~fast_math () in
@@ -2633,7 +2662,12 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
       | Some name ->
         let mangled = llvm_name (mangle_extern name) in
         Buffer.add_string out
-          (Printf.sprintf "\ndefine i32 @main() {\nentry:\n  call void @%s()\n  call void @march_run_scheduler()\n  ret i32 0\n}\n" mangled)
+          (Printf.sprintf "\ndeclare void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
+           define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
+             call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
+             call void @%s()\n\
+             call void @march_run_scheduler()\n\
+             ret i32 0\n}\n" mangled)
       | None -> ()));
 
   (* Append closure wrapper functions generated for top-level fn-as-value *)

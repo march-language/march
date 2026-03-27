@@ -1294,6 +1294,26 @@ void *march_dir_rm_rf(void *path_ptr) {
     return mk_ok_unit();
 }
 
+/* ── Process builtins ──────────────────────────────────────────────── */
+
+static int    g_argc = 0;
+static char **g_argv = NULL;
+
+void march_process_argv_init(int argc, char **argv) {
+    g_argc = argc;
+    g_argv = argv;
+}
+
+/* Returns List(String) of argv entries. */
+void *march_process_argv(void) {
+    void *list = make_nil();
+    for (int i = g_argc - 1; i >= 0; i--) {
+        void *s = march_string_lit(g_argv[i], (int64_t)strlen(g_argv[i]));
+        list = make_cons(s, list);
+    }
+    return list;
+}
+
 /* ── CSV builtins ───────────────────────────────────────────────────── */
 
 /* CSV handle: heap object with fields:
