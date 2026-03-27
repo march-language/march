@@ -50,8 +50,8 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
       let next_tok = raw lexbuf in
       (match next_tok with
        | Parser.BY ->
-         (* Protocol choose block — push Block for its END *)
-         Stack.push Block stack;
+         (* Protocol choose block — push Match so NL works as branch separator *)
+         Stack.push Match stack;
          buffered := Some Parser.BY;
          tok
        | other ->

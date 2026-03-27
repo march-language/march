@@ -150,7 +150,7 @@ let load_stdlib_file path =
     (try
        let m =
          March_parser.Parser.module_
-           March_lexer.Lexer.token lexbuf
+           (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
        in
        let m = March_desugar.Desugar.desugar_module m in
        let basename = Filename.basename path in
