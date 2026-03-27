@@ -28,6 +28,11 @@
 ; Typed holes
 (typed_hole) @string.special
 
+; Sigil expressions — ~H prefix as keyword, content as special string
+(sigil_expression prefix: (sigil_prefix) @keyword)
+(sigil_expression content: (string) @string.special)
+(sigil_expression content: (triple_string) @string.special)
+
 ; Comments
 (comment) @comment
 (block_comment) @comment
