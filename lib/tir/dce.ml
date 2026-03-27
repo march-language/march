@@ -75,10 +75,15 @@ let reachable_fns (m : Tir.tir_module) : StringSet.t =
   let fn_names = StringSet.of_list (List.map (fun fd -> fd.Tir.fn_name) m.Tir.tm_fns) in
   let visited = ref StringSet.empty in
   let queue = Queue.create () in
-  (* Seed with main; if no main, seed with all functions *)
+  (* Seed with main + any explicit exports (e.g. WASM island functions);
+     if no main and no exports, seed with all functions. *)
+  let has_seeds = ref false in
   (match List.find_opt (fun fd -> fd.Tir.fn_name = "main") m.Tir.tm_fns with
-   | Some main_fn -> Queue.push main_fn.Tir.fn_name queue
-   | None -> List.iter (fun fd -> Queue.push fd.Tir.fn_name queue) m.Tir.tm_fns);
+   | Some main_fn -> Queue.push main_fn.Tir.fn_name queue; has_seeds := true
+   | None -> ());
+  List.iter (fun name -> Queue.push name queue; has_seeds := true) m.Tir.tm_exports;
+  if not !has_seeds then
+    List.iter (fun fd -> Queue.push fd.Tir.fn_name queue) m.Tir.tm_fns;
   while not (Queue.is_empty queue) do
     let name = Queue.pop queue in
     if not (StringSet.mem name !visited) then begin

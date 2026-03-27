@@ -123,7 +123,7 @@ let build_module n_groups =
   fns := { fn_name = "main"; fn_params = [];
             fn_ret_ty = TUnit;
             fn_body = EAtom (ilit 0) } :: !fns;
-  { tm_name = "bench"; tm_fns = List.rev !fns; tm_types = []; tm_externs = [] }
+  { tm_name = "bench"; tm_fns = List.rev !fns; tm_types = []; tm_externs = []; tm_exports = [] }
 
 (* ── Timing ──────────────────────────────────────────────────────────── *)
 

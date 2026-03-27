@@ -1,215 +1,214 @@
-# Bastion: WASM Islands
+# Bastion — WASM Islands
 
-**Status**: Draft | **Version**: 0.1 | **Part of**: [Bastion Design Spec](README.md)
+**Status:** Framework infrastructure complete. WASM compilation pending Tier 4 browser target.
 
----
+## What is an island?
 
-## Concept
+An _island_ is an interactive UI component that:
+1. **Renders server-side** — producing static HTML included in the page response.
+2. **Hydrates client-side** — a compiled March `.wasm` module loads in the browser and takes over the DOM node, enabling full interactivity without a full client-side framework.
 
-Most of the page is server-rendered HTML — fast, cacheable, works without JavaScript. Specific interactive components are designated as **islands**: self-contained March modules compiled to WASM that hydrate in the browser.
+Surrounding static content remains plain HTML. Only islands ship and execute JavaScript (well, WASM). This is the "Islands Architecture" pattern (Astro, Qwik, Fresh).
 
-This follows the islands architecture (as popularized by Astro), but with a unique advantage: island components are written in March, share types with the server, and run as actors in the WASM runtime.
+## Island declaration
 
----
-
-## Declaring an Island
-
-An island is a March module that implements the `Bastion.Island` behaviour:
+Islands are regular March modules that implement the `Island(s)` interface:
 
 ```march
-mod MyApp.Islands.SearchBar do
-  import Bastion.Island
+-- Counter.march
+mod Counter do
+  type State = { count : Int }
+  type Msg = Increment | Decrement | SetValue(Int)
 
-  # The state type for this island
-  type State = {
-    query: String,
-    results: List(User),
-    loading: Bool
-  }
-
-  # Messages this island can receive
-  type Msg =
-    | UpdateQuery(String)
-    | SubmitSearch
-    | SearchResults(List(User))
-    | Reset
-
-  # Initial state
-  fn init(props: %{users: List(User)}) -> State do
-    %{query: "", results: props.users, loading: false}
+  fn render(state : State) : String do
+    "<div class=\"counter\">" ++
+    "  <button data-on-click=\"Decrement\">-</button>" ++
+    "  <span>${state.count}</span>" ++
+    "  <button data-on-click=\"Increment\">+</button>" ++
+    "</div>"
   end
 
-  # State transitions — pattern matched on message type
-  fn update(state: State, msg: Msg) -> {State, Cmd(Msg)} do
-    case msg do
-      UpdateQuery(q) ->
-        {%{state | query: q}, Cmd.none()}
-
-      SubmitSearch ->
-        {%{state | loading: true}, Cmd.http_get(
-          "/api/users/search?q=" <> state.query,
-          fn response -> SearchResults(JSON.decode(response.body))
-        )}
-
-      SearchResults(users) ->
-        {%{state | results: users, loading: false}, Cmd.none()}
-
-      Reset ->
-        {%{state | query: "", results: []}, Cmd.none()}
+  fn update(state : State, msg : Msg) : State do
+    match msg do
+    | Increment        -> { state with count = state.count + 1 }
+    | Decrement        -> { state with count = state.count - 1 }
+    | SetValue(n)      -> { state with count = n }
     end
   end
 
-  # Render the island's DOM
-  fn view(state: State) -> Fragment do
-    ~H"""
-    <div class="search-bar">
-      <input
-        type="text"
-        value={state.query}
-        @input={fn e -> UpdateQuery(e.target.value)}
-        @keydown.enter={fn _ -> SubmitSearch}
-        placeholder="Search users..."
-      />
-      {if state.loading do
-        <div class="spinner">Loading...</div>
-      else
-        <ul class="results">
-          {List.map(state.results, fn user ->
-            <li>{user.name} — {user.email}</li>
-          end)}
-        </ul>
-      end}
-    </div>
-    """
+  -- Called by the Island interface impl to decode JSON messages from the JS runtime.
+  fn decode_msg(json : String) : Msg do
+    -- TODO: derive Json.decode when the derive macro lands.
+    -- For now, hand-write or use Json.parse.
+    match json do
+    | "\"Increment\""        -> Increment
+    | "\"Decrement\""        -> Decrement
+    | _                      -> Increment  -- fallback
+    end
   end
 end
-```
 
----
-
-## Embedding Islands in Server Templates
-
-Islands are placed in server-rendered templates using the `<Island>` component:
-
-```march
-fn index(conn) do
-  users = MyApp.Users.list_all(conn.assigns.db)
-
-  conn |> html(~H"""
-  <PageLayout title="Users">
-    <h1>User Directory</h1>
-
-    <!-- This part is static SSR HTML -->
-    <p>We have {List.length(users)} registered users.</p>
-
-    <!-- This part becomes a WASM island in the browser -->
-    <Island module={MyApp.Islands.SearchBar} props={%{users: users}} />
-
-    <!-- Another island, independent actor -->
-    <Island module={MyApp.Islands.ChatWidget} props={%{room: "general"}} />
-  </PageLayout>
-  """)
+-- Register as an island (connects to the Islands framework):
+impl Island(Counter.State) do
+  fn render(state) do Counter.render(state) end
+  fn update(state, msg_json) do Counter.update(state, Counter.decode_msg(msg_json)) end
 end
 ```
 
-The server renders the island's initial HTML (by calling `init` then `view` at SSR time), wraps it in a marker element with metadata, and the client-side Bastion runtime hydrates it into a live WASM actor.
+## Server-side rendering
 
----
+Use `Islands.wrap` in your page template:
 
-## Server-Rendered Island HTML
+```march
+fn counter_page(conn) do
+  let initial = { count = 0 }
+  let state_json = Json.to_string(Json.object([
+    ("count", Json.number(int_to_float(initial.count)))
+  ]))
+  let island_html = Islands.wrap(
+    "Counter",
+    Islands.Eager,
+    state_json,
+    Counter.render(initial)
+  )
+  let page = "<!DOCTYPE html><html><head>" ++
+             Islands.bootstrap_script("/_march/islands") ++
+             "</head><body>" ++
+             island_html ++
+             "</body></html>"
+  HttpServer.html(conn, 200, page)
+end
+```
 
-The server outputs something like:
+## Hydration markers
+
+`Islands.wrap` generates a `<div>` with three data attributes:
 
 ```html
-<div data-bastion-island="MyApp.Islands.SearchBar"
-     data-bastion-props="eyJ1c2VycyI6Wy4uLl19"
-     data-bastion-wasm="/static/islands/search_bar.wasm">
-  <!-- SSR'd initial view -->
-  <div class="search-bar">
-    <input type="text" value="" placeholder="Search users..." />
-    <ul class="results">
-      <li>Alice — alice@example.com</li>
-      <li>Bob — bob@example.com</li>
-    </ul>
+<div data-march-island="Counter"
+     data-march-hydrate="eager"
+     data-march-state='{"count":0}'>
+  <!-- SSR content: shown immediately, replaced after WASM hydrates -->
+  <div class="counter">
+    <button data-on-click="Decrement">-</button>
+    <span>0</span>
+    <button data-on-click="Increment">+</button>
   </div>
 </div>
 ```
 
-The Bastion client runtime (`bastion.js`) finds these markers, loads the WASM module, and hydrates the island — attaching event handlers and making it interactive.
+| Attribute | Value | Purpose |
+|-----------|-------|---------|
+| `data-march-island` | `"Counter"` | Matches the `.wasm` filename |
+| `data-march-hydrate` | `"eager"` | Hydration strategy |
+| `data-march-state` | `'{"count":0}'` | JSON initial state (single-quoted to allow JSON double-quotes) |
 
----
+Single quotes in state JSON are escaped as `&#39;` by `Islands.escape_state`.
 
-## Island-to-Island Communication
+## Hydration strategies
 
-Islands on the same page can send typed messages to each other via a client-side PubSub:
+| Strategy | `HydrateOn` | Trigger |
+|----------|-------------|---------|
+| `eager` | `Eager` | DOMContentLoaded |
+| `lazy` | `Lazy` | IntersectionObserver (viewport entry) |
+| `idle` | `OnIdle` | requestIdleCallback (or 200ms timeout on Safari) |
+| `interaction` | `OnInteraction` | First click / focusin / touchstart / pointerdown |
+
+Choose based on the island's priority:
+- **Eager**: above-the-fold, immediately interactive components.
+- **Lazy**: below-the-fold components (infinite scroll items, accordions).
+- **Idle**: analytics widgets, non-critical enhancements.
+- **Interaction**: components that only need to be interactive when touched.
+
+## Event binding
+
+The JS runtime scans the island's DOM after every render for `data-on-*` attributes:
+
+| Attribute | Event | Message sent to actor |
+|-----------|-------|-----------------------|
+| `data-on-click="Increment"` | click | `{ tag: "Increment" }` |
+| `data-on-input="SetQuery"` | input | `{ tag: "SetQuery", value: "..." }` |
+| `data-on-change="Toggle"` | change | `{ tag: "Toggle", checked: true }` |
+| `data-on-submit="Save"` | submit | `{ tag: "Save", data: { ... } }` |
+
+The actor's `update` function receives a JSON-encoded message string. The Island interface impl is responsible for decoding it into the proper `Msg` type.
+
+## Actor-per-island model
+
+Each hydrated island runs as a `IslandActor` in the JS runtime:
+
+```
+User event (click "Increment")
+    │
+    ▼
+IslandActor.send({ tag: "Increment" })
+    │  queued via queueMicrotask (cooperative scheduler)
+    ▼
+WASM: update(stateJson, msgJson) → newStateJson
+    │
+    ▼
+WASM: render(newStateJson) → htmlString
+    │
+    ▼
+element.innerHTML = htmlString
+attachEventHandlers(element, actor)
+```
+
+Islands are isolated — state is owned by the actor. Cross-island messaging goes through the global `window.marchIslands.send(name, msg)` API, which routes to the named actor.
+
+## WASM compilation (TODO)
+
+**Current status:** Tier 1 WASM (pure compute, `wasm64-wasi`) is code-complete, awaiting toolchain. Browser target (`wasm32-unknown-unknown`) is Tier 4 on the roadmap.
+
+When Tier 4 lands, the compiler will:
+1. Accept `--target wasm32-unknown-unknown` for island modules.
+2. Emit a JS glue sidecar (`Counter.glue.js`) alongside `Counter.wasm`.
+3. Export `march_island_render`, `march_island_update`, `march_island_init`.
+4. Generate `march_alloc` / `march_dealloc` for string passing across the WASM boundary.
+
+The `loadWasmModule` stub in `march_islands.js` has the exact integration point documented:
+
+```js
+// TODO (Tier 4): Replace with real loading:
+// const { instance } = await WebAssembly.instantiateStreaming(
+//   fetch(`${baseUrl}/${name}.wasm`), { env: buildMarchImports() }
+// );
+// return wrapWasmExports(instance.exports, name);
+```
+
+## Island registry (server startup)
 
 ```march
-# In the SearchBar island
-fn update(state, SubmitSearch) do
-  {%{state | loading: true},
-   Cmd.batch([
-     Cmd.http_get("/api/users/search?q=" <> state.query, SearchResults),
-     Cmd.broadcast("search:updated", %{query: state.query})
-   ])}
-end
+let registry =
+  Islands.empty_registry()
+  |> Islands.register(Islands.Descriptor("Counter", Islands.Eager, "/_march/Counter.wasm"))
+  |> Islands.register(Islands.Descriptor("Clock",   Islands.Lazy,  "/_march/Clock.wasm"))
 
-# In the Analytics island, subscribe to search events
-fn init(props) do
-  Bastion.Island.subscribe("search:updated")
-  %{searches: []}
-end
+-- In your page template:
+let preloads = Islands.registry_preload_hints(registry, "/_march")
+-- → <link rel="modulepreload" href="/_march/Counter.wasm">
+--   <link rel="modulepreload" href="/_march/Clock.wasm">
 ```
 
----
-
-## Island-to-Server Communication
-
-Islands communicate with the server via the WebSocket channel. Messages are typed end-to-end:
+## Testing islands
 
 ```march
-# Client-side island
-fn update(state, SaveDraft) do
-  {state, Cmd.channel_push("drafts:save", %{content: state.editor_content})}
+-- Test server-side rendering without WASM:
+test "counter renders initial state" do
+  let html = Counter.render({ count = 0 })
+  assert (String.contains(html, "0"))
 end
 
-# Server-side channel handler
-mod MyApp.DraftChannel do
-  import Bastion.Channel
+-- Test hydration wrapping:
+test "wrap produces correct attributes" do
+  let html = Islands.wrap("Counter", Islands.Eager, "{\"count\":0}", "<span>0</span>")
+  assert (String.contains(html, "data-march-island=\"Counter\""))
+  assert (String.contains(html, "data-march-hydrate=\"eager\""))
+end
 
-  fn handle_in(conn, "drafts:save", %{content: content}) do
-    MyApp.Drafts.save(conn.assigns.current_user, content)
-    conn |> push("drafts:saved", %{status: "ok"})
-  end
+-- Test state update logic (pure, no WASM needed):
+test "increment increases count" do
+  let s = Counter.update({ count = 5 }, Counter.Increment)
+  assert (s.count == 6)
 end
 ```
-
----
-
-## WASM Compilation Pipeline
-
-```
-March Source (.march files)
-    │
-    ├── Server target: OCaml 5.3.0 → native binary
-    │
-    └── WASM target: March → WASM (per-island .wasm files)
-         │
-         ▼
-    /priv/static/islands/
-    ├── search_bar.wasm
-    ├── chat_widget.wasm
-    └── notification_bell.wasm
-```
-
-Forge handles both compilation targets. `forge build` produces the server binary and all WASM island bundles. In development, `forge dev` watches for changes and recompiles affected islands incrementally.
-
----
-
-## Open Questions
-
-- **WASM compilation target**: Which WASM toolchain? Direct compilation from March AST, or via an intermediate representation?
-- **WASM actor runtime**: How are March actors (green threads, mailboxes, `Pid(a)`) implemented in the WASM target? Does each island get its own WASM instance, or do they share one with cooperative scheduling?
-- **Island serialization**: How are props serialized from server to client for hydration? JSON is the natural choice, but should there be a binary fast-path for large datasets?
-- **Hot code reloading**: Can islands be hot-swapped in development without losing state?
-
-See [open-questions.md](open-questions.md) for the full list.

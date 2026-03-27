@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-26 (syntax overhaul: NL token filter, no `|` in match arms, if/then/else; LSP stdlib Token_filter fix; crypto builtins return Ok(Bytes); all 1151 tests passing)
+**Last updated:** 2026-03-26 (Bastion WASM Islands library — Islands framework infrastructure, JS runtime, specs)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -14,11 +14,17 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ## P1 — High Impact / Near-Term
 
+### Web Framework: Islands Library
+
+- ✅ **Islands library (`islands/`)** — `forge new islands --lib`. Core: `Islands.wrap`, `Islands.wrap_eager`, `Islands.client_only`, `Islands.bootstrap_script`, `Islands.preload_hint`, `Islands.Registry`. `HydrateOn` type (`Eager | Lazy | OnIdle | OnInteraction`). `interface Island(s)` typeclass. `islands/runtime/march_islands.js` — actor-per-island JS runtime with configurable hydration strategies (eager, lazy, idle, interaction), event delegation (`data-on-click`, `data-on-input`, `data-on-change`, `data-on-submit`), cross-island messaging API. 34 tests in `islands/test/islands_test.march`. Specs: `specs/bastion/architecture.md`, `specs/bastion/wasm-islands.md`, `specs/bastion/templates.md`. WASM loading stub plugs in when Tier 4 browser target lands.
+- [ ] **WASM Tier 4 (browser target)** — `wasm32-unknown-unknown` + JS glue codegen. Emit `march_island_render` / `march_island_update` / `march_island_init` from compiled island modules. Memory bridge (`march_alloc`/`march_dealloc`) for string passing across the WASM boundary. Integrate into `Islands.loadWasmModule` stub in `march_islands.js`. Depends on Tier 1 end-to-end validation (install wasi-sdk + wasmtime).
+- [ ] **Bastion.Router** — Pattern-match router for HTTP handlers. `Router.get("/users/:id", fn conn -> ...)`, `Router.scope("/api", fn r -> ...)`. Builds on `HttpServer` Conn/plug pipeline.
+- [ ] **`Html` stdlib module** — `Html.escape`, `Html.Safe` type for injection-safe HTML construction. Used by templates to escape user-supplied content.
+
 ### Tooling: Forge Build Tool
 
 - ✅ **Implement `forge`** — Implemented as `forge/` package. Commands: `forge new`, `forge build`, `forge run`, `forge test`, `forge format`, `forge interactive`/`i`, `forge deps`, `forge clean`, `forge search`. Template scaffolding generates valid March code (PascalCase module names, `do/end` fn bodies, `println` builtin). 15 tests in `forge/test/test_forge.ml`.
 - ✅ **`forge search` — Hoogle-style search** — `lib/search/search.ml` (new `march_search` library): Levenshtein fuzzy name search, type-signature component matching, doc-keyword search, combined search (AND-semantics). JSON index cache at `.march/search-index.json`. `forge/lib/cmd_search.ml` wires up cmdliner with `--type`, `--doc`, `--limit`, `--json`, `--rebuild` flags. 25 tests in `test/test_search.ml` (levenshtein, name search, type search, doc search, combined, JSON roundtrip, stdlib integration).
-- ✅ **`HttpServer.listen` SIGINT clean shutdown** — Interpreter `http_server_listen` builtin (`eval.ml`) now uses `Unix.select` with a 1-second timeout instead of blocking `accept`, checking `shutdown_requested` between iterations. Ctrl+C sets the flag via the existing signal handler; the accept loop exits and prints `"march: Shutting down..."`. Mirrors the C runtime's `g_http_shutdown` + select pattern.
 
 ---
 
@@ -83,7 +89,6 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 
 ## Done (recently completed)
 
-- ✅ **Sigil syntax (`~X"..."`)** — Generic sigil prefix syntax for domain-specific string literals. Lexer emits `SIGIL_PREFIX` for `~X` (uppercase letter). Parser combines with string literals (plain, triple-quoted, interpolated) into `ESigil(char, expr, span)` AST node. Desugar transforms `ESigil('H', content, sp)` → `Sigil.h(content)` (module-qualified call). `stdlib/sigil.march`: `Sigil.h` wraps string as `IOList` for zero-copy wire sending. Threaded through typecheck, eval, coverage, TIR lower, formatter, LSP analysis. 6 tests in `test/stdlib/test_sigil.march`. Prerequisite for Bastion template compilation.
 - ✅ **Event-loop HTTP server (Phases 1–2)** — `runtime/march_http_evloop.c` + `march_http_io.{c,h}` + `march_http_internal.h`: kqueue/epoll event loop replacing thread-per-connection model. One event-loop thread per CPU core with SO_REUSEPORT (kernel-distributed accept). Non-blocking I/O: `conn_state_t` per-connection state with inline 64 KB read buffer, `march_recv_nonblocking` / `march_send_nonblocking` state machines, per-thread free-list pool. Edge-triggered events with accept batching. Compile flag: `-DMARCH_HTTP_USE_EVLOOP` (auto-enabled when `march_http_evloop.c` exists). Thread-per-connection fallback retained. Plan: `specs/event_loop_plan.md`. Phases 3–4 (per-thread arena, io_uring) remain optional future work.
 - ✅ **Zero-copy response builder (section 4.5 Response Pipeline)** — `runtime/march_http_response.{h,c}`: pre-serialized status lines for all common codes (200/201/204/301/302/304/400/401/403/404/405/500/503) as const globals; `march_response_t` with 160-slot fixed iovec array; `march_response_init/set_status/add_header/add_date_header/set_body/send` API; `_Thread_local` 16 KB scratch buffer (no malloc on hot path); double-buffered Date header cache refreshed ≤once/second (atomic fast-path, mutex slow-path); `march_response_send_plaintext(fd)` sends "Hello, World!" in 4 iovecs (zero per-request allocation); `march_http_response_module_init()` called at server startup; `march_http.c` wired. 20 C tests (76 checks) in `test/test_http_response.c` covering init, status lines, unknown-code scratch, header iovec layout, Date cache freshness, thread-safety (8 threads), socket-pair round-trips for 200/404/plaintext.
 - ✅ **SIMD HTTP parser** — `runtime/march_http_parse_simd.c` + `.h`: SSE4.2 PCMPESTRI fast path (16 bytes/cycle for delimiter scanning); scalar fallback via `#if defined(__SSE4_2__)`; `march_http_parse_request_simd()` single-request API; `march_http_parse_pipelined()` for pipelined requests; `march_http.c` updated to use SIMD fast path by default (disable with `-DMARCH_HTTP_DISABLE_SIMD`); 20 C tests in `test/test_http_simd.c`; dune rule compiles with `-msse4.2` (harmless on ARM64).

@@ -1,0 +1,8 @@
+[package]
+name = "islands"
+version = "0.1.0"
+type = "lib"
+description = ""
+author = ""
+
+[deps]

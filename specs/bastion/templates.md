@@ -1,159 +1,142 @@
-# Bastion: Templates and Rendering
+# Bastion — Templates
 
-**Status**: Draft | **Version**: 0.1 | **Part of**: [Bastion Design Spec](README.md)
+**Status:** Design. Not yet implemented.
 
----
+## Overview
 
-## The `~H` Sigil
+Bastion templates produce HTML strings on the server. They compose with the Islands library: template functions call `Islands.wrap` to embed interactive islands in otherwise static HTML.
 
-Bastion templates use a `~H` sigil that embeds HTML with March expressions. The template is parsed and compiled to March AST at compile time, producing efficient IO list construction. All expressions inside the template are type-checked by the March compiler.
+The template layer is deliberately simple:
+- No special template syntax — templates are plain March functions returning `String`.
+- String interpolation (`${}`) and `++` concatenation handle most cases.
+- `IOList` (a list of string chunks) is used for efficient large-page assembly.
 
-**Language requirement**: This requires adding sigil support to March's lexer/parser. The parser hands off the sigil body as a raw string to the template compiler, which parses the HTML and embedded expressions, then produces March AST nodes.
-
----
-
-## Template Syntax
-
-The syntax is an HTML-like hybrid of HEEx and JSX: HTML structure with March expressions in curly braces, components as function calls.
+## Pattern: function-based templates
 
 ```march
-mod MyApp.UserHandler do
-  import Bastion.Conn
-  import Bastion.Template
+mod Layout do
 
-  fn index(conn: Conn(Authenticated)) do
-    users = MyApp.Users.list_all(conn.assigns.db)
+  -- Base page layout
+  fn base(title, head_extra, body) do
+    "<!DOCTYPE html>" ++
+    "<html lang=\"en\">" ++
+    "<head>" ++
+    "  <meta charset=\"utf-8\">" ++
+    "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" ++
+    "  <title>${title}</title>" ++
+    head_extra ++
+    "</head>" ++
+    "<body>" ++
+    body ++
+    "</body>" ++
+    "</html>"
+  end
 
-    conn |> html(~H"""
-    <div class="container">
-      <h1>Users ({List.length(users)})</h1>
+  fn with_islands(title, base_url, body) do
+    let script = Islands.bootstrap_script(base_url)
+    base(title, script, body)
+  end
 
-      <ul>
-        {List.map(users, fn user ->
-          <li class="user-card">
-            <UserCard user={user} />
-          </li>
-        end)}
-      </ul>
+end
+```
 
-      <Island module={MyApp.Islands.SearchBar} props={%{users: users}} />
-    </div>
-    """)
+## Pattern: IOList for large pages
+
+For pages with many fragments, use `IOList` to avoid O(n²) string concatenation:
+
+```march
+mod PageTemplate do
+
+  fn render_items(items) do
+    let chunks = List.map(items, fn item -> "<li>${item}</li>")
+    let inner = String.join(chunks, "\n")
+    "<ul>${inner}</ul>"
+  end
+
+  fn render_page(items) do
+    let body = render_items(items)
+    Layout.with_islands("Item List", "/_march", body)
+  end
+
+end
+```
+
+## Pattern: islands in templates
+
+```march
+mod CounterPage do
+
+  fn render(initial_count) do
+    let state_json = "{\"count\":${int_to_string(initial_count)}}"
+    let island_html = Islands.wrap(
+      "Counter",
+      Islands.Eager,
+      state_json,
+      "<span>${int_to_string(initial_count)}</span>"
+    )
+    Layout.with_islands("Counter Demo", "/_march",
+      "<main>" ++
+      "<h1>Counter</h1>" ++
+      island_html ++
+      "</main>"
+    )
+  end
+
+end
+```
+
+## Planned: HTML escaping
+
+User-supplied strings should be escaped before embedding in HTML. A planned `Html` stdlib module will provide:
+
+```march
+-- Planned stdlib/html.march
+mod Html do
+  fn escape(s : String) : String do
+    s
+    |> String.replace_all("&", "&amp;")
+    |> String.replace_all("<", "&lt;")
+    |> String.replace_all(">", "&gt;")
+    |> String.replace_all("\"", "&quot;")
+    |> String.replace_all("'", "&#39;")
+  end
+
+  -- Wrap a pre-escaped or trusted HTML string
+  type Safe = Safe(String)
+
+  fn safe(s : String) : Safe do Safe(s) end
+
+  fn to_string(s : Safe) : String do
+    match s do
+    | Safe(inner) -> inner
+    end
   end
 end
 ```
 
----
+Until `Html` lands, use `String.replace_all` directly for any user-supplied content inserted into HTML.
 
-## Components as Functions
+## Planned: template macros
 
-Components are regular March functions that return template fragments. Props are function arguments, type-checked at the call site:
+A future `@template` annotation will allow string interpolation with auto-escaping:
 
 ```march
-mod MyApp.Components do
-  import Bastion.Template
-
-  fn UserCard(user: User) do
-    ~H"""
-    <div class="card">
-      <img src={user.avatar_url} alt={user.name} />
-      <h3>{user.name}</h3>
-      <p>{user.email}</p>
-      {case user.role do
-        :admin -> <span class="badge badge-admin">Admin</span>
-        :moderator -> <span class="badge badge-mod">Mod</span>
-        _ -> <span></span>
-      end}
-    </div>
-    """
-  end
-
-  fn PageLayout(title: String, children: Fragment) do
-    ~H"""
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <title>{title} — MyApp</title>
-        <link rel="stylesheet" href="/static/app.css" />
-      </head>
-      <body>
-        <nav><NavBar /></nav>
-        <main>{children}</main>
-        <footer><Footer /></footer>
-        <script src="/static/bastion.js"></script>
-      </body>
-    </html>
-    """
-  end
+-- Future syntax (not yet implemented):
+@template
+fn greeting(name : String) : Html.Safe do
+  -- ${name} is auto-escaped; #{name} inserts raw HTML (explicit opt-in)
+  <div class="greeting">Hello, ${name}!</div>
 end
 ```
 
----
+## Integration with HttpServer
 
-## Template Compilation Pipeline
-
-```
-~H"""...""" sigil
-    │
-    ▼
-Template Parser (HTML + March expressions)
-    │
-    ▼
-Template AST (typed tree of elements, expressions, components)
-    │
-    ▼
-Type Checker (verifies all expressions, component props)
-    │
-    ▼
-March AST (IO list construction: ["<div class=\"card\">", user.name, "</div>"])
-    │
-    ▼
-Compiled March Function (efficient binary/string concatenation)
-```
-
-At runtime, rendering a template is just calling a function that returns an IO list — no parsing, no interpretation. This gives sub-millisecond render times for typical pages.
-
----
-
-## Compile-Time Type Safety
-
-The template compiler ensures:
-
-- All variables referenced in `{expr}` are in scope and well-typed
-- Component calls like `<UserCard user={user} />` match the component function's type signature
-- Missing required props are a compile-time error
-- Type mismatches (passing an `Int` where `String` is expected) are a compile-time error
+Templates return `String` and plug directly into `HttpServer.html`:
 
 ```march
-# This is a compile-time error:
-fn broken_template(user: User) do
-  ~H"""
-  <UserCard user={42} />
-  """
-  # ERROR: UserCard expects `user: User`, got `Int`
+fn handle_counter(conn) do
+  let count = 0
+  let page = CounterPage.render(count)
+  HttpServer.html(conn, 200, page)
 end
-```
-
----
-
-## XSS Prevention
-
-All expressions inside `~H` templates are **HTML-escaped by default**:
-
-```march
-# Safe — user input is escaped
-~H"""<p>{user.bio}</p>"""
-# If user.bio is "<script>alert('xss')</script>", renders as:
-# <p>&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;</p>
-
-# For trusted HTML content (e.g., sanitized Markdown output), use raw()
-~H"""<div class="post-body">{raw(sanitized_html)}</div>"""
-```
-
-The `raw()` function is the only way to bypass escaping. It serves as a clear signal in code review. The template compiler can optionally emit a warning when `raw()` is used:
-
-```toml
-# forge.toml
-[bastion.security]
-warn_on_raw_html = true   # default: true in dev, false in prod
 ```

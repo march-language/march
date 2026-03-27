@@ -1,101 +1,100 @@
-# Bastion: Architecture and Process Model
+# Bastion — Web Framework Architecture
 
-**Status**: Draft | **Version**: 0.1 | **Part of**: [Bastion Design Spec](README.md)
+**Status:** Design phase. The Islands library (`islands/`) is the first shipped piece.
 
----
+## Overview
 
-## High-Level Request Flow
+Bastion is March's full-stack web framework. It consists of three layers:
 
 ```
-Client Request
+┌─────────────────────────────────────────────────────────┐
+│  Bastion (router, templates, sessions, plug pipeline)    │
+├──────────────────────────┬──────────────────────────────┤
+│  HttpServer (stdlib)     │  Islands library             │
+│  Plug pipeline / Conn    │  WASM island hydration       │
+├──────────────────────────┴──────────────────────────────┤
+│  March runtime (actors, scheduler, HTTP, TLS)            │
+└─────────────────────────────────────────────────────────┘
+```
+
+The framework is deliberately separated into independent libraries so each piece can be used standalone:
+
+| Library | Status | Description |
+|---------|--------|-------------|
+| `HttpServer` (stdlib) | ✅ Shipped | Low-level Conn/plug pipeline |
+| `Islands` | ✅ Shipped | WASM island model (this work) |
+| `Bastion.Router` | Planned | Macro-free pattern-match router |
+| `Bastion.Template` | Planned | Server-side HTML templates |
+| `Bastion.Session` | Planned | Cookie-backed session management |
+| `Bastion.Auth` | Planned | Pluggable auth strategies |
+
+## Islands Library (`islands/`)
+
+The Islands library is a standalone forge library (`forge new islands --lib`). It does not depend on Bastion; any HTTP framework can use it.
+
+See [`wasm-islands.md`](wasm-islands.md) for the detailed design.
+
+### What it ships today
+
+- `Islands.wrap` / `Islands.wrap_eager` / `Islands.client_only` — server-side HTML wrappers with hydration markers
+- `Islands.bootstrap_script` — generate the `<script>` tag for the JS runtime
+- `Islands.preload_hint` — `<link rel="modulepreload">` hints for WASM files
+- `Islands.Registry` — island descriptor registry for server startup
+- `interface Island(s)` — the typeclass for island modules to implement
+- `islands/runtime/march_islands.js` — client-side actor-per-island bootstrap
+- Configurable per-island hydration strategies: `Eager | Lazy | OnIdle | OnInteraction`
+
+### WASM compilation status
+
+The WASM target is Tier 1 (code complete; awaiting wasi-sdk + wasmtime for end-to-end test). The browser target (Tier 4, `wasm32-unknown-unknown` + JS glue) is not yet available. The Islands library is architecturally complete; the WASM loading in `march_islands.js` is a well-documented stub that plugs in when Tier 4 lands.
+
+## Request lifecycle (future)
+
+```
+Browser request
     │
     ▼
-┌─────────────────────┐
-│   Bastion.Endpoint   │  ← Accepts TCP/TLS connections
-└─────────┬───────────┘
-          │
-          ▼
-┌─────────────────────┐
-│  Typed Middleware    │  ← Pipeline: Conn(Raw) → Conn(Parsed) → Conn(Authenticated) → ...
-│  Pipeline           │
-└─────────┬───────────┘
-          │
-          ▼
-┌─────────────────────┐
-│  Pattern-Matched    │  ← fn route(conn, :get, ["users", id]) do ... end
-│  Router             │
-└─────────┬───────────┘
-          │
-          ▼
-┌─────────────────────┐
-│  Handler Function   │  ← Business logic, DB queries via Depot, template rendering
-└─────────┬───────────┘
-          │
-          ▼
-┌─────────────────────┐
-│  Response           │  ← HTML (with WASM island markers) or JSON
-└─────────────────────┘
+Bastion.Router (match method + path)
+    │
+    ▼
+Plug pipeline (auth, session, CSRF, …)
+    │
+    ▼
+Handler fn (Conn → Conn)
+    │  calls Counter.render(state)
+    │  calls Islands.wrap("Counter", Eager, state_json, html)
+    │
+    ▼
+HttpServer.send_resp(conn, 200, full_html)
+    │
+    ▼
+Browser receives HTML with hydration markers
+    │
+    ▼
+march_islands.js bootstraps → actor per island → WASM loaded
 ```
 
----
+## Actor model
 
-## Server-Side Process Model
+Each island on the client runs as an actor. The JS runtime is a lightweight cooperative actor scheduler built on `queueMicrotask`. When WASM threads (Tier 3) land, the scheduler can be upgraded to use Web Workers while preserving the programming model.
 
-Bastion uses **one actor (green thread) per connected user**, matching the proven LiveView model from Phoenix/Erlang.
+Server-side, each request handler runs inside the March actor scheduler. Islands can be backed by server actors for live updates (via WebSocket); the client actor sends a message to the server actor's `Pid` encoded as a URL-safe token in the hydration state.
 
-For standard HTTP request/response cycles, a green thread is spawned to handle the request and terminates when the response is sent. For WebSocket connections (Channels), a persistent actor is maintained for the lifetime of the connection, supervised by Bastion's supervision tree.
-
-```
-Bastion.Supervisor
-├── Bastion.Endpoint (accepts connections)
-├── Bastion.ChannelSupervisor
-│   ├── Connection Actor (user A) — holds all component state for user A's page
-│   ├── Connection Actor (user B)
-│   └── ...
-└── Bastion.PubSub (topic-based message broadcast)
-```
-
-This is deliberately NOT one actor per component per user on the server. A complex page with 30 interactive components and 10,000 concurrent users creates 10,000 server-side actors (one per connection), not 300,000. The WASM islands handle per-component state on the client.
-
----
-
-## Client-Side Process Model (WASM Islands)
-
-On the client, each WASM island is an independent actor with its own state and typed mailbox. Islands communicate with each other via message passing and with the server via the WebSocket channel.
+## Data flow for a live island (future)
 
 ```
-Browser
-├── Island: SearchBar (actor, local state: query, suggestions)
-├── Island: ChatWidget (actor, local state: messages, input)
-├── Island: NotificationBell (actor, local state: count, dropdown_open)
-└── Channel (WebSocket connection to server)
-```
-
-Each island actor runs in the WASM runtime, manages its own DOM subtree, and can:
-
-- Hold local state without server round-trips
-- Send messages to other islands on the page
-- Send messages to the server via the Channel
-- Receive pushed updates from the server
-
----
-
-## Design Principles
-
-1. **Performance is first-class.** Sub-millisecond routing, compiled templates, zero-copy IO lists, efficient WASM bundles. Bastion should compete with Rust frameworks on throughput.
-2. **Types everywhere.** Templates are type-checked at compile time. Middleware transformations are tracked in the type system. Shared client/server modules use the same type definitions.
-3. **Pattern matching over DSLs.** March has powerful pattern matching — use it. Routes, error handling, and middleware composition should feel like idiomatic March, not a framework-specific language.
-4. **The actor model stays under the hood.** Developers interact with `conn` and handler functions. Supervision, process management, and green thread scheduling happen transparently.
-5. **Islands, not SPAs.** The default rendering model is server-rendered HTML with targeted WASM islands for interactivity. Ship less code to the client.
-
----
-
-## Ecosystem Position
-
-```
-March          — the language (statically-typed, functional, ML/Elixir hybrid)
-Forge          — the build tool (compilation, dependencies, generators)
-Depot          — the PostgreSQL driver
-Bastion        — the web framework (this document)
-Channels       — WebSocket pub/sub (being implemented separately, integrated into Bastion)
+Client island actor
+    │  user event → send({ tag: "Increment" })
+    ▼
+WASM update(state, msg) → new state
+WASM render(new_state) → HTML
+patch DOM
+    │
+    │  if online: also forward to server via WS
+    ▼
+Server Counter actor
+    on Increment -> { state with count = state.count + 1 }
+    │
+    ▼
+Broadcast to all connected clients watching this counter
 ```
