@@ -108,6 +108,22 @@ let load () =
      | Failure msg   -> Error msg
      | Toml.Parse_error msg -> Error ("forge.toml parse error: " ^ msg))
 
+(** Return the lib directory for a git dependency installed in the CAS, or
+    [None] if [forge deps] has not been run yet for this dep. *)
+let git_dep_lib_path dep_name =
+  match Sys.getenv_opt "HOME" with
+  | None -> None
+  | Some home ->
+    let dep_dir =
+      Filename.concat home
+        (Filename.concat ".march"
+           (Filename.concat "cas" (Filename.concat "deps" dep_name)))
+    in
+    let lib_dir = Filename.concat dep_dir "lib" in
+    if Sys.file_exists lib_dir then Some lib_dir
+    else if Sys.file_exists dep_dir then Some dep_dir
+    else None
+
 (** Create a directory and all its parents. *)
 let mkdir_p dir =
   let _ = Sys.command (Printf.sprintf "mkdir -p %s" (Filename.quote dir)) in

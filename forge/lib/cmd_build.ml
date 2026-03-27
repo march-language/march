@@ -32,7 +32,7 @@ let build ~release =
       let output    = Filename.concat build_dir proj.Project.name in
       let opt_flag  = if release then " --opt 2" else "" in
       (* Collect lib directories from path dependencies *)
-      let dep_lib_paths = List.filter_map (fun (_, dep) ->
+      let dep_lib_paths = List.filter_map (fun (dep_name, dep) ->
           match dep with
           | Project.PathDep rel_path ->
             let abs_path = if Filename.is_relative rel_path
@@ -41,7 +41,7 @@ let build ~release =
             in
             let d = Filename.concat abs_path "lib" in
             if Sys.file_exists d then Some d else None
-          | Project.GitDep _ -> None
+          | Project.GitDep _ -> Project.git_dep_lib_path dep_name
         ) proj.Project.deps in
       (* MARCH_LIB_PATH: dep libs + lib/ + config/ (if present) *)
       let all_lib_paths =
