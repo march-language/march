@@ -3218,6 +3218,17 @@
         }
       ]
     },
+    "sigil_prefix": {
+      "type": "TOKEN",
+      "content": {
+        "type": "PREC",
+        "value": 10,
+        "content": {
+          "type": "PATTERN",
+          "value": "~[A-Z]"
+        }
+      }
+    },
     "match_expression": {
       "type": "SEQ",
       "members": [
@@ -3531,10 +3542,6 @@
     {
       "type": "SYMBOL",
       "name": "block_comment"
-    },
-    {
-      "type": "SYMBOL",
-      "name": "sigil_prefix"
     }
   ],
   "inline": [],
