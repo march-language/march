@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>March WASM Island Demo</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0f172a; color: #e2e8f0;
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; padding: 2rem;
+  }
+  h1 { font-size: 1.5rem; margin-bottom: 0.5rem; color: #38bdf8; }
+  .subtitle { color: #94a3b8; margin-bottom: 2rem; font-size: 0.9rem; }
+  .card {
+    background: #1e293b; border: 1px solid #334155; border-radius: 12px;
+    padding: 1.5rem; width: 100%; max-width: 600px; margin-bottom: 1rem;
+  }
+  .card h2 { font-size: 1rem; color: #7dd3fc; margin-bottom: 0.75rem; }
+  .log { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.8rem; line-height: 1.6; }
+  .log .ok { color: #4ade80; }
+  .log .info { color: #94a3b8; }
+  .log .val { color: #fbbf24; }
+  .log .err { color: #f87171; }
+  #island-output {
+    background: #0f172a; border: 1px solid #334155; border-radius: 8px;
+    padding: 1rem; margin-top: 0.75rem; min-height: 2rem;
+  }
+  #island-output span { color: #4ade80; font-size: 1.1rem; }
+  .badge {
+    display: inline-block; background: #164e63; color: #67e8f9;
+    font-size: 0.7rem; padding: 2px 8px; border-radius: 4px; margin-left: 0.5rem;
+  }
+  .stats { display: flex; gap: 1rem; margin-top: 0.75rem; flex-wrap: wrap; }
+  .stat { background: #0f172a; border-radius: 6px; padding: 0.5rem 0.75rem; }
+  .stat .label { font-size: 0.7rem; color: #64748b; }
+  .stat .value { font-size: 1rem; color: #f1f5f9; font-family: monospace; }
+</style>
+</head>
+<body>
+  <h1>March → WASM Island <span class="badge">wasm32-unknown-unknown</span></h1>
+  <p class="subtitle">Compiled from March source → LLVM IR → WebAssembly, running in the browser</p>
+
+  <div class="card">
+    <h2>🔧 Loading Pipeline</h2>
+    <div id="pipeline-log" class="log"></div>
+  </div>
+
+  <div class="card">
+    <h2>🏝️ Island Output</h2>
+    <p class="info" style="font-size:0.8rem; color:#64748b; margin-bottom:0.5rem;">
+      Result of calling <code>march_island_render("{}")</code>:
+    </p>
+    <div id="island-output"></div>
+  </div>
+
+  <div class="card">
+    <h2>📊 Module Info</h2>
+    <div id="module-stats" class="stats"></div>
+  </div>
+
+<script>
+const plog = document.getElementById('pipeline-log');
+const output = document.getElementById('island-output');
+const stats = document.getElementById('module-stats');
+
+function log(msg, cls = 'info') {
+  const div = document.createElement('div');
+  div.className = cls;
+  div.innerHTML = msg;
+  plog.appendChild(div);
+}
+
+function addStat(label, value) {
+  const div = document.createElement('div');
+  div.className = 'stat';
+  div.innerHTML = `<div class="label">${label}</div><div class="value">${value}</div>`;
+  stats.appendChild(div);
+}
+
+/** Read a March string from WASM memory.
+ *  Layout: header(16 bytes) + length(i64 @ +16) + data_ptr(ptr @ +24)
+ *  On wasm32, i64 fields are 8 bytes; pointers are 4 bytes stored in 8-byte slots.
+ */
+function readMarchString(memory, ptr) {
+  const view = new DataView(memory.buffer);
+  // length is i64 at offset 16
+  const len = Number(view.getBigInt64(ptr + 16, true));
+  // data pointer: on wasm32, it's a 32-bit ptr stored at offset 24
+  // Could be i64 (BigInt) or i32 depending on how the compiler lays it out
+  // The compiler uses i64 slots, so read as i64 but take lower 32 bits
+  const dataPtr = Number(view.getBigInt64(ptr + 24, true));
+  const bytes = new Uint8Array(memory.buffer, dataPtr, len);
+  return new TextDecoder().decode(bytes);
+}
+
+/** Write a March string into WASM memory using march_string_lit_export.
+ *  We allocate a data buffer, copy the JS string into it, then call the
+ *  runtime's string_lit which builds the proper march_string struct.
+ */
+function writeMarchString(exports, str) {
+  const { memory, march_alloc_export, march_string_lit_export } = exports;
+  const encoded = new TextEncoder().encode(str);
+
+  // Allocate a data buffer in WASM memory for the raw bytes
+  const dataPtr = march_alloc_export(BigInt(encoded.length + 1));
+  const mem = new Uint8Array(memory.buffer);
+  mem.set(encoded, dataPtr);
+  mem[dataPtr + encoded.length] = 0; // null terminator
+
+  // Call the runtime to build a proper march_string struct
+  return march_string_lit_export(dataPtr, BigInt(encoded.length));
+}
+
+async function main() {
+  const t0 = performance.now();
+
+  log('Fetching <span class="val">wasm_browser_test.wasm</span>...');
+  const resp = await fetch('wasm_browser_test.wasm');
+  const wasmBytes = await resp.arrayBuffer();
+  const fetchMs = (performance.now() - t0).toFixed(1);
+  log(`✓ Fetched ${wasmBytes.byteLength} bytes in ${fetchMs}ms`, 'ok');
+
+  addStat('Binary size', `${wasmBytes.byteLength} B`);
+
+  log('Compiling WebAssembly module...');
+  const t1 = performance.now();
+  const { instance } = await WebAssembly.instantiate(wasmBytes, {});
+  const compileMs = (performance.now() - t1).toFixed(1);
+  log(`✓ Module compiled + instantiated in ${compileMs}ms`, 'ok');
+
+  const exportNames = Object.keys(instance.exports);
+  const fnExports = exportNames.filter(n => typeof instance.exports[n] === 'function');
+  addStat('Exports', exportNames.length);
+  addStat('Functions', fnExports.length);
+  log(`Exports: <span class="val">${fnExports.join(', ')}</span>`);
+
+  // Initialize
+  log('Calling <span class="val">_start()</span>...');
+  instance.exports._start();
+  log('✓ Initialization complete', 'ok');
+
+  // Call march_island_init
+  log('Calling <span class="val">march_island_init()</span>...');
+  const initPtr = instance.exports.march_island_init();
+  log(`✓ init returned ptr <span class="val">0x${initPtr.toString(16)}</span>`, 'ok');
+
+  // Write a state JSON string into WASM memory and call render
+  const stateJson = '{"count": 42}';
+  log(`Writing state string: <span class="val">${stateJson}</span>`);
+  const statePtr = writeMarchString(instance.exports, stateJson);
+
+  log('Calling <span class="val">march_island_render(state)</span>...');
+  const t2 = performance.now();
+  const renderPtr = instance.exports.march_island_render(statePtr);
+  const renderMs = (performance.now() - t2).toFixed(3);
+
+  const html = readMarchString(instance.exports.memory, renderPtr);
+  log(`✓ render returned in ${renderMs}ms: <span class="val">${html}</span>`, 'ok');
+
+  addStat('Render time', `${renderMs}ms`);
+  addStat('Memory', `${(instance.exports.memory.buffer.byteLength / 1024).toFixed(0)} KB`);
+
+  // Display the rendered HTML
+  output.innerHTML = html;
+
+  const totalMs = (performance.now() - t0).toFixed(1);
+  log(`<br>✓ Total pipeline: <span class="val">${totalMs}ms</span>`, 'ok');
+}
+
+main().catch(err => {
+  log(`✗ Error: ${err.message}`, 'err');
+  console.error(err);
+});
+</script>
+</body>
+</html>

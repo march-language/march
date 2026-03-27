@@ -1,0 +1,15 @@
+mod CounterIsland do
+
+fn render(state_json) do
+  "<span>hello from wasm</span>"
+end
+
+fn update(state_json, msg_json) do
+  state_json
+end
+
+fn main() do
+  println(render("{}"))
+end
+
+end

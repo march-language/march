@@ -184,6 +184,12 @@ function attachEventHandlers(root, actor) {
  * @returns {Promise<object|null>}  WASM wrapper or null if not available
  */
 async function loadWasmModule(baseUrl, name) {
+  // Allow test harnesses to inject mock WASM modules.
+  // Set window.__marchTestLoader = async (baseUrl, name) => ({ render, update })
+  if (window.__marchTestLoader) {
+    return window.__marchTestLoader(baseUrl, name);
+  }
+
   // Stub: WASM browser target not yet available.
   // When Tier 4 lands, replace this with:
   //

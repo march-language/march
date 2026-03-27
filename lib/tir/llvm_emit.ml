@@ -81,6 +81,42 @@ type ctx = {
   mutable mutual_tco_fn_tags    : (string * int) list;
 }
 
+(** Compilation target. *)
+type target_config =
+  | Native          (** Host-native binary (arm64-apple-macosx, x86_64-linux, etc.) *)
+  | Wasm64Wasi      (** wasm64-wasi — 8-byte pointers, WASI preview *)
+  | Wasm32Wasi      (** wasm32-wasi — 4-byte pointers, WASI preview *)
+  | Wasm32Unknown   (** wasm32-unknown-unknown — browser, no WASI *)
+
+let is_wasm_target = function
+  | Native -> false
+  | Wasm64Wasi | Wasm32Wasi | Wasm32Unknown -> true
+
+let is_wasm32 = function
+  | Wasm32Wasi | Wasm32Unknown -> true
+  | _ -> false
+
+let target_triple = function
+  | Native          -> "arm64-apple-macosx15.0.0"  (* TODO: detect host *)
+  | Wasm64Wasi      -> "wasm64-wasi"
+  | Wasm32Wasi      -> "wasm32-wasi"
+  | Wasm32Unknown   -> "wasm32-unknown-unknown"
+
+(** Pointer size in bytes for the target. *)
+let target_ptr_size = function
+  | Native | Wasm64Wasi -> 8
+  | Wasm32Wasi | Wasm32Unknown -> 4
+
+(** LLVM pointer type name for the target. *)
+let target_ptr_ty = function
+  | Native | Wasm64Wasi -> "ptr"
+  | Wasm32Wasi | Wasm32Unknown -> "ptr"  (* opaque ptr works for wasm32 too *)
+
+(** LLVM integer type matching pointer width. *)
+let target_int_ty = function
+  | Native | Wasm64Wasi -> "i64"
+  | Wasm32Wasi | Wasm32Unknown -> "i32"
+
 let make_ctx ?(fast_math=false) () = {
   buf      = Buffer.create 4096;
   preamble = Buffer.create 1024;
@@ -2298,11 +2334,10 @@ let build_ctor_info ctx (m : Tir.tir_module) =
         { ce_tag = 0; ce_fields = field_tys }
   ) m.Tir.tm_types
 
-let emit_preamble (buf : Buffer.t) =
-  Buffer.add_string buf {|; March compiler output
-target triple = "arm64-apple-macosx15.0.0"
-
-; Runtime declarations
+let emit_preamble ?(target=Native) (buf : Buffer.t) =
+  Buffer.add_string buf (Printf.sprintf "; March compiler output\ntarget triple = \"%s\"\n\n" (target_triple target));
+  (* Core runtime declarations — needed on all targets *)
+  Buffer.add_string buf {|; Runtime declarations
 declare ptr  @march_alloc(i64 %sz)
 declare void @march_incrc(ptr %p)
 declare void @march_decrc(ptr %p)
@@ -2331,35 +2366,6 @@ declare i64  @march_string_byte_length(ptr %s)
 declare i64  @march_string_is_empty(ptr %s)
 declare ptr  @march_string_to_int(ptr %s)
 declare ptr  @march_string_join(ptr %list, ptr %sep)
-declare void @march_kill(ptr %actor)
-declare i64  @march_is_alive(ptr %actor)
-declare ptr  @march_send(ptr %actor, ptr %msg)
-; Phase 5: per-process heap allocation and cross-heap message passing
-; march_send_linear: send a linear (zero-copy) message — caller transfers ownership
-declare ptr  @march_send_linear(ptr %actor, ptr %msg)
-; march_msg_copy / march_msg_move: direct cross-heap operations (used by scheduler layer)
-declare ptr  @march_msg_copy(ptr %src_heap, ptr %dst_heap, ptr %value)
-declare ptr  @march_msg_move(ptr %src_heap, ptr %dst_heap, ptr %value)
-; march_process_alloc: per-process bump allocation (non-atomic, no locks)
-declare ptr  @march_process_alloc(ptr %heap, i64 %sz)
-declare ptr  @march_spawn(ptr %actor)
-declare i64  @march_actor_get_int(ptr %actor, i64 %index)
-declare void @march_run_scheduler()
-; Phase 4: compiled-code reduction counting
-@march_tls_reductions = external thread_local global i64
-declare void @march_yield_from_compiled()
-declare i64  @march_tcp_listen(i64 %port)
-declare i64  @march_tcp_accept(i64 %fd)
-declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)
-declare void @march_tcp_send_all(i64 %fd, ptr %data)
-declare void @march_tcp_close(i64 %fd)
-declare ptr  @march_http_parse_request(ptr %raw)
-declare ptr  @march_http_serialize_response(i64 %status, ptr %headers, ptr %body)
-declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
-declare void @march_ws_handshake(i64 %fd, ptr %key)
-declare ptr  @march_ws_recv(i64 %fd)
-declare void @march_ws_send(i64 %fd, ptr %frame)
-declare ptr  @march_ws_select(i64 %fd, ptr %pipe, i64 %timeout)
 ; Float builtins
 declare double @march_float_abs(double %f)
 declare i64    @march_float_ceil(double %f)
@@ -2411,6 +2417,38 @@ declare ptr  @march_string_to_float(ptr %s)
 ; List builtins
 declare ptr  @march_list_append(ptr %a, ptr %b)
 declare ptr  @march_list_concat(ptr %lists)
+; LLVM intrinsics
+declare i64  @llvm.ctpop.i64(i64 %val)
+
+|};
+  (* Native-only declarations: actors, networking, file I/O, scheduler *)
+  if not (is_wasm_target target) then
+    Buffer.add_string buf {|; Actor builtins
+declare void @march_kill(ptr %actor)
+declare i64  @march_is_alive(ptr %actor)
+declare ptr  @march_send(ptr %actor, ptr %msg)
+declare ptr  @march_send_linear(ptr %actor, ptr %msg)
+declare ptr  @march_msg_copy(ptr %src_heap, ptr %dst_heap, ptr %value)
+declare ptr  @march_msg_move(ptr %src_heap, ptr %dst_heap, ptr %value)
+declare ptr  @march_process_alloc(ptr %heap, i64 %sz)
+declare ptr  @march_spawn(ptr %actor)
+declare i64  @march_actor_get_int(ptr %actor, i64 %index)
+declare void @march_run_scheduler()
+@march_tls_reductions = external thread_local global i64
+declare void @march_yield_from_compiled()
+; TCP/network builtins
+declare i64  @march_tcp_listen(i64 %port)
+declare i64  @march_tcp_accept(i64 %fd)
+declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)
+declare void @march_tcp_send_all(i64 %fd, ptr %data)
+declare void @march_tcp_close(i64 %fd)
+declare ptr  @march_http_parse_request(ptr %raw)
+declare ptr  @march_http_serialize_response(i64 %status, ptr %headers, ptr %body)
+declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
+declare void @march_ws_handshake(i64 %fd, ptr %key)
+declare ptr  @march_ws_recv(i64 %fd)
+declare void @march_ws_send(i64 %fd, ptr %frame)
+declare ptr  @march_ws_select(i64 %fd, ptr %pipe, i64 %timeout)
 ; File/Dir builtins
 declare i64  @march_file_exists(ptr %s)
 declare i64  @march_dir_exists(ptr %s)
@@ -2425,7 +2463,6 @@ declare ptr  @march_file_delete(ptr %path)
 declare ptr  @march_file_copy(ptr %src, ptr %dst)
 declare ptr  @march_file_rename(ptr %src, ptr %dst)
 declare ptr  @march_file_stat(ptr %path)
-; TCP/network builtins
 declare ptr  @march_tcp_connect(ptr %host, i64 %port)
 ; HTTP client builtins
 declare ptr  @march_http_serialize_request(ptr %method, ptr %host, ptr %path, ptr %query, ptr %headers, ptr %body)
@@ -2452,16 +2489,20 @@ declare void @march_link(ptr %actor_a, ptr %actor_b)
 declare void @march_unlink(ptr %actor_a, ptr %actor_b)
 declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs)
 declare ptr  @march_value_to_string(ptr %v)
-; LLVM intrinsics
-declare i64  @llvm.ctpop.i64(i64 %val)
-
+|}
+  else
+    (* WASM targets: plain global instead of thread_local; no-op scheduler *)
+    Buffer.add_string buf {|; WASM: plain global (no TLS), no-op scheduler stub
+@march_tls_reductions = external global i64
+declare void @march_yield_from_compiled()
+declare void @march_run_scheduler()
 |}
 
 let emit_main_wrapper (buf : Buffer.t) =
   Buffer.add_string buf
     "\ndefine i32 @main() {\nentry:\n  call void @march_main()\n  call void @march_run_scheduler()\n  ret i32 0\n}\n"
 
-let emit_module ?(fast_math=false) (m : Tir.tir_module) : string =
+let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : string =
   let ctx = make_ctx ~fast_math () in
   build_ctor_info ctx m;
   (* Register user-defined extern functions *)
@@ -2498,7 +2539,7 @@ let emit_module ?(fast_math=false) (m : Tir.tir_module) : string =
     ) m.Tir.tm_fns;
 
   let out = Buffer.create 8192 in
-  emit_preamble out;
+  emit_preamble ~target out;
   (* Emit user-defined extern function declarations *)
   List.iter (fun (ed : Tir.extern_decl) ->
       let ret_llty = llvm_ret_ty ed.ed_ret in
@@ -2520,12 +2561,80 @@ let emit_module ?(fast_math=false) (m : Tir.tir_module) : string =
       then Some fn.Tir.fn_name
       else None
     ) m.Tir.tm_fns in
-  (match main_fn_name with
-   | Some name ->
-     let mangled = llvm_name (mangle_extern name) in
+
+  (* Entry point: for native targets emit @main calling march_main + scheduler;
+     for WASM browser target (Wasm32Unknown), emit exported island entry points
+     that the JS runtime can call. *)
+  (match target with
+   | Wasm32Unknown ->
+     (* For WASM islands, export the render/update functions.
+        The island name is derived from the module name.
+        The user's module must define render(state) and update(state, msg). *)
+     (* Find a function by base name, handling mono suffixes like render$String *)
+     let find_fn suffix =
+       List.find_opt (fun (fn : Tir.fn_def) ->
+         let n = fn.Tir.fn_name in
+         (* Strip monomorphization suffix (e.g. render$String → render) *)
+         let base = match String.index_opt n '$' with
+           | Some i -> String.sub n 0 i
+           | None -> n
+         in
+         base = suffix ||
+         (String.length base > String.length suffix + 1 &&
+          String.sub base (String.length base - String.length suffix - 1)
+            (String.length suffix + 1) = ("." ^ suffix))
+       ) m.Tir.tm_fns
+     in
+     let emit_island_export export_name march_fn_name params ret_ty =
+       let mangled = llvm_name (mangle_extern march_fn_name) in
+       let param_decls = String.concat ", " (List.mapi (fun i ty ->
+           Printf.sprintf "%s %%%d" ty i) params) in
+       let param_refs = String.concat ", " (List.mapi (fun i ty ->
+           Printf.sprintf "%s %%%d" ty i) params) in
+       Buffer.add_string out
+         (Printf.sprintf "\ndefine dllexport %s @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret %s %%r\n}\n"
+            ret_ty export_name param_decls ret_ty mangled param_refs ret_ty)
+     in
+     (match find_fn "render" with
+      | Some fn ->
+        emit_island_export "march_island_render" fn.Tir.fn_name ["ptr"] "ptr"
+      | None -> ());
+     (match find_fn "update" with
+      | Some fn ->
+        emit_island_export "march_island_update" fn.Tir.fn_name ["ptr"; "ptr"] "ptr"
+      | None -> ());
+     (* march_island_init: if there's an init() function, export it;
+        otherwise generate a stub that returns null (use SSR state). *)
+     (match find_fn "init" with
+      | Some fn ->
+        let mangled = llvm_name (mangle_extern fn.Tir.fn_name) in
+        Buffer.add_string out
+          (Printf.sprintf "\ndefine dllexport ptr @march_island_init() {\nentry:\n  %%r = call ptr @%s()\n  ret ptr %%r\n}\n" mangled)
+      | None ->
+        Buffer.add_string out
+          "\ndefine dllexport ptr @march_island_init() {\nentry:\n  ret ptr null\n}\n");
+     (* Re-export march_alloc and march_free for JS glue *)
      Buffer.add_string out
-       (Printf.sprintf "\ndefine i32 @main() {\nentry:\n  call void @%s()\n  call void @march_run_scheduler()\n  ret i32 0\n}\n" mangled)
-   | None -> ());
+       "\ndefine dllexport void @march_dealloc(ptr %p) {\nentry:\n  call void @march_free(ptr %p)\n  ret void\n}\n";
+     Buffer.add_string out
+       "\ndefine dllexport ptr @march_alloc_export(i64 %sz) {\nentry:\n  %r = call ptr @march_alloc(i64 %sz)\n  ret ptr %r\n}\n";
+     Buffer.add_string out
+       "\ndefine dllexport ptr @march_string_lit_export(ptr %s, i64 %len) {\nentry:\n  %r = call ptr @march_string_lit(ptr %s, i64 %len)\n  ret ptr %r\n}\n";
+     (* If there's a main function, still call it for module-level init *)
+     (match main_fn_name with
+      | Some name ->
+        let mangled = llvm_name (mangle_extern name) in
+        Buffer.add_string out
+          (Printf.sprintf "\ndefine dllexport void @_start() {\nentry:\n  call void @%s()\n  ret void\n}\n" mangled)
+      | None -> ())
+   | _ ->
+     (* Native / WASI: standard @main wrapper *)
+     (match main_fn_name with
+      | Some name ->
+        let mangled = llvm_name (mangle_extern name) in
+        Buffer.add_string out
+          (Printf.sprintf "\ndefine i32 @main() {\nentry:\n  call void @%s()\n  call void @march_run_scheduler()\n  ret i32 0\n}\n" mangled)
+      | None -> ()));
 
   (* Append closure wrapper functions generated for top-level fn-as-value *)
   Buffer.add_buffer out ctx.extra_fns;
@@ -2582,7 +2691,7 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
   let ctx = make_ctx ~fast_math () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = [] } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
@@ -2631,7 +2740,7 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
   let ctx = make_ctx ~fast_math () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = [] } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
@@ -2667,7 +2776,7 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
   let ctx = make_ctx ~fast_math () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = [] } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = [] } in
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
   Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
@@ -2697,7 +2806,7 @@ let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
   let ctx = make_ctx ~fast_math () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = [] } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = [] } in
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
   Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
@@ -2754,7 +2863,7 @@ let emit_fns_fragment
     ~(fns : Tir.fn_def list) : string =
   let ctx = make_ctx () in
   let pseudo_mod : Tir.tir_module =
-    { tm_name = "stdlib_prelude"; tm_types = types; tm_fns = fns; tm_externs = [] } in
+    { tm_name = "stdlib_prelude"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;

@@ -105,5 +105,7 @@ type tir_module = {
   tm_fns     : fn_def list;
   tm_types   : type_def list;
   tm_externs : extern_decl list;
+  tm_exports : string list;  (** Extra root function names to keep alive during DCE.
+                                 Used for WASM island exports (render, update, init). *)
 }
 [@@deriving show]

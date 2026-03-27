@@ -1409,7 +1409,8 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
   let result : Tir.tir_module = { tm_name = m.mod_name.txt;
     tm_fns = all_fns;
     tm_types = builtin_type_defs @ List.rev !types;
-    tm_externs = List.rev !externs } in
+    tm_externs = List.rev !externs;
+    tm_exports = [] } in
   _type_map_ref := None;
   _iface_methods := Hashtbl.create 0;
   _use_aliases := Hashtbl.create 0;
