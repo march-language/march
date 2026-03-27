@@ -3198,24 +3198,24 @@ let base_env : env =
            | Ok s -> VString (Digestif.SHA256.(to_hex (digest_string s)))
            | Error e -> eval_error "sha256: %s" e)
         | _ -> eval_error "sha256(s: String | Bytes): String"))
-    (* ---- HMAC-SHA-256: returns hex string ---- *)
+    (* ---- HMAC-SHA-256: returns Ok(Bytes) ---- *)
   ; ("hmac_sha256", VBuiltin ("hmac_sha256", function
         | [key_v; msg_v] ->
           (match march_val_to_raw key_v, march_val_to_raw msg_v with
            | Ok key, Ok msg ->
-             VString (Digestif.SHA256.(to_hex (hmac_string ~key msg)))
+             let raw = Digestif.SHA256.(to_raw_string (hmac_string ~key msg)) in
+             VCon ("Ok", [march_bytes_of_string raw])
            | Error e, _ | _, Error e -> eval_error "hmac_sha256: %s" e)
-        | _ -> eval_error "hmac_sha256(key: String | Bytes, msg: String | Bytes): String"))
-    (* ---- PBKDF2-HMAC-SHA256: returns hex string ---- *)
+        | _ -> eval_error "hmac_sha256(key: String | Bytes, msg: String | Bytes): Ok(Bytes)"))
+    (* ---- PBKDF2-HMAC-SHA256: returns Ok(Bytes) ---- *)
   ; ("pbkdf2_sha256", VBuiltin ("pbkdf2_sha256", function
         | [pwd_v; salt_v; VInt iters; VInt dklen] ->
           (match march_val_to_raw pwd_v, march_val_to_raw salt_v with
            | Ok password, Ok salt ->
-             VString (pbkdf2_hmac_sha256 ~password ~salt ~iterations:iters ~dklen
-                      |> String.to_seq |> Seq.map (fun c -> Printf.sprintf "%02x" (Char.code c))
-                      |> List.of_seq |> String.concat "")
+             let raw = pbkdf2_hmac_sha256 ~password ~salt ~iterations:iters ~dklen in
+             VCon ("Ok", [march_bytes_of_string raw])
            | Error e, _ | _, Error e -> eval_error "pbkdf2_sha256: %s" e)
-        | _ -> eval_error "pbkdf2_sha256(password: String, salt: String | Bytes, iterations: Int, dklen: Int): String"))
+        | _ -> eval_error "pbkdf2_sha256(password: String, salt: String | Bytes, iterations: Int, dklen: Int): Ok(Bytes)"))
     (* ---- Base64 encode: Bytes -> String ---- *)
   ; ("base64_encode", VBuiltin ("base64_encode", function
         | [v] ->
@@ -3223,13 +3223,13 @@ let base_env : env =
            | Ok s -> VString (base64_encode s)
            | Error e -> eval_error "base64_encode: %s" e)
         | _ -> eval_error "base64_encode(s: Bytes): String"))
-    (* ---- Base64 decode: String -> Bytes ---- *)
+    (* ---- Base64 decode: String -> Ok(Bytes) | Err(String) ---- *)
   ; ("base64_decode", VBuiltin ("base64_decode", function
         | [VString s] ->
           (match base64_decode s with
-           | Ok raw -> march_bytes_of_string raw
-           | Error e -> eval_error "base64_decode: %s" e)
-        | _ -> eval_error "base64_decode(s: String): Bytes"))
+           | Ok raw -> VCon ("Ok", [march_bytes_of_string raw])
+           | Error e -> VCon ("Err", [VString e]))
+        | _ -> eval_error "base64_decode(s: String): Ok(Bytes) | Err(String)"))
     (* ---- random_bytes(n): generate n random bytes ---- *)
   ; ("random_bytes", VBuiltin ("random_bytes", function
         | [VInt n] ->

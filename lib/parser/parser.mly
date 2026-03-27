@@ -407,11 +407,11 @@ protocol_step:
     { ProtoMsg (sender, receiver, t) }
   | LOOP; DO; steps = list(protocol_step); END
     { ProtoLoop steps }
-  | CHOOSE; BY; chooser = upper_name; COLON; branches = nonempty_list(choose_branch); END
+  | CHOOSE; BY; chooser = upper_name; COLON; option(arm_sep); branches = separated_nonempty_list(arm_sep, choose_branch); END
     { ProtoChoice (chooser, branches) }
 
 choose_branch:
-  | PIPE; label = lower_name; ARROW; steps = list(protocol_step)
+  | option(PIPE); label = lower_name; ARROW; steps = list(protocol_step)
     { (label, steps) }
 
 (** Nested module: mod Name do ... end *)
