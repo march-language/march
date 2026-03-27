@@ -134,8 +134,14 @@ let parse_atom s =
     (match try_parse_version vs with
      | Error e -> Error e
      | Ok v    -> Ok (Lt v))
+  else if len >= 2 && String.sub s 0 1 = "=" then
+    (* explicit "= VER" exact equality *)
+    let vs = trim (String.sub s 1 (len - 1)) in
+    (match try_parse_version vs with
+     | Error e -> Error e
+     | Ok v    -> Ok (Eq v))
   else
-    (* exact version or error *)
+    (* bare version string: exact equality *)
     (match try_parse_version s with
      | Error e -> Error e
      | Ok v    -> Ok (Eq v))

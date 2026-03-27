@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-26 (Bastion WASM Islands library — Islands framework infrastructure, JS runtime, specs; LSP forge.toml dep resolution — cross-file imports from forge deps now work in the LSP)
+**Last updated:** 2026-03-27 (Forge dependency resolution and versioning — PubGrub solver, semver constraints, lockfile, CAS package store, [patch] overrides, API surface semver enforcement, property-based + regression + benchmark tests)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -25,6 +25,7 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 - ✅ **Implement `forge`** — Implemented as `forge/` package. Commands: `forge new`, `forge build`, `forge run`, `forge test`, `forge format`, `forge interactive`/`i`, `forge deps`, `forge clean`, `forge search`. Template scaffolding generates valid March code (PascalCase module names, `do/end` fn bodies, `println` builtin). 15 tests in `forge/test/test_forge.ml`.
 - ✅ **`forge search` — Hoogle-style search** — `lib/search/search.ml` (new `march_search` library): Levenshtein fuzzy name search, type-signature component matching, doc-keyword search, combined search (AND-semantics). JSON index cache at `.march/search-index.json`. `forge/lib/cmd_search.ml` wires up cmdliner with `--type`, `--doc`, `--limit`, `--json`, `--rebuild` flags. 25 tests in `test/test_search.ml` (levenshtein, name search, type search, doc search, combined, JSON roundtrip, stdlib integration).
+- ✅ **Forge dependency resolution and versioning system** — Full plan at `specs/plans/forge-dependency-resolution-plan.md`. Six implementation phases (Phases 1–6 complete): (1) Semver `~>` / `>=` / `<=` / `>` / `<` / exact / `AND` combinations (`resolver_version.ml`, `resolver_constraint.ml`); five dep source types (`RegistryDep`, `GitTagDep`, `GitBranchDep`, `GitRevDep`, `PathDep`); `forge.lock` TOML with manifest hash drift detection (`resolver_lockfile.ml`). (2) In-memory registry index; PubGrub greedy solver with FIFO work queue, conflict-driven incompatibility tracking, human-readable error messages (`resolver_pubgrub.ml`, `resolver_registry.ml`). (3) SHA-256 content-addressed package store — sorted canonical archive (`.git`/`.march` excluded, no timestamps), store/lookup/verify with tampering detection (`resolver_cas_package.ml`). (4) `[patch]` fork overrides — `GitBranchDep`/`PathDep` substitution before solver; extra patches for transitive deps; `forge deps` and `forge deps update`. (5) Text-based `.march` source API surface extraction (`pub fn`/`pub type`), diff (Added/Removed/Changed), MAJOR/MINOR/PATCH classification, semver enforcement in `forge publish --old-source` (`resolver_api_surface.ml`, `cmd_publish.ml`). (6) Property-based tests (QCheck, 200 cases × 3 properties), regression tests for Cargo/Hex/npm known bugs, solver performance benchmarks (chain-100: <100ms, chain-500: <1s, diamond-20×20: <500ms). Total: 132 forge tests across 6 suites.
 
 ---
 

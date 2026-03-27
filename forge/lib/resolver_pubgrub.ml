@@ -280,13 +280,13 @@ let propagate_decision state pkg version =
            Hashtbl.replace state.assignments dep_name (Derived (Positive combined));
            (* Re-enqueue if not already in the queue. *)
            if not (List.mem dep_name state.work_queue) then
-             state.work_queue <- dep_name :: state.work_queue
+             state.work_queue <- state.work_queue @ [dep_name]
          | Some (Derived (Negative _)) | None ->
            (* No constraint yet: set it fresh and enqueue. *)
            Hashtbl.replace state.assignments dep_name
              (Derived (Positive dep_constraint));
            if not (List.mem dep_name state.work_queue) then
-             state.work_queue <- dep_name :: state.work_queue)
+             state.work_queue <- state.work_queue @ [dep_name])
       ) deps
 
 (** Attempt to decide a version for [pkg], given current constraints. *)
@@ -325,7 +325,7 @@ let solve registry ~root_deps ~overrides =
       in
       Hashtbl.replace state.assignments pkg (Derived (Positive combined));
       if not (List.mem pkg state.work_queue) then
-        state.work_queue <- pkg :: state.work_queue
+        state.work_queue <- state.work_queue @ [pkg]
     ) root_deps;
   (* Also add all override packages as decided at a synthetic version or any *)
   List.iter (fun (pkg, ver_opt) ->
