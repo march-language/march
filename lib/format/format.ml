@@ -264,6 +264,35 @@ let rec try_collect_list acc = function
   | ECon ({ txt = "Cons"; _ }, [hd; tl], _) -> try_collect_list (hd :: acc) tl
   | _ -> None
 
+(** Try to reconstruct string interpolation from desugared
+    prefix ++ to_string(e1) ++ s1 ++ to_string(e2) ++ s2 ++ ...
+    Returns Some (prefix_str, [(expr, suffix_str); ...]) if the pattern matches,
+    where the original source was "prefix${e1}s1${e2}s2". *)
+let try_collect_interp expr =
+  (* Flatten left-associated ++ chain into a list of segments *)
+  let rec flatten acc = function
+    | EApp (EVar { txt = "++"; _ }, [lhs; rhs], _) ->
+      flatten (rhs :: acc) lhs
+    | e -> e :: acc
+  in
+  let segments = flatten [] expr in
+  (* Pattern: LitString, to_string(e), LitString, to_string(e), LitString, ...
+     The first segment must be a LitString (the prefix).
+     Then alternating to_string(expr) and LitString pairs.
+     The chain always ends with a LitString or to_string(expr). *)
+  match segments with
+  | ELit (LitString prefix, _) :: rest ->
+    let rec collect_pairs acc = function
+      | [] -> Some (prefix, List.rev acc)
+      | EApp (EVar { txt = "to_string"; _ }, [e], _) :: ELit (LitString s, _) :: rest ->
+        collect_pairs ((e, s) :: acc) rest
+      | [EApp (EVar { txt = "to_string"; _ }, [e], _)] ->
+        collect_pairs ((e, "") :: acc) []
+      | _ -> None
+    in
+    collect_pairs [] rest
+  | _ -> None
+
 
 (** Render an expression as a single line.  Used to measure width and
     decide whether to emit inline or break across multiple lines. *)
@@ -279,6 +308,35 @@ let rec expr_inline = function
        let[@warning "-8"] ECon ({ txt; _ }, args, _) = e in
        Printf.sprintf "%s(%s)" txt (String.concat ", " (List.map expr_inline args)))
   | ECon ({ txt = "Nil"; _ }, [], _) -> "[]"
+  (* Reconstruct string interpolation: ++ / to_string chain → "${expr}" *)
+  | EApp (EVar { txt = "++"; _ }, [_; _], _) as e when try_collect_interp e <> None ->
+    let[@warning "-8"] Some (prefix, parts) = try_collect_interp e in
+    let needs_triple = String.contains prefix '\n' ||
+      List.exists (fun (_, s) -> String.contains s '\n') parts in
+    let buf = Buffer.create 64 in
+    if needs_triple then begin
+      let triple = "\"\"\"" in
+      Buffer.add_string buf triple;
+      Buffer.add_string buf prefix;
+      List.iter (fun (e, seg) ->
+        Buffer.add_string buf "${";
+        Buffer.add_string buf (expr_inline e);
+        Buffer.add_char buf '}';
+        Buffer.add_string buf seg
+      ) parts;
+      Buffer.add_string buf triple
+    end else begin
+      Buffer.add_char buf '"';
+      Buffer.add_string buf (String.escaped prefix);
+      List.iter (fun (e, seg) ->
+        Buffer.add_string buf "${";
+        Buffer.add_string buf (expr_inline e);
+        Buffer.add_char buf '}';
+        Buffer.add_string buf (String.escaped seg)
+      ) parts;
+      Buffer.add_char buf '"'
+    end;
+    Buffer.contents buf
   | EApp (EVar { txt = op; _ }, [a; b], _) when infix_prec op <> None ->
     (* Binary infix operator — render as  a op b  with precedence-correct parens *)
     let p    = Option.get (infix_prec op) in
@@ -354,19 +412,22 @@ let rec expr_inline = function
       n.txt (String.concat ", " (List.map fmt_param ps)) ty
   | EAssert (e, _)              -> Printf.sprintf "assert %s" (expr_inline e)
   | ESigil (c, content, _)     ->
-    (match content with
-     | ELit (LitString s, _) when String.contains s '\n' ->
-       let triple = "\"\"\"" in
-       Printf.sprintf "~%c%s%s%s" c triple s triple
-     | _ -> Printf.sprintf "~%c%s" c (expr_inline content))
+    let inner = expr_inline content in
+    Printf.sprintf "~%c%s" c inner
   | ECond _                     -> "match do ... end"
 
 (** Returns true if the expression must be rendered on multiple lines
     (match, multi-statement block, local fn definition). *)
-let sigil_is_multiline = function
+let sigil_is_multiline content =
+  match content with
   | ELit (LitString s, _) -> String.contains s '\n'
-  | EApp (EVar { txt = "string_concat"; _ }, [_; _], _) -> true
-  | _ -> false
+  | _ ->
+    (* Check if it's an interpolation chain with multiline content *)
+    match try_collect_interp content with
+    | Some (prefix, parts) ->
+      String.contains prefix '\n' ||
+      List.exists (fun (_, s) -> String.contains s '\n') parts
+    | None -> false
 
 let is_multiline = function
   | EMatch _ | ELetFn _ -> true
@@ -482,15 +543,39 @@ and emit_if_branch ctx e =
     indented ctx (fun () -> emit_stmt ctx e)
 
 and emit_sigil_multiline ctx c content =
-  (* Extract the raw string content from the sigil *)
+  (* Reconstruct the raw string with interpolation preserved *)
   let raw = match content with
     | ELit (LitString s, _) -> s
-    | _ -> expr_inline content
+    | _ ->
+      match try_collect_interp content with
+      | Some (prefix, parts) ->
+        let buf = Buffer.create 256 in
+        Buffer.add_string buf prefix;
+        List.iter (fun (e, seg) ->
+          Buffer.add_string buf "${";
+          Buffer.add_string buf (expr_inline e);
+          Buffer.add_char buf '}';
+          Buffer.add_string buf seg
+        ) parts;
+        Buffer.contents buf
+      | None -> expr_inline content
   in
   let triple = "\"\"\"" in
   line ctx (Printf.sprintf "~%c%s" c triple);
   (* Output content lines at base_indent + 2.
      Strip common leading whitespace from the original, then re-indent. *)
+  (* Strip leading newline (implicit from triple-quote on own line)
+     and trailing newline+whitespace (from closing triple-quote on own line) *)
+  let raw =
+    let len = String.length raw in
+    let start = if len > 0 && raw.[0] = '\n' then 1 else 0 in
+    let stop = ref len in
+    while !stop > start && (raw.[!stop - 1] = ' ' || raw.[!stop - 1] = '\n' || raw.[!stop - 1] = '\t') do
+      decr stop
+    done;
+    if start = 0 && !stop = len then raw
+    else String.sub raw start (!stop - start)
+  in
   let content_lines = String.split_on_char '\n' raw in
   let base = (ctx.indent + 1) * 2 in
   let base_indent = String.make base ' ' in

@@ -107,6 +107,30 @@ The March formatter can be used as an external formatter in Zed. Add this to you
 
 This runs `forge format --stdin` on every save, which reads the buffer from stdin and writes the formatted output to stdout. Make sure `forge` is in your `PATH`.
 
+**Note:** Zed does not inherit your shell `PATH`. If `forge` isn't found, use the full path:
+
+```json
+"command": "/Users/80197052/.opam/march/bin/forge"
+```
+
+## LSP (hover, go-to-definition, completions)
+
+The March LSP server (`march-lsp`) provides hover types, go-to-definition, completions, diagnostics, inlay hints, and more. It's configured automatically in `extension.toml`.
+
+If Zed can't find `march-lsp`, configure the path in your Zed settings:
+
+```json
+{
+  "lsp": {
+    "march-lsp": {
+      "binary": {
+        "path": "/Users/80197052/.opam/march/bin/march-lsp"
+      }
+    }
+  }
+}
+```
+
 ### Gotchas
 
 - **Zed caches grammars aggressively.** If "reload extensions" doesn't seem to work after a WASM rebuild, quit Zed fully and relaunch. In rare cases, clear the cache: `rm -rf ~/Library/Caches/Zed/extensions/march`.
