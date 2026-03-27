@@ -114,22 +114,168 @@ let rec decompose_concat (e : expr) : expr list =
     decompose_concat left @ decompose_concat right
   | _ -> [e]
 
+(* ── Island tag parsing in ~H ──────────────────────────────────────────── *)
+
+(** Try to extract the value of an attribute (name='value' or name="value")
+    from a raw HTML-like string.  Returns [Some value] or [None]. *)
+let extract_attr (attr_name : string) (s : string) : string option =
+  let pat_sq = attr_name ^ "='" in
+  let pat_dq = attr_name ^ "=\"" in
+  let try_quote pat close_char =
+    match String.split_on_char pat.[0] s with
+    | _ ->
+      (* Simple substring search *)
+      let plen = String.length pat in
+      let slen = String.length s in
+      let rec scan i =
+        if i + plen > slen then None
+        else if String.sub s i plen = pat then begin
+          let start = i + plen in
+          let rec find_end j =
+            if j >= slen then None
+            else if s.[j] = close_char then
+              Some (String.sub s start (j - start))
+            else find_end (j + 1)
+          in
+          find_end start
+        end
+        else scan (i + 1)
+      in
+      scan 0
+  in
+  match try_quote pat_sq '\'' with
+  | Some _ as r -> r
+  | None -> try_quote pat_dq '"'
+
+(** Check if a string literal starts an island tag: [<island ...].
+    Returns the module name if found, and whether the tag is self-closing
+    within this literal (i.e. contains [/>]). *)
+let detect_island_start (s : string) : string option =
+  let trimmed = String.trim s in
+  if String.length trimmed >= 7 &&
+     String.sub trimmed 0 7 = "<island" then
+    extract_attr "name" trimmed
+  else
+    None
+
+(** Check if a string contains the self-closing end of an island tag [/>]. *)
+let has_island_close (s : string) : bool =
+  let len = String.length s in
+  let rec scan i =
+    if i + 1 >= len then false
+    else if s.[i] = '/' && s.[i+1] = '>' then true
+    else scan (i + 1)
+  in
+  scan 0
+
+(** Process a list of parts from an ~H sigil, replacing <island> tags with
+    calls to [IslandView.island_ssr].
+
+    Recognises:
+      ~H"<island name='Counter' />                  — no props
+      ~H"<island name='Counter' props=${expr} />     — with props
+
+    Desugars to:
+      IslandView.island_ssr(name, Json.to_string(to_json(Mod.init(props))),
+                            IOList.to_string(Mod.render(Mod.init(props))))
+
+    When no props are given, uses the record literal [{}] as a dummy.
+    The props expression comes from the next interpolated part after the
+    opening string that contains [props=]. *)
+let process_island_tags (parts : expr list) (sp : span) : expr list =
+  let v s = EVar { txt = s; span = sp } in
+  let app f args = EApp (v f, args, sp) in
+  let rec go acc = function
+    | [] -> List.rev acc
+    (* String literal that contains an island tag *)
+    | ELit (LitString s, lsp) :: rest when detect_island_start s <> None ->
+      let module_name = match detect_island_start s with
+        | Some n -> n | None -> assert false in
+      (* Determine if props= appears in the string.  If so, the next
+         interpolated part is the props expression. *)
+      let has_props =
+        let len = String.length s in
+        let rec scan i =
+          if i + 6 > len then false
+          else if String.sub s i 6 = "props=" then true
+          else scan (i + 1)
+        in
+        scan 0
+      in
+      if has_props then begin
+        (* Expect: EApp(to_string, [props_expr]) :: ELit(" />") :: rest' *)
+        match rest with
+        | EApp (EVar { txt = "to_string"; _ }, [props_expr], _) :: tail ->
+          (* Skip the closing " />" literal if present *)
+          let rest' = match tail with
+            | ELit (LitString closing, _) :: r when has_island_close closing -> r
+            | _ -> tail
+          in
+          let init_call = app (module_name ^ ".create") [props_expr] in
+          let state_json = app "Json.to_string" [app "to_json" [init_call]] in
+          let render_call = app "IOList.to_string" [
+            app (module_name ^ ".render") [
+              app (module_name ^ ".create") [props_expr]
+            ]
+          ] in
+          let island_expr =
+            app "IslandView.island_ssr" [
+              ELit (LitString module_name, sp);
+              state_json;
+              render_call
+            ]
+          in
+          go (island_expr :: acc) rest'
+        | _ ->
+          (* Malformed — treat as a no-props island *)
+          let island_expr = app "IslandView.island" [
+            ELit (LitString module_name, sp);
+            ELit (LitString "{}", lsp)
+          ] in
+          go (island_expr :: acc) rest
+      end
+      else begin
+        (* No props — skip to closing /> *)
+        let rest' = if has_island_close s then rest
+          else match rest with
+            | ELit (LitString closing, _) :: r when has_island_close closing -> r
+            | _ -> rest
+        in
+        let island_expr = app "IslandView.island" [
+          ELit (LitString module_name, sp);
+          ELit (LitString "{}", lsp)
+        ] in
+        go (island_expr :: acc) rest'
+      end
+    | part :: rest ->
+      go (part :: acc) rest
+  in
+  go [] parts
+
 (** Build an IOList directly from the parts of an ~H sigil interpolation.
 
     Static string literals are kept as-is.  Dynamic parts (to_string calls)
-    are wrapped in Html.escape for auto-escaping.  The result is:
+    are wrapped in Html.escape for auto-escaping.
+
+    Island tags ([<island name='Mod' props=${expr} />]) are recognised and
+    replaced with [IslandView.island_ssr(...)] calls that perform SSR.
+
+    The result is:
       IOList.from_strings(["static1", Html.escape(to_string(e1)), "static2", ...])
     which produces a multi-segment IOList without building an intermediate
     concatenated string. *)
 let html_interp_to_iolist (content : expr) (sp : span) : expr =
   let parts = decompose_concat content in
+  (* First pass: replace <island> tags with IslandView calls *)
+  let parts = process_island_tags parts sp in
+  (* Second pass: escape dynamic interpolations *)
   let parts = List.map (fun part ->
     match part with
     | EApp (EVar { txt = "to_string"; _ }, args, psp) ->
       (* Dynamic part: wrap to_string(x) in Html.escape *)
       let inner = EApp (EVar { txt = "to_string"; span = psp }, args, psp) in
       EApp (EVar { txt = "Html.escape"; span = psp }, [inner], psp)
-    | _ -> part  (* String literals — leave as-is *)
+    | _ -> part  (* String literals and island_ssr calls — leave as-is *)
   ) parts in
   let list_expr = List.fold_right (fun e acc ->
     ECon ({ txt = "Cons"; span = sp }, [e; acc], sp)
@@ -1082,6 +1228,141 @@ let check_app_main_exclusivity (decls : decl list) : unit =
   if has_main && has_app then
     failwith "A module cannot define both main() and an app declaration"
 
+(* ── Island bridge auto-generation ─────────────────────────────────────── *)
+
+(** Check if the original declarations include [DDeriving(type_name, ...Json...)]
+    for a given type name. *)
+let has_json_derive (type_name_str : string) (decls : decl list) : bool =
+  List.exists (function
+    | DDeriving (tn, ifaces, _) ->
+      tn.txt = type_name_str &&
+      List.exists (fun (i : name) -> i.txt = "Json") ifaces
+    | _ -> false
+  ) decls
+
+(** Check if a DFn with the given name exists in the declaration list. *)
+let has_fn_named (fn_name_str : string) (decls : decl list) : bool =
+  List.exists (function
+    | DFn (def, _) -> def.fn_name.txt = fn_name_str
+    | _ -> false
+  ) decls
+
+(** Generate [update_json] and [render_json] bridge functions for an island
+    module that has State and Msg types with [derive Json], plus [update]
+    and [render] functions.
+
+    The generated code uses the polymorphic [from_json]/[to_json] builtins
+    which dispatch via impl_tbl at runtime.  Because the generated call sites
+    feed their results into [update(state, msg)], the typechecker infers the
+    correct concrete types for each [from_json] call. *)
+let gen_island_bridges (sp : span) : decl list =
+  let v s = EVar { txt = s; span = sp } in
+  let app f args = EApp (v f, args, sp) in
+  let pat_var s = PatVar (mk_name s) in
+  let pat_con c args = PatCon (mk_name c, args) in
+  let wild = PatWild sp in
+  let br pat body = { branch_pat = pat; branch_guard = None; branch_body = body } in
+  let mk_pub_fn name params body : fn_def =
+    { fn_name   = mk_name name;
+      fn_vis    = Public;
+      fn_doc    = None;
+      fn_attrs  = [];
+      fn_ret_ty = None;
+      fn_clauses = [{
+        fc_params = List.map (fun p ->
+          FPNamed { param_name = mk_name p; param_ty = None; param_lin = Unrestricted }
+        ) params;
+        fc_guard  = None;
+        fc_body   = body;
+        fc_span   = sp;
+      }] }
+  in
+  (* update_json(state_json, msg_json) : String
+       match (Json.parse(state_json), Json.parse(msg_json)) do
+       (Ok(sjv), Ok(mjv)) ->
+         match (from_json(sjv), from_json(mjv)) do
+         (Ok(state), Ok(msg)) ->
+           Json.to_string(to_json(update(state, msg)))
+         _ -> state_json
+         end
+       _ -> state_json
+       end *)
+  let update_body =
+    let outer_scrut = ETuple ([
+      app "Json.parse" [v "state_json"];
+      app "Json.parse" [v "msg_json"]
+    ], sp) in
+    let inner_scrut = ETuple ([
+      app "from_json" [v "sjv"];
+      app "from_json" [v "mjv"]
+    ], sp) in
+    let success =
+      app "Json.to_string" [
+        app "to_json" [
+          app "update" [v "state"; v "msg"]
+        ]
+      ]
+    in
+    let inner_match = EMatch (inner_scrut, [
+      br (PatTuple ([pat_con "Ok" [pat_var "state"];
+                     pat_con "Ok" [pat_var "msg"]], sp)) success;
+      br wild (v "state_json")
+    ], sp) in
+    EMatch (outer_scrut, [
+      br (PatTuple ([pat_con "Ok" [pat_var "sjv"];
+                     pat_con "Ok" [pat_var "mjv"]], sp)) inner_match;
+      br wild (v "state_json")
+    ], sp)
+  in
+  (* render_json(state_json) : String
+       match Json.parse(state_json) do
+       Ok(sjv) ->
+         match from_json(sjv) do
+         Ok(state) -> IOList.to_string(render(state))
+         _ -> ""
+         end
+       _ -> ""
+       end *)
+  let render_body =
+    let inner_match = EMatch (app "from_json" [v "sjv"], [
+      br (pat_con "Ok" [pat_var "state"])
+        (app "IOList.to_string" [app "render" [v "state"]]);
+      br wild (ELit (LitString "", sp))
+    ], sp) in
+    EMatch (app "Json.parse" [v "state_json"], [
+      br (pat_con "Ok" [pat_var "sjv"]) inner_match;
+      br wild (ELit (LitString "", sp))
+    ], sp)
+  in
+  let uf = mk_pub_fn "update_json" ["state_json"; "msg_json"] update_body in
+  let rf = mk_pub_fn "render_json" ["state_json"] render_body in
+  [DFn (uf, sp); DFn (rf, sp)]
+
+(** If this module looks like an island (has State + Msg with derive Json,
+    and update + render functions), inject auto-generated bridge functions
+    so the user doesn't need to write them manually. *)
+let maybe_inject_island_bridges
+    (orig_decls : decl list) (expanded : decl list) : decl list =
+  let is_island =
+    has_json_derive "State" orig_decls &&
+    has_json_derive "Msg" orig_decls &&
+    has_fn_named "update" expanded &&
+    has_fn_named "render" expanded
+  in
+  if is_island then begin
+    (* Only inject if the user hasn't already written their own *)
+    let already_has_update_json = has_fn_named "update_json" expanded in
+    let already_has_render_json = has_fn_named "render_json" expanded in
+    if already_has_update_json || already_has_render_json then expanded
+    else
+      let sp = match expanded with
+        | DFn (_, sp) :: _ -> sp
+        | _ -> dummy_span
+      in
+      expanded @ gen_island_bridges sp
+  end
+  else expanded
+
 (** Desugar an entire module.  Returns a new [module_] with all multi-head
     fns and pipe expressions lowered to their core forms.
     Also injects default interface method bodies into impls that omit them.
@@ -1097,6 +1378,8 @@ let desugar_module (m : module_) : module_ =
         expand_derive type_defs type_name ifaces sp
       | _ -> [d]
     ) m.mod_decls in
+  (* Auto-generate island bridge functions if this is an island module. *)
+  let expanded = maybe_inject_island_bridges m.mod_decls expanded in
   let interfaces = collect_interfaces expanded in
   let decls = List.map (fun d ->
       inject_defaults interfaces (desugar_decl d)

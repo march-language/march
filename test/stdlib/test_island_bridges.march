@@ -1,0 +1,102 @@
+-- Test auto-generated island bridge functions.
+--
+-- When a module has State and Msg types with derive Json, plus
+-- update and render functions, the compiler auto-generates
+-- update_json and render_json bridge functions.
+
+mod TestIslandBridges do
+
+  import Json
+
+  type State = { count : Int }
+  type Msg = Increment | Decrement | Reset
+
+  derive Json for State
+  derive Json for Msg
+
+  fn create(initial : Int) : State do
+    { count = initial }
+  end
+
+  fn update(st : State, msg : Msg) : State do
+    match msg do
+    Increment -> { count = st.count + 1 }
+    Decrement -> { count = st.count - 1 }
+    Reset     -> { count = 0 }
+    end
+  end
+
+  fn render(st : State) : IOList do
+    IOList.from_string("<span>" ++ int_to_string(st.count) ++ "</span>")
+  end
+
+  -- ── Tests ──────────────────────────────────────────────────────────────
+
+  describe "auto-generated update_json" do
+
+    test "increment via JSON bridge" do
+      let result = update_json("{\"count\":5}", "{\"tag\":\"Increment\"}")
+      assert (String.contains(result, "6"))
+    end
+
+    test "decrement via JSON bridge" do
+      let result = update_json("{\"count\":10}", "{\"tag\":\"Decrement\"}")
+      assert (String.contains(result, "9"))
+    end
+
+    test "reset via JSON bridge" do
+      let result = update_json("{\"count\":42}", "{\"tag\":\"Reset\"}")
+      assert (String.contains(result, "0"))
+    end
+
+    test "invalid state JSON returns original" do
+      let result = update_json("not json", "{\"tag\":\"Increment\"}")
+      assert (result == "not json")
+    end
+
+    test "invalid msg JSON returns original state" do
+      let result = update_json("{\"count\":5}", "not json")
+      assert (result == "{\"count\":5}")
+    end
+
+  end
+
+  describe "auto-generated render_json" do
+
+    test "renders state to HTML" do
+      let html = render_json("{\"count\":42}")
+      assert (String.contains(html, "42"))
+      assert (String.contains(html, "<span>"))
+    end
+
+    test "renders zero" do
+      let html = render_json("{\"count\":0}")
+      assert (String.contains(html, "0"))
+    end
+
+    test "invalid JSON returns empty string" do
+      let html = render_json("not json")
+      assert (html == "")
+    end
+
+  end
+
+  describe "round-trip" do
+
+    test "update then render" do
+      let s = update_json("{\"count\":0}", "{\"tag\":\"Increment\"}")
+      let html = render_json(s)
+      assert (String.contains(html, "1"))
+    end
+
+    test "multiple updates" do
+      let s1 = update_json("{\"count\":0}", "{\"tag\":\"Increment\"}")
+      let s2 = update_json(s1, "{\"tag\":\"Increment\"}")
+      let s3 = update_json(s2, "{\"tag\":\"Increment\"}")
+      let html = render_json(s3)
+      assert (String.contains(html, "3"))
+    end
+
+  end
+
+end

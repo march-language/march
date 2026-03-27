@@ -3446,6 +3446,50 @@ let actor_handler_hints state_ty inferred_ty =
   | t ->
     [Printf.sprintf "handler must return a record matching the state, not %s" (pp_ty t)]
 
+(** Validate the island module protocol.
+
+    If a module defines types named [State] and [Msg] and at least one of
+    [init], [update], or [render], we treat it as an island module and check
+    that the required functions are present:
+
+    - [update(State, Msg) -> State]   — required
+    - [render(State) -> IOList]        — required
+    - [create(Props) -> State]          — recommended (warning if missing)
+    - [merge(State, State) -> State]   — optional, no warning *)
+let validate_island_protocol (env : env) (mod_name : Ast.name) (inner_env : env) =
+  let has_type n = List.exists (fun (k, _) -> k = n) inner_env.types in
+  let has_fn n = List.exists (fun (k, _) -> k = n) inner_env.vars in
+  if not (has_type "State" && has_type "Msg") then ()
+  else begin
+    let has_update = has_fn "update" in
+    let has_render = has_fn "render" in
+    let has_create = has_fn "create" in
+    (* Only validate if at least one protocol function exists — avoids
+       false positives on modules that coincidentally have State/Msg types. *)
+    if has_update || has_render || has_create then begin
+      if not has_update then
+        Err.error env.errors ~span:mod_name.span
+          (Printf.sprintf
+             "Island module `%s` is missing required function `update`.\n  \
+              Island modules with State and Msg types must define:\n  \
+              \  fn update(state : State, msg : Msg) : State"
+             mod_name.txt);
+      if not has_render then
+        Err.error env.errors ~span:mod_name.span
+          (Printf.sprintf
+             "Island module `%s` is missing required function `render`.\n  \
+              Island modules with State and Msg types must define:\n  \
+              \  fn render(state : State) : IOList"
+             mod_name.txt);
+      if not has_create then
+        Err.warning env.errors ~span:mod_name.span
+          (Printf.sprintf
+             "Island module `%s` does not define `create`.\n  \
+              Consider adding: fn create(props : Props) : State"
+             mod_name.txt)
+    end
+  end
+
 (** [check_module_needs env mod_name decls] validates capability declarations for a module:
     1. Every Cap(X) in any function signature must be covered by a [needs] declaration.
     2. Every [needs X] must be used by at least one function.
@@ -3966,6 +4010,8 @@ let rec check_decl env (d : Ast.decl) : env =
     in
     (* Validate capability declarations for this module *)
     check_module_needs env name decls;
+    (* Validate island module protocol if applicable *)
+    validate_island_protocol env name inner_env;
     (* Expose only public names as "ModName.name" in the outer env.
        Also export sub-module keys: if "B" is in pub_set, export "B.f" as "A.B.f". *)
     let is_pub_key k =
