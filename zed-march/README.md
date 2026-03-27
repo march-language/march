@@ -85,6 +85,28 @@ git rev-parse HEAD
 # Copy that hash into extension.toml's rev field
 ```
 
+## Auto-formatting
+
+The March formatter can be used as an external formatter in Zed. Add this to your Zed settings (`Cmd+,` → open JSON):
+
+```json
+{
+  "languages": {
+    "March": {
+      "formatter": {
+        "external": {
+          "command": "forge",
+          "arguments": ["format", "--stdin"]
+        }
+      },
+      "format_on_save": "on"
+    }
+  }
+}
+```
+
+This runs `forge format --stdin` on every save, which reads the buffer from stdin and writes the formatted output to stdout. Make sure `forge` is in your `PATH`.
+
 ### Gotchas
 
 - **Zed caches grammars aggressively.** If "reload extensions" doesn't seem to work after a WASM rebuild, quit Zed fully and relaunch. In rare cases, clear the cache: `rm -rf ~/Library/Caches/Zed/extensions/march`.
