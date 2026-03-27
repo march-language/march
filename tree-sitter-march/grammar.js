@@ -441,11 +441,13 @@ module.exports = grammar({
     assert_expression: $ => seq('assert', field('value', $._expr)),
 
     // Sigil expressions: ~H"...", ~H"""..."""
+    // Content is parsed into fragments for highlighting (HTML tags, interpolation, text).
     sigil_expression: $ => seq(
       field('prefix', $.sigil_prefix),
-      field('content', choice($.string, $.triple_string)),
+      field('content', choice($.triple_string, $.string)),
     ),
     sigil_prefix: _ => token(prec(10, /~[A-Z]/)),
+
 
     match_expression: $ => seq(
       'match', field('value', $._expr), 'do',
