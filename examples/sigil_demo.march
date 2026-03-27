@@ -1,14 +1,11 @@
 -- Sigil demo: ~H generates HTML as IOList for fast wire transfer
+-- Triple-quoted ~H"""...""" gives you multi-line HTML with interpolation.
 
 mod SigilDemo do
 
-fn render_item(item : String) : String do
-  "<li>" ++ item ++ "</li>"
-end
-
-fn render_list(items : List(String)) : String do
-  let rendered = List.map(items, fn item -> render_item(item))
-  string_join(rendered, "\n      ")
+fn render_items(items : List(String)) : String do
+  let lis = List.map(items, fn item -> "      <li>" ++ item ++ "</li>")
+  string_join(lis, "\n")
 end
 
 fn main() do
@@ -16,10 +13,33 @@ fn main() do
   let username = "Alice"
   let items = ["Compiler", "LSP", "Tree-sitter", "Sigils"]
   let item_count = int_to_string(List.length(items))
+  let list_html = render_items(items)
 
-  let list_html = render_list(items)
-
-  let page = ~H"<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"UTF-8\">\n  <title>${title}</title>\n  <style>\n    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; background: #0d1117; color: #c9d1d9; }\n    h1 { color: #58a6ff; }\n    .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.5rem; margin: 1rem 0; }\n    .badge { display: inline-block; background: #238636; color: #fff; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.85rem; }\n    ul { list-style: none; padding: 0; }\n    li { padding: 0.4rem 0; border-bottom: 1px solid #21262d; }\n    li:last-child { border-bottom: none; }\n  </style>\n</head>\n<body>\n  <h1>${title}</h1>\n  <div class=\"card\">\n    <p>Hello, <strong>${username}</strong>! <span class=\"badge\">${item_count} features</span></p>\n    <ul>\n      ${list_html}\n    </ul>\n  </div>\n</body>\n</html>"
+  let page = ~H"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>${title}</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; background: #0d1117; color: #c9d1d9; }
+    h1 { color: #58a6ff; }
+    .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.5rem; margin: 1rem 0; }
+    .badge { display: inline-block; background: #238636; color: #fff; padding: 0.2rem 0.6rem; border-radius: 12px; font-size: 0.85rem; }
+    ul { list-style: none; padding: 0; }
+    li { padding: 0.4rem 0; border-bottom: 1px solid #21262d; }
+    li:last-child { border-bottom: none; }
+  </style>
+</head>
+<body>
+  <h1>${title}</h1>
+  <div class="card">
+    <p>Hello, <strong>${username}</strong>! <span class="badge">${item_count} features</span></p>
+    <ul>
+${list_html}
+    </ul>
+  </div>
+</body>
+</html>"""
 
   let html_str = IOList.to_string(page)
   println(html_str)
