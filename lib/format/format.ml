@@ -330,14 +330,22 @@ let rec expr_inline = function
     Printf.sprintf "fn %s(%s)%s do ... end"
       n.txt (String.concat ", " (List.map fmt_param ps)) ty
   | EAssert (e, _)              -> Printf.sprintf "assert %s" (expr_inline e)
-  | ESigil (c, content, _)     -> Printf.sprintf "~%c%s" c (expr_inline content)
+  | ESigil (c, content, _)     ->
+    let s = expr_inline content in
+    Printf.sprintf "~%c%s" c s
   | ECond _                     -> "match do ... end"
 
 (** Returns true if the expression must be rendered on multiple lines
     (match, multi-statement block, local fn definition). *)
+let sigil_is_multiline = function
+  | ELit (LitString s, _) -> String.contains s '\n'
+  | EApp (EVar { txt = "string_concat"; _ }, [_; _], _) -> true
+  | _ -> false
+
 let is_multiline = function
   | EMatch _ | ELetFn _ -> true
   | EBlock (_ :: _ :: _, _) -> true
+  | ESigil (_, content, _) -> sigil_is_multiline content
   | _ -> false
 
 (** Returns true if we should break this expression across lines,
@@ -383,6 +391,9 @@ let rec emit_stmt ctx e =
       name.txt (String.concat ", " (List.map fmt_param ps)) ty);
     indented ctx (fun () -> emit_body ctx body);
     line ctx "end"
+
+  | ESigil (c, content, _) when sigil_is_multiline content ->
+    emit_sigil_multiline ctx c content
 
   | _ ->
     line ctx (expr_inline e)
@@ -443,6 +454,42 @@ and emit_if_branch ctx e =
     indented ctx (fun () -> emit_stmt ctx e)
   | _ ->
     indented ctx (fun () -> emit_stmt ctx e)
+
+and emit_sigil_multiline ctx c content =
+  (* Extract the raw string content from the sigil *)
+  let raw = match content with
+    | ELit (LitString s, _) -> s
+    | _ -> expr_inline content
+  in
+  let triple = "\"\"\"" in
+  line ctx (Printf.sprintf "~%c%s" c triple);
+  (* Output content lines at base_indent + 2.
+     Strip common leading whitespace from the original, then re-indent. *)
+  let content_lines = String.split_on_char '\n' raw in
+  let base = (ctx.indent + 1) * 2 in
+  let base_indent = String.make base ' ' in
+  (* Find minimum leading spaces among non-empty lines *)
+  let min_indent = List.fold_left (fun acc l ->
+    if String.length l = 0 then acc
+    else
+      let spaces = ref 0 in
+      while !spaces < String.length l && l.[!spaces] = ' ' do incr spaces done;
+      min acc !spaces
+  ) max_int content_lines in
+  let min_indent = if min_indent = max_int then 0 else min_indent in
+  List.iter (fun l ->
+    if String.length l = 0 then
+      Buffer.add_char ctx.buf '\n'
+    else begin
+      let stripped = if min_indent > 0 && String.length l >= min_indent
+        then String.sub l min_indent (String.length l - min_indent)
+        else l in
+      Buffer.add_string ctx.buf base_indent;
+      Buffer.add_string ctx.buf stripped;
+      Buffer.add_char ctx.buf '\n'
+    end
+  ) content_lines;
+  line ctx triple
 
 and emit_pipe_chain ctx expr =
   (* Collect the pipe chain from left to right. *)
