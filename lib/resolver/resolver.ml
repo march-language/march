@@ -48,7 +48,7 @@ let parse_march_file path src =
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-  try Ok (March_parser.Parser.module_ March_lexer.Lexer.token lexbuf)
+  try Ok (March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
   with
   | March_errors.Errors.ParseError (msg, _hint, pos) ->
     let open Lexing in

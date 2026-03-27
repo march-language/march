@@ -293,7 +293,12 @@ let parse_march_file path src =
     Returns (errors, extra_dmods_to_prepend). *)
 let resolve_imports ~source_file (m : March_ast.Ast.module_) =
   let source_dir = Filename.dirname source_file in
-  let search_path = [source_dir] in
+  let extra_lib_paths =
+    match Sys.getenv_opt "MARCH_LIB_PATH" with
+    | None -> []
+    | Some s -> List.filter (fun d -> d <> "") (String.split_on_char ':' s)
+  in
+  let search_path = source_dir :: extra_lib_paths in
   let resolved : (string, March_ast.Ast.decl list) Hashtbl.t = Hashtbl.create 8 in
   let in_progress : (string, unit) Hashtbl.t = Hashtbl.create 4 in
   let errors : (string * March_ast.Ast.span * string) list ref = ref [] in
@@ -948,6 +953,17 @@ let () =
   if Array.length argv >= 2 && argv.(1) = "test" then begin
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
     run_test_cmd rest
+  end;
+  if Array.length argv >= 2 && argv.(1) = "repl" then begin
+    let preload_file = if Array.length argv >= 3 then Some argv.(2) else None in
+    let runtime_so = ensure_runtime_so () in
+    let jit_ctx = March_jit.Repl_jit.create ~runtime_so () in
+    Fun.protect
+      ~finally:(fun () -> March_jit.Repl_jit.cleanup jit_ctx)
+      (fun () ->
+        March_repl.Repl.run ~stdlib_decls:(load_stdlib ())
+          ~jit_ctx:(Some jit_ctx) ~preload_file ());
+    exit 0
   end;
   let files = ref [] in
   let specs = [

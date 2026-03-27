@@ -180,7 +180,7 @@ let wrap_decl_as_module ~(stdlib_decls : March_ast.Ast.decl list)
     mod_decls = stdlib_decls @ [d] }
 
 (** Non-TUI fallback REPL. *)
-let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx=(None : March_jit.Repl_jit.t option)) () =
+let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx=(None : March_jit.Repl_jit.t option)) ?(preload_file=None) () =
   let use_jit = jit_ctx <> None &&
     Sys.getenv_opt "MARCH_REPL_INTERP" = None in
   let jit_ctx = if use_jit then jit_ctx else None in
@@ -232,7 +232,23 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
   in
 
   (* Load a file path into env/tc_env, printing any errors to stderr. *)
-  let do_load_file path =
+  let load_decls_list path all_decls =
+    List.iter (fun decl ->
+      let input_ctx = March_errors.Errors.create () in
+      let input_tc  = { !tc_env with errors = input_ctx } in
+      let new_tc    = March_typecheck.Typecheck.check_decl input_tc decl in
+      if not (March_errors.Errors.has_errors input_ctx) then begin
+        (try
+          env    := March_eval.Eval.eval_decl !env decl;
+          tc_env := { new_tc with errors = March_errors.Errors.create () }
+        with exn ->
+          Printf.eprintf "runtime error loading %s: %s\n%!" path (Printexc.to_string exn))
+      end else
+        List.iter print_diag (March_errors.Errors.sorted input_ctx)
+    ) all_decls
+  in
+
+  let parse_file path =
     match (try
       let ic = open_in path in
       let n  = in_channel_length ic in
@@ -241,7 +257,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
       close_in ic;
       Some (Bytes.to_string b)
     with Sys_error msg -> Printf.eprintf "error: cannot open %s: %s\n%!" path msg; None) with
-    | None -> ()
+    | None -> None
     | Some file_src ->
       let lexbuf = Lexing.from_string file_src in
       (match (try
@@ -249,41 +265,47 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
         Some (March_desugar.Desugar.desugar_module m)
       with exn ->
         Printf.eprintf "parse error in %s: %s\n%!" path (Printexc.to_string exn); None) with
-      | None -> ()
+      | None -> None
       | Some desugared ->
-        (* Resolve cross-file imports relative to the loaded file's directory *)
         let (import_errs, extra_decls) =
           March_resolver.Resolver.resolve_imports ~source_file:path desugared in
         List.iter (fun (_, span, msg) ->
           Printf.eprintf "%s:%d: import error: %s\n%!"
             span.March_ast.Ast.file span.March_ast.Ast.start_line msg
         ) import_errs;
-        (* Wrap the file's declarations in a DMod using the file's module name,
-           so that `Repl.pg_connect` etc. are exported with the qualified prefix. *)
-        let file_mod =
-          March_ast.Ast.DMod (
-            desugared.March_ast.Ast.mod_name,
-            March_ast.Ast.Public,
-            desugared.March_ast.Ast.mod_decls,
-            March_ast.Ast.dummy_span)
-        in
-        let all_decls = extra_decls @ [file_mod] in
-        List.iter (fun decl ->
-          let input_ctx = March_errors.Errors.create () in
-          let input_tc  = { !tc_env with errors = input_ctx } in
-          let new_tc    = March_typecheck.Typecheck.check_decl input_tc decl in
-          if not (March_errors.Errors.has_errors input_ctx) then begin
-            (try
-              env    := March_eval.Eval.eval_decl !env decl;
-              tc_env := { new_tc with errors = March_errors.Errors.create () }
-            with exn ->
-              Printf.eprintf "runtime error loading %s: %s\n%!" path (Printexc.to_string exn))
-          end else
-            List.iter print_diag (March_errors.Errors.sorted input_ctx)
-        ) all_decls;
-        Printf.printf "loaded %s\n%!" path;
-        loaded_file := Some path)
+        Some (desugared, extra_decls))
   in
+
+  (* :load — wraps in a DMod so names are qualified (e.g. DbTest.main). *)
+  let do_load_file path =
+    match parse_file path with
+    | None -> ()
+    | Some (desugared, extra_decls) ->
+      let file_mod =
+        March_ast.Ast.DMod (
+          desugared.March_ast.Ast.mod_name,
+          March_ast.Ast.Public,
+          desugared.March_ast.Ast.mod_decls,
+          March_ast.Ast.dummy_span)
+      in
+      load_decls_list path (extra_decls @ [file_mod]);
+      Printf.printf "loaded %s\n%!" path;
+      loaded_file := Some path
+  in
+
+  (* Preload (forge interactive) — processes flat so top-level imports fire,
+     opening imported namespaces (Connection, Config, etc.) into REPL scope. *)
+  let do_preload_file path =
+    match parse_file path with
+    | None -> ()
+    | Some (desugared, extra_decls) ->
+      load_decls_list path (extra_decls @ desugared.March_ast.Ast.mod_decls);
+      Printf.printf "loaded %s\n%!" path;
+      loaded_file := Some path
+  in
+
+  (* Preload a file before entering the loop (e.g. from forge interactive). *)
+  Option.iter do_preload_file preload_file;
 
   (* Show :where immediately on entry. *)
   (match debug_hooks with
@@ -858,7 +880,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
   History.save hist (history_path ())
 
 (** Full TUI REPL loop using notty two-pane layout. *)
-let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx=(None : March_jit.Repl_jit.t option)) () =
+let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx=(None : March_jit.Repl_jit.t option)) ?(preload_file=None) () =
   let use_jit = jit_ctx <> None &&
     Sys.getenv_opt "MARCH_REPL_INTERP" = None in
   let jit_ctx = if use_jit then jit_ctx else None in
@@ -891,15 +913,16 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
   let watch_list   : (string * March_ast.Ast.expr) list ref = ref [] in
   (* Auto-type display: when true, print inferred type after each expression. *)
   let show_type    = ref false in
-  (* scope_baseline is constant: stdlib names to hide from the right pane. *)
-  let scope_baseline = if is_debug then base_e else e0 in
+  (* scope_baseline: stdlib + preloaded names to hide from the right pane.
+     Mutable so that preload can update it after loading project code. *)
+  let scope_baseline = ref (if is_debug then base_e else e0) in
   (* Cached right-pane data — recomputed only after Submit/env changes,
      never on plain Redraw keystrokes.  This avoids O(|env|²) work per key. *)
   let cached_scope   = ref ([] : Tui.scope_entry list) in
   let cached_result  = ref (None : (string * string) option) in
   let cached_actors  = ref ([] : March_eval.Eval.actor_info list) in
   let refresh_scope () =
-    let (sc, res) = user_scope !env !tc_env result_h ~baseline_env:scope_baseline in
+    let (sc, res) = user_scope !env !tc_env result_h ~baseline_env:!scope_baseline in
     cached_scope  := sc;
     cached_result := res;
     cached_actors := March_eval.Eval.list_actors ()
@@ -953,6 +976,76 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
     List.iter (fun line ->
       hist_lines := !hist_lines @ [Notty.I.string attr line]
     ) (String.split_on_char '\n' s)
+  in
+
+  let tui_load_decls_list path all_decls =
+    List.iter (fun decl ->
+      let input_ctx = March_errors.Errors.create () in
+      let input_tc  = { !tc_env with errors = input_ctx } in
+      let new_tc    = March_typecheck.Typecheck.check_decl input_tc decl in
+      if not (March_errors.Errors.has_errors input_ctx) then begin
+        (try
+          env := March_eval.Eval.eval_decl !env decl;
+          tc_env := { new_tc with errors = March_errors.Errors.create () }
+        with _ -> ())
+      end else
+        List.iter (fun (d : March_errors.Errors.diagnostic) ->
+          add_line Notty.A.(fg red)
+            (Printf.sprintf "error: %s" d.message)
+        ) (March_errors.Errors.sorted input_ctx)
+    ) all_decls;
+    ignore path
+  in
+
+  let tui_parse_file path =
+    match (try
+      let ic = open_in path in
+      let n  = in_channel_length ic in
+      let b  = Bytes.create n in
+      really_input ic b 0 n;
+      close_in ic;
+      Some (Bytes.to_string b)
+    with Sys_error msg ->
+      add_line Notty.A.(fg red) (Printf.sprintf "cannot open: %s" msg); None) with
+    | None -> None
+    | Some file_src ->
+      let lexbuf = Lexing.from_string file_src in
+      (match (try
+        let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+        Some (March_desugar.Desugar.desugar_module m)
+      with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
+      | None -> None
+      | Some desugared ->
+        let (_, extra_decls) =
+          March_resolver.Resolver.resolve_imports ~source_file:path desugared in
+        Some (desugared, extra_decls))
+  in
+
+  (* :load — wraps in DMod so names are qualified (e.g. DbTest.main). *)
+  let do_load_file path =
+    match tui_parse_file path with
+    | None -> ()
+    | Some (desugared, extra_decls) ->
+      let file_mod =
+        March_ast.Ast.DMod (
+          desugared.March_ast.Ast.mod_name,
+          March_ast.Ast.Public,
+          desugared.March_ast.Ast.mod_decls,
+          March_ast.Ast.dummy_span)
+      in
+      tui_load_decls_list path (extra_decls @ [file_mod]);
+      add_line Notty.A.(fg green) (Printf.sprintf "loaded %s" path);
+      loaded_file := Some path
+  in
+
+  (* Preload (forge interactive) — flat so top-level imports open namespaces. *)
+  let do_preload_file path =
+    match tui_parse_file path with
+    | None -> ()
+    | Some (desugared, extra_decls) ->
+      tui_load_decls_list path (extra_decls @ desugared.March_ast.Ast.mod_decls);
+      add_line Notty.A.(fg green) (Printf.sprintf "loaded %s" path);
+      loaded_file := Some path
   in
 
   (* After any navigation, show :where and update env + watches. *)
@@ -1523,51 +1616,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
           if path = "" then
             add_line Notty.A.(fg red) "usage: :load <file>"
           else
-            (match (try
-              let ic = open_in path in
-              let n  = in_channel_length ic in
-              let b  = Bytes.create n in
-              really_input ic b 0 n;
-              close_in ic;
-              Some (Bytes.to_string b)
-            with Sys_error msg -> add_line Notty.A.(fg red)
-              (Printf.sprintf "cannot open: %s" msg); None) with
-            | None -> ()
-            | Some file_src ->
-              let lexbuf = Lexing.from_string file_src in
-              (match (try
-                let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
-                Some (March_desugar.Desugar.desugar_module m)
-              with _ -> add_line Notty.A.(fg red) "parse error in file"; None) with
-              | None -> ()
-              | Some desugared ->
-                let (_, extra_decls) =
-                  March_resolver.Resolver.resolve_imports ~source_file:path desugared in
-                let file_mod =
-                  March_ast.Ast.DMod (
-                    desugared.March_ast.Ast.mod_name,
-                    March_ast.Ast.Public,
-                    desugared.March_ast.Ast.mod_decls,
-                    March_ast.Ast.dummy_span)
-                in
-                let all_decls = extra_decls @ [file_mod] in
-                List.iter (fun decl ->
-                  let input_ctx = March_errors.Errors.create () in
-                  let input_tc  = { !tc_env with errors = input_ctx } in
-                  let new_tc    = March_typecheck.Typecheck.check_decl input_tc decl in
-                  if not (March_errors.Errors.has_errors input_ctx) then begin
-                    (try
-                      env := March_eval.Eval.eval_decl !env decl;
-                      tc_env := { new_tc with errors = March_errors.Errors.create () }
-                    with _ -> ())
-                  end else
-                    List.iter (fun (d : March_errors.Errors.diagnostic) ->
-                      add_line Notty.A.(fg red)
-                        (Printf.sprintf "error: %s" d.message)
-                    ) (March_errors.Errors.sorted input_ctx)
-                ) all_decls;
-                add_line Notty.A.(fg green) (Printf.sprintf "loaded %s" path);
-                loaded_file := Some path))
+            do_load_file path
         | ":reload" ->
           (match !loaded_file with
            | None ->
@@ -1728,6 +1777,12 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
     )
   in
 
+  (* Preload a file before entering the loop (e.g. from forge interactive).
+     After preloading, update the baseline so preloaded names are hidden
+     from the scope panel — only user-typed bindings should appear. *)
+  Option.iter do_preload_file preload_file;
+  if preload_file <> None then scope_baseline := !env;
+
   (* Show :where immediately on entry so the user knows where they are. *)
   (match debug_hooks with
    | Some h -> nav_context h
@@ -1790,7 +1845,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
   History.save hist (history_path ());
   Tui.close tui
 
-let run ?(stdlib_decls = []) ?(debug_hooks = None) ?(initial_env = None) ?(jit_ctx : March_jit.Repl_jit.t option = None) () =
+let run ?(stdlib_decls = []) ?(debug_hooks = None) ?(initial_env = None) ?(jit_ctx : March_jit.Repl_jit.t option = None) ?(preload_file = None) () =
   if Unix.isatty Unix.stdin && Unix.isatty Unix.stdout
-  then run_tui ~stdlib_decls ~debug_hooks ~initial_env ~jit_ctx ()
-  else run_simple ~stdlib_decls ~debug_hooks ~initial_env ~jit_ctx ()
+  then run_tui ~stdlib_decls ~debug_hooks ~initial_env ~jit_ctx ~preload_file ()
+  else run_simple ~stdlib_decls ~debug_hooks ~initial_env ~jit_ctx ~preload_file ()

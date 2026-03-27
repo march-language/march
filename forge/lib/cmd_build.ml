@@ -23,15 +23,11 @@ let build ~release =
         (Filename.concat ".march" (Filename.concat "build" mode))
     in
     Project.mkdir_p build_dir;
-    let src_dir =
-      match proj.Project.project_type with
-      | Project.Lib  -> Filename.concat proj.Project.root "lib"
-      | Project.App
-      | Project.Tool -> Filename.concat proj.Project.root "src"
-    in
-    let files = find_march_files src_dir in
+    let lib_dir    = Filename.concat proj.Project.root "lib" in
+    let config_dir = Filename.concat proj.Project.root "config" in
+    let files = find_march_files lib_dir in
     if files = [] then
-      Error (Printf.sprintf "no .march files found in %s" src_dir)
+      Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin
       let output    = Filename.concat build_dir proj.Project.name in
       let opt_flag  = if release then " --opt 2" else "" in
@@ -43,12 +39,15 @@ let build ~release =
               then Filename.concat proj.Project.root rel_path
               else rel_path
             in
-            let lib_dir = Filename.concat abs_path "lib" in
-            if Sys.file_exists lib_dir then Some lib_dir else None
+            let d = Filename.concat abs_path "lib" in
+            if Sys.file_exists d then Some d else None
           | Project.GitDep _ -> None
         ) proj.Project.deps in
-      (* Also add src_dir itself to MARCH_LIB_PATH so imports within src/ are found *)
-      let all_lib_paths = dep_lib_paths @ [src_dir] in
+      (* MARCH_LIB_PATH: dep libs + lib/ + config/ (if present) *)
+      let all_lib_paths =
+        dep_lib_paths @ [lib_dir]
+        @ (if Sys.file_exists config_dir then [config_dir] else [])
+      in
       let lib_path_env = Printf.sprintf "MARCH_LIB_PATH=%s " (String.concat ":" all_lib_paths)
       in
       let cmd =
@@ -58,13 +57,8 @@ let build ~release =
           let files_str = String.concat " " (List.map Filename.quote files) in
           Printf.sprintf "%smarch check %s" lib_path_env files_str
         | Project.App | Project.Tool ->
-          (* For app/tool: pass the single entry point; the resolver finds other files
-             via MARCH_LIB_PATH. Entry point is main.march if present, else first file. *)
-          let entry =
-            let main = Filename.concat src_dir "main.march" in
-            if List.mem main files then main
-            else List.hd files
-          in
+          (* Entry point is lib/<name>.march; resolver finds imports via MARCH_LIB_PATH *)
+          let entry = Filename.concat lib_dir (proj.Project.name ^ ".march") in
           Printf.sprintf "%smarch --compile -o %s%s %s"
             lib_path_env (Filename.quote output) opt_flag (Filename.quote entry)
       in

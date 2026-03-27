@@ -35,4 +35,5 @@ val run :
   ?debug_hooks:debug_hooks option ->
   ?initial_env:March_eval.Eval.env option ->
   ?jit_ctx:March_jit.Repl_jit.t option ->
+  ?preload_file:string option ->
   unit -> unit
