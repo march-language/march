@@ -33,18 +33,24 @@
  *   data-on-input="SetValue"       → actor.send({ tag: "SetValue", value: e.target.value })
  *   data-on-submit="Submit"        → actor.send({ tag: "Submit" }) (prevents default)
  *
- * ── WASM status ───────────────────────────────────────────────────────────
+ * ── WASM exports ────────────────────────────────────────────────────────────
  *
- * WASM codegen is Tier 1 (pure compute, code complete, toolchain pending).
- * Browser target (Tier 4) requires wasm32-unknown-unknown + JS glue codegen.
- * Until then, loadWasmModule() returns null and islands remain non-interactive.
+ * The compiled March WASM module exports:
+ *   march_island_render(state_ptr)       → i32  (ptr to HTML string)
+ *   march_island_update(state_ptr, msg)  → i32  (ptr to new state)
+ *   march_island_init()                  → i32  (ptr to initial state, or 0)
+ *   march_alloc_export(size: i64)        → i32  (bump allocator)
+ *   march_string_lit_export(ptr, len)    → i32  (builds a march_string struct)
+ *   march_dealloc(ptr)                   → void
+ *   _start()                             → void (module initialisation)
  *
- * When WASM codegen lands, the WASM module must export:
- *   init()                    → i32  (ptr to initial state, if needed)
- *   render(state_ptr: i32)    → i32  (ptr to HTML string)
- *   update(state_ptr: i32, msg_ptr: i32) → i32  (ptr to new state)
- *   march_alloc(size: i32)    → i32
- *   march_dealloc(ptr: i32)   → void
+ * ── March string layout (wasm32) ────────────────────────────────────────────
+ *
+ *   offset  0: rc       (i64, 8 bytes)  — reference count
+ *   offset  8: tag      (i32, 4 bytes)  — type tag
+ *   offset 12: pad      (i32, 4 bytes)
+ *   offset 16: length   (i64, 8 bytes)  — byte length of UTF-8 data
+ *   offset 24: data_ptr (i64, 8 bytes)  — pointer to UTF-8 bytes
  */
 
 'use strict';
@@ -161,27 +167,92 @@ function attachEventHandlers(root, actor) {
   });
 }
 
-// ── WASM loading ──────────────────────────────────────────────────────────────
+// ── WASM string bridge ───────────────────────────────────────────────────────
+
+const _decoder = new TextDecoder();
+const _encoder = new TextEncoder();
+
+/**
+ * Read a March string from WASM linear memory.
+ *
+ * March string layout (wasm32):
+ *   +0  rc       i64
+ *   +8  tag      i32  + pad i32
+ *   +16 length   i64   (byte count)
+ *   +24 data_ptr i64   (pointer to UTF-8 bytes; only lower 32 bits used on wasm32)
+ */
+function readMarchString(memory, ptr) {
+  const view = new DataView(memory.buffer);
+  const len     = Number(view.getBigInt64(ptr + 16, true));
+  const dataPtr = Number(view.getBigInt64(ptr + 24, true));
+  return _decoder.decode(new Uint8Array(memory.buffer, dataPtr, len));
+}
+
+/**
+ * Write a JS string into WASM linear memory as a March string.
+ *
+ * Uses march_alloc_export to allocate a data buffer, copies the UTF-8 bytes,
+ * then calls march_string_lit_export to build the proper march_string struct.
+ */
+function writeMarchString(exports, str) {
+  const { memory, march_alloc_export, march_string_lit_export } = exports;
+  const encoded = _encoder.encode(str);
+
+  // Allocate a data buffer in WASM memory for the raw bytes
+  const dataPtr = march_alloc_export(BigInt(encoded.length + 1));
+  const mem = new Uint8Array(memory.buffer);
+  mem.set(encoded, dataPtr);
+  mem[dataPtr + encoded.length] = 0; // null terminator
+
+  // Build a proper march_string struct via the runtime
+  return march_string_lit_export(dataPtr, BigInt(encoded.length));
+}
+
+// ── WASM module wrapper ──────────────────────────────────────────────────────
+
+/**
+ * Wrap raw WASM exports into the {init, render, update} interface
+ * expected by IslandActor. Bridges JS strings ↔ March WASM strings.
+ */
+function wrapWasmExports(exports, name) {
+  const { memory, march_island_render, march_island_update,
+          march_island_init, march_dealloc } = exports;
+
+  return {
+    /** Call march_island_init; return JSON string or '{}'. */
+    init() {
+      const ptr = march_island_init();
+      if (ptr === 0) return '{}';
+      return readMarchString(memory, ptr);
+    },
+
+    /** Write stateJson into WASM, call render, read HTML string back. */
+    render(stateJson) {
+      const sp = writeMarchString(exports, stateJson);
+      const rp = march_island_render(sp);
+      const html = readMarchString(memory, rp);
+      return html;
+    },
+
+    /** Write stateJson + msgJson into WASM, call update, read new state back. */
+    update(stateJson, msgJson) {
+      const sp = writeMarchString(exports, stateJson);
+      const mp = writeMarchString(exports, msgJson);
+      const np = march_island_update(sp, mp);
+      const next = readMarchString(memory, np);
+      return next;
+    },
+  };
+}
+
+// ── WASM loading ─────────────────────────────────────────────────────────────
 
 /**
  * Load and instantiate a WASM island module.
  *
- * TODO (Tier 4 — browser WASM target): Replace the stub below with real
- * WebAssembly.instantiateStreaming. The compiled March WASM module must export:
- *
- *   march_island_render(state_ptr: i32) → i32   (pointer to HTML string)
- *   march_island_update(state_ptr: i32, msg_ptr: i32) → i32  (new state ptr)
- *   march_island_init()                 → i32   (initial state ptr, or 0)
- *   march_alloc(size: i32)              → i32
- *   march_dealloc(ptr: i32, size: i32)  → void
- *
- * Memory layout for strings: 4-byte length prefix (LE i32) followed by UTF-8 bytes.
- * The host must call march_alloc to pass strings into WASM and march_dealloc to free
- * the returned string pointers after use.
- *
  * @param {string} baseUrl  URL prefix, e.g. "/_march/islands"
  * @param {string} name     Island name, e.g. "Counter"
- * @returns {Promise<object|null>}  WASM wrapper or null if not available
+ * @returns {Promise<object|null>}  {init, render, update} wrapper or null
  */
 async function loadWasmModule(baseUrl, name) {
   // Allow test harnesses to inject mock WASM modules.
@@ -190,71 +261,32 @@ async function loadWasmModule(baseUrl, name) {
     return window.__marchTestLoader(baseUrl, name);
   }
 
-  // Stub: WASM browser target not yet available.
-  // When Tier 4 lands, replace this with:
-  //
-  //   const wasmUrl = `${baseUrl}/${name}.wasm`;
-  //   const imports = { env: buildMarchImports() };
-  //   const { instance } = await WebAssembly.instantiateStreaming(
-  //     fetch(wasmUrl), imports
-  //   );
-  //   return wrapWasmExports(instance.exports, name);
-  //
-  console.info(
-    `[march-islands] ${name}: WASM browser target not yet compiled.` +
-    ` Island will remain static (SSR content preserved).`
-  );
-  return null;
-}
+  const wasmUrl = `${baseUrl}/${name}.wasm`;
+  try {
+    const resp = await fetch(wasmUrl);
+    if (!resp.ok) {
+      console.info(
+        `[march-islands] ${name}: WASM not found at ${wasmUrl} (${resp.status}).` +
+        ` Island will remain static (SSR content preserved).`
+      );
+      return null;
+    }
 
-// Placeholder: wraps raw WASM exports into a friendlier JS object.
-// Uncomment and complete when Tier 4 WASM codegen lands.
-//
-// function wrapWasmExports(exports, name) {
-//   const { memory, march_alloc, march_dealloc,
-//           march_island_render, march_island_update, march_island_init } = exports;
-//   const decoder = new TextDecoder();
-//   const encoder = new TextEncoder();
-//
-//   function readString(ptr) {
-//     const view = new DataView(memory.buffer);
-//     const len = view.getInt32(ptr, true);
-//     return decoder.decode(new Uint8Array(memory.buffer, ptr + 4, len));
-//   }
-//
-//   function writeString(s) {
-//     const bytes = encoder.encode(s);
-//     const ptr = march_alloc(4 + bytes.byteLength);
-//     const view = new DataView(memory.buffer);
-//     view.setInt32(ptr, bytes.byteLength, true);
-//     new Uint8Array(memory.buffer, ptr + 4, bytes.byteLength).set(bytes);
-//     return ptr;
-//   }
-//
-//   return {
-//     init() {
-//       const ptr = march_island_init();
-//       return ptr !== 0 ? readString(ptr) : '{}';
-//     },
-//     render(stateJson) {
-//       const sp = writeString(stateJson);
-//       const rp = march_island_render(sp);
-//       march_dealloc(sp, 4 + encoder.encode(stateJson).byteLength);
-//       const html = readString(rp);
-//       march_dealloc(rp, 4 + encoder.encode(html).byteLength);
-//       return html;
-//     },
-//     update(stateJson, msgJson) {
-//       const sp = writeString(stateJson);
-//       const mp = writeString(msgJson);
-//       const np = march_island_update(sp, mp);
-//       march_dealloc(sp, ...); march_dealloc(mp, ...);
-//       const next = readString(np);
-//       march_dealloc(np, ...);
-//       return next;
-//     },
-//   };
-// }
+    const { instance } = await WebAssembly.instantiate(
+      await resp.arrayBuffer()
+    );
+
+    // Run module initialisation (_start sets up globals, calls main if present)
+    if (instance.exports._start) {
+      instance.exports._start();
+    }
+
+    return wrapWasmExports(instance.exports, name);
+  } catch (err) {
+    console.error(`[march-islands] ${name}: failed to load WASM`, err);
+    return null;
+  }
+}
 
 // ── Hydration ─────────────────────────────────────────────────────────────────
 
