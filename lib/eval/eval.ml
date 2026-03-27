@@ -2423,6 +2423,68 @@ let base_env : env =
         | [v] -> VString (value_display v)
         | _ -> eval_error "to_string: expected one argument"))
 
+    (* ---- HTML template builtins ---- *)
+
+    (* html_escape_str: OCaml-level HTML entity escaping for the auto-escape builtin. *)
+  ; ("html_auto_escape", VBuiltin ("html_auto_escape",
+      let html_escape_str s =
+        (* Replace & first to avoid double-escaping *)
+        let replace_all ~sub ~by s =
+          let buf = Buffer.create (String.length s) in
+          let lsub = String.length sub in
+          let ls = String.length s in
+          let i = ref 0 in
+          while !i <= ls - lsub do
+            if String.sub s !i lsub = sub then begin
+              Buffer.add_string buf by;
+              i := !i + lsub
+            end else begin
+              Buffer.add_char buf s.[!i];
+              i := !i + 1
+            end
+          done;
+          while !i < ls do
+            Buffer.add_char buf s.[!i];
+            i := !i + 1
+          done;
+          Buffer.contents buf
+        in
+        let s = replace_all ~sub:"&" ~by:"&amp;" s in
+        let s = replace_all ~sub:"<" ~by:"&lt;" s in
+        let s = replace_all ~sub:">" ~by:"&gt;" s in
+        let s = replace_all ~sub:"\"" ~by:"&quot;" s in
+        let s = replace_all ~sub:"'" ~by:"&#39;" s in
+        s
+      in
+      (* Flatten an IOList value to a string without HTML escaping.
+         Used for IOList fragments that are already safe HTML. *)
+      let rec iolist_flatten v =
+        match v with
+        | VCon ("Empty", []) -> ""
+        | VCon ("Str", [VString s]) -> s
+        | VCon ("Segments", [lst]) ->
+          let rec concat_list l =
+            match l with
+            | VCon ("Nil", []) -> ""
+            | VCon ("Cons", [h; t]) -> iolist_flatten h ^ concat_list t
+            | _ -> ""
+          in
+          concat_list lst
+        | _ -> ""
+      in
+      function
+      (* Html.Safe(s) — already safe, return as-is *)
+      | [VCon ("Safe", [VString s])] -> VString s
+      (* IOList variants — already rendered HTML, flatten without escaping *)
+      | [VCon ("Empty", []) as v] -> VString (iolist_flatten v)
+      | [VCon ("Str", _) as v]    -> VString (iolist_flatten v)
+      | [VCon ("Segments", _) as v] -> VString (iolist_flatten v)
+      (* Plain string — escape HTML entities *)
+      | [VString s] -> VString (html_escape_str s)
+      (* Anything else — convert to string and escape *)
+      | [v] -> VString (html_escape_str (value_display v))
+      | _ -> eval_error "html_auto_escape: expected one argument"))
+
     (* ---- Standard interface builtins: Eq, Ord, Show, Hash ---- *)
     (* These dispatch through impl_tbl for user-defined types; fall back
        to structural/primitive operations for built-in types. *)
@@ -2955,6 +3017,46 @@ let base_env : env =
           done;
           VInt !count
         | _ -> eval_error "string_grapheme_count: expected string"))
+
+    (* ---- IOList.hash — FNV-1a hash for ETag generation ---- *)
+    (* Walks the IOList tree hashing each Str segment's bytes without
+       first flattening to a single string.  Returns a lowercase hex string.
+       FNV-1a 64-bit: offset_basis = 14695981039346656037, prime = 1099511628211. *)
+  ; ("iolist_hash_fnv1a", VBuiltin ("iolist_hash_fnv1a",
+      let fnv_prime    = Int64.of_string "1099511628211" in
+      let fnv_offset   = Int64.of_string "-3750763034362895579" (* 14695981039346656037 as int64 *) in
+      let hash_bytes h s =
+        let len = String.length s in
+        let h = ref h in
+        for i = 0 to len - 1 do
+          let b = Int64.of_int (Char.code s.[i]) in
+          h := Int64.mul (Int64.logxor !h b) fnv_prime
+        done;
+        !h
+      in
+      let rec hash_iolist h v =
+        match v with
+        | VCon ("Empty", [])         -> h
+        | VCon ("Str", [VString s])  -> hash_bytes h s
+        | VCon ("Segments", [lst])   ->
+          let rec hash_list h l =
+            match l with
+            | VCon ("Nil", [])       -> h
+            | VCon ("Cons", [hd; tl]) -> hash_list (hash_iolist h hd) tl
+            | _                      -> h
+          in
+          hash_list h lst
+        | _                          -> h
+      in
+      let to_hex h =
+        (* 16 hex chars for 64-bit hash *)
+        Printf.sprintf "%016Lx" h
+      in
+      function
+      | [v] ->
+        let h = hash_iolist fnv_offset v in
+        VString (to_hex h)
+      | _ -> eval_error "iolist_hash_fnv1a: expected one argument"))
 
     (* ---- Char primitives (chars represented as single-char strings) ---- *)
   ; ("char_is_alpha", VBuiltin ("char_is_alpha", function

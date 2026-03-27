@@ -91,6 +91,181 @@ describe "~H sigil auto-escaping" do
     let result = ~H"<div title=\"${attr}\">content</div>"
     assert (IOList.to_string(result) == "<div title=\"he said &quot;hi&quot;\">content</div>")
   end
+
+  test "Html.Safe value is not double-escaped in ~H" do
+    let safe = Html.raw("<b>already safe</b>")
+    let result = ~H"<div>${safe}</div>"
+    assert (IOList.to_string(result) == "<div><b>already safe</b></div>")
+  end
+
+  test "IOList partial embedded in ~H is not double-escaped" do
+    let inner = ~H"<em>inner content</em>"
+    let outer = ~H"<div>${inner}</div>"
+    assert (IOList.to_string(outer) == "<div><em>inner content</em></div>")
+  end
+
+  test "IOList with XSS-unsafe content is not re-escaped when embedded" do
+    -- The inner ~H already escaped ${user_input}, outer ~H must not re-escape
+    let user_input = "<script>xss</script>"
+    let inner = ~H"<span>${user_input}</span>"
+    let outer = ~H"<div>${inner}</div>"
+    assert (IOList.to_string(outer) == "<div><span>&lt;script&gt;xss&lt;/script&gt;</span></div>")
+  end
+end
+
+describe "Html.escape_attr" do
+  test "escapes ampersand in attribute" do
+    assert (Html.escape_attr("a & b") == "a &amp; b")
+  end
+
+  test "escapes angle brackets in attribute" do
+    assert (Html.escape_attr("<evil>") == "&lt;evil&gt;")
+  end
+
+  test "leaves plain strings alone" do
+    assert (Html.escape_attr("class-name") == "class-name")
+  end
+end
+
+describe "Html.tag" do
+  test "generates tag with no attributes" do
+    let result = Html.tag("p", [], IOList.from_string("hello"))
+    assert (IOList.to_string(result) == "<p>hello</p>")
+  end
+
+  test "generates tag with one attribute" do
+    let result = Html.tag("div", [("class", "greeting")], IOList.from_string("Hi"))
+    assert (IOList.to_string(result) == "<div class=\"greeting\">Hi</div>")
+  end
+
+  test "generates tag with multiple attributes" do
+    let result = Html.tag("a", [("href", "/home"), ("class", "nav")], IOList.from_string("Home"))
+    assert (IOList.to_string(result) == "<a href=\"/home\" class=\"nav\">Home</a>")
+  end
+
+  test "escapes attribute values" do
+    let result = Html.tag("div", [("data-val", "<x>&")], IOList.empty())
+    assert (IOList.to_string(result) == "<div data-val=\"&lt;x&gt;&amp;\"></div>")
+  end
+
+  test "tag with ~H content does not double-escape" do
+    let name = "world"
+    let content = ~H"<b>Hello, ${name}</b>"
+    let result = Html.tag("div", [("class", "msg")], content)
+    assert (IOList.to_string(result) == "<div class=\"msg\"><b>Hello, world</b></div>")
+  end
+
+  test "tag with empty content" do
+    let result = Html.tag("div", [], IOList.empty())
+    assert (IOList.to_string(result) == "<div></div>")
+  end
+end
+
+fn greeting_partial(name : String) : IOList do
+  ~H"<p>Hello, ${name}!</p>"
+end
+
+describe "Html.render_partial" do
+  test "calls partial function with argument" do
+    let result = Html.render_partial(fn name -> greeting_partial(name), "Alice")
+    assert (IOList.to_string(result) == "<p>Hello, Alice!</p>")
+  end
+
+  test "partial result embeds in ~H without double-escaping" do
+    let partial = Html.render_partial(fn name -> greeting_partial(name), "<script>")
+    let page = ~H"<body>${partial}</body>"
+    assert (IOList.to_string(page) == "<body><p>Hello, &lt;script&gt;!</p></body>")
+  end
+end
+
+describe "Html.render_collection" do
+  test "renders each item via partial" do
+    let items = ["Alice", "Bob", "Carol"]
+    let result = Html.render_collection(items, fn name -> ~H"<li>${name}</li>")
+    assert (IOList.to_string(result) == "<li>Alice</li><li>Bob</li><li>Carol</li>")
+  end
+
+  test "empty collection returns empty iolist" do
+    let items : List(String) = []
+    let result = Html.render_collection(items, fn name -> ~H"<li>${name}</li>")
+    assert (IOList.to_string(result) == "")
+  end
+
+  test "collection with unsafe content is escaped" do
+    let items = ["<b>safe tag</b>", "A & B"]
+    let result = Html.render_collection(items, fn item -> ~H"<span>${item}</span>")
+    assert (IOList.to_string(result) == "<span>&lt;b&gt;safe tag&lt;/b&gt;</span><span>A &amp; B</span>")
+  end
+end
+
+describe "Html.layout" do
+  test "wraps content in html document structure" do
+    let result = Html.layout("My Page", IOList.empty(), IOList.from_string("<p>body</p>"))
+    assert (IOList.to_string(result) == "<!DOCTYPE html><html><head><title>My Page</title></head><body><p>body</p></body></html>")
+  end
+
+  test "escapes title" do
+    let result = Html.layout("A <B> & C", IOList.empty(), IOList.empty())
+    let s = IOList.to_string(result)
+    assert (String.contains(s, "A &lt;B&gt; &amp; C"))
+  end
+
+  test "includes head_extra" do
+    let head = IOList.from_string("<link rel=\"stylesheet\" href=\"/app.css\">")
+    let result = Html.layout("Page", head, IOList.empty())
+    let s = IOList.to_string(result)
+    assert (String.contains(s, "<link rel=\"stylesheet\" href=\"/app.css\">"))
+  end
+
+  test "head_extra appears before body" do
+    let head = IOList.from_string("<meta charset=\"utf-8\">")
+    let body = IOList.from_string("<p>content</p>")
+    let result = Html.layout("Test", head, body)
+    let s = IOList.to_string(result)
+    assert (String.contains(s, "<meta charset=\"utf-8\"></head><body><p>content</p>"))
+  end
+end
+
+describe "Html.content_hash" do
+  test "returns a non-empty hex string" do
+    let h = Html.content_hash(IOList.from_string("hello"))
+    assert (string_length(h) == 16)
+  end
+
+  test "empty iolist has known hash" do
+    -- FNV-1a 64-bit offset basis for empty input
+    let h = Html.content_hash(IOList.empty())
+    assert (h == "cbf29ce484222325")
+  end
+
+  test "different content produces different hash" do
+    let h1 = Html.content_hash(IOList.from_string("hello"))
+    let h2 = Html.content_hash(IOList.from_string("world"))
+    assert (h1 != h2)
+  end
+
+  test "same content via append and from_string produce same hash" do
+    let a = IOList.append(IOList.from_string("hel"), IOList.from_string("lo"))
+    let b = IOList.from_string("hello")
+    assert (Html.content_hash(a) == Html.content_hash(b))
+  end
+end
+
+describe "IOList.hash" do
+  test "returns 16-char hex string" do
+    let h = IOList.hash(IOList.from_string("test"))
+    assert (string_length(h) == 16)
+  end
+
+  test "hash of empty IOList is FNV-1a offset basis" do
+    assert (IOList.hash(IOList.empty()) == "cbf29ce484222325")
+  end
+
+  test "segments and single string hash identically" do
+    let seg = IOList.append(IOList.from_string("foo"), IOList.from_string("bar"))
+    let str = IOList.from_string("foobar")
+    assert (IOList.hash(seg) == IOList.hash(str))
+  end
 end
 
 end

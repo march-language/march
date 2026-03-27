@@ -268,13 +268,20 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
   let parts = decompose_concat content in
   (* First pass: replace <island> tags with IslandView calls *)
   let parts = process_island_tags parts sp in
-  (* Second pass: escape dynamic interpolations *)
+  (* Second pass: escape dynamic interpolations.
+     Use html_auto_escape(x) instead of Html.escape(to_string(x)) so that:
+     - Html.Safe values are inserted verbatim (no double-escaping)
+     - IOList values (partials) are flattened as-is (already HTML)
+     - Plain strings and other values are HTML-escaped normally *)
   let parts = List.map (fun part ->
     match part with
+    | EApp (EVar { txt = "to_string"; _ }, [inner_expr], psp) ->
+      (* Dynamic part: use html_auto_escape(x) — handles Safe/IOList/String *)
+      EApp (EVar { txt = "html_auto_escape"; span = psp }, [inner_expr], psp)
     | EApp (EVar { txt = "to_string"; _ }, args, psp) ->
-      (* Dynamic part: wrap to_string(x) in Html.escape *)
+      (* Fallback for unusual arity — shouldn't happen in practice *)
       let inner = EApp (EVar { txt = "to_string"; span = psp }, args, psp) in
-      EApp (EVar { txt = "Html.escape"; span = psp }, [inner], psp)
+      EApp (EVar { txt = "html_auto_escape"; span = psp }, [inner], psp)
     | _ -> part  (* String literals and island_ssr calls — leave as-is *)
   ) parts in
   let list_expr = List.fold_right (fun e acc ->

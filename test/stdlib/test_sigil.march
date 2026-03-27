@@ -42,7 +42,35 @@ describe "~H sigil" do
     -- Should still produce correct output
     assert (IOList.to_string(result) == "<p>Hello, world</p>")
     -- Multi-segment IOList: byte_size should match total string length
-    assert (IOList.byte_size(result) == 20)
+    assert (IOList.byte_size(result) == 19)
+  end
+end
+
+describe "~H safe composition" do
+  test "Html.Safe value bypasses escaping in ~H" do
+    let safe = Html.raw("<strong>bold</strong>")
+    let result = ~H"<p>${safe}</p>"
+    assert (IOList.to_string(result) == "<p><strong>bold</strong></p>")
+  end
+
+  test "nested ~H partials do not double-escape" do
+    let user = "<Alice>"
+    let inner = ~H"<span>${user}</span>"
+    let outer = ~H"<div>${inner}</div>"
+    assert (IOList.to_string(outer) == "<div><span>&lt;Alice&gt;</span></div>")
+  end
+
+  test "render_partial result embeds without double-escaping" do
+    let partial = Html.render_partial(fn label -> ~H"<li>${label}</li>", "<danger>")
+    let page = ~H"<ul>${partial}</ul>"
+    assert (IOList.to_string(page) == "<ul><li>&lt;danger&gt;</li></ul>")
+  end
+
+  test "render_collection in ~H does not double-escape" do
+    let items = ["<a>", "<b>"]
+    let list_html = Html.render_collection(items, fn item -> ~H"<li>${item}</li>")
+    let page = ~H"<ul>${list_html}</ul>"
+    assert (IOList.to_string(page) == "<ul><li>&lt;a&gt;</li><li>&lt;b&gt;</li></ul>")
   end
 end
 

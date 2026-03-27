@@ -1,0 +1,191 @@
+-- examples/templates.march
+--
+-- Idiomatic March template composition using ~H sigils, Html helpers,
+-- IOList partials, collection rendering, and layout wrapping.
+--
+-- Run with:
+--   dune exec march -- examples/templates.march
+--
+-- Key ideas:
+--   1. ~H"..." produces IOList — the canonical rendered HTML fragment type.
+--   2. Interpolated ${x} values are auto-escaped (Html entities).
+--   3. Interpolating an IOList (partial result) does NOT double-escape.
+--   4. Html.render_partial / Html.render_collection compose IOList fragments.
+--   5. Html.layout wraps a finished IOList in a full HTML document.
+--   6. Html.content_hash(iol) gives an ETag for the rendered fragment.
+
+mod Templates do
+
+-- ---------------------------------------------------------------------------
+-- Data types
+-- ---------------------------------------------------------------------------
+
+type User = { name : String, role : String }
+type Post = { title : String, excerpt : String, slug : String }
+
+-- ---------------------------------------------------------------------------
+-- Partials — each is a plain function returning IOList
+-- ---------------------------------------------------------------------------
+
+-- Renders a single navigation link.
+fn nav_link_partial(label : String, href : String) : IOList do
+  ~H"<li><a href=\"${href}\">${label}</a></li>"
+end
+
+-- Renders the site navigation bar.
+-- Note: uses Html.list directly with a typed lambda to avoid polymorphism
+-- issues when render_collection is also used with a different item type.
+fn nav_partial(links : List((String, String))) : IOList do
+  let link_items = Html.list(links, fn pair ->
+    match pair do
+    (label, href) -> nav_link_partial(label, href)
+    end)
+  ~H"<nav><ul>${link_items}</ul></nav>"
+end
+
+-- Renders a single blog post card.  The title and excerpt are user-supplied
+-- strings so they are auto-escaped by ~H.
+fn post_card_partial(post : Post) : IOList do
+  ~H"""<article>
+  <h2><a href="/posts/${post.slug}">${post.title}</a></h2>
+  <p>${post.excerpt}</p>
+</article>"""
+end
+
+-- Renders the current user badge in the header.
+fn user_badge_partial(user : User) : IOList do
+  ~H"<span class=\"user-badge\">${user.name} (${user.role})</span>"
+end
+
+-- ---------------------------------------------------------------------------
+-- Page sections (composed from partials)
+-- ---------------------------------------------------------------------------
+
+-- Renders the page header: logo + nav + user badge.
+fn header_section(current_user : User) : IOList do
+  let nav_links = [
+    ("Home",  "/"),
+    ("Posts", "/posts"),
+    ("About", "/about")
+  ]
+  let nav  = nav_partial(nav_links)
+  let badge = user_badge_partial(current_user)
+  ~H"""<header>
+  <h1 class="logo">March Blog</h1>
+  ${nav}
+  ${badge}
+</header>"""
+end
+
+-- Renders the blog index page body: heading + collection of post cards.
+-- Uses explicit recursion to avoid type inference limits with polymorphic
+-- Html.render_collection when called at different item types in one file.
+fn blog_index_section(posts : List(Post)) : IOList do
+  fn render_posts(ps : List(Post), acc : IOList) : IOList do
+    match ps do
+    Nil -> acc
+    Cons(p, rest) -> render_posts(rest, IOList.append(acc, post_card_partial(p)))
+    end
+  end
+  let cards = render_posts(posts, IOList.empty())
+  ~H"""<main>
+  <h2>Latest Posts</h2>
+  ${cards}
+</main>"""
+end
+
+-- ---------------------------------------------------------------------------
+-- Full page assembly with layout
+-- ---------------------------------------------------------------------------
+
+-- Assembles a complete HTML document from sections.
+fn render_blog_index(current_user : User, posts : List(Post)) : IOList do
+  let head_extra = ~H"""<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/app.css">"""
+
+  let header  = header_section(current_user)
+  let content = blog_index_section(posts)
+
+  let body = ~H"""${header}
+${content}
+<footer><p>&copy; 2025 March Blog</p></footer>"""
+
+  Html.layout("March Blog — Home", head_extra, body)
+end
+
+-- ---------------------------------------------------------------------------
+-- Island component embedding
+-- ---------------------------------------------------------------------------
+--
+-- Islands are interactive WASM components compiled from March.
+-- Embed them with the <island> syntax inside ~H.  Bastion handles
+-- the SSR (server-side rendering) automatically via IslandView.island_ssr.
+--
+-- Example (not run here — requires a real island module):
+--
+--   let likes_island = ~H"<island name='LikeButton' props=${post} />"
+--
+-- The island result is also an IOList and embeds without double-escaping:
+--
+--   let page = ~H"<article>${post_html}${likes_island}</article>"
+
+-- ---------------------------------------------------------------------------
+-- Fragment caching pattern (conceptual — Vault not wired in this example)
+-- ---------------------------------------------------------------------------
+--
+-- In a real Bastion handler, expensive sections are cached:
+--
+--   fn render_sidebar(conn) do
+--     Bastion.Cache.fragment("sidebar:global", 300_000, fn ->
+--       -- This IOList is stored in Vault for 5 minutes
+--       ~H"""<aside>
+--         <h3>Top Posts</h3>
+--         ${render_collection(top_posts, fn p -> post_card_partial(p))}
+--       </aside>"""
+--     end)
+--   end
+--
+-- The cached IOList re-embeds into the parent ~H without double-escaping:
+--
+--   let sidebar = render_sidebar(conn)
+--   let page = Html.layout("Home", head, ~H"${header}${sidebar}${content}")
+
+-- ---------------------------------------------------------------------------
+-- ETag generation
+-- ---------------------------------------------------------------------------
+
+-- Compute an ETag for a rendered fragment (used by Bastion.Cache.etag middleware).
+fn etag_for(iol : IOList) : String do
+  "\"" ++ Html.content_hash(iol) ++ "\""
+end
+
+-- ---------------------------------------------------------------------------
+-- Main — demonstrate the full pipeline
+-- ---------------------------------------------------------------------------
+
+fn main() do
+  let me = { name = "Alice", role = "admin" }
+
+  let posts = [
+    { title = "Hello, March!", excerpt = "Getting started with the March language.", slug = "hello-march" },
+    { title = "Bastion Routing", excerpt = "How to define routes in <Bastion>.", slug = "bastion-routing" },
+    { title = "Islands & WASM", excerpt = "Embedding interactive islands in SSR pages.", slug = "islands-wasm" }
+  ]
+
+  let page = render_blog_index(me, posts)
+  let html = IOList.to_string(page)
+
+  println("=== Rendered HTML (first 500 chars) ===")
+  println(String.slice_bytes(html, 0, 500))
+
+  println("")
+  println("=== ETag ===")
+  println(etag_for(page))
+
+  println("")
+  println("=== Total byte size ===")
+  println(to_string(IOList.byte_size(page)))
+end
+
+end

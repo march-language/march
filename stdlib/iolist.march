@@ -224,4 +224,23 @@ mod IOList do
     end
   end
 
+  doc """
+  Compute a FNV-1a 64-bit content hash over the IOList segments without
+  first flattening to a single string.  Returns a 16-character lowercase
+  hex string suitable for use as an ETag value.
+
+      IOList.hash(IOList.from_string("hello"))   -- some hex string
+      IOList.hash(IOList.empty())                -- "cbf29ce484222325"
+
+  The hash walks the IOList tree in order, hashing each `Str` segment's
+  bytes as encountered.  The result is identical to hashing the fully
+  flattened string.
+
+  Suitable for ETag generation and fragment cache keying.
+  Cost: O(total bytes across all segments).
+  """
+  fn hash(iol : IOList) : String do
+    iolist_hash_fnv1a(iol)
+  end
+
 end

@@ -1,7 +1,12 @@
--- Html module: HTML escaping and safe HTML helpers.
+-- Html module: HTML escaping, safe HTML helpers, and template composition.
 --
 -- Provides utilities for escaping HTML entities, marking strings as
--- safe (pre-escaped) HTML, and rendering lists of items into IOLists.
+-- safe (pre-escaped) HTML, rendering lists of items into IOLists, and
+-- composing template partials and layouts.
+--
+-- IOList is the canonical "rendered HTML fragment" type throughout this
+-- module.  Fragments can be stored in Vault for fragment caching and
+-- re-embedded into parent templates via ~H sigils without double-escaping.
 
 mod Html do
 
@@ -93,6 +98,140 @@ mod Html do
         join_acc(rest, sep, IOList.append(with_sep, item), false)
       end end
     end
+  end
+
+  doc """
+  Escape a string for use in an HTML attribute value context.
+
+      Html.escape_attr("hello & world")  -- "hello &amp; world"
+      Html.escape_attr("<script>")       -- "&lt;script&gt;"
+
+  Currently identical to `Html.escape`.  Kept as a separate function so
+  attribute-specific escaping rules can be tightened in the future without
+  breaking call sites.
+  """
+  fn escape_attr(s : String) : String do
+    escape(s)
+  end
+
+  doc """
+  Build an HTML tag with properly escaped attributes and an IOList body.
+
+      Html.tag("div", [("class", "greeting")], IOList.from_string("Hi"))
+      -- "<div class=\"greeting\">Hi</div>"
+
+      Html.tag("br", [], IOList.empty())
+      -- "<br></br>"  (use self-closing syntax in static HTML if needed)
+
+  Attribute keys and values are both run through `Html.escape_attr`.
+  The content is an IOList so it can be a composed partial or ~H result.
+  Passing the result of a ~H sigil as content is safe: it will not be
+  double-escaped.
+
+  Cost: O(k) for attribute serialisation where k = number of attributes,
+  plus O(1) for IOList wrapping.
+  """
+  fn tag(name : String, attrs : List((String, String)), content : IOList) : IOList do
+    let attr_str = List.fold_left("", attrs, fn (acc, pair) ->
+      match pair do
+      (k, v) ->
+        acc ++ " " ++ escape_attr(k) ++ "=\"" ++ escape_attr(v) ++ "\""
+      end)
+    let open_tag = "<" ++ name ++ attr_str ++ ">"
+    let close_tag = "</" ++ name ++ ">"
+    IOList.from_string(open_tag)
+    |> IOList.append(content)
+    |> IOList.append(IOList.from_string(close_tag))
+  end
+
+  doc """
+  Call a template partial function with a single argument, returning IOList.
+
+      fn user_card(user) do IOList.from_string("<div>" ++ user.name ++ "</div>") end
+      Html.render_partial(fn user -> user_card(user), current_user)
+
+  Partials are just functions that return IOList.  This helper makes the
+  intent explicit and ensures the return type is IOList so the result
+  can be safely embedded in a parent ~H sigil without double-escaping,
+  or stored in Vault as a cached fragment.
+
+  Cost: O(1) — just calls the function.
+  """
+  fn render_partial(partial_fn : a -> IOList, arg : a) : IOList do
+    partial_fn(arg)
+  end
+
+  doc """
+  Map a template partial over a list of items, returning a single IOList.
+
+      Html.render_collection(users, fn user -> IOList.from_string("<li>" ++ user.name ++ "</li>"))
+      -- IOList containing all rendered <li> items concatenated
+
+  Equivalent to `Html.list(items, partial_fn)`.  The Rails-flavoured name
+  makes the intent clear when building list views.
+
+  The returned IOList can be embedded in a parent ~H sigil without
+  double-escaping or stored in Vault as a cached fragment.
+
+  Cost: O(n) where n is the length of the list.
+  """
+  fn render_collection(items : List(a), partial_fn : a -> IOList) : IOList do
+    list(items, partial_fn)
+  end
+
+  doc """
+  Wrap content in a standard HTML document structure.
+
+      Html.layout("My Page", IOList.empty(), page_content)
+
+  Produces:
+      <!DOCTYPE html><html><head><title>My Page</title></head>
+      <body>...page_content...</body></html>
+
+  - `title` is HTML-escaped automatically.
+  - `head_extra` is an IOList inserted after `</title>` and before `</head>`.
+    Use it for `<link>`, `<meta>`, and `<style>` tags.
+  - `body` is an IOList (result of ~H or render_partial) inserted inside `<body>`.
+
+  Typical use:
+
+      fn page(conn) do
+        Html.layout(
+          "Dashboard",
+          IOList.from_string("<link rel=\"stylesheet\" href=\"/app.css\">"),
+          body_content
+        )
+      end
+
+  Cost: O(1) for IOList construction; O(total bytes) when flushed to string.
+  """
+  fn layout(title : String, head_extra : IOList, body : IOList) : IOList do
+    let title_safe = escape(title)
+    let doc_open = IOList.from_string(
+      "<!DOCTYPE html><html><head><title>" ++ title_safe ++ "</title>"
+    )
+    let body_open = IOList.from_string("</head><body>")
+    let body_close = IOList.from_string("</body></html>")
+    doc_open
+    |> IOList.append(head_extra)
+    |> IOList.append(body_open)
+    |> IOList.append(body)
+    |> IOList.append(body_close)
+  end
+
+  doc """
+  Compute a content hash over an IOList for ETag generation.
+
+      Html.content_hash(~H"<p>Hello</p>")  -- a hex string, e.g. "a1b2c3d4e5f6..."
+
+  Delegates to `IOList.hash` (FNV-1a 64-bit over segments, no flattening).
+  The returned hex string is suitable for use as an HTTP ETag value or as a
+  Vault cache key for fragment caching.
+
+  Cost: O(total bytes across all segments).
+  """
+  fn content_hash(iol : IOList) : String do
+    IOList.hash(iol)
   end
 
 end
