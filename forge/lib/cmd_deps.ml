@@ -221,15 +221,33 @@ let run () =
        Resolver_lockfile.has_drifted lock_path toml_content then
       Printf.printf
         "note: forge.toml has changed since last `forge deps` — updating lockfile\n%!";
+    (* Apply [patch] overrides: replace dep sources before installing.
+       Patches substitute the declared dep with the patch source. *)
+    let patch_names = List.map (fun p -> p.Project.patch_name) proj.Project.patches in
+    let effective_deps = List.map (fun (dep_name, dep) ->
+        match List.find_opt (fun p -> p.Project.patch_name = dep_name)
+                proj.Project.patches with
+        | Some p ->
+          Printf.printf "  [patch] %s → overriding with patched source\n%!" dep_name;
+          (dep_name, p.Project.patch_source)
+        | None -> (dep_name, dep)
+      ) proj.Project.deps in
+    (* Add any patch-only entries (patches for transitive deps not in direct deps) *)
+    let extra_patches = List.filter_map (fun p ->
+        if List.mem_assoc p.Project.patch_name effective_deps then None
+        else Some (p.Project.patch_name, p.Project.patch_source)
+      ) proj.Project.patches in
+    let all_deps = effective_deps @ extra_patches in
+    ignore patch_names;
     (* Install all deps *)
-    if proj.Project.deps = [] then begin
+    if all_deps = [] then begin
       Printf.printf "no dependencies declared\n%!";
       Resolver_lockfile.write lock_path [] ~manifest_hash:
         (Resolver_lockfile.compute_manifest_hash toml_content);
       Ok ()
     end else begin
-      Printf.printf "resolving %d dependencies...\n%!" (List.length proj.Project.deps);
-      let results = List.map (fun (n, d) -> (n, install_dep n d)) proj.Project.deps in
+      Printf.printf "resolving %d dependencies...\n%!" (List.length all_deps);
+      let results = List.map (fun (n, d) -> (n, install_dep n d)) all_deps in
       let errors  = List.filter_map (fun (_, r) ->
           match r with Error e -> Some e | Ok _ -> None) results in
       let entries = List.filter_map (fun (_, r) ->
