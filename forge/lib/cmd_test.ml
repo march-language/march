@@ -30,8 +30,7 @@ let find_lib_sources () =
   match Project.load () with
   | Error _ -> []
   | Ok proj ->
-    if proj.Project.project_type <> Project.Lib
-       && proj.Project.project_type <> Project.LibTool then []
+    if proj.Project.project_type <> Project.Lib then []
     else
       let lib_dir = Filename.concat proj.Project.root "lib" in
       if Sys.file_exists lib_dir && Sys.is_directory lib_dir then
@@ -50,8 +49,7 @@ let invoke_march ?(verbose=false) ?(filter="") ?(coverage=false) files =
   (* Set MARCH_LIB_PATH so test files can resolve `use LibModule` imports
      from the lib/ directory without needing manual env setup. *)
   (match Project.load () with
-   | Ok proj when proj.Project.project_type = Project.Lib
-                || proj.Project.project_type = Project.LibTool ->
+   | Ok proj when proj.Project.project_type = Project.Lib ->
      let lib_dir = Filename.concat proj.Project.root "lib" in
      let path = match Sys.getenv_opt "MARCH_LIB_PATH" with
        | Some s -> lib_dir ^ ":" ^ s | None -> lib_dir in

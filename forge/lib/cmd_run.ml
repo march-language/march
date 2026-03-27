@@ -4,9 +4,7 @@ let run () =
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
-    if proj.Project.project_type = Project.Lib then
-      Error "cannot run a library project (use 'forge build' or 'forge test' instead)"
-    else begin
+    begin
       let lib_dir    = Filename.concat proj.Project.root "lib" in
       let config_dir = Filename.concat proj.Project.root "config" in
       (* Entry point is lib/<name>.march *)

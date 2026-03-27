@@ -17,11 +17,9 @@ let new_cmd =
   let app_flag  = Arg.(value & flag & info ["app"]  ~doc:"Application project (default)") in
   let lib_flag  = Arg.(value & flag & info ["lib"]  ~doc:"Library project") in
   let tool_flag = Arg.(value & flag & info ["tool"] ~doc:"CLI tool project") in
-  let lib_tool_flag = Arg.(value & flag & info ["lib-tool"] ~doc:"Library + CLI tool project") in
-  let run name _is_app is_lib is_tool is_lib_tool =
+  let run name _is_app is_lib is_tool =
     let pt =
-      if is_lib_tool then Project.LibTool
-      else if is_lib  then Project.Lib
+      if is_lib  then Project.Lib
       else if is_tool then Project.Tool
       else Project.App
     in
@@ -32,7 +30,7 @@ let new_cmd =
      | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1)
   in
   Cmd.v (Cmd.info "new" ~doc:"Create a new March project")
-    Term.(const run $ name $ app_flag $ lib_flag $ tool_flag $ lib_tool_flag)
+    Term.(const run $ name $ app_flag $ lib_flag $ tool_flag)
 
 (* ----------------------------------------------------------------- forge build *)
 
@@ -130,6 +128,21 @@ let deps_cmd =
     (Cmd.info "deps" ~doc:"Install and manage project dependencies")
     [deps_update_cmd]
 
+(* --------------------------------------------------------------- forge install *)
+
+let install_cmd =
+  let source =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"PATH_OR_URL" ~doc:"Local path or git URL of the project to install")
+  in
+  let run s =
+    match Cmd_install.run s with
+    | Ok ()  -> ()
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "install" ~doc:"Build and install a March project as a CLI tool")
+    Term.(const run $ source)
+
 (* ------------------------------------------------------------------ forge help *)
 
 let help_cmd =
@@ -199,7 +212,8 @@ let default_term =
 let () =
   let cmds =
     [ new_cmd; init_cmd; build_cmd; run_cmd; test_cmd; format_cmd;
-      interactive_cmd; i_cmd; clean_cmd; deps_cmd; search_cmd; help_cmd ]
+      interactive_cmd; i_cmd; clean_cmd; deps_cmd; install_cmd; search_cmd;
+      help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term

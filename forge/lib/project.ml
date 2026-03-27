@@ -1,6 +1,6 @@
 (** Project model: load and represent forge.toml *)
 
-type project_type = App | Lib | Tool | LibTool
+type project_type = App | Lib | Tool
 
 type dep =
   | GitDep of { url : string; rev : string }
@@ -20,14 +20,12 @@ let project_type_of_string = function
   | "app"      -> App
   | "lib"      -> Lib
   | "tool"     -> Tool
-  | "lib+tool" -> LibTool
   | s          -> failwith (Printf.sprintf "unknown project type '%s'" s)
 
 let project_type_to_string = function
   | App     -> "app"
   | Lib     -> "lib"
   | Tool    -> "tool"
-  | LibTool -> "lib+tool"
 
 let read_file path =
   let ic = open_in path in
