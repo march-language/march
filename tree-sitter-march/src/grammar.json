@@ -3207,11 +3207,11 @@
             "members": [
               {
                 "type": "SYMBOL",
-                "name": "string"
+                "name": "triple_string"
               },
               {
                 "type": "SYMBOL",
-                "name": "triple_string"
+                "name": "string"
               }
             ]
           }
@@ -3221,12 +3221,17 @@
     "sigil_prefix": {
       "type": "TOKEN",
       "content": {
-        "type": "PREC",
-        "value": 10,
-        "content": {
-          "type": "PATTERN",
-          "value": "~[A-Z]"
-        }
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "STRING",
+            "value": "~"
+          },
+          {
+            "type": "PATTERN",
+            "value": "[A-Z]"
+          }
+        ]
       }
     },
     "match_expression": {

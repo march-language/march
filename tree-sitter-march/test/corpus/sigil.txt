@@ -1,0 +1,41 @@
+================
+Sigil with regular string
+================
+mod T do
+fn main() do
+  let x = ~H"<div>hi</div>"
+end
+end
+---
+(source_file
+  (module_def
+    name: (type_identifier)
+    (function_def
+      name: (identifier)
+      body: (block_body
+        (let_declaration
+          pattern: (variable_pattern (variable_pattern))
+          value: (sigil_expression
+            prefix: (sigil_prefix)
+            content: (string)))))))
+
+================
+Sigil with triple string
+================
+mod T do
+fn main() do
+  let x = ~H"""<div>hi</div>"""
+end
+end
+---
+(source_file
+  (module_def
+    name: (type_identifier)
+    (function_def
+      name: (identifier)
+      body: (block_body
+        (let_declaration
+          pattern: (variable_pattern (variable_pattern))
+          value: (sigil_expression
+            prefix: (sigil_prefix)
+            content: (triple_string)))))))

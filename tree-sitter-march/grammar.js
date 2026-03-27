@@ -441,12 +441,13 @@ module.exports = grammar({
     assert_expression: $ => seq('assert', field('value', $._expr)),
 
     // Sigil expressions: ~H"...", ~H"""..."""
-    // Content is parsed into fragments for highlighting (HTML tags, interpolation, text).
+    // Content is tokenized by the external scanner into HTML tags,
+    // interpolation expressions, and plain text for distinct highlighting.
     sigil_expression: $ => seq(
       field('prefix', $.sigil_prefix),
       field('content', choice($.triple_string, $.string)),
     ),
-    sigil_prefix: _ => token(prec(10, /~[A-Z]/)),
+    sigil_prefix: _ => token(seq('~', /[A-Z]/)),
 
 
     match_expression: $ => seq(
@@ -493,7 +494,6 @@ module.exports = grammar({
     ),
 
     // Triple-quoted doc string: """..."""  (content may span lines and contain " and "")
-    // Must be listed before string in doc_annotation choice so maximal-munch picks it.
     triple_string: _ => /"""([^"]|"[^"]|""[^"])*"{0,2}"""/,
 
     comment: _ => token(seq('--', /.*/)),
