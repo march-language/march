@@ -222,10 +222,29 @@ march/
 ├── lsp/
 │   └── test/test_lsp.ml      # 57 tests (initialize/diagnostics/hover/goto-def/completion/inlay hints)
 └── forge/
-    └── test/test_forge.exe   # 15 tests (scaffold, toml)
+    ├── lib/
+    │   ├── resolver_version.ml       # semver parse/compare/~> constraint expansion
+    │   ├── resolver_constraint.ml    # constraint types, satisfies, AND combinator
+    │   ├── resolver_lockfile.ml      # forge.lock TOML write/read, drift detection
+    │   ├── resolver_registry.ml      # in-memory package index, TOML load/save
+    │   ├── resolver_pubgrub.ml       # PubGrub greedy solver, conflict messages
+    │   ├── resolver_cas_package.ml   # canonical archive, SHA-256 CAS store/verify
+    │   ├── resolver_api_surface.ml   # pub fn/type extraction, diff, semver check
+    │   ├── cmd_deps.ml               # forge deps (install all dep types + [patch])
+    │   └── cmd_publish.ml            # forge publish with semver enforcement
+    └── test/
+        ├── test_forge.exe            # 15 tests (scaffold, toml)
+        ├── test_resolver.exe         # 35 tests (semver, constraints, lockfile)
+        ├── test_solver.exe           # 16 tests (registry, PubGrub solver)
+        ├── test_cas_package.exe      # 10 tests (canonical archive, CAS)
+        ├── test_patch.exe            # 6 tests ([patch] overrides)
+        ├── test_api_surface.exe      # 25 tests (API extraction, semver enforcement)
+        ├── test_properties.exe       # 3 QCheck properties (solver soundness)
+        ├── test_regression.exe       # 8 tests (Cargo/Hex/npm regressions)
+        └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
-## Current State (as of 2026-03-26, post Bastion Islands library — WASM island framework + actor-per-island JS runtime + Island interface + hydration protocol + LSP forge.toml dep resolution + **Vault stdlib**)
+## Current State (as of 2026-03-27, post forge dep resolution — PubGrub solver + lockfile + CAS + [patch] + semver enforcement + property/regression tests)
 
 - **Builds clean**
 - **0 known failures** across all test suites (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing** + **Phase 4: reduction counting in compiled code** + **Phase 4: lazy stack growth** + **Vault sharded KV store**):
@@ -238,6 +257,13 @@ march/
   - `test_lsp.exe`: 120 tests, passing (doc strings, find-refs, rename, sig-help, code actions, snippet completions, folding ranges, type annotation action, remove unused binding action, phase2 enhanced match, quickfix framework, dead code detection, p1.1 typed match stubs, p1.7 fn return/param annotation, batch annotation, P2.8 naming convention fix, P3.10 De Morgan rewrite)
   - `test_stdlib_march.exe`: 13 tests, passing (Http, HttpTransport, HttpClient, HttpServer, WebSocket, Tls, Process, Logger, PubSub, Channel, ChannelServer, Presence, ChannelSocket)
   - `test_forge.exe`: 15 tests, passing (scaffold/toml)
+  - `test_resolver.exe`: 35 tests, passing (semver version parse/compare/~>, constraints, project dep loading, lockfile write/read/drift)
+  - `test_solver.exe`: 16 tests, passing (registry roundtrip, PubGrub solver happy paths + conflicts + error messages)
+  - `test_cas_package.exe`: 10 tests, passing (canonical archive, CAS store/lookup/idempotency/verify/tampering detection)
+  - `test_patch.exe`: 6 tests, passing ([patch] overrides parse + solver wiring)
+  - `test_api_surface.exe`: 25 tests, passing (pub fn/type extraction, surface diff, semver bump classification, forge publish enforcement)
+  - `test_properties.exe` (forge): 3 QCheck property tests × 200 cases each (solution satisfies constraints, solver deterministic, no violated transitive constraints)
+  - `test_regression.exe`: 8 tests, passing (Cargo/Hex/npm regression scenarios; greedy backtrack limitation documented)
   - `test_oracle.exe`: requires `MARCH_BIN` env var (oracle/idempotency/pass tests)
 - **Full pipeline working**: `dune exec march -- file.march` parses → desugars → typechecks → runs `main()` if present
 - **Match syntax**: `match expr do Pat -> body end` — no leading `|` on arms; NL separates arms inside match body; multi-statement arms use `-> do ... end` wrapper (2026-03-26 syntax overhaul)

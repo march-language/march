@@ -194,6 +194,22 @@ let search_cmd =
        ~doc:"Search stdlib and dependencies for functions, types, and constructors")
     Term.(const run $ query $ type_sig $ doc_query $ limit $ as_json $ pretty $ rebuild)
 
+(* --------------------------------------------------------------- forge publish *)
+
+let publish_cmd =
+  let old_source =
+    Arg.(value & opt (some string) None &
+         info ["old-source"] ~docv:"DIR"
+           ~doc:"Path to the previous version's source tree for semver checking")
+  in
+  let dry_run =
+    Arg.(value & flag & info ["dry-run"]
+           ~doc:"Validate only; do not submit to registry")
+  in
+  let run o d = handle (Cmd_publish.run ~old_source_dir:o ~dry_run:d ()) in
+  Cmd.v (Cmd.info "publish" ~doc:"Validate and publish the current package")
+    Term.(const run $ old_source $ dry_run)
+
 (* ------------------------------------------------------------------ forge init *)
 
 let init_cmd =
@@ -212,8 +228,8 @@ let default_term =
 let () =
   let cmds =
     [ new_cmd; init_cmd; build_cmd; run_cmd; test_cmd; format_cmd;
-      interactive_cmd; i_cmd; clean_cmd; deps_cmd; install_cmd; search_cmd;
-      help_cmd ]
+      interactive_cmd; i_cmd; clean_cmd; deps_cmd; install_cmd; publish_cmd;
+      search_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term

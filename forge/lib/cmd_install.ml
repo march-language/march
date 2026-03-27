@@ -56,7 +56,7 @@ let run source =
       else begin
         let output = Filename.concat build_dir proj.Project.name in
         (* Collect dep lib paths *)
-        let dep_lib_paths = List.filter_map (fun (dep_name, dep) ->
+        let dep_lib_paths = List.filter_map (fun (_, dep) ->
             match dep with
             | Project.PathDep rel_path ->
               let p = if Filename.is_relative rel_path
@@ -65,7 +65,7 @@ let run source =
               in
               let d = Filename.concat p "lib" in
               if Sys.file_exists d then Some d else None
-            | Project.GitDep _ -> Project.git_dep_lib_path dep_name
+            | _ -> None
           ) proj.Project.deps in
         let config_dir = Filename.concat abs_dir "config" in
         let all_lib_paths =

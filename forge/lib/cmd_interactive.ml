@@ -10,7 +10,7 @@ let run () =
   | Ok proj ->
     let lib_dir    = Filename.concat proj.Project.root "lib" in
     let config_dir = Filename.concat proj.Project.root "config" in
-    let dep_lib_paths = List.filter_map (fun (dep_name, dep) ->
+    let dep_lib_paths = List.filter_map (fun (_, dep) ->
         match dep with
         | Project.PathDep rel_path ->
           let abs_path = if Filename.is_relative rel_path
@@ -19,7 +19,7 @@ let run () =
           in
           let d = Filename.concat abs_path "lib" in
           if Sys.file_exists d then Some d else None
-        | Project.GitDep _ -> Project.git_dep_lib_path dep_name
+        | _ -> None
       ) proj.Project.deps in
     let all_lib_paths =
       dep_lib_paths @ [lib_dir]
