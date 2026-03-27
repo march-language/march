@@ -802,9 +802,29 @@ let analyse ~filename ~src : t =
   | Ok raw_ast ->
     let desugared = March_desugar.Desugar.desugar_module raw_ast in
     let stdlib_decls = load_stdlib () in
+    (* Resolve cross-file imports (user imports + forge dep imports).
+       Build the extra lib-path list from:
+         1. forge.toml [deps] resolved to absolute lib/ dirs
+         2. MARCH_LIB_PATH env var (already handled inside resolve_imports) *)
+    let forge_lib_paths =
+      let start_dir =
+        if filename = "" || filename = "<unknown>"
+        then Sys.getcwd ()
+        else Filename.dirname filename
+      in
+      match Forge_config.find_forge_root start_dir with
+      | None      -> []
+      | Some root -> Forge_config.dep_lib_paths root
+    in
+    let (_resolve_errors, extra_decls) =
+      March_resolver.Resolver.resolve_imports
+        ~extra_lib_paths:forge_lib_paths
+        ~source_file:filename
+        desugared
+    in
     let desugared =
       { desugared with
-        Ast.mod_decls = stdlib_decls @ desugared.Ast.mod_decls }
+        Ast.mod_decls = stdlib_decls @ extra_decls @ desugared.Ast.mod_decls }
     in
     let (errors, type_map, final_env) = Tc.check_module_full desugared in
     let def_map        = Hashtbl.create 64 in
