@@ -99,6 +99,28 @@ let fn_param_to_pattern : fn_param -> pattern = function
 let mk_named_param name : fn_param =
   FPNamed { param_name = name; param_ty = None; param_lin = Unrestricted }
 
+(* ---- HTML auto-escaping for ~H sigil ---- *)
+
+(** Walk a string-concatenation chain (built from interpolation) and wrap
+    every [to_string(expr)] call in [Html.escape(to_string(expr))].
+    String literals are left untouched — only interpolated values get escaped.
+
+    The parser builds interpolations as:
+      "prefix" ++ to_string(e1) ++ "mid" ++ to_string(e2) ++ "suffix"
+    represented as nested [EApp(EVar "++", [left; right], sp)].
+
+    We recurse into both sides of [++] and wrap [to_string] calls. *)
+let rec escape_html_interp (e : expr) : expr =
+  match e with
+  | EApp (EVar { txt = "++"; span = sp1 }, [left; right], sp2) ->
+    EApp (EVar { txt = "++"; span = sp1 },
+          [escape_html_interp left; escape_html_interp right], sp2)
+  | EApp (EVar ({ txt = "to_string"; _ } as _name), args, sp) ->
+    (* Wrap: to_string(x) → Html.escape(to_string(x)) *)
+    let inner = EApp (EVar { txt = "to_string"; span = sp }, args, sp) in
+    EApp (EVar { txt = "Html.escape"; span = sp }, [inner], sp)
+  | _ -> e  (* string literals, other expressions — leave as-is *)
+
 (* ---- Pipe desugaring ---- *)
 
 (** Desugar [EPipe (l, r, sp)] → [EApp (r, [l], sp)].
@@ -231,9 +253,15 @@ let rec desugar_expr (e : expr) : expr =
     EAssert (desugar_expr e, sp)
 
   | ESigil (c, content, sp) ->
-    (* Desugar ~H"..." → Sigil.h(content), ~R"..." → Sigil.r(content), etc. *)
+    (* Desugar ~H"..." → Sigil.h(content), ~R"..." → Sigil.r(content), etc.
+       For ~H specifically, wrap interpolated to_string() calls with Html.escape()
+       so that user-supplied values are auto-escaped in HTML templates. *)
     let fn_name = Printf.sprintf "Sigil.%c" (Char.lowercase_ascii c) in
     let content' = desugar_expr content in
+    let content' =
+      if c = 'H' then escape_html_interp content'
+      else content'
+    in
     EApp (EVar { txt = fn_name; span = sp }, [content'], sp)
 
 (* ---- Multi-head fn desugaring ---- *)

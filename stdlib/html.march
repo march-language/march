@@ -1,0 +1,98 @@
+-- Html module: HTML escaping and safe HTML helpers.
+--
+-- Provides utilities for escaping HTML entities, marking strings as
+-- safe (pre-escaped) HTML, and rendering lists of items into IOLists.
+
+mod Html do
+
+  -- Html.Safe wraps a string that should NOT be escaped (already safe HTML)
+  type Safe = Safe(String)
+
+  doc """
+  Escape HTML entities in a string: & < > " '
+
+      Html.escape("a & b")       -- "a &amp; b"
+      Html.escape("<script>")    -- "&lt;script&gt;"
+      Html.escape("he said \"hi\"") -- "he said &quot;hi&quot;"
+
+  Replaces & first to avoid double-escaping, then < > " '.
+
+  Cost: O(n) per replacement pass.
+  """
+  fn escape(s : String) : String do
+    s
+    |> String.replace_all("&", "&amp;")
+    |> String.replace_all("<", "&lt;")
+    |> String.replace_all(">", "&gt;")
+    |> String.replace_all("\"", "&quot;")
+    |> String.replace_all("'", "&#39;")
+  end
+
+  doc """
+  Mark a string as safe HTML (bypass escaping).
+
+      Html.raw("<b>bold</b>")  -- Safe("<b>bold</b>")
+
+  Use this when you have pre-escaped HTML that should be inserted verbatim.
+  """
+  fn raw(s : String) : Safe do
+    Safe(s)
+  end
+
+  doc """
+  Extract the string from a Safe value.
+
+      Html.to_string(Html.raw("<b>bold</b>"))  -- "<b>bold</b>"
+  """
+  fn safe_to_string(safe : Safe) : String do
+    match safe do
+    Safe(s) -> s
+    end
+  end
+
+  doc """
+  Render a list of items into an IOList using a template function.
+
+      Html.list(["a", "b"], fn item -> IOList.from_string("<li>" ++ item ++ "</li>"))
+      -- IOList containing "<li>a</li><li>b</li>"
+
+  Cost: O(n) where n is the length of the list.
+  """
+  fn list(items : List(a), render_fn : a -> IOList) : IOList do
+    list_acc(items, render_fn, IOList.empty())
+  end
+
+  pfn list_acc(items : List(a), render_fn : a -> IOList, acc : IOList) : IOList do
+    match items do
+    Nil -> acc
+    Cons(item, rest) ->
+      list_acc(rest, render_fn, IOList.append(acc, render_fn(item)))
+    end
+  end
+
+  doc """
+  Join a list of IOLists with a separator string.
+
+      Html.join([IOList.from_string("a"), IOList.from_string("b")], ", ")
+      -- IOList containing "a, b"
+
+  Cost: O(n) where n is the length of the list.
+  """
+  fn join(items : List(IOList), sep : String) : IOList do
+    join_acc(items, sep, IOList.empty(), true)
+  end
+
+  pfn join_acc(items : List(IOList), sep : String, acc : IOList, first : Bool) : IOList do
+    match items do
+    Nil -> acc
+    Cons(item, rest) ->
+      match first do
+      true -> join_acc(rest, sep, IOList.append(acc, item), false)
+      false -> do
+        let with_sep = IOList.append(acc, IOList.from_string(sep))
+        join_acc(rest, sep, IOList.append(with_sep, item), false)
+      end end
+    end
+  end
+
+end

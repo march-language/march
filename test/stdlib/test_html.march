@@ -1,0 +1,96 @@
+mod TestHtml do
+
+describe "Html.escape" do
+  test "escapes ampersand" do
+    assert (Html.escape("a & b") == "a &amp; b")
+  end
+
+  test "escapes angle brackets" do
+    assert (Html.escape("<script>") == "&lt;script&gt;")
+  end
+
+  test "escapes double quotes" do
+    assert (Html.escape("he said \"hi\"") == "he said &quot;hi&quot;")
+  end
+
+  test "escapes single quotes" do
+    assert (Html.escape("it's") == "it&#39;s")
+  end
+
+  test "escapes multiple entities" do
+    assert (Html.escape("<b>A & B</b>") == "&lt;b&gt;A &amp; B&lt;/b&gt;")
+  end
+
+  test "leaves safe strings alone" do
+    assert (Html.escape("hello world") == "hello world")
+  end
+end
+
+describe "Html.raw" do
+  test "wraps string in Safe" do
+    let safe = Html.raw("<b>bold</b>")
+    assert (Html.safe_to_string(safe) == "<b>bold</b>")
+  end
+end
+
+describe "Html.list" do
+  test "renders list items" do
+    let items = ["a", "b", "c"]
+    let result = Html.list(items, fn item -> IOList.from_string("<li>" ++ item ++ "</li>"))
+    assert (IOList.to_string(result) == "<li>a</li><li>b</li><li>c</li>")
+  end
+
+  test "empty list returns empty iolist" do
+    let items : List(String) = []
+    let result = Html.list(items, fn item -> IOList.from_string(item))
+    assert (IOList.to_string(result) == "")
+  end
+end
+
+describe "Html.join" do
+  test "joins iolists with separator" do
+    let items = [IOList.from_string("a"), IOList.from_string("b"), IOList.from_string("c")]
+    let result = Html.join(items, ", ")
+    assert (IOList.to_string(result) == "a, b, c")
+  end
+
+  test "single item has no separator" do
+    let items = [IOList.from_string("only")]
+    let result = Html.join(items, ", ")
+    assert (IOList.to_string(result) == "only")
+  end
+
+  test "empty list returns empty iolist" do
+    let items : List(IOList) = []
+    let result = Html.join(items, ", ")
+    assert (IOList.to_string(result) == "")
+  end
+end
+
+describe "~H sigil auto-escaping" do
+  test "escapes interpolated values with HTML entities" do
+    let user_input = "<script>alert('xss')</script>"
+    let result = ~H"<p>${user_input}</p>"
+    assert (IOList.to_string(result) == "<p>&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;</p>")
+  end
+
+  test "does not escape static string parts" do
+    let name = "safe"
+    let result = ~H"<b>${name}</b>"
+    assert (IOList.to_string(result) == "<b>safe</b>")
+  end
+
+  test "escapes ampersands in interpolated values" do
+    let text = "A & B"
+    let result = ~H"<span>${text}</span>"
+    assert (IOList.to_string(result) == "<span>A &amp; B</span>")
+  end
+
+  test "escapes quotes in interpolated values" do
+    let attr = "he said \"hi\""
+    let result = ~H"<div title=\"${attr}\">content</div>"
+    assert (IOList.to_string(result) == "<div title=\"he said &quot;hi&quot;\">content</div>")
+  end
+end
+
+end
