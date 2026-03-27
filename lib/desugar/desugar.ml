@@ -99,27 +99,42 @@ let fn_param_to_pattern : fn_param -> pattern = function
 let mk_named_param name : fn_param =
   FPNamed { param_name = name; param_ty = None; param_lin = Unrestricted }
 
-(* ---- HTML auto-escaping for ~H sigil ---- *)
+(* ---- HTML IOList generation for ~H sigil ---- *)
 
-(** Walk a string-concatenation chain (built from interpolation) and wrap
-    every [to_string(expr)] call in [Html.escape(to_string(expr))].
-    String literals are left untouched — only interpolated values get escaped.
+(** Decompose a [++] chain into a flat list of parts.
 
     The parser builds interpolations as:
       "prefix" ++ to_string(e1) ++ "mid" ++ to_string(e2) ++ "suffix"
     represented as nested [EApp(EVar "++", [left; right], sp)].
 
-    We recurse into both sides of [++] and wrap [to_string] calls. *)
-let rec escape_html_interp (e : expr) : expr =
+    We recursively flatten both sides of [++] into a list. *)
+let rec decompose_concat (e : expr) : expr list =
   match e with
-  | EApp (EVar { txt = "++"; span = sp1 }, [left; right], sp2) ->
-    EApp (EVar { txt = "++"; span = sp1 },
-          [escape_html_interp left; escape_html_interp right], sp2)
-  | EApp (EVar ({ txt = "to_string"; _ } as _name), args, sp) ->
-    (* Wrap: to_string(x) → Html.escape(to_string(x)) *)
-    let inner = EApp (EVar { txt = "to_string"; span = sp }, args, sp) in
-    EApp (EVar { txt = "Html.escape"; span = sp }, [inner], sp)
-  | _ -> e  (* string literals, other expressions — leave as-is *)
+  | EApp (EVar { txt = "++"; _ }, [left; right], _sp) ->
+    decompose_concat left @ decompose_concat right
+  | _ -> [e]
+
+(** Build an IOList directly from the parts of an ~H sigil interpolation.
+
+    Static string literals are kept as-is.  Dynamic parts (to_string calls)
+    are wrapped in Html.escape for auto-escaping.  The result is:
+      IOList.from_strings(["static1", Html.escape(to_string(e1)), "static2", ...])
+    which produces a multi-segment IOList without building an intermediate
+    concatenated string. *)
+let html_interp_to_iolist (content : expr) (sp : span) : expr =
+  let parts = decompose_concat content in
+  let parts = List.map (fun part ->
+    match part with
+    | EApp (EVar { txt = "to_string"; _ }, args, psp) ->
+      (* Dynamic part: wrap to_string(x) in Html.escape *)
+      let inner = EApp (EVar { txt = "to_string"; span = psp }, args, psp) in
+      EApp (EVar { txt = "Html.escape"; span = psp }, [inner], psp)
+    | _ -> part  (* String literals — leave as-is *)
+  ) parts in
+  let list_expr = List.fold_right (fun e acc ->
+    ECon ({ txt = "Cons"; span = sp }, [e; acc], sp)
+  ) parts (ECon ({ txt = "Nil"; span = sp }, [], sp)) in
+  EApp (EVar { txt = "IOList.from_strings"; span = sp }, [list_expr], sp)
 
 (* ---- Pipe desugaring ---- *)
 
@@ -253,16 +268,17 @@ let rec desugar_expr (e : expr) : expr =
     EAssert (desugar_expr e, sp)
 
   | ESigil (c, content, sp) ->
-    (* Desugar ~H"..." → Sigil.h(content), ~R"..." → Sigil.r(content), etc.
-       For ~H specifically, wrap interpolated to_string() calls with Html.escape()
-       so that user-supplied values are auto-escaped in HTML templates. *)
-    let fn_name = Printf.sprintf "Sigil.%c" (Char.lowercase_ascii c) in
     let content' = desugar_expr content in
-    let content' =
-      if c = 'H' then escape_html_interp content'
-      else content'
-    in
-    EApp (EVar { txt = fn_name; span = sp }, [content'], sp)
+    if c = 'H' then
+      (* Desugar ~H"..." → IOList.from_strings([parts...])
+         Decompose the ++ chain into segments, wrap dynamic parts in
+         Html.escape, and build a multi-segment IOList directly. *)
+      html_interp_to_iolist content' sp
+    else begin
+      (* Other sigils: ~R"..." → Sigil.r(content), etc. *)
+      let fn_name = Printf.sprintf "Sigil.%c" (Char.lowercase_ascii c) in
+      EApp (EVar { txt = fn_name; span = sp }, [content'], sp)
+    end
 
 (* ---- Multi-head fn desugaring ---- *)
 

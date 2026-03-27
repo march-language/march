@@ -35,6 +35,15 @@ describe "~H sigil" do
     let result = ~H"<p>The answer is ${to_string(x)}</p>"
     assert (IOList.to_string(result) == "<p>The answer is 42</p>")
   end
+
+  test "~H produces multi-segment IOList" do
+    let name = "world"
+    let result = ~H"<p>Hello, ${name}</p>"
+    -- Should still produce correct output
+    assert (IOList.to_string(result) == "<p>Hello, world</p>")
+    -- Multi-segment IOList: byte_size should match total string length
+    assert (IOList.byte_size(result) == 20)
+  end
 end
 
 end

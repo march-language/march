@@ -1,22 +1,21 @@
--- Sigil module: handlers for sigil expressions (~H, ~R, ~J, etc.)
+-- Sigil module: handlers for sigil expressions (~R, ~J, etc.)
 --
--- Each sigil ~X"..." desugars to a call to Sigil.x(content).
+-- Most sigils ~X"..." desugar to a call to Sigil.x(content).
 -- Handlers receive the interpolated string and return an appropriate type.
 --
--- The key sigil is ~H for HTML templates, which returns an IOList
--- for efficient wire transfer to the browser.
+-- The ~H sigil for HTML templates is special: it desugars directly to
+-- IOList.from_strings([...]) with separate segments for static and
+-- dynamic parts, avoiding intermediate string concatenation.
 
 mod Sigil do
 
   doc """
-  HTML template sigil handler.
+  HTML template sigil handler (legacy entry point).
 
-  ~H"<p>Hello, \${name}</p>" desugars to Sigil.h("<p>Hello, " ++ name ++ "</p>")
-
-  Returns an IOList for zero-copy wire sending. The IOList wraps
-  the interpolated string as a single segment — future versions
-  will parse the template into multiple IOList segments at compile
-  time for even faster delivery.
+  The ~H sigil now desugars directly to IOList.from_strings([...]) at
+  compile time, producing multi-segment IOLists without an intermediate
+  concatenated string.  This function is retained for backward compatibility
+  with code that calls Sigil.h() explicitly.
   """
   fn h(content : String) do
     IOList.from_string(content)
