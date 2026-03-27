@@ -74,6 +74,15 @@ fn get_or(table, key, default) do
   end
 end
 
+doc """
+Look up a vault table by its registered name.
+Returns Some(table) if a table with that name exists, None otherwise.
+Any actor can call this — no handle required.
+"""
+fn whereis(name) do
+  vault_whereis(name)
+end
+
 doc "Return true if `key` exists in the table and has not expired."
 fn has(table, key) do
   match vault_get(table, key) do

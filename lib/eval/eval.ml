@@ -200,8 +200,9 @@ let vault_make_table (id : int) (name : string) : vault_table = {
     { vs_data = Hashtbl.create 16; vs_mutex = Mutex.create () });
 }
 
-let vault_registry : (int, vault_table) Hashtbl.t = Hashtbl.create 8
-let vault_next_id  : int ref = ref 0
+let vault_registry      : (int, vault_table) Hashtbl.t = Hashtbl.create 8
+let vault_name_registry : (string, int) Hashtbl.t     = Hashtbl.create 8
+let vault_next_id       : int ref = ref 0
 
 (** True if a row is still live (not expired). *)
 let vault_row_live (row : vault_row) : bool =
@@ -4280,8 +4281,28 @@ let base_env : env =
         incr vault_next_id;
         let tbl = vault_make_table id name in
         Hashtbl.replace vault_registry id tbl;
+        (* Register name → id so any actor can look it up by name. *)
+        Hashtbl.replace vault_name_registry name id;
+        (* If called inside an actor, register a cleanup thunk so the table and
+           its name entry are removed when the owning actor crashes or exits.
+           At top-level (current_pid = None) both live until program exit. *)
+        (match !current_pid with
+         | Some pid ->
+           let cleanup () =
+             Hashtbl.remove vault_registry id;
+             Hashtbl.remove vault_name_registry name
+           in
+           register_resource_ocaml pid (Printf.sprintf "vault:%s" name) cleanup
+         | None -> ());
         VVaultHandle id
       | _ -> eval_error "vault_new: expected String (table name)"))
+
+  ; ("vault_whereis", VBuiltin ("vault_whereis", function
+      | [VString name] ->
+        (match Hashtbl.find_opt vault_name_registry name with
+         | None    -> VCon ("None", [])
+         | Some id -> VCon ("Some", [VVaultHandle id]))
+      | _ -> eval_error "vault_whereis: expected String (table name)"))
 
   ; ("vault_set", VBuiltin ("vault_set", function
       | [VVaultHandle id; key; v] ->
@@ -5167,6 +5188,7 @@ let reset_scheduler_state () : unit =
   logger_level := 1;
   logger_context := [];
   Hashtbl.clear vault_registry;
+  Hashtbl.clear vault_name_registry;
   vault_next_id := 0
 
 (* NOTE: debug_ctx actor event logging is intentionally not reproduced here.
