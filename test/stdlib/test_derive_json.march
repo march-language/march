@@ -1,0 +1,180 @@
+mod TestDeriveJson do
+
+  -- Simple enum variant (no args)
+  type Color = Red | Green | Blue
+  derive Eq for Color
+  derive Json for Color
+
+  describe "derive Json for enum variants" do
+    test "to_json for Red" do
+      let j = to_json(Red)
+      let s = Json.to_string(j)
+      assert (String.contains(s, "\"tag\""))
+      assert (String.contains(s, "\"Red\""))
+    end
+
+    test "to_json for Green" do
+      let j = to_json(Green)
+      let s = Json.to_string(j)
+      assert (String.contains(s, "\"Green\""))
+    end
+
+    test "roundtrip Red" do
+      let j = to_json(Red)
+      let result = from_json(j)
+      match result do
+      Ok(c) -> assert (c == Red)
+      Err(e) -> do
+        println("Error: " ++ e)
+        assert (false)
+      end
+      end
+    end
+
+    test "roundtrip Green" do
+      let j = to_json(Green)
+      let result = from_json(j)
+      match result do
+      Ok(c) -> assert (c == Green)
+      Err(e) -> do
+        println("Error: " ++ e)
+        assert (false)
+      end
+      end
+    end
+
+    test "roundtrip Blue" do
+      let j = to_json(Blue)
+      let result = from_json(j)
+      match result do
+      Ok(c) -> assert (c == Blue)
+      Err(e) -> do
+        println("Error: " ++ e)
+        assert (false)
+      end
+      end
+    end
+  end
+
+  -- Variant with arguments
+  type Shape = Circle(Int) | Rect(Int, Int) | Empty
+  derive Eq for Shape
+  derive Json for Shape
+
+  describe "derive Json for variants with args" do
+    test "to_json for Circle" do
+      let j = to_json(Circle(5))
+      let s = Json.to_string(j)
+      assert (String.contains(s, "\"tag\""))
+      assert (String.contains(s, "\"Circle\""))
+    end
+
+    test "to_json for Rect" do
+      let j = to_json(Rect(3, 4))
+      let s = Json.to_string(j)
+      assert (String.contains(s, "\"Rect\""))
+      assert (String.contains(s, "\"0\""))
+      assert (String.contains(s, "\"1\""))
+    end
+
+    test "to_json for Empty" do
+      let j = to_json(Empty)
+      let s = Json.to_string(j)
+      assert (String.contains(s, "\"Empty\""))
+    end
+
+    test "roundtrip Circle" do
+      let s = Circle(10)
+      let j = to_json(s)
+      let result = from_json(j)
+      match result do
+      Ok(s2) -> assert (s2 == Circle(10))
+      Err(e) -> do
+        println("Error: " ++ e)
+        assert (false)
+      end
+      end
+    end
+
+    test "roundtrip Rect" do
+      let s = Rect(3, 4)
+      let j = to_json(s)
+      let result = from_json(j)
+      match result do
+      Ok(s2) -> assert (s2 == Rect(3, 4))
+      Err(e) -> do
+        println("Error: " ++ e)
+        assert (false)
+      end
+      end
+    end
+
+    test "roundtrip Empty" do
+      let j = to_json(Empty)
+      let result = from_json(j)
+      match result do
+      Ok(s2) -> assert (s2 == Empty)
+      Err(e) -> do
+        println("Error: " ++ e)
+        assert (false)
+      end
+      end
+    end
+
+    test "from_json error for missing args" do
+      -- Circle expects an Int arg at key "0", but we don't provide it
+      let j = Json.encode_object([("tag", Json.encode_string("Circle"))])
+      let result = from_json(j)
+      match result do
+      Err(_) -> assert (true)
+      Ok(_) -> assert (false)
+      end
+    end
+  end
+
+  -- Record type (derive last so typechecker sees correct from_json for records)
+  type User = { name : String, age : Int, active : Bool }
+  derive Eq for User
+  derive Json for User
+
+  describe "derive Json for records" do
+    test "to_json for User" do
+      let j = to_json({ name = "Alice", age = 30, active = true })
+      let s = Json.to_string(j)
+      assert (String.contains(s, "\"name\""))
+      assert (String.contains(s, "\"age\""))
+      assert (String.contains(s, "\"active\""))
+    end
+
+    test "roundtrip User" do
+      let u = { name = "Alice", age = 30, active = true }
+      let j = to_json(u)
+      let result = from_json(j)
+      match result do
+      Ok(u2) -> do
+        assert (u2.name == "Alice")
+        assert (u2.age == 30)
+        assert (u2.active == true)
+      end
+      Err(e) -> do
+        println("Error: " ++ e)
+        assert (false)
+      end
+      end
+    end
+
+    test "from_json error for wrong types" do
+      let j = Json.encode_object([
+        ("name", Json.encode_int(42)),
+        ("age", Json.encode_string("not a number")),
+        ("active", Json.encode_string("not a bool"))
+      ])
+      let result = from_json(j)
+      match result do
+      Err(_) -> assert (true)
+      Ok(_) -> assert (false)
+      end
+    end
+  end
+
+end

@@ -4150,9 +4150,17 @@ let rec check_decl env (d : Ast.decl) : env =
     (* Validate each method against the interface declaration. *)
     (match List.assoc_opt idef.impl_iface.txt env.interfaces with
      | None ->
-       Err.error env.errors ~span:idef.impl_iface.span
-         (Printf.sprintf "Unknown interface `%s` — is it declared above this impl?"
-            idef.impl_iface.txt)
+       (* For derive-generated pseudo-interfaces (e.g. JsonTo, JsonFrom),
+          skip interface validation but still type-check and bind each method
+          as a standalone function in the environment. *)
+       let is_json_derive =
+         String.length idef.impl_iface.txt >= 4
+         && String.sub idef.impl_iface.txt 0 4 = "Json"
+       in
+       if not is_json_derive then
+         Err.error env.errors ~span:idef.impl_iface.span
+           (Printf.sprintf "Unknown interface `%s` — is it declared above this impl?"
+              idef.impl_iface.txt)
      | Some interface ->
        (* Check superclass constraints: each required superclass must already have an impl *)
        let sc_tvars = ref [(interface.iface_param.txt, inst_ty)] in
@@ -4225,7 +4233,19 @@ let rec check_decl env (d : Ast.decl) : env =
                      (Printf.sprintf "`%s` in `impl %s` must match the interface signature"
                         mname.txt idef.impl_iface.txt))))
          ) idef.impl_methods);
-    env_with_impl
+    (* For Json derive pseudo-interfaces, also bind each method in the env
+       so that to_json/from_json are visible as regular functions at call sites. *)
+    let is_json_derive =
+      String.length idef.impl_iface.txt >= 4
+      && String.sub idef.impl_iface.txt 0 4 = "Json"
+    in
+    if is_json_derive then
+      List.fold_left (fun env ((_mname : Ast.name), (def : Ast.fn_def)) ->
+          let sch = check_fn env def _sp in
+          bind_var def.fn_name.txt sch env
+        ) env_with_impl idef.impl_methods
+    else
+      env_with_impl
 
   | Ast.DExtern (edef, _sp) ->
     (* Register each foreign function as a monomorphic binding. *)

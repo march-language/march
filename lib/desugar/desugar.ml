@@ -499,9 +499,11 @@ let mk_fn_def name params body : fn_def =
       fc_span   = dummy_span;
     }] }
 
-(** Build a [DImpl] for one derived interface on [type_name]. *)
+(** Build derived declarations for one interface on [type_name].
+    Returns a list of [decl] — usually one [DImpl], but [Json] produces
+    two standalone [DFn] declarations (to_json / from_json). *)
 let derive_impl (type_name : name) (sp : span)
-    (iface : string) (tparams : name list) (td : type_def) : decl option =
+    (iface : string) (tparams : name list) (td : type_def) : decl list =
   (* Type annotation for the type being implemented *)
   let self_ty : ty =
     if tparams = [] then TyCon (type_name, [])
@@ -590,7 +592,7 @@ let derive_impl (type_name : name) (sp : span)
         (* Delegate to the underlying type's eq *)
         EApp (EVar (mk_name "=="), [EVar (mk_name "a"); EVar (mk_name "b")], dummy_span)
     in
-    Some (impl_one "eq" ["a"; "b"] body)
+    [impl_one "eq" ["a"; "b"] body]
 
   | "Show" ->
     let body = match td with
@@ -650,7 +652,7 @@ let derive_impl (type_name : name) (sp : span)
       | TDAlias _ ->
         EApp (EVar (mk_name "show"), [EVar (mk_name "x")], dummy_span)
     in
-    Some (impl_one "show" ["x"] body)
+    [impl_one "show" ["x"] body]
 
   | "Hash" ->
     (* Avoid calling hash() recursively (check_fn shadows the polymorphic binding).
@@ -693,7 +695,7 @@ let derive_impl (type_name : name) (sp : span)
       | TDAlias _ ->
         EApp (EVar (mk_name "hash"), [EVar (mk_name "x")], dummy_span)
     in
-    Some (impl_one "hash" ["x"] body)
+    [impl_one "hash" ["x"] body]
 
   | "Ord" ->
     (* derive Ord: compare constructors by their declaration index.
@@ -788,9 +790,252 @@ let derive_impl (type_name : name) (sp : span)
       | TDAlias _ ->
         EApp (EVar (mk_name "compare"), [EVar (mk_name "a"); EVar (mk_name "b")], dummy_span)
     in
-    Some (impl_one "compare" ["a"; "b"] body)
+    [impl_one "compare" ["a"; "b"] body]
 
-  | _ -> None  (* Unknown interface — silently skip *)
+  | "Json" ->
+    (* derive Json: generate standalone to_json and from_json functions.
+       to_json(x : T) : JsonValue   — structural encoding to JSON
+       from_json(v : JsonValue) : Result(T, String) — decoding from JSON *)
+    let sp = dummy_span in
+    (* Helper: encode a field value based on its type annotation *)
+    let encoder_for_ty (ty : ty) (value_expr : expr) : expr =
+      match ty with
+      | TyCon ({txt = "String"; _}, []) ->
+        EApp (EVar (mk_name "Json.encode_string"), [value_expr], sp)
+      | TyCon ({txt = "Int"; _}, []) ->
+        EApp (EVar (mk_name "Json.encode_int"), [value_expr], sp)
+      | TyCon ({txt = "Float"; _}, []) ->
+        EApp (EVar (mk_name "Json.encode_number"), [value_expr], sp)
+      | TyCon ({txt = "Bool"; _}, []) ->
+        EApp (EVar (mk_name "Json.encode_bool"), [value_expr], sp)
+      | _ ->
+        (* Assume nested type also derives Json — call to_json recursively *)
+        EApp (EVar (mk_name "to_json"), [value_expr], sp)
+    in
+    (* Helper: build a decoder pattern + extraction for a given type.
+       Returns (pattern_for_Some_wrapper, expression_to_convert) *)
+    let decoder_pat_for_ty (ty : ty) (var_name : string) : pattern * expr =
+      match ty with
+      | TyCon ({txt = "String"; _}, []) ->
+        (PatCon (mk_name "Some", [PatCon (mk_name "Str", [PatVar (mk_name var_name)])]),
+         EVar (mk_name var_name))
+      | TyCon ({txt = "Int"; _}, []) ->
+        (PatCon (mk_name "Some", [PatCon (mk_name "Number", [PatVar (mk_name var_name)])]),
+         EApp (EVar (mk_name "float_to_int"), [EVar (mk_name var_name)], sp))
+      | TyCon ({txt = "Float"; _}, []) ->
+        (PatCon (mk_name "Some", [PatCon (mk_name "Number", [PatVar (mk_name var_name)])]),
+         EVar (mk_name var_name))
+      | TyCon ({txt = "Bool"; _}, []) ->
+        (PatCon (mk_name "Some", [PatCon (mk_name "Bool", [PatVar (mk_name var_name)])]),
+         EVar (mk_name var_name))
+      | _ ->
+        (* For other types, extract raw JsonValue and call from_json *)
+        let raw_var = var_name ^ "_raw" in
+        (PatCon (mk_name "Some", [PatVar (mk_name raw_var)]),
+         (* We'll need a match on from_json result — but for simplicity in the
+            pattern approach, just store the raw value and handle in the body *)
+         EVar (mk_name raw_var))
+    in
+    (* ── to_json ────────────────────────────────────────────── *)
+    let to_json_body = match td with
+      | TDRecord fields ->
+        (* Json.encode_object([("f1", encode(x.f1)), ("f2", encode(x.f2)), ...]) *)
+        let pair_exprs = List.map (fun (f : field) ->
+            let field_access = EField (EVar (mk_name "x"), f.fld_name, sp) in
+            let encoded = encoder_for_ty f.fld_ty field_access in
+            ETuple ([ELit (LitString f.fld_name.txt, sp); encoded], sp)
+          ) fields
+        in
+        let pairs_list = List.fold_right (fun e acc ->
+            ECon (mk_name "Cons", [e; acc], sp)
+          ) pair_exprs (ECon (mk_name "Nil", [], sp))
+        in
+        EApp (EVar (mk_name "Json.encode_object"), [pairs_list], sp)
+      | TDVariant variants ->
+        (* match x with
+           | Ctor0 -> encode_object([("tag", encode_string("Ctor0"))])
+           | Ctor1(v0) -> encode_object([("tag", ...), ("0", encode(v0))]) *)
+        let branches = List.map (fun (v : variant) ->
+            let n = List.length v.var_args in
+            let arg_names = List.init n (fun i -> Printf.sprintf "_jv%d" i) in
+            let pats = List.map (fun s -> PatVar (mk_name s)) arg_names in
+            let tag_pair = ETuple ([
+                ELit (LitString "tag", sp);
+                EApp (EVar (mk_name "Json.encode_string"),
+                      [ELit (LitString v.var_name.txt, sp)], sp)
+              ], sp) in
+            let arg_pairs = List.mapi (fun i arg_name ->
+                let ty = List.nth v.var_args i in
+                ETuple ([
+                    ELit (LitString (string_of_int i), sp);
+                    encoder_for_ty ty (EVar (mk_name arg_name))
+                  ], sp)
+              ) arg_names
+            in
+            let all_pairs = tag_pair :: arg_pairs in
+            let pairs_list = List.fold_right (fun e acc ->
+                ECon (mk_name "Cons", [e; acc], sp)
+              ) all_pairs (ECon (mk_name "Nil", [], sp))
+            in
+            { branch_pat = PatCon (v.var_name, pats);
+              branch_guard = None;
+              branch_body = EApp (EVar (mk_name "Json.encode_object"), [pairs_list], sp) }
+          ) variants
+        in
+        EMatch (EVar (mk_name "x"), branches, sp)
+      | TDAlias _ ->
+        EApp (EVar (mk_name "to_json"), [EVar (mk_name "x")], sp)
+    in
+    (* ── from_json ──────────────────────────────────────────── *)
+    let from_json_body = match td with
+      | TDRecord fields ->
+        (* match (Json.get(v,"f1"), Json.get(v,"f2"), ...) with
+           | (Some(Str(f1)), Some(Number(f2)), ...) -> Ok({f1=f1, f2=float_to_int(f2), ...})
+           | _ -> Err("invalid JSON for TypeName") *)
+        let get_exprs = List.map (fun (f : field) ->
+            EApp (EVar (mk_name "Json.get"),
+                  [EVar (mk_name "v"); ELit (LitString f.fld_name.txt, sp)], sp)
+          ) fields
+        in
+        let scrutinee = ETuple (get_exprs, sp) in
+        let pats_and_convs = List.mapi (fun _i (f : field) ->
+            let var_name = Printf.sprintf "_jf%d" _i in
+            decoder_pat_for_ty f.fld_ty var_name
+          ) fields
+        in
+        let ok_pats = List.map fst pats_and_convs in
+        (* Build the record expression *)
+        let record_fields = List.mapi (fun i (f : field) ->
+            let (_pat, conv_expr) = List.nth pats_and_convs i in
+            (* For non-primitive types we need to call from_json and handle Result *)
+            let value_expr = match f.fld_ty with
+              | TyCon ({txt = "String"; _}, [])
+              | TyCon ({txt = "Int"; _}, [])
+              | TyCon ({txt = "Float"; _}, [])
+              | TyCon ({txt = "Bool"; _}, []) -> conv_expr
+              | _ ->
+                (* For complex types, conv_expr is the raw JsonValue var.
+                   We need: match from_json(raw) with Ok(v) -> v | Err(e) -> panic(e) *)
+                let from_result = EApp (EVar (mk_name "from_json"), [conv_expr], sp) in
+                EMatch (from_result, [
+                  { branch_pat = PatCon (mk_name "Ok", [PatVar (mk_name (Printf.sprintf "_jfok%d" i))]);
+                    branch_guard = None;
+                    branch_body = EVar (mk_name (Printf.sprintf "_jfok%d" i)) };
+                  { branch_pat = PatCon (mk_name "Err", [PatVar (mk_name "_jfe")]);
+                    branch_guard = None;
+                    branch_body = EApp (EVar (mk_name "panic"), [EVar (mk_name "_jfe")], sp) };
+                ], sp)
+            in
+            (f.fld_name, value_expr)
+          ) fields
+        in
+        let ok_record = ECon (mk_name "Ok", [ERecord (record_fields, sp)], sp) in
+        let err_msg = Printf.sprintf "invalid JSON for %s" type_name.txt in
+        let err_branch = {
+          branch_pat = PatWild sp;
+          branch_guard = None;
+          branch_body = ECon (mk_name "Err", [ELit (LitString err_msg, sp)], sp);
+        } in
+        let ok_branch = {
+          branch_pat = PatTuple (ok_pats, sp);
+          branch_guard = None;
+          branch_body = ok_record;
+        } in
+        EMatch (scrutinee, [ok_branch; err_branch], sp)
+      | TDVariant variants ->
+        (* match Json.get(v, "tag") with
+           | Some(Str("Ctor0")) -> Ok(Ctor0)
+           | Some(Str("Ctor1")) -> match Json.get(v, "0") with ...
+           | _ -> Err("invalid JSON for TypeName") *)
+        let tag_expr = EApp (EVar (mk_name "Json.get"),
+                             [EVar (mk_name "v"); ELit (LitString "tag", sp)], sp)
+        in
+        let branches = List.map (fun (v : variant) ->
+            let n = List.length v.var_args in
+            if n = 0 then
+              { branch_pat = PatCon (mk_name "Some",
+                  [PatCon (mk_name "Str",
+                    [PatLit (LitString v.var_name.txt, sp)])]);
+                branch_guard = None;
+                branch_body = ECon (mk_name "Ok", [ECon (v.var_name, [], sp)], sp) }
+            else begin
+              (* For variants with args, extract each arg from "0", "1", etc. *)
+              let arg_gets = List.init n (fun i ->
+                  EApp (EVar (mk_name "Json.get"),
+                        [EVar (mk_name "v"); ELit (LitString (string_of_int i), sp)], sp)
+                ) in
+              let scrutinee2 = if n = 1 then List.hd arg_gets
+                               else ETuple (arg_gets, sp) in
+              let arg_pats_convs = List.mapi (fun i ty ->
+                  let var_name = Printf.sprintf "_ja%d" i in
+                  decoder_pat_for_ty ty var_name
+                ) v.var_args
+              in
+              let inner_pats = if n = 1 then [fst (List.hd arg_pats_convs)]
+                               else [PatTuple (List.map fst arg_pats_convs, sp)] in
+              let ctor_args = List.mapi (fun i ty ->
+                  let (_pat, conv_expr) = List.nth arg_pats_convs i in
+                  match ty with
+                  | TyCon ({txt = "String"; _}, [])
+                  | TyCon ({txt = "Int"; _}, [])
+                  | TyCon ({txt = "Float"; _}, [])
+                  | TyCon ({txt = "Bool"; _}, []) -> conv_expr
+                  | _ ->
+                    let from_result = EApp (EVar (mk_name "from_json"), [conv_expr], sp) in
+                    EMatch (from_result, [
+                      { branch_pat = PatCon (mk_name "Ok", [PatVar (mk_name (Printf.sprintf "_jaok%d" i))]);
+                        branch_guard = None;
+                        branch_body = EVar (mk_name (Printf.sprintf "_jaok%d" i)) };
+                      { branch_pat = PatCon (mk_name "Err", [PatVar (mk_name "_jae")]);
+                        branch_guard = None;
+                        branch_body = EApp (EVar (mk_name "panic"), [EVar (mk_name "_jae")], sp) };
+                    ], sp)
+                ) v.var_args
+              in
+              let ok_ctor = ECon (mk_name "Ok", [ECon (v.var_name, ctor_args, sp)], sp) in
+              let err_msg2 = Printf.sprintf "invalid JSON for %s.%s" type_name.txt v.var_name.txt in
+              let inner_branches =
+                [{ branch_pat = List.hd inner_pats; branch_guard = None; branch_body = ok_ctor };
+                 { branch_pat = PatWild sp; branch_guard = None;
+                   branch_body = ECon (mk_name "Err", [ELit (LitString err_msg2, sp)], sp) }]
+              in
+              { branch_pat = PatCon (mk_name "Some",
+                  [PatCon (mk_name "Str",
+                    [PatLit (LitString v.var_name.txt, sp)])]);
+                branch_guard = None;
+                branch_body = EMatch (scrutinee2, inner_branches, sp) }
+            end
+          ) variants
+        in
+        let err_msg = Printf.sprintf "invalid JSON for %s" type_name.txt in
+        let wild_branch = {
+          branch_pat = PatWild sp;
+          branch_guard = None;
+          branch_body = ECon (mk_name "Err", [ELit (LitString err_msg, sp)], sp);
+        } in
+        EMatch (tag_expr, branches @ [wild_branch], sp)
+      | TDAlias _ ->
+        EApp (EVar (mk_name "from_json"), [EVar (mk_name "v")], sp)
+    in
+    (* Generate two DImpl blocks with pseudo-interfaces "JsonTo" and "JsonFrom".
+       This allows impl_tbl dispatch for variant types, while also binding
+       to_json/from_json in the local env for record types. *)
+    let to_json_fn = mk_fn_def "to_json" ["x"] to_json_body in
+    let from_json_fn = mk_fn_def "from_json" ["v"] from_json_body in
+    let mk_json_impl iface_name meth_name fn_body =
+      let idef : impl_def = {
+        impl_iface       = mk_name iface_name;
+        impl_ty          = self_ty;
+        impl_constraints = [];
+        impl_assoc_types = [];
+        impl_methods     = [(mk_name meth_name, fn_body)];
+      } in
+      DImpl (idef, sp)
+    in
+    [mk_json_impl "JsonTo" "to_json" to_json_fn;
+     mk_json_impl "JsonFrom" "from_json" from_json_fn]
+
+  | _ -> []  (* Unknown interface — silently skip *)
 
 (** Expand a [DDeriving] into zero or more [DImpl] blocks.
     If the type is not found or an interface is unknown, silently skips. *)
@@ -803,7 +1048,7 @@ let expand_derive
   match List.assoc_opt type_name.txt type_defs with
   | None -> []   (* type not found — silently skip *)
   | Some (tparams, td) ->
-    List.filter_map (fun iface_name ->
+    List.concat_map (fun iface_name ->
         derive_impl type_name sp iface_name.txt tparams td
       ) ifaces
 

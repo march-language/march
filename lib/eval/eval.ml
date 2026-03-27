@@ -225,6 +225,12 @@ let impl_tbl : (string * string, value) Hashtbl.t = Hashtbl.create 8
     Used by [==] and interface method dispatch to look up Eq/Ord/Hash/Show impls. *)
 let ctor_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 16
 
+(** Record field-set → type name mapping.
+    Maps a canonical key (sorted, comma-joined field names) to the declaring type name.
+    Populated when [eval_decl] processes [DType] nodes with [TDRecord].
+    Used by Json derive dispatch to identify record types at runtime. *)
+let record_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 8
+
 (** Protocol → sorted role list mapping.
     Populated when [eval_decl] processes [DProtocol] nodes.
     Used by [MPST.new] to know how many endpoints to create and their names. *)
@@ -626,7 +632,11 @@ let type_name_of_value = function
   | VString _ -> Some "String"
   | VBool _   -> Some "Bool"
   | VCon (tag, _) -> Hashtbl.find_opt ctor_type_tbl tag
-  | VRecord _ -> None  (* records don't carry a type tag at runtime *)
+  | VRecord fields ->
+    (* Look up record type by its field names *)
+    let field_names = List.map fst fields in
+    let key = String.concat "," (List.sort String.compare field_names) in
+    Hashtbl.find_opt record_type_tbl key
   | _         -> None
 
 (** Forward-reference hook for dispatch in comparison operators.
@@ -2470,6 +2480,82 @@ let base_env : env =
               | None         -> VInt (Hashtbl.hash v))
            | None -> VInt (Hashtbl.hash v))
         | _ -> eval_error "hash: expected one argument"))
+
+    (* ---- Json derive dispatch builtins ---- *)
+    (* These dispatch to_json/from_json through impl_tbl for user-defined
+       variant types.  For record types, the DImpl eval binds to_json/from_json
+       directly in the env, so the env-bound version is used as fallback. *)
+  ; ("to_json", VBuiltin ("to_json", function
+        | [v] ->
+          (match type_name_of_value v with
+           | Some tname ->
+             (match Hashtbl.find_opt impl_tbl ("JsonTo", tname) with
+              | Some to_fn -> !apply_hook to_fn [v]
+              | None       -> eval_error "to_json: no Json derive for type %s" tname)
+           | None -> eval_error "to_json: cannot determine type of value")
+        | _ -> eval_error "to_json: expected one argument"))
+  ; ("from_json", VBuiltin ("from_json", function
+        | [v] ->
+          (* Dispatch from_json by inspecting the JsonValue structure.
+             For variant-encoded JSON: look at the "tag" field to find the
+             constructor, then look up the type via ctor_type_tbl.
+             For record-encoded JSON: look at the field names and match
+             via record_type_tbl. *)
+          let try_variant_dispatch () =
+            (* JSON objects with a "tag" field: look up the tag string
+               in ctor_type_tbl to find the type, then dispatch *)
+            match v with
+            | VCon ("Object", [pairs_list]) ->
+              (* Walk the association list to find ("tag", Str(ctor_name)) *)
+              let rec find_tag = function
+                | VCon ("Nil", []) -> None
+                | VCon ("Cons", [VTuple [VString "tag"; VCon ("Str", [VString tag])]; _rest]) ->
+                  Some tag
+                | VCon ("Cons", [_; rest_list]) -> find_tag rest_list
+                | _ -> None
+              in
+              (match find_tag pairs_list with
+               | Some tag ->
+                 (match Hashtbl.find_opt ctor_type_tbl tag with
+                  | Some tname ->
+                    (match Hashtbl.find_opt impl_tbl ("JsonFrom", tname) with
+                     | Some from_fn -> Some (!apply_hook from_fn [v])
+                     | None -> None)
+                  | None -> None)
+               | None -> None)
+            | _ -> None
+          in
+          let try_record_dispatch () =
+            (* JSON objects without a "tag" but with known field set *)
+            match v with
+            | VCon ("Object", [pairs_list]) ->
+              let rec collect_keys acc = function
+                | VCon ("Nil", []) -> Some acc
+                | VCon ("Cons", [VTuple [VString k; _]; rest]) ->
+                  collect_keys (k :: acc) rest
+                | _ -> None
+              in
+              (match collect_keys [] pairs_list with
+               | Some keys ->
+                 let sorted = List.sort String.compare keys in
+                 let key = String.concat "," sorted in
+                 (match Hashtbl.find_opt record_type_tbl key with
+                  | Some tname ->
+                    (match Hashtbl.find_opt impl_tbl ("JsonFrom", tname) with
+                     | Some from_fn -> Some (!apply_hook from_fn [v])
+                     | None -> None)
+                  | None -> None)
+               | None -> None)
+            | _ -> None
+          in
+          (match try_variant_dispatch () with
+           | Some result -> result
+           | None ->
+             (match try_record_dispatch () with
+              | Some result -> result
+              | None ->
+                eval_error "from_json: cannot determine target type from JSON value"))
+        | _ -> eval_error "from_json: expected one argument"))
 
     (* ---- Int primitives ---- *)
   ; ("int_abs", VBuiltin ("int_abs", function
@@ -5201,6 +5287,7 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.reset impl_tbl;
   Hashtbl.reset ctor_type_tbl;
+  Hashtbl.reset record_type_tbl;
   Hashtbl.reset protocol_roles_tbl;
   next_pid := 0;
   next_monitor_id := 0;
@@ -5773,6 +5860,11 @@ let rec eval_decl (env : env) (d : decl) : env =
        List.iter (fun (v : variant) ->
            Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt
          ) variants
+     | TDRecord fields ->
+       (* Register record type by its field names for Json derive dispatch *)
+       let field_names = List.map (fun (f : field) -> f.fld_name.txt) fields in
+       let key = String.concat "," (List.sort String.compare field_names) in
+       Hashtbl.replace record_type_tbl key name.txt
      | _ -> ());
     env
 
@@ -5870,6 +5962,10 @@ let rec eval_decl (env : env) (d : decl) : env =
       | TyVar n      -> n.txt
       | _            -> ""
     in
+    let is_json_iface =
+      String.length idef.impl_iface.txt >= 4
+      && String.sub idef.impl_iface.txt 0 4 = "Json"
+    in
     List.fold_left (fun env (mname, fn_def) ->
         let new_env = match fn_def.fn_clauses with
           | [{ fc_params = []; fc_body; _ }] ->
@@ -5885,7 +5981,11 @@ let rec eval_decl (env : env) (d : decl) : env =
             Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val
           | None -> ()
         end;
-        new_env
+        (* For Json derive: to_json only registers in impl_tbl (so the
+           builtin dispatcher can route by value type); from_json binds in
+           env (since we can't dispatch on the target type from a JsonValue). *)
+        if is_json_iface && mname.txt = "to_json" then env
+        else new_env
       ) env idef.impl_methods
 
   | DProtocol (name, pdef, _sp) ->
@@ -6063,6 +6163,10 @@ let eval_module_env (m : module_) : env =
         | TyVar n      -> n.txt
         | _            -> ""
       in
+      let is_json_iface =
+        String.length idef.impl_iface.txt >= 4
+        && String.sub idef.impl_iface.txt 0 4 = "Json"
+      in
       let env' = List.fold_left (fun acc_env (mname, fn_def) ->
           let new_acc = match fn_def.fn_clauses with
             | [{ fc_params = []; fc_body; _ }] ->
@@ -6078,7 +6182,10 @@ let eval_module_env (m : module_) : env =
               Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val
             | None -> ()
           end;
-          new_acc
+          (* For Json derive: to_json only registers in impl_tbl;
+             from_json binds in env (can't dispatch on target type). *)
+          if is_json_iface then acc_env
+          else new_acc
         ) env idef.impl_methods in
       env_ref := env';
       make_recursive_env rest env'
@@ -6089,12 +6196,16 @@ let eval_module_env (m : module_) : env =
       make_recursive_env rest env'
 
     | DType (_, name, _, td, _) :: rest ->
-      (* Populate ctor_type_tbl for dispatch *)
+      (* Populate ctor_type_tbl and record_type_tbl for dispatch *)
       (match td with
        | TDVariant variants ->
          List.iter (fun (v : variant) ->
              Hashtbl.replace ctor_type_tbl v.var_name.txt name.txt
            ) variants
+       | TDRecord fields ->
+         let field_names = List.map (fun (f : field) -> f.fld_name.txt) fields in
+         let key = String.concat "," (List.sort String.compare field_names) in
+         Hashtbl.replace record_type_tbl key name.txt
        | _ -> ());
       make_recursive_env rest env
 
