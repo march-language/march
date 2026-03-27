@@ -79,9 +79,12 @@ let format_cmd =
   let check =
     Arg.(value & flag & info ["check"] ~doc:"Check formatting only, no writes")
   in
-  let run c = handle (Cmd_format.run ~check:c) in
+  let stdin =
+    Arg.(value & flag & info ["stdin"] ~doc:"Read from stdin, write formatted output to stdout (for editor integration)")
+  in
+  let run c s = handle (Cmd_format.run ~check:c ~stdin:s) in
   Cmd.v (Cmd.info "format" ~doc:"Format all .march source files")
-    Term.(const run $ check)
+    Term.(const run $ check $ stdin)
 
 (* ---------------------------------------------------------- forge interactive *)
 

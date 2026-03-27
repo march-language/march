@@ -12,7 +12,19 @@ let rec collect_march_files dir =
           [path]
         else [])
 
-let run ~check =
+let run ~check ~stdin =
+  if stdin then begin
+    let buf = Buffer.create 4096 in
+    (try while true do Buffer.add_char buf (input_char Stdlib.stdin) done
+     with End_of_file -> ());
+    let src = Buffer.contents buf in
+    let formatted =
+      try March_format.Format.format_source ~filename:"<stdin>" src
+      with _ -> src
+    in
+    print_string formatted;
+    Ok ()
+  end else
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
