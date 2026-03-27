@@ -618,13 +618,29 @@ let run_test_cmd args =
 
 (** Run the fmt subcommand and exit. *)
 let run_fmt args =
-  (* Parse --check flag and collect targets *)
+  (* Parse flags and collect targets *)
   let check_mode = ref false in
+  let stdin_mode = ref false in
   let targets    = ref [] in
   List.iter (fun a ->
     if a = "--check" then check_mode := true
+    else if a = "--stdin" then stdin_mode := true
     else targets := a :: !targets
   ) args;
+  (* --stdin: read from stdin, format, write to stdout *)
+  if !stdin_mode then begin
+    let buf = Buffer.create 4096 in
+    (try while true do Buffer.add_char buf (input_char stdin) done
+     with End_of_file -> ());
+    let src = Buffer.contents buf in
+    let filename = match !targets with f :: _ -> f | [] -> "<stdin>" in
+    let formatted =
+      try March_format.Format.format_source ~filename src
+      with _ -> src
+    in
+    print_string formatted;
+    exit 0
+  end;
   let targets = List.rev !targets in
   let files = List.concat_map (fun target ->
     if target = "." || (Sys.file_exists target && Sys.is_directory target) then
