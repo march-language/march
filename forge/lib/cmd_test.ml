@@ -46,6 +46,15 @@ let invoke_march ?(verbose=false) ?(filter="") ?(coverage=false) files =
   let lib_files = find_lib_sources () in
   let all_files = lib_files @ files in
   let files_str = String.concat " " (List.map Filename.quote all_files) in
+  (* Set MARCH_LIB_PATH so test files can resolve `use LibModule` imports
+     from the lib/ directory without needing manual env setup. *)
+  (match Project.load () with
+   | Ok proj when proj.Project.project_type = Project.Lib ->
+     let lib_dir = Filename.concat proj.Project.root "lib" in
+     let path = match Sys.getenv_opt "MARCH_LIB_PATH" with
+       | Some s -> lib_dir ^ ":" ^ s | None -> lib_dir in
+     Unix.putenv "MARCH_LIB_PATH" path
+   | _ -> ());
   let cmd = Printf.sprintf "march test%s%s%s %s" verbose_flag coverage_flag filter_flag files_str in
   let rc = Sys.command cmd in
   if rc = 0 then Ok ()
