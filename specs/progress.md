@@ -173,7 +173,7 @@ march/
 │   └── base64.c             # Base64 for WebSocket handshake
 │   ├── search/
 │   │   └── search.ml        # Search index: Levenshtein fuzzy search, type/doc search, JSON cache
-├── stdlib/                  # 34 modules, ~7500 lines
+├── stdlib/                  # 37 modules, ~7700 lines
 │   ├── prelude.march        # Auto-imported helpers (panic, identity, compose, unwrap, etc.)
 │   ├── option.march         # Option(a) with Some/None
 │   ├── result.march         # Result(a,e) with Ok/Err
@@ -210,6 +210,9 @@ march/
 │   ├── channel_server.march # 263 lines: ChannelMailbox, JoinResult, ChannelConfig, do_join/leave, apply_result, shard helpers
 │   ├── presence.march       # 281 lines: PresenceMeta/Entry/State, track_state/untrack_state/list_state, diff helpers
 │   ├── channel_socket.march # 287 lines: SocketConfig, ActiveChannels registry, topic routing, plug_for/ws_loop
+│   ├── vault.march          # ETS-like in-memory KV store: new/set/set_ttl/get/drop/update/size/whereis/has
+│   ├── env.march            # Env var access: get/require/get_int/get_bool/is_set/require_int
+│   ├── config.march         # Layered application config (Vault-backed): put/get/put_in/get_in, from_env, validate, env detection, endpoint config, named stores
 │   └── docs/flow.md         # Flow module design doc: concepts, examples, GenStage comparison
 ├── test/
 │   ├── test_march.ml         # 958+ tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, bytes, logger, flow, actor_module, etc.)
@@ -244,7 +247,7 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
-## Current State (as of 2026-03-27, post Html template system — partials, collections, layouts, IOList.hash, html_auto_escape)
+## Current State (as of 2026-03-27, post Bastion configuration system — Env + Config stdlib modules, Vault-backed global config, env var loading, validation, endpoint config)
 
 - **Builds clean**
 - **0 known failures** across all test suites (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing** + **Phase 4: reduction counting in compiled code** + **Phase 4: lazy stack growth** + **Vault sharded KV store**):
@@ -255,7 +258,7 @@ march/
   - `test_properties.exe`: 36 tests, passing (QCheck2 properties)
   - `test_supervision.exe`: 15 tests, passing (actor supervision)
   - `test_lsp.exe`: 120 tests, passing (doc strings, find-refs, rename, sig-help, code actions, snippet completions, folding ranges, type annotation action, remove unused binding action, phase2 enhanced match, quickfix framework, dead code detection, p1.1 typed match stubs, p1.7 fn return/param annotation, batch annotation, P2.8 naming convention fix, P3.10 De Morgan rewrite)
-  - `test_stdlib_march.exe`: 13 tests, passing (Http, HttpTransport, HttpClient, HttpServer, WebSocket, Tls, Process, Logger, PubSub, Channel, ChannelServer, Presence, ChannelSocket)
+  - `test_stdlib_march.exe`: 15 tests, passing (Http, HttpTransport, HttpClient, HttpServer, WebSocket, Tls, Process, Logger, PubSub, Channel, ChannelServer, Presence, ChannelSocket, Env, Config)
   - `test_forge.exe`: 15 tests, passing (scaffold/toml)
   - `test_resolver.exe`: 35 tests, passing (semver version parse/compare/~>, constraints, project dep loading, lockfile write/read/drift)
   - `test_solver.exe`: 16 tests, passing (registry roundtrip, PubGrub solver happy paths + conflicts + error messages)
@@ -283,6 +286,7 @@ march/
 - **LSP Phase 2 enhancements** — (1) Enhanced exhaustive match: `match_site.ms_missing_cases : string list` holds ALL missing variants (AST-based `augment_match_sites` pass enumerates type ctors, filters covered constructors, skips qualified `Bit.Zero` keys); "Add all N missing cases" bulk `QuickFix`; "Fix all incomplete `T` matches in file" `RefactorRewrite` when same type appears in multiple match sites; `type_matches` groups match sites by type. (2) Diagnostics-driven quickfix framework: `fix_registry : (string, fix_gen) Hashtbl.t` with `register_fix`/`apply_fix_registry`; pre-registered codes: `non_exhaustive_match`, `unused_binding`, `unused_private_fn`, `unreachable_code`. (3) Dead code detection: call-graph BFS from public roots + `main`; `unused_fns : string list`; `unused_private_fn` Warning diagnostics; post-block scanner emits `unreachable_code` Warning for expressions following `panic`/`panic_`/`unreachable_` calls. +9 tests.
 - **LSP Phase 1 enhancements** — (1) Snippet completions: `insertText` with tabstops for functions (`"fn(${1:Int}, ${2:String})"`) and multi-arg constructors; `insertTextFormat=Snippet`. (2) Folding ranges: `textDocument/foldingRange` handler; `collect_fold_ranges` walks `DFn`/`DMod`/`DActor`/`DDescribe`/`EMatch`/`ELetFn`; `foldingRangeProvider=true`. (3) Add type annotation code action: `collect_annotation_sites` finds untyped `ELet`/`DLet` bindings; `RefactorRewrite` inserts `": TypeName"`. (4) Remove unused binding code action: `code : string option` on `Errors.diagnostic`; `warning_with_code ~code:"unused_binding"`; generates "Prefix with underscore" and "Remove unused binding" `QuickFix` actions. +4 tests.
 - **LSP test suite** — `lsp/test/test_lsp.ml` (107 tests): position utils, diagnostics, document symbols, completions, goto-def, hover types, inlay hints, march-specific features, error recovery, analysis struct, doc strings, find references, rename symbol, signature help, code actions, snippet completions, folding ranges, type annotation action, remove unused binding action, phase2 enhanced match, quickfix framework, dead code detection, p1.1 typed match stubs, p1.7 fn return/param annotation, p1.7 batch annotation
+- **Bastion configuration system** — `stdlib/env.march`: `Env.get/2`, `Env.require/1`, `Env.get_int/2`, `Env.get_bool/2`, `Env.is_set/1`, `Env.require_int/1` — thin wrappers over `process_env` with parsing and defaults. `stdlib/config.march`: global Vault-backed config store (`__march_config__`); 2-level `Config.put/3`/`Config.get/2` and 3-level `Config.put_in/4`/`Config.get_in/3`; `Config.from_env`, `Config.from_env_int`, `Config.from_env_bool` load config from environment variables with defaults; `Config.validate`/`Config.validate_in` with predicate functions return `Ok/Err`; `Config.env`/`Config.is_dev`/`Config.is_test`/`Config.is_prod` read `MARCH_ENV`; `Config.put_endpoint`/`Config.endpoint_port`/`Config.endpoint_host`/`Config.secret_key_base` for Bastion web server config; `Config.new_store`/`Config.store_put`/`Config.store_get` for isolated named stores (useful in tests). Both modules added to stdlib load order in `bin/main.ml` and `test/test_stdlib_march.ml`. 28+ tests in `test/stdlib/test_env.march` and `test/stdlib/test_config.march`.
 - **Escape analysis tests** — `escape_analysis` group in `test/test_march.ml` (6 tests): `escape_module` helper runs Lower→Mono→Defun→Perceus→Escape pipeline; tests verify: locally-discarded EAlloc promoted to EStackAlloc; returned value stays EAlloc; value stored in another alloc stays EAlloc; Conn-pattern (field read via match, field returned not struct) promotes to EStackAlloc; EDecRC eliminated for promoted variables; complex multi-alloc function runs without crash.
 - **FBIP reuse now fires correctly** — Fixed borrow inference (`lib/tir/borrow.ml`) to treat case scrutinee as owning when branch bodies allocate same-type constructors (the "reconstruct" pattern). Added `has_matching_alloc` helper. This enables Perceus FBIP to detect DecRC→EAlloc of matching shape and replace with EReuse (in-place mutation). `tree_transform` benchmark: 10.6s → 0.52s (20× speedup), 92MB → 66MB RSS.
 - **Perceus post-call DecRC correctness fix** — Fixed `lib/tir/perceus.ml` where borrow inference's post-call DecRC for borrowed args (emitted as `ESeq(call, DecRC(arg))`) discarded the call's return value because `ESeq` returns the last expression. Added `fix_tail_value` restructuring pass: introduces fresh let binding to preserve the call result (`ELet($rc_N, call, ESeq(DecRC(arg), $rc_N))`). Follows ELet chains to fix nested patterns. Fixes correctness bugs in `binary_trees`, `list_ops`, `tree_transform`, and any function returning a value from a callee that borrows its argument.

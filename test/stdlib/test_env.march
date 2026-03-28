@@ -1,0 +1,158 @@
+-- Tests for the Env stdlib module.
+-- Run with: dune exec march -- test test/stdlib/test_env.march
+
+mod TestEnv do
+
+describe "Env.get" do
+
+  test "returns default when variable is not set" do
+    let result = Env.get("MARCH_TEST_UNSET_VAR_XYZ_999", "fallback")
+    assert (result == "fallback")
+  end
+
+  test "returns value when variable is set" do
+    process_set_env("MARCH_TEST_ENV_GET_1", "hello")
+    let result = Env.get("MARCH_TEST_ENV_GET_1", "default")
+    assert (result == "hello")
+  end
+
+  test "empty string default works" do
+    let result = Env.get("MARCH_TEST_UNSET_EMPTY_ABC_999", "")
+    assert (result == "")
+  end
+
+  test "prefers set value over non-empty default" do
+    process_set_env("MARCH_TEST_ENV_PREF_1", "from_env")
+    let result = Env.get("MARCH_TEST_ENV_PREF_1", "the_default")
+    assert (result == "from_env")
+  end
+
+end
+
+describe "Env.require" do
+
+  test "returns value when variable is set" do
+    process_set_env("MARCH_TEST_FETCH_1", "world")
+    let result = Env.require("MARCH_TEST_FETCH_1")
+    assert (result == "world")
+  end
+
+  test "returns correct value for various content" do
+    process_set_env("MARCH_TEST_FETCH_2", "some-secret-key-base-value")
+    let result = Env.require("MARCH_TEST_FETCH_2")
+    assert (result == "some-secret-key-base-value")
+  end
+
+end
+
+describe "Env.get_int" do
+
+  test "parses integer from env var" do
+    process_set_env("MARCH_TEST_INT_1", "42")
+    let result = Env.get_int("MARCH_TEST_INT_1", 0)
+    assert (result == 42)
+  end
+
+  test "returns default when variable is not set" do
+    let result = Env.get_int("MARCH_TEST_UNSET_INT_999", 99)
+    assert (result == 99)
+  end
+
+  test "returns default when value is not a valid integer" do
+    process_set_env("MARCH_TEST_BAD_INT_1", "not-a-number")
+    let result = Env.get_int("MARCH_TEST_BAD_INT_1", 7)
+    assert (result == 7)
+  end
+
+  test "parses negative integers" do
+    process_set_env("MARCH_TEST_NEG_INT_1", "-5")
+    let result = Env.get_int("MARCH_TEST_NEG_INT_1", 0)
+    assert (result == -5)
+  end
+
+  test "parses port numbers" do
+    process_set_env("MARCH_TEST_PORT_1", "4000")
+    let result = Env.get_int("MARCH_TEST_PORT_1", 3000)
+    assert (result == 4000)
+  end
+
+  test "parses zero" do
+    process_set_env("MARCH_TEST_ZERO_INT_1", "0")
+    let result = Env.get_int("MARCH_TEST_ZERO_INT_1", 1)
+    assert (result == 0)
+  end
+
+end
+
+describe "Env.get_bool" do
+
+  test "returns true for string 'true'" do
+    process_set_env("MARCH_TEST_BOOL_T1", "true")
+    assert (Env.get_bool("MARCH_TEST_BOOL_T1", false))
+  end
+
+  test "returns true for string '1'" do
+    process_set_env("MARCH_TEST_BOOL_ONE_1", "1")
+    assert (Env.get_bool("MARCH_TEST_BOOL_ONE_1", false))
+  end
+
+  test "returns true for string 'yes'" do
+    process_set_env("MARCH_TEST_BOOL_YES_1", "yes")
+    assert (Env.get_bool("MARCH_TEST_BOOL_YES_1", false))
+  end
+
+  test "returns false for string 'false'" do
+    process_set_env("MARCH_TEST_BOOL_F1", "false")
+    assert not(Env.get_bool("MARCH_TEST_BOOL_F1", true))
+  end
+
+  test "returns false for string '0'" do
+    process_set_env("MARCH_TEST_BOOL_ZERO_1", "0")
+    assert not(Env.get_bool("MARCH_TEST_BOOL_ZERO_1", true))
+  end
+
+  test "returns default false when variable not set" do
+    assert not(Env.get_bool("MARCH_TEST_UNSET_BOOL_999", false))
+  end
+
+  test "returns default true when variable not set" do
+    assert (Env.get_bool("MARCH_TEST_UNSET_BOOL_TRUE_999", true))
+  end
+
+end
+
+describe "Env.is_set" do
+
+  test "returns true when variable is set" do
+    process_set_env("MARCH_TEST_IS_SET_1", "anything")
+    assert (Env.is_set("MARCH_TEST_IS_SET_1"))
+  end
+
+  test "returns false when variable is not set" do
+    assert not(Env.is_set("MARCH_TEST_NOT_SET_XYZ_987654"))
+  end
+
+  test "returns true even for empty string value" do
+    process_set_env("MARCH_TEST_EMPTY_SET_1", "")
+    assert (Env.is_set("MARCH_TEST_EMPTY_SET_1"))
+  end
+
+end
+
+describe "Env.require_int" do
+
+  test "parses and returns integer value" do
+    process_set_env("MARCH_TEST_FETCH_INT_1", "1234")
+    let result = Env.require_int("MARCH_TEST_FETCH_INT_1")
+    assert (result == 1234)
+  end
+
+  test "parses large integers" do
+    process_set_env("MARCH_TEST_FETCH_INT_2", "65535")
+    let result = Env.require_int("MARCH_TEST_FETCH_INT_2")
+    assert (result == 65535)
+  end
+
+end
+
+end -- mod TestEnv

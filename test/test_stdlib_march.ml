@@ -118,6 +118,9 @@ let all_stdlib_decls =
     "channel_server.march";
     "presence.march";
     "channel_socket.march";
+    "vault.march";
+    "env.march";
+    "config.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -210,6 +213,14 @@ let () =
     ("logger", [
       Alcotest.test_case "Logger module"
         `Quick (run_stdlib_test "test_logger.march" "TestLogger");
+    ]);
+    ("env", [
+      Alcotest.test_case "Env module"
+        `Quick (run_stdlib_test "test_env.march" "TestEnv");
+    ]);
+    ("config", [
+      Alcotest.test_case "Config module"
+        `Quick (run_stdlib_test "test_config.march" "TestConfig");
     ]);
     (* test_flow.march tests the function-transformer Flow API (from_fn/run/then_)
        which differs from the current Seq-based flow.march implementation.
