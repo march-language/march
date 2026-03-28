@@ -91,6 +91,14 @@ mod Islands do
     String.replace_all(json, "'", "&#39;")
   end
 
+  -- Escape double-quote characters in a CSS string for embedding in a
+  -- double-quoted HTML attribute (data-march-island-css="...").
+  -- The browser decodes &quot; before JS reads the attribute value, so the
+  -- CSS received by the runtime will be correctly unescaped.
+  pfn escape_css_attr(css) do
+    String.replace_all(css, "\"", "&quot;")
+  end
+
   -- Wrap server-rendered HTML with island hydration markers.
   --
   -- name       : island name; must match the WASM module filename (e.g. "Counter")
@@ -110,9 +118,35 @@ mod Islands do
     "<div data-march-island=\"${name}\" data-march-hydrate=\"${strat}\" data-march-state='${escaped}'>${inner_html}</div>"
   end
 
+  -- Wrap server-rendered HTML with island hydration markers AND scoped CSS.
+  --
+  -- The scoped_css string is the output of IslandCss.scope_css/2 — all selectors
+  -- are already prefixed with the island's scoping attribute.  The JS runtime
+  -- reads the data-march-island-css attribute on first hydration and injects a
+  -- <style> tag into the document <head> (deduplication is automatic).
+  --
+  -- Produces:
+  --   <div data-march-island="Name"
+  --        data-march-hydrate="strategy"
+  --        data-march-state='{"key":"val"}'
+  --        data-march-island-css="...scoped css...">
+  --     ...inner_html...
+  --   </div>
+  fn wrap_with_css(name, hydrate, state_json, scoped_css, inner_html) do
+    let strat   = hydrate_attr(hydrate)
+    let escaped = escape_state(state_json)
+    let css_val = escape_css_attr(scoped_css)
+    "<div data-march-island=\"${name}\" data-march-hydrate=\"${strat}\" data-march-state='${escaped}' data-march-island-css=\"${css_val}\">${inner_html}</div>"
+  end
+
   -- Wrap with Eager hydration (most common; best for interactive-heavy pages).
   fn wrap_eager(name, state_json, inner_html) do
     wrap(name, Eager, state_json, inner_html)
+  end
+
+  -- Wrap with Eager hydration and scoped CSS.
+  fn wrap_eager_with_css(name, state_json, scoped_css, inner_html) do
+    wrap_with_css(name, Eager, state_json, scoped_css, inner_html)
   end
 
   -- Wrap with no server-rendered content (client-only island).
