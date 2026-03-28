@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-27 (Session middleware — `stdlib/session.march`: cookie-backed and Vault-backed sessions, flash messages, HMAC-SHA256 signing, 49 tests)
+**Last updated:** 2026-03-27 (Bastion adversarial test suite — 346 tests across 7 files; bug fixes in `stdlib/islands.march`, test correctness fixes; RESULTS.md documents all findings)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 

@@ -1,0 +1,440 @@
+-- Adversarial tests for BastionDev dev dashboard, live reload,
+-- timer middleware, error overlay, and conn inspector.
+--
+-- Run with:
+--   _build/default/bin/main.exe test examples/bastion_tests/test_dashboard.march
+
+mod TestDashboard do
+
+pfn make_conn(m, path_, req_hdrs) do
+  let parts = List.filter(string_split(path_, "/"), fn s -> not(string_is_empty(s)))
+  Conn(0, m, path_, parts, "", req_hdrs, "", 0, Nil, "", false, Nil, NoUpgrade)
+end
+
+pfn make_get(path_) do
+  make_conn(Get, path_, Nil)
+end
+
+pfn halted_html_conn(body) do
+  let c = make_get("/")
+  let c1 = HttpServer.put_resp_header(c, "content-type", "text/html; charset=utf-8")
+  HttpServer.send_resp(c1, 200, body)
+end
+
+pfn halted_text_conn(body) do
+  let c = make_get("/")
+  let c1 = HttpServer.put_resp_header(c, "content-type", "text/plain")
+  HttpServer.send_resp(c1, 200, body)
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "BastionDev: request_timer and finish_timer" do
+  test "request_timer sets bastion_start assign" do
+    let c = BastionDev.request_timer(make_get("/"))
+    assert (HttpServer.get_assign(c, "bastion_start") == Some("0"))
+  end
+
+  test "finish_timer sets bastion_elapsed assign" do
+    let c = BastionDev.finish_timer(make_get("/"))
+    assert (HttpServer.get_assign(c, "bastion_elapsed") == Some("0"))
+  end
+
+  test "request_timer does not halt conn" do
+    let c = BastionDev.request_timer(make_get("/"))
+    assert (!HttpServer.halted(c))
+  end
+
+  test "finish_timer does not halt conn" do
+    let c = BastionDev.finish_timer(make_get("/"))
+    assert (!HttpServer.halted(c))
+  end
+
+  test "timer sequence: start then finish assigns both values" do
+    let c = make_get("/")
+    let c1 = BastionDev.request_timer(c)
+    let c2 = BastionDev.finish_timer(c1)
+    assert (HttpServer.get_assign(c2, "bastion_start")   == Some("0"))
+    assert (HttpServer.get_assign(c2, "bastion_elapsed") == Some("0"))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "BastionDev: server_timing" do
+  test "server_timing sets Server-Timing header" do
+    let c = BastionDev.finish_timer(make_get("/"))
+    let c1 = BastionDev.server_timing(c)
+    match HttpServer.get_resp_header(c1, "Server-Timing") do
+    Some(v) -> assert (String.contains(v, "total;dur="))
+    None    -> assert false
+    end
+  end
+
+  test "server_timing falls back to 0 when no elapsed assign" do
+    let c = BastionDev.server_timing(make_get("/"))
+    match HttpServer.get_resp_header(c, "Server-Timing") do
+    Some(v) -> assert (String.contains(v, "dur=0"))
+    None    -> assert false
+    end
+  end
+
+  test "server_timing does not halt conn" do
+    let c = BastionDev.server_timing(make_get("/"))
+    assert (!HttpServer.halted(c))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "BastionDev: conn_inspector" do
+  test "conn_inspector returns conn unchanged (method)" do
+    let c = make_get("/inspect-path")
+    let c1 = BastionDev.conn_inspector(c)
+    assert (HttpServer.method(c1) == Get)
+  end
+
+  test "conn_inspector returns conn unchanged (path)" do
+    let c = make_get("/inspect-path")
+    let c1 = BastionDev.conn_inspector(c)
+    assert (HttpServer.path(c1) == "/inspect-path")
+  end
+
+  test "conn_inspector returns conn unchanged (halted = false)" do
+    let c = make_get("/")
+    let c1 = BastionDev.conn_inspector(c)
+    assert (!HttpServer.halted(c1))
+  end
+
+  test "conn_inspector on halted conn returns halted conn" do
+    let c = HttpServer.send_resp(make_get("/"), 200, "body")
+    let c1 = BastionDev.conn_inspector(c)
+    assert (HttpServer.halted(c1))
+    assert (HttpServer.status(c1) == 200)
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "BastionDev: live_reload_script" do
+  test "live_reload_script is a non-empty string" do
+    let s = BastionDev.live_reload_script()
+    assert (String.byte_size(s) > 0)
+  end
+
+  test "live_reload_script contains EventSource" do
+    assert (String.contains(BastionDev.live_reload_script(), "EventSource"))
+  end
+
+  test "live_reload_script connects to /_bastion/live_reload" do
+    assert (String.contains(BastionDev.live_reload_script(), "/_bastion/live_reload"))
+  end
+
+  test "live_reload_script is a <script> tag" do
+    let s = BastionDev.live_reload_script()
+    assert (String.starts_with(s, "<script>"))
+    assert (String.ends_with(s, "</script>"))
+  end
+
+  test "live_reload_script listens for reload event" do
+    assert (String.contains(BastionDev.live_reload_script(), "reload"))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "BastionDev: inject_live_reload" do
+  test "injects script before </body> in HTML response" do
+    let body = "<html><body><p>Hello</p></body></html>"
+    let c = halted_html_conn(body)
+    let c1 = BastionDev.inject_live_reload(c)
+    let new_body = HttpServer.resp_body(c1)
+    assert (String.contains(new_body, "<script>"))
+    -- Script should appear before </body>
+    assert (String.contains(new_body, "</body>"))
+  end
+
+  test "does not inject into non-HTML response" do
+    let c = halted_text_conn("<html><body>not html content-type</body></html>")
+    let c1 = BastionDev.inject_live_reload(c)
+    -- Body should be unchanged (no script injected)
+    assert (HttpServer.resp_body(c1) == "<html><body>not html content-type</body></html>")
+  end
+
+  test "does not inject when conn is NOT halted" do
+    let c = make_get("/")
+    let c1 = HttpServer.put_resp_header(c, "content-type", "text/html")
+    -- Not halted: inject_live_reload should pass through
+    let c2 = BastionDev.inject_live_reload(c1)
+    assert (HttpServer.resp_body(c2) == "")
+  end
+
+  test "appends script when no </body> tag present" do
+    let body = "<html>No body tag here"
+    let c = halted_html_conn(body)
+    let c1 = BastionDev.inject_live_reload(c)
+    let new_body = HttpServer.resp_body(c1)
+    -- Script should be appended
+    assert (String.contains(new_body, "<script>"))
+    assert (String.contains(new_body, "EventSource"))
+  end
+
+  test "script appears immediately before </body>" do
+    let body = "<html><body><p>content</p></body></html>"
+    let c = halted_html_conn(body)
+    let c1 = BastionDev.inject_live_reload(c)
+    let new_body = HttpServer.resp_body(c1)
+    let script = BastionDev.live_reload_script()
+    -- The pattern script ++ </body> should be present
+    assert (String.contains(new_body, script ++ "</body>"))
+  end
+
+  test "inject is idempotent concept: second call injects second script" do
+    -- Not necessarily desired behavior, but shouldn't panic
+    let c = halted_html_conn("<html><body>hi</body></html>")
+    let c1 = BastionDev.inject_live_reload(c)
+    -- Calling again on an already-injected response: shouldn't panic
+    let c2 = BastionDev.inject_live_reload(c1)
+    assert (HttpServer.halted(c2))
+  end
+
+  test "preserves status code during injection" do
+    let c = HttpServer.put_resp_header(make_get("/"), "content-type", "text/html")
+    let c1 = HttpServer.send_resp(c, 404, "<html><body>not found</body></html>")
+    let c2 = BastionDev.inject_live_reload(c1)
+    assert (HttpServer.status(c2) == 404)
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "BastionDev: live_reload_handler" do
+  test "responds to /_bastion/live_reload with 200" do
+    let c = make_get("/_bastion/live_reload")
+    let result = BastionDev.live_reload_handler(c)
+    assert (HttpServer.status(result) == 200)
+    assert (HttpServer.halted(result))
+  end
+
+  test "sets content-type text/event-stream" do
+    let c = make_get("/_bastion/live_reload")
+    let result = BastionDev.live_reload_handler(c)
+    match HttpServer.get_resp_header(result, "content-type") do
+    Some(ct) -> assert (String.contains(ct, "text/event-stream"))
+    None     -> assert false
+    end
+  end
+
+  test "sets cache-control no-cache" do
+    let c = make_get("/_bastion/live_reload")
+    let result = BastionDev.live_reload_handler(c)
+    match HttpServer.get_resp_header(result, "cache-control") do
+    Some(v) -> assert (String.contains(v, "no-cache"))
+    None    -> assert false
+    end
+  end
+
+  test "passes through non-live_reload paths" do
+    let c = make_get("/some/other/path")
+    let result = BastionDev.live_reload_handler(c)
+    assert (!HttpServer.halted(result))
+  end
+
+  test "passes through /_bastion (not the SSE endpoint)" do
+    let c = make_get("/_bastion")
+    let result = BastionDev.live_reload_handler(c)
+    assert (!HttpServer.halted(result))
+  end
+
+  test "passes through /live_reload (wrong prefix)" do
+    let c = make_get("/live_reload")
+    let result = BastionDev.live_reload_handler(c)
+    assert (!HttpServer.halted(result))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "BastionDev: error_overlay_html" do
+  test "contains error message" do
+    let c = make_get("/crash")
+    let html = BastionDev.error_overlay_html("KeyError: missing key", "trace here", c)
+    assert (String.contains(html, "KeyError: missing key"))
+  end
+
+  test "contains stack trace" do
+    let c = make_get("/crash")
+    let html = BastionDev.error_overlay_html("error", "my stack trace", c)
+    assert (String.contains(html, "my stack trace"))
+  end
+
+  test "HTML-escapes error message (XSS protection)" do
+    let c = make_get("/crash")
+    let html = BastionDev.error_overlay_html("<script>alert(1)</script>", "trace", c)
+    assert (!String.contains(html, "<script>alert(1)</script>"))
+    assert (String.contains(html, "&lt;script&gt;"))
+  end
+
+  test "HTML-escapes stack trace (XSS protection)" do
+    let c = make_get("/crash")
+    let html = BastionDev.error_overlay_html("error", "<img src=x onerror=alert(1)>", c)
+    assert (!String.contains(html, "<img src=x"))
+    assert (String.contains(html, "&lt;img"))
+  end
+
+  test "contains 500 badge" do
+    let c = make_get("/")
+    let html = BastionDev.error_overlay_html("err", "trace", c)
+    assert (String.contains(html, "500"))
+  end
+
+  test "contains request path" do
+    let c = make_get("/api/users/42")
+    let html = BastionDev.error_overlay_html("err", "trace", c)
+    assert (String.contains(html, "/api/users/42"))
+  end
+
+  test "contains Stack Trace section heading" do
+    let c = make_get("/")
+    let html = BastionDev.error_overlay_html("err", "trace", c)
+    assert (String.contains(html, "Stack Trace"))
+  end
+
+  test "contains Request section heading" do
+    let c = make_get("/")
+    let html = BastionDev.error_overlay_html("err", "trace", c)
+    assert (String.contains(html, "Request"))
+  end
+
+  test "is a valid HTML document (has DOCTYPE)" do
+    let c = make_get("/")
+    let html = BastionDev.error_overlay_html("err", "trace", c)
+    assert (String.starts_with(html, "<!DOCTYPE html>"))
+  end
+
+  test "error message with path XSS in path is escaped" do
+    let c = make_conn(Get, "/<script>", Nil)
+    let html = BastionDev.error_overlay_html("err", "trace", c)
+    assert (!String.contains(html, "<script>"))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "BastionDev: error_overlay middleware" do
+  test "returns 500 status" do
+    let c = make_get("/")
+    let result = BastionDev.error_overlay(c, "Some error", "trace line")
+    assert (HttpServer.status(result) == 500)
+  end
+
+  test "halts the conn" do
+    let c = make_get("/")
+    let result = BastionDev.error_overlay(c, "err", "trace")
+    assert (HttpServer.halted(result))
+  end
+
+  test "sets content-type text/html" do
+    let c = make_get("/")
+    let result = BastionDev.error_overlay(c, "err", "trace")
+    match HttpServer.get_resp_header(result, "content-type") do
+    Some(ct) -> assert (String.contains(ct, "text/html"))
+    None     -> assert false
+    end
+  end
+
+  test "body contains the error message" do
+    let c = make_get("/")
+    let result = BastionDev.error_overlay(c, "DatabaseConnectionError", "trace")
+    assert (String.contains(HttpServer.resp_body(result), "DatabaseConnectionError"))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "BastionDev: dashboard_html structure" do
+  test "contains stats section with total requests" do
+    let stats = BastionDev.record_request(
+      BastionDev.new_stats(),
+      BastionDev.make_entry("GET", "/", 200, 10))
+    let html = BastionDev.dashboard_html(stats)
+    assert (String.contains(html, "1"))  -- 1 total request
+  end
+
+  test "contains errors section" do
+    let html = BastionDev.dashboard_html(BastionDev.new_stats())
+    assert (String.contains(html, "Errors") || String.contains(html, "errors"))
+  end
+
+  test "contains requests section" do
+    let html = BastionDev.dashboard_html(BastionDev.new_stats())
+    assert (String.contains(html, "Request") || String.contains(html, "requests"))
+  end
+
+  test "contains routes section" do
+    let html = BastionDev.dashboard_html(BastionDev.new_stats())
+    assert (String.contains(html, "Route") || String.contains(html, "routes"))
+  end
+
+  test "request entries appear in dashboard HTML" do
+    let e = BastionDev.make_entry("POST", "/api/users", 201, 45)
+    let stats = BastionDev.record_request(BastionDev.new_stats(), e)
+    let html = BastionDev.dashboard_html(stats)
+    assert (String.contains(html, "/api/users"))
+    assert (String.contains(html, "POST"))
+  end
+
+  test "error entries appear in dashboard HTML" do
+    let e = BastionDev.make_error_entry("NullPointerError", "at line 42", "/boom")
+    let stats = BastionDev.record_error(BastionDev.new_stats(), e)
+    let html = BastionDev.dashboard_html(stats)
+    assert (String.contains(html, "NullPointerError") || String.contains(html, "/boom"))
+  end
+
+  test "route entries appear in dashboard HTML" do
+    let r = BastionDev.make_route("GET", "/users/:id", "UserController.show")
+    let stats = BastionDev.register_route(BastionDev.new_stats(), r)
+    let html = BastionDev.dashboard_html(stats)
+    assert (String.contains(html, "/users/:id") || String.contains(html, "UserController"))
+  end
+
+  test "dashboard HTML-escapes user data (XSS in path)" do
+    let e = BastionDev.make_entry("GET", "/<script>xss</script>", 200, 5)
+    let stats = BastionDev.record_request(BastionDev.new_stats(), e)
+    let html = BastionDev.dashboard_html(stats)
+    -- The raw <script> tag should NOT appear unescaped
+    assert (!String.contains(html, "<script>xss</script>"))
+  end
+
+  test "dashboard HTML-escapes error messages (XSS)" do
+    let e = BastionDev.make_error_entry("<img onerror=alert(1) src=x>", "trace", "/path")
+    let stats = BastionDev.record_error(BastionDev.new_stats(), e)
+    let html = BastionDev.dashboard_html(stats)
+    assert (!String.contains(html, "<img onerror=alert"))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "BastionDev: inc_ws and dec_ws" do
+  test "inc_ws increments WebSocket counter" do
+    let s = BastionDev.new_stats()
+    let s1 = BastionDev.inc_ws(s)
+    let s2 = BastionDev.inc_ws(s1)
+    assert (BastionDev.stats_ws(s2) == 2)
+  end
+
+  test "dec_ws decrements WebSocket counter" do
+    let s = BastionDev.inc_ws(BastionDev.inc_ws(BastionDev.new_stats()))
+    let s1 = BastionDev.dec_ws(s)
+    assert (BastionDev.stats_ws(s1) == 1)
+  end
+
+  test "dec_ws does not go below 0" do
+    let s = BastionDev.new_stats()  -- ws=0
+    let s1 = BastionDev.dec_ws(s)
+    assert (BastionDev.stats_ws(s1) == 0)
+  end
+end
+
+end -- mod TestDashboard
