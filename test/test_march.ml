@@ -146,6 +146,18 @@ let test_parse_module_single_fn () =
     Alcotest.(check int) "1 clause" 1 (List.length def.fn_clauses)
   | _ -> Alcotest.fail "expected single DFn"
 
+let test_parse_dotted_module_name () =
+  let src = {|mod TestApp.Router do
+    fn dispatch(conn) do conn end
+  end|} in
+  let lexbuf = Lexing.from_string src in
+  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  Alcotest.(check string) "module name is dotted" "TestApp.Router" m.mod_name.txt;
+  match m.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    Alcotest.(check string) "fn name" "dispatch" def.fn_name.txt
+  | _ -> Alcotest.fail "expected single DFn"
+
 let test_parse_underscore_param () =
   let src = {|mod Test do
     fn greet(_name : String) do "hello" end
@@ -1752,6 +1764,20 @@ let test_mpst_eval_wrong_order_error () =
      with Failure _ | Invalid_argument _ | March_eval.Eval.Eval_error _ -> true)
 
 (* ── Eval tests ─────────────────────────────────────────────────────────── *)
+
+let test_eval_dotted_module () =
+  (* Dotted module nested inside a top-level module — functions must be
+     accessible under the full qualified name "TestApp.Router.greet". *)
+  let env = eval_module {|mod Main do
+    mod TestApp.Router do
+      fn greet() do
+        "hello from router"
+      end
+    end
+    fn main() do () end
+  end|} in
+  let v = call_fn env "TestApp.Router.greet" [] in
+  Alcotest.(check string) "dotted module fn result" "hello from router" (vstr v)
 
 let test_eval_literal () =
   let env = eval_module {|mod Test do
@@ -17181,6 +17207,7 @@ let () =
         [
           Alcotest.test_case "multi-head fn" `Quick test_parse_module_multi_head;
           Alcotest.test_case "single fn" `Quick test_parse_module_single_fn;
+          Alcotest.test_case "dotted module name parse" `Quick test_parse_dotted_module_name;
           Alcotest.test_case "underscore-prefixed param" `Quick test_parse_underscore_param;
         ] );
       ( "keywords",
@@ -17341,6 +17368,7 @@ let () =
         ] );
       ( "eval",
         [
+          Alcotest.test_case "dotted module name"  `Quick (with_reset test_eval_dotted_module);
           Alcotest.test_case "literal"             `Quick test_eval_literal;
           Alcotest.test_case "arithmetic"          `Quick test_eval_arithmetic;
           Alcotest.test_case "recursion"           `Quick test_eval_recursion;
