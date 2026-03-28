@@ -1,0 +1,483 @@
+-- test/stdlib/test_bastion_dev.march
+-- Tests for the BastionDev stdlib module.
+-- Run with: dune exec march -- test test/stdlib/test_bastion_dev.march
+
+mod TestBastionDev do
+
+-- ── Test helpers ───────────────────────────────────────────────────────────
+
+ptype Upgrade = NoUpgrade | WebSocketUpgrade(a)
+ptype Conn = Conn(
+  Int, Method, String, List(String), String,
+  List(Header), String, Int, List(Header), String,
+  Bool, List((String, String)), Upgrade
+)
+
+pfn make_conn(meth, path_, qs, req_hdrs, req_body) do
+  let parts = List.filter(string_split(path_, "/"), fn s -> not(string_is_empty(s)))
+  Conn(0, meth, path_, parts, qs, req_hdrs, req_body, 0, Nil, "", false, Nil, NoUpgrade)
+end
+
+pfn make_get(path_) do
+  make_conn(Get, path_, "", Cons(Header("host", "localhost"), Nil), "")
+end
+
+-- Fill stats with n identical request entries (for capping tests).
+pfn fill_requests(s, e, n) do
+  if n <= 0 do s
+  else fill_requests(BastionDev.record_request(s, e), e, n - 1) end
+end
+
+-- Fill stats with n identical error entries (for capping tests).
+pfn fill_errors(s, e, n) do
+  if n <= 0 do s
+  else fill_errors(BastionDev.record_error(s, e), e, n - 1) end
+end
+
+-- ── RequestEntry ───────────────────────────────────────────────────────────
+
+describe "RequestEntry" do
+  test "make_entry constructs entry" do
+    let e = BastionDev.make_entry("GET", "/users", 200, 3)
+    assert (BastionDev.entry_method(e) == "GET")
+    assert (BastionDev.entry_path(e) == "/users")
+    assert (BastionDev.entry_status(e) == 200)
+    assert (BastionDev.entry_duration(e) == 3)
+  end
+
+  test "entry_status distinguishes 200 and 500" do
+    let ok_e  = BastionDev.make_entry("GET", "/", 200, 1)
+    let err_e = BastionDev.make_entry("GET", "/", 500, 1)
+    assert (BastionDev.entry_status(ok_e) < 500)
+    assert (BastionDev.entry_status(err_e) >= 500)
+  end
+end
+
+-- ── ErrorEntry ─────────────────────────────────────────────────────────────
+
+describe "ErrorEntry" do
+  test "make_error_entry constructs entry" do
+    let e = BastionDev.make_error_entry("KeyError: missing", "trace line 1", "/api/users")
+    assert (BastionDev.error_entry_msg(e) == "KeyError: missing")
+    assert (BastionDev.error_entry_trace(e) == "trace line 1")
+    assert (BastionDev.error_entry_path(e) == "/api/users")
+  end
+end
+
+-- ── RouteEntry ─────────────────────────────────────────────────────────────
+
+describe "RouteEntry" do
+  test "make_route constructs entry" do
+    let r = BastionDev.make_route("GET", "/users/:id", "UserController.show")
+    assert (BastionDev.route_method(r) == "GET")
+    assert (BastionDev.route_pattern(r) == "/users/:id")
+    assert (BastionDev.route_handler(r) == "UserController.show")
+  end
+end
+
+-- ── VaultStat ──────────────────────────────────────────────────────────────
+
+describe "VaultStat" do
+  test "make_vault_stat stores name and count" do
+    let vs = BastionDev.make_vault_stat("sessions", 42)
+    assert (BastionDev.vault_stat_name(vs) == "sessions")
+    assert (BastionDev.vault_stat_count(vs) == 42)
+  end
+
+  test "snapshot_vault returns None for unknown table" do
+    assert (BastionDev.snapshot_vault("nonexistent_table_xyz_bd") == None)
+  end
+
+  test "snapshot_vault returns Some for live table" do
+    let t = Vault.new("bastion_test_table_1")
+    Vault.set(t, "k", "v")
+    let snap = BastionDev.snapshot_vault("bastion_test_table_1")
+    assert (snap != None)
+    match snap do
+    Some(vs) -> assert (BastionDev.vault_stat_count(vs) == 1)
+    None     -> assert false
+    end
+  end
+end
+
+-- ── DevStats ───────────────────────────────────────────────────────────────
+
+describe "DevStats construction" do
+  test "new_stats returns zeroed stats" do
+    let s = BastionDev.new_stats()
+    assert (BastionDev.stats_total(s) == 0)
+    assert (BastionDev.stats_errors(s) == 0)
+    assert (BastionDev.stats_ws(s) == 0)
+    assert (is_nil(BastionDev.stats_recent(s)))
+    assert (is_nil(BastionDev.stats_error_log(s)))
+    assert (is_nil(BastionDev.stats_routes(s)))
+    assert (is_nil(BastionDev.stats_vault(s)))
+  end
+end
+
+describe "DevStats record_request" do
+  test "increments total on each call" do
+    let e  = BastionDev.make_entry("GET", "/", 200, 1)
+    let s0 = BastionDev.new_stats()
+    let s1 = BastionDev.record_request(s0, e)
+    let s2 = BastionDev.record_request(s1, e)
+    assert (BastionDev.stats_total(s1) == 1)
+    assert (BastionDev.stats_total(s2) == 2)
+  end
+
+  test "increments error_count only for 5xx" do
+    let ok_e  = BastionDev.make_entry("GET", "/", 200, 1)
+    let err_e = BastionDev.make_entry("GET", "/", 500, 1)
+    let s0 = BastionDev.new_stats()
+    let s1 = BastionDev.record_request(s0, ok_e)
+    let s2 = BastionDev.record_request(s1, err_e)
+    assert (BastionDev.stats_errors(s1) == 0)
+    assert (BastionDev.stats_errors(s2) == 1)
+  end
+
+  test "stores entry in recent (newest first)" do
+    let e1 = BastionDev.make_entry("GET", "/first", 200, 1)
+    let e2 = BastionDev.make_entry("GET", "/second", 200, 2)
+    let s0 = BastionDev.new_stats()
+    let s2 = BastionDev.record_request(BastionDev.record_request(s0, e1), e2)
+    let recent = BastionDev.stats_recent(s2)
+    assert (not (is_nil(recent)))
+    assert (BastionDev.entry_path(head(recent)) == "/second")
+  end
+
+  test "caps recent list at 50 entries" do
+    let e  = BastionDev.make_entry("GET", "/x", 200, 1)
+    let s  = fill_requests(BastionDev.new_stats(), e, 60)
+    assert (length(BastionDev.stats_recent(s)) == 50)
+  end
+end
+
+describe "DevStats record_error" do
+  test "adds error entry to error log" do
+    let ee = BastionDev.make_error_entry("Panic: oops", "stack", "/crash")
+    let s1 = BastionDev.record_error(BastionDev.new_stats(), ee)
+    assert (not (is_nil(BastionDev.stats_error_log(s1))))
+    assert (BastionDev.error_entry_msg(head(BastionDev.stats_error_log(s1))) == "Panic: oops")
+  end
+
+  test "caps error log at 20 entries" do
+    let ee = BastionDev.make_error_entry("err", "trace", "/x")
+    let s  = fill_errors(BastionDev.new_stats(), ee, 25)
+    assert (length(BastionDev.stats_error_log(s)) == 20)
+  end
+end
+
+describe "DevStats route registry" do
+  test "register_route adds a route" do
+    let r  = BastionDev.make_route("GET", "/api/health", "HealthController.check")
+    let s1 = BastionDev.register_route(BastionDev.new_stats(), r)
+    assert (not (is_nil(BastionDev.stats_routes(s1))))
+    assert (BastionDev.route_pattern(head(BastionDev.stats_routes(s1))) == "/api/health")
+  end
+end
+
+describe "DevStats vault stats" do
+  test "add_vault_stat appends snapshot" do
+    let vs = BastionDev.make_vault_stat("cache", 10)
+    let s1 = BastionDev.add_vault_stat(BastionDev.new_stats(), vs)
+    assert (not (is_nil(BastionDev.stats_vault(s1))))
+    assert (BastionDev.vault_stat_name(head(BastionDev.stats_vault(s1))) == "cache")
+  end
+
+  test "set_vault_stats replaces the whole list" do
+    let vs = BastionDev.make_vault_stat("sessions", 5)
+    let s1 = BastionDev.add_vault_stat(BastionDev.new_stats(), vs)
+    let s2 = BastionDev.set_vault_stats(s1, Nil)
+    assert (is_nil(BastionDev.stats_vault(s2)))
+  end
+end
+
+describe "DevStats WebSocket counting" do
+  test "inc_ws increments count" do
+    let s  = BastionDev.new_stats()
+    let s2 = BastionDev.inc_ws(BastionDev.inc_ws(s))
+    assert (BastionDev.stats_ws(s2) == 2)
+  end
+
+  test "dec_ws decrements count" do
+    let s1 = BastionDev.inc_ws(BastionDev.inc_ws(BastionDev.new_stats()))
+    let s2 = BastionDev.dec_ws(s1)
+    assert (BastionDev.stats_ws(s2) == 1)
+  end
+
+  test "dec_ws does not go below 0" do
+    let s1 = BastionDev.dec_ws(BastionDev.new_stats())
+    assert (BastionDev.stats_ws(s1) == 0)
+  end
+end
+
+-- ── Middleware ─────────────────────────────────────────────────────────────
+
+describe "request_timer" do
+  test "sets bastion_start assign" do
+    let c2 = BastionDev.request_timer(make_get("/users"))
+    assert (HttpServer.get_assign(c2, "bastion_start") != None)
+  end
+
+  test "does not halt the conn" do
+    let c2 = BastionDev.request_timer(make_get("/"))
+    assert (not (HttpServer.halted(c2)))
+  end
+end
+
+describe "finish_timer" do
+  test "sets bastion_elapsed assign" do
+    let c2 = BastionDev.finish_timer(BastionDev.request_timer(make_get("/")))
+    assert (HttpServer.get_assign(c2, "bastion_elapsed") != None)
+  end
+end
+
+describe "server_timing" do
+  test "adds Server-Timing header" do
+    let c2 = BastionDev.server_timing(BastionDev.finish_timer(make_get("/")))
+    let hdrs = HttpServer.resp_headers(c2)
+    let has_st = List.any(hdrs, fn h ->
+      match h do Header(n, _) -> string_to_lowercase(n) == "server-timing" end)
+    assert has_st
+  end
+
+  test "Server-Timing value starts with total;dur=" do
+    let c2   = BastionDev.server_timing(BastionDev.finish_timer(make_get("/")))
+    let hdrs = HttpServer.resp_headers(c2)
+    let found = List.find(hdrs, fn h ->
+      match h do Header(n, _) -> string_to_lowercase(n) == "server-timing" end)
+    assert (found != None)
+    match found do
+    Some(Header(_, v)) -> assert (string_starts_with(v, "total;dur="))
+    None               -> assert false
+    end
+  end
+end
+
+describe "conn_inspector" do
+  test "returns conn with unchanged path" do
+    let c2 = BastionDev.conn_inspector(make_get("/inspect-me"))
+    assert (HttpServer.path(c2) == "/inspect-me")
+  end
+
+  test "does not halt the conn" do
+    let c2 = BastionDev.conn_inspector(make_get("/"))
+    assert (not (HttpServer.halted(c2)))
+  end
+end
+
+-- ── Live reload ────────────────────────────────────────────────────────────
+
+describe "live_reload_script" do
+  test "returns a non-empty string" do
+    assert (not (string_is_empty(BastionDev.live_reload_script())))
+  end
+
+  test "script contains EventSource" do
+    assert (string_contains(BastionDev.live_reload_script(), "EventSource"))
+  end
+
+  test "script references the SSE endpoint" do
+    assert (string_contains(BastionDev.live_reload_script(), "/_bastion/live_reload"))
+  end
+end
+
+describe "inject_live_reload" do
+  test "non-halted conn passes through" do
+    let c2 = BastionDev.inject_live_reload(make_get("/"))
+    assert (not (HttpServer.halted(c2)))
+  end
+
+  test "non-HTML halted response passes through unchanged" do
+    let c2 = make_get("/api/data")
+             |> HttpServer.put_resp_header("content-type", "application/json")
+             |> HttpServer.send_resp(200, "{\"ok\":true}")
+    let c3 = BastionDev.inject_live_reload(c2)
+    assert (HttpServer.resp_body(c3) == "{\"ok\":true}")
+  end
+
+  test "HTML response gets script injected before </body>" do
+    let html = "<html><body><p>hello</p></body></html>"
+    let c2 = make_get("/")
+             |> HttpServer.put_resp_header("content-type", "text/html; charset=utf-8")
+             |> HttpServer.send_resp(200, html)
+    let c3 = BastionDev.inject_live_reload(c2)
+    let body = HttpServer.resp_body(c3)
+    assert (string_contains(body, "EventSource"))
+    assert (string_contains(body, "</body>"))
+    assert (string_contains(body, "<p>hello</p>"))
+  end
+
+  test "appends script when no </body> tag present" do
+    let html = "<html><body><p>no closing body</p>"
+    let c2 = make_get("/")
+             |> HttpServer.put_resp_header("content-type", "text/html")
+             |> HttpServer.send_resp(200, html)
+    let c3 = BastionDev.inject_live_reload(c2)
+    let body = HttpServer.resp_body(c3)
+    assert (string_contains(body, "EventSource"))
+    assert (string_contains(body, "<p>no closing body</p>"))
+  end
+end
+
+describe "live_reload_handler" do
+  test "intercepts /_bastion/live_reload and halts" do
+    let c2 = BastionDev.live_reload_handler(make_get("/_bastion/live_reload"))
+    assert (HttpServer.halted(c2))
+    assert (HttpServer.status(c2) == 200)
+  end
+
+  test "passes through other paths" do
+    let c2 = BastionDev.live_reload_handler(make_get("/other"))
+    assert (not (HttpServer.halted(c2)))
+  end
+
+  test "sets text/event-stream content-type" do
+    let c2 = BastionDev.live_reload_handler(make_get("/_bastion/live_reload"))
+    let has_sse = List.any(HttpServer.resp_headers(c2), fn h ->
+      match h do Header(_, v) -> string_contains(string_to_lowercase(v), "text/event-stream") end)
+    assert has_sse
+  end
+end
+
+-- ── Error overlay ──────────────────────────────────────────────────────────
+
+describe "error_overlay_html" do
+  test "contains the error message" do
+    let html = BastionDev.error_overlay_html("KeyError: foo", "trace data", make_get("/crash"))
+    assert (string_contains(html, "KeyError"))
+  end
+
+  test "contains the stack trace" do
+    let html = BastionDev.error_overlay_html("err", "stack trace line 1", make_get("/crash"))
+    assert (string_contains(html, "stack trace line 1"))
+  end
+
+  test "contains the request path" do
+    let html = BastionDev.error_overlay_html("err", "trace", make_get("/the/path"))
+    assert (string_contains(html, "/the/path"))
+  end
+
+  test "HTML-escapes the error message" do
+    let html = BastionDev.error_overlay_html("<script>xss</script>", "trace", make_get("/"))
+    assert (not (string_contains(html, "<script>xss")))
+    assert (string_contains(html, "&lt;script&gt;"))
+  end
+
+  test "contains Copy button" do
+    let html = BastionDev.error_overlay_html("err", "trace", make_get("/"))
+    assert (string_contains(html, "Copy"))
+  end
+end
+
+describe "error_overlay" do
+  test "sends 500 response" do
+    let c2 = BastionDev.error_overlay(make_get("/crash"), "Panic: oops", "trace")
+    assert (HttpServer.status(c2) == 500)
+    assert (HttpServer.halted(c2))
+  end
+
+  test "response body contains DOCTYPE" do
+    let c2 = BastionDev.error_overlay(make_get("/crash"), "Panic", "trace")
+    assert (string_contains(HttpServer.resp_body(c2), "<!DOCTYPE html>"))
+  end
+
+  test "sets content-type text/html" do
+    let c2 = BastionDev.error_overlay(make_get("/crash"), "Panic", "trace")
+    let has_html = List.any(HttpServer.resp_headers(c2), fn h ->
+      match h do Header(n, v) -> string_to_lowercase(n) == "content-type" && string_starts_with(string_to_lowercase(v), "text/html") end)
+    assert has_html
+  end
+end
+
+-- ── Dashboard HTML ─────────────────────────────────────────────────────────
+
+describe "dashboard_html" do
+  test "renders without panic on empty stats" do
+    let html = BastionDev.dashboard_html(BastionDev.new_stats())
+    assert (not (string_is_empty(html)))
+    assert (string_contains(html, "<!DOCTYPE html>"))
+  end
+
+  test "shows request count" do
+    let e  = BastionDev.make_entry("GET", "/", 200, 5)
+    let s  = fill_requests(BastionDev.new_stats(), e, 2)
+    let html = BastionDev.dashboard_html(s)
+    assert (string_contains(html, "2"))
+  end
+
+  test "shows request paths in log" do
+    let e  = BastionDev.make_entry("GET", "/my-special-path", 200, 5)
+    let s  = BastionDev.record_request(BastionDev.new_stats(), e)
+    let html = BastionDev.dashboard_html(s)
+    assert (string_contains(html, "/my-special-path"))
+  end
+
+  test "shows error log entries" do
+    let ee = BastionDev.make_error_entry("SomeError: oops", "trace", "/boom")
+    let s  = BastionDev.record_error(BastionDev.new_stats(), ee)
+    let html = BastionDev.dashboard_html(s)
+    assert (string_contains(html, "SomeError"))
+    assert (string_contains(html, "/boom"))
+  end
+
+  test "shows registered routes" do
+    let r  = BastionDev.make_route("GET", "/users/:id", "UserController.show")
+    let s  = BastionDev.register_route(BastionDev.new_stats(), r)
+    let html = BastionDev.dashboard_html(s)
+    assert (string_contains(html, "/users/:id"))
+    assert (string_contains(html, "UserController.show"))
+  end
+
+  test "shows vault stats" do
+    let vs = BastionDev.make_vault_stat("response_cache", 17)
+    let s  = BastionDev.add_vault_stat(BastionDev.new_stats(), vs)
+    let html = BastionDev.dashboard_html(s)
+    assert (string_contains(html, "response_cache"))
+    assert (string_contains(html, "17"))
+  end
+
+  test "shows WebSocket count" do
+    let s  = BastionDev.inc_ws(BastionDev.inc_ws(BastionDev.inc_ws(BastionDev.new_stats())))
+    let html = BastionDev.dashboard_html(s)
+    assert (string_contains(html, "3"))
+  end
+
+  test "HTML-escapes path containing angle brackets" do
+    let e  = BastionDev.make_entry("GET", "/search?q=<xss>", 200, 1)
+    let s  = BastionDev.record_request(BastionDev.new_stats(), e)
+    let html = BastionDev.dashboard_html(s)
+    assert (not (string_contains(html, "<xss>")))
+    assert (string_contains(html, "&lt;xss&gt;"))
+  end
+
+  test "auto-refresh meta tag is present" do
+    let html = BastionDev.dashboard_html(BastionDev.new_stats())
+    assert (string_contains(html, "http-equiv"))
+  end
+
+  test "contains Bastion Dev branding" do
+    let html = BastionDev.dashboard_html(BastionDev.new_stats())
+    assert (string_contains(html, "Bastion Dev"))
+  end
+end
+
+describe "dashboard_handler" do
+  test "intercepts /_bastion and sends 200" do
+    let c2 = BastionDev.dashboard_handler(make_get("/_bastion"), BastionDev.new_stats())
+    assert (HttpServer.status(c2) == 200)
+    assert (HttpServer.halted(c2))
+  end
+
+  test "/_bastion response body contains Bastion Dev" do
+    let c2 = BastionDev.dashboard_handler(make_get("/_bastion"), BastionDev.new_stats())
+    assert (string_contains(HttpServer.resp_body(c2), "Bastion Dev"))
+  end
+
+  test "passes through non-dashboard paths" do
+    let c2 = BastionDev.dashboard_handler(make_get("/about"), BastionDev.new_stats())
+    assert (not (HttpServer.halted(c2)))
+  end
+end
+
+end
