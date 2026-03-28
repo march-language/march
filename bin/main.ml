@@ -133,6 +133,7 @@ let load_stdlib () =
       "islands.march";
       "env.march";
       "config.march";
+      "bastion.march";
       "test.march";
     ] in
     List.concat_map (fun name ->

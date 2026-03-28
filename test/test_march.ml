@@ -16176,6 +16176,327 @@ let test_vault_concurrent_writes () =
   Hashtbl.remove March_eval.Eval.vault_registry id;
   Alcotest.(check int) "all writes committed" (n_threads * n_writes) total
 
+(* ── Bastion.Cache and Bastion.Depot tests ───────────────────────────────── *)
+
+(* Load stdlib deps for Bastion tests: iolist, http_server, vault, bastion. *)
+let eval_with_bastion src =
+  let iolist_decl      = load_stdlib_file_for_test "iolist.march" in
+  let http_server_decl = load_stdlib_file_for_test "http_server.march" in
+  let vault_decl2      = load_stdlib_file_for_test "vault.march" in
+  let bastion_decl     = load_stdlib_file_for_test "bastion.march" in
+  eval_with_stdlib [iolist_decl; http_server_decl; vault_decl2; bastion_decl] src
+
+(* Build a minimal Conn for use in tests.
+   Conn(fd, method, path, path_info, qs, req_headers, req_body,
+        status, resp_headers, resp_body, halted, assigns, upgrade) *)
+let bastion_conn_src = {|
+  fn make_conn(req_hdrs, resp_body_str) do
+    Conn(0, :get, "/", Nil, "", req_hdrs, "", 200, Nil, resp_body_str, false, Nil, :no_upgrade)
+  end
+|}
+
+(* ── ETag middleware ─────────────────────────────────────────────────── *)
+
+let test_bastion_etag_sets_header () =
+  let env = eval_with_bastion ({|mod Test do|} ^ bastion_conn_src ^ {|
+    fn f() do
+      let conn = make_conn(Nil, "hello world")
+      let conn2 = Bastion.Cache.etag(conn)
+      HttpServer.get_resp_header(conn2, "etag")
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  (* ETag should be Some("<hash>") *)
+  (match v with
+   | March_eval.Eval.VCon ("Some", [March_eval.Eval.VString etag]) ->
+     Alcotest.(check bool) "ETag starts with quote" true
+       (String.length etag > 2 && etag.[0] = '"')
+   | _ -> Alcotest.fail "expected Some(etag string)")
+
+let test_bastion_etag_304_on_match () =
+  let env = eval_with_bastion ({|mod Test do|} ^ bastion_conn_src ^ {|
+    fn f() do
+      -- First compute what ETag would be generated for this body
+      let conn1 = make_conn(Nil, "my response body")
+      let conn_with_tag = Bastion.Cache.etag(conn1)
+      let etag_val = HttpServer.get_resp_header(conn_with_tag, "etag")
+      -- Make a second request with If-None-Match matching that ETag
+      match etag_val do
+      Some(tag) -> do
+        let conn2 = make_conn(Cons(Header("if-none-match", tag), Nil), "my response body")
+        let conn3 = Bastion.Cache.etag(conn2)
+        HttpServer.status(conn3)
+      end
+      None -> -1
+      end
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "ETag match yields 304" 304 (vint v)
+
+let test_bastion_etag_no_304_on_mismatch () =
+  let env = eval_with_bastion ({|mod Test do|} ^ bastion_conn_src ^ {|
+    fn f() do
+      let conn = make_conn(
+        Cons(Header("if-none-match", "\"stale_etag\""), Nil),
+        "current body"
+      )
+      let conn2 = Bastion.Cache.etag(conn)
+      HttpServer.status(conn2)
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "ETag mismatch: status stays 200" 200 (vint v)
+
+(* ── Response caching ────────────────────────────────────────────────── *)
+
+let test_bastion_cached_miss_calls_generator () =
+  let env = eval_with_bastion ({|mod Test do|} ^ bastion_conn_src ^ {|
+    fn f() do
+      let conn = make_conn(Nil, "")
+      let result = Bastion.Cache.cached(conn, "bastion_test:miss1", 60, fn c ->
+        HttpServer.send_resp(c, 200, "generated body")
+      )
+      HttpServer.resp_body(result)
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check string) "cache miss: generator runs" "generated body" (vstr v)
+
+let test_bastion_cached_hit_skips_generator () =
+  let env = eval_with_bastion ({|mod Test do|} ^ bastion_conn_src ^ {|
+    fn f() do
+      let conn = make_conn(Nil, "")
+      -- First call: miss, stores result
+      let _ = Bastion.Cache.cached(conn, "bastion_test:hit1", 60, fn c ->
+        HttpServer.send_resp(c, 200, "cached body")
+      )
+      -- Second call: hit, returns cached
+      let result = Bastion.Cache.cached(conn, "bastion_test:hit1", 60, fn c ->
+        HttpServer.send_resp(c, 200, "regenerated (should not appear)")
+      )
+      HttpServer.resp_body(result)
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check string) "cache hit: cached body returned" "cached body" (vstr v)
+
+let test_bastion_cached_ttl_expired_reruns_generator () =
+  let env = eval_with_bastion ({|mod Test do|} ^ bastion_conn_src ^ {|
+    fn f() do
+      let conn = make_conn(Nil, "")
+      -- TTL of -1 seconds: expires immediately
+      let _ = Bastion.Cache.cached(conn, "bastion_test:ttl1", -1, fn c ->
+        HttpServer.send_resp(c, 200, "stale body")
+      )
+      -- Entry is already expired, generator should run again
+      let result = Bastion.Cache.cached(conn, "bastion_test:ttl1", 60, fn c ->
+        HttpServer.send_resp(c, 200, "fresh body")
+      )
+      HttpServer.resp_body(result)
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check string) "expired entry: generator reruns" "fresh body" (vstr v)
+
+(* ── Fragment caching ────────────────────────────────────────────────── *)
+
+let test_bastion_fragment_miss_calls_generator () =
+  let env = eval_with_bastion ({|mod Test do
+    fn f() do
+      let frag = Bastion.Cache.fragment("bastion_frag:miss1", 60, fn () ->
+        IOList.from_string("<span>fresh</span>")
+      )
+      IOList.to_string(frag)
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check string) "fragment miss: generator runs" "<span>fresh</span>" (vstr v)
+
+let test_bastion_fragment_hit_returns_cached () =
+  let env = eval_with_bastion ({|mod Test do
+    fn f() do
+      -- First call populates cache
+      let _ = Bastion.Cache.fragment("bastion_frag:hit1", 60, fn () ->
+        IOList.from_string("<b>original</b>")
+      )
+      -- Second call should return cached IOList
+      let frag = Bastion.Cache.fragment("bastion_frag:hit1", 60, fn () ->
+        IOList.from_string("<b>regenerated (should not appear)</b>")
+      )
+      IOList.to_string(frag)
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check string) "fragment hit: cached fragment returned" "<b>original</b>" (vstr v)
+
+let test_bastion_fragment_ttl_expired () =
+  let env = eval_with_bastion ({|mod Test do
+    fn f() do
+      let _ = Bastion.Cache.fragment("bastion_frag:ttl1", -1, fn () ->
+        IOList.from_string("stale")
+      )
+      let frag = Bastion.Cache.fragment("bastion_frag:ttl1", 60, fn () ->
+        IOList.from_string("fresh fragment")
+      )
+      IOList.to_string(frag)
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check string) "fragment ttl expired: generator reruns" "fresh fragment" (vstr v)
+
+(* ── Cache invalidation ──────────────────────────────────────────────── *)
+
+let test_bastion_invalidate_removes_key () =
+  let env = eval_with_bastion ({|mod Test do
+    fn f() do
+      -- Populate the fragment_cache table via fragment/3
+      let _ = Bastion.Cache.fragment("bastion_inv:k1", 60, fn () ->
+        IOList.from_string("cached")
+      )
+      Bastion.Cache.invalidate("fragment_cache", "bastion_inv:k1")
+      -- After invalidation the generator should run
+      let frag = Bastion.Cache.fragment("bastion_inv:k1", 60, fn () ->
+        IOList.from_string("regenerated")
+      )
+      IOList.to_string(frag)
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check string) "invalidate: regenerates after removal" "regenerated" (vstr v)
+
+let test_bastion_invalidate_prefix_removes_matching () =
+  let env = eval_with_bastion ({|mod Test do
+    fn f() do
+      -- Store two keys under same prefix and one unrelated
+      let _ = Bastion.Cache.fragment("pfx:a", 60, fn () -> IOList.from_string("a"))
+      let _ = Bastion.Cache.fragment("pfx:b", 60, fn () -> IOList.from_string("b"))
+      let _ = Bastion.Cache.fragment("other:c", 60, fn () -> IOList.from_string("c"))
+      -- Invalidate prefix
+      Bastion.Cache.invalidate_prefix("fragment_cache", "pfx:")
+      -- pfx:a should be gone, regenerates
+      let a = Bastion.Cache.fragment("pfx:a", 60, fn () -> IOList.from_string("a_new"))
+      -- other:c should still be cached
+      let c = Bastion.Cache.fragment("other:c", 60, fn () -> IOList.from_string("c_new"))
+      (IOList.to_string(a), IOList.to_string(c))
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  (match v with
+   | March_eval.Eval.VTuple [March_eval.Eval.VString a; March_eval.Eval.VString c] ->
+     Alcotest.(check string) "pfx:a regenerated" "a_new" a;
+     Alcotest.(check string) "other:c still cached" "c" c
+   | _ -> Alcotest.fail "expected tuple of strings")
+
+(* ── Cache-Control helpers ───────────────────────────────────────────── *)
+
+let test_bastion_cache_control_sets_header () =
+  let env = eval_with_bastion ({|mod Test do|} ^ bastion_conn_src ^ {|
+    fn f() do
+      let conn = make_conn(Nil, "")
+      let conn2 = Bastion.Cache.cache_control(conn, "public, max-age=300")
+      HttpServer.get_resp_header(conn2, "cache-control")
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check string) "cache_control header set" "public, max-age=300"
+    (vstr (vsome v))
+
+let test_bastion_no_cache_sets_directives () =
+  let env = eval_with_bastion ({|mod Test do|} ^ bastion_conn_src ^ {|
+    fn f() do
+      let conn = make_conn(Nil, "")
+      let conn2 = Bastion.Cache.no_cache(conn)
+      HttpServer.get_resp_header(conn2, "cache-control")
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check string) "no_cache directives" "no-store, no-cache, must-revalidate"
+    (vstr (vsome v))
+
+let test_bastion_public_cache_includes_max_age () =
+  let env = eval_with_bastion ({|mod Test do|} ^ bastion_conn_src ^ {|
+    fn f() do
+      let conn = make_conn(Nil, "")
+      let conn2 = Bastion.Cache.public_cache(conn, 3600)
+      HttpServer.get_resp_header(conn2, "cache-control")
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check string) "public_cache header" "public, max-age=3600"
+    (vstr (vsome v))
+
+(* ── Bastion.Depot middleware ────────────────────────────────────────── *)
+
+let test_bastion_depot_with_pool_assigns_db () =
+  let env = eval_with_bastion ({|mod Test do|} ^ bastion_conn_src ^ {|
+    fn f() do
+      let pool  = "mock_pool_handle"
+      let conn  = make_conn(Nil, "")
+      let conn2 = Bastion.Depot.with_pool(conn, pool)
+      HttpServer.get_assign(conn2, "db")
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  Alcotest.(check string) "with_pool assigns pool under 'db'" "mock_pool_handle"
+    (vstr (vsome v))
+
+let test_bastion_depot_assign_does_not_discard_existing () =
+  let env = eval_with_bastion ({|mod Test do|} ^ bastion_conn_src ^ {|
+    fn f() do
+      let conn  = make_conn(Nil, "")
+      let conn2 = HttpServer.assign(conn, "user_id", "alice")
+      let conn3 = Bastion.Depot.with_pool(conn2, "pool")
+      -- Both assigns should be visible
+      let db   = HttpServer.get_assign(conn3, "db")
+      let uid  = HttpServer.get_assign(conn3, "user_id")
+      (db, uid)
+    end
+  end|}) in
+  let v = call_fn env "f" [] in
+  (match v with
+   | March_eval.Eval.VTuple [db_opt; uid_opt] ->
+     Alcotest.(check string) "db assign present" "pool" (vstr (vsome db_opt));
+     Alcotest.(check string) "user_id assign preserved" "alice" (vstr (vsome uid_opt))
+   | _ -> Alcotest.fail "expected tuple")
+
+(* ── Vault.keys new builtin ─────────────────────────────────────────── *)
+
+let test_vault_keys_returns_all_keys () =
+  let env = eval_with_vault {|mod Test do
+    fn count(lst) do
+      match lst do
+      Nil -> 0
+      Cons(_, rest) -> 1 + count(rest)
+      end
+    end
+    fn f() do
+      let t = Vault.new("keys_test_1")
+      Vault.set(t, "x", 1)
+      Vault.set(t, "y", 2)
+      Vault.set(t, "z", 3)
+      count(Vault.keys(t))
+    end
+  end|} in
+  Alcotest.(check int) "Vault.keys returns 3 keys" 3
+    (vint (call_fn env "f" []))
+
+let test_vault_keys_empty_table () =
+  let env = eval_with_vault {|mod Test do
+    fn count(lst) do
+      match lst do
+      Nil -> 0
+      Cons(_, rest) -> 1 + count(rest)
+      end
+    end
+    fn f() do
+      let t = Vault.new("keys_test_empty")
+      count(Vault.keys(t))
+    end
+  end|} in
+  Alcotest.(check int) "Vault.keys on empty table = 0" 0
+    (vint (call_fn env "f" []))
+
 (* ── Construction ── *)
 
 let test_df_empty_row_count () =
@@ -18261,5 +18582,27 @@ let () =
         Alcotest.test_case "get_or default"               `Quick test_vault_get_or;
         Alcotest.test_case "has present and absent"       `Quick test_vault_has;
         Alcotest.test_case "concurrent writes no lost updates" `Slow test_vault_concurrent_writes;
+        Alcotest.test_case "keys returns all live keys"   `Quick test_vault_keys_returns_all_keys;
+        Alcotest.test_case "keys on empty table"          `Quick test_vault_keys_empty_table;
+      ]);
+      ("bastion_cache", [
+        Alcotest.test_case "etag sets header"             `Quick test_bastion_etag_sets_header;
+        Alcotest.test_case "etag 304 on match"            `Quick test_bastion_etag_304_on_match;
+        Alcotest.test_case "etag no 304 on mismatch"      `Quick test_bastion_etag_no_304_on_mismatch;
+        Alcotest.test_case "cached miss calls generator"  `Quick test_bastion_cached_miss_calls_generator;
+        Alcotest.test_case "cached hit skips generator"   `Quick test_bastion_cached_hit_skips_generator;
+        Alcotest.test_case "cached ttl expired reruns"    `Quick test_bastion_cached_ttl_expired_reruns_generator;
+        Alcotest.test_case "fragment miss calls generator" `Quick test_bastion_fragment_miss_calls_generator;
+        Alcotest.test_case "fragment hit returns cached"  `Quick test_bastion_fragment_hit_returns_cached;
+        Alcotest.test_case "fragment ttl expired reruns"  `Quick test_bastion_fragment_ttl_expired;
+        Alcotest.test_case "invalidate removes key"       `Quick test_bastion_invalidate_removes_key;
+        Alcotest.test_case "invalidate_prefix matches"    `Quick test_bastion_invalidate_prefix_removes_matching;
+        Alcotest.test_case "cache_control sets header"    `Quick test_bastion_cache_control_sets_header;
+        Alcotest.test_case "no_cache directives"          `Quick test_bastion_no_cache_sets_directives;
+        Alcotest.test_case "public_cache max-age"         `Quick test_bastion_public_cache_includes_max_age;
+      ]);
+      ("bastion_depot", [
+        Alcotest.test_case "with_pool assigns db"         `Quick test_bastion_depot_with_pool_assigns_db;
+        Alcotest.test_case "with_pool preserves assigns"  `Quick test_bastion_depot_assign_does_not_discard_existing;
       ]);
     ]
