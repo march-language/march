@@ -498,6 +498,28 @@ let check_reductions () : unit =
 
 let eval_error fmt = Printf.ksprintf (fun s -> raise (Eval_error s)) fmt
 
+(** Decode an internal vault key string back to a March value.
+    Mirrors vault_key_of_value.  Complex keys (Tuple, Ctor) are returned
+    as raw VString; simple scalar keys are fully reconstructed. *)
+let vault_decode_key (k : string) : value =
+  let n = String.length k in
+  if n >= 2 && k.[1] = ':' then
+    let rest2 = String.sub k 2 (n - 2) in
+    (match k.[0] with
+     | 'i' -> (try VInt (int_of_string rest2) with _ -> VString k)
+     | 'f' -> (try VFloat (float_of_string rest2) with _ -> VString k)
+     | 'b' -> VBool (rest2 = "true")
+     | 'a' -> VAtom rest2
+     | 'u' -> VUnit
+     | 's' ->
+       (* "s:<len>:<str>" — find the colon separating length from content *)
+       (match String.index_opt rest2 ':' with
+        | None -> VString k
+        | Some i ->
+          VString (String.sub rest2 (i + 1) (String.length rest2 - i - 1)))
+     | _ -> VString k)  (* Tuple/Ctor: return as raw string *)
+  else VString k
+
 (** Canonical string key for a March value used in vault tables.
     Panics if called with a non-serialisable value (function, pid, …). *)
 let rec vault_key_of_value (v : value) : string =
@@ -4617,6 +4639,25 @@ let base_env : env =
         ) 0 tbl.vt_shards in
         VInt count
       | _ -> eval_error "vault_size: expected VaultTable"))
+
+  (* vault_keys: return all live keys as a March List(String). *)
+  ; ("vault_keys", VBuiltin ("vault_keys", function
+      | [VVaultHandle id] ->
+        let tbl = vault_lookup id in
+        let keys = Array.fold_left (fun acc shard ->
+          Mutex.lock shard.vs_mutex;
+          let ks = Hashtbl.fold (fun k row acc ->
+            if vault_row_live row then k :: acc
+            else (Hashtbl.remove shard.vs_data k; acc)
+          ) shard.vs_data [] in
+          Mutex.unlock shard.vs_mutex;
+          ks @ acc
+        ) [] tbl.vt_shards in
+        (* Build March linked list: Cons(k, Cons(k2, ... Nil)) *)
+        List.fold_right (fun k acc ->
+          VCon ("Cons", [vault_decode_key k; acc])
+        ) keys (VCon ("Nil", []))
+      | _ -> eval_error "vault_keys: expected VaultTable"))
 
   (* ---- Actor.call / Actor.cast ---- *)
   (* actor_cast: fire-and-forget async message to an actor. *)

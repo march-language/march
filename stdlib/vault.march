@@ -91,4 +91,18 @@ fn has(table, key) do
   end
 end
 
+doc """
+Return all live (non-expired) keys in the table as a List(String).
+
+    let t = Vault.new("ex")
+    Vault.set(t, "a", 1)
+    Vault.set(t, "b", 2)
+    List.length(Vault.keys(t))  -- 2
+
+Cost: O(n) where n is the number of entries in the table.
+"""
+fn keys(table) do
+  vault_keys(table)
+end
+
 end

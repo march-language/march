@@ -130,6 +130,7 @@ let load_stdlib () =
       "channel_socket.march";
       "presence.march";
       "islands.march";
+      "bastion.march";
     ] in
     List.concat_map (fun name ->
         load_stdlib_file (Filename.concat stdlib_dir name)
