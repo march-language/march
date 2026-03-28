@@ -17127,6 +17127,62 @@ let test_df_drop_nulls () =
   end|} in
   Alcotest.(check int) "drop_nulls removes 1 null row" 2 (vint (call_fn env "f" []))
 
+(* ── Cross-module load order ─────────────────────────────────────────────── *)
+(* Regression test: an alphabetically-earlier module must be able to call a
+   function in an alphabetically-later module at the same dot-depth.
+   Before the fix, Router.dispatch() would fail because UsersController was
+   not yet in Router's captured environment. *)
+
+let test_cross_module_load_order_forward_ref () =
+  (* Alpha comes before Beta alphabetically but calls Beta.value().
+     Without the global module_registry fix this would raise
+     "no member 'value' in module 'Beta'" at call time. *)
+  let env = eval_module {|mod Test do
+    mod Alpha do
+      fn get_beta_value() do Beta.value() end
+    end
+
+    mod Beta do
+      fn value() do 42 end
+    end
+
+    fn f() do Alpha.get_beta_value() end
+  end|} in
+  Alcotest.(check int) "Alpha can call Beta.value() despite load order" 42
+    (vint (call_fn env "f" []))
+
+let test_cross_module_load_order_mutual () =
+  (* Alpha calls Beta — forward reference works via global registry. *)
+  let env = eval_module {|mod Test do
+    mod Alpha do
+      fn ping() do Beta.pong() end
+    end
+
+    mod Beta do
+      fn pong() do 99 end
+    end
+
+    fn f() do Alpha.ping() end
+  end|} in
+  Alcotest.(check int) "forward cross-module reference (Alpha->Beta) works" 99
+    (vint (call_fn env "f" []))
+
+let test_cross_module_load_order_reverse_mutual () =
+  (* Zzz comes after Alpha alphabetically; Alpha calls Zzz. *)
+  let env = eval_module {|mod Test do
+    mod Alpha do
+      fn call_zzz() do Zzz.answer() end
+    end
+
+    mod Zzz do
+      fn answer() do 7 end
+    end
+
+    fn f() do Alpha.call_zzz() end
+  end|} in
+  Alcotest.(check int) "Alpha can call Zzz.answer() (Z after A)" 7
+    (vint (call_fn env "f" []))
+
 let () =
   Alcotest.run "march"
     [
@@ -18632,5 +18688,10 @@ let () =
       ("bastion_depot", [
         Alcotest.test_case "with_pool assigns db"         `Quick test_bastion_depot_with_pool_assigns_db;
         Alcotest.test_case "with_pool preserves assigns"  `Quick test_bastion_depot_assign_does_not_discard_existing;
+      ]);
+      ("cross_module_load_order", [
+        Alcotest.test_case "Alpha calls Beta (forward ref)"    `Quick test_cross_module_load_order_forward_ref;
+        Alcotest.test_case "mutual cross-module Alpha->Beta"   `Quick test_cross_module_load_order_mutual;
+        Alcotest.test_case "Alpha calls Zzz (Z after A)"       `Quick test_cross_module_load_order_reverse_mutual;
       ]);
     ]

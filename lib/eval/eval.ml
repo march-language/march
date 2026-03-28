@@ -239,6 +239,15 @@ let record_type_tbl : (string, string) Hashtbl.t = Hashtbl.create 8
     Used by [MPST.new] to know how many endpoints to create and their names. *)
 let protocol_roles_tbl : (string, string list) Hashtbl.t = Hashtbl.create 8
 
+(** Global module member registry — maps "ModName.member" to its value.
+    Populated as [DMod] nodes are evaluated.  Used by [EField] qualified
+    lookup so that cross-module references work regardless of load order:
+    a closure captured in Router can call UsersController.index even if
+    UsersController hadn't been evaluated yet when Router was defined,
+    because the lookup happens at *call time* against this registry.
+    Reset at the start of each [eval_module_env] run. *)
+let module_registry : (string, value) Hashtbl.t = Hashtbl.create 64
+
 (** Module stack for tracking the current module path during eval.
     Updated when entering/leaving [DMod]. Top of stack = innermost module. *)
 let module_stack : string list ref = ref []
@@ -4974,7 +4983,18 @@ let base_env : env =
 let lookup name env =
   match List.assoc_opt name env with
   | Some v -> v
-  | None   -> eval_error "unbound variable: %s" name
+  | None ->
+    (* Qualified module references (dotted names like "Beta.value") are desugared
+       from EField to EVar by the desugar pass.  If not found in the lexical env,
+       check the global module_registry so that cross-module calls work regardless
+       of load order — a closure captured in Alpha can call Beta.value even if
+       Beta was evaluated after Alpha. *)
+    if String.contains name '.' then
+      (match Hashtbl.find_opt module_registry name with
+       | Some v -> v
+       | None -> eval_error "unbound variable: %s" name)
+    else
+      eval_error "unbound variable: %s" name
 
 (** Extract parameter names from a single fn_clause (after desugaring,
     all params are FPNamed or FPPat(PatVar)). *)
@@ -5159,7 +5179,9 @@ and eval_expr_inner (env : env) (e : expr) : value =
       match module_path_str ex with
       | Some prefix ->
         let key = prefix ^ "." ^ field.txt in
-        List.assoc_opt key env
+        (match List.assoc_opt key env with
+         | Some _ as v -> v
+         | None -> Hashtbl.find_opt module_registry key)
       | None -> None
     in
     (match qualified_lookup with
@@ -6142,6 +6164,10 @@ let rec eval_decl (env : env) (d : decl) : env =
         then Some (name.txt ^ "." ^ k, v)
         else None
       ) mod_env in
+    (* Register in the global module registry so that cross-module
+       qualified lookups (EField) can find these bindings at call time
+       even if the referencing module was evaluated before this one. *)
+    List.iter (fun (k, v) -> Hashtbl.replace module_registry k v) prefixed;
     prefixed @ env
 
   | DImpl (idef, sp) ->
@@ -6271,6 +6297,7 @@ and eval_decls (env : env) (decls : decl list) : env =
             fully-populated environment (including all stubs). *)
 let eval_module_env (m : module_) : env =
   (* Reset global actor and task state for this module run *)
+  Hashtbl.clear module_registry;
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.clear actor_registry;
   next_pid := 0;
