@@ -66,7 +66,7 @@ let config_config _name pascal =
 mod %sConfig do
 
   doc "Application name atom used as the Config namespace."
-  pub fn ns() do
+  fn ns() do
     :%s
   end
 
@@ -82,7 +82,7 @@ let config_dev name pascal =
 mod %sDevConfig do
 
   doc "Apply development configuration."
-  pub fn configure() do
+  fn configure() do
     Config.put_endpoint(4000, "localhost", "dev-secret-key-base-replace-in-prod")
     Config.put(:%s, :debug, true)
     Config.put(:%s, :code_reloader, true)
@@ -105,7 +105,7 @@ let config_test name pascal =
 mod %sTestConfig do
 
   doc "Apply test configuration."
-  pub fn configure() do
+  fn configure() do
     Config.put_endpoint(4001, "localhost", "test-secret-key-base")
     Config.put(:%s, :debug, false)
     Config.put(:%s, :app_name, "%s")
@@ -127,7 +127,7 @@ let config_prod pascal =
 mod %sProdConfig do
 
   doc "Apply production configuration.  Reads PORT and SECRET_KEY_BASE from env."
-  pub fn configure() do
+  fn configure() do
     let port   = Env.get_int("PORT", 4000)
     let secret = Env.require("SECRET_KEY_BASE")
     let host   = Env.get("PHX_HOST", "example.com")
@@ -184,17 +184,16 @@ mod %s do
 
     -- Build the request pipeline:
     -- request_timer -> router -> finish_timer (live_reload injected in dev)
-    let pipeline = fn conn -> do
+    let pipeline = fn conn ->
       let c0 = BastionDev.request_timer(conn)
       let c1 = router(c0, stats)
       let c2 = if Config.is_dev() then BastionDev.inject_live_reload(c1) else c1
       BastionDev.finish_timer(c2)
-    end
 
     println("[%s] listening on http://localhost:" ++ int_to_string(port))
-    if Config.is_dev() do
-      println("[%s] dev dashboard at http://localhost:" ++ int_to_string(port) ++ "/_bastion")
-    else :ok end
+    if Config.is_dev()
+    then println("[%s] dev dashboard at http://localhost:" ++ int_to_string(port) ++ "/_bastion")
+    else :ok
 
     HttpServer.new(port)
     |> HttpServer.plug(pipeline)
@@ -257,7 +256,7 @@ let router_source pascal =
 mod %s.Router do
 
   doc "Dispatch conn to the appropriate controller action."
-  pub fn dispatch(conn, stats) do
+  fn dispatch(conn, stats) do
     let m = HttpServer.method(conn)
     let p = HttpServer.path_info(conn)
     match (m, p) do
@@ -291,7 +290,7 @@ let page_controller_source pascal =
 mod %s.PageController do
 
   doc "Renders the home page."
-  pub fn index(conn) do
+  fn index(conn) do
     let html = %s.Templates.Layout.wrap(%s.Templates.Page.Index.render())
     HttpServer.send_resp(conn, 200, html)
   end
@@ -311,7 +310,7 @@ let layout_source name pascal =
 mod %s.Templates.Layout do
 
   doc "Wrap inner_html in the base HTML page shell."
-  pub fn wrap(inner_html) do
+  fn wrap(inner_html) do
     "<!DOCTYPE html>" ++
     "<html lang=\"en\">" ++
     "<head>" ++
@@ -340,7 +339,7 @@ let page_index_source name pascal =
 mod %s.Templates.Page.Index do
 
   doc "Render the home page body."
-  pub fn render() do
+  fn render() do
     "<main class=\"hero\">" ++
     "<h1>Welcome to %s!</h1>" ++
     "<p>Your Bastion app is running. Edit <code>lib/%s/templates/page/index.march</code> to get started.</p>" ++
@@ -399,12 +398,10 @@ let test_helper_source pascal =
 mod %sTest.Helper do
 
   doc "Assert two values are equal, printing a message on failure."
-  pub fn assert_equal(expected, actual, label) do
-    if expected == actual do
-      println("  PASS: " ++ label)
-    else
-      println("  FAIL: " ++ label ++ " — expected: " ++ to_string(expected) ++ ", got: " ++ to_string(actual))
-    end
+  fn assert_equal(expected, actual, label) do
+    if expected == actual
+    then println("  PASS: " ++ label)
+    else println("  FAIL: " ++ label ++ " — expected: " ++ to_string(expected) ++ ", got: " ++ to_string(actual))
   end
 
 end
