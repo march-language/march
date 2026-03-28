@@ -234,9 +234,14 @@ march/
     │   ├── resolver_cas_package.ml   # canonical archive, SHA-256 CAS store/verify
     │   ├── resolver_api_surface.ml   # pub fn/type extraction, diff, semver check
     │   ├── cmd_deps.ml               # forge deps (install all dep types + [patch])
-    │   └── cmd_publish.ml            # forge publish with semver enforcement
+    │   ├── cmd_publish.ml            # forge publish with semver enforcement
+    │   ├── scaffold_bastion.ml       # Bastion app file templates (12 files)
+    │   ├── cmd_bastion_new.ml        # forge bastion new APP_NAME
+    │   ├── cmd_bastion_server.ml     # forge bastion server (watch+restart loop)
+    │   └── cmd_bastion_routes.ml     # forge bastion routes (route table printer)
     └── test/
         ├── test_forge.exe            # 15 tests (scaffold, toml)
+        ├── test_bastion.exe          # 20 tests (bastion scaffold, routes parser)
         ├── test_resolver.exe         # 35 tests (semver, constraints, lockfile)
         ├── test_solver.exe           # 16 tests (registry, PubGrub solver)
         ├── test_cas_package.exe      # 10 tests (canonical archive, CAS)
@@ -247,7 +252,7 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
-## Current State (as of 2026-03-27, post Bastion web framework + Bastion.Cache/Depot stdlib middleware)
+## Current State (as of 2026-03-27, post forge bastion command group)
 
 - **Builds clean**
 - **14 pre-existing failures** in `repl_jit_regression`/`repl_compiler_parity` (unrelated to Bastion work); all other suites pass. Full list: (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing** + **Phase 4: reduction counting in compiled code** + **Phase 4: lazy stack growth** + **Vault sharded KV store** + **Bastion.Cache + Bastion.Depot middleware**):
@@ -260,6 +265,7 @@ march/
   - `test_lsp.exe`: 120 tests, passing (doc strings, find-refs, rename, sig-help, code actions, snippet completions, folding ranges, type annotation action, remove unused binding action, phase2 enhanced match, quickfix framework, dead code detection, p1.1 typed match stubs, p1.7 fn return/param annotation, batch annotation, P2.8 naming convention fix, P3.10 De Morgan rewrite)
   - `test_stdlib_march.exe`: 17 tests, passing (Http, HttpTransport, HttpClient, HttpServer, WebSocket, Tls, Process, Logger, PubSub, Channel, ChannelServer, Presence, ChannelSocket, Env, Config, BastionDev, Vault)
   - `test_forge.exe`: 15 tests, passing (scaffold/toml)
+  - `test_bastion.exe`: 20 tests, passing (bastion scaffold, routes parser)
   - `test_resolver.exe`: 35 tests, passing (semver version parse/compare/~>, constraints, project dep loading, lockfile write/read/drift)
   - `test_solver.exe`: 16 tests, passing (registry roundtrip, PubGrub solver happy paths + conflicts + error messages)
   - `test_cas_package.exe`: 10 tests, passing (canonical archive, CAS store/lookup/idempotency/verify/tampering detection)
