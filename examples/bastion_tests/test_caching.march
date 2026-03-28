@@ -1,0 +1,311 @@
+-- Adversarial tests for Bastion.Cache.
+--
+-- Tests: ETag middleware, conditional requests (304), response caching,
+-- fragment caching, cache invalidation, Cache-Control helpers.
+--
+-- Run with:
+--   _build/default/bin/main.exe test examples/bastion_tests/test_caching.march
+
+mod TestCaching do
+
+pfn make_conn(m, path_, req_hdrs) do
+  Conn(0, m, path_, Nil, "", req_hdrs, "", 0, Nil, "", false, Nil, NoUpgrade)
+end
+
+pfn get_with_headers(hdrs) do
+  make_conn(Get, "/", hdrs)
+end
+
+pfn get_conn() do
+  get_with_headers(Nil)
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Bastion.Cache.etag" do
+  test "adds ETag response header to a responded conn" do
+    let c = HttpServer.send_resp(get_conn(), 200, "Hello")
+    let result = Bastion.Cache.etag(c)
+    match HttpServer.get_resp_header(result, "etag") do
+    Some(tag) -> assert (String.byte_size(tag) > 0)
+    None      -> assert false
+    end
+  end
+
+  test "ETag is wrapped in double quotes" do
+    let c = HttpServer.send_resp(get_conn(), 200, "body content")
+    let result = Bastion.Cache.etag(c)
+    match HttpServer.get_resp_header(result, "etag") do
+    Some(tag) -> do
+      assert (String.starts_with(tag, "\""))
+      assert (String.ends_with(tag, "\""))
+    end
+    None -> assert false
+    end
+  end
+
+  test "returns 304 when If-None-Match header matches ETag" do
+    -- First request: compute ETag
+    let c1 = HttpServer.send_resp(get_conn(), 200, "stable-content")
+    let r1 = Bastion.Cache.etag(c1)
+    match HttpServer.get_resp_header(r1, "etag") do
+    None      -> assert false
+    Some(tag) -> do
+      -- Second request: send matching If-None-Match
+      let hdrs = Cons(Header("if-none-match", tag), Nil)
+      let c2 = HttpServer.send_resp(get_with_headers(hdrs), 200, "stable-content")
+      let r2 = Bastion.Cache.etag(c2)
+      assert (HttpServer.status(r2) == 304)
+      assert (HttpServer.resp_body(r2) == "")
+    end
+    end
+  end
+
+  test "returns full response when If-None-Match does NOT match" do
+    let hdrs = Cons(Header("if-none-match", "\"stale-tag\""), Nil)
+    let c = HttpServer.send_resp(get_with_headers(hdrs), 200, "updated-content")
+    let result = Bastion.Cache.etag(c)
+    -- Should NOT return 304
+    assert (HttpServer.status(result) == 200)
+    assert (HttpServer.resp_body(result) == "updated-content")
+  end
+
+  test "same body produces same ETag (deterministic)" do
+    let c1 = HttpServer.send_resp(get_conn(), 200, "hello world")
+    let c2 = HttpServer.send_resp(get_conn(), 200, "hello world")
+    let r1 = Bastion.Cache.etag(c1)
+    let r2 = Bastion.Cache.etag(c2)
+    assert (HttpServer.get_resp_header(r1, "etag") == HttpServer.get_resp_header(r2, "etag"))
+  end
+
+  test "different bodies produce different ETags" do
+    let c1 = HttpServer.send_resp(get_conn(), 200, "content-A")
+    let c2 = HttpServer.send_resp(get_conn(), 200, "content-B")
+    let r1 = Bastion.Cache.etag(c1)
+    let r2 = Bastion.Cache.etag(c2)
+    assert (HttpServer.get_resp_header(r1, "etag") != HttpServer.get_resp_header(r2, "etag"))
+  end
+
+  test "empty body gets an ETag" do
+    let c = HttpServer.send_resp(get_conn(), 200, "")
+    let result = Bastion.Cache.etag(c)
+    match HttpServer.get_resp_header(result, "etag") do
+    Some(tag) -> assert (String.byte_size(tag) > 0)
+    None      -> assert false
+    end
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Bastion.Cache.cached" do
+  -- NOTE: Each test must use a unique cache key to avoid cross-test pollution
+  -- since Vault persists between tests in the same process.
+
+  test "cache miss: generator is called and result stored" do
+    -- First call: cache miss — generator runs
+    let result = Bastion.Cache.cached(get_conn(), "test-cache-miss-10", 0, fn c ->
+      HttpServer.text(c, 200, "generated-body"))
+    assert (HttpServer.resp_body(result) == "generated-body")
+    assert (HttpServer.status(result) == 200)
+  end
+
+  test "cache hit: second request returns cached value" do
+    -- Prime the cache with "cached-body"
+    Bastion.Cache.cached(get_conn(), "test-cache-hit-10", 0, fn c ->
+      HttpServer.text(c, 200, "cached-body"))
+    -- Second call: generator has a different body — should NOT run (cache hit)
+    let result = Bastion.Cache.cached(get_conn(), "test-cache-hit-10", 0, fn c ->
+      HttpServer.text(c, 200, "should-not-appear"))
+    assert (HttpServer.resp_body(result) == "cached-body")
+  end
+
+  test "cache hit returns correct status code" do
+    Bastion.Cache.cached(get_conn(), "test-status-cache-10", 0, fn c ->
+      HttpServer.json(c, 201, "{\"status\":\"created\"}"))
+    let result = Bastion.Cache.cached(get_conn(), "test-status-cache-10", 0, fn c ->
+      HttpServer.text(c, 500, "wrong"))
+    assert (HttpServer.status(result) == 201)
+  end
+
+  test "different cache keys are independent" do
+    Bastion.Cache.cached(get_conn(), "key-A-10", 0, fn c ->
+      HttpServer.text(c, 200, "value-A"))
+    Bastion.Cache.cached(get_conn(), "key-B-10", 0, fn c ->
+      HttpServer.text(c, 200, "value-B"))
+    let ra = Bastion.Cache.cached(get_conn(), "key-A-10", 0, fn c ->
+      HttpServer.text(c, 500, "wrong-A"))
+    let rb = Bastion.Cache.cached(get_conn(), "key-B-10", 0, fn c ->
+      HttpServer.text(c, 500, "wrong-B"))
+    assert (HttpServer.resp_body(ra) == "value-A")
+    assert (HttpServer.resp_body(rb) == "value-B")
+  end
+
+  test "TTL=0 means cache forever (entry persists)" do
+    Bastion.Cache.cached(get_conn(), "test-forever-cache-10", 0, fn c ->
+      HttpServer.text(c, 200, "forever"))
+    let result = Bastion.Cache.cached(get_conn(), "test-forever-cache-10", 0, fn c ->
+      HttpServer.text(c, 404, "should-not-be-here"))
+    assert (HttpServer.resp_body(result) == "forever")
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Bastion.Cache.fragment" do
+  test "cache miss: generator is called and result returned" do
+    let frag = Bastion.Cache.fragment("frag-miss-10", 0, fn () ->
+      IOList.from_string("<div>generated</div>"))
+    assert (IOList.to_string(frag) == "<div>generated</div>")
+  end
+
+  test "cache hit: returns stored fragment" do
+    Bastion.Cache.fragment("frag-hit-10", 0, fn () ->
+      IOList.from_string("<div>cached-frag</div>"))
+    -- Second call with a different generator: should return cached value
+    let result = Bastion.Cache.fragment("frag-hit-10", 0, fn () ->
+      IOList.from_string("<div>should-not-appear</div>"))
+    assert (IOList.to_string(result) == "<div>cached-frag</div>")
+  end
+
+  test "fragments from different keys are independent" do
+    Bastion.Cache.fragment("frag-ind-A-10", 0, fn () -> IOList.from_string("A"))
+    Bastion.Cache.fragment("frag-ind-B-10", 0, fn () -> IOList.from_string("B"))
+    let ra = Bastion.Cache.fragment("frag-ind-A-10", 0, fn () -> IOList.from_string("wrong-A"))
+    let rb = Bastion.Cache.fragment("frag-ind-B-10", 0, fn () -> IOList.from_string("wrong-B"))
+    assert (IOList.to_string(ra) == "A")
+    assert (IOList.to_string(rb) == "B")
+  end
+
+  test "empty fragment is cached" do
+    Bastion.Cache.fragment("frag-empty-10", 0, fn () -> IOList.empty())
+    let result = Bastion.Cache.fragment("frag-empty-10", 0, fn () ->
+      IOList.from_string("should-not-appear"))
+    assert (IOList.to_string(result) == "")
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Bastion.Cache.invalidate" do
+  test "invalidate removes a cached response entry" do
+    -- Warm cache with "original"
+    Bastion.Cache.cached(get_conn(), "inv-test-10", 0, fn c ->
+      HttpServer.text(c, 200, "original"))
+    -- Invalidate
+    Bastion.Cache.invalidate("response_cache", "inv-test-10")
+    -- Miss: generator runs again, so new value is returned
+    let result = Bastion.Cache.cached(get_conn(), "inv-test-10", 0, fn c ->
+      HttpServer.text(c, 200, "regenerated"))
+    assert (HttpServer.resp_body(result) == "regenerated")
+  end
+
+  test "invalidate on nonexistent key is a no-op" do
+    -- Should not panic
+    Bastion.Cache.invalidate("response_cache", "nonexistent-key-xyz")
+    assert true
+  end
+
+  test "invalidate on nonexistent table is a no-op" do
+    Bastion.Cache.invalidate("nonexistent_table_xyz", "key")
+    assert true
+  end
+
+  test "invalidate removes fragment entry" do
+    Bastion.Cache.fragment("frag-inv-10", 0, fn () -> IOList.from_string("before-invalidate"))
+    Bastion.Cache.invalidate("fragment_cache", "frag-inv-10")
+    let result = Bastion.Cache.fragment("frag-inv-10", 0, fn () ->
+      IOList.from_string("after-invalidate"))
+    assert (IOList.to_string(result) == "after-invalidate")
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Bastion.Cache.invalidate_prefix" do
+  test "removes all keys with matching prefix" do
+    -- Store multiple entries with same prefix
+    Bastion.Cache.fragment("prefix-test-A-1-10", 0, fn () -> IOList.from_string("a1-original"))
+    Bastion.Cache.fragment("prefix-test-A-2-10", 0, fn () -> IOList.from_string("a2-original"))
+    Bastion.Cache.fragment("prefix-test-B-1-10", 0, fn () -> IOList.from_string("b1-original"))
+    -- Invalidate all "prefix-test-A-" entries
+    Bastion.Cache.invalidate_prefix("fragment_cache", "prefix-test-A-")
+    -- A entries should be regenerated (new generator returns different value)
+    let ra1 = Bastion.Cache.fragment("prefix-test-A-1-10", 0, fn () -> IOList.from_string("a1-regenerated"))
+    let ra2 = Bastion.Cache.fragment("prefix-test-A-2-10", 0, fn () -> IOList.from_string("a2-regenerated"))
+    -- B entry should return original cached value
+    let rb1 = Bastion.Cache.fragment("prefix-test-B-1-10", 0, fn () -> IOList.from_string("b1-wrong"))
+    assert (IOList.to_string(ra1) == "a1-regenerated")
+    assert (IOList.to_string(ra2) == "a2-regenerated")
+    assert (IOList.to_string(rb1) == "b1-original")  -- B entry survives
+  end
+
+  test "empty prefix matches nothing (no-op on empty table)" do
+    Bastion.Cache.invalidate_prefix("nonexistent-table-pfx", "")
+    assert true
+  end
+
+  test "prefix matching does not affect other tables" do
+    Bastion.Cache.fragment("shared-pfx-key", 0, fn () -> IOList.from_string("fragment-val"))
+    Bastion.Cache.invalidate_prefix("response_cache", "shared-pfx-key")
+    -- Fragment cache should be untouched
+    let result = Bastion.Cache.fragment("shared-pfx-key", 0, fn () -> IOList.from_string("wrong"))
+    assert (IOList.to_string(result) == "fragment-val")
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Bastion.Cache.cache_control" do
+  test "sets arbitrary Cache-Control header" do
+    let c = Bastion.Cache.cache_control(get_conn(), "public, max-age=3600")
+    match HttpServer.get_resp_header(c, "cache-control") do
+    Some(v) -> assert (v == "public, max-age=3600")
+    None    -> assert false
+    end
+  end
+
+  test "no_cache sets no-store directive" do
+    let c = Bastion.Cache.no_cache(get_conn())
+    match HttpServer.get_resp_header(c, "cache-control") do
+    Some(v) -> assert (String.contains(v, "no-store"))
+    None    -> assert false
+    end
+  end
+
+  test "no_cache sets no-cache directive" do
+    let c = Bastion.Cache.no_cache(get_conn())
+    match HttpServer.get_resp_header(c, "cache-control") do
+    Some(v) -> assert (String.contains(v, "no-cache"))
+    None    -> assert false
+    end
+  end
+
+  test "public_cache sets max-age with correct value" do
+    let c = Bastion.Cache.public_cache(get_conn(), 7200)
+    match HttpServer.get_resp_header(c, "cache-control") do
+    Some(v) -> do
+      assert (String.contains(v, "public"))
+      assert (String.contains(v, "max-age=7200"))
+    end
+    None -> assert false
+    end
+  end
+
+  test "public_cache with 0 sets max-age=0" do
+    let c = Bastion.Cache.public_cache(get_conn(), 0)
+    match HttpServer.get_resp_header(c, "cache-control") do
+    Some(v) -> assert (String.contains(v, "max-age=0"))
+    None    -> assert false
+    end
+  end
+
+  test "cache_control does not modify conn body or status" do
+    let c = Bastion.Cache.no_cache(get_conn())
+    assert (HttpServer.status(c) == 0)
+    assert (HttpServer.resp_body(c) == "")
+    assert (!HttpServer.halted(c))
+  end
+end
+
+end -- mod TestCaching

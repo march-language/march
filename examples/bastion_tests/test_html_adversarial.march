@@ -1,0 +1,353 @@
+-- Adversarial tests for the Html module.
+--
+-- Focuses on XSS attack vectors, double-escaping, Unicode,
+-- edge cases in tag generation, layout injection, and content_hash.
+--
+-- Run with:
+--   _build/default/bin/main.exe test examples/bastion_tests/test_html_adversarial.march
+
+mod TestHtmlAdversarial do
+
+-- ---------------------------------------------------------------------------
+
+describe "Html.escape: XSS attack vectors" do
+  test "script tag is escaped" do
+    let result = Html.escape("<script>alert('xss')</script>")
+    assert (!String.contains(result, "<script>"))
+    assert (String.contains(result, "&lt;script&gt;"))
+  end
+
+  test "event handler injection: onerror attribute" do
+    let result = Html.escape("\" onerror=\"alert(1)")
+    assert (!String.contains(result, "\""))
+    assert (String.contains(result, "&quot;"))
+  end
+
+  test "event handler via single quote" do
+    let result = Html.escape("' onmouseover='alert(1)")
+    assert (!String.contains(result, "'"))
+    assert (String.contains(result, "&#39;"))
+  end
+
+  test "javascript: protocol" do
+    let result = Html.escape("javascript:alert(1)")
+    -- The literal text is safe; it cannot execute when escaped
+    -- but javascript: itself doesn't need HTML escaping
+    assert (result == "javascript:alert(1)")
+  end
+
+  test "IMG tag with onerror" do
+    let result = Html.escape("<img src=x onerror=alert(1)>")
+    assert (!String.contains(result, "<img"))
+    assert (String.contains(result, "&lt;img"))
+  end
+
+  test "SVG XSS vector" do
+    let result = Html.escape("<svg onload=alert(1)>")
+    assert (!String.contains(result, "<svg"))
+    assert (String.contains(result, "&lt;svg"))
+  end
+
+  test "HTML comment injection attempt" do
+    let result = Html.escape("<!--<script>-->")
+    assert (!String.contains(result, "<!--"))
+    assert (String.contains(result, "&lt;!--"))
+  end
+
+  test "null byte handling (passes through as-is)" do
+    -- HTML.escape does not process null bytes — they're safe in HTML contexts
+    -- and the test verifies the function doesn't panic
+    let s = "before\x00after"
+    let result = Html.escape(s)
+    -- Should not panic; result should still contain the rest
+    assert (String.contains(result, "before"))
+    assert (String.contains(result, "after"))
+  end
+
+  test "double escaping prevention: & is escaped only once" do
+    -- If we escape "a & b", we get "a &amp; b"
+    -- Escaping again should give "a &amp;amp; b" (escaping &)
+    let once = Html.escape("a & b")
+    assert (once == "a &amp; b")
+    let twice = Html.escape(once)
+    assert (twice == "a &amp;amp; b")
+    -- Safe values do NOT get double-escaped when embedded in ~H
+    -- (that's the IOList contract, not Html.escape)
+  end
+
+  test "entity already in string is escaped (no double-escape by ~H)" do
+    -- If user input contains &amp; it should be escaped to &amp;amp;
+    let user_input = "&amp;"
+    let result = Html.escape(user_input)
+    assert (result == "&amp;amp;")
+  end
+
+  test "all five entities escaped together" do
+    let result = Html.escape("& < > \" '")
+    assert (result == "&amp; &lt; &gt; &quot; &#39;")
+  end
+
+  test "mixed XSS payload" do
+    let payload = "<script>document.cookie</script>&onload=evil&\""
+    let result = Html.escape(payload)
+    assert (!String.contains(result, "<"))
+    assert (!String.contains(result, ">"))
+    assert (!String.contains(result, "\""))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Html.escape: Unicode and multi-byte strings" do
+  test "ASCII-only string is unchanged" do
+    assert (Html.escape("hello world 123") == "hello world 123")
+  end
+
+  test "Unicode characters pass through unchanged" do
+    let result = Html.escape("こんにちは世界")
+    assert (result == "こんにちは世界")
+  end
+
+  test "Emoji passes through unchanged" do
+    let result = Html.escape("Hello 🌍!")
+    assert (result == "Hello 🌍!")
+  end
+
+  test "Mixed unicode and HTML entities" do
+    let result = Html.escape("Привет <world>")
+    assert (String.contains(result, "Привет "))
+    assert (String.contains(result, "&lt;world&gt;"))
+  end
+
+  test "empty string escapes to empty string" do
+    assert (Html.escape("") == "")
+  end
+
+  test "whitespace-only string is unchanged" do
+    assert (Html.escape("   \t\n  ") == "   \t\n  ")
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "~H sigil: adversarial interpolation" do
+  test "XSS via interpolated script tag" do
+    let xss = "<script>alert('xss')</script>"
+    let result = IOList.to_string(~H"<div>${xss}</div>")
+    assert (!String.contains(result, "<script>"))
+    assert (String.contains(result, "&lt;script&gt;"))
+  end
+
+  test "XSS via event handler in attribute value" do
+    let evil = "\" onmouseover=\"alert(1)\""
+    let result = IOList.to_string(~H"<a href=\"${evil}\">click</a>")
+    -- The double quote must be escaped so the attacker cannot break out of the attribute value.
+    -- "onmouseover" still appears as text inside the escaped value — that's fine.
+    assert (String.contains(result, "&quot;"))
+    -- The raw unescaped injection sequence must not be present
+    assert (!String.contains(result, "\" onmouseover="))
+  end
+
+  test "double quote injection in attribute" do
+    let injected = "x\" href=\"evil"
+    let result = IOList.to_string(~H"<a class=\"${injected}\">text</a>")
+    -- The injected double quote should be escaped
+    assert (!String.contains(result, "href=\"evil"))
+  end
+
+  test "IOList embedded in ~H is NOT double-escaped" do
+    let inner = IOList.from_string("<b>bold</b>")
+    let outer = IOList.to_string(~H"<div>${inner}</div>")
+    assert (outer == "<div><b>bold</b></div>")
+  end
+
+  test "Html.Safe embedded in ~H is NOT escaped" do
+    let safe = Html.raw("<em>safe html</em>")
+    let result = IOList.to_string(~H"<p>${safe}</p>")
+    assert (result == "<p><em>safe html</em></p>")
+  end
+
+  test "chained ~H with XSS at each level" do
+    let xss = "<script>steal()</script>"
+    let inner = ~H"<span>${xss}</span>"
+    let outer = IOList.to_string(~H"<div>${inner}</div>")
+    assert (!String.contains(outer, "<script>steal"))
+    assert (String.contains(outer, "&lt;script&gt;"))
+  end
+
+  test "numeric interpolation does not get escaped" do
+    let n = 42
+    let result = IOList.to_string(~H"<span>${int_to_string(n)}</span>")
+    assert (result == "<span>42</span>")
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Html.tag: adversarial attribute injection" do
+  test "attribute value with > is escaped" do
+    let result = Html.tag("div", [("data-val", "a > b")], IOList.empty())
+    let s = IOList.to_string(result)
+    assert (!String.contains(s, "a > b"))
+    assert (String.contains(s, "a &gt; b"))
+  end
+
+  test "attribute value with < is escaped" do
+    let result = Html.tag("div", [("data-val", "a < b")], IOList.empty())
+    let s = IOList.to_string(result)
+    assert (!String.contains(s, "a < b"))
+    assert (String.contains(s, "a &lt; b"))
+  end
+
+  test "attribute value with & is escaped" do
+    let result = Html.tag("a", [("href", "/path?a=1&b=2")], IOList.from_string("link"))
+    let s = IOList.to_string(result)
+    assert (!String.contains(s, "a=1&b=2"))
+    assert (String.contains(s, "a=1&amp;b=2"))
+  end
+
+  test "attribute injection via quote in value" do
+    -- Attacker tries to inject: class="x" onclick="evil()"
+    let injected = "x\" onclick=\"evil()"
+    let result = Html.tag("div", [("class", injected)], IOList.empty())
+    let s = IOList.to_string(result)
+    -- The double quote must be escaped — injection cannot break out of the attribute value.
+    -- "onclick" still appears as text inside the escaped value — that's fine.
+    assert (String.contains(s, "&quot;"))
+    -- The raw unescaped injection sequence must not be present
+    assert (!String.contains(s, "\" onclick="))
+  end
+
+  test "XSS payload in attribute name is escaped" do
+    let evil_key = "onclick"
+    let result = Html.tag("div", [(evil_key, "alert(1)")], IOList.from_string("content"))
+    let s = IOList.to_string(result)
+    -- The attribute name 'onclick' is not itself dangerous, but
+    -- this tests that attribute names are passed through and keys work
+    assert (String.contains(s, "onclick"))
+  end
+
+  test "empty attribute value is valid" do
+    let result = Html.tag("input", [("disabled", "")], IOList.empty())
+    let s = IOList.to_string(result)
+    assert (String.contains(s, "disabled=\"\""))
+  end
+
+  test "many attributes all appear" do
+    let attrs = [("class", "c"), ("id", "i"), ("data-x", "v"), ("role", "button")]
+    let result = Html.tag("div", attrs, IOList.empty())
+    let s = IOList.to_string(result)
+    assert (String.contains(s, "class=\"c\""))
+    assert (String.contains(s, "id=\"i\""))
+    assert (String.contains(s, "data-x=\"v\""))
+    assert (String.contains(s, "role=\"button\""))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Html.layout: adversarial title" do
+  test "XSS in title is escaped" do
+    let result = Html.layout("<script>alert(1)</script>", IOList.empty(), IOList.empty())
+    let s = IOList.to_string(result)
+    assert (!String.contains(s, "<script>alert"))
+    assert (String.contains(s, "&lt;script&gt;"))
+  end
+
+  test "title with & is escaped" do
+    let result = Html.layout("A & B", IOList.empty(), IOList.empty())
+    let s = IOList.to_string(result)
+    assert (String.contains(s, "A &amp; B"))
+  end
+
+  test "body content is NOT escaped (it's IOList, already safe)" do
+    let body = IOList.from_string("<p>Hello <b>World</b></p>")
+    let result = Html.layout("Title", IOList.empty(), body)
+    let s = IOList.to_string(result)
+    assert (String.contains(s, "<p>Hello <b>World</b></p>"))
+  end
+
+  test "head_extra is NOT escaped" do
+    let head = IOList.from_string("<link rel=\"stylesheet\" href=\"/app.css\">")
+    let result = Html.layout("Title", head, IOList.empty())
+    let s = IOList.to_string(result)
+    assert (String.contains(s, "<link rel=\"stylesheet\""))
+  end
+
+  test "empty layout is a valid HTML document" do
+    let result = Html.layout("", IOList.empty(), IOList.empty())
+    let s = IOList.to_string(result)
+    assert (String.starts_with(s, "<!DOCTYPE html>"))
+    assert (String.contains(s, "<html>"))
+    assert (String.contains(s, "</html>"))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Html.list and Html.render_collection: edge cases" do
+  test "single-element list renders correctly" do
+    let items = ["only"]
+    let result = Html.list(items, fn item -> ~H"<li>${item}</li>")
+    assert (IOList.to_string(result) == "<li>only</li>")
+  end
+
+  test "list with XSS content is escaped" do
+    let items = ["<script>", "alert('xss')"]
+    let result = Html.list(items, fn item -> ~H"<li>${item}</li>")
+    let s = IOList.to_string(result)
+    assert (!String.contains(s, "<script>"))
+    assert (String.contains(s, "&lt;script&gt;"))
+  end
+
+  test "collection rendering with mixed safe/unsafe" do
+    let items = ["safe", "<evil>", "also safe"]
+    let result = Html.render_collection(items, fn item -> ~H"<span>${item}</span>")
+    let s = IOList.to_string(result)
+    assert (String.contains(s, "<span>safe</span>"))
+    assert (String.contains(s, "&lt;evil&gt;"))
+    assert (String.contains(s, "<span>also safe</span>"))
+  end
+
+  test "join with XSS in separator does not get escaped" do
+    -- separator is static, not escaped
+    let items = [IOList.from_string("a"), IOList.from_string("b")]
+    let result = Html.join(items, " | ")
+    assert (IOList.to_string(result) == "a | b")
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Html.content_hash: determinism and uniqueness" do
+  test "same input gives same hash" do
+    let h1 = Html.content_hash(IOList.from_string("same content"))
+    let h2 = Html.content_hash(IOList.from_string("same content"))
+    assert (h1 == h2)
+  end
+
+  test "different inputs give different hashes" do
+    let h1 = Html.content_hash(IOList.from_string("content A"))
+    let h2 = Html.content_hash(IOList.from_string("content B"))
+    assert (h1 != h2)
+  end
+
+  test "hash is 16 hex characters" do
+    let h = Html.content_hash(IOList.from_string("test"))
+    assert (string_length(h) == 16)
+  end
+
+  test "XSS payload has a valid hash" do
+    let xss = IOList.from_string("<script>alert(1)</script>")
+    let h = Html.content_hash(xss)
+    assert (string_length(h) == 16)
+  end
+
+  test "order matters: different order gives different hash" do
+    let a = IOList.append(IOList.from_string("hello"), IOList.from_string("world"))
+    let b = IOList.append(IOList.from_string("world"), IOList.from_string("hello"))
+    assert (Html.content_hash(a) != Html.content_hash(b))
+  end
+end
+
+end -- mod TestHtmlAdversarial

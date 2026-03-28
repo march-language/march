@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-28 (CorrelationId middleware + uuid_v4 builtin)
+**Last updated:** 2026-03-28 (CorrelationId middleware + uuid_v4 builtin; Bastion adversarial test suite — 346 tests across 7 files; bug fixes in `stdlib/islands.march`, test correctness fixes; RESULTS.md documents all findings)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 

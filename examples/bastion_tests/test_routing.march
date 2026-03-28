@@ -1,0 +1,341 @@
+-- Adversarial tests for the HTTP routing pipeline.
+--
+-- Tests: run_pipeline, halt semantics, method dispatch, 404 fallback,
+-- path matching, Bastion.Depot, redirect, json/text/html helpers,
+-- assign threading, and chained middleware.
+--
+-- Run with:
+--   _build/default/bin/main.exe test examples/bastion_tests/test_routing.march
+
+mod TestRouting do
+
+-- ---------------------------------------------------------------------------
+-- Helpers
+-- ---------------------------------------------------------------------------
+
+pfn make_conn(m, path_, req_hdrs, body) do
+  let parts = List.filter(string_split(path_, "/"), fn s -> not(string_is_empty(s)))
+  Conn(0, m, path_, parts, "", req_hdrs, body, 0, Nil, "", false, Nil, NoUpgrade)
+end
+
+pfn make_get(path_) do
+  make_conn(Get, path_, Nil, "")
+end
+
+pfn make_post(path_, body) do
+  make_conn(Post, path_, Nil, body)
+end
+
+-- A simple router: GET /hello -> 200, POST /submit -> 201, else 404
+pfn simple_router(conn) do
+  match (HttpServer.method(conn), HttpServer.path_info(conn)) do
+  (Get, Cons("hello", Nil)) ->
+    HttpServer.text(conn, 200, "world")
+  (Post, Cons("submit", Nil)) ->
+    HttpServer.json(conn, 201, "{\"ok\":true}")
+  (Get, Cons("redirect-me", Nil)) ->
+    HttpServer.redirect(conn, "/hello")
+  (Get, Cons("html-page", Nil)) ->
+    HttpServer.html(conn, 200, "<h1>Hello</h1>")
+  _ ->
+    HttpServer.text(conn, 404, "not found")
+  end
+end
+
+-- A plug that tags the conn with an assign
+pfn tagger(tag_val, conn) do
+  HttpServer.assign(conn, "tag", tag_val)
+end
+
+-- A plug that halts immediately
+pfn halter(conn) do
+  HttpServer.send_resp(conn, 418, "I'm a teapot")
+end
+
+-- A plug that should never be reached
+pfn must_not_reach(conn) do
+  panic("This plug should never be reached")
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "run_pipeline: basic pass-through" do
+  test "empty pipeline returns conn unchanged" do
+    let c = make_get("/hello")
+    let result = HttpServer.run_pipeline(c, Nil)
+    assert (!HttpServer.halted(result))
+    assert (HttpServer.status(result) == 0)
+  end
+
+  test "single plug runs" do
+    let c = make_get("/hello")
+    let result = HttpServer.run_pipeline(c, Cons(simple_router, Nil))
+    assert (HttpServer.halted(result))
+    assert (HttpServer.status(result) == 200)
+  end
+
+  test "multiple plugs run in order" do
+    let c = make_get("/hello")
+    let plugs = Cons(fn conn -> HttpServer.assign(conn, "step", "1"),
+                Cons(fn conn -> HttpServer.assign(conn, "step", "2"),
+                Nil))
+    let result = HttpServer.run_pipeline(c, plugs)
+    match HttpServer.get_assign(result, "step") do
+    Some(v) -> assert (v == "2")
+    None    -> assert false
+    end
+  end
+
+  test "assigns accumulate across plugs" do
+    let c = make_get("/")
+    let plugs = Cons(fn conn -> HttpServer.assign(conn, "a", "1"),
+                Cons(fn conn -> HttpServer.assign(conn, "b", "2"),
+                Nil))
+    let result = HttpServer.run_pipeline(c, plugs)
+    match HttpServer.get_assign(result, "a") do
+    Some(v) -> assert (v == "1")
+    None    -> assert false
+    end
+    match HttpServer.get_assign(result, "b") do
+    Some(v) -> assert (v == "2")
+    None    -> assert false
+    end
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "run_pipeline: halt stops execution" do
+  test "halted conn skips remaining plugs" do
+    let c = make_get("/")
+    let plugs = Cons(halter, Cons(must_not_reach, Nil))
+    let result = HttpServer.run_pipeline(c, plugs)
+    assert (HttpServer.halted(result))
+    assert (HttpServer.status(result) == 418)
+  end
+
+  test "pre-halted conn skips ALL plugs" do
+    let c = HttpServer.send_resp(make_get("/"), 200, "pre-halted")
+    let result = HttpServer.run_pipeline(c, Cons(must_not_reach, Nil))
+    assert (HttpServer.status(result) == 200)
+  end
+
+  test "send_resp marks conn as halted" do
+    let c = make_get("/hello")
+    let result = simple_router(c)
+    assert (HttpServer.halted(result))
+  end
+
+  test "halt() marks halted without setting response" do
+    let c = make_get("/")
+    let result = HttpServer.halt(c)
+    assert (HttpServer.halted(result))
+    assert (HttpServer.status(result) == 0)
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "route matching: method dispatch" do
+  test "GET /hello returns 200" do
+    let result = simple_router(make_get("/hello"))
+    assert (HttpServer.status(result) == 200)
+    assert (HttpServer.resp_body(result) == "world")
+  end
+
+  test "POST /submit returns 201" do
+    let result = simple_router(make_post("/submit", ""))
+    assert (HttpServer.status(result) == 201)
+  end
+
+  test "POST /hello returns 404 (method mismatch)" do
+    let result = simple_router(make_post("/hello", ""))
+    assert (HttpServer.status(result) == 404)
+  end
+
+  test "GET /submit returns 404 (method mismatch)" do
+    let result = simple_router(make_get("/submit"))
+    assert (HttpServer.status(result) == 404)
+  end
+
+  test "GET /unknown returns 404" do
+    let result = simple_router(make_get("/unknown/path"))
+    assert (HttpServer.status(result) == 404)
+  end
+
+  test "root path returns 404 in simple_router" do
+    let result = simple_router(make_get("/"))
+    assert (HttpServer.status(result) == 404)
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+pfn param_router(conn) do
+  match (HttpServer.method(conn), HttpServer.path_info(conn)) do
+  (Get, Cons("users", Cons(user_id, Nil))) ->
+    HttpServer.text(conn, 200, "user:" ++ user_id)
+  (Get, Cons("posts", Cons(post_id, Cons("comments", Nil)))) ->
+    HttpServer.text(conn, 200, "post-comments:" ++ post_id)
+  _ ->
+    HttpServer.text(conn, 404, "not found")
+  end
+end
+
+describe "route matching: path params" do
+  test "extracts single path param" do
+    let result = param_router(make_get("/users/42"))
+    assert (HttpServer.status(result) == 200)
+    assert (HttpServer.resp_body(result) == "user:42")
+  end
+
+  test "extracts nested path param" do
+    let result = param_router(make_get("/posts/99/comments"))
+    assert (HttpServer.status(result) == 200)
+    assert (HttpServer.resp_body(result) == "post-comments:99")
+  end
+
+  test "deep path with extra segments returns 404" do
+    let result = param_router(make_get("/users/42/extra"))
+    assert (HttpServer.status(result) == 404)
+  end
+
+  test "numeric string param works" do
+    let result = param_router(make_get("/users/12345"))
+    assert (HttpServer.resp_body(result) == "user:12345")
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "response helpers" do
+  test "text sets content-type text/plain" do
+    let c = HttpServer.text(make_get("/"), 200, "hello")
+    match HttpServer.get_resp_header(c, "content-type") do
+    Some(ct) -> assert (String.contains(ct, "text/plain"))
+    None     -> assert false
+    end
+  end
+
+  test "json sets content-type application/json" do
+    let c = HttpServer.json(make_get("/"), 200, "{}")
+    match HttpServer.get_resp_header(c, "content-type") do
+    Some(ct) -> assert (String.contains(ct, "application/json"))
+    None     -> assert false
+    end
+  end
+
+  test "html sets content-type text/html" do
+    let c = HttpServer.html(make_get("/"), 200, "<p>ok</p>")
+    match HttpServer.get_resp_header(c, "content-type") do
+    Some(ct) -> assert (String.contains(ct, "text/html"))
+    None     -> assert false
+    end
+  end
+
+  test "redirect sets location header and 302" do
+    let c = HttpServer.redirect(make_get("/old"), "/new")
+    assert (HttpServer.status(c) == 302)
+    assert (HttpServer.get_resp_header(c, "location") == Some("/new"))
+  end
+
+  test "send_resp overwrites prior response" do
+    let c = make_get("/")
+    let c1 = HttpServer.send_resp(c, 200, "first")
+    let c2 = HttpServer.send_resp(c1, 404, "second")
+    assert (HttpServer.status(c2) == 404)
+    assert (HttpServer.resp_body(c2) == "second")
+  end
+
+  test "put_resp_header prepends header" do
+    let c = make_get("/")
+    let c1 = HttpServer.put_resp_header(c, "x-custom", "value")
+    assert (HttpServer.get_resp_header(c1, "x-custom") == Some("value"))
+  end
+
+  test "multiple resp headers are all accessible" do
+    let c = make_get("/")
+    let c1 = HttpServer.put_resp_header(c, "x-a", "1")
+    let c2 = HttpServer.put_resp_header(c1, "x-b", "2")
+    assert (HttpServer.get_resp_header(c2, "x-a") == Some("1"))
+    assert (HttpServer.get_resp_header(c2, "x-b") == Some("2"))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Bastion.Depot.with_pool" do
+  test "assigns pool under 'db' key" do
+    let c = Bastion.Depot.with_pool(make_get("/"), "mock-pool")
+    assert (HttpServer.get_assign(c, "db") == Some("mock-pool"))
+  end
+
+  test "pool can be retrieved downstream" do
+    let c = make_get("/")
+    let pipeline = Cons(
+      fn conn -> Bastion.Depot.with_pool(conn, "pool42"),
+      Cons(
+        fn conn -> do
+          let db = HttpServer.get_assign(conn, "db")
+          match db do
+          Some(v) -> HttpServer.text(conn, 200, v)
+          None    -> HttpServer.text(conn, 500, "no db")
+          end
+        end,
+        Nil))
+    let result = HttpServer.run_pipeline(c, pipeline)
+    assert (HttpServer.resp_body(result) == "pool42")
+  end
+
+  test "with_pool overwrites prior pool" do
+    let c = Bastion.Depot.with_pool(make_get("/"), "pool-v1")
+    let c2 = Bastion.Depot.with_pool(c, "pool-v2")
+    -- Most recent assign wins (assigns are prepended)
+    match HttpServer.get_assign(c2, "db") do
+    Some(v) -> assert (v == "pool-v2")
+    None    -> assert false
+    end
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "request header access" do
+  test "get_req_header finds header case-insensitively" do
+    let hdrs = Cons(Header("Content-Type", "application/json"), Nil)
+    let c = make_conn(Post, "/", hdrs, "{}")
+    assert (HttpServer.get_req_header(c, "content-type") == Some("application/json"))
+    assert (HttpServer.get_req_header(c, "CONTENT-TYPE") == Some("application/json"))
+  end
+
+  test "get_req_header returns None for missing header" do
+    let c = make_get("/")
+    assert (HttpServer.get_req_header(c, "authorization") == None)
+  end
+
+  test "req_body is accessible" do
+    let c = make_post("/", "hello body")
+    assert (HttpServer.req_body(c) == "hello body")
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "path_info parsing" do
+  test "empty path gives empty path_info" do
+    let c = make_get("/")
+    assert (HttpServer.path_info(c) == Nil)
+  end
+
+  test "single segment path" do
+    let c = make_get("/hello")
+    assert (HttpServer.path_info(c) == Cons("hello", Nil))
+  end
+
+  test "multi segment path" do
+    let c = make_get("/users/42/profile")
+    assert (HttpServer.path_info(c) == Cons("users", Cons("42", Cons("profile", Nil))))
+  end
+end
+
+end -- mod TestRouting

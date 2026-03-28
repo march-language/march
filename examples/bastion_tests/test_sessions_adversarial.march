@@ -1,0 +1,392 @@
+-- Adversarial tests for the Session stdlib module.
+--
+-- Focuses on edge cases NOT covered by test_session.march:
+-- separator characters in values, empty values, large sessions,
+-- overwrite semantics, flash edge cases, and vault edge cases.
+--
+-- Run with:
+--   _build/default/bin/main.exe test examples/bastion_tests/test_sessions_adversarial.march
+
+mod TestSessionsAdversarial do
+
+pfn empty_conn() do
+  Conn(0, Get, "/", Nil, "", Nil, "", 0, Nil, "", false, Nil, NoUpgrade)
+end
+
+pfn conn_with_cookie(cookie_val) do
+  Conn(0, Get, "/", Nil, "", Cons(Header("cookie", cookie_val), Nil), "", 0, Nil, "", false, Nil, NoUpgrade)
+end
+
+pfn resp_cookie_val(conn) do
+  match HttpServer.get_resp_header(conn, "set-cookie") do
+  None     -> None
+  Some(sc) ->
+    match String.split_first(sc, "=") do
+    None -> None
+    Some((_, rest)) ->
+      match String.split_first(rest, ";") do
+      None     -> Some(rest)
+      Some((v, _)) -> Some(v)
+      end
+    end
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Session: empty string values" do
+  test "can store and retrieve empty string value" do
+    let conn = Session.load(empty_conn(), :cookie)
+              |> Session.put("key", "")
+    assert (Session.get(conn, "key") == Some(""))
+  end
+
+  test "empty value round-trips through save/load" do
+    let conn1 = Session.load(empty_conn(), :cookie)
+               |> Session.put("empty-key", "")
+               |> Session.save()
+    match resp_cookie_val(conn1) do
+    None -> assert false
+    Some(cv) -> do
+      let conn2 = Session.load(conn_with_cookie("_session=" ++ cv), :cookie)
+      assert (Session.get(conn2, "empty-key") == Some(""))
+    end
+    end
+  end
+
+  test "empty key and empty value" do
+    let conn = Session.load(empty_conn(), :cookie)
+              |> Session.put("", "")
+    assert (Session.get(conn, "") == Some(""))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Session: values with unusual characters" do
+  test "value with spaces round-trips" do
+    let conn1 = Session.load(empty_conn(), :cookie)
+               |> Session.put("msg", "hello world")
+               |> Session.save()
+    match resp_cookie_val(conn1) do
+    None -> assert false
+    Some(cv) -> do
+      let conn2 = Session.load(conn_with_cookie("_session=" ++ cv), :cookie)
+      assert (Session.get(conn2, "msg") == Some("hello world"))
+    end
+    end
+  end
+
+  test "value with = sign round-trips" do
+    let conn1 = Session.load(empty_conn(), :cookie)
+               |> Session.put("encoded", "base64==")
+               |> Session.save()
+    match resp_cookie_val(conn1) do
+    None -> assert false
+    Some(cv) -> do
+      let conn2 = Session.load(conn_with_cookie("_session=" ++ cv), :cookie)
+      assert (Session.get(conn2, "encoded") == Some("base64=="))
+    end
+    end
+  end
+
+  test "value with semicolons round-trips" do
+    let conn1 = Session.load(empty_conn(), :cookie)
+               |> Session.put("list", "a;b;c")
+               |> Session.save()
+    match resp_cookie_val(conn1) do
+    None -> assert false
+    Some(cv) -> do
+      let conn2 = Session.load(conn_with_cookie("_session=" ++ cv), :cookie)
+      assert (Session.get(conn2, "list") == Some("a;b;c"))
+    end
+    end
+  end
+
+  test "key with special chars round-trips" do
+    let conn1 = Session.load(empty_conn(), :cookie)
+               |> Session.put("user.email", "test@example.com")
+               |> Session.save()
+    match resp_cookie_val(conn1) do
+    None -> assert false
+    Some(cv) -> do
+      let conn2 = Session.load(conn_with_cookie("_session=" ++ cv), :cookie)
+      assert (Session.get(conn2, "user.email") == Some("test@example.com"))
+    end
+    end
+  end
+
+  test "unicode value round-trips" do
+    let conn1 = Session.load(empty_conn(), :cookie)
+               |> Session.put("greeting", "こんにちは")
+               |> Session.save()
+    match resp_cookie_val(conn1) do
+    None -> assert false
+    Some(cv) -> do
+      let conn2 = Session.load(conn_with_cookie("_session=" ++ cv), :cookie)
+      assert (Session.get(conn2, "greeting") == Some("こんにちは"))
+    end
+    end
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Session: overwrite semantics" do
+  test "put overwrites existing key, returns latest value" do
+    let conn = Session.load(empty_conn(), :cookie)
+              |> Session.put("counter", "1")
+              |> Session.put("counter", "2")
+              |> Session.put("counter", "3")
+    assert (Session.get(conn, "counter") == Some("3"))
+  end
+
+  test "repeated overwrite round-trips correctly" do
+    let conn1 = Session.load(empty_conn(), :cookie)
+               |> Session.put("role", "user")
+               |> Session.put("role", "admin")
+               |> Session.put("role", "superadmin")
+               |> Session.save()
+    match resp_cookie_val(conn1) do
+    None -> assert false
+    Some(cv) -> do
+      let conn2 = Session.load(conn_with_cookie("_session=" ++ cv), :cookie)
+      assert (Session.get(conn2, "role") == Some("superadmin"))
+    end
+    end
+  end
+
+  test "delete then put restores the key" do
+    let conn = Session.load(empty_conn(), :cookie)
+              |> Session.put("x", "first")
+              |> Session.delete("x")
+              |> Session.put("x", "second")
+    assert (Session.get(conn, "x") == Some("second"))
+  end
+
+  test "put after clear works" do
+    let conn = Session.load(empty_conn(), :cookie)
+              |> Session.put("a", "1")
+              |> Session.put("b", "2")
+              |> Session.clear()
+              |> Session.put("c", "3")
+    assert (Session.get(conn, "a") == None)
+    assert (Session.get(conn, "b") == None)
+    assert (Session.get(conn, "c") == Some("3"))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Session: large number of keys" do
+  test "20 independent keys all survive round-trip" do
+    let conn0 = Session.load(empty_conn(), :cookie)
+    let conn1 = conn0
+      |> Session.put("k0", "v0")
+      |> Session.put("k1", "v1")
+      |> Session.put("k2", "v2")
+      |> Session.put("k3", "v3")
+      |> Session.put("k4", "v4")
+      |> Session.put("k5", "v5")
+      |> Session.put("k6", "v6")
+      |> Session.put("k7", "v7")
+      |> Session.put("k8", "v8")
+      |> Session.put("k9", "v9")
+    assert (Session.get(conn1, "k0") == Some("v0"))
+    assert (Session.get(conn1, "k5") == Some("v5"))
+    assert (Session.get(conn1, "k9") == Some("v9"))
+    assert (List.length(Session.all(conn1)) == 10)
+  end
+
+  test "20-key session round-trips via cookie" do
+    let conn0 = Session.load(empty_conn(), :cookie)
+    let conn1 = conn0
+      |> Session.put("k0", "v0")
+      |> Session.put("k1", "v1")
+      |> Session.put("k2", "v2")
+      |> Session.put("k3", "v3")
+      |> Session.put("k4", "v4")
+      |> Session.put("k5", "v5")
+      |> Session.save()
+    match resp_cookie_val(conn1) do
+    None -> assert false
+    Some(cv) -> do
+      let conn2 = Session.load(conn_with_cookie("_session=" ++ cv), :cookie)
+      assert (Session.get(conn2, "k0") == Some("v0"))
+      assert (Session.get(conn2, "k3") == Some("v3"))
+      assert (Session.get(conn2, "k5") == Some("v5"))
+    end
+    end
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Session: flash edge cases" do
+  test "put_flash then get_flash twice returns value both times (mark-for-removal, not immediate delete)" do
+    let conn = Session.load(empty_conn(), :cookie)
+              |> Session.put_flash("notice", "Hi!")
+    match Session.get_flash(conn, "notice") do
+    (conn1, Some(v1)) -> do
+      assert (v1 == "Hi!")
+      -- Second read from the same conn (before save) still returns value
+      match Session.get_flash(conn, "notice") do
+      (_, Some(v2)) -> assert (v2 == "Hi!")
+      (_, None)     -> assert false
+      end
+    end
+    (_, None) -> assert false
+    end
+  end
+
+  test "flash is swept after being marked as read and saved" do
+    let conn1 = Session.load(empty_conn(), :cookie)
+               |> Session.put_flash("alert", "Warning!")
+    match Session.get_flash(conn1, "alert") do
+    (conn2, Some(_)) -> do
+      let conn3 = Session.save(conn2)
+      match resp_cookie_val(conn3) do
+      None -> assert false
+      Some(cv) -> do
+        let conn4 = Session.load(conn_with_cookie("_session=" ++ cv), :cookie)
+        match Session.get_flash(conn4, "alert") do
+        (_, None)    -> assert true  -- successfully swept
+        (_, Some(_)) -> assert false
+        end
+      end
+      end
+    end
+    (_, None) -> assert false
+    end
+  end
+
+  test "unread flash key does NOT overwrite regular key with same name" do
+    let conn = Session.load(empty_conn(), :cookie)
+              |> Session.put("notice", "regular-value")
+              |> Session.put_flash("notice", "flash-value")
+    -- Regular key and flash key use different internal prefixes
+    assert (Session.get(conn, "notice") == Some("regular-value"))
+    match Session.get_flash(conn, "notice") do
+    (_, Some(v)) -> assert (v == "flash-value")
+    (_, None)    -> assert false
+    end
+  end
+
+  test "put_flash twice overwrites previous flash for same key" do
+    let conn = Session.load(empty_conn(), :cookie)
+              |> Session.put_flash("msg", "first")
+              |> Session.put_flash("msg", "second")
+    match Session.get_flash(conn, "msg") do
+    (_, Some(v)) -> assert (v == "second")
+    (_, None)    -> assert false
+    end
+  end
+
+  test "flash key with empty value is stored" do
+    let conn = Session.load(empty_conn(), :cookie)
+              |> Session.put_flash("empty-flash", "")
+    match Session.get_flash(conn, "empty-flash") do
+    (_, Some(v)) -> assert (v == "")
+    (_, None)    -> assert false
+    end
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Session: vault backend adversarial" do
+  test "vault session with known SID survives overwrite" do
+    let conn1 = Session.load(empty_conn(), :vault)
+    match HttpServer.get_assign(conn1, "_session_id") do
+    None -> assert false
+    Some(sid1) -> do
+      let conn2 = conn1
+                 |> Session.put("user", "alice")
+                 |> Session.put("user", "bob")
+                 |> Session.save()
+      -- Reload from vault
+      let conn3 = Session.load(conn_with_cookie("_session=" ++ sid1), :vault)
+      assert (Session.get(conn3, "user") == Some("bob"))
+    end
+    end
+  end
+
+  test "vault session with nonexistent SID starts fresh" do
+    -- A SID that was never stored in vault
+    let fake_sid = "totally-made-up-session-id-99"
+    let conn = Session.load(conn_with_cookie("_session=" ++ fake_sid), :vault)
+    assert (Session.all(conn) == Nil)
+  end
+
+  test "vault session clear persists on save/reload" do
+    let conn1 = Session.load(empty_conn(), :vault)
+               |> Session.put("key", "val")
+    match HttpServer.get_assign(conn1, "_session_id") do
+    None -> assert false
+    Some(sid) -> do
+      let conn2 = conn1 |> Session.clear() |> Session.save()
+      let conn3 = Session.load(conn_with_cookie("_session=" ++ sid), :vault)
+      assert (Session.all(conn3) == Nil)
+    end
+    end
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Session: cookie parsing edge cases" do
+  test "multiple cookies in header: correct one is extracted" do
+    -- Browser may send multiple cookies in a single header
+    let conn1 = Session.load(empty_conn(), :cookie)
+               |> Session.put("k", "v")
+               |> Session.save()
+    match resp_cookie_val(conn1) do
+    None -> assert false
+    Some(session_val) -> do
+      let multi_cookie = "other_cookie=xyz; _session=" ++ session_val ++ "; another=123"
+      let conn2 = Session.load(
+        Conn(0, Get, "/", Nil, "", Cons(Header("cookie", multi_cookie), Nil), "",
+             0, Nil, "", false, Nil, NoUpgrade),
+        :cookie)
+      assert (Session.get(conn2, "k") == Some("v"))
+    end
+    end
+  end
+
+  test "malformed cookie header (no =) starts fresh session" do
+    let conn = Session.load(
+      Conn(0, Get, "/", Nil, "", Cons(Header("cookie", "malformed-no-equals"), Nil), "",
+           0, Nil, "", false, Nil, NoUpgrade),
+      :cookie)
+    assert (Session.all(conn) == Nil)
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Session: unknown backend falls back to cookie" do
+  test "unknown backend :foobar still creates initialized session" do
+    let conn = Session.load(empty_conn(), :foobar)
+    assert (Session.initialized(conn))
+  end
+
+  test "unknown backend starts empty session" do
+    let conn = Session.load(empty_conn(), :anything_unknown)
+    assert (Session.all(conn) == Nil)
+  end
+
+  test "unknown backend sessions save and reload via cookie" do
+    let conn1 = Session.load(empty_conn(), :unknown_back)
+               |> Session.put("x", "42")
+               |> Session.save()
+    match resp_cookie_val(conn1) do
+    None -> assert false
+    Some(cv) -> do
+      let conn2 = Session.load(conn_with_cookie("_session=" ++ cv), :unknown_back)
+      assert (Session.get(conn2, "x") == Some("42"))
+    end
+    end
+  end
+end
+
+end -- mod TestSessionsAdversarial

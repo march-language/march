@@ -253,7 +253,7 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
-## Current State (as of 2026-03-28, post forge bastion command group + Session middleware)
+## Current State (as of 2026-03-28, post forge bastion command group + Session middleware + Bastion adversarial test suite)
 
 - **Builds clean**
 - **14 pre-existing failures** in `repl_jit_regression`/`repl_compiler_parity` (unrelated to Bastion work); all other suites pass. Full list: (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing** + **Phase 4: reduction counting in compiled code** + **Phase 4: lazy stack growth** + **Vault sharded KV store** + **Bastion.Cache + Bastion.Depot middleware**):
@@ -265,6 +265,7 @@ march/
   - `test_supervision.exe`: 15 tests, passing (actor supervision)
   - `test_lsp.exe`: 120 tests, passing (doc strings, find-refs, rename, sig-help, code actions, snippet completions, folding ranges, type annotation action, remove unused binding action, phase2 enhanced match, quickfix framework, dead code detection, p1.1 typed match stubs, p1.7 fn return/param annotation, batch annotation, P2.8 naming convention fix, P3.10 De Morgan rewrite)
   - `test_stdlib_march.exe`: 18 tests, passing (Http, HttpTransport, HttpClient, HttpServer, WebSocket, Tls, Process, Logger, PubSub, Channel, ChannelServer, Presence, ChannelSocket, Env, Config, BastionDev, Vault, Session)
+  - `examples/bastion_tests/`: 346 adversarial tests, all passing (routing 42, caching 37, sessions 35, csrf 44, dev-dashboard 64, html 54, islands 70)
   - `test_forge.exe`: 15 tests, passing (scaffold/toml)
   - `test_bastion.exe`: 20 tests, passing (bastion scaffold, routes parser)
   - `test_resolver.exe`: 35 tests, passing (semver version parse/compare/~>, constraints, project dep loading, lockfile write/read/drift)

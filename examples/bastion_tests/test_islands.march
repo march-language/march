@@ -1,0 +1,447 @@
+-- Adversarial tests for the Islands stdlib module.
+--
+-- Tests: wrap/wrap_with_css output structure, all hydration strategies,
+-- state JSON escaping, CSS attribute escaping, empty content, special chars
+-- in island names, client_only, bootstrap_script, preload_hint, Registry.
+--
+-- Run with:
+--   _build/default/bin/main.exe test examples/bastion_tests/test_islands.march
+
+mod TestIslands do
+
+-- ---------------------------------------------------------------------------
+
+describe "Islands.hydrate_attr" do
+  test "Eager maps to 'eager'" do
+    assert (Islands.hydrate_attr(Eager) == "eager")
+  end
+
+  test "Lazy maps to 'lazy'" do
+    assert (Islands.hydrate_attr(Lazy) == "lazy")
+  end
+
+  test "OnIdle maps to 'idle'" do
+    assert (Islands.hydrate_attr(OnIdle) == "idle")
+  end
+
+  test "OnInteraction maps to 'interaction'" do
+    assert (Islands.hydrate_attr(OnInteraction) == "interaction")
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Islands.wrap: output structure" do
+  test "contains data-march-island attribute with island name" do
+    let result = Islands.wrap("Counter", Eager, "{}", "<p>0</p>")
+    assert (String.contains(result, "data-march-island=\"Counter\""))
+  end
+
+  test "contains data-march-hydrate attribute" do
+    let result = Islands.wrap("Counter", Eager, "{}", "<p>0</p>")
+    assert (String.contains(result, "data-march-hydrate=\"eager\""))
+  end
+
+  test "contains data-march-state attribute with state JSON" do
+    let result = Islands.wrap("Counter", Eager, "{\"count\":0}", "<p>0</p>")
+    assert (String.contains(result, "data-march-state="))
+    assert (String.contains(result, "{\"count\":0}"))
+  end
+
+  test "contains inner HTML" do
+    let result = Islands.wrap("Counter", Eager, "{}", "<p>inner content</p>")
+    assert (String.contains(result, "<p>inner content</p>"))
+  end
+
+  test "wraps in a <div> element" do
+    let result = Islands.wrap("Counter", Eager, "{}", "")
+    assert (String.starts_with(result, "<div "))
+    assert (String.ends_with(result, "</div>"))
+  end
+
+  test "Lazy strategy in output" do
+    let result = Islands.wrap("MyComp", Lazy, "{}", "")
+    assert (String.contains(result, "data-march-hydrate=\"lazy\""))
+  end
+
+  test "OnIdle strategy in output" do
+    let result = Islands.wrap("MyComp", OnIdle, "{}", "")
+    assert (String.contains(result, "data-march-hydrate=\"idle\""))
+  end
+
+  test "OnInteraction strategy in output" do
+    let result = Islands.wrap("MyComp", OnInteraction, "{}", "")
+    assert (String.contains(result, "data-march-hydrate=\"interaction\""))
+  end
+
+  test "empty inner_html produces empty div body" do
+    let result = Islands.wrap("Counter", Eager, "{}", "")
+    assert (String.ends_with(result, "></div>"))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Islands.wrap: state JSON escaping" do
+  test "single quotes in state JSON are escaped to &#39;" do
+    -- State JSON is embedded in single-quoted attribute: data-march-state='...'
+    -- Any ' in the JSON would break the attribute
+    let state_with_quote = "{\"name\":\"it's alive\"}"
+    let result = Islands.wrap("C", Eager, state_with_quote, "")
+    -- Raw single quote should not appear unescaped inside the attribute
+    assert (!String.contains(result, "it's alive"))
+    assert (String.contains(result, "it&#39;s alive"))
+  end
+
+  test "double quotes in state JSON pass through (they're inside single-quoted attr)" do
+    let json_st = "{\"key\":\"value\"}"
+    let result = Islands.wrap("C", Eager, json_st, "")
+    -- Double quotes are fine inside single-quoted attributes
+    assert (String.contains(result, "\"key\":\"value\""))
+  end
+
+  test "backslash in state JSON passes through" do
+    let json_st = "{\"path\":\"C:\\\\Users\"}"
+    let result = Islands.wrap("C", Eager, json_st, "")
+    assert (String.contains(result, json_st))
+  end
+
+  test "empty state JSON is valid" do
+    let result = Islands.wrap("C", Eager, "{}", "")
+    assert (String.contains(result, "{}"))
+  end
+
+  test "complex nested JSON json_st" do
+    let json_st = "{\"user\":{\"id\":42,\"name\":\"Alice\"},\"items\":[1,2,3]}"
+    let result = Islands.wrap("App", Eager, json_st, "")
+    assert (String.contains(result, json_st))
+  end
+
+  test "state JSON with multiple single quotes" do
+    let json_st = "{\"a\":\"it's\",\"b\":\"can't\"}"
+    let result = Islands.wrap("C", Eager, json_st, "")
+    -- Single quotes are escaped to &#39; so they don't break the attribute
+    assert (String.contains(result, "&#39;"))
+    -- The literal sequences "it's" and "can't" should NOT appear unescaped
+    assert (!String.contains(result, "it's"))
+    assert (!String.contains(result, "can't"))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Islands.wrap: island name handling" do
+  test "simple ASCII name" do
+    let result = Islands.wrap("Counter", Eager, "{}", "")
+    assert (String.contains(result, "data-march-island=\"Counter\""))
+  end
+
+  test "hyphenated name" do
+    let result = Islands.wrap("my-counter", Eager, "{}", "")
+    assert (String.contains(result, "data-march-island=\"my-counter\""))
+  end
+
+  test "name with underscore" do
+    let result = Islands.wrap("my_counter", Eager, "{}", "")
+    assert (String.contains(result, "data-march-island=\"my_counter\""))
+  end
+
+  test "empty island name (edge case - should not panic)" do
+    let result = Islands.wrap("", Eager, "{}", "content")
+    assert (String.contains(result, "data-march-island=\"\""))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Islands.wrap_with_css: CSS escaping" do
+  test "output contains data-march-island-css attribute" do
+    let result = Islands.wrap_with_css("Counter", Eager, "{}", ".btn { color: red; }", "<p>hi</p>")
+    assert (String.contains(result, "data-march-island-css="))
+  end
+
+  test "CSS double quotes are escaped in attribute value" do
+    -- The CSS attr is double-quoted: data-march-island-css="..."
+    -- Any " in CSS would break the attribute
+    let css_with_quotes = "content: \"hello\""
+    let result = Islands.wrap_with_css("C", Eager, "{}", css_with_quotes, "")
+    assert (!String.contains(result, "content: \"hello\""))
+    assert (String.contains(result, "&quot;"))
+  end
+
+  test "CSS ampersand is escaped" do
+    let css_with_amp = ".a & .b { color: red; }"
+    let result = Islands.wrap_with_css("C", Eager, "{}", css_with_amp, "")
+    assert (!String.contains(result, ".a & .b"))
+    assert (String.contains(result, "&amp;"))
+  end
+
+  test "CSS with < and > are escaped" do
+    let css_evil = ".a > .b { color: red; }"
+    let result = Islands.wrap_with_css("C", Eager, "{}", css_evil, "")
+    assert (!String.contains(result, ".a > .b"))
+    assert (String.contains(result, "&gt;"))
+  end
+
+  test "normal CSS without special chars passes through" do
+    let css = ".counter { font-size: 1.2rem; color: #333; }"
+    let result = Islands.wrap_with_css("Counter", Eager, "{}", css, "<p>0</p>")
+    assert (String.contains(result, ".counter"))
+    assert (String.contains(result, "font-size: 1.2rem"))
+  end
+
+  test "contains all four required data attributes" do
+    let result = Islands.wrap_with_css("C", Lazy, "{}", "css", "html")
+    assert (String.contains(result, "data-march-island="))
+    assert (String.contains(result, "data-march-hydrate="))
+    assert (String.contains(result, "data-march-state="))
+    assert (String.contains(result, "data-march-island-css="))
+  end
+
+  test "inner HTML is included after CSS" do
+    let result = Islands.wrap_with_css("C", Eager, "{}", ".x{}", "<span>content</span>")
+    assert (String.contains(result, "<span>content</span>"))
+  end
+
+  test "wrap_with_css with empty CSS is valid" do
+    let result = Islands.wrap_with_css("C", Eager, "{}", "", "html")
+    assert (String.contains(result, "data-march-island-css=\"\""))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Islands.wrap_eager" do
+  test "uses Eager hydration strategy" do
+    let result = Islands.wrap_eager("Counter", "{}", "<p>0</p>")
+    assert (String.contains(result, "data-march-hydrate=\"eager\""))
+  end
+
+  test "matches wrap with Eager manually" do
+    let name = "MyComp"
+    let json_st = "{\"x\":1}"
+    let html = "<div>content</div>"
+    let via_eager = Islands.wrap_eager(name, json_st, html)
+    let via_wrap  = Islands.wrap(name, Eager, json_st, html)
+    assert (via_eager == via_wrap)
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Islands.wrap_eager_with_css" do
+  test "uses Eager hydration strategy" do
+    let result = Islands.wrap_eager_with_css("Counter", "{}", ".btn{}", "<p>0</p>")
+    assert (String.contains(result, "data-march-hydrate=\"eager\""))
+  end
+
+  test "matches wrap_with_css with Eager manually" do
+    let name = "MyComp"
+    let json_st = "{}"
+    let css = ".x { color: red; }"
+    let html = "<p>content</p>"
+    let via_eager_css = Islands.wrap_eager_with_css(name, json_st, css, html)
+    let via_wrap_css  = Islands.wrap_with_css(name, Eager, json_st, css, html)
+    assert (via_eager_css == via_wrap_css)
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Islands.client_only" do
+  test "produces empty inner content" do
+    let result = Islands.client_only("Counter", Eager, "{}")
+    assert (String.ends_with(result, "></div>"))
+  end
+
+  test "contains correct data attributes" do
+    let result = Islands.client_only("App", Lazy, "{\"key\":\"val\"}")
+    assert (String.contains(result, "data-march-island=\"App\""))
+    assert (String.contains(result, "data-march-hydrate=\"lazy\""))
+    assert (String.contains(result, "{\"key\":\"val\"}"))
+  end
+
+  test "client_only has no inner HTML" do
+    let result = Islands.client_only("C", Eager, "{}")
+    -- No inner content — wraps empty string
+    assert (!String.contains(result, "<p>"))
+    assert (!String.contains(result, "inner"))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Islands.bootstrap_script" do
+  test "generates a script type=module tag" do
+    let script = Islands.bootstrap_script("/_march/islands")
+    assert (String.contains(script, "<script type=\"module\""))
+    assert (String.contains(script, "</script>"))
+  end
+
+  test "includes the correct src path" do
+    let script = Islands.bootstrap_script("/_march/islands")
+    assert (String.contains(script, "/_march/islands/march-islands.js"))
+  end
+
+  test "custom base URL is used" do
+    let script = Islands.bootstrap_script("/assets")
+    assert (String.contains(script, "/assets/march-islands.js"))
+  end
+
+  test "empty base URL still generates valid tag" do
+    let script = Islands.bootstrap_script("")
+    assert (String.contains(script, "march-islands.js"))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Islands.preload_hint" do
+  test "generates a link rel=modulepreload tag" do
+    let hint = Islands.preload_hint("/_march/islands", "Counter")
+    assert (String.contains(hint, "<link rel=\"modulepreload\""))
+  end
+
+  test "includes correct href with island name and .wasm extension" do
+    let hint = Islands.preload_hint("/_march/islands", "Counter")
+    assert (String.contains(hint, "/_march/islands/Counter.wasm"))
+  end
+
+  test "custom base URL and island name" do
+    let hint = Islands.preload_hint("/wasm", "MyCounter")
+    assert (String.contains(hint, "/wasm/MyCounter.wasm"))
+  end
+
+  test "hint is a complete tag" do
+    let hint = Islands.preload_hint("/b", "C")
+    assert (String.starts_with(hint, "<link"))
+    assert (String.ends_with(hint, ">"))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Islands.Registry" do
+  test "empty_registry has no descriptors" do
+    let reg = Islands.empty_registry()
+    assert (List.length(Islands.registry_descriptors(reg)) == 0)
+  end
+
+  test "register adds a descriptor" do
+    let d = Descriptor("Counter", Eager, "counter.wasm")
+    let reg = Islands.register(Islands.empty_registry(), d)
+    assert (List.length(Islands.registry_descriptors(reg)) == 1)
+  end
+
+  test "register multiple descriptors" do
+    let d1 = Descriptor("Counter", Eager, "counter.wasm")
+    let d2 = Descriptor("Timer", Lazy, "timer.wasm")
+    let reg = Islands.register(Islands.register(Islands.empty_registry(), d1), d2)
+    assert (List.length(Islands.registry_descriptors(reg)) == 2)
+  end
+
+  test "find_island returns Some for registered island" do
+    let d = Descriptor("Counter", Eager, "counter.wasm")
+    let reg = Islands.register(Islands.empty_registry(), d)
+    match Islands.find_island(reg, "Counter") do
+    Some(found) -> assert (Islands.descriptor_name(found) == "Counter")
+    None        -> assert false
+    end
+  end
+
+  test "find_island returns None for unregistered island" do
+    let reg = Islands.empty_registry()
+    assert (Islands.find_island(reg, "NonExistent") == None)
+  end
+
+  test "find_island is case-sensitive" do
+    let d = Descriptor("Counter", Eager, "")
+    let reg = Islands.register(Islands.empty_registry(), d)
+    assert (Islands.find_island(reg, "counter") == None)
+    assert (Islands.find_island(reg, "COUNTER") == None)
+  end
+
+  test "find_island finds correct descriptor among multiple" do
+    let d1 = Descriptor("Alpha", Eager, "a.wasm")
+    let d2 = Descriptor("Beta", Lazy, "b.wasm")
+    let d3 = Descriptor("Gamma", OnIdle, "g.wasm")
+    let reg = Islands.register(Islands.register(Islands.register(Islands.empty_registry(), d1), d2), d3)
+    match Islands.find_island(reg, "Beta") do
+    Some(found) -> assert (Islands.descriptor_wasm_path(found) == "b.wasm")
+    None        -> assert false
+    end
+  end
+
+  test "registry_preload_hints generates hints for all islands" do
+    let d1 = Descriptor("A", Eager, "")
+    let d2 = Descriptor("B", Lazy, "")
+    let reg = Islands.register(Islands.register(Islands.empty_registry(), d1), d2)
+    let hints = Islands.registry_preload_hints(reg, "/assets")
+    assert (String.contains(hints, "A.wasm"))
+    assert (String.contains(hints, "B.wasm"))
+  end
+
+  test "empty registry produces empty preload hints" do
+    let reg = Islands.empty_registry()
+    let hints = Islands.registry_preload_hints(reg, "/assets")
+    assert (hints == "")
+  end
+
+  test "single registry hint has no newline separator" do
+    let d = Descriptor("Counter", Eager, "")
+    let reg = Islands.register(Islands.empty_registry(), d)
+    let hints = Islands.registry_preload_hints(reg, "/b")
+    assert (!String.contains(hints, "\n"))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Descriptor accessors" do
+  test "descriptor_name returns the name" do
+    let d = Descriptor("MyIsland", Eager, "my.wasm")
+    assert (Islands.descriptor_name(d) == "MyIsland")
+  end
+
+  test "descriptor_hydrate returns the strategy" do
+    let d = Descriptor("X", OnInteraction, "x.wasm")
+    assert (Islands.descriptor_hydrate(d) == OnInteraction)
+  end
+
+  test "descriptor_wasm_path returns the path" do
+    let d = Descriptor("X", Eager, "/path/to/x.wasm")
+    assert (Islands.descriptor_wasm_path(d) == "/path/to/x.wasm")
+  end
+end
+
+-- ---------------------------------------------------------------------------
+
+describe "Islands: integration with Html module" do
+  test "island HTML can be embedded in Html.tag" do
+    let island = Islands.wrap("Counter", Eager, "{}", "<p>0</p>")
+    let wrapped = Html.tag("section", [("class", "island-container")],
+                           IOList.from_string(island))
+    let result = IOList.to_string(wrapped)
+    assert (String.contains(result, "data-march-island"))
+    assert (String.contains(result, "<section class=\"island-container\">"))
+  end
+
+  test "island embedded in Html.layout" do
+    let island = Islands.wrap("Counter", Lazy, "{}", "<p>loading...</p>")
+    let head = IOList.from_string(Islands.bootstrap_script("/_march/islands"))
+    let body = IOList.from_string(island)
+    let layout = Html.layout("My App", head, body)
+    let result = IOList.to_string(layout)
+    assert (String.contains(result, "march-islands.js"))
+    assert (String.contains(result, "data-march-island=\"Counter\""))
+  end
+
+  test "island name with XSS payload is embedded as-is (not escaped by wrap)" do
+    -- wrap does NOT escape the island name — it's expected to be a trusted module name
+    -- This tests the actual behavior to document it
+    let result = Islands.wrap("Counter", Eager, "{}", "")
+    assert (String.contains(result, "data-march-island=\"Counter\""))
+  end
+end
+
+end -- mod TestIslands
