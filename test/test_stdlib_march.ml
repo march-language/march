@@ -118,6 +118,8 @@ let all_stdlib_decls =
     "channel_server.march";
     "presence.march";
     "channel_socket.march";
+    "html.march";
+    "csrf.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -217,4 +219,8 @@ let () =
       Alcotest.test_case "Flow module"
         `Quick (run_stdlib_test "test_flow.march" "TestFlow");
     ]); *)
+    ("csrf", [
+      Alcotest.test_case "CSRF module"
+        `Quick (run_stdlib_test "test_csrf.march" "TestCSRF");
+    ]);
   ]
