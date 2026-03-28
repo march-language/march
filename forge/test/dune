@@ -1,6 +1,6 @@
 (tests
  (names test_forge test_resolver test_solver test_cas_package test_patch
-        test_api_surface test_properties test_regression)
+        test_api_surface test_properties test_regression test_bastion)
  (libraries march_forge alcotest unix qcheck qcheck-alcotest))
 
 (executable

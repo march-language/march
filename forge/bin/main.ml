@@ -216,6 +216,48 @@ let init_cmd =
   Cmd.v (Cmd.info "init" ~doc:"Initialize a forge.toml in the current directory")
     Term.(const (fun () -> handle (Cmd_init.run ())) $ const ())
 
+(* --------------------------------------------------------------- forge bastion *)
+
+let bastion_new_cmd =
+  let name =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"NAME" ~doc:"Application name (snake_case)")
+  in
+  let run n =
+    match Cmd_bastion_new.run n with
+    | Ok () -> ()
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "new" ~doc:"Scaffold a new Bastion web application")
+    Term.(const run $ name)
+
+let bastion_server_cmd =
+  let port =
+    Arg.(value & opt (some int) None &
+         info ["port"; "p"] ~docv:"PORT"
+           ~doc:"Override the HTTP port (default: read from Config.endpoint_port, fallback 4000)")
+  in
+  let run p =
+    match Cmd_bastion_server.run ~port_override:p () with
+    | Ok () -> ()
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "server" ~doc:"Start the Bastion dev server with live-reload")
+    Term.(const run $ port)
+
+let bastion_routes_cmd =
+  Cmd.v (Cmd.info "routes" ~doc:"List all routes defined in the router")
+    Term.(const (fun () ->
+        match Cmd_bastion_routes.run () with
+        | Ok () -> ()
+        | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+      ) $ const ())
+
+let bastion_cmd =
+  Cmd.group
+    (Cmd.info "bastion" ~doc:"Bastion web framework commands (server, new, routes)")
+    [bastion_new_cmd; bastion_server_cmd; bastion_routes_cmd]
+
 (* --------------------------------------------------------------------- root *)
 
 let default_term =
@@ -229,7 +271,7 @@ let () =
   let cmds =
     [ new_cmd; init_cmd; build_cmd; run_cmd; test_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; install_cmd; publish_cmd;
-      search_cmd; help_cmd ]
+      search_cmd; bastion_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
