@@ -252,6 +252,97 @@ let process_island_tags (parts : expr list) (sp : span) : expr list =
   in
   go [] parts
 
+(* ── CSRF token injection in ~H ──────────────────────────────────────────── *)
+
+(** Check whether [s] contains a [<form] opening tag whose [method] attribute
+    specifies a mutating HTTP method (post, put, patch, delete).
+
+    Returns [Some close_pos] where [close_pos] is the byte index just after
+    the [>] closing the form opening tag, or [None].
+
+    Detection is case-insensitive on both tag name and method value.
+    Only the first mutating form tag within [s] is detected; call recursively
+    on the remainder to handle multiple forms in one literal. *)
+let csrf_form_close_pos (s : string) : int option =
+  let lower = String.lowercase_ascii s in
+  let len   = String.length lower in
+  let is_boundary c =
+    c = ' ' || c = '\t' || c = '\n' || c = '\r' || c = '>' in
+  let find_sub needle hay from =
+    let nlen = String.length needle in
+    let hlen = String.length hay in
+    let rec loop i =
+      if i + nlen > hlen then -1
+      else if String.sub hay i nlen = needle then i
+      else loop (i + 1)
+    in
+    loop from
+  in
+  let mutating = ["post"; "put"; "patch"; "delete"] in
+  let rec scan i =
+    let fi = find_sub "<form" lower i in
+    if fi = -1 then None
+    else begin
+      let after_tag = fi + 5 in
+      (* Require whitespace or '>' immediately after "<form" so we don't
+         match "<format", "<formdata", etc. *)
+      if after_tag < len && not (is_boundary lower.[after_tag]) then
+        scan (fi + 1)
+      else begin
+        (* Find the closing '>' of this form tag *)
+        let rec find_close j =
+          if j >= len then -1
+          else if lower.[j] = '>' then j + 1
+          else find_close (j + 1)
+        in
+        let close = find_close after_tag in
+        if close = -1 then None
+        else begin
+          let tag_src = String.sub lower fi (close - fi) in
+          let has_method = List.exists (fun m ->
+            find_sub ("method=\"" ^ m ^ "\"") tag_src 0 >= 0 ||
+            find_sub ("method='" ^ m ^ "'") tag_src 0 >= 0 ||
+            find_sub ("method=" ^ m) tag_src 0 >= 0
+          ) mutating in
+          if has_method then Some close
+          else scan (fi + 1)
+        end
+      end
+    end
+  in
+  scan 0
+
+(** Inject CSRF hidden-input string expressions into a ~H parts list.
+
+    For each [ELit (LitString s, _)] that contains a [<form method="post/...">]
+    opening tag, split the literal at the closing [>] and insert an
+    [EApp(CSRF.tag_string, [EVar "conn"])] call between the two halves.
+
+    The injected call returns [String] (not IOList), so it is valid as an
+    element in the [List(String)] passed to [IOList.from_strings].
+
+    Assumes a [conn] variable is in scope — the standard Bastion convention
+    for request-handler functions that use ~H templates. *)
+let inject_csrf_tokens (parts : expr list) (sp : span) : expr list =
+  let v s = EVar { txt = s; span = sp } in
+  let csrf_call = EApp (v "CSRF.tag_string", [v "conn"], sp) in
+  let rec go = function
+    | [] -> []
+    | ELit (LitString s, lsp) :: rest ->
+      (match csrf_form_close_pos s with
+       | None -> ELit (LitString s, lsp) :: go rest
+       | Some close_pos ->
+         let before = String.sub s 0 close_pos in
+         let after  = String.sub s close_pos (String.length s - close_pos) in
+         (* Recurse on the remainder to handle multiple forms in one literal *)
+         ELit (LitString before, lsp)
+         :: csrf_call
+         :: go (ELit (LitString after, lsp) :: rest))
+    | part :: rest ->
+      part :: go rest
+  in
+  go parts
+
 (** Build an IOList directly from the parts of an ~H sigil interpolation.
 
     Static string literals are kept as-is.  Dynamic parts (to_string calls)
@@ -259,6 +350,10 @@ let process_island_tags (parts : expr list) (sp : span) : expr list =
 
     Island tags ([<island name='Mod' props=${expr} />]) are recognised and
     replaced with [IslandView.island_ssr(...)] calls that perform SSR.
+
+    Form tags with mutating methods ([<form method="post/put/patch/delete">])
+    have a [CSRF.tag_string(conn)] call injected immediately after the opening
+    tag, providing automatic CSRF protection in ~H templates.
 
     The result is:
       IOList.from_strings(["static1", Html.escape(to_string(e1)), "static2", ...])
@@ -268,7 +363,9 @@ let html_interp_to_iolist (content : expr) (sp : span) : expr =
   let parts = decompose_concat content in
   (* First pass: replace <island> tags with IslandView calls *)
   let parts = process_island_tags parts sp in
-  (* Second pass: escape dynamic interpolations.
+  (* Second pass: inject CSRF tokens after mutating <form> opening tags *)
+  let parts = inject_csrf_tokens parts sp in
+  (* Third pass: escape dynamic interpolations.
      Use html_auto_escape(x) instead of Html.escape(to_string(x)) so that:
      - Html.Safe values are inserted verbatim (no double-escaping)
      - IOList values (partials) are flattened as-is (already HTML)

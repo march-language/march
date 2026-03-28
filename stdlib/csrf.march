@@ -1,0 +1,253 @@
+-- CSRF module: Cross-Site Request Forgery protection for Bastion web apps.
+--
+-- Generates a per-session CSRF token stored in the Conn assigns under
+-- "_csrf_token".  The middleware validates the token on every mutating
+-- request (POST, PUT, PATCH, DELETE) that is not a JSON API call.
+--
+-- Typical usage in an endpoint pipeline:
+--
+--   conn
+--   |> CSRF.ensure_token()     -- assign token to session (call early)
+--   |> CSRF.protect()          -- validate on mutating requests
+--
+-- In ~H templates, <form method="post"> auto-injects the hidden field via
+-- the desugar pass.  For manually built forms use CSRF.tag(conn).
+--
+-- Token format: 32 cryptographically random bytes, base64-encoded.
+-- Rotation:     Per-session (not per-request) to support back button /
+--               multi-tab usage.
+
+mod CSRF do
+
+  -- -----------------------------------------------------------------------
+  -- Token generation
+  -- -----------------------------------------------------------------------
+
+  doc """
+  Generate a fresh cryptographically random CSRF token.
+
+      CSRF.generate_token()  -- e.g. "dGhpcyBpcyBhIHRlc3Q..."
+
+  Uses 32 random bytes from `random_bytes/1` (CSPRNG), base64-encoded.
+  The result is URL-safe due to base64 padding — suitable for embedding in
+  HTML attributes without further escaping.
+  """
+  fn generate_token() : String do
+    let bytes = random_bytes(32)
+    base64_encode(bytes)
+  end
+
+  -- -----------------------------------------------------------------------
+  -- Conn accessors
+  -- -----------------------------------------------------------------------
+
+  doc """
+  Get the current CSRF token from the Conn assigns.
+
+      let tok = CSRF.token(conn)
+
+  Returns the stored token string, or an empty string if the token has not
+  yet been assigned (i.e., `ensure_token/1` was not called upstream).
+  Call `ensure_token/1` in the middleware pipeline to guarantee a token is
+  present before calling `token/1` in a template or handler.
+  """
+  fn token(conn) : String do
+    match HttpServer.get_assign(conn, "_csrf_token") do
+    Some(t) -> t
+    None -> ""
+    end
+  end
+
+  doc """
+  Ensure the Conn has a CSRF token, generating one if absent.
+
+      conn = CSRF.ensure_token(conn)
+
+  Returns an updated Conn with the token in assigns.  Idempotent: if the
+  token already exists this is a no-op and the existing token is kept.
+  Call this early in the endpoint pipeline, after session loading.
+
+      conn
+      |> CSRF.ensure_token()
+      |> CSRF.protect()
+      |> MyApp.Router.route()
+  """
+  fn ensure_token(conn) do
+    match HttpServer.get_assign(conn, "_csrf_token") do
+    Some(_) -> conn
+    None -> do
+      let t = generate_token()
+      HttpServer.assign(conn, "_csrf_token", t)
+    end
+    end
+  end
+
+  -- -----------------------------------------------------------------------
+  -- HTML helpers
+  -- -----------------------------------------------------------------------
+
+  doc """
+  Return an IOList containing a hidden CSRF input tag for manual form building.
+
+      Html.tag("form", [("method", "post")], CSRF.tag(conn))
+
+  Produces:
+      <input type="hidden" name="_csrf_token" value="...">
+
+  The token value is HTML-escaped so it is safe to embed in any HTML context.
+
+  For ~H sigil templates, the compiler auto-injects this tag into any
+  `<form method="post/put/patch/delete">` — you do not need to call this
+  manually unless you are building forms outside ~H.
+  """
+  fn tag(conn) : IOList do
+    let t = token(conn)
+    IOList.from_string(
+      "<input type=\"hidden\" name=\"_csrf_token\" value=\"" ++
+      Html.escape(t) ++
+      "\">"
+    )
+  end
+
+  doc """
+  Return the CSRF hidden input tag as a plain String.
+
+  Same as `CSRF.tag/1` but returns `String` rather than `IOList`.  Used
+  internally by the ~H compiler desugar pass which builds a `List(String)`
+  before calling `IOList.from_strings/1`.
+
+      CSRF.tag_string(conn)
+      -- "<input type=\"hidden\" name=\"_csrf_token\" value=\"tok\">"
+  """
+  fn tag_string(conn) : String do
+    IOList.to_string(tag(conn))
+  end
+
+  -- -----------------------------------------------------------------------
+  -- Validation helpers
+  -- -----------------------------------------------------------------------
+
+  -- Extract the value of a named field from a URL-encoded form body.
+  -- Body format: "key1=value1&key2=value2&..."
+  -- Returns None if the field is not present.
+  pfn parse_form_field(body : String, field : String) : Option(String) do
+    let pairs = String.split(body, "&")
+    fn find(ps : List(String)) : Option(String) do
+      match ps do
+      Nil -> None
+      Cons(pair, rest) ->
+        match String.split_first(pair, "=") do
+        Some((k, v)) ->
+          if k == field do Some(v)
+          else find(rest) end
+        None -> find(rest)
+        end
+      end
+    end
+    find(pairs)
+  end
+
+  -- -----------------------------------------------------------------------
+  -- Validation
+  -- -----------------------------------------------------------------------
+
+  doc """
+  Validate the CSRF token in the request against the session token.
+
+      if CSRF.validate(conn) do
+        handle_form(conn)
+      else
+        HttpServer.send_resp(conn, 403, "Invalid CSRF token")
+      end
+
+  Reads `_csrf_token` from the form body (URL-encoded) and compares it to
+  the session token stored in assigns.  Returns `false` if either token is
+  absent or if they do not match.
+
+  The `protect/1` middleware calls this automatically; use `validate/1`
+  directly only when you need custom error handling.
+  """
+  fn validate(conn) : Bool do
+    match HttpServer.get_assign(conn, "_csrf_skipped") do
+    Some(_) -> true
+    None -> do
+      let session_token = HttpServer.get_assign(conn, "_csrf_token")
+      let body_token = parse_form_field(HttpServer.req_body(conn), "_csrf_token")
+      match (session_token, body_token) do
+      (Some(st), Some(bt)) -> st == bt
+      _ -> false
+      end
+    end
+    end
+  end
+
+  -- -----------------------------------------------------------------------
+  -- Middleware helpers (private)
+  -- -----------------------------------------------------------------------
+
+  -- Called by protect/1 when method is mutating and content-type is not JSON.
+  pfn protect_check_token(conn) do
+    if validate(conn) do conn
+    else
+      HttpServer.send_resp(conn, 403,
+        "Forbidden: CSRF token is missing or invalid. " ++
+        "Ensure your form includes the _csrf_token hidden field.")
+    end
+  end
+
+  -- Called by protect/1 for mutating requests.
+  pfn protect_mutating(conn) do
+    let ct = HttpServer.get_req_header(conn, "content-type")
+    let is_json = match ct do
+      Some(v) -> String.starts_with(v, "application/json")
+      None -> false
+      end
+    if is_json do conn
+    else protect_check_token(conn)
+    end
+  end
+
+  -- -----------------------------------------------------------------------
+  -- Middleware
+  -- -----------------------------------------------------------------------
+
+  doc """
+  CSRF protection middleware.  Validates the token on mutating requests.
+
+      conn |> CSRF.protect()
+
+  Safe methods (GET, HEAD, OPTIONS) pass through unchanged.
+
+  JSON API requests (Content-Type: application/json) are exempt — they are
+  protected by the browser's same-origin policy for cross-origin fetches.
+
+  All other mutating requests (POST, PUT, PATCH, DELETE) must include a
+  valid `_csrf_token` field in the form body.  On mismatch the request is
+  halted with a `403 Forbidden` response.
+
+  Routes that legitimately receive cross-origin POSTs (e.g., Stripe
+  webhooks) should call `CSRF.skip/1` before routing.
+  """
+  fn protect(conn) do
+    match HttpServer.method(conn) do
+    Get -> conn
+    Head -> conn
+    Options -> conn
+    _ -> protect_mutating(conn)
+    end
+  end
+
+  doc """
+  Skip CSRF validation for this Conn.
+
+      conn |> CSRF.skip() |> MyApp.WebhookHandler.stripe()
+
+  Marks the Conn so that `CSRF.protect/1` and `CSRF.validate/1` will pass
+  through without checking the token.  Use for incoming webhooks or other
+  legitimate cross-origin POST endpoints.
+  """
+  fn skip(conn) do
+    HttpServer.assign(conn, "_csrf_skipped", "true")
+  end
+
+end
