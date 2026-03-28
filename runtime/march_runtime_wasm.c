@@ -15,6 +15,33 @@
 #include <stdint.h>
 #include <stddef.h>
 
+/* ── Minimal libc stubs (no libc in wasm32-unknown-unknown -nostdlib) ── */
+
+void *memset(void *s, int c, size_t n) {
+    unsigned char *p = (unsigned char *)s;
+    while (n--) *p++ = (unsigned char)c;
+    return s;
+}
+
+void *memcpy(void *dst, const void *src, size_t n) {
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s2 = (const unsigned char *)src;
+    while (n--) *d++ = *s2++;
+    return dst;
+}
+
+void *memmove(void *dst, const void *src, size_t n) {
+    unsigned char *d = (unsigned char *)dst;
+    const unsigned char *s2 = (const unsigned char *)src;
+    if (d < s2) {
+        while (n--) *d++ = *s2++;
+    } else {
+        d += n; s2 += n;
+        while (n--) *--d = *--s2;
+    }
+    return dst;
+}
+
 /* ── Memory management ──────────────────────────────────────────────── */
 
 /* Simple bump allocator over WASM linear memory.
@@ -492,6 +519,20 @@ void march_panic(void *s) {
 int64_t march_tls_reductions = 0;
 void march_yield_from_compiled(void) {}
 void march_run_scheduler(void) {}
+
+/* ── Vault stubs (native-only — panic in WASM) ───────────────────────── */
+
+/* Vault uses OS mutexes and threads — not available in WASM.
+   These stubs satisfy the linker; calling them at runtime traps. */
+void *march_vault_new(void *name) { (void)name; __builtin_trap(); }
+void *march_vault_whereis(void *name) { (void)name; __builtin_trap(); }
+void *march_vault_set(void *t, void *k, void *v) { (void)t; (void)k; (void)v; __builtin_trap(); }
+void *march_vault_set_ttl(void *t, void *k, void *v, int64_t ttl) { (void)t;(void)k;(void)v;(void)ttl; __builtin_trap(); }
+void *march_vault_get(void *t, void *k) { (void)t; (void)k; __builtin_trap(); }
+void *march_vault_drop(void *t, void *k) { (void)t; (void)k; __builtin_trap(); }
+void *march_vault_update(void *t, void *k, void *f) { (void)t;(void)k;(void)f; __builtin_trap(); }
+int64_t march_vault_size(void *t) { (void)t; __builtin_trap(); }
+void *march_vault_keys(void *t) { (void)t; __builtin_trap(); }
 
 /* ── LLVM intrinsic ─────────────────────────────────────────────────── */
 
