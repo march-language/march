@@ -123,6 +123,7 @@ let all_stdlib_decls =
     "config.march";
     "html.march";
     "csrf.march";
+    "bastion_dev.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -211,6 +212,10 @@ let () =
     ("process", [
       Alcotest.test_case "Process module"
         `Quick (run_stdlib_test "test_process.march" "TestProcess");
+    ]);
+    ("bastion_dev", [
+      Alcotest.test_case "BastionDev module"
+        `Quick (run_stdlib_test "test_bastion_dev.march" "TestBastionDev");
     ]);
     ("logger", [
       Alcotest.test_case "Logger module"
