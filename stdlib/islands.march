@@ -121,6 +121,34 @@ mod Islands do
     wrap(name, hydrate, state_json, "")
   end
 
+  pfn escape_attr_value(s) do
+    let s1 = String.replace(s, "&",  "&amp;")
+    let s2 = String.replace(s1, "\"", "&quot;")
+    let s3 = String.replace(s2, "<",  "&lt;")
+    String.replace(s3, ">", "&gt;")
+  end
+
+  -- Wrap with scoped CSS embedded as a data attribute.
+  --
+  -- Produces:
+  --   <div data-march-island="Name"
+  --        data-march-hydrate="strategy"
+  --        data-march-state='{"key":"val"}'
+  --        data-march-island-css="...escaped css...">
+  --     ...inner_html...
+  --   </div>
+  fn wrap_with_css(name, hydrate, state_json, css, inner_html) do
+    let strat      = hydrate_attr(hydrate)
+    let escaped    = escape_state(state_json)
+    let escaped_css = escape_attr_value(css)
+    "<div data-march-island=\"${name}\" data-march-hydrate=\"${strat}\" data-march-state='${escaped}' data-march-island-css=\"${escaped_css}\">${inner_html}</div>"
+  end
+
+  -- Wrap with CSS using the Eager hydration strategy.
+  fn wrap_eager_with_css(name, state_json, css, inner_html) do
+    wrap_with_css(name, Eager, state_json, css, inner_html)
+  end
+
   -- Generate the <script type="module"> tag that loads the island bootstrap runtime.
   -- base_url is the URL prefix where march-islands.js is served, e.g. "/_march/islands".
   -- Place this tag in your page's <head> or at the end of <body>.
