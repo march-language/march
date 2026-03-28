@@ -16176,6 +16176,349 @@ let test_vault_concurrent_writes () =
   Hashtbl.remove March_eval.Eval.vault_registry id;
   Alcotest.(check int) "all writes committed" (n_threads * n_writes) total
 
+(* ── BastionIdempotency stdlib tests ────────────────────────────────────── *)
+
+(* Helper: load all stdlib files needed for BastionIdempotency tests. *)
+let eval_with_bastion_idempotency src =
+  let string_decl  = load_stdlib_file_for_test "string.march" in
+  let http_decl    = load_stdlib_file_for_test "http.march" in
+  let hs_decl      = load_stdlib_file_for_test "http_server.march" in
+  let vault_decl_  = load_stdlib_file_for_test "vault.march" in
+  let idem_decl    = load_stdlib_file_for_test "bastion_idempotency.march" in
+  eval_with_stdlib [string_decl; http_decl; hs_decl; vault_decl_; idem_decl] src
+
+(** A GET request always passes through to the handler unchanged. *)
+let test_idempotency_passthrough_get () =
+  let env = eval_with_bastion_idempotency {|mod Test do
+    fn f() do
+      let table = Vault.new("idem_get")
+      let cfg = BastionIdempotency.new(table)
+      let conn = Conn(0, Get, "/users", Nil, "",
+                      Cons(Header("Idempotency-Key", "key-get"), Nil),
+                      "", 0, Nil, "", false, Nil, NoUpgrade)
+      let handler = fn c -> HttpServer.send_resp(c, 200, "ok")
+      let result = BastionIdempotency.call(conn, handler, cfg)
+      HttpServer.status(result)
+    end
+  end|} in
+  Alcotest.(check int) "GET passes through: status 200" 200
+    (vint (call_fn env "f" []))
+
+(** DELETE passes through — it is already idempotent by definition. *)
+let test_idempotency_passthrough_delete () =
+  let env = eval_with_bastion_idempotency {|mod Test do
+    fn f() do
+      let table = Vault.new("idem_del")
+      let cfg = BastionIdempotency.new(table)
+      let conn = Conn(0, Delete, "/users/1", Nil, "",
+                      Cons(Header("Idempotency-Key", "key-del"), Nil),
+                      "", 0, Nil, "", false, Nil, NoUpgrade)
+      let handler = fn c -> HttpServer.send_resp(c, 204, "")
+      let result = BastionIdempotency.call(conn, handler, cfg)
+      HttpServer.status(result)
+    end
+  end|} in
+  Alcotest.(check int) "DELETE passes through: status 204" 204
+    (vint (call_fn env "f" []))
+
+(** POST without Idempotency-Key header passes through unchanged. *)
+let test_idempotency_passthrough_no_key () =
+  let env = eval_with_bastion_idempotency {|mod Test do
+    fn f() do
+      let table = Vault.new("idem_nokey")
+      let cfg = BastionIdempotency.new(table)
+      let conn = Conn(0, Post, "/orders", Nil, "",
+                      Nil,   -- no headers at all
+                      "{}", 0, Nil, "", false, Nil, NoUpgrade)
+      let handler = fn c -> HttpServer.send_resp(c, 201, "created")
+      let result = BastionIdempotency.call(conn, handler, cfg)
+      HttpServer.status(result)
+    end
+  end|} in
+  Alcotest.(check int) "POST with no key passes through: status 201" 201
+    (vint (call_fn env "f" []))
+
+(** First POST with a key executes the handler and returns its response. *)
+let test_idempotency_first_request_executes () =
+  let env = eval_with_bastion_idempotency {|mod Test do
+    fn f() do
+      let table = Vault.new("idem_first")
+      let cfg = BastionIdempotency.new(table)
+      let conn = Conn(0, Post, "/orders", Nil, "",
+                      Cons(Header("Idempotency-Key", "order-abc"), Nil),
+                      "{}", 0, Nil, "", false, Nil, NoUpgrade)
+      let handler = fn c -> HttpServer.send_resp(c, 201, "created")
+      let result = BastionIdempotency.call(conn, handler, cfg)
+      HttpServer.status(result)
+    end
+  end|} in
+  Alcotest.(check int) "first POST executes handler: status 201" 201
+    (vint (call_fn env "f" []))
+
+(** Second POST with the same key replays the cached response without
+    calling the handler a second time. *)
+let test_idempotency_replay_cached_response () =
+  let env = eval_with_bastion_idempotency {|mod Test do
+    fn f() do
+      let table  = Vault.new("idem_replay")
+      let cfg    = BastionIdempotency.new(table)
+      let conn   = Conn(0, Post, "/orders", Nil, "",
+                        Cons(Header("Idempotency-Key", "order-def"), Nil),
+                        "{}", 0, Nil, "", false, Nil, NoUpgrade)
+      -- Track how many times the handler was called.
+      let calls  = Vault.new("idem_replay_calls")
+      Vault.set(calls, "n", 0)
+      let handler = fn c -> do
+        Vault.update(calls, "n", fn n -> n + 1)
+        HttpServer.send_resp(c, 201, "created")
+      end
+      -- First request: runs handler.
+      let _ = BastionIdempotency.call(conn, handler, cfg)
+      -- Second request: replays cache.
+      let result2 = BastionIdempotency.call(conn, handler, cfg)
+      (HttpServer.status(result2), Vault.get_or(calls, "n", 0))
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  (match v with
+   | March_eval.Eval.VTuple [s; c] ->
+     Alcotest.(check int) "replayed status = 201" 201 (vint s);
+     Alcotest.(check int) "handler called exactly once" 1 (vint c)
+   | _ -> Alcotest.fail "expected tuple")
+
+(** A request that arrives while the first is still in-flight gets 409. *)
+let test_idempotency_concurrent_duplicate_returns_409 () =
+  let env = eval_with_bastion_idempotency {|mod Test do
+    fn f() do
+      let table = Vault.new("idem_inflight")
+      let cfg   = BastionIdempotency.new(table)
+      let conn  = Conn(0, Post, "/orders", Nil, "",
+                       Cons(Header("Idempotency-Key", "concurrent-key"), Nil),
+                       "{}", 0, Nil, "", false, Nil, NoUpgrade)
+      -- Pre-seed the in-flight marker to simulate a concurrent request.
+      Vault.set(table, "concurrent-key", InFlight)
+      let handler = fn c -> HttpServer.send_resp(c, 201, "created")
+      let result = BastionIdempotency.call(conn, handler, cfg)
+      HttpServer.status(result)
+    end
+  end|} in
+  Alcotest.(check int) "concurrent duplicate gets 409" 409
+    (vint (call_fn env "f" []))
+
+(** PUT requests are protected just like POST. *)
+let test_idempotency_put_protected () =
+  let env = eval_with_bastion_idempotency {|mod Test do
+    fn f() do
+      let table = Vault.new("idem_put")
+      let cfg   = BastionIdempotency.new(table)
+      let conn  = Conn(0, Put, "/users/1", Nil, "",
+                       Cons(Header("Idempotency-Key", "put-key-1"), Nil),
+                       "{}", 0, Nil, "", false, Nil, NoUpgrade)
+      let calls = Vault.new("idem_put_calls")
+      Vault.set(calls, "n", 0)
+      let handler = fn c -> do
+        Vault.update(calls, "n", fn n -> n + 1)
+        HttpServer.send_resp(c, 200, "updated")
+      end
+      let _ = BastionIdempotency.call(conn, handler, cfg)
+      let _ = BastionIdempotency.call(conn, handler, cfg)
+      Vault.get_or(calls, "n", 0)
+    end
+  end|} in
+  Alcotest.(check int) "PUT: handler called only once" 1
+    (vint (call_fn env "f" []))
+
+(** PATCH requests are protected just like POST. *)
+let test_idempotency_patch_protected () =
+  let env = eval_with_bastion_idempotency {|mod Test do
+    fn f() do
+      let table = Vault.new("idem_patch")
+      let cfg   = BastionIdempotency.new(table)
+      let conn  = Conn(0, Patch, "/users/1", Nil, "",
+                       Cons(Header("Idempotency-Key", "patch-key-1"), Nil),
+                       "{\"name\":\"bob\"}", 0, Nil, "", false, Nil, NoUpgrade)
+      let calls = Vault.new("idem_patch_calls")
+      Vault.set(calls, "n", 0)
+      let handler = fn c -> do
+        Vault.update(calls, "n", fn n -> n + 1)
+        HttpServer.send_resp(c, 200, "patched")
+      end
+      let _ = BastionIdempotency.call(conn, handler, cfg)
+      let _ = BastionIdempotency.call(conn, handler, cfg)
+      Vault.get_or(calls, "n", 0)
+    end
+  end|} in
+  Alcotest.(check int) "PATCH: handler called only once" 1
+    (vint (call_fn env "f" []))
+
+(** The replayed response body matches the original. *)
+let test_idempotency_replay_body () =
+  let env = eval_with_bastion_idempotency {|mod Test do
+    fn f() do
+      let table = Vault.new("idem_body")
+      let cfg   = BastionIdempotency.new(table)
+      let conn  = Conn(0, Post, "/items", Nil, "",
+                       Cons(Header("Idempotency-Key", "body-key"), Nil),
+                       "{}", 0, Nil, "", false, Nil, NoUpgrade)
+      let handler = fn c -> HttpServer.send_resp(c, 200, "the-body")
+      let _ = BastionIdempotency.call(conn, handler, cfg)
+      let result2 = BastionIdempotency.call(conn, handler, cfg)
+      HttpServer.resp_body(result2)
+    end
+  end|} in
+  Alcotest.(check string) "replayed body matches original" "the-body"
+    (vstr (call_fn env "f" []))
+
+(** has_entry returns false before any call and true after the first. *)
+let test_idempotency_has_entry () =
+  let env = eval_with_bastion_idempotency {|mod Test do
+    fn f() do
+      let table  = Vault.new("idem_has")
+      let cfg    = BastionIdempotency.new(table)
+      let conn   = Conn(0, Post, "/x", Nil, "",
+                        Cons(Header("Idempotency-Key", "has-key"), Nil),
+                        "", 0, Nil, "", false, Nil, NoUpgrade)
+      let before = BastionIdempotency.has_entry(table, "has-key")
+      let handler = fn c -> HttpServer.send_resp(c, 200, "ok")
+      let _ = BastionIdempotency.call(conn, handler, cfg)
+      let after = BastionIdempotency.has_entry(table, "has-key")
+      (before, after)
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  (match v with
+   | March_eval.Eval.VTuple [b; a] ->
+     Alcotest.(check bool) "has_entry before = false" false (vbool b);
+     Alcotest.(check bool) "has_entry after  = true"  true  (vbool a)
+   | _ -> Alcotest.fail "expected tuple")
+
+(** evict removes a Done entry so the next call re-executes the handler. *)
+let test_idempotency_evict () =
+  let env = eval_with_bastion_idempotency {|mod Test do
+    fn f() do
+      let table = Vault.new("idem_evict")
+      let cfg   = BastionIdempotency.new(table)
+      let conn  = Conn(0, Post, "/evict", Nil, "",
+                       Cons(Header("Idempotency-Key", "evict-key"), Nil),
+                       "", 0, Nil, "", false, Nil, NoUpgrade)
+      let calls = Vault.new("idem_evict_calls")
+      Vault.set(calls, "n", 0)
+      let handler = fn c -> do
+        Vault.update(calls, "n", fn n -> n + 1)
+        HttpServer.send_resp(c, 200, "ok")
+      end
+      let _ = BastionIdempotency.call(conn, handler, cfg)
+      -- Evict the cache entry, then call again.
+      BastionIdempotency.evict(table, "evict-key")
+      let _ = BastionIdempotency.call(conn, handler, cfg)
+      Vault.get_or(calls, "n", 0)
+    end
+  end|} in
+  Alcotest.(check int) "evict allows re-execution: handler called twice" 2
+    (vint (call_fn env "f" []))
+
+(** inspect returns None before any call, Some(InFlight) while in-flight,
+    and Some(Done(...)) after completion. *)
+let test_idempotency_inspect () =
+  let env = eval_with_bastion_idempotency {|mod Test do
+    fn f() do
+      let table = Vault.new("idem_inspect")
+      let cfg   = BastionIdempotency.new(table)
+      let conn  = Conn(0, Post, "/inspect", Nil, "",
+                       Cons(Header("Idempotency-Key", "inspect-key"), Nil),
+                       "", 0, Nil, "", false, Nil, NoUpgrade)
+      let none_before = BastionIdempotency.inspect(table, "inspect-key")
+      let handler = fn c -> HttpServer.send_resp(c, 200, "ok")
+      let _ = BastionIdempotency.call(conn, handler, cfg)
+      let after_entry = BastionIdempotency.inspect(table, "inspect-key")
+      let is_done = match after_entry do
+        Some(Done(_, _, _)) -> true
+        _ -> false
+        end
+      (none_before, is_done)
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  (match v with
+   | March_eval.Eval.VTuple [n; d] ->
+     Alcotest.(check bool) "inspect before = None" true
+       (match n with March_eval.Eval.VCon ("None", []) -> true | _ -> false);
+     Alcotest.(check bool) "inspect after = Some(Done(...))" true (vbool d)
+   | _ -> Alcotest.fail "expected tuple")
+
+(** with_ttl configures a custom TTL stored in the Config. *)
+let test_idempotency_with_ttl () =
+  let env = eval_with_bastion_idempotency {|mod Test do
+    fn f() do
+      let table = Vault.new("idem_ttl")
+      let cfg   = BastionIdempotency.with_ttl(BastionIdempotency.new(table), 3600)
+      let conn  = Conn(0, Post, "/ttl", Nil, "",
+                       Cons(Header("Idempotency-Key", "ttl-key"), Nil),
+                       "", 0, Nil, "", false, Nil, NoUpgrade)
+      let calls = Vault.new("idem_ttl_calls")
+      Vault.set(calls, "n", 0)
+      let handler = fn c -> do
+        Vault.update(calls, "n", fn n -> n + 1)
+        HttpServer.send_resp(c, 200, "ok")
+      end
+      let _ = BastionIdempotency.call(conn, handler, cfg)
+      let _ = BastionIdempotency.call(conn, handler, cfg)
+      Vault.get_or(calls, "n", 0)
+    end
+  end|} in
+  Alcotest.(check int) "custom TTL: handler still called once" 1
+    (vint (call_fn env "f" []))
+
+(** with_key_header reads from a custom request header instead of the default. *)
+let test_idempotency_custom_key_header () =
+  let env = eval_with_bastion_idempotency {|mod Test do
+    fn f() do
+      let table = Vault.new("idem_custom_hdr")
+      let cfg   = BastionIdempotency.with_key_header(
+                    BastionIdempotency.new(table), "X-Request-Id")
+      let conn  = Conn(0, Post, "/custom", Nil, "",
+                       Cons(Header("X-Request-Id", "req-xyz"), Nil),
+                       "{}", 0, Nil, "", false, Nil, NoUpgrade)
+      let calls = Vault.new("idem_custom_hdr_calls")
+      Vault.set(calls, "n", 0)
+      let handler = fn c -> do
+        Vault.update(calls, "n", fn n -> n + 1)
+        HttpServer.send_resp(c, 201, "created")
+      end
+      let _ = BastionIdempotency.call(conn, handler, cfg)
+      let _ = BastionIdempotency.call(conn, handler, cfg)
+      Vault.get_or(calls, "n", 0)
+    end
+  end|} in
+  Alcotest.(check int) "custom header: handler called once" 1
+    (vint (call_fn env "f" []))
+
+(** Different idempotency keys are independent: each key has its own entry. *)
+let test_idempotency_different_keys_independent () =
+  let env = eval_with_bastion_idempotency {|mod Test do
+    fn f() do
+      let table = Vault.new("idem_keys")
+      let cfg   = BastionIdempotency.new(table)
+      let conn1 = Conn(0, Post, "/orders", Nil, "",
+                       Cons(Header("Idempotency-Key", "key-1"), Nil),
+                       "{}", 0, Nil, "", false, Nil, NoUpgrade)
+      let conn2 = Conn(0, Post, "/orders", Nil, "",
+                       Cons(Header("Idempotency-Key", "key-2"), Nil),
+                       "{}", 0, Nil, "", false, Nil, NoUpgrade)
+      let calls = Vault.new("idem_keys_calls")
+      Vault.set(calls, "n", 0)
+      let handler = fn c -> do
+        Vault.update(calls, "n", fn n -> n + 1)
+        HttpServer.send_resp(c, 201, "created")
+      end
+      let _ = BastionIdempotency.call(conn1, handler, cfg)
+      let _ = BastionIdempotency.call(conn2, handler, cfg)
+      Vault.get_or(calls, "n", 0)
+    end
+  end|} in
+  Alcotest.(check int) "two different keys: handler called twice" 2
+    (vint (call_fn env "f" []))
+
 (* ── Construction ── *)
 
 let test_df_empty_row_count () =
@@ -18261,5 +18604,22 @@ let () =
         Alcotest.test_case "get_or default"               `Quick test_vault_get_or;
         Alcotest.test_case "has present and absent"       `Quick test_vault_has;
         Alcotest.test_case "concurrent writes no lost updates" `Slow test_vault_concurrent_writes;
+      ]);
+      ("bastion_idempotency", [
+        Alcotest.test_case "GET passes through"              `Quick test_idempotency_passthrough_get;
+        Alcotest.test_case "DELETE passes through"           `Quick test_idempotency_passthrough_delete;
+        Alcotest.test_case "POST no key passes through"      `Quick test_idempotency_passthrough_no_key;
+        Alcotest.test_case "first POST executes handler"     `Quick test_idempotency_first_request_executes;
+        Alcotest.test_case "second POST replays response"    `Quick test_idempotency_replay_cached_response;
+        Alcotest.test_case "concurrent duplicate → 409"      `Quick test_idempotency_concurrent_duplicate_returns_409;
+        Alcotest.test_case "PUT is protected"                `Quick test_idempotency_put_protected;
+        Alcotest.test_case "PATCH is protected"              `Quick test_idempotency_patch_protected;
+        Alcotest.test_case "replay preserves body"           `Quick test_idempotency_replay_body;
+        Alcotest.test_case "has_entry before and after"      `Quick test_idempotency_has_entry;
+        Alcotest.test_case "evict allows re-execution"       `Quick test_idempotency_evict;
+        Alcotest.test_case "inspect entry state"             `Quick test_idempotency_inspect;
+        Alcotest.test_case "with_ttl sets custom TTL"        `Quick test_idempotency_with_ttl;
+        Alcotest.test_case "with_key_header custom header"   `Quick test_idempotency_custom_key_header;
+        Alcotest.test_case "different keys are independent"  `Quick test_idempotency_different_keys_independent;
       ]);
     ]

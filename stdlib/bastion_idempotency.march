@@ -1,0 +1,164 @@
+-- BastionIdempotency: idempotency keys middleware for the Bastion web framework.
+--
+-- For POST, PUT, and PATCH requests, reads the Idempotency-Key request header
+-- and uses Vault to cache the full response (status code, response headers, and
+-- body).  On a duplicate request with the same key, the cached response is
+-- replayed verbatim instead of invoking the handler again.  Concurrent
+-- duplicates — requests that arrive while the first is still in-flight — receive
+-- a 409 Conflict response immediately.
+--
+-- This implements the Stripe-style idempotency pattern, which is the industry
+-- standard for safe retries on non-idempotent HTTP endpoints.
+--
+-- Usage:
+--   let table = Vault.new("idempotency_keys")
+--   let cfg   = BastionIdempotency.new(table)
+--   let plug  = fn conn -> BastionIdempotency.call(conn, handler, cfg)
+--   HttpServer.new(4000)
+--   |> HttpServer.plug(plug)
+--   |> HttpServer.listen()
+
+mod BastionIdempotency do
+
+-- Cache entry stored in Vault for each idempotency key.
+-- InFlight: the request is currently being processed by the handler.
+-- Done:     the handler has completed; holds the status code, response headers,
+--           and response body to replay on subsequent requests.
+type Entry = InFlight | Done(Int, List(Header), String)
+
+-- Middleware configuration.
+-- table:      Vault table handle for storing cache entries.
+-- ttl_secs:   How long cached responses are retained (default: 86400 = 24 h).
+-- key_header: Request header carrying the idempotency key
+--             (default: "Idempotency-Key").
+type Config(t) = Config(t, Int, String)
+
+doc "Create a Config with defaults: 24-hour TTL and the 'Idempotency-Key' header."
+fn new(table) do
+  Config(table, 86400, "Idempotency-Key")
+end
+
+doc "Return a copy of `config` with the cache TTL set to `ttl_secs` seconds."
+fn with_ttl(config, ttl_secs) do
+  match config do
+  Config(table, _, header) -> Config(table, ttl_secs, header)
+  end
+end
+
+doc "Return a copy of `config` that reads the idempotency key from `header_name`."
+fn with_key_header(config, header_name) do
+  match config do
+  Config(table, ttl, _) -> Config(table, ttl, header_name)
+  end
+end
+
+-- True for HTTP methods that change server state and therefore need idempotency
+-- protection.  GET, HEAD, DELETE, OPTIONS, and TRACE are safe or already
+-- idempotent by definition, so they pass through unchanged.
+pfn is_mutating(m) do
+  match m do
+  Post  -> true
+  Put   -> true
+  Patch -> true
+  _     -> false
+  end
+end
+
+-- Recursively prepend each cached response header to `conn`.
+pfn apply_cached_headers(conn, headers) do
+  match headers do
+  Nil -> conn
+  Cons(Header(n, v), rest) ->
+    apply_cached_headers(HttpServer.put_resp_header(conn, n, v), rest)
+  end
+end
+
+-- Build a Conn that replays a previously-cached response.
+pfn replay(conn, cached_status, cached_headers, cached_body) do
+  conn
+  |> apply_cached_headers(cached_headers)
+  |> HttpServer.send_resp(cached_status, cached_body)
+end
+
+-- Return a 409 Conflict response for a concurrent duplicate request.
+pfn conflict(conn) do
+  conn
+  |> HttpServer.put_resp_header("content-type", "application/json")
+  |> HttpServer.send_resp(409, "{\"error\":\"request_in_flight\",\"message\":\"A request with this idempotency key is already being processed\"}")
+end
+
+doc """
+Idempotency middleware entry point.  Wire this into a Bastion plug pipeline:
+
+    let table = Vault.new("idempotency_keys")
+    let cfg   = BastionIdempotency.new(table)
+    let plug  = fn conn -> BastionIdempotency.call(conn, handler, cfg)
+
+Pass-through conditions (no caching, `next` called directly):
+  - The request method is GET, HEAD, DELETE, OPTIONS, or TRACE.
+  - The request does not include the configured idempotency-key header.
+
+For POST, PUT, and PATCH requests that carry the key header:
+  - No cached entry:   marks the key as in-flight, calls `next(conn)`, stores
+                       the full response in Vault, then returns the response.
+  - In-flight entry:   returns 409 Conflict immediately (concurrent duplicate).
+  - Done entry:        replays the cached status, headers, and body verbatim
+                       without calling `next` (past duplicate).
+"""
+fn call(conn, next, config) do
+  match config do
+  Config(table, ttl, key_header) -> do
+    let m = HttpServer.method(conn)
+    if is_mutating(m) do
+      match HttpServer.get_req_header(conn, key_header) do
+      None -> next(conn)
+      Some(key) -> do
+        match Vault.get(table, key) do
+        None -> do
+          Vault.set_ttl(table, key, InFlight, ttl)
+          let result = next(conn)
+          let entry = Done(HttpServer.status(result), HttpServer.resp_headers(result), HttpServer.resp_body(result))
+          Vault.set_ttl(table, key, entry, ttl)
+          result
+        end
+        Some(InFlight) -> conflict(conn)
+        Some(Done(cached_status, cached_headers, cached_body)) ->
+          replay(conn, cached_status, cached_headers, cached_body)
+        end
+      end
+      end
+    else next(conn) end
+  end
+  end
+end
+
+doc """
+Inspect the raw cache entry for `key` in `table`.  Intended for tests and
+monitoring endpoints, not for use in the request path.
+
+Returns:
+  None              — key is not in the cache (never seen, or TTL expired).
+  Some(InFlight)    — a request for this key is currently being processed.
+  Some(Done(...))   — a completed response is cached for this key.
+"""
+fn inspect(table, key) do
+  Vault.get(table, key)
+end
+
+doc "True if an entry for `key` exists in `table`, whether in-flight or done."
+fn has_entry(table, key) do
+  Vault.has(table, key)
+end
+
+doc """
+Remove the cache entry for `key` from `table`.
+
+Use this to let a client retry a request after the server encountered an error
+that left the cached response in an inconsistent state, or to clear stale
+entries during testing.
+"""
+fn evict(table, key) do
+  Vault.drop(table, key)
+end
+
+end
