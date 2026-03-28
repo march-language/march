@@ -46,6 +46,16 @@
         else cat with_e (ELit (LitString seg, sp))
       ) prefix parts
 
+  (** Join a dotted module path into a single name, e.g. [A; B; C] → "A.B.C".
+      Used for `mod A.B.C do ... end` declarations. *)
+  let join_mod_path names =
+    match names with
+    | [] -> assert false
+    | [n] -> n
+    | first :: _ ->
+      let txt = String.concat "." (List.map (fun (n : name) -> n.txt) names) in
+      { txt; span = first.span }
+
   let group_fn_clauses (decls : decl list) : decl list =
     let rec go acc = function
       | [] -> List.rev acc
@@ -127,9 +137,10 @@
 (* ---- Module ---- *)
 
 module_:
-  | MOD; name = upper_name; DO; decls = decl_list_r; END; EOF
-    { { mod_name = name; mod_decls = group_fn_clauses decls } }
-  | MOD; _n = upper_name; error
+  | MOD; path = upper_dot_path; DO; decls = decl_list_r; END; EOF
+    { let name = join_mod_path path in
+      { mod_name = name; mod_decls = group_fn_clauses decls } }
+  | MOD; _n = upper_dot_path; error
     { raise (March_errors.Errors.ParseError (
         "I was expecting `do` to start the module body here:",
         Some "mod Name do\n    ...\nend",
@@ -415,11 +426,12 @@ choose_branch:
   | option(PIPE); label = lower_name; ARROW; steps = list(protocol_step)
     { (label, steps) }
 
-(** Nested module: mod Name do ... end *)
+(** Nested module: mod Name do ... end  or  mod A.B.C do ... end *)
 mod_decl:
-  | MOD; name = upper_name; DO; decls = decl_list_r; END
-    { DMod (name, Public, group_fn_clauses decls, mk_span ($loc)) }
-  | MOD; _n = upper_name; error
+  | MOD; path = upper_dot_path; DO; decls = decl_list_r; END
+    { let name = join_mod_path path in
+      DMod (name, Public, group_fn_clauses decls, mk_span ($loc)) }
+  | MOD; _n = upper_dot_path; error
     { error_raise
         "I was expecting `do` after the module name here:"
         (Some "mod Name do\n    ...\nend")

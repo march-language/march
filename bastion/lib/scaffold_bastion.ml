@@ -184,17 +184,16 @@ mod %s do
 
     -- Build the request pipeline:
     -- request_timer -> router -> finish_timer (live_reload injected in dev)
-    let pipeline = fn conn -> do
+    let pipeline = fn conn ->
       let c0 = BastionDev.request_timer(conn)
       let c1 = router(c0, stats)
       let c2 = if Config.is_dev() then BastionDev.inject_live_reload(c1) else c1
       BastionDev.finish_timer(c2)
-    end
 
     println("[%s] listening on http://localhost:" ++ int_to_string(port))
-    if Config.is_dev() do
-      println("[%s] dev dashboard at http://localhost:" ++ int_to_string(port) ++ "/_bastion")
-    else :ok end
+    if Config.is_dev()
+    then println("[%s] dev dashboard at http://localhost:" ++ int_to_string(port) ++ "/_bastion")
+    else :ok
 
     HttpServer.new(port)
     |> HttpServer.plug(pipeline)
@@ -400,11 +399,9 @@ mod %sTest.Helper do
 
   doc "Assert two values are equal, printing a message on failure."
   fn assert_equal(expected, actual, label) do
-    if expected == actual do
-      println("  PASS: " ++ label)
-    else
-      println("  FAIL: " ++ label ++ " — expected: " ++ to_string(expected) ++ ", got: " ++ to_string(actual))
-    end
+    if expected == actual
+    then println("  PASS: " ++ label)
+    else println("  FAIL: " ++ label ++ " — expected: " ++ to_string(expected) ++ ", got: " ++ to_string(actual))
   end
 
 end
