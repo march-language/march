@@ -4886,6 +4886,22 @@ let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) :
     Returns the [Err.ctx] containing all diagnostics. *)
 let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
   let type_map = Hashtbl.create 256 in
+  (* Helper: recursively collect qualified "Mod.fn" names from nested DMod
+     declarations so that cross-module forward references are pre-bound in
+     pass 1. This mirrors the eval.ml global module_registry approach.
+     Only pre-binds public functions to preserve private-access restrictions. *)
+  let rec prebind_mod_members prefix env decls =
+    List.fold_left (fun e d ->
+        match d with
+        | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
+          let qname = prefix ^ "." ^ def.fn_name.txt in
+          if List.mem_assoc qname e.vars then e
+          else bind_var qname (Mono (fresh_var 0)) e
+        | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
+          prebind_mod_members (prefix ^ "." ^ mname.txt) e inner_decls
+        | _ -> e
+      ) env decls
+  in
   (* Pass 1: forward-reference placeholders for functions and type/ctor names *)
   let pre_env = List.fold_left (fun env d ->
       match d with
@@ -4893,6 +4909,10 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
         (* Don't shadow existing bindings (e.g., builtins) with mono forward refs *)
         if List.mem_assoc def.fn_name.txt env.vars then env
         else bind_var def.fn_name.txt (Mono (fresh_var 0)) env
+      | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
+        (* Pre-bind all public qualified names "ModName.fn" so that sibling
+           modules that reference each other don't fail during pass 2. *)
+        prebind_mod_members mname.txt env inner_decls
       | Ast.DType (_, name, params, typedef, _) ->
         let env1 = { env with types = (name.txt, List.length params) :: env.types } in
         (match typedef with
@@ -4951,12 +4971,26 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
 let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
     : Err.ctx * (Ast.span, ty) Hashtbl.t * env =
   let type_map = Hashtbl.create 256 in
+  let rec prebind_mod_members_full prefix env decls =
+    List.fold_left (fun e d ->
+        match d with
+        | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
+          let qname = prefix ^ "." ^ def.fn_name.txt in
+          if List.mem_assoc qname e.vars then e
+          else bind_var qname (Mono (fresh_var 0)) e
+        | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
+          prebind_mod_members_full (prefix ^ "." ^ mname.txt) e inner_decls
+        | _ -> e
+      ) env decls
+  in
   (* Same two-pass structure as check_module — uses base_env with builtins. *)
   let pre_env = List.fold_left (fun env d ->
       match d with
       | Ast.DFn (def, _) ->
         if List.mem_assoc def.fn_name.txt env.vars then env
         else bind_var def.fn_name.txt (Mono (fresh_var 0)) env
+      | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
+        prebind_mod_members_full mname.txt env inner_decls
       | Ast.DType (_vis, name, params, typedef, _) ->
         let env1 = { env with types = (name.txt, List.length params) :: env.types } in
         (match typedef with

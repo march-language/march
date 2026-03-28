@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-28 (WASM Tier 4 browser target validated end-to-end; CorrelationId middleware + uuid_v4 builtin; forge bastion scaffold fixes — templates, bastion/lib move; Bastion adversarial test suite — 346 tests across 7 files)
+**Last updated:** 2026-03-28 (WASM Tier 4 browser target validated end-to-end; CorrelationId middleware + uuid_v4 builtin; forge bastion scaffold fixes — templates, bastion/lib move; Bastion adversarial test suite — 346 tests across 7 files; module load-order independence extended to typecheck pass)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
