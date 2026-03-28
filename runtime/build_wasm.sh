@@ -44,14 +44,16 @@ fi
 
 echo "Using wasi-sdk: $WASI_SDK"
 
-# --- build runtime .o for wasm64-wasi ----------------------------------------
-RUNTIME_C="$SCRIPT_DIR/march_runtime.c"
-RUNTIME_O="$SCRIPT_DIR/march_runtime_wasm64.o"
+# --- build runtime .o for wasm32-unknown-unknown ------------------------------
+# Use march_runtime_wasm.c (the stripped-down browser runtime) rather than
+# the native march_runtime.c which requires ucontext.h, pthreads, etc.
+RUNTIME_C="$SCRIPT_DIR/march_runtime_wasm.c"
+RUNTIME_O="$SCRIPT_DIR/march_runtime_wasm32.o"
 
 echo "Compiling runtime..."
 "$WASI_CLANG" \
-    --target=wasm64-wasi \
-    --sysroot="$WASI_SYSROOT" \
+    --target=wasm32-unknown-unknown \
+    -nostdlib \
     -O2 \
     -DMARCH_WASM \
     -Wno-unused-command-line-argument \
@@ -82,7 +84,7 @@ if [ -n "$1" ]; then
     fi
 
     echo "Compiling $MARCH_FILE -> $OUT_WASM ..."
-    "$MARCH_BIN" --compile --target wasm64-wasi "$MARCH_FILE" -o "$OUT_WASM"
+    WASI_SDK_PATH="$WASI_SDK" "$MARCH_BIN" --compile --target wasm32-unknown-unknown "$MARCH_FILE" -o "$OUT_WASM"
 
     echo "Done: $OUT_WASM"
 
@@ -90,11 +92,11 @@ if [ -n "$1" ]; then
     if command -v wasmtime >/dev/null 2>&1; then
         echo ""
         echo "Running with wasmtime:"
-        wasmtime --wasm memory64 "$OUT_WASM"
+        wasmtime "$OUT_WASM"
     else
         echo ""
         echo "wasmtime not found. To run:"
         echo "  brew install wasmtime"
-        echo "  wasmtime --wasm memory64 $OUT_WASM"
+        echo "  wasmtime $OUT_WASM"
     fi
 fi

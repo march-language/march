@@ -281,7 +281,10 @@ let is_builtin_fn name =
                  (* Generic to_string *)
                  "to_string";
                  (* Bitwise integer builtins *)
-                 "int_and"; "int_or"; "int_xor"; "int_not"; "int_shl"; "int_shr"; "int_popcount"]
+                 "int_and"; "int_or"; "int_xor"; "int_not"; "int_shl"; "int_shr"; "int_popcount";
+                 (* Vault (key-value store) builtins *)
+                 "vault_new"; "vault_whereis"; "vault_set"; "vault_set_ttl";
+                 "vault_get"; "vault_drop"; "vault_update"; "vault_size"; "vault_keys"]
 
 let atom_is_builtin (atom : Tir.atom) =
   match atom with
@@ -445,6 +448,16 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "register_supervisor"         -> Some Tir.TUnit
   (* Generic to_string *)
   | "to_string"                   -> Some Tir.TString
+  (* Vault (key-value store) builtins *)
+  | "vault_new"          -> Some (Tir.TPtr Tir.TUnit)
+  | "vault_whereis"      -> Some (Tir.TCon ("Option", [Tir.TPtr Tir.TUnit]))
+  | "vault_set"          -> Some Tir.TUnit
+  | "vault_set_ttl"      -> Some Tir.TUnit
+  | "vault_get"          -> Some (Tir.TCon ("Option", [Tir.TPtr Tir.TUnit]))
+  | "vault_drop"         -> Some Tir.TUnit
+  | "vault_update"       -> Some Tir.TUnit
+  | "vault_size"         -> Some Tir.TInt
+  | "vault_keys"         -> Some (Tir.TCon ("List", [Tir.TPtr Tir.TUnit]))
   (* Bitwise integer builtins *)
   | "int_and" | "int_or" | "int_xor"
   | "int_not" | "int_shl" | "int_shr"
@@ -584,6 +597,16 @@ let mangle_extern : string -> string = function
   | "register_supervisor"  -> "march_register_supervisor"
   (* Generic to_string *)
   | "to_string"          -> "march_value_to_string"
+  (* Vault (key-value store) builtins *)
+  | "vault_new"          -> "march_vault_new"
+  | "vault_whereis"      -> "march_vault_whereis"
+  | "vault_set"          -> "march_vault_set"
+  | "vault_set_ttl"      -> "march_vault_set_ttl"
+  | "vault_get"          -> "march_vault_get"
+  | "vault_drop"         -> "march_vault_drop"
+  | "vault_update"       -> "march_vault_update"
+  | "vault_size"         -> "march_vault_size"
+  | "vault_keys"         -> "march_vault_keys"
   | "main"          -> "march_main"   (* March main → march_main in LLVM *)
   | other           -> other
 
@@ -1305,6 +1328,32 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
         (match Hashtbl.find_opt ctx.top_fn_ret_ty f.Tir.v_name with
          | Some (Tir.TVar _) | None -> fn_ret_tir f.Tir.v_ty
          | Some t -> t)
+    in
+    let ret_ty = llvm_ret_ty ret_tir in
+    if ret_ty = "void" then begin
+      emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
+      ("i64", "0")
+    end else begin
+      let r = fresh ctx "cr" in
+      emit ctx (Printf.sprintf "%s = call %s @%s(%s)" r ret_ty fname args_str);
+      (ret_ty, r)
+    end
+
+  (* ── ECallPtr where callee is a known builtin ─────────────────────── *)
+  (* Builtins (e.g. vault_update) are not in top_fns, so TIR lowering
+     emits them as call_ptr.  Detect this here and emit a direct call
+     instead of trying to dispatch through a closure pointer. *)
+  | Tir.ECallPtr (Tir.AVar f, args) when is_builtin_fn f.Tir.v_name ->
+    let arg_strs = List.map (fun a ->
+        let (ty, v) = emit_atom ctx a in ty ^ " " ^ v
+      ) args in
+    let args_str = String.concat ", " arg_strs in
+    let fname = match Hashtbl.find_opt ctx.extern_map f.Tir.v_name with
+      | Some c_name -> c_name
+      | None -> mangle_extern f.Tir.v_name in
+    let ret_tir = match builtin_ret_ty f.Tir.v_name with
+      | Some t -> t
+      | None -> fn_ret_tir f.Tir.v_ty
     in
     let ret_ty = llvm_ret_ty ret_tir in
     if ret_ty = "void" then begin
@@ -2434,6 +2483,16 @@ declare ptr  @march_string_to_float(ptr %s)
 ; List builtins
 declare ptr  @march_list_append(ptr %a, ptr %b)
 declare ptr  @march_list_concat(ptr %lists)
+; Vault (key-value store) builtins
+declare ptr  @march_vault_new(ptr %name)
+declare ptr  @march_vault_whereis(ptr %name)
+declare ptr  @march_vault_set(ptr %table, ptr %key, ptr %value)
+declare ptr  @march_vault_set_ttl(ptr %table, ptr %key, ptr %value, i64 %ttl)
+declare ptr  @march_vault_get(ptr %table, ptr %key)
+declare ptr  @march_vault_drop(ptr %table, ptr %key)
+declare ptr  @march_vault_update(ptr %table, ptr %key, ptr %f)
+declare i64  @march_vault_size(ptr %table)
+declare ptr  @march_vault_keys(ptr %table)
 ; LLVM intrinsics
 declare i64  @llvm.ctpop.i64(i64 %val)
 
@@ -2599,7 +2658,9 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
      (* For WASM islands, export the render/update functions.
         The island name is derived from the module name.
         The user's module must define render(state) and update(state, msg). *)
-     (* Find a function by base name, handling mono suffixes like render$String *)
+     (* Find a function by base name, handling mono suffixes like render$String.
+        Only matches the user's own module (tm_name.suffix) or bare names —
+        NOT functions from other modules like Vault.update. *)
      let find_fn suffix =
        List.find_opt (fun (fn : Tir.fn_def) ->
          let n = fn.Tir.fn_name in
@@ -2609,9 +2670,7 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
            | None -> n
          in
          base = suffix ||
-         (String.length base > String.length suffix + 1 &&
-          String.sub base (String.length base - String.length suffix - 1)
-            (String.length suffix + 1) = ("." ^ suffix))
+         base = m.Tir.tm_name ^ "." ^ suffix
        ) m.Tir.tm_fns
      in
      let emit_island_export export_name march_fn_name params ret_ty =
