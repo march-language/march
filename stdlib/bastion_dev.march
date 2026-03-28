@@ -172,11 +172,67 @@ fn vault_stat_count(vs) do
   end
 end
 
+-- ── SystemStats ─────────────────────────────────────────────────────────────
+
+-- A live snapshot of runtime / OS metrics for the System section.
+-- Fields: uptime_ms, heap_bytes, minor_gcs, major_gcs,
+--         actor_count, cpu_count, word_size.
+type SystemStats = SystemStats(Int, Int, Int, Int, Int, Int, Int)
+
+doc "Take a live snapshot of runtime/system metrics."
+fn snapshot_system() do
+  SystemStats(
+    sys_uptime_ms(),
+    sys_heap_bytes(),
+    sys_minor_gcs(),
+    sys_major_gcs(),
+    sys_actor_count(),
+    sys_cpu_count(),
+    sys_word_size()
+  )
+end
+
+doc "Refresh the system snapshot stored in DevStats."
+fn refresh_system(stats) do
+  match stats do
+  DevStats(t, e, r, w, vs, el, routes, _) ->
+    DevStats(t, e, r, w, vs, el, routes, snapshot_system())
+  end
+end
+
+fn sys_uptime(s) do
+  match s do SystemStats(u, _, _, _, _, _, _) -> u end
+end
+
+fn sys_heap(s) do
+  match s do SystemStats(_, h, _, _, _, _, _) -> h end
+end
+
+fn sys_minor_gc(s) do
+  match s do SystemStats(_, _, mn, _, _, _, _) -> mn end
+end
+
+fn sys_major_gc(s) do
+  match s do SystemStats(_, _, _, mj, _, _, _) -> mj end
+end
+
+fn sys_actors(s) do
+  match s do SystemStats(_, _, _, _, a, _, _) -> a end
+end
+
+fn sys_cpus(s) do
+  match s do SystemStats(_, _, _, _, _, c, _) -> c end
+end
+
+fn sys_wordsize(s) do
+  match s do SystemStats(_, _, _, _, _, _, w) -> w end
+end
+
 -- ── DevStats ───────────────────────────────────────────────────────────────
 
 -- Full dev-server state for the /_bastion dashboard.
 -- Fields: total_requests, error_count, recent (50), ws_connections,
--- vault_stats, errors (20), routes.
+-- vault_stats, errors (20), routes, system_snapshot.
 type DevStats = DevStats(
   Int,               -- total_requests
   Int,               -- error_count
@@ -184,53 +240,60 @@ type DevStats = DevStats(
   Int,               -- ws_connections
   List(VaultStat),   -- vault_stats
   List(ErrorEntry),  -- errors
-  List(RouteEntry)   -- routes
+  List(RouteEntry),  -- routes
+  SystemStats        -- system snapshot (refresh with refresh_system/1)
 )
 
-doc "Create an empty DevStats."
+doc "Create an empty DevStats with a live system snapshot."
 fn new_stats() do
-  DevStats(0, 0, Nil, 0, Nil, Nil, Nil)
+  DevStats(0, 0, Nil, 0, Nil, Nil, Nil, snapshot_system())
 end
 
 fn stats_total(s) do
   match s do
-  DevStats(t, _, _, _, _, _, _) -> t
+  DevStats(t, _, _, _, _, _, _, _) -> t
   end
 end
 
 fn stats_errors(s) do
   match s do
-  DevStats(_, e, _, _, _, _, _) -> e
+  DevStats(_, e, _, _, _, _, _, _) -> e
   end
 end
 
 fn stats_recent(s) do
   match s do
-  DevStats(_, _, r, _, _, _, _) -> r
+  DevStats(_, _, r, _, _, _, _, _) -> r
   end
 end
 
 fn stats_ws(s) do
   match s do
-  DevStats(_, _, _, w, _, _, _) -> w
+  DevStats(_, _, _, w, _, _, _, _) -> w
   end
 end
 
 fn stats_vault(s) do
   match s do
-  DevStats(_, _, _, _, v, _, _) -> v
+  DevStats(_, _, _, _, v, _, _, _) -> v
   end
 end
 
 fn stats_error_log(s) do
   match s do
-  DevStats(_, _, _, _, _, el, _) -> el
+  DevStats(_, _, _, _, _, el, _, _) -> el
   end
 end
 
 fn stats_routes(s) do
   match s do
-  DevStats(_, _, _, _, _, _, r) -> r
+  DevStats(_, _, _, _, _, _, r, _) -> r
+  end
+end
+
+fn stats_sys(s) do
+  match s do
+  DevStats(_, _, _, _, _, _, _, sys) -> sys
   end
 end
 
@@ -248,12 +311,12 @@ end
 doc "Record a new RequestEntry; keeps newest 50, increments counters."
 fn record_request(stats, entry) do
   match stats do
-  DevStats(total, errs, recent, ws, vs, el, routes) ->
+  DevStats(total, errs, recent, ws, vs, el, routes, sys) ->
     do
       let new_total  = total + 1
       let new_errs   = if entry_status(entry) >= 500 do errs + 1 else errs end
       let new_recent = take(Cons(entry, recent), 50)
-      DevStats(new_total, new_errs, new_recent, ws, vs, el, routes)
+      DevStats(new_total, new_errs, new_recent, ws, vs, el, routes, sys)
     end
   end
 end
@@ -261,10 +324,10 @@ end
 doc "Record a new ErrorEntry; keeps newest 20."
 fn record_error(stats, entry) do
   match stats do
-  DevStats(total, errs, recent, ws, vs, el, routes) ->
+  DevStats(total, errs, recent, ws, vs, el, routes, sys) ->
     do
       let new_el = take(Cons(entry, el), 20)
-      DevStats(total, errs, recent, ws, vs, new_el, routes)
+      DevStats(total, errs, recent, ws, vs, new_el, routes, sys)
     end
   end
 end
@@ -272,41 +335,42 @@ end
 doc "Register a route in the dashboard registry."
 fn register_route(stats, entry) do
   match stats do
-  DevStats(total, errs, recent, ws, vs, el, routes) ->
-    DevStats(total, errs, recent, ws, vs, el, Cons(entry, routes))
+  DevStats(total, errs, recent, ws, vs, el, routes, sys) ->
+    DevStats(total, errs, recent, ws, vs, el, Cons(entry, routes), sys)
   end
 end
 
 doc "Replace the vault snapshots list."
 fn set_vault_stats(stats, vault_list) do
   match stats do
-  DevStats(total, errs, recent, ws, _, el, routes) ->
-    DevStats(total, errs, recent, ws, vault_list, el, routes)
+  DevStats(total, errs, recent, ws, _, el, routes, sys) ->
+    DevStats(total, errs, recent, ws, vault_list, el, routes, sys)
   end
 end
 
 doc "Append a single vault snapshot."
 fn add_vault_stat(stats, vs) do
   match stats do
-  DevStats(total, errs, recent, ws, vault_list, el, routes) ->
-    DevStats(total, errs, recent, ws, Cons(vs, vault_list), el, routes)
+  DevStats(total, errs, recent, ws, vault_list, el, routes, sys) ->
+    DevStats(total, errs, recent, ws, Cons(vs, vault_list), el, routes, sys)
   end
 end
 
 doc "Increment the active WebSocket connection count."
 fn inc_ws(stats) do
   match stats do
-  DevStats(t, e, r, w, vs, el, routes) -> DevStats(t, e, r, w + 1, vs, el, routes)
+  DevStats(t, e, r, w, vs, el, routes, sys) ->
+    DevStats(t, e, r, w + 1, vs, el, routes, sys)
   end
 end
 
 doc "Decrement the active WebSocket connection count (floor 0)."
 fn dec_ws(stats) do
   match stats do
-  DevStats(t, e, r, w, vs, el, routes) ->
+  DevStats(t, e, r, w, vs, el, routes, sys) ->
     do
       let new_w = if w > 0 do w - 1 else 0 end
-      DevStats(t, e, r, new_w, vs, el, routes)
+      DevStats(t, e, r, new_w, vs, el, routes, sys)
     end
   end
 end
@@ -682,11 +746,68 @@ pfn avg_duration(entries) do
   else int_to_string(s / c) end
 end
 
+-- Format an uptime duration given milliseconds → "Xd Xh Xm Xs".
+pfn format_uptime(ms) do
+  let total_s  = ms / 1000
+  let days     = total_s / 86400
+  let hours    = (total_s % 86400) / 3600
+  let minutes  = (total_s % 3600) / 60
+  let seconds  = total_s % 60
+  if days > 0 do
+    int_to_string(days) ++ "d " ++ int_to_string(hours) ++ "h"
+  else if hours > 0 do
+    int_to_string(hours) ++ "h " ++ int_to_string(minutes) ++ "m"
+  else if minutes > 0 do
+    int_to_string(minutes) ++ "m " ++ int_to_string(seconds) ++ "s"
+  else
+    int_to_string(seconds) ++ "s"
+  end end end
+end
+
+-- Format bytes into a human-readable string (B / KB / MB / GB).
+pfn format_bytes(b) do
+  if b >= 1073741824 do
+    int_to_string(b / 1073741824) ++ " GB"
+  else if b >= 1048576 do
+    int_to_string(b / 1048576) ++ " MB"
+  else if b >= 1024 do
+    int_to_string(b / 1024) ++ " KB"
+  else
+    int_to_string(b) ++ " B"
+  end end end
+end
+
+-- Render the System section as a two-column key/value table.
+pfn render_system(sys) do
+  let uptime_str  = format_uptime(sys_uptime(sys))
+  let heap_str    = format_bytes(sys_heap(sys))
+  let minor_str   = int_to_string(sys_minor_gc(sys))
+  let major_str   = int_to_string(sys_major_gc(sys))
+  let actor_str   = int_to_string(sys_actors(sys))
+  let cpu_str     = int_to_string(sys_cpus(sys))
+  let word_str    = int_to_string(sys_wordsize(sys)) ++ "-bit"
+  "<table class=\"req-table sys-table\">" ++
+  "<tbody>" ++
+  kv_row("Uptime",         uptime_str) ++
+  kv_row("Heap (live)",    heap_str)   ++
+  kv_row("GC (minor)",     minor_str)  ++
+  kv_row("GC (major)",     major_str)  ++
+  kv_row("Active actors",  actor_str)  ++
+  kv_row("CPU cores",      cpu_str)    ++
+  kv_row("Word size",      word_str)   ++
+  -- TODO: sys_total_memory() builtin (needs OS integration via /proc/meminfo or sysctl)
+  -- TODO: sys_cpu_usage_pct() builtin (needs /proc/stat delta or getrusage)
+  -- TODO: sys_reduction_count() builtin (expose total reductions from scheduler)
+  -- TODO: sys_port_count() builtin (expose number of open file descriptors)
+  "</tbody></table>"
+end
+
 doc """
 Render the Bastion dev dashboard as a standalone HTML page.
 
 The page (inspired by Phoenix LiveDashboard) shows:
 - Metric cards: total requests, errors, avg response time, WS connections
+- System section: uptime, heap, GC stats, actors, CPU cores, word size
 - Recent request log with colour-coded status badges
 - Error log with expandable stack traces
 - Vault table stats (name, entry count)
@@ -695,14 +816,16 @@ The page (inspired by Phoenix LiveDashboard) shows:
     let html = BastionDev.dashboard_html(stats)
 """
 fn dashboard_html(stats) do
-  let total_str = int_to_string(stats_total(stats))
-  let errs_str  = int_to_string(stats_errors(stats))
-  let ws_str    = int_to_string(stats_ws(stats))
-  let avg_str   = avg_duration(stats_recent(stats)) ++ "ms"
-  let req_html  = render_request_log(stats_recent(stats))
-  let err_html  = render_error_log(stats_error_log(stats))
-  let vault_html = render_vault(stats_vault(stats))
+  let sys         = snapshot_system()
+  let total_str   = int_to_string(stats_total(stats))
+  let errs_str    = int_to_string(stats_errors(stats))
+  let ws_str      = int_to_string(stats_ws(stats))
+  let avg_str     = avg_duration(stats_recent(stats)) ++ "ms"
+  let req_html    = render_request_log(stats_recent(stats))
+  let err_html    = render_error_log(stats_error_log(stats))
+  let vault_html  = render_vault(stats_vault(stats))
   let routes_html = render_routes(stats_routes(stats))
+  let sys_html    = render_system(sys)
   "<!DOCTYPE html><html><head><meta charset=\"utf-8\">" ++
   "<title>Bastion Dev Dashboard</title>" ++
   "<meta http-equiv=\"refresh\" content=\"5\">" ++
@@ -738,6 +861,9 @@ fn dashboard_html(stats) do
   "details pre{background:#070912;padding:.8rem;border-radius:4px;margin-top:.4rem;font-size:.78rem;overflow-x:auto;white-space:pre-wrap}" ++
   ".empty{color:#545c7e;font-size:.85rem;font-style:italic;padding:.5rem 0}" ++
   ".k{color:#a9b1d6;width:200px;white-space:nowrap}" ++
+  ".sys-table td{padding:.3rem .6rem;border-bottom:1px solid #1a1e2e}" ++
+  ".sys-table td.k{color:#7dcfff;font-size:.82rem;width:180px}" ++
+  ".sys-table td:last-child{color:#c0caf5;font-size:.82rem}" ++
   "</style></head><body>" ++
   "<div class=\"topbar\">" ++
   "<span class=\"topbar-title\">⬡ Bastion Dev</span>" ++
@@ -750,6 +876,7 @@ fn dashboard_html(stats) do
   stat_card("Avg Response", avg_str, "avg") ++
   stat_card("WebSockets", ws_str, "ws") ++
   "</div>" ++
+  "<div class=\"section\"><h2>System</h2>" ++ sys_html ++ "</div>" ++
   "<div class=\"section\"><h2>Recent Requests</h2>" ++ req_html ++ "</div>" ++
   "<div class=\"section\"><h2>Error Log</h2>" ++ err_html ++ "</div>" ++
   "<div class=\"section\"><h2>Vault Tables</h2>" ++ vault_html ++ "</div>" ++

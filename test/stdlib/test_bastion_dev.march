@@ -462,6 +462,81 @@ describe "dashboard_html" do
   end
 end
 
+-- ── SystemStats ────────────────────────────────────────────────────────────
+
+describe "SystemStats" do
+  test "snapshot_system returns live data" do
+    let sys = BastionDev.snapshot_system()
+    -- uptime must be >= 0
+    assert (BastionDev.sys_uptime(sys) >= 0)
+    -- heap must be a positive byte count
+    assert (BastionDev.sys_heap(sys) > 0)
+    -- GC counts are non-negative
+    assert (BastionDev.sys_minor_gc(sys) >= 0)
+    assert (BastionDev.sys_major_gc(sys) >= 0)
+    -- actors count is non-negative
+    assert (BastionDev.sys_actors(sys) >= 0)
+    -- cpu_count >= 1
+    assert (BastionDev.sys_cpus(sys) >= 1)
+    -- word size is 32 or 64
+    let ws = BastionDev.sys_wordsize(sys)
+    assert (ws == 32 || ws == 64)
+  end
+
+  test "new_stats includes a system snapshot" do
+    let s = BastionDev.new_stats()
+    let sys = BastionDev.stats_sys(s)
+    assert (BastionDev.sys_cpus(sys) >= 1)
+  end
+
+  test "refresh_system updates the system snapshot" do
+    let s0 = BastionDev.new_stats()
+    let s1 = BastionDev.refresh_system(s0)
+    let sys = BastionDev.stats_sys(s1)
+    assert (BastionDev.sys_uptime(sys) >= 0)
+  end
+
+  test "record_request preserves system snapshot" do
+    let s0  = BastionDev.new_stats()
+    let sys = BastionDev.stats_sys(s0)
+    let e   = BastionDev.make_entry("GET", "/", 200, 1)
+    let s1  = BastionDev.record_request(s0, e)
+    assert (BastionDev.sys_cpus(BastionDev.stats_sys(s1)) == BastionDev.sys_cpus(sys))
+  end
+end
+
+describe "dashboard_html system section" do
+  test "system section is present in rendered HTML" do
+    let html = BastionDev.dashboard_html(BastionDev.new_stats())
+    assert (string_contains(html, "System"))
+  end
+
+  test "uptime appears in system section" do
+    let html = BastionDev.dashboard_html(BastionDev.new_stats())
+    assert (string_contains(html, "Uptime"))
+  end
+
+  test "heap stat appears in system section" do
+    let html = BastionDev.dashboard_html(BastionDev.new_stats())
+    assert (string_contains(html, "Heap"))
+  end
+
+  test "GC stats appear in system section" do
+    let html = BastionDev.dashboard_html(BastionDev.new_stats())
+    assert (string_contains(html, "GC"))
+  end
+
+  test "CPU cores appear in system section" do
+    let html = BastionDev.dashboard_html(BastionDev.new_stats())
+    assert (string_contains(html, "CPU"))
+  end
+
+  test "sys-table CSS class is present" do
+    let html = BastionDev.dashboard_html(BastionDev.new_stats())
+    assert (string_contains(html, "sys-table"))
+  end
+end
+
 describe "dashboard_handler" do
   test "intercepts /_bastion and sends 200" do
     let c2 = BastionDev.dashboard_handler(make_get("/_bastion"), BastionDev.new_stats())

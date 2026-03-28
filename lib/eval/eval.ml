@@ -204,6 +204,9 @@ let vault_registry      : (int, vault_table) Hashtbl.t = Hashtbl.create 8
 let vault_name_registry : (string, int) Hashtbl.t     = Hashtbl.create 8
 let vault_next_id       : int ref = ref 0
 
+(** Monotonic start time for sys_uptime_ms calculations. *)
+let process_start_time : float = Unix.gettimeofday ()
+
 (** True if a row is still live (not expired). *)
 let vault_row_live (row : vault_row) : bool =
   match row.vr_expiry with
@@ -4375,6 +4378,34 @@ let base_env : env =
   ; ("process_pid", VBuiltin ("process_pid", function
         | [] -> VInt (Unix.getpid ())
         | _ -> eval_error "process_pid: no arguments expected"))
+  (* ── System / runtime introspection builtins ────────────────────────── *)
+  ; ("sys_uptime_ms", VBuiltin ("sys_uptime_ms", function
+        | [] | [VUnit] ->
+          let ms = int_of_float ((Unix.gettimeofday () -. process_start_time) *. 1000.0) in
+          VInt ms
+        | _ -> eval_error "sys_uptime_ms: no arguments expected"))
+  ; ("sys_heap_bytes", VBuiltin ("sys_heap_bytes", function
+        | [] | [VUnit] ->
+          let s = Gc.stat () in
+          VInt (s.Gc.live_words * (Sys.word_size / 8))
+        | _ -> eval_error "sys_heap_bytes: no arguments expected"))
+  ; ("sys_word_size", VBuiltin ("sys_word_size", function
+        | [] | [VUnit] -> VInt Sys.word_size
+        | _ -> eval_error "sys_word_size: no arguments expected"))
+  ; ("sys_minor_gcs", VBuiltin ("sys_minor_gcs", function
+        | [] | [VUnit] ->
+          let s = Gc.stat () in VInt s.Gc.minor_collections
+        | _ -> eval_error "sys_minor_gcs: no arguments expected"))
+  ; ("sys_major_gcs", VBuiltin ("sys_major_gcs", function
+        | [] | [VUnit] ->
+          let s = Gc.stat () in VInt s.Gc.major_collections
+        | _ -> eval_error "sys_major_gcs: no arguments expected"))
+  ; ("sys_actor_count", VBuiltin ("sys_actor_count", function
+        | [] | [VUnit] -> VInt (Hashtbl.length actor_registry)
+        | _ -> eval_error "sys_actor_count: no arguments expected"))
+  ; ("sys_cpu_count", VBuiltin ("sys_cpu_count", function
+        | [] | [VUnit] -> VInt (Domain.recommended_domain_count ())
+        | _ -> eval_error "sys_cpu_count: no arguments expected"))
   (* Run a command synchronously; returns Ok(ProcessResult(code, stdout, stderr))
      or Err(msg) on OS error.  Stderr is captured separately. *)
   ; ("process_spawn_sync", VBuiltin ("process_spawn_sync", function
