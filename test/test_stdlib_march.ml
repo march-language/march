@@ -125,6 +125,7 @@ let all_stdlib_decls =
     "html.march";
     "csrf.march";
     "session.march";
+    "correlation.march";
     "bastion_dev.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
@@ -244,5 +245,9 @@ let () =
     ("session", [
       Alcotest.test_case "Session module"
         `Quick (run_stdlib_test "test_session.march" "TestSession");
+    ]);
+    ("correlation", [
+      Alcotest.test_case "CorrelationId module"
+        `Quick (run_stdlib_test "test_correlation.march" "TestCorrelationId");
     ]);
   ]

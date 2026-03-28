@@ -3554,6 +3554,24 @@ let base_env : env =
           done;
           march_bytes_of_string (Bytes.to_string buf)
         | _ -> eval_error "random_bytes(n: Int): Bytes"))
+    (* ---- uuid_v4(): generate a random UUID v4 string ---- *)
+  ; ("uuid_v4", VBuiltin ("uuid_v4", function
+        | [] ->
+          let buf = Bytes.create 16 in
+          for i = 0 to 15 do
+            Bytes.set buf i (Char.chr (Random.int 256))
+          done;
+          (* Set version 4: high nibble of byte 6 = 0x4 *)
+          Bytes.set buf 6 (Char.chr ((Char.code (Bytes.get buf 6) land 0x0f) lor 0x40));
+          (* Set variant bits: top 2 bits of byte 8 = 0b10 *)
+          Bytes.set buf 8 (Char.chr ((Char.code (Bytes.get buf 8) land 0x3f) lor 0x80));
+          let hex b = Printf.sprintf "%02x" (Char.code b) in
+          let s = String.concat "" (List.init 16 (fun i -> hex (Bytes.get buf i))) in
+          (* xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx *)
+          VString (String.sub s 0 8 ^ "-" ^ String.sub s 8 4 ^ "-"
+                   ^ String.sub s 12 4 ^ "-" ^ String.sub s 16 4 ^ "-"
+                   ^ String.sub s 20 12)
+        | _ -> eval_error "uuid_v4: no arguments expected"))
   ; ("tcp_recv_http", VBuiltin ("tcp_recv_http", function
         | [VInt fd; VInt max_bytes] ->
           (* Read an HTTP response on a keep-alive connection:
