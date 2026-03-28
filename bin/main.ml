@@ -256,10 +256,10 @@ let write_file path contents =
 (* Cross-file import resolver (delegated to march_resolver library)  *)
 (* ------------------------------------------------------------------ *)
 
-(** Convert a CamelCase module name to a snake_case file name.
-    E.g. "HttpClient" → "http_client.march", "Message" → "message.march" *)
-let module_name_to_filename name =
-  let buf = Buffer.create (String.length name + 8) in
+(** Convert a single CamelCase segment to snake_case.
+    E.g. "HttpClient" → "http_client", "Router" → "router" *)
+let camel_to_snake name =
+  let buf = Buffer.create (String.length name + 4) in
   String.iteri (fun i c ->
     if i > 0 && c >= 'A' && c <= 'Z' then begin
       Buffer.add_char buf '_';
@@ -267,8 +267,16 @@ let module_name_to_filename name =
     end else
       Buffer.add_char buf (Char.lowercase_ascii c)
   ) name;
-  Buffer.add_string buf ".march";
   Buffer.contents buf
+
+(** Convert a possibly-dotted module name to a relative file path.
+    Single segment: "HttpClient" → "http_client.march"
+    Dotted:         "MyApp.Router" → "my_app/router.march"
+                    "MyApp.Templates.Layout" → "my_app/templates/layout.march" *)
+let module_name_to_filename name =
+  let parts = String.split_on_char '.' name in
+  let snake_parts = List.map camel_to_snake parts in
+  String.concat Filename.dir_sep snake_parts ^ ".march"
 
 (** Stdlib module names — always resolved from the bundled stdlib, never
     from the user's source tree. *)
@@ -310,9 +318,12 @@ let parse_march_file path src =
     let open Lexing in
     Error (Printf.sprintf "%s:%d: parse error" path pos.pos_lnum)
 
-(** Resolve cross-file imports.
+(** Resolve cross-file imports and auto-discover project library files.
     Scans [m.mod_decls] for DUse/DAlias that name user modules (not stdlib),
     finds their .march files, parses and desugars them, detects cycles.
+    Also auto-discovers all .march files in MARCH_LIB_PATH directories so that
+    qualified cross-module calls (e.g. MyApp.Router.dispatch) work without
+    explicit [use] declarations — required for multi-file Bastion projects.
     Returns (errors, extra_dmods_to_prepend). *)
 let resolve_imports ~source_file (m : March_ast.Ast.module_) =
   let source_dir = Filename.dirname source_file in
@@ -323,9 +334,13 @@ let resolve_imports ~source_file (m : March_ast.Ast.module_) =
   in
   let search_path = source_dir :: extra_lib_paths in
   let resolved : (string, March_ast.Ast.decl list) Hashtbl.t = Hashtbl.create 8 in
+  (* Track loaded file paths so the same file is never parsed twice *)
+  let loaded_paths : (string, unit) Hashtbl.t = Hashtbl.create 8 in
   let in_progress : (string, unit) Hashtbl.t = Hashtbl.create 4 in
   let errors : (string * March_ast.Ast.span * string) list ref = ref [] in
   let dummy_span = March_ast.Ast.dummy_span in
+  (* Pre-mark the entry file so auto-discovery never re-loads it *)
+  Hashtbl.add loaded_paths source_file ();
 
   let find_file mod_name =
     let fname = module_name_to_filename mod_name in
@@ -356,26 +371,32 @@ let resolve_imports ~source_file (m : March_ast.Ast.module_) =
                 mod_name (module_name_to_filename mod_name)) :: !errors;
           []
         | Some file_path ->
-          let src =
-            try read_file file_path
-            with Sys_error msg ->
-              errors := (mod_name, from_span,
-                Printf.sprintf "Cannot read `%s`: %s" file_path msg) :: !errors;
-              ""
-          in
-          if src = "" then []
-          else
-            match parse_march_file file_path src with
-            | Error msg ->
-              errors := (mod_name, from_span, msg) :: !errors; []
-            | Ok ast ->
-              let ast = March_desugar.Desugar.desugar_module ast in
-              let transitive = load_refs ast.March_ast.Ast.mod_decls in
-              let all_decls = transitive @ ast.March_ast.Ast.mod_decls in
-              [ March_ast.Ast.DMod (ast.March_ast.Ast.mod_name,
-                                    March_ast.Ast.Public,
-                                    all_decls,
-                                    dummy_span) ]
+          if Hashtbl.mem loaded_paths file_path then
+            (* Already loaded via auto-discovery; return empty to avoid duplication *)
+            []
+          else begin
+            Hashtbl.add loaded_paths file_path ();
+            let src =
+              try read_file file_path
+              with Sys_error msg ->
+                errors := (mod_name, from_span,
+                  Printf.sprintf "Cannot read `%s`: %s" file_path msg) :: !errors;
+                ""
+            in
+            if src = "" then []
+            else
+              match parse_march_file file_path src with
+              | Error msg ->
+                errors := (mod_name, from_span, msg) :: !errors; []
+              | Ok ast ->
+                let ast = March_desugar.Desugar.desugar_module ast in
+                let transitive = load_refs ast.March_ast.Ast.mod_decls in
+                let all_decls = transitive @ ast.March_ast.Ast.mod_decls in
+                [ March_ast.Ast.DMod (ast.March_ast.Ast.mod_name,
+                                      March_ast.Ast.Public,
+                                      all_decls,
+                                      dummy_span) ]
+          end
       in
       Hashtbl.add resolved mod_name result;
       Hashtbl.remove in_progress mod_name;
@@ -395,8 +416,76 @@ let resolve_imports ~source_file (m : March_ast.Ast.module_) =
         end
       ) refs
   in
-  let extra_decls = load_refs m.March_ast.Ast.mod_decls in
-  (!errors, extra_decls)
+
+  (* Step 1: resolve explicit imports (DUse/DAlias) from the entry file *)
+  let explicit_decls = load_refs m.March_ast.Ast.mod_decls in
+
+  (* Step 2: auto-discover all .march files in MARCH_LIB_PATH directories.
+     Load any that were not already pulled in via explicit imports.
+     Two-phase: parse all files first to learn their module names, then sort
+     by module-name depth (more dot-segments = deeper namespace = fewer
+     dependents = load first) so dependencies are in env before their users. *)
+  let collect_lib_files dir =
+    let rec walk acc d =
+      if not (Sys.file_exists d && Sys.is_directory d) then acc
+      else
+        Array.fold_left (fun acc name ->
+            let p = Filename.concat d name in
+            if Sys.is_directory p then walk acc p
+            else if Filename.check_suffix p ".march" then p :: acc
+            else acc)
+          acc (Sys.readdir d)
+    in
+    walk [] dir
+  in
+  let dot_count s =
+    String.fold_left (fun n c -> if c = '.' then n + 1 else n) 0 s
+  in
+  let auto_decls =
+    List.concat_map (fun lib_dir ->
+        let files = collect_lib_files lib_dir in
+        (* Phase 1: parse + desugar all un-loaded files to learn their mod names *)
+        let parsed = List.filter_map (fun file_path ->
+            if Hashtbl.mem loaded_paths file_path then None
+            else
+              let src = try read_file file_path with Sys_error _ -> "" in
+              if src = "" then None
+              else
+                match parse_march_file file_path src with
+                | Error msg ->
+                  Printf.eprintf "[lib] %s\n%!" msg; None
+                | Ok ast ->
+                  Some (file_path, March_desugar.Desugar.desugar_module ast)
+          ) files in
+        (* Sort: more dot-segments in mod name → load first (namespace leaves).
+           Alphabetical tiebreak keeps things deterministic. *)
+        let sorted = List.sort (fun (_, a) (_, b) ->
+            let mn ast = ast.March_ast.Ast.mod_name.March_ast.Ast.txt in
+            let da = dot_count (mn a) and db = dot_count (mn b) in
+            if db <> da then compare db da
+            else compare (mn a) (mn b)
+          ) parsed in
+        (* Phase 2: build DMods in sorted order *)
+        List.filter_map (fun (file_path, ast) ->
+            if Hashtbl.mem loaded_paths file_path then None
+            else begin
+              Hashtbl.add loaded_paths file_path ();
+              let transitive = load_refs ast.March_ast.Ast.mod_decls in
+              let all_decls = transitive @ ast.March_ast.Ast.mod_decls in
+              (* Cache under mod_name so explicit `use` won't reload this file *)
+              let mn = ast.March_ast.Ast.mod_name.March_ast.Ast.txt in
+              if not (Hashtbl.mem resolved mn) then
+                Hashtbl.add resolved mn [];
+              Some (March_ast.Ast.DMod (ast.March_ast.Ast.mod_name,
+                                        March_ast.Ast.Public,
+                                        all_decls,
+                                        dummy_span))
+            end
+          ) sorted
+      ) extra_lib_paths
+  in
+
+  (!errors, explicit_decls @ auto_decls)
 
 (** Format [filename] in-place.  Returns true if the file was changed. *)
 let fmt_file filename =
