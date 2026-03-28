@@ -173,7 +173,7 @@ march/
 │   └── base64.c             # Base64 for WebSocket handshake
 │   ├── search/
 │   │   └── search.ml        # Search index: Levenshtein fuzzy search, type/doc search, JSON cache
-├── stdlib/                  # 37 modules, ~7700 lines
+├── stdlib/                  # 38 modules, ~7800 lines
 │   ├── prelude.march        # Auto-imported helpers (panic, identity, compose, unwrap, etc.)
 │   ├── option.march         # Option(a) with Some/None
 │   ├── result.march         # Result(a,e) with Ok/Err
@@ -213,9 +213,10 @@ march/
 │   ├── vault.march          # ETS-like in-memory KV store: new/set/set_ttl/get/drop/update/size/whereis/has
 │   ├── env.march            # Env var access: get/require/get_int/get_bool/is_set/require_int
 │   ├── config.march         # Layered application config (Vault-backed): put/get/put_in/get_in, from_env, validate, env detection, endpoint config, named stores
+│   ├── correlation.march    # CorrelationId middleware: UUID v4 generation, X-Request-ID assign/echo, Logger context injection
 │   └── docs/flow.md         # Flow module design doc: concepts, examples, GenStage comparison
 ├── test/
-│   ├── test_march.ml         # 958+ tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, bytes, logger, flow, actor_module, etc.)
+│   ├── test_march.ml         # 1180 tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, bytes, logger, flow, actor_module, etc.)
 │   ├── test_cas.ml           # 41 tests (scc, pipeline, def_id)
 │   ├── test_jit.ml           # 1 test (dlopen round-trip)
 │   ├── test_fmt.ml           # 23 tests (formatter round-trip)
