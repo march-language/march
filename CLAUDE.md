@@ -30,20 +30,23 @@ After changing a feature, run the benchmark(s) that exercise it to catch regress
 ## Project layout
 
 ```
-specs/design.md             running design spec for the language
-specs/gc_design.md          design spec for the GC
-specs/progress.md           implementation progress so far
 bin/main.ml                 compiler entry point (parse→desugar→typecheck→eval)
 lib/ast/ast.ml              AST types (span, expr, pattern, decl, …)
 lib/lexer/lexer.mll         ocamllex lexer
 lib/parser/parser.mly       menhir parser
 lib/desugar/desugar.ml      pipe desugar, multi-head fn → single EMatch clause
 lib/typecheck/typecheck.ml  bidirectional HM type inference
-lib/eval/eval.ml            tree-walking interpreter
+lib/eval/eval.ml            tree-walking interpreter (1180+ tests)
+lib/tir/                    typed IR: lower, mono, defun, perceus, borrow, fusion, llvm_emit
+lib/jit/                    REPL JIT compiler
 lib/errors/errors.ml        diagnostic type (Error/Warning/Hint + span)
-lib/effects/effects.ml      (placeholder)
-lib/codegen/codegen.ml      (placeholder)
+lib/search/search.ml        Hoogle-style type/name search engine
+stdlib/                     57 March stdlib modules (bastion, csrf, session, html, islands, …)
+runtime/                    C runtime (GC, scheduler, HTTP, TLS, WASM)
+forge/                      build tool (new, build, run, test, deps, bastion subcommands)
+lsp/                        LSP server (diagnostics, hover, goto-def, completions, code actions)
 test/test_march.ml          alcotest suite
+specs/                      design specs, progress tracking, feature plans
 ```
 
 ## Surface syntax notes
@@ -52,9 +55,35 @@ test/test_march.ml          alcotest suite
 - Type variants: `type Foo = A | B(Int)` — no leading `|`
 - Conditionals: `if cond then e1 else e2` (not `if/do/end`)
 - Block lets: `let x = expr` with no `in`; subsequent block exprs see the binding
-- Lambda multi-params: `fn (a, b) -> expr` (no `;` separator; or single `fn x -> expr`)
 - No `;` — use newlines to separate block expressions
 - Match arms use `block_body` — multi-statement arms are fine, no `do...end` wrapper needed
+
+### Lambda syntax (critical — common source of bugs)
+
+Lambdas use `fn ... -> expr` (arrow form only, NO `do...end` block form):
+
+```march
+fn x -> x + 1                     -- single param
+fn _ -> 42                        -- wildcard param
+fn (a, b) -> a + b                -- multiple params (parenthesized)
+fn () -> some_function()          -- ZERO-ARG: must use fn () -> ...
+```
+
+**Common mistakes:**
+- `fn -> expr` — PARSE ERROR. Zero-arg lambdas MUST use `fn () -> expr`
+- `fn _ -> expr` when you want zero-arg — WRONG. `_` is a 1-arg lambda; calling it with 0 args gives "arity mismatch: expected 1 args, got 0"
+- There is no `fn (x) do ... end` form for lambdas. The body after `->` is a single expression. Use `let` bindings for multi-statement bodies:
+  ```march
+  fn (x) -> let y = x + 1
+            let z = y * 2
+            z
+  ```
+
+### Visibility
+
+- `fn name(...)` — public (default)
+- `pfn name(...)` — private (module-internal)
+- `type Foo = ...` — public type (no `pub` keyword needed)
 
 ## Pipeline
 

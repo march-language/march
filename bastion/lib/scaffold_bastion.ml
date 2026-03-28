@@ -157,9 +157,19 @@ mod %s do
   -- Load the configuration for the current environment.
   pfn load_config() do
     match Config.env() do
-    :dev  -> %sDevConfig.configure()
-    :test -> %sTestConfig.configure()
-    :prod -> %sProdConfig.configure()
+    :dev -> do
+      Config.put_endpoint(4000, "localhost", "dev-secret-key-base-replace-in-prod")
+      Config.put(:%s, :debug, true)
+    end
+    :prod -> do
+      let port   = Env.get_int("PORT", 4000)
+      let secret = Env.require("SECRET_KEY_BASE")
+      let host   = Env.get("PHX_HOST", "example.com")
+      Config.put_endpoint(port, host, secret)
+      Config.put(:%s, :debug, false)
+    end
+    _ ->
+      Config.put_endpoint(4001, "localhost", "test-secret-key-base")
     end
   end
 
@@ -168,12 +178,15 @@ mod %s do
     load_config()
     let port  = Config.endpoint_port(4000)
     let stats = BastionDev.new_stats()
+    let stats = BastionDev.register_route(stats, BastionDev.make_route("GET",  "/",                    "home"))
+    let stats = BastionDev.register_route(stats, BastionDev.make_route("GET",  "/_bastion",            "dashboard"))
+    let stats = BastionDev.register_route(stats, BastionDev.make_route("GET",  "/_bastion/live_reload","live_reload"))
 
     -- Build the request pipeline:
-    -- request_timer -> router -> live_reload (dev only) -> finish_timer
+    -- request_timer -> router -> finish_timer (live_reload injected in dev)
     let pipeline = fn conn -> do
       let c0 = BastionDev.request_timer(conn)
-      let c1 = %s.Router.dispatch(c0, stats)
+      let c1 = router(c0, stats)
       let c2 = if Config.is_dev() then BastionDev.inject_live_reload(c1) else c1
       BastionDev.finish_timer(c2)
     end
@@ -188,9 +201,42 @@ mod %s do
     |> HttpServer.listen()
   end
 
+  pfn router(conn, stats) do
+    let m = HttpServer.method(conn)
+    let p = HttpServer.path_info(conn)
+    match (m, p) do
+    -- ROUTE: GET /
+    (Get, []) ->
+      home(conn)
+
+    -- ROUTE: GET /_bastion  (dev dashboard)
+    (Get, ["_bastion"]) ->
+      BastionDev.dashboard_handler(conn, stats)
+
+    -- ROUTE: GET /_bastion/live_reload  (SSE live-reload endpoint)
+    (Get, ["_bastion", "live_reload"]) ->
+      BastionDev.live_reload_handler(conn)
+
+    _ ->
+      HttpServer.send_resp(conn, 404, "Not Found")
+    end
+  end
+
+  pfn home(conn) do
+    let html = "<main class=\"hero\"><h1>Welcome to %s!</h1>" ++
+               "<p>Your Bastion app is running. Edit <code>lib/%s.march</code> to get started.</p>" ++
+               "<ul><li><a href=\"/_bastion\">Dev dashboard</a></li></ul></main>"
+    HttpServer.put_resp_header(conn, "content-type", "text/html; charset=utf-8")
+    |> HttpServer.send_resp(200, html)
+  end
+
 end
 |}
-    name pascal pascal pascal pascal pascal pascal pascal
+    name pascal
+    (String.lowercase_ascii pascal)
+    (String.lowercase_ascii pascal)
+    pascal pascal pascal
+    name
 
 (* ---------- lib/APP/router.march ------------------------------------ *)
 
@@ -369,30 +415,37 @@ let test_page_controller_source pascal =
   Printf.sprintf
 {|-- test/controllers/test_page_controller.march — unit tests for PageController.
 --
--- Integration tests can use HttpServer.spawn_n to start a real server.
--- See examples/http_test.march for a working example.
+-- To run:   march test test/controllers/test_page_controller.march
+-- Note: the PageController module must be imported before running this file.
+-- See lib/%s/controllers/page_controller.march.
 
 mod %sTest.PageControllerTest do
 
   fn test_index_returns_200() do
-    -- TODO: implement integration test using HttpServer.spawn_n
-    println("  PASS: test_index_returns_200 (stub)")
+    -- Build a minimal test conn pointing at GET /
+    -- Conn(fd, method, path, path_info, query, req_hdrs, req_body, status, resp_hdrs, resp_body, halted, assigns, upgrade)
+    let conn   = Conn(0, Get, "/", Nil, "", Nil, "", 0, Nil, "", false, Nil, NoUpgrade)
+    let result = %s.PageController.index(conn)
+    let status = HttpServer.status(result)
+    assert (status == 200)
   end
 
   fn test_index_body_contains_welcome() do
-    -- TODO: implement integration test using HttpServer.spawn_n
-    println("  PASS: test_index_body_contains_welcome (stub)")
+    let conn   = Conn(0, Get, "/", Nil, "", Nil, "", 0, Nil, "", false, Nil, NoUpgrade)
+    let result = %s.PageController.index(conn)
+    let body   = HttpServer.resp_body(result)
+    assert (string_contains(body, "Welcome"))
   end
 
   fn main() do
     test_index_returns_200()
     test_index_body_contains_welcome()
-    println("PageController tests done.")
+    println("PageController tests passed.")
   end
 
 end
 |}
-    pascal
+    (String.lowercase_ascii pascal) pascal pascal pascal
 
 (* ---------- dotfiles ------------------------------------------------ *)
 
