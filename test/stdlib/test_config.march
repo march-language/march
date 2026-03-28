@@ -1,0 +1,298 @@
+-- Tests for the Config stdlib module.
+-- Run with: dune exec march -- test test/stdlib/test_config.march
+--
+-- Each describe block uses its own named store to avoid global state
+-- pollution between test groups.
+
+mod TestConfig do
+
+describe "Config.store_put and store_get (2-level)" do
+
+  test "stores and retrieves an integer" do
+    let cfg = Config.new_store("test_cfg_int_1")
+    Config.store_put(cfg, :myapp, :port, 4000)
+    assert (Config.store_get(cfg, :myapp, :port) == Some(4000))
+  end
+
+  test "stores and retrieves a string" do
+    let cfg = Config.new_store("test_cfg_str_1")
+    Config.store_put(cfg, :myapp, :host, "localhost")
+    assert (Config.store_get(cfg, :myapp, :host) == Some("localhost"))
+  end
+
+  test "returns None for missing key" do
+    let cfg = Config.new_store("test_cfg_none_1")
+    assert (Config.store_get(cfg, :myapp, :missing) == None)
+  end
+
+  test "overwrites previous value" do
+    let cfg = Config.new_store("test_cfg_overwrite_1")
+    Config.store_put(cfg, :myapp, :port, 3000)
+    Config.store_put(cfg, :myapp, :port, 4000)
+    assert (Config.store_get(cfg, :myapp, :port) == Some(4000))
+  end
+
+  test "different app atoms are isolated" do
+    let cfg = Config.new_store("test_cfg_iso_1")
+    Config.store_put(cfg, :app_a, :key, "alpha")
+    Config.store_put(cfg, :app_b, :key, "beta")
+    assert (Config.store_get(cfg, :app_a, :key) == Some("alpha"))
+    assert (Config.store_get(cfg, :app_b, :key) == Some("beta"))
+  end
+
+  test "different key atoms are isolated" do
+    let cfg = Config.new_store("test_cfg_keys_1")
+    Config.store_put(cfg, :myapp, :host, "localhost")
+    Config.store_put(cfg, :myapp, :port, 4000)
+    assert (Config.store_get(cfg, :myapp, :host) == Some("localhost"))
+    assert (Config.store_get(cfg, :myapp, :port) == Some(4000))
+  end
+
+  test "stores boolean values" do
+    let cfg = Config.new_store("test_cfg_bool_1")
+    Config.store_put(cfg, :myapp, :debug, true)
+    assert (Config.store_get(cfg, :myapp, :debug) == Some(true))
+  end
+
+end
+
+describe "Config.store_put_in and store_get_in (3-level)" do
+
+  test "stores and retrieves a 3-level value" do
+    let cfg = Config.new_store("test_cfg_3l_1")
+    Config.store_put_in(cfg, :myapp, :database, :pool_size, 10)
+    assert (Config.store_get_in(cfg, :myapp, :database, :pool_size) == Some(10))
+  end
+
+  test "returns None for missing 3-level key" do
+    let cfg = Config.new_store("test_cfg_3l_none_1")
+    assert (Config.store_get_in(cfg, :myapp, :database, :missing) == None)
+  end
+
+  test "3-level keys are isolated from 2-level keys" do
+    let cfg = Config.new_store("test_cfg_3l_iso_1")
+    Config.store_put(cfg, :myapp, :port, 4000)
+    Config.store_put_in(cfg, :myapp, :database, :port, 5432)
+    assert (Config.store_get(cfg, :myapp, :port) == Some(4000))
+    assert (Config.store_get_in(cfg, :myapp, :database, :port) == Some(5432))
+  end
+
+  test "different sections are isolated" do
+    let cfg = Config.new_store("test_cfg_sections_1")
+    Config.store_put_in(cfg, :myapp, :database, :host, "db.local")
+    Config.store_put_in(cfg, :myapp, :cache, :host, "cache.local")
+    assert (Config.store_get_in(cfg, :myapp, :database, :host) == Some("db.local"))
+    assert (Config.store_get_in(cfg, :myapp, :cache, :host) == Some("cache.local"))
+  end
+
+  test "stores string values in 3-level" do
+    let cfg = Config.new_store("test_cfg_3l_str_1")
+    Config.store_put_in(cfg, :myapp, :database, :hostname, "postgres.internal")
+    assert (Config.store_get_in(cfg, :myapp, :database, :hostname) == Some("postgres.internal"))
+  end
+
+end
+
+describe "Config.put and Config.get (global store)" do
+
+  test "stores and retrieves from global store" do
+    Config.put(:testglobal_a, :version, "1.0.0")
+    assert (Config.get(:testglobal_a, :version) == Some("1.0.0"))
+  end
+
+  test "global store persists across calls" do
+    Config.put(:testglobal_b, :feature_flag, true)
+    let r1 = Config.get(:testglobal_b, :feature_flag)
+    let r2 = Config.get(:testglobal_b, :feature_flag)
+    assert (r1 == Some(true))
+    assert (r2 == Some(true))
+  end
+
+  test "global 3-level put_in and get_in" do
+    Config.put_in(:testglobal_c, :db, :pool_size, 15)
+    assert (Config.get_in(:testglobal_c, :db, :pool_size) == Some(15))
+  end
+
+end
+
+describe "Config.get_with_default" do
+
+  test "returns value when key exists" do
+    Config.put(:test_gwd_app, :timeout, 30)
+    let result = Config.get_with_default(:test_gwd_app, :timeout, 60)
+    assert (result == 30)
+  end
+
+  test "returns default when key is absent" do
+    let result = Config.get_with_default(:test_gwd_missing_app_xyz, :missing_key, 42)
+    assert (result == 42)
+  end
+
+  test "returns string default when absent" do
+    let result = Config.get_with_default(:test_gwd_str_app_xyz, :missing_str_key, "fallback")
+    assert (result == "fallback")
+  end
+
+  test "get_in_with_default returns value when present" do
+    Config.put_in(:test_gwd_in_app, :section, :key, 100)
+    let result = Config.get_in_with_default(:test_gwd_in_app, :section, :key, 0)
+    assert (result == 100)
+  end
+
+  test "get_in_with_default returns default when absent" do
+    let result = Config.get_in_with_default(:test_gwd_in_miss_xyz, :section, :missing, 99)
+    assert (result == 99)
+  end
+
+end
+
+describe "Config.from_env" do
+
+  test "loads string from env var" do
+    process_set_env("MARCH_CFG_TEST_HOST_1", "db.example.com")
+    let result = Config.from_env(:cfg_env_test_a, :host, "MARCH_CFG_TEST_HOST_1", "localhost")
+    assert (result == "db.example.com")
+    assert (Config.get(:cfg_env_test_a, :host) == Some("db.example.com"))
+  end
+
+  test "uses default when env var not set" do
+    let result = Config.from_env(:cfg_env_test_b, :host, "MARCH_CFG_UNSET_HOST_XYZ", "localhost")
+    assert (result == "localhost")
+    assert (Config.get(:cfg_env_test_b, :host) == Some("localhost"))
+  end
+
+  test "from_env_int parses integer from env var" do
+    process_set_env("MARCH_CFG_TEST_PORT_1", "5432")
+    let result = Config.from_env_int(:cfg_env_test_c, :port, "MARCH_CFG_TEST_PORT_1", 3000)
+    assert (result == 5432)
+    assert (Config.get(:cfg_env_test_c, :port) == Some(5432))
+  end
+
+  test "from_env_int uses default when env var not set" do
+    let result = Config.from_env_int(:cfg_env_test_d, :port, "MARCH_CFG_UNSET_PORT_XYZ", 4000)
+    assert (result == 4000)
+  end
+
+  test "from_env_int uses default when value is not an integer" do
+    process_set_env("MARCH_CFG_TEST_BAD_PORT_1", "not-a-port")
+    let result = Config.from_env_int(:cfg_env_test_e, :port, "MARCH_CFG_TEST_BAD_PORT_1", 4000)
+    assert (result == 4000)
+  end
+
+  test "from_env_bool reads true from env var" do
+    process_set_env("MARCH_CFG_TEST_DEBUG_1", "true")
+    let result = Config.from_env_bool(:cfg_env_test_f, :debug, "MARCH_CFG_TEST_DEBUG_1", false)
+    assert result
+  end
+
+  test "from_env_bool reads false from env var" do
+    process_set_env("MARCH_CFG_TEST_DEBUG_2", "false")
+    let result = Config.from_env_bool(:cfg_env_test_g, :debug, "MARCH_CFG_TEST_DEBUG_2", true)
+    assert not(result)
+  end
+
+  test "from_env_bool uses default when not set" do
+    let result = Config.from_env_bool(:cfg_env_test_h, :debug, "MARCH_CFG_UNSET_DEBUG_XYZ", false)
+    assert not(result)
+  end
+
+end
+
+describe "Config.validate" do
+
+  test "returns Ok when key set and predicate passes" do
+    Config.put(:cfg_val_app_a, :port, 4000)
+    let result = Config.validate(:cfg_val_app_a, :port, fn p -> p > 0 && p < 65536)
+    assert (result == Ok(4000))
+  end
+
+  test "returns Err when key is not set" do
+    let result = Config.validate(:cfg_val_missing_xyz, :missing_key, fn p -> p > 0)
+    assert (result == Err("Config: key not set"))
+  end
+
+  test "returns Err when predicate fails" do
+    Config.put(:cfg_val_app_b, :port, 99999)
+    let result = Config.validate(:cfg_val_app_b, :port, fn p -> p > 0 && p < 65536)
+    assert (result == Err("Config: validation failed"))
+  end
+
+  test "validate_in returns Ok for nested key" do
+    Config.put_in(:cfg_val_app_c, :db, :pool_size, 10)
+    let result = Config.validate_in(:cfg_val_app_c, :db, :pool_size, fn n -> n > 0)
+    assert (result == Ok(10))
+  end
+
+  test "validate_in returns Err for missing nested key" do
+    let result = Config.validate_in(:cfg_val_missing_xyz, :db, :missing, fn n -> n > 0)
+    assert (result == Err("Config: key not set"))
+  end
+
+end
+
+describe "Config.env" do
+
+  test "env detection: set to test" do
+    process_set_env("MARCH_ENV", "test")
+    assert (Config.env() == :test)
+    assert (Config.is_test())
+    assert not(Config.is_dev())
+    assert not(Config.is_prod())
+  end
+
+  test "env detection: set to prod" do
+    process_set_env("MARCH_ENV", "prod")
+    assert (Config.env() == :prod)
+    assert (Config.is_prod())
+    assert not(Config.is_dev())
+    assert not(Config.is_test())
+  end
+
+  test "env detection: set to dev" do
+    process_set_env("MARCH_ENV", "dev")
+    assert (Config.env() == :dev)
+    assert (Config.is_dev())
+    assert not(Config.is_test())
+    assert not(Config.is_prod())
+  end
+
+  test "env defaults to dev for unknown value" do
+    process_set_env("MARCH_ENV", "staging")
+    assert (Config.env() == :dev)
+    assert (Config.is_dev())
+  end
+
+end
+
+describe "Config.put_endpoint and endpoint accessors" do
+
+  test "put_endpoint stores port, host, and secret" do
+    Config.put_endpoint(8080, "0.0.0.0", "supersecret")
+    assert (Config.endpoint_port(4000) == 8080)
+    assert (Config.endpoint_host("localhost") == "0.0.0.0")
+    assert (Config.secret_key_base() == "supersecret")
+  end
+
+end
+
+describe "Config.new_store" do
+
+  test "new_store returns an isolated table" do
+    let s1 = Config.new_store("isolated_store_a_1")
+    let s2 = Config.new_store("isolated_store_b_1")
+    Config.store_put(s1, :app, :key, "in_s1")
+    Config.store_put(s2, :app, :key, "in_s2")
+    assert (Config.store_get(s1, :app, :key) == Some("in_s1"))
+    assert (Config.store_get(s2, :app, :key) == Some("in_s2"))
+  end
+
+  test "new_store called twice with same name returns same store" do
+    let s1 = Config.new_store("same_name_store_1")
+    Config.store_put(s1, :app, :key, "value1")
+    let s2 = Config.new_store("same_name_store_1")
+    assert (Config.store_get(s2, :app, :key) == Some("value1"))
+  end
+
+end
+
+end -- mod TestConfig

@@ -129,6 +129,21 @@ mod HttpServer do
     find(req_headers(conn))
   end
 
+  -- Header lookup (case-insensitive) on response headers
+  fn get_resp_header(conn, name) do
+    let lower_name = string_to_lowercase(name)
+    fn find(hs) do
+      match hs do
+      Nil -> None
+      Cons(Header(n, v), rest) -> do
+        if string_to_lowercase(n) == lower_name do Some(v)
+        else find(rest) end
+      end
+      end
+    end
+    find(resp_headers(conn))
+  end
+
   -- Assign lookup
   fn get_assign(conn, key) do
     fn find(pairs) do

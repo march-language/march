@@ -1,0 +1,287 @@
+-- Config module: layered application configuration backed by Vault.
+--
+-- Configuration is stored in a global, process-wide Vault table named
+-- "__march_config__", accessed via 2-atom or 3-atom tuple keys:
+--
+--   Config.put(:myapp, :port, 4000)
+--   Config.get(:myapp, :port)                   -- => Some(4000)
+--   Config.put_in(:myapp, :db, :host, "localhost")
+--   Config.get_in(:myapp, :db, :host)           -- => Some("localhost")
+--
+-- Load from environment at startup:
+--   Config.from_env(:myapp, :port, "PORT", 4000)
+--   Config.from_env(:myapp, :secret, "SECRET_KEY_BASE", "")
+--
+-- Validate values:
+--   Config.validate(:myapp, :port, fn p -> p > 0 && p < 65536)
+--
+-- Detect current environment (reads MARCH_ENV):
+--   Config.env()   -- :dev | :test | :prod
+--
+-- Endpoint config shorthand (for Bastion web server):
+--   Config.put_endpoint(4000, "localhost", my_secret)
+--   Config.endpoint_port(4000)
+--   Config.endpoint_host("localhost")
+--   Config.secret_key_base()
+--
+-- Named stores (for isolation in tests):
+--   let store = Config.new_store("my_test_store")
+--   Config.store_put(store, :myapp, :key, value)
+--   Config.store_get(store, :myapp, :key)
+
+mod Config do
+
+-- ── Internal ──────────────────────────────────────────────────────────────
+
+-- Get or create the global config vault.
+-- First call creates the table; subsequent calls retrieve it by name.
+pfn global_table() do
+  match vault_whereis("__march_config__") do
+  Some(tbl) -> tbl
+  None      -> vault_new("__march_config__")
+  end
+end
+
+-- ── 2-level put / get ─────────────────────────────────────────────────────
+
+doc "Store a configuration value under (ns, key). ns is an atom naming your app."
+fn put(ns, key, value) do
+  vault_set(global_table(), (ns, key), value)
+end
+
+doc "Look up a configuration value. Returns Some(value) or None."
+fn get(ns, key) do
+  vault_get(global_table(), (ns, key))
+end
+
+doc "Get a configuration value, returning default if absent."
+fn get_with_default(ns, key, default_val) do
+  match vault_get(global_table(), (ns, key)) do
+  Some(v) -> v
+  None    -> default_val
+  end
+end
+
+doc "Get a required configuration value. Panics if not set."
+fn require(ns, key) do
+  match vault_get(global_table(), (ns, key)) do
+  Some(v) -> v
+  None    -> panic("Config: missing required key")
+  end
+end
+
+-- ── 3-level put / get ─────────────────────────────────────────────────────
+
+doc "Store a configuration value under (ns, section, key)."
+fn put_in(ns, section, key, value) do
+  vault_set(global_table(), (ns, section, key), value)
+end
+
+doc "Look up a 3-level configuration value. Returns Some(value) or None."
+fn get_in(ns, section, key) do
+  vault_get(global_table(), (ns, section, key))
+end
+
+doc "Get a 3-level configuration value, returning default if absent."
+fn get_in_with_default(ns, section, key, default_val) do
+  match vault_get(global_table(), (ns, section, key)) do
+  Some(v) -> v
+  None    -> default_val
+  end
+end
+
+doc "Get a required 3-level configuration value. Panics if not set."
+fn require_in(ns, section, key) do
+  match vault_get(global_table(), (ns, section, key)) do
+  Some(v) -> v
+  None    -> panic("Config: missing required nested key")
+  end
+end
+
+-- ── Environment variable loading ──────────────────────────────────────────
+
+doc """
+Load a String value from an environment variable and store it in config.
+Uses default if the env var is not set. Returns the value stored.
+"""
+fn from_env(ns, key, env_var, default_val) do
+  let value = match process_env(env_var) do
+    Some(v) -> v
+    None    -> default_val
+  end
+  vault_set(global_table(), (ns, key), value)
+  value
+end
+
+doc """
+Load an Int value from an environment variable.
+Parses the string as an integer; uses default if absent or unparseable.
+Returns the value stored.
+"""
+fn from_env_int(ns, key, env_var, default_val) do
+  let value = match process_env(env_var) do
+    Some(s) ->
+      match string_to_int(s) do
+      Some(n) -> n
+      None    -> default_val
+      end
+    None -> default_val
+  end
+  vault_set(global_table(), (ns, key), value)
+  value
+end
+
+doc """
+Load a Bool value from an environment variable.
+"true", "1", "yes" are parsed as true; uses default if absent.
+Returns the value stored.
+"""
+fn from_env_bool(ns, key, env_var, default_val) do
+  let value = match process_env(env_var) do
+    Some(s) -> s == "true" || s == "1" || s == "yes"
+    None    -> default_val
+  end
+  vault_set(global_table(), (ns, key), value)
+  value
+end
+
+-- ── Environment detection ─────────────────────────────────────────────────
+
+doc """
+Returns the current application environment as an atom.
+Reads the MARCH_ENV environment variable; defaults to :dev.
+Possible values: :dev, :test, :prod.
+"""
+fn env() do
+  match process_env("MARCH_ENV") do
+  Some("prod") -> :prod
+  Some("test") -> :test
+  Some("dev")  -> :dev
+  Some(_)      -> :dev
+  None         -> :dev
+  end
+end
+
+doc "True if the current environment is :dev."
+fn is_dev() do
+  match process_env("MARCH_ENV") do
+  Some("prod") -> false
+  Some("test") -> false
+  _            -> true
+  end
+end
+
+doc "True if the current environment is :test."
+fn is_test() do
+  match process_env("MARCH_ENV") do
+  Some("test") -> true
+  _            -> false
+  end
+end
+
+doc "True if the current environment is :prod."
+fn is_prod() do
+  match process_env("MARCH_ENV") do
+  Some("prod") -> true
+  _            -> false
+  end
+end
+
+-- ── Validation ────────────────────────────────────────────────────────────
+
+doc """
+Validate a config value with a predicate function.
+Returns Ok(value) if the key is set and predicate returns true.
+Returns Err(reason) otherwise.
+"""
+fn validate(ns, key, predicate) do
+  match vault_get(global_table(), (ns, key)) do
+  None    -> Err("Config: key not set")
+  Some(v) -> if predicate(v) then Ok(v) else Err("Config: validation failed")
+  end
+end
+
+doc """
+Validate a 3-level config value with a predicate function.
+Returns Ok(value) or Err(reason).
+"""
+fn validate_in(ns, section, key, predicate) do
+  match vault_get(global_table(), (ns, section, key)) do
+  None    -> Err("Config: key not set")
+  Some(v) -> if predicate(v) then Ok(v) else Err("Config: validation failed")
+  end
+end
+
+-- ── Endpoint config ───────────────────────────────────────────────────────
+
+doc """
+Store Bastion endpoint configuration.
+Typically called during application startup.
+  Config.put_endpoint(4000, "localhost", secret)
+"""
+fn put_endpoint(port, host, secret) do
+  let tbl = global_table()
+  vault_set(tbl, (:bastion, :port), port)
+  vault_set(tbl, (:bastion, :host), host)
+  vault_set(tbl, (:bastion, :secret_key_base), secret)
+end
+
+doc "Get the configured HTTP port. Returns default_port if not set."
+fn endpoint_port(default_port) do
+  match vault_get(global_table(), (:bastion, :port)) do
+  Some(p) -> p
+  None    -> default_port
+  end
+end
+
+doc "Get the configured host. Returns default_host if not set."
+fn endpoint_host(default_host) do
+  match vault_get(global_table(), (:bastion, :host)) do
+  Some(h) -> h
+  None    -> default_host
+  end
+end
+
+doc "Get the secret key base. Returns empty string if not configured."
+fn secret_key_base() do
+  match vault_get(global_table(), (:bastion, :secret_key_base)) do
+  Some(s) -> s
+  None    -> ""
+  end
+end
+
+-- ── Named config stores ───────────────────────────────────────────────────
+
+doc """
+Create an isolated named config store.
+Useful for testing or multi-tenant configurations.
+Returns an opaque store handle (a Vault table).
+"""
+fn new_store(name) do
+  match vault_whereis(name) do
+  Some(tbl) -> tbl
+  None      -> vault_new(name)
+  end
+end
+
+doc "Store a 2-level value in a named config store."
+fn store_put(store, ns, key, value) do
+  vault_set(store, (ns, key), value)
+end
+
+doc "Look up a 2-level value from a named config store. Returns Some(v) or None."
+fn store_get(store, ns, key) do
+  vault_get(store, (ns, key))
+end
+
+doc "Store a 3-level value in a named config store."
+fn store_put_in(store, ns, section, key, value) do
+  vault_set(store, (ns, section, key), value)
+end
+
+doc "Look up a 3-level value from a named config store."
+fn store_get_in(store, ns, section, key) do
+  vault_get(store, (ns, section, key))
+end
+
+end -- mod Config

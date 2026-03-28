@@ -109,6 +109,7 @@ let all_stdlib_decls =
     "array.march";
     "bigint.march";
     "decimal.march";
+    "bytes.march";
     "process.march";
     "logger.march";
     "flow.march";
@@ -118,6 +119,13 @@ let all_stdlib_decls =
     "channel_server.march";
     "presence.march";
     "channel_socket.march";
+    "vault.march";
+    "env.march";
+    "config.march";
+    "html.march";
+    "csrf.march";
+    "session.march";
+    "bastion_dev.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -207,9 +215,21 @@ let () =
       Alcotest.test_case "Process module"
         `Quick (run_stdlib_test "test_process.march" "TestProcess");
     ]);
+    ("bastion_dev", [
+      Alcotest.test_case "BastionDev module"
+        `Quick (run_stdlib_test "test_bastion_dev.march" "TestBastionDev");
+    ]);
     ("logger", [
       Alcotest.test_case "Logger module"
         `Quick (run_stdlib_test "test_logger.march" "TestLogger");
+    ]);
+    ("env", [
+      Alcotest.test_case "Env module"
+        `Quick (run_stdlib_test "test_env.march" "TestEnv");
+    ]);
+    ("config", [
+      Alcotest.test_case "Config module"
+        `Quick (run_stdlib_test "test_config.march" "TestConfig");
     ]);
     (* test_flow.march tests the function-transformer Flow API (from_fn/run/then_)
        which differs from the current Seq-based flow.march implementation.
@@ -217,4 +237,12 @@ let () =
       Alcotest.test_case "Flow module"
         `Quick (run_stdlib_test "test_flow.march" "TestFlow");
     ]); *)
+    ("csrf", [
+      Alcotest.test_case "CSRF module"
+        `Quick (run_stdlib_test "test_csrf.march" "TestCSRF");
+    ]);
+    ("session", [
+      Alcotest.test_case "Session module"
+        `Quick (run_stdlib_test "test_session.march" "TestSession");
+    ]);
   ]
