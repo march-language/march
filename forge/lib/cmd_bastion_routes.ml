@@ -86,17 +86,18 @@ let parse_comment_routes lines =
 
 (* ------------------------------------------------------------------ arm-style parser *)
 
-(** Recognise match arms of the form [(:get, [...]) ->] and extract method +
-    path.  This catches hand-written routers without the ROUTE comment. *)
-let method_of_atom s =
-  match s with
-  | ":get"    -> Some "GET"
-  | ":post"   -> Some "POST"
-  | ":put"    -> Some "PUT"
-  | ":patch"  -> Some "PATCH"
-  | ":delete" -> Some "DELETE"
-  | ":head"   -> Some "HEAD"
-  | _         -> None
+(** Recognise match arms of the form [(:get, [...]) ->] or [(Get, [...]) ->]
+    and extract method + path.  This catches hand-written routers without the
+    ROUTE comment, in both atom-style (:get) and constructor-style (Get). *)
+let method_of_token s =
+  match String.lowercase_ascii (String.trim s) with
+  | ":get"    | "get"    -> Some "GET"
+  | ":post"   | "post"   -> Some "POST"
+  | ":put"    | "put"    -> Some "PUT"
+  | ":patch"  | "patch"  -> Some "PATCH"
+  | ":delete" | "delete" -> Some "DELETE"
+  | ":head"   | "head"   -> Some "HEAD"
+  | _                    -> None
 
 (** Extract a rough path string from the path_info list literal.
     E.g. ["users", id] -> "/users/:id"
@@ -129,15 +130,29 @@ let parse_arm_routes lines =
   let n = Array.length lines in
   for i = 0 to n - 1 do
     let line = string_trim_left lines.(i) in
-    (* Pattern: (:METHOD, [...]) -> *)
-    if starts_with "(:" line then begin
+    (* Pattern: (:METHOD, [...]) ->  or  (Get, [...]) ->  etc. *)
+    let is_arm =
+      starts_with "(:" line ||
+      (String.length line > 1 && line.[0] = '(' &&
+       (let rest = String.sub line 1 (String.length line - 1) in
+        starts_with "Get," rest || starts_with "Post," rest ||
+        starts_with "Put," rest || starts_with "Patch," rest ||
+        starts_with "Delete," rest || starts_with "Head," rest ||
+        starts_with "Get," (String.trim rest) ||
+        starts_with "Post," (String.trim rest) ||
+        starts_with "Put," (String.trim rest) ||
+        starts_with "Patch," (String.trim rest) ||
+        starts_with "Delete," (String.trim rest) ||
+        starts_with "Head," (String.trim rest)))
+    in
+    if is_arm then begin
       (* extract up to the first "->" *)
       let s = match String.index_opt line '>' with
         | Some k when k > 0 && line.[k-1] = '-' ->
           String.trim (String.sub line 0 (k - 1))
         | _ -> line
       in
-      (* parse (:method, [path_list]) *)
+      (* parse (:method, [path_list]) or (Method, [path_list]) *)
       (match String.index_opt s ',' with
        | None -> ()
        | Some comma ->
@@ -148,7 +163,7 @@ let parse_arm_routes lines =
              String.sub rest 0 (String.length rest - 1)
            else rest
          in
-         (match method_of_atom atom_part with
+         (match method_of_token atom_part with
           | None -> ()
           | Some meth ->
             let path = path_of_list_literal rest in
@@ -186,7 +201,7 @@ let parse_arm_routes lines =
               in
               routes := { method_str = meth; path; handler } :: !routes
             end))
-    end
+    end  (* is_arm *)
   done;
   List.rev !routes
 

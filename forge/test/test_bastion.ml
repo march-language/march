@@ -123,8 +123,8 @@ let test_scaffold_router_has_get_root () =
        | Error m -> Alcotest.fail m
        | Ok () -> ());
       let path = Filename.concat name ("lib/" ^ name ^ "/router.march") in
-      Alcotest.(check bool) "router matches (:get, [])" true
-        (file_contains path "(:get, [])"))
+      Alcotest.(check bool) "router matches (Get, [])" true
+        (file_contains path "(Get, [])"))
 
 let test_scaffold_router_has_bastion_dashboard () =
   with_temp_parent (fun name ->
@@ -220,19 +220,19 @@ let sample_router pascal =
     let p = HttpServer.path_info(conn)
     match (m, p) do
     -- ROUTE: GET /
-    (:get, []) ->
+    (Get, []) ->
       %s.PageController.index(conn)
 
     -- ROUTE: GET /users
-    (:get, ["users"]) ->
+    (Get, ["users"]) ->
       %s.UserController.index(conn)
 
     -- ROUTE: POST /users
-    (:post, ["users"]) ->
+    (Post, ["users"]) ->
       %s.UserController.create(conn)
 
     -- ROUTE: GET /_bastion
-    (:get, ["_bastion"]) ->
+    (Get, ["_bastion"]) ->
       BastionDev.dashboard_handler(conn, stats)
 
     _ ->
@@ -342,7 +342,7 @@ let () =
       ; Alcotest.test_case "main has HttpServer.listen"      `Quick test_scaffold_main_has_httpserver_listen
       ; Alcotest.test_case "main references BastionDev"      `Quick test_scaffold_main_has_bastiondev
       ; Alcotest.test_case "router has -- ROUTE: comments"   `Quick test_scaffold_router_has_route_comment
-      ; Alcotest.test_case "router matches (:get, [])"       `Quick test_scaffold_router_has_get_root
+      ; Alcotest.test_case "router matches (Get, [])"         `Quick test_scaffold_router_has_get_root
       ; Alcotest.test_case "router has _bastion route"       `Quick test_scaffold_router_has_bastion_dashboard
       ; Alcotest.test_case "dev config sets port 4000"       `Quick test_scaffold_config_dev_sets_port
       ; Alcotest.test_case "prod config reads PORT from env" `Quick test_scaffold_config_prod_uses_env
