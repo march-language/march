@@ -51,6 +51,8 @@ specs/                      design specs, progress tracking, feature plans
 
 ## Surface syntax notes
 
+See [syntax_reference.md](syntax_reference.md) for a complete quick-reference of all March syntax.
+
 - Module: `mod Name do ... end` (not `module`)
 - Type variants: `type Foo = A | B(Int)` — no leading `|`
 - Conditionals: `if cond then e1 else e2` (not `if/do/end`)
