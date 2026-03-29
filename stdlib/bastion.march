@@ -376,9 +376,7 @@ mod Static do
       "<script src=\"" ++ Bastion.Static.path("app.js") ++ "\"></script>"
   """
   fn path(logical) do
-    let clean = if String.starts_with(logical, "/") then
-      String.slice_bytes(logical, 1, string_length(logical) - 1)
-    else logical end
+    let clean = if String.starts_with(logical, "/") then String.slice_bytes(logical, 1, string_length(logical) - 1) else logical
     let manifest = get_manifest()
     match Json.get(manifest, clean) do
     Some(Json.Str(digested)) -> "/static/assets/" ++ digested
@@ -428,9 +426,9 @@ mod Static do
   """
   fn serve(conn, path_segments, from_dir) do
     let relative = String.join(path_segments, "/")
-    if not (safe_path(from_dir, relative)) then
+    if not (safe_path(from_dir, relative)) do
       HttpServer.send_resp(conn, 404, "Not Found")
-    else do
+    else
       let full_path = Path.join(from_dir, relative)
       match File.read(full_path) do
       Err(_) -> HttpServer.send_resp(conn, 404, "Not Found")
@@ -446,11 +444,7 @@ mod Static do
           |> HttpServer.put_resp_header("etag", etag_val)
         match HttpServer.get_req_header(conn, "if-none-match") do
         Some(client_tag) ->
-          if client_tag == etag_val then
-            HttpServer.send_resp(base_conn, 304, "")
-          else
-            HttpServer.send_resp(base_conn, 200, body)
-          end
+          if client_tag == etag_val then HttpServer.send_resp(base_conn, 304, "") else HttpServer.send_resp(base_conn, 200, body)
         None ->
           HttpServer.send_resp(base_conn, 200, body)
         end
@@ -514,5 +508,27 @@ mod Assets do
   end
 
 end -- mod Assets
+
+-- ---------------------------------------------------------------------------
+-- Bastion.Components
+-- ---------------------------------------------------------------------------
+
+mod Components do
+
+  -- Renders the first error message for a form field as an HTML span,
+  -- or an empty string if the field has no errors.
+  --
+  -- Usage in templates:
+  --   Bastion.Components.error_tag(form, "email")
+  --   -- => "<span class=\"field-error\">has invalid format</span>"
+  --   -- => "" (when no errors)
+  fn error_tag(form, field) do
+    match Depot.Form.get_errors(form, field) do
+    Nil          -> ""
+    Cons(msg, _) -> "<span class=\"field-error\">" ++ Html.escape(msg) ++ "</span>"
+    end
+  end
+
+end -- mod Components
 
 end -- mod Bastion
