@@ -91,9 +91,60 @@ let start_child march_exe entry env_arr =
   end else
     pid
 
+(* ---------------------------------------------------------- esbuild watcher *)
+
+(** Locate esbuild in PATH (returns None if not found). *)
+let find_esbuild_opt () =
+  let path_dirs =
+    match Sys.getenv_opt "PATH" with
+    | None   -> ["/usr/local/bin"; "/usr/bin"; "/bin"]
+    | Some p -> String.split_on_char ':' p
+  in
+  List.find_opt (fun d ->
+      Sys.file_exists (Filename.concat d "esbuild")
+    ) path_dirs
+  |> Option.map (fun d -> Filename.concat d "esbuild")
+
+(** Fork a child that runs esbuild --watch.  Returns the child PID or -1 on
+    any error.  Silently skips if esbuild is not installed or assets don't
+    exist — the server still works, assets just aren't rebuilt automatically. *)
+let maybe_start_esbuild root =
+  let js_entry  = Filename.concat root "assets/js/app.js" in
+  let css_entry = Filename.concat root "assets/css/app.css" in
+  let out_dir   = Filename.concat root "priv/static/assets" in
+  let has_assets = Sys.file_exists js_entry || Sys.file_exists css_entry in
+  if not has_assets then -1
+  else
+    match find_esbuild_opt () with
+    | None ->
+      Printf.printf "    Assets:    esbuild not found — run `forge assets build` manually\n%!";
+      -1
+    | Some esbuild ->
+      (* Ensure output directory exists before watching *)
+      let _ = Sys.command (Printf.sprintf "mkdir -p %s" (Filename.quote out_dir)) in
+      let entries =
+        List.filter Sys.file_exists [js_entry; css_entry]
+        |> List.map Filename.quote
+        |> String.concat " "
+      in
+      let args = [| esbuild; entries; "--bundle";
+                    "--outdir=" ^ out_dir; "--sourcemap"; "--watch" |] in
+      let pid = Unix.fork () in
+      if pid = 0 then begin
+        (* Redirect esbuild stdout/stderr to /dev/null to avoid cluttering
+           server output.  esbuild --watch prints its own status lines. *)
+        (try Unix.execve esbuild args (Unix.environment ())
+         with e ->
+           Printf.eprintf "forge: failed to exec esbuild: %s\n%!" (Printexc.to_string e);
+           exit 1)
+      end else begin
+        Printf.printf "    Assets:    esbuild --watch (pid %d)\n%!" pid;
+        pid
+      end
+
 (* ------------------------------------------------------------------ banner *)
 
-let print_banner app_name port =
+let print_banner app_name port has_assets =
   Printf.printf "\n";
   Printf.printf "==> Bastion dev server starting\n%!";
   Printf.printf "    App:       %s\n%!"  app_name;
@@ -101,6 +152,8 @@ let print_banner app_name port =
   Printf.printf "    Dashboard: http://localhost:%d/_bastion\n%!" port;
   Printf.printf "    Env:       dev\n%!";
   Printf.printf "    Watching:  lib/  config/\n%!";
+  (if has_assets then
+     Printf.printf "    Assets:    assets/ -> priv/static/assets/ (esbuild)\n%!");
   Printf.printf "    Press Ctrl+C to stop.\n\n%!"
 
 (* ------------------------------------------------------------------ run *)
@@ -139,17 +192,26 @@ let run ~port_override () =
           "MARCH_LIB_PATH", lib_path_str;
           "BASTION_PORT",   string_of_int port;
         ] in
-      let march_exe = find_march_exe () in
-      print_banner proj.Project.name port;
+      let march_exe  = find_march_exe () in
+      let has_assets = Sys.file_exists (Filename.concat root "assets") in
+      print_banner proj.Project.name port has_assets;
+
+      (* Optionally spawn esbuild --watch for the assets pipeline *)
+      let esbuild_pid = ref (maybe_start_esbuild root) in
 
       (* child_pid ref shared with SIGINT handler *)
       let child_pid = ref (start_child march_exe entry env_arr) in
 
-      (* Clean shutdown on Ctrl-C *)
+      (* Clean shutdown on Ctrl-C — kill both server and esbuild *)
       Sys.set_signal Sys.sigint (Sys.Signal_handle (fun _ ->
           if !child_pid > 0 then begin
             (try Unix.kill !child_pid Sys.sigterm with Unix.Unix_error _ -> ());
             (try let _ = Unix.waitpid [] !child_pid in ()
+             with Unix.Unix_error _ -> ())
+          end;
+          if !esbuild_pid > 0 then begin
+            (try Unix.kill !esbuild_pid Sys.sigterm with Unix.Unix_error _ -> ());
+            (try let _ = Unix.waitpid [] !esbuild_pid in ()
              with Unix.Unix_error _ -> ())
           end;
           Printf.printf "\n--> Stopped.\n%!";
@@ -163,7 +225,7 @@ let run ~port_override () =
         (* Sleep ~1s using Unix.select (avoids busy-wait, interruptible) *)
         (try let _ = Unix.select [] [] [] 1.0 in () with Unix.Unix_error _ -> ());
 
-        (* Check if child exited unexpectedly *)
+        (* Check if server child exited unexpectedly *)
         (match (try Unix.waitpid [Unix.WNOHANG] !child_pid
                 with Unix.Unix_error _ -> (0, Unix.WEXITED 0)) with
          | (pid, _) when pid = !child_pid ->
@@ -172,6 +234,15 @@ let run ~port_override () =
            child_pid := start_child march_exe entry env_arr;
            prev := snapshot lib_dir config_dir
          | _ -> ());
+
+        (* Check if esbuild exited unexpectedly (it shouldn't in --watch mode) *)
+        (if !esbuild_pid > 0 then
+           match (try Unix.waitpid [Unix.WNOHANG] !esbuild_pid
+                  with Unix.Unix_error _ -> (0, Unix.WEXITED 0)) with
+           | (pid, _) when pid = !esbuild_pid ->
+             Printf.printf "--> esbuild exited unexpectedly. Restarting...\n%!";
+             esbuild_pid := maybe_start_esbuild root
+           | _ -> ());
 
         (* Check for file changes *)
         let curr = snapshot lib_dir config_dir in

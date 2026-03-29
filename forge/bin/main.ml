@@ -216,6 +216,37 @@ let init_cmd =
   Cmd.v (Cmd.info "init" ~doc:"Initialize a forge.toml in the current directory")
     Term.(const (fun () -> handle (Cmd_init.run ())) $ const ())
 
+(* --------------------------------------------------------------- forge assets *)
+
+let assets_build_cmd =
+  Cmd.v (Cmd.info "build" ~doc:"Bundle assets for development (esbuild, with sourcemaps)")
+    Term.(const (fun () ->
+        match Cmd_assets.build () with
+        | Ok () -> ()
+        | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+      ) $ const ())
+
+let assets_deploy_cmd =
+  Cmd.v (Cmd.info "deploy" ~doc:"Bundle and minify assets for production, with digest fingerprinting")
+    Term.(const (fun () ->
+        match Cmd_assets.deploy () with
+        | Ok () -> ()
+        | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+      ) $ const ())
+
+let assets_watch_cmd =
+  Cmd.v (Cmd.info "watch" ~doc:"Watch assets for changes and rebuild automatically (esbuild --watch)")
+    Term.(const (fun () ->
+        match Cmd_assets.watch () with
+        | Ok () -> ()
+        | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+      ) $ const ())
+
+let assets_cmd =
+  Cmd.group
+    (Cmd.info "assets" ~doc:"Asset pipeline commands (build, deploy, watch) powered by esbuild")
+    [assets_build_cmd; assets_deploy_cmd; assets_watch_cmd]
+
 (* --------------------------------------------------------------- forge bastion *)
 
 let bastion_new_cmd =
@@ -271,7 +302,7 @@ let () =
   let cmds =
     [ new_cmd; init_cmd; build_cmd; run_cmd; test_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; install_cmd; publish_cmd;
-      search_cmd; bastion_cmd; help_cmd ]
+      search_cmd; assets_cmd; bastion_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term

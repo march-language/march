@@ -4,26 +4,51 @@
 (* Stdlib loader                                                       *)
 (* ------------------------------------------------------------------ *)
 
-(** Locate the stdlib directory.  Try paths relative to the source root
-    (for development) and relative to the installed executable. *)
+(** Resolve an executable name to an absolute path.
+    If the name already contains a slash it is used as-is (after resolving
+    relative to CWD).  Otherwise PATH is searched.  Falls back to the raw
+    name if nothing is found. *)
+let resolve_exe_path name =
+  if String.contains name '/' then
+    (* relative or absolute path — resolve against CWD *)
+    if String.length name > 0 && name.[0] = '/' then name
+    else Filename.concat (Sys.getcwd ()) name
+  else begin
+    let path_dirs =
+      match Sys.getenv_opt "PATH" with
+      | None   -> ["/usr/local/bin"; "/usr/bin"; "/bin"]
+      | Some p -> String.split_on_char ':' p
+    in
+    match List.find_opt (fun d ->
+        let p = Filename.concat d name in
+        Sys.file_exists p && not (Sys.is_directory p)
+      ) path_dirs with
+    | Some d -> Filename.concat d name
+    | None   -> name
+  end
+
+(** Locate the stdlib directory.
+    Resolution order:
+    1. MARCH_STDLIB environment variable (explicit override)
+    2. Paths relative to the resolved march executable:
+       - bin/../stdlib          (source-tree / opam switch layout)
+       - bin/../../stdlib       (nested build layout)
+       - bin/../share/march/stdlib  (installed share layout)
+    3. "stdlib" relative to CWD (works when running from the March repo root) *)
 let find_stdlib_dir () =
-  (* Allow override via environment variable *)
-  let env_override =
-    match Sys.getenv_opt "MARCH_STDLIB" with
-    | Some p when Sys.file_exists p -> Some p
-    | _ -> None
-  in
-  match env_override with
-  | Some p -> Some p
-  | None ->
-    let exe_dir = Filename.dirname Sys.executable_name in
+  match Sys.getenv_opt "MARCH_STDLIB" with
+  | Some p when Sys.file_exists p -> Some p
+  | _ ->
+    let exe_path = resolve_exe_path Sys.executable_name in
+    let exe_dir  = Filename.dirname exe_path in
     let candidates = [
-      "stdlib";
-      (* Installed share layout: bin/../share/march/stdlib *)
-      Filename.concat exe_dir "../share/march/stdlib";
-      (* Source-tree layouts for development *)
+      (* Exe-relative candidates — work regardless of CWD *)
       Filename.concat exe_dir "../stdlib";
       Filename.concat exe_dir "../../stdlib";
+      (* Installed share layout: bin/../share/march/stdlib *)
+      Filename.concat exe_dir "../share/march/stdlib";
+      (* CWD-relative fallback — works when invoked from the March repo root *)
+      "stdlib";
     ] in
     List.find_opt Sys.file_exists candidates
 

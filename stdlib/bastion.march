@@ -283,4 +283,236 @@ mod Depot do
 
 end -- mod Depot
 
+-- ---------------------------------------------------------------------------
+-- Bastion.Static
+-- ---------------------------------------------------------------------------
+
+mod Static do
+
+  -- -------------------------------------------------------------------------
+  -- Content-type helpers
+  -- -------------------------------------------------------------------------
+
+  pfn ext_to_mime(ext) do
+    match ext do
+    "html" -> "text/html; charset=utf-8"
+    "htm"  -> "text/html; charset=utf-8"
+    "css"  -> "text/css; charset=utf-8"
+    "js"   -> "application/javascript; charset=utf-8"
+    "mjs"  -> "application/javascript; charset=utf-8"
+    "json" -> "application/json"
+    "xml"  -> "application/xml"
+    "txt"  -> "text/plain; charset=utf-8"
+    "png"  -> "image/png"
+    "jpg"  -> "image/jpeg"
+    "jpeg" -> "image/jpeg"
+    "gif"  -> "image/gif"
+    "svg"  -> "image/svg+xml"
+    "ico"  -> "image/x-icon"
+    "webp" -> "image/webp"
+    "woff" -> "font/woff"
+    "woff2"-> "font/woff2"
+    "wasm" -> "application/wasm"
+    "pdf"  -> "application/pdf"
+    "map"  -> "application/json"
+    _      -> "application/octet-stream"
+    end
+  end
+
+  -- -------------------------------------------------------------------------
+  -- Manifest loading and caching
+  -- -------------------------------------------------------------------------
+
+  -- Load and cache the assets manifest from priv/static/assets/manifest.json.
+  -- Returns a Json.Object assoc-list on success, or an empty object on any error.
+  pfn load_manifest() do
+    match File.read("priv/static/assets/manifest.json") do
+    Ok(content) ->
+      match Json.parse(content) do
+      Ok(obj) -> obj
+      Err(_)  -> Json.Object(Nil)
+      end
+    Err(_) -> Json.Object(Nil)
+    end
+  end
+
+  pfn manifest_table() do
+    match Vault.whereis("bastion_static_manifest") do
+    Some(tbl) -> tbl
+    None      -> Vault.new("bastion_static_manifest")
+    end
+  end
+
+  -- Return the cached manifest, loading it from disk on first access.
+  pfn get_manifest() do
+    let tbl = manifest_table()
+    match Vault.get(tbl, "manifest") do
+    Some(m) -> m
+    None -> do
+      let m = load_manifest()
+      Vault.set(tbl, "manifest", m)
+      m
+    end
+    end
+  end
+
+  -- -------------------------------------------------------------------------
+  -- Path resolution
+  -- -------------------------------------------------------------------------
+
+  doc """
+  Resolve a logical asset path to its digested URL.
+
+  In production, reads the manifest written by `forge assets deploy` and
+  returns the fingerprinted path.  In development (no manifest), returns the
+  logical path prefixed with `/static/assets/`.
+
+      Bastion.Static.path("app.js")   -- "/static/assets/app-abc123ef.js"
+      Bastion.Static.path("app.css")  -- "/static/assets/app-def45678.css"
+
+  Use in templates:
+
+      "<link rel=\"stylesheet\" href=\"" ++ Bastion.Static.path("app.css") ++ "\">"
+      "<script src=\"" ++ Bastion.Static.path("app.js") ++ "\"></script>"
+  """
+  fn path(logical) do
+    let clean = if String.starts_with(logical, "/") then
+      String.slice_bytes(logical, 1, string_length(logical) - 1)
+    else logical end
+    let manifest = get_manifest()
+    match Json.get(manifest, clean) do
+    Some(Json.Str(digested)) -> "/static/assets/" ++ digested
+    _                        -> "/static/assets/" ++ clean
+    end
+  end
+
+  -- Invalidate the cached manifest (call after a deploy or asset rebuild).
+  doc "Clear the cached asset manifest.  Forces the next path/1 call to reload from disk."
+  fn invalidate_manifest() do
+    match Vault.whereis("bastion_static_manifest") do
+    Some(tbl) -> Vault.drop(tbl, "manifest")
+    None      -> :ok
+    end
+  end
+
+  -- -------------------------------------------------------------------------
+  -- Static file serving
+  -- -------------------------------------------------------------------------
+
+  -- Return true if the resolved path stays inside the base directory.
+  -- Blocks path traversal attacks like "../../etc/passwd".
+  pfn safe_path(base, logical_path) do
+    let norm = Path.normalize(Path.join(base, logical_path))
+    String.starts_with(norm, base)
+  end
+
+  doc """
+  Serve a static file from `from_dir` (default `"priv/static"`).
+
+  `path_segments` is the tail of the request path after the static prefix,
+  e.g. `["assets", "app.js"]` for a request to `/static/assets/app.js`.
+
+  Sets:
+  - `Content-Type` from the file extension
+  - `Cache-Control: public, max-age=31536000, immutable` for fingerprinted
+    assets (filenames containing a `-` before the extension)
+  - `ETag` weak hash for conditional requests
+  - Responds `304 Not Modified` when the client's `If-None-Match` matches
+
+  Returns `404 Not Found` when the file does not exist or the path escapes
+  the static directory.
+
+      -- In a router arm:
+      (Get, ["static" | rest]) ->
+        Bastion.Static.serve(conn, rest, "priv/static")
+  """
+  fn serve(conn, path_segments, from_dir) do
+    let relative = String.join(path_segments, "/")
+    if not (safe_path(from_dir, relative)) then
+      HttpServer.send_resp(conn, 404, "Not Found")
+    else do
+      let full_path = Path.join(from_dir, relative)
+      match File.read(full_path) do
+      Err(_) -> HttpServer.send_resp(conn, 404, "Not Found")
+      Ok(body) -> do
+        let ext = Path.extension(full_path)
+        let ct  = ext_to_mime(ext)
+        let cc  = "public, max-age=31536000, immutable"
+        let hash     = IOList.hash(IOList.from_string(body))
+        let etag_val = "\"" ++ hash ++ "\""
+        let base_conn =
+          HttpServer.put_resp_header(conn, "content-type", ct)
+          |> HttpServer.put_resp_header("cache-control", cc)
+          |> HttpServer.put_resp_header("etag", etag_val)
+        match HttpServer.get_req_header(conn, "if-none-match") do
+        Some(client_tag) ->
+          if client_tag == etag_val then
+            HttpServer.send_resp(base_conn, 304, "")
+          else
+            HttpServer.send_resp(base_conn, 200, body)
+          end
+        None ->
+          HttpServer.send_resp(base_conn, 200, body)
+        end
+      end
+      end
+    end
+  end
+
+  doc """
+  Convenience overload: serve from the default `"priv/static"` directory.
+
+      (Get, ["static" | rest]) -> Bastion.Static.serve(conn, rest)
+  """
+  fn serve(conn, path_segments) do
+    serve(conn, path_segments, "priv/static")
+  end
+
+end -- mod Static
+
+-- ---------------------------------------------------------------------------
+-- Bastion.Assets
+-- ---------------------------------------------------------------------------
+
+mod Assets do
+
+  doc """
+  Return the public URL for a logical asset name.
+
+  Delegates to `Bastion.Static.path/1`.  Use this in templates and layouts:
+
+      "<link rel=\"stylesheet\" href=\"" ++ Bastion.Assets.static_path("app.css") ++ "\">"
+      "<script src=\"" ++ Bastion.Assets.static_path("app.js") ++ "\"></script>"
+  """
+  fn static_path(logical) do
+    Bastion.Static.path(logical)
+  end
+
+  doc """
+  Return the esbuild entry-point JS bundle path — shorthand for `static_path("app.js")`.
+  """
+  fn js_bundle_path() do
+    Bastion.Static.path("app.js")
+  end
+
+  doc """
+  Return the esbuild CSS bundle path — shorthand for `static_path("app.css")`.
+  """
+  fn css_bundle_path() do
+    Bastion.Static.path("app.css")
+  end
+
+  doc """
+  Invalidate the cached asset manifest.
+
+  Call this after a hot deploy or asset rebuild when the manifest on disk has
+  changed and you want `static_path/1` to pick up the new fingerprinted names
+  without restarting the server.
+  """
+  fn invalidate_manifest() do
+    Bastion.Static.invalidate_manifest()
+  end
+
+end -- mod Assets
+
 end -- mod Bastion

@@ -5,16 +5,19 @@
      APP/
        forge.toml
        .editorconfig  .gitignore  README.md
+       assets/
+         js/app.js                          (esbuild JS entry point)
+         css/app.css                        (esbuild CSS entry point)
+         vendor/march-islands.js            (island hydration runtime)
        config/  config.march  dev.march  test.march  prod.march
        lib/
          APP.march                          (application module + main)
          APP/
            router.march                     (pattern-dispatch router)
            controllers/page_controller.march
-           templates/layout.march
+           templates/layout.march           (uses Bastion.Assets.static_path)
            templates/page/index.march
-       priv/static/css/app.css
-       priv/static/js/app.js
+       priv/static/assets/                  (gitignored — built by forge assets build)
        test/
          test_helper.march
          controllers/test_page_controller.march
@@ -305,6 +308,10 @@ let layout_source name pascal =
 {|-- %s.Templates.Layout — base HTML layout.
 --
 -- Wrap any page body with Layout.wrap/1.
+--
+-- Bastion.Assets.static_path/1 resolves to the digested fingerprinted path in
+-- production and the plain development path otherwise.  Run
+-- `forge assets build` to bundle, or `forge assets deploy` for production.
 
 mod %s.Templates.Layout do
 
@@ -316,11 +323,11 @@ mod %s.Templates.Layout do
     "<meta charset=\"UTF-8\">" ++
     "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">" ++
     "<title>%s</title>" ++
-    "<link rel=\"stylesheet\" href=\"/static/css/app.css\">" ++
+    "<link rel=\"stylesheet\" href=\"" ++ Bastion.Assets.static_path("app.css") ++ "\">" ++
     "</head>" ++
     "<body>" ++
     inner_html ++
-    "<script src=\"/static/js/app.js\"></script>" ++
+    "<script src=\"" ++ Bastion.Assets.static_path("app.js") ++ "\"></script>" ++
     "</body>" ++
     "</html>"
   end
@@ -354,9 +361,12 @@ end
 
 (* ---------- priv/static -------------------------------------------- *)
 
-let app_css name =
+let assets_app_css name =
   Printf.sprintf
-{|/* priv/static/css/app.css — %s stylesheet */
+{|/* assets/css/app.css — %s stylesheet source
+ * Bundled by esbuild: run `forge assets build` (dev) or `forge assets deploy` (prod).
+ * Output lands in priv/static/assets/app.css (gitignored).
+ */
 
 *, *::before, *::after { box-sizing: border-box; }
 
@@ -381,11 +391,122 @@ code { background: #e5e7eb; padding: 2px 6px; border-radius: 4px; font-size: 0.9
 |}
     name
 
-let app_js _name =
-  {|// priv/static/js/app.js — client-side JavaScript entry point
-// BastionDev live-reload is injected automatically in dev mode.
+let assets_app_js _name =
+  {|// assets/js/app.js — esbuild entry point
+// Bundled by `forge assets build` (dev) or `forge assets deploy` (prod).
+// Output: priv/static/assets/app.js  (gitignored)
+//
+// Import CSS here so esbuild bundles it alongside the JavaScript:
+import "../css/app.css"
 
+// Import the March islands runtime for client-side island hydration:
+import "../vendor/march-islands.js"
+
+// Your client-side JavaScript goes here.
 console.log("[app.js] loaded");
+|}
+
+(** The March islands hydration runtime, vendored into assets/vendor/.
+    Handles eager, lazy (IntersectionObserver), idle (requestIdleCallback),
+    and interaction-triggered island hydration strategies.
+    Bundled by esbuild as part of the normal assets pipeline. *)
+let march_islands_js =
+  {|// assets/vendor/march-islands.js — March islands hydration runtime
+// Bundled by esbuild into priv/static/assets/app.js.
+// Do not edit the output in priv/static/assets/ — edit this source file.
+
+(function () {
+  "use strict";
+
+  // Registry of island component definitions keyed by module name.
+  const islands = {};
+
+  // Register an island constructor. Called by compiled WASM glue code.
+  window.__marchRegisterIsland = function (name, factory) {
+    islands[name] = factory;
+  };
+
+  // Hydrate a single island element.
+  function hydrateElement(el) {
+    const name = el.dataset.island;
+    if (!name) return;
+    if (el.dataset.hydrated) return;
+    const factory = islands[name];
+    if (!factory) {
+      console.warn("[march-islands] unknown island:", name);
+      return;
+    }
+    try {
+      const props = el.dataset.props ? JSON.parse(el.dataset.props) : {};
+      factory(el, props);
+      el.dataset.hydrated = "true";
+    } catch (err) {
+      console.error("[march-islands] hydration error in", name, err);
+    }
+  }
+
+  // Eager hydration: run immediately on DOMContentLoaded.
+  function hydrateEager() {
+    document.querySelectorAll("[data-island][data-strategy='eager']")
+      .forEach(hydrateElement);
+  }
+
+  // Lazy hydration: use IntersectionObserver, fall back to eager.
+  function hydrateLazy() {
+    const els = document.querySelectorAll("[data-island][data-strategy='lazy']");
+    if (!("IntersectionObserver" in window)) {
+      els.forEach(hydrateElement);
+      return;
+    }
+    const observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) {
+          hydrateElement(entry.target);
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { rootMargin: "200px" });
+    els.forEach(function (el) { observer.observe(el); });
+  }
+
+  // Idle hydration: use requestIdleCallback, fall back to setTimeout.
+  function hydrateIdle() {
+    const els = document.querySelectorAll("[data-island][data-strategy='idle']");
+    const fn = window.requestIdleCallback || function (cb) { setTimeout(cb, 1); };
+    els.forEach(function (el) {
+      fn(function () { hydrateElement(el); });
+    });
+  }
+
+  // Interaction hydration: hydrate on first pointer/focus event.
+  function hydrateOnInteraction() {
+    const els = document.querySelectorAll("[data-island][data-strategy='interaction']");
+    els.forEach(function (el) {
+      function handler() {
+        hydrateElement(el);
+        el.removeEventListener("pointerenter", handler);
+        el.removeEventListener("focusin", handler);
+      }
+      el.addEventListener("pointerenter", handler, { once: true });
+      el.addEventListener("focusin", handler, { once: true });
+    });
+  }
+
+  // Run all hydration strategies when the DOM is ready.
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function () {
+      hydrateEager();
+      hydrateLazy();
+      hydrateIdle();
+      hydrateOnInteraction();
+    });
+  } else {
+    hydrateEager();
+    hydrateLazy();
+    hydrateIdle();
+    hydrateOnInteraction();
+  }
+})();
 |}
 
 (* ---------- test/ -------------------------------------------------- *)
@@ -458,7 +579,10 @@ let editorconfig =
    indent_style = space\n\
    indent_size = 2\n"
 
-let gitignore = "/.march/\n/priv/static/assets/\n"
+let gitignore =
+  "/.march/\n" ^
+  "# esbuild output — regenerated by `forge assets build`\n" ^
+  "/priv/static/assets/\n"
 
 let readme name =
   Printf.sprintf
@@ -469,17 +593,44 @@ A [Bastion](https://march-lang.org/bastion) web application built with March.
 ## Getting started
 
 ```
+forge assets build            # bundle assets (run once before starting server)
 forge bastion server          # start dev server (http://localhost:4000)
 forge bastion routes          # list all routes
 forge test                    # run tests
 ```
 
+For development with automatic asset rebuilds, run both in separate terminals:
+
+```
+forge assets watch            # rebuild assets on change
+forge bastion server          # start dev server
+```
+
+## Asset pipeline
+
+Assets are bundled by [esbuild](https://esbuild.github.io/).
+Install it once with `npm install -g esbuild` or `brew install esbuild`.
+
+| Command               | Description                                       |
+|-----------------------|---------------------------------------------------|
+| `forge assets build`  | Dev bundle (sourcemaps, no minification)          |
+| `forge assets deploy` | Prod bundle (minified + content-hash fingerprint) |
+| `forge assets watch`  | Rebuild on file changes                           |
+
+Source files live in `assets/`.  Output is written to `priv/static/assets/`
+(gitignored).  `Bastion.Assets.static_path/1` resolves to fingerprinted paths
+in production and plain paths in development.
+
 ## Project layout
 
 ```
+assets/         source JS and CSS (bundled by esbuild)
+  js/app.js     JavaScript entry point
+  css/app.css   stylesheet source
+  vendor/       third-party JS (march-islands runtime, etc.)
 config/         environment-specific configuration
 lib/            application source (controllers, templates, router)
-priv/static/    CSS, JS, and other static assets
+priv/static/    static files; assets/ subdirectory is gitignored
 test/           test files
 ```
 |}
@@ -522,9 +673,15 @@ let scaffold name =
       write_file (j ("lib/" ^ name ^ "/templates/page/index.march"))
         (page_index_source name pascal);
 
-      (* priv/static/ *)
-      write_file (j "priv/static/css/app.css") (app_css name);
-      write_file (j "priv/static/js/app.js")   (app_js name);
+      (* assets/ — esbuild source files *)
+      write_file (j "assets/js/app.js")             (assets_app_js name);
+      write_file (j "assets/css/app.css")            (assets_app_css name);
+      write_file (j "assets/vendor/march-islands.js") march_islands_js;
+
+      (* priv/static/assets/ placeholder so the directory exists.
+         The real output is written by `forge assets build`.
+         We write a .gitkeep so git tracks the directory. *)
+      write_file (j "priv/static/assets/.gitkeep") "";
 
       (* test/ *)
       write_file (j "test/test_helper.march")
