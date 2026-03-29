@@ -200,11 +200,13 @@ class march_server =
         match get_analysis uri with
         | None -> None
         | Some a ->
-          let ty_str  = Analysis.type_at a ~line ~character in
-          let doc_str = Analysis.doc_name_at a ~line ~character in
+          let ty_str   = Analysis.type_at a ~line ~character in
+          let doc_str  = Analysis.doc_name_at a ~line ~character in
+          let perf_str = Analysis.perf_insight_at a ~line ~character in
           let parts   = List.filter_map Fun.id [
             Option.map (fun ty -> Printf.sprintf "```march\n%s\n```" ty) ty_str;
             Option.map (fun d  -> "---\n" ^ d) doc_str;
+            Option.map (fun p  -> "---\n" ^ p) perf_str;
           ] in
           if parts <> [] then
             let md = MarkupContent.create
