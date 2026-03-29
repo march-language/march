@@ -222,6 +222,7 @@ march/
 │   ├── bastion_pubsub.march       # Distributed pub/sub: named instances, Local/Redis/Cluster adapters, wildcard topics
 │   ├── bastion_test_sandbox.march # Test sandboxing: SandboxEnv, checkout/release, isolated Vault namespace
 │   ├── bastion_idempotency.march  # Idempotency middleware: IdempotencyState, protect/3, replay, X-Idempotent-Replayed
+│   ├── depot_gate.march           # 587 lines: Depot.Gate validation pipeline — cast, validate_required/length/format/inclusion/exclusion/number/acceptance/confirmation/change, constraint hints (unique/foreign_key/no_assoc/check), apply_constraint_error, full accessor API
 │   └── docs/flow.md         # Flow module design doc: concepts, examples, GenStage comparison
 ├── test/
 │   ├── test_march.ml         # 1180 tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, bytes, logger, flow, actor_module, etc.)

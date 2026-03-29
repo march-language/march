@@ -1,0 +1,582 @@
+-- Depot.Gate: typed validation pipeline for web forms and data input.
+--
+-- A Gate accumulates validation results over raw input params without
+-- short-circuiting — all validators run, all errors are collected.
+-- At the end you have either a clean set of cast changes ready to persist,
+-- or a structured error map ready to render in a form.
+--
+-- The name "Gate" was chosen because data must pass through the gate
+-- before entering the system. A valid Gate is the only thing
+-- Depot.insert accepts — unvalidated data cannot pass.
+--
+-- Basic usage:
+--
+--   import Depot.Gate
+--
+--   fn user_gate(params) do
+--     cast(params, ["name", "email", "age"])
+--     |> validate_required(["name", "email"])
+--     |> validate_length("name", [LenMin(2), LenMax(100)])
+--     |> validate_format("email", "@")
+--     |> validate_number("age", [NumMin(13), NumMax(150)])
+--   end
+--
+--   let gate = user_gate(conn_params)
+--   if is_valid(gate) then
+--     -- use get_change(gate, "name") etc. for persistence
+--     Ok(gate)
+--   else
+--     Err(errors(gate))
+--   end
+--
+-- DB constraint hints (resolved after Depot.insert/update):
+--
+--   cast(params, ["email"])
+--   |> validate_required(["email"])
+--   |> unique_constraint("email", [ConstraintName("users_email_index"),
+--                                   ConstraintMessage("has already been taken")])
+
+mod Depot.Gate do
+
+-- ---------------------------------------------------------------------------
+-- Types
+-- ---------------------------------------------------------------------------
+
+-- DbConstraint(kind, field, constraint_name, message)
+-- kind: "unique" | "foreign_key" | "no_assoc" | "check"
+ptype DbConstraint = DbConstraint(String, String, String, String)
+
+-- Gate(params, changes, errors, valid, constraints)
+--   params      : original raw input as (field, value) string pairs
+--   changes     : cast and accepted values as (field, value) string pairs
+--   errors      : accumulated errors as (field, message) pairs (all kept)
+--   valid       : false as soon as any error is added
+--   constraints : DB constraint hints for Depot.insert/update resolution
+type Gate = Gate(List((String, String)), List((String, String)), List((String, String)), Bool, List(DbConstraint))
+
+-- Options for validate_length.
+type LengthOpt =
+    LenMin(Int)
+  | LenMax(Int)
+  | LenExact(Int)
+  | LenMessage(String)
+
+-- Options for validate_number.
+type NumberOpt =
+    NumMin(Int)
+  | NumMax(Int)
+  | NumGreaterThan(Int)
+  | NumLessThan(Int)
+  | NumEqualTo(Int)
+  | NumMessage(String)
+
+-- Options for DB constraint functions.
+type ConstraintOpt =
+    ConstraintName(String)
+  | ConstraintMessage(String)
+
+-- ---------------------------------------------------------------------------
+-- Private: Gate field accessors / updaters
+-- ---------------------------------------------------------------------------
+
+pfn form_params(f) do
+  match f do Gate(p, _, _, _, _) -> p end
+end
+
+pfn form_changes(f) do
+  match f do Gate(_, ch, _, _, _) -> ch end
+end
+
+pfn form_errors(f) do
+  match f do Gate(_, _, e, _, _) -> e end
+end
+
+pfn form_valid(f) do
+  match f do Gate(_, _, _, v, _) -> v end
+end
+
+pfn form_constraints(f) do
+  match f do Gate(_, _, _, _, cs) -> cs end
+end
+
+pfn set_changes(f, changes) do
+  match f do Gate(p, _, e, v, cs) -> Gate(p, changes, e, v, cs) end
+end
+
+pfn set_errors_field(f, errs) do
+  match f do Gate(p, ch, _, v, cs) -> Gate(p, ch, errs, v, cs) end
+end
+
+pfn set_valid_field(f, v) do
+  match f do Gate(p, ch, e, _, cs) -> Gate(p, ch, e, v, cs) end
+end
+
+pfn set_constraints_field(f, cs) do
+  match f do Gate(p, ch, e, v, _) -> Gate(p, ch, e, v, cs) end
+end
+
+-- ---------------------------------------------------------------------------
+-- Private: association list utilities
+-- ---------------------------------------------------------------------------
+
+-- Find the first value for a key.
+pfn alist_get(pairs, key) do
+  match pairs do
+  Nil -> None
+  Cons((k, v), rest) ->
+    if k == key then Some(v) else alist_get(rest, key)
+  end
+end
+
+-- Set a key (replaces first occurrence, or prepends if absent).
+pfn alist_set(pairs, key, value) do
+  fn go(ps, acc) do
+    match ps do
+    Nil ->
+      List.append(List.reverse(acc), Cons((key, value), Nil))
+    Cons((k, v), rest) ->
+      if k == key then List.append(List.reverse(acc), Cons((key, value), rest)) else go(rest, Cons((k, v), acc))
+    end
+  end
+  go(pairs, Nil)
+end
+
+-- Remove all entries with a key.
+pfn alist_delete(pairs, key) do
+  fn keep(p) do
+    match p do (k, _) -> k != key end
+  end
+  List.filter(pairs, keep)
+end
+
+-- Collect all values for a key (preserves order).
+pfn alist_get_all(pairs, key) do
+  fn go(ps, acc) do
+    match ps do
+    Nil -> List.reverse(acc)
+    Cons((k, v), rest) ->
+      if k == key then go(rest, Cons(v, acc)) else go(rest, acc)
+    end
+  end
+  go(pairs, Nil)
+end
+
+-- Check membership in a string list.
+pfn str_member(xs, s) do
+  List.any(xs, fn x -> x == s)
+end
+
+-- ---------------------------------------------------------------------------
+-- Private: extract options
+-- ---------------------------------------------------------------------------
+
+pfn extract_constraint_name(opts, default) do
+  fn go(os) do
+    match os do
+    Nil -> default
+    Cons(ConstraintName(n), _) -> n
+    Cons(_, rest) -> go(rest)
+    end
+  end
+  go(opts)
+end
+
+pfn extract_constraint_message(opts, default) do
+  fn go(os) do
+    match os do
+    Nil -> default
+    Cons(ConstraintMessage(m), _) -> m
+    Cons(_, rest) -> go(rest)
+    end
+  end
+  go(opts)
+end
+
+-- ---------------------------------------------------------------------------
+-- Private: number validation helpers
+-- ---------------------------------------------------------------------------
+
+pfn apply_number_opts(form, field, n, opts) do
+  fn go(os, f) do
+    match os do
+    Nil -> f
+    Cons(opt, rest) ->
+      go(rest, match opt do
+      NumMin(m) -> if n < m then add_error(f, field, "must be greater than or equal to " ++ int_to_string(m)) else f
+      NumMax(m) -> if n > m then add_error(f, field, "must be less than or equal to " ++ int_to_string(m)) else f
+      NumGreaterThan(m) -> if n <= m then add_error(f, field, "must be greater than " ++ int_to_string(m)) else f
+      NumLessThan(m) -> if n >= m then add_error(f, field, "must be less than " ++ int_to_string(m)) else f
+      NumEqualTo(m) -> if n != m then add_error(f, field, "must be equal to " ++ int_to_string(m)) else f
+      NumMessage(_) -> f
+      end)
+    end
+  end
+  go(opts, form)
+end
+
+-- ---------------------------------------------------------------------------
+-- Construction
+-- ---------------------------------------------------------------------------
+
+doc """
+Create a Gate from raw params, keeping only the allow-listed fields.
+
+Values remain as strings; type coercion (e.g. "42" -> Int) is the
+caller's responsibility via `put_change`.
+
+    let form = Depot.Gate.cast(params, ["name", "email", "age"])
+"""
+fn cast(params, fields) do
+  fn keep(p) do
+    match p do (k, _) -> str_member(fields, k) end
+  end
+  let allowed = List.filter(params, keep)
+  Gate(params, allowed, Nil, true, Nil)
+end
+
+-- ---------------------------------------------------------------------------
+-- Accessors
+-- ---------------------------------------------------------------------------
+
+doc """
+Returns the current value of a field, checking changes first then params.
+
+    Depot.Gate.get_field(form, "name")  -- Some("Alice") or None
+"""
+fn get_field(form, field) do
+  match get_change(form, field) do
+  Some(v) -> Some(v)
+  None    -> alist_get(form_params(form), field)
+  end
+end
+
+doc """
+Returns the change (cast value) for a field, or None if not present.
+
+    Depot.Gate.get_change(form, "email")
+"""
+fn get_change(form, field) do
+  alist_get(form_changes(form), field)
+end
+
+doc """
+Sets a change value on the form.
+
+    form |> Depot.Gate.put_change("role", "admin")
+"""
+fn put_change(form, field, value) do
+  set_changes(form, alist_set(form_changes(form), field, value))
+end
+
+doc """
+Removes a change from the form (e.g. after hashing a password).
+
+    form |> Depot.Gate.delete_change("password")
+"""
+fn delete_change(form, field) do
+  set_changes(form, alist_delete(form_changes(form), field))
+end
+
+doc """
+Adds an error for a field and marks the form invalid.
+
+    form |> Depot.Gate.add_error("email", "has invalid format")
+"""
+fn add_error(form, field, message) do
+  let new_errors = Cons((field, message), form_errors(form))
+  form |> set_errors_field(new_errors) |> set_valid_field(false)
+end
+
+doc """
+Returns true if the form has no validation errors.
+
+    if Depot.Gate.is_valid(form) then persist(form) else render_errors(form) end
+"""
+fn is_valid(form) do
+  form_valid(form)
+end
+
+doc """
+Returns all errors as a list of (field, message) pairs.
+
+    Depot.Gate.errors(form)  -- [("email", "has invalid format"), ...]
+"""
+fn errors(form) do
+  form_errors(form)
+end
+
+doc """
+Returns all error messages for a specific field.
+
+    Depot.Gate.get_errors(form, "email")  -- ["has invalid format", ...]
+"""
+fn get_errors(form, field) do
+  alist_get_all(form_errors(form), field)
+end
+
+-- ---------------------------------------------------------------------------
+-- Validators
+-- ---------------------------------------------------------------------------
+
+doc """
+Validates that all listed fields have non-empty values.
+
+    form |> Depot.Gate.validate_required(["name", "email"])
+"""
+fn validate_required(form, fields) do
+  fn go(fs, f) do
+    match fs do
+    Nil -> f
+    Cons(field, rest) ->
+      go(rest, match get_field(f, field) do
+      None    -> add_error(f, field, "can't be blank")
+      Some(v) -> if String.trim(v) == "" then add_error(f, field, "can't be blank") else f
+      end)
+    end
+  end
+  go(fields, form)
+end
+
+pfn apply_length_opts(form, field, len, opts) do
+  fn go(os, f) do
+    match os do
+    Nil -> f
+    Cons(opt, rest) ->
+      go(rest, match opt do
+      LenMin(n) -> if len < n then add_error(f, field, "should be at least " ++ int_to_string(n) ++ " character(s)") else f
+      LenMax(n) -> if len > n then add_error(f, field, "should be at most " ++ int_to_string(n) ++ " character(s)") else f
+      LenExact(n) -> if len != n then add_error(f, field, "should be exactly " ++ int_to_string(n) ++ " character(s)") else f
+      LenMessage(_) -> f
+      end)
+    end
+  end
+  go(opts, form)
+end
+
+doc """
+Validates string length constraints on a field.
+
+Opts may be any combination of:
+  LenMin(n)     -- must have at least n bytes
+  LenMax(n)     -- must have at most n bytes
+  LenExact(n)   -- must be exactly n bytes
+  LenMessage(m) -- (reserved; use add_error for custom messages)
+
+Absent fields are silently skipped — use validate_required first.
+
+    form |> Depot.Gate.validate_length("name", [LenMin(2), LenMax(100)])
+"""
+fn validate_length(form, field, opts) do
+  match get_field(form, field) do
+  None    -> form
+  Some(v) -> apply_length_opts(form, field, String.byte_size(v), opts)
+  end
+end
+
+doc """
+Validates that a field value matches a regex pattern.
+
+    form |> Depot.Gate.validate_format("email", "@")
+    form |> Depot.Gate.validate_format("slug", "^[a-z0-9-]+$")
+
+Absent fields are silently skipped.
+"""
+fn validate_format(form, field, pattern) do
+  match get_field(form, field) do
+  None    -> form
+  Some(v) ->
+    if Regex.matches(pattern, v) then form else add_error(form, field, "has invalid format")
+  end
+end
+
+doc """
+Validates that a field value is in the allowed set.
+
+    form |> Depot.Gate.validate_inclusion("role", ["user", "admin", "mod"])
+"""
+fn validate_inclusion(form, field, values) do
+  match get_field(form, field) do
+  None    -> form
+  Some(v) ->
+    if str_member(values, v) then form else add_error(form, field, "is not a valid value")
+  end
+end
+
+doc """
+Validates that a field value is NOT in the excluded set.
+
+    form |> Depot.Gate.validate_exclusion("username", ["root", "admin"])
+"""
+fn validate_exclusion(form, field, values) do
+  match get_field(form, field) do
+  None    -> form
+  Some(v) ->
+    if str_member(values, v) then add_error(form, field, "is reserved") else form
+  end
+end
+
+doc """
+Validates numeric constraints on a field (value must parse as an integer).
+
+Opts may be any combination of:
+  NumMin(n)         -- >= n
+  NumMax(n)         -- <= n
+  NumGreaterThan(n) -- > n
+  NumLessThan(n)    -- < n
+  NumEqualTo(n)     -- == n
+  NumMessage(m)     -- (reserved)
+
+    form |> Depot.Gate.validate_number("age", [NumMin(13), NumMax(150)])
+"""
+fn validate_number(form, field, opts) do
+  match get_field(form, field) do
+  None    -> form
+  Some(v) ->
+    match string_to_int(v) do
+    Some(n) -> apply_number_opts(form, field, n, opts)
+    None    ->
+      match string_to_float(v) do
+      Some(fv) -> apply_number_opts(form, field, float_to_int(fv), opts)
+      None     -> add_error(form, field, "is not a number")
+      end
+    end
+  end
+end
+
+doc """
+Validates that a field has been accepted (checkbox style: value "true" or "1").
+
+    form |> Depot.Gate.validate_acceptance("terms_of_service")
+"""
+fn validate_acceptance(form, field) do
+  match get_field(form, field) do
+  None    -> add_error(form, field, "must be accepted")
+  Some(v) ->
+    if v == "true" || v == "1" then form else add_error(form, field, "must be accepted")
+  end
+end
+
+doc """
+Validates that a field matches its confirmation counterpart.
+
+For field "password", checks that "password_confirmation" has the same value.
+
+    form |> Depot.Gate.validate_confirmation("password")
+"""
+fn validate_confirmation(form, field) do
+  let conf_field = field ++ "_confirmation"
+  match get_field(form, field) do
+  None -> form
+  Some(v) ->
+    match get_field(form, conf_field) do
+    None ->
+      add_error(form, conf_field, "can't be blank")
+    Some(cv) ->
+      if v == cv then form else add_error(form, conf_field, "does not match " ++ field)
+    end
+  end
+end
+
+doc """
+Applies a custom validator function to a field.
+
+The validator receives the field value and returns:
+  None        -- valid (no error)
+  Some(msg)   -- invalid, add this error message
+
+    form |> Depot.Gate.validate_change("username", fn v ->
+      if String.byte_size(v) < 3 then Some("too short") else None end
+    )
+"""
+fn validate_change(form, field, validator) do
+  match get_field(form, field) do
+  None    -> form
+  Some(v) ->
+    match validator(v) do
+    None      -> form
+    Some(msg) -> add_error(form, field, msg)
+    end
+  end
+end
+
+-- ---------------------------------------------------------------------------
+-- Database constraint hints
+-- ---------------------------------------------------------------------------
+
+doc """
+Registers a unique constraint hint.
+
+When Depot.insert/update encounters a unique violation on the named
+constraint, it maps the error back to this field with this message.
+
+    form
+    |> Depot.Gate.unique_constraint("email",
+         [ConstraintName("users_email_index"),
+          ConstraintMessage("has already been taken")])
+"""
+fn unique_constraint(form, field, opts) do
+  let name = extract_constraint_name(opts, field ++ "_index")
+  let msg  = extract_constraint_message(opts, "has already been taken")
+  set_constraints_field(form,
+    Cons(DbConstraint("unique", field, name, msg), form_constraints(form)))
+end
+
+doc """
+Registers a foreign key constraint hint.
+
+    form |> Depot.Gate.foreign_key_constraint("user_id",
+              [ConstraintName("posts_user_id_fkey")])
+"""
+fn foreign_key_constraint(form, field, opts) do
+  let name = extract_constraint_name(opts, field ++ "_fkey")
+  let msg  = extract_constraint_message(opts, "does not exist")
+  set_constraints_field(form,
+    Cons(DbConstraint("foreign_key", field, name, msg), form_constraints(form)))
+end
+
+doc """
+Registers a no-association constraint hint.
+
+    form |> Depot.Gate.no_assoc_constraint("posts",
+              [ConstraintName("posts_user_id_fkey")])
+"""
+fn no_assoc_constraint(form, field, opts) do
+  let name = extract_constraint_name(opts, field ++ "_fkey")
+  let msg  = extract_constraint_message(opts, "is still associated with this entry")
+  set_constraints_field(form,
+    Cons(DbConstraint("no_assoc", field, name, msg), form_constraints(form)))
+end
+
+doc """
+Registers a check constraint hint.
+
+    form |> Depot.Gate.check_constraint("age",
+              [ConstraintName("users_age_check"),
+               ConstraintMessage("must be 13 or older")])
+"""
+fn check_constraint(form, field, opts) do
+  let name = extract_constraint_name(opts, field ++ "_check")
+  let msg  = extract_constraint_message(opts, "is invalid")
+  set_constraints_field(form,
+    Cons(DbConstraint("check", field, name, msg), form_constraints(form)))
+end
+
+doc """
+Maps a database constraint name back to a field error.
+
+Called by Depot.insert/update when a DB error occurs.
+
+    Depot.Gate.apply_constraint_error(form, "users_email_index")
+"""
+fn apply_constraint_error(form, constraint_name) do
+  fn go(cs) do
+    match cs do
+    Nil -> form
+    Cons(DbConstraint(_, field, name, msg), rest) ->
+      if name == constraint_name then add_error(form, field, msg) else go(rest)
+    end
+  end
+  go(form_constraints(form))
+end
+
+end -- mod Depot.Gate

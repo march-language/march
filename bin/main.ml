@@ -158,6 +158,7 @@ let load_stdlib () =
       "islands.march";
       "env.march";
       "config.march";
+      "depot_form.march";
       "bastion.march";
       "csrf.march";
       "session.march";
@@ -320,7 +321,8 @@ let stdlib_module_names =
   ; "HttpServer"; "HttpTransport"; "WebSocket"; "Process"; "Logger"
   ; "Flow"; "Actor"; "Sort"; "Hamt"; "Seq"; "Iterable"; "IOList"
   ; "Random"; "Stats"; "Plot"; "Prelude"; "DataFrame"; "Islands"; "Test"
-  ; "Vault"; "BastionDev"; "BastionCookies"; "BastionRoutes"; "BastionPubSub"; "BastionCSP" ]
+  ; "Vault"; "BastionDev"; "BastionCookies"; "BastionRoutes"; "BastionPubSub"; "BastionCSP"
+  ; "Depot"; "Depot.Gate" ]
 
 (** Collect [(mod_name, span)] for each DUse/DAlias in [decls]. *)
 let import_refs decls =
