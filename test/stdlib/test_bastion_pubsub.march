@@ -1,0 +1,246 @@
+-- test/stdlib/test_bastion_pubsub.march
+-- Tests for the BastionPubSub stdlib module.
+-- Run with: dune exec march -- test test/stdlib/test_bastion_pubsub.march
+--
+-- BastionPubSub is a Vault-backed named pub/sub system with wildcard topic
+-- matching and per-subscriber inboxes.  All functions are tested in pure
+-- (non-actor) mode via the inbox and subscribers APIs.
+
+mod TestBastionPubSub do
+
+-- ── Helpers ───────────────────────────────────────────────────────────────────
+
+-- Return a unique instance name per test group to avoid cross-test pollution.
+pfn inst(suffix) do
+  "test_ps_" ++ suffix
+end
+
+-- ── topic_matches ─────────────────────────────────────────────────────────────
+
+describe "BastionPubSub topic_matches" do
+  test "exact match returns true" do
+    assert (BastionPubSub.topic_matches("room:lobby", "room:lobby"))
+  end
+
+  test "exact match different topic returns false" do
+    assert (not (BastionPubSub.topic_matches("room:lobby", "room:42")))
+  end
+
+  test "wildcard prefix matches topic sharing the prefix" do
+    assert (BastionPubSub.topic_matches("room:*", "room:lobby"))
+    assert (BastionPubSub.topic_matches("room:*", "room:42"))
+  end
+
+  test "wildcard prefix does not match different namespace" do
+    assert (not (BastionPubSub.topic_matches("room:*", "game:lobby")))
+  end
+
+  test "bare wildcard matches any topic" do
+    assert (BastionPubSub.topic_matches("*", "room:lobby"))
+    assert (BastionPubSub.topic_matches("*", "anything"))
+  end
+end
+
+-- ── subscribe / subscribers ───────────────────────────────────────────────────
+
+describe "BastionPubSub subscribe / subscribers" do
+  test "subscribing adds the subscriber id to the topic" do
+    let name = inst("sub1")
+    BastionPubSub.subscribe(name, "room:a", "alice")
+    let subs = BastionPubSub.subscribers(name, "room:a")
+    assert (subs != Nil)
+  end
+
+  test "subscribers returns Nil for a topic with no subscriptions" do
+    let name = inst("sub2")
+    let subs = BastionPubSub.subscribers(name, "no_such_topic")
+    assert (subs == Nil)
+  end
+
+  test "subscribing twice is idempotent" do
+    let name = inst("sub3")
+    BastionPubSub.subscribe(name, "t", "alice")
+    BastionPubSub.subscribe(name, "t", "alice")
+    let subs = BastionPubSub.subscribers(name, "t")
+    -- count should be 1 (idempotent)
+    match subs do
+    Cons(_, Nil) -> assert true
+    _            -> assert false
+    end
+  end
+
+  test "subscribing two different ids both appear in subscribers" do
+    let name = inst("sub4")
+    BastionPubSub.subscribe(name, "chat", "alice")
+    BastionPubSub.subscribe(name, "chat", "bob")
+    let subs = BastionPubSub.subscribers(name, "chat")
+    let has_alice = List.any(subs, fn s -> s == "alice")
+    let has_bob   = List.any(subs, fn s -> s == "bob")
+    assert has_alice
+    assert has_bob
+  end
+
+  test "subscriptions to different topics are independent" do
+    let name = inst("sub5")
+    BastionPubSub.subscribe(name, "topic_a", "alice")
+    BastionPubSub.subscribe(name, "topic_b", "bob")
+    assert (BastionPubSub.subscribers(name, "topic_a") != Nil)
+    assert (BastionPubSub.subscribers(name, "topic_b") != Nil)
+    assert (BastionPubSub.subscribers(name, "topic_c") == Nil)
+  end
+end
+
+-- ── unsubscribe ───────────────────────────────────────────────────────────────
+
+describe "BastionPubSub unsubscribe" do
+  test "unsubscribe removes the subscriber" do
+    let name = inst("unsub1")
+    BastionPubSub.subscribe(name, "room", "alice")
+    BastionPubSub.unsubscribe(name, "room", "alice")
+    assert (BastionPubSub.subscribers(name, "room") == Nil)
+  end
+
+  test "unsubscribing one id leaves the other" do
+    let name = inst("unsub2")
+    BastionPubSub.subscribe(name, "room", "alice")
+    BastionPubSub.subscribe(name, "room", "bob")
+    BastionPubSub.unsubscribe(name, "room", "alice")
+    let subs = BastionPubSub.subscribers(name, "room")
+    assert (List.any(subs, fn s -> s == "bob"))
+    assert (not (List.any(subs, fn s -> s == "alice")))
+  end
+
+  test "unsubscribing a non-existent id is a no-op" do
+    let name = inst("unsub3")
+    BastionPubSub.subscribe(name, "room", "alice")
+    BastionPubSub.unsubscribe(name, "room", "ghost")
+    let subs = BastionPubSub.subscribers(name, "room")
+    assert (List.any(subs, fn s -> s == "alice"))
+  end
+end
+
+-- ── broadcast / inbox ────────────────────────────────────────────────────────
+
+describe "BastionPubSub broadcast / inbox" do
+  test "broadcast delivers message to subscribed id" do
+    let name = inst("bc1")
+    BastionPubSub.subscribe(name, "news", "alice")
+    BastionPubSub.broadcast(name, "news", "hello")
+    let msgs = BastionPubSub.inbox(name, "alice")
+    assert (msgs != Nil)
+  end
+
+  test "broadcast delivers to all subscribers of a topic" do
+    let name = inst("bc2")
+    BastionPubSub.subscribe(name, "sport", "alice")
+    BastionPubSub.subscribe(name, "sport", "bob")
+    BastionPubSub.broadcast(name, "sport", "goal!")
+    assert (BastionPubSub.inbox(name, "alice") != Nil)
+    assert (BastionPubSub.inbox(name, "bob") != Nil)
+  end
+
+  test "broadcast does not deliver to subscribers of a different topic" do
+    let name = inst("bc3")
+    BastionPubSub.subscribe(name, "sport", "alice")
+    BastionPubSub.subscribe(name, "politics", "bob")
+    BastionPubSub.broadcast(name, "sport", "score")
+    assert (BastionPubSub.inbox(name, "alice") != Nil)
+    assert (BastionPubSub.inbox(name, "bob") == Nil)
+  end
+
+  test "multiple broadcasts accumulate in inbox in order" do
+    let name = inst("bc4")
+    BastionPubSub.subscribe(name, "ch", "alice")
+    BastionPubSub.broadcast(name, "ch", "first")
+    BastionPubSub.broadcast(name, "ch", "second")
+    let msgs = BastionPubSub.inbox(name, "alice")
+    match msgs do
+    Cons(m1, Cons(m2, Nil)) -> do
+      assert (m1 == "first")
+      assert (m2 == "second")
+    end
+    _ -> assert false
+    end
+  end
+
+  test "inbox returns Nil for a subscriber who received nothing" do
+    let name = inst("bc5")
+    BastionPubSub.subscribe(name, "ch", "alice")
+    assert (BastionPubSub.inbox(name, "alice") == Nil)
+  end
+end
+
+-- ── wildcard broadcast ────────────────────────────────────────────────────────
+
+describe "BastionPubSub wildcard broadcast" do
+  test "wildcard subscriber receives broadcast on matching topic" do
+    let name = inst("wc1")
+    BastionPubSub.subscribe(name, "room:*", "listener")
+    BastionPubSub.broadcast(name, "room:lobby", "ping")
+    assert (BastionPubSub.inbox(name, "listener") != Nil)
+  end
+
+  test "wildcard subscriber does not receive broadcast on non-matching topic" do
+    let name = inst("wc2")
+    BastionPubSub.subscribe(name, "room:*", "listener")
+    BastionPubSub.broadcast(name, "game:42", "msg")
+    assert (BastionPubSub.inbox(name, "listener") == Nil)
+  end
+end
+
+-- ── broadcast_from ────────────────────────────────────────────────────────────
+
+describe "BastionPubSub broadcast_from" do
+  test "broadcast_from delivers to other subscribers" do
+    let name = inst("bcf1")
+    BastionPubSub.subscribe(name, "room", "alice")
+    BastionPubSub.subscribe(name, "room", "bob")
+    BastionPubSub.broadcast_from(name, "alice", "room", "hi")
+    assert (BastionPubSub.inbox(name, "bob") != Nil)
+  end
+
+  test "broadcast_from excludes the sender" do
+    let name = inst("bcf2")
+    BastionPubSub.subscribe(name, "room", "alice")
+    BastionPubSub.subscribe(name, "room", "bob")
+    BastionPubSub.broadcast_from(name, "alice", "room", "hi")
+    assert (BastionPubSub.inbox(name, "alice") == Nil)
+  end
+end
+
+-- ── local_broadcast_sync ──────────────────────────────────────────────────────
+
+describe "BastionPubSub local_broadcast_sync" do
+  test "local_broadcast_sync behaves like broadcast" do
+    let name = inst("lbs1")
+    BastionPubSub.subscribe(name, "events", "alice")
+    BastionPubSub.local_broadcast_sync(name, "events", "tick")
+    assert (BastionPubSub.inbox(name, "alice") != Nil)
+  end
+end
+
+-- ── clear_inbox ───────────────────────────────────────────────────────────────
+
+describe "BastionPubSub clear_inbox" do
+  test "clear_inbox empties the subscriber inbox" do
+    let name = inst("ci1")
+    BastionPubSub.subscribe(name, "feed", "alice")
+    BastionPubSub.broadcast(name, "feed", "item")
+    BastionPubSub.clear_inbox(name, "alice")
+    assert (BastionPubSub.inbox(name, "alice") == Nil)
+  end
+end
+
+-- ── named-instance isolation ──────────────────────────────────────────────────
+
+describe "BastionPubSub named-instance isolation" do
+  test "two instances with the same topic name do not share subscribers" do
+    let name_a = inst("iso_a")
+    let name_b = inst("iso_b")
+    BastionPubSub.subscribe(name_a, "room", "alice")
+    BastionPubSub.broadcast(name_b, "room", "msg")
+    assert (BastionPubSub.inbox(name_a, "alice") == Nil)
+  end
+end
+
+end -- mod TestBastionPubSub

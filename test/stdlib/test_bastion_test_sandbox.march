@@ -1,0 +1,210 @@
+-- test/stdlib/test_bastion_test_sandbox.march
+-- Tests for BastionTestSandbox: isolated test sandbox lifecycle and helpers.
+
+mod TestBastionTestSandbox do
+
+-- ── Helpers ──────────────────────────────────────────────────────────────────
+
+pfn make_conn(m, hdrs, body) do
+  Conn(0, m, "/", Nil, "", hdrs, body, 0, Nil, "", false, Nil, NoUpgrade)
+end
+
+-- ── checkout ─────────────────────────────────────────────────────────────────
+
+describe "BastionTestSandbox.checkout" do
+  test "returns a SandboxEnv" do
+    let env = BastionTestSandbox.checkout("test_app")
+    -- env_nonce returns a non-empty string — confirms we got a SandboxEnv
+    assert (String.byte_size(BastionTestSandbox.env_nonce(env)) > 0)
+  end
+
+  test "env_app_name returns the provided app name" do
+    let env = BastionTestSandbox.checkout("my_app")
+    assert (BastionTestSandbox.env_app_name(env) == "my_app")
+  end
+
+  test "env_nonce returns a non-empty unique string" do
+    let env = BastionTestSandbox.checkout("app")
+    let nonce = BastionTestSandbox.env_nonce(env)
+    assert (String.byte_size(nonce) > 0)
+  end
+
+  test "env_vault_table_name returns a non-empty string" do
+    let env = BastionTestSandbox.checkout("app")
+    let tname = BastionTestSandbox.env_vault_table_name(env)
+    assert (String.byte_size(tname) > 0)
+  end
+
+  test "env_pubsub_name returns a string containing the nonce" do
+    let env = BastionTestSandbox.checkout("app")
+    let ps  = BastionTestSandbox.env_pubsub_name(env)
+    let nonce = BastionTestSandbox.env_nonce(env)
+    assert (String.contains(ps, nonce))
+  end
+
+  test "two checkouts return different nonces" do
+    let env1 = BastionTestSandbox.checkout("app")
+    let env2 = BastionTestSandbox.checkout("app")
+    assert (BastionTestSandbox.env_nonce(env1) != BastionTestSandbox.env_nonce(env2))
+  end
+
+  test "two checkouts get different vault table names" do
+    let env1 = BastionTestSandbox.checkout("app")
+    let env2 = BastionTestSandbox.checkout("app")
+    assert (BastionTestSandbox.env_vault_table_name(env1) != BastionTestSandbox.env_vault_table_name(env2))
+  end
+end
+
+-- ── checkout_tracked / is_active / active_count ───────────────────────────────
+
+describe "BastionTestSandbox.checkout_tracked and is_active" do
+  test "is_active returns true after checkout_tracked" do
+    let env = BastionTestSandbox.checkout_tracked("tracked_app")
+    assert (BastionTestSandbox.is_active(env))
+  end
+
+  test "is_active returns false after release_tracked" do
+    let env = BastionTestSandbox.checkout_tracked("tracked_app2")
+    BastionTestSandbox.release_tracked(env)
+    assert (!BastionTestSandbox.is_active(env))
+  end
+
+  test "active_count increases after checkout_tracked" do
+    let before = BastionTestSandbox.active_count()
+    let env = BastionTestSandbox.checkout_tracked("count_app")
+    let after = BastionTestSandbox.active_count()
+    assert (after == before + 1)
+    -- cleanup
+    BastionTestSandbox.release_tracked(env)
+  end
+
+  test "active_count decreases after release_tracked" do
+    let env = BastionTestSandbox.checkout_tracked("count_app2")
+    let before = BastionTestSandbox.active_count()
+    BastionTestSandbox.release_tracked(env)
+    let after = BastionTestSandbox.active_count()
+    assert (after == before - 1)
+  end
+end
+
+-- ── release ───────────────────────────────────────────────────────────────────
+
+describe "BastionTestSandbox.release" do
+  test "release returns :ok" do
+    let env = BastionTestSandbox.checkout("rel_app")
+    let result = BastionTestSandbox.release(env)
+    assert (result == :ok)
+  end
+
+  test "release clears vault data written before release" do
+    let env = BastionTestSandbox.checkout("rel_app2")
+    BastionTestSandbox.vault_set(env, "bucket", "mykey", "myval")
+    BastionTestSandbox.release(env)
+    -- After release the Vault table for this env is cleared.
+    -- A fresh vault_get on the same env should return None since release
+    -- drops all keys (table may still exist but be empty, or not exist).
+    let result = BastionTestSandbox.vault_get(env, "bucket", "mykey")
+    assert (result == None)
+  end
+end
+
+-- ── vault_set / vault_get / sandbox_vault_key ─────────────────────────────────
+
+describe "BastionTestSandbox.vault_set and vault_get" do
+  test "vault_get returns None for unknown key" do
+    let env = BastionTestSandbox.checkout("vault_app")
+    let result = BastionTestSandbox.vault_get(env, "tbl", "missing")
+    assert (result == None)
+  end
+
+  test "vault_set / vault_get round-trip" do
+    let env = BastionTestSandbox.checkout("vault_app2")
+    BastionTestSandbox.vault_set(env, "users", "alice", "active")
+    let result = BastionTestSandbox.vault_get(env, "users", "alice")
+    assert (result == Some("active"))
+  end
+
+  test "vault_set overwrites an existing key" do
+    let env = BastionTestSandbox.checkout("vault_app3")
+    BastionTestSandbox.vault_set(env, "t", "k", "v1")
+    BastionTestSandbox.vault_set(env, "t", "k", "v2")
+    let result = BastionTestSandbox.vault_get(env, "t", "k")
+    assert (result == Some("v2"))
+  end
+
+  test "different keys are independent" do
+    let env = BastionTestSandbox.checkout("vault_app4")
+    BastionTestSandbox.vault_set(env, "t", "a", "val_a")
+    BastionTestSandbox.vault_set(env, "t", "b", "val_b")
+    assert (BastionTestSandbox.vault_get(env, "t", "a") == Some("val_a"))
+    assert (BastionTestSandbox.vault_get(env, "t", "b") == Some("val_b"))
+  end
+
+  test "two sandboxes do not share vault data" do
+    let env1 = BastionTestSandbox.checkout("iso_app")
+    let env2 = BastionTestSandbox.checkout("iso_app")
+    BastionTestSandbox.vault_set(env1, "bucket", "key", "env1_val")
+    let result = BastionTestSandbox.vault_get(env2, "bucket", "key")
+    assert (result == None)
+  end
+end
+
+-- ── sandbox_vault_key ─────────────────────────────────────────────────────────
+
+describe "BastionTestSandbox.sandbox_vault_key" do
+  test "produces table:key format" do
+    let env = BastionTestSandbox.checkout("key_app")
+    let k = BastionTestSandbox.sandbox_vault_key(env, "sessions", "user:42")
+    assert (k == "sessions:user:42")
+  end
+end
+
+-- ── build_conn ────────────────────────────────────────────────────────────────
+
+describe "BastionTestSandbox.build_conn" do
+  test "build_conn sets _sandbox_nonce assign" do
+    let env  = BastionTestSandbox.checkout("conn_app")
+    let conn = BastionTestSandbox.build_conn(env, Get, "/")
+    let nonce = BastionTestSandbox.env_nonce(env)
+    assert (HttpServer.get_assign(conn, "_sandbox_nonce") == Some(nonce))
+  end
+
+  test "build_conn sets the correct path" do
+    let env  = BastionTestSandbox.checkout("conn_app2")
+    let conn = BastionTestSandbox.build_conn(env, Post, "/users")
+    assert (HttpServer.path(conn) == "/users")
+  end
+
+  test "build_conn sets the correct method" do
+    let env  = BastionTestSandbox.checkout("conn_app3")
+    let conn = BastionTestSandbox.build_conn(env, Delete, "/items/1")
+    assert (HttpServer.method(conn) == Delete)
+  end
+end
+
+-- ── build_conn_full ───────────────────────────────────────────────────────────
+
+describe "BastionTestSandbox.build_conn_full" do
+  test "build_conn_full includes request headers" do
+    let env  = BastionTestSandbox.checkout("full_conn_app")
+    let hdrs = Cons(Header("content-type", "application/json"), Nil)
+    let conn = BastionTestSandbox.build_conn_full(env, Post, "/data", "", hdrs, "{}")
+    let ct   = HttpServer.get_req_header(conn, "content-type")
+    assert (ct == Some("application/json"))
+  end
+
+  test "build_conn_full includes the request body" do
+    let env  = BastionTestSandbox.checkout("full_conn_app2")
+    let conn = BastionTestSandbox.build_conn_full(env, Post, "/echo", "", Nil, "hello")
+    assert (HttpServer.req_body(conn) == "hello")
+  end
+
+  test "build_conn_full still sets _sandbox_nonce" do
+    let env  = BastionTestSandbox.checkout("full_conn_app3")
+    let conn = BastionTestSandbox.build_conn_full(env, Get, "/x", "a=1", Nil, "")
+    let nonce = BastionTestSandbox.env_nonce(env)
+    assert (HttpServer.get_assign(conn, "_sandbox_nonce") == Some(nonce))
+  end
+end
+
+end

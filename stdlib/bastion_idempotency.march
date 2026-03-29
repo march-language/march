@@ -1,0 +1,215 @@
+-- BastionIdempotency: idempotency-key middleware for Bastion web apps.
+--
+-- Caches request responses in Vault by the value of the `Idempotency-Key`
+-- request header.  Subsequent requests carrying the same key receive the
+-- cached response without re-executing the handler.
+--
+-- Concurrency safety:
+--   An InProgress sentinel is written before the handler runs so that
+--   concurrent duplicate requests receive 409 Conflict rather than
+--   running the handler twice.
+--
+-- 5xx responses are never cached — only successful or client-error responses
+-- are stored so transient server failures can be retried.
+--
+-- Typical usage:
+--
+--   BastionIdempotency.protect(conn, fn c -> MyHandler.create(c), opts)
+--
+-- Where opts is a List((String, String)) with optional keys:
+--   "vault_table"  — Vault table name (default "idempotency_cache")
+--   "scope"        — prefix for cache keys (default "")
+
+mod BastionIdempotency do
+
+-- ── Types ─────────────────────────────────────────────────────────────────────
+
+type IdempotencyState
+  = InProgress(Int)
+  | Completed(Int, List((String, String)), String, Int)
+
+-- CachedResponse wraps a replayed entry with a replayed flag.
+type CachedResponse = CachedResponse(
+  Int,
+  List((String, String)),
+  String,
+  Bool
+)
+
+-- ── Private helpers ───────────────────────────────────────────────────────────
+
+pfn get_opt(opts, k, default) do
+  fn go(pairs) do
+    match pairs do
+    Nil -> default
+    Cons((pk, pv), rest) ->
+      if pk == k then pv else go(rest)
+    end
+  end
+  go(opts)
+end
+
+pfn get_cache_table(vault_table_name) do
+  match Vault.whereis(vault_table_name) do
+  Some(t) -> t
+  None    -> Vault.new(vault_table_name)
+  end
+end
+
+pfn make_cache_key(key, scope_prefix) do
+  if String.byte_size(scope_prefix) == 0 then key else scope_prefix ++ ":" ++ key
+end
+
+-- Replay a list of (name, value) response headers onto a conn.
+pfn replay_headers(conn, headers) do
+  fn go(hs, c) do
+    match hs do
+    Nil -> c
+    Cons((name, val), rest) ->
+      go(rest, HttpServer.put_resp_header(c, name, val))
+    end
+  end
+  go(headers, conn)
+end
+
+-- ── Public API ────────────────────────────────────────────────────────────────
+
+doc """
+Extract the idempotency key from the request's `Idempotency-Key` header.
+Returns Some(key_string) or None if the header is absent.
+"""
+fn get_key(conn) do
+  HttpServer.get_req_header(conn, "idempotency-key")
+end
+
+doc """
+Look up the current state for a cache key.
+Returns Some(IdempotencyState) or None if no entry exists.
+
+    BastionIdempotency.lookup("idempotency_cache", "key-123", "")
+"""
+fn lookup(vault_table_name, key, scope) do
+  let tbl       = get_cache_table(vault_table_name)
+  let cache_key = make_cache_key(key, scope)
+  Vault.get(tbl, cache_key)
+end
+
+doc """
+Mark a key as InProgress in the Vault cache.
+Should be called before the handler runs to prevent concurrent duplicates.
+"""
+fn mark_in_progress(vault_table_name, key, scope) do
+  let tbl       = get_cache_table(vault_table_name)
+  let cache_key = make_cache_key(key, scope)
+  Vault.set(tbl, cache_key, InProgress(0))
+end
+
+doc """
+Store a completed response in the Vault cache.
+`status` is the HTTP status code, `headers` is List((String, String)),
+`body` is the response body string.
+"""
+fn complete_entry(vault_table_name, key, scope, status, headers, body) do
+  let tbl       = get_cache_table(vault_table_name)
+  let cache_key = make_cache_key(key, scope)
+  Vault.set(tbl, cache_key, Completed(status, headers, body, 0))
+end
+
+doc """
+Apply a cached Completed response to `conn`, adding the
+`x-idempotent-replayed: true` header.
+
+    BastionIdempotency.replay_response(conn, cached_state)
+
+`cached_state` must be a Completed variant.
+"""
+fn replay_response(conn, cached_state) do
+  match cached_state do
+  Completed(status, resp_headers, body, _) -> do
+    let c1 = replay_headers(conn, resp_headers)
+    let c2 = HttpServer.put_resp_header(c1, "x-idempotent-replayed", "true")
+    HttpServer.send_resp(c2, status, body)
+  end
+  InProgress(_) ->
+    -- Should not be called for InProgress; treat as pass-through.
+    conn
+  end
+end
+
+doc """
+Drop a cached entry, allowing the next request with that key to run the
+handler again.
+
+    BastionIdempotency.invalidate("idempotency_cache", "key-123", "")
+"""
+fn invalidate(vault_table_name, key, scope) do
+  let tbl       = get_cache_table(vault_table_name)
+  let cache_key = make_cache_key(key, scope)
+  Vault.drop(tbl, cache_key)
+end
+
+pfn protect_with_key(conn, handler, vault_table, scope, ikey) do
+  let tbl       = get_cache_table(vault_table)
+  let cache_key = make_cache_key(ikey, scope)
+  match Vault.get(tbl, cache_key) do
+  Some(InProgress(_)) -> do
+    -- Concurrent duplicate request — tell the caller to retry.
+    let c1 = HttpServer.put_resp_header(conn, "retry-after", "5")
+    let c2 = HttpServer.put_resp_header(c1, "idempotency-key", ikey)
+    HttpServer.send_resp(c2, 409, "{\"error\":\"request_in_progress\"}")
+  end
+  Some(Completed(status, resp_headers, body, _)) -> do
+    -- Cache hit: replay the stored response.
+    let c1 = replay_headers(conn, resp_headers)
+    let c2 = HttpServer.put_resp_header(c1, "x-idempotent-replayed", "true")
+    let c3 = HttpServer.put_resp_header(c2, "idempotency-key", ikey)
+    HttpServer.send_resp(c3, status, body)
+  end
+  None -> do
+    -- First request: mark in-progress, run handler, persist result.
+    Vault.set(tbl, cache_key, InProgress(0))
+    let result = handler(conn)
+    let result_status = HttpServer.status(result)
+    if result_status >= 500 do
+      -- Do not cache server errors; drop the InProgress sentinel.
+      Vault.drop(tbl, cache_key)
+      HttpServer.put_resp_header(result, "idempotency-key", ikey)
+    else
+      let completed = Completed(result_status, Nil, HttpServer.resp_body(result), 0)
+      Vault.set(tbl, cache_key, completed)
+      let r1 = HttpServer.put_resp_header(result, "idempotency-key", ikey)
+      HttpServer.put_resp_header(r1, "x-idempotent-replayed", "false")
+    end
+  end
+  end
+end
+
+doc """
+Full idempotency middleware.  Wraps `handler` with cache check/store logic.
+
+    BastionIdempotency.protect(conn, fn c -> MyHandler.create(c), opts)
+
+opts keys (all optional):
+  "vault_table"  — Vault table name (default "idempotency_cache")
+  "scope"        — key scope prefix (default "")
+
+Behaviour:
+  * No Idempotency-Key header -> calls handler directly (pass-through).
+  * Key found, InProgress      -> returns 409 Conflict.
+  * Key found, Completed       -> replays cached response.
+  * Key not found              -> marks InProgress, runs handler, caches
+                                  result (unless 5xx), returns result.
+"""
+fn protect(conn, handler, opts) do
+  let vault_table = get_opt(opts, "vault_table", "idempotency_cache")
+  let scope       = get_opt(opts, "scope", "")
+  match get_key(conn) do
+  None ->
+    -- No idempotency key — pass through to handler unchanged.
+    handler(conn)
+  Some(ikey) ->
+    protect_with_key(conn, handler, vault_table, scope, ikey)
+  end
+end
+
+end

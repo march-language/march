@@ -1,0 +1,168 @@
+-- test/stdlib/test_bastion_cookies.march
+-- Tests for the BastionCookies stdlib module.
+-- Run with: dune exec march -- test test/stdlib/test_bastion_cookies.march
+
+mod TestBastionCookies do
+
+-- ── Helpers ─────────────────────────────────────────────────────────────────
+
+pfn make_conn(m, hdrs, body) do
+  Conn(0, m, "/", Nil, "", hdrs, body, 0, Nil, "", false, Nil, NoUpgrade)
+end
+
+pfn make_get() do
+  make_conn(Get, Nil, "")
+end
+
+-- Extract the cookie value (before the first ";") from a Set-Cookie header.
+-- e.g. "pref=abc.def; Path=/" -> "pref=abc.def"
+pfn extract_name_value(sc) do
+  match String.split_first(sc, ";") do
+  Some((cv, _)) -> cv
+  None          -> sc
+  end
+end
+
+-- ── default_opts ─────────────────────────────────────────────────────────────
+
+describe "BastionCookies default_opts" do
+  test "returns a non-empty list" do
+    let opts = BastionCookies.default_opts()
+    assert (opts != Nil)
+  end
+end
+
+-- ── put_signed / get_signed ───────────────────────────────────────────────────
+
+describe "BastionCookies put_signed / get_signed" do
+  test "round-trip: get_signed retrieves the value set by put_signed" do
+    let conn0 = make_get()
+    let conn1 = BastionCookies.put_signed(conn0, "pref", "dark", BastionCookies.default_opts())
+    match HttpServer.get_resp_header(conn1, "set-cookie") do
+    None     -> assert false
+    Some(sc) ->
+      let cookie_val = extract_name_value(sc)
+      let conn2 = make_conn(Get, Cons(Header("cookie", cookie_val), Nil), "")
+      let result = BastionCookies.get_signed(conn2, "pref")
+      assert (result == Some("dark"))
+    end
+  end
+
+  test "get_signed returns None on missing cookie" do
+    let conn = make_get()
+    assert (BastionCookies.get_signed(conn, "missing") == None)
+  end
+
+  test "get_signed returns None on tampered value" do
+    let conn2 = make_conn(Get, Cons(Header("cookie", "pref=tampered.invalidsig"), Nil), "")
+    assert (BastionCookies.get_signed(conn2, "pref") == None)
+  end
+
+  test "set-cookie header contains the cookie name" do
+    let conn0 = make_get()
+    let conn1 = BastionCookies.put_signed(conn0, "mypref", "val", BastionCookies.default_opts())
+    match HttpServer.get_resp_header(conn1, "set-cookie") do
+    None     -> assert false
+    Some(sc) -> assert (String.starts_with(sc, "mypref="))
+    end
+  end
+end
+
+-- ── put_encrypted / get_encrypted ─────────────────────────────────────────────
+
+describe "BastionCookies put_encrypted / get_encrypted" do
+  test "round-trip: get_encrypted retrieves the value set by put_encrypted" do
+    let conn0 = make_get()
+    let conn1 = BastionCookies.put_encrypted(conn0, "_flash", "saved!", BastionCookies.default_opts())
+    match HttpServer.get_resp_header(conn1, "set-cookie") do
+    None     -> assert false
+    Some(sc) ->
+      let cookie_val = extract_name_value(sc)
+      let conn2 = make_conn(Get, Cons(Header("cookie", cookie_val), Nil), "")
+      let result = BastionCookies.get_encrypted(conn2, "_flash")
+      assert (result == Some("saved!"))
+    end
+  end
+
+  test "get_encrypted returns None on missing cookie" do
+    let conn = make_get()
+    assert (BastionCookies.get_encrypted(conn, "_flash") == None)
+  end
+
+  test "encrypted token starts with enc: prefix in set-cookie" do
+    let conn0 = make_get()
+    let conn1 = BastionCookies.put_encrypted(conn0, "secret", "value", BastionCookies.default_opts())
+    match HttpServer.get_resp_header(conn1, "set-cookie") do
+    None     -> assert false
+    Some(sc) -> assert (String.contains(sc, "enc:"))
+    end
+  end
+
+  test "signed and encrypted cookies use different keys" do
+    let conn0 = make_get()
+    let conn1 = BastionCookies.put_signed(conn0, "tok", "hello", BastionCookies.default_opts())
+    match HttpServer.get_resp_header(conn1, "set-cookie") do
+    None     -> assert false
+    Some(sc) ->
+      let cookie_val = extract_name_value(sc)
+      -- A signed cookie fed to get_encrypted should return None (no enc: prefix)
+      let conn2 = make_conn(Get, Cons(Header("cookie", cookie_val), Nil), "")
+      assert (BastionCookies.get_encrypted(conn2, "tok") == None)
+    end
+  end
+end
+
+-- ── delete ────────────────────────────────────────────────────────────────────
+
+describe "BastionCookies delete" do
+  test "delete sets Set-Cookie with Max-Age=0" do
+    let conn0 = make_get()
+    let conn1 = BastionCookies.delete(conn0, "pref")
+    match HttpServer.get_resp_header(conn1, "set-cookie") do
+    None     -> assert false
+    Some(v)  -> assert (String.contains(v, "Max-Age=0"))
+    end
+  end
+
+  test "delete sets cookie name with empty value" do
+    let conn0 = make_get()
+    let conn1 = BastionCookies.delete(conn0, "mypref")
+    match HttpServer.get_resp_header(conn1, "set-cookie") do
+    None     -> assert false
+    Some(v)  -> assert (String.starts_with(v, "mypref="))
+    end
+  end
+end
+
+-- ── build_set_cookie options ──────────────────────────────────────────────────
+
+describe "BastionCookies default_opts content" do
+  test "default_opts includes Path=/" do
+    let conn0 = make_get()
+    let conn1 = BastionCookies.put_signed(conn0, "x", "v", BastionCookies.default_opts())
+    match HttpServer.get_resp_header(conn1, "set-cookie") do
+    None     -> assert false
+    Some(sc) -> assert (String.contains(sc, "Path=/"))
+    end
+  end
+
+  test "default_opts includes HttpOnly" do
+    let conn0 = make_get()
+    let conn1 = BastionCookies.put_signed(conn0, "x", "v", BastionCookies.default_opts())
+    match HttpServer.get_resp_header(conn1, "set-cookie") do
+    None     -> assert false
+    Some(sc) -> assert (String.contains(sc, "HttpOnly"))
+    end
+  end
+
+  test "default_opts includes SameSite=Lax" do
+    let conn0 = make_get()
+    let conn1 = BastionCookies.put_signed(conn0, "x", "v", BastionCookies.default_opts())
+    match HttpServer.get_resp_header(conn1, "set-cookie") do
+    None     -> assert false
+    Some(sc) -> assert (String.contains(sc, "SameSite=Lax"))
+    end
+  end
+end
+
+end -- mod TestBastionCookies

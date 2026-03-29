@@ -1,0 +1,229 @@
+-- BastionCSP: Content Security Policy nonce injection for Bastion web apps.
+--
+-- Generates a cryptographically random nonce per request, assigns it to the
+-- Conn under the key "csp_nonce", and emits the appropriate
+-- Content-Security-Policy header.
+--
+-- Typical usage in an endpoint pipeline:
+--
+--   conn
+--   |> BastionCSP.protect()
+--
+-- In templates, retrieve the nonce via:
+--
+--   let n = BastionCSP.nonce(conn)
+--   "<script nonce=\"" ++ n ++ "\">...</script>"
+--
+-- Default policy (strict):
+--   default-src 'self'
+--   script-src  'self' 'nonce-NONCE'
+--   style-src   'self' 'nonce-NONCE'
+--   img-src     'self' data: https:
+--   font-src    'self'
+--   connect-src 'self' wss:
+--   worker-src  'self' blob:
+--   frame-ancestors 'self'
+--   base-uri    'self'
+--   form-action 'self'
+
+mod BastionCSP do
+
+-- ---------------------------------------------------------------------------
+-- Private helpers
+-- ---------------------------------------------------------------------------
+
+-- Build the default directive list with the nonce substituted in.
+pfn default_directives(nonce_val) do
+  Cons(("default-src", "'self'"),
+  Cons(("script-src", "'self' 'nonce-" ++ nonce_val ++ "'"),
+  Cons(("style-src", "'self' 'nonce-" ++ nonce_val ++ "'"),
+  Cons(("img-src", "'self' data: https:"),
+  Cons(("font-src", "'self'"),
+  Cons(("connect-src", "'self' wss:"),
+  Cons(("worker-src", "'self' blob:"),
+  Cons(("frame-ancestors", "'self'"),
+  Cons(("base-uri", "'self'"),
+  Cons(("form-action", "'self'"),
+  Nil))))))))))
+end
+
+-- Find the first override value for key k in the overrides list.
+-- Returns Some(value) if found, None otherwise.
+pfn lookup_override(overrides, k) do
+  match overrides do
+  Nil -> None
+  Cons(h, rest) ->
+    match h do
+    (ok, ov) ->
+      match ok == k do
+      true  -> Some(ov)
+      false -> lookup_override(rest, k)
+      end
+    end
+  end
+end
+
+-- Apply overrides to a single (key, value) directive pair.
+pfn apply_override_to_pair(pair, overrides) do
+  match pair do
+  (k, v) ->
+    match lookup_override(overrides, k) do
+    Some(ov) -> (k, ov)
+    None     -> (k, v)
+    end
+  end
+end
+
+-- Merge overrides into defaults: for each default (k,v) pair, if overrides
+-- contains a matching key, use that value; otherwise keep the default.
+pfn merge_overrides(defaults, overrides) do
+  fn go(ps, acc) do
+    match ps do
+    Nil -> acc
+    Cons(h, rest) -> do
+      let merged = apply_override_to_pair(h, overrides)
+      go(rest, Cons(merged, acc))
+    end
+    end
+  end
+  List.reverse(go(defaults, Nil))
+end
+
+-- Format a single directive pair as "key value" string.
+pfn format_directive(pair) do
+  match pair do
+  (k, v) -> k ++ " " ++ v
+  end
+end
+
+-- Append a directive string to an accumulator with "; " separator.
+-- Uses inline if (no trailing 'end') since it is the sole function body expr.
+pfn append_directive(acc, dir_str) do
+  if acc == "" then dir_str
+  else acc ++ "; " ++ dir_str
+end
+
+-- Convert a directive list to a semicolon-separated policy string.
+pfn directives_to_string(dirs) do
+  fn go(ds, acc) do
+    match ds do
+    Nil -> acc
+    Cons(h, rest) ->
+      go(rest, append_directive(acc, format_directive(h)))
+    end
+  end
+  go(dirs, "")
+end
+
+-- Build the full CSP policy string given a nonce and an override list.
+pfn build_policy(nonce_val, overrides) do
+  let defaults = default_directives(nonce_val)
+  let merged   = merge_overrides(defaults, overrides)
+  directives_to_string(merged)
+end
+
+-- ---------------------------------------------------------------------------
+-- Public API
+-- ---------------------------------------------------------------------------
+
+doc """
+Generate a fresh nonce (16 random bytes, base64-encoded) and assign it to
+the Conn under the key "csp_nonce".  Returns the updated Conn.
+
+    conn = BastionCSP.assign_nonce(conn)
+"""
+fn assign_nonce(conn) do
+  let bytes     = random_bytes(16)
+  let nonce_val = base64_encode(bytes)
+  HttpServer.assign(conn, "csp_nonce", nonce_val)
+end
+
+doc """
+Retrieve the CSP nonce from the Conn assigns.
+
+Returns Some(nonce_string) if `assign_nonce` has been called, None otherwise.
+
+    match BastionCSP.get_nonce(conn) do
+    Some(n) -> n
+    None    -> ""
+    end
+"""
+fn get_nonce(conn) do
+  HttpServer.get_assign(conn, "csp_nonce")
+end
+
+doc """
+Return the nonce string, or an empty string if none has been assigned.
+
+    let n = BastionCSP.nonce(conn)
+"""
+fn nonce(conn) do
+  match HttpServer.get_assign(conn, "csp_nonce") do
+  Some(n) -> n
+  None    -> ""
+  end
+end
+
+doc """
+Set the Content-Security-Policy response header using the nonce already
+assigned to the Conn.  Call `assign_nonce/1` first (or use `protect/1`).
+
+    conn
+    |> BastionCSP.assign_nonce()
+    |> BastionCSP.set_header()
+"""
+fn set_header(conn) do
+  let policy = build_policy(nonce(conn), Nil)
+  HttpServer.put_resp_header(conn, "content-security-policy", policy)
+end
+
+doc """
+Assign a fresh nonce and set the Content-Security-Policy header in one step.
+This is the primary entry point for most pipelines.
+
+    conn |> BastionCSP.protect()
+"""
+fn protect(conn) do
+  let conn1 = assign_nonce(conn)
+  set_header(conn1)
+end
+
+doc """
+Assign a fresh nonce and set a customised Content-Security-Policy header.
+`overrides` is a `List((String, String))` of directive pairs that replace
+the corresponding defaults.
+
+    conn
+    |> BastionCSP.protect_with_overrides(
+         Cons(("img-src", "'self'"), Nil))
+"""
+fn protect_with_overrides(conn, overrides) do
+  let conn1  = assign_nonce(conn)
+  let policy = build_policy(nonce(conn1), overrides)
+  HttpServer.put_resp_header(conn1, "content-security-policy", policy)
+end
+
+doc """
+No-op: returns the Conn unchanged.  Useful to explicitly mark that CSP is
+intentionally disabled for a route (e.g. during local development).
+
+    conn |> BastionCSP.disable()
+"""
+fn disable(conn) do
+  conn
+end
+
+doc """
+Assign a fresh nonce and set a Content-Security-Policy-Report-Only header,
+appending `report-uri <report_uri>` to the default policy.
+
+    conn |> BastionCSP.report_only(conn, "https://csp.example.com/report")
+"""
+fn report_only(conn, report_uri) do
+  let conn1  = assign_nonce(conn)
+  let base   = build_policy(nonce(conn1), Nil)
+  let policy = base ++ "; report-uri " ++ report_uri
+  HttpServer.put_resp_header(conn1, "content-security-policy-report-only", policy)
+end
+
+end -- mod BastionCSP
