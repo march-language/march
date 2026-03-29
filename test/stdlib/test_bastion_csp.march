@@ -1,0 +1,211 @@
+-- test/stdlib/test_bastion_csp.march
+-- Tests for the BastionCSP stdlib module.
+-- Run with: dune exec march -- test test/stdlib/test_bastion_csp.march
+
+mod TestBastionCSP do
+
+-- ── Test helpers ─────────────────────────────────────────────────────────────
+
+ptype Upgrade = NoUpgrade | WebSocketUpgrade(a)
+ptype Conn = Conn(
+  Int, Method, String, List(String), String,
+  List(Header), String, Int, List(Header), String,
+  Bool, List((String, String)), Upgrade
+)
+
+pfn make_conn() do
+  Conn(0, Get, "/", Nil, "", Nil, "", 0, Nil, "", false, Nil, NoUpgrade)
+end
+
+-- ── assign_nonce ──────────────────────────────────────────────────────────────
+
+describe "BastionCSP assign_nonce" do
+  test "assigns a non-empty nonce to the conn" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.assign_nonce(conn0)
+    let n = BastionCSP.nonce(conn1)
+    assert (n != "")
+  end
+
+  test "two successive assign_nonce calls produce different nonces" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.assign_nonce(conn0)
+    let conn2 = BastionCSP.assign_nonce(conn0)
+    let n1 = BastionCSP.nonce(conn1)
+    let n2 = BastionCSP.nonce(conn2)
+    assert (n1 != n2)
+  end
+
+  test "get_nonce returns Some after assign_nonce" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.assign_nonce(conn0)
+    let result = BastionCSP.get_nonce(conn1)
+    assert (result != None)
+  end
+end
+
+-- ── get_nonce / nonce ─────────────────────────────────────────────────────────
+
+describe "BastionCSP get_nonce / nonce" do
+  test "get_nonce returns None on fresh conn" do
+    let conn = make_conn()
+    assert (BastionCSP.get_nonce(conn) == None)
+  end
+
+  test "nonce returns empty string on fresh conn" do
+    let conn = make_conn()
+    assert (BastionCSP.nonce(conn) == "")
+  end
+
+  test "nonce returns the value set by assign_nonce" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.assign_nonce(conn0)
+    let n = BastionCSP.nonce(conn1)
+    assert (n != "")
+    assert (BastionCSP.get_nonce(conn1) == Some(n))
+  end
+end
+
+-- ── protect ───────────────────────────────────────────────────────────────────
+
+describe "BastionCSP protect" do
+  test "protect sets the content-security-policy header" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.protect(conn0)
+    match HttpServer.get_resp_header(conn1, "content-security-policy") do
+    None    -> assert false
+    Some(_) -> assert true
+    end
+  end
+
+  test "protect assigns a nonce to the conn" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.protect(conn0)
+    assert (BastionCSP.nonce(conn1) != "")
+  end
+
+  test "CSP header from protect contains nonce- prefix" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.protect(conn0)
+    match HttpServer.get_resp_header(conn1, "content-security-policy") do
+    None    -> assert false
+    Some(h) -> assert (String.contains(h, "nonce-"))
+    end
+  end
+
+  test "CSP header from protect contains script-src directive" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.protect(conn0)
+    match HttpServer.get_resp_header(conn1, "content-security-policy") do
+    None    -> assert false
+    Some(h) -> assert (String.contains(h, "script-src"))
+    end
+  end
+
+  test "CSP header from protect contains default-src 'self'" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.protect(conn0)
+    match HttpServer.get_resp_header(conn1, "content-security-policy") do
+    None    -> assert false
+    Some(h) -> assert (String.contains(h, "default-src"))
+    end
+  end
+
+  test "CSP header embeds the nonce value assigned to the conn" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.protect(conn0)
+    let n = BastionCSP.nonce(conn1)
+    match HttpServer.get_resp_header(conn1, "content-security-policy") do
+    None    -> assert false
+    Some(h) -> assert (String.contains(h, n))
+    end
+  end
+end
+
+-- ── protect_with_overrides ────────────────────────────────────────────────────
+
+describe "BastionCSP protect_with_overrides" do
+  test "override replaces the default img-src directive" do
+    let conn0 = make_conn()
+    let overrides = Cons(("img-src", "'self' https://cdn.example.com"), Nil)
+    let conn1 = BastionCSP.protect_with_overrides(conn0, overrides)
+    match HttpServer.get_resp_header(conn1, "content-security-policy") do
+    None    -> assert false
+    Some(h) -> assert (String.contains(h, "cdn.example.com"))
+    end
+  end
+
+  test "protect_with_overrides still assigns a nonce" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.protect_with_overrides(conn0, Nil)
+    assert (BastionCSP.nonce(conn1) != "")
+  end
+
+  test "non-overridden directives still appear in header" do
+    let conn0 = make_conn()
+    let overrides = Cons(("img-src", "'none'"), Nil)
+    let conn1 = BastionCSP.protect_with_overrides(conn0, overrides)
+    match HttpServer.get_resp_header(conn1, "content-security-policy") do
+    None    -> assert false
+    Some(h) -> do
+      assert (String.contains(h, "default-src"))
+      assert (String.contains(h, "script-src"))
+    end
+    end
+  end
+end
+
+-- ── disable ───────────────────────────────────────────────────────────────────
+
+describe "BastionCSP disable" do
+  test "disable returns conn unchanged (no CSP header)" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.disable(conn0)
+    assert (HttpServer.get_resp_header(conn1, "content-security-policy") == None)
+  end
+end
+
+-- ── report_only ───────────────────────────────────────────────────────────────
+
+describe "BastionCSP report_only" do
+  test "report_only sets content-security-policy-report-only header" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.report_only(conn0, "https://csp.example.com/report")
+    match HttpServer.get_resp_header(conn1, "content-security-policy-report-only") do
+    None    -> assert false
+    Some(_) -> assert true
+    end
+  end
+
+  test "report_only header contains report-uri" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.report_only(conn0, "https://csp.example.com/report")
+    match HttpServer.get_resp_header(conn1, "content-security-policy-report-only") do
+    None    -> assert false
+    Some(h) -> assert (String.contains(h, "report-uri"))
+    end
+  end
+
+  test "report_only header contains the report URI value" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.report_only(conn0, "https://csp.example.com/report")
+    match HttpServer.get_resp_header(conn1, "content-security-policy-report-only") do
+    None    -> assert false
+    Some(h) -> assert (String.contains(h, "csp.example.com"))
+    end
+  end
+
+  test "report_only assigns a nonce" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.report_only(conn0, "https://csp.example.com/report")
+    assert (BastionCSP.nonce(conn1) != "")
+  end
+
+  test "report_only does not set content-security-policy header" do
+    let conn0 = make_conn()
+    let conn1 = BastionCSP.report_only(conn0, "https://csp.example.com/report")
+    assert (HttpServer.get_resp_header(conn1, "content-security-policy") == None)
+  end
+end
+
+end -- mod TestBastionCSP

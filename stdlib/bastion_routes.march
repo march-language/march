@@ -1,0 +1,182 @@
+-- BastionRoutes: reversible routing helpers for Bastion web apps.
+--
+-- Provides a runtime route registry (backed by a Vault table) and helpers
+-- for building path strings with embedded segments and query parameters.
+--
+-- In the full compiler, routes would be auto-generated at compile time.
+-- This module provides the runtime half: path building, query encoding,
+-- and route introspection via BastionRoutes.all().
+--
+-- Typical usage:
+--
+--   -- Register routes at startup (the compiler does this automatically)
+--   BastionRoutes.register("home", "get", "/", 0)
+--   BastionRoutes.register("users", "get", "/users", 0)
+--   BastionRoutes.register("user", "get", "/users/:id", 1)
+--
+--   -- Build paths (these would be typed helpers in the full compiler)
+--   BastionRoutes.path("home", Nil, Nil)                          -- "/"
+--   BastionRoutes.path("users", Nil, Nil)                         -- "/users"
+--   BastionRoutes.path("user", Cons("42", Nil), Nil)              -- "/users/42"
+--   BastionRoutes.path("users", Nil, Cons(("page","2"), Nil))     -- "/users?page=2"
+
+mod BastionRoutes do
+
+-- ---------------------------------------------------------------------------
+-- Route registry (Vault-backed)
+-- ---------------------------------------------------------------------------
+
+-- RouteEntry: (name_string, method_string, pattern, arity)
+-- pattern: "/users/:id" with :param placeholders
+
+pfn registry_table() do
+  match Vault.whereis("bastion_routes") do
+  Some(t) -> t
+  None    -> Vault.new("bastion_routes")
+  end
+end
+
+doc """
+Register a named route in the global registry.
+
+  name    — string identifier, e.g. "user"
+  method  — HTTP method string: "get", "post", "put", "delete"
+  pattern — path pattern with :param segments: "/users/:id"
+  arity   — number of dynamic path segments (0 for static routes)
+
+    BastionRoutes.register("user", "get", "/users/:id", 1)
+"""
+fn register(name, method, pattern, arity) do
+  let tbl   = registry_table()
+  let entry = (name, method, pattern, arity)
+  Vault.set(tbl, name, entry)
+end
+
+doc """
+Retrieve all registered routes.  Returns a list of route entries.
+
+    BastionRoutes.all()
+    -- => [("home", "get", "/", 0), ("user", "get", "/users/:id", 1), ...]
+"""
+fn all() do
+  let tbl = registry_table()
+  let ks  = Vault.keys(tbl)
+  fn go(xs, acc) do
+    match xs do
+    Nil -> acc
+    Cons(k, rest) ->
+      match Vault.get(tbl, k) do
+      Some(e) -> go(rest, Cons(e, acc))
+      None    -> go(rest, acc)
+      end
+    end
+  end
+  go(ks, Nil)
+end
+
+-- ---------------------------------------------------------------------------
+-- Path helpers
+-- ---------------------------------------------------------------------------
+
+-- URL-encode a single query parameter value (basic percent-encoding).
+pfn encode_query_value(s) do
+  s
+  |> fn v -> String.replace_all(v, "&", "%26") end
+  |> fn v -> String.replace_all(v, "=", "%3D") end
+  |> fn v -> String.replace_all(v, "?", "%3F") end
+  |> fn v -> String.replace_all(v, "#", "%23") end
+  |> fn v -> String.replace_all(v, " ", "%20") end
+end
+
+-- Build query string from a list of (String, String) pairs.
+pfn build_query_string(params) do
+  fn go(ps, acc) do
+    match ps do
+    Nil -> acc
+    Cons((k, v), rest) ->
+      let pair = encode_query_value(k) ++ "=" ++ encode_query_value(v)
+      let next = if acc == "" then pair else acc ++ "&" ++ pair end
+      go(rest, next)
+    end
+  end
+  go(params, "")
+end
+
+-- Fill :param slots in a pattern with positional segment values.
+pfn fill_pattern(pattern, segments) do
+  let parts = List.filter(String.split(pattern, "/"), fn s -> not(string_is_empty(s)))
+  fn go(ps, segs, acc) do
+    match ps do
+    Nil -> acc
+    Cons(part, rest) ->
+      if String.starts_with(part, ":") then
+        match segs do
+        Nil         -> go(rest, Nil, acc ++ "/" ++ part)
+        Cons(s, ss) -> go(rest, ss, acc ++ "/" ++ s)
+        end
+      else
+        go(rest, segs, acc ++ "/" ++ part)
+      end
+    end
+  end
+  let base = go(parts, segments, "")
+  if base == "" then "/" else base end
+end
+
+doc """
+Build a path string for a named route, filling in path segments and
+appending query parameters.
+
+  name     — route name (must be registered)
+  segments — list of String values for dynamic path segments (in order)
+  query    — list of (String, String) query parameter pairs
+
+    BastionRoutes.path("user", Cons("42", Nil), Nil)
+    -- => "/users/42"
+
+    BastionRoutes.path("users", Nil, Cons(("page", "2"), Nil))
+    -- => "/users?page=2"
+
+Returns "unknown route: <name>" if the route is not registered.
+"""
+fn path(name, segments, query) do
+  let tbl = registry_table()
+  match Vault.get(tbl, name) do
+  None ->
+    "unknown route: " ++ name
+  Some((_, _, pattern, _)) ->
+    let base = fill_pattern(pattern, segments)
+    let qs   = build_query_string(query)
+    if qs == "" then base else base ++ "?" ++ qs end
+  end
+end
+
+doc """
+Build a static path (no dynamic segments, no query params).
+
+    BastionRoutes.static_path("home")  -- "/"
+"""
+fn static_path(name) do
+  path(name, Nil, Nil)
+end
+
+doc """
+Build a path with a single dynamic segment.
+
+    BastionRoutes.path1("user", "42")  -- "/users/42"
+"""
+fn path1(name, seg) do
+  path(name, Cons(seg, Nil), Nil)
+end
+
+doc """
+Build a path with two dynamic segments.
+
+    BastionRoutes.path2("post_comment", "10", "99")
+    -- "/posts/10/comments/99"
+"""
+fn path2(name, seg1, seg2) do
+  path(name, Cons(seg1, Cons(seg2, Nil)), Nil)
+end
+
+end -- mod BastionRoutes

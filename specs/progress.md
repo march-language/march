@@ -173,7 +173,7 @@ march/
 │   └── base64.c             # Base64 for WebSocket handshake
 │   ├── search/
 │   │   └── search.ml        # Search index: Levenshtein fuzzy search, type/doc search, JSON cache
-├── stdlib/                  # 38 modules, ~7800 lines
+├── stdlib/                  # 46 modules, ~9600 lines
 │   ├── prelude.march        # Auto-imported helpers (panic, identity, compose, unwrap, etc.)
 │   ├── option.march         # Option(a) with Some/None
 │   ├── result.march         # Result(a,e) with Ok/Err
@@ -214,6 +214,14 @@ march/
 │   ├── env.march            # Env var access: get/require/get_int/get_bool/is_set/require_int
 │   ├── config.march         # Layered application config (Vault-backed): put/get/put_in/get_in, from_env, validate, env detection, endpoint config, named stores
 │   ├── correlation.march    # CorrelationId middleware: UUID v4 generation, X-Request-ID assign/echo, Logger context injection
+│   ├── bastion_cookies.march      # Signed/encrypted cookies: PBKDF2 key derivation, HMAC-SHA256 signing, put/get/delete
+│   ├── bastion_routes.march       # Route registry: register/all/find_by_name, path/3 helper, query param encoding
+│   ├── bastion_telemetry.march    # Structured telemetry: attach/detach/execute, TelemetryEvent, Aggregator sub-module
+│   ├── bastion_hot_deploy.march   # Connection draining: DrainStatus FSM, health_status, in-flight counter
+│   ├── bastion_csp.march          # CSP nonce injection: assign_nonce, protect, protect_with_overrides, report_only
+│   ├── bastion_pubsub.march       # Distributed pub/sub: named instances, Local/Redis/Cluster adapters, wildcard topics
+│   ├── bastion_test_sandbox.march # Test sandboxing: SandboxEnv, checkout/release, isolated Vault namespace
+│   ├── bastion_idempotency.march  # Idempotency middleware: IdempotencyState, protect/3, replay, X-Idempotent-Replayed
 │   └── docs/flow.md         # Flow module design doc: concepts, examples, GenStage comparison
 ├── test/
 │   ├── test_march.ml         # 1180 tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, bytes, logger, flow, actor_module, etc.)
@@ -253,7 +261,7 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
-## Current State (as of 2026-03-28, post WASM Tier 4 validation + CorrelationId middleware + scaffolder fixes + Bastion adversarial test suite + multi-file project-aware compilation)
+## Current State (as of 2026-03-29, post 8 Bastion P1 stdlib modules: BastionCookies, BastionRoutes, BastionTelemetry, BastionHotDeploy, BastionCSP, BastionPubSub, BastionTestSandbox, BastionIdempotency)
 
 - **Builds clean**
 - **14 pre-existing failures** in `repl_jit_regression`/`repl_compiler_parity` (unrelated to Bastion work); all other suites pass. Full list: (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing** + **Phase 4: reduction counting in compiled code** + **Phase 4: lazy stack growth** + **Vault sharded KV store** + **Bastion.Cache + Bastion.Depot middleware**):
@@ -264,7 +272,7 @@ march/
   - `test_properties.exe`: 36 tests, passing (QCheck2 properties)
   - `test_supervision.exe`: 15 tests, passing (actor supervision)
   - `test_lsp.exe`: 120 tests, passing (doc strings, find-refs, rename, sig-help, code actions, snippet completions, folding ranges, type annotation action, remove unused binding action, phase2 enhanced match, quickfix framework, dead code detection, p1.1 typed match stubs, p1.7 fn return/param annotation, batch annotation, P2.8 naming convention fix, P3.10 De Morgan rewrite)
-  - `test_stdlib_march.exe`: 19 tests, passing (Http, HttpTransport, HttpClient, HttpServer, WebSocket, Tls, Process, Logger, PubSub, Channel, ChannelServer, Presence, ChannelSocket, Env, Config, BastionDev, Vault, Session, Correlation)
+  - `test_stdlib_march.exe`: 27 tests, passing (Http, HttpTransport, HttpClient, HttpServer, WebSocket, Tls, Process, Logger, PubSub, Channel, ChannelServer, Presence, ChannelSocket, Env, Config, BastionDev, Vault, Session, Correlation, BastionCookies, BastionRoutes, BastionPubSub, BastionCSP, BastionTelemetry, BastionHotDeploy, BastionTestSandbox, BastionIdempotency)
   - `examples/bastion_tests/`: 346 adversarial tests, all passing (routing 42, caching 37, sessions 35, csrf 44, dev-dashboard 64, html 54, islands 70)
   - `test_forge.exe`: 15 tests, passing (scaffold/toml)
   - `test_bastion.exe`: 20 tests, passing (bastion scaffold, routes parser)

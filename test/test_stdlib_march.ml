@@ -127,6 +127,14 @@ let all_stdlib_decls =
     "session.march";
     "correlation.march";
     "bastion_dev.march";
+    "bastion_cookies.march";
+    "bastion_routes.march";
+    "bastion_pubsub.march";
+    "bastion_csp.march";
+    "bastion_telemetry.march";
+    "bastion_hot_deploy.march";
+    "bastion_test_sandbox.march";
+    "bastion_idempotency.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -249,5 +257,37 @@ let () =
     ("correlation", [
       Alcotest.test_case "CorrelationId module"
         `Quick (run_stdlib_test "test_correlation.march" "TestCorrelationId");
+    ]);
+    ("bastion_cookies", [
+      Alcotest.test_case "BastionCookies module"
+        `Quick (run_stdlib_test "test_bastion_cookies.march" "TestBastionCookies");
+    ]);
+    ("bastion_routes", [
+      Alcotest.test_case "BastionRoutes module"
+        `Quick (run_stdlib_test "test_bastion_routes.march" "TestBastionRoutes");
+    ]);
+    ("bastion_pubsub", [
+      Alcotest.test_case "BastionPubSub module"
+        `Quick (run_stdlib_test "test_bastion_pubsub.march" "TestBastionPubSub");
+    ]);
+    ("bastion_csp", [
+      Alcotest.test_case "BastionCSP module"
+        `Quick (run_stdlib_test "test_bastion_csp.march" "TestBastionCSP");
+    ]);
+    ("bastion_telemetry", [
+      Alcotest.test_case "BastionTelemetry module"
+        `Quick (run_stdlib_test "test_bastion_telemetry.march" "TestBastionTelemetry");
+    ]);
+    ("bastion_hot_deploy", [
+      Alcotest.test_case "BastionHotDeploy module"
+        `Quick (run_stdlib_test "test_bastion_hot_deploy.march" "TestBastionHotDeploy");
+    ]);
+    ("bastion_test_sandbox", [
+      Alcotest.test_case "BastionTestSandbox module"
+        `Quick (run_stdlib_test "test_bastion_test_sandbox.march" "TestBastionTestSandbox");
+    ]);
+    ("bastion_idempotency", [
+      Alcotest.test_case "BastionIdempotency module"
+        `Quick (run_stdlib_test "test_bastion_idempotency.march" "TestBastionIdempotency");
     ]);
   ]

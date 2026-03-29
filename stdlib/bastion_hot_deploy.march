@@ -1,0 +1,250 @@
+-- BastionHotDeploy: connection-draining state machine for zero-downtime deploys.
+--
+-- Implements a simple four-state machine:
+--
+--   Starting → Serving ←→ Draining → Stopped
+--
+-- State is persisted in a Vault table so it survives within the same process
+-- and is inspectable from tests without HTTP round-trips.
+--
+-- Storage layout ("hot_deploy_state" Vault table):
+--   "status"           → String  "serving" | "draining" | "starting" | "stopped"
+--   "in_flight"        → Int     number of requests currently being handled
+--   "drain_started_at" → Int     monotonic timestamp (0 = not draining)
+--
+-- Typical usage:
+--
+--   BastionHotDeploy.start_drain()
+--   -- wait for in-flight requests to finish …
+--   let (code, body) = BastionHotDeploy.health_status(BastionHotDeploy.default_config())
+
+mod BastionHotDeploy do
+
+-- ---------------------------------------------------------------------------
+-- Types
+-- ---------------------------------------------------------------------------
+
+type DrainStatus = Serving | Draining | Starting | Stopped
+
+type DrainConfig = DrainConfig(
+  Int,   -- timeout_ms              default 30 000
+  Int,   -- channel_close_timeout_ms default  5 000
+  Int,   -- drain_status_code        default    503
+  Bool   -- close_connections        default   true
+)
+
+-- ---------------------------------------------------------------------------
+-- Private helpers
+-- ---------------------------------------------------------------------------
+
+pfn get_state_table() do
+  match Vault.whereis("hot_deploy_state") do
+  Some(tbl) -> tbl
+  None      -> Vault.new("hot_deploy_state")
+  end
+end
+
+-- Decode stored String → DrainStatus (default Serving for missing key).
+pfn decode_status(s) do
+  match s do
+  "draining" -> Draining
+  "starting" -> Starting
+  "stopped"  -> Stopped
+  _          -> Serving
+  end
+end
+
+-- Encode DrainStatus → String for Vault storage.
+pfn encode_status(status) do
+  match status do
+  Serving  -> "serving"
+  Draining -> "draining"
+  Starting -> "starting"
+  Stopped  -> "stopped"
+  end
+end
+
+pfn set_status(tbl, status) do
+  Vault.set(tbl, "status", encode_status(status))
+end
+
+-- ---------------------------------------------------------------------------
+-- Configuration
+-- ---------------------------------------------------------------------------
+
+doc """
+Return the default DrainConfig.
+
+    BastionHotDeploy.default_config()
+    -- DrainConfig(30000, 5000, 503, true)
+"""
+fn default_config() do
+  DrainConfig(30000, 5000, 503, true)
+end
+
+-- Accessors for DrainConfig fields.
+fn config_timeout_ms(cfg) do
+  match cfg do DrainConfig(t, _, _, _) -> t end
+end
+
+fn config_channel_close_timeout_ms(cfg) do
+  match cfg do DrainConfig(_, c, _, _) -> c end
+end
+
+fn config_drain_status_code(cfg) do
+  match cfg do DrainConfig(_, _, s, _) -> s end
+end
+
+fn config_close_connections(cfg) do
+  match cfg do DrainConfig(_, _, _, b) -> b end
+end
+
+-- ---------------------------------------------------------------------------
+-- Status queries
+-- ---------------------------------------------------------------------------
+
+doc """
+Return the current DrainStatus.  Defaults to Serving if no state has been set.
+
+    BastionHotDeploy.get_status()
+"""
+fn get_status() do
+  let tbl = get_state_table()
+  let s   = Vault.get_or(tbl, "status", "serving")
+  decode_status(s)
+end
+
+doc """
+Return true when the current status is Draining.
+
+    BastionHotDeploy.is_draining()
+"""
+fn is_draining() do
+  match get_status() do
+  Draining -> true
+  _        -> false
+  end
+end
+
+doc """
+Return true when the deploy manager should refuse new connections
+(i.e. status is Draining or Stopped).
+
+    BastionHotDeploy.should_drain_request(config)
+"""
+fn should_drain_request(_config) do
+  match get_status() do
+  Draining -> true
+  Stopped  -> true
+  _        -> false
+  end
+end
+
+-- ---------------------------------------------------------------------------
+-- Status transitions
+-- ---------------------------------------------------------------------------
+
+doc """
+Transition to Draining (from Serving).  Records the drain start timestamp as 0
+(no real monotonic clock in stdlib).  Safe to call from any state.
+
+    BastionHotDeploy.start_drain()
+"""
+fn start_drain() do
+  let tbl = get_state_table()
+  set_status(tbl, Draining)
+  Vault.set(tbl, "drain_started_at", 0)
+end
+
+doc "Transition to Stopped."
+fn stop_drain() do
+  let tbl = get_state_table()
+  set_status(tbl, Stopped)
+end
+
+doc "Transition to Starting."
+fn mark_starting() do
+  let tbl = get_state_table()
+  set_status(tbl, Starting)
+end
+
+doc "Transition to Serving.  Clears the drain_started_at timestamp."
+fn mark_serving() do
+  let tbl = get_state_table()
+  set_status(tbl, Serving)
+  Vault.set(tbl, "drain_started_at", 0)
+end
+
+-- ---------------------------------------------------------------------------
+-- In-flight request counter
+-- ---------------------------------------------------------------------------
+
+doc """
+Increment the in-flight request counter by 1.  Call at the start of each request.
+
+    BastionHotDeploy.increment_in_flight()
+"""
+fn increment_in_flight() do
+  let tbl = get_state_table()
+  let n   = Vault.get_or(tbl, "in_flight", 0)
+  Vault.set(tbl, "in_flight", n + 1)
+end
+
+doc """
+Decrement the in-flight request counter by 1 (floored at 0).
+Call when a request finishes.
+
+    BastionHotDeploy.decrement_in_flight()
+"""
+fn decrement_in_flight() do
+  let tbl = get_state_table()
+  let n   = Vault.get_or(tbl, "in_flight", 0)
+  let next = if n <= 0 then 0 else n - 1 end
+  Vault.set(tbl, "in_flight", next)
+end
+
+doc """
+Return the current in-flight request count.
+
+    BastionHotDeploy.in_flight_count()
+"""
+fn in_flight_count() do
+  let tbl = get_state_table()
+  Vault.get_or(tbl, "in_flight", 0)
+end
+
+-- ---------------------------------------------------------------------------
+-- Health / drain response helpers
+-- ---------------------------------------------------------------------------
+
+doc """
+Return `(status_code, json_body)` appropriate for a health-check endpoint.
+
+  Serving  → (200, "{\"status\":\"ok\"}")
+  Draining → (503, "{\"status\":\"draining\"}")
+  Starting → (503, "{\"status\":\"starting\"}")
+  Stopped  → (503, "{\"status\":\"stopped\"}")
+
+    let (code, body) = BastionHotDeploy.health_status(BastionHotDeploy.default_config())
+"""
+fn health_status(_config) do
+  match get_status() do
+  Serving  -> (200, "{\"status\":\"ok\"}")
+  Draining -> (503, "{\"status\":\"draining\"}")
+  Starting -> (503, "{\"status\":\"starting\"}")
+  Stopped  -> (503, "{\"status\":\"stopped\"}")
+  end
+end
+
+doc """
+Return `(status_code, json_body)` to send when rejecting a request during drain.
+Uses the configured drain_status_code (default 503).
+
+    let (code, body) = BastionHotDeploy.drain_response(config)
+"""
+fn drain_response(config) do
+  let code = config_drain_status_code(config)
+  (code, "{\"status\":\"draining\"}")
+end
+
+end -- mod BastionHotDeploy

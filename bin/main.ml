@@ -163,6 +163,14 @@ let load_stdlib () =
       "session.march";
       "test.march";
       "bastion_dev.march";
+      "bastion_cookies.march";
+      "bastion_routes.march";
+      "bastion_pubsub.march";
+      "bastion_csp.march";
+      "bastion_telemetry.march";
+      "bastion_hot_deploy.march";
+      "bastion_test_sandbox.march";
+      "bastion_idempotency.march";
     ] in
     List.concat_map (fun name ->
         load_stdlib_file (Filename.concat stdlib_dir name)
@@ -312,7 +320,7 @@ let stdlib_module_names =
   ; "HttpServer"; "HttpTransport"; "WebSocket"; "Process"; "Logger"
   ; "Flow"; "Actor"; "Sort"; "Hamt"; "Seq"; "Iterable"; "IOList"
   ; "Random"; "Stats"; "Plot"; "Prelude"; "DataFrame"; "Islands"; "Test"
-  ; "Vault"; "BastionDev" ]
+  ; "Vault"; "BastionDev"; "BastionCookies"; "BastionRoutes"; "BastionPubSub"; "BastionCSP" ]
 
 (** Collect [(mod_name, span)] for each DUse/DAlias in [decls]. *)
 let import_refs decls =
