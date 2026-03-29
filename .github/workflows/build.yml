@@ -1,0 +1,160 @@
+# .github/workflows/build.yml
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      ref:
+        required: true
+        type: string
+        description: "Git ref to build (tag, branch, or SHA)"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: darwin-arm64
+            ocaml-compiler: 5.3.0
+          - os: macos-13
+            platform: darwin-x86_64
+            ocaml-compiler: 5.3.0
+          - os: ubuntu-22.04
+            platform: linux-x86_64
+            ocaml-compiler: 5.3.0
+            static: true
+          - os: ubuntu-22.04
+            platform: linux-aarch64
+            ocaml-compiler: 5.3.0
+            static: true
+            cross: true
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      # --- Linux static builds (musl) ---
+
+      - name: Install musl toolchain (Linux)
+        if: matrix.static
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Set up QEMU (Linux aarch64 cross)
+        if: matrix.cross
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      # For aarch64, we build inside Alpine (musl-native) under QEMU.
+      # This avoids cross-compilation complexity with OCaml.
+      - name: Build in Alpine container (Linux aarch64)
+        if: matrix.cross
+        uses: addnab/docker-run-action@v3
+        with:
+          image: alpine:3.19
+          options: >-
+            --platform linux/arm64
+            -v ${{ github.workspace }}:/work
+            -w /work
+          run: |
+            apk add --no-cache bash opam ocaml build-base git
+            opam init --disable-sandboxing --bare -y
+            opam switch create 5.3.0 ocaml-base-compiler.5.3.0
+            eval $(opam env)
+            opam install --deps-only -y .
+            dune build --force
+            mkdir -p _dist/bin _dist/stdlib
+            cp _build/default/bin/main.exe _dist/bin/march
+            cp _build/default/forge/bin/main.exe _dist/bin/forge
+            cp stdlib/*.march _dist/stdlib/
+            cp LICENSE _dist/
+
+      # --- macOS and Linux x86_64 native builds ---
+
+      - name: Set up OCaml (native)
+        if: "!matrix.cross"
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml-compiler }}
+
+      - name: Install dependencies (native)
+        if: "!matrix.cross"
+        run: opam install --deps-only -y .
+
+      - name: Build (Linux x86_64 static)
+        if: matrix.static && !matrix.cross
+        run: |
+          eval $(opam env)
+          OCAMLPARAM='_,ccopt=-static' dune build --force
+          mkdir -p _dist/bin _dist/stdlib
+          cp _build/default/bin/main.exe _dist/bin/march
+          cp _build/default/forge/bin/main.exe _dist/bin/forge
+          cp stdlib/*.march _dist/stdlib/
+          cp LICENSE _dist/
+
+      - name: Build (macOS)
+        if: "!matrix.static"
+        run: |
+          eval $(opam env)
+          dune build
+          mkdir -p _dist/bin _dist/stdlib
+          cp _build/default/bin/main.exe _dist/bin/march
+          cp _build/default/forge/bin/main.exe _dist/bin/forge
+          cp stdlib/*.march _dist/stdlib/
+          cp LICENSE _dist/
+
+      # --- Package ---
+
+      - name: Strip binary
+        run: |
+          if command -v strip &> /dev/null; then
+            strip _dist/bin/march || true
+            strip _dist/bin/forge || true
+          fi
+
+      - name: Package archive
+        run: |
+          ARCHIVE_NAME="march-${{ inputs.version }}-${{ matrix.platform }}"
+          mv _dist "${ARCHIVE_NAME}"
+          tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: march-${{ inputs.version }}-${{ matrix.platform }}
+          path: march-${{ inputs.version }}-${{ matrix.platform }}.tar.gz
+
+  checksums:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          cd artifacts
+          for f in *.tar.gz; do
+            hash=$(sha256sum "$f" | cut -d' ' -f1)
+            echo "sha256:${hash}  ${f}" >> ../march-${{ inputs.version }}-checksums.txt
+          done
+
+      - name: Upload checksums
+        uses: actions/upload-artifact@v4
+        with:
+          name: march-${{ inputs.version }}-checksums
+          path: march-${{ inputs.version }}-checksums.txt

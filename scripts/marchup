@@ -1,0 +1,116 @@
+#!/bin/sh
+set -euo pipefail
+
+MARCH_HOME="${MARCH_HOME:-$HOME/.march}"
+REPO="march-lang/march"
+BASE_URL="https://github.com/${REPO}/releases"
+
+main() {
+    echo "marchup: installing March compiler"
+    echo ""
+
+    # 1. Detect platform
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    ARCH=$(uname -m)
+
+    case "$OS" in
+        darwin) OS="darwin" ;;
+        linux)  OS="linux" ;;
+        *)      err "unsupported OS: $OS" ;;
+    esac
+
+    case "$ARCH" in
+        x86_64|amd64)   ARCH="x86_64" ;;
+        arm64|aarch64)
+            if [ "$OS" = "darwin" ]; then
+                ARCH="arm64"
+            else
+                ARCH="aarch64"
+            fi
+            ;;
+        *)  err "unsupported architecture: $ARCH" ;;
+    esac
+
+    PLATFORM="${OS}-${ARCH}"
+    echo "Detected platform: ${PLATFORM}"
+
+    # 2. Fetch latest version
+    VERSION=$(curl -sSf "${BASE_URL}/latest" -o /dev/null -w '%{redirect_url}' \
+        | grep -oE '[^/]+$' \
+        | sed 's/^v//')
+
+    if [ -z "$VERSION" ]; then
+        err "could not determine latest version"
+    fi
+
+    echo "Latest version: ${VERSION}"
+
+    ARCHIVE="march-${VERSION}-${PLATFORM}.tar.gz"
+    CHECKSUMS="march-${VERSION}-checksums.txt"
+
+    # 3. Download archive and checksums
+    TMPDIR=$(mktemp -d)
+    trap 'rm -rf "$TMPDIR"' EXIT
+
+    echo "Downloading ${ARCHIVE}..."
+    curl -sSfL "${BASE_URL}/download/v${VERSION}/${ARCHIVE}" -o "${TMPDIR}/${ARCHIVE}"
+    curl -sSfL "${BASE_URL}/download/v${VERSION}/${CHECKSUMS}" -o "${TMPDIR}/${CHECKSUMS}"
+
+    # 4. Verify checksum
+    echo "Verifying checksum..."
+    EXPECTED=$(grep "${ARCHIVE}" "${TMPDIR}/${CHECKSUMS}" | cut -d' ' -f1 | sed 's/^sha256://')
+    ACTUAL=$(sha256sum "${TMPDIR}/${ARCHIVE}" 2>/dev/null \
+        || shasum -a 256 "${TMPDIR}/${ARCHIVE}" | cut -d' ' -f1)
+    ACTUAL=$(echo "$ACTUAL" | cut -d' ' -f1)
+
+    if [ "$EXPECTED" != "$ACTUAL" ]; then
+        err "checksum mismatch (expected ${EXPECTED}, got ${ACTUAL})"
+    fi
+    echo "Checksum verified."
+
+    # 5. Extract to version directory
+    VERSION_DIR="${MARCH_HOME}/versions/${VERSION}"
+    mkdir -p "${VERSION_DIR}"
+    tar xzf "${TMPDIR}/${ARCHIVE}" -C "${VERSION_DIR}" --strip-components=1
+
+    chmod +x "${VERSION_DIR}/bin/march"
+    chmod +x "${VERSION_DIR}/bin/forge"
+
+    # 6. Set as active version
+    echo "${VERSION}" > "${MARCH_HOME}/version"
+    ln -sfn "${VERSION_DIR}" "${MARCH_HOME}/current"
+
+    # 7. Verify installation
+    echo ""
+    "${VERSION_DIR}/bin/march" --version
+    "${VERSION_DIR}/bin/forge" --version
+
+    echo ""
+    echo "March ${VERSION} installed successfully!"
+    echo ""
+
+    # 8. PATH instructions
+    BINDIR="${MARCH_HOME}/current/bin"
+    case "$SHELL" in
+        */zsh)  PROFILE="$HOME/.zshrc" ;;
+        */bash) PROFILE="$HOME/.bashrc" ;;
+        *)      PROFILE="$HOME/.profile" ;;
+    esac
+
+    if ! echo "$PATH" | tr ':' '\n' | grep -qx "$BINDIR"; then
+        echo "Add March to your PATH by adding this to ${PROFILE}:"
+        echo ""
+        echo "  export PATH=\"${BINDIR}:\$PATH\""
+        echo ""
+        echo "Then restart your shell or run:"
+        echo ""
+        echo "  source ${PROFILE}"
+    fi
+}
+
+err() {
+    echo "marchup: error: $1" >&2
+    exit 1
+}
+
+main "$@"

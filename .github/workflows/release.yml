@@ -1,0 +1,62 @@
+# .github/workflows/release.yml
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ github.ref_name }}  # e.g. "v0.1.0"
+      ref: ${{ github.ref }}
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: March ${{ github.ref_name }}
+          body: |
+            ## Installation
+
+            ```
+            curl -sSf https://march-lang.org/install | sh
+            ```
+
+            Or if you already have forge:
+
+            ```
+            forge install ${{ github.ref_name }}
+            forge use ${{ github.ref_name }}
+            ```
+
+            ## Checksums
+
+            Verify your download:
+
+            ```
+            sha256sum -c march-${{ github.ref_name }}-checksums.txt
+            ```
+          files: artifacts/*
+          draft: false
+          prerelease: false
+
+      - name: Update latest tag
+        run: |
+          git tag -f latest ${{ github.ref_name }}
+          git push -f origin latest
