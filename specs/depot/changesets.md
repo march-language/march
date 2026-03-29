@@ -1,4 +1,4 @@
-# Depot: Form Objects and Changeset Validation
+# Depot: Gate Objects and Changeset Validation
 
 **Status**: Draft | **Version**: 0.1 | **Part of**: Depot Design Spec
 

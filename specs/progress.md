@@ -214,7 +214,7 @@ march/
 │   ├── env.march            # Env var access: get/require/get_int/get_bool/is_set/require_int
 │   ├── config.march         # Layered application config (Vault-backed): put/get/put_in/get_in, from_env, validate, env detection, endpoint config, named stores
 │   ├── correlation.march    # CorrelationId middleware: UUID v4 generation, X-Request-ID assign/echo, Logger context injection
-│   ├── depot_form.march     # 587 lines: Depot.Form validation pipeline — cast, validate_required/length/format/inclusion/exclusion/number/acceptance/confirmation/change, constraint hints (unique/foreign_key/no_assoc/check), apply_constraint_error, full accessor API
+│   ├── depot_gate.march     # 587 lines: Depot.Gate validation pipeline — cast, validate_required/length/format/inclusion/exclusion/number/acceptance/confirmation/change, constraint hints (unique/foreign_key/no_assoc/check), apply_constraint_error, full accessor API
 │   └── docs/flow.md         # Flow module design doc: concepts, examples, GenStage comparison
 ├── test/
 │   ├── test_march.ml         # 1180 tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, bytes, logger, flow, actor_module, etc.)

@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-29 (Depot.Form — typed validation pipeline with cast/validate/constraint API; 79 tests; Bastion.Components.error_tag; fixes to bastion.march parse errors in Static module)
+**Last updated:** 2026-03-29 (Depot.Gate — typed validation pipeline with cast/validate/constraint API; 79 tests; Bastion.Components.error_tag; fixes to bastion.march parse errors in Static module)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -51,7 +51,7 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ### Database: Depot
 
-- ✅ **Form objects and changeset validation** — `Depot.Form` typed validation pipeline with `cast/validate/constraint` steps that accumulate errors without short-circuiting. `Form` type with params/changes/errors/valid/constraints fields. Validators: `validate_required`, `validate_length`, `validate_format`, `validate_inclusion`, `validate_exclusion`, `validate_number`, `validate_acceptance`, `validate_confirmation`, `validate_change`. DB constraint mapping: `unique_constraint`, `foreign_key_constraint`, `no_assoc_constraint`, `check_constraint`, `apply_constraint_error`. Accessors: `cast`, `get_field`, `get_change`, `put_change`, `delete_change`, `add_error`, `is_valid`, `errors`, `get_errors`. `Bastion.Components.error_tag` for form rendering. 79 tests in `test/stdlib/test_depot_form.march`. Spec: `specs/depot/changesets.md`.
+- ✅ **Gate objects and validation** — `Depot.Gate` typed validation pipeline with `cast/validate/constraint` steps that accumulate errors without short-circuiting. `Gate` type with params/changes/errors/valid/constraints fields. Validators: `validate_required`, `validate_length`, `validate_format`, `validate_inclusion`, `validate_exclusion`, `validate_number`, `validate_acceptance`, `validate_confirmation`, `validate_change`. DB constraint mapping: `unique_constraint`, `foreign_key_constraint`, `no_assoc_constraint`, `check_constraint`, `apply_constraint_error`. Accessors: `cast`, `get_field`, `get_change`, `put_change`, `delete_change`, `add_error`, `is_valid`, `errors`, `get_errors`. `Bastion.Components.error_tag` for form rendering. 79 tests in `test/stdlib/test_depot_gate.march`. Spec: `specs/depot/changesets.md`.
 
 ### LSP: Performance Insights
 
