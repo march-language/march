@@ -69,6 +69,22 @@ type demorgan_site = {
   dm_right_span : Ast.span;  (** Span of the right operand b *)
 }
 
+(** What kind of performance issue a [perf_insight] reports. *)
+type perf_insight_kind =
+  | NonTailCall    of { pi_fn_name : string; pi_blocking : string }
+      (** A recursive call that is not in tail position — the stack grows. *)
+  | ActorSendCopy  of { pi_value_desc : string; pi_ty : string }
+      (** A non-linear value sent via [send()] — will be deep-copied. *)
+  | ClosureCapture of { pi_count : int; pi_names : string list }
+      (** A lambda that closes over [pi_count] values — larger allocation. *)
+
+(** A performance insight produced by static AST analysis. *)
+type perf_insight = {
+  pi_span    : Ast.span;
+  pi_kind    : perf_insight_kind;
+  pi_message : string;
+}
+
 (** Full analysis result for one document. *)
 type t = {
   src         : string;
@@ -116,6 +132,8 @@ type t = {
   (** Functions/types that violate the naming convention (camelCase fn, snake_case type). *)
   demorgan_sites   : demorgan_site list;
   (** Sites eligible for De Morgan rewriting: !(a&&b), !(a||b), !a&&!b, !a||!b. *)
+  perf_insights    : perf_insight list;
+  (** AST-level performance insights: non-tail calls, actor send copies, large closures. *)
 }
 
 (* ------------------------------------------------------------------ *)
@@ -728,6 +746,360 @@ let to_pascal name =
   ) parts)
 
 (* ------------------------------------------------------------------ *)
+(* Performance insights (Phase 1, AST level)                          *)
+(* ------------------------------------------------------------------ *)
+
+(** Operators whose results count as "pending work" after a call returns,
+    preventing tail-call optimisation. *)
+let march_operators =
+  ["+"; "-"; "*"; "/"; "%"; "&&"; "||"; "=="; "!="; "<>"; "<"; ">"; "<="; ">=";
+   "++"; "^"; "not"]
+
+let is_march_operator name = List.mem name march_operators
+
+(** Names bound by a pattern (used to extend the scope in closures). *)
+let rec pat_bound_names (pat : Ast.pattern) =
+  match pat with
+  | Ast.PatVar n -> [n.txt]
+  | Ast.PatAs (p, n, _) -> n.txt :: pat_bound_names p
+  | Ast.PatTuple (ps, _) | Ast.PatCon (_, ps) | Ast.PatAtom (_, ps, _) ->
+    List.concat_map pat_bound_names ps
+  | Ast.PatRecord (fs, _) ->
+    List.concat_map (fun (_, p) -> pat_bound_names p) fs
+  | _ -> []
+
+(** Collect free variable names in [body] that are not the lambda's own
+    [params].  These are the values the closure must capture. *)
+let lambda_free_vars (params : Ast.param list) (body : Ast.expr) : string list =
+  let param_names = List.map (fun (p : Ast.param) -> p.Ast.param_name.txt) params in
+  let fvs : (string, unit) Hashtbl.t = Hashtbl.create 8 in
+  let rec go (bound : string list) (e : Ast.expr) =
+    match e with
+    | Ast.EVar n ->
+      if not (List.mem n.txt bound) then Hashtbl.replace fvs n.txt ()
+    | Ast.ELam (ps, lbody, _) ->
+      let inner = List.map (fun (p : Ast.param) -> p.Ast.param_name.txt) ps @ bound in
+      go inner lbody
+    | Ast.ELetFn (name, ps, _, fbody, _) ->
+      let inner = name.txt :: List.map (fun (p : Ast.param) -> p.Ast.param_name.txt) ps @ bound in
+      go inner fbody
+    | Ast.EBlock (es, _) ->
+      let rec go_block bound = function
+        | [] -> ()
+        | (Ast.ELet (b, _)) :: rest ->
+          go bound b.Ast.bind_expr;
+          go_block (pat_bound_names b.Ast.bind_pat @ bound) rest
+        | (Ast.ELetFn (name, ps, _, fbody, _)) :: rest ->
+          let inner = name.txt :: List.map (fun (p : Ast.param) -> p.Ast.param_name.txt) ps @ bound in
+          go inner fbody;
+          go_block (name.txt :: bound) rest
+        | e :: rest -> go bound e; go_block bound rest
+      in
+      go_block bound es
+    | Ast.ELet (b, _) -> go bound b.Ast.bind_expr
+    | Ast.EMatch (subj, branches, _) ->
+      go bound subj;
+      List.iter (fun (br : Ast.branch) ->
+          let names = pat_bound_names br.Ast.branch_pat in
+          go (names @ bound) br.Ast.branch_body
+        ) branches
+    | Ast.EApp (f, args, _) -> go bound f; List.iter (go bound) args
+    | Ast.EIf (c, t, f, _) -> go bound c; go bound t; go bound f
+    | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) -> go bound a; go bound b
+    | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
+      List.iter (go bound) es
+    | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> go bound e) fs
+    | Ast.ERecordUpdate (e, fs, _) ->
+      go bound e; List.iter (fun (_, e2) -> go bound e2) fs
+    | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _)
+    | Ast.EDbg (Some e, _) | Ast.ESpawn (e, _) | Ast.EAssert (e, _) ->
+      go bound e
+    | _ -> ()
+  in
+  go param_names body;
+  Hashtbl.fold (fun k () acc -> k :: acc) fvs []
+
+(** Walk [e] collecting perf insights for lambdas with ≥3 captures. *)
+let rec closure_capture_check (e : Ast.expr) acc =
+  match e with
+  | Ast.ELam (params, body, sp) ->
+    let caps = lambda_free_vars params body in
+    let n = List.length caps in
+    let acc =
+      if n >= 3 then
+        let sorted = List.sort String.compare caps in
+        let names_str = String.concat ", " (List.map (fun s -> "`" ^ s ^ "`") sorted) in
+        let msg = Printf.sprintf
+          "This function captures %d values (%s). Each call allocates a closure object holding all of them.\n\nIf several values always travel together, consider grouping them into a record."
+          n names_str
+        in
+        { pi_span    = sp;
+          pi_kind    = ClosureCapture { pi_count = n; pi_names = sorted };
+          pi_message = msg } :: acc
+      else acc
+    in
+    closure_capture_check body acc  (* still recurse for nested lambdas *)
+  | Ast.EApp (f, args, _) ->
+    let acc = closure_capture_check f acc in
+    List.fold_left (fun a e -> closure_capture_check e a) acc args
+  | Ast.EBlock (es, _) ->
+    List.fold_left (fun a e -> closure_capture_check e a) acc es
+  | Ast.ELet (b, _) -> closure_capture_check b.Ast.bind_expr acc
+  | Ast.ELetFn (_, _, _, body, _) -> closure_capture_check body acc
+  | Ast.EIf (c, t, f, _) ->
+    closure_capture_check c (closure_capture_check t (closure_capture_check f acc))
+  | Ast.EMatch (subj, brs, _) ->
+    let acc = closure_capture_check subj acc in
+    List.fold_left (fun a (br : Ast.branch) -> closure_capture_check br.Ast.branch_body a) acc brs
+  | Ast.EPipe (a, b, _) | Ast.ESend (a, b, _) ->
+    closure_capture_check a (closure_capture_check b acc)
+  | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
+    List.fold_left (fun a e -> closure_capture_check e a) acc es
+  | Ast.ERecord (fs, _) ->
+    List.fold_left (fun a (_, e) -> closure_capture_check e a) acc fs
+  | Ast.ERecordUpdate (e, fs, _) ->
+    List.fold_left (fun a (_, e2) -> closure_capture_check e2 a)
+      (closure_capture_check e acc) fs
+  | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _)
+  | Ast.EDbg (Some e, _) | Ast.ESpawn (e, _) | Ast.EAssert (e, _) ->
+    closure_capture_check e acc
+  | _ -> acc
+
+(** True when [ty] is a heap-allocated type that will be deep-copied on send
+    (i.e., not a linear/affine value and not a scalar). *)
+let is_complex_ty (ty : Tc.ty) =
+  match Tc.repr ty with
+  | Tc.TLin _ -> false          (* linear/affine: zero-copy ownership transfer *)
+  | Tc.TCon ("Int",   []) | Tc.TCon ("Bool",  [])
+  | Tc.TCon ("Float", []) | Tc.TCon ("Unit",  [])
+  | Tc.TCon ("Char",  []) -> false
+  | Tc.TCon _ | Tc.TTuple _ | Tc.TRecord _ -> true
+  | _ -> false
+
+let describe_ty (ty : Tc.ty) =
+  match Tc.repr ty with
+  | Tc.TCon (name, []) -> name
+  | Tc.TCon (name, _)  -> name ^ "(...)"
+  | Tc.TTuple _        -> "tuple"
+  | Tc.TRecord _       -> "record"
+  | other              -> Tc.pp_ty other
+
+(** Walk [e] collecting [ActorSendCopy] insights for [send()] calls whose
+    message argument is a non-linear complex type. *)
+let rec send_copy_check (type_map : (Ast.span, Tc.ty) Hashtbl.t) (e : Ast.expr) acc =
+  match e with
+  | Ast.ESend (pid, msg, sp) ->
+    let acc = send_copy_check type_map pid acc in
+    let acc = send_copy_check type_map msg acc in
+    let msg_sp = span_of_expr msg in
+    (match Hashtbl.find_opt type_map msg_sp with
+     | None -> acc
+     | Some ty when not (is_complex_ty ty) -> acc
+     | Some ty ->
+       let value_desc = match msg with
+         | Ast.EVar n -> "`" ^ n.txt ^ "`"
+         | _          -> "the message value"
+       in
+       let ty_str = describe_ty ty in
+       let msg_text = Printf.sprintf
+         "%s will be deep-copied when sent (type: `%s`).\n\nIf you no longer need it after this point, declare it `linear` to transfer ownership instead of copying:\n\n    send(pid, linear %s)"
+         value_desc ty_str ty_str
+       in
+       { pi_span    = sp;
+         pi_kind    = ActorSendCopy { pi_value_desc = value_desc; pi_ty = ty_str };
+         pi_message = msg_text } :: acc)
+  | Ast.EApp (f, args, _) ->
+    let acc = send_copy_check type_map f acc in
+    List.fold_left (fun a e -> send_copy_check type_map e a) acc args
+  | Ast.EBlock (es, _) ->
+    List.fold_left (fun a e -> send_copy_check type_map e a) acc es
+  | Ast.ELet (b, _) -> send_copy_check type_map b.Ast.bind_expr acc
+  | Ast.ELetFn (_, _, _, body, _) | Ast.ELam (_, body, _) ->
+    send_copy_check type_map body acc
+  | Ast.EIf (c, t, f, _) ->
+    send_copy_check type_map c
+      (send_copy_check type_map t (send_copy_check type_map f acc))
+  | Ast.EMatch (subj, brs, _) ->
+    let acc = send_copy_check type_map subj acc in
+    List.fold_left (fun a (br : Ast.branch) ->
+        send_copy_check type_map br.Ast.branch_body a) acc brs
+  | Ast.EPipe (a, b, _) ->
+    send_copy_check type_map a (send_copy_check type_map b acc)
+  | Ast.ETuple (es, _) | Ast.EAtom (_, es, _) | Ast.ECon (_, es, _) ->
+    List.fold_left (fun a e -> send_copy_check type_map e a) acc es
+  | Ast.ERecord (fs, _) ->
+    List.fold_left (fun a (_, e) -> send_copy_check type_map e a) acc fs
+  | Ast.ERecordUpdate (e, fs, _) ->
+    List.fold_left (fun a (_, e2) -> send_copy_check type_map e2 a)
+      (send_copy_check type_map e acc) fs
+  | Ast.EField (e, _, _) | Ast.EAnnot (e, _, _)
+  | Ast.EDbg (Some e, _) | Ast.ESpawn (e, _) | Ast.EAssert (e, _) ->
+    send_copy_check type_map e acc
+  | _ -> acc
+
+(** Walk [e] looking for calls to [fn_name] that are not in tail position.
+    [blocking] is [None] when the expression is in tail position, or
+    [Some description] when there is pending work after it returns. *)
+let rec tco_check (fn_name : string) (blocking : string option) (e : Ast.expr) acc =
+  match e with
+  (* Self-recursive call *)
+  | Ast.EApp (Ast.EVar n, args, sp) when n.txt = fn_name ->
+    let acc =
+      match blocking with
+      | None -> acc   (* tail position — no stack growth *)
+      | Some b ->
+        let msg = Printf.sprintf
+          "This recursive call is not in tail position — %s, so the stack grows by one frame per call.\n\nRewrite using an accumulator parameter to move the work before the recursive call."
+          b
+        in
+        { pi_span    = sp;
+          pi_kind    = NonTailCall { pi_fn_name = fn_name; pi_blocking = b };
+          pi_message = msg } :: acc
+    in
+    (* The args themselves are not in tail position *)
+    List.fold_left (fun a arg ->
+        tco_check fn_name (Some "it is passed as an argument") arg a
+      ) acc args
+
+  (* Binary operator — args are not in tail position *)
+  | Ast.EApp (Ast.EVar op, ([_; _] as args), _) when is_march_operator op.txt ->
+    let b = Printf.sprintf "`%s` uses the result" op.txt in
+    List.fold_left (fun a arg -> tco_check fn_name (Some b) arg a) acc args
+
+  (* Any other function call — args are not in tail position *)
+  | Ast.EApp (f, args, _) ->
+    let acc = tco_check fn_name (Some "an outer call uses it") f acc in
+    List.fold_left (fun a arg ->
+        tco_check fn_name (Some "an outer call uses it") arg a
+      ) acc args
+
+  (* Block: only the last expression inherits tail ctx *)
+  | Ast.EBlock (es, _) ->
+    let rec go acc = function
+      | []       -> acc
+      | [e]      -> tco_check fn_name blocking e acc
+      | e :: rest ->
+        let acc = tco_check fn_name (Some "it is not the last expression") e acc in
+        go acc rest
+    in
+    go acc es
+
+  (* Let binding RHS is never in tail position *)
+  | Ast.ELet (b, _) ->
+    tco_check fn_name (Some "it is bound to a variable, not returned") b.Ast.bind_expr acc
+
+  (* If: branches inherit tail ctx; condition is not tail *)
+  | Ast.EIf (cond, t, f, _) ->
+    let acc = tco_check fn_name (Some "it is the condition") cond acc in
+    let acc = tco_check fn_name blocking t acc in
+    tco_check fn_name blocking f acc
+
+  (* Match: arms inherit tail ctx; scrutinee is not tail *)
+  | Ast.EMatch (subj, branches, _) ->
+    let acc = tco_check fn_name (Some "it is the match scrutinee") subj acc in
+    List.fold_left (fun acc (br : Ast.branch) ->
+        tco_check fn_name blocking br.Ast.branch_body acc
+      ) acc branches
+
+  (* Constructor wraps the result — args are not in tail position *)
+  | Ast.ECon (name, args, _) ->
+    let b = Printf.sprintf "constructor `%s` wraps it" name.Ast.txt in
+    List.fold_left (fun a arg -> tco_check fn_name (Some b) arg a) acc args
+
+  (* Tuple — elements are not in tail position *)
+  | Ast.ETuple (es, _) ->
+    List.fold_left (fun a e ->
+        tco_check fn_name (Some "it is inside a tuple") e a
+      ) acc es
+
+  (* Record — fields are not in tail position *)
+  | Ast.ERecord (fields, _) ->
+    List.fold_left (fun a (_, e) ->
+        tco_check fn_name (Some "it is inside a record") e a
+      ) acc fields
+
+  (* Annotation is transparent *)
+  | Ast.EAnnot (e, _, _) -> tco_check fn_name blocking e acc
+
+  (* Pipe: last stage inherits tail ctx; earlier stages do not *)
+  | Ast.EPipe (a, b, _) ->
+    let acc = tco_check fn_name (Some "it is piped further") a acc in
+    tco_check fn_name blocking b acc
+
+  (* Nested functions have their own scope — do not descend *)
+  | Ast.ELam _ | Ast.ELetFn _ -> acc
+
+  (* Other structural expressions *)
+  | Ast.ERecordUpdate (e, fields, _) ->
+    let acc = tco_check fn_name (Some "it is inside a record update") e acc in
+    List.fold_left (fun a (_, e2) ->
+        tco_check fn_name (Some "it is inside a record update") e2 a
+      ) acc fields
+
+  | Ast.ESend (a, b, _) ->
+    let acc = tco_check fn_name (Some "it is the send target") a acc in
+    tco_check fn_name (Some "it is the send message") b acc
+
+  | Ast.EAtom (_, es, _) ->
+    List.fold_left (fun a e ->
+        tco_check fn_name (Some "it is inside an atom") e a
+      ) acc es
+
+  | Ast.EField (e, _, _) | Ast.ESpawn (e, _)
+  | Ast.EDbg (Some e, _) | Ast.EAssert (e, _) ->
+    tco_check fn_name (Some "the result is used further") e acc
+
+  | _ -> acc
+
+(** Check all clauses of a function definition for non-tail recursive calls. *)
+let tco_check_fn (fn : Ast.fn_def) acc =
+  let fn_name = fn.Ast.fn_name.txt in
+  List.fold_left (fun acc (cl : Ast.fn_clause) ->
+      tco_check fn_name None cl.Ast.fc_body acc
+    ) acc fn.Ast.fn_clauses
+
+(** Convert a [perf_insight] to an LSP [Diagnostic.t]. *)
+let perf_insight_to_diag (pi : perf_insight) : Lsp.Types.Diagnostic.t =
+  let range = Pos.span_to_lsp_range pi.pi_span in
+  let severity, code = match pi.pi_kind with
+    | NonTailCall _    -> Lsp.Types.DiagnosticSeverity.Warning, "non_tail_call"
+    | ActorSendCopy _  -> Lsp.Types.DiagnosticSeverity.Warning, "actor_send_copy"
+    | ClosureCapture _ -> Lsp.Types.DiagnosticSeverity.Hint,    "closure_capture"
+  in
+  Lsp.Types.Diagnostic.create
+    ~range
+    ~severity
+    ~message:(`String pi.pi_message)
+    ~source:"march"
+    ~code:(`String code)
+    ()
+
+(** Run all three Phase-1 perf insight passes over [user_decls] and return
+    the collected insights. *)
+let collect_perf_insights
+    (type_map : (Ast.span, Tc.ty) Hashtbl.t)
+    (user_decls : Ast.decl list) : perf_insight list =
+  let acc = ref [] in
+  let add_all pis = acc := pis @ !acc in
+  let rec scan_decl (d : Ast.decl) =
+    match d with
+    | Ast.DFn (fn, _) ->
+      add_all (tco_check_fn fn []);
+      List.iter (fun (cl : Ast.fn_clause) ->
+          add_all (closure_capture_check cl.Ast.fc_body []);
+          add_all (send_copy_check type_map cl.Ast.fc_body [])
+        ) fn.Ast.fn_clauses
+    | Ast.DLet (_, b, _) ->
+      add_all (closure_capture_check b.Ast.bind_expr []);
+      add_all (send_copy_check type_map b.Ast.bind_expr [])
+    | Ast.DMod (_, _, decls, _) ->
+      List.iter scan_decl decls
+    | _ -> ()
+  in
+  List.iter scan_decl user_decls;
+  !acc
+
+(* ------------------------------------------------------------------ *)
 (* Main analysis entry point                                           *)
 (* ------------------------------------------------------------------ *)
 
@@ -770,7 +1142,8 @@ let analyse ~filename ~src : t =
       unused_fns        = [];
       type_matches      = [];
       naming_violations = [];
-      demorgan_sites    = [] }
+      demorgan_sites    = [];
+      perf_insights     = [] }
   in
   let make_parse_diag pos msg =
     let sp : Ast.span = {
@@ -1339,10 +1712,13 @@ let analyse ~filename ~src : t =
     in
     List.iter collect_dm_decl user_decls;
     let demorgan_sites = !demorgan_acc in
+    let perf_insights = collect_perf_insights type_map user_decls in
+    let perf_diags = List.map perf_insight_to_diag perf_insights in
     let diags =
       (Err.sorted errors |> List.filter_map (diag_to_lsp ~filename))
       @ !dead_code_diags
       @ unused_fn_diags
+      @ perf_diags
     in
     { src; filename; type_map; def_map; use_map;
       vars       = final_env.Tc.vars;
@@ -1365,7 +1741,8 @@ let analyse ~filename ~src : t =
       unused_fns;
       type_matches;
       naming_violations;
-      demorgan_sites }
+      demorgan_sites;
+      perf_insights }
 
 (* ------------------------------------------------------------------ *)
 (* Query helpers                                                       *)
@@ -2680,3 +3057,24 @@ let actor_info_at (a : t) ~line ~character : string option =
     List.iter (fun s -> Buffer.add_string buf (s ^ "\n")) msg_types;
     Buffer.add_string buf "```";
     Some (Buffer.contents buf)
+
+(** Return the performance insight message for the smallest span that
+    contains the cursor, or [None] if no insight applies. *)
+let perf_insight_at (a : t) ~line ~character : string option =
+  let is_user_span (sp : Ast.span) =
+    sp.Ast.file = a.filename || sp.Ast.file = "" || sp.Ast.file = "<unknown>"
+  in
+  let candidates = List.filter (fun (pi : perf_insight) ->
+      is_user_span pi.pi_span &&
+      Pos.span_contains pi.pi_span ~line ~character
+    ) a.perf_insights
+  in
+  match candidates with
+  | [] -> None
+  | _ ->
+    (* Return the insight with the smallest span (most specific) *)
+    let best = List.fold_left (fun best pi ->
+        if Pos.span_smaller pi.pi_span best.pi_span then pi else best
+      ) (List.hd candidates) (List.tl candidates)
+    in
+    Some best.pi_message
