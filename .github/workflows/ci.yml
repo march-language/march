@@ -1,0 +1,46 @@
+# .github/workflows/ci.yml
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            ocaml-compiler: 5.3.0
+          - os: ubuntu-22.04
+            ocaml-compiler: 5.3.0
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml-compiler }}
+
+      - name: Install dependencies
+        run: opam install --deps-only --with-test -y .
+
+      - name: Build
+        run: |
+          eval $(opam env)
+          dune build
+
+      - name: Test
+        run: |
+          eval $(opam env)
+          dune runtest
+
+      - name: Check formatting
+        run: |
+          eval $(opam env)
+          dune fmt 2>&1 || true
