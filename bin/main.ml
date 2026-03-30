@@ -159,6 +159,7 @@ let load_stdlib () =
       "env.march";
       "config.march";
       "depot_form.march";
+      "depot_schema.march";
       "bastion.march";
       "csrf.march";
       "session.march";
