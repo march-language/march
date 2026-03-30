@@ -979,8 +979,21 @@ let compile filename =
     snap_tir "tir-perceus" tir;
     let tir = March_tir.Escape.escape_analysis tir in
     snap_tir "tir-escape" tir;
-    let tir = if !opt_enabled then March_tir.Opt.run tir else tir in
-    snap_tir "tir-opt" tir;
+    (* Run optimizer with per-pass snapshots (Phase 3 instrumentation).
+       When dump_phases is on, each individual opt pass is captured separately
+       (tir-opt-1-inline, tir-opt-1-cprop, …) so the viewer shows every step.
+       When opt is disabled, fall through to a single tir-opt snapshot. *)
+    let tir =
+      if !opt_enabled then
+        March_tir.Opt.run
+          ~snap:(fun label m ->
+            if !dump_phases then
+              phases := March_dump.Dump.tir_phase m label :: !phases)
+          tir
+      else tir
+    in
+    (* When opt is disabled there are no per-pass snaps; still emit one overall. *)
+    if not !opt_enabled then snap_tir "tir-opt" tir;
     (* Write all collected phases to march-phases/phases.json *)
     (if !dump_phases then
        March_dump.Dump.write_phases ~source_file:filename (List.rev !phases));
