@@ -116,6 +116,7 @@ let all_stdlib_decls =
     "process.march";
     "logger.march";
     "flow.march";
+    "regex.march";
     "test.march";
     "pubsub.march";
     "channel.march";
@@ -130,6 +131,7 @@ let all_stdlib_decls =
     "session.march";
     "correlation.march";
     "bastion_dev.march";
+    "depot_gate.march";
     "depot_schema.march";
     "bastion_cookies.march";
     "bastion_routes.march";
@@ -293,6 +295,10 @@ let () =
     ("bastion_idempotency", [
       Alcotest.test_case "BastionIdempotency module"
         `Quick (run_stdlib_test "test_bastion_idempotency.march" "TestBastionIdempotency");
+    ]);
+    ("depot_gate", [
+      Alcotest.test_case "DepotGate module"
+        `Quick (run_stdlib_test "test_depot_gate.march" "TestDepotGate");
     ]);
     ("depot_schema", [
       Alcotest.test_case "DepotSchema module"
