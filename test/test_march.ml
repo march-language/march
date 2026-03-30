@@ -7503,6 +7503,60 @@ let test_cprop_opt_integration () =
    | March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 7)) -> ()
    | e -> Alcotest.failf "expected 7 after full opt, got: %s" (March_tir.Tir.show_expr e))
 
+(** Regression: cprop must NOT substitute literals into RC / Free arguments.
+    Bug: let m = "POST" in ... DecRC(m)  →  DecRC("POST") after cprop.
+    LLVM emit would then allocate a fresh string just to free it, while the
+    original allocation leaks at RC=1. *)
+let test_cprop_no_propagate_into_rc () =
+  let m_var = { March_tir.Tir.v_name = "m"; v_ty = March_tir.Tir.TString; v_lin = March_tir.Tir.Aff } in
+  let lit_post = March_ast.Ast.LitString "POST" in
+  (* let m = "POST"
+     DecRC(m)          -- cprop must leave this as DecRC(AVar m), not DecRC(ALit "POST") *)
+  let body =
+    March_tir.Tir.ELet (m_var,
+      March_tir.Tir.EAtom (March_tir.Tir.ALit lit_post),
+      March_tir.Tir.EDecRC (March_tir.Tir.AVar m_var)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EDecRC (March_tir.Tir.AVar _)) -> ()
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EDecRC (March_tir.Tir.ALit _)) ->
+     Alcotest.fail "cprop corrupted DecRC target: substituted literal into DecRC argument"
+   | e -> Alcotest.failf "unexpected shape: %s" (March_tir.Tir.show_expr e))
+
+let test_cprop_no_propagate_into_incrc () =
+  let m_var = { March_tir.Tir.v_name = "m"; v_ty = March_tir.Tir.TString; v_lin = March_tir.Tir.Lin } in
+  let lit_post = March_ast.Ast.LitString "POST" in
+  let body =
+    March_tir.Tir.ELet (m_var,
+      March_tir.Tir.EAtom (March_tir.Tir.ALit lit_post),
+      March_tir.Tir.EIncRC (March_tir.Tir.AVar m_var)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EIncRC (March_tir.Tir.AVar _)) -> ()
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EIncRC (March_tir.Tir.ALit _)) ->
+     Alcotest.fail "cprop corrupted IncRC target: substituted literal into IncRC argument"
+   | e -> Alcotest.failf "unexpected shape: %s" (March_tir.Tir.show_expr e))
+
+let test_cprop_no_propagate_into_free () =
+  let m_var = { March_tir.Tir.v_name = "m"; v_ty = March_tir.Tir.TString; v_lin = March_tir.Tir.Aff } in
+  let lit_post = March_ast.Ast.LitString "POST" in
+  let body =
+    March_tir.Tir.ELet (m_var,
+      March_tir.Tir.EAtom (March_tir.Tir.ALit lit_post),
+      March_tir.Tir.EFree (March_tir.Tir.AVar m_var)) in
+  let m = mk_module [mk_fn "f" body] in
+  let changed = ref false in
+  let m' = March_tir.Cprop.run ~changed m in
+  (match first_body m' with
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EFree (March_tir.Tir.AVar _)) -> ()
+   | March_tir.Tir.ELet (_, _, March_tir.Tir.EFree (March_tir.Tir.ALit _)) ->
+     Alcotest.fail "cprop corrupted Free target: substituted literal into Free argument"
+   | e -> Alcotest.failf "unexpected shape: %s" (March_tir.Tir.show_expr e))
+
 (* ── LLVM emit correctness: constructor hashtable collision ──────────────── *)
 
 (** Bug: ctor_info keyed by constructor name only — two ADTs with the same
@@ -17822,8 +17876,11 @@ let () =
         Alcotest.test_case "chain"                `Quick test_cprop_chain;
         Alcotest.test_case "enables_fold"         `Quick test_cprop_enables_fold;
         Alcotest.test_case "no_propagate_complex" `Quick test_cprop_no_propagate_complex;
-        Alcotest.test_case "case_branch_shadow"   `Quick test_cprop_case_branch_shadow;
-        Alcotest.test_case "opt_integration"      `Quick test_cprop_opt_integration;
+        Alcotest.test_case "case_branch_shadow"      `Quick test_cprop_case_branch_shadow;
+        Alcotest.test_case "opt_integration"         `Quick test_cprop_opt_integration;
+        Alcotest.test_case "no_propagate_into_decrc" `Quick test_cprop_no_propagate_into_rc;
+        Alcotest.test_case "no_propagate_into_incrc" `Quick test_cprop_no_propagate_into_incrc;
+        Alcotest.test_case "no_propagate_into_free"  `Quick test_cprop_no_propagate_into_free;
       ]);
       ("fast_math", [
         Alcotest.test_case "emits_fast_attr" `Quick test_fast_math_emits_fast_attr;

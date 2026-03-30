@@ -109,11 +109,16 @@ let rec cprop_expr ~changed (env : env) : Tir.expr -> Tir.expr = function
   | Tir.EReuse (token, ty, args) ->
     Tir.EReuse (subst_atom ~changed env token, ty, subst_atoms ~changed env args)
 
-  | Tir.EFree a        -> Tir.EFree (subst_atom ~changed env a)
-  | Tir.EIncRC a       -> Tir.EIncRC (subst_atom ~changed env a)
-  | Tir.EDecRC a       -> Tir.EDecRC (subst_atom ~changed env a)
-  | Tir.EAtomicIncRC a -> Tir.EAtomicIncRC (subst_atom ~changed env a)
-  | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (subst_atom ~changed env a)
+  (* RC operations and Free must NOT have their argument substituted with a
+     literal.  The argument must remain the variable that was heap-allocated
+     so that the RC operation affects the original allocation.  Replacing it
+     with a literal would cause LLVM emit to allocate a fresh object just to
+     immediately free it, while the original allocation leaks at RC=1. *)
+  | Tir.EFree a        -> Tir.EFree a
+  | Tir.EIncRC a       -> Tir.EIncRC a
+  | Tir.EDecRC a       -> Tir.EDecRC a
+  | Tir.EAtomicIncRC a -> Tir.EAtomicIncRC a
+  | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC a
 
   | Tir.ESeq (e1, e2) ->
     Tir.ESeq (cprop_expr ~changed env e1, cprop_expr ~changed env e2)
