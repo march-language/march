@@ -298,6 +298,18 @@ let bastion_cmd =
     (Cmd.info "bastion" ~doc:"Bastion web framework commands (server, new, routes)")
     [bastion_new_cmd; bastion_server_cmd; bastion_routes_cmd]
 
+(* ------------------------------------------------------------------ forge phases *)
+
+let phases_cmd =
+  let port =
+    Arg.(value & opt int 7777 &
+         info ["port"; "p"] ~docv:"PORT" ~doc:"Port to serve on (default: 7777)")
+  in
+  let run p = Cmd_phases.run ~port:p () in
+  Cmd.v (Cmd.info "phases"
+           ~doc:"Serve the phase viewer for --dump-phases output at http://localhost:PORT")
+    Term.(const run $ port)
+
 (* --------------------------------------------------------------------- root *)
 
 let default_term =
@@ -311,7 +323,7 @@ let () =
   let cmds =
     [ new_cmd; init_cmd; build_cmd; run_cmd; test_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; install_cmd; publish_cmd;
-      search_cmd; assets_cmd; bastion_cmd; help_cmd ]
+      search_cmd; assets_cmd; bastion_cmd; phases_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
