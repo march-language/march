@@ -38,19 +38,28 @@ let build_cmd =
   let release =
     Arg.(value & flag & info ["release"] ~doc:"Build in release mode")
   in
-  let run r =
-    match Cmd_build.build ~release:r with
+  let dump_phases =
+    Arg.(value & flag & info ["dump-phases"]
+           ~doc:"Serialize each compiler IR stage to march-phases/phases.json")
+  in
+  let run r d =
+    match Cmd_build.build ~release:r ~dump_phases:d () with
     | Ok binary -> Printf.printf "built: %s\n%!" binary
     | Error m   -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
   Cmd.v (Cmd.info "build" ~doc:"Build the current project")
-    Term.(const run $ release)
+    Term.(const run $ release $ dump_phases)
 
 (* ------------------------------------------------------------------- forge run *)
 
 let run_cmd =
+  let dump_phases =
+    Arg.(value & flag & info ["dump-phases"]
+           ~doc:"Serialize each compiler IR stage to march-phases/phases.json")
+  in
+  let run d = handle (Cmd_run.run ~dump_phases:d ()) in
   Cmd.v (Cmd.info "run" ~doc:"Build and run the current project")
-    Term.(const (fun () -> handle (Cmd_run.run ())) $ const ())
+    Term.(const run $ dump_phases)
 
 (* ------------------------------------------------------------------ forge test *)
 
@@ -289,11 +298,23 @@ let bastion_cmd =
     (Cmd.info "bastion" ~doc:"Bastion web framework commands (server, new, routes)")
     [bastion_new_cmd; bastion_server_cmd; bastion_routes_cmd]
 
+(* ------------------------------------------------------------------ forge phases *)
+
+let phases_cmd =
+  let port =
+    Arg.(value & opt int 7777 &
+         info ["port"; "p"] ~docv:"PORT" ~doc:"Port to serve on (default: 7777)")
+  in
+  let run p = Cmd_phases.run ~port:p () in
+  Cmd.v (Cmd.info "phases"
+           ~doc:"Serve the phase viewer for --dump-phases output at http://localhost:PORT")
+    Term.(const run $ port)
+
 (* --------------------------------------------------------------------- root *)
 
 let default_term =
   Term.(const (fun () ->
-    match Cmd_build.build ~release:false with
+    match Cmd_build.build ~release:false () with
     | Ok binary -> Printf.printf "built: %s\n%!" binary
     | Error m   -> Printf.eprintf "error: %s\n%!" m; exit 1
   ) $ const ())
@@ -302,7 +323,7 @@ let () =
   let cmds =
     [ new_cmd; init_cmd; build_cmd; run_cmd; test_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; install_cmd; publish_cmd;
-      search_cmd; assets_cmd; bastion_cmd; help_cmd ]
+      search_cmd; assets_cmd; bastion_cmd; phases_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term

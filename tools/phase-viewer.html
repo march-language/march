@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>March Phase Viewer</title>
+<script src="https://unpkg.com/cytoscape@3.27.0/dist/cytoscape.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", monospace;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Top bar ──────────────────────────────────────────────── */
+  #topbar {
+    background: #16213e;
+    border-bottom: 1px solid #0f3460;
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+
+  #topbar h1 {
+    font-size: 14px;
+    font-weight: 600;
+    color: #e94560;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+  }
+
+  #source-label {
+    font-size: 11px;
+    color: #888;
+    font-family: monospace;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+
+  #load-btn {
+    background: #0f3460;
+    border: 1px solid #e94560;
+    color: #e0e0e0;
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  #load-btn:hover { background: #e94560; }
+
+  #file-input { display: none; }
+
+  #diff-toggle {
+    background: transparent;
+    border: 1px solid #888;
+    color: #aaa;
+    padding: 4px 12px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  #diff-toggle.active {
+    border-color: #e9a94e;
+    color: #e9a94e;
+    background: #2a1a00;
+  }
+
+  #layout-select {
+    background: #0f3460;
+    border: 1px solid #444;
+    color: #e0e0e0;
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+
+  #node-count {
+    font-size: 11px;
+    color: #666;
+    white-space: nowrap;
+  }
+
+  /* ── Main area ──────────────────────────────────────────────── */
+  #main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* ── Phase sidebar ──────────────────────────────────────────── */
+  #sidebar {
+    width: 200px;
+    flex-shrink: 0;
+    background: #16213e;
+    border-right: 1px solid #0f3460;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  #sidebar h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #666;
+    padding: 10px 12px 6px;
+    border-bottom: 1px solid #0f3460;
+    flex-shrink: 0;
+  }
+
+  #phase-list {
+    overflow-y: auto;
+    flex: 1;
+    padding: 4px 0;
+  }
+
+  .phase-item {
+    padding: 7px 14px;
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #aaa;
+    border-left: 2px solid transparent;
+    position: relative;
+  }
+  .phase-item:hover { background: #1a2a4e; color: #e0e0e0; }
+  .phase-item.active {
+    background: #0f3460;
+    color: #e94560;
+    border-left-color: #e94560;
+  }
+  .phase-item.diff-from {
+    border-left-color: #888;
+    color: #bbb;
+    background: #1a1f2e;
+  }
+
+  .phase-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .phase-stat {
+    font-size: 10px;
+    color: #555;
+    margin-left: auto;
+  }
+
+  /* ── Graph canvas ──────────────────────────────────────────── */
+  #cy-wrap {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+  }
+
+  #cy {
+    width: 100%;
+    height: 100%;
+    background: #1a1a2e;
+  }
+
+  /* ── Info panel ──────────────────────────────────────────────── */
+  #info-panel {
+    width: 260px;
+    flex-shrink: 0;
+    background: #16213e;
+    border-left: 1px solid #0f3460;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  #info-panel h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: #666;
+    padding: 10px 12px 6px;
+    border-bottom: 1px solid #0f3460;
+    flex-shrink: 0;
+  }
+
+  #info-content {
+    overflow-y: auto;
+    flex: 1;
+    padding: 10px 12px;
+    font-size: 11px;
+    line-height: 1.6;
+  }
+
+  .info-row { margin-bottom: 8px; }
+  .info-key { color: #888; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .info-val { color: #e0e0e0; word-break: break-all; font-family: monospace; }
+
+  .info-calls {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 2px;
+  }
+  .call-chip {
+    background: #0f3460;
+    border-radius: 3px;
+    padding: 1px 6px;
+    font-family: monospace;
+    font-size: 10px;
+    color: #7ab4e8;
+    cursor: pointer;
+  }
+  .call-chip:hover { background: #1a4a80; }
+
+  /* ── Drop overlay ──────────────────────────────────────────── */
+  #drop-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(26,26,46,0.92);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 12px;
+    z-index: 100;
+  }
+
+  #drop-overlay h2 {
+    font-size: 22px;
+    color: #e94560;
+    font-weight: 300;
+  }
+
+  #drop-overlay p {
+    font-size: 13px;
+    color: #888;
+    text-align: center;
+    line-height: 1.8;
+  }
+
+  #drop-overlay code {
+    background: #0f3460;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-family: monospace;
+    font-size: 12px;
+    color: #7ab4e8;
+  }
+
+  #load-btn-big {
+    background: #e94560;
+    border: none;
+    color: white;
+    padding: 10px 24px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    margin-top: 8px;
+  }
+  #load-btn-big:hover { background: #c73450; }
+
+  /* ── Legend ──────────────────────────────────────────────── */
+  #legend {
+    padding: 8px 12px;
+    border-top: 1px solid #0f3460;
+    flex-shrink: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: #888;
+  }
+
+  .legend-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+</style>
+</head>
+<body>
+
+<!-- Top bar -->
+<div id="topbar">
+  <h1>March Phase Viewer</h1>
+  <span id="source-label">No file loaded</span>
+  <span id="node-count"></span>
+  <select id="layout-select">
+    <option value="breadthfirst">Breadthfirst</option>
+    <option value="cose">Cose</option>
+    <option value="circle">Circle</option>
+    <option value="grid">Grid</option>
+    <option value="concentric">Concentric</option>
+  </select>
+  <button id="diff-toggle">Diff Mode</button>
+  <button id="load-btn" onclick="document.getElementById('file-input').click()">Load phases.json</button>
+  <input type="file" id="file-input" accept=".json">
+</div>
+
+<!-- Main layout -->
+<div id="main">
+
+  <!-- Phase list -->
+  <div id="sidebar">
+    <h2>Phases</h2>
+    <div id="phase-list"></div>
+    <div id="legend">
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#5a9fd4"></div><span>module</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#6ec96e"></div><span>fn pub</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#4a9a4a"></div><span>fn priv</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#e9a94e"></div><span>type</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#c97ec9"></div><span>actor</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#e94560"></div><span>new/changed</span>
+      </div>
+      <div class="legend-item">
+        <div class="legend-dot" style="background:#444"></div><span>removed</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Graph -->
+  <div id="cy-wrap">
+    <div id="drop-overlay">
+      <h2>March Phase Viewer</h2>
+      <p>
+        Generate a phases file with:<br>
+        <code>march --dump-phases --compile your-file.march</code><br>
+        then load <code>march-phases/phases.json</code>
+      </p>
+      <button id="load-btn-big" onclick="document.getElementById('file-input').click()">
+        Load phases.json
+      </button>
+      <p style="font-size:11px;margin-top:8px">or drag &amp; drop the file here</p>
+    </div>
+    <div id="cy"></div>
+  </div>
+
+  <!-- Info panel -->
+  <div id="info-panel">
+    <h2>Node Info</h2>
+    <div id="info-content">
+      <p style="color:#555;font-size:11px">Click a node to inspect it.</p>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────────
+let allData = null;          // parsed phases.json root object
+let cy = null;               // cytoscape instance
+let currentPhaseIdx = 0;
+let diffMode = false;
+let diffFromIdx = null;       // phase we're diffing FROM (previous)
+
+// ─────────────────────────────────────────────────────────────────────────
+// Colour map for node types
+// ─────────────────────────────────────────────────────────────────────────
+const TYPE_COLORS = {
+  module:      '#5a9fd4',
+  fn_pub:      '#6ec96e',
+  fn_priv:     '#4a8a4a',
+  fn:          '#6ec96e',
+  type_pub:    '#e9a94e',
+  type_priv:   '#b87e30',
+  variant:     '#e9a94e',
+  record:      '#d4a030',
+  closure:     '#c0a070',
+  actor_pub:   '#c97ec9',
+  actor_priv:  '#996a99',
+  interface:   '#7ec9c9',
+  impl:        '#4a9999',
+  test:        '#9999cc',
+  describe:    '#7777aa',
+  let_pub:     '#88aacc',
+  let_priv:    '#556688',
+  default:     '#888888',
+};
+
+function nodeColor(type, diffStatus) {
+  if (diffStatus === 'added')   return '#e94560';
+  if (diffStatus === 'removed') return '#444444';
+  if (diffStatus === 'changed') return '#e9a94e';
+  return TYPE_COLORS[type] || TYPE_COLORS.default;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Load & file handling
+// ─────────────────────────────────────────────────────────────────────────
+document.getElementById('file-input').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (file) loadFile(file);
+});
+
+// Drag & drop
+const overlay = document.getElementById('drop-overlay');
+document.body.addEventListener('dragover', e => { e.preventDefault(); overlay.style.borderColor = '#e94560'; });
+document.body.addEventListener('drop', e => {
+  e.preventDefault();
+  const file = e.dataTransfer.files[0];
+  if (file) loadFile(file);
+});
+
+function loadFile(file) {
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      allData = JSON.parse(e.target.result);
+      initViewer();
+    } catch(err) {
+      alert('Failed to parse JSON: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Initialise viewer after data load
+// ─────────────────────────────────────────────────────────────────────────
+function initViewer() {
+  document.getElementById('drop-overlay').style.display = 'none';
+  document.getElementById('source-label').textContent = allData.source_file || '';
+
+  buildPhaseList();
+  initCytoscape();
+  showPhase(0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Sidebar: phase list
+// ─────────────────────────────────────────────────────────────────────────
+function buildPhaseList() {
+  const list = document.getElementById('phase-list');
+  list.innerHTML = '';
+  allData.phases.forEach((ph, idx) => {
+    const item = document.createElement('div');
+    item.className = 'phase-item';
+    item.dataset.idx = idx;
+
+    const dot = document.createElement('div');
+    dot.className = 'phase-dot';
+    dot.style.background = phaseColor(ph.phase);
+
+    const label = document.createElement('span');
+    label.textContent = ph.phase;
+
+    const stat = document.createElement('span');
+    stat.className = 'phase-stat';
+    stat.textContent = ph.nodes.length + 'n';
+
+    item.appendChild(dot);
+    item.appendChild(label);
+    item.appendChild(stat);
+
+    item.addEventListener('click', () => {
+      if (diffMode && currentPhaseIdx !== idx) {
+        // In diff mode, click sets the comparison target; current phase is 'from'
+        diffFromIdx = currentPhaseIdx;
+        currentPhaseIdx = idx;
+        showPhase(idx);
+      } else {
+        currentPhaseIdx = idx;
+        showPhase(idx);
+      }
+    });
+    list.appendChild(item);
+  });
+}
+
+function phaseColor(phaseName) {
+  const colors = {
+    'parse':          '#5a9fd4',
+    'tir-lower':      '#6ec96e',
+    'tir-mono':       '#8adf8a',
+    'tir-fusion':     '#e9a94e',
+    'tir-defun':      '#d47aaa',
+    'tir-known-call': '#7ac9d4',
+    'tir-perceus':    '#e94560',
+    'tir-escape':     '#c97ec9',
+    'tir-opt':        '#d4d45a',
+  };
+  return colors[phaseName] || '#888';
+}
+
+function updatePhaseList() {
+  document.querySelectorAll('.phase-item').forEach(item => {
+    const idx = parseInt(item.dataset.idx);
+    item.classList.remove('active', 'diff-from');
+    if (idx === currentPhaseIdx)        item.classList.add('active');
+    else if (idx === diffFromIdx && diffMode) item.classList.add('diff-from');
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Cytoscape setup
+// ─────────────────────────────────────────────────────────────────────────
+function initCytoscape() {
+  if (cy) cy.destroy();
+
+  cy = cytoscape({
+    container: document.getElementById('cy'),
+    style: [
+      {
+        selector: 'node',
+        style: {
+          'background-color': 'data(color)',
+          'label': 'data(label)',
+          'color': '#e0e0e0',
+          'font-size': '10px',
+          'text-valign': 'bottom',
+          'text-halign': 'center',
+          'text-margin-y': '4px',
+          'text-max-width': '120px',
+          'text-wrap': 'ellipsis',
+          'width': 'data(size)',
+          'height': 'data(size)',
+          'border-width': 'data(borderWidth)',
+          'border-color': 'data(borderColor)',
+          'border-opacity': 1,
+          'font-family': 'monospace',
+          'text-background-color': '#1a1a2e',
+          'text-background-opacity': 0.7,
+          'text-background-padding': '2px',
+        }
+      },
+      {
+        selector: 'node:selected',
+        style: {
+          'border-width': 3,
+          'border-color': '#fff',
+          'border-opacity': 1,
+        }
+      },
+      {
+        selector: 'node.module',
+        style: {
+          'shape': 'diamond',
+          'width': 24,
+          'height': 24,
+        }
+      },
+      {
+        selector: 'edge',
+        style: {
+          'width': 1,
+          'line-color': 'data(edgeColor)',
+          'target-arrow-color': 'data(edgeColor)',
+          'target-arrow-shape': 'triangle',
+          'curve-style': 'bezier',
+          'opacity': 0.6,
+          'label': 'data(label)',
+          'font-size': '8px',
+          'color': '#666',
+          'text-background-color': '#1a1a2e',
+          'text-background-opacity': 0.6,
+          'text-background-padding': '1px',
+        }
+      },
+      {
+        selector: 'edge[label = "calls"]',
+        style: {
+          'line-color': '#334',
+          'target-arrow-color': '#334',
+          'opacity': 0.3,
+          'label': '',
+        }
+      },
+      {
+        selector: 'edge[label = "decl"], edge[label = "fn"], edge[label = "type"], edge[label = "contains"]',
+        style: {
+          'line-color': '#335',
+          'target-arrow-color': '#335',
+          'opacity': 0.5,
+          'label': '',
+        }
+      },
+    ],
+    layout: { name: 'preset' },
+    userZoomingEnabled: true,
+    userPanningEnabled: true,
+  });
+
+  cy.on('tap', 'node', function(evt) {
+    showNodeInfo(evt.target.data());
+  });
+
+  cy.on('tap', function(evt) {
+    if (evt.target === cy) clearNodeInfo();
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Show a phase
+// ─────────────────────────────────────────────────────────────────────────
+function showPhase(idx) {
+  updatePhaseList();
+  if (!allData || !cy) return;
+
+  const phase = allData.phases[idx];
+  let diffMap = null;
+
+  if (diffMode && diffFromIdx !== null && diffFromIdx !== idx) {
+    diffMap = buildDiffMap(allData.phases[diffFromIdx], phase);
+  }
+
+  // Build cytoscape elements
+  const elements = [];
+  const knownIds = new Set(phase.nodes.map(n => n.id));
+
+  phase.nodes.forEach(n => {
+    const diff  = diffMap ? (diffMap.get(n.id) || 'same') : 'same';
+    const color = nodeColor(n.type, diff);
+    const size  = n.type === 'module' ? 20 :
+                  n.type.startsWith('fn') ? 14 :
+                  n.type.startsWith('type') || n.type === 'variant' || n.type === 'record' ? 12 :
+                  11;
+    const borderWidth = diff !== 'same' ? 2 : 0;
+    const borderColor = diff === 'added' ? '#ff4466' :
+                        diff === 'changed' ? '#e9a94e' :
+                        diff === 'removed' ? '#666' : 'transparent';
+    elements.push({
+      data: {
+        id: n.id,
+        label: truncate(n.label, 28),
+        fullLabel: n.label,
+        type: n.type,
+        metadata: n.metadata || {},
+        color,
+        size,
+        borderWidth,
+        borderColor,
+        diff,
+      },
+      classes: n.type === 'module' ? 'module' : '',
+    });
+  });
+
+  // Removed nodes (only in diff mode)
+  if (diffMode && diffFromIdx !== null && diffFromIdx !== idx) {
+    const fromPhase = allData.phases[diffFromIdx];
+    fromPhase.nodes.forEach(n => {
+      if (!knownIds.has(n.id)) {
+        elements.push({
+          data: {
+            id: n.id,
+            label: truncate(n.label, 28),
+            fullLabel: n.label,
+            type: n.type,
+            metadata: n.metadata || {},
+            color: '#333',
+            size: 10,
+            borderWidth: 0,
+            borderColor: 'transparent',
+            diff: 'removed',
+          },
+          classes: '',
+        });
+      }
+    });
+  }
+
+  phase.edges.forEach((e, i) => {
+    // Only add edge if both endpoints exist in our element set
+    const allIds = new Set(elements.map(el => el.data.id));
+    if (!allIds.has(e.source) || !allIds.has(e.target)) return;
+    const edgeColor = e.label === 'calls' ? '#2a2a44' : '#2a3a5a';
+    elements.push({
+      data: {
+        id: `e_${idx}_${i}`,
+        source: e.source,
+        target: e.target,
+        label: e.label,
+        edgeColor,
+      }
+    });
+  });
+
+  cy.elements().remove();
+  cy.add(elements);
+
+  runLayout();
+
+  const nodeCount = phase.nodes.length;
+  const edgeCount = phase.edges.length;
+  document.getElementById('node-count').textContent =
+    `${nodeCount} nodes · ${edgeCount} edges`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Layout
+// ─────────────────────────────────────────────────────────────────────────
+function runLayout() {
+  const layoutName = document.getElementById('layout-select').value;
+  const nodeCount = cy.nodes().length;
+
+  const opts = {
+    name: layoutName,
+    animate: nodeCount < 200,
+    animationDuration: 400,
+    fit: true,
+    padding: 40,
+    avoidOverlap: true,
+  };
+
+  // Tuning for specific layouts
+  if (layoutName === 'breadthfirst') {
+    opts.directed = true;
+    opts.spacingFactor = 1.2;
+  } else if (layoutName === 'cose') {
+    opts.nodeRepulsion = () => 8000;
+    opts.idealEdgeLength = () => 80;
+    opts.edgeElasticity = () => 100;
+    opts.numIter = 1000;
+  }
+
+  cy.layout(opts).run();
+}
+
+document.getElementById('layout-select').addEventListener('change', () => {
+  if (cy && cy.nodes().length > 0) runLayout();
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Diff mode
+// ─────────────────────────────────────────────────────────────────────────
+document.getElementById('diff-toggle').addEventListener('click', function() {
+  diffMode = !diffMode;
+  this.classList.toggle('active', diffMode);
+  if (!diffMode) {
+    diffFromIdx = null;
+    showPhase(currentPhaseIdx);
+  } else {
+    // Default: diff current vs previous
+    diffFromIdx = Math.max(0, currentPhaseIdx - 1);
+    showPhase(currentPhaseIdx);
+  }
+});
+
+/**
+ * Build a map from node id → diff status ('added' | 'changed' | 'same')
+ * by comparing fromPhase to toPhase.
+ */
+function buildDiffMap(fromPhase, toPhase) {
+  const fromMap = new Map(fromPhase.nodes.map(n => [n.id, n]));
+  const result  = new Map();
+
+  toPhase.nodes.forEach(n => {
+    if (!fromMap.has(n.id)) {
+      result.set(n.id, 'added');
+    } else {
+      const old = fromMap.get(n.id);
+      const changed = JSON.stringify(old.metadata) !== JSON.stringify(n.metadata)
+                   || old.label !== n.label;
+      result.set(n.id, changed ? 'changed' : 'same');
+    }
+  });
+  return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Node info panel
+// ─────────────────────────────────────────────────────────────────────────
+function showNodeInfo(data) {
+  const content = document.getElementById('info-content');
+  const meta    = data.metadata || {};
+
+  let html = `
+    <div class="info-row">
+      <div class="info-key">id</div>
+      <div class="info-val">${esc(data.id)}</div>
+    </div>
+    <div class="info-row">
+      <div class="info-key">label</div>
+      <div class="info-val">${esc(data.fullLabel || data.label)}</div>
+    </div>
+    <div class="info-row">
+      <div class="info-key">type</div>
+      <div class="info-val">${esc(data.type)}</div>
+    </div>`;
+
+  if (data.diff && data.diff !== 'same') {
+    html += `
+    <div class="info-row">
+      <div class="info-key">diff</div>
+      <div class="info-val" style="color:${data.diff==='added'?'#e94560':data.diff==='changed'?'#e9a94e':'#888'}">${data.diff}</div>
+    </div>`;
+  }
+
+  // Metadata fields
+  Object.entries(meta).forEach(([k, v]) => {
+    if (k === 'calls' && Array.isArray(v) && v.length > 0) {
+      html += `
+    <div class="info-row">
+      <div class="info-key">calls</div>
+      <div class="info-calls">
+        ${v.map(fn => `<span class="call-chip" title="${esc(fn)}">${esc(fn)}</span>`).join('')}
+      </div>
+    </div>`;
+    } else if (v !== '' && v !== '[]' && v !== '0') {
+      html += `
+    <div class="info-row">
+      <div class="info-key">${esc(k)}</div>
+      <div class="info-val">${esc(typeof v === 'string' ? v : JSON.stringify(v))}</div>
+    </div>`;
+    }
+  });
+
+  content.innerHTML = html;
+}
+
+function clearNodeInfo() {
+  document.getElementById('info-content').innerHTML =
+    '<p style="color:#555;font-size:11px">Click a node to inspect it.</p>';
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Utilities
+// ─────────────────────────────────────────────────────────────────────────
+function truncate(s, max) {
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+function esc(s) {
+  if (typeof s !== 'string') s = JSON.stringify(s);
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+</script>
+</body>
+</html>
