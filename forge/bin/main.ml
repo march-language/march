@@ -38,19 +38,28 @@ let build_cmd =
   let release =
     Arg.(value & flag & info ["release"] ~doc:"Build in release mode")
   in
-  let run r =
-    match Cmd_build.build ~release:r with
+  let dump_phases =
+    Arg.(value & flag & info ["dump-phases"]
+           ~doc:"Serialize each compiler IR stage to march-phases/phases.json")
+  in
+  let run r d =
+    match Cmd_build.build ~release:r ~dump_phases:d () with
     | Ok binary -> Printf.printf "built: %s\n%!" binary
     | Error m   -> Printf.eprintf "error: %s\n%!" m; exit 1
   in
   Cmd.v (Cmd.info "build" ~doc:"Build the current project")
-    Term.(const run $ release)
+    Term.(const run $ release $ dump_phases)
 
 (* ------------------------------------------------------------------- forge run *)
 
 let run_cmd =
+  let dump_phases =
+    Arg.(value & flag & info ["dump-phases"]
+           ~doc:"Serialize each compiler IR stage to march-phases/phases.json")
+  in
+  let run d = handle (Cmd_run.run ~dump_phases:d ()) in
   Cmd.v (Cmd.info "run" ~doc:"Build and run the current project")
-    Term.(const (fun () -> handle (Cmd_run.run ())) $ const ())
+    Term.(const run $ dump_phases)
 
 (* ------------------------------------------------------------------ forge test *)
 
@@ -293,7 +302,7 @@ let bastion_cmd =
 
 let default_term =
   Term.(const (fun () ->
-    match Cmd_build.build ~release:false with
+    match Cmd_build.build ~release:false () with
     | Ok binary -> Printf.printf "built: %s\n%!" binary
     | Error m   -> Printf.eprintf "error: %s\n%!" m; exit 1
   ) $ const ())

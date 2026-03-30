@@ -243,6 +243,7 @@ let ensure_runtime_so () =
   so_path
 
 let dump_tir       = ref false
+let dump_phases    = ref false
 let emit_llvm      = ref false
 let do_compile     = ref false
 let output_file    = ref ""
@@ -851,6 +852,8 @@ let compile filename =
     ) parse_errs;
   (* Desugar *)
   let desugared = March_desugar.Desugar.desugar_module module_ast in
+  (* Capture user AST before stdlib injection — used by -dump-phases *)
+  let user_ast = desugared in
   (* Resolve cross-file imports: find imported .march files, parse and inject *)
   let (resolve_errors, extra_decls) = resolve_imports ~source_file:filename desugared in
   List.iter (fun (_mod_name, span, msg) ->
@@ -900,7 +903,7 @@ let compile filename =
           ) d.notes
       end
     ) diags;
-  let compile_mode = !dump_tir || !emit_llvm || !do_compile in
+  let compile_mode = !dump_tir || !emit_llvm || !do_compile || !dump_phases in
   let has_user_errors = List.exists (fun (d : March_errors.Errors.diagnostic) ->
       d.severity = March_errors.Errors.Error && is_user_file d
     ) diags in
@@ -908,7 +911,17 @@ let compile filename =
      (e.g. http_client) are tolerated since those modules are WIP. *)
   if has_user_errors || has_parse_errors || has_resolve_errors then exit 1
   else if compile_mode then begin
+    (* -dump-phases: collect per-stage JSON graphs *)
+    let phases = ref [] in
+    let snap_tir label tir =
+      if !dump_phases then
+        phases := March_dump.Dump.tir_phase tir label :: !phases
+    in
+    (* Phase 1: AST after parse+desugar — user file only (no stdlib). *)
+    (if !dump_phases then
+       phases := March_dump.Dump.ast_phase user_ast "parse" :: !phases);
     let tir = March_tir.Lower.lower_module ~type_map desugared in
+    snap_tir "tir-lower" tir;
     (* For WASM island targets, mark render/update/init as exported.
        Set exports BEFORE monomorphization so the functions get mono'd. *)
     let tir = match parse_target !target_str with
@@ -928,6 +941,7 @@ let compile filename =
       | _ -> tir
     in
     let tir = March_tir.Mono.monomorphize tir in
+    snap_tir "tir-mono" tir;
     (* After mono, update tm_exports to use monomorphized names *)
     let tir =
       if tir.March_tir.Tir.tm_exports <> [] then begin
@@ -951,16 +965,25 @@ let compile filename =
       end else tir
     in
     let tir = if !opt_enabled then March_tir.Fusion.run ~changed:(ref false) tir else tir in
+    snap_tir "tir-fusion" tir;
     let tir = March_tir.Defun.defunctionalize tir in
+    snap_tir "tir-defun" tir;
     (* Known-call pass: run before Perceus so apply functions are still pure
        and eligible for inlining in the subsequent Opt fixed-point loop.
        Also included in the Opt coordinator for cases revealed after Perceus. *)
     let tir = if !opt_enabled
               then March_tir.Known_call.run ~changed:(ref false) tir
               else tir in
+    snap_tir "tir-known-call" tir;
     let tir = March_tir.Perceus.perceus tir in
+    snap_tir "tir-perceus" tir;
     let tir = March_tir.Escape.escape_analysis tir in
+    snap_tir "tir-escape" tir;
     let tir = if !opt_enabled then March_tir.Opt.run tir else tir in
+    snap_tir "tir-opt" tir;
+    (* Write all collected phases to march-phases/phases.json *)
+    (if !dump_phases then
+       March_dump.Dump.write_phases ~source_file:filename (List.rev !phases));
     if !dump_tir then begin
       List.iter (fun td ->
           Printf.printf "%s\n\n" (March_tir.Pp.string_of_type_def td)
@@ -1252,7 +1275,8 @@ let () =
   end;
   let files = ref [] in
   let specs = [
-    ("--dump-tir",   Arg.Set dump_tir,    " Print TIR instead of evaluating");
+    ("--dump-tir",     Arg.Set dump_tir,     " Print TIR instead of evaluating");
+    ("--dump-phases",  Arg.Set dump_phases,  " Serialize each IR stage to march-phases/phases.json");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
     ("--target",     Arg.Set_string target_str,  "<target>  Compilation target: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown");

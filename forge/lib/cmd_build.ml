@@ -13,7 +13,7 @@ let find_march_files dir =
   in
   walk [] dir
 
-let build ~release =
+let build ~release ?(dump_phases=false) () =
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
@@ -31,6 +31,7 @@ let build ~release =
     else begin
       let output    = Filename.concat build_dir proj.Project.name in
       let opt_flag  = if release then " --opt 2" else "" in
+      let dump_flag = if dump_phases then " --dump-phases" else "" in
       (* Collect lib directories from path dependencies *)
       let dep_lib_paths = List.filter_map (fun (_, dep) ->
           match dep with
@@ -52,8 +53,8 @@ let build ~release =
       in
       let entry = Filename.concat lib_dir (proj.Project.name ^ ".march") in
       let cmd =
-        Printf.sprintf "%smarch --compile -o %s%s %s"
-          lib_path_env (Filename.quote output) opt_flag (Filename.quote entry)
+        Printf.sprintf "%smarch --compile -o %s%s%s %s"
+          lib_path_env (Filename.quote output) opt_flag dump_flag (Filename.quote entry)
       in
       let rc = Sys.command cmd in
       if rc = 0 then Ok output

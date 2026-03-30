@@ -1,6 +1,6 @@
 (** forge run — run app through the March interpreter (fast for development) *)
 
-let run () =
+let run ?(dump_phases=false) () =
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
@@ -31,8 +31,9 @@ let run () =
         let lib_path_env =
           Printf.sprintf "MARCH_LIB_PATH=%s" (String.concat ":" extra_dirs)
         in
-        let cmd = Printf.sprintf "%s march %s"
-          lib_path_env (Filename.quote entry) in
+        let dump_flag = if dump_phases then " --dump-phases" else "" in
+        let cmd = Printf.sprintf "%s march%s %s"
+          lib_path_env dump_flag (Filename.quote entry) in
         let rc = Sys.command cmd in
         if rc = 0 then Ok ()
         else Error (Printf.sprintf "program exited with code %d" rc)
