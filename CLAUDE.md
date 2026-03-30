@@ -55,7 +55,7 @@ See [syntax_reference.md](syntax_reference.md) for a complete quick-reference of
 
 - Module: `mod Name do ... end` (not `module`)
 - Type variants: `type Foo = A | B(Int)` — no leading `|`
-- Conditionals: `if cond do e1 else e2 end` — use `do...else...end`, not `then`
+- Conditionals: `if cond do ... end` — use `do...end`, `else` is optional, NO `then` keyword
 - Block lets: `let x = expr` with no `in`; subsequent block exprs see the binding
 - No `;` — use newlines to separate block expressions
 - Match arms use `block_body` — multi-statement arms are fine, no `do...end` wrapper needed

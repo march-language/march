@@ -248,13 +248,13 @@ end
 
 ## If / Else
 
-Inline form:
-
 ```march
-if x > 0 then "pos" else "non-pos"
+if x > 0 do
+  "positive"
+end
 ```
 
-Block form (both branches can be multi-statement):
+With optional `else` block (both branches can be multi-statement):
 
 ```march
 if x > 0 do
@@ -265,7 +265,7 @@ else
 end
 ```
 
-Both forms require an `else` branch — `if` is an expression.
+`else` is optional — `if` without `else` returns `()`. There is no `then` keyword.
 
 ---
 
