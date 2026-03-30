@@ -376,7 +376,11 @@ mod Static do
       "<script src=\"" ++ Bastion.Static.path("app.js") ++ "\"></script>"
   """
   fn path(logical) do
-    let clean = if String.starts_with(logical, "/") then String.slice_bytes(logical, 1, string_length(logical) - 1) else logical
+    let clean = if String.starts_with(logical, "/") do
+      String.slice_bytes(logical, 1, string_length(logical) - 1)
+    else
+      logical
+    end
     let manifest = get_manifest()
     match Json.get(manifest, clean) do
     Some(Json.Str(digested)) -> "/static/assets/" ++ digested
@@ -426,7 +430,7 @@ mod Static do
   """
   fn serve(conn, path_segments, from_dir) do
     let relative = String.join(path_segments, "/")
-    if not (safe_path(from_dir, relative)) do
+    if not(safe_path(from_dir, relative)) do
       HttpServer.send_resp(conn, 404, "Not Found")
     else
       let full_path = Path.join(from_dir, relative)
@@ -444,7 +448,11 @@ mod Static do
           |> HttpServer.put_resp_header("etag", etag_val)
         match HttpServer.get_req_header(conn, "if-none-match") do
         Some(client_tag) ->
-          if client_tag == etag_val then HttpServer.send_resp(base_conn, 304, "") else HttpServer.send_resp(base_conn, 200, body)
+          if client_tag == etag_val do
+            HttpServer.send_resp(base_conn, 304, "")
+          else
+            HttpServer.send_resp(base_conn, 200, body)
+          end
         None ->
           HttpServer.send_resp(base_conn, 200, body)
         end

@@ -1,0 +1,222 @@
+-- demo_app: Bastion web app demonstrating dev dashboard, asset pipeline,
+-- islands, static file serving, and multi-route routing.
+--
+-- Run with:
+--   dune exec march -- demo_app/lib/app.march
+--
+-- Routes:
+--   GET /              home page
+--   GET /about         about page (island demo)
+--   GET /api/status    JSON endpoint
+--   GET /_bastion      dev dashboard
+--   GET /static/**     static files from priv/static/
+
+mod DemoApp do
+
+-- ---------------------------------------------------------------------------
+-- Pre-populate DevStats for the dashboard demo
+-- ---------------------------------------------------------------------------
+
+pfn make_demo_stats() do
+  let s0 = BastionDev.new_stats()
+
+  -- Register routes in the dashboard
+  let s1 = BastionDev.register_route(s0,
+    BastionDev.make_route("GET", "/", "DemoApp.home_handler"))
+  let s2 = BastionDev.register_route(s1,
+    BastionDev.make_route("GET", "/about", "DemoApp.about_handler"))
+  let s3 = BastionDev.register_route(s2,
+    BastionDev.make_route("GET", "/api/status", "DemoApp.api_status_handler"))
+  let s4 = BastionDev.register_route(s3,
+    BastionDev.make_route("GET", "/_bastion", "BastionDev.dashboard_handler"))
+  let s5 = BastionDev.register_route(s4,
+    BastionDev.make_route("GET", "/static/**", "Bastion.Static.serve"))
+
+  -- Seed some request history so the dashboard looks alive
+  let s6  = BastionDev.record_request(s5,  BastionDev.make_entry("GET",  "/",             200, 3))
+  let s7  = BastionDev.record_request(s6,  BastionDev.make_entry("GET",  "/about",         200, 2))
+  let s8  = BastionDev.record_request(s7,  BastionDev.make_entry("GET",  "/api/status",    200, 1))
+  let s9  = BastionDev.record_request(s8,  BastionDev.make_entry("GET",  "/",              200, 4))
+  let s10 = BastionDev.record_request(s9,  BastionDev.make_entry("POST", "/api/missing",   404, 1))
+  let s11 = BastionDev.record_request(s10, BastionDev.make_entry("GET",  "/about",         200, 3))
+  let s12 = BastionDev.record_request(s11, BastionDev.make_entry("GET",  "/static/assets/app.css", 200, 5))
+  let s13 = BastionDev.record_request(s12, BastionDev.make_entry("GET",  "/",              200, 2))
+
+  -- Seed one error entry
+  let err = BastionDev.make_error_entry(
+    "KeyError: assign 'user' not found",
+    "  in DemoApp.profile_handler demo_app/lib/app.march:42\n  in HttpServer.run_pipeline stdlib/http_server.march:88",
+    "/profile/42")
+  BastionDev.record_error(s13, err)
+end
+
+-- Vault key for persisting stats across requests
+pfn stats_vault_key() do "demo_app_stats" end
+
+-- Load stats from Vault, initialising on first call.
+pfn load_stats() do
+  match Vault.whereis(stats_vault_key()) do
+  None ->
+    do
+      let tbl = Vault.new(stats_vault_key())
+      let initial = make_demo_stats()
+      Vault.set(tbl, "stats", initial)
+      initial
+    end
+  Some(tbl) ->
+    match Vault.get(tbl, "stats") do
+    Some(s) -> s
+    None ->
+      do
+        let initial = make_demo_stats()
+        Vault.set(tbl, "stats", initial)
+        initial
+      end
+    end
+  end
+end
+
+-- Persist updated stats to Vault.
+pfn save_stats(stats) do
+  let tbl = match Vault.whereis(stats_vault_key()) do
+    Some(t) -> t
+    None    -> Vault.new(stats_vault_key())
+  end
+  Vault.set(tbl, "stats", stats)
+end
+
+-- Record a live request entry into the persisted stats.
+pfn track_request(method_str, path_str, status_code, duration_ms) do
+  let stats = load_stats()
+  let entry = BastionDev.make_entry(method_str, path_str, status_code, duration_ms)
+  let updated = BastionDev.record_request(stats, entry)
+  save_stats(updated)
+end
+
+-- ---------------------------------------------------------------------------
+-- Layout helper
+-- ---------------------------------------------------------------------------
+
+pfn layout(title, body_html) do
+  "<!DOCTYPE html><html lang=\"en\">" ++
+  "<head>" ++
+  "<meta charset=\"utf-8\">" ++
+  "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">" ++
+  "<title>" ++ title ++ " — DemoApp</title>" ++
+  "<link rel=\"stylesheet\" href=\"" ++ Bastion.Assets.css_bundle_path() ++ "\">" ++
+  "</head>" ++
+  "<body>" ++
+  "<nav class=\"topnav\">" ++
+  "<a href=\"/\">Home</a>" ++
+  "<a href=\"/about\">About</a>" ++
+  "<a href=\"/api/status\">API</a>" ++
+  "<a href=\"/_bastion\">&#x26a1; Dev Dashboard</a>" ++
+  "</nav>" ++
+  "<main class=\"content\">" ++
+  body_html ++
+  "</main>" ++
+  "<script src=\"" ++ Bastion.Assets.js_bundle_path() ++ "\"></script>" ++
+  "</body></html>"
+end
+
+-- ---------------------------------------------------------------------------
+-- Route handlers
+-- ---------------------------------------------------------------------------
+
+pfn home_handler(conn) do
+  let html = layout("Home",
+    "<div class=\"hero\">" ++
+    "<h1>&#x2756; DemoApp</h1>" ++
+    "<p class=\"subtitle\">A Bastion web app built with March</p>" ++
+    "<div class=\"feature-grid\">" ++
+    "<div class=\"feature\"><h3>&#x26a1; Asset Pipeline</h3><p>esbuild bundles <code>assets/js/app.js</code> and <code>assets/css/app.css</code> to <code>priv/static/assets/</code>.</p></div>" ++
+    "<div class=\"feature\"><h3>&#x1f3dd; Islands</h3><p>Interactive components hydrated by the march-islands.js runtime.</p></div>" ++
+    "<div class=\"feature\"><h3>&#x1f4ca; Dev Dashboard</h3><p>Request logs, route registry, system stats at <a href=\"/_bastion\">/_bastion</a>.</p></div>" ++
+    "<div class=\"feature\"><h3>&#x1f4c2; Static Files</h3><p>Files in <code>priv/static/</code> served at <code>/static/**</code> with ETags and Cache-Control.</p></div>" ++
+    "</div>" ++
+    "</div>")
+  HttpServer.html(conn, 200, html)
+end
+
+pfn about_handler(conn) do
+  let html = layout("About",
+    "<h1>About</h1>" ++
+    "<p>DemoApp shows the Bastion framework features in action.</p>" ++
+    "<h2>Island Demo</h2>" ++
+    "<p>The counter below is a March island: server-rendered HTML, hydrated by march-islands.js at runtime.</p>" ++
+    "<div data-island=\"Counter\" data-hydrate=\"eager\" data-state=\"{&quot;count&quot;:0}\">" ++
+    "<p class=\"island-counter\">Count: <span id=\"count-display\">0</span></p>" ++
+    "<button class=\"btn\" onclick=\"this.dispatchEvent(new CustomEvent('march:msg', {detail:'Increment',bubbles:true}))\">+1</button>" ++
+    "<button class=\"btn\" onclick=\"this.dispatchEvent(new CustomEvent('march:msg', {detail:'Decrement',bubbles:true}))\">&minus;1</button>" ++
+    "</div>" ++
+    "<h2>Stack</h2>" ++
+    "<ul><li>Language: March 0.1.0</li><li>Framework: Bastion</li><li>Assets: esbuild</li><li>Runtime: OCaml 5.3.0</li></ul>")
+  HttpServer.html(conn, 200, html)
+end
+
+pfn api_status_handler(conn) do
+  HttpServer.json(conn, 200,
+    "{\"status\":\"ok\",\"app\":\"DemoApp\",\"version\":\"0.1.0\",\"framework\":\"Bastion\",\"routes\":5}")
+end
+
+-- ---------------------------------------------------------------------------
+-- Router
+-- ---------------------------------------------------------------------------
+
+pfn router(conn) do
+  let m    = Http.method_to_string(HttpServer.method(conn))
+  let p    = HttpServer.path(conn)
+
+  -- Check the dev dashboard first
+  let stats = load_stats()
+  let conn2 = BastionDev.dashboard_handler(conn, stats)
+  if HttpServer.halted(conn2) do
+    -- Dashboard served — record it
+    track_request(m, p, 200, 0)
+    conn2
+  else
+    let result = match (HttpServer.method(conn), HttpServer.path_info(conn)) do
+    (Get, Nil) ->
+      home_handler(conn)
+    (Get, Cons("about", Nil)) ->
+      about_handler(conn)
+    (Get, Cons("api", Cons("status", Nil))) ->
+      api_status_handler(conn)
+    (Get, Cons("static", rest)) ->
+      Bastion.Static.serve(conn, rest, "demo_app/priv/static")
+    _ ->
+      HttpServer.html(conn, 404,
+        layout("Not Found",
+          "<h1>404 Not Found</h1><p>The page <code>" ++ p ++ "</code> does not exist.</p>"))
+    end
+    -- Record every routed request
+    track_request(m, p, HttpServer.status(result), 0)
+    result
+  end
+end
+
+-- ---------------------------------------------------------------------------
+-- main
+-- ---------------------------------------------------------------------------
+
+fn main() do
+  println("==============================================")
+  println(" DemoApp — Bastion dev dashboard demo")
+  println("==============================================")
+  println("Listening on http://localhost:4000")
+  println("")
+  println("Routes:")
+  println("  GET /              home page")
+  println("  GET /about         about + island demo")
+  println("  GET /api/status    JSON status endpoint")
+  println("  GET /_bastion      dev dashboard")
+  println("  GET /static/**     priv/static/ file serving")
+  println("")
+  HttpServer.new(4000)
+  |> HttpServer.plug(fn conn -> BastionDev.request_timer(conn))
+  |> HttpServer.plug(router)
+  |> HttpServer.plug(fn conn -> BastionDev.inject_live_reload(conn))
+  |> HttpServer.listen()
+end
+
+end -- mod DemoApp
