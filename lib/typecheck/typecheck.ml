@@ -961,7 +961,12 @@ let builtin_bindings : (string * scheme) list =
     ("byte_to_char", Mono (TArrow (t_int, t_string)));
     (* Actor message-passing builtins *)
     ("actor_cast",  poly2 (fun a b -> TArrow (a, TArrow (b, t_unit))));
-    ("actor_call",  poly2 (fun a e -> TArrow (a, TArrow (a, TArrow (t_int, t_result a e)))));
+    ("actor_call",
+      let pid_a = fresh_var 0 in
+      let msg_b = fresh_var 0 in
+      let ret_c = fresh_var 0 in
+      Poly ([get_id pid_a; get_id msg_b; get_id ret_c], [],
+        TArrow (pid_a, TArrow (msg_b, TArrow (t_int, t_result ret_c t_string)))));
     ("actor_reply", poly2 (fun a b -> TArrow (a, TArrow (b, t_unit))));
     (* Logger builtins — 0-arg variants typed as Mono(result) so foo() works *)
     ("logger_set_level",   Mono (TArrow (t_int, t_unit)));

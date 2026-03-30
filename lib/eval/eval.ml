@@ -1525,17 +1525,17 @@ let march_string_list xs =
 
 (** Parse an HTTP method string to the March Method variant. *)
 let http_method_of_string s =
-  match String.uppercase_ascii s with
-  | "GET"     -> VCon ("Get",     [])
-  | "POST"    -> VCon ("Post",    [])
-  | "PUT"     -> VCon ("Put",     [])
-  | "PATCH"   -> VCon ("Patch",   [])
-  | "DELETE"  -> VCon ("Delete",  [])
-  | "HEAD"    -> VCon ("Head",    [])
-  | "OPTIONS" -> VCon ("Options", [])
-  | "TRACE"   -> VCon ("Trace",   [])
-  | "CONNECT" -> VCon ("Connect", [])
-  | _         -> VCon ("Other",   [VString s])
+  match String.lowercase_ascii s with
+  | "get"     -> VAtom "get"
+  | "post"    -> VAtom "post"
+  | "put"     -> VAtom "put"
+  | "patch"   -> VAtom "patch"
+  | "delete"  -> VAtom "delete"
+  | "head"    -> VAtom "head"
+  | "options" -> VAtom "options"
+  | "trace"   -> VAtom "trace"
+  | "connect" -> VAtom "connect"
+  | _         -> VAtom (String.lowercase_ascii s)
 
 (** Split a URI path on "/" into non-empty segments → March List(String). *)
 let split_path_info path =
