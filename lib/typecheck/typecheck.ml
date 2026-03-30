@@ -386,6 +386,163 @@ let lookup_var  name env = List.assoc_opt name env.vars
 let lookup_type name env = List.assoc_opt name env.types
 let lookup_ctor name env = List.assoc_opt name env.ctors
 
+(* ── Qualified module resolution ─────────────────────────────────────
+   When a qualified name like "Map.get" isn't in the local env, we load
+   the module via the registry and inject its exports into env on demand. *)
+
+(** Simple edit distance for "did you mean" suggestions. *)
+let edit_distance (a : string) (b : string) : int =
+  let m = String.length a and n = String.length b in
+  if m = 0 then n
+  else if n = 0 then m
+  else begin
+    let d = Array.make_matrix (m + 1) (n + 1) 0 in
+    for i = 0 to m do d.(i).(0) <- i done;
+    for j = 0 to n do d.(0).(j) <- j done;
+    for i = 1 to m do
+      for j = 1 to n do
+        let cost = if a.[i-1] = b.[j-1] then 0 else 1 in
+        d.(i).(j) <- min (min (d.(i-1).(j) + 1) (d.(i).(j-1) + 1))
+                         (d.(i-1).(j-1) + cost)
+      done
+    done;
+    d.(m).(n)
+  end
+
+(** Split a qualified name "Mod.member" into (module, member).
+    Returns None if the name contains no dot. *)
+let split_qualified (name : string) : (string * string) option =
+  match String.index_opt name '.' with
+  | None -> None
+  | Some i ->
+    Some (String.sub name 0 i, String.sub name (i + 1) (String.length name - i - 1))
+
+(** Suggest a module name similar to [name] from stdlib files on disk. *)
+let suggest_module_name (name : string) : string option =
+  match March_modules.Module_registry.find_stdlib_dir () with
+  | None -> None
+  | Some dir ->
+    let best = ref None in
+    let best_dist = ref max_int in
+    (try
+       let entries = Sys.readdir dir in
+       Array.iter (fun entry ->
+         if Filename.check_suffix entry ".march" then begin
+           let base = Filename.chop_suffix entry ".march" in
+           let parts = String.split_on_char '_' base in
+           let mod_name = String.concat "" (List.map String.capitalize_ascii parts) in
+           let d = edit_distance (String.lowercase_ascii name) (String.lowercase_ascii mod_name) in
+           if d > 0 && d < !best_dist && d <= 2 then begin
+             best := Some mod_name;
+             best_dist := d
+           end
+         end
+       ) entries
+     with _ -> ());
+    !best
+
+(** Load a module's exports into an env, returning the updated env.
+    Injects "Mod.name" bindings for functions/values, types, and constructors. *)
+let load_module_into_env (mod_name : string) (exports : March_modules.Module_registry.module_exports) (env : env) : env =
+  List.fold_left (fun env entry ->
+    let open March_modules.Module_registry in
+    let qname = mod_name ^ "." ^ entry.ex_name in
+    match entry.ex_kind with
+    | ExFn | ExValue ->
+      if List.mem_assoc qname env.vars then env
+      else { env with vars = (qname, Mono (fresh_var 0)) :: env.vars }
+    | ExType arity ->
+      if List.mem_assoc qname env.types then env
+      else { env with types = (qname, arity) :: env.types }
+    | ExCtor (parent_type, _ctor_arity) ->
+      if List.mem_assoc qname env.ctors then env
+      else begin
+        (* Find the parent type's param names from the module's type exports *)
+        let type_arity = List.fold_left (fun acc e ->
+          match e.ex_kind with ExType a when e.ex_name = parent_type -> a | _ -> acc
+        ) 0 exports.me_entries in
+        let param_names = List.init type_arity (fun i ->
+          Printf.sprintf "$t%d" i) in
+        let arg_tys = List.init _ctor_arity (fun i ->
+          Ast.TyVar { txt = Printf.sprintf "$a%d" i; span = Ast.dummy_span }) in
+        let ci = {
+          ci_type = mod_name ^ "." ^ parent_type;
+          ci_params = param_names;
+          ci_arg_tys = arg_tys;
+          ci_vis = if entry.ex_public then Ast.Public else Ast.Private;
+        } in
+        { env with ctors = (qname, ci) :: env.ctors }
+      end
+  ) env exports.me_entries
+
+(** Try to resolve a qualified variable by loading its module.
+    Returns (updated_env, scheme option). *)
+let resolve_qualified_var (name : string) (env : env) : env * scheme option =
+  match split_qualified name with
+  | None -> env, None
+  | Some (mod_name, _member) ->
+    match March_modules.Module_registry.ensure_loaded mod_name with
+    | None -> env, None
+    | Some exports ->
+      let env' = load_module_into_env mod_name exports env in
+      env', lookup_var name env'
+
+(** Try to resolve a qualified type by loading its module.
+    Returns (updated_env, arity option). *)
+let resolve_qualified_type (name : string) (env : env) : env * int option =
+  match split_qualified name with
+  | None -> env, None
+  | Some (mod_name, _member) ->
+    match March_modules.Module_registry.ensure_loaded mod_name with
+    | None -> env, None
+    | Some exports ->
+      let env' = load_module_into_env mod_name exports env in
+      env', lookup_type name env'
+
+(** Try to resolve a qualified constructor by loading its module.
+    Returns (updated_env, ctor_info option). *)
+let resolve_qualified_ctor (name : string) (env : env) : env * ctor_info option =
+  match split_qualified name with
+  | None -> env, None
+  | Some (mod_name, _member) ->
+    match March_modules.Module_registry.ensure_loaded mod_name with
+    | None -> env, None
+    | Some exports ->
+      let env' = load_module_into_env mod_name exports env in
+      env', lookup_ctor name env'
+
+(** Produce an error message for a qualified name that failed to resolve. *)
+let qualified_error_msg (name : string) : string =
+  match split_qualified name with
+  | None -> Printf.sprintf "I cannot find `%s`." name
+  | Some (mod_name, member) ->
+    match March_modules.Module_registry.ensure_loaded mod_name with
+    | None ->
+      let hint = match suggest_module_name mod_name with
+        | Some s -> Printf.sprintf " Did you mean `%s`?" s
+        | None -> ""
+      in
+      Printf.sprintf "Unknown module `%s`.%s" mod_name hint
+    | Some exports ->
+      (* Module exists but member not found — check private *)
+      let open March_modules.Module_registry in
+      let priv = List.find_opt (fun e -> e.ex_name = member && not e.ex_public) exports.me_entries in
+      match priv with
+      | Some _ ->
+        Printf.sprintf "Function `%s` is private to module `%s`." member mod_name
+      | None ->
+        let public_names = List.filter_map (fun e ->
+          if e.ex_public then Some e.ex_name else None
+        ) exports.me_entries in
+        let suggestions = List.filter (fun n ->
+          edit_distance (String.lowercase_ascii member) (String.lowercase_ascii n) <= 2
+        ) public_names in
+        let hint = match suggestions with
+          | [] -> ""
+          | ss -> " Did you mean " ^ String.concat " or " (List.map (fun s -> Printf.sprintf "`%s.%s`" mod_name s) ss) ^ "?"
+        in
+        Printf.sprintf "Module `%s` does not export `%s`.%s" mod_name member hint
+
 (** All parent types of ctors in [env] that share [name] (multiple types may
     define the same variant). Returns list of type names (deduplicated). *)
 let all_ctors_named (name : string) (env : env) : string list =
@@ -1434,9 +1591,13 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
     let arity = match lookup_type name.txt env with
       | Some a -> a
       | None   ->
-        Err.error env.errors ~span:name.span
-          (Printf.sprintf "I don't know a type called `%s`." name.txt);
-        0
+        (* Try qualified module resolution: "Mod.Type" *)
+        match resolve_qualified_type name.txt env with
+        | _, Some a -> a
+        | _ ->
+          Err.error env.errors ~span:name.span
+            (qualified_error_msg name.txt);
+          0
     in
     let args' = List.map (surface_ty env ~tvars) args in
     if List.length args' <> arity then
@@ -1682,12 +1843,18 @@ let rec infer_pattern env (pat : Ast.pattern)
     bindings, TTuple tys
 
   | Ast.PatCon (name, ps) ->
-    (match lookup_ctor name.txt env with
+    (let ci_opt = match lookup_ctor name.txt env with
+       | Some _ as r -> r
+       | None ->
+         let _, resolved = resolve_qualified_ctor name.txt env in
+         resolved
+     in
+     match ci_opt with
      | None ->
        let candidates = suggest_ctors name.txt env in
        let hint =
          if candidates = [] then
-           "Is this a typo, or did you forget to declare the type?"
+           qualified_error_msg name.txt
          else
            let lines = List.map (fun (k, ty) ->
                Printf.sprintf "  • `%s` — from type `%s`" k ty
@@ -2164,12 +2331,13 @@ let rec infer_expr env (e : Ast.expr) : ty =
       (match lookup_var name.txt env with
        | Some sch -> instantiate env.level env sch
        | None     ->
-         Err.error env.errors ~span:name.span
-           (Printf.sprintf
-              "I cannot find a variable named `%s`.\n\
-               Is it defined above this point, or perhaps misspelled?"
-              name.txt);
-         TError)
+         (* Try qualified module resolution: "Mod.func" *)
+         match resolve_qualified_var name.txt env with
+         | _, Some sch -> instantiate env.level env sch
+         | _ ->
+           Err.error env.errors ~span:name.span
+             (qualified_error_msg name.txt);
+           TError)
 
     (* ── Type annotations ─────────────────────────────────────────── *)
     | Ast.EAnnot (e, ann, sp) ->
@@ -2587,12 +2755,19 @@ let rec infer_expr env (e : Ast.expr) : ty =
 
     (* ── Constructor application ──────────────────────────────────── *)
     | Ast.ECon (name, args, sp) ->
-      (match lookup_ctor name.txt env with
+      (let ci_opt = match lookup_ctor name.txt env with
+         | Some _ as r -> r
+         | None ->
+           (* Try qualified module resolution: "Mod.Ctor" *)
+           let _, resolved = resolve_qualified_ctor name.txt env in
+           resolved
+       in
+       match ci_opt with
        | None ->
          let candidates = suggest_ctors name.txt env in
          let hint =
            if candidates = [] then
-             "Is this a typo, or did you forget to declare the type?"
+             qualified_error_msg name.txt
            else
              let lines = List.map (fun (k, ty) ->
                  Printf.sprintf "  • `%s` — from type `%s`" k ty
@@ -4902,6 +5077,22 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
           let qname = prefix ^ "." ^ def.fn_name.txt in
           if List.mem_assoc qname e.vars then e
           else bind_var qname (Mono (fresh_var 0)) e
+        | Ast.DType (vis, name, params, typedef, _) when vis = Ast.Public ->
+          let qname = prefix ^ "." ^ name.txt in
+          let e1 = if List.mem_assoc qname e.types then e
+            else { e with types = (qname, List.length params) :: e.types } in
+          (match typedef with
+           | Ast.TDVariant variants ->
+             let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+             List.fold_left (fun acc (v : Ast.variant) ->
+                 let qctor = prefix ^ "." ^ v.var_name.txt in
+                 if List.mem_assoc qctor acc.ctors then acc
+                 else
+                   let ci = { ci_type = qname; ci_params = param_names;
+                              ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
+                   { acc with ctors = (qctor, ci) :: acc.ctors }
+               ) e1 variants
+           | _ -> e1)
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
           prebind_mod_members (prefix ^ "." ^ mname.txt) e inner_decls
         | _ -> e

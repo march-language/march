@@ -17405,6 +17405,81 @@ let test_desugar_module_func_no_args () =
      | _ -> Alcotest.fail "expected single clause")
   | _ -> Alcotest.fail "expected single DFn"
 
+(* ── Phase 3: Typecheck qualified resolution tests ─────────────────────── *)
+
+let test_tc_qualified_var_in_same_file () =
+  (* Qualified function call within same-file module resolves *)
+  let src = {|mod Test do
+    mod Math do
+      fn add(a, b) do a + b end
+    end
+    fn go() do Math.add(1, 2) end
+  end|} in
+  let errors = typecheck src in
+  Alcotest.(check bool) "qualified var in same file typechecks" false (has_errors errors)
+
+let test_tc_qualified_type_in_same_file () =
+  (* Qualified type annotation within same-file module resolves *)
+  let src = {|mod Test do
+    mod Inner do
+      type Color = Red | Green | Blue
+    end
+    fn go() do Inner.Red end
+  end|} in
+  let errors = typecheck src in
+  Alcotest.(check bool) "qualified ctor in same file typechecks" false (has_errors errors)
+
+let test_tc_unknown_module_error () =
+  (* Unknown module produces clear error *)
+  let src = {|mod Test do
+    fn go() do Xyz123.foo() end
+  end|} in
+  let errors = typecheck src in
+  Alcotest.(check bool) "unknown module is an error" true (has_errors errors);
+  let diags = errors.March_errors.Errors.diagnostics in
+  let has_unknown = List.exists (fun (d : March_errors.Errors.diagnostic) ->
+    let s = d.message in
+    (try let _ = Str.search_forward (Str.regexp_string "Unknown module") s 0 in true
+     with Not_found ->
+       try let _ = Str.search_forward (Str.regexp_string "cannot find") s 0 in true
+       with Not_found -> false)
+  ) diags in
+  Alcotest.(check bool) "error mentions unknown module or not found" true has_unknown
+
+let test_tc_unknown_member_error () =
+  (* Module exists but member doesn't → clear error *)
+  let src = {|mod Test do
+    mod Stuff do
+      fn real_fn() do 42 end
+    end
+    fn go() do Stuff.nonexistent() end
+  end|} in
+  let errors = typecheck src in
+  Alcotest.(check bool) "unknown member is an error" true (has_errors errors)
+
+let test_tc_private_fn_rejected () =
+  (* Private function access from outside module is rejected *)
+  let src = {|mod Test do
+    mod Secret do
+      pfn hidden() do 42 end
+    end
+    fn go() do Secret.hidden() end
+  end|} in
+  let errors = typecheck src in
+  Alcotest.(check bool) "private fn access rejected" true (has_errors errors)
+
+let test_tc_qualified_ctor_builtin () =
+  (* Builtin qualified constructors: Option.Some, Result.Ok *)
+  let src = {|mod Test do
+    fn go() do
+      let a = Option.Some(42)
+      let b = Result.Ok(1)
+      a
+    end
+  end|} in
+  let errors = typecheck src in
+  Alcotest.(check bool) "builtin qualified ctors typecheck" false (has_errors errors)
+
 let () =
   Alcotest.run "march"
     [
@@ -18930,5 +19005,13 @@ let () =
         Alcotest.test_case "Module.func(args) → EApp"  `Quick test_desugar_module_func_call;
         Alcotest.test_case "record.field not rewritten" `Quick test_desugar_record_field_not_rewritten;
         Alcotest.test_case "Module.func ref → EVar"    `Quick test_desugar_module_func_no_args;
+      ]);
+      ("typecheck_qualified", [
+        Alcotest.test_case "qualified var in same file"     `Quick test_tc_qualified_var_in_same_file;
+        Alcotest.test_case "qualified ctor in same file"    `Quick test_tc_qualified_type_in_same_file;
+        Alcotest.test_case "unknown module error"           `Quick test_tc_unknown_module_error;
+        Alcotest.test_case "unknown member error"           `Quick test_tc_unknown_member_error;
+        Alcotest.test_case "private fn rejected"            `Quick test_tc_private_fn_rejected;
+        Alcotest.test_case "builtin qualified ctors"        `Quick test_tc_qualified_ctor_builtin;
       ]);
     ]

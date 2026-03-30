@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-30 (qualified module access Phase 0+2: module export registry + desugar normalization — 1196 tests)
+**Last updated:** 2026-03-30 (qualified module access Phase 3: typecheck qualified resolution — 1202 tests)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -122,6 +122,8 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 ---
 
 ## Done (recently completed)
+
+- ✅ **Qualified module access — Phase 3 (Typecheck qualified resolution)** — `lib/typecheck/typecheck.ml`: added `resolve_qualified_var`, `resolve_qualified_type`, `resolve_qualified_ctor` fallback functions that split dotted names, call `Module_registry.ensure_loaded`, and inject module exports into the typechecker env on demand. `prebind_mod_members` extended to also pre-bind qualified types and constructors from nested `DMod` declarations (not just functions). `surface_ty` TyCon case falls back to qualified type resolution. `ECon`/`PatCon` cases fall back to qualified constructor resolution. Error messages use edit-distance suggestions: "Unknown module `Mpa`. Did you mean `Map`?", "Module `Map` does not export `gte`. Did you mean `Map.get`?", "Function `hidden` is private to module `Secret`." Added `edit_distance`, `suggest_module_name`, `load_module_into_env`, `qualified_error_msg` helpers. `lib/typecheck/dune` now depends on `march_modules`. `lib/modules/module_registry.mli` exposes `find_stdlib_dir` and `find_stdlib_file`. 6 new tests in `typecheck_qualified` group (1202 total).
 
 - ✅ **Qualified module access — Phase 0 (Module Export Registry) + Phase 2 (Desugar normalization)** — `lib/modules/module_registry.ml` + `.mli` + `dune` (new `march_modules` library): global module export registry with types (`export_kind`: `ExFn`, `ExType`, `ExCtor`, `ExValue`; `export_entry`; `module_exports`), `register`/`lookup`/`is_known_module` API, `ensure_loaded` for lazy stdlib module loading (finds `.march` file, parses+desugars, extracts public exports, caches; circular dependency sentinel via `loading` hashtable). Desugar normalization already existed in `desugar.ml:474-494`: `EField(ECon(mod,[]),name)` → `ECon("Mod.Name",[])` for uppercase (constructors) or `EVar("Mod.name")` for lowercase (functions); `EApp(ECon(qualified,[]),args)` folded into `ECon(name,args)` at lines 432-443; record field access (`EField(EVar(...),...)`) correctly left untouched. 7 new tests: 2 module_registry (register+lookup, is_known_module), 5 desugar_qualified (Module.Ctor(args)→ECon, Module.Ctor→ECon, Module.func(args)→EApp, record.field not rewritten, Module.func ref→EVar). Spec: `specs/qualified-modules.md`.
 

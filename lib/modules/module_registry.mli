@@ -41,3 +41,9 @@ val set_stdlib_dir : string -> unit
 
 (** Reset all global state (for testing). *)
 val reset : unit -> unit
+
+(** Find the stdlib directory, searching several candidates. *)
+val find_stdlib_dir : unit -> string option
+
+(** Find the stdlib .march file path for a module name. *)
+val find_stdlib_file : string -> string option
