@@ -305,6 +305,7 @@
   <h1>March Phase Viewer</h1>
   <span id="source-label">No file loaded</span>
   <span id="node-count"></span>
+  <span id="diff-summary" style="font-size:11px;display:none;gap:8px;"></span>
   <select id="layout-select">
     <option value="breadthfirst">Breadthfirst</option>
     <option value="cose">Cose</option>
@@ -465,40 +466,84 @@ function initViewer() {
 function buildPhaseList() {
   const list = document.getElementById('phase-list');
   list.innerHTML = '';
-  allData.phases.forEach((ph, idx) => {
-    const item = document.createElement('div');
-    item.className = 'phase-item';
-    item.dataset.idx = idx;
 
-    const dot = document.createElement('div');
-    dot.className = 'phase-dot';
-    dot.style.background = phaseColor(ph.phase);
+  // Group consecutive tir-opt-{iter}-* phases under a collapsible header.
+  // Non-opt phases are rendered flat as before.
+  let i = 0;
+  while (i < allData.phases.length) {
+    const ph = allData.phases[i];
+    const optMatch = ph.phase.match(/^tir-opt-(\d+)-/);
 
-    const label = document.createElement('span');
-    label.textContent = ph.phase;
+    if (optMatch) {
+      // Collect all passes for this iteration
+      const iter = optMatch[1];
+      const prefix = `tir-opt-${iter}-`;
+      const groupStart = i;
+      while (i < allData.phases.length && allData.phases[i].phase.startsWith(prefix)) i++;
 
-    const stat = document.createElement('span');
-    stat.className = 'phase-stat';
-    stat.textContent = ph.nodes.length + 'n';
+      // Section header
+      const header = document.createElement('div');
+      header.style.cssText = 'padding:4px 14px 2px;font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.08em;';
+      header.textContent = `Opt iter ${iter}`;
+      list.appendChild(header);
 
-    item.appendChild(dot);
-    item.appendChild(label);
-    item.appendChild(stat);
-
-    item.addEventListener('click', () => {
-      if (diffMode && currentPhaseIdx !== idx) {
-        // In diff mode, click sets the comparison target; current phase is 'from'
-        diffFromIdx = currentPhaseIdx;
-        currentPhaseIdx = idx;
-        showPhase(idx);
-      } else {
-        currentPhaseIdx = idx;
-        showPhase(idx);
+      // Individual pass items (indented)
+      for (let j = groupStart; j < i; j++) {
+        list.appendChild(makePhaseItem(allData.phases[j], j, true));
       }
-    });
-    list.appendChild(item);
-  });
+    } else {
+      list.appendChild(makePhaseItem(ph, i, false));
+      i++;
+    }
+  }
 }
+
+function makePhaseItem(ph, idx, indented) {
+  const item = document.createElement('div');
+  item.className = 'phase-item';
+  item.dataset.idx = idx;
+  if (indented) item.style.paddingLeft = '24px';
+
+  const dot = document.createElement('div');
+  dot.className = 'phase-dot';
+  dot.style.background = phaseColor(ph.phase);
+
+  // For opt sub-passes, show just the pass name, not the full label
+  const optMatch = ph.phase.match(/^tir-opt-\d+-(.+)$/);
+  const label = document.createElement('span');
+  label.textContent = optMatch ? optMatch[1] : ph.phase;
+
+  const stat = document.createElement('span');
+  stat.className = 'phase-stat';
+  stat.textContent = ph.nodes.length + 'n';
+
+  item.appendChild(dot);
+  item.appendChild(label);
+  item.appendChild(stat);
+
+  item.addEventListener('click', () => {
+    if (diffMode && currentPhaseIdx !== idx) {
+      diffFromIdx = currentPhaseIdx;
+      currentPhaseIdx = idx;
+      showPhase(idx);
+    } else {
+      currentPhaseIdx = idx;
+      showPhase(idx);
+    }
+  });
+  return item;
+}
+
+// Per-pass colours within the opt fixed-point loop.
+const OPT_PASS_COLORS = {
+  'known-call': '#7ac9d4',
+  'inline':     '#6ec96e',
+  'cprop':      '#8adf8a',
+  'fold':       '#e9d45a',
+  'simplify':   '#d4c040',
+  'fusion':     '#e9a94e',
+  'dce':        '#c97ec9',
+};
 
 function phaseColor(phaseName) {
   const colors = {
@@ -512,7 +557,11 @@ function phaseColor(phaseName) {
     'tir-escape':     '#c97ec9',
     'tir-opt':        '#d4d45a',
   };
-  return colors[phaseName] || '#888';
+  if (colors[phaseName]) return colors[phaseName];
+  // tir-opt-{iter}-{pass} individual pass phases
+  const m = phaseName.match(/^tir-opt-\d+-(.+)$/);
+  if (m) return OPT_PASS_COLORS[m[1]] || '#b0b040';
+  return '#888';
 }
 
 function updatePhaseList() {
@@ -717,6 +766,28 @@ function showPhase(idx) {
   const edgeCount = phase.edges.length;
   document.getElementById('node-count').textContent =
     `${nodeCount} nodes · ${edgeCount} edges`;
+
+  // Update diff summary bar
+  const summaryEl = document.getElementById('diff-summary');
+  if (diffMode && diffMap) {
+    let added = 0, changed = 0, removed = 0;
+    diffMap.forEach(v => {
+      if (v === 'added')   added++;
+      if (v === 'changed') changed++;
+    });
+    // Count removed: nodes in fromPhase not in current
+    const fromPhase = allData.phases[diffFromIdx];
+    const curIds = new Set(phase.nodes.map(n => n.id));
+    fromPhase.nodes.forEach(n => { if (!curIds.has(n.id)) removed++; });
+    summaryEl.style.display = 'inline-flex';
+    summaryEl.innerHTML =
+      (added   ? `<span style="color:#e94560">+${added} added</span>` : '') +
+      (changed  ? `<span style="color:#e9a94e">~${changed} changed</span>` : '') +
+      (removed  ? `<span style="color:#666">-${removed} removed</span>` : '') +
+      (!added && !changed && !removed ? `<span style="color:#555">no changes</span>` : '');
+  } else {
+    summaryEl.style.display = 'none';
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────

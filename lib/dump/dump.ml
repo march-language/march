@@ -182,7 +182,7 @@ let ast_phase (m : module_) phase_name =
 
   and visit_decl parent = function
     | DFn (fd, _) ->
-      let id = new_id ("fn_" ^ fd.fn_name.txt) in
+      let id = "fn_" ^ fd.fn_name.txt in
       let params =
         match fd.fn_clauses with
         | c :: _ -> String.concat ", " (List.map fn_param_to_str c.fc_params)
@@ -218,7 +218,7 @@ let ast_phase (m : module_) phase_name =
       ) (List.sort_uniq String.compare body_calls)
 
     | DType (vis, name, _tvars, tdef, _) ->
-      let id = new_id ("type_" ^ name.txt) in
+      let id = "type_" ^ name.txt in
       let detail = match tdef with
         | TDAlias t  -> "alias " ^ ty_to_str t
         | TDVariant vs ->
@@ -242,7 +242,7 @@ let ast_phase (m : module_) phase_name =
       add_edge parent id "decl"
 
     | DMod (name, _vis, decls, _) ->
-      let id = new_id ("mod_" ^ name.txt) in
+      let id = "mod_" ^ name.txt in
       nodes := {
         n_id    = id;
         n_label = "mod " ^ name.txt;
@@ -253,7 +253,7 @@ let ast_phase (m : module_) phase_name =
       visit_decls id decls
 
     | DActor (vis, name, _def, _) ->
-      let id = new_id ("actor_" ^ name.txt) in
+      let id = "actor_" ^ name.txt in
       nodes := {
         n_id    = id;
         n_label = "actor " ^ name.txt;
@@ -263,7 +263,7 @@ let ast_phase (m : module_) phase_name =
       add_edge parent id "decl"
 
     | DInterface (idef, _) ->
-      let id = new_id ("iface_" ^ idef.March_ast.Ast.iface_name.txt) in
+      let id = "iface_" ^ idef.March_ast.Ast.iface_name.txt in
       nodes := {
         n_id    = id;
         n_label = "interface " ^ idef.March_ast.Ast.iface_name.txt;
@@ -273,7 +273,7 @@ let ast_phase (m : module_) phase_name =
       add_edge parent id "decl"
 
     | DImpl (iimpl, _) ->
-      let id = new_id ("impl_" ^ iimpl.March_ast.Ast.impl_iface.txt) in
+      let id = "impl_" ^ iimpl.March_ast.Ast.impl_iface.txt in
       nodes := {
         n_id    = id;
         n_label = "impl " ^ iimpl.March_ast.Ast.impl_iface.txt;
@@ -374,9 +374,26 @@ let rec count_rc_ops (e : March_tir.Tir.expr) =
   | ESeq (a, b)          -> count_rc_ops a + count_rc_ops b
   | _                    -> 0
 
-(** Produce nodes+edges for a TIR module. *)
+(** A simple non-cryptographic fingerprint of a string.
+    Used only for change detection in the diff viewer. *)
+let body_fingerprint s =
+  (* djb2-style hash, wrapped to a positive int *)
+  let h = ref 5381 in
+  String.iter (fun c -> h := (!h lsl 5) + !h + Char.code c) s;
+  Printf.sprintf "%08x" (abs !h land 0x7fffffff)
+
+(** Produce a stable, unique ID for a TIR function.
+    Uses the function name directly — names are unique within a TIR module
+    after monomorphization and are preserved across opt passes. *)
+let tir_fn_id fn_name = "fn_" ^ fn_name
+
+(** Produce a stable, unique ID for a TIR type definition. *)
+let tir_type_id type_name = "type_" ^ type_name
+
+(** Produce nodes+edges for a TIR module.
+    Node IDs are name-based (stable across passes) so the diff viewer can
+    track which nodes were added, removed, or modified between adjacent phases. *)
 let tir_phase (tm : March_tir.Tir.tir_module) phase_name =
-  reset_counter ();
   let nodes = ref [] in
   let edges = ref [] in
 
@@ -391,7 +408,7 @@ let tir_phase (tm : March_tir.Tir.tir_module) phase_name =
     ];
   } :: !nodes;
 
-  (* Type definition nodes *)
+  (* Type definition nodes — stable IDs based on type name *)
   List.iter (fun td ->
     let open March_tir.Tir in
     let (name, detail, ty) = match td with
@@ -409,7 +426,7 @@ let tir_phase (tm : March_tir.Tir.tir_module) phase_name =
       | TDClosure (n, ts) ->
         (n, "closure(" ^ String.concat ", " (List.map tir_ty_str ts) ^ ")", "closure")
     in
-    let id = new_id ("type_" ^ name) in
+    let id = tir_type_id name in
     nodes := {
       n_id    = id;
       n_label = "type " ^ name;
@@ -419,29 +436,33 @@ let tir_phase (tm : March_tir.Tir.tir_module) phase_name =
     edges := { e_src = mod_id; e_dst = id; e_label = "type" } :: !edges
   ) tm.March_tir.Tir.tm_types;
 
-  (* Function nodes *)
+  (* Function nodes — stable IDs based on function name *)
   List.iter (fun (fn : March_tir.Tir.fn_def) ->
-    let id = new_id ("fn_" ^ fn.fn_name) in
+    let id = tir_fn_id fn.March_tir.Tir.fn_name in
     let params_str = String.concat ", " (List.map (fun v ->
       v.March_tir.Tir.v_name ^ ": " ^ tir_ty_str v.March_tir.Tir.v_ty
     ) fn.March_tir.Tir.fn_params) in
     let calls = tir_calls_in [] fn.March_tir.Tir.fn_body in
     let calls = List.sort_uniq String.compare calls in
     let rc_ops = count_rc_ops fn.March_tir.Tir.fn_body in
+    (* Body fingerprint lets the diff viewer detect when a function's body
+       changed between passes even if its signature and call list are the same. *)
+    let body_fp = body_fingerprint (March_tir.Tir.show_expr fn.March_tir.Tir.fn_body) in
     nodes := {
       n_id    = id;
       n_label = fn.March_tir.Tir.fn_name ^ "(" ^ params_str ^ ")";
       n_type  = "fn";
       n_meta  = [
-        "ret",    json_string (tir_ty_str fn.March_tir.Tir.fn_ret_ty);
-        "calls",  json_list (List.map json_string calls);
-        "rc_ops", json_string (string_of_int rc_ops);
+        "ret",        json_string (tir_ty_str fn.March_tir.Tir.fn_ret_ty);
+        "calls",      json_list (List.map json_string calls);
+        "rc_ops",     json_string (string_of_int rc_ops);
+        "body_hash",  json_string body_fp;
       ];
     } :: !nodes;
     edges := { e_src = mod_id; e_dst = id; e_label = "fn" } :: !edges;
-    (* call edges *)
+    (* Call edges — targets now use stable IDs so more edges resolve correctly *)
     List.iter (fun callee ->
-      edges := { e_src = id; e_dst = "fn_" ^ callee ^ "_?"; e_label = "calls" }
+      edges := { e_src = id; e_dst = tir_fn_id callee; e_label = "calls" }
         :: !edges
     ) calls
   ) tm.March_tir.Tir.tm_fns;

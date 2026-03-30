@@ -10,20 +10,37 @@
     - Fold fourth: evaluates now-literal arithmetic
     - Simplify fifth: identity laws / strength reduction on folded results
     - Fusion.run_struct sixth: collapses chains of record-update operations
-    - DCE last: removes let bindings made dead by folding/simplification *)
+    - DCE last: removes let bindings made dead by folding/simplification
 
-let run (m : Tir.tir_module) : Tir.tir_module =
-  let passes = [Known_call.run; Inline.run; Cprop.run; Fold.run; Simplify.run;
-                Fusion.run_struct; Dce.run] in
+    The optional [~snap] callback is invoked after each individual pass with
+    a label of the form ["tir-opt-{iter}-{pass}"] and the post-pass module.
+    When [~snap] is omitted (or is a no-op) behaviour is identical to before. *)
+
+let named_passes = [
+  "known-call",  Known_call.run;
+  "inline",      Inline.run;
+  "cprop",       Cprop.run;
+  "fold",        Fold.run;
+  "simplify",    Simplify.run;
+  "fusion",      Fusion.run_struct;
+  "dce",         Dce.run;
+]
+
+let run ?(snap = fun _label _m -> ()) (m : Tir.tir_module) : Tir.tir_module =
   let changed = ref false in
-  let apply p =
+  let apply iter p =
     changed := false;
-    List.fold_left (fun acc pass -> pass ~changed acc) p passes
+    List.fold_left (fun acc (label, pass) ->
+      let acc' = pass ~changed acc in
+      snap (Printf.sprintf "tir-opt-%d-%s" iter label) acc';
+      acc'
+    ) p named_passes
   in
   let rec loop p n =
     if n = 0 then p
     else
-      let p' = apply p in
+      let iter = 6 - n in
+      let p' = apply iter p in
       if not !changed then p'
       else loop p' (n - 1)
   in
