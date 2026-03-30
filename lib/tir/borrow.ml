@@ -47,6 +47,7 @@ let is_borrowed (m : borrow_map) (fn_name : string) (idx : int) : bool =
     module dependency: [Perceus] imports [Borrow], so [Borrow] must not import
     [Perceus]. *)
 let needs_rc : Tir.ty -> bool = function
+  | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars, not heap-allocated *)
   | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
   | Tir.TVar _ | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit
   | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _ -> false

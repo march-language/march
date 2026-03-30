@@ -164,7 +164,7 @@ end
 -- ---------------------------------------------------------------------------
 
 pfn router(conn) do
-  let m    = Http.method_to_string(HttpServer.method(conn))
+  let m    = HttpServer.method_to_string(HttpServer.method(conn))
   let p    = HttpServer.path(conn)
 
   -- Check the dev dashboard first
@@ -176,13 +176,13 @@ pfn router(conn) do
     conn2
   else
     let result = match (HttpServer.method(conn), HttpServer.path_info(conn)) do
-    (Get, Nil) ->
+    (:get, Nil) ->
       home_handler(conn)
-    (Get, Cons("about", Nil)) ->
+    (:get, Cons("about", Nil)) ->
       about_handler(conn)
-    (Get, Cons("api", Cons("status", Nil))) ->
+    (:get, Cons("api", Cons("status", Nil))) ->
       api_status_handler(conn)
-    (Get, Cons("static", rest)) ->
+    (:get, Cons("static", rest)) ->
       Bastion.Static.serve(conn, rest, "demo_app/priv/static")
     _ ->
       HttpServer.html(conn, 404,

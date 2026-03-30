@@ -19,7 +19,7 @@ pfn make_conn(meth, path_, qs, req_hdrs, req_body) do
 end
 
 pfn make_get(path_) do
-  make_conn(Get, path_, "", Cons(Header("host", "localhost"), Nil), "")
+  make_conn(:get, path_, "", Cons(Header("host", "localhost"), Nil), "")
 end
 
 -- Fill stats with n identical request entries (for capping tests).

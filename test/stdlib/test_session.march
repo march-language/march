@@ -8,7 +8,7 @@ mod TestSession do
 
 -- Build a minimal Conn.
 fn make_conn(hdrs) do
-  Conn(0, Get, "/", Nil, "", hdrs, "", 0, Nil, "", false, Nil, NoUpgrade)
+  Conn(0, :get, "/", Nil, "", hdrs, "", 0, Nil, "", false, Nil, NoUpgrade)
 end
 
 fn empty_conn() do

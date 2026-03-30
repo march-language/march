@@ -18,9 +18,11 @@ mod HttpServer do
 
   -- The Conn type: holds everything about a request-response cycle.
   -- Modeled on Plug.Conn from Elixir.
+  -- The method field is an Atom (e.g. :get, :post) — interned i64 hash,
+  -- allocation-free and safe for pattern matching in compiled mode.
   type Conn = Conn(
     Int,                    -- fd (TCP socket)
-    Method,                 -- request method
+    Atom,                   -- request method (:get, :post, :put, etc.)
     String,                 -- request path (raw, e.g. "/users/42")
     List(String),           -- path_info (split on "/", empty filtered)
     String,                 -- query_string (raw, e.g. "page=1&limit=10")
@@ -40,6 +42,21 @@ mod HttpServer do
     match conn do
     Conn(_, m, _, _, _, _, _, _, _, _, _, _, _) -> m
     end
+  end
+
+  -- Convert a method atom to its string name (for logging, responses, etc.)
+  -- Atoms use lowercase: :get, :post, :put, :patch, :delete, :head, :options
+  fn method_to_string(m) do
+    if m == :get do "GET"
+    else if m == :post do "POST"
+    else if m == :put do "PUT"
+    else if m == :patch do "PATCH"
+    else if m == :delete do "DELETE"
+    else if m == :head do "HEAD"
+    else if m == :options do "OPTIONS"
+    else if m == :trace do "TRACE"
+    else if m == :connect do "CONNECT"
+    else "UNKNOWN" end end end end end end end end end
   end
 
   fn path(conn) do

@@ -13,7 +13,7 @@ pfn make_conn(m, path_, req_hdrs) do
 end
 
 pfn get_with_headers(hdrs) do
-  make_conn(Get, "/", hdrs)
+  make_conn(:get, "/", hdrs)
 end
 
 pfn get_conn() do

@@ -164,21 +164,21 @@ end
 describe "BastionTestSandbox.build_conn" do
   test "build_conn sets _sandbox_nonce assign" do
     let env  = BastionTestSandbox.checkout("conn_app")
-    let conn = BastionTestSandbox.build_conn(env, Get, "/")
+    let conn = BastionTestSandbox.build_conn(env, :get, "/")
     let nonce = BastionTestSandbox.env_nonce(env)
     assert (HttpServer.get_assign(conn, "_sandbox_nonce") == Some(nonce))
   end
 
   test "build_conn sets the correct path" do
     let env  = BastionTestSandbox.checkout("conn_app2")
-    let conn = BastionTestSandbox.build_conn(env, Post, "/users")
+    let conn = BastionTestSandbox.build_conn(env, :post, "/users")
     assert (HttpServer.path(conn) == "/users")
   end
 
   test "build_conn sets the correct method" do
     let env  = BastionTestSandbox.checkout("conn_app3")
-    let conn = BastionTestSandbox.build_conn(env, Delete, "/items/1")
-    assert (HttpServer.method(conn) == Delete)
+    let conn = BastionTestSandbox.build_conn(env, :delete, "/items/1")
+    assert (HttpServer.method(conn) == :delete)
   end
 end
 
@@ -188,20 +188,20 @@ describe "BastionTestSandbox.build_conn_full" do
   test "build_conn_full includes request headers" do
     let env  = BastionTestSandbox.checkout("full_conn_app")
     let hdrs = Cons(Header("content-type", "application/json"), Nil)
-    let conn = BastionTestSandbox.build_conn_full(env, Post, "/data", "", hdrs, "{}")
+    let conn = BastionTestSandbox.build_conn_full(env, :post, "/data", "", hdrs, "{}")
     let ct   = HttpServer.get_req_header(conn, "content-type")
     assert (ct == Some("application/json"))
   end
 
   test "build_conn_full includes the request body" do
     let env  = BastionTestSandbox.checkout("full_conn_app2")
-    let conn = BastionTestSandbox.build_conn_full(env, Post, "/echo", "", Nil, "hello")
+    let conn = BastionTestSandbox.build_conn_full(env, :post, "/echo", "", Nil, "hello")
     assert (HttpServer.req_body(conn) == "hello")
   end
 
   test "build_conn_full still sets _sandbox_nonce" do
     let env  = BastionTestSandbox.checkout("full_conn_app3")
-    let conn = BastionTestSandbox.build_conn_full(env, Get, "/x", "a=1", Nil, "")
+    let conn = BastionTestSandbox.build_conn_full(env, :get, "/x", "a=1", Nil, "")
     let nonce = BastionTestSandbox.env_nonce(env)
     assert (HttpServer.get_assign(conn, "_sandbox_nonce") == Some(nonce))
   end

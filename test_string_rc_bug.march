@@ -1,0 +1,38 @@
+-- Minimal reproducer for the string RC bug in compiled mode.
+--
+-- The bug: when a String parameter `m` is compared with `==` in nested if/else,
+-- Perceus inserts IncRC before the first comparison (because m is live in the
+-- else branch) but does NOT insert a matching DecRC in the true branch.
+-- Additionally, the string literal allocated by march_string_lit for each
+-- comparison is never freed (no RC tracking for comparison temporaries).
+--
+-- This causes a memory leak but does NOT affect correctness of routing logic.
+-- The routing below produces correct results in compiled mode.
+--
+-- Run: dune exec march -- test_string_rc_bug.march  (interpreter: correct)
+-- Run: dune exec march -- --compile test_string_rc_bug.march  (compiled: also correct, but leaks)
+
+mod TestStringRcBug do
+
+  -- Route based on a string parameter passed to a function.
+  -- This is the pattern that triggers the Perceus RC issue.
+  fn route(m: String) : String do
+    if m == "GET" do
+      "matched GET"
+    else
+      if m == "POST" do
+        "matched POST"
+      else
+        "no match"
+      end
+    end
+  end
+
+  fn main() do
+    -- All three branches must produce correct output.
+    println(route("POST"))    -- expect: matched POST
+    println(route("GET"))     -- expect: matched GET
+    println(route("DELETE"))  -- expect: no match
+  end
+
+end

@@ -230,9 +230,9 @@ mod CSRF do
   """
   fn protect(conn) do
     match HttpServer.method(conn) do
-    Get -> conn
-    Head -> conn
-    Options -> conn
+    :get -> conn
+    :head -> conn
+    :options -> conn
     _ -> protect_mutating(conn)
     end
   end

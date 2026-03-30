@@ -13,11 +13,11 @@ mod WebSocket do
   type SelectResult = WsData(WsFrame) | ActorMsg | Timeout
 
   -- These mirror types from Http/HttpServer (no imports in March).
-  type Method = Get | Post | Put | Patch | Delete | Head | Options | Trace | Connect | Other(String)
+  -- Method field uses Atom (:get, :post, etc.) matching HttpServer.Conn.
   type Header = Header(String, String)
   type Upgrade = NoUpgrade | WebSocketUpgrade(WsSocket -> Unit)
   type Conn = Conn(
-    Int, Method, String, List(String), String,
+    Int, Atom, String, List(String), String,
     List(Header), String, Int, List(Header), String,
     Bool, List((String, String)), Upgrade
   )

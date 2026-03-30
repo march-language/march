@@ -12,7 +12,7 @@ pfn make_conn(m, path_, req_hdrs) do
 end
 
 pfn make_get(path_) do
-  make_conn(Get, path_, Nil)
+  make_conn(:get, path_, Nil)
 end
 
 pfn halted_html_conn(body) do
@@ -91,7 +91,7 @@ describe "BastionDev: conn_inspector" do
   test "conn_inspector returns conn unchanged (method)" do
     let c = make_get("/inspect-path")
     let c1 = BastionDev.conn_inspector(c)
-    assert (HttpServer.method(c1) == Get)
+    assert (HttpServer.method(c1) == :get)
   end
 
   test "conn_inspector returns conn unchanged (path)" do
@@ -313,7 +313,7 @@ describe "BastionDev: error_overlay_html" do
   end
 
   test "error message with path XSS in path is escaped" do
-    let c = make_conn(Get, "/<script>", Nil)
+    let c = make_conn(:get, "/<script>", Nil)
     let html = BastionDev.error_overlay_html("err", "trace", c)
     assert (!String.contains(html, "<script>"))
   end

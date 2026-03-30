@@ -178,12 +178,22 @@ let llvm_name (name : string) : string =
 
 (* ── Type mapping ────────────────────────────────────────────────────── *)
 
+(** FNV-1a 64-bit hash — used for stable atom → i64 mapping.
+    Must match the C runtime implementation in march_runtime.c. *)
+let fnv1a_64 (s : string) : int64 =
+  let fnv_offset = 0xcbf29ce484222325L in
+  let fnv_prime  = 0x100000001b3L in
+  String.fold_left (fun h c ->
+    Int64.mul (Int64.logxor h (Int64.of_int (Char.code c))) fnv_prime
+  ) fnv_offset s
+
 let llvm_ty : Tir.ty -> string = function
   | Tir.TInt    -> "i64"
   | Tir.TFloat  -> "double"
   | Tir.TBool   -> "i64"   (* booleans as i64 for uniform field layout *)
   | Tir.TUnit   -> "i64"   (* unit = i64 0 *)
   | Tir.TString -> "ptr"
+  | Tir.TCon ("Atom", []) -> "i64"  (* atoms are interned i64 hashes, not heap ptrs *)
   | Tir.TCon _  -> "ptr"
   | Tir.TTuple _ -> "ptr"
   | Tir.TRecord _ -> "ptr"
@@ -204,6 +214,7 @@ let llvm_ret_ty : Tir.ty -> string = function
       safely dereferenced for 16 bytes. *)
 let llvm_param_ty (ty : Tir.ty) : string =
   match ty with
+  | Tir.TCon ("Atom", []) -> "i64"   (* atoms are i64 scalars, not heap pointers *)
   | Tir.TString | Tir.TCon _ | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _
   | Tir.TPtr _ | Tir.TVar _ ->
     "ptr nonnull dereferenceable(16)"
@@ -726,7 +737,10 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     let bits = Int64.bits_of_float f in
     ("double", Printf.sprintf "0x%016LX" bits)
   | Tir.ALit (March_ast.Ast.LitBool b)  -> ("i64",    if b then "1" else "0")
-  | Tir.ALit (March_ast.Ast.LitAtom _)  -> ("i64",    "0")
+  | Tir.ALit (March_ast.Ast.LitAtom name) ->
+    (* Atoms are interned as FNV-1a 64-bit hashes of their name *)
+    let h = fnv1a_64 name in
+    ("i64", Int64.to_string h)
   | Tir.ALit (March_ast.Ast.LitString s) ->
     let gname = intern_string ctx s in
     let tmp = fresh ctx "sl" in
@@ -1698,8 +1712,12 @@ and emit_case ctx scrut_atom branches default_opt =
   let is_ptr_scrut =
     match scrut_atom with
     | Tir.AVar v ->
-      (match v.Tir.v_ty with Tir.TBool | Tir.TInt -> false | _ -> true)
-    | Tir.ALit (March_ast.Ast.LitBool _) | Tir.ALit (March_ast.Ast.LitInt _) -> false
+      (match v.Tir.v_ty with
+       | Tir.TBool | Tir.TInt -> false
+       | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars *)
+       | _ -> true)
+    | Tir.ALit (March_ast.Ast.LitBool _) | Tir.ALit (March_ast.Ast.LitInt _)
+    | Tir.ALit (March_ast.Ast.LitAtom _) -> false
     | _ -> scrut_ty = "ptr"
   in
 
@@ -1714,6 +1732,11 @@ and emit_case ctx scrut_atom branches default_opt =
   (* Detect string-literal case: br_tag starts with '"' *)
   let is_string_case = List.exists (fun br ->
       String.length br.Tir.br_tag > 0 && br.Tir.br_tag.[0] = '"'
+    ) branches in
+
+  (* Detect atom case: br_tag starts with ':' — emit switch on i64 FNV1a hashes *)
+  let is_atom_case = List.exists (fun br ->
+      String.length br.Tir.br_tag > 0 && br.Tir.br_tag.[0] = ':'
     ) branches in
 
   (* The scrutinee's TIR type — needed both for the switch tag lookup and for
@@ -1793,7 +1816,11 @@ and emit_case ctx scrut_atom branches default_opt =
             if is_ptr_scrut then
               let e = ctor_entry ctx (qualified_br_key br.Tir.br_tag) 0 in
               string_of_int e.ce_tag
-            else begin
+            else if is_atom_case then begin
+              (* Atom tags are ":NAME" — hash the name part with FNV1a *)
+              let name = String.sub br.Tir.br_tag 1 (String.length br.Tir.br_tag - 1) in
+              Int64.to_string (fnv1a_64 name)
+            end else begin
               match int_of_string_opt br.Tir.br_tag with
               | Some n -> string_of_int n
               | None -> "0"

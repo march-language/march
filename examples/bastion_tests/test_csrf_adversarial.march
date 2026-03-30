@@ -14,11 +14,11 @@ pfn make_conn(m, hdrs, body) do
 end
 
 pfn post_with_body(body) do
-  make_conn(Post, Nil, body)
+  make_conn(:post, Nil, body)
 end
 
 pfn post_with_token_in_session(body, session_tok) do
-  HttpServer.assign(make_conn(Post, Nil, body), "_csrf_token", session_tok)
+  HttpServer.assign(make_conn(:post, Nil, body), "_csrf_token", session_tok)
 end
 
 -- Helpers for mutating-methods describe
@@ -154,7 +154,7 @@ end
 
 describe "CSRF: empty token handling" do
   test "empty session token with empty body token still fails" do
-    let conn0 = make_conn(Post, Nil, "_csrf_token=")
+    let conn0 = make_conn(:post, Nil, "_csrf_token=")
     let conn = HttpServer.assign(conn0, "_csrf_token", "")
     -- Both are empty strings - this should succeed since they match
     -- (But this is a degenerate case; the protect middleware shouldn't allow empty tokens)
@@ -164,14 +164,14 @@ describe "CSRF: empty token handling" do
   end
 
   test "protect with empty body on POST returns 403" do
-    let conn0 = make_conn(Post, Nil, "")
+    let conn0 = make_conn(:post, Nil, "")
     let conn  = HttpServer.assign(conn0, "_csrf_token", "nonempty-tok")
     let result = CSRF.protect(conn)
     assert (HttpServer.status(result) == 403)
   end
 
   test "protect with no session token on POST returns 403" do
-    let conn = make_conn(Post, Nil, "_csrf_token=sometoken")
+    let conn = make_conn(:post, Nil, "_csrf_token=sometoken")
     -- No session token assigned
     let result = CSRF.protect(conn)
     assert (HttpServer.status(result) == 403)
@@ -182,32 +182,32 @@ end
 
 describe "CSRF: all mutating methods" do
   test "PUT with matching token passes" do
-    let conn = with_csrf_token(make_conn(Put, Nil, matching_body()))
+    let conn = with_csrf_token(make_conn(:put, Nil, matching_body()))
     assert (!HttpServer.halted(CSRF.protect(conn)))
   end
 
   test "PATCH with matching token passes" do
-    let conn = with_csrf_token(make_conn(Patch, Nil, matching_body()))
+    let conn = with_csrf_token(make_conn(:patch, Nil, matching_body()))
     assert (!HttpServer.halted(CSRF.protect(conn)))
   end
 
   test "DELETE with matching token passes" do
-    let conn = with_csrf_token(make_conn(Delete, Nil, matching_body()))
+    let conn = with_csrf_token(make_conn(:delete, Nil, matching_body()))
     assert (!HttpServer.halted(CSRF.protect(conn)))
   end
 
   test "PUT with wrong token returns 403" do
-    let conn = with_csrf_token(make_conn(Put, Nil, wrong_body()))
+    let conn = with_csrf_token(make_conn(:put, Nil, wrong_body()))
     assert (HttpServer.status(CSRF.protect(conn)) == 403)
   end
 
   test "PATCH with wrong token returns 403" do
-    let conn = with_csrf_token(make_conn(Patch, Nil, wrong_body()))
+    let conn = with_csrf_token(make_conn(:patch, Nil, wrong_body()))
     assert (HttpServer.status(CSRF.protect(conn)) == 403)
   end
 
   test "DELETE with wrong token returns 403" do
-    let conn = with_csrf_token(make_conn(Delete, Nil, wrong_body()))
+    let conn = with_csrf_token(make_conn(:delete, Nil, wrong_body()))
     assert (HttpServer.status(CSRF.protect(conn)) == 403)
   end
 end
@@ -216,35 +216,35 @@ end
 
 describe "CSRF: JSON content-type exemption" do
   test "application/json POST is exempt" do
-    let conn = make_conn(Post, json_hdrs(), "{\"key\":\"value\"}")
+    let conn = make_conn(:post, json_hdrs(), "{\"key\":\"value\"}")
     assert (!HttpServer.halted(CSRF.protect(conn)))
   end
 
   test "application/json; charset=utf-8 POST is exempt" do
-    let conn = make_conn(Post, json_hdrs_with_charset(), "{}")
+    let conn = make_conn(:post, json_hdrs_with_charset(), "{}")
     assert (!HttpServer.halted(CSRF.protect(conn)))
   end
 
   test "application/json PUT is exempt" do
-    let conn = make_conn(Put, json_hdrs(), "{}")
+    let conn = make_conn(:put, json_hdrs(), "{}")
     assert (!HttpServer.halted(CSRF.protect(conn)))
   end
 
   test "application/json DELETE is exempt" do
-    let conn = make_conn(Delete, json_hdrs(), "")
+    let conn = make_conn(:delete, json_hdrs(), "")
     assert (!HttpServer.halted(CSRF.protect(conn)))
   end
 
   test "text/plain POST is NOT exempt and fails without token" do
     let hdrs = Cons(Header("content-type", "text/plain"), Nil)
-    let conn = make_conn(Post, hdrs, "some data")
+    let conn = make_conn(:post, hdrs, "some data")
     -- No CSRF token -> should get 403
     assert (HttpServer.status(CSRF.protect(conn)) == 403)
   end
 
   test "multipart/form-data POST is NOT exempt" do
     let hdrs = Cons(Header("content-type", "multipart/form-data"), Nil)
-    let conn = make_conn(Post, hdrs, "file-data")
+    let conn = make_conn(:post, hdrs, "file-data")
     assert (HttpServer.status(CSRF.protect(conn)) == 403)
   end
 end
@@ -253,22 +253,22 @@ end
 
 describe "CSRF: skip + protect interaction" do
   test "skipped conn: POST with no token passes protect" do
-    let conn = CSRF.skip(make_conn(Post, Nil, "no-token-here"))
+    let conn = CSRF.skip(make_conn(:post, Nil, "no-token-here"))
     assert (!HttpServer.halted(CSRF.protect(conn)))
   end
 
   test "skipped conn: DELETE with no token passes protect" do
-    let conn = CSRF.skip(make_conn(Delete, Nil, ""))
+    let conn = CSRF.skip(make_conn(:delete, Nil, ""))
     assert (!HttpServer.halted(CSRF.protect(conn)))
   end
 
   test "skip is idempotent" do
-    let conn = CSRF.skip(CSRF.skip(make_conn(Post, Nil, "")))
+    let conn = CSRF.skip(CSRF.skip(make_conn(:post, Nil, "")))
     assert (!HttpServer.halted(CSRF.protect(conn)))
   end
 
   test "skip does not modify status or body" do
-    let conn = CSRF.skip(make_conn(Post, Nil, "body"))
+    let conn = CSRF.skip(make_conn(:post, Nil, "body"))
     assert (HttpServer.status(conn) == 0)
     assert (HttpServer.resp_body(conn) == "")
     assert (!HttpServer.halted(conn))
@@ -279,7 +279,7 @@ end
 
 describe "CSRF: pipeline integration" do
   test "ensure_token then protect passes GET through untouched" do
-    let c = Conn(0, Get, "/", Nil, "", Nil, "", 0, Nil, "", false, Nil, NoUpgrade)
+    let c = Conn(0, :get, "/", Nil, "", Nil, "", 0, Nil, "", false, Nil, NoUpgrade)
     let pipeline = Cons(CSRF.ensure_token,
                    Cons(CSRF.protect,
                    Nil))
@@ -288,7 +288,7 @@ describe "CSRF: pipeline integration" do
   end
 
   test "ensure_token then protect blocks POST without token" do
-    let c = Conn(0, Post, "/submit", Cons("submit", Nil), "", Nil, "name=alice", 0, Nil, "", false, Nil, NoUpgrade)
+    let c = Conn(0, :post, "/submit", Cons("submit", Nil), "", Nil, "name=alice", 0, Nil, "", false, Nil, NoUpgrade)
     let pipeline = Cons(CSRF.ensure_token,
                    Cons(CSRF.protect,
                    Nil))
@@ -298,7 +298,7 @@ describe "CSRF: pipeline integration" do
 
   test "POST with matching token in pipeline passes" do
     let tok = "pipeline-test-token"
-    let c = Conn(0, Post, "/submit", Cons("submit", Nil), "", Nil,
+    let c = Conn(0, :post, "/submit", Cons("submit", Nil), "", Nil,
                  "_csrf_token=" ++ tok, 0, Nil, "", false, Nil, NoUpgrade)
     let c1 = HttpServer.assign(c, "_csrf_token", tok)
     let pipeline = Cons(CSRF.protect,
