@@ -661,6 +661,81 @@ void *march_send(void *actor, void *msg) {
     return some;
 }
 
+/* ── Actor.call / Actor.reply (synchronous messaging) ────────────────── */
+/*
+ * march_actor_call: synchronous call — builds a wrapped message containing the
+ * calling green-thread pointer as the reply channel (field 0), then sends it to
+ * the actor and blocks until the actor calls march_actor_reply.
+ *
+ * Protocol:
+ *   1. Read the tag from inner_msg (the zero-arg constructor like GetCount).
+ *   2. Build a new heap struct with the same tag + one extra field: the calling
+ *      proc pointer (the "reply channel").  The actor handler receives this as
+ *      its first parameter (e.g., `on GetCount(reply_to)`).
+ *   3. Send the augmented message to the actor's green thread.
+ *   4. Block via march_sched_recv() until the actor calls march_actor_reply.
+ *   5. Return Ok(reply_value).
+ *
+ * RC contract: we consume one reference to inner_msg (via march_decrc after
+ * reading the tag) and transfer ownership of the new call_msg to the actor.
+ */
+void *march_actor_call(void *actor, void *inner_msg, int64_t timeout_ms) {
+    (void)timeout_ms;  /* timeout not yet enforced; accepted for API compat */
+
+    int64_t *a = (int64_t *)actor;
+    if (!a[3]) {
+        march_decrc(inner_msg);
+        return mk_err_cstr("actor not alive");
+    }
+
+    march_actor_meta *meta = find_or_create_meta(actor);
+    if (!meta->green_thread) {
+        march_decrc(inner_msg);
+        return mk_err_cstr("actor not found");
+    }
+
+    march_proc *caller = march_sched_current();
+    if (!caller) {
+        march_decrc(inner_msg);
+        return mk_err_cstr("actor_call: not in scheduler context");
+    }
+
+    /* Read the tag from inner_msg so we can reproduce it on the augmented msg.
+     * inner_msg is assumed to be a zero-arg constructor (16 bytes: header only).
+     * We decrc it now — the caller owned one reference. */
+    int32_t msg_tag = ((march_hdr *)inner_msg)->tag;
+    march_decrc(inner_msg);
+
+    /* Build the augmented call message: same tag, field 0 = caller proc ptr.
+     * Layout: 16-byte header + 8-byte ptr field = 24 bytes. */
+    void *call_msg = march_alloc(24);
+    MARCH_SET_TAG(call_msg, msg_tag);
+    MARCH_FIELD(call_msg, 0) = (int64_t)(uintptr_t)caller;
+
+    march_sched_send(meta->green_thread, call_msg);
+
+    /* Block until the actor calls actor_reply. */
+    void *result = march_sched_recv();
+    if (!result) return mk_err_cstr("actor_call: no reply");
+
+    return mk_ok(result);
+}
+
+/*
+ * march_actor_reply: send a reply back to the caller blocked in actor_call.
+ *
+ * ref_ptr is the calling green-thread proc pointer that was injected as field 0
+ * of the call message.  We cast it back to march_proc * and enqueue result in
+ * that proc's mailbox, waking it from march_sched_recv().
+ *
+ * RC contract: march_actor_reply does NOT incrc result; it transfers the
+ * caller's reference (the handler's Perceus instrumentation already owns it).
+ */
+void march_actor_reply(void *ref_ptr, void *result) {
+    march_proc *caller = (march_proc *)ref_ptr;
+    march_sched_send(caller, result);
+}
+
 /* ── Float builtins ──────────────────────────────────────────────────── */
 
 double march_float_abs(double f) { return fabs(f); }

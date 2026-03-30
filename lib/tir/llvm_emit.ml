@@ -242,6 +242,7 @@ let is_builtin_fn name =
                  "println"; "print";
                  "int_to_string"; "float_to_string"; "bool_to_string";
                  "kill"; "is_alive"; "send"; "spawn"; "actor_get_int";
+                 "actor_call"; "actor_reply"; "actor_cast";
                  "task_spawn"; "task_await"; "task_await_unwrap";
                  "task_yield"; "task_spawn_steal"; "task_reductions";
                  "get_work_pool";
@@ -369,6 +370,9 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "send"                        -> Some (Tir.TCon ("Option", [Tir.TUnit]))
   | "spawn"                        -> Some (Tir.TPtr Tir.TUnit)
   | "actor_get_int"               -> Some Tir.TInt
+  | "actor_call"                  -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TVar "e"]))
+  | "actor_reply"                 -> Some Tir.TUnit
+  | "actor_cast"                  -> Some (Tir.TCon ("Option", [Tir.TUnit]))
   (* Float builtins *)
   | "float_abs"                   -> Some Tir.TFloat
   | "float_ceil"                  -> Some Tir.TInt
@@ -495,6 +499,9 @@ let mangle_extern : string -> string = function
   | "send_linear"   -> "march_send_linear"
   | "spawn"         -> "march_spawn"
   | "actor_get_int" -> "march_actor_get_int"
+  | "actor_call"    -> "march_actor_call"
+  | "actor_reply"   -> "march_actor_reply"
+  | "actor_cast"    -> "march_send"
   | "tcp_listen"              -> "march_tcp_listen"
   | "tcp_accept"              -> "march_tcp_accept"
   | "tcp_recv_http"           -> "march_tcp_recv_http"
@@ -2536,6 +2543,8 @@ declare ptr  @march_msg_move(ptr %src_heap, ptr %dst_heap, ptr %value)
 declare ptr  @march_process_alloc(ptr %heap, i64 %sz)
 declare ptr  @march_spawn(ptr %actor)
 declare i64  @march_actor_get_int(ptr %actor, i64 %index)
+declare ptr  @march_actor_call(ptr %actor, ptr %msg, i64 %timeout_ms)
+declare void @march_actor_reply(ptr %ref, ptr %result)
 declare void @march_run_scheduler()
 @march_tls_reductions = external thread_local global i64
 declare void @march_yield_from_compiled()
