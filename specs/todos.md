@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-30 (qualified module access Phase 4: eval on-demand module loading — 1205 tests)
+**Last updated:** 2026-03-30 (qualified module access Phase 6: REPL tab completion — 1208 tests)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -122,6 +122,8 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 ---
 
 ## Done (recently completed)
+
+- ✅ **Qualified module access — Phase 6 (REPL tab completion)** — `lib/repl/complete.ml`: enhanced `complete` function with `complete_qualified` for dotted prefixes (e.g. `Map.ge` → `Map.get`) — queries both scope entries and `Module_registry.ensure_loaded` for public exports. `known_module_names` collects module names from scope (dotted entries) and stdlib dir on disk. When prefix starts uppercase, suggests `ModName.` as completion. Private members excluded. `lib/repl/dune` depends on `march_modules`. 3 new tests in `repl_complete_qualified` group (1208 total).
 
 - ✅ **Qualified module access — Phase 4 (Eval on-demand module loading)** — `lib/eval/eval.ml`: added `module_loader` callback ref and `ensure_module_loaded` sentinel-guarded loader; `lookup` for dotted EVar names and `EField` qualified handler now call `ensure_module_loaded` before failing, triggering on-demand stdlib loading. Added `eval_stdlib_decls` function for evaluating DMod declarations into `module_registry` without resetting global state. `lib/eval/dune` depends on `march_modules`. `bin/main.ml` sets `module_loader` callback before `run_module` — finds stdlib file via `Module_registry.find_stdlib_file`, parses+desugars via `load_stdlib_file`, evals via `eval_stdlib_decls`. 3 new tests in `eval_qualified` group (1205 total).
 

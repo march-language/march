@@ -17528,6 +17528,38 @@ let test_eval_module_loader_callback () =
   Alcotest.(check bool) "loader not called again (idempotent)" false !called;
   March_eval.Eval.module_loader := None
 
+(* ── Phase 6: REPL tab completion for qualified module names ───────────── *)
+
+let test_complete_qualified_from_scope () =
+  (* When scope has "Map.get" and "Map.put", typing "Map.g" completes to "Map.get" *)
+  let scope = [("Map.get", ""); ("Map.put", ""); ("foo", "")] in
+  let results = March_repl.Complete.complete "Map.g" scope in
+  Alcotest.(check bool) "Map.get suggested" true (List.mem "Map.get" results);
+  Alcotest.(check bool) "Map.put NOT suggested" false (List.mem "Map.put" results)
+
+let test_complete_module_name_with_dot () =
+  (* Typing "Ma" should suggest "Map." as a module name *)
+  let scope = [("Map.get", ""); ("Map.put", "")] in
+  let results = March_repl.Complete.complete "Ma" scope in
+  Alcotest.(check bool) "Map. suggested" true (List.mem "Map." results)
+
+let test_complete_qualified_from_registry () =
+  (* Register a module in the registry, then complete against it *)
+  March_modules.Module_registry.reset ();
+  March_modules.Module_registry.register "TestMod"
+    { me_name = "TestMod"; me_entries = [
+        { ex_name = "alpha"; ex_kind = ExFn; ex_public = true };
+        { ex_name = "beta"; ex_kind = ExFn; ex_public = true };
+        { ex_name = "secret"; ex_kind = ExFn; ex_public = false };
+      ] };
+  let results = March_repl.Complete.complete "TestMod.a" [] in
+  Alcotest.(check bool) "TestMod.alpha suggested" true (List.mem "TestMod.alpha" results);
+  Alcotest.(check bool) "TestMod.beta NOT suggested" false (List.mem "TestMod.beta" results);
+  (* Private members should not appear *)
+  let results2 = March_repl.Complete.complete "TestMod.s" [] in
+  Alcotest.(check bool) "private TestMod.secret not suggested" false (List.mem "TestMod.secret" results2);
+  March_modules.Module_registry.reset ()
+
 let () =
   Alcotest.run "march"
     [
@@ -19066,5 +19098,10 @@ let () =
         Alcotest.test_case "qualified fn eval same file"       `Quick (with_reset test_eval_qualified_fn_same_file);
         Alcotest.test_case "eval_stdlib_decls populates reg"   `Quick test_eval_stdlib_decls_populates_registry;
         Alcotest.test_case "module_loader callback idempotent" `Quick test_eval_module_loader_callback;
+      ]);
+      ("repl_complete_qualified", [
+        Alcotest.test_case "qualified from scope"              `Quick test_complete_qualified_from_scope;
+        Alcotest.test_case "module name with dot"              `Quick test_complete_module_name_with_dot;
+        Alcotest.test_case "qualified from registry"           `Quick test_complete_qualified_from_registry;
       ]);
     ]
