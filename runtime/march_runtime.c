@@ -393,6 +393,36 @@ static _Thread_local int g_in_scheduler = 0;
 /* Lazy initialization flag for the green thread scheduler. */
 static int g_sched_initialized = 0;
 
+/* Background scheduler thread — started automatically by march_spawn() so
+ * that actor green threads run even when the main thread is blocked in the
+ * HTTP event loop (which never calls march_run_scheduler()).
+ *
+ * Invariant: g_sched_bg_started transitions 0→1 exactly once per program
+ * execution, guarded by a CAS.  march_run_scheduler() joins the thread if
+ * it was started, ensuring orderly shutdown for non-HTTP programs. */
+static pthread_t       g_sched_bg_thread;
+static _Atomic int     g_sched_bg_started = 0;
+
+static void *sched_bg_entry(void *arg) {
+    (void)arg;
+    march_sched_run();
+    return NULL;
+}
+
+/* Start the scheduler in a background OS thread if not already running.
+ * Idempotent: the CAS ensures at most one background thread is created. */
+static void march_ensure_sched_started(void) {
+    int expected = 0;
+    if (!atomic_compare_exchange_strong_explicit(
+            &g_sched_bg_started, &expected, 1,
+            memory_order_acq_rel, memory_order_relaxed))
+        return;  /* already started */
+    if (pthread_create(&g_sched_bg_thread, NULL, sched_bg_entry, NULL) != 0) {
+        /* Fall back: reset flag so march_run_scheduler() runs inline. */
+        atomic_store_explicit(&g_sched_bg_started, 0, memory_order_relaxed);
+    }
+}
+
 /* Forward declarations */
 int64_t march_monitor(void *watcher, void *target);
 
@@ -543,18 +573,48 @@ void *march_spawn(void *actor) {
         g_sched_initialized = 1;
     }
     meta->green_thread = march_sched_spawn(actor_green_thread, meta);
+    /* Start the scheduler in a background thread so actor green threads run
+     * even when the main thread is blocked inside the HTTP event loop.
+     * For non-HTTP programs this is harmless: march_run_scheduler() joins
+     * the background thread before returning. */
+    march_ensure_sched_started();
     return actor;
 }
 
-/* Read an int64 field at word index from an actor struct.
- * Index mapping: 0=rc, 1=tag+pad, 2=dispatch, 3=alive, 4+=state fields. */
+/* Read an int64 state field by 0-based index from an actor struct.
+ *
+ * The March programmer passes index 0 for the first state field, 1 for the
+ * second, etc. (same as the eval interpreter).  The compiled actor struct
+ * layout adds a 4-word header before the state fields:
+ *
+ *   word 0: rc          (reference count — from march_hdr)
+ *   word 1: tag+pad     (GC tag — from march_hdr)
+ *   word 2: $dispatch   (TIR field index 0 — closure ptr for message dispatch)
+ *   word 3: $alive      (TIR field index 1 — 1=alive, 0=dead)
+ *   word 4+: state fields in alphabetical order (TIR field indices 2+)
+ *
+ * We therefore add 4 to translate the caller's 0-based state-field index
+ * into the correct word offset in memory. */
 int64_t march_actor_get_int(void *actor, int64_t index) {
-    return ((int64_t *)actor)[index];
+    return ((int64_t *)actor)[index + 4];
 }
 
 /* Delegate to the green thread scheduler.  Runs all spawned green threads
- * until they all complete (all actors have exited their loops). */
+ * until they all complete (all actors have exited their loops).
+ *
+ * If march_spawn() already started a background scheduler thread (the common
+ * case when the main thread is blocked in the HTTP event loop), we join that
+ * thread instead of running the scheduler inline.  This ensures orderly
+ * shutdown: the background thread drives all actors to completion, then the
+ * join returns and the program exits normally. */
 void march_run_scheduler(void) {
+    if (atomic_load_explicit(&g_sched_bg_started, memory_order_acquire)) {
+        /* Background thread is/was running — join it so actors finish. */
+        pthread_join(g_sched_bg_thread, NULL);
+        atomic_store_explicit(&g_sched_bg_started, 0, memory_order_relaxed);
+        g_sched_initialized = 0;
+        return;
+    }
     if (g_in_scheduler) return;
     g_in_scheduler = 1;
     march_sched_run();
