@@ -71,6 +71,7 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ### Language Features
 
+- [ ] **Compiler visualization and GC instrumentation** — interactive UI for exploring compiler phases, optimization passes, and reference counting traces. Plan: `specs/plans/compiler-visualization-plan.md`.
 - [ ] **MCP server for March** — An MCP (Model Context Protocol) server that exposes March's type checker and compiler as tools for LLM agents. Post-LSP, pre-1.0. Would expose: typecheck a snippet, get type at position, search by type signature, expand typed holes.
 - ✅ **Supervision tree spec V2** — `specs/features/actor-system.md` now has "Linear Types and Message Passing (V2 Design)" section documenting: why linear values must not be sent as messages, V2 rule (use `Send`/`Recv` session handles), current known soundness gap, and future path.
 - ✅ **`SRec` full multi-turn testing** — 10 new tests: `srec_unfold_basic`, `srec_unfold_passthrough`, `srec_ping_pong_protocol`, `srec_ping_pong_unfold_one_step`, `srec_ping_pong_unfold_two_steps`, `srec_nested_srec`, `srec_finite_3_step`, `srec_choose_loop`, `srec_dual`, `srec_multi_turn_typechecks`.
