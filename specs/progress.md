@@ -262,11 +262,11 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
-## Current State (as of 2026-03-30, post atom HTTP method routing fix)
+## Current State (as of 2026-03-30, post cprop RC-target corruption fix)
 
 - **Builds clean**
 - **14 pre-existing failures** in `repl_jit_regression`/`repl_compiler_parity` (unrelated to Bastion work); all other suites pass. Full list: (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing** + **Phase 4: reduction counting in compiled code** + **Phase 4: lazy stack growth** + **Vault sharded KV store** + **Bastion.Cache + Bastion.Depot middleware**):
-  - `test_march.exe`: 1185 tests, 14 pre-existing repl_jit/repl_compiler_parity failures
+  - `test_march.exe`: 1188 tests, 14 pre-existing repl_jit/repl_compiler_parity failures
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests (23 failures: pre-existing formatter round-trip failures)
