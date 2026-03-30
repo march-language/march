@@ -37,11 +37,103 @@ type borrow_map = param_modes StringMap.t
 
 let empty : borrow_map = StringMap.empty
 
-(** True iff parameter [idx] of [fn_name] is marked borrowed in [m]. *)
+(** Hardcoded borrow table for C extern functions that borrow (read-only) their
+    string/heap parameters without taking ownership.  Indexed by C name *or*
+    TIR builtin name (the same name appears in EApp before LLVM mangling).
+
+    Format: (function_name, bool list) where each bool indicates whether the
+    corresponding positional parameter is borrowed. *)
+let extern_borrow_table : (string * bool list) list = [
+  (* ── IO ─────────────────────────────────────────────────────────────────── *)
+  ("march_print",   [true]);
+  ("march_println", [true]);
+  ("print",         [true]);   (* TIR builtin name before LLVM mangling *)
+  ("println",       [true]);
+  (* ── Core string operations ─────────────────────────────────────────────── *)
+  ("march_string_eq",          [true; true]);
+  ("march_string_concat",      [true; true]);
+  ("march_string_byte_length", [true]);
+  ("march_string_grapheme_count", [true]);
+  ("march_string_is_empty",    [true]);
+  ("march_string_to_int",      [true]);
+  ("march_string_to_float",    [true]);
+  ("march_string_to_lowercase",[true]);
+  ("march_string_to_uppercase",[true]);
+  ("march_string_trim",        [true]);
+  ("march_string_trim_start",  [true]);
+  ("march_string_trim_end",    [true]);
+  ("march_string_reverse",     [true]);
+  (* ── 2-arg string × string ──────────────────────────────────────────────── *)
+  ("march_string_contains",      [true; true]);
+  ("march_string_starts_with",   [true; true]);
+  ("march_string_ends_with",     [true; true]);
+  ("march_string_split",         [true; true]);
+  ("march_string_split_first",   [true; true]);
+  ("march_string_index_of",      [true; true]);
+  ("march_string_last_index_of", [true; true]);
+  (* ── 3-arg string × string × string ────────────────────────────────────── *)
+  ("march_string_replace",     [true; true; true]);
+  ("march_string_replace_all", [true; true; true]);
+  (* ── mixed-arity: string param(s) only ─────────────────────────────────── *)
+  (* slice(s, int_start, int_len)  — only s is a string *)
+  ("march_string_slice",     [true; false; false]);
+  (* repeat(s, int_n)  — only s is a string *)
+  ("march_string_repeat",    [true; false]);
+  (* join(list, sep)  — list is heap-owned by caller; sep is borrowed string *)
+  ("march_string_join",      [false; true]);
+  (* pad_left/right(s, int_width, fill)  — s and fill are strings *)
+  ("march_string_pad_left",  [true; false; true]);
+  ("march_string_pad_right", [true; false; true]);
+  (* ── TIR builtin names (pre-mangling) ───────────────────────────────────── *)
+  ("string_eq",            [true; true]);
+  ("string_concat",        [true; true]);
+  ("++",                   [true; true]);
+  ("string_byte_length",   [true]);
+  ("string_grapheme_count",[true]);
+  ("string_is_empty",      [true]);
+  ("string_to_int",        [true]);
+  ("string_to_float",      [true]);
+  ("string_to_lowercase",  [true]);
+  ("string_to_uppercase",  [true]);
+  ("string_trim",          [true]);
+  ("string_trim_start",    [true]);
+  ("string_trim_end",      [true]);
+  ("string_reverse",       [true]);
+  ("string_contains",      [true; true]);
+  ("string_starts_with",   [true; true]);
+  ("string_ends_with",     [true; true]);
+  ("string_split",         [true; true]);
+  ("string_split_first",   [true; true]);
+  ("string_index_of",      [true; true]);
+  ("string_last_index_of", [true; true]);
+  ("string_replace",       [true; true; true]);
+  ("string_replace_all",   [true; true; true]);
+  ("string_slice",         [true; false; false]);
+  ("string_repeat",        [true; false]);
+  ("string_join",          [false; true]);
+  ("string_pad_left",      [true; false; true]);
+  ("string_pad_right",     [true; false; true]);
+  (* ── Synthetic C names used directly in lower.ml wrappers ──────────────── *)
+  ("march_compare_string", [true; true]);
+  ("march_hash_string",    [true]);
+]
+
+(** True iff parameter [idx] of C extern / TIR builtin [fn_name] is borrowed
+    according to the hardcoded ABI table.  Used as a fallback in [is_borrowed]
+    when the function is not a March-defined function. *)
+let is_extern_borrowed (fn_name : string) (param_idx : int) : bool =
+  match List.assoc_opt fn_name extern_borrow_table with
+  | Some borrows ->
+    (match List.nth_opt borrows param_idx with Some b -> b | None -> false)
+  | None -> false
+
+(** True iff parameter [idx] of [fn_name] is marked borrowed in [m].
+    Falls back to [is_extern_borrowed] for C externs / TIR builtins not
+    present in the March borrow map. *)
 let is_borrowed (m : borrow_map) (fn_name : string) (idx : int) : bool =
   match StringMap.find_opt fn_name m with
   | Some modes -> idx < Array.length modes && modes.(idx)
-  | None -> false
+  | None -> is_extern_borrowed fn_name idx
 
 (** Same predicate as [Perceus.needs_rc].  Duplicated here to avoid a cyclic
     module dependency: [Perceus] imports [Borrow], so [Borrow] must not import
