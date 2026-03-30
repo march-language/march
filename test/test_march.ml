@@ -2307,6 +2307,35 @@ let test_tir_lower_module () =
   Alcotest.(check int) "2 functions" 2 (List.length m.March_tir.Tir.tm_fns);
   Alcotest.(check string) "first fn name" "add" (List.hd m.tm_fns).fn_name
 
+let test_tir_lower_qualified_module () =
+  (* Referencing Math.min_int should auto-lower the Math stdlib module
+     and include its functions in tm_fns. *)
+  let m = lower_module_typed {|mod Test do
+    mod Math do
+      fn min_int(a : Int, b : Int) : Int do
+        if a < b do a else b end
+      end
+    end
+    fn main() do Math.min_int(3, 5) end
+  end|} in
+  let fn_names = List.map (fun (f : March_tir.Tir.fn_def) -> f.fn_name) m.tm_fns in
+  Alcotest.(check bool) "Math.min_int in fns" true (List.mem "Math.min_int" fn_names)
+
+let test_tir_lower_qualified_auto_load () =
+  (* When a qualified name like "Mod.func" appears and no inline DMod exists,
+     ensure_module_lowered should trigger stdlib loading. *)
+  (* We test the mechanism directly by calling _ensure_module_lowered
+     and checking that _lowered_modules tracks it. *)
+  March_tir.Lower._lowered_modules := Hashtbl.create 4;
+  March_tir.Lower._fns_ref := ref [];
+  March_tir.Lower._types_ref := ref [];
+  (* Try to load a nonexistent module — should not crash *)
+  !(March_tir.Lower._ensure_module_lowered) "NoSuchModule99";
+  Alcotest.(check bool) "nonexistent module tracked"
+    true (Hashtbl.mem !(March_tir.Lower._lowered_modules) "NoSuchModule99");
+  (* Fns should still be empty — no module found *)
+  Alcotest.(check int) "no fns added" 0 (List.length !(!(March_tir.Lower._fns_ref)))
+
 let test_tir_lower_type_def () =
   let m = lower_module {|mod Test do
     type Shape = Circle(Int) | Square(Int)
@@ -17838,6 +17867,8 @@ let () =
           Alcotest.test_case "lower record"         `Quick test_tir_lower_record;
           Alcotest.test_case "lower seq"            `Quick test_tir_lower_seq;
           Alcotest.test_case "lower module"         `Quick test_tir_lower_module;
+          Alcotest.test_case "lower qualified mod"  `Quick test_tir_lower_qualified_module;
+          Alcotest.test_case "qualified auto-load"  `Quick test_tir_lower_qualified_auto_load;
           Alcotest.test_case "lower type def"       `Quick test_tir_lower_type_def;
           Alcotest.test_case "lower fn params"      `Quick test_tir_lower_fn_params;
           Alcotest.test_case "ANF invariant"        `Quick test_tir_anf_invariant;

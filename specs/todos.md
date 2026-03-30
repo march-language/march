@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-30 (qualified module access Phase 6: REPL tab completion — 1208 tests)
+**Last updated:** 2026-03-30 (qualified module access Phase 5: TIR Lower — 1210 tests)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -122,6 +122,8 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 ---
 
 ## Done (recently completed)
+
+- ✅ **Qualified module access — Phase 5 (TIR Lower compiled path)** — `lib/tir/lower.ml`: added `_fns_ref`/`_types_ref` module-level accumulator refs (set by `lower_module`), `_lowered_modules` tracking hashtable, `_ensure_module_lowered` forward-ref callback. `lower_stdlib_mod_decls` lowers stdlib module declarations (DFn, DType, nested DMod) into the accumulator refs. `ensure_module_lowered` loads stdlib `.march` files via `Module_registry.find_stdlib_file`, parses+desugars, then calls `lower_stdlib_mod_decls` — triggered from EVar handling in both `lower_to_atom_k` and `lower_expr` when a dotted qualified name is encountered. `lib/tir/dune` depends on `march_modules`. 2 new tests in `tir` group (1210 total).
 
 - ✅ **Qualified module access — Phase 6 (REPL tab completion)** — `lib/repl/complete.ml`: enhanced `complete` function with `complete_qualified` for dotted prefixes (e.g. `Map.ge` → `Map.get`) — queries both scope entries and `Module_registry.ensure_loaded` for public exports. `known_module_names` collects module names from scope (dotted entries) and stdlib dir on disk. When prefix starts uppercase, suggests `ModName.` as completion. Private members excluded. `lib/repl/dune` depends on `march_modules`. 3 new tests in `repl_complete_qualified` group (1208 total).
 

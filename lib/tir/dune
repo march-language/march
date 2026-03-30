@@ -1,5 +1,5 @@
 (library
  (name march_tir)
  (modules tir pp lower mono defun borrow perceus escape llvm_emit purity fold simplify inline dce cprop opt fusion known_call)
- (libraries march_ast march_typecheck)
+ (libraries march_ast march_typecheck march_modules)
  (preprocess (pps ppx_deriving.show)))
