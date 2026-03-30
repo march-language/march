@@ -1,0 +1,3 @@
+(library
+ (name march_modules)
+ (libraries march_ast march_lexer march_parser march_desugar march_errors))

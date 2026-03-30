@@ -17273,6 +17273,138 @@ let test_cross_module_load_order_reverse_mutual () =
   Alcotest.(check int) "Alpha can call Zzz.answer() (Z after A)" 7
     (vint (call_fn env "f" []))
 
+(* ── Module registry tests ──────────────────────────────────────────────── *)
+
+let test_registry_register_lookup () =
+  March_modules.Module_registry.reset ();
+  let exports : March_modules.Module_registry.module_exports = {
+    me_name = "TestMod";
+    me_entries = [
+      { ex_name = "foo"; ex_kind = ExFn; ex_public = true };
+      { ex_name = "Bar"; ex_kind = ExCtor ("MyType", 1); ex_public = true };
+    ];
+  } in
+  March_modules.Module_registry.register "TestMod" exports;
+  let result = March_modules.Module_registry.lookup "TestMod" in
+  Alcotest.(check bool) "lookup finds registered module" true
+    (Option.is_some result);
+  let got = Option.get result in
+  Alcotest.(check string) "module name preserved" "TestMod" got.me_name;
+  Alcotest.(check int) "two exports" 2 (List.length got.me_entries);
+  (* lookup non-existent returns None *)
+  let missing = March_modules.Module_registry.lookup "NoSuchMod" in
+  Alcotest.(check bool) "missing module is None" true (Option.is_none missing);
+  March_modules.Module_registry.reset ()
+
+let test_registry_is_known () =
+  March_modules.Module_registry.reset ();
+  Alcotest.(check bool) "unknown before register" false
+    (March_modules.Module_registry.is_known_module "Foo");
+  March_modules.Module_registry.register "Foo"
+    { me_name = "Foo"; me_entries = [] };
+  Alcotest.(check bool) "known after register" true
+    (March_modules.Module_registry.is_known_module "Foo");
+  March_modules.Module_registry.reset ()
+
+(* ── Desugar qualified name normalization tests ─────────────────────────── *)
+
+let test_desugar_module_ctor_with_args () =
+  (* Result.Ok(42) should desugar to ECon("Result.Ok", [42]) *)
+  let src = {|mod Test do
+    fn go() do Result.Ok(42) end
+  end|} in
+  let m = parse_and_desugar src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    (match def.fn_clauses with
+     | [clause] ->
+       (match clause.fc_body with
+        | March_ast.Ast.ECon (name, [_arg], _) ->
+          Alcotest.(check string) "qualified ctor name" "Result.Ok" name.txt
+        | other ->
+          Alcotest.fail (Printf.sprintf "expected ECon(Result.Ok, [_]), got %s"
+            (March_ast.Ast.show_expr other)))
+     | _ -> Alcotest.fail "expected single clause")
+  | _ -> Alcotest.fail "expected single DFn"
+
+let test_desugar_module_ctor_zero_arg () =
+  (* Option.None should desugar to ECon("Option.None", []) *)
+  let src = {|mod Test do
+    fn go() do Option.None end
+  end|} in
+  let m = parse_and_desugar src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    (match def.fn_clauses with
+     | [clause] ->
+       (match clause.fc_body with
+        | March_ast.Ast.ECon (name, [], _) ->
+          Alcotest.(check string) "zero-arg qualified ctor" "Option.None" name.txt
+        | other ->
+          Alcotest.fail (Printf.sprintf "expected ECon(Option.None, []), got %s"
+            (March_ast.Ast.show_expr other)))
+     | _ -> Alcotest.fail "expected single clause")
+  | _ -> Alcotest.fail "expected single DFn"
+
+let test_desugar_module_func_call () =
+  (* Map.get(m, k) should desugar to EApp(EVar("Map.get"), [m, k]) *)
+  let src = {|mod Test do
+    fn go(m, k) do Map.get(m, k) end
+  end|} in
+  let m = parse_and_desugar src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    (match def.fn_clauses with
+     | [clause] ->
+       (match clause.fc_body with
+        | March_ast.Ast.EApp (March_ast.Ast.EVar name, [_; _], _) ->
+          Alcotest.(check string) "qualified func name" "Map.get" name.txt
+        | other ->
+          Alcotest.fail (Printf.sprintf "expected EApp(EVar(Map.get), [_, _]), got %s"
+            (March_ast.Ast.show_expr other)))
+     | _ -> Alcotest.fail "expected single clause")
+  | _ -> Alcotest.fail "expected single DFn"
+
+let test_desugar_record_field_not_rewritten () =
+  (* record.field should stay as EField, NOT be rewritten to EVar *)
+  let src = {|mod Test do
+    fn go(r) do r.name end
+  end|} in
+  let m = parse_and_desugar src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    (match def.fn_clauses with
+     | [clause] ->
+       (match clause.fc_body with
+        | March_ast.Ast.EField (March_ast.Ast.EVar _, field, _) ->
+          Alcotest.(check string) "record field preserved" "name" field.txt
+        | March_ast.Ast.EVar name ->
+          Alcotest.fail (Printf.sprintf "should not rewrite record.field to EVar, got %s" name.txt)
+        | other ->
+          Alcotest.fail (Printf.sprintf "expected EField(EVar, name), got %s"
+            (March_ast.Ast.show_expr other)))
+     | _ -> Alcotest.fail "expected single clause")
+  | _ -> Alcotest.fail "expected single DFn"
+
+let test_desugar_module_func_no_args () =
+  (* Map.new should desugar to EVar("Map.new") (not in EApp context) *)
+  let src = {|mod Test do
+    fn go() do Map.new end
+  end|} in
+  let m = parse_and_desugar src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DFn (def, _)] ->
+    (match def.fn_clauses with
+     | [clause] ->
+       (match clause.fc_body with
+        | March_ast.Ast.EVar name ->
+          Alcotest.(check string) "qualified func ref" "Map.new" name.txt
+        | other ->
+          Alcotest.fail (Printf.sprintf "expected EVar(Map.new), got %s"
+            (March_ast.Ast.show_expr other)))
+     | _ -> Alcotest.fail "expected single clause")
+  | _ -> Alcotest.fail "expected single DFn"
+
 let () =
   Alcotest.run "march"
     [
@@ -18787,5 +18919,16 @@ let () =
         Alcotest.test_case "Alpha calls Beta (forward ref)"    `Quick test_cross_module_load_order_forward_ref;
         Alcotest.test_case "mutual cross-module Alpha->Beta"   `Quick test_cross_module_load_order_mutual;
         Alcotest.test_case "Alpha calls Zzz (Z after A)"       `Quick test_cross_module_load_order_reverse_mutual;
+      ]);
+      ("module_registry", [
+        Alcotest.test_case "register and lookup"     `Quick test_registry_register_lookup;
+        Alcotest.test_case "is_known_module"          `Quick test_registry_is_known;
+      ]);
+      ("desugar_qualified", [
+        Alcotest.test_case "Module.Ctor(args) → ECon" `Quick test_desugar_module_ctor_with_args;
+        Alcotest.test_case "Module.Ctor → ECon"        `Quick test_desugar_module_ctor_zero_arg;
+        Alcotest.test_case "Module.func(args) → EApp"  `Quick test_desugar_module_func_call;
+        Alcotest.test_case "record.field not rewritten" `Quick test_desugar_record_field_not_rewritten;
+        Alcotest.test_case "Module.func ref → EVar"    `Quick test_desugar_module_func_no_args;
       ]);
     ]

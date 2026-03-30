@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-30 (cprop RC-target corruption bugfix + Actor.call/reply in compiled mode + extern_borrow_table for C string externs — 1189 tests)
+**Last updated:** 2026-03-30 (qualified module access Phase 0+2: module export registry + desugar normalization — 1196 tests)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -122,6 +122,8 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 ---
 
 ## Done (recently completed)
+
+- ✅ **Qualified module access — Phase 0 (Module Export Registry) + Phase 2 (Desugar normalization)** — `lib/modules/module_registry.ml` + `.mli` + `dune` (new `march_modules` library): global module export registry with types (`export_kind`: `ExFn`, `ExType`, `ExCtor`, `ExValue`; `export_entry`; `module_exports`), `register`/`lookup`/`is_known_module` API, `ensure_loaded` for lazy stdlib module loading (finds `.march` file, parses+desugars, extracts public exports, caches; circular dependency sentinel via `loading` hashtable). Desugar normalization already existed in `desugar.ml:474-494`: `EField(ECon(mod,[]),name)` → `ECon("Mod.Name",[])` for uppercase (constructors) or `EVar("Mod.name")` for lowercase (functions); `EApp(ECon(qualified,[]),args)` folded into `ECon(name,args)` at lines 432-443; record field access (`EField(EVar(...),...)`) correctly left untouched. 7 new tests: 2 module_registry (register+lookup, is_known_module), 5 desugar_qualified (Module.Ctor(args)→ECon, Module.Ctor→ECon, Module.func(args)→EApp, record.field not rewritten, Module.func ref→EVar). Spec: `specs/qualified-modules.md`.
 
 - ✅ **Perceus RC leak fix for C extern / TIR builtin functions** — `lib/tir/borrow.ml`: added `extern_borrow_table` (hardcoded list of C extern and TIR builtin function names with per-parameter borrow flags) and `is_extern_borrowed` helper. `is_borrowed` now falls back to this table when the function name is absent from the March borrow map — covering `march_string_eq`, `march_string_concat`, `march_string_byte_length`, `march_string_is_empty`, `march_string_to_int`, `march_string_to_float`, `march_print`, `march_println`, all extended `march_string_*` ops, `march_compare_string`, `march_hash_string`, and their TIR builtin-name aliases. Previously, borrow inference treated every parameter of unknown callees as owned, causing Perceus to insert spurious IncRC with no matching DecRC for string arguments — a silent RC leak on any string comparison, concatenation, or print call in compiled mode.
 
