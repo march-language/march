@@ -661,6 +661,15 @@ void *march_send(void *actor, void *msg) {
     return some;
 }
 
+/* ── Heap layout helpers (used by actor_call and file I/O) ────────────── */
+/* Header layout: rc(8) | tag(4) | pad(4) | fields... */
+#define MARCH_FIELD(obj, i) (((int64_t *)(obj))[2 + (i)])
+#define MARCH_FIELD_PTR(obj, i) ((void *)MARCH_FIELD(obj, i))
+#define MARCH_SET_TAG(obj, t) (((march_hdr *)(obj))->tag = (int32_t)(t))
+
+static void *mk_ok(void *value);
+static void *mk_err_cstr(const char *msg);
+
 /* ── Actor.call / Actor.reply (synchronous messaging) ────────────────── */
 /*
  * march_actor_call: synchronous call — builds a wrapped message containing the
@@ -1170,11 +1179,6 @@ int64_t march_dir_exists(void *s) {
 }
 
 /* ── File/Dir/CSV I/O helpers ────────────────────────────────────────── */
-
-/* Header layout: rc(8) | tag(4) | pad(4) | fields... */
-#define MARCH_FIELD(obj, i) (((int64_t *)(obj))[2 + (i)])
-#define MARCH_FIELD_PTR(obj, i) ((void *)MARCH_FIELD(obj, i))
-#define MARCH_SET_TAG(obj, t) (((march_hdr *)(obj))->tag = (int32_t)(t))
 
 /* Create Result(Ok=0,Err=1) values; all file/dir/csv fns return Result. */
 static void *mk_ok(void *value) {

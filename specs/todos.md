@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-30 (cprop RC-target corruption bugfix + Actor.call/reply in compiled mode — 1188 tests)
+**Last updated:** 2026-03-30 (cprop RC-target corruption bugfix + Actor.call/reply in compiled mode + extern_borrow_table for C string externs — 1189 tests)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 

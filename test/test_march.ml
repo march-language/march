@@ -5350,18 +5350,24 @@ let test_borrow_no_incrc_at_call_site () =
 
 let test_borrow_no_decrc_in_callee () =
   (* A function that only borrows its TCon param should have no EDecRC
-     emitted for that param inside its body. *)
+     emitted for that param inside its body.
+     We use a wildcard pattern (Conn(_)) to avoid extracting a string field:
+     extracting a field and passing it to a borrowing extern (println) would
+     correctly produce a post-call EDecRC for the extracted string.  The test
+     is specifically about suppression of the EDecRC for the borrowed *param*
+     (conn), not about extracted sub-values. *)
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do | Conn(_) -> () end
     end
   end|} in
   let log_fn =
     List.find (fun fn -> fn.March_tir.Tir.fn_name = "log") m.March_tir.Tir.tm_fns
   in
   (* With borrow inference, conn is marked borrowed.
-     The ECase scrutinee-free (EDecRC on conn) is suppressed. *)
+     The ECase scrutinee-free (EDecRC on conn) is suppressed.
+     No string is extracted so no other EDecRC is present either. *)
   Alcotest.(check bool) "no EDecRC in log body (borrow elides callee Dec)" false
     (has_any_decrc log_fn.March_tir.Tir.fn_body)
 
@@ -5390,14 +5396,18 @@ let test_borrow_owned_param_still_gets_rc () =
 let test_borrow_conn_middleware_pattern () =
   (* HTTP middleware pattern: conn is passed through multiple read-only
      middlewares and then to a final handler that returns it.
-     Read-only middlewares should generate zero RC ops for conn. *)
+     Read-only middlewares should generate zero RC ops for conn.
+     We use wildcard patterns to avoid extracting string fields: extracting a
+     field and passing it to a borrowing extern (println) would correctly emit
+     a post-call EDecRC for the extracted string (caller is responsible since
+     println borrows).  The test is about conn's own DecRC being suppressed. *)
   let m = perceus_module {|mod Test do
     type Conn = Conn(String)
     fn log_middleware(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do | Conn(_) -> () end
     end
     fn auth_middleware(conn : Conn) : Unit do
-      match conn do | Conn(s) -> println(s) end
+      match conn do | Conn(_) -> () end
     end
     fn handle(conn : Conn) : Conn do
       log_middleware(conn)
