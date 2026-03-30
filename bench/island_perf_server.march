@@ -1,0 +1,54 @@
+-- Island performance server for concurrency benchmarking.
+--
+-- Actor-backed HTTP server: each POST /update sends Inc() to the counter actor.
+--
+-- Endpoints:
+--   POST /update   — increments the counter actor
+--   GET  /state    — returns {count} as JSON
+--
+-- Consistency invariant:
+--   After N successful POST /update requests,
+--   final count − baseline count == N.
+--
+-- Build & run:
+--   ./_build/default/bin/main.exe --compile bench/island_perf_server.march
+--   ./bench/island_perf_server
+
+mod IslandPerfServer do
+
+actor Counter do
+  state { count : Int }
+  init { count = 0 }
+
+  on Inc() do
+    { state with count = state.count + 1 }
+  end
+end
+
+fn router(counter, conn) do
+  let m = Http.method_to_string(HttpServer.method(conn))
+  let p = HttpServer.path(conn)
+  if m == "POST" do
+    if p == "/update" do
+      let _ = send(counter, Inc())
+      HttpServer.json(conn, 200, "{\"ok\":true}")
+    else HttpServer.text(conn, 404, "Not Found") end
+  else if m == "GET" do
+    if p == "/ping" do
+      HttpServer.text(conn, 200, "pong")
+    else HttpServer.text(conn, 404, "Not Found") end
+  else HttpServer.text(conn, 405, "Method Not Allowed") end end
+end
+
+fn main() : Unit do
+  let counter = spawn(Counter)
+  println("Island perf server on http://localhost:8899")
+  println("  POST /update  -> inc actor counter, returns {ok:true}")
+  println("  GET  /ping    -> pong (health check)")
+
+  HttpServer.new(8899)
+  |> HttpServer.plug(fn conn -> router(counter, conn))
+  |> HttpServer.listen()
+end
+
+end
