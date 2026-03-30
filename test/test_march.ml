@@ -4926,6 +4926,32 @@ let test_actor_compile_run_scheduler_in_main () =
   Alcotest.(check bool) "@main calls march_run_scheduler" true
     (ir_contains ir "march_run_scheduler")
 
+(** Compiled actor: actor_call emits march_actor_call; actor_reply emits
+    march_actor_reply in the handler body. *)
+let test_actor_compile_call_reply_emitted () =
+  let ir = emit_actor_ir {|mod Test do
+    actor Counter do
+      state { count : Int }
+      init { count = 0 }
+      on Increment() do
+        { count = state.count + 1 }
+      end
+      on GetCount(reply_to) do
+        Actor.reply(reply_to, state.count)
+        state
+      end
+    end
+    fn main() : Unit do
+      let pid = spawn(Counter)
+      let _ = Actor.call(pid, GetCount, 5000)
+      ()
+    end
+  end|} in
+  Alcotest.(check bool) "march_actor_call in IR" true
+    (ir_contains ir "march_actor_call");
+  Alcotest.(check bool) "march_actor_reply in IR" true
+    (ir_contains ir "march_actor_reply")
+
 (* ── TCO (tail-call optimisation) IR tests ─────────────────────────────── *)
 
 (** Helper: full pipeline → LLVM IR, same as emit_actor_ir but named clearly. *)
@@ -17712,6 +17738,7 @@ let () =
           Alcotest.test_case "link emitted"                 `Quick test_actor_compile_link_emitted;
           Alcotest.test_case "multi-actor no crash"         `Quick test_actor_compile_multi_actor_no_crash;
           Alcotest.test_case "run_scheduler in main"        `Quick test_actor_compile_run_scheduler_in_main;
+          Alcotest.test_case "actor_call/reply emitted"     `Quick test_actor_compile_call_reply_emitted;
         ] );
       ( "tco_codegen", [
           Alcotest.test_case "factorial loop emitted"   `Quick test_tco_factorial_has_loop;
