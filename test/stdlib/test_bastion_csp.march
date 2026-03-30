@@ -14,7 +14,7 @@ ptype Conn = Conn(
 )
 
 pfn make_conn() do
-  Conn(0, Get, "/", Nil, "", Nil, "", 0, Nil, "", false, Nil, NoUpgrade)
+  Conn(0, :get, "/", Nil, "", Nil, "", 0, Nil, "", false, Nil, NoUpgrade)
 end
 
 -- ── assign_nonce ──────────────────────────────────────────────────────────────

@@ -11,7 +11,7 @@ pfn make_conn(m, hdrs, body) do
 end
 
 pfn make_get() do
-  make_conn(Get, Nil, "")
+  make_conn(:get, Nil, "")
 end
 
 -- Extract the cookie value (before the first ";") from a Set-Cookie header.
@@ -42,7 +42,7 @@ describe "BastionCookies put_signed / get_signed" do
     None     -> assert false
     Some(sc) ->
       let cookie_val = extract_name_value(sc)
-      let conn2 = make_conn(Get, Cons(Header("cookie", cookie_val), Nil), "")
+      let conn2 = make_conn(:get, Cons(Header("cookie", cookie_val), Nil), "")
       let result = BastionCookies.get_signed(conn2, "pref")
       assert (result == Some("dark"))
     end
@@ -54,7 +54,7 @@ describe "BastionCookies put_signed / get_signed" do
   end
 
   test "get_signed returns None on tampered value" do
-    let conn2 = make_conn(Get, Cons(Header("cookie", "pref=tampered.invalidsig"), Nil), "")
+    let conn2 = make_conn(:get, Cons(Header("cookie", "pref=tampered.invalidsig"), Nil), "")
     assert (BastionCookies.get_signed(conn2, "pref") == None)
   end
 
@@ -78,7 +78,7 @@ describe "BastionCookies put_encrypted / get_encrypted" do
     None     -> assert false
     Some(sc) ->
       let cookie_val = extract_name_value(sc)
-      let conn2 = make_conn(Get, Cons(Header("cookie", cookie_val), Nil), "")
+      let conn2 = make_conn(:get, Cons(Header("cookie", cookie_val), Nil), "")
       let result = BastionCookies.get_encrypted(conn2, "_flash")
       assert (result == Some("saved!"))
     end
@@ -106,7 +106,7 @@ describe "BastionCookies put_encrypted / get_encrypted" do
     Some(sc) ->
       let cookie_val = extract_name_value(sc)
       -- A signed cookie fed to get_encrypted should return None (no enc: prefix)
-      let conn2 = make_conn(Get, Cons(Header("cookie", cookie_val), Nil), "")
+      let conn2 = make_conn(:get, Cons(Header("cookie", cookie_val), Nil), "")
       assert (BastionCookies.get_encrypted(conn2, "tok") == None)
     end
   end

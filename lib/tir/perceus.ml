@@ -136,6 +136,7 @@ let decrc_for (v : Tir.var) (a : Tir.atom) : Tir.expr =
 
 (** Returns true if this type needs reference counting (heap-allocated). *)
 let needs_rc : Tir.ty -> bool = function
+  | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars, not heap-allocated *)
   | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
   | Tir.TVar _ -> false  (* unresolved after mono: conservatively skip RC
                             to avoid incrc on integers stored as inttoptr *)

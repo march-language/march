@@ -826,37 +826,48 @@ typedef struct {
     int   client_fd;
 } conn_thread_arg_t;
 
-/* Convert a method string to a Method variant ADT value.
- * Method = Get(0) | Post(1) | Put(2) | Patch(3) | Delete(4)
- *        | Head(5) | Options(6) | Trace(7) | Connect(8) | Other(String)(9)
- * Tags 0-8: 16-byte header only, no fields.
- * Tag 9 (Other): 16-byte header + 1 field (String) at offset 16. */
-static void *method_string_to_variant(void *method_str) {
-    march_string *ms = (march_string *)method_str;
-    const char *s = ms->data;
-    int64_t len = ms->len;
-    int tag = -1;
-
-    if (len == 3 && memcmp(s, "GET", 3) == 0)          tag = 0;
-    else if (len == 4 && memcmp(s, "POST", 4) == 0)     tag = 1;
-    else if (len == 3 && memcmp(s, "PUT", 3) == 0)      tag = 2;
-    else if (len == 5 && memcmp(s, "PATCH", 5) == 0)    tag = 3;
-    else if (len == 6 && memcmp(s, "DELETE", 6) == 0)    tag = 4;
-    else if (len == 4 && memcmp(s, "HEAD", 4) == 0)      tag = 5;
-    else if (len == 7 && memcmp(s, "OPTIONS", 7) == 0)   tag = 6;
-    else if (len == 5 && memcmp(s, "TRACE", 5) == 0)     tag = 7;
-    else if (len == 7 && memcmp(s, "CONNECT", 7) == 0)   tag = 8;
-
-    if (tag >= 0) {
-        void *m = march_alloc(16);
-        *(int32_t *)((char *)m + 8) = (int32_t)tag;
-        return m;
+/* FNV-1a 64-bit hash — must match the OCaml fnv1a_64 in llvm_emit.ml.
+ * Used to intern atom names as stable i64 values for pattern matching. */
+static int64_t fnv1a_64_str(const char *s, size_t len) {
+    uint64_t h = UINT64_C(0xcbf29ce484222325);
+    const uint64_t prime = UINT64_C(0x100000001b3);
+    for (size_t i = 0; i < len; i++) {
+        h ^= (uint8_t)s[i];
+        h *= prime;
     }
-    /* Other(String) — tag 9, one field */
-    void *m = march_alloc(16 + 8);
-    *(int32_t *)((char *)m + 8) = 9;
-    *(void **)((char *)m + 16) = method_str;
-    return m;
+    return (int64_t)h;
+}
+
+/* Convert an HTTP method string to a March atom (i64 FNV-1a hash).
+ * March atoms are lowercase: GET → :get, POST → :post, etc.
+ * The hash is computed on the lowercase atom name to match the compiler. */
+static int64_t method_string_to_atom(const char *s, size_t len) {
+    /* Fast path: compare against known methods, return hash of lowercase name */
+    if (len == 3 && memcmp(s, "GET", 3) == 0)
+        return fnv1a_64_str("get", 3);
+    if (len == 4 && memcmp(s, "POST", 4) == 0)
+        return fnv1a_64_str("post", 4);
+    if (len == 3 && memcmp(s, "PUT", 3) == 0)
+        return fnv1a_64_str("put", 3);
+    if (len == 5 && memcmp(s, "PATCH", 5) == 0)
+        return fnv1a_64_str("patch", 5);
+    if (len == 6 && memcmp(s, "DELETE", 6) == 0)
+        return fnv1a_64_str("delete", 6);
+    if (len == 4 && memcmp(s, "HEAD", 4) == 0)
+        return fnv1a_64_str("head", 4);
+    if (len == 7 && memcmp(s, "OPTIONS", 7) == 0)
+        return fnv1a_64_str("options", 7);
+    if (len == 5 && memcmp(s, "TRACE", 5) == 0)
+        return fnv1a_64_str("trace", 5);
+    if (len == 7 && memcmp(s, "CONNECT", 7) == 0)
+        return fnv1a_64_str("connect", 7);
+    /* Unknown method: convert to lowercase and hash */
+    char lower[64];
+    size_t n = len < 63 ? len : 63;
+    for (size_t i = 0; i < n; i++)
+        lower[i] = (char)tolower((unsigned char)s[i]);
+    lower[n] = '\0';
+    return fnv1a_64_str(lower, n);
 }
 
 /* Split a path string on "/" into a March List(String).
@@ -915,8 +926,9 @@ static void *make_int(int64_t value) {
 
 /* Build a full 13-field Conn heap object.
  * Conn is a single-constructor ADT: tag=0, 13 fields at offsets 16..112.
- * Total size: 16 (header) + 13*8 (fields) = 120 bytes. */
-static void *make_conn(int64_t fd, void *method, void *path, void *path_info,
+ * Total size: 16 (header) + 13*8 (fields) = 120 bytes.
+ * Field 1 (method) is now an i64 atom hash (not a Method ADT pointer). */
+static void *make_conn(int64_t fd, int64_t method, void *path, void *path_info,
                         void *query_string, void *req_headers, void *req_body,
                         int64_t resp_status, void *resp_headers, void *resp_body,
                         void *halted, void *assigns, void *upgrade) {
@@ -924,7 +936,7 @@ static void *make_conn(int64_t fd, void *method, void *path, void *path_info,
     /* tag = 0 (single constructor), already zeroed by march_alloc */
     char *base = (char *)c;
     *(int64_t *)(base + 16)  = fd;             /* field 0: fd */
-    *(void **)(base + 24)    = method;         /* field 1: method */
+    *(int64_t *)(base + 24)  = method;         /* field 1: method (atom i64) */
     *(void **)(base + 32)    = path;           /* field 2: path */
     *(void **)(base + 40)    = path_info;      /* field 3: path_info */
     *(void **)(base + 48)    = query_string;   /* field 4: query_string */
@@ -1091,9 +1103,8 @@ int march_detect_keep_alive_simd(const march_http_request_t *req) {
 void *march_conn_from_parsed(const march_http_request_t *req,
                               const char *buf, size_t buf_len,
                               int fd) {
-    /* Method string → Method variant */
-    void *method_str = march_string_lit(req->method, (int64_t)req->method_len);
-    void *method     = method_string_to_variant(method_str);
+    /* Method string → atom i64 hash (e.g. "GET" → hash(:GET)) */
+    int64_t method = method_string_to_atom(req->method, req->method_len);
 
     /* Path + query split */
     const char *qmark = memchr(req->path, '?', req->path_len);

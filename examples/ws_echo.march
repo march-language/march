@@ -42,9 +42,9 @@ end
 
 pfn router(conn) do
   match (HttpServer.method(conn), HttpServer.path_info(conn)) do
-  (Get, Cons("ws", Nil)) ->
+  (:get, Cons("ws", Nil)) ->
     WebSocket.upgrade(conn, fn socket -> ws_handler(socket))
-  (Get, Nil) ->
+  (:get, Nil) ->
     conn |> HttpServer.text(200, "WebSocket echo server — connect to /ws")
   _ ->
     conn |> HttpServer.text(404, "Not Found")

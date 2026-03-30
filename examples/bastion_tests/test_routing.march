@@ -19,23 +19,23 @@ pfn make_conn(m, path_, req_hdrs, body) do
 end
 
 pfn make_get(path_) do
-  make_conn(Get, path_, Nil, "")
+  make_conn(:get, path_, Nil, "")
 end
 
 pfn make_post(path_, body) do
-  make_conn(Post, path_, Nil, body)
+  make_conn(:post, path_, Nil, body)
 end
 
 -- A simple router: GET /hello -> 200, POST /submit -> 201, else 404
 pfn simple_router(conn) do
   match (HttpServer.method(conn), HttpServer.path_info(conn)) do
-  (Get, Cons("hello", Nil)) ->
+  (:get, Cons("hello", Nil)) ->
     HttpServer.text(conn, 200, "world")
-  (Post, Cons("submit", Nil)) ->
+  (:post, Cons("submit", Nil)) ->
     HttpServer.json(conn, 201, "{\"ok\":true}")
-  (Get, Cons("redirect-me", Nil)) ->
+  (:get, Cons("redirect-me", Nil)) ->
     HttpServer.redirect(conn, "/hello")
-  (Get, Cons("html-page", Nil)) ->
+  (:get, Cons("html-page", Nil)) ->
     HttpServer.html(conn, 200, "<h1>Hello</h1>")
   _ ->
     HttpServer.text(conn, 404, "not found")
@@ -173,9 +173,9 @@ end
 
 pfn param_router(conn) do
   match (HttpServer.method(conn), HttpServer.path_info(conn)) do
-  (Get, Cons("users", Cons(user_id, Nil))) ->
+  (:get, Cons("users", Cons(user_id, Nil))) ->
     HttpServer.text(conn, 200, "user:" ++ user_id)
-  (Get, Cons("posts", Cons(post_id, Cons("comments", Nil)))) ->
+  (:get, Cons("posts", Cons(post_id, Cons("comments", Nil)))) ->
     HttpServer.text(conn, 200, "post-comments:" ++ post_id)
   _ ->
     HttpServer.text(conn, 404, "not found")
@@ -303,7 +303,7 @@ end
 describe "request header access" do
   test "get_req_header finds header case-insensitively" do
     let hdrs = Cons(Header("Content-Type", "application/json"), Nil)
-    let c = make_conn(Post, "/", hdrs, "{}")
+    let c = make_conn(:post, "/", hdrs, "{}")
     assert (HttpServer.get_req_header(c, "content-type") == Some("application/json"))
     assert (HttpServer.get_req_header(c, "CONTENT-TYPE") == Some("application/json"))
   end

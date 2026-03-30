@@ -4,7 +4,7 @@
 -- Vault data or PubSub subscriptions.  The sandbox lifecycle is:
 --
 --   let env = BastionTestSandbox.checkout("my_app")
---   let conn = BastionTestSandbox.build_conn(env, Get, "/users")
+--   let conn = BastionTestSandbox.build_conn(env, :get, "/users")
 --   -- … run your pipeline …
 --   BastionTestSandbox.release(env)
 --

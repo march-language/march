@@ -45,14 +45,14 @@ describe "BastionIdempotency.get_key" do
   end
 
   test "returns Some(key) when header is present" do
-    let conn = conn_with_ikey(Post, "my-key-123")
+    let conn = conn_with_ikey(:post, "my-key-123")
     assert (BastionIdempotency.get_key(conn) == Some("my-key-123"))
   end
 
   test "header lookup is case-insensitive" do
     -- Header stored as "Idempotency-Key" but looked up lowercased.
     let hdrs = Cons(Header("Idempotency-Key", "KEY-CAPS"), Nil)
-    let conn = make_conn(Post, hdrs, "")
+    let conn = make_conn(:post, hdrs, "")
     assert (BastionIdempotency.get_key(conn) == Some("KEY-CAPS"))
   end
 end
@@ -189,7 +189,7 @@ describe "BastionIdempotency.protect — first request with key" do
   test "first call executes the handler and returns its response" do
     let tbl  = fresh_table()
     let opts = Cons(("vault_table", tbl), Nil)
-    let conn = conn_with_ikey(Post, "first-req-key")
+    let conn = conn_with_ikey(:post, "first-req-key")
     let result = BastionIdempotency.protect(conn, fn c -> echo_handler(c), opts)
     assert (HttpServer.status(result) == 200)
     assert (HttpServer.resp_body(result) == "hello")
@@ -198,7 +198,7 @@ describe "BastionIdempotency.protect — first request with key" do
   test "first call stores the result in cache" do
     let tbl  = fresh_table()
     let opts = Cons(("vault_table", tbl), Nil)
-    let conn = conn_with_ikey(Post, "store-key")
+    let conn = conn_with_ikey(:post, "store-key")
     BastionIdempotency.protect(conn, fn c -> echo_handler(c), opts)
     let cached = BastionIdempotency.lookup(tbl, "store-key", "")
     match cached do
@@ -210,7 +210,7 @@ describe "BastionIdempotency.protect — first request with key" do
   test "first call adds x-idempotent-replayed: false header" do
     let tbl  = fresh_table()
     let opts = Cons(("vault_table", tbl), Nil)
-    let conn = conn_with_ikey(Post, "first-hdr-key")
+    let conn = conn_with_ikey(:post, "first-hdr-key")
     let result = BastionIdempotency.protect(conn, fn c -> echo_handler(c), opts)
     let replayed = HttpServer.get_resp_header(result, "x-idempotent-replayed")
     assert (replayed == Some("false"))
@@ -224,10 +224,10 @@ describe "BastionIdempotency.protect — second request replays cache" do
     let tbl  = fresh_table()
     let opts = Cons(("vault_table", tbl), Nil)
     let key  = "replay-key"
-    let conn1 = conn_with_ikey(Post, key)
+    let conn1 = conn_with_ikey(:post, key)
     BastionIdempotency.protect(conn1, fn c -> echo_handler(c), opts)
     -- Second call
-    let conn2   = conn_with_ikey(Post, key)
+    let conn2   = conn_with_ikey(:post, key)
     let result2 = BastionIdempotency.protect(conn2, fn c -> echo_handler(c), opts)
     assert (HttpServer.status(result2) == 200)
     assert (HttpServer.resp_body(result2) == "hello")
@@ -237,9 +237,9 @@ describe "BastionIdempotency.protect — second request replays cache" do
     let tbl  = fresh_table()
     let opts = Cons(("vault_table", tbl), Nil)
     let key  = "replay-hdr-key"
-    let conn1 = conn_with_ikey(Post, key)
+    let conn1 = conn_with_ikey(:post, key)
     BastionIdempotency.protect(conn1, fn c -> echo_handler(c), opts)
-    let conn2   = conn_with_ikey(Post, key)
+    let conn2   = conn_with_ikey(:post, key)
     let result2 = BastionIdempotency.protect(conn2, fn c -> echo_handler(c), opts)
     let replayed = HttpServer.get_resp_header(result2, "x-idempotent-replayed")
     assert (replayed == Some("true"))
@@ -252,7 +252,7 @@ describe "BastionIdempotency.protect — 5xx responses not cached" do
   test "5xx handler response is not stored in cache" do
     let tbl  = fresh_table()
     let opts = Cons(("vault_table", tbl), Nil)
-    let conn = conn_with_ikey(Post, "error-key")
+    let conn = conn_with_ikey(:post, "error-key")
     BastionIdempotency.protect(conn, fn c -> error_handler(c), opts)
     -- Cache should be empty (InProgress dropped)
     let cached = BastionIdempotency.lookup(tbl, "error-key", "")
@@ -262,7 +262,7 @@ describe "BastionIdempotency.protect — 5xx responses not cached" do
   test "5xx response is returned to caller unchanged (minus idempotency-key header)" do
     let tbl  = fresh_table()
     let opts = Cons(("vault_table", tbl), Nil)
-    let conn = conn_with_ikey(Post, "err-resp-key")
+    let conn = conn_with_ikey(:post, "err-resp-key")
     let result = BastionIdempotency.protect(conn, fn c -> error_handler(c), opts)
     assert (HttpServer.status(result) == 500)
   end
@@ -272,10 +272,10 @@ describe "BastionIdempotency.protect — 5xx responses not cached" do
     let opts = Cons(("vault_table", tbl), Nil)
     let key  = "retry-after-error"
     -- First call: error, not cached
-    let conn1 = conn_with_ikey(Post, key)
+    let conn1 = conn_with_ikey(:post, key)
     BastionIdempotency.protect(conn1, fn c -> error_handler(c), opts)
     -- Second call: should run handler again (no InProgress / Completed in cache)
-    let conn2   = conn_with_ikey(Post, key)
+    let conn2   = conn_with_ikey(:post, key)
     let result2 = BastionIdempotency.protect(conn2, fn c -> echo_handler(c), opts)
     assert (HttpServer.status(result2) == 200)
   end
@@ -290,7 +290,7 @@ describe "BastionIdempotency.protect — InProgress returns 409" do
     -- Manually inject InProgress (simulating a concurrent in-flight request)
     BastionIdempotency.mark_in_progress(tbl, key, "")
     let opts   = Cons(("vault_table", tbl), Nil)
-    let conn   = conn_with_ikey(Post, key)
+    let conn   = conn_with_ikey(:post, key)
     let result = BastionIdempotency.protect(conn, fn c -> echo_handler(c), opts)
     assert (HttpServer.status(result) == 409)
   end
@@ -304,8 +304,8 @@ describe "BastionIdempotency.protect — scope option" do
     let key  = "scope-key"
     let opts1 = Cons(("vault_table", tbl), Cons(("scope", "payments"), Nil))
     let opts2 = Cons(("vault_table", tbl), Cons(("scope", "orders"), Nil))
-    let conn1 = conn_with_ikey(Post, key)
-    let conn2 = conn_with_ikey(Post, key)
+    let conn1 = conn_with_ikey(:post, key)
+    let conn2 = conn_with_ikey(:post, key)
     BastionIdempotency.protect(conn1, fn c -> echo_handler(c), opts1)
     -- Second conn with DIFFERENT scope should run handler, not replay
     let result2 = BastionIdempotency.protect(conn2, fn c -> echo_handler(c), opts2)

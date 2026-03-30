@@ -417,7 +417,7 @@ Log the full conn state (method, path, status, halted) using Logger.info.
     -- [INFO] [conn_inspector] GET /users/42 status=0 halted=false
 """
 fn conn_inspector(conn) do
-  let m_str    = Http.method_to_string(HttpServer.method(conn))
+  let m_str    = HttpServer.method_to_string(HttpServer.method(conn))
   let path_str = HttpServer.path(conn)
   let stat_str = int_to_string(HttpServer.status(conn))
   let halt_str = if HttpServer.halted(conn) do "true" else "false" end
@@ -573,7 +573,7 @@ Includes: exception message, full stack trace, request details (method, path,
 query string, status at crash), request headers, and conn assigns.
 """
 fn error_overlay_html(error_msg, stack_trace, conn) do
-  let m_str  = Http.method_to_string(HttpServer.method(conn))
+  let m_str  = HttpServer.method_to_string(HttpServer.method(conn))
   let p_str  = HttpServer.path(conn)
   let qs_str = HttpServer.query_string(conn)
   let s_str  = int_to_string(HttpServer.status(conn))

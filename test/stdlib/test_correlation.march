@@ -41,13 +41,13 @@ end
 
 describe "CorrelationId.request_id" do
   test "returns empty string when assign was not called" do
-    let conn = make_conn(Get, Nil, "")
+    let conn = make_conn(:get, Nil, "")
     assert (CorrelationId.request_id(conn) == "")
   end
 
   test "returns the stored ID after assign" do
     Logger.clear_context()
-    let conn = make_conn(Get, Nil, "")
+    let conn = make_conn(:get, Nil, "")
     let conn2 = CorrelationId.assign(conn)
     let rid = CorrelationId.request_id(conn2)
     assert (String.byte_size(rid) > 0)
@@ -59,7 +59,7 @@ end
 describe "CorrelationId.assign — ID generation" do
   test "assigns a non-empty request_id when no X-Request-ID header" do
     Logger.clear_context()
-    let conn = make_conn(Get, Nil, "")
+    let conn = make_conn(:get, Nil, "")
     let conn2 = CorrelationId.assign(conn)
     assert (String.byte_size(CorrelationId.request_id(conn2)) > 0)
   end
@@ -67,7 +67,7 @@ describe "CorrelationId.assign — ID generation" do
   test "uses X-Request-ID header when present and short" do
     Logger.clear_context()
     let hdrs = Cons(Header("x-request-id", "my-trace-id-123"), Nil)
-    let conn = make_conn(Get, hdrs, "")
+    let conn = make_conn(:get, hdrs, "")
     let conn2 = CorrelationId.assign(conn)
     assert (CorrelationId.request_id(conn2) == "my-trace-id-123")
   end
@@ -77,7 +77,7 @@ describe "CorrelationId.assign — ID generation" do
     -- Build a 201-byte string
     let long_id = String.repeat("x", 201)
     let hdrs = Cons(Header("x-request-id", long_id), Nil)
-    let conn = make_conn(Get, hdrs, "")
+    let conn = make_conn(:get, hdrs, "")
     let conn2 = CorrelationId.assign(conn)
     -- Should have generated a fresh UUID, not the oversized header
     assert (CorrelationId.request_id(conn2) != long_id)
@@ -87,7 +87,7 @@ describe "CorrelationId.assign — ID generation" do
   test "is idempotent if called again (last call wins)" do
     Logger.clear_context()
     let hdrs = Cons(Header("x-request-id", "first-id"), Nil)
-    let conn = make_conn(Get, hdrs, "")
+    let conn = make_conn(:get, hdrs, "")
     let conn2 = CorrelationId.assign(conn)
     assert (CorrelationId.request_id(conn2) == "first-id")
   end
@@ -99,7 +99,7 @@ describe "CorrelationId.assign — response header" do
   test "sets X-Request-ID response header" do
     Logger.clear_context()
     let hdrs = Cons(Header("x-request-id", "trace-abc"), Nil)
-    let conn = make_conn(Get, hdrs, "")
+    let conn = make_conn(:get, hdrs, "")
     let conn2 = CorrelationId.assign(conn)
     let resp_hdr = HttpServer.get_resp_header(conn2, "x-request-id")
     assert (resp_hdr == Some("trace-abc"))
@@ -107,7 +107,7 @@ describe "CorrelationId.assign — response header" do
 
   test "echoes a generated UUID in the response header" do
     Logger.clear_context()
-    let conn = make_conn(Get, Nil, "")
+    let conn = make_conn(:get, Nil, "")
     let conn2 = CorrelationId.assign(conn)
     let rid = CorrelationId.request_id(conn2)
     let resp = HttpServer.get_resp_header(conn2, "x-request-id")
@@ -121,7 +121,7 @@ describe "CorrelationId.assign — Logger context injection" do
   test "request_id appears in Logger context after assign" do
     Logger.clear_context()
     let hdrs = Cons(Header("x-request-id", "ctx-test-id"), Nil)
-    let conn = make_conn(Get, hdrs, "")
+    let conn = make_conn(:get, hdrs, "")
     let _conn2 = CorrelationId.assign(conn)
     -- The logger context should now include request_id
     -- We verify indirectly: request_id stored in assigns matches
@@ -136,7 +136,7 @@ describe "CorrelationId.clear" do
   test "clears Logger context without panicking" do
     Logger.clear_context()
     let hdrs = Cons(Header("x-request-id", "clear-test"), Nil)
-    let conn = make_conn(Get, hdrs, "")
+    let conn = make_conn(:get, hdrs, "")
     let _conn2 = CorrelationId.assign(conn)
     CorrelationId.clear()
     assert (true)

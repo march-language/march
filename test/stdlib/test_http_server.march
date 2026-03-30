@@ -7,9 +7,10 @@
 mod TestHttpServer do
 
 -- Local mirrors of HttpServer private types (matched structurally at runtime).
+-- Method field is now Atom (:get, :post, etc.) matching HttpServer.Conn.
 ptype Upgrade = NoUpgrade | WebSocketUpgrade(a)
 ptype Conn = Conn(
-  Int, Method, String, List(String), String,
+  Int, Atom, String, List(String), String,
   List(Header), String, Int, List(Header), String,
   Bool, List((String, String)), Upgrade
 )
@@ -20,22 +21,22 @@ pfn make_conn(meth, path_, qs, req_hdrs, req_body) do
 end
 
 pfn make_get(path_) do
-  make_conn(Get, path_, "", Cons(Header("host", "localhost"), Nil), "")
+  make_conn(:get, path_, "", Cons(Header("host", "localhost"), Nil), "")
 end
 
 pfn make_post(path_, body) do
-  make_conn(Post, path_, "", Cons(Header("content-type", "text/plain"), Nil), body)
+  make_conn(:post, path_, "", Cons(Header("content-type", "text/plain"), Nil), body)
 end
 
 describe "HttpServer Conn accessors" do
   test "method accessor Get" do
     let conn = make_get("/users")
-    assert (Http.method_to_string(HttpServer.method(conn)) == "GET")
+    assert (HttpServer.method(conn) == :get)
   end
 
   test "method accessor Post" do
     let conn = make_post("/submit", "data")
-    assert (Http.method_to_string(HttpServer.method(conn)) == "POST")
+    assert (HttpServer.method(conn) == :post)
   end
 
   test "path accessor" do
@@ -51,7 +52,7 @@ describe "HttpServer Conn accessors" do
   end
 
   test "query_string accessor" do
-    let conn = make_conn(Get, "/search", "q=hello&limit=5", Nil, "")
+    let conn = make_conn(:get, "/search", "q=hello&limit=5", Nil, "")
     assert (HttpServer.query_string(conn) == "q=hello&limit=5")
   end
 

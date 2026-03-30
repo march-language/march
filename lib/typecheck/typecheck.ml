@@ -625,7 +625,7 @@ let builtin_interfaces : (string * Ast.interface_def) list =
 let builtin_impls : (string * ty) list =
   [ (* Eq *)
     ("Eq",   t_int);   ("Eq",   t_float); ("Eq",   t_string);
-    ("Eq",   t_bool);  ("Eq",   t_unit);
+    ("Eq",   t_bool);  ("Eq",   t_unit);  ("Eq",   t_atom);
     (* Ord *)
     ("Ord",  t_int);   ("Ord",  t_float); ("Ord",  t_string);
     (* Show *)

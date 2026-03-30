@@ -10,7 +10,7 @@ fn make_conn(m, hdrs, body) do
 end
 
 fn conn_with_token(tok) do
-  let c = make_conn(Get, Nil, "")
+  let c = make_conn(:get, Nil, "")
   HttpServer.assign(c, "_csrf_token", tok)
 end
 
@@ -40,7 +40,7 @@ end
 
 describe "CSRF.token" do
   test "returns empty string when no token assigned" do
-    let conn = make_conn(Get, Nil, "")
+    let conn = make_conn(:get, Nil, "")
     assert (CSRF.token(conn) == "")
   end
 
@@ -54,7 +54,7 @@ end
 
 describe "CSRF.ensure_token" do
   test "assigns a token when none is present" do
-    let conn = make_conn(Get, Nil, "")
+    let conn = make_conn(:get, Nil, "")
     let conn2 = CSRF.ensure_token(conn)
     assert (CSRF.token(conn2) != "")
   end
@@ -66,7 +66,7 @@ describe "CSRF.ensure_token" do
   end
 
   test "assigns a token that is non-empty" do
-    let conn = make_conn(Post, Nil, "")
+    let conn = make_conn(:post, Nil, "")
     let conn2 = CSRF.ensure_token(conn)
     let tok = CSRF.token(conn2)
     assert (String.byte_size(tok) > 0)
@@ -126,7 +126,7 @@ end
 
 describe "CSRF.validate" do
   test "returns false when no session token assigned" do
-    let conn = make_conn(Post, Nil, "_csrf_token=tok")
+    let conn = make_conn(:post, Nil, "_csrf_token=tok")
     assert (!CSRF.validate(conn))
   end
 
@@ -136,27 +136,27 @@ describe "CSRF.validate" do
   end
 
   test "returns false when tokens differ" do
-    let conn0 = make_conn(Post, Nil, "_csrf_token=wrong")
+    let conn0 = make_conn(:post, Nil, "_csrf_token=wrong")
     let conn  = HttpServer.assign(conn0, "_csrf_token", "correct")
     assert (!CSRF.validate(conn))
   end
 
   test "returns true when tokens match" do
-    let conn0 = make_conn(Post, Nil, "_csrf_token=secret42")
+    let conn0 = make_conn(:post, Nil, "_csrf_token=secret42")
     let conn  = HttpServer.assign(conn0, "_csrf_token", "secret42")
     assert (CSRF.validate(conn))
   end
 
   test "handles body with multiple fields" do
     let body = "name=alice&_csrf_token=tok&age=30"
-    let conn0 = make_conn(Post, Nil, body)
+    let conn0 = make_conn(:post, Nil, body)
     let conn  = HttpServer.assign(conn0, "_csrf_token", "tok")
     assert (CSRF.validate(conn))
   end
 
   test "returns true when _csrf_skipped is set" do
     -- Even with mismatched tokens, skip overrides
-    let conn0 = make_conn(Post, Nil, "_csrf_token=wrong")
+    let conn0 = make_conn(:post, Nil, "_csrf_token=wrong")
     let conn1 = HttpServer.assign(conn0, "_csrf_token", "correct")
     let conn2 = CSRF.skip(conn1)
     assert (CSRF.validate(conn2))
@@ -167,20 +167,20 @@ end
 
 describe "CSRF.protect — safe methods pass through" do
   test "GET is not checked" do
-    let conn = make_conn(Get, Nil, "")
+    let conn = make_conn(:get, Nil, "")
     let result = CSRF.protect(conn)
     -- GET is not halted regardless of token state
     assert (!HttpServer.halted(result))
   end
 
   test "HEAD is not checked" do
-    let conn = make_conn(Head, Nil, "")
+    let conn = make_conn(:head, Nil, "")
     let result = CSRF.protect(conn)
     assert (!HttpServer.halted(result))
   end
 
   test "OPTIONS is not checked" do
-    let conn = make_conn(Options, Nil, "")
+    let conn = make_conn(:options, Nil, "")
     let result = CSRF.protect(conn)
     assert (!HttpServer.halted(result))
   end
@@ -188,49 +188,49 @@ end
 
 describe "CSRF.protect — mutating methods require valid token" do
   test "POST with matching token passes" do
-    let conn0 = make_conn(Post, Nil, "_csrf_token=tok")
+    let conn0 = make_conn(:post, Nil, "_csrf_token=tok")
     let conn  = HttpServer.assign(conn0, "_csrf_token", "tok")
     let result = CSRF.protect(conn)
     assert (!HttpServer.halted(result))
   end
 
   test "PUT with matching token passes" do
-    let conn0 = make_conn(Put, Nil, "_csrf_token=tok")
+    let conn0 = make_conn(:put, Nil, "_csrf_token=tok")
     let conn  = HttpServer.assign(conn0, "_csrf_token", "tok")
     let result = CSRF.protect(conn)
     assert (!HttpServer.halted(result))
   end
 
   test "PATCH with matching token passes" do
-    let conn0 = make_conn(Patch, Nil, "_csrf_token=tok")
+    let conn0 = make_conn(:patch, Nil, "_csrf_token=tok")
     let conn  = HttpServer.assign(conn0, "_csrf_token", "tok")
     let result = CSRF.protect(conn)
     assert (!HttpServer.halted(result))
   end
 
   test "DELETE with matching token passes" do
-    let conn0 = make_conn(Delete, Nil, "_csrf_token=tok")
+    let conn0 = make_conn(:delete, Nil, "_csrf_token=tok")
     let conn  = HttpServer.assign(conn0, "_csrf_token", "tok")
     let result = CSRF.protect(conn)
     assert (!HttpServer.halted(result))
   end
 
   test "POST with wrong token returns 403" do
-    let conn0 = make_conn(Post, Nil, "_csrf_token=wrong")
+    let conn0 = make_conn(:post, Nil, "_csrf_token=wrong")
     let conn  = HttpServer.assign(conn0, "_csrf_token", "correct")
     let result = CSRF.protect(conn)
     assert (HttpServer.status(result) == 403)
   end
 
   test "POST with missing token returns 403" do
-    let conn0 = make_conn(Post, Nil, "name=alice")
+    let conn0 = make_conn(:post, Nil, "name=alice")
     let conn  = HttpServer.assign(conn0, "_csrf_token", "tok")
     let result = CSRF.protect(conn)
     assert (HttpServer.status(result) == 403)
   end
 
   test "POST with no session token returns 403" do
-    let conn = make_conn(Post, Nil, "_csrf_token=tok")
+    let conn = make_conn(:post, Nil, "_csrf_token=tok")
     let result = CSRF.protect(conn)
     assert (HttpServer.status(result) == 403)
   end
@@ -239,7 +239,7 @@ end
 describe "CSRF.protect — JSON content-type is exempt" do
   test "POST with application/json skips CSRF check" do
     let hdrs = Cons(Header("content-type", "application/json"), Nil)
-    let conn = make_conn(Post, hdrs, "{\"key\":\"value\"}")
+    let conn = make_conn(:post, hdrs, "{\"key\":\"value\"}")
     -- No token in session or body — but JSON is exempt
     let result = CSRF.protect(conn)
     assert (!HttpServer.halted(result))
@@ -248,7 +248,7 @@ describe "CSRF.protect — JSON content-type is exempt" do
 
   test "PUT with application/json; charset=utf-8 skips CSRF check" do
     let hdrs = Cons(Header("content-type", "application/json; charset=utf-8"), Nil)
-    let conn = make_conn(Put, hdrs, "{}")
+    let conn = make_conn(:put, hdrs, "{}")
     let result = CSRF.protect(conn)
     assert (!HttpServer.halted(result))
   end
@@ -258,14 +258,14 @@ end
 
 describe "CSRF.skip" do
   test "marks conn so validate returns true regardless of token" do
-    let conn0 = make_conn(Post, Nil, "_csrf_token=anything")
+    let conn0 = make_conn(:post, Nil, "_csrf_token=anything")
     let conn1 = HttpServer.assign(conn0, "_csrf_token", "different")
     let conn2 = CSRF.skip(conn1)
     assert (CSRF.validate(conn2))
   end
 
   test "marks conn so protect passes through on POST" do
-    let conn0 = make_conn(Post, Nil, "")
+    let conn0 = make_conn(:post, Nil, "")
     let conn1 = CSRF.skip(conn0)
     let result = CSRF.protect(conn1)
     assert (!HttpServer.halted(result))

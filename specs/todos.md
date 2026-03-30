@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-30 (compiler visualization Phases 3–4: per-pass opt instrumentation, stable node IDs, diff summary bar in phase viewer)
+**Last updated:** 2026-03-30 (Atom-based HTTP method routing — atoms implement Eq, compile to FNV-1a i64 hashes, C runtime converts method strings to atoms at boundary; HttpServer.Conn method field changed from Method ADT to Atom; HttpServer.method_to_string/1 added — 1185 tests)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 

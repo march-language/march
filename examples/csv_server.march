@@ -80,7 +80,7 @@ end
 
 pfn router(conn) do
   match (HttpServer.method(conn), HttpServer.path_info(conn)) do
-  (Post, Cons("csv", Nil)) -> do
+  (:post, Cons("csv", Nil)) -> do
     let body = HttpServer.req_body(conn)
     let csv_path = save_csv(body)
     match Csv.read_all(csv_path, ",", :rfc4180) do
@@ -123,7 +123,7 @@ pfn router(conn) do
     end
     end
   end
-  (Get, Nil) ->
+  (:get, Nil) ->
     conn |> HttpServer.text(200, "POST /csv with a CSV body (name,score rows)")
   _ ->
     conn |> HttpServer.text(404, "Not Found")

@@ -13,11 +13,11 @@ mod HttpTest do
 
   fn router(conn) do
     match (HttpServer.method(conn), HttpServer.path_info(conn)) do
-    (Get, Nil) ->
+    (:get, Nil) ->
       HttpServer.text(conn, 200, "hello")
-    (Get, Cons("ping", Nil)) ->
+    (:get, Cons("ping", Nil)) ->
       HttpServer.text(conn, 200, "pong")
-    (Post, Cons("echo", Nil)) ->
+    (:post, Cons("echo", Nil)) ->
       HttpServer.text(conn, 200, HttpServer.req_body(conn))
     _ ->
       HttpServer.text(conn, 404, "not found")
