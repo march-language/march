@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-30 (qualified module access Phase 3: typecheck qualified resolution — 1202 tests)
+**Last updated:** 2026-03-30 (qualified module access Phase 4: eval on-demand module loading — 1205 tests)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -122,6 +122,8 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 ---
 
 ## Done (recently completed)
+
+- ✅ **Qualified module access — Phase 4 (Eval on-demand module loading)** — `lib/eval/eval.ml`: added `module_loader` callback ref and `ensure_module_loaded` sentinel-guarded loader; `lookup` for dotted EVar names and `EField` qualified handler now call `ensure_module_loaded` before failing, triggering on-demand stdlib loading. Added `eval_stdlib_decls` function for evaluating DMod declarations into `module_registry` without resetting global state. `lib/eval/dune` depends on `march_modules`. `bin/main.ml` sets `module_loader` callback before `run_module` — finds stdlib file via `Module_registry.find_stdlib_file`, parses+desugars via `load_stdlib_file`, evals via `eval_stdlib_decls`. 3 new tests in `eval_qualified` group (1205 total).
 
 - ✅ **Qualified module access — Phase 3 (Typecheck qualified resolution)** — `lib/typecheck/typecheck.ml`: added `resolve_qualified_var`, `resolve_qualified_type`, `resolve_qualified_ctor` fallback functions that split dotted names, call `Module_registry.ensure_loaded`, and inject module exports into the typechecker env on demand. `prebind_mod_members` extended to also pre-bind qualified types and constructors from nested `DMod` declarations (not just functions). `surface_ty` TyCon case falls back to qualified type resolution. `ECon`/`PatCon` cases fall back to qualified constructor resolution. Error messages use edit-distance suggestions: "Unknown module `Mpa`. Did you mean `Map`?", "Module `Map` does not export `gte`. Did you mean `Map.get`?", "Function `hidden` is private to module `Secret`." Added `edit_distance`, `suggest_module_name`, `load_module_into_env`, `qualified_error_msg` helpers. `lib/typecheck/dune` now depends on `march_modules`. `lib/modules/module_registry.mli` exposes `find_stdlib_dir` and `find_stdlib_file`. 6 new tests in `typecheck_qualified` group (1202 total).
 

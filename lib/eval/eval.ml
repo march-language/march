@@ -248,6 +248,22 @@ let protocol_roles_tbl : (string, string list) Hashtbl.t = Hashtbl.create 8
     Reset at the start of each [eval_module_env] run. *)
 let module_registry : (string, value) Hashtbl.t = Hashtbl.create 64
 
+(** Callback set by the driver (main.ml / REPL) to load a stdlib module
+    on demand.  When set, [ensure_module_loaded] calls this to parse,
+    desugar, typecheck, and eval the module, populating [module_registry]. *)
+let module_loader : (string -> unit) option ref = ref None
+
+(** Ensure a stdlib module has been loaded into [module_registry].
+    Idempotent — checks a sentinel key before invoking [module_loader]. *)
+let ensure_module_loaded (name : string) : unit =
+  let sentinel = name ^ ".__loaded__" in
+  if not (Hashtbl.mem module_registry sentinel) then begin
+    Hashtbl.replace module_registry sentinel VUnit;
+    match !module_loader with
+    | Some loader -> (try loader name with _ -> ())
+    | None -> ()
+  end
+
 (** Module stack for tracking the current module path during eval.
     Updated when entering/leaving [DMod]. Top of stack = innermost module. *)
 let module_stack : string list ref = ref []
@@ -4992,7 +5008,14 @@ let lookup name env =
     if String.contains name '.' then
       (match Hashtbl.find_opt module_registry name with
        | Some v -> v
-       | None -> eval_error "unbound variable: %s" name)
+       | None ->
+         (* Try loading the module on demand from stdlib *)
+         let dot = String.index name '.' in
+         let mod_name = String.sub name 0 dot in
+         ensure_module_loaded mod_name;
+         (match Hashtbl.find_opt module_registry name with
+          | Some v -> v
+          | None -> eval_error "unbound variable: %s" name))
     else
       eval_error "unbound variable: %s" name
 
@@ -5181,7 +5204,13 @@ and eval_expr_inner (env : env) (e : expr) : value =
         let key = prefix ^ "." ^ field.txt in
         (match List.assoc_opt key env with
          | Some _ as v -> v
-         | None -> Hashtbl.find_opt module_registry key)
+         | None ->
+           match Hashtbl.find_opt module_registry key with
+           | Some _ as v -> v
+           | None ->
+             (* Try loading the module on demand from stdlib *)
+             ensure_module_loaded prefix;
+             Hashtbl.find_opt module_registry key)
       | None -> None
     in
     (match qualified_lookup with
@@ -5197,7 +5226,12 @@ and eval_expr_inner (env : env) (e : expr) : value =
        let key = mod_name ^ "." ^ field.txt in
        (match List.assoc_opt key env with
         | Some v -> v
-        | None   -> eval_error "no member '%s' in module '%s'" field.txt mod_name)
+        | None ->
+          (* Try loading on demand *)
+          ensure_module_loaded mod_name;
+          (match Hashtbl.find_opt module_registry key with
+           | Some v -> v
+           | None -> eval_error "no member '%s' in module '%s'" field.txt mod_name))
      | _ -> eval_error "field access on non-record value"))
 
   | EIf (cond, then_, else_, sp) ->
@@ -6450,11 +6484,80 @@ let call_hook_opt (v_opt : value option) : unit =
   | Some (VCon ("Some", [hook_fn])) -> ignore (apply hook_fn [])
   | _ -> ()
 
-(** Run the module: evaluate it, then call [main()] or drive the [app] lifecycle.
-    - [main()] path: call main, drain the scheduler, exit.
-    - [app] path: evaluate __app_init__ → { spec, on_start, on_stop },
-      spawn supervision tree, call on_start, run scheduler until shutdown,
-      call graceful_shutdown, call on_stop, exit. *)
+(** Evaluate a list of declarations (typically a DMod from a stdlib file)
+    into the current module_registry WITHOUT resetting global state.
+    Used by the on-demand module_loader callback. *)
+let eval_stdlib_decls (decls : decl list) : unit =
+  let base = task_builtins @ base_env in
+  let env_ref = ref base in
+  let rec go ds env =
+    match ds with
+    | [] -> env
+    | DMod (name, _, inner_decls, _) :: rest ->
+      module_stack := name.txt :: !module_stack;
+      let inner_ref = ref env in
+      List.iter (function
+        | DFn (def, _) ->
+          let stub = VBuiltin ("<stub:" ^ def.fn_name.txt ^ ">",
+                               fun _ -> eval_error "stub %s called before initialisation"
+                                   def.fn_name.txt) in
+          inner_ref := (def.fn_name.txt, stub) :: !inner_ref
+        | _ -> ()
+      ) inner_decls;
+      let rec eval_inner ds' e =
+        match ds' with
+        | [] -> e
+        | DFn (def, _) :: r ->
+          let clause = match def.fn_clauses with
+            | [c] -> c
+            | _   -> eval_error "fn %s: expected one clause" def.fn_name.txt
+          in
+          let params = clause_params clause in
+          let rec_clo = VBuiltin ("<rec:" ^ def.fn_name.txt ^ ">",
+            fun args ->
+              let call_env = !inner_ref in
+              let fn_v = VClosure (call_env, params, clause.fc_body) in
+              apply fn_v args) in
+          let e' = (def.fn_name.txt, rec_clo) :: List.remove_assoc def.fn_name.txt e in
+          inner_ref := e';
+          eval_inner r e'
+        | d :: r ->
+          let e' = eval_decl e d in
+          inner_ref := e';
+          eval_inner r e'
+      in
+      let mod_env = eval_inner inner_decls !inner_ref in
+      module_stack := (match !module_stack with _ :: tl -> tl | [] -> []);
+      let rec declared_names acc = function
+        | [] -> acc
+        | DFn (def, _) :: r -> declared_names (def.fn_name.txt :: acc) r
+        | DLet (_, b, _) :: r ->
+          let rec pn a = function PatVar n -> n.txt :: a | PatTuple (ps, _) -> List.fold_left pn a ps | PatCon (_, ps) -> List.fold_left pn a ps | _ -> a in
+          declared_names (pn acc b.bind_pat) r
+        | DMod (n, _, _, _) :: r -> declared_names (n.txt :: acc) r
+        | DExtern (edef, _) :: r ->
+          declared_names (List.map (fun (ef : extern_fn) -> ef.ef_name.txt) edef.ext_fns @ acc) r
+        | _ :: r -> declared_names acc r
+      in
+      let own_names = declared_names [] inner_decls in
+      let is_own_key k =
+        List.exists (fun n ->
+          k = n || (String.length k > String.length n + 1 &&
+                    String.sub k 0 (String.length n + 1) = n ^ ".")) own_names in
+      let prefixed = List.filter_map (fun (k, v) ->
+        if is_own_key k then Some (name.txt ^ "." ^ k, v) else None) mod_env in
+      List.iter (fun (k, v) -> Hashtbl.replace module_registry k v) prefixed;
+      let env' = prefixed @ env in
+      env_ref := env';
+      go rest env'
+    | d :: rest ->
+      let env' = eval_decl env d in
+      env_ref := env';
+      go rest env'
+  in
+  ignore (go decls !env_ref)
+
+(** Run the module: evaluate it, then call [main()] or drive the [app] lifecycle. *)
 let run_module (m : module_) : unit =
   (* Reset global app state for fresh run *)
   app_spawn_order   := [];

@@ -17480,6 +17480,54 @@ let test_tc_qualified_ctor_builtin () =
   let errors = typecheck src in
   Alcotest.(check bool) "builtin qualified ctors typecheck" false (has_errors errors)
 
+(* ── Phase 4: Eval on-demand module loading tests ──────────────────────── *)
+
+let test_eval_qualified_fn_same_file () =
+  (* Qualified function call in same-file module evaluates correctly *)
+  let src = {|mod Test do
+    mod Math do
+      fn double(x) do x * 2 end
+    end
+    fn main() do Math.double(21) end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_errors, _type_map) = March_typecheck.Typecheck.check_module m in
+  (* Should not raise *)
+  March_eval.Eval.run_module m
+
+let test_eval_stdlib_decls_populates_registry () =
+  (* eval_stdlib_decls loads a DMod into module_registry *)
+  let src = {|mod Helper do
+    fn add(a, b) do a + b end
+    fn mul(a, b) do a * b end
+  end|} in
+  let m = parse_and_desugar src in
+  (* Wrap the module's decls as a DMod, like load_stdlib_file does *)
+  let decls = [March_ast.Ast.DMod (m.March_ast.Ast.mod_name,
+                                    March_ast.Ast.Public,
+                                    m.March_ast.Ast.mod_decls,
+                                    March_ast.Ast.dummy_span)] in
+  March_eval.Eval.eval_stdlib_decls decls;
+  (* Check that Helper.add is now in module_registry *)
+  let key = "Helper.add" in
+  let found = Hashtbl.mem March_eval.Eval.module_registry key in
+  Alcotest.(check bool) "Helper.add in registry" true found;
+  let key2 = "Helper.mul" in
+  let found2 = Hashtbl.mem March_eval.Eval.module_registry key2 in
+  Alcotest.(check bool) "Helper.mul in registry" true found2
+
+let test_eval_module_loader_callback () =
+  (* module_loader callback can be set and is invoked *)
+  let called = ref false in
+  March_eval.Eval.module_loader := Some (fun _name -> called := true);
+  March_eval.Eval.ensure_module_loaded "TestCallbackMod";
+  Alcotest.(check bool) "loader was called" true !called;
+  (* Idempotent: second call should not invoke loader again *)
+  called := false;
+  March_eval.Eval.ensure_module_loaded "TestCallbackMod";
+  Alcotest.(check bool) "loader not called again (idempotent)" false !called;
+  March_eval.Eval.module_loader := None
+
 let () =
   Alcotest.run "march"
     [
@@ -19013,5 +19061,10 @@ let () =
         Alcotest.test_case "unknown member error"           `Quick test_tc_unknown_member_error;
         Alcotest.test_case "private fn rejected"            `Quick test_tc_private_fn_rejected;
         Alcotest.test_case "builtin qualified ctors"        `Quick test_tc_qualified_ctor_builtin;
+      ]);
+      ("eval_qualified", [
+        Alcotest.test_case "qualified fn eval same file"       `Quick (with_reset test_eval_qualified_fn_same_file);
+        Alcotest.test_case "eval_stdlib_decls populates reg"   `Quick test_eval_stdlib_decls_populates_registry;
+        Alcotest.test_case "module_loader callback idempotent" `Quick test_eval_module_loader_callback;
       ]);
     ]

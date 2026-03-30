@@ -1160,6 +1160,17 @@ let compile filename =
     end
   end
   else begin
+    (* Set up the on-demand module loader so qualified access like Map.get()
+       can trigger loading a stdlib module even if it wasn't explicitly imported.
+       This is mostly a fallback — load_stdlib() already loads common modules,
+       but this covers modules not in the hardcoded list or REPL scenarios. *)
+    March_eval.Eval.module_loader := Some (fun mod_name ->
+      match March_modules.Module_registry.find_stdlib_file mod_name with
+      | None -> ()
+      | Some path ->
+        let decls = load_stdlib_file path in
+        March_eval.Eval.eval_stdlib_decls decls
+    );
     (if !debug_mode || !debug_tui_mode then begin
       let ctx = March_debug.Debug.make_debug_ctx
         ~on_dbg:(fun env ->
