@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-30 (5 new stdlib modules: Tuple, Char, OrderedMap, SortedSet, Range)
+**Last updated:** 2026-03-30 (Task stdlib module + Tuple, Char, OrderedMap, SortedSet, Range)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -122,6 +122,8 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 ---
 
 ## Done (recently completed)
+
+- ✅ **`Task` stdlib module** — `stdlib/task.march`: Elixir-style lightweight async tasks. `Task.async(f)`, `Task.await(task)`, `Task.await_ms(task, ms)`, `Task.await_unwrap(task)`, `Task.await_many(tasks)`, `Task.await_many_ms(tasks, ms)`, `Task.async_stream(list, f)`, `Task.async_stream_n(list, f, max_concurrency)`. Builds on `task_spawn`/`task_await`/`task_await_unwrap` primitives; zero-arg user functions wrapped to the `fn _ -> f()` thunk signature. Parses and typechecks cleanly.
 
 - ✅ **5 new stdlib modules: Tuple, Char, OrderedMap, SortedSet, Range** — `stdlib/tuple.march`: `first/second/swap/map_first/map_second/map_both/to_list/make/apply/both/zip/unzip` for 2-tuples. `stdlib/char.march`: `is_alpha/is_digit/is_alphanumeric/is_upper/is_lower/is_whitespace/to_upper/to_lower/to_int/from_int/to_string/is_ascii/is_printable/digit_value/hex_digit_value/is_hex_digit` wrapping char builtins. `stdlib/ordered_map.march`: AVL tree-based sorted map with comparator — `new/put/get/delete/member/keys/values/to_list/from_list/size/min_key/max_key/fold/map/filter/is_empty/get_or`. `stdlib/sorted_set.march`: AVL tree-based sorted set wrapping same algorithm — `new/add/remove/member/to_list/from_list/size/min/max/union/intersect/difference/fold/is_empty/subset`. `stdlib/range.march`: integer range as record `%{start,stop,step}` — `new/new_step/to_list/contains/size/is_empty/map/filter/each/reduce/reverse/first/last/all/any/sum`. All 5 added to `bin/main.ml` stdlib load list.
 
