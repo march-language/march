@@ -314,10 +314,20 @@ let bastion_gen_schema_cmd =
   Cmd.v (Cmd.info "schema" ~doc:"Generate a Depot schema module and migration")
     Term.(const run $ module_name $ table_name $ fields)
 
+let bastion_gen_auth_cmd =
+  Cmd.v
+    (Cmd.info "auth"
+       ~doc:"Generate session-based authentication (User, UserToken, Accounts context, controllers, middleware)")
+    Term.(const (fun () ->
+        match Gen_auth.run () with
+        | Ok () -> ()
+        | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+      ) $ const ())
+
 let bastion_gen_cmd =
   Cmd.group
     (Cmd.info "gen" ~doc:"Code generators for Bastion applications")
-    [bastion_gen_schema_cmd]
+    [bastion_gen_schema_cmd; bastion_gen_auth_cmd]
 
 let bastion_cmd =
   Cmd.group
