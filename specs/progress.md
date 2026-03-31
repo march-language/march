@@ -173,7 +173,7 @@ march/
 │   └── base64.c             # Base64 for WebSocket handshake
 │   ├── search/
 │   │   └── search.ml        # Search index: Levenshtein fuzzy search, type/doc search, JSON cache
-├── stdlib/                  # 46 modules, ~9600 lines
+├── stdlib/                  # 51 modules, ~10200 lines
 │   ├── prelude.march        # Auto-imported helpers (panic, identity, compose, unwrap, etc.)
 │   ├── option.march         # Option(a) with Some/None
 │   ├── result.march         # Result(a,e) with Ok/Err
@@ -225,6 +225,11 @@ march/
 │   ├── depot_gate.march           # Depot.Gate validation pipeline — v1 cast/2 (string pairs) + v2 cast_record/3 (record-based diff tracking), validate_required/length/format/inclusion/exclusion/number/acceptance/confirmation/change, constraint hints, base/changed_fields/changed/apply_changes
 │   ├── depot_schema.march         # Depot.Schema: record-based schema definitions — define/2, blank/1, table/field_names/field_type/field_opts/primary_key/is_virtual/associations/association/db_fields inspection API
 │   ├── depot_repo.march           # Depot.Repo: Vault-backed in-memory repository — insert/update/delete/delete_all, all/get/get_bang/get_by/one/count/exists
+│   ├── tuple.march                # Tuple: 2-tuple utilities — first/second/swap/map_first/map_second/map_both/to_list/make/apply/both/zip/unzip
+│   ├── char.march                 # Char: character classification/conversion — is_alpha/is_digit/is_alphanumeric/is_upper/is_lower/is_whitespace/to_upper/to_lower/to_int/from_int/to_string/digit_value/hex_digit_value/is_hex_digit
+│   ├── ordered_map.march          # OrderedMap: AVL tree-based sorted map with comparator — put/get/delete/member/keys/values/fold/map/filter/min_key/max_key
+│   ├── sorted_set.march           # SortedSet: AVL tree-based sorted set — add/remove/member/union/intersect/difference/fold/subset
+│   └── range.march                # Range: integer range as record — new/new_step/to_list/contains/size/map/filter/each/reduce/reverse/first/last/all/any/sum
 │   └── docs/flow.md         # Flow module design doc: concepts, examples, GenStage comparison
 ├── test/
 │   ├── test_march.ml         # 1180 tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, bytes, logger, flow, actor_module, etc.)

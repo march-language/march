@@ -1,0 +1,89 @@
+-- Tuple module: utilities for 2-tuples (pairs).
+--
+-- All functions operate on (a, b) pairs.
+-- Use let-destructuring to access components.
+
+mod Tuple do
+
+doc "Returns the first element of a pair."
+fn first(t : (a, b)) : a do
+  let (x, _) = t
+  x
+end
+
+doc "Returns the second element of a pair."
+fn second(t : (a, b)) : b do
+  let (_, y) = t
+  y
+end
+
+doc "Swaps the two elements of a pair."
+fn swap(t : (a, b)) : (b, a) do
+  let (x, y) = t
+  (y, x)
+end
+
+doc "Applies f to the first element, returning a new pair."
+fn map_first(t : (a, b), f : a -> c) : (c, b) do
+  let (x, y) = t
+  (f(x), y)
+end
+
+doc "Applies f to the second element, returning a new pair."
+fn map_second(t : (a, b), f : b -> c) : (a, c) do
+  let (x, y) = t
+  (x, f(y))
+end
+
+doc "Applies f to the first element and g to the second element."
+fn map_both(t : (a, b), f : a -> c, g : b -> d) : (c, d) do
+  let (x, y) = t
+  (f(x), g(y))
+end
+
+doc "Converts a pair to a 2-element list. Both elements must be the same type."
+fn to_list(t : (a, a)) : List(a) do
+  let (x, y) = t
+  Cons(x, Cons(y, Nil))
+end
+
+doc "Creates a pair from two values."
+fn make(a : a, b : b) : (a, b) do
+  (a, b)
+end
+
+doc "Applies a function that takes two separate args to a pair."
+fn apply(t : (a, b), f : (a, b) -> c) : c do
+  f(t)
+end
+
+doc "Returns true if both elements satisfy their respective predicates."
+fn both(t : (a, b), p : a -> Bool, q : b -> Bool) : Bool do
+  let (x, y) = t
+  p(x) && q(y)
+end
+
+doc "Zips two lists into a list of pairs. Stops at the shorter list."
+fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
+  match xs do
+  Nil -> Nil
+  Cons(x, rest_x) ->
+    match ys do
+    Nil -> Nil
+    Cons(y, rest_y) -> Cons((x, y), zip(rest_x, rest_y))
+    end
+  end
+end
+
+doc "Unzips a list of pairs into a pair of lists."
+fn unzip(pairs : List((a, b))) : (List(a), List(b)) do
+  fn go(ps : List((a, b)), as_ : List(a), bs : List(b)) : (List(a), List(b)) do
+    match ps do
+    Nil -> (List.reverse(as_), List.reverse(bs))
+    Cons((x, y), rest) -> go(rest, Cons(x, as_), Cons(y, bs))
+    end
+  end
+  go(pairs, Nil, Nil)
+end
+
+end
