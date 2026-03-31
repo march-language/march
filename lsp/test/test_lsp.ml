@@ -2559,8 +2559,8 @@ mod Test do
   type Nat = Zero | Succ(Nat)
   pfn add_one(n: Nat): Nat do
     match n do
-    | Zero -> Succ(Zero)
-    | Succ(k) -> Succ(Succ(add_one(k)))
+      Zero -> Succ(Zero)
+      Succ(k) -> Succ(Succ(add_one(k)))
     end
   end
 end

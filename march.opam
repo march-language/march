@@ -11,7 +11,7 @@ homepage: "https://github.com/march-lang/march"
 bug-reports: "https://github.com/march-lang/march/issues"
 depends: [
   "ocaml" {>= "5.3.0"}
-  "dune" {>= "3.6" & >= "3.0"}
+  "dune" {>= "3.7" & >= "3.0"}
   "dune-configurator" {>= "3.0"}
   "menhir" {>= "20230608"}
   "ppx_deriving" {>= "6.0"}
