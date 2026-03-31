@@ -1283,6 +1283,114 @@ let run_check_cmd files =
   if user_errors <> [] then exit 1
   else exit 0
 
+(* ── Phase 10: GC trace analyser ────────────────────────────────────── *)
+(*
+ * Reads a gc.jsonl file produced by MARCH_TRACE_GC=1 and reports:
+ *   - leaked objects   (alloc'd but never freed at program end)
+ *   - double frees     (free event for an already-freed address)
+ *   - negative RCs     (dec_ref whose post-decrement RC < 0)
+ *)
+let analyze_gc_trace path =
+  let ic = try open_in path
+           with Sys_error _ ->
+             Printf.eprintf "march analyze-trace: cannot open '%s'\n" path;
+             exit 1
+  in
+  (* Minimal JSON field scanner — pure OCaml, no external deps.
+     Handles "key":"string_val" and "key":number_val forms. *)
+  let str_find haystack needle from =
+    let hl = String.length haystack and nl = String.length needle in
+    let r = ref (-1) and i = ref from in
+    while !i <= hl - nl && !r < 0 do
+      if String.sub haystack !i nl = needle then r := !i else incr i
+    done; !r
+  in
+  let get_field json key =
+    let ps = "\"" ^ key ^ "\":\"" in
+    let pn = "\"" ^ key ^ "\":" in
+    let i  = str_find json ps 0 in
+    if i >= 0 then
+      let s = i + String.length ps in
+      (match String.index_from_opt json s '"' with
+       | Some e -> Some (String.sub json s (e - s))
+       | None   -> None)
+    else
+      let j = str_find json pn 0 in
+      if j >= 0 then
+        let s = j + String.length pn in
+        let e = ref s in
+        while !e < String.length json &&
+              (let c = json.[!e] in (c >= '0' && c <= '9') || c = '-') do
+          incr e
+        done;
+        if !e > s then Some (String.sub json s (!e - s)) else None
+      else None
+  in
+  let live  : (string, int * int) Hashtbl.t = Hashtbl.create 4096 in
+  let freed : (string, bool)      Hashtbl.t = Hashtbl.create 1024 in
+  let n_alloc = ref 0 and n_free = ref 0 and n_inc = ref 0 and n_dec = ref 0 in
+  let n_double = ref 0 and n_neg = ref 0 and lno = ref 0 in
+  (try while true do
+    let line = String.trim (input_line ic) in
+    incr lno;
+    if line <> "" then begin
+      let ev   = Option.value ~default:"" (get_field line "event") in
+      let addr = Option.value ~default:"" (get_field line "addr")  in
+      let rc   = Option.fold  ~none:0 ~some:int_of_string (get_field line "rc") in
+      match ev with
+      | "alloc" ->
+        incr n_alloc;
+        Hashtbl.replace live addr (rc, !lno);
+        Hashtbl.remove freed addr
+      | "free" ->
+        incr n_free;
+        if Hashtbl.mem freed addr then incr n_double
+        else begin Hashtbl.remove live addr; Hashtbl.replace freed addr true end
+      | "inc_ref" ->
+        incr n_inc;
+        (match Hashtbl.find_opt live addr with
+         | Some (_, eno) -> Hashtbl.replace live addr (rc, eno)
+         | None -> ())
+      | "dec_ref" ->
+        incr n_dec;
+        (match Hashtbl.find_opt live addr with
+         | Some (_, eno) ->
+           if rc < 0 then incr n_neg;
+           Hashtbl.replace live addr (rc, eno)
+         | None -> ())
+      | _ -> ()
+    end
+  done with End_of_file -> ());
+  close_in ic;
+  let n_leaked = Hashtbl.length live in
+  Printf.printf "March GC Trace Analysis: %s\n" path;
+  Printf.printf "  events        : alloc=%d  free=%d  inc_ref=%d  dec_ref=%d\n"
+    !n_alloc !n_free !n_inc !n_dec;
+  Printf.printf "  leaked objects: %d\n" n_leaked;
+  Printf.printf "  double frees  : %d\n" !n_double;
+  Printf.printf "  negative RCs  : %d\n" !n_neg;
+  let ok = n_leaked = 0 && !n_double = 0 && !n_neg = 0 in
+  if ok then print_string "  result: OK\n"
+  else begin
+    if n_leaked > 0 then begin
+      Printf.eprintf "error: %d leaked object(s)\n" n_leaked;
+      let shown = ref 0 in
+      Hashtbl.iter (fun addr (rc, eno) ->
+        if !shown < 10 then begin
+          Printf.eprintf "  leak: addr=%-18s rc=%-3d (alloc at event #%d)\n" addr rc eno;
+          incr shown
+        end
+      ) live;
+      if n_leaked > 10 then
+        Printf.eprintf "  … and %d more\n" (n_leaked - 10)
+    end;
+    if !n_double > 0 then
+      Printf.eprintf "error: %d double-free(s)\n" !n_double;
+    if !n_neg   > 0 then
+      Printf.eprintf "error: %d negative reference count(s)\n" !n_neg
+  end;
+  exit (if ok then 0 else 1)
+
 let () =
   (* Handle subcommands before Arg.parse *)
   let argv = Sys.argv in
@@ -1297,6 +1405,11 @@ let () =
   if Array.length argv >= 2 && argv.(1) = "test" then begin
     let rest = Array.to_list (Array.sub argv 2 (Array.length argv - 2)) in
     run_test_cmd rest
+  end;
+  (* Phase 10: GC trace validator — see analyze_gc_trace below. *)
+  if Array.length argv >= 2 && argv.(1) = "analyze-trace" then begin
+    let path = if Array.length argv >= 3 then argv.(2) else "trace/gc/gc.jsonl" in
+    analyze_gc_trace path
   end;
   if Array.length argv >= 2 && argv.(1) = "repl" then begin
     let preload_file = if Array.length argv >= 3 then Some argv.(2) else None in

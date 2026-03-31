@@ -374,6 +374,77 @@ let rec count_rc_ops (e : March_tir.Tir.expr) =
   | ESeq (a, b)          -> count_rc_ops a + count_rc_ops b
   | _                    -> 0
 
+(** Count total TIR nodes (approximates function body size).
+    Mirrors the logic in lib/tir/inline.ml — used to annotate dump output
+    with inline-eligibility reasoning (Phase 9). *)
+let rec count_tir_nodes (e : March_tir.Tir.expr) =
+  let open March_tir.Tir in
+  match e with
+  | EAtom _                       -> 1
+  | EApp (_, args)                -> 1 + List.length args
+  | ECallPtr (_, args)            -> 1 + List.length args
+  | ELet (_, rhs, body)           -> 1 + count_tir_nodes rhs + count_tir_nodes body
+  | ELetRec (fns, body)           ->
+    1 + count_tir_nodes body +
+    List.fold_left (fun a f -> a + count_tir_nodes f.fn_body) 0 fns
+  | ECase (_, brs, def)           ->
+    1 + (match def with None -> 0 | Some e -> count_tir_nodes e) +
+    List.fold_left (fun a br -> a + count_tir_nodes br.br_body) 0 brs
+  | ESeq (a, b)                   -> 1 + count_tir_nodes a + count_tir_nodes b
+  | ETuple args | EAlloc (_, args) | EStackAlloc (_, args) -> 1 + List.length args
+  | ERecord fs                    -> 1 + List.length fs
+  | EField _ | EUpdate _          -> 1
+  | EIncRC _ | EDecRC _ | EAtomicIncRC _ | EAtomicDecRC _ | EFree _ -> 1
+  | EReuse (_, _, args)           -> 1 + List.length args
+
+(** Check whether a function body calls itself (direct recursion check). *)
+let calls_self fn_name (e : March_tir.Tir.expr) =
+  let open March_tir.Tir in
+  let rec go = function
+    | EApp (v, _)         -> v.v_name = fn_name
+    | ELet (_, rhs, body) -> go rhs || go body
+    | ELetRec (fns, body) -> go body || List.exists (fun f -> go f.fn_body) fns
+    | ECase (_, brs, def) ->
+      List.exists (fun b -> go b.br_body) brs ||
+      Option.fold ~none:false ~some:go def
+    | ESeq (a, b)         -> go a || go b
+    | _                   -> false
+  in
+  go e
+
+(** Inline-eligibility annotation for Phase 9 optimization reasoning.
+    Returns ("yes"|"no", reason-string). The inline_size_threshold mirrors
+    lib/tir/inline.ml so the reasoning is accurate. *)
+let inline_size_threshold = 50
+
+let inline_annotation fn_name (fn : March_tir.Tir.fn_def) =
+  let body_size = count_tir_nodes fn.March_tir.Tir.fn_body in
+  let is_small  = body_size <= inline_size_threshold in
+  let is_nonrec = not (calls_self fn_name fn.March_tir.Tir.fn_body) in
+  (* We can't call Purity here without a full dependency, but we can check
+     for obvious side effects: ESeq, EFree, EReuse, atomic ops = probably impure. *)
+  let rec has_side_effects = function
+    | March_tir.Tir.ESeq _         -> true
+    | March_tir.Tir.EFree _        -> true
+    | March_tir.Tir.EReuse _       -> true
+    | March_tir.Tir.ELet (_, r, b) -> has_side_effects r || has_side_effects b
+    | March_tir.Tir.ELetRec (fns, body) ->
+      has_side_effects body || List.exists (fun f -> has_side_effects f.March_tir.Tir.fn_body) fns
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> has_side_effects b.March_tir.Tir.br_body) brs ||
+      Option.fold ~none:false ~some:has_side_effects def
+    | _ -> false
+  in
+  let is_likely_pure = not (has_side_effects fn.March_tir.Tir.fn_body) in
+  let eligible = is_small && is_nonrec && is_likely_pure in
+  let reason =
+    if eligible then "eligible"
+    else if not is_small    then Printf.sprintf "too large (size=%d, threshold=%d)" body_size inline_size_threshold
+    else if not is_nonrec   then "recursive"
+    else                         "side-effects"
+  in
+  (eligible, reason, body_size)
+
 (** A simple non-cryptographic fingerprint of a string.
     Used only for change detection in the diff viewer. *)
 let body_fingerprint s =
@@ -444,19 +515,30 @@ let tir_phase (tm : March_tir.Tir.tir_module) phase_name =
     ) fn.March_tir.Tir.fn_params) in
     let calls = tir_calls_in [] fn.March_tir.Tir.fn_body in
     let calls = List.sort_uniq String.compare calls in
-    let rc_ops = count_rc_ops fn.March_tir.Tir.fn_body in
+    let rc_ops    = count_rc_ops fn.March_tir.Tir.fn_body in
     (* Body fingerprint lets the diff viewer detect when a function's body
        changed between passes even if its signature and call list are the same. *)
-    let body_fp = body_fingerprint (March_tir.Tir.show_expr fn.March_tir.Tir.fn_body) in
+    let body_fp   = body_fingerprint (March_tir.Tir.show_expr fn.March_tir.Tir.fn_body) in
+    (* Phase 9: inline-eligibility reasoning and ownership density *)
+    let (eligible, reason, body_size) = inline_annotation fn.March_tir.Tir.fn_name fn in
+    let density =
+      if body_size > 0 then
+        Printf.sprintf "%.2f" (float_of_int rc_ops /. float_of_int body_size)
+      else "0.00"
+    in
     nodes := {
       n_id    = id;
       n_label = fn.March_tir.Tir.fn_name ^ "(" ^ params_str ^ ")";
       n_type  = "fn";
       n_meta  = [
-        "ret",        json_string (tir_ty_str fn.March_tir.Tir.fn_ret_ty);
-        "calls",      json_list (List.map json_string calls);
-        "rc_ops",     json_string (string_of_int rc_ops);
-        "body_hash",  json_string body_fp;
+        "ret",              json_string (tir_ty_str fn.March_tir.Tir.fn_ret_ty);
+        "calls",            json_list (List.map json_string calls);
+        "rc_ops",           json_string (string_of_int rc_ops);
+        "body_size",        json_string (string_of_int body_size);
+        "rc_density",       json_string density;
+        "inline_eligible",  json_string (if eligible then "yes" else "no");
+        "inline_reason",    json_string reason;
+        "body_hash",        json_string body_fp;
       ];
     } :: !nodes;
     edges := { e_src = mod_id; e_dst = id; e_label = "fn" } :: !edges;
@@ -477,14 +559,43 @@ let ensure_dir path =
   if not (Sys.file_exists path) then
     Unix.mkdir path 0o755
 
-let write_phases ~source_file phases =
-  ensure_dir "march-phases";
+(* ------------------------------------------------------------------ *)
+(* Phase 6: Structured trace/ pipeline                                 *)
+(* ------------------------------------------------------------------ *)
+
+let rec write_phases ~source_file phases =
+  (* Primary output: trace/phases/phases.json (Phase 6 layout).
+     Legacy alias: march-phases/phases.json kept for backward compat. *)
+  ensure_dir "trace";
+  ensure_dir "trace/phases";
+  ensure_dir "march-phases";  (* legacy *)
   let payload = json_obj [
     "source_file", json_string source_file;
     "phases",      json_list phases;
   ] in
-  let path = "march-phases/phases.json" in
+  let primary_path = "trace/phases/phases.json" in
+  let legacy_path  = "march-phases/phases.json" in
+  List.iter (fun path ->
+    let oc = open_out path in
+    output_string oc payload;
+    close_out oc
+  ) [primary_path; legacy_path];
+  Printf.eprintf "wrote %s\n%!" primary_path;
+  (* Write manifest so viewers can discover what trace data is available. *)
+  write_manifest ~source_file ~has_phases:true
+
+and write_manifest ~source_file ~has_phases =
+  ensure_dir "trace";
+  let path = "trace/manifest.json" in
+  (* Check if GC trace exists *)
+  let has_gc = Sys.file_exists "trace/gc/gc.jsonl" in
+  let payload = json_obj [
+    "source_file",  json_string source_file;
+    "has_phases",   (if has_phases then "true" else "false");
+    "has_gc",       (if has_gc    then "true" else "false");
+    "phases_path",  json_string "trace/phases/phases.json";
+    "gc_path",      json_string "trace/gc/gc.jsonl";
+  ] in
   let oc = open_out path in
   output_string oc payload;
-  close_out oc;
-  Printf.eprintf "wrote %s\n%!" path
+  close_out oc

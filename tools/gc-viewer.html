@@ -1,0 +1,739 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>March GC Trace Viewer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", monospace;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Top bar ──────────────────────────────────────────────── */
+  #topbar {
+    background: #16213e;
+    border-bottom: 1px solid #0f3460;
+    padding: 8px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  #topbar h1 { font-size: 14px; font-weight: 600; color: #e94560; letter-spacing: 0.05em; }
+  #source-label { font-size: 11px; color: #888; font-family: monospace; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  #load-btn {
+    background: #0f3460; border: 1px solid #e94560; color: #e0e0e0;
+    padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; white-space: nowrap;
+  }
+  #load-btn:hover { background: #e94560; }
+  #file-input { display: none; }
+
+  .filter-btn {
+    background: transparent; border: 1px solid #444; color: #aaa;
+    padding: 3px 10px; border-radius: 4px; cursor: pointer; font-size: 11px;
+  }
+  .filter-btn.active { background: #1a2a3a; color: #e0e0e0; }
+  .filter-btn.alloc.active  { border-color: #6ec96e; color: #6ec96e; }
+  .filter-btn.free.active   { border-color: #e94560; color: #e94560; }
+  .filter-btn.inc.active    { border-color: #7ab4e8; color: #7ab4e8; }
+  .filter-btn.dec.active    { border-color: #e9a94e; color: #e9a94e; }
+
+  /* ── Stats bar ─────────────────────────────────────────────── */
+  #stats-bar {
+    background: #12192e;
+    border-bottom: 1px solid #0f3460;
+    padding: 6px 16px;
+    display: flex;
+    gap: 24px;
+    flex-shrink: 0;
+    font-size: 11px;
+  }
+  .stat { display: flex; flex-direction: column; gap: 1px; }
+  .stat-label { color: #555; text-transform: uppercase; letter-spacing: 0.06em; font-size: 9px; }
+  .stat-val   { color: #e0e0e0; font-family: monospace; font-size: 12px; }
+  .stat-val.alloc  { color: #6ec96e; }
+  .stat-val.free   { color: #e94560; }
+  .stat-val.inc    { color: #7ab4e8; }
+  .stat-val.dec    { color: #e9a94e; }
+  .stat-val.leak   { color: #ff8844; }
+
+  /* ── Main ──────────────────────────────────────────────────── */
+  #main { display: flex; flex: 1; overflow: hidden; }
+
+  /* ── Timeline ──────────────────────────────────────────────── */
+  #timeline-wrap {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  #timeline-header {
+    padding: 6px 12px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #555;
+    border-bottom: 1px solid #0f3460;
+    flex-shrink: 0;
+    display: flex;
+    gap: 16px;
+    align-items: center;
+  }
+
+  /* Canvas-based timeline strip */
+  #timeline-canvas-wrap {
+    flex-shrink: 0;
+    height: 80px;
+    background: #12192e;
+    border-bottom: 1px solid #0f3460;
+    position: relative;
+    cursor: crosshair;
+  }
+  #timeline-canvas { width: 100%; height: 100%; display: block; }
+  #timeline-cursor {
+    position: absolute; top: 0; bottom: 0; width: 1px;
+    background: rgba(233,69,96,0.6); pointer-events: none; display: none;
+  }
+
+  /* Live count area above event list */
+  #live-strip {
+    flex-shrink: 0;
+    height: 40px;
+    background: #0e1628;
+    border-bottom: 1px solid #0f3460;
+    position: relative;
+  }
+  #live-canvas { width: 100%; height: 100%; display: block; }
+
+  #event-list-wrap {
+    flex: 1;
+    overflow-y: auto;
+    background: #12192e;
+  }
+
+  /* Virtual list placeholder; we render with JS */
+  #event-list { font-size: 11px; }
+
+  .ev-row {
+    display: flex;
+    align-items: center;
+    padding: 3px 12px;
+    border-bottom: 1px solid #0f1525;
+    cursor: pointer;
+    gap: 8px;
+  }
+  .ev-row:hover { background: #1a2a4e; }
+  .ev-row.selected { background: #0f3460; }
+
+  .ev-badge {
+    width: 56px; flex-shrink: 0;
+    font-size: 10px; font-weight: 600; text-align: center;
+    padding: 1px 4px; border-radius: 3px;
+  }
+  .ev-badge.alloc   { background: #1a3a1a; color: #6ec96e; border: 1px solid #3a6a3a; }
+  .ev-badge.free    { background: #3a1a1a; color: #e94560; border: 1px solid #6a3a3a; }
+  .ev-badge.inc_ref { background: #1a2a3a; color: #7ab4e8; border: 1px solid #3a5a8a; }
+  .ev-badge.dec_ref { background: #2a1a0a; color: #e9a94e; border: 1px solid #6a4a1a; }
+
+  .ev-addr { font-family: monospace; color: #7ab4e8; font-size: 10px; width: 100px; flex-shrink: 0; }
+  .ev-rc   { font-family: monospace; color: #aaa; font-size: 10px; width: 50px; flex-shrink: 0; }
+  .ev-tag  { font-family: monospace; color: #888; font-size: 10px; width: 40px; flex-shrink: 0; }
+  .ev-ts   { font-family: monospace; color: #444; font-size: 10px; flex: 1; text-align: right; }
+  .ev-idx  { font-family: monospace; color: #333; font-size: 9px; width: 50px; flex-shrink: 0; }
+
+  /* ── Info panel ────────────────────────────────────────────── */
+  #info-panel {
+    width: 260px; flex-shrink: 0;
+    background: #16213e; border-left: 1px solid #0f3460;
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  #info-panel h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+    color: #666; padding: 10px 12px 6px; border-bottom: 1px solid #0f3460; flex-shrink: 0;
+  }
+  #info-content { overflow-y: auto; flex: 1; padding: 10px 12px; font-size: 11px; line-height: 1.6; }
+  .info-row    { margin-bottom: 8px; }
+  .info-key    { color: #888; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .info-val    { color: #e0e0e0; word-break: break-all; font-family: monospace; }
+
+  .addr-history {
+    display: flex; flex-direction: column; gap: 2px; margin-top: 4px;
+  }
+  .history-item {
+    display: flex; gap: 6px; align-items: center;
+    padding: 2px 6px; border-radius: 3px; background: #0f1a2a; cursor: pointer;
+    font-size: 10px;
+  }
+  .history-item:hover { background: #1a3060; }
+
+  /* ── Drop overlay ──────────────────────────────────────────── */
+  #drop-overlay {
+    position: fixed; inset: 0;
+    background: rgba(26,26,46,0.95);
+    display: flex; align-items: center; justify-content: center;
+    flex-direction: column; gap: 12px; z-index: 100;
+  }
+  #drop-overlay h2 { font-size: 22px; color: #e94560; font-weight: 300; }
+  #drop-overlay p  { font-size: 13px; color: #888; text-align: center; line-height: 1.8; }
+  #drop-overlay code {
+    background: #0f3460; border-radius: 4px; padding: 2px 8px;
+    font-family: monospace; font-size: 12px; color: #7ab4e8;
+  }
+  #load-btn-big {
+    background: #e94560; border: none; color: white;
+    padding: 10px 24px; border-radius: 6px; cursor: pointer; font-size: 14px; margin-top: 8px;
+  }
+  #load-btn-big:hover { background: #c73450; }
+
+  /* search */
+  #search-input {
+    background: #0f1a2a; border: 1px solid #333; color: #e0e0e0;
+    padding: 3px 8px; border-radius: 4px; font-size: 11px; font-family: monospace;
+    width: 140px;
+  }
+  #search-input:focus { outline: none; border-color: #7ab4e8; }
+</style>
+</head>
+<body>
+
+<!-- Drop overlay -->
+<div id="drop-overlay">
+  <h2>March GC Trace Viewer</h2>
+  <p>
+    Run a compiled March binary with GC tracing enabled:<br>
+    <code>MARCH_TRACE_GC=1 ./your-binary</code><br>
+    then load <code>trace/gc/gc.jsonl</code>
+  </p>
+  <button id="load-btn-big" onclick="document.getElementById('file-input').click()">
+    Load gc.jsonl
+  </button>
+  <p style="font-size:11px;margin-top:8px">or drag &amp; drop the file here</p>
+</div>
+
+<!-- Top bar -->
+<div id="topbar">
+  <h1>March GC Trace Viewer</h1>
+  <span id="source-label">No file loaded</span>
+  <input id="search-input" type="text" placeholder="filter addr / tag…">
+  <button class="filter-btn alloc active" data-type="alloc">alloc</button>
+  <button class="filter-btn free active"  data-type="free">free</button>
+  <button class="filter-btn inc active"   data-type="inc_ref">inc_ref</button>
+  <button class="filter-btn dec active"   data-type="dec_ref">dec_ref</button>
+  <button id="load-btn" onclick="document.getElementById('file-input').click()">Load gc.jsonl</button>
+  <input type="file" id="file-input" accept=".jsonl,.json,.txt">
+</div>
+
+<!-- Stats -->
+<div id="stats-bar">
+  <div class="stat"><span class="stat-label">Events</span><span id="s-total" class="stat-val">—</span></div>
+  <div class="stat"><span class="stat-label">Allocs</span><span id="s-alloc" class="stat-val alloc">—</span></div>
+  <div class="stat"><span class="stat-label">Frees</span><span id="s-free"  class="stat-val free">—</span></div>
+  <div class="stat"><span class="stat-label">Inc ref</span><span id="s-inc"  class="stat-val inc">—</span></div>
+  <div class="stat"><span class="stat-label">Dec ref</span><span id="s-dec"  class="stat-val dec">—</span></div>
+  <div class="stat"><span class="stat-label">Peak live</span><span id="s-peak" class="stat-val">—</span></div>
+  <div class="stat"><span class="stat-label">Leaked</span><span id="s-leak" class="stat-val leak">—</span></div>
+  <div class="stat"><span class="stat-label">Showing</span><span id="s-show" class="stat-val">—</span></div>
+</div>
+
+<!-- Main -->
+<div id="main">
+
+  <!-- Timeline + event list -->
+  <div id="timeline-wrap">
+    <div id="timeline-header">
+      <span>Timeline</span>
+      <span id="tl-range" style="color:#666"></span>
+    </div>
+    <div id="timeline-canvas-wrap">
+      <canvas id="timeline-canvas"></canvas>
+      <div id="timeline-cursor"></div>
+    </div>
+    <div id="live-strip">
+      <canvas id="live-canvas"></canvas>
+    </div>
+    <div id="event-list-wrap">
+      <div id="event-list"></div>
+    </div>
+  </div>
+
+  <!-- Info panel -->
+  <div id="info-panel">
+    <h2>Event Detail</h2>
+    <div id="info-content">
+      <p style="color:#555;font-size:11px">Click an event to inspect it.</p>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// ─────────────────────────────────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────────────────────────────────
+let allEvents   = [];   // parsed JSONL rows
+let filtered    = [];   // filtered view
+let selectedIdx = -1;
+const activeTypes = new Set(['alloc', 'free', 'inc_ref', 'dec_ref']);
+let searchTerm  = '';
+
+const COLORS = {
+  alloc:   '#6ec96e',
+  free:    '#e94560',
+  inc_ref: '#7ab4e8',
+  dec_ref: '#e9a94e',
+};
+
+// ─────────────────────────────────────────────────────────────────────────
+// File loading
+// ─────────────────────────────────────────────────────────────────────────
+document.getElementById('file-input').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (file) loadFile(file);
+});
+
+document.body.addEventListener('dragover', e => e.preventDefault());
+document.body.addEventListener('drop', e => {
+  e.preventDefault();
+  const file = e.dataTransfer.files[0];
+  if (file) loadFile(file);
+});
+
+function loadFile(file) {
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    parseJSONL(e.target.result, file.name);
+  };
+  reader.readAsText(file);
+}
+
+function parseJSONL(text, name) {
+  const lines = text.split('\n');
+  allEvents = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    try {
+      const obj = JSON.parse(line);
+      allEvents.push(obj);
+    } catch(_) { /* skip malformed */ }
+  }
+  document.getElementById('source-label').textContent = name + '  (' + allEvents.length + ' events)';
+  document.getElementById('drop-overlay').style.display = 'none';
+  applyFilters();
+  renderTimeline();
+  renderLiveLine();
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Filtering
+// ─────────────────────────────────────────────────────────────────────────
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', function() {
+    const t = this.dataset.type;
+    if (activeTypes.has(t)) activeTypes.delete(t);
+    else activeTypes.add(t);
+    this.classList.toggle('active', activeTypes.has(t));
+    applyFilters();
+    renderTimeline();
+    renderLiveLine();
+  });
+});
+
+document.getElementById('search-input').addEventListener('input', function() {
+  searchTerm = this.value.trim().toLowerCase();
+  applyFilters();
+});
+
+function applyFilters() {
+  filtered = allEvents.filter(ev => {
+    if (!activeTypes.has(ev.event)) return false;
+    if (searchTerm) {
+      const addr = (ev.addr || '').toLowerCase();
+      const tag  = String(ev.tag || '');
+      if (!addr.includes(searchTerm) && !tag.includes(searchTerm)) return false;
+    }
+    return true;
+  });
+  updateStats();
+  renderEventList();
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Stats
+// ─────────────────────────────────────────────────────────────────────────
+function updateStats() {
+  let alloc = 0, free = 0, inc = 0, dec = 0;
+  allEvents.forEach(ev => {
+    if (ev.event === 'alloc')   alloc++;
+    if (ev.event === 'free')    free++;
+    if (ev.event === 'inc_ref') inc++;
+    if (ev.event === 'dec_ref') dec++;
+  });
+
+  // Compute peak live count and leaked addresses
+  const live = new Map(); // addr -> current RC
+  let peak = 0, cur = 0;
+  allEvents.forEach(ev => {
+    if (ev.event === 'alloc') {
+      live.set(ev.addr, 1);
+      cur++;
+      if (cur > peak) peak = cur;
+    } else if (ev.event === 'free') {
+      live.delete(ev.addr);
+      cur = Math.max(0, cur - 1);
+    }
+  });
+  const leaked = live.size;
+
+  document.getElementById('s-total').textContent = fmtN(allEvents.length);
+  document.getElementById('s-alloc').textContent = fmtN(alloc);
+  document.getElementById('s-free').textContent  = fmtN(free);
+  document.getElementById('s-inc').textContent   = fmtN(inc);
+  document.getElementById('s-dec').textContent   = fmtN(dec);
+  document.getElementById('s-peak').textContent  = fmtN(peak);
+  document.getElementById('s-leak').textContent  = leaked > 0 ? fmtN(leaked) + ' !' : '0';
+  document.getElementById('s-show').textContent  = fmtN(filtered.length);
+}
+
+function fmtN(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'K';
+  return String(n);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Timeline canvas (event density bar)
+// ─────────────────────────────────────────────────────────────────────────
+function renderTimeline() {
+  const canvas = document.getElementById('timeline-canvas');
+  const wrap   = document.getElementById('timeline-canvas-wrap');
+  canvas.width  = wrap.offsetWidth;
+  canvas.height = wrap.offsetHeight;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  if (allEvents.length === 0) return;
+
+  const ts0 = allEvents[0].ts_ns  || 0;
+  const ts1 = allEvents[allEvents.length - 1].ts_ns || ts0 + 1;
+  const span = Math.max(ts1 - ts0, 1);
+
+  document.getElementById('tl-range').textContent =
+    'span: ' + fmtNs(span);
+
+  ctx.fillStyle = '#0e1628';
+  ctx.fillRect(0, 0, W, H);
+
+  // Bucket events into W/2 columns, stacked by type
+  const BUCKETS = Math.min(W, 800);
+  const buckets = Array.from({length: BUCKETS}, () => ({alloc:0,free:0,inc_ref:0,dec_ref:0}));
+  allEvents.forEach(ev => {
+    const b = Math.min(Math.floor(((ev.ts_ns - ts0) / span) * BUCKETS), BUCKETS - 1);
+    if (buckets[b][ev.event] !== undefined) buckets[b][ev.event]++;
+  });
+
+  const maxVal = Math.max(1, ...buckets.map(b => b.alloc + b.free + b.inc_ref + b.dec_ref));
+  const bw = W / BUCKETS;
+
+  for (let i = 0; i < BUCKETS; i++) {
+    const b = buckets[i];
+    const total = b.alloc + b.free + b.inc_ref + b.dec_ref;
+    if (total === 0) continue;
+    const x = i * bw;
+    let y = H;
+    for (const [type, count] of [['alloc','#6ec96e'],['free','#e94560'],['inc_ref','#7ab4e8'],['dec_ref','#e9a94e']]) {
+      const h = (b[type] / maxVal) * (H - 4);
+      y -= h;
+      ctx.fillStyle = count;
+      ctx.fillRect(x, y, bw + 0.5, h);
+    }
+  }
+
+  // X-axis time labels
+  ctx.fillStyle = '#333';
+  ctx.font = '9px monospace';
+  for (let t = 0; t <= 4; t++) {
+    const x = (t / 4) * W;
+    ctx.fillStyle = '#2a3a5a';
+    ctx.fillRect(x, 0, 1, H);
+    ctx.fillStyle = '#555';
+    ctx.fillText(fmtNs((t / 4) * span), x + 2, H - 2);
+  }
+}
+
+function renderLiveLine() {
+  const canvas = document.getElementById('live-canvas');
+  const strip  = document.getElementById('live-strip');
+  canvas.width  = strip.offsetWidth;
+  canvas.height = strip.offsetHeight;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+
+  ctx.fillStyle = '#0e1628';
+  ctx.fillRect(0, 0, W, H);
+
+  if (allEvents.length === 0) return;
+
+  // Compute live count over time
+  const POINTS = Math.min(W, 800);
+  const ts0 = allEvents[0].ts_ns  || 0;
+  const ts1 = allEvents[allEvents.length - 1].ts_ns || ts0 + 1;
+  const span = Math.max(ts1 - ts0, 1);
+  const pts = new Array(POINTS).fill(0);
+  let live = 0;
+  let pidx = 0;
+  allEvents.forEach(ev => {
+    const p = Math.min(Math.floor(((ev.ts_ns - ts0) / span) * POINTS), POINTS - 1);
+    while (pidx <= p && pidx < POINTS) { pts[pidx] = live; pidx++; }
+    if (ev.event === 'alloc') live++;
+    else if (ev.event === 'free') live = Math.max(0, live - 1);
+  });
+  while (pidx < POINTS) { pts[pidx] = live; pidx++; }
+
+  const maxLive = Math.max(1, ...pts);
+  ctx.strokeStyle = '#5a9fd4';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < POINTS; i++) {
+    const x = (i / (POINTS - 1)) * W;
+    const y = H - (pts[i] / maxLive) * (H - 4) - 2;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Fill under line
+  ctx.fillStyle = 'rgba(90,159,212,0.1)';
+  ctx.lineTo(W, H); ctx.lineTo(0, H); ctx.closePath(); ctx.fill();
+
+  ctx.fillStyle = '#555';
+  ctx.font = '9px monospace';
+  ctx.fillText('live objects: max ' + fmtN(maxLive), 4, 10);
+}
+
+function fmtNs(ns) {
+  if (ns >= 1e9)  return (ns / 1e9).toFixed(2) + 's';
+  if (ns >= 1e6)  return (ns / 1e6).toFixed(1) + 'ms';
+  if (ns >= 1e3)  return (ns / 1e3).toFixed(0) + 'µs';
+  return ns + 'ns';
+}
+
+// Timeline cursor
+document.getElementById('timeline-canvas-wrap').addEventListener('mousemove', function(e) {
+  const cursor = document.getElementById('timeline-cursor');
+  const rect = this.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  cursor.style.display = 'block';
+  cursor.style.left = x + 'px';
+});
+document.getElementById('timeline-canvas-wrap').addEventListener('mouseleave', function() {
+  document.getElementById('timeline-cursor').style.display = 'none';
+});
+document.getElementById('timeline-canvas-wrap').addEventListener('click', function(e) {
+  if (allEvents.length === 0) return;
+  const rect = this.getBoundingClientRect();
+  const frac = (e.clientX - rect.left) / rect.width;
+  const ts0  = allEvents[0].ts_ns || 0;
+  const ts1  = allEvents[allEvents.length - 1].ts_ns || ts0;
+  const targetTs = ts0 + frac * (ts1 - ts0);
+  // Jump to nearest event in filtered list
+  let bestDist = Infinity, bestI = 0;
+  filtered.forEach((ev, i) => {
+    const d = Math.abs((ev.ts_ns || 0) - targetTs);
+    if (d < bestDist) { bestDist = d; bestI = i; }
+  });
+  scrollToEvent(bestI);
+  selectEvent(bestI);
+});
+
+// ─────────────────────────────────────────────────────────────────────────
+// Event list (virtual scroll — render visible rows)
+// ─────────────────────────────────────────────────────────────────────────
+const ROW_HEIGHT = 24;
+let listScrollTop = 0;
+
+function renderEventList() {
+  const wrap = document.getElementById('event-list-wrap');
+  const list = document.getElementById('event-list');
+
+  // Set total scroll height
+  list.style.height = (filtered.length * ROW_HEIGHT) + 'px';
+  list.style.position = 'relative';
+  list.innerHTML = '';
+
+  const visibleStart = Math.floor(listScrollTop / ROW_HEIGHT);
+  const visibleCount = Math.ceil(wrap.offsetHeight / ROW_HEIGHT) + 2;
+  const start = Math.max(0, visibleStart - 5);
+  const end   = Math.min(filtered.length, visibleStart + visibleCount + 5);
+
+  const fragment = document.createDocumentFragment();
+  for (let i = start; i < end; i++) {
+    const ev = filtered[i];
+    const row = document.createElement('div');
+    row.className = 'ev-row' + (i === selectedIdx ? ' selected' : '');
+    row.style.position = 'absolute';
+    row.style.top  = (i * ROW_HEIGHT) + 'px';
+    row.style.left = '0'; row.style.right = '0';
+    row.style.height = ROW_HEIGHT + 'px';
+    row.dataset.i = i;
+
+    const badge = document.createElement('div');
+    badge.className = 'ev-badge ' + ev.event;
+    badge.textContent = ev.event;
+
+    const addr = document.createElement('div');
+    addr.className = 'ev-addr';
+    addr.textContent = shortAddr(ev.addr);
+
+    const rc = document.createElement('div');
+    rc.className = 'ev-rc';
+    rc.textContent = 'rc=' + (ev.rc !== undefined ? ev.rc : '?');
+
+    const tag = document.createElement('div');
+    tag.className = 'ev-tag';
+    tag.textContent = 'tag=' + (ev.tag !== undefined ? ev.tag : '?');
+
+    const ts = document.createElement('div');
+    ts.className = 'ev-ts';
+    ts.textContent = fmtNs(ev.ts_ns || 0);
+
+    const idx = document.createElement('div');
+    idx.className = 'ev-idx';
+    idx.textContent = '#' + i;
+
+    row.append(idx, badge, addr, rc, tag, ts);
+    row.addEventListener('click', () => selectEvent(i));
+    fragment.appendChild(row);
+  }
+  list.appendChild(fragment);
+}
+
+document.getElementById('event-list-wrap').addEventListener('scroll', function() {
+  listScrollTop = this.scrollTop;
+  renderEventList();
+});
+
+function scrollToEvent(i) {
+  const wrap = document.getElementById('event-list-wrap');
+  const top  = i * ROW_HEIGHT;
+  const bot  = top + ROW_HEIGHT;
+  if (top < wrap.scrollTop || bot > wrap.scrollTop + wrap.offsetHeight) {
+    wrap.scrollTop = top - wrap.offsetHeight / 2;
+  }
+}
+
+function shortAddr(addr) {
+  if (!addr) return '?';
+  // Keep last 8 hex chars for display
+  const m = addr.match(/0x([0-9a-f]+)$/i);
+  if (m && m[1].length > 8) return '0x…' + m[1].slice(-8);
+  return addr;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Selection & info panel
+// ─────────────────────────────────────────────────────────────────────────
+function selectEvent(i) {
+  selectedIdx = i;
+  renderEventList();
+  const ev = filtered[i];
+  if (!ev) return;
+  showEventInfo(ev, i);
+}
+
+function showEventInfo(ev, i) {
+  const content = document.getElementById('info-content');
+
+  // Find history for this address
+  const addr = ev.addr;
+  const history = allEvents
+    .map((e, idx) => ({...e, _idx: idx}))
+    .filter(e => e.addr === addr);
+
+  const colorFor = t => COLORS[t] || '#888';
+
+  let html = `
+    <div class="info-row">
+      <div class="info-key">event</div>
+      <div class="info-val" style="color:${colorFor(ev.event)}">${esc(ev.event)}</div>
+    </div>
+    <div class="info-row">
+      <div class="info-key">address</div>
+      <div class="info-val">${esc(ev.addr || '?')}</div>
+    </div>
+    <div class="info-row">
+      <div class="info-key">RC after</div>
+      <div class="info-val">${ev.rc !== undefined ? ev.rc : '?'}</div>
+    </div>
+    <div class="info-row">
+      <div class="info-key">tag</div>
+      <div class="info-val">${ev.tag !== undefined ? ev.tag : '?'}</div>
+    </div>
+    <div class="info-row">
+      <div class="info-key">size</div>
+      <div class="info-val">${ev.size > 0 ? ev.size + ' bytes' : '—'}</div>
+    </div>
+    <div class="info-row">
+      <div class="info-key">timestamp</div>
+      <div class="info-val">${fmtNs(ev.ts_ns || 0)}</div>
+    </div>
+    <div class="info-row">
+      <div class="info-key">event #</div>
+      <div class="info-val">${i} of ${filtered.length}</div>
+    </div>`;
+
+  if (history.length > 1) {
+    html += `<div class="info-row">
+      <div class="info-key">Address history (${history.length} events)</div>
+      <div class="addr-history">`;
+    history.slice(0, 20).forEach(h => {
+      html += `<div class="history-item" data-hidx="${h._idx}"
+                    style="border-left:2px solid ${colorFor(h.event)}">
+        <span style="color:${colorFor(h.event)}">${h.event}</span>
+        <span style="color:#888">rc=${h.rc}</span>
+        <span style="color:#555">${fmtNs(h.ts_ns||0)}</span>
+      </div>`;
+    });
+    if (history.length > 20) html += `<div style="color:#555;padding:2px 6px">…${history.length - 20} more</div>`;
+    html += `</div></div>`;
+  }
+
+  content.innerHTML = html;
+
+  // Wire history item clicks
+  content.querySelectorAll('.history-item[data-hidx]').forEach(el => {
+    el.addEventListener('click', () => {
+      const absIdx = parseInt(el.dataset.hidx);
+      // Find in filtered
+      const fi = filtered.findIndex(e => allEvents.indexOf(e) === absIdx);
+      if (fi >= 0) { scrollToEvent(fi); selectEvent(fi); }
+    });
+  });
+}
+
+function esc(s) {
+  if (typeof s !== 'string') s = String(s);
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Resize handling
+// ─────────────────────────────────────────────────────────────────────────
+window.addEventListener('resize', () => {
+  renderTimeline();
+  renderLiveLine();
+  renderEventList();
+});
+</script>
+</body>
+</html>

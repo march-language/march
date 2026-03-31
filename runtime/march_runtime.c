@@ -14,6 +14,67 @@
 #include <unistd.h>
 #include <fcntl.h>
 
+/* ── GC/RC Tracing (Phase 5) ─────────────────────────────────────────── */
+/*
+ * Enabled by setting MARCH_TRACE_GC=1 in the environment before running a
+ * compiled March binary.  Events are written as newline-delimited JSON to
+ * trace/gc/gc.jsonl in the current working directory.
+ *
+ * Event format:
+ *   {"event":"alloc",   "addr":"0x…","size":N,"rc":1,"tag":0,"ts_ns":N}
+ *   {"event":"free",    "addr":"0x…","size":0,"rc":0,"tag":N,"ts_ns":N}
+ *   {"event":"inc_ref", "addr":"0x…","size":0,"rc":N,"tag":N,"ts_ns":N}
+ *   {"event":"dec_ref", "addr":"0x…","size":0,"rc":N,"tag":N,"ts_ns":N}
+ */
+
+static FILE            *gc_trace_file  = NULL;
+static pthread_mutex_t  gc_trace_mutex = PTHREAD_MUTEX_INITIALIZER;
+/* 0 = not yet checked, 1 = enabled, -1 = disabled */
+static int              gc_trace_state = 0;
+
+static void gc_trace_init_locked(void) {
+    if (getenv("MARCH_TRACE_GC") == NULL) { gc_trace_state = -1; return; }
+    mkdir("trace",    0755);
+    mkdir("trace/gc", 0755);
+    gc_trace_file  = fopen("trace/gc/gc.jsonl", "w");
+    gc_trace_state = (gc_trace_file != NULL) ? 1 : -1;
+    if (gc_trace_state < 0)
+        fputs("march: warning: MARCH_TRACE_GC=1 but could not open trace/gc/gc.jsonl\n",
+              stderr);
+}
+
+/* Lazy single-check: fast path avoids the mutex once state is known. */
+static inline int gc_trace_on(void) {
+    if (__builtin_expect(gc_trace_state != 0, 1)) return gc_trace_state > 0;
+    pthread_mutex_lock(&gc_trace_mutex);
+    if (gc_trace_state == 0) gc_trace_init_locked();
+    pthread_mutex_unlock(&gc_trace_mutex);
+    return gc_trace_state > 0;
+}
+
+static inline int64_t gc_ts_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000LL + (int64_t)ts.tv_nsec;
+}
+
+static void gc_emit(const char *ev, void *addr,
+                    int64_t size, int64_t rc, int32_t tag) {
+    pthread_mutex_lock(&gc_trace_mutex);
+    fprintf(gc_trace_file,
+            "{\"event\":\"%s\",\"addr\":\"%p\","
+            "\"size\":%lld,\"rc\":%lld,\"tag\":%d,\"ts_ns\":%lld}\n",
+            ev, addr,
+            (long long)size, (long long)rc, (int)tag,
+            (long long)gc_ts_ns());
+    pthread_mutex_unlock(&gc_trace_mutex);
+}
+
+/* Called automatically at program exit to flush and close the trace file. */
+static void gc_trace_atexit(void) {
+    if (gc_trace_file) { fflush(gc_trace_file); fclose(gc_trace_file); }
+}
+
 /* ── Allocation ──────────────────────────────────────────────────────── */
 
 void *march_alloc(int64_t sz) {
@@ -24,6 +85,7 @@ void *march_alloc(int64_t sz) {
     h->rc  = 1;
     h->tag = 0;
     h->pad = 0;
+    if (gc_trace_on()) gc_emit("alloc", p, sz, 1, 0);
     return p;
 }
 
@@ -53,16 +115,21 @@ void *march_alloc(int64_t sz) {
 void march_incrc(void *p) {
     if (!IS_HEAP_PTR(p)) return;
     /* Relaxed: caller already holds a reference so the object is alive. */
-    atomic_fetch_add_explicit(
+    int64_t prev = atomic_fetch_add_explicit(
         (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_relaxed);
+    if (gc_trace_on())
+        gc_emit("inc_ref", p, 0, prev + 1, ((march_hdr *)p)->tag);
 }
 
 void march_decrc(void *p) {
     if (!IS_HEAP_PTR(p)) return;
     /* acq_rel: release our writes before decrement; acquire before free so
      * we see all other threads' writes to the object. */
+    int32_t tag  = ((march_hdr *)p)->tag;
     int64_t prev = atomic_fetch_sub_explicit(
         (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
+    if (gc_trace_on())
+        gc_emit(prev == 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
     if (prev == 1) {
         free(p);
     } else if (prev < 1) {
@@ -76,13 +143,18 @@ void march_decrc(void *p) {
 
 int64_t march_decrc_freed(void *p) {
     if (!IS_HEAP_PTR(p)) return 1;
+    int32_t tag  = ((march_hdr *)p)->tag;
     int64_t prev = atomic_fetch_sub_explicit(
         (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
+    if (gc_trace_on())
+        gc_emit(prev <= 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
     if (prev <= 1) { free(p); return 1; }
     return 0;
 }
 
 void march_free(void *p) {
+    if (gc_trace_on() && IS_HEAP_PTR(p))
+        gc_emit("free", p, 0, 0, ((march_hdr *)p)->tag);
     free(p);
 }
 
@@ -92,12 +164,16 @@ void march_free(void *p) {
 void march_incrc_local(void *p) {
     if (!IS_HEAP_PTR(p)) return;
     ((march_hdr *)p)->rc++;
+    if (gc_trace_on())
+        gc_emit("inc_ref", p, 0, ((march_hdr *)p)->rc, ((march_hdr *)p)->tag);
 }
 
 void march_decrc_local(void *p) {
     if (!IS_HEAP_PTR(p)) return;
     march_hdr *h = (march_hdr *)p;
     h->rc--;
+    if (gc_trace_on())
+        gc_emit(h->rc <= 0 ? "free" : "dec_ref", p, 0, h->rc, h->tag);
     if (h->rc <= 0) {
         if (h->rc < 0) {
             fprintf(stderr, "march: local RC underflow at %p — aborting\n", p);
@@ -1441,6 +1517,8 @@ static char **g_argv = NULL;
 void march_process_argv_init(int argc, char **argv) {
     g_argc = argc;
     g_argv = argv;
+    /* Register GC trace flush once — safe to call multiple times (atexit dedup). */
+    if (gc_trace_on()) atexit(gc_trace_atexit);
 }
 
 /* Returns List(String) of argv entries. */
