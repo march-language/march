@@ -63,6 +63,26 @@ fn abs(n) do n end
 
 Return-type annotation is optional (`fn f(x: Int): Bool do ... end`).
 
+Default argument values (Elixir-style `\\`):
+
+```march
+fn greet(name, greeting \\ "Hello") do
+  greeting ++ ", " ++ name ++ "!"
+end
+
+greet("World")           -- "Hello, World!"
+greet("World", "Hi")    -- "Hi, World!"
+```
+
+Multiple defaults — all must be trailing parameters:
+
+```march
+fn make(x, y \\ 10, z \\ 20) do x + y + z end
+make(1)          -- 31  (uses y=10, z=20)
+make(1, 5)       -- 26  (uses z=20)
+make(1, 5, 6)    -- 12  (all explicit)
+```
+
 Local function inside a block:
 
 ```march
@@ -150,10 +170,29 @@ type Point = { x: Float, y: Float }
 type User = { name: String, age: Int }
 ```
 
-Private type:
+Private type (type and constructors both private):
 
 ```march
 ptype Internal = Foo | Bar(Int)
+```
+
+Opaque type (type name public, constructors private):
+
+```march
+opaque type Handle = Handle(Int)
+-- Inside the module: can construct and pattern-match Handle
+-- Outside the module: type name visible, constructors hidden
+```
+
+Use opaque types to hide implementation details while keeping the type name usable in signatures:
+
+```march
+mod Token do
+  opaque type Token = Token(String)
+  fn make(s) do Token(s) end
+  fn value(Token(s)) do s end
+end
+-- Outside: can call Token.make/Token.value, cannot use Token(_) directly
 ```
 
 ---
@@ -243,6 +282,32 @@ match do
   _       -> "non-positive"
 end
 ```
+
+---
+
+## With Expressions
+
+Elixir-style monadic chaining for `Result`/`Option` types:
+
+```march
+with Ok(x) <- f(),
+     Ok(y) <- g(x) do
+  x + y
+end
+```
+
+With an `else` handler for failed patterns:
+
+```march
+with Ok(x) <- fetch_user(id),
+     Ok(y) <- fetch_data(x) do
+  process(x, y)
+else
+  Err(e) -> handle_error(e)
+end
+```
+
+Each `pat <- expr` binding: if `expr` matches `pat`, continue; otherwise fall through to `else` arms (or propagate the non-matching value if no `else`). Multiple bindings are separated by commas.
 
 ---
 
@@ -351,6 +416,20 @@ Any uppercase letter can be a sigil prefix (`~H`, `~R`, etc.).
 [1, 2, 3]                 -- list literal (sugar for Cons chains)
 Cons(1, Cons(2, Nil))     -- explicit cons
 ```
+
+## List Comprehensions
+
+```march
+[expr for pat in list]              -- map: apply expr to each element
+[expr for pat in list, pred]        -- filter-map: only elements where pred is true
+
+-- Examples:
+[x * 2 for x in [1, 2, 3]]         -- [2, 4, 6]
+[x for x in nums, x % 2 == 0]      -- only even numbers
+[x + 1 for x in [10, 20, 30]]      -- [11, 21, 31]
+```
+
+Desugars to `List.map` / `List.filter` + `List.map`. Requires `List` in scope.
 
 ---
 

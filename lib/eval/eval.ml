@@ -38,6 +38,7 @@ type value =
   | VChan   of chan_endpoint            (** Binary session-typed channel endpoint *)
   | VMChan  of mpst_endpoint            (** Multi-party session-typed channel endpoint *)
   | VForeign of string * string         (** FFI extern: (lib_name, symbol_name) *)
+  | VMultiarity of (int * value) list   (** Arity-dispatched fn: [(arity, closure)] sorted ascending *)
   | VNativeIntArr   of int array        (** Flat OCaml int array — fast numeric loops *)
   | VNativeFloatArr of float array      (** Flat OCaml float array — fast numeric loops *)
   | VTypedArray of value array          (** Contiguous typed array for columnar DataFrame storage *)
@@ -785,6 +786,9 @@ let rec value_to_string v =
     Printf.sprintf "MChan(%s#%d, %s)" me.me_proto me.me_id me.me_role
   | VForeign (lib, sym) ->
     Printf.sprintf "<foreign:%s:%s>" lib sym
+  | VMultiarity variants ->
+    let arities = List.map (fun (a, _) -> string_of_int a) variants in
+    Printf.sprintf "<fn/%s>" (String.concat "|" arities)
   | VNativeIntArr a ->
     let n = Array.length a in
     if n <= 8 then
@@ -5126,6 +5130,7 @@ let clause_params (clause : fn_clause) : string list =
       | FPNamed p       -> p.param_name.txt
       | FPPat (PatVar n) -> n.txt
       | FPPat _         -> eval_error "unexpected pattern param after desugaring"
+      | FPDefault (p, _) -> p.param_name.txt  (* desugar should have expanded these *)
     ) clause.fc_params
 
 (** Extract span from an expression, or dummy_span if unavailable. *)
@@ -5190,6 +5195,15 @@ and apply_inner (fn_val : value) (args : value list) : value =
      | None ->
        eval_error "extern %s:%s — no OCaml stub registered for this symbol \
                    (add it to the foreign_stubs table in eval.ml)" lib sym)
+
+  | VMultiarity variants ->
+    let n = List.length args in
+    (match List.assoc_opt n variants with
+     | Some fn_v -> apply fn_v args
+     | None ->
+       let arities = List.map (fun (a, _) -> string_of_int a) variants in
+       eval_error "arity mismatch: function accepts %s args, got %d"
+         (String.concat " or " arities) n)
 
   | _ -> eval_error "applied non-function value: %s" (value_to_string fn_val)
 
@@ -6181,11 +6195,13 @@ let rec eval_decl (env : env) (d : decl) : env =
                   def.fn_name.txt
     in
     let params = clause_params clause in
+    let arity = List.length params in
     (* Use a mutable env ref so the closure can call itself recursively.
        When [rec_closure] is invoked, [env_ref] already contains the
        function's own name, making self-recursion work in the REPL. *)
     let env_ref = ref env in
-    let rec_closure = VBuiltin ("<rec:" ^ def.fn_name.txt ^ ">",
+    let rec_name = Printf.sprintf "<rec:%s/%d>" def.fn_name.txt arity in
+    let rec_closure = VBuiltin (rec_name,
                                 fun args ->
                                   let call_env = !env_ref in
                                   let fn_v = VClosure (call_env, params, clause.fc_body) in
@@ -6248,12 +6264,30 @@ let rec eval_decl (env : env) (d : decl) : env =
                        def.fn_name.txt
         in
         let params = clause_params clause in
-        let rec_closure = VBuiltin ("<rec:" ^ def.fn_name.txt ^ ">",
+        let arity = List.length params in
+        let rec_name = Printf.sprintf "<rec:%s/%d>" def.fn_name.txt arity in
+        let rec_closure = VBuiltin (rec_name,
                                     fun args ->
                                       let call_env = !inner_ref in
                                       let fn_v = VClosure (call_env, params, clause.fc_body) in
                                       apply fn_v args) in
-        let e' = (def.fn_name.txt, rec_closure)
+        let parse_rec_arity n =
+          match String.rindex_opt n '/' with
+          | None -> None
+          | Some i ->
+            (try Some (int_of_string (String.sub n (i+1) (String.length n - i - 2)))
+             with _ -> None)
+        in
+        let combined =
+          match List.assoc_opt def.fn_name.txt e with
+          | Some (VMultiarity variants) ->
+            VMultiarity ((arity, rec_closure) :: List.remove_assoc arity variants)
+          | Some (VBuiltin (n, _) as prev) when parse_rec_arity n <> None ->
+            let prev_arity = Option.get (parse_rec_arity n) in
+            VMultiarity [(arity, rec_closure); (prev_arity, prev)]
+          | _ -> rec_closure
+        in
+        let e' = (def.fn_name.txt, combined)
                    :: List.remove_assoc def.fn_name.txt e in
         inner_ref := e';
         eval_mod_decls rest e'
@@ -6475,12 +6509,35 @@ let eval_module_env (m : module_) : env =
       let params = clause_params clause in
       (* The closure environment is the ref itself; we use a trick:
          build a closure that looks up in [env_ref] at call time. *)
-      let rec_closure = VBuiltin ("<rec:" ^ def.fn_name.txt ^ ">",
+      let arity = List.length params in
+      (* Encode arity in the name so we can recover it when combining arities *)
+      let rec_name = Printf.sprintf "<rec:%s/%d>" def.fn_name.txt arity in
+      let rec_closure = VBuiltin (rec_name,
                                   fun args ->
                                     let call_env = !env_ref in
                                     let fn_v = VClosure (call_env, params, clause.fc_body) in
                                     apply fn_v args) in
-      let env' = (def.fn_name.txt, rec_closure)
+      (* Support default-arg overloading: if a same-named fn already has a real
+         closure (VMultiarity or a previous single-arity VBuiltin), combine into
+         VMultiarity so both arities are callable. *)
+      let parse_rec_arity n =
+        (* "<rec:greet/1>" → Some 1 *)
+        match String.rindex_opt n '/' with
+        | None -> None
+        | Some i ->
+          (try Some (int_of_string (String.sub n (i+1) (String.length n - i - 2)))
+           with _ -> None)
+      in
+      let combined =
+        match List.assoc_opt def.fn_name.txt env with
+        | Some (VMultiarity variants) ->
+          VMultiarity ((arity, rec_closure) :: List.remove_assoc arity variants)
+        | Some (VBuiltin (n, _) as prev) when parse_rec_arity n <> None ->
+          let prev_arity = Option.get (parse_rec_arity n) in
+          VMultiarity [(arity, rec_closure); (prev_arity, prev)]
+        | _ -> rec_closure
+      in
+      let env' = (def.fn_name.txt, combined)
                  :: List.remove_assoc def.fn_name.txt env in
       env_ref := env';
       make_recursive_env rest env'

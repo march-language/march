@@ -220,6 +220,7 @@ and fn_clause = {
 and fn_param =
   | FPPat of pattern              (** Pattern parameter: fn fib(0) *)
   | FPNamed of param              (** Named parameter: fn greet(name : String) *)
+  | FPDefault of param * expr     (** Default value: fn greet(name, greeting \\ "Hello") *)
 [@@deriving show]
 
 and type_def =

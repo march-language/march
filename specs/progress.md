@@ -269,11 +269,11 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
-## Current State (as of 2026-03-31, forge bastion gen json + march-lang SKILL.md)
+## Current State (as of 2026-03-31, core language features: list comprehensions + with expressions + default args + opaque types)
 
 - **Builds clean**
-- **14 pre-existing failures** in `repl_jit_regression`/`repl_compiler_parity` (unrelated to Bastion work); all other suites pass. Full list: (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing** + **Phase 4: reduction counting in compiled code** + **Phase 4: lazy stack growth** + **Vault sharded KV store** + **Bastion.Cache + Bastion.Depot middleware**):
-  - `test_march.exe`: 1218 tests (+8 forge bastion gen json), 14 pre-existing repl_jit/repl_compiler_parity failures
+- **14 pre-existing failures** in `repl_jit_regression`/`repl_compiler_parity` (unrelated to core language work); all other suites pass. Full list: (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing** + **Phase 4: reduction counting in compiled code** + **Phase 4: lazy stack growth** + **Vault sharded KV store** + **Bastion.Cache + Bastion.Depot middleware**):
+  - `test_march.exe`: 1233 tests (+15 core language: list comprehensions, with expressions, default args, opaque types), 14 pre-existing repl_jit/repl_compiler_parity failures
   - `test_cas.exe`: 41 tests, passing (scc, pipeline, def_id)
   - `test_jit.exe`: 1 test, passing (dlopen_libc)
   - `test_fmt.exe`: 23 tests (23 failures: pre-existing formatter round-trip failures)
@@ -339,6 +339,10 @@ march/
 - **Pattern matching exhaustiveness checking** — compile-time pattern matrix analysis in `lib/typecheck/typecheck.ml`; warns on non-exhaustive matches, errors on unreachable arms
 - **Multi-level `use` paths** — `use A.B.*` / `use A.B.C` fully supported; grammar ambiguity resolved in parser, full path resolution in typecheck
 - **Opaque type enforcement** — `sig Name do type T end` hides representation; callers cannot access internal structure through the abstraction boundary
+- **`opaque type` declarations** — `opaque type Handle = Handle(Int)`: type name public, constructors private. `opaque` keyword in lexer+parser; `var_vis = Private` on all variants; type annotation still visible outside module
+- **List comprehensions** — `[expr for pat in list]` and `[expr for pat in list, pred]`; parser desugars to `List.map`/`List.filter` at parse time; requires `List` in scope
+- **`with` expressions** — Elixir-style monadic chaining `with Ok(x) <- f(), Ok(y) <- g(x) do x + y end` with optional `else` arms; parser desugars to nested `EMatch`
+- **Default argument values** — `fn greet(name, greeting \\ "Hello") do ... end`; `FPDefault` AST node; `expand_defaults_decl` in desugar generates N shortened DFn variants; `VMultiarity` in eval dispatches by arity
 - **Multi-error parser recovery** — Menhir `error` token recovery; multiple syntax errors per file reported
 - **Clojure-level REPL quality** — `:reload`, `:inspect/:i <expr>`, pretty-printer (depth/collection truncation), error recovery (env preserved on typecheck error), REPL/compiler parity tests
 - **`tap` builtin** — `tap(v)` sends `v` to a global thread-safe tap bus and returns `v`; REPL drains and displays tapped values after each eval (orange in TUI, `tap> v` in simple mode). Type: `∀a. a → a`. Safe for actor-context use.

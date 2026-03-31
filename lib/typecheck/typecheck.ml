@@ -3382,6 +3382,7 @@ let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_sp
     | Ast.FPNamed p -> check_name p.param_name.txt p.param_name.span
     | Ast.FPPat (Ast.PatVar n) -> check_name n.txt n.span
     | Ast.FPPat _ -> ()
+    | Ast.FPDefault (p, _) -> check_name p.param_name.txt p.param_name.span
   ) params
 
 (** Check a function definition.
@@ -3440,6 +3441,14 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
               let pat_bindings, _ = infer_pattern env pat in
               let env' = bind_vars pat_bindings env in
               (t :: tys, env')
+            | Ast.FPDefault (p, _) ->
+              (* Default should have been expanded by desugar; handle gracefully *)
+              let t = match p.param_ty with
+                | Some ann -> surface_ty env' ~tvars:fn_tvars ann
+                | None -> fresh_var env'.level
+              in
+              let env' = bind_var p.param_name.txt (Mono t) env in
+              (t :: tys, env')
           ) clause.fc_params ([], env_rec)
       in
 
@@ -3451,6 +3460,8 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
           | Ast.FPPat (Ast.PatVar name) ->
             Hashtbl.replace env.type_map name.span (repr pty)
           | Ast.FPPat _ -> ()
+          | Ast.FPDefault (p, _) ->
+            Hashtbl.replace env.type_map p.param_name.span (repr pty)
         ) clause.fc_params param_tys;
 
       (* Process the when-clause: distinguish class constraints from guards.
@@ -3500,6 +3511,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
       (* Check linear params were all consumed *)
       let param_names = List.filter_map (function
           | Ast.FPNamed p -> Some p.param_name.txt
+          | Ast.FPDefault (p, _) -> Some p.param_name.txt
           | Ast.FPPat _ -> None) clause.fc_params in
       check_linear_all_consumed body_env ~scope_span:fn_span param_names;
 
@@ -5047,6 +5059,7 @@ let rec enforce_tail_calls_in_decls (errors : Err.ctx) (decls : Ast.decl list) :
              List.fold_left (fun acc p ->
                match p with
                | Ast.FPNamed named -> StringSet.add named.param_name.txt acc
+               | Ast.FPDefault (named, _) -> StringSet.add named.param_name.txt acc
                | Ast.FPPat pat -> StringSet.union acc (collect_pattern_vars pat)
              ) StringSet.empty clause.Ast.fc_params
            in

@@ -96,6 +96,9 @@ let extract_fn_params (fn : Ast.fn_def) : (string * string) list =
       | Ast.FPNamed p ->
         (p.param_name.txt,
          match p.param_ty with Some t -> pp_ast_ty t | None -> "_")
+      | Ast.FPDefault (p, _) ->
+        (p.param_name.txt,
+         match p.param_ty with Some t -> pp_ast_ty t | None -> "_")
       | Ast.FPPat _ -> ("_", "_")
     ) clause.fc_params
 
