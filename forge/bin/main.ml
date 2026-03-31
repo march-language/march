@@ -424,6 +424,18 @@ let depot_cmd =
     [depot_migrate_cmd; depot_rollback_cmd; depot_migrations_cmd;
      depot_reset_cmd; depot_gen_cmd]
 
+(* --------------------------------------------------------------- forge compile *)
+
+let compile_cmd =
+  let file =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"FILE" ~doc:"Path to the .march source file to compile")
+  in
+  let run f = handle (Cmd_compile.run ~file:f ()) in
+  Cmd.v (Cmd.info "compile"
+           ~doc:"Compile a single .march file and dump all compiler phases to trace/phases/phases.json")
+    Term.(const run $ file)
+
 (* ------------------------------------------------------------------ forge phases *)
 
 let phases_cmd =
@@ -447,7 +459,7 @@ let default_term =
 
 let () =
   let cmds =
-    [ new_cmd; init_cmd; build_cmd; run_cmd; test_cmd; format_cmd;
+    [ new_cmd; init_cmd; build_cmd; run_cmd; compile_cmd; test_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; install_cmd; publish_cmd;
       search_cmd; assets_cmd; bastion_cmd; depot_cmd; phases_cmd; help_cmd ]
   in
