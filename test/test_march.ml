@@ -112,6 +112,18 @@ let test_parse_expr_lambda () =
   | March_ast.Ast.EApp (_, [March_ast.Ast.ELam (_, _, _)], _) -> ()
   | _ -> Alcotest.fail "expected EApp with ELam argument"
 
+let test_parse_lambda_keyword_params () =
+  (* `state` is a reserved keyword; it must be usable as a lambda param name *)
+  let src = "fn (state, event, payload) -> state" in
+  let lexbuf = Lexing.from_string src in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.ELam (ps, _, _) ->
+    Alcotest.(check int) "3 params" 3 (List.length ps);
+    let names = List.map (fun p -> p.March_ast.Ast.param_name.March_ast.Ast.txt) ps in
+    Alcotest.(check (list string)) "param names" ["state"; "event"; "payload"] names
+  | _ -> Alcotest.fail "expected ELam"
+
 let test_parse_expr_app () =
   let lexbuf = Lexing.from_string "f(x, y)" in
   let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
@@ -18716,6 +18728,7 @@ let () =
           Alcotest.test_case "atom expr" `Quick test_parse_expr_atom;
           Alcotest.test_case "pipe expr" `Quick test_parse_expr_pipe;
           Alcotest.test_case "lambda expr" `Quick test_parse_expr_lambda;
+          Alcotest.test_case "lambda keyword params" `Quick test_parse_lambda_keyword_params;
           Alcotest.test_case "application" `Quick test_parse_expr_app;
         ] );
       ( "module",

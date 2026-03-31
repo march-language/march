@@ -281,13 +281,13 @@ when_guard:
 (** Function parameters: can be patterns (for head matching) or named params. *)
 fn_param:
   | p = pattern { FPPat p }
-  | name = lower_name; COLON; t = ty
+  | name = soft_lower_name; COLON; t = ty
     { FPNamed { param_name = name; param_ty = Some t; param_lin = Unrestricted } }
-  | LINEAR; name = lower_name; COLON; t = ty
+  | LINEAR; name = soft_lower_name; COLON; t = ty
     { FPNamed { param_name = name; param_ty = Some t; param_lin = Linear } }
-  | name = lower_name; DSLASH; default_e = expr
+  | name = soft_lower_name; DSLASH; default_e = expr
     { FPDefault ({ param_name = name; param_ty = None; param_lin = Unrestricted }, default_e) }
-  | name = lower_name; COLON; t = ty; DSLASH; default_e = expr
+  | name = soft_lower_name; COLON; t = ty; DSLASH; default_e = expr
     { FPDefault ({ param_name = name; param_ty = Some t; param_lin = Unrestricted }, default_e) }
 
 let_decl:
@@ -717,11 +717,11 @@ field:
     { { fld_name = name; fld_ty = t; fld_lin = Linear } }
 
 param:
-  | name = lower_name; COLON; t = ty
+  | name = soft_lower_name; COLON; t = ty
     { { param_name = name; param_ty = Some t; param_lin = Unrestricted } }
-  | name = lower_name
+  | name = soft_lower_name
     { { param_name = name; param_ty = None; param_lin = Unrestricted } }
-  | LINEAR; name = lower_name; COLON; t = ty
+  | LINEAR; name = soft_lower_name; COLON; t = ty
     { { param_name = name; param_ty = Some t; param_lin = Linear } }
 
 (* ---- Expressions ---- *)
@@ -823,7 +823,7 @@ expr:
     { build_with bindings body else_arms (mk_span ($loc)) }
 
 lambda_params:
-  | name = lower_name { [{ param_name = name; param_ty = None; param_lin = Unrestricted }] }
+  | name = soft_lower_name { [{ param_name = name; param_ty = None; param_lin = Unrestricted }] }
   | UNDERSCORE { [{ param_name = mk_name "_" $loc; param_ty = None; param_lin = Unrestricted }] }
   | LPAREN; ps = separated_list(COMMA, param); RPAREN
     { ps }
@@ -1025,7 +1025,7 @@ pattern:
 
 simple_pattern:
   | UNDERSCORE { PatWild (mk_span ($loc)) }
-  | id = lower_name { PatVar id }
+  | id = soft_lower_name { PatVar id }
   | n = INT { PatLit (LitInt n, mk_span ($loc)) }
   | MINUS; n = INT { PatLit (LitInt (-n), mk_span ($loc)) }
   | f = FLOAT { PatLit (LitFloat f, mk_span ($loc)) }
@@ -1048,6 +1048,25 @@ simple_pattern:
 
 lower_name:
   | id = LOWER_IDENT { mk_name id $loc }
+
+(** Like lower_name but also accepts certain keywords that are commonly
+    used as variable / parameter names (e.g. `state` in actor code).
+    Use this in binding positions — params, patterns, let bindings — so
+    that `fn (state, event, payload) -> …` parses without errors. *)
+soft_lower_name:
+  | id = LOWER_IDENT  { mk_name id $loc }
+  | STATE             { mk_name "state"    $loc }
+  | INIT              { mk_name "init"     $loc }
+  | LOOP              { mk_name "loop"     $loc }
+  | ON                { mk_name "on"       $loc }
+  | PROTOCOL          { mk_name "protocol" $loc }
+  | APP               { mk_name "app"      $loc }
+  | AS                { mk_name "as"       $loc }
+  | WITH              { mk_name "with"     $loc }
+  | WHEN              { mk_name "when"     $loc }
+  | USE               { mk_name "use"      $loc }
+  | IN                { mk_name "in"       $loc }
+  | FOR               { mk_name "for"      $loc }
 
 upper_name:
   | id = UPPER_IDENT { mk_name id $loc }
