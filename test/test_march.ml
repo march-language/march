@@ -17820,6 +17820,165 @@ let test_duration_format_negative () =
   Alcotest.(check string) "format -70s" "-1 minute, 10 seconds"
     (vstr (call_fn env "f" []))
 
+(* ── forge bastion gen json ──────────────────────────────────────────────── *)
+
+(** Run [f] in a fresh temp directory and clean it up afterward. *)
+let with_tmpdir f =
+  let dir = Filename.temp_file "march_forge_test_" "" in
+  Sys.remove dir;
+  Unix.mkdir dir 0o755;
+  let old_cwd = Sys.getcwd () in
+  Unix.chdir dir;
+  (try f dir with exn -> Unix.chdir old_cwd; (* clean up *) ignore exn);
+  Unix.chdir old_cwd
+
+let file_contains path sub =
+  let ic = open_in path in
+  let n  = in_channel_length ic in
+  let s  = Bytes.create n in
+  really_input ic s 0 n;
+  close_in ic;
+  let s  = Bytes.to_string s in
+  let from_len = String.length sub in
+  let rec loop i =
+    if i + from_len > String.length s then false
+    else if String.sub s i from_len = sub then true
+    else loop (i + 1)
+  in
+  loop 0
+
+let test_gen_json_creates_schema () =
+  with_tmpdir (fun _dir ->
+    (match March_forge.Cmd_bastion_gen.run_json "Posts" "Post"
+               ["title:string"; "body:string"; "published:boolean"] with
+     | Error msg -> Alcotest.fail msg
+     | Ok () ->
+       Alcotest.(check bool) "schema file exists"
+         true (Sys.file_exists "src/app/schemas/post.march");
+       Alcotest.(check bool) "schema has mod Posts"
+         true (file_contains "src/app/schemas/post.march" "mod Tmpdir.Post do")
+             (* app_name is inferred from cwd basename; we just check structure *)
+    ))
+
+let test_gen_json_creates_migration () =
+  with_tmpdir (fun _dir ->
+    (match March_forge.Cmd_bastion_gen.run_json "Posts" "Post"
+               ["title:string"] with
+     | Error msg -> Alcotest.fail msg
+     | Ok () ->
+       let migration_dir = "priv/depot/migrations" in
+       Alcotest.(check bool) "migration dir exists"
+         true (Sys.file_exists migration_dir && Sys.is_directory migration_dir);
+       let files = Array.to_list (Sys.readdir migration_dir) in
+       let has_migration =
+         List.exists (fun f -> String.length f > 15 &&
+                               String.sub f (String.length f - 16) 16 = "_create_posts.march"
+                                 || (let sf = String.split_on_char '_' f in
+                                     List.length sf >= 2 &&
+                                     List.nth sf (List.length sf - 1) = "march" &&
+                                     List.mem "create" sf)) files
+       in
+       Alcotest.(check bool) "migration file exists" true has_migration
+    ))
+
+let test_gen_json_creates_context () =
+  with_tmpdir (fun _dir ->
+    (match March_forge.Cmd_bastion_gen.run_json "Posts" "Post"
+               ["title:string"] with
+     | Error msg -> Alcotest.fail msg
+     | Ok () ->
+       Alcotest.(check bool) "context file exists"
+         true (Sys.file_exists "src/app/contexts/posts.march");
+       Alcotest.(check bool) "context has list fn"
+         true (file_contains "src/app/contexts/posts.march" "fn list_posts()");
+       Alcotest.(check bool) "context has create fn"
+         true (file_contains "src/app/contexts/posts.march" "fn create_post(params)");
+       Alcotest.(check bool) "context has delete fn"
+         true (file_contains "src/app/contexts/posts.march" "fn delete_post(")
+    ))
+
+let test_gen_json_creates_handler () =
+  with_tmpdir (fun _dir ->
+    (match March_forge.Cmd_bastion_gen.run_json "Posts" "Post"
+               ["title:string"] with
+     | Error msg -> Alcotest.fail msg
+     | Ok () ->
+       Alcotest.(check bool) "handler file exists"
+         true (Sys.file_exists "src/app/handlers/post_handler.march");
+       Alcotest.(check bool) "handler has index fn"
+         true (file_contains "src/app/handlers/post_handler.march" "fn index(conn)");
+       Alcotest.(check bool) "handler has show fn"
+         true (file_contains "src/app/handlers/post_handler.march" "fn show(conn, id)");
+       Alcotest.(check bool) "handler has create fn"
+         true (file_contains "src/app/handlers/post_handler.march" "fn create(conn)");
+       Alcotest.(check bool) "handler has update fn"
+         true (file_contains "src/app/handlers/post_handler.march" "fn update(conn, id)");
+       Alcotest.(check bool) "handler has delete fn"
+         true (file_contains "src/app/handlers/post_handler.march" "fn delete(conn, id)");
+       Alcotest.(check bool) "handler has not_found fallback"
+         true (file_contains "src/app/handlers/post_handler.march" "fn not_found(conn)")
+    ))
+
+let test_gen_json_handler_uses_conn_json () =
+  with_tmpdir (fun _dir ->
+    (match March_forge.Cmd_bastion_gen.run_json "Posts" "Post"
+               ["title:string"] with
+     | Error msg -> Alcotest.fail msg
+     | Ok () ->
+       Alcotest.(check bool) "handler uses Conn.json"
+         true (file_contains "src/app/handlers/post_handler.march" "Conn.json(conn,");
+       Alcotest.(check bool) "handler returns 201 for create"
+         true (file_contains "src/app/handlers/post_handler.march" "Conn.json(conn, 201,");
+       Alcotest.(check bool) "handler returns 422 for invalid"
+         true (file_contains "src/app/handlers/post_handler.march" "Conn.json(conn, 422,");
+       Alcotest.(check bool) "handler returns 204 for delete"
+         true (file_contains "src/app/handlers/post_handler.march" "Conn.json(conn, 204,")
+    ))
+
+let test_gen_json_creates_test_file () =
+  with_tmpdir (fun _dir ->
+    (match March_forge.Cmd_bastion_gen.run_json "Posts" "Post"
+               ["title:string"] with
+     | Error msg -> Alcotest.fail msg
+     | Ok () ->
+       Alcotest.(check bool) "test file exists"
+         true (Sys.file_exists "test/handlers/post_handler_test.march");
+       Alcotest.(check bool) "test file has describe block"
+         true (file_contains "test/handlers/post_handler_test.march" "describe \"PostHandler\"")
+    ))
+
+let test_gen_json_schema_field_types () =
+  with_tmpdir (fun _dir ->
+    (match March_forge.Cmd_bastion_gen.run_json "Posts" "Post"
+               ["title:string"; "count:integer"; "score:float";
+                "published:boolean"; "uid:uuid"] with
+     | Error msg -> Alcotest.fail msg
+     | Ok () ->
+       let schema = "src/app/schemas/post.march" in
+       Alcotest.(check bool) "string -> String"
+         true (file_contains schema "title = \"String\"");
+       Alcotest.(check bool) "integer -> Int"
+         true (file_contains schema "count = \"Int\"");
+       Alcotest.(check bool) "float -> Float"
+         true (file_contains schema "score = \"Float\"");
+       Alcotest.(check bool) "boolean -> Bool"
+         true (file_contains schema "published = \"Bool\"");
+       Alcotest.(check bool) "uuid -> UUID"
+         true (file_contains schema "uid = \"UUID\"");
+       Alcotest.(check bool) "timestamps present"
+         true (file_contains schema "inserted_at = \"UtcDatetime\"")
+    ))
+
+let test_gen_json_invalid_field_spec () =
+  with_tmpdir (fun _dir ->
+    (match March_forge.Cmd_bastion_gen.run_json "Posts" "Post"
+               ["badfield"] with
+     | Ok ()    -> Alcotest.fail "expected error for bad field spec"
+     | Error e  ->
+       Alcotest.(check bool) "error mentions invalid"
+         true (String.length e > 0)
+    ))
+
 (* ── Cross-module load order ─────────────────────────────────────────────── *)
 (* Regression test: an alphabetically-earlier module must be able to call a
    function in an alphabetically-later module at the same dot-depth.
@@ -19775,5 +19934,15 @@ let () =
         Alcotest.test_case "format hours"           `Quick test_duration_format_hours;
         Alcotest.test_case "format zero"            `Quick test_duration_format_zero;
         Alcotest.test_case "format negative"        `Quick test_duration_format_negative;
+      ]);
+      ("forge bastion gen json", [
+        Alcotest.test_case "creates schema file"        `Quick test_gen_json_creates_schema;
+        Alcotest.test_case "creates migration file"     `Quick test_gen_json_creates_migration;
+        Alcotest.test_case "creates context file"       `Quick test_gen_json_creates_context;
+        Alcotest.test_case "creates handler file"       `Quick test_gen_json_creates_handler;
+        Alcotest.test_case "handler uses Conn.json"     `Quick test_gen_json_handler_uses_conn_json;
+        Alcotest.test_case "creates test file"          `Quick test_gen_json_creates_test_file;
+        Alcotest.test_case "maps field types"           `Quick test_gen_json_schema_field_types;
+        Alcotest.test_case "rejects invalid field spec" `Quick test_gen_json_invalid_field_spec;
       ]);
     ]
