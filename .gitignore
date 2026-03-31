@@ -28,3 +28,4 @@ zed-march/target/
 *.ll
 .march/
 .claude/worktrees/
+march-phases/
