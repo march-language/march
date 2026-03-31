@@ -128,7 +128,7 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 
 - ✅ **`with` expressions** — Elixir-style monadic chaining: `with Ok(x) <- f(), Ok(y) <- g(x) do x + y end` with optional `else` block. Desugars to nested `EMatch` in parser (`build_with` helper). 4 new tests.
 
-- ✅ **Default argument values** — `fn greet(name, greeting \\ "Hello") do ... end` (Elixir-style `\\`). `FPDefault` AST node; `expand_defaults_decl` in `lib/desugar/desugar.ml` generates N shortened DFn decls. `VMultiarity` in `lib/eval/eval.ml` dispatches by arity. 3 new tests.
+- ✅ **Default argument values** — `fn greet(name, greeting \\ "Hello") do ... end` (Elixir-style `\\`). `FPDefault` AST node; `expand_defaults_decl` in `lib/desugar/desugar.ml` generates uniquely-named `greet$N` DFns (name-mangling for TIR/LLVM safety); `VMultiarity` in `lib/eval/eval.ml` auto-registers base names from `$N` patterns; TIR `lower.ml` builds `_default_dispatch` table to rewrite call sites. 3 tests passing in interpreter and compiled pipeline.
 
 - ✅ **Opaque types** — `opaque type Handle = Handle(Int)`: type name public, constructors private. `opaque` keyword in lexer/parser; sets `var_vis = Private` on all variants in typecheck. 4 new tests (2 internal access, 2 external enforcement).
 
