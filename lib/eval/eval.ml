@@ -3617,6 +3617,27 @@ let base_env : env =
            | Ok s -> VString (Digestif.SHA256.(to_hex (digest_string s)))
            | Error e -> eval_error "sha256: %s" e)
         | _ -> eval_error "sha256(s: String | Bytes): String"))
+    (* ---- SHA-512 hash (hex string output) ---- *)
+  ; ("sha512", VBuiltin ("sha512", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s -> VString (Digestif.SHA512.(to_hex (digest_string s)))
+           | Error e -> eval_error "sha512: %s" e)
+        | _ -> eval_error "sha512(s: String | Bytes): String"))
+    (* ---- SHA-1 hash (hex string output, used for UUID v5) ---- *)
+  ; ("sha1", VBuiltin ("sha1", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s -> VString (Digestif.SHA1.(to_hex (digest_string s)))
+           | Error e -> eval_error "sha1: %s" e)
+        | _ -> eval_error "sha1(s: String | Bytes): String"))
+    (* ---- SHA-1 raw bytes (used for UUID v5 byte manipulation) ---- *)
+  ; ("sha1_bytes", VBuiltin ("sha1_bytes", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s -> march_bytes_of_string (Digestif.SHA1.(to_raw_string (digest_string s)))
+           | Error e -> eval_error "sha1_bytes: %s" e)
+        | _ -> eval_error "sha1_bytes(s: String | Bytes): Bytes"))
     (* ---- HMAC-SHA-256: returns Ok(Bytes) ---- *)
   ; ("hmac_sha256", VBuiltin ("hmac_sha256", function
         | [key_v; msg_v] ->

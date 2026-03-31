@@ -1,0 +1,302 @@
+-- Crypto module: general-purpose cryptographic primitives.
+--
+-- Exposes hashing, HMAC, password hashing/verification, random generation,
+-- and Base64 encoding as a public API.  The underlying implementations are
+-- provided by the March runtime (Digestif SHA-256/512, PBKDF2, CSPRNG).
+--
+-- Password hashing uses PBKDF2-SHA256 with a 16-byte random salt and
+-- 100 000 iterations.  The stored format is:
+--   "pbkdf2:sha256:100000:<salt_hex>:<hash_hex>"
+-- This is intentionally simple to verify without external libraries.
+--
+-- All hex output is lowercase.
+
+mod Crypto do
+
+-- ── Private helpers ───────────────────────────────────────────────────────
+
+pfn rev_list(xs) do
+  fn go(lst, acc) do
+    match lst do
+    Nil -> acc
+    Cons(h, t) -> go(t, Cons(h, acc))
+    end
+  end
+  go(xs, Nil)
+end
+
+-- Lowercase hex nibble for 0–15.
+pfn hex_nibble(n) do
+  if n < 10 do int_to_string(n)
+  else char_from_int(87 + n)  -- 'a' = 97; 97 - 10 = 87
+  end
+end
+
+-- Lowercase 2-char hex for a byte value 0–255.
+pfn byte_to_hex(n) do
+  hex_nibble(n / 16) ++ hex_nibble(n % 16)
+end
+
+-- Convert a Bytes value to a lowercase hex string.
+pfn bytes_to_hex(b) do
+  match b do
+  Bytes(xs) ->
+    fn go(bs, acc) do
+      match bs do
+      Nil -> string_join(rev_list(acc), "")
+      Cons(n, rest) -> go(rest, Cons(byte_to_hex(n), acc))
+      end
+    end
+    go(xs, Nil)
+  end
+end
+
+-- Hex character value: returns 0–15, or -1 on invalid input.
+pfn hex_char_val(c) do
+  let code = char_to_int(c)
+  if code >= 48 && code <= 57 do code - 48
+  else if code >= 97 && code <= 102 do code - 87
+  else if code >= 65 && code <= 70 do code - 55
+  else -1 end end end
+end
+
+-- Parse a hex string (even number of chars) into a byte list.
+-- Returns Some(list) on success, None on bad input.
+pfn hex_str_to_bytes(s) do
+  let chars = string_chars(s)
+  fn go(cs, acc) do
+    match cs do
+    Nil -> Some(rev_list(acc))
+    Cons(hi, Cons(lo, rest)) ->
+      let h = hex_char_val(hi)
+      let l = hex_char_val(lo)
+      if h < 0 || l < 0 do None
+      else go(rest, Cons(h * 16 + l, acc)) end
+    _ -> None
+    end
+  end
+  go(chars, Nil)
+end
+
+-- URL-safe Base64: replace + → -, / → _, strip trailing =
+pfn to_url_safe_b64(s) do
+  let s1 = string_replace_all(s, "+", "-")
+  let s2 = string_replace_all(s1, "/", "_")
+  fn strip_pad(t) do
+    let len = string_byte_length(t)
+    if len > 0 && string_slice(t, len - 1, 1) == "=" do
+      strip_pad(string_slice(t, 0, len - 1))
+    else t end
+  end
+  strip_pad(s2)
+end
+
+-- Restore standard Base64 from URL-safe form (add = padding).
+pfn from_url_safe_b64(s) do
+  let s1 = string_replace_all(s, "-", "+")
+  let s2 = string_replace_all(s1, "_", "/")
+  let len = string_byte_length(s2)
+  let rem = len % 4
+  if rem == 0 do s2
+  else if rem == 2 do s2 ++ "=="
+  else if rem == 3 do s2 ++ "="
+  else s2 end end end
+end
+
+-- Password hash format: "pbkdf2:sha256:100000:<salt_hex>:<hash_hex>"
+let pw_iterations = 100000
+let pw_dklen = 32
+
+-- ── Hash functions ────────────────────────────────────────────────────────
+
+doc """
+Compute the SHA-256 hash of data, returning a lowercase hex string.
+
+    Crypto.sha256("hello")
+    -- "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+
+The argument may be a String or Bytes value.
+"""
+fn sha256(data) do
+  sha256(data)
+end
+
+doc """
+Compute the SHA-512 hash of data, returning a lowercase hex string.
+
+The argument may be a String or Bytes value.
+"""
+fn sha512(data) do
+  sha512(data)
+end
+
+doc """
+Compute an HMAC using the given algorithm.
+
+    Crypto.hmac(:sha256, "secret", "message")
+    -- lowercase hex string of the HMAC-SHA256 result
+
+Supported algorithms: `:sha256`.  Returns the HMAC as a lowercase hex string.
+The key and data may each be a String or Bytes value.
+"""
+fn hmac(algo, key, data) do
+  match algo do
+  :sha256 ->
+    match hmac_sha256(key, data) do
+    Ok(b) -> bytes_to_hex(b)
+    end
+  end
+end
+
+-- ── Password hashing ──────────────────────────────────────────────────────
+
+doc """
+Hash a plaintext password using PBKDF2-SHA256 with a random salt.
+
+    let h = Crypto.hash_password("my-secret")
+    -- "pbkdf2:sha256:100000:<salt_hex>:<hash_hex>"
+
+The result is safe to store in a database.  Use `verify_password/2` to check
+a candidate password against the stored hash.
+
+Uses 100 000 PBKDF2 iterations with a 16-byte random salt and 32-byte output.
+"""
+fn hash_password(plain) do
+  let salt_bytes = random_bytes(16)
+  let salt_hex = bytes_to_hex(salt_bytes)
+  match pbkdf2_sha256(plain, salt_bytes, pw_iterations, pw_dklen) do
+  Ok(hash_bytes) ->
+    let hash_hex = bytes_to_hex(hash_bytes)
+    "pbkdf2:sha256:" ++ int_to_string(pw_iterations) ++ ":" ++ salt_hex ++ ":" ++ hash_hex
+  end
+end
+
+doc """
+Verify a plaintext password against a stored hash produced by `hash_password/1`.
+
+    let h = Crypto.hash_password("correct-horse-battery-staple")
+    Crypto.verify_password("correct-horse-battery-staple", h)  -- true
+    Crypto.verify_password("wrong-password", h)                -- false
+
+Returns `false` if the hash format is unrecognised.
+"""
+fn verify_password(plain, stored) do
+  let parts = string_split(stored, ":")
+  match parts do
+  Cons("pbkdf2", Cons("sha256", Cons(iter_str, Cons(salt_hex, Cons(hash_hex, Nil))))) ->
+    match string_to_int(iter_str) do
+    None -> false
+    Some(iters) ->
+      match hex_str_to_bytes(salt_hex) do
+      None -> false
+      Some(byte_list) ->
+        let salt_bytes = Bytes(byte_list)
+        match pbkdf2_sha256(plain, salt_bytes, iters, pw_dklen) do
+        Ok(new_bytes) ->
+          let new_hex = bytes_to_hex(new_bytes)
+          secure_compare(new_hex, hash_hex)
+        end
+      end
+    end
+  _ -> false
+  end
+end
+
+-- ── Random generation ─────────────────────────────────────────────────────
+
+doc """
+Generate n cryptographically random bytes.
+
+    Crypto.random_bytes(16)  -- Bytes value with 16 random bytes
+"""
+fn random_bytes(n) do
+  random_bytes(n)
+end
+
+doc """
+Generate n random bytes and return them as a lowercase hex string (2n chars).
+
+    Crypto.random_hex(16)  -- 32-character lowercase hex string
+"""
+fn random_hex(n) do
+  bytes_to_hex(random_bytes(n))
+end
+
+-- ── Constant-time comparison ──────────────────────────────────────────────
+
+doc """
+Compare two strings in constant time with respect to their length.
+
+Prevents timing attacks when comparing secrets such as tokens or HMAC digests.
+Returns `true` if the strings are equal, `false` otherwise.
+
+Note: the interpreter does not guarantee constant time at the machine level;
+this function nonetheless avoids early exits that would reveal prefix length.
+
+    Crypto.secure_compare("abc", "abc")  -- true
+    Crypto.secure_compare("abc", "abd")  -- false
+"""
+fn secure_compare(a, b) do
+  let la = string_byte_length(a)
+  let lb = string_byte_length(b)
+  if la != lb do false
+  else
+    let a_chars = string_chars(a)
+    let b_chars = string_chars(b)
+    fn go(acs, bcs, diff) do
+      match (acs, bcs) do
+      (Nil, Nil) -> diff == 0
+      (Cons(ac, ar), Cons(bc, br)) ->
+        let d = if ac == bc do 0 else 1 end
+        go(ar, br, diff + d)
+      _ -> false
+      end
+    end
+    go(a_chars, b_chars, 0)
+  end
+end
+
+-- ── Base64 helpers ────────────────────────────────────────────────────────
+
+doc """
+Base64-encode a Bytes value (standard alphabet with padding).
+
+    let b = Crypto.random_bytes(12)
+    Crypto.base64_encode(b)  -- 16-character Base64 string
+"""
+fn base64_encode(data) do
+  base64_encode(data)
+end
+
+doc """
+Decode a standard Base64 string to Bytes.
+
+    Crypto.base64_decode("SGVsbG8=")  -- Ok(Bytes for "Hello")
+    Crypto.base64_decode("!!")        -- Err("base64_decode: ...")
+"""
+fn base64_decode(s) do
+  base64_decode(s)
+end
+
+doc """
+Base64-encode using the URL-safe alphabet (- and _ instead of + and /),
+with no padding characters.
+
+    Crypto.base64_url_encode(Crypto.random_bytes(16))
+    -- URL-safe 22-character string
+"""
+fn base64_url_encode(data) do
+  to_url_safe_b64(base64_encode(data))
+end
+
+doc """
+Decode a URL-safe Base64 string (- and _, no padding) to Bytes.
+
+    Crypto.base64_url_decode("SGVsbG8")  -- Ok(Bytes)
+    Crypto.base64_url_decode("!!")       -- Err(...)
+"""
+fn base64_url_decode(s) do
+  base64_decode(from_url_safe_b64(s))
+end
+
+end
