@@ -123,8 +123,8 @@ let test_scaffold_router_has_get_root () =
        | Error m -> Alcotest.fail m
        | Ok () -> ());
       let path = Filename.concat name ("lib/" ^ name ^ "/router.march") in
-      Alcotest.(check bool) "router matches (Get, [])" true
-        (file_contains path "(Get, [])"))
+      Alcotest.(check bool) "router matches (:get, Nil)" true
+        (file_contains path "(:get, Nil)"))
 
 let test_scaffold_router_has_bastion_dashboard () =
   with_temp_parent (fun name ->
@@ -215,28 +215,30 @@ let sample_router pascal =
   Printf.sprintf
 {|mod %s.Router do
 
-  pub fn dispatch(conn, stats) do
-    let m = HttpServer.method(conn)
-    let p = HttpServer.path_info(conn)
+  alias HttpServer as H
+
+  fn dispatch(conn, stats) do
+    let m = H.method(conn)
+    let p = H.path_info(conn)
     match (m, p) do
     -- ROUTE: GET /
-    (Get, []) ->
+    (:get, Nil) ->
       %s.PageController.index(conn)
 
     -- ROUTE: GET /users
-    (Get, ["users"]) ->
+    (:get, Cons("users", Nil)) ->
       %s.UserController.index(conn)
 
     -- ROUTE: POST /users
-    (Post, ["users"]) ->
+    (:post, Cons("users", Nil)) ->
       %s.UserController.create(conn)
 
     -- ROUTE: GET /_bastion
-    (Get, ["_bastion"]) ->
+    (:get, Cons("_bastion", Nil)) ->
       BastionDev.dashboard_handler(conn, stats)
 
     _ ->
-      HttpServer.send_resp(conn, 404, "Not Found")
+      H.send_resp(conn, 404, "Not Found")
     end
   end
 
@@ -342,7 +344,7 @@ let () =
       ; Alcotest.test_case "main has HttpServer.listen"      `Quick test_scaffold_main_has_httpserver_listen
       ; Alcotest.test_case "main references BastionDev"      `Quick test_scaffold_main_has_bastiondev
       ; Alcotest.test_case "router has -- ROUTE: comments"   `Quick test_scaffold_router_has_route_comment
-      ; Alcotest.test_case "router matches (Get, [])"         `Quick test_scaffold_router_has_get_root
+      ; Alcotest.test_case "router matches (:get, Nil)"        `Quick test_scaffold_router_has_get_root
       ; Alcotest.test_case "router has _bastion route"       `Quick test_scaffold_router_has_bastion_dashboard
       ; Alcotest.test_case "dev config sets port 4000"       `Quick test_scaffold_config_dev_sets_port
       ; Alcotest.test_case "prod config reads PORT from env" `Quick test_scaffold_config_prod_uses_env
