@@ -141,11 +141,14 @@ type t = {
 (* ------------------------------------------------------------------ *)
 
 let find_stdlib_dir () =
+  let exe_dir = Filename.dirname Sys.executable_name in
   let candidates = [
     "stdlib";
-    Filename.concat (Filename.dirname Sys.executable_name) "../stdlib";
-    Filename.concat (Filename.dirname Sys.executable_name) "../../stdlib";
-    Filename.concat (Filename.dirname Sys.executable_name) "../../../stdlib";
+    Filename.concat exe_dir "../stdlib";
+    Filename.concat exe_dir "../../stdlib";
+    Filename.concat exe_dir "../../../stdlib";
+    Filename.concat exe_dir "../share/march/stdlib";
+    Filename.concat exe_dir "../share/march";
   ] in
   List.find_opt Sys.file_exists candidates
 
