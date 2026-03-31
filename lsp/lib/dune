@@ -11,6 +11,7 @@
   march_errors
   march_format
   march_resolver
+  march_tir
   linol.lsp
   linol
   linol-lwt
