@@ -314,10 +314,36 @@ let bastion_gen_schema_cmd =
   Cmd.v (Cmd.info "schema" ~doc:"Generate a Depot schema module and migration")
     Term.(const run $ module_name $ table_name $ fields)
 
+let bastion_gen_json_cmd =
+  let context_name =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"CONTEXT"
+           ~doc:"Context module name (e.g. Posts — groups related CRUD functions)")
+  in
+  let module_name =
+    Arg.(required & pos 1 (some string) None &
+         info [] ~docv:"MODULE"
+           ~doc:"Schema module name, singular (e.g. Post)")
+  in
+  let fields =
+    Arg.(value & pos_right 1 string [] &
+         info [] ~docv:"FIELD:TYPE"
+           ~doc:"Field definitions (e.g. title:string body:text published:boolean)")
+  in
+  let run ctx m f =
+    match Cmd_bastion_gen.run_json ctx m f with
+    | Ok () -> ()
+    | Error msg -> Printf.eprintf "error: %s\n%!" msg; exit 1
+  in
+  Cmd.v
+    (Cmd.info "json"
+       ~doc:"Generate a JSON API resource: schema, migration, context, handler, and tests")
+    Term.(const run $ context_name $ module_name $ fields)
+
 let bastion_gen_cmd =
   Cmd.group
     (Cmd.info "gen" ~doc:"Code generators for Bastion applications")
-    [bastion_gen_schema_cmd]
+    [bastion_gen_schema_cmd; bastion_gen_json_cmd]
 
 let bastion_cmd =
   Cmd.group

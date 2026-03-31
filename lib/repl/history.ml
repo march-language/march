@@ -1,7 +1,7 @@
 (** Input history: ring buffer with Up/Down navigation and NUL-separated file persistence. *)
 
 type t = {
-  mutable entries  : string array;
+  mutable entries  : string array; [@warning "-69"]
   max_size         : int;
   mutable count    : int;
   mutable write_at : int;   (* next write position in ring *)

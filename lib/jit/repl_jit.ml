@@ -1,3 +1,4 @@
+[@@@warning "-69"]
 (* lib/jit/repl_jit.ml
  *
  * REPL JIT compilation engine.
