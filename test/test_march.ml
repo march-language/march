@@ -9500,6 +9500,112 @@ let test_enum_sort_small_by () =
   end|} in
   check_int_list "Enum.sort_small_by" [1;2;3;4] (call_fn env "f" [])
 
+let test_enum_chunk_every () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.chunk_every([1, 2, 3, 4, 5], 2) end
+  end|} in
+  let result = call_fn env "f" [] in
+  Alcotest.(check int) "Enum.chunk_every 3 chunks" 3 (List.length (vlist result))
+
+let test_enum_zip () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.zip([1, 2, 3], [10, 20, 30]) end
+  end|} in
+  let result = call_fn env "f" [] in
+  Alcotest.(check int) "Enum.zip length" 3 (List.length (vlist result))
+
+let test_enum_dedup () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.dedup([1, 1, 2, 3, 3, 2]) end
+  end|} in
+  check_int_list "Enum.dedup" [1;2;3;2] (call_fn env "f" [])
+
+let test_enum_uniq () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.uniq([1, 2, 1, 3, 2]) end
+  end|} in
+  check_int_list "Enum.uniq" [1;2;3] (call_fn env "f" [])
+
+let test_enum_take_while () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.take_while([1, 2, 3, 4], fn x -> x < 3) end
+  end|} in
+  check_int_list "Enum.take_while" [1;2] (call_fn env "f" [])
+
+let test_enum_drop_while () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.drop_while([1, 2, 3, 4], fn x -> x < 3) end
+  end|} in
+  check_int_list "Enum.drop_while" [3;4] (call_fn env "f" [])
+
+let test_enum_sum () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.sum([1, 2, 3, 4, 5]) end
+  end|} in
+  Alcotest.(check int) "Enum.sum" 15 (vint (call_fn env "f" []))
+
+let test_enum_product () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.product([1, 2, 3, 4, 5]) end
+  end|} in
+  Alcotest.(check int) "Enum.product" 120 (vint (call_fn env "f" []))
+
+let test_enum_scan () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.scan([1, 2, 3, 4], 0, fn acc -> fn x -> acc + x) end
+  end|} in
+  check_int_list "Enum.scan" [0;1;3;6;10] (call_fn env "f" [])
+
+let test_enum_with_index () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.with_index([10, 20, 30]) end
+  end|} in
+  let result = call_fn env "f" [] in
+  Alcotest.(check int) "Enum.with_index length" 3 (List.length (vlist result))
+
+let test_enum_intersperse () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.intersperse([1, 2, 3], 0) end
+  end|} in
+  check_int_list "Enum.intersperse" [1;0;2;0;3] (call_fn env "f" [])
+
+let test_enum_chunk_by () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.chunk_by([1, 1, 2, 2, 3], fn x -> x) end
+  end|} in
+  let result = call_fn env "f" [] in
+  Alcotest.(check int) "Enum.chunk_by 3 groups" 3 (List.length (vlist result))
+
+let test_enum_slide () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.slide([1, 2, 3, 4], 3) end
+  end|} in
+  let result = call_fn env "f" [] in
+  Alcotest.(check int) "Enum.slide 2 windows" 2 (List.length (vlist result))
+
+let test_enum_frequencies () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.frequencies([1, 2, 1, 3, 2, 1]) end
+  end|} in
+  let result = call_fn env "f" [] in
+  Alcotest.(check int) "Enum.frequencies 3 entries" 3 (List.length (vlist result))
+
+let test_enum_min_by () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.min_by([3, 1, 4, 1, 5], fn x -> x) end
+  end|} in
+  let result = call_fn env "f" [] in
+  let args = match result with March_eval.Eval.VCon ("Some", a) -> a | _ -> [] in
+  Alcotest.(check int) "Enum.min_by" 1 (vint (List.hd args))
+
+let test_enum_max_by () =
+  let env = eval_with_enum {|mod Test do
+    fn f() do Enum.max_by([3, 1, 4, 1, 5], fn x -> x) end
+  end|} in
+  let result = call_fn env "f" [] in
+  let args = match result with March_eval.Eval.VCon ("Some", a) -> a | _ -> [] in
+  Alcotest.(check int) "Enum.max_by" 5 (vint (List.hd args))
+
 (* ── Phase 1: Monitor and Link tests ──────────────────────────────── *)
 
 (** Helper: create a fresh actor inst with Phase 1 fields and add to registry. *)
@@ -17531,7 +17637,7 @@ let test_crypto_secure_compare () =
       let a = Crypto.secure_compare("abc", "abc")
       let b = Crypto.secure_compare("abc", "abd")
       let c = Crypto.secure_compare("abc", "ab")
-      if a && not b && not c do 1 else 0 end
+      if a && !b && !c do 1 else 0 end
     end
   end|} in
   Alcotest.(check int) "secure_compare logic" 1
@@ -18989,7 +19095,23 @@ let () =
         Alcotest.test_case "sort_by"     `Quick test_enum_sort_by;
         Alcotest.test_case "timsort_by"  `Quick test_enum_timsort_by;
         Alcotest.test_case "introsort_by" `Quick test_enum_introsort_by;
-        Alcotest.test_case "sort_small_by" `Quick test_enum_sort_small_by;
+        Alcotest.test_case "sort_small_by"  `Quick test_enum_sort_small_by;
+        Alcotest.test_case "chunk_every"   `Quick test_enum_chunk_every;
+        Alcotest.test_case "zip"           `Quick test_enum_zip;
+        Alcotest.test_case "dedup"         `Quick test_enum_dedup;
+        Alcotest.test_case "uniq"          `Quick test_enum_uniq;
+        Alcotest.test_case "take_while"    `Quick test_enum_take_while;
+        Alcotest.test_case "drop_while"    `Quick test_enum_drop_while;
+        Alcotest.test_case "sum"           `Quick test_enum_sum;
+        Alcotest.test_case "product"       `Quick test_enum_product;
+        Alcotest.test_case "scan"          `Quick test_enum_scan;
+        Alcotest.test_case "with_index"    `Quick test_enum_with_index;
+        Alcotest.test_case "intersperse"   `Quick test_enum_intersperse;
+        Alcotest.test_case "chunk_by"      `Quick test_enum_chunk_by;
+        Alcotest.test_case "slide"         `Quick test_enum_slide;
+        Alcotest.test_case "frequencies"   `Quick test_enum_frequencies;
+        Alcotest.test_case "min_by"        `Quick test_enum_min_by;
+        Alcotest.test_case "max_by"        `Quick test_enum_max_by;
       ]);
       ("supervision phase1", [
         Alcotest.test_case "monitor receives Down on kill"        `Quick (with_reset test_monitor_receives_down_on_kill);

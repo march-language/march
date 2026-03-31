@@ -26,7 +26,7 @@ let is_macos () =
   Sys.file_exists "/System/Library/CoreServices/SystemVersion.plist"
 
 type t = {
-  runtime_so   : string;
+  runtime_so   : string [@warning "-69"];
   clang        : string;
   tmp_dir      : string;
   undef_flag   : string;  (* "-undefined dynamic_lookup" on macOS, "" elsewhere *)

@@ -166,7 +166,9 @@ class march_server =
         ServerCapabilities.signatureHelpProvider =
           Some sig_help;
         ServerCapabilities.foldingRangeProvider =
-          Some (`Bool true) }
+          Some (`Bool true);
+        ServerCapabilities.codeLensProvider =
+          Some (Lsp.Types.CodeLensOptions.create ~resolveProvider:false ()) }
 
     (* -------------------------------------------------------------- *)
     (* Document synchronisation                                        *)
@@ -175,6 +177,15 @@ class march_server =
     method on_notif_doc_did_open ~notify_back doc ~content =
       let uri = doc.Lsp.Types.TextDocumentItem.uri in
       let a = analyse_and_cache uri content in
+      (* Push AST-level diagnostics immediately so the editor is responsive. *)
+      Lwt.async (fun () ->
+        (* Run TIR pipeline in a background fiber.  On completion, update the
+           cached analysis and push an incremental publishDiagnostics with the
+           TIR-level hints merged in. *)
+        let a2 = Analysis.run_tir_pass a in
+        let uri_str = Lsp.Types.DocumentUri.to_string uri in
+        Hashtbl.replace doc_cache uri_str a2;
+        notify_back#send_diagnostic a2.Analysis.diagnostics);
       notify_back#send_diagnostic a.Analysis.diagnostics
 
     method on_notif_doc_did_close ~notify_back:_ doc =
@@ -187,6 +198,12 @@ class march_server =
         ~old_content:_ ~new_content =
       let uri = vdoc.Lsp.Types.VersionedTextDocumentIdentifier.uri in
       let a = analyse_and_cache uri new_content in
+      (* Same two-phase publish: AST diagnostics first, TIR insights async. *)
+      Lwt.async (fun () ->
+        let a2 = Analysis.run_tir_pass a in
+        let uri_str = Lsp.Types.DocumentUri.to_string uri in
+        Hashtbl.replace doc_cache uri_str a2;
+        notify_back#send_diagnostic a2.Analysis.diagnostics);
       notify_back#send_diagnostic a.Analysis.diagnostics
 
     (* -------------------------------------------------------------- *)
@@ -447,6 +464,28 @@ class march_server =
                ("activeSignature", `Int 0);
                ("activeParameter", `Int active_param)
              ]))
+
+      end else if meth = "textDocument/codeLens" then begin
+        let items =
+          match get_td_uri () with
+          | None -> []
+          | Some uri ->
+            (match get_analysis uri with
+             | None -> []
+             | Some a -> a.Analysis.code_lens_items)
+        in
+        let json_items = List.map (fun (cl : Analysis.code_lens_item) ->
+            `Assoc [
+              ("range", json_range cl.cl_range);
+              ("command", `Assoc [
+                ("title",   `String cl.cl_title);
+                ("command", `String "march.perf.noop");
+                ("arguments", `List [])
+              ])
+            ]
+          ) items
+        in
+        Lwt.return (`List json_items)
 
       end else if meth = "textDocument/foldingRange" then begin
         let ranges =

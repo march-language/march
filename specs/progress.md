@@ -173,7 +173,7 @@ march/
 │   └── base64.c             # Base64 for WebSocket handshake
 │   ├── search/
 │   │   └── search.ml        # Search index: Levenshtein fuzzy search, type/doc search, JSON cache
-├── stdlib/                  # 52 modules, ~10200 lines
+├── stdlib/                  # 57 modules, ~12400 lines
 │   ├── prelude.march        # Auto-imported helpers (panic, identity, compose, unwrap, etc.)
 │   ├── option.march         # Option(a) with Some/None
 │   ├── result.march         # Result(a,e) with Ok/Err
@@ -183,7 +183,14 @@ march/
 │   ├── iolist.march         # 221 lines: lazy string builder
 │   ├── seq.march            # 251 lines: lazy church-encoded fold sequences
 │   ├── sort.march           # 615 lines: Timsort, Introsort, AlphaDev (n≤8)
-│   ├── enum.march           # 314 lines: higher-level list utilities
+│   ├── enum.march           # 701 lines: Elixir-style enumeration — map/filter/fold/sort/chunk_every/zip/dedup/uniq/take_while/drop_while/sum/product/scan/with_index/intersperse/chunk_by/slide/frequencies/min_by/max_by
+│   ├── io.march             # 72 lines: explicit I/O — puts/write/warn/read_line/gets/inspect
+│   ├── system.march         # 155 lines: OS/runtime info — os/arch/cpu_count/monotonic_time/env/put_env/argv/cwd/pid/exit/cmd
+│   ├── crypto.march         # 302 lines: SHA-256/512, HMAC, PBKDF2 password hashing, random_bytes/hex, base64, secure_compare
+│   ├── uuid.march           # 266 lines: UUID v4 (random) + v5 (SHA-1 name-based), parse/validate/version/to_string/nil
+│   ├── duration.march       # 208 lines: time-span arithmetic — new/milliseconds/seconds/minutes/hours/days/weeks, add/subtract/multiply/compare/format
+│   ├── base64.march         # 143 lines: Base64 encode/decode (standard + URL-safe), Bytes helpers
+│   ├── uri.march            # 360 lines: URI parsing/construction — parse/build/encode/decode/query_params/merge_query
 │   ├── hamt.march           # HAMT engine (generic 32-way trie, O(1) amortized)
 │   ├── map.march            # HAMT-backed Map(k,v) — O(1) amortized lookup/insert/delete
 │   ├── array.march          # Persistent vector (32-way trie + tail buffer)
@@ -232,7 +239,7 @@ march/
 │   └── range.march                # Range: integer range as record — new/new_step/to_list/contains/size/map/filter/each/reduce/reverse/first/last/all/any/sum
 │   └── docs/flow.md         # Flow module design doc: concepts, examples, GenStage comparison
 ├── test/
-│   ├── test_march.ml         # 1180 tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, bytes, logger, flow, actor_module, etc.)
+│   ├── test_march.ml         # 1200+ tests (app entry, HAMT, tap, MPST, parity, LSP, opaque, type_level_nat, testing_library, bytes, logger, flow, actor_module, stdlib: Enum/Crypto/UUID/Duration/Base64/URI/IO/System, etc.)
 │   ├── test_cas.ml           # 41 tests (scc, pipeline, def_id)
 │   ├── test_jit.ml           # 1 test (dlopen round-trip)
 │   ├── test_fmt.ml           # 23 tests (formatter round-trip)
@@ -240,7 +247,7 @@ march/
 │   ├── test_supervision.ml   # 15 tests (actor supervision policies)
 │   └── test_oracle.ml        # oracle tests (requires MARCH_BIN env var)
 ├── lsp/
-│   └── test/test_lsp.ml      # 57 tests (initialize/diagnostics/hover/goto-def/completion/inlay hints)
+│   └── test/test_lsp.ml      # 147 tests (initialize/diagnostics/hover/goto-def/completion/inlay hints/perf-insights)
 └── forge/
     ├── lib/
     │   ├── resolver_version.ml       # semver parse/compare/~> constraint expansion

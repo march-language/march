@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-30 (Task stdlib module + Tuple, Char, OrderedMap, SortedSet, Range)
+**Last updated:** 2026-03-31 (Enum expansion + IO and System stdlib modules)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -231,7 +231,9 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 - ✅ **Supervisor restart policies (max_restarts)** — `sc_max_restarts` + sliding time window enforced in `eval.ml`; supervisor crashes when child exceeds restart budget
 - ✅ **Module `alias` declarations** — `alias Long.Name, as: Short` syntax and qualified name resolution in typecheck
 - ✅ **Timsort, Introsort, AlphaDev sort** — `stdlib/sort.march` (615 lines)
-- ✅ **Enum module** — `stdlib/enum.march` (314 lines)
+- ✅ **Enum module (expanded)** — `stdlib/enum.march` (701 lines): full Elixir-style enumeration — `map/filter/fold/reduce/flat_map/each/any/all/find/count/sort/sort_by/group_by/chunk_every/zip/dedup/uniq/take_while/drop_while/sum/product/scan/with_index/intersperse/chunk_by/slide/frequencies/min_by/max_by/min/max/reverse/flatten/concat/partition/split_while/unzip/into_list`. Added `sort_small_by` helper for small-list sort (AlphaDev). 17 new alcotest tests added.
+- ✅ **IO, System stdlib modules** — `stdlib/io.march` (72 lines): `IO.puts/write/warn/read_line/gets/inspect` — explicit I/O wrappers under clean namespace. `stdlib/system.march` (155 lines): `System.os/arch/cpu_count/monotonic_time/env/put_env/argv/cwd/pid/exit/cmd/version` — OS/runtime info.
+- ✅ **URI, Crypto, UUID, Duration, Base64 stdlib modules** — `stdlib/uri.march` (360 lines): URI parsing/construction, percent-encode/decode, query_params, merge_query. `stdlib/crypto.march` (302 lines): SHA-256/512, HMAC-SHA256, PBKDF2 password hashing (100k iterations), random_bytes/hex, base64/url-safe base64, constant-time `secure_compare`. `stdlib/uuid.march` (266 lines): UUID v4 (CSPRNG), UUID v5 (SHA-1 name-based, RFC 4122), parse/validate/version/to_string/nil. `stdlib/duration.march` (208 lines): `new/:ms/:s/:m/:h/:d/:w` constructors, `to_milliseconds/to_seconds`, `add/subtract/multiply/compare/format` (human-readable, handles negatives). `stdlib/base64.march` (143 lines): standard + URL-safe Base64 encode/decode, Bytes helpers. Crypto module uses `stdlib_sha256/stdlib_sha512/stdlib_random_bytes/stdlib_base64_encode/stdlib_base64_decode` aliases in `eval.ml` to avoid infinite recursion from same-named builtins.
 - ✅ **March-native stdlib test suite** — 23 `.march` test files in `test/stdlib/` covering all stdlib modules; `stdlib/test.march` (Test module with assert_true/false/eq_int/eq_str/some/none/ok/err); `test/test_stdlib_march.ml` OCaml runner (7 suites: Http, HttpTransport, HttpClient, HttpServer, WebSocket, Process, Logger)
 - ✅ **Logger module additions** — `Logger.level_from_string`, `level_rank`, `level_enabled`, `format_entry`, `log_if` added to `stdlib/logger.march`
 - ✅ **TCE structural recursion warning** — `check_tail_position` in `typecheck.ml` now emits a Warning when a structurally-recursive (but non-tail) call is detected; distinguishes arithmetic reductions (`n-1`) from pattern-bound sub-components

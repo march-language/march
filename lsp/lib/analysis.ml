@@ -77,12 +77,35 @@ type perf_insight_kind =
       (** A non-linear value sent via [send()] — will be deep-copied. *)
   | ClosureCapture of { pi_count : int; pi_names : string list }
       (** A lambda that closes over [pi_count] values — larger allocation. *)
+  (* Phase 3 — TIR pipeline insights (function-level, emitted after async TIR pass) *)
+  | StackPromoted of { pi_count : int }
+      (** Escape analysis promoted [pi_count] heap allocations to the stack. *)
+  | FbipReuse of { pi_count : int }
+      (** Perceus detected [pi_count] in-place memory reuse opportunities (FBIP). *)
+  | TirIndirectCall of { pi_fn_name : string; pi_count : int }
+      (** [pi_count] calls in this function go through a function pointer. *)
 
 (** A performance insight produced by static AST analysis. *)
 type perf_insight = {
   pi_span    : Ast.span;
   pi_kind    : perf_insight_kind;
   pi_message : string;
+}
+
+(** Per-function counts from the TIR optimization pipeline.
+    Used for code lens annotations and TIR-level perf insights. *)
+type tir_fn_insight = {
+  tfi_fn_name        : string;   (** source function name *)
+  tfi_stack_allocs   : int;      (** EStackAlloc nodes — values promoted to stack by escape analysis *)
+  tfi_reuse_ops      : int;      (** EReuse nodes — in-place updates by Perceus/FBIP *)
+  tfi_indirect_calls : int;      (** ECallPtr nodes surviving known_call — indirect dispatch *)
+  tfi_heap_allocs    : int;      (** EAlloc nodes — remaining heap allocations *)
+}
+
+(** A code lens annotation that appears above a function definition. *)
+type code_lens_item = {
+  cl_range : Lsp.Types.Range.t;  (** Position of the function name (for the lens line) *)
+  cl_title : string;             (** Summary text shown above the function *)
 }
 
 (** Full analysis result for one document. *)
@@ -134,6 +157,10 @@ type t = {
   (** Sites eligible for De Morgan rewriting: !(a&&b), !(a||b), !a&&!b, !a||!b. *)
   perf_insights    : perf_insight list;
   (** AST-level performance insights: non-tail calls, actor send copies, large closures. *)
+  tir_fn_insights  : tir_fn_insight list;
+  (** TIR-pipeline function-level insights: stack promotions, FBIP reuse, indirect calls. *)
+  code_lens_items  : code_lens_item list;
+  (** Code lens annotations for display above function definitions. *)
 }
 
 (* ------------------------------------------------------------------ *)
@@ -1068,6 +1095,9 @@ let perf_insight_to_diag (pi : perf_insight) : Lsp.Types.Diagnostic.t =
     | NonTailCall _    -> Lsp.Types.DiagnosticSeverity.Warning, "non_tail_call"
     | ActorSendCopy _  -> Lsp.Types.DiagnosticSeverity.Warning, "actor_send_copy"
     | ClosureCapture _ -> Lsp.Types.DiagnosticSeverity.Hint,    "closure_capture"
+    | StackPromoted _  -> Lsp.Types.DiagnosticSeverity.Hint,    "stack_promoted"
+    | FbipReuse _      -> Lsp.Types.DiagnosticSeverity.Hint,    "fbip_reuse"
+    | TirIndirectCall _ -> Lsp.Types.DiagnosticSeverity.Hint,   "indirect_call"
   in
   Lsp.Types.Diagnostic.create
     ~range
@@ -1146,7 +1176,9 @@ let analyse ~filename ~src : t =
       type_matches      = [];
       naming_violations = [];
       demorgan_sites    = [];
-      perf_insights     = [] }
+      perf_insights     = [];
+      tir_fn_insights   = [];
+      code_lens_items   = [] }
   in
   let make_parse_diag pos msg =
     let sp : Ast.span = {
@@ -1745,7 +1777,169 @@ let analyse ~filename ~src : t =
       type_matches;
       naming_violations;
       demorgan_sites;
-      perf_insights }
+      perf_insights;
+      tir_fn_insights  = [];
+      code_lens_items  = [] }
+
+(* ------------------------------------------------------------------ *)
+(* Phase 3: TIR pipeline analysis                                      *)
+(* ------------------------------------------------------------------ *)
+
+module Tir = March_tir.Tir
+
+(** Count optimization nodes in a TIR expression.
+    Returns (stack_allocs, reuse_ops, indirect_calls, heap_allocs). *)
+let rec tir_count_nodes (e : Tir.expr) : int * int * int * int =
+  let add (sa1, ru1, ic1, ha1) (sa2, ru2, ic2, ha2) =
+    (sa1+sa2, ru1+ru2, ic1+ic2, ha1+ha2)
+  in
+  match e with
+  | Tir.EStackAlloc _                -> (1, 0, 0, 0)
+  | Tir.EReuse _                     -> (0, 1, 0, 0)
+  | Tir.ECallPtr _                   -> (0, 0, 1, 0)
+  | Tir.EAlloc _                     -> (0, 0, 0, 1)
+  | Tir.ELet (_, e1, e2)             -> add (tir_count_nodes e1) (tir_count_nodes e2)
+  | Tir.ELetRec (fns, body)          ->
+    let acc = List.fold_left (fun a (fn : Tir.fn_def) ->
+        add a (tir_count_nodes fn.fn_body)) (0,0,0,0) fns in
+    add acc (tir_count_nodes body)
+  | Tir.ECase (_, branches, def_opt) ->
+    let acc = List.fold_left (fun a (br : Tir.branch) ->
+        add a (tir_count_nodes br.br_body)) (0,0,0,0) branches in
+    (match def_opt with Some d -> add acc (tir_count_nodes d) | None -> acc)
+  | Tir.ESeq (e1, e2)                -> add (tir_count_nodes e1) (tir_count_nodes e2)
+  | _                                -> (0, 0, 0, 0)
+
+(** Run the full TIR pipeline on [a]'s source, then annotate [a] with
+    per-function TIR insights and code lens items.  Called asynchronously
+    after the synchronous [analyse] completes so the editor sees AST-level
+    diagnostics immediately and TIR-level hints arrive shortly after. *)
+let run_tir_pass (a : t) : t =
+  (* Skip if there are errors — the TIR pipeline would fail on broken source. *)
+  let has_errors = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+      d.severity = Some Lsp.Types.DiagnosticSeverity.Error
+    ) a.diagnostics
+  in
+  if has_errors then a
+  else
+    try
+      (* Re-lex and parse the original source to get a fresh Ast.module_.
+         (The Analysis.t record does not store the parsed AST itself.) *)
+      let lexbuf = Lexing.from_string a.src in
+      lexbuf.Lexing.lex_curr_p <-
+        { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = a.filename };
+      let raw =
+        March_parser.Parser.module_
+          (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf
+      in
+      let desugared = March_desugar.Desugar.desugar_module raw in
+      (* Run: lower → mono → defun → known_call → perceus → escape *)
+      let tir = March_tir.Lower.lower_module ~type_map:a.type_map desugared in
+      let tir = March_tir.Mono.monomorphize tir in
+      let tir = March_tir.Defun.defunctionalize tir in
+      let tir = March_tir.Known_call.run ~changed:(ref false) tir in
+      let tir = March_tir.Perceus.perceus tir in
+      let tir = March_tir.Escape.escape_analysis tir in
+      (* Collect per-function optimization counts *)
+      let tir_fn_insights =
+        List.filter_map (fun (fn : Tir.fn_def) ->
+            (* Skip synthetic functions generated by lower.ml (prefixed with '$') *)
+            if fn.fn_name = "" || fn.fn_name.[0] = '$' then None
+            else begin
+              let (sa, ru, ic, ha) = tir_count_nodes fn.fn_body in
+              if sa + ru + ic + ha = 0 then None
+              else Some {
+                tfi_fn_name        = fn.fn_name;
+                tfi_stack_allocs   = sa;
+                tfi_reuse_ops      = ru;
+                tfi_indirect_calls = ic;
+                tfi_heap_allocs    = ha;
+              }
+            end
+          ) tir.Tir.tm_fns
+      in
+      (* Build code lens items — one per function with interesting TIR data.
+         Map function names back to source spans via def_map. *)
+      let code_lens_items =
+        List.filter_map (fun (tfi : tir_fn_insight) ->
+            match Hashtbl.find_opt a.def_map tfi.tfi_fn_name with
+            | None -> None
+            | Some sp ->
+              let parts = [] in
+              let parts =
+                if tfi.tfi_stack_allocs > 0 then
+                  Printf.sprintf "⚡ %d stack-allocated" tfi.tfi_stack_allocs :: parts
+                else parts
+              in
+              let parts =
+                if tfi.tfi_reuse_ops > 0 then
+                  Printf.sprintf "♻ %d in-place" tfi.tfi_reuse_ops :: parts
+                else parts
+              in
+              let parts =
+                if tfi.tfi_indirect_calls > 0 then
+                  Printf.sprintf "⚠ %d indirect call%s"
+                    tfi.tfi_indirect_calls
+                    (if tfi.tfi_indirect_calls > 1 then "s" else "")
+                  :: parts
+                else parts
+              in
+              if parts = [] then None
+              else Some {
+                cl_range = Pos.span_to_lsp_range sp;
+                cl_title = String.concat " · " (List.rev parts);
+              }
+          ) tir_fn_insights
+      in
+      (* Produce perf insights at function-definition spans (Hint severity) so
+         they appear in hover and the problems panel. *)
+      let tir_perf_insights =
+        List.filter_map (fun (tfi : tir_fn_insight) ->
+            match Hashtbl.find_opt a.def_map tfi.tfi_fn_name with
+            | None -> None
+            | Some sp ->
+              (* We emit one combined insight per function when any of the
+                 three optimizations are active.  Keep the most impactful. *)
+              if tfi.tfi_stack_allocs > 0 then
+                Some { pi_span    = sp;
+                       pi_kind    = StackPromoted { pi_count = tfi.tfi_stack_allocs };
+                       pi_message = Printf.sprintf
+                         "March stack-allocates %d value%s in this function \
+                          — no heap involvement and no memory-management cost \
+                          for %s."
+                         tfi.tfi_stack_allocs
+                         (if tfi.tfi_stack_allocs > 1 then "s" else "")
+                         (if tfi.tfi_stack_allocs > 1 then "them" else "it") }
+              else if tfi.tfi_reuse_ops > 0 then
+                Some { pi_span    = sp;
+                       pi_kind    = FbipReuse { pi_count = tfi.tfi_reuse_ops };
+                       pi_message = Printf.sprintf
+                         "March updates %d value%s in place in this function \
+                          instead of allocating new memory — no extra allocation \
+                          when the input is uniquely owned."
+                         tfi.tfi_reuse_ops
+                         (if tfi.tfi_reuse_ops > 1 then "s" else "") }
+              else if tfi.tfi_indirect_calls > 0 then
+                Some { pi_span    = sp;
+                       pi_kind    = TirIndirectCall { pi_fn_name  = tfi.tfi_fn_name;
+                                                      pi_count    = tfi.tfi_indirect_calls };
+                       pi_message = Printf.sprintf
+                         "This function makes %d indirect call%s through a function \
+                          pointer. If you specialize it for a specific callback, \
+                          March can call it directly."
+                         tfi.tfi_indirect_calls
+                         (if tfi.tfi_indirect_calls > 1 then "s" else "") }
+              else None
+          ) tir_fn_insights
+      in
+      { a with
+        tir_fn_insights;
+        code_lens_items;
+        perf_insights = a.perf_insights @ tir_perf_insights;
+      }
+    with _ ->
+      (* TIR pipeline failed (e.g. unsupported construct) — return analysis unchanged *)
+      a
 
 (* ------------------------------------------------------------------ *)
 (* Query helpers                                                       *)

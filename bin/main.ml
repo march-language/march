@@ -137,6 +137,8 @@ let load_stdlib () =
       "decimal.march";
       "bytes.march";
       "process.march";
+      "io.march";
+      "system.march";
       "logger.march";
       "actor.march";
       "flow.march";
