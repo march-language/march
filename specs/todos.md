@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-30 (forge depot CLI — migrate/rollback/migrations/reset/gen.migration — 1210+ tests)
+**Last updated:** 2026-03-30 (Task stdlib module — async/await/await_many/async_stream)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -122,6 +122,8 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 ---
 
 ## Done (recently completed)
+
+- ✅ **`Task` stdlib module** — `stdlib/task.march`: Elixir-style lightweight async tasks. `Task.async(f)`, `Task.await(task)`, `Task.await_ms(task, ms)`, `Task.await_unwrap(task)`, `Task.await_many(tasks)`, `Task.await_many_ms(tasks, ms)`, `Task.async_stream(list, f)`, `Task.async_stream_n(list, f, max_concurrency)`. Builds on `task_spawn`/`task_await`/`task_await_unwrap` primitives; zero-arg user functions wrapped to the `fn _ -> f()` thunk signature. Parses and typechecks cleanly.
 
 - ✅ **Qualified module access — Phase 5 (TIR Lower compiled path)** — `lib/tir/lower.ml`: added `_fns_ref`/`_types_ref` module-level accumulator refs (set by `lower_module`), `_lowered_modules` tracking hashtable, `_ensure_module_lowered` forward-ref callback. `lower_stdlib_mod_decls` lowers stdlib module declarations (DFn, DType, nested DMod) into the accumulator refs. `ensure_module_lowered` loads stdlib `.march` files via `Module_registry.find_stdlib_file`, parses+desugars, then calls `lower_stdlib_mod_decls` — triggered from EVar handling in both `lower_to_atom_k` and `lower_expr` when a dotted qualified name is encountered. `lib/tir/dune` depends on `march_modules`. 2 new tests in `tir` group (1210 total).
 
