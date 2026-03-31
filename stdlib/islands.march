@@ -50,6 +50,13 @@ mod Islands do
   --   OnInteraction — on the first user interaction with the island (click, focus, …)
   type HydrateOn = Eager | Lazy | OnIdle | OnInteraction
 
+  -- Data flow mode: indicates where island state is managed.
+  --
+  --   Server — state comes from the server; client does not modify it
+  --   Client — state is managed entirely on the client; server provides initial value
+  --   Sync   — state synchronises bidirectionally between client and server
+  type DataFlow = Server | Client | Sync
+
   -- Metadata descriptor for one registered island.
   --   name      : module name used to locate the .wasm file (e.g. "Counter")
   --   hydrate   : default hydration strategy for this island
@@ -85,6 +92,15 @@ mod Islands do
     end
   end
 
+  -- Convert a DataFlow value to the string used in the data-march-dataflow attribute.
+  fn dataflow_attr(df) do
+    match df do
+    Server -> "server"
+    Client -> "client"
+    Sync   -> "sync"
+    end
+  end
+
   -- Escape single-quote characters in a JSON string so it can be safely embedded
   -- in a single-quoted HTML attribute (data-march-state='...').
   pfn escape_state(json) do
@@ -108,6 +124,19 @@ mod Islands do
     let strat = hydrate_attr(hydrate)
     let escaped = escape_state(state_json)
     "<div data-march-island=\"${name}\" data-march-hydrate=\"${strat}\" data-march-state='${escaped}'>${inner_html}</div>"
+  end
+
+  -- Wrap with a data flow mode annotation.
+  --
+  -- dataflow : Server | Client | Sync
+  --   Server — read-only data from server (e.g. rendered list of items)
+  --   Client — client-managed state (e.g. counter, form UI)
+  --   Sync   — bidirectional (e.g. optimistic updates synced back to server)
+  fn wrap_with_dataflow(name, hydrate, dataflow, state_json, inner_html) do
+    let strat = hydrate_attr(hydrate)
+    let df    = dataflow_attr(dataflow)
+    let escaped = escape_state(state_json)
+    "<div data-march-island=\"${name}\" data-march-hydrate=\"${strat}\" data-march-dataflow=\"${df}\" data-march-state='${escaped}'>${inner_html}</div>"
   end
 
   -- Wrap with Eager hydration (most common; best for interactive-heavy pages).

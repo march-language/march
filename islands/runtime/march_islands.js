@@ -57,9 +57,10 @@
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const ISLAND_ATTR  = 'data-march-island';
-const STATE_ATTR   = 'data-march-state';
-const HYDRATE_ATTR = 'data-march-hydrate';
+const ISLAND_ATTR    = 'data-march-island';
+const STATE_ATTR     = 'data-march-state';
+const HYDRATE_ATTR   = 'data-march-hydrate';
+const DATAFLOW_ATTR  = 'data-march-dataflow';
 
 // ── DevTools instrumentation ────────────────────────────────────────────────
 
@@ -418,6 +419,7 @@ async function hydrateIsland(element, baseUrl) {
   if (!name || element._marchActor) return; // already hydrated
 
   const hydration = element.getAttribute(HYDRATE_ATTR) ?? 'eager';
+  const dataflow = element.getAttribute(DATAFLOW_ATTR) ?? null;
   const id = 'island-' + (++_devtoolsIdCounter);
   element._marchIslandId = id;
 
@@ -427,6 +429,7 @@ async function hydrateIsland(element, baseUrl) {
     id,
     name,
     hydration,
+    dataflow,
     state: safeParseJson(initialStateJson),
     wasmModule: `${name}.wasm`,
   });
@@ -569,6 +572,7 @@ function devtoolsScan() {
       id,
       name,
       hydration: el.getAttribute(HYDRATE_ATTR) ?? 'eager',
+      dataflow: el.getAttribute(DATAFLOW_ATTR) ?? null,
       status: el._marchActor ? 'hydrated' : 'pending',
       state: safeParseJson(parseState(el)),
       props: {},
