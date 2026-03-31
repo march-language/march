@@ -27,6 +27,15 @@ jobs:
         with:
           ocaml-compiler: ${{ matrix.ocaml-compiler }}
 
+      - name: Install system dependencies
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install blake3
+          else
+            sudo apt-get update
+            sudo apt-get install -y libblake3-dev
+          fi
+
       - name: Install dependencies
         run: opam install --deps-only --with-test -y .
 

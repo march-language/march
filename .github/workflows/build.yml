@@ -88,6 +88,16 @@ jobs:
         with:
           ocaml-compiler: ${{ matrix.ocaml-compiler }}
 
+      - name: Install system dependencies (native)
+        if: "!matrix.cross"
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            brew install blake3
+          else
+            sudo apt-get update
+            sudo apt-get install -y libblake3-dev
+          fi
+
       - name: Install dependencies (native)
         if: "!matrix.cross"
         run: opam install --deps-only -y .
