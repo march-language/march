@@ -54,7 +54,7 @@ pfn list_cap(lst, max) do
     match xs do
     Nil -> Nil
     Cons(h, t) ->
-      if n <= 0 then Nil
+      if n <= 0 do Nil
       else Cons(h, go(t, n - 1)) end
     end
   end
@@ -77,7 +77,7 @@ pfn remove_handler(handlers, target) do
   match handlers do
   Nil -> Nil
   Cons((hid, evts), rest) ->
-    if hid == target then rest
+    if hid == target do rest
     else Cons((hid, evts), remove_handler(rest, target)) end
   end
 end
@@ -96,7 +96,7 @@ pfn lists_equal(a, b) do
     match b do
     Nil -> false
     Cons(hb, tb) ->
-      if ha == hb then lists_equal(ta, tb)
+      if ha == hb do lists_equal(ta, tb)
       else false end
     end
   end
@@ -113,7 +113,7 @@ pfn any_filter_matches(filters, name) do
   match filters do
   Nil -> false
   Cons(f, rest) ->
-    if filter_matches(f, name) then true
+    if filter_matches(f, name) do true
     else any_filter_matches(rest, name) end
   end
 end
@@ -125,7 +125,7 @@ pfn list_take(lst, n) do
     match xs do
     Nil -> Nil
     Cons(h, t) ->
-      if rem <= 0 then Nil
+      if rem <= 0 do Nil
       else Cons(h, go(t, rem - 1)) end
     end
   end
@@ -189,7 +189,7 @@ fn subscribed_events(handler_id) do
     match hs do
     Nil -> None
     Cons((hid, evts), rest) ->
-      if hid == handler_id then Some(evts)
+      if hid == handler_id do Some(evts)
       else go(rest) end
     end
   end
@@ -308,7 +308,7 @@ mod Aggregator do
       match xs do
       Nil -> Nil
       Cons(h, t) ->
-        if n <= 0 then Nil
+        if n <= 0 do Nil
         else Cons(h, go(t, n - 1)) end
       end
     end
@@ -320,7 +320,7 @@ mod Aggregator do
       match xs do
       Nil -> Nil
       Cons(h, t) ->
-        if rem <= 0 then Nil
+        if rem <= 0 do Nil
         else Cons(h, go(t, rem - 1)) end
       end
     end
@@ -380,7 +380,7 @@ mod Aggregator do
     let errs = Vault.get_or(t, "error_count", 0)
     match event do
     TelemetryEvent(_, _, meta) ->
-      if is_error_event(meta) then Vault.set(t, "error_count", errs + 1)
+      if is_error_event(meta) do Vault.set(t, "error_count", errs + 1)
       else () end
     end
   end
@@ -398,11 +398,11 @@ mod Aggregator do
       match xs do
       Nil -> acc
       Cons(ev, rest) ->
-        if remaining <= 0 then acc
+        if remaining <= 0 do acc
         else
           match ev do
           TelemetryEvent(name, _, _) ->
-            if is_endpoint_event(name) then
+            if is_endpoint_event(name) do
               keep_endpoint(rest, Cons(ev, acc), remaining - 1)
             else
               keep_endpoint(rest, acc, remaining)
