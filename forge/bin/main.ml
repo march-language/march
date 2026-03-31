@@ -293,10 +293,36 @@ let bastion_routes_cmd =
         | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
       ) $ const ())
 
+let bastion_gen_schema_cmd =
+  let module_name =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"MODULE" ~doc:"Module name (e.g. User)")
+  in
+  let table_name =
+    Arg.(required & pos 1 (some string) None &
+         info [] ~docv:"TABLE" ~doc:"Database table name (e.g. users)")
+  in
+  let fields =
+    Arg.(value & pos_right 1 string [] &
+         info [] ~docv:"FIELD:TYPE" ~doc:"Field definitions (e.g. name:string email:string)")
+  in
+  let run m t f =
+    match Cmd_bastion_gen.run_schema m t f with
+    | Ok () -> ()
+    | Error msg -> Printf.eprintf "error: %s\n%!" msg; exit 1
+  in
+  Cmd.v (Cmd.info "schema" ~doc:"Generate a Depot schema module and migration")
+    Term.(const run $ module_name $ table_name $ fields)
+
+let bastion_gen_cmd =
+  Cmd.group
+    (Cmd.info "gen" ~doc:"Code generators for Bastion applications")
+    [bastion_gen_schema_cmd]
+
 let bastion_cmd =
   Cmd.group
-    (Cmd.info "bastion" ~doc:"Bastion web framework commands (server, new, routes)")
-    [bastion_new_cmd; bastion_server_cmd; bastion_routes_cmd]
+    (Cmd.info "bastion" ~doc:"Bastion web framework commands (server, new, routes, gen)")
+    [bastion_new_cmd; bastion_server_cmd; bastion_routes_cmd; bastion_gen_cmd]
 
 (* ------------------------------------------------------------------ forge phases *)
 
