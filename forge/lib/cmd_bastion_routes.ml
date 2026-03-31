@@ -102,9 +102,51 @@ let method_of_token s =
 (** Extract a rough path string from the path_info list literal.
     E.g. ["users", id] -> "/users/:id"
          []             -> "/" *)
-let path_of_list_literal s =
-  (* strip outer "[" and "]" *)
+let segment_of_token p =
+  let p = String.trim p in
+  if String.length p >= 2 && p.[0] = '"' && p.[String.length p - 1] = '"'
+  then String.sub p 1 (String.length p - 2)
+  else ":" ^ p
+
+(** Extract segments from a Cons-chain: Cons("a", Cons("b", Nil)) -> ["a";"b"] *)
+let rec segments_of_cons s =
   let s = String.trim s in
+  if s = "Nil" || s = "" then []
+  else if starts_with "Cons(" s then begin
+    (* strip "Cons(" prefix *)
+    let inner = String.sub s 5 (String.length s - 5) in
+    (* find the first comma separating head from tail *)
+    let depth = ref 0 in
+    let comma = ref (-1) in
+    String.iteri (fun i c ->
+        if !comma >= 0 then ()
+        else if c = '(' || c = '[' then incr depth
+        else if c = ')' || c = ']' then decr depth
+        else if c = ',' && !depth = 0 then comma := i
+      ) inner;
+    if !comma < 0 then []
+    else
+      let head = String.trim (String.sub inner 0 !comma) in
+      let tail = String.trim (String.sub inner (!comma + 1)
+                                (String.length inner - !comma - 1)) in
+      (* strip trailing ")" from tail *)
+      let tail = if String.length tail > 0 && tail.[String.length tail - 1] = ')'
+        then String.sub tail 0 (String.length tail - 1)
+        else tail
+      in
+      segment_of_token head :: segments_of_cons tail
+  end
+  else []
+
+let path_of_list_literal s =
+  let s = String.trim s in
+  (* Nil — empty list *)
+  if s = "Nil" then "/"
+  (* Cons(head, tail) — linked-list form *)
+  else if starts_with "Cons(" s then
+    "/" ^ String.concat "/" (segments_of_cons s)
+  else
+  (* [ ... ] bracket form *)
   let inner =
     if String.length s >= 2 && s.[0] = '[' && s.[String.length s - 1] = ']'
     then String.sub s 1 (String.length s - 2)
