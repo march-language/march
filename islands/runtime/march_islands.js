@@ -94,6 +94,8 @@ class IslandActor {
   #element;
   #mailbox = [];
   #ticking = false;
+  #paused = false;       // time-travel pause — queue messages, don't process
+  #pausedQueue = [];     // messages received while paused
 
   constructor(name, wasmInstance, initialState, element) {
     this.#name    = name;
@@ -109,11 +111,65 @@ class IslandActor {
    * Messages are processed in order; rendering happens after each update.
    */
   send(msg) {
+    if (this.#paused) {
+      this.#pausedQueue.push(msg);
+      devtoolsEmit('island:message-queued', {
+        id: this.#element._marchIslandId,
+        name: this.#name,
+        msg,
+        queueSize: this.#pausedQueue.length,
+      });
+      return;
+    }
     this.#mailbox.push(msg);
     if (!this.#ticking) {
       this.#ticking = true;
       queueMicrotask(() => this.#drain());
     }
+  }
+
+  /**
+   * Pause the actor — messages queue but don't process.
+   * Used by DevTools time-travel to freeze the island.
+   */
+  pause() { this.#paused = true; }
+
+  /**
+   * Resume the actor — drain any queued messages.
+   */
+  resume() {
+    this.#paused = false;
+    // Flush queued messages into the mailbox
+    if (this.#pausedQueue.length > 0) {
+      this.#mailbox.push(...this.#pausedQueue);
+      this.#pausedQueue = [];
+      if (!this.#ticking) {
+        this.#ticking = true;
+        queueMicrotask(() => this.#drain());
+      }
+    }
+  }
+
+  /**
+   * Render at a specific state without mutating the actor's live state.
+   * Used by DevTools time-travel scrubbing.
+   */
+  renderAt(stateJson) {
+    try {
+      const html = this.#wasm.render(stateJson);
+      this.#element.innerHTML = html;
+      // Don't bind event handlers — this is a preview, not live
+    } catch (err) {
+      console.error(`[march-islands] ${this.#name}: renderAt error`, err);
+    }
+  }
+
+  /**
+   * Re-render at the current live state and rebind handlers.
+   * Used when resuming from time-travel.
+   */
+  renderLive() {
+    this.#render();
   }
 
   #drain() {
