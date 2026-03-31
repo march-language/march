@@ -179,6 +179,11 @@ let load_stdlib () =
       "bastion_hot_deploy.march";
       "bastion_test_sandbox.march";
       "bastion_idempotency.march";
+      "tuple.march";
+      "char.march";
+      "ordered_map.march";
+      "sorted_set.march";
+      "range.march";
     ] in
     List.concat_map (fun name ->
         load_stdlib_file (Filename.concat stdlib_dir name)

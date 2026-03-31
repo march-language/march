@@ -1,0 +1,107 @@
+-- Char module: character classification and conversion utilities.
+--
+-- Wraps the built-in char_* primitives for idiomatic use.
+-- All predicates return Bool; conversions preserve the char type.
+
+mod Char do
+
+doc "Returns true if c is an ASCII letter (a-z or A-Z)."
+fn is_alpha(c : Char) : Bool do
+  char_is_alpha(c)
+end
+
+doc "Returns true if c is an ASCII digit (0-9)."
+fn is_digit(c : Char) : Bool do
+  char_is_digit(c)
+end
+
+doc "Returns true if c is an ASCII letter or digit."
+fn is_alphanumeric(c : Char) : Bool do
+  char_is_alphanumeric(c)
+end
+
+doc "Returns true if c is an ASCII uppercase letter (A-Z)."
+fn is_upper(c : Char) : Bool do
+  char_is_uppercase(c)
+end
+
+doc "Returns true if c is an ASCII lowercase letter (a-z)."
+fn is_lower(c : Char) : Bool do
+  char_is_lowercase(c)
+end
+
+doc "Returns true if c is an ASCII whitespace character (space, tab, newline, etc.)."
+fn is_whitespace(c : Char) : Bool do
+  char_is_whitespace(c)
+end
+
+doc "Converts c to uppercase. Non-alphabetic chars are returned unchanged."
+fn to_upper(c : Char) : Char do
+  char_to_uppercase(c)
+end
+
+doc "Converts c to lowercase. Non-alphabetic chars are returned unchanged."
+fn to_lower(c : Char) : Char do
+  char_to_lowercase(c)
+end
+
+doc "Returns the integer code point of c."
+fn to_int(c : Char) : Int do
+  char_to_int(c)
+end
+
+doc "Returns the character with the given code point."
+fn from_int(n : Int) : Char do
+  char_from_int(n)
+end
+
+doc "Returns a single-character string containing c."
+fn to_string(c : Char) : String do
+  String.from_char(c)
+end
+
+doc "Returns true if c is ASCII (code point 0-127)."
+fn is_ascii(c : Char) : Bool do
+  char_to_int(c) < 128
+end
+
+doc "Returns true if c is a printable ASCII character (code point 32-126)."
+fn is_printable(c : Char) : Bool do
+  let n = char_to_int(c)
+  n >= 32 && n <= 126
+end
+
+doc "Returns the numeric value of a digit character (0-9). Panics if not a digit."
+fn digit_value(c : Char) : Int do
+  if char_is_digit(c) do
+    char_to_int(c) - char_to_int('0')
+  else
+    panic("Char.digit_value: not a digit")
+  end
+end
+
+doc "Returns the hex value of a hex digit (0-9, a-f, A-F). Panics if not hex."
+fn hex_digit_value(c : Char) : Int do
+  if char_is_digit(c) do
+    char_to_int(c) - char_to_int('0')
+  else
+    if char_to_int(c) >= char_to_int('a') && char_to_int(c) <= char_to_int('f') do
+      char_to_int(c) - char_to_int('a') + 10
+    else
+      if char_to_int(c) >= char_to_int('A') && char_to_int(c) <= char_to_int('F') do
+        char_to_int(c) - char_to_int('A') + 10
+      else
+        panic("Char.hex_digit_value: not a hex digit")
+      end
+    end
+  end
+end
+
+doc "Returns true if c is a hex digit (0-9, a-f, A-F)."
+fn is_hex_digit(c : Char) : Bool do
+  char_is_digit(c) ||
+  (char_to_int(c) >= char_to_int('a') && char_to_int(c) <= char_to_int('f')) ||
+  (char_to_int(c) >= char_to_int('A') && char_to_int(c) <= char_to_int('F'))
+end
+
+end

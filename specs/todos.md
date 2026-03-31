@@ -1,6 +1,6 @@
 # March — TODO List
 
-**Last updated:** 2026-03-30 (forge depot CLI — migrate/rollback/migrations/reset/gen.migration — 1210+ tests)
+**Last updated:** 2026-03-30 (5 new stdlib modules: Tuple, Char, OrderedMap, SortedSet, Range)
 
 This file tracks everything that still needs to get done. Organized by priority and category. Check `specs/progress.md` for what's already done.
 
@@ -122,6 +122,8 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 ---
 
 ## Done (recently completed)
+
+- ✅ **5 new stdlib modules: Tuple, Char, OrderedMap, SortedSet, Range** — `stdlib/tuple.march`: `first/second/swap/map_first/map_second/map_both/to_list/make/apply/both/zip/unzip` for 2-tuples. `stdlib/char.march`: `is_alpha/is_digit/is_alphanumeric/is_upper/is_lower/is_whitespace/to_upper/to_lower/to_int/from_int/to_string/is_ascii/is_printable/digit_value/hex_digit_value/is_hex_digit` wrapping char builtins. `stdlib/ordered_map.march`: AVL tree-based sorted map with comparator — `new/put/get/delete/member/keys/values/to_list/from_list/size/min_key/max_key/fold/map/filter/is_empty/get_or`. `stdlib/sorted_set.march`: AVL tree-based sorted set wrapping same algorithm — `new/add/remove/member/to_list/from_list/size/min/max/union/intersect/difference/fold/is_empty/subset`. `stdlib/range.march`: integer range as record `%{start,stop,step}` — `new/new_step/to_list/contains/size/is_empty/map/filter/each/reduce/reverse/first/last/all/any/sum`. All 5 added to `bin/main.ml` stdlib load list.
 
 - ✅ **Qualified module access — Phase 5 (TIR Lower compiled path)** — `lib/tir/lower.ml`: added `_fns_ref`/`_types_ref` module-level accumulator refs (set by `lower_module`), `_lowered_modules` tracking hashtable, `_ensure_module_lowered` forward-ref callback. `lower_stdlib_mod_decls` lowers stdlib module declarations (DFn, DType, nested DMod) into the accumulator refs. `ensure_module_lowered` loads stdlib `.march` files via `Module_registry.find_stdlib_file`, parses+desugars, then calls `lower_stdlib_mod_decls` — triggered from EVar handling in both `lower_to_atom_k` and `lower_expr` when a dotted qualified name is encountered. `lib/tir/dune` depends on `march_modules`. 2 new tests in `tir` group (1210 total).
 
