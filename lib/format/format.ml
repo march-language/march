@@ -905,7 +905,15 @@ and emit_fn ctx fn =
         sequence being lexed as string interpolation.
         Known limitation: doc strings containing triple-quotes will produce
         broken output — acceptable edge case for now. *)
-     line ctx (Printf.sprintf "doc \"\"\"%s\"\"\"" doc)
+     let buf = Buffer.create (String.length doc + 8) in
+     String.iteri (fun i c ->
+       if c = '$' && i + 1 < String.length doc && doc.[i + 1] = '{' then
+         (Buffer.add_char buf '\\'; Buffer.add_char buf '$')
+       else
+         Buffer.add_char buf c
+     ) doc;
+     let escaped = Buffer.contents buf in
+     line ctx (Printf.sprintf "doc \"\"\"%s\"\"\"" escaped)
   );
   match fn.fn_clauses with
   | [] -> ()

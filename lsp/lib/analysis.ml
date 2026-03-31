@@ -806,7 +806,8 @@ let lambda_free_vars (params : Ast.param list) (body : Ast.expr) : string list =
   let rec go (bound : string list) (e : Ast.expr) =
     match e with
     | Ast.EVar n ->
-      if not (List.mem n.txt bound) then Hashtbl.replace fvs n.txt ()
+      if not (List.mem n.txt bound) && not (is_march_operator n.txt)
+      then Hashtbl.replace fvs n.txt ()
     | Ast.ELam (ps, lbody, _) ->
       let inner = List.map (fun (p : Ast.param) -> p.Ast.param_name.txt) ps @ bound in
       go inner lbody
