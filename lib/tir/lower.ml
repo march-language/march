@@ -128,6 +128,19 @@ let resolve_use_alias (name : string) : string =
   | Some qualified -> qualified
   | None -> name
 
+(* ── Qualified module lowering (refs) ──────────────────────────── *)
+
+(** Module-level refs for function and type accumulators, set by [lower_module].
+    Needed so [ensure_module_lowered] can append stdlib module definitions. *)
+let _fns_ref : Tir.fn_def list ref ref = ref (ref [])
+let _types_ref : Tir.type_def list ref ref = ref (ref [])
+
+(** Tracks which modules have already been lowered to avoid duplicates. *)
+let _lowered_modules : (string, unit) Hashtbl.t ref = ref (Hashtbl.create 8)
+
+(** Forward ref — filled after [lower_fn_def] / [lower_type_def] are defined. *)
+let _ensure_module_lowered : (string -> unit) ref = ref (fun _ -> ())
+
 (* ── Interface method resolution ────────────────────────────────── *)
 
 (** Maps interface method names to a list of (concrete_type_name, mangled_fn_name).
@@ -175,6 +188,9 @@ let rec lower_to_atom_k (e : Ast.expr) (k : Tir.atom -> Tir.expr) : Tir.expr =
   | Ast.ELit (lit, _) -> k (Tir.ALit lit)
   | Ast.EVar { txt = name; span; _ } ->
     let name = resolve_use_alias name in
+    (match String.index_opt name '.' with
+     | Some i -> !_ensure_module_lowered (String.sub name 0 i)
+     | None -> ());
     let ty = ty_of_span span in
     k (Tir.AVar { v_name = name; v_ty = ty; v_lin = Tir.Unr })
   | _ ->
@@ -199,6 +215,9 @@ and lower_expr (e : Ast.expr) : Tir.expr =
 
   | Ast.EVar { txt = name; span; _ } ->
     let name = resolve_use_alias name in
+    (match String.index_opt name '.' with
+     | Some i -> !_ensure_module_lowered (String.sub name 0 i)
+     | None -> ());
     Tir.EAtom (Tir.AVar { v_name = name; v_ty = ty_of_span span; v_lin = Tir.Unr })
 
   (* --- Let bindings --- *)
@@ -817,6 +836,52 @@ let lower_type_def (name : Ast.name) (_params : Ast.name list) (td : Ast.type_de
     Some (Tir.TDRecord (name.txt, fs))
   | Ast.TDAlias _ -> None
 
+(* ── Qualified module lowering (implementation) ───────────────── *)
+
+(** Lower all declarations from a stdlib module's body, adding functions
+    and types to the current module-level accumulator refs. *)
+let rec lower_stdlib_mod_decls prefix decls =
+  let direct_fn_names = List.filter_map (function
+      | Ast.DFn (def, _) -> Some def.fn_name.txt
+      | _ -> None) decls in
+  List.iter (fun d ->
+      match d with
+      | Ast.DFn (def, _) ->
+        let fn = lower_fn_def def in
+        let fn = rename_tir_vars prefix direct_fn_names fn in
+        !_fns_ref := { fn with fn_name = prefix ^ fn.fn_name } :: !(!_fns_ref)
+      | Ast.DType (_, tname, params, td, _) ->
+        (match lower_type_def tname params td with
+         | Some td' -> !_types_ref := td' :: !(!_types_ref)
+         | None -> ())
+      | Ast.DMod (sub_name, _, sub_decls, _) ->
+        lower_stdlib_mod_decls (prefix ^ sub_name.txt ^ ".") sub_decls
+      | _ -> ()
+    ) decls
+
+let () = _ensure_module_lowered := (fun mod_name ->
+  if not (Hashtbl.mem !_lowered_modules mod_name) then begin
+    Hashtbl.replace !_lowered_modules mod_name ();
+    match March_modules.Module_registry.find_stdlib_file mod_name with
+    | None -> ()
+    | Some path ->
+      (try
+         let ic = open_in_bin path in
+         let n = in_channel_length ic in
+         let b = Bytes.create n in
+         really_input ic b 0 n;
+         close_in ic;
+         let src = Bytes.to_string b in
+         let lexbuf = Lexing.from_string src in
+         lexbuf.Lexing.lex_curr_p <-
+           { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
+         let ast = March_parser.Parser.module_
+                     (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+         let ast = March_desugar.Desugar.desugar_module ast in
+         lower_stdlib_mod_decls (mod_name ^ ".") ast.mod_decls
+       with _ -> ())
+  end)
+
 (* ── Actor lowering ─────────────────────────────────────────────── *)
 
 (** Lower an actor declaration to TIR type defs + function defs.
@@ -1139,8 +1204,11 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
   _type_map_ref := type_map;
   _iface_methods := Hashtbl.create 16;
   _use_aliases := Hashtbl.create 16;
+  _lowered_modules := Hashtbl.create 8;
   let fns = ref [] in
   let types = ref [] in
+  _fns_ref := fns;
+  _types_ref := types;
   let top_lets = ref [] in
   let externs = ref [] in
   (* Pre-populate _iface_methods with standard interface builtins:
