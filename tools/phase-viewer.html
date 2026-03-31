@@ -61,7 +61,7 @@
 
   #file-input { display: none; }
 
-  #diff-toggle {
+  #diff-toggle, #rc-toggle {
     background: transparent;
     border: 1px solid #888;
     color: #aaa;
@@ -75,6 +75,11 @@
     border-color: #e9a94e;
     color: #e9a94e;
     background: #2a1a00;
+  }
+  #rc-toggle.active {
+    border-color: #e94560;
+    color: #e94560;
+    background: #2a0010;
   }
 
   #layout-select {
@@ -314,6 +319,7 @@
     <option value="concentric">Concentric</option>
   </select>
   <button id="diff-toggle">Diff Mode</button>
+  <button id="rc-toggle">RC Density</button>
   <button id="load-btn" onclick="document.getElementById('file-input').click()">Load phases.json</button>
   <input type="file" id="file-input" accept=".json">
 </div>
@@ -386,6 +392,7 @@ let cy = null;               // cytoscape instance
 let currentPhaseIdx = 0;
 let diffMode = false;
 let diffFromIdx = null;       // phase we're diffing FROM (previous)
+let rcDensityMode = false;    // Phase 9: colour nodes by RC operation density
 
 // ─────────────────────────────────────────────────────────────────────────
 // Colour map for node types
@@ -411,10 +418,33 @@ const TYPE_COLORS = {
   default:     '#888888',
 };
 
-function nodeColor(type, diffStatus) {
+// Phase 9: map RC density (rc_ops / body_size) to a heat colour.
+// 0.0 = cool blue, 0.5 = yellow, 1.0+ = hot red.
+function rcDensityColor(densityStr) {
+  const d = Math.min(parseFloat(densityStr) || 0, 1.0);
+  // Interpolate: 0→#2266aa, 0.5→#e9a94e, 1→#e94560
+  if (d < 0.5) {
+    const t = d * 2;
+    const r = Math.round(0x22 + t * (0xe9 - 0x22));
+    const g = Math.round(0x66 + t * (0xa9 - 0x66));
+    const b = Math.round(0xaa + t * (0x4e - 0xaa));
+    return '#' + [r,g,b].map(v => v.toString(16).padStart(2,'0')).join('');
+  } else {
+    const t = (d - 0.5) * 2;
+    const r = Math.round(0xe9 + t * (0xe9 - 0xe9));
+    const g = Math.round(0xa9 + t * (0x45 - 0xa9));
+    const b = Math.round(0x4e + t * (0x60 - 0x4e));
+    return '#' + [r,g,b].map(v => v.toString(16).padStart(2,'0')).join('');
+  }
+}
+
+function nodeColor(type, diffStatus, metadata) {
   if (diffStatus === 'added')   return '#e94560';
   if (diffStatus === 'removed') return '#444444';
   if (diffStatus === 'changed') return '#e9a94e';
+  if (rcDensityMode && type === 'fn' && metadata && metadata.rc_density !== undefined) {
+    return rcDensityColor(metadata.rc_density);
+  }
   return TYPE_COLORS[type] || TYPE_COLORS.default;
 }
 
@@ -691,7 +721,7 @@ function showPhase(idx) {
 
   phase.nodes.forEach(n => {
     const diff  = diffMap ? (diffMap.get(n.id) || 'same') : 'same';
-    const color = nodeColor(n.type, diff);
+    const color = nodeColor(n.type, diff, n.metadata);
     const size  = n.type === 'module' ? 20 :
                   n.type.startsWith('fn') ? 14 :
                   n.type.startsWith('type') || n.type === 'variant' || n.type === 'record' ? 12 :
@@ -840,6 +870,13 @@ document.getElementById('diff-toggle').addEventListener('click', function() {
   }
 });
 
+// Phase 9: RC density colour mode
+document.getElementById('rc-toggle').addEventListener('click', function() {
+  rcDensityMode = !rcDensityMode;
+  this.classList.toggle('active', rcDensityMode);
+  showPhase(currentPhaseIdx);
+});
+
 /**
  * Build a map from node id → diff status ('added' | 'changed' | 'same')
  * by comparing fromPhase to toPhase.
@@ -898,6 +935,33 @@ function showNodeInfo(data) {
       <div class="info-key">calls</div>
       <div class="info-calls">
         ${v.map(fn => `<span class="call-chip" title="${esc(fn)}">${esc(fn)}</span>`).join('')}
+      </div>
+    </div>`;
+    } else if (k === 'inline_eligible') {
+      const color = v === 'yes' ? '#6ec96e' : '#e9a94e';
+      html += `
+    <div class="info-row">
+      <div class="info-key">inline eligible</div>
+      <div class="info-val" style="color:${color}">${esc(v)}</div>
+    </div>`;
+    } else if (k === 'inline_reason' && v !== 'eligible') {
+      html += `
+    <div class="info-row">
+      <div class="info-key">inline reason</div>
+      <div class="info-val" style="color:#e9a94e">${esc(v)}</div>
+    </div>`;
+    } else if (k === 'rc_density') {
+      const d = parseFloat(v) || 0;
+      const color = rcDensityColor(v);
+      const bar = Math.min(Math.round(d * 100), 100);
+      html += `
+    <div class="info-row">
+      <div class="info-key">RC density</div>
+      <div class="info-val">
+        <span style="color:${color}">${v}</span>
+        <div style="margin-top:2px;height:4px;width:100%;background:#1a1a2e;border-radius:2px">
+          <div style="height:4px;width:${bar}%;background:${color};border-radius:2px"></div>
+        </div>
       </div>
     </div>`;
     } else if (v !== '' && v !== '[]' && v !== '0') {
