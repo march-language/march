@@ -161,6 +161,7 @@ let load_stdlib () =
       "depot_form.march";
       "depot_gate.march";
       "depot_schema.march";
+      "depot_repo.march";
       "bastion.march";
       "csrf.march";
       "session.march";

@@ -1,0 +1,256 @@
+-- Depot.Repo: in-memory repository backed by Vault tables.
+--
+-- Each schema table gets its own Vault table. Rows are stored as records
+-- keyed by primary key (auto-generated UUID on insert).
+--
+-- Usage:
+--
+--   let gate = Depot.Gate.cast_record(
+--     Depot.Schema.blank(schema()),
+--     params,
+--     ["name", "email"]
+--   ) |> Depot.Gate.validate_required(["name", "email"])
+--
+--   match Depot.Repo.insert(schema(), gate) do
+--     Ok(record) -> record
+--     Err(gate)  -> Depot.Gate.errors(gate)
+--   end
+--
+--   let users = Depot.Repo.all(schema())
+--   let user  = Depot.Repo.get(schema(), "some-uuid")
+
+mod Depot.Repo do
+
+-- ---------------------------------------------------------------------------
+-- Private helpers
+-- ---------------------------------------------------------------------------
+
+-- Get or create the Vault table for a schema's table name.
+pfn ensure_table(schema) do
+  let table_name = Depot.Schema.table(schema)
+  match Vault.whereis(table_name) do
+    Some(t) -> t
+    None    -> Vault.new(table_name)
+  end
+end
+
+-- Build a record from an assoc list of (field, value) pairs,
+-- injecting the primary key.
+pfn build_record(schema, merged_entries, id) do
+  let pk = Depot.Schema.primary_key(schema)
+  let with_pk = Cons((pk, id), merged_entries)
+  record_from_list(with_pk)
+end
+
+-- Check if a record matches all clauses (record of field=value).
+pfn matches_clauses(record, clause_entries) do
+  match clause_entries do
+    Nil -> true
+    Cons((k, v), rest) ->
+      let matches = match record_get(record, k) do
+        Some(rv) -> rv == v
+        None     -> false
+      end
+      if matches do matches_clauses(record, rest) else false end
+  end
+end
+
+-- Collect all rows from a Vault table as a list of records.
+pfn collect_rows(table, keys) do
+  match keys do
+    Nil -> Nil
+    Cons(k, rest) ->
+      match Vault.get(table, k) do
+        Some(row) -> Cons(row, collect_rows(table, rest))
+        None      -> collect_rows(table, rest)
+      end
+  end
+end
+
+-- Filter rows by clause entries.
+pfn filter_by_clauses(rows, clause_entries) do
+  List.filter(rows, fn row -> matches_clauses(row, clause_entries))
+end
+
+-- Drop all keys from a Vault table.
+pfn drop_all_keys(table, keys) do
+  match keys do
+    Nil -> 0
+    Cons(k, rest) ->
+      Vault.drop(table, k)
+      drop_all_keys(table, rest)
+  end
+end
+
+-- ---------------------------------------------------------------------------
+-- Write API
+-- ---------------------------------------------------------------------------
+
+doc """
+Insert a new record from a validated Gate.
+
+Returns Ok(record) on success, Err(gate) if the gate is invalid.
+The primary key is auto-generated as a UUID.
+
+    match Depot.Repo.insert(schema, gate) do
+      Ok(user)  -> user
+      Err(gate) -> Depot.Gate.errors(gate)
+    end
+"""
+fn insert(schema, gate) do
+  if Depot.Gate.is_valid(gate) do
+    let table = ensure_table(schema)
+    let merged = Depot.Gate.apply_changes(gate)
+    let id = uuid_v4()
+    let record = build_record(schema, merged, id)
+    Vault.set(table, id, record)
+    Ok(record)
+  else
+    Err(gate)
+  end
+end
+
+doc """
+Update an existing record from a validated Gate.
+
+The gate's base must contain the primary key. Only changed fields
+are merged into the existing record.
+
+Returns Ok(record) on success, Err(gate) if the gate is invalid.
+
+    match Depot.Repo.update(schema, gate) do
+      Ok(user)  -> user
+      Err(gate) -> Depot.Gate.errors(gate)
+    end
+"""
+fn update(schema, gate) do
+  if Depot.Gate.is_valid(gate) do
+    let table = ensure_table(schema)
+    let pk = Depot.Schema.primary_key(schema)
+    let base = Depot.Gate.base(gate)
+    let pk_entry = List.find(base, fn entry -> match entry do (k, _) -> k == pk end)
+    match pk_entry do
+      Some((_, id)) ->
+        let merged = Depot.Gate.apply_changes(gate)
+        let record = build_record(schema, merged, id)
+        Vault.set(table, id, record)
+        Ok(record)
+      None -> Err(Depot.Gate.add_error(gate, pk, "primary key not found in base"))
+    end
+  else
+    Err(gate)
+  end
+end
+
+doc """
+Delete a record by its primary key value.
+
+    Depot.Repo.delete(schema, "some-uuid")
+"""
+fn delete(schema, id) do
+  let table = ensure_table(schema)
+  Vault.drop(table, id)
+  Ok(id)
+end
+
+-- ---------------------------------------------------------------------------
+-- Read API
+-- ---------------------------------------------------------------------------
+
+doc """
+Return all records for a schema as a list.
+
+    let users = Depot.Repo.all(schema)
+"""
+fn all(schema) do
+  let table = ensure_table(schema)
+  let keys = Vault.keys(table)
+  collect_rows(table, keys)
+end
+
+doc """
+Get a single record by primary key. Returns Some(record) or None.
+
+    Depot.Repo.get(schema, "abc-123")
+"""
+fn get(schema, id) do
+  let table = ensure_table(schema)
+  Vault.get(table, id)
+end
+
+doc """
+Get a single record by primary key. Panics if not found.
+
+    let user = Depot.Repo.get_bang(schema, "abc-123")
+"""
+fn get_bang(schema, id) do
+  let table = ensure_table(schema)
+  match Vault.get(table, id) do
+    Some(row) -> row
+    None -> panic("Depot.Repo.get_bang: record not found for id " ++ to_string(id))
+  end
+end
+
+doc """
+Get a single record matching the given field clauses.
+Returns Some(record) or None.
+
+    Depot.Repo.get_by(schema, { email = "alice@test.com" })
+"""
+fn get_by(schema, clauses) do
+  let rows = all(schema)
+  let clause_entries = record_entries(clauses)
+  let matches = filter_by_clauses(rows, clause_entries)
+  match matches do
+    Nil -> None
+    Cons(row, _) -> Some(row)
+  end
+end
+
+doc """
+Return exactly one record matching all rows (useful after filtering).
+Returns Some(record) if exactly one match, None otherwise.
+
+    Depot.Repo.one(schema)
+"""
+fn one(schema) do
+  let rows = all(schema)
+  match rows do
+    Cons(row, Nil) -> Some(row)
+    _ -> None
+  end
+end
+
+doc """
+Count the number of records for a schema.
+
+    Depot.Repo.count(schema)
+"""
+fn count(schema) do
+  let table = ensure_table(schema)
+  Vault.size(table)
+end
+
+doc """
+Returns true if any records exist for a schema.
+
+    Depot.Repo.exists(schema)
+"""
+fn exists(schema) do
+  count(schema) > 0
+end
+
+doc """
+Delete all records for a schema. Returns the count of deleted records.
+
+    Depot.Repo.delete_all(schema)
+"""
+fn delete_all(schema) do
+  let table = ensure_table(schema)
+  let keys = Vault.keys(table)
+  let n = List.length(keys)
+  drop_all_keys(table, keys)
+  n
+end
+
+end -- mod Depot.Repo

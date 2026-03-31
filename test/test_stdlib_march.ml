@@ -133,6 +133,7 @@ let all_stdlib_decls =
     "bastion_dev.march";
     "depot_gate.march";
     "depot_schema.march";
+    "depot_repo.march";
     "bastion_cookies.march";
     "bastion_routes.march";
     "bastion_pubsub.march";
@@ -303,5 +304,9 @@ let () =
     ("depot_schema", [
       Alcotest.test_case "DepotSchema module"
         `Quick (run_stdlib_test "test_depot_schema.march" "TestDepotSchema");
+    ]);
+    ("depot_repo", [
+      Alcotest.test_case "DepotRepo module"
+        `Quick (run_stdlib_test "test_depot_repo.march" "TestDepotRepo");
     ]);
   ]
