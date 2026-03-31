@@ -52,16 +52,18 @@ end
 -- Validate the 8-4-4-4-12 UUID format.
 pfn validate_format(s) do
   let len = string_byte_length(s)
-  len == 36                        &&
-  string_slice(s,  8, 1) == "-"   &&
-  string_slice(s, 13, 1) == "-"   &&
-  string_slice(s, 18, 1) == "-"   &&
-  string_slice(s, 23, 1) == "-"   &&
-  check_hex_range(s,  0,  8)      &&
-  check_hex_range(s,  9,  4)      &&
-  check_hex_range(s, 14,  4)      &&
-  check_hex_range(s, 19,  4)      &&
-  check_hex_range(s, 24, 12)
+  if len != 36 do false
+  else
+    string_slice(s,  8, 1) == "-"   &&
+    string_slice(s, 13, 1) == "-"   &&
+    string_slice(s, 18, 1) == "-"   &&
+    string_slice(s, 23, 1) == "-"   &&
+    check_hex_range(s,  0,  8)      &&
+    check_hex_range(s,  9,  4)      &&
+    check_hex_range(s, 14,  4)      &&
+    check_hex_range(s, 19,  4)      &&
+    check_hex_range(s, 24, 12)
+  end
 end
 
 -- Hex value of a character (0–15), -1 on invalid input.
@@ -94,12 +96,12 @@ end
 
 -- Format a list of 16 byte values as a UUID string.
 pfn bytes_to_uuid_str(bs) do
-  pfn nibble(n) do
+  fn nibble(n) do
     if n < 10 do int_to_string(n)
     else char_from_int(87 + n)  -- lowercase: 'a' = 97; 97 - 10 = 87
     end
   end
-  pfn byte_hex(n) do nibble(n / 16) ++ nibble(n % 16) end
+  fn byte_hex(n) do nibble(n / 16) ++ nibble(n % 16) end
   fn go(lst, i, acc) do
     match lst do
     Nil -> string_join(rev_list(acc), "")
@@ -127,7 +129,7 @@ pfn set_version_variant(bs, version) do
         else if i == 8 do
           -- Top 2 bits = 10 (variant RFC 4122)
           (b % 64) + 128
-        else b end
+        else b end end
       go(rest, i + 1, Cons(new_b, acc))
     end
   end

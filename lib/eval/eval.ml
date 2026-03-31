@@ -208,6 +208,17 @@ let vault_next_id       : int ref = ref 0
 (** Monotonic start time for sys_uptime_ms calculations. *)
 let process_start_time : float = Unix.gettimeofday ()
 
+(** Cached uname output for sys_os / sys_arch: (os_name, arch_name). *)
+let uname_info : (string * string) option Lazy.t = lazy (
+  try
+    let ic = Unix.open_process_in "uname -sm 2>/dev/null" in
+    let s = (try input_line ic with End_of_file -> "") in
+    let _ = Unix.close_process_in ic in
+    match String.split_on_char ' ' (String.trim s) with
+    | [os; arch] -> Some (String.lowercase_ascii os, String.lowercase_ascii arch)
+    | _ -> None
+  with _ -> None)
+
 (** True if a row is still live (not expired). *)
 let vault_row_live (row : vault_row) : bool =
   match row.vr_expiry with
@@ -2235,6 +2246,17 @@ let base_env : env =
           (try VString (input_line stdin)
            with End_of_file -> VString "")
         | _ -> eval_error "read_line: expected unit"))
+    (* io_read_line: alias for read_line, avoids name conflict inside IO module *)
+  ; ("io_read_line", VBuiltin ("io_read_line", function
+        | [VUnit] | [] ->
+          (try VString (input_line stdin)
+           with End_of_file -> VString "")
+        | _ -> eval_error "io_read_line: expected unit"))
+    (* print_stderr: write string to stderr without newline *)
+  ; ("print_stderr", VBuiltin ("print_stderr", function
+        | [VString s] -> Printf.eprintf "%s%!" s; VUnit
+        | [v] -> Printf.eprintf "%s%!" (value_display v); VUnit
+        | _ -> eval_error "print_stderr: expected String"))
     (* List helpers (using VCon "Cons"/"Nil") *)
   ; ("head", VBuiltin ("head", function
         | [VCon ("Cons", [h; _])] -> h
@@ -3683,6 +3705,39 @@ let base_env : env =
           done;
           march_bytes_of_string (Bytes.to_string buf)
         | _ -> eval_error "random_bytes(n: Int): Bytes"))
+    (* ---- stdlib_* aliases: allow Crypto module to call builtins without shadowing ---- *)
+  ; ("stdlib_sha256", VBuiltin ("stdlib_sha256", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s -> VString (Digestif.SHA256.(to_hex (digest_string s)))
+           | Error e -> eval_error "stdlib_sha256: %s" e)
+        | _ -> eval_error "stdlib_sha256(s: String | Bytes): String"))
+  ; ("stdlib_sha512", VBuiltin ("stdlib_sha512", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s -> VString (Digestif.SHA512.(to_hex (digest_string s)))
+           | Error e -> eval_error "stdlib_sha512: %s" e)
+        | _ -> eval_error "stdlib_sha512(s: String | Bytes): String"))
+  ; ("stdlib_random_bytes", VBuiltin ("stdlib_random_bytes", function
+        | [VInt n] ->
+          let buf = Bytes.create n in
+          for i = 0 to n - 1 do
+            Bytes.set buf i (Char.chr (Random.int 256))
+          done;
+          march_bytes_of_string (Bytes.to_string buf)
+        | _ -> eval_error "stdlib_random_bytes(n: Int): Bytes"))
+  ; ("stdlib_base64_encode", VBuiltin ("stdlib_base64_encode", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s -> VString (base64_encode s)
+           | Error e -> eval_error "stdlib_base64_encode: %s" e)
+        | _ -> eval_error "stdlib_base64_encode(s: Bytes): String"))
+  ; ("stdlib_base64_decode", VBuiltin ("stdlib_base64_decode", function
+        | [VString s] ->
+          (match base64_decode s with
+           | Ok raw -> VCon ("Ok", [march_bytes_of_string raw])
+           | Error e -> VCon ("Err", [VString e]))
+        | _ -> eval_error "stdlib_base64_decode(s: String): Ok(Bytes) | Err(String)"))
     (* ---- uuid_v4(): generate a random UUID v4 string ---- *)
   ; ("uuid_v4", VBuiltin ("uuid_v4", function
         | [] ->
@@ -4575,6 +4630,33 @@ let base_env : env =
   ; ("sys_cpu_count", VBuiltin ("sys_cpu_count", function
         | [] | [VUnit] -> VInt (Domain.recommended_domain_count ())
         | _ -> eval_error "sys_cpu_count: no arguments expected"))
+  ; ("sys_os", VBuiltin ("sys_os", function
+        | [] | [VUnit] ->
+          let atom = match Sys.os_type with
+            | "Win32" | "Cygwin" -> "windows"
+            | _ ->
+              (match Lazy.force uname_info with
+               | Some ("darwin", _) -> "macos"
+               | Some ("linux",  _) -> "linux"
+               | Some (os, _)       -> os
+               | None               -> "unknown")
+          in
+          VCon (atom, [])
+        | _ -> eval_error "sys_os: no arguments expected"))
+  ; ("sys_arch", VBuiltin ("sys_arch", function
+        | [] | [VUnit] ->
+          let atom = match Lazy.force uname_info with
+            | Some (_, "x86_64")                     -> "x86_64"
+            | Some (_, "aarch64") | Some (_, "arm64") -> "aarch64"
+            | Some (_, "i386")   | Some (_, "i686")   -> "x86"
+            | Some (_, arch) when arch <> ""          -> arch
+            | _                                       -> "unknown"
+          in
+          VCon (atom, [])
+        | _ -> eval_error "sys_arch: no arguments expected"))
+  ; ("march_version", VBuiltin ("march_version", function
+        | [] | [VUnit] -> VString "0.1.0"
+        | _ -> eval_error "march_version: no arguments expected"))
   (* Run a command synchronously; returns Ok(ProcessResult(code, stdout, stderr))
      or Err(msg) on OS error.  Stderr is captured separately. *)
   ; ("process_spawn_sync", VBuiltin ("process_spawn_sync", function

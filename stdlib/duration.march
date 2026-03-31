@@ -169,7 +169,7 @@ fn format(d) do
       let weeks_   = total_d / 7
       let days_    = total_d % 7
 
-      pfn plural(n, singular, pl) do
+      fn plural(n, singular, pl) do
         if n == 1 do int_to_string(n) ++ " " ++ singular
         else int_to_string(n) ++ " " ++ pl end
       end

@@ -1898,6 +1898,8 @@ let run_tir_pass (a : t) : t =
             match Hashtbl.find_opt a.def_map tfi.tfi_fn_name with
             | None -> None
             | Some sp ->
+              (* We emit one combined insight per function when any of the
+                 three optimizations are active.  Keep the most impactful. *)
               if tfi.tfi_stack_allocs > 0 then
                 Some { pi_span    = sp;
                        pi_kind    = StackPromoted { pi_count = tfi.tfi_stack_allocs };
