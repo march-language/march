@@ -6621,8 +6621,31 @@ let eval_module_env (m : module_) : env =
       in
       let env' = (def.fn_name.txt, combined)
                  :: List.remove_assoc def.fn_name.txt env in
-      env_ref := env';
-      make_recursive_env rest env'
+      (* If this is a mangled default-arg function (foo$N), also register
+         under the base name (foo) as a VMultiarity so that callers using
+         the original name can dispatch by arity (e.g. call_fn env "greet"). *)
+      let env'' =
+        let name = def.fn_name.txt in
+        match String.rindex_opt name '$' with
+        | Some dollar_pos when dollar_pos > 0 ->
+          let base = String.sub name 0 dollar_pos in
+          let suffix = String.sub name (dollar_pos + 1) (String.length name - dollar_pos - 1) in
+          (match int_of_string_opt suffix with
+           | Some _ ->
+             let existing_variants = match List.assoc_opt base env' with
+               | Some (VMultiarity vs) -> vs
+               | Some (VBuiltin (n, _) as prev) when parse_rec_arity n <> None ->
+                 [(Option.get (parse_rec_arity n), prev)]
+               | _ -> []
+             in
+             let base_combined = VMultiarity
+               ((arity, rec_closure) :: List.remove_assoc arity existing_variants) in
+             (base, base_combined) :: List.remove_assoc base env'
+           | None -> env')
+        | _ -> env'
+      in
+      env_ref := env'';
+      make_recursive_env rest env''
 
     | DLet (_, b, _) :: rest ->
       let v = eval_expr env b.bind_expr in

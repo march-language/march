@@ -276,7 +276,7 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
-## Current State (as of 2026-03-31, core language features: list comprehensions + with expressions + default args + opaque types)
+## Current State (as of 2026-03-31, default args TIR/LLVM fix + dune-project cleanup)
 
 - **Builds clean**
 - **14 pre-existing failures** in `repl_jit_regression`/`repl_compiler_parity` (unrelated to core language work); all other suites pass. Full list: (app entry point + HAMT Map/Set/Array + tap bus + REPL/compiler parity + MPST + REPL JIT fix + LSP Phase 1 + LSP Phase 2 + tail-call enforcement + structural recursion refinement + stream fusion + type-level nat solver + built-in testing library + March-native stdlib tests + TCE structural recursion warning + Random/Stats/Plot stdlib + describe keyword + FFI interpreter dispatch + JIT bitwise builtins + doctest extraction + **TCO loop transformation in LLVM codegen** + **DataFrame Phase 7** + **constant propagation** + **Mutual TCO** + **borrow inference** + **known-call** + **struct update fusion** + **escape analysis** + **Phase 5: per-process heaps + message passing** + **Phase 4: reduction counting in compiled code** + **Phase 4: lazy stack growth** + **Vault sharded KV store** + **Bastion.Cache + Bastion.Depot middleware**):
@@ -349,7 +349,7 @@ march/
 - **`opaque type` declarations** — `opaque type Handle = Handle(Int)`: type name public, constructors private. `opaque` keyword in lexer+parser; `var_vis = Private` on all variants; type annotation still visible outside module
 - **List comprehensions** — `[expr for pat in list]` and `[expr for pat in list, pred]`; parser desugars to `List.map`/`List.filter` at parse time; requires `List` in scope
 - **`with` expressions** — Elixir-style monadic chaining `with Ok(x) <- f(), Ok(y) <- g(x) do x + y end` with optional `else` arms; parser desugars to nested `EMatch`
-- **Default argument values** — `fn greet(name, greeting \\ "Hello") do ... end`; `FPDefault` AST node; `expand_defaults_decl` in desugar generates N shortened DFn variants; `VMultiarity` in eval dispatches by arity
+- **Default argument values** — `fn greet(name, greeting \\ "Hello") do ... end`; `FPDefault` AST node; `expand_defaults_decl` generates uniquely-named `greet$N` DFns (TIR-safe name mangling); TIR `_default_dispatch` table rewrites call sites; `eval.ml` auto-builds VMultiarity for base names from `$N` patterns; works in interpreter and TIR/LLVM pipeline
 - **Multi-error parser recovery** — Menhir `error` token recovery; multiple syntax errors per file reported
 - **Clojure-level REPL quality** — `:reload`, `:inspect/:i <expr>`, pretty-printer (depth/collection truncation), error recovery (env preserved on typecheck error), REPL/compiler parity tests
 - **`tap` builtin** — `tap(v)` sends `v` to a global thread-safe tap bus and returns `v`; REPL drains and displays tapped values after each eval (orange in TUI, `tap> v` in simple mode). Type: `∀a. a → a`. Safe for actor-context use.

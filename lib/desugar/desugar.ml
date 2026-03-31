@@ -1470,13 +1470,21 @@ let maybe_inject_island_bridges
   else expanded
 
 (** Expand a [DFn] with [FPDefault] params into multiple [DFn] decls.
-    For each default parameter, generates a shortened version that calls
-    the full-arity function with the remaining defaults filled in.
+    Uses name mangling so each generated DFn has a unique name, making
+    the output safe for the TIR/LLVM compiled pipeline.
 
     Example: [fn greet(name, greeting \\ "Hello") -> ...]
     Produces:
-      [fn greet(name) -> greet(name, "Hello")]
-      [fn greet(name, greeting) -> ...]       (* full-arity, FPDefault → FPNamed *)
+      [fn greet$2(name, greeting) -> ...]          (* full-arity, unique mangled name *)
+      [fn greet$1(name) -> greet$2(name, "Hello")] (* short wrapper, calls mangled full *)
+      [fn greet(name) -> greet$1(name)]            (* 1-arg dispatcher, original name *)
+      [fn greet(name, greeting) -> greet$2(name, greeting)] (* 2-arg dispatcher *)
+
+    The [greet$N] functions have unique names and are used by the TIR/LLVM pipeline.
+    The [greet] dispatcher DFns (same original name, different arities) are combined
+    into a VMultiarity value by the interpreter for backwards-compatible dispatch.
+    The TIR lowering detects and skips the dispatcher DFns, rewriting call sites
+    based on arity using the [greet$N] mangled names instead.
 *)
 let expand_defaults_decl (d : decl) : decl list =
   match d with
@@ -1490,16 +1498,19 @@ let expand_defaults_decl (d : decl) : decl list =
        if defaults = [] then [d]
        else begin
          let mk_var txt = EVar { txt; span = sp } in
-         (* Build the full-arity decl: replace FPDefault with FPNamed *)
+         let n_total = List.length params in
+         let full_mangled = Printf.sprintf "%s$%d" def.fn_name.txt n_total in
+         (* Build the full-arity decl: replace FPDefault with FPNamed, rename to mangled name *)
          let strip_default = function
            | FPDefault (p, _) -> FPNamed p
            | other -> other
          in
          let full_params = List.map strip_default params in
          let full_clause = { first with fc_params = full_params } in
-         let full_def = { def with fn_clauses = [full_clause] } in
+         let full_def = { def with fn_clauses = [full_clause];
+                                   fn_name = { def.fn_name with txt = full_mangled } } in
          let full_decl = DFn (full_def, sp) in
-         (* Helper: extract the arg name from a required param for the call site *)
+         (* Helper: extract the arg name from a param for use at call sites *)
          let req_arg_of_param p =
            match p with
            | FPNamed p -> mk_var p.param_name.txt
@@ -1508,8 +1519,11 @@ let expand_defaults_decl (d : decl) : decl list =
            | FPPat _ -> mk_var "__arg"   (* pattern params in required position: unusual *)
          in
          let req_args = List.map req_arg_of_param required in
-         (* For i = 0 to n_defaults-1: generate a version with arity = len(required)+i *)
-         let extra_decls = List.init (List.length defaults) (fun i ->
+         (* For i = 0 to n_defaults-1: generate a uniquely-named short-arity version.
+            Each calls the full mangled version directly (no self-referential calls). *)
+         let mangled_decls = List.init (List.length defaults) (fun i ->
+           let this_arity = List.length required + i in
+           let mangled_name = Printf.sprintf "%s$%d" def.fn_name.txt this_arity in
            let short_params =
              required @
              List.filteri (fun j _ -> j < i) (List.map (fun (p, _) -> FPNamed p) defaults)
@@ -1521,12 +1535,17 @@ let expand_defaults_decl (d : decl) : decl list =
              List.filteri (fun j _ -> j >= i) (List.map (fun (_, e) -> e) defaults)
            in
            let all_call_args = req_args @ passed_default_args @ remaining_default_exprs in
-           let body = EApp (mk_var def.fn_name.txt, all_call_args, sp) in
+           (* Call the full mangled version, not the original name *)
+           let body = EApp (mk_var full_mangled, all_call_args, sp) in
            let short_clause = { fc_params = short_params; fc_guard = None; fc_body = body; fc_span = sp } in
-           let short_def = { def with fn_clauses = [short_clause]; fn_ret_ty = None } in
+           let short_def = { def with fn_clauses = [short_clause]; fn_ret_ty = None;
+                                      fn_name = { def.fn_name with txt = mangled_name } } in
            DFn (short_def, sp)
          ) in
-         extra_decls @ [full_decl]
+         (* No dispatcher DFns: the interpreter (eval.ml) automatically creates
+            VMultiarity entries for the base name by detecting foo$N patterns.
+            The TIR pipeline rewrites call sites via _default_dispatch table. *)
+         mangled_decls @ [full_decl]
        end)
   | _ -> [d]
 
