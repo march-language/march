@@ -21,10 +21,6 @@ depends: [
   "notty" {>= "0.2.3"}
   "odoc" {with-doc}
 ]
-depexts: [
-  ["blake3"] {os-distribution = "homebrew"}
-  ["libblake3-dev"] {os-family = "debian"}
-]
 build: [
   ["dune" "subst"] {dev}
   [

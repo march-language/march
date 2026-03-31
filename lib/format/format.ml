@@ -901,11 +901,26 @@ and emit_fn ctx fn =
    | None -> ()
    | Some doc ->
      (* Always use triple-quoted strings for doc comments.
-        This preserves non-ASCII bytes verbatim and avoids the dollar-brace
-        sequence being lexed as string interpolation.
+        Re-escape any `${` sequences so they are not lexed as string
+        interpolation when the formatted output is re-parsed.
         Known limitation: doc strings containing triple-quotes will produce
         broken output — acceptable edge case for now. *)
-     line ctx (Printf.sprintf "doc \"\"\"%s\"\"\"" doc)
+     let escaped =
+       let buf = Buffer.create (String.length doc) in
+       let n = String.length doc in
+       let i = ref 0 in
+       while !i < n do
+         if !i + 1 < n && doc.[!i] = '$' && doc.[!i+1] = '{' then begin
+           Buffer.add_string buf "\\${";
+           i := !i + 2
+         end else begin
+           Buffer.add_char buf doc.[!i];
+           incr i
+         end
+       done;
+       Buffer.contents buf
+     in
+     line ctx (Printf.sprintf "doc \"\"\"%s\"\"\"" escaped)
   );
   match fn.fn_clauses with
   | [] -> ()

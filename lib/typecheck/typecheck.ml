@@ -3397,9 +3397,28 @@ let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_sp
 let check_fn env (def : Ast.fn_def) fn_span : scheme =
   let env'    = enter_level env in
   (* Self-reference for recursion — a fresh var that will get unified
-     with the actual type as the body is checked. *)
-  let self_ty = fresh_var env'.level in
-  let env_rec = bind_var def.fn_name.txt (Mono self_ty) env' in
+     with the actual type as the body is checked.
+     For default-arg wrappers (multiple DFn with the same name), the full-arity
+     version is processed first.  When a wrapper is checked, the function name
+     is already bound to a concrete type in the environment.  In that case we
+     reuse the existing binding so the wrapper body can call the full function
+     at a different arity without a self-type conflict. *)
+  let self_ty, env_rec =
+    match List.assoc_opt def.fn_name.txt env'.vars with
+    | Some (Mono (TVar r)) when (match !r with Unbound _ -> true | _ -> false) ->
+      (* Still a pass-1 placeholder fresh var — use normal self-ref *)
+      let sv = fresh_var env'.level in
+      (sv, bind_var def.fn_name.txt (Mono sv) env')
+    | Some existing_sch ->
+      (* Already concretely typed (e.g. full-arity default-arg fn) — keep it
+         so the wrapper body resolves calls at the full arity correctly.
+         Still create a self_ty for the unify at the end of check_fn. *)
+      let sv = fresh_var env'.level in
+      (sv, bind_var def.fn_name.txt existing_sch env')
+    | None ->
+      let sv = fresh_var env'.level in
+      (sv, bind_var def.fn_name.txt (Mono sv) env')
+  in
 
   let sch = match def.fn_clauses with
     | [] ->

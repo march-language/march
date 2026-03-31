@@ -280,16 +280,22 @@ const _encoder = new TextEncoder();
 /**
  * Read a March string from WASM linear memory.
  *
- * March string layout (wasm32):
- *   +0  rc       i64
- *   +8  tag      i32  + pad i32
- *   +16 length   i64   (byte count)
- *   +24 data_ptr i64   (pointer to UTF-8 bytes; only lower 32 bits used on wasm32)
+ * Uses the exported march_island_string_length / march_island_string_data
+ * helpers to avoid hard-coding struct layout (which differs between
+ * wasm32 and wasm64 due to pointer size).
  */
+let _wasmStringHelpers = null;
+
 function readMarchString(memory, ptr) {
+  if (_wasmStringHelpers) {
+    const len     = _wasmStringHelpers.length(ptr);
+    const dataPtr = _wasmStringHelpers.data(ptr);
+    return _decoder.decode(new Uint8Array(memory.buffer, dataPtr, len));
+  }
+  // Fallback: read struct directly (wasm32 layout)
   const view = new DataView(memory.buffer);
   const len     = Number(view.getBigInt64(ptr + 16, true));
-  const dataPtr = Number(view.getBigInt64(ptr + 24, true));
+  const dataPtr = view.getInt32(ptr + 24, true);
   return _decoder.decode(new Uint8Array(memory.buffer, dataPtr, len));
 }
 
@@ -321,7 +327,16 @@ function writeMarchString(exports, str) {
  */
 function wrapWasmExports(exports, name) {
   const { memory, march_island_render, march_island_update,
-          march_island_init, march_dealloc } = exports;
+          march_island_init, march_dealloc,
+          march_island_string_length, march_island_string_data } = exports;
+
+  // Install string helpers so readMarchString uses safe accessors
+  if (march_island_string_length && march_island_string_data) {
+    _wasmStringHelpers = {
+      length: march_island_string_length,
+      data:   march_island_string_data,
+    };
+  }
 
   return {
     /** Call march_island_init; return JSON string or '{}'. */
