@@ -18553,6 +18553,22 @@ let test_default_arg_overridden () =
     [March_eval.Eval.VString "World"; March_eval.Eval.VString "Hi"] in
   Alcotest.(check string) "default arg overridden" "Hi, World!" (vstr v)
 
+let test_default_arg_typechecks () =
+  (* Default arg expansion should not cause typecheck errors *)
+  let ctx = typecheck {|mod Test do
+    fn greet(name, greeting \\ "Hello") do
+      greeting ++ ", " ++ name ++ "!"
+    end
+  end|} in
+  Alcotest.(check bool) "default arg def typechecks" false (has_errors ctx)
+
+let test_default_multiple_defaults_typechecks () =
+  (* Multiple defaults should typecheck without unification errors *)
+  let ctx = typecheck {|mod Test do
+    fn make(x, y \\ 10, z \\ 20) do x + y + z end
+  end|} in
+  Alcotest.(check bool) "multiple defaults typecheck" false (has_errors ctx)
+
 let test_default_multiple_defaults () =
   let env = eval_module {|mod Test do
     fn make(x, y \\ 10, z \\ 20) do x + y + z end
@@ -20278,9 +20294,11 @@ let () =
         Alcotest.test_case "no else clause"     `Quick test_with_no_else;
       ]);
       ("default arguments", [
-        Alcotest.test_case "default used"       `Quick test_default_arg_used;
-        Alcotest.test_case "default overridden" `Quick test_default_arg_overridden;
-        Alcotest.test_case "multiple defaults"  `Quick test_default_multiple_defaults;
+        Alcotest.test_case "default used"              `Quick test_default_arg_used;
+        Alcotest.test_case "default overridden"        `Quick test_default_arg_overridden;
+        Alcotest.test_case "multiple defaults"         `Quick test_default_multiple_defaults;
+        Alcotest.test_case "default arg typechecks"    `Quick test_default_arg_typechecks;
+        Alcotest.test_case "multi-default typechecks"  `Quick test_default_multiple_defaults_typechecks;
       ]);
       ("opaque types", [
         Alcotest.test_case "internal access"    `Quick test_opaque_type_internal_access;
