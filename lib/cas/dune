@@ -1,7 +1,16 @@
+(executable
+ (name discover)
+ (libraries dune-configurator))
+
+(rule
+ (targets blake3_cflags.sexp blake3_libs.sexp)
+ (action (run ./discover.exe)))
+
 (library
  (name march_cas)
  (modules blake3 serialize hash cas scc pipeline)
  (libraries march_tir march_ast unix)
- (foreign_stubs (language c) (names blake3_stubs) (flags (:standard -I/opt/homebrew/include)))
- (c_library_flags (-L/opt/homebrew/lib -lblake3))
+ (foreign_stubs (language c) (names blake3_stubs)
+  (flags (:standard (:include blake3_cflags.sexp))))
+ (c_library_flags (:include blake3_libs.sexp))
  (preprocess (pps ppx_deriving.show)))

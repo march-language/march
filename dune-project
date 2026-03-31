@@ -17,12 +17,16 @@
  (depends
   (ocaml (>= 5.3.0))
   (dune (>= 3.0))
+  (dune-configurator (>= 3.0))
   (menhir (>= 20230608))
   (ppx_deriving (>= 6.0))
   (alcotest (>= 1.7.0))
   (qcheck-core (>= 0.91))
   (qcheck-alcotest (>= 0.91))
-  (notty (>= 0.2.3))))
+  (notty (>= 0.2.3)))
+ (depexts
+  (("blake3") (= os-distribution "homebrew"))
+  (("libblake3-dev") (= os-family "debian"))))
 
 (package
  (name forge)
@@ -33,7 +37,9 @@
   (dune (>= 3.0))
   (cmdliner (>= 1.3.0))
   (alcotest (>= 1.7.0))
-  (digestif (>= 1.0))))
+  (digestif (>= 1.0))
+  (qcheck-core (and (>= 0.91) :with-test))
+  (qcheck-alcotest (and (>= 0.91) :with-test))))
 
 (package
  (name march-lsp)
