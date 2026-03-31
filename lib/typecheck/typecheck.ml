@@ -2758,7 +2758,28 @@ let rec infer_expr env (e : Ast.expr) : ty =
          TError)
 
     | Ast.EApp (f, args, sp) ->
-      let f_ty = infer_expr env f in
+      (* For EVar calls, check for an arity-specific overload registered
+         under "name#N".  This enables default-arg-expanded functions (which
+         register separate DFns at each arity) to dispatch to the right type
+         at the call site.  Only use the arity key when it holds a concrete
+         (non-TVar) scheme; otherwise fall back to the normal EVar lookup so
+         that recursive calls inside a function body use the self-reference. *)
+      let n = List.length args in
+      let f_ty = match f with
+        | Ast.EVar v ->
+          let arity_key = Printf.sprintf "%s#%d" v.txt n in
+          let is_concrete = function
+            | Poly _ -> true
+            | Mono t -> (match repr t with TVar _ -> false | _ -> true)
+          in
+          (match List.assoc_opt arity_key env.vars with
+           | Some sch when is_concrete sch ->
+             let t = instantiate env.level env sch in
+             Hashtbl.replace env.type_map v.span (repr t);
+             t
+           | _ -> infer_expr env f)
+        | _ -> infer_expr env f
+      in
       infer_app env sp f_ty args 0
 
     (* ── Constructor application ──────────────────────────────────── *)
@@ -3397,9 +3418,23 @@ let warn_unused_params env (params : Ast.fn_param list) (body : Ast.expr) _fn_sp
 let check_fn env (def : Ast.fn_def) fn_span : scheme =
   let env'    = enter_level env in
   (* Self-reference for recursion — a fresh var that will get unified
-     with the actual type as the body is checked. *)
+     with the actual type as the body is checked.
+     Exception: if this function name already has a concrete type from a
+     previously-typechecked DFn with the same name (default-arg expansion
+     generates multiple same-named DFns at different arities), don't shadow
+     it.  The wrapper's body calls the full-arity version by name, so it must
+     see the already-established concrete type, not the self-reference. *)
   let self_ty = fresh_var env'.level in
-  let env_rec = bind_var def.fn_name.txt (Mono self_ty) env' in
+  let has_prior_concrete =
+    match List.assoc_opt def.fn_name.txt env.vars with
+    | Some (Poly _) -> true
+    | Some (Mono t) -> (match repr t with TVar _ -> false | _ -> true)
+    | None -> false
+  in
+  let env_rec =
+    if has_prior_concrete then env'
+    else bind_var def.fn_name.txt (Mono self_ty) env'
+  in
 
   let sch = match def.fn_clauses with
     | [] ->
@@ -4011,7 +4046,19 @@ let rec check_decl env (d : Ast.decl) : env =
   | Ast.DFn (def, sp) ->
     let sch = check_fn env def sp in
     discharge_constraints env sp;
-    bind_var def.fn_name.txt sch env
+    let arity = match def.fn_clauses with
+      | [c] -> List.length c.fc_params | _ -> 0
+    in
+    let arity_key = Printf.sprintf "%s#%d" def.fn_name.txt arity in
+    (* Always register under the arity-specific key. *)
+    let env' = bind_var arity_key sch env in
+    (* For the plain name: keep the full-arity (first-processed) binding as
+       canonical so that higher-order uses get the most-general type.
+       Only shadow if no concrete type is registered yet. *)
+    (match List.assoc_opt def.fn_name.txt env.vars with
+     | Some (Poly _) -> env'
+     | Some (Mono t) when (match repr t with TVar _ -> false | _ -> true) -> env'
+     | _ -> bind_var def.fn_name.txt sch env')
 
   | Ast.DLet (_vis, b, sp) ->
     let env' = enter_level env in
@@ -4153,7 +4200,13 @@ let rec check_decl env (d : Ast.decl) : env =
     let pre_env = List.fold_left (fun e d ->
         match d with
         | Ast.DFn (def, _) ->
-          bind_var def.fn_name.txt (Mono (fresh_var 0)) e
+          let arity = match def.fn_clauses with
+            | c :: _ -> List.length c.fc_params | _ -> 0
+          in
+          let arity_key = Printf.sprintf "%s#%d" def.fn_name.txt arity in
+          let e1 = if List.mem_assoc arity_key e.vars then e
+                   else bind_var arity_key (Mono (fresh_var 0)) e in
+          bind_var def.fn_name.txt (Mono (fresh_var 0)) e1
         | _ -> e
       ) env decls in
     let inner_env = List.fold_left check_decl pre_env decls in
@@ -5123,9 +5176,18 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
   let pre_env = List.fold_left (fun env d ->
       match d with
       | Ast.DFn (def, _) ->
+        (* Always register under "name#arity" key to support arity-based
+           dispatch for default-arg-expanded functions (multiple DFns with
+           the same name at different arities). *)
+        let arity = match def.fn_clauses with
+          | c :: _ -> List.length c.fc_params | _ -> 0
+        in
+        let arity_key = Printf.sprintf "%s#%d" def.fn_name.txt arity in
+        let e1 = if List.mem_assoc arity_key env.vars then env
+                 else bind_var arity_key (Mono (fresh_var 0)) env in
         (* Don't shadow existing bindings (e.g., builtins) with mono forward refs *)
-        if List.mem_assoc def.fn_name.txt env.vars then env
-        else bind_var def.fn_name.txt (Mono (fresh_var 0)) env
+        if List.mem_assoc def.fn_name.txt e1.vars then e1
+        else bind_var def.fn_name.txt (Mono (fresh_var 0)) e1
       | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
         (* Pre-bind all public qualified names "ModName.fn" so that sibling
            modules that reference each other don't fail during pass 2. *)
@@ -5204,8 +5266,14 @@ let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
   let pre_env = List.fold_left (fun env d ->
       match d with
       | Ast.DFn (def, _) ->
-        if List.mem_assoc def.fn_name.txt env.vars then env
-        else bind_var def.fn_name.txt (Mono (fresh_var 0)) env
+        let arity = match def.fn_clauses with
+          | c :: _ -> List.length c.fc_params | _ -> 0
+        in
+        let arity_key = Printf.sprintf "%s#%d" def.fn_name.txt arity in
+        let e1 = if List.mem_assoc arity_key env.vars then env
+                 else bind_var arity_key (Mono (fresh_var 0)) env in
+        if List.mem_assoc def.fn_name.txt e1.vars then e1
+        else bind_var def.fn_name.txt (Mono (fresh_var 0)) e1
       | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
         prebind_mod_members_full mname.txt env inner_decls
       | Ast.DType (_vis, name, params, typedef, _) ->

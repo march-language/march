@@ -349,7 +349,7 @@ march/
 - **`opaque type` declarations** — `opaque type Handle = Handle(Int)`: type name public, constructors private. `opaque` keyword in lexer+parser; `var_vis = Private` on all variants; type annotation still visible outside module
 - **List comprehensions** — `[expr for pat in list]` and `[expr for pat in list, pred]`; parser desugars to `List.map`/`List.filter` at parse time; requires `List` in scope
 - **`with` expressions** — Elixir-style monadic chaining `with Ok(x) <- f(), Ok(y) <- g(x) do x + y end` with optional `else` arms; parser desugars to nested `EMatch`
-- **Default argument values** — `fn greet(name, greeting \\ "Hello") do ... end`; `FPDefault` AST node; `expand_defaults_decl` in desugar generates N shortened DFn variants; `VMultiarity` in eval dispatches by arity
+- **Default argument values** — `fn greet(name, greeting \\ "Hello") do ... end`; `FPDefault` AST node; `expand_defaults_decl` in desugar generates N shortened DFn variants; `VMultiarity` in eval dispatches by arity; typechecker uses arity-keyed env slots (`"name#N"`) + EApp arity-based dispatch so both 1-arg and 2-arg calls typecheck correctly
 - **Multi-error parser recovery** — Menhir `error` token recovery; multiple syntax errors per file reported
 - **Clojure-level REPL quality** — `:reload`, `:inspect/:i <expr>`, pretty-printer (depth/collection truncation), error recovery (env preserved on typecheck error), REPL/compiler parity tests
 - **`tap` builtin** — `tap(v)` sends `v` to a global thread-safe tap bus and returns `v`; REPL drains and displays tapped values after each eval (orange in TUI, `tap> v` in simple mode). Type: `∀a. a → a`. Safe for actor-context use.

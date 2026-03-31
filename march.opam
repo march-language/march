@@ -11,7 +11,7 @@ homepage: "https://github.com/march-lang/march"
 bug-reports: "https://github.com/march-lang/march/issues"
 depends: [
   "ocaml" {>= "5.3.0"}
-  "dune" {>= "3.6" & >= "3.0"}
+  "dune" {>= "3.7" & >= "3.0"}
   "dune-configurator" {>= "3.0"}
   "menhir" {>= "20230608"}
   "ppx_deriving" {>= "6.0"}
@@ -20,10 +20,6 @@ depends: [
   "qcheck-alcotest" {>= "0.91"}
   "notty" {>= "0.2.3"}
   "odoc" {with-doc}
-]
-depexts: [
-  ["blake3"] {os-distribution = "homebrew"}
-  ["libblake3-dev"] {os-family = "debian"}
 ]
 build: [
   ["dune" "subst"] {dev}

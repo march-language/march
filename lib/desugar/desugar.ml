@@ -1526,7 +1526,7 @@ let expand_defaults_decl (d : decl) : decl list =
            let short_def = { def with fn_clauses = [short_clause]; fn_ret_ty = None } in
            DFn (short_def, sp)
          ) in
-         extra_decls @ [full_decl]
+         [full_decl] @ extra_decls
        end)
   | _ -> [d]
 

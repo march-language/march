@@ -1,4 +1,4 @@
-(lang dune 3.6)
+(lang dune 3.7)
 (using menhir 2.1)
 (name march)
 (version 0.1.0)
@@ -23,10 +23,7 @@
   (alcotest (>= 1.7.0))
   (qcheck-core (>= 0.91))
   (qcheck-alcotest (>= 0.91))
-  (notty (>= 0.2.3)))
- (depexts
-  (("blake3") (= os-distribution "homebrew"))
-  (("libblake3-dev") (= os-family "debian"))))
+  (notty (>= 0.2.3))))
 
 (package
  (name forge)
