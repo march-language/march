@@ -1941,6 +1941,46 @@ let test_eval_multi_stmt_match_arm () =
   Alcotest.(check int) "classify(7) = 1" 1
     (match v1 with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
 
+let test_eval_block_arm_no_wrapper () =
+  (* Multi-statement match arm body without do...end wrapper *)
+  let env = eval_module {|mod Test do
+    fn classify(n) do
+      match n do
+      0 ->
+        let tag = 0
+        tag
+      _ ->
+        let tag = 1
+        tag
+      end
+    end
+  end|} in
+  let v0 = call_fn env "classify" [March_eval.Eval.VInt 0] in
+  let v1 = call_fn env "classify" [March_eval.Eval.VInt 7] in
+  Alcotest.(check int) "classify(0) = 0" 0
+    (match v0 with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt");
+  Alcotest.(check int) "classify(7) = 1" 1
+    (match v1 with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
+let test_eval_block_arm_nested () =
+  (* Nested match with multi-expression arm bodies *)
+  let env = eval_module {|mod Test do
+    type Shape = Circle(Int) | Rect(Int, Int)
+    fn area(s) do
+      match s do
+      Circle(r) ->
+        let sq = r * r
+        sq * 3
+      Rect(w, h) ->
+        let a = w * h
+        a
+      end
+    end
+  end|} in
+  let v = call_fn env "area" [March_eval.Eval.VCon ("Circle", [March_eval.Eval.VInt 5])] in
+  Alcotest.(check int) "Circle area" 75
+    (match v with March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt")
+
 let test_eval_unary_minus () =
   let env = eval_module {|mod Test do
     fn neg(x) do -x end
@@ -17538,6 +17578,8 @@ let () =
           Alcotest.test_case "percent token"       `Quick test_lexer_percent;
           Alcotest.test_case "modulo operator"     `Quick test_eval_modulo;
           Alcotest.test_case "multi-stmt match arm"`Quick test_eval_multi_stmt_match_arm;
+          Alcotest.test_case "block arm no wrapper" `Quick test_eval_block_arm_no_wrapper;
+          Alcotest.test_case "block arm nested"     `Quick test_eval_block_arm_nested;
         ] );
       ( "tir",
         [

@@ -910,7 +910,7 @@ interp_parts:
   | PIPE { () }
 
 branch:
-  | p = pattern; guard = option(when_guard); ARROW; e = expr
+  | p = pattern; guard = option(when_guard); ARROW; e = block_body
     { { branch_pat = p; branch_guard = guard; branch_body = e } }
   | _p = pattern; _guard = option(when_guard); error
     { error_raise
@@ -919,9 +919,9 @@ branch:
         $startpos($3) }
 
 cond_branch:
-  | e = expr; ARROW; body = expr
+  | e = expr; ARROW; body = block_body
     { (e, body) }
-  | UNDERSCORE; ARROW; body = expr
+  | UNDERSCORE; ARROW; body = block_body
     { (ELit (LitBool true, mk_span ($loc($1))), body) }
 
 (* ---- Patterns ---- *)
