@@ -58,7 +58,17 @@ See [syntax_reference.md](syntax_reference.md) for a complete quick-reference of
 - Conditionals: `if cond do ... end` — use `do...end`, `else` is optional, NO `then` keyword
 - Block lets: `let x = expr` with no `in`; subsequent block exprs see the binding
 - No `;` — use newlines to separate block expressions
-- Match arms use `block_body` — multi-statement arms are fine, no `do...end` wrapper needed
+- Match arms use `block_body` — multi-expression arms with `let` bindings are supported:
+  ```march
+  match x do
+    Some(v) ->
+      let y = v + 1
+      let z = y * 2
+      z
+    None -> 0
+  end
+  ```
+  The token filter uses lookahead to distinguish arm boundaries from block continuations. A `do...end` wrapper also works: `Some(v) -> do ... end`
 
 ### Lambda syntax (critical — common source of bugs)
 

@@ -537,6 +537,10 @@ end
 -- ---- Deduplication ----
 
 doc "Removes consecutive duplicate elements (keeps first of each run)."
+fn member(xs : List(a), x : a) : Bool do
+  any(xs, fn y -> y == x)
+end
+
 fn dedup(xs : List(a)) : List(a) do
   fn go(lst : List(a), prev : a, acc : List(a)) : List(a) do
     match lst do

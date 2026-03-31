@@ -46,12 +46,13 @@ mod Depot.Gate do
 -- kind: "unique" | "foreign_key" | "no_assoc" | "check"
 ptype DbConstraint = DbConstraint(String, String, String, String)
 
--- Gate(params, changes, errors, valid, constraints)
---   params      : original raw input as (field, value) string pairs
---   changes     : cast and accepted values as (field, value) string pairs
---   errors      : accumulated errors as (field, message) pairs (all kept)
---   valid       : false as soon as any error is added
---   constraints : DB constraint hints for Depot.insert/update resolution
+-- Gate(base_or_params, changes, errors, valid, constraints)
+--   base_or_params : for v1 (cast/2): original raw params as (field, value) string pairs
+--                    for v2 (cast_record/3): base record entries as (field, value) assoc list
+--   changes        : cast and accepted values as (field, value) pairs
+--   errors         : accumulated errors as (field, message) pairs (all kept)
+--   valid          : false as soon as any error is added
+--   constraints    : DB constraint hints for Depot.insert/update resolution
 type Gate = Gate(List((String, String)), List((String, String)), List((String, String)), Bool, List(DbConstraint))
 
 -- Options for validate_length.
@@ -81,6 +82,10 @@ type ConstraintOpt =
 
 pfn form_params(f) do
   match f do Gate(p, _, _, _, _) -> p end
+end
+
+pfn form_base(f) do
+  match f do Gate(b, _, _, _, _) -> b end
 end
 
 pfn form_changes(f) do
@@ -166,6 +171,13 @@ pfn str_member(xs, s) do
   List.any(xs, fn x -> x == s)
 end
 
+-- Check if a value is "blank" — empty string or whitespace-only.
+-- For string values, trims whitespace; for non-strings, always non-blank.
+pfn is_blank(v) do
+  if v == "" then true
+  else String.trim(to_string(v)) == ""
+end
+
 -- ---------------------------------------------------------------------------
 -- Private: extract options
 -- ---------------------------------------------------------------------------
@@ -214,6 +226,38 @@ pfn apply_number_opts(form, field, n, opts) do
   go(opts, form)
 end
 
+pfn change_entry_key(entry) do
+  match entry do (k, _) -> k end
+end
+
+-- ---------------------------------------------------------------------------
+-- Private: record diff for cast_record
+-- ---------------------------------------------------------------------------
+
+pfn cast_diff_entry(base_entries, k, v, rest, fields, acc) do
+  if str_member(fields, k) do
+    let base_val = alist_get(base_entries, k)
+    let is_changed = match base_val do
+      Some(bv) -> bv != v
+      None     -> true
+    end
+    if is_changed do
+      cast_diff(base_entries, rest, fields, Cons((k, v), acc))
+    else
+      cast_diff(base_entries, rest, fields, acc)
+    end
+  else
+    cast_diff(base_entries, rest, fields, acc)
+  end
+end
+
+pfn cast_diff(base_entries, param_entries, fields, acc) do
+  match param_entries do
+    Nil -> List.reverse(acc)
+    Cons((k, v), rest) -> cast_diff_entry(base_entries, k, v, rest, fields, acc)
+  end
+end
+
 -- ---------------------------------------------------------------------------
 -- Construction
 -- ---------------------------------------------------------------------------
@@ -234,19 +278,46 @@ fn cast(params, fields) do
   Gate(params, allowed, Nil, true, Nil)
 end
 
+doc """
+Create a record-based Gate from a base record, incoming params record,
+and an allow-list of field names.
+
+Only fields in the allow-list are considered, and only values that
+differ from base are recorded as changes. This enables efficient
+UPDATE queries that only SET changed columns.
+
+    let blank = Depot.Schema.blank(schema())
+    let gate = Depot.Gate.cast_record(blank, params, ["name", "email", "role"])
+
+Insert flow: base is `Depot.Schema.blank(schema)`, so every param
+that differs from the default is a change.
+
+Update flow: base is a DB record, so only actual modifications appear
+in `changes`.
+"""
+fn cast_record(base, params, fields) do
+  let base_entries = record_entries(base)
+  let param_entries = record_entries(params)
+  let changes = cast_diff(base_entries, param_entries, fields, Nil)
+  Gate(base_entries, changes, Nil, true, Nil)
+end
+
 -- ---------------------------------------------------------------------------
 -- Accessors
 -- ---------------------------------------------------------------------------
 
 doc """
-Returns the current value of a field, checking changes first then params.
+Returns the current value of a field, checking changes first then base/params.
+
+For v1 Gates, falls back to params. For v2 Gates (cast_record), falls back
+to the base record entries.
 
     Depot.Gate.get_field(form, "name")  -- Some("Alice") or None
 """
 fn get_field(form, field) do
   match get_change(form, field) do
   Some(v) -> Some(v)
-  None    -> alist_get(form_params(form), field)
+  None    -> alist_get(form_base(form), field)
   end
 end
 
@@ -275,6 +346,56 @@ Removes a change from the form (e.g. after hashing a password).
 """
 fn delete_change(form, field) do
   set_changes(form, alist_delete(form_changes(form), field))
+end
+
+doc """
+Returns the base entries of a Gate (the original record as an assoc list).
+For a v1 Gate, returns the original params.
+
+    Depot.Gate.base(gate)
+"""
+fn base(form) do
+  form_base(form)
+end
+
+doc """
+Returns the list of field names that have changes.
+
+    Depot.Gate.changed_fields(gate)  -- ["name", "email"]
+"""
+fn changed_fields(form) do
+  List.map(form_changes(form), change_entry_key)
+end
+
+doc """
+Returns true if the given field has a change recorded.
+
+    Depot.Gate.changed(gate, "name")  -- true or false
+"""
+fn changed(form, field) do
+  match get_change(form, field) do
+    Some(_) -> true
+    None    -> false
+  end
+end
+
+pfn merge_changes(base_entries, changes) do
+  match changes do
+    Nil -> base_entries
+    Cons((k, v), rest) -> merge_changes(alist_set(base_entries, k, v), rest)
+  end
+end
+
+doc """
+Merges base + changes into a single assoc list. For Gate, this is
+the effective record after all changes are applied.
+
+    Depot.Gate.apply_changes(gate)  -- [("name", "Alice"), ("email", "alice@test.com"), ...]
+"""
+fn apply_changes(form) do
+  let b = form_base(form)
+  let ch = form_changes(form)
+  merge_changes(b, ch)
 end
 
 doc """
@@ -330,7 +451,7 @@ fn validate_required(form, fields) do
     Cons(field, rest) ->
       go(rest, match get_field(f, field) do
       None    -> add_error(f, field, "can't be blank")
-      Some(v) -> if String.trim(v) == "" then add_error(f, field, "can't be blank") else f
+      Some(v) -> if is_blank(v) then add_error(f, field, "can't be blank") else f
       end)
     end
   end
@@ -398,7 +519,7 @@ fn validate_inclusion(form, field, values) do
   match get_field(form, field) do
   None    -> form
   Some(v) ->
-    if str_member(values, v) then form else add_error(form, field, "is not a valid value")
+    if List.member(values, v) then form else add_error(form, field, "is not a valid value")
   end
 end
 
@@ -411,7 +532,7 @@ fn validate_exclusion(form, field, values) do
   match get_field(form, field) do
   None    -> form
   Some(v) ->
-    if str_member(values, v) then add_error(form, field, "is reserved") else form
+    if List.member(values, v) then add_error(form, field, "is reserved") else form
   end
 end
 

@@ -2473,6 +2473,85 @@ let base_env : env =
         | [v] -> VString (value_display v)
         | _ -> eval_error "to_string: expected one argument"))
 
+    (* ---- Record introspection builtins ---- *)
+
+    (* record_keys: returns a list of field name strings from a record value.
+       %{a: 1, b: 2} => ["a", "b"]  (preserves insertion order) *)
+  ; ("record_keys", VBuiltin ("record_keys", function
+        | [VRecord fields] ->
+          List.fold_right (fun (k, _) acc ->
+            VCon ("Cons", [VString k; acc])
+          ) fields (VCon ("Nil", []))
+        | [_] -> eval_error "record_keys: expected a record"
+        | _ -> eval_error "record_keys: expected one argument"))
+
+    (* record_values: returns a list of values from a record.
+       %{a: 1, b: 2} => [1, 2]  (preserves insertion order) *)
+  ; ("record_values", VBuiltin ("record_values", function
+        | [VRecord fields] ->
+          List.fold_right (fun (_, v) acc ->
+            VCon ("Cons", [v; acc])
+          ) fields (VCon ("Nil", []))
+        | [_] -> eval_error "record_values: expected a record"
+        | _ -> eval_error "record_values: expected one argument"))
+
+    (* record_entries: returns a list of (key, value) pairs from a record.
+       %{a: 1, b: 2} => [("a", 1), ("b", 2)]  (preserves insertion order) *)
+  ; ("record_entries", VBuiltin ("record_entries", function
+        | [VRecord fields] ->
+          List.fold_right (fun (k, v) acc ->
+            VCon ("Cons", [VTuple [VString k; v]; acc])
+          ) fields (VCon ("Nil", []))
+        | [_] -> eval_error "record_entries: expected a record"
+        | _ -> eval_error "record_entries: expected one argument"))
+
+    (* record_get: returns Some(value) if field exists, None otherwise.
+       record_get(%{a: 1, b: 2}, "a") => Some(1)
+       record_get(%{a: 1}, "z") => None *)
+  ; ("record_get", VBuiltin ("record_get", function
+        | [VRecord fields; VString key] ->
+          (match List.assoc_opt key fields with
+           | Some v -> VCon ("Some", [v])
+           | None   -> VCon ("None", []))
+        | [_; _] -> eval_error "record_get: expected (record, string)"
+        | _ -> eval_error "record_get: expected two arguments"))
+
+    (* record_put: returns a new record with the field set (or added).
+       record_put(%{a: 1}, "b", 2) => %{a: 1, b: 2}
+       record_put(%{a: 1}, "a", 9) => %{a: 9} *)
+  ; ("record_put", VBuiltin ("record_put", function
+        | [VRecord fields; VString key; value] ->
+          let rec update = function
+            | [] -> [(key, value)]
+            | (k, _) :: rest when k = key -> (key, value) :: rest
+            | pair :: rest -> pair :: update rest
+          in
+          VRecord (update fields)
+        | [_; _; _] -> eval_error "record_put: expected (record, string, value)"
+        | _ -> eval_error "record_put: expected three arguments"))
+
+    (* record_has_key: returns true if the record has the given field.
+       record_has_key(%{a: 1}, "a") => true
+       record_has_key(%{a: 1}, "z") => false *)
+  ; ("record_has_key", VBuiltin ("record_has_key", function
+        | [VRecord fields; VString key] ->
+          VBool (List.exists (fun (k, _) -> k = key) fields)
+        | [_; _] -> eval_error "record_has_key: expected (record, string)"
+        | _ -> eval_error "record_has_key: expected two arguments"))
+
+    (* record_from_list: builds a record from a list of (string, value) pairs.
+       record_from_list([("a", 1), ("b", 2)]) => %{a: 1, b: 2} *)
+  ; ("record_from_list", VBuiltin ("record_from_list", function
+        | [lst] ->
+          let rec to_pairs = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [VTuple [VString k; v]; rest]) ->
+              (k, v) :: to_pairs rest
+            | _ -> eval_error "record_from_list: expected list of (string, value) pairs"
+          in
+          VRecord (to_pairs lst)
+        | _ -> eval_error "record_from_list: expected one argument"))
+
     (* ---- HTML template builtins ---- *)
 
     (* html_escape_str: OCaml-level HTML entity escaping for the auto-escape builtin. *)

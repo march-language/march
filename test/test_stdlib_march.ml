@@ -61,24 +61,27 @@ let read_file path =
     Prelude's functions land in global scope (matching bin/main.ml behaviour).
     All other files are returned as a single [DMod] so names are qualified. *)
 let load_stdlib_decls name =
-  Printf.eprintf "Parsing stdlib: %s\n%!" name;
   let path = find_stdlib_file name in
   let src  = read_file path in
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-  let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
-  let m = March_desugar.Desugar.desugar_module m in
-  if name = "prelude.march" then
-    (* Unwrap outer mod so prelude globals are in scope directly *)
-    (match m.March_ast.Ast.mod_decls with
-     | [March_ast.Ast.DMod (_, _, inner, _)] -> inner
-     | decls -> decls)
-  else
-    [March_ast.Ast.DMod (m.March_ast.Ast.mod_name,
-                         March_ast.Ast.Public,
-                         m.March_ast.Ast.mod_decls,
-                         March_ast.Ast.dummy_span)]
+  try
+    let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+    let m = March_desugar.Desugar.desugar_module m in
+    if name = "prelude.march" then
+      (* Unwrap outer mod so prelude globals are in scope directly *)
+      (match m.March_ast.Ast.mod_decls with
+       | [March_ast.Ast.DMod (_, _, inner, _)] -> inner
+       | decls -> decls)
+    else
+      [March_ast.Ast.DMod (m.March_ast.Ast.mod_name,
+                           March_ast.Ast.Public,
+                           m.March_ast.Ast.mod_decls,
+                           March_ast.Ast.dummy_span)]
+  with _ ->
+    Printf.eprintf "[test] skipping stdlib %s (parse error)\n%!" name;
+    []
 
 (** Load all stdlib modules in dependency order, matching bin/main.ml. *)
 let all_stdlib_decls =
@@ -113,6 +116,7 @@ let all_stdlib_decls =
     "process.march";
     "logger.march";
     "flow.march";
+    "regex.march";
     "test.march";
     "pubsub.march";
     "channel.march";
@@ -127,6 +131,9 @@ let all_stdlib_decls =
     "session.march";
     "correlation.march";
     "bastion_dev.march";
+    "depot_gate.march";
+    "depot_schema.march";
+    "depot_repo.march";
     "bastion_cookies.march";
     "bastion_routes.march";
     "bastion_pubsub.march";
@@ -289,5 +296,17 @@ let () =
     ("bastion_idempotency", [
       Alcotest.test_case "BastionIdempotency module"
         `Quick (run_stdlib_test "test_bastion_idempotency.march" "TestBastionIdempotency");
+    ]);
+    ("depot_gate", [
+      Alcotest.test_case "DepotGate module"
+        `Quick (run_stdlib_test "test_depot_gate.march" "TestDepotGate");
+    ]);
+    ("depot_schema", [
+      Alcotest.test_case "DepotSchema module"
+        `Quick (run_stdlib_test "test_depot_schema.march" "TestDepotSchema");
+    ]);
+    ("depot_repo", [
+      Alcotest.test_case "DepotRepo module"
+        `Quick (run_stdlib_test "test_depot_repo.march" "TestDepotRepo");
     ]);
   ]

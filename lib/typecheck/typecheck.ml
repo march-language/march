@@ -896,6 +896,14 @@ let builtin_bindings : (string * scheme) list =
     ("is_nil", poly1 (fun a -> TArrow (t_list a, t_bool)));
     (* Generic to_string: ∀a. a -> String *)
     ("to_string", poly1 (fun a -> TArrow (a, t_string)));
+    (* Record introspection builtins: ∀a b. fully polymorphic — runtime checks type *)
+    ("record_keys",      poly1 (fun a -> TArrow (a, t_list t_string)));
+    ("record_values",    poly2 (fun a b -> TArrow (a, t_list b)));
+    ("record_entries",   poly2 (fun a b -> TArrow (a, t_list (TTuple [t_string; b]))));
+    ("record_get",       poly2 (fun a b -> TArrow (a, TArrow (t_string, t_option b))));
+    ("record_put",       poly2 (fun a b -> TArrow (a, TArrow (t_string, TArrow (b, a)))));
+    ("record_has_key",   poly1 (fun a -> TArrow (a, TArrow (t_string, t_bool))));
+    ("record_from_list", poly2 (fun a b -> TArrow (t_list (TTuple [t_string; a]), b)));
     (* Generic to_json/from_json: fully polymorphic — runtime dispatches via impl_tbl.
        ∀a b. a -> b  — this avoids shadowing when multiple types derive Json. *)
     ("to_json",   poly2 (fun a b -> TArrow (a, b)));

@@ -619,4 +619,253 @@ describe "pipeline composition" do
   end
 end
 
+-- ---------------------------------------------------------------------------
+-- Gate v2: record-based cast_record with diff tracking
+-- ---------------------------------------------------------------------------
+
+describe "Depot.Gate.cast_record" do
+  test "creates a gate from base record and params" do
+    let base = { name = "", email = "", age = 0 }
+    let params = { name = "Alice", email = "alice@test.com" }
+    let gate = Depot.Gate.cast_record(base, params, ["name", "email"])
+    assert Depot.Gate.is_valid(gate)
+  end
+
+  test "only records changes that differ from base" do
+    let base = { name = "Alice", role = "user" }
+    let params = { name = "Alice", role = "admin" }
+    let gate = Depot.Gate.cast_record(base, params, ["name", "role"])
+    -- name is the same, so only role should be a change
+    assert Depot.Gate.get_change(gate, "name") == None
+    assert Depot.Gate.get_change(gate, "role") == Some("admin")
+  end
+
+  test "filters out fields not in the allow list" do
+    let base = { name = "", email = "" }
+    let params = { name = "Alice", email = "alice@test.com", is_admin = true }
+    let gate = Depot.Gate.cast_record(base, params, ["name", "email"])
+    assert Depot.Gate.get_change(gate, "is_admin") == None
+  end
+
+  test "same values produce no changes" do
+    let base = { name = "Alice", email = "alice@test.com" }
+    let params = { name = "Alice", email = "alice@test.com" }
+    let gate = Depot.Gate.cast_record(base, params, ["name", "email"])
+    assert Depot.Gate.changed_fields(gate) == Nil
+    assert Depot.Gate.is_valid(gate)
+  end
+
+  test "insert flow: all non-default params become changes" do
+    let base = { name = "", email = "", role = "user" }
+    let params = { name = "Alice", email = "alice@test.com", role = "user" }
+    let gate = Depot.Gate.cast_record(base, params, ["name", "email", "role"])
+    -- name and email differ from base defaults, role is same
+    assert Depot.Gate.get_change(gate, "name") == Some("Alice")
+    assert Depot.Gate.get_change(gate, "email") == Some("alice@test.com")
+    assert Depot.Gate.get_change(gate, "role") == None
+  end
+
+  test "integer values tracked correctly" do
+    let base = { name = "", age = 0 }
+    let params = { name = "Alice", age = 30 }
+    let gate = Depot.Gate.cast_record(base, params, ["name", "age"])
+    -- get_change returns polymorphic Some(value); compare via to_string
+    assert to_string(Depot.Gate.get_change(gate, "age")) == "Some(30)"
+  end
+
+  test "boolean values tracked correctly" do
+    let base = { confirmed = false }
+    let params = { confirmed = true }
+    let gate = Depot.Gate.cast_record(base, params, ["confirmed"])
+    assert to_string(Depot.Gate.get_change(gate, "confirmed")) == "Some(true)"
+  end
+end
+
+describe "Depot.Gate v2 get_field" do
+  test "returns change when present" do
+    let base = { name = "Alice" }
+    let params = { name = "Alicia" }
+    let gate = Depot.Gate.cast_record(base, params, ["name"])
+    assert Depot.Gate.get_field(gate, "name") == Some("Alicia")
+  end
+
+  test "falls back to base when no change" do
+    let base = { name = "Alice", email = "alice@test.com" }
+    let params = { name = "Alicia" }
+    let gate = Depot.Gate.cast_record(base, params, ["name", "email"])
+    assert Depot.Gate.get_field(gate, "email") == Some("alice@test.com")
+  end
+
+  test "returns None for unknown field" do
+    let base = { name = "Alice" }
+    let params = { name = "Alicia" }
+    let gate = Depot.Gate.cast_record(base, params, ["name"])
+    assert Depot.Gate.get_field(gate, "nonexistent") == None
+  end
+end
+
+describe "Depot.Gate v2 put_change / delete_change" do
+  test "put_change adds a change" do
+    let base = { name = "", email = "" }
+    let params = { name = "Alice" }
+    let gate = Depot.Gate.cast_record(base, params, ["name"])
+    let gate2 = Depot.Gate.put_change(gate, "email", "alice@test.com")
+    assert Depot.Gate.get_change(gate2, "email") == Some("alice@test.com")
+  end
+
+  test "delete_change removes a change" do
+    let base = { name = "", password = "" }
+    let params = { name = "Alice", password = "secret" }
+    let gate = Depot.Gate.cast_record(base, params, ["name", "password"])
+    let gate2 = Depot.Gate.delete_change(gate, "password")
+    assert Depot.Gate.get_change(gate2, "password") == None
+    assert Depot.Gate.get_change(gate2, "name") == Some("Alice")
+  end
+end
+
+describe "Depot.Gate v2 changed_fields / changed" do
+  test "changed_fields returns list of changed field names" do
+    let base = { name = "Alice", email = "old@test.com", role = "user" }
+    let params = { name = "Alicia", email = "new@test.com", role = "user" }
+    let gate = Depot.Gate.cast_record(base, params, ["name", "email", "role"])
+    let fields = Depot.Gate.changed_fields(gate)
+    assert List.member(fields, "name")
+    assert List.member(fields, "email")
+    assert List.member(fields, "role") == false
+  end
+
+  test "changed returns true for changed field" do
+    let base = { name = "Alice" }
+    let params = { name = "Alicia" }
+    let gate = Depot.Gate.cast_record(base, params, ["name"])
+    assert Depot.Gate.changed(gate, "name") == true
+  end
+
+  test "changed returns false for unchanged field" do
+    let base = { name = "Alice", role = "user" }
+    let params = { name = "Alicia", role = "user" }
+    let gate = Depot.Gate.cast_record(base, params, ["name", "role"])
+    assert Depot.Gate.changed(gate, "role") == false
+  end
+end
+
+describe "Depot.Gate v2 apply_changes" do
+  test "merges base and changes" do
+    let base = { name = "Alice", email = "old@test.com", role = "user" }
+    let params = { name = "Alicia", email = "old@test.com", role = "user" }
+    let gate = Depot.Gate.cast_record(base, params, ["name", "email", "role"])
+    let merged = Depot.Gate.apply_changes(gate)
+    -- merged is an assoc list: base with changes applied
+    assert List.member(merged, ("name", "Alicia"))
+    assert List.member(merged, ("email", "old@test.com"))
+    assert List.member(merged, ("role", "user"))
+  end
+
+  test "apply_changes with put_change" do
+    let base = { name = "", password_hash = "" }
+    let params = { name = "Alice" }
+    let gate = Depot.Gate.cast_record(base, params, ["name"])
+    let gate2 = Depot.Gate.put_change(gate, "password_hash", "hashed123")
+    let merged = Depot.Gate.apply_changes(gate2)
+    assert List.member(merged, ("name", "Alice"))
+    assert List.member(merged, ("password_hash", "hashed123"))
+  end
+end
+
+describe "Depot.Gate v2 validators" do
+  test "validate_required works with record values" do
+    let base = { name = "", email = "" }
+    let params = { name = "Alice" }
+    let gate = Depot.Gate.cast_record(base, params, ["name", "email"])
+    let gate2 = Depot.Gate.validate_required(gate, ["name", "email"])
+    assert Depot.Gate.is_valid(gate2) == false
+    assert Depot.Gate.get_errors(gate2, "email") == Cons("can't be blank", Nil)
+  end
+
+  test "validate_required passes for non-empty values" do
+    let base = { name = "", email = "" }
+    let params = { name = "Alice", email = "alice@test.com" }
+    let gate = Depot.Gate.cast_record(base, params, ["name", "email"])
+    let gate2 = Depot.Gate.validate_required(gate, ["name", "email"])
+    assert Depot.Gate.is_valid(gate2)
+  end
+
+  test "validate_required handles non-empty value as non-blank" do
+    let base = { count = "0" }
+    let params = { count = "0" }
+    let gate = Depot.Gate.cast_record(base, params, ["count"])
+    -- count="0" in base, not changed, but get_field returns base value
+    let gate2 = Depot.Gate.validate_required(gate, ["count"])
+    assert Depot.Gate.is_valid(gate2)
+  end
+
+  test "validate_inclusion works with typed values" do
+    let base = { role = "user" }
+    let params = { role = "admin" }
+    let gate = Depot.Gate.cast_record(base, params, ["role"])
+    let gate2 = Depot.Gate.validate_inclusion(gate, "role", ["user", "admin", "mod"])
+    assert Depot.Gate.is_valid(gate2)
+  end
+
+  test "validate_inclusion rejects invalid value" do
+    let base = { role = "user" }
+    let params = { role = "superadmin" }
+    let gate = Depot.Gate.cast_record(base, params, ["role"])
+    let gate2 = Depot.Gate.validate_inclusion(gate, "role", ["user", "admin", "mod"])
+    assert Depot.Gate.is_valid(gate2) == false
+  end
+
+  test "add_error works on v2 gate" do
+    let base = { name = "" }
+    let params = { name = "Alice" }
+    let gate = Depot.Gate.cast_record(base, params, ["name"])
+    let gate2 = Depot.Gate.add_error(gate, "name", "custom error")
+    assert Depot.Gate.is_valid(gate2) == false
+    assert Depot.Gate.get_errors(gate2, "name") == Cons("custom error", Nil)
+  end
+end
+
+describe "Depot.Gate v2 constraint hints" do
+  test "unique_constraint works on v2 gate" do
+    let base = { email = "" }
+    let params = { email = "alice@test.com" }
+    let gate = Depot.Gate.cast_record(base, params, ["email"])
+    let gate2 = Depot.Gate.unique_constraint(gate, "email",
+      [ConstraintName("users_email_index"), ConstraintMessage("already taken")])
+    -- constraint registered but no error yet
+    assert Depot.Gate.is_valid(gate2)
+    -- apply constraint error
+    let gate3 = Depot.Gate.apply_constraint_error(gate2, "users_email_index")
+    assert Depot.Gate.is_valid(gate3) == false
+    assert Depot.Gate.get_errors(gate3, "email") == Cons("already taken", Nil)
+  end
+end
+
+describe "Depot.Gate v2 pipeline" do
+  test "full insert pipeline with schema" do
+    let base = { name = "", email = "", role = "user" }
+    let params = { name = "Alice", email = "alice@test.com", role = "admin" }
+    let gate = Depot.Gate.cast_record(base, params, ["name", "email", "role"])
+      |> Depot.Gate.validate_required(["name", "email"])
+      |> Depot.Gate.validate_inclusion("role", ["user", "admin", "mod"])
+    assert Depot.Gate.is_valid(gate)
+    assert Depot.Gate.get_change(gate, "name") == Some("Alice")
+    assert Depot.Gate.get_change(gate, "email") == Some("alice@test.com")
+    assert Depot.Gate.get_change(gate, "role") == Some("admin")
+  end
+
+  test "full update pipeline — unchanged fields not in changes" do
+    let existing = { name = "Alice", email = "alice@test.com", role = "user" }
+    let params = { name = "Alicia", email = "alice@test.com", role = "user" }
+    let gate = Depot.Gate.cast_record(existing, params, ["name", "email", "role"])
+      |> Depot.Gate.validate_required(["name", "email"])
+    assert Depot.Gate.is_valid(gate)
+    -- only name changed
+    assert Depot.Gate.changed(gate, "name") == true
+    assert Depot.Gate.changed(gate, "email") == false
+    assert Depot.Gate.changed(gate, "role") == false
+    assert List.length(Depot.Gate.changed_fields(gate)) == 1
+  end
+end
+
 end -- mod TestDepotGate
