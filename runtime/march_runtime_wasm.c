@@ -318,7 +318,24 @@ void *march_string_reverse(void *s) { return s; }
 void *march_string_pad_left(void *s, int64_t w, void *f) { (void)w; (void)f; return s; }
 void *march_string_pad_right(void *s, int64_t w, void *f) { (void)w; (void)f; return s; }
 int64_t march_string_grapheme_count(void *s) { return ((march_string *)s)->length; }
-void *march_string_index_of(void *s, void *sub) { (void)s; (void)sub; return march_alloc(24); /* None */ }
+void *march_string_index_of(void *s, void *sub) {
+    march_string *str = (march_string *)s;
+    march_string *sub_s = (march_string *)sub;
+    if (!str || !sub_s || sub_s->length == 0) return march_alloc(24); /* None */
+    for (int64_t i = 0; i <= str->length - sub_s->length; i++) {
+        int match = 1;
+        for (int64_t j = 0; j < sub_s->length; j++) {
+            if (str->data[i + j] != sub_s->data[j]) { match = 0; break; }
+        }
+        if (match) {
+            void *box = march_alloc(24);
+            *(int32_t *)((char *)box + 8) = 1;  /* tag = Some */
+            *(int64_t *)((char *)box + 16) = i;
+            return box;
+        }
+    }
+    return march_alloc(24); /* None */
+}
 void *march_string_last_index_of(void *s, void *sub) { (void)s; (void)sub; return march_alloc(24); /* None */ }
 void *march_string_to_float(void *s) { (void)s; return march_alloc(24); /* None */ }
 
@@ -399,6 +416,11 @@ void *march_iolist_flatten(void *iolist) {
     result->length = written;
     result->data   = buf;
     return result;
+}
+
+/* string_length — emitted by the compiler as a builtin (without march_ prefix). */
+int64_t string_length(void *str) {
+    return str ? ((march_string *)str)->length : 0;
 }
 
 /* String accessor helpers — used by island JS bridge to read HTML back. */
