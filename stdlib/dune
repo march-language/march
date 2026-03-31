@@ -1,0 +1,4 @@
+(install
+ (package march)
+ (section share)
+ (files (glob_files *.march)))

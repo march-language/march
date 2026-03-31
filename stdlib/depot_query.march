@@ -1,0 +1,319 @@
+-- Depot.Query: composable, lazy query builder for in-memory data.
+--
+-- Builds a query value from a Depot.Schema that accumulates operations
+-- (where, select, order_by, limit, offset). The query is lazy — no
+-- filtering happens until `execute/2` is called with a list of rows.
+--
+-- Usage:
+--
+--   let q = Depot.Query.from(schema())
+--     |> Depot.Query.where_(fn row -> record_get(row, "age") > Some(18))
+--     |> Depot.Query.order_asc("name")
+--     |> Depot.Query.limit(10)
+--
+--   let results = Depot.Query.execute(q, all_rows)
+--
+-- Multiple `where_` calls are AND-combined. Order of operations in execute:
+--   1. Filter (where predicates, AND-combined)
+--   2. Sort (order_by fields)
+--   3. Offset (drop N rows)
+--   4. Limit (take N rows)
+--   5. Project (select mapping)
+
+mod Depot.Query do
+
+-- ---------------------------------------------------------------------------
+-- Types
+-- ---------------------------------------------------------------------------
+
+-- Query(schema, wheres, select_fn, order_bys, limit_val, offset_val)
+--   schema     : the Depot.Schema value
+--   wheres     : list of predicate functions (each: row -> Bool), AND-combined
+--   select_fn  : None or Some(fn) for projection (row -> projected_row)
+--   order_bys  : list of (field_name, direction) pairs, direction = "asc" | "desc"
+--   limit_val  : None or Some(Int)
+--   offset_val : None or Some(Int)
+type Query = Query(a, List(b), c, List((String, String)), d, e)
+
+-- ---------------------------------------------------------------------------
+-- Construction
+-- ---------------------------------------------------------------------------
+
+doc """
+Wrap a Depot.Schema into a fresh query with no operations.
+
+    let q = Depot.Query.from(schema())
+"""
+fn from(schema) do
+  Query(schema, Nil, None, Nil, None, None)
+end
+
+-- ---------------------------------------------------------------------------
+-- Composable operations (all return a new Query)
+-- ---------------------------------------------------------------------------
+
+doc """
+Add a where predicate. Multiple calls are AND-combined.
+
+The predicate receives a row (record) and must return a Bool.
+
+    q |> Depot.Query.where_(fn row -> record_get(row, "active") == Some(true))
+"""
+fn where_(query, predicate) do
+  match query do
+    Query(s, ws, sel, obs, lim, off) ->
+      Query(s, List.append(ws, Cons(predicate, Nil)), sel, obs, lim, off)
+  end
+end
+
+doc """
+Set the select projection. Replaces any previous select.
+
+The projection receives a row (record) and returns a new value.
+
+    q |> Depot.Query.select(fn row ->
+      { name = record_get(row, "name"), email = record_get(row, "email") }
+    )
+"""
+fn select(query, projection) do
+  match query do
+    Query(s, ws, _, obs, lim, off) ->
+      Query(s, ws, Some(projection), obs, lim, off)
+  end
+end
+
+doc """
+Add an order_by clause with explicit direction ("asc" or "desc").
+
+Multiple calls accumulate: earlier calls have higher priority.
+
+    q |> Depot.Query.order_by("name", "asc")
+      |> Depot.Query.order_by("age", "desc")
+"""
+fn order_by(query, field, direction) do
+  match query do
+    Query(s, ws, sel, obs, lim, off) ->
+      Query(s, ws, sel, List.append(obs, Cons((field, direction), Nil)), lim, off)
+  end
+end
+
+doc """
+Add an ascending order_by clause.
+
+    q |> Depot.Query.order_asc("name")
+"""
+fn order_asc(query, field) do
+  order_by(query, field, "asc")
+end
+
+doc """
+Add a descending order_by clause.
+
+    q |> Depot.Query.order_desc("name")
+"""
+fn order_desc(query, field) do
+  order_by(query, field, "desc")
+end
+
+doc """
+Set a limit on the number of results. Replaces any previous limit.
+
+    q |> Depot.Query.limit(10)
+"""
+fn limit(query, n) do
+  match query do
+    Query(s, ws, sel, obs, _, off) ->
+      Query(s, ws, sel, obs, Some(n), off)
+  end
+end
+
+doc """
+Set an offset (skip N rows). Replaces any previous offset.
+
+    q |> Depot.Query.offset(20)
+"""
+fn offset(query, n) do
+  match query do
+    Query(s, ws, sel, obs, lim, _) ->
+      Query(s, ws, sel, obs, lim, Some(n))
+  end
+end
+
+-- ---------------------------------------------------------------------------
+-- Accessors
+-- ---------------------------------------------------------------------------
+
+doc """
+Returns the schema associated with this query.
+
+    Depot.Query.schema(q)
+"""
+fn schema(query) do
+  match query do Query(s, _, _, _, _, _) -> s end
+end
+
+-- ---------------------------------------------------------------------------
+-- Private helpers for execute
+-- ---------------------------------------------------------------------------
+
+-- Apply all where predicates to a list of rows (AND-combined).
+pfn apply_wheres(rows, predicates) do
+  match predicates do
+    Nil -> rows
+    Cons(pred, rest) ->
+      let filtered = List.filter(rows, pred)
+      apply_wheres(filtered, rest)
+  end
+end
+
+-- Take the first n elements from a list.
+pfn take(lst, n) do
+  if n <= 0 do
+    Nil
+  else
+    match lst do
+      Nil -> Nil
+      Cons(h, t) -> Cons(h, take(t, n - 1))
+    end
+  end
+end
+
+-- Drop the first n elements from a list.
+pfn drop_rows(lst, n) do
+  if n <= 0 do
+    lst
+  else
+    match lst do
+      Nil -> Nil
+      Cons(_, t) -> drop_rows(t, n - 1)
+    end
+  end
+end
+
+-- Compare two values extracted from records by a field name.
+-- Returns negative if a < b, 0 if equal, positive if a > b.
+pfn compare_field_values(a, b) do
+  if a == b then 0
+  else if a < b then 0 - 1
+  else 1
+end
+
+-- Build a comparison function from order_by clauses.
+-- Returns true if row_a should come before row_b.
+pfn compare_rows(row_a, row_b, order_bys) do
+  match order_bys do
+    Nil -> true
+    Cons((field, direction), rest) ->
+      let va = match record_get(row_a, field) do
+        Some(v) -> v
+        None -> ""
+      end
+      let vb = match record_get(row_b, field) do
+        Some(v) -> v
+        None -> ""
+      end
+      let cmp = compare_field_values(va, vb)
+      if cmp == 0 then compare_rows(row_a, row_b, rest)
+      else if direction == "desc" then cmp > 0
+      else cmp < 0
+  end
+end
+
+-- Insertion sort for rows using order_by clauses.
+pfn insert_row(row, sorted, order_bys) do
+  match sorted do
+    Nil -> Cons(row, Nil)
+    Cons(h, t) ->
+      if compare_rows(row, h, order_bys) then Cons(row, sorted)
+      else Cons(h, insert_row(row, t, order_bys))
+  end
+end
+
+pfn sort_rows(rows, order_bys) do
+  match rows do
+    Nil -> Nil
+    Cons(h, t) -> insert_row(h, sort_rows(t, order_bys), order_bys)
+  end
+end
+
+-- ---------------------------------------------------------------------------
+-- Execution
+-- ---------------------------------------------------------------------------
+
+doc """
+Execute a query against a list of rows (records).
+
+Applies operations in order:
+  1. where predicates (AND-combined filter)
+  2. order_by (stable insertion sort)
+  3. offset (drop N rows)
+  4. limit (take N rows)
+  5. select projection (map)
+
+    let results = Depot.Query.execute(query, rows)
+"""
+fn execute(query, rows) do
+  match query do
+    Query(_, wheres, sel, order_bys, lim, off) ->
+      -- 1. Filter
+      let filtered = apply_wheres(rows, wheres)
+      -- 2. Sort
+      let sorted = match order_bys do
+        Nil -> filtered
+        _ -> sort_rows(filtered, order_bys)
+      end
+      -- 3. Offset
+      let offset_applied = match off do
+        None -> sorted
+        Some(n) -> drop_rows(sorted, n)
+      end
+      -- 4. Limit
+      let limited = match lim do
+        None -> offset_applied
+        Some(n) -> take(offset_applied, n)
+      end
+      -- 5. Project
+      match sel do
+        None -> limited
+        Some(proj) -> List.map(limited, proj)
+      end
+  end
+end
+
+doc """
+Count the results of a query without materializing them.
+Only applies where predicates (ignores order_by, limit, offset, select).
+
+    let n = Depot.Query.count(query, rows)
+"""
+fn count(query, rows) do
+  match query do
+    Query(_, wheres, _, _, _, _) ->
+      let filtered = apply_wheres(rows, wheres)
+      List.length(filtered)
+  end
+end
+
+doc """
+Returns true if the query would return any results.
+
+    Depot.Query.exists(query, rows)
+"""
+fn exists(query, rows) do
+  count(query, rows) > 0
+end
+
+doc """
+Returns the first result of a query, or None.
+
+    Depot.Query.first(query, rows)
+"""
+fn first(query, rows) do
+  let results = execute(limit(query, 1), rows)
+  match results do
+    Cons(row, _) -> Some(row)
+    Nil -> None
+  end
+end
+
+end -- mod Depot.Query
