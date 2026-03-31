@@ -229,6 +229,7 @@ let fmt_param p =
 let fmt_fn_param = function
   | FPPat  p -> fmt_pat p
   | FPNamed p -> fmt_param p
+  | FPDefault (p, _default_e) -> fmt_param p ^ " \\\\ _"
 
 (* ------------------------------------------------------------------ *)
 (* Infix operator handling                                            *)

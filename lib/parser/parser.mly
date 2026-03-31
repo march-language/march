@@ -75,6 +75,45 @@
       | d :: rest -> go (d :: acc) rest
     in
     go [] decls
+
+  (** Build a lambda from a pattern and body for comprehension desugaring.
+      PatVar names become a simple named param.
+      All other patterns wrap in a match. *)
+  let mk_comp_lambda pat body sp =
+    match pat with
+    | PatVar name ->
+      ELam ([{ param_name = name; param_ty = None; param_lin = Unrestricted }], body, sp)
+    | _ ->
+      let arg = { txt = "__celem"; span = sp } in
+      let br = { branch_pat = pat; branch_guard = None; branch_body = body } in
+      ELam (
+        [{ param_name = arg; param_ty = None; param_lin = Unrestricted }],
+        EMatch (EVar arg, [br], sp),
+        sp)
+
+  (** [x * 2 for x in xs]         → List.map(xs, fn x -> x * 2)
+      [x * 2 for x in xs, x > 3]  → List.map(List.filter(xs, fn x -> x > 3), fn x -> x * 2) *)
+  let desugar_list_comp body pat src pred_opt sp =
+    let map_lam    = mk_comp_lambda pat body sp in
+    let mk_var txt = EVar { txt; span = sp } in
+    let source = match pred_opt with
+      | None -> src
+      | Some pred ->
+        let filter_lam = mk_comp_lambda pat pred sp in
+        EApp (mk_var "List.filter", [src; filter_lam], sp)
+    in
+    EApp (mk_var "List.map", [source; map_lam], sp)
+
+  (** Build nested EMatch for a `with` expression.
+      with Ok(a) <- e1, Ok(b) <- e2 do body else Err(x) -> h end
+      → match e1 do Ok(a) -> match e2 do Ok(b) -> body | Err(x) -> h end | Err(x) -> h end *)
+  let rec build_with bindings body else_arms sp =
+    match bindings with
+    | [] -> body
+    | (pat, e) :: rest ->
+      let inner = build_with rest body else_arms sp in
+      let ok_br = { branch_pat = pat; branch_guard = None; branch_body = inner } in
+      EMatch (e, ok_br :: else_arms, sp)
 %}
 
 %token <int> INT
@@ -89,7 +128,7 @@
 %token STATE INIT PROTOCOL LOOP
 %token LINEAR AFFINE
 %token INTERFACE IMPL SIG EXTERN AS USE NEEDS REQUIRES
-%token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE FOR
+%token IMPORT ALIAS ONLY EXCEPT PFN PTYPE DERIVE FOR IN OPAQUE GETS DSLASH
 %token APP ON_START ON_STOP
 %token CHOOSE BY OFFER
 %token TEST DESCRIBE ASSERT SETUP SETUP_ALL
@@ -246,6 +285,10 @@ fn_param:
     { FPNamed { param_name = name; param_ty = Some t; param_lin = Unrestricted } }
   | LINEAR; name = lower_name; COLON; t = ty
     { FPNamed { param_name = name; param_ty = Some t; param_lin = Linear } }
+  | name = lower_name; DSLASH; default_e = expr
+    { FPDefault ({ param_name = name; param_ty = None; param_lin = Unrestricted }, default_e) }
+  | name = lower_name; COLON; t = ty; DSLASH; default_e = expr
+    { FPDefault ({ param_name = name; param_ty = Some t; param_lin = Unrestricted }, default_e) }
 
 let_decl:
   | LET; p = simple_pattern; ty = option(type_annot); EQUALS; e = expr
@@ -258,6 +301,16 @@ let_decl:
         $startpos($4) }
 
 type_decl:
+  (* opaque type: type name public, constructors private to module *)
+  | OPAQUE; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
+    variants = separated_nonempty_list(PIPE, variant)
+    { let tps = match tparams with Some ps -> ps | None -> [] in
+      let private_variants = List.map (fun v -> { v with var_vis = Private }) variants in
+      DType (Public, name, tps, TDVariant private_variants, mk_span ($loc)) }
+  | OPAQUE; TYPE; name = upper_name; tparams = option(type_params); EQUALS;
+    LBRACE; fields = separated_list(COMMA, field); RBRACE
+    { let tps = match tparams with Some ps -> ps | None -> [] in
+      DType (Public, name, tps, TDRecord fields, mk_span ($loc)) }
   | TYPE; name = upper_name; tparams = option(type_params); EQUALS;
     variants = separated_nonempty_list(PIPE, variant)
     { let tps = match tparams with Some ps -> ps | None -> [] in
@@ -697,6 +750,9 @@ block_expr:
                  param_lin = fp.param_lin }
         | FPPat (PatVar n) ->
           Some { param_name = n; param_ty = None; param_lin = Unrestricted }
+        | FPDefault (fp, _) ->
+          Some { param_name = fp.param_name; param_ty = fp.param_ty;
+                 param_lin = fp.param_lin }
         | FPPat _ -> None) params in
       ELetFn (name, simple_params, ret, body, mk_span ($loc)) }
   | FN; _n = lower_name; LPAREN; _ps = separated_list(COMMA, fn_param); RPAREN; error
@@ -705,6 +761,7 @@ block_expr:
         (Some "fn name(params) do\n    body\nend")
         $startpos($6) }
   | e = expr { e }
+
 
 expr:
   | e = expr_pipe { e }
@@ -757,6 +814,13 @@ expr:
         "I was expecting `do` after the match expression here:"
         (Some "match expr do\n    Pattern -> result\nend")
         $startpos($3) }
+  | WITH; bindings = separated_nonempty_list(COMMA, with_binding);
+    DO; body = block_body; END
+    { build_with bindings body [] (mk_span ($loc)) }
+  | WITH; bindings = separated_nonempty_list(COMMA, with_binding);
+    DO; body = block_body;
+    ELSE; option(arm_sep); else_arms = separated_nonempty_list(arm_sep, branch); END
+    { build_with bindings body else_arms (mk_span ($loc)) }
 
 lambda_params:
   | name = lower_name { [{ param_name = name; param_ty = None; param_lin = Unrestricted }] }
@@ -869,6 +933,13 @@ expr_atom:
     { ETuple (e :: es, mk_span ($loc)) }
   | LPAREN; RPAREN { ETuple ([], mk_span ($loc)) }
   | DO; body = block_body; END { body }
+  (* List comprehension: [expr for pat in expr] or [expr for pat in expr, pred] *)
+  | LBRACKET; body = expr; FOR; pat = pattern; IN; src = expr; RBRACKET
+    { let sp = mk_span ($loc) in
+      desugar_list_comp body pat src None sp }
+  | LBRACKET; body = expr; FOR; pat = pattern; IN; src = expr; COMMA; pred = expr; RBRACKET
+    { let sp = mk_span ($loc) in
+      desugar_list_comp body pat src (Some pred) sp }
   (* List literals: [1, 2, 3]  →  Cons(1, Cons(2, Cons(3, Nil))) *)
   | LBRACKET; RBRACKET
     { ECon (mk_name "Nil" $loc, [], mk_span ($loc)) }
@@ -917,6 +988,10 @@ branch:
         "I was expecting `->` in the match arm here:"
         (Some "Pattern -> result")
         $startpos($3) }
+
+with_binding:
+  | pat = pattern; GETS; e = expr
+    { (pat, e) }
 
 cond_branch:
   | e = expr; ARROW; body = block_body

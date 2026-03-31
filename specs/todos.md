@@ -123,6 +123,14 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 
 ## Done (recently completed)
 
+- ✅ **List comprehensions** — `[expr for pat in list]` and `[expr for pat in list, pred]` syntax. Parser-level desugaring to `List.map`/`List.filter` + `List.map` in `lib/parser/parser.mly`. Requires `List` in scope. 4 new tests.
+
+- ✅ **`with` expressions** — Elixir-style monadic chaining: `with Ok(x) <- f(), Ok(y) <- g(x) do x + y end` with optional `else` block. Desugars to nested `EMatch` in parser (`build_with` helper). 4 new tests.
+
+- ✅ **Default argument values** — `fn greet(name, greeting \\ "Hello") do ... end` (Elixir-style `\\`). `FPDefault` AST node; `expand_defaults_decl` in `lib/desugar/desugar.ml` generates N shortened DFn decls. `VMultiarity` in `lib/eval/eval.ml` dispatches by arity. 3 new tests.
+
+- ✅ **Opaque types** — `opaque type Handle = Handle(Int)`: type name public, constructors private. `opaque` keyword in lexer/parser; sets `var_vis = Private` on all variants in typecheck. 4 new tests (2 internal access, 2 external enforcement).
+
 - ✅ **march-lang SKILL.md** — `.claude/skills/march-lang/SKILL.md`: comprehensive 1100-line language reference skill for Claude Code sessions. Covers: 11 wrong/right syntax pairs (conditionals, lambdas, zero-arg lambdas, multi-line lambdas, visibility, type variants, HTTP atoms, do-blocks, multi-head functions), full syntax quick-reference, all forge commands and forge search query modes, stdlib manifest for all 76 loaded modules with public API signatures, 8 idiomatic code examples (fib, HOF pipeline, HTTP server, binary tree, parallel tasks, actor system, option chaining, result collection), builtins reference grouped by category (int/float/math/string/char/list/IO/map/actors/tasks/network/crypto/system/utility), interpreter and compiled pipeline descriptions, and testing patterns with Alcotest.
 
 - ✅ **`Task` stdlib module** — `stdlib/task.march`: Elixir-style lightweight async tasks. `Task.async(f)`, `Task.await(task)`, `Task.await_ms(task, ms)`, `Task.await_unwrap(task)`, `Task.await_many(tasks)`, `Task.await_many_ms(tasks, ms)`, `Task.async_stream(list, f)`, `Task.async_stream_n(list, f, max_concurrency)`. Builds on `task_spawn`/`task_await`/`task_await_unwrap` primitives; zero-arg user functions wrapped to the `fn _ -> f()` thunk signature. Parses and typechecks cleanly.

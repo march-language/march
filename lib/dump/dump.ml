@@ -121,6 +121,7 @@ let fn_param_to_str = function
      | PatLit (LitBool b, _)   -> string_of_bool b
      | _             -> "_")
   | FPNamed p  -> param_to_str p
+  | FPDefault (p, _) -> param_to_str p ^ " \\\\ _"
 
 (* Collect names of functions directly called inside an expression.
    Only top-level calls are tracked (not recursive descent into every arm)

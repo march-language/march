@@ -18322,6 +18322,204 @@ let test_complete_qualified_from_registry () =
   Alcotest.(check bool) "private TestMod.secret not suggested" false (List.mem "TestMod.secret" results2);
   March_modules.Module_registry.reset ()
 
+(* ── List comprehension tests ────────────────────────────────────────────── *)
+
+let eval_with_list src =
+  let list_decl = load_stdlib_file_for_test "list.march" in
+  eval_with_stdlib [list_decl] src
+
+let test_comp_basic () =
+  let env = eval_with_list {|mod Test do
+    fn f() do
+      let nums = [1, 2, 3]
+      [x * 2 for x in nums]
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  let lst = vlist v in
+  Alcotest.(check int) "comp basic: length 3" 3 (List.length lst);
+  Alcotest.(check int) "comp basic: first elem 2" 2 (vint (List.nth lst 0));
+  Alcotest.(check int) "comp basic: last elem 6" 6 (vint (List.nth lst 2))
+
+let test_comp_filtered () =
+  let env = eval_with_list {|mod Test do
+    fn f() do
+      let nums = [1, 2, 3, 4, 5]
+      [x for x in nums, x % 2 == 0]
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  let lst = vlist v in
+  Alcotest.(check int) "comp filtered: length 2" 2 (List.length lst);
+  Alcotest.(check int) "comp filtered: first elem 2" 2 (vint (List.nth lst 0));
+  Alcotest.(check int) "comp filtered: second elem 4" 4 (vint (List.nth lst 1))
+
+let test_comp_inline_list () =
+  let env = eval_with_list {|mod Test do
+    fn f() do [x + 1 for x in [10, 20, 30]] end
+  end|} in
+  let v = call_fn env "f" [] in
+  let lst = vlist v in
+  Alcotest.(check int) "comp inline: length 3" 3 (List.length lst);
+  Alcotest.(check int) "comp inline: first 11" 11 (vint (List.nth lst 0))
+
+let test_comp_filter_all () =
+  let env = eval_with_list {|mod Test do
+    fn f() do [x for x in [1, 2, 3], x > 10] end
+  end|} in
+  let v = call_fn env "f" [] in
+  let lst = vlist v in
+  Alcotest.(check int) "comp filter all: empty list" 0 (List.length lst)
+
+(* ── with-expression tests ───────────────────────────────────────────────── *)
+
+let test_with_happy_path () =
+  let env = eval_module {|mod Test do
+    type Result(a, e) = Ok(a) | Err(e)
+    fn f() do
+      with Ok(x) <- Ok(1), Ok(y) <- Ok(2) do
+        x + y
+      end
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "with happy path: 1+2=3" 3 (vint v)
+
+let test_with_first_fails () =
+  let env = eval_module {|mod Test do
+    type Result(a, e) = Ok(a) | Err(e)
+    fn f() do
+      with Ok(x) <- Err("oops"), Ok(y) <- Ok(x + 1) do
+        y
+      else
+        Err(e) -> 99
+      end
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "with first fails: else branch" 99 (vint v)
+
+let test_with_second_fails () =
+  let env = eval_module {|mod Test do
+    type Result(a, e) = Ok(a) | Err(e)
+    fn f() do
+      with Ok(x) <- Ok(10), Ok(y) <- Err("bad") do
+        x + y
+      else
+        Err(e) -> 0
+      end
+    end
+  end|} in
+  let v = call_fn env "f" [] in
+  Alcotest.(check int) "with second fails: else branch" 0 (vint v)
+
+let test_with_no_else () =
+  let env = eval_module {|mod Test do
+    type Result(a, e) = Ok(a) | Err(e)
+    fn f(r) do
+      with Ok(x) <- r do x * 2 end
+    end
+  end|} in
+  let ok_val = March_eval.Eval.VCon ("Ok", [March_eval.Eval.VInt 5]) in
+  let v = call_fn env "f" [ok_val] in
+  Alcotest.(check int) "with no else: ok input" 10 (vint v)
+
+(* ── Default argument tests ──────────────────────────────────────────────── *)
+
+let test_default_arg_used () =
+  let env = eval_module {|mod Test do
+    fn greet(name, greeting \\ "Hello") do
+      greeting ++ ", " ++ name ++ "!"
+    end
+  end|} in
+  (* Call with 1 arg — default should be used *)
+  let v = call_fn env "greet" [March_eval.Eval.VString "World"] in
+  Alcotest.(check string) "default arg used" "Hello, World!" (vstr v)
+
+let test_default_arg_overridden () =
+  let env = eval_module {|mod Test do
+    fn greet(name, greeting \\ "Hello") do
+      greeting ++ ", " ++ name ++ "!"
+    end
+  end|} in
+  (* Call with 2 args — explicit value overrides default *)
+  let v = call_fn env "greet"
+    [March_eval.Eval.VString "World"; March_eval.Eval.VString "Hi"] in
+  Alcotest.(check string) "default arg overridden" "Hi, World!" (vstr v)
+
+let test_default_multiple_defaults () =
+  let env = eval_module {|mod Test do
+    fn make(x, y \\ 10, z \\ 20) do x + y + z end
+  end|} in
+  (* Call with just 1 arg: y=10, z=20 → 1+10+20=31 *)
+  let v1 = call_fn env "make" [March_eval.Eval.VInt 1] in
+  Alcotest.(check int) "multi-default: 1 arg" 31 (vint v1);
+  (* Call with 2 args: y=5, z=20 → 1+5+20=26 *)
+  let v2 = call_fn env "make"
+    [March_eval.Eval.VInt 1; March_eval.Eval.VInt 5] in
+  Alcotest.(check int) "multi-default: 2 args" 26 (vint v2);
+  (* Call with 3 args: y=5, z=6 → 1+5+6=12 *)
+  let v3 = call_fn env "make"
+    [March_eval.Eval.VInt 1; March_eval.Eval.VInt 5; March_eval.Eval.VInt 6] in
+  Alcotest.(check int) "multi-default: 3 args" 12 (vint v3)
+
+(* ── Opaque type tests ───────────────────────────────────────────────────── *)
+
+let test_opaque_type_internal_access () =
+  let env = eval_module {|mod Test do
+    opaque type Handle = Handle(Int)
+    fn make(n) do Handle(n) end
+    fn unwrap(h) do
+      match h do
+      Handle(n) -> n
+      end
+    end
+  end|} in
+  let h = call_fn env "make" [March_eval.Eval.VInt 42] in
+  let v = call_fn env "unwrap" [h] in
+  Alcotest.(check int) "opaque: internal access works" 42 (vint v)
+
+let test_opaque_type_is_public () =
+  (* The type name is exported but the constructor is private.
+     We verify the module can use Handle internally. *)
+  let env = eval_module {|mod Test do
+    opaque type Token = Token(String)
+    fn make(s) do Token(s) end
+    fn value(t) do match t do Token(s) -> s end end
+  end|} in
+  let tok = call_fn env "make" [March_eval.Eval.VString "secret"] in
+  let s = call_fn env "value" [tok] in
+  Alcotest.(check string) "opaque: type usable within module" "secret" (vstr s)
+
+let test_opaque_constructor_private_externally () =
+  (* Opaque constructors are private: using the constructor from outside the
+     defining module (even unqualified) should fail typechecking. *)
+  let ctx = typecheck {|mod Test do
+    mod M do
+      opaque type Handle = Handle(Int)
+      fn make(n) do Handle(n) end
+    end
+    fn main() do Handle(99) end
+  end|} in
+  Alcotest.(check bool) "opaque: ctor hidden outside module" true (has_errors ctx)
+
+let test_opaque_pattern_private_externally () =
+  (* Pattern matching on an opaque constructor from outside is also forbidden. *)
+  let ctx = typecheck {|mod Test do
+    mod M do
+      opaque type Wrap = Wrap(Int)
+      fn make(n) do Wrap(n) end
+    end
+    fn main() do
+      let w = M.make(42)
+      match w do
+        Wrap(n) -> n
+        _ -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check bool) "opaque: pattern hidden outside module" true (has_errors ctx)
+
 let () =
   Alcotest.run "march"
     [
@@ -19944,5 +20142,28 @@ let () =
         Alcotest.test_case "creates test file"          `Quick test_gen_json_creates_test_file;
         Alcotest.test_case "maps field types"           `Quick test_gen_json_schema_field_types;
         Alcotest.test_case "rejects invalid field spec" `Quick test_gen_json_invalid_field_spec;
+      ]);
+      ("list comprehensions", [
+        Alcotest.test_case "basic map"          `Quick test_comp_basic;
+        Alcotest.test_case "filtered"           `Quick test_comp_filtered;
+        Alcotest.test_case "inline list"        `Quick test_comp_inline_list;
+        Alcotest.test_case "filter all out"     `Quick test_comp_filter_all;
+      ]);
+      ("with expressions", [
+        Alcotest.test_case "happy path"         `Quick test_with_happy_path;
+        Alcotest.test_case "first fails"        `Quick test_with_first_fails;
+        Alcotest.test_case "second fails"       `Quick test_with_second_fails;
+        Alcotest.test_case "no else clause"     `Quick test_with_no_else;
+      ]);
+      ("default arguments", [
+        Alcotest.test_case "default used"       `Quick test_default_arg_used;
+        Alcotest.test_case "default overridden" `Quick test_default_arg_overridden;
+        Alcotest.test_case "multiple defaults"  `Quick test_default_multiple_defaults;
+      ]);
+      ("opaque types", [
+        Alcotest.test_case "internal access"    `Quick test_opaque_type_internal_access;
+        Alcotest.test_case "type is public"     `Quick test_opaque_type_is_public;
+        Alcotest.test_case "constructor private externally" `Quick test_opaque_constructor_private_externally;
+        Alcotest.test_case "pattern private externally"    `Quick test_opaque_pattern_private_externally;
       ]);
     ]

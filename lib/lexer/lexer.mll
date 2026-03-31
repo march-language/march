@@ -64,6 +64,8 @@ let () =
       ("except", EXCEPT);
       ("derive", DERIVE);
       ("for", FOR);
+      ("in", IN);
+      ("opaque", OPAQUE);
       ("pfn", PFN);
       ("ptype", PTYPE);
       ("app", APP);
@@ -118,7 +120,9 @@ rule token = parse
   | ']'           { RBRACKET }
   | '@'           { AT }
   | "->"          { ARROW }
+  | "<-"          { GETS }
   | "|>"          { PIPE_ARROW }
+  | "\\\\"        { DSLASH }
   | '='           { EQUALS }
   | ':'           { COLON }
   | ','           { COMMA }

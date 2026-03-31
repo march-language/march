@@ -69,6 +69,7 @@ let is_trivial_param = function
   | FPNamed _ -> true
   | FPPat (PatVar _) -> true   (* single var pattern is just a binding *)
   | FPPat _ -> false
+  | FPDefault _ -> false  (* forces desugar to run expand_defaults_in_def *)
 
 (** A guard looks like a type-class constraint (e.g. [Eq(a)]) when it is a
     constructor application whose constructor name starts with an uppercase
@@ -92,6 +93,7 @@ let clause_is_trivial (clause : fn_clause) =
 let fn_param_to_pattern : fn_param -> pattern = function
   | FPNamed p -> PatVar p.param_name
   | FPPat  p  -> p
+  | FPDefault (p, _) -> PatVar p.param_name
 
 (** Convert an [fn_param] into the "declaration" form used in the
     single merged clause.  We always use an [FPNamed] with the generated
@@ -1467,6 +1469,67 @@ let maybe_inject_island_bridges
   end
   else expanded
 
+(** Expand a [DFn] with [FPDefault] params into multiple [DFn] decls.
+    For each default parameter, generates a shortened version that calls
+    the full-arity function with the remaining defaults filled in.
+
+    Example: [fn greet(name, greeting \\ "Hello") -> ...]
+    Produces:
+      [fn greet(name) -> greet(name, "Hello")]
+      [fn greet(name, greeting) -> ...]       (* full-arity, FPDefault → FPNamed *)
+*)
+let expand_defaults_decl (d : decl) : decl list =
+  match d with
+  | DFn (def, sp) ->
+    (match def.fn_clauses with
+     | [] -> [d]
+     | first :: _ ->
+       let params = first.fc_params in
+       let required = List.filter (fun p -> match p with FPDefault _ -> false | _ -> true) params in
+       let defaults = List.filter_map (fun p -> match p with FPDefault (param, e) -> Some (param, e) | _ -> None) params in
+       if defaults = [] then [d]
+       else begin
+         let mk_var txt = EVar { txt; span = sp } in
+         (* Build the full-arity decl: replace FPDefault with FPNamed *)
+         let strip_default = function
+           | FPDefault (p, _) -> FPNamed p
+           | other -> other
+         in
+         let full_params = List.map strip_default params in
+         let full_clause = { first with fc_params = full_params } in
+         let full_def = { def with fn_clauses = [full_clause] } in
+         let full_decl = DFn (full_def, sp) in
+         (* Helper: extract the arg name from a required param for the call site *)
+         let req_arg_of_param p =
+           match p with
+           | FPNamed p -> mk_var p.param_name.txt
+           | FPPat (PatVar n) -> mk_var n.txt
+           | FPDefault (p, _) -> mk_var p.param_name.txt
+           | FPPat _ -> mk_var "__arg"   (* pattern params in required position: unusual *)
+         in
+         let req_args = List.map req_arg_of_param required in
+         (* For i = 0 to n_defaults-1: generate a version with arity = len(required)+i *)
+         let extra_decls = List.init (List.length defaults) (fun i ->
+           let short_params =
+             required @
+             List.filteri (fun j _ -> j < i) (List.map (fun (p, _) -> FPNamed p) defaults)
+           in
+           let passed_default_args =
+             List.filteri (fun j _ -> j < i) (List.map (fun (p, _) -> mk_var p.param_name.txt) defaults)
+           in
+           let remaining_default_exprs =
+             List.filteri (fun j _ -> j >= i) (List.map (fun (_, e) -> e) defaults)
+           in
+           let all_call_args = req_args @ passed_default_args @ remaining_default_exprs in
+           let body = EApp (mk_var def.fn_name.txt, all_call_args, sp) in
+           let short_clause = { fc_params = short_params; fc_guard = None; fc_body = body; fc_span = sp } in
+           let short_def = { def with fn_clauses = [short_clause]; fn_ret_ty = None } in
+           DFn (short_def, sp)
+         ) in
+         extra_decls @ [full_decl]
+       end)
+  | _ -> [d]
+
 (** Desugar an entire module.  Returns a new [module_] with all multi-head
     fns and pipe expressions lowered to their core forms.
     Also injects default interface method bodies into impls that omit them.
@@ -1480,7 +1543,7 @@ let desugar_module (m : module_) : module_ =
       match d with
       | DDeriving (type_name, ifaces, sp) ->
         expand_derive type_defs type_name ifaces sp
-      | _ -> [d]
+      | _ -> expand_defaults_decl d
     ) m.mod_decls in
   (* Auto-generate island bridge functions if this is an island module. *)
   let expanded = maybe_inject_island_bridges m.mod_decls expanded in
