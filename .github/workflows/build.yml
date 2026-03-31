@@ -24,11 +24,11 @@ jobs:
           - os: macos-13
             platform: darwin-x86_64
             ocaml-compiler: 5.3.0
-          - os: ubuntu-22.04
+          - os: ubuntu-24.04
             platform: linux-x86_64
             ocaml-compiler: 5.3.0
             static: true
-          - os: ubuntu-22.04
+          - os: ubuntu-24.04
             platform: linux-aarch64
             ocaml-compiler: 5.3.0
             static: true
@@ -68,7 +68,7 @@ jobs:
             -v ${{ github.workspace }}:/work
             -w /work
           run: |
-            apk add --no-cache bash opam ocaml build-base git
+            apk add --no-cache bash opam ocaml build-base git blake3-dev
             opam init --disable-sandboxing --bare -y
             opam switch create 5.3.0 ocaml-base-compiler.5.3.0
             eval $(opam env)
@@ -137,7 +137,7 @@ jobs:
 
   checksums:
     needs: build
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
