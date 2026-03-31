@@ -324,6 +324,70 @@ let bastion_cmd =
     (Cmd.info "bastion" ~doc:"Bastion web framework commands (server, new, routes, gen)")
     [bastion_new_cmd; bastion_server_cmd; bastion_routes_cmd; bastion_gen_cmd]
 
+(* ------------------------------------------------------------------- forge depot *)
+
+let depot_migrate_cmd =
+  Cmd.v (Cmd.info "migrate" ~doc:"Apply all pending migrations")
+    Term.(const (fun () ->
+        match Cmd_depot.run_migrate () with
+        | Ok () -> ()
+        | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+      ) $ const ())
+
+let depot_rollback_cmd =
+  let step =
+    Arg.(value & opt int 1 &
+         info ["step"; "n"] ~docv:"N"
+           ~doc:"Number of migrations to roll back (default: 1)")
+  in
+  let run n =
+    match Cmd_depot.run_rollback n with
+    | Ok () -> ()
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "rollback" ~doc:"Roll back the last N migrations")
+    Term.(const run $ step)
+
+let depot_migrations_cmd =
+  Cmd.v (Cmd.info "migrations" ~doc:"Show migration status (applied / pending)")
+    Term.(const (fun () ->
+        match Cmd_depot.run_migrations () with
+        | Ok () -> ()
+        | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+      ) $ const ())
+
+let depot_reset_cmd =
+  Cmd.v (Cmd.info "reset" ~doc:"Roll back all migrations and re-apply (dev reset)")
+    Term.(const (fun () ->
+        match Cmd_depot.run_reset () with
+        | Ok () -> ()
+        | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+      ) $ const ())
+
+let depot_gen_migration_cmd =
+  let name =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"NAME" ~doc:"Migration name (e.g. create_users, add_email_to_posts)")
+  in
+  let run n =
+    match Cmd_depot.run_gen_migration n with
+    | Ok () -> ()
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "migration" ~doc:"Generate a new timestamped migration stub")
+    Term.(const run $ name)
+
+let depot_gen_cmd =
+  Cmd.group
+    (Cmd.info "gen" ~doc:"Depot code generators")
+    [depot_gen_migration_cmd]
+
+let depot_cmd =
+  Cmd.group
+    (Cmd.info "depot" ~doc:"Database migration commands (migrate, rollback, migrations, reset, gen)")
+    [depot_migrate_cmd; depot_rollback_cmd; depot_migrations_cmd;
+     depot_reset_cmd; depot_gen_cmd]
+
 (* ------------------------------------------------------------------ forge phases *)
 
 let phases_cmd =
@@ -349,7 +413,7 @@ let () =
   let cmds =
     [ new_cmd; init_cmd; build_cmd; run_cmd; test_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; install_cmd; publish_cmd;
-      search_cmd; assets_cmd; bastion_cmd; phases_cmd; help_cmd ]
+      search_cmd; assets_cmd; bastion_cmd; depot_cmd; phases_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term
