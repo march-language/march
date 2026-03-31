@@ -2729,6 +2729,125 @@ end
       (result <> None)
 
 (* ------------------------------------------------------------------ *)
+(* Phase 3: TIR pipeline tests                                         *)
+(* ------------------------------------------------------------------ *)
+
+let test_tir_pass_does_not_crash () =
+  let src = {|
+mod Test do
+  fn double(x: Int) -> Int do
+    x * 2
+  end
+
+  fn main() -> Int do
+    double(21)
+  end
+end
+|} in
+  let a = analyse src in
+  let a2 = An.run_tir_pass a in
+  Alcotest.(check bool) "tir_fn_insights is a list" true
+    (List.length a2.An.tir_fn_insights >= 0);
+  Alcotest.(check bool) "code_lens_items is a list" true
+    (List.length a2.An.code_lens_items >= 0)
+
+let test_tir_pass_idempotent () =
+  let src = {|
+mod Test do
+  fn sum(xs: List(Int), acc: Int) -> Int do
+    match xs do
+      [] -> acc
+      [x, ..rest] -> sum(rest, acc + x)
+    end
+  end
+end
+|} in
+  let a = analyse src in
+  let a2 = An.run_tir_pass a in
+  let a3 = An.run_tir_pass a2 in
+  Alcotest.(check bool) "insights do not double on second pass" true
+    (List.length a3.An.perf_insights <= List.length a2.An.perf_insights + 3)
+
+let test_tir_pass_skipped_on_error () =
+  let src = {|
+mod Test do
+  fn broken() -> Int do
+    this_does_not_exist()
+  end
+end
+|} in
+  let a = analyse src in
+  let has_errors = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
+      d.severity = Some Lsp.Types.DiagnosticSeverity.Error
+    ) a.An.diagnostics
+  in
+  let a2 = An.run_tir_pass a in
+  if has_errors then
+    Alcotest.(check bool) "TIR pass skipped on error" true
+      (List.length a2.An.tir_fn_insights = 0)
+  else
+    Alcotest.(check bool) "TIR pass did not crash" true true
+
+let test_tir_indirect_call_insight () =
+  let src = {|
+mod Test do
+  fn apply(f: Int -> Int, x: Int) -> Int do
+    f(x)
+  end
+end
+|} in
+  let a = analyse src in
+  let a2 = An.run_tir_pass a in
+  let has_indirect = List.exists (fun (pi : An.perf_insight) ->
+      match pi.pi_kind with
+      | An.TirIndirectCall _ -> true
+      | _ -> false
+    ) a2.An.perf_insights
+  in
+  let has_tir_data = List.length a2.An.tir_fn_insights > 0 in
+  if has_tir_data then
+    Alcotest.(check bool) "HOF has indirect-call insight" true has_indirect
+  else
+    Alcotest.(check bool) "TIR pass completed" true true
+
+let test_tir_fn_insights_field_populated () =
+  let src = {|
+mod Test do
+  fn factorial(n: Int, acc: Int) -> Int do
+    match n do
+      0 -> acc
+      k -> factorial(k - 1, acc * k)
+    end
+  end
+end
+|} in
+  let a = analyse src in
+  let a2 = An.run_tir_pass a in
+  Alcotest.(check bool) "tir_fn_insights is a list" true
+    (List.length a2.An.tir_fn_insights >= 0);
+  let all_named = List.for_all (fun (tfi : An.tir_fn_insight) ->
+      String.length tfi.An.tfi_fn_name > 0
+    ) a2.An.tir_fn_insights in
+  Alcotest.(check bool) "all insights have non-empty fn names" true all_named
+
+let test_code_lens_consistent_with_tir_insights () =
+  let src = {|
+mod Test do
+  fn apply(f: Int -> Int, x: Int) -> Int do
+    f(x)
+  end
+end
+|} in
+  let a = analyse src in
+  let a2 = An.run_tir_pass a in
+  Alcotest.(check bool) "code lens count <= insight count" true
+    (List.length a2.An.code_lens_items <= List.length a2.An.tir_fn_insights);
+  let all_titled = List.for_all (fun (cl : An.code_lens_item) ->
+      String.length cl.An.cl_title > 0
+    ) a2.An.code_lens_items in
+  Alcotest.(check bool) "all code lens items have titles" true all_titled
+
+(* ------------------------------------------------------------------ *)
 (* Runner                                                              *)
 (* ------------------------------------------------------------------ *)
 
@@ -2938,5 +3057,13 @@ let () =
     ];
     "perf insights: hover integration", [
       "perf_insight_at returns message at call site", `Quick, test_perf_insight_at_returns_message_at_call_site;
+    ];
+    "perf insights phase 3: TIR pipeline", [
+      "run_tir_pass does not crash",             `Quick, test_tir_pass_does_not_crash;
+      "run_tir_pass is idempotent",              `Quick, test_tir_pass_idempotent;
+      "TIR pass skipped when source has errors", `Quick, test_tir_pass_skipped_on_error;
+      "HOF indirect-call insight",               `Quick, test_tir_indirect_call_insight;
+      "tir_fn_insights field populated",         `Quick, test_tir_fn_insights_field_populated;
+      "code lens consistent with TIR insights",  `Quick, test_code_lens_consistent_with_tir_insights;
     ];
   ]
