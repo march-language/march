@@ -7,8 +7,11 @@ let run ?(dump_phases=false) () =
     begin
       let lib_dir    = Filename.concat proj.Project.root "lib" in
       let config_dir = Filename.concat proj.Project.root "config" in
-      (* Entry point is lib/<name>.march *)
-      let entry = Filename.concat lib_dir (proj.Project.name ^ ".march") in
+      (* Entry point: use forge.toml [package] entrypoint if set, else lib/<name>.march *)
+      let entry = match proj.Project.entrypoint with
+        | Some ep -> Filename.concat proj.Project.root ep
+        | None    -> Filename.concat lib_dir (proj.Project.name ^ ".march")
+      in
       if not (Sys.file_exists entry) then
         Error (Printf.sprintf "entry point not found: %s" entry)
       else begin

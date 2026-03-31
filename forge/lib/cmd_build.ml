@@ -51,7 +51,10 @@ let build ~release ?(dump_phases=false) () =
       in
       let lib_path_env = Printf.sprintf "MARCH_LIB_PATH=%s " (String.concat ":" all_lib_paths)
       in
-      let entry = Filename.concat lib_dir (proj.Project.name ^ ".march") in
+      let entry = match proj.Project.entrypoint with
+        | Some ep -> Filename.concat proj.Project.root ep
+        | None    -> Filename.concat lib_dir (proj.Project.name ^ ".march")
+      in
       let cmd =
         Printf.sprintf "%smarch --compile -o %s%s%s %s"
           lib_path_env (Filename.quote output) opt_flag dump_flag (Filename.quote entry)
