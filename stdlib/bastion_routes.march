@@ -80,12 +80,11 @@ end
 
 -- URL-encode a single query parameter value (basic percent-encoding).
 pfn encode_query_value(s) do
-  s
-  |> (fn v -> String.replace_all(v, "&", "%26"))
-  |> (fn v -> String.replace_all(v, "=", "%3D"))
-  |> (fn v -> String.replace_all(v, "?", "%3F"))
-  |> (fn v -> String.replace_all(v, "#", "%23"))
-  |> (fn v -> String.replace_all(v, " ", "%20"))
+  let s = String.replace_all(s, "&", "%26")
+  let s = String.replace_all(s, "=", "%3D")
+  let s = String.replace_all(s, "?", "%3F")
+  let s = String.replace_all(s, "#", "%23")
+  String.replace_all(s, " ", "%20")
 end
 
 -- Build query string from a list of (String, String) pairs.

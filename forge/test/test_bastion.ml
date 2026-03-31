@@ -85,8 +85,8 @@ let test_scaffold_creates_required_files () =
       check ("lib/" ^ name ^ "/controllers/page_controller.march");
       check ("lib/" ^ name ^ "/templates/layout.march");
       check ("lib/" ^ name ^ "/templates/page/index.march");
-      check "priv/static/css/app.css";
-      check "priv/static/js/app.js";
+      check "assets/css/app.css";
+      check "assets/js/app.js";
       check "test/test_helper.march";
       check "test/controllers/test_page_controller.march")
 
@@ -204,7 +204,7 @@ let test_scaffold_css_exists_and_nonempty () =
       (match Scaffold_bastion.scaffold name with
        | Error m -> Alcotest.fail m
        | Ok () -> ());
-      let path = Filename.concat name "priv/static/css/app.css" in
+      let path = Filename.concat name "assets/css/app.css" in
       Alcotest.(check bool) "app.css non-empty" true
         (Sys.file_exists path && (read_file path |> String.length) > 0))
 

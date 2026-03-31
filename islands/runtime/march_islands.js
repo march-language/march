@@ -61,6 +61,24 @@ const ISLAND_ATTR  = 'data-march-island';
 const STATE_ATTR   = 'data-march-state';
 const HYDRATE_ATTR = 'data-march-hydrate';
 
+// ── DevTools instrumentation ────────────────────────────────────────────────
+
+/** Emit a DevTools event if __MARCH_DEBUG is enabled. */
+function devtoolsEmit(type, data) {
+  if (!window.__MARCH_DEBUG) return;
+  window.postMessage({
+    source: 'march-devtools-page',
+    payload: Object.assign({ type, timestamp: Date.now() }, data),
+  }, '*');
+}
+
+/** Safely parse a JSON state string; return the parsed object or the raw string. */
+function safeParseJson(s) {
+  try { return JSON.parse(s); } catch { return s; }
+}
+
+let _devtoolsIdCounter = 0;
+
 // ── IslandActor ───────────────────────────────────────────────────────────────
 
 /**
@@ -102,10 +120,35 @@ class IslandActor {
     while (this.#mailbox.length > 0) {
       const msg = this.#mailbox.shift();
       try {
+        // DevTools state restore — bypass update, set state directly
+        if (msg.tag === '__restore__' && msg.state !== undefined) {
+          this.#state = typeof msg.state === 'string' ? msg.state : JSON.stringify(msg.state);
+          this.#render();
+          devtoolsEmit('island:state-change', {
+            id: this.#element._marchIslandId,
+            name: this.#name,
+            state: safeParseJson(this.#state),
+            msg: { tag: '__restore__' },
+          });
+          continue;
+        }
+        const prevState = this.#state;
         this.#state = this.#wasm.update(this.#state, JSON.stringify(msg));
+        devtoolsEmit('island:state-change', {
+          id: this.#element._marchIslandId,
+          name: this.#name,
+          state: safeParseJson(this.#state),
+          prevState: safeParseJson(prevState),
+          msg,
+        });
         this.#render();
       } catch (err) {
         console.error(`[march-islands] ${this.#name}: update error`, err);
+        devtoolsEmit('island:error', {
+          id: this.#element._marchIslandId,
+          name: this.#name,
+          error: String(err),
+        });
       }
     }
     this.#ticking = false;
@@ -118,6 +161,11 @@ class IslandActor {
       attachEventHandlers(this.#element, this);
     } catch (err) {
       console.error(`[march-islands] ${this.#name}: render error`, err);
+      devtoolsEmit('island:error', {
+        id: this.#element._marchIslandId,
+        name: this.#name,
+        error: `render: ${err}`,
+      });
     }
   }
 }
@@ -313,10 +361,24 @@ async function hydrateIsland(element, baseUrl) {
   const name = element.getAttribute(ISLAND_ATTR);
   if (!name || element._marchActor) return; // already hydrated
 
+  const hydration = element.getAttribute(HYDRATE_ATTR) ?? 'eager';
+  const id = 'island-' + (++_devtoolsIdCounter);
+  element._marchIslandId = id;
+
+  // Emit mount (island discovered, WASM not yet loaded)
+  const initialStateJson = parseState(element);
+  devtoolsEmit('island:mount', {
+    id,
+    name,
+    hydration,
+    state: safeParseJson(initialStateJson),
+    wasmModule: `${name}.wasm`,
+  });
+
+  const t0 = performance.now();
   const wasm = await loadWasmModule(baseUrl, name);
   if (!wasm) return; // WASM not available; preserve SSR content
 
-  const initialStateJson = parseState(element);
   const actor = new IslandActor(name, wasm, initialStateJson, element);
 
   // Store on element for inter-island messaging
@@ -325,6 +387,10 @@ async function hydrateIsland(element, baseUrl) {
   // Register globally for cross-island messaging
   window.marchIslands = window.marchIslands ?? {};
   window.marchIslands[name] = actor;
+
+  // Emit hydrate with real WASM load duration
+  const duration = Math.round(performance.now() - t0);
+  devtoolsEmit('island:hydrate', { id, name, duration });
 
   // Kick off initial render (replaces SSR with live WASM output)
   actor.send({ tag: '__init__' });
@@ -390,10 +456,20 @@ function applyStrategy(element, baseUrl) {
  * Usage:
  *   window.marchIslands.send('Counter', { tag: 'Increment' });
  */
-function sendToIsland(name, msg) {
+function sendToIsland(name, msg, fromName) {
   const el = document.querySelector(`[${ISLAND_ATTR}="${name}"]`);
   if (el?._marchActor) {
+    devtoolsEmit('island:message-send', {
+      from: fromName || 'external',
+      to: name,
+      payload: msg,
+    });
     el._marchActor.send(msg);
+    devtoolsEmit('island:message-receive', {
+      to: name,
+      from: fromName || 'external',
+      payload: msg,
+    });
   } else {
     console.warn(`[march-islands] No hydrated island named "${name}"`);
   }
@@ -424,6 +500,47 @@ function bootstrap() {
 
 // Install cross-island send API
 window.marchIslands = { send: sendToIsland };
+
+// DevTools scan support — respond with real runtime state
+function devtoolsScan() {
+  const elements = document.querySelectorAll(`[${ISLAND_ATTR}]`);
+  const islands = [];
+  elements.forEach(el => {
+    const name = el.getAttribute(ISLAND_ATTR);
+    const id = el._marchIslandId || ('island-' + (++_devtoolsIdCounter));
+    el._marchIslandId = id;
+    islands.push({
+      id,
+      name,
+      hydration: el.getAttribute(HYDRATE_ATTR) ?? 'eager',
+      status: el._marchActor ? 'hydrated' : 'pending',
+      state: safeParseJson(parseState(el)),
+      props: {},
+      wasmModule: `${name}.wasm`,
+      parentId: null,
+      children: [],
+      mountedAt: Date.now(),
+    });
+  });
+  window.postMessage({
+    source: 'march-devtools-page',
+    payload: { type: 'scan-result', islands, timestamp: Date.now() },
+  }, '*');
+}
+
+// Listen for scan requests from the DevTools extension
+window.addEventListener('message', event => {
+  if (event.source !== window) return;
+  if (event.data?.source === 'march-devtools-extension' && event.data.type === 'scan') {
+    devtoolsScan();
+  }
+});
+
+// Expose scan on the marchIslands object for the debug script
+if (window.__MARCH_DEBUG) {
+  window.__marchDevtools = window.__marchDevtools ?? {};
+  window.__marchDevtools.scan = devtoolsScan;
+}
 
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', bootstrap);
