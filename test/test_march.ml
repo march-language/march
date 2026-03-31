@@ -17286,6 +17286,540 @@ let test_df_drop_nulls () =
   end|} in
   Alcotest.(check int) "drop_nulls removes 1 null row" 2 (vint (call_fn env "f" []))
 
+(* ── Base64 stdlib module tests ─────────────────────────────────────────── *)
+
+let eval_with_base64 src =
+  let decl = load_stdlib_file_for_test "base64.march" in
+  let bytes_decl = load_stdlib_file_for_test "bytes.march" in
+  eval_with_stdlib [bytes_decl; decl] src
+
+let test_base64_parse_ok () =
+  (* Just load and ensure the module parses without error *)
+  let _decl = load_stdlib_file_for_test "base64.march" in
+  ()
+
+let test_base64_encode_decode () =
+  let env = eval_with_base64 {|mod Test do
+    fn f() do
+      let b = Bytes.from_string("Hello")
+      let enc = Base64.encode(b)
+      match Base64.decode(enc) do
+      Ok(dec) -> Bytes.to_string(dec)
+      Err(_)  -> "error"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "encode/decode round-trip" "Hello"
+    (vstr (call_fn env "f" []))
+
+let test_base64_encode_known () =
+  let env = eval_with_base64 {|mod Test do
+    fn f() do
+      let b = Bytes.from_string("Hello")
+      Base64.encode(b)
+    end
+  end|} in
+  Alcotest.(check string) "encode 'Hello'" "SGVsbG8="
+    (vstr (call_fn env "f" []))
+
+let test_base64_url_encode_decode () =
+  let env = eval_with_base64 {|mod Test do
+    fn f() do
+      let b = Bytes.from_string("Hello")
+      let enc = Base64.url_encode(b)
+      match Base64.url_decode(enc) do
+      Ok(dec) -> Bytes.to_string(dec)
+      Err(_)  -> "error"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "url_encode/url_decode round-trip" "Hello"
+    (vstr (call_fn env "f" []))
+
+let test_base64_url_no_padding () =
+  let env = eval_with_base64 {|mod Test do
+    fn f() do
+      let b = Bytes.from_string("Hello")
+      let enc = Base64.url_encode(b)
+      -- URL-safe encoding should not contain '='
+      if string_contains(enc, "=") do "has-padding" else "no-padding" end
+    end
+  end|} in
+  Alcotest.(check string) "url_encode has no padding" "no-padding"
+    (vstr (call_fn env "f" []))
+
+let test_base64_stdlib_decode_invalid () =
+  let env = eval_with_base64 {|mod Test do
+    fn f() do
+      match Base64.decode("!!!") do
+      Ok(_)  -> "ok"
+      Err(_) -> "invalid"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "decode bad input returns Err(:invalid)" "invalid"
+    (vstr (call_fn env "f" []))
+
+(* ── URI stdlib module tests ─────────────────────────────────────────────── *)
+
+let eval_with_uri src =
+  let decl = load_stdlib_file_for_test "uri.march" in
+  eval_with_stdlib [decl] src
+
+let test_uri_parse_ok () =
+  let _decl = load_stdlib_file_for_test "uri.march" in
+  ()
+
+let test_uri_parse_full () =
+  let env = eval_with_uri {|mod Test do
+    fn f() do
+      let u = URI.parse("https://example.com:8080/api?q=hello#top")
+      URI.scheme(u)
+    end
+  end|} in
+  Alcotest.(check string) "scheme" "https"
+    (vstr (call_fn env "f" []))
+
+let test_uri_parse_host () =
+  let env = eval_with_uri {|mod Test do
+    fn f() do
+      let u = URI.parse("https://example.com:8080/api?q=hello#top")
+      URI.host(u)
+    end
+  end|} in
+  Alcotest.(check string) "host" "example.com"
+    (vstr (call_fn env "f" []))
+
+let test_uri_parse_path () =
+  let env = eval_with_uri {|mod Test do
+    fn f() do
+      let u = URI.parse("https://example.com/api/users")
+      URI.path(u)
+    end
+  end|} in
+  Alcotest.(check string) "path" "/api/users"
+    (vstr (call_fn env "f" []))
+
+let test_uri_parse_query () =
+  let env = eval_with_uri {|mod Test do
+    fn f() do
+      let u = URI.parse("http://localhost/search?q=foo&page=2")
+      URI.query(u)
+    end
+  end|} in
+  Alcotest.(check string) "raw query" "q=foo&page=2"
+    (vstr (call_fn env "f" []))
+
+let test_uri_parse_fragment () =
+  let env = eval_with_uri {|mod Test do
+    fn f() do
+      let u = URI.parse("http://example.com/page#section-1")
+      URI.fragment(u)
+    end
+  end|} in
+  Alcotest.(check string) "fragment" "section-1"
+    (vstr (call_fn env "f" []))
+
+let test_uri_to_string () =
+  let env = eval_with_uri {|mod Test do
+    fn f() do
+      let u = URI.parse("https://example.com/path?q=1")
+      URI.to_string(u)
+    end
+  end|} in
+  Alcotest.(check string) "to_string round-trip" "https://example.com/path?q=1"
+    (vstr (call_fn env "f" []))
+
+let test_uri_encode () =
+  let env = eval_with_uri {|mod Test do
+    fn f() do URI.encode("hello world") end
+  end|} in
+  Alcotest.(check string) "encode space" "hello%20world"
+    (vstr (call_fn env "f" []))
+
+let test_uri_decode () =
+  let env = eval_with_uri {|mod Test do
+    fn f() do URI.decode("hello%20world") end
+  end|} in
+  Alcotest.(check string) "decode %20" "hello world"
+    (vstr (call_fn env "f" []))
+
+let test_uri_encode_query () =
+  let env = eval_with_uri {|mod Test do
+    fn f() do
+      URI.encode_query([("q", "hello world"), ("page", "2")])
+    end
+  end|} in
+  Alcotest.(check string) "encode_query" "q=hello%20world&page=2"
+    (vstr (call_fn env "f" []))
+
+let test_uri_decode_query () =
+  let env = eval_with_uri {|mod Test do
+    fn f() do
+      let pairs = URI.decode_query("q=hello+world&page=2")
+      match pairs do
+      Cons((k, v), _) -> k ++ "=" ++ v
+      Nil -> "empty"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "decode_query first pair" "q=hello world"
+    (vstr (call_fn env "f" []))
+
+(* ── Crypto stdlib module tests ──────────────────────────────────────────── *)
+
+let eval_with_crypto src =
+  let decl = load_stdlib_file_for_test "crypto.march" in
+  eval_with_stdlib [decl] src
+
+let test_crypto_parse_ok () =
+  let _decl = load_stdlib_file_for_test "crypto.march" in
+  ()
+
+let test_crypto_stdlib_sha256 () =
+  let env = eval_with_crypto {|mod Test do
+    fn f() do Crypto.sha256("hello") end
+  end|} in
+  Alcotest.(check string) "sha256 of 'hello'"
+    "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    (vstr (call_fn env "f" []))
+
+let test_crypto_sha512 () =
+  let env = eval_with_crypto {|mod Test do
+    fn f() do
+      let h = Crypto.sha512("hello")
+      string_slice(h, 0, 16)
+    end
+  end|} in
+  Alcotest.(check string) "sha512 of 'hello' first 16 chars" "9b71d224bd62f378"
+    (vstr (call_fn env "f" []))
+
+let test_crypto_hmac () =
+  let env = eval_with_crypto {|mod Test do
+    fn f() do string_byte_length(Crypto.hmac(:sha256, "key", "message")) end
+  end|} in
+  (* HMAC-SHA256 hex output is 64 characters *)
+  Alcotest.(check int) "hmac sha256 returns 64-char hex" 64
+    (vint (call_fn env "f" []))
+
+let test_crypto_random_bytes () =
+  let env = eval_with_crypto {|mod Test do
+    pfn count(xs, n) do
+      match xs do
+      Nil -> n
+      Cons(_, t) -> count(t, n + 1)
+      end
+    end
+    fn f() do
+      let b = Crypto.random_bytes(16)
+      match b do Bytes(xs) -> count(xs, 0) end
+    end
+  end|} in
+  Alcotest.(check int) "random_bytes returns 16 bytes" 16
+    (vint (call_fn env "f" []))
+
+let test_crypto_random_hex () =
+  let env = eval_with_crypto {|mod Test do
+    fn f() do string_byte_length(Crypto.random_hex(16)) end
+  end|} in
+  Alcotest.(check int) "random_hex(16) gives 32-char string" 32
+    (vint (call_fn env "f" []))
+
+let test_crypto_secure_compare () =
+  let env = eval_with_crypto {|mod Test do
+    fn f() do
+      let a = Crypto.secure_compare("abc", "abc")
+      let b = Crypto.secure_compare("abc", "abd")
+      let c = Crypto.secure_compare("abc", "ab")
+      if a && not b && not c do 1 else 0 end
+    end
+  end|} in
+  Alcotest.(check int) "secure_compare logic" 1
+    (vint (call_fn env "f" []))
+
+let test_crypto_stdlib_base64_roundtrip () =
+  let env = eval_with_crypto {|mod Test do
+    fn f() do
+      let b = random_bytes(12)
+      let enc = Crypto.base64_encode(b)
+      match Crypto.base64_decode(enc) do
+      Ok(_)  -> "ok"
+      Err(_) -> "err"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "base64_encode/decode round-trip" "ok"
+    (vstr (call_fn env "f" []))
+
+let test_crypto_password_hash_verify () =
+  let env = eval_with_crypto {|mod Test do
+    fn f() do
+      let h = Crypto.hash_password("secret123")
+      if Crypto.verify_password("secret123", h) do "ok" else "fail" end
+    end
+  end|} in
+  Alcotest.(check string) "hash_password/verify_password round-trip" "ok"
+    (vstr (call_fn env "f" []))
+
+let test_crypto_password_wrong () =
+  let env = eval_with_crypto {|mod Test do
+    fn f() do
+      let h = Crypto.hash_password("correct")
+      if Crypto.verify_password("wrong", h) do "ok" else "fail" end
+    end
+  end|} in
+  Alcotest.(check string) "verify_password rejects wrong password" "fail"
+    (vstr (call_fn env "f" []))
+
+(* ── UUID stdlib module tests ─────────────────────────────────────────────── *)
+
+let eval_with_uuid src =
+  let decl = load_stdlib_file_for_test "uuid.march" in
+  eval_with_stdlib [decl] src
+
+let test_uuid_parse_ok () =
+  let _decl = load_stdlib_file_for_test "uuid.march" in
+  ()
+
+let test_uuid_v4_format () =
+  let env = eval_with_uuid {|mod Test do
+    fn f() do
+      let u = UUID.v4()
+      let s = UUID.to_string(u)
+      string_byte_length(s)
+    end
+  end|} in
+  Alcotest.(check int) "UUID v4 string length is 36" 36
+    (vint (call_fn env "f" []))
+
+let test_uuid_v4_dashes () =
+  let env = eval_with_uuid {|mod Test do
+    fn f() do
+      let u = UUID.v4()
+      let s = UUID.to_string(u)
+      string_slice(s, 8, 1) ++ string_slice(s, 13, 1) ++
+      string_slice(s, 18, 1) ++ string_slice(s, 23, 1)
+    end
+  end|} in
+  Alcotest.(check string) "UUID v4 dashes at correct positions" "----"
+    (vstr (call_fn env "f" []))
+
+let test_uuid_v4_version () =
+  let env = eval_with_uuid {|mod Test do
+    fn f() do UUID.version(UUID.v4()) end
+  end|} in
+  Alcotest.(check int) "UUID v4 version is 4" 4
+    (vint (call_fn env "f" []))
+
+let test_uuid_nil () =
+  let env = eval_with_uuid {|mod Test do
+    fn f() do UUID.to_string(UUID.nil()) end
+  end|} in
+  Alcotest.(check string) "nil UUID" "00000000-0000-0000-0000-000000000000"
+    (vstr (call_fn env "f" []))
+
+let test_uuid_is_valid_true () =
+  let env = eval_with_uuid {|mod Test do
+    fn f() do
+      UUID.is_valid("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+    end
+  end|} in
+  Alcotest.(check bool) "valid UUID returns true" true
+    (vbool (call_fn env "f" []))
+
+let test_uuid_is_valid_false () =
+  let env = eval_with_uuid {|mod Test do
+    fn f() do UUID.is_valid("not-a-uuid") end
+  end|} in
+  Alcotest.(check bool) "invalid string returns false" false
+    (vbool (call_fn env "f" []))
+
+let test_uuid_parse_valid () =
+  let env = eval_with_uuid {|mod Test do
+    fn f() do
+      match UUID.parse("f47ac10b-58cc-4372-a567-0e02b2c3d479") do
+      Ok(_)  -> "ok"
+      Err(_) -> "err"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "parse valid UUID" "ok"
+    (vstr (call_fn env "f" []))
+
+let test_uuid_parse_invalid () =
+  let env = eval_with_uuid {|mod Test do
+    fn f() do
+      match UUID.parse("bad-input") do
+      Ok(_)  -> "ok"
+      Err(_) -> "err"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "parse invalid UUID" "err"
+    (vstr (call_fn env "f" []))
+
+let test_uuid_v5_deterministic () =
+  let env = eval_with_uuid {|mod Test do
+    fn f() do
+      let ns = UUID.nil()
+      let a = UUID.v5(ns, "hello")
+      let b = UUID.v5(ns, "hello")
+      if UUID.to_string(a) == UUID.to_string(b) do "same" else "different" end
+    end
+  end|} in
+  Alcotest.(check string) "v5 is deterministic" "same"
+    (vstr (call_fn env "f" []))
+
+let test_uuid_v5_version () =
+  let env = eval_with_uuid {|mod Test do
+    fn f() do
+      UUID.version(UUID.v5(UUID.nil(), "test"))
+    end
+  end|} in
+  Alcotest.(check int) "v5 version digit is 5" 5
+    (vint (call_fn env "f" []))
+
+(* ── Duration stdlib module tests ────────────────────────────────────────── *)
+
+let eval_with_duration src =
+  let decl = load_stdlib_file_for_test "duration.march" in
+  eval_with_stdlib [decl] src
+
+let test_duration_parse_ok () =
+  let _decl = load_stdlib_file_for_test "duration.march" in
+  ()
+
+let test_duration_milliseconds () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do Duration.to_milliseconds(Duration.milliseconds(500)) end
+  end|} in
+  Alcotest.(check int) "milliseconds(500)" 500
+    (vint (call_fn env "f" []))
+
+let test_duration_seconds () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do Duration.to_milliseconds(Duration.seconds(2)) end
+  end|} in
+  Alcotest.(check int) "seconds(2) = 2000ms" 2000
+    (vint (call_fn env "f" []))
+
+let test_duration_minutes () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do Duration.to_milliseconds(Duration.minutes(1)) end
+  end|} in
+  Alcotest.(check int) "minutes(1) = 60000ms" 60000
+    (vint (call_fn env "f" []))
+
+let test_duration_hours () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do Duration.to_milliseconds(Duration.hours(1)) end
+  end|} in
+  Alcotest.(check int) "hours(1) = 3600000ms" 3600000
+    (vint (call_fn env "f" []))
+
+let test_duration_days () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do Duration.to_milliseconds(Duration.days(1)) end
+  end|} in
+  Alcotest.(check int) "days(1) = 86400000ms" 86400000
+    (vint (call_fn env "f" []))
+
+let test_duration_weeks () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do Duration.to_milliseconds(Duration.weeks(1)) end
+  end|} in
+  Alcotest.(check int) "weeks(1) = 604800000ms" 604800000
+    (vint (call_fn env "f" []))
+
+let test_duration_new_unit () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do Duration.to_milliseconds(Duration.new(30, :s)) end
+  end|} in
+  Alcotest.(check int) "new(30, :s) = 30000ms" 30000
+    (vint (call_fn env "f" []))
+
+let test_duration_add () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do
+      let a = Duration.seconds(30)
+      let b = Duration.seconds(30)
+      Duration.to_milliseconds(Duration.add(a, b))
+    end
+  end|} in
+  Alcotest.(check int) "add 30s+30s = 60000ms" 60000
+    (vint (call_fn env "f" []))
+
+let test_duration_subtract () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do
+      let a = Duration.minutes(2)
+      let b = Duration.seconds(30)
+      Duration.to_milliseconds(Duration.subtract(a, b))
+    end
+  end|} in
+  Alcotest.(check int) "subtract 2m-30s = 90000ms" 90000
+    (vint (call_fn env "f" []))
+
+let test_duration_multiply () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do
+      Duration.to_milliseconds(Duration.multiply(Duration.seconds(10), 6))
+    end
+  end|} in
+  Alcotest.(check int) "multiply 10s * 6 = 60000ms" 60000
+    (vint (call_fn env "f" []))
+
+let test_duration_compare () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do
+      let a = Duration.compare(Duration.seconds(10), Duration.minutes(1))
+      let b = Duration.compare(Duration.hours(1), Duration.hours(1))
+      let c = Duration.compare(Duration.days(1), Duration.hours(12))
+      int_to_string(a) ++ int_to_string(b) ++ int_to_string(c)
+    end
+  end|} in
+  Alcotest.(check string) "compare: -1, 0, 1" "-101"
+    (vstr (call_fn env "f" []))
+
+let test_duration_to_seconds () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do
+      -- to_seconds(2000ms) = 2.0; multiply by 100 and truncate to int = 200
+      let s = Duration.to_seconds(Duration.milliseconds(2000))
+      float_to_int(s * 100.0)
+    end
+  end|} in
+  Alcotest.(check int) "to_seconds 2000ms = 2.0" 200
+    (vint (call_fn env "f" []))
+
+let test_duration_format_seconds () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do Duration.format(Duration.seconds(90)) end
+  end|} in
+  Alcotest.(check string) "format 90s" "1 minute, 30 seconds"
+    (vstr (call_fn env "f" []))
+
+let test_duration_format_hours () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do Duration.format(Duration.hours(2)) end
+  end|} in
+  Alcotest.(check string) "format 2 hours" "2 hours"
+    (vstr (call_fn env "f" []))
+
+let test_duration_format_zero () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do Duration.format(Duration.milliseconds(0)) end
+  end|} in
+  Alcotest.(check string) "format 0ms" "0 milliseconds"
+    (vstr (call_fn env "f" []))
+
+let test_duration_format_negative () =
+  let env = eval_with_duration {|mod Test do
+    fn f() do Duration.format(Duration.seconds(-70)) end
+  end|} in
+  Alcotest.(check string) "format -70s" "-1 minute, 10 seconds"
+    (vstr (call_fn env "f" []))
+
 (* ── Cross-module load order ─────────────────────────────────────────────── *)
 (* Regression test: an alphabetically-earlier module must be able to call a
    function in an alphabetically-later module at the same dot-depth.
@@ -19176,5 +19710,70 @@ let () =
         Alcotest.test_case "qualified from scope"              `Quick test_complete_qualified_from_scope;
         Alcotest.test_case "module name with dot"              `Quick test_complete_module_name_with_dot;
         Alcotest.test_case "qualified from registry"           `Quick test_complete_qualified_from_registry;
+      ]);
+      ("base64 stdlib", [
+        Alcotest.test_case "parse"                    `Quick test_base64_parse_ok;
+        Alcotest.test_case "encode/decode round-trip" `Quick test_base64_encode_decode;
+        Alcotest.test_case "encode known value"       `Quick test_base64_encode_known;
+        Alcotest.test_case "url encode/decode"        `Quick test_base64_url_encode_decode;
+        Alcotest.test_case "url_encode no padding"    `Quick test_base64_url_no_padding;
+        Alcotest.test_case "decode invalid"           `Quick test_base64_stdlib_decode_invalid;
+      ]);
+      ("uri stdlib", [
+        Alcotest.test_case "parse"           `Quick test_uri_parse_ok;
+        Alcotest.test_case "scheme"          `Quick test_uri_parse_full;
+        Alcotest.test_case "host"            `Quick test_uri_parse_host;
+        Alcotest.test_case "path"            `Quick test_uri_parse_path;
+        Alcotest.test_case "query"           `Quick test_uri_parse_query;
+        Alcotest.test_case "fragment"        `Quick test_uri_parse_fragment;
+        Alcotest.test_case "to_string"       `Quick test_uri_to_string;
+        Alcotest.test_case "encode"          `Quick test_uri_encode;
+        Alcotest.test_case "decode"          `Quick test_uri_decode;
+        Alcotest.test_case "encode_query"    `Quick test_uri_encode_query;
+        Alcotest.test_case "decode_query"    `Quick test_uri_decode_query;
+      ]);
+      ("crypto stdlib", [
+        Alcotest.test_case "parse"                      `Quick test_crypto_parse_ok;
+        Alcotest.test_case "sha256"                     `Quick test_crypto_stdlib_sha256;
+        Alcotest.test_case "sha512 prefix"              `Quick test_crypto_sha512;
+        Alcotest.test_case "hmac length"                `Quick test_crypto_hmac;
+        Alcotest.test_case "random_bytes length"        `Quick test_crypto_random_bytes;
+        Alcotest.test_case "random_hex length"          `Quick test_crypto_random_hex;
+        Alcotest.test_case "secure_compare"             `Quick test_crypto_secure_compare;
+        Alcotest.test_case "base64 round-trip"          `Quick test_crypto_stdlib_base64_roundtrip;
+        Alcotest.test_case "hash_password/verify"       `Quick test_crypto_password_hash_verify;
+        Alcotest.test_case "verify rejects wrong"       `Quick test_crypto_password_wrong;
+      ]);
+      ("uuid stdlib", [
+        Alcotest.test_case "parse"                  `Quick test_uuid_parse_ok;
+        Alcotest.test_case "v4 format length"       `Quick test_uuid_v4_format;
+        Alcotest.test_case "v4 dashes"              `Quick test_uuid_v4_dashes;
+        Alcotest.test_case "v4 version"             `Quick test_uuid_v4_version;
+        Alcotest.test_case "nil UUID"               `Quick test_uuid_nil;
+        Alcotest.test_case "is_valid true"          `Quick test_uuid_is_valid_true;
+        Alcotest.test_case "is_valid false"         `Quick test_uuid_is_valid_false;
+        Alcotest.test_case "parse valid"            `Quick test_uuid_parse_valid;
+        Alcotest.test_case "parse invalid"          `Quick test_uuid_parse_invalid;
+        Alcotest.test_case "v5 deterministic"       `Quick test_uuid_v5_deterministic;
+        Alcotest.test_case "v5 version digit"       `Quick test_uuid_v5_version;
+      ]);
+      ("duration stdlib", [
+        Alcotest.test_case "parse"                  `Quick test_duration_parse_ok;
+        Alcotest.test_case "milliseconds"           `Quick test_duration_milliseconds;
+        Alcotest.test_case "seconds"                `Quick test_duration_seconds;
+        Alcotest.test_case "minutes"                `Quick test_duration_minutes;
+        Alcotest.test_case "hours"                  `Quick test_duration_hours;
+        Alcotest.test_case "days"                   `Quick test_duration_days;
+        Alcotest.test_case "weeks"                  `Quick test_duration_weeks;
+        Alcotest.test_case "new unit atom"          `Quick test_duration_new_unit;
+        Alcotest.test_case "add"                    `Quick test_duration_add;
+        Alcotest.test_case "subtract"               `Quick test_duration_subtract;
+        Alcotest.test_case "multiply"               `Quick test_duration_multiply;
+        Alcotest.test_case "compare"                `Quick test_duration_compare;
+        Alcotest.test_case "to_seconds"             `Quick test_duration_to_seconds;
+        Alcotest.test_case "format seconds"         `Quick test_duration_format_seconds;
+        Alcotest.test_case "format hours"           `Quick test_duration_format_hours;
+        Alcotest.test_case "format zero"            `Quick test_duration_format_zero;
+        Alcotest.test_case "format negative"        `Quick test_duration_format_negative;
       ]);
     ]

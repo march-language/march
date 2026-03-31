@@ -1,0 +1,264 @@
+-- UUID module: RFC 4122 UUID generation and manipulation.
+--
+-- The UUID type wraps a canonical string representation:
+--   "xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx"
+-- where M is the version digit and N is the variant digit (8, 9, a, or b).
+--
+-- Supported versions:
+--   v4  — randomly generated (RFC 4122 §4.4)
+--   v5  — name-based using SHA-1 (RFC 4122 §4.3)
+--         NOTE: v5 uses the first 16 bytes of a SHA-1 hash with version/
+--         variant bits set; the resulting UUID is RFC-compliant.
+--
+-- The nil UUID ("00000000-0000-0000-0000-000000000000") is the all-zeros UUID.
+-- version/1 returns 0 for the nil UUID.
+
+mod UUID do
+
+type UUID = UUID(String)
+
+-- ── Private helpers ───────────────────────────────────────────────────────
+
+pfn rev_list(xs) do
+  fn go(lst, acc) do
+    match lst do
+    Nil -> acc
+    Cons(h, t) -> go(t, Cons(h, acc))
+    end
+  end
+  go(xs, Nil)
+end
+
+-- Is c a valid hexadecimal character (lower or upper case)?
+pfn is_hex_char(c) do
+  let code = char_to_int(c)
+  (code >= 48 && code <= 57)   ||  -- 0–9
+  (code >= 65 && code <= 70)   ||  -- A–F
+  (code >= 97 && code <= 102)      -- a–f
+end
+
+-- Check that bytes [start, start+len) of string s are all hex digits.
+pfn check_hex_range(s, start, len) do
+  fn go(i) do
+    if i >= start + len do true
+    else
+      let c = string_slice(s, i, 1)
+      if is_hex_char(c) do go(i + 1) else false end
+    end
+  end
+  go(start)
+end
+
+-- Validate the 8-4-4-4-12 UUID format.
+pfn validate_format(s) do
+  let len = string_byte_length(s)
+  len == 36                        &&
+  string_slice(s,  8, 1) == "-"   &&
+  string_slice(s, 13, 1) == "-"   &&
+  string_slice(s, 18, 1) == "-"   &&
+  string_slice(s, 23, 1) == "-"   &&
+  check_hex_range(s,  0,  8)      &&
+  check_hex_range(s,  9,  4)      &&
+  check_hex_range(s, 14,  4)      &&
+  check_hex_range(s, 19,  4)      &&
+  check_hex_range(s, 24, 12)
+end
+
+-- Hex value of a character (0–15), -1 on invalid input.
+pfn hex_val(c) do
+  let code = char_to_int(c)
+  if code >= 48 && code <= 57  do code - 48
+  else if code >= 65 && code <= 70  do code - 55
+  else if code >= 97 && code <= 102 do code - 87
+  else -1 end end end
+end
+
+-- Parse a UUID string (no dashes) as a list of 16 byte values.
+pfn uuid_str_to_bytes(s) do
+  -- Strip dashes to get 32 hex chars
+  let hex = string_replace_all(s, "-", "")
+  let chars = string_chars(hex)
+  fn go(cs, acc) do
+    match cs do
+    Nil -> Some(rev_list(acc))
+    Cons(hi, Cons(lo, rest)) ->
+      let h = hex_val(hi)
+      let l = hex_val(lo)
+      if h < 0 || l < 0 do None
+      else go(rest, Cons(h * 16 + l, acc)) end
+    _ -> None
+    end
+  end
+  go(chars, Nil)
+end
+
+-- Format a list of 16 byte values as a UUID string.
+pfn bytes_to_uuid_str(bs) do
+  pfn nibble(n) do
+    if n < 10 do int_to_string(n)
+    else char_from_int(87 + n)  -- lowercase: 'a' = 97; 97 - 10 = 87
+    end
+  end
+  pfn byte_hex(n) do nibble(n / 16) ++ nibble(n % 16) end
+  fn go(lst, i, acc) do
+    match lst do
+    Nil -> string_join(rev_list(acc), "")
+    Cons(b, rest) ->
+      let h = byte_hex(b)
+      let sep =
+        if i == 3 || i == 5 || i == 7 || i == 9 do "-"
+        else "" end
+      go(rest, i + 1, Cons(sep ++ h, acc))
+    end
+  end
+  go(bs, 0, Nil)
+end
+
+-- Set version and variant bits in a 16-byte list.
+pfn set_version_variant(bs, version) do
+  fn go(lst, i, acc) do
+    match lst do
+    Nil -> rev_list(acc)
+    Cons(b, rest) ->
+      let new_b =
+        if i == 6 do
+          -- High nibble = version, low nibble preserved
+          (version * 16) + (b % 16)
+        else if i == 8 do
+          -- Top 2 bits = 10 (variant RFC 4122)
+          (b % 64) + 128
+        else b end
+      go(rest, i + 1, Cons(new_b, acc))
+    end
+  end
+  go(bs, 0, Nil)
+end
+
+-- ── Public API ────────────────────────────────────────────────────────────
+
+doc """
+Generate a random UUID v4.
+
+    UUID.v4()  -- e.g. UUID("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+
+Uses the runtime's CSPRNG.  Version bits (4) and variant bits (RFC 4122)
+are set correctly.
+"""
+fn v4() do
+  UUID(uuid_v4())
+end
+
+doc """
+Parse a UUID string, returning Ok(UUID) or Err(:invalid).
+
+Accepts both upper and lower case hex digits; validates the
+xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx format (36 characters, 4 dashes).
+
+    UUID.parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")  -- Ok(UUID(...))
+    UUID.parse("not-a-uuid")                             -- Err(:invalid)
+"""
+fn parse(s) do
+  if validate_format(s) do Ok(UUID(string_to_lowercase(s)))
+  else Err(:invalid) end
+end
+
+doc """
+Convert a UUID to its canonical lowercase string representation.
+
+    UUID.to_string(UUID.nil())
+    -- "00000000-0000-0000-0000-000000000000"
+"""
+fn to_string(uuid) do
+  match uuid do UUID(s) -> s end
+end
+
+doc """
+The nil UUID: all 128 bits are zero.
+
+    UUID.to_string(UUID.nil())
+    -- "00000000-0000-0000-0000-000000000000"
+"""
+fn nil() do
+  UUID("00000000-0000-0000-0000-000000000000")
+end
+
+doc """
+Generate a name-based UUID v5 (SHA-1, RFC 4122 §4.3).
+
+    let dns = UUID.parse("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+    UUID.v5(dns, "www.example.com")  -- deterministic UUID
+
+The namespace must be a valid UUID.  The name is an arbitrary string.
+The result is deterministic: the same namespace + name always produce the
+same UUID.
+"""
+fn v5(namespace, name) do
+  match namespace do
+  UUID(ns_str) ->
+    match uuid_str_to_bytes(ns_str) do
+    None -> UUID("00000000-0000-0000-0000-000000000000")
+    Some(ns_bytes) ->
+      -- Build namespace bytes string for SHA-1 input
+      fn bytes_to_str(bs) do
+        fn go(lst, acc) do
+          match lst do
+          Nil -> string_join(rev_list(acc), "")
+          Cons(b, rest) -> go(rest, Cons(char_from_int(b), acc))
+          end
+        end
+        go(bs, Nil)
+      end
+      let ns_raw = bytes_to_str(ns_bytes)
+      let input = ns_raw ++ name
+      -- SHA-1 hash of namespace + name
+      let hash_bytes = sha1_bytes(input)
+      match hash_bytes do
+      Bytes(hash_list) ->
+        -- Take first 16 bytes, set version=5 and variant bits
+        fn take16(lst, i, acc) do
+          if i >= 16 do rev_list(acc)
+          else match lst do
+            Nil -> rev_list(acc)
+            Cons(b, rest) -> take16(rest, i + 1, Cons(b, acc))
+            end end
+        end
+        let sixteen = take16(hash_list, 0, Nil)
+        let versioned = set_version_variant(sixteen, 5)
+        UUID(bytes_to_uuid_str(versioned))
+      end
+    end
+  end
+end
+
+doc """
+Return the version number of a UUID (1–5), or 0 for unrecognised/nil.
+
+    UUID.version(UUID.v4())  -- 4
+    UUID.version(UUID.nil()) -- 0
+"""
+fn version(uuid) do
+  match uuid do
+  UUID(s) ->
+    if string_byte_length(s) < 15 do 0
+    else
+      let v_char = string_slice(s, 14, 1)
+      match string_to_int(v_char) do
+      Some(n) -> n
+      None    -> 0
+      end
+    end
+  end
+end
+
+doc """
+Return true if the string is a valid UUID in xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx form.
+
+    UUID.is_valid("f47ac10b-58cc-4372-a567-0e02b2c3d479")  -- true
+    UUID.is_valid("00000000-0000-0000-0000-000000000000")  -- true
+    UUID.is_valid("not-a-uuid")                             -- false
+"""
+fn is_valid(s) do
+  validate_format(s)
+end
+
+end
