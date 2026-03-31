@@ -45,8 +45,9 @@ let find_stdlib_dir () =
       (* Exe-relative candidates — work regardless of CWD *)
       Filename.concat exe_dir "../stdlib";
       Filename.concat exe_dir "../../stdlib";
-      (* Installed share layout: bin/../share/march/stdlib *)
+      (* Installed share layout: bin/../share/march/stdlib or bin/../share/march *)
       Filename.concat exe_dir "../share/march/stdlib";
+      Filename.concat exe_dir "../share/march";
       (* CWD-relative fallback — works when invoked from the March repo root *)
       "stdlib";
     ] in
@@ -162,6 +163,8 @@ let load_stdlib () =
       "depot_gate.march";
       "depot_schema.march";
       "depot_repo.march";
+      "depot_query.march";
+      "depot_migration.march";
       "bastion.march";
       "csrf.march";
       "session.march";
