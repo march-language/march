@@ -11,7 +11,7 @@ type entry = {
 }
 
 type t = {
-  mutable entries : entry array;
+  entries         : entry array;
   mutable size    : int;
   mutable head    : int;  (* index of the most recent entry in the ring *)
 }
