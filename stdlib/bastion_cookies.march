@@ -45,7 +45,7 @@ end
 pfn make_signed_token(value, key) do
   let vb64 = base64_encode(Bytes.from_string(value))
   match hmac_sha256(key, Bytes.from_string(value)) do
-  Ok(sig) -> vb64 ++ "." ++ base64_encode(sig)
+  Ok(mac) -> vb64 ++ "." ++ base64_encode(mac)
   Err(e)  -> panic("BastionCookies: hmac_sha256 failed: " ++ e)
   end
 end
@@ -62,7 +62,7 @@ pfn verify_signed_token(token, key) do
       match hmac_sha256(key, Bytes.from_string(value)) do
       Err(_) -> None
       Ok(expected_sig) ->
-        if base64_encode(expected_sig) == sigb64 then Some(value) else None end
+        if base64_encode(expected_sig) == sigb64 do Some(value) else None end
       end
     end
   end
@@ -75,7 +75,7 @@ end
 
 -- Decrypt and verify an encrypted token. Returns Some(value) or None.
 pfn verify_enc_token(token, key) do
-  if String.starts_with(token, "enc:") then
+  if String.starts_with(token, "enc:") do
     let inner = String.slice_bytes(token, 4, String.byte_size(token) - 4)
     verify_signed_token(inner, key)
   else None end
@@ -113,7 +113,7 @@ pfn find_cookie(cookies, name) do
     match cs do
     Nil -> None
     Cons((k, v), rest) ->
-      if k == name then Some(v)
+      if k == name do Some(v)
       else go(rest) end
     end
   end

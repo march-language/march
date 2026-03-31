@@ -81,11 +81,11 @@ end
 -- URL-encode a single query parameter value (basic percent-encoding).
 pfn encode_query_value(s) do
   s
-  |> fn v -> String.replace_all(v, "&", "%26") end
-  |> fn v -> String.replace_all(v, "=", "%3D") end
-  |> fn v -> String.replace_all(v, "?", "%3F") end
-  |> fn v -> String.replace_all(v, "#", "%23") end
-  |> fn v -> String.replace_all(v, " ", "%20") end
+  |> (fn v -> String.replace_all(v, "&", "%26"))
+  |> (fn v -> String.replace_all(v, "=", "%3D"))
+  |> (fn v -> String.replace_all(v, "?", "%3F"))
+  |> (fn v -> String.replace_all(v, "#", "%23"))
+  |> (fn v -> String.replace_all(v, " ", "%20"))
 end
 
 -- Build query string from a list of (String, String) pairs.
@@ -95,7 +95,7 @@ pfn build_query_string(params) do
     Nil -> acc
     Cons((k, v), rest) ->
       let pair = encode_query_value(k) ++ "=" ++ encode_query_value(v)
-      let next = if acc == "" then pair else acc ++ "&" ++ pair end
+      let next = if acc == "" do pair else acc ++ "&" ++ pair end
       go(rest, next)
     end
   end
@@ -109,7 +109,7 @@ pfn fill_pattern(pattern, segments) do
     match ps do
     Nil -> acc
     Cons(part, rest) ->
-      if String.starts_with(part, ":") then
+      if String.starts_with(part, ":") do
         match segs do
         Nil         -> go(rest, Nil, acc ++ "/" ++ part)
         Cons(s, ss) -> go(rest, ss, acc ++ "/" ++ s)
@@ -120,7 +120,7 @@ pfn fill_pattern(pattern, segments) do
     end
   end
   let base = go(parts, segments, "")
-  if base == "" then "/" else base end
+  if base == "" do "/" else base end
 end
 
 doc """
@@ -147,7 +147,7 @@ fn path(name, segments, query) do
   Some((_, _, pattern, _)) ->
     let base = fill_pattern(pattern, segments)
     let qs   = build_query_string(query)
-    if qs == "" then base else base ++ "?" ++ qs end
+    if qs == "" do base else base ++ "?" ++ qs end
   end
 end
 

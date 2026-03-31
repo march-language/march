@@ -199,7 +199,7 @@ Call when a request finishes.
 fn decrement_in_flight() do
   let tbl = get_state_table()
   let n   = Vault.get_or(tbl, "in_flight", 0)
-  let next = if n <= 0 then 0 else n - 1 end
+  let next = if n <= 0 do 0 else n - 1 end
   Vault.set(tbl, "in_flight", next)
 end
 
