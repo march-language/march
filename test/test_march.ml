@@ -6897,7 +6897,7 @@ let test_purity_free () =
 let mk_fn name body =
   { March_tir.Tir.fn_name = name; fn_params = [];
     fn_ret_ty = March_tir.Tir.TInt; fn_body = body }
-let mk_module fns = { March_tir.Tir.tm_name = "test"; tm_fns = fns; tm_types = []; tm_externs = []; tm_exports = [] }
+let mk_module fns = { March_tir.Tir.tm_name = "test"; tm_fns = fns; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = [] }
 let avar name ty = March_tir.Tir.AVar (mk_var name ty)
 let flit f = March_tir.Tir.ALit (March_ast.Ast.LitFloat f)
 let fapp op args =
@@ -7482,7 +7482,7 @@ let test_fast_math_emits_fast_attr () =
   let body = March_tir.Tir.EApp (fn_var "+.", [March_tir.Tir.AVar x; March_tir.Tir.AVar y]) in
   let fd = { March_tir.Tir.fn_name = "fadd_test"; fn_params = [x; y];
              fn_ret_ty = March_tir.Tir.TFloat; fn_body = body } in
-  let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = [] } in
+  let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = [] } in
   let ir_fast   = March_tir.Llvm_emit.emit_module ~fast_math:true  m in
   let ir_normal = March_tir.Llvm_emit.emit_module ~fast_math:false m in
   Alcotest.(check bool) "fast_math IR contains 'fadd fast'" true
@@ -7708,7 +7708,7 @@ let test_ctor_no_collision_different_tags () =
                              (March_tir.Tir.TCon ("B.Cons", []),
                               [March_tir.Tir.AVar x]) } in
   let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fn_a; fn_b];
-            tm_types = [td_a; td_b]; tm_externs = []; tm_exports = [] } in
+            tm_types = [td_a; td_b]; tm_externs = []; tm_exports = []; tm_tests = [] } in
   let ir = March_tir.Llvm_emit.emit_module m in
   (* Without the fix, A.Cons lookup falls back to tag=0 (ctor_info["A.Cons"]
      not found → fallback entry with ce_tag=0).  With the fix, it finds
@@ -7736,7 +7736,7 @@ let test_ctor_arity_mismatch_raises () =
                               (* 2 args but ctor only has 1 field *)
                               [March_tir.Tir.AVar x; March_tir.Tir.AVar y]) } in
   let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fn_t];
-            tm_types = [td]; tm_externs = []; tm_exports = [] } in
+            tm_types = [td]; tm_externs = []; tm_exports = []; tm_tests = [] } in
   let raised =
     try ignore (March_tir.Llvm_emit.emit_module m); false
     with Failure _ -> true

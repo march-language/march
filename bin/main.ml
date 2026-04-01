@@ -261,6 +261,7 @@ let dump_tir       = ref false
 let dump_phases    = ref false
 let emit_llvm      = ref false
 let do_compile     = ref false
+let do_test        = ref false   (* --test: compile test blocks into a test-runner binary *)
 let output_file    = ref ""
 let debug_mode     = ref false
 let debug_tui_mode = ref false
@@ -935,7 +936,7 @@ let compile filename =
     (* Phase 1: AST after parse+desugar — user file only (no stdlib). *)
     (if !dump_phases then
        phases := March_dump.Dump.ast_phase user_ast "parse" :: !phases);
-    let tir = March_tir.Lower.lower_module ~type_map desugared in
+    let tir = March_tir.Lower.lower_module ~type_map ~test_mode:!do_test desugared in
     snap_tir "tir-lower" tir;
     (* For WASM island targets, mark render/update/init as exported.
        Set exports BEFORE monomorphization so the functions get mono'd. *)
@@ -1431,6 +1432,7 @@ let () =
     ("--dump-phases",  Arg.Set dump_phases,  " Serialize each IR stage to march-phases/phases.json");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
+    ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile)");
     ("--target",     Arg.Set_string target_str,  "<target>  Compilation target: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown");
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");
     ("--no-opt",    Arg.Clear opt_enabled,  " Skip TIR optimization passes");

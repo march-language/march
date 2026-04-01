@@ -405,7 +405,7 @@ let test_scc_impl_hash_single () =
   (* scc_impl_hash of a Single returns the fn's impl_hash *)
   let fd = make_fn "f" (int_atom 1) in
   let hmod = March_cas.Pipeline.hash_module
-               { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = [] } in
+               { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = [] } in
   let h_scc = List.hd hmod in
   let impl_hash = March_cas.Pipeline.scc_impl_hash h_scc in
   Alcotest.(check int) "impl_hash is 64 hex chars" 64 (String.length impl_hash)
@@ -417,7 +417,7 @@ let test_scc_impl_hash_group () =
   let odd_fd  = make_fn "odd"
     (EApp ({ v_name = "even"; v_ty = TFn ([], TInt); v_lin = Unr }, [])) in
   let hmod = March_cas.Pipeline.hash_module
-               { tm_name = "T"; tm_fns = [even_fd; odd_fd]; tm_types = []; tm_externs = []; tm_exports = [] } in
+               { tm_name = "T"; tm_fns = [even_fd; odd_fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = [] } in
   Alcotest.(check int) "one SCC for mutual recursion" 1 (List.length hmod);
   let h_scc = List.hd hmod in
   let impl_hash = March_cas.Pipeline.scc_impl_hash h_scc in
@@ -428,7 +428,7 @@ let test_hash_module_independent_fns_two_sccs () =
   let f = make_fn "f" (int_atom 1) in
   let g = make_fn "g" (int_atom 2) in
   let hmod = March_cas.Pipeline.hash_module
-               { tm_name = "T"; tm_fns = [f; g]; tm_types = []; tm_externs = []; tm_exports = [] } in
+               { tm_name = "T"; tm_fns = [f; g]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = [] } in
   Alcotest.(check int) "two independent fns → two SCCs" 2 (List.length hmod)
 
 let test_compile_scc_cache_miss_calls_compiler () =
@@ -437,7 +437,7 @@ let test_compile_scc_cache_miss_calls_compiler () =
   let store = March_cas.Cas.create ~project_root:root in
   let fd = make_fn "f" (int_atom 42) in
   let hmod = March_cas.Pipeline.hash_module
-               { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = [] } in
+               { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = [] } in
   let h_scc = List.hd hmod in
   let calls = ref 0 in
   let fake_compile _scc = incr calls; "/tmp/f.o" in
@@ -451,7 +451,7 @@ let test_compile_scc_cache_hit_skips_compiler () =
   let store = March_cas.Cas.create ~project_root:root in
   let fd = make_fn "f" (int_atom 42) in
   let hmod = March_cas.Pipeline.hash_module
-               { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = [] } in
+               { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = [] } in
   let h_scc = List.hd hmod in
   let calls = ref 0 in
   let fake_compile _scc = incr calls; "/tmp/f.o" in
@@ -468,7 +468,7 @@ let test_compile_scc_returns_artifact_path () =
   let store = March_cas.Cas.create ~project_root:root in
   let fd = make_fn "f" (int_atom 7) in
   let hmod = March_cas.Pipeline.hash_module
-               { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = [] } in
+               { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = [] } in
   let h_scc = List.hd hmod in
   let expected = "/tmp/expected_path.o" in
   let path = March_cas.Pipeline.compile_scc store ~target:"test" ~flags:[]
@@ -481,7 +481,7 @@ let test_compile_scc_cache_hit_returns_cached_path () =
   let store = March_cas.Cas.create ~project_root:root in
   let fd = make_fn "f" (int_atom 7) in
   let hmod = March_cas.Pipeline.hash_module
-               { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = [] } in
+               { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = [] } in
   let h_scc = List.hd hmod in
   let original = "/tmp/original.o" in
   let _ = March_cas.Pipeline.compile_scc store ~target:"test" ~flags:[]
@@ -498,9 +498,9 @@ let test_changed_body_causes_cache_miss () =
   let fd1 = make_fn "f" (int_atom 1) in
   let fd2 = make_fn "f" (int_atom 2) in
   let hmod1 = March_cas.Pipeline.hash_module
-                { tm_name = "T"; tm_fns = [fd1]; tm_types = []; tm_externs = []; tm_exports = [] } in
+                { tm_name = "T"; tm_fns = [fd1]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = [] } in
   let hmod2 = March_cas.Pipeline.hash_module
-                { tm_name = "T"; tm_fns = [fd2]; tm_types = []; tm_externs = []; tm_exports = [] } in
+                { tm_name = "T"; tm_fns = [fd2]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = [] } in
   let h_scc1 = List.hd hmod1 in
   let h_scc2 = List.hd hmod2 in
   let calls = ref 0 in
@@ -517,7 +517,7 @@ let test_different_targets_cause_separate_cache_entries () =
   let store = March_cas.Cas.create ~project_root:root in
   let fd = make_fn "f" (int_atom 5) in
   let hmod = March_cas.Pipeline.hash_module
-               { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = [] } in
+               { tm_name = "T"; tm_fns = [fd]; tm_types = []; tm_externs = []; tm_exports = []; tm_tests = [] } in
   let h_scc = List.hd hmod in
   let calls = ref 0 in
   let fake_compile _scc = incr calls; "/tmp/out.o" in

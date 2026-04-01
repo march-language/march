@@ -1,5 +1,13 @@
 (** forge build [--release] *)
 
+(** Returns true for files that match test-file naming conventions.
+    forge build (production binary) must never include these even if they
+    somehow end up under lib/. *)
+let is_test_file name =
+  (String.length name > 5 && String.sub name 0 5 = "test_"
+   && Filename.check_suffix name ".march")
+  || Filename.check_suffix name "_test.march"
+
 let find_march_files dir =
   let rec walk acc d =
     if not (Sys.file_exists d) then acc
@@ -7,7 +15,8 @@ let find_march_files dir =
       Array.fold_left (fun acc name ->
           let path = Filename.concat d name in
           if Sys.is_directory path then walk acc path
-          else if Filename.check_suffix name ".march" then path :: acc
+          else if Filename.check_suffix name ".march" && not (is_test_file name)
+          then path :: acc
           else acc)
         acc (Sys.readdir d)
   in

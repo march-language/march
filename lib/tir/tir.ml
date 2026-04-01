@@ -107,5 +107,10 @@ type tir_module = {
   tm_externs : extern_decl list;
   tm_exports : string list;  (** Extra root function names to keep alive during DCE.
                                  Used for WASM island exports (render, update, init). *)
+  tm_tests   : (string * string) list;
+  (** (fn_name, display_name) pairs for --test mode.  Non-empty only when the
+      module was lowered with [~test_mode:true].  The fn_name matches a [fn_def]
+      in [tm_fns] whose body is the corresponding test block.  display_name is
+      the human-readable test name (with describe prefix if nested). *)
 }
 [@@deriving show]
