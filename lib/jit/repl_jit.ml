@@ -239,9 +239,10 @@ and pp_field ?(depth=0) (ty : March_tir.Tir.ty) (ptr : nativeint) (i : int) : st
 
 (* ── run_expr ──────────────────────────────────────────────────────── *)
 
-let run_expr ctx ~type_map m =
+let run_expr ctx ~type_map:_ m =
   let n = next_id ctx in
   let repl_vars = List.map (fun (gname, _) -> bare_of_global gname) ctx.globals in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
   let tir = lower_module ~type_map ~repl_vars m in
   (* The last function in the module is the expression wrapper.
      Extract its body and return type. *)
@@ -313,9 +314,10 @@ let run_expr ctx ~type_map m =
 
 (** Distinguish fn vs let at the AST level, not TIR.
     [is_fn_decl] is true when the original REPL input was a DFn. *)
-let run_decl ctx ~type_map ~is_fn_decl ~bind_name m =
+let run_decl ctx ~type_map:_ ~is_fn_decl ~bind_name m =
   let n = next_id ctx in
   let repl_vars = List.map (fun (gname, _) -> bare_of_global gname) ctx.globals in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
   let tir = lower_module ~type_map ~repl_vars m in
   let all_support_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
@@ -416,6 +418,7 @@ let precompile_stdlib ctx
     ~(content_hash : string)
     ~(stdlib_decls : March_ast.Ast.decl list)
     ~(type_map     : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t) =
+  ignore type_map;
   let home = (try Sys.getenv "HOME" with Not_found -> ".") in
   let cache_dir = Filename.concat home ".cache/march" in
   let short_hash = String.sub content_hash 0 16 in
@@ -454,7 +457,8 @@ let precompile_stdlib ctx
       { March_ast.Ast.mod_name = { txt = "StdlibPrelude"; span = s };
         mod_decls = stdlib_decls } in
     (try
-      let tir = lower_module ~type_map stdlib_mod in
+      let (_, type_map_stdlib) = March_typecheck.Typecheck.check_module stdlib_mod in
+      let tir = lower_module ~type_map:type_map_stdlib stdlib_mod in
       let stdlib_fns = List.filter
         (fun (f : March_tir.Tir.fn_def) ->
           not (is_c_runtime_fn f.fn_name) &&
