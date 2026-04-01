@@ -26,17 +26,25 @@ type patch = {
   patch_source : dep;  (** always GitBranchDep, GitRevDep, GitTagDep, or PathDep *)
 }
 
+(** A task declared in [archive.task.NAME]. *)
+type archive_task = {
+  task_command : string;  (** e.g. "bastion.new" *)
+  task_module  : string;  (** relative path, e.g. "forge/cmd_new.march" *)
+}
+
 type project = {
-  name         : string;
-  version      : string;
-  project_type : project_type;
-  description  : string;
-  author       : string;
-  root         : string;
-  entrypoint   : string option;
-  deps         : (string * dep) list;
-  dev_deps     : (string * dep) list;
-  patches      : patch list;
+  name          : string;
+  version       : string;
+  project_type  : project_type;
+  description   : string;
+  author        : string;
+  root          : string;
+  entrypoint    : string option;
+  deps          : (string * dep) list;
+  dev_deps      : (string * dep) list;
+  patches       : patch list;
+  archive_tasks : archive_task list;
+  archive_deps  : (string * dep) list;
 }
 
 let project_type_of_string = function
@@ -128,6 +136,23 @@ let parse_section_deps prefix doc =
       end else None
     ) doc.Toml.sections
 
+(** Parse [archive.task.NAME] sections into archive_task list. *)
+let parse_archive_tasks doc =
+  let prefix = "archive.task." in
+  let plen = String.length prefix in
+  List.filter_map (fun (sec_name, pairs) ->
+      if String.length sec_name > plen &&
+         String.sub sec_name 0 plen = prefix
+      then begin
+        let command = Toml.get_string pairs "command" in
+        let module_ = Toml.get_string pairs "module" in
+        match command, module_ with
+        | Some task_command, Some task_module ->
+          Some { task_command; task_module }
+        | _ -> None
+      end else None
+    ) doc.Toml.sections
+
 (** Parse [patch.NAME] sections. *)
 let parse_patches doc =
   List.filter_map (fun (sec_name, pairs) ->
@@ -168,8 +193,15 @@ let load_from root =
   let dev_deps = inline_devdeps @ section_devdeps in
   (* [patch.NAME] sections *)
   let patches = parse_patches doc in
+  (* [archive.task.NAME] sections *)
+  let archive_tasks = parse_archive_tasks doc in
+  (* [archive-deps] inline + section forms *)
+  let inline_archdeps  = parse_deps_section (Toml.get_section doc "archive-deps") in
+  let section_archdeps = parse_section_deps "archive-deps" doc in
+  let archive_deps = inline_archdeps @ section_archdeps in
   { name; version; project_type = project_type_of_string type_str;
-    description; author; root; entrypoint; deps; dev_deps; patches }
+    description; author; root; entrypoint; deps; dev_deps; patches;
+    archive_tasks; archive_deps }
 
 let load_from_dir dir =
   try Ok (load_from dir)

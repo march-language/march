@@ -7,6 +7,32 @@ let handle = function
   | Ok ()   -> ()
   | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
 
+(* --------------------------------------------------------- pre-dispatch ---
+   Archive tasks look like "bastion.new" — dotted namespaces not used by any
+   built-in command.  We intercept these before cmdliner so unknown commands
+   route to installed archives rather than producing a usage error. ---------- *)
+
+let () =
+  if Array.length Sys.argv >= 2 then begin
+    let cmd = Sys.argv.(1) in
+    (* Only intercept if first char is not '-' and the name contains a dot *)
+    if String.length cmd > 0 && cmd.[0] <> '-' && String.contains cmd '.' then begin
+      let args =
+        if Array.length Sys.argv > 2 then
+          Array.to_list (Array.sub Sys.argv 2 (Array.length Sys.argv - 2))
+        else []
+      in
+      (match Archive_store.find_task cmd with
+       | Some task_file ->
+         exit (Archive_store.run_task task_file args)
+       | None ->
+         let ns = String.sub cmd 0 (String.index cmd '.') in
+         Printf.eprintf "error: unknown command '%s'\n%!" cmd;
+         Printf.eprintf "hint:  install the %s archive with: forge install %s\n%!" ns ns;
+         exit 1)
+    end
+  end
+
 (* ------------------------------------------------------------------ forge new *)
 
 let new_cmd =
@@ -137,21 +163,6 @@ let deps_cmd =
     (Cmd.info "deps" ~doc:"Install and manage project dependencies")
     [deps_update_cmd]
 
-(* --------------------------------------------------------------- forge install *)
-
-let install_cmd =
-  let source =
-    Arg.(required & pos 0 (some string) None &
-         info [] ~docv:"PATH_OR_URL" ~doc:"Local path or git URL of the project to install")
-  in
-  let run s =
-    match Cmd_install.run s with
-    | Ok ()  -> ()
-    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
-  in
-  Cmd.v (Cmd.info "install" ~doc:"Build and install a March project as a CLI tool")
-    Term.(const run $ source)
-
 (* ------------------------------------------------------------------ forge help *)
 
 let help_cmd =
@@ -219,6 +230,63 @@ let publish_cmd =
   Cmd.v (Cmd.info "publish" ~doc:"Validate and publish the current package")
     Term.(const run $ old_source $ dry_run)
 
+(* -------------------------------------------------------------- forge install *)
+
+let install_cmd =
+  let arg =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"NAME[@REF]"
+           ~doc:"Archive to install. REF may be a version, local path, or git URL (with optional #branch).")
+  in
+  let force =
+    Arg.(value & flag & info ["force"] ~doc:"Reinstall even if already installed")
+  in
+  let no_verify =
+    Arg.(value & flag & info ["no-verify"] ~doc:"Skip checksum verification")
+  in
+  let run a f v = handle (Cmd_archive.run_install a ~force:f ~no_verify:v) in
+  Cmd.v (Cmd.info "install" ~doc:"Install a forge archive globally")
+    Term.(const run $ arg $ force $ no_verify)
+
+(* ------------------------------------------------------------ forge uninstall *)
+
+let uninstall_cmd =
+  let name =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"NAME" ~doc:"Archive to remove")
+  in
+  let run n = handle (Cmd_archive.run_uninstall n) in
+  Cmd.v (Cmd.info "uninstall" ~doc:"Remove a globally installed archive")
+    Term.(const run $ name)
+
+(* ------------------------------------------------------------- forge archives *)
+
+let archives_cmd =
+  Cmd.v (Cmd.info "archives" ~doc:"List installed forge archives")
+    Term.(const (fun () -> Cmd_archive.run_list ()) $ const ())
+
+(* --------------------------------------------------------------- forge update *)
+
+let update_cmd =
+  let name =
+    Arg.(value & pos 0 (some string) None &
+         info [] ~docv:"NAME" ~doc:"Archive to update (omit to update all)")
+  in
+  let run n = handle (Cmd_archive.run_update n) in
+  Cmd.v (Cmd.info "update" ~doc:"Update one or all installed archives")
+    Term.(const run $ name)
+
+(* --------------------------------------------------------------- forge verify *)
+
+let verify_cmd =
+  let name =
+    Arg.(value & pos 0 (some string) None &
+         info [] ~docv:"NAME" ~doc:"Archive to verify (omit to verify all)")
+  in
+  let run n = handle (Cmd_archive.run_verify n) in
+  Cmd.v (Cmd.info "verify" ~doc:"Verify integrity of installed archives")
+    Term.(const run $ name)
+
 (* ------------------------------------------------------------------ forge init *)
 
 let init_cmd =
@@ -261,7 +329,8 @@ let default_term =
 let () =
   let cmds =
     [ new_cmd; init_cmd; build_cmd; run_cmd; compile_cmd; test_cmd; format_cmd;
-      interactive_cmd; i_cmd; clean_cmd; deps_cmd; install_cmd; publish_cmd;
+      interactive_cmd; i_cmd; clean_cmd; deps_cmd; publish_cmd;
+      install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       search_cmd; phases_cmd; help_cmd ]
   in
   let main =
