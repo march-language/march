@@ -11828,6 +11828,52 @@ let test_parse_import_dotbrace () =
      | _ -> Alcotest.fail "expected UseNames")
   | _ -> Alcotest.fail "expected DUse UseNames"
 
+(* import Mod.Sub — dotted path, UseAll *)
+let test_parse_import_dotted_all () =
+  let src = {|mod Test do
+    import Foo.Bar
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DUse (ud, _)] ->
+    Alcotest.(check bool) "import dotted → UseAll" true
+      (match ud.March_ast.Ast.use_sel with March_ast.Ast.UseAll -> true | _ -> false);
+    Alcotest.(check int) "2 path segments" 2 (List.length ud.March_ast.Ast.use_path);
+    let segs = List.map (fun n -> n.March_ast.Ast.txt) ud.March_ast.Ast.use_path in
+    Alcotest.(check string) "first seg" "Foo" (List.nth segs 0);
+    Alcotest.(check string) "second seg" "Bar" (List.nth segs 1)
+  | _ -> Alcotest.fail "expected DUse UseAll"
+
+(* import Mod.Sub.{foo, bar} — dotted path with brace selector *)
+let test_parse_import_dotted_dotbrace () =
+  let src = {|mod Test do
+    import Foo.Bar.{baz, qux}
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DUse (ud, _)] ->
+    Alcotest.(check int) "2 path segments" 2 (List.length ud.March_ast.Ast.use_path);
+    (match ud.March_ast.Ast.use_sel with
+     | March_ast.Ast.UseNames names ->
+       Alcotest.(check int) "2 selected names" 2 (List.length names)
+     | _ -> Alcotest.fail "expected UseNames")
+  | _ -> Alcotest.fail "expected DUse UseNames"
+
+(* import Mod.Sub, only: [foo] — dotted path with only filter *)
+let test_parse_import_dotted_only () =
+  let src = {|mod Test do
+    import Foo.Bar, only: [baz]
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DUse (ud, _)] ->
+    Alcotest.(check int) "2 path segments" 2 (List.length ud.March_ast.Ast.use_path);
+    (match ud.March_ast.Ast.use_sel with
+     | March_ast.Ast.UseNames names ->
+       Alcotest.(check int) "1 name" 1 (List.length names)
+     | _ -> Alcotest.fail "expected UseNames")
+  | _ -> Alcotest.fail "expected DUse UseNames"
+
 (* alias Mod as Short — Elixir-style direct `as` keyword *)
 let test_parse_alias_as_kw () =
   let src = {|mod Test do
@@ -19650,6 +19696,9 @@ let () =
         Alcotest.test_case "parse import only"     `Quick test_parse_import_only;
         Alcotest.test_case "parse import except"   `Quick test_parse_import_except;
         Alcotest.test_case "parse import dotbrace" `Quick test_parse_import_dotbrace;
+        Alcotest.test_case "parse import dotted all"      `Quick test_parse_import_dotted_all;
+        Alcotest.test_case "parse import dotted dotbrace" `Quick test_parse_import_dotted_dotbrace;
+        Alcotest.test_case "parse import dotted only"     `Quick test_parse_import_dotted_only;
         Alcotest.test_case "parse alias as"        `Quick test_parse_alias_as;
         Alcotest.test_case "parse alias bare"      `Quick test_parse_alias_bare;
         Alcotest.test_case "parse alias as kw"     `Quick test_parse_alias_as_kw;

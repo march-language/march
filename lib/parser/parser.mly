@@ -522,20 +522,33 @@ use_selector:
   | LBRACE; names = separated_list(COMMA, lower_name); RBRACE
     { UseNames names }
 
-(** Elixir-style import: import Mod, import Mod, only: [f,g], import Mod, except: [f,g]
-    Also: import Mod.{A, B} — selective import using dot-brace syntax *)
+(** Elixir-style import: import Mod, import Mod.Sub, import Mod.Sub.{A, B},
+    import Mod.Sub, only: [f,g], import Mod.Sub, except: [f,g]
+    Multi-level module paths are handled via the right-recursive import_path_tail
+    nonterminal, analogous to use_path_tail: after each DOT, the lookahead
+    (UPPER_IDENT vs LBRACE) unambiguously selects which branch to take. *)
 import_decl:
-  | IMPORT; name = upper_name
-    { DUse ({ use_path = [name]; use_sel = UseAll }, mk_span ($loc)) }
-  | IMPORT; name = upper_name; DOT; LBRACE;
-    names = separated_list(COMMA, any_name); RBRACE
-    { DUse ({ use_path = [name]; use_sel = UseNames names }, mk_span ($loc)) }
-  | IMPORT; name = upper_name; COMMA; ONLY; COLON; LBRACKET;
-    names = separated_list(COMMA, lower_name); RBRACKET
-    { DUse ({ use_path = [name]; use_sel = UseNames names }, mk_span ($loc)) }
-  | IMPORT; name = upper_name; COMMA; EXCEPT; COLON; LBRACKET;
-    names = separated_list(COMMA, lower_name); RBRACKET
-    { DUse ({ use_path = [name]; use_sel = UseExcept names }, mk_span ($loc)) }
+  | IMPORT; head = upper_name; tail = import_path_tail
+    { let (path_rest, sel) = tail in
+      DUse ({ use_path = head :: path_rest; use_sel = sel }, mk_span ($loc)) }
+
+(* Right-recursive tail for import paths.  After the leading UPPER_IDENT the
+   lookahead determines which alternative applies:
+     empty           -> UseAll          -- import A
+     COMMA ONLY      -> UseNames        -- import A, only: [f,g]
+     COMMA EXCEPT    -> UseExcept       -- import A, except: [f,g]
+     DOT LBRACE      -> UseNames        -- import A.{B, C}
+     DOT UPPER_IDENT -> recurse         -- import A.B.... *)
+import_path_tail:
+  |   { ([], UseAll) }
+  | COMMA; ONLY; COLON; LBRACKET; names = separated_list(COMMA, lower_name); RBRACKET
+    { ([], UseNames names) }
+  | COMMA; EXCEPT; COLON; LBRACKET; names = separated_list(COMMA, lower_name); RBRACKET
+    { ([], UseExcept names) }
+  | DOT; LBRACE; names = separated_list(COMMA, any_name); RBRACE
+    { ([], UseNames names) }
+  | DOT; seg = upper_name; tail = import_path_tail
+    { let (rest, sel) = tail in (seg :: rest, sel) }
 
 (** alias Long.Name, as: Short  or  alias Long.Name as Short  or  alias Long.Name *)
 alias_decl_rule:
