@@ -103,13 +103,27 @@ fn (a, b) -> a + b            -- multiple params
 fn () -> compute()            -- ZERO-ARG: must use fn () -> ...
 ```
 
-Multi-statement lambda body uses `let` bindings:
+Multi-statement lambda bodies are supported with leading `let` bindings followed by
+a final expression — identical to match arm block bodies:
 
 ```march
-fn (x) -> let y = x + 1
-          let z = y * 2
-          z
+fn x ->
+  let y = x + 1
+  let z = y * 2
+  z
+
+fn (a, b) ->
+  let sum = a + b
+  sum * 2
+
+fn () ->
+  let x = compute()
+  let y = x + 1
+  y
 ```
+
+The body is: zero or more `let`/`linear let` bindings, then a final expression.
+Single-expression lambdas are unchanged — no `let` bindings means no `EBlock` wrapper.
 
 **`fn -> expr` is a PARSE ERROR.** Zero-arg lambdas require `fn () -> expr`.
 

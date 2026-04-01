@@ -767,7 +767,7 @@ expr:
   | e = expr_pipe { e }
   | ASSERT; e = expr
     { EAssert (e, mk_span ($loc)) }
-  | FN; ps = lambda_params; ARROW; body = expr
+  | FN; ps = lambda_params; ARROW; body = lambda_body
     { ELam (ps, body, mk_span ($loc)) }
   | FN; ps = lambda_params; error
     { let params = String.concat " " (List.map (fun p -> p.param_name.txt) ps) in
@@ -827,6 +827,27 @@ lambda_params:
   | UNDERSCORE { [{ param_name = mk_name "_" $loc; param_ty = None; param_lin = Unrestricted }] }
   | LPAREN; ps = separated_list(COMMA, param); RPAREN
     { ps }
+
+(** Lambda body: zero or more leading [let] bindings followed by a final expression.
+    This mirrors [block_body] but uses a right-recursive rule so it can appear after
+    [->] without requiring [do...end] delimiters.  NL tokens are already suppressed
+    outside match contexts, so the token stream is flat; the grammar terminates
+    greedily: all leading [let]/[linear let] tokens are consumed as bindings, and the
+    first non-[let] token starts the final expression. *)
+lambda_body:
+  | stmts = lambda_stmts; e = expr
+    { match stmts with
+      | [] -> e
+      | _  -> EBlock (stmts @ [e], mk_span ($loc)) }
+
+lambda_stmts:
+  | (* empty *) { [] }
+  | LET; p = simple_pattern; ty = option(type_annot); EQUALS; ev = expr; rest = lambda_stmts
+    { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Unrestricted; bind_expr = ev },
+            mk_span ($loc)) :: rest }
+  | LINEAR; LET; p = simple_pattern; ty = option(type_annot); EQUALS; ev = expr; rest = lambda_stmts
+    { ELet ({ bind_pat = p; bind_ty = ty; bind_lin = Linear; bind_expr = ev },
+            mk_span ($loc)) :: rest }
 
 expr_pipe:
   | l = expr_pipe; PIPE_ARROW; r = expr_or

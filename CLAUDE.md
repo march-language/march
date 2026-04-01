@@ -84,24 +84,30 @@ See [syntax_reference.md](syntax_reference.md) for a complete quick-reference of
 
 ### Lambda syntax (critical — common source of bugs)
 
-Lambdas use `fn ... -> expr` (arrow form only, NO `do...end` block form):
+Lambdas use `fn ... -> body` (arrow form only, NO `do...end` block form).
+The body is a single expression, OR zero or more `let` bindings followed by a
+final expression — identical to match arm block bodies:
 
 ```march
-fn x -> x + 1                     -- single param
+fn x -> x + 1                     -- single param, single expr
 fn _ -> 42                        -- wildcard param
 fn (a, b) -> a + b                -- multiple params (parenthesized)
 fn () -> some_function()          -- ZERO-ARG: must use fn () -> ...
+
+-- Multi-expression bodies with let bindings:
+fn x ->
+  let y = x + 1
+  let z = y * 2
+  z
+
+fn () ->
+  let result = compute()
+  result + 1
 ```
 
 **Common mistakes:**
 - `fn -> expr` — PARSE ERROR. Zero-arg lambdas MUST use `fn () -> expr`
 - `fn _ -> expr` when you want zero-arg — WRONG. `_` is a 1-arg lambda; calling it with 0 args gives "arity mismatch: expected 1 args, got 0"
-- There is no `fn (x) do ... end` form for lambdas. The body after `->` is a single expression. Use `let` bindings for multi-statement bodies:
-  ```march
-  fn (x) -> let y = x + 1
-            let z = y * 2
-            z
-  ```
 
 ### Visibility
 

@@ -46,7 +46,7 @@ A statically-typed functional programming language. The compiler is implemented 
 
 ### Syntax (ML/Elixir Hybrid)
 - `fn name(x, y) do ... end` — named functions with parenthesized args
-- `fn x -> x + 1` / `fn (x, y) -> body` — lambdas; multi-param requires parens
+- `fn x -> x + 1` / `fn (x, y) -> body` — lambdas; multi-param requires parens; lambda bodies support leading `let` bindings + final expr (same as match arm block bodies)
 - `mod Name do ... end` — modules; `sig Name do ... end` — interfaces
 - `do ... end` — inline block expression (also valid in match arms)
 - `x |> f |> g` — pipe operator

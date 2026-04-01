@@ -124,6 +124,55 @@ let test_parse_lambda_keyword_params () =
     Alcotest.(check (list string)) "param names" ["state"; "event"; "payload"] names
   | _ -> Alcotest.fail "expected ELam"
 
+let test_parse_lambda_block_body () =
+  (* Multi-expression lambda body with let bindings *)
+  let src = "fn x -> let y = x + 1 let z = y * 2 z" in
+  let lexbuf = Lexing.from_string src in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.ELam ([_], March_ast.Ast.EBlock (stmts, _), _) ->
+    Alcotest.(check int) "3 stmts in block" 3 (List.length stmts)
+  | _ -> Alcotest.fail "expected ELam with EBlock body"
+
+let test_parse_lambda_single_let () =
+  (* Single let-binding lambda: let followed by final expr *)
+  let src = "fn x -> let y = x + 1 y" in
+  let lexbuf = Lexing.from_string src in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.ELam ([_], March_ast.Ast.EBlock ([_; _], _), _) -> ()
+  | _ -> Alcotest.fail "expected ELam with 2-element EBlock body"
+
+let test_parse_lambda_no_let_unchanged () =
+  (* Single-expression lambda still works as before — no EBlock wrapper *)
+  let src = "fn x -> x + 1" in
+  let lexbuf = Lexing.from_string src in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.ELam ([_], body, _) ->
+    (match body with
+     | March_ast.Ast.EBlock _ -> Alcotest.fail "single-expr lambda should not be wrapped in EBlock"
+     | _ -> ())
+  | _ -> Alcotest.fail "expected ELam"
+
+let test_parse_lambda_zero_arg_block () =
+  (* Zero-arg lambda with multi-expression body *)
+  let src = "fn () -> let x = 1 x" in
+  let lexbuf = Lexing.from_string src in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.ELam ([], March_ast.Ast.EBlock ([_; _], _), _) -> ()
+  | _ -> Alcotest.fail "expected zero-arg ELam with EBlock body"
+
+let test_parse_lambda_multi_param_block () =
+  (* Multi-param lambda with let-binding body *)
+  let src = "fn (a, b) -> let c = a + b c" in
+  let lexbuf = Lexing.from_string src in
+  let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  match expr with
+  | March_ast.Ast.ELam ([_; _], March_ast.Ast.EBlock ([_; _], _), _) -> ()
+  | _ -> Alcotest.fail "expected 2-param ELam with EBlock body"
+
 let test_parse_expr_app () =
   let lexbuf = Lexing.from_string "f(x, y)" in
   let expr = March_parser.Parser.expr_eof (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
@@ -18570,6 +18619,11 @@ let () =
           Alcotest.test_case "pipe expr" `Quick test_parse_expr_pipe;
           Alcotest.test_case "lambda expr" `Quick test_parse_expr_lambda;
           Alcotest.test_case "lambda keyword params" `Quick test_parse_lambda_keyword_params;
+          Alcotest.test_case "lambda block body" `Quick test_parse_lambda_block_body;
+          Alcotest.test_case "lambda single let" `Quick test_parse_lambda_single_let;
+          Alcotest.test_case "lambda no-let unchanged" `Quick test_parse_lambda_no_let_unchanged;
+          Alcotest.test_case "lambda zero-arg block" `Quick test_parse_lambda_zero_arg_block;
+          Alcotest.test_case "lambda multi-param block" `Quick test_parse_lambda_multi_param_block;
           Alcotest.test_case "application" `Quick test_parse_expr_app;
         ] );
       ( "module",
