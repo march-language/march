@@ -1,6 +1,6 @@
 (library
  (name march_forge)
- (libraries unix march_search march_format yojson digestif march_bastion))
+ (libraries unix march_search march_format yojson digestif))
 
 (rule
  (target phase_viewer_html.ml)
