@@ -257,6 +257,7 @@ let is_builtin_fn name =
                  "math_exp"; "math_exp2";
                  "math_log"; "math_log2"; "math_log10"; "math_pow";
                  (* Extended string builtins *)
+                 "string_chars"; "string_from_chars";
                  "string_contains"; "string_starts_with"; "string_ends_with";
                  "string_slice"; "string_split"; "string_split_first";
                  "string_replace"; "string_replace_all";
@@ -393,6 +394,8 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "math_log" | "math_log2" | "math_log10" -> Some Tir.TFloat
   | "math_atan2" | "math_pow"    -> Some Tir.TFloat
   (* Extended string builtins *)
+  | "string_chars"                -> Some (Tir.TCon ("List", [Tir.TString]))
+  | "string_from_chars"           -> Some Tir.TString
   | "string_contains"             -> Some Tir.TBool
   | "string_starts_with"          -> Some Tir.TBool
   | "string_ends_with"            -> Some Tir.TBool
@@ -552,6 +555,8 @@ let mangle_extern : string -> string = function
   | "math_log10" -> "march_math_log10"
   | "math_pow"   -> "march_math_pow"
   (* Extended string builtins *)
+  | "string_chars"         -> "march_string_chars"
+  | "string_from_chars"    -> "march_string_from_chars"
   | "string_contains"      -> "march_string_contains"
   | "string_starts_with"   -> "march_string_starts_with"
   | "string_ends_with"     -> "march_string_ends_with"
@@ -2512,6 +2517,8 @@ declare double @march_math_log2(double %f)
 declare double @march_math_log10(double %f)
 declare double @march_math_pow(double %b, double %e)
 ; Extended string builtins
+declare ptr  @march_string_chars(ptr %s)
+declare ptr  @march_string_from_chars(ptr %list)
 declare i64  @march_string_contains(ptr %s, ptr %sub)
 declare i64  @march_string_starts_with(ptr %s, ptr %prefix)
 declare i64  @march_string_ends_with(ptr %s, ptr %suffix)

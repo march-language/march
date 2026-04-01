@@ -7778,6 +7778,31 @@ let test_compiled_main_calls_march_run_scheduler () =
   in
   Alcotest.(check bool) "march_run_scheduler is declared in preamble" true has_declaration
 
+(* ── LLVM emit regression: string_chars / string_from_chars ─────────────── *)
+
+(** Regression: string_chars and string_from_chars must lower to C-runtime
+    calls in the LLVM backend.  Before the fix, emit_atom fell through to the
+    default alloca-load path and generated [%string_chars.addr] which was never
+    allocated, crashing LLVM IR verification. *)
+let test_string_chars_llvm_emit () =
+  let src = {|mod Test do
+    fn f(s : String) do
+      let chars = string_chars(s)
+      string_from_chars(chars)
+    end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let ir = March_tir.Llvm_emit.emit_module tir in
+  let ir_has pat =
+    try ignore (Str.search_forward (Str.regexp_string pat) ir 0); true
+    with Not_found -> false
+  in
+  Alcotest.(check bool) "string_chars -> @march_string_chars"     true  (ir_has "@march_string_chars");
+  Alcotest.(check bool) "string_from_chars -> @march_string_from_chars" true  (ir_has "@march_string_from_chars");
+  Alcotest.(check bool) "no %string_chars.addr load"              false (ir_has "%string_chars.addr")
+
 (* ── String stdlib module tests ─────────────────────────────────────────── *)
 
 (** Helper: load string.march and evaluate [src] with it in scope. *)
@@ -19156,6 +19181,8 @@ let () =
           test_ctor_arity_mismatch_raises;
         Alcotest.test_case "compiled main calls march_run_scheduler" `Quick
           (with_reset test_compiled_main_calls_march_run_scheduler);
+        Alcotest.test_case "string_chars llvm emit" `Quick
+          test_string_chars_llvm_emit;
       ]);
       ("string stdlib", [
         Alcotest.test_case "byte_size"           `Quick test_string_byte_size;

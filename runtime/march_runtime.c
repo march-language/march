@@ -1038,6 +1038,46 @@ void *march_string_split_first(void *s, void *sep) {
     return make_none();
 }
 
+/* Split a string into a List of single-character strings. */
+void *march_string_chars(void *s) {
+    march_string *ss = (march_string *)s;
+    void *list = make_nil();
+    for (int64_t i = ss->len - 1; i >= 0; i--) {
+        void *ch = march_string_lit(ss->data + i, 1);
+        list = make_cons(ch, list);
+    }
+    return list;
+}
+
+/* Join a List of strings (single-char or multi-char) into one string. */
+void *march_string_from_chars(void *lst) {
+    /* First pass: compute total length. */
+    int64_t total = 0;
+    void *cur = lst;
+    while (1) {
+        int32_t tag = *(int32_t *)((char *)cur + 8);
+        if (tag == 0) break; /* Nil */
+        march_string *ch = *(march_string **)((char *)cur + 16);
+        total += ch->len;
+        cur = *(void **)((char *)cur + 24);
+    }
+    march_string *r = malloc(sizeof(march_string) + (size_t)total + 1);
+    if (!r) { fputs("march: out of memory\n", stderr); exit(1); }
+    r->rc = 1; r->len = total;
+    int64_t off = 0;
+    cur = lst;
+    while (1) {
+        int32_t tag = *(int32_t *)((char *)cur + 8);
+        if (tag == 0) break; /* Nil */
+        march_string *ch = *(march_string **)((char *)cur + 16);
+        memcpy(r->data + off, ch->data, (size_t)ch->len);
+        off += ch->len;
+        cur = *(void **)((char *)cur + 24);
+    }
+    r->data[total] = '\0';
+    return r;
+}
+
 /* Replace first occurrence. */
 void *march_string_replace(void *s, void *old, void *new_) {
     march_string *ss = (march_string *)s;
