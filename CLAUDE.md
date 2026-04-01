@@ -27,6 +27,18 @@ After implementing or completing a feature, update `specs/todos.md` (move item t
 
 After changing a feature, run the benchmark(s) that exercise it to catch regressions — see `specs/benchmarks.md` for the mapping. Quick reference: Perceus/FBIP changes → `bench/tree_transform.march`; closure/HOF changes → `bench/list_ops.march`; allocation/GC changes → `bench/binary_trees.march`.
 
+## Searching the codebase
+
+**Use `forge search` to find modules, functions, types, and other code constructs.** This is the primary way to discover what exists in the codebase.
+
+```
+forge search "function_name"    # search for a function
+forge search "ModuleName"       # search for a module
+forge search "type_name"        # search for a type
+```
+
+Always use `forge search` before grepping or manually reading files when looking for modules, functions, or types in March code.
+
 ## Project layout
 
 ```
