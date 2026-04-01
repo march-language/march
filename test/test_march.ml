@@ -14778,13 +14778,13 @@ let interp_eval_expr src =
 (** Run an expression through the JIT (wrapping in a minimal module).
     Returns Some result_str on success, None if JIT unavailable or fails. *)
 let jit_eval_simple_expr ~runtime_so src =
-  let type_map = Hashtbl.create 16 in
   let lexbuf   = Lexing.from_string src in
   match (try Some (March_parser.Parser.repl_input (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
          with _ -> None) with
   | Some (March_ast.Ast.ReplExpr e) ->
     let e' = March_desugar.Desugar.desugar_expr e in
     let m  = make_jit_test_module e' in
+    let (_, type_map) = March_typecheck.Typecheck.check_module m in
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (match (try
       let (_, result) = March_jit.Repl_jit.run_expr jit ~type_map m in
