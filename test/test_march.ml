@@ -2701,6 +2701,20 @@ let test_parse_impl_decl () =
     Alcotest.(check int) "1 method" 1 (List.length idef.impl_methods)
   | _ -> Alcotest.fail "expected DImpl"
 
+(* impl Mod.Iface(T) — dotted interface name parses and stores joined name *)
+let test_parse_impl_dotted_iface () =
+  let src = {|mod Test do
+    impl Conduit.Storage(Int) do
+      fn get(k, s) do "" end
+    end
+  end|} in
+  let m = parse_module src in
+  match m.March_ast.Ast.mod_decls with
+  | [March_ast.Ast.DImpl (idef, _)] ->
+    Alcotest.(check string) "dotted impl iface" "Conduit.Storage" idef.March_ast.Ast.impl_iface.March_ast.Ast.txt;
+    Alcotest.(check int) "1 method" 1 (List.length idef.March_ast.Ast.impl_methods)
+  | _ -> Alcotest.fail "expected DImpl"
+
 let test_parse_sig_decl () =
   let src = {|mod Test do
     sig Collections do
@@ -18969,6 +18983,7 @@ let () =
         [
           Alcotest.test_case "interface decl"       `Quick test_parse_interface_decl;
           Alcotest.test_case "impl decl"            `Quick test_parse_impl_decl;
+          Alcotest.test_case "impl dotted iface"   `Quick test_parse_impl_dotted_iface;
           Alcotest.test_case "sig decl"             `Quick test_parse_sig_decl;
           Alcotest.test_case "extern decl"          `Quick test_parse_extern_decl;
           Alcotest.test_case "use all"              `Quick test_parse_use_all;

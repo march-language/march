@@ -606,12 +606,16 @@ method_sig:
 %inline preceded_by_do_end(X):
   | DO; x = X; END { x }
 
-(** Interface implementation: impl Eq(Int) do fn eq(x, y) do x == y end end *)
+(** Interface implementation: impl Eq(Int) do fn eq(x, y) do x == y end end
+    Also accepts dotted names: impl Conduit.Storage(T) do ... end
+    (equivalent to: import Conduit; impl Storage(T) do ... end) *)
 impl_decl:
-  | IMPL; iface = upper_name; LPAREN; t = ty; RPAREN;
+  | IMPL; iface_path = upper_dot_path; LPAREN; t = ty; RPAREN;
     constraints = loption(preceded(WHEN, separated_nonempty_list(COMMA, constraint_expr)));
     DO; methods = list(fn_decl); END
-    { DImpl ({
+    { let iface = let joined = String.concat "." (List.map (fun n -> n.txt) iface_path) in
+                  mk_name joined $loc(iface_path) in
+      DImpl ({
         impl_iface = iface;
         impl_ty = t;
         impl_constraints = constraints;
@@ -621,14 +625,17 @@ impl_decl:
             | DFn (def, _) -> Some (def.fn_name, def)
             | _ -> None) methods;
       }, mk_span ($loc)) }
-  | IMPL; _iface = upper_name; error
+  | IMPL; _iface = upper_dot_path; error
     { error_raise
         "Implementations need a type argument in parentheses:"
         (Some "impl InterfaceName(ConcreteType) do\n    fn method(x) do ... end\nend")
         $startpos($3) }
 
 constraint_expr:
-  | name = upper_name; LPAREN; t = ty; RPAREN { (name, [t]) }
+  | path = upper_dot_path; LPAREN; t = ty; RPAREN
+    { let name = let joined = String.concat "." (List.map (fun n -> n.txt) path) in
+                 mk_name joined $loc(path) in
+      (name, [t]) }
 
 (** Module signature: sig Collections do fn insert: Int -> List -> Int end *)
 sig_decl:
