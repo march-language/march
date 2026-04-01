@@ -14,6 +14,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <setjmp.h>
 
 /* ── GC/RC Tracing (Phase 5) ─────────────────────────────────────────── */
 /*
@@ -424,11 +425,122 @@ void march_println(void *s) {
 
 void march_panic(void *s) {
     march_string *ms = (march_string *)s;
+    /* In test mode, capture the message and longjmp back to the test runner
+       instead of terminating the process. */
+    if (march_test_in_test) {
+        int len = (int)ms->len < (int)sizeof(march_test_fail_buf) - 1
+                  ? (int)ms->len : (int)sizeof(march_test_fail_buf) - 1;
+        memcpy(march_test_fail_buf, ms->data, (size_t)len);
+        march_test_fail_buf[len] = '\0';
+        longjmp(march_test_jmp_buf, 1);
+    }
     fprintf(stderr, "panic: ");
     fwrite(ms->data, 1, (size_t)ms->len, stderr);
     fputc('\n', stderr);
     fflush(stderr);
     exit(1);
+}
+
+/* ── Test harness ────────────────────────────────────────────────────────── */
+
+/* State used by the test runner.  These are process-global because test
+   binaries are single-threaded during test execution. */
+jmp_buf  march_test_jmp_buf;
+int      march_test_in_test  = 0;
+char     march_test_fail_buf[4096];
+
+static int  test_verbose    = 0;
+static char test_filter[256] = "";
+
+/* Counters across all march_test_run calls */
+static int test_total   = 0;
+static int test_failed  = 0;
+
+/* Failure list — stored as a flat array of (name, msg) string pairs.
+   At most 2048 failures recorded to avoid unbounded allocation. */
+#define MARCH_TEST_MAX_FAILURES 2048
+static char *test_failure_names[MARCH_TEST_MAX_FAILURES];
+static char *test_failure_msgs[MARCH_TEST_MAX_FAILURES];
+static int   test_failure_count = 0;
+
+/* Parse --verbose / -v and --filter=... from argv. */
+void march_test_init(int32_t argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--verbose") == 0 || strcmp(argv[i], "-v") == 0) {
+            test_verbose = 1;
+        } else if (strncmp(argv[i], "--filter=", 9) == 0) {
+            strncpy(test_filter, argv[i] + 9, sizeof(test_filter) - 1);
+            test_filter[sizeof(test_filter) - 1] = '\0';
+        }
+    }
+}
+
+/* Run the setup_all function once before any tests. */
+void march_test_setup_all(void (*fn)(void)) {
+    if (fn) fn();
+}
+
+/* Run a single test function, with optional per-test setup.
+   name is a NUL-terminated C string (from the LLVM constant). */
+void march_test_run(void (*fn)(void), const char *name, void (*setup)(void)) {
+    /* Apply filter (case-sensitive substring match). */
+    if (test_filter[0] != '\0' && strstr(name, test_filter) == NULL)
+        return;
+
+    test_total++;
+    if (setup) setup();
+
+    march_test_fail_buf[0] = '\0';
+    march_test_in_test = 1;
+    int jmp_rc = setjmp(march_test_jmp_buf);
+    if (jmp_rc == 0) {
+        fn();
+        march_test_in_test = 0;
+        /* Test passed */
+        if (test_verbose) {
+            printf("  \xe2\x9c\x93 %s\n", name);
+            fflush(stdout);
+        } else {
+            printf(".");
+            fflush(stdout);
+        }
+    } else {
+        march_test_in_test = 0;
+        /* Test failed (panic / assertion) */
+        if (test_verbose) {
+            printf("  \xe2\x9c\x97 %s\n    %s\n", name, march_test_fail_buf);
+            fflush(stdout);
+        } else {
+            printf("F");
+            fflush(stdout);
+        }
+        if (test_failure_count < MARCH_TEST_MAX_FAILURES) {
+            test_failure_names[test_failure_count] = strdup(name);
+            test_failure_msgs[test_failure_count]  = strdup(
+                march_test_fail_buf[0] ? march_test_fail_buf : "assertion failed");
+            test_failure_count++;
+        }
+        test_failed++;
+    }
+}
+
+/* Print the final summary and return an exit code (0 = all pass, 1 = failures). */
+int32_t march_test_report(void) {
+    if (!test_verbose) printf("\n");
+    if (test_failed > 0 && !test_verbose) {
+        printf("\n%d failure(s):\n\n", test_failure_count);
+        for (int i = 0; i < test_failure_count; i++) {
+            printf("FAIL: \"%s\"\n  %s\n\n",
+                   test_failure_names[i], test_failure_msgs[i]);
+            free(test_failure_names[i]);
+            free(test_failure_msgs[i]);
+        }
+    }
+    printf("Finished: %d test%s, %d failure%s\n",
+           test_total,  test_total  == 1 ? "" : "s",
+           test_failed, test_failed == 1 ? "" : "s");
+    fflush(stdout);
+    return test_failed > 0 ? 1 : 0;
 }
 
 /* ── Actor runtime — green thread based ──────────────────────────────────── */

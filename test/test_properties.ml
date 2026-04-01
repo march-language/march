@@ -589,7 +589,7 @@ let gen_tir_closure_module : Tir.tir_module Gen.t =
          Tir.tm_fns     = [main_fn];
          Tir.tm_types   = [];
          Tir.tm_externs = [];
-         Tir.tm_exports = [] })
+         Tir.tm_exports = []; tm_tests = [] })
     (Gen.int_range (-20) 20)
     (Gen.int_range (-20) 20)
 
@@ -608,7 +608,7 @@ let gen_tir_module : Tir.tir_module Gen.t =
          Tir.tm_fns     = [fn];
          Tir.tm_types   = [];
          Tir.tm_externs = [];
-         Tir.tm_exports = [] })
+         Tir.tm_exports = []; tm_tests = [] })
     gen_tir_int_expr
 
 (* ── TIR walking utilities ──────────────────────────────────────────────── *)

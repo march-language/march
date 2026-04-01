@@ -945,16 +945,26 @@ let ctor_entry ctx name n_args_fallback =
        type was not propagated through the pattern-matrix compiler. *)
     let suffix = "." ^ name in
     let suffix_len = String.length suffix in
-    let found = Hashtbl.fold (fun k v acc ->
-        match acc with
-        | Some _ -> acc
-        | None ->
-          let klen = String.length k in
-          if klen > suffix_len &&
-             String.equal (String.sub k (klen - suffix_len) suffix_len) suffix
-          then Some v
-          else None
-      ) ctx.ctor_info None in
+    (* Collect all entries ending with ".<name>" and pick the best match.
+       "Best" = arity matches n_args_fallback; otherwise fall back to first found.
+       This handles the case where two unrelated types share a constructor name
+       (e.g. Heap.HLeaf with 0 fields vs HEntry.HLeaf with 3 fields): the
+       call-site arity breaks the tie instead of hashtable iteration order. *)
+    let candidates = Hashtbl.fold (fun k v acc ->
+        let klen = String.length k in
+        if klen > suffix_len &&
+           String.equal (String.sub k (klen - suffix_len) suffix_len) suffix
+        then v :: acc
+        else acc
+      ) ctx.ctor_info [] in
+    let found = match candidates with
+      | [] -> None
+      | [single] -> Some single
+      | many ->
+        (match List.find_opt (fun e -> List.length e.ce_fields = n_args_fallback) many with
+         | Some exact -> Some exact
+         | None -> Some (List.hd many))
+    in
     (match found with
      | Some e -> e
      | None ->
@@ -2487,6 +2497,10 @@ declare void @march_decrc_local(ptr %p)
 declare void @march_free(ptr %p)
 declare void @march_print(ptr %s)
 declare void @march_panic(ptr %s)
+declare void @march_test_init(i32 %argc, ptr %argv)
+declare void @march_test_run(ptr %fn, ptr %name, ptr %setup_or_null)
+declare void @march_test_setup_all(ptr %fn)
+declare i32  @march_test_report()
 declare void @march_println(ptr %s)
 declare ptr  @march_string_lit(ptr %s, i64 %len)
 declare ptr  @march_int_to_string(i64 %n)
@@ -2881,18 +2895,62 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
           (Printf.sprintf "\ndefine dllexport void @_start() {\nentry:\n  call void @%s()\n  ret void\n}\n" mangled)
       | None -> ())
    | _ ->
-     (* Native / WASI: standard @main wrapper *)
-     (match main_fn_name with
-      | Some name ->
-        let mangled = llvm_name (mangle_extern name) in
-        Buffer.add_string out
-          (Printf.sprintf "\ndeclare void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
-           define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
-             call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
-             call void @%s()\n\
-             call void @march_run_scheduler()\n\
-             ret i32 0\n}\n" mangled)
-      | None -> ()));
+     (* Native / WASI: test-runner @main (when tm_tests populated) or standard @main. *)
+     if m.Tir.tm_tests <> [] then begin
+       (* --test mode: emit a @main that calls the test harness.
+          For each test fn we emit a string constant for its display name and
+          call march_test_run(fn_ptr, name_ptr, setup_or_null).
+          setup_all and per-test setup are optional and may not exist. *)
+       let has_setup_all = List.exists (fun (fn : Tir.fn_def) ->
+           fn.Tir.fn_name = "__march_setup_all__") m.Tir.tm_fns in
+       let has_setup = List.exists (fun (fn : Tir.fn_def) ->
+           fn.Tir.fn_name = "__march_setup__") m.Tir.tm_fns in
+       (* Emit test name string constants into the LLVM preamble buffer. *)
+       List.iteri (fun i (_fn_name, display_name) ->
+         let escaped = String.concat "\\0A" (String.split_on_char '\n' display_name) in
+         let nbytes = String.length display_name + 1 in
+         Printf.bprintf ctx.preamble
+           "@.test_name_%d = private constant [%d x i8] c\"%s\\00\"\n"
+           i nbytes escaped
+       ) m.Tir.tm_tests;
+       let buf2 = Buffer.create 1024 in
+       Buffer.add_string buf2
+         "\ndeclare void @march_process_argv_init(i32 %argc, ptr %argv_ptr)\n";
+       Buffer.add_string buf2
+         "define i32 @main(i32 %argc, ptr %argv_ptr) {\nentry:\n";
+       Buffer.add_string buf2
+         "  call void @march_process_argv_init(i32 %argc, ptr %argv_ptr)\n";
+       Buffer.add_string buf2
+         "  call void @march_test_init(i32 %argc, ptr %argv_ptr)\n";
+       if has_setup_all then
+         Buffer.add_string buf2
+           (Printf.sprintf "  call void @march_test_setup_all(ptr @%s)\n"
+              (llvm_name (mangle_extern "__march_setup_all__")));
+       let setup_arg = if has_setup then
+         Printf.sprintf "ptr @%s" (llvm_name (mangle_extern "__march_setup__"))
+       else "ptr null" in
+       List.iteri (fun i (fn_name, _display_name) ->
+         let mangled = llvm_name (mangle_extern fn_name) in
+         Printf.bprintf buf2
+           "  call void @march_test_run(ptr @%s, ptr @.test_name_%d, %s)\n"
+           mangled i setup_arg
+       ) m.Tir.tm_tests;
+       Buffer.add_string buf2 "  %rc = call i32 @march_test_report()\n";
+       Buffer.add_string buf2 "  ret i32 %rc\n}\n";
+       Buffer.add_buffer out buf2
+     end else begin
+       (match main_fn_name with
+        | Some name ->
+          let mangled = llvm_name (mangle_extern name) in
+          Buffer.add_string out
+            (Printf.sprintf "\ndeclare void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
+             define i32 @main(i32 %%argc, ptr %%argv_ptr) {\nentry:\n\
+               call void @march_process_argv_init(i32 %%argc, ptr %%argv_ptr)\n\
+               call void @%s()\n\
+               call void @march_run_scheduler()\n\
+               ret i32 0\n}\n" mangled)
+        | None -> ())
+     end);
 
   (* Append closure wrapper functions generated for top-level fn-as-value *)
   Buffer.add_buffer out ctx.extra_fns;
@@ -2949,7 +3007,7 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
   let ctx = make_ctx ~fast_math () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = [] } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
@@ -2998,7 +3056,7 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
   let ctx = make_ctx ~fast_math () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = [] } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
@@ -3034,7 +3092,7 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
   let ctx = make_ctx ~fast_math () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = [] } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
   Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
@@ -3064,7 +3122,7 @@ let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
   let ctx = make_ctx ~fast_math () in
-  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = [] } in
+  let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
   Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
@@ -3121,7 +3179,7 @@ let emit_fns_fragment
     ~(fns : Tir.fn_def list) : string =
   let ctx = make_ctx () in
   let pseudo_mod : Tir.tir_module =
-    { tm_name = "stdlib_prelude"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = [] } in
+    { tm_name = "stdlib_prelude"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;

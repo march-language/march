@@ -1216,7 +1216,7 @@ let builtin_type_defs : Tir.type_def list = [
 ]
 
 (** Lower a module. *)
-let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
+let lower_module ?type_map ?(test_mode=false) (m : Ast.module_) : Tir.tir_module =
   reset_counter ();
   _type_map_ref := type_map;
   _iface_methods := Hashtbl.create 16;
@@ -1507,6 +1507,61 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
           ) all_fn_names
       | Ast.DDescribe _ -> ()
     ) m.mod_decls;
+  (* --- Test mode: collect DTest/DSetup/DSetupAll/DDescribe blocks and lower
+     them to TIR functions so they can be compiled into a test-runner binary. *)
+  let test_pairs = ref [] in   (* (fn_name, display_name) in declaration order *)
+  if test_mode then begin
+    let test_counter = ref 0 in
+    (* Lower a test-body expression to a zero-arg TIR function. *)
+    let lower_test_body name_prefix display_name body =
+      let fn_name = Printf.sprintf "__march_test_%d__" !test_counter in
+      let _ = name_prefix in  (* prefix baked into display_name already *)
+      incr test_counter;
+      let body' = lower_expr body in
+      let fn : Tir.fn_def = {
+        fn_name;
+        fn_params = [];
+        fn_ret_ty = Tir.TCon ("Unit", []);
+        fn_body   = body';
+      } in
+      fns := fn :: !fns;
+      test_pairs := (fn_name, display_name) :: !test_pairs
+    in
+    (* Recursive collector: descends into DDescribe blocks. *)
+    let rec collect_tests prefix decls =
+      List.iter (fun d ->
+        match d with
+        | Ast.DTest (tdef, _) ->
+          let display = if prefix = "" then tdef.Ast.test_name
+                        else prefix ^ " " ^ tdef.Ast.test_name in
+          lower_test_body prefix display tdef.Ast.test_body
+        | Ast.DDescribe (label, inner, _) ->
+          let new_prefix = if prefix = "" then label else prefix ^ " " ^ label in
+          collect_tests new_prefix inner
+        | Ast.DSetup (body, _) ->
+          (* Per-test setup: lower to __march_setup__ (overwritten by last decl) *)
+          let body' = lower_expr body in
+          let fn : Tir.fn_def = {
+            fn_name   = "__march_setup__";
+            fn_params = [];
+            fn_ret_ty = Tir.TCon ("Unit", []);
+            fn_body   = body';
+          } in
+          fns := fn :: !fns
+        | Ast.DSetupAll (body, _) ->
+          let body' = lower_expr body in
+          let fn : Tir.fn_def = {
+            fn_name   = "__march_setup_all__";
+            fn_params = [];
+            fn_ret_ty = Tir.TCon ("Unit", []);
+            fn_body   = body';
+          } in
+          fns := fn :: !fns
+        | _ -> ()
+      ) decls
+    in
+    collect_tests "" m.mod_decls
+  end;
   (* Inject top-level let bindings into main's body as a chain of ELet. *)
   let all_fns = List.rev !fns in
   let all_fns =
@@ -1528,7 +1583,8 @@ let lower_module ?type_map (m : Ast.module_) : Tir.tir_module =
     tm_fns = all_fns;
     tm_types = builtin_type_defs @ List.rev !types;
     tm_externs = List.rev !externs;
-    tm_exports = [] } in
+    tm_exports = [];
+    tm_tests = List.rev !test_pairs } in
   _type_map_ref := None;
   _iface_methods := Hashtbl.create 0;
   _use_aliases := Hashtbl.create 0;

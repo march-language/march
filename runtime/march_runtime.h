@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <setjmp.h>
 
 /* Object header layout (16 bytes):
  *   offset  0: int64_t  rc   (reference count)
@@ -172,3 +173,12 @@ void *march_value_to_string(void *v);
 /* Process builtins */
 void  march_process_argv_init(int argc, char **argv);
 void *march_process_argv(void);
+
+/* Test harness — used by --test compiled binaries. */
+extern jmp_buf  march_test_jmp_buf;
+extern int      march_test_in_test;
+extern char     march_test_fail_buf[4096];
+void    march_test_init(int32_t argc, char **argv);
+void    march_test_setup_all(void (*fn)(void));
+void    march_test_run(void (*fn)(void), const char *name, void (*setup)(void));
+int32_t march_test_report(void);
