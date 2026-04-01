@@ -495,18 +495,16 @@ end
 doc "Returns true if the BigInt is negative."
 fn is_negative(n : BigInt) : Bool do
   match n do
-  BigInt(false, Nil) -> false
-  BigInt(false, _)   -> true
-  _                  -> false
+  BigInt(_, Nil)  -> false
+  BigInt(sign, _) -> if sign do false else true end
   end
 end
 
 doc "Returns true if the BigInt is positive (> 0)."
 fn is_positive(n : BigInt) : Bool do
   match n do
-  BigInt(true, Nil) -> false
-  BigInt(true, _)   -> true
-  _                 -> false
+  BigInt(_, Nil)  -> false
+  BigInt(sign, _) -> sign
   end
 end
 

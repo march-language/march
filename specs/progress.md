@@ -229,6 +229,9 @@ march/
 │   ├── bastion_pubsub.march       # Distributed pub/sub: named instances, Local/Redis/Cluster adapters, wildcard topics
 │   ├── bastion_test_sandbox.march # Test sandboxing: SandboxEnv, checkout/release, isolated Vault namespace
 │   ├── bastion_idempotency.march  # Idempotency middleware: IdempotencyState, protect/3, replay, X-Idempotent-Replayed
+│   ├── depot_gate.march           # Depot.Gate validation pipeline — v1 cast/2 (string pairs) + v2 cast_record/3 (record-based diff tracking), validate_required/length/format/inclusion/exclusion/number/acceptance/confirmation/change, constraint hints, base/changed_fields/changed/apply_changes
+│   ├── depot_schema.march         # Depot.Schema: record-based schema definitions — define/2, blank/1, table/field_names/field_type/field_opts/primary_key/is_virtual/associations/association/db_fields inspection API
+│   ├── depot_repo.march           # Depot.Repo: Vault-backed in-memory repository — insert/update/delete/delete_all, all/get/get_bang/get_by/one/count/exists
 │   ├── tuple.march                # Tuple: 2-tuple utilities — first/second/swap/map_first/map_second/map_both/to_list/make/apply/both/zip/unzip
 │   ├── char.march                 # Char: character classification/conversion — is_alpha/is_digit/is_alphanumeric/is_upper/is_lower/is_whitespace/to_upper/to_lower/to_int/from_int/to_string/digit_value/hex_digit_value/is_hex_digit
 │   ├── ordered_map.march          # OrderedMap: AVL tree-based sorted map with comparator — put/get/delete/member/keys/values/fold/map/filter/min_key/max_key
@@ -282,7 +285,7 @@ march/
   - `test_properties.exe`: 36 tests, passing (QCheck2 properties)
   - `test_supervision.exe`: 15 tests, passing (actor supervision)
   - `test_lsp.exe`: 131 tests, passing (doc strings, find-refs, rename, sig-help, code actions, snippet completions, folding ranges, type annotation action, remove unused binding action, phase2 enhanced match, quickfix framework, dead code detection, p1.1 typed match stubs, p1.7 fn return/param annotation, batch annotation, P2.8 naming convention fix, P3.10 De Morgan rewrite, perf insights Phase 1)
-  - `test_stdlib_march.exe`: 27 tests, 27 passing (Http, HttpTransport, HttpClient, HttpServer, WebSocket, Tls, Process, Logger, PubSub, Channel, ChannelServer, Presence, ChannelSocket, Env, Config, BastionDev, Vault, Session, Correlation, BastionPubSub, BastionCSP, BastionTestSandbox, BastionIdempotency, BastionCookies, BastionRoutes, BastionTelemetry, BastionHotDeploy) — Depot.Gate/Schema/Repo/Query/Migration/Test moved to depot repo
+  - `test_stdlib_march.exe`: 33 tests, 33 passing (Http, HttpTransport, HttpClient, HttpServer, WebSocket, Tls, Process, Logger, PubSub, Channel, ChannelServer, Presence, ChannelSocket, Env, Config, BastionDev, Vault, Session, Correlation, BastionPubSub, BastionCSP, BastionTestSandbox, BastionIdempotency, BastionCookies, BastionRoutes, BastionTelemetry, BastionHotDeploy, **DepotGate** (97 tests), **DepotSchema** (28 tests), **DepotRepo** (27 tests), **DepotQuery** (16 tests), **DepotMigration** (17 tests), **DepotTest** (7 tests))
   - `examples/bastion_tests/`: 346 adversarial tests, all passing (routing 42, caching 37, sessions 35, csrf 44, dev-dashboard 64, html 54, islands 70)
   - `test_forge.exe`: 15 tests, passing (scaffold/toml)
   - `test_resolver.exe`: 35 tests, passing (semver version parse/compare/~>, constraints, project dep loading, lockfile write/read/drift)

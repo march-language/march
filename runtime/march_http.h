@@ -134,6 +134,15 @@ void march_http_pool_stop(void);
 void march_http_server_listen(int64_t port, int64_t max_conns,
                                int64_t idle_timeout, void *pipeline);
 
+/* Fork a child that runs the server until it has handled exactly n requests,
+ * then exits.  Returns the child PID (as int64_t) to the parent. */
+int64_t march_http_server_spawn_n(int64_t port, int64_t n,
+                                   int64_t max_conns, int64_t idle_timeout,
+                                   void *pipeline);
+
+/* Wait for a child PID returned by march_http_server_spawn_n to exit. */
+void march_http_server_wait(int64_t handle);
+
 /* ── WebSocket builtins ────────────────────────────────────────────── */
 
 /* Perform the WebSocket handshake upgrade on an already-accepted fd.

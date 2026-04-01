@@ -296,7 +296,11 @@ let is_builtin_fn name =
                  "int_and"; "int_or"; "int_xor"; "int_not"; "int_shl"; "int_shr"; "int_popcount";
                  (* Vault (key-value store) builtins *)
                  "vault_new"; "vault_whereis"; "vault_set"; "vault_set_ttl";
-                 "vault_get"; "vault_drop"; "vault_update"; "vault_size"; "vault_keys"]
+                 "vault_get"; "vault_drop"; "vault_update"; "vault_size"; "vault_keys";
+                 (* IOList builtins *)
+                 "iolist_hash_fnv1a";
+                 (* HTTP server builtins *)
+                 "http_server_spawn_n"; "http_server_wait"]
 
 let atom_is_builtin (atom : Tir.atom) =
   match atom with
@@ -477,6 +481,11 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "int_and" | "int_or" | "int_xor"
   | "int_not" | "int_shl" | "int_shr"
   | "int_popcount"                -> Some Tir.TInt
+  (* IOList builtins *)
+  | "iolist_hash_fnv1a"           -> Some Tir.TString
+  (* HTTP server builtins *)
+  | "http_server_spawn_n"         -> Some Tir.TInt
+  | "http_server_wait"            -> Some Tir.TUnit
   | _ -> None
 
 (** Mangle a March builtin name to the C runtime function name. *)
@@ -510,6 +519,8 @@ let mangle_extern : string -> string = function
   | "http_parse_request"      -> "march_http_parse_request"
   | "http_serialize_response" -> "march_http_serialize_response"
   | "http_server_listen"      -> "march_http_server_listen"
+  | "http_server_spawn_n"     -> "march_http_server_spawn_n"
+  | "http_server_wait"        -> "march_http_server_wait"
   | "ws_handshake"            -> "march_ws_handshake"
   | "ws_recv"                 -> "march_ws_recv"
   | "ws_send"                 -> "march_ws_send"
@@ -625,6 +636,8 @@ let mangle_extern : string -> string = function
   | "vault_update"       -> "march_vault_update"
   | "vault_size"         -> "march_vault_size"
   | "vault_keys"         -> "march_vault_keys"
+  (* IOList builtins *)
+  | "iolist_hash_fnv1a"  -> "march_iolist_hash_fnv1a"
   | "main"          -> "march_main"   (* March main → march_main in LLVM *)
   | other           -> other
 
@@ -827,6 +840,12 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
        compiled_fns — so the alloca-bridge path would generate an invalid
        "%march_*.addr" load.  Emit the global address directly instead. *)
     ("ptr", "@" ^ llvm_name v.Tir.v_name)
+  | Tir.AVar v when is_builtin_fn v.Tir.v_name ->
+    (* Builtin function used as a first-class value (e.g. iolist_hash_fnv1a passed
+       to a HOF).  These map to C-runtime externs via mangle_extern — never in
+       var_slot or compiled_fns — so the alloca-bridge path would generate an
+       invalid "%builtin.addr" load.  Emit the mangled global address directly. *)
+    ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
   | Tir.AVar v ->
     let base = llvm_name v.Tir.v_name in
     let slot = match Hashtbl.find_opt ctx.var_slot base with
@@ -2517,6 +2536,8 @@ declare ptr  @march_string_to_float(ptr %s)
 ; List builtins
 declare ptr  @march_list_append(ptr %a, ptr %b)
 declare ptr  @march_list_concat(ptr %lists)
+; IOList builtins
+declare ptr  @march_iolist_hash_fnv1a(ptr %iol)
 ; Vault (key-value store) builtins
 declare ptr  @march_vault_new(ptr %name)
 declare ptr  @march_vault_whereis(ptr %name)
@@ -2557,6 +2578,8 @@ declare void @march_tcp_close(i64 %fd)
 declare ptr  @march_http_parse_request(ptr %raw)
 declare ptr  @march_http_serialize_response(i64 %status, ptr %headers, ptr %body)
 declare void @march_http_server_listen(i64 %port, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
+declare i64  @march_http_server_spawn_n(i64 %port, i64 %n, i64 %max_conns, i64 %idle_timeout, ptr %pipeline)
+declare void @march_http_server_wait(i64 %handle)
 declare void @march_ws_handshake(i64 %fd, ptr %key)
 declare ptr  @march_ws_recv(i64 %fd)
 declare void @march_ws_send(i64 %fd, ptr %frame)

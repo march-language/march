@@ -135,6 +135,7 @@ let load_stdlib () =
       "array.march";
       "bigint.march";
       "decimal.march";
+      "duration.march";
       "bytes.march";
       "process.march";
       "io.march";
@@ -162,6 +163,12 @@ let load_stdlib () =
       "env.march";
       "config.march";
       "depot_form.march";
+      "depot_gate.march";
+      "depot_schema.march";
+      "depot_repo.march";
+      "depot_query.march";
+      "depot_migration.march";
+      "depot_test.march";
       "bastion.march";
       "csrf.march";
       "session.march";
@@ -325,12 +332,13 @@ let module_name_to_filename name =
     from the user's source tree. *)
 let stdlib_module_names =
   [ "List"; "Map"; "Set"; "Array"; "Queue"; "String"; "Option"; "Result"
-  ; "Math"; "Enum"; "BigInt"; "Decimal"; "DateTime"; "Bytes"; "Json"
+  ; "Math"; "Enum"; "BigInt"; "Decimal"; "DateTime"; "Duration"; "Bytes"; "Json"
   ; "Regex"; "Csv"; "File"; "Dir"; "Path"; "Http"; "HttpClient"
   ; "HttpServer"; "HttpTransport"; "WebSocket"; "Process"; "Logger"
   ; "Flow"; "Actor"; "Sort"; "Hamt"; "Seq"; "Iterable"; "IOList"
   ; "Random"; "Stats"; "Plot"; "Prelude"; "DataFrame"; "Islands"; "Test"
-  ; "Vault"; "BastionDev"; "BastionCookies"; "BastionRoutes"; "BastionPubSub"; "BastionCSP" ]
+  ; "Vault"; "BastionDev"; "BastionCookies"; "BastionRoutes"; "BastionPubSub"; "BastionCSP"
+  ; "Depot"; "Depot.Gate" ]
 
 (** Collect [(mod_name, span)] for each DUse/DAlias in [decls]. *)
 let import_refs decls =

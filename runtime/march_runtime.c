@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <inttypes.h>
 #include <math.h>
 #include <ctype.h>
 #include <stdatomic.h>
@@ -181,6 +182,51 @@ void march_decrc_local(void *p) {
         }
         free(p);
     }
+}
+
+/* ── IOList hash ─────────────────────────────────────────────────────── */
+
+/* IOList variant tags (must match iolist.march stdlib):
+     0 = Empty
+     1 = Str(String)          field[0] at offset 16
+     2 = Segments(List(IOList)) field[0] at offset 16
+   List variant tags:
+     0 = Nil
+     1 = Cons(head, tail)     head at offset 16, tail at offset 24 */
+static uint64_t piolist_hash_walk(void *iol, uint64_t h) {
+    static const uint64_t FNV_PRIME  = UINT64_C(1099511628211);
+    static const uint64_t FNV_OFFSET = UINT64_C(14695981039346656037);
+    if (!h) h = FNV_OFFSET; /* unused — caller passes offset */
+    if (!iol) return h;
+    int32_t tag = *(int32_t *)((char *)iol + 8);
+    if (tag == 1) { /* Str(String) */
+        march_string *s = *(march_string **)((char *)iol + 16);
+        if (s) {
+            for (int64_t i = 0; i < s->len; i++) {
+                h ^= (uint64_t)(unsigned char)s->data[i];
+                h *= FNV_PRIME;
+            }
+        }
+    } else if (tag == 2) { /* Segments(List(IOList)) */
+        void *list = *(void **)((char *)iol + 16);
+        while (list) {
+            int32_t ltag = *(int32_t *)((char *)list + 8);
+            if (ltag != 1) break; /* Nil */
+            void *head = *(void **)((char *)list + 16);
+            list       = *(void **)((char *)list + 24);
+            h = piolist_hash_walk(head, h);
+        }
+    }
+    /* tag == 0 (Empty) — nothing to hash */
+    return h;
+}
+
+void *march_iolist_hash_fnv1a(void *iol) {
+    static const uint64_t FNV_OFFSET = UINT64_C(14695981039346656037);
+    uint64_t h = piolist_hash_walk(iol, FNV_OFFSET);
+    char buf[17];
+    snprintf(buf, sizeof(buf), "%016" PRIx64, h);
+    return march_string_lit(buf, 16);
 }
 
 /* ── Strings ─────────────────────────────────────────────────────────── */

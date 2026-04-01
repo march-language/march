@@ -82,7 +82,11 @@ let builtin_names : StringSet.t =
       (* Hash builtins used by derived Hash instances *)
       "march_hash_int"; "march_hash_float"; "march_hash_string"; "march_hash_bool";
       (* Bitwise integer builtins *)
-      "int_and"; "int_or"; "int_xor"; "int_not"; "int_shl"; "int_shr"; "int_popcount" ]
+      "int_and"; "int_or"; "int_xor"; "int_not"; "int_shl"; "int_shr"; "int_popcount";
+      (* IOList builtins *)
+      "iolist_hash_fnv1a";
+      (* HTTP server spawn/wait builtins *)
+      "http_server_spawn_n"; "http_server_wait" ]
 
 (* ── Phase 0: collect top-level names ────────────────────────────── *)
 

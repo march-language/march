@@ -131,6 +131,12 @@ let all_stdlib_decls =
     "session.march";
     "correlation.march";
     "bastion_dev.march";
+    "depot_gate.march";
+    "depot_schema.march";
+    "depot_repo.march";
+    "depot_query.march";
+    "depot_migration.march";
+    "depot_test.march";
     "bastion_cookies.march";
     "bastion_routes.march";
     "bastion_pubsub.march";
@@ -293,5 +299,29 @@ let () =
     ("bastion_idempotency", [
       Alcotest.test_case "BastionIdempotency module"
         `Quick (run_stdlib_test "test_bastion_idempotency.march" "TestBastionIdempotency");
+    ]);
+    ("depot_gate", [
+      Alcotest.test_case "DepotGate module"
+        `Quick (run_stdlib_test "test_depot_gate.march" "TestDepotGate");
+    ]);
+    ("depot_schema", [
+      Alcotest.test_case "DepotSchema module"
+        `Quick (run_stdlib_test "test_depot_schema.march" "TestDepotSchema");
+    ]);
+    ("depot_repo", [
+      Alcotest.test_case "DepotRepo module"
+        `Quick (run_stdlib_test "test_depot_repo.march" "TestDepotRepo");
+    ]);
+    ("depot_query", [
+      Alcotest.test_case "DepotQuery module"
+        `Quick (run_stdlib_test "test_depot_query.march" "TestDepotQuery");
+    ]);
+    ("depot_migration", [
+      Alcotest.test_case "DepotMigration module"
+        `Quick (run_stdlib_test "test_depot_migration.march" "TestDepotMigration");
+    ]);
+    ("depot_test", [
+      Alcotest.test_case "DepotTest module"
+        `Quick (run_stdlib_test "test_depot_test.march" "TestDepotTest");
     ]);
   ]
