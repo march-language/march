@@ -12,10 +12,55 @@ let handle = function
    built-in command.  We intercept these before cmdliner so unknown commands
    route to installed archives rather than producing a usage error. ---------- *)
 
+let print_archive_help name =
+  let entries = Archive_store.load_registry () in
+  match List.assoc_opt name entries with
+  | None ->
+    Printf.eprintf "error: '%s' is not an installed archive\n%!" name;
+    Printf.eprintf "hint:  forge install %s  to install it\n%!" name;
+    exit 1
+  | Some entry ->
+    let archive_root = match entry.Archive_store.source with
+      | Archive_store.Path p -> p
+      | _ -> Archive_store.archive_dir name
+    in
+    let source_str = match entry.Archive_store.source with
+      | Archive_store.Registry { version } -> Printf.sprintf "registry (%s)" version
+      | Archive_store.Git { url; git_ref; rev } ->
+        let ref_str = match git_ref with Some r -> r | None -> "default" in
+        let rev_str = match rev with
+          | Some r -> Printf.sprintf " @%s" (String.sub r 0 (min 8 (String.length r)))
+          | None -> ""
+        in
+        Printf.sprintf "git %s (%s%s)" url ref_str rev_str
+      | Archive_store.Path p -> Printf.sprintf "path %s" p
+    in
+    Printf.printf "Archive: %s\n" name;
+    Printf.printf "Source:  %s\n" source_str;
+    let tasks = Archive_store.list_archive_tasks archive_root in
+    if tasks = [] then
+      Printf.printf "Tasks:   (none declared)\n%!"
+    else begin
+      Printf.printf "Tasks:\n%!";
+      List.iter (fun (cmd, _) ->
+          Printf.printf "  forge %-30s\n%!" cmd
+        ) tasks
+    end
+
 let () =
   if Array.length Sys.argv >= 2 then begin
     let cmd = Sys.argv.(1) in
-    (* Only intercept if first char is not '-' and the name contains a dot *)
+    (* "forge help <archive>" — show tasks for a named archive *)
+    if cmd = "help" && Array.length Sys.argv >= 3 then begin
+      let topic = Sys.argv.(2) in
+      let entries = Archive_store.load_registry () in
+      if List.mem_assoc topic entries then begin
+        print_archive_help topic;
+        exit 0
+      end
+      (* else fall through to cmdliner's built-in help *)
+    end;
+    (* Intercept dotted namespace commands like "bastion.new" *)
     if String.length cmd > 0 && cmd.[0] <> '-' && String.contains cmd '.' then begin
       let args =
         if Array.length Sys.argv > 2 then
@@ -23,8 +68,8 @@ let () =
         else []
       in
       (match Archive_store.find_task cmd with
-       | Some task_file ->
-         exit (Archive_store.run_task task_file args)
+       | Some (task_file, lib_paths) ->
+         exit (Archive_store.run_task task_file lib_paths args)
        | None ->
          let ns = String.sub cmd 0 (String.index cmd '.') in
          Printf.eprintf "error: unknown command '%s'\n%!" cmd;
@@ -172,7 +217,22 @@ let help_cmd =
   in
   let run t =
     match t with
-    | None   -> `Help (`Auto, None)
+    | None ->
+      (* Print installed archives after the standard help *)
+      let entries = Archive_store.load_registry () in
+      if entries <> [] then begin
+        Printf.printf "\nInstalled archives (use 'forge help <name>' for task list):\n";
+        List.iter (fun (name, entry) ->
+            let root = match entry.Archive_store.source with
+              | Archive_store.Path p -> p
+              | _ -> Archive_store.archive_dir name
+            in
+            let tasks = Archive_store.list_archive_tasks root in
+            let task_names = List.map fst tasks in
+            Printf.printf "  %-12s  %s\n%!" name (String.concat ", " task_names)
+          ) entries
+      end;
+      `Help (`Auto, None)
     | Some c -> `Help (`Auto, Some c)
   in
   Cmd.v (Cmd.info "help" ~doc:"Show help for forge or a specific command")

@@ -245,7 +245,15 @@ let read_tasks_from_toml toml_path =
         end else None
       ) doc.Toml.sections
 
-(** Given a command like "bastion.new", return the task module file path or None.
+(** Lib paths to add to MARCH_LIB_PATH for tasks running from an archive root.
+    Includes lib/ (for sibling module imports like Forge.Scaffold) and forge/
+    at the root level (for CAS-extracted archives). *)
+let lib_paths_for_root archive_root =
+  let lib_dir   = Filename.concat archive_root "lib" in
+  let forge_dir = Filename.concat archive_root "forge" in
+  List.filter Sys.file_exists [lib_dir; forge_dir]
+
+(** Given a command like "bastion.new", return (task_file, lib_paths) or None.
     Checks project-local deps first, then global archives. *)
 let find_task command =
   (* Extract namespace = first dotted segment *)
@@ -266,7 +274,9 @@ let find_task command =
           | None -> None
           | Some rel_module ->
             let full_path = Filename.concat dep_dir rel_module in
-            if Sys.file_exists full_path then Some full_path else None
+            if Sys.file_exists full_path then
+              Some (full_path, lib_paths_for_root dep_dir)
+            else None
         end else None
     in
     (match local_result with
@@ -287,7 +297,9 @@ let find_task command =
           | None -> None
           | Some rel_module ->
             let full_path = Filename.concat archive_root rel_module in
-            if Sys.file_exists full_path then Some full_path else None))
+            if Sys.file_exists full_path then
+              Some (full_path, lib_paths_for_root archive_root)
+            else None))
 
 (** Return all (command, module_path) pairs for an archive directory. *)
 let list_archive_tasks archive_root =
@@ -299,9 +311,14 @@ let list_archive_tasks archive_root =
     ) tasks
 
 (** Run a task module file with the given arguments.
-    Arguments are passed via FORGE_TASK_ARGS (newline-separated). *)
-let run_task task_file args =
+    FORGE_TASK_ARGS carries newline-separated args; MARCH_LIB_PATH lets tasks
+    import sibling modules (e.g. Forge.Scaffold from lib/forge/scaffold.march). *)
+let run_task task_file lib_paths args =
   let args_env = String.concat "\n" args in
-  let cmd = Printf.sprintf "FORGE_TASK_ARGS=%s march %s"
-      (Filename.quote args_env) (Filename.quote task_file) in
+  let lib_path_env = match lib_paths with
+    | [] -> ""
+    | ps -> Printf.sprintf "MARCH_LIB_PATH=%s " (Filename.quote (String.concat ":" ps))
+  in
+  let cmd = Printf.sprintf "%sFORGE_TASK_ARGS=%s march %s"
+      lib_path_env (Filename.quote args_env) (Filename.quote task_file) in
   Sys.command cmd
