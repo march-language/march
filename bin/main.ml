@@ -162,12 +162,6 @@ let load_stdlib () =
       "env.march";
       "config.march";
       "depot_form.march";
-      "depot_gate.march";
-      "depot_schema.march";
-      "depot_repo.march";
-      "depot_query.march";
-      "depot_migration.march";
-      "depot_test.march";
       "bastion.march";
       "csrf.march";
       "session.march";
@@ -336,8 +330,7 @@ let stdlib_module_names =
   ; "HttpServer"; "HttpTransport"; "WebSocket"; "Process"; "Logger"
   ; "Flow"; "Actor"; "Sort"; "Hamt"; "Seq"; "Iterable"; "IOList"
   ; "Random"; "Stats"; "Plot"; "Prelude"; "DataFrame"; "Islands"; "Test"
-  ; "Vault"; "BastionDev"; "BastionCookies"; "BastionRoutes"; "BastionPubSub"; "BastionCSP"
-  ; "Depot"; "Depot.Gate" ]
+  ; "Vault"; "BastionDev"; "BastionCookies"; "BastionRoutes"; "BastionPubSub"; "BastionCSP" ]
 
 (** Collect [(mod_name, span)] for each DUse/DAlias in [decls]. *)
 let import_refs decls =
