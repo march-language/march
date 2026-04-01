@@ -4554,6 +4554,17 @@ let rec check_decl env (d : Ast.decl) : env =
               && String.sub k 0 plen = prefix
            then Some (String.sub k plen (String.length k - plen), sch)
            else None) env.vars in
+       (* Import interfaces from the module prefix into scope as short names *)
+       let matching_ifaces = List.filter_map (fun (k, idef) ->
+           let plen = String.length prefix in
+           if String.length k > plen
+              && String.sub k 0 plen = prefix
+           then Some (String.sub k plen (String.length k - plen), idef)
+           else None) env.interfaces in
+       let env = List.fold_left (fun e (short, idef) ->
+           if List.mem_assoc short e.interfaces then e
+           else { e with interfaces = (short, idef) :: e.interfaces }
+         ) env matching_ifaces in
        (* Track for unused-import warning: warn if nothing from this module is used. *)
        if matching <> [] then begin
          let short_names = List.map fst matching in
@@ -5133,6 +5144,10 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
                    { acc with ctors = (qctor, ci) :: acc.ctors }
                ) e1 variants
            | _ -> e1)
+        | Ast.DInterface (idef, _) ->
+          let qname = prefix ^ "." ^ idef.iface_name.txt in
+          if List.mem_assoc qname e.interfaces then e
+          else { e with interfaces = (qname, idef) :: e.interfaces }
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
           prebind_mod_members (prefix ^ "." ^ mname.txt) e inner_decls
         | _ -> e
