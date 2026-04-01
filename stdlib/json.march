@@ -50,84 +50,94 @@ pfn skip_ws(chars) do
   end
 end
 
+-- Inner loop for match_literal: walk char lists in parallel.
+pfn match_literal_go(cs, es, expected) do
+  match es do
+  Nil -> Ok(cs)
+  Cons(e, et) -> do
+    match cs do
+    Nil -> Err("unexpected end of input, expected: " ++ expected)
+    Cons(c, ct) ->
+      if c == e do match_literal_go(ct, et, expected)
+      else Err("expected '" ++ e ++ "' but found '" ++ c ++ "'") end
+    end
+  end
+  end
+end
+
 -- Try to match a prefix string against the head of a char list.
 -- Returns Ok(remaining) or Err(message).
 pfn match_literal(chars, expected) do
-  let exp_chars = string_chars(expected)
-  fn go(cs, es) do
-    match es do
-    Nil -> Ok(cs)
-    Cons(e, et) -> do
-      match cs do
-      Nil -> Err("unexpected end of input, expected: " ++ expected)
-      Cons(c, ct) ->
-        if c == e do go(ct, et)
-        else Err("expected '" ++ e ++ "' but found '" ++ c ++ "'") end
+  let exp_chars = string_split(expected, "")
+  match_literal_go(chars, exp_chars, expected)
+end
+
+-- Inner loop for parse_string_inner.
+-- Extracted as top-level pfn to avoid capturing char_from_int as a free variable.
+pfn parse_string_go(cs, acc) do
+  match cs do
+  Nil -> Err("unterminated string literal")
+  Cons(c, rest) -> do
+    if c == "\"" do
+      Ok((string_join(rev(acc, Nil), ""), rest))
+    else if c == "\\" do
+      match rest do
+      Nil -> Err("unexpected end of input in string escape")
+      Cons(e, rest2) -> do
+        let ec =
+          if e == "\"" do Ok("\"")
+          else if e == "\\" do Ok("\\")
+          else if e == "/" do Ok("/")
+          else if e == "n" do Ok(char_from_int(10))
+          else if e == "r" do Ok(char_from_int(13))
+          else if e == "t" do Ok(char_from_int(9))
+          else if e == "b" do Ok(char_from_int(8))
+          else if e == "f" do Ok(char_from_int(12))
+          else Err("unknown escape sequence: \\" ++ e) end end end end end end end end
+        match ec do
+        Err(msg) -> Err(msg)
+        Ok(ch) -> parse_string_go(rest2, Cons(ch, acc))
+        end
       end
-    end
-    end
+      end
+    else parse_string_go(rest, Cons(c, acc)) end end
   end
-  go(chars, exp_chars)
+  end
 end
 
 -- Parse a JSON string (chars is AFTER the opening quote).
 -- Returns Ok((string_value, remaining_chars)) or Err(message).
 pfn parse_string_inner(chars) do
-  fn go(cs, acc) do
-    match cs do
-    Nil -> Err("unterminated string literal")
-    Cons(c, rest) -> do
-      if c == "\"" do
-        Ok((string_join(rev(acc, Nil), ""), rest))
-      else if c == "\\" do
-        match rest do
-        Nil -> Err("unexpected end of input in string escape")
-        Cons(e, rest2) -> do
-          let ec =
-            if e == "\"" do Ok("\"")
-            else if e == "\\" do Ok("\\")
-            else if e == "/" do Ok("/")
-            else if e == "n" do Ok(char_from_int(10))
-            else if e == "r" do Ok(char_from_int(13))
-            else if e == "t" do Ok(char_from_int(9))
-            else if e == "b" do Ok(char_from_int(8))
-            else if e == "f" do Ok(char_from_int(12))
-            else Err("unknown escape sequence: \\" ++ e) end end end end end end end end
-          match ec do
-          Err(msg) -> Err(msg)
-          Ok(ch) -> go(rest2, Cons(ch, acc))
-          end
-        end
-        end
-      else go(rest, Cons(c, acc)) end end
-    end
-    end
+  parse_string_go(chars, Nil)
+end
+
+-- Top-level predicate for JSON number characters.
+-- Extracted to avoid capturing char_is_digit as a free variable in a closure.
+pfn json_is_num_char(c) do
+  char_is_digit(c) || c == "." || c == "e" || c == "E"
+end
+
+-- Top-level accumulator loop for collecting number characters.
+pfn json_collect_num(cs, acc) do
+  match cs do
+  Nil -> (rev(acc, Nil), Nil)
+  Cons(c, rest) -> do
+    if json_is_num_char(c) do json_collect_num(rest, Cons(c, acc))
+    else (rev(acc, Nil), cs) end
   end
-  go(chars, Nil)
+  end
 end
 
 -- Parse a JSON number.
 -- chars starts at '-' or a digit.
 pfn parse_number(chars) do
-  fn is_num_char(c) do
-    char_is_digit(c) || c == "." || c == "e" || c == "E"
-  end
-  fn collect(cs, acc) do
-    match cs do
-    Nil -> (rev(acc, Nil), Nil)
-    Cons(c, rest) -> do
-      if is_num_char(c) do collect(rest, Cons(c, acc))
-      else (rev(acc, Nil), cs) end
-    end
-    end
-  end
   -- Handle optional leading minus
   let (sign, chars2) =
     match chars do
     Cons(c, rest) -> if c == "-" do ("-", rest) else ("", chars) end
     Nil -> ("", Nil)
     end
-  let (num_chars, remaining) = collect(chars2, Nil)
+  let (num_chars, remaining) = json_collect_num(chars2, Nil)
   let num_str = sign ++ string_join(num_chars, "")
   match string_to_float(num_str) do
   None -> Err("invalid number: " ++ num_str)
@@ -173,31 +183,69 @@ pfn parse_value(chars) do
   end
 end
 
+-- Inner loop for parse_array.
+pfn parse_array_elements(cs, acc) do
+  match parse_value(cs) do
+  Err(e) -> Err(e)
+  Ok((v, remaining)) -> do
+    let cs2 = skip_ws(remaining)
+    match cs2 do
+    Nil -> Err("unterminated array, expected ',' or ']'")
+    Cons(sep, rest2) ->
+      if sep == "]" do Ok((Array(rev(Cons(v, acc), Nil)), rest2))
+      else if sep == "," do parse_array_elements(skip_ws(rest2), Cons(v, acc))
+      else Err("expected ',' or ']' in array, found: '" ++ sep ++ "'") end end
+    end
+  end
+  end
+end
+
 -- Parse a JSON array (chars is AFTER the '[').
 pfn parse_array(chars) do
   match chars do
   Nil -> Err("unterminated array")
   Cons(c, rest) -> do
     if c == "]" do Ok((Array(Nil), rest))
-    else do
-      fn parse_elements(cs, acc) do
-        match parse_value(cs) do
-        Err(e) -> Err(e)
-        Ok((v, remaining)) -> do
-          let cs2 = skip_ws(remaining)
-          match cs2 do
-          Nil -> Err("unterminated array, expected ',' or ']'")
-          Cons(sep, rest2) ->
-            if sep == "]" do Ok((Array(rev(Cons(v, acc), Nil)), rest2))
-            else if sep == "," do parse_elements(skip_ws(rest2), Cons(v, acc))
-            else Err("expected ',' or ']' in array, found: '" ++ sep ++ "'") end end
-          end
-        end
+    else parse_array_elements(chars, Nil) end
+  end
+  end
+end
+
+-- Inner loop for parse_object.
+pfn parse_pairs(cs, acc) do
+  let cs2 = skip_ws(cs)
+  match cs2 do
+  Nil -> Err("unterminated object")
+  Cons(q, rest2) ->
+    if q == "\"" do
+      match parse_string_inner(rest2) do
+      Err(e) -> Err(e)
+      Ok((key, after_key)) -> do
+        let cs3 = skip_ws(after_key)
+        match cs3 do
+        Nil -> Err("expected ':' after object key")
+        Cons(colon, rest3) ->
+          if colon == ":" do
+            match parse_value(skip_ws(rest3)) do
+            Err(e) -> Err(e)
+            Ok((v, after_val)) -> do
+              let cs4 = skip_ws(after_val)
+              match cs4 do
+              Nil -> Err("unterminated object, expected ',' or '}'")
+              Cons(sep, rest4) ->
+                if sep == "}" do
+                  Ok((Object(rev(Cons((key, v), acc), Nil)), rest4))
+                else if sep == "," do
+                  parse_pairs(skip_ws(rest4), Cons((key, v), acc))
+                else Err("expected ',' or '}' in object, found: '" ++ sep ++ "'") end end
+              end
+            end
+            end
+          else Err("expected ':' after object key, found: '" ++ colon ++ "'") end
         end
       end
-      parse_elements(chars, Nil) end
-    end
-  end
+      end
+    else Err("expected '\"' for object key, found: '" ++ q ++ "'") end
   end
 end
 
@@ -207,45 +255,7 @@ pfn parse_object(chars) do
   Nil -> Err("unterminated object")
   Cons(c, rest) -> do
     if c == "}" do Ok((Object(Nil), rest))
-    else do
-      fn parse_pairs(cs, acc) do
-        let cs2 = skip_ws(cs)
-        match cs2 do
-        Nil -> Err("unterminated object")
-        Cons(q, rest2) ->
-          if q == "\"" do
-            match parse_string_inner(rest2) do
-            Err(e) -> Err(e)
-            Ok((key, after_key)) -> do
-              let cs3 = skip_ws(after_key)
-              match cs3 do
-              Nil -> Err("expected ':' after object key")
-              Cons(colon, rest3) ->
-                if colon == ":" do
-                  match parse_value(skip_ws(rest3)) do
-                  Err(e) -> Err(e)
-                  Ok((v, after_val)) -> do
-                    let cs4 = skip_ws(after_val)
-                    match cs4 do
-                    Nil -> Err("unterminated object, expected ',' or '}'")
-                    Cons(sep, rest4) ->
-                      if sep == "}" do
-                        Ok((Object(rev(Cons((key, v), acc), Nil)), rest4))
-                      else if sep == "," do
-                        parse_pairs(skip_ws(rest4), Cons((key, v), acc))
-                      else Err("expected ',' or '}' in object, found: '" ++ sep ++ "'") end end
-                    end
-                  end
-                  end
-                else Err("expected ':' after object key, found: '" ++ colon ++ "'") end
-              end
-            end
-            end
-          else Err("expected '\"' for object key, found: '" ++ q ++ "'") end
-        end
-      end
-      parse_pairs(chars, Nil) end
-    end
+    else parse_pairs(chars, Nil) end
   end
   end
 end
@@ -271,7 +281,7 @@ pfn escape_string_chars(chars, acc) do
 end
 
 pfn escape_str(s) do
-  escape_string_chars(string_chars(s), Nil)
+  escape_string_chars(string_split(s, ""), Nil)
 end
 
 pfn map_list(xs, f, acc) do
@@ -293,7 +303,7 @@ Returns Ok(value) on success, Err(message) on parse error.
     Json.parse("{\"x\": 1}")     -- Ok(Object([("x", Number(1.0))]))
 """
 fn parse(s) do
-  let chars = string_chars(s)
+  let chars = string_split(s, "")
   match parse_value(chars) do
   Err(e) -> Err(e)
   Ok((v, remaining)) -> do

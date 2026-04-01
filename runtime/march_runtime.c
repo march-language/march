@@ -985,7 +985,41 @@ void *march_string_slice(void *s, int64_t start, int64_t len) {
     return march_string_lit(ss->data + start, len);
 }
 
+/* Char builtins */
+void *march_char_from_int(int64_t n) {
+    char c = (char)(n & 0xFF);
+    return march_string_lit(&c, 1);
+}
+
+int64_t march_char_to_int(void *c) {
+    march_string *sc = (march_string *)c;
+    if (sc->len == 0) return 0;
+    return (int64_t)(unsigned char)sc->data[0];
+}
+
+int64_t march_char_is_digit(void *c) {
+    march_string *sc = (march_string *)c;
+    if (sc->len == 0) return 0;
+    unsigned char ch = (unsigned char)sc->data[0];
+    return (ch >= '0' && ch <= '9') ? 1 : 0;
+}
+
+/* Float/Int conversion */
+int64_t march_float_to_int(double f) {
+    return (int64_t)f;
+}
+
 /* Returns List(String). */
+void *march_string_chars(void *s) {
+    march_string *ss = (march_string *)s;
+    void *list = make_nil();
+    for (int64_t i = ss->len - 1; i >= 0; i--) {
+        void *ch = march_string_lit(ss->data + i, 1);
+        list = make_cons(ch, list);
+    }
+    return list;
+}
+
 void *march_string_split(void *s, void *sep) {
     march_string *ss = (march_string *)s;
     march_string *sp = (march_string *)sep;

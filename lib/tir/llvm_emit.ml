@@ -256,7 +256,12 @@ let is_builtin_fn name =
                  "math_sqrt"; "math_cbrt";
                  "math_exp"; "math_exp2";
                  "math_log"; "math_log2"; "math_log10"; "math_pow";
+                 (* Char builtins *)
+                 "char_from_int"; "char_to_int"; "char_is_digit";
+                 (* Float/Int conversion builtins *)
+                 "float_to_int";
                  (* Extended string builtins *)
+                 "string_chars";
                  "string_contains"; "string_starts_with"; "string_ends_with";
                  "string_slice"; "string_split"; "string_split_first";
                  "string_replace"; "string_replace_all";
@@ -377,6 +382,12 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "actor_call"                  -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TVar "e"]))
   | "actor_reply"                 -> Some Tir.TUnit
   | "actor_cast"                  -> Some (Tir.TCon ("Option", [Tir.TUnit]))
+  (* Char builtins *)
+  | "char_from_int"               -> Some Tir.TString
+  | "char_to_int"                 -> Some Tir.TInt
+  | "char_is_digit"               -> Some Tir.TBool
+  (* Float/Int conversion builtins *)
+  | "float_to_int"                -> Some Tir.TInt
   (* Float builtins *)
   | "float_abs"                   -> Some Tir.TFloat
   | "float_ceil"                  -> Some Tir.TInt
@@ -525,6 +536,12 @@ let mangle_extern : string -> string = function
   | "ws_recv"                 -> "march_ws_recv"
   | "ws_send"                 -> "march_ws_send"
   | "ws_select"               -> "march_ws_select"
+  (* Char builtins *)
+  | "char_from_int"   -> "march_char_from_int"
+  | "char_to_int"     -> "march_char_to_int"
+  | "char_is_digit"   -> "march_char_is_digit"
+  (* Float/Int conversion builtins *)
+  | "float_to_int"    -> "march_float_to_int"
   (* Float builtins *)
   | "float_abs"       -> "march_float_abs"
   | "float_ceil"      -> "march_float_ceil"
@@ -552,6 +569,7 @@ let mangle_extern : string -> string = function
   | "math_log10" -> "march_math_log10"
   | "math_pow"   -> "march_math_pow"
   (* Extended string builtins *)
+  | "string_chars"         -> "march_string_chars"
   | "string_contains"      -> "march_string_contains"
   | "string_starts_with"   -> "march_string_starts_with"
   | "string_ends_with"     -> "march_string_ends_with"
@@ -2492,6 +2510,12 @@ declare i64    @march_float_floor(double %f)
 declare i64    @march_float_round(double %f)
 declare i64    @march_float_truncate(double %f)
 declare double @march_int_to_float(i64 %n)
+; Char builtins
+declare ptr    @march_char_from_int(i64 %n)
+declare i64    @march_char_to_int(ptr %c)
+declare i64    @march_char_is_digit(ptr %c)
+; Float/Int conversion builtins
+declare i64    @march_float_to_int(double %f)
 ; Math builtins
 declare double @march_math_sin(double %f)
 declare double @march_math_cos(double %f)
@@ -2516,6 +2540,7 @@ declare i64  @march_string_contains(ptr %s, ptr %sub)
 declare i64  @march_string_starts_with(ptr %s, ptr %prefix)
 declare i64  @march_string_ends_with(ptr %s, ptr %suffix)
 declare ptr  @march_string_slice(ptr %s, i64 %start, i64 %len)
+declare ptr  @march_string_chars(ptr %s)
 declare ptr  @march_string_split(ptr %s, ptr %sep)
 declare ptr  @march_string_split_first(ptr %s, ptr %sep)
 declare ptr  @march_string_replace(ptr %s, ptr %old, ptr %new)
