@@ -701,7 +701,7 @@ let test_session_projection_simple () =
       Server -> Client : Bool
     end
   end|} in
-  let pi = List.assoc "Ping" env.March_typecheck.Typecheck.protocols in
+  let pi = March_typecheck.Typecheck.StrMap.find "Ping" env.March_typecheck.Typecheck.protocols in
   let client_ty = List.assoc "Client" pi.March_typecheck.Typecheck.pi_projections in
   let server_ty = List.assoc "Server" pi.March_typecheck.Typecheck.pi_projections in
   Alcotest.(check string) "client projection"
@@ -719,7 +719,7 @@ let test_session_duality_holds () =
       Server -> Client : Int
     end
   end|} in
-  let pi = List.assoc "Counter" env.March_typecheck.Typecheck.protocols in
+  let pi = March_typecheck.Typecheck.StrMap.find "Counter" env.March_typecheck.Typecheck.protocols in
   let client_ty = List.assoc "Client" pi.March_typecheck.Typecheck.pi_projections in
   let server_ty = List.assoc "Server" pi.March_typecheck.Typecheck.pi_projections in
   let dual_client = March_typecheck.Typecheck.dual_session_ty client_ty in
@@ -737,7 +737,7 @@ let test_session_loop_projection () =
     end
   end|} in
   Alcotest.(check bool) "loop protocol: no errors" false (has_errors ctx);
-  let pi = List.assoc "Stream" env.March_typecheck.Typecheck.protocols in
+  let pi = March_typecheck.Typecheck.StrMap.find "Stream" env.March_typecheck.Typecheck.protocols in
   let source_ty = List.assoc "Source" pi.March_typecheck.Typecheck.pi_projections in
   (* Source projection should be Rec(X, Send(Int, X)) for some X *)
   (match source_ty with
@@ -1264,7 +1264,7 @@ let test_srec_ping_pong_protocol () =
     end
   end|} in
   Alcotest.(check bool) "ping-pong: no typecheck errors" false (has_errors ctx);
-  let pi = List.assoc "PingPong" env.March_typecheck.Typecheck.protocols in
+  let pi = March_typecheck.Typecheck.StrMap.find "PingPong" env.March_typecheck.Typecheck.protocols in
   let client_ty = List.assoc "Client" pi.March_typecheck.Typecheck.pi_projections in
   let t_int  = March_typecheck.Typecheck.TCon ("Int",  []) in
   let t_bool = March_typecheck.Typecheck.TCon ("Bool", []) in
@@ -1381,7 +1381,7 @@ let test_srec_choose_loop_protocol () =
     end
   end|} in
   Alcotest.(check bool) "choose loop: no typecheck errors" false (has_errors ctx);
-  let pi = List.assoc "Negotiation" env.March_typecheck.Typecheck.protocols in
+  let pi = March_typecheck.Typecheck.StrMap.find "Negotiation" env.March_typecheck.Typecheck.protocols in
   (* Both roles should have a projection *)
   let has_client = List.mem_assoc "Client" pi.March_typecheck.Typecheck.pi_projections in
   let has_server = List.mem_assoc "Server" pi.March_typecheck.Typecheck.pi_projections in
@@ -1446,7 +1446,7 @@ let test_mpst_projection_client () =
       Server -> Client : Bool
     end
   end|} in
-  let pi = List.assoc "Auth" env.March_typecheck.Typecheck.protocols in
+  let pi = March_typecheck.Typecheck.StrMap.find "Auth" env.March_typecheck.Typecheck.protocols in
   let client_ty = List.assoc "Client" pi.March_typecheck.Typecheck.pi_projections in
   Alcotest.(check string) "client projection"
     "MSend(Server, Int, MRecv(Server, Bool, End))"
@@ -1462,7 +1462,7 @@ let test_mpst_projection_authdb () =
       Server -> Client : Bool
     end
   end|} in
-  let pi = List.assoc "Auth" env.March_typecheck.Typecheck.protocols in
+  let pi = March_typecheck.Typecheck.StrMap.find "Auth" env.March_typecheck.Typecheck.protocols in
   let authdb_ty = List.assoc "AuthDB" pi.March_typecheck.Typecheck.pi_projections in
   Alcotest.(check string) "authdb projection"
     "MRecv(Server, String, MSend(Server, Bool, End))"
@@ -1478,7 +1478,7 @@ let test_mpst_projection_server () =
       Server -> Client : Bool
     end
   end|} in
-  let pi = List.assoc "Auth" env.March_typecheck.Typecheck.protocols in
+  let pi = March_typecheck.Typecheck.StrMap.find "Auth" env.March_typecheck.Typecheck.protocols in
   let server_ty = List.assoc "Server" pi.March_typecheck.Typecheck.pi_projections in
   Alcotest.(check string) "server projection"
     "MRecv(Client, Int, MSend(AuthDB, String, MRecv(AuthDB, Bool, MSend(Client, Bool, End))))"

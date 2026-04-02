@@ -1769,8 +1769,10 @@ let analyse ~filename ~src : t =
       ctors      = Tc.StrMap.fold (fun name cis acc ->
                      match cis with ci :: _ -> (name, ci.Tc.ci_type) :: acc | [] -> acc)
                      final_env.Tc.ctors [];
-      interfaces = final_env.Tc.interfaces;
-      impls      = final_env.Tc.impls;
+      interfaces = Tc.StrMap.bindings final_env.Tc.interfaces;
+      impls      = Tc.StrMap.fold (fun k vs acc ->
+                     List.fold_left (fun a v -> (k, v) :: a) acc vs)
+                     final_env.Tc.impls [];
       actors;
       doc_map;
       refs_map;

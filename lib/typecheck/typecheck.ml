@@ -152,7 +152,8 @@ let rec repr = function
 (** Does unification variable [id] at [level] appear free in [t]?
     Also adjusts levels of encountered unbound vars (for correct
     generalization — this is the standard Rémy/Damas-Milner trick). *)
-let rec occurs id level = function
+let rec occurs id level t =
+  match t with
   | TVar r ->
     (match !r with
      | Unbound (id', l) ->
@@ -359,15 +360,15 @@ type env = {
   errors  : Err.ctx;
   pending_constraints : constraint_ list ref; (** Accumulated use-site constraints *)
   type_map : (Ast.span, ty) Hashtbl.t;
-  interfaces : (string * Ast.interface_def) list; (** Registered interfaces *)
+  interfaces : Ast.interface_def StrMap.t; (** Registered interfaces *)
   sigs       : (string * Ast.sig_def) list;       (** Registered module signatures *)
   mod_needs  : string list;
   (** Capabilities declared via [needs] in the current module scope, as dot-joined paths *)
   module_caps : (string * string list) list;
   (** Capabilities required by checked sub-modules: module name → list of cap paths.
       Populated when a [DMod] is fully checked; used for transitive enforcement. *)
-  protocols  : (string * proto_info) list; (** Registered session-type protocols *)
-  impls      : (string * ty) list; (** Registered interface implementations: (iface_name, impl_ty) *)
+  protocols  : proto_info StrMap.t; (** Registered session-type protocols *)
+  impls      : ty list StrMap.t; (** Registered interface implementations: iface_name → impl types *)
   import_tracker : import_entry list ref;
   (** Accumulated import/alias entries for unused-import warning detection.
       Shared (mutable) across all env copies derived from the same root. *)
@@ -377,8 +378,8 @@ let make_env errors type_map = {
   vars = StrMap.empty; types = StrMap.empty; ctors = StrMap.empty; records = StrMap.empty;
   level = 0; lin = [];
   errors; pending_constraints = ref []; type_map;
-  interfaces = []; sigs = [];
-  mod_needs = []; module_caps = []; protocols = []; impls = [];
+  interfaces = StrMap.empty; sigs = [];
+  mod_needs = []; module_caps = []; protocols = StrMap.empty; impls = StrMap.empty;
   import_tracker = ref [];
 }
 
@@ -1333,8 +1334,10 @@ let base_env errors type_map =
   { env with
     types      = List.fold_left (fun m (k, v) -> StrMap.add k v m) StrMap.empty builtin_types;
     ctors      = List.fold_left (fun m (k, v) -> add_ctor k v m) StrMap.empty builtin_ctors;
-    interfaces = builtin_interfaces;
-    impls      = builtin_impls;
+    interfaces = List.fold_left (fun m (k, v) -> StrMap.add k v m) StrMap.empty builtin_interfaces;
+    impls      = List.fold_left (fun m (k, v) ->
+                   let lst = Option.value ~default:[] (StrMap.find_opt k m) in
+                   StrMap.add k (v :: lst) m) StrMap.empty builtin_impls;
   }
 
 (* =================================================================
@@ -1590,7 +1593,7 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
        We intercept this before the normal type-lookup path. *)
     (match name.txt, args with
      | "Chan", [Ast.TyCon (role, []); Ast.TyCon (proto, [])] ->
-       (match List.assoc_opt proto.txt env.protocols with
+       (match StrMap.find_opt proto.txt env.protocols with
         | None ->
           Err.error env.errors ~span:proto.span
             (Printf.sprintf "I don't know a protocol called `%s`." proto.txt);
@@ -1670,7 +1673,7 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
 
   | Ast.TyChan (role, proto) ->
     (* Look up the protocol and project onto the given role. *)
-    (match List.assoc_opt proto.txt env.protocols with
+    (match StrMap.find_opt proto.txt env.protocols with
      | None ->
        Err.error env.errors ~span:proto.span
          (Printf.sprintf "I don't know a protocol called `%s`." proto.txt);
@@ -2412,7 +2415,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
            "Chan.new: argument must be a protocol name (string, atom, or bare name).";
          TError
        | Some pname ->
-         (match List.assoc_opt pname env.protocols with
+         (match StrMap.find_opt pname env.protocols with
           | None ->
             Err.error env.errors ~span:sp
               (Printf.sprintf "Chan.new: protocol `%s` is not declared." pname);
@@ -2630,7 +2633,7 @@ let rec infer_expr env (e : Ast.expr) : ty =
            "MPST.new: argument must be a protocol name.";
          TError
        | Some pname ->
-         (match List.assoc_opt pname env.protocols with
+         (match StrMap.find_opt pname env.protocols with
           | None ->
             Err.error env.errors ~span:sp
               (Printf.sprintf "MPST.new: protocol `%s` is not declared." pname);
@@ -3510,7 +3513,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
         match clause.fc_guard with
         | None -> []
         | Some (Ast.ECon (iface_name, args, _))
-          when List.assoc_opt iface_name.txt env.interfaces <> None ->
+          when StrMap.mem iface_name.txt env.interfaces ->
           (* It's a class constraint: Eq(a), Ord(b), etc. *)
           List.filter_map (fun arg ->
               match arg with
@@ -3623,7 +3626,24 @@ let rec impl_matches_ty impl_ty target_ty =
     inference.  Called at each declaration boundary (DFn, DLet) to verify
     that constrained type variables were unified with a compatible type. *)
 let discharge_constraints env span =
+  (* Dedup CInterface constraints: when the same concrete type is constrained
+     on the same interface multiple times (e.g., 10 calls to Storage.get on
+     the same storage variable), we only need to check the impl once.
+     Uses pp_ty on the repr'd type as a canonical string key. *)
+  let seen = Hashtbl.create 16 in
   List.iter (fun c ->
+      let dominated = match c with
+        | CInterface (name, t) ->
+          let rt = repr t in
+          (match rt with
+           | TVar _ -> false  (* polymorphic -- will be skipped anyway *)
+           | _ ->
+             let key = name ^ ":" ^ pp_ty rt in
+             if Hashtbl.mem seen key then true
+             else (Hashtbl.add seen key (); false))
+        | _ -> false
+      in
+      if not dominated then
       match c with
       | CNum t | COrd t ->
         let ty   = repr t in
@@ -3645,9 +3665,11 @@ let discharge_constraints env span =
         (match ty with
          | TVar _ -> ()   (* Still polymorphic — cannot check yet *)
          | _ ->
-           let satisfied = List.exists (fun (iname, impl_ty) ->
-               iname = iface_name && impl_matches_ty (repr impl_ty) ty
-             ) env.impls in
+           let satisfied = match StrMap.find_opt iface_name env.impls with
+             | None -> false
+             | Some impl_tys -> List.exists (fun impl_ty ->
+                 impl_matches_ty (repr impl_ty) ty) impl_tys
+           in
            if not satisfied then
              Err.error env.errors ~span
                (Printf.sprintf
@@ -4182,11 +4204,6 @@ let rec check_decl env (d : Ast.decl) : env =
     bind_var name.txt (Mono (TCon ("Pid", [state_ty]))) env_with_ctors
 
   | Ast.DMod (name, _vis, decls, _sp) ->
-    (* Pass 1: pre-bind all inner DFn names as mono forward refs so that
-       functions within the module can reference each other regardless of
-       declaration order (same logic as check_module's pass 1).
-       Unlike check_module's pass 1, we always pre-bind here — outer-scope
-       names with the same identifier should not block intra-module refs. *)
     let pre_env = List.fold_left (fun e d ->
         match d with
         | Ast.DFn (def, _) ->
@@ -4311,7 +4328,7 @@ let rec check_decl env (d : Ast.decl) : env =
 
   | Ast.DProtocol (name, pdef, sp) ->
     (* Register the protocol and validate structural well-formedness. *)
-    if List.mem_assoc name.txt env.protocols then
+    if StrMap.mem name.txt env.protocols then
       Err.error env.errors ~span:sp
         (Printf.sprintf "Duplicate protocol definition `%s`." name.txt);
     if pdef.proto_steps = [] then
@@ -4365,9 +4382,9 @@ let rec check_decl env (d : Ast.decl) : env =
       ) participants;
     (* Check against previously-declared protocols for cross-protocol conflicts. *)
     let pi = { pi_def = pdef; pi_projections = projections; pi_span = sp } in
-    let new_env = { env with protocols = (name.txt, pi) :: env.protocols } in
-    (if List.length new_env.protocols > 1 then
-       List.iter (fun (other_name, other_pi) ->
+    let new_env = { env with protocols = StrMap.add name.txt pi env.protocols } in
+    (if StrMap.cardinal new_env.protocols > 1 then
+       StrMap.iter (fun other_name other_pi ->
            if other_name <> name.txt then begin
              let other_parts = List.map fst other_pi.pi_projections in
              if List.length participants >= 2 && List.length other_parts >= 2
@@ -4391,7 +4408,7 @@ let rec check_decl env (d : Ast.decl) : env =
        each method as a polymorphic function binding in scope.
        Methods get CInterface constraints so call sites verify the type
        satisfies the interface (discharged in discharge_constraints). *)
-    let env' = { env with interfaces = (idef.iface_name.txt, idef) :: env.interfaces } in
+    let env' = { env with interfaces = StrMap.add idef.iface_name.txt idef env.interfaces } in
     List.fold_left (fun env (m : Ast.method_decl) ->
         (* Use level+1 so the interface type parameter gets quantified by generalize. *)
         let a = fresh_var (env.level + 1) in
@@ -4422,7 +4439,10 @@ let rec check_decl env (d : Ast.decl) : env =
     let tvars = ref [] in
     let inst_ty = surface_ty env ~tvars idef.impl_ty in
     (* Register this implementation so CInterface constraints can be discharged. *)
-    let env_with_impl = { env with impls = (idef.impl_iface.txt, inst_ty) :: env.impls } in
+    let env_with_impl = { env with impls =
+      (let key = idef.impl_iface.txt in
+       let lst = Option.value ~default:[] (StrMap.find_opt key env.impls) in
+       StrMap.add key (inst_ty :: lst) env.impls) } in
     (* Check 'when' constraints: each C(T) must already be implemented. *)
     List.iter (fun ((cname : Ast.name), ctys) ->
         match List.map (surface_ty env ~tvars) ctys with
@@ -4431,9 +4451,10 @@ let rec check_decl env (d : Ast.decl) : env =
           (match cty with
            | TVar _ -> ()   (* Polymorphic param — checked at use sites *)
            | _ ->
-             if not (List.exists (fun (iname, impl_ty) ->
-                 iname = cname.txt && impl_matches_ty (repr impl_ty) cty
-               ) env.impls) then
+             if not (match StrMap.find_opt cname.txt env.impls with
+                 | None -> false
+                 | Some tys -> List.exists (fun impl_ty ->
+                     impl_matches_ty (repr impl_ty) cty) tys) then
                Err.error env.errors ~span:cname.span
                  (Printf.sprintf
                     "Constraint `%s(%s)` in `when` clause is not satisfied.\n\
@@ -4442,7 +4463,7 @@ let rec check_decl env (d : Ast.decl) : env =
         | _ -> ()
       ) idef.impl_constraints;
     (* Validate each method against the interface declaration. *)
-    (match List.assoc_opt idef.impl_iface.txt env.interfaces with
+    (match StrMap.find_opt idef.impl_iface.txt env.interfaces with
      | None ->
        (* For derive-generated pseudo-interfaces (e.g. JsonTo, JsonFrom),
           skip interface validation but still type-check and bind each method
@@ -4466,9 +4487,10 @@ let rec check_decl env (d : Ast.decl) : env =
               (match sc_inst_ty with
                | TVar _ -> ()  (* polymorphic param — checked at use sites *)
                | _ ->
-                 if not (List.exists (fun (iname, impl_ty) ->
-                     iname = sc_name.txt && impl_matches_ty (repr impl_ty) sc_inst_ty
-                   ) env.impls) then
+                 if not (match StrMap.find_opt sc_name.txt env.impls with
+                     | None -> false
+                     | Some tys -> List.exists (fun impl_ty ->
+                         impl_matches_ty (repr impl_ty) sc_inst_ty) tys) then
                    Err.error env.errors ~span:idef.impl_iface.span
                      (Printf.sprintf
                         "Cannot implement `%s(%s)`: required superclass `%s(%s)` is not \
@@ -4571,16 +4593,15 @@ let rec check_decl env (d : Ast.decl) : env =
            then (String.sub k plen (String.length k - plen), sch) :: acc
            else acc) env.vars [] in
        (* Import interfaces from the module prefix into scope as short names *)
-       let matching_ifaces = List.filter_map (fun (k, idef) ->
+       let env = StrMap.fold (fun k idef e ->
            let plen = String.length prefix in
            if String.length k > plen
               && String.sub k 0 plen = prefix
-           then Some (String.sub k plen (String.length k - plen), idef)
-           else None) env.interfaces in
-       let env = List.fold_left (fun e (short, idef) ->
-           if List.mem_assoc short e.interfaces then e
-           else { e with interfaces = (short, idef) :: e.interfaces }
-         ) env matching_ifaces in
+           then
+             let short = String.sub k plen (String.length k - plen) in
+             if StrMap.mem short e.interfaces then e
+             else { e with interfaces = StrMap.add short idef e.interfaces }
+           else e) env.interfaces env in
        (* Track for unused-import warning: warn if nothing from this module is used. *)
        if matching <> [] then begin
          let short_names = List.map fst matching in
@@ -5160,8 +5181,8 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
            | _ -> e1)
         | Ast.DInterface (idef, _) ->
           let qname = prefix ^ "." ^ idef.iface_name.txt in
-          if List.mem_assoc qname e.interfaces then e
-          else { e with interfaces = (qname, idef) :: e.interfaces }
+          if StrMap.mem qname e.interfaces then e
+          else { e with interfaces = StrMap.add qname idef e.interfaces }
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
           prebind_mod_members (prefix ^ "." ^ mname.txt) e inner_decls
         | _ -> e
@@ -5217,7 +5238,7 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
       | Ast.DSig (name, sdef, _) ->
         { env with sigs = (name.txt, sdef) :: env.sigs }
       | Ast.DInterface (idef, _) ->
-        { env with interfaces = (idef.iface_name.txt, idef) :: env.interfaces }
+        { env with interfaces = StrMap.add idef.iface_name.txt idef env.interfaces }
       | _ -> env
     ) (base_env errors type_map) m.Ast.mod_decls
   in

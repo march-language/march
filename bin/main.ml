@@ -471,6 +471,20 @@ let resolve_imports ~source_file (m : March_ast.Ast.module_) =
 
   (* Step 1: resolve explicit imports (DUse/DAlias) from the entry file *)
   let explicit_decls = load_refs m.March_ast.Ast.mod_decls in
+  (* Mark all explicitly-loaded modules (and their nested transitive deps) as
+     already-emitted.  This prevents them from being re-embedded as transitive
+     deps inside auto-discovered DMods in step 2.  Without this, every conduit
+     submodule that does `import Conduit` would embed the entire Conduit DMod
+     (~80 declarations) inside itself, causing O(N²) typecheck cost. *)
+  let rec mark_emitted_decls = function
+    | [] -> ()
+    | March_ast.Ast.DMod ({March_ast.Ast.txt = mn; _}, _, inner, _) :: rest ->
+      Hashtbl.replace resolved mn [];
+      mark_emitted_decls inner;
+      mark_emitted_decls rest
+    | _ :: rest -> mark_emitted_decls rest
+  in
+  mark_emitted_decls explicit_decls;
 
   (* Step 2: auto-discover all .march files in MARCH_LIB_PATH directories.
      Load any that were not already pulled in via explicit imports.
