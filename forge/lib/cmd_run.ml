@@ -32,7 +32,9 @@ let run ?(dump_phases=false) ?(compiled=false) () =
                 else rel_path
               in
               let d = Filename.concat abs_path "lib" in
-              if Sys.file_exists d then Some d else None
+              if Sys.file_exists d then Some d
+              else if Sys.file_exists abs_path then Some abs_path
+              else None
             | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
               Project.git_dep_lib_path dep_name
             | _ -> None
