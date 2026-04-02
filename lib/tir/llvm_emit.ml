@@ -258,6 +258,7 @@ let is_builtin_fn name =
                  "math_log"; "math_log2"; "math_log10"; "math_pow";
                  (* Char builtins *)
                  "char_from_int"; "char_to_int"; "char_is_digit";
+                 "byte_to_char"; "char_is_alphanumeric"; "char_is_whitespace";
                  (* Float/Int conversion builtins *)
                  "float_to_int";
                  (* Extended string builtins *)
@@ -280,6 +281,8 @@ let is_builtin_fn name =
                  "dir_mkdir"; "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list"; "dir_list_full";
                  (* Process builtins *)
                  "process_argv";
+                 "process_env"; "process_set_env"; "process_cwd"; "process_exit";
+                 "process_pid"; "process_spawn_sync"; "process_spawn_lines";
                  (* TCP/network builtins *)
                  "tcp_connect"; "tcp_close";
                  (* HTTP builtins *)
@@ -452,6 +455,13 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "dir_list"                    -> Some (Tir.TCon ("Result", [Tir.TCon ("List", [Tir.TString]); Tir.TString]))
   | "dir_list_full"               -> Some (Tir.TCon ("Result", [Tir.TCon ("List", [Tir.TString]); Tir.TString]))
   | "process_argv"                -> Some (Tir.TCon ("List", [Tir.TString]))
+  | "process_env"                 -> Some (Tir.TCon ("Option", [Tir.TString]))
+  | "process_set_env"             -> Some Tir.TUnit
+  | "process_cwd"                 -> Some Tir.TString
+  | "process_exit"                -> Some Tir.TUnit
+  | "process_pid"                 -> Some Tir.TInt
+  | "process_spawn_sync"          -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]))
+  | "process_spawn_lines"         -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]))
   (* TCP/network builtins *)
   | "tcp_connect"                 -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
   (* HTTP builtins *)
@@ -543,6 +553,9 @@ let mangle_extern : string -> string = function
   (* Char builtins *)
   | "char_from_int"   -> "march_char_from_int"
   | "char_to_int"     -> "march_char_to_int"
+  | "byte_to_char"    -> "march_char_from_int"   (* same semantics: int → single-char string *)
+  | "char_is_alphanumeric" -> "march_char_is_alphanumeric"
+  | "char_is_whitespace"   -> "march_char_is_whitespace"
   | "char_is_digit"   -> "march_char_is_digit"
   (* Float/Int conversion builtins *)
   | "float_to_int"    -> "march_float_to_int"
@@ -620,6 +633,13 @@ let mangle_extern : string -> string = function
   | "dir_list"          -> "march_dir_list"
   | "dir_list_full"     -> "march_dir_list_full"
   | "process_argv"      -> "march_process_argv"
+  | "process_env"       -> "march_process_env"
+  | "process_set_env"   -> "march_process_set_env"
+  | "process_cwd"       -> "march_process_cwd"
+  | "process_exit"      -> "march_process_exit"
+  | "process_pid"       -> "march_process_pid"
+  | "process_spawn_sync"  -> "march_process_spawn_sync"
+  | "process_spawn_lines" -> "march_process_spawn_lines"
   (* TCP/network builtins *)
   | "tcp_connect"       -> "march_tcp_connect"
   (* HTTP builtins *)
@@ -947,7 +967,7 @@ let ctor_entry ctx name n_args_fallback =
        type was not propagated through the pattern-matrix compiler. *)
     let suffix = "." ^ name in
     let suffix_len = String.length suffix in
-    (* Collect all entries ending with ".<name>" and pick the best match.
+    (* Collect all entries ending with ".<ctor>" and pick the best match.
        "Best" = arity matches n_args_fallback; otherwise fall back to first found.
        This handles the case where two unrelated types share a constructor name
        (e.g. Heap.HLeaf with 0 fields vs HEntry.HLeaf with 3 fields): the
@@ -1069,11 +1089,27 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── Arithmetic builtins ───────────────────────────────────────────── *)
   | Tir.EApp (f, [a; b]) when is_int_arith f.Tir.v_name ->
-    let va = emit_atom_as ctx "i64" a in
-    let vb = emit_atom_as ctx "i64" b in
-    let r  = fresh ctx "ar" in
-    emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_arith_op f.Tir.v_name) va vb);
-    ("i64", r)
+    (* +, -, *, /, % are polymorphic over Int and Float in March.
+       Detect float operands by checking the actual LLVM type of the first arg;
+       if double, use floating-point ops instead of integer ops. *)
+    let (ty_a, va) = emit_atom ctx a in
+    if ty_a = "double" then begin
+      let vb = emit_atom_as ctx "double" b in
+      let r  = fresh ctx "ar" in
+      let fop = match f.Tir.v_name with
+        | "+" -> "fadd" | "-" -> "fsub" | "*" -> "fmul" | "/" -> "fdiv"
+        | _ -> "fmul"
+      in
+      let op_str = if ctx.fast_math then fop ^ " fast" else fop in
+      emit ctx (Printf.sprintf "%s = %s double %s, %s" r op_str va vb);
+      ("double", r)
+    end else begin
+      let va' = coerce ctx ty_a va "i64" in
+      let vb = emit_atom_as ctx "i64" b in
+      let r  = fresh ctx "ar" in
+      emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r (int_arith_op f.Tir.v_name) va' vb);
+      ("i64", r)
+    end
 
   | Tir.EApp (f, [a; b]) when is_int_cmp f.Tir.v_name ->
     let (ty_a, va) = emit_atom ctx a in
@@ -1442,6 +1478,26 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       (ret_ty, r)
     end
 
+  (* ── Integer arithmetic builtins called via ECallPtr ──────────────── *)
+  (* int_mod / int_div / int_mod_euclid are builtins that appear as ECallPtr
+     (not EApp) because lower.ml treats them as ordinary variables.  Emit the
+     corresponding LLVM instruction directly rather than trying to dispatch
+     through a closure pointer (which would reference an undefined alloca). *)
+  | Tir.ECallPtr (Tir.AVar f, [a; b])
+    when f.Tir.v_name = "int_mod" || f.Tir.v_name = "int_div"
+      || f.Tir.v_name = "int_mod_euclid" ->
+    let va = emit_atom_as ctx "i64" a in
+    let vb = emit_atom_as ctx "i64" b in
+    let r  = fresh ctx "ar" in
+    let op = match f.Tir.v_name with
+      | "int_mod"        -> "srem"
+      | "int_div"        -> "sdiv"
+      | "int_mod_euclid" -> "urem"
+      | _                -> assert false
+    in
+    emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r op va vb);
+    ("i64", r)
+
   (* ── Indirect call through closure ────────────────────────────────── *)
   (* fn_atom is a local var holding a ptr to a closure struct.
      Field 0 of the closure is the apply fn ptr.
@@ -1778,6 +1834,10 @@ and emit_case ctx scrut_atom branches default_opt =
       (match v.Tir.v_ty with
        | Tir.TBool | Tir.TInt -> false
        | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars *)
+       | Tir.TVar _ -> scrut_ty = "ptr"  (* unknown type: trust actual loaded LLVM type.
+                                            Pattern-bound vars get TVar "_" from lower.ml;
+                                            a Bool/Int field loaded as i64 must not be
+                                            treated as a heap pointer. *)
        | _ -> true)
     | Tir.ALit (March_ast.Ast.LitBool _) | Tir.ALit (March_ast.Ast.LitInt _)
     | Tir.ALit (March_ast.Ast.LitAtom _) -> false
@@ -1873,11 +1933,15 @@ and emit_case ctx scrut_atom branches default_opt =
         else ("i64", scrut_val)
       in
 
-      (* Build switch arms *)
-      let cases_str = List.map2 (fun br lbl ->
+      (* Build switch arms, deduplicating by tag to prevent LLVM IR validation
+         errors. Duplicate tags can occur in dead code blocks generated by the
+         TCO pass when the scrutinee variable has the wrong TIR type (e.g. typed
+         as Auth but matched with Option-like Some/None patterns). *)
+      let seen_tags = Hashtbl.create 4 in
+      let cases_str = List.filter_map (fun (br, lbl) ->
           let tag_str =
             if is_ptr_scrut then
-              let e = ctor_entry ctx (qualified_br_key br.Tir.br_tag) 0 in
+              let e = ctor_entry ctx (qualified_br_key br.Tir.br_tag) (List.length br.Tir.br_vars) in
               string_of_int e.ce_tag
             else if is_atom_case then begin
               (* Atom tags are ":NAME" — hash the name part with FNV1a *)
@@ -1888,9 +1952,13 @@ and emit_case ctx scrut_atom branches default_opt =
               | Some n -> string_of_int n
               | None -> "0"
             end
-            in
-          Printf.sprintf "%s %s, label %%%s" sw_ty tag_str lbl
-        ) branches branch_lbls in
+          in
+          if Hashtbl.mem seen_tags tag_str then None
+          else begin
+            Hashtbl.add seen_tags tag_str ();
+            Some (Printf.sprintf "%s %s, label %%%s" sw_ty tag_str lbl)
+          end
+        ) (List.combine branches branch_lbls) in
       let cases_part = String.concat "\n      " cases_str in
       emit_term ctx (Printf.sprintf "switch %s %s, label %%%s [\n      %s\n  ]"
                        sw_ty sw_val default_lbl cases_part)

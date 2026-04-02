@@ -1436,6 +1436,18 @@ let lower_module ?type_map ?(test_mode=false) (m : Ast.module_) : Tir.tir_module
                  | None -> ())
               | Ast.DMod (sub_name, _, sub_decls, _) ->
                 lower_mod_decls (prefix ^ sub_name.txt ^ ".") sub_decls
+              | Ast.DLet (_, b, _) ->
+                let rhs = lower_expr b.bind_expr in
+                (match b.bind_pat with
+                 | Ast.PatVar n ->
+                   let v : Tir.var = {
+                     v_name = n.txt;
+                     v_ty = (match b.bind_ty with Some t -> lower_ty t
+                             | None -> ty_of_expr b.bind_expr);
+                     v_lin = lower_linearity b.bind_lin;
+                   } in
+                   top_lets := (v, rhs) :: !top_lets
+                 | _ -> ())
               | _ -> ()
             ) decls
         in
@@ -1562,7 +1574,42 @@ let lower_module ?type_map ?(test_mode=false) (m : Ast.module_) : Tir.tir_module
     in
     collect_tests "" m.mod_decls
   end;
-  (* Inject top-level let bindings into main's body as a chain of ELet. *)
+  (* Inject top-level let bindings into function bodies that reference them.
+     We scan each fn_body for direct variable references to decide which
+     top_lets to inject.  This avoids duplicate alloca names in mutco
+     combined functions (which merge multiple fn_defs into one LLVM function). *)
+  let rec fn_body_uses name (e : Tir.expr) =
+    match e with
+    | Tir.EAtom a -> atom_uses name a
+    | Tir.EApp (f, args) ->
+      f.Tir.v_name = name || List.exists (atom_uses name) args
+    | Tir.ECallPtr (a, args) ->
+      atom_uses name a || List.exists (atom_uses name) args
+    | Tir.ELet (v, rhs, body) ->
+      fn_body_uses name rhs ||
+      (if v.Tir.v_name = name then false else fn_body_uses name body)
+    | Tir.ELetRec (fns, body) ->
+      List.exists (fun fn -> fn_body_uses name fn.Tir.fn_body) fns ||
+      fn_body_uses name body
+    | Tir.ECase (scrut, arms, def) ->
+      atom_uses name scrut ||
+      List.exists (fun br -> fn_body_uses name br.Tir.br_body) arms ||
+      (match def with Some e -> fn_body_uses name e | None -> false)
+    | Tir.ETuple atoms -> List.exists (atom_uses name) atoms
+    | Tir.ERecord fields -> List.exists (fun (_, a) -> atom_uses name a) fields
+    | Tir.EField (a, _) -> atom_uses name a
+    | Tir.EUpdate (a, fields) ->
+      atom_uses name a || List.exists (fun (_, a) -> atom_uses name a) fields
+    | Tir.EAlloc (_, atoms) | Tir.EStackAlloc (_, atoms) ->
+      List.exists (atom_uses name) atoms
+    | Tir.EFree a | Tir.EIncRC a | Tir.EDecRC a
+    | Tir.EAtomicIncRC a | Tir.EAtomicDecRC a -> atom_uses name a
+    | Tir.EReuse (a, _, atoms) ->
+      atom_uses name a || List.exists (atom_uses name) atoms
+    | Tir.ESeq (e1, e2) -> fn_body_uses name e1 || fn_body_uses name e2
+  and atom_uses name a =
+    match a with Tir.AVar v -> v.Tir.v_name = name | _ -> false
+  in
   let all_fns = List.rev !fns in
   let all_fns =
     match List.rev !top_lets with
@@ -1572,11 +1619,15 @@ let lower_module ?type_map ?(test_mode=false) (m : Ast.module_) : Tir.tir_module
           let is_main = fn.fn_name = "main" ||
             (String.length fn.fn_name > 5 &&
              String.sub fn.fn_name (String.length fn.fn_name - 5) 5 = ".main") in
-          if is_main then
+          let needed = List.filter (fun (v, _) ->
+              is_main || fn_body_uses v.Tir.v_name fn.fn_body
+            ) lets in
+          match needed with
+          | [] -> fn
+          | _ ->
             let body = List.fold_right (fun (v, rhs) body ->
-                Tir.ELet (v, rhs, body)) lets fn.fn_body in
+                Tir.ELet (v, rhs, body)) needed fn.fn_body in
             { fn with fn_body = body }
-          else fn
         ) all_fns
   in
   let result : Tir.tir_module = { tm_name = m.mod_name.txt;

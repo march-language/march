@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <setjmp.h>
+#include <sys/wait.h>
 
 /* ── GC/RC Tracing (Phase 5) ─────────────────────────────────────────── */
 /*
@@ -1116,6 +1117,23 @@ int64_t march_char_is_digit(void *c) {
     return (ch >= '0' && ch <= '9') ? 1 : 0;
 }
 
+int64_t march_char_is_alphanumeric(void *c) {
+    march_string *sc = (march_string *)c;
+    if (sc->len == 0) return 0;
+    unsigned char ch = (unsigned char)sc->data[0];
+    return ((ch >= '0' && ch <= '9') ||
+            (ch >= 'a' && ch <= 'z') ||
+            (ch >= 'A' && ch <= 'Z')) ? 1 : 0;
+}
+
+int64_t march_char_is_whitespace(void *c) {
+    march_string *sc = (march_string *)c;
+    if (sc->len == 0) return 0;
+    unsigned char ch = (unsigned char)sc->data[0];
+    return (ch == ' ' || ch == '\t' || ch == '\n' ||
+            ch == '\r' || ch == '\f' || ch == '\v') ? 1 : 0;
+}
+
 /* Float/Int conversion */
 int64_t march_float_to_int(double f) {
     return (int64_t)f;
@@ -1750,6 +1768,139 @@ void *march_process_argv(void) {
         list = make_cons(s, list);
     }
     return list;
+}
+
+/* ── Process builtins ──────────────────────────────────────────────── */
+
+/* process_env(name) → Option(String) */
+void *march_process_env(void *name_obj) {
+    march_string *s = (march_string *)name_obj;
+    char key[4096];
+    size_t klen = s->len < (int64_t)sizeof(key) - 1 ? (size_t)s->len : sizeof(key) - 1;
+    memcpy(key, s->data, klen);
+    key[klen] = '\0';
+    char *val = getenv(key);
+    if (val == NULL) {
+        return make_none();
+    }
+    void *str = march_string_lit(val, (int64_t)strlen(val));
+    return make_some_ptr(str);
+}
+
+/* process_set_env(name, value) → Unit (returns i64 0) */
+int64_t march_process_set_env(void *name_obj, void *value_obj) {
+    march_string *n = (march_string *)name_obj;
+    march_string *v = (march_string *)value_obj;
+    char key[4096], val[65536];
+    size_t kl = n->len < (int64_t)sizeof(key)-1 ? (size_t)n->len : sizeof(key)-1;
+    size_t vl = v->len < (int64_t)sizeof(val)-1 ? (size_t)v->len : sizeof(val)-1;
+    memcpy(key, n->data, kl); key[kl] = '\0';
+    memcpy(val, v->data, vl); val[vl] = '\0';
+    setenv(key, val, 1);
+    return 0; /* Unit = i64 0 */
+}
+
+/* process_cwd() → String */
+void *march_process_cwd(void) {
+    char buf[4096];
+    if (getcwd(buf, sizeof(buf)) == NULL) {
+        return march_string_lit("", 0);
+    }
+    return march_string_lit(buf, (int64_t)strlen(buf));
+}
+
+/* process_exit(code) → Unit */
+int64_t march_process_exit(int64_t code) {
+    exit((int)code);
+    return 0; /* unreachable */
+}
+
+/* process_pid() → Int */
+int64_t march_process_pid(void) {
+    return (int64_t)getpid();
+}
+
+/* process_spawn_sync(command, args) → Result(ProcessResult, String)
+   ProcessResult = ProcessResult(Int, String, String) (exit_code, stdout, stderr) */
+void *march_process_spawn_sync(void *cmd_obj, void *args_list) {
+    march_string *cmd_s = (march_string *)cmd_obj;
+    /* Count args */
+    int extra = 0;
+    void *tmp = args_list;
+    while (((march_hdr *)tmp)->tag == 1) { extra++; tmp = MARCH_FIELD_PTR(tmp, 1); }
+    int argc = 1 + extra;
+    char **argv = (char **)malloc((size_t)(argc + 1) * sizeof(char *));
+    /* argv[0] = command */
+    argv[0] = (char *)malloc((size_t)(cmd_s->len + 1));
+    memcpy(argv[0], cmd_s->data, (size_t)cmd_s->len);
+    argv[0][cmd_s->len] = '\0';
+    /* argv[1..] = args */
+    int i = 1;
+    tmp = args_list;
+    while (((march_hdr *)tmp)->tag == 1) {
+        march_string *a = (march_string *)MARCH_FIELD_PTR(tmp, 0);
+        argv[i] = (char *)malloc((size_t)(a->len + 1));
+        memcpy(argv[i], a->data, (size_t)a->len);
+        argv[i][a->len] = '\0';
+        i++;
+        tmp = MARCH_FIELD_PTR(tmp, 1);
+    }
+    argv[argc] = NULL;
+    /* Execute via fork+exec */
+    int stdout_pipe[2], stderr_pipe[2];
+    if (pipe(stdout_pipe) != 0 || pipe(stderr_pipe) != 0) {
+        for (int j = 0; j < argc; j++) free(argv[j]);
+        free(argv);
+        return mk_err_cstr("pipe failed");
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(stdout_pipe[0]); close(stderr_pipe[0]);
+        dup2(stdout_pipe[1], STDOUT_FILENO);
+        dup2(stderr_pipe[1], STDERR_FILENO);
+        close(stdout_pipe[1]); close(stderr_pipe[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(stdout_pipe[1]); close(stderr_pipe[1]);
+    for (int j = 0; j < argc; j++) free(argv[j]);
+    free(argv);
+    if (pid < 0) return mk_err_cstr("fork failed");
+    /* Read stdout and stderr */
+    char out_buf[65536]; size_t out_len = 0;
+    char err_buf[16384]; size_t err_len = 0;
+    ssize_t nr;
+    while (out_len < sizeof(out_buf) &&
+           (nr = read(stdout_pipe[0], out_buf + out_len, sizeof(out_buf) - out_len)) > 0)
+        out_len += (size_t)nr;
+    while (err_len < sizeof(err_buf) &&
+           (nr = read(stderr_pipe[0], err_buf + err_len, sizeof(err_buf) - err_len)) > 0)
+        err_len += (size_t)nr;
+    close(stdout_pipe[0]); close(stderr_pipe[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    int exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+    /* Build ProcessResult(exit_code, stdout, stderr): tag=0, 3 fields */
+    void *out_str = march_string_lit(out_buf, (int64_t)out_len);
+    void *err_str = march_string_lit(err_buf, (int64_t)err_len);
+    void *pr = march_alloc(16 + 24); /* header(16) + 3 fields * 8 */
+    MARCH_FIELD(pr, 0) = exit_code;
+    MARCH_FIELD(pr, 1) = (int64_t)out_str;
+    MARCH_FIELD(pr, 2) = (int64_t)err_str;
+    return mk_ok(pr);
+}
+
+/* process_spawn_lines(command, args) → Result(Seq(String), String) */
+void *march_process_spawn_lines(void *cmd_obj, void *args_list) {
+    /* Run command and return Ok(stdout_string) — caller can split lines */
+    void *result = march_process_spawn_sync(cmd_obj, args_list);
+    /* If Ok(ProcessResult), extract stdout and return Ok(stdout) */
+    if (((march_hdr *)result)->tag == 0) {
+        void *pr = MARCH_FIELD_PTR(result, 0);
+        void *out_str = MARCH_FIELD_PTR(pr, 1);
+        return mk_ok(out_str);
+    }
+    return result; /* Err case: pass through */
 }
 
 /* ── CSV builtins ───────────────────────────────────────────────────── */

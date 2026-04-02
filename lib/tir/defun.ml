@@ -58,6 +58,8 @@ let builtin_names : StringSet.t =
       "file_create_dir"; "file_create_dir_all";
       "dir_mkdir"; "dir_mkdir_p"; "dir_rmdir"; "dir_rm_rf"; "dir_list"; "dir_list_full";
       "process_argv";
+      "process_env"; "process_set_env"; "process_cwd"; "process_exit";
+      "process_pid"; "process_spawn_sync"; "process_spawn_lines";
       (* TCP/network builtins *)
       "tcp_connect"; "tcp_close"; "tcp_listen"; "tcp_accept";
       "tcp_send_all"; "tcp_recv_all"; "tcp_recv_http"; "tcp_recv_http_headers";
@@ -86,7 +88,55 @@ let builtin_names : StringSet.t =
       (* IOList builtins *)
       "iolist_hash_fnv1a";
       (* HTTP server spawn/wait builtins *)
-      "http_server_spawn_n"; "http_server_wait" ]
+      "http_server_spawn_n"; "http_server_wait";
+      (* Char/byte conversion builtins *)
+      "byte_to_char"; "char_is_alphanumeric"; "char_is_whitespace";
+      (* Char builtins *)
+      "char_from_int"; "char_to_int"; "char_is_alpha"; "char_is_digit";
+      "char_is_lowercase"; "char_is_uppercase"; "char_to_lowercase"; "char_to_uppercase";
+      (* Logger builtins *)
+      "logger_set_level"; "logger_get_level"; "logger_add_context";
+      "logger_clear_context"; "logger_get_context"; "logger_write";
+      (* Integer builtins *)
+      "int_abs"; "int_pow"; "int_max_value"; "int_min_value";
+      "int_div"; "int_mod"; "int_div_euclid"; "int_mod_euclid";
+      (* Float builtins *)
+      "float_to_int"; "float_from_string"; "float_is_nan"; "float_is_infinite";
+      "float_infinity"; "float_neg_infinity"; "float_nan"; "float_epsilon";
+      (* TLS builtins *)
+      "tls_connect"; "tls_accept"; "tls_close"; "tls_read"; "tls_write";
+      "tls_client_ctx"; "tls_server_ctx"; "tls_ctx_free";
+      "tls_negotiated_alpn"; "tls_peer_cn";
+      (* Actor builtins *)
+      "actor_call"; "actor_cast"; "actor_reply"; "self"; "receive";
+      (* String conversion builtins *)
+      "string_chars"; "string_from_chars";
+      (* Unix/time builtins *)
+      "unix_time";
+      (* Comparison / hash builtins *)
+      "compare"; "compare_int"; "compare_float"; "compare_string"; "eq"; "hash";
+      (* Record builtins *)
+      "record_get"; "record_put"; "record_has_key"; "record_keys";
+      "record_values"; "record_entries"; "record_from_list";
+      (* JSON builtins *)
+      "to_json"; "from_json";
+      (* HTML builtins *)
+      "html_auto_escape";
+      (* Show builtins *)
+      "show"; "to_string";
+      (* Native array builtins *)
+      "native_int_arr_make"; "native_int_arr_get"; "native_int_arr_set";
+      "native_int_arr_length"; "native_int_arr_from_list"; "native_int_arr_to_list";
+      "native_int_arr_map"; "native_int_arr_fold"; "native_int_arr_sum";
+      "native_float_arr_make"; "native_float_arr_get"; "native_float_arr_set";
+      "native_float_arr_length"; "native_float_arr_from_list"; "native_float_arr_to_list";
+      "native_float_arr_map"; "native_float_arr_fold"; "native_float_arr_sum";
+      (* Typed array builtins *)
+      "typed_array_create"; "typed_array_get"; "typed_array_set";
+      "typed_array_length"; "typed_array_from_list"; "typed_array_to_list";
+      "typed_array_map"; "typed_array_filter"; "typed_array_fold"; "typed_array_slice";
+      (* Misc builtins *)
+      "tap"; "panic_"; "todo_"; "unreachable_" ]
 
 (* ── Phase 0: collect top-level names ────────────────────────────── *)
 
