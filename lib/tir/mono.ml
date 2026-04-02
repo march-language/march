@@ -197,7 +197,14 @@ let rec rewrite_calls
            | Tir.ALit l -> lit_ty l
          ) args in
        let subst = build_subst orig_fn arg_tys in
-       if subst = [] then expr
+       if subst = [] then begin
+         (* No specialization needed (monomorphic or unresolved TVar args) —
+            but still enqueue to ensure the function is emitted.  Matches the
+            ECallPtr branch below which already handles this case correctly. *)
+         if not (Hashtbl.mem done_set orig_name) then
+           Queue.add (orig_name, orig_fn, []) worklist;
+         expr
+       end
        else begin
          let param_tys_concrete = List.map (fun v -> subst_ty subst v.Tir.v_ty)
              orig_fn.Tir.fn_params in
