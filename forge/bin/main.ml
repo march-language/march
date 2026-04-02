@@ -128,9 +128,13 @@ let run_cmd =
     Arg.(value & flag & info ["dump-phases"]
            ~doc:"Serialize each compiler IR stage to march-phases/phases.json")
   in
-  let run d = handle (Cmd_run.run ~dump_phases:d ()) in
+  let compiled =
+    Arg.(value & flag & info ["compiled"]
+           ~doc:"Compile via the LLVM pipeline first, then execute the resulting binary")
+  in
+  let run d c = handle (Cmd_run.run ~dump_phases:d ~compiled:c ()) in
   Cmd.v (Cmd.info "run" ~doc:"Build and run the current project")
-    Term.(const run $ dump_phases)
+    Term.(const run $ dump_phases $ compiled)
 
 (* ------------------------------------------------------------------ forge test *)
 

@@ -1,6 +1,14 @@
 (** forge run — run app through the March interpreter (fast for development) *)
 
-let run ?(dump_phases=false) () =
+let run ?(dump_phases=false) ?(compiled=false) () =
+  if compiled then begin
+    match Cmd_build.build ~release:false ~dump_phases () with
+    | Error msg -> Error msg
+    | Ok binary ->
+      let rc = Sys.command (Filename.quote binary) in
+      if rc = 0 then Ok ()
+      else Error (Printf.sprintf "program exited with code %d" rc)
+  end else
   match Project.load () with
   | Error msg -> Error msg
   | Ok proj ->
