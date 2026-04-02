@@ -35,6 +35,7 @@ type t = {
   mutable globals : (string * string) list;  (* (llvm_name, llvm_ty) *)
   mutable handles : Jit.dl_handle list;      (* open dl handles *)
   compiled_fns : (string, unit) Hashtbl.t;  (* fns already compiled in prior fragments *)
+  global_tir_tys : (string, March_tir.Tir.ty) Hashtbl.t;  (* bare_name -> TIR type, for display *)
 }
 
 let create ~runtime_so ?(clang="clang") () =
@@ -46,7 +47,8 @@ let create ~runtime_so ?(clang="clang") () =
   let undef_flag = if is_macos () then " -undefined dynamic_lookup" else "" in
   { runtime_so; clang; tmp_dir; undef_flag;
     counter = 0; globals = []; handles = [rt_handle];
-    compiled_fns = Hashtbl.create 256 }
+    compiled_fns = Hashtbl.create 256;
+    global_tir_tys = Hashtbl.create 16 }
 
 let next_id ctx =
   let n = ctx.counter in
@@ -290,9 +292,24 @@ let run_expr ctx ~type_map:_ m =
          a large integer from List.length, fold, etc.).  On ARM64/x86-64
          both ptr and i64 occupy the same register, so call_void_to_int
          reads the raw bits correctly regardless of the declared return type.
-         This avoids the old 4096 heuristic which broke for any integer > 4095. *)
+         This avoids the old 4096 heuristic which broke for any integer > 4095.
+         If the body is a bare variable reference (e.g. `v`), look up the
+         TIR type we stored when it was last assigned, so booleans display
+         as "true"/"false" rather than "1"/"0". *)
+      let rec find_retvar body = match body with
+        | March_tir.Tir.EAtom (March_tir.Tir.AVar v) -> Some v.March_tir.Tir.v_name
+        | March_tir.Tir.ESeq (_, e2) -> find_retvar e2
+        | March_tir.Tir.ELet (_, _, e2) -> find_retvar e2
+        | _ -> None
+      in
+      let stored_ty = match find_retvar main_fn.March_tir.Tir.fn_body with
+        | Some vname -> Hashtbl.find_opt ctx.global_tir_tys vname
+        | None -> None
+      in
       let v = Jit.call_void_to_int fptr in
-      Int64.to_string v
+      (match stored_ty with
+       | Some March_tir.Tir.TBool -> if v = 0L then "false" else "true"
+       | _ -> Int64.to_string v)
     | ty ->
       (* Heap-allocated value: use the pointer path, then pretty-print.
          Values below 4 GiB are almost certainly scalars stored via inttoptr
@@ -305,11 +322,14 @@ let run_expr ctx ~type_map:_ m =
         pp_heap_value ty ptr
   in
   (* Register @repl_N_v in ctx.globals so subsequent fragments can bridge `v`
-     via emit_prev_global_bridges.  Replace any prior `v` entry. *)
+     via emit_prev_global_bridges.  Replace any prior `v` entry.
+     Also record the TIR type so that a subsequent `v` expression with
+     TVar "_" return type can display the value correctly (e.g. bool). *)
   let llty = March_tir.Llvm_emit.llvm_ty_of_tir ret_ty in
   let global_name = Printf.sprintf "repl_%d_v" n in
   ctx.globals <- (global_name, llty) ::
     List.filter (fun (gn, _) -> bare_of_global gn <> "v") ctx.globals;
+  Hashtbl.replace ctx.global_tir_tys "v" ret_ty;
   (ret_ty, result_str)
 
 (** Distinguish fn vs let at the AST level, not TIR.
@@ -393,7 +413,8 @@ let run_decl ctx ~type_map:_ ~is_fn_decl ~bind_name m =
     let global_name = Printf.sprintf "repl_%d_%s" n bind_name in
     let llty = March_tir.Llvm_emit.llvm_ty_of_tir main_fn.fn_ret_ty in
     ctx.globals <- (global_name, llty) ::
-      List.filter (fun (gn, _) -> bare_of_global gn <> bind_name) ctx.globals
+      List.filter (fun (gn, _) -> bare_of_global gn <> bind_name) ctx.globals;
+    Hashtbl.replace ctx.global_tir_tys bind_name main_fn.fn_ret_ty
   end
 
 (** Pre-compile stdlib functions to a cached .so, keyed by a content hash

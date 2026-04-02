@@ -238,7 +238,7 @@ let is_builtin_fn name =
                  "+."; "-."; "*."; "/.";
                  "=="; "!="; "<"; "<="; ">"; ">=";
                  "++"; "string_concat"; "string_eq";
-                 "string_byte_length"; "string_is_empty"; "string_to_int"; "string_join";
+                 "string_length"; "string_byte_length"; "string_is_empty"; "string_to_int"; "string_join";
                  "println"; "print";
                  "int_to_string"; "float_to_string"; "bool_to_string";
                  "kill"; "is_alive"; "send"; "spawn"; "actor_get_int";
@@ -370,6 +370,7 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "bool_to_string"              -> Some Tir.TString
   | "string_concat" | "++"        -> Some Tir.TString
   | "string_eq"                   -> Some Tir.TInt
+  | "string_length"               -> Some Tir.TInt
   | "string_byte_length"          -> Some Tir.TInt
   | "string_is_empty"             -> Some Tir.TBool
   | "string_to_int"               -> Some (Tir.TCon ("Option", [Tir.TInt]))
@@ -511,6 +512,7 @@ let mangle_extern : string -> string = function
   | "bool_to_string"  -> "march_bool_to_string"
   | "string_concat" | "++" -> "march_string_concat"
   | "string_eq"          -> "march_string_eq"
+  | "string_length"      -> "march_string_byte_length"
   | "string_byte_length" -> "march_string_byte_length"
   | "string_is_empty"    -> "march_string_is_empty"
   | "string_to_int"      -> "march_string_to_int"
@@ -1077,9 +1079,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let (ty_a, va) = emit_atom ctx a in
     let (ty_b, vb) = emit_atom ctx b in
     if ty_a = "ptr" && (f.Tir.v_name = "==" || f.Tir.v_name = "!=") then begin
-      (* String equality: call march_string_eq which returns i64 (0 or 1) *)
+      (* String equality: call march_string_eq which returns i64 (0 or 1).
+         Coerce both operands to ptr — vb may be an i64 literal (e.g. "0" for
+         false/unit) which is invalid as a bare ptr argument in LLVM IR. *)
+      let va_ptr = coerce ctx ty_a va "ptr" in
+      let vb_ptr = coerce ctx ty_b vb "ptr" in
       let r = fresh ctx "cr" in
-      emit ctx (Printf.sprintf "%s = call i64 @march_string_eq(ptr %s, ptr %s)" r va vb);
+      emit ctx (Printf.sprintf "%s = call i64 @march_string_eq(ptr %s, ptr %s)" r va_ptr vb_ptr);
       if f.Tir.v_name = "!=" then begin
         let nr = fresh ctx "ar" in
         emit ctx (Printf.sprintf "%s = xor i64 %s, 1" nr r);
