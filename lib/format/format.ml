@@ -781,14 +781,14 @@ and emit_decl ctx = function
     let path = String.concat "." (List.map (fun n -> n.txt) u.use_path) in
     (match u.use_sel with
      | UseAll      ->
-       line ctx (Printf.sprintf "use %s.*" path)
+       line ctx (Printf.sprintf "import %s" path)
      | UseNames ns ->
-       line ctx (Printf.sprintf "use %s.{%s}" path
+       line ctx (Printf.sprintf "import %s, only: [%s]" path
          (String.concat ", " (List.map (fun n -> n.txt) ns)))
      | UseSingle   ->
-       line ctx (Printf.sprintf "use %s" path)
+       line ctx (Printf.sprintf "import %s" path)
      | UseExcept ns ->
-       line ctx (Printf.sprintf "use %s except: [%s]" path
+       line ctx (Printf.sprintf "import %s, except: [%s]" path
          (String.concat ", " (List.map (fun n -> n.txt) ns))))
 
   | DAlias (a, _) ->
