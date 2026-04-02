@@ -66,7 +66,7 @@ let user_scope eval_env tc_env result_h ~baseline_env =
       Hashtbl.add seen name ();
       let vs = March_eval.Eval.value_to_string v in
       let ty_str =
-        match List.assoc_opt name tc_env.March_typecheck.Typecheck.vars with
+        match March_typecheck.Typecheck.StrMap.find_opt name tc_env.March_typecheck.Typecheck.vars with
         | None -> "?"
         | Some scheme ->
           let ty = March_typecheck.Typecheck.instantiate
@@ -100,15 +100,15 @@ let preregister_stdlib_types tc_env (stdlib_decls : March_ast.Ast.decl list) =
       | DType (_, name, params, TDVariant variants, _) ->
         let arity      = List.length params in
         let param_names = List.map (fun (p : name) -> p.txt) params in
-        let env1 = { env with types = (name.txt, arity) :: env.types } in
+        let env1 = { env with types = StrMap.add name.txt arity env.types } in
         List.fold_left (fun e (v : variant) ->
           let ci = { ci_type = name.txt; ci_params = param_names;
                      ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
-          { e with ctors = (v.var_name.txt, ci) :: e.ctors }
+          { e with ctors = March_typecheck.Typecheck.add_ctor v.var_name.txt ci e.ctors }
         ) env1 variants
       | DType (_, name, params, _, _) ->
         let arity = List.length params in
-        { env with types = (name.txt, arity) :: env.types }
+        { env with types = StrMap.add name.txt arity env.types }
       | _ -> env
     ) env decls
   in
@@ -832,8 +832,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                               :: (List.remove_assoc "v" !env);
                      if tc_ok then
                        tc_env := { !tc_env with
-                         vars = ("v", March_typecheck.Typecheck.Mono inferred)
-                                :: (List.remove_assoc "v" !tc_env.vars) }
+                         vars = March_typecheck.Typecheck.StrMap.add "v"
+                                  (March_typecheck.Typecheck.Mono inferred) !tc_env.vars }
                    in
                    (try
                       (match jit_ctx with
@@ -847,8 +847,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                             Printf.printf "- : %s\n%!" ty_str;
                           if tc_ok then
                             tc_env := { !tc_env with
-                              vars = ("v", March_typecheck.Typecheck.Mono inferred)
-                                     :: (List.remove_assoc "v" !tc_env.vars) }
+                              vars = March_typecheck.Typecheck.StrMap.add "v"
+                                       (March_typecheck.Typecheck.Mono inferred) !tc_env.vars }
                         with Failure _ ->
                           (* JIT compilation failed — fall back to tree-walking interpreter *)
                           eval_via_interp ())
@@ -1294,8 +1294,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                add_line Notty.A.(fg cyan) (Printf.sprintf "- : %s" ty_str);
              if tc_ok then
                tc_env := { !tc_env with
-                 vars = ("v", March_typecheck.Typecheck.Mono inferred)
-                        :: (List.remove_assoc "v" !tc_env.vars) }
+                 vars = March_typecheck.Typecheck.StrMap.add "v"
+                          (March_typecheck.Typecheck.Mono inferred) !tc_env.vars }
            | None ->
              let v = capture_stdout (fun () -> March_eval.Eval.eval_expr !env e') in
              let vs = March_eval.Eval.value_to_string_pretty v in
@@ -1306,8 +1306,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              env    := ("v", v) :: (List.remove_assoc "v" !env);
              if tc_ok then
                tc_env := { !tc_env with
-                 vars = ("v", March_typecheck.Typecheck.Mono inferred)
-                        :: (List.remove_assoc "v" !tc_env.vars) })
+                 vars = March_typecheck.Typecheck.StrMap.add "v"
+                          (March_typecheck.Typecheck.Mono inferred) !tc_env.vars })
          with
          | March_eval.Eval.Eval_error msg ->
            add_line Notty.A.(fg red) (Printf.sprintf "runtime error: %s" msg)

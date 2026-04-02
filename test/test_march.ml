@@ -2901,8 +2901,8 @@ let repl_eval_exprs ?(stdlib_src="") exprs_src =
            env := ("v", v) :: (List.remove_assoc "v" !env);
            if tc_ok then
              tc_env := { !tc_env with
-               vars = ("v", March_typecheck.Typecheck.Mono inferred)
-                      :: (List.remove_assoc "v" !tc_env.vars) };
+               vars = March_typecheck.Typecheck.StrMap.add "v"
+                        (March_typecheck.Typecheck.Mono inferred) !tc_env.vars };
            `Ok (vs, ty_str)
          with
          | March_eval.Eval.Eval_error msg -> `RuntimeError msg
@@ -18629,6 +18629,82 @@ let test_opaque_pattern_private_externally () =
   end|} in
   Alcotest.(check bool) "opaque: pattern hidden outside module" true (has_errors ctx)
 
+(* ── Typecheck performance regression tests ────────────────────────────── *)
+(* These tests guard against O(n²) regressions in the typechecker.
+   Before the StrMap fix, a module with N declarations caused O(N²) behavior
+   because every lookup scanned the entire association list.
+   Each test constructs a module with hundreds of declarations and asserts
+   typecheck completes well under 2 seconds. *)
+
+(** Generate a March source string with [n] top-level let bindings. *)
+let gen_many_lets n =
+  let buf = Buffer.create (n * 30) in
+  Buffer.add_string buf "mod PerfTest do\n";
+  for i = 0 to n - 1 do
+    Buffer.add_string buf (Printf.sprintf "  let v%d = %d\n" i i)
+  done;
+  Buffer.add_string buf "  fn main() do v0 end\nend";
+  Buffer.contents buf
+
+(** Generate a March source string with [n] variants in one type, plus pattern match. *)
+let gen_many_ctors n =
+  let buf = Buffer.create (n * 20) in
+  Buffer.add_string buf "mod PerfTest do\n  type Big = ";
+  for i = 0 to n - 1 do
+    if i > 0 then Buffer.add_string buf " | ";
+    Buffer.add_string buf (Printf.sprintf "V%d" i)
+  done;
+  Buffer.add_string buf "\n  fn f(x) do\n    match x do\n";
+  for i = 0 to n - 1 do
+    Buffer.add_string buf (Printf.sprintf "      V%d -> %d\n" i i)
+  done;
+  Buffer.add_string buf "    end\n  end\nend";
+  Buffer.contents buf
+
+(** Generate a March source with [depth] nested submodules, each with [width] fns. *)
+let gen_nested_modules depth width =
+  let buf = Buffer.create (depth * width * 40) in
+  Buffer.add_string buf "mod PerfTest do\n";
+  for d = 0 to depth - 1 do
+    Buffer.add_string buf (Printf.sprintf "  mod Sub%d do\n" d);
+    for w = 0 to width - 1 do
+      Buffer.add_string buf (Printf.sprintf "    fn f%d(x) do x end\n" w)
+    done;
+    Buffer.add_string buf "  end\n"
+  done;
+  Buffer.add_string buf "  fn main() do 0 end\nend";
+  Buffer.contents buf
+
+let test_tc_perf_large_env () =
+  (* 500 top-level lets — with O(n²) list env this was ~seconds; O(log n) map is instant *)
+  let src = gen_many_lets 500 in
+  let t0 = Unix.gettimeofday () in
+  let ctx = typecheck src in
+  let elapsed = Unix.gettimeofday () -. t0 in
+  Alcotest.(check bool) "large env: no errors" false (has_errors ctx);
+  if elapsed > 2.0 then
+    Alcotest.failf "typecheck of 500-let module took %.2fs (> 2s limit — O(n²) regression?)" elapsed
+
+let test_tc_perf_many_ctors () =
+  (* 200 variants — exercises ctor lookup and pattern match checking *)
+  let src = gen_many_ctors 200 in
+  let t0 = Unix.gettimeofday () in
+  let ctx = typecheck src in
+  let elapsed = Unix.gettimeofday () -. t0 in
+  Alcotest.(check bool) "many ctors: no errors" false (has_errors ctx);
+  if elapsed > 2.0 then
+    Alcotest.failf "typecheck of 200-ctor type took %.2fs (> 2s limit — O(n²) regression?)" elapsed
+
+let test_tc_perf_nested_modules () =
+  (* 20 submodules × 20 fns each = 400 qualified names in env *)
+  let src = gen_nested_modules 20 20 in
+  let t0 = Unix.gettimeofday () in
+  let ctx = typecheck src in
+  let elapsed = Unix.gettimeofday () -. t0 in
+  Alcotest.(check bool) "nested modules: no errors" false (has_errors ctx);
+  if elapsed > 2.0 then
+    Alcotest.failf "typecheck of 20x20 nested modules took %.2fs (> 2s limit — O(n²) regression?)" elapsed
+
 let () =
   Alcotest.run "march"
     [
@@ -20294,5 +20370,10 @@ let () =
         Alcotest.test_case "type is public"     `Quick test_opaque_type_is_public;
         Alcotest.test_case "constructor private externally" `Quick test_opaque_constructor_private_externally;
         Alcotest.test_case "pattern private externally"    `Quick test_opaque_pattern_private_externally;
+      ]);
+      ("typecheck perf", [
+        Alcotest.test_case "large env lookup O(log n)"  `Quick test_tc_perf_large_env;
+        Alcotest.test_case "many ctors no quadratic"    `Quick test_tc_perf_many_ctors;
+        Alcotest.test_case "deep nested modules"        `Quick test_tc_perf_nested_modules;
       ]);
     ]

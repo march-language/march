@@ -122,6 +122,8 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 
 ## Done (recently completed)
 
+- ✅ **O(log n) typecheck environment — StrMap fix** — Replaced all four `env` association-list fields (`vars`, `types`, `ctors`, `records`) in `lib/typecheck/typecheck.ml` with `Map.Make(String).t` (StrMap). Previously each lookup was O(n) linear scan over the env list; with 57 stdlib modules + transitive deps (conduit → depot → …) merged into a single flat module at compile time, this caused pathological O(n²) behaviour — a minimal `import Conduit` app took 17+ minutes to typecheck. After the fix, typecheck is O(n log n). `env.ctors` uses `ctor_info list StrMap.t` to preserve multi-type ctor ambiguity detection. Also updated `lib/repl/repl.ml`, `lsp/lib/analysis.ml`, `test/test_march.ml`. Three regression tests added in `typecheck perf` group: `large env lookup O(log n)` (500 lets < 2s), `many ctors no quadratic` (200-variant type < 2s), `deep nested modules` (20×20 submodule matrix < 2s). 1314 tests pass.
+
 - ✅ **List comprehensions** — `[expr for pat in list]` and `[expr for pat in list, pred]` syntax. Parser-level desugaring to `List.map`/`List.filter` + `List.map` in `lib/parser/parser.mly`. Requires `List` in scope. 4 new tests.
 
 - ✅ **`with` expressions** — Elixir-style monadic chaining: `with Ok(x) <- f(), Ok(y) <- g(x) do x + y end` with optional `else` block. Desugars to nested `EMatch` in parser (`build_with` helper). 4 new tests.

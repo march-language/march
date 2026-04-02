@@ -346,11 +346,13 @@ type proto_info = {
   pi_span        : Ast.span;
 }
 
+module StrMap = Map.Make(String)
+
 type env = {
-  vars    : (string * scheme) list;        (** Term variable → scheme *)
-  types   : (string * int) list;           (** Type constructor name → arity *)
-  ctors   : (string * ctor_info) list;     (** Data constructor name → info *)
-  records : (string * (string list * (string * Ast.ty) list)) list;
+  vars    : scheme StrMap.t;               (** Term variable → scheme *)
+  types   : int StrMap.t;                  (** Type constructor name → arity *)
+  ctors   : ctor_info list StrMap.t;       (** Data constructor name → all infos (head = most recent) *)
+  records : (string list * (string * Ast.ty) list) StrMap.t;
     (** Named record type definitions: name → (type_params, [(field, surface_ty)]) *)
   level   : int;                           (** Current generalization level *)
   lin     : lin_entry list;                (** Linear/affine use tracking *)
@@ -372,7 +374,8 @@ type env = {
 }
 
 let make_env errors type_map = {
-  vars = []; types = []; ctors = []; records = []; level = 0; lin = [];
+  vars = StrMap.empty; types = StrMap.empty; ctors = StrMap.empty; records = StrMap.empty;
+  level = 0; lin = [];
   errors; pending_constraints = ref []; type_map;
   interfaces = []; sigs = [];
   mod_needs = []; module_caps = []; protocols = []; impls = [];
@@ -382,9 +385,19 @@ let make_env errors type_map = {
 let enter_level env = { env with level = env.level + 1 }
 let leave_level env = { env with level = env.level - 1 }
 
-let lookup_var  name env = List.assoc_opt name env.vars
-let lookup_type name env = List.assoc_opt name env.types
-let lookup_ctor name env = List.assoc_opt name env.ctors
+let lookup_var  name env = StrMap.find_opt name env.vars
+let lookup_type name env = StrMap.find_opt name env.types
+let lookup_ctor name env =
+  match StrMap.find_opt name env.ctors with
+  | Some (ci :: _) -> Some ci
+  | _ -> None
+
+(** Add [ci] under [key] in [ctors], keeping all infos for the same name.
+    Deduplicates: if a ctor_info with the same [ci_type] already exists, no-op. *)
+let add_ctor (key : string) (ci : ctor_info) (ctors : ctor_info list StrMap.t) =
+  let lst = Option.value ~default:[] (StrMap.find_opt key ctors) in
+  if List.exists (fun c -> c.ci_type = ci.ci_type) lst then ctors
+  else StrMap.add key (ci :: lst) ctors
 
 (* ── Qualified module resolution ─────────────────────────────────────
    When a qualified name like "Map.get" isn't in the local env, we load
@@ -449,14 +462,13 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
     let qname = mod_name ^ "." ^ entry.ex_name in
     match entry.ex_kind with
     | ExFn | ExValue ->
-      if List.mem_assoc qname env.vars then env
-      else { env with vars = (qname, Mono (fresh_var 0)) :: env.vars }
+      if StrMap.mem qname env.vars then env
+      else { env with vars = StrMap.add qname (Mono (fresh_var 0)) env.vars }
     | ExType arity ->
-      if List.mem_assoc qname env.types then env
-      else { env with types = (qname, arity) :: env.types }
+      if StrMap.mem qname env.types then env
+      else { env with types = StrMap.add qname arity env.types }
     | ExCtor (parent_type, _ctor_arity) ->
-      if List.mem_assoc qname env.ctors then env
-      else begin
+      begin
         (* Find the parent type's param names from the module's type exports *)
         let type_arity = List.fold_left (fun acc e ->
           match e.ex_kind with ExType a when e.ex_name = parent_type -> a | _ -> acc
@@ -471,7 +483,7 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
           ci_arg_tys = arg_tys;
           ci_vis = if entry.ex_public then Ast.Public else Ast.Private;
         } in
-        { env with ctors = (qname, ci) :: env.ctors }
+        { env with ctors = add_ctor qname ci env.ctors }
       end
   ) env exports.me_entries
 
@@ -544,38 +556,42 @@ let qualified_error_msg (name : string) : string =
         Printf.sprintf "Module `%s` does not export `%s`.%s" mod_name member hint
 
 (** All parent types of ctors in [env] that share [name] (multiple types may
-    define the same variant). Returns list of type names (deduplicated). *)
+    define the same variant). Returns list of type names (deduplicated).
+    O(log n) — just a single map lookup on the ctor_info list. *)
 let all_ctors_named (name : string) (env : env) : string list =
-  let seen = Hashtbl.create 4 in
-  List.filter_map (fun (k, ci) ->
-    if k = name && not (Hashtbl.mem seen ci.ci_type)
-    then begin Hashtbl.add seen ci.ci_type (); Some ci.ci_type end
-    else None
-  ) env.ctors
+  match StrMap.find_opt name env.ctors with
+  | None -> []
+  | Some cis ->
+    let seen = Hashtbl.create 4 in
+    List.filter_map (fun ci ->
+      if Hashtbl.mem seen ci.ci_type then None
+      else begin Hashtbl.add seen ci.ci_type (); Some ci.ci_type end
+    ) cis
 
 (** Suggest constructors close to [name]: case-insensitive match or first-2-char
     prefix match with length difference ≤ 2. Returns [(ctor_name, type_name)]. *)
 let suggest_ctors (name : string) (env : env) : (string * string) list =
   let name_lo = String.lowercase_ascii name in
   let seen = Hashtbl.create 8 in
-  List.filter_map (fun (k, ci) ->
-    let key = k ^ "/" ^ ci.ci_type in
-    if Hashtbl.mem seen key then None
-    else begin
-      let k_lo = String.lowercase_ascii k in
-      let close =
-        k_lo = name_lo ||
-        (String.length name_lo >= 2 && String.length k_lo >= 2 &&
-         String.sub k_lo 0 2 = String.sub name_lo 0 2 &&
-         abs (String.length k - String.length name) <= 2)
-      in
-      if close then begin Hashtbl.add seen key (); Some (k, ci.ci_type) end
-      else None
-    end
-  ) env.ctors
+  StrMap.fold (fun k cis acc ->
+    let k_lo = String.lowercase_ascii k in
+    let close =
+      k_lo = name_lo ||
+      (String.length name_lo >= 2 && String.length k_lo >= 2 &&
+       String.sub k_lo 0 2 = String.sub name_lo 0 2 &&
+       abs (String.length k - String.length name) <= 2)
+    in
+    if not close then acc
+    else
+      List.fold_left (fun acc ci ->
+        let key = k ^ "/" ^ ci.ci_type in
+        if Hashtbl.mem seen key then acc
+        else begin Hashtbl.add seen key (); (k, ci.ci_type) :: acc end
+      ) acc cis
+  ) env.ctors []
 
 let bind_var name sch env =
-  { env with vars = (name, sch) :: env.vars }
+  { env with vars = StrMap.add name sch env.vars }
 
 let bind_vars bindings env =
   List.fold_left (fun e (n, s) -> bind_var n s e) env bindings
@@ -584,7 +600,7 @@ let bind_vars bindings env =
 let bind_linear name lin ty env =
   let le = { le_name = name; le_lin = lin; le_used = ref false } in
   { env with
-    vars = (name, Mono ty) :: env.vars;
+    vars = StrMap.add name (Mono ty) env.vars;
     lin  = le :: env.lin }
 
 (* =================================================================
@@ -1315,8 +1331,8 @@ let base_env errors type_map =
   let env = bind_vars builtin_bindings env in
   let env = bind_vars builtin_interface_bindings env in
   { env with
-    types      = builtin_types;
-    ctors      = builtin_ctors;
+    types      = List.fold_left (fun m (k, v) -> StrMap.add k v m) StrMap.empty builtin_types;
+    ctors      = List.fold_left (fun m (k, v) -> add_ctor k v m) StrMap.empty builtin_ctors;
     interfaces = builtin_interfaces;
     impls      = builtin_impls;
   }
@@ -1614,7 +1630,7 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
            name.txt arity (List.length args'));
     (* If this is a named record type, expand it structurally so that
        type annotations like `: Point` unify correctly with record literals. *)
-    (match List.assoc_opt name.txt env.records with
+    (match StrMap.find_opt name.txt env.records with
      | Some (params, field_decls) when List.length params = List.length args' ->
        let saved = !tvars in
        List.iter2 (fun pname arg -> tvars := (pname, arg) :: !tvars) params args';
@@ -1694,7 +1710,7 @@ let expand_record env ty =
   match repr ty with
   | TRecord _ as t -> Some t
   | TCon (name, args) ->
-    (match List.assoc_opt name env.records with
+    (match StrMap.find_opt name env.records with
      | Some (params, field_decls) when List.length params = List.length args ->
        let tvars = ref (List.combine params args) in
        let flds = List.map (fun (fn, fty) -> (fn, surface_ty env ~tvars fty)) field_decls in
@@ -2003,11 +2019,13 @@ let rec norm_pat (p : Ast.pattern) : spat =
     Qualified aliases (keys containing '.') are skipped so that exhaustiveness
     analysis only sees each constructor once under its bare name. *)
 let ctors_for_type (env : env) type_name =
-  List.filter_map (fun (k, (ci : ctor_info)) ->
-    if ci.ci_type = type_name && not (String.contains k '.')
-    then Some (k, List.length ci.ci_arg_tys)
-    else None
-  ) env.ctors
+  StrMap.fold (fun k cis acc ->
+    if String.contains k '.' then acc
+    else
+      match List.find_opt (fun (ci : ctor_info) -> ci.ci_type = type_name) cis with
+      | Some ci -> (k, List.length ci.ci_arg_tys) :: acc
+      | None -> acc
+  ) env.ctors []
 
 (** Instantiate a surface type with a substitution from param names to internal
     types.  Used to reconstruct constructor argument types. *)
@@ -2030,7 +2048,7 @@ let rec inst_ty (subst : (string * ty) list) (surf : Ast.ty) : ty =
 (** Instantiated argument types for [ctor_name] given the parent type's
     concrete type arguments (e.g. [Int] for Option(Int)). *)
 let ctor_arg_tys (env : env) ctor_name parent_args =
-  match List.assoc_opt ctor_name env.ctors with
+  match lookup_ctor ctor_name env with
   | None -> []
   | Some ci ->
     let n = List.length ci.ci_params in
@@ -3404,7 +3422,7 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
      reuse the existing binding so the wrapper body can call the full function
      at a different arity without a self-type conflict. *)
   let self_ty, env_rec =
-    match List.assoc_opt def.fn_name.txt env'.vars with
+    match StrMap.find_opt def.fn_name.txt env'.vars with
     | Some (Mono (TVar r)) when (match !r with Unbound _ -> true | _ -> false) ->
       (* Still a pass-1 placeholder fresh var — use normal self-ref *)
       let sv = fresh_var env'.level in
@@ -3685,8 +3703,8 @@ let actor_handler_hints state_ty inferred_ty =
     - [create(Props) -> State]          — recommended (warning if missing)
     - [merge(State, State) -> State]   — optional, no warning *)
 let validate_island_protocol (env : env) (mod_name : Ast.name) (inner_env : env) =
-  let has_type n = List.exists (fun (k, _) -> k = n) inner_env.types in
-  let has_fn n = List.exists (fun (k, _) -> k = n) inner_env.vars in
+  let has_type n = StrMap.mem n inner_env.types in
+  let has_fn n = StrMap.mem n inner_env.vars in
   if not (has_type "State" && has_type "Msg") then ()
   else begin
     let has_update = has_fn "update" in
@@ -4052,7 +4070,7 @@ let rec check_decl env (d : Ast.decl) : env =
     bind_vars bindings' env
 
   | Ast.DType (_vis, name, params, typedef, _sp) ->
-    let env1 = { env with types = (name.txt, List.length params) :: env.types } in
+    let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
     (match typedef with
      | Ast.TDVariant variants ->
        let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
@@ -4064,7 +4082,7 @@ let rec check_decl env (d : Ast.decl) : env =
            (* Register both bare "CtorName" and qualified "TypeName.CtorName"
               so users can write either form for disambiguation. *)
            let qual_key = name.txt ^ "." ^ v.var_name.txt in
-           { e with ctors = (qual_key, ci) :: (v.var_name.txt, ci) :: e.ctors }
+           { e with ctors = add_ctor qual_key ci (add_ctor v.var_name.txt ci e.ctors) }
          ) env1 variants
      | Ast.TDRecord fields ->
        let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
@@ -4079,7 +4097,7 @@ let rec check_decl env (d : Ast.decl) : env =
            in
            (f.fld_name.txt, fty)
          ) fields in
-       { env1 with records = (name.txt, (param_names, field_pairs)) :: env1.records }
+       { env1 with records = StrMap.add name.txt (param_names, field_pairs) env1.records }
      | Ast.TDAlias _ -> env1)
 
   | Ast.DActor (_vis, name, actor, _sp) ->
@@ -4109,8 +4127,8 @@ let rec check_decl env (d : Ast.decl) : env =
        instantiation; this ensures `send(pid, Msg(x))` typechecks correctly even
        when the handler omits a type annotation. *)
     let env_with_actor_ctor = { env with ctors =
-      (name.txt, { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_vis = Ast.Public })
-      :: env.ctors } in
+      add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_vis = Ast.Public }
+        env.ctors } in
     let env_with_ctors = List.fold_left (fun acc_env (h : Ast.actor_handler) ->
         let arg_tys = List.mapi (fun i (p : Ast.param) ->
             match p.param_ty with
@@ -4123,7 +4141,7 @@ let rec check_decl env (d : Ast.decl) : env =
           ) h.ah_params in
         let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
                    ci_arg_tys = arg_tys; ci_vis = Ast.Public } in
-        { acc_env with ctors = (h.ah_msg.txt, ci) :: acc_env.ctors }
+        { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
       ) env_with_actor_ctor actor.actor_handlers in
     (* Check init expression — must return the state record type *)
     check_expr env_with_ctors actor.actor_init state_ty
@@ -4200,7 +4218,7 @@ let rec check_decl env (d : Ast.decl) : env =
       | Some sdef ->
         (* Verify all sig_fns are present with matching types *)
         List.iter (fun ((fname : Ast.name), sig_ty) ->
-            match List.assoc_opt fname.txt inner_env.vars with
+            match StrMap.find_opt fname.txt inner_env.vars with
             | None ->
               Err.error env.errors ~span:name.span
                 (Printf.sprintf
@@ -4227,7 +4245,7 @@ let rec check_decl env (d : Ast.decl) : env =
           ) sdef.sig_fns;
         (* Verify all sig_types are declared in the module *)
         List.iter (fun ((tname : Ast.name), _params) ->
-            if not (List.mem_assoc tname.txt inner_env.types) then
+            if not (StrMap.mem tname.txt inner_env.types) then
               Err.error env.errors ~span:name.span
                 (Printf.sprintf
                    "Module `%s` does not declare type `%s` required by `sig %s`."
@@ -4250,34 +4268,27 @@ let rec check_decl env (d : Ast.decl) : env =
       ) pub_set
     in
     (* Collect exported names from inner_env.vars.
-       inner_env.vars may contain duplicate entries for a given key because
-       the pre-binding pass added a Mono(TVar) forward-ref before check_decl
-       added the real Poly scheme.  keep only the FIRST (most recently bound =
-       correct) entry per exported key. *)
-    let new_names_raw = List.filter_map (fun (k, sch) ->
+       StrMap guarantees one entry per key so deduplication is not needed. *)
+    let new_names = StrMap.fold (fun k sch acc ->
         if is_pub_key k
-        then Some (name.txt ^ "." ^ k, sch)
-        else None
-      ) inner_env.vars in
-    let _seen_export = Hashtbl.create 16 in
-    let new_names = List.filter_map (fun (k, v) ->
-        if Hashtbl.mem _seen_export k then None
-        else (Hashtbl.add _seen_export k (); Some (k, v))
-      ) new_names_raw in
+        then (name.txt ^ "." ^ k, sch) :: acc
+        else acc
+      ) inner_env.vars [] in
     (* Also export type names and constructors from public DMod into outer scope.
        Types defined in a module (e.g. IOList, Option) are referred to by their
        bare name throughout user code, not prefixed.
        Opaque types listed in the sig have their constructors hidden: only the
        type name is exported, not the constructors (encapsulation). *)
-    let new_types = List.filter (fun (k, _) -> List.mem k pub_set) inner_env.types in
-    let new_ctors = List.filter (fun (_k, ci) ->
-        (* Hide constructors for opaque types declared in the sig *)
-        if List.mem ci.ci_type opaque_types then false
-        (* Export constructor only if its parent type is public AND
-           the constructor itself is explicitly marked Public.
-           This enforces opaque types: `pub type Foo = A | B` hides A and B
-           until they are individually marked `pub A | pub B`. *)
-        else List.mem ci.ci_type pub_set && ci.ci_vis = Ast.Public
+    let new_types = StrMap.filter (fun k _ -> List.mem k pub_set) inner_env.types in
+    let new_ctors = StrMap.filter_map (fun _k cis ->
+        let filtered = List.filter (fun ci ->
+          (* Hide constructors for opaque types declared in the sig *)
+          not (List.mem ci.ci_type opaque_types) &&
+          (* Export constructor only if its parent type is public AND
+             the constructor itself is explicitly marked Public. *)
+          List.mem ci.ci_type pub_set && ci.ci_vis = Ast.Public
+        ) cis in
+        match filtered with [] -> None | _ -> Some filtered
       ) inner_env.ctors in
     (* Collect this module's declared capabilities for transitive enforcement *)
     let inner_needs = List.concat_map (function
@@ -4285,12 +4296,17 @@ let rec check_decl env (d : Ast.decl) : env =
         | _ -> []) decls in
     (* Also export record field layouts for public record types so that
        cross-module field access (e.g. conn.fd) works correctly. *)
-    let new_records = List.filter (fun (k, _) -> List.mem k pub_set) inner_env.records in
+    let new_records = StrMap.filter (fun k _ -> List.mem k pub_set) inner_env.records in
     let env' = bind_vars new_names env in
     { env' with
-      types   = new_types   @ env'.types;
-      ctors   = new_ctors   @ env'.ctors;
-      records = new_records @ env'.records;
+      types   = StrMap.union (fun _k v _ -> Some v) new_types env'.types;
+      ctors   = StrMap.union (fun _k new_cis old_cis ->
+                  (* Merge lists; new_cis are more local, so prepend them *)
+                  let merged = List.fold_right (fun ci acc ->
+                    if List.exists (fun c -> c.ci_type = ci.ci_type) acc then acc
+                    else ci :: acc) new_cis old_cis in
+                  Some merged) new_ctors env'.ctors;
+      records = StrMap.union (fun _k v _ -> Some v) new_records env'.records;
       module_caps = (name.txt, inner_needs) :: env'.module_caps }
 
   | Ast.DProtocol (name, pdef, sp) ->
@@ -4338,8 +4354,8 @@ let rec check_decl env (d : Ast.decl) : env =
            name.txt (List.hd participants));
     (* Hint if participant names are not known actor/type names. *)
     List.iter (fun p ->
-        let is_actor = List.exists (fun (_, ci) -> ci.ci_type = p) env.ctors in
-        let is_type  = List.mem_assoc p env.types in
+        let is_actor = StrMap.exists (fun _ cis -> List.exists (fun ci -> ci.ci_type = p) cis) env.ctors in
+        let is_type  = StrMap.mem p env.types in
         if not (is_actor || is_type) then
           Err.hint env.errors ~span:sp
             (Printf.sprintf
@@ -4548,12 +4564,12 @@ let rec check_decl env (d : Ast.decl) : env =
        env
      | Ast.UseAll ->
        (* Find all vars with "Prefix.name" and rebind them as plain "name" *)
-       let matching = List.filter_map (fun (k, sch) ->
+       let matching = StrMap.fold (fun k sch acc ->
            let plen = String.length prefix in
            if String.length k > plen
               && String.sub k 0 plen = prefix
-           then Some (String.sub k plen (String.length k - plen), sch)
-           else None) env.vars in
+           then (String.sub k plen (String.length k - plen), sch) :: acc
+           else acc) env.vars [] in
        (* Import interfaces from the module prefix into scope as short names *)
        let matching_ifaces = List.filter_map (fun (k, idef) ->
            let plen = String.length prefix in
@@ -4579,7 +4595,7 @@ let rec check_decl env (d : Ast.decl) : env =
        bind_vars matching env
      | Ast.UseNames names ->
        List.fold_left (fun env n ->
-           match List.assoc_opt (prefix ^ n.Ast.txt) env.vars with
+           match StrMap.find_opt (prefix ^ n.Ast.txt) env.vars with
            | Some sch ->
              (* Track for unused-import warning: warn if this specific name is unused. *)
              let entry = { ie_span = n.Ast.span
@@ -4597,15 +4613,15 @@ let rec check_decl env (d : Ast.decl) : env =
              env) env names
      | Ast.UseExcept excluded ->
        let excl_set = List.map (fun n -> n.Ast.txt) excluded in
-       let matching = List.filter_map (fun (k, sch) ->
+       let matching = StrMap.fold (fun k sch acc ->
            let plen = String.length prefix in
            if String.length k > plen
               && String.sub k 0 plen = prefix
            then
              let short = String.sub k plen (String.length k - plen) in
-             if List.mem short excl_set then None
-             else Some (short, sch)
-           else None) env.vars in
+             if List.mem short excl_set then acc
+             else (short, sch) :: acc
+           else acc) env.vars [] in
        (* Track for unused-import warning: warn if nothing from this module is used. *)
        if matching <> [] then begin
          let short_names = List.map fst matching in
@@ -4624,12 +4640,12 @@ let rec check_decl env (d : Ast.decl) : env =
     let short_name = ad.alias_name.Ast.txt in
     let short_prefix = short_name ^ "." in
     (* Re-export all "Orig.name" as "Short.name" *)
-    let new_bindings = List.filter_map (fun (k, sch) ->
+    let new_bindings = StrMap.fold (fun k sch acc ->
         let plen = String.length orig_prefix in
         if String.length k > plen && String.sub k 0 plen = orig_prefix then
           let rest = String.sub k plen (String.length k - plen) in
-          Some (short_prefix ^ rest, sch)
-        else None) env.vars in
+          (short_prefix ^ rest, sch) :: acc
+        else acc) env.vars [] in
     (* Track for unused-alias warning: warn if no "Short.*" name is referenced. *)
     if new_bindings <> [] then begin
       let orig_str = String.concat "." (List.map (fun n -> n.Ast.txt) ad.alias_path) in
@@ -5126,22 +5142,20 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
         match d with
         | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
           let qname = prefix ^ "." ^ def.fn_name.txt in
-          if List.mem_assoc qname e.vars then e
+          if StrMap.mem qname e.vars then e
           else bind_var qname (Mono (fresh_var 0)) e
         | Ast.DType (vis, name, params, typedef, _) when vis = Ast.Public ->
           let qname = prefix ^ "." ^ name.txt in
-          let e1 = if List.mem_assoc qname e.types then e
-            else { e with types = (qname, List.length params) :: e.types } in
+          let e1 = if StrMap.mem qname e.types then e
+            else { e with types = StrMap.add qname (List.length params) e.types } in
           (match typedef with
            | Ast.TDVariant variants ->
              let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
              List.fold_left (fun acc (v : Ast.variant) ->
                  let qctor = prefix ^ "." ^ v.var_name.txt in
-                 if List.mem_assoc qctor acc.ctors then acc
-                 else
-                   let ci = { ci_type = qname; ci_params = param_names;
-                              ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
-                   { acc with ctors = (qctor, ci) :: acc.ctors }
+                 let ci = { ci_type = qname; ci_params = param_names;
+                            ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
+                 { acc with ctors = add_ctor qctor ci acc.ctors }
                ) e1 variants
            | _ -> e1)
         | Ast.DInterface (idef, _) ->
@@ -5158,14 +5172,14 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
       match d with
       | Ast.DFn (def, _) ->
         (* Don't shadow existing bindings (e.g., builtins) with mono forward refs *)
-        if List.mem_assoc def.fn_name.txt env.vars then env
+        if StrMap.mem def.fn_name.txt env.vars then env
         else bind_var def.fn_name.txt (Mono (fresh_var 0)) env
       | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
         (* Pre-bind all public qualified names "ModName.fn" so that sibling
            modules that reference each other don't fail during pass 2. *)
         prebind_mod_members mname.txt env inner_decls
       | Ast.DType (_, name, params, typedef, _) ->
-        let env1 = { env with types = (name.txt, List.length params) :: env.types } in
+        let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
         (match typedef with
          | Ast.TDVariant variants ->
            let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
@@ -5174,20 +5188,20 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
                         ; ci_vis     = v.var_vis } in
-               { e with ctors = (v.var_name.txt, ci) :: e.ctors }
+               { e with ctors = add_ctor v.var_name.txt ci e.ctors }
              ) env1 variants
          | Ast.TDRecord fields ->
            let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
            let field_pairs = List.map (fun (f : Ast.field) -> (f.fld_name.txt, f.fld_ty)) fields in
-           { env1 with records = (name.txt, (param_names, field_pairs)) :: env1.records }
+           { env1 with records = StrMap.add name.txt (param_names, field_pairs) env1.records }
          | _ -> env1)
       | Ast.DActor (_, name, actor, _) ->
         (* Register actor name as a zero-arg constructor and message ctors.
            Same arity fix as in check_decl: include unannotated params as
            unique TyVar placeholders so constructor arity is always correct. *)
         let env1 = { env with ctors =
-          (name.txt, { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_vis = Ast.Public })
-          :: env.ctors } in
+          add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_vis = Ast.Public }
+            env.ctors } in
         List.fold_left (fun acc_env (h : Ast.actor_handler) ->
             let arg_tys = List.mapi (fun i (p : Ast.param) ->
                 match p.param_ty with
@@ -5198,7 +5212,7 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
               ) h.ah_params in
             let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
                        ci_arg_tys = arg_tys; ci_vis = Ast.Public } in
-            { acc_env with ctors = (h.ah_msg.txt, ci) :: acc_env.ctors }
+            { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
           ) env1 actor.actor_handlers
       | Ast.DSig (name, sdef, _) ->
         { env with sigs = (name.txt, sdef) :: env.sigs }
@@ -5227,7 +5241,7 @@ let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
         match d with
         | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
           let qname = prefix ^ "." ^ def.fn_name.txt in
-          if List.mem_assoc qname e.vars then e
+          if StrMap.mem qname e.vars then e
           else bind_var qname (Mono (fresh_var 0)) e
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
           prebind_mod_members_full (prefix ^ "." ^ mname.txt) e inner_decls
@@ -5238,12 +5252,12 @@ let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
   let pre_env = List.fold_left (fun env d ->
       match d with
       | Ast.DFn (def, _) ->
-        if List.mem_assoc def.fn_name.txt env.vars then env
+        if StrMap.mem def.fn_name.txt env.vars then env
         else bind_var def.fn_name.txt (Mono (fresh_var 0)) env
       | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
         prebind_mod_members_full mname.txt env inner_decls
       | Ast.DType (_vis, name, params, typedef, _) ->
-        let env1 = { env with types = (name.txt, List.length params) :: env.types } in
+        let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
         (match typedef with
          | Ast.TDVariant variants ->
            let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
@@ -5252,7 +5266,7 @@ let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
                         ; ci_vis     = v.var_vis } in
-               { e with ctors = (v.var_name.txt, ci) :: e.ctors }
+               { e with ctors = add_ctor v.var_name.txt ci e.ctors }
              ) env1 variants
          | _ -> env1)
       | _ -> env

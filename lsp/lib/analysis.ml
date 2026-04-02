@@ -1307,13 +1307,20 @@ let analyse ~filename ~src : t =
     in
     (* Build ctor → parent-type map from final env *)
     let ctor_parent_map =
-      List.map (fun (name, ci) -> (name, ci.Tc.ci_type)) final_env.Tc.ctors
+      Tc.StrMap.fold (fun name cis acc ->
+        (* Use head of list (most recently added) for the parent type *)
+        match cis with
+        | ci :: _ -> (name, ci.Tc.ci_type) :: acc
+        | [] -> acc
+      ) final_env.Tc.ctors []
     in
     (* Build ctor → surface arg types map (for typed stub generation — P1.1) *)
     let ctor_sigs_map : (string, Ast.ty list) Hashtbl.t = Hashtbl.create 16 in
-    List.iter (fun (name, (ci : Tc.ctor_info)) ->
+    Tc.StrMap.iter (fun name cis ->
         if not (String.contains name '.') then
-          Hashtbl.replace ctor_sigs_map name ci.Tc.ci_arg_tys
+          match cis with
+          | ci :: _ -> Hashtbl.replace ctor_sigs_map name ci.Tc.ci_arg_tys
+          | [] -> ()
       ) final_env.Tc.ctors;
     (* Build parent-type → all ctors map (bare names only — skip "Type.Ctor" keys) *)
     let type_ctors_map : (string, string list) Hashtbl.t = Hashtbl.create 8 in
@@ -1757,10 +1764,11 @@ let analyse ~filename ~src : t =
       @ perf_diags
     in
     { src; filename; type_map; def_map; use_map;
-      vars       = final_env.Tc.vars;
-      types      = final_env.Tc.types;
-      ctors      = List.map (fun (name, ci) -> (name, ci.Tc.ci_type))
-                     final_env.Tc.ctors;
+      vars       = Tc.StrMap.bindings final_env.Tc.vars;
+      types      = Tc.StrMap.bindings final_env.Tc.types;
+      ctors      = Tc.StrMap.fold (fun name cis acc ->
+                     match cis with ci :: _ -> (name, ci.Tc.ci_type) :: acc | [] -> acc)
+                     final_env.Tc.ctors [];
       interfaces = final_env.Tc.interfaces;
       impls      = final_env.Tc.impls;
       actors;
@@ -1770,8 +1778,11 @@ let analyse ~filename ~src : t =
       consumption;
       match_sites;
       diagnostics      = diags;
-      ctor_arities     = List.map (fun (name, ci) ->
-                           (name, List.length ci.Tc.ci_arg_tys)) final_env.Tc.ctors;
+      ctor_arities     = Tc.StrMap.fold (fun name cis acc ->
+                           match cis with
+                           | ci :: _ -> (name, List.length ci.Tc.ci_arg_tys) :: acc
+                           | [] -> acc)
+                           final_env.Tc.ctors [];
       fold_ranges      = collect_fold_ranges raw_ast;
       annotation_sites = collect_annotation_sites raw_ast;
       unused_fns;
