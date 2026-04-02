@@ -42,7 +42,7 @@ let build ~release ?(dump_phases=false) () =
       let opt_flag  = if release then " --opt 2" else "" in
       let dump_flag = if dump_phases then " --dump-phases" else "" in
       (* Collect lib directories from path dependencies *)
-      let dep_lib_paths = List.filter_map (fun (_, dep) ->
+      let dep_lib_paths = List.filter_map (fun (dep_name, dep) ->
           match dep with
           | Project.PathDep rel_path ->
             let abs_path = if Filename.is_relative rel_path
@@ -51,6 +51,8 @@ let build ~release ?(dump_phases=false) () =
             in
             let d = Filename.concat abs_path "lib" in
             if Sys.file_exists d then Some d else None
+          | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
+            Project.git_dep_lib_path dep_name
           | _ -> None
         ) proj.Project.deps in
       (* MARCH_LIB_PATH: dep libs + lib/ + config/ (if present) *)

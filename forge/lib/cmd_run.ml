@@ -24,7 +24,7 @@ let run ?(dump_phases=false) ?(compiled=false) () =
         Error (Printf.sprintf "entry point not found: %s" entry)
       else begin
         (* Build MARCH_LIB_PATH: dep lib dirs + lib/ + config/ (if present) *)
-        let dep_lib_paths = List.filter_map (fun (_, dep) ->
+        let dep_lib_paths = List.filter_map (fun (dep_name, dep) ->
             match dep with
             | Project.PathDep rel_path ->
               let abs_path = if Filename.is_relative rel_path
@@ -33,6 +33,8 @@ let run ?(dump_phases=false) ?(compiled=false) () =
               in
               let d = Filename.concat abs_path "lib" in
               if Sys.file_exists d then Some d else None
+            | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
+              Project.git_dep_lib_path dep_name
             | _ -> None
           ) proj.Project.deps in
         let extra_dirs =
