@@ -38,6 +38,11 @@ void march_tcp_close(int64_t fd);
  * Returns Ok(fd:i64) or Err(reason:String). Ok=tag0, Err=tag1. */
 void *march_tcp_connect(void *host, int64_t port);
 
+/* Read all bytes from fd_ptr (ptr-encoded fd) until close or max_bytes. */
+void *march_tcp_recv_all(void *fd_ptr, int64_t max_bytes, int64_t timeout_ms);
+void *march_tcp_recv_chunk(void *fd_ptr, int64_t max_bytes, int64_t timeout_ms);
+void *march_tcp_recv_http_headers(void *fd_ptr, int64_t max_bytes);
+
 /* ── HTTP client builtins ──────────────────────────────────────────── */
 
 /* Serialize an HTTP/1.1 request from its components.

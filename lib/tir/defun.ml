@@ -17,11 +17,11 @@ let builtin_names : StringSet.t =
       "+."; "-."; "*."; "/.";
       "<"; ">"; "<="; ">="; "&&"; "||";
       "=="; "!="; "++";
-      "print"; "println"; "print_int"; "print_float";
+      "print"; "println"; "print_stderr"; "print_int"; "print_float";
       "int_to_string"; "float_to_string"; "bool_to_string";
       "string_to_int"; "string_length"; "string_concat";
       "string_byte_length"; "string_is_empty"; "string_join";
-      "read_line"; "not";
+      "read_line"; "io_read_line"; "not";
       "panic";
       "head"; "tail"; "is_nil";
       "to_string"; "respond"; "kill"; "is_alive";
@@ -62,7 +62,7 @@ let builtin_names : StringSet.t =
       "process_pid"; "process_spawn_sync"; "process_spawn_lines";
       (* TCP/network builtins *)
       "tcp_connect"; "tcp_close"; "tcp_listen"; "tcp_accept";
-      "tcp_send_all"; "tcp_recv_all"; "tcp_recv_http"; "tcp_recv_http_headers";
+      "tcp_send_all"; "tcp_recv_all"; "tcp_recv_exact"; "tcp_recv_http"; "tcp_recv_http_headers";
       "tcp_recv_chunk"; "tcp_recv_chunked_frame";
       (* HTTP builtins *)
       "http_parse_request"; "http_serialize_response"; "http_server_listen";
@@ -114,7 +114,7 @@ let builtin_names : StringSet.t =
       (* Unix/time builtins *)
       "unix_time";
       (* Comparison / hash builtins *)
-      "compare"; "compare_int"; "compare_float"; "compare_string"; "eq"; "hash";
+      "compare"; "compare_int"; "compare_float"; "compare_string";
       (* Record builtins *)
       "record_get"; "record_put"; "record_has_key"; "record_keys";
       "record_values"; "record_entries"; "record_from_list";
@@ -136,7 +136,26 @@ let builtin_names : StringSet.t =
       "typed_array_length"; "typed_array_from_list"; "typed_array_to_list";
       "typed_array_map"; "typed_array_filter"; "typed_array_fold"; "typed_array_slice";
       (* Misc builtins *)
-      "tap"; "panic_"; "todo_"; "unreachable_" ]
+      "tap"; "panic_"; "todo_"; "unreachable_";
+      (* Crypto / hash builtins — C-level functions callable without a module qualifier.
+         These appear unqualified in stdlib code (session.march, csrf.march, etc.)
+         and must be treated as top-level to avoid ECallPtr generation. *)
+      "hmac_sha256"; "pbkdf2_sha256";
+      "sha256"; "sha512";
+      "base64_encode"; "base64_decode";
+      "random_bytes";
+      "stdlib_sha256"; "stdlib_sha512";
+      "stdlib_base64_encode"; "stdlib_base64_decode";
+      "stdlib_random_bytes";
+      (* System introspection builtins — eval-only in interpreter; in compiled mode
+         these map to C stub functions that return sensible defaults. *)
+      "sys_uptime_ms"; "sys_heap_bytes"; "sys_word_size";
+      "sys_minor_gcs"; "sys_major_gcs";
+      "sys_actor_count"; "sys_cpu_count";
+      "sys_os"; "sys_arch";
+      "march_version";
+      (* UUID / identity builtins *)
+      "uuid_v4" ]
 
 (* ── Phase 0: collect top-level names ────────────────────────────── *)
 

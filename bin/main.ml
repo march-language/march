@@ -229,6 +229,8 @@ let ensure_runtime_so () =
   if needs_compile then begin
     (* Note: -lpthread not needed on macOS (pthreads are in libSystem). *)
     let http_c = Filename.concat runtime_dir "march_http.c" in
+    let extras_c = Filename.concat runtime_dir "march_extras.c" in
+    let opt_file f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
     let extra_files =
       if Sys.file_exists http_c then
         let sha1_c    = Filename.concat runtime_dir "sha1.c" in
@@ -238,19 +240,47 @@ let ensure_runtime_so () =
         let resp_c    = Filename.concat runtime_dir "march_http_response.c" in
         let io_c      = Filename.concat runtime_dir "march_http_io.c" in
         let evloop_c  = Filename.concat runtime_dir "march_http_evloop.c" in
-        let opt_file f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
-        Printf.sprintf " %s %s %s%s%s%s%s%s" http_c sha1_c base64_c
+        let tls_c     = Filename.concat runtime_dir "march_tls.c" in
+        Printf.sprintf " %s %s %s%s%s%s%s%s%s%s" http_c sha1_c base64_c
           (opt_file simd_c) (opt_file sched_c) (opt_file resp_c)
-          (opt_file io_c) (opt_file evloop_c)
-      else ""
+          (opt_file io_c) (opt_file evloop_c) (opt_file tls_c) (opt_file extras_c)
+      else (opt_file extras_c)
+    in
+    (* OpenSSL flags: needed when march_tls.c is included. *)
+    let tls_c = Filename.concat runtime_dir "march_tls.c" in
+    let openssl_flags =
+      if not (Sys.file_exists tls_c) then ""
+      else
+        let dirs = [
+          "/opt/homebrew/opt/openssl@3";
+          "/opt/homebrew/opt/openssl";
+          "/usr/local/opt/openssl@3";
+          "/usr/local/opt/openssl";
+          "/usr/include/openssl";
+        ] in
+        let found = List.fold_left (fun acc d ->
+          match acc with
+          | Some _ -> acc
+          | None ->
+            let hdr = Filename.concat d "include/openssl/ssl.h" in
+            if Sys.file_exists hdr then Some d else None
+        ) None dirs in
+        match found with
+        | Some d ->
+          Printf.sprintf " -I%s/include -L%s/lib -lssl -lcrypto" d d
+        | None ->
+          (* Try pkg-config *)
+          if Sys.command "pkg-config --exists openssl 2>/dev/null" = 0 then
+            " -lssl -lcrypto"
+          else ""
     in
     let evloop_flag =
       let evloop_c = Filename.concat runtime_dir "march_http_evloop.c" in
       if Sys.file_exists evloop_c then " -DMARCH_HTTP_USE_EVLOOP" else ""
     in
     let cmd = Printf.sprintf
-      "clang -shared -O2 -fPIC -msse4.2 -Wno-unused-command-line-argument%s -I%s %s%s -o %s 2>&1"
-      evloop_flag runtime_dir runtime_c extra_files so_path in
+      "clang -shared -O2 -fPIC -msse4.2 -Wno-unused-command-line-argument%s -I%s %s%s%s -o %s 2>&1"
+      evloop_flag runtime_dir runtime_c extra_files openssl_flags so_path in
     let rc = Sys.command cmd in
     if rc <> 0 then
       failwith (Printf.sprintf "march: failed to compile runtime .so (clang exit %d)" rc)
@@ -1149,6 +1179,8 @@ let compile filename =
             let opt_flag = Printf.sprintf " -O%d" effective_opt in
             let runtime_dir = Filename.dirname runtime in
             let http_c = Filename.concat runtime_dir "march_http.c" in
+            let extras_c2 = Filename.concat runtime_dir "march_extras.c" in
+            let opt_file2 f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
             let extra_c_files =
               if Sys.file_exists http_c then
                 let sha1_c    = Filename.concat runtime_dir "sha1.c" in
@@ -1158,19 +1190,45 @@ let compile filename =
                 let resp_c    = Filename.concat runtime_dir "march_http_response.c" in
                 let io_c      = Filename.concat runtime_dir "march_http_io.c" in
                 let evloop_c  = Filename.concat runtime_dir "march_http_evloop.c" in
-                let opt_file f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
-                Printf.sprintf " %s %s %s%s%s%s%s%s" http_c sha1_c base64_c
-                  (opt_file simd_c) (opt_file sched_c) (opt_file resp_c)
-                  (opt_file io_c) (opt_file evloop_c)
-              else ""
+                let tls_c2    = Filename.concat runtime_dir "march_tls.c" in
+                Printf.sprintf " %s %s %s%s%s%s%s%s%s%s" http_c sha1_c base64_c
+                  (opt_file2 simd_c) (opt_file2 sched_c) (opt_file2 resp_c)
+                  (opt_file2 io_c) (opt_file2 evloop_c)
+                  (opt_file2 tls_c2) (opt_file2 extras_c2)
+              else (opt_file2 extras_c2)
+            in
+            (* OpenSSL flags for TLS *)
+            let tls_c2 = Filename.concat runtime_dir "march_tls.c" in
+            let openssl_flags2 =
+              if not (Sys.file_exists tls_c2) then ""
+              else
+                let dirs = [
+                  "/opt/homebrew/opt/openssl@3";
+                  "/opt/homebrew/opt/openssl";
+                  "/usr/local/opt/openssl@3";
+                  "/usr/local/opt/openssl";
+                ] in
+                let found = List.fold_left (fun acc d ->
+                  match acc with
+                  | Some _ -> acc
+                  | None ->
+                    let hdr = Filename.concat d "include/openssl/ssl.h" in
+                    if Sys.file_exists hdr then Some d else None
+                ) None dirs in
+                match found with
+                | Some d ->
+                  Printf.sprintf " -I%s/include -L%s/lib -lssl -lcrypto" d d
+                | None ->
+                  if Sys.command "pkg-config --exists openssl 2>/dev/null" = 0
+                  then " -lssl -lcrypto" else ""
             in
             let evloop_flag =
               let evloop_c = Filename.concat runtime_dir "march_http_evloop.c" in
               if Sys.file_exists evloop_c then " -DMARCH_HTTP_USE_EVLOOP" else ""
             in
             let cmd = Printf.sprintf
-              "clang%s -msse4.2 -Wno-unused-command-line-argument%s %s%s %s -o %s"
-              opt_flag evloop_flag runtime extra_c_files ll_file out_bin in
+              "clang%s -msse4.2 -Wno-unused-command-line-argument%s %s%s%s %s -o %s"
+              opt_flag evloop_flag runtime extra_c_files openssl_flags2 ll_file out_bin in
             let rc = Sys.command cmd in
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1

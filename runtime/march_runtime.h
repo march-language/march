@@ -32,6 +32,35 @@ void  march_free(void *p);
 /* I/O builtins. */
 void  march_print(void *s);
 void  march_println(void *s);
+void  march_print_stderr(void *s);
+void *march_io_read_line(void);
+int64_t march_int_pow(int64_t base, int64_t exp);
+
+/* Panic/todo primitive variants (return ptr so they satisfy polymorphic `a`). */
+void *march_panic_ext(void *s);
+void *march_todo_ext(void *s);
+
+/* Time builtins. */
+double  march_unix_time(void);
+
+/* TypedArray builtins. */
+void   *march_typed_array_from_list(void *list);
+void   *march_typed_array_to_list(void *arr);
+int64_t march_typed_array_length(void *arr);
+void   *march_typed_array_get(void *arr, int64_t i);
+void   *march_typed_array_set(void *arr, int64_t i, void *val);
+void   *march_typed_array_create(int64_t len, void *default_val);
+void   *march_typed_array_map(void *arr, void *f);
+void   *march_typed_array_filter(void *arr, void *f);
+void   *march_typed_array_fold(void *arr, void *acc, void *f);
+
+/* Logger builtins. */
+void   *march_logger_set_level(int64_t level);
+int64_t march_logger_get_level(void);
+void   *march_logger_add_context(void *key, void *value);
+void   *march_logger_clear_context(void);
+void   *march_logger_get_context(void);
+void   *march_logger_write(void *level_str, void *msg, void *ctx, void *extra);
 
 /* String builtins. */
 typedef struct { int64_t rc; int64_t len; char data[]; } march_string;
@@ -173,6 +202,37 @@ void *march_value_to_string(void *v);
 /* Process builtins */
 void  march_process_argv_init(int argc, char **argv);
 void *march_process_argv(void);
+
+/* Vault builtins (march_extras.c). */
+void   *march_vault_new(void *name);
+void   *march_vault_whereis(void *name);
+void   *march_vault_set(void *table, void *key, void *value);
+void   *march_vault_set_ttl(void *table, void *key, void *value, int64_t ttl_secs);
+void   *march_vault_get(void *table, void *key);
+void   *march_vault_drop(void *table, void *key);
+void   *march_vault_update(void *table, void *key, void *f);
+int64_t march_vault_size(void *table);
+void   *march_vault_keys(void *table);
+
+/* Crypto builtins (march_extras.c). */
+void   *march_sha256(void *data);
+void   *march_sha512(void *data);
+void   *march_hmac_sha256(void *key, void *msg);
+void   *march_pbkdf2_sha256(void *pass, void *salt, int64_t iters, int64_t dklen);
+void   *march_base64_encode(void *input);
+void   *march_base64_decode(void *str);
+void   *march_random_bytes(int64_t n);
+void   *march_uuid_v4(void);
+
+/* System introspection builtins (march_extras.c). */
+int64_t march_sys_uptime_ms(void);
+int64_t march_sys_cpu_count(void);
+int64_t march_sys_heap_bytes(void);
+int64_t march_sys_word_size(void);
+int64_t march_sys_minor_gcs(void);
+int64_t march_sys_major_gcs(void);
+int64_t march_sys_actor_count(void);
+void   *march_get_version(void);
 
 /* Test harness — used by --test compiled binaries. */
 extern jmp_buf  march_test_jmp_buf;

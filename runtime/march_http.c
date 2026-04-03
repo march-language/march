@@ -303,6 +303,75 @@ void march_tcp_close(int64_t fd) {
     close((int)fd);
 }
 
+/* tcp_recv_all(fd_ptr, max_bytes, timeout_ms) → Result(String, String)
+ * Reads until connection closes or max_bytes reached.
+ * fd_ptr: the socket fd passed as ptr (inttoptr of i64 fd value). */
+void *march_tcp_recv_all(void *fd_ptr, int64_t max_bytes, int64_t timeout_ms) {
+    /* fd comes as a ptr-sized value carrying the raw i64 fd. */
+    int fd = (int)(int64_t)(uintptr_t)fd_ptr;
+    (void)timeout_ms;  /* TODO: implement timeout */
+    char chunk[65536];
+    char *accum = NULL;
+    size_t total = 0;
+    while ((int64_t)total < max_bytes) {
+        size_t to_read = sizeof(chunk);
+        if ((int64_t)(total + to_read) > max_bytes)
+            to_read = (size_t)(max_bytes - (int64_t)total);
+        ssize_t n = recv(fd, chunk, to_read, 0);
+        if (n < 0) {
+            free(accum);
+            return make_err("recv failed");
+        }
+        if (n == 0) break;  /* connection closed */
+        char *tmp = realloc(accum, total + (size_t)n);
+        if (!tmp) { free(accum); return make_err("OOM"); }
+        accum = tmp;
+        memcpy(accum + total, chunk, (size_t)n);
+        total += (size_t)n;
+    }
+    void *s = march_string_lit(accum ? accum : "", (int64_t)total);
+    free(accum);
+    return make_ok(s);
+}
+
+/* tcp_recv_chunk(fd_ptr, max_bytes, timeout_ms) → Result(String, String)
+ * Reads one chunk (up to max_bytes) from the socket. */
+void *march_tcp_recv_chunk(void *fd_ptr, int64_t max_bytes, int64_t timeout_ms) {
+    int fd = (int)(int64_t)(uintptr_t)fd_ptr;
+    (void)timeout_ms;
+    size_t sz = max_bytes < 65536 ? (size_t)max_bytes : 65536;
+    char *buf = malloc(sz);
+    if (!buf) return make_err("OOM");
+    ssize_t n = recv(fd, buf, sz, 0);
+    if (n < 0) { free(buf); return make_err("recv failed"); }
+    void *s = march_string_lit(buf, (int64_t)(n < 0 ? 0 : (size_t)n));
+    free(buf);
+    return make_ok(s);
+}
+
+/* tcp_recv_http_headers(fd_ptr, max_bytes) → Result(String, String)
+ * Reads until \r\n\r\n (end of HTTP headers). */
+void *march_tcp_recv_http_headers(void *fd_ptr, int64_t max_bytes) {
+    int fd = (int)(int64_t)(uintptr_t)fd_ptr;
+    char *accum = NULL;
+    size_t total = 0;
+    char c;
+    while ((int64_t)total < max_bytes) {
+        ssize_t n = recv(fd, &c, 1, 0);
+        if (n <= 0) break;
+        char *tmp = realloc(accum, total + 1);
+        if (!tmp) { free(accum); return make_err("OOM"); }
+        accum = tmp;
+        accum[total++] = c;
+        if (total >= 4 &&
+            accum[total-4] == '\r' && accum[total-3] == '\n' &&
+            accum[total-2] == '\r' && accum[total-1] == '\n') break;
+    }
+    void *s = march_string_lit(accum ? accum : "", (int64_t)total);
+    free(accum);
+    return make_ok(s);
+}
+
 /* Connect to host:port as a TCP client.
  * Returns Ok(fd:i64) on success, Err(reason:string) on failure.
  * Tag convention: Ok=tag0, Err=tag1 (matches march_runtime.c mk_ok/mk_err). */

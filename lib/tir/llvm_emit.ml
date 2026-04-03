@@ -57,6 +57,10 @@ type ctx = {
   extra_fns : Buffer.t;
   (* User-defined extern function name mapping: march_name → c_name *)
   extern_map : (string, string) Hashtbl.t;
+  (* Unqualified suffix → qualified TIR name for cross-module function refs
+     that lower.ml emits without the module prefix (e.g. "base64_encode" →
+     "Crypto.base64_encode").  Populated during emit_module init. *)
+  unqualified_fns : (string, string) Hashtbl.t;
   (* Tracks the actual LLVM type stored in each alloca slot, keyed by slot name.
      Used to emit correct load types even when TIR var has unresolved TVar. *)
   var_llvm_ty : (string, string) Hashtbl.t;
@@ -134,6 +138,7 @@ let make_ctx ?(fast_math=false) () = {
   emitted_wraps = Hashtbl.create 8;
   extra_fns = Buffer.create 1024;
   extern_map = Hashtbl.create 8;
+  unqualified_fns = Hashtbl.create 32;
   var_llvm_ty = Hashtbl.create 32;
   tco_fn_name    = None;
   tco_loop_label = "";
@@ -239,7 +244,7 @@ let is_builtin_fn name =
                  "=="; "!="; "<"; "<="; ">"; ">=";
                  "++"; "string_concat"; "string_eq";
                  "string_length"; "string_byte_length"; "string_is_empty"; "string_to_int"; "string_join";
-                 "println"; "print";
+                 "println"; "print"; "print_stderr";
                  "int_to_string"; "float_to_string"; "bool_to_string";
                  "kill"; "is_alive"; "send"; "spawn"; "actor_get_int";
                  "actor_call"; "actor_reply"; "actor_cast";
@@ -284,7 +289,18 @@ let is_builtin_fn name =
                  "process_env"; "process_set_env"; "process_cwd"; "process_exit";
                  "process_pid"; "process_spawn_sync"; "process_spawn_lines";
                  (* TCP/network builtins *)
-                 "tcp_connect"; "tcp_close";
+                 "tcp_connect"; "tcp_close"; "tcp_recv_exact";
+                 "tcp_recv_all"; "tcp_recv_chunk"; "tcp_recv_http_headers";
+                 (* TLS builtins *)
+                 "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_accept";
+                 "tls_read"; "tls_write"; "tls_close"; "tls_ctx_free";
+                 "tls_negotiated_alpn"; "tls_peer_cn";
+                 (* TypedArray builtins *)
+                 "typed_array_create"; "typed_array_from_list"; "typed_array_to_list";
+                 "typed_array_length"; "typed_array_get"; "typed_array_set";
+                 "typed_array_map"; "typed_array_filter"; "typed_array_fold";
+                 (* Time builtins *)
+                 "unix_time";
                  (* HTTP builtins *)
                  "http_serialize_request"; "http_parse_response";
                  (* CSV builtins *)
@@ -308,7 +324,31 @@ let is_builtin_fn name =
                  (* IOList builtins *)
                  "iolist_hash_fnv1a";
                  (* HTTP server builtins *)
-                 "http_server_spawn_n"; "http_server_wait"]
+                 "http_server_spawn_n"; "http_server_wait";
+                 (* Crypto / hash builtins — see mangle_extern for C name mapping *)
+                 "hmac_sha256"; "pbkdf2_sha256";
+                 "sha256"; "sha512";
+                 "base64_encode"; "base64_decode";
+                 "random_bytes";
+                 "stdlib_sha256"; "stdlib_sha512";
+                 "stdlib_base64_encode"; "stdlib_base64_decode";
+                 "stdlib_random_bytes";
+                 (* System introspection builtins *)
+                 "sys_uptime_ms"; "sys_heap_bytes"; "sys_word_size";
+                 "sys_minor_gcs"; "sys_major_gcs";
+                 "sys_actor_count"; "sys_cpu_count";
+                 "sys_os"; "sys_arch";
+                 "march_version";
+                 (* UUID / identity builtins *)
+                 "uuid_v4";
+                 (* Panic/todo/unreachable internal builtins *)
+                 "panic_"; "todo_"; "unreachable_";
+                 (* IO read builtins *)
+                 "io_read_line"; "read_line";
+                 (* Logger builtins *)
+                 "logger_set_level"; "logger_get_level";
+                 "logger_add_context"; "logger_clear_context";
+                 "logger_get_context"; "logger_write"]
 
 let atom_is_builtin (atom : Tir.atom) =
   match atom with
@@ -367,7 +407,16 @@ let emit_reduction_check ctx =
 (** TIR return type for known builtin/extern functions, overriding type info. *)
 let builtin_ret_ty : string -> Tir.ty option = function
   | "panic"                       -> Some Tir.TUnit
-  | "println" | "print"           -> Some Tir.TUnit
+  | "panic_" | "todo_" | "unreachable_" -> Some (Tir.TPtr Tir.TUnit)  (* polymorphic `a` → ptr *)
+  | "println" | "print" | "print_stderr" -> Some Tir.TUnit
+  | "io_read_line" | "read_line"         -> Some Tir.TString
+  (* Logger builtins *)
+  | "logger_set_level"     -> Some Tir.TUnit
+  | "logger_get_level"     -> Some Tir.TInt
+  | "logger_add_context"   -> Some Tir.TUnit
+  | "logger_clear_context" -> Some Tir.TUnit
+  | "logger_get_context"   -> Some (Tir.TCon ("List", [Tir.TTuple [Tir.TString; Tir.TString]]))
+  | "logger_write"         -> Some Tir.TUnit
   | "int_to_string"               -> Some Tir.TString
   | "float_to_string"             -> Some Tir.TString
   | "bool_to_string"              -> Some Tir.TString
@@ -464,6 +513,22 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "process_spawn_lines"         -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]))
   (* TCP/network builtins *)
   | "tcp_connect"                 -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
+  | "tcp_recv_exact"              -> Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]))
+  | "tcp_recv_all" | "tcp_recv_chunk" | "tcp_recv_http_headers" -> Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]))
+  (* TLS builtins *)
+  | "tls_client_ctx" | "tls_server_ctx" | "tls_connect" | "tls_accept" -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
+  | "tls_read" -> Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]))
+  | "tls_write" | "tls_close" | "tls_ctx_free" -> Some Tir.TUnit
+  | "tls_negotiated_alpn" | "tls_peer_cn" -> Some (Tir.TCon ("Option", [Tir.TString]))
+  (* TypedArray builtins *)
+  | "typed_array_create" | "typed_array_from_list" | "typed_array_map" | "typed_array_filter" -> Some (Tir.TVar "a")
+  | "typed_array_to_list" -> Some (Tir.TCon ("List", [Tir.TVar "a"]))
+  | "typed_array_length"  -> Some Tir.TInt
+  | "typed_array_get"     -> Some (Tir.TVar "a")
+  | "typed_array_set"     -> Some (Tir.TVar "a")
+  | "typed_array_fold"    -> Some (Tir.TVar "a")
+  (* Time builtins *)
+  | "unix_time" -> Some Tir.TFloat
   (* HTTP builtins *)
   | "http_serialize_request"      -> Some Tir.TString
   | "http_parse_response"         -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]))
@@ -510,6 +575,22 @@ let builtin_ret_ty : string -> Tir.ty option = function
   (* HTTP server builtins *)
   | "http_server_spawn_n"         -> Some Tir.TInt
   | "http_server_wait"            -> Some Tir.TUnit
+  (* Crypto / hash builtins *)
+  | "hmac_sha256"
+  | "pbkdf2_sha256"           -> Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]))
+  | "sha256" | "stdlib_sha256"
+  | "sha512" | "stdlib_sha512" -> Some Tir.TString
+  | "random_bytes" | "stdlib_random_bytes" -> Some (Tir.TCon ("Bytes", []))
+  | "base64_encode" | "stdlib_base64_encode" -> Some Tir.TString
+  | "base64_decode" | "stdlib_base64_decode"
+                              -> Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]))
+  (* System introspection builtins *)
+  | "sys_uptime_ms" | "sys_heap_bytes" | "sys_word_size"
+  | "sys_minor_gcs" | "sys_major_gcs"
+  | "sys_actor_count" | "sys_cpu_count" -> Some Tir.TInt
+  | "sys_os" | "sys_arch" | "march_version" -> Some Tir.TString
+  (* UUID / identity builtins *)
+  | "uuid_v4" -> Some Tir.TString
   | _ -> None
 
 (** Mangle a March builtin name to the C runtime function name. *)
@@ -517,6 +598,8 @@ let mangle_extern : string -> string = function
   | "panic"         -> "march_panic"
   | "println"       -> "march_println"
   | "print"         -> "march_print"
+  | "print_stderr"  -> "march_print_stderr"
+  | "io_read_line" | "read_line" -> "march_io_read_line"
   | "int_to_string" -> "march_int_to_string"
   | "float_to_string" -> "march_float_to_string"
   | "bool_to_string"  -> "march_bool_to_string"
@@ -538,6 +621,7 @@ let mangle_extern : string -> string = function
   | "actor_cast"    -> "march_send"
   | "tcp_listen"              -> "march_tcp_listen"
   | "tcp_accept"              -> "march_tcp_accept"
+  | "tcp_recv_exact"          -> "march_tcp_recv_exact"
   | "tcp_recv_http"           -> "march_tcp_recv_http"
   | "tcp_send_all"            -> "march_tcp_send_all"
   | "tcp_close"               -> "march_tcp_close"
@@ -642,6 +726,32 @@ let mangle_extern : string -> string = function
   | "process_spawn_lines" -> "march_process_spawn_lines"
   (* TCP/network builtins *)
   | "tcp_connect"       -> "march_tcp_connect"
+  | "tcp_recv_all"      -> "march_tcp_recv_all"
+  | "tcp_recv_chunk"    -> "march_tcp_recv_chunk"
+  | "tcp_recv_http_headers" -> "march_tcp_recv_http_headers"
+  (* TLS builtins *)
+  | "tls_client_ctx"    -> "march_tls_client_ctx"
+  | "tls_server_ctx"    -> "march_tls_server_ctx"
+  | "tls_connect"       -> "march_tls_connect"
+  | "tls_accept"        -> "march_tls_accept"
+  | "tls_read"          -> "march_tls_read"
+  | "tls_write"         -> "march_tls_write"
+  | "tls_close"         -> "march_tls_close"
+  | "tls_ctx_free"      -> "march_tls_ctx_free"
+  | "tls_negotiated_alpn" -> "march_tls_negotiated_alpn"
+  | "tls_peer_cn"       -> "march_tls_peer_cn"
+  (* TypedArray builtins *)
+  | "typed_array_create"    -> "march_typed_array_create"
+  | "typed_array_from_list" -> "march_typed_array_from_list"
+  | "typed_array_to_list"   -> "march_typed_array_to_list"
+  | "typed_array_length"    -> "march_typed_array_length"
+  | "typed_array_get"       -> "march_typed_array_get"
+  | "typed_array_set"       -> "march_typed_array_set"
+  | "typed_array_map"       -> "march_typed_array_map"
+  | "typed_array_filter"    -> "march_typed_array_filter"
+  | "typed_array_fold"      -> "march_typed_array_fold"
+  (* Time builtins *)
+  | "unix_time"         -> "march_unix_time"
   (* HTTP builtins *)
   | "http_serialize_request" -> "march_http_serialize_request"
   | "http_parse_response"    -> "march_http_parse_response"
@@ -682,6 +792,38 @@ let mangle_extern : string -> string = function
   (* IOList builtins *)
   | "iolist_hash_fnv1a"  -> "march_iolist_hash_fnv1a"
   | "main"          -> "march_main"   (* March main → march_main in LLVM *)
+  (* Crypto / hash builtins *)
+  | "hmac_sha256"          -> "march_hmac_sha256"
+  | "pbkdf2_sha256"        -> "march_pbkdf2_sha256"
+  | "sha256" | "stdlib_sha256"              -> "march_sha256"
+  | "sha512" | "stdlib_sha512"              -> "march_sha512"
+  | "base64_encode" | "stdlib_base64_encode" -> "march_base64_encode"
+  | "base64_decode" | "stdlib_base64_decode" -> "march_base64_decode"
+  | "random_bytes"  | "stdlib_random_bytes"  -> "march_random_bytes"
+  (* System introspection builtins *)
+  | "sys_uptime_ms"    -> "march_sys_uptime_ms"
+  | "sys_heap_bytes"   -> "march_sys_heap_bytes"
+  | "sys_word_size"    -> "march_sys_word_size"
+  | "sys_minor_gcs"    -> "march_sys_minor_gcs"
+  | "sys_major_gcs"    -> "march_sys_major_gcs"
+  | "sys_actor_count"  -> "march_sys_actor_count"
+  | "sys_cpu_count"    -> "march_sys_cpu_count"
+  | "sys_os"           -> "march_sys_os"
+  | "sys_arch"         -> "march_sys_arch"
+  | "march_version"    -> "march_get_version"
+  (* UUID / identity builtins *)
+  | "uuid_v4"          -> "march_uuid_v4"
+  (* Panic/todo/unreachable internal primitives *)
+  | "panic_"       -> "march_panic_ext"
+  | "todo_"        -> "march_todo_ext"
+  | "unreachable_" -> "march_panic_ext"
+  (* Logger builtins *)
+  | "logger_set_level"    -> "march_logger_set_level"
+  | "logger_get_level"    -> "march_logger_get_level"
+  | "logger_add_context"  -> "march_logger_add_context"
+  | "logger_clear_context" -> "march_logger_clear_context"
+  | "logger_get_context"  -> "march_logger_get_context"
+  | "logger_write"        -> "march_logger_write"
   | other           -> other
 
 (* ── Arithmetic builtins ─────────────────────────────────────────────── *)
@@ -747,6 +889,11 @@ let coerce ctx from_ty v to_ty =
   | ("i64", "i1") ->
     let r = fresh ctx "cv" in
     emit ctx (Printf.sprintf "%s = trunc i64 %s to i1" r v);
+    r
+  | ("i64", "double") ->
+    (* Float stored as raw bits in an i64 — reinterpret to double *)
+    let r = fresh ctx "cv" in
+    emit ctx (Printf.sprintf "%s = bitcast i64 %s to double" r v);
     r
   | _ -> v  (* other combos: leave as-is; LLVM will catch mismatches *)
 
@@ -857,6 +1004,14 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
       if target_ret = "void" then
         Buffer.add_string ctx.extra_fns
           (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n\n"
+             wrap_name decl_str fn_name call_args)
+      else if target_ret = "i64" then
+        Buffer.add_string ctx.extra_fns
+          (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call i64 @%s(%s)\n  %%rp = inttoptr i64 %%r to ptr\n  ret ptr %%rp\n}\n\n"
+             wrap_name decl_str fn_name call_args)
+      else if target_ret = "double" then
+        Buffer.add_string ctx.extra_fns
+          (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call double @%s(%s)\n  %%ri = bitcast double %%r to i64\n  %%rp = inttoptr i64 %%ri to ptr\n  ret ptr %%rp\n}\n\n"
              wrap_name decl_str fn_name call_args)
       else
         Buffer.add_string ctx.extra_fns
@@ -1131,15 +1286,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     end else begin
       let cmp = fresh ctx "cmp" in
       let r   = fresh ctx "ar" in
-      if ty_a = "double" then begin
-        (* Float comparison: use fcmp ordered predicates *)
+      if ty_a = "double" || ty_b = "double" then begin
+        (* Float comparison: use fcmp ordered predicates.
+           Coerce both sides to double in case one came from a boxed ptr. *)
         let fpred = match f.Tir.v_name with
           | "==" -> "oeq" | "!=" -> "one"
           | "<"  -> "olt" | "<=" -> "ole"
           | ">"  -> "ogt" | ">=" -> "oge"
           | s -> failwith ("unknown cmp: " ^ s)
         in
-        emit ctx (Printf.sprintf "%s = fcmp %s double %s, %s" cmp fpred va vb);
+        let va_f = coerce ctx ty_a va "double" in
+        let vb_f = coerce ctx ty_b vb "double" in
+        emit ctx (Printf.sprintf "%s = fcmp %s double %s, %s" cmp fpred va_f vb_f);
       end else begin
         (* Coerce to i64 in case variables were loaded as ptr due to TVar type *)
         let va' = coerce ctx ty_a va "i64" in
@@ -1422,15 +1580,72 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
                 r actor_ty actor_v msg_ty msg_v);
     ("ptr", r)
 
+  (* ── Integer arithmetic builtins called via EApp ─────────────────── *)
+  (* int_mod / int_div / int_mod_euclid / int_abs / int_pow /
+     int_max_value / int_min_value are in builtin_names in defun.ml
+     so they stay as EApp (not converted to ECallPtr).  Handle them here
+     BEFORE the var_slot guard so the specific match takes priority. *)
+  | Tir.EApp (f, [a; b])
+    when f.Tir.v_name = "int_mod" || f.Tir.v_name = "int_div"
+      || f.Tir.v_name = "int_mod_euclid" ->
+    let va = emit_atom_as ctx "i64" a in
+    let vb = emit_atom_as ctx "i64" b in
+    let r  = fresh ctx "ar" in
+    let op = match f.Tir.v_name with
+      | "int_mod"        -> "srem"
+      | "int_div"        -> "sdiv"
+      | "int_mod_euclid" -> "urem"
+      | _                -> assert false
+    in
+    emit ctx (Printf.sprintf "%s = %s i64 %s, %s" r op va vb);
+    ("i64", r)
+
+  | Tir.EApp (f, [a; b])
+    when f.Tir.v_name = "int_pow" ->
+    let va = emit_atom_as ctx "i64" a in
+    let vb = emit_atom_as ctx "i64" b in
+    let r  = fresh ctx "ar" in
+    emit ctx (Printf.sprintf "%s = call i64 @march_int_pow(i64 %s, i64 %s)" r va vb);
+    ("i64", r)
+
+  | Tir.EApp (f, [a])
+    when f.Tir.v_name = "int_abs" ->
+    let va = emit_atom_as ctx "i64" a in
+    let r  = fresh ctx "ar" in
+    emit ctx (Printf.sprintf "%s = call i64 @llvm.abs.i64(i64 %s, i1 false)" r va);
+    ("i64", r)
+
+  | Tir.EApp (f, _)
+    when f.Tir.v_name = "int_max_value" ->
+    ("i64", "9223372036854775807")
+
+  | Tir.EApp (f, _)
+    when f.Tir.v_name = "int_min_value" ->
+    ("i64", "-9223372036854775808")
+
+  (* ── EApp of a locally-bound closure variable ────────────────────── *)
+  (* If f has a var_slot alloca, it is a local closure — not a top-level fn.
+     Redirect to ECallPtr dispatch to avoid generating an undefined @f call. *)
+  | Tir.EApp (f, args)
+    when Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name) ->
+    emit_expr ctx (Tir.ECallPtr (Tir.AVar f, args))
+
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->
     let arg_strs = List.map (fun a ->
         let (ty, v) = emit_atom ctx a in ty ^ " " ^ v
       ) args in
     let args_str = String.concat ", " arg_strs in
-    let fname    = match Hashtbl.find_opt ctx.extern_map f.Tir.v_name with
+    (* Resolve unqualified cross-module references: lower.ml may emit a
+       function reference without its module prefix (e.g. "base64_encode"
+       for "Crypto.base64_encode").  Look up the qualified name first. *)
+    let resolved_name = match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
+      | Some q -> q
+      | None -> f.Tir.v_name
+    in
+    let fname    = match Hashtbl.find_opt ctx.extern_map resolved_name with
       | Some c_name -> c_name
-      | None -> mangle_extern f.Tir.v_name in
+      | None -> mangle_extern resolved_name in
     (* Determine return type: check known builtins first, then the registered
        fn_def return type (if any), then fall back to the call-site TFn annotation.
        The call-site type may be TVar "_" in JIT mode (empty type_map), so
@@ -1438,9 +1653,43 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let ret_tir  = match builtin_ret_ty f.Tir.v_name with
       | Some t -> t
       | None   ->
-        (match Hashtbl.find_opt ctx.top_fn_ret_ty f.Tir.v_name with
+        (match Hashtbl.find_opt ctx.top_fn_ret_ty resolved_name with
          | Some (Tir.TVar _) | None -> fn_ret_tir f.Tir.v_ty
          | Some t -> t)
+    in
+    let ret_ty = llvm_ret_ty ret_tir in
+    if ret_ty = "void" then begin
+      emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
+      ("i64", "0")
+    end else begin
+      let r = fresh ctx "cr" in
+      emit ctx (Printf.sprintf "%s = call %s @%s(%s)" r ret_ty fname args_str);
+      (ret_ty, r)
+    end
+
+  (* ── ECallPtr where callee is an unqualified cross-module user function ── *)
+  (* lower.ml may emit function references without their module prefix (e.g.
+     "base64_encode" for "Crypto.base64_encode").  defun converts EApp of
+     non-top-level names to ECallPtr.  If the name has an entry in
+     unqualified_fns AND no local alloca slot exists (meaning it's not a
+     locally-bound closure variable), emit a direct call to the qualified fn.
+     The var_slot guard is critical: a local variable named "abs" must not be
+     confused with Math.abs — it would have a slot from its ELet binding. *)
+  | Tir.ECallPtr (Tir.AVar f, args)
+    when (let base = llvm_name f.Tir.v_name in
+          not (Hashtbl.mem ctx.var_slot base))
+      && Hashtbl.mem ctx.unqualified_fns f.Tir.v_name ->
+    let qualified = Hashtbl.find ctx.unqualified_fns f.Tir.v_name in
+    let arg_strs = List.map (fun a ->
+        let (ty, v) = emit_atom ctx a in ty ^ " " ^ v
+      ) args in
+    let args_str = String.concat ", " arg_strs in
+    let fname = match Hashtbl.find_opt ctx.extern_map qualified with
+      | Some c_name -> c_name
+      | None -> mangle_extern qualified in
+    let ret_tir = match Hashtbl.find_opt ctx.top_fn_ret_ty qualified with
+      | Some (Tir.TVar _) | None -> fn_ret_tir f.Tir.v_ty
+      | Some t -> t
     in
     let ret_ty = llvm_ret_ty ret_tir in
     if ret_ty = "void" then begin
@@ -1456,7 +1705,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   (* Builtins (e.g. vault_update) are not in top_fns, so TIR lowering
      emits them as call_ptr.  Detect this here and emit a direct call
      instead of trying to dispatch through a closure pointer. *)
-  | Tir.ECallPtr (Tir.AVar f, args) when is_builtin_fn f.Tir.v_name ->
+  | Tir.ECallPtr (Tir.AVar f, args)
+    when is_builtin_fn f.Tir.v_name
+      && not (Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name)) ->
     let arg_strs = List.map (fun a ->
         let (ty, v) = emit_atom ctx a in ty ^ " " ^ v
       ) args in
@@ -1478,11 +1729,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       (ret_ty, r)
     end
 
-  (* ── Integer arithmetic builtins called via ECallPtr ──────────────── *)
-  (* int_mod / int_div / int_mod_euclid are builtins that appear as ECallPtr
-     (not EApp) because lower.ml treats them as ordinary variables.  Emit the
-     corresponding LLVM instruction directly rather than trying to dispatch
-     through a closure pointer (which would reference an undefined alloca). *)
+
   | Tir.ECallPtr (Tir.AVar f, [a; b])
     when f.Tir.v_name = "int_mod" || f.Tir.v_name = "int_div"
       || f.Tir.v_name = "int_mod_euclid" ->
@@ -1909,9 +2156,11 @@ and emit_case ctx scrut_atom branches default_opt =
       List.for_all (fun br -> is_bool_tag br.Tir.br_tag) branches
     in
     if is_bool_case then begin
-      (* trunc i64 -> i1, then br i1 *)
+      (* trunc i64 -> i1, then br i1.
+         Booleans stored in struct fields come out as ptr (boxed i64); coerce first. *)
+      let scrut_i64 = coerce ctx scrut_ty scrut_val "i64" in
       let i1v = fresh ctx "bi" in
-      emit ctx (Printf.sprintf "%s = trunc i64 %s to i1" i1v scrut_val);
+      emit ctx (Printf.sprintf "%s = trunc i64 %s to i1" i1v scrut_i64);
       let find_lbl tag fallback =
         match List.find_opt (fun br -> is_bool_tag br.Tir.br_tag &&
           (br.Tir.br_tag = tag || br.Tir.br_tag = String.capitalize_ascii tag)) branches with
@@ -2571,11 +2820,15 @@ declare void @march_decrc_local(ptr %p)
 declare void @march_free(ptr %p)
 declare void @march_print(ptr %s)
 declare void @march_panic(ptr %s)
+declare ptr  @march_panic_ext(ptr %s)
+declare ptr  @march_todo_ext(ptr %s)
 declare void @march_test_init(i32 %argc, ptr %argv)
 declare void @march_test_run(ptr %fn, ptr %name, ptr %setup_or_null)
 declare void @march_test_setup_all(ptr %fn)
 declare i32  @march_test_report()
 declare void @march_println(ptr %s)
+declare void @march_print_stderr(ptr %s)
+declare ptr  @march_io_read_line()
 declare ptr  @march_string_lit(ptr %s, i64 %len)
 declare ptr  @march_int_to_string(i64 %n)
 declare ptr  @march_float_to_string(double %f)
@@ -2605,6 +2858,8 @@ declare double @march_int_to_float(i64 %n)
 declare ptr    @march_char_from_int(i64 %n)
 declare i64    @march_char_to_int(ptr %c)
 declare i64    @march_char_is_digit(ptr %c)
+declare i64    @march_char_is_alphanumeric(ptr %c)
+declare i64    @march_char_is_whitespace(ptr %c)
 ; Float/Int conversion builtins
 declare i64    @march_float_to_int(double %f)
 ; Math builtins
@@ -2665,8 +2920,39 @@ declare ptr  @march_vault_drop(ptr %table, ptr %key)
 declare ptr  @march_vault_update(ptr %table, ptr %key, ptr %f)
 declare i64  @march_vault_size(ptr %table)
 declare ptr  @march_vault_keys(ptr %table)
+; Crypto / hash builtins
+declare ptr  @march_sha256(ptr %b)
+declare ptr  @march_sha512(ptr %b)
+declare ptr  @march_hmac_sha256(ptr %key, ptr %msg)
+declare ptr  @march_pbkdf2_sha256(ptr %pass, ptr %salt, i64 %iters, i64 %len)
+declare ptr  @march_base64_encode(ptr %b)
+declare ptr  @march_base64_decode(ptr %s)
+declare ptr  @march_random_bytes(i64 %n)
+; System introspection builtins
+declare i64  @march_sys_uptime_ms()
+declare i64  @march_sys_heap_bytes()
+declare i64  @march_sys_word_size()
+declare i64  @march_sys_minor_gcs()
+declare i64  @march_sys_major_gcs()
+declare i64  @march_sys_actor_count()
+declare i64  @march_sys_cpu_count()
+declare ptr  @march_sys_os()
+declare ptr  @march_sys_arch()
+declare ptr  @march_get_version()
+; UUID / identity builtins
+declare ptr  @march_uuid_v4()
+; Integer math helpers
+declare i64  @march_int_pow(i64 %base, i64 %exp)
 ; LLVM intrinsics
 declare i64  @llvm.ctpop.i64(i64 %val)
+declare i64  @llvm.abs.i64(i64 %val, i1 %is_int_min_poison)
+; Logger builtins
+declare ptr  @march_logger_set_level(i64 %level)
+declare i64  @march_logger_get_level()
+declare ptr  @march_logger_add_context(ptr %key, ptr %value)
+declare ptr  @march_logger_clear_context()
+declare ptr  @march_logger_get_context()
+declare ptr  @march_logger_write(ptr %level, ptr %msg, ptr %ctx, ptr %extra)
 
 |};
   (* Native-only declarations: actors, networking, file I/O, scheduler *)
@@ -2689,6 +2975,7 @@ declare void @march_yield_from_compiled()
 ; TCP/network builtins
 declare i64  @march_tcp_listen(i64 %port)
 declare i64  @march_tcp_accept(i64 %fd)
+declare ptr  @march_tcp_recv_exact(i64 %fd, i64 %n)
 declare ptr  @march_tcp_recv_http(i64 %fd, i64 %max)
 declare void @march_tcp_send_all(i64 %fd, ptr %data)
 declare void @march_tcp_close(i64 %fd)
@@ -2722,6 +3009,40 @@ declare ptr  @march_dir_rm_rf(ptr %path)
 declare ptr  @march_dir_list(ptr %path)
 declare ptr  @march_dir_list_full(ptr %path)
 declare ptr  @march_process_argv()
+declare ptr  @march_process_cwd()
+declare ptr  @march_process_env(ptr %name)
+declare i64  @march_process_set_env(ptr %name, ptr %value)
+declare i64  @march_process_exit(i64 %code)
+declare i64  @march_process_pid()
+declare ptr  @march_process_spawn_sync(ptr %cmd, ptr %args)
+declare ptr  @march_process_spawn_lines(ptr %cmd, ptr %args)
+; TCP recv-all
+declare ptr  @march_tcp_recv_all(ptr %fd, i64 %max_bytes, i64 %timeout_ms)
+declare ptr  @march_tcp_recv_chunk(ptr %fd, i64 %max_bytes, i64 %timeout_ms)
+declare ptr  @march_tcp_recv_http_headers(ptr %fd, i64 %max_bytes)
+; TLS builtins
+declare ptr  @march_tls_client_ctx(ptr %ca_file, ptr %alpn_list, i64 %verify_peer, i64 %timeout_ms)
+declare ptr  @march_tls_server_ctx(ptr %cert_file, ptr %key_file, ptr %ca_file, ptr %alpn_list, i64 %verify_peer)
+declare ptr  @march_tls_connect(i64 %fd, i64 %ctx_handle, ptr %hostname)
+declare ptr  @march_tls_accept(i64 %fd, i64 %ctx_handle)
+declare ptr  @march_tls_read(i64 %ssl_handle, i64 %max_bytes)
+declare ptr  @march_tls_write(i64 %ssl_handle, ptr %data)
+declare void @march_tls_close(i64 %ssl_handle)
+declare void @march_tls_ctx_free(i64 %ctx_handle)
+declare ptr  @march_tls_negotiated_alpn(i64 %ssl_handle)
+declare ptr  @march_tls_peer_cn(i64 %ssl_handle)
+; TypedArray builtins
+declare ptr  @march_typed_array_create(i64 %len, ptr %default_val)
+declare ptr  @march_typed_array_from_list(ptr %list)
+declare ptr  @march_typed_array_to_list(ptr %arr)
+declare i64  @march_typed_array_length(ptr %arr)
+declare ptr  @march_typed_array_get(ptr %arr, i64 %i)
+declare ptr  @march_typed_array_set(ptr %arr, i64 %i, ptr %val)
+declare ptr  @march_typed_array_map(ptr %arr, ptr %f)
+declare ptr  @march_typed_array_filter(ptr %arr, ptr %f)
+declare ptr  @march_typed_array_fold(ptr %arr, ptr %acc, ptr %f)
+; Time builtins
+declare double @march_unix_time()
 declare ptr  @march_tcp_connect(ptr %host, i64 %port)
 ; HTTP client builtins
 declare ptr  @march_http_serialize_request(ptr %method, ptr %host, ptr %path, ptr %query, ptr %headers, ptr %body)
@@ -2777,7 +3098,23 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
     ) m.Tir.tm_externs;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty)
+      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+      (* Populate unqualified_fns: maps the unqualified suffix (e.g.
+         "base64_encode") to the fully qualified name ("Crypto.base64_encode").
+         Used to fix up cross-module ECallPtr calls where lower.ml left the
+         function name unqualified.  First registration wins to avoid
+         collisions between modules sharing an unqualified name.
+         NOTE: we do NOT add the unqualified name to top_fns — that would
+         shadow local variables with the same name (e.g. a boolean variable
+         named "abs" would incorrectly resolve to @Math.abs). *)
+      (match String.rindex_opt fn.Tir.fn_name '.' with
+       | Some i ->
+         let unq = String.sub fn.Tir.fn_name (i+1)
+                     (String.length fn.Tir.fn_name - i - 1) in
+         if not (Hashtbl.mem ctx.unqualified_fns unq) then begin
+           Hashtbl.replace ctx.unqualified_fns unq fn.Tir.fn_name
+         end
+       | None -> ()))
     m.Tir.tm_fns;
   (* Identify mutual-TCO groups.  Functions in these groups are emitted as
      combined dispatch functions + thin wrappers — they must NOT also be
@@ -2795,7 +3132,8 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
      to march_* builtins — not user-defined qualified names like "CapDemo.main".
      Also skip functions that are members of a mutual-TCO group — those were
      already emitted (as wrappers) by emit_mutual_tco_group above. *)
-  let preamble_declared = ["panic"; "println"; "print"] in
+  let preamble_declared = ["panic"; "panic_"; "todo_"; "unreachable_";
+                           "println"; "print"; "print_stderr"; "io_read_line"; "read_line"] in
   List.iter (fun fn ->
       if List.mem fn.Tir.fn_name preamble_declared then ()
       else if List.mem fn.Tir.fn_name mutual_fn_names then ()
@@ -3023,7 +3361,11 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
                call void @%s()\n\
                call void @march_run_scheduler()\n\
                ret i32 0\n}\n" mangled)
-        | None -> ())
+        | None ->
+          (* Library module with no user-defined main: emit a stub @main so
+             clang can link a valid binary (forge build type-checks libraries). *)
+          Buffer.add_string out
+            "\ndefine i32 @main(i32 %argc, ptr %argv_ptr) {\nentry:\n  ret i32 0\n}\n")
      end);
 
   (* Append closure wrapper functions generated for top-level fn-as-value *)
@@ -3218,6 +3560,12 @@ let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
   let wrap_body =
     if target_ret = "void" then
       Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n"
+        wrap_name decl_str fn_llvm_name call_args
+    else if target_ret = "i64" then
+      Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  %%r = call i64 @%s(%s)\n  %%rp = inttoptr i64 %%r to ptr\n  ret ptr %%rp\n}\n"
+        wrap_name decl_str fn_llvm_name call_args
+    else if target_ret = "double" then
+      Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  %%r = call double @%s(%s)\n  %%ri = bitcast double %%r to i64\n  %%rp = inttoptr i64 %%ri to ptr\n  ret ptr %%rp\n}\n"
         wrap_name decl_str fn_llvm_name call_args
     else
       Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret ptr %%r\n}\n"

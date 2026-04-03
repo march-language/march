@@ -422,7 +422,55 @@ void march_println(void *s) {
     putchar('\n');
 }
 
+void march_print_stderr(void *s) {
+    march_string *ms = (march_string *)s;
+    fwrite(ms->data, 1, (size_t)ms->len, stderr);
+    fputc('\n', stderr);
+}
+
+void *march_io_read_line(void) {
+    char buf[4096];
+    if (!fgets(buf, sizeof(buf), stdin)) {
+        return march_string_lit("", 0);
+    }
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len-1] == '\n') { buf[--len] = '\0'; }
+    if (len > 0 && buf[len-1] == '\r') { buf[--len] = '\0'; }
+    return march_string_lit(buf, (int64_t)len);
+}
+
+/* ── Integer math helpers ────────────────────────────────────────────────── */
+
+int64_t march_int_pow(int64_t base, int64_t exp) {
+    if (exp < 0) return 0;
+    int64_t result = 1;
+    while (exp > 0) {
+        if (exp & 1) result *= base;
+        base *= base;
+        exp >>= 1;
+    }
+    return result;
+}
+
 /* ── Panic ───────────────────────────────────────────────────────────────── */
+
+/* Forward declaration so march_panic_ext / march_todo_ext can call march_panic
+ * which is defined just below. */
+void march_panic(void *s);
+
+/* panic_ / todo_ / unreachable_: internal runtime primitives called by the
+ * March prelude's panic/todo/unreachable wrappers.  They call march_panic and
+ * return NULL (unreachable, but needed to satisfy the polymorphic return type
+ * the compiler assigns to expressions of type `a`). */
+void *march_panic_ext(void *s) {
+    march_panic(s);
+    return NULL;
+}
+
+void *march_todo_ext(void *s) {
+    march_panic(s);
+    return NULL;
+}
 
 void march_panic(void *s) {
     march_string *ms = (march_string *)s;
@@ -2298,4 +2346,233 @@ void *march_value_to_string(void *v) {
 void march_own(void *pid, void *value) {
     (void)pid; (void)value;
     /* TODO: look up Drop impl for value's type and call register_resource */
+}
+
+/* ── Time builtins ───────────────────────────────────────────────────── */
+
+double march_unix_time(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+/* ── TypedArray builtins ─────────────────────────────────────────────── */
+/* TypedArray is a heap object with layout:
+ *   [rc:i64][tag:i32][pad:i32][len:i64][cap:i64][elements: void*[]]
+ * Each element slot is 8 bytes — can hold i64, double (bitcast), or ptr. */
+#define TYPED_ARRAY_HDR_SIZE (16 + 8 + 8)  /* hdr + len + cap */
+
+static void *typed_array_alloc(int64_t len) {
+    size_t sz = (size_t)(TYPED_ARRAY_HDR_SIZE + len * 8);
+    void *arr = march_alloc((int64_t)sz);
+    *(int64_t *)((char *)arr + 16) = len;   /* len field */
+    *(int64_t *)((char *)arr + 24) = len;   /* cap field */
+    return arr;
+}
+
+void *march_typed_array_from_list(void *list) {
+    /* Count list length first */
+    int64_t n = 0;
+    void *tmp = list;
+    while (*(int32_t *)((char *)tmp + 8) == 1) {
+        n++;
+        tmp = *(void **)((char *)tmp + 24);
+    }
+    void *arr = typed_array_alloc(n);
+    void *cur = list;
+    for (int64_t i = 0; i < n; i++) {
+        void *elem = *(void **)((char *)cur + 16);
+        *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8) = elem;
+        cur = *(void **)((char *)cur + 24);
+    }
+    return arr;
+}
+
+void *march_typed_array_to_list(void *arr) {
+    int64_t len = *(int64_t *)((char *)arr + 16);
+    /* Build list in reverse order, then it's correct */
+    void *lst = make_nil();
+    for (int64_t i = len - 1; i >= 0; i--) {
+        void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+        lst = make_cons(elem, lst);
+    }
+    return lst;
+}
+
+int64_t march_typed_array_length(void *arr) {
+    return *(int64_t *)((char *)arr + 16);
+}
+
+void *march_typed_array_get(void *arr, int64_t i) {
+    return *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+}
+
+void *march_typed_array_set(void *arr, int64_t i, void *val) {
+    void *new_arr = march_alloc((int64_t)(TYPED_ARRAY_HDR_SIZE + march_typed_array_length(arr) * 8));
+    int64_t len = march_typed_array_length(arr);
+    *(int64_t *)((char *)new_arr + 16) = len;
+    *(int64_t *)((char *)new_arr + 24) = len;
+    memcpy((char *)new_arr + TYPED_ARRAY_HDR_SIZE,
+           (char *)arr + TYPED_ARRAY_HDR_SIZE,
+           (size_t)(len * 8));
+    *(void **)((char *)new_arr + TYPED_ARRAY_HDR_SIZE + i * 8) = val;
+    return new_arr;
+}
+
+void *march_typed_array_create(int64_t len, void *default_val) {
+    void *arr = typed_array_alloc(len);
+    for (int64_t i = 0; i < len; i++)
+        *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8) = default_val;
+    return arr;
+}
+
+void *march_typed_array_map(void *arr, void *f) {
+    int64_t len = march_typed_array_length(arr);
+    void *new_arr = typed_array_alloc(len);
+    for (int64_t i = 0; i < len; i++) {
+        void *elem = march_typed_array_get(arr, i);
+        /* Call closure: load fn ptr from field 0, call f(f_clo, elem) */
+        void *fn_ptr_loc = (char *)f + 8;
+        void (*fn)(void) = *(void (**)(void))fn_ptr_loc;
+        void *(*fn_typed)(void*, void*) = (void *(*)(void*, void*))fn;
+        void *result = fn_typed(f, elem);
+        *(void **)((char *)new_arr + TYPED_ARRAY_HDR_SIZE + i * 8) = result;
+    }
+    return new_arr;
+}
+
+void *march_typed_array_filter(void *arr, void *f) {
+    int64_t len = march_typed_array_length(arr);
+    void **temp = malloc((size_t)(len * 8));
+    int64_t count = 0;
+    for (int64_t i = 0; i < len; i++) {
+        void *elem = march_typed_array_get(arr, i);
+        void *fn_ptr_loc = (char *)f + 8;
+        void (*fn)(void) = *(void (**)(void))fn_ptr_loc;
+        int64_t (*fn_typed)(void*, void*) = (int64_t (*)(void*, void*))fn;
+        if (fn_typed(f, elem)) temp[count++] = elem;
+    }
+    void *new_arr = typed_array_alloc(count);
+    memcpy((char *)new_arr + TYPED_ARRAY_HDR_SIZE, temp, (size_t)(count * 8));
+    free(temp);
+    return new_arr;
+}
+
+void *march_typed_array_fold(void *arr, void *acc, void *f) {
+    int64_t len = march_typed_array_length(arr);
+    void *result = acc;
+    for (int64_t i = 0; i < len; i++) {
+        void *elem = march_typed_array_get(arr, i);
+        void *fn_ptr_loc = (char *)f + 8;
+        void (*fn)(void) = *(void (**)(void))fn_ptr_loc;
+        void *(*fn_typed)(void*, void*, void*) = (void *(*)(void*, void*, void*))fn;
+        result = fn_typed(f, result, elem);
+    }
+    return result;
+}
+
+/* ── Logger builtins ─────────────────────────────────────────────────── */
+
+static int64_t march_logger_level_val = 0;   /* Debug=0, Info=1, Warn=2, Error=3 */
+static void   *march_logger_ctx_list  = NULL; /* March List((String,String)) or NULL (init on first use) */
+static pthread_mutex_t march_logger_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void *logger_nil(void) {
+    return march_alloc(16);
+}
+
+static void *logger_cons(void *head, void *tail) {
+    void *cons = march_alloc(32);
+    *(int32_t *)((char *)cons + 8) = 1;
+    void **fp = (void **)((char *)cons + 16);
+    fp[0] = head;
+    fp[1] = tail;
+    return cons;
+}
+
+static void *logger_tuple2(void *a, void *b) {
+    void *tup = march_alloc(32);
+    /* tag stays 0 */
+    void **fp = (void **)((char *)tup + 16);
+    fp[0] = a;
+    fp[1] = b;
+    return tup;
+}
+
+/* Print a March List((String,String)) as  key=val, key2=val2 */
+static void logger_print_pairs(void *lst) {
+    int first = 1;
+    while (1) {
+        int32_t tag = *(int32_t *)((char *)lst + 8);
+        if (tag == 0) break;  /* Nil */
+        void *tup  = *(void **)((char *)lst + 16);
+        lst        = *(void **)((char *)lst + 24);
+        void *k    = *(void **)((char *)tup + 16);
+        void *v    = *(void **)((char *)tup + 24);
+        march_string *ks = (march_string *)k;
+        march_string *vs = (march_string *)v;
+        if (!first) fputs(", ", stderr);
+        fwrite(ks->data, 1, (size_t)ks->len, stderr);
+        fputc('=', stderr);
+        fwrite(vs->data, 1, (size_t)vs->len, stderr);
+        first = 0;
+    }
+}
+
+void *march_logger_set_level(int64_t level) {
+    pthread_mutex_lock(&march_logger_mutex);
+    march_logger_level_val = level;
+    pthread_mutex_unlock(&march_logger_mutex);
+    return logger_nil();
+}
+
+int64_t march_logger_get_level(void) {
+    return march_logger_level_val;
+}
+
+void *march_logger_add_context(void *key, void *value) {
+    pthread_mutex_lock(&march_logger_mutex);
+    if (!march_logger_ctx_list) march_logger_ctx_list = logger_nil();
+    void *tup = logger_tuple2(key, value);
+    march_logger_ctx_list = logger_cons(tup, march_logger_ctx_list);
+    pthread_mutex_unlock(&march_logger_mutex);
+    return logger_nil();
+}
+
+void *march_logger_clear_context(void) {
+    pthread_mutex_lock(&march_logger_mutex);
+    march_logger_ctx_list = logger_nil();
+    pthread_mutex_unlock(&march_logger_mutex);
+    return logger_nil();
+}
+
+void *march_logger_get_context(void) {
+    pthread_mutex_lock(&march_logger_mutex);
+    void *ctx = march_logger_ctx_list ? march_logger_ctx_list : logger_nil();
+    pthread_mutex_unlock(&march_logger_mutex);
+    return ctx;
+}
+
+/* logger_write(level_str, msg, ctx, extra) → unit
+ * Writes:  [LEVEL] message {ctx_key=val, extra_key=val}  to stderr. */
+void *march_logger_write(void *level_str, void *msg, void *ctx, void *extra) {
+    march_string *ls = (march_string *)level_str;
+    march_string *ms = (march_string *)msg;
+    fputc('[', stderr);
+    fwrite(ls->data, 1, (size_t)ls->len, stderr);
+    fputs("] ", stderr);
+    fwrite(ms->data, 1, (size_t)ms->len, stderr);
+    /* Check if either ctx or extra has any entries */
+    int32_t ctx_tag   = *(int32_t *)((char *)ctx   + 8);
+    int32_t extra_tag = *(int32_t *)((char *)extra  + 8);
+    if (ctx_tag != 0 || extra_tag != 0) {
+        fputs(" {", stderr);
+        logger_print_pairs(ctx);
+        /* If both non-empty, separate with comma */
+        if (ctx_tag != 0 && extra_tag != 0) fputs(", ", stderr);
+        logger_print_pairs(extra);
+        fputc('}', stderr);
+    }
+    fputc('\n', stderr);
+    return logger_nil();
 }
