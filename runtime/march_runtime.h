@@ -213,6 +213,10 @@ void   *march_vault_drop(void *table, void *key);
 void   *march_vault_update(void *table, void *key, void *f);
 int64_t march_vault_size(void *table);
 void   *march_vault_keys(void *table);
+/* String-namespace helpers: accept a String name, auto-create/find vault. */
+void   *march_vault_ns_set(void *ns, void *key, void *value);
+void   *march_vault_ns_get(void *ns, void *key);
+void   *march_vault_ns_drop(void *ns, void *key);
 
 /* Crypto builtins (march_extras.c). */
 void   *march_sha256(void *data);

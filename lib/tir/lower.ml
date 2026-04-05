@@ -95,6 +95,20 @@ let rec convert_ty (t : Typecheck.ty) : Tir.ty =
   | Typecheck.TChan _         -> Tir.TCon ("Chan", [])  (* lowered to opaque Chan ptr *)
   | Typecheck.TError          -> Tir.TVar "_err"
 
+(* ── Parameter type scope (set by lower_fn_def, used by lower_to_atom_k) ── *)
+
+(** Maps current function's (or lambda's) parameter names → their TIR types.
+    Used to give body variable references the correct type when [ty_of_span]
+    returns a wrong or stale type for a parameter at its use-site (e.g. due
+    to shared mutable type_map entries).  Managed by [lower_fn_def] and the
+    [ELam] case in [lower_expr]:
+    - [lower_fn_def] saves/restores across nested calls so function scopes
+      don't interfere.
+    - [ELam] temporarily installs the lambda's own parameter types so the
+      lambda body can't accidentally inherit an enclosing function parameter
+      of the same name but different type. *)
+let _fn_param_types : (string, Tir.ty) Hashtbl.t = Hashtbl.create 8
+
 (* ── Type map reference (set by lower_module, used by lower_expr) ── *)
 
 (** Optional typechecker type_map threaded through lowering.
@@ -144,9 +158,24 @@ let _ensure_module_lowered : (string -> unit) ref = ref (fun _ -> ())
 (* ── Interface method resolution ────────────────────────────────── *)
 
 (** Maps interface method names to a list of (concrete_type_name, mangled_fn_name).
-    Used during lowering to rewrite calls like [show(42)] → [Show$Int.show(42)]. *)
+    Used during lowering to rewrite calls like [show(42)] → [Show$Int.show(42)].
+    Keys include BOTH base names (e.g. "checkpoint_get") AND fully-qualified
+    names (e.g. "Conduit.Storage.checkpoint_get") so that polymorphic call sites
+    that use qualified names can be resolved post-monomorphization. *)
 let _iface_methods : (string, (string * string) list) Hashtbl.t ref
   = ref (Hashtbl.create 0)
+
+(** Saved copy of [_iface_methods] after the most recent [lower_module] call.
+    Retained so that [Mono.monomorphize] can resolve interface calls in
+    functions that were polymorphic during lowering but become concrete after
+    type-variable substitution. *)
+let _saved_iface_methods : (string, (string * string) list) Hashtbl.t ref
+  = ref (Hashtbl.create 0)
+
+(** Return the interface-method dispatch table built during the last call to
+    [lower_module].  Used by the monomorphization pass. *)
+let get_iface_methods () : (string, (string * string) list) Hashtbl.t =
+  !_saved_iface_methods
 
 (** Maps base function names to [(arity, mangled_name)] for default-arg functions.
     Built from [DFn] declarations whose names end with [$N] (N = arity number).
@@ -156,9 +185,21 @@ let _default_dispatch : (string, (int * string) list) Hashtbl.t ref
 
 (** Resolve an interface method call if possible.
     Given a method name and the inferred type of the first argument,
-    returns the mangled impl function name, or None. *)
+    returns the mangled impl function name, or None.
+    Tries the name as-is first, then progressively strips module prefixes to
+    handle calls like "Conduit.Storage.enqueue" when the impl was registered
+    under "Storage.enqueue" (user wrote `impl Storage(T)` after `import Conduit`). *)
 let resolve_iface_method (method_name : string) (arg_span : Ast.span) : string option =
-  match Hashtbl.find_opt !_iface_methods method_name with
+  let rec find_impls name =
+    match Hashtbl.find_opt !_iface_methods name with
+    | Some impls -> Some impls
+    | None ->
+      (match String.index_opt name '.' with
+       | None -> None
+       | Some i ->
+         find_impls (String.sub name (i + 1) (String.length name - i - 1)))
+  in
+  match find_impls method_name with
   | None -> None
   | Some impls ->
     match !_type_map_ref with
@@ -198,6 +239,19 @@ let rec lower_to_atom_k (e : Ast.expr) (k : Tir.atom -> Tir.expr) : Tir.expr =
      | Some i -> !_ensure_module_lowered (String.sub name 0 i)
      | None -> ());
     let ty = ty_of_span span in
+    (* Use the parameter's declared type (from _fn_param_types) when available,
+       rather than ty_of_span.  The type_map is shared across the whole program
+       and ty_of_span may return a stale or spurious type for a parameter
+       use-site (e.g. Result(String,String) instead of the concrete storage
+       record type, because the mutable typechecker TVar was linked elsewhere).
+       _fn_param_types is kept accurate for the current scope by lower_fn_def
+       (which sets it to the function's declared params, saved/restored on
+       nesting) and the ELam case (which installs the lambda's own params and
+       removes enclosing-function entries that the lambda shadows). *)
+    let ty = match Hashtbl.find_opt _fn_param_types name with
+      | Some param_ty -> param_ty
+      | None -> ty
+    in
     k (Tir.AVar { v_name = name; v_ty = ty; v_lin = Tir.Unr })
   | _ ->
     let rhs = lower_expr e in
@@ -224,7 +278,11 @@ and lower_expr (e : Ast.expr) : Tir.expr =
     (match String.index_opt name '.' with
      | Some i -> !_ensure_module_lowered (String.sub name 0 i)
      | None -> ());
-    Tir.EAtom (Tir.AVar { v_name = name; v_ty = ty_of_span span; v_lin = Tir.Unr })
+    let ty = match Hashtbl.find_opt _fn_param_types name with
+      | Some param_ty -> param_ty
+      | None -> ty_of_span span
+    in
+    Tir.EAtom (Tir.AVar { v_name = name; v_ty = ty; v_lin = Tir.Unr })
 
   (* --- Let bindings --- *)
   | Ast.ELet (b, _) ->
@@ -235,7 +293,29 @@ and lower_expr (e : Ast.expr) : Tir.expr =
   | Ast.EBlock ([e], _) -> lower_expr e
   | Ast.EBlock (Ast.ELet (b, _) :: rest, sp) ->
     let rhs = lower_expr b.bind_expr in
+    (* When this let binding introduces a name that shadows a function parameter,
+       temporarily remove the parameter entry from _fn_param_types so that
+       references to the bound name in the rest of the block use the let-bound
+       type (from ty_of_span) rather than the parameter's declared type.
+       We save the removed entries and restore them after processing the body. *)
+    let saved_shadowed : (string * Tir.ty) list =
+      let check_pat_name pat =
+        match pat with
+        | Ast.PatVar n ->
+          (match Hashtbl.find_opt _fn_param_types n.txt with
+           | Some ty -> Some (n.txt, ty)
+           | None    -> None)
+        | _ -> None
+      in
+      let pats = match b.bind_pat with
+        | Ast.PatTuple (ps, _) -> ps
+        | p -> [p]
+      in
+      List.filter_map check_pat_name pats
+    in
+    List.iter (fun (name, _) -> Hashtbl.remove _fn_param_types name) saved_shadowed;
     let body = lower_expr (Ast.EBlock (rest, sp)) in
+    List.iter (fun (name, ty) -> Hashtbl.replace _fn_param_types name ty) saved_shadowed;
     (match b.bind_pat with
      | Ast.PatVar n ->
        let v : Tir.var = {
@@ -451,7 +531,33 @@ and lower_expr (e : Ast.expr) : Tir.expr =
                             |> Option.value ~default:unknown_ty);
           v_lin = lower_linearity p.param_lin }
       ) params in
+    (* Lambda parameters take precedence over any outer function parameters
+       with the same name in _fn_param_types.  Without this, a lambda
+         fn b -> if b do 1 else 0 end
+       defined inside a function that has a parameter named 'b' would have
+       its body lowered with the OUTER function's type for 'b', not the
+       lambda's own 'b' type (e.g. Bool vs ColumnBuilder).
+       We save the displaced entries and restore them after the body. *)
+    let saved_lam_params : (string * Tir.ty option) list =
+      List.map (fun (v : Tir.var) ->
+        (v.v_name, Hashtbl.find_opt _fn_param_types v.v_name)
+      ) params'
+    in
+    List.iter (fun (v : Tir.var) ->
+      match v.v_ty with
+      | Tir.TVar "_" ->
+        (* Unknown lambda param type — remove outer entry so body falls back
+           to ty_of_span rather than inheriting a possibly-wrong outer type. *)
+        Hashtbl.remove _fn_param_types v.v_name
+      | _ ->
+        Hashtbl.replace _fn_param_types v.v_name v.v_ty
+    ) params';
     let body' = lower_expr body in
+    List.iter (fun (name, saved) ->
+      match saved with
+      | Some ty -> Hashtbl.replace _fn_param_types name ty
+      | None    -> Hashtbl.remove _fn_param_types name
+    ) saved_lam_params;
     (* Try to get the return type from the lambda body's span first.
        When that span isn't in the type_map (e.g. desugared lambdas passed to
        builtins), fall back to the lambda's own inferred type (lam_ty) which
@@ -835,7 +941,15 @@ let lower_fn_def (def : Ast.fn_def) : Tir.fn_def =
     | Some t -> lower_ty t
     | None -> ty_of_expr clause.fc_body
   in
+  (* Populate the parameter type scope so that body variable references can
+     fall back to the declared parameter type when ty_of_span gives TError.
+     Save/restore to handle nested lower_fn_def calls (impl methods, etc.). *)
+  let saved_scope = Hashtbl.copy _fn_param_types in
+  Hashtbl.clear _fn_param_types;
+  List.iter (fun v -> Hashtbl.replace _fn_param_types v.Tir.v_name v.Tir.v_ty) params;
   let body = lower_expr clause.fc_body in
+  Hashtbl.clear _fn_param_types;
+  Hashtbl.iter (fun k v -> Hashtbl.replace _fn_param_types k v) saved_scope;
   { fn_name = def.fn_name.txt; fn_params = params; fn_ret_ty = ret_ty; fn_body = body }
 
 (** Lower a type definition. *)
@@ -860,6 +974,8 @@ let lower_type_def (name : Ast.name) (_params : Ast.name list) (td : Ast.type_de
 let rec lower_stdlib_mod_decls prefix decls =
   let direct_fn_names = List.filter_map (function
       | Ast.DFn (def, _) -> Some def.fn_name.txt
+      | Ast.DLet (_, b, _) ->
+        (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
       | _ -> None) decls in
   List.iter (fun d ->
       match d with
@@ -873,6 +989,21 @@ let rec lower_stdlib_mod_decls prefix decls =
          | None -> ())
       | Ast.DMod (sub_name, _, sub_decls, _) ->
         lower_stdlib_mod_decls (prefix ^ sub_name.txt ^ ".") sub_decls
+      | Ast.DLet (_, b, _) ->
+        (* Module-level let bindings are compiled as zero-arg functions so they
+           can be referenced by qualified name (e.g. Crypto.pw_dklen). *)
+        (match b.bind_pat with
+         | Ast.PatVar n ->
+           let rhs = lower_expr b.bind_expr in
+           let fn : Tir.fn_def = {
+             fn_name   = prefix ^ n.txt;
+             fn_params = [];
+             fn_ret_ty = (match b.bind_ty with Some t -> lower_ty t
+                          | None -> ty_of_expr b.bind_expr);
+             fn_body   = rhs;
+           } in
+           !_fns_ref := fn :: !(!_fns_ref)
+         | _ -> ())
       | _ -> ()
     ) decls
 
@@ -1337,33 +1468,59 @@ let lower_module ?type_map ?(test_mode=false) (m : Ast.module_) : Tir.tir_module
     ) hash_specs;
   end; (* end of builtin iface injection *)
   (* Pass 1: Collect interface/impl declarations first so that interface
-     method resolution is available when lowering function bodies. *)
-  List.iter (fun d ->
-      match d with
-      | Ast.DInterface (idef, _) ->
-        List.iter (fun (m : Ast.method_decl) ->
-            if not (Hashtbl.mem !_iface_methods m.md_name.txt) then
-              Hashtbl.replace !_iface_methods m.md_name.txt []
-          ) idef.iface_methods
-      | Ast.DImpl (idef, _) ->
-        let type_name = match idef.impl_ty with
-          | Ast.TyCon ({ txt = name; _ }, _) -> name
-          | Ast.TyTuple _  -> "$Tuple"
-          | Ast.TyRecord _ -> "$Record"
-          | _ -> "$Unknown"
-        in
-        List.iter (fun ((mname : Ast.name), (mdef : Ast.fn_def)) ->
-            let mangled = Printf.sprintf "%s$%s.%s"
-              idef.impl_iface.txt type_name mname.txt in
-            let fn = lower_fn_def mdef in
-            fns := { fn with fn_name = mangled } :: !fns;
-            let existing = match Hashtbl.find_opt !_iface_methods mname.txt with
-              | Some l -> l | None -> [] in
-            Hashtbl.replace !_iface_methods mname.txt
-              ((type_name, mangled) :: existing)
-          ) idef.impl_methods
-      | _ -> ()
-    ) m.mod_decls;
+     method resolution is available when lowering function bodies.
+     Recursively processes DMod contents so that impls declared inside
+     imported modules (which are wrapped in DMod by resolve_imports) are
+     also registered. *)
+  let rec collect_iface_impls decls =
+    List.iter (fun d ->
+        match d with
+        | Ast.DInterface (idef, _) ->
+          List.iter (fun (m : Ast.method_decl) ->
+              if not (Hashtbl.mem !_iface_methods m.md_name.txt) then
+                Hashtbl.replace !_iface_methods m.md_name.txt []
+            ) idef.iface_methods
+        | Ast.DImpl (idef, _) ->
+          let type_name = match idef.impl_ty with
+            | Ast.TyCon ({ txt = name; _ }, _) -> name
+            | Ast.TyTuple _  -> "$Tuple"
+            | Ast.TyRecord _ -> "$Record"
+            | _ -> "$Unknown"
+          in
+          List.iter (fun ((mname : Ast.name), (mdef : Ast.fn_def)) ->
+              let mangled = Printf.sprintf "%s$%s.%s"
+                idef.impl_iface.txt type_name mname.txt in
+              let qualified_key = idef.impl_iface.txt ^ "." ^ mname.txt in
+              (* Only lower the function body once per mangled name
+                 (avoids double-lowering when DMod recursion re-encounters a
+                 top-level impl that was already processed). *)
+              let already = match Hashtbl.find_opt !_iface_methods qualified_key with
+                | Some l -> List.mem_assoc type_name l
+                | None   -> false
+              in
+              if not already then begin
+                let fn = lower_fn_def mdef in
+                fns := { fn with fn_name = mangled } :: !fns;
+                let existing = match Hashtbl.find_opt !_iface_methods mname.txt with
+                  | Some l -> l | None -> [] in
+                Hashtbl.replace !_iface_methods mname.txt
+                  ((type_name, mangled) :: existing);
+                (* Also register under fully-qualified key "Interface.method" so that
+                   polymorphic call sites using qualified names can be resolved
+                   post-monomorphization. *)
+                let existing2 = match Hashtbl.find_opt !_iface_methods qualified_key with
+                  | Some l -> l | None -> [] in
+                Hashtbl.replace !_iface_methods qualified_key
+                  ((type_name, mangled) :: existing2)
+              end
+            ) idef.impl_methods
+        | Ast.DMod (_, _, inner_decls, _) ->
+          (* Recurse so that impls inside imported DMod wrappers are found. *)
+          collect_iface_impls inner_decls
+        | _ -> ()
+      ) decls
+  in
+  collect_iface_impls m.mod_decls;
   (* Build default-arg dispatch table from mangled DFn names (foo$N pattern).
      These are generated by desugar's expand_defaults_decl.
      Maps base_name -> [(arity, mangled_name)] so that call sites can be
@@ -1423,6 +1580,8 @@ let lower_module ?type_map ?(test_mode=false) (m : Ast.module_) : Tir.tir_module
         let rec lower_mod_decls prefix decls =
           let direct_fn_names = List.filter_map (function
               | Ast.DFn (def, _) -> Some def.fn_name.txt
+              | Ast.DLet (_, b, _) ->
+                (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
               | _ -> None) decls in
           List.iter (fun d ->
               match d with
@@ -1437,17 +1596,56 @@ let lower_module ?type_map ?(test_mode=false) (m : Ast.module_) : Tir.tir_module
               | Ast.DMod (sub_name, _, sub_decls, _) ->
                 lower_mod_decls (prefix ^ sub_name.txt ^ ".") sub_decls
               | Ast.DLet (_, b, _) ->
+                (* Module-level let bindings are compiled as zero-arg functions
+                   so they can be referenced by qualified name after
+                   rename_tir_vars renames the short name to prefix^name. *)
                 let rhs = lower_expr b.bind_expr in
                 (match b.bind_pat with
                  | Ast.PatVar n ->
-                   let v : Tir.var = {
-                     v_name = n.txt;
-                     v_ty = (match b.bind_ty with Some t -> lower_ty t
-                             | None -> ty_of_expr b.bind_expr);
-                     v_lin = lower_linearity b.bind_lin;
+                   let fn : Tir.fn_def = {
+                     fn_name   = prefix ^ n.txt;
+                     fn_params = [];
+                     fn_ret_ty = (match b.bind_ty with Some t -> lower_ty t
+                                  | None -> ty_of_expr b.bind_expr);
+                     fn_body   = rhs;
                    } in
-                   top_lets := (v, rhs) :: !top_lets
+                   fns := fn :: !fns
                  | _ -> ())
+              | Ast.DUse (ud, _) ->
+                (* Handle [import X] inside a module body.  Functions from
+                   imported modules are stored under the current context prefix
+                   (e.g. "import Query" inside "mod Migration do" → fns are
+                   named "Migration.Query.*").  Build aliases mapping the short
+                   name (e.g. "simple_query") to the context-qualified name
+                   (e.g. "Migration.Query.simple_query") so that calls to the
+                   unqualified name are resolved correctly. *)
+                let import_prefix =
+                  String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) ^ "."
+                in
+                let ctx_prefix = prefix ^ import_prefix in
+                let all_fn_names =
+                  List.map (fun (fn : Tir.fn_def) -> fn.fn_name) !fns
+                in
+                let register_aliases p =
+                  List.iter (fun fn_name ->
+                    let plen = String.length p in
+                    if String.length fn_name > plen
+                       && String.sub fn_name 0 plen = p
+                    then begin
+                      let short = String.sub fn_name plen
+                                    (String.length fn_name - plen) in
+                      (* First registration wins (consistent with top-level
+                         DUse handling). *)
+                      if not (Hashtbl.mem !_use_aliases short) then
+                        Hashtbl.replace !_use_aliases short fn_name
+                    end
+                  ) all_fn_names
+                in
+                (* Prefer context-qualified name (e.g. "Migration.Query.f");
+                   fall back to bare module name (e.g. "Query.f") for
+                   imports of top-level non-prefixed modules. *)
+                register_aliases ctx_prefix;
+                register_aliases import_prefix
               | _ -> ()
             ) decls
         in
@@ -1637,6 +1835,8 @@ let lower_module ?type_map ?(test_mode=false) (m : Ast.module_) : Tir.tir_module
     tm_exports = [];
     tm_tests = List.rev !test_pairs } in
   _type_map_ref := None;
+  (* Save a snapshot before clearing so the mono pass can use it. *)
+  _saved_iface_methods := Hashtbl.copy !_iface_methods;
   _iface_methods := Hashtbl.create 0;
   _use_aliases := Hashtbl.create 0;
   result

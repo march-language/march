@@ -153,6 +153,7 @@ let load_stdlib () =
       "plot.march";
       "dataframe.march";
       "tls.march";
+      "uuid.march";
       "vault.march";
       "channel.march";
       "pubsub.march";
@@ -982,6 +983,10 @@ let compile filename =
        phases := March_dump.Dump.ast_phase user_ast "parse" :: !phases);
     let tir = March_tir.Lower.lower_module ~type_map ~test_mode:!do_test desugared in
     snap_tir "tir-lower" tir;
+    (* Capture the interface-dispatch table before it is cleared by lower_module.
+       Passed to monomorphize so it can resolve interface calls in functions
+       that were polymorphic during lowering but now have concrete types. *)
+    let iface_methods = March_tir.Lower.get_iface_methods () in
     (* For WASM island targets, mark render/update/init as exported.
        Set exports BEFORE monomorphization so the functions get mono'd. *)
     let tir = match parse_target !target_str with
@@ -1000,7 +1005,7 @@ let compile filename =
         { tir with March_tir.Tir.tm_exports = exports }
       | _ -> tir
     in
-    let tir = March_tir.Mono.monomorphize tir in
+    let tir = March_tir.Mono.monomorphize ~iface_methods tir in
     snap_tir "tir-mono" tir;
     (* After mono, update tm_exports to use monomorphized names *)
     let tir =

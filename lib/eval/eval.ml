@@ -4919,6 +4919,66 @@ let base_env : env =
         ) keys (VCon ("Nil", []))
       | _ -> eval_error "vault_keys: expected VaultTable"))
 
+  (* String-namespace vault helpers: accept a String namespace name and
+     auto-create/find the vault by that name.  Useful for the pattern:
+       ptype MyStore = { ns : String }
+       Vault.ns_set(self.ns, key, value) *)
+  ; ("vault_ns_set", VBuiltin ("vault_ns_set", function
+      | [VString name; key; v] ->
+        let id = match Hashtbl.find_opt vault_name_registry name with
+          | Some id -> id
+          | None ->
+            let id = !vault_next_id in
+            incr vault_next_id;
+            let tbl = vault_make_table id name in
+            Hashtbl.replace vault_registry id tbl;
+            Hashtbl.replace vault_name_registry name id;
+            id
+        in
+        let tbl = vault_lookup id in
+        let k = vault_key_of_value key in
+        let shard = vault_shard_for k tbl.vt_shards in
+        Mutex.lock shard.vs_mutex;
+        Hashtbl.replace shard.vs_data k { vr_value = v; vr_expiry = None };
+        Mutex.unlock shard.vs_mutex;
+        VUnit
+      | _ -> eval_error "vault_ns_set: expected (String, key, value)"))
+
+  ; ("vault_ns_get", VBuiltin ("vault_ns_get", function
+      | [VString name; key] ->
+        (match Hashtbl.find_opt vault_name_registry name with
+         | None -> VCon ("None", [])
+         | Some id ->
+           let tbl = vault_lookup id in
+           let k = vault_key_of_value key in
+           let shard = vault_shard_for k tbl.vt_shards in
+           Mutex.lock shard.vs_mutex;
+           let result =
+             match Hashtbl.find_opt shard.vs_data k with
+             | None -> VCon ("None", [])
+             | Some row when not (vault_row_live row) ->
+               Hashtbl.remove shard.vs_data k;
+               VCon ("None", [])
+             | Some row -> VCon ("Some", [row.vr_value])
+           in
+           Mutex.unlock shard.vs_mutex;
+           result)
+      | _ -> eval_error "vault_ns_get: expected (String, key)"))
+
+  ; ("vault_ns_drop", VBuiltin ("vault_ns_drop", function
+      | [VString name; key] ->
+        (match Hashtbl.find_opt vault_name_registry name with
+         | None -> VUnit
+         | Some id ->
+           let tbl = vault_lookup id in
+           let k = vault_key_of_value key in
+           let shard = vault_shard_for k tbl.vt_shards in
+           Mutex.lock shard.vs_mutex;
+           Hashtbl.remove shard.vs_data k;
+           Mutex.unlock shard.vs_mutex;
+           VUnit)
+      | _ -> eval_error "vault_ns_drop: expected (String, key)"))
+
   (* ---- Actor.call / Actor.cast ---- *)
   (* actor_cast: fire-and-forget async message to an actor. *)
   ; ("actor_cast", VBuiltin ("actor_cast", function
@@ -5201,7 +5261,21 @@ let lookup name env =
          ensure_module_loaded mod_name;
          (match Hashtbl.find_opt module_registry name with
           | Some v -> v
-          | None -> eval_error "unbound variable: %s" name))
+          | None ->
+            (* Interface dispatch fallback: progressively strip leading module
+               components to resolve "Conduit.Storage.checkpoint_get" →
+               "Storage.checkpoint_get" which is registered in module_registry
+               when the impl was evaluated. *)
+            let rec strip_lookup nm =
+              match String.index_opt nm '.' with
+              | None -> eval_error "unbound variable: %s" name
+              | Some i ->
+                let shorter = String.sub nm (i+1) (String.length nm - i - 1) in
+                match Hashtbl.find_opt module_registry shorter with
+                | Some v -> v
+                | None -> strip_lookup shorter
+            in
+            strip_lookup name))
     else
       eval_error "unbound variable: %s" name
 
@@ -6442,11 +6516,16 @@ let rec eval_decl (env : env) (d : decl) : env =
           | _ ->
             eval_decl env (DFn (fn_def, sp))
         in
-        (* Phase 6b: register in impl_tbl for own() resolution *)
+        (* Phase 6b: register in impl_tbl for own() resolution, and also
+           register under "InterfaceName.MethodName" in module_registry so
+           that fully-qualified interface calls like "Conduit.Storage.checkpoint_get"
+           can be resolved via the lookup fallback (which strips module prefixes). *)
         if type_name <> "" then begin
           match List.assoc_opt mname.txt new_env with
           | Some fn_val ->
-            Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val
+            Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
+            let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
+            Hashtbl.replace module_registry iface_qualified fn_val
           | None -> ()
         end;
         (* For Json derive: to_json only registers in impl_tbl (so the
@@ -6690,11 +6769,16 @@ let eval_module_env (m : module_) : env =
             | _ ->
               eval_decl acc_env (DFn (fn_def, sp))
           in
-          (* Phase 6b: register in impl_tbl for own() resolution *)
+          (* Phase 6b: register in impl_tbl for own() resolution, and also
+             register under "InterfaceName.MethodName" in module_registry so
+             that fully-qualified interface calls like "Conduit.Storage.checkpoint_get"
+             can be resolved via the lookup fallback (which strips module prefixes). *)
           if type_name <> "" then begin
             match List.assoc_opt mname.txt new_acc with
             | Some fn_val ->
-              Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val
+              Hashtbl.replace impl_tbl (idef.impl_iface.txt, type_name) fn_val;
+              let iface_qualified = idef.impl_iface.txt ^ "." ^ mname.txt in
+              Hashtbl.replace module_registry iface_qualified fn_val
             | None -> ()
           end;
           (* For Json derive: to_json only registers in impl_tbl;

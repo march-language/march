@@ -355,10 +355,10 @@ If jv is not an Object, returns None.
     Json.get(Object([("x", Number(1.0))]), "x") -- Some(Number(1.0))
     Json.get(Null, "x")                          -- None
 """
-fn get(jv, key) do
+fn get(jv : JsonValue, key : String) : Option(JsonValue) do
   match jv do
   Object(kvs) -> do
-    fn find(pairs) do
+    fn find(pairs : List((String, JsonValue))) : Option(JsonValue) do
       match pairs do
       Nil -> None
       Cons(kv, rest) -> do
@@ -380,7 +380,7 @@ Returns Some(value) if the full path exists, or None if any step fails.
 
     Json.get_in(obj, ["a", "b", "c"]) -- equivalent to obj.a.b.c
 """
-fn get_in(jv, keys) do
+fn get_in(jv : JsonValue, keys : List(String)) : Option(JsonValue) do
   match keys do
   Nil -> Some(jv)
   Cons(k, rest) -> do

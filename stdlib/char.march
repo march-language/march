@@ -7,7 +7,8 @@ mod Char do
 
 doc "Returns true if c is an ASCII letter (a-z or A-Z)."
 fn is_alpha(c : Char) : Bool do
-  char_is_alpha(c)
+  let n = char_to_int(c)
+  (n >= 65 && n <= 90) || (n >= 97 && n <= 122)
 end
 
 doc "Returns true if c is an ASCII digit (0-9)."
@@ -22,12 +23,14 @@ end
 
 doc "Returns true if c is an ASCII uppercase letter (A-Z)."
 fn is_upper(c : Char) : Bool do
-  char_is_uppercase(c)
+  let n = char_to_int(c)
+  n >= 65 && n <= 90
 end
 
 doc "Returns true if c is an ASCII lowercase letter (a-z)."
 fn is_lower(c : Char) : Bool do
-  char_is_lowercase(c)
+  let n = char_to_int(c)
+  n >= 97 && n <= 122
 end
 
 doc "Returns true if c is an ASCII whitespace character (space, tab, newline, etc.)."
@@ -37,12 +40,18 @@ end
 
 doc "Converts c to uppercase. Non-alphabetic chars are returned unchanged."
 fn to_upper(c : Char) : Char do
-  char_to_uppercase(c)
+  let n = char_to_int(c)
+  if n >= 97 && n <= 122 do char_from_int(n - 32)
+  else c
+  end
 end
 
 doc "Converts c to lowercase. Non-alphabetic chars are returned unchanged."
 fn to_lower(c : Char) : Char do
-  char_to_lowercase(c)
+  let n = char_to_int(c)
+  if n >= 65 && n <= 90 do char_from_int(n + 32)
+  else c
+  end
 end
 
 doc "Returns the integer code point of c."
@@ -57,7 +66,7 @@ end
 
 doc "Returns a single-character string containing c."
 fn to_string(c : Char) : String do
-  String.from_char(c)
+  string_from_chars(Cons(c, Nil))
 end
 
 doc "Returns true if c is ASCII (code point 0-127)."
@@ -74,7 +83,7 @@ end
 doc "Returns the numeric value of a digit character (0-9). Panics if not a digit."
 fn digit_value(c : Char) : Int do
   if char_is_digit(c) do
-    char_to_int(c) - char_to_int('0')
+    char_to_int(c) - 48
   else
     panic("Char.digit_value: not a digit")
   end
@@ -83,13 +92,13 @@ end
 doc "Returns the hex value of a hex digit (0-9, a-f, A-F). Panics if not hex."
 fn hex_digit_value(c : Char) : Int do
   if char_is_digit(c) do
-    char_to_int(c) - char_to_int('0')
+    char_to_int(c) - 48
   else
-    if char_to_int(c) >= char_to_int('a') && char_to_int(c) <= char_to_int('f') do
-      char_to_int(c) - char_to_int('a') + 10
+    if char_to_int(c) >= 97 && char_to_int(c) <= 102 do
+      char_to_int(c) - 97 + 10
     else
-      if char_to_int(c) >= char_to_int('A') && char_to_int(c) <= char_to_int('F') do
-        char_to_int(c) - char_to_int('A') + 10
+      if char_to_int(c) >= 65 && char_to_int(c) <= 70 do
+        char_to_int(c) - 65 + 10
       else
         panic("Char.hex_digit_value: not a hex digit")
       end
@@ -100,8 +109,8 @@ end
 doc "Returns true if c is a hex digit (0-9, a-f, A-F)."
 fn is_hex_digit(c : Char) : Bool do
   char_is_digit(c) ||
-  (char_to_int(c) >= char_to_int('a') && char_to_int(c) <= char_to_int('f')) ||
-  (char_to_int(c) >= char_to_int('A') && char_to_int(c) <= char_to_int('F'))
+  (char_to_int(c) >= 97 && char_to_int(c) <= 102) ||
+  (char_to_int(c) >= 65 && char_to_int(c) <= 70)
 end
 
 end

@@ -349,6 +349,76 @@ void *march_tcp_recv_chunk(void *fd_ptr, int64_t max_bytes, int64_t timeout_ms) 
     return make_ok(s);
 }
 
+/* tcp_recv_exact(fd, n) → Result(Bytes, String)
+ * Reads exactly n bytes from the socket, blocking until all are received. */
+void *march_tcp_recv_exact(int64_t fd, int64_t n) {
+    if (n <= 0) {
+        void *empty = march_string_lit("", 0);
+        return make_ok(empty);
+    }
+    char *buf = malloc((size_t)n);
+    if (!buf) return make_err("tcp_recv_exact: OOM");
+    size_t received = 0;
+    while ((int64_t)received < n) {
+        ssize_t r = recv((int)fd, buf + received, (size_t)(n - (int64_t)received), 0);
+        if (r <= 0) {
+            free(buf);
+            return make_err("tcp_recv_exact: connection closed");
+        }
+        received += (size_t)r;
+    }
+    void *s = march_string_lit(buf, n);
+    free(buf);
+    return make_ok(s);
+}
+
+/* tcp_recv_chunked_frame(fd_ptr) → Result(String, String)
+ * Reads one HTTP chunked transfer-encoding frame.
+ * Returns Ok("") when the terminal 0-size chunk is reached.
+ * Format: "<hex_len>\r\n<data>\r\n" per chunk. */
+void *march_tcp_recv_chunked_frame(void *fd_ptr) {
+    int fd = (int)(int64_t)(uintptr_t)fd_ptr;
+    /* Read the chunk-size line (hex digits followed by \r\n). */
+    char size_buf[32];
+    size_t si = 0;
+    while (si < sizeof(size_buf) - 1) {
+        char c;
+        ssize_t n = recv(fd, &c, 1, 0);
+        if (n <= 0) return make_err("tcp_recv_chunked_frame: connection closed reading size");
+        if (c == '\r') {
+            /* Consume the \n */
+            recv(fd, &c, 1, 0);
+            break;
+        }
+        size_buf[si++] = c;
+    }
+    size_buf[si] = '\0';
+    long chunk_size = strtol(size_buf, NULL, 16);
+    if (chunk_size < 0) return make_err("tcp_recv_chunked_frame: invalid chunk size");
+    if (chunk_size == 0) {
+        /* Terminal chunk — consume trailing \r\n */
+        char tmp[2];
+        recv(fd, tmp, 2, MSG_WAITALL);
+        void *empty = march_string_lit("", 0);
+        return make_ok(empty);
+    }
+    /* Read exactly chunk_size bytes of data. */
+    char *buf = malloc((size_t)chunk_size);
+    if (!buf) return make_err("tcp_recv_chunked_frame: OOM");
+    size_t received = 0;
+    while ((ssize_t)received < chunk_size) {
+        ssize_t n = recv(fd, buf + received, (size_t)(chunk_size - (ssize_t)received), 0);
+        if (n <= 0) { free(buf); return make_err("tcp_recv_chunked_frame: connection closed reading data"); }
+        received += (size_t)n;
+    }
+    /* Consume trailing \r\n after the chunk data. */
+    char trailing[2];
+    recv(fd, trailing, 2, MSG_WAITALL);
+    void *s = march_string_lit(buf, (int64_t)chunk_size);
+    free(buf);
+    return make_ok(s);
+}
+
 /* tcp_recv_http_headers(fd_ptr, max_bytes) → Result(String, String)
  * Reads until \r\n\r\n (end of HTTP headers). */
 void *march_tcp_recv_http_headers(void *fd_ptr, int64_t max_bytes) {

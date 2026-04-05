@@ -292,10 +292,10 @@ end
 
 doc "Sorts by a comparator function. Uses merge sort (stable, O(n log n))."
 fn sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
-  fn rev_onto(rev_prefix : List(a), tail : List(a)) : List(a) do
+  fn rev_onto(rev_prefix : List(a), suffix : List(a)) : List(a) do
     match rev_prefix do
-    Nil        -> tail
-    Cons(h, t) -> rev_onto(t, Cons(h, tail))
+    Nil        -> suffix
+    Cons(h, t) -> rev_onto(t, Cons(h, suffix))
     end
   end
   fn merge(a : List(a), b : List(a)) : List(a) do

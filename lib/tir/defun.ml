@@ -160,8 +160,9 @@ let builtin_names : StringSet.t =
 (* ── Phase 0: collect top-level names ────────────────────────────── *)
 
 let collect_top_level_names (m : Tir.tir_module) : StringSet.t =
-  let user_fns = List.fold_left (fun s fn -> StringSet.add fn.Tir.fn_name s)
-      StringSet.empty m.Tir.tm_fns in
+  let user_fns = List.fold_left (fun s fn ->
+      StringSet.add fn.Tir.fn_name s
+    ) StringSet.empty m.Tir.tm_fns in
   StringSet.union user_fns builtin_names
 
 (* ── Phase 1: free variable analysis ─────────────────────────────── *)

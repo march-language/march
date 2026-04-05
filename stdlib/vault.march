@@ -105,4 +105,30 @@ fn keys(table) do
   vault_keys(table)
 end
 
+doc """
+Insert or overwrite a key-value pair using a string namespace name.
+Auto-creates the named vault if it does not yet exist.
+Useful when you store a namespace string rather than a vault handle.
+
+    Vault.ns_set("my_ns", "key", 42)
+"""
+fn ns_set(ns, key, value) do
+  vault_ns_set(ns, key, value)
+end
+
+doc """
+Look up a key using a string namespace name.
+Returns None if the namespace does not exist or the key is absent.
+
+    Vault.ns_get("my_ns", "key")  -- Some(42) or None
+"""
+fn ns_get(ns, key) do
+  vault_ns_get(ns, key)
+end
+
+doc "Remove a key from a named vault namespace.  No-op if the namespace or key is absent."
+fn ns_drop(ns, key) do
+  vault_ns_drop(ns, key)
+end
+
 end

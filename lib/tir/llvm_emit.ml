@@ -35,6 +35,11 @@ type ctx = {
   (* Maps fn_name → fn_ret_ty for functions registered in top_fns.
      Used in EApp to resolve concrete return types when call-site TVar is "_". *)
   top_fn_ret_ty : (string, Tir.ty) Hashtbl.t;
+  (* Set of zero-argument top-level functions (module-level `let` constants
+     compiled as zero-arg functions).  When emit_atom encounters an AVar
+     referencing one of these, it calls the function to obtain the value
+     rather than emitting a function pointer.  Populated alongside top_fns. *)
+  zero_arg_fns  : (string, bool) Hashtbl.t;
   field_map : (string, (string * Tir.ty) list) Hashtbl.t;
   mutable ret_ty  : Tir.ty;
   fast_math : bool;
@@ -128,6 +133,7 @@ let make_ctx ?(fast_math=false) () = {
   ctor_info = Hashtbl.create 64;
   top_fns   = Hashtbl.create 64;
   top_fn_ret_ty = Hashtbl.create 64;
+  zero_arg_fns  = Hashtbl.create 16;
   field_map = Hashtbl.create 16;
   ret_ty   = Tir.TUnit;
   fast_math;
@@ -291,6 +297,7 @@ let is_builtin_fn name =
                  (* TCP/network builtins *)
                  "tcp_connect"; "tcp_close"; "tcp_recv_exact";
                  "tcp_recv_all"; "tcp_recv_chunk"; "tcp_recv_http_headers";
+                 "tcp_recv_chunked_frame";
                  (* TLS builtins *)
                  "tls_client_ctx"; "tls_server_ctx"; "tls_connect"; "tls_accept";
                  "tls_read"; "tls_write"; "tls_close"; "tls_ctx_free";
@@ -321,11 +328,13 @@ let is_builtin_fn name =
                  (* Vault (key-value store) builtins *)
                  "vault_new"; "vault_whereis"; "vault_set"; "vault_set_ttl";
                  "vault_get"; "vault_drop"; "vault_update"; "vault_size"; "vault_keys";
+                 "vault_ns_set"; "vault_ns_get"; "vault_ns_drop";
                  (* IOList builtins *)
                  "iolist_hash_fnv1a";
                  (* HTTP server builtins *)
                  "http_server_spawn_n"; "http_server_wait";
                  (* Crypto / hash builtins — see mangle_extern for C name mapping *)
+                 "md5";
                  "hmac_sha256"; "pbkdf2_sha256";
                  "sha256"; "sha512";
                  "base64_encode"; "base64_decode";
@@ -514,7 +523,8 @@ let builtin_ret_ty : string -> Tir.ty option = function
   (* TCP/network builtins *)
   | "tcp_connect"                 -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
   | "tcp_recv_exact"              -> Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]))
-  | "tcp_recv_all" | "tcp_recv_chunk" | "tcp_recv_http_headers" -> Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]))
+  | "tcp_recv_all" | "tcp_recv_chunk" | "tcp_recv_http_headers"
+  | "tcp_recv_chunked_frame" -> Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]))
   (* TLS builtins *)
   | "tls_client_ctx" | "tls_server_ctx" | "tls_connect" | "tls_accept" -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
   | "tls_read" -> Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]))
@@ -566,6 +576,9 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "vault_update"       -> Some Tir.TUnit
   | "vault_size"         -> Some Tir.TInt
   | "vault_keys"         -> Some (Tir.TCon ("List", [Tir.TPtr Tir.TUnit]))
+  | "vault_ns_set"       -> Some Tir.TUnit
+  | "vault_ns_get"       -> Some (Tir.TCon ("Option", [Tir.TPtr Tir.TUnit]))
+  | "vault_ns_drop"      -> Some Tir.TUnit
   (* Bitwise integer builtins *)
   | "int_and" | "int_or" | "int_xor"
   | "int_not" | "int_shl" | "int_shr"
@@ -576,6 +589,7 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "http_server_spawn_n"         -> Some Tir.TInt
   | "http_server_wait"            -> Some Tir.TUnit
   (* Crypto / hash builtins *)
+  | "md5"                         -> Some Tir.TString
   | "hmac_sha256"
   | "pbkdf2_sha256"           -> Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]))
   | "sha256" | "stdlib_sha256"
@@ -729,6 +743,7 @@ let mangle_extern : string -> string = function
   | "tcp_recv_all"      -> "march_tcp_recv_all"
   | "tcp_recv_chunk"    -> "march_tcp_recv_chunk"
   | "tcp_recv_http_headers" -> "march_tcp_recv_http_headers"
+  | "tcp_recv_chunked_frame" -> "march_tcp_recv_chunked_frame"
   (* TLS builtins *)
   | "tls_client_ctx"    -> "march_tls_client_ctx"
   | "tls_server_ctx"    -> "march_tls_server_ctx"
@@ -789,10 +804,14 @@ let mangle_extern : string -> string = function
   | "vault_update"       -> "march_vault_update"
   | "vault_size"         -> "march_vault_size"
   | "vault_keys"         -> "march_vault_keys"
+  | "vault_ns_set"       -> "march_vault_ns_set"
+  | "vault_ns_get"       -> "march_vault_ns_get"
+  | "vault_ns_drop"      -> "march_vault_ns_drop"
   (* IOList builtins *)
   | "iolist_hash_fnv1a"  -> "march_iolist_hash_fnv1a"
   | "main"          -> "march_main"   (* March main → march_main in LLVM *)
   (* Crypto / hash builtins *)
+  | "md5"                  -> "march_md5"
   | "hmac_sha256"          -> "march_hmac_sha256"
   | "pbkdf2_sha256"        -> "march_pbkdf2_sha256"
   | "sha256" | "stdlib_sha256"              -> "march_sha256"
@@ -932,6 +951,8 @@ let alloca_name ctx (base : string) : string =
       base ^ "_" ^ string_of_int n
   in
   Hashtbl.replace ctx.var_slot base slot;
+  (if String.length base >= 11 && String.sub base 0 11 = "Conduit.Sto" then
+    Printf.eprintf "[DEBUG alloca_name] base=%s slot=%s\n%!" base slot);
   slot
 
 (* ── Atom emission ───────────────────────────────────────────────────── *)
@@ -1028,8 +1049,12 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp hp);
     emit ctx (Printf.sprintf "store ptr @%s, ptr %s, align 8" wrap_name fp);
     ("ptr", hp)
-  | Tir.AVar v when Hashtbl.mem ctx.top_fns v.Tir.v_name ->
-    (* Top-level function reference — emit its address directly (for EApp callee) *)
+  | Tir.AVar v when Hashtbl.mem ctx.top_fns v.Tir.v_name
+                 && not (Hashtbl.mem ctx.zero_arg_fns v.Tir.v_name) ->
+    (* Top-level function reference — emit its address directly (for EApp callee).
+       Zero-arg functions (module-level `let` constants) are excluded here so
+       they fall through to the 0-arg call path below, which calls the function
+       to materialise the value rather than returning a function pointer. *)
     ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
   | Tir.AVar v when (let n = v.Tir.v_name in
                      String.length n >= 7 && String.sub n 0 7 = "march_") ->
@@ -1044,6 +1069,84 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
        var_slot or compiled_fns — so the alloca-bridge path would generate an
        invalid "%builtin.addr" load.  Emit the mangled global address directly. *)
     ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
+  (* ── AVar with no registered alloca slot ────────────────────────── *)
+  (* If var_slot has no entry for this name, there is no alloca in the
+     current function — it cannot be a locally-bound variable.  This
+     arises for cross-module references (e.g. module-level `let`
+     constants like "pw_iterations" that survive the lower pass as AVar
+     atoms) and for external function references used as first-class
+     values.  Distinguish by type:
+       • TFn with ≥1 params  → wrap in a closure trampoline (same as the
+         top_fns TFn path above, but for functions not yet in top_fns).
+       • Anything else (0-arg function / concrete value / TVar) → call
+         the function with 0 arguments to materialise the value.
+     Name resolution follows the same qualified→unqualified→extern chain
+     used by the ECallPtr handlers. *)
+  | Tir.AVar v when not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) ->
+    let resolved = match Hashtbl.find_opt ctx.unqualified_fns v.Tir.v_name with
+      | Some q -> q
+      | None   -> v.Tir.v_name
+    in
+    let fname = match Hashtbl.find_opt ctx.extern_map resolved with
+      | Some c -> c
+      | None   -> mangle_extern resolved
+    in
+    (match v.Tir.v_ty with
+     | Tir.TFn (ps, _) when ps <> [] ->
+       (* Multi-arg function used as a first-class value from a module
+          not in top_fns — wrap in a closure trampoline so that ECallPtr
+          dispatch can call it uniformly.  Mirrors lines 972–1030. *)
+       let fn_name   = llvm_name fname in
+       let wrap_name = fn_name ^ "$clo_wrap" in
+       if not (Hashtbl.mem ctx.emitted_wraps wrap_name) then begin
+         Hashtbl.add ctx.emitted_wraps wrap_name ();
+         let nparams     = List.length ps in
+         let ret_tir     = fn_ret_tir v.Tir.v_ty in
+         let target_ret  = llvm_ret_ty ret_tir in
+         let param_tys   = List.init nparams (fun _ -> "ptr") in
+         let all_params  = "ptr" :: param_tys in
+         let arg_names   = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
+         let all_decls   = "%_clo" :: arg_names in
+         let decl_str    = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) all_params all_decls) in
+         let call_args   = String.concat ", " (List.map2 (fun t n -> t ^ " " ^ n) param_tys arg_names) in
+         if target_ret = "void" then
+           Buffer.add_string ctx.extra_fns
+             (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n\n"
+                wrap_name decl_str fn_name call_args)
+         else if target_ret = "i64" then
+           Buffer.add_string ctx.extra_fns
+             (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call i64 @%s(%s)\n  %%rp = inttoptr i64 %%r to ptr\n  ret ptr %%rp\n}\n\n"
+                wrap_name decl_str fn_name call_args)
+         else if target_ret = "double" then
+           Buffer.add_string ctx.extra_fns
+             (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call double @%s(%s)\n  %%ri = bitcast double %%r to i64\n  %%rp = inttoptr i64 %%ri to ptr\n  ret ptr %%rp\n}\n\n"
+                wrap_name decl_str fn_name call_args)
+         else
+           Buffer.add_string ctx.extra_fns
+             (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret ptr %%r\n}\n\n"
+                wrap_name decl_str target_ret fn_name call_args)
+       end;
+       let hp  = fresh ctx "cwrap" in
+       emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);
+       let tgp = fresh ctx "cwt" in
+       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 8" tgp hp);
+       emit ctx (Printf.sprintf "store i32 0, ptr %s, align 4" tgp);
+       let fp  = fresh ctx "cwf" in
+       emit ctx (Printf.sprintf "%s = getelementptr i8, ptr %s, i64 16" fp hp);
+       emit ctx (Printf.sprintf "store ptr @%s, ptr %s, align 8" wrap_name fp);
+       ("ptr", hp)
+     | _ ->
+       (* 0-arg function (module-level constant) or unknown type:
+          call with no arguments to obtain the value. *)
+       let ret_tir = match Hashtbl.find_opt ctx.top_fn_ret_ty resolved with
+         | Some (Tir.TVar _) | None -> Tir.TVar "_"
+         | Some t -> t
+       in
+       let ret_ty = llvm_ret_ty ret_tir in
+       let r = fresh ctx "gl" in
+       emit ctx (Printf.sprintf "%s = call %s @%s()" r ret_ty (llvm_name fname));
+       (ret_ty, r))
+
   | Tir.AVar v ->
     let base = llvm_name v.Tir.v_name in
     let slot = match Hashtbl.find_opt ctx.var_slot base with
@@ -1730,6 +1833,51 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     end
 
 
+  (* ── ECallPtr where callee AVar has no local alloca slot ─────────── *)
+  (* The TIR lower pass may emit ECallPtr for cross-module function calls
+     when it cannot confirm at lower time that the callee is a top-level
+     definition.  If the callee AVar has NO entry in var_slot — meaning
+     no alloca was registered for it in the current function — it cannot
+     be a locally-bound closure variable, so dispatching through a closure
+     struct would read from an undefined "%%name.addr" alloca and produce
+     invalid LLVM IR (e.g. "use of undefined value
+     '%%Depot.Form.get_errors.addr'").
+     In this case emit a direct call to the global function instead.
+     This is a safe catch-all: local closure variables (let-bindings,
+     parameters) always have a var_slot entry from alloca_name/emit_fn. *)
+  | Tir.ECallPtr (Tir.AVar f, args)
+    when not (Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name)) ->
+    (if String.length f.Tir.v_name >= 11 && String.sub f.Tir.v_name 0 11 = "Conduit.Sto" then
+      Printf.eprintf "[DEBUG ECallPtr-direct] name=%s\n%!" f.Tir.v_name);
+    let arg_strs = List.map (fun a ->
+        let (ty, v) = emit_atom ctx a in ty ^ " " ^ v
+      ) args in
+    let args_str = String.concat ", " arg_strs in
+    let resolved_name = match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
+      | Some q -> q
+      | None -> f.Tir.v_name
+    in
+    let fname = match Hashtbl.find_opt ctx.extern_map resolved_name with
+      | Some c_name -> c_name
+      | None -> mangle_extern resolved_name in
+    let ret_tir =
+      match builtin_ret_ty f.Tir.v_name with
+      | Some t -> t
+      | None ->
+        (match Hashtbl.find_opt ctx.top_fn_ret_ty resolved_name with
+         | Some (Tir.TVar _) | None -> fn_ret_tir f.Tir.v_ty
+         | Some t -> t)
+    in
+    let ret_ty = llvm_ret_ty ret_tir in
+    if ret_ty = "void" then begin
+      emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
+      ("i64", "0")
+    end else begin
+      let r = fresh ctx "cr" in
+      emit ctx (Printf.sprintf "%s = call %s @%s(%s)" r ret_ty fname args_str);
+      (ret_ty, r)
+    end
+
   | Tir.ECallPtr (Tir.AVar f, [a; b])
     when f.Tir.v_name = "int_mod" || f.Tir.v_name = "int_div"
       || f.Tir.v_name = "int_mod_euclid" ->
@@ -1750,6 +1898,11 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      Field 0 of the closure is the apply fn ptr.
      Convention: apply fn takes (ptr $clo, original_params…). *)
   | Tir.ECallPtr (fn_atom, args) ->
+    (match fn_atom with
+     | Tir.AVar v when String.length v.Tir.v_name >= 11 && String.sub v.Tir.v_name 0 11 = "Conduit.Sto" ->
+       let in_vs = Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name) in
+       Printf.eprintf "[DEBUG ECallPtr-clo] name=%s in_var_slot=%b\n%!" v.Tir.v_name in_vs
+     | _ -> ());
     let (_, clo_ptr) = emit_atom ctx fn_atom in
     let fn_ptr = emit_load_field ctx clo_ptr 0 "ptr" in
     let nargs = List.length args in
@@ -2793,10 +2946,15 @@ let build_ctor_info ctx (m : Tir.tir_module) =
            ADTs with the same constructor name (e.g. List.Cons and Tree.Cons)
            never collide in ctor_info.  lower.ml embeds the same qualified key
            in EAlloc (TCon ("TypeName.CtorName", [])), and emit_case qualifies
-           br_tag with scrut_tir_ty before the lookup. *)
-        Hashtbl.replace ctx.ctor_info (_name ^ "." ^ ctor_name)
-          { ce_tag = tag_idx; ce_fields = field_tys };
-        Hashtbl.replace ctx.poly_ctors (_name, ctor_name) field_tys
+           br_tag with scrut_tir_ty before the lookup.
+           Use first-wins semantics to avoid collisions when two types from
+           different modules share the same short name (e.g. Depot.Query.Query
+           and Ast.Query both lower to TDVariant("Query", ...)). *)
+        let key = _name ^ "." ^ ctor_name in
+        if not (Hashtbl.mem ctx.ctor_info key) then
+          Hashtbl.replace ctx.ctor_info key { ce_tag = tag_idx; ce_fields = field_tys };
+        if not (Hashtbl.mem ctx.poly_ctors (_name, ctor_name)) then
+          Hashtbl.replace ctx.poly_ctors (_name, ctor_name) field_tys
       ) ctors
     | Tir.TDRecord (_name, fields) ->
       Hashtbl.replace ctx.ctor_info _name
@@ -2920,7 +3078,11 @@ declare ptr  @march_vault_drop(ptr %table, ptr %key)
 declare ptr  @march_vault_update(ptr %table, ptr %key, ptr %f)
 declare i64  @march_vault_size(ptr %table)
 declare ptr  @march_vault_keys(ptr %table)
+declare ptr  @march_vault_ns_set(ptr %ns, ptr %key, ptr %value)
+declare ptr  @march_vault_ns_get(ptr %ns, ptr %key)
+declare ptr  @march_vault_ns_drop(ptr %ns, ptr %key)
 ; Crypto / hash builtins
+declare ptr  @march_md5(ptr %b)
 declare ptr  @march_sha256(ptr %b)
 declare ptr  @march_sha512(ptr %b)
 declare ptr  @march_hmac_sha256(ptr %key, ptr %msg)
@@ -3020,6 +3182,7 @@ declare ptr  @march_process_spawn_lines(ptr %cmd, ptr %args)
 declare ptr  @march_tcp_recv_all(ptr %fd, i64 %max_bytes, i64 %timeout_ms)
 declare ptr  @march_tcp_recv_chunk(ptr %fd, i64 %max_bytes, i64 %timeout_ms)
 declare ptr  @march_tcp_recv_http_headers(ptr %fd, i64 %max_bytes)
+declare ptr  @march_tcp_recv_chunked_frame(ptr %fd)
 ; TLS builtins
 declare ptr  @march_tls_client_ctx(ptr %ca_file, ptr %alpn_list, i64 %verify_peer, i64 %timeout_ms)
 declare ptr  @march_tls_server_ctx(ptr %cert_file, ptr %key_file, ptr %ca_file, ptr %alpn_list, i64 %verify_peer)
@@ -3099,6 +3262,8 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
       Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+      if fn.Tir.fn_params = [] then
+        Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true;
       (* Populate unqualified_fns: maps the unqualified suffix (e.g.
          "base64_encode") to the fully qualified name ("Crypto.base64_encode").
          Used to fix up cross-module ECallPtr calls where lower.ml left the
@@ -3317,11 +3482,12 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
            fn.Tir.fn_name = "__march_setup_all__") m.Tir.tm_fns in
        let has_setup = List.exists (fun (fn : Tir.fn_def) ->
            fn.Tir.fn_name = "__march_setup__") m.Tir.tm_fns in
-       (* Emit test name string constants into the LLVM preamble buffer. *)
+       (* Emit test name string constants directly to out (preamble was already
+          flushed to out above, so ctx.preamble writes would be lost). *)
        List.iteri (fun i (_fn_name, display_name) ->
          let escaped = String.concat "\\0A" (String.split_on_char '\n' display_name) in
          let nbytes = String.length display_name + 1 in
-         Printf.bprintf ctx.preamble
+         Printf.bprintf out
            "@.test_name_%d = private constant [%d x i8] c\"%s\\00\"\n"
            i nbytes escaped
        ) m.Tir.tm_tests;
@@ -3427,11 +3593,13 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty) fns;
+      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+      if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) fns;
   (* Register pre-compiled extern functions so EApp generates direct calls *)
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty) extern_fns;
+      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+      if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) extern_fns;
   List.iter (emit_fn ctx) fns;
   let ret_llty = llvm_ty ret_ty in
   let fname = Printf.sprintf "repl_%d" n in
@@ -3476,10 +3644,12 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty) fns;
+      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+      if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) fns;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty) extern_fns;
+      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+      if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) extern_fns;
   List.iter (emit_fn ctx) fns;
   let llty = llvm_ty val_ty in
   let global_name = Printf.sprintf "repl_%d_%s" n name in
@@ -3512,9 +3682,11 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
   Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+  if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true;
   List.iter (fun f ->
       Hashtbl.replace ctx.top_fns f.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty) extern_fns;
+      Hashtbl.replace ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty;
+      if f.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns f.Tir.fn_name true) extern_fns;
   emit_fn ctx fn;
   let init_name = Printf.sprintf "repl_%d_init" n in
   Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n  ret void\n}\n" init_name;
@@ -3542,9 +3714,11 @@ let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
   Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+  if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true;
   List.iter (fun f ->
       Hashtbl.replace ctx.top_fns f.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty) extern_fns;
+      Hashtbl.replace ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty;
+      if f.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns f.Tir.fn_name true) extern_fns;
   emit_fn ctx fn;
   (* Build a thin closure wrapper: @<fn>$clo_wrap(ptr %_clo, ptr %a0, ...) *)
   let fn_llvm_name = llvm_name (mangle_extern fn.Tir.fn_name) in
@@ -3605,7 +3779,8 @@ let emit_fns_fragment
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty) fns;
+      Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+      if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) fns;
   List.iter (emit_fn ctx) fns;
   let out = Buffer.create 8192 in
   emit_preamble out;

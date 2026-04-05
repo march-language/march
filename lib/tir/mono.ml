@@ -158,12 +158,19 @@ let ensure_atom_fns fn_table done_set worklist atoms =
 (** Rewrite all [EApp] and [ELetRec] calls in [expr] that target
     polymorphic functions, replacing them with calls to the
     specialized (mangled) version and enqueuing the specialization
-    if not already done. *)
+    if not already done.
+
+    [iface_methods] is the dispatch table saved after lowering: maps interface
+    method names (both base and qualified) to [(type_name, mangled_impl)].
+    [record_to_typename] maps structural [TRecord] types to their nominal names
+    so that impl lookups work even when ptype aliases have been expanded. *)
 let rec rewrite_calls
-    (fn_table  : (string, Tir.fn_def) Hashtbl.t)
-    (done_set  : (string, unit) Hashtbl.t)
-    (worklist  : (string * Tir.fn_def * ty_subst) Queue.t)
-    (expr      : Tir.expr)
+    (fn_table         : (string, Tir.fn_def) Hashtbl.t)
+    (done_set         : (string, unit) Hashtbl.t)
+    (worklist         : (string * Tir.fn_def * ty_subst) Queue.t)
+    (iface_methods    : (string, (string * string) list) Hashtbl.t)
+    (record_to_typename : (string, string) Hashtbl.t)
+    (expr             : Tir.expr)
   : Tir.expr =
   match expr with
   | Tir.EApp (f_var, args) ->
@@ -175,7 +182,63 @@ let rec rewrite_calls
        but the fn_def it refers to may still be the generic version. *)
     let orig_name = f_var.Tir.v_name in
     (match Hashtbl.find_opt fn_table orig_name with
-     | None -> expr   (* builtin or external, leave as-is *)
+     | None ->
+       (* Not in fn_table (builtin or external).  Before giving up, check if
+          this is an unresolved interface method call that can now be resolved
+          because the type-variable substitution gave us a concrete first-arg
+          type.  This handles the case where lower.ml could not resolve the
+          dispatch at lowering time (polymorphic parameter), but mono has now
+          replaced the TVar with a concrete type. *)
+       (* Try the method name as-is, then progressively strip module prefixes.
+          This handles calls like "Conduit.Storage.checkpoint_get" where the
+          impl was registered under "Storage.checkpoint_get" (because the user
+          wrote `impl Storage(VaultStorage)` after `import Conduit`). *)
+       let rec find_iface_impls name =
+         match Hashtbl.find_opt iface_methods name with
+         | Some impls -> Some impls
+         | None ->
+           (match String.index_opt name '.' with
+            | None -> None
+            | Some i ->
+              find_iface_impls (String.sub name (i + 1) (String.length name - i - 1)))
+       in
+       (match find_iface_impls orig_name with
+        | None ->
+          expr   (* Not an interface method — truly external/builtin *)
+        | Some impls ->
+          (match args with
+           | [] -> expr
+           | first_arg :: _ ->
+             let arg_ty = match first_arg with
+               | Tir.AVar v -> v.Tir.v_ty
+               | _ -> Tir.TUnit
+             in
+             (* Get the concrete type name from the first argument. *)
+             let type_name = match arg_ty with
+               | Tir.TCon (n, _) -> Some n
+               | Tir.TRecord fs ->
+                 (* ptype aliases expand to structural records; look up the
+                    nominal name via the canonical mangle-string key so that
+                    field-order differences between lower_ty and convert_ty
+                    don't cause missed lookups. *)
+                 let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
+                 let key = mangle_ty (Tir.TRecord sorted) in
+                 Hashtbl.find_opt record_to_typename key
+               | _ -> None
+             in
+             (match type_name with
+              | None -> expr   (* Still cannot resolve — leave for linker *)
+              | Some tname ->
+                (match List.assoc_opt tname impls with
+                 | None -> expr   (* No impl for this concrete type *)
+                 | Some mangled_name ->
+                   (* Resolved!  Enqueue the impl so DCE keeps it alive. *)
+                   (match Hashtbl.find_opt fn_table mangled_name with
+                    | Some orig_impl when not (Hashtbl.mem done_set mangled_name) ->
+                      Queue.add (mangled_name, orig_impl, []) worklist
+                    | _ -> ());
+                   let f_var' = { f_var with Tir.v_name = mangled_name } in
+                   Tir.EApp (f_var', args)))))
      | Some orig_fn
        when not (List.exists (fun v -> has_tvar v.Tir.v_ty) orig_fn.Tir.fn_params) ->
        (* Callee params are monomorphic but it may not have been seeded
@@ -260,30 +323,58 @@ let rec rewrite_calls
      | _ -> expr)
   | Tir.ELet (v, e1, e2) ->
     Tir.ELet (v,
-      rewrite_calls fn_table done_set worklist e1,
-      rewrite_calls fn_table done_set worklist e2)
+      rewrite_calls fn_table done_set worklist iface_methods record_to_typename e1,
+      rewrite_calls fn_table done_set worklist iface_methods record_to_typename e2)
   | Tir.ELetRec (fns, body) ->
     let fns' = List.map (fun fn ->
-        { fn with Tir.fn_body = rewrite_calls fn_table done_set worklist fn.Tir.fn_body }
+        { fn with Tir.fn_body =
+            rewrite_calls fn_table done_set worklist iface_methods record_to_typename
+              fn.Tir.fn_body }
       ) fns in
-    Tir.ELetRec (fns', rewrite_calls fn_table done_set worklist body)
+    Tir.ELetRec (fns',
+      rewrite_calls fn_table done_set worklist iface_methods record_to_typename body)
   | Tir.ECase (a, brs, def) ->
     let brs' = List.map (fun br ->
-        { br with Tir.br_body = rewrite_calls fn_table done_set worklist br.Tir.br_body }
+        { br with Tir.br_body =
+            rewrite_calls fn_table done_set worklist iface_methods record_to_typename
+              br.Tir.br_body }
       ) brs in
-    Tir.ECase (a, brs', Option.map (rewrite_calls fn_table done_set worklist) def)
+    Tir.ECase (a, brs',
+      Option.map
+        (rewrite_calls fn_table done_set worklist iface_methods record_to_typename)
+        def)
   | Tir.ESeq (e1, e2) ->
-    Tir.ESeq (rewrite_calls fn_table done_set worklist e1,
-              rewrite_calls fn_table done_set worklist e2)
+    Tir.ESeq (
+      rewrite_calls fn_table done_set worklist iface_methods record_to_typename e1,
+      rewrite_calls fn_table done_set worklist iface_methods record_to_typename e2)
   | other -> other
 
 (** Main entry point. Returns a new [tir_module] with no [TVar] in
     any fn_def that is reachable from a monomorphic root. Polymorphic
-    fn_defs with no monomorphic callers are dropped (unreachable). *)
-let monomorphize (m : Tir.tir_module) : Tir.tir_module =
+    fn_defs with no monomorphic callers are dropped (unreachable).
+
+    [iface_methods] is the dispatch table saved by [Lower.get_iface_methods ()].
+    When absent (empty table), interface dispatch post-mono is skipped. *)
+let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.tir_module =
   (* Build lookup table for original fn_defs *)
   let fn_table : (string, Tir.fn_def) Hashtbl.t = Hashtbl.create 32 in
   List.iter (fun fn -> Hashtbl.replace fn_table fn.Tir.fn_name fn) m.Tir.tm_fns;
+  (* Build reverse mapping: canonical TRecord mangle string → nominal type name.
+     This allows us to resolve interface impls when a ptype (private type alias)
+     has been expanded to its underlying record representation.
+     e.g. "FakeWorkflowStorage = {vault_key: String, error: Option(String)}"
+     → mangle_ty(TRecord[sorted]) = "R_error_Option_String_vault_key_String"
+     → "FakeWorkflowStorage"
+     Using a canonical string key (rather than structural Tir.ty key) avoids
+     any potential hash/equality issues with complex type trees. *)
+  let record_to_typename : (string, string) Hashtbl.t = Hashtbl.create 8 in
+  List.iter (function
+    | Tir.TDRecord (name, fields) ->
+      let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fields in
+      let key = mangle_ty (Tir.TRecord sorted) in
+      Hashtbl.replace record_to_typename key name
+    | _ -> ()
+  ) m.Tir.tm_types;
 
   let result   : Tir.fn_def list ref = ref [] in
   let done_set : (string, unit) Hashtbl.t = Hashtbl.create 32 in
@@ -317,7 +408,8 @@ let monomorphize (m : Tir.tir_module) : Tir.tir_module =
       let fn' = subst_fn_def subst orig_fn in
       let fn' = { fn' with Tir.fn_name = target_name } in
       (* Rewrite calls in the body, enqueuing new specializations *)
-      let body' = rewrite_calls fn_table done_set worklist fn'.Tir.fn_body in
+      let body' = rewrite_calls fn_table done_set worklist
+                    iface_methods record_to_typename fn'.Tir.fn_body in
       result := { fn' with Tir.fn_body = body' } :: !result
     end
   done;

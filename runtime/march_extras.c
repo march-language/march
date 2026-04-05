@@ -353,6 +353,71 @@ void *march_sha512(void *data) {
     return march_sha256(data);
 }
 
+/* ── march_md5 ───────────────────────────────────────────────────────── */
+
+/* RFC 1321 MD5 — portable pure-C implementation.
+ * Returns the 32-character lowercase hex digest of the input string. */
+static void md5_raw(const uint8_t *msg, size_t len, uint8_t out[16]) {
+    uint32_t s[64] = {
+        7,12,17,22, 7,12,17,22, 7,12,17,22, 7,12,17,22,
+        5, 9,14,20, 5, 9,14,20, 5, 9,14,20, 5, 9,14,20,
+        4,11,16,23, 4,11,16,23, 4,11,16,23, 4,11,16,23,
+        6,10,15,21, 6,10,15,21, 6,10,15,21, 6,10,15,21
+    };
+    uint32_t K[64] = {
+        0xd76aa478,0xe8c7b756,0x242070db,0xc1bdceee,0xf57c0faf,0x4787c62a,
+        0xa8304613,0xfd469501,0x698098d8,0x8b44f7af,0xffff5bb1,0x895cd7be,
+        0x6b901122,0xfd987193,0xa679438e,0x49b40821,0xf61e2562,0xc040b340,
+        0x265e5a51,0xe9b6c7aa,0xd62f105d,0x02441453,0xd8a1e681,0xe7d3fbc8,
+        0x21e1cde6,0xc33707d6,0xf4d50d87,0x455a14ed,0xa9e3e905,0xfcefa3f8,
+        0x676f02d9,0x8d2a4c8a,0xfffa3942,0x8771f681,0x6d9d6122,0xfde5380c,
+        0xa4beea44,0x4bdecfa9,0xf6bb4b60,0xbebfbc70,0x289b7ec6,0xeaa127fa,
+        0xd4ef3085,0x04881d05,0xd9d4d039,0xe6db99e5,0x1fa27cf8,0xc4ac5665,
+        0xf4292244,0x432aff97,0xab9423a7,0xfc93a039,0x655b59c3,0x8f0ccc92,
+        0xffeff47d,0x85845dd1,0x6fa87e4f,0xfe2ce6e0,0xa3014314,0x4e0811a1,
+        0xf7537e82,0xbd3af235,0x2ad7d2bb,0xeb86d391
+    };
+    uint32_t a0=0x67452301,b0=0xefcdab89,c0=0x98badcfe,d0=0x10325476;
+    size_t orig_len = len;
+    size_t new_len = len + 1;
+    while (new_len % 64 != 56) new_len++;
+    new_len += 8;
+    uint8_t *m = (uint8_t *)calloc(new_len, 1);
+    memcpy(m, msg, len);
+    m[len] = 0x80;
+    uint64_t bits = (uint64_t)orig_len * 8;
+    memcpy(m + new_len - 8, &bits, 8);
+    for (size_t off = 0; off < new_len; off += 64) {
+        uint32_t M[16];
+        memcpy(M, m + off, 64);
+        uint32_t A=a0,B=b0,C=c0,D=d0,F,g;
+        for (uint32_t i=0;i<64;i++){
+            if(i<16){F=(B&C)|(~B&D);g=i;}
+            else if(i<32){F=(D&B)|(~D&C);g=(5*i+1)%16;}
+            else if(i<48){F=B^C^D;g=(3*i+5)%16;}
+            else{F=C^(B|(~D));g=(7*i)%16;}
+            F=F+A+K[i]+M[g];
+            A=D;D=C;C=B;
+            B=B+((F<<s[i])|(F>>(32-s[i])));
+        }
+        a0+=A;b0+=B;c0+=C;d0+=D;
+    }
+    free(m);
+    uint32_t digest[4]={a0,b0,c0,d0};
+    memcpy(out,digest,16);
+}
+
+void *march_md5(void *data) {
+    size_t len;
+    uint8_t *bytes = string_to_raw(data, &len);
+    uint8_t hash[16];
+    md5_raw(bytes, len, hash);
+    free(bytes);
+    char hex[33];
+    bytes_to_hex(hash, 16, hex);
+    return march_string_lit(hex, 32);
+}
+
 /* ── march_hmac_sha256 ───────────────────────────────────────────────── */
 
 /* Takes key:String, msg:String, returns Result(Bytes, String) */
@@ -775,6 +840,69 @@ void *march_vault_keys(void *handle) {
     }
     pthread_mutex_unlock(&vd->mutex);
     return list;
+}
+
+/* ── Vault string-namespace helpers ──────────────────────────────────────
+ * These accept a String namespace name instead of a vault table handle.
+ * The vault is auto-created (or found) by name via march_vault_new, which is
+ * idempotent — safe to call on every operation.  This supports the pattern:
+ *   ptype VaultStorage = { ns : String }
+ *   Vault.ns_set(self.ns, key, value)
+ *   Vault.ns_get(self.ns, key)
+ * without requiring the caller to explicitly hold a table handle. */
+
+void *march_vault_ns_set(void *ns_val, void *key_val, void *value) {
+    void *handle = march_vault_new(ns_val);
+    void *result = march_vault_set(handle, key_val, value);
+    march_decrc(handle);
+    return result;
+}
+
+void *march_vault_ns_get(void *ns_val, void *key_val) {
+    /* Use whereis to avoid creating a vault on every read — return None if
+     * the namespace doesn't exist yet. */
+    char *name = vault_key_cstr(ns_val);
+    pthread_mutex_lock(&vault_registry_mutex);
+    vault_reg_entry *e = vault_registry;
+    while (e) {
+        if (strcmp(e->name, name) == 0) {
+            void *h = e->handle;
+            march_incrc(h);
+            pthread_mutex_unlock(&vault_registry_mutex);
+            free(name);
+            void *result = march_vault_get(h, key_val);
+            march_decrc(h);
+            return result;
+        }
+        e = e->next;
+    }
+    pthread_mutex_unlock(&vault_registry_mutex);
+    free(name);
+    /* Namespace doesn't exist — return None */
+    void *none = march_alloc(16);
+    *(int32_t *)((char *)none + 8) = 0; /* tag = 0 = None */
+    return none;
+}
+
+void *march_vault_ns_drop(void *ns_val, void *key_val) {
+    char *name = vault_key_cstr(ns_val);
+    pthread_mutex_lock(&vault_registry_mutex);
+    vault_reg_entry *e = vault_registry;
+    void *found = NULL;
+    while (e) {
+        if (strcmp(e->name, name) == 0) {
+            found = e->handle;
+            march_incrc(found);
+            break;
+        }
+        e = e->next;
+    }
+    pthread_mutex_unlock(&vault_registry_mutex);
+    free(name);
+    if (!found) return march_alloc(16); /* Unit */
+    void *result = march_vault_drop(found, key_val);
+    march_decrc(found);
+    return result;
 }
 
 /* ── System builtins ──────────────────────────────────────────────────── */
