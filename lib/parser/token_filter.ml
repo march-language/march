@@ -85,7 +85,7 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
       | Parser.END when !depth = 0 ->
         result := false;
         done_ := true
-      | Parser.LPAREN | Parser.LBRACKET | Parser.LBRACE ->
+      | Parser.LPAREN | Parser.LBRACKET | Parser.LBRACE | Parser.RECORD_LBRACE ->
         incr depth
       | Parser.RPAREN | Parser.RBRACKET | Parser.RBRACE ->
         if !depth > 0 then decr depth
@@ -177,7 +177,7 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
       end;
       tok
 
-    | Parser.LPAREN | Parser.LBRACKET | Parser.LBRACE ->
+    | Parser.LPAREN | Parser.LBRACKET | Parser.LBRACE | Parser.RECORD_LBRACE ->
       incr paren_depth;
       Stack.push Paren stack;
       tok

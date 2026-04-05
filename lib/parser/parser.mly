@@ -140,6 +140,7 @@
 %token <string> INTERP_MID
 %token <string> INTERP_END
 %token LPAREN RPAREN LBRACE RBRACE LBRACKET RBRACKET
+%token RECORD_LBRACE   (* %{ — record literal/type sigil *)
 %token AT
 %token ARROW PIPE_ARROW
 %token EQUALS COLON COMMA PIPE DOT
@@ -715,6 +716,11 @@ ty_atom:
   | LPAREN; t = ty; RPAREN { t }
   | LPAREN; t = ty; COMMA; ts = separated_nonempty_list(COMMA, ty); RPAREN
     { TyTuple (t :: ts) }
+  | RECORD_LBRACE; fields = separated_nonempty_list(COMMA, ty_record_field); RBRACE
+    { TyRecord fields }
+
+ty_record_field:
+  | name = lower_name; COLON; t = ty { (name, t) }
 
 dotted_upper_tail:
   | id = upper_name { [id] }
@@ -741,6 +747,8 @@ param:
     { { param_name = name; param_ty = Some t; param_lin = Unrestricted } }
   | name = soft_lower_name
     { { param_name = name; param_ty = None; param_lin = Unrestricted } }
+  | UNDERSCORE
+    { { param_name = mk_name "_" $loc; param_ty = None; param_lin = Unrestricted } }
   | LINEAR; name = soft_lower_name; COLON; t = ty
     { { param_name = name; param_ty = Some t; param_lin = Linear } }
 
@@ -993,6 +1001,9 @@ expr_atom:
   (* Record literal: { x = 1, y = 2 } *)
   | LBRACE; fields = separated_nonempty_list(COMMA, record_field_expr); RBRACE
     { ERecord (fields, mk_span ($loc)) }
+  (* Record literal with % sigil and colon syntax: %{ x: 1, y: 2 } *)
+  | RECORD_LBRACE; fields = separated_nonempty_list(COMMA, record_field_expr_colon); RBRACE
+    { ERecord (fields, mk_span ($loc)) }
   (* Record update: { state with count = state.count + 1 } *)
   | LBRACE; base = expr; WITH; updates = separated_nonempty_list(COMMA, record_field_expr); RBRACE
     { ERecordUpdate (base, updates, mk_span ($loc)) }
@@ -1011,6 +1022,9 @@ expr_atom:
 
 record_field_expr:
   | name = lower_name; EQUALS; e = expr { (name, e) }
+
+record_field_expr_colon:
+  | name = lower_name; COLON; e = expr { (name, e) }
 
 (** Interpolation parts after the opening INTERP_START. *)
 interp_parts:
