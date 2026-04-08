@@ -568,14 +568,16 @@ static int64_t vault_now_ms(void) {
     return (int64_t)ts.tv_sec * 1000LL + (int64_t)(ts.tv_nsec / 1000000);
 }
 
-/* Convert a March value to a C string key. */
+/* Convert a March string value to a C string key.
+ * The key is always a march_string* — cast directly to read its content.
+ * Previously this called march_value_to_string() which reads the len field
+ * as a tag (int32_t), returning "#<tag:N>" for all strings of length N,
+ * causing all same-length keys to collide in the vault. */
 static char *vault_key_cstr(void *key) {
-    void *s = march_value_to_string(key);
-    march_string *ms = (march_string *)s;
+    march_string *ms = (march_string *)key;
     char *buf = malloc((size_t)ms->len + 1);
     memcpy(buf, ms->data, (size_t)ms->len);
     buf[ms->len] = '\0';
-    march_decrc(s);
     return buf;
 }
 

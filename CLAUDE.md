@@ -27,6 +27,33 @@ After implementing or completing a feature, update `specs/todos.md` (move item t
 
 After changing a feature, run the benchmark(s) that exercise it to catch regressions — see `specs/benchmarks.md` for the mapping. Quick reference: Perceus/FBIP changes → `bench/tree_transform.march`; closure/HOF changes → `bench/list_ops.march`; allocation/GC changes → `bench/binary_trees.march`.
 
+## Multi-file compilation (MARCH_LIB_PATH)
+
+March accepts exactly ONE input file per invocation. Multi-file projects (apps + library deps) use the `MARCH_LIB_PATH` environment variable to auto-discover all `.march` files in dependency directories.
+
+```bash
+cd /Users/80197052/code/march
+MARCH_LIB_PATH=/path/to/dep1/lib:/path/to/dep2/src \
+  ./_build/default/bin/main.exe --compile -o output_binary entry.march
+```
+
+March walks ALL `.march` files in each `MARCH_LIB_PATH` directory recursively and loads their modules automatically. The entry file is the single `.march` file passed on the command line.
+
+**CAS cache:** Compiled binaries are content-hash cached in `<project>/.march/cas/artifacts/`. After modifying the runtime C files (`runtime/march_extras.c`, `runtime/march_runtime.c`), clear this directory before rebuilding:
+
+```bash
+rm -rf /Users/80197052/code/march/.march/cas/artifacts/
+```
+
+**Example (test_conduit_app):**
+```bash
+cd /Users/80197052/code/march && \
+  MARCH_LIB_PATH=/Users/80197052/code/conduit/lib:/Users/80197052/code/test_conduit_app/src \
+  ./_build/default/bin/main.exe --compile \
+  -o /Users/80197052/code/test_conduit_app/bin/test_conduit_app \
+  /Users/80197052/code/test_conduit_app/src/test_conduit_app.march
+```
+
 ## Searching the codebase
 
 **Use `forge search` to find modules, functions, types, and other code constructs.** This is the primary way to discover what exists in the codebase.
@@ -108,6 +135,7 @@ fn () ->
 **Common mistakes:**
 - `fn -> expr` — PARSE ERROR. Zero-arg lambdas MUST use `fn () -> expr`
 - `fn _ -> expr` when you want zero-arg — WRONG. `_` is a 1-arg lambda; calling it with 0 args gives "arity mismatch: expected 1 args, got 0"
+- `task_spawn(fn () -> f())` — WRONG if `task_spawn` passes 1 arg to the callback. Use `fn _ -> f()` (1-arg discard).
 
 ### Visibility
 
