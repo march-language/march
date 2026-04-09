@@ -188,6 +188,7 @@ let load_stdlib () =
       "ordered_map.march";
       "sorted_set.march";
       "range.march";
+      "crypto.march";
     ] in
     List.concat_map (fun name ->
         load_stdlib_file (Filename.concat stdlib_dir name)
@@ -927,8 +928,26 @@ let compile filename =
     { desugared with
       March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
   in
-  (* Inject stdlib declarations before user declarations *)
+  (* Inject stdlib declarations before user declarations.
+     If MARCH_LIB_PATH provided a module that also ships in the stdlib (e.g.
+     Islands from bastion/lib/islands.march), defer to the external version:
+     strip the stdlib copy so the external one is the sole definition. *)
   let stdlib_decls = load_stdlib () in
+  let extern_mod_names =
+    List.filter_map (function
+      | March_ast.Ast.DMod (nm, _vis, _decls, _sp) ->
+        Some nm.March_ast.Ast.txt
+      | _ -> None
+    ) extra_decls
+  in
+  let stdlib_decls =
+    if extern_mod_names = [] then stdlib_decls
+    else List.filter (function
+      | March_ast.Ast.DMod (nm, _vis, _decls, _sp) ->
+        not (List.mem nm.March_ast.Ast.txt extern_mod_names)
+      | _ -> true
+    ) stdlib_decls
+  in
   let desugared =
     { desugared with
       March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }

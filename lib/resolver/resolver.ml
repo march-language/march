@@ -19,11 +19,22 @@ let module_name_to_filename name =
     from the user's source tree. *)
 let stdlib_module_names =
   [ "List"; "Map"; "Set"; "Array"; "Queue"; "String"; "Option"; "Result"
-  ; "Math"; "Enum"; "BigInt"; "Decimal"; "DateTime"; "Bytes"; "Json"
+  ; "Math"; "Enum"; "BigInt"; "Decimal"; "DateTime"; "Duration"; "Bytes"; "Json"
   ; "Regex"; "Csv"; "File"; "Dir"; "Path"; "Http"; "HttpClient"
   ; "HttpServer"; "HttpTransport"; "WebSocket"; "Process"; "Logger"
   ; "Flow"; "Actor"; "Sort"; "Hamt"; "Seq"; "Iterable"; "IOList"
-  ; "Random"; "Stats"; "Plot"; "Prelude"; "DataFrame" ]
+  ; "Random"; "Stats"; "Plot"; "Prelude"; "DataFrame"; "Test"
+  ; "Vault"; "Config"; "Crypto"; "Env"; "Channel"; "PubSub"
+  ; "ChannelServer"; "ChannelSocket"; "Presence"; "Tls"; "Uuid"
+  ; "DepotForm"; "DepotGate"; "DepotSchema"; "DepotRepo"
+  ; "DepotQuery"; "DepotMigration"; "DepotTest"
+  ; "Tuple"; "Char"; "OrderedMap"; "SortedSet"; "Range"
+  (* Deprecated web modules — still in stdlib for backward compat;
+     overridden by bastion/lib versions when bastion is a dep. *)
+  ; "Islands"; "CSRF"; "Session"; "Bastion"
+  ; "BastionDev"; "BastionCookies"; "BastionRoutes"; "BastionPubSub"
+  ; "BastionCSP"; "BastionTelemetry"; "BastionHotDeploy"
+  ; "BastionTestSandbox"; "BastionIdempotency" ]
 
 (** Collect [(mod_name, span)] for each DUse/DAlias in [decls],
     recursing into nested DMod blocks so that imports written inside
