@@ -1,6 +1,6 @@
 ---
 layout: home
-title: March Programming Language
+title: March Lang
 nav_order: 1
 ---
 
