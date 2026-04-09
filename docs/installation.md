@@ -6,141 +6,150 @@ nav_order: 2
 
 # Installation
 
-March is built from source using OCaml 5.3.0, opam, and dune.
+March is built from source. The toolchain is OCaml 5.3.0 + dune, managed with opam.
 
 ---
 
 ## Prerequisites
 
-| Tool | Version | Notes |
-|------|---------|-------|
-| OCaml | 5.3.0 | via opam switch |
+| Tool | Version | Purpose |
+|------|---------|---------|
 | opam | 2.x | OCaml package manager |
-| dune | 3.x | Build system (installed via opam) |
-| LLVM | 18+ | For native code compilation |
-| git | any | To clone the repository |
+| OCaml | 5.3.0 | Set up via opam switch |
+| dune | 3.7+ | Build system (installed by opam) |
+| LLVM / clang | 18+ | Native code compilation |
+| git | any | Clone the repository |
 
 ### macOS
 
 ```sh
 brew install opam llvm
-opam init
+opam init --bare -y
 ```
 
-### Linux (Debian/Ubuntu)
+Homebrew puts clang on your PATH automatically. LLVM 18+ is required; earlier versions may work but are untested.
+
+### Linux (Debian / Ubuntu)
 
 ```sh
-apt-get install opam llvm-18-dev clang-18
-opam init
+sudo apt-get install -y opam clang-18 llvm-18-dev libllvm18
+opam init --bare -y
+```
+
+For other distributions use your package manager to install `opam` and a recent `clang` / `llvm-dev`.
+
+---
+
+## 1. Clone
+
+```sh
+git clone https://github.com/march-lang/march.git
+cd march
 ```
 
 ---
 
-## Build Steps
+## 2. Create the opam switch
 
-### 1. Clone the repository
-
-```sh
-git clone https://github.com/yourusername/march.git
-cd march
-```
-
-### 2. Create the opam switch
-
-March uses a dedicated opam switch named `march` pinned to OCaml 5.3.0:
+March uses a dedicated opam switch pinned to OCaml 5.3.0. This keeps its dependencies isolated from other OCaml projects.
 
 ```sh
 opam switch create march 5.3.0
 ```
 
-This step takes a few minutes the first time.
+This downloads and compiles OCaml — it takes a few minutes the first time.
 
-### 3. Install dependencies
+---
+
+## 3. Install dependencies
 
 ```sh
-opam install . --deps-only
+opam install . --deps-only -y
 ```
 
-Key dependencies installed by opam:
-- `menhir` — parser generator
-- `ppx_deriving` — derivation macros
-- `alcotest` — test framework
-- `notty` — REPL TUI
-- `odoc` — documentation generator
+Key packages installed:
 
-### 4. Build
+| Package | Purpose |
+|---------|---------|
+| `menhir` | Parser generator |
+| `ppx_deriving` | Derivation macros (`show`, `eq`, …) |
+| `alcotest` | Test framework |
+| `qcheck-core` | Property-based tests |
+| `notty` | REPL TUI rendering |
+
+---
+
+## 4. Build
 
 ```sh
 dune build
 ```
 
-This compiles the compiler, runtime, stdlib, forge build tool, and LSP server.
+This compiles everything: the compiler, the stdlib, the C runtime, the `forge` build tool, and the LSP server.
 
-### 5. Run tests
+---
+
+## 5. Verify
+
+```sh
+dune exec march -- examples/list_lib.march
+```
+
+Expected output:
+```
+range 1..10:   [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+length:        10
+sum 1..10:     55
+product 1..5:  120
+max:           10
+reversed:      [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]
+append [1..3] [4..6]: [1, 2, 3, 4, 5, 6]
+```
+
+---
+
+## 6. Run tests (optional)
 
 ```sh
 dune runtest
 ```
 
-All tests should pass. The test suite covers the parser, typechecker, evaluator, stdlib, and forge.
+All tests should pass. The suite covers the parser, typechecker, evaluator, stdlib, and forge.
 
 ---
 
-## Running the Compiler
+## PATH setup (optional)
 
-After building, the compiler binary is at `./_build/default/bin/main.exe`. You can run it directly:
+For convenience, add the binaries to your shell PATH:
 
 ```sh
-./_build/default/bin/main.exe your_program.march
+# ~/.zshrc or ~/.bashrc
+export PATH="$HOME/march/_build/default/bin:$HOME/march/_build/default/forge/bin:$PATH"
 ```
 
-Or use `dune exec` as a wrapper (no PATH setup needed):
+After sourcing your shell config you can run `march` and `forge` directly:
 
 ```sh
-dune exec march -- your_program.march
-```
-
-For convenience, add the compiler to your PATH:
-
-```sh
-export PATH="$PWD/_build/default/bin:$PATH"
-```
-
----
-
-## forge Build Tool
-
-The `forge` command is at `./_build/default/forge/bin/forge.exe`:
-
-```sh
-dune exec forge -- --help
+march examples/list_lib.march
 forge new my_project
-forge build
-forge test
 ```
 
 ---
 
-## Directory Structure After Build
+## Binary locations after build
 
 ```
-march/
-├── _build/                     # dune build output
-│   └── default/
-│       ├── bin/main.exe        # compiler
-│       ├── forge/bin/forge.exe # build tool
-│       └── lsp/bin/march_lsp.exe  # LSP server
-├── stdlib/                     # March standard library source
-├── runtime/                    # C runtime
-├── examples/                   # Example programs
-└── test/                       # Test suite
+_build/default/
+├── bin/main.exe          # march compiler / interpreter
+├── forge/bin/forge.exe   # forge build tool
+└── lsp/bin/march_lsp.exe # LSP server (for editor integration)
 ```
 
 ---
 
-## Verifying Your Build
+## Hello, March
 
-Create a file `hello.march`:
+Create `hello.march`:
 
 ```elixir
 mod Hello do
@@ -154,16 +163,31 @@ Run it:
 
 ```sh
 dune exec march -- hello.march
+# Hello, March!
 ```
 
-Expected output:
-```
-Hello, March!
+---
+
+## Troubleshooting
+
+**`Error: No switch installed`**  
+Run `opam switch march` (or `eval $(opam env --switch=march)`) to activate the switch in your current shell.
+
+**`clang: error: unknown target triple 'x86_64-unknown-linux-gnu'`**  
+Your LLVM version is too old. Install LLVM 18+.
+
+**`dune build` fails with missing `menhir`**  
+Run `opam install . --deps-only -y` again — the switch may not have been active when you first ran it.
+
+**Tests fail on Linux with `libffi` errors**  
+```sh
+sudo apt-get install libffi-dev
 ```
 
 ---
 
 ## Next Steps
 
-- [Getting Started](getting-started.md) — write your first program
+- [Getting Started](getting-started.md) — write your first real program
 - [Language Tour](tour.md) — a guided introduction to the language
+- [Tooling](tooling.md) — forge, LSP, and the debugger
