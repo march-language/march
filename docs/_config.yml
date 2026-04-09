@@ -1,0 +1,50 @@
+title: March Programming Language
+description: A statically-typed functional language in the ML/Elixir tradition, compiled to native code via LLVM.
+baseurl: ""
+url: ""
+
+theme: just-the-docs
+
+# Site structure
+nav_order_default: 99
+
+# Search
+search_enabled: true
+search:
+  heading_level: 2
+  previews: 3
+  preview_words_before: 5
+  preview_words_after: 10
+  tokenizer_separator: /[\s\-/]+/
+  rel_url: true
+  button: false
+
+# Code highlighting
+highlighter: rouge
+kramdown:
+  syntax_highlighter: rouge
+
+# Navigation
+nav_external_links:
+  - title: GitHub
+    url: https://github.com/yourusername/march
+
+# Footer
+footer_content: "March Programming Language. Built with <a href=\"https://just-the-docs.com\">Just the Docs</a>."
+
+# Collections (for future API reference)
+collections:
+  docs:
+    permalink: "/:collection/:path/"
+    output: true
+
+# Exclude from build
+exclude:
+  - "*.ml"
+  - "*.mly"
+  - "*.mll"
+  - Makefile
+  - Gemfile
+  - Gemfile.lock
+  - node_modules/
+  - _build/

@@ -118,7 +118,7 @@ actor Counter do
   state { value : Int }
   init { value = 0 }
 
-  on Add(n : Int) do
+  on Increment(n : Int) do
     { state with value = state.value + n }
   end
 
@@ -162,13 +162,13 @@ fn main() : Unit do
   -- Section 7: actor history (:actors / :actor)
   let c = spawn(Counter)
   let l = spawn(Logger)
-  send(c, Add(10))
+  send(c, Increment(10))
   send(l, Record("counter += 10"))
-  send(c, Add(5))
+  send(c, Increment(5))
   send(l, Record("counter += 5"))
   send(c, Reset())
   send(l, Record("counter reset"))
-  send(c, Add(3))
+  send(c, Increment(3))
   send(l, Record("counter += 3"))
   dbg()
 

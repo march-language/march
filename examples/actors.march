@@ -5,7 +5,7 @@
 mod ActorDemo do
 
 -- ─── Counter actor ──────────────────────────────────────────────────────────
--- Holds an integer value.  Supports Increment, Decrement, Reset, and Ping.
+-- Holds an integer value.  Supports Increment, Decrement, Reset, and Probe.
 -- Handlers return the new state record.
 
 actor Counter do
@@ -24,8 +24,8 @@ actor Counter do
     { state with value = 0 }
   end
 
-  on Ping(label : String) do
-    println("[Counter] ping from " ++ label ++ ", value = " ++ int_to_string(state.value))
+  on Probe(label : String) do
+    println("[Counter] probe from " ++ label ++ ", value = " ++ int_to_string(state.value))
     state
   end
 end
@@ -76,10 +76,10 @@ fn main() : Unit do
   safe_send(logger,  Log("counter incremented by 10"), "Log")
   safe_send(counter, Increment(5),  "Increment(5)")
   safe_send(logger,  Log("counter incremented by 5"),  "Log")
-  safe_send(counter, Ping("logger"), "Ping")
+  safe_send(counter, Probe("logger"), "Probe")
   safe_send(logger,  Stats(), "Stats")
   println("")
-  dbg()
+
   println("=== Killing the logger ===")
   kill(logger)
   println("logger  alive: " ++ bool_to_string(is_alive(logger)))
@@ -93,9 +93,9 @@ fn main() : Unit do
 
   println("=== Counter is still alive ===")
   safe_send(counter, Decrement(3), "Decrement(3)")
-  safe_send(counter, Ping("supervisor"), "Ping")
+  safe_send(counter, Probe("supervisor"), "Probe")
   safe_send(counter, Reset(), "Reset")
-  safe_send(counter, Ping("supervisor"), "Ping after reset")
+  safe_send(counter, Probe("supervisor"), "Probe after reset")
   println("")
 
   println("=== Restarting the logger (spawn a fresh one) ===")
