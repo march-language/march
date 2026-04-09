@@ -16,7 +16,7 @@ All stdlib modules are available without any import statement — use qualified 
 
 The `Prelude` module is automatically imported into every March program. These names are always in scope:
 
-```march
+```elixir
 -- Diverging
 panic("invariant violated")   -- terminates with an error
 todo("not yet implemented")   -- typechecks as any type
@@ -45,7 +45,7 @@ const(x)                      -- fn _ -> x
 
 `list.march` — 508 lines. The standard singly-linked list.
 
-```march
+```elixir
 -- Construction
 List.empty()                         -- []
 List.singleton(42)                   -- [42]
@@ -111,7 +111,7 @@ List.chunk_by([1, 1, 2, 2, 3], fn a b -> a == b)  -- [[1, 1], [2, 2], [3]]
 
 `string.march` — String operations.
 
-```march
+```elixir
 String.length("hello")              -- 5
 String.concat(["a", "b", "c"])      -- "abc"
 String.join(["a", "b", "c"], ", ")  -- "a, b, c"
@@ -139,7 +139,7 @@ String.chars("hi")                  -- ["h", "i"]
 
 `map.march` — HAMT-backed persistent hash map. O(1) amortized operations.
 
-```march
+```elixir
 -- Construction
 let m = Map.empty()
 let m2 = Map.singleton("key", 42)
@@ -178,7 +178,7 @@ Map.to_list(m3)   -- [("a", 1), ("b", 2), ("c", 3)]
 
 `set.march` — HAMT-backed persistent set.
 
-```march
+```elixir
 let s = Set.from_list([1, 2, 3, 4, 5])
 Set.member(3, s)           -- true
 Set.insert(6, s)           -- {1,2,3,4,5,6}
@@ -197,7 +197,7 @@ Set.filter(s, fn x -> x % 2 == 0)  -- {2, 4}
 
 `option.march` — `Option(a) = None | Some(a)`.
 
-```march
+```elixir
 Option.map(Some(5), fn x -> x + 1)     -- Some(6)
 Option.map(None, fn x -> x + 1)        -- None
 Option.and_then(Some(5), fn x -> if x > 3 do Some(x) else None end)
@@ -219,7 +219,7 @@ Option.filter(Some(2), fn x -> x > 3)  -- None
 
 `result.march` — `Result(a, e) = Ok(a) | Err(e)`.
 
-```march
+```elixir
 Result.map(Ok(5), fn x -> x + 1)      -- Ok(6)
 Result.map(Err("oops"), fn x -> x + 1) -- Err("oops")
 Result.map_err(Err("x"), String.upcase) -- Err("X")
@@ -239,7 +239,7 @@ Result.to_option(Err("e"))            -- None
 
 `io.march` — Explicit I/O operations.
 
-```march
+```elixir
 IO.puts("Hello, World!")         -- print with newline
 IO.write("no newline")           -- print without newline
 IO.warn("warning message")       -- print to stderr
@@ -256,7 +256,7 @@ The `println` and `print` builtins are also always available.
 
 `math.march` — Mathematical functions.
 
-```march
+```elixir
 Math.abs(-5)          -- 5
 Math.abs_f(-3.14)     -- 3.14
 Math.min(3, 5)        -- 3
@@ -285,7 +285,7 @@ Math.is_nan(0.0 /. 0.0)   -- true
 
 `crypto.march` — Cryptographic primitives.
 
-```march
+```elixir
 Crypto.sha256("hello")              -- hex string
 Crypto.sha512("hello")              -- hex string
 Crypto.hmac_sha256(key, message)    -- hex string
@@ -303,7 +303,7 @@ Crypto.pbkdf2_sha256(password, salt, iterations, key_len)  -- derived key
 
 `uuid.march` — UUID generation and parsing.
 
-```march
+```elixir
 UUID.v4()                     -- generate a random UUID string
 UUID.v5(namespace, name)      -- deterministic UUID from namespace+name
 UUID.parse("550e8400-...")    -- Option(UUID)
@@ -319,7 +319,7 @@ UUID.nil()                    -- "00000000-0000-0000-0000-000000000000"
 
 `json.march` — JSON encoding and decoding.
 
-```march
+```elixir
 type JsonValue =
   | JNull
   | JBool(Bool)
@@ -341,7 +341,7 @@ JSON.get(obj, "key")                  -- Option(JsonValue)
 
 `http_client.march` — Make HTTP requests.
 
-```march
+```elixir
 let resp = Http.get("https://api.example.com/data")
 let resp = Http.post("https://api.example.com/data", body)
 let resp = Http.request({
@@ -366,7 +366,7 @@ end
 
 `file.march`, `dir.march`, `path.march`:
 
-```march
+```elixir
 -- File I/O (Result-based)
 File.read("data.txt")              -- Result(String, String)
 File.write("out.txt", "content")   -- Result((), String)
@@ -395,7 +395,7 @@ Path.is_absolute("/usr/bin")       -- true
 
 `system.march` — OS and runtime information.
 
-```march
+```elixir
 System.os()                -- "macos" | "linux" | "windows"
 System.arch()              -- "x86_64" | "arm64"
 System.cpu_count()         -- number of logical CPUs
@@ -415,7 +415,7 @@ System.cmd("ls", ["-la"])  -- Result(String, String)
 
 `logger.march` — Structured logging.
 
-```march
+```elixir
 Logger.info("server started")
 Logger.warn("connection retry")
 Logger.error("database unreachable")
@@ -433,7 +433,7 @@ Logger.with_context(fn () ->
 
 `vault.march` — Process-local key-value store backed by a mutable hash table. Used extensively in the stdlib for global mutable state.
 
-```march
+```elixir
 Vault.put("counter", 0)
 Vault.get("counter")          -- Option(a)
 Vault.update("counter", fn n -> n + 1)
@@ -448,7 +448,7 @@ Vault.all()                   -- List((String, a))
 
 `enum.march` — Elixir-inspired lazy enumeration over any `Iterable`.
 
-```march
+```elixir
 Enum.map(items, fn x -> x * 2)
 Enum.filter(items, fn x -> x > 0)
 Enum.fold(items, 0, fn acc x -> acc + x)
@@ -475,7 +475,7 @@ Enum.max_by(items, fn x -> x.score)
 
 `duration.march` — Time-span arithmetic.
 
-```march
+```elixir
 let d = Duration.seconds(30)
 let h = Duration.hours(2)
 let w = Duration.weeks(1)
@@ -494,7 +494,7 @@ Duration.milliseconds(d)   -- 30000
 
 `uri.march` — URI parsing and construction.
 
-```march
+```elixir
 URI.parse("https://example.com/path?k=v")
 -- Result({ scheme, host, port, path, query, fragment })
 

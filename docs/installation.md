@@ -142,7 +142,7 @@ march/
 
 Create a file `hello.march`:
 
-```march
+```elixir
 mod Hello do
   fn main() do
     println("Hello, March!")

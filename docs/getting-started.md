@@ -14,7 +14,7 @@ This guide walks you from zero to a working March program. See [Installation](in
 
 Every March file starts with a module declaration. Create `hello.march`:
 
-```march
+```elixir
 mod Hello do
 
   fn main() do
@@ -44,7 +44,7 @@ Hello, March!
 
 ## A More Complete Program
 
-```march
+```elixir
 mod Greet do
 
   fn greet(name : String) : String do
@@ -180,7 +180,7 @@ dune exec forge -- test
 
 A typical March program has:
 
-```march
+```elixir
 mod MyApp do
 
   -- Type definitions
@@ -212,14 +212,14 @@ The `main()` function is called automatically when the program starts. Its retur
 
 Type annotations are optional but useful for documentation and catching mistakes early:
 
-```march
+```elixir
 fn add(x : Int, y : Int) : Int do
   x + y
 end
 ```
 
 Without annotations, the compiler infers everything:
-```march
+```elixir
 fn add(x, y) do
   x + y
 end

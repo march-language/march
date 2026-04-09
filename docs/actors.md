@@ -17,7 +17,7 @@ An actor declaration has three parts:
 - `init { ... }` — the initial state value
 - `on Msg(...) do ... end` — message handlers, each returning the new state
 
-```march
+```elixir
 actor Counter do
   state { value : Int }
   init  { value = 0 }
@@ -44,7 +44,7 @@ Inside a handler, `state` refers to the current state record. Each handler must 
 
 `spawn` creates a new actor and returns its process identifier (`Pid`):
 
-```march
+```elixir
 fn main() do
   let counter = spawn(Counter)
   -- counter : Pid
@@ -57,7 +57,7 @@ end
 
 `send` delivers a message to an actor asynchronously:
 
-```march
+```elixir
 send(counter, Increment(10))
 send(counter, Increment(5))
 send(counter, Reset())
@@ -67,7 +67,7 @@ The message is the constructor applied to its arguments. The actor handles it ac
 
 `send` returns `Some(())` if the actor is alive, or `None` if the actor is dead (has been killed or crashed):
 
-```march
+```elixir
 match send(counter, Increment(1)) do
   Some(_) -> println("message delivered")
   None    -> println("actor is dead")
@@ -78,7 +78,7 @@ end
 
 ## Checking if an Actor is Alive
 
-```march
+```elixir
 let alive = is_alive(counter)
 println("alive: " ++ bool_to_string(alive))
 ```
@@ -87,7 +87,7 @@ println("alive: " ++ bool_to_string(alive))
 
 ## Stopping an Actor
 
-```march
+```elixir
 kill(counter)
 ```
 
@@ -99,7 +99,7 @@ After `kill`, `is_alive(counter)` returns `false` and further `send`s return `No
 
 This is adapted from [examples/actors.march](../examples/actors.march):
 
-```march
+```elixir
 mod ActorDemo do
 
   actor Counter do
@@ -160,7 +160,7 @@ end
 
 Handlers can perform I/O before returning the new state:
 
-```march
+```elixir
 actor Database do
   state { entries : List(String) }
   init  { entries = [] }
@@ -185,7 +185,7 @@ end
 
 Actors don't have built-in synchronous calls. The standard pattern for request-reply is to pass a reply-to `Pid` in the message:
 
-```march
+```elixir
 actor Store do
   state { data : Map(String, Int) }
   init  { data = Map.new() }
@@ -229,7 +229,7 @@ end
 
 Complex state uses record types. Functional update with `{ state with field = new_value }` is the canonical way to update state:
 
-```march
+```elixir
 actor WebServer do
   state {
     request_count : Int,
@@ -265,7 +265,7 @@ end
 
 In programs with actors, `run_until_idle()` processes all pending messages before continuing. Useful in scripts and tests:
 
-```march
+```elixir
 fn main() do
   let counter = spawn(Counter)
   send(counter, Increment(1))
@@ -284,7 +284,7 @@ end
 
 Actors can hold references to other actors as part of their state:
 
-```march
+```elixir
 actor Worker do
   state { boss : Pid, id : Int }
   init  { boss = pid_of_int(0), id = 0 }
@@ -321,7 +321,7 @@ end
 
 Inside a handler, `self()` returns the current actor's `Pid`. Useful for passing yourself as a reply address:
 
-```march
+```elixir
 on Request(question : String, caller : Pid) do
   let answer = compute_answer(question)
   send(caller, Answer(answer, self()))
@@ -335,7 +335,7 @@ end
 
 For long-running applications, use `app` instead of (or alongside) `main`:
 
-```march
+```elixir
 mod MyService do
   actor Worker do
     state { count : Int }

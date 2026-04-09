@@ -254,7 +254,7 @@ Alternatively, the compiled `march.dylib` can be installed directly into Zed's e
 
 Place a `dbg()` breakpoint anywhere in your code:
 
-```march
+```elixir
 fn process(items : List(Int)) : Int do
   let filtered = List.filter(items, fn x -> x > 0)
   dbg()    -- breakpoint: REPL opens here

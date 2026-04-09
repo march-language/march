@@ -53,7 +53,7 @@ March is designed for building reliable, high-performance systems — from CLI t
 
 ## Quick Look
 
-```march
+```elixir
 mod Greeter do
 
 type Greeting = Formal | Casual

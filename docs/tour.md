@@ -12,7 +12,7 @@ A fast walkthrough of March syntax and core concepts. Every snippet here runs as
 
 ## Comments
 
-```march
+```elixir
 -- this is a line comment
 
 {- this is a block comment
@@ -26,7 +26,7 @@ A fast walkthrough of March syntax and core concepts. Every snippet here runs as
 
 Every March file begins with exactly one module declaration:
 
-```march
+```elixir
 mod MyApp do
   -- everything goes here
 end
@@ -34,7 +34,7 @@ end
 
 Modules can be dotted (for multi-file projects):
 
-```march
+```elixir
 mod MyApp.Router do
   -- ...
 end
@@ -42,7 +42,7 @@ end
 
 Modules can be nested:
 
-```march
+```elixir
 mod Outer do
   mod Inner do
     fn greet() do println("from Inner") end
@@ -56,7 +56,7 @@ end
 
 `let` binds a name in the current block. No `in` is needed — subsequent expressions in the block see the binding:
 
-```march
+```elixir
 fn main() do
   let x = 42
   let y = x + 1
@@ -66,14 +66,14 @@ end
 
 Type annotations are optional:
 
-```march
+```elixir
 let count : Int = 0
 let name : String = "March"
 ```
 
 Module-level `let` defines constants:
 
-```march
+```elixir
 mod Config do
   let max_retries = 3
   let base_url = "https://example.com"
@@ -95,7 +95,7 @@ end
 
 Float arithmetic uses dotted operators to make it explicit:
 
-```march
+```elixir
 let sum = 1.0 +. 2.5    -- Float +
 let diff = 3.0 -. 1.5   -- Float -
 let prod = 2.0 *. 4.0   -- Float *
@@ -110,20 +110,20 @@ Integer arithmetic uses the plain operators: `+`, `-`, `*`, `/`, `%`.
 
 Concatenate with `++`:
 
-```march
+```elixir
 let greeting = "Hello, " ++ "World!"
 ```
 
 String interpolation with `${}`:
 
-```march
+```elixir
 let name = "Alice"
 let msg = "Hello, ${name}!"   -- "Hello, Alice!"
 ```
 
 Triple-quoted strings preserve newlines:
 
-```march
+```elixir
 let html = """
   <div>
     <p>Hello</p>
@@ -139,7 +139,7 @@ Useful builtins: `int_to_string`, `float_to_string`, `bool_to_string`, `to_strin
 
 Named functions use `fn name(params) do ... end`:
 
-```march
+```elixir
 fn add(x : Int, y : Int) : Int do
   x + y
 end
@@ -147,7 +147,7 @@ end
 
 Return type annotation is optional:
 
-```march
+```elixir
 fn square(n) do
   n * n
 end
@@ -155,7 +155,7 @@ end
 
 Functions can have multiple expressions in the body; the last one is the return value:
 
-```march
+```elixir
 fn summarize(xs : List(Int)) : String do
   let n   = List.length(xs)
   let sum = List.fold(xs, 0, fn acc x -> acc + x)
@@ -167,7 +167,7 @@ end
 
 Use `pfn` to make a function private to its module:
 
-```march
+```elixir
 mod Passwords do
   pfn hash_raw(s : String) : String do
     -- not callable outside this module
@@ -182,7 +182,7 @@ end
 
 ### Default Arguments
 
-```march
+```elixir
 fn greet(name, greeting \\ "Hello") do
   greeting ++ ", " ++ name ++ "!"
 end
@@ -197,12 +197,12 @@ All defaulted parameters must be trailing.
 
 Consecutive clauses with the same name are merged into a single function with pattern dispatch (Elixir-style):
 
-```march
+```elixir
 fn len(Nil) do 0 end
 fn len(Cons(_, t)) do 1 + len(t) end
 ```
 
-```march
+```elixir
 fn abs(n) when n < 0 do -n end
 fn abs(n) do n end
 ```
@@ -213,7 +213,7 @@ fn abs(n) do n end
 
 Lambdas use arrow syntax: `fn params -> body`.
 
-```march
+```elixir
 fn x -> x + 1                -- single param
 fn (a, b) -> a + b           -- multiple params (parenthesized)
 fn () -> 42                  -- ZERO-ARG: must use fn () -> ...
@@ -222,7 +222,7 @@ fn _ -> "ignored"            -- wildcard (1-arg, discards the value)
 
 Multi-expression lambda bodies use `let` bindings:
 
-```march
+```elixir
 fn x ->
   let y = x + 1
   let z = y * 2
@@ -235,7 +235,7 @@ fn x ->
 
 ## If / Else
 
-```march
+```elixir
 if x > 0 do
   "positive"
 else
@@ -245,7 +245,7 @@ end
 
 `else` is optional (returns `()` if omitted):
 
-```march
+```elixir
 if debug_mode do
   println("debug info")
 end
@@ -253,7 +253,7 @@ end
 
 Both branches can contain multiple expressions:
 
-```march
+```elixir
 if List.is_empty(xs) do
   let msg = "list is empty"
   println(msg)
@@ -271,7 +271,7 @@ There is no `then` keyword in March.
 
 Pattern matching is the primary control flow construct:
 
-```march
+```elixir
 match xs do
   Nil        -> "empty"
   Cons(h, _) -> "starts with " ++ to_string(h)
@@ -280,7 +280,7 @@ end
 
 Arms are separated by newlines (or `|`). Multi-expression arms:
 
-```march
+```elixir
 match result do
   Ok(v) ->
     let s = to_string(v)
@@ -292,7 +292,7 @@ end
 
 Guards with `when`:
 
-```march
+```elixir
 match n do
   x when x > 100 -> "big"
   x when x > 0   -> "small"
@@ -302,7 +302,7 @@ end
 
 Pattern-free multi-way conditional (cond):
 
-```march
+```elixir
 match do
   score >= 90 -> "A"
   score >= 80 -> "B"
@@ -317,7 +317,7 @@ end
 
 `with` chains `Result`/`Option` bindings — short-circuits on failure:
 
-```march
+```elixir
 with Ok(user) <- fetch_user(id),
      Ok(data) <- fetch_data(user.token) do
   process(user, data)
@@ -334,7 +334,7 @@ Each `pat <- expr`: if `expr` matches `pat`, continue; otherwise fall through to
 
 `|>` threads the left value as the first argument of the right expression:
 
-```march
+```elixir
 [1, 2, 3, 4, 5]
 |> List.filter(fn x -> x % 2 == 0)
 |> List.map(fn x -> x * x)
@@ -342,7 +342,7 @@ Each `pat <- expr`: if `expr` matches `pat`, continue; otherwise fall through to
 ```
 
 Equivalent to:
-```march
+```elixir
 List.fold(
   List.map(
     List.filter([1, 2, 3, 4, 5], fn x -> x % 2 == 0),
@@ -357,7 +357,7 @@ The pipe version reads left-to-right and matches the mental model.
 
 ## Tuples
 
-```march
+```elixir
 let pair  = (1, "hello")        -- (Int, String)
 let triple = (1, 2.0, true)     -- (Int, Float, Bool)
 let unit  = ()                  -- ()
@@ -365,7 +365,7 @@ let unit  = ()                  -- ()
 
 Destructure in patterns:
 
-```march
+```elixir
 let (a, b) = pair
 ```
 
@@ -373,7 +373,7 @@ let (a, b) = pair
 
 ## Lists
 
-```march
+```elixir
 let empty = []
 let nums  = [1, 2, 3]           -- sugar for Cons(1, Cons(2, Cons(3, Nil)))
 let more  = Cons(0, nums)       -- [0, 1, 2, 3]
@@ -381,7 +381,7 @@ let more  = Cons(0, nums)       -- [0, 1, 2, 3]
 
 List comprehensions:
 
-```march
+```elixir
 [x * 2 for x in [1, 2, 3]]               -- [2, 4, 6]
 [x for x in nums, x % 2 == 0]            -- even numbers only
 [to_string(x) for x in [1, 2, 3]]        -- ["1", "2", "3"]
@@ -393,28 +393,28 @@ List comprehensions:
 
 Define a record type:
 
-```march
+```elixir
 type Point = { x : Float, y : Float }
 type User  = { name : String, age : Int, admin : Bool }
 ```
 
 Create a record:
 
-```march
+```elixir
 let p = { x = 1.0, y = 2.0 }
 let u = { name = "Alice", age = 30, admin = false }
 ```
 
 Access fields:
 
-```march
+```elixir
 p.x         -- 1.0
 u.name      -- "Alice"
 ```
 
 Functional update (returns a new record with some fields changed):
 
-```march
+```elixir
 let p2 = { p with x = 5.0 }
 let u2 = { u with age = 31, admin = true }
 ```
@@ -425,7 +425,7 @@ let u2 = { u with age = 31, admin = true }
 
 A `?` anywhere in an expression is a typed hole. The compiler reports what type it expects:
 
-```march
+```elixir
 fn mystery(xs : List(Int)) : Int do
   List.fold(xs, ?, fn acc x -> acc + x)
   -- error: hole of type Int
@@ -434,7 +434,7 @@ end
 
 Named holes `?name` for documentation:
 
-```march
+```elixir
 fn process(x) do
   ?todo_implement_this
 end
@@ -446,7 +446,7 @@ end
 
 `do ... end` is an expression that evaluates its body and returns the last value:
 
-```march
+```elixir
 let result = do
   let a = compute_a()
   let b = compute_b(a)
@@ -460,7 +460,7 @@ end
 
 Attach documentation to any definition:
 
-```march
+```elixir
 doc "Returns the absolute value of n."
 fn abs(n : Int) : Int do
   if n < 0 do -n else n end
@@ -469,7 +469,7 @@ end
 
 Multi-line docs:
 
-```march
+```elixir
 doc """
 Splits a string by the given delimiter.
 
@@ -487,7 +487,7 @@ end
 
 March has built-in test syntax:
 
-```march
+```elixir
 test "addition is commutative" do
   assert (1 + 2 == 2 + 1)
 end
