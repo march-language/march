@@ -1,9 +1,9 @@
 title: March Programming Language
 description: A statically-typed functional language in the ML/Elixir tradition, compiled to native code via LLVM.
-baseurl: ""
-url: ""
+baseurl: "/march"
+url: "https://march-language.github.io"
 
-theme: just-the-docs
+remote_theme: just-the-docs/just-the-docs
 
 # Site structure
 nav_order_default: 99
@@ -31,12 +31,6 @@ nav_external_links:
 
 # Footer
 footer_content: "March Programming Language. Built with <a href=\"https://just-the-docs.com\">Just the Docs</a>."
-
-# Collections (for future API reference)
-collections:
-  docs:
-    permalink: "/:collection/:path/"
-    output: true
 
 # Exclude from build
 exclude:
