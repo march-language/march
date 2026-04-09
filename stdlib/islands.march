@@ -1,3 +1,13 @@
+-- DEPRECATED: This module has moved to the Bastion framework package.
+-- Add bastion as a dependency in your forge.toml and import Islands from there.
+-- The bastion version adds OnVisible hydration, parent-child events, channel
+-- sync, and FormConfig. Migration notes:
+--   Islands.DataFlow       -> Islands.DataflowMode
+--   Islands.Sync           -> removed (use Client + channel for bidirectional sync)
+--   Islands.Registry       -> removed (registry moved to IslandAssets)
+--   Islands.Descriptor     -> removed
+-- This stdlib copy will be removed in a future march release.
+--
 -- Islands: WASM island framework for March web applications.
 --
 -- Islands are interactive UI components rendered server-side in HTML and then

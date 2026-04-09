@@ -1,3 +1,7 @@
+-- DEPRECATED: This module has moved to the Bastion framework package.
+-- Add bastion as a dependency in your forge.toml and import it from there.
+-- This stdlib copy will be removed in a future march release.
+--
 -- BastionIdempotency: idempotency-key middleware for Bastion web apps.
 --
 -- Caches request responses in Vault by the value of the `Idempotency-Key`
