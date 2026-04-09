@@ -92,7 +92,7 @@ This compiles everything: the compiler, the stdlib, the C runtime, the `forge` b
 ## 5. Verify
 
 ```sh
-dune exec march -- examples/list_lib.march
+forge run examples/list_lib.march
 ```
 
 Expected output:
@@ -111,7 +111,7 @@ append [1..3] [4..6]: [1, 2, 3, 4, 5, 6]
 ## 6. Run tests (optional)
 
 ```sh
-dune runtest
+forge test
 ```
 
 All tests should pass. The suite covers the parser, typechecker, evaluator, stdlib, and forge.
@@ -120,17 +120,17 @@ All tests should pass. The suite covers the parser, typechecker, evaluator, stdl
 
 ## PATH setup (optional)
 
-For convenience, add the binaries to your shell PATH:
+For convenience, add the forge binary to your shell PATH:
 
 ```sh
 # ~/.zshrc or ~/.bashrc
-export PATH="$HOME/march/_build/default/bin:$HOME/march/_build/default/forge/bin:$PATH"
+export PATH="$HOME/march/_build/default/forge/bin:$PATH"
 ```
 
-After sourcing your shell config you can run `march` and `forge` directly:
+After sourcing your shell config you can run `forge` directly from anywhere:
 
 ```sh
-march examples/list_lib.march
+forge run my_program.march
 forge new my_project
 ```
 
@@ -162,7 +162,7 @@ end
 Run it:
 
 ```sh
-dune exec march -- hello.march
+forge run hello.march
 # Hello, March!
 ```
 
