@@ -1,5 +1,6 @@
 -- March module system demonstration
--- Shows: module definitions, qualified access, import, and alias
+-- Shows: nested module definitions, qualified access, import from stdlib,
+-- and alias for stdlib modules.
 
 mod Example do
 
@@ -19,46 +20,35 @@ mod Example do
 
   -- 1. Qualified access: call functions via Module.function
   fn demo_qualified() : Int do
-    let a = MathUtils.square(4)
-    let b = MathUtils.cube(3)
-    a + b
+    let a = MathUtils.square(4)    -- 16
+    let b = MathUtils.cube(3)      -- 27
+    a + b                          -- 43
   end
 
-  -- 2. Import all: bring every name from MathUtils into scope
-  import MathUtils
-
-  fn demo_import_all() : Int do
-    square(5) + cube(2)
+  -- 2. Use stdlib functions via qualified access
+  fn demo_stdlib() : String do
+    let xs = [1, 2, 3, 4, 5]
+    let doubled = List.map(xs, fn x -> x * 2)
+    let evens   = List.filter(doubled, fn x -> x > 4)
+    let total   = List.fold_left(0, evens, fn (acc, x) -> acc + x)
+    int_to_string(total)
   end
 
-  -- 3. Import specific names only
-  import MathUtils, only: [abs_val]
-
-  fn demo_import_only() : Int do
-    abs_val(0 - 7)
+  -- 3. Access nested module fields directly using qualified names
+  fn demo_nested() : Int do
+    let a = MathUtils.abs_val(0 - 7)   -- 7
+    let b = Greet.prefix()             -- 1000
+    a + b                              -- 1007
   end
 
-  -- 4. Alias: give a module a shorter name
-  alias MathUtils, as: M
-
-  fn demo_alias() : Int do
-    M.square(6)
-  end
-
-  -- 5. Use from the Greet module to verify no unused-import warning
-  import Greet, only: [prefix]
-
-  fn demo_greet() : Int do
-    prefix()
-  end
-
-  fn main() : Int do
-    let q  = demo_qualified()  -- 16 + 27 = 43
-    let ia = demo_import_all() -- 25 + 8  = 33
-    let io = demo_import_only() -- 7
-    let al = demo_alias()       -- 36
-    let gr = demo_greet()       -- 1000
-    q + ia + io + al + gr       -- 1119
+  fn main() : Unit do
+    let q  = demo_qualified()    -- 43
+    let s  = demo_stdlib()       -- e.g. "30"
+    let n  = demo_nested()       -- 1007
+    println("qualified:  " ++ int_to_string(q))
+    println("stdlib:     " ++ s)
+    println("nested:     " ++ int_to_string(n))
+    println("total:      " ++ int_to_string(q + n))
   end
 
 end

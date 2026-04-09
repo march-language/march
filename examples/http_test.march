@@ -26,9 +26,10 @@ mod HttpTest do
 
   fn assert_eq(label, expected, actual) do
     if expected == actual do
-      print("[PASS] " ++ label) end
+      print("[PASS] " ++ label)
     else
       print("[FAIL] " ++ label ++ ": expected \"" ++ expected ++ "\" got \"" ++ actual ++ "\"")
+    end
   end
 
   fn main() do

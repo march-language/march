@@ -1,152 +1,94 @@
--- A linked-list library with map, filter, fold, and a small demo.
+-- A custom linked-list library demonstrating user-defined recursive types.
+-- Defines its own list type and implements common operations from scratch.
+--
 -- Run: march examples/list_lib.march
 
 mod ListLib do
 
-type List(a) = Nil | Cons(a, List(a))
+-- Define a custom integer list type (separate from the stdlib)
+type IntList = INil | ICons(Int, IntList)
 
-type Option(a) = None | Some(a)
+-- ─── Core operations ───────────────────────────────────────────────────────
 
-fn length(lst : List(Int)) : Int do
+fn il_length(lst : IntList) : Int do
   match lst do
-  Nil        -> 0
-  Cons(_, t) -> 1 + length(t)
+  INil        -> 0
+  ICons(_, t) -> 1 + il_length(t)
   end
 end
 
-fn map(f : Int -> Int, lst : List(Int)) : List(Int) do
+fn il_sum(lst : IntList) : Int do
   match lst do
-  Nil        -> Nil
-  Cons(h, t) -> Cons(f(h), map(f, t))
+  INil        -> 0
+  ICons(h, t) -> h + il_sum(t)
   end
 end
 
-fn filter(pred : Int -> Bool, lst : List(Int)) : List(Int) do
+fn il_product(lst : IntList) : Int do
   match lst do
-  Nil        -> Nil
-  Cons(h, t) -> if pred(h) do Cons(h, filter(pred, t)) else filter(pred, t) end
+  INil        -> 1
+  ICons(h, t) -> h * il_product(t)
   end
 end
 
-fn fold_left(f : Int -> Int -> Int, acc : Int, lst : List(Int)) : Int do
+fn il_max(lst : IntList, default : Int) : Int do
   match lst do
-  Nil        -> acc
-  Cons(h, t) -> fold_left(f, f(acc, h), t)
+  INil        -> default
+  ICons(h, t) ->
+    let rest_max = il_max(t, default)
+    if h > rest_max do h else rest_max end
   end
 end
 
-fn sum(lst : List(Int)) : Int do
-  fold_left(fn (a, b) -> a + b, 0, lst)
+fn il_reverse_acc(lst : IntList, acc : IntList) : IntList do
+  match lst do
+  INil        -> acc
+  ICons(h, t) -> il_reverse_acc(t, ICons(h, acc))
+  end
 end
 
-fn product(lst : List(Int)) : Int do
-  fold_left(fn (a, b) -> a * b, 1, lst)
+fn il_reverse(lst : IntList) : IntList do
+  il_reverse_acc(lst, INil)
 end
 
-fn append(xs : List(Int), ys : List(Int)) : List(Int) do
+fn il_append(xs : IntList, ys : IntList) : IntList do
   match xs do
-  Nil        -> ys
-  Cons(h, t) -> Cons(h, append(t, ys))
+  INil        -> ys
+  ICons(h, t) -> ICons(h, il_append(t, ys))
   end
 end
 
-fn reverse_acc(lst : List(Int), acc : List(Int)) : List(Int) do
+-- Build a range [lo, hi] using accumulator (tail-recursive)
+fn il_range_acc(lo : Int, hi : Int, acc : IntList) : IntList do
+  if lo > hi do il_reverse(acc)
+  else il_range_acc(lo + 1, hi, ICons(lo, acc)) end
+end
+
+fn il_range(lo : Int, hi : Int) : IntList do
+  il_range_acc(lo, hi, INil)
+end
+
+-- Convert to a stdlib List for printing
+fn il_to_list(lst : IntList) : List(Int) do
   match lst do
-  Nil        -> acc
-  Cons(h, t) -> reverse_acc(t, Cons(h, acc))
+  INil        -> []
+  ICons(h, t) -> Cons(h, il_to_list(t))
   end
 end
 
-fn reverse(lst : List(Int)) : List(Int) do
-  reverse_acc(lst, Nil)
-end
-
-fn find(pred : Int -> Bool, lst : List(Int)) : Option(Int) do
-  match lst do
-  Nil        -> None
-  Cons(h, t) -> if pred(h) do Some(h) else find(pred, t) end
-  end
-end
-
-fn range(lo : Int, hi : Int) : List(Int) do
-  if lo > hi do Nil else Cons(lo, range(lo + 1, hi)) end
-end
-
--- Multi-statement match arm: print elements do separator
-fn print_list(lst : List(Int)) : Unit do
-  print("[")
-  match lst do
-  Nil -> ()
-  Cons(h, t) -> do
-    print(int_to_string(h))
-    match t do
-    Nil -> ()
-    _   -> do
-      print(", ")
-      print_list_tail(t)
-    end
-    end
-  end
-  end
-  print("]")
-end
-
-fn print_list_tail(lst : List(Int)) : Unit do
-  match lst do
-  Nil        -> ()
-  Cons(h, t) -> do
-    print(int_to_string(h))
-    match t do
-    Nil -> ()
-    _   -> do
-      print(", ")
-      print_list_tail(t)
-    end
-    end
-  end
-  end
-end
-
-fn option_to_string(o : Option(Int)) : String do
-  match o do
-  None    -> "None"
-  Some(x) -> "Some(" ++ int_to_string(x) ++ ")"
-  end
-end
+-- ─── Main ─────────────────────────────────────────────────────────────────
 
 fn main() : Unit do
-  let nums = range(1, 10)
-  print_list(nums)
-  println("")
-
-  let doubled = map(fn x -> x * 2, nums)
-  print("doubled:   ")
-  print_list(doubled)
-  println("")
-
-  let evens = filter(fn x -> x % 2 == 0, nums)
-  print("evens:     ")
-  print_list(evens)
-  println("")
-
-  let s = sum(nums)
-  println("sum 1..10  = " ++ int_to_string(s))
-
-  let p = product(range(1, 5))
-  println("5!         = " ++ int_to_string(p))
-
-  let rev = reverse(range(1, 5))
-  print("reverse:   ")
-  print_list(rev)
-  println("")
-
-  let big = find(fn x -> x > 7, nums)
-  println("find >7:   " ++ option_to_string(big))
-
-  let none = find(fn x -> x > 100, nums)
-  println("find >100: " ++ option_to_string(none))
-
-  println("length:    " ++ int_to_string(length(nums)))
+  let nums = il_range(1, 10)
+  println("range 1..10:   " ++ to_string(il_to_list(nums)))
+  println("length:        " ++ int_to_string(il_length(nums)))
+  println("sum 1..10:     " ++ int_to_string(il_sum(nums)))
+  println("product 1..5:  " ++ int_to_string(il_product(il_range(1, 5))))
+  println("max:           " ++ int_to_string(il_max(nums, 0)))
+  println("reversed:      " ++ to_string(il_to_list(il_reverse(nums))))
+  let a = il_range(1, 3)
+  let b = il_range(4, 6)
+  println("append [1..3] [4..6]: " ++ to_string(il_to_list(il_append(a, b))))
 end
 
 end
