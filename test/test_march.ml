@@ -5688,13 +5688,17 @@ let setup_jit_runtime () =
         let p = Filename.concat runtime_dir f in
         if Sys.file_exists p then " " ^ p else ""
       in
-      (* Include scheduler and message files: march_runtime.c calls
-         march_sched_spawn (in march_scheduler.c), which on Linux requires
-         all symbols to be resolved at shared-library load time. *)
+      (* On Linux, dlopen requires all symbols resolved at load time (unlike
+         macOS which allows lazy/two-level resolution). Include all core C
+         files that march_runtime.c depends on. Determined by attempting a
+         link and collecting the resulting "undefined symbol" errors. *)
       let extra_srcs =
         (opt_file "march_scheduler.c") ^
         (opt_file "march_message.c") ^
-        (opt_file "march_extras.c")
+        (opt_file "march_heap.c") ^
+        (opt_file "march_gc.c") ^
+        (opt_file "march_extras.c") ^
+        (opt_file "base64.c")
       in
       (* pthreads are in libSystem on macOS; explicit -lpthread needed on Linux. *)
       let pthread_flag =
