@@ -22,6 +22,40 @@
   var loadingEl = document.getElementById("pg-loading-msg");
 
   /* ------------------------------------------------------------------ */
+  /* Stdlib doc lookup — used by h(name)                                */
+  /* ------------------------------------------------------------------ */
+  function searchStdlib(name) {
+    var stdlib = window.marchStdlib || {};
+    var results = [];
+    // Match exactly "fn <name>(" at the start of a (possibly indented) line
+    var re = new RegExp("^\\s*fn\\s+" + name + "\\s*\\(");
+
+    Object.keys(stdlib).forEach(function (filename) {
+      var src    = stdlib[filename];
+      var base   = filename.replace(/\.march$/, "");
+      var modName = base.charAt(0).toUpperCase() + base.slice(1);
+      var lines  = src.split("\n");
+
+      for (var i = 0; i < lines.length; i++) {
+        if (re.test(lines[i])) {
+          // Grab doc string from the preceding line if present
+          var doc = "";
+          if (i > 0) {
+            var prev = lines[i - 1].trim();
+            var m = prev.match(/^doc\s+"(.+)"$/);
+            if (m) doc = m[1];
+          }
+          // Strip the "do" and body — just show the signature
+          var sig = lines[i].trim().replace(/\s+do\s*$/, "");
+          results.push({ mod: modName, sig: sig, doc: doc });
+        }
+      }
+    });
+
+    return results;
+  }
+
+  /* ------------------------------------------------------------------ */
   /* Bundle loading                                                      */
   /* ------------------------------------------------------------------ */
   function loadScript(src, onload, onerror) {
@@ -154,6 +188,26 @@
         appendLine("Interpreter not available.", "pg-error");
         return;
       }
+
+      // h(name) — stdlib documentation lookup
+      var helpMatch = trimmed.match(/^h\((\w+)\)$/);
+      if (helpMatch) {
+        var fnName = helpMatch[1];
+        var hits   = searchStdlib(fnName);
+        if (hits.length === 0) {
+          appendLine("No stdlib docs found for '" + fnName + "'.", "pg-error");
+          appendLine("Tip: try h() for general help, or check the docs.", "pg-info");
+        } else {
+          hits.forEach(function (entry) {
+            var header = entry.mod + "." + fnName;
+            if (entry.doc) header += " — " + entry.doc;
+            appendLine(header, "pg-info");
+            appendLine("  " + entry.sig, "pg-output");
+          });
+        }
+        return;
+      }
+
       var result = window.marchEvalLine(code);
       if (result.output && result.output.trim()) {
         appendLine(result.output.trimEnd(), "pg-output");
