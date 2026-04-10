@@ -190,6 +190,7 @@ end
 
 | Guide | What it covers |
 |-------|---------------|
+| [Try It Out](playground.md) | Interactive REPL — run March in your browser |
 | [Installation](installation.md) | Build from source, prerequisites |
 | [Getting Started](getting-started.md) | Hello world, compiling, running the REPL |
 | [Language Tour](tour.md) | Variables, functions, types, pipes — the essentials |
