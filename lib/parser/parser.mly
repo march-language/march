@@ -1143,14 +1143,15 @@ repl_input:
         Some (Printf.sprintf "let %s = expr" name),
         $startpos($2))) }
 
-(** Parse a sequence of zero or more declarations followed by an optional
-    expression, then EOF.  Used by the browser REPL to handle multi-item
-    inputs like:
-        type Shape = ...
-        let area = fn s -> match s do ... end
-        area(Circle(5.0))
-    without splitting on newlines (which breaks multi-line declarations). *)
+(** Parse a sequence of zero or more declarations and expressions, then EOF.
+    Used by the browser REPL so multi-item inputs work:
+        actor Counter do ... end
+        let pid = spawn(Counter)
+        send(pid, Inc(5))
+        send(pid, Get())
+        run_until_idle()
+    Both declarations and bare expressions may appear in any order. *)
 repl_sequence:
   | EOF { [] }
   | d = decl; rest = repl_sequence { March_ast.Ast.ReplDecl d :: rest }
-  | e = expr; EOF { [March_ast.Ast.ReplExpr e] }
+  | e = expr; rest = repl_sequence { March_ast.Ast.ReplExpr e :: rest }

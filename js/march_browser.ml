@@ -25,18 +25,21 @@ open Js_of_ocaml
 (* Output capture via Buffer + Format redirector                       *)
 (* ------------------------------------------------------------------ *)
 
-(** Redirect Format.std_formatter to [buf] while [f ()] runs.
-    In the browser there are no real file descriptors to redirect, so
-    we just intercept the Format formatter output functions. *)
+(** Redirect both Format.std_formatter and eval's capture_write to [buf]
+    while [f ()] runs.  This catches both Format.printf output and the
+    print/println builtins (which go through Eval.test_capture_buf). *)
 let with_output_captured buf f =
   let old_out = Format.get_formatter_output_functions () in
   let write s p l = Buffer.add_substring buf s p l in
   let flush () = () in
   Format.set_formatter_output_functions write flush;
+  March_eval.Eval.test_capture_buf := Some buf;
   (try f ()
    with exn ->
+     March_eval.Eval.test_capture_buf := None;
      Format.set_formatter_output_functions (fst old_out) (snd old_out);
      raise exn);
+  March_eval.Eval.test_capture_buf := None;
   Format.set_formatter_output_functions (fst old_out) (snd old_out)
 
 (* ------------------------------------------------------------------ *)

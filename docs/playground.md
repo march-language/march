@@ -19,7 +19,7 @@ The playground below runs a full March interpreter compiled to WebAssembly-frien
 
 ```march
 1 + 2 * 3
-"hello" <> " " <> "world"
+"hello, " ++ "world"
 ```
 
 **Let bindings and functions**
