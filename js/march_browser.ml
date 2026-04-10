@@ -233,7 +233,10 @@ let parse_hint line col env =
     | _ -> None
 
 (** Given [code], the session [env], and a [Lexing.position], return a string
-    showing the offending source line, a caret pointer, and a hint. *)
+    showing the error.  When a context-specific hint is available it leads the
+    output (so it's the first thing the user reads); the source line and caret
+    follow as supporting context.  Falls back to a bare "parse error" header
+    when no hint can be derived. *)
 let format_parse_error code env (pos : Lexing.position) msg =
   let lines = String.split_on_char '\n' code in
   let line_no = pos.Lexing.pos_lnum in   (* 1-based *)
@@ -241,11 +244,12 @@ let format_parse_error code env (pos : Lexing.position) msg =
   match List.nth_opt lines (line_no - 1) with
   | Some src_line ->
     let caret = String.make (max 0 col) ' ' ^ "^" in
-    let hint_part = match parse_hint src_line col env with
-      | Some h -> "\nhint: " ^ h
-      | None   -> ""
-    in
-    Printf.sprintf "%s\n%s\n%s%s" msg src_line caret hint_part
+    (match parse_hint src_line col env with
+     | Some hint ->
+       (* Hint first — most useful info visible immediately *)
+       Printf.sprintf "%s\n%s\n%s" hint src_line caret
+     | None ->
+       Printf.sprintf "%s\n%s\n%s" msg src_line caret)
   | None ->
     Printf.sprintf "%s (line %d col %d)" msg line_no col
 
