@@ -159,13 +159,23 @@ let ensure_session_init () =
 (* Parse helpers                                                       *)
 (* ------------------------------------------------------------------ *)
 
+(** Given [code] and a [Lexing.position], return a two-line string:
+      the source line containing the error
+      a caret (^) pointing at the column
+    If the line number is out of range, falls back to a bare coordinate. *)
+let format_parse_error code (pos : Lexing.position) msg =
+  let lines = String.split_on_char '\n' code in
+  let line_no = pos.Lexing.pos_lnum in   (* 1-based *)
+  let col     = pos.Lexing.pos_cnum - pos.Lexing.pos_bol in  (* 0-based *)
+  match List.nth_opt lines (line_no - 1) with
+  | Some src_line ->
+    let caret = String.make (max 0 col) ' ' ^ "^" in
+    Printf.sprintf "%s\n%s\n%s" msg src_line caret
+  | None ->
+    Printf.sprintf "%s (line %d col %d)" msg line_no col
+
 (** Parse all REPL items from [code] using the [repl_sequence] grammar rule.
-    This accepts a sequence of declarations followed by an optional expression,
-    all from a single lexbuf, enabling multi-declaration inputs like:
-      type Shape = Circle(Float) | Rect(Float, Float)
-      let area = fn s -> match s do ... end
-      area(Circle(5.0))
-    Returns [Ok items] or [Error msg] on parse failure. *)
+    Returns [Ok items] or [Error msg] with source context and a caret pointer. *)
 let parse_all_repl_items code =
   let lexbuf = Lexing.from_string (code ^ "\n") in
   lexbuf.Lexing.lex_curr_p <-
@@ -176,13 +186,10 @@ let parse_all_repl_items code =
     Ok items
   with
   | March_errors.Errors.ParseError (msg, _hint, pos) ->
-    let open Lexing in
-    Error (Printf.sprintf "parse error at line %d: %s" pos.pos_lnum msg)
+    Error (format_parse_error code pos ("parse error: " ^ msg))
   | March_parser.Parser.Error ->
     let pos = Lexing.lexeme_start_p lexbuf in
-    let open Lexing in
-    Error (Printf.sprintf "parse error at line %d col %d"
-             pos.pos_lnum (pos.pos_cnum - pos.pos_bol))
+    Error (format_parse_error code pos "parse error")
 
 (* ------------------------------------------------------------------ *)
 (* Eval an expression / declaration sequence                           *)

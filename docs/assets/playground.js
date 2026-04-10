@@ -106,13 +106,16 @@
   /* Append output to history                                            */
   /* ------------------------------------------------------------------ */
   function appendLine(text, cssClass) {
-    var entry = document.createElement("div");
-    entry.className = "pg-entry";
-    var span = document.createElement("span");
-    span.className = cssClass;
-    span.textContent = text;
-    entry.appendChild(span);
-    historyEl.appendChild(entry);
+    // Split on newlines so caret-pointer error messages render correctly.
+    text.split("\n").forEach(function (line) {
+      var entry = document.createElement("div");
+      entry.className = "pg-entry";
+      var span = document.createElement("span");
+      span.className = cssClass;
+      span.textContent = line;
+      entry.appendChild(span);
+      historyEl.appendChild(entry);
+    });
     historyEl.scrollTop = historyEl.scrollHeight;
   }
 
