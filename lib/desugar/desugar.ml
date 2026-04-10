@@ -39,6 +39,7 @@
     make it worthwhile. *)
 
 open March_ast.Ast
+module Err = March_errors.Errors
 
 (* ---- Utilities ---- *)
 
@@ -413,7 +414,15 @@ let rec desugar_expr (e : expr) : expr =
          | ELit (lit, litsp) -> PatLit (lit, litsp)
          | EAtom (a, args, epsp) -> PatAtom (a, List.map expr_to_pat args, epsp)
          | ETuple (es, epsp) -> PatTuple (List.map expr_to_pat es, epsp)
-         | _ -> failwith ("pipe-to-match: cannot convert to pattern: " ^ show_expr e)
+         | _ ->
+           let file = sp.file in
+           let line = sp.start_line in
+           let col  = sp.start_col in
+           failwith (Printf.sprintf
+             "%s:%d:%d: error: pipe-to-match: expression cannot be used as a pattern here.\n\
+              Only constructors, variables, literals, and tuples are allowed as match arms \
+              in a `|>` pipe expression."
+             file line col)
        in
        let branches = List.map (fun (cond_e, body) ->
            { branch_pat = expr_to_pat cond_e
@@ -769,9 +778,11 @@ let mk_fn_def name params body : fn_def =
 
 (** Build derived declarations for one interface on [type_name].
     Returns a list of [decl] — usually one [DImpl], but [Json] produces
-    two standalone [DFn] declarations (to_json / from_json). *)
-let derive_impl (type_name : name) (sp : span)
-    (iface : string) (tparams : name list) (td : type_def) : decl list =
+    two standalone [DFn] declarations (to_json / from_json).
+    [iface_span] is the span of the interface name in the source, used for
+    error reporting when the interface is unknown. *)
+let derive_impl (errors : Err.ctx) (type_name : name) (sp : span)
+    (iface : string) (iface_span : span) (tparams : name list) (td : type_def) : decl list =
   (* Type annotation for the type being implemented *)
   let self_ty : ty =
     if tparams = [] then TyCon (type_name, [])
@@ -1303,11 +1314,18 @@ let derive_impl (type_name : name) (sp : span)
     [mk_json_impl "JsonTo" "to_json" to_json_fn;
      mk_json_impl "JsonFrom" "from_json" from_json_fn]
 
-  | _ -> []  (* Unknown interface — silently skip *)
+  | _ ->
+    Err.error errors ~span:iface_span
+      (Printf.sprintf
+         "Unknown derive target `%s` for type `%s`.\n\
+          Supported interfaces: Eq, Show, Hash, Ord, Json"
+         iface type_name.txt);
+    []
 
 (** Expand a [DDeriving] into zero or more [DImpl] blocks.
-    If the type is not found or an interface is unknown, silently skips. *)
+    Emits an error for unknown interfaces; silently skips if the type is not found. *)
 let expand_derive
+    (errors : Err.ctx)
     (type_defs : (string * (name list * type_def)) list)
     (type_name : name)
     (ifaces : name list)
@@ -1316,23 +1334,29 @@ let expand_derive
   match List.assoc_opt type_name.txt type_defs with
   | None -> []   (* type not found — silently skip *)
   | Some (tparams, td) ->
-    List.concat_map (fun iface_name ->
-        derive_impl type_name sp iface_name.txt tparams td
+    List.concat_map (fun (iface_name : name) ->
+        derive_impl errors type_name sp iface_name.txt iface_name.span tparams td
       ) ifaces
 
 (** Check mutual exclusivity of [main] and [app] declarations.
-    Returns an error message if both are present. *)
-let check_app_main_exclusivity (decls : decl list) : unit =
-  let has_main = List.exists (function
-      | DFn (def, _) when def.fn_name.txt = "main" -> true
-      | _ -> false
-    ) decls in
-  let has_app = List.exists (function
-      | DApp _ -> true
-      | _ -> false
-    ) decls in
-  if has_main && has_app then
-    failwith "A module cannot define both main() and an app declaration"
+    Reports a proper error with span if both are present. *)
+let check_app_main_exclusivity (errors : Err.ctx) (decls : decl list) : unit =
+  let main_span = List.find_map (function
+      | DFn (def, sp) when def.fn_name.txt = "main" -> Some sp
+      | _ -> None) decls in
+  let app_span = List.find_map (function
+      | DApp (_, sp) -> Some sp
+      | _ -> None) decls in
+  match main_span, app_span with
+  | Some ms, Some as_ ->
+    Err.error errors ~span:ms
+      (Printf.sprintf
+         "A module cannot define both `main()` and an `app` declaration.\n\
+          `main()` is for programs that run once and exit.\n\
+          `app` is for long-running supervised applications with a process tree.\n\
+          Choose one: `main()` at %s:%d, or `app` at %s:%d."
+         ms.file ms.start_line as_.file as_.start_line)
+  | _ -> ()
 
 (* ── Island bridge auto-generation ─────────────────────────────────────── *)
 
@@ -1553,15 +1577,15 @@ let expand_defaults_decl (d : decl) : decl list =
     fns and pipe expressions lowered to their core forms.
     Also injects default interface method bodies into impls that omit them.
     [DDeriving] nodes are expanded into [DImpl] blocks here. *)
-let desugar_module (m : module_) : module_ =
-  check_app_main_exclusivity m.mod_decls;
+let desugar_module ?(errors = Err.create ()) (m : module_) : module_ =
+  check_app_main_exclusivity errors m.mod_decls;
   (* Collect type definitions so derive expansion can reference them. *)
   let type_defs = collect_type_defs m.mod_decls in
   (* Expand DDeriving nodes and desugar everything else. *)
   let expanded = List.concat_map (fun d ->
       match d with
       | DDeriving (type_name, ifaces, sp) ->
-        expand_derive type_defs type_name ifaces sp
+        expand_derive errors type_defs type_name ifaces sp
       | _ -> expand_defaults_decl d
     ) m.mod_decls in
   (* Auto-generate island bridge functions if this is an island module. *)

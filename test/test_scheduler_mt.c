@@ -75,6 +75,7 @@ static void test_multithread_spawn_10000(void) {
  */
 
 static _Atomic int g_mt_recv_count = 0;
+static _Atomic int g_mt_senders_done = 0;
 static march_proc *g_mt_receiver = NULL;
 
 static void mt_recv_loop(void *arg) {
@@ -82,6 +83,12 @@ static void mt_recv_loop(void *arg) {
     for (int i = 0; i < expected; i++) {
         void *msg = march_sched_recv();
         if (msg) atomic_fetch_add_explicit(&g_mt_recv_count, 1, memory_order_relaxed);
+    }
+    /* Wait for all senders to finish before exiting. Without this, a sender
+     * running on another scheduler thread could call march_sched_send() on
+     * g_mt_receiver after the scheduler has already freed it (use-after-free). */
+    while (atomic_load_explicit(&g_mt_senders_done, memory_order_acquire) < 50) {
+        march_sched_yield();
     }
 }
 
@@ -91,10 +98,12 @@ static void mt_sender(void *arg) {
         march_sched_send(g_mt_receiver, (void *)(intptr_t)(i + 1));
         march_sched_yield();
     }
+    atomic_fetch_add_explicit(&g_mt_senders_done, 1, memory_order_release);
 }
 
 static void test_multithread_send_recv(void) {
     g_mt_recv_count = 0;
+    g_mt_senders_done = 0;
     march_sched_init();
     g_mt_receiver = march_sched_spawn(mt_recv_loop, (void *)(intptr_t)500);
     for (int i = 0; i < 50; i++) {

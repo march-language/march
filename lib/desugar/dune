@@ -1,3 +1,3 @@
 (library
  (name march_desugar)
- (libraries march_ast))
+ (libraries march_ast march_errors))

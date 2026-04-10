@@ -5683,8 +5683,35 @@ let setup_jit_runtime () =
   | None -> None
   | Some runtime_c ->
     if not (Sys.file_exists so_path) then begin
+      let runtime_dir = Filename.dirname runtime_c in
+      let opt_file f =
+        let p = Filename.concat runtime_dir f in
+        if Sys.file_exists p then " " ^ p else ""
+      in
+      (* On Linux, dlopen requires all symbols resolved at load time (unlike
+         macOS which allows lazy/two-level resolution). Include all core C
+         files that march_runtime.c depends on. Determined by attempting a
+         link and collecting the resulting "undefined symbol" errors. *)
+      let extra_srcs =
+        (opt_file "march_scheduler.c") ^
+        (opt_file "march_message.c") ^
+        (opt_file "march_heap.c") ^
+        (opt_file "march_gc.c") ^
+        (opt_file "march_extras.c") ^
+        (opt_file "base64.c")
+      in
+      (* pthreads are in libSystem on macOS; explicit -lpthread needed on Linux. *)
+      let pthread_flag =
+        match Sys.os_type with
+        | "Unix" ->
+          (match Sys.command "uname -s 2>/dev/null | grep -q Darwin" with
+           | 0 -> ""
+           | _ -> " -lpthread")
+        | _ -> ""
+      in
       let rc = Sys.command (Printf.sprintf
-        "clang -shared -O2 -fPIC %s -o %s 2>/dev/null" runtime_c so_path) in
+        "clang -shared -O2 -fPIC %s%s%s -o %s 2>/dev/null"
+        runtime_c extra_srcs pthread_flag so_path) in
       if rc <> 0 then None else Some so_path
     end else Some so_path
 
@@ -12592,7 +12619,7 @@ let test_app_spawns_actors () =
   let count = Hashtbl.length March_eval.Eval.actor_registry in
   Alcotest.(check bool) "at least one actor spawned" true (count >= 1)
 
-(** mutual exclusivity: main + app raises *)
+(** mutual exclusivity: main + app reports an error *)
 let test_app_main_exclusive () =
   let src = {|mod Bad do
     fn main() do 42 end
@@ -12600,15 +12627,11 @@ let test_app_main_exclusive () =
       Supervisor.spec(:one_for_one, [])
     end
   end|} in
-  let raised =
-    try
-      let lexbuf = Lexing.from_string src in
-      let ast = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
-      ignore (March_desugar.Desugar.desugar_module ast);
-      false
-    with Failure _ -> true
-  in
-  Alcotest.(check bool) "main + app raises" true raised
+  let lexbuf = Lexing.from_string src in
+  let ast = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors ast);
+  Alcotest.(check bool) "main + app raises" true (March_errors.Errors.has_errors errors)
 
 (* ------------------------------------------------------------------ *)
 (* Process Registry tests                                              *)

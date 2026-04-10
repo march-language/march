@@ -736,7 +736,16 @@ let run_test_cmd args =
       ) parse_errs;
       exit 1
     end;
-    let desugared = March_desugar.Desugar.desugar_module module_ast in
+    let desugar_errors = March_errors.Errors.create () in
+    let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in
+    if March_errors.Errors.has_errors desugar_errors then begin
+      List.iter (fun (d : March_errors.Errors.diagnostic) ->
+          Printf.eprintf "%s:%d:%d: error: %s\n"
+            d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
+            d.span.March_ast.Ast.start_col d.message
+        ) (March_errors.Errors.sorted desugar_errors);
+      exit 1
+    end;
     let (resolve_errors, extra_decls) = resolve_imports ~source_file:filename desugared in
     if resolve_errors <> [] then begin
       List.iter (fun (_mod_name, span, msg) ->
@@ -952,7 +961,14 @@ let compile filename =
        | Some h -> Printf.eprintf "hint: %s\n" h)
     ) parse_errs;
   (* Desugar *)
-  let desugared = March_desugar.Desugar.desugar_module module_ast in
+  let desugar_errors = March_errors.Errors.create () in
+  let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in
+  List.iter (fun (d : March_errors.Errors.diagnostic) ->
+      Printf.eprintf "%s:%d:%d: error: %s\n"
+        d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
+        d.span.March_ast.Ast.start_col d.message
+    ) (March_errors.Errors.sorted desugar_errors);
+  let has_desugar_errors = March_errors.Errors.has_errors desugar_errors in
   (* Capture user AST before stdlib injection — used by -dump-phases *)
   let user_ast = desugared in
   (* Resolve cross-file imports: find imported .march files, parse and inject *)
@@ -1015,7 +1031,7 @@ let compile filename =
     ) diags in
   (* In compile mode, abort on user-file errors only.  Stdlib errors
      (e.g. http_client) are tolerated since those modules are WIP. *)
-  if has_user_errors || has_parse_errors || has_resolve_errors then exit 1
+  if has_user_errors || has_parse_errors || has_resolve_errors || has_desugar_errors then exit 1
   else if compile_mode then begin
     (* -dump-phases: collect per-stage JSON graphs *)
     let phases = ref [] in

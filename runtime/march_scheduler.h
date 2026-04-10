@@ -45,7 +45,11 @@ typedef enum {
     PROC_READY   = 0,  /* In run queue, waiting for a CPU turn              */
     PROC_RUNNING = 1,  /* Currently executing on the scheduler thread       */
     PROC_WAITING = 2,  /* Blocked on receive/I/O; not in run queue          */
-    PROC_DEAD    = 3   /* Finished; resources will be freed by the scheduler */
+    PROC_DEAD    = 3,  /* Finished; resources will be freed by the scheduler */
+    PROC_PARKED  = 4   /* Transitioning to WAITING: status set but swapcontext
+                        * not yet called.  Wakers must spin-wait on this state
+                        * before pushing to a deque, to avoid resuming a process
+                        * whose context has not yet been saved.              */
 } march_proc_status;
 
 /* ── Process priority ─────────────────────────────────────────────────── */
