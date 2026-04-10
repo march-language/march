@@ -158,6 +158,9 @@
   .pg-example-chip:hover { background: #313244; border-color: #89b4fa; }
   .pg-chip-actor { border-color: #a6e3a1; color: #a6e3a1; }
   .pg-chip-actor:hover { background: #1e3a2a; border-color: #a6e3a1; }
+  .pg-chip-error { border-color: #f38ba8; color: #f38ba8; }
+  .pg-chip-error:hover { background: #2d1a1e; border-color: #f38ba8; }
+  .pg-chip-divider { color: #4b5563; font-size: 11px; padding: 4px 2px; align-self: center; user-select: none; }
 
   /* Right-hand copy panel */
   .pg-copy {
@@ -246,6 +249,10 @@
       <button class="pg-example-chip" onclick="pgLoad('h(map)')">h(map)</button>
       <button class="pg-example-chip pg-chip-actor" onclick="pgLoad('actor Counter do\n  state { value : Int }\n  init { value = 0 }\n  on Inc(n : Int) do\n    { value = state.value + n }\n  end\n  on Get() do\n    println(&quot;count: &quot; ++ int_to_string(state.value))\n    state\n  end\n  on Reset() do\n    { value = 0 }\n  end\nend\nlet pid = spawn(Counter)')">make the actor</button>
       <button class="pg-example-chip pg-chip-actor" onclick="pgLoad('send(pid, Inc(5))\nsend(pid, Inc(3))\nsend(pid, Get())\nsend(pid, Reset())\nsend(pid, Inc(1))\nsend(pid, Get())\nrun_until_idle()')">send messages</button>
+      <span class="pg-chip-divider">errors →</span>
+      <button class="pg-example-chip pg-chip-error" onclick="pgLoad('count = 0')">wrong assignment</button>
+      <button class="pg-example-chip pg-chip-error" onclick="pgLoad('let classify = fn n -> match n do\n  0 -> &quot;zero&quot;\n  1 -> &quot;one&quot;\nend\nclassify(5)')">missing match arm</button>
+      <button class="pg-example-chip pg-chip-error" onclick="pgLoadThen('actor Counter do\n  state { value : Int }\n  init { value = 0 }\n  on Inc(n : Int) do { value = state.value + n } end\nend\nlet pid = spawn(Counter)', 'send(pid(, Inc(1))')">pid typo</button>
       <button class="pg-example-chip" onclick="pgLoad(':reset')">:reset</button>
       <button class="pg-example-chip" onclick="pgLoad(':help')">:help</button>
     </div>

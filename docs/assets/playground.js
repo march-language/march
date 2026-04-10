@@ -277,6 +277,15 @@
     inputEl.focus();
   };
 
+  // pgLoadThen(setup, code): silently submit setup, then load code into input.
+  // Used by error-demo chips that need prior state (e.g. actor in scope).
+  window.pgLoadThen = function (setup, code) {
+    loadBundle(function () {
+      if (window.marchEvalLine) window.marchEvalLine(setup);
+    });
+    window.pgLoad(code);
+  };
+
   window.pgSubmit = function () {
     submitCode(inputEl.value);
   };
