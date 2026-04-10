@@ -156,14 +156,18 @@ let ensure_session_init () =
 (* Parse helpers                                                       *)
 (* ------------------------------------------------------------------ *)
 
-let parse_user_code code =
-  let lexbuf = Lexing.from_string code in
+(** Parse one REPL item using the dedicated repl_input grammar entry point.
+    This accepts both bare expressions (ReplExpr) and declarations (ReplDecl)
+    without requiring a `mod Name do ... end` wrapper. *)
+let parse_repl_input code =
+  (* Append a newline so the lexer sees EOF cleanly after the last token *)
+  let lexbuf = Lexing.from_string (code ^ "\n") in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = "<repl>" };
   try
-    let m = March_parser.Parser.module_
+    let item = March_parser.Parser.repl_input
         (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
-    Ok (March_desugar.Desugar.desugar_module m)
+    Ok item
   with
   | March_errors.Errors.ParseError (msg, _hint, pos) ->
     let open Lexing in
@@ -201,6 +205,18 @@ let string_of_value v =
       Buffer.add_char buf '(';
       List.iteri (fun i v -> if i > 0 then Buffer.add_string buf ", "; pp v) vs;
       Buffer.add_char buf ')'
+    | March_eval.Eval.VCon ("Nil", []) -> Buffer.add_string buf "[]"
+    | March_eval.Eval.VCon ("Cons", _) ->
+      (* Pretty-print linked lists as [a, b, c] *)
+      let rec collect acc = function
+        | March_eval.Eval.VCon ("Cons", [hd; tl]) -> collect (hd :: acc) tl
+        | March_eval.Eval.VCon ("Nil", []) -> List.rev acc
+        | v -> List.rev (v :: acc)
+      in
+      let elems = collect [] v in
+      Buffer.add_char buf '[';
+      List.iteri (fun i e -> if i > 0 then Buffer.add_string buf ", "; pp e) elems;
+      Buffer.add_char buf ']'
     | March_eval.Eval.VCon (tag, [])  -> Buffer.add_string buf tag
     | March_eval.Eval.VCon (tag, vs)  ->
       Buffer.add_string buf tag;
@@ -237,61 +253,82 @@ let string_of_value v =
   pp v;
   Buffer.contents buf
 
+(** Evaluate a single parsed repl_input item in the session.
+    Returns [(output, value_opt, error_opt)].
+    [value_opt] is set for ReplExpr items so the caller can display the result. *)
+let eval_item item =
+  let out_buf = Buffer.create 128 in
+  let error_ref : string option ref = ref None in
+  let value_ref : March_eval.Eval.value option ref = ref None in
+  with_output_captured out_buf (fun () ->
+    try
+      (match item with
+       | March_ast.Ast.ReplEOF -> ()
+       | March_ast.Ast.ReplExpr expr ->
+         let v = March_eval.Eval.eval_expr !session_env_ref expr in
+         value_ref := Some v
+       | March_ast.Ast.ReplDecl decl ->
+         let new_env = March_eval.Eval.eval_decl !session_env_ref decl in
+         session_env_ref := new_env;
+         (* If `main` was just defined, call it immediately *)
+         (match List.assoc_opt "main" new_env with
+          | Some v ->
+            let result = March_eval.Eval.apply v [] in
+            let s = string_of_value result in
+            if s <> "()" then Format.printf "%s\n%!" s
+          | None -> ()))
+    with
+    | March_eval.Eval.Eval_error msg ->
+      error_ref := Some ("runtime error: " ^ msg)
+    | March_eval.Eval.Match_failure msg ->
+      error_ref := Some ("match failure: " ^ msg)
+    | exn ->
+      error_ref := Some ("error: " ^ Printexc.to_string exn)
+  );
+  (Buffer.contents out_buf, !value_ref, !error_ref)
+
 (** Evaluate [code] in the persistent session.
+    Handles both single items and multi-line blocks (evaluated line by line).
     Returns [(output_text, error_opt)]. *)
 let eval_line code =
   ensure_session_init ();
-  match parse_user_code code with
-  | Error msg -> ("", Some msg)
-  | Ok user_module ->
-    let out_buf = Buffer.create 128 in
-    let error_ref : string option ref = ref None in
-    with_output_captured out_buf (fun () ->
-      try
-        (* Typecheck the user's decls in isolation (no session type env;
-           typecheck is just for catching obvious errors).
-           We build a module that includes the new decls only. *)
-        let dummy_span = March_ast.Ast.dummy_span in
-        let dummy_name = { March_ast.Ast.txt = "ReplSnippet"; March_ast.Ast.span = dummy_span } in
-        let check_mod = {
-          March_ast.Ast.mod_name  = dummy_name;
-          March_ast.Ast.mod_decls = user_module.March_ast.Ast.mod_decls;
-        } in
-        let (tc_ctx, _) = March_typecheck.Typecheck.check_module check_mod in
-        let errors = March_errors.Errors.sorted tc_ctx
-                     |> List.filter (fun (d : March_errors.Errors.diagnostic) ->
-                          d.severity = March_errors.Errors.Error) in
-        (match errors with
-         | d :: _ ->
-           error_ref := Some d.March_errors.Errors.message
-         | [] ->
-           (* Eval each new declaration into the session env *)
-           let new_env = List.fold_left March_eval.Eval.eval_decl
-                           !session_env_ref
-                           user_module.March_ast.Ast.mod_decls in
-           session_env_ref := new_env;
-           (* If a top-level `main` was just defined, call it once *)
-           (match List.assoc_opt "main" new_env with
-            | Some v ->
-              let result = March_eval.Eval.apply v [] in
-              let s = string_of_value result in
-              if s <> "()" then begin
-                Format.printf "%s\n%!" s
-              end
-            | None ->
-              (* If the snippet is a single expression (DLet _ or DExpr _),
-                 print its value. We detect this by looking for bindings with
-                 auto-generated names from desugar, or by counting decls. *)
-              ()))
-      with
-      | March_eval.Eval.Eval_error msg ->
-        error_ref := Some ("runtime error: " ^ msg)
-      | March_eval.Eval.Match_failure msg ->
-        error_ref := Some ("match failure: " ^ msg)
-      | exn ->
-        error_ref := Some ("error: " ^ Printexc.to_string exn)
-    );
-    (Buffer.contents out_buf, !error_ref)
+  let render_result output value_opt =
+    match value_opt with
+    | None -> output
+    | Some v ->
+      let s = string_of_value v in
+      if output = "" then s ^ "\n" else output ^ s ^ "\n"
+  in
+  (* Try the whole input as one repl_input item first *)
+  match parse_repl_input code with
+  | Ok item ->
+    let (output, value_opt, error_opt) = eval_item item in
+    (render_result output value_opt, error_opt)
+  | Error first_err ->
+    (* If multi-line, try evaluating each non-empty line separately.
+       This handles: let x = 1\nlet y = 2\nx + y  *)
+    let lines = String.split_on_char '\n' (String.trim code)
+                |> List.filter (fun l -> String.trim l <> "") in
+    if List.length lines <= 1 then
+      ("", Some first_err)
+    else begin
+      let overall_out = Buffer.create 128 in
+      let last_value = ref None in
+      let first_error = ref None in
+      List.iter (fun line ->
+        if !first_error = None then
+          match parse_repl_input line with
+          | Ok item ->
+            let (out, v, err) = eval_item item in
+            Buffer.add_string overall_out out;
+            last_value := v;
+            first_error := err
+          | Error msg ->
+            first_error := Some msg
+      ) lines;
+      let output = render_result (Buffer.contents overall_out) !last_value in
+      (output, !first_error)
+    end
 
 (* ------------------------------------------------------------------ *)
 (* JavaScript exports                                                  *)

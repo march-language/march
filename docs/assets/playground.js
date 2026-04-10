@@ -21,29 +21,47 @@
   /* ------------------------------------------------------------------ */
   /* Bundle loading                                                      */
   /* ------------------------------------------------------------------ */
+  function loadScript(src, onload, onerror) {
+    var s = document.createElement("script");
+    s.src = src;
+    s.onload = onload;
+    s.onerror = onerror;
+    document.head.appendChild(s);
+  }
+
   function loadBundle(callback) {
     if (bundleLoaded) { callback(); return; }
     if (bundleLoading) { pendingCode = callback; return; }
     bundleLoading = true;
     loadingEl.textContent = "Loading interpreter\u2026";
 
-    var script = document.createElement("script");
-    script.src = base + "/assets/march.js";
-    script.onload = function () {
-      bundleLoaded  = true;
-      bundleLoading = false;
-      loadingEl.textContent = "Ready.";
-      setTimeout(function () { loadingEl.textContent = ""; }, 1500);
-      callback();
-      if (pendingCode) { var cb = pendingCode; pendingCode = null; cb(); }
-    };
-    script.onerror = function () {
-      bundleLoading = false;
-      loadingEl.textContent =
-        "Failed to load interpreter. " +
-        "Ensure docs/assets/march.js has been built (dune build @playground).";
-    };
-    document.head.appendChild(script);
+    // Load stdlib first, then the interpreter bundle
+    loadScript(base + "/assets/march_stdlib.js", function () {
+      loadScript(base + "/assets/march.js", function () {
+        bundleLoaded  = true;
+        bundleLoading = false;
+        loadingEl.textContent = "Ready.";
+        setTimeout(function () { loadingEl.textContent = ""; }, 1500);
+        callback();
+        if (pendingCode) { var cb = pendingCode; pendingCode = null; cb(); }
+      }, function () {
+        bundleLoading = false;
+        loadingEl.textContent = "Failed to load interpreter.";
+      });
+    }, function () {
+      // stdlib failed — try loading the interpreter anyway (REPL will work without stdlib)
+      loadScript(base + "/assets/march.js", function () {
+        bundleLoaded  = true;
+        bundleLoading = false;
+        loadingEl.textContent = "Ready (no stdlib).";
+        setTimeout(function () { loadingEl.textContent = ""; }, 1500);
+        callback();
+        if (pendingCode) { var cb = pendingCode; pendingCode = null; cb(); }
+      }, function () {
+        bundleLoading = false;
+        loadingEl.textContent = "Failed to load interpreter.";
+      });
+    });
   }
 
   /* ------------------------------------------------------------------ */
