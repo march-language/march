@@ -5683,8 +5683,31 @@ let setup_jit_runtime () =
   | None -> None
   | Some runtime_c ->
     if not (Sys.file_exists so_path) then begin
+      let runtime_dir = Filename.dirname runtime_c in
+      let opt_file f =
+        let p = Filename.concat runtime_dir f in
+        if Sys.file_exists p then " " ^ p else ""
+      in
+      (* Include scheduler and message files: march_runtime.c calls
+         march_sched_spawn (in march_scheduler.c), which on Linux requires
+         all symbols to be resolved at shared-library load time. *)
+      let extra_srcs =
+        (opt_file "march_scheduler.c") ^
+        (opt_file "march_message.c") ^
+        (opt_file "march_extras.c")
+      in
+      (* pthreads are in libSystem on macOS; explicit -lpthread needed on Linux. *)
+      let pthread_flag =
+        match Sys.os_type with
+        | "Unix" ->
+          (match Sys.command "uname -s 2>/dev/null | grep -q Darwin" with
+           | 0 -> ""
+           | _ -> " -lpthread")
+        | _ -> ""
+      in
       let rc = Sys.command (Printf.sprintf
-        "clang -shared -O2 -fPIC %s -o %s 2>/dev/null" runtime_c so_path) in
+        "clang -shared -O2 -fPIC %s%s%s -o %s 2>/dev/null"
+        runtime_c extra_srcs pthread_flag so_path) in
       if rc <> 0 then None else Some so_path
     end else Some so_path
 
