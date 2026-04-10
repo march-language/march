@@ -176,17 +176,17 @@ let parse_hint line col =
     let prev = prev_nonws line col in
     match ch, prev with
     | ',', '(' ->
-      Some "expected an expression here — looks like an extra `(` before the comma"
+      Some "expected an expression here — there is an extra opening parenthesis before this comma"
     | ')', '(' ->
-      Some "empty parentheses — expected an expression between `(` and `)`"
+      Some "empty parentheses — an expression is required between the opening and closing parenthesis"
     | ',', _ ->
-      Some (Printf.sprintf "unexpected `,` — is there a missing expression or an extra `(` nearby?")
+      Some "unexpected comma — is there a missing expression or an extra opening parenthesis nearby?"
     | ')', _ ->
-      Some "unexpected `)` — check for a mismatched or extra `(` earlier"
+      Some "unexpected closing parenthesis — check for a mismatched or extra opening parenthesis earlier"
     | '(', _ ->
-      Some "unexpected `(` here"
+      Some "unexpected opening parenthesis here"
     | '=', _ when prev <> '!' && prev <> '<' && prev <> '>' && prev <> '=' ->
-      Some "unexpected `=` — did you mean `let name = expr`?"
+      Some "unexpected equals sign — did you mean: let name = expr"
     | _ -> None
 
 (** Given [code] and a [Lexing.position], return a string showing the
