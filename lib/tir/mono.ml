@@ -11,6 +11,27 @@
        substitution from arg types, clone + rename callee, enqueue.
     4. Output: only the reachable monomorphic fn_defs. *)
 
+(* ── Interface dispatch helpers ─────────────────────────────────── *)
+
+(** Resolve an interface method implementation for [type_name] from [impls].
+    Strips module prefixes progressively ("Foo.Bar.VaultStorage" → "VaultStorage")
+    to handle qualified type names registered under bare names.
+    The sentinel ["$single_impl$"] selects the sole impl when the call-site
+    type is erased (TVar "_" or opaque placeholder). *)
+let resolve_impl_by_type (impls : (string * string) list) (type_name : string) : string option =
+  if type_name = "$single_impl$" then
+    (match impls with [(_, m)] -> Some m | _ -> None)
+  else
+    let rec loop name =
+      match List.assoc_opt name impls with
+      | Some m -> Some m
+      | None ->
+        (match String.index_opt name '.' with
+         | None -> None
+         | Some i -> loop (String.sub name (i + 1) (String.length name - i - 1)))
+    in
+    loop type_name
+
 (* ── Type detection ─────────────────────────────────────────────── *)
 
 let rec has_tvar : Tir.ty -> bool = function
@@ -242,24 +263,7 @@ let rec rewrite_calls
              (match type_name_or_single with
               | None -> expr   (* Still cannot resolve — leave for linker *)
               | Some tname ->
-                (* Strip module prefixes progressively to handle qualified
-                   type names (e.g. "Foo.Bar.VaultStorage" → "VaultStorage")
-                   when the impl was registered under the bare type name. *)
-                let rec find_impl_by_type name =
-                  (* Sentinel from single-impl TVar fallback — use the only impl directly. *)
-                  if name = "$single_impl$" then
-                    (match impls with [(_,m)] -> Some m | _ -> None)
-                  else
-                  match List.assoc_opt name impls with
-                  | Some m -> Some m
-                  | None ->
-                    (match String.index_opt name '.' with
-                     | None -> None
-                     | Some i ->
-                       find_impl_by_type
-                         (String.sub name (i + 1) (String.length name - i - 1)))
-                in
-                (match find_impl_by_type tname with
+                (match resolve_impl_by_type impls tname with
                  | None -> expr   (* No impl for this concrete type *)
                  | Some mangled_name ->
                    (* Resolved!  Enqueue the impl so DCE keeps it alive. *)
@@ -358,20 +362,7 @@ let rec rewrite_calls
                 (match type_name_or_single with
                  | None -> expr
                  | Some tname ->
-                   let rec find_impl_by_type name =
-                     if name = "$single_impl$" then
-                       (match impls with [(_,m)] -> Some m | _ -> None)
-                     else
-                     match List.assoc_opt name impls with
-                     | Some m -> Some m
-                     | None ->
-                       (match String.index_opt name '.' with
-                        | None -> None
-                        | Some i ->
-                          find_impl_by_type
-                            (String.sub name (i + 1) (String.length name - i - 1)))
-                   in
-                   (match find_impl_by_type tname with
+                   (match resolve_impl_by_type impls tname with
                     | None -> expr
                     | Some mangled_name ->
                       (match Hashtbl.find_opt fn_table mangled_name with

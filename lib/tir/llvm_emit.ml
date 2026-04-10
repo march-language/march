@@ -1020,8 +1020,14 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     (* Register wrapper if not already generated *)
     if not (Hashtbl.mem ctx.emitted_wraps wrap_name) then begin
       Hashtbl.add ctx.emitted_wraps wrap_name ();
-      (* We'll generate the wrapper function at the end.  For now, declare it. *)
-      let nparams = match v.Tir.v_ty with Tir.TFn (ps, _) -> List.length ps | _ -> 0 in
+      (* We'll generate the wrapper function at the end.  For now, declare it.
+         When the AVar's type is erased (TVar "_"), fall back to the param-count
+         registered in top_fn_nparams at function-definition time. *)
+      let nparams = match v.Tir.v_ty with
+        | Tir.TFn (ps, _) -> List.length ps
+        | _ ->
+          Option.value ~default:0 (Hashtbl.find_opt ctx.top_fn_nparams v.Tir.v_name)
+      in
       let ret_tir = fn_ret_tir v.Tir.v_ty in
       let target_ret = llvm_ret_ty ret_tir in
       let param_tys = List.init nparams (fun _ -> "ptr") in
