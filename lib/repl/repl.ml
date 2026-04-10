@@ -284,13 +284,9 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
   let loaded_file : string option ref = ref None in
 
   let print_diag (d : March_errors.Errors.diagnostic) =
-    let sev = match d.severity with
-      | March_errors.Errors.Error   -> "error"
-      | March_errors.Errors.Warning -> "warning"
-      | March_errors.Errors.Hint    -> "hint"
-    in
-    Printf.eprintf "%s: %s\n%!" sev d.message;
-    List.iter (fun note -> Printf.eprintf "note: %s\n%!" note) d.notes
+    let src = Buffer.contents buf in
+    Printf.eprintf "%s\n\n%!"
+      (March_errors.Errors.render_diagnostic ~src d)
   in
 
   (* Load a file path into env/tc_env, printing any errors to stderr. *)

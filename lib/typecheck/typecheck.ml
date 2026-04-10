@@ -524,6 +524,25 @@ let resolve_qualified_ctor (name : string) (env : env) : env * ctor_info option 
       let env' = load_module_into_env mod_name exports env in
       env', lookup_ctor name env'
 
+(** Suggest a variable name close to [name] from [env.vars].
+    Returns the closest match with edit distance ≤ 2 that isn't a qualified name. *)
+let suggest_var_in_scope (name : string) (env : env) : string option =
+  let name_lo   = String.lowercase_ascii name in
+  let max_dist  = if String.length name <= 3 then 1 else 2 in
+  let best      = ref None in
+  let best_dist = ref max_int in
+  StrMap.iter (fun k _ ->
+    (* Skip qualified names (Mod.member) — those are suggested elsewhere. *)
+    if not (String.contains k '.') then begin
+      let d = edit_distance name_lo (String.lowercase_ascii k) in
+      if d > 0 && d <= max_dist && d < !best_dist then begin
+        best      := Some k;
+        best_dist := d
+      end
+    end
+  ) env.vars;
+  !best
+
 (** Produce an error message for a qualified name that failed to resolve. *)
 let qualified_error_msg (name : string) : string =
   match split_qualified name with
@@ -1399,6 +1418,37 @@ let report_mismatch env ~span ~reason expected found =
       (match notes with n :: _ -> [n] | [] -> [])
     | _ -> []
   in
+  (* Common-case hints for frequently-confused types.
+     NOTE: `expected` here = the inferred type of the expression;
+           `found`    here = the required type from context.
+     So "I expected X but found Y" means the expression was X but Y was required. *)
+  let common_hint =
+    match repr expected, repr found with
+    | TCon ("Int", []), TCon ("Float", []) ->
+      (* Expression produced Int but Float was required *)
+      [ "Int and Float are distinct types in March.\n\
+         Use `int_to_float(x)` to convert, or write a Float literal like `1.0`." ]
+    | TCon ("Float", []), TCon ("Int", []) ->
+      (* Expression produced Float but Int was required *)
+      [ "Float and Int are distinct types in March.\n\
+         Use `float_to_int(x)` to truncate, or write an Int literal like `1`." ]
+    | TCon ("Int", []), TCon ("Bool", []) ->
+      (* Expression was Int but Bool was required *)
+      [ "March does not coerce Int to Bool.\n\
+         Try an explicit comparison, e.g. `x != 0`." ]
+    | TCon ("Int", []), TCon ("String", []) ->
+      (* Expression was Int but String was required *)
+      [ "Use `int_to_string(x)` to convert an Int to a String." ]
+    | TCon ("Float", []), TCon ("String", []) ->
+      (* Expression was Float but String was required *)
+      [ "Use `float_to_string(x)` to convert a Float to a String." ]
+    | TArrow _, _ ->
+      [ "This value is a function. Did you forget to apply it to its arguments?" ]
+    | _, TArrow _ ->
+      [ "A function was expected here.\n\
+         Did you mean to pass this as a callback?" ]
+    | _ -> []
+  in
   let labels =
     match reason with
     | Some r ->
@@ -1411,7 +1461,7 @@ let report_mismatch env ~span ~reason expected found =
   in
   Err.report env.errors
     { Err.severity = Error; span; message = headline;
-      labels; notes = why_note @ mismatch_note; code = None }
+      labels; notes = why_note @ mismatch_note @ common_hint; code = None }
 
 (** Structural equality for session types (used by [unify] for [TChan] cases).
     Intentionally ignores payload types — only checks session structure shape. *)
@@ -2317,10 +2367,19 @@ let check_exhaustiveness (env : env) (span : Ast.span) (scrut_ty : ty)
     match find_missing_mc env [scrut_ty] matrix with
     | None -> ()
     | Some (ex :: _) ->
-      Err.warning env.errors ~span
-        (Printf.sprintf "Non-exhaustive pattern match — missing case: %s" ex)
+      Err.report env.errors
+        { Err.severity = Warning; span;
+          message = Printf.sprintf "Non-exhaustive pattern match — missing case: %s" ex;
+          labels  = [];
+          notes   = [ "Add a branch for this case, or use `_ -> ...` as a catch-all." ];
+          code    = None }
     | Some [] ->
-      Err.warning env.errors ~span "Non-exhaustive pattern match"
+      Err.report env.errors
+        { Err.severity = Warning; span;
+          message = "Non-exhaustive pattern match";
+          labels  = [];
+          notes   = [ "Add a catch-all branch `_ -> ...` to handle any remaining cases." ];
+          code    = None }
   end
 
 (** Unfold one step of a recursive session type.
@@ -2364,8 +2423,17 @@ let rec infer_expr env (e : Ast.expr) : ty =
          match resolve_qualified_var name.txt env with
          | _, Some sch -> instantiate env.level env sch
          | _ ->
-           Err.error env.errors ~span:name.span
-             (qualified_error_msg name.txt);
+           let msg =
+             if String.contains name.txt '.' then
+               qualified_error_msg name.txt
+             else begin
+               let base = Printf.sprintf "I cannot find `%s`." name.txt in
+               match suggest_var_in_scope name.txt env with
+               | Some s -> base ^ Printf.sprintf " Did you mean `%s`?" s
+               | None   -> base
+             end
+           in
+           Err.error env.errors ~span:name.span msg;
            TError)
 
     (* ── Type annotations ─────────────────────────────────────────── *)

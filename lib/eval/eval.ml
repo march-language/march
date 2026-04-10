@@ -745,8 +745,17 @@ let cmp_op op_i op_f op_s op_b name = VBuiltin (name, function
                 | ">=" -> n >= 0
                 | _    -> false)
        | _ ->
-         eval_error "builtin %s: incompatible operand types" name)
-    | _ -> eval_error "builtin %s: incompatible operand types" name)
+         eval_error "builtin %s: no `Ord` implementation for this type" name)
+    | [a; b] ->
+      let type_of v = match v with
+        | VInt _    -> "Int"    | VFloat _  -> "Float" | VString _ -> "String"
+        | VBool _   -> "Bool"   | VAtom _   -> "Atom"  | VUnit     -> "Unit"
+        | VTuple _  -> "Tuple"  | VRecord _ -> "Record"
+        | VCon (t, _) -> t      | _         -> "value"
+      in
+      eval_error "builtin %s: cannot compare a %s with a %s — these types are not comparable"
+        name (type_of a) (type_of b)
+    | _ -> eval_error "builtin %s: expected two comparable values" name)
 
 (** Detect whether a VCon chain is a March list (Nil / Cons(h, t)). *)
 let rec is_list_value = function
@@ -5315,7 +5324,8 @@ let rec eval_block (env : env) (es : expr list) : value =
     let bindings = match match_pattern v b.bind_pat with
       | Some bs -> bs
       | None    -> raise (Match_failure
-                            (Printf.sprintf "let binding pattern failed"))
+                            (Printf.sprintf "let binding pattern failed: the value %s did not match the expected pattern"
+                               (value_to_string v)))
     in
     eval_block (bindings @ env) rest
   (* Local named recursive function: fn go(params) do body end *)
@@ -5726,7 +5736,7 @@ and eval_match (env : env) (match_span : span) (v : value) (branches : branch li
   let rec go arm_idx = function
     | [] ->
       raise (Match_failure
-               (Printf.sprintf "non-exhaustive match on value: %s"
+               (Printf.sprintf "Non-exhaustive pattern match: no branch matched the value %s.\nAdd a catch-all `_ -> ...` arm, or handle this case explicitly."
                   (value_to_string v)))
     | br :: rest ->
       (match match_pattern v br.branch_pat with

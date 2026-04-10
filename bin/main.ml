@@ -766,9 +766,8 @@ let run_test_cmd args =
     if has_user_errors then begin
       List.iter (fun (d : March_errors.Errors.diagnostic) ->
         if is_user_file d && d.severity = March_errors.Errors.Error then
-          Printf.eprintf "%s:%d:%d: error: %s\n"
-            d.span.March_ast.Ast.file d.span.March_ast.Ast.start_line
-            d.span.March_ast.Ast.start_col d.message
+          Printf.eprintf "%s\n\n"
+            (March_errors.Errors.render_diagnostic ~src ~filename d)
       ) diags;
       exit 1
     end;
@@ -1006,22 +1005,9 @@ let compile filename =
     d.span.March_ast.Ast.file = "<unknown>"
   in
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
-      if is_user_file d then begin
-        let sev = match d.severity with
-          | March_errors.Errors.Error   -> "error"
-          | March_errors.Errors.Warning -> "warning"
-          | March_errors.Errors.Hint    -> "hint"
-        in
-        Printf.eprintf "%s:%d:%d: %s: %s\n"
-          d.span.March_ast.Ast.file
-          d.span.March_ast.Ast.start_line
-          d.span.March_ast.Ast.start_col
-          sev
-          d.message;
-        List.iter (fun note ->
-            Printf.eprintf "note: %s\n" note
-          ) d.notes
-      end
+      if is_user_file d then
+        Printf.eprintf "%s\n\n"
+          (March_errors.Errors.render_diagnostic ~src ~filename d)
     ) diags;
   let compile_mode = !dump_tir || !emit_llvm || !do_compile || !dump_phases in
   let has_user_errors = List.exists (fun (d : March_errors.Errors.diagnostic) ->
