@@ -6,7 +6,7 @@ nav_order: 6
 
 # Linear and Affine Types
 
-March's type system tracks ownership through **linear** and **affine** qualifiers. These let the compiler catch resource leaks and use-after-free bugs without a garbage collector.
+March's type system tracks ownership through **linear** and **affine** qualifiers. These let the compiler catch resource leaks and use-after-free bugs **at compile time** — not at runtime, and not by relying on a garbage collector.
 
 ---
 
