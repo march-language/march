@@ -4096,6 +4096,22 @@ let rec check_decl env (d : Ast.decl) : env =
     (match typedef with
      | Ast.TDVariant variants ->
        let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+       (* Check for duplicate constructor names within this type.
+          Track (name, span) pairs so we can point at both occurrences. *)
+       let _ = List.fold_left (fun seen (v : Ast.variant) ->
+           match List.assoc_opt v.var_name.txt seen with
+           | Some first_sp ->
+             Err.error env.errors ~span:v.var_name.span
+               (Printf.sprintf
+                  "type `%s` defines constructor `%s` more than once\n\
+                   Constructors are the named cases of a variant type — \
+                   each must have a unique name within the type.\n\
+                   First defined at %s:%d:%d"
+                  name.txt v.var_name.txt
+                  first_sp.Ast.file first_sp.Ast.start_line first_sp.Ast.start_col);
+             seen
+           | None -> (v.var_name.txt, v.var_name.span) :: seen
+         ) [] variants in
        List.fold_left (fun e (v : Ast.variant) ->
            let ci = { ci_type    = name.txt
                     ; ci_params  = param_names
@@ -4108,6 +4124,20 @@ let rec check_decl env (d : Ast.decl) : env =
          ) env1 variants
      | Ast.TDRecord fields ->
        let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+       (* Check for duplicate field names within this record.
+          Track (name, span) pairs so we can point at both occurrences. *)
+       let _ = List.fold_left (fun seen (f : Ast.field) ->
+           match List.assoc_opt f.fld_name.txt seen with
+           | Some first_sp ->
+             Err.error env.errors ~span:f.fld_name.span
+               (Printf.sprintf
+                  "record `%s` defines field `%s` more than once\n\
+                   First defined at %s:%d:%d"
+                  name.txt f.fld_name.txt
+                  first_sp.Ast.file first_sp.Ast.start_line first_sp.Ast.start_col);
+             seen
+           | None -> (f.fld_name.txt, f.fld_name.span) :: seen
+         ) [] fields in
        (* Propagate field-level linearity annotations into the surface type so
           that expand_record returns TLin wrappers for linear fields.  This
           enables both the EField check and let-binding linearity propagation
