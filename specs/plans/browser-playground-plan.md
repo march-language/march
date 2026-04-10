@@ -1,36 +1,98 @@
 # Browser Playground — "Try It Out" Page
 
-**Goal:** Add a self-contained interactive playground to the docs site where visitors can write and run March code directly in the browser, with no install required.
+**Goal:** Add a self-contained interactive REPL to the docs site where visitors can write and run March code directly in the browser, with no install required.
 
-**Approach:** Compile the OCaml pipeline (lexer → parser → desugar → typecheck → eval) to JavaScript using `js_of_ocaml`. The tree-walking interpreter already handles everything a playground needs: expressions, let bindings, functions, algebraic types, actors, pattern matching, the pipe operator. The compiled JS is loaded lazily on the playground page only.
+**Approach:** Compile the OCaml pipeline (lexer → parser → desugar → typecheck → eval) to JavaScript using `js_of_ocaml`. The tree-walking interpreter handles everything a playground needs: expressions, let bindings, functions, algebraic types, actors, pattern matching, the pipe operator, and stateful sessions. The compiled JS is loaded lazily — only when the user first interacts with the REPL.
+
+**Design reference:** [roc-lang.org/#try-roc](https://www.roc-lang.org/#try-roc). Key takeaways: terminal/REPL aesthetic rather than a split editor+output panel; stateful session so `let` bindings persist across inputs; Enter to run, Shift-Enter for newlines; minimal chrome — no explicit Run button; explanatory copy sits beside the terminal, not inside it; an arrow/hint points new users at where to start.
+
+---
+
+## UI Design
+
+### Layout
+
+Two-column on desktop, stacked on mobile. The REPL terminal occupies the left ~60%; explanatory copy sits to the right.
+
+```
+┌──────────────────────────────┐   ┌─────────────────────────────┐
+│  march>                      │   │  Try March in your browser. │
+│                              │   │                             │
+│                              │   │  This is a live REPL —      │
+│                              │   │  let bindings and function  │
+│                              │   │  definitions persist for    │
+│  march> █                    │   │  the session.               │
+│                              │   │                             │
+│                              │   │  Enter runs. Shift-Enter    │
+│                              │   │  adds a newline.       ←───┘│
+└──────────────────────────────┘
+```
+
+### Terminal aesthetics
+
+- Dark background (`#1a1b26` or similar), matching the code blocks already on the docs site
+- Monospace font throughout, matching `march>` prompt from the real REPL
+- Output shows value + inferred type on the same line: `42 : Int`, `["a", "b"] : List(String)`
+- Errors appear inline in the scroll history in a muted red, with the same friendly formatting the compiler already produces
+- Scrollable history; new output appends at the bottom, input always at the bottom
+- The terminal box has a subtle border and inner padding — close to the Roc style
+
+### Input behaviour
+
+- `Enter` — submit and run
+- `Shift-Enter` — insert newline (for multi-line expressions, `do...end` blocks, etc.)
+- `↑` / `↓` — navigate session history (same as the native REPL)
+- Prompt is `march>`, continuation lines use `  ...>` (matching the native REPL exactly)
+
+### First-load hint
+
+On first render (before the bundle loads), the input is disabled and shows placeholder text: `"Loading…"`. Once ready, replace with `"Try: List.map([1, 2, 3], fn x -> x * 2)"` as the placeholder, and display a small arrow or callout pointing at the input suggesting a first expression to try — the same pattern as Roc's arrow pointing to "Try entering `0.1 + 0.2`".
+
+### Example snippets
+
+Below the REPL, a row of small clickable chips — not a dropdown. Clicking a chip pastes the snippet into the input (does not auto-run, so the user can read it first):
+
+| Chip label | Snippet pasted |
+|---|---|
+| `1 + 1` | `1 + 1` |
+| list pipeline | `[1, 2, 3, 4, 5] \|> List.filter(fn x -> x > 2) \|> List.map(fn x -> x * x)` |
+| pattern match | three-line ADT + match expression |
+| fibonacci | multi-head `fn fib` definition |
+| actor | `actor Counter` definition + spawn + send |
+
+Chips are small, inline, and subtle — they should feel like hints, not the main attraction.
 
 ---
 
 ## Architecture
 
 ```
-docs/playground.md          ← Jekyll page (just front matter + one div)
+docs/playground.md              ← Jekyll page (front matter + one include)
 docs/_includes/
-  playground.html           ← self-contained widget HTML + inline CSS
-  playground.js             ← thin JS glue (load WASM, call OCaml, render output)
-docs/assets/march.js        ← js_of_ocaml output (lazy-loaded, ~2–5 MB gzipped ~600 KB)
+  playground.html               ← terminal UI: HTML structure + inline CSS
+  playground.js                 ← session state, input handling, lazy bundle load
+docs/assets/march.js            ← js_of_ocaml output (~2–5 MB, ~600 KB gzipped)
 
 js/
-  march_browser.ml          ← OCaml entry point: exposes march_eval() to JS
-  dune                      ← js_of_ocaml build target
+  march_browser.ml              ← OCaml entry: exposes marchEval() + marchEvalStateful()
+  dune                          ← js_of_ocaml build target
 ```
 
-The `march_browser.ml` file wraps the existing pipeline and registers a single JS-callable function:
+### JS API surface
+
+`march_browser.ml` exposes two functions via `Js.export`:
 
 ```ocaml
-let () =
-  Js.export "marchEval" (fun code ->
-    (* run lexer → parser → desugar → typecheck → eval *)
-    (* return {output, error, type_} as a JS object *)
-  )
+(* Stateless: evaluate a single expression/declaration, return result *)
+marchEval : string -> { output: string; error: string | null }
+
+(* Stateful: evaluate within a persistent session environment *)
+(* The session env is stored as a mutable ref in march_browser.ml *)
+marchEvalSession : string -> { output: string; error: string | null }
+marchResetSession : unit -> unit
 ```
 
-Jekyll includes the widget HTML into the playground page. The widget lazy-loads `march.js` the first time the user clicks Run (no bundle download on page load).
+The REPL widget uses `marchEvalSession` so `let` bindings and function definitions accumulate across inputs, matching the native REPL. `marchResetSession` is called when the user types `:reset`.
 
 ---
 
@@ -40,63 +102,51 @@ Jekyll includes the widget HTML into the playground page. The widget lazy-loads 
 
 **Files:** `js/march_browser.ml`, `js/dune`
 
-1. Add a `js_of_ocaml` executable target in `js/dune` that depends on `march_eval`, `march_typecheck`, `march_parser`, `march_lexer`, `march_desugar`, `march_ast`.
+1. Add a `js_of_ocaml` executable target in `js/dune`:
+   ```
+   (executable
+     (name march_browser)
+     (libraries march_eval march_typecheck march_parser march_lexer march_desugar march_ast js_of_ocaml)
+     (modes js))
+   ```
 2. Write `march_browser.ml`:
-   - Stub `Unix` calls that can't work in a browser: `gettimeofday` → `0.0`, `open_process_in` → raise, uname detection → return `"browser"`.
-   - Stub file I/O builtins (`File.read`, `File.write`) to return a user-visible error: `"File I/O is not available in the browser playground"`.
-   - Run the full pipeline, capture stdout/stderr via a `Buffer.t`, return `{output: string, error: string | null}` via `Js.export`.
-   - Actor concurrency works as-is: js_of_ocaml maps OCaml `Mutex` to no-ops; actor scheduling runs cooperatively in a single event loop tick, which is fine for demos.
-3. Verify bundle size with `wc -c docs/assets/march.js`. Target: < 8 MB uncompressed, < 1 MB gzipped. If larger, profile with `js_of_ocaml --profile` and strip unused stdlib modules.
+   - Maintain a mutable `session_env` ref (the eval environment, same type as `Eval.empty_env`).
+   - Stub `Unix` calls: `gettimeofday` → `0.0`; `open_process_in` → raise; `getenv` → `None`; file descriptor ops → surface a user-friendly error string.
+   - Capture `stdout` output via a `Buffer.t` replaced on `Format.std_formatter` before each eval call.
+   - Return `{output, error}` as a `Js.t` object.
+   - Actor concurrency: js_of_ocaml maps `Mutex` to no-ops; the cooperative scheduler runs fine in a single event loop tick for demo-scale programs.
+3. Verify bundle size. Target: < 8 MB uncompressed, < 1 MB gzipped. Profile with `js_of_ocaml --profile` if larger.
 
-**Deliverable:** `docs/assets/march.js` loads in a browser console and `marchEval("1 + 1")` returns `{output: "2 : Int", error: null}`.
+**Deliverable:** Open a browser console, load `march.js`, call `marchEvalSession("1 + 1")`, get `{output: "2 : Int", error: null}`.
 
 ---
 
-### Phase 2 — Widget HTML + JS glue
+### Phase 2 — Terminal widget
 
 **Files:** `docs/_includes/playground.html`, `docs/_includes/playground.js`
 
-Widget layout (two-column on desktop, stacked on mobile):
+The widget is a single `<div class="march-repl">` containing:
+- `<div class="repl-history">` — scrollable, append-only output history
+- `<div class="repl-input-row">` — `<span class="prompt">march&gt;</span>` + `<textarea rows="1" ...>`
 
-```
-┌─────────────────────────────────────────────┐
-│ [Example ▾]                        [Run ▶]  │
-├──────────────────────┬──────────────────────┤
-│                      │                      │
-│   editor (textarea   │   output panel       │
-│   or CodeMirror)     │   (stdout + type)    │
-│                      │                      │
-│                      │  Error (if any):     │
-│                      │  highlighted red     │
-└──────────────────────┴──────────────────────┘
-```
+The textarea auto-grows with content (CSS `field-sizing: content` or a JS resize observer fallback). On `Enter`, submit; on `Shift-Enter`, insert `\n`.
 
-JS glue responsibilities:
-- On first Run click: inject a `<script src="/march/assets/march.js">` tag, wait for load, then call `marchEval(code)`.
-- Subsequent runs: call `marchEval` directly (already loaded).
-- Show a spinner while the bundle loads (first run only).
-- Display output in the right panel; if `error` is non-null, show it styled as an error with a red left border.
-- Preserve editor content in `sessionStorage` so it survives page refresh.
-
-Start with a plain `<textarea>` for the editor. CodeMirror can be added later without changing the interface.
+JS responsibilities:
+- On first keydown in the textarea: inject `<script src=".../march.js">` dynamically, show a "Loading…" state, wait for `window.marchEvalSession` to exist, then enable.
+- On submit: append the input to history as `march> <code>`, call `marchEvalSession(code)`, append the result (or error) to history, clear the textarea, scroll to bottom.
+- Maintain an in-memory input history array; `↑`/`↓` cycles through it.
+- `:reset` clears history display and calls `marchResetSession()`.
+- Cap history DOM nodes at 500 to avoid unbounded growth.
 
 ---
 
-### Phase 3 — Examples gallery
+### Phase 3 — Example chips + copy
 
-A dropdown (or tab strip) with pre-loaded snippets that demonstrate March's distinctive features. Suggested set:
+Below the two-column REPL section, a `<div class="repl-examples">` row of chips. Each chip has a `data-snippet` attribute; clicking it sets the textarea value (does not submit).
 
-| Label | What it shows |
-|---|---|
-| Hello World | Minimal — functions, string concatenation |
-| Pattern Matching | ADTs, exhaustiveness, guards |
-| List Pipeline | Pipe operator, `List.map`, `List.filter` |
-| Fibonacci | Recursion, multi-head functions |
-| Option & Result | `with` chaining, safe error handling |
-| Actor Counter | `actor`, `spawn`, `send` — the Elixir angle |
-| FBIP Demo | Recursive tree transform, add a note about in-place reuse |
+Above the REPL, a one-sentence label: **"Try March in your browser"** with a short subline: *"Enter runs. Shift-Enter adds a newline. Let bindings persist for the session."*
 
-Each example is a string constant in `playground.js`. Selecting one from the dropdown replaces the editor content (with a confirmation if the editor has been modified).
+The right-side copy column suggests a first thing to try — `List.range(1, 6) |> List.map(fn x -> x * x)` — with a small arrow pointing left at the input, matching the Roc visual cue.
 
 ---
 
@@ -114,55 +164,56 @@ nav_order: 2
 {% include playground.html %}
 ```
 
-Add to `docs/index.md` documentation table:
+Add to the `docs/index.md` docs table:
 
 ```markdown
-| [Try It Out](playground.md) | Run March code in your browser |
+| [Try It Out](playground.md) | Run March code in your browser — no install needed |
 ```
 
-`nav_order: 2` puts it right below the landing page in the sidebar.
+`nav_order: 2` places it immediately below the landing page in the sidebar.
 
 ---
 
 ### Phase 5 — Polish
 
-- **Keyboard shortcut:** `Ctrl+Enter` / `Cmd+Enter` runs the code.
-- **URL state:** Encode editor content as a base64 URL fragment (`#code=...`) so examples can be linked from docs. Keep it opt-in — only write the URL hash on Run, not on every keystroke.
-- **Output line limit:** Cap at 500 lines to prevent runaway output from locking up the UI.
-- **Timeout:** Wrap `marchEval` in a Web Worker with a 5-second timeout to kill infinite loops. The Worker receives the code string and posts back the result; the main thread shows "Timed out after 5s" if no response arrives.
-- **Mobile:** Make the layout single-column below 768 px; keep the Run button always visible.
+- **Web Worker timeout:** Move `marchEvalSession` into a Worker. The main thread posts the code string, waits up to 5 s, then shows *"Timed out — use `:reset` to clear the session"* if no reply arrives. Kills infinite loops without hanging the tab.
+- **URL hash sharing:** On each successful eval, write `#s=<base64(code)>` to `location.hash`. On page load, if the hash is present, pre-fill the textarea with the decoded snippet. This makes it possible to link to a specific snippet from the docs (e.g., the actors page could link to a pre-filled actor example).
+- **Mobile:** Single-column below 768 px. Terminal takes full width; copy moves above it.
+- **`:help` in the REPL:** Intercept `:help` client-side and print a short list of available commands (`:reset`, `:type <expr>` if implemented, `:help`).
 
 ---
 
-## Unix stubs needed
+## Unix stubs
 
-These are the only `Unix` calls in the eval/interpreter path that need browser stubs:
+All stubs live in `march_browser.ml`. No changes to the core pipeline.
 
-| Call | Location | Stub |
+| Call | Where | Browser stub |
 |---|---|---|
-| `Unix.gettimeofday ()` | `eval.ml` — `Time.now` builtin | Return `0.0` |
-| `Unix.open_process_in "uname -s"` | runtime detection in `eval.ml` | Return `"browser"` |
-| `Unix.getenv` | some stdlib builtins | Return `None` always |
-| File descriptor ops | `File.*` builtins | Return `Error("not available in browser")` |
-
-No changes to the core pipeline files. All stubs live in `march_browser.ml` via a `module Unix = Browser_unix` substitution or direct shadowing before linking.
+| `Unix.gettimeofday ()` | `Time.now` builtin | `0.0` |
+| `Unix.open_process_in "uname -s"` | platform detection | `"browser"` constant |
+| `Unix.getenv` | env builtins | always `None` |
+| File descriptor ops | `File.*` builtins | `Error "File I/O is not available in the browser playground"` |
 
 ---
 
 ## Build integration
 
-Add a `make playground` target (or dune alias) that:
-1. Builds `js/march_browser.ml` with js_of_ocaml
-2. Copies output to `docs/assets/march.js`
+Add a dune alias:
 
-This does NOT run as part of `dune build` by default — it's a manual step before deploying the docs site. The generated `march.js` is committed to the repo (like other generated docs assets) so GitHub Pages can serve it without a build step.
+```
+(alias
+  (name playground)
+  (deps (alias_rec js/all))
+  (action (copy js/march_browser.bc.js docs/assets/march.js)))
+```
+
+Run with `dune build @playground`. This is **not** part of the default `dune build` — it's a manual step before publishing docs. The generated `docs/assets/march.js` is committed to the repo so GitHub Pages can serve it without a CI build step.
 
 ---
 
 ## What this does not cover
 
-- **Sharing snippets** — URL hash encoding (Phase 5) is sufficient for linking; no server needed.
-- **CodeMirror syntax highlighting** — nice to have, not required for v1. The Tree-sitter grammar already exists for Zed; a CodeMirror mode would need a separate port.
-- **Saving sessions** — out of scope. `sessionStorage` for within-tab persistence is enough.
-- **Multi-file programs** — single-file only. The playground is for exploration, not project development.
-- **Native WASM execution** (Option B) — deferred. The interpreter is sufficient for demos and avoids needing a compilation server.
+- **CodeMirror syntax highlighting** — the Tree-sitter grammar exists for Zed; a CodeMirror mode needs a separate port. Plain monospace textarea is fine for v1.
+- **Multi-file programs** — single expression/declaration per input. The playground is for exploration, not project development.
+- **Saving sessions across tabs** — `sessionStorage` for within-tab persistence is enough.
+- **Native WASM execution** (compile → run) — deferred. The interpreter is sufficient for demos and avoids needing a compilation server.
