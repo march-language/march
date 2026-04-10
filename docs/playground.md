@@ -46,8 +46,8 @@ area(Circle(5.0))
 **Standard library**
 
 ```march
-List.map(fn x -> x * x, [1, 2, 3, 4, 5])
-List.filter(fn x -> x % 2 == 0, List.range(1, 20))
+List.map([1, 2, 3, 4, 5], fn x -> x * x)
+List.filter(List.range(1, 20), fn x -> x % 2 == 0)
 ```
 
 **Multi-line input**: press **Shift+Enter** to add a new line, **Enter** to run.
