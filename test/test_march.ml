@@ -12592,7 +12592,7 @@ let test_app_spawns_actors () =
   let count = Hashtbl.length March_eval.Eval.actor_registry in
   Alcotest.(check bool) "at least one actor spawned" true (count >= 1)
 
-(** mutual exclusivity: main + app raises *)
+(** mutual exclusivity: main + app reports an error *)
 let test_app_main_exclusive () =
   let src = {|mod Bad do
     fn main() do 42 end
@@ -12600,15 +12600,11 @@ let test_app_main_exclusive () =
       Supervisor.spec(:one_for_one, [])
     end
   end|} in
-  let raised =
-    try
-      let lexbuf = Lexing.from_string src in
-      let ast = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
-      ignore (March_desugar.Desugar.desugar_module ast);
-      false
-    with Failure _ -> true
-  in
-  Alcotest.(check bool) "main + app raises" true raised
+  let lexbuf = Lexing.from_string src in
+  let ast = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+  let errors = March_errors.Errors.create () in
+  ignore (March_desugar.Desugar.desugar_module ~errors ast);
+  Alcotest.(check bool) "main + app raises" true (March_errors.Errors.has_errors errors)
 
 (* ------------------------------------------------------------------ *)
 (* Process Registry tests                                              *)
