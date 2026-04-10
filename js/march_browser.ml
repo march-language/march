@@ -159,26 +159,69 @@ let ensure_session_init () =
 (* Parse helpers                                                       *)
 (* ------------------------------------------------------------------ *)
 
-(** Return the last non-whitespace character before position [col] in [line],
-    or ' ' if none exists. *)
-let prev_nonws line col =
-  let i = ref (col - 1) in
-  while !i >= 0 && (line.[!i] = ' ' || line.[!i] = '\t') do decr i done;
-  if !i >= 0 then line.[!i] else ' '
+(** Scan backwards from [i] skipping whitespace; return the resulting index. *)
+let skip_ws_back line i =
+  let p = ref i in
+  while !p >= 0 && (line.[!p] = ' ' || line.[!p] = '\t') do decr p done;
+  !p
 
+(** Extract the identifier that ends at position [pos] in [line], if any.
+    Returns the identifier string, or None if the character at [pos] is not
+    part of an identifier. *)
+let ident_ending_at line pos =
+  let is_id c =
+    (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+    (c >= '0' && c <= '9') || c = '_' || c = '.'
+  in
+  if pos < 0 || not (is_id line.[pos]) then None
+  else begin
+    let i = ref pos in
+    while !i > 0 && is_id line.[!i - 1] do decr i done;
+    Some (String.sub line !i (pos - !i + 1))
+  end
 
-(** Produce a context-sensitive hint from the character at [col] and before. *)
-let parse_hint line col =
+(** Return a short description of the value kind for a session variable. *)
+let kind_of_value v =
+  match v with
+  | March_eval.Eval.VInt _     -> "an Int"
+  | March_eval.Eval.VFloat _   -> "a Float"
+  | March_eval.Eval.VBool _    -> "a Bool"
+  | March_eval.Eval.VString _  -> "a String"
+  | March_eval.Eval.VUnit      -> "unit"
+  | March_eval.Eval.VClosure _ | March_eval.Eval.VBuiltin _ -> "a function"
+  | March_eval.Eval.VPid _     -> "an actor Pid"
+  | March_eval.Eval.VCon (tag, []) -> "the value " ^ tag
+  | March_eval.Eval.VCon (tag, _)  -> "a " ^ tag
+  | _                          -> "a value"
+
+(** Produce a context-sensitive hint from the character at [col] and the
+    surrounding source, optionally using the session env to name things. *)
+let parse_hint line col env =
   let len = String.length line in
   if col >= len then None
   else
     let ch   = line.[col] in
-    let prev = prev_nonws line col in
+    let prev_pos = skip_ws_back line (col - 1) in
+    let prev = if prev_pos >= 0 then line.[prev_pos] else ' ' in
     match ch, prev with
     | ',', '(' ->
-      Some "expected an expression here — there is an extra opening parenthesis before this comma"
+      (* e.g. send(pid(,  — the thing before '(' is often a named variable *)
+      let before_paren = skip_ws_back line (prev_pos - 1) in
+      let name_hint = match ident_ending_at line before_paren with
+        | Some name ->
+          let scope_note = match List.assoc_opt name env with
+            | Some v -> Printf.sprintf " (%s is %s, not a function)" name (kind_of_value v)
+            | None   -> ""
+          in
+          Printf.sprintf "looks like `%s` is being called as a function — \
+                          did you mean `%s,` instead of `%s(`?%s"
+            name name name scope_note
+        | None ->
+          "expected an expression here — there is an extra opening parenthesis before this comma"
+      in
+      Some name_hint
     | ')', '(' ->
-      Some "empty parentheses — an expression is required between the opening and closing parenthesis"
+      Some "empty parentheses — an expression is required between them"
     | ',', _ ->
       Some "unexpected comma — is there a missing expression or an extra opening parenthesis nearby?"
     | ')', _ ->
@@ -189,16 +232,16 @@ let parse_hint line col =
       Some "unexpected equals sign — did you mean: let name = expr"
     | _ -> None
 
-(** Given [code] and a [Lexing.position], return a string showing the
-    offending source line, a caret pointer, and a context-sensitive hint. *)
-let format_parse_error code (pos : Lexing.position) msg =
+(** Given [code], the session [env], and a [Lexing.position], return a string
+    showing the offending source line, a caret pointer, and a hint. *)
+let format_parse_error code env (pos : Lexing.position) msg =
   let lines = String.split_on_char '\n' code in
   let line_no = pos.Lexing.pos_lnum in   (* 1-based *)
   let col     = pos.Lexing.pos_cnum - pos.Lexing.pos_bol in  (* 0-based *)
   match List.nth_opt lines (line_no - 1) with
   | Some src_line ->
     let caret = String.make (max 0 col) ' ' ^ "^" in
-    let hint_part = match parse_hint src_line col with
+    let hint_part = match parse_hint src_line col env with
       | Some h -> "\nhint: " ^ h
       | None   -> ""
     in
@@ -208,7 +251,7 @@ let format_parse_error code (pos : Lexing.position) msg =
 
 (** Parse all REPL items from [code] using the [repl_sequence] grammar rule.
     Returns [Ok items] or [Error msg] with source context and a caret pointer. *)
-let parse_all_repl_items code =
+let parse_all_repl_items code env =
   let lexbuf = Lexing.from_string (code ^ "\n") in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = "<repl>" };
@@ -218,10 +261,10 @@ let parse_all_repl_items code =
     Ok items
   with
   | March_errors.Errors.ParseError (msg, _hint, pos) ->
-    Error (format_parse_error code pos ("parse error: " ^ msg))
+    Error (format_parse_error code env pos ("parse error: " ^ msg))
   | March_parser.Parser.Error ->
     let pos = Lexing.lexeme_start_p lexbuf in
-    Error (format_parse_error code pos "parse error")
+    Error (format_parse_error code env pos "parse error")
 
 (* ------------------------------------------------------------------ *)
 (* Eval an expression / declaration sequence                           *)
@@ -339,7 +382,7 @@ let eval_item item =
     Returns [(output_text, error_opt)]. *)
 let eval_line code =
   ensure_session_init ();
-  match parse_all_repl_items code with
+  match parse_all_repl_items code !session_env_ref with
   | Error msg -> ("", Some msg)
   | Ok items ->
     let overall_out = Buffer.create 128 in
