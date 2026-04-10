@@ -192,7 +192,7 @@
   }
 </style>
 
-<div class="pg-wrap" id="pg-wrap" data-base="{{ site.baseurl }}">
+<div class="pg-wrap" id="pg-wrap" data-base="{{ site.baseurl }}" data-ver="{{ site.time | date: '%s' }}">
 
   <!-- Terminal column -->
   <div style="flex: 2 1 480px; min-width: 320px;">
@@ -242,6 +242,7 @@
       <button class="pg-example-chip" onclick="pgLoad('type Shape = Circle(Float) | Rect(Float, Float)\nlet area = fn s -> match s do\n  Circle(r) -> 3.14159 *. r *. r\n  Rect(w, h) -> w *. h\nend\narea(Circle(5.0))')">ADTs</button>
       <button class="pg-example-chip" onclick="pgLoad('List.filter(List.range(1, 20), fn x -> x % 2 == 0)')">filter</button>
       <button class="pg-example-chip" onclick="pgLoad(':reset')">:reset</button>
+      <button class="pg-example-chip" onclick="pgLoad(':help')">:help</button>
     </div>
   </div>
 

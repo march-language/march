@@ -1,9 +1,12 @@
 (function () {
   "use strict";
 
-  // Read the Jekyll baseurl from the data attribute on the root element.
-  // This avoids putting {{ }} Liquid tags inside JS where Jekyll mangles braces.
-  var base = (document.getElementById("pg-wrap") || {}).dataset.base || "";
+  // Read the Jekyll baseurl and deploy version from data attributes on the root element.
+  // data-ver is set to the Jekyll build timestamp so browsers always fetch the
+  // current march.js after a deploy rather than serving a stale cached copy.
+  var pgWrap = document.getElementById("pg-wrap") || {};
+  var base   = pgWrap.dataset.base || "";
+  var ver    = pgWrap.dataset.ver  || "0";
 
   /* ------------------------------------------------------------------ */
   /* State                                                               */
@@ -35,9 +38,10 @@
     bundleLoading = true;
     loadingEl.textContent = "Loading interpreter\u2026";
 
-    // Load stdlib first, then the interpreter bundle
-    loadScript(base + "/assets/march_stdlib.js", function () {
-      loadScript(base + "/assets/march.js", function () {
+    // Load stdlib first, then the interpreter bundle.
+    // Append ?v=<deploy-timestamp> so browsers always fetch the latest build.
+    loadScript(base + "/assets/march_stdlib.js?v=" + ver, function () {
+      loadScript(base + "/assets/march.js?v=" + ver, function () {
         bundleLoaded  = true;
         bundleLoading = false;
         loadingEl.textContent = "Ready.";
@@ -50,7 +54,7 @@
       });
     }, function () {
       // stdlib failed — try loading the interpreter anyway (REPL will work without stdlib)
-      loadScript(base + "/assets/march.js", function () {
+      loadScript(base + "/assets/march.js?v=" + ver, function () {
         bundleLoaded  = true;
         bundleLoading = false;
         loadingEl.textContent = "Ready (no stdlib).";
@@ -110,12 +114,38 @@
     inputEl.value = "";
     autoResize();
 
-    if (code.trim() === ":reset") {
+    var trimmed = code.trim();
+
+    if (trimmed === ":reset") {
       if (bundleLoaded && window.marchResetSession) {
         window.marchResetSession();
       }
       historyEl.innerHTML = "";
       appendLine("Session reset.", "pg-info");
+      return;
+    }
+
+    if (trimmed === ":help" || trimmed === "h()") {
+      var helpLines = [
+        "March REPL — quick reference",
+        "",
+        "Commands:",
+        "  :reset        clear session and history",
+        "  :help / h()   show this message",
+        "",
+        "Syntax hints:",
+        "  let x = 42                  bind a value",
+        "  fn double(n) do n * 2 end   define a function",
+        "  List.map([1,2,3], fn x -> x * 2)   map over a list",
+        "  if cond do expr else expr end       conditional",
+        "  match val do Pat -> expr end        pattern match",
+        "",
+        "Use Shift+Enter for multi-line input, Enter to run.",
+        "Click the chips above to load examples."
+      ];
+      helpLines.forEach(function (line) {
+        appendLine(line || "\u00a0", "pg-info");
+      });
       return;
     }
 
