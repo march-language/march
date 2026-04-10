@@ -588,9 +588,15 @@ void *march_sched_try_recv(void) {
 }
 
 void march_sched_wake(march_proc *target) {
-    if (!target || atomic_load_explicit(&target->status, memory_order_acquire) != PROC_WAITING)
-        return;
-    atomic_store_explicit(&target->status, PROC_READY, memory_order_release);
+    if (!target) return;
+    /* Use CAS to atomically transition WAITING→READY so that concurrent
+     * senders cannot both succeed and push the process to the deque twice,
+     * which would cause a spurious NULL return from march_sched_recv(). */
+    march_proc_status expected = PROC_WAITING;
+    if (!atomic_compare_exchange_strong_explicit(
+            &target->status, &expected, PROC_READY,
+            memory_order_acq_rel, memory_order_acquire))
+        return; /* Not WAITING, or another thread already woke it. */
     if (tl_sched) {
         march_deque_push(&tl_sched->local_queue, target);
     } else {
