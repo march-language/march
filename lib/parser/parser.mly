@@ -171,6 +171,7 @@
 %start <March_ast.Ast.module_> module_
 %start <March_ast.Ast.expr> expr_eof
 %start <March_ast.Ast.repl_input> repl_input
+%start <March_ast.Ast.repl_input list> repl_sequence
 
 %%
 
@@ -1141,3 +1142,16 @@ repl_input:
           "unexpected `%s = ...` — did you mean `let %s = ...`?" name name,
         Some (Printf.sprintf "let %s = expr" name),
         $startpos($2))) }
+
+(** Parse a sequence of zero or more declarations and expressions, then EOF.
+    Used by the browser REPL so multi-item inputs work:
+        actor Counter do ... end
+        let pid = spawn(Counter)
+        send(pid, Inc(5))
+        send(pid, Get())
+        run_until_idle()
+    Both declarations and bare expressions may appear in any order. *)
+repl_sequence:
+  | EOF { [] }
+  | d = decl; rest = repl_sequence { March_ast.Ast.ReplDecl d :: rest }
+  | e = expr; rest = repl_sequence { March_ast.Ast.ReplExpr e :: rest }

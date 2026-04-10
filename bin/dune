@@ -6,7 +6,7 @@
 
 (rule
  (alias warm-cache)
- (deps main.exe (source_tree ../stdlib))
+ (deps main.exe (source_tree ../stdlib) (source_tree ../runtime))
  (action (no-infer (system "./main.exe warm-cache"))))
 
 (rule

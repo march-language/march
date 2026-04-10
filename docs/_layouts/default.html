@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="march">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>{% if page.url == "/" or page.url == "/march/" %}{{ site.title }}{% else %}{{ page.title }} — {{ site.title }}{% endif %}</title>
+  <meta name="description" content="{{ page.description | default: site.description | escape }}"/>
+
+  <!-- DaisyUI + Tailwind CSS (CDN — includes Typography plugin) -->
+  <link href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css" rel="stylesheet" type="text/css"/>
+  <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
+
+  <style>
+    /* ── March brand palette (DaisyUI v4 HSL variables) ───────────────── */
+    [data-theme="march"] {
+      color-scheme: dark;
+
+      --p:   193 60% 27%;   /* #1C5D6F  primary */
+      --pc:  172 78% 95%;   /* #E6FCF9  primary-content */
+      --s:   196 66% 17%;   /* #0F3A4A  secondary */
+      --sc:  171 71% 89%;   /* #CFF7F1  secondary-content */
+      --a:   173 67% 66%;   /* #6FE3D6  accent */
+      --ac:  191 72%  9%;   /* #062026  accent-content */
+      --n:   201 59% 10%;   /* #0B1F2A  neutral */
+      --nc:  196 37% 84%;   /* #C7DDE5  neutral-content */
+      --b1:  201 59% 10%;   /* #0B1F2A  base-100 */
+      --b2:  199 57% 14%;   /* #0F2A36  base-200 */
+      --b3:  197 58% 18%;   /* #133847  base-300 */
+      --bc:  194 61% 90%;   /* #D6EEF5  base-content */
+      --in:  198 93% 60%;   /* #3ABFF8  info */
+      --su:  158 64% 52%;   /* #36D399  success */
+      --wa:   43 97% 56%;   /* #FBBF24  warning */
+      --er:    0 91% 71%;   /* #F87272  error */
+
+      --rounded-box: 0.5rem;
+      --rounded-btn: 0.375rem;
+      --rounded-badge: 1rem;
+      --animation-btn: 0.15s;
+      --animation-input: 0.2s;
+      --btn-focus-scale: 0.97;
+      --border-btn: 1px;
+      --tab-border: 1px;
+      --tab-radius: 0.5rem;
+    }
+
+    /* ── Sidebar active link ───────────────────────────────────────────── */
+    .menu li > a.active {
+      background: hsl(173 67% 66% / 0.12);
+      color: #6FE3D6;
+      font-weight: 600;
+    }
+
+    /* ── Prose overrides ───────────────────────────────────────────────── */
+    .prose h1, .prose h2, .prose h3, .prose h4 { scroll-margin-top: 4rem; }
+    .prose table { display: block; overflow-x: auto; }
+    .prose :not(pre) > code {
+      background: #0F2A36;
+      color: #6FE3D6;
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 0.85em;
+    }
+    .prose :not(pre) > code::before,
+    .prose :not(pre) > code::after { content: none; }
+
+    /* ── Rouge syntax highlighting (March palette) ─────────────────────── */
+    .highlight { background: #0B1F2A !important; border-radius: 8px; overflow-x: auto; border: 1px solid #133847; }
+    .highlight pre { background: transparent; margin: 0; padding: 1rem 1.25rem; }
+    .highlighter-rouge .highlight { margin: 1.25rem 0; }
+
+    .highlight .c,  .highlight .c1, .highlight .cm,
+    .highlight .cp, .highlight .cs  { color: #3D6070; font-style: italic; } /* comment */
+    .highlight .k,  .highlight .kd, .highlight .kn,
+    .highlight .kp, .highlight .kr  { color: #6FE3D6; }                    /* keyword → accent */
+    .highlight .kt                  { color: #CFF7F1; }                    /* type */
+    .highlight .s,  .highlight .sb, .highlight .sc,
+    .highlight .sd, .highlight .s2, .highlight .sh,
+    .highlight .si, .highlight .sx, .highlight .sr,
+    .highlight .s1, .highlight .ss  { color: #36D399; }                    /* string → success */
+    .highlight .m,  .highlight .mf, .highlight .mh,
+    .highlight .mi, .highlight .mo, .highlight .il { color: #FBBF24; }     /* number → warning */
+    .highlight .o,  .highlight .ow  { color: #3ABFF8; }                    /* operator → info */
+    .highlight .nf, .highlight .fm  { color: #6FE3D6; }                    /* function → accent */
+    .highlight .nc, .highlight .nn  { color: #CFF7F1; }                    /* class/module */
+    .highlight .nb                  { color: #3ABFF8; }                    /* builtin → info */
+    .highlight .nt                  { color: #6FE3D6; }                    /* tag */
+    .highlight .na                  { color: #36D399; }                    /* attribute */
+    .highlight .err                 { color: #F87272; }                    /* error */
+    .highlight .n,  .highlight .nx  { color: #D6EEF5; }                    /* name → base-content */
+    .highlight .p                   { color: #C7DDE5; }                    /* punctuation */
+    .highlight .gd                  { color: #F87272; }                    /* deleted */
+    .highlight .gi                  { color: #36D399; }                    /* inserted */
+  </style>
+</head>
+
+<body class="bg-base-100 text-base-content">
+  <div class="drawer lg:drawer-open">
+    <input id="nav-drawer" type="checkbox" class="drawer-toggle"/>
+
+    <!-- ── Page content ─────────────────────────────────────────────── -->
+    <div class="drawer-content flex flex-col min-h-screen">
+
+      <!-- Mobile topbar -->
+      <nav class="navbar bg-base-200 border-b border-base-300 sticky top-0 z-30 lg:hidden">
+        <div class="navbar-start">
+          <label for="nav-drawer" class="btn btn-ghost btn-square drawer-button" aria-label="Open menu">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+            </svg>
+          </label>
+        </div>
+        <div class="navbar-center">
+          <a href="{{ site.baseurl }}/" class="flex items-center gap-2 font-bold text-lg">
+            <img src="{{ site.baseurl }}/assets/logo.svg" width="26" height="26" alt="March logo"/>
+            March
+          </a>
+        </div>
+        <div class="navbar-end">
+          <a href="https://github.com/march-language/march"
+             class="btn btn-ghost btn-sm" target="_blank" rel="noopener">GitHub</a>
+        </div>
+      </nav>
+
+      <!-- Main content -->
+      <main class="flex-1 w-full max-w-4xl mx-auto px-6 py-10 lg:px-12">
+        <article class="prose prose-invert max-w-none
+                        prose-headings:font-semibold
+                        prose-a:text-primary prose-a:no-underline hover:prose-a:underline
+                        prose-code:text-primary
+                        prose-pre:p-0 prose-pre:bg-transparent prose-pre:rounded-none">
+          {{ content }}
+        </article>
+      </main>
+
+      <!-- Footer -->
+      <footer class="border-t border-base-300 py-6 px-6 lg:px-12 text-sm text-base-content/50">
+        March Programming Language &mdash;
+        <a href="https://github.com/march-language/march" class="hover:text-primary" target="_blank" rel="noopener">GitHub</a>
+      </footer>
+    </div>
+
+    <!-- ── Sidebar ───────────────────────────────────────────────────── -->
+    <div class="drawer-side z-40">
+      <label for="nav-drawer" aria-label="Close menu" class="drawer-overlay"></label>
+
+      <aside class="min-h-full w-64 bg-base-200 border-r border-base-300 flex flex-col">
+
+        <!-- Logo -->
+        <div class="p-5 border-b border-base-300">
+          <a href="{{ site.baseurl }}/" class="flex items-center gap-3 group">
+            <img src="{{ site.baseurl }}/assets/logo.svg" width="38" height="38" alt="March logo"/>
+            <span class="font-bold text-xl group-hover:text-primary transition-colors">March</span>
+          </a>
+        </div>
+
+        <!-- Nav -->
+        <nav class="flex-1 overflow-y-auto py-4 px-2">
+          <ul class="menu menu-sm gap-px">
+
+            <li class="menu-title text-xs uppercase tracking-widest opacity-50 mt-1 mb-1">Start here</li>
+            {% assign nav_pages = site.pages | sort: 'nav_order' %}
+            {% for p in nav_pages %}{% if p.nav_order == 2 or p.nav_order == 3 %}
+            <li><a href="{{ p.url | prepend: site.baseurl }}"{% if p.url == page.url %} class="active"{% endif %}>{{ p.title }}</a></li>
+            {% endif %}{% endfor %}
+
+            <li class="menu-title text-xs uppercase tracking-widest opacity-50 mt-4 mb-1">Language</li>
+            {% for p in nav_pages %}{% if p.nav_order >= 4 and p.nav_order <= 8 %}
+            <li><a href="{{ p.url | prepend: site.baseurl }}"{% if p.url == page.url %} class="active"{% endif %}>{{ p.title }}</a></li>
+            {% endif %}{% endfor %}
+
+            <li class="menu-title text-xs uppercase tracking-widest opacity-50 mt-4 mb-1">Concurrency</li>
+            {% for p in nav_pages %}{% if p.nav_order >= 9 and p.nav_order <= 11 %}
+            <li><a href="{{ p.url | prepend: site.baseurl }}"{% if p.url == page.url %} class="active"{% endif %}>{{ p.title }}</a></li>
+            {% endif %}{% endfor %}
+
+            <li class="menu-title text-xs uppercase tracking-widest opacity-50 mt-4 mb-1">Reference</li>
+            {% for p in nav_pages %}{% if p.nav_order >= 12 %}
+            <li><a href="{{ p.url | prepend: site.baseurl }}"{% if p.url == page.url %} class="active"{% endif %}>{{ p.title }}</a></li>
+            {% endif %}{% endfor %}
+
+          </ul>
+        </nav>
+
+        <!-- GitHub CTA -->
+        <div class="p-4 border-t border-base-300">
+          <a href="https://github.com/march-language/march"
+             class="btn btn-outline btn-primary btn-sm w-full gap-2" target="_blank" rel="noopener">
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 .5C5.73.5.5 5.73.5 12c0 5.08 3.29 9.38 7.86 10.9.57.1.78-.25.78-.55v-2.1c-3.2.7-3.87-1.54-3.87-1.54-.52-1.33-1.27-1.68-1.27-1.68-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.68 1.24 3.33.95.1-.74.4-1.24.72-1.53-2.55-.29-5.23-1.28-5.23-5.68 0-1.25.45-2.28 1.18-3.08-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.15 1.17a10.9 10.9 0 012.87-.39c.97 0 1.95.13 2.87.39 2.18-1.48 3.14-1.17 3.14-1.17.63 1.58.23 2.75.11 3.04.74.8 1.18 1.83 1.18 3.08 0 4.41-2.69 5.38-5.25 5.67.41.35.78 1.05.78 2.12v3.14c0 .3.2.66.79.55C20.21 21.38 23.5 17.08 23.5 12 23.5 5.73 18.27.5 12 .5z"/>
+            </svg>
+            View on GitHub
+          </a>
+        </div>
+
+      </aside>
+    </div>
+  </div>
+</body>
+</html>

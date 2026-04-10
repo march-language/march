@@ -1,0 +1,25 @@
+; March browser REPL — compiled to JavaScript via js_of_ocaml.
+;
+; To build the JS bundle:
+;   dune build --root=<worktree-root> js/march_browser.bc.js
+;
+; After building, copy the bundle to docs/assets/:
+;   cp _build/default/js/march_browser.bc.js docs/assets/march.js
+;
+; Or use the playground alias which does both:
+;   dune build --root=<worktree-root> @js/playground
+
+(executable
+ (name march_browser)
+ (libraries
+  digestif.ocaml
+  march_ast
+  march_errors
+  march_lexer
+  march_parser
+  march_desugar
+  march_typecheck
+  march_eval
+  js_of_ocaml)
+ (js_of_ocaml (flags (:standard)))
+ (modes js))

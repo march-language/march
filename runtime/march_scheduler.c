@@ -445,6 +445,15 @@ static void sched_loop(march_scheduler *sched) {
         march_proc_status st = atomic_load_explicit(&p->status, memory_order_acquire);
         if (st == PROC_READY) {
             march_deque_push(&sched->local_queue, p);
+        } else if (st == PROC_PARKED) {
+            /* The process called march_sched_recv's slow path: it stored
+             * PROC_PARKED then immediately called swapcontext.  Now that
+             * swapcontext has returned here, the process's ucontext is fully
+             * saved in p->ctx.  Transition to PROC_WAITING so that any
+             * waker that was spin-waiting on PROC_PARKED can now safely CAS
+             * WAITING→READY and push p to a deque without risk of another
+             * thread resuming a process whose context isn't saved yet. */
+            atomic_store_explicit(&p->status, PROC_WAITING, memory_order_release);
         } else if (st == PROC_DEAD) {
             registry_remove(p);
             atomic_fetch_sub_explicit(&g_live_procs, 1, memory_order_release);
@@ -545,7 +554,7 @@ int march_sched_send(march_proc *target, void *msg) {
     mbox_push(target, msg);
     march_proc_status st = atomic_load_explicit(&target->status, memory_order_acquire);
     mbox_lock_release(target);
-    if (st == PROC_WAITING) {
+    if (st == PROC_WAITING || st == PROC_PARKED) {
         march_sched_wake(target);
     }
     return 0;
@@ -566,10 +575,19 @@ void *march_sched_recv(void) {
         mbox_lock_release(p);
         return msg;
     }
-    atomic_store_explicit(&p->status, PROC_WAITING, memory_order_release);
+    /* PROC_PARKED: we're about to call swapcontext but haven't yet saved our
+     * context.  Wakers that see PROC_PARKED must spin-wait until the
+     * scheduler transitions us to PROC_WAITING (context saved) before
+     * pushing us to a run-deque.  Without this, a waker could push us
+     * while we are still executing, causing two schedulers to resume the
+     * same process concurrently. */
+    atomic_store_explicit(&p->status, PROC_PARKED, memory_order_release);
     mbox_lock_release(p);
 
     swapcontext(&p->ctx, &tl_sched->sched_ctx);
+    /* Context is now saved.  The scheduler (sched_loop) transitions us from
+     * PROC_PARKED to PROC_WAITING immediately after swapcontext returns on
+     * its side, making it safe for a waker to push us to a deque. */
 
     /* Resumed — a sender woke us. */
     mbox_lock_acquire(p);
@@ -588,9 +606,28 @@ void *march_sched_try_recv(void) {
 }
 
 void march_sched_wake(march_proc *target) {
-    if (!target || atomic_load_explicit(&target->status, memory_order_acquire) != PROC_WAITING)
-        return;
-    atomic_store_explicit(&target->status, PROC_READY, memory_order_release);
+    if (!target) return;
+
+    /* If the process is PROC_PARKED, its context has not yet been saved by
+     * swapcontext.  We must wait until the scheduler transitions it to
+     * PROC_WAITING before we can push it to a deque; otherwise two
+     * scheduler threads would try to resume the same process simultaneously.
+     * The transition is O(1) so this spin is extremely short. */
+    march_proc_status cur;
+    do {
+        cur = atomic_load_explicit(&target->status, memory_order_acquire);
+        if (cur == PROC_DEAD || cur == PROC_READY || cur == PROC_RUNNING)
+            return; /* Not WAITING — no need to wake. */
+        /* cur is PROC_PARKED or PROC_WAITING: keep looping until WAITING. */
+    } while (cur == PROC_PARKED);
+
+    /* Use CAS to atomically transition WAITING→READY so that concurrent
+     * senders cannot both succeed and push the process to the deque twice. */
+    march_proc_status expected = PROC_WAITING;
+    if (!atomic_compare_exchange_strong_explicit(
+            &target->status, &expected, PROC_READY,
+            memory_order_acq_rel, memory_order_acquire))
+        return; /* Not WAITING (already woken by another sender). */
     if (tl_sched) {
         march_deque_push(&tl_sched->local_queue, target);
     } else {
