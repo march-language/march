@@ -30,6 +30,41 @@ type debug_hooks = {
   (** Load trace from file; returns Ok () or Error msg. *)
 }
 
+(** Compute a content hash of stdlib decls (MD5 of marshalled form). *)
+val stdlib_content_hash : March_ast.Ast.decl list -> string
+
+(** Pre-register stdlib type constructors into the typecheck env. *)
+val preregister_stdlib_types :
+  March_typecheck.Typecheck.env ->
+  March_ast.Ast.decl list ->
+  March_typecheck.Typecheck.env
+
+(** Typecheck and eval stdlib decls into the REPL env. *)
+val load_decls_into_env :
+  March_eval.Eval.env ->
+  March_typecheck.Typecheck.env ->
+  March_ast.Ast.decl list ->
+  March_eval.Eval.env * March_typecheck.Typecheck.env
+
+(** Load a cached typecheck env from disk. *)
+val load_cached_tc_env :
+  content_hash:string ->
+  type_map:(March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t ->
+  March_typecheck.Typecheck.env option
+
+(** Save a typecheck env to disk cache. *)
+val save_cached_tc_env :
+  content_hash:string ->
+  March_typecheck.Typecheck.env ->
+  unit
+
+(** Precompile stdlib to a cached .so via the JIT context. *)
+val maybe_precompile_stdlib :
+  March_jit.Repl_jit.t option ->
+  stdlib_decls:March_ast.Ast.decl list ->
+  type_map:(March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t ->
+  unit
+
 val run :
   ?stdlib_decls:March_ast.Ast.decl list ->
   ?debug_hooks:debug_hooks option ->

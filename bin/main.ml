@@ -1551,6 +1551,42 @@ let () =
     let path = if Array.length argv >= 3 then argv.(2) else "trace/gc/gc.jsonl" in
     analyze_gc_trace path
   end;
+  if Array.length argv >= 2 && argv.(1) = "warm-cache" then begin
+    let t0 = Unix.gettimeofday () in
+    (* 1. Parse + desugar stdlib (populates AST cache) *)
+    let stdlib_decls = load_stdlib () in
+    let t1 = Unix.gettimeofday () in
+    Printf.printf "stdlib AST:      %.3fs\n%!" (t1 -. t0);
+    (* 2. Typecheck stdlib (populates TC env cache) *)
+    let type_map = Hashtbl.create 64 in
+    let base_tc = March_typecheck.Typecheck.base_env
+      (March_errors.Errors.create ()) type_map in
+    let tc_pre = March_repl.Repl.preregister_stdlib_types base_tc stdlib_decls in
+    let content_hash = March_repl.Repl.stdlib_content_hash stdlib_decls in
+    (match March_repl.Repl.load_cached_tc_env ~content_hash ~type_map with
+     | Some _ ->
+       let t2 = Unix.gettimeofday () in
+       Printf.printf "tc_env:          %.3fs (cached)\n%!" (t2 -. t1)
+     | None ->
+       let (_e0, tc0) = March_repl.Repl.load_decls_into_env
+         March_eval.Eval.base_env tc_pre stdlib_decls in
+       March_repl.Repl.save_cached_tc_env ~content_hash tc0;
+       let t2 = Unix.gettimeofday () in
+       Printf.printf "tc_env:          %.3fs (built + cached)\n%!" (t2 -. t1));
+    (* 3. Compile C runtime .so *)
+    let t3 = Unix.gettimeofday () in
+    let runtime_so = ensure_runtime_so () in
+    let t4 = Unix.gettimeofday () in
+    Printf.printf "runtime .so:     %.3fs\n%!" (t4 -. t3);
+    (* 4. Precompile stdlib .so *)
+    let jit_ctx = March_jit.Repl_jit.create ~runtime_so () in
+    March_repl.Repl.maybe_precompile_stdlib (Some jit_ctx) ~stdlib_decls ~type_map;
+    March_jit.Repl_jit.cleanup jit_ctx;
+    let t5 = Unix.gettimeofday () in
+    Printf.printf "stdlib .so:      %.3fs\n%!" (t5 -. t4);
+    Printf.printf "total:           %.3fs\n%!" (t5 -. t0);
+    exit 0
+  end;
   if Array.length argv >= 2 && argv.(1) = "repl" then begin
     let preload_file = if Array.length argv >= 3 then Some argv.(2) else None in
     let runtime_so = ensure_runtime_so () in
