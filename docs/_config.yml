@@ -1,4 +1,4 @@
-title: March Programming Language
+title: March Lang
 description: A statically-typed functional language in the ML/Elixir tradition, compiled to native code via LLVM.
 baseurl: "/march"
 url: "https://march-language.github.io"
@@ -30,7 +30,7 @@ nav_external_links:
     url: https://github.com/yourusername/march
 
 # Footer
-footer_content: "March Programming Language. Built with <a href=\"https://just-the-docs.com\">Just the Docs</a>."
+footer_content: 'March Programming Language. Built with <a href="https://just-the-docs.com">Just the Docs</a>.'
 
 # Exclude from build
 exclude:
