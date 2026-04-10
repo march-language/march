@@ -118,16 +118,15 @@ All tests should pass. The suite covers the parser, typechecker, evaluator, stdl
 
 ---
 
-## PATH setup (optional)
+## Installing forge to PATH (optional)
 
-For convenience, add the forge binary to your shell PATH:
+To use `forge` directly without a path prefix, install it after building:
 
 ```sh
-# ~/.zshrc or ~/.bashrc
-export PATH="$HOME/march/_build/default/forge/bin:$PATH"
+dune install forge
 ```
 
-After sourcing your shell config you can run `forge` directly from anywhere:
+This copies the binary to your opam switch's bin directory, which is already on PATH. After this, forge commands work from anywhere:
 
 ```sh
 forge run my_program.march

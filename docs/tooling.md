@@ -10,6 +10,24 @@ March ships with a build tool, an LSP server, and a tree-sitter grammar for edit
 
 ---
 
+## Installing forge
+
+After cloning and building the repo, install `forge` to your PATH with:
+
+```sh
+dune build && dune install forge
+```
+
+Then all forge commands are available directly:
+
+```sh
+forge run my_program.march
+forge test
+forge search "map"
+```
+
+---
+
 ## forge — Build Tool
 
 `forge` is the official project manager for March.
@@ -17,7 +35,7 @@ March ships with a build tool, an LSP server, and a tree-sitter grammar for edit
 ### Creating a Project
 
 ```sh
-dune exec forge -- new my_app
+forge new my_app
 cd my_app
 ```
 
@@ -45,44 +63,44 @@ version = "0.1.0"
 
 ```sh
 # Build the project
-dune exec forge -- build
+forge build
 
 # Build and run
-dune exec forge -- run
+forge run
 
 # Run with arguments
-dune exec forge -- run -- --port 8080
+forge run -- --port 8080
 ```
 
 ### Testing
 
 ```sh
 # Run all tests
-dune exec forge -- test
+forge test
 
 # Run tests matching a filter
-dune exec forge -- test --filter "list operations"
+forge test --filter "list operations"
 ```
 
 ### Formatting
 
 ```sh
-dune exec forge -- format
-dune exec forge -- format --check   # check without modifying
+forge format
+forge format --check   # check without modifying
 ```
 
 ### Cleaning Build Artifacts
 
 ```sh
-dune exec forge -- clean
+forge clean
 ```
 
 ### Interactive Mode (REPL)
 
 ```sh
-dune exec forge -- interactive
+forge interactive
 # alias:
-dune exec forge -- i
+forge i
 ```
 
 ---
@@ -94,46 +112,46 @@ dune exec forge -- i
 ### Search by Name
 
 ```sh
-dune exec forge -- search "map"
+forge search "map"
 # Finds: List.map, Map.map_values, Option.map, Result.map, ...
 
-dune exec forge -- search "fold"
+forge search "fold"
 # Finds: List.fold_left, List.fold_right, Map.fold, Enum.fold, ...
 ```
 
 ### Search by Type Signature
 
 ```sh
-dune exec forge -- search --type "List(a) -> (a -> b) -> List(b)"
+forge search --type "List(a) -> (a -> b) -> List(b)"
 # Finds: List.map, Enum.map
 
-dune exec forge -- search --type "Option(a) -> a -> a"
+forge search --type "Option(a) -> a -> a"
 # Finds: Option.unwrap_or
 
-dune exec forge -- search --type "String -> Int"
+forge search --type "String -> Int"
 # Finds: String.length, String.to_int (partial)
 ```
 
 ### Search by Documentation Keyword
 
 ```sh
-dune exec forge -- search --doc "sort"
+forge search --doc "sort"
 # Finds functions with "sort" in their docstrings
 
-dune exec forge -- search --doc "hash"
+forge search --doc "hash"
 ```
 
 ### Output Options
 
 ```sh
-dune exec forge -- search "map" --limit 5
-dune exec forge -- search "map" --json   # JSON output
+forge search "map" --limit 5
+forge search "map" --json   # JSON output
 ```
 
 ### Rebuilding the Search Index
 
 ```sh
-dune exec forge -- search --rebuild
+forge search --rebuild
 ```
 
 The search index is cached at `.march/search-index.json` and rebuilt when source changes.
@@ -154,14 +172,14 @@ depot   = ">= 1.0.0, < 2.0.0"
 
 Then:
 ```sh
-dune exec forge -- deps
+forge deps
 ```
 
 ### Updating Dependencies
 
 ```sh
-dune exec forge -- deps update
-dune exec forge -- deps update bastion   # update specific package
+forge deps update
+forge deps update bastion   # update specific package
 ```
 
 ### Lock File
@@ -306,10 +324,10 @@ The compiler can produce structured output for debugging and analysis:
 
 ```sh
 # Dump all compilation phases to trace/phases/
-dune exec march -- --dump-phases my_program.march
+forge compile --dump-phases my_program.march
 
 # Analyze a GC trace
-dune exec march -- analyze-trace trace/gc/gc.jsonl
+MARCH_TRACE_GC=1 forge run my_program.march
 ```
 
 With `MARCH_TRACE_GC=1` set, the runtime logs all reference-counting operations to `trace/gc/gc.jsonl`. The analysis command reports:
@@ -319,7 +337,7 @@ With `MARCH_TRACE_GC=1` set, the runtime logs all reference-counting operations 
 
 ### Visualizing Compiler Phases
 
-Open `tools/phase-viewer.html` in a browser after running `--dump-phases`. This shows:
+Open `tools/phase-viewer.html` in a browser after running `forge compile --dump-phases`. This shows:
 - Per-function TIR dumps at each pass
 - Inline eligibility and reasoning
 - RC density visualization (which values are RC'd most)
