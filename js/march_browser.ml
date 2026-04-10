@@ -156,18 +156,21 @@ let ensure_session_init () =
 (* Parse helpers                                                       *)
 (* ------------------------------------------------------------------ *)
 
-(** Parse one REPL item using the dedicated repl_input grammar entry point.
-    This accepts both bare expressions (ReplExpr) and declarations (ReplDecl)
-    without requiring a `mod Name do ... end` wrapper. *)
-let parse_repl_input code =
-  (* Append a newline so the lexer sees EOF cleanly after the last token *)
+(** Parse all REPL items from [code] using the [repl_sequence] grammar rule.
+    This accepts a sequence of declarations followed by an optional expression,
+    all from a single lexbuf, enabling multi-declaration inputs like:
+      type Shape = Circle(Float) | Rect(Float, Float)
+      let area = fn s -> match s do ... end
+      area(Circle(5.0))
+    Returns [Ok items] or [Error msg] on parse failure. *)
+let parse_all_repl_items code =
   let lexbuf = Lexing.from_string (code ^ "\n") in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = "<repl>" };
   try
-    let item = March_parser.Parser.repl_input
+    let items = March_parser.Parser.repl_sequence
         (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
-    Ok item
+    Ok items
   with
   | March_errors.Errors.ParseError (msg, _hint, pos) ->
     let open Lexing in
@@ -288,47 +291,35 @@ let eval_item item =
   (Buffer.contents out_buf, !value_ref, !error_ref)
 
 (** Evaluate [code] in the persistent session.
-    Handles both single items and multi-line blocks (evaluated line by line).
+    Parses all items from [code] sequentially from a shared lexbuf, so that
+    multi-declaration inputs like type defs + let bindings + expressions all
+    work without requiring artificial line splitting.
     Returns [(output_text, error_opt)]. *)
 let eval_line code =
   ensure_session_init ();
-  let render_result output value_opt =
-    match value_opt with
-    | None -> output
-    | Some v ->
-      let s = string_of_value v in
-      if output = "" then s ^ "\n" else output ^ s ^ "\n"
-  in
-  (* Try the whole input as one repl_input item first *)
-  match parse_repl_input code with
-  | Ok item ->
-    let (output, value_opt, error_opt) = eval_item item in
-    (render_result output value_opt, error_opt)
-  | Error first_err ->
-    (* If multi-line, try evaluating each non-empty line separately.
-       This handles: let x = 1\nlet y = 2\nx + y  *)
-    let lines = String.split_on_char '\n' (String.trim code)
-                |> List.filter (fun l -> String.trim l <> "") in
-    if List.length lines <= 1 then
-      ("", Some first_err)
-    else begin
-      let overall_out = Buffer.create 128 in
-      let last_value = ref None in
-      let first_error = ref None in
-      List.iter (fun line ->
-        if !first_error = None then
-          match parse_repl_input line with
-          | Ok item ->
-            let (out, v, err) = eval_item item in
-            Buffer.add_string overall_out out;
-            last_value := v;
-            first_error := err
-          | Error msg ->
-            first_error := Some msg
-      ) lines;
-      let output = render_result (Buffer.contents overall_out) !last_value in
-      (output, !first_error)
-    end
+  match parse_all_repl_items code with
+  | Error msg -> ("", Some msg)
+  | Ok items ->
+    let overall_out = Buffer.create 128 in
+    let last_value = ref None in
+    let first_error = ref None in
+    List.iter (fun item ->
+      if !first_error = None then begin
+        let (out, v, err) = eval_item item in
+        Buffer.add_string overall_out out;
+        last_value := v;
+        first_error := err
+      end
+    ) items;
+    let output =
+      match !last_value with
+      | None -> Buffer.contents overall_out
+      | Some v ->
+        let s = string_of_value v in
+        let base = Buffer.contents overall_out in
+        if base = "" then s ^ "\n" else base ^ s ^ "\n"
+    in
+    (output, !first_error)
 
 (* ------------------------------------------------------------------ *)
 (* JavaScript exports                                                  *)

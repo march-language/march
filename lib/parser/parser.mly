@@ -171,6 +171,7 @@
 %start <March_ast.Ast.module_> module_
 %start <March_ast.Ast.expr> expr_eof
 %start <March_ast.Ast.repl_input> repl_input
+%start <March_ast.Ast.repl_input list> repl_sequence
 
 %%
 
@@ -1141,3 +1142,15 @@ repl_input:
           "unexpected `%s = ...` — did you mean `let %s = ...`?" name name,
         Some (Printf.sprintf "let %s = expr" name),
         $startpos($2))) }
+
+(** Parse a sequence of zero or more declarations followed by an optional
+    expression, then EOF.  Used by the browser REPL to handle multi-item
+    inputs like:
+        type Shape = ...
+        let area = fn s -> match s do ... end
+        area(Circle(5.0))
+    without splitting on newlines (which breaks multi-line declarations). *)
+repl_sequence:
+  | EOF { [] }
+  | d = decl; rest = repl_sequence { March_ast.Ast.ReplDecl d :: rest }
+  | e = expr; EOF { [March_ast.Ast.ReplExpr e] }
