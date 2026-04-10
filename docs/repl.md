@@ -13,14 +13,9 @@ The March REPL is an interactive programming environment with a two-pane TUI, ta
 ## Starting the REPL
 
 ```sh
-dune exec march -- --repl
-```
-
-Or via forge:
-```sh
-dune exec forge -- interactive
+forge interactive
 # alias:
-dune exec forge -- i
+forge i
 ```
 
 You'll see:
