@@ -12,16 +12,16 @@
             content="{{ page.description | default: site.description | escape }}"
         />
 
-        <!-- DaisyUI + Tailwind CSS (CDN — includes Typography plugin) -->
+        <!-- DaisyUI v3 (HSL variables) + Tailwind CSS (CDN — includes Typography plugin) -->
         <link
-            href="https://cdn.jsdelivr.net/npm/daisyui@4/dist/full.min.css"
+            href="https://cdn.jsdelivr.net/npm/daisyui@3/dist/full.min.css"
             rel="stylesheet"
             type="text/css"
         />
         <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
 
         <style>
-            /* ── March brand palette (DaisyUI v4 HSL variables) ───────────────── */
+            /* ── March brand palette (DaisyUI v3 — HSL: H S% L%) ──────────────── */
             [data-theme="march"] {
                 color-scheme: dark;
 
