@@ -12,6 +12,7 @@
 (executable
  (name march_browser)
  (libraries
+  digestif.ocaml
   march_ast
   march_errors
   march_lexer
