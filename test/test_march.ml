@@ -5878,6 +5878,7 @@ let test_repl_jit_stdlib_list_length () =
       Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
     let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
       Hashtbl.create 16 in
+    let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        (* Precompile stdlib — this triggers the TVar bug path on unfixed builds *)
@@ -5934,6 +5935,7 @@ let test_repl_list_literal () =
       Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
     let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
       Hashtbl.create 16 in
+    let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        March_jit.Repl_jit.precompile_stdlib jit
@@ -5977,6 +5979,7 @@ let test_repl_stdlib_on_list () =
       Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
     let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
       Hashtbl.create 16 in
+    let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        March_jit.Repl_jit.precompile_stdlib jit
@@ -6075,6 +6078,7 @@ let test_repl_stdlib_chain () =
       Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
     let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
       Hashtbl.create 16 in
+    let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        March_jit.Repl_jit.precompile_stdlib jit
@@ -6213,6 +6217,7 @@ let test_repl_jit_list_display () =
       Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
     let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
       Hashtbl.create 16 in
+    let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        March_jit.Repl_jit.precompile_stdlib jit
@@ -6338,6 +6343,7 @@ let test_repl_list_literal_with_bigint () =
     let stdlib_decls = [list_decl; bigint_decl] in
     let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
       Hashtbl.create 16 in
+    let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (* Intentionally do NOT call precompile_stdlib — this forces all stdlib
        functions (including BigInt) into the first JIT fragment, reproducing
@@ -6403,6 +6409,7 @@ let test_repl_list_literal_with_precompile_bigint () =
       Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
     let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
       Hashtbl.create 16 in
+    let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        (* Precompile bigint — should succeed now that decimal.march is fixed *)
@@ -6480,6 +6487,7 @@ let test_repl_jit_stdlib_reverse () =
       Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
     let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
       Hashtbl.create 16 in
+    let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        March_jit.Repl_jit.precompile_stdlib jit
@@ -6517,6 +6525,7 @@ let test_repl_jit_stdlib_no_precompile () =
     let stdlib_decls = [list_decl] in
     let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
       Hashtbl.create 16 in
+    let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (* Intentionally skip precompile_stdlib to force inline-JIT mode *)
     (try
@@ -6563,6 +6572,7 @@ let test_repl_jit_stdlib_length_3x () =
       Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
     let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
       Hashtbl.create 16 in
+    let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        March_jit.Repl_jit.precompile_stdlib jit

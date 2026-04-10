@@ -13,7 +13,7 @@ val create : runtime_so:string -> ?clang:string -> unit -> t
     Raises [Failure] on compile or link error. *)
 val run_expr :
   t ->
-  type_map:(March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t ->
+  tc_env:March_typecheck.Typecheck.env ->
   March_ast.Ast.module_ ->
   March_tir.Tir.ty * string
 
@@ -24,7 +24,7 @@ val run_expr :
     Raises [Failure] on compile or link error. *)
 val run_decl :
   t ->
-  type_map:(March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t ->
+  tc_env:March_typecheck.Typecheck.env ->
   is_fn_decl:bool ->
   bind_name:string ->
   March_ast.Ast.module_ ->
