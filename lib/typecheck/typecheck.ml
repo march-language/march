@@ -5252,6 +5252,96 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
   enforce_tail_calls_in_decls errors m.Ast.mod_decls;
   (errors, type_map)
 
+(** Like [check_module] but starts from a pre-built environment.
+    Used by the REPL JIT to typecheck user expressions incrementally
+    without re-typechecking stdlib on every input.
+
+    [env] should be the environment produced by loading stdlib
+    (via [base_env] + repeated [check_decl] calls).  The [type_map]
+    inside [env] is mutated in place with new span→type entries. *)
+let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, ty) Hashtbl.t =
+  let errors = env.errors in
+  let type_map = env.type_map in
+  let rec prebind_mod_members_inc prefix e decls =
+    List.fold_left (fun e d ->
+        match d with
+        | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
+          let qname = prefix ^ "." ^ def.fn_name.txt in
+          if StrMap.mem qname e.vars then e
+          else bind_var qname (Mono (fresh_var 0)) e
+        | Ast.DType (vis, name, params, typedef, _) when vis = Ast.Public ->
+          let qname = prefix ^ "." ^ name.txt in
+          let e1 = if StrMap.mem qname e.types then e
+            else { e with types = StrMap.add qname (List.length params) e.types } in
+          (match typedef with
+           | Ast.TDVariant variants ->
+             let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+             List.fold_left (fun acc (v : Ast.variant) ->
+                 let qctor = prefix ^ "." ^ v.var_name.txt in
+                 let ci = { ci_type = qname; ci_params = param_names;
+                            ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
+                 { acc with ctors = add_ctor qctor ci acc.ctors }
+               ) e1 variants
+           | _ -> e1)
+        | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
+          prebind_mod_members_inc (prefix ^ "." ^ mname.txt) e inner_decls
+        | _ -> e
+      ) e decls
+  in
+  (* Pass 1: forward-reference placeholders for new declarations *)
+  let pre_env = List.fold_left (fun env d ->
+      match d with
+      | Ast.DFn (def, _) ->
+        if StrMap.mem def.fn_name.txt env.vars then env
+        else bind_var def.fn_name.txt (Mono (fresh_var 0)) env
+      | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
+        prebind_mod_members_inc mname.txt env inner_decls
+      | Ast.DType (_, name, params, typedef, _) ->
+        let env1 = { env with types = StrMap.add name.txt (List.length params) env.types } in
+        (match typedef with
+         | Ast.TDVariant variants ->
+           let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+           List.fold_left (fun e (v : Ast.variant) ->
+               let ci = { ci_type    = name.txt
+                        ; ci_params  = param_names
+                        ; ci_arg_tys = v.var_args
+                        ; ci_vis     = v.var_vis } in
+               { e with ctors = add_ctor v.var_name.txt ci e.ctors }
+             ) env1 variants
+         | Ast.TDRecord fields ->
+           let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+           let field_pairs = List.map (fun (f : Ast.field) -> (f.fld_name.txt, f.fld_ty)) fields in
+           { env1 with records = StrMap.add name.txt (param_names, field_pairs) env1.records }
+         | _ -> env1)
+      | Ast.DActor (_, name, actor, _) ->
+        let env1 = { env with ctors =
+          add_ctor name.txt { ci_type = name.txt; ci_params = []; ci_arg_tys = []; ci_vis = Ast.Public }
+            env.ctors } in
+        List.fold_left (fun acc_env (h : Ast.actor_handler) ->
+            let arg_tys = List.mapi (fun i (p : Ast.param) ->
+                match p.param_ty with
+                | Some ty -> ty
+                | None ->
+                  Ast.TyVar { txt = Printf.sprintf "$p%d_%s" i h.ah_msg.txt;
+                              span = p.param_name.span }
+              ) h.ah_params in
+            let ci = { ci_type = name.txt ^ "_Msg"; ci_params = [];
+                       ci_arg_tys = arg_tys; ci_vis = Ast.Public } in
+            { acc_env with ctors = add_ctor h.ah_msg.txt ci acc_env.ctors }
+          ) env1 actor.actor_handlers
+      | Ast.DSig (name, sdef, _) ->
+        { env with sigs = (name.txt, sdef) :: env.sigs }
+      | Ast.DInterface (idef, _) ->
+        { env with interfaces = StrMap.add idef.iface_name.txt idef env.interfaces }
+      | _ -> env
+    ) env m.Ast.mod_decls
+  in
+  (* Pass 2: full checking of new declarations *)
+  let _final_env = List.fold_left check_decl pre_env m.Ast.mod_decls in
+  (* Pass 3: tail-call enforcement *)
+  enforce_tail_calls_in_decls errors m.Ast.mod_decls;
+  (errors, type_map)
+
 (** Like [check_module] but also returns the final type environment.
     Used by tests to inspect protocol projections. *)
 let check_module_full ?(errors = Err.create ()) (m : Ast.module_)

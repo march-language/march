@@ -36,6 +36,7 @@ type t = {
   mutable handles : Jit.dl_handle list;      (* open dl handles *)
   compiled_fns : (string, unit) Hashtbl.t;  (* fns already compiled in prior fragments *)
   global_tir_tys : (string, March_tir.Tir.ty) Hashtbl.t;  (* bare_name -> TIR type, for display *)
+  mutable stdlib_decls : March_ast.Ast.decl list;  (* cached for incremental lowering context *)
 }
 
 let create ~runtime_so ?(clang="clang") () =
@@ -48,7 +49,8 @@ let create ~runtime_so ?(clang="clang") () =
   { runtime_so; clang; tmp_dir; undef_flag;
     counter = 0; globals = []; handles = [rt_handle];
     compiled_fns = Hashtbl.create 256;
-    global_tir_tys = Hashtbl.create 16 }
+    global_tir_tys = Hashtbl.create 16;
+    stdlib_decls = [] }
 
 let next_id ctx =
   let n = ctx.counter in
@@ -144,8 +146,8 @@ let bare_of_global (gname : string) : string =
 (** Lower a single-expression module through the TIR pipeline.
     [repl_vars] are bare variable names of REPL globals that should be
     treated as borrowed by Perceus so they are never freed mid-session. *)
-let lower_module ~type_map ?(repl_vars : string list = []) (m : March_ast.Ast.module_) =
-  let tir = March_tir.Lower.lower_module ~type_map m in
+let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(repl_vars : string list = []) (m : March_ast.Ast.module_) =
+  let tir = March_tir.Lower.lower_module ~type_map ~stdlib_context m in
   let tir = March_tir.Mono.monomorphize tir in
   let tir = March_tir.Defun.defunctionalize tir in
   let tir = March_tir.Perceus.perceus ~repl_vars tir in
@@ -241,11 +243,13 @@ and pp_field ?(depth=0) (ty : March_tir.Tir.ty) (ptr : nativeint) (i : int) : st
 
 (* ── run_expr ──────────────────────────────────────────────────────── *)
 
-let run_expr ctx ~type_map:_ m =
+let run_expr ctx ~tc_env m =
   let n = next_id ctx in
   let repl_vars = List.map (fun (gname, _) -> bare_of_global gname) ctx.globals in
-  let (_, type_map) = March_typecheck.Typecheck.check_module m in
-  let tir = lower_module ~type_map ~repl_vars m in
+  let errors = March_errors.Errors.create () in
+  let env = { tc_env with March_typecheck.Typecheck.errors } in
+  let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
+  let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m in
   (* The last function in the module is the expression wrapper.
      Extract its body and return type. *)
   let main_fn = List.find (fun (f : March_tir.Tir.fn_def) ->
@@ -334,11 +338,13 @@ let run_expr ctx ~type_map:_ m =
 
 (** Distinguish fn vs let at the AST level, not TIR.
     [is_fn_decl] is true when the original REPL input was a DFn. *)
-let run_decl ctx ~type_map:_ ~is_fn_decl ~bind_name m =
+let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
   let n = next_id ctx in
   let repl_vars = List.map (fun (gname, _) -> bare_of_global gname) ctx.globals in
-  let (_, type_map) = March_typecheck.Typecheck.check_module m in
-  let tir = lower_module ~type_map ~repl_vars m in
+  let errors = March_errors.Errors.create () in
+  let env = { tc_env with March_typecheck.Typecheck.errors } in
+  let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
+  let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m in
   let all_support_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
   (* Partition into new (to define) and extern (already compiled, need declare). *)
@@ -440,6 +446,7 @@ let precompile_stdlib ctx
     ~(stdlib_decls : March_ast.Ast.decl list)
     ~(type_map     : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t) =
   ignore type_map;
+  ctx.stdlib_decls <- stdlib_decls;
   let home = (try Sys.getenv "HOME" with Not_found -> ".") in
   let cache_dir = Filename.concat home ".cache/march" in
   let short_hash = String.sub content_hash 0 16 in

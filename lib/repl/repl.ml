@@ -150,8 +150,10 @@ let maybe_precompile_stdlib jit_ctx ~stdlib_decls
       ~content_hash ~stdlib_decls ~type_map
 
 (** Wrap a REPL expression in a synthetic module for TIR lowering.
-    The expression becomes the body of fn main() -> expr. *)
-let wrap_expr_as_module ~(stdlib_decls : March_ast.Ast.decl list)
+    The expression becomes the body of fn main() -> expr.
+    Does NOT include stdlib_decls — the JIT uses incremental typecheck
+    and passes stdlib_context to lower_module separately. *)
+let wrap_expr_as_module
     (e : March_ast.Ast.expr) : March_ast.Ast.module_ =
   let s = March_ast.Ast.dummy_span in
   let main_clause = {
@@ -170,14 +172,14 @@ let wrap_expr_as_module ~(stdlib_decls : March_ast.Ast.decl list)
   } in
   let main_decl = March_ast.Ast.DFn (main_def, s) in
   { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
-    mod_decls = stdlib_decls @ [main_decl] }
+    mod_decls = [main_decl] }
 
 (** Wrap a REPL declaration in a synthetic module for TIR lowering. *)
-let wrap_decl_as_module ~(stdlib_decls : March_ast.Ast.decl list)
+let wrap_decl_as_module
     (d : March_ast.Ast.decl) : March_ast.Ast.module_ =
   let s = March_ast.Ast.dummy_span in
   { March_ast.Ast.mod_name = { txt = "Repl"; span = s };
-    mod_decls = stdlib_decls @ [d] }
+    mod_decls = [d] }
 
 (** Non-TUI fallback REPL. *)
 let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx=(None : March_jit.Repl_jit.t option)) ?(preload_file=None) () =
@@ -723,8 +725,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                           | March_ast.Ast.DFn (def, _) -> def.fn_name.txt
                           | _ -> assert false
                         in
-                        let m = wrap_decl_as_module ~stdlib_decls d' in
-                        March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:true ~bind_name m;
+                        let m = wrap_decl_as_module d' in
+                        March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:true ~bind_name m;
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
                         Printf.printf "val %s = <fn>\n%!" bind_name
@@ -743,8 +745,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                           | March_ast.Ast.DLet (_, b, _) -> b.bind_expr
                           | _ -> assert false
                         in
-                        let m = wrap_expr_as_module ~stdlib_decls bind_expr in
-                        (try March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m
+                        let m = wrap_expr_as_module bind_expr in
+                        (try March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m
                          with Failure _ -> ());
                         (* Always update interpreter env (source of truth for value display) *)
                         env := March_eval.Eval.eval_decl !env d';
@@ -839,9 +841,9 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                       (match jit_ctx with
                       | Some jit ->
                         (try
-                          let m = wrap_expr_as_module ~stdlib_decls e' in
+                          let m = wrap_expr_as_module e' in
                           let (_ty, result_str) =
-                            March_jit.Repl_jit.run_expr jit ~type_map m in
+                            March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
                           Printf.printf "= %s\n%!" result_str;
                           if !show_type then
                             Printf.printf "- : %s\n%!" ty_str;
@@ -1177,8 +1179,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                | March_ast.Ast.DFn (def, _) -> def.fn_name.txt
                | _ -> assert false
              in
-             let m = wrap_decl_as_module ~stdlib_decls d' in
-             (try March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:true ~bind_name m
+             let m = wrap_decl_as_module d' in
+             (try March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:true ~bind_name m
               with Failure _ -> ());
              if tc_ok then
                tc_env := { new_tc with errors = March_errors.Errors.create () };
@@ -1197,8 +1199,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                | March_ast.Ast.DLet (_, b, _) -> b.bind_expr
                | _ -> assert false
              in
-             let m = wrap_expr_as_module ~stdlib_decls bind_expr in
-             (try March_jit.Repl_jit.run_decl jit ~type_map ~is_fn_decl:false ~bind_name m
+             let m = wrap_expr_as_module bind_expr in
+             (try March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m
               with Failure _ -> ());
              env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
              if tc_ok then
@@ -1286,9 +1288,9 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
         (try
            (match jit_ctx with
            | Some jit ->
-             let m = wrap_expr_as_module ~stdlib_decls e' in
+             let m = wrap_expr_as_module e' in
              let (_ty, result_str) =
-               March_jit.Repl_jit.run_expr jit ~type_map m in
+               March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
              add_line Notty.A.(fg green) (Printf.sprintf "= %s" result_str);
              if !show_type then
                add_line Notty.A.(fg cyan) (Printf.sprintf "- : %s" ty_str);
