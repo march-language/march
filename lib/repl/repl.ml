@@ -131,6 +131,55 @@ let load_decls_into_env env tc_env decls =
     (e', { tc' with errors = March_errors.Errors.create () })
   ) (env, tc_env) decls
 
+(** Run only eval_decl for each stdlib module (skip typechecking).
+    Used when the typecheck env is loaded from cache. *)
+let eval_decls_only env decls =
+  List.fold_left (fun e decl ->
+    (try March_eval.Eval.eval_decl e decl with _ -> e)
+  ) env decls
+
+(** Try to load a cached typecheck env.  Returns Some tc_env on hit. *)
+let load_cached_tc_env ~content_hash ~type_map =
+  let home = (try Sys.getenv "HOME" with Not_found -> ".") in
+  let cache_dir = Filename.concat home ".cache/march" in
+  let short_hash = String.sub content_hash 0 16 in
+  let cache_path = Filename.concat cache_dir
+    ("stdlib_tcenv_" ^ short_hash ^ ".bin") in
+  try
+    if Sys.file_exists cache_path then begin
+      let ic = open_in_bin cache_path in
+      let (cached_tc : March_typecheck.Typecheck.env) = Marshal.from_channel ic in
+      let (cached_tm : (March_ast.Ast.span * March_typecheck.Typecheck.ty) list) =
+        Marshal.from_channel ic in
+      close_in ic;
+      (* Restore type_map entries into the shared hashtable *)
+      List.iter (fun (k, v) -> Hashtbl.replace type_map k v) cached_tm;
+      (* Replace errors and type_map with fresh/live ones *)
+      Some { cached_tc with
+        March_typecheck.Typecheck.errors = March_errors.Errors.create ();
+        type_map }
+    end else None
+  with _ -> None
+
+(** Save the typecheck env to cache. *)
+let save_cached_tc_env ~content_hash tc_env =
+  let home = (try Sys.getenv "HOME" with Not_found -> ".") in
+  let cache_dir = Filename.concat home ".cache/march" in
+  let short_hash = String.sub content_hash 0 16 in
+  let cache_path = Filename.concat cache_dir
+    ("stdlib_tcenv_" ^ short_hash ^ ".bin") in
+  (try
+    (try Unix.mkdir cache_dir 0o755
+     with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+    let oc = open_out_bin cache_path in
+    Marshal.to_channel oc tc_env [];
+    (* Save type_map as association list (Hashtbl isn't stable across runs) *)
+    let tm_list = Hashtbl.fold (fun k v acc -> (k, v) :: acc)
+      tc_env.March_typecheck.Typecheck.type_map [] in
+    Marshal.to_channel oc tm_list [];
+    close_out oc
+  with _ -> ())
+
 (** Compute a content hash of stdlib decls using MD5 of their marshalled form.
     Stable within a binary build — changes whenever stdlib source changes. *)
 let stdlib_content_hash (stdlib_decls : March_ast.Ast.decl list) : string =
@@ -196,16 +245,27 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
   let base_tc = March_typecheck.Typecheck.base_env
     (March_errors.Errors.create ()) type_map in
   let t_s0 = Unix.gettimeofday () in
+  let content_hash = stdlib_content_hash stdlib_decls in
   let (e0, tc0) = match initial_env with
     | Some e -> (e, base_tc)
     | None   ->
-      let tc_pre = preregister_stdlib_types base_tc stdlib_decls in
-      let t_s1 = Unix.gettimeofday () in
-      Printf.eprintf "[timing] preregister: %.3fs\n%!" (t_s1 -. t_s0);
-      let r = load_decls_into_env base_e tc_pre stdlib_decls in
-      let t_s2 = Unix.gettimeofday () in
-      Printf.eprintf "[timing] load_decls: %.3fs\n%!" (t_s2 -. t_s1);
-      r
+      (match load_cached_tc_env ~content_hash ~type_map with
+       | Some cached_tc ->
+         let t_s1 = Unix.gettimeofday () in
+         Printf.eprintf "[timing] tc_env cache hit: %.3fs\n%!" (t_s1 -. t_s0);
+         let e0 = eval_decls_only base_e stdlib_decls in
+         let t_s2 = Unix.gettimeofday () in
+         Printf.eprintf "[timing] eval_decls: %.3fs\n%!" (t_s2 -. t_s1);
+         (e0, cached_tc)
+       | None ->
+         let tc_pre = preregister_stdlib_types base_tc stdlib_decls in
+         let t_s1 = Unix.gettimeofday () in
+         Printf.eprintf "[timing] preregister: %.3fs\n%!" (t_s1 -. t_s0);
+         let (e0, tc0) = load_decls_into_env base_e tc_pre stdlib_decls in
+         let t_s2 = Unix.gettimeofday () in
+         Printf.eprintf "[timing] load_decls: %.3fs\n%!" (t_s2 -. t_s1);
+         save_cached_tc_env ~content_hash tc0;
+         (e0, tc0))
   in
   let t_s3 = Unix.gettimeofday () in
   maybe_precompile_stdlib jit_ctx ~stdlib_decls ~type_map;
@@ -893,11 +953,19 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
   let base_e  = March_eval.Eval.base_env in
   let base_tc = March_typecheck.Typecheck.base_env
     (March_errors.Errors.create ()) type_map in
+  let content_hash = stdlib_content_hash stdlib_decls in
   let (e0, tc0) = match initial_env with
     | Some e -> (e, base_tc)
     | None   ->
-      let tc_pre = preregister_stdlib_types base_tc stdlib_decls in
-      load_decls_into_env base_e tc_pre stdlib_decls
+      (match load_cached_tc_env ~content_hash ~type_map with
+       | Some cached_tc ->
+         let e0 = eval_decls_only base_e stdlib_decls in
+         (e0, cached_tc)
+       | None ->
+         let tc_pre = preregister_stdlib_types base_tc stdlib_decls in
+         let (e0, tc0) = load_decls_into_env base_e tc_pre stdlib_decls in
+         save_cached_tc_env ~content_hash tc0;
+         (e0, tc0))
   in
   maybe_precompile_stdlib jit_ctx ~stdlib_decls ~type_map;
   let env      = ref e0 in

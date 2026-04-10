@@ -99,93 +99,140 @@ let load_stdlib_file path =
      | exn ->
        Printf.eprintf "[stdlib] error in %s: %s\n%!" path (Printexc.to_string exn); [])
 
-(** Load all stdlib modules and return their declarations, to be
-    prepended to the user module before evaluation. *)
-let load_stdlib () =
+(** The ordered list of stdlib file names. *)
+let stdlib_file_list = [
+  "prelude.march";
+  "option.march";
+  "result.march";
+  "list.march";
+  "hamt.march";
+  "map.march";
+  "math.march";
+  "string.march";
+  "iolist.march";
+  "html.march";
+  "sigil.march";
+  "http.march";
+  "http_transport.march";
+  "http_client.march";
+  "seq.march";
+  "path.march";
+  "file.march";
+  "dir.march";
+  "sort.march";
+  "csv.march";
+  "websocket.march";
+  "http_server.march";
+  "iterable.march";
+  "set.march";
+  "array.march";
+  "bigint.march";
+  "decimal.march";
+  "duration.march";
+  "bytes.march";
+  "process.march";
+  "io.march";
+  "system.march";
+  "logger.march";
+  "actor.march";
+  "flow.march";
+  "json.march";
+  "regex.march";
+  "datetime.march";
+  "queue.march";
+  "enum.march";
+  "random.march";
+  "stats.march";
+  "plot.march";
+  "dataframe.march";
+  "tls.march";
+  "uuid.march";
+  "vault.march";
+  "channel.march";
+  "pubsub.march";
+  "channel_server.march";
+  "channel_socket.march";
+  "presence.march";
+  "islands.march";
+  "env.march";
+  "config.march";
+  "bastion.march";
+  "csrf.march";
+  "session.march";
+  "test.march";
+  "bastion_dev.march";
+  "bastion_cookies.march";
+  "bastion_routes.march";
+  "bastion_pubsub.march";
+  "bastion_csp.march";
+  "bastion_telemetry.march";
+  "bastion_hot_deploy.march";
+  "bastion_test_sandbox.march";
+  "bastion_idempotency.march";
+  "tuple.march";
+  "char.march";
+  "ordered_map.march";
+  "sorted_set.march";
+  "range.march";
+  "crypto.march";
+]
+
+(** Read all stdlib source files and compute a hash of their contents.
+    Returns (stdlib_dir, source_hash, file_paths). *)
+let stdlib_source_hash () =
   match find_stdlib_dir () with
-  | None -> []
+  | None -> None
   | Some stdlib_dir ->
-    (* Load order: prelude first so its globals (reverse, panic, etc.) are
-       available to subsequent modules, then the module libraries. *)
-    let files = [
-      "prelude.march";
-      "option.march";
-      "result.march";
-      "list.march";
-      "hamt.march";
-      "map.march";
-      "math.march";
-      "string.march";
-      "iolist.march";
-      "html.march";
-      "sigil.march";
-      "http.march";
-      "http_transport.march";
-      "http_client.march";
-      "seq.march";
-      "path.march";
-      "file.march";
-      "dir.march";
-      "sort.march";
-      "csv.march";
-      "websocket.march";
-      "http_server.march";
-      "iterable.march";
-      "set.march";
-      "array.march";
-      "bigint.march";
-      "decimal.march";
-      "duration.march";
-      "bytes.march";
-      "process.march";
-      "io.march";
-      "system.march";
-      "logger.march";
-      "actor.march";
-      "flow.march";
-      "json.march";
-      "regex.march";
-      "datetime.march";
-      "queue.march";
-      "enum.march";
-      "random.march";
-      "stats.march";
-      "plot.march";
-      "dataframe.march";
-      "tls.march";
-      "uuid.march";
-      "vault.march";
-      "channel.march";
-      "pubsub.march";
-      "channel_server.march";
-      "channel_socket.march";
-      "presence.march";
-      "islands.march";
-      "env.march";
-      "config.march";
-      "bastion.march";
-      "csrf.march";
-      "session.march";
-      "test.march";
-      "bastion_dev.march";
-      "bastion_cookies.march";
-      "bastion_routes.march";
-      "bastion_pubsub.march";
-      "bastion_csp.march";
-      "bastion_telemetry.march";
-      "bastion_hot_deploy.march";
-      "bastion_test_sandbox.march";
-      "bastion_idempotency.march";
-      "tuple.march";
-      "char.march";
-      "ordered_map.march";
-      "sorted_set.march";
-      "range.march";
-      "crypto.march";
-    ] in
-    List.concat_map (fun name ->
-        load_stdlib_file (Filename.concat stdlib_dir name)
-      ) files
+    let paths = List.map (Filename.concat stdlib_dir) stdlib_file_list in
+    let buf = Buffer.create (256 * 1024) in
+    List.iter (fun path ->
+      try
+        let ic = open_in path in
+        let n = in_channel_length ic in
+        let bytes = Bytes.create n in
+        really_input ic bytes 0 n;
+        close_in ic;
+        Buffer.add_bytes buf bytes
+      with Sys_error _ -> ()
+    ) paths;
+    let hash = Digest.to_hex (Digest.string (Buffer.contents buf)) in
+    Some (stdlib_dir, hash, paths)
+
+(** Load all stdlib modules and return their declarations, to be
+    prepended to the user module before evaluation.
+    Uses a content-hash-keyed cache of parsed+desugared ASTs. *)
+let load_stdlib () =
+  match stdlib_source_hash () with
+  | None -> []
+  | Some (stdlib_dir, source_hash, _) ->
+    let home = (try Sys.getenv "HOME" with Not_found -> ".") in
+    let cache_dir = Filename.concat home ".cache/march" in
+    let short_hash = String.sub source_hash 0 16 in
+    let cache_path = Filename.concat cache_dir
+      ("stdlib_ast_" ^ short_hash ^ ".bin") in
+    (* Cache hit: unmarshal parsed ASTs *)
+    match (try
+      if Sys.file_exists cache_path then begin
+        let ic = open_in_bin cache_path in
+        let data : March_ast.Ast.decl list = Marshal.from_channel ic in
+        close_in ic;
+        Some data
+      end else None
+    with _ -> None) with
+    | Some decls -> decls
+    | None ->
+      (* Cache miss: parse all files, then cache *)
+      let decls = List.concat_map (fun name ->
+          load_stdlib_file (Filename.concat stdlib_dir name)
+        ) stdlib_file_list in
+      (try
+        (try Unix.mkdir cache_dir 0o755
+         with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+        let oc = open_out_bin cache_path in
+        Marshal.to_channel oc decls [];
+        close_out oc
+      with _ -> ());
+      decls
 
 (** Pre-compile the C runtime to a shared library.
     Cached at ~/.cache/march/libmarch_runtime.so.
