@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="night">
+<html lang="en" data-theme="march">
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
@@ -11,20 +11,42 @@
   <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
 
   <style>
-    /* ── March brand: override night theme primary to teal ─────────────── */
-    [data-theme="night"] {
-      --p:   186 90% 46%;
-      --pf:  186 90% 36%;
-      --pc:  220 30%  9%;
-      --s:   186 55% 28%;
-      --sf:  186 55% 20%;
-      --sc:  186 20% 90%;
+    /* ── March brand palette (DaisyUI v4 HSL variables) ───────────────── */
+    [data-theme="march"] {
+      color-scheme: dark;
+
+      --p:   193 60% 27%;   /* #1C5D6F  primary */
+      --pc:  172 78% 95%;   /* #E6FCF9  primary-content */
+      --s:   196 66% 17%;   /* #0F3A4A  secondary */
+      --sc:  171 71% 89%;   /* #CFF7F1  secondary-content */
+      --a:   173 67% 66%;   /* #6FE3D6  accent */
+      --ac:  191 72%  9%;   /* #062026  accent-content */
+      --n:   201 59% 10%;   /* #0B1F2A  neutral */
+      --nc:  196 37% 84%;   /* #C7DDE5  neutral-content */
+      --b1:  201 59% 10%;   /* #0B1F2A  base-100 */
+      --b2:  199 57% 14%;   /* #0F2A36  base-200 */
+      --b3:  197 58% 18%;   /* #133847  base-300 */
+      --bc:  194 61% 90%;   /* #D6EEF5  base-content */
+      --in:  198 93% 60%;   /* #3ABFF8  info */
+      --su:  158 64% 52%;   /* #36D399  success */
+      --wa:   43 97% 56%;   /* #FBBF24  warning */
+      --er:    0 91% 71%;   /* #F87272  error */
+
+      --rounded-box: 0.5rem;
+      --rounded-btn: 0.375rem;
+      --rounded-badge: 1rem;
+      --animation-btn: 0.15s;
+      --animation-input: 0.2s;
+      --btn-focus-scale: 0.97;
+      --border-btn: 1px;
+      --tab-border: 1px;
+      --tab-radius: 0.5rem;
     }
 
     /* ── Sidebar active link ───────────────────────────────────────────── */
     .menu li > a.active {
-      background: hsl(186 90% 46% / 0.15);
-      color: hsl(186 90% 62%);
+      background: hsl(173 67% 66% / 0.12);
+      color: #6FE3D6;
       font-weight: 600;
     }
 
@@ -32,8 +54,8 @@
     .prose h1, .prose h2, .prose h3, .prose h4 { scroll-margin-top: 4rem; }
     .prose table { display: block; overflow-x: auto; }
     .prose :not(pre) > code {
-      background: #2a2d3e;
-      color: #89b4fa;
+      background: #0F2A36;
+      color: #6FE3D6;
       padding: 1px 6px;
       border-radius: 4px;
       font-size: 0.85em;
@@ -41,33 +63,33 @@
     .prose :not(pre) > code::before,
     .prose :not(pre) > code::after { content: none; }
 
-    /* ── Rouge syntax highlighting (Catppuccin Mocha) ──────────────────── */
-    .highlight { background: #1e2030 !important; border-radius: 8px; overflow-x: auto; }
+    /* ── Rouge syntax highlighting (March palette) ─────────────────────── */
+    .highlight { background: #0B1F2A !important; border-radius: 8px; overflow-x: auto; border: 1px solid #133847; }
     .highlight pre { background: transparent; margin: 0; padding: 1rem 1.25rem; }
     .highlighter-rouge .highlight { margin: 1.25rem 0; }
 
     .highlight .c,  .highlight .c1, .highlight .cm,
-    .highlight .cp, .highlight .cs  { color: #6c7086; font-style: italic; } /* comment */
+    .highlight .cp, .highlight .cs  { color: #3D6070; font-style: italic; } /* comment */
     .highlight .k,  .highlight .kd, .highlight .kn,
-    .highlight .kp, .highlight .kr  { color: #cba6f7; }                    /* keyword */
-    .highlight .kt                  { color: #f5c2e7; }                    /* type */
+    .highlight .kp, .highlight .kr  { color: #6FE3D6; }                    /* keyword → accent */
+    .highlight .kt                  { color: #CFF7F1; }                    /* type */
     .highlight .s,  .highlight .sb, .highlight .sc,
     .highlight .sd, .highlight .s2, .highlight .sh,
     .highlight .si, .highlight .sx, .highlight .sr,
-    .highlight .s1, .highlight .ss  { color: #a6e3a1; }                    /* string */
+    .highlight .s1, .highlight .ss  { color: #36D399; }                    /* string → success */
     .highlight .m,  .highlight .mf, .highlight .mh,
-    .highlight .mi, .highlight .mo, .highlight .il { color: #fab387; }     /* number */
-    .highlight .o,  .highlight .ow  { color: #89dceb; }                    /* operator */
-    .highlight .nf, .highlight .fm  { color: #89b4fa; }                    /* function */
-    .highlight .nc, .highlight .nn  { color: #f5c2e7; }                    /* class/module */
-    .highlight .nb                  { color: #89dceb; }                    /* builtin */
-    .highlight .nt                  { color: #89b4fa; }                    /* tag */
-    .highlight .na                  { color: #a6e3a1; }                    /* attribute */
-    .highlight .err                 { color: #f38ba8; }                    /* error */
-    .highlight .n,  .highlight .nx  { color: #cdd6f4; }                    /* name */
-    .highlight .p                   { color: #cdd6f4; }                    /* punctuation */
-    .highlight .gd                  { color: #f38ba8; }                    /* deleted */
-    .highlight .gi                  { color: #a6e3a1; }                    /* inserted */
+    .highlight .mi, .highlight .mo, .highlight .il { color: #FBBF24; }     /* number → warning */
+    .highlight .o,  .highlight .ow  { color: #3ABFF8; }                    /* operator → info */
+    .highlight .nf, .highlight .fm  { color: #6FE3D6; }                    /* function → accent */
+    .highlight .nc, .highlight .nn  { color: #CFF7F1; }                    /* class/module */
+    .highlight .nb                  { color: #3ABFF8; }                    /* builtin → info */
+    .highlight .nt                  { color: #6FE3D6; }                    /* tag */
+    .highlight .na                  { color: #36D399; }                    /* attribute */
+    .highlight .err                 { color: #F87272; }                    /* error */
+    .highlight .n,  .highlight .nx  { color: #D6EEF5; }                    /* name → base-content */
+    .highlight .p                   { color: #C7DDE5; }                    /* punctuation */
+    .highlight .gd                  { color: #F87272; }                    /* deleted */
+    .highlight .gi                  { color: #36D399; }                    /* inserted */
   </style>
 </head>
 
