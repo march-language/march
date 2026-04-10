@@ -159,10 +159,38 @@ let ensure_session_init () =
 (* Parse helpers                                                       *)
 (* ------------------------------------------------------------------ *)
 
-(** Given [code] and a [Lexing.position], return a two-line string:
-      the source line containing the error
-      a caret (^) pointing at the column
-    If the line number is out of range, falls back to a bare coordinate. *)
+(** Return the last non-whitespace character before position [col] in [line],
+    or ' ' if none exists. *)
+let prev_nonws line col =
+  let i = ref (col - 1) in
+  while !i >= 0 && (line.[!i] = ' ' || line.[!i] = '\t') do decr i done;
+  if !i >= 0 then line.[!i] else ' '
+
+
+(** Produce a context-sensitive hint from the character at [col] and before. *)
+let parse_hint line col =
+  let len = String.length line in
+  if col >= len then None
+  else
+    let ch   = line.[col] in
+    let prev = prev_nonws line col in
+    match ch, prev with
+    | ',', '(' ->
+      Some "expected an expression here — looks like an extra `(` before the comma"
+    | ')', '(' ->
+      Some "empty parentheses — expected an expression between `(` and `)`"
+    | ',', _ ->
+      Some (Printf.sprintf "unexpected `,` — is there a missing expression or an extra `(` nearby?")
+    | ')', _ ->
+      Some "unexpected `)` — check for a mismatched or extra `(` earlier"
+    | '(', _ ->
+      Some "unexpected `(` here"
+    | '=', _ when prev <> '!' && prev <> '<' && prev <> '>' && prev <> '=' ->
+      Some "unexpected `=` — did you mean `let name = expr`?"
+    | _ -> None
+
+(** Given [code] and a [Lexing.position], return a string showing the
+    offending source line, a caret pointer, and a context-sensitive hint. *)
 let format_parse_error code (pos : Lexing.position) msg =
   let lines = String.split_on_char '\n' code in
   let line_no = pos.Lexing.pos_lnum in   (* 1-based *)
@@ -170,7 +198,11 @@ let format_parse_error code (pos : Lexing.position) msg =
   match List.nth_opt lines (line_no - 1) with
   | Some src_line ->
     let caret = String.make (max 0 col) ' ' ^ "^" in
-    Printf.sprintf "%s\n%s\n%s" msg src_line caret
+    let hint_part = match parse_hint src_line col with
+      | Some h -> "\nhint: " ^ h
+      | None   -> ""
+    in
+    Printf.sprintf "%s\n%s\n%s%s" msg src_line caret hint_part
   | None ->
     Printf.sprintf "%s (line %d col %d)" msg line_no col
 
