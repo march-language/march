@@ -1478,7 +1478,23 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
      Recursively processes DMod contents so that impls declared inside
      imported modules (which are wrapped in DMod by resolve_imports) are
      also registered. *)
-  let rec collect_iface_impls ~lower_bodies decls =
+  let rec collect_iface_impls ~lower_bodies ?(mod_prefix = "") decls =
+    (* Collect direct function/let names at this module level so that
+       rename_tir_vars can qualify references inside impl method bodies.
+       For example, inside `mod BigInt do impl Eq(BigInt) do fn eq(a,b) do
+       bigint_eq_impl(a,b) end end end`, the impl method body calls
+       `bigint_eq_impl` (unqualified), but Pass 2 emits the function as
+       `BigInt.bigint_eq_impl`.  Applying rename_tir_vars here fixes the
+       mismatch so mono can find the callee in fn_table. *)
+    let direct_fn_names =
+      if lower_bodies && mod_prefix <> "" then
+        List.filter_map (function
+          | Ast.DFn (def, _)     -> Some def.fn_name.txt
+          | Ast.DLet (_, b, _) ->
+            (match b.bind_pat with Ast.PatVar n -> Some n.txt | _ -> None)
+          | _ -> None) decls
+      else []
+    in
     List.iter (fun d ->
         match d with
         | Ast.DInterface (idef, _) ->
@@ -1511,6 +1527,13 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                 ignore mdef;
                 if lower_bodies then begin
                   let fn = lower_fn_def mdef in
+                  (* If this impl is inside a module, qualify any references to
+                     module-local functions (e.g. bigint_eq_impl → BigInt.bigint_eq_impl)
+                     so that mono can find them in fn_table (which uses the
+                     prefixed names from lower_stdlib_mod_decls). *)
+                  let fn = if mod_prefix <> "" && direct_fn_names <> [] then
+                    rename_tir_vars mod_prefix direct_fn_names fn
+                  else fn in
                   fns := { fn with fn_name = mangled } :: !fns
                 end;
                 let existing = match Hashtbl.find_opt !_iface_methods mname.txt with
@@ -1526,9 +1549,12 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                   ((type_name, mangled) :: existing2)
               end
             ) idef.impl_methods
-        | Ast.DMod (_, _, inner_decls, _) ->
-          (* Recurse so that impls inside imported DMod wrappers are found. *)
-          collect_iface_impls ~lower_bodies inner_decls
+        | Ast.DMod (sub_name, _, inner_decls, _) ->
+          (* Recurse, tracking the module prefix so that impl method bodies
+             that call module-private functions are renamed correctly. *)
+          collect_iface_impls ~lower_bodies
+            ~mod_prefix:(mod_prefix ^ sub_name.txt ^ ".")
+            inner_decls
         | _ -> ()
       ) decls
   in
