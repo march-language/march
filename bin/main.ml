@@ -163,13 +163,6 @@ let load_stdlib () =
       "islands.march";
       "env.march";
       "config.march";
-      "depot_form.march";
-      "depot_gate.march";
-      "depot_schema.march";
-      "depot_repo.march";
-      "depot_query.march";
-      "depot_migration.march";
-      "depot_test.march";
       "bastion.march";
       "csrf.march";
       "session.march";
