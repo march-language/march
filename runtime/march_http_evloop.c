@@ -253,10 +253,25 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
                                             &consumed);
         if (n <= 0) break;
 
+        /* Build Conn objects NOW — reqs[i] pointers reference c->rbuf at its
+         * current position.  We must call march_conn_from_parsed before the
+         * memmove below, which overwrites the buffer and invalidates those
+         * pointers.  march_conn_from_parsed copies all string data (via
+         * march_string_lit) so the resulting Conn is safe after the shift. */
+        void *pre_conns[EVLOOP_PIPELINE_BATCH];
+        int   pre_keep_alives[EVLOOP_PIPELINE_BATCH];
+        for (int i = 0; i < n; i++) {
+            pre_keep_alives[i] = march_detect_keep_alive_simd(&reqs[i]);
+            pre_conns[i]       = march_conn_from_parsed(&reqs[i],
+                                                         c->rbuf, c->rbuf_len,
+                                                         c->fd);
+        }
+
         /* Shift consumed bytes NOW — before any send or early return.
          * Critical: EAGAIN/partial paths return early below; if the shift
          * were at the bottom of the loop, those paths would leave consumed
-         * bytes in c->rbuf and re-parse the same requests next time. */
+         * bytes in c->rbuf and re-parse the same requests next time.
+         * Safe: pre_conns[] already copied all string data above. */
         if (consumed > 0 && consumed < c->rbuf_len) {
             memmove(c->rbuf, c->rbuf + consumed, c->rbuf_len - consumed);
             c->rbuf_len -= consumed;
@@ -275,10 +290,8 @@ static void handle_read(int evfd, conn_state_t *c, void *pipeline) {
         int batch_ok         = 1;
 
         for (int i = 0; i < n; i++) {
-            int   keep_alive  = march_detect_keep_alive_simd(&reqs[i]);
-            void *conn        = march_conn_from_parsed(&reqs[i],
-                                                        c->rbuf, c->rbuf_len,
-                                                        c->fd);
+            int   keep_alive  = pre_keep_alives[i];
+            void *conn        = pre_conns[i];
             void *result_conn = fn(pipeline, conn);
 
             if (!result_conn) {

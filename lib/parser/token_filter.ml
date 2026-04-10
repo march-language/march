@@ -21,11 +21,23 @@ type match_state = {
   mutable ms_in_arm_body : bool;  (* inside arm body (past first token after ARROW) *)
 }
 
+(* A token together with the lexbuf positions it was lexed at.
+   Saved so that when a token is re-queued after lookahead, the
+   parser sees the correct source location rather than the position
+   the lexbuf has advanced to. *)
+type tok_with_pos = {
+  tok     : Parser.token;
+  start_p : Lexing.position;
+  curr_p  : Lexing.position;
+}
+
 let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.token =
   let stack : context Stack.t = Stack.create () in
   let pending_match_depths : int Stack.t = Stack.create () in
   let paren_depth = ref 0 in
-  let buffer : Parser.token Queue.t = Queue.create () in
+  (* Buffer stores tokens with their original lexbuf positions so
+     that re-queued tokens restore the correct span information. *)
+  let buffer : tok_with_pos Queue.t = Queue.create () in
   (* Stack of match states, one per nested match level *)
   let match_states : match_state Stack.t = Stack.create () in
 
@@ -38,11 +50,26 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     else Some (Stack.top match_states)
   in
 
+  (* Read the next token, restoring lexbuf positions if the token
+     comes from the lookahead buffer. *)
   let raw lexbuf =
-    if not (Queue.is_empty buffer) then
-      Queue.pop buffer
-    else
+    if not (Queue.is_empty buffer) then begin
+      let { tok; start_p; curr_p } = Queue.pop buffer in
+      lexbuf.Lexing.lex_start_p <- start_p;
+      lexbuf.Lexing.lex_curr_p  <- curr_p;
+      tok
+    end else
       base_lexer lexbuf
+  in
+
+  (* Push a token back into the buffer, saving the current lexbuf
+     positions so they can be restored when the token is dequeued. *)
+  let push_buf tok lexbuf =
+    Queue.push {
+      tok;
+      start_p = lexbuf.Lexing.lex_start_p;
+      curr_p  = lexbuf.Lexing.lex_curr_p;
+    } buffer
   in
 
   (* Check if a token could start a match arm pattern *)
@@ -65,8 +92,13 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
      If ARROW -> new arm. If NL -> body continuation.
      Also bail on tokens that can't appear in patterns at depth=0. *)
   let lookahead_is_new_arm first_tok lexbuf =
-    let buffered_tokens = Queue.create () in
-    Queue.push first_tok buffered_tokens;
+    let buffered_tokens : tok_with_pos Queue.t = Queue.create () in
+    (* first_tok was just returned by raw lexbuf, so current positions are its *)
+    Queue.push {
+      tok     = first_tok;
+      start_p = lexbuf.Lexing.lex_start_p;
+      curr_p  = lexbuf.Lexing.lex_curr_p;
+    } buffered_tokens;
     let depth = ref 0 in
     let result = ref false in
     let done_ = ref false in
@@ -107,13 +139,17 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
     (* Process the first token *)
     process first_tok;
 
-    (* Continue reading if not done *)
+    (* Continue reading if not done — save positions for each new token *)
     while not !done_ do
       let tok = base_lexer lexbuf in
-      Queue.push tok buffered_tokens;
+      Queue.push {
+        tok;
+        start_p = lexbuf.Lexing.lex_start_p;
+        curr_p  = lexbuf.Lexing.lex_curr_p;
+      } buffered_tokens;
       process tok
     done;
-    (* Put all buffered tokens back *)
+    (* Put all buffered tokens back into the global buffer *)
     Queue.transfer buffered_tokens buffer;
     !result
   in
@@ -152,10 +188,10 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
          (* Protocol choose block — push Match so NL works as branch separator *)
          Stack.push Match stack;
          Stack.push { ms_suppress_nl = false; ms_in_arm_body = false } match_states;
-         Queue.push Parser.BY buffer;
+         push_buf Parser.BY lexbuf;
          tok
        | other ->
-         Queue.push other buffer;
+         push_buf other lexbuf;
          tok)
 
     | Parser.DO ->
@@ -219,7 +255,7 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
             dispatch after lexbuf
           | Parser.PIPE ->
             (* Explicit pipe arm separator — emit NL as arm boundary *)
-            Queue.push after buffer;
+            push_buf after lexbuf;
             ms.ms_in_arm_body <- false;
             Parser.NL
           | tok_after when is_pattern_start tok_after ->
@@ -236,7 +272,7 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
             end
           | other ->
             (* Not a pattern start — body continuation, suppress NL *)
-            Queue.push other buffer;
+            push_buf other lexbuf;
             next lexbuf)
         | _ ->
           (* Not in arm body (before first arm or no match state).
@@ -252,7 +288,7 @@ let make (base_lexer : Lexing.lexbuf -> Parser.token) : Lexing.lexbuf -> Parser.
           | Parser.END ->
             dispatch after lexbuf
           | other ->
-            Queue.push other buffer;
+            push_buf other lexbuf;
             Parser.NL)
       end else
         next lexbuf  (* outside match body — swallow *)

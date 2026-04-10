@@ -105,6 +105,16 @@ fn keys(table) do
   vault_keys(table)
 end
 
+doc "Return all key-value pairs in the table as a list of (String, a) tuples."
+fn all(table) do
+  let ks = keys(table)
+  List.filter_map(ks, fn k ->
+    match get(table, k) do
+    None -> None
+    Some(v) -> Some((k, v))
+    end)
+end
+
 doc """
 Insert or overwrite a key-value pair using a string namespace name.
 Auto-creates the named vault if it does not yet exist.

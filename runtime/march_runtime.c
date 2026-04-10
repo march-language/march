@@ -864,6 +864,52 @@ void *march_spawn(void *actor) {
     return actor;
 }
 
+/* ── Lightweight task spawn ──────────────────────────────────────────────── */
+
+/* Green-thread trampoline for task_spawn thunk closures.
+ * A March thunk closure has layout:
+ *   offset  0..7 : ref count (i64)
+ *   offset  8..11: tag (i32)
+ *   offset 12..15: padding
+ *   offset 16..23: apply fn ptr (fn(closure_ptr, i64) -> result_ptr)
+ *
+ * Called from the green-thread entry via march_sched_spawn. */
+static void march_thunk_trampoline(void *arg) {
+    void *clo = arg;
+    typedef void *(*apply_fn_t)(void *, int64_t);
+    apply_fn_t apply = *(apply_fn_t *)((char *)clo + 16);
+    apply(clo, (int64_t)0);
+    march_decrc(clo);   /* release the reference taken at spawn time */
+    march_sched_exit();
+}
+
+/* Spawn a thunk closure (fn () -> T) as an async green thread.
+ *
+ * Layout of the returned Task object (24 bytes):
+ *   offset  0..7 : ref count (i64)
+ *   offset  8..11: tag = 0 (i32)
+ *   offset 12..15: padding
+ *   offset 16..23: field 0 = march_proc* (green thread handle)
+ *
+ * The caller can pass this to task_await / kill. */
+void *march_task_spawn_thunk(void *clo_ptr) {
+    if (!g_sched_initialized) {
+        march_sched_init();
+        g_sched_initialized = 1;
+    }
+    march_incrc(clo_ptr);           /* keep closure alive while task runs */
+    march_ensure_sched_started();   /* start background scheduler if needed */
+    march_proc *p = march_sched_spawn(march_thunk_trampoline, clo_ptr);
+    /* Box the process pointer as a Task handle */
+    int64_t *task = (int64_t *)march_alloc(24);
+    if (task) {
+        task[0] = 0;    /* ref count */
+        ((int32_t *)task)[2] = 0;   /* tag = 0 at offset 8 */
+        task[2] = (int64_t)(uintptr_t)p;  /* field 0 at offset 16 */
+    }
+    return (void *)task;
+}
+
 /* Read an int64 state field by 0-based index from an actor struct.
  *
  * The March programmer passes index 0 for the first state field, 1 for the

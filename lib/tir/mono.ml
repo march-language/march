@@ -226,10 +226,40 @@ let rec rewrite_calls
                  Hashtbl.find_opt record_to_typename key
                | _ -> None
              in
-             (match type_name with
+             (* Fallback: if the concrete type could not be determined (type was
+                erased to TVar "_", or was coerced to a primitive like TString
+                as an opaque placeholder), AND there is exactly one registered
+                impl, resolve to that single impl.  This is sound when the
+                program has only one concrete implementation — the typical case
+                for single-backend libraries like Conduit with VaultStorage. *)
+             let type_name_or_single = match type_name with
+               | Some _ -> type_name
+               | None ->
+                 (match impls with
+                  | [(_, _)] -> Some "$single_impl$"   (* sentinel: use the only impl *)
+                  | _ -> None)
+             in
+             (match type_name_or_single with
               | None -> expr   (* Still cannot resolve — leave for linker *)
               | Some tname ->
-                (match List.assoc_opt tname impls with
+                (* Strip module prefixes progressively to handle qualified
+                   type names (e.g. "Foo.Bar.VaultStorage" → "VaultStorage")
+                   when the impl was registered under the bare type name. *)
+                let rec find_impl_by_type name =
+                  (* Sentinel from single-impl TVar fallback — use the only impl directly. *)
+                  if name = "$single_impl$" then
+                    (match impls with [(_,m)] -> Some m | _ -> None)
+                  else
+                  match List.assoc_opt name impls with
+                  | Some m -> Some m
+                  | None ->
+                    (match String.index_opt name '.' with
+                     | None -> None
+                     | Some i ->
+                       find_impl_by_type
+                         (String.sub name (i + 1) (String.length name - i - 1)))
+                in
+                (match find_impl_by_type tname with
                  | None -> expr   (* No impl for this concrete type *)
                  | Some mangled_name ->
                    (* Resolved!  Enqueue the impl so DCE keeps it alive. *)
@@ -284,7 +314,76 @@ let rec rewrite_calls
      | Tir.AVar v ->
        let orig_name = v.Tir.v_name in
        (match Hashtbl.find_opt fn_table orig_name with
-        | None -> expr  (* unknown / builtin *)
+        | None ->
+          (* Not a user function.  Try to resolve as an interface method call
+             (same logic as EApp above).  This handles the common case where
+             lower.ml/defun emits ECallPtr for cross-module interface dispatch
+             when the first argument's type is erased to TVar "_". *)
+          let rec find_iface_impls name =
+            match Hashtbl.find_opt iface_methods name with
+            | Some impls -> Some impls
+            | None ->
+              (match String.index_opt name '.' with
+               | None -> None
+               | Some i ->
+                 find_iface_impls (String.sub name (i + 1) (String.length name - i - 1)))
+          in
+          (match find_iface_impls orig_name with
+           | None -> expr   (* Truly external/builtin — unchanged *)
+           | Some impls ->
+             (match args with
+              | [] -> expr
+              | first_arg :: _ ->
+                let arg_ty = match first_arg with
+                  | Tir.AVar av -> av.Tir.v_ty
+                  | _ -> Tir.TUnit
+                in
+                let type_name = match arg_ty with
+                  | Tir.TCon (n, _) -> Some n
+                  | Tir.TRecord fs ->
+                    let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
+                    let key = mangle_ty (Tir.TRecord sorted) in
+                    Hashtbl.find_opt record_to_typename key
+                  | _ -> None
+                in
+                (* Single-impl fallback for type-erased args (TVar or opaque
+                   primitive placeholder). *)
+                let type_name_or_single = match type_name with
+                  | Some _ -> type_name
+                  | None ->
+                    (match impls with
+                     | [(_, _)] -> Some "$single_impl$"
+                     | _ -> None)
+                in
+                (match type_name_or_single with
+                 | None -> expr
+                 | Some tname ->
+                   let rec find_impl_by_type name =
+                     if name = "$single_impl$" then
+                       (match impls with [(_,m)] -> Some m | _ -> None)
+                     else
+                     match List.assoc_opt name impls with
+                     | Some m -> Some m
+                     | None ->
+                       (match String.index_opt name '.' with
+                        | None -> None
+                        | Some i ->
+                          find_impl_by_type
+                            (String.sub name (i + 1) (String.length name - i - 1)))
+                   in
+                   (match find_impl_by_type tname with
+                    | None -> expr
+                    | Some mangled_name ->
+                      (match Hashtbl.find_opt fn_table mangled_name with
+                       | Some orig_impl when not (Hashtbl.mem done_set mangled_name) ->
+                         Queue.add (mangled_name, orig_impl, []) worklist
+                       | _ -> ());
+                      (* Rewrite ECallPtr to use the resolved impl name.
+                         Switch to EApp so that the call goes through the direct
+                         call path in llvm_emit rather than the closure-dispatch
+                         path, which would try to load a fn_ptr from a struct. *)
+                      let f_var' = { v with Tir.v_name = mangled_name } in
+                      Tir.EApp (f_var', args)))))
         | Some orig_fn ->
           (* If callee is polymorphic, try to build a substitution from args *)
           let lit_ty = function

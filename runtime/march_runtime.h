@@ -105,6 +105,9 @@ int64_t march_actor_get_int(void *actor, int64_t index);
 void   *march_send(void *actor, void *msg);
 /* Process all actors in the run queue (called automatically by march_send). */
 void    march_run_scheduler(void);
+/* Spawn a March thunk closure (fn () -> T) as an async green thread.
+ * Returns a boxed Task handle. */
+void   *march_task_spawn_thunk(void *clo_ptr);
 
 /* Float builtins. */
 double  march_float_abs(double f);

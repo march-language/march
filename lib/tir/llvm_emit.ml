@@ -35,6 +35,10 @@ type ctx = {
   (* Maps fn_name → fn_ret_ty for functions registered in top_fns.
      Used in EApp to resolve concrete return types when call-site TVar is "_". *)
   top_fn_ret_ty : (string, Tir.ty) Hashtbl.t;
+  (* Maps fn_name → number of parameters for top-level functions.
+     Used when emitting a top-level function as a first-class value (closure
+     trampoline) but the AVar's v_ty is TVar _ rather than TFn. *)
+  top_fn_nparams : (string, int) Hashtbl.t;
   (* Set of zero-argument top-level functions (module-level `let` constants
      compiled as zero-arg functions).  When emit_atom encounters an AVar
      referencing one of these, it calls the function to obtain the value
@@ -62,6 +66,10 @@ type ctx = {
   extra_fns : Buffer.t;
   (* User-defined extern function name mapping: march_name → c_name *)
   extern_map : (string, string) Hashtbl.t;
+  (* Tracks forward declarations emitted for unknown functions (interface dispatch
+     calls that are not resolved at compile time due to type erasure). Maps
+     function LLVM name → declare string to avoid duplicate declarations. *)
+  unknown_decls : (string, unit) Hashtbl.t;
   (* Unqualified suffix → qualified TIR name for cross-module function refs
      that lower.ml emits without the module prefix (e.g. "base64_encode" →
      "Crypto.base64_encode").  Populated during emit_module init. *)
@@ -133,6 +141,7 @@ let make_ctx ?(fast_math=false) () = {
   ctor_info = Hashtbl.create 64;
   top_fns   = Hashtbl.create 64;
   top_fn_ret_ty = Hashtbl.create 64;
+  top_fn_nparams = Hashtbl.create 64;
   zero_arg_fns  = Hashtbl.create 16;
   field_map = Hashtbl.create 16;
   ret_ty   = Tir.TUnit;
@@ -144,6 +153,7 @@ let make_ctx ?(fast_math=false) () = {
   emitted_wraps = Hashtbl.create 8;
   extra_fns = Buffer.create 1024;
   extern_map = Hashtbl.create 8;
+  unknown_decls = Hashtbl.create 8;
   unqualified_fns = Hashtbl.create 32;
   var_llvm_ty = Hashtbl.create 32;
   tco_fn_name    = None;
@@ -951,8 +961,6 @@ let alloca_name ctx (base : string) : string =
       base ^ "_" ^ string_of_int n
   in
   Hashtbl.replace ctx.var_slot base slot;
-  (if String.length base >= 11 && String.sub base 0 11 = "Conduit.Sto" then
-    Printf.eprintf "[DEBUG alloca_name] base=%s slot=%s\n%!" base slot);
   slot
 
 (* ── Atom emission ───────────────────────────────────────────────────── *)
@@ -1279,14 +1287,31 @@ let resolve_ctor_fields ctx scrut_tir_ty ctor_name n_args =
   | _ ->
     (ctor_entry ctx ctor_name n_args).ce_fields
 
-(** Look up the sorted field list for a record type. *)
+(** Look up the sorted field list for a record type.
+    For TCon types, tries the name as-is then progressively strips leading
+    module-path segments ("Conduit.Config" → "Config") so that qualified type
+    names produced by the typechecker resolve against the bare-named entries
+    stored in field_map by the lowering pass.
+    Fields are returned in alphabetical order to match the record construction
+    order used by lower.ml (which sorts fields at allocation sites). *)
 let get_record_fields ctx (ty : Tir.ty) : (string * Tir.ty) list =
   match ty with
-  | Tir.TRecord fields -> fields   (* already sorted by name *)
+  | Tir.TRecord fields -> fields   (* already sorted alphabetically at construction *)
   | Tir.TCon (name, _) ->
-    (match Hashtbl.find_opt ctx.field_map name with
-     | Some fields -> fields
-     | None -> [])
+    (* Field definitions are stored under the qualified type name (e.g.
+       "Conduit.Config").  Fall back to progressively stripping module
+       prefixes for any types that were registered under a bare name. *)
+    let rec find n =
+      match Hashtbl.find_opt ctx.field_map n with
+      | Some fields ->
+        (* Sort alphabetically to match the construction order used in lower.ml *)
+        List.sort (fun (a, _) (b, _) -> String.compare a b) fields
+      | None ->
+        (match String.index_opt n '.' with
+         | None -> []
+         | Some i -> find (String.sub n (i + 1) (String.length n - i - 1)))
+    in
+    find name
   | _ -> []
 
 (** Find the index and type of [field_name] in the record described by [ty]. *)
@@ -1475,27 +1500,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      with dummy arg 0, boxes result into a Task heap object.
      task_await_unwrap unboxes field 0 from the Task. *)
 
-  (* task_spawn(thunk_closure) → call thunk(0), box result *)
+  (* task_spawn(thunk_closure) → spawn as async green thread via runtime *)
   | Tir.EApp (f, [clo_atom]) when f.Tir.v_name = "task_spawn" ->
     let (_, clo_ptr) = emit_atom ctx clo_atom in
-    (* Load apply fn from closure field 0 (offset 16 from header) *)
-    let fn_ptr = emit_load_field ctx clo_ptr 0 "ptr" in
-    (* Determine result type from thunk signature Int -> a *)
-    let ret_ty = (match clo_atom with
-      | Tir.AVar v ->
-        (match v.Tir.v_ty with
-         | Tir.TFn (_, ret) -> llvm_ty ret
-         | _ -> "ptr")
-      | _ -> "ptr")
-    in
-    (* Call apply(closure, 0) — defun convention: closure as 1st arg *)
     let result = fresh ctx "tsres" in
-    emit ctx (Printf.sprintf "%s = call %s %s(ptr %s, i64 0)"
-                result ret_ty fn_ptr clo_ptr);
-    (* Box result into Task heap object *)
-    let task_ptr = emit_heap_alloc ctx 0 1 in
-    emit_store_field ctx task_ptr 0 ret_ty result;
-    ("ptr", task_ptr)
+    emit ctx (Printf.sprintf "%s = call ptr @march_task_spawn_thunk(ptr %s)"
+                result clo_ptr);
+    ("ptr", result)
 
   (* task_await_unwrap(task_ptr) → unbox field 0 *)
   | Tir.EApp (f, [a]) when f.Tir.v_name = "task_await_unwrap" ->
@@ -1529,23 +1540,13 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EApp (f, []) when f.Tir.v_name = "task_yield" ->
     ("i64", "0")
 
-  (* task_spawn_steal(pool, thunk_closure) → call thunk(0), box result *)
+  (* task_spawn_steal(pool, thunk_closure) → spawn as async green thread *)
   | Tir.EApp (f, [_pool; clo_atom]) when f.Tir.v_name = "task_spawn_steal" ->
     let (_, clo_ptr) = emit_atom ctx clo_atom in
-    let fn_ptr = emit_load_field ctx clo_ptr 0 "ptr" in
-    let ret_ty = (match clo_atom with
-      | Tir.AVar v ->
-        (match v.Tir.v_ty with
-         | Tir.TFn (_, ret) -> llvm_ty ret
-         | _ -> "ptr")
-      | _ -> "ptr")
-    in
     let result = fresh ctx "tsres" in
-    emit ctx (Printf.sprintf "%s = call %s %s(ptr %s, i64 0)"
-                result ret_ty fn_ptr clo_ptr);
-    let task_ptr = emit_heap_alloc ctx 0 1 in
-    emit_store_field ctx task_ptr 0 ret_ty result;
-    ("ptr", task_ptr)
+    emit ctx (Printf.sprintf "%s = call ptr @march_task_spawn_thunk(ptr %s)"
+                result clo_ptr);
+    ("ptr", result)
 
   (* task_reductions() → 0 in Phase 1 *)
   | Tir.EApp (f, []) when f.Tir.v_name = "task_reductions" ->
@@ -1735,10 +1736,10 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
 
   (* ── General function call ─────────────────────────────────────────── *)
   | Tir.EApp (f, args) ->
-    let arg_strs = List.map (fun a ->
-        let (ty, v) = emit_atom ctx a in ty ^ " " ^ v
-      ) args in
-    let args_str = String.concat ", " arg_strs in
+    (* Emit each arg once, collecting both type and value strings. *)
+    let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
+    let arg_strs  = List.map (fun (ty, v) -> ty ^ " " ^ v) arg_pairs in
+    let args_str  = String.concat ", " arg_strs in
     (* Resolve unqualified cross-module references: lower.ml may emit a
        function reference without its module prefix (e.g. "base64_encode"
        for "Crypto.base64_encode").  Look up the qualified name first. *)
@@ -1761,6 +1762,33 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          | Some t -> t)
     in
     let ret_ty = llvm_ret_ty ret_tir in
+    (* If the function is not known (not in top_fns, not a builtin, not an extern),
+       emit a forward declaration into the preamble so LLVM does not reject the IR
+       with "use of undefined value".  This covers interface dispatch calls that were
+       not resolved at compile time due to type erasure (e.g. Conduit.Storage.X when
+       the storage value has type TVar "_").
+       NOTE: skip if fname starts with "march_" — those are always pre-declared
+       in the hardcoded preamble string (emit_preamble). *)
+    let is_runtime_builtin =
+      String.length fname >= 6 && String.sub fname 0 6 = "march_"
+    in
+    let is_known_fn =
+      is_runtime_builtin
+      || Hashtbl.mem ctx.top_fns resolved_name
+      || Hashtbl.mem ctx.extern_map resolved_name
+      || builtin_ret_ty f.Tir.v_name <> None
+      || (match f.Tir.v_name with
+          | "panic" | "panic_" | "todo_" | "unreachable_" | "println"
+          | "print" | "print_stderr" | "io_read_line" | "read_line" -> true
+          | _ -> false)
+    in
+    if not is_known_fn && not (Hashtbl.mem ctx.unknown_decls fname) then begin
+      Hashtbl.replace ctx.unknown_decls fname ();
+      let param_strs = List.mapi (fun i (ty, _) ->
+          Printf.sprintf "%s %%arg%d" ty i) arg_pairs in
+      Buffer.add_string ctx.preamble
+        (Printf.sprintf "declare %s @%s(%s)\n" ret_ty fname (String.concat ", " param_strs))
+    end;
     if ret_ty = "void" then begin
       emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
       ("i64", "0")
@@ -1847,12 +1875,9 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      parameters) always have a var_slot entry from alloca_name/emit_fn. *)
   | Tir.ECallPtr (Tir.AVar f, args)
     when not (Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name)) ->
-    (if String.length f.Tir.v_name >= 11 && String.sub f.Tir.v_name 0 11 = "Conduit.Sto" then
-      Printf.eprintf "[DEBUG ECallPtr-direct] name=%s\n%!" f.Tir.v_name);
-    let arg_strs = List.map (fun a ->
-        let (ty, v) = emit_atom ctx a in ty ^ " " ^ v
-      ) args in
-    let args_str = String.concat ", " arg_strs in
+    let arg_pairs = List.map (fun a -> emit_atom ctx a) args in
+    let arg_strs  = List.map (fun (ty, v) -> ty ^ " " ^ v) arg_pairs in
+    let args_str  = String.concat ", " arg_strs in
     let resolved_name = match Hashtbl.find_opt ctx.unqualified_fns f.Tir.v_name with
       | Some q -> q
       | None -> f.Tir.v_name
@@ -1869,6 +1894,33 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
          | Some t -> t)
     in
     let ret_ty = llvm_ret_ty ret_tir in
+    (* Emit a forward declare if the function is not known (not in top_fns,
+       not a builtin, not an extern).  This covers interface-dispatch calls
+       where the storage value has a type-erased type (TVar "_") and march
+       did not monomorphize the call — e.g. @Conduit.Storage.checkpoint_load_all
+       appears as a call but has no define/declare in the generated IR.
+       NOTE: skip if fname starts with "march_" — those are always pre-declared
+       in the hardcoded preamble string (emit_preamble). *)
+    let is_runtime_builtin =
+      String.length fname >= 6 && String.sub fname 0 6 = "march_"
+    in
+    let is_known_fn =
+      is_runtime_builtin
+      || Hashtbl.mem ctx.top_fns resolved_name
+      || Hashtbl.mem ctx.extern_map resolved_name
+      || builtin_ret_ty f.Tir.v_name <> None
+      || (match f.Tir.v_name with
+          | "panic" | "panic_" | "todo_" | "unreachable_" | "println"
+          | "print" | "print_stderr" | "io_read_line" | "read_line" -> true
+          | _ -> false)
+    in
+    if not is_known_fn && not (Hashtbl.mem ctx.unknown_decls fname) then begin
+      Hashtbl.replace ctx.unknown_decls fname ();
+      let param_strs = List.mapi (fun i (ty, _) ->
+          Printf.sprintf "%s %%arg%d" ty i) arg_pairs in
+      Buffer.add_string ctx.preamble
+        (Printf.sprintf "declare %s @%s(%s)\n" ret_ty fname (String.concat ", " param_strs))
+    end;
     if ret_ty = "void" then begin
       emit ctx (Printf.sprintf "call void @%s(%s)" fname args_str);
       ("i64", "0")
@@ -1898,11 +1950,6 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
      Field 0 of the closure is the apply fn ptr.
      Convention: apply fn takes (ptr $clo, original_params…). *)
   | Tir.ECallPtr (fn_atom, args) ->
-    (match fn_atom with
-     | Tir.AVar v when String.length v.Tir.v_name >= 11 && String.sub v.Tir.v_name 0 11 = "Conduit.Sto" ->
-       let in_vs = Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name) in
-       Printf.eprintf "[DEBUG ECallPtr-clo] name=%s in_var_slot=%b\n%!" v.Tir.v_name in_vs
-     | _ -> ());
     let (_, clo_ptr) = emit_atom ctx fn_atom in
     let fn_ptr = emit_load_field ctx clo_ptr 0 "ptr" in
     let nargs = List.length args in
@@ -3132,6 +3179,7 @@ declare i64  @march_actor_get_int(ptr %actor, i64 %index)
 declare ptr  @march_actor_call(ptr %actor, ptr %msg, i64 %timeout_ms)
 declare void @march_actor_reply(ptr %ref, ptr %result)
 declare void @march_run_scheduler()
+declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
 @march_tls_reductions = external thread_local global i64
 declare void @march_yield_from_compiled()
 ; TCP/network builtins
@@ -3239,6 +3287,7 @@ declare ptr  @march_value_to_string(ptr %v)
 @march_tls_reductions = external global i64
 declare void @march_yield_from_compiled()
 declare void @march_run_scheduler()
+declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
 |}
 
 let emit_main_wrapper (buf : Buffer.t) =
@@ -3257,11 +3306,13 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
   List.iter (fun (ed : Tir.extern_decl) ->
       Hashtbl.replace ctx.extern_map ed.ed_march_name ed.ed_c_name;
       Hashtbl.replace ctx.top_fns ed.ed_march_name true;
-      Hashtbl.replace ctx.top_fn_ret_ty ed.ed_march_name ed.ed_ret
+      Hashtbl.replace ctx.top_fn_ret_ty ed.ed_march_name ed.ed_ret;
+      Hashtbl.replace ctx.top_fn_nparams ed.ed_march_name (List.length ed.ed_params)
     ) m.Tir.tm_externs;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
       Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+      Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
       if fn.Tir.fn_params = [] then
         Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true;
       (* Populate unqualified_fns: maps the unqualified suffix (e.g.
@@ -3594,11 +3645,13 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
       Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+      Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
       if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) fns;
   (* Register pre-compiled extern functions so EApp generates direct calls *)
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
       Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+      Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
       if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) extern_fns;
   List.iter (emit_fn ctx) fns;
   let ret_llty = llvm_ty ret_ty in
@@ -3645,10 +3698,12 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
       Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+      Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
       if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) fns;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
       Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+      Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
       if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) extern_fns;
   List.iter (emit_fn ctx) fns;
   let llty = llvm_ty val_ty in
@@ -3682,10 +3737,12 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
   Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+  Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
   if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true;
   List.iter (fun f ->
       Hashtbl.replace ctx.top_fns f.Tir.fn_name true;
       Hashtbl.replace ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty;
+      Hashtbl.replace ctx.top_fn_nparams f.Tir.fn_name (List.length f.Tir.fn_params);
       if f.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns f.Tir.fn_name true) extern_fns;
   emit_fn ctx fn;
   let init_name = Printf.sprintf "repl_%d_init" n in
@@ -3714,10 +3771,12 @@ let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
   Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+  Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
   if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true;
   List.iter (fun f ->
       Hashtbl.replace ctx.top_fns f.Tir.fn_name true;
       Hashtbl.replace ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty;
+      Hashtbl.replace ctx.top_fn_nparams f.Tir.fn_name (List.length f.Tir.fn_params);
       if f.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns f.Tir.fn_name true) extern_fns;
   emit_fn ctx fn;
   (* Build a thin closure wrapper: @<fn>$clo_wrap(ptr %_clo, ptr %a0, ...) *)
@@ -3780,6 +3839,7 @@ let emit_fns_fragment
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
       Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
+      Hashtbl.replace ctx.top_fn_nparams fn.Tir.fn_name (List.length fn.Tir.fn_params);
       if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) fns;
   List.iter (emit_fn ctx) fns;
   let out = Buffer.create 8192 in

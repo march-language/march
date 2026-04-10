@@ -114,11 +114,11 @@ let alpha_rename (params : Tir.var list) (body : Tir.expr)
   (new_params, subst_expr body)
 
 (** Substitute parameters for call arguments, wrapped in ANF lets. *)
-let subst_args params args body =
+let subst_args ?(fn_name="?") params args body =
   if List.length params <> List.length args then
     failwith (Printf.sprintf
-      "inline: arity mismatch: %d params vs %d args"
-      (List.length params) (List.length args));
+      "inline: arity mismatch in '%s': %d params vs %d args"
+      fn_name (List.length params) (List.length args));
   List.fold_right2 (fun param arg acc ->
     Tir.ELet (param, Tir.EAtom arg, acc)
   ) params args body
@@ -128,12 +128,16 @@ let inline_expr ~changed (fn_env : (string, Tir.fn_def) Hashtbl.t)
   let rec go = function
     | Tir.EApp (f, args) ->
       (match Hashtbl.find_opt fn_env f.Tir.v_name with
-       | Some fd ->
+       | Some fd when List.length fd.Tir.fn_params = List.length args ->
          let (new_params, new_body) = alpha_rename fd.Tir.fn_params fd.Tir.fn_body in
-         let inlined = subst_args new_params args new_body in
+         if List.length new_params <> List.length args then
+           failwith (Printf.sprintf
+             "inline: alpha_rename changed arity for '%s': %d params -> %d new_params vs %d args"
+             fd.Tir.fn_name (List.length fd.Tir.fn_params) (List.length new_params) (List.length args));
+         let inlined = subst_args ~fn_name:fd.Tir.fn_name new_params args new_body in
          changed := true;
          inlined
-       | None -> Tir.EApp (f, args))
+       | _ -> Tir.EApp (f, args))
     | Tir.ELet (v, rhs, body) -> Tir.ELet (v, go rhs, go body)
     | Tir.ELetRec (fns, body) ->
       Tir.ELetRec (List.map (fun fd ->

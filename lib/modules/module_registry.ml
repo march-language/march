@@ -9,6 +9,7 @@ type export_kind =
   | ExType of int
   | ExCtor of string * int
   | ExValue
+  | ExInterface of interface_def
 
 type export_entry = {
   ex_name : string;
@@ -118,6 +119,10 @@ let extract_exports (mod_name : string) (decls : decl list) : module_exports =
         | _ -> []
       in
       type_entry :: ctor_entries
+    | DInterface (idef, _) ->
+      [{ ex_name = idef.iface_name.txt;
+         ex_kind = ExInterface idef;
+         ex_public = true }]
     | _ -> []
   ) decls in
   { me_name = mod_name; me_entries = entries }

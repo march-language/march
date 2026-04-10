@@ -165,6 +165,20 @@ fn map(xs : List(a), f : a -> b) : List(b) do
   go(xs, Nil)
 end
 
+doc "Applies `f` to each element for side effects. Returns ()."
+fn each(xs : List(a), f : a -> b) : () do
+  fn go(lst : List(a)) : () do
+    match lst do
+    Nil        -> ()
+    Cons(h, t) -> do
+      let _ = f(h)
+      go(t)
+    end
+    end
+  end
+  go(xs)
+end
+
 doc "Applies `f` to each element and concatenates the results."
 fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
   fn go(lst : List(a), acc : List(b)) : List(b) do

@@ -8,6 +8,7 @@ type export_kind =
   | ExType of int              (** Type constructor with arity *)
   | ExCtor of string * int     (** Data constructor: parent type name, arity *)
   | ExValue                    (** Top-level let binding *)
+  | ExInterface of March_ast.Ast.interface_def  (** Interface definition (for cross-module method resolution) *)
 
 (** A single exported member of a module. *)
 type export_entry = {

@@ -38,6 +38,9 @@ mod String do
   """
   fn slice_bytes(s, start, len) do string_slice(s, start, len) end
 
+  doc "Alias for slice_bytes: extract len bytes starting at start."
+  fn slice(s, start, len) do string_slice(s, start, len) end
+
   doc """
   Return `true` if `substring` appears anywhere in `s`.
 

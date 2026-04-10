@@ -455,8 +455,15 @@ let suggest_module_name (name : string) : string option =
      with _ -> ());
     !best
 
+(** Forward ref filled after [surface_ty] and [generalize] are defined.
+    Injects interface method bindings for cross-module [ExInterface] exports. *)
+let inject_iface_exports_ref
+  : (string -> March_modules.Module_registry.module_exports -> env -> env) ref =
+  ref (fun _mod_name _exports env -> env)
+
 (** Load a module's exports into an env, returning the updated env.
-    Injects "Mod.name" bindings for functions/values, types, and constructors. *)
+    Injects "Mod.name" bindings for functions/values, types, and constructors.
+    Interface method bindings are handled separately via inject_iface_exports_ref. *)
 let load_module_into_env (mod_name : string) (exports : March_modules.Module_registry.module_exports) (env : env) : env =
   List.fold_left (fun env entry ->
     let open March_modules.Module_registry in
@@ -486,6 +493,7 @@ let load_module_into_env (mod_name : string) (exports : March_modules.Module_reg
         } in
         { env with ctors = add_ctor qname ci env.ctors }
       end
+    | ExInterface _ -> env  (* handled by inject_iface_exports_ref after surface_ty is available *)
   ) env exports.me_entries
 
 (** Try to resolve a qualified variable by loading its module.
@@ -1741,6 +1749,38 @@ let rec surface_ty env ~(tvars : (string * ty) list ref) (s : Ast.ty) : ty =
         | Some sty ->
           TChan (ref sty)))
 
+(* Now that surface_ty and generalize are defined, wire up the forward ref so
+   resolve_qualified_var can inject interface method bindings cross-module. *)
+let () = inject_iface_exports_ref := (fun mod_name exports env ->
+  let open March_modules.Module_registry in
+  List.fold_left (fun env entry ->
+    match entry.ex_kind with
+    | ExInterface idef ->
+      List.fold_left (fun env (m : Ast.method_decl) ->
+        let qname = mod_name ^ "." ^ idef.iface_name.txt ^ "." ^ m.md_name.txt in
+        if StrMap.mem qname env.vars then env
+        else begin
+          (* Use level 1 for the interface type parameter so generalize 0 quantifies it. *)
+          let a = fresh_var 1 in
+          let tvars = ref [(idef.iface_param.txt, a)] in
+          let ty = surface_ty env ~tvars m.md_ty in
+          let a_id = match a with
+            | TVar r -> (match !r with Unbound (id, _) -> id | _ -> 0)
+            | _ -> 0
+          in
+          let base_sch = generalize 0 ty in
+          let sch = match base_sch with
+            | Poly (ids, cs, t) ->
+              Poly (ids, CInterface (idef.iface_name.txt, a) :: cs, t)
+            | Mono t ->
+              Poly ([a_id], [CInterface (idef.iface_name.txt, a)], t)
+          in
+          { env with vars = StrMap.add qname sch env.vars }
+        end
+      ) env idef.iface_methods
+    | _ -> env
+  ) env exports.me_entries)
+
 (** Instantiate a constructor's type at the current level.
     Creates fresh unification variables for each type parameter of the
     parent type, then converts the constructor's argument surface-types
@@ -1908,6 +1948,9 @@ let rec infer_pattern env (pat : Ast.pattern)
 
   | Ast.PatVar name ->
     let t = fresh_var env.level in
+    (* Record in type_map so lower.ml can look up the resolved type via ty_of_span.
+       Unification happens after infer_pattern returns; repr t follows the link. *)
+    Hashtbl.replace env.type_map name.span t;
     [(name.txt, Mono t)], t
 
   | Ast.PatLit (lit, _) ->
@@ -1997,6 +2040,7 @@ let rec infer_pattern env (pat : Ast.pattern)
 
   | Ast.PatAs (inner, name, _) ->
     let bindings, t = infer_pattern env inner in
+    Hashtbl.replace env.type_map name.span t;
     (name.txt, Mono t) :: bindings, t
 
 and ty_of_lit = function
@@ -2423,18 +2467,34 @@ let rec infer_expr env (e : Ast.expr) : ty =
          match resolve_qualified_var name.txt env with
          | _, Some sch -> instantiate env.level env sch
          | _ ->
-           let msg =
-             if String.contains name.txt '.' then
-               qualified_error_msg name.txt
-             else begin
-               let base = Printf.sprintf "I cannot find `%s`." name.txt in
-               match suggest_var_in_scope name.txt env with
-               | Some s -> base ^ Printf.sprintf " Did you mean `%s`?" s
-               | None   -> base
-             end
+           (* Final fallback: for multi-component names like "Conduit.Storage.workflow_load",
+              interface methods are registered without the outer module prefix
+              (e.g. as "Storage.workflow_load"). Try progressively stripping
+              leading dot-separated components. *)
+           let rec try_suffix n =
+             match String.index_opt n '.' with
+             | None -> None
+             | Some i ->
+               let rest = String.sub n (i + 1) (String.length n - i - 1) in
+               (match lookup_var rest env with
+                | Some sch -> Some sch
+                | None -> try_suffix rest)
            in
-           Err.error env.errors ~span:name.span msg;
-           TError)
+           (match try_suffix name.txt with
+            | Some sch -> instantiate env.level env sch
+            | None ->
+              let msg =
+                if String.contains name.txt '.' then
+                  qualified_error_msg name.txt
+                else begin
+                  let base = Printf.sprintf "I cannot find `%s`." name.txt in
+                  match suggest_var_in_scope name.txt env with
+                  | Some s -> base ^ Printf.sprintf " Did you mean `%s`?" s
+                  | None   -> base
+                end
+              in
+              Err.error env.errors ~span:name.span msg;
+              TError))
 
     (* ── Type annotations ─────────────────────────────────────────── *)
     | Ast.EAnnot (e, ann, sp) ->
@@ -3031,7 +3091,23 @@ let rec infer_expr env (e : Ast.expr) : ty =
           let qualified = prefix ^ "." ^ name.txt in
           (match lookup_var qualified env with
            | Some sch -> Some (instantiate env.level env sch)
-           | None     -> None)
+           | None ->
+             (* For multi-component paths like Conduit.Storage.workflow_load,
+                the interface method may be registered as just "Storage.workflow_load"
+                (interface-qualified) without the outer module prefix.
+                Try progressively stripping leading path components. *)
+             let member = name.txt in
+             let rec try_suffix p =
+               match String.index_opt p '.' with
+               | None -> None
+               | Some i ->
+                 let rest = String.sub p (i + 1) (String.length p - i - 1) in
+                 let candidate = rest ^ "." ^ member in
+                 (match lookup_var candidate env with
+                  | Some sch -> Some (instantiate env.level env sch)
+                  | None -> try_suffix rest)
+             in
+             try_suffix prefix)
         | None -> None
       in
       (match mod_access with
@@ -4275,7 +4351,7 @@ let rec check_decl env (d : Ast.decl) : env =
     let pre_env = List.fold_left (fun e d ->
         match d with
         | Ast.DFn (def, _) ->
-          bind_var def.fn_name.txt (Mono (fresh_var 0)) e
+          bind_var def.fn_name.txt (Mono (fresh_var (env.level + 1))) e
         | _ -> e
       ) env decls in
     let inner_env = List.fold_left check_decl pre_env decls in
@@ -4293,6 +4369,10 @@ let rec check_decl env (d : Ast.decl) : env =
         | Ast.DActor _ -> None
         | Ast.DMod (n, Ast.Public, _, _) -> Some n.txt
         | Ast.DMod _ -> None
+        (* Interface declarations are always public — export interface name so that
+           its methods (bound as "IfaceName.method" in inner_env) get exported
+           as "ModName.IfaceName.method" into the outer scope. *)
+        | Ast.DInterface (idef, _) -> Some idef.iface_name.txt
         | _ -> None
       ) decls
     in
@@ -4631,9 +4711,12 @@ let rec check_decl env (d : Ast.decl) : env =
       List.iter (fun ((_mname : Ast.name), (def : Ast.fn_def)) ->
           ignore (check_fn env def _sp)
         ) idef.impl_methods;
+      discharge_constraints env_with_impl _sp;
       env_with_impl
-    end else
+    end else begin
+      discharge_constraints env_with_impl _sp;
       env_with_impl
+    end
 
   | Ast.DExtern (edef, _sp) ->
     (* Register each foreign function as a monomorphic binding. *)
@@ -5232,7 +5315,7 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
         | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
           let qname = prefix ^ "." ^ def.fn_name.txt in
           if StrMap.mem qname e.vars then e
-          else bind_var qname (Mono (fresh_var 0)) e
+          else bind_var qname (Mono (fresh_var 1)) e
         | Ast.DType (vis, name, params, typedef, _) when vis = Ast.Public ->
           let qname = prefix ^ "." ^ name.txt in
           let e1 = if StrMap.mem qname e.types then e
@@ -5248,9 +5331,46 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
                ) e1 variants
            | _ -> e1)
         | Ast.DInterface (idef, _) ->
-          let qname = prefix ^ "." ^ idef.iface_name.txt in
-          if StrMap.mem qname e.interfaces then e
-          else { e with interfaces = StrMap.add qname idef e.interfaces }
+          let iface_qname = prefix ^ "." ^ idef.iface_name.txt in
+          let e1 = if StrMap.mem iface_qname e.interfaces then e
+                   else { e with interfaces = StrMap.add iface_qname idef e.interfaces } in
+          (* Pre-bind each interface method with a proper Poly scheme so that
+             cross-module references (e.g. "Conduit.Storage.workflow_load") resolve
+             correctly even when the module containing the interface is processed
+             AFTER the modules that use it in pass 2. We use a temp error context
+             so that unknown type names (e.g. DateTime not yet in scope) don't
+             produce spurious errors — best-effort types are sufficient here. *)
+          if StrMap.mem (prefix ^ "." ^ idef.iface_name.txt ^ "." ^
+                         (match idef.iface_methods with m :: _ -> m.md_name.txt | [] -> ""))
+               e.vars
+          then e1  (* already bound — skip to avoid duplicate work *)
+          else
+          List.fold_left (fun e (m : Ast.method_decl) ->
+            let full_qualified = prefix ^ "." ^ idef.iface_name.txt ^ "." ^ m.md_name.txt in
+            let iface_qualified = idef.iface_name.txt ^ "." ^ m.md_name.txt in
+            if StrMap.mem full_qualified e.vars then e
+            else begin
+              let tmp_errors = Err.create () in
+              let tmp_env = { e with errors = tmp_errors } in
+              let a = fresh_var 1 in
+              let tvars = ref [(idef.iface_param.txt, a)] in
+              let ty = surface_ty tmp_env ~tvars m.md_ty in
+              let a_id = match a with
+                | TVar r -> (match !r with Unbound (id, _) -> id | _ -> 0)
+                | _ -> 0
+              in
+              let base_sch = generalize 0 ty in
+              let sch = match base_sch with
+                | Poly (ids, cs, t) ->
+                  Poly (ids, CInterface (idef.iface_name.txt, a) :: cs, t)
+                | Mono t ->
+                  Poly ([a_id], [CInterface (idef.iface_name.txt, a)], t)
+              in
+              let e1 = { e with vars = StrMap.add full_qualified sch e.vars } in
+              if StrMap.mem iface_qualified e1.vars then e1
+              else { e1 with vars = StrMap.add iface_qualified sch e1.vars }
+            end
+          ) e1 idef.iface_methods
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
           prebind_mod_members (prefix ^ "." ^ mname.txt) e inner_decls
         | _ -> e
@@ -5262,7 +5382,7 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
       | Ast.DFn (def, _) ->
         (* Don't shadow existing bindings (e.g., builtins) with mono forward refs *)
         if StrMap.mem def.fn_name.txt env.vars then env
-        else bind_var def.fn_name.txt (Mono (fresh_var 0)) env
+        else bind_var def.fn_name.txt (Mono (fresh_var 1)) env
       | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
         (* Pre-bind all public qualified names "ModName.fn" so that sibling
            modules that reference each other don't fail during pass 2. *)
@@ -5421,7 +5541,7 @@ let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
         | Ast.DFn (def, _) when def.fn_vis = Ast.Public ->
           let qname = prefix ^ "." ^ def.fn_name.txt in
           if StrMap.mem qname e.vars then e
-          else bind_var qname (Mono (fresh_var 0)) e
+          else bind_var qname (Mono (fresh_var 1)) e
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
           prebind_mod_members_full (prefix ^ "." ^ mname.txt) e inner_decls
         | _ -> e
@@ -5432,7 +5552,7 @@ let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
       match d with
       | Ast.DFn (def, _) ->
         if StrMap.mem def.fn_name.txt env.vars then env
-        else bind_var def.fn_name.txt (Mono (fresh_var 0)) env
+        else bind_var def.fn_name.txt (Mono (fresh_var 1)) env
       | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
         prebind_mod_members_full mname.txt env inner_decls
       | Ast.DType (_vis, name, params, typedef, _) ->

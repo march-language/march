@@ -179,6 +179,11 @@ fn add_ms(dt : DateTime, n : Int) : DateTime do
   add_seconds(dt, int_div(n, 1000))
 end
 
+doc "Add a Duration (stored in milliseconds) to a DateTime."
+fn add(dt : DateTime, dur : Int) : DateTime do
+  add_ms(dt, dur)
+end
+
 doc """
 Difference between two DateTimes in seconds.
 diff_seconds(a, b) = to_timestamp(a) - to_timestamp(b).

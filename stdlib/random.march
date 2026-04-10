@@ -87,6 +87,13 @@ fn range(rng : Rng, lo : Int, hi : Int) : (Int, Rng) do
   (lo + int_mod(pos, hi - lo + 1), rng2)
 end
 
+doc "Generate a random integer in [lo, hi] (inclusive) using the current time as seed."
+fn int(lo : Int, hi : Int) : Int do
+  let rng = seed(float_to_int(unix_time(())))
+  let (n, _) = range(rng, lo, hi)
+  n
+end
+
 -- ---- Collection operations ----
 
 -- Remove the element at 0-based index n from a list.
