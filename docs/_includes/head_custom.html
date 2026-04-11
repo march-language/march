@@ -20,8 +20,10 @@
   /* ── Navigation ──────────────────────────────────────────────────────── */
   .site-title, .site-title:visited          { color: #D6EEF5 !important; }
   .nav-list .nav-list-link                  { color: #a8ccd8 !important; }
-  .nav-list .nav-list-link:hover            { color: #D6EEF5 !important; background-color: #133847 !important; }
-  .nav-list .nav-list-link.active           { color: #6FE3D6 !important; background-color: rgba(111,227,214,0.1) !important; font-weight: 600; }
+  .nav-list .nav-list-item .nav-list-link:hover,
+  .nav-list .nav-list-link:hover            { color: #D6EEF5 !important; background-image: linear-gradient(-90deg, #133847 0%, #133847 100%) !important; }
+  .nav-list .nav-list-item .nav-list-link.active,
+  .nav-list .nav-list-link.active           { color: #6FE3D6 !important; background-image: linear-gradient(-90deg, rgba(111,227,214,0.12) 0%, rgba(111,227,214,0.12) 100%) !important; font-weight: 600; }
   .nav-category                             { color: #3d6678 !important; border-top-color: #133847 !important; }
   .aux-nav-link, .aux-nav-link:visited      { color: #a8ccd8 !important; }
   .breadcrumb-nav-list-item                 { color: #7fa8ba !important; }
