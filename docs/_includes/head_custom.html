@@ -1,0 +1,100 @@
+<style>
+  /* ── March brand palette ──────────────────────────────────────────────── */
+  :root {
+    --march-base-100:  #0B1F2A;
+    --march-base-200:  #0F2A36;
+    --march-base-300:  #133847;
+    --march-content:   #D6EEF5;
+    --march-primary:   #1C5D6F;
+    --march-accent:    #6FE3D6;
+    --march-accent-dk: #062026;
+    --march-secondary: #0F3A4A;
+    --march-info:      #3ABFF8;
+    --march-success:   #36D399;
+    --march-warning:   #FBBF24;
+    --march-error:     #F87272;
+  }
+
+  /* ── Page & sidebar backgrounds ─────────────────────────────────────── */
+  body                        { background-color: var(--march-base-100) !important; color: var(--march-content) !important; }
+  .side-bar                   { background-color: var(--march-base-200) !important; border-right: 1px solid var(--march-base-300) !important; }
+  .main                       { background-color: var(--march-base-100) !important; }
+  .main-header                { background-color: var(--march-base-200) !important; border-bottom: 1px solid var(--march-base-300) !important; }
+  .site-footer                { background-color: var(--march-base-200) !important; border-top: 1px solid var(--march-base-300) !important; }
+
+  /* ── Navigation ─────────────────────────────────────────────────────── */
+  .nav-list .nav-list-item .nav-list-link                 { color: #a8ccd8 !important; }
+  .nav-list .nav-list-item .nav-list-link:hover           { color: var(--march-content) !important; background-color: var(--march-base-300) !important; }
+  .nav-list .nav-list-item .nav-list-link.active          { color: var(--march-accent) !important; background-color: rgba(111,227,214,0.1) !important; font-weight: 600; }
+  .nav-list-item .nav-list-item .nav-list-link            { color: #7fa8ba !important; }
+  .nav-category                                            { color: #3d6678 !important; border-top-color: var(--march-base-300) !important; }
+  .site-title, .site-title:visited                         { color: var(--march-content) !important; }
+
+  /* ── Search ─────────────────────────────────────────────────────────── */
+  .search-input                { background-color: var(--march-base-100) !important; border-color: var(--march-base-300) !important; color: var(--march-content) !important; }
+  .search-results              { background-color: var(--march-base-200) !important; border-color: var(--march-base-300) !important; }
+  .search-result               { color: var(--march-content) !important; border-bottom-color: var(--march-base-300) !important; }
+  .search-result:hover         { background-color: var(--march-base-300) !important; }
+
+  /* ── Main content typography ─────────────────────────────────────────── */
+  .main-content h1, .main-content h2,
+  .main-content h3, .main-content h4,
+  .main-content h5, .main-content h6 { color: #E6FCF9 !important; }
+  .main-content p, .main-content li  { color: var(--march-content) !important; }
+  .main-content a                     { color: var(--march-accent) !important; }
+  .main-content a:hover               { color: #9ff0e8 !important; }
+  .main-content hr                    { border-color: var(--march-base-300) !important; }
+
+  /* Table of contents */
+  .page-header                { border-bottom-color: var(--march-base-300) !important; color: var(--march-content) !important; }
+  .aux-nav-link, .aux-nav-link:visited { color: #a8ccd8 !important; }
+  .breadcrumb-nav-list-item   { color: #7fa8ba !important; }
+
+  /* Tables */
+  table th                    { background-color: var(--march-base-200) !important; color: var(--march-content) !important; border-color: var(--march-base-300) !important; }
+  table td                    { border-color: var(--march-base-300) !important; color: var(--march-content) !important; }
+  table tr:hover              { background-color: var(--march-secondary) !important; }
+
+  /* Blockquotes */
+  blockquote                  { border-left-color: var(--march-primary) !important; color: #a8ccd8 !important; }
+
+  /* Inline code */
+  code:not([class])           { background-color: var(--march-base-200) !important; color: var(--march-accent) !important; border: 1px solid var(--march-base-300) !important; }
+  p > code, li > code        { background-color: var(--march-base-200) !important; color: var(--march-accent) !important; border: 1px solid var(--march-base-300) !important; }
+
+  /* ── Code blocks (Rouge) ─────────────────────────────────────────────── */
+  .highlight                  { background-color: var(--march-base-100) !important; border: 1px solid var(--march-base-300); border-radius: 6px; }
+  .highlighter-rouge pre.highlight { background-color: var(--march-base-100) !important; }
+  div.highlighter-rouge       { background-color: var(--march-base-100) !important; border: 1px solid var(--march-base-300); border-radius: 6px; }
+
+  .highlight .c, .highlight .c1, .highlight .cm,
+  .highlight .cp, .highlight .cs { color: #3d6070; font-style: italic; }
+  .highlight .k, .highlight .kd, .highlight .kn,
+  .highlight .kp, .highlight .kr { color: #6FE3D6; }
+  .highlight .kt              { color: #CFF7F1; }
+  .highlight .s, .highlight .sb, .highlight .sc, .highlight .sd,
+  .highlight .s2, .highlight .sh, .highlight .si, .highlight .sx,
+  .highlight .sr, .highlight .s1, .highlight .ss { color: #36D399; }
+  .highlight .m, .highlight .mf, .highlight .mh,
+  .highlight .mi, .highlight .mo, .highlight .il { color: #FBBF24; }
+  .highlight .o, .highlight .ow { color: #3ABFF8; }
+  .highlight .nf, .highlight .fm { color: #6FE3D6; }
+  .highlight .nc, .highlight .nn { color: #CFF7F1; }
+  .highlight .nb              { color: #3ABFF8; }
+  .highlight .na              { color: #36D399; }
+  .highlight .err             { color: #F87272; }
+  .highlight .n, .highlight .nx { color: #D6EEF5; }
+  .highlight .p               { color: #C7DDE5; }
+  .highlight .gd              { color: #F87272; }
+  .highlight .gi              { color: #36D399; }
+
+  /* ── Buttons / labels ────────────────────────────────────────────────── */
+  .btn                        { background-color: var(--march-primary) !important; color: #E6FCF9 !important; border-color: var(--march-primary) !important; }
+  .label                      { background-color: var(--march-base-300) !important; color: var(--march-content) !important; }
+
+  /* ── Scrollbar (webkit) ──────────────────────────────────────────────── */
+  ::-webkit-scrollbar              { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track        { background: var(--march-base-100); }
+  ::-webkit-scrollbar-thumb        { background: var(--march-base-300); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover  { background: var(--march-primary); }
+</style>
