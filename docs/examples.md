@@ -300,7 +300,68 @@ end
 
 ---
 
-## Data & Files
+## Data & Statistics
+
+### stats_basic.march
+
+Descriptive and bivariate statistics using the `Stats` module on plain `List(Float)` values.
+
+```elixir
+-- Weekly temperatures
+let temps = [18.5, 21.0, 19.8, 23.4, 22.1, 17.6, 20.3]
+
+println("mean:    " ++ float_to_string(Stats.mean(temps)))
+println("median:  " ++ float_to_string(Stats.median(temps)))
+println("std_dev: " ++ float_to_string(Stats.std_dev(temps)))
+println("p25:     " ++ float_to_string(Stats.percentile(temps, 25.0)))
+println("p75:     " ++ float_to_string(Stats.percentile(temps, 75.0)))
+
+-- Linear regression: hours studied → exam score
+let (slope, intercept) = Stats.linear_regression(hours, scores)
+let predicted = slope *. 9.0 +. intercept
+```
+
+Also shows `covariance`, `correlation`, `mode`, and the safe `Result`-returning variants (`mean_safe`, `std_dev_safe`).
+
+---
+
+### dataframe_basic.march
+
+Tabular data pipelines with the `DataFrame` module. Uses an employee dataset throughout.
+
+```elixir
+-- Construct from typed columns
+let df = DataFrame.from_columns([
+  StrCol("name",   typed_array_from_list(["Alice", "Bob", "Charlie"])),
+  StrCol("dept",   typed_array_from_list(["Eng", "Eng", "Sales"])),
+  IntCol("salary", typed_array_from_list([95000, 88000, 72000])),
+  FloatCol("rating", typed_array_from_list([4.5, 3.9, 4.2]))
+])
+
+-- LazyFrame: filter, sort, derived column, collect
+let result =
+  DataFrame.lazy(df)
+  |> DataFrame.filter(Gt(Col("salary"), LitInt(80000)))
+  |> DataFrame.sort_by([("salary", Desc)])
+  |> DataFrame.with_column("bonus", fn row ->
+      match DataFrame.row_get_int(row, "salary") do
+      Some(s) -> IntVal(s / 10)
+      None    -> IntVal(0)
+      end)
+  |> DataFrame.collect()
+
+-- GroupBy: mean salary and headcount per department
+let by_dept = DataFrame.group_by(df, ["dept"])
+let agg_df  = DataFrame.agg(by_dept, [Mean("salary"), Count])
+
+-- Stats integration
+let summary          = DataFrame.summarize(df)       -- per-column stats as a DataFrame
+let (train, test)    = DataFrame.train_test_split(df, 0.8)
+```
+
+Also shows `inner_join`, `col_z_score` normalization, and bridging a column to `Stats` via `DataFrame.float_list`.
+
+---
 
 ### csv_example.march
 

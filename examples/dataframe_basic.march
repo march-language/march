@@ -1,0 +1,212 @@
+-- dataframe_basic.march — tabular data with DataFrame
+--
+-- Demonstrates the DataFrame module:
+--   * Construction from typed columns (IntCol, FloatCol, StrCol)
+--   * Schema, row/col counts, head/tail
+--   * float_list to bridge columns into Stats functions
+--   * LazyFrame: filter, sort_by, with_column, select, collect
+--   * GroupBy aggregation (group_by + agg)
+--   * Joins: inner_join
+--   * summarize: per-column descriptive stats in a DataFrame
+--   * col_z_score: z-score normalization
+--   * train_test_split: 80/20 hold-out
+--
+-- Run: dune exec march -- examples/dataframe_basic.march
+
+mod DataFrameBasic do
+
+-- Build the employee dataset used across all demos.
+pfn make_employees() : Result(DataFrame, String) do
+  let names   = StrCol("name",   typed_array_from_list(["Alice", "Bob", "Charlie", "Diana", "Eve", "Frank"]))
+  let depts   = StrCol("dept",   typed_array_from_list(["Eng", "Eng", "Sales", "Sales", "Eng", "Sales"]))
+  let salaries = IntCol("salary", typed_array_from_list([95000, 88000, 72000, 78000, 102000, 65000]))
+  let ratings  = FloatCol("rating", typed_array_from_list([4.5, 3.9, 4.2, 4.0, 4.8, 3.7]))
+  DataFrame.from_columns([names, depts, salaries, ratings])
+end
+
+-- ── 1. Construction and metadata ────────────────────────────────────────────
+
+fn demo_construction() do
+  println("=== Construction and Metadata ===")
+  match make_employees() do
+  Err(e) -> println("error: " ++ e)
+  Ok(df) -> do
+    println("schema:    " ++ to_string(DataFrame.schema(df)))
+    println("rows:      " ++ int_to_string(DataFrame.row_count(df)))
+    println("cols:      " ++ int_to_string(DataFrame.col_count(df)))
+
+    -- head/tail
+    let top3 = DataFrame.head(df, 3)
+    println("head(3) rows: " ++ int_to_string(DataFrame.row_count(top3)))
+
+    let last2 = DataFrame.tail(df, 2)
+    println("tail(2) rows: " ++ int_to_string(DataFrame.row_count(last2)))
+
+    -- Bridge a column into Stats
+    match DataFrame.float_list(df, "salary") do
+    Err(e) -> println("error: " ++ e)
+    Ok(sals) ->
+      println("mean salary: " ++ float_to_string(Stats.mean(sals)))
+    end
+  end
+  end
+end
+
+-- ── 2. LazyFrame: filter, sort, derived columns ─────────────────────────────
+
+fn demo_lazy() do
+  println("")
+  println("=== LazyFrame ===")
+  match make_employees() do
+  Err(e) -> println("error: " ++ e)
+  Ok(df) -> do
+
+    -- Filter to salary > 80000, sort highest first
+    let high_earners =
+      DataFrame.lazy(df)
+      |> DataFrame.filter(Gt(Col("salary"), LitInt(80000)))
+      |> DataFrame.sort_by([("salary", Desc)])
+      |> DataFrame.collect()
+
+    match high_earners do
+    Err(e) -> println("error: " ++ e)
+    Ok(he) ->
+      println("salary > 80k: " ++ int_to_string(DataFrame.row_count(he)) ++ " employees")
+    end
+
+    -- Add a derived column: annual bonus = salary / 10
+    let with_bonus =
+      DataFrame.lazy(df)
+      |> DataFrame.with_column("bonus", fn row ->
+          match DataFrame.row_get_int(row, "salary") do
+          Some(s) -> IntVal(s / 10)
+          None    -> IntVal(0)
+          end)
+      |> DataFrame.select(["name", "salary", "bonus"])
+      |> DataFrame.collect()
+
+    match with_bonus do
+    Err(e) -> println("error: " ++ e)
+    Ok(b)  ->
+      println("with bonus col: " ++ int_to_string(DataFrame.col_count(b)) ++ " cols, "
+              ++ int_to_string(DataFrame.row_count(b)) ++ " rows")
+    end
+
+    -- Filter by string: only Eng department
+    let eng_only =
+      DataFrame.lazy(df)
+      |> DataFrame.filter(Eq(Col("dept"), LitStr("Eng")))
+      |> DataFrame.collect()
+
+    match eng_only do
+    Err(e) -> println("error: " ++ e)
+    Ok(e)  ->
+      println("Eng dept: " ++ int_to_string(DataFrame.row_count(e)) ++ " employees")
+    end
+  end
+  end
+end
+
+-- ── 3. GroupBy aggregation ───────────────────────────────────────────────────
+
+fn demo_groupby() do
+  println("")
+  println("=== GroupBy Aggregation ===")
+  match make_employees() do
+  Err(e) -> println("error: " ++ e)
+  Ok(df) -> do
+    -- Mean salary and headcount per department
+    let by_dept = DataFrame.group_by(df, ["dept"])
+    match DataFrame.agg(by_dept, [Mean("salary"), Count, Max("salary")]) do
+    Err(e) -> println("error: " ++ e)
+    Ok(agg) ->
+      println("groups: " ++ int_to_string(DataFrame.row_count(agg))
+              ++ " depts, " ++ int_to_string(DataFrame.col_count(agg)) ++ " agg cols")
+    end
+  end
+  end
+end
+
+-- ── 4. Join two DataFrames ───────────────────────────────────────────────────
+
+fn demo_join() do
+  println("")
+  println("=== Join ===")
+
+  -- Left: employees with a dept_id
+  let emp = DataFrame.make_df([
+    StrCol("name",    typed_array_from_list(["Alice", "Bob", "Charlie"])),
+    IntCol("dept_id", typed_array_from_list([1, 1, 2]))
+  ])
+
+  -- Right: department reference table
+  let depts = DataFrame.make_df([
+    IntCol("dept_id",   typed_array_from_list([1, 2, 3])),
+    StrCol("dept_name", typed_array_from_list(["Engineering", "Sales", "HR"]))
+  ])
+
+  let result =
+    DataFrame.lazy(emp)
+    |> DataFrame.inner_join(depts, ["dept_id"])
+    |> DataFrame.collect()
+
+  match result do
+  Err(e) -> println("error: " ++ e)
+  Ok(j)  ->
+    println("inner_join rows: " ++ int_to_string(DataFrame.row_count(j))
+            ++ " cols: " ++ to_string(DataFrame.schema(j)))
+  end
+end
+
+-- ── 5. Stats integration: summarize and z-score ──────────────────────────────
+
+fn demo_stats_integration() do
+  println("")
+  println("=== Stats Integration ===")
+  match make_employees() do
+  Err(e) -> println("error: " ++ e)
+  Ok(df) -> do
+
+    -- summarize: returns a DataFrame with one row per column
+    let summary = DataFrame.summarize(df)
+    println("summarize schema: " ++ to_string(DataFrame.schema(summary)))
+    println("summarize rows (one per input col): "
+            ++ int_to_string(DataFrame.row_count(summary)))
+
+    -- Z-score normalize the rating column
+    match DataFrame.get_column(df, "rating") do
+    Err(e) -> println("error: " ++ e)
+    Ok(rating_col) ->
+      match DataFrame.col_z_score(rating_col) do
+      Err(e) -> println("z_score error: " ++ e)
+      Ok(z_col) ->
+        match z_col do
+        FloatCol(_, z_data) -> do
+          let zs = typed_array_to_list(z_data)
+          let rounded = List.map(zs, fn z ->
+            let s = float_to_string(z)
+            String.slice(s, 0, 6))
+          println("rating z-scores: " ++ to_string(rounded))
+          end
+        _ -> println("unexpected col type")
+        end
+      end
+    end
+
+    -- train/test split
+    let (train, test) = DataFrame.train_test_split(df, 0.8)
+    println("train rows: " ++ int_to_string(DataFrame.row_count(train)))
+    println("test rows:  " ++ int_to_string(DataFrame.row_count(test)))
+  end
+  end
+end
+
+fn main() do
+  demo_construction()
+  demo_lazy()
+  demo_groupby()
+  demo_join()
+  demo_stats_integration()
+end
+
+end

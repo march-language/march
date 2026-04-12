@@ -1,0 +1,111 @@
+-- stats_basic.march — descriptive and bivariate statistics
+--
+-- Demonstrates the Stats module:
+--   * Basic aggregates:  sum, count, mean, median, mode, min, max
+--   * Spread:            variance, std_dev, percentile
+--   * Bivariate:         covariance, correlation
+--   * Linear regression: slope, intercept, prediction
+--   * Safe variants:     mean_safe, std_dev_safe (return Result)
+--
+-- Run: dune exec march -- examples/stats_basic.march
+
+mod StatsBasic do
+
+pfn f(x : Float) : String do float_to_string(x) end
+
+-- ── 1. Descriptive statistics ───────────────────────────────────────────────
+
+fn demo_descriptive() do
+  println("=== Descriptive Statistics ===")
+
+  -- Daily high temperatures for one week (Celsius)
+  let temps = [18.5, 21.0, 19.8, 23.4, 22.1, 17.6, 20.3]
+
+  println("data:      " ++ to_string(temps))
+  println("count:     " ++ int_to_string(Stats.count(temps)))
+  println("sum:       " ++ f(Stats.sum(temps)))
+  println("mean:      " ++ f(Stats.mean(temps)))
+  println("median:    " ++ f(Stats.median(temps)))
+  println("mode:      " ++ f(Stats.mode(temps)))
+  println("min:       " ++ f(Stats.min_val(temps)))
+  println("max:       " ++ f(Stats.max_val(temps)))
+  println("std_dev:   " ++ f(Stats.std_dev(temps)))
+  println("variance:  " ++ f(Stats.variance(temps)))
+  println("p25:       " ++ f(Stats.percentile(temps, 25.0)))
+  println("p75:       " ++ f(Stats.percentile(temps, 75.0)))
+  println("p90:       " ++ f(Stats.percentile(temps, 90.0)))
+end
+
+-- ── 2. Bivariate statistics ─────────────────────────────────────────────────
+
+fn demo_bivariate() do
+  println("")
+  println("=== Bivariate Statistics ===")
+
+  -- Hours studied per day vs exam score
+  let hours  = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+  let scores = [45.0, 52.0, 60.0, 67.0, 74.0, 80.0, 86.0, 91.0]
+
+  let cov  = Stats.covariance(hours, scores)
+  let corr = Stats.correlation(hours, scores)
+
+  println("covariance(hours, scores):  " ++ f(cov))
+  println("correlation(hours, scores): " ++ f(corr))
+  -- Correlation near 1.0 means strong positive linear relationship
+end
+
+-- ── 3. Linear regression ────────────────────────────────────────────────────
+
+fn demo_regression() do
+  println("")
+  println("=== Linear Regression ===")
+
+  let hours  = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+  let scores = [45.0, 52.0, 60.0, 67.0, 74.0, 80.0, 86.0, 91.0]
+
+  let (slope, intercept) = Stats.linear_regression(hours, scores)
+  println("slope:     " ++ f(slope))
+  println("intercept: " ++ f(intercept))
+  println("model:     score = " ++ f(slope) ++ " * hours + " ++ f(intercept))
+
+  -- Predict scores for unseen inputs
+  let predict = fn h -> slope *. h +. intercept
+  println("predict(9 hours):  " ++ f(predict(9.0)))
+  println("predict(10 hours): " ++ f(predict(10.0)))
+end
+
+-- ── 4. Safe (Result-returning) variants ─────────────────────────────────────
+
+fn demo_safe() do
+  println("")
+  println("=== Safe Variants ===")
+
+  let empty : List(Float) = []
+
+  -- mean_safe returns Err on empty list instead of panicking
+  match Stats.mean_safe(empty) do
+  Ok(m)  -> println("mean([]):     " ++ f(m))
+  Err(e) -> println("mean([]) err: " ++ e)
+  end
+
+  -- std_dev_safe requires at least 2 elements
+  match Stats.std_dev_safe([42.0]) do
+  Ok(s)  -> println("std_dev([42.0]): " ++ f(s))
+  Err(e) -> println("std_dev([42.0]) err: " ++ e)
+  end
+
+  -- Non-empty: succeeds
+  match Stats.mean_safe([10.0, 20.0, 30.0]) do
+  Ok(m)  -> println("mean([10,20,30]): " ++ f(m))
+  Err(e) -> println("mean([10,20,30]) err: " ++ e)
+  end
+end
+
+fn main() do
+  demo_descriptive()
+  demo_bivariate()
+  demo_regression()
+  demo_safe()
+end
+
+end
