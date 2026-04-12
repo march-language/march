@@ -241,7 +241,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
   else
     Printf.printf "March REPL — :quit to exit, :env to list bindings\n%!";
   let type_map = Hashtbl.create 64 in
-  let base_e  = March_eval.Eval.base_env in
+  let base_e  = March_eval.Eval.task_builtins @ March_eval.Eval.base_env in
   let base_tc = March_typecheck.Typecheck.base_env
     (March_errors.Errors.create ()) type_map in
   let t_s0 = Unix.gettimeofday () in
@@ -563,7 +563,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                let base_tc' = March_typecheck.Typecheck.base_env
                  (March_errors.Errors.create ()) type_map in
                let tc_pre' = preregister_stdlib_types base_tc' stdlib_decls in
-               let (e', tc') = load_decls_into_env March_eval.Eval.base_env tc_pre' stdlib_decls in
+               let base_e' = March_eval.Eval.task_builtins @ March_eval.Eval.base_env in
+               let (e', tc') = load_decls_into_env base_e' tc_pre' stdlib_decls in
                env    := e';
                tc_env := tc';
                Printf.printf "REPL state reset.\n%!"
@@ -623,7 +624,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                   let base_tc' = March_typecheck.Typecheck.base_env
                     (March_errors.Errors.create ()) type_map in
                   let tc_pre' = preregister_stdlib_types base_tc' stdlib_decls in
-                  let (e', tc') = load_decls_into_env March_eval.Eval.base_env tc_pre' stdlib_decls in
+                  let base_e' = March_eval.Eval.task_builtins @ March_eval.Eval.base_env in
+                  let (e', tc') = load_decls_into_env base_e' tc_pre' stdlib_decls in
                   env    := e';
                   tc_env := tc';
                   do_load_file path;
@@ -946,7 +948,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
   let hist     = History.create ~max_size:(history_size ()) in
   History.load hist (history_path ());
   let type_map = Hashtbl.create 64 in
-  let base_e  = March_eval.Eval.base_env in
+  let base_e  = March_eval.Eval.task_builtins @ March_eval.Eval.base_env in
   let base_tc = March_typecheck.Typecheck.base_env
     (March_errors.Errors.create ()) type_map in
   let content_hash = stdlib_content_hash stdlib_decls in
@@ -1604,7 +1606,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
           let base_tc' = March_typecheck.Typecheck.base_env
             (March_errors.Errors.create ()) type_map in
           let tc_pre' = preregister_stdlib_types base_tc' stdlib_decls in
-          let (e', tc') = load_decls_into_env March_eval.Eval.base_env tc_pre' stdlib_decls in
+          let base_e' = March_eval.Eval.task_builtins @ March_eval.Eval.base_env in
+          let (e', tc') = load_decls_into_env base_e' tc_pre' stdlib_decls in
           env := e'; tc_env := tc';
           hist_lines := []
         | ":help" ->

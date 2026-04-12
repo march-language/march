@@ -13,6 +13,38 @@ let count_token tok buf =
 let do_end_depth buf =
   count_token "do" buf - count_token "end" buf
 
+(** Net depth of unmatched bracket/paren/brace characters, skipping over
+    string literals (double-quoted) and line comments (--).
+    Positive means we are inside an unclosed delimiter. *)
+let bracket_depth buf =
+  let n = String.length buf in
+  let depth = ref 0 in
+  let i = ref 0 in
+  while !i < n do
+    let c = buf.[!i] in
+    (* Line comment: skip to end of line *)
+    if c = '-' && !i + 1 < n && buf.[!i + 1] = '-' then begin
+      while !i < n && buf.[!i] <> '\n' do incr i done
+    end
+    (* String literal: skip to closing double-quote, handling backslash escapes *)
+    else if c = '"' then begin
+      incr i;
+      while !i < n && buf.[!i] <> '"' do
+        if buf.[!i] = '\\' then incr i;
+        incr i
+      done;
+      incr i
+    end
+    else begin
+      (match c with
+       | '(' | '[' | '{' -> incr depth
+       | ')' | ']' | '}' -> decr depth
+       | _ -> ());
+      incr i
+    end
+  done;
+  !depth
+
 (** Last non-blank line in [buf], trimmed. *)
 let last_non_blank_line buf =
   let lines = String.split_on_char '\n' buf in
@@ -62,6 +94,7 @@ let ends_with_continuation buf =
 (** True when [buf] appears syntactically complete (safe to submit). *)
 let is_complete buf =
   do_end_depth buf <= 0
+  && bracket_depth buf <= 0
   && not (ends_with_with buf)
   && not (starts_with_pipe buf)
   && not (ends_with_continuation buf)
