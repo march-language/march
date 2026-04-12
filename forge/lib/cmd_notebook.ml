@@ -1,11 +1,11 @@
-(** forge notebook — thin OCaml shim that runs the March notebook runner.
+(** forge notebook — thin OCaml shim that runs the March notebook runner/server.
 
-    The real implementation lives in forge/tasks/notebook.march.
-    This shim embeds that source as a string, writes it to a temp file,
-    and invokes the March interpreter with appropriate env vars. *)
+    Two subcommands:
+      forge notebook FILE.mnb [-o FILE.html]   -- batch render to HTML
+      forge notebook serve FILE.mnb [--port N] -- live server with WebSocket UI
 
-(* The notebook.march source is embedded at build time by the dune rule below.
-   At runtime this gives us [Notebook_march_src.content : string]. *)
+    The real implementations live in forge/tasks/notebook.march and
+    forge/tasks/notebook_server.march, embedded as strings at build time. *)
 
 (* ------------------------------------------------------------------ *)
 (* Stdlib / march binary discovery                                     *)
@@ -31,18 +31,27 @@ let find_march () =
 (* Write embedded March source to a temp file                          *)
 (* ------------------------------------------------------------------ *)
 
-let write_temp_march () =
-  let tmp = Filename.temp_file "forge_notebook_" ".march" in
+let write_temp content suffix =
+  let tmp = Filename.temp_file "forge_notebook_" suffix in
   let oc = open_out tmp in
-  output_string oc Notebook_march_src.content;
+  output_string oc content;
   close_out oc;
   tmp
 
 (* ------------------------------------------------------------------ *)
-(* Command                                                             *)
+(* Build the environment prefix for the march invocation               *)
 (* ------------------------------------------------------------------ *)
 
-let run ~input ~output () =
+let lib_path_prefix () =
+  match find_stdlib_dir () with
+  | None   -> ""
+  | Some d -> Printf.sprintf "MARCH_LIB_PATH=%s " (Filename.quote d)
+
+(* ------------------------------------------------------------------ *)
+(* Batch render: forge notebook FILE.mnb [-o FILE.html]                *)
+(* ------------------------------------------------------------------ *)
+
+let run_render ~input ~output () =
   let input_path =
     if Filename.is_relative input then Filename.concat (Sys.getcwd ()) input
     else input
@@ -51,17 +60,12 @@ let run ~input ~output () =
     Error (Printf.sprintf "notebook file not found: %s" input_path)
   else begin
     let march = find_march () in
-    let tmp   = write_temp_march () in
+    let tmp   = write_temp Notebook_march_src.content ".march" in
     let output_path = match output with
       | Some p -> p
       | None   ->
         let base = Filename.remove_extension input_path in
         base ^ ".html"
-    in
-    let stdlib_opt = find_stdlib_dir () in
-    let lib_path_env = match stdlib_opt with
-      | None   -> ""
-      | Some d -> Printf.sprintf "MARCH_LIB_PATH=%s " (Filename.quote d)
     in
     let nb_env =
       Printf.sprintf "FORGE_NB_INPUT=%s FORGE_NB_OUTPUT=%s FORGE_NB_MARCH=%s"
@@ -70,10 +74,39 @@ let run ~input ~output () =
         (Filename.quote march)
     in
     let cmd = Printf.sprintf "%s%s %s %s"
-      lib_path_env nb_env (Filename.quote march) (Filename.quote tmp)
+      (lib_path_prefix ()) nb_env (Filename.quote march) (Filename.quote tmp)
     in
     let rc = Sys.command cmd in
     (try Sys.remove tmp with Sys_error _ -> ());
     if rc = 0 then Ok ()
     else Error (Printf.sprintf "forge notebook exited with code %d" rc)
+  end
+
+(* ------------------------------------------------------------------ *)
+(* Live server: forge notebook serve FILE.mnb [--port N]               *)
+(* ------------------------------------------------------------------ *)
+
+let run_serve ~input ~port () =
+  let input_path =
+    if Filename.is_relative input then Filename.concat (Sys.getcwd ()) input
+    else input
+  in
+  if not (Sys.file_exists input_path) then
+    Error (Printf.sprintf "notebook file not found: %s" input_path)
+  else begin
+    let march = find_march () in
+    let tmp   = write_temp Notebook_server_march_src.content ".march" in
+    let nb_env =
+      Printf.sprintf "FORGE_NB_INPUT=%s FORGE_NB_PORT=%d FORGE_NB_MARCH=%s"
+        (Filename.quote input_path)
+        port
+        (Filename.quote march)
+    in
+    let cmd = Printf.sprintf "%s %s %s"
+      nb_env (Filename.quote march) (Filename.quote tmp)
+    in
+    let rc = Sys.command cmd in
+    (try Sys.remove tmp with Sys_error _ -> ());
+    if rc = 0 then Ok ()
+    else Error (Printf.sprintf "forge notebook serve exited with code %d" rc)
   end
