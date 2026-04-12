@@ -68,12 +68,14 @@ mod PatternMatching do
 
   -- ── 4. Nested patterns ───────────────────────────────────────────────────
 
-  type Tree = Leaf | Node(Tree, Int, Tree)
+  -- Simple arithmetic expression tree
+  type Expr = ENum(Int) | EAdd(Expr, Expr) | EMul(Expr, Expr)
 
-  fn sum_tree(t : Tree) : Int do
-    match t do
-      Leaf              -> 0
-      Node(l, v, r)     -> sum_tree(l) + v + sum_tree(r)
+  fn eval_expr(e : Expr) : Int do
+    match e do
+      ENum(n)    -> n
+      EAdd(l, r) -> eval_expr(l) + eval_expr(r)
+      EMul(l, r) -> eval_expr(l) * eval_expr(r)
     end
   end
 
@@ -123,8 +125,9 @@ mod PatternMatching do
     end
 
     -- 4. Nested
-    let tree = Node(Node(Leaf, 1, Leaf), 2, Node(Leaf, 3, Leaf))
-    println("tree sum=" ++ int_to_string(sum_tree(tree)))
+    -- (1 + 2) * (3 + 4) = 21
+    let expr = EMul(EAdd(ENum(1), ENum(2)), EAdd(ENum(3), ENum(4)))
+    println("(1+2)*(3+4)=" ++ int_to_string(eval_expr(expr)))
     println("nested Some(Some(99))=" ++ int_to_string(unwrap_nested(Some(Some(99)))))
     println("nested Some(None)=" ++ int_to_string(unwrap_nested(Some(None))))
 

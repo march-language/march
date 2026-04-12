@@ -356,7 +356,7 @@ let agg_df  = DataFrame.agg(by_dept, [Mean("salary"), Count])
 
 -- Stats integration
 let summary          = DataFrame.summarize(df)       -- per-column stats as a DataFrame
-let (train, test)    = DataFrame.train_test_split(df, 0.8)
+let (train, holdout) = DataFrame.train_test_split(df, 0.8)
 ```
 
 Also shows `inner_join`, `col_z_score` normalization, and bridging a column to `Stats` via `DataFrame.float_list`.

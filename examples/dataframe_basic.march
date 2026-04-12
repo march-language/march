@@ -194,9 +194,9 @@ fn demo_stats_integration() do
     end
 
     -- train/test split
-    let (train, test) = DataFrame.train_test_split(df, 0.8)
+    let (train, holdout) = DataFrame.train_test_split(df, 0.8)
     println("train rows: " ++ int_to_string(DataFrame.row_count(train)))
-    println("test rows:  " ++ int_to_string(DataFrame.row_count(test)))
+    println("test rows:  " ++ int_to_string(DataFrame.row_count(holdout)))
   end
   end
 end
