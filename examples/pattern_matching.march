@@ -1,0 +1,137 @@
+-- pattern_matching.march — pattern matching in March
+--
+-- Covers:
+--   1. Matching on literals and wildcards
+--   2. Custom ADTs (algebraic data types)
+--   3. Option and Result
+--   4. Nested patterns and destructuring
+--   5. Multi-head function definitions
+--
+-- Run: dune exec march -- examples/pattern_matching.march
+
+mod PatternMatching do
+
+  -- ── 1. Literals and wildcards ────────────────────────────────────────────
+
+  fn describe_int(n : Int) : String do
+    match n do
+      0 -> "zero"
+      1 -> "one"
+      _ -> "other: " ++ int_to_string(n)
+    end
+  end
+
+  -- ── 2. Custom ADTs ───────────────────────────────────────────────────────
+
+  type Shape = Circle(Int)
+             | Rect(Int, Int)
+             | Triangle(Int, Int)
+
+  fn area(s : Shape) : Int do
+    match s do
+      Circle(r)       -> r * r * 3        -- approx pi=3
+      Rect(w, h)      -> w * h
+      Triangle(b, h)  -> (b * h) / 2
+    end
+  end
+
+  fn describe_shape(s : Shape) : String do
+    match s do
+      Circle(_)    -> "circle"
+      Rect(w, h)   ->
+        if w == h do "square" else "rectangle" end
+      Triangle(_, _) -> "triangle"
+    end
+  end
+
+  -- ── 3. Option and Result ─────────────────────────────────────────────────
+
+  fn safe_divide(a : Int, b : Int) : Option(Int) do
+    if b == 0 do None else Some(a / b) end
+  end
+
+  fn show_option(label : String, v : Option(Int)) do
+    match v do
+      Some(n) -> println(label ++ " = " ++ int_to_string(n))
+      None    -> println(label ++ " = (none)")
+    end
+  end
+
+  fn parse_positive(s : String) : Result(Int, String) do
+    let n = string_to_int(s)
+    match n do
+      Some(v) ->
+        if v > 0 do Ok(v) else Err("not positive: " ++ s) end
+      None -> Err("not a number: " ++ s)
+    end
+  end
+
+  -- ── 4. Nested patterns ───────────────────────────────────────────────────
+
+  type Tree = Leaf | Node(Tree, Int, Tree)
+
+  fn sum_tree(t : Tree) : Int do
+    match t do
+      Leaf              -> 0
+      Node(l, v, r)     -> sum_tree(l) + v + sum_tree(r)
+    end
+  end
+
+  -- Match on nested Option — Some(Some(x)) vs anything else
+  fn unwrap_nested(v : Option(Option(Int))) : Int do
+    match v do
+      Some(Some(n)) -> n
+      Some(None)    -> -1
+      None          -> -2
+    end
+  end
+
+  -- ── 5. Multi-head function definitions ───────────────────────────────────
+  --
+  -- Each clause matches a distinct pattern; evaluated top to bottom.
+
+  fn fib(0) : Int do 0 end
+  fn fib(1) : Int do 1 end
+  fn fib(n) : Int do fib(n - 1) + fib(n - 2) end
+
+  fn list_sum(Nil)         : Int do 0 end
+  fn list_sum(Cons(x, xs)) : Int do x + list_sum(xs) end
+
+  fn main() do
+    -- 1. Literals
+    println(describe_int(0))
+    println(describe_int(1))
+    println(describe_int(42))
+
+    -- 2. ADTs
+    let shapes = [Circle(5), Rect(4, 4), Rect(3, 7), Triangle(6, 4)]
+    List.each(shapes, fn s ->
+      println(describe_shape(s) ++ " area=" ++ int_to_string(area(s))))
+
+    -- 3. Option / Result
+    show_option("10/2", safe_divide(10, 2))
+    show_option("10/0", safe_divide(10, 0))
+
+    match parse_positive("7") do
+      Ok(n)  -> println("parsed: " ++ int_to_string(n))
+      Err(e) -> println("error: " ++ e)
+    end
+
+    match parse_positive("bad") do
+      Ok(n)  -> println("parsed: " ++ int_to_string(n))
+      Err(e) -> println("error: " ++ e)
+    end
+
+    -- 4. Nested
+    let tree = Node(Node(Leaf, 1, Leaf), 2, Node(Leaf, 3, Leaf))
+    println("tree sum=" ++ int_to_string(sum_tree(tree)))
+    println("nested Some(Some(99))=" ++ int_to_string(unwrap_nested(Some(Some(99)))))
+    println("nested Some(None)=" ++ int_to_string(unwrap_nested(Some(None))))
+
+    -- 5. Multi-head
+    println("fib(10)=" ++ int_to_string(fib(10)))
+    let xs = Cons(1, Cons(2, Cons(3, Nil)))
+    println("list_sum=[1,2,3]=" ++ int_to_string(list_sum(xs)))
+  end
+
+end

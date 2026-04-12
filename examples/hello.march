@@ -1,0 +1,37 @@
+-- hello.march — first steps in March
+--
+-- Covers: functions, let bindings, basic types, list stdlib, recursion.
+--
+-- Run: dune exec march -- examples/hello.march
+
+mod Hello do
+
+  -- Simple function with a type annotation
+  fn greet(name : String) : String do
+    "Hello, " ++ name ++ "!"
+  end
+
+  -- Recursive function
+  fn factorial(0) : Int do 1 end
+  fn factorial(n) : Int do n * factorial(n - 1) end
+
+  -- Higher-order functions with the List stdlib
+  fn double_evens(xs : List(Int)) : List(Int) do
+    xs
+    |> List.filter(fn x -> x % 2 == 0)
+    |> List.map(fn x -> x * 2)
+  end
+
+  fn main() do
+    println(greet("world"))
+    println(greet("March"))
+
+    let result = factorial(6)
+    println("6! = " ++ int_to_string(result))
+
+    let nums = [1, 2, 3, 4, 5, 6]
+    let evens_doubled = double_evens(nums)
+    println("double_evens([1..6]) = " ++ to_string(evens_doubled))
+  end
+
+end
