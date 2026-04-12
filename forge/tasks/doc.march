@@ -1,0 +1,580 @@
+-- forge doc — HTML documentation generator for March source files.
+--
+-- Invoked by the forge doc OCaml shim with environment variables:
+--   FORGE_DOC_OUTPUT   output directory (default: doc)
+--   FORGE_DOC_STDLIB   path to stdlib directory
+--   FORGE_DOC_PRIVATE  if "true", include pfn entries
+--   FORGE_DOC_SRC      colon-separated list of extra source dirs
+
+mod ForgeDoc do
+
+-- ── String helpers ────────────────────────────────────────────────────────────
+
+pfn trim(s) do String.trim(s) end
+pfn sw(s, p) do String.starts_with(s, p) end
+pfn ew(s, p) do String.ends_with(s, p) end
+pfn bsz(s) do String.byte_size(s) end
+pfn slc(s, start, len) do String.slice(s, start, len) end
+
+pfn drop_prefix(s, prefix) do
+  slc(s, bsz(prefix), bsz(s) - bsz(prefix))
+end
+
+pfn drop_suffix(s, suffix) do
+  slc(s, 0, bsz(s) - bsz(suffix))
+end
+
+pfn html_escape(s) do
+  let s = String.replace_all(s, "&", "&amp;")
+  let s = String.replace_all(s, "<", "&lt;")
+  let s = String.replace_all(s, ">", "&gt;")
+  let s = String.replace_all(s, "\"", "&quot;")
+  s
+end
+
+-- ── Markdown-to-HTML ─────────────────────────────────────────────────────────
+
+pfn flush_para(buf, out) do
+  if List.is_empty(buf) do out
+  else
+    let text = html_escape(String.join(List.reverse(buf), " "))
+    Cons("</p>", Cons(text, Cons("<p>", out)))
+  end
+end
+
+pfn flush_code(buf, out) do
+  let code = html_escape(String.join(List.reverse(buf), "\n"))
+  Cons("</code></pre>", Cons(code, out))
+end
+
+pfn is_fence(t) do bsz(t) >= 3 && slc(t, 0, 3) == "```" end
+
+pfn md_step_code(line, rest, buf, out, go) do
+  let t = trim(line)
+  if t == "```" do go(rest, Nil, flush_code(buf, out), false)
+  else go(rest, Cons(line, buf), out, true) end
+end
+
+pfn md_step_text(line, rest, buf, out, go) do
+  let t = trim(line)
+  if is_fence(t) do go(rest, Nil, Cons("<pre><code>", flush_para(buf, out)), true)
+  else
+    if String.is_empty(t) do go(rest, Nil, flush_para(buf, out), false)
+    else go(rest, Cons(t, buf), out, false) end
+  end
+end
+
+pfn md_to_html(md) do
+  let lines = String.split(md, "\n")
+  fn go(ls, buf, out, code_mode) do
+    match ls do
+    Nil ->
+      let out2 = if code_mode do flush_code(buf, out) else flush_para(buf, out) end
+      String.join(List.reverse(out2), "")
+    Cons(line, rest) ->
+      if code_mode do md_step_code(line, rest, buf, out, go)
+      else md_step_text(line, rest, buf, out, go) end
+    end
+  end
+  go(lines, Nil, Nil, false)
+end
+
+-- ── Doc-item types ────────────────────────────────────────────────────────────
+
+-- FnEntry(name, signature, doc, is_private)
+ptype FnEntry = FnEntry(String, String, Option(String), Bool)
+
+-- TypeEntry(name, signature, doc)
+ptype TypeEntry = TypeEntry(String, String, Option(String))
+
+-- IfaceEntry(name, signature, doc, methods)
+ptype IfaceEntry = IfaceEntry(String, String, Option(String), List((String, String)))
+
+-- ModuleInfo(name, comment, fns, types, ifaces)
+ptype ModuleInfo = ModuleInfo(String, Option(String), List(FnEntry), List(TypeEntry), List(IfaceEntry))
+
+-- ── Source text parsing ───────────────────────────────────────────────────────
+
+-- Extract the module name from "mod Name do" (first occurrence).
+pfn parse_module_name(lines) do
+  fn go(ls) do
+    match ls do
+    Nil -> "Unknown"
+    Cons(line, rest) ->
+      do
+        let t = trim(line)
+        if sw(t, "mod ") && ew(t, " do") do
+          trim(drop_suffix(drop_prefix(t, "mod "), " do"))
+        else go(rest) end
+      end
+    end
+  end
+  go(lines)
+end
+
+-- Collect leading "--" comment block before any non-comment code.
+pfn parse_module_comment(lines) do
+  fn go(ls, acc) do
+    match ls do
+    Nil ->
+      if List.is_empty(acc) do None
+      else Some(trim(String.join(List.reverse(acc), "\n"))) end
+    Cons(line, rest) ->
+      do
+        let t = trim(line)
+        if sw(t, "--") do
+          let text =
+            if bsz(t) > 2 && slc(t, 2, 1) == " " do slc(t, 3, bsz(t) - 3)
+            else slc(t, 2, bsz(t) - 2) end
+          go(rest, Cons(text, acc))
+        else
+          if String.is_empty(t) do go(rest, Cons("", acc))
+          else
+            if List.is_empty(acc) do None
+            else Some(trim(String.join(List.reverse(acc), "\n"))) end
+          end
+        end
+      end
+    end
+  end
+  go(lines, Nil)
+end
+
+-- Extract the doc text from a single-line: doc "text"
+pfn extract_single_doc(line) do
+  let t = trim(line)
+  match String.split_first(t, "\"") do
+  None -> ""
+  Some((_, after)) ->
+    match String.split_first(after, "\"") do
+    None -> after
+    Some((content, _)) -> content
+    end
+  end
+end
+
+-- Collect triple-quoted doc lines until closing """
+pfn collect_triple_doc(lines) do
+  fn go(ls, acc) do
+    match ls do
+    Nil -> (trim(String.join(List.reverse(acc), "\n")), Nil)
+    Cons(line, rest) ->
+      do
+        let t = trim(line)
+        if String.contains(t, "\"\"\"") do
+          (trim(String.join(List.reverse(acc), "\n")), rest)
+        else
+          go(rest, Cons(line, acc))
+        end
+      end
+    end
+  end
+  go(lines, Nil)
+end
+
+-- Strip a known keyword prefix from a declaration line.
+pfn strip_kw(t) do
+  if sw(t, "pfn ") do drop_prefix(t, "pfn ")
+  else
+    if sw(t, "fn ") do drop_prefix(t, "fn ")
+    else
+      if sw(t, "ptype ") do drop_prefix(t, "ptype ")
+      else
+        if sw(t, "type ") do drop_prefix(t, "type ")
+        else
+          if sw(t, "interface ") do drop_prefix(t, "interface ")
+          else t end
+        end
+      end
+    end
+  end
+end
+
+-- Extract function/type signature: strip keyword prefix and trailing " do".
+pfn extract_sig(line) do
+  let t = trim(line)
+  let t = strip_kw(t)
+  let t = if ew(t, " do") do drop_suffix(t, " do") else t end
+  trim(t)
+end
+
+-- Extract the name part from a declaration (up to first '(' ':' '=' or space).
+pfn decl_name(decl) do
+  fn go(i, n) do
+    if i >= n do decl
+    else
+      let ch = slc(decl, i, 1)
+      if ch == "(" do slc(decl, 0, i)
+      else
+        if ch == ":" do slc(decl, 0, i)
+        else
+          if ch == "=" do slc(decl, 0, i)
+          else
+            if ch == " " do slc(decl, 0, i)
+            else go(i + 1, n) end
+          end
+        end
+      end
+    end
+  end
+  go(0, bsz(decl))
+end
+
+-- State tuple: (pending_doc, fns, types, ifaces, remaining_lines)
+-- Process one line of source, returning updated state.
+pfn process_line(line, pending, fns, types, ifaces, include_private) do
+  let t = trim(line)
+  if String.is_empty(t) do (pending, fns, types, ifaces, Nil)
+  else
+    if sw(t, "--") do (pending, fns, types, ifaces, Nil)
+    else
+      if sw(t, "doc \"") do
+        let doc_text = extract_single_doc(t)
+        (Some(doc_text), fns, types, ifaces, Nil)
+      else
+        if sw(t, "fn ") do
+          let dsig = extract_sig(line)
+          let name = decl_name(dsig)
+          (None, Cons(FnEntry(name, dsig, pending, false), fns), types, ifaces, Nil)
+        else
+          if sw(t, "pfn ") && include_private do
+            let dsig = extract_sig(line)
+            let name = decl_name(dsig)
+            (None, Cons(FnEntry(name, dsig, pending, true), fns), types, ifaces, Nil)
+          else
+            if sw(t, "type ") do
+              let dsig = extract_sig(line)
+              let name = decl_name(dsig)
+              (None, fns, Cons(TypeEntry(name, dsig, pending), types), ifaces, Nil)
+            else
+              if sw(t, "ptype ") do
+                let dsig = extract_sig(line)
+                let name = decl_name(dsig)
+                (None, fns, Cons(TypeEntry(name, "ptype " ++ dsig, pending), types), ifaces, Nil)
+              else
+                if sw(t, "interface ") do
+                  let dsig = extract_sig(line)
+                  let name = decl_name(dsig)
+                  (None, fns, types, Cons(IfaceEntry(name, dsig, pending, Nil), ifaces), Nil)
+                else
+                  (None, fns, types, ifaces, Nil)
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+-- Walk lines extracting doc + fn/type/interface entries.
+pfn parse_entries(lines, include_private) do
+  fn go(ls, pending, fns, types, ifaces) do
+    match ls do
+    Nil ->
+      (List.reverse(fns), List.reverse(types), List.reverse(ifaces))
+    Cons(line, rest) ->
+      do
+        -- Handle triple-doc specially (consumes multiple lines)
+        let t = trim(line)
+        if sw(t, "doc \"\"\"") do
+          let (doc_text, rest2) = collect_triple_doc(rest)
+          go(rest2, Some(doc_text), fns, types, ifaces)
+        else
+          let (pending2, fns2, types2, ifaces2, _) =
+            process_line(line, pending, fns, types, ifaces, include_private)
+          go(rest, pending2, fns2, types2, ifaces2)
+        end
+      end
+    end
+  end
+  go(lines, None, Nil, Nil, Nil)
+end
+
+-- Parse a .march file into a ModuleInfo (or None if unparseable).
+pfn parse_file(path, include_private) do
+  match File.read(path) do
+  Err(_) -> None
+  Ok(src) ->
+    do
+      let lines = String.split(src, "\n")
+      let mod_name = parse_module_name(lines)
+      let mod_comment = parse_module_comment(lines)
+      let (fns, types, ifaces) = parse_entries(lines, include_private)
+      if mod_name == "Unknown" && List.is_empty(fns) && List.is_empty(types) do
+        None
+      else
+        Some(ModuleInfo(mod_name, mod_comment, fns, types, ifaces))
+      end
+    end
+  end
+end
+
+-- ── File discovery ────────────────────────────────────────────────────────────
+
+pfn walk_march_files(dir) do
+  match Dir.list(dir) do
+  Err(_) -> Nil
+  Ok(names) ->
+    List.flat_map(names, fn name ->
+      let path = dir ++ "/" ++ name
+      if Dir.exists(path) do walk_march_files(path)
+      else
+        if String.ends_with(name, ".march") do Cons(path, Nil)
+        else Nil end
+      end
+    )
+  end
+end
+
+-- ── HTML templates ────────────────────────────────────────────────────────────
+
+pfn page_css() do
+  ":root{--bg:#1a1b1e;--sb:#141517;--card:#25262b;--bdr:#2c2e33;--acc:#a78bfa;" ++
+  "--text:#c9d1d9;--dim:#8b949e;--bright:#f0f6fc;--code:#161b22;" ++
+  "--fn:#58a6ff;--ty:#3fb950;--if:#d29922;--prv:#6e7681}" ++
+  "*{box-sizing:border-box;margin:0;padding:0}" ++
+  "body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:15px;line-height:1.6;display:flex;min-height:100vh}" ++
+  "a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}" ++
+  "code,pre{font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px}" ++
+  "pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:12px 16px;overflow-x:auto;margin:10px 0}" ++
+  "code{background:var(--code);padding:2px 5px;border-radius:3px}pre code{background:none;padding:0}" ++
+  "h1{font-size:1.6rem;color:var(--bright);margin-bottom:8px}" ++
+  "h2{font-size:1.1rem;color:var(--bright);margin:28px 0 10px;border-bottom:1px solid var(--bdr);padding-bottom:5px}" ++
+  "p{margin:7px 0}" ++
+  "#sb{width:260px;min-width:200px;background:var(--sb);border-right:1px solid var(--bdr);padding:22px 14px;position:sticky;top:0;height:100vh;overflow-y:auto;flex-shrink:0}" ++
+  "#sb h1{font-size:.9rem;color:var(--acc);margin-bottom:14px;text-transform:uppercase;letter-spacing:.06em}" ++
+  "#sq{width:100%;background:var(--card);border:1px solid var(--bdr);border-radius:5px;color:var(--text);padding:6px 9px;font-size:13px;margin-bottom:14px;outline:none}" ++
+  "#sq:focus{border-color:#7c3aed}" ++
+  ".sl{display:block;padding:3px 7px;border-radius:4px;font-size:13px;color:var(--text)}" ++
+  ".sl:hover,.sl.active{background:var(--card);color:var(--acc);text-decoration:none}" ++
+  "#main{flex:1;padding:36px 44px;max-width:880px}" ++
+  ".mdoc{background:var(--card);border:1px solid var(--bdr);border-radius:7px;padding:18px 22px;margin-bottom:20px;color:var(--dim);font-size:14px}" ++
+  ".item{border:1px solid var(--bdr);border-radius:7px;margin-bottom:11px;overflow:hidden}" ++
+  ".ih{display:flex;align-items:baseline;gap:9px;padding:10px 14px;background:var(--card);cursor:pointer;user-select:none}" ++
+  ".ih:hover{background:#2d2e33}" ++
+  ".badge{font-size:10px;font-weight:700;letter-spacing:.07em;padding:2px 6px;border-radius:4px;text-transform:uppercase;flex-shrink:0}" ++
+  ".bfn{background:#1d3557;color:var(--fn)}.bpfn{background:#1e2124;color:var(--prv)}" ++
+  ".bty{background:#0d3321;color:var(--ty)}.bpt{background:#1a2416;color:#5a9a60}" ++
+  ".bif{background:#3a2a00;color:var(--if)}" ++
+  ".sig{font-family:monospace;font-size:13px;color:var(--bright);flex:1}" ++
+  ".ib{padding:11px 14px;border-top:1px solid var(--bdr);display:none;font-size:14px}" ++
+  ".ib.open{display:block}" ++
+  ".mc{border:1px solid var(--bdr);border-radius:7px;padding:14px 18px;margin-bottom:10px;background:var(--card)}" ++
+  ".mc:hover{border-color:#7c3aed}.mc h3{color:var(--acc);font-size:.95rem}" ++
+  ".mc p{font-size:13px;color:var(--dim);margin-top:5px}" ++
+  ".st{font-size:12px;color:var(--dim);margin-top:5px}.st span{margin-right:10px}"
+end
+
+pfn page_js() do
+  "document.addEventListener('DOMContentLoaded',function(){" ++
+  "document.querySelectorAll('.ih').forEach(function(h){h.addEventListener('click',function(){var b=this.nextElementSibling;if(b)b.classList.toggle('open');});});" ++
+  "var s=document.getElementById('sq');if(s)s.addEventListener('input',function(){var q=this.value.toLowerCase();" ++
+  "document.querySelectorAll('.sl').forEach(function(a){a.style.display=a.textContent.toLowerCase().includes(q)?'':'none';});" ++
+  "document.querySelectorAll('.item').forEach(function(el){var sig=el.querySelector('.sig');el.style.display=(!q||(sig&&sig.textContent.toLowerCase().includes(q)))?'':'none';});" ++
+  "document.querySelectorAll('.mc').forEach(function(el){el.style.display=(!q||el.textContent.toLowerCase().includes(q))?'':'none';});});" ++
+  "var path=window.location.pathname;" ++
+  "document.querySelectorAll('.sl').forEach(function(a){if(path.endsWith(a.getAttribute('href')))a.classList.add('active');});" ++
+  "});"
+end
+
+pfn page(title, sidebar, is_index, content) do
+  let idx_cls = if is_index do " class=\"sl active\"" else " class=\"sl\"" end
+  "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\">" ++
+  "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">" ++
+  "<title>" ++ html_escape(title) ++ " — March Docs</title>" ++
+  "<style>" ++ page_css() ++ "</style></head><body>" ++
+  "<nav id=\"sb\"><h1>March Docs</h1>" ++
+  "<input id=\"sq\" type=\"search\" placeholder=\"Search\xe2\x80\xa6\" autocomplete=\"off\">" ++
+  "<a href=\"index.html\"" ++ idx_cls ++ ">Overview</a>" ++
+  sidebar ++
+  "</nav><main id=\"main\">" ++ content ++ "</main>" ++
+  "<script>" ++ page_js() ++ "</script></body></html>"
+end
+
+pfn sidebar_links(module_names) do
+  let links = List.map(module_names, fn name ->
+    "<a class=\"sl\" href=\"" ++ html_escape(name) ++ ".html\">" ++
+    html_escape(name) ++ "</a>"
+  )
+  String.join(links, "\n")
+end
+
+-- ── Entry accessors ──────────────────────────────────────────────────────────
+
+pfn fn_entry_priv(e) do match e do FnEntry(_, _, _, p) -> p end end
+pfn mod_info_name(m) do match m do ModuleInfo(n, _, _, _, _) -> n end end
+
+-- ── Doc body helpers ─────────────────────────────────────────────────────────
+
+pfn render_doc_body(doc_opt) do
+  match doc_opt do
+  None -> ""
+  Some(doc) -> "<div class=\"ib\">" ++ md_to_html(doc) ++ "</div>"
+  end
+end
+
+pfn render_comment_html(comment_opt) do
+  match comment_opt do
+  None -> ""
+  Some(c) -> "<div class=\"mdoc\">" ++ md_to_html(c) ++ "</div>"
+  end
+end
+
+-- ── Item rendering ────────────────────────────────────────────────────────────
+
+pfn render_fn(entry) do
+  match entry do
+  FnEntry(name, dsig, doc_opt, is_private) ->
+    let badge_cls = if is_private do "bpfn" else "bfn" end
+    let badge_lbl = if is_private do "pfn" else "fn" end
+    let badge = "<span class=\"badge " ++ badge_cls ++ "\">" ++ badge_lbl ++ "</span>"
+    let hdr = "<div class=\"ih\">" ++ badge ++
+      "<span class=\"sig\">" ++ html_escape(dsig) ++ "</span></div>"
+    let body = render_doc_body(doc_opt)
+    "<div class=\"item\" id=\"fn-" ++ html_escape(name) ++ "\">" ++ hdr ++ body ++ "</div>"
+  end
+end
+
+pfn render_type(entry) do
+  match entry do
+  TypeEntry(name, dsig, doc_opt) ->
+    let is_prv = sw(dsig, "ptype ")
+    let badge_cls = if is_prv do "bpt" else "bty" end
+    let badge_lbl = if is_prv do "ptype" else "type" end
+    let badge = "<span class=\"badge " ++ badge_cls ++ "\">" ++ badge_lbl ++ "</span>"
+    let disp = if is_prv do drop_prefix(dsig, "ptype ") else dsig end
+    let hdr = "<div class=\"ih\">" ++ badge ++
+      "<span class=\"sig\">" ++ html_escape(disp) ++ "</span></div>"
+    let body = render_doc_body(doc_opt)
+    "<div class=\"item\" id=\"type-" ++ html_escape(name) ++ "\">" ++ hdr ++ body ++ "</div>"
+  end
+end
+
+pfn render_iface(entry) do
+  match entry do
+  IfaceEntry(name, dsig, doc_opt, _methods) ->
+    let badge = "<span class=\"badge bif\">interface</span>"
+    let hdr = "<div class=\"ih\">" ++ badge ++
+      "<span class=\"sig\">" ++ html_escape(dsig) ++ "</span></div>"
+    let body = render_doc_body(doc_opt)
+    "<div class=\"item\" id=\"iface-" ++ html_escape(name) ++ "\">" ++ hdr ++ body ++ "</div>"
+  end
+end
+
+-- ── Module page ───────────────────────────────────────────────────────────────
+
+pfn render_module(info, sidebar) do
+  match info do
+  ModuleInfo(mod_name, comment_opt, fns, types, ifaces) ->
+    let title_html = "<h1>" ++ html_escape(mod_name) ++ "</h1>"
+    let comment_html = render_comment_html(comment_opt)
+    let types_html =
+      if List.is_empty(types) do ""
+      else "<h2>Types</h2>" ++ String.join(List.map(types, render_type), "\n") end
+    let ifaces_html =
+      if List.is_empty(ifaces) do ""
+      else "<h2>Interfaces</h2>" ++ String.join(List.map(ifaces, render_iface), "\n") end
+    let pub_fns = List.filter(fns, fn e -> not fn_entry_priv(e))
+    let prv_fns = List.filter(fns, fn e -> fn_entry_priv(e))
+    let pub_html =
+      if List.is_empty(pub_fns) do ""
+      else "<h2>Functions</h2>" ++ String.join(List.map(pub_fns, render_fn), "\n") end
+    let prv_html =
+      if List.is_empty(prv_fns) do ""
+      else "<h2>Private</h2>" ++ String.join(List.map(prv_fns, render_fn), "\n") end
+    let content = title_html ++ comment_html ++ types_html ++ ifaces_html ++ pub_html ++ prv_html
+    page(mod_name, sidebar, false, content)
+  end
+end
+
+-- ── Index page ────────────────────────────────────────────────────────────────
+
+pfn index_card(info) do
+  match info do
+  ModuleInfo(name, comment_opt, fns, types, _) ->
+    let blurb = match comment_opt do
+      None -> ""
+      Some(c) ->
+        let first = match List.head_opt(String.split(c, "\n")) do
+          None -> ""
+          Some(l) -> trim(l)
+        end
+        if String.is_empty(first) do "" else "<p>" ++ html_escape(first) ++ "</p>" end
+    end
+    let fn_count = List.length(List.filter(fns, fn e -> not fn_entry_priv(e)))
+    let ty_count = List.length(types)
+    let stats = "<div class=\"st\"><span>" ++ String.from_int(fn_count) ++
+      " functions</span><span>" ++ String.from_int(ty_count) ++ " types</span></div>"
+    "<a href=\"" ++ html_escape(name) ++ ".html\" style=\"display:block;color:inherit;text-decoration:none\">" ++
+    "<div class=\"mc\"><h3>" ++ html_escape(name) ++ "</h3>" ++ blurb ++ stats ++ "</div></a>"
+  end
+end
+
+pfn render_index(modules, sidebar) do
+  let cards = List.map(modules, index_card)
+  let count = String.from_int(List.length(modules))
+  let content = "<h1>March Standard Library</h1>" ++
+    "<p style=\"color:var(--dim);margin-bottom:20px\">" ++ count ++ " modules</p>" ++
+    String.join(cards, "\n")
+  page("March Docs", sidebar, true, content)
+end
+
+-- ── Main ──────────────────────────────────────────────────────────────────────
+
+fn main() do
+  let output_dir = match System.env("FORGE_DOC_OUTPUT") do
+    None -> "doc"
+    Some(d) -> d
+  end
+  let include_private = match System.env("FORGE_DOC_PRIVATE") do
+    Some("true") -> true
+    _ -> false
+  end
+  let stdlib_dirs = match System.env("FORGE_DOC_STDLIB") do
+    None -> Nil
+    Some(p) -> Cons(p, Nil)
+  end
+  let extra_dirs = match System.env("FORGE_DOC_SRC") do
+    None -> Nil
+    Some(s) ->
+      List.filter(String.split(s, ":"), fn p -> not (String.is_empty(p)))
+  end
+  let all_dirs = List.append(stdlib_dirs, extra_dirs)
+  if List.is_empty(all_dirs) do
+    IO.warn("forge doc: no source directories found (set FORGE_DOC_STDLIB)")
+    System.exit(1)
+  end
+  let all_files = List.sort(List.flat_map(all_dirs, walk_march_files), fn(a, b) -> a < b)
+  IO.warn("forge doc: parsing " ++ String.from_int(List.length(all_files)) ++ " source files...")
+  let modules = List.sort(
+    List.filter_map(all_files, fn path -> parse_file(path, include_private)),
+    fn a b -> mod_info_name(a) < mod_info_name(b)
+  )
+  IO.warn("forge doc: generating " ++ String.from_int(List.length(modules)) ++ " module pages...")
+  match Dir.mkdir_p(output_dir) do
+    Err(_) -> IO.warn("forge doc: cannot create " ++ output_dir); System.exit(1)
+    Ok(_) -> ()
+  end
+  let module_names = List.map(modules, mod_info_name)
+  let sidebar = sidebar_links(module_names)
+  List.each(modules, fn info ->
+    let name = mod_info_name(info)
+    let html = render_module(info, sidebar)
+    match File.write(output_dir ++ "/" ++ name ++ ".html", html) do
+      Err(_) -> IO.warn("forge doc: failed to write " ++ name ++ ".html")
+      Ok(_) -> ()
+    end
+  )
+  let idx = render_index(modules, sidebar)
+  match File.write(output_dir ++ "/index.html", idx) do
+    Err(_) -> IO.warn("forge doc: failed to write index.html")
+    Ok(_) -> ()
+  end
+  IO.puts("forge doc: generated " ++ String.from_int(List.length(modules)) ++
+    " module pages in " ++ output_dir ++ "/")
+  IO.puts("  open " ++ output_dir ++ "/index.html")
+end
+
+end

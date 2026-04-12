@@ -1,0 +1,89 @@
+# Introduction to March
+
+Welcome to this interactive March notebook. Code cells below are evaluated in
+sequence, with bindings carrying forward between cells.
+
+## Basic Expressions
+
+Let's start with some simple values and printing.
+
+```march
+let greeting = "Hello, March notebooks!"
+print(greeting)
+```
+
+```march
+let x = 42
+let y = x * 2 + 1
+print(to_string(y))
+```
+
+## Working with Lists
+
+March has built-in list support with a rich standard library.
+
+```march
+let nums = [1, 2, 3, 4, 5]
+let doubled = List.map(nums, fn n -> n * 2)
+print(to_string(doubled))
+```
+
+```march
+let total = List.fold_left(0, nums, fn (acc, n) -> acc + n)
+print(to_string(total))
+```
+
+```march
+let evens = List.filter(nums, fn n -> n % 2 == 0)
+print(to_string(evens))
+```
+
+## Functions
+
+You can define functions in code cells and use them in later cells.
+
+```march
+fn square(n) do
+  n * n
+end
+
+fn sum_of_squares(lst) do
+  let mapped = List.map(lst, fn n -> square(n))
+  List.fold_left(0, mapped, fn (acc, n) -> acc + n)
+end
+```
+
+```march
+let result = sum_of_squares([1, 2, 3, 4, 5])
+print(to_string(result))
+```
+
+## Pattern Matching
+
+March supports expressive pattern matching with guards using `when`.
+
+```march
+fn classify(n) do
+  match n do
+    0 -> "zero"
+    n when n < 0 -> "negative"
+    _ -> "positive"
+  end
+end
+
+print(classify(-5))
+print(classify(0))
+print(classify(42))
+```
+
+## String Operations
+
+```march
+let words = ["march", "notebooks", "are", "great"]
+let sentence = String.join(words, " ")
+print(sentence)
+```
+
+---
+
+*This notebook was generated with `forge notebook`.*

@@ -369,6 +369,41 @@ let compile_cmd =
            ~doc:"Compile a single .march file and dump all compiler phases to trace/phases/phases.json")
     Term.(const run $ file)
 
+(* ------------------------------------------------------------------- forge doc *)
+
+let doc_cmd =
+  let output =
+    Arg.(value & opt string "doc" &
+         info ["o"; "output"] ~docv:"DIR"
+           ~doc:"Output directory for generated HTML (default: doc)")
+  in
+  let private_ =
+    Arg.(value & flag & info ["private"] ~doc:"Include private functions in output")
+  in
+  let stdlib_only =
+    Arg.(value & flag & info ["stdlib"] ~doc:"Document stdlib only (skip project sources)")
+  in
+  let run o p s = handle (Cmd_doc.run ~output_dir:o ~include_private:p ~stdlib_only:s ()) in
+  Cmd.v (Cmd.info "doc" ~doc:"Generate HTML documentation from March source files")
+    Term.(const run $ output $ private_ $ stdlib_only)
+
+(* --------------------------------------------------------------- forge notebook *)
+
+let notebook_cmd =
+  let input =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"FILE.mnb" ~doc:"Path to the .mnb notebook file")
+  in
+  let output =
+    Arg.(value & opt (some string) None &
+         info ["o"; "output"] ~docv:"FILE.html"
+           ~doc:"Output HTML path (default: <input>.html)")
+  in
+  let run i o = handle (Cmd_notebook.run ~input:i ~output:o ()) in
+  Cmd.v (Cmd.info "notebook"
+           ~doc:"Evaluate a March notebook (.mnb) and generate an HTML report")
+    Term.(const run $ input $ output)
+
 (* ------------------------------------------------------------------ forge phases *)
 
 let phases_cmd =
@@ -395,7 +430,7 @@ let () =
     [ new_cmd; init_cmd; build_cmd; run_cmd; compile_cmd; test_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; publish_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
-      search_cmd; phases_cmd; help_cmd ]
+      search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
   in
   let main =
     Cmd.group ~default:default_term

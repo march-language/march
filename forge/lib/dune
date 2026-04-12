@@ -3,6 +3,26 @@
  (libraries unix march_search march_format yojson digestif))
 
 (rule
+ (target doc_march_src.ml)
+ (deps ../tasks/doc.march)
+ (action
+  (with-stdout-to %{target}
+   (progn
+    (echo "let content = {forge_doc_march|\n")
+    (cat %{dep:../tasks/doc.march})
+    (echo "\n|forge_doc_march}\n")))))
+
+(rule
+ (target notebook_march_src.ml)
+ (deps ../tasks/notebook.march)
+ (action
+  (with-stdout-to %{target}
+   (progn
+    (echo "let content = {forge_notebook_march|\n")
+    (cat %{dep:../tasks/notebook.march})
+    (echo "\n|forge_notebook_march}\n")))))
+
+(rule
  (target phase_viewer_html.ml)
  (deps ../../tools/phase-viewer.html)
  (action

@@ -1,0 +1,512 @@
+-- forge notebook — March notebook runner (.mnb format).
+--
+-- An .mnb file is a Markdown document where ```march ... ``` fenced code
+-- blocks are evaluatable March code cells.  Cells are evaluated in sequence;
+-- bindings carry forward between cells.  Output is captured per cell.
+--
+-- Invoked by the forge notebook OCaml shim with environment variables:
+--   FORGE_NB_INPUT    path to the .mnb file (required)
+--   FORGE_NB_OUTPUT   path for the generated .html file
+--   FORGE_NB_MARCH    path to the march binary (optional, defaults to "march")
+--   MARCH_LIB_PATH    set by shim for stdlib access (used automatically)
+--
+-- Architecture: the runner generates a single .march source file with all
+-- code cells inside one fn main() do ... end block, with unique sentinel
+-- strings printed before and after each cell's code.  Running that file
+-- once captures all per-cell outputs in one pass.
+
+mod ForgeNotebook do
+
+-- ── Cell types ────────────────────────────────────────────────────────────────
+
+type Cell = Markdown(String) | Code(String)
+
+-- CellResult(index, source, stdout, error)
+type CellResult = CellResult(Int, String, String, Option(String))
+
+-- ── String helpers ────────────────────────────────────────────────────────────
+
+pfn trim(s) do String.trim(s) end
+
+pfn sw(s, p) do String.starts_with(s, p) end
+
+pfn bs(s) do String.byte_size(s) end
+
+pfn slice(s, i, n) do String.slice(s, i, n) end
+
+pfn drop_prefix(s, prefix) do
+  slice(s, bs(prefix), bs(s) - bs(prefix))
+end
+
+pfn html_escape(s) do
+  let s = String.replace_all(s, "&", "&amp;")
+  let s = String.replace_all(s, "<", "&lt;")
+  let s = String.replace_all(s, ">", "&gt;")
+  let s = String.replace_all(s, "\"", "&quot;")
+  s
+end
+
+-- ── Markdown → HTML (simplified) ─────────────────────────────────────────────
+
+pfn fmt_inline(s) do
+  -- Inline code: `...`
+  if String.contains(s, "`") do
+    fn replace_ticks(s, acc) do
+      match String.split_first(s, "`") do
+        None -> acc ++ html_escape(s)
+        Some((before, after)) ->
+          match String.split_first(after, "`") do
+            None -> acc ++ html_escape(before) ++ "`" ++ html_escape(after)
+            Some((code, rest)) ->
+              replace_ticks(rest, acc ++ html_escape(before) ++ "<code>" ++ html_escape(code) ++ "</code>")
+          end
+      end
+    end
+    replace_ticks(s, "")
+  else
+    html_escape(s)
+  end
+end
+
+pfn markdown_to_html(md) do
+  let lines = String.split(md, "\n")
+  fn go(lines, acc, para_open, list_open) do
+    match lines do
+      Nil ->
+        let acc = if list_open do Cons("</ul>", acc) else acc end
+        let acc = if para_open do Cons("</p>", acc) else acc end
+        String.join(List.reverse(acc), "")
+      Cons(line, rest) ->
+        let t = trim(line)
+        let is_empty = String.is_empty(t)
+        if is_empty do
+          let acc = if list_open do Cons("</ul>", acc) else acc end
+          let acc = if para_open do Cons("</p>", acc) else acc end
+          go(rest, acc, false, false)
+        else if t == "---" || t == "***" || t == "___" do
+          let acc = if list_open do Cons("</ul>", acc) else acc end
+          let acc = if para_open do Cons("</p>", acc) else acc end
+          go(rest, Cons("<hr>", acc), false, false)
+        else if bs(t) >= 4 && slice(t, 0, 4) == "### " do
+          let acc = if list_open do Cons("</ul>", acc) else acc end
+          let acc = if para_open do Cons("</p>", acc) else acc end
+          let heading = slice(t, 4, bs(t) - 4)
+          go(rest, Cons("<h3>" ++ fmt_inline(heading) ++ "</h3>", acc), false, false)
+        else if bs(t) >= 3 && slice(t, 0, 3) == "## " do
+          let acc = if list_open do Cons("</ul>", acc) else acc end
+          let acc = if para_open do Cons("</p>", acc) else acc end
+          let heading = slice(t, 3, bs(t) - 3)
+          go(rest, Cons("<h2>" ++ fmt_inline(heading) ++ "</h2>", acc), false, false)
+        else if bs(t) >= 2 && slice(t, 0, 2) == "# " do
+          let acc = if list_open do Cons("</ul>", acc) else acc end
+          let acc = if para_open do Cons("</p>", acc) else acc end
+          let heading = slice(t, 2, bs(t) - 2)
+          go(rest, Cons("<h1>" ++ fmt_inline(heading) ++ "</h1>", acc), false, false)
+        else if bs(t) >= 2 && (slice(t, 0, 2) == "- " || slice(t, 0, 2) == "* ") do
+          let acc = if para_open do Cons("</p>", acc) else acc end
+          let acc = if !(list_open) do Cons("<ul>", acc) else acc end
+          let item = slice(t, 2, bs(t) - 2)
+          go(rest, Cons("<li>" ++ fmt_inline(item) ++ "</li>", acc), false, true)
+        else
+          let acc = if list_open do Cons("</ul>", acc) else acc end
+          let acc = if !(para_open) do Cons("<p>", acc) else Cons(" ", acc) end
+          go(rest, Cons(fmt_inline(t), acc), true, false)
+        end end end end end end
+    end
+  end
+  go(lines, Nil, false, false)
+end
+
+-- ── Cell parser ───────────────────────────────────────────────────────────────
+
+pfn parse_cells(content) do
+  let lines = String.split(content, "\n")
+  fn go(lines, cells, buf, code_open) do
+    match lines do
+      Nil ->
+        let text = String.join(List.reverse(buf), "\n")
+        if code_open do
+          List.reverse(Cons(Code(text), cells))
+        else
+          let trimmed = trim(text)
+          if String.is_empty(trimmed) do
+            List.reverse(cells)
+          else
+            List.reverse(Cons(Markdown(trimmed), cells))
+          end
+        end
+      Cons(line, rest) ->
+        let stripped = trim(line)
+        if code_open do
+          if stripped == "```" do
+            let code = String.join(List.reverse(buf), "\n")
+            go(rest, Cons(Code(code), cells), Nil, false)
+          else
+            go(rest, cells, Cons(line, buf), true)
+          end
+        else
+          if stripped == "```march" do
+            let text = trim(String.join(List.reverse(buf), "\n"))
+            let new_cells =
+              if String.is_empty(text) do cells
+              else Cons(Markdown(text), cells)
+              end
+            go(rest, new_cells, Nil, true)
+          else
+            go(rest, cells, Cons(line, buf), false)
+          end
+        end
+    end
+  end
+  go(lines, Nil, Nil, false)
+end
+
+pfn extract_title(cells) do
+  match cells do
+    Nil -> None
+    Cons(Markdown(md), _) ->
+      let lines = String.split(md, "\n")
+      match List.find(lines, fn l -> bs(l) >= 2 && slice(l, 0, 2) == "# ") do
+        Some(h) -> Some(trim(slice(h, 2, bs(h) - 2)))
+        None    -> None
+      end
+    Cons(_, rest) -> extract_title(rest)
+  end
+end
+
+-- ── March source generator ────────────────────────────────────────────────────
+
+-- Unique marker strings for output capture
+pfn cell_start_marker(n) do "__MNB_START_" ++ String.from_int(n) ++ "__" end
+pfn cell_end_marker(n)   do "__MNB_END_"   ++ String.from_int(n) ++ "__" end
+
+-- Generate a combined .march source file that runs all code cells inside
+-- a single fn main() do ... end block, separated by sentinel println calls.
+pfn generate_runner(cells) do
+  fn go(cells, acc, n) do
+    match cells do
+      Nil -> List.reverse(acc)
+      Cons(Markdown(_), rest) -> go(rest, acc, n)
+      Cons(Code(src), rest) ->
+        let start = "  println(\"" ++ cell_start_marker(n) ++ "\")\n"
+        let end_s = "  println(\"" ++ cell_end_marker(n) ++ "\")\n"
+        -- Indent each line of the cell source by 2 spaces so it reads
+        -- cleanly inside the fn main() do ... end block.
+        let indented = String.join(
+          List.map(String.split(src, "\n"), fn l -> "  " ++ l),
+          "\n"
+        ) ++ "\n"
+        go(rest, Cons(end_s, Cons(indented, Cons(start, acc))), n + 1)
+    end
+  end
+  let body_parts = go(cells, Nil, 0)
+  let body = String.join(body_parts, "")
+  "mod NotebookRunner do\nfn main() do\n" ++ body ++ "end\nend\n"
+end
+
+-- ── Output parser ─────────────────────────────────────────────────────────────
+
+-- Extract the text between cell_start_marker(n) and cell_end_marker(n)
+-- from the combined stdout string.
+pfn extract_cell_output(stdout, n) do
+  let start_marker = cell_start_marker(n)
+  let end_marker   = cell_end_marker(n)
+  match String.split_first(stdout, start_marker) do
+    None -> ""
+    Some((_, after_start)) ->
+      -- Skip the newline that follows the marker
+      let after_start =
+        if sw(after_start, "\n") do drop_prefix(after_start, "\n")
+        else after_start
+        end
+      match String.split_first(after_start, end_marker) do
+        None -> trim(after_start)
+        Some((between, _)) ->
+          -- Trim trailing newline that precedes the end marker
+          let s = between
+          let s =
+            if String.ends_with(s, "\n") do
+              slice(s, 0, bs(s) - 1)
+            else s
+            end
+          s
+      end
+  end
+end
+
+-- Given the combined stdout and the list of cells, produce per-cell results.
+pfn parse_cell_results(stdout, cells, error_msg) do
+  fn go(cells, acc, n) do
+    match cells do
+      Nil -> List.reverse(acc)
+      Cons(Markdown(_), rest) ->
+        let r = CellResult(n, "", "", None)
+        go(rest, Cons(r, acc), n + 1)
+      Cons(Code(src), rest) ->
+        let (cell_out, cell_err) = match error_msg do
+          Some(err) -> ("", Some(err))
+          None      ->
+            let out = extract_cell_output(stdout, n)
+            (out, None)
+        end
+        let r = CellResult(n, src, cell_out, cell_err)
+        go(rest, Cons(r, acc), n + 1)
+    end
+  end
+  -- We need to number only code cells for the marker, but keep markdown index
+  fn go2(cells, acc, code_n, total_n) do
+    match cells do
+      Nil -> List.reverse(acc)
+      Cons(Markdown(_), rest) ->
+        let r = CellResult(total_n, "", "", None)
+        go2(rest, Cons(r, acc), code_n, total_n + 1)
+      Cons(Code(src), rest) ->
+        let (cell_out, cell_err) = match error_msg do
+          Some(err) -> ("", Some(err))
+          None      ->
+            let out = extract_cell_output(stdout, code_n)
+            (out, None)
+        end
+        let r = CellResult(total_n, src, cell_out, cell_err)
+        go2(rest, Cons(r, acc), code_n + 1, total_n + 1)
+    end
+  end
+  go2(cells, Nil, 0, 0)
+end
+
+-- ── Notebook evaluator ────────────────────────────────────────────────────────
+
+pfn run_cells(cells, march_bin) do
+  let src = generate_runner(cells)
+  -- Write runner to temp file
+  let tmp = "/tmp/__forge_notebook_runner__.march"
+  match File.write(tmp, src) do
+    Err(msg) ->
+      let err = "failed to write temp file: " ++ msg
+      parse_cell_results("", cells, Some(err))
+    Ok(_) ->
+      -- Run march on the generated file
+      match Process.run(march_bin, [tmp]) do
+        Err(msg) ->
+          parse_cell_results("", cells, Some("march invocation failed: " ++ msg))
+        Ok(result) ->
+          let exit_code = Process.exit_code(result)
+          let stdout    = Process.stdout(result)
+          let stderr    = Process.stderr(result)
+          if exit_code != 0 do
+            -- Whole run failed — show stderr as the error for all code cells
+            let err = if String.is_empty(trim(stderr)) do
+              "march exited with code " ++ String.from_int(exit_code)
+            else trim(stderr)
+            end
+            parse_cell_results("", cells, Some(err))
+          else
+            parse_cell_results(stdout, cells, None)
+          end
+      end
+  end
+end
+
+-- ── CSS ───────────────────────────────────────────────────────────────────────
+
+pfn notebook_css() do
+  """<style>
+:root{--accent:#7c3aed;--code-bg:#1e1e2e;--code-fg:#cdd6f4;--out-bg:#f8fafc;--out-bd:#e2e8f0;--err-bg:#fef2f2;--err-fg:#dc2626;--err-bd:#fca5a5;--cell-bd:#e2e8f0;--val-fg:#0550ae}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#fff;color:#1a1a2e;max-width:920px;margin:0 auto;padding:48px 24px 80px;line-height:1.65}
+header{margin-bottom:48px;padding-bottom:20px;border-bottom:3px solid var(--accent)}
+header h1{font-size:30px;color:var(--accent);font-weight:700}
+header .meta{font-size:13px;color:#6b7280;margin-top:6px}
+.cell{margin:24px 0}
+.cell-md{padding:4px 0}
+.cell-md h1{font-size:26px;margin:20px 0 10px;font-weight:700}
+.cell-md h2{font-size:20px;margin:16px 0 8px;font-weight:600}
+.cell-md h3{font-size:16px;margin:14px 0 6px;font-weight:600}
+.cell-md p{margin:8px 0;color:#374151}
+.cell-md ul{margin:8px 0 8px 24px}
+.cell-md li{margin:3px 0;color:#374151}
+.cell-md hr{border:none;border-top:1px solid #e5e7eb;margin:16px 0}
+.cell-md code{font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px;background:#f3f4f6;padding:2px 5px;border-radius:4px;color:#9333ea}
+.cell-md strong{font-weight:600}
+.cell-md em{font-style:italic}
+.code-wrap{border:1px solid var(--cell-bd);border-radius:10px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+.cell-label{font-size:11px;font-family:'JetBrains Mono',monospace;color:#9ca3af;background:#f9fafb;padding:5px 14px;border-bottom:1px solid var(--cell-bd);letter-spacing:.03em}
+.code-src{background:var(--code-bg);color:var(--code-fg);font-family:'JetBrains Mono','Fira Code',monospace;font-size:13.5px;line-height:1.6;padding:18px 20px;overflow-x:auto;white-space:pre;tab-size:2}
+.cell-out{background:var(--out-bg);border-top:1px solid var(--out-bd);padding:12px 18px;font-family:'JetBrains Mono',monospace;font-size:13px;white-space:pre-wrap;word-break:break-word;color:#1f2937}
+.cell-err{background:var(--err-bg);border-top:2px solid var(--err-bd);padding:12px 18px;font-family:'JetBrains Mono',monospace;font-size:13px;color:var(--err-fg);white-space:pre-wrap}
+footer{margin-top:72px;padding-top:20px;border-top:1px solid #e5e7eb;font-size:12px;color:#9ca3af;text-align:center}
+</style>"""
+end
+
+-- ── HTML generator ────────────────────────────────────────────────────────────
+
+pfn cell_html(cell, result, code_idx) do
+  match cell do
+    Markdown(md) ->
+      "<div class=\"cell cell-md\">\n" ++ markdown_to_html(md) ++ "\n</div>\n"
+    Code(_) ->
+      let (CellResult(_, src, stdout_text, err_opt)) = result
+      let label = "In [" ++ String.from_int(code_idx) ++ "]"
+      let src_html = "<pre class=\"code-src\">" ++ html_escape(trim(src)) ++ "</pre>\n"
+      let out_html = match err_opt do
+        Some(err) ->
+          "<div class=\"cell-err\">" ++ html_escape(err) ++ "</div>\n"
+        None ->
+          let s = trim(stdout_text)
+          if String.is_empty(s) do ""
+          else "<div class=\"cell-out\">" ++ html_escape(s) ++ "</div>\n"
+          end
+      end
+      "<div class=\"cell\">\n<div class=\"code-wrap\">\n" ++
+      "<div class=\"cell-label\">" ++ html_escape(label) ++ "</div>\n" ++
+      src_html ++ out_html ++
+      "</div>\n</div>\n"
+  end
+end
+
+pfn to_html(title, cells, results, date_str) do
+  let header =
+    "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n" ++
+    "<meta charset=\"UTF-8\">\n" ++
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\n" ++
+    "<title>" ++ html_escape(title) ++ "</title>\n" ++
+    notebook_css() ++
+    "</head>\n<body>\n" ++
+    "<header>\n<h1>" ++ html_escape(title) ++ "</h1>\n" ++
+    "<div class=\"meta\">Evaluated " ++ date_str ++
+    " &middot; forge notebook &middot; March</div>\n</header>\n<main>\n"
+  let footer =
+    "</main>\n<footer>Generated by <strong>forge notebook</strong> &middot; " ++
+    date_str ++ "</footer>\n</body>\n</html>\n"
+  fn go(cells, results, acc, code_idx) do
+    match (cells, results) do
+      (Nil, _) -> List.reverse(acc)
+      (_, Nil) -> List.reverse(acc)
+      (Cons(cell, rest_cells), Cons(result, rest_results)) ->
+        let n = match cell do
+          Markdown(_) -> code_idx
+          Code(_)     -> code_idx + 1
+        end
+        let html = cell_html(cell, result, match cell do
+          Markdown(_) -> code_idx
+          Code(_)     -> code_idx + 1
+        end)
+        go(rest_cells, rest_results, Cons(html, acc), n)
+      _ -> List.reverse(acc)
+    end
+  end
+  -- Pair cells with results and generate HTML
+  fn go2(cells, results, acc, code_n) do
+    match (cells, results) do
+      (Nil, _) -> List.reverse(acc)
+      (_, Nil) -> List.reverse(acc)
+      (Cons(cell, rc), Cons(result, rr)) ->
+        let html = match cell do
+
+          Markdown(md) ->
+            "<div class=\"cell cell-md\">\n" ++ markdown_to_html(md) ++ "\n</div>\n"
+          Code(_) ->
+            let (CellResult(_, src, stdout_text, err_opt)) = result
+            let label = "In [" ++ String.from_int(code_n + 1) ++ "]"
+            let src_html = "<pre class=\"code-src\">" ++ html_escape(trim(src)) ++ "</pre>\n"
+            let out_html = match err_opt do
+              Some(err) ->
+                "<div class=\"cell-err\">" ++ html_escape(err) ++ "</div>\n"
+              None ->
+                let s = trim(stdout_text)
+                if String.is_empty(s) do ""
+                else "<div class=\"cell-out\">" ++ html_escape(s) ++ "</div>\n"
+                end
+            end
+            "<div class=\"cell\">\n<div class=\"code-wrap\">\n" ++
+            "<div class=\"cell-label\">" ++ label ++ "</div>\n" ++
+            src_html ++ out_html ++
+            "</div>\n</div>\n"
+        end
+        let new_code_n = match cell do
+          Markdown(_) -> code_n
+          Code(_)     -> code_n + 1
+        end
+        go2(rc, rr, Cons(html, acc), new_code_n)
+      _ -> List.reverse(acc)
+    end
+  end
+  let body_parts = go2(cells, results, Nil, 0)
+  let body = String.join(body_parts, "")
+  header ++ body ++ footer
+end
+
+-- ── Main entry point ──────────────────────────────────────────────────────────
+
+fn main() do
+  let input_path = match System.env("FORGE_NB_INPUT") do
+    Some(p) -> p
+    None    ->
+      IO.warn("forge notebook: FORGE_NB_INPUT not set")
+      Process.exit(1)
+      ""
+  end
+
+  let output_path = match System.env("FORGE_NB_OUTPUT") do
+    Some(p) -> p
+    None    ->
+      -- Default: replace .mnb extension with .html
+      match String.split_first(input_path, ".mnb") do
+        Some((base, _)) -> base ++ ".html"
+        None            -> input_path ++ ".html"
+      end
+  end
+
+  let march_bin = match System.env("FORGE_NB_MARCH") do
+    Some(b) -> b
+    None    -> "march"
+  end
+
+  -- Read notebook file
+  match File.read(input_path) do
+    Err(msg) ->
+      IO.warn("forge notebook: cannot read " ++ input_path ++ ": " ++ msg)
+      Process.exit(1)
+    Ok(content) ->
+      let cells = parse_cells(content)
+      let code_count = List.length(List.filter(cells, fn c ->
+        match c do
+          Code(_) -> true
+          Markdown(_) -> false
+        end
+      ))
+      let title = match extract_title(cells) do
+        Some(t) -> t
+        None    ->
+          match String.split_first(input_path, ".mnb") do
+            Some((base, _)) ->
+              match List.find(String.split(base, "/"), fn _ -> true) do
+                Some(last) ->
+                  let parts = String.split(base, "/")
+                  List.nth(parts, List.length(parts) - 1)
+                None -> base
+              end
+            None -> input_path
+          end
+      end
+
+      IO.puts("forge notebook: " ++ title ++ " (" ++ String.from_int(List.length(cells)) ++ " cells)")
+      IO.puts("forge notebook: evaluating " ++ String.from_int(code_count) ++ " code cell(s)...")
+
+      let results = run_cells(cells, march_bin)
+
+      -- Generate HTML (use a simple date placeholder since March has no date builtin)
+      let date_str = "generated"
+      let html = to_html(title, cells, results, date_str)
+
+      match File.write(output_path, html) do
+        Err(msg) ->
+          IO.warn("forge notebook: cannot write " ++ output_path ++ ": " ++ msg)
+          Process.exit(1)
+        Ok(_) ->
+          IO.puts("forge notebook: wrote " ++ output_path)
+      end
+  end
+end
+
+end
