@@ -68,19 +68,31 @@ let starts_with_pipe buf =
 
 (** True if the last non-blank line ends with a token that implies the
     expression continues on the next line: trailing [=] (let/fn binding),
-    [->] (lambda or match arm arrow), or keywords [then]/[else]. *)
+    [->] (lambda or match arm arrow), [|>] (pipe forward), binary operators
+    [++]/[+]/[-]/[*]/[/], or keywords [then]/[else]. *)
 let ends_with_continuation buf =
   let l = last_non_blank_line buf in
   let n = String.length l in
   if n = 0 then false
   else begin
-    (* Trailing -> *)
-    let trailing_arrow = n >= 2 && l.[n-1] = '>' && l.[n-2] = '-' in
+    (* Trailing -> (lambda/match arrow) but not |> *)
+    let trailing_arrow =
+      n >= 2 && l.[n-1] = '>' && l.[n-2] = '-' in
+    (* Trailing |> (pipe forward) *)
+    let trailing_pipe =
+      n >= 2 && l.[n-1] = '>' && l.[n-2] = '|' in
     (* Trailing = but not ==, !=, <=, >= *)
     let trailing_eq =
       l.[n-1] = '='
       && not (n >= 2 &&
               (l.[n-2] = '=' || l.[n-2] = '!' || l.[n-2] = '<' || l.[n-2] = '>')) in
+    (* Trailing binary operators that imply a right operand follows *)
+    let trailing_binop =
+      (n >= 2 && l.[n-1] = '+' && l.[n-2] = '+')  (* ++ *)
+      || (l.[n-1] = '+' && (n < 2 || l.[n-2] <> '+'))  (* + but not ++ *)
+      || (l.[n-1] = '-' && (n < 2 || (l.[n-2] <> '-' && l.[n-2] <> '>')))  (* - but not -- or -> *)
+      || l.[n-1] = '*'
+      || (l.[n-1] = '/' && (n < 2 || l.[n-2] <> '/')) in  (* / but not // *)
     (* Trailing keyword: then or else *)
     let trailing_kw =
       let words = String.split_on_char ' ' (String.trim l) in
@@ -88,7 +100,7 @@ let ends_with_continuation buf =
       | w :: _ -> w = "then" || w = "else"
       | []     -> false
     in
-    trailing_arrow || trailing_eq || trailing_kw
+    trailing_arrow || trailing_pipe || trailing_eq || trailing_binop || trailing_kw
   end
 
 (** True when [buf] appears syntactically complete (safe to submit). *)
