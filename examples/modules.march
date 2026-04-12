@@ -1,10 +1,16 @@
--- March module system demonstration
--- Shows: nested module definitions, qualified access, import from stdlib,
--- and alias for stdlib modules.
+-- modules.march — March module system
+--
+-- Covers:
+--   1. Basic module with qualified access (Module.function)
+--   2. Two-level nesting (Outer.Inner.function)
+--   3. Private functions (pfn) vs public functions (fn)
+--
+-- Run: dune exec march -- examples/modules.march
 
-mod Example do
+mod ModuleDemo do
 
-  -- Define a module with math utilities
+  -- ── Part 1: Basic qualified access ──────────────────────────────────────
+
   mod MathUtils do
     fn square(x : Int) : Int do x * x end
     fn cube(x : Int) : Int do x * x * x end
@@ -13,42 +19,68 @@ mod Example do
     end
   end
 
-  -- Define a greeting module
-  mod Greet do
-    fn prefix() : Int do 1000 end
+  fn demo_qualified() do
+    let a = MathUtils.square(4)     -- 16
+    let b = MathUtils.cube(3)       -- 27
+    let c = MathUtils.abs_val(0 - 5) -- 5
+    println("square(4)=" ++ int_to_string(a)
+      ++ "  cube(3)=" ++ int_to_string(b)
+      ++ "  abs(-5)=" ++ int_to_string(c))
   end
 
-  -- 1. Qualified access: call functions via Module.function
-  fn demo_qualified() : Int do
-    let a = MathUtils.square(4)    -- 16
-    let b = MathUtils.cube(3)      -- 27
-    a + b                          -- 43
+  -- ── Part 2: Two-level nesting ────────────────────────────────────────────
+
+  mod Geometry do
+    mod Rect do
+      fn area(w : Int, h : Int) : Int do w * h end
+      fn perimeter(w : Int, h : Int) : Int do (w + h) * 2 end
+    end
+
+    mod Triangle do
+      fn area(base : Int, height : Int) : Int do (base * height) / 2 end
+    end
   end
 
-  -- 2. Use stdlib functions via qualified access
-  fn demo_stdlib() : String do
-    let xs = [1, 2, 3, 4, 5]
-    let doubled = List.map(xs, fn x -> x * 2)
-    let evens   = List.filter(doubled, fn x -> x > 4)
-    let total   = List.fold_left(0, evens, fn (acc, x) -> acc + x)
-    int_to_string(total)
+  fn demo_nested() do
+    let ra = Geometry.Rect.area(6, 7)            -- 42
+    let rp = Geometry.Rect.perimeter(6, 7)       -- 26
+    let ta = Geometry.Triangle.area(10, 4)       -- 20
+    println("Rect.area=" ++ int_to_string(ra)
+      ++ "  Rect.perimeter=" ++ int_to_string(rp)
+      ++ "  Triangle.area=" ++ int_to_string(ta))
   end
 
-  -- 3. Access nested module fields directly using qualified names
-  fn demo_nested() : Int do
-    let a = MathUtils.abs_val(0 - 7)   -- 7
-    let b = Greet.prefix()             -- 1000
-    a + b                              -- 1007
+  -- ── Part 3: Public vs private (pfn) ─────────────────────────────────────
+  --
+  -- pfn functions are only callable within their defining module.
+  -- Callers see only the public API.
+
+  mod Crypto do
+    fn encode(x : Int) : Int do
+      add_checksum(scramble(x))
+    end
+
+    fn decode(x : Int) : Int do
+      unscramble(remove_checksum(x))
+    end
+
+    pfn scramble(x : Int) : Int do x * 31 + 7 end
+    pfn unscramble(x : Int) : Int do (x - 7) / 31 end
+    pfn add_checksum(x : Int) : Int do x + 100 end
+    pfn remove_checksum(x : Int) : Int do x - 100 end
   end
 
-  fn main() : Unit do
-    let q  = demo_qualified()    -- 43
-    let s  = demo_stdlib()       -- e.g. "30"
-    let n  = demo_nested()       -- 1007
-    println("qualified:  " ++ int_to_string(q))
-    println("stdlib:     " ++ s)
-    println("nested:     " ++ int_to_string(n))
-    println("total:      " ++ int_to_string(q + n))
+  fn demo_private() do
+    let encoded = Crypto.encode(42)
+    let decoded = Crypto.decode(encoded)
+    println("encode(42)=" ++ int_to_string(encoded)
+      ++ "  decode(encode(42))=" ++ int_to_string(decoded))
+  end
+
+  fn main() do
+    demo_qualified()
+    demo_nested()
+    demo_private()
   end
 
 end
