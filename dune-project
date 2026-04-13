@@ -36,6 +36,7 @@
   (cmdliner (>= 1.3.0))
   (alcotest (>= 1.7.0))
   (digestif (>= 1.0))
+  (yojson (>= 2.0))
   (qcheck-core (and (>= 0.91) :with-test))
   (qcheck-alcotest (and (>= 0.91) :with-test))))
 
