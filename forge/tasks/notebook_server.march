@@ -322,27 +322,71 @@ pfn generate_runner(cells, run_through_idx) do
     end
   end
 
-  fn go(cells, chunks, code_n, total_n) do
+  -- True if the first non-blank line of src starts with `fn ` or `pfn `.
+  -- Such cells contain module-level function declarations, not expressions.
+  fn is_fn_def_cell(src) do
+    fn first_nonblank(ls) do
+      match ls do
+        Nil -> ""
+        Cons(l, rest) ->
+          if String.is_empty(trim(l)) do first_nonblank(rest)
+          else trim(l)
+          end
+      end
+    end
+    let t = first_nonblank(cell_lines(src))
+    String.starts_with(t, "fn ") || String.starts_with(t, "pfn ")
+  end
+
+  -- For a function-definition cell: returns (module_code, main_marker_code).
+  -- The function bodies go at module level; the markers go inside main() so
+  -- extract_cell_output can still find them (showing an empty result is fine).
+  fn make_fn_def_cell(src, n) do
+    let ns   = String.from_int(n)
+    let rvar = "__r" ++ ns ++ "__"
+    let svar = "__s" ++ ns ++ "__"
+    let mod_code  = String.join(cell_lines(src), "\n") ++ "\n\n"
+    let main_code =
+      "  println(\"" ++ cell_start_marker(n) ++ "\")\n" ++
+      "  let " ++ rvar ++ " = ()\n" ++
+      "  let " ++ svar ++ " = to_string(" ++ rvar ++ ")\n" ++
+      "  println(\"" ++ cell_end_marker(n) ++ "\")\n"
+    (mod_code, main_code)
+  end
+
+  -- go returns (module_level_chunks, main_body_chunks), both in reverse.
+  fn go(cells, mod_rev, body_rev, code_n, total_n) do
     if total_n > run_through_idx do
-      List.reverse(chunks)
+      (List.reverse(mod_rev), List.reverse(body_rev))
     else
       match cells do
-        Nil -> List.reverse(chunks)
-        Cons(Markdown(_), rest)   -> go(rest, chunks, code_n, total_n + 1)
-        Cons(ServerCell(_), rest) -> go(rest, chunks, code_n, total_n + 1)
+        Nil -> (List.reverse(mod_rev), List.reverse(body_rev))
+        Cons(Markdown(_), rest)   -> go(rest, mod_rev, body_rev, code_n, total_n + 1)
+        Cons(ServerCell(_), rest) -> go(rest, mod_rev, body_rev, code_n, total_n + 1)
         Cons(Code(src), rest) ->
-          go(rest,
-            Cons(make_cell_inline(src, code_n), chunks),
-            code_n + 1,
-            total_n + 1)
+          if is_fn_def_cell(src) do
+            let (mod_code, main_code) = make_fn_def_cell(src, code_n)
+            go(rest,
+              Cons(mod_code, mod_rev),
+              Cons(main_code, body_rev),
+              code_n + 1,
+              total_n + 1)
+          else
+            go(rest,
+              mod_rev,
+              Cons(make_cell_inline(src, code_n), body_rev),
+              code_n + 1,
+              total_n + 1)
+          end
       end
     end
   end
 
-  let body_chunks = go(cells, Nil, 0, 0)
-  let body = String.join(body_chunks, "")
-  let body = if String.is_empty(body) do "  ()\n" else body end
-  "mod NotebookRunner do\n\nfn main() do\n" ++ body ++ "end\n\nend\n"
+  let (mod_chunks, body_chunks) = go(cells, Nil, Nil, 0, 0)
+  let mod_str  = String.join(mod_chunks, "")
+  let body     = String.join(body_chunks, "")
+  let body     = if String.is_empty(body) do "  ()\n" else body end
+  "mod NotebookRunner do\n\n" ++ mod_str ++ "fn main() do\n" ++ body ++ "end\n\nend\n"
 end
 
 -- Generate a standalone runner for a server cell (wraps source in mod+main)
