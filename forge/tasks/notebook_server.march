@@ -143,58 +143,141 @@ pfn cell_end_marker(n)   do "__MNB_END_"   ++ String.from_int(n) ++ "__" end
 --
 -- Auto-print rule: if the cell's last expression evaluates to a non-unit value
 -- (i.e. to_string result != "()"), it is printed automatically — just like a REPL.
+--
+-- Cells are inlined sequentially into main() so that `let` bindings defined
+-- in earlier cells are visible in later ones — exactly like a REPL session.
+--
+-- Each cell's source is split into "preamble" (let-binding lines) and a
+-- "final expression" (the last non-let line).  The preamble lines become
+-- top-level lets in main(); the final expression is captured for auto-print.
+-- If all lines are let-bindings (no final expression), we emit "()" as the
+-- captured value so the auto-print is suppressed.
 pfn generate_runner(cells, run_through_idx) do
-  -- Build a pfn definition for one code cell.
-  fn make_cell_fn(src, n) do
-    let name = "__cell_" ++ String.from_int(n) ++ "__"
-    -- Trim trailing newline before splitting to avoid empty indented last line
+  -- Strip trailing newline, split into lines.
+  fn cell_lines(src) do
     let src = if String.ends_with(src, "\n") do
       String.slice(src, 0, bs(src) - 1)
     else src
     end
-    let indented = String.join(
-      List.map(String.split(src, "\n"), fn l -> "  " ++ l),
-      "\n"
-    ) ++ "\n"
-    "pfn " ++ name ++ "() do\n" ++ indented ++ "end\n"
+    String.split(src, "\n")
   end
 
-  -- Build the main() call for one code cell: run it, auto-print non-unit result.
-  fn make_cell_call(n) do
-    let name = "__cell_" ++ String.from_int(n) ++ "__"
-    "  println(\"" ++ cell_start_marker(n) ++ "\")\n" ++
-    "  let __r__ = " ++ name ++ "()\n" ++
-    "  let __s__ = to_string(__r__)\n" ++
-    "  if __s__ != \"()\" do println(__s__) else () end\n" ++
-    "  println(\"" ++ cell_end_marker(n) ++ "\")\n"
+  -- Split lines into (preamble_lines, last_line).
+  -- last_line is the last non-blank line; preamble is everything before it.
+  -- Returns (lines, "") if all lines are blank.
+  fn split_last(lines) do
+    let rev = List.reverse(lines)
+    fn find_last(ls) do
+      match ls do
+        Nil -> (lines, "")
+        Cons(l, rest) ->
+          if String.is_empty(trim(l)) do find_last(rest)
+          else (List.reverse(rest), trim(l))
+          end
+      end
+    end
+    find_last(rev)
   end
 
-  fn go(cells, fn_defs, calls, code_n, total_n) do
+  -- If the last line is "let NAME = EXPR" (simple ident, optional type annotation),
+  -- return Some(NAME) so we can use NAME as the auto-print result.
+  -- Returns None for patterns (let (a,b) = ...) or if not a let line.
+  fn let_bound_name(line) do
+    let t = trim(line)
+    if String.starts_with(t, "let ") do
+      -- After "let ": extract identifier before optional ":" or "="
+      let after = trim(String.slice(t, 4, bs(t) - 4))
+      -- Strip type annotation: take part before first ":"
+      let ident_raw = match String.split_first(after, ":") do
+        None -> match String.split_first(after, "=") do
+          None -> after
+          Some((b, _)) -> trim(b)
+        end
+        Some((b, _)) -> trim(b)
+      end
+      let ident = trim(ident_raw)
+      -- Reject patterns: must not contain ( ) ,  or spaces
+      let has_paren = match String.split_first(ident, "(") do Some(_) -> true | None -> false end
+      let has_comma = match String.split_first(ident, ",") do Some(_) -> true | None -> false end
+      let has_space = match String.split_first(ident, " ") do Some(_) -> true | None -> false end
+      if String.is_empty(ident) || has_paren || has_comma || has_space do None
+      else Some(ident)
+      end
+    else
+      None
+    end
+  end
+
+  -- Emit one cell inline into main() so bindings accumulate across cells.
+  --
+  -- For a plain-expression last line:
+  --   let __rN__ = <expr>
+  --
+  -- For a let-binding last line (e.g. "let a = 1*1"):
+  --   let a = 1*1          -- keeps `a` in scope for later cells
+  --   let __rN__ = a       -- auto-print the bound value
+  --
+  -- For a let-pattern last line (e.g. "let (a,b) = ..."):
+  --   let (a,b) = ...      -- keeps names in scope
+  --   let __rN__ = ()      -- auto-print suppressed
+  fn make_cell_inline(src, n) do
+    let ns   = String.from_int(n)
+    let rvar = "__r" ++ ns ++ "__"
+    let svar = "__s" ++ ns ++ "__"
+    let lines = cell_lines(src)
+    match split_last(lines) do
+      (preamble, last_line) ->
+        let pre_str = if List.is_empty(preamble) do ""
+          else String.join(List.map(preamble, fn l -> "  " ++ l), "\n") ++ "\n"
+          end
+        -- Determine how to capture the result
+        let (binding_str, result_expr) =
+          if String.is_empty(last_line) do
+            ("", "()")
+          else
+            match let_bound_name(last_line) do
+              Some(name) ->
+                -- last line is "let name = expr" — emit it, capture name
+                ("  " ++ last_line ++ "\n", name)
+              None ->
+                if String.starts_with(trim(last_line), "let ") do
+                  ("  " ++ last_line ++ "\n", "()")
+                else
+                  ("", last_line)
+                end
+            end
+          end
+        "  println(\"" ++ cell_start_marker(n) ++ "\")\n" ++
+        pre_str ++
+        binding_str ++
+        "  let " ++ rvar ++ " = " ++ result_expr ++ "\n" ++
+        "  let " ++ svar ++ " = to_string(" ++ rvar ++ ")\n" ++
+        "  if " ++ svar ++ " != \"()\" do println(" ++ svar ++ ") else () end\n" ++
+        "  println(\"" ++ cell_end_marker(n) ++ "\")\n"
+    end
+  end
+
+  fn go(cells, chunks, code_n, total_n) do
     if total_n > run_through_idx do
-      (List.reverse(fn_defs), List.reverse(calls))
+      List.reverse(chunks)
     else
       match cells do
-        Nil -> (List.reverse(fn_defs), List.reverse(calls))
-        Cons(Markdown(_), rest)   -> go(rest, fn_defs, calls, code_n, total_n + 1)
-        Cons(ServerCell(_), rest) -> go(rest, fn_defs, calls, code_n, total_n + 1)
+        Nil -> List.reverse(chunks)
+        Cons(Markdown(_), rest)   -> go(rest, chunks, code_n, total_n + 1)
+        Cons(ServerCell(_), rest) -> go(rest, chunks, code_n, total_n + 1)
         Cons(Code(src), rest) ->
           go(rest,
-            Cons(make_cell_fn(src, code_n), fn_defs),
-            Cons(make_cell_call(code_n), calls),
+            Cons(make_cell_inline(src, code_n), chunks),
             code_n + 1,
             total_n + 1)
       end
     end
   end
 
-  match go(cells, Nil, Nil, 0, 0) do
-    (fn_defs, calls) ->
-      let fns  = String.join(fn_defs, "\n")
-      let body = String.join(calls, "")
-      -- fn main() must have at least one expression (empty body is a parse error)
-      let body = if String.is_empty(body) do "  ()\n" else body end
-      "mod NotebookRunner do\n\n" ++ fns ++ "\nfn main() do\n" ++ body ++ "end\n\nend\n"
-  end
+  let body_chunks = go(cells, Nil, 0, 0)
+  let body = String.join(body_chunks, "")
+  let body = if String.is_empty(body) do "  ()\n" else body end
+  "mod NotebookRunner do\n\nfn main() do\n" ++ body ++ "end\n\nend\n"
 end
 
 -- Generate a standalone runner for a server cell (wraps source in mod+main)
