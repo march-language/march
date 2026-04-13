@@ -28,13 +28,7 @@ let stdlib_module_names =
   ; "ChannelServer"; "ChannelSocket"; "Presence"; "Tls"; "Uuid"
   ; "DepotForm"; "DepotGate"; "DepotSchema"; "DepotRepo"
   ; "DepotQuery"; "DepotMigration"; "DepotTest"
-  ; "Tuple"; "Char"; "OrderedMap"; "SortedSet"; "Range"
-  (* Deprecated web modules — still in stdlib for backward compat;
-     overridden by bastion/lib versions when bastion is a dep. *)
-  ; "Islands"; "CSRF"; "Session"; "Bastion"
-  ; "BastionDev"; "BastionCookies"; "BastionRoutes"; "BastionPubSub"
-  ; "BastionCSP"; "BastionTelemetry"; "BastionHotDeploy"
-  ; "BastionTestSandbox"; "BastionIdempotency" ]
+  ; "Tuple"; "Char"; "OrderedMap"; "SortedSet"; "Range" ]
 
 (** Collect [(mod_name, span)] for each DUse/DAlias in [decls],
     recursing into nested DMod blocks so that imports written inside
