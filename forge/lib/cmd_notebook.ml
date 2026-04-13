@@ -14,19 +14,6 @@
 (* Stdlib / march binary discovery                                     *)
 (* ------------------------------------------------------------------ *)
 
-let find_stdlib_dir () =
-  let exe = Sys.executable_name in
-  let bin_dir = Filename.dirname exe in
-  let candidates = [
-    "stdlib";
-    Filename.concat bin_dir "../stdlib";
-    Filename.concat bin_dir "../../stdlib";
-    Filename.concat bin_dir "../../../stdlib";
-    (* installed via opam: <prefix>/bin/../share/march *)
-    Filename.concat bin_dir "../share/march";
-  ] in
-  List.find_opt Sys.file_exists candidates
-
 let find_march () =
   let exe_dir = Filename.dirname Sys.executable_name in
   let sibling = Filename.concat exe_dir "march" in
@@ -43,15 +30,6 @@ let write_temp content suffix =
   output_string oc content;
   close_out oc;
   tmp
-
-(* ------------------------------------------------------------------ *)
-(* Build the environment prefix for the march invocation               *)
-(* ------------------------------------------------------------------ *)
-
-let lib_path_prefix () =
-  match find_stdlib_dir () with
-  | None   -> ""
-  | Some d -> Printf.sprintf "MARCH_LIB_PATH=%s " (Filename.quote d)
 
 (* ------------------------------------------------------------------ *)
 (* Batch render: forge notebook FILE.mnb [-o FILE.html]                *)
@@ -79,8 +57,8 @@ let run_render ~input ~output () =
         (Filename.quote output_path)
         (Filename.quote march)
     in
-    let cmd = Printf.sprintf "%s%s %s %s"
-      (lib_path_prefix ()) nb_env (Filename.quote march) (Filename.quote tmp)
+    let cmd = Printf.sprintf "%s %s %s"
+      nb_env (Filename.quote march) (Filename.quote tmp)
     in
     let rc = Sys.command cmd in
     (try Sys.remove tmp with Sys_error _ -> ());
@@ -150,8 +128,8 @@ let run_serve ~input ~port ~no_open () =
       (Filename.quote march)
       (Filename.quote display_title)
   in
-  let cmd = Printf.sprintf "%s%s %s %s"
-    (lib_path_prefix ()) nb_env (Filename.quote march) (Filename.quote runner_tmp)
+  let cmd = Printf.sprintf "%s %s %s"
+    nb_env (Filename.quote march) (Filename.quote runner_tmp)
   in
   let url = Printf.sprintf "http://localhost:%d" port in
   if is_temp then begin
