@@ -3369,6 +3369,36 @@ end
 
 -- ── Utilities ──────────────────────────────────────────────────────────────
 
+pfn html_esc(s : String) : String do
+  string_replace(string_replace(string_replace(string_replace(s, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"), "\"", "&quot;")
+end
+
+doc """
+Render a DataFrame as an HTML table string.
+The output is detected automatically by the March notebook and displayed
+as a styled table rather than raw text.
+"""
+fn to_html(df : DataFrame) : String do
+  let cols = schema(df)
+  let nrows = row_count(df)
+  let header = String.join(List.map(cols, fn c -> "<th>" ++ html_esc(c) ++ "</th>"), "")
+  let rows = to_rows(df)
+  let body = String.join(List.map(rows, fn row ->
+    match row do
+    Row(pairs) ->
+      let cells = String.join(List.map(pairs, fn pair ->
+        match pair do (_, v) -> "<td>" ++ html_esc(value_to_string(v)) ++ "</td>" end
+      ), "")
+      "<tr>" ++ cells ++ "</tr>"
+    end
+  ), "\n")
+  let footer = "<caption style=\"caption-side:bottom;text-align:left;padding:4px 8px;font-size:11px;color:#6b7280\">" ++
+    String.from_int(nrows) ++ " row" ++ (if nrows == 1 do "" else "s" end) ++
+    " × " ++ String.from_int(List.length(cols)) ++ " col" ++ (if List.length(cols) == 1 do "" else "s" end) ++
+    "</caption>"
+  "<table>" ++ footer ++ "<thead><tr>" ++ header ++ "</tr></thead><tbody>" ++ body ++ "</tbody></table>"
+end
+
 doc "Print a DataFrame as a simple text table."
 fn print_table(df : DataFrame) : Unit do
   let cols = schema(df)

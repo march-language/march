@@ -636,6 +636,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 textarea.cell-src{display:block;width:100%;background:#12121f;color:#cdd6f4;font-family:'JetBrains Mono','Fira Code',monospace;font-size:13.5px;line-height:1.6;padding:16px 20px;border:none;resize:none;outline:none;tab-size:2;min-height:48px}
 .cell-server-wrap textarea.cell-src{background:#0b1a0f;color:#bbf7d0}
 .cell-out{border-top:1px solid #1e1e2e;padding:10px 18px;font-family:'JetBrains Mono',monospace;font-size:13px;white-space:pre-wrap;word-break:break-word;color:#94a3b8;background:#0d0d1a}
+.cell-out-html{border-top:1px solid #1e1e2e;padding:10px 18px;background:#0d0d1a;overflow-x:auto}
+.cell-out-html table{border-collapse:collapse;font-size:13px;color:#e2e8f0;width:100%;font-family:-apple-system,sans-serif}
+.cell-out-html th{background:#1a1a2e;padding:6px 12px;text-align:left;border-bottom:1px solid #2d2d4e;color:#a78bfa;font-weight:600;font-size:12px}
+.cell-out-html td{padding:5px 12px;border-bottom:1px solid #1e1e2e;color:#94a3b8;font-size:12px}
+.cell-out-html tr:hover td{background:#12121f}
+.cell-out-html svg{max-width:100%;height:auto}
 .cell-server-out{border-top:1px solid #1a4d2a;padding:10px 18px;font-family:'JetBrains Mono',monospace;font-size:13px;white-space:pre-wrap;word-break:break-word;color:#86efac;background:#071209;max-height:300px;overflow-y:auto}
 .cell-err{border-top:2px solid #7f1d1d;padding:10px 18px;font-family:'JetBrains Mono',monospace;font-size:13px;color:#f87171;white-space:pre-wrap;background:#1a0a0a}
 .pid-badge{font-size:10px;color:#4ade80;font-family:'JetBrains Mono',monospace;padding:1px 6px;border:1px solid #166534;border-radius:3px;margin-left:4px}
@@ -690,12 +696,12 @@ function send(obj) { if (ws && ws.readyState===1) ws.send(JSON.stringify(obj)); 
 
 function handleMsg(msg) {
   if (msg.type === "notebook") {
-    cells = msg.cells.map(c => ({...c, output:"", error:null, running:false, server_log:"", pid:null}));
+    cells = msg.cells.map(c => ({...c, output:"", error:null, running:false, server_log:"", pid:null, _elapsed_ms:null}));
     render();
     setStatus("ok", "loaded");
   } else if (msg.type === "running") {
     const idx = msg.index;
-    if (cells[idx]) { cells[idx].running = true; updateCell(idx); }
+    if (cells[idx]) { cells[idx].running = true; cells[idx]._start_ms = Date.now(); updateCell(idx); }
     setStatus("running", "running…");
   } else if (msg.type === "output") {
     const idx = msg.index;
@@ -703,6 +709,7 @@ function handleMsg(msg) {
       cells[idx].running = false;
       cells[idx].output  = msg.stdout || "";
       cells[idx].error   = msg.error || null;
+      cells[idx]._elapsed_ms = cells[idx]._start_ms ? Date.now() - cells[idx]._start_ms : null;
       updateCell(idx);
     }
     if (pendingRun !== null) {
@@ -1009,14 +1016,23 @@ function attachMarkdownEvents(wrap, idx) {
   autoResize(ta);
 }
 
+function renderOutput(text) {
+  const t = text.trimStart();
+  if (t.startsWith('<svg') || t.startsWith('<table') || t.startsWith('<!DOCTYPE') || t.startsWith('<html')) {
+    return `<div class="cell-out-html">\${text}</div>`;
+  }
+  return `<div class="cell-out">\${esc(text)}</div>`;
+}
+
 function codeCell(idx, cell) {
   const cls = cell.running ? " running" : cell.error ? " has-error" : "";
-  const lbl = cell.running ? "running…" : `In [\${idx+1}]`;
+  const timing = (!cell.running && cell._elapsed_ms != null) ? ` · \${cell._elapsed_ms < 1000 ? cell._elapsed_ms+"ms" : (cell._elapsed_ms/1000).toFixed(1)+"s"}` : "";
+  const lbl = cell.running ? "running…" : `In [\${idx+1}]\${timing}`;
   const lblCls = cell.running ? " running" : "";
   const outHtml = cell.error
     ? `<div class="cell-err">\${esc(cell.error)}</div>`
     : cell.output
-      ? `<div class="cell-out">\${esc(cell.output)}</div>`
+      ? renderOutput(cell.output)
       : "";
   return `<div class="cell-code\${cls}">
     <div class="cell-header">
@@ -1104,6 +1120,21 @@ function attachEditorEvents(wrap, idx) {
       if (cells[idx].kind === "code") runCell(idx);
       else if (cells[idx].kind === "server") startServer(idx);
       else { cells[idx]._editing = false; render(); }
+    }
+    // Shift+Enter: run cell and move focus to next (Jupyter muscle memory)
+    if (e.shiftKey && !e.metaKey && !e.ctrlKey && e.key === "Enter") {
+      e.preventDefault();
+      if (cells[idx].kind === "code") runCell(idx);
+      const nextIdx = idx + 1;
+      if (nextIdx < cells.length) {
+        setTimeout(() => {
+          const nextWrap = document.querySelector(`[data-idx="\${nextIdx}"]`);
+          const nextTa = nextWrap && nextWrap.querySelector("textarea");
+          if (nextTa) nextTa.focus();
+        }, 30);
+      } else {
+        addCell("code", idx);
+      }
     }
     if (e.key === "Tab") {
       e.preventDefault();
