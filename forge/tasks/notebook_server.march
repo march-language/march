@@ -1062,10 +1062,10 @@ end
 
 -- ── HTTP router ───────────────────────────────────────────────────────────────
 
-pfn router(nb_path, port, march_bin, conn) do
+pfn router(nb_path, display_title, port, march_bin, conn) do
   match (HttpServer.method(conn), HttpServer.path_info(conn)) do
     (:get, Nil) ->
-      conn |> HttpServer.html(200, ui_html(nb_path, port))
+      conn |> HttpServer.html(200, ui_html(display_title, port))
 
     (:get, Cons("ws", Nil)) ->
       WebSocket.upgrade(conn, fn socket ->
@@ -1102,12 +1102,18 @@ fn main() do
     None    -> "march"
   end
 
+  -- FORGE_NB_TITLE overrides the display title (used for untitled temp notebooks)
+  let display_title = match System.env("FORGE_NB_TITLE") do
+    Some(t) -> t
+    None    -> nb_path
+  end
+
   IO.puts("forge notebook: serving " ++ nb_path ++ " on http://localhost:" ++ String.from_int(port))
   IO.puts("forge notebook: press Ctrl-C to stop")
 
   let server = HttpServer.new(port)
   let server = HttpServer.plug(server, fn req_conn ->
-    router(nb_path, port, march_bin, req_conn)
+    router(nb_path, display_title, port, march_bin, req_conn)
   )
   HttpServer.listen(server)
 end

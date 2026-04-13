@@ -391,22 +391,30 @@ let doc_cmd =
 
 let notebook_serve_cmd =
   let input =
-    Arg.(required & pos 0 (some string) None &
-         info [] ~docv:"FILE.mnb" ~doc:"Path to the .mnb notebook file")
+    Arg.(value & pos 0 (some string) None &
+         info [] ~docv:"FILE.mnb"
+           ~doc:"Notebook file to open or create. \
+                 Omit to start a fresh temporary notebook.")
   in
   let port =
     Arg.(value & opt int 4040 &
          info ["port"; "p"] ~docv:"PORT"
            ~doc:"Port to serve on (default: 4040)")
   in
-  let run i p = handle (Cmd_notebook.run_serve ~input:i ~port:p ()) in
+  let no_open =
+    Arg.(value & flag &
+         info ["no-open"]
+           ~doc:"Do not automatically open the browser")
+  in
+  let run i p n = handle (Cmd_notebook.run_serve ~input:i ~port:p ~no_open:n ()) in
   Cmd.v (Cmd.info "serve"
-           ~doc:"Start a live notebook server with WebSocket-based cell execution")
-    Term.(const run $ input $ port)
+           ~doc:"Start a live notebook server (FILE.mnb optional — \
+                 creates a fresh notebook if omitted)")
+    Term.(const run $ input $ port $ no_open)
 
 let notebook_cmd =
   let input =
-    Arg.(required & pos 0 (some string) None &
+    Arg.(value & pos 0 (some string) None &
          info [] ~docv:"FILE.mnb" ~doc:"Path to the .mnb notebook file")
   in
   let output =
@@ -414,11 +422,30 @@ let notebook_cmd =
          info ["o"; "output"] ~docv:"FILE.html"
            ~doc:"Output HTML path (default: <input>.html)")
   in
-  let run i o = handle (Cmd_notebook.run_render ~input:i ~output:o ()) in
-  let render_term = Term.(const run $ input $ output) in
+  let serve_flag =
+    Arg.(value & flag & info ["serve"; "s"] ~doc:"Start the live server instead of rendering")
+  in
+  let port =
+    Arg.(value & opt int 4040 &
+         info ["port"; "p"] ~docv:"PORT" ~doc:"Port for --serve (default: 4040)")
+  in
+  let no_open =
+    Arg.(value & flag & info ["no-open"] ~doc:"Do not automatically open the browser (with --serve)")
+  in
+  let run i o s p n =
+    if s then handle (Cmd_notebook.run_serve ~input:i ~port:p ~no_open:n ())
+    else match i with
+      | None ->
+        (* No file and no --serve: default to serve mode *)
+        handle (Cmd_notebook.run_serve ~input:None ~port:p ~no_open:n ())
+      | Some f -> handle (Cmd_notebook.run_render ~input:f ~output:o ())
+  in
+  let render_term = Term.(const run $ input $ output $ serve_flag $ port $ no_open) in
   Cmd.group ~default:render_term
     (Cmd.info "notebook"
-       ~doc:"Evaluate a March notebook (.mnb) and generate an HTML report, or start a live server")
+       ~doc:"Open or create a March notebook. \
+             With no arguments, starts a live notebook server (like Livebook). \
+             With FILE.mnb, renders to HTML or starts the live server with --serve.")
     [notebook_serve_cmd]
 
 (* ------------------------------------------------------------------ forge phases *)
