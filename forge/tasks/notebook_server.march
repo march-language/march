@@ -299,9 +299,9 @@ pfn generate_runner(cells, run_through_idx) do
             ("", "()")
           else
             match let_bound_name(first_line) do
-              Some(name) ->
-                -- "let name = <multi-line expr>" — emit whole stmt, capture name
-                (stmt_str, name)
+              Some(_name) ->
+                -- "let name = <multi-line expr>" — emit stmt, suppress result (Jupyter convention)
+                (stmt_str, "()")
               None ->
                 if String.starts_with(trim(first_line), "let ") do
                   -- Pattern binding (let (a,b) = ...) — emit, suppress result
