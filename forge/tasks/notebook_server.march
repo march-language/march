@@ -352,7 +352,8 @@ pfn generate_runner(cells, run_through_idx) do
       "  let " ++ rvar ++ " = ()\n" ++
       "  let " ++ svar ++ " = to_string(" ++ rvar ++ ")\n" ++
       "  println(\"" ++ cell_end_marker(n) ++ "\")\n"
-    (mod_code, main_code)
+    let pair = (mod_code, main_code)
+    pair
   end
 
   -- go returns (nested_mod_chunks, main_body_chunks), both in reverse.
