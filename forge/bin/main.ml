@@ -392,7 +392,7 @@ let doc_cmd =
 let notebook_serve_cmd =
   let input =
     Arg.(value & pos 0 (some string) None &
-         info [] ~docv:"FILE.mnb"
+         info [] ~docv:"FILE.scrollmd"
            ~doc:"Notebook file to open or create. \
                  Omit to start a fresh temporary notebook.")
   in
@@ -408,14 +408,14 @@ let notebook_serve_cmd =
   in
   let run i p n = handle (Cmd_notebook.run_serve ~input:i ~port:p ~no_open:n ()) in
   Cmd.v (Cmd.info "serve"
-           ~doc:"Start a live notebook server (FILE.mnb optional — \
+           ~doc:"Start a live notebook server (FILE.scrollmd optional — \
                  creates a fresh notebook if omitted)")
     Term.(const run $ input $ port $ no_open)
 
 let notebook_cmd =
   let input =
     Arg.(value & pos 0 (some string) None &
-         info [] ~docv:"FILE.mnb" ~doc:"Path to the .mnb notebook file")
+         info [] ~docv:"FILE.scrollmd" ~doc:"Path to the .mnb notebook file")
   in
   let output =
     Arg.(value & opt (some string) None &
@@ -445,7 +445,7 @@ let notebook_cmd =
     (Cmd.info "notebook"
        ~doc:"Open or create a March notebook. \
              With no arguments, starts a live notebook server (like Livebook). \
-             With FILE.mnb, renders to HTML or starts the live server with --serve.")
+             With FILE.scrollmd, renders to HTML or starts the live server with --serve.")
     [notebook_serve_cmd]
 
 (* ------------------------------------------------------------------ forge phases *)
