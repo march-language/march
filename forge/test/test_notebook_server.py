@@ -82,18 +82,30 @@ def recv_json(sock):
     return json.loads(txt)
 
 def run_cell(sock, nb_content, cell_idx, timeout=15):
-    """Save notebook then run cell at cell_idx; return (stdout, error)."""
+    """Save notebook then run cell at cell_idx; return (stdout, error).
+    Handles the async polling protocol: run → running → poll_run → output."""
     send_json(sock, {"type": "save", "content": nb_content})
     msg = recv_json(sock)
     assert msg["type"] == "saved", f"save failed: {msg}"
     send_json(sock, {"type": "run", "index": cell_idx})
     sock.settimeout(timeout)
-    # read "running" + "output"
-    for _ in range(2):
+    # Expect "running" first
+    msg = recv_json(sock)
+    assert msg["type"] == "running", f"expected 'running', got {msg}"
+    # Now poll until we get "output"
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        send_json(sock, {"type": "poll_run", "index": cell_idx})
+        sock.settimeout(min(5, deadline - time.time()))
         msg = recv_json(sock)
         if msg["type"] == "output":
             return msg.get("stdout", ""), msg.get("error")
-    raise RuntimeError("did not receive output message")
+        elif msg["type"] == "still_running":
+            time.sleep(0.1)
+            continue
+        else:
+            raise RuntimeError(f"unexpected message during poll: {msg}")
+    raise RuntimeError("timed out waiting for output")
 
 # ── Server lifecycle ───────────────────────────────────────────────────────────
 
@@ -326,6 +338,29 @@ def test_run_all_ordering(sock, nb_path):
     check("sequential: acc = (1*2)+10 = 12", out, "12")
     check_no_error("no error", err)
 
+def test_interrupt(sock, nb_path):
+    print("\n── interrupt (stop_run) ──────────────────────────────────────────────")
+
+    # Use System.sleep if available; fallback: tight loop that takes a few seconds
+    # We'll use a cell that sleeps for 10 seconds, then interrupt it quickly
+    content = nb(("md", "# T"), ("code", "System.sleep(10000)"))
+    send_json(sock, {"type": "save", "content": content})
+    msg = recv_json(sock)
+    assert msg["type"] == "saved"
+
+    send_json(sock, {"type": "run", "index": 1})
+    sock.settimeout(5)
+    msg = recv_json(sock)
+    assert msg["type"] == "running", f"expected running, got {msg}"
+
+    # Give it a moment to start, then stop it
+    time.sleep(0.3)
+    send_json(sock, {"type": "stop_run", "index": 1})
+    sock.settimeout(5)
+    msg = recv_json(sock)
+    check("stop returns output", msg["type"], "output")
+    check("interrupted error", msg.get("error"), "interrupted")
+
 def test_save_and_reload(sock, nb_path):
     print("\n── save and reload ───────────────────────────────────────────────────")
 
@@ -364,6 +399,7 @@ def main():
         test_error_propagation(sock, nb_path)
         test_list_and_stdlib(sock, nb_path)
         test_run_all_ordering(sock, nb_path)
+        test_interrupt(sock, nb_path)
         test_save_and_reload(sock, nb_path)
 
         sock.close()

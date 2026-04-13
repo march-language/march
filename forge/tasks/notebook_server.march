@@ -427,49 +427,109 @@ pfn extract_cell_output(stdout, code_n) do
   end
 end
 
--- Run cells 0..run_through_idx, return (stdout_for_target_code_cell, error_opt)
-pfn run_cells_to(cells, run_through_idx, march_bin) do
-  -- Count which code cell index corresponds to run_through_idx.
-  -- Server cells are skipped (they don't count as code cells).
-  fn find_code_idx(cells, target_total, code_n, total_n) do
-    match cells do
-      Nil -> code_n - 1
-      Cons(Markdown(_), rest) ->
-        if total_n == target_total do code_n - 1
-        else find_code_idx(rest, target_total, code_n, total_n + 1)
-        end
-      Cons(ServerCell(_), rest) ->
-        if total_n == target_total do code_n - 1
-        else find_code_idx(rest, target_total, code_n, total_n + 1)
-        end
-      Cons(Code(_), rest) ->
-        if total_n == target_total do code_n
-        else find_code_idx(rest, target_total, code_n + 1, total_n + 1)
-        end
-    end
+-- Map overall cell index to code-cell index (skipping markdown and server cells).
+pfn find_code_idx(cells, target_total, code_n, total_n) do
+  match cells do
+    Nil -> code_n - 1
+    Cons(Markdown(_), rest) ->
+      if total_n == target_total do code_n - 1
+      else find_code_idx(rest, target_total, code_n, total_n + 1)
+      end
+    Cons(ServerCell(_), rest) ->
+      if total_n == target_total do code_n - 1
+      else find_code_idx(rest, target_total, code_n, total_n + 1)
+      end
+    Cons(Code(_), rest) ->
+      if total_n == target_total do code_n
+      else find_code_idx(rest, target_total, code_n + 1, total_n + 1)
+      end
   end
-  let target_code_idx = find_code_idx(cells, run_through_idx, 0, 0)
-  let src = generate_runner(cells, run_through_idx)
-  let tmp = "/tmp/__forge_nb_server_runner__.march"
+end
+
+-- ── Async code-cell process management ───────────────────────────────────────
+
+pfn run_bg_ns()        do "__forge_nb_runs__" end
+pfn run_tmp_path(idx)  do "/tmp/__forge_nb_run_" ++ String.from_int(idx) ++ "__.march" end
+pfn run_out_path(idx)  do "/tmp/__forge_nb_run_" ++ String.from_int(idx) ++ "__.out" end
+pfn run_err_path(idx)  do "/tmp/__forge_nb_run_" ++ String.from_int(idx) ++ "__.err" end
+pfn run_exit_path(idx) do "/tmp/__forge_nb_run_" ++ String.from_int(idx) ++ "__.exit" end
+pfn run_pid_key(idx)   do String.from_int(idx) ++ ":p" end
+pfn run_cidx_key(idx)  do String.from_int(idx) ++ ":c" end
+
+-- Spawn a code-cell runner in the background; store PID + code-idx in Vault.
+pfn start_run_proc(cells, run_through_idx, march_bin) do
+  let cidx  = find_code_idx(cells, run_through_idx, 0, 0)
+  let src   = generate_runner(cells, run_through_idx)
+  let tmp   = run_tmp_path(run_through_idx)
+  let outp  = run_out_path(run_through_idx)
+  let errp  = run_err_path(run_through_idx)
+  let exitp = run_exit_path(run_through_idx)
   match File.write(tmp, src) do
-    Err(msg) -> ("", Some("failed to write temp: " ++ msg))
+    Err(msg) -> Err("failed to write: " ++ msg)
     Ok(_) ->
-      match Process.run(march_bin, [tmp]) do
-        Err(msg) -> ("", Some("march invocation failed: " ++ msg))
+      let _ = File.write(outp, "")
+      let _ = File.write(errp, "")
+      let _ = File.write(exitp, "")
+      let shell = "{ " ++ march_bin ++ " " ++ tmp ++ " >" ++ outp ++ " 2>" ++ errp ++ "; echo $? >" ++ exitp ++ "; } & echo $!"
+      match Process.run("sh", ["-c", shell]) do
+        Err(msg) -> Err("spawn failed: " ++ msg)
         Ok(result) ->
-          let code = Process.exit_code(result)
-          let out  = Process.stdout(result)
-          let err  = Process.stderr(result)
-          if code != 0 do
-            let msg = if String.is_empty(trim(err)) do
-              "march exited with code " ++ String.from_int(code)
-            else trim(err)
-            end
-            ("", Some(msg))
+          if Process.exit_code(result) != 0 do
+            Err("sh failed: " ++ trim(Process.stderr(result)))
           else
-            (extract_cell_output(out, target_code_idx), None)
+            let pid = trim(Process.stdout(result))
+            let _ = Vault.ns_set(run_bg_ns(), run_pid_key(run_through_idx), pid)
+            let _ = Vault.ns_set(run_bg_ns(), run_cidx_key(run_through_idx), String.from_int(cidx))
+            Ok(pid)
           end
       end
+  end
+end
+
+-- Poll a running code-cell process.
+-- Returns None if still alive, Some((stdout, error_opt)) when finished.
+pfn check_run_proc(run_through_idx) do
+  match Vault.ns_get(run_bg_ns(), run_pid_key(run_through_idx)) do
+    None -> Some(("", Some("no running process for this cell")))
+    Some(pid) ->
+      match Process.run("sh", ["-c", "kill -0 " ++ pid ++ " 2>/dev/null && echo alive || echo dead"]) do
+        Err(_) -> Some(("", Some("process check failed")))
+        Ok(chk) ->
+          if trim(Process.stdout(chk)) == "alive" do None
+          else
+            let _ = Vault.ns_drop(run_bg_ns(), run_pid_key(run_through_idx))
+            let cidx_s = match Vault.ns_get(run_bg_ns(), run_cidx_key(run_through_idx)) do
+              Some(s) -> s | None -> "0"
+            end
+            let _ = Vault.ns_drop(run_bg_ns(), run_cidx_key(run_through_idx))
+            let cidx = match String.to_int(cidx_s) do Ok(n) -> n | Err(_) -> 0 end
+            let out_raw  = match File.read(run_out_path(run_through_idx))  do Ok(s) -> s | Err(_) -> "" end
+            let err_raw  = match File.read(run_err_path(run_through_idx))  do Ok(s) -> s | Err(_) -> "" end
+            let exit_raw = match File.read(run_exit_path(run_through_idx)) do Ok(s) -> trim(s) | Err(_) -> "" end
+            let exit_code = match String.to_int(exit_raw) do Ok(n) -> n | Err(_) -> 0 end
+            if exit_code != 0 do
+              let msg = if String.is_empty(trim(err_raw)) do
+                "march exited with code " ++ exit_raw
+              else trim(err_raw)
+              end
+              Some(("", Some(msg)))
+            else
+              Some((extract_cell_output(out_raw, cidx), None))
+            end
+          end
+      end
+  end
+end
+
+-- Kill a running code-cell process and clean up Vault entries.
+pfn stop_run_proc(run_through_idx) do
+  match Vault.ns_get(run_bg_ns(), run_pid_key(run_through_idx)) do
+    None -> ()
+    Some(pid) ->
+      let _ = Process.run("sh", ["-c", "kill -TERM " ++ pid ++ " 2>/dev/null || true"])
+      let _ = Vault.ns_drop(run_bg_ns(), run_pid_key(run_through_idx))
+      let _ = Vault.ns_drop(run_bg_ns(), run_cidx_key(run_through_idx))
+      ()
   end
 end
 
@@ -661,14 +721,39 @@ pfn handle_ws_msg(msg, nb_path, march_bin, socket) do
                   WebSocket.send_frame(socket, err_frame(to_string(e)))
                 Ok(content) ->
                   let cells = parse_cells(content)
-                  WebSocket.send_frame(socket, TextFrame(
-                    "{\"type\":\"running\",\"index\":" ++ String.from_int(idx) ++ "}"
-                  ))
-                  let (out, err_opt) = run_cells_to(cells, idx, march_bin)
-                  WebSocket.send_frame(socket, TextFrame(
-                    output_msg(idx, out, err_opt)
-                  ))
+                  match start_run_proc(cells, idx, march_bin) do
+                    Err(msg) ->
+                      WebSocket.send_frame(socket, TextFrame(output_msg(idx, "", Some(msg))))
+                    Ok(_pid) ->
+                      WebSocket.send_frame(socket, TextFrame(
+                        "{\"type\":\"running\",\"index\":" ++ String.from_int(idx) ++ "}"
+                      ))
+                  end
               end
+          end
+
+        Some("poll_run") ->
+          match json_get_int(jv, "index") do
+            None ->
+              WebSocket.send_frame(socket, err_frame("missing index"))
+            Some(idx) ->
+              match check_run_proc(idx) do
+                None ->
+                  WebSocket.send_frame(socket, TextFrame(
+                    "{\"type\":\"still_running\",\"index\":" ++ String.from_int(idx) ++ "}"
+                  ))
+                Some((out, err_opt)) ->
+                  WebSocket.send_frame(socket, TextFrame(output_msg(idx, out, err_opt)))
+              end
+          end
+
+        Some("stop_run") ->
+          match json_get_int(jv, "index") do
+            None ->
+              WebSocket.send_frame(socket, err_frame("missing index"))
+            Some(idx) ->
+              stop_run_proc(idx)
+              WebSocket.send_frame(socket, TextFrame(output_msg(idx, "", Some("interrupted"))))
           end
 
         Some("start_server") ->
@@ -896,6 +981,7 @@ let cells = [];   // [{kind, source, output, error, running, server_log, pid}]
 let ws = null;
 let pendingRun = null;
 const serverPolls = {};
+const runPolls = {};  // code-cell polling intervals
 
 // ── WebSocket ────────────────────────────────────────────────────────────────
 
@@ -932,8 +1018,13 @@ function handleMsg(msg) {
     const idx = msg.index;
     if (cells[idx]) { cells[idx].running = true; cells[idx]._start_ms = Date.now(); updateCell(idx); }
     setStatus("running", "running…");
+    startRunPoll(idx);
+  } else if (msg.type === "still_running") {
+    const idx = msg.index;
+    if (cells[idx]) updateCell(idx);  // refreshes elapsed counter
   } else if (msg.type === "output") {
     const idx = msg.index;
+    stopRunPoll(idx);
     if (cells[idx]) {
       cells[idx].running = false;
       cells[idx].output  = msg.stdout || "";
@@ -1004,6 +1095,25 @@ function handleMsg(msg) {
 }
 
 // ── Server process management ────────────────────────────────────────────────
+
+function startRunPoll(idx) {
+  stopRunPoll(idx);
+  runPolls[idx] = setInterval(() => {
+    send({type:"poll_run", index:idx});
+  }, 300);
+}
+
+function stopRunPoll(idx) {
+  if (runPolls[idx]) {
+    clearInterval(runPolls[idx]);
+    delete runPolls[idx];
+  }
+}
+
+function stopRun(idx) {
+  stopRunPoll(idx);
+  send({type:"stop_run", index:idx});
+}
 
 function startServerPoll(idx) {
   stopServerPoll(idx);
@@ -1310,11 +1420,15 @@ function renderOutput(text) {
 
 function codeCell(idx, cell) {
   const cls = cell.running ? " running" : cell.error ? " has-error" : "";
-  const timing = (!cell.running && cell._elapsed_ms != null) ? ` · \${cell._elapsed_ms < 1000 ? cell._elapsed_ms+"ms" : (cell._elapsed_ms/1000).toFixed(1)+"s"}` : "";
-  const lbl = cell.running ? "running…" : `In [\${idx+1}]\${timing}`;
+  const liveMs = cell.running && cell._start_ms ? Date.now() - cell._start_ms : null;
+  const fmtMs = (ms) => ms < 1000 ? ms+"ms" : (ms/1000).toFixed(1)+"s";
+  const timing = cell.running && liveMs != null
+    ? ` · \${fmtMs(liveMs)}`
+    : (cell._elapsed_ms != null ? ` · \${fmtMs(cell._elapsed_ms)}` : "");
+  const lbl = cell.running ? `running…\${timing}` : `In [\${idx+1}]\${timing}`;
   const lblCls = cell.running ? " running" : "";
   const staleBadge = cell._dirty ? `<span class="stale-badge" title="Output may be stale">↻ stale</span>` : "";
-  const slowBadge = (!cell.running && isPotentiallyLongRunning(cell.source)) ? `<span class="slow-badge" title="May take a while — use ⬛ to cancel">⏱</span>` : "";
+  const slowBadge = (!cell.running && isPotentiallyLongRunning(cell.source)) ? `<span class="slow-badge" title="May take a while — use ⬛ to stop">⏱</span>` : "";
   const srcCollapsed = !!cell._src_collapsed;
   const outCollapsed = !!cell._out_collapsed;
   const srcToggle = `<button class="add-btn" onclick="toggleSrcCollapse(\${idx})" title="\${srcCollapsed?'Expand source':'Collapse source'}">\${srcCollapsed?'⌄':'⌃'}</button>`;
@@ -1330,6 +1444,9 @@ function codeCell(idx, cell) {
   const dirtyAttr = cell._dirty ? ' data-dirty="1"' : "";
   const srcCls = srcCollapsed ? " src-collapsed" : "";
   const outCls = outCollapsed ? " out-collapsed" : "";
+  const actionBtn = cell.running
+    ? `<button class="stop-btn" onclick="stopRun(\${idx})">⬛ Stop</button>`
+    : `<button class="run-btn" onclick="runCell(\${idx})">▶ Run</button>`;
   return `<div class="cell-code\${cls}\${srcCls}\${outCls}"\${dirtyAttr}>
     <div class="cell-header">
       <span class="cell-label\${lblCls}">\${lbl}</span>\${staleBadge}\${slowBadge}
@@ -1340,7 +1457,7 @@ function codeCell(idx, cell) {
         <button class="add-btn" onclick="clearCell(\${idx})" title="Clear output">○</button>
         <button class="add-btn" onclick="deleteCell(\${idx})" title="Delete">✕</button>
       </div>
-      <button class="run-btn" onclick="runCell(\${idx})" \${cell.running?"disabled":""}>▶ Run</button>
+      \${actionBtn}
     </div>
     <textarea class="cell-src" data-cell="\${idx}" spellcheck="false">\${esc(cell.source)}</textarea>
     \${srcPreview}
