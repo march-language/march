@@ -162,25 +162,84 @@ pfn generate_runner(cells, run_through_idx) do
     String.split(src, "\n")
   end
 
-  -- Split lines into (preamble_lines, last_line).
-  -- last_line is the last non-blank line; preamble is everything before it.
-  -- Returns (lines, "") if all lines are blank.
+  -- Count substring occurrences: count_in("a(b(c", "(") = 2
+  fn count_in(s, sub) do List.length(String.split(s, sub)) - 1 end
+
+  -- Number of bracket/block openers in a line (forward direction).
+  --   openers = count of `(` and `[` + 1 if line ends with ` do` (opens a block)
+  fn line_openers(line) do
+    let t = trim(line)
+    let b = count_in(line, "(") + count_in(line, "[")
+    let d = if String.ends_with(t, " do") || t == "do" do 1 else 0 end
+    b + d
+  end
+
+  -- Number of bracket/block closers in a line (forward direction).
+  --   closers = count of `)` and `]` + 1 if trimmed line is exactly "end"
+  fn line_closers(line) do
+    let t = trim(line)
+    let b = count_in(line, ")") + count_in(line, "]")
+    let e = if t == "end" do 1 else 0 end
+    b + e
+  end
+
+  -- Split lines into (preamble_lines, last_stmt_lines).
+  -- last_stmt_lines is the COMPLETE last top-level statement, even if multi-line
+  -- (e.g. DataFrame.from_columns([...]), if/match/do blocks).
+  -- Works by scanning backward with bracket+block depth tracking:
+  --   depth = "how many more openers do we still need to find?"
+  --   opener seen going backward → depth decreases
+  --   closer seen going backward → depth increases
+  --   stop when depth reaches 0 (we found the start of the statement)
   fn split_last(lines) do
-    let rev = List.reverse(lines)
-    fn find_last(ls) do
+    -- Drop trailing blank lines from a reversed list.
+    fn drop_blank(ls) do
       match ls do
-        Nil -> (lines, "")
+        Nil -> Nil
         Cons(l, rest) ->
-          if String.is_empty(trim(l)) do find_last(rest)
-          else (List.reverse(rest), trim(l))
+          if String.is_empty(trim(l)) do drop_blank(rest)
+          else ls
           end
       end
     end
-    find_last(rev)
+
+    -- Scan rev_lines backward, collecting into stmt_rev until depth balances.
+    fn find_start(rev_lines, depth, stmt_rev) do
+      match rev_lines do
+        Nil -> (Nil, List.reverse(stmt_rev))
+        Cons(line, rest) ->
+          let new_depth = depth - line_openers(line) + line_closers(line)
+          if new_depth <= 0 do
+            -- This line is the opener of the top-level statement — include it.
+            (List.reverse(rest), List.reverse(Cons(line, stmt_rev)))
+          else
+            find_start(rest, new_depth, Cons(line, stmt_rev))
+          end
+      end
+    end
+
+    let rev = drop_blank(List.reverse(lines))
+    match rev do
+      Nil -> (lines, Nil)
+      Cons(last_line, rev_rest) ->
+        let opens  = line_openers(last_line)
+        let closes = line_closers(last_line)
+        -- A continuation line has closers and no openers of its own
+        -- (e.g. `])`, `))`, standalone `end`)
+        let is_cont = opens == 0 && closes > 0
+        if is_cont do
+          -- Multi-line statement: scan backward until we find the opener(s).
+          find_start(rev_rest, closes, Cons(last_line, Nil))
+        else
+          -- Single-line statement (the common case).
+          (List.reverse(rev_rest), Cons(last_line, Nil))
+        end
+    end
   end
 
-  -- If the last line is "let NAME = EXPR" (simple ident, optional type annotation),
-  -- return Some(NAME) so we can use NAME as the auto-print result.
+  -- If the first line of a statement is "let NAME = EXPR" (simple ident,
+  -- optional type annotation), return Some(NAME) so we can use NAME as the
+  -- auto-print result.
   -- Returns None for patterns (let (a,b) = ...) or if not a let line.
   fn let_bound_name(line) do
     let t = trim(line)
@@ -210,40 +269,43 @@ pfn generate_runner(cells, run_through_idx) do
 
   -- Emit one cell inline into main() so bindings accumulate across cells.
   --
-  -- For a plain-expression last line:
-  --   let __rN__ = <expr>
+  -- split_last returns (preamble_lines, last_stmt_lines) where last_stmt_lines
+  -- is the complete last top-level statement (one or many lines).
+  -- We look at the FIRST line of last_stmt to classify it:
   --
-  -- For a let-binding last line (e.g. "let a = 1*1"):
-  --   let a = 1*1          -- keeps `a` in scope for later cells
-  --   let __rN__ = a       -- auto-print the bound value
-  --
-  -- For a let-pattern last line (e.g. "let (a,b) = ..."):
-  --   let (a,b) = ...      -- keeps names in scope
-  --   let __rN__ = ()      -- auto-print suppressed
+  --   plain expression  →  let __rN__ = <whole stmt>
+  --   let NAME = EXPR   →  emit stmt verbatim; let __rN__ = NAME   (auto-print)
+  --   let PAT = EXPR    →  emit stmt verbatim; let __rN__ = ()     (suppressed)
   fn make_cell_inline(src, n) do
     let ns   = String.from_int(n)
     let rvar = "__r" ++ ns ++ "__"
     let svar = "__s" ++ ns ++ "__"
     let lines = cell_lines(src)
     match split_last(lines) do
-      (preamble, last_line) ->
+      (preamble, last_stmt) ->
         let pre_str = if List.is_empty(preamble) do ""
           else String.join(List.map(preamble, fn l -> "  " ++ l), "\n") ++ "\n"
           end
-        -- Determine how to capture the result
+        -- First line of the last statement drives classification.
+        let first_line = match last_stmt do Cons(l, _) -> l | Nil -> "" end
+        -- Emit the full statement (all lines), indented.
+        let stmt_str = String.join(List.map(last_stmt, fn l -> "  " ++ l), "\n") ++ "\n"
+        -- Determine how to capture the result.
         let (binding_str, result_expr) =
-          if String.is_empty(last_line) do
+          if List.is_empty(last_stmt) do
             ("", "()")
           else
-            match let_bound_name(last_line) do
+            match let_bound_name(first_line) do
               Some(name) ->
-                -- last line is "let name = expr" — emit it, capture name
-                ("  " ++ last_line ++ "\n", name)
+                -- "let name = <multi-line expr>" — emit whole stmt, capture name
+                (stmt_str, name)
               None ->
-                if String.starts_with(trim(last_line), "let ") do
-                  ("  " ++ last_line ++ "\n", "()")
+                if String.starts_with(trim(first_line), "let ") do
+                  -- Pattern binding (let (a,b) = ...) — emit, suppress result
+                  (stmt_str, "()")
                 else
-                  ("", last_line)
+                  -- Plain expression — possibly multi-line; join as single expr
+                  ("", String.join(last_stmt, "\n"))
                 end
             end
           end
@@ -791,6 +853,11 @@ function connect() {
 
 function send(obj) { if (ws && ws.readyState===1) ws.send(JSON.stringify(obj)); }
 
+// Re-size all textareas once custom fonts finish loading
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(resizeAllTextareas);
+}
+
 // ── Message handling ─────────────────────────────────────────────────────────
 
 function handleMsg(msg) {
@@ -1062,6 +1129,8 @@ function render() {
   endBar.style.cssText = "display:flex;justify-content:center;gap:8px;padding:12px 0";
   endBar.innerHTML = `<button class="add-btn" onclick="addCell('markdown',\${cells.length-1})">+ Markdown</button><button class="add-btn" onclick="addCell('code',\${cells.length-1})">+ Code</button><button class="add-btn" onclick="addCell('server',\${cells.length-1})">+ Server</button>`;
   nb.appendChild(endBar);
+  // Defer a second resize pass so custom fonts (JetBrains Mono) are laid out
+  requestAnimationFrame(resizeAllTextareas);
 }
 
 function markdownCell(idx, cell) {
@@ -1248,6 +1317,10 @@ function autoResize(ta) {
   if (!ta) return;
   ta.style.height = "1px";
   ta.style.height = Math.max(48, ta.scrollHeight) + "px";
+}
+
+function resizeAllTextareas() {
+  document.querySelectorAll("textarea").forEach(autoResize);
 }
 
 function setStatus(cls, text) {
