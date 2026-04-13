@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <setjmp.h>
 #include <sys/wait.h>
+#include <signal.h>
 
 /* ── GC/RC Tracing (Phase 5) ─────────────────────────────────────────── */
 /*
@@ -1995,6 +1996,94 @@ void *march_process_spawn_lines(void *cmd_obj, void *args_list) {
         return mk_ok(out_str);
     }
     return result; /* Err case: pass through */
+}
+
+/* ── Async process management ───────────────────────────────────────── */
+
+/* Global fd-to-FILE* registry for live processes.
+   Each entry: slot → {pid, FILE*}  (FILE* wraps the stdout read-end pipe).
+   Keyed by the stream_id stored in LiveProcess(pid, stream_id). */
+#define LIVE_PROC_MAX 64
+static struct { int used; pid_t pid; FILE *fp; } live_proc_reg[LIVE_PROC_MAX];
+static int live_proc_next = 0;
+
+/* process_spawn_async(command, args) → Result(LiveProcess(pid,id), String) */
+void *march_process_spawn_async(void *cmd_obj, void *args_list) {
+    march_string *cmd_s = (march_string *)cmd_obj;
+    /* Build argv */
+    int extra = 0;
+    void *tmp = args_list;
+    while (((march_hdr *)tmp)->tag == 1) { extra++; tmp = MARCH_FIELD_PTR(tmp, 1); }
+    int argc = 1 + extra;
+    char **argv = (char **)malloc((size_t)(argc + 1) * sizeof(char *));
+    argv[0] = (char *)malloc((size_t)(cmd_s->len + 1));
+    memcpy(argv[0], cmd_s->data, (size_t)cmd_s->len); argv[0][cmd_s->len] = '\0';
+    int i = 1; tmp = args_list;
+    while (((march_hdr *)tmp)->tag == 1) {
+        march_string *a = (march_string *)MARCH_FIELD_PTR(tmp, 0);
+        argv[i] = (char *)malloc((size_t)(a->len + 1));
+        memcpy(argv[i], a->data, (size_t)a->len); argv[i][a->len] = '\0';
+        i++; tmp = MARCH_FIELD_PTR(tmp, 1);
+    }
+    argv[argc] = NULL;
+    /* Pipe for stdout */
+    int pfd[2];
+    if (pipe(pfd) != 0) {
+        for (int j = 0; j < argc; j++) free(argv[j]); free(argv);
+        return mk_err_cstr("pipe failed");
+    }
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(pfd[0]);
+        dup2(pfd[1], STDOUT_FILENO); close(pfd[1]);
+        execvp(argv[0], argv); _exit(127);
+    }
+    close(pfd[1]);
+    for (int j = 0; j < argc; j++) free(argv[j]); free(argv);
+    if (pid < 0) { close(pfd[0]); return mk_err_cstr("fork failed"); }
+    /* Register */
+    int id = live_proc_next++ % LIVE_PROC_MAX;
+    if (live_proc_reg[id].fp) fclose(live_proc_reg[id].fp);
+    live_proc_reg[id].used = 1;
+    live_proc_reg[id].pid  = pid;
+    live_proc_reg[id].fp   = fdopen(pfd[0], "r");
+    /* Build LiveProcess(pid, id): tag=0, 2 int64 fields */
+    void *lp = march_alloc(16 + 16);
+    MARCH_FIELD(lp, 0) = (int64_t)pid;
+    MARCH_FIELD(lp, 1) = (int64_t)id;
+    return mk_ok(lp);
+}
+
+/* process_read_line(lp) → Option(String) */
+void *march_process_read_line(void *lp_obj) {
+    int64_t id = MARCH_FIELD(lp_obj, 1);
+    if (id < 0 || id >= LIVE_PROC_MAX || !live_proc_reg[id].used || !live_proc_reg[id].fp)
+        return make_none();
+    char buf[4096]; char *line = fgets(buf, sizeof(buf), live_proc_reg[id].fp);
+    if (!line) return make_none();
+    size_t len = strlen(line);
+    if (len > 0 && line[len-1] == '\n') len--;  /* strip newline */
+    return make_some_ptr(march_string_lit(line, (int64_t)len));
+}
+
+/* process_kill_proc(lp) → () */
+int64_t march_process_kill_proc(void *lp_obj) {
+    int64_t pid = MARCH_FIELD(lp_obj, 0);
+    kill((pid_t)pid, SIGTERM);
+    return 0;
+}
+
+/* process_wait_proc(lp) → Int (exit code) */
+int64_t march_process_wait_proc(void *lp_obj) {
+    int64_t pid = MARCH_FIELD(lp_obj, 0);
+    int64_t id  = MARCH_FIELD(lp_obj, 1);
+    if (id >= 0 && id < LIVE_PROC_MAX && live_proc_reg[id].used) {
+        if (live_proc_reg[id].fp) { fclose(live_proc_reg[id].fp); live_proc_reg[id].fp = NULL; }
+        live_proc_reg[id].used = 0;
+    }
+    int status = 0;
+    waitpid((pid_t)pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
 }
 
 /* ── CSV builtins ───────────────────────────────────────────────────── */

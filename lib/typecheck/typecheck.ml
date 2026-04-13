@@ -1199,6 +1199,16 @@ let builtin_bindings : (string * scheme) list =
     ("process_spawn_lines", poly2 (fun a e ->
         TArrow (t_string, TArrow (t_list t_string,
           t_result (TCon ("Seq", [a])) e))));
+    (* Async (non-blocking) process spawn *)
+    ("process_spawn_async", poly1 (fun e ->
+        TArrow (t_string, TArrow (t_list t_string,
+          t_result (TCon ("LiveProcess", [])) e))));
+    ("process_read_line", Mono
+        (TArrow (TCon ("LiveProcess", []), t_option t_string)));
+    ("process_kill_proc", Mono
+        (TArrow (TCon ("LiveProcess", []), t_unit)));
+    ("process_wait_proc", Mono
+        (TArrow (TCon ("LiveProcess", []), t_int)));
     (* Actor self/receive builtins — 0-arg: foo() parses as EApp(f,[])
        so infer_app returns the type directly without unwrapping TArrow *)
     ("self",    Mono t_int);

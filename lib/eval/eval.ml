@@ -149,6 +149,11 @@ type task_entry = {
 let task_registry : (int, task_entry) Hashtbl.t = Hashtbl.create 16
 let next_task_id : int ref = ref 0
 
+(** Live-process registry for Process.spawn (async, non-blocking).
+    Maps an opaque integer id → (in_channel, pid). *)
+let live_proc_tbl : (int, in_channel * int) Hashtbl.t = Hashtbl.create 8
+let live_proc_next_id : int ref = ref 0
+
 (** Vault: ETS-like in-memory key-value store.
     Each table is identified by an opaque integer handle.
 
@@ -4729,6 +4734,69 @@ let base_env : env =
            with Unix.Unix_error (err, _, _) ->
              VCon ("Err", [VString (Unix.error_message err)]))
         | _ -> eval_error "process_spawn_lines: expected (String, List(String))"))
+
+  (* Spawn a process asynchronously (non-blocking).
+     Returns Ok(LiveProcess(pid, stream_id)) or Err(String). *)
+  ; ("process_spawn_async", VBuiltin ("process_spawn_async", function
+        | [VString cmd; lst] ->
+          let rec args_of_list = function
+            | VCon ("Nil", []) -> []
+            | VCon ("Cons", [VString s; rest]) -> s :: args_of_list rest
+            | v -> eval_error "process_spawn_async: expected String list, got %s"
+                     (value_to_string v)
+          in
+          let args_strs = args_of_list lst in
+          let args_arr  = Array.of_list (cmd :: args_strs) in
+          (try
+            let (stdout_r, stdout_w) = Unix.pipe () in
+            let (stderr_r, stderr_w) = Unix.pipe () in
+            let pid = Unix.create_process cmd args_arr Unix.stdin stdout_w stderr_w in
+            Unix.close stdout_w;
+            Unix.close stderr_w;
+            Unix.close stderr_r;
+            let ic = Unix.in_channel_of_descr stdout_r in
+            let id = !live_proc_next_id in
+            incr live_proc_next_id;
+            Hashtbl.add live_proc_tbl id (ic, pid);
+            VCon ("Ok", [VCon ("LiveProcess", [VInt pid; VInt id])])
+          with Unix.Unix_error (err, _, _) ->
+            VCon ("Err", [VString (Unix.error_message err)]))
+        | _ -> eval_error "process_spawn_async: expected (String, List(String))"))
+
+  (* Read one line from a LiveProcess's stdout.
+     Returns Some(line) or None on EOF. *)
+  ; ("process_read_line", VBuiltin ("process_read_line", function
+        | [VCon ("LiveProcess", [VInt _pid; VInt id])] ->
+          (match Hashtbl.find_opt live_proc_tbl id with
+           | None -> VCon ("None", [])
+           | Some (ic, _) ->
+             (try VCon ("Some", [VString (input_line ic)])
+              with End_of_file -> VCon ("None", [])))
+        | _ -> eval_error "process_read_line: expected LiveProcess"))
+
+  (* Send SIGTERM to the process. *)
+  ; ("process_kill_proc", VBuiltin ("process_kill_proc", function
+        | [VCon ("LiveProcess", [VInt pid; VInt _id])] ->
+          (try Unix.kill pid Sys.sigterm with Unix.Unix_error _ -> ());
+          VUnit
+        | _ -> eval_error "process_kill_proc: expected LiveProcess"))
+
+  (* Wait for the process to finish; close the channel. Returns exit code. *)
+  ; ("process_wait_proc", VBuiltin ("process_wait_proc", function
+        | [VCon ("LiveProcess", [VInt pid; VInt id])] ->
+          (match Hashtbl.find_opt live_proc_tbl id with
+           | Some (ic, _) ->
+             (try close_in_noerr ic with _ -> ());
+             Hashtbl.remove live_proc_tbl id
+           | None -> ());
+          (try
+            let (_, status) = Unix.waitpid [] pid in
+            match status with
+            | Unix.WEXITED  n -> VInt n
+            | Unix.WSIGNALED n -> VInt (- n)
+            | Unix.WSTOPPED  n -> VInt (- n)
+          with Unix.Unix_error _ -> VInt (-1))
+        | _ -> eval_error "process_wait_proc: expected LiveProcess"))
 
   (* ---- Logger builtins ---- *)
   ; ("logger_set_level", VBuiltin ("logger_set_level", function

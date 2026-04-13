@@ -60,6 +60,7 @@ let builtin_names : StringSet.t =
       "process_argv";
       "process_env"; "process_set_env"; "process_cwd"; "process_exit";
       "process_pid"; "process_spawn_sync"; "process_spawn_lines";
+      "process_spawn_async"; "process_read_line"; "process_kill_proc"; "process_wait_proc";
       (* TCP/network builtins *)
       "tcp_connect"; "tcp_close"; "tcp_listen"; "tcp_accept";
       "tcp_send_all"; "tcp_recv_all"; "tcp_recv_exact"; "tcp_recv_http"; "tcp_recv_http_headers";

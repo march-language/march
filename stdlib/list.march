@@ -12,17 +12,43 @@ mod List do
 
 -- ---- Construction ----
 
-doc "Returns an empty list."
+doc """
+Returns an empty list.
+
+## Examples
+
+```march
+List.empty()  -- []
+```
+"""
 fn empty() : List(a) do
   Nil
 end
 
-doc "Returns a list containing a single element."
+doc """
+Returns a list containing a single element.
+
+## Examples
+
+```march
+List.singleton(42)   -- [42]
+List.singleton("hi") -- ["hi"]
+```
+"""
 fn singleton(x : a) : List(a) do
   Cons(x, Nil)
 end
 
-doc "Returns a list with `x` repeated `n` times."
+doc """
+Returns a list with `x` repeated `n` times.
+
+## Examples
+
+```march
+List.repeat(0, 3)    -- [0, 0, 0]
+List.repeat("x", 4)  -- ["x", "x", "x", "x"]
+```
+"""
 fn repeat(x : a, n : Int) : List(a) do
   fn go(i : Int, acc : List(a)) : List(a) do
     if i <= 0 do acc else go(i - 1, Cons(x, acc)) end
@@ -30,7 +56,17 @@ fn repeat(x : a, n : Int) : List(a) do
   go(n, Nil)
 end
 
-doc "Returns [start, start+1, ..., stop-1]. Returns [] if start >= stop."
+doc """
+Returns [start, start+1, ..., stop-1]. Returns [] if start >= stop.
+
+## Examples
+
+```march
+List.range(0, 5)   -- [0, 1, 2, 3, 4]
+List.range(3, 7)   -- [3, 4, 5, 6]
+List.range(5, 5)   -- []
+```
+"""
 fn range(start : Int, stop : Int) : List(Int) do
   fn go(i : Int, acc : List(Int)) : List(Int) do
     if i < start do acc else go(i - 1, Cons(i, acc)) end
@@ -111,7 +147,16 @@ end
 
 -- ---- Measurement ----
 
-doc "Returns the number of elements in the list."
+doc """
+Returns the number of elements in the list.
+
+## Examples
+
+```march
+List.length([1, 2, 3])  -- 3
+List.length([])         -- 0
+```
+"""
 fn length(xs : List(a)) : Int do
   fn go(lst : List(a), acc : Int) : Int do
     match lst do
@@ -143,7 +188,16 @@ fn reverse(xs : List(a)) : List(a) do
   go(xs, Nil)
 end
 
-doc "Concatenates two lists."
+doc """
+Concatenates two lists.
+
+## Examples
+
+```march
+List.append([1, 2], [3, 4, 5])  -- [1, 2, 3, 4, 5]
+List.append([], [1, 2])         -- [1, 2]
+```
+"""
 fn append(xs : List(a), ys : List(a)) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
@@ -154,7 +208,19 @@ fn append(xs : List(a), ys : List(a)) : List(a) do
   go(reverse(xs), ys)
 end
 
-doc "Applies `f` to each element, returning a new list."
+doc """
+Applies `f` to each element, returning a new list.
+
+## Examples
+
+```march
+List.map([1, 2, 3], fn x -> x * 2)
+-- [2, 4, 6]
+
+List.map(["a", "b"], String.upper)
+-- ["A", "B"]
+```
+"""
 fn map(xs : List(a), f : a -> b) : List(b) do
   fn go(lst : List(a), acc : List(b)) : List(b) do
     match lst do
@@ -190,7 +256,19 @@ fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
   go(xs, Nil)
 end
 
-doc "Returns only elements satisfying `pred`."
+doc """
+Returns only elements satisfying `pred`.
+
+## Examples
+
+```march
+List.filter([1, 2, 3, 4, 5], fn x -> x > 2)
+-- [3, 4, 5]
+
+List.filter(["foo", "", "bar", ""], fn s -> !String.is_empty(s))
+-- ["foo", "bar"]
+```
+"""
 fn filter(xs : List(a), pred : a -> Bool) : List(a) do
   fn go(lst : List(a), acc : List(a)) : List(a) do
     match lst do
@@ -221,7 +299,19 @@ fn filter_map(xs : List(a), f : a -> Option(b)) : List(b) do
   go(xs, Nil)
 end
 
-doc "Left fold: reduces the list from left to right with an accumulator."
+doc """
+Left fold: reduces the list from left to right with an accumulator.
+
+## Examples
+
+```march
+List.fold_left(0, [1, 2, 3, 4], fn acc -> fn x -> acc + x)
+-- 10
+
+List.fold_left([], [1, 2, 3], fn acc -> fn x -> Cons(x * 2, acc))
+-- [6, 4, 2]  (note: reversed; use fold_right or reverse for ordered)
+```
+"""
 fn fold_left(acc : b, xs : List(a), f : b -> a -> b) : b do
   match xs do
   Nil        -> acc
@@ -304,7 +394,19 @@ end
 
 -- ---- Sorting ----
 
-doc "Sorts by a comparator function. Uses merge sort (stable, O(n log n))."
+doc """
+Sorts by a comparator function. Uses merge sort (stable, O(n log n)).
+
+## Examples
+
+```march
+List.sort_by([3, 1, 4, 1, 5], fn (a, b) -> a < b)
+-- [1, 1, 3, 4, 5]
+
+List.sort_by(["banana", "apple", "cherry"], fn (a, b) -> a < b)
+-- ["apple", "banana", "cherry"]
+```
+"""
 fn sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
   fn rev_onto(rev_prefix : List(a), suffix : List(a)) : List(a) do
     match rev_prefix do
@@ -442,7 +544,19 @@ end
 
 -- ---- Combining ----
 
-doc "Pairs up elements from two lists. Stops at the shorter list."
+doc """
+Pairs up elements from two lists. Stops at the shorter list.
+
+## Examples
+
+```march
+List.zip([1, 2, 3], ["a", "b", "c"])
+-- [(1, "a"), (2, "b"), (3, "c")]
+
+List.zip([1, 2], ["a", "b", "c", "d"])
+-- [(1, "a"), (2, "b")]
+```
+"""
 fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
   fn go(a : List(a), b : List(b), acc : List((a, b))) : List((a, b)) do
     match a do

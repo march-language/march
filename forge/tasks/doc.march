@@ -34,10 +34,26 @@ end
 
 -- ── Markdown-to-HTML ─────────────────────────────────────────────────────────
 
+-- Render inline backtick code spans: `code` -> <code>code</code>
+pfn render_inline(text) do
+  fn go(s, out) do
+    match String.split_first(s, "`") do
+    None -> List.reverse(Cons(html_escape(s), out))
+    Some((before, after)) ->
+      match String.split_first(after, "`") do
+      None -> List.reverse(Cons(html_escape(s), out))
+      Some((code, rest)) ->
+        go(rest, Cons("</code>", Cons(html_escape(code), Cons("<code>", Cons(html_escape(before), out)))))
+      end
+    end
+  end
+  String.join(go(text, Nil), "")
+end
+
 pfn flush_para(buf, out) do
   if List.is_empty(buf) do out
   else
-    let text = html_escape(String.join(List.reverse(buf), " "))
+    let text = render_inline(String.join(List.reverse(buf), " "))
     Cons("</p>", Cons(text, Cons("<p>", out)))
   end
 end
@@ -55,12 +71,33 @@ pfn md_step_code(line, rest, buf, out, go) do
   else go(rest, Cons(line, buf), out, true) end
 end
 
+pfn md_heading(t) do
+  if sw(t, "### ") do Some(("<h4>", drop_prefix(t, "### ")))
+  else
+    if sw(t, "## ") do Some(("<h3>", drop_prefix(t, "## ")))
+    else
+      if sw(t, "# ") do Some(("<h3>", drop_prefix(t, "# ")))
+      else None end
+    end
+  end
+end
+
 pfn md_step_text(line, rest, buf, out, go) do
   let t = trim(line)
   if is_fence(t) do go(rest, Nil, Cons("<pre><code>", flush_para(buf, out)), true)
   else
     if String.is_empty(t) do go(rest, Nil, flush_para(buf, out), false)
-    else go(rest, Cons(t, buf), out, false) end
+    else
+      match md_heading(t) do
+      Some((tag, content)) ->
+        let close = String.replace_all(tag, "<", "</")
+        let flushed = flush_para(buf, out)
+        let hnode = Cons(close, Cons(html_escape(content), Cons(tag, flushed)))
+        go(rest, Nil, hnode, false)
+      None ->
+        go(rest, Cons(t, buf), out, false)
+      end
+    end
   end
 end
 
@@ -222,6 +259,15 @@ end
 
 -- State tuple: (pending_doc, fns, types, ifaces, remaining_lines)
 -- Process one line of source, returning updated state.
+-- Only declarations at column 0 are module-level (not nested helpers).
+pfn is_toplevel(line) do
+  if String.is_empty(line) do false
+  else
+    let ch = slc(line, 0, 1)
+    ch != " " && ch != "\t"
+  end
+end
+
 pfn process_line(line, pending, fns, types, ifaces, include_private) do
   let t = trim(line)
   if String.is_empty(t) do (pending, fns, types, ifaces, Nil)
@@ -232,12 +278,12 @@ pfn process_line(line, pending, fns, types, ifaces, include_private) do
         let doc_text = extract_single_doc(t)
         (Some(doc_text), fns, types, ifaces, Nil)
       else
-        if sw(t, "fn ") do
+        if sw(t, "fn ") && is_toplevel(line) do
           let dsig = extract_sig(line)
           let name = decl_name(dsig)
           (None, Cons(FnEntry(name, dsig, pending, false), fns), types, ifaces, Nil)
         else
-          if sw(t, "pfn ") && include_private do
+          if sw(t, "pfn ") && include_private && is_toplevel(line) do
             let dsig = extract_sig(line)
             let name = decl_name(dsig)
             (None, Cons(FnEntry(name, dsig, pending, true), fns), types, ifaces, Nil)
@@ -358,13 +404,19 @@ pfn page_css() do
   ".bfn{background:#1d3557;color:var(--fn)}.bpfn{background:#1e2124;color:var(--prv)}" ++
   ".bty{background:#0d3321;color:var(--ty)}.bpt{background:#1a2416;color:#5a9a60}" ++
   ".bif{background:#3a2a00;color:var(--if)}" ++
-  ".sig{font-family:monospace;font-size:13px;color:var(--bright);flex:1}" ++
-  ".ib{padding:11px 14px;border-top:1px solid var(--bdr);display:none;font-size:14px}" ++
+  ".name{font-family:monospace;font-size:13px;color:var(--bright);font-weight:600}" ++
+  ".sig{font-family:monospace;font-size:13px;color:var(--dim);flex:1;margin-left:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" ++
+  ".ib{padding:16px 18px;border-top:1px solid var(--bdr);display:none;font-size:14px;color:var(--text);line-height:1.7}" ++
   ".ib.open{display:block}" ++
   ".mc{border:1px solid var(--bdr);border-radius:7px;padding:14px 18px;margin-bottom:10px;background:var(--card)}" ++
   ".mc:hover{border-color:#7c3aed}.mc h3{color:var(--acc);font-size:.95rem}" ++
   ".mc p{font-size:13px;color:var(--dim);margin-top:5px}" ++
-  ".st{font-size:12px;color:var(--dim);margin-top:5px}.st span{margin-right:10px}"
+  ".st{font-size:12px;color:var(--dim);margin-top:5px}.st span{margin-right:10px}" ++
+  ".pre-wrap{position:relative}" ++
+  ".copy-btn{position:absolute;top:7px;right:8px;background:var(--card);color:var(--dim);border:1px solid var(--bdr);border-radius:4px;padding:2px 8px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;opacity:0;transition:opacity .15s,color .15s,border-color .15s}" ++
+  ".pre-wrap:hover .copy-btn{opacity:1}" ++
+  ".copy-btn:hover{color:var(--text);border-color:#7c3aed}" ++
+  ".copy-btn.copied{color:var(--fn);border-color:var(--fn);opacity:1}"
 end
 
 pfn page_js() do
@@ -376,6 +428,17 @@ pfn page_js() do
   "document.querySelectorAll('.mc').forEach(function(el){el.style.display=(!q||el.textContent.toLowerCase().includes(q))?'':'none';});});" ++
   "var path=window.location.pathname;" ++
   "document.querySelectorAll('.sl').forEach(function(a){if(path.endsWith(a.getAttribute('href')))a.classList.add('active');});" ++
+  "document.querySelectorAll('.ib pre').forEach(function(pre){" ++
+  "var wrap=document.createElement('div');wrap.className='pre-wrap';" ++
+  "pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);" ++
+  "var btn=document.createElement('button');btn.className='copy-btn';btn.textContent='Copy';" ++
+  "btn.addEventListener('click',function(e){e.stopPropagation();" ++
+  "var code=pre.querySelector('code');var text=code?code.textContent:pre.textContent;" ++
+  "navigator.clipboard.writeText(text).then(function(){" ++
+  "btn.textContent='Copied!';btn.classList.add('copied');" ++
+  "setTimeout(function(){btn.textContent='Copy';btn.classList.remove('copied');},2000);" ++
+  "}).catch(function(){btn.textContent='!';setTimeout(function(){btn.textContent='Copy';},1500);});});" ++
+  "wrap.appendChild(btn);});" ++
   "});"
 end
 
@@ -386,7 +449,7 @@ pfn page(title, sidebar, is_index, content) do
   "<title>" ++ html_escape(title) ++ " — March Docs</title>" ++
   "<style>" ++ page_css() ++ "</style></head><body>" ++
   "<nav id=\"sb\"><h1>March Docs</h1>" ++
-  "<input id=\"sq\" type=\"search\" placeholder=\"Search\xe2\x80\xa6\" autocomplete=\"off\">" ++
+  "<input id=\"sq\" type=\"search\" placeholder=\"Search&hellip;\" autocomplete=\"off\">" ++
   "<a href=\"index.html\"" ++ idx_cls ++ ">Overview</a>" ++
   sidebar ++
   "</nav><main id=\"main\">" ++ content ++ "</main>" ++
@@ -403,15 +466,27 @@ end
 
 -- ── Entry accessors ──────────────────────────────────────────────────────────
 
-pfn fn_entry_priv(e) do match e do FnEntry(_, _, _, p) -> p end end
-pfn mod_info_name(m) do match m do ModuleInfo(n, _, _, _, _) -> n end end
+pfn entry_priv(e) do
+  match e do
+  FnEntry(_, _, _, p) -> p
+  end
+end
+
+pfn info_name(m) do
+  match m do
+  ModuleInfo(n, _, _, _, _) -> n
+  end
+end
+
+pfn is_pub(e) do !entry_priv(e) end
+pfn is_prv(e) do entry_priv(e) end
 
 -- ── Doc body helpers ─────────────────────────────────────────────────────────
 
 pfn render_doc_body(doc_opt) do
   match doc_opt do
   None -> ""
-  Some(doc) -> "<div class=\"ib\">" ++ md_to_html(doc) ++ "</div>"
+  Some(d) -> "<div class=\"ib\">" ++ md_to_html(d) ++ "</div>"
   end
 end
 
@@ -431,8 +506,13 @@ pfn render_fn(entry) do
     let badge_lbl = if is_private do "pfn" else "fn" end
     let badge = "<span class=\"badge " ++ badge_cls ++ "\">" ++ badge_lbl ++ "</span>"
     let hdr = "<div class=\"ih\">" ++ badge ++
+      "<span class=\"name\">" ++ html_escape(name) ++ "</span>" ++
       "<span class=\"sig\">" ++ html_escape(dsig) ++ "</span></div>"
-    let body = render_doc_body(doc_opt)
+    let doc_html = match doc_opt do
+      None -> ""
+      Some(d) -> md_to_html(d)
+    end
+    let body = "<div class=\"ib\">" ++ doc_html ++ "</div>"
     "<div class=\"item\" id=\"fn-" ++ html_escape(name) ++ "\">" ++ hdr ++ body ++ "</div>"
   end
 end
@@ -446,8 +526,13 @@ pfn render_type(entry) do
     let badge = "<span class=\"badge " ++ badge_cls ++ "\">" ++ badge_lbl ++ "</span>"
     let disp = if is_prv do drop_prefix(dsig, "ptype ") else dsig end
     let hdr = "<div class=\"ih\">" ++ badge ++
+      "<span class=\"name\">" ++ html_escape(name) ++ "</span>" ++
       "<span class=\"sig\">" ++ html_escape(disp) ++ "</span></div>"
-    let body = render_doc_body(doc_opt)
+    let doc_html = match doc_opt do
+      None -> ""
+      Some(d) -> md_to_html(d)
+    end
+    let body = "<div class=\"ib\">" ++ doc_html ++ "</div>"
     "<div class=\"item\" id=\"type-" ++ html_escape(name) ++ "\">" ++ hdr ++ body ++ "</div>"
   end
 end
@@ -457,8 +542,13 @@ pfn render_iface(entry) do
   IfaceEntry(name, dsig, doc_opt, _methods) ->
     let badge = "<span class=\"badge bif\">interface</span>"
     let hdr = "<div class=\"ih\">" ++ badge ++
+      "<span class=\"name\">" ++ html_escape(name) ++ "</span>" ++
       "<span class=\"sig\">" ++ html_escape(dsig) ++ "</span></div>"
-    let body = render_doc_body(doc_opt)
+    let doc_html = match doc_opt do
+      None -> ""
+      Some(d) -> md_to_html(d)
+    end
+    let body = "<div class=\"ib\">" ++ doc_html ++ "</div>"
     "<div class=\"item\" id=\"iface-" ++ html_escape(name) ++ "\">" ++ hdr ++ body ++ "</div>"
   end
 end
@@ -476,8 +566,8 @@ pfn render_module(info, sidebar) do
     let ifaces_html =
       if List.is_empty(ifaces) do ""
       else "<h2>Interfaces</h2>" ++ String.join(List.map(ifaces, render_iface), "\n") end
-    let pub_fns = List.filter(fns, fn e -> not fn_entry_priv(e))
-    let prv_fns = List.filter(fns, fn e -> fn_entry_priv(e))
+    let pub_fns = List.filter(fns, is_pub)
+    let prv_fns = List.filter(fns, is_prv)
     let pub_html =
       if List.is_empty(pub_fns) do ""
       else "<h2>Functions</h2>" ++ String.join(List.map(pub_fns, render_fn), "\n") end
@@ -503,7 +593,7 @@ pfn index_card(info) do
         end
         if String.is_empty(first) do "" else "<p>" ++ html_escape(first) ++ "</p>" end
     end
-    let fn_count = List.length(List.filter(fns, fn e -> not fn_entry_priv(e)))
+    let fn_count = List.length(List.filter(fns, is_pub))
     let ty_count = List.length(types)
     let stats = "<div class=\"st\"><span>" ++ String.from_int(fn_count) ++
       " functions</span><span>" ++ String.from_int(ty_count) ++ " types</span></div>"
@@ -539,28 +629,30 @@ fn main() do
   let extra_dirs = match System.env("FORGE_DOC_SRC") do
     None -> Nil
     Some(s) ->
-      List.filter(String.split(s, ":"), fn p -> not (String.is_empty(p)))
+      List.filter(String.split(s, ":"), fn p -> !(String.is_empty(p)))
   end
   let all_dirs = List.append(stdlib_dirs, extra_dirs)
   if List.is_empty(all_dirs) do
     IO.warn("forge doc: no source directories found (set FORGE_DOC_STDLIB)")
     System.exit(1)
-  end
-  let all_files = List.sort(List.flat_map(all_dirs, walk_march_files), fn(a, b) -> a < b)
+  else () end
+  let all_files = List.sort_by(List.flat_map(all_dirs, walk_march_files), fn (a, b) -> a < b)
   IO.warn("forge doc: parsing " ++ String.from_int(List.length(all_files)) ++ " source files...")
-  let modules = List.sort(
+  let modules = List.sort_by(
     List.filter_map(all_files, fn path -> parse_file(path, include_private)),
-    fn a b -> mod_info_name(a) < mod_info_name(b)
+    fn (a, b) -> info_name(a) < info_name(b)
   )
   IO.warn("forge doc: generating " ++ String.from_int(List.length(modules)) ++ " module pages...")
   match Dir.mkdir_p(output_dir) do
-    Err(_) -> IO.warn("forge doc: cannot create " ++ output_dir); System.exit(1)
+    Err(_) ->
+      IO.warn("forge doc: cannot create " ++ output_dir)
+      System.exit(1)
     Ok(_) -> ()
   end
-  let module_names = List.map(modules, mod_info_name)
+  let module_names = List.map(modules, info_name)
   let sidebar = sidebar_links(module_names)
   List.each(modules, fn info ->
-    let name = mod_info_name(info)
+    let name = info_name(info)
     let html = render_module(info, sidebar)
     match File.write(output_dir ++ "/" ++ name ++ ".html", html) do
       Err(_) -> IO.warn("forge doc: failed to write " ++ name ++ ".html")
