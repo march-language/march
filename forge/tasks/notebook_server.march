@@ -204,14 +204,17 @@ pfn generate_runner(cells, run_through_idx) do
     end
 
     -- Scan rev_lines backward, collecting into stmt_rev until depth balances.
+    -- Because we prepend each line while scanning backward, stmt_rev accumulates
+    -- in FORWARD source order (head = earliest line). Do NOT reverse on return.
     fn find_start(rev_lines, depth, stmt_rev) do
       match rev_lines do
-        Nil -> (Nil, List.reverse(stmt_rev))
+        Nil -> (Nil, stmt_rev)
         Cons(line, rest) ->
           let new_depth = depth - line_openers(line) + line_closers(line)
           if new_depth <= 0 do
-            -- This line is the opener of the top-level statement — include it.
-            (List.reverse(rest), List.reverse(Cons(line, stmt_rev)))
+            -- Found the opener. Cons it onto stmt_rev; it is now at the head,
+            -- which is correct since it's the earliest (first) line.
+            (List.reverse(rest), Cons(line, stmt_rev))
           else
             find_start(rest, new_depth, Cons(line, stmt_rev))
           end
