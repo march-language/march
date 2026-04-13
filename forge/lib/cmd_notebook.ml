@@ -16,11 +16,14 @@
 
 let find_stdlib_dir () =
   let exe = Sys.executable_name in
+  let bin_dir = Filename.dirname exe in
   let candidates = [
     "stdlib";
-    Filename.concat (Filename.dirname exe) "../stdlib";
-    Filename.concat (Filename.dirname exe) "../../stdlib";
-    Filename.concat (Filename.dirname exe) "../../../stdlib";
+    Filename.concat bin_dir "../stdlib";
+    Filename.concat bin_dir "../../stdlib";
+    Filename.concat bin_dir "../../../stdlib";
+    (* installed via opam: <prefix>/bin/../share/march *)
+    Filename.concat bin_dir "../share/march";
   ] in
   List.find_opt Sys.file_exists candidates
 
