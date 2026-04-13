@@ -958,6 +958,25 @@ textarea.cell-src{display:block;width:100%;background:#1c1c1f;color:#e4e4e7;font
 .src-preview{font-family:'JetBrains Mono',monospace;font-size:13px;color:#71717a;padding:8px 18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
 .src-preview:hover{color:#a78bfa}
 .out-collapsed .cell-out,.out-collapsed .cell-out-html,.out-collapsed .cell-err,.out-collapsed .cell-server-out{display:none!important}
+
+/* ── Phase 3: command mode ──────────────────────────── */
+.cell-wrap:focus{outline:none}
+.cell-wrap.cmd-selected>.cell-code{border-color:#7c3aed;box-shadow:0 0 0 2px #7c3aed55;border-left-color:#a78bfa}
+.cell-wrap.cmd-selected>.cell-md-wrap{border-left-color:#a78bfa;outline:1px solid #7c3aed55}
+.cell-wrap.cmd-selected>.cell-server-wrap{border-color:#22c55e;box-shadow:0 0 0 2px #22c55e33}
+#mode-badge{font-size:10px;font-family:'JetBrains Mono',monospace;padding:2px 7px;border-radius:4px;letter-spacing:.06em;font-weight:600;border:1px solid transparent;display:none}
+#mode-badge.cmd{display:inline-block;color:#fbbf24;background:#451a03;border-color:#78350f}
+/* cheatsheet modal */
+#cheatsheet{display:none;position:fixed;inset:0;background:#000a;z-index:999;align-items:center;justify-content:center}
+#cheatsheet.visible{display:flex}
+#cheatsheet-inner{background:#1c1c1f;border:1px solid #3f3f46;border-radius:10px;padding:24px 32px;max-width:520px;width:100%;color:#d4d4d8}
+#cheatsheet-inner h2{font-size:15px;font-weight:600;margin-bottom:16px;color:#f4f4f5}
+#cheatsheet-inner table{width:100%;border-collapse:collapse;font-size:12px}
+#cheatsheet-inner td{padding:4px 8px;color:#a1a1aa}
+#cheatsheet-inner td:first-child{font-family:'JetBrains Mono',monospace;color:#c4b5fd;width:90px}
+#cheatsheet-inner tr:hover td{color:#e4e4e7;background:#27272a}
+#cheatsheet-inner h3{font-size:12px;font-weight:600;color:#71717a;text-transform:uppercase;letter-spacing:.07em;margin:14px 0 6px}
+#cheatsheet-close{margin-top:18px;display:block;text-align:right}
 </style>
 </head>
 <body>
@@ -969,7 +988,38 @@ textarea.cell-src{display:block;width:100%;background:#1c1c1f;color:#e4e4e7;font
   <button class="btn btn-primary" id="btn-run-all">▶ Run All</button>
   <button class="btn btn-secondary" id="btn-clear-all">Clear All</button>
   <button class="btn btn-secondary" id="btn-save">Save</button>
+  <span id="mode-badge">COMMAND</span>
   <div id="status">connecting</div>
+</div>
+<div id="cheatsheet">
+  <div id="cheatsheet-inner">
+    <h2>Keyboard Shortcuts</h2>
+    <h3>Command Mode (Esc to enter)</h3>
+    <table>
+      <tr><td>j / ↓</td><td>Select next cell</td></tr>
+      <tr><td>k / ↑</td><td>Select previous cell</td></tr>
+      <tr><td>Enter</td><td>Enter edit mode</td></tr>
+      <tr><td>a</td><td>Insert code cell above</td></tr>
+      <tr><td>b</td><td>Insert code cell below</td></tr>
+      <tr><td>m</td><td>Convert cell to Markdown</td></tr>
+      <tr><td>y</td><td>Convert cell to Code</td></tr>
+      <tr><td>d d</td><td>Delete cell</td></tr>
+      <tr><td>o</td><td>Toggle output collapse</td></tr>
+      <tr><td>0 0</td><td>Clear cell output</td></tr>
+      <tr><td>Shift+Enter</td><td>Run cell + select next</td></tr>
+      <tr><td>?</td><td>Show this cheatsheet</td></tr>
+      <tr><td>Esc</td><td>Exit command mode</td></tr>
+    </table>
+    <h3>Edit Mode</h3>
+    <table>
+      <tr><td>Esc</td><td>Enter command mode</td></tr>
+      <tr><td>Shift+Enter</td><td>Run + move to next</td></tr>
+      <tr><td>Cmd/Ctrl+Enter</td><td>Run cell</td></tr>
+      <tr><td>Cmd/Ctrl+S</td><td>Save notebook</td></tr>
+      <tr><td>Cmd/Ctrl+Shift+Enter</td><td>Run all cells</td></tr>
+    </table>
+    <div id="cheatsheet-close"><button class="btn btn-secondary" onclick="hideCheatsheet()">Close</button></div>
+  </div>
 </div>
 <div id="notebook"></div>
 
@@ -1341,6 +1391,13 @@ function render() {
       attachEditorEvents(wrap, idx);
     }
 
+    // Click on cell wrapper (not button/textarea) → command mode
+    wrap.addEventListener("click", (e) => {
+      if (!e.target.closest("button,textarea,a,input")) {
+        cmdSelect(idx, false);
+      }
+    });
+
     // between-cell add bar
     const bar = document.createElement("div");
     bar.className = "add-cell-bar";
@@ -1355,6 +1412,11 @@ function render() {
   endBar.style.cssText = "display:flex;justify-content:center;gap:8px;padding:12px 0";
   endBar.innerHTML = `<button class="add-btn" onclick="addCell('markdown',\${cells.length-1})">+ Markdown</button><button class="add-btn" onclick="addCell('code',\${cells.length-1})">+ Code</button><button class="add-btn" onclick="addCell('server',\${cells.length-1})">+ Server</button>`;
   nb.appendChild(endBar);
+  // Restore command mode selection highlight if still valid
+  if (cmdActive && cmdSelected >= 0 && cmdSelected < cells.length) {
+    const selWrap = document.querySelector(`[data-idx="\${cmdSelected}"]`);
+    if (selWrap) { selWrap.classList.add("cmd-selected"); selWrap.setAttribute("tabindex", "-1"); }
+  }
   // Defer a second resize pass so custom fonts (JetBrains Mono) are laid out
   requestAnimationFrame(resizeAllTextareas);
 }
@@ -1400,12 +1462,15 @@ function attachMarkdownEvents(wrap, idx) {
     if (preview) preview.innerHTML = renderMd(ta.value) || '<span style="color:#4b5563;font-style:italic">Click to edit…</span>';
     autoResize(ta);
   });
+  installEscapeHandler(ta, idx);
   ta.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
       e.preventDefault();
-      toggleMdEdit(idx);
+      cells[idx].source = ta.value;
+      cells[idx]._editing = false;
+      updateCell(idx);
+      cmdSelect(idx, false);
     }
-    if (e.key === "Escape") { e.preventDefault(); toggleMdEdit(idx); }
   });
   autoResize(ta);
 }
@@ -1521,11 +1586,21 @@ function updateCell(idx) {
   bar.className = "add-cell-bar";
   bar.innerHTML = `<button onclick="addCell('markdown',\${idx})">+ md</button><button onclick="addCell('code',\${idx})">+ code</button><button onclick="addCell('server',\${idx})">+ srv</button>`;
   wrap.appendChild(bar);
+  // Re-apply command mode selection if this cell was selected
+  if (cmdActive && cmdSelected === idx) {
+    wrap.classList.add("cmd-selected");
+    wrap.setAttribute("tabindex", "-1");
+  }
+  // Click on wrapper → command mode
+  wrap.addEventListener("click", (e) => {
+    if (!e.target.closest("button,textarea,a,input")) cmdSelect(idx, false);
+  });
 }
 
 function attachEditorEvents(wrap, idx) {
   const ta = wrap.querySelector("textarea");
   if (!ta) return;
+  installEscapeHandler(ta, idx);
   ta.addEventListener("input", () => {
     cells[idx].source = ta.value;
     autoResize(ta);
@@ -1595,11 +1670,158 @@ document.getElementById("btn-add-code").onclick   = () => addCell("code",   cell
 document.getElementById("btn-add-md").onclick     = () => addCell("markdown", cells.length-1);
 document.getElementById("btn-add-server").onclick = () => addCell("server", cells.length-1);
 
+// ── Phase 3: Command mode ─────────────────────────────────────────────────────
+
+let cmdSelected = -1;   // index of selected cell in command mode, -1 = none
+let cmdActive   = false; // true when in command mode
+let cmdLastKey  = "";
+let cmdLastMs   = 0;
+
+function cmdSelect(idx, scrollIntoView) {
+  // Persist current textarea value before switching
+  if (cmdSelected >= 0 && cells[cmdSelected]) {
+    const oldWrap = document.querySelector(`[data-idx="\${cmdSelected}"]`);
+    if (oldWrap) {
+      const ta = oldWrap.querySelector("textarea[data-cell]");
+      if (ta) cells[cmdSelected].source = ta.value;
+      oldWrap.classList.remove("cmd-selected");
+    }
+  }
+  cmdSelected = idx;
+  cmdActive   = true;
+  const wrap = document.querySelector(`[data-idx="\${idx}"]`);
+  if (wrap) {
+    wrap.classList.add("cmd-selected");
+    wrap.setAttribute("tabindex", "-1");
+    wrap.focus();
+    if (scrollIntoView !== false) wrap.scrollIntoView({block:"nearest"});
+  }
+  document.getElementById("mode-badge").className = "cmd";
+}
+
+function cmdExit() {
+  if (cmdSelected >= 0) {
+    const wrap = document.querySelector(`[data-idx="\${cmdSelected}"]`);
+    if (wrap) wrap.classList.remove("cmd-selected");
+  }
+  cmdSelected = -1;
+  cmdActive   = false;
+  document.getElementById("mode-badge").className = "";
+}
+
+function cmdEnterEdit(idx) {
+  if (idx < 0 || idx >= cells.length) return;
+  cmdActive = false;
+  if (cells[idx] && cells[idx].kind === "markdown") {
+    cells[idx]._editing = true;
+    updateCell(idx);
+  }
+  const wrap = document.querySelector(`[data-idx="\${idx}"]`);
+  if (!wrap) return;
+  const ta = wrap.querySelector("textarea");
+  if (ta) { ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length); }
+  document.getElementById("mode-badge").className = "";
+}
+
+function convertCell(idx, toKind) {
+  if (!cells[idx] || cells[idx].kind === toKind) return;
+  cells[idx].kind = toKind;
+  cells[idx].output = "";
+  cells[idx].error = null;
+  cells[idx].server_log = "";
+  cells[idx]._editing = false;
+  updateCell(idx);
+  setTimeout(() => cmdSelect(idx, false), 10);
+}
+
+function showCheatsheet() {
+  document.getElementById("cheatsheet").classList.add("visible");
+}
+
+function hideCheatsheet() {
+  document.getElementById("cheatsheet").classList.remove("visible");
+}
+
+document.getElementById("cheatsheet").addEventListener("click", (e) => {
+  if (e.target === document.getElementById("cheatsheet")) hideCheatsheet();
+});
+
+// Enter command mode when Escape pressed in textarea
+function installEscapeHandler(ta, idx) {
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      cells[idx].source = ta.value;
+      ta.blur();
+      cmdSelect(idx, false);
+    }
+  });
+}
+
 // ── Keyboard shortcuts ───────────────────────────────────────────────────────
 
 document.addEventListener("keydown", (e) => {
-  if ((e.metaKey||e.ctrlKey) && e.shiftKey && e.key==="Enter") { e.preventDefault(); runAll(); }
-  if ((e.metaKey||e.ctrlKey) && e.key==="s") { e.preventDefault(); saveNotebook(); }
+  const tag = document.activeElement && document.activeElement.tagName;
+  const inInput = tag === "TEXTAREA" || tag === "INPUT";
+
+  // Global shortcuts (work in any mode)
+  if ((e.metaKey||e.ctrlKey) && e.shiftKey && e.key==="Enter") { e.preventDefault(); runAll(); return; }
+  if ((e.metaKey||e.ctrlKey) && e.key==="s") { e.preventDefault(); saveNotebook(); return; }
+
+  // Command mode shortcuts
+  if (cmdActive && !inInput) {
+    const now = Date.now();
+    const dbl = (k) => cmdLastKey === k && (now - cmdLastMs) < 500;
+    e.preventDefault();
+    switch(e.key) {
+      case "j": case "ArrowDown": {
+        const next = cmdSelected < cells.length - 1 ? cmdSelected + 1 : cmdSelected;
+        cmdSelect(next); break;
+      }
+      case "k": case "ArrowUp": {
+        const prev = cmdSelected > 0 ? cmdSelected - 1 : 0;
+        cmdSelect(prev); break;
+      }
+      case "Enter":
+        cmdEnterEdit(cmdSelected); break;
+      case "a":
+        addCell("code", cmdSelected - 1);
+        setTimeout(() => cmdSelect(cmdSelected, false), 20);
+        break;
+      case "b":
+        addCell("code", cmdSelected);
+        setTimeout(() => cmdSelect(cmdSelected + 1, false), 20);
+        break;
+      case "m":
+        convertCell(cmdSelected, "markdown"); break;
+      case "y":
+        convertCell(cmdSelected, "code"); break;
+      case "d":
+        if (dbl("d")) { const old = cmdSelected; deleteCell(old); cmdLastKey = "";
+          setTimeout(() => { if (old > 0) cmdSelect(old-1); else if (cells.length>0) cmdSelect(0); }, 20); }
+        else { cmdLastKey = "d"; cmdLastMs = now; }
+        return;
+      case "0":
+        if (dbl("0")) { clearCell(cmdSelected); cmdLastKey = ""; }
+        else { cmdLastKey = "0"; cmdLastMs = now; }
+        return;
+      case "o":
+        toggleOutCollapse(cmdSelected); break;
+      case "Escape":
+        cmdExit(); break;
+      case "?":
+        showCheatsheet(); break;
+      default:
+        // Shift+Enter: run + move next
+        if (e.shiftKey && e.key === "Enter") {
+          if (cells[cmdSelected] && cells[cmdSelected].kind === "code") runCell(cmdSelected);
+          const next2 = cmdSelected < cells.length - 1 ? cmdSelected + 1 : cmdSelected;
+          cmdSelect(next2);
+        }
+    }
+    cmdLastKey = e.key;
+    cmdLastMs  = now;
+  }
 });
 
 connect();
