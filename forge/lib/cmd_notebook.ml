@@ -7,8 +7,9 @@
     FILE.mnb is optional for `serve`: if omitted, a new temp notebook is created.
     If FILE.mnb is given but does not exist, it is created with a starter template.
 
-    The real implementations live in forge/tasks/notebook.march and
-    forge/tasks/notebook_server.march, embedded as strings at build time. *)
+    The batch renderer lives in forge/tasks/notebook.march.
+    The live server (Scroll) lives in ~/code/scroll/src/scroll.march —
+    symlinked into forge/tasks/notebook_server.march and embedded at build time. *)
 
 (* ------------------------------------------------------------------ *)
 (* Stdlib / march binary discovery                                     *)
