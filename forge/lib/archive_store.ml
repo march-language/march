@@ -310,15 +310,35 @@ let list_archive_tasks archive_root =
       if Sys.file_exists full then Some (cmd, full) else None
     ) tasks
 
+(** Resolve the stdlib directory using the same strategy as the compiler:
+    1. MARCH_STDLIB env var  2. exe-relative paths  3. CWD fallback *)
+let find_stdlib_dir () =
+  match Sys.getenv_opt "MARCH_STDLIB" with
+  | Some p when Sys.file_exists p -> Some p
+  | _ ->
+    let exe_dir = Filename.dirname Sys.executable_name in
+    let candidates = [
+      Filename.concat exe_dir "../stdlib";
+      Filename.concat exe_dir "../../stdlib";
+      Filename.concat exe_dir "../share/march/stdlib";
+      Filename.concat exe_dir "../share/march";
+      "stdlib";
+    ] in
+    List.find_opt Sys.file_exists candidates
+
 (** Run a task module file with the given arguments.
     FORGE_TASK_ARGS carries newline-separated args; MARCH_LIB_PATH lets tasks
-    import sibling modules (e.g. Forge.Scaffold from lib/forge/scaffold.march). *)
+    import sibling modules; MARCH_STDLIB tells tasks where the stdlib lives. *)
 let run_task task_file lib_paths args =
   let args_env = String.concat "\n" args in
   let lib_path_env = match lib_paths with
     | [] -> ""
     | ps -> Printf.sprintf "MARCH_LIB_PATH=%s " (Filename.quote (String.concat ":" ps))
   in
-  let cmd = Printf.sprintf "%sFORGE_TASK_ARGS=%s march %s"
-      lib_path_env (Filename.quote args_env) (Filename.quote task_file) in
+  let stdlib_env = match find_stdlib_dir () with
+    | None -> ""
+    | Some p -> Printf.sprintf "MARCH_STDLIB=%s " (Filename.quote p)
+  in
+  let cmd = Printf.sprintf "%s%sFORGE_TASK_ARGS=%s march %s"
+      lib_path_env stdlib_env (Filename.quote args_env) (Filename.quote task_file) in
   Sys.command cmd
