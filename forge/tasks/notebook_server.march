@@ -860,6 +860,19 @@ textarea.cell-src{display:block;width:100%;background:#1c1c1f;color:#e4e4e7;font
 .add-cell-bar button{padding:2px 12px;font-size:11px;border-radius:10px;border:1px solid #3f3f46;background:transparent;color:#71717a;cursor:pointer;transition:color .1s,border-color .1s}
 .add-cell-bar button:hover{border-color:#7c3aed;color:#a78bfa}
 #drop-hint{text-align:center;color:#52525b;padding:60px;font-size:14px}
+
+/* ── Phase 1: stale dimming, collapse, copy, badges ─ */
+[data-dirty] .cell-out,[data-dirty] .cell-out-html{opacity:0.4;transition:opacity .2s}
+.stale-badge{font-size:10px;color:#a16207;background:#451a03;border:1px solid #78350f;border-radius:3px;padding:1px 5px;margin-left:4px;font-family:'JetBrains Mono',monospace}
+.slow-badge{font-size:10px;color:#6366f1;background:#1e1b4b;border:1px solid #3730a3;border-radius:3px;padding:1px 5px;margin-left:4px;font-family:'JetBrains Mono',monospace;cursor:default}
+.cell-out-wrap{position:relative}
+.copy-btn{position:absolute;top:6px;right:8px;padding:2px 8px;font-size:11px;border-radius:4px;border:1px solid #3f3f46;background:#27272a;color:#a1a1aa;cursor:pointer;opacity:0;transition:opacity .15s}
+.cell-out-wrap:hover .copy-btn{opacity:1}
+.src-collapsed textarea{display:none!important}
+.src-collapsed .src-preview{display:block}
+.src-preview{font-family:'JetBrains Mono',monospace;font-size:13px;color:#71717a;padding:8px 18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.src-preview:hover{color:#a78bfa}
+.out-collapsed .cell-out,.out-collapsed .cell-out-html,.out-collapsed .cell-err,.out-collapsed .cell-server-out{display:none!important}
 </style>
 </head>
 <body>
@@ -869,6 +882,7 @@ textarea.cell-src{display:block;width:100%;background:#1c1c1f;color:#e4e4e7;font
   <button class="btn btn-secondary" id="btn-add-code">+ Code</button>
   <button class="btn btn-server" id="btn-add-server">+ Server</button>
   <button class="btn btn-primary" id="btn-run-all">▶ Run All</button>
+  <button class="btn btn-secondary" id="btn-clear-all">Clear All</button>
   <button class="btn btn-secondary" id="btn-save">Save</button>
   <div id="status">connecting</div>
 </div>
@@ -925,6 +939,7 @@ function handleMsg(msg) {
       cells[idx].output  = msg.stdout || "";
       cells[idx].error   = msg.error || null;
       cells[idx]._elapsed_ms = cells[idx]._start_ms ? Date.now() - cells[idx]._start_ms : null;
+      if (!msg.error) cells[idx]._dirty = false;
       updateCell(idx);
     }
     if (pendingRun !== null) {
@@ -1055,11 +1070,63 @@ function nextCodeCell(from) {
 function runAll() {
   const first = firstCodeCell();
   if (first === -1) return;
-  cells.forEach(c => { c.output=""; c.error=null; c.running=false; });
+  cells.forEach(c => { c.output=""; c.error=null; c.running=false; c._dirty=false; });
   render();
   pendingRun = first;
   runCell(first);
   setStatus("running", "running…");
+}
+
+function clearCell(idx) {
+  if (!cells[idx]) return;
+  cells[idx].output = "";
+  cells[idx].error = null;
+  cells[idx]._elapsed_ms = null;
+  updateCell(idx);
+}
+
+function clearAll() {
+  cells.forEach((c, i) => { c.output=""; c.error=null; c._elapsed_ms=null; });
+  render();
+}
+
+function toggleSrcCollapse(idx) {
+  if (!cells[idx]) return;
+  cells[idx]._src_collapsed = !cells[idx]._src_collapsed;
+  updateCell(idx);
+}
+
+function toggleOutCollapse(idx) {
+  if (!cells[idx]) return;
+  cells[idx]._out_collapsed = !cells[idx]._out_collapsed;
+  updateCell(idx);
+}
+
+function copyOutput(idx) {
+  if (!cells[idx]) return;
+  const text = cells[idx].output || cells[idx].error || "";
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = document.querySelector(`[data-idx="\${idx}"] .copy-btn`);
+    if (btn) { btn.textContent = "Copied ✓"; setTimeout(() => { btn.textContent = "Copy"; }, 1500); }
+  });
+}
+
+// ── Long-running static analysis ─────────────────────────────────────────────
+
+const SLOW_PATTERNS = [
+  /\bHttp\./,/\bHttpClient\./,/\bHttpTransport\./,
+  /\bTask\.async\b/,/\bTask\.await\b/,/\btask_spawn\b/,
+  /\bProcess\.run\b/,/\bProcess\.spawn\b/,
+  /\bSocket\./,/\bChannelSocket\./,/\bTls\./,
+  /\bSystem\.sleep\b/,
+  /\bFile\.read\b/,/\bFile\.write\b/,
+];
+
+function isPotentiallyLongRunning(src) {
+  if (SLOW_PATTERNS.some(p => p.test(src))) return true;
+  const m = src.match(/\bfn\s+(\w+)\s*\(/);
+  if (m && new RegExp('\\b' + m[1] + '\\s*\\(').test(src.slice(src.indexOf(m[0]) + m[0].length))) return true;
+  return false;
 }
 
 function saveNotebook() {
@@ -1246,22 +1313,37 @@ function codeCell(idx, cell) {
   const timing = (!cell.running && cell._elapsed_ms != null) ? ` · \${cell._elapsed_ms < 1000 ? cell._elapsed_ms+"ms" : (cell._elapsed_ms/1000).toFixed(1)+"s"}` : "";
   const lbl = cell.running ? "running…" : `In [\${idx+1}]\${timing}`;
   const lblCls = cell.running ? " running" : "";
+  const staleBadge = cell._dirty ? `<span class="stale-badge" title="Output may be stale">↻ stale</span>` : "";
+  const slowBadge = (!cell.running && isPotentiallyLongRunning(cell.source)) ? `<span class="slow-badge" title="May take a while — use ⬛ to cancel">⏱</span>` : "";
+  const srcCollapsed = !!cell._src_collapsed;
+  const outCollapsed = !!cell._out_collapsed;
+  const srcToggle = `<button class="add-btn" onclick="toggleSrcCollapse(\${idx})" title="\${srcCollapsed?'Expand source':'Collapse source'}">\${srcCollapsed?'⌄':'⌃'}</button>`;
+  const outToggle = `<button class="add-btn" onclick="toggleOutCollapse(\${idx})" title="\${outCollapsed?'Expand output':'Collapse output'}">\${outCollapsed?'▸':'▾'}</button>`;
+  const srcPreview = srcCollapsed ? `<div class="src-preview" onclick="toggleSrcCollapse(\${idx})">\${esc(cell.source.split('\\n')[0])}</div>` : "";
+  const hasOut = !!(cell.output || cell.error);
+  const copyBtn = hasOut ? `<button class="copy-btn" onclick="copyOutput(\${idx})">Copy</button>` : "";
   const outHtml = cell.error
-    ? `<div class="cell-err">\${esc(cell.error)}</div>`
+    ? `<div class="cell-out-wrap">\${copyBtn}<div class="cell-err">\${esc(cell.error)}</div></div>`
     : cell.output
-      ? renderOutput(cell.output)
+      ? `<div class="cell-out-wrap">\${copyBtn}\${renderOutput(cell.output)}</div>`
       : "";
-  return `<div class="cell-code\${cls}">
+  const dirtyAttr = cell._dirty ? ' data-dirty="1"' : "";
+  const srcCls = srcCollapsed ? " src-collapsed" : "";
+  const outCls = outCollapsed ? " out-collapsed" : "";
+  return `<div class="cell-code\${cls}\${srcCls}\${outCls}"\${dirtyAttr}>
     <div class="cell-header">
-      <span class="cell-label\${lblCls}">\${lbl}</span>
+      <span class="cell-label\${lblCls}">\${lbl}</span>\${staleBadge}\${slowBadge}
       <div class="add-btns">
+        \${srcToggle}\${outToggle}
         <button class="add-btn" onclick="moveCell(\${idx},-1)" title="Move up">↑</button>
         <button class="add-btn" onclick="moveCell(\${idx},1)" title="Move down">↓</button>
+        <button class="add-btn" onclick="clearCell(\${idx})" title="Clear output">○</button>
         <button class="add-btn" onclick="deleteCell(\${idx})" title="Delete">✕</button>
       </div>
       <button class="run-btn" onclick="runCell(\${idx})" \${cell.running?"disabled":""}>▶ Run</button>
     </div>
     <textarea class="cell-src" data-cell="\${idx}" spellcheck="false">\${esc(cell.source)}</textarea>
+    \${srcPreview}
     \${outHtml}
   </div>`;
 }
@@ -1330,6 +1412,15 @@ function attachEditorEvents(wrap, idx) {
   ta.addEventListener("input", () => {
     cells[idx].source = ta.value;
     autoResize(ta);
+    // Mark this cell and all later code cells as dirty (output may be stale)
+    if (cells[idx].kind === "code") {
+      for (let i = idx; i < cells.length; i++) {
+        if (cells[i].kind === "code") cells[i]._dirty = true;
+      }
+      // Reflect dirty state in DOM without full re-render
+      const cellDiv = wrap.querySelector(".cell-code");
+      if (cellDiv) cellDiv.setAttribute("data-dirty", "1");
+    }
   });
   ta.addEventListener("keydown", (e) => {
     if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
@@ -1381,6 +1472,7 @@ function setStatus(cls, text) {
 // ── Toolbar buttons ──────────────────────────────────────────────────────────
 
 document.getElementById("btn-run-all").onclick    = runAll;
+document.getElementById("btn-clear-all").onclick  = clearAll;
 document.getElementById("btn-save").onclick       = saveNotebook;
 document.getElementById("btn-add-code").onclick   = () => addCell("code",   cells.length-1);
 document.getElementById("btn-add-md").onclick     = () => addCell("markdown", cells.length-1);
