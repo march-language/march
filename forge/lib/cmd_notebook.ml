@@ -147,8 +147,8 @@ let run_serve ~input ~port ~no_open () =
       (Filename.quote march)
       (Filename.quote display_title)
   in
-  let cmd = Printf.sprintf "%s %s %s"
-    nb_env (Filename.quote march) (Filename.quote runner_tmp)
+  let cmd = Printf.sprintf "%s%s %s %s"
+    (lib_path_prefix ()) nb_env (Filename.quote march) (Filename.quote runner_tmp)
   in
   let url = Printf.sprintf "http://localhost:%d" port in
   if is_temp then begin
