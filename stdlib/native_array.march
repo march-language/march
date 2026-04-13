@@ -27,9 +27,9 @@ mod NativeArray do
 
 -- ── Int arrays ─────────────────────────────────────────────────────────────
 
-doc "Create a new integer array of [n] elements, each initialised to [init]."
-fn make_int(n : Int, init : Int) do
-  native_int_arr_make(n, init)
+doc "Create a new integer array of [n] elements, each initialised to [fill]."
+fn make_int(n : Int, fill : Int) do
+  native_int_arr_make(n, fill)
 end
 
 doc "Return the number of elements in [arr]."
@@ -58,8 +58,8 @@ fn map_int(arr, f) do
 end
 
 doc "Left fold over all elements. [f(acc, elem) = new_acc]. O(n)."
-fn fold_int(init, arr, f) do
-  native_int_arr_fold(init, arr, f)
+fn fold_int(acc, arr, f) do
+  native_int_arr_fold(acc, arr, f)
 end
 
 doc "Build a NativeIntArr from a List(Int). O(n)."
@@ -74,9 +74,9 @@ end
 
 -- ── Float arrays ────────────────────────────────────────────────────────────
 
-doc "Create a new float array of [n] elements, each initialised to [init]."
-fn make_float(n : Int, init : Float) do
-  native_float_arr_make(n, init)
+doc "Create a new float array of [n] elements, each initialised to [fill]."
+fn make_float(n : Int, fill : Float) do
+  native_float_arr_make(n, fill)
 end
 
 doc "Return the number of elements in [arr]."
@@ -105,8 +105,8 @@ fn map_float(arr, f) do
 end
 
 doc "Left fold over all elements. [f(acc, elem) = new_acc]. O(n)."
-fn fold_float(init, arr, f) do
-  native_float_arr_fold(init, arr, f)
+fn fold_float(acc, arr, f) do
+  native_float_arr_fold(acc, arr, f)
 end
 
 doc "Build a NativeFloatArr from a List(Float). O(n)."

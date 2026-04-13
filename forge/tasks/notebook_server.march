@@ -135,33 +135,74 @@ end
 pfn cell_start_marker(n) do "__MNB_START_" ++ String.from_int(n) ++ "__" end
 pfn cell_end_marker(n)   do "__MNB_END_"   ++ String.from_int(n) ++ "__" end
 
--- Generate a runner for cells 0..run_through_idx (Code cells only; Server cells skipped)
+-- Generate a runner for cells 0..run_through_idx (Code cells only; Server cells skipped).
+--
+-- Each Code cell becomes a module-level helper function so that:
+--   1. Named function declarations inside cells work normally (lexically scoped).
+--   2. The cell's return value can be captured and auto-printed.
+--
+-- Auto-print rule: if the cell's last expression evaluates to a non-unit value
+-- (i.e. to_string result != "()"), it is printed automatically — just like a REPL.
 pfn generate_runner(cells, run_through_idx) do
-  fn go(cells, acc, code_n, total_n) do
-    if total_n > run_through_idx do List.reverse(acc)
+  -- Build a pfn definition for one code cell.
+  fn make_cell_fn(src, n) do
+    let name = "__cell_" ++ String.from_int(n) ++ "__"
+    -- Trim trailing newline before splitting to avoid empty indented last line
+    let src = if String.ends_with(src, "\n") do
+      String.slice(src, 0, bs(src) - 1)
+    else src
+    end
+    let indented = String.join(
+      List.map(String.split(src, "\n"), fn l -> "  " ++ l),
+      "\n"
+    ) ++ "\n"
+    "pfn " ++ name ++ "() do\n" ++ indented ++ "end\n"
+  end
+
+  -- Build the main() call for one code cell: run it, auto-print non-unit result.
+  fn make_cell_call(n) do
+    let name = "__cell_" ++ String.from_int(n) ++ "__"
+    "  println(\"" ++ cell_start_marker(n) ++ "\")\n" ++
+    "  let __r__ = " ++ name ++ "()\n" ++
+    "  let __s__ = to_string(__r__)\n" ++
+    "  if __s__ != \"()\" do println(__s__) else () end\n" ++
+    "  println(\"" ++ cell_end_marker(n) ++ "\")\n"
+  end
+
+  fn go(cells, fn_defs, calls, code_n, total_n) do
+    if total_n > run_through_idx do
+      (List.reverse(fn_defs), List.reverse(calls))
     else
       match cells do
-        Nil -> List.reverse(acc)
-        Cons(Markdown(_), rest) -> go(rest, acc, code_n, total_n + 1)
-        Cons(ServerCell(_), rest)   -> go(rest, acc, code_n, total_n + 1)
+        Nil -> (List.reverse(fn_defs), List.reverse(calls))
+        Cons(Markdown(_), rest)   -> go(rest, fn_defs, calls, code_n, total_n + 1)
+        Cons(ServerCell(_), rest) -> go(rest, fn_defs, calls, code_n, total_n + 1)
         Cons(Code(src), rest) ->
-          let start = "  println(\"" ++ cell_start_marker(code_n) ++ "\")\n"
-          let end_s = "  println(\"" ++ cell_end_marker(code_n) ++ "\")\n"
-          let indented = String.join(
-            List.map(String.split(src, "\n"), fn l -> "  " ++ l),
-            "\n"
-          ) ++ "\n"
-          go(rest, Cons(end_s, Cons(indented, Cons(start, acc))), code_n + 1, total_n + 1)
+          go(rest,
+            Cons(make_cell_fn(src, code_n), fn_defs),
+            Cons(make_cell_call(code_n), calls),
+            code_n + 1,
+            total_n + 1)
       end
     end
   end
-  let body_parts = go(cells, Nil, 0, 0)
-  let body = String.join(body_parts, "")
-  "mod NotebookRunner do\nfn main() do\n" ++ body ++ "end\nend\n"
+
+  match go(cells, Nil, Nil, 0, 0) do
+    (fn_defs, calls) ->
+      let fns  = String.join(fn_defs, "\n")
+      let body = String.join(calls, "")
+      -- fn main() must have at least one expression (empty body is a parse error)
+      let body = if String.is_empty(body) do "  ()\n" else body end
+      "mod NotebookRunner do\n\n" ++ fns ++ "\nfn main() do\n" ++ body ++ "end\n\nend\n"
+  end
 end
 
 -- Generate a standalone runner for a server cell (wraps source in mod+main)
 pfn generate_server_runner(src) do
+  let src = if String.ends_with(src, "\n") do
+    String.slice(src, 0, bs(src) - 1)
+  else src
+  end
   let indented = String.join(
     List.map(String.split(src, "\n"), fn l -> "  " ++ l),
     "\n"
@@ -549,10 +590,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 #status.running{color:#fbbf24}
 #notebook{flex:1;overflow-y:auto;padding:32px 0;display:flex;flex-direction:column;align-items:center;gap:0}
 .cell{width:100%;max-width:860px;margin:0 auto 4px}
-.cell-md{padding:6px 24px}
-.cell-md h1{font-size:26px;margin:20px 0 10px;font-weight:700;color:#e2e8f0}
-.cell-md h2{font-size:20px;margin:16px 0 8px;font-weight:600;color:#e2e8f0}
-.cell-md h3{font-size:16px;margin:12px 0 6px;font-weight:600;color:#c4b5fd}
+.cell-md-wrap{border:1px solid #23233a;border-radius:10px;overflow:hidden;background:#13132080;transition:border-color .15s}
+.cell-md-wrap:hover{border-color:#3d3d6e}
+.cell-md-header{display:flex;align-items:center;padding:3px 8px 3px 14px;background:#1a1a2e;border-bottom:1px solid #23233a;opacity:0;transition:opacity .15s;pointer-events:none}
+.cell-md-wrap:hover .cell-md-header{opacity:1;pointer-events:auto}
+.cell-md-label{font-size:10px;font-family:'JetBrains Mono',monospace;color:#6b7280;flex:1}
+.cell-md-actions{display:flex;gap:4px}
+.cell-md{padding:10px 22px 12px}
+.cell-md h1{font-size:26px;margin:16px 0 8px;font-weight:700;color:#e2e8f0}
+.cell-md h2{font-size:20px;margin:14px 0 6px;font-weight:600;color:#e2e8f0}
+.cell-md h3{font-size:16px;margin:10px 0 5px;font-weight:600;color:#c4b5fd}
 .cell-md p{margin:6px 0;color:#94a3b8;line-height:1.65}
 .cell-md ul{margin:6px 0 6px 22px;color:#94a3b8}
 .cell-md li{margin:3px 0}
@@ -560,6 +607,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;b
 .cell-md hr{border:none;border-top:1px solid #2d2d4e;margin:14px 0}
 .cell-md em{font-style:italic;color:#94a3b8}
 .cell-md strong{font-weight:600;color:#e2e8f0}
+.cell-md-editor{background:#1a1a2e;border-top:1px solid #23233a}
+.cell-md-editor textarea{display:block;width:100%;background:transparent;color:#e2e8f0;border:none;resize:none;outline:none;padding:14px 22px;font-family:inherit;font-size:13px;line-height:1.65;min-height:80px}
 .cell-code{background:#12121f;border:1px solid #2d2d4e;border-radius:10px;overflow:hidden;transition:border-color .15s}
 .cell-code:focus-within{border-color:#7c3aed}
 .cell-code.running{border-color:#fbbf24}
@@ -881,17 +930,8 @@ function render() {
     wrap.dataset.idx = idx;
 
     if (cell.kind === "markdown") {
-      wrap.innerHTML = `<div class="cell-md">\${renderMd(cell.source)}</div>`;
-      wrap.querySelector(".cell-md").addEventListener("dblclick", () => {
-        cell._editing = !cell._editing;
-        if (cell._editing) {
-          wrap.innerHTML = mdEditor(idx, cell);
-          autoResize(wrap.querySelector("textarea"));
-          attachEditorEvents(wrap, idx);
-        } else {
-          render();
-        }
-      });
+      wrap.innerHTML = markdownCell(idx, cell);
+      attachMarkdownEvents(wrap, idx);
     } else if (cell.kind === "server") {
       wrap.innerHTML = serverCell(idx, cell);
       autoResize(wrap.querySelector("textarea"));
@@ -918,10 +958,55 @@ function render() {
   nb.appendChild(endBar);
 }
 
-function mdEditor(idx, cell) {
-  return `<div style="padding:4px 20px">
-    <textarea data-cell="\${idx}" style="width:100%;background:#1a1a2e;color:#e2e8f0;border:1px solid #4c3d8a;border-radius:6px;padding:10px;font-family:inherit;font-size:13px;resize:none;outline:none;min-height:60px">\${esc(cell.source)}</textarea>
+function markdownCell(idx, cell) {
+  const editing = !!cell._editing;
+  const editorHtml = editing
+    ? `<div class="cell-md-editor"><textarea data-cell="\${idx}" spellcheck="false">\${esc(cell.source)}</textarea></div>`
+    : "";
+  return `<div class="cell-md-wrap">
+    <div class="cell-md-header">
+      <span class="cell-md-label">markdown</span>
+      <div class="cell-md-actions">
+        <button class="add-btn" onclick="moveCell(\${idx},-1)" title="Move up">↑</button>
+        <button class="add-btn" onclick="moveCell(\${idx},1)" title="Move down">↓</button>
+        <button class="add-btn" onclick="event.stopPropagation();toggleMdEdit(\${idx})" title="\${editing?'Done':'Edit'}">\${editing?'✓':'✎'}</button>
+        <button class="add-btn" onclick="deleteCell(\${idx})" title="Delete">✕</button>
+      </div>
+    </div>
+    <div class="cell-md" onclick="if(!event.target.closest('button'))toggleMdEdit(\${idx})">\${renderMd(cell.source)||'<span style="color:#4b5563;font-style:italic">Click to edit…</span>'}</div>
+    \${editorHtml}
   </div>`;
+}
+
+function toggleMdEdit(idx) {
+  if (!cells[idx]) return;
+  cells[idx]._editing = !cells[idx]._editing;
+  updateCell(idx);
+  if (cells[idx]._editing) {
+    const wrap = document.querySelector(`[data-idx="\${idx}"]`);
+    const ta = wrap && wrap.querySelector("textarea");
+    if (ta) { ta.focus(); autoResize(ta); }
+  }
+}
+
+function attachMarkdownEvents(wrap, idx) {
+  const ta = wrap.querySelector(".cell-md-editor textarea");
+  if (!ta) return;
+  ta.addEventListener("input", () => {
+    cells[idx].source = ta.value;
+    // live-update the preview while editing
+    const preview = wrap.querySelector(".cell-md");
+    if (preview) preview.innerHTML = renderMd(ta.value) || '<span style="color:#4b5563;font-style:italic">Click to edit…</span>';
+    autoResize(ta);
+  });
+  ta.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      e.preventDefault();
+      toggleMdEdit(idx);
+    }
+    if (e.key === "Escape") { e.preventDefault(); toggleMdEdit(idx); }
+  });
+  autoResize(ta);
 }
 
 function codeCell(idx, cell) {
@@ -982,14 +1067,16 @@ function updateCell(idx) {
   const wrap = document.querySelector(`[data-idx="\${idx}"]`);
   if (!wrap) return;
   const cell = cells[idx];
-  const old = wrap.querySelector("textarea");
-  const src = old ? old.value : cell.source;
-  cell.source = src;
-  if (cell.kind === "server") {
+  // Capture current textarea value before overwriting innerHTML
+  const srcArea = wrap.querySelector("textarea[data-cell]");
+  if (srcArea) cell.source = srcArea.value;
+  if (cell.kind === "markdown") {
+    wrap.innerHTML = markdownCell(idx, cell);
+    attachMarkdownEvents(wrap, idx);
+  } else if (cell.kind === "server") {
     wrap.innerHTML = serverCell(idx, cell);
     autoResize(wrap.querySelector("textarea"));
     attachEditorEvents(wrap, idx);
-    // scroll server output to bottom
     const out = document.getElementById(`srv-out-\${idx}`);
     if (out) out.scrollTop = out.scrollHeight;
   } else if (cell.kind === "code") {
