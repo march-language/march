@@ -322,9 +322,10 @@ pfn generate_runner(cells, run_through_idx) do
     end
   end
 
-  -- True if the first non-blank line of src starts with `fn ` or `pfn `.
-  -- Such cells contain module-level function declarations, not expressions.
-  fn is_fn_def_cell(src) do
+  -- True if the first non-blank line of src starts with `mod ` (a module cell).
+  -- Module cells are embedded as nested mods inside NotebookRunner so their
+  -- functions are accessible via Qualified.name syntax from later cells.
+  fn is_mod_cell(src) do
     fn first_nonblank(ls) do
       match ls do
         Nil -> ""
@@ -334,14 +335,14 @@ pfn generate_runner(cells, run_through_idx) do
           end
       end
     end
-    let t = first_nonblank(cell_lines(src))
-    String.starts_with(t, "fn ") || String.starts_with(t, "pfn ")
+    String.starts_with(first_nonblank(cell_lines(src)), "mod ")
   end
 
-  -- For a function-definition cell: returns (module_code, main_marker_code).
-  -- The function bodies go at module level; the markers go inside main() so
-  -- extract_cell_output can still find them (showing an empty result is fine).
-  fn make_fn_def_cell(src, n) do
+  -- For a module cell: returns (nested_mod_code, main_marker_code).
+  -- The mod block is embedded inside NotebookRunner (nested mods are valid
+  -- March — mod_decl is part of decl_list_r which is used recursively).
+  -- Only the empty START/END markers go in main() so extract_cell_output works.
+  fn make_mod_cell(src, n) do
     let ns   = String.from_int(n)
     let rvar = "__r" ++ ns ++ "__"
     let svar = "__s" ++ ns ++ "__"
@@ -354,7 +355,7 @@ pfn generate_runner(cells, run_through_idx) do
     (mod_code, main_code)
   end
 
-  -- go returns (module_level_chunks, main_body_chunks), both in reverse.
+  -- go returns (nested_mod_chunks, main_body_chunks), both in reverse.
   fn go(cells, mod_rev, body_rev, code_n, total_n) do
     if total_n > run_through_idx do
       (List.reverse(mod_rev), List.reverse(body_rev))
@@ -364,8 +365,8 @@ pfn generate_runner(cells, run_through_idx) do
         Cons(Markdown(_), rest)   -> go(rest, mod_rev, body_rev, code_n, total_n + 1)
         Cons(ServerCell(_), rest) -> go(rest, mod_rev, body_rev, code_n, total_n + 1)
         Cons(Code(src), rest) ->
-          if is_fn_def_cell(src) do
-            let (mod_code, main_code) = make_fn_def_cell(src, code_n)
+          if is_mod_cell(src) do
+            let (mod_code, main_code) = make_mod_cell(src, code_n)
             go(rest,
               Cons(mod_code, mod_rev),
               Cons(main_code, body_rev),
