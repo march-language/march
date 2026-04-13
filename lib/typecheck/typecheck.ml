@@ -4495,6 +4495,14 @@ let rec check_decl env (d : Ast.decl) : env =
         ) cis in
         match filtered with [] -> None | _ -> Some filtered
       ) inner_env.ctors in
+    (* Also register qualified ctor keys "ModName.CtorName" so that the
+       desugared form ECon("ModName.CtorName") can be resolved directly from
+       env.ctors without going through Module_registry.  This is critical for
+       REPL-defined modules which are never added to the global registry, and
+       also makes qualified ctor lookup consistent for all modules. *)
+    let qual_ctors = StrMap.fold (fun ctor_name cis acc ->
+        StrMap.add (name.txt ^ "." ^ ctor_name) cis acc
+      ) new_ctors StrMap.empty in
     (* Collect this module's declared capabilities for transitive enforcement *)
     let inner_needs = List.concat_map (function
         | Ast.DNeeds (caps, _) -> List.map cap_path_of_names caps
@@ -4505,12 +4513,13 @@ let rec check_decl env (d : Ast.decl) : env =
     let env' = bind_vars new_names env in
     { env' with
       types   = StrMap.union (fun _k v _ -> Some v) new_types env'.types;
-      ctors   = StrMap.union (fun _k new_cis old_cis ->
-                  (* Merge lists; new_cis are more local, so prepend them *)
-                  let merged = List.fold_right (fun ci acc ->
-                    if List.exists (fun c -> c.ci_type = ci.ci_type) acc then acc
-                    else ci :: acc) new_cis old_cis in
-                  Some merged) new_ctors env'.ctors;
+      ctors   = (let all_new = StrMap.union (fun _k a _ -> Some a) qual_ctors new_ctors in
+                  StrMap.union (fun _k new_cis old_cis ->
+                    (* Merge lists; new_cis are more local, so prepend them *)
+                    let merged = List.fold_right (fun ci acc ->
+                      if List.exists (fun c -> c.ci_type = ci.ci_type) acc then acc
+                      else ci :: acc) new_cis old_cis in
+                    Some merged) all_new env'.ctors);
       records = StrMap.union (fun _k v _ -> Some v) new_records env'.records;
       module_caps = (name.txt, inner_needs) :: env'.module_caps }
 

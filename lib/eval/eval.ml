@@ -6467,9 +6467,16 @@ let rec eval_decl (env : env) (d : decl) : env =
     env
 
   | DActor (_, name, def, _) ->
-    (* Register actor definition so spawn() can find it later *)
+    (* Register actor definition so spawn() can find it later.
+       Also register under the qualified name (e.g. "ActorDemo.Counter") so
+       that spawn(ActorDemo.Counter) works when the actor is defined inside a
+       module — the desugar pass turns A.B into ECon("A.B") which becomes the
+       actor_name used in ESpawn. *)
     let env_ref = ref env in
     Hashtbl.replace actor_defs_tbl name.txt (def, env_ref);
+    let qual = current_doc_prefix () ^ name.txt in
+    if qual <> name.txt then
+      Hashtbl.replace actor_defs_tbl qual (def, env_ref);
     env
 
   | DMod (name, _, decls, _) ->
@@ -6814,8 +6821,12 @@ let eval_module_env (m : module_) : env =
       make_recursive_env rest env'
 
     | DActor (_, name, def, _) :: rest ->
-      (* Register actor with the shared env_ref so handlers can call module fns *)
+      (* Register actor with the shared env_ref so handlers can call module fns.
+         Also register qualified name for spawn(Mod.Actor) support. *)
       Hashtbl.replace actor_defs_tbl name.txt (def, env_ref);
+      let qual = current_doc_prefix () ^ name.txt in
+      if qual <> name.txt then
+        Hashtbl.replace actor_defs_tbl qual (def, env_ref);
       make_recursive_env rest env
 
     | DMod _ as d :: rest ->
