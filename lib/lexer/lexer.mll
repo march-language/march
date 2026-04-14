@@ -88,6 +88,7 @@ let digit = ['0'-'9']
 let alpha = ['a'-'z' 'A'-'Z' '_']
 let ident = alpha (alpha | digit | '\'')*
 let atom_name = ['a'-'z'] (alpha | digit)*
+let hex_digit = ['0'-'9' 'a'-'f' 'A'-'F']
 
 rule token = parse
   | whitespace    { token lexbuf }
@@ -191,6 +192,9 @@ and read_string buf = parse
   | "\\\\"        { Buffer.add_char buf '\\'; read_string buf lexbuf }
   | "\\\""        { Buffer.add_char buf '"'; read_string buf lexbuf }
   | "\\$"         { Buffer.add_char buf '$'; read_string buf lexbuf }
+  | "\\x" (hex_digit hex_digit as hex)
+                  { Buffer.add_char buf (Char.chr (int_of_string ("0x" ^ hex)));
+                    read_string buf lexbuf }
   | '\\' (_ as c) { raise (Lexer_error (Printf.sprintf "Invalid escape sequence: \\%c" c)) }
   | eof           { raise (Lexer_error "Unterminated string literal") }
   | _ as c        { Buffer.add_char buf c; read_string buf lexbuf }
@@ -239,6 +243,9 @@ and read_string_interp buf = parse
   | "\\\\"        { Buffer.add_char buf '\\'; read_string_interp buf lexbuf }
   | "\\\""        { Buffer.add_char buf '"'; read_string_interp buf lexbuf }
   | "\\$"         { Buffer.add_char buf '$'; read_string_interp buf lexbuf }
+  | "\\x" (hex_digit hex_digit as hex)
+                  { Buffer.add_char buf (Char.chr (int_of_string ("0x" ^ hex)));
+                    read_string_interp buf lexbuf }
   | '\\' (_ as c) { raise (Lexer_error (Printf.sprintf "Invalid escape sequence: \\%c" c)) }
   | eof           { raise (Lexer_error "Unterminated string interpolation") }
   | _ as c        { Buffer.add_char buf c; read_string_interp buf lexbuf }
