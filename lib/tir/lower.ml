@@ -935,6 +935,39 @@ and compile_matrix
       else
         Tir.ECase (scrut, tir_branches, default)
 
+(** Collect the (name, span) of every variable binding in a pattern,
+    including [PatAs] outer names.  Used to register pattern-bound locals
+    in [_fn_param_types] before lowering a branch body so that those
+    names are not rewritten through [_use_aliases] (e.g. a pattern
+    variable [status] must not become [HttpServer.status]). *)
+and collect_pat_names : Ast.pattern -> (string * Ast.span) list = function
+  | Ast.PatWild _ -> []
+  | Ast.PatVar n -> [(n.txt, n.span)]
+  | Ast.PatCon (_, subs) -> List.concat_map collect_pat_names subs
+  | Ast.PatAtom (_, subs, _) -> List.concat_map collect_pat_names subs
+  | Ast.PatTuple (subs, _) -> List.concat_map collect_pat_names subs
+  | Ast.PatLit _ -> []
+  | Ast.PatRecord (fields, _) ->
+    List.concat_map (fun (_, p) -> collect_pat_names p) fields
+  | Ast.PatAs (p, n, _) -> (n.txt, n.span) :: collect_pat_names p
+
+(** Lower a branch body with the pattern's bound names registered in
+    [_fn_param_types] for the duration of the lowering.  Restores any
+    shadowed entries afterwards. *)
+and lower_branch_body_with_pat (pat : Ast.pattern) (body : Ast.expr) : Tir.expr =
+  let names = collect_pat_names pat in
+  let saved_shadowed = List.filter_map (fun (name, _) ->
+      match Hashtbl.find_opt _fn_param_types name with
+      | Some ty -> Some (name, ty)
+      | None -> None) names in
+  List.iter (fun (name, sp) ->
+    Hashtbl.replace _fn_param_types name (ty_of_span sp)) names;
+  let result = lower_expr body in
+  List.iter (fun (name, _) -> Hashtbl.remove _fn_param_types name) names;
+  List.iter (fun (name, ty) ->
+    Hashtbl.replace _fn_param_types name ty) saved_shadowed;
+  result
+
 (** Lower a single-scrutinee match to a TIR decision tree.
     Branches with [when] guards are handled by embedding a boolean check
     in the branch body: if the guard is false, control falls through to the
@@ -945,7 +978,8 @@ and lower_match (scrut : Tir.atom) (branches : Ast.branch list) : Tir.expr =
   if not has_guards then begin
     (* Fast path: no guards — use efficient matrix compilation. *)
     let rows = List.map (fun (br : Ast.branch) ->
-        ([br.branch_pat], lower_expr br.branch_body)) branches in
+        ([br.branch_pat],
+         lower_branch_body_with_pat br.branch_pat br.branch_body)) branches in
     compile_matrix [scrut] rows None
   end else begin
     (* Guards present: compile each branch individually with fallthrough
@@ -954,6 +988,15 @@ and lower_match (scrut : Tir.atom) (branches : Ast.branch list) : Tir.expr =
       | [] -> Tir.EAtom (Tir.ALit (Ast.LitInt 0))  (* match failure *)
       | (br : Ast.branch) :: rest ->
         let rest_expr = go rest in
+        (* Register pattern-bound names while lowering the body and guard
+           so that [resolve_use_alias] treats them as locals. *)
+        let pat_names = collect_pat_names br.branch_pat in
+        let saved_shadowed = List.filter_map (fun (name, _) ->
+            match Hashtbl.find_opt _fn_param_types name with
+            | Some ty -> Some (name, ty)
+            | None -> None) pat_names in
+        List.iter (fun (name, sp) ->
+          Hashtbl.replace _fn_param_types name (ty_of_span sp)) pat_names;
         let body = lower_expr br.branch_body in
         let guarded_body = match br.branch_guard with
           | None -> body
@@ -966,6 +1009,9 @@ and lower_match (scrut : Tir.atom) (branches : Ast.branch list) : Tir.expr =
                 [{ br_tag = "true"; br_vars = []; br_body = body }],
                 Some rest_expr))
         in
+        List.iter (fun (name, _) -> Hashtbl.remove _fn_param_types name) pat_names;
+        List.iter (fun (name, ty) ->
+          Hashtbl.replace _fn_param_types name ty) saved_shadowed;
         compile_matrix [scrut] [([br.branch_pat], guarded_body)] (Some rest_expr)
     in
     go branches
