@@ -1279,9 +1279,10 @@ let compile filename =
               let evloop_c = Filename.concat runtime_dir "march_http_evloop.c" in
               if Sys.file_exists evloop_c then " -DMARCH_HTTP_USE_EVLOOP" else ""
             in
+            let math_flag = if Sys.unix then " -lm" else "" in
             let cmd = Printf.sprintf
-              "clang%s -msse4.2 -Wno-unused-command-line-argument%s %s%s%s %s -o %s"
-              opt_flag evloop_flag runtime extra_c_files openssl_flags2 ll_file out_bin in
+              "clang%s -msse4.2 -Wno-unused-command-line-argument%s %s%s%s %s -o %s%s"
+              opt_flag evloop_flag runtime extra_c_files openssl_flags2 ll_file out_bin math_flag in
             let rc = Sys.command cmd in
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
