@@ -25,6 +25,7 @@ let fold_float_op op a b =
 let mk_int n = Tir.EAtom (Tir.ALit (March_ast.Ast.LitInt n))
 let mk_float f = Tir.EAtom (Tir.ALit (March_ast.Ast.LitFloat f))
 let mk_bool b = Tir.EAtom (Tir.ALit (March_ast.Ast.LitBool b))
+let mk_string s = Tir.EAtom (Tir.ALit (March_ast.Ast.LitString s))
 
 let rec fold_expr ~changed : Tir.expr -> Tir.expr = function
   (* Integer arithmetic on two literals *)
@@ -67,6 +68,21 @@ let rec fold_expr ~changed : Tir.expr -> Tir.expr = function
 
   (* ECase with LitBool false scrutinee and no default — unreachable in practice
      (March lowering always emits a default branch for if/else), fall through to recurse *)
+
+  (* String concatenation: "a" ++ "b" → "ab" *)
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitString a); Tir.ALit (March_ast.Ast.LitString b)])
+    when f.Tir.v_name = "++" || f.Tir.v_name = "string_concat" ->
+    changed := true; mk_string (a ^ b)
+
+  (* string_byte_length("...") → n *)
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitString s)])
+    when f.Tir.v_name = "string_byte_length" || f.Tir.v_name = "string_length" ->
+    changed := true; mk_int (String.length s)
+
+  (* string_is_empty("...") → bool *)
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitString s)])
+    when f.Tir.v_name = "string_is_empty" ->
+    changed := true; mk_bool (String.length s = 0)
 
   (* Recurse into all other nodes *)
   | Tir.ELet (v, rhs, body) ->

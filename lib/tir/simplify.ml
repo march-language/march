@@ -87,6 +87,14 @@ let rec simplify_expr ~changed : Tir.expr -> Tir.expr = function
   | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitBool false); x]) when f.Tir.v_name = "||" ->
     changed := true; Tir.EAtom x
 
+  (* String identities: x ++ "" → x, "" ++ x → x *)
+  | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitString "")])
+    when f.Tir.v_name = "++" || f.Tir.v_name = "string_concat" ->
+    changed := true; Tir.EAtom x
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitString ""); x])
+    when f.Tir.v_name = "++" || f.Tir.v_name = "string_concat" ->
+    changed := true; Tir.EAtom x
+
   (* Recurse *)
   | Tir.ELet (v, rhs, body) ->
     Tir.ELet (v, simplify_expr ~changed rhs, simplify_expr ~changed body)
