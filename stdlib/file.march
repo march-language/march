@@ -7,149 +7,149 @@
 
 mod File do
 
-ptype FileError = NotFound(String) | Permission(String) | IsDirectory(String) | NotEmpty(String) | IoError(String)
+  ptype FileError = NotFound(String) | Permission(String) | IsDirectory(String) | NotEmpty(String) | IoError(String)
 
-ptype FileKind = RegularFile | Directory | Symlink | OtherKind
+  ptype FileKind = RegularFile | Directory | Symlink | OtherKind
 
--- FileStat uses a positional constructor
--- Pattern match: FileStat(size, kind, modified, accessed)
-ptype FileStat = FileStat(Int, FileKind, Int, Int)
+  -- FileStat uses a positional constructor
+  -- Pattern match: FileStat(size, kind, modified, accessed)
+  ptype FileStat = FileStat(Int, FileKind, Int, Int)
 
--- Read
+  -- Read
 
-fn read(path) do
-  file_read(path)
-end
+  fn read(path) do
+    file_read(path)
+  end
 
-fn read_lines(path) do
-  match file_read(path) do
-  Err(e) -> Err(e)
-  Ok(s) -> do
-    let lines = String.split(s, "\n")
-    -- Strip all trailing empty strings (from trailing newlines)
-    fn strip_trailing(xs) do
-      match List.reverse(xs) do
-      Nil -> Nil
-      Cons("", rest) -> strip_trailing(List.reverse(rest))
-      ig -> xs
+  fn read_lines(path) do
+    match file_read(path) do
+    Err(e) -> Err(e)
+    Ok(s) -> do
+      let lines = String.split(s, "\n")
+      -- Strip all trailing empty strings (from trailing newlines)
+      fn strip_trailing(xs) do
+        match List.reverse(xs) do
+        Nil -> Nil
+        Cons("", rest) -> strip_trailing(List.reverse(rest))
+        ig -> xs
+        end
       end
+      Ok(strip_trailing(lines))
     end
-    Ok(strip_trailing(lines))
+    end
   end
+
+  -- Returns true for any filesystem entry including directories.
+  -- Use Dir.exists to test specifically for directories.
+  fn exists(path) do
+    file_exists(path)
   end
-end
 
--- Returns true for any filesystem entry including directories.
--- Use Dir.exists to test specifically for directories.
-fn exists(path) do
-  file_exists(path)
-end
+  fn stat(path) do
+    file_stat(path)
+  end
 
-fn stat(path) do
-  file_stat(path)
-end
+  -- Write
 
--- Write
+  fn write(path, data) do file_write(path, data) end
+  fn append(path, data) do file_append(path, data) end
+  fn delete(path) do file_delete(path) end
+  fn copy(src, dest) do file_copy(src, dest) end
+  fn rename(src, dest) do file_rename(src, dest) end
 
-fn write(path, data) do file_write(path, data) end
-fn append(path, data) do file_append(path, data) end
-fn delete(path) do file_delete(path) end
-fn copy(src, dest) do file_copy(src, dest) end
-fn rename(src, dest) do file_rename(src, dest) end
+  -- Streaming: closed when callback returns OR panics (via try_finally).
 
--- Streaming: closed when callback returns OR panics (via try_finally).
+  -- Seq wraps a church-encoded fold closure. Single-pass.
+  ptype Seq(a) = Seq(a)
 
--- Seq wraps a church-encoded fold closure. Single-pass.
-ptype Seq(a) = Seq(a)
-
--- Streaming: opens path, creates a single-pass Seq(String) of lines, calls callback,
--- then closes the file handle. The Seq is single-pass -- consuming it twice yields
--- empty results on the second pass.  `try_finally` guarantees the fd is
--- closed even if `callback` panics.
-fn with_lines(path, callback) do
-  match file_open(path) do
-  Err(e) -> Err(e)
-  Ok(fd) -> do
-    fn do_lines(a, f) do
-      match file_read_line(fd) do
-      None -> a
-      Some(line) -> do_lines(f(a, line), f)
+  -- Streaming: opens path, creates a single-pass Seq(String) of lines, calls callback,
+  -- then closes the file handle. The Seq is single-pass -- consuming it twice yields
+  -- empty results on the second pass.  `try_finally` guarantees the fd is
+  -- closed even if `callback` panics.
+  fn with_lines(path, callback) do
+    match file_open(path) do
+    Err(e) -> Err(e)
+    Ok(fd) -> do
+      fn do_lines(a, f) do
+        match file_read_line(fd) do
+        None -> a
+        Some(line) -> do_lines(f(a, line), f)
+        end
       end
+      let seq = Seq(fn(acc, f) -> do_lines(acc, f))
+      let result = try_finally(
+        fn _ -> callback(seq),
+        fn _ -> file_close(fd)
+      )
+      Ok(result)
     end
-    let seq = Seq(fn(acc, f) -> do_lines(acc, f))
-    let result = try_finally(
-      fn _ -> callback(seq),
-      fn _ -> file_close(fd)
-    )
-    Ok(result)
+    end
   end
-  end
-end
 
-fn with_chunks(path, size, callback) do
-  match file_open(path) do
-  Err(e) -> Err(e)
-  Ok(fd) -> do
-    fn do_chunks(a, f) do
-      match file_read_chunk(fd, size) do
-      None -> a
-      Some(chunk) -> do_chunks(f(a, chunk), f)
+  fn with_chunks(path, size, callback) do
+    match file_open(path) do
+    Err(e) -> Err(e)
+    Ok(fd) -> do
+      fn do_chunks(a, f) do
+        match file_read_chunk(fd, size) do
+        None -> a
+        Some(chunk) -> do_chunks(f(a, chunk), f)
+        end
       end
+      let seq = Seq(fn(acc, f) -> do_chunks(acc, f))
+      let result = try_finally(
+        fn _ -> callback(seq),
+        fn _ -> file_close(fd)
+      )
+      Ok(result)
     end
-    let seq = Seq(fn(acc, f) -> do_chunks(acc, f))
-    let result = try_finally(
-      fn _ -> callback(seq),
-      fn _ -> file_close(fd)
-    )
-    Ok(result)
+    end
   end
-  end
-end
 
--- Low-level callbacks (side-effect iteration)
+  -- Low-level callbacks (side-effect iteration)
 
--- Internal helper: recursively reads lines. Used by each_line.
-pfn each_line_loop(fd, f) do
-  match file_read_line(fd) do
-  None -> :ok
-  Some(line) -> do
-    f(line)
-    each_line_loop(fd, f)
+  -- Internal helper: recursively reads lines. Used by each_line.
+  pfn each_line_loop(fd, f) do
+    match file_read_line(fd) do
+    None -> :ok
+    Some(line) -> do
+      f(line)
+      each_line_loop(fd, f)
+    end
+    end
   end
-  end
-end
 
-fn each_line(path, f) do
-  match file_open(path) do
-  Err(e) -> Err(e)
-  Ok(fd) -> do
-    each_line_loop(fd, f)
-    file_close(fd)
-    Ok(:ok)
+  fn each_line(path, f) do
+    match file_open(path) do
+    Err(e) -> Err(e)
+    Ok(fd) -> do
+      each_line_loop(fd, f)
+      file_close(fd)
+      Ok(:ok)
+    end
+    end
   end
-  end
-end
 
--- Internal helper: recursively reads chunks. Used by each_chunk.
-pfn each_chunk_loop(fd, size, f) do
-  match file_read_chunk(fd, size) do
-  None -> :ok
-  Some(chunk) -> do
-    f(chunk)
-    each_chunk_loop(fd, size, f)
+  -- Internal helper: recursively reads chunks. Used by each_chunk.
+  pfn each_chunk_loop(fd, size, f) do
+    match file_read_chunk(fd, size) do
+    None -> :ok
+    Some(chunk) -> do
+      f(chunk)
+      each_chunk_loop(fd, size, f)
+    end
+    end
   end
-  end
-end
 
-fn each_chunk(path, size, f) do
-  match file_open(path) do
-  Err(e) -> Err(e)
-  Ok(fd) -> do
-    each_chunk_loop(fd, size, f)
-    file_close(fd)
-    Ok(:ok)
+  fn each_chunk(path, size, f) do
+    match file_open(path) do
+    Err(e) -> Err(e)
+    Ok(fd) -> do
+      each_chunk_loop(fd, size, f)
+      file_close(fd)
+      Ok(:ok)
+    end
+    end
   end
-  end
-end
 
 end

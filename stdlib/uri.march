@@ -17,344 +17,344 @@
 
 mod URI do
 
-type URI = URI(String, String, Option(Int), String, String, String)
+  type URI = URI(String, String, Option(Int), String, String, String)
 
--- ── Private helpers ───────────────────────────────────────────────────────
+  -- ── Private helpers ───────────────────────────────────────────────────────
 
-pfn rev_list(xs) do
-  fn go(lst, acc) do
-    match lst do
-    Nil -> acc
-    Cons(h, t) -> go(t, Cons(h, acc))
-    end
-  end
-  go(xs, Nil)
-end
-
--- Is the given byte value an unreserved URI character?
--- Unreserved: A-Z (65-90), a-z (97-122), 0-9 (48-57), - (45), _ (95), . (46), ~ (126)
-pfn is_unreserved(code) do
-  (code >= 65 && code <= 90)  ||
-  (code >= 97 && code <= 122) ||
-  (code >= 48 && code <= 57)  ||
-  code == 45 || code == 95 || code == 46 || code == 126
-end
-
--- Upper-case hex character for nibble n (0–15).
-pfn hex_nibble(n) do
-  if n < 10 do int_to_string(n)
-  else char_from_int(55 + n)  -- 'A' = 65; 65 - 10 = 55
-  end
-end
-
--- Percent-encode a single byte value.
-pfn percent_encode_byte(code) do
-  "%" ++ hex_nibble(code / 16) ++ hex_nibble(code % 16)
-end
-
--- Decode two hex chars to a byte value. Returns -1 on bad input.
-pfn hex_val(c) do
-  let code = char_to_int(c)
-  if code >= 48 && code <= 57 do code - 48         -- '0'–'9'
-  else if code >= 65 && code <= 70 do code - 55    -- 'A'–'F'
-  else if code >= 97 && code <= 102 do code - 87   -- 'a'–'f'
-  else -1 end end end
-end
-
--- ── Public API ────────────────────────────────────────────────────────────
-
-doc """
-Parse a URI string into its components.
-
-    URI.parse("https://example.com:8080/api/users?q=hello#top")
-    -- URI("https", "example.com", Some(8080), "/api/users", "q=hello", "top")
-
-    URI.parse("http://localhost/path")
-    -- URI("http", "localhost", None, "/path", "", "")
-
-    URI.parse("/relative/path?foo=bar")
-    -- URI("", "", None, "/relative/path", "foo=bar", "")
-
-Relative URIs (no scheme) are supported; host and port will be empty/None.
-"""
-fn parse(s) do
-  -- Extract scheme (everything before "://")
-  let (scheme, rest1) = match string_split_first(s, "://") do
-    Some((sch, rest)) -> (sch, rest)
-    None -> ("", s)
-    end
-  -- Extract fragment (after "#")
-  let (rest2, fragment) = match string_split_first(rest1, "#") do
-    Some((r, frag)) -> (r, frag)
-    None -> (rest1, "")
-    end
-  -- Extract query (after "?")
-  let (rest3, raw_query) = match string_split_first(rest2, "?") do
-    Some((r, q)) -> (r, q)
-    None -> (rest2, "")
-    end
-  -- Extract authority (host:port) and path (split on first "/")
-  let (authority, path) =
-    if string_starts_with(rest3, "/") do
-      -- No authority — path is the whole thing
-      ("", rest3)
-    else
-      match string_split_first(rest3, "/") do
-      Some((auth, p)) -> (auth, "/" ++ p)
-      None -> (rest3, "")
+  pfn rev_list(xs) do
+    fn go(lst, acc) do
+      match lst do
+      Nil -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
       end
     end
-  -- Parse host and optional port from authority
-  let (host, port) = match string_split_first(authority, ":") do
-    Some((h, p_str)) ->
-      match string_to_int(p_str) do
-      Some(p) -> (h, Some(p))
-      None    -> (authority, None)
-      end
-    None -> (authority, None)
-    end
-  URI(scheme, host, port, path, raw_query, fragment)
-end
-
-doc """
-Convert a URI back to its string representation.
-
-    URI.to_string(URI("https", "example.com", None, "/path", "q=1", "top"))
-    -- "https://example.com/path?q=1#top"
-
-    URI.to_string(URI("http", "localhost", Some(4000), "/", "", ""))
-    -- "http://localhost:4000/"
-"""
-fn to_string(uri) do
-  match uri do
-  URI(scheme, host, port, path, query, fragment) ->
-    let scheme_part =
-      if string_is_empty(scheme) do ""
-      else scheme ++ "://" end
-    let port_part = match port do
-      None    -> ""
-      Some(p) -> ":" ++ int_to_string(p)
-      end
-    let query_part =
-      if string_is_empty(query) do ""
-      else "?" ++ query end
-    let frag_part =
-      if string_is_empty(fragment) do ""
-      else "#" ++ fragment end
-    scheme_part ++ host ++ port_part ++ path ++ query_part ++ frag_part
+    go(xs, Nil)
   end
-end
 
-doc """
-Percent-encode a string for safe use in a URI component.
+  -- Is the given byte value an unreserved URI character?
+  -- Unreserved: A-Z (65-90), a-z (97-122), 0-9 (48-57), - (45), _ (95), . (46), ~ (126)
+  pfn is_unreserved(code) do
+    (code >= 65 && code <= 90)  ||
+    (code >= 97 && code <= 122) ||
+    (code >= 48 && code <= 57)  ||
+    code == 45 || code == 95 || code == 46 || code == 126
+  end
 
-Unreserved characters (A–Z, a–z, 0–9, -, _, ., ~) are left unchanged;
-all other bytes are encoded as %XX (uppercase hex).
-
-    URI.encode("hello world")  -- "hello%20world"
-    URI.encode("foo=bar&baz")  -- "foo%3Dbar%26baz"
-    URI.encode("café")         -- "caf%C3%A9"
-"""
-fn encode(s) do
-  let chars = string_chars(s)
-  fn go(cs, acc) do
-    match cs do
-    Nil -> string_join(rev_list(acc), "")
-    Cons(c, rest) ->
-      let code = char_to_int(c)
-      let part =
-        if is_unreserved(code) do string_from_chars(Cons(c, Nil))
-        else percent_encode_byte(code) end
-      go(rest, Cons(part, acc))
+  -- Upper-case hex character for nibble n (0–15).
+  pfn hex_nibble(n) do
+    if n < 10 do int_to_string(n)
+    else char_from_int(55 + n)  -- 'A' = 65; 65 - 10 = 55
     end
   end
-  go(chars, Nil)
-end
 
-doc """
-Decode a percent-encoded URI component.
+  -- Percent-encode a single byte value.
+  pfn percent_encode_byte(code) do
+    "%" ++ hex_nibble(code / 16) ++ hex_nibble(code % 16)
+  end
 
-%XX sequences are decoded to their byte values; + is left unchanged
-(use decode_query for form-encoded values where + means space).
+  -- Decode two hex chars to a byte value. Returns -1 on bad input.
+  pfn hex_val(c) do
+    let code = char_to_int(c)
+    if code >= 48 && code <= 57 do code - 48         -- '0'–'9'
+    else if code >= 65 && code <= 70 do code - 55    -- 'A'–'F'
+    else if code >= 97 && code <= 102 do code - 87   -- 'a'–'f'
+    else -1 end end end
+  end
 
-    URI.decode("hello%20world")  -- "hello world"
-    URI.decode("caf%C3%A9")      -- "café"
-    URI.decode("no-encoding")    -- "no-encoding"
-"""
-fn decode(s) do
-  let chars = string_chars(s)
-  fn go(cs, acc) do
-    match cs do
-    Nil -> string_join(rev_list(acc), "")
-    Cons(c, rest) ->
-      if c == "%" do
-        match rest do
-        Cons(hi, Cons(lo, rest2)) ->
-          let h = hex_val(hi)
-          let l = hex_val(lo)
-          if h >= 0 && l >= 0 do
-            let byte_val = h * 16 + l
-            go(rest2, Cons(char_from_int(byte_val), acc))
-          else
-            go(rest, Cons(string_from_chars(Cons(c, Nil)), acc))
-          end
-        _ -> go(rest, Cons(string_from_chars(Cons(c, Nil)), acc))
-        end
+  -- ── Public API ────────────────────────────────────────────────────────────
+
+  doc """
+  Parse a URI string into its components.
+
+      URI.parse("https://example.com:8080/api/users?q=hello#top")
+      -- URI("https", "example.com", Some(8080), "/api/users", "q=hello", "top")
+
+      URI.parse("http://localhost/path")
+      -- URI("http", "localhost", None, "/path", "", "")
+
+      URI.parse("/relative/path?foo=bar")
+      -- URI("", "", None, "/relative/path", "foo=bar", "")
+
+  Relative URIs (no scheme) are supported; host and port will be empty/None.
+  """
+  fn parse(s) do
+    -- Extract scheme (everything before "://")
+    let (scheme, rest1) = match string_split_first(s, "://") do
+      Some((sch, rest)) -> (sch, rest)
+      None -> ("", s)
+      end
+    -- Extract fragment (after "#")
+    let (rest2, fragment) = match string_split_first(rest1, "#") do
+      Some((r, frag)) -> (r, frag)
+      None -> (rest1, "")
+      end
+    -- Extract query (after "?")
+    let (rest3, raw_query) = match string_split_first(rest2, "?") do
+      Some((r, q)) -> (r, q)
+      None -> (rest2, "")
+      end
+    -- Extract authority (host:port) and path (split on first "/")
+    let (authority, path) =
+      if string_starts_with(rest3, "/") do
+        -- No authority — path is the whole thing
+        ("", rest3)
       else
-        go(rest, Cons(string_from_chars(Cons(c, Nil)), acc))
+        match string_split_first(rest3, "/") do
+        Some((auth, p)) -> (auth, "/" ++ p)
+        None -> (rest3, "")
+        end
+      end
+    -- Parse host and optional port from authority
+    let (host, port) = match string_split_first(authority, ":") do
+      Some((h, p_str)) ->
+        match string_to_int(p_str) do
+        Some(p) -> (h, Some(p))
+        None    -> (authority, None)
+        end
+      None -> (authority, None)
+      end
+    URI(scheme, host, port, path, raw_query, fragment)
+  end
+
+  doc """
+  Convert a URI back to its string representation.
+
+      URI.to_string(URI("https", "example.com", None, "/path", "q=1", "top"))
+      -- "https://example.com/path?q=1#top"
+
+      URI.to_string(URI("http", "localhost", Some(4000), "/", "", ""))
+      -- "http://localhost:4000/"
+  """
+  fn to_string(uri) do
+    match uri do
+    URI(scheme, host, port, path, query, fragment) ->
+      let scheme_part =
+        if string_is_empty(scheme) do ""
+        else scheme ++ "://" end
+      let port_part = match port do
+        None    -> ""
+        Some(p) -> ":" ++ int_to_string(p)
+        end
+      let query_part =
+        if string_is_empty(query) do ""
+        else "?" ++ query end
+      let frag_part =
+        if string_is_empty(fragment) do ""
+        else "#" ++ fragment end
+      scheme_part ++ host ++ port_part ++ path ++ query_part ++ frag_part
+    end
+  end
+
+  doc """
+  Percent-encode a string for safe use in a URI component.
+
+  Unreserved characters (A–Z, a–z, 0–9, -, _, ., ~) are left unchanged;
+  all other bytes are encoded as %XX (uppercase hex).
+
+      URI.encode("hello world")  -- "hello%20world"
+      URI.encode("foo=bar&baz")  -- "foo%3Dbar%26baz"
+      URI.encode("café")         -- "caf%C3%A9"
+  """
+  fn encode(s) do
+    let chars = string_chars(s)
+    fn go(cs, acc) do
+      match cs do
+      Nil -> string_join(rev_list(acc), "")
+      Cons(c, rest) ->
+        let code = char_to_int(c)
+        let part =
+          if is_unreserved(code) do string_from_chars(Cons(c, Nil))
+          else percent_encode_byte(code) end
+        go(rest, Cons(part, acc))
       end
     end
+    go(chars, Nil)
   end
-  go(chars, Nil)
-end
 
-doc """
-Encode a list of key-value pairs as a URL query string.
+  doc """
+  Decode a percent-encoded URI component.
 
-Keys and values are percent-encoded; pairs are joined with "&".
+  %XX sequences are decoded to their byte values; + is left unchanged
+  (use decode_query for form-encoded values where + means space).
 
-    URI.encode_query([("q", "hello world"), ("page", "2")])
-    -- "q=hello%20world&page=2"
-
-    URI.encode_query([])  -- ""
-"""
-fn encode_query(pairs) do
-  fn encode_pair(kv) do
-    match kv do
-    (k, v) -> encode(k) ++ "=" ++ encode(v)
+      URI.decode("hello%20world")  -- "hello world"
+      URI.decode("caf%C3%A9")      -- "café"
+      URI.decode("no-encoding")    -- "no-encoding"
+  """
+  fn decode(s) do
+    let chars = string_chars(s)
+    fn go(cs, acc) do
+      match cs do
+      Nil -> string_join(rev_list(acc), "")
+      Cons(c, rest) ->
+        if c == "%" do
+          match rest do
+          Cons(hi, Cons(lo, rest2)) ->
+            let h = hex_val(hi)
+            let l = hex_val(lo)
+            if h >= 0 && l >= 0 do
+              let byte_val = h * 16 + l
+              go(rest2, Cons(char_from_int(byte_val), acc))
+            else
+              go(rest, Cons(string_from_chars(Cons(c, Nil)), acc))
+            end
+          _ -> go(rest, Cons(string_from_chars(Cons(c, Nil)), acc))
+          end
+        else
+          go(rest, Cons(string_from_chars(Cons(c, Nil)), acc))
+        end
+      end
     end
+    go(chars, Nil)
   end
-  fn go(ps, acc) do
-    match ps do
-    Nil -> string_join(rev_list(acc), "&")
-    Cons(p, rest) -> go(rest, Cons(encode_pair(p), acc))
-    end
-  end
-  go(pairs, Nil)
-end
 
-doc """
-Decode a URL query string into a list of key-value pairs.
+  doc """
+  Encode a list of key-value pairs as a URL query string.
 
-Percent-encoded sequences are decoded; "+" is treated as a space
-(application/x-www-form-urlencoded convention).
+  Keys and values are percent-encoded; pairs are joined with "&".
 
-    URI.decode_query("q=hello+world&page=2")
-    -- [("q", "hello world"), ("page", "2")]
+      URI.encode_query([("q", "hello world"), ("page", "2")])
+      -- "q=hello%20world&page=2"
 
-    URI.decode_query("")  -- []
-"""
-fn decode_query(s) do
-  if string_is_empty(s) do Nil
-  else
-    let pairs = string_split(s, "&")
-    fn decode_plus(t) do
-      decode(string_replace_all(t, "+", "%20"))
+      URI.encode_query([])  -- ""
+  """
+  fn encode_query(pairs) do
+    fn encode_pair(kv) do
+      match kv do
+      (k, v) -> encode(k) ++ "=" ++ encode(v)
+      end
     end
     fn go(ps, acc) do
       match ps do
-      Nil -> rev_list(acc)
-      Cons(pair, rest) ->
-        match string_split_first(pair, "=") do
-        Some((k, v)) -> go(rest, Cons((decode_plus(k), decode_plus(v)), acc))
-        None         -> go(rest, Cons((decode_plus(pair), ""), acc))
-        end
+      Nil -> string_join(rev_list(acc), "&")
+      Cons(p, rest) -> go(rest, Cons(encode_pair(p), acc))
       end
     end
     go(pairs, Nil)
   end
-end
 
-doc """
-Merge a relative URI reference onto a base URI (RFC 3986 §5.2, simplified).
+  doc """
+  Decode a URL query string into a list of key-value pairs.
 
-If the relative URI has a scheme, it is used as-is.
-If it has an authority (host), the base scheme is kept.
-Otherwise the base scheme and host are preserved, and the path is resolved.
+  Percent-encoded sequences are decoded; "+" is treated as a space
+  (application/x-www-form-urlencoded convention).
 
-    let base = URI.parse("https://example.com/a/b/c")
-    URI.to_string(URI.merge(base, URI.parse("../d")))
-    -- "https://example.com/a/d"
+      URI.decode_query("q=hello+world&page=2")
+      -- [("q", "hello world"), ("page", "2")]
 
-    URI.to_string(URI.merge(base, URI.parse("//other.com/x")))
-    -- "https://other.com/x"
-"""
-fn merge(base, relative) do
-  match (base, relative) do
-  (URI(bs, bh, bp, bpath, _, _), URI(rs, rh, rp, rpath, rq, rf)) ->
-    if not (string_is_empty(rs)) do
-      -- Relative has a scheme: use it as-is
-      relative
-    else if not (string_is_empty(rh)) do
-      -- Relative has an authority: use base scheme, relative everything else
-      URI(bs, rh, rp, rpath, rq, rf)
-    else if string_is_empty(rpath) do
-      -- Empty relative path: keep base path and scheme/host; adopt relative query/fragment
-      let new_q = if string_is_empty(rq) do "" else rq end
-      URI(bs, bh, bp, bpath, new_q, rf)
-    else if string_starts_with(rpath, "/") do
-      -- Absolute relative path
-      URI(bs, bh, bp, rpath, rq, rf)
-    else do
-      -- Relative path: merge with base path directory
-      let base_dir = match string_last_index_of(bpath, "/") do
-        Some(i) -> string_slice(bpath, 0, i + 1)
-        None    -> "/"
-        end
-      let merged = base_dir ++ rpath
-      -- Remove dot segments
-      let segments = string_split(merged, "/")
-      fn resolve(segs, acc) do
-        match segs do
+      URI.decode_query("")  -- []
+  """
+  fn decode_query(s) do
+    if string_is_empty(s) do Nil
+    else
+      let pairs = string_split(s, "&")
+      fn decode_plus(t) do
+        decode(string_replace_all(t, "+", "%20"))
+      end
+      fn go(ps, acc) do
+        match ps do
         Nil -> rev_list(acc)
-        Cons(s, rest) ->
-          if s == "." do resolve(rest, acc)
-          else if s == ".." do
-            match acc do
-            Nil      -> resolve(rest, Nil)
-            Cons(_, prev) -> resolve(rest, prev)
-            end
-          else resolve(rest, Cons(s, acc))
-          end end
+        Cons(pair, rest) ->
+          match string_split_first(pair, "=") do
+          Some((k, v)) -> go(rest, Cons((decode_plus(k), decode_plus(v)), acc))
+          None         -> go(rest, Cons((decode_plus(pair), ""), acc))
+          end
         end
       end
-      let clean_segs = resolve(segments, Nil)
-      let clean_path = string_join(clean_segs, "/")
-      URI(bs, bh, bp, clean_path, rq, rf)
-    end end end end end
+      go(pairs, Nil)
+    end
   end
-end
 
--- ── Field accessors ───────────────────────────────────────────────────────
+  doc """
+  Merge a relative URI reference onto a base URI (RFC 3986 §5.2, simplified).
 
-doc "Extract the scheme component (e.g. \"https\")."
-fn scheme(uri) do
-  match uri do URI(s, _, _, _, _, _) -> s end
-end
+  If the relative URI has a scheme, it is used as-is.
+  If it has an authority (host), the base scheme is kept.
+  Otherwise the base scheme and host are preserved, and the path is resolved.
 
-doc "Extract the host component (e.g. \"example.com\")."
-fn host(uri) do
-  match uri do URI(_, h, _, _, _, _) -> h end
-end
+      let base = URI.parse("https://example.com/a/b/c")
+      URI.to_string(URI.merge(base, URI.parse("../d")))
+      -- "https://example.com/a/d"
 
-doc "Extract the port as Some(n) or None."
-fn port(uri) do
-  match uri do URI(_, _, p, _, _, _) -> p end
-end
+      URI.to_string(URI.merge(base, URI.parse("//other.com/x")))
+      -- "https://other.com/x"
+  """
+  fn merge(base, relative) do
+    match (base, relative) do
+    (URI(bs, bh, bp, bpath, _, _), URI(rs, rh, rp, rpath, rq, rf)) ->
+      if not (string_is_empty(rs)) do
+        -- Relative has a scheme: use it as-is
+        relative
+      else if not (string_is_empty(rh)) do
+        -- Relative has an authority: use base scheme, relative everything else
+        URI(bs, rh, rp, rpath, rq, rf)
+      else if string_is_empty(rpath) do
+        -- Empty relative path: keep base path and scheme/host; adopt relative query/fragment
+        let new_q = if string_is_empty(rq) do "" else rq end
+        URI(bs, bh, bp, bpath, new_q, rf)
+      else if string_starts_with(rpath, "/") do
+        -- Absolute relative path
+        URI(bs, bh, bp, rpath, rq, rf)
+      else do
+        -- Relative path: merge with base path directory
+        let base_dir = match string_last_index_of(bpath, "/") do
+          Some(i) -> string_slice(bpath, 0, i + 1)
+          None    -> "/"
+          end
+        let merged = base_dir ++ rpath
+        -- Remove dot segments
+        let segments = string_split(merged, "/")
+        fn resolve(segs, acc) do
+          match segs do
+          Nil -> rev_list(acc)
+          Cons(s, rest) ->
+            if s == "." do resolve(rest, acc)
+            else if s == ".." do
+              match acc do
+              Nil      -> resolve(rest, Nil)
+              Cons(_, prev) -> resolve(rest, prev)
+              end
+            else resolve(rest, Cons(s, acc))
+            end end
+          end
+        end
+        let clean_segs = resolve(segments, Nil)
+        let clean_path = string_join(clean_segs, "/")
+        URI(bs, bh, bp, clean_path, rq, rf)
+      end end end end end
+    end
+  end
 
-doc "Extract the path component (e.g. \"/api/users\")."
-fn path(uri) do
-  match uri do URI(_, _, _, p, _, _) -> p end
-end
+  -- ── Field accessors ───────────────────────────────────────────────────────
 
-doc "Extract the raw query string (e.g. \"q=hello&page=2\")."
-fn query(uri) do
-  match uri do URI(_, _, _, _, q, _) -> q end
-end
+  doc "Extract the scheme component (e.g. \"https\")."
+  fn scheme(uri) do
+    match uri do URI(s, _, _, _, _, _) -> s end
+  end
 
-doc "Extract the fragment identifier (e.g. \"section-1\")."
-fn fragment(uri) do
-  match uri do URI(_, _, _, _, _, f) -> f end
-end
+  doc "Extract the host component (e.g. \"example.com\")."
+  fn host(uri) do
+    match uri do URI(_, h, _, _, _, _) -> h end
+  end
+
+  doc "Extract the port as Some(n) or None."
+  fn port(uri) do
+    match uri do URI(_, _, p, _, _, _) -> p end
+  end
+
+  doc "Extract the path component (e.g. \"/api/users\")."
+  fn path(uri) do
+    match uri do URI(_, _, _, p, _, _) -> p end
+  end
+
+  doc "Extract the raw query string (e.g. \"q=hello&page=2\")."
+  fn query(uri) do
+    match uri do URI(_, _, _, _, q, _) -> q end
+  end
+
+  doc "Extract the fragment identifier (e.g. \"section-1\")."
+  fn fragment(uri) do
+    match uri do URI(_, _, _, _, _, f) -> f end
+  end
 
 end

@@ -10,718 +10,719 @@
 
 mod Enum do
 
--- Internal helper: reverse a list. Avoids dependency on prelude's reverse.
-pfn rev(xs : List(a)) : List(a) do
-  fn go(lst : List(a), acc : List(a)) : List(a) do
-    match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, Cons(h, acc))
-    end
-  end
-  go(xs, Nil)
-end
-
--- ---- Traversal ----
-
-doc """
-Applies f to each element and returns a new list of results. O(n).
-
-This is the primary way to transform a collection element-by-element.
-"""
-fn map(xs : List(a), f : a -> b) : List(b) do
-  fn go(lst : List(a), acc : List(b)) : List(b) do
-    match lst do
-    Nil        -> rev(acc)
-    Cons(h, t) -> go(t, Cons(f(h), acc))
-    end
-  end
-  go(xs, Nil)
-end
-
-doc """
-Applies f to each element (f returns a list) and concatenates all results.
-O(n * m) where m is average sublist length.
-
-Use when each element expands to zero or more output elements (e.g. tokenizing,
-expanding ranges). Equivalent to Haskell's concatMap.
-"""
-fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
-  -- append_list: append ys onto xs (xs ++ ys). O(|xs|).
-  fn append_list(left : List(b), right : List(b)) : List(b) do
-    fn rev_onto(rev_xs, ys) do
-      match rev_xs do
-      Nil -> ys
-      Cons(h, t) -> rev_onto(t, Cons(h, ys))
-      end
-    end
-    fn rev_left(xs, acc) do
-      match xs do
-      Nil -> acc
-      Cons(h, t) -> rev_left(t, Cons(h, acc))
-      end
-    end
-    rev_onto(rev_left(left, Nil), right)
-  end
-  fn go(lst : List(a), acc : List(b)) : List(b) do
-    match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, append_list(acc, f(h)))
-    end
-  end
-  go(xs, Nil)
-end
-
-doc """
-Returns only the elements for which pred returns true. O(n).
-
-Preserves order and is stable (equal elements stay in original relative order).
-"""
-fn filter(xs : List(a), pred : a -> Bool) : List(a) do
-  fn go(lst : List(a), acc : List(a)) : List(a) do
-    match lst do
-    Nil        -> rev(acc)
-    Cons(h, t) -> do
-      if pred(h) do go(t, Cons(h, acc))
-      else go(t, acc) end
-    end
-    end
-  end
-  go(xs, Nil)
-end
-
-doc """
-Left fold over a list. f is curried: f(acc)(x) returns the new accumulator.
-O(n).
-
-This is the primitive from which most other Enum functions can be derived.
-Use fold when you need to accumulate a single value from all elements.
-"""
-fn fold(zero : b, xs : List(a), f : b -> a -> b) : b do
-  fn go(lst : List(a), acc : b) : b do
-    match lst do
-    Nil        -> acc
-    Cons(h, t) -> do
-      let g = f(acc)
-      go(t, g(h))
-    end
-    end
-  end
-  go(xs, zero)
-end
-
-doc """
-Like fold, but uses the first element as the initial accumulator.
-Returns None for empty lists, Some(result) otherwise. O(n).
-
-Prefer over fold when there is no natural zero value (e.g. max, min,
-string concatenation without a starting value).
-"""
-fn reduce(xs : List(a), f : a -> a -> a) : Option(a) do
-  match xs do
-  Nil        -> None
-  Cons(h, t) -> do
-    fn go(lst : List(a), acc : a) : a do
+  -- Internal helper: reverse a list. Avoids dependency on prelude's reverse.
+  pfn rev(xs : List(a)) : List(a) do
+    fn go(lst : List(a), acc : List(a)) : List(a) do
       match lst do
       Nil        -> acc
-      Cons(x, r) -> do
-        let g = f(acc)
-        go(r, g(x))
-      end
+      Cons(h, t) -> go(t, Cons(h, acc))
       end
     end
-    Some(go(t, h))
+    go(xs, Nil)
   end
-  end
-end
 
-doc """
-Applies f to each element for side effects and returns Unit. O(n).
+  -- ---- Traversal ----
 
-Use when you want to perform an action (e.g. println) for each element
-and don't care about the result. Returns Unit regardless of f's return type.
-"""
-fn each(xs : List(a), f : a -> b) : Unit do
-  match xs do
-  Nil        -> ()
-  Cons(h, t) -> do
-    let _ = f(h)
-    each(t, f)
-  end
-  end
-end
+  doc """
+  Applies f to each element and returns a new list of results. O(n).
 
--- ---- Predicates and queries ----
-
-doc """
-Returns the number of elements in the list. O(n).
-
-Prefer this over computing length inside a recursive helper when possible.
-"""
-fn count(xs : List(a)) : Int do
-  fn go(lst : List(a), acc : Int) : Int do
-    match lst do
-    Nil        -> acc
-    Cons(_, t) -> go(t, acc + 1)
-    end
-  end
-  go(xs, 0)
-end
-
-doc """
-Returns true if at least one element satisfies pred. Short-circuits. O(n).
-
-Use any instead of filter + count when you only need a yes/no answer —
-any stops at the first match.
-"""
-fn any(xs : List(a), pred : a -> Bool) : Bool do
-  match xs do
-  Nil        -> false
-  Cons(h, t) -> do
-    if pred(h) do true
-    else any(t, pred) end
-  end
-  end
-end
-
-doc """
-Returns true if all elements satisfy pred. Short-circuits on first failure. O(n).
-
-Use all to validate a collection without counting or filtering.
-"""
-fn all(xs : List(a), pred : a -> Bool) : Bool do
-  match xs do
-  Nil        -> true
-  Cons(h, t) -> do
-    if pred(h) do all(t, pred)
-    else false end
-  end
-  end
-end
-
-doc """
-Returns the first element satisfying pred, or None if none does. O(n).
-
-Use find when you need one element that matches a condition. If you
-need all matching elements, use filter instead.
-"""
-fn find(xs : List(a), pred : a -> Bool) : Option(a) do
-  match xs do
-  Nil        -> None
-  Cons(h, t) -> do
-    if pred(h) do Some(h)
-    else find(t, pred) end
-  end
-  end
-end
-
--- ---- Grouping and zipping ----
-
-doc """
-Groups consecutive elements with the same key into (key, [elements]) pairs.
-O(n).
-
-Note: only CONSECUTIVE equal-key elements are grouped. If the same key
-appears non-consecutively, it produces multiple groups (unlike a hash-group-by).
-This matches Elixir's chunk_by semantics, not group_by.
-
-Design: consecutive-only grouping avoids the need for a map/hashtable,
-keeping this function pure and O(n) without sorting.
-"""
-fn group_by(xs : List(a), key : a -> k) : List((k, List(a))) do
-  fn go(lst : List(a), cur_key : k, cur_group : List(a), acc : List((k, List(a)))) : List((k, List(a))) do
-    match lst do
-    Nil -> do
-      let finished = Cons((cur_key, rev(cur_group)), acc)
-      rev(finished)
-    end
-    Cons(h, t) -> do
-      let k = key(h)
-      -- compare keys with structural equality (==)
-      if k == cur_key do
-        go(t, cur_key, Cons(h, cur_group), acc)
-      else do
-        let finished = Cons((cur_key, rev(cur_group)), acc)
-        go(t, k, Cons(h, Nil), finished) end
-      end
-    end
-    end
-  end
-  match xs do
-  Nil        -> Nil
-  Cons(h, t) -> do
-    let k = key(h)
-    go(t, k, Cons(h, Nil), Nil)
-  end
-  end
-end
-
-doc """
-Zips two lists together applying f to corresponding elements.
-Stops at the shorter list. O(min(|xs|, |ys|)).
-f is curried: f(x)(y) returns the combined value.
-
-Use zip_with when you want to combine two collections element-by-element.
-Equivalent to Haskell's zipWith.
-"""
-fn zip_with(xs : List(a), ys : List(b), f : a -> b -> c) : List(c) do
-  fn go(as_ : List(a), bs : List(b), acc : List(c)) : List(c) do
-    match as_ do
-    Nil -> rev(acc)
-    Cons(x, xt) -> do
-      match bs do
-      Nil -> rev(acc)
-      Cons(y, yt) -> do
-        let g = f(x)
-        go(xt, yt, Cons(g(y), acc))
-      end
-      end
-    end
-    end
-  end
-  go(xs, ys, Nil)
-end
-
--- ---- Sorting wrappers ----
-
-doc """
-Sorts xs by cmp. Stable (preserves relative order of equal elements).
-Uses Timsort: O(n log n) worst-case, O(n) on already-sorted input.
-
-Prefer this for general-purpose sorting. The stability guarantee means
-that if you sort by key A and do by key B, elements with equal B end
-remain in A order.
-
-cmp is curried: cmp(x)(y) = true means x should come before y.
-"""
-fn sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
-  Sort.timsort_by(xs, cmp)
-end
-
-doc """
-Sorts xs using Timsort. Stable, O(n log n) worst-case, O(n) on sorted input.
-
-Explicitly names the algorithm for documentation clarity. Prefer sort_by
-for application code; use timsort_by when you specifically need stability
-and near-linear behavior on natural runs (e.g. merging pre-sorted logs).
-"""
-fn timsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
-  Sort.timsort_by(xs, cmp)
-end
-
-doc """
-Sorts xs using Introsort. Unstable, O(n log n) worst-case guaranteed.
-
-Prefer over timsort_by when:
-  - worst-case O(n log n) is required (security-sensitive or adversarial input)
-  - stability is not needed and you want predictable worst-case behavior
-  - you are sorting data with no natural runs
-"""
-fn introsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
-  Sort.introsort_by(xs, cmp)
-end
-
-doc """
-Sorts a small list (n <= 8) using optimal comparison networks.
-Falls back to mergesort for n > 8. Stable.
-
-Use sort_small_by when:
-  - you know the list has at most 8 elements (e.g. sorting tuples, fixed fields)
-  - you want provably minimal comparator count for the size
-For general sorting, prefer sort_by.
-"""
-fn sort_small_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
-  Sort.sort_small_by(xs, cmp)
-end
-
--- ---- New grouping and chunking ----
-
-doc """
-Chunks consecutive elements with the same key into (key, [elements]) pairs.
-O(n). Only CONSECUTIVE equal-key runs are grouped.
-
-This is identical to group_by but named correctly after Elixir's chunk_by.
-Use chunk_by when the grouping key changes only at boundaries (e.g. run-length
-encoding). For grouping all occurrences of a key, use frequencies/assoc lists.
-"""
-fn chunk_by(xs : List(a), key : a -> k) : List((k, List(a))) do
-  group_by(xs, key)
-end
-
-doc """
-Split xs into consecutive chunks of exactly n elements each.
-The final chunk may be smaller than n if len(xs) is not divisible by n.
-Returns [] for empty xs. O(n).
-
-    chunk_every([1,2,3,4,5], 2)  -- [[1,2], [3,4], [5]]
-"""
-fn chunk_every(xs : List(a), n : Int) : List(List(a)) do
-  fn go(lst : List(a), cur : List(a), cur_sz : Int, acc : List(List(a))) : List(List(a)) do
-    match lst do
-    Nil ->
-      if cur_sz == 0 do rev(acc)
-      else rev(Cons(rev(cur), acc)) end
-    Cons(h, t) ->
-      if cur_sz + 1 == n do
-        go(t, Nil, 0, Cons(rev(Cons(h, cur)), acc))
-      else
-        go(t, Cons(h, cur), cur_sz + 1, acc)
-      end
-    end
-  end
-  go(xs, Nil, 0, Nil)
-end
-
-doc """
-Zip two lists into a list of pairs, stopping at the shorter list. O(min(|a|,|b|)).
-
-    zip([1,2,3], [4,5,6])  -- [(1,4), (2,5), (3,6)]
-"""
-fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
-  zip_with(xs, ys, fn x -> fn y -> (x, y))
-end
-
-doc """
-Pair each element with its zero-based index. O(n).
-
-    with_index([10,20,30])  -- [(10,0), (20,1), (30,2)]
-"""
-fn with_index(xs : List(a)) : List((a, Int)) do
-  fn go(lst : List(a), i : Int, acc : List((a, Int))) : List((a, Int)) do
-    match lst do
-    Nil        -> rev(acc)
-    Cons(h, t) -> go(t, i + 1, Cons((h, i), acc))
-    end
-  end
-  go(xs, 0, Nil)
-end
-
--- ---- Deduplication ----
-
-doc """
-Remove consecutive duplicate elements (structural equality). O(n).
-
-    dedup([1,1,2,3,3,2])  -- [1,2,3,2]
-
-Only adjacent duplicates are removed. For all-duplicates removal, use uniq.
-"""
-fn dedup(xs : List(a)) : List(a) do
-  match xs do
-  Nil        -> Nil
-  Cons(h, t) ->
-    fn go(lst : List(a), prev : a, acc : List(a)) : List(a) do
+  This is the primary way to transform a collection element-by-element.
+  """
+  fn map(xs : List(a), f : a -> b) : List(b) do
+    fn go(lst : List(a), acc : List(b)) : List(b) do
       match lst do
       Nil        -> rev(acc)
-      Cons(x, r) ->
-        if x == prev do go(r, prev, acc)
-        else go(r, x, Cons(x, acc)) end
+      Cons(h, t) -> go(t, Cons(f(h), acc))
       end
     end
-    go(t, h, Cons(h, Nil))
+    go(xs, Nil)
   end
-end
 
-doc """
-Remove all duplicate elements, keeping the first occurrence. O(n²).
+  doc """
+  Applies f to each element (f returns a list) and concatenates all results.
+  O(n * m) where m is average sublist length.
 
-    uniq([1,2,1,3,2])  -- [1,2,3]
-"""
-fn uniq(xs : List(a)) : List(a) do
-  fn member(lst : List(a), x : a) : Bool do
-    match lst do
-    Nil        -> false
-    Cons(h, t) -> if h == x do true else member(t, x) end
+  Use when each element expands to zero or more output elements (e.g. tokenizing,
+  expanding ranges). Equivalent to Haskell's concatMap.
+  """
+  fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
+    -- append_list: append ys onto xs (xs ++ ys). O(|xs|).
+    fn append_list(left : List(b), right : List(b)) : List(b) do
+      fn rev_onto(rev_xs, ys) do
+        match rev_xs do
+        Nil -> ys
+        Cons(h, t) -> rev_onto(t, Cons(h, ys))
+        end
+      end
+      fn rev_left(xs, acc) do
+        match xs do
+        Nil -> acc
+        Cons(h, t) -> rev_left(t, Cons(h, acc))
+        end
+      end
+      rev_onto(rev_left(left, Nil), right)
     end
-  end
-  fn go(lst : List(a), seen : List(a), acc : List(a)) : List(a) do
-    match lst do
-    Nil        -> rev(acc)
-    Cons(h, t) ->
-      if member(seen, h) do go(t, seen, acc)
-      else go(t, Cons(h, seen), Cons(h, acc)) end
+    fn go(lst : List(a), acc : List(b)) : List(b) do
+      match lst do
+      Nil        -> acc
+      Cons(h, t) -> go(t, append_list(acc, f(h)))
+      end
     end
+    go(xs, Nil)
   end
-  go(xs, Nil, Nil)
-end
 
-doc """
-Remove duplicates by key function, keeping the first occurrence. O(n²).
+  doc """
+  Returns only the elements for which pred returns true. O(n).
 
-    uniq_by(["alice","bob","anna"], fn s -> string_slice(s, 0, 1))
-      -- ["alice","bob"]   (keeps first with each initial letter)
-"""
-fn uniq_by(xs : List(a), f : a -> k) : List(a) do
-  fn member_key(lst, key) do
-    match lst do
-    Nil        -> false
-    Cons(h, t) -> if h == key do true else member_key(t, key) end
-    end
-  end
-  fn go(lst, seen, acc) do
-    match lst do
-    Nil        -> rev(acc)
-    Cons(h, t) ->
-      let ky = f(h)
-      if member_key(seen, ky) do go(t, seen, acc)
-      else go(t, Cons(ky, seen), Cons(h, acc)) end
-    end
-  end
-  go(xs, Nil, Nil)
-end
-
-doc """
-Remove duplicates from an ordered list in O(n log n), keeping the first
-occurrence of each value.  Requires a less-than comparator matching
-`Set`'s convention: `cmp : a -> a -> Bool` where `cmp(a)(b) == true`
-means a < b.  Output preserves insertion order.
-
-Prefer this over `uniq` when your element type has a natural ordering
-(Int, String, etc.) and the list is large enough that O(n²) is painful.
-
-    uniq_ord([3, 1, 2, 1, 3], fn a -> fn b -> a < b)
-    -- [3, 1, 2]
-"""
-fn uniq_ord(xs, cmp) do
-  -- Build an order-preserving filter: walk xs once, tracking seen
-  -- elements in a Set (O(log n) contains/insert).  Total: O(n log n).
-  fn go(lst, seen, acc) do
-    match lst do
-    Nil        -> rev(acc)
-    Cons(h, t) ->
-      if Set.contains(seen, h, cmp) do go(t, seen, acc)
-      else go(t, Set.insert(seen, h, cmp), Cons(h, acc)) end
-    end
-  end
-  go(xs, Set.empty(), Nil)
-end
-
--- ---- Insertion and interleaving ----
-
-doc """
-Insert sep between every adjacent pair of elements. O(n).
-
-    intersperse([1,2,3], 0)  -- [1,0,2,0,3]
-    intersperse([], 0)        -- []
-    intersperse([1], 0)       -- [1]
-"""
-fn intersperse(xs : List(a), sep : a) : List(a) do
-  match xs do
-  Nil          -> Nil
-  Cons(h, Nil) -> Cons(h, Nil)
-  Cons(h, t)   ->
+  Preserves order and is stable (equal elements stay in original relative order).
+  """
+  fn filter(xs : List(a), pred : a -> Bool) : List(a) do
     fn go(lst : List(a), acc : List(a)) : List(a) do
       match lst do
       Nil        -> rev(acc)
-      Cons(x, r) -> go(r, Cons(x, Cons(sep, acc)))
+      Cons(h, t) -> do
+        if pred(h) do go(t, Cons(h, acc))
+        else go(t, acc) end
+      end
       end
     end
-    go(t, Cons(h, Nil))
+    go(xs, Nil)
   end
-end
 
--- ---- Scanning and sliding ----
+  doc """
+  Left fold over a list.  Argument order: collection first, init
+  second, callback last (uncurried-collection convention).  The
+  callback `f` is curried as `f(acc)(x) = new_acc`.  O(n).
 
-doc """
-Like fold but returns a list of all intermediate accumulator values,
-including the initial value. O(n).
+  This is the primitive from which most other Enum functions can be derived.
+  Use fold when you need to accumulate a single value from all elements.
+  """
+  fn fold(xs : List(a), zero : b, f : b -> a -> b) : b do
+    fn go(lst : List(a), acc : b) : b do
+      match lst do
+      Nil        -> acc
+      Cons(h, t) -> do
+        let g = f(acc)
+        go(t, g(h))
+      end
+      end
+    end
+    go(xs, zero)
+  end
 
-    scan([1,2,3,4], 0, fn acc -> fn x -> acc + x)
-      -- [0, 1, 3, 6, 10]
+  doc """
+  Like fold, but uses the first element as the initial accumulator.
+  Returns None for empty lists, Some(result) otherwise. O(n).
 
-The returned list always has length len(xs) + 1.
-"""
-fn scan(xs, zero, f) do
-  fn go(lst, acc, result) do
-    match lst do
-    Nil        -> rev(result)
+  Prefer over fold when there is no natural zero value (e.g. max, min,
+  string concatenation without a starting value).
+  """
+  fn reduce(xs : List(a), f : a -> a -> a) : Option(a) do
+    match xs do
+    Nil        -> None
     Cons(h, t) -> do
-      let g = f(acc)
-      let next = g(h)
-      go(t, next, Cons(next, result))
+      fn go(lst : List(a), acc : a) : a do
+        match lst do
+        Nil        -> acc
+        Cons(x, r) -> do
+          let g = f(acc)
+          go(r, g(x))
+        end
+        end
+      end
+      Some(go(t, h))
     end
     end
   end
-  go(xs, zero, Cons(zero, Nil))
-end
 
-doc """
-Return all overlapping windows of length n. O(n * m) where m is window size.
+  doc """
+  Applies f to each element for side effects and returns Unit. O(n).
 
-    slide([1,2,3,4], 3)  -- [[1,2,3], [2,3,4]]
-    slide([1,2], 3)      -- []   (list shorter than window)
-"""
-fn slide(xs : List(a), n : Int) : List(List(a)) do
-  fn take_n(lst : List(a), k : Int, acc : List(a)) : Option(List(a)) do
-    if k == 0 do Some(rev(acc))
-    else
+  Use when you want to perform an action (e.g. println) for each element
+  and don't care about the result. Returns Unit regardless of f's return type.
+  """
+  fn each(xs : List(a), f : a -> b) : Unit do
+    match xs do
+    Nil        -> ()
+    Cons(h, t) -> do
+      let _ = f(h)
+      each(t, f)
+    end
+    end
+  end
+
+  -- ---- Predicates and queries ----
+
+  doc """
+  Returns the number of elements in the list. O(n).
+
+  Prefer this over computing length inside a recursive helper when possible.
+  """
+  fn count(xs : List(a)) : Int do
+    fn go(lst : List(a), acc : Int) : Int do
       match lst do
-      Nil        -> None
-      Cons(h, t) -> take_n(t, k - 1, Cons(h, acc))
+      Nil        -> acc
+      Cons(_, t) -> go(t, acc + 1)
       end
     end
+    go(xs, 0)
   end
-  fn go(lst : List(a), acc : List(List(a))) : List(List(a)) do
-    match take_n(lst, n, Nil) do
-    None         -> rev(acc)
-    Some(window) ->
+
+  doc """
+  Returns true if at least one element satisfies pred. Short-circuits. O(n).
+
+  Use any instead of filter + count when you only need a yes/no answer —
+  any stops at the first match.
+  """
+  fn any(xs : List(a), pred : a -> Bool) : Bool do
+    match xs do
+    Nil        -> false
+    Cons(h, t) -> do
+      if pred(h) do true
+      else any(t, pred) end
+    end
+    end
+  end
+
+  doc """
+  Returns true if all elements satisfy pred. Short-circuits on first failure. O(n).
+
+  Use all to validate a collection without counting or filtering.
+  """
+  fn all(xs : List(a), pred : a -> Bool) : Bool do
+    match xs do
+    Nil        -> true
+    Cons(h, t) -> do
+      if pred(h) do all(t, pred)
+      else false end
+    end
+    end
+  end
+
+  doc """
+  Returns the first element satisfying pred, or None if none does. O(n).
+
+  Use find when you need one element that matches a condition. If you
+  need all matching elements, use filter instead.
+  """
+  fn find(xs : List(a), pred : a -> Bool) : Option(a) do
+    match xs do
+    Nil        -> None
+    Cons(h, t) -> do
+      if pred(h) do Some(h)
+      else find(t, pred) end
+    end
+    end
+  end
+
+  -- ---- Grouping and zipping ----
+
+  doc """
+  Groups consecutive elements with the same key into (key, [elements]) pairs.
+  O(n).
+
+  Note: only CONSECUTIVE equal-key elements are grouped. If the same key
+  appears non-consecutively, it produces multiple groups (unlike a hash-group-by).
+  This matches Elixir's chunk_by semantics, not group_by.
+
+  Design: consecutive-only grouping avoids the need for a map/hashtable,
+  keeping this function pure and O(n) without sorting.
+  """
+  fn group_by(xs : List(a), key : a -> k) : List((k, List(a))) do
+    fn go(lst : List(a), cur_key : k, cur_group : List(a), acc : List((k, List(a)))) : List((k, List(a))) do
       match lst do
-      Nil        -> rev(acc)
-      Cons(_, t) -> go(t, Cons(window, acc))
+      Nil -> do
+        let finished = Cons((cur_key, rev(cur_group)), acc)
+        rev(finished)
+      end
+      Cons(h, t) -> do
+        let k = key(h)
+        -- compare keys with structural equality (==)
+        if k == cur_key do
+          go(t, cur_key, Cons(h, cur_group), acc)
+        else do
+          let finished = Cons((cur_key, rev(cur_group)), acc)
+          go(t, k, Cons(h, Nil), finished) end
+        end
+      end
       end
     end
-  end
-  go(xs, Nil)
-end
-
--- ---- Prefix/suffix filtering ----
-
-doc """
-Return the longest prefix for which pred returns true. O(n).
-
-    take_while([1,2,3,4], fn x -> x < 3)  -- [1,2]
-"""
-fn take_while(xs : List(a), pred : a -> Bool) : List(a) do
-  fn go(lst : List(a), acc : List(a)) : List(a) do
-    match lst do
-    Nil        -> rev(acc)
-    Cons(h, t) ->
-      if pred(h) do go(t, Cons(h, acc))
-      else rev(acc) end
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) -> do
+      let k = key(h)
+      go(t, k, Cons(h, Nil), Nil)
+    end
     end
   end
-  go(xs, Nil)
-end
 
-doc """
-Drop elements from the front while pred returns true, return the rest. O(n).
+  doc """
+  Zips two lists together applying f to corresponding elements.
+  Stops at the shorter list. O(min(|xs|, |ys|)).
+  f is curried: f(x)(y) returns the combined value.
 
-    drop_while([1,2,3,4], fn x -> x < 3)  -- [3,4]
-"""
-fn drop_while(xs : List(a), pred : a -> Bool) : List(a) do
-  match xs do
-  Nil        -> Nil
-  Cons(h, t) ->
-    if pred(h) do drop_while(t, pred)
-    else xs end
-  end
-end
-
--- ---- Min/max by key ----
-
-doc """
-Return Some(element) with the minimum f(element) value, or None for empty.
-Uses < for key comparison. O(n).
-
-    min_by(["banana","fig","apple"], fn s -> string_length(s))
-      -- Some("fig")
-"""
-fn min_by(xs : List(a), f : a -> k) : Option(a) do
-  match xs do
-  Nil        -> None
-  Cons(h, t) ->
-    fn go(lst : List(a), best : a, best_k : k) : a do
-      match lst do
-      Nil        -> best
-      Cons(x, r) ->
-        let k = f(x)
-        if k < best_k do go(r, x, k)
-        else go(r, best, best_k) end
+  Use zip_with when you want to combine two collections element-by-element.
+  Equivalent to Haskell's zipWith.
+  """
+  fn zip_with(xs : List(a), ys : List(b), f : a -> b -> c) : List(c) do
+    fn go(as_ : List(a), bs : List(b), acc : List(c)) : List(c) do
+      match as_ do
+      Nil -> rev(acc)
+      Cons(x, xt) -> do
+        match bs do
+        Nil -> rev(acc)
+        Cons(y, yt) -> do
+          let g = f(x)
+          go(xt, yt, Cons(g(y), acc))
+        end
+        end
+      end
       end
     end
-    Some(go(t, h, f(h)))
+    go(xs, ys, Nil)
   end
-end
 
-doc """
-Return Some(element) with the maximum f(element) value, or None for empty.
-Uses > for key comparison. O(n).
+  -- ---- Sorting wrappers ----
 
-    max_by(["apple","fig","banana"], fn s -> string_length(s))
-      -- Some("banana")
-"""
-fn max_by(xs : List(a), f : a -> k) : Option(a) do
-  match xs do
-  Nil        -> None
-  Cons(h, t) ->
-    fn go(lst : List(a), best : a, best_k : k) : a do
+  doc """
+  Sorts xs by cmp. Stable (preserves relative order of equal elements).
+  Uses Timsort: O(n log n) worst-case, O(n) on already-sorted input.
+
+  Prefer this for general-purpose sorting. The stability guarantee means
+  that if you sort by key A and do by key B, elements with equal B end
+  remain in A order.
+
+  cmp is curried: cmp(x)(y) = true means x should come before y.
+  """
+  fn sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+    Sort.timsort_by(xs, cmp)
+  end
+
+  doc """
+  Sorts xs using Timsort. Stable, O(n log n) worst-case, O(n) on sorted input.
+
+  Explicitly names the algorithm for documentation clarity. Prefer sort_by
+  for application code; use timsort_by when you specifically need stability
+  and near-linear behavior on natural runs (e.g. merging pre-sorted logs).
+  """
+  fn timsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+    Sort.timsort_by(xs, cmp)
+  end
+
+  doc """
+  Sorts xs using Introsort. Unstable, O(n log n) worst-case guaranteed.
+
+  Prefer over timsort_by when:
+    - worst-case O(n log n) is required (security-sensitive or adversarial input)
+    - stability is not needed and you want predictable worst-case behavior
+    - you are sorting data with no natural runs
+  """
+  fn introsort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+    Sort.introsort_by(xs, cmp)
+  end
+
+  doc """
+  Sorts a small list (n <= 8) using optimal comparison networks.
+  Falls back to mergesort for n > 8. Stable.
+
+  Use sort_small_by when:
+    - you know the list has at most 8 elements (e.g. sorting tuples, fixed fields)
+    - you want provably minimal comparator count for the size
+  For general sorting, prefer sort_by.
+  """
+  fn sort_small_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+    Sort.sort_small_by(xs, cmp)
+  end
+
+  -- ---- New grouping and chunking ----
+
+  doc """
+  Chunks consecutive elements with the same key into (key, [elements]) pairs.
+  O(n). Only CONSECUTIVE equal-key runs are grouped.
+
+  This is identical to group_by but named correctly after Elixir's chunk_by.
+  Use chunk_by when the grouping key changes only at boundaries (e.g. run-length
+  encoding). For grouping all occurrences of a key, use frequencies/assoc lists.
+  """
+  fn chunk_by(xs : List(a), key : a -> k) : List((k, List(a))) do
+    group_by(xs, key)
+  end
+
+  doc """
+  Split xs into consecutive chunks of exactly n elements each.
+  The final chunk may be smaller than n if len(xs) is not divisible by n.
+  Returns [] for empty xs. O(n).
+
+      chunk_every([1,2,3,4,5], 2)  -- [[1,2], [3,4], [5]]
+  """
+  fn chunk_every(xs : List(a), n : Int) : List(List(a)) do
+    fn go(lst : List(a), cur : List(a), cur_sz : Int, acc : List(List(a))) : List(List(a)) do
       match lst do
-      Nil        -> best
-      Cons(x, r) ->
-        let k = f(x)
-        if k > best_k do go(r, x, k)
-        else go(r, best, best_k) end
-      end
-    end
-    Some(go(t, h, f(h)))
-  end
-end
-
--- ---- Counting and aggregation ----
-
-doc """
-Sum a list of integers. Returns 0 for empty list. O(n).
-
-    sum([1,2,3,4,5])  -- 15
-"""
-fn sum(xs : List(Int)) : Int do
-  fn go(lst : List(Int), acc : Int) : Int do
-    match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, acc + h)
-    end
-  end
-  go(xs, 0)
-end
-
-doc """
-Product of a list of integers. Returns 1 for empty list. O(n).
-
-    product([1,2,3,4,5])  -- 120
-"""
-fn product(xs : List(Int)) : Int do
-  fn go(lst : List(Int), acc : Int) : Int do
-    match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, acc * h)
-    end
-  end
-  go(xs, 1)
-end
-
-doc """
-Count occurrences of each element. Returns List((element, count)) association
-list in order of first appearance. O(n²) in unique elements.
-
-    frequencies(["a","b","a","c","b","a"])
-      -- [("a",3),("b",2),("c",1)]
-"""
-fn frequencies(xs : List(a)) : List((a, Int)) do
-  fn update(pairs : List((a, Int)), key : a) : List((a, Int)) do
-    fn go(lst : List((a, Int)), acc : List((a, Int))) : List((a, Int)) do
-      match lst do
-      Nil -> rev(Cons((key, 1), acc))
-      Cons((k, c), t) ->
-        if k == key do
-          fn rev_onto(rv : List((a, Int)), rest : List((a, Int))) : List((a, Int)) do
-            match rv do
-            Nil         -> rest
-            Cons(h, tl) -> rev_onto(tl, Cons(h, rest))
-            end
-          end
-          rev_onto(acc, Cons((k, c + 1), t))
+      Nil ->
+        if cur_sz == 0 do rev(acc)
+        else rev(Cons(rev(cur), acc)) end
+      Cons(h, t) ->
+        if cur_sz + 1 == n do
+          go(t, Nil, 0, Cons(rev(Cons(h, cur)), acc))
         else
-          go(t, Cons((k, c), acc))
+          go(t, Cons(h, cur), cur_sz + 1, acc)
         end
       end
     end
-    go(pairs, Nil)
+    go(xs, Nil, 0, Nil)
   end
-  fn go(lst : List(a), acc : List((a, Int))) : List((a, Int)) do
-    match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, update(acc, h))
+
+  doc """
+  Zip two lists into a list of pairs, stopping at the shorter list. O(min(|a|,|b|)).
+
+      zip([1,2,3], [4,5,6])  -- [(1,4), (2,5), (3,6)]
+  """
+  fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
+    zip_with(xs, ys, fn x -> fn y -> (x, y))
+  end
+
+  doc """
+  Pair each element with its zero-based index. O(n).
+
+      with_index([10,20,30])  -- [(10,0), (20,1), (30,2)]
+  """
+  fn with_index(xs : List(a)) : List((a, Int)) do
+    fn go(lst : List(a), i : Int, acc : List((a, Int))) : List((a, Int)) do
+      match lst do
+      Nil        -> rev(acc)
+      Cons(h, t) -> go(t, i + 1, Cons((h, i), acc))
+      end
+    end
+    go(xs, 0, Nil)
+  end
+
+  -- ---- Deduplication ----
+
+  doc """
+  Remove consecutive duplicate elements (structural equality). O(n).
+
+      dedup([1,1,2,3,3,2])  -- [1,2,3,2]
+
+  Only adjacent duplicates are removed. For all-duplicates removal, use uniq.
+  """
+  fn dedup(xs : List(a)) : List(a) do
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) ->
+      fn go(lst : List(a), prev : a, acc : List(a)) : List(a) do
+        match lst do
+        Nil        -> rev(acc)
+        Cons(x, r) ->
+          if x == prev do go(r, prev, acc)
+          else go(r, x, Cons(x, acc)) end
+        end
+      end
+      go(t, h, Cons(h, Nil))
     end
   end
-  go(xs, Nil)
-end
+
+  doc """
+  Remove all duplicate elements, keeping the first occurrence. O(n²).
+
+      uniq([1,2,1,3,2])  -- [1,2,3]
+  """
+  fn uniq(xs : List(a)) : List(a) do
+    fn member(lst : List(a), x : a) : Bool do
+      match lst do
+      Nil        -> false
+      Cons(h, t) -> if h == x do true else member(t, x) end
+      end
+    end
+    fn go(lst : List(a), seen : List(a), acc : List(a)) : List(a) do
+      match lst do
+      Nil        -> rev(acc)
+      Cons(h, t) ->
+        if member(seen, h) do go(t, seen, acc)
+        else go(t, Cons(h, seen), Cons(h, acc)) end
+      end
+    end
+    go(xs, Nil, Nil)
+  end
+
+  doc """
+  Remove duplicates by key function, keeping the first occurrence. O(n²).
+
+      uniq_by(["alice","bob","anna"], fn s -> string_slice(s, 0, 1))
+        -- ["alice","bob"]   (keeps first with each initial letter)
+  """
+  fn uniq_by(xs : List(a), f : a -> k) : List(a) do
+    fn member_key(lst, key) do
+      match lst do
+      Nil        -> false
+      Cons(h, t) -> if h == key do true else member_key(t, key) end
+      end
+    end
+    fn go(lst, seen, acc) do
+      match lst do
+      Nil        -> rev(acc)
+      Cons(h, t) ->
+        let ky = f(h)
+        if member_key(seen, ky) do go(t, seen, acc)
+        else go(t, Cons(ky, seen), Cons(h, acc)) end
+      end
+    end
+    go(xs, Nil, Nil)
+  end
+
+  doc """
+  Remove duplicates from an ordered list in O(n log n), keeping the first
+  occurrence of each value.  Requires a less-than comparator matching
+  `Set`'s convention: `cmp : a -> a -> Bool` where `cmp(a)(b) == true`
+  means a < b.  Output preserves insertion order.
+
+  Prefer this over `uniq` when your element type has a natural ordering
+  (Int, String, etc.) and the list is large enough that O(n²) is painful.
+
+      uniq_ord([3, 1, 2, 1, 3], fn a -> fn b -> a < b)
+      -- [3, 1, 2]
+  """
+  fn uniq_ord(xs, cmp) do
+    -- Build an order-preserving filter: walk xs once, tracking seen
+    -- elements in a Set (O(log n) contains/insert).  Total: O(n log n).
+    fn go(lst, seen, acc) do
+      match lst do
+      Nil        -> rev(acc)
+      Cons(h, t) ->
+        if Set.contains(seen, h, cmp) do go(t, seen, acc)
+        else go(t, Set.insert(seen, h, cmp), Cons(h, acc)) end
+      end
+    end
+    go(xs, Set.empty(), Nil)
+  end
+
+  -- ---- Insertion and interleaving ----
+
+  doc """
+  Insert sep between every adjacent pair of elements. O(n).
+
+      intersperse([1,2,3], 0)  -- [1,0,2,0,3]
+      intersperse([], 0)        -- []
+      intersperse([1], 0)       -- [1]
+  """
+  fn intersperse(xs : List(a), sep : a) : List(a) do
+    match xs do
+    Nil          -> Nil
+    Cons(h, Nil) -> Cons(h, Nil)
+    Cons(h, t)   ->
+      fn go(lst : List(a), acc : List(a)) : List(a) do
+        match lst do
+        Nil        -> rev(acc)
+        Cons(x, r) -> go(r, Cons(x, Cons(sep, acc)))
+        end
+      end
+      go(t, Cons(h, Nil))
+    end
+  end
+
+  -- ---- Scanning and sliding ----
+
+  doc """
+  Like fold but returns a list of all intermediate accumulator values,
+  including the initial value. O(n).
+
+      scan([1,2,3,4], 0, fn acc -> fn x -> acc + x)
+        -- [0, 1, 3, 6, 10]
+
+  The returned list always has length len(xs) + 1.
+  """
+  fn scan(xs, zero, f) do
+    fn go(lst, acc, result) do
+      match lst do
+      Nil        -> rev(result)
+      Cons(h, t) -> do
+        let g = f(acc)
+        let next = g(h)
+        go(t, next, Cons(next, result))
+      end
+      end
+    end
+    go(xs, zero, Cons(zero, Nil))
+  end
+
+  doc """
+  Return all overlapping windows of length n. O(n * m) where m is window size.
+
+      slide([1,2,3,4], 3)  -- [[1,2,3], [2,3,4]]
+      slide([1,2], 3)      -- []   (list shorter than window)
+  """
+  fn slide(xs : List(a), n : Int) : List(List(a)) do
+    fn take_n(lst : List(a), k : Int, acc : List(a)) : Option(List(a)) do
+      if k == 0 do Some(rev(acc))
+      else
+        match lst do
+        Nil        -> None
+        Cons(h, t) -> take_n(t, k - 1, Cons(h, acc))
+        end
+      end
+    end
+    fn go(lst : List(a), acc : List(List(a))) : List(List(a)) do
+      match take_n(lst, n, Nil) do
+      None         -> rev(acc)
+      Some(window) ->
+        match lst do
+        Nil        -> rev(acc)
+        Cons(_, t) -> go(t, Cons(window, acc))
+        end
+      end
+    end
+    go(xs, Nil)
+  end
+
+  -- ---- Prefix/suffix filtering ----
+
+  doc """
+  Return the longest prefix for which pred returns true. O(n).
+
+      take_while([1,2,3,4], fn x -> x < 3)  -- [1,2]
+  """
+  fn take_while(xs : List(a), pred : a -> Bool) : List(a) do
+    fn go(lst : List(a), acc : List(a)) : List(a) do
+      match lst do
+      Nil        -> rev(acc)
+      Cons(h, t) ->
+        if pred(h) do go(t, Cons(h, acc))
+        else rev(acc) end
+      end
+    end
+    go(xs, Nil)
+  end
+
+  doc """
+  Drop elements from the front while pred returns true, return the rest. O(n).
+
+      drop_while([1,2,3,4], fn x -> x < 3)  -- [3,4]
+  """
+  fn drop_while(xs : List(a), pred : a -> Bool) : List(a) do
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) ->
+      if pred(h) do drop_while(t, pred)
+      else xs end
+    end
+  end
+
+  -- ---- Min/max by key ----
+
+  doc """
+  Return Some(element) with the minimum f(element) value, or None for empty.
+  Uses < for key comparison. O(n).
+
+      min_by(["banana","fig","apple"], fn s -> string_length(s))
+        -- Some("fig")
+  """
+  fn min_by(xs : List(a), f : a -> k) : Option(a) do
+    match xs do
+    Nil        -> None
+    Cons(h, t) ->
+      fn go(lst : List(a), best : a, best_k : k) : a do
+        match lst do
+        Nil        -> best
+        Cons(x, r) ->
+          let k = f(x)
+          if k < best_k do go(r, x, k)
+          else go(r, best, best_k) end
+        end
+      end
+      Some(go(t, h, f(h)))
+    end
+  end
+
+  doc """
+  Return Some(element) with the maximum f(element) value, or None for empty.
+  Uses > for key comparison. O(n).
+
+      max_by(["apple","fig","banana"], fn s -> string_length(s))
+        -- Some("banana")
+  """
+  fn max_by(xs : List(a), f : a -> k) : Option(a) do
+    match xs do
+    Nil        -> None
+    Cons(h, t) ->
+      fn go(lst : List(a), best : a, best_k : k) : a do
+        match lst do
+        Nil        -> best
+        Cons(x, r) ->
+          let k = f(x)
+          if k > best_k do go(r, x, k)
+          else go(r, best, best_k) end
+        end
+      end
+      Some(go(t, h, f(h)))
+    end
+  end
+
+  -- ---- Counting and aggregation ----
+
+  doc """
+  Sum a list of integers. Returns 0 for empty list. O(n).
+
+      sum([1,2,3,4,5])  -- 15
+  """
+  fn sum(xs : List(Int)) : Int do
+    fn go(lst : List(Int), acc : Int) : Int do
+      match lst do
+      Nil        -> acc
+      Cons(h, t) -> go(t, acc + h)
+      end
+    end
+    go(xs, 0)
+  end
+
+  doc """
+  Product of a list of integers. Returns 1 for empty list. O(n).
+
+      product([1,2,3,4,5])  -- 120
+  """
+  fn product(xs : List(Int)) : Int do
+    fn go(lst : List(Int), acc : Int) : Int do
+      match lst do
+      Nil        -> acc
+      Cons(h, t) -> go(t, acc * h)
+      end
+    end
+    go(xs, 1)
+  end
+
+  doc """
+  Count occurrences of each element. Returns List((element, count)) association
+  list in order of first appearance. O(n²) in unique elements.
+
+      frequencies(["a","b","a","c","b","a"])
+        -- [("a",3),("b",2),("c",1)]
+  """
+  fn frequencies(xs : List(a)) : List((a, Int)) do
+    fn update(pairs : List((a, Int)), key : a) : List((a, Int)) do
+      fn go(lst : List((a, Int)), acc : List((a, Int))) : List((a, Int)) do
+        match lst do
+        Nil -> rev(Cons((key, 1), acc))
+        Cons((k, c), t) ->
+          if k == key do
+            fn rev_onto(rv : List((a, Int)), rest : List((a, Int))) : List((a, Int)) do
+              match rv do
+              Nil         -> rest
+              Cons(h, tl) -> rev_onto(tl, Cons(h, rest))
+              end
+            end
+            rev_onto(acc, Cons((k, c + 1), t))
+          else
+            go(t, Cons((k, c), acc))
+          end
+        end
+      end
+      go(pairs, Nil)
+    end
+    fn go(lst : List(a), acc : List((a, Int))) : List((a, Int)) do
+      match lst do
+      Nil        -> acc
+      Cons(h, t) -> go(t, update(acc, h))
+      end
+    end
+    go(xs, Nil)
+  end
 
 end

@@ -129,17 +129,17 @@ end
 
 describe "fold_left" do
   test "fold_left sums all elements" do
-    let s = Array.fold_left(0, make_vec(5), fn (acc, x) -> acc + x)
+    let s = Array.fold_left(make_vec(5), 0, fn (acc, x) -> acc + x)
     assert (s == 15)
   end
 
   test "fold_left over empty vector gives initial accumulator" do
-    let s = Array.fold_left(0, Array.empty(), fn (acc, x) -> acc + x)
+    let s = Array.fold_left(Array.empty(), 0, fn (acc, x) -> acc + x)
     assert (s == 0)
   end
 
   test "fold_left counts elements" do
-    let c = Array.fold_left(0, make_vec(10), fn (acc, _x) -> acc + 1)
+    let c = Array.fold_left(make_vec(10), 0, fn (acc, _x) -> acc + 1)
     assert (c == 10)
   end
 end

@@ -27,107 +27,107 @@
 
 mod Task do
 
-doc """
-Spawn f as a lightweight async task.
-f must be a zero-argument function: fn () -> result.
-Returns a Task handle that can be passed to Task.await.
+  doc """
+  Spawn f as a lightweight async task.
+  f must be a zero-argument function: fn () -> result.
+  Returns a Task handle that can be passed to Task.await.
 
-Example:
-  let t = Task.async(fn () -> 1 + 1)
-  Task.await(t)  -- Ok(2)
-"""
-fn async(f) do
-  task_spawn(fn _ -> f())
-end
+  Example:
+    let t = Task.async(fn () -> 1 + 1)
+    Task.await(t)  -- Ok(2)
+  """
+  fn async(f) do
+    task_spawn(fn _ -> f())
+  end
 
-doc """
-Await the result of a task with a default 5-second timeout.
-Returns Ok(result) or Err(reason).
+  doc """
+  Await the result of a task with a default 5-second timeout.
+  Returns Ok(result) or Err(reason).
 
-Example:
-  let t = Task.async(fn () -> 42)
-  Task.await(t)  -- Ok(42)
-"""
-fn await(task) do
-  task_await(task)
-end
+  Example:
+    let t = Task.async(fn () -> 42)
+    Task.await(t)  -- Ok(42)
+  """
+  fn await(task) do
+    task_await(task)
+  end
 
-doc """
-Await the result of a task with an explicit timeout in milliseconds.
-Returns Ok(result) or Err(reason).
-timeout_ms is accepted for API compatibility; enforcement requires
-the async runtime (Phase 2+).
+  doc """
+  Await the result of a task with an explicit timeout in milliseconds.
+  Returns Ok(result) or Err(reason).
+  timeout_ms is accepted for API compatibility; enforcement requires
+  the async runtime (Phase 2+).
 
-Example:
-  let t = Task.async(fn () -> slow_query())
-  Task.await_ms(t, 10000)  -- wait up to 10 seconds
-"""
-fn await_ms(task, _timeout_ms) do
-  task_await(task)
-end
+  Example:
+    let t = Task.async(fn () -> slow_query())
+    Task.await_ms(t, 10000)  -- wait up to 10 seconds
+  """
+  fn await_ms(task, _timeout_ms) do
+    task_await(task)
+  end
 
-doc """
-Unwrap the result of a task, raising on error.
-Returns the result value directly (not wrapped in Ok).
-Panics if the task failed.
+  doc """
+  Unwrap the result of a task, raising on error.
+  Returns the result value directly (not wrapped in Ok).
+  Panics if the task failed.
 
-Example:
-  let t = Task.async(fn () -> 42)
-  Task.await!(t)  -- 42
-"""
-fn await_unwrap(task) do
-  task_await_unwrap(task)
-end
+  Example:
+    let t = Task.async(fn () -> 42)
+    Task.await!(t)  -- 42
+  """
+  fn await_unwrap(task) do
+    task_await_unwrap(task)
+  end
 
-doc """
-Await all tasks, returning results in the same order as the input list.
-Each element is Ok(v) or Err(reason).
-Uses a default 5-second timeout per task.
+  doc """
+  Await all tasks, returning results in the same order as the input list.
+  Each element is Ok(v) or Err(reason).
+  Uses a default 5-second timeout per task.
 
-Example:
-  let t1 = Task.async(fn () -> 1)
-  let t2 = Task.async(fn () -> 2)
-  Task.await_many([t1, t2])  -- [Ok(1), Ok(2)]
-"""
-fn await_many(tasks) do
-  List.map(tasks, fn t -> task_await(t))
-end
+  Example:
+    let t1 = Task.async(fn () -> 1)
+    let t2 = Task.async(fn () -> 2)
+    Task.await_many([t1, t2])  -- [Ok(1), Ok(2)]
+  """
+  fn await_many(tasks) do
+    List.map(tasks, fn t -> task_await(t))
+  end
 
-doc """
-Await all tasks with an explicit timeout in milliseconds.
-Returns results in the same order as the input list.
-Each element is Ok(v) or Err(reason).
-"""
-fn await_many_ms(tasks, _timeout_ms) do
-  List.map(tasks, fn t -> task_await(t))
-end
+  doc """
+  Await all tasks with an explicit timeout in milliseconds.
+  Returns results in the same order as the input list.
+  Each element is Ok(v) or Err(reason).
+  """
+  fn await_many_ms(tasks, _timeout_ms) do
+    List.map(tasks, fn t -> task_await(t))
+  end
 
-doc """
-Run f on each element of list concurrently, returning results in original order.
-Equivalent to a parallel Enum.map.  Each result is Ok(v) or Err(reason).
+  doc """
+  Run f on each element of list concurrently, returning results in original order.
+  Equivalent to a parallel Enum.map.  Each result is Ok(v) or Err(reason).
 
-Example:
-  Task.async_stream([1, 2, 3], fn n -> n * n)
-  -- [Ok(1), Ok(4), Ok(9)]
-"""
-fn async_stream(list, f) do
-  let tasks = List.map(list, fn x -> task_spawn(fn _ -> f(x)))
-  List.map(tasks, fn t -> task_await(t))
-end
+  Example:
+    Task.async_stream([1, 2, 3], fn n -> n * n)
+    -- [Ok(1), Ok(4), Ok(9)]
+  """
+  fn async_stream(list, f) do
+    let tasks = List.map(list, fn x -> task_spawn(fn _ -> f(x)))
+    List.map(tasks, fn t -> task_await(t))
+  end
 
-doc """
-Run f on each element concurrently with a cap on parallel tasks.
-max_concurrency limits how many tasks run at once (advisory in Phase 1).
-Returns results in original order; each element is Ok(v) or Err(reason).
+  doc """
+  Run f on each element concurrently with a cap on parallel tasks.
+  max_concurrency limits how many tasks run at once (advisory in Phase 1).
+  Returns results in original order; each element is Ok(v) or Err(reason).
 
-Example:
-  Task.async_stream_n(urls, fn url -> http_get(url), 10)
-"""
-fn async_stream_n(list, f, _max_concurrency) do
-  -- Phase 1: single-threaded interpreter runs all tasks eagerly, so
-  -- max_concurrency is advisory here.  Phase 2+ will enforce batching.
-  let tasks = List.map(list, fn x -> task_spawn(fn _ -> f(x)))
-  List.map(tasks, fn t -> task_await(t))
-end
+  Example:
+    Task.async_stream_n(urls, fn url -> http_get(url), 10)
+  """
+  fn async_stream_n(list, f, _max_concurrency) do
+    -- Phase 1: single-threaded interpreter runs all tasks eagerly, so
+    -- max_concurrency is advisory here.  Phase 2+ will enforce batching.
+    let tasks = List.map(list, fn x -> task_spawn(fn _ -> f(x)))
+    List.map(tasks, fn t -> task_await(t))
+  end
 
 end

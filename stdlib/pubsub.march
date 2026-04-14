@@ -26,228 +26,228 @@
 
 mod PubSub do
 
--- ── Internal helpers ───────────────────────────────────────────────────────
+  -- ── Internal helpers ───────────────────────────────────────────────────────
 
-pfn str_cmp(a) do fn b -> a < b end
+  pfn str_cmp(a) do fn b -> a < b end
 
--- Remove the first occurrence of `elem` from `lst` using structural equality.
-pfn list_remove_first(lst, elem) do
-  match lst do
-  Nil -> Nil
-  Cons(h, t) ->
-    if h == elem do t
-    else Cons(h, list_remove_first(t, elem)) end
-  end
-end
-
-pfn list_contains(lst, elem) do
-  match lst do
-  Nil -> false
-  Cons(h, t) ->
-    if h == elem do true
-    else list_contains(t, elem) end
-  end
-end
-
-pfn list_length(lst) do
-  fn go(xs, acc) do
-    match xs do
-    Nil -> acc
-    Cons(_, t) -> go(t, acc + 1)
+  -- Remove the first occurrence of `elem` from `lst` using structural equality.
+  pfn list_remove_first(lst, elem) do
+    match lst do
+    Nil -> Nil
+    Cons(h, t) ->
+      if h == elem do t
+      else Cons(h, list_remove_first(t, elem)) end
     end
   end
-  go(lst, 0)
-end
 
--- ── PubSubState ────────────────────────────────────────────────────────────
-
--- Immutable PubSub state: Map(topic, List(subscriber_pid)).
-type PubSubState = PubSubState(Map(String, List(Int)))
-
-doc "Create an empty PubSub state."
-fn new_state() do
-  PubSubState(Map.empty())
-end
-
--- ── Pure subscription operations ──────────────────────────────────────────
-
-doc """
-Subscribe `pid` to `topic`.  Returns the updated state.
-If the pid is already subscribed, adds a duplicate (no-op semantically since
-broadcasts are once-per-pid after deduplication at send time).
-"""
-fn subscribe_state(ps, topic, pid) do
-  match ps do
-  PubSubState(m) ->
-    do
-      let current = match Map.get(m, topic, str_cmp) do
-        Some(lst) -> lst
-        None      -> Nil
-      end
-      let updated = Cons(pid, current)
-      PubSubState(Map.insert(m, topic, updated, str_cmp))
+  pfn list_contains(lst, elem) do
+    match lst do
+    Nil -> false
+    Cons(h, t) ->
+      if h == elem do true
+      else list_contains(t, elem) end
     end
   end
-end
 
-doc "Unsubscribe `pid` from `topic`.  Removes the first matching entry."
-fn unsubscribe_state(ps, topic, pid) do
-  match ps do
-  PubSubState(m) ->
-    do
-      let current = match Map.get(m, topic, str_cmp) do
-        Some(lst) -> lst
-        None      -> Nil
+  pfn list_length(lst) do
+    fn go(xs, acc) do
+      match xs do
+      Nil -> acc
+      Cons(_, t) -> go(t, acc + 1)
       end
-      let trimmed = list_remove_first(current, pid)
-      match trimmed do
-      Nil ->
-        PubSubState(Map.remove(m, topic, str_cmp))
-      _ ->
-        PubSubState(Map.insert(m, topic, trimmed, str_cmp))
+    end
+    go(lst, 0)
+  end
+
+  -- ── PubSubState ────────────────────────────────────────────────────────────
+
+  -- Immutable PubSub state: Map(topic, List(subscriber_pid)).
+  type PubSubState = PubSubState(Map(String, List(Int)))
+
+  doc "Create an empty PubSub state."
+  fn new_state() do
+    PubSubState(Map.empty())
+  end
+
+  -- ── Pure subscription operations ──────────────────────────────────────────
+
+  doc """
+  Subscribe `pid` to `topic`.  Returns the updated state.
+  If the pid is already subscribed, adds a duplicate (no-op semantically since
+  broadcasts are once-per-pid after deduplication at send time).
+  """
+  fn subscribe_state(ps, topic, pid) do
+    match ps do
+    PubSubState(m) ->
+      do
+        let current = match Map.get(m, topic, str_cmp) do
+          Some(lst) -> lst
+          None      -> Nil
+        end
+        let updated = Cons(pid, current)
+        PubSubState(Map.insert(m, topic, updated, str_cmp))
       end
     end
   end
-end
 
-doc "Return the list of subscriber pids for `topic`.  Empty list if none."
-fn get_subscribers(ps, topic) do
-  match ps do
-  PubSubState(m) ->
-    match Map.get(m, topic, str_cmp) do
-    Some(lst) -> lst
-    None      -> Nil
+  doc "Unsubscribe `pid` from `topic`.  Removes the first matching entry."
+  fn unsubscribe_state(ps, topic, pid) do
+    match ps do
+    PubSubState(m) ->
+      do
+        let current = match Map.get(m, topic, str_cmp) do
+          Some(lst) -> lst
+          None      -> Nil
+        end
+        let trimmed = list_remove_first(current, pid)
+        match trimmed do
+        Nil ->
+          PubSubState(Map.remove(m, topic, str_cmp))
+        _ ->
+          PubSubState(Map.insert(m, topic, trimmed, str_cmp))
+        end
+      end
     end
   end
-end
 
-doc "True when at least one pid is subscribed to `topic`."
-fn has_subscribers(ps, topic) do
-  match get_subscribers(ps, topic) do
-  Nil -> false
-  _   -> true
+  doc "Return the list of subscriber pids for `topic`.  Empty list if none."
+  fn get_subscribers(ps, topic) do
+    match ps do
+    PubSubState(m) ->
+      match Map.get(m, topic, str_cmp) do
+      Some(lst) -> lst
+      None      -> Nil
+      end
+    end
   end
-end
 
-doc "Number of subscribers currently registered for `topic`."
-fn subscriber_count(ps, topic) do
-  list_length(get_subscribers(ps, topic))
-end
+  doc "True when at least one pid is subscribed to `topic`."
+  fn has_subscribers(ps, topic) do
+    match get_subscribers(ps, topic) do
+    Nil -> false
+    _   -> true
+    end
+  end
 
--- ── Topic routing ──────────────────────────────────────────────────────────
+  doc "Number of subscribers currently registered for `topic`."
+  fn subscriber_count(ps, topic) do
+    list_length(get_subscribers(ps, topic))
+  end
 
-doc """
-Hash-based shard index for `topic` given `num_shards` shards.
-Uses the built-in hash() function (same primitive the HAMT uses).
-Returns a value in [0, num_shards).
-"""
-fn topic_shard(topic, num_shards) do
-  let h = int_and(hash(topic), 2147483647)
-  h % num_shards
-end
+  -- ── Topic routing ──────────────────────────────────────────────────────────
 
-doc """
-True when `pattern` matches `topic`.  Segment-aware: a trailing `*`
-in `pattern` wildcards the remainder, but the character at the
-wildcard position in `topic` must be a segment separator (`:` or `.`)
-or end-of-string.  This prevents `"user*"` from matching `"users"`
-or `"user_other"` — Phoenix's pubsub convention.
+  doc """
+  Hash-based shard index for `topic` given `num_shards` shards.
+  Uses the built-in hash() function (same primitive the HAMT uses).
+  Returns a value in [0, num_shards).
+  """
+  fn topic_shard(topic, num_shards) do
+    let h = int_and(hash(topic), 2147483647)
+    h % num_shards
+  end
 
-Examples:
-  topic_matches("room:*",   "room:lobby")  -> true
-  topic_matches("room:*",   "room:1:x")    -> true  (multi-segment ok)
-  topic_matches("room:*",   "game:42")     -> false
-  topic_matches("room:lobby","room:lobby") -> true
-  topic_matches("user*",    "user:1")      -> true  (separator follows)
-  topic_matches("user*",    "user")        -> true  (end-of-string ok)
-  topic_matches("user*",    "users")       -> false (no separator)
-"""
-fn topic_matches(pattern, topic) do
-  let plen = string_byte_length(pattern)
-  let tlen = string_byte_length(topic)
-  if plen == 0 do
-    tlen == 0
-  else
-    let last_char = string_slice(pattern, plen - 1, 1)
-    if last_char == "*" do
-      let prefix = string_slice(pattern, 0, plen - 1)
-      let prefix_len = plen - 1
-      if prefix_len == 0 do
-        -- Bare wildcard `*` matches any topic, including the empty one.
-        true
-      else if not(string_starts_with(topic, prefix)) do false
-      else if tlen == prefix_len do true  -- topic == prefix, no chars beyond
-      else
-        -- Check that the first byte beyond the prefix is a segment
-        -- separator, unless the prefix itself ended with one (then
-        -- any continuation is in-segment or a new subsegment).
-        let last_prefix_char = string_slice(prefix, prefix_len - 1, 1)
-        if last_prefix_char == ":" || last_prefix_char == "." do true
-        else do
-          let boundary = string_slice(topic, prefix_len, 1)
-          boundary == ":" || boundary == "."
-        end end
-      end end end
+  doc """
+  True when `pattern` matches `topic`.  Segment-aware: a trailing `*`
+  in `pattern` wildcards the remainder, but the character at the
+  wildcard position in `topic` must be a segment separator (`:` or `.`)
+  or end-of-string.  This prevents `"user*"` from matching `"users"`
+  or `"user_other"` — Phoenix's pubsub convention.
+
+  Examples:
+    topic_matches("room:*",   "room:lobby")  -> true
+    topic_matches("room:*",   "room:1:x")    -> true  (multi-segment ok)
+    topic_matches("room:*",   "game:42")     -> false
+    topic_matches("room:lobby","room:lobby") -> true
+    topic_matches("user*",    "user:1")      -> true  (separator follows)
+    topic_matches("user*",    "user")        -> true  (end-of-string ok)
+    topic_matches("user*",    "users")       -> false (no separator)
+  """
+  fn topic_matches(pattern, topic) do
+    let plen = string_byte_length(pattern)
+    let tlen = string_byte_length(topic)
+    if plen == 0 do
+      tlen == 0
     else
-      pattern == topic
-    end
-  end
-end
-
--- ── Pure broadcast (for testing / single-process use) ─────────────────────
-
-doc """
-Send a broadcast message to all subscribers in `pids` except `excluded_pid`.
-When `excluded_pid` is None, all subscribers receive the message.
-Uses actor_cast to deliver BroadcastMsg to each pid.
-Requires actor runtime.
-"""
-fn broadcast_to(pids, excluded_pid, event, payload) do
-  match pids do
-  Nil -> ()
-  Cons(pid, rest) ->
-    do
-      let should_skip = match excluded_pid do
-        Some(excl) -> pid == excl
-        None       -> false
+      let last_char = string_slice(pattern, plen - 1, 1)
+      if last_char == "*" do
+        let prefix = string_slice(pattern, 0, plen - 1)
+        let prefix_len = plen - 1
+        if prefix_len == 0 do
+          -- Bare wildcard `*` matches any topic, including the empty one.
+          true
+        else if not(string_starts_with(topic, prefix)) do false
+        else if tlen == prefix_len do true  -- topic == prefix, no chars beyond
+        else
+          -- Check that the first byte beyond the prefix is a segment
+          -- separator, unless the prefix itself ended with one (then
+          -- any continuation is in-segment or a new subsegment).
+          let last_prefix_char = string_slice(prefix, prefix_len - 1, 1)
+          if last_prefix_char == ":" || last_prefix_char == "." do true
+          else do
+            let boundary = string_slice(topic, prefix_len, 1)
+            boundary == ":" || boundary == "."
+          end end
+        end end end
+      else
+        pattern == topic
       end
-      if should_skip do ()
-      else actor_cast(pid, BroadcastMsg(event, payload)) end
-      broadcast_to(rest, excluded_pid, event, payload)
     end
   end
-end
 
--- ── Runtime API stubs ──────────────────────────────────────────────────────
--- These functions require a running PubSub shard actor.
--- The channel server starts the shards and passes them to these helpers.
--- Direct callers in application code go through the Channel helpers.
+  -- ── Pure broadcast (for testing / single-process use) ─────────────────────
 
-doc """
-Subscribe `subscriber_pid` to `topic` in the shard `shard_pid`.
-Sends a PubSubSubscribe message to the shard actor.
-Requires actor runtime.
-"""
-fn subscribe_in_shard(shard_pid, topic, subscriber_pid) do
-  actor_cast(shard_pid, PubSubSubscribe(topic, subscriber_pid))
-end
+  doc """
+  Send a broadcast message to all subscribers in `pids` except `excluded_pid`.
+  When `excluded_pid` is None, all subscribers receive the message.
+  Uses actor_cast to deliver BroadcastMsg to each pid.
+  Requires actor runtime.
+  """
+  fn broadcast_to(pids, excluded_pid, event, payload) do
+    match pids do
+    Nil -> ()
+    Cons(pid, rest) ->
+      do
+        let should_skip = match excluded_pid do
+          Some(excl) -> pid == excl
+          None       -> false
+        end
+        if should_skip do ()
+        else actor_cast(pid, BroadcastMsg(event, payload)) end
+        broadcast_to(rest, excluded_pid, event, payload)
+      end
+    end
+  end
 
-doc """
-Unsubscribe `subscriber_pid` from `topic` in the shard `shard_pid`.
-Sends a PubSubUnsubscribe message to the shard actor.
-Requires actor runtime.
-"""
-fn unsubscribe_in_shard(shard_pid, topic, subscriber_pid) do
-  actor_cast(shard_pid, PubSubUnsubscribe(topic, subscriber_pid))
-end
+  -- ── Runtime API stubs ──────────────────────────────────────────────────────
+  -- These functions require a running PubSub shard actor.
+  -- The channel server starts the shards and passes them to these helpers.
+  -- Direct callers in application code go through the Channel helpers.
 
-doc """
-Broadcast `event` + `payload` to all subscribers of `topic` in shard `shard_pid`.
-Pass `Some(sender_pid)` to exclude the sender (broadcast_from behaviour).
-Requires actor runtime.
-"""
-fn broadcast_in_shard(shard_pid, topic, excluded_pid, event, payload) do
-  actor_cast(shard_pid, PubSubBroadcast(topic, excluded_pid, event, payload))
-end
+  doc """
+  Subscribe `subscriber_pid` to `topic` in the shard `shard_pid`.
+  Sends a PubSubSubscribe message to the shard actor.
+  Requires actor runtime.
+  """
+  fn subscribe_in_shard(shard_pid, topic, subscriber_pid) do
+    actor_cast(shard_pid, PubSubSubscribe(topic, subscriber_pid))
+  end
+
+  doc """
+  Unsubscribe `subscriber_pid` from `topic` in the shard `shard_pid`.
+  Sends a PubSubUnsubscribe message to the shard actor.
+  Requires actor runtime.
+  """
+  fn unsubscribe_in_shard(shard_pid, topic, subscriber_pid) do
+    actor_cast(shard_pid, PubSubUnsubscribe(topic, subscriber_pid))
+  end
+
+  doc """
+  Broadcast `event` + `payload` to all subscribers of `topic` in shard `shard_pid`.
+  Pass `Some(sender_pid)` to exclude the sender (broadcast_from behaviour).
+  Requires actor runtime.
+  """
+  fn broadcast_in_shard(shard_pid, topic, excluded_pid, event, payload) do
+    actor_cast(shard_pid, PubSubBroadcast(topic, excluded_pid, event, payload))
+  end
 
 end

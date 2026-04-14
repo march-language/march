@@ -13,316 +13,316 @@
 
 mod DateTime do
 
-type Date = Date(Int, Int, Int)         -- year, month (1-12), day (1-31)
-type Time = Time(Int, Int, Int)         -- hour (0-23), min (0-59), sec (0-59)
-type DateTime = DateTime(Date, Time)
+  type Date = Date(Int, Int, Int)         -- year, month (1-12), day (1-31)
+  type Time = Time(Int, Int, Int)         -- hour (0-23), min (0-59), sec (0-59)
+  type DateTime = DateTime(Date, Time)
 
--- ── Private helpers ───────────────────────────────────────────────────────
+  -- ── Private helpers ───────────────────────────────────────────────────────
 
--- Floor division (rounds toward negative infinity).
-pfn floor_div(a, b) do
-  let q = int_div(a, b)
-  let r = a - q * b
-  if r < 0 do q - 1 else q end
-end
-
--- Floor modulo (always non-negative when b > 0).
-pfn floor_mod(a, b) do
-  a - floor_div(a, b) * b
-end
-
--- Is the given year a leap year in the proleptic Gregorian calendar?
-pfn is_leap(y) do
-  if int_mod(y, 400) == 0 do true
-  else if int_mod(y, 100) == 0 do false
-  else if int_mod(y, 4) == 0 do true
-  else false end end end
-end
-
--- Number of days in month m (1-indexed) of year y.
-pfn days_in_month(y, m) do
-  if m == 1 || m == 3 || m == 5 || m == 7 || m == 8 || m == 10 || m == 12 do 31
-  else if m == 4 || m == 6 || m == 9 || m == 11 do 30
-  else if is_leap(y) do 29
-  else 28 end end end
-end
-
--- Count of leap years in the range 1..n (for n >= 1).
-pfn leap_count(n) do
-  int_div(n, 4) - int_div(n, 100) + int_div(n, 400)
-end
-
--- Days from 1970-01-01 to Jan 1 of year y (may be negative for y < 1970).
-pfn year_to_days(y) do
-  let y1 = y - 1
-  let leaps = if y1 > 0 do leap_count(y1) else 0 end
-  y1 * 365 + leaps - (1969 * 365 + 477)
-end
-
--- Days from 1970-01-01 to the date (y, m, d).
-pfn date_to_days(y, m, d) do
-  fn month_sum(mi, acc) do
-    if mi >= m do acc
-    else month_sum(mi + 1, acc + days_in_month(y, mi)) end
+  -- Floor division (rounds toward negative infinity).
+  pfn floor_div(a, b) do
+    let q = int_div(a, b)
+    let r = a - q * b
+    if r < 0 do q - 1 else q end
   end
-  year_to_days(y) + month_sum(1, 0) + (d - 1)
-end
 
--- Convert a count of days since 1970-01-01 to a Date.
--- All helper functions are defined first, then called once.
-pfn days_to_date(days) do
-  fn find_year_fwd(y, rem) do
-    let diy = if is_leap(y) do 366 else 365 end
-    if rem < diy do (y, rem)
-    else find_year_fwd(y + 1, rem - diy) end
+  -- Floor modulo (always non-negative when b > 0).
+  pfn floor_mod(a, b) do
+    a - floor_div(a, b) * b
   end
-  fn find_year_bwd(y, neg_rem) do
-    let prev = y - 1
-    let diy = if is_leap(prev) do 366 else 365 end
-    if neg_rem + diy >= 0 do (prev, neg_rem + diy)
-    else find_year_bwd(prev, neg_rem + diy) end
+
+  -- Is the given year a leap year in the proleptic Gregorian calendar?
+  pfn is_leap(y) do
+    if int_mod(y, 400) == 0 do true
+    else if int_mod(y, 100) == 0 do false
+    else if int_mod(y, 4) == 0 do true
+    else false end end end
   end
-  fn find_month(yr, m, rem) do
-    let dm = days_in_month(yr, m)
-    if rem < dm do (m, rem + 1)
-    else find_month(yr, m + 1, rem - dm) end
+
+  -- Number of days in month m (1-indexed) of year y.
+  pfn days_in_month(y, m) do
+    if m == 1 || m == 3 || m == 5 || m == 7 || m == 8 || m == 10 || m == 12 do 31
+    else if m == 4 || m == 6 || m == 9 || m == 11 do 30
+    else if is_leap(y) do 29
+    else 28 end end end
   end
-  let (yr, doy) =
-    if days >= 0 do find_year_fwd(1970, days)
-    else find_year_bwd(1970, days) end
-  let (mo, da) = find_month(yr, 1, doy)
-  Date(yr, mo, da)
-end
 
--- Pad an integer to at least `width` digits with leading zeros.
-pfn pad_int(n, width) do
-  let s = int_to_string(n)
-  let len = string_byte_length(s)
-  if len >= width do s
-  else string_pad_left(s, width, "0") end
-end
-
--- Parse a decimal integer from a string prefix of exactly `n` digits.
--- Returns Some((value, rest_string)) or None on failure.
-pfn parse_digits(s, n) do
-  let len = string_byte_length(s)
-  if len < n do None
-  else do
-    let digits = string_slice(s, 0, n)
-    let rest = string_slice(s, n, len - n)
-    match string_to_int(digits) do
-    None -> None
-    Some(v) -> Some((v, rest))
-    end end
+  -- Count of leap years in the range 1..n (for n >= 1).
+  pfn leap_count(n) do
+    int_div(n, 4) - int_div(n, 100) + int_div(n, 400)
   end
-end
 
--- Expect a literal prefix in s. Returns Some(rest) or None.
-pfn expect_prefix(s, prefix) do
-  if string_starts_with(s, prefix) do
-    Some(string_slice(s, string_byte_length(prefix),
-           string_byte_length(s) - string_byte_length(prefix)))
-  else None end
-end
-
--- Validate calendar ranges.  Returns Ok(DateTime) if every field is in
--- its expected range, Err(msg) otherwise.  Catches typo bugs that the
--- pure-digits parser would otherwise accept (e.g. month 13, day 32,
--- hour 25, second 61).
-pfn validate_datetime(y : Int, m : Int, d : Int, h : Int, mi : Int, s : Int) : Result(DateTime, String) do
-  if m < 1 || m > 12 do
-    Err("invalid month " ++ int_to_string(m) ++ " (expected 1..12)")
-  else if d < 1 || d > days_in_month(y, m) do
-    Err("invalid day " ++ int_to_string(d) ++ " for " ++ int_to_string(y) ++ "-" ++ pad_int(m, 2))
-  else if h < 0 || h > 23 do
-    Err("invalid hour " ++ int_to_string(h) ++ " (expected 0..23)")
-  else if mi < 0 || mi > 59 do
-    Err("invalid minute " ++ int_to_string(mi) ++ " (expected 0..59)")
-  else if s < 0 || s > 59 do
-    -- We don't model leap seconds; 0..59 is the valid range.
-    Err("invalid second " ++ int_to_string(s) ++ " (expected 0..59)")
-  else
-    Ok(DateTime(Date(y, m, d), Time(h, mi, s)))
-  end end end end end
-end
-
--- ── Public API ────────────────────────────────────────────────────────────
-
-doc "Return the current Unix timestamp as an Int (seconds since 1970-01-01 UTC)."
-fn now() do
-  float_to_int(unix_time(()))
-end
-
-doc """
-Convert a Unix timestamp (Int seconds) to a DateTime.
-
-    DateTime.from_timestamp(0)     -- DateTime(Date(1970, 1, 1), Time(0, 0, 0))
-    DateTime.from_timestamp(86400) -- DateTime(Date(1970, 1, 2), Time(0, 0, 0))
-"""
-fn from_timestamp(ts) do
-  let days = floor_div(ts, 86400)
-  let secs = floor_mod(ts, 86400)
-  let hour = int_div(secs, 3600)
-  let min  = int_div(int_mod(secs, 3600), 60)
-  let sec  = int_mod(secs, 60)
-  DateTime(days_to_date(days), Time(hour, min, sec))
-end
-
-doc """
-Convert a DateTime to a Unix timestamp (Int seconds since 1970-01-01 UTC).
-
-    DateTime.to_timestamp(DateTime(Date(1970, 1, 1), Time(0, 0, 0))) -- 0
-"""
-fn to_timestamp(dt) do
-  match dt do
-  DateTime(Date(y, m, d), Time(h, mi, s)) ->
-    date_to_days(y, m, d) * 86400 + h * 3600 + mi * 60 + s
+  -- Days from 1970-01-01 to Jan 1 of year y (may be negative for y < 1970).
+  pfn year_to_days(y) do
+    let y1 = y - 1
+    let leaps = if y1 > 0 do leap_count(y1) else 0 end
+    y1 * 365 + leaps - (1969 * 365 + 477)
   end
-end
 
-doc "Add n days to a DateTime. n may be negative."
-fn add_days(dt, n) do
-  from_timestamp(to_timestamp(dt) + n * 86400)
-end
-
-doc "Add n hours to a DateTime. n may be negative."
-fn add_hours(dt, n) do
-  from_timestamp(to_timestamp(dt) + n * 3600)
-end
-
-doc "Add n seconds to a DateTime. n may be negative."
-fn add_seconds(dt, n) do
-  from_timestamp(to_timestamp(dt) + n)
-end
-
-doc "Add n milliseconds to a DateTime. n may be negative."
-fn add_ms(dt : DateTime, n : Int) : DateTime do
-  add_seconds(dt, int_div(n, 1000))
-end
-
-doc "Add a Duration (stored in milliseconds) to a DateTime."
-fn add(dt : DateTime, dur : Int) : DateTime do
-  add_ms(dt, dur)
-end
-
-doc """
-Difference between two DateTimes in seconds.
-diff_seconds(a, b) = to_timestamp(a) - to_timestamp(b).
-"""
-fn diff_seconds(a, b) do
-  to_timestamp(a) - to_timestamp(b)
-end
-
-doc """
-Compare two DateTimes.
-Returns -1 if a < b, 0 if a == b, 1 if a > b.
-"""
-fn compare(a, b) do
-  let ta = to_timestamp(a)
-  let tb = to_timestamp(b)
-  if ta < tb do -1
-  else if ta > tb do 1
-  else 0 end end
-end
-
-doc """
-Return the day of the week for the date component of a DateTime.
-0 = Sunday, 1 = Monday, ..., 6 = Saturday.
-(January 1, 1970 was a Thursday = 4.)
-"""
-fn day_of_week(dt) do
-  match dt do
-  DateTime(Date(y, m, d), _) -> do
-    let days = date_to_days(y, m, d)
-    int_mod(days + 4, 7)
+  -- Days from 1970-01-01 to the date (y, m, d).
+  pfn date_to_days(y, m, d) do
+    fn month_sum(mi, acc) do
+      if mi >= m do acc
+      else month_sum(mi + 1, acc + days_in_month(y, mi)) end
+    end
+    year_to_days(y) + month_sum(1, 0) + (d - 1)
   end
+
+  -- Convert a count of days since 1970-01-01 to a Date.
+  -- All helper functions are defined first, then called once.
+  pfn days_to_date(days) do
+    fn find_year_fwd(y, rem) do
+      let diy = if is_leap(y) do 366 else 365 end
+      if rem < diy do (y, rem)
+      else find_year_fwd(y + 1, rem - diy) end
+    end
+    fn find_year_bwd(y, neg_rem) do
+      let prev = y - 1
+      let diy = if is_leap(prev) do 366 else 365 end
+      if neg_rem + diy >= 0 do (prev, neg_rem + diy)
+      else find_year_bwd(prev, neg_rem + diy) end
+    end
+    fn find_month(yr, m, rem) do
+      let dm = days_in_month(yr, m)
+      if rem < dm do (m, rem + 1)
+      else find_month(yr, m + 1, rem - dm) end
+    end
+    let (yr, doy) =
+      if days >= 0 do find_year_fwd(1970, days)
+      else find_year_bwd(1970, days) end
+    let (mo, da) = find_month(yr, 1, doy)
+    Date(yr, mo, da)
   end
-end
 
-doc """
-Format a DateTime as a string.
-Supported specifiers: %Y %m %d %H %M %S %%
-
-Example: DateTime.format(dt, "%Y-%m-%d %H:%M:%S")
-"""
-fn format(dt, fmt) do
-  match dt do
-  DateTime(Date(yr, mo, dy), Time(hr, mn, sc)) -> do
-    let s1 = string_replace_all(fmt, "%Y", pad_int(yr, 4))
-    let s2 = string_replace_all(s1, "%m", pad_int(mo, 2))
-    let s3 = string_replace_all(s2, "%d", pad_int(dy, 2))
-    let s4 = string_replace_all(s3, "%H", pad_int(hr, 2))
-    let s5 = string_replace_all(s4, "%M", pad_int(mn, 2))
-    string_replace_all(s5, "%S", pad_int(sc, 2))
+  -- Pad an integer to at least `width` digits with leading zeros.
+  pfn pad_int(n, width) do
+    let s = int_to_string(n)
+    let len = string_byte_length(s)
+    if len >= width do s
+    else string_pad_left(s, width, "0") end
   end
+
+  -- Parse a decimal integer from a string prefix of exactly `n` digits.
+  -- Returns Some((value, rest_string)) or None on failure.
+  pfn parse_digits(s, n) do
+    let len = string_byte_length(s)
+    if len < n do None
+    else do
+      let digits = string_slice(s, 0, n)
+      let rest = string_slice(s, n, len - n)
+      match string_to_int(digits) do
+      None -> None
+      Some(v) -> Some((v, rest))
+      end end
+    end
   end
-end
 
-doc """
-Parse a DateTime from a string in UTC.
-Supports: "YYYY-MM-DD" and "YYYY-MM-DD HH:MM:SS".
-Returns Ok(DateTime) or Err(message) — rejects out-of-range fields
-(month 13, day 32, hour 25, …) rather than constructing a garbage
-calendar value.
+  -- Expect a literal prefix in s. Returns Some(rest) or None.
+  pfn expect_prefix(s, prefix) do
+    if string_starts_with(s, prefix) do
+      Some(string_slice(s, string_byte_length(prefix),
+             string_byte_length(s) - string_byte_length(prefix)))
+    else None end
+  end
 
-Note: this module is timezone-naive.  All DateTimes represent UTC; no
-offset parsing is supported.
-"""
-fn parse(s) do
-  let len = string_byte_length(s)
-  if len < 10 do Err("string too short to be a date: " ++ s)
-  else
-    match parse_digits(s, 4) do
-    None -> Err("expected 4-digit year in: " ++ s)
-    Some((y, r1)) -> do
-      match expect_prefix(r1, "-") do
-      None -> Err("expected '-' after year")
-      Some(r2) ->
-        match parse_digits(r2, 2) do
-        None -> Err("expected 2-digit month")
-        Some((m, r3)) ->
-          match expect_prefix(r3, "-") do
-          None -> Err("expected '-' after month")
-          Some(r4) ->
-            match parse_digits(r4, 2) do
-            None -> Err("expected 2-digit day")
-            Some((d, r5)) ->
-              if string_is_empty(r5) do
-                validate_datetime(y, m, d, 0, 0, 0)
-              else
-                match expect_prefix(r5, " ") do
-                None -> Err("expected ' ' or end after date")
-                Some(r6) ->
-                  match parse_digits(r6, 2) do
-                  None -> Err("expected 2-digit hour")
-                  Some((h, r7)) ->
-                    match expect_prefix(r7, ":") do
-                    None -> Err("expected ':' after hour")
-                    Some(r8) ->
-                      match parse_digits(r8, 2) do
-                      None -> Err("expected 2-digit minute")
-                      Some((mi, r9)) ->
-                        match expect_prefix(r9, ":") do
-                        None -> Err("expected ':' after minute")
-                        Some(r10) ->
-                          match parse_digits(r10, 2) do
-                          None -> Err("expected 2-digit second")
-                          Some((sc, _)) ->
-                            validate_datetime(y, m, d, h, mi, sc)
+  -- Validate calendar ranges.  Returns Ok(DateTime) if every field is in
+  -- its expected range, Err(msg) otherwise.  Catches typo bugs that the
+  -- pure-digits parser would otherwise accept (e.g. month 13, day 32,
+  -- hour 25, second 61).
+  pfn validate_datetime(y : Int, m : Int, d : Int, h : Int, mi : Int, s : Int) : Result(DateTime, String) do
+    if m < 1 || m > 12 do
+      Err("invalid month " ++ int_to_string(m) ++ " (expected 1..12)")
+    else if d < 1 || d > days_in_month(y, m) do
+      Err("invalid day " ++ int_to_string(d) ++ " for " ++ int_to_string(y) ++ "-" ++ pad_int(m, 2))
+    else if h < 0 || h > 23 do
+      Err("invalid hour " ++ int_to_string(h) ++ " (expected 0..23)")
+    else if mi < 0 || mi > 59 do
+      Err("invalid minute " ++ int_to_string(mi) ++ " (expected 0..59)")
+    else if s < 0 || s > 59 do
+      -- We don't model leap seconds; 0..59 is the valid range.
+      Err("invalid second " ++ int_to_string(s) ++ " (expected 0..59)")
+    else
+      Ok(DateTime(Date(y, m, d), Time(h, mi, s)))
+    end end end end end
+  end
+
+  -- ── Public API ────────────────────────────────────────────────────────────
+
+  doc "Return the current Unix timestamp as an Int (seconds since 1970-01-01 UTC)."
+  fn now() do
+    float_to_int(unix_time(()))
+  end
+
+  doc """
+  Convert a Unix timestamp (Int seconds) to a DateTime.
+
+      DateTime.from_timestamp(0)     -- DateTime(Date(1970, 1, 1), Time(0, 0, 0))
+      DateTime.from_timestamp(86400) -- DateTime(Date(1970, 1, 2), Time(0, 0, 0))
+  """
+  fn from_timestamp(ts) do
+    let days = floor_div(ts, 86400)
+    let secs = floor_mod(ts, 86400)
+    let hour = int_div(secs, 3600)
+    let min  = int_div(int_mod(secs, 3600), 60)
+    let sec  = int_mod(secs, 60)
+    DateTime(days_to_date(days), Time(hour, min, sec))
+  end
+
+  doc """
+  Convert a DateTime to a Unix timestamp (Int seconds since 1970-01-01 UTC).
+
+      DateTime.to_timestamp(DateTime(Date(1970, 1, 1), Time(0, 0, 0))) -- 0
+  """
+  fn to_timestamp(dt) do
+    match dt do
+    DateTime(Date(y, m, d), Time(h, mi, s)) ->
+      date_to_days(y, m, d) * 86400 + h * 3600 + mi * 60 + s
+    end
+  end
+
+  doc "Add n days to a DateTime. n may be negative."
+  fn add_days(dt, n) do
+    from_timestamp(to_timestamp(dt) + n * 86400)
+  end
+
+  doc "Add n hours to a DateTime. n may be negative."
+  fn add_hours(dt, n) do
+    from_timestamp(to_timestamp(dt) + n * 3600)
+  end
+
+  doc "Add n seconds to a DateTime. n may be negative."
+  fn add_seconds(dt, n) do
+    from_timestamp(to_timestamp(dt) + n)
+  end
+
+  doc "Add n milliseconds to a DateTime. n may be negative."
+  fn add_ms(dt : DateTime, n : Int) : DateTime do
+    add_seconds(dt, int_div(n, 1000))
+  end
+
+  doc "Add a Duration (stored in milliseconds) to a DateTime."
+  fn add(dt : DateTime, dur : Int) : DateTime do
+    add_ms(dt, dur)
+  end
+
+  doc """
+  Difference between two DateTimes in seconds.
+  diff_seconds(a, b) = to_timestamp(a) - to_timestamp(b).
+  """
+  fn diff_seconds(a, b) do
+    to_timestamp(a) - to_timestamp(b)
+  end
+
+  doc """
+  Compare two DateTimes.
+  Returns -1 if a < b, 0 if a == b, 1 if a > b.
+  """
+  fn compare(a, b) do
+    let ta = to_timestamp(a)
+    let tb = to_timestamp(b)
+    if ta < tb do -1
+    else if ta > tb do 1
+    else 0 end end
+  end
+
+  doc """
+  Return the day of the week for the date component of a DateTime.
+  0 = Sunday, 1 = Monday, ..., 6 = Saturday.
+  (January 1, 1970 was a Thursday = 4.)
+  """
+  fn day_of_week(dt) do
+    match dt do
+    DateTime(Date(y, m, d), _) -> do
+      let days = date_to_days(y, m, d)
+      int_mod(days + 4, 7)
+    end
+    end
+  end
+
+  doc """
+  Format a DateTime as a string.
+  Supported specifiers: %Y %m %d %H %M %S %%
+
+  Example: DateTime.format(dt, "%Y-%m-%d %H:%M:%S")
+  """
+  fn format(dt, fmt) do
+    match dt do
+    DateTime(Date(yr, mo, dy), Time(hr, mn, sc)) -> do
+      let s1 = string_replace_all(fmt, "%Y", pad_int(yr, 4))
+      let s2 = string_replace_all(s1, "%m", pad_int(mo, 2))
+      let s3 = string_replace_all(s2, "%d", pad_int(dy, 2))
+      let s4 = string_replace_all(s3, "%H", pad_int(hr, 2))
+      let s5 = string_replace_all(s4, "%M", pad_int(mn, 2))
+      string_replace_all(s5, "%S", pad_int(sc, 2))
+    end
+    end
+  end
+
+  doc """
+  Parse a DateTime from a string in UTC.
+  Supports: "YYYY-MM-DD" and "YYYY-MM-DD HH:MM:SS".
+  Returns Ok(DateTime) or Err(message) — rejects out-of-range fields
+  (month 13, day 32, hour 25, …) rather than constructing a garbage
+  calendar value.
+
+  Note: this module is timezone-naive.  All DateTimes represent UTC; no
+  offset parsing is supported.
+  """
+  fn parse(s) do
+    let len = string_byte_length(s)
+    if len < 10 do Err("string too short to be a date: " ++ s)
+    else
+      match parse_digits(s, 4) do
+      None -> Err("expected 4-digit year in: " ++ s)
+      Some((y, r1)) -> do
+        match expect_prefix(r1, "-") do
+        None -> Err("expected '-' after year")
+        Some(r2) ->
+          match parse_digits(r2, 2) do
+          None -> Err("expected 2-digit month")
+          Some((m, r3)) ->
+            match expect_prefix(r3, "-") do
+            None -> Err("expected '-' after month")
+            Some(r4) ->
+              match parse_digits(r4, 2) do
+              None -> Err("expected 2-digit day")
+              Some((d, r5)) ->
+                if string_is_empty(r5) do
+                  validate_datetime(y, m, d, 0, 0, 0)
+                else
+                  match expect_prefix(r5, " ") do
+                  None -> Err("expected ' ' or end after date")
+                  Some(r6) ->
+                    match parse_digits(r6, 2) do
+                    None -> Err("expected 2-digit hour")
+                    Some((h, r7)) ->
+                      match expect_prefix(r7, ":") do
+                      None -> Err("expected ':' after hour")
+                      Some(r8) ->
+                        match parse_digits(r8, 2) do
+                        None -> Err("expected 2-digit minute")
+                        Some((mi, r9)) ->
+                          match expect_prefix(r9, ":") do
+                          None -> Err("expected ':' after minute")
+                          Some(r10) ->
+                            match parse_digits(r10, 2) do
+                            None -> Err("expected 2-digit second")
+                            Some((sc, _)) ->
+                              validate_datetime(y, m, d, h, mi, sc)
+                            end
                           end
                         end
                       end
                     end
                   end
-                end
+              end
             end
           end
         end
       end
-    end
-    end
+      end
+      end
     end
   end
-end
 
 end

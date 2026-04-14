@@ -25,98 +25,106 @@
 
 mod NativeArray do
 
--- ── Int arrays ─────────────────────────────────────────────────────────────
+  -- ── Int arrays ─────────────────────────────────────────────────────────────
 
-doc "Create a new integer array of [n] elements, each initialised to [fill]."
-fn make_int(n : Int, fill : Int) do
-  native_int_arr_make(n, fill)
-end
+  doc "Create a new integer array of [n] elements, each initialised to [fill]."
+  fn make_int(n : Int, fill : Int) do
+    native_int_arr_make(n, fill)
+  end
 
-doc "Return the number of elements in [arr]."
-fn length_int(arr) do
-  native_int_arr_length(arr)
-end
+  doc "Return the number of elements in [arr]."
+  fn length_int(arr) do
+    native_int_arr_length(arr)
+  end
 
-doc "Return the element at index [i] (0-based). Panics if out of bounds."
-fn get_int(arr, i : Int) do
-  native_int_arr_get(arr, i)
-end
+  doc "Return the element at index [i] (0-based). Panics if out of bounds."
+  fn get_int(arr, i : Int) do
+    native_int_arr_get(arr, i)
+  end
 
-doc "Return a new array with element [i] replaced by [v]. O(n)."
-fn set_int(arr, i : Int, v : Int) do
-  native_int_arr_set(arr, i, v)
-end
+  doc "Return a new array with element [i] replaced by [v]. O(n)."
+  fn set_int(arr, i : Int, v : Int) do
+    native_int_arr_set(arr, i, v)
+  end
 
-doc "Sum all elements. O(n) tight loop."
-fn sum_int(arr) : Int do
-  native_int_arr_sum(arr)
-end
+  doc "Sum all elements. O(n) tight loop."
+  fn sum_int(arr) : Int do
+    native_int_arr_sum(arr)
+  end
 
-doc "Apply [f] to every element, returning a new NativeIntArr. O(n)."
-fn map_int(arr, f) do
-  native_int_arr_map(arr, f)
-end
+  doc "Apply [f] to every element, returning a new NativeIntArr. O(n)."
+  fn map_int(arr, f) do
+    native_int_arr_map(arr, f)
+  end
 
-doc "Left fold over all elements. [f(acc, elem) = new_acc]. O(n)."
-fn fold_int(acc, arr, f) do
-  native_int_arr_fold(acc, arr, f)
-end
+  doc """
+  Left fold over all elements.  Argument order: collection first, init
+  second, callback last (uncurried-collection convention).  Callback
+  `f(acc, elem) = new_acc`.  O(n).
+  """
+  fn fold_int(arr, acc, f) do
+    native_int_arr_fold(acc, arr, f)
+  end
 
-doc "Build a NativeIntArr from a List(Int). O(n)."
-fn from_list_int(lst) do
-  native_int_arr_from_list(lst)
-end
+  doc "Build a NativeIntArr from a List(Int). O(n)."
+  fn from_list_int(lst) do
+    native_int_arr_from_list(lst)
+  end
 
-doc "Convert a NativeIntArr to a List(Int). O(n)."
-fn to_list_int(arr) do
-  native_int_arr_to_list(arr)
-end
+  doc "Convert a NativeIntArr to a List(Int). O(n)."
+  fn to_list_int(arr) do
+    native_int_arr_to_list(arr)
+  end
 
--- ── Float arrays ────────────────────────────────────────────────────────────
+  -- ── Float arrays ────────────────────────────────────────────────────────────
 
-doc "Create a new float array of [n] elements, each initialised to [fill]."
-fn make_float(n : Int, fill : Float) do
-  native_float_arr_make(n, fill)
-end
+  doc "Create a new float array of [n] elements, each initialised to [fill]."
+  fn make_float(n : Int, fill : Float) do
+    native_float_arr_make(n, fill)
+  end
 
-doc "Return the number of elements in [arr]."
-fn length_float(arr) do
-  native_float_arr_length(arr)
-end
+  doc "Return the number of elements in [arr]."
+  fn length_float(arr) do
+    native_float_arr_length(arr)
+  end
 
-doc "Return the element at index [i] (0-based). Panics if out of bounds."
-fn get_float(arr, i : Int) do
-  native_float_arr_get(arr, i)
-end
+  doc "Return the element at index [i] (0-based). Panics if out of bounds."
+  fn get_float(arr, i : Int) do
+    native_float_arr_get(arr, i)
+  end
 
-doc "Return a new array with element [i] replaced by [v]. O(n)."
-fn set_float(arr, i : Int, v : Float) do
-  native_float_arr_set(arr, i, v)
-end
+  doc "Return a new array with element [i] replaced by [v]. O(n)."
+  fn set_float(arr, i : Int, v : Float) do
+    native_float_arr_set(arr, i, v)
+  end
 
-doc "Sum all elements. O(n) tight loop."
-fn sum_float(arr) : Float do
-  native_float_arr_sum(arr)
-end
+  doc "Sum all elements. O(n) tight loop."
+  fn sum_float(arr) : Float do
+    native_float_arr_sum(arr)
+  end
 
-doc "Apply [f] to every element, returning a new NativeFloatArr. O(n)."
-fn map_float(arr, f) do
-  native_float_arr_map(arr, f)
-end
+  doc "Apply [f] to every element, returning a new NativeFloatArr. O(n)."
+  fn map_float(arr, f) do
+    native_float_arr_map(arr, f)
+  end
 
-doc "Left fold over all elements. [f(acc, elem) = new_acc]. O(n)."
-fn fold_float(acc, arr, f) do
-  native_float_arr_fold(acc, arr, f)
-end
+  doc """
+  Left fold over all elements.  Argument order: collection first, init
+  second, callback last (uncurried-collection convention).  Callback
+  `f(acc, elem) = new_acc`.  O(n).
+  """
+  fn fold_float(arr, acc, f) do
+    native_float_arr_fold(acc, arr, f)
+  end
 
-doc "Build a NativeFloatArr from a List(Float). O(n)."
-fn from_list_float(lst) do
-  native_float_arr_from_list(lst)
-end
+  doc "Build a NativeFloatArr from a List(Float). O(n)."
+  fn from_list_float(lst) do
+    native_float_arr_from_list(lst)
+  end
 
-doc "Convert a NativeFloatArr to a List(Float). O(n)."
-fn to_list_float(arr) do
-  native_float_arr_to_list(arr)
-end
+  doc "Convert a NativeFloatArr to a List(Float). O(n)."
+  fn to_list_float(arr) do
+    native_float_arr_to_list(arr)
+  end
 
 end

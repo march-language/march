@@ -16,528 +16,530 @@
 
 mod Set do
 
--- ── Internal representation ────────────────────────────────────────────────
+  -- ── Internal representation ────────────────────────────────────────────────
 
--- Set(a) is a thin wrapper around Map(a, Unit).
--- We inline the same HAMT structure directly rather than nesting the Map
--- wrapper to avoid an extra allocation layer.
+  -- Set(a) is a thin wrapper around Map(a, Unit).
+  -- We inline the same HAMT structure directly rather than nesting the Map
+  -- wrapper to avoid an extra allocation layer.
 
-ptype SEntry(a) =
-  SEmpty
-  | SLeaf(Int, a)
-  | SBranch(Int, List(SEntry(a)))
-  | SCollision(Int, List(a))
+  ptype SEntry(a) =
+    SEmpty
+    | SLeaf(Int, a)
+    | SBranch(Int, List(SEntry(a)))
+    | SCollision(Int, List(a))
 
-ptype Set(a) = HamtSet(SEntry(a))
+  ptype Set(a) = HamtSet(SEntry(a))
 
--- ── Private helpers ────────────────────────────────────────────────────────
+  -- ── Private helpers ────────────────────────────────────────────────────────
 
-pfn lst_rev(lst) do
-  fn go(xs, acc) do
-    match xs do
-    Nil -> acc
-    Cons(h, t) -> go(t, Cons(h, acc))
-    end
-  end
-  go(lst, Nil)
-end
-
-pfn cmp_eq(cmp, a, b) do
-  let lt_ab = cmp(a)
-  let lt_ba = cmp(b)
-  if lt_ab(b) do false
-  else if lt_ba(a) do false
-  else true end end
-end
-
-pfn key_hash(k) do
-  int_and(hash(k), 1073741823)
-end
-
-pfn hash_slot(h, level) do
-  int_and(int_shr(h, level * 5), 31)
-end
-
-pfn bitmap_has(bitmap, idx) do
-  int_and(int_shr(bitmap, idx), 1) == 1
-end
-
-pfn bitmap_rank(bitmap, idx) do
-  int_popcount(int_and(bitmap, int_shl(1, idx) - 1))
-end
-
-pfn bitmap_set(bitmap, idx) do
-  int_or(bitmap, int_shl(1, idx))
-end
-
-pfn bitmap_clear(bitmap, idx) do
-  int_and(bitmap, int_not(int_shl(1, idx)))
-end
-
-pfn list_insert_at(lst, idx, elem) do
-  fn rev_onto(rev_xs, ys) do
-    match rev_xs do
-    Nil -> ys
-    Cons(h, t) -> rev_onto(t, Cons(h, ys))
-    end
-  end
-  fn go(xs, i, acc) do
-    if i == 0 do rev_onto(acc, Cons(elem, xs))
-    else match xs do
-      Nil        -> rev_onto(acc, Cons(elem, Nil))
-      Cons(h, t) -> go(t, i - 1, Cons(h, acc))
-      end end
-  end
-  go(lst, idx, Nil)
-end
-
-pfn list_replace_at(lst, idx, elem) do
-  fn rev_onto(rev_xs, ys) do
-    match rev_xs do
-    Nil -> ys
-    Cons(h, t) -> rev_onto(t, Cons(h, ys))
-    end
-  end
-  fn go(xs, i, acc) do
-    match xs do
-    Nil -> rev_onto(acc, Nil)
-    Cons(h, t) -> do
-      if i == 0 do rev_onto(acc, Cons(elem, t))
-      else go(t, i - 1, Cons(h, acc)) end
-    end
-    end
-  end
-  go(lst, idx, Nil)
-end
-
-pfn list_delete_at(lst, idx) do
-  fn rev_onto(rev_xs, ys) do
-    match rev_xs do
-    Nil -> ys
-    Cons(h, t) -> rev_onto(t, Cons(h, ys))
-    end
-  end
-  fn go(xs, i, acc) do
-    match xs do
-    Nil -> rev_onto(acc, Nil)
-    Cons(h, t) -> do
-      if i == 0 do rev_onto(acc, t)
-      else go(t, i - 1, Cons(h, acc)) end
-    end
-    end
-  end
-  go(lst, idx, Nil)
-end
-
-pfn list_nth_safe(lst, n) do
-  match lst do
-  Nil -> panic("Set: HAMT node index out of range")
-  Cons(h, t) ->
-    if n == 0 do h else list_nth_safe(t, n - 1) end
-  end
-end
-
-pfn coll_has(elems, x, eq) do
-  match elems do
-  Nil -> false
-  Cons(e, rest) ->
-    if eq(e, x) do true else coll_has(rest, x, eq) end
-  end
-end
-
-pfn coll_insert_elem(elems, x, eq) do
-  if coll_has(elems, x, eq) do elems
-  else Cons(x, elems) end
-end
-
-pfn coll_remove_elem(elems, x, eq) do
-  fn rev_onto(rev_xs, ys) do
-    match rev_xs do
-    Nil -> ys
-    Cons(h, t) -> rev_onto(t, Cons(h, ys))
-    end
-  end
-  fn go(es, acc) do
-    match es do
-    Nil -> rev_onto(acc, Nil)
-    Cons(e, rest) -> do
-      if eq(e, x) do rev_onto(acc, rest)
-      else go(rest, Cons(e, acc)) end
-    end
-    end
-  end
-  go(elems, Nil)
-end
-
--- ── HAMT core ─────────────────────────────────────────────────────────────
-
-pfn node_contains(node, x, h, eq, level) do
-  match node do
-  SEmpty -> false
-  SLeaf(lh, lx) ->
-    lh == h && eq(lx, x)
-  SCollision(ch, elems) ->
-    ch == h && coll_has(elems, x, eq)
-  SBranch(bitmap, children) -> do
-    let slot = hash_slot(h, level)
-    if bitmap_has(bitmap, slot) do
-      let idx = bitmap_rank(bitmap, slot)
-      let child = list_nth_safe(children, idx)
-      node_contains(child, x, h, eq, level + 1)
-    else false end
-  end
-  end
-end
-
-pfn make_branch(h1, x1, h2, x2, level) do
-  fn apply_slots(node, slots) do
-    match slots do
-    Nil -> node
-    Cons(s, rest) ->
-      apply_slots(SBranch(bitmap_set(0, s), Cons(node, Nil)), rest)
-    end
-  end
-  fn go(lvl, slots_acc) do
-    if lvl > 6 do
-      apply_slots(SCollision(h1, Cons(x1, Cons(x2, Nil))), slots_acc)
-    else do
-      let s1 = hash_slot(h1, lvl)
-      let s2 = hash_slot(h2, lvl)
-      if s1 == s2 do
-        go(lvl + 1, Cons(s1, slots_acc))
-      else do
-        let leaf1 = SLeaf(h1, x1)
-        let leaf2 = SLeaf(h2, x2)
-        let bm = bitmap_set(bitmap_set(0, s1), s2)
-        let base_node =
-          if s1 < s2 do SBranch(bm, Cons(leaf1, Cons(leaf2, Nil)))
-          else SBranch(bm, Cons(leaf2, Cons(leaf1, Nil))) end
-        apply_slots(base_node, slots_acc) end
-      end end
-    end
-  end
-  go(level, Nil)
-end
-
-pfn node_insert(node, x, h, eq, level) do
-  match node do
-  SEmpty -> SLeaf(h, x)
-  SLeaf(lh, lx) -> do
-    if lh == h do
-      if eq(lx, x) do node
-      else SCollision(h, Cons(lx, Cons(x, Nil))) end
-    else
-      make_branch(lh, lx, h, x, level)
-    end
-  end
-  SCollision(ch, elems) -> do
-    if ch == h do
-      SCollision(ch, coll_insert_elem(elems, x, eq))
-    else do
-      fn expand(nd, es) do
-        match es do
-        Nil -> nd
-        Cons(e, rest) ->
-          expand(node_insert(nd, e, ch, eq, level), rest)
-        end
+  pfn lst_rev(lst) do
+    fn go(xs, acc) do
+      match xs do
+      Nil -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
       end
-      expand(node_insert(SEmpty, x, h, eq, level), elems) end
+    end
+    go(lst, Nil)
+  end
+
+  pfn cmp_eq(cmp, a, b) do
+    let lt_ab = cmp(a)
+    let lt_ba = cmp(b)
+    if lt_ab(b) do false
+    else if lt_ba(a) do false
+    else true end end
+  end
+
+  pfn key_hash(k) do
+    int_and(hash(k), 1073741823)
+  end
+
+  pfn hash_slot(h, level) do
+    int_and(int_shr(h, level * 5), 31)
+  end
+
+  pfn bitmap_has(bitmap, idx) do
+    int_and(int_shr(bitmap, idx), 1) == 1
+  end
+
+  pfn bitmap_rank(bitmap, idx) do
+    int_popcount(int_and(bitmap, int_shl(1, idx) - 1))
+  end
+
+  pfn bitmap_set(bitmap, idx) do
+    int_or(bitmap, int_shl(1, idx))
+  end
+
+  pfn bitmap_clear(bitmap, idx) do
+    int_and(bitmap, int_not(int_shl(1, idx)))
+  end
+
+  pfn list_insert_at(lst, idx, elem) do
+    fn rev_onto(rev_xs, ys) do
+      match rev_xs do
+      Nil -> ys
+      Cons(h, t) -> rev_onto(t, Cons(h, ys))
+      end
+    end
+    fn go(xs, i, acc) do
+      if i == 0 do rev_onto(acc, Cons(elem, xs))
+      else match xs do
+        Nil        -> rev_onto(acc, Cons(elem, Nil))
+        Cons(h, t) -> go(t, i - 1, Cons(h, acc))
+        end end
+    end
+    go(lst, idx, Nil)
+  end
+
+  pfn list_replace_at(lst, idx, elem) do
+    fn rev_onto(rev_xs, ys) do
+      match rev_xs do
+      Nil -> ys
+      Cons(h, t) -> rev_onto(t, Cons(h, ys))
+      end
+    end
+    fn go(xs, i, acc) do
+      match xs do
+      Nil -> rev_onto(acc, Nil)
+      Cons(h, t) -> do
+        if i == 0 do rev_onto(acc, Cons(elem, t))
+        else go(t, i - 1, Cons(h, acc)) end
+      end
+      end
+    end
+    go(lst, idx, Nil)
+  end
+
+  pfn list_delete_at(lst, idx) do
+    fn rev_onto(rev_xs, ys) do
+      match rev_xs do
+      Nil -> ys
+      Cons(h, t) -> rev_onto(t, Cons(h, ys))
+      end
+    end
+    fn go(xs, i, acc) do
+      match xs do
+      Nil -> rev_onto(acc, Nil)
+      Cons(h, t) -> do
+        if i == 0 do rev_onto(acc, t)
+        else go(t, i - 1, Cons(h, acc)) end
+      end
+      end
+    end
+    go(lst, idx, Nil)
+  end
+
+  pfn list_nth_safe(lst, n) do
+    match lst do
+    Nil -> panic("Set: HAMT node index out of range")
+    Cons(h, t) ->
+      if n == 0 do h else list_nth_safe(t, n - 1) end
     end
   end
-  SBranch(bitmap, children) -> do
-    let slot = hash_slot(h, level)
-    if bitmap_has(bitmap, slot) do
-      let idx = bitmap_rank(bitmap, slot)
-      let child = list_nth_safe(children, idx)
-      let new_child = node_insert(child, x, h, eq, level + 1)
-      SBranch(bitmap, list_replace_at(children, idx, new_child))
-    else do
-      let idx = bitmap_rank(bitmap, slot)
-      SBranch(bitmap_set(bitmap, slot), list_insert_at(children, idx, SLeaf(h, x)))
-    end end
-  end
-  end
-end
 
-pfn node_remove(node, x, h, eq, level) do
-  match node do
-  SEmpty -> SEmpty
-  SLeaf(lh, lx) ->
-    if lh == h && eq(lx, x) do SEmpty else node end
-  SCollision(ch, elems) -> do
-    if ch != h do node
-    else do
-      let new_elems = coll_remove_elem(elems, x, eq)
-      match new_elems do
-      Nil -> SEmpty
-      Cons(sole, Nil) -> SLeaf(ch, sole)
-      _ -> SCollision(ch, new_elems)
+  pfn coll_has(elems, x, eq) do
+    match elems do
+    Nil -> false
+    Cons(e, rest) ->
+      if eq(e, x) do true else coll_has(rest, x, eq) end
+    end
+  end
+
+  pfn coll_insert_elem(elems, x, eq) do
+    if coll_has(elems, x, eq) do elems
+    else Cons(x, elems) end
+  end
+
+  pfn coll_remove_elem(elems, x, eq) do
+    fn rev_onto(rev_xs, ys) do
+      match rev_xs do
+      Nil -> ys
+      Cons(h, t) -> rev_onto(t, Cons(h, ys))
+      end
+    end
+    fn go(es, acc) do
+      match es do
+      Nil -> rev_onto(acc, Nil)
+      Cons(e, rest) -> do
+        if eq(e, x) do rev_onto(acc, rest)
+        else go(rest, Cons(e, acc)) end
+      end
+      end
+    end
+    go(elems, Nil)
+  end
+
+  -- ── HAMT core ─────────────────────────────────────────────────────────────
+
+  pfn node_contains(node, x, h, eq, level) do
+    match node do
+    SEmpty -> false
+    SLeaf(lh, lx) ->
+      lh == h && eq(lx, x)
+    SCollision(ch, elems) ->
+      ch == h && coll_has(elems, x, eq)
+    SBranch(bitmap, children) -> do
+      let slot = hash_slot(h, level)
+      if bitmap_has(bitmap, slot) do
+        let idx = bitmap_rank(bitmap, slot)
+        let child = list_nth_safe(children, idx)
+        node_contains(child, x, h, eq, level + 1)
+      else false end
+    end
+    end
+  end
+
+  pfn make_branch(h1, x1, h2, x2, level) do
+    fn apply_slots(node, slots) do
+      match slots do
+      Nil -> node
+      Cons(s, rest) ->
+        apply_slots(SBranch(bitmap_set(0, s), Cons(node, Nil)), rest)
+      end
+    end
+    fn go(lvl, slots_acc) do
+      if lvl > 6 do
+        apply_slots(SCollision(h1, Cons(x1, Cons(x2, Nil))), slots_acc)
+      else do
+        let s1 = hash_slot(h1, lvl)
+        let s2 = hash_slot(h2, lvl)
+        if s1 == s2 do
+          go(lvl + 1, Cons(s1, slots_acc))
+        else do
+          let leaf1 = SLeaf(h1, x1)
+          let leaf2 = SLeaf(h2, x2)
+          let bm = bitmap_set(bitmap_set(0, s1), s2)
+          let base_node =
+            if s1 < s2 do SBranch(bm, Cons(leaf1, Cons(leaf2, Nil)))
+            else SBranch(bm, Cons(leaf2, Cons(leaf1, Nil))) end
+          apply_slots(base_node, slots_acc) end
+        end end
+      end
+    end
+    go(level, Nil)
+  end
+
+  pfn node_insert(node, x, h, eq, level) do
+    match node do
+    SEmpty -> SLeaf(h, x)
+    SLeaf(lh, lx) -> do
+      if lh == h do
+        if eq(lx, x) do node
+        else SCollision(h, Cons(lx, Cons(x, Nil))) end
+      else
+        make_branch(lh, lx, h, x, level)
+      end
+    end
+    SCollision(ch, elems) -> do
+      if ch == h do
+        SCollision(ch, coll_insert_elem(elems, x, eq))
+      else do
+        fn expand(nd, es) do
+          match es do
+          Nil -> nd
+          Cons(e, rest) ->
+            expand(node_insert(nd, e, ch, eq, level), rest)
+          end
+        end
+        expand(node_insert(SEmpty, x, h, eq, level), elems) end
+      end
+    end
+    SBranch(bitmap, children) -> do
+      let slot = hash_slot(h, level)
+      if bitmap_has(bitmap, slot) do
+        let idx = bitmap_rank(bitmap, slot)
+        let child = list_nth_safe(children, idx)
+        let new_child = node_insert(child, x, h, eq, level + 1)
+        SBranch(bitmap, list_replace_at(children, idx, new_child))
+      else do
+        let idx = bitmap_rank(bitmap, slot)
+        SBranch(bitmap_set(bitmap, slot), list_insert_at(children, idx, SLeaf(h, x)))
       end end
     end
+    end
   end
-  SBranch(bitmap, children) -> do
-    let slot = hash_slot(h, level)
-    if bitmap_has(bitmap, slot) do
-      let idx = bitmap_rank(bitmap, slot)
-      let child = list_nth_safe(children, idx)
-      let new_child = node_remove(child, x, h, eq, level + 1)
-      match new_child do
-      SEmpty -> do
-        let new_bm = bitmap_clear(bitmap, slot)
-        let new_children = list_delete_at(children, idx)
-        match new_children do
+
+  pfn node_remove(node, x, h, eq, level) do
+    match node do
+    SEmpty -> SEmpty
+    SLeaf(lh, lx) ->
+      if lh == h && eq(lx, x) do SEmpty else node end
+    SCollision(ch, elems) -> do
+      if ch != h do node
+      else do
+        let new_elems = coll_remove_elem(elems, x, eq)
+        match new_elems do
         Nil -> SEmpty
-        Cons(sole, Nil) ->
-          match sole do
-          SLeaf(_, _) -> sole
-          SCollision(_, _) -> sole
+        Cons(sole, Nil) -> SLeaf(ch, sole)
+        _ -> SCollision(ch, new_elems)
+        end end
+      end
+    end
+    SBranch(bitmap, children) -> do
+      let slot = hash_slot(h, level)
+      if bitmap_has(bitmap, slot) do
+        let idx = bitmap_rank(bitmap, slot)
+        let child = list_nth_safe(children, idx)
+        let new_child = node_remove(child, x, h, eq, level + 1)
+        match new_child do
+        SEmpty -> do
+          let new_bm = bitmap_clear(bitmap, slot)
+          let new_children = list_delete_at(children, idx)
+          match new_children do
+          Nil -> SEmpty
+          Cons(sole, Nil) ->
+            match sole do
+            SLeaf(_, _) -> sole
+            SCollision(_, _) -> sole
+            _ -> SBranch(new_bm, new_children)
+            end
           _ -> SBranch(new_bm, new_children)
           end
-        _ -> SBranch(new_bm, new_children)
+        end
+        _ ->
+          SBranch(bitmap, list_replace_at(children, idx, new_child))
+        end
+      else node end
+    end
+    end
+  end
+
+  pfn node_fold(acc, node, f) do
+    match node do
+    SEmpty -> acc
+    SLeaf(_, x) -> f(acc, x)
+    SCollision(_, elems) -> do
+      fn go(a, es) do
+        match es do
+        Nil -> a
+        Cons(e, rest) -> go(f(a, e), rest)
         end
       end
-      _ ->
-        SBranch(bitmap, list_replace_at(children, idx, new_child))
-      end
-    else node end
-  end
-  end
-end
-
-pfn node_fold(acc, node, f) do
-  match node do
-  SEmpty -> acc
-  SLeaf(_, x) -> f(acc, x)
-  SCollision(_, elems) -> do
-    fn go(a, es) do
-      match es do
-      Nil -> a
-      Cons(e, rest) -> go(f(a, e), rest)
-      end
+      go(acc, elems)
     end
-    go(acc, elems)
-  end
-  SBranch(_, children) -> do
-    fn go(a, cs) do
-      match cs do
-      Nil -> a
-      Cons(child, rest) ->
-        go(node_fold(a, child, f), rest)
+    SBranch(_, children) -> do
+      fn go(a, cs) do
+        match cs do
+        Nil -> a
+        Cons(child, rest) ->
+          go(node_fold(a, child, f), rest)
+        end
       end
+      go(acc, children)
     end
-    go(acc, children)
-  end
-  end
-end
-
-pfn node_size(node) do
-  match node do
-  SEmpty -> 0
-  SLeaf(_, _) -> 1
-  SCollision(_, elems) -> do
-    fn count(es, n) do
-      match es do
-      Nil -> n
-      Cons(_, rest) -> count(rest, n + 1)
-      end
-    end
-    count(elems, 0)
-  end
-  SBranch(_, children) -> do
-    fn go(acc, cs) do
-      match cs do
-      Nil -> acc
-      Cons(child, rest) -> go(acc + node_size(child), rest)
-      end
-    end
-    go(0, children)
-  end
-  end
-end
-
--- ── Public API ─────────────────────────────────────────────────────────────
-
-doc "Returns an empty set."
-fn empty() do
-  HamtSet(SEmpty)
-end
-
-doc "Returns a set containing exactly one element."
-fn singleton(x) do
-  let h = key_hash(x)
-  HamtSet(SLeaf(h, x))
-end
-
--- ---- Query ----
-
-doc "Returns true if the set contains no elements."
-fn is_empty(s) do
-  match s do
-  HamtSet(SEmpty) -> true
-  _               -> false
-  end
-end
-
-doc "Returns the number of elements in the set. O(n)."
-fn size(s) do
-  match s do
-  HamtSet(node) -> node_size(node)
-  end
-end
-
-doc """
-Returns true if the set contains elem.
-cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
-"""
-fn contains(s, elem, cmp) do
-  match s do
-  HamtSet(node) -> do
-    let h = key_hash(elem)
-    let eq = fn (a, b) -> cmp_eq(cmp, a, b)
-    node_contains(node, elem, h, eq, 0)
-  end
-  end
-end
-
--- ---- Modification ----
-
-doc """
-Inserts elem into the set. Returns the set unchanged if elem is already present.
-cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
-"""
-fn insert(s, elem, cmp) do
-  match s do
-  HamtSet(node) -> do
-    let h = key_hash(elem)
-    let eq = fn (a, b) -> cmp_eq(cmp, a, b)
-    HamtSet(node_insert(node, elem, h, eq, 0))
-  end
-  end
-end
-
-doc """
-Removes elem from the set. Returns the set unchanged if elem is absent.
-cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
-"""
-fn remove(s, elem, cmp) do
-  match s do
-  HamtSet(node) -> do
-    let h = key_hash(elem)
-    let eq = fn (a, b) -> cmp_eq(cmp, a, b)
-    HamtSet(node_remove(node, elem, h, eq, 0))
-  end
-  end
-end
-
--- ---- Set operations ----
-
-doc """
-Returns the union of two sets (all elements in either set).
-cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
-"""
-fn union(a, b, cmp) do
-  fn go(acc, x) do
-    insert(acc, x, cmp)
-  end
-  match b do
-  HamtSet(node) -> node_fold(a, node, go)
-  end
-end
-
-doc """
-Returns the intersection of two sets (elements in both sets).
-cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
-"""
-fn intersection(a, b, cmp) do
-  fn go(acc, x) do
-    if contains(b, x, cmp) do insert(acc, x, cmp)
-    else acc end
-  end
-  match a do
-  HamtSet(node) ->
-    node_fold(empty(), node, go)
-  end
-end
-
-doc """
-Returns elements in a that are not in b (set difference a \\ b).
-cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
-"""
-fn difference(a, b, cmp) do
-  fn go(acc, x) do
-    if contains(b, x, cmp) do acc
-    else insert(acc, x, cmp) end
-  end
-  match a do
-  HamtSet(node) ->
-    node_fold(empty(), node, go)
-  end
-end
-
-doc "Returns true if a is a subset of b."
-fn is_subset(a, b, cmp) do
-  fn check(ok, x) do
-    ok && contains(b, x, cmp)
-  end
-  match a do
-  HamtSet(node) ->
-    node_fold(true, node, check)
-  end
-end
-
--- ---- Traversal ----
-
-doc "Returns all elements as a list (hash-traversal order)."
-fn to_list(s) do
-  match s do
-  HamtSet(node) -> do
-    let acc = node_fold(Nil, node, fn (xs, x) -> Cons(x, xs))
-    lst_rev(acc)
-  end
-  end
-end
-
-doc """
-Builds a set from a list of elements.
-cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
-"""
-fn from_list(xs, cmp) do
-  fn go(lst, acc) do
-    match lst do
-    Nil -> acc
-    Cons(x, rest) -> go(rest, insert(acc, x, cmp))
     end
   end
-  go(xs, empty())
-end
 
-doc """
-Left fold over all elements. f(acc)(elem) = new_acc.
-"""
-fn fold(acc, s, f) do
-  match s do
-  HamtSet(node) ->
-    node_fold(acc, node, f)
+  pfn node_size(node) do
+    match node do
+    SEmpty -> 0
+    SLeaf(_, _) -> 1
+    SCollision(_, elems) -> do
+      fn count(es, n) do
+        match es do
+        Nil -> n
+        Cons(_, rest) -> count(rest, n + 1)
+        end
+      end
+      count(elems, 0)
+    end
+    SBranch(_, children) -> do
+      fn go(acc, cs) do
+        match cs do
+        Nil -> acc
+        Cons(child, rest) -> go(acc + node_size(child), rest)
+        end
+      end
+      go(0, children)
+    end
+    end
   end
-end
 
-doc """
-Returns true if the two sets contain the same elements.
-cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
-"""
-fn eq(a, b, cmp) do
-  let sa = size(a)
-  let sb = size(b)
-  if sa != sb do false
-  else do
+  -- ── Public API ─────────────────────────────────────────────────────────────
+
+  doc "Returns an empty set."
+  fn empty() do
+    HamtSet(SEmpty)
+  end
+
+  doc "Returns a set containing exactly one element."
+  fn singleton(x) do
+    let h = key_hash(x)
+    HamtSet(SLeaf(h, x))
+  end
+
+  -- ---- Query ----
+
+  doc "Returns true if the set contains no elements."
+  fn is_empty(s) do
+    match s do
+    HamtSet(SEmpty) -> true
+    _               -> false
+    end
+  end
+
+  doc "Returns the number of elements in the set. O(n)."
+  fn size(s) do
+    match s do
+    HamtSet(node) -> node_size(node)
+    end
+  end
+
+  doc """
+  Returns true if the set contains elem.
+  cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+  """
+  fn contains(s, elem, cmp) do
+    match s do
+    HamtSet(node) -> do
+      let h = key_hash(elem)
+      let eq = fn (a, b) -> cmp_eq(cmp, a, b)
+      node_contains(node, elem, h, eq, 0)
+    end
+    end
+  end
+
+  -- ---- Modification ----
+
+  doc """
+  Inserts elem into the set. Returns the set unchanged if elem is already present.
+  cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+  """
+  fn insert(s, elem, cmp) do
+    match s do
+    HamtSet(node) -> do
+      let h = key_hash(elem)
+      let eq = fn (a, b) -> cmp_eq(cmp, a, b)
+      HamtSet(node_insert(node, elem, h, eq, 0))
+    end
+    end
+  end
+
+  doc """
+  Removes elem from the set. Returns the set unchanged if elem is absent.
+  cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+  """
+  fn remove(s, elem, cmp) do
+    match s do
+    HamtSet(node) -> do
+      let h = key_hash(elem)
+      let eq = fn (a, b) -> cmp_eq(cmp, a, b)
+      HamtSet(node_remove(node, elem, h, eq, 0))
+    end
+    end
+  end
+
+  -- ---- Set operations ----
+
+  doc """
+  Returns the union of two sets (all elements in either set).
+  cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+  """
+  fn union(a, b, cmp) do
+    fn go(acc, x) do
+      insert(acc, x, cmp)
+    end
+    match b do
+    HamtSet(node) -> node_fold(a, node, go)
+    end
+  end
+
+  doc """
+  Returns the intersection of two sets (elements in both sets).
+  cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+  """
+  fn intersection(a, b, cmp) do
+    fn go(acc, x) do
+      if contains(b, x, cmp) do insert(acc, x, cmp)
+      else acc end
+    end
+    match a do
+    HamtSet(node) ->
+      node_fold(empty(), node, go)
+    end
+  end
+
+  doc """
+  Returns elements in a that are not in b (set difference a \\ b).
+  cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+  """
+  fn difference(a, b, cmp) do
+    fn go(acc, x) do
+      if contains(b, x, cmp) do acc
+      else insert(acc, x, cmp) end
+    end
+    match a do
+    HamtSet(node) ->
+      node_fold(empty(), node, go)
+    end
+  end
+
+  doc "Returns true if a is a subset of b."
+  fn is_subset(a, b, cmp) do
     fn check(ok, x) do
       ok && contains(b, x, cmp)
     end
     match a do
     HamtSet(node) ->
       node_fold(true, node, check)
-    end end
+    end
   end
-end
+
+  -- ---- Traversal ----
+
+  doc "Returns all elements as a list (hash-traversal order)."
+  fn to_list(s) do
+    match s do
+    HamtSet(node) -> do
+      let acc = node_fold(Nil, node, fn (xs, x) -> Cons(x, xs))
+      lst_rev(acc)
+    end
+    end
+  end
+
+  doc """
+  Builds a set from a list of elements.
+  cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+  """
+  fn from_list(xs, cmp) do
+    fn go(lst, acc) do
+      match lst do
+      Nil -> acc
+      Cons(x, rest) -> go(rest, insert(acc, x, cmp))
+      end
+    end
+    go(xs, empty())
+  end
+
+  doc """
+  Left fold over all elements.  Argument order: collection first, init
+  second, callback last (uncurried-collection convention).  The
+  callback `f` itself is curried as `f(acc)(elem) = new_acc`.
+  """
+  fn fold(s, acc, f) do
+    match s do
+    HamtSet(node) ->
+      node_fold(acc, node, f)
+    end
+  end
+
+  doc """
+  Returns true if the two sets contain the same elements.
+  cmp : a -> a -> Bool where cmp(a)(b) = true means a < b.
+  """
+  fn eq(a, b, cmp) do
+    let sa = size(a)
+    let sb = size(b)
+    if sa != sb do false
+    else do
+      fn check(ok, x) do
+        ok && contains(b, x, cmp)
+      end
+      match a do
+      HamtSet(node) ->
+        node_fold(true, node, check)
+      end end
+    end
+  end
 
 end

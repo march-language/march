@@ -10,689 +10,689 @@
 
 mod List do
 
--- ---- Construction ----
+  -- ---- Construction ----
 
-doc """
-Returns an empty list.
+  doc """
+  Returns an empty list.
 
-## Examples
+  ## Examples
 
-```march
-List.empty()  -- []
-```
-"""
-fn empty() : List(a) do
-  Nil
-end
-
-doc """
-Returns a list containing a single element.
-
-## Examples
-
-```march
-List.singleton(42)   -- [42]
-List.singleton("hi") -- ["hi"]
-```
-"""
-fn singleton(x : a) : List(a) do
-  Cons(x, Nil)
-end
-
-doc """
-Returns a list with `x` repeated `n` times.
-
-## Examples
-
-```march
-List.repeat(0, 3)    -- [0, 0, 0]
-List.repeat("x", 4)  -- ["x", "x", "x", "x"]
-```
-"""
-fn repeat(x : a, n : Int) : List(a) do
-  fn go(i : Int, acc : List(a)) : List(a) do
-    if i <= 0 do acc else go(i - 1, Cons(x, acc)) end
+      march> List.empty()
+      []
+  """
+  fn empty() : List(a) do
+    Nil
   end
-  go(n, Nil)
-end
 
-doc """
-Returns [start, start+1, ..., stop-1]. Returns [] if start >= stop.
+  doc """
+  Returns a list containing a single element.
 
-## Examples
+  ## Examples
 
-```march
-List.range(0, 5)   -- [0, 1, 2, 3, 4]
-List.range(3, 7)   -- [3, 4, 5, 6]
-List.range(5, 5)   -- []
-```
-"""
-fn range(start : Int, stop : Int) : List(Int) do
-  fn go(i : Int, acc : List(Int)) : List(Int) do
-    if i < start do acc else go(i - 1, Cons(i, acc)) end
+      march> List.singleton(42)
+      [42]
+      march> List.singleton("hi")
+      ["hi"]
+  """
+  fn singleton(x : a) : List(a) do
+    Cons(x, Nil)
   end
-  go(stop - 1, Nil)
-end
 
-doc "Returns [start, start+step, ...] up to but not including stop."
-fn range_step(start : Int, stop : Int, step : Int) : List(Int) do
-  fn build(i : Int, acc : List(Int)) : List(Int) do
-    if step > 0 do
-      if i >= stop do reverse(acc) else build(i + step, Cons(i, acc)) end
-    else
-      if i <= stop do reverse(acc) else build(i + step, Cons(i, acc)) end
+  doc """
+  Returns a list with `x` repeated `n` times.
+
+  ## Examples
+
+      march> List.repeat(0, 3)
+      [0, 0, 0]
+      march> List.repeat("x", 4)
+      ["x", "x", "x", "x"]
+  """
+  fn repeat(x : a, n : Int) : List(a) do
+    fn go(i : Int, acc : List(a)) : List(a) do
+      if i <= 0 do acc else go(i - 1, Cons(x, acc)) end
     end
+    go(n, Nil)
   end
-  build(start, Nil)
-end
 
--- ---- Access ----
+  doc """
+  Returns [start, start+1, ..., stop-1]. Returns [] if start >= stop.
 
-doc "Returns the first element. Panics on empty list."
-fn head(xs : List(a)) : a do
-  match xs do
-  Cons(h, _) -> h
-  Nil        -> panic("List.head: empty list")
-  end
-end
+  ## Examples
 
-doc "Returns the tail (all but first element). Panics on empty list."
-fn tail(xs : List(a)) : List(a) do
-  match xs do
-  Cons(_, t) -> t
-  Nil        -> panic("List.tail: empty list")
-  end
-end
-
-doc "Returns Some(first element), or None if empty."
-fn head_opt(xs : List(a)) : Option(a) do
-  match xs do
-  Cons(h, _) -> Some(h)
-  Nil        -> None
-  end
-end
-
-doc "Returns Some(tail), or None if empty."
-fn tail_opt(xs : List(a)) : Option(List(a)) do
-  match xs do
-  Cons(_, t) -> Some(t)
-  Nil        -> None
-  end
-end
-
-doc "Returns the last element. Panics on empty list."
-fn last(xs : List(a)) : a do
-  match xs do
-  Nil        -> panic("List.last: empty list")
-  Cons(x, Nil) -> x
-  Cons(_, t)   -> last(t)
-  end
-end
-
-doc "Returns the nth element (0-indexed). Panics if out of bounds."
-fn nth(xs : List(a), n : Int) : a do
-  match xs do
-  Nil        -> panic("List.nth: index out of bounds")
-  Cons(h, t) -> if n == 0 do h else nth(t, n - 1) end
-  end
-end
-
-doc "Returns Some(nth element), or None if out of bounds."
-fn nth_opt(xs : List(a), n : Int) : Option(a) do
-  match xs do
-  Nil        -> None
-  Cons(h, t) -> if n == 0 do Some(h) else nth_opt(t, n - 1) end
-  end
-end
-
--- ---- Measurement ----
-
-doc """
-Returns the number of elements in the list.
-
-## Examples
-
-```march
-List.length([1, 2, 3])  -- 3
-List.length([])         -- 0
-```
-"""
-fn length(xs : List(a)) : Int do
-  fn go(lst : List(a), acc : Int) : Int do
-    match lst do
-    Nil        -> acc
-    Cons(_, t) -> go(t, acc + 1)
+      march> List.range(0, 5)
+      [0, 1, 2, 3, 4]
+      march> List.range(3, 7)
+      [3, 4, 5, 6]
+      march> List.range(5, 5)
+      []
+  """
+  fn range(start : Int, stop : Int) : List(Int) do
+    fn go(i : Int, acc : List(Int)) : List(Int) do
+      if i < start do acc else go(i - 1, Cons(i, acc)) end
     end
+    go(stop - 1, Nil)
   end
-  go(xs, 0)
-end
 
-doc "Returns true if the list has no elements."
-fn is_empty(xs : List(a)) : Bool do
-  match xs do
-  Nil -> true
-  _   -> false
-  end
-end
-
--- ---- Transforming ----
-
-doc "Returns the list in reverse order."
-fn reverse(xs : List(a)) : List(a) do
-  fn go(lst : List(a), acc : List(a)) : List(a) do
-    match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, Cons(h, acc))
-    end
-  end
-  go(xs, Nil)
-end
-
-doc """
-Concatenates two lists.
-
-## Examples
-
-```march
-List.append([1, 2], [3, 4, 5])  -- [1, 2, 3, 4, 5]
-List.append([], [1, 2])         -- [1, 2]
-```
-"""
-fn append(xs : List(a), ys : List(a)) : List(a) do
-  fn go(lst : List(a), acc : List(a)) : List(a) do
-    match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, Cons(h, acc))
-    end
-  end
-  go(reverse(xs), ys)
-end
-
-doc """
-Applies `f` to each element, returning a new list.
-
-## Examples
-
-```march
-List.map([1, 2, 3], fn x -> x * 2)
--- [2, 4, 6]
-
-List.map(["a", "b"], String.upper)
--- ["A", "B"]
-```
-"""
-fn map(xs : List(a), f : a -> b) : List(b) do
-  fn go(lst : List(a), acc : List(b)) : List(b) do
-    match lst do
-    Nil        -> reverse(acc)
-    Cons(h, t) -> go(t, Cons(f(h), acc))
-    end
-  end
-  go(xs, Nil)
-end
-
-doc "Applies `f` to each element for side effects. Returns ()."
-fn each(xs : List(a), f : a -> b) : () do
-  fn go(lst : List(a)) : () do
-    match lst do
-    Nil        -> ()
-    Cons(h, t) -> do
-      let _ = f(h)
-      go(t)
-    end
-    end
-  end
-  go(xs)
-end
-
-doc "Applies `f` to each element and concatenates the results.  O(n) in the total output size."
-fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
-  -- Accumulate each f(h) onto acc in reversed order, then reverse once at
-  -- the end.  Total work is O(total_output), not O(total_output^2) which
-  -- the old append-based implementation would incur.
-  fn prepend_reversed(sub : List(b), acc : List(b)) : List(b) do
-    match sub do
-    Nil           -> acc
-    Cons(x, rest) -> prepend_reversed(rest, Cons(x, acc))
-    end
-  end
-  fn go(lst : List(a), acc : List(b)) : List(b) do
-    match lst do
-    Nil        -> reverse(acc)
-    Cons(h, t) -> go(t, prepend_reversed(f(h), acc))
-    end
-  end
-  go(xs, Nil)
-end
-
-doc """
-Returns only elements satisfying `pred`.
-
-## Examples
-
-```march
-List.filter([1, 2, 3, 4, 5], fn x -> x > 2)
--- [3, 4, 5]
-
-List.filter(["foo", "", "bar", ""], fn s -> !String.is_empty(s))
--- ["foo", "bar"]
-```
-"""
-fn filter(xs : List(a), pred : a -> Bool) : List(a) do
-  fn go(lst : List(a), acc : List(a)) : List(a) do
-    match lst do
-    Nil        -> reverse(acc)
-    Cons(h, t) ->
-      if pred(h) do go(t, Cons(h, acc)) else go(t, acc) end
-    end
-  end
-  go(xs, Nil)
-end
-
-doc """
-Applies `f` to each element; collects Some values, discards None.
-Equivalent to map followed by filter for non-None values.
-"""
-fn filter_map(xs : List(a), f : a -> Option(b)) : List(b) do
-  fn go(lst : List(a), acc : List(b)) : List(b) do
-    match lst do
-    Nil        -> reverse(acc)
-    Cons(h, t) -> do
-      match f(h) do
-      Some(v) -> go(t, Cons(v, acc))
-      None    -> go(t, acc)
+  doc "Returns [start, start+step, ...] up to but not including stop."
+  fn range_step(start : Int, stop : Int, step : Int) : List(Int) do
+    fn build(i : Int, acc : List(Int)) : List(Int) do
+      if step > 0 do
+        if i >= stop do reverse(acc) else build(i + step, Cons(i, acc)) end
+      else
+        if i <= stop do reverse(acc) else build(i + step, Cons(i, acc)) end
       end
     end
+    build(start, Nil)
+  end
+
+  -- ---- Access ----
+
+  doc "Returns the first element. Panics on empty list."
+  fn head(xs : List(a)) : a do
+    match xs do
+    Cons(h, _) -> h
+    Nil        -> panic("List.head: empty list")
     end
   end
-  go(xs, Nil)
-end
 
-doc """
-Left fold: reduces the list from left to right with an accumulator.
-
-## Examples
-
-```march
-List.fold_left(0, [1, 2, 3, 4], fn acc -> fn x -> acc + x)
--- 10
-
-List.fold_left([], [1, 2, 3], fn acc -> fn x -> Cons(x * 2, acc))
--- [6, 4, 2]  (note: reversed; use fold_right or reverse for ordered)
-```
-"""
-fn fold_left(acc : b, xs : List(a), f : b -> a -> b) : b do
-  match xs do
-  Nil        -> acc
-  Cons(h, t) -> fold_left(f(acc, h), t, f)
-  end
-end
-
-doc "Right fold: reduces the list from right to left."
-fn fold_right(xs : List(a), acc : b, f : a -> b -> b) : b do
-  fold_left(acc, reverse(xs), fn (a, h) -> f(h, a))
-end
-
-doc "Like fold_left but returns a list of all intermediate accumulator values."
-fn scan_left(acc : b, xs : List(a), f : b -> a -> b) : List(b) do
-  fn go(a : b, lst : List(a), result : List(b)) : List(b) do
-    match lst do
-    Nil        -> reverse(Cons(a, result))
-    Cons(h, t) -> do
-      let a2 = f(a, h)
-      go(a2, t, Cons(a, result))
-    end
+  doc "Returns the tail (all but first element). Panics on empty list."
+  fn tail(xs : List(a)) : List(a) do
+    match xs do
+    Cons(_, t) -> t
+    Nil        -> panic("List.tail: empty list")
     end
   end
-  go(acc, xs, Nil)
-end
 
-doc "Concatenates a list of lists into a single list."
-fn concat(xss : List(List(a))) : List(a) do
-  fold_right(xss, Nil, fn xs -> fn acc -> append(xs, acc))
-end
-
-doc "Inserts `sep` between every consecutive pair of elements."
-fn intersperse(xs : List(a), sep : a) : List(a) do
-  fn go(lst : List(a), acc : List(a)) : List(a) do
-    match lst do
-    Nil           -> reverse(acc)
-    Cons(x, Nil)  -> reverse(Cons(x, acc))
-    Cons(h, t)    -> go(t, Cons(sep, Cons(h, acc)))
-    end
-  end
-  go(xs, Nil)
-end
-
--- ---- Searching ----
-
-doc "Returns the first element satisfying `pred`, or None."
-fn find(xs : List(a), pred : a -> Bool) : Option(a) do
-  match xs do
-  Nil        -> None
-  Cons(h, t) -> if pred(h) do Some(h) else find(t, pred) end
-  end
-end
-
-doc "Returns the index of the first element satisfying `pred`, or None."
-fn find_index(xs : List(a), pred : a -> Bool) : Option(Int) do
-  fn go(lst : List(a), i : Int) : Option(Int) do
-    match lst do
+  doc "Returns Some(first element), or None if empty."
+  fn head_opt(xs : List(a)) : Option(a) do
+    match xs do
+    Cons(h, _) -> Some(h)
     Nil        -> None
-    Cons(h, t) -> if pred(h) do Some(i) else go(t, i + 1) end
     end
   end
-  go(xs, 0)
-end
 
-doc "Returns true if any element satisfies `pred`."
-fn any(xs : List(a), pred : a -> Bool) : Bool do
-  match xs do
-  Nil        -> false
-  Cons(h, t) -> if pred(h) do true else any(t, pred) end
-  end
-end
-
-doc "Returns true if all elements satisfy `pred` (vacuously true for [])."
-fn all(xs : List(a), pred : a -> Bool) : Bool do
-  match xs do
-  Nil        -> true
-  Cons(h, t) -> if pred(h) do all(t, pred) else false end
-  end
-end
-
--- ---- Sorting ----
-
-doc """
-Sorts by a comparator function. Uses merge sort (stable, O(n log n)).
-
-## Examples
-
-```march
-List.sort_by([3, 1, 4, 1, 5], fn (a, b) -> a < b)
--- [1, 1, 3, 4, 5]
-
-List.sort_by(["banana", "apple", "cherry"], fn (a, b) -> a < b)
--- ["apple", "banana", "cherry"]
-```
-"""
-fn sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
-  fn rev_onto(rev_prefix : List(a), suffix : List(a)) : List(a) do
-    match rev_prefix do
-    Nil        -> suffix
-    Cons(h, t) -> rev_onto(t, Cons(h, suffix))
+  doc "Returns Some(tail), or None if empty."
+  fn tail_opt(xs : List(a)) : Option(List(a)) do
+    match xs do
+    Cons(_, t) -> Some(t)
+    Nil        -> None
     end
   end
-  fn merge(a : List(a), b : List(a)) : List(a) do
-    fn go(l : List(a), r : List(a), acc : List(a)) : List(a) do
-      match l do
-      Nil -> rev_onto(acc, r)
-      Cons(x, xl) -> do
-        match r do
-        Nil -> rev_onto(acc, l)
-        Cons(y, yl) ->
-          if cmp(x, y) do go(xl, r, Cons(x, acc))
-          else go(l, yl, Cons(y, acc)) end
+
+  doc "Returns the last element. Panics on empty list."
+  fn last(xs : List(a)) : a do
+    match xs do
+    Nil        -> panic("List.last: empty list")
+    Cons(x, Nil) -> x
+    Cons(_, t)   -> last(t)
+    end
+  end
+
+  doc "Returns the nth element (0-indexed). Panics if out of bounds."
+  fn nth(xs : List(a), n : Int) : a do
+    match xs do
+    Nil        -> panic("List.nth: index out of bounds")
+    Cons(h, t) -> if n == 0 do h else nth(t, n - 1) end
+    end
+  end
+
+  doc "Returns Some(nth element), or None if out of bounds."
+  fn nth_opt(xs : List(a), n : Int) : Option(a) do
+    match xs do
+    Nil        -> None
+    Cons(h, t) -> if n == 0 do Some(h) else nth_opt(t, n - 1) end
+    end
+  end
+
+  -- ---- Measurement ----
+
+  doc """
+  Returns the number of elements in the list.
+
+  ## Examples
+
+      march> List.length([1, 2, 3])
+      3
+      march> List.length([])
+      0
+  """
+  fn length(xs : List(a)) : Int do
+    fn go(lst : List(a), acc : Int) : Int do
+      match lst do
+      Nil        -> acc
+      Cons(_, t) -> go(t, acc + 1)
+      end
+    end
+    go(xs, 0)
+  end
+
+  doc "Returns true if the list has no elements."
+  fn is_empty(xs : List(a)) : Bool do
+    match xs do
+    Nil -> true
+    _   -> false
+    end
+  end
+
+  -- ---- Transforming ----
+
+  doc "Returns the list in reverse order."
+  fn reverse(xs : List(a)) : List(a) do
+    fn go(lst : List(a), acc : List(a)) : List(a) do
+      match lst do
+      Nil        -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(xs, Nil)
+  end
+
+  doc """
+  Concatenates two lists.
+
+  ## Examples
+
+      march> List.append([1, 2], [3, 4, 5])
+      [1, 2, 3, 4, 5]
+      march> List.append([], [1, 2])
+      [1, 2]
+  """
+  fn append(xs : List(a), ys : List(a)) : List(a) do
+    fn go(lst : List(a), acc : List(a)) : List(a) do
+      match lst do
+      Nil        -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(reverse(xs), ys)
+  end
+
+  doc """
+  Applies `f` to each element, returning a new list.
+
+  ## Examples
+
+      march> List.map([1, 2, 3], fn x -> x * 2)
+      march> 
+      [2, 4, 6]
+
+      march> List.map(["a", "b"], String.upper)
+      march> 
+      ["A", "B"]
+  """
+  fn map(xs : List(a), f : a -> b) : List(b) do
+    fn go(lst : List(a), acc : List(b)) : List(b) do
+      match lst do
+      Nil        -> reverse(acc)
+      Cons(h, t) -> go(t, Cons(f(h), acc))
+      end
+    end
+    go(xs, Nil)
+  end
+
+  doc "Applies `f` to each element for side effects. Returns ()."
+  fn each(xs : List(a), f : a -> b) : () do
+    fn go(lst : List(a)) : () do
+      match lst do
+      Nil        -> ()
+      Cons(h, t) -> do
+        let _ = f(h)
+        go(t)
+      end
+      end
+    end
+    go(xs)
+  end
+
+  doc "Applies `f` to each element and concatenates the results.  O(n) in the total output size."
+  fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
+    -- Accumulate each f(h) onto acc in reversed order, then reverse once at
+    -- the end.  Total work is O(total_output), not O(total_output^2) which
+    -- the old append-based implementation would incur.
+    fn prepend_reversed(sub : List(b), acc : List(b)) : List(b) do
+      match sub do
+      Nil           -> acc
+      Cons(x, rest) -> prepend_reversed(rest, Cons(x, acc))
+      end
+    end
+    fn go(lst : List(a), acc : List(b)) : List(b) do
+      match lst do
+      Nil        -> reverse(acc)
+      Cons(h, t) -> go(t, prepend_reversed(f(h), acc))
+      end
+    end
+    go(xs, Nil)
+  end
+
+  doc """
+  Returns only elements satisfying `pred`.
+
+  ## Examples
+
+      march> List.filter([1, 2, 3, 4, 5], fn x -> x > 2)
+      march> 
+      [3, 4, 5]
+
+      march> List.filter(["foo", "", "bar", ""], fn s -> !String.is_empty(s))
+      march> 
+      ["foo", "bar"]
+  """
+  fn filter(xs : List(a), pred : a -> Bool) : List(a) do
+    fn go(lst : List(a), acc : List(a)) : List(a) do
+      match lst do
+      Nil        -> reverse(acc)
+      Cons(h, t) ->
+        if pred(h) do go(t, Cons(h, acc)) else go(t, acc) end
+      end
+    end
+    go(xs, Nil)
+  end
+
+  doc """
+  Applies `f` to each element; collects Some values, discards None.
+  Equivalent to map followed by filter for non-None values.
+  """
+  fn filter_map(xs : List(a), f : a -> Option(b)) : List(b) do
+    fn go(lst : List(a), acc : List(b)) : List(b) do
+      match lst do
+      Nil        -> reverse(acc)
+      Cons(h, t) -> do
+        match f(h) do
+        Some(v) -> go(t, Cons(v, acc))
+        None    -> go(t, acc)
         end
       end
       end
     end
-    go(a, b, Nil)
+    go(xs, Nil)
   end
-  fn step_pairs(groups : List(List(a)), acc : List(List(a))) : List(List(a)) do
-    match groups do
-    Nil -> reverse(acc)
-    Cons(g, Nil) -> reverse(Cons(g, acc))
-    Cons(g1, Cons(g2, rest)) -> step_pairs(rest, Cons(merge(g1, g2), acc))
-    end
-  end
-  fn sort_loop(groups : List(List(a))) : List(a) do
-    match groups do
-    Nil -> Nil
-    Cons(sole, Nil) -> sole
-    _ -> sort_loop(step_pairs(groups, Nil))
-    end
-  end
-  fn to_singletons(lst : List(a), acc : List(List(a))) : List(List(a)) do
-    match lst do
-    Nil        -> reverse(acc)
-    Cons(h, t) -> to_singletons(t, Cons(Cons(h, Nil), acc))
-    end
-  end
-  sort_loop(to_singletons(xs, Nil))
-end
 
--- ---- Splitting ----
+  doc """
+  Left fold: reduces the list from left to right with an accumulator.
+  Argument order follows the stdlib uncurried-collection convention:
+  collection first, acc second, callback last.
 
-doc "Returns the first `n` elements. Returns the whole list if n >= length."
-fn take(xs : List(a), n : Int) : List(a) do
-  fn go(lst : List(a), k : Int, acc : List(a)) : List(a) do
-    if k <= 0 do reverse(acc)
-    else match lst do
+  ## Examples
+
+      march> List.fold_left([1, 2, 3, 4], 0, fn (acc, x) -> acc + x)
+      10
+
+      march> List.fold_left([1, 2, 3], [], fn (acc, x) -> Cons(x * 2, acc))
+      [6, 4, 2]
+  """
+  fn fold_left(xs : List(a), acc : b, f : (b, a) -> b) : b do
+    match xs do
+    Nil        -> acc
+    Cons(h, t) -> fold_left(t, f(acc, h), f)
+    end
+  end
+
+  doc "Right fold: reduces the list from right to left."
+  fn fold_right(xs : List(a), acc : b, f : (a, b) -> b) : b do
+    fold_left(reverse(xs), acc, fn (acc, h) -> f(h, acc))
+  end
+
+  doc "Like fold_left but returns a list of all intermediate accumulator values."
+  fn scan_left(xs : List(a), acc : b, f : (b, a) -> b) : List(b) do
+    fn go(a : b, lst : List(a), result : List(b)) : List(b) do
+      match lst do
+      Nil        -> reverse(Cons(a, result))
+      Cons(h, t) -> do
+        let a2 = f(a, h)
+        go(a2, t, Cons(a, result))
+      end
+      end
+    end
+    go(acc, xs, Nil)
+  end
+
+  doc "Concatenates a list of lists into a single list."
+  fn concat(xss : List(List(a))) : List(a) do
+    fold_right(xss, Nil, fn (xs, acc) -> append(xs, acc))
+  end
+
+  doc "Inserts `sep` between every consecutive pair of elements."
+  fn intersperse(xs : List(a), sep : a) : List(a) do
+    fn go(lst : List(a), acc : List(a)) : List(a) do
+      match lst do
+      Nil           -> reverse(acc)
+      Cons(x, Nil)  -> reverse(Cons(x, acc))
+      Cons(h, t)    -> go(t, Cons(sep, Cons(h, acc)))
+      end
+    end
+    go(xs, Nil)
+  end
+
+  -- ---- Searching ----
+
+  doc "Returns the first element satisfying `pred`, or None."
+  fn find(xs : List(a), pred : a -> Bool) : Option(a) do
+    match xs do
+    Nil        -> None
+    Cons(h, t) -> if pred(h) do Some(h) else find(t, pred) end
+    end
+  end
+
+  doc "Returns the index of the first element satisfying `pred`, or None."
+  fn find_index(xs : List(a), pred : a -> Bool) : Option(Int) do
+    fn go(lst : List(a), i : Int) : Option(Int) do
+      match lst do
+      Nil        -> None
+      Cons(h, t) -> if pred(h) do Some(i) else go(t, i + 1) end
+      end
+    end
+    go(xs, 0)
+  end
+
+  doc "Returns true if any element satisfies `pred`."
+  fn any(xs : List(a), pred : a -> Bool) : Bool do
+    match xs do
+    Nil        -> false
+    Cons(h, t) -> if pred(h) do true else any(t, pred) end
+    end
+  end
+
+  doc "Returns true if all elements satisfy `pred` (vacuously true for [])."
+  fn all(xs : List(a), pred : a -> Bool) : Bool do
+    match xs do
+    Nil        -> true
+    Cons(h, t) -> if pred(h) do all(t, pred) else false end
+    end
+  end
+
+  -- ---- Sorting ----
+
+  doc """
+  Sorts by a comparator function. Uses merge sort (stable, O(n log n)).
+
+  ## Examples
+
+      march> List.sort_by([3, 1, 4, 1, 5], fn (a, b) -> a < b)
+      march> 
+      [1, 1, 3, 4, 5]
+
+      march> List.sort_by(["banana", "apple", "cherry"], fn (a, b) -> a < b)
+      march> 
+      ["apple", "banana", "cherry"]
+  """
+  fn sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+    fn rev_onto(rev_prefix : List(a), suffix : List(a)) : List(a) do
+      match rev_prefix do
+      Nil        -> suffix
+      Cons(h, t) -> rev_onto(t, Cons(h, suffix))
+      end
+    end
+    fn merge(a : List(a), b : List(a)) : List(a) do
+      fn go(l : List(a), r : List(a), acc : List(a)) : List(a) do
+        match l do
+        Nil -> rev_onto(acc, r)
+        Cons(x, xl) -> do
+          match r do
+          Nil -> rev_onto(acc, l)
+          Cons(y, yl) ->
+            if cmp(x, y) do go(xl, r, Cons(x, acc))
+            else go(l, yl, Cons(y, acc)) end
+          end
+        end
+        end
+      end
+      go(a, b, Nil)
+    end
+    fn step_pairs(groups : List(List(a)), acc : List(List(a))) : List(List(a)) do
+      match groups do
+      Nil -> reverse(acc)
+      Cons(g, Nil) -> reverse(Cons(g, acc))
+      Cons(g1, Cons(g2, rest)) -> step_pairs(rest, Cons(merge(g1, g2), acc))
+      end
+    end
+    fn sort_loop(groups : List(List(a))) : List(a) do
+      match groups do
+      Nil -> Nil
+      Cons(sole, Nil) -> sole
+      _ -> sort_loop(step_pairs(groups, Nil))
+      end
+    end
+    fn to_singletons(lst : List(a), acc : List(List(a))) : List(List(a)) do
+      match lst do
       Nil        -> reverse(acc)
-      Cons(h, t) -> go(t, k - 1, Cons(h, acc))
+      Cons(h, t) -> to_singletons(t, Cons(Cons(h, Nil), acc))
+      end
+    end
+    sort_loop(to_singletons(xs, Nil))
+  end
+
+  -- ---- Splitting ----
+
+  doc "Returns the first `n` elements. Returns the whole list if n >= length."
+  fn take(xs : List(a), n : Int) : List(a) do
+    fn go(lst : List(a), k : Int, acc : List(a)) : List(a) do
+      if k <= 0 do reverse(acc)
+      else match lst do
+        Nil        -> reverse(acc)
+        Cons(h, t) -> go(t, k - 1, Cons(h, acc))
+        end end
+    end
+    go(xs, n, Nil)
+  end
+
+  doc "Drops the first `n` elements. Returns [] if n >= length."
+  fn drop(xs : List(a), n : Int) : List(a) do
+    if n <= 0 do xs
+    else match xs do
+      Nil        -> Nil
+      Cons(_, t) -> drop(t, n - 1)
       end end
   end
-  go(xs, n, Nil)
-end
 
-doc "Drops the first `n` elements. Returns [] if n >= length."
-fn drop(xs : List(a), n : Int) : List(a) do
-  if n <= 0 do xs
-  else match xs do
+  doc "Returns the longest prefix of elements satisfying `pred`."
+  fn take_while(xs : List(a), pred : a -> Bool) : List(a) do
+    fn go(lst : List(a), acc : List(a)) : List(a) do
+      match lst do
+      Nil        -> reverse(acc)
+      Cons(h, t) ->
+        if pred(h) do go(t, Cons(h, acc)) else reverse(acc) end
+      end
+    end
+    go(xs, Nil)
+  end
+
+  doc "Drops elements while `pred` holds, returning the rest."
+  fn drop_while(xs : List(a), pred : a -> Bool) : List(a) do
+    match xs do
     Nil        -> Nil
-    Cons(_, t) -> drop(t, n - 1)
-    end end
-end
-
-doc "Returns the longest prefix of elements satisfying `pred`."
-fn take_while(xs : List(a), pred : a -> Bool) : List(a) do
-  fn go(lst : List(a), acc : List(a)) : List(a) do
-    match lst do
-    Nil        -> reverse(acc)
-    Cons(h, t) ->
-      if pred(h) do go(t, Cons(h, acc)) else reverse(acc) end
+    Cons(h, t) -> if pred(h) do drop_while(t, pred) else xs end
     end
   end
-  go(xs, Nil)
-end
 
-doc "Drops elements while `pred` holds, returning the rest."
-fn drop_while(xs : List(a), pred : a -> Bool) : List(a) do
-  match xs do
-  Nil        -> Nil
-  Cons(h, t) -> if pred(h) do drop_while(t, pred) else xs end
-  end
-end
-
-doc "Splits the list at position n, returning (take n xs, drop n xs)."
-fn split_at(xs : List(a), n : Int) : (List(a), List(a)) do
-  fn go(lst : List(a), k : Int, acc : List(a)) : (List(a), List(a)) do
-    if k <= 0 do (reverse(acc), lst)
-    else match lst do
-      Nil        -> (reverse(acc), Nil)
-      Cons(h, t) -> go(t, k - 1, Cons(h, acc))
-      end end
-  end
-  go(xs, n, Nil)
-end
-
-doc "Splits into (elements satisfying pred, elements not satisfying pred)."
-fn partition(xs : List(a), pred : a -> Bool) : (List(a), List(a)) do
-  fn go(lst : List(a), yes : List(a), no : List(a)) : (List(a), List(a)) do
-    match lst do
-    Nil        -> (reverse(yes), reverse(no))
-    Cons(h, t) -> do
-      if pred(h) do go(t, Cons(h, yes), no)
-      else go(t, yes, Cons(h, no)) end
+  doc "Splits the list at position n, returning (take n xs, drop n xs)."
+  fn split_at(xs : List(a), n : Int) : (List(a), List(a)) do
+    fn go(lst : List(a), k : Int, acc : List(a)) : (List(a), List(a)) do
+      if k <= 0 do (reverse(acc), lst)
+      else match lst do
+        Nil        -> (reverse(acc), Nil)
+        Cons(h, t) -> go(t, k - 1, Cons(h, acc))
+        end end
     end
-    end
+    go(xs, n, Nil)
   end
-  go(xs, Nil, Nil)
-end
 
-doc "Returns all elements except the last. Returns Nil for empty or singleton lists."
-fn drop_last(xs : List(a)) : List(a) do
-  match reverse(xs) do
-  Nil -> Nil
-  Cons(ig, rest) -> reverse(rest)
-  end
-end
-
-doc "Splits the list into consecutive chunks of at most `size` elements."
-fn chunks(xs : List(a), size : Int) : List(List(a)) do
-  fn go(lst : List(a), acc : List(List(a))) : List(List(a)) do
-    if is_empty(lst) do reverse(acc)
-    else do
-      let (chunk, rest) = split_at(lst, size)
-      go(rest, Cons(chunk, acc)) end
-    end
-  end
-  go(xs, Nil)
-end
-
--- ---- Combining ----
-
-doc """
-Pairs up elements from two lists. Stops at the shorter list.
-
-## Examples
-
-```march
-List.zip([1, 2, 3], ["a", "b", "c"])
--- [(1, "a"), (2, "b"), (3, "c")]
-
-List.zip([1, 2], ["a", "b", "c", "d"])
--- [(1, "a"), (2, "b")]
-```
-"""
-fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
-  fn go(a : List(a), b : List(b), acc : List((a, b))) : List((a, b)) do
-    match a do
-    Nil -> reverse(acc)
-    Cons(x, xt) -> do
-      match b do
-      Nil -> reverse(acc)
-      Cons(y, yt) -> go(xt, yt, Cons((x, y), acc))
+  doc "Splits into (elements satisfying pred, elements not satisfying pred)."
+  fn partition(xs : List(a), pred : a -> Bool) : (List(a), List(a)) do
+    fn go(lst : List(a), yes : List(a), no : List(a)) : (List(a), List(a)) do
+      match lst do
+      Nil        -> (reverse(yes), reverse(no))
+      Cons(h, t) -> do
+        if pred(h) do go(t, Cons(h, yes), no)
+        else go(t, yes, Cons(h, no)) end
+      end
       end
     end
+    go(xs, Nil, Nil)
+  end
+
+  doc "Returns all elements except the last. Returns Nil for empty or singleton lists."
+  fn drop_last(xs : List(a)) : List(a) do
+    match reverse(xs) do
+    Nil -> Nil
+    Cons(ig, rest) -> reverse(rest)
     end
   end
-  go(xs, ys, Nil)
-end
 
-doc "Like zip but applies `f` to each pair instead of building tuples."
-fn zip_with(xs : List(a), ys : List(b), f : a -> b -> c) : List(c) do
-  fn go(a : List(a), b : List(b), acc : List(c)) : List(c) do
-    match a do
-    Nil -> reverse(acc)
-    Cons(x, xt) -> do
-      match b do
-      Nil -> reverse(acc)
-      Cons(y, yt) -> go(xt, yt, Cons(f(x, y), acc))
+  doc "Splits the list into consecutive chunks of at most `size` elements."
+  fn chunks(xs : List(a), size : Int) : List(List(a)) do
+    fn go(lst : List(a), acc : List(List(a))) : List(List(a)) do
+      if is_empty(lst) do reverse(acc)
+      else do
+        let (chunk, rest) = split_at(lst, size)
+        go(rest, Cons(chunk, acc)) end
       end
     end
+    go(xs, Nil)
+  end
+
+  -- ---- Combining ----
+
+  doc """
+  Pairs up elements from two lists. Stops at the shorter list.
+
+  ## Examples
+
+      march> List.zip([1, 2, 3], ["a", "b", "c"])
+      march> 
+      [(1, "a"), (2, "b"), (3, "c")]
+
+      march> List.zip([1, 2], ["a", "b", "c", "d"])
+      march> 
+      [(1, "a"), (2, "b")]
+  """
+  fn zip(xs : List(a), ys : List(b)) : List((a, b)) do
+    fn go(a : List(a), b : List(b), acc : List((a, b))) : List((a, b)) do
+      match a do
+      Nil -> reverse(acc)
+      Cons(x, xt) -> do
+        match b do
+        Nil -> reverse(acc)
+        Cons(y, yt) -> go(xt, yt, Cons((x, y), acc))
+        end
+      end
+      end
+    end
+    go(xs, ys, Nil)
+  end
+
+  doc "Like zip but applies `f` to each pair instead of building tuples."
+  fn zip_with(xs : List(a), ys : List(b), f : a -> b -> c) : List(c) do
+    fn go(a : List(a), b : List(b), acc : List(c)) : List(c) do
+      match a do
+      Nil -> reverse(acc)
+      Cons(x, xt) -> do
+        match b do
+        Nil -> reverse(acc)
+        Cons(y, yt) -> go(xt, yt, Cons(f(x, y), acc))
+        end
+      end
+      end
+    end
+    go(xs, ys, Nil)
+  end
+
+  doc "Splits a list of pairs into two lists."
+  fn unzip(pairs : List((a, b))) : (List(a), List(b)) do
+    fn go(lst : List((a, b)), as_ : List(a), bs : List(b)) : (List(a), List(b)) do
+      match lst do
+      Nil            -> (reverse(as_), reverse(bs))
+      Cons((x, y), t) -> go(t, Cons(x, as_), Cons(y, bs))
+      end
+    end
+    go(pairs, Nil, Nil)
+  end
+
+  doc "Pairs each element with its 0-based index: [a, b] -> [(0, a), (1, b)]."
+  fn enumerate(xs : List(a)) : List((Int, a)) do
+    fn go(lst : List(a), i : Int, acc : List((Int, a))) : List((Int, a)) do
+      match lst do
+      Nil        -> reverse(acc)
+      Cons(h, t) -> go(t, i + 1, Cons((i, h), acc))
+      end
+    end
+    go(xs, 0, Nil)
+  end
+
+  -- ---- Reducing ----
+
+  doc "Sums a list of integers."
+  fn sum_int(xs : List(Int)) : Int do
+    fn go(lst : List(Int), acc : Int) : Int do
+      match lst do
+      Nil        -> acc
+      Cons(x, t) -> go(t, acc + x)
+      end
+    end
+    go(xs, 0)
+  end
+
+  doc "Multiplies all integers in a list."
+  fn product_int(xs : List(Int)) : Int do
+    fn go(lst : List(Int), acc : Int) : Int do
+      match lst do
+      Nil        -> acc
+      Cons(x, t) -> go(t, acc * x)
+      end
+    end
+    go(xs, 1)
+  end
+
+  doc "Returns the minimum integer in the list. Panics if empty."
+  fn minimum_int(xs : List(Int)) : Int do
+    fn go(lst : List(Int), m : Int) : Int do
+      match lst do
+      Nil        -> m
+      Cons(x, r) -> if x < m do go(r, x) else go(r, m) end
+      end
+    end
+    match xs do
+    Nil        -> panic("List.minimum_int: empty list")
+    Cons(h, t) -> go(t, h)
     end
   end
-  go(xs, ys, Nil)
-end
 
-doc "Splits a list of pairs into two lists."
-fn unzip(pairs : List((a, b))) : (List(a), List(b)) do
-  fn go(lst : List((a, b)), as_ : List(a), bs : List(b)) : (List(a), List(b)) do
-    match lst do
-    Nil            -> (reverse(as_), reverse(bs))
-    Cons((x, y), t) -> go(t, Cons(x, as_), Cons(y, bs))
+  doc "Returns the maximum integer in the list. Panics if empty."
+  fn maximum_int(xs : List(Int)) : Int do
+    fn go(lst : List(Int), m : Int) : Int do
+      match lst do
+      Nil        -> m
+      Cons(x, r) -> if x > m do go(r, x) else go(r, m) end
+      end
+    end
+    match xs do
+    Nil        -> panic("List.maximum_int: empty list")
+    Cons(h, t) -> go(t, h)
     end
   end
-  go(pairs, Nil, Nil)
-end
 
-doc "Pairs each element with its 0-based index: [a, b] -> [(0, a), (1, b)]."
-fn enumerate(xs : List(a)) : List((Int, a)) do
-  fn go(lst : List(a), i : Int, acc : List((Int, a))) : List((Int, a)) do
-    match lst do
-    Nil        -> reverse(acc)
-    Cons(h, t) -> go(t, i + 1, Cons((i, h), acc))
+  -- ---- Deduplication ----
+
+  doc "Returns true if `xs` contains `x` (using structural equality)."
+  fn member(xs : List(a), x : a) : Bool do
+    any(xs, fn y -> y == x)
+  end
+
+  doc "Removes consecutive duplicate elements (keeps first of each run).  Uses structural equality."
+  fn dedup(xs : List(a)) : List(a) do
+    fn go(lst : List(a), prev : a, acc : List(a)) : List(a) do
+      match lst do
+      Nil        -> reverse(acc)
+      Cons(h, t) -> do
+        if h == prev do go(t, h, acc)
+        else go(t, h, Cons(h, acc)) end
+      end
+      end
+    end
+    match xs do
+    Nil        -> Nil
+    Cons(h, t) -> go(t, h, Cons(h, Nil))
     end
   end
-  go(xs, 0, Nil)
-end
-
--- ---- Reducing ----
-
-doc "Sums a list of integers."
-fn sum_int(xs : List(Int)) : Int do
-  fn go(lst : List(Int), acc : Int) : Int do
-    match lst do
-    Nil        -> acc
-    Cons(x, t) -> go(t, acc + x)
-    end
-  end
-  go(xs, 0)
-end
-
-doc "Multiplies all integers in a list."
-fn product_int(xs : List(Int)) : Int do
-  fn go(lst : List(Int), acc : Int) : Int do
-    match lst do
-    Nil        -> acc
-    Cons(x, t) -> go(t, acc * x)
-    end
-  end
-  go(xs, 1)
-end
-
-doc "Returns the minimum integer in the list. Panics if empty."
-fn minimum_int(xs : List(Int)) : Int do
-  fn go(lst : List(Int), m : Int) : Int do
-    match lst do
-    Nil        -> m
-    Cons(x, r) -> if x < m do go(r, x) else go(r, m) end
-    end
-  end
-  match xs do
-  Nil        -> panic("List.minimum_int: empty list")
-  Cons(h, t) -> go(t, h)
-  end
-end
-
-doc "Returns the maximum integer in the list. Panics if empty."
-fn maximum_int(xs : List(Int)) : Int do
-  fn go(lst : List(Int), m : Int) : Int do
-    match lst do
-    Nil        -> m
-    Cons(x, r) -> if x > m do go(r, x) else go(r, m) end
-    end
-  end
-  match xs do
-  Nil        -> panic("List.maximum_int: empty list")
-  Cons(h, t) -> go(t, h)
-  end
-end
-
--- ---- Deduplication ----
-
-doc "Returns true if `xs` contains `x` (using structural equality)."
-fn member(xs : List(a), x : a) : Bool do
-  any(xs, fn y -> y == x)
-end
-
-doc "Removes consecutive duplicate elements (keeps first of each run).  Uses structural equality."
-fn dedup(xs : List(a)) : List(a) do
-  fn go(lst : List(a), prev : a, acc : List(a)) : List(a) do
-    match lst do
-    Nil        -> reverse(acc)
-    Cons(h, t) -> do
-      if h == prev do go(t, h, acc)
-      else go(t, h, Cons(h, acc)) end
-    end
-    end
-  end
-  match xs do
-  Nil        -> Nil
-  Cons(h, t) -> go(t, h, Cons(h, Nil))
-  end
-end
 
 end

@@ -4,262 +4,262 @@
 
 mod Seq do
 
--- Step type for fold_while: Continue to keep folding, Halt to stop early.
-ptype Step(a) = Continue(a) | Halt(a)
+  -- Step type for fold_while: Continue to keep folding, Halt to stop early.
+  ptype Step(a) = Continue(a) | Halt(a)
 
--- Seq wraps a closure. March's type syntax cannot express the rank-2 type,
--- so we omit the type annotation — the constructor takes any value (the fold fn).
-ptype Seq(a) = Seq(a)
+  -- Seq wraps a closure. March's type syntax cannot express the rank-2 type,
+  -- so we omit the type annotation — the constructor takes any value (the fold fn).
+  ptype Seq(a) = Seq(a)
 
--- Internal helper: reverse a list. Avoids dependency on list.march.
-pfn rev(xs) do
-  fn go(lst, acc) do
-    match lst do
-    Nil -> acc
-    Cons(h, t) -> go(t, Cons(h, acc))
+  -- Internal helper: reverse a list. Avoids dependency on list.march.
+  pfn rev(xs) do
+    fn go(lst, acc) do
+      match lst do
+      Nil -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(xs, Nil)
+  end
+
+  -- Construction
+
+  fn from_list(xs) do
+    fn go(lst, a, f) do
+      match lst do
+      Nil -> a
+      Cons(h, t) -> go(t, f(a, h), f)
+      end
+    end
+    Seq(fn(acc, f) -> go(xs, acc, f))
+  end
+
+  fn empty() do
+    Seq(fn(acc, ig) -> acc)
+  end
+
+  fn unfold(seed, next) do
+    fn go(s, a, f) do
+      match next(s) do
+      None -> a
+      Some(pair) -> do
+        let (value, s2) = pair
+        go(s2, f(a, value), f)
+      end
+      end
+    end
+    Seq(fn(acc, f) -> go(seed, acc, f))
+  end
+
+  fn concat(s1, s2) do
+    fn run_concat(fold1, fold2, acc, f) do
+      let mid = fold1(acc, f)
+      fold2(mid, f)
+    end
+    match s1 do
+    Seq(fold1) -> do
+      match s2 do
+      Seq(fold2) ->
+        Seq(fn(acc, f) -> run_concat(fold1, fold2, acc, f))
+      end
+    end
     end
   end
-  go(xs, Nil)
-end
 
--- Construction
+  -- Transformation (lazy)
 
-fn from_list(xs) do
-  fn go(lst, a, f) do
-    match lst do
-    Nil -> a
-    Cons(h, t) -> go(t, f(a, h), f)
+  fn map(seq, f) do
+    match seq do
+    Seq(fold) ->
+      Seq(fn(acc, g) -> fold(acc, fn(a, x) -> g(a, f(x))))
     end
   end
-  Seq(fn(acc, f) -> go(xs, acc, f))
-end
 
-fn empty() do
-  Seq(fn(acc, ig) -> acc)
-end
-
-fn unfold(seed, next) do
-  fn go(s, a, f) do
-    match next(s) do
-    None -> a
-    Some(pair) -> do
-      let (value, s2) = pair
-      go(s2, f(a, value), f)
-    end
-    end
-  end
-  Seq(fn(acc, f) -> go(seed, acc, f))
-end
-
-fn concat(s1, s2) do
-  fn run_concat(fold1, fold2, acc, f) do
-    let mid = fold1(acc, f)
-    fold2(mid, f)
-  end
-  match s1 do
-  Seq(fold1) -> do
-    match s2 do
-    Seq(fold2) ->
-      Seq(fn(acc, f) -> run_concat(fold1, fold2, acc, f))
-    end
-  end
-  end
-end
-
--- Transformation (lazy)
-
-fn map(seq, f) do
-  match seq do
-  Seq(fold) ->
-    Seq(fn(acc, g) -> fold(acc, fn(a, x) -> g(a, f(x))))
-  end
-end
-
-fn filter(seq, pred) do
-  match seq do
-  Seq(fold) -> do
-    Seq(fn(acc, f) ->
-      fold(acc, fn(a, x) -> if pred(x) do f(a, x) else a end)
-    )
-  end
-  end
-end
-
-fn flat_map(seq, f) do
-  match seq do
-  Seq(fold) -> do
-    Seq(fn(acc, g) ->
-      fold(acc, fn(a, x) ->
-        match f(x) do
-        Seq(inner_fold) -> inner_fold(a, g)
-        end
+  fn filter(seq, pred) do
+    match seq do
+    Seq(fold) -> do
+      Seq(fn(acc, f) ->
+        fold(acc, fn(a, x) -> if pred(x) do f(a, x) else a end)
       )
+    end
+    end
+  end
+
+  fn flat_map(seq, f) do
+    match seq do
+    Seq(fold) -> do
+      Seq(fn(acc, g) ->
+        fold(acc, fn(a, x) ->
+          match f(x) do
+          Seq(inner_fold) -> inner_fold(a, g)
+          end
+        )
+      )
+    end
+    end
+  end
+
+  fn take(seq, n) do
+    fn step_take(pair, x, f) do
+      let (a, count) = pair
+      if count >= n do (a, count)
+      else (f(a, x), count + 1) end
+    end
+    fn run_take(fold, acc, f) do
+      let result = fold((acc, 0), fn(pair, x) -> step_take(pair, x, f))
+      let (a, ig) = result
+      a
+    end
+    match seq do
+    Seq(fold) ->
+      Seq(fn(acc, f) -> run_take(fold, acc, f))
+    end
+  end
+
+  fn drop(seq, n) do
+    fn step_drop(pair, x, f) do
+      let (a, skipped) = pair
+      if skipped < n do (a, skipped + 1)
+      else (f(a, x), skipped + 1) end
+    end
+    fn run_drop(fold, acc, f) do
+      let result = fold((acc, 0), fn(pair, x) -> step_drop(pair, x, f))
+      let (a, ig) = result
+      a
+    end
+    match seq do
+    Seq(fold) ->
+      Seq(fn(acc, f) -> run_drop(fold, acc, f))
+    end
+  end
+
+  fn zip(s1, s2) do
+    fn step_zip(pair, x, f) do
+      let (a, remaining) = pair
+      match remaining do
+      Nil -> (a, Nil)
+      Cons(y, rest) -> do
+        let new_a = f(a, (x, y))
+        (new_a, rest)
+      end
+      end
+    end
+    -- Takes s2_seq as a param so to_list is called at consumption time (deferred)
+    fn run_zip(fold, s2_seq, acc, f) do
+      let lst2 = to_list(s2_seq)
+      let result = fold((acc, lst2), fn(pair, x) -> step_zip(pair, x, f))
+      let (a, ig) = result
+      a
+    end
+    match s1 do
+    Seq(fold) ->
+      Seq(fn(acc, f) -> run_zip(fold, s2, acc, f))
+    end
+  end
+
+  fn batch(seq, n) do
+    -- Group elements into lists of size n.
+    fn step_batch(triple, x, f) do
+      let (a, buf, count) = triple
+      if count + 1 >= n do
+        (f(a, rev(Cons(x, buf))), Nil, 0)
+      else
+        (a, Cons(x, buf), count + 1)
+      end
+    end
+    fn flush_batch(triple, f) do
+      let (a, buf, ig) = triple
+      match buf do
+      Nil -> a
+      _ -> f(a, rev(buf))
+      end
+    end
+    fn run_batch(fold, acc, f) do
+      let result = fold((acc, Nil, 0), fn(triple, x) -> step_batch(triple, x, f))
+      flush_batch(result, f)
+    end
+    match seq do
+    Seq(fold) ->
+      Seq(fn(acc, f) -> run_batch(fold, acc, f))
+    end
+  end
+
+  -- Consumption (eager)
+
+  fn to_list(seq) do
+    match seq do
+    Seq(fold) ->
+      rev(fold(Nil, fn(acc, x) -> Cons(x, acc)))
+    end
+  end
+
+  fn fold(seq, start, f) do
+    match seq do
+    Seq(folder) -> folder(start, f)
+    end
+  end
+
+  -- Note: fold_while does NOT truly short-circuit iteration.
+  -- With church-encoded folds, all elements are visited but accumulation
+  -- is skipped after Halt. For file streaming, the file is read to EOF
+  -- even after Halt. This is a known limitation of the fold-based model.
+  fn fold_while(seq, start, f) do
+    fn step_fold_while(step, x, f) do
+      match step do
+      Halt(a) -> Halt(a)
+      Continue(a) -> f(a, x)
+      end
+    end
+    match seq do
+    Seq(folder) -> do
+      let result = folder(Continue(start), fn(step, x) -> step_fold_while(step, x, f))
+      match result do
+      Continue(a) -> a
+      Halt(a) -> a
+      end
+    end
+    end
+  end
+
+  fn each(seq, f) do
+    match seq do
+    Seq(folder) -> do
+      folder(:ok, fn(ig, x) -> f(x))
+      :ok
+    end
+    end
+  end
+
+  fn count(seq) do
+    match seq do
+    Seq(folder) ->
+      folder(0, fn(n, ig) -> n + 1)
+    end
+  end
+
+  fn find(seq, pred) do
+    fold_while(seq, None, fn(ig, x) -> do
+      if pred(x) do Halt(Some(x))
+      else Continue(None) end
+    end
     )
   end
-  end
-end
 
-fn take(seq, n) do
-  fn step_take(pair, x, f) do
-    let (a, count) = pair
-    if count >= n do (a, count)
-    else (f(a, x), count + 1) end
-  end
-  fn run_take(fold, acc, f) do
-    let result = fold((acc, 0), fn(pair, x) -> step_take(pair, x, f))
-    let (a, ig) = result
-    a
-  end
-  match seq do
-  Seq(fold) ->
-    Seq(fn(acc, f) -> run_take(fold, acc, f))
-  end
-end
-
-fn drop(seq, n) do
-  fn step_drop(pair, x, f) do
-    let (a, skipped) = pair
-    if skipped < n do (a, skipped + 1)
-    else (f(a, x), skipped + 1) end
-  end
-  fn run_drop(fold, acc, f) do
-    let result = fold((acc, 0), fn(pair, x) -> step_drop(pair, x, f))
-    let (a, ig) = result
-    a
-  end
-  match seq do
-  Seq(fold) ->
-    Seq(fn(acc, f) -> run_drop(fold, acc, f))
-  end
-end
-
-fn zip(s1, s2) do
-  fn step_zip(pair, x, f) do
-    let (a, remaining) = pair
-    match remaining do
-    Nil -> (a, Nil)
-    Cons(y, rest) -> do
-      let new_a = f(a, (x, y))
-      (new_a, rest)
+  -- Note: March identifiers cannot contain '?', so these are named `any` and `all`
+  fn any(seq, pred) do
+    fold_while(seq, false, fn(ig, x) -> do
+      if pred(x) do Halt(true)
+      else Continue(false) end
     end
+    )
+  end
+
+  fn all(seq, pred) do
+    fold_while(seq, true, fn(ig, x) -> do
+      if pred(x) do Continue(true)
+      else Halt(false) end
     end
+    )
   end
-  -- Takes s2_seq as a param so to_list is called at consumption time (deferred)
-  fn run_zip(fold, s2_seq, acc, f) do
-    let lst2 = to_list(s2_seq)
-    let result = fold((acc, lst2), fn(pair, x) -> step_zip(pair, x, f))
-    let (a, ig) = result
-    a
-  end
-  match s1 do
-  Seq(fold) ->
-    Seq(fn(acc, f) -> run_zip(fold, s2, acc, f))
-  end
-end
-
-fn batch(seq, n) do
-  -- Group elements into lists of size n.
-  fn step_batch(triple, x, f) do
-    let (a, buf, count) = triple
-    if count + 1 >= n do
-      (f(a, rev(Cons(x, buf))), Nil, 0)
-    else
-      (a, Cons(x, buf), count + 1)
-    end
-  end
-  fn flush_batch(triple, f) do
-    let (a, buf, ig) = triple
-    match buf do
-    Nil -> a
-    _ -> f(a, rev(buf))
-    end
-  end
-  fn run_batch(fold, acc, f) do
-    let result = fold((acc, Nil, 0), fn(triple, x) -> step_batch(triple, x, f))
-    flush_batch(result, f)
-  end
-  match seq do
-  Seq(fold) ->
-    Seq(fn(acc, f) -> run_batch(fold, acc, f))
-  end
-end
-
--- Consumption (eager)
-
-fn to_list(seq) do
-  match seq do
-  Seq(fold) ->
-    rev(fold(Nil, fn(acc, x) -> Cons(x, acc)))
-  end
-end
-
-fn fold(seq, start, f) do
-  match seq do
-  Seq(folder) -> folder(start, f)
-  end
-end
-
--- Note: fold_while does NOT truly short-circuit iteration.
--- With church-encoded folds, all elements are visited but accumulation
--- is skipped after Halt. For file streaming, the file is read to EOF
--- even after Halt. This is a known limitation of the fold-based model.
-fn fold_while(seq, start, f) do
-  fn step_fold_while(step, x, f) do
-    match step do
-    Halt(a) -> Halt(a)
-    Continue(a) -> f(a, x)
-    end
-  end
-  match seq do
-  Seq(folder) -> do
-    let result = folder(Continue(start), fn(step, x) -> step_fold_while(step, x, f))
-    match result do
-    Continue(a) -> a
-    Halt(a) -> a
-    end
-  end
-  end
-end
-
-fn each(seq, f) do
-  match seq do
-  Seq(folder) -> do
-    folder(:ok, fn(ig, x) -> f(x))
-    :ok
-  end
-  end
-end
-
-fn count(seq) do
-  match seq do
-  Seq(folder) ->
-    folder(0, fn(n, ig) -> n + 1)
-  end
-end
-
-fn find(seq, pred) do
-  fold_while(seq, None, fn(ig, x) -> do
-    if pred(x) do Halt(Some(x))
-    else Continue(None) end
-  end
-  )
-end
-
--- Note: March identifiers cannot contain '?', so these are named `any` and `all`
-fn any(seq, pred) do
-  fold_while(seq, false, fn(ig, x) -> do
-    if pred(x) do Halt(true)
-    else Continue(false) end
-  end
-  )
-end
-
-fn all(seq, pred) do
-  fold_while(seq, true, fn(ig, x) -> do
-    if pred(x) do Continue(true)
-    else Halt(false) end
-  end
-  )
-end
 
 end

@@ -44,214 +44,214 @@
 
 mod ChannelServer do
 
--- ── Message types ──────────────────────────────────────────────────────────
--- ChannelMailbox, PubSubMsg, and BroadcastMsg are defined in channel.march
--- and available here as Channel.ChannelMailbox etc.
+  -- ── Message types ──────────────────────────────────────────────────────────
+  -- ChannelMailbox, PubSubMsg, and BroadcastMsg are defined in channel.march
+  -- and available here as Channel.ChannelMailbox etc.
 
--- ── JoinResult ────────────────────────────────────────────────────────────
+  -- ── JoinResult ────────────────────────────────────────────────────────────
 
--- Result of a channel join attempt.
---   JoinOk(state)     — join accepted; state is the handler's initial state
---   JoinErr(reason)   — join rejected with a reason string
-type JoinResult(a) = JoinOk(a) | JoinErr(String)
+  -- Result of a channel join attempt.
+  --   JoinOk(state)     — join accepted; state is the handler's initial state
+  --   JoinErr(reason)   — join rejected with a reason string
+  type JoinResult(a) = JoinOk(a) | JoinErr(String)
 
--- ── Channel configuration ──────────────────────────────────────────────────
+  -- ── Channel configuration ──────────────────────────────────────────────────
 
--- Runtime configuration for a single channel process.
---   socket         — the Channel.Socket for this join
---   join_fn        — fn(topic, params, socket) -> Result(state, String)
---   handle_in_fn   — fn(ref, event, payload, state, socket) -> HandleResult
---   handle_info_fn — fn(msg, state, socket) -> HandleResult
---   leave_fn       — fn(reason, state, socket) -> Unit
---   pubsub_shard   — pid of the PubSub shard actor for this topic
-type ChannelConfig(a, b, c, d, e) = ChannelConfig(
-  a,    -- socket (Channel.Socket)
-  b,    -- join_fn
-  c,    -- handle_in_fn
-  d,    -- handle_info_fn
-  e,    -- leave_fn
-  Int   -- pubsub_shard_pid
-)
+  -- Runtime configuration for a single channel process.
+  --   socket         — the Channel.Socket for this join
+  --   join_fn        — fn(topic, params, socket) -> Result(state, String)
+  --   handle_in_fn   — fn(ref, event, payload, state, socket) -> HandleResult
+  --   handle_info_fn — fn(msg, state, socket) -> HandleResult
+  --   leave_fn       — fn(reason, state, socket) -> Unit
+  --   pubsub_shard   — pid of the PubSub shard actor for this topic
+  type ChannelConfig(a, b, c, d, e) = ChannelConfig(
+    a,    -- socket (Channel.Socket)
+    b,    -- join_fn
+    c,    -- handle_in_fn
+    d,    -- handle_info_fn
+    e,    -- leave_fn
+    Int   -- pubsub_shard_pid
+  )
 
-doc "Construct a ChannelConfig."
-fn make_config(socket, join_fn, handle_in_fn, handle_info_fn, leave_fn, shard_pid) do
-  ChannelConfig(socket, join_fn, handle_in_fn, handle_info_fn, leave_fn, shard_pid)
-end
-
-doc "Extract the socket from a config."
-fn config_socket(cfg) do
-  match cfg do | ChannelConfig(s, _, _, _, _, _) -> s end
-end
-
-doc "Extract the pubsub shard pid from a config."
-fn config_shard(cfg) do
-  match cfg do | ChannelConfig(_, _, _, _, _, sp) -> sp end
-end
-
--- ── Join helper ────────────────────────────────────────────────────────────
-
-doc """
-Perform the join handshake.  Calls join_fn, subscribes to PubSub on success.
-Returns JoinOk(state) or JoinErr(reason).
-Must be called from within an actor handler (requires actor runtime).
-"""
-fn do_join(cfg, topic, params_json) do
-  match cfg do
-  ChannelConfig(socket, join_fn, _, _, _, shard_pid) ->
-    do
-      let result = join_fn(topic, params_json, socket)
-      match result do
-      Ok(st) ->
-        do
-          let my_pid = self()
-          PubSub.subscribe_in_shard(shard_pid, topic, my_pid)
-          JoinOk(st)
-        end
-      Err(reason) ->
-        JoinErr(reason)
-      end
-    end
+  doc "Construct a ChannelConfig."
+  fn make_config(socket, join_fn, handle_in_fn, handle_info_fn, leave_fn, shard_pid) do
+    ChannelConfig(socket, join_fn, handle_in_fn, handle_info_fn, leave_fn, shard_pid)
   end
-end
 
--- ── Leave helper ──────────────────────────────────────────────────────────
-
-doc """
-Perform the leave teardown.  Unsubscribes from PubSub, calls leave_fn.
-Must be called from within an actor handler (requires actor runtime).
-"""
-fn do_leave(cfg, st, reason_str) do
-  match cfg do
-  ChannelConfig(socket, _, _, _, leave_fn, shard_pid) ->
-    do
-      let my_pid = self()
-      let topic  = Channel.socket_topic(socket)
-      PubSub.unsubscribe_in_shard(shard_pid, topic, my_pid)
-      leave_fn(reason_str, st, socket)
-    end
+  doc "Extract the socket from a config."
+  fn config_socket(cfg) do
+    match cfg do | ChannelConfig(s, _, _, _, _, _) -> s end
   end
-end
 
--- ── HandleResult dispatch ─────────────────────────────────────────────────
+  doc "Extract the pubsub shard pid from a config."
+  fn config_shard(cfg) do
+    match cfg do | ChannelConfig(_, _, _, _, _, sp) -> sp end
+  end
 
-doc """
-Apply a HandleResult: if Reply, send the reply to the transport; return the
-new state.  For Stop, call do_leave.
-Returns the new channel state.
-Must be called from within an actor handler (requires actor runtime).
-"""
-fn apply_result(cfg, result, ref) do
-  match cfg do
-  ChannelConfig(socket, _, _, _, _, _) ->
-    do
-      let transport_pid = Channel.socket_transport_pid(socket)
-      let topic         = Channel.socket_topic(socket)
-      let join_ref      = Channel.socket_join_ref(socket)
-      match result do
-      Reply(status, payload_json, new_st) ->
-        do
-          let reply_m = Channel.reply_msg(join_ref, ref, topic, status, payload_json)
-          actor_cast(transport_pid, ChannelPush("phx_reply", Channel.serialize(reply_m)))
-          new_st
-        end
-      NoReply(new_st) ->
-        new_st
-      Stop(reason, new_st) ->
-        do
-          do_leave(cfg, new_st, reason)
-          new_st
+  -- ── Join helper ────────────────────────────────────────────────────────────
+
+  doc """
+  Perform the join handshake.  Calls join_fn, subscribes to PubSub on success.
+  Returns JoinOk(state) or JoinErr(reason).
+  Must be called from within an actor handler (requires actor runtime).
+  """
+  fn do_join(cfg, topic, params_json) do
+    match cfg do
+    ChannelConfig(socket, join_fn, _, _, _, shard_pid) ->
+      do
+        let result = join_fn(topic, params_json, socket)
+        match result do
+        Ok(st) ->
+          do
+            let my_pid = self()
+            PubSub.subscribe_in_shard(shard_pid, topic, my_pid)
+            JoinOk(st)
+          end
+        Err(reason) ->
+          JoinErr(reason)
         end
       end
     end
   end
-end
 
--- ── Broadcast dispatch ────────────────────────────────────────────────────
+  -- ── Leave helper ──────────────────────────────────────────────────────────
 
-doc """
-Handle a ChannelBroadcast message received by a channel process.
-Forwards the event+payload to the transport pid.
-Must be called from within an actor handler (requires actor runtime).
-"""
-fn handle_broadcast(cfg, event, payload_json) do
-  match cfg do
-  ChannelConfig(socket, _, _, _, _, _) ->
-    actor_cast(Channel.socket_transport_pid(socket), ChannelPush(event, payload_json))
-  end
-end
-
-doc """
-Handle a ChannelBroadcastFrom message.
-Forwards event+payload to the transport unless this process is excluded.
-Must be called from within an actor handler (requires actor runtime).
-"""
-fn handle_broadcast_from(cfg, excl_pid, event, payload_json) do
-  match cfg do
-  ChannelConfig(socket, _, _, _, _, _) ->
-    do
-      let my_pid = self()
-      if my_pid == excl_pid do () else actor_cast(Channel.socket_transport_pid(socket), ChannelPush(event, payload_json)) end
+  doc """
+  Perform the leave teardown.  Unsubscribes from PubSub, calls leave_fn.
+  Must be called from within an actor handler (requires actor runtime).
+  """
+  fn do_leave(cfg, st, reason_str) do
+    match cfg do
+    ChannelConfig(socket, _, _, _, leave_fn, shard_pid) ->
+      do
+        let my_pid = self()
+        let topic  = Channel.socket_topic(socket)
+        PubSub.unsubscribe_in_shard(shard_pid, topic, my_pid)
+        leave_fn(reason_str, st, socket)
+      end
     end
   end
-end
 
--- ── PubSub shard helpers ──────────────────────────────────────────────────
+  -- ── HandleResult dispatch ─────────────────────────────────────────────────
 
-doc """
-Process a PubSubSubscribe message inside a shard actor.
-Returns the new PubSubState.
-"""
-fn shard_handle_subscribe(ps_state, topic, pid) do
-  PubSub.subscribe_state(ps_state, topic, pid)
-end
-
-doc """
-Process a PubSubUnsubscribe message inside a shard actor.
-Returns the new PubSubState.
-"""
-fn shard_handle_unsubscribe(ps_state, topic, pid) do
-  PubSub.unsubscribe_state(ps_state, topic, pid)
-end
-
-doc """
-Process a PubSubBroadcast message inside a shard actor.
-Fans out to all subscribers, optionally excluding a pid.
-Returns the PubSubState unchanged.
-"""
-fn shard_handle_broadcast(ps_state, topic, excluded_opt, event, payload_json) do
-  let subs = PubSub.get_subscribers(ps_state, topic)
-  PubSub.broadcast_to(subs, excluded_opt, event, payload_json)
-  ps_state
-end
-
--- ── Shard selection ───────────────────────────────────────────────────────
-
-doc """
-Select the shard pid for `topic` from a list of shard pids.
-Uses PubSub.topic_shard for consistent routing.
-"""
-fn select_shard(shards, topic) do
-  let n   = shard_list_length(shards)
-  let idx = PubSub.topic_shard(topic, n)
-  shard_list_nth(shards, idx)
-end
-
-pfn shard_list_length(lst) do
-  fn go(xs, acc) do
-    match xs do
-    Nil -> acc
-    Cons(_, t) -> go(t, acc + 1)
+  doc """
+  Apply a HandleResult: if Reply, send the reply to the transport; return the
+  new state.  For Stop, call do_leave.
+  Returns the new channel state.
+  Must be called from within an actor handler (requires actor runtime).
+  """
+  fn apply_result(cfg, result, ref) do
+    match cfg do
+    ChannelConfig(socket, _, _, _, _, _) ->
+      do
+        let transport_pid = Channel.socket_transport_pid(socket)
+        let topic         = Channel.socket_topic(socket)
+        let join_ref      = Channel.socket_join_ref(socket)
+        match result do
+        Reply(status, payload_json, new_st) ->
+          do
+            let reply_m = Channel.reply_msg(join_ref, ref, topic, status, payload_json)
+            actor_cast(transport_pid, ChannelPush("phx_reply", Channel.serialize(reply_m)))
+            new_st
+          end
+        NoReply(new_st) ->
+          new_st
+        Stop(reason, new_st) ->
+          do
+            do_leave(cfg, new_st, reason)
+            new_st
+          end
+        end
+      end
     end
   end
-  go(lst, 0)
-end
 
-pfn shard_list_nth(lst, n) do
-  match lst do
-  Nil -> 0
-  Cons(h, t) ->
-    if n == 0 do h else shard_list_nth(t, n - 1) end
+  -- ── Broadcast dispatch ────────────────────────────────────────────────────
+
+  doc """
+  Handle a ChannelBroadcast message received by a channel process.
+  Forwards the event+payload to the transport pid.
+  Must be called from within an actor handler (requires actor runtime).
+  """
+  fn handle_broadcast(cfg, event, payload_json) do
+    match cfg do
+    ChannelConfig(socket, _, _, _, _, _) ->
+      actor_cast(Channel.socket_transport_pid(socket), ChannelPush(event, payload_json))
+    end
   end
-end
+
+  doc """
+  Handle a ChannelBroadcastFrom message.
+  Forwards event+payload to the transport unless this process is excluded.
+  Must be called from within an actor handler (requires actor runtime).
+  """
+  fn handle_broadcast_from(cfg, excl_pid, event, payload_json) do
+    match cfg do
+    ChannelConfig(socket, _, _, _, _, _) ->
+      do
+        let my_pid = self()
+        if my_pid == excl_pid do () else actor_cast(Channel.socket_transport_pid(socket), ChannelPush(event, payload_json)) end
+      end
+    end
+  end
+
+  -- ── PubSub shard helpers ──────────────────────────────────────────────────
+
+  doc """
+  Process a PubSubSubscribe message inside a shard actor.
+  Returns the new PubSubState.
+  """
+  fn shard_handle_subscribe(ps_state, topic, pid) do
+    PubSub.subscribe_state(ps_state, topic, pid)
+  end
+
+  doc """
+  Process a PubSubUnsubscribe message inside a shard actor.
+  Returns the new PubSubState.
+  """
+  fn shard_handle_unsubscribe(ps_state, topic, pid) do
+    PubSub.unsubscribe_state(ps_state, topic, pid)
+  end
+
+  doc """
+  Process a PubSubBroadcast message inside a shard actor.
+  Fans out to all subscribers, optionally excluding a pid.
+  Returns the PubSubState unchanged.
+  """
+  fn shard_handle_broadcast(ps_state, topic, excluded_opt, event, payload_json) do
+    let subs = PubSub.get_subscribers(ps_state, topic)
+    PubSub.broadcast_to(subs, excluded_opt, event, payload_json)
+    ps_state
+  end
+
+  -- ── Shard selection ───────────────────────────────────────────────────────
+
+  doc """
+  Select the shard pid for `topic` from a list of shard pids.
+  Uses PubSub.topic_shard for consistent routing.
+  """
+  fn select_shard(shards, topic) do
+    let n   = shard_list_length(shards)
+    let idx = PubSub.topic_shard(topic, n)
+    shard_list_nth(shards, idx)
+  end
+
+  pfn shard_list_length(lst) do
+    fn go(xs, acc) do
+      match xs do
+      Nil -> acc
+      Cons(_, t) -> go(t, acc + 1)
+      end
+    end
+    go(lst, 0)
+  end
+
+  pfn shard_list_nth(lst, n) do
+    match lst do
+    Nil -> 0
+    Cons(h, t) ->
+      if n == 0 do h else shard_list_nth(t, n - 1) end
+    end
+  end
 
 end

@@ -10,124 +10,124 @@
 
 mod Process do
 
--- Result of a completed subprocess.
--- ProcessResult(exit_code, stdout, stderr)
-type ProcessResult = ProcessResult(Int, String, String)
+  -- Result of a completed subprocess.
+  -- ProcessResult(exit_code, stdout, stderr)
+  type ProcessResult = ProcessResult(Int, String, String)
 
--- Handle for an asynchronously-spawned subprocess (non-blocking).
--- LiveProcess(pid, stream_id) — both fields are opaque implementation details.
-type LiveProcess = LiveProcess(Int, Int)
+  -- Handle for an asynchronously-spawned subprocess (non-blocking).
+  -- LiveProcess(pid, stream_id) — both fields are opaque implementation details.
+  type LiveProcess = LiveProcess(Int, Int)
 
--- ---- Subprocess execution ----
+  -- ---- Subprocess execution ----
 
-doc "Run command with args, wait for it to finish. Returns Ok(ProcessResult) or Err(msg)."
-fn run(command, args) do
-  process_spawn_sync(command, args)
-end
-
-doc "Run command and return its stdout as a Seq(String) of lines. Returns Ok(Seq) or Err(msg)."
-fn run_stream(command, args) do
-  process_spawn_lines(command, args)
-end
-
--- ---- Environment ----
-
-doc "Get the value of an environment variable. Returns Some(value) or None."
-fn env(name) do
-  process_env(name)
-end
-
-doc "Set an environment variable."
-fn set_env(name, value) do
-  process_set_env(name, value)
-end
-
--- ---- Current process ----
-
-doc "Returns the current working directory."
-fn cwd() do
-  process_cwd()
-end
-
-doc "Terminate the process with the given exit code."
-fn exit(code) do
-  process_exit(code)
-end
-
-doc "Returns the command-line arguments as List(String) (argv[0] is the executable)."
-fn argv() do
-  process_argv()
-end
-
-doc "Returns the OS-level PID of the current process."
-fn pid() do
-  process_pid()
-end
-
--- ---- Async subprocess management ----
-
-doc """
-Spawn a command asynchronously (non-blocking).
-Returns Ok(LiveProcess) immediately — the child process starts running
-in the background. Use read_line to consume its stdout, kill to terminate
-it, and wait_proc to reap its exit code.
-"""
-fn spawn_async(command, args) do
-  process_spawn_async(command, args)
-end
-
-doc """
-Read one line from the live process's stdout.
-Returns Some(line) for each output line, or None when the process has
-closed its stdout (typically on exit).
-Blocks until a full line is available.
-"""
-fn read_line(p) do
-  process_read_line(p)
-end
-
-doc "Send SIGTERM to the live process."
-fn kill(p) do
-  process_kill_proc(p)
-end
-
-doc """
-Wait for the live process to exit and return its exit code.
-Also closes the stdout channel. Should be called after the process
-exits (read_line returned None) or after kill.
-"""
-fn wait_proc(p) do
-  process_wait_proc(p)
-end
-
--- ---- ProcessResult helpers ----
-
-doc "Extract the exit code from a ProcessResult."
-fn exit_code(r) do
-  match r do
-  ProcessResult(code, _, _) -> code
+  doc "Run command with args, wait for it to finish. Returns Ok(ProcessResult) or Err(msg)."
+  fn run(command, args) do
+    process_spawn_sync(command, args)
   end
-end
 
-doc "Extract captured stdout from a ProcessResult."
-fn stdout(r) do
-  match r do
-  ProcessResult(_, out, _) -> out
+  doc "Run command and return its stdout as a Seq(String) of lines. Returns Ok(Seq) or Err(msg)."
+  fn run_stream(command, args) do
+    process_spawn_lines(command, args)
   end
-end
 
-doc "Extract captured stderr from a ProcessResult."
-fn stderr(r) do
-  match r do
-  ProcessResult(_, _, err) -> err
-  end
-end
+  -- ---- Environment ----
 
-doc "True if the command exited with code 0."
-fn ok(r) do
-  match r do
-  ProcessResult(code, _, _) -> code == 0
+  doc "Get the value of an environment variable. Returns Some(value) or None."
+  fn env(name) do
+    process_env(name)
   end
-end
+
+  doc "Set an environment variable."
+  fn set_env(name, value) do
+    process_set_env(name, value)
+  end
+
+  -- ---- Current process ----
+
+  doc "Returns the current working directory."
+  fn cwd() do
+    process_cwd()
+  end
+
+  doc "Terminate the process with the given exit code."
+  fn exit(code) do
+    process_exit(code)
+  end
+
+  doc "Returns the command-line arguments as List(String) (argv[0] is the executable)."
+  fn argv() do
+    process_argv()
+  end
+
+  doc "Returns the OS-level PID of the current process."
+  fn pid() do
+    process_pid()
+  end
+
+  -- ---- Async subprocess management ----
+
+  doc """
+  Spawn a command asynchronously (non-blocking).
+  Returns Ok(LiveProcess) immediately — the child process starts running
+  in the background. Use read_line to consume its stdout, kill to terminate
+  it, and wait_proc to reap its exit code.
+  """
+  fn spawn_async(command, args) do
+    process_spawn_async(command, args)
+  end
+
+  doc """
+  Read one line from the live process's stdout.
+  Returns Some(line) for each output line, or None when the process has
+  closed its stdout (typically on exit).
+  Blocks until a full line is available.
+  """
+  fn read_line(p) do
+    process_read_line(p)
+  end
+
+  doc "Send SIGTERM to the live process."
+  fn kill(p) do
+    process_kill_proc(p)
+  end
+
+  doc """
+  Wait for the live process to exit and return its exit code.
+  Also closes the stdout channel. Should be called after the process
+  exits (read_line returned None) or after kill.
+  """
+  fn wait_proc(p) do
+    process_wait_proc(p)
+  end
+
+  -- ---- ProcessResult helpers ----
+
+  doc "Extract the exit code from a ProcessResult."
+  fn exit_code(r) do
+    match r do
+    ProcessResult(code, _, _) -> code
+    end
+  end
+
+  doc "Extract captured stdout from a ProcessResult."
+  fn stdout(r) do
+    match r do
+    ProcessResult(_, out, _) -> out
+    end
+  end
+
+  doc "Extract captured stderr from a ProcessResult."
+  fn stderr(r) do
+    match r do
+    ProcessResult(_, _, err) -> err
+    end
+  end
+
+  doc "True if the command exited with code 0."
+  fn ok(r) do
+    match r do
+    ProcessResult(code, _, _) -> code == 0
+    end
+  end
 
 end

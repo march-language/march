@@ -16,540 +16,540 @@
 
 mod BigInt do
 
-ptype BigInt = BigInt(Bool, List(Int))
+  ptype BigInt = BigInt(Bool, List(Int))
 
--- ---- Internal constants and helpers ----
+  -- ---- Internal constants and helpers ----
 
-pfn base() : Int do 10000 end
+  pfn base() : Int do 10000 end
 
--- Remove trailing zeros (leading zeros in little-endian) from a digit list.
-pfn normalize(digits : List(Int)) : List(Int) do
-  fn drop_leading_zeros(xs) do
-    match xs do
-    Nil -> Nil
-    Cons(0, rest) -> drop_leading_zeros(rest)
-    _ -> xs
+  -- Remove trailing zeros (leading zeros in little-endian) from a digit list.
+  pfn normalize(digits : List(Int)) : List(Int) do
+    fn drop_leading_zeros(xs) do
+      match xs do
+      Nil -> Nil
+      Cons(0, rest) -> drop_leading_zeros(rest)
+      _ -> xs
+      end
     end
-  end
-  fn rev(xs, acc) do
-    match xs do
-    Nil -> acc
-    Cons(h, t) -> rev(t, Cons(h, acc))
+    fn rev(xs, acc) do
+      match xs do
+      Nil -> acc
+      Cons(h, t) -> rev(t, Cons(h, acc))
+      end
     end
+    rev(drop_leading_zeros(rev(digits, Nil)), Nil)
   end
-  rev(drop_leading_zeros(rev(digits, Nil)), Nil)
-end
 
--- Compare two magnitude digit lists. Returns -1, 0, or 1.
-pfn compare_digits(a : List(Int), b : List(Int)) : Int do
-  let la = length(a)
-  let lb = length(b)
-  if la < lb do -1
-  else if la > lb do 1
-  else do
-    -- Same length: compare from most significant limb down.
-    -- Reverse so we go from most-significant to least-significant.
-    fn cmp_lists(xs : List(Int), ys : List(Int)) : Int do
-      fn go(as_, bs) do
-        match as_ do
-        Nil -> 0
-        Cons(x, xrest) -> do
-          match bs do
+  -- Compare two magnitude digit lists. Returns -1, 0, or 1.
+  pfn compare_digits(a : List(Int), b : List(Int)) : Int do
+    let la = length(a)
+    let lb = length(b)
+    if la < lb do -1
+    else if la > lb do 1
+    else do
+      -- Same length: compare from most significant limb down.
+      -- Reverse so we go from most-significant to least-significant.
+      fn cmp_lists(xs : List(Int), ys : List(Int)) : Int do
+        fn go(as_, bs) do
+          match as_ do
           Nil -> 0
-          Cons(y, yrest) ->
-            if x < y do -1
-            else if x > y do 1
-            else go(xrest, yrest) end end
+          Cons(x, xrest) -> do
+            match bs do
+            Nil -> 0
+            Cons(y, yrest) ->
+              if x < y do -1
+              else if x > y do 1
+              else go(xrest, yrest) end end
+            end
+          end
           end
         end
+        go(xs, ys)
+      end
+      cmp_lists(reverse(a), reverse(b)) end end
+    end
+  end
+
+  -- Add two digit lists (unsigned). Returns normalized digit list.
+  pfn add_digits(a : List(Int), b : List(Int)) : List(Int) do
+    fn rev(xs, acc) do
+      match xs do
+      Nil -> acc
+      Cons(h, t) -> rev(t, Cons(h, acc))
+      end
+    end
+    fn go(xs : List(Int), ys : List(Int), carry : Int, acc : List(Int)) : List(Int) do
+      match xs do
+      Nil -> do
+        match ys do
+        Nil ->
+          if carry == 0 do rev(acc, Nil)
+          else rev(Cons(carry, acc), Nil) end
+        Cons(y, yr) -> do
+          let sum = y + carry
+          go(Nil, yr, sum / base(), Cons(sum - (sum / base()) * base(), acc))
+        end
         end
       end
-      go(xs, ys)
+      Cons(x, xr) -> do
+        match ys do
+        Nil -> do
+          let sum = x + carry
+          go(xr, Nil, sum / base(), Cons(sum - (sum / base()) * base(), acc))
+        end
+        Cons(y, yr) -> do
+          let sum = x + y + carry
+          go(xr, yr, sum / base(), Cons(sum - (sum / base()) * base(), acc))
+        end
+        end
+      end
+      end
     end
-    cmp_lists(reverse(a), reverse(b)) end end
+    normalize(go(a, b, 0, Nil))
   end
-end
 
--- Add two digit lists (unsigned). Returns normalized digit list.
-pfn add_digits(a : List(Int), b : List(Int)) : List(Int) do
-  fn rev(xs, acc) do
-    match xs do
-    Nil -> acc
-    Cons(h, t) -> rev(t, Cons(h, acc))
+  -- Subtract smaller magnitude b from larger magnitude a (a >= b assumed).
+  -- Returns normalized digit list.
+  pfn sub_digits(a : List(Int), b : List(Int)) : List(Int) do
+    fn rev(xs, acc) do
+      match xs do
+      Nil -> acc
+      Cons(h, t) -> rev(t, Cons(h, acc))
+      end
     end
+    fn go(xs : List(Int), ys : List(Int), borrow : Int, acc : List(Int)) : List(Int) do
+      match xs do
+      Nil -> rev(acc, Nil)
+      Cons(x, xr) -> do
+        let y = match ys do
+          Nil        -> 0
+          Cons(y, _) -> y
+          end
+        let yr = match ys do
+          Nil        -> Nil
+          Cons(_, t) -> t
+          end
+        let diff = x - y - borrow
+        if diff < 0 do
+          go(xr, yr, 1, Cons(diff + base(), acc))
+        else
+          go(xr, yr, 0, Cons(diff, acc))
+        end
+      end
+      end
+    end
+    normalize(go(a, b, 0, Nil))
   end
-  fn go(xs : List(Int), ys : List(Int), carry : Int, acc : List(Int)) : List(Int) do
-    match xs do
-    Nil -> do
-      match ys do
-      Nil ->
+
+  -- Multiply a digit list by a single limb.
+  pfn mul_digit(a : List(Int), d : Int) : List(Int) do
+    fn rev(xs, acc) do
+      match xs do
+      Nil -> acc
+      Cons(h, t) -> rev(t, Cons(h, acc))
+      end
+    end
+    fn go(xs : List(Int), carry : Int, acc : List(Int)) : List(Int) do
+      match xs do
+      Nil -> do
         if carry == 0 do rev(acc, Nil)
         else rev(Cons(carry, acc), Nil) end
-      Cons(y, yr) -> do
-        let sum = y + carry
-        go(Nil, yr, sum / base(), Cons(sum - (sum / base()) * base(), acc))
+      end
+      Cons(x, rest) -> do
+        let prod = x * d + carry
+        go(rest, prod / base(), Cons(prod - (prod / base()) * base(), acc))
       end
       end
     end
-    Cons(x, xr) -> do
+    normalize(go(a, 0, Nil))
+  end
+
+  -- Shift a digit list left by n limbs (multiply by base^n).
+  pfn shift_left(a : List(Int), n : Int) : List(Int) do
+    if n <= 0 do a
+    else shift_left(Cons(0, a), n - 1) end
+  end
+
+  -- Multiply two digit lists.
+  pfn mul_digits(a : List(Int), b : List(Int)) : List(Int) do
+    fn go(ys : List(Int), shift : Int, acc : List(Int)) : List(Int) do
       match ys do
-      Nil -> do
-        let sum = x + carry
-        go(xr, Nil, sum / base(), Cons(sum - (sum / base()) * base(), acc))
-      end
-      Cons(y, yr) -> do
-        let sum = x + y + carry
-        go(xr, yr, sum / base(), Cons(sum - (sum / base()) * base(), acc))
+      Nil -> acc
+      Cons(y, rest) -> do
+        let partial = shift_left(mul_digit(a, y), shift)
+        go(rest, shift + 1, add_digits(acc, partial))
       end
       end
     end
-    end
+    go(b, 0, Nil)
   end
-  normalize(go(a, b, 0, Nil))
-end
 
--- Subtract smaller magnitude b from larger magnitude a (a >= b assumed).
--- Returns normalized digit list.
-pfn sub_digits(a : List(Int), b : List(Int)) : List(Int) do
-  fn rev(xs, acc) do
-    match xs do
-    Nil -> acc
-    Cons(h, t) -> rev(t, Cons(h, acc))
+  -- Divide digit list `a` by single limb `d`. Returns (quotient, remainder).
+  pfn div_digit(a : List(Int), d : Int) : (List(Int), Int) do
+    fn rev(xs, acc) do
+      match xs do
+      Nil -> acc
+      Cons(h, t) -> rev(t, Cons(h, acc))
+      end
     end
+    fn go(xs : List(Int), carry : Int, acc : List(Int)) : (List(Int), Int) do
+      match xs do
+      Nil -> (rev(acc, Nil), carry)
+      Cons(x, rest) -> do
+        let cur = carry * base() + x
+        let q = cur / d
+        let new_carry = cur - q * d
+        go(rest, new_carry, Cons(q, acc))
+      end
+      end
+    end
+    let reversed_a = reverse(a)
+    let (q_msb_first, rem) = go(reversed_a, 0, Nil)
+    (normalize(reverse(q_msb_first)), rem)
   end
-  fn go(xs : List(Int), ys : List(Int), borrow : Int, acc : List(Int)) : List(Int) do
-    match xs do
-    Nil -> rev(acc, Nil)
-    Cons(x, xr) -> do
-      let y = match ys do
-        Nil        -> 0
-        Cons(y, _) -> y
+
+  -- ---- Length helper ----
+
+  pfn length(xs : List(a)) : Int do
+    fn go(lst, acc) do
+      match lst do
+      Nil        -> acc
+      Cons(_, t) -> go(t, acc + 1)
+      end
+    end
+    go(xs, 0)
+  end
+
+  pfn reverse(xs : List(a)) : List(a) do
+    fn go(lst, acc) do
+      match lst do
+      Nil        -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(xs, Nil)
+  end
+
+  -- ---- Construction ----
+
+  doc "Returns BigInt zero."
+  fn zero() : BigInt do
+    BigInt(true, Nil)
+  end
+
+  doc "Returns BigInt one."
+  fn one() : BigInt do
+    BigInt(true, Cons(1, Nil))
+  end
+
+  doc "Converts a native Int to BigInt."
+  fn from_int(n : Int) : BigInt do
+    if n == 0 do BigInt(true, Nil)
+    else do
+      let sign = n >= 0
+      let abs_n = if n >= 0 do n else 0 - n end
+      fn to_digits(x : Int) : List(Int) do
+        fn go(n, acc) do
+          if n == 0 do acc
+          else go(n / base(), Cons(n - (n / base()) * base(), acc)) end
         end
-      let yr = match ys do
-        Nil        -> Nil
-        Cons(_, t) -> t
-        end
-      let diff = x - y - borrow
-      if diff < 0 do
-        go(xr, yr, 1, Cons(diff + base(), acc))
-      else
-        go(xr, yr, 0, Cons(diff, acc))
+        reverse(go(x, Nil))
       end
-    end
-    end
-  end
-  normalize(go(a, b, 0, Nil))
-end
-
--- Multiply a digit list by a single limb.
-pfn mul_digit(a : List(Int), d : Int) : List(Int) do
-  fn rev(xs, acc) do
-    match xs do
-    Nil -> acc
-    Cons(h, t) -> rev(t, Cons(h, acc))
+      BigInt(sign, to_digits(abs_n)) end
     end
   end
-  fn go(xs : List(Int), carry : Int, acc : List(Int)) : List(Int) do
-    match xs do
-    Nil -> do
-      if carry == 0 do rev(acc, Nil)
-      else rev(Cons(carry, acc), Nil) end
-    end
-    Cons(x, rest) -> do
-      let prod = x * d + carry
-      go(rest, prod / base(), Cons(prod - (prod / base()) * base(), acc))
-    end
-    end
-  end
-  normalize(go(a, 0, Nil))
-end
 
--- Shift a digit list left by n limbs (multiply by base^n).
-pfn shift_left(a : List(Int), n : Int) : List(Int) do
-  if n <= 0 do a
-  else shift_left(Cons(0, a), n - 1) end
-end
+  -- ---- Arithmetic ----
 
--- Multiply two digit lists.
-pfn mul_digits(a : List(Int), b : List(Int)) : List(Int) do
-  fn go(ys : List(Int), shift : Int, acc : List(Int)) : List(Int) do
-    match ys do
-    Nil -> acc
-    Cons(y, rest) -> do
-      let partial = shift_left(mul_digit(a, y), shift)
-      go(rest, shift + 1, add_digits(acc, partial))
-    end
-    end
-  end
-  go(b, 0, Nil)
-end
-
--- Divide digit list `a` by single limb `d`. Returns (quotient, remainder).
-pfn div_digit(a : List(Int), d : Int) : (List(Int), Int) do
-  fn rev(xs, acc) do
-    match xs do
-    Nil -> acc
-    Cons(h, t) -> rev(t, Cons(h, acc))
-    end
-  end
-  fn go(xs : List(Int), carry : Int, acc : List(Int)) : (List(Int), Int) do
-    match xs do
-    Nil -> (rev(acc, Nil), carry)
-    Cons(x, rest) -> do
-      let cur = carry * base() + x
-      let q = cur / d
-      let new_carry = cur - q * d
-      go(rest, new_carry, Cons(q, acc))
-    end
-    end
-  end
-  let reversed_a = reverse(a)
-  let (q_msb_first, rem) = go(reversed_a, 0, Nil)
-  (normalize(reverse(q_msb_first)), rem)
-end
-
--- ---- Length helper ----
-
-pfn length(xs : List(a)) : Int do
-  fn go(lst, acc) do
-    match lst do
-    Nil        -> acc
-    Cons(_, t) -> go(t, acc + 1)
-    end
-  end
-  go(xs, 0)
-end
-
-pfn reverse(xs : List(a)) : List(a) do
-  fn go(lst, acc) do
-    match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, Cons(h, acc))
-    end
-  end
-  go(xs, Nil)
-end
-
--- ---- Construction ----
-
-doc "Returns BigInt zero."
-fn zero() : BigInt do
-  BigInt(true, Nil)
-end
-
-doc "Returns BigInt one."
-fn one() : BigInt do
-  BigInt(true, Cons(1, Nil))
-end
-
-doc "Converts a native Int to BigInt."
-fn from_int(n : Int) : BigInt do
-  if n == 0 do BigInt(true, Nil)
-  else do
-    let sign = n >= 0
-    let abs_n = if n >= 0 do n else 0 - n end
-    fn to_digits(x : Int) : List(Int) do
-      fn go(n, acc) do
-        if n == 0 do acc
-        else go(n / base(), Cons(n - (n / base()) * base(), acc)) end
-      end
-      reverse(go(x, Nil))
-    end
-    BigInt(sign, to_digits(abs_n)) end
-  end
-end
-
--- ---- Arithmetic ----
-
-doc "Adds two BigInts."
-fn add(a : BigInt, b : BigInt) : BigInt do
-  match a do
-  BigInt(sa, da) -> do
-    match b do
-    BigInt(sb, db) ->
-      if sa == sb do
-        -- Same sign: add magnitudes, keep sign
-        BigInt(sa, add_digits(da, db))
-      else do
-        -- Different signs: subtract smaller from larger
-        let cmp = compare_digits(da, db)
-        if cmp == 0 do BigInt(true, Nil)
-        else if cmp > 0 do
-          -- |a| > |b|: result has sign of a
-          BigInt(sa, sub_digits(da, db))
-        else
-          -- |b| > |a|: result has sign of b
-          BigInt(sb, sub_digits(db, da))
-        end end
-      end end
-    end
-  end
-  end
-end
-
-doc "Subtracts b from a."
-fn sub(a : BigInt, b : BigInt) : BigInt do
-  match b do
-  BigInt(sb, db) -> add(a, BigInt(!sb, db))
-  end
-end
-
--- Note: ! is the boolean negation operator in March
--- Actually let me use a helper
-
-pfn negate_sign(s : Bool) : Bool do
-  if s do false else true end
-end
-
-doc "Negates a BigInt."
-fn negate(a : BigInt) : BigInt do
-  match a do
-  BigInt(s, d) -> do
-    match d do
-    Nil -> BigInt(true, Nil)
-    _   -> BigInt(negate_sign(s), d)
-    end
-  end
-  end
-end
-
-doc "Multiplies two BigInts."
-fn mul(a : BigInt, b : BigInt) : BigInt do
-  match a do
-  BigInt(sa, da) -> do
-    match b do
-    BigInt(sb, db) -> do
-      let result_digits = mul_digits(da, db)
-      match result_digits do
-      Nil -> BigInt(true, Nil)
-      _   -> BigInt(sa == sb, result_digits)
-      end
-    end
-    end
-  end
-  end
-end
-
-doc """
-Divides a by b.  Uses truncation toward zero: `div(-17, 3) == -5`,
-`div(17, -3) == -5`, `div(-17, -3) == 5`.  Panics if b is zero.
-
-**Limitation:** only single-limb divisors (|b| < `base()`, roughly 10^9)
-are supported in the current implementation.  Multi-limb divisors raise
-`BigInt.div: multi-limb divisor not yet supported` — this is a loud
-failure, not a silent wrong result, but callers must guard against it
-until long division lands.  Most practical use cases (dividing by small
-denominators, modular arithmetic) fit within the limb bound.
-"""
-fn div(a : BigInt, b : BigInt) : BigInt do
-  match b do
-  BigInt(_, Nil) -> panic("BigInt.div: division by zero")
-  BigInt(sb, db) -> do
+  doc "Adds two BigInts."
+  fn add(a : BigInt, b : BigInt) : BigInt do
     match a do
     BigInt(sa, da) -> do
-      -- Single-limb fast path: Knuth long division (TAOCP §4.3.1 Alg. D)
-      -- would be needed for the general case.  Not implemented yet.
-      match db do
-      Cons(d, Nil) -> do
-        let (q, _) = div_digit(da, d)
-        match q do
-        Nil -> BigInt(true, Nil)
-        _   -> BigInt(sa == sb, q)
-        end
-      end
-      _ ->
-        panic("BigInt.div: multi-limb divisor not yet supported (use |b| < 10^9)")
-      end
-    end
-    end
-  end
-  end
-end
-
-doc """
-Computes a mod b (truncated modulo, same sign as a).  The identity
-`a == div(a, b) * b + mod_(a, b)` always holds.  Examples:
-`mod_(-17, 3) == -2`, `mod_(17, 3) == 2`.  Panics if b is zero.
-
-**Limitation:** only single-limb divisors (|b| < `base()`, roughly 10^9)
-are supported.  Multi-limb divisors raise
-`BigInt.mod: multi-limb divisor not yet supported`.
-"""
-fn mod_(a : BigInt, b : BigInt) : BigInt do
-  match b do
-  BigInt(_, Nil) -> panic("BigInt.mod: division by zero")
-  BigInt(sb, db) -> do
-    match a do
-    BigInt(sa, da) -> do
-      match db do
-      Cons(d, Nil) -> do
-        let (_, r) = div_digit(da, d)
-        if r == 0 do BigInt(true, Nil)
-        else BigInt(sa, Cons(r, Nil)) end
-      end
-      _ ->
-        panic("BigInt.mod: multi-limb divisor not yet supported (use |b| < 10^9)")
-      end
-    end
-    end
-  end
-  end
-end
-
--- ---- Comparison ----
-
-doc "Compares two BigInts. Returns -1 (a < b), 0 (a == b), or 1 (a > b)."
-fn compare(a : BigInt, b : BigInt) : Int do
-  match a do
-  BigInt(sa, da) -> do
-    match b do
-    BigInt(sb, db) -> do
-      let a_zero = match da do
-        Nil -> true
-        _ -> false
-        end
-      let b_zero = match db do
-        Nil -> true
-        _ -> false
-        end
-      if a_zero && b_zero do 0
-      else if a_zero do if sb do 0 - 1 else 1 end
-      else if b_zero do if sa do 1 else 0 - 1 end
-      else if sa && !sb do 1
-      else if !sa && sb do 0 - 1
-      else do
-        let mag_cmp = compare_digits(da, db)
-        if sa do mag_cmp else 0 - mag_cmp end
-      end end end end end end
-    end
-    end
-  end
-  end
-end
-
-doc "Returns true if a equals b."
-fn eq(a : BigInt, b : BigInt) : Bool do
-  compare(a, b) == 0
-end
-
-doc "Returns true if a < b."
-fn lt(a : BigInt, b : BigInt) : Bool do
-  compare(a, b) < 0
-end
-
-doc "Returns true if a > b."
-fn gt(a : BigInt, b : BigInt) : Bool do
-  compare(a, b) > 0
-end
-
-doc "Returns true if a <= b."
-fn lte(a : BigInt, b : BigInt) : Bool do
-  compare(a, b) <= 0
-end
-
-doc "Returns true if a >= b."
-fn gte(a : BigInt, b : BigInt) : Bool do
-  compare(a, b) >= 0
-end
-
--- ---- Conversion ----
-
-doc """
-Converts a BigInt to its decimal string representation.
-
-The digits are stored in base 10^4 (little-endian), so each limb
-contributes 4 decimal characters (with leading zeros on all but the
-most-significant limb).  Pieces are collected into a list and
-`string_join`-ed once at the end, making the routine O(number of
-limbs) rather than the quadratic behaviour of repeated `++`.
-"""
-fn to_string(n : BigInt) : String do
-  match n do
-  BigInt(sign, digits) -> do
-    match digits do
-    Nil -> "0"
-    _ -> do
-      -- Convert little-endian base-10000 digits to decimal string.
-      -- Process from most-significant (last) to least-significant (first).
-      let reversed = reverse(digits)
-      fn digit_to_str(d : Int, is_first : Bool) : String do
-        -- Pad with leading zeros unless it's the most-significant limb
-        if is_first do int_to_string(d)
+      match b do
+      BigInt(sb, db) ->
+        if sa == sb do
+          -- Same sign: add magnitudes, keep sign
+          BigInt(sa, add_digits(da, db))
         else do
-          let s = int_to_string(d)
-          let len = string_length(s)
-          if len >= 4 do s
-          else if len == 3 do "0" ++ s
-          else if len == 2 do "00" ++ s
-          else "000" ++ s end end end end
-        end
+          -- Different signs: subtract smaller from larger
+          let cmp = compare_digits(da, db)
+          if cmp == 0 do BigInt(true, Nil)
+          else if cmp > 0 do
+            -- |a| > |b|: result has sign of a
+            BigInt(sa, sub_digits(da, db))
+          else
+            -- |b| > |a|: result has sign of b
+            BigInt(sb, sub_digits(db, da))
+          end end
+        end end
       end
-      -- Reverse-accumulate pieces, then string_join once: O(total chars).
-      fn go(ds : List(Int), is_first : Bool, acc : List(String)) : List(String) do
-        match ds do
-        Nil -> acc
-        Cons(d, rest) ->
-          go(rest, false, Cons(digit_to_str(d, is_first), acc))
-        end
-      end
-      let pieces_rev = go(reversed, true, Nil)
-      let magnitude = string_join(reverse(pieces_rev), "")
-      if sign do magnitude
-      else "-" ++ magnitude end
     end
     end
   end
+
+  doc "Subtracts b from a."
+  fn sub(a : BigInt, b : BigInt) : BigInt do
+    match b do
+    BigInt(sb, db) -> add(a, BigInt(!sb, db))
+    end
   end
-end
 
-doc "Returns the absolute value of a BigInt."
-fn abs(n : BigInt) : BigInt do
-  match n do
-  BigInt(_, d) -> BigInt(true, d)
+  -- Note: ! is the boolean negation operator in March
+  -- Actually let me use a helper
+
+  pfn negate_sign(s : Bool) : Bool do
+    if s do false else true end
   end
-end
 
-doc "Returns true if the BigInt is zero."
-fn is_zero(n : BigInt) : Bool do
-  match n do
-  BigInt(_, Nil) -> true
-  _              -> false
+  doc "Negates a BigInt."
+  fn negate(a : BigInt) : BigInt do
+    match a do
+    BigInt(s, d) -> do
+      match d do
+      Nil -> BigInt(true, Nil)
+      _   -> BigInt(negate_sign(s), d)
+      end
+    end
+    end
   end
-end
 
-doc "Returns true if the BigInt is negative."
-fn is_negative(n : BigInt) : Bool do
-  match n do
-  BigInt(_, Nil)  -> false
-  BigInt(sign, _) -> if sign do false else true end
+  doc "Multiplies two BigInts."
+  fn mul(a : BigInt, b : BigInt) : BigInt do
+    match a do
+    BigInt(sa, da) -> do
+      match b do
+      BigInt(sb, db) -> do
+        let result_digits = mul_digits(da, db)
+        match result_digits do
+        Nil -> BigInt(true, Nil)
+        _   -> BigInt(sa == sb, result_digits)
+        end
+      end
+      end
+    end
+    end
   end
-end
 
-doc "Returns true if the BigInt is positive (> 0)."
-fn is_positive(n : BigInt) : Bool do
-  match n do
-  BigInt(_, Nil)  -> false
-  BigInt(sign, _) -> sign
+  doc """
+  Divides a by b.  Uses truncation toward zero: `div(-17, 3) == -5`,
+  `div(17, -3) == -5`, `div(-17, -3) == 5`.  Panics if b is zero.
+
+  **Limitation:** only single-limb divisors (|b| < `base()`, roughly 10^9)
+  are supported in the current implementation.  Multi-limb divisors raise
+  `BigInt.div: multi-limb divisor not yet supported` — this is a loud
+  failure, not a silent wrong result, but callers must guard against it
+  until long division lands.  Most practical use cases (dividing by small
+  denominators, modular arithmetic) fit within the limb bound.
+  """
+  fn div(a : BigInt, b : BigInt) : BigInt do
+    match b do
+    BigInt(_, Nil) -> panic("BigInt.div: division by zero")
+    BigInt(sb, db) -> do
+      match a do
+      BigInt(sa, da) -> do
+        -- Single-limb fast path: Knuth long division (TAOCP §4.3.1 Alg. D)
+        -- would be needed for the general case.  Not implemented yet.
+        match db do
+        Cons(d, Nil) -> do
+          let (q, _) = div_digit(da, d)
+          match q do
+          Nil -> BigInt(true, Nil)
+          _   -> BigInt(sa == sb, q)
+          end
+        end
+        _ ->
+          panic("BigInt.div: multi-limb divisor not yet supported (use |b| < 10^9)")
+        end
+      end
+      end
+    end
+    end
   end
-end
 
--- ---- Interface implementations ----
+  doc """
+  Computes a mod b (truncated modulo, same sign as a).  The identity
+  `a == div(a, b) * b + mod_(a, b)` always holds.  Examples:
+  `mod_(-17, 3) == -2`, `mod_(17, 3) == 2`.  Panics if b is zero.
 
--- Aliases to avoid name shadowing inside impl blocks.
-pfn bigint_eq_impl(a, b) do eq(a, b) end
-pfn bigint_compare_impl(a, b) do compare(a, b) end
-pfn bigint_to_str_impl(n) do to_string(n) end
+  **Limitation:** only single-limb divisors (|b| < `base()`, roughly 10^9)
+  are supported.  Multi-limb divisors raise
+  `BigInt.mod: multi-limb divisor not yet supported`.
+  """
+  fn mod_(a : BigInt, b : BigInt) : BigInt do
+    match b do
+    BigInt(_, Nil) -> panic("BigInt.mod: division by zero")
+    BigInt(sb, db) -> do
+      match a do
+      BigInt(sa, da) -> do
+        match db do
+        Cons(d, Nil) -> do
+          let (_, r) = div_digit(da, d)
+          if r == 0 do BigInt(true, Nil)
+          else BigInt(sa, Cons(r, Nil)) end
+        end
+        _ ->
+          panic("BigInt.mod: multi-limb divisor not yet supported (use |b| < 10^9)")
+        end
+      end
+      end
+    end
+    end
+  end
 
-impl Eq(BigInt) do
-  fn eq(a, b) do bigint_eq_impl(a, b) end
-end
+  -- ---- Comparison ----
 
-impl Ord(BigInt) do
-  fn compare(a, b) do bigint_compare_impl(a, b) end
-end
+  doc "Compares two BigInts. Returns -1 (a < b), 0 (a == b), or 1 (a > b)."
+  fn compare(a : BigInt, b : BigInt) : Int do
+    match a do
+    BigInt(sa, da) -> do
+      match b do
+      BigInt(sb, db) -> do
+        let a_zero = match da do
+          Nil -> true
+          _ -> false
+          end
+        let b_zero = match db do
+          Nil -> true
+          _ -> false
+          end
+        if a_zero && b_zero do 0
+        else if a_zero do if sb do 0 - 1 else 1 end
+        else if b_zero do if sa do 1 else 0 - 1 end
+        else if sa && !sb do 1
+        else if !sa && sb do 0 - 1
+        else do
+          let mag_cmp = compare_digits(da, db)
+          if sa do mag_cmp else 0 - mag_cmp end
+        end end end end end end
+      end
+      end
+    end
+    end
+  end
 
-impl Show(BigInt) do
-  fn show(n) do bigint_to_str_impl(n) end
-end
+  doc "Returns true if a equals b."
+  fn eq(a : BigInt, b : BigInt) : Bool do
+    compare(a, b) == 0
+  end
+
+  doc "Returns true if a < b."
+  fn lt(a : BigInt, b : BigInt) : Bool do
+    compare(a, b) < 0
+  end
+
+  doc "Returns true if a > b."
+  fn gt(a : BigInt, b : BigInt) : Bool do
+    compare(a, b) > 0
+  end
+
+  doc "Returns true if a <= b."
+  fn lte(a : BigInt, b : BigInt) : Bool do
+    compare(a, b) <= 0
+  end
+
+  doc "Returns true if a >= b."
+  fn gte(a : BigInt, b : BigInt) : Bool do
+    compare(a, b) >= 0
+  end
+
+  -- ---- Conversion ----
+
+  doc """
+  Converts a BigInt to its decimal string representation.
+
+  The digits are stored in base 10^4 (little-endian), so each limb
+  contributes 4 decimal characters (with leading zeros on all but the
+  most-significant limb).  Pieces are collected into a list and
+  `string_join`-ed once at the end, making the routine O(number of
+  limbs) rather than the quadratic behaviour of repeated `++`.
+  """
+  fn to_string(n : BigInt) : String do
+    match n do
+    BigInt(sign, digits) -> do
+      match digits do
+      Nil -> "0"
+      _ -> do
+        -- Convert little-endian base-10000 digits to decimal string.
+        -- Process from most-significant (last) to least-significant (first).
+        let reversed = reverse(digits)
+        fn digit_to_str(d : Int, is_first : Bool) : String do
+          -- Pad with leading zeros unless it's the most-significant limb
+          if is_first do int_to_string(d)
+          else do
+            let s = int_to_string(d)
+            let len = string_length(s)
+            if len >= 4 do s
+            else if len == 3 do "0" ++ s
+            else if len == 2 do "00" ++ s
+            else "000" ++ s end end end end
+          end
+        end
+        -- Reverse-accumulate pieces, then string_join once: O(total chars).
+        fn go(ds : List(Int), is_first : Bool, acc : List(String)) : List(String) do
+          match ds do
+          Nil -> acc
+          Cons(d, rest) ->
+            go(rest, false, Cons(digit_to_str(d, is_first), acc))
+          end
+        end
+        let pieces_rev = go(reversed, true, Nil)
+        let magnitude = string_join(reverse(pieces_rev), "")
+        if sign do magnitude
+        else "-" ++ magnitude end
+      end
+      end
+    end
+    end
+  end
+
+  doc "Returns the absolute value of a BigInt."
+  fn abs(n : BigInt) : BigInt do
+    match n do
+    BigInt(_, d) -> BigInt(true, d)
+    end
+  end
+
+  doc "Returns true if the BigInt is zero."
+  fn is_zero(n : BigInt) : Bool do
+    match n do
+    BigInt(_, Nil) -> true
+    _              -> false
+    end
+  end
+
+  doc "Returns true if the BigInt is negative."
+  fn is_negative(n : BigInt) : Bool do
+    match n do
+    BigInt(_, Nil)  -> false
+    BigInt(sign, _) -> if sign do false else true end
+    end
+  end
+
+  doc "Returns true if the BigInt is positive (> 0)."
+  fn is_positive(n : BigInt) : Bool do
+    match n do
+    BigInt(_, Nil)  -> false
+    BigInt(sign, _) -> sign
+    end
+  end
+
+  -- ---- Interface implementations ----
+
+  -- Aliases to avoid name shadowing inside impl blocks.
+  pfn bigint_eq_impl(a, b) do eq(a, b) end
+  pfn bigint_compare_impl(a, b) do compare(a, b) end
+  pfn bigint_to_str_impl(n) do to_string(n) end
+
+  impl Eq(BigInt) do
+    fn eq(a, b) do bigint_eq_impl(a, b) end
+  end
+
+  impl Ord(BigInt) do
+    fn compare(a, b) do bigint_compare_impl(a, b) end
+  end
+
+  impl Show(BigInt) do
+    fn show(n) do bigint_to_str_impl(n) end
+  end
 
 end

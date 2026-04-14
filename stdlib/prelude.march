@@ -13,159 +13,162 @@
 
 mod Prelude do
 
--- ---- Diverging ----
+  -- ---- Diverging ----
 
-doc """
-Terminates the program with a runtime error.
-Used for violated invariants — bugs, not expected failures.
-Propagates to the enclosing actor boundary.
-"""
-fn panic(msg : String) : a do
-  panic_(msg)
-end
-
-doc """
-Marks code as not yet implemented.
-Typechecks as any type so you can sketch a program top-down.
-Never valid in production.
-"""
-fn todo(msg : String) : a do
-  todo_(msg)
-end
-
-doc "Asserts that a code path is unreachable."
-fn unreachable() : a do
-  unreachable_()
-end
-
--- ---- Option helpers ----
-
-doc "Extracts the value from Some(x), panicking if None."
-fn unwrap(opt : Option(a)) : a do
-  match opt do
-  Some(x) -> x
-  None    -> panic("unwrap called on None")
+  doc """
+  Terminates the program with a runtime error.
+  Used for violated invariants — bugs, not expected failures.
+  Propagates to the enclosing actor boundary.
+  """
+  fn panic(msg : String) : a do
+    panic_(msg)
   end
-end
 
-doc "Returns the contained value, or `default` if None."
-fn unwrap_or(opt : Option(a), default : a) : a do
-  match opt do
-  Some(x) -> x
-  None    -> default
+  doc """
+  Marks code as not yet implemented.
+  Typechecks as any type so you can sketch a program top-down.
+  Never valid in production.
+  """
+  fn todo(msg : String) : a do
+    todo_(msg)
   end
-end
 
--- ---- List basics ----
-
-doc "Returns the first element of the list. Panics if empty."
-fn head(xs : List(a)) : a do
-  match xs do
-  Cons(h, _) -> h
-  Nil        -> panic("head: empty list")
+  doc "Asserts that a code path is unreachable."
+  fn unreachable() : a do
+    unreachable_()
   end
-end
 
-doc "Returns all but the first element. Panics if empty."
-fn tail(xs : List(a)) : List(a) do
-  match xs do
-  Cons(_, t) -> t
-  Nil        -> panic("tail: empty list")
+  -- ---- Option helpers ----
+
+  doc "Extracts the value from Some(x), panicking if None."
+  fn unwrap(opt : Option(a)) : a do
+    match opt do
+    Some(x) -> x
+    None    -> panic("unwrap called on None")
+    end
   end
-end
 
-doc "Returns true if the list is empty."
-fn is_nil(xs : List(a)) : Bool do
-  match xs do
-  Nil -> true
-  Cons(_, _) -> false
+  doc "Returns the contained value, or `default` if None."
+  fn unwrap_or(opt : Option(a), default : a) : a do
+    match opt do
+    Some(x) -> x
+    None    -> default
+    end
   end
-end
 
-doc "Returns the number of elements in the list."
-fn length(xs : List(a)) : Int do
-  fn go(lst : List(a), acc : Int) : Int do
-    match lst do
+  -- ---- List basics ----
+
+  doc "Returns the first element of the list. Panics if empty."
+  fn head(xs : List(a)) : a do
+    match xs do
+    Cons(h, _) -> h
+    Nil        -> panic("head: empty list")
+    end
+  end
+
+  doc "Returns all but the first element. Panics if empty."
+  fn tail(xs : List(a)) : List(a) do
+    match xs do
+    Cons(_, t) -> t
+    Nil        -> panic("tail: empty list")
+    end
+  end
+
+  doc "Returns true if the list is empty."
+  fn is_nil(xs : List(a)) : Bool do
+    match xs do
+    Nil -> true
+    Cons(_, _) -> false
+    end
+  end
+
+  doc "Returns the number of elements in the list."
+  fn length(xs : List(a)) : Int do
+    fn go(lst : List(a), acc : Int) : Int do
+      match lst do
+      Nil        -> acc
+      Cons(_, t) -> go(t, acc + 1)
+      end
+    end
+    go(xs, 0)
+  end
+
+  doc "Reverses a list."
+  fn reverse(xs : List(a)) : List(a) do
+    fn go(lst : List(a), acc : List(a)) : List(a) do
+      match lst do
+      Nil        -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(xs, Nil)
+  end
+
+  doc """
+  Left fold over a list.  Argument order: collection first, init
+  second, callback last (uncurried-collection convention).
+  """
+  fn fold_left(xs : List(a), acc : b, f : (b, a) -> b) : b do
+    match xs do
     Nil        -> acc
-    Cons(_, t) -> go(t, acc + 1)
+    Cons(h, t) -> fold_left(t, f(acc, h), f)
     end
   end
-  go(xs, 0)
-end
 
-doc "Reverses a list."
-fn reverse(xs : List(a)) : List(a) do
-  fn go(lst : List(a), acc : List(a)) : List(a) do
-    match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, Cons(h, acc))
+  doc "Returns only the elements satisfying `pred`."
+  fn filter(xs : List(a), pred : a -> Bool) : List(a) do
+    fn go(acc : List(a), remaining : List(a)) : List(a) do
+      match remaining do
+      Nil        -> reverse(acc)
+      Cons(h, t) -> if pred(h) do go(Cons(h, acc), t) else go(acc, t) end
+      end
     end
+    go(Nil, xs)
   end
-  go(xs, Nil)
-end
 
-doc "Left fold over a list."
-fn fold_left(acc : b, xs : List(a), f : b -> a -> b) : b do
-  match xs do
-  Nil        -> acc
-  Cons(h, t) -> fold_left(f(acc, h), t, f)
-  end
-end
-
-doc "Returns only the elements satisfying `pred`."
-fn filter(xs : List(a), pred : a -> Bool) : List(a) do
-  fn go(acc : List(a), remaining : List(a)) : List(a) do
-    match remaining do
-    Nil        -> reverse(acc)
-    Cons(h, t) -> if pred(h) do go(Cons(h, acc), t) else go(acc, t) end
+  doc "Applies `f` to every element of the list."
+  fn map(xs : List(a), f : a -> b) : List(b) do
+    fn go(acc : List(b), remaining : List(a)) : List(b) do
+      match remaining do
+      Nil        -> reverse(acc)
+      Cons(h, t) -> go(Cons(f(h), acc), t)
+      end
     end
+    go(Nil, xs)
   end
-  go(Nil, xs)
-end
 
-doc "Applies `f` to every element of the list."
-fn map(xs : List(a), f : a -> b) : List(b) do
-  fn go(acc : List(b), remaining : List(a)) : List(b) do
-    match remaining do
-    Nil        -> reverse(acc)
-    Cons(h, t) -> go(Cons(f(h), acc), t)
-    end
+  -- ---- Combinators ----
+
+  doc "The identity function — returns its argument unchanged."
+  fn identity(x : a) : a do
+    x
   end
-  go(Nil, xs)
-end
 
--- ---- Combinators ----
+  doc "Function composition: compose(f, g)(x) = f(g(x))."
+  fn compose(f : b -> c, g : a -> b) : a -> c do
+    fn x -> f(g(x))
+  end
 
-doc "The identity function — returns its argument unchanged."
-fn identity(x : a) : a do
-  x
-end
+  doc "Flips the order of arguments: flip(f)(b, a) = f(a, b)."
+  fn flip(f : a -> b -> c) : b -> a -> c do
+    fn (b, a) -> f(a, b)
+  end
 
-doc "Function composition: compose(f, g)(x) = f(g(x))."
-fn compose(f : b -> c, g : a -> b) : a -> c do
-  fn x -> f(g(x))
-end
+  doc "Returns a function that always returns `x`, ignoring its argument."
+  fn const(x : a) : b -> a do
+    fn _ -> x
+  end
 
-doc "Flips the order of arguments: flip(f)(b, a) = f(a, b)."
-fn flip(f : a -> b -> c) : b -> a -> c do
-  fn (b, a) -> f(a, b)
-end
+  -- ---- IO convenience ----
 
-doc "Returns a function that always returns `x`, ignoring its argument."
-fn const(x : a) : b -> a do
-  fn _ -> x
-end
+  doc "Prints a value using its Show representation, with a trailing newline."
+  fn debug(x : a) : Unit do
+    println(to_string(x))
+  end
 
--- ---- IO convenience ----
-
-doc "Prints a value using its Show representation, with a trailing newline."
-fn debug(x : a) : Unit do
-  println(to_string(x))
-end
-
-doc "Converts any value to its string representation."
-fn inspect(x : a) : String do
-  to_string(x)
-end
+  doc "Converts any value to its string representation."
+  fn inspect(x : a) : String do
+    to_string(x)
+  end
 
 end

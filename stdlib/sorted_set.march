@@ -8,256 +8,256 @@
 
 mod SortedSet do
 
--- Internal AVL tree (same as OrderedMap, keyed by element, value = unit)
-type Tree(a) = Leaf | Node(Tree(a), a, Tree(a), Int)
+  -- Internal AVL tree (same as OrderedMap, keyed by element, value = unit)
+  type Tree(a) = Leaf | Node(Tree(a), a, Tree(a), Int)
 
--- ---- Internal helpers ----
+  -- ---- Internal helpers ----
 
-pfn height(t : Tree(a)) : Int do
-  match t do
-  Leaf -> 0
-  Node(_, _, _, h) -> h
+  pfn height(t : Tree(a)) : Int do
+    match t do
+    Leaf -> 0
+    Node(_, _, _, h) -> h
+    end
   end
-end
 
-pfn make_node(l : Tree(a), k : a, r : Tree(a)) : Tree(a) do
-  let lh = height(l)
-  let rh = height(r)
-  let h = if lh > rh do lh + 1 else rh + 1 end
-  Node(l, k, r, h)
-end
-
-pfn rotate_right(t : Tree(a)) : Tree(a) do
-  match t do
-  Node(Node(ll, lk, lr, _), k, r, _) ->
-    let new_r = make_node(lr, k, r)
-    make_node(ll, lk, new_r)
-  _ -> t
+  pfn make_node(l : Tree(a), k : a, r : Tree(a)) : Tree(a) do
+    let lh = height(l)
+    let rh = height(r)
+    let h = if lh > rh do lh + 1 else rh + 1 end
+    Node(l, k, r, h)
   end
-end
 
-pfn rotate_left(t : Tree(a)) : Tree(a) do
-  match t do
-  Node(l, k, Node(rl, rk, rr, _), _) ->
-    let new_l = make_node(l, k, rl)
-    make_node(new_l, rk, rr)
-  _ -> t
+  pfn rotate_right(t : Tree(a)) : Tree(a) do
+    match t do
+    Node(Node(ll, lk, lr, _), k, r, _) ->
+      let new_r = make_node(lr, k, r)
+      make_node(ll, lk, new_r)
+    _ -> t
+    end
   end
-end
 
-pfn bf(t : Tree(a)) : Int do
-  match t do
-  Leaf -> 0
-  Node(l, _, r, _) -> height(l) - height(r)
+  pfn rotate_left(t : Tree(a)) : Tree(a) do
+    match t do
+    Node(l, k, Node(rl, rk, rr, _), _) ->
+      let new_l = make_node(l, k, rl)
+      make_node(new_l, rk, rr)
+    _ -> t
+    end
   end
-end
 
-pfn balance(t : Tree(a)) : Tree(a) do
-  match t do
-  Leaf -> Leaf
-  Node(l, k, r, _) ->
-    let b = height(l) - height(r)
-    if b > 1 do
-      if bf(l) < 0 do
-        rotate_right(make_node(rotate_left(l), k, r))
-      else
-        rotate_right(t)
-      end
-    else
-      if b < -1 do
-        if bf(r) > 0 do
-          rotate_left(make_node(l, k, rotate_right(r)))
+  pfn bf(t : Tree(a)) : Int do
+    match t do
+    Leaf -> 0
+    Node(l, _, r, _) -> height(l) - height(r)
+    end
+  end
+
+  pfn balance(t : Tree(a)) : Tree(a) do
+    match t do
+    Leaf -> Leaf
+    Node(l, k, r, _) ->
+      let b = height(l) - height(r)
+      if b > 1 do
+        if bf(l) < 0 do
+          rotate_right(make_node(rotate_left(l), k, r))
         else
-          rotate_left(t)
+          rotate_right(t)
         end
       else
-        make_node(l, k, r)
-      end
-    end
-  end
-end
-
-pfn tree_insert(t : Tree(a), cmp : (a, a) -> Int, x : a) : Tree(a) do
-  match t do
-  Leaf -> Node(Leaf, x, Leaf, 1)
-  Node(l, k, r, _) ->
-    let c = cmp(x, k)
-    if c < 0 do
-      balance(make_node(tree_insert(l, cmp, x), k, r))
-    else
-      if c > 0 do
-        balance(make_node(l, k, tree_insert(r, cmp, x)))
-      else
-        t
-      end
-    end
-  end
-end
-
-pfn tree_member(t : Tree(a), cmp : (a, a) -> Int, x : a) : Bool do
-  match t do
-  Leaf -> false
-  Node(l, k, r, _) ->
-    let c = cmp(x, k)
-    if c < 0 do
-      tree_member(l, cmp, x)
-    else
-      if c > 0 do
-        tree_member(r, cmp, x)
-      else
-        true
-      end
-    end
-  end
-end
-
-pfn tree_min(t : Tree(a)) : Option(a) do
-  match t do
-  Leaf -> None
-  Node(Leaf, k, _, _) -> Some(k)
-  Node(l, _, _, _) -> tree_min(l)
-  end
-end
-
-pfn tree_delete_min(t : Tree(a)) : Tree(a) do
-  match t do
-  Leaf -> Leaf
-  Node(Leaf, _, r, _) -> r
-  Node(l, k, r, _) -> balance(make_node(tree_delete_min(l), k, r))
-  end
-end
-
-pfn tree_delete(t : Tree(a), cmp : (a, a) -> Int, x : a) : Tree(a) do
-  match t do
-  Leaf -> Leaf
-  Node(l, k, r, _) ->
-    let c = cmp(x, k)
-    if c < 0 do
-      balance(make_node(tree_delete(l, cmp, x), k, r))
-    else
-      if c > 0 do
-        balance(make_node(l, k, tree_delete(r, cmp, x)))
-      else
-        match tree_min(r) do
-        None -> l
-        Some(rk) -> balance(make_node(l, rk, tree_delete_min(r)))
+        if b < -1 do
+          if bf(r) > 0 do
+            rotate_left(make_node(l, k, rotate_right(r)))
+          else
+            rotate_left(t)
+          end
+        else
+          make_node(l, k, r)
         end
       end
     end
   end
-end
 
-pfn tree_to_list(t : Tree(a), acc : List(a)) : List(a) do
-  match t do
-  Leaf -> acc
-  Node(l, k, r, _) -> tree_to_list(l, Cons(k, tree_to_list(r, acc)))
+  pfn tree_insert(t : Tree(a), cmp : (a, a) -> Int, x : a) : Tree(a) do
+    match t do
+    Leaf -> Node(Leaf, x, Leaf, 1)
+    Node(l, k, r, _) ->
+      let c = cmp(x, k)
+      if c < 0 do
+        balance(make_node(tree_insert(l, cmp, x), k, r))
+      else
+        if c > 0 do
+          balance(make_node(l, k, tree_insert(r, cmp, x)))
+        else
+          t
+        end
+      end
+    end
   end
-end
 
-pfn tree_size(t : Tree(a)) : Int do
-  match t do
-  Leaf -> 0
-  Node(l, _, r, _) -> 1 + tree_size(l) + tree_size(r)
+  pfn tree_member(t : Tree(a), cmp : (a, a) -> Int, x : a) : Bool do
+    match t do
+    Leaf -> false
+    Node(l, k, r, _) ->
+      let c = cmp(x, k)
+      if c < 0 do
+        tree_member(l, cmp, x)
+      else
+        if c > 0 do
+          tree_member(r, cmp, x)
+        else
+          true
+        end
+      end
+    end
   end
-end
 
-pfn tree_fold(t : Tree(a), acc : b, f : (b, a) -> b) : b do
-  match t do
-  Leaf -> acc
-  Node(l, k, r, _) ->
-    let acc2 = tree_fold(l, acc, f)
-    let acc3 = f(acc2, k)
-    tree_fold(r, acc3, f)
+  pfn tree_min(t : Tree(a)) : Option(a) do
+    match t do
+    Leaf -> None
+    Node(Leaf, k, _, _) -> Some(k)
+    Node(l, _, _, _) -> tree_min(l)
+    end
   end
-end
 
-pfn tree_max(t : Tree(a)) : Option(a) do
-  match t do
-  Leaf -> None
-  Node(_, k, Leaf, _) -> Some(k)
-  Node(_, _, r, _) -> tree_max(r)
+  pfn tree_delete_min(t : Tree(a)) : Tree(a) do
+    match t do
+    Leaf -> Leaf
+    Node(Leaf, _, r, _) -> r
+    Node(l, k, r, _) -> balance(make_node(tree_delete_min(l), k, r))
+    end
   end
-end
 
--- ---- Public API ----
-
-doc "Creates a new empty sorted set with the given comparator."
-fn new(cmp : (a, a) -> Int) : %{cmp: (a, a) -> Int, tree: Tree(a)} do
-  %{cmp: cmp, tree: Leaf}
-end
-
-doc "Adds element v to the set. No-op if already present."
-fn add(s : %{cmp: (a, a) -> Int, tree: Tree(a)}, v : a) : %{cmp: (a, a) -> Int, tree: Tree(a)} do
-  %{cmp: s.cmp, tree: tree_insert(s.tree, s.cmp, v)}
-end
-
-doc "Removes element v from the set. No-op if not present."
-fn remove(s : %{cmp: (a, a) -> Int, tree: Tree(a)}, v : a) : %{cmp: (a, a) -> Int, tree: Tree(a)} do
-  %{cmp: s.cmp, tree: tree_delete(s.tree, s.cmp, v)}
-end
-
-doc "Returns true if v is in the set."
-fn member(s : %{cmp: (a, a) -> Int, tree: Tree(a)}, v : a) : Bool do
-  tree_member(s.tree, s.cmp, v)
-end
-
-doc "Returns all elements in sorted order."
-fn to_list(s : %{cmp: (a, a) -> Int, tree: Tree(a)}) : List(a) do
-  tree_to_list(s.tree, Nil)
-end
-
-doc "Builds a set from a list of elements."
-fn from_list(items : List(a), cmp : (a, a) -> Int) : %{cmp: (a, a) -> Int, tree: Tree(a)} do
-  List.fold_left(items, new(cmp), fn s -> fn v -> add(s, v))
-end
-
-doc "Returns the number of elements in the set."
-fn size(s : %{cmp: (a, a) -> Int, tree: Tree(a)}) : Int do
-  tree_size(s.tree)
-end
-
-doc "Returns the smallest element, or None if empty."
-fn min(s : %{cmp: (a, a) -> Int, tree: Tree(a)}) : Option(a) do
-  tree_min(s.tree)
-end
-
-doc "Returns the largest element, or None if empty."
-fn max(s : %{cmp: (a, a) -> Int, tree: Tree(a)}) : Option(a) do
-  tree_max(s.tree)
-end
-
-doc "Returns a set containing all elements in either a or b."
-fn union(a : %{cmp: (k, k) -> Int, tree: Tree(k)}, b : %{cmp: (k, k) -> Int, tree: Tree(k)}) : %{cmp: (k, k) -> Int, tree: Tree(k)} do
-  List.fold_left(to_list(b), a, fn s -> fn v -> add(s, v))
-end
-
-doc "Returns a set containing only elements in both a and b."
-fn intersect(a : %{cmp: (k, k) -> Int, tree: Tree(k)}, b : %{cmp: (k, k) -> Int, tree: Tree(k)}) : %{cmp: (k, k) -> Int, tree: Tree(k)} do
-  List.fold_left(to_list(a), new(a.cmp), fn s -> fn v ->
-    if tree_member(b.tree, b.cmp, v) do add(s, v) else s end)
-end
-
-doc "Returns a set of elements in a that are not in b."
-fn difference(a : %{cmp: (k, k) -> Int, tree: Tree(k)}, b : %{cmp: (k, k) -> Int, tree: Tree(k)}) : %{cmp: (k, k) -> Int, tree: Tree(k)} do
-  List.fold_left(to_list(b), a, fn s -> fn v -> remove(s, v))
-end
-
-doc "Folds over the set in sorted order: f(acc, element) -> acc."
-fn fold(s : %{cmp: (a, a) -> Int, tree: Tree(a)}, acc : b, f : (b, a) -> b) : b do
-  tree_fold(s.tree, acc, f)
-end
-
-doc "Returns true if the set is empty."
-fn is_empty(s : %{cmp: (a, a) -> Int, tree: Tree(a)}) : Bool do
-  match s.tree do
-  Leaf -> true
-  _ -> false
+  pfn tree_delete(t : Tree(a), cmp : (a, a) -> Int, x : a) : Tree(a) do
+    match t do
+    Leaf -> Leaf
+    Node(l, k, r, _) ->
+      let c = cmp(x, k)
+      if c < 0 do
+        balance(make_node(tree_delete(l, cmp, x), k, r))
+      else
+        if c > 0 do
+          balance(make_node(l, k, tree_delete(r, cmp, x)))
+        else
+          match tree_min(r) do
+          None -> l
+          Some(rk) -> balance(make_node(l, rk, tree_delete_min(r)))
+          end
+        end
+      end
+    end
   end
-end
 
-doc "Returns true if a is a subset of b (every element of a is in b)."
-fn subset(a : %{cmp: (k, k) -> Int, tree: Tree(k)}, b : %{cmp: (k, k) -> Int, tree: Tree(k)}) : Bool do
-  List.all(to_list(a), fn v -> tree_member(b.tree, b.cmp, v))
-end
+  pfn tree_to_list(t : Tree(a), acc : List(a)) : List(a) do
+    match t do
+    Leaf -> acc
+    Node(l, k, r, _) -> tree_to_list(l, Cons(k, tree_to_list(r, acc)))
+    end
+  end
+
+  pfn tree_size(t : Tree(a)) : Int do
+    match t do
+    Leaf -> 0
+    Node(l, _, r, _) -> 1 + tree_size(l) + tree_size(r)
+    end
+  end
+
+  pfn tree_fold(t : Tree(a), acc : b, f : (b, a) -> b) : b do
+    match t do
+    Leaf -> acc
+    Node(l, k, r, _) ->
+      let acc2 = tree_fold(l, acc, f)
+      let acc3 = f(acc2, k)
+      tree_fold(r, acc3, f)
+    end
+  end
+
+  pfn tree_max(t : Tree(a)) : Option(a) do
+    match t do
+    Leaf -> None
+    Node(_, k, Leaf, _) -> Some(k)
+    Node(_, _, r, _) -> tree_max(r)
+    end
+  end
+
+  -- ---- Public API ----
+
+  doc "Creates a new empty sorted set with the given comparator."
+  fn new(cmp : (a, a) -> Int) : %{cmp: (a, a) -> Int, tree: Tree(a)} do
+    %{cmp: cmp, tree: Leaf}
+  end
+
+  doc "Adds element v to the set. No-op if already present."
+  fn add(s : %{cmp: (a, a) -> Int, tree: Tree(a)}, v : a) : %{cmp: (a, a) -> Int, tree: Tree(a)} do
+    %{cmp: s.cmp, tree: tree_insert(s.tree, s.cmp, v)}
+  end
+
+  doc "Removes element v from the set. No-op if not present."
+  fn remove(s : %{cmp: (a, a) -> Int, tree: Tree(a)}, v : a) : %{cmp: (a, a) -> Int, tree: Tree(a)} do
+    %{cmp: s.cmp, tree: tree_delete(s.tree, s.cmp, v)}
+  end
+
+  doc "Returns true if v is in the set."
+  fn member(s : %{cmp: (a, a) -> Int, tree: Tree(a)}, v : a) : Bool do
+    tree_member(s.tree, s.cmp, v)
+  end
+
+  doc "Returns all elements in sorted order."
+  fn to_list(s : %{cmp: (a, a) -> Int, tree: Tree(a)}) : List(a) do
+    tree_to_list(s.tree, Nil)
+  end
+
+  doc "Builds a set from a list of elements."
+  fn from_list(items : List(a), cmp : (a, a) -> Int) : %{cmp: (a, a) -> Int, tree: Tree(a)} do
+    List.fold_left(new(cmp), items, fn s -> fn v -> add(s, v))
+  end
+
+  doc "Returns the number of elements in the set."
+  fn size(s : %{cmp: (a, a) -> Int, tree: Tree(a)}) : Int do
+    tree_size(s.tree)
+  end
+
+  doc "Returns the smallest element, or None if empty."
+  fn min(s : %{cmp: (a, a) -> Int, tree: Tree(a)}) : Option(a) do
+    tree_min(s.tree)
+  end
+
+  doc "Returns the largest element, or None if empty."
+  fn max(s : %{cmp: (a, a) -> Int, tree: Tree(a)}) : Option(a) do
+    tree_max(s.tree)
+  end
+
+  doc "Returns a set containing all elements in either a or b."
+  fn union(a : %{cmp: (k, k) -> Int, tree: Tree(k)}, b : %{cmp: (k, k) -> Int, tree: Tree(k)}) : %{cmp: (k, k) -> Int, tree: Tree(k)} do
+    List.fold_left(a, to_list(b), fn s -> fn v -> add(s, v))
+  end
+
+  doc "Returns a set containing only elements in both a and b."
+  fn intersect(a : %{cmp: (k, k) -> Int, tree: Tree(k)}, b : %{cmp: (k, k) -> Int, tree: Tree(k)}) : %{cmp: (k, k) -> Int, tree: Tree(k)} do
+    List.fold_left(new(a.cmp), to_list(a), fn s -> fn v ->
+      if tree_member(b.tree, b.cmp, v) do add(s, v) else s end)
+  end
+
+  doc "Returns a set of elements in a that are not in b."
+  fn difference(a : %{cmp: (k, k) -> Int, tree: Tree(k)}, b : %{cmp: (k, k) -> Int, tree: Tree(k)}) : %{cmp: (k, k) -> Int, tree: Tree(k)} do
+    List.fold_left(a, to_list(b), fn s -> fn v -> remove(s, v))
+  end
+
+  doc "Folds over the set in sorted order: f(acc, element) -> acc."
+  fn fold(s : %{cmp: (a, a) -> Int, tree: Tree(a)}, acc : b, f : (b, a) -> b) : b do
+    tree_fold(s.tree, acc, f)
+  end
+
+  doc "Returns true if the set is empty."
+  fn is_empty(s : %{cmp: (a, a) -> Int, tree: Tree(a)}) : Bool do
+    match s.tree do
+    Leaf -> true
+    _ -> false
+    end
+  end
+
+  doc "Returns true if a is a subset of b (every element of a is in b)."
+  fn subset(a : %{cmp: (k, k) -> Int, tree: Tree(k)}, b : %{cmp: (k, k) -> Int, tree: Tree(k)}) : Bool do
+    List.all(to_list(a), fn v -> tree_member(b.tree, b.cmp, v))
+  end
 
 end

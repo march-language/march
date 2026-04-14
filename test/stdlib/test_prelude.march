@@ -87,17 +87,17 @@ end
 describe "fold_left" do
   test "fold_left sums a list" do
     let xs = Cons(1, Cons(2, Cons(3, Cons(4, Nil))))
-    assert (fold_left(0, xs, fn (acc, x) -> acc + x) == 10)
+    assert (fold_left(xs, 0, fn (acc, x) -> acc + x) == 10)
   end
 
   test "fold_left on empty list returns accumulator" do
     let empty_ints : List(Int) = Nil
-    assert (fold_left(0, empty_ints, fn (acc, x) -> acc + x) == 0)
+    assert (fold_left(empty_ints, 0, fn (acc, x) -> acc + x) == 0)
   end
 
   test "fold_left computes product" do
     let xs = Cons(1, Cons(2, Cons(3, Nil)))
-    assert (fold_left(1, xs, fn (acc, x) -> acc * x) == 6)
+    assert (fold_left(xs, 1, fn (acc, x) -> acc * x) == 6)
   end
 end
 

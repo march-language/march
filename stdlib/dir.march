@@ -5,47 +5,47 @@
 
 mod Dir do
 
-fn list(path) do
-  dir_list(path)
-end
+  fn list(path) do
+    dir_list(path)
+  end
 
-fn list_full(path) do
-  match dir_list(path) do
-  Err(e) -> Err(e)
-  Ok(names) -> do
-    let prefix =
-      if string_is_empty(path) do ""
-      else if string_ends_with(path, "/") do path
-      else path ++ "/" end end
-    fn prepend(xs) do
-      match xs do
-      Nil -> Nil
-      Cons(name, rest) -> Cons(prefix ++ name, prepend(rest))
+  fn list_full(path) do
+    match dir_list(path) do
+    Err(e) -> Err(e)
+    Ok(names) -> do
+      let prefix =
+        if string_is_empty(path) do ""
+        else if string_ends_with(path, "/") do path
+        else path ++ "/" end end
+      fn prepend(xs) do
+        match xs do
+        Nil -> Nil
+        Cons(name, rest) -> Cons(prefix ++ name, prepend(rest))
+        end
       end
+      Ok(prepend(names))
     end
-    Ok(prepend(names))
+    end
   end
+
+  fn mkdir(path) do
+    dir_mkdir(path)
   end
-end
 
-fn mkdir(path) do
-  dir_mkdir(path)
-end
+  fn mkdir_p(path) do
+    dir_mkdir_p(path)
+  end
 
-fn mkdir_p(path) do
-  dir_mkdir_p(path)
-end
+  fn rmdir(path) do
+    dir_rmdir(path)
+  end
 
-fn rmdir(path) do
-  dir_rmdir(path)
-end
+  fn rm_rf(path) do
+    dir_rm_rf(path)
+  end
 
-fn rm_rf(path) do
-  dir_rm_rf(path)
-end
-
-fn exists(path) do
-  dir_exists(path)
-end
+  fn exists(path) do
+    dir_exists(path)
+  end
 
 end

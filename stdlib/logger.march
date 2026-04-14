@@ -20,132 +20,132 @@
 
 mod Logger do
 
-type Level = Debug | Info | Warn | Error
+  type Level = Debug | Info | Warn | Error
 
--- ---- Level helpers ----
+  -- ---- Level helpers ----
 
-fn level_to_int(l) do
-  match l do
-  Debug -> 0
-  Info  -> 1
-  Warn  -> 2
-  Error -> 3
+  fn level_to_int(l) do
+    match l do
+    Debug -> 0
+    Info  -> 1
+    Warn  -> 2
+    Error -> 3
+    end
   end
-end
 
-fn level_to_string(l) do
-  match l do
-  Debug -> "DEBUG"
-  Info  -> "INFO"
-  Warn  -> "WARN"
-  Error -> "ERROR"
+  fn level_to_string(l) do
+    match l do
+    Debug -> "DEBUG"
+    Info  -> "INFO"
+    Warn  -> "WARN"
+    Error -> "ERROR"
+    end
   end
-end
 
-fn int_to_level(n) do
-  if n <= 0 do Debug
-  else if n == 1 do Info
-  else if n == 2 do Warn
-  else Error end end end
-end
-
-doc "Parse a log level from a string (case-insensitive). Returns None for unknown strings."
-fn level_from_string(s) do
-  let lower = string_to_lowercase(s)
-  if lower == "debug" do Some(Debug)
-  else if lower == "info" do Some(Info)
-  else if lower == "warn" || lower == "warning" do Some(Warn)
-  else if lower == "error" do Some(Error)
-  else None end end end end
-end
-
-doc "Return the numeric rank of a log level: Debug=0, Info=1, Warn=2, Error=3."
-fn level_rank(l) do
-  match l do
-  Debug -> 0
-  Info  -> 1
-  Warn  -> 2
-  Error -> 3
+  fn int_to_level(n) do
+    if n <= 0 do Debug
+    else if n == 1 do Info
+    else if n == 2 do Warn
+    else Error end end end
   end
-end
 
-doc "Return true if `level` is at least as severe as `min_level`."
-fn level_enabled(level, min_level) do
-  level_rank(level) >= level_rank(min_level)
-end
-
-doc "Format a log entry as a simple string: [LEVEL] message"
-fn format_entry(level, msg) do
-  "[" ++ level_to_string(level) ++ "] " ++ msg
-end
-
-doc "Log at `level` only if `level` is enabled relative to `min_level`."
-fn log_if(level, min_level, msg) do
-  if level_enabled(level, min_level) do log(level, msg)
-  else () end
-end
-
--- ---- Level control ----
-
-doc "Set the minimum log level. Messages below this level are discarded."
-fn set_level(level) do
-  logger_set_level(level_to_int(level))
-end
-
-doc "Get the current minimum log level."
-fn get_level() do
-  int_to_level(logger_get_level())
-end
-
--- ---- Context management ----
-
-doc "Add a key-value pair to the persistent log context."
-fn with_context(key, value) do
-  logger_add_context(key, value)
-end
-
-doc "Remove all persistent context key-value pairs."
-fn clear_context() do
-  logger_clear_context()
-end
-
--- ---- Core logging ----
-
-pfn should_log(level) do
-  level_to_int(level) >= logger_get_level()
-end
-
-pfn do_log(level, msg, extra) do
-  if should_log(level) do
-    let ctx = logger_get_context()
-    logger_write(level_to_string(level), msg, ctx, extra)
-  else ()
+  doc "Parse a log level from a string (case-insensitive). Returns None for unknown strings."
+  fn level_from_string(s) do
+    let lower = string_to_lowercase(s)
+    if lower == "debug" do Some(Debug)
+    else if lower == "info" do Some(Info)
+    else if lower == "warn" || lower == "warning" do Some(Warn)
+    else if lower == "error" do Some(Error)
+    else None end end end end
   end
-end
 
-doc "Log a Debug-level message."
-fn debug(msg) do do_log(Debug, msg, Nil) end
+  doc "Return the numeric rank of a log level: Debug=0, Info=1, Warn=2, Error=3."
+  fn level_rank(l) do
+    match l do
+    Debug -> 0
+    Info  -> 1
+    Warn  -> 2
+    Error -> 3
+    end
+  end
 
-doc "Log an Info-level message."
-fn info(msg) do do_log(Info, msg, Nil) end
+  doc "Return true if `level` is at least as severe as `min_level`."
+  fn level_enabled(level, min_level) do
+    level_rank(level) >= level_rank(min_level)
+  end
 
-doc "Log a Warn-level message."
-fn warn(msg) do do_log(Warn, msg, Nil) end
+  doc "Format a log entry as a simple string: [LEVEL] message"
+  fn format_entry(level, msg) do
+    "[" ++ level_to_string(level) ++ "] " ++ msg
+  end
 
-doc "Log an Error-level message."
-fn error(msg) do do_log(Error, msg, Nil) end
+  doc "Log at `level` only if `level` is enabled relative to `min_level`."
+  fn log_if(level, min_level, msg) do
+    if level_enabled(level, min_level) do log(level, msg)
+    else () end
+  end
 
-doc "Log a message at the given level."
-fn log(level, msg) do do_log(level, msg, Nil) end
+  -- ---- Level control ----
 
-doc """
-Log a message at the given level with extra metadata.
-metadata is a List((String, String)) of key-value pairs.
+  doc "Set the minimum log level. Messages below this level are discarded."
+  fn set_level(level) do
+    logger_set_level(level_to_int(level))
+  end
 
-    Logger.log_with(Logger.Info, "request done", [("status", "200"), ("ms", "42")])
-"""
-fn log_with(level, msg, metadata) do
-  do_log(level, msg, metadata)
-end
+  doc "Get the current minimum log level."
+  fn get_level() do
+    int_to_level(logger_get_level())
+  end
+
+  -- ---- Context management ----
+
+  doc "Add a key-value pair to the persistent log context."
+  fn with_context(key, value) do
+    logger_add_context(key, value)
+  end
+
+  doc "Remove all persistent context key-value pairs."
+  fn clear_context() do
+    logger_clear_context()
+  end
+
+  -- ---- Core logging ----
+
+  pfn should_log(level) do
+    level_to_int(level) >= logger_get_level()
+  end
+
+  pfn do_log(level, msg, extra) do
+    if should_log(level) do
+      let ctx = logger_get_context()
+      logger_write(level_to_string(level), msg, ctx, extra)
+    else ()
+    end
+  end
+
+  doc "Log a Debug-level message."
+  fn debug(msg) do do_log(Debug, msg, Nil) end
+
+  doc "Log an Info-level message."
+  fn info(msg) do do_log(Info, msg, Nil) end
+
+  doc "Log a Warn-level message."
+  fn warn(msg) do do_log(Warn, msg, Nil) end
+
+  doc "Log an Error-level message."
+  fn error(msg) do do_log(Error, msg, Nil) end
+
+  doc "Log a message at the given level."
+  fn log(level, msg) do do_log(level, msg, Nil) end
+
+  doc """
+  Log a message at the given level with extra metadata.
+  metadata is a List((String, String)) of key-value pairs.
+
+      Logger.log_with(Logger.Info, "request done", [("status", "200"), ("ms", "42")])
+  """
+  fn log_with(level, msg, metadata) do
+    do_log(level, msg, metadata)
+  end
 
 end

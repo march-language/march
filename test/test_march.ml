@@ -9708,7 +9708,7 @@ let test_enum_filter () =
 
 let test_enum_fold () =
   let env = eval_with_enum {|mod Test do
-    fn f() do Enum.fold(0, [1, 2, 3, 4, 5], fn acc -> fn x -> acc + x) end
+    fn f() do Enum.fold([1, 2, 3, 4, 5], 0, fn acc -> fn x -> acc + x) end
   end|} in
   Alcotest.(check int) "Enum.fold sum" 15 (vint (call_fn env "f" []))
 
@@ -11399,7 +11399,7 @@ let test_map_fold () =
   let env = eval_with_map (Printf.sprintf {|mod T do
     fn f() do
       let m = Map.from_list([(1, 10), (2, 20), (3, 30)], %s)
-      Map.fold(0, m, fn(acc) -> fn(k) -> fn(v) -> acc + v)
+      Map.fold(m, 0, fn(acc) -> fn(k) -> fn(v) -> acc + v)
     end
   end|} int_cmp) in
   Alcotest.(check int) "fold sums values" 60 (vint (call_fn env "f" []))
@@ -11616,7 +11616,7 @@ let test_set_fold () =
   let env = eval_with_set (Printf.sprintf {|mod T do
     fn f() do
       let s = Set.from_list([1, 2, 3, 4, 5], %s)
-      Set.fold(0, s, fn(acc, x) -> acc + x)
+      Set.fold(s, 0, fn(acc, x) -> acc + x)
     end
   end|} int_cmp) in
   Alcotest.(check int) "fold sum" 15 (vint (call_fn env "f" []))
@@ -11715,7 +11715,7 @@ let test_array_fold_left () =
   let env = eval_with_array {|mod T do
     fn f() do
       let a = Array.from_list([1, 2, 3, 4, 5])
-      Array.fold_left(0, a, fn(acc, x) -> acc + x)
+      Array.fold_left(a, 0, fn(acc, x) -> acc + x)
     end
   end|} in
   Alcotest.(check int) "fold_left sum" 15 (vint (call_fn env "f" []))
@@ -17161,7 +17161,7 @@ let test_df_groupby_sum () =
       match DataFrame.agg(gb, [Sum("val")]) do
       Ok(df2) ->
         match DataFrame.float_list(df2, "val") do
-        Ok(xs) -> float_to_int(List.fold_left(0.0, xs, fn (acc, x) -> acc +. x))
+        Ok(xs) -> float_to_int(List.fold_left(xs, 0.0, fn (acc, x) -> acc +. x))
         Err(_) -> -1
         end
       Err(_) -> -1

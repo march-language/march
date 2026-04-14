@@ -29,163 +29,163 @@
 
 mod Flow do
 
--- A Stage wraps a Seq(a).
--- In the compiled runtime this would be an actor Pid; here it holds the
--- lazy fold function directly.
-type Stage(a) = Stage(Seq(a))
+  -- A Stage wraps a Seq(a).
+  -- In the compiled runtime this would be an actor Pid; here it holds the
+  -- lazy fold function directly.
+  type Stage(a) = Stage(Seq(a))
 
--- ---- Producers ----
+  -- ---- Producers ----
 
-doc "Create a stage from a list of items."
-fn from_list(xs) do
-  Stage(Seq.from_list(xs))
-end
-
-doc "Create a stage from an existing Seq."
-fn from_seq(seq) do
-  Stage(seq)
-end
-
-doc """
-Create a stage by unfolding a seed value.
-next : seed -> Option((item, new_seed))
-Produces items until next returns None.
-
-Example — integers from 0 to 4:
-    Flow.unfold(0, fn s -> if s >= 5 do None else Some((s, s + 1))) end
-"""
-fn unfold(seed, next) do
-  Stage(Seq.unfold(seed, next))
-end
-
-doc "Create a stage over the integer range [start, stop)."
-fn range(start, stop) do
-  Stage(Seq.unfold(start, fn i -> do
-    if i >= stop do None
-    else Some((i, i + 1)) end
-  end))
-end
-
--- ---- Transformers ----
-
-doc "Apply f to every item."
-fn map(stage, f) do
-  match stage do
-  Stage(seq) -> Stage(Seq.map(seq, f))
+  doc "Create a stage from a list of items."
+  fn from_list(xs) do
+    Stage(Seq.from_list(xs))
   end
-end
 
-doc "Keep only items where pred returns true."
-fn filter(stage, pred) do
-  match stage do
-  Stage(seq) -> Stage(Seq.filter(seq, pred))
+  doc "Create a stage from an existing Seq."
+  fn from_seq(seq) do
+    Stage(seq)
   end
-end
 
-doc "Apply f to each item (f returns a list) and flatten the results."
-fn flat_map(stage, f) do
-  match stage do
-  Stage(seq) ->
-    Stage(Seq.flat_map(seq, fn x ->
-      match f(x) do
-      Stage(inner) -> inner
-      end))
+  doc """
+  Create a stage by unfolding a seed value.
+  next : seed -> Option((item, new_seed))
+  Produces items until next returns None.
+
+  Example — integers from 0 to 4:
+      Flow.unfold(0, fn s -> if s >= 5 do None else Some((s, s + 1))) end
+  """
+  fn unfold(seed, next) do
+    Stage(Seq.unfold(seed, next))
   end
-end
 
-doc "Keep at most n items."
-fn take(stage, n) do
-  match stage do
-  Stage(seq) -> Stage(Seq.take(seq, n))
+  doc "Create a stage over the integer range [start, stop)."
+  fn range(start, stop) do
+    Stage(Seq.unfold(start, fn i -> do
+      if i >= stop do None
+      else Some((i, i + 1)) end
+    end))
   end
-end
 
-doc "Skip the first n items."
-fn drop(stage, n) do
-  match stage do
-  Stage(seq) -> Stage(Seq.drop(seq, n))
+  -- ---- Transformers ----
+
+  doc "Apply f to every item."
+  fn map(stage, f) do
+    match stage do
+    Stage(seq) -> Stage(Seq.map(seq, f))
+    end
   end
-end
 
-doc "Group items into lists of at most n elements."
-fn batch(stage, n) do
-  match stage do
-  Stage(seq) -> Stage(Seq.batch(seq, n))
+  doc "Keep only items where pred returns true."
+  fn filter(stage, pred) do
+    match stage do
+    Stage(seq) -> Stage(Seq.filter(seq, pred))
+    end
   end
-end
 
-doc """
-Parallelism hint: in the compiled runtime, spawn n worker actors for this stage.
-No-op in the interpreter (single-threaded execution).
-
-    Flow.from_list(urls)
-      |> Flow.map(fn url -> Http.get(url))
-      |> Flow.with_concurrency(8)
-      |> Flow.collect
-"""
-fn with_concurrency(stage, _n) do stage end
-
--- ---- Consumers (run the pipeline eagerly) ----
-
-doc "Collect all items into a List."
-fn collect(stage) do
-  match stage do
-  Stage(seq) -> Seq.to_list(seq)
+  doc "Apply f to each item (f returns a list) and flatten the results."
+  fn flat_map(stage, f) do
+    match stage do
+    Stage(seq) ->
+      Stage(Seq.flat_map(seq, fn x ->
+        match f(x) do
+        Stage(inner) -> inner
+        end))
+    end
   end
-end
 
-doc "Run the pipeline for side effects; discard all items."
-fn run(stage) do
-  match stage do
-  Stage(seq) -> Seq.each(seq, fn _ -> ())
+  doc "Keep at most n items."
+  fn take(stage, n) do
+    match stage do
+    Stage(seq) -> Stage(Seq.take(seq, n))
+    end
   end
-end
 
-doc "Reduce all items to a single value using f(accumulator, item) -> accumulator."
-fn reduce(stage, start, f) do
-  match stage do
-  Stage(seq) -> Seq.fold(seq, start, f)
+  doc "Skip the first n items."
+  fn drop(stage, n) do
+    match stage do
+    Stage(seq) -> Stage(Seq.drop(seq, n))
+    end
   end
-end
 
-doc "Consume with f(acc, item) -> acc (alias for reduce)."
-fn into(stage, start, f) do
-  reduce(stage, start, f)
-end
-
-doc "Run f on each item for its side effects."
-fn each(stage, f) do
-  match stage do
-  Stage(seq) -> Seq.each(seq, f)
+  doc "Group items into lists of at most n elements."
+  fn batch(stage, n) do
+    match stage do
+    Stage(seq) -> Stage(Seq.batch(seq, n))
+    end
   end
-end
 
-doc "Count the total number of items produced."
-fn count(stage) do
-  match stage do
-  Stage(seq) -> Seq.count(seq)
-  end
-end
+  doc """
+  Parallelism hint: in the compiled runtime, spawn n worker actors for this stage.
+  No-op in the interpreter (single-threaded execution).
 
-doc "Return the first item satisfying pred, or None."
-fn find(stage, pred) do
-  match stage do
-  Stage(seq) -> Seq.find(seq, pred)
-  end
-end
+      Flow.from_list(urls)
+        |> Flow.map(fn url -> Http.get(url))
+        |> Flow.with_concurrency(8)
+        |> Flow.collect
+  """
+  fn with_concurrency(stage, _n) do stage end
 
-doc "True if any item satisfies pred."
-fn any(stage, pred) do
-  match stage do
-  Stage(seq) -> Seq.any(seq, pred)
-  end
-end
+  -- ---- Consumers (run the pipeline eagerly) ----
 
-doc "True if all items satisfy pred."
-fn all(stage, pred) do
-  match stage do
-  Stage(seq) -> Seq.all(seq, pred)
+  doc "Collect all items into a List."
+  fn collect(stage) do
+    match stage do
+    Stage(seq) -> Seq.to_list(seq)
+    end
   end
-end
+
+  doc "Run the pipeline for side effects; discard all items."
+  fn run(stage) do
+    match stage do
+    Stage(seq) -> Seq.each(seq, fn _ -> ())
+    end
+  end
+
+  doc "Reduce all items to a single value using f(accumulator, item) -> accumulator."
+  fn reduce(stage, start, f) do
+    match stage do
+    Stage(seq) -> Seq.fold(seq, start, f)
+    end
+  end
+
+  doc "Consume with f(acc, item) -> acc (alias for reduce)."
+  fn into(stage, start, f) do
+    reduce(stage, start, f)
+  end
+
+  doc "Run f on each item for its side effects."
+  fn each(stage, f) do
+    match stage do
+    Stage(seq) -> Seq.each(seq, f)
+    end
+  end
+
+  doc "Count the total number of items produced."
+  fn count(stage) do
+    match stage do
+    Stage(seq) -> Seq.count(seq)
+    end
+  end
+
+  doc "Return the first item satisfying pred, or None."
+  fn find(stage, pred) do
+    match stage do
+    Stage(seq) -> Seq.find(seq, pred)
+    end
+  end
+
+  doc "True if any item satisfies pred."
+  fn any(stage, pred) do
+    match stage do
+    Stage(seq) -> Seq.any(seq, pred)
+    end
+  end
+
+  doc "True if all items satisfy pred."
+  fn all(stage, pred) do
+    match stage do
+    Stage(seq) -> Seq.all(seq, pred)
+    end
+  end
 
 end

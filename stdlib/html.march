@@ -132,7 +132,7 @@ mod Html do
   plus O(1) for IOList wrapping.
   """
   fn tag(name : String, attrs : List((String, String)), content : IOList) : IOList do
-    let attr_str = List.fold_left("", attrs, fn (acc, pair) ->
+    let attr_str = List.fold_left(attrs, "", fn (acc, pair) ->
       match pair do
       (k, v) ->
         acc ++ " " ++ escape_attr(k) ++ "=\"" ++ escape_attr(v) ++ "\""

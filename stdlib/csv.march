@@ -14,97 +14,97 @@
 
 mod Csv do
 
-ptype CsvError = FileError(String) | CsvParseError(String)
+  ptype CsvError = FileError(String) | CsvParseError(String)
 
--- Result of csv_next_row: either end-of-file or a parsed row.
-ptype CsvRow = CsvEof | Row(List(String))
+  -- Result of csv_next_row: either end-of-file or a parsed row.
+  ptype CsvRow = CsvEof | Row(List(String))
 
--- Internal streaming loop: call callback(fields) for each row.
-pfn each_row_loop(handle, callback) do
-  match csv_next_row(handle) do
-  CsvEof -> :ok
-  Row(fields) -> do
-    callback(fields)
-    each_row_loop(handle, callback)
-  end
-  end
-end
-
--- Stream rows from path one at a time.
--- callback receives List(String) per row.
--- File is always closed after all rows or on :eof.
-fn each_row(path, delimiter, mode, callback) do
-  match csv_open(path, delimiter, mode) do
-  Err(e) -> Err(e)
-  Ok(handle) -> do
-    each_row_loop(handle, callback)
-    csv_close(handle)
-    Ok(:ok)
-  end
-  end
-end
-
--- Internal accumulator loop for read_all.
-pfn collect_loop(handle, acc) do
-  match csv_next_row(handle) do
-  CsvEof -> List.reverse(acc)
-  Row(fields) -> collect_loop(handle, Cons(fields, acc))
-  end
-end
-
--- Eagerly read all rows into a List(List(String)).
--- Only for small files.
-fn read_all(path, delimiter, mode) do
-  match csv_open(path, delimiter, mode) do
-  Err(e) -> Err(e)
-  Ok(handle) -> do
-    let rows = collect_loop(handle, Nil)
-    csv_close(handle)
-    Ok(rows)
-  end
-  end
-end
-
--- Internal loop for each_row_with_header: calls callback(header, fields) per row.
-pfn with_header_loop(handle, header, callback) do
-  match csv_next_row(handle) do
-  CsvEof -> :ok
-  Row(fields) -> do
-    callback(header, fields)
-    with_header_loop(handle, header, callback)
-  end
-  end
-end
-
--- Stream rows with the first row separated as a header.
--- callback receives (header : List(String), row : List(String)).
-fn each_row_with_header(path, delimiter, mode, callback) do
-  match csv_open(path, delimiter, mode) do
-  Err(e) -> Err(e)
-  Ok(handle) -> do
+  -- Internal streaming loop: call callback(fields) for each row.
+  pfn each_row_loop(handle, callback) do
     match csv_next_row(handle) do
-    CsvEof -> do
+    CsvEof -> :ok
+    Row(fields) -> do
+      callback(fields)
+      each_row_loop(handle, callback)
+    end
+    end
+  end
+
+  -- Stream rows from path one at a time.
+  -- callback receives List(String) per row.
+  -- File is always closed after all rows or on :eof.
+  fn each_row(path, delimiter, mode, callback) do
+    match csv_open(path, delimiter, mode) do
+    Err(e) -> Err(e)
+    Ok(handle) -> do
+      each_row_loop(handle, callback)
       csv_close(handle)
       Ok(:ok)
     end
-    Row(header) -> do
+    end
+  end
+
+  -- Internal accumulator loop for read_all.
+  pfn collect_loop(handle, acc) do
+    match csv_next_row(handle) do
+    CsvEof -> List.reverse(acc)
+    Row(fields) -> collect_loop(handle, Cons(fields, acc))
+    end
+  end
+
+  -- Eagerly read all rows into a List(List(String)).
+  -- Only for small files.
+  fn read_all(path, delimiter, mode) do
+    match csv_open(path, delimiter, mode) do
+    Err(e) -> Err(e)
+    Ok(handle) -> do
+      let rows = collect_loop(handle, Nil)
+      csv_close(handle)
+      Ok(rows)
+    end
+    end
+  end
+
+  -- Internal loop for each_row_with_header: calls callback(header, fields) per row.
+  pfn with_header_loop(handle, header, callback) do
+    match csv_next_row(handle) do
+    CsvEof -> :ok
+    Row(fields) -> do
+      callback(header, fields)
       with_header_loop(handle, header, callback)
-      csv_close(handle)
-      Ok(:ok)
     end
     end
   end
+
+  -- Stream rows with the first row separated as a header.
+  -- callback receives (header : List(String), row : List(String)).
+  fn each_row_with_header(path, delimiter, mode, callback) do
+    match csv_open(path, delimiter, mode) do
+    Err(e) -> Err(e)
+    Ok(handle) -> do
+      match csv_next_row(handle) do
+      CsvEof -> do
+        csv_close(handle)
+        Ok(:ok)
+      end
+      Row(header) -> do
+        with_header_loop(handle, header, callback)
+        csv_close(handle)
+        Ok(:ok)
+      end
+      end
+    end
+    end
   end
-end
 
--- Convenience: comma-delimited, RFC 4180, eager.
-fn read_csv(path) do
-  read_all(path, ",", :rfc4180)
-end
+  -- Convenience: comma-delimited, RFC 4180, eager.
+  fn read_csv(path) do
+    read_all(path, ",", :rfc4180)
+  end
 
--- Convenience: comma-delimited, RFC 4180, streaming.
-fn each_csv_row(path, callback) do
-  each_row(path, ",", :rfc4180, callback)
-end
+  -- Convenience: comma-delimited, RFC 4180, streaming.
+  fn each_csv_row(path, callback) do
+    each_row(path, ",", :rfc4180, callback)
+  end
 
 end

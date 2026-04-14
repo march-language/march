@@ -225,12 +225,12 @@ end
 
 describe "folding" do
   test "fold_left sums list" do
-    let s = List.fold_left(0, five(), fn (acc, x) -> acc + x)
+    let s = List.fold_left(five(), 0, fn (acc, x) -> acc + x)
     assert (s == 15)
   end
 
   test "fold_left builds reversed list" do
-    let r = List.fold_left(Nil, three(), fn (acc, x) -> Cons(x, acc))
+    let r = List.fold_left(three(), Nil, fn (acc, x) -> Cons(x, acc))
     assert (List.head(r) == 30)
   end
 
@@ -241,7 +241,7 @@ describe "folding" do
 
   test "scan_left produces prefix sums" do
     let xs = Cons(1, Cons(2, Cons(3, Nil)))
-    let r = List.scan_left(0, xs, fn (acc, x) -> acc + x)
+    let r = List.scan_left(xs, 0, fn (acc, x) -> acc + x)
     assert (List.length(r) == 4)
     assert (List.head(r) == 0)
     assert (List.last(r) == 6)

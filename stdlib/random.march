@@ -14,135 +14,135 @@
 
 mod Random do
 
-type Rng = { s0 : Int, s1 : Int, s2 : Int, s3 : Int }
+  type Rng = { s0 : Int, s1 : Int, s2 : Int, s3 : Int }
 
--- ---- Internal helpers ----
+  -- ---- Internal helpers ----
 
--- 63-bit left rotation by k positions.
--- Valid for k in 1..62.
-pfn rotl(x : Int, k : Int) : Int do
-  int_or(int_shl(x, k), int_shr(x, 63 - k))
-end
-
--- Bijective hash of one integer — used for seeding.
--- Mixes bits well to avoid bad seeds (e.g., 0).
-pfn mix(x : Int) : Int do
-  let max_v = int_max_value(())
-  let x = int_xor(x, int_shr(int_and(x, max_v), 30))
-  let x = x * 1234567891011
-  let x = int_xor(x, int_shr(int_and(x, max_v), 27))
-  let x = x * 987654321
-  let x = int_xor(x, int_shr(int_and(x, max_v), 31))
-  x
-end
-
--- ---- Construction ----
-
-doc "Create a deterministic Rng from an integer seed."
-fn seed(n : Int) : Rng do
-  let s0 = mix(n)
-  let s1 = mix(n + 1)
-  let s2 = mix(n + 2)
-  let s3 = mix(n + 3)
-  -- Ensure non-zero state: xoshiro256** requires at least one non-zero word
-  let s0 = if s0 == 0 && s1 == 0 && s2 == 0 && s3 == 0 do 1 else s0 end
-  { s0 = s0, s1 = s1, s2 = s2, s3 = s3 }
-end
-
--- ---- Core xoshiro256** step (63-bit variant) ----
-
--- Returns the next raw output and advances the state.
-pfn next_raw(rng : Rng) : (Int, Rng) do
-  let result = rotl(rng.s1 * 5, 7) * 9
-  let t = int_shl(rng.s1, 17)
-  let s2 = int_xor(rng.s2, rng.s0)
-  let s3 = int_xor(rng.s3, rng.s1)
-  let s1 = int_xor(rng.s1, s2)
-  let s0 = int_xor(rng.s0, s3)
-  let s2 = int_xor(s2, t)
-  let s3 = rotl(s3, 45)
-  (result, { s0 = s0, s1 = s1, s2 = s2, s3 = s3 })
-end
-
--- ---- Public generators ----
-
-doc "Generate the next pseudorandom integer (full 63-bit signed range)."
-fn next_int(rng : Rng) : (Int, Rng) do
-  next_raw(rng)
-end
-
-doc "Generate a pseudorandom float in [0.0, 1.0)."
-fn next_float(rng : Rng) : (Float, Rng) do
-  let (raw, rng2) = next_raw(rng)
-  let max_v = int_max_value(())
-  let bits52 = int_shr(int_and(raw, max_v), 10)
-  (int_to_float(bits52) /. 4503599627370496.0, rng2)
-end
-
-doc "Generate a random integer in [lo, hi] (inclusive)."
-fn range(rng : Rng, lo : Int, hi : Int) : (Int, Rng) do
-  let (raw, rng2) = next_raw(rng)
-  let max_v = int_max_value(())
-  let pos = int_and(raw, max_v)
-  (lo + int_mod(pos, hi - lo + 1), rng2)
-end
-
-doc "Generate a random integer in [lo, hi] (inclusive) using the current time as seed."
-fn int(lo : Int, hi : Int) : Int do
-  let rng = seed(float_to_int(unix_time(())))
-  let (n, _) = range(rng, lo, hi)
-  n
-end
-
--- ---- Collection operations ----
-
--- Remove the element at 0-based index n from a list.
--- Returns (element, list_without_element).
-pfn remove_nth(xs : List(a), n : Int) : (a, List(a)) do
-  fn go(lst : List(a), i : Int, acc : List(a)) : (a, List(a)) do
-    match lst do
-    Nil -> panic("Random.remove_nth: index out of bounds")
-    Cons(h, t) -> do
-      if i == n do (h, List.append(List.reverse(acc), t))
-      else go(t, i + 1, Cons(h, acc)) end
-    end
-    end
+  -- 63-bit left rotation by k positions.
+  -- Valid for k in 1..62.
+  pfn rotl(x : Int, k : Int) : Int do
+    int_or(int_shl(x, k), int_shr(x, 63 - k))
   end
-  go(xs, 0, Nil)
-end
 
-doc """
-Shuffle a list using the Fisher-Yates algorithm.
-Returns (shuffled_list, new_rng). O(n²) on lists.
-Same seed + same list always produces the same shuffle.
-"""
-fn shuffle(rng : Rng, xs : List(a)) : (List(a), Rng) do
-  fn go(rest : List(a), remaining : Int, acc : List(a), r : Rng) : (List(a), Rng) do
-    match rest do
-    Nil -> (List.reverse(acc), r)
-    _ -> do
-      let (raw, r2) = next_raw(r)
-      let max_v = int_max_value(())
-      let pos = int_and(raw, max_v)
-      let idx = int_mod(pos, remaining)
-      let (picked, new_rest) = remove_nth(rest, idx)
-      go(new_rest, remaining - 1, Cons(picked, acc), r2)
-    end
-    end
+  -- Bijective hash of one integer — used for seeding.
+  -- Mixes bits well to avoid bad seeds (e.g., 0).
+  pfn mix(x : Int) : Int do
+    let max_v = int_max_value(())
+    let x = int_xor(x, int_shr(int_and(x, max_v), 30))
+    let x = x * 1234567891011
+    let x = int_xor(x, int_shr(int_and(x, max_v), 27))
+    let x = x * 987654321
+    let x = int_xor(x, int_shr(int_and(x, max_v), 31))
+    x
   end
-  go(xs, List.length(xs), Nil, rng)
-end
 
-doc """
-Sample n elements from xs without replacement.
-If n >= length(xs), returns all elements (shuffled).
-Returns (sample, new_rng).
-"""
-fn sample(rng : Rng, xs : List(a), n : Int) : (List(a), Rng) do
-  let len = List.length(xs)
-  let count = if n > len do len else n end
-  let (shuffled, rng2) = shuffle(rng, xs)
-  (List.take(shuffled, count), rng2)
-end
+  -- ---- Construction ----
+
+  doc "Create a deterministic Rng from an integer seed."
+  fn seed(n : Int) : Rng do
+    let s0 = mix(n)
+    let s1 = mix(n + 1)
+    let s2 = mix(n + 2)
+    let s3 = mix(n + 3)
+    -- Ensure non-zero state: xoshiro256** requires at least one non-zero word
+    let s0 = if s0 == 0 && s1 == 0 && s2 == 0 && s3 == 0 do 1 else s0 end
+    { s0 = s0, s1 = s1, s2 = s2, s3 = s3 }
+  end
+
+  -- ---- Core xoshiro256** step (63-bit variant) ----
+
+  -- Returns the next raw output and advances the state.
+  pfn next_raw(rng : Rng) : (Int, Rng) do
+    let result = rotl(rng.s1 * 5, 7) * 9
+    let t = int_shl(rng.s1, 17)
+    let s2 = int_xor(rng.s2, rng.s0)
+    let s3 = int_xor(rng.s3, rng.s1)
+    let s1 = int_xor(rng.s1, s2)
+    let s0 = int_xor(rng.s0, s3)
+    let s2 = int_xor(s2, t)
+    let s3 = rotl(s3, 45)
+    (result, { s0 = s0, s1 = s1, s2 = s2, s3 = s3 })
+  end
+
+  -- ---- Public generators ----
+
+  doc "Generate the next pseudorandom integer (full 63-bit signed range)."
+  fn next_int(rng : Rng) : (Int, Rng) do
+    next_raw(rng)
+  end
+
+  doc "Generate a pseudorandom float in [0.0, 1.0)."
+  fn next_float(rng : Rng) : (Float, Rng) do
+    let (raw, rng2) = next_raw(rng)
+    let max_v = int_max_value(())
+    let bits52 = int_shr(int_and(raw, max_v), 10)
+    (int_to_float(bits52) /. 4503599627370496.0, rng2)
+  end
+
+  doc "Generate a random integer in [lo, hi] (inclusive)."
+  fn range(rng : Rng, lo : Int, hi : Int) : (Int, Rng) do
+    let (raw, rng2) = next_raw(rng)
+    let max_v = int_max_value(())
+    let pos = int_and(raw, max_v)
+    (lo + int_mod(pos, hi - lo + 1), rng2)
+  end
+
+  doc "Generate a random integer in [lo, hi] (inclusive) using the current time as seed."
+  fn int(lo : Int, hi : Int) : Int do
+    let rng = seed(float_to_int(unix_time(())))
+    let (n, _) = range(rng, lo, hi)
+    n
+  end
+
+  -- ---- Collection operations ----
+
+  -- Remove the element at 0-based index n from a list.
+  -- Returns (element, list_without_element).
+  pfn remove_nth(xs : List(a), n : Int) : (a, List(a)) do
+    fn go(lst : List(a), i : Int, acc : List(a)) : (a, List(a)) do
+      match lst do
+      Nil -> panic("Random.remove_nth: index out of bounds")
+      Cons(h, t) -> do
+        if i == n do (h, List.append(List.reverse(acc), t))
+        else go(t, i + 1, Cons(h, acc)) end
+      end
+      end
+    end
+    go(xs, 0, Nil)
+  end
+
+  doc """
+  Shuffle a list using the Fisher-Yates algorithm.
+  Returns (shuffled_list, new_rng). O(n²) on lists.
+  Same seed + same list always produces the same shuffle.
+  """
+  fn shuffle(rng : Rng, xs : List(a)) : (List(a), Rng) do
+    fn go(rest : List(a), remaining : Int, acc : List(a), r : Rng) : (List(a), Rng) do
+      match rest do
+      Nil -> (List.reverse(acc), r)
+      _ -> do
+        let (raw, r2) = next_raw(r)
+        let max_v = int_max_value(())
+        let pos = int_and(raw, max_v)
+        let idx = int_mod(pos, remaining)
+        let (picked, new_rest) = remove_nth(rest, idx)
+        go(new_rest, remaining - 1, Cons(picked, acc), r2)
+      end
+      end
+    end
+    go(xs, List.length(xs), Nil, rng)
+  end
+
+  doc """
+  Sample n elements from xs without replacement.
+  If n >= length(xs), returns all elements (shuffled).
+  Returns (sample, new_rng).
+  """
+  fn sample(rng : Rng, xs : List(a), n : Int) : (List(a), Rng) do
+    let len = List.length(xs)
+    let count = if n > len do len else n end
+    let (shuffled, rng2) = shuffle(rng, xs)
+    (List.take(shuffled, count), rng2)
+  end
 
 end
