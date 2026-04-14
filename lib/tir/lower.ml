@@ -301,28 +301,24 @@ and lower_expr (e : Ast.expr) : Tir.expr =
   | Ast.EBlock ([e], _) -> lower_expr e
   | Ast.EBlock (Ast.ELet (b, _) :: rest, sp) ->
     let rhs = lower_expr b.bind_expr in
-    (* When this let binding introduces a name that shadows a function parameter,
-       temporarily remove the parameter entry from _fn_param_types so that
-       references to the bound name in the rest of the block use the let-bound
-       type (from ty_of_span) rather than the parameter's declared type.
-       We save the removed entries and restore them after processing the body. *)
+    (* Register the let-bound pattern names in _fn_param_types for the
+       duration of lowering the rest of the block.  Without this, a bare
+       reference to the bound name (e.g. [html] after [let html = ...]) is
+       rewritten through [_use_aliases], turning a local into a global
+       function reference (e.g. [html] → [Response.html]).  Save any shadowed
+       entries (function parameters or outer let-bindings with the same name)
+       and restore them afterwards. *)
+    let pat_names = collect_pat_names b.bind_pat in
     let saved_shadowed : (string * Tir.ty) list =
-      let check_pat_name pat =
-        match pat with
-        | Ast.PatVar n ->
-          (match Hashtbl.find_opt _fn_param_types n.txt with
-           | Some ty -> Some (n.txt, ty)
-           | None    -> None)
-        | _ -> None
-      in
-      let pats = match b.bind_pat with
-        | Ast.PatTuple (ps, _) -> ps
-        | p -> [p]
-      in
-      List.filter_map check_pat_name pats
+      List.filter_map (fun (name, _) ->
+        match Hashtbl.find_opt _fn_param_types name with
+        | Some ty -> Some (name, ty)
+        | None -> None) pat_names
     in
-    List.iter (fun (name, _) -> Hashtbl.remove _fn_param_types name) saved_shadowed;
+    List.iter (fun (name, sp) ->
+      Hashtbl.replace _fn_param_types name (ty_of_span sp)) pat_names;
     let body = lower_expr (Ast.EBlock (rest, sp)) in
+    List.iter (fun (name, _) -> Hashtbl.remove _fn_param_types name) pat_names;
     List.iter (fun (name, ty) -> Hashtbl.replace _fn_param_types name ty) saved_shadowed;
     (match b.bind_pat with
      | Ast.PatVar n ->
@@ -1809,7 +1805,14 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                    named "Migration.Query.*").  Build aliases mapping the short
                    name (e.g. "simple_query") to the context-qualified name
                    (e.g. "Migration.Query.simple_query") so that calls to the
-                   unqualified name are resolved correctly. *)
+                   unqualified name are resolved correctly.
+
+                   IMPORTANT: a sibling fn in the current module shadows an
+                   imported name of the same kind.  Without this guard, a
+                   module like [Controller] with [import ErrorView] followed
+                   by [fn render] would have its own [render] calls rewritten
+                   to [Controller.ErrorView.render].  [direct_fn_names] is
+                   the list of sibling fn short-names collected upfront. *)
                 let import_prefix =
                   String.concat "." (List.map (fun n -> n.Ast.txt) ud.use_path) ^ "."
                 in
@@ -1825,9 +1828,11 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
                     then begin
                       let short = String.sub fn_name plen
                                     (String.length fn_name - plen) in
-                      (* First registration wins (consistent with top-level
-                         DUse handling). *)
-                      if not (Hashtbl.mem !_use_aliases short) then
+                      (* Skip if a sibling fn in the current module has the
+                         same short name — sibling fns shadow imports. *)
+                      if not (List.mem short direct_fn_names)
+                         && not (Hashtbl.mem !_use_aliases short)
+                      then
                         Hashtbl.replace !_use_aliases short fn_name
                     end
                   ) all_fn_names
