@@ -238,4 +238,114 @@ test "linear_regression slope direction" do
   assert slope < 0.0
 end
 
+-- ---- quantile (Hyndman & Fan 1996 methods) ----
+--
+-- Reference values cross-checked against R's quantile(x, probs, type=k)
+-- and numpy's quantile(x, q, method=...) where applicable.
+
+test "quantile Linear (Type 7) matches R quantile(1:5, 0.5, type=7) == 3" do
+  let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+  assert approx_eq(Stats.quantile(xs, 0.5, Linear), 3.0)
+end
+
+test "quantile Linear (Type 7) q=0.25 of 1..5 is 2.0" do
+  let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+  assert approx_eq(Stats.quantile(xs, 0.25, Linear), 2.0)
+end
+
+test "quantile Linear (Type 7) q=0.75 of 1..5 is 4.0" do
+  let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+  assert approx_eq(Stats.quantile(xs, 0.75, Linear), 4.0)
+end
+
+test "quantile InvertedCdf (Type 1) at exact step" do
+  -- n*q = 5*0.2 = 1.0 exact, so Type 1 returns x[1-1] = x[0] = 1.0
+  let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+  assert approx_eq(Stats.quantile(xs, 0.2, InvertedCdf), 1.0)
+end
+
+test "quantile InvertedCdf (Type 1) strictly above step" do
+  -- n*q = 5*0.21 = 1.05, so Type 1 returns x[⌈1.05⌉-1] = x[1] = 2.0
+  let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+  assert approx_eq(Stats.quantile(xs, 0.21, InvertedCdf), 2.0)
+end
+
+test "quantile AveragedInvertedCdf (Type 2) averages at exact step" do
+  -- n*q = 1.0 exact, so Type 2 returns (x[0] + x[1]) / 2 = 1.5
+  let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+  assert approx_eq(Stats.quantile(xs, 0.2, AveragedInvertedCdf), 1.5)
+end
+
+test "quantile ClosestObservation (Type 3) at median" do
+  -- n*q - 0.5 = 2.0 → round half-to-even → 2 → x[2] = 3.0
+  let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+  assert approx_eq(Stats.quantile(xs, 0.5, ClosestObservation), 3.0)
+end
+
+test "quantile MedianUnbiased (Type 8) at median" do
+  let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+  assert approx_eq(Stats.quantile(xs, 0.5, MedianUnbiased), 3.0)
+end
+
+test "quantile_default is Linear alias" do
+  let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+  assert approx_eq(Stats.quantile_default(xs, 0.5),
+                   Stats.quantile(xs, 0.5, Linear))
+end
+
+test "quantile boundaries q=0 and q=1 are min and max" do
+  let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+  assert approx_eq(Stats.quantile(xs, 0.0, Linear), 1.0)
+  assert approx_eq(Stats.quantile(xs, 1.0, Linear), 5.0)
+end
+
+test "quantile on single element always returns it" do
+  let xs = [42.0]
+  assert approx_eq(Stats.quantile(xs, 0.0,  Linear), 42.0)
+  assert approx_eq(Stats.quantile(xs, 0.5,  Linear), 42.0)
+  assert approx_eq(Stats.quantile(xs, 1.0,  Linear), 42.0)
+  assert approx_eq(Stats.quantile(xs, 0.25, InvertedCdf), 42.0)
+end
+
+-- ---- quantiles (batched) ----
+
+test "quantiles returns list in input order" do
+  let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+  let qs = Stats.quantiles(xs, [0.0, 0.5, 1.0], Linear)
+  match qs do
+  Cons(lo, Cons(mid, Cons(hi, Nil))) -> do
+    assert approx_eq(lo, 1.0)
+    assert approx_eq(mid, 3.0)
+    assert approx_eq(hi, 5.0)
+  end
+  _ -> assert false
+  end
+end
+
+-- ---- iqr ----
+
+test "iqr default (Linear) on 1..5 is 2.0" do
+  let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+  assert approx_eq(Stats.iqr_default(xs), 2.0)
+end
+
+test "iqr matches Q3 - Q1 under the same method" do
+  let xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+  let q1 = Stats.quantile(xs, 0.25, Weibull)
+  let q3 = Stats.quantile(xs, 0.75, Weibull)
+  assert approx_eq(Stats.iqr(xs, Weibull), q3 -. q1)
+end
+
+-- ---- five-number summary ----
+
+test "five_number_summary on 1..5 with Linear" do
+  let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+  let (lo, q1, q2, q3, hi) = Stats.five_number_summary(xs, Linear)
+  assert approx_eq(lo, 1.0)
+  assert approx_eq(q1, 2.0)
+  assert approx_eq(q2, 3.0)
+  assert approx_eq(q3, 4.0)
+  assert approx_eq(hi, 5.0)
+end
+
 end

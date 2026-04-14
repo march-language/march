@@ -117,6 +117,8 @@ let all_stdlib_decls =
     "logger.march";
     "flow.march";
     "regex.march";
+    "random.march";
+    "stats.march";
     "test.march";
     "pubsub.march";
     "channel.march";
@@ -227,6 +229,18 @@ let () =
     ("config", [
       Alcotest.test_case "Config module"
         `Quick (run_stdlib_test "test_config.march" "TestConfig");
+    ]);
+    ("stats", [
+      Alcotest.test_case "Stats module"
+        `Quick (run_stdlib_test "test_stats.march" "TestStats");
+    ]);
+    ("random", [
+      Alcotest.test_case "Random module"
+        `Quick (run_stdlib_test "test_random.march" "TestRandom");
+    ]);
+    ("test", [
+      Alcotest.test_case "Test module (assertion helpers)"
+        `Quick (run_stdlib_test "test_test.march" "TestTest");
     ]);
     (* test_flow.march tests the function-transformer Flow API (from_fn/run/then_)
        which differs from the current Seq-based flow.march implementation.

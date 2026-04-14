@@ -91,6 +91,244 @@ mod Stats do
     percentile(xs, 50.0)
   end
 
+  -- ---- Quantile with selectable interpolation ----
+  --
+  -- Nine standard methods per Hyndman & Fan (1996), matching R's
+  -- `quantile()` and `numpy.quantile()` `method=` argument.  Types 1–3
+  -- are discontinuous (return an observation); Types 4–9 are continuous
+  -- (linearly interpolate between two observations).  `Linear` (Type 7)
+  -- is the default in R, numpy, and Excel; `MedianUnbiased` (Type 8) is
+  -- the distribution-free recommendation of Hyndman & Fan.
+
+  -- QuantileMethod selects one of the nine standard interpolation rules:
+  --   InvertedCdf              — Type 1: discontinuous inverse empirical CDF
+  --   AveragedInvertedCdf      — Type 2: Type 1 with averaging at jumps
+  --   ClosestObservation       — Type 3: nearest observation (half-to-even)
+  --   InterpolatedInvertedCdf  — Type 4: linear, nodes at k/n
+  --   Hazen                    — Type 5: linear, nodes at (k − 1/2)/n
+  --   Weibull                  — Type 6: linear, nodes at k/(n+1)
+  --   Linear                   — Type 7: linear, nodes at (k − 1)/(n − 1) — R/numpy default
+  --   MedianUnbiased           — Type 8: linear, distribution-free
+  --   NormalUnbiased           — Type 9: linear, normal-theory unbiased
+  type QuantileMethod =
+      InvertedCdf
+    | AveragedInvertedCdf
+    | ClosestObservation
+    | InterpolatedInvertedCdf
+    | Hazen
+    | Weibull
+    | Linear
+    | MedianUnbiased
+    | NormalUnbiased
+
+  -- Linear interpolation between sorted[⌊h⌋] and sorted[⌊h⌋+1] at the
+  -- fractional part of h (0-indexed).  h outside [0, n-1] clamps to the
+  -- endpoints so caller needn't branch on every boundary.
+  pfn linear_interp(sorted : List(Float), n : Int, h : Float) : Float do
+    let nf = int_to_float(n)
+    if h <= 0.0 do List.nth(sorted, 0)
+    else if h >= nf -. 1.0 do List.nth(sorted, n - 1)
+    else do
+      let i = float_floor(h)
+      let frac = h -. int_to_float(i)
+      let lo = List.nth(sorted, i)
+      if frac == 0.0 do lo
+      else do
+        let hi = List.nth(sorted, i + 1)
+        lo +. frac *. (hi -. lo)
+      end end
+    end end end
+  end
+
+  -- (alpha, beta) pairs for continuous methods (Types 4–9).  Formula:
+  --   h = q * (n − α − β + 1) + α − 1     (0-indexed)
+  pfn ab_of(method : QuantileMethod) : (Float, Float) do
+    match method do
+    InterpolatedInvertedCdf -> (0.0, 1.0)
+    Hazen                   -> (0.5, 0.5)
+    Weibull                 -> (0.0, 0.0)
+    Linear                  -> (1.0, 1.0)
+    MedianUnbiased          -> (1.0 /. 3.0, 1.0 /. 3.0)
+    NormalUnbiased          -> (3.0 /. 8.0, 3.0 /. 8.0)
+    _                       -> (1.0, 1.0)    -- unused for Types 1–3
+    end
+  end
+
+  -- Clamp a 0-indexed integer position into [0, n-1].
+  pfn clamp_idx(i : Int, n : Int) : Int do
+    if i < 0 do 0
+    else do
+      if i >= n do n - 1 else i end
+    end end
+  end
+
+  -- Even-rounding helper for Type 3: round half-integers to the nearest
+  -- even integer (banker's rounding).  `f` is in [0, n].
+  pfn round_half_to_even(f : Float) : Int do
+    let i = float_floor(f)
+    let frac = f -. int_to_float(i)
+    if frac < 0.5 do i
+    else do
+      if frac > 0.5 do i + 1
+      else do
+        -- Exactly halfway: round to the nearest even integer.
+        if i % 2 == 0 do i else i + 1 end
+      end end
+    end end
+  end
+
+  -- Core quantile calculation on a pre-sorted list.  Callers that
+  -- compute multiple quantiles on the same data pass the sorted list
+  -- once and reuse it across queries.
+  pfn quantile_inverted_cdf(sorted : List(Float), n : Int, q : Float) : Float do
+    let nf = int_to_float(n)
+    let h = nf *. q
+    if h <= 0.0 do List.nth(sorted, 0)
+    else do
+      let fl = float_floor(h)
+      let frac = h -. int_to_float(fl)
+      let idx = if frac == 0.0 do fl - 1 else fl end
+      List.nth(sorted, clamp_idx(idx, n))
+    end end
+  end
+
+  pfn quantile_avg_inverted(sorted : List(Float), n : Int, q : Float) : Float do
+    let nf = int_to_float(n)
+    let h = nf *. q
+    if h <= 0.0 do List.nth(sorted, 0)
+    else do
+      let fl = float_floor(h)
+      let frac = h -. int_to_float(fl)
+      if frac == 0.0 do
+        -- Exactly on a step: average x[fl-1] and x[fl] (0-indexed).
+        let i = fl - 1
+        let clamped = clamp_idx(i, n)
+        if i < 0 || i >= n - 1 do List.nth(sorted, clamped)
+        else do
+          let a = List.nth(sorted, i)
+          let b = List.nth(sorted, i + 1)
+          (a +. b) /. 2.0
+        end end
+      else do
+        List.nth(sorted, clamp_idx(fl, n))
+      end end
+    end end
+  end
+
+  pfn quantile_closest_obs(sorted : List(Float), n : Int, q : Float) : Float do
+    let nf = int_to_float(n)
+    let h = nf *. q -. 0.5
+    let j = round_half_to_even(h)
+    List.nth(sorted, clamp_idx(j, n))
+  end
+
+  pfn quantile_continuous(sorted : List(Float), n : Int, q : Float, alpha : Float, beta : Float) : Float do
+    let nf = int_to_float(n)
+    let h = q *. (nf -. alpha -. beta +. 1.0) +. alpha -. 1.0
+    linear_interp(sorted, n, h)
+  end
+
+  pfn quantile_sorted(sorted : List(Float), n : Int, q : Float, method : QuantileMethod) : Float do
+    match method do
+    InvertedCdf             -> quantile_inverted_cdf(sorted, n, q)
+    AveragedInvertedCdf     -> quantile_avg_inverted(sorted, n, q)
+    ClosestObservation      -> quantile_closest_obs(sorted, n, q)
+    _ -> do
+      let (alpha, beta) = ab_of(method)
+      quantile_continuous(sorted, n, q, alpha, beta)
+    end
+    end
+  end
+
+  doc """
+  Quantile at probability q ∈ [0.0, 1.0] using the given interpolation
+  method.  Panics on empty list or out-of-range q.
+
+  For a percentile-style API (q in 0..100), see `percentile`.  The
+  existing `percentile(xs, p)` is equivalent to
+  `quantile(xs, p / 100.0, Linear)`.
+  """
+  fn quantile(xs : List(Float), q : Float, method : QuantileMethod) : Float do
+    match xs do
+    Nil -> panic("Stats.quantile: empty list")
+    _ -> do
+      if q < 0.0 || q > 1.0 do panic("Stats.quantile: q must be in [0.0, 1.0]")
+      else do
+        let sorted = sort_floats(xs)
+        let n = List.length(sorted)
+        let nf = int_to_float(n)
+        quantile_sorted(sorted, n, q, method)
+      end end
+    end
+    end
+  end
+
+  doc """
+  Quantile with `Linear` interpolation (Type 7, R/numpy default).
+  Convenience alias for `quantile(xs, q, Linear)`.
+  """
+  fn quantile_default(xs : List(Float), q : Float) : Float do
+    quantile(xs, q, Linear)
+  end
+
+  doc """
+  Batched quantiles: returns `[quantile(xs, q, method) for q in qs]`.
+  Sorts the input once and reuses it for each q.
+  """
+  fn quantiles(xs : List(Float), qs : List(Float), method : QuantileMethod) : List(Float) do
+    match xs do
+    Nil -> panic("Stats.quantiles: empty list")
+    _ -> do
+      let sorted = sort_floats(xs)
+      let n = List.length(sorted)
+      List.map(qs, fn q ->
+        if q < 0.0 || q > 1.0 do panic("Stats.quantiles: q must be in [0.0, 1.0]")
+        else quantile_sorted(sorted, n, q, method) end)
+    end
+    end
+  end
+
+  doc """
+  Interquartile range: Q3 − Q1 using the given method.
+
+  Uses the same sorted list for both quartiles (one sort, not two).
+  Panics on empty input.
+  """
+  fn iqr(xs : List(Float), method : QuantileMethod) : Float do
+    match quantiles(xs, [0.25, 0.75], method) do
+    Cons(q1, Cons(q3, Nil)) -> q3 -. q1
+    _ -> panic("Stats.iqr: unexpected quantiles result")
+    end
+  end
+
+  doc "Interquartile range using `Linear` (Type 7) interpolation."
+  fn iqr_default(xs : List(Float)) : Float do
+    iqr(xs, Linear)
+  end
+
+  doc """
+  Five-number summary with selectable method: (min, Q1, median, Q3, max).
+  Panics on empty list.
+  """
+  fn five_number_summary(xs : List(Float), method : QuantileMethod) : (Float, Float, Float, Float, Float) do
+    match xs do
+    Nil -> panic("Stats.five_number_summary: empty list")
+    _ -> do
+      let sorted = sort_floats(xs)
+      let n = List.length(sorted)
+      let qs = quantiles(sorted, [0.25, 0.5, 0.75], method)
+      match qs do
+      Cons(q1, Cons(q2, Cons(q3, Nil))) -> do
+        let lo = List.nth(sorted, 0)
+        let hi = List.nth(sorted, n - 1)
+        (lo, q1, q2, q3, hi)
+      end
+      _ -> panic("Stats.five_number_summary: unexpected quantiles")
+      end
+    end
+    end
+  end
+
   -- ---- Spread ----
 
   -- Welford's online algorithm: single-pass computation of the sum of

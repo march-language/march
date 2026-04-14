@@ -17983,6 +17983,63 @@ let test_uuid_v5_rfc_url_vector () =
     "dd2c1780-811a-5296-81c5-178a0ef488bc"
     (vstr (call_fn env "f" []))
 
+let test_uuid_v7_version () =
+  let env = eval_with_uuid {|mod Test do
+    fn f() do UUID.version(UUID.v7()) end
+  end|} in
+  Alcotest.(check int) "UUID v7 version is 7" 7
+    (vint (call_fn env "f" []))
+
+let test_uuid_v7_format () =
+  let env = eval_with_uuid {|mod Test do
+    fn f() do
+      let s = UUID.to_string(UUID.v7())
+      string_byte_length(s)
+    end
+  end|} in
+  Alcotest.(check int) "UUID v7 string length is 36" 36
+    (vint (call_fn env "f" []))
+
+let test_uuid_v7_at_timestamp_roundtrips () =
+  (* v7_at(ms) embeds ms; timestamp_ms must recover exactly that value.  *)
+  let env = eval_with_uuid {|mod Test do
+    fn f() do
+      let u = UUID.v7_at(1700000000000)
+      match UUID.timestamp_ms(u) do
+      Some(ms) -> ms
+      None     -> -1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "v7 timestamp roundtrip" 1700000000000
+    (vint (call_fn env "f" []))
+
+let test_uuid_v7_sorts_by_time () =
+  (* Three UUIDs at strictly increasing timestamps should compare in
+     string-sort order.  This is the main reason to pick v7 over v4.   *)
+  let env = eval_with_uuid {|mod Test do
+    fn f() do
+      let a = UUID.to_string(UUID.v7_at(1000000000000))
+      let b = UUID.to_string(UUID.v7_at(1500000000000))
+      let c = UUID.to_string(UUID.v7_at(1700000000000))
+      if a < b && b < c do "ordered" else "out-of-order" end
+    end
+  end|} in
+  Alcotest.(check string) "v7 string-sort = timestamp-sort"
+    "ordered" (vstr (call_fn env "f" []))
+
+let test_uuid_v7_timestamp_ms_on_v4_is_none () =
+  let env = eval_with_uuid {|mod Test do
+    fn f() do
+      match UUID.timestamp_ms(UUID.v4()) do
+      Some(_) -> "some"
+      None    -> "none"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "timestamp_ms returns None for v4 UUIDs"
+    "none" (vstr (call_fn env "f" []))
+
 (* ── Duration stdlib module tests ────────────────────────────────────────── *)
 
 let eval_with_duration src =
@@ -20377,6 +20434,11 @@ let () =
         Alcotest.test_case "v5 version digit"       `Quick test_uuid_v5_version;
         Alcotest.test_case "v5 RFC DNS vector"      `Quick test_uuid_v5_rfc_dns_vector;
         Alcotest.test_case "v5 RFC URL vector"      `Quick test_uuid_v5_rfc_url_vector;
+        Alcotest.test_case "v7 version digit"       `Quick test_uuid_v7_version;
+        Alcotest.test_case "v7 format length"       `Quick test_uuid_v7_format;
+        Alcotest.test_case "v7_at timestamp roundtrip" `Quick test_uuid_v7_at_timestamp_roundtrips;
+        Alcotest.test_case "v7 sorts by time"       `Quick test_uuid_v7_sorts_by_time;
+        Alcotest.test_case "timestamp_ms none for v4" `Quick test_uuid_v7_timestamp_ms_on_v4_is_none;
       ]);
       ("duration stdlib", [
         Alcotest.test_case "parse"                  `Quick test_duration_parse_ok;

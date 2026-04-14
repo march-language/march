@@ -3927,6 +3927,91 @@ let base_env : env =
                    ^ String.sub s 12 4 ^ "-" ^ String.sub s 16 4 ^ "-"
                    ^ String.sub s 20 12)
         | _ -> eval_error "uuid_v4: no arguments expected"))
+
+    (* ---- uuid_v7(): generate a time-ordered UUID v7 string (RFC 9562) ----
+       Layout (128 bits total):
+         bits   0–47  : unix_ts_ms          (48 bits, big-endian)
+         bits  48–51  : version = 0b0111     (4 bits)
+         bits  52–63  : rand_a              (12 bits)
+         bits  64–65  : variant = 0b10      (2 bits)
+         bits  66–127 : rand_b              (62 bits)
+       Random bytes come from /dev/urandom (matches random_bytes/v4 policy
+       pending a future switch of uuid_v4 to CSPRNG).  Uses the current
+       system time in milliseconds via Unix.gettimeofday (). *)
+  ; ("uuid_v7", VBuiltin ("uuid_v7", function
+        | args when args = [] || args = [VUnit] ->
+          let ms =
+            (* 48 bits is plenty: 2^48 ms ≈ 8925 years past epoch *)
+            Int64.of_float (Unix.gettimeofday () *. 1000.0)
+          in
+          let ts_byte i =
+            (* Big-endian: byte 0 is the most significant byte of ms *)
+            let shift = (5 - i) * 8 in
+            Int64.to_int
+              (Int64.logand (Int64.shift_right_logical ms shift) 0xFFL)
+          in
+          let buf = Bytes.create 16 in
+          (* Timestamp bytes 0..5 *)
+          for i = 0 to 5 do Bytes.set buf i (Char.chr (ts_byte i)) done;
+          (* Fill bytes 6..15 with CSPRNG *)
+          (try
+            let ic = open_in_bin "/dev/urandom" in
+            Fun.protect ~finally:(fun () -> close_in_noerr ic)
+              (fun () -> really_input ic buf 6 10)
+          with Sys_error msg ->
+            eval_error "uuid_v7: cannot read /dev/urandom: %s" msg);
+          (* Set version 7: high nibble of byte 6 = 0x7 *)
+          Bytes.set buf 6
+            (Char.chr ((Char.code (Bytes.get buf 6) land 0x0f) lor 0x70));
+          (* Set variant bits: top 2 bits of byte 8 = 0b10 *)
+          Bytes.set buf 8
+            (Char.chr ((Char.code (Bytes.get buf 8) land 0x3f) lor 0x80));
+          let hex b = Printf.sprintf "%02x" (Char.code b) in
+          let s = String.concat "" (List.init 16 (fun i -> hex (Bytes.get buf i))) in
+          VString (String.sub s 0 8 ^ "-" ^ String.sub s 8 4 ^ "-"
+                   ^ String.sub s 12 4 ^ "-" ^ String.sub s 16 4 ^ "-"
+                   ^ String.sub s 20 12)
+        | _ -> eval_error "uuid_v7: no arguments expected"))
+
+    (* ---- uuid_v7_at(unix_ms: Int): UUID v7 at a specific timestamp ----
+       Useful for backfilling old records with time-sorted UUIDs, and for
+       deterministic tests that want to pin the timestamp portion. *)
+  ; ("uuid_v7_at", VBuiltin ("uuid_v7_at", function
+        | [VInt unix_ms] ->
+          if unix_ms < 0 then
+            eval_error "uuid_v7_at: negative timestamp %d" unix_ms
+          else begin
+            let ms = Int64.of_int unix_ms in
+            let ts_byte i =
+              let shift = (5 - i) * 8 in
+              Int64.to_int
+                (Int64.logand (Int64.shift_right_logical ms shift) 0xFFL)
+            in
+            let buf = Bytes.create 16 in
+            for i = 0 to 5 do Bytes.set buf i (Char.chr (ts_byte i)) done;
+            (try
+              let ic = open_in_bin "/dev/urandom" in
+              Fun.protect ~finally:(fun () -> close_in_noerr ic)
+                (fun () -> really_input ic buf 6 10)
+            with Sys_error msg ->
+              eval_error "uuid_v7_at: cannot read /dev/urandom: %s" msg);
+            Bytes.set buf 6
+              (Char.chr ((Char.code (Bytes.get buf 6) land 0x0f) lor 0x70));
+            Bytes.set buf 8
+              (Char.chr ((Char.code (Bytes.get buf 8) land 0x3f) lor 0x80));
+            let hex b = Printf.sprintf "%02x" (Char.code b) in
+            let s = String.concat "" (List.init 16 (fun i -> hex (Bytes.get buf i))) in
+            VString (String.sub s 0 8 ^ "-" ^ String.sub s 8 4 ^ "-"
+                     ^ String.sub s 12 4 ^ "-" ^ String.sub s 16 4 ^ "-"
+                     ^ String.sub s 20 12)
+          end
+        | _ -> eval_error "uuid_v7_at(unix_ms: Int): UUID v7 at a fixed ms timestamp"))
+
+    (* ---- unix_time_ms(): Int milliseconds since Unix epoch ---- *)
+  ; ("unix_time_ms", VBuiltin ("unix_time_ms", function
+        | args when args = [] || args = [VUnit] ->
+          VInt (int_of_float (Unix.gettimeofday () *. 1000.0))
+        | _ -> eval_error "unix_time_ms: takes no arguments"))
   ; ("tcp_recv_http", VBuiltin ("tcp_recv_http", function
         | [VInt fd; VInt max_bytes] ->
           (* Read an HTTP response on a keep-alive connection:

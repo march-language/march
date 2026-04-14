@@ -188,4 +188,87 @@ test "sample is deterministic" do
   assert s1 == s2
 end
 
+-- ---- non-uniform distributions ----
+
+pfn abs_f(x : Float) : Float do
+  if x < 0.0 do 0.0 -. x else x end
+end
+
+pfn sum_floats(xs : List(Float)) : Float do
+  List.fold_left(xs, 0.0, fn (acc, x) -> acc +. x)
+end
+
+pfn sample_n_standard_normal(rng, n : Int) : List(Float) do
+  fn go(r, k : Int, acc) do
+    if k == 0 do acc
+    else do
+      let (z, r2) = Random.standard_normal(r)
+      go(r2, k - 1, Cons(z, acc))
+    end end
+  end
+  go(rng, n, Nil)
+end
+
+test "standard_normal is deterministic for same seed" do
+  let (z1, _) = Random.standard_normal(Random.seed(7))
+  let (z2, _) = Random.standard_normal(Random.seed(7))
+  assert z1 == z2
+end
+
+test "normal with sigma=0 returns mu" do
+  let (x, _) = Random.normal(Random.seed(1), 42.0, 0.0)
+  assert x == 42.0
+end
+
+test "standard_normal sample mean approaches 0" do
+  -- Law of large numbers: mean of 500 N(0,1) should be small.
+  let samples = sample_n_standard_normal(Random.seed(99), 500)
+  let mean = sum_floats(samples) /. 500.0
+  assert abs_f(mean) < 0.2
+end
+
+test "normal shifts and scales correctly" do
+  -- N(10, 1) must equal 10 + 1 * standard_normal(same_seed) bit-for-bit.
+  let (z, _) = Random.standard_normal(Random.seed(314))
+  let (x, _) = Random.normal(Random.seed(314), 10.0, 1.0)
+  assert abs_f(x -. (10.0 +. z)) < 0.000001
+end
+
+test "exponential produces non-negative values" do
+  let (e, _) = Random.exponential(Random.seed(1), 1.0)
+  assert e >= 0.0
+end
+
+test "exponential is deterministic" do
+  let (a, _) = Random.exponential(Random.seed(11), 2.0)
+  let (b, _) = Random.exponential(Random.seed(11), 2.0)
+  assert a == b
+end
+
+test "bernoulli(0) always false, bernoulli(1) always true" do
+  let (f, _) = Random.bernoulli(Random.seed(0), 0.0)
+  let (t, _) = Random.bernoulli(Random.seed(0), 1.0)
+  assert !f
+  assert t
+end
+
+test "choice on single-element list returns that element" do
+  let (x, _) = Random.choice(Random.seed(0), Cons(42, Nil))
+  assert x == 42
+end
+
+test "choice_weighted with a single heavy weight picks that item" do
+  -- Weights (0, 100, 0) must always pick the middle element.
+  let items = Cons((:a, 0.0), Cons((:b, 100.0), Cons((:c, 0.0), Nil)))
+  let (pick, _) = Random.choice_weighted(Random.seed(123), items)
+  assert pick == :b
+end
+
+test "choice_weighted is deterministic" do
+  let items = Cons((:x, 1.0), Cons((:y, 1.0), Cons((:z, 1.0), Nil)))
+  let (a, _) = Random.choice_weighted(Random.seed(7), items)
+  let (b, _) = Random.choice_weighted(Random.seed(7), items)
+  assert a == b
+end
+
 end

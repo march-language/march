@@ -145,4 +145,133 @@ mod Random do
     (List.take(shuffled, count), rng2)
   end
 
+  -- ---- Non-uniform distributions ----
+  --
+  -- All distribution samplers are pure: they consume a Rng and return
+  -- (value, new_rng).  Convenience entry points take only the rng and
+  -- use sensible defaults (mu=0, sigma=1, lambda=1.0).
+
+  -- Uniform on the open interval (0, 1).  next_float is [0, 1), so we
+  -- re-draw if we hit exactly 0.  Used where log/divide would blow up on 0.
+  pfn next_float_open(rng : Rng) : (Float, Rng) do
+    let (u, rng2) = next_float(rng)
+    if u == 0.0 do next_float_open(rng2) else (u, rng2) end
+  end
+
+  doc """
+  Sample from the standard normal distribution N(0, 1) using the
+  Box–Muller transform.  Consumes two uniform samples per call and
+  discards the second Gaussian deviate (simple + stateless; the
+  pairing optimization requires a stateful RNG wrapper).
+  """
+  fn standard_normal(rng : Rng) : (Float, Rng) do
+    let (u1, rng2) = next_float_open(rng)
+    let (u2, rng3) = next_float_open(rng2)
+    let radius = math_sqrt(0.0 -. 2.0 *. math_log(u1))
+    let angle  = 2.0 *. 3.14159265358979323846 *. u2
+    let z = radius *. math_cos(angle)
+    (z, rng3)
+  end
+
+  doc """
+  Sample from the normal distribution N(mu, sigma^2).
+  Panics if sigma < 0.  sigma=0 returns mu.
+  """
+  fn normal(rng : Rng, mu : Float, sigma : Float) : (Float, Rng) do
+    if sigma < 0.0 do panic("Random.normal: sigma must be non-negative")
+    else if sigma == 0.0 do (mu, rng)
+    else do
+      let (z, rng2) = standard_normal(rng)
+      (mu +. sigma *. z, rng2)
+    end end end
+  end
+
+  doc """
+  Sample from the exponential distribution with rate `lambda > 0`.
+  Uses the inverse-CDF method: if U ~ Uniform(0, 1) then
+  X = -ln(U) / lambda is Exp(lambda).
+  Panics if lambda <= 0.
+  """
+  fn exponential(rng : Rng, lambda : Float) : (Float, Rng) do
+    if lambda <= 0.0 do panic("Random.exponential: lambda must be positive")
+    else do
+      let (u, rng2) = next_float_open(rng)
+      ((0.0 -. math_log(u)) /. lambda, rng2)
+    end end
+  end
+
+  doc """
+  Sample from a Bernoulli distribution with success probability p.
+  p must be in [0.0, 1.0]; panics otherwise.
+  """
+  fn bernoulli(rng : Rng, p : Float) : (Bool, Rng) do
+    if p < 0.0 || p > 1.0 do panic("Random.bernoulli: p must be in [0, 1]")
+    else do
+      let (u, rng2) = next_float(rng)
+      (u < p, rng2)
+    end end
+  end
+
+  -- Scan a cumulative-weight list, returning the element whose running
+  -- total first exceeds the target.  Caller must ensure the list is
+  -- non-empty and target is in [0, total_weight).
+  pfn pick_by_cumulative(items : List((a, Float)), target : Float, acc : Float) : a do
+    match items do
+    Nil -> panic("Random.choice_weighted: empty or degenerate weights")
+    Cons((x, w), rest) -> do
+      let new_acc = acc +. w
+      if target < new_acc do x
+      else pick_by_cumulative(rest, target, new_acc) end
+    end
+    end
+  end
+
+  doc """
+  Weighted random selection from a list of `(item, weight)` pairs.
+
+  Weights must be non-negative and at least one must be positive.
+  Returns `(chosen_item, new_rng)`.  Linear in the number of items.
+
+  Example:
+    let items = [(:cat, 1.0), (:dog, 2.0), (:fish, 0.5)]
+    let (pet, rng2) = Random.choice_weighted(rng, items)
+    -- pet is one of :cat, :dog, :fish with probability ~0.28, 0.57, 0.14
+  """
+  fn choice_weighted(rng : Rng, items : List((a, Float))) : (a, Rng) do
+    match items do
+    Nil -> panic("Random.choice_weighted: empty item list")
+    _ -> do
+      let total = List.fold_left(items, 0.0, fn (acc, p) ->
+        match p do
+        (_, w) ->
+          if w < 0.0 do panic("Random.choice_weighted: negative weight")
+          else acc +. w end
+        end)
+      if total <= 0.0 do panic("Random.choice_weighted: weights sum to zero")
+      else do
+        let (u, rng2) = next_float(rng)
+        let target = u *. total
+        let picked = pick_by_cumulative(items, target, 0.0)
+        (picked, rng2)
+      end end
+    end
+    end
+  end
+
+  doc """
+  Pick a uniform element from a non-empty list.
+  Returns `(element, new_rng)`.  Panics on empty input.
+  """
+  fn choice(rng : Rng, xs : List(a)) : (a, Rng) do
+    match xs do
+    Nil -> panic("Random.choice: empty list")
+    _ -> do
+      let n = List.length(xs)
+      let (idx, rng2) = range(rng, 0, n - 1)
+      let elt = List.nth(xs, idx)
+      (elt, rng2)
+    end
+    end
+  end
+
 end

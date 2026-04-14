@@ -76,26 +76,55 @@ finding, and convention drift.  Listed in the recommended order.
   `Task.all_settled`, cancellation scopes.  Existing
   `async/await/await_many` cover the happy path but composing async
   ops requires hand-rolled supervision.
-- [ ] **`Test.assert_eq` (generic)** — Single small function using
-  structural equality.  Today's `assert_eq_int`/`assert_eq_str`/
-  `assert_eq_bool` force test authors to pick the right one for the
-  type; the generic version handles tuples, records, sums.
-- [ ] **`UUID.v7`** — Timestamp-ordered UUIDs.  v4/v5 exist.  Useful
-  primarily for DB primary keys (B-tree locality).  Needs a small
-  runtime builtin + ~50 lines of March.
+- ✅ **`Test.assert_eq` / `assert_ne` (generic)** — `stdlib/test.march`:
+  single generic `assert_eq(expected, actual, msg)` using structural `==`
+  (which falls through to OCaml equality when no `Eq` impl is present).
+  Works on ints, strings, bools, floats, tuples, records, ADT variants,
+  lists, and arbitrary nestings.  Failure messages render both sides
+  via `to_string`.  Counterpart `assert_ne`.  9 new tests in
+  `test/stdlib/test_test.march` (the first test for the `Test` module
+  itself).
+- ✅ **`UUID.v7` / `v7_at` / `timestamp_ms`** — RFC 9562 time-ordered
+  UUIDs for better B-tree locality than v4.  Runtime adds
+  `uuid_v7` (CSPRNG + current unix_time_ms), `uuid_v7_at(unix_ms)`
+  (pinned timestamp — useful for backfilling and deterministic
+  tests), and `unix_time_ms()`.  Stdlib exposes `UUID.v7`, `UUID.v7_at`,
+  and `UUID.timestamp_ms` (extracts the embedded millisecond stamp
+  from v7 UUIDs, returns `None` for other versions).  Version = 7
+  and variant = `10xx` bits set correctly.  String-sort order of v7
+  UUIDs matches timestamp order — that's the whole point.  5 new
+  tests in `test_march` `uuid stdlib` group.  1315 → 1320.
 - [ ] **DateTime timezones** — `LocalDateTime`, `Tz` ADT,
   `to_utc`/`from_utc`, IANA identifiers.  Today's `DateTime` is
   UTC-only.  Decide IANA-loading vs static map first.
 - [ ] **Streams (`Seq.from_*`)** — `Seq.from_file`, `Seq.from_http`,
   `Seq.from_channel`, `Seq.batched`, plus a back-pressure sketch.
   Today's `Seq` is a church-encoded fold with no source constructors.
-- [ ] **`Stats.quantile` / `iqr`** — `quantile(xs, q, method)` with
-  the standard 9 methods (R/Python convention).  `iqr(xs)` is
-  `quantile(.75) - quantile(.25)`.  Today's `percentile` only
-  implements one interpolation method.
-- [ ] **`Random.normal` / `exponential`** — Box-Muller for normal,
-  inverse-CDF for exponential, plus weighted choice.  Today's
-  `Random` is uniform-only.
+- ✅ **`Stats.quantile` / `quantiles` / `iqr` / `five_number_summary`**
+  — `stdlib/stats.march`: `quantile(xs, q, method)` implements all 9
+  Hyndman & Fan (1996) interpolation methods matching R's
+  `quantile(type=k)` and numpy's `method=` argument
+  (`InvertedCdf`, `AveragedInvertedCdf`, `ClosestObservation`,
+  `InterpolatedInvertedCdf`, `Hazen`, `Weibull`, `Linear` [default],
+  `MedianUnbiased`, `NormalUnbiased`).  Batched `quantiles(xs, qs,
+  method)` sorts once.  `iqr(xs, method)` / `iqr_default(xs)`.
+  `five_number_summary(xs, method)` returns `(min, Q1, median,
+  Q3, max)`.  `quantile_default` is a `Linear` alias consistent with
+  the existing `percentile`.  18 new tests in
+  `test/stdlib/test_stats.march`, cross-checked against R reference
+  values for each method.
+- ✅ **`Random.normal` / `exponential` / `bernoulli` /
+  `choice_weighted` / `choice`** — `stdlib/random.march`:
+  `standard_normal(rng)` via Box-Muller; `normal(rng, mu, sigma)`;
+  `exponential(rng, lambda)` via inverse-CDF; `bernoulli(rng, p)`;
+  `choice(rng, xs)` uniform; `choice_weighted(rng,
+  List((a, Float)))` with cumulative scan.  All samplers validate
+  params (panic on `sigma<0`, `lambda<=0`, `p` out of
+  `[0,1]`, negative or all-zero weights).  All return `(value,
+  new_rng)` following Random's existing functional style.  13 new
+  tests in `test/stdlib/test_random.march` including
+  law-of-large-numbers check for normal mean, deterministic
+  same-seed-same-result, and weight-collapse behaviour.
 
 ### Database: Depot
 

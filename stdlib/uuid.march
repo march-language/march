@@ -154,6 +154,63 @@ mod UUID do
   end
 
   doc """
+  Generate a time-ordered UUID v7 (RFC 9562).
+
+      UUID.v7()  -- e.g. UUID("018e7c9b-2a55-7890-9d51-...")
+
+  The leading 48 bits are the current Unix timestamp in milliseconds;
+  the remaining 74 bits are random (CSPRNG).  Version bits (7) and
+  variant bits (RFC 4122) are set correctly.
+
+  v7 UUIDs are sortable by generation time, which dramatically improves
+  B-tree locality when used as database primary keys versus v4.  Prefer
+  v7 over v4 for new schemas.
+  """
+  fn v7() do
+    UUID(uuid_v7())
+  end
+
+  doc """
+  Generate a v7 UUID at a specific Unix timestamp (milliseconds).
+
+      UUID.v7_at(1_700_000_000_000)  -- UUID with timestamp pinned to 2023-11-14
+
+  Useful for backfilling historical records with time-ordered UUIDs and
+  for deterministic tests that want to control the timestamp portion.
+  The random bits are still CSPRNG-generated on every call.
+  """
+  fn v7_at(unix_ms : Int) : UUID do
+    UUID(uuid_v7_at(unix_ms))
+  end
+
+  doc """
+  Extract the Unix timestamp (milliseconds) embedded in a v7 UUID.
+
+  Returns Some(ms) for valid v7 UUIDs; None for other versions or
+  unparseable strings.  The inverse of `v7_at`: for any m in a
+  reasonable range, `timestamp_ms(v7_at(m)) == Some(m)`.
+  """
+  fn timestamp_ms(uuid) do
+    match uuid do
+    UUID(s) ->
+      if version(uuid) != 7 do None
+      else match uuid_str_to_bytes(s) do
+        None -> None
+        Some(bs) ->
+          -- First 6 bytes are the big-endian millisecond timestamp
+          fn take6_to_ms(lst, i, acc) do
+            if i >= 6 do acc
+            else match lst do
+              Nil -> acc
+              Cons(b, rest) -> take6_to_ms(rest, i + 1, acc * 256 + b)
+              end end
+          end
+          Some(take6_to_ms(bs, 0, 0))
+        end end
+    end
+  end
+
+  doc """
   Parse a UUID string, returning Ok(UUID) or Err(:invalid).
 
   Accepts both upper and lower case hex digits; validates the

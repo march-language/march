@@ -990,6 +990,9 @@ let builtin_bindings : (string * scheme) list =
     ("float_nan",       Mono (TArrow (t_unit,  t_float)));
     ("float_epsilon",   Mono (TArrow (t_unit,  t_float)));
     ("unix_time",       Mono (TArrow (t_unit,  t_float)));
+    ("unix_time_ms",    Mono (TArrow (t_unit,  t_int)));
+    ("uuid_v7",         Mono (TArrow (t_unit,  t_string)));
+    ("uuid_v7_at",      Mono (TArrow (t_int,   t_string)));
     ("float_from_string",Mono (TArrow (t_string, t_option t_float)));
     ("float_to_string", Mono (TArrow (t_float,  t_string)));
     (* Math primitives *)

@@ -78,4 +78,42 @@ mod Test do
     end
   end
 
+  doc """
+  Assert two values are structurally equal (generic).
+
+  Uses March's built-in structural equality (the `==` operator), so this
+  works on any types that aren't functions or opaque resources — ints,
+  strings, booleans, floats, tuples, records, ADT variants, lists, and
+  combinations of them.
+
+  On failure, both values are rendered via `to_string` (same form as
+  `inspect`/`debug`) and included in the panic message so failures
+  are easy to diagnose.
+
+  Example:
+    Test.assert_eq((1, "a"), (1, "a"), "tuple equal")
+    Test.assert_eq([1, 2, 3], [1, 2, 3], "list equal")
+    Test.assert_eq(Some(42), Some(42), "option equal")
+  """
+  fn assert_eq(expected, actual, msg : String) : Unit do
+    if expected != actual do
+      panic("Assertion failed: " ++ msg
+        ++ " (got " ++ to_string(actual)
+        ++ ", expected " ++ to_string(expected) ++ ")")
+    else () end
+  end
+
+  doc """
+  Assert two values are not structurally equal.
+
+  Counterpart to `assert_eq`; panics if the values compare equal via `==`.
+  Useful for checking that mutation/update paths actually changed something.
+  """
+  fn assert_ne(left, right, msg : String) : Unit do
+    if left == right do
+      panic("Assertion failed: " ++ msg
+        ++ " (both values were " ++ to_string(left) ++ ")")
+    else () end
+  end
+
 end
