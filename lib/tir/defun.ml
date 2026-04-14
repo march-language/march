@@ -156,7 +156,12 @@ let builtin_names : StringSet.t =
       "sys_os"; "sys_arch";
       "march_version";
       (* UUID / identity builtins *)
-      "uuid_v4" ]
+      "uuid_v4";
+      (* Session-typed channel builtins *)
+      "chan_new"; "chan_send"; "chan_recv"; "chan_close";
+      "chan_choose"; "chan_offer";
+      (* Multi-party session type builtins *)
+      "mpst_new"; "mpst_send"; "mpst_recv"; "mpst_close" ]
 
 (* ── Phase 0: collect top-level names ────────────────────────────── *)
 
@@ -173,18 +178,18 @@ let collect_top_level_names (m : Tir.tir_module) : StringSet.t =
     [tl] is the set of top-level function names.
     Returns an association list of (name, ty) with no duplicates, sorted by name. *)
 let free_vars_of_expr (top_level : StringSet.t) (body : Tir.expr) (params : Tir.var list) :
-    (string * Tir.ty) list =
-  (* Result stored as a name→ty map to avoid duplicates *)
-  let result : (string, Tir.ty) Hashtbl.t = Hashtbl.create 8 in
+    Tir.var list =
+  (* Result stored as a name→var map to preserve linearity and avoid duplicates *)
+  let result : (string, Tir.var) Hashtbl.t = Hashtbl.create 8 in
 
-  let add_fv name ty =
-    if not (Hashtbl.mem result name) then
-      Hashtbl.add result name ty
+  let add_fv (v : Tir.var) =
+    if not (Hashtbl.mem result v.Tir.v_name) then
+      Hashtbl.add result v.Tir.v_name v
   in
 
   let fv_var (v : Tir.var) (bound : StringSet.t) =
     if StringSet.mem v.Tir.v_name bound || StringSet.mem v.Tir.v_name top_level then ()
-    else add_fv v.Tir.v_name v.Tir.v_ty
+    else add_fv v
   in
 
   let fv_atom (a : Tir.atom) (bound : StringSet.t) =
@@ -251,12 +256,13 @@ let free_vars_of_expr (top_level : StringSet.t) (body : Tir.expr) (params : Tir.
   fv_expr body initial_bound;
   (* Return sorted by name for determinism *)
   let pairs = Hashtbl.fold (fun k v acc -> (k, v) :: acc) result [] in
-  List.sort (fun (a, _) (b, _) -> String.compare a b) pairs
+  let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) pairs in
+  List.map snd sorted
 
 (** A detected lambda with its free variables. *)
 type lambda_info = {
   lam_fn           : Tir.fn_def;           (* the original fn_def inside ELetRec *)
-  lam_fvs          : (string * Tir.ty) list;  (* free variables, sorted by name *)
+  lam_fvs          : Tir.var list;             (* free variables, sorted by name, with linearity preserved *)
   lam_is_recursive : bool;                 (* body refers to fn's own name *)
   lam_uid          : int;                  (* globally unique id — used to disambiguate
                                               multiple lambdas with the same fn_name *)
@@ -282,7 +288,7 @@ let collect_lambdas (m : Tir.tir_module) (top_level : StringSet.t) : lambda_info
       when fn.Tir.fn_name = ref_var.Tir.v_name ->
       (* Check for self-recursion before excluding self from free vars. *)
       let fvs_raw = free_vars_of_expr top_level fn.Tir.fn_body fn.Tir.fn_params in
-      let is_recursive = List.exists (fun (name, _) -> name = fn.Tir.fn_name) fvs_raw in
+      let is_recursive = List.exists (fun (v : Tir.var) -> v.Tir.v_name = fn.Tir.fn_name) fvs_raw in
       (* Exclude the function's own name from free variables: recursive
          calls use $clo in the lifted apply fn, so self-capture would
          create a circular allocation. *)
@@ -327,7 +333,7 @@ let lift_lambda (lam : lambda_info) : Tir.type_def * Tir.fn_def =
   let clo_name = Printf.sprintf "$Clo_%s$%d" fn.Tir.fn_name lam.lam_uid in
   let apply_name = Printf.sprintf "%s$apply$%d" fn.Tir.fn_name lam.lam_uid in
   (* TDClosure struct: [fn_ptr: TPtr(TUnit), fv0_ty, fv1_ty, ...] *)
-  let td = Tir.TDClosure (clo_name, Tir.TPtr Tir.TUnit :: List.map snd fvs) in
+  let td = Tir.TDClosure (clo_name, Tir.TPtr Tir.TUnit :: List.map (fun v -> v.Tir.v_ty) fvs) in
   (* $clo parameter — opaque pointer to the closure struct itself *)
   let clo_param = { Tir.v_name = "$clo"; v_ty = Tir.TPtr Tir.TUnit; v_lin = Tir.Unr } in
   (* Wrap the original body with ELet bindings that load each free variable
@@ -348,11 +354,10 @@ let lift_lambda (lam : lambda_info) : Tir.type_def * Tir.fn_def =
   in
   let wrapped_body =
     add_self_binding (
-      List.fold_right (fun (i, (fv_name, fv_ty)) acc ->
-          let fv_var = { Tir.v_name = fv_name; v_ty = fv_ty; v_lin = Tir.Unr } in
+      List.fold_right (fun (i, (fv : Tir.var)) acc ->
           let field_name = "$fv" ^ string_of_int (i + 1) in
           let load_expr  = Tir.EField (Tir.AVar clo_param, field_name) in
-          Tir.ELet (fv_var, load_expr, acc)
+          Tir.ELet (fv, load_expr, acc)
         ) (List.mapi (fun i fv -> (i, fv)) fvs) fn.Tir.fn_body)
   in
   let apply_fn : Tir.fn_def = {
@@ -386,9 +391,7 @@ let rewrite_expr (known_lambdas : (string * lambda_info) list)
          let fn_ptr_atom = Tir.AVar { Tir.v_name = apply_name;
                                        v_ty = Tir.TPtr Tir.TUnit;
                                        v_lin = Tir.Unr } in
-         let fv_atoms = List.map (fun (name, ty) ->
-             Tir.AVar { Tir.v_name = name; v_ty = ty; v_lin = Tir.Unr }
-           ) lam.lam_fvs in
+         let fv_atoms = List.map (fun (v : Tir.var) -> Tir.AVar v) lam.lam_fvs in
          let clo_name = Printf.sprintf "$Clo_%s$%d" fn.Tir.fn_name lam.lam_uid in
          Tir.EAlloc (Tir.TCon (clo_name, []), fn_ptr_atom :: fv_atoms)
        | None ->
