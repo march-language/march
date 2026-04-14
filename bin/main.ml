@@ -468,7 +468,8 @@ let resolve_imports ~source_file (m : March_ast.Ast.module_) =
 
   let rec load mod_name ~from_span =
     if Hashtbl.mem resolved mod_name then
-      Hashtbl.find resolved mod_name
+      (* Already emitted at some point — never re-emit (would duplicate decls) *)
+      []
     else if Hashtbl.mem in_progress mod_name then begin
       errors := (mod_name, from_span,
         Printf.sprintf
@@ -506,15 +507,22 @@ let resolve_imports ~source_file (m : March_ast.Ast.module_) =
                 errors := (mod_name, from_span, msg) :: !errors; []
               | Ok ast ->
                 let ast = March_desugar.Desugar.desugar_module ast in
+                (* Mark resolved BEFORE recursing so cycles don't duplicate. *)
+                Hashtbl.add resolved mod_name [];
                 let transitive = load_refs ast.March_ast.Ast.mod_decls in
-                let all_decls = transitive @ ast.March_ast.Ast.mod_decls in
-                [ March_ast.Ast.DMod (ast.March_ast.Ast.mod_name,
+                let self_dmod =
+                  March_ast.Ast.DMod (ast.March_ast.Ast.mod_name,
                                       March_ast.Ast.Public,
-                                      all_decls,
-                                      dummy_span) ]
+                                      ast.March_ast.Ast.mod_decls,
+                                      dummy_span)
+                in
+                (* Emit transitive imports as top-level siblings, NOT nested.
+                   Nesting would cause TIR to prefix their fn names with this
+                   module's name (e.g. `Runner.foo` → `Processes.Runner.foo`),
+                   which breaks qualified cross-module calls at link time. *)
+                transitive @ [self_dmod]
           end
       in
-      Hashtbl.add resolved mod_name result;
       Hashtbl.remove in_progress mod_name;
       result
     end
@@ -595,21 +603,27 @@ let resolve_imports ~source_file (m : March_ast.Ast.module_) =
             if db <> da then compare db da
             else compare (mn a) (mn b)
           ) parsed in
-        (* Phase 2: build DMods in sorted order *)
-        List.filter_map (fun (file_path, ast) ->
-            if Hashtbl.mem loaded_paths file_path then None
+        (* Phase 2: build DMods in sorted order.  Emit transitive imports as
+           top-level siblings (not nested) to avoid name-mangling collisions. *)
+        List.concat_map (fun (file_path, ast) ->
+            if Hashtbl.mem loaded_paths file_path then []
             else begin
               Hashtbl.add loaded_paths file_path ();
-              let transitive = load_refs ast.March_ast.Ast.mod_decls in
-              let all_decls = transitive @ ast.March_ast.Ast.mod_decls in
-              (* Cache under mod_name so explicit `use` won't reload this file *)
               let mn = ast.March_ast.Ast.mod_name.March_ast.Ast.txt in
-              if not (Hashtbl.mem resolved mn) then
+              if Hashtbl.mem resolved mn then []
+              else begin
+                (* Mark emitted BEFORE load_refs so recursive imports don't
+                   re-emit this module inside their own transitive set. *)
                 Hashtbl.add resolved mn [];
-              Some (March_ast.Ast.DMod (ast.March_ast.Ast.mod_name,
-                                        March_ast.Ast.Public,
-                                        all_decls,
-                                        dummy_span))
+                let transitive = load_refs ast.March_ast.Ast.mod_decls in
+                let self_dmod =
+                  March_ast.Ast.DMod (ast.March_ast.Ast.mod_name,
+                                      March_ast.Ast.Public,
+                                      ast.March_ast.Ast.mod_decls,
+                                      dummy_span)
+                in
+                transitive @ [self_dmod]
+              end
             end
           ) sorted
       ) extra_lib_paths

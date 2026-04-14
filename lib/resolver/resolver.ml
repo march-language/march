@@ -102,7 +102,8 @@ let resolve_imports ?(extra_lib_paths=[]) ~source_file (m : March_ast.Ast.module
 
   let rec load mod_name ~from_span =
     if Hashtbl.mem resolved mod_name then
-      Hashtbl.find resolved mod_name
+      (* Already emitted at some point — never re-emit (would duplicate decls) *)
+      []
     else if Hashtbl.mem in_progress mod_name then begin
       errors := (mod_name, from_span,
         Printf.sprintf
@@ -135,14 +136,21 @@ let resolve_imports ?(extra_lib_paths=[]) ~source_file (m : March_ast.Ast.module
               errors := (mod_name, from_span, msg) :: !errors; []
             | Ok ast ->
               let ast = March_desugar.Desugar.desugar_module ast in
+              (* Mark resolved BEFORE recursing so cycles don't duplicate. *)
+              Hashtbl.add resolved mod_name [];
               let transitive = load_refs ast.March_ast.Ast.mod_decls in
-              let all_decls = transitive @ ast.March_ast.Ast.mod_decls in
-              [ March_ast.Ast.DMod (ast.March_ast.Ast.mod_name,
+              let self_dmod =
+                March_ast.Ast.DMod (ast.March_ast.Ast.mod_name,
                                     March_ast.Ast.Public,
-                                    all_decls,
-                                    dummy_span) ]
+                                    ast.March_ast.Ast.mod_decls,
+                                    dummy_span)
+              in
+              (* Emit transitive imports as top-level siblings, NOT nested.
+                 Nesting causes TIR to prefix their fn names with this
+                 module's name (e.g. `Runner.foo` → `Processes.Runner.foo`),
+                 which breaks qualified cross-module calls at link time. *)
+              transitive @ [self_dmod]
       in
-      Hashtbl.add resolved mod_name result;
       Hashtbl.remove in_progress mod_name;
       result
     end
