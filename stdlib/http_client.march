@@ -212,6 +212,54 @@ mod HttpClient do
     end
   end
 
+  -- Header names that must be dropped when a redirect crosses origins:
+  -- they carry caller credentials and must not leak to third-party hosts.
+  -- Matched case-insensitively.
+  fn hc_is_sensitive_header_name(name) do
+    let lower = string_to_lowercase(name)
+    lower == "authorization"
+    || lower == "cookie"
+    || lower == "proxy-authorization"
+  end
+
+  fn hc_strip_sensitive_headers(headers) do
+    match headers do
+    Nil -> Nil
+    Cons(Header(n, v), rest) -> do
+      if hc_is_sensitive_header_name(n) do
+        hc_strip_sensitive_headers(rest)
+      else
+        Cons(Header(n, v), hc_strip_sensitive_headers(rest))
+      end
+    end
+    end
+  end
+
+  -- Two requests share an origin iff scheme, host, and port all match.
+  -- A missing port is treated as the scheme default (80 for http, 443 for https).
+  fn hc_effective_port(sch, port_opt) do
+    match port_opt do
+    Some(p) -> p
+    None -> match sch do
+      SchemeHttps -> 443
+      SchemeHttp  -> 80
+      end
+    end
+  end
+
+  fn hc_same_origin(req_a, req_b) do
+    let sa = Http.scheme(req_a)
+    let sb = Http.scheme(req_b)
+    let same_scheme = match (sa, sb) do
+      (SchemeHttp, SchemeHttp) -> true
+      (SchemeHttps, SchemeHttps) -> true
+      _ -> false
+      end
+    let same_host = string_to_lowercase(Http.host(req_a)) == string_to_lowercase(Http.host(req_b))
+    let same_port = hc_effective_port(sa, Http.port(req_a)) == hc_effective_port(sb, Http.port(req_b))
+    same_scheme && same_host && same_port
+  end
+
   fn handle_redirects(req, resp, max, count) do
     if max == 0 do Ok(resp)
     else if not(Http.response_is_redirect(resp)) do Ok(resp)
@@ -221,9 +269,23 @@ mod HttpClient do
       None -> Ok(resp)
       Some(location) -> do
         let redirect_req = match Http.parse_url(location) do
-          Ok(parsed) ->
-            Request(Get, Http.scheme(parsed), Http.host(parsed), Http.port(parsed), Http.path(parsed), Http.query(parsed), Http.headers(req), "")
+          Ok(parsed) -> do
+            -- Parsed absolute URL: if the target crosses origins, drop
+            -- Authorization / Cookie / Proxy-Authorization to avoid
+            -- leaking credentials to third-party hosts.
+            let target = Request(Get, Http.scheme(parsed), Http.host(parsed),
+                                 Http.port(parsed), Http.path(parsed),
+                                 Http.query(parsed), Nil, "")
+            let safe_headers = if hc_same_origin(req, target) do
+                Http.headers(req)
+              else
+                hc_strip_sensitive_headers(Http.headers(req))
+              end
+            Request(Get, Http.scheme(parsed), Http.host(parsed), Http.port(parsed),
+                    Http.path(parsed), Http.query(parsed), safe_headers, "")
+          end
           Err(_) ->
+            -- Relative Location: same origin, headers preserved.
             Http.set_body(Http.set_method(Http.set_path(req, location), Get), "")
           end
         match HttpTransport.request(redirect_req) do

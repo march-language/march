@@ -357,11 +357,23 @@ pfn svg_polyline_el(points : List((Float, Float)), stroke : String, sw : Float) 
   end
 end
 
+-- Escape a string for safe inclusion in SVG text nodes and attribute
+-- values.  Plots may be served to a browser, so any user-controlled
+-- label, title, or axis name must be escaped to prevent XSS via crafted
+-- input containing markup, quotes, or ampersands.
+pfn svg_escape(s : String) : String do
+  let s1 = string_replace_all(s,  "&", "&amp;")
+  let s2 = string_replace_all(s1, "<", "&lt;")
+  let s3 = string_replace_all(s2, ">", "&gt;")
+  let s4 = string_replace_all(s3, "\"", "&quot;")
+  string_replace_all(s4, "'", "&#39;")
+end
+
 pfn svg_text_el(x : Float, y : Float, txt : String,
                fs : Float, anchor : String) : String do
   "<text x=\"" ++ fmt_float(x) ++ "\" y=\"" ++ fmt_float(y) ++
   "\" font-size=\"" ++ fmt_float(fs) ++
-  "\" text-anchor=\"" ++ anchor ++ "\">" ++ txt ++ "</text>"
+  "\" text-anchor=\"" ++ anchor ++ "\">" ++ svg_escape(txt) ++ "</text>"
 end
 
 pfn join_strs(lst : List(String), sep : String) : String do
@@ -544,7 +556,7 @@ pfn render_y_axis(ticks : List(Float), sy : Float -> Float,
       Cons("<text x=\"0\" y=\"0\" font-size=\"" ++ fmt_float(fs) ++
            "\" text-anchor=\"middle\" transform=\"translate(" ++
            fmt_float(lx) ++ "," ++ fmt_float(mid_y) ++
-           ") rotate(-90)\">" ++ l ++ "</text>", Nil)
+           ") rotate(-90)\">" ++ svg_escape(l) ++ "</text>", Nil)
     end
     end
   Cons(axis_line, List.append(tick_parts, lbl_parts))

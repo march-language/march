@@ -1,8 +1,12 @@
 -- Json module: JSON encoding and decoding.
 --
 -- Types:
---   JsonValue = Null | Bool(Bool) Number(Float) Str(String)
---              | Array(List(JsonValue)) Object(List((String, JsonValue)))
+--   JsonValue = Null
+--             | Bool(Bool)
+--             | Number(Float)
+--             | Str(String)
+--             | Array(List(JsonValue))
+--             | Object(List((String, JsonValue)))
 --
 -- Note: Object uses an association list (ordered, allows duplicate keys).
 -- Key lookup uses the first occurrence.

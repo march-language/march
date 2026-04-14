@@ -200,6 +200,30 @@ describe "Http request transforms" do
     assert (Http.get_request_header(req2, "x-token") == Some("abc123"))
     assert (not (is_nil(Http.headers(req2))))
   end
+
+  test "set_header strips CR from header value (CRLF injection defence)" do
+    let req = Request(Get, SchemeHttp, "example.com", None, "/", None, Nil, "")
+    let req2 = Http.set_header(req, "X-Evil", "abc\rX-Injected: yes")
+    assert (Http.get_request_header(req2, "X-Evil") == Some("abcX-Injected: yes"))
+  end
+
+  test "set_header strips LF from header value" do
+    let req = Request(Get, SchemeHttp, "example.com", None, "/", None, Nil, "")
+    let req2 = Http.set_header(req, "X-Evil", "abc\nX-Injected: yes")
+    assert (Http.get_request_header(req2, "X-Evil") == Some("abcX-Injected: yes"))
+  end
+
+  test "set_header strips NUL from header name and value" do
+    let req = Request(Get, SchemeHttp, "example.com", None, "/", None, Nil, "")
+    let req2 = Http.set_header(req, "X-\x00Name", "v\x00alue")
+    assert (Http.get_request_header(req2, "X-Name") == Some("value"))
+  end
+
+  test "set_header strips CRLF from header name" do
+    let req = Request(Get, SchemeHttp, "example.com", None, "/", None, Nil, "")
+    let req2 = Http.set_header(req, "X-\r\nInjected", "ok")
+    assert (Http.get_request_header(req2, "X-Injected") == Some("ok"))
+  end
 end
 
 describe "Http response accessors" do

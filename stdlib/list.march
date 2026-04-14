@@ -245,12 +245,21 @@ fn each(xs : List(a), f : a -> b) : () do
   go(xs)
 end
 
-doc "Applies `f` to each element and concatenates the results."
+doc "Applies `f` to each element and concatenates the results.  O(n) in the total output size."
 fn flat_map(xs : List(a), f : a -> List(b)) : List(b) do
+  -- Accumulate each f(h) onto acc in reversed order, then reverse once at
+  -- the end.  Total work is O(total_output), not O(total_output^2) which
+  -- the old append-based implementation would incur.
+  fn prepend_reversed(sub : List(b), acc : List(b)) : List(b) do
+    match sub do
+    Nil           -> acc
+    Cons(x, rest) -> prepend_reversed(rest, Cons(x, acc))
+    end
+  end
   fn go(lst : List(a), acc : List(b)) : List(b) do
     match lst do
-    Nil        -> acc
-    Cons(h, t) -> go(t, append(acc, f(h)))
+    Nil        -> reverse(acc)
+    Cons(h, t) -> go(t, prepend_reversed(f(h), acc))
     end
   end
   go(xs, Nil)
@@ -664,17 +673,18 @@ end
 
 -- ---- Deduplication ----
 
-doc "Removes consecutive duplicate elements (keeps first of each run)."
+doc "Returns true if `xs` contains `x` (using structural equality)."
 fn member(xs : List(a), x : a) : Bool do
   any(xs, fn y -> y == x)
 end
 
+doc "Removes consecutive duplicate elements (keeps first of each run).  Uses structural equality."
 fn dedup(xs : List(a)) : List(a) do
   fn go(lst : List(a), prev : a, acc : List(a)) : List(a) do
     match lst do
     Nil        -> reverse(acc)
     Cons(h, t) -> do
-      if to_string(h) == to_string(prev) do go(t, h, acc)
+      if h == prev do go(t, h, acc)
       else go(t, h, Cons(h, acc)) end
     end
     end

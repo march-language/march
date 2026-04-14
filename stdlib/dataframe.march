@@ -43,9 +43,28 @@ type Row = Row(List((String, Value)))
 -- DataFrame: an ordered list of equal-length typed columns.
 type DataFrame = DataFrame(List(Column))
 
-doc "Construct a DataFrame directly from a list of columns. No length check."
+doc """
+Construct a DataFrame directly from a list of columns.  Panics if any
+column has a different length from the first — ragged frames silently
+corrupt every downstream aggregation, so we fail fast instead.
+
+Use `from_columns` for the `Result`-returning version when columns may
+come from user input and the caller wants to handle the error.
+"""
 fn make_df(cols : List(Column)) : DataFrame do
-  DataFrame(cols)
+  match cols do
+  Nil -> DataFrame(Nil)
+  Cons(first, rest) -> do
+    let expected = col_len(first)
+    let bad = List.find(rest, fn c -> col_len(c) != expected)
+    match bad do
+    None -> DataFrame(cols)
+    Some(c) ->
+      panic("DataFrame.make_df: column '" ++ col_name(c) ++ "' has length "
+            ++ int_to_string(col_len(c)) ++ ", expected " ++ int_to_string(expected))
+    end
+  end
+  end
 end
 
 -- ── Column helpers ─────────────────────────────────────────────────────────

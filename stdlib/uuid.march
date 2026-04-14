@@ -102,13 +102,16 @@ pfn bytes_to_uuid_str(bs) do
     end
   end
   fn byte_hex(n) do nibble(n / 16) ++ nibble(n % 16) end
+  -- Standard UUID format is 8-4-4-4-12 hex chars, separated by dashes.
+  -- Dashes go *before* byte indices 4, 6, 8, 10 so that output is:
+  -- bytes[0..3]-bytes[4..5]-bytes[6..7]-bytes[8..9]-bytes[10..15].
   fn go(lst, i, acc) do
     match lst do
     Nil -> string_join(rev_list(acc), "")
     Cons(b, rest) ->
       let h = byte_hex(b)
       let sep =
-        if i == 3 || i == 5 || i == 7 || i == 9 do "-"
+        if i == 4 || i == 6 || i == 8 || i == 10 do "-"
         else "" end
       go(rest, i + 1, Cons(sep ++ h, acc))
     end
@@ -200,19 +203,29 @@ fn v5(namespace, name) do
     match uuid_str_to_bytes(ns_str) do
     None -> UUID("00000000-0000-0000-0000-000000000000")
     Some(ns_bytes) ->
-      -- Build namespace bytes string for SHA-1 input
-      fn bytes_to_str(bs) do
-        fn go(lst, acc) do
-          match lst do
-          Nil -> string_join(rev_list(acc), "")
-          Cons(b, rest) -> go(rest, Cons(char_from_int(b), acc))
+      -- Per RFC 4122 §4.3: SHA-1(namespace_bytes || name_bytes).  The
+      -- namespace is 16 raw bytes; we must not route them through
+      -- `char_from_int` (which silently drops bytes > 0x7F via empty
+      -- strings and would corrupt the hash input).  Build a single
+      -- `Bytes(...)` value and pass it directly to `sha1_bytes`, which
+      -- accepts both String and Bytes.
+      fn name_to_bytes(s) do
+        fn go(cs, acc) do
+          match cs do
+          Nil -> rev_list(acc)
+          Cons(c, rest) -> go(rest, Cons(char_to_int(c), acc))
           end
         end
-        go(bs, Nil)
+        go(string_chars(s), Nil)
       end
-      let ns_raw = bytes_to_str(ns_bytes)
-      let input = ns_raw ++ name
-      -- SHA-1 hash of namespace + name
+      fn list_append(xs, ys) do
+        match xs do
+        Nil -> ys
+        Cons(h, t) -> Cons(h, list_append(t, ys))
+        end
+      end
+      let input = Bytes(list_append(ns_bytes, name_to_bytes(name)))
+      -- SHA-1 hash of namespace || name
       let hash_bytes = sha1_bytes(input)
       match hash_bytes do
       Bytes(hash_list) ->

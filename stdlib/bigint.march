@@ -330,14 +330,25 @@ fn mul(a : BigInt, b : BigInt) : BigInt do
   end
 end
 
-doc "Divides a by b (integer division, truncates toward zero). Panics if b is zero."
+doc """
+Divides a by b.  Uses truncation toward zero: `div(-17, 3) == -5`,
+`div(17, -3) == -5`, `div(-17, -3) == 5`.  Panics if b is zero.
+
+**Limitation:** only single-limb divisors (|b| < `base()`, roughly 10^9)
+are supported in the current implementation.  Multi-limb divisors raise
+`BigInt.div: multi-limb divisor not yet supported` — this is a loud
+failure, not a silent wrong result, but callers must guard against it
+until long division lands.  Most practical use cases (dividing by small
+denominators, modular arithmetic) fit within the limb bound.
+"""
 fn div(a : BigInt, b : BigInt) : BigInt do
   match b do
   BigInt(_, Nil) -> panic("BigInt.div: division by zero")
   BigInt(sb, db) -> do
     match a do
     BigInt(sa, da) -> do
-      -- Simple single-limb fast path
+      -- Single-limb fast path: Knuth long division (TAOCP §4.3.1 Alg. D)
+      -- would be needed for the general case.  Not implemented yet.
       match db do
       Cons(d, Nil) -> do
         let (q, _) = div_digit(da, d)
@@ -347,11 +358,7 @@ fn div(a : BigInt, b : BigInt) : BigInt do
         end
       end
       _ ->
-        -- Multi-limb division via repeated subtraction is too slow.
-        -- Use long division: reduce to single-digit divisors iteratively.
-        -- For now, implement via to_int conversion when possible, else panic.
-        -- A full multi-word long division is left as a future improvement.
-        panic("BigInt.div: multi-limb divisor not yet supported")
+        panic("BigInt.div: multi-limb divisor not yet supported (use |b| < 10^9)")
       end
     end
     end
@@ -359,7 +366,15 @@ fn div(a : BigInt, b : BigInt) : BigInt do
   end
 end
 
-doc "Computes a mod b (remainder, same sign as a). Panics if b is zero."
+doc """
+Computes a mod b (truncated modulo, same sign as a).  The identity
+`a == div(a, b) * b + mod_(a, b)` always holds.  Examples:
+`mod_(-17, 3) == -2`, `mod_(17, 3) == 2`.  Panics if b is zero.
+
+**Limitation:** only single-limb divisors (|b| < `base()`, roughly 10^9)
+are supported.  Multi-limb divisors raise
+`BigInt.mod: multi-limb divisor not yet supported`.
+"""
 fn mod_(a : BigInt, b : BigInt) : BigInt do
   match b do
   BigInt(_, Nil) -> panic("BigInt.mod: division by zero")
@@ -373,7 +388,7 @@ fn mod_(a : BigInt, b : BigInt) : BigInt do
         else BigInt(sa, Cons(r, Nil)) end
       end
       _ ->
-        panic("BigInt.mod: multi-limb divisor not yet supported")
+        panic("BigInt.mod: multi-limb divisor not yet supported (use |b| < 10^9)")
       end
     end
     end

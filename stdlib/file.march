@@ -1,8 +1,9 @@
 -- File module: filesystem I/O.
 -- All I/O functions return Result(value, FileError).
--- Use with_lines / with_chunks for streaming (file handle closed after callback returns).
--- Note: if the callback raises an unhandled exception, the handle may leak.
--- March does not have try/finally semantics.
+-- Use with_lines / with_chunks for streaming.  The file handle is
+-- closed when the callback returns *and* if the callback panics —
+-- these wrappers delegate to the runtime `try_finally` primitive to
+-- guarantee cleanup even on unhandled exceptions.
 
 mod File do
 
@@ -56,14 +57,15 @@ fn delete(path) do file_delete(path) end
 fn copy(src, dest) do file_copy(src, dest) end
 fn rename(src, dest) do file_rename(src, dest) end
 
--- Streaming: closed after callback returns (not exception-safe)
+-- Streaming: closed when callback returns OR panics (via try_finally).
 
 -- Seq wraps a church-encoded fold closure. Single-pass.
 ptype Seq(a) = Seq(a)
 
 -- Streaming: opens path, creates a single-pass Seq(String) of lines, calls callback,
 -- then closes the file handle. The Seq is single-pass -- consuming it twice yields
--- empty results on the second pass.
+-- empty results on the second pass.  `try_finally` guarantees the fd is
+-- closed even if `callback` panics.
 fn with_lines(path, callback) do
   match file_open(path) do
   Err(e) -> Err(e)
@@ -75,8 +77,10 @@ fn with_lines(path, callback) do
       end
     end
     let seq = Seq(fn(acc, f) -> do_lines(acc, f))
-    let result = callback(seq)
-    file_close(fd)
+    let result = try_finally(
+      fn _ -> callback(seq),
+      fn _ -> file_close(fd)
+    )
     Ok(result)
   end
   end
@@ -93,8 +97,10 @@ fn with_chunks(path, size, callback) do
       end
     end
     let seq = Seq(fn(acc, f) -> do_chunks(acc, f))
-    let result = callback(seq)
-    file_close(fd)
+    let result = try_finally(
+      fn _ -> callback(seq),
+      fn _ -> file_close(fd)
+    )
     Ok(result)
   end
   end

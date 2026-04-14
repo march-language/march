@@ -7,7 +7,10 @@
 -- Most users should use HttpClient (Layer 3) instead. Use this
 -- directly only when you need low-level control over connections.
 --
--- NOTE: Only supports HTTP (not HTTPS/TLS) in this initial version.
+-- This module handles plain HTTP only.  For HTTPS, use the Tls module
+-- (`Tls.https_get` / `Tls.connect`).  Passing an https:// request to
+-- this module returns `Err(SchemeNotSupported(...))` rather than
+-- silently downgrading to plaintext.
 
 mod HttpTransport do
 
@@ -18,20 +21,40 @@ mod HttpTransport do
     | RecvError(String)
     | ConnParseError(String)
     | Closed
+    | SchemeNotSupported(String)
+
+  -- Guard: refuse to send an https:// request over a plain TCP socket.
+  -- Returning an explicit error here prevents callers from unknowingly
+  -- leaking credentials, bodies, or cookies in plaintext when a URL was
+  -- built with https but no TLS context was threaded through.
+  pfn require_plain_http(req) do
+    match Http.scheme(req) do
+    SchemeHttp  -> Ok(())
+    SchemeHttps -> Err(SchemeNotSupported("https:// not supported by HttpTransport; use the Tls module"))
+    end
+  end
 
   doc """
   Open a TCP connection to the request's host:port.
   Returns Ok(fd) or Err(TransportError).
+
+  Refuses https:// requests with `SchemeNotSupported` — use the Tls
+  module for TLS-enabled connections.
   """
   fn connect(req) do
-    let req_host = Http.host(req)
-    let req_port = match Http.port(req) do
-      Some(p) -> p
-      None -> 80
+    match require_plain_http(req) do
+    Err(e) -> Err(e)
+    Ok(_) -> do
+      let req_host = Http.host(req)
+      let req_port = match Http.port(req) do
+        Some(p) -> p
+        None -> 80
+        end
+      match tcp_connect(req_host, req_port) do
+      Err(msg) -> Err(ConnectionRefused(msg))
+      Ok(fd) -> Ok(fd)
       end
-    match tcp_connect(req_host, req_port) do
-    Err(msg) -> Err(ConnectionRefused(msg))
-    Ok(fd) -> Ok(fd)
+    end
     end
   end
 
@@ -39,8 +62,19 @@ mod HttpTransport do
   Send a request and receive the response on an existing fd.
   Does NOT close the connection — caller manages the fd lifetime.
   Suitable for keep-alive connection reuse.
+
+  Refuses https:// requests with `SchemeNotSupported` even when an fd is
+  provided, because this module uses plain `tcp_send_all` that would
+  bypass TLS on a TLS-wrapped fd.  Use the Tls module for HTTPS.
   """
   fn request_on(fd, req) do
+    match require_plain_http(req) do
+    Err(e) -> Err(e)
+    Ok(_) -> request_on_plain(fd, req)
+    end
+  end
+
+  pfn request_on_plain(fd, req) do
     let meth = Http.method_to_string(Http.method(req))
     let req_host = Http.host(req)
     let req_path = Http.path(req)
@@ -71,8 +105,18 @@ mod HttpTransport do
   Calls on_chunk(chunk_string) for each body chunk as it arrives.
   Returns Ok((status_code, headers, last_chunk_result)) or Err.
   Does NOT close the connection.
+
+  Refuses https:// requests with `SchemeNotSupported`.  Use the Tls
+  module for streaming over TLS.
   """
   fn stream_request_on(fd, req, on_chunk) do
+    match require_plain_http(req) do
+    Err(e) -> Err(e)
+    Ok(_) -> stream_request_on_plain(fd, req, on_chunk)
+    end
+  end
+
+  pfn stream_request_on_plain(fd, req, on_chunk) do
     let meth = Http.method_to_string(Http.method(req))
     let req_host = Http.host(req)
     let req_path = Http.path(req)
@@ -131,8 +175,18 @@ mod HttpTransport do
   Send an HTTP request and receive the response.
   Opens a TCP connection, sends the request with Connection: close,
   receives and parses the response, then closes the connection.
+
+  Refuses https:// requests with `SchemeNotSupported` — use the Tls
+  module for TLS-enabled requests.
   """
   fn request(req) do
+    match require_plain_http(req) do
+    Err(e) -> Err(e)
+    Ok(_) -> request_plain(req)
+    end
+  end
+
+  pfn request_plain(req) do
     let req = Http.set_header(req, "Connection", "close")
     let req_host = Http.host(req)
     let req_port = match Http.port(req) do

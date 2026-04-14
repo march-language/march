@@ -511,6 +511,19 @@ describe "deduplication" do
     let empty : List(Int) = Nil
     assert List.is_empty(List.dedup(empty))
   end
+
+  test "dedup uses structural equality on tuples (not to_string)" do
+    -- Pairs that stringify equal under a broken impl but differ structurally
+    -- must be kept as two elements.
+    let xs = Cons((1, 2), Cons((1, 2), Cons((3, 4), Nil)))
+    let r = List.dedup(xs)
+    assert (List.length(r) == 2)
+  end
+
+  test "member uses structural equality" do
+    assert (List.member(Cons(1, Cons(2, Cons(3, Nil))), 2))
+    assert (not (List.member(Cons(1, Cons(2, Cons(3, Nil))), 4)))
+  end
 end
 
 end

@@ -169,10 +169,55 @@ mod Http do
     end
   end
 
+  -- Local list-reverse, so this module does not depend on Prelude/List
+  -- being loaded (the pure-data Http layer is self-contained).
+  pfn rev_list(xs) do
+    fn go(lst, acc) do
+      match lst do
+      Nil -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(xs, Nil)
+  end
+
+  doc """
+  Strip bytes that are never valid in an HTTP header name or value: NUL
+  (0x00), LF (0x0A), and CR (0x0D).  Per RFC 7230, header field-names are
+  tokens and field-values are visible ASCII plus HTAB/SP; control bytes
+  that could split the message onto a new line must not appear.  Stripping
+  them at the API boundary prevents CRLF-injection / response-splitting
+  / request-smuggling attacks when header strings come from untrusted
+  input (e.g., user-submitted tokens, paths, or redirect targets).
+  """
+  pfn sanitize_header_part(s : String) : String do
+    fn go(cs, acc) do
+      match cs do
+      Nil -> string_join(rev_list(acc), "")
+      Cons(c, rest) -> do
+        let code = char_to_int(c)
+        if code == 0 || code == 10 || code == 13 do
+          go(rest, acc)
+        else
+          go(rest, Cons(char_from_int(code), acc))
+        end
+      end
+      end
+    end
+    go(string_chars(s), Nil)
+  end
+
+  doc """
+  Prepend a header to `req`.  The name and value are sanitized: NUL, CR,
+  and LF bytes are removed to block CRLF-injection attacks even when the
+  inputs come from untrusted sources.  See `sanitize_header_part/1`.
+  """
   fn set_header(req : Request(b), name : String, value : String) : Request(b) do
+    let safe_name = sanitize_header_part(name)
+    let safe_value = sanitize_header_part(value)
     match req do
     Request(m, sc, h, p, pa, q, hd, bd) ->
-      Request(m, sc, h, p, pa, q, Cons(Header(name, value), hd), bd)
+      Request(m, sc, h, p, pa, q, Cons(Header(safe_name, safe_value), hd), bd)
     end
   end
 

@@ -1101,6 +1101,10 @@ let builtin_bindings : (string * scheme) list =
     ("file_read_line",  Mono (TArrow (t_int, t_option t_string)));
     ("file_read_chunk", Mono (TArrow (t_int, TArrow (t_int, t_option t_string))));
     ("file_close",      Mono (TArrow (t_int, t_unit)));
+    (* Structured cleanup: try_finally(action: () -> a, cleanup: () -> b) : a *)
+    ("try_finally",
+      poly2 (fun a b -> TArrow (TArrow (t_int, a),
+                                TArrow (TArrow (t_int, b), a))));
     (* CSV builtins — csv_next_row returns CsvRow (declared in csv.march) *)
     ("csv_open",     poly1 (fun e -> TArrow (t_string, TArrow (t_string, TArrow (t_atom, t_result t_int e)))));
     ("csv_next_row", Mono (TArrow (t_int, TCon ("CsvRow", []))));

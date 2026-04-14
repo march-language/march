@@ -5,8 +5,12 @@
 -- provided by the March runtime (Digestif SHA-256/512, PBKDF2, CSPRNG).
 --
 -- Password hashing uses PBKDF2-SHA256 with a 16-byte random salt and
--- 100 000 iterations.  The stored format is:
---   "pbkdf2:sha256:100000:<salt_hex>:<hash_hex>"
+-- 600 000 iterations (OWASP 2023 recommendation for SHA-256).  The stored
+-- format is:
+--   "pbkdf2:sha256:600000:<salt_hex>:<hash_hex>"
+-- The iteration count is embedded in the stored hash, so existing hashes
+-- produced with a different count still verify correctly via
+-- `verify_password/2`.
 -- This is intentionally simple to verify without external libraries.
 --
 -- All hex output is lowercase.
@@ -103,8 +107,9 @@ pfn from_url_safe_b64(s) do
   else s2 end end end
 end
 
--- Password hash format: "pbkdf2:sha256:100000:<salt_hex>:<hash_hex>"
-let pw_iterations = 100000
+-- Password hash format: "pbkdf2:sha256:<iters>:<salt_hex>:<hash_hex>"
+-- Default iteration count follows OWASP 2023 guidance for PBKDF2-SHA256.
+let pw_iterations = 600000
 let pw_dklen = 32
 
 -- ── Hash functions ────────────────────────────────────────────────────────
@@ -154,12 +159,15 @@ doc """
 Hash a plaintext password using PBKDF2-SHA256 with a random salt.
 
     let h = Crypto.hash_password("my-secret")
-    -- "pbkdf2:sha256:100000:<salt_hex>:<hash_hex>"
+    -- "pbkdf2:sha256:600000:<salt_hex>:<hash_hex>"
 
 The result is safe to store in a database.  Use `verify_password/2` to check
 a candidate password against the stored hash.
 
-Uses 100 000 PBKDF2 iterations with a 16-byte random salt and 32-byte output.
+Uses 600 000 PBKDF2 iterations (OWASP 2023 recommendation for SHA-256) with
+a 16-byte random salt and 32-byte output.  Existing hashes stored with a
+different iteration count continue to verify correctly because the count is
+embedded in the hash string.
 """
 fn hash_password(plain) do
   let salt_bytes = random_bytes(16)
@@ -225,35 +233,44 @@ end
 -- ── Constant-time comparison ──────────────────────────────────────────────
 
 doc """
-Compare two strings in constant time with respect to their length.
+Compare two strings for equality in time proportional to `max(|a|, |b|)`,
+never short-circuiting on the first byte difference or on length mismatch.
 
-Prevents timing attacks when comparing secrets such as tokens or HMAC digests.
-Returns `true` if the strings are equal, `false` otherwise.
+Prevents timing attacks that would otherwise reveal (a) the length of the
+expected value or (b) the position of the first differing byte when
+validating a secret such as a token, HMAC digest, or session cookie.
+
+Returns `true` iff `a` and `b` have the same bytes.
 
 Note: the interpreter does not guarantee constant time at the machine level;
-this function nonetheless avoids early exits that would reveal prefix length.
+this function provides *algorithmic* constant-time behaviour that translates
+to machine-level constant time under the native compiler.
 
     Crypto.secure_compare("abc", "abc")  -- true
     Crypto.secure_compare("abc", "abd")  -- false
+    Crypto.secure_compare("abc", "abcd") -- false (no length-based early exit)
 """
 fn secure_compare(a, b) do
   let la = string_byte_length(a)
   let lb = string_byte_length(b)
-  if la != lb do false
-  else
-    let a_chars = string_chars(a)
-    let b_chars = string_chars(b)
-    fn go(acs, bcs, diff) do
-      match (acs, bcs) do
-      (Nil, Nil) -> diff == 0
-      (Cons(ac, ar), Cons(bc, br)) ->
-        let d = if ac == bc do 0 else 1 end
-        go(ar, br, diff + d)
-      _ -> false
-      end
+  let a_chars = string_chars(a)
+  let b_chars = string_chars(b)
+  -- Walk both strings to the end of the longer one.  For each byte pair
+  -- accumulate a 0/1 difference; for every unmatched-length byte accumulate
+  -- a 1.  Never short-circuit.  `diff == 0` iff lengths matched and every
+  -- byte matched.
+  fn go(acs, bcs, diff) do
+    match (acs, bcs) do
+    (Nil, Nil) -> diff
+    (Cons(x, xr), Cons(y, yr)) ->
+      let d = if x == y do 0 else 1 end
+      go(xr, yr, diff + d)
+    (Cons(_, xr), Nil) -> go(xr, Nil, diff + 1)
+    (Nil, Cons(_, yr)) -> go(Nil, yr, diff + 1)
     end
-    go(a_chars, b_chars, 0)
   end
+  let total = go(a_chars, b_chars, 0)
+  total == 0 && la == lb
 end
 
 -- ── Base64 helpers ────────────────────────────────────────────────────────

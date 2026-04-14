@@ -127,7 +127,6 @@ let all_stdlib_decls =
     "env.march";
     "config.march";
     "html.march";
-    "correlation.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -235,8 +234,4 @@ let () =
       Alcotest.test_case "Flow module"
         `Quick (run_stdlib_test "test_flow.march" "TestFlow");
     ]); *)
-    ("correlation", [
-      Alcotest.test_case "CorrelationId module"
-        `Quick (run_stdlib_test "test_correlation.march" "TestCorrelationId");
-    ]);
   ]

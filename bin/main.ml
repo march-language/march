@@ -396,8 +396,8 @@ let stdlib_module_names =
   ; "Regex"; "Csv"; "File"; "Dir"; "Path"; "Http"; "HttpClient"
   ; "HttpServer"; "HttpTransport"; "WebSocket"; "Process"; "Logger"
   ; "Flow"; "Actor"; "Sort"; "Hamt"; "Seq"; "Iterable"; "IOList"
-  ; "Random"; "Stats"; "Plot"; "Prelude"; "DataFrame"; "Islands"; "Test"
-  ; "Vault"; "BastionDev"; "BastionCookies"; "BastionRoutes"; "BastionPubSub"; "BastionCSP"
+  ; "Random"; "Stats"; "Plot"; "Prelude"; "DataFrame"; "Test"
+  ; "Vault"
   ; "Depot"; "Depot.Gate" ]
 
 (** Collect [(mod_name, span)] for each DUse/DAlias in [decls]. *)
@@ -434,7 +434,7 @@ let parse_march_file path src =
     finds their .march files, parses and desugars them, detects cycles.
     Also auto-discovers all .march files in MARCH_LIB_PATH directories so that
     qualified cross-module calls (e.g. MyApp.Router.dispatch) work without
-    explicit [use] declarations — required for multi-file Bastion projects.
+    explicit [use] declarations — required for multi-file projects.
     Returns (errors, extra_dmods_to_prepend). *)
 let resolve_imports ~source_file (m : March_ast.Ast.module_) =
   let source_dir = Filename.dirname source_file in
@@ -971,9 +971,9 @@ let compile filename =
       March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
   in
   (* Inject stdlib declarations before user declarations.
-     If MARCH_LIB_PATH provided a module that also ships in the stdlib (e.g.
-     Islands from bastion/lib/islands.march), defer to the external version:
-     strip the stdlib copy so the external one is the sole definition. *)
+     If MARCH_LIB_PATH provided a module that also ships in the stdlib, defer
+     to the external version: strip the stdlib copy so the external one is
+     the sole definition. *)
   let stdlib_decls = load_stdlib () in
   let extern_mod_names =
     List.filter_map (function

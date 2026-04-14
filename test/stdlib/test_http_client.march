@@ -146,4 +146,102 @@ describe "HttpClient built-in step helpers" do
   end
 end
 
+describe "HttpClient redirect cross-origin auth stripping" do
+  test "same origin preserves Authorization" do
+    let req_a = Request(Get, SchemeHttps, "api.example.com", None, "/", None, Nil, "")
+    let req_b = Request(Get, SchemeHttps, "api.example.com", None, "/v2", None, Nil, "")
+    assert (HttpClient.hc_same_origin(req_a, req_b))
+  end
+
+  test "same origin: explicit default port matches omitted port" do
+    let req_a = Request(Get, SchemeHttps, "api.example.com", None, "/", None, Nil, "")
+    let req_b = Request(Get, SchemeHttps, "api.example.com", Some(443), "/", None, Nil, "")
+    assert (HttpClient.hc_same_origin(req_a, req_b))
+  end
+
+  test "same origin: http default port matches omitted" do
+    let req_a = Request(Get, SchemeHttp, "api.example.com", None, "/", None, Nil, "")
+    let req_b = Request(Get, SchemeHttp, "api.example.com", Some(80), "/", None, Nil, "")
+    assert (HttpClient.hc_same_origin(req_a, req_b))
+  end
+
+  test "different scheme is cross-origin" do
+    let req_a = Request(Get, SchemeHttps, "api.example.com", None, "/", None, Nil, "")
+    let req_b = Request(Get, SchemeHttp, "api.example.com", None, "/", None, Nil, "")
+    assert (not (HttpClient.hc_same_origin(req_a, req_b)))
+  end
+
+  test "different host is cross-origin" do
+    let req_a = Request(Get, SchemeHttps, "api.example.com", None, "/", None, Nil, "")
+    let req_b = Request(Get, SchemeHttps, "evil.example.com", None, "/", None, Nil, "")
+    assert (not (HttpClient.hc_same_origin(req_a, req_b)))
+  end
+
+  test "different port is cross-origin" do
+    let req_a = Request(Get, SchemeHttps, "api.example.com", Some(443), "/", None, Nil, "")
+    let req_b = Request(Get, SchemeHttps, "api.example.com", Some(8443), "/", None, Nil, "")
+    assert (not (HttpClient.hc_same_origin(req_a, req_b)))
+  end
+
+  test "host comparison is case-insensitive" do
+    let req_a = Request(Get, SchemeHttps, "API.Example.Com", None, "/", None, Nil, "")
+    let req_b = Request(Get, SchemeHttps, "api.example.com", None, "/", None, Nil, "")
+    assert (HttpClient.hc_same_origin(req_a, req_b))
+  end
+
+  test "strip removes Authorization" do
+    let headers = Cons(Header("Authorization", "Bearer secret"),
+                  Cons(Header("X-Custom", "ok"), Nil))
+    let stripped = HttpClient.hc_strip_sensitive_headers(headers)
+    -- X-Custom survives; Authorization is gone.
+    match stripped do
+    Cons(Header(n, _), Nil) -> assert (n == "X-Custom")
+    _ -> assert false
+    end
+  end
+
+  test "strip removes Cookie" do
+    let headers = Cons(Header("Cookie", "session=abc"),
+                  Cons(Header("Accept", "*/*"), Nil))
+    let stripped = HttpClient.hc_strip_sensitive_headers(headers)
+    match stripped do
+    Cons(Header(n, _), Nil) -> assert (n == "Accept")
+    _ -> assert false
+    end
+  end
+
+  test "strip removes Proxy-Authorization" do
+    let headers = Cons(Header("proxy-authorization", "Basic xyz"),
+                  Cons(Header("User-Agent", "test"), Nil))
+    let stripped = HttpClient.hc_strip_sensitive_headers(headers)
+    match stripped do
+    Cons(Header(n, _), Nil) -> assert (n == "User-Agent")
+    _ -> assert false
+    end
+  end
+
+  test "strip is case-insensitive on header name" do
+    let headers = Cons(Header("AUTHORIZATION", "Bearer x"),
+                  Cons(Header("Cookie", "s=1"),
+                  Cons(Header("X-Safe", "ok"), Nil)))
+    let stripped = HttpClient.hc_strip_sensitive_headers(headers)
+    match stripped do
+    Cons(Header(n, _), Nil) -> assert (n == "X-Safe")
+    _ -> assert false
+    end
+  end
+
+  test "strip preserves non-sensitive headers untouched" do
+    let headers = Cons(Header("User-Agent", "march/0.1"),
+                  Cons(Header("Accept", "*/*"),
+                  Cons(Header("Content-Type", "application/json"), Nil)))
+    let stripped = HttpClient.hc_strip_sensitive_headers(headers)
+    -- All three remain.
+    match stripped do
+    Cons(_, Cons(_, Cons(_, Nil))) -> ()
+    _ -> assert false
+    end
+  end
+end
+
 end

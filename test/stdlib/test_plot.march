@@ -137,6 +137,45 @@ end
 
 -- ---- Save ----
 
+-- ---- XSS / SVG escaping tests ----
+
+test "set_title escapes angle brackets (XSS defence)" do
+  let p = Plot.new()
+    |> Plot.add_series(Plot.line_series(Cons(1.0, Nil), Cons(2.0, Nil)))
+    |> Plot.set_title("<script>alert(1)</script>")
+  let svg = Plot.to_svg(p)
+  -- Raw `<script>` must not appear; the escaped form must.
+  assert (not (contains(svg, "<script>")))
+  assert contains(svg, "&lt;script&gt;")
+end
+
+test "set_xlabel escapes ampersand" do
+  let p = Plot.new()
+    |> Plot.add_series(Plot.line_series(Cons(1.0, Nil), Cons(2.0, Nil)))
+    |> Plot.set_xlabel("A & B")
+  let svg = Plot.to_svg(p)
+  assert contains(svg, "A &amp; B")
+end
+
+test "set_ylabel escapes markup in rotated text element" do
+  let p = Plot.new()
+    |> Plot.add_series(Plot.line_series(Cons(1.0, Nil), Cons(2.0, Nil)))
+    |> Plot.set_ylabel("<b>y</b>")
+  let svg = Plot.to_svg(p)
+  assert (not (contains(svg, "<b>y</b>")))
+  assert contains(svg, "&lt;b&gt;y&lt;/b&gt;")
+end
+
+test "series labels escape markup in legend" do
+  let p = Plot.new()
+    |> Plot.add_labeled_series(Plot.line_series(Cons(1.0, Nil), Cons(2.0, Nil)),
+                               "<img src=x onerror=alert(1)>")
+    |> Plot.with_legend
+  let svg = Plot.to_svg(p)
+  assert (not (contains(svg, "<img src=x")))
+  assert contains(svg, "&lt;img src=x")
+end
+
 test "save writes file" do
   let xs = Cons(1.0, Cons(2.0, Nil))
   let ys = Cons(3.0, Cons(4.0, Nil))

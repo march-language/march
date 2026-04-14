@@ -3436,6 +3436,22 @@ let base_env : env =
         VAtom "ok"
       | _ -> eval_error "file_close(fd)"))
 
+    (* ── Structured cleanup ──────────────────────────────────────────
+       try_finally(action, cleanup) runs action() and then cleanup(),
+       re-raising any exception thrown by action *after* cleanup has
+       run.  March code does not have its own try/finally construct,
+       so this primitive is how stdlib wrappers (e.g., File.with_lines)
+       guarantee resource release even when a callback panics. *)
+  ; ("try_finally", VBuiltin ("try_finally", function
+      | [action_fn; cleanup_fn] ->
+        let run_cleanup () =
+          try ignore (!apply_hook cleanup_fn [VUnit]) with _ -> ()
+        in
+        (match !apply_hook action_fn [VUnit] with
+         | exception e -> run_cleanup (); raise e
+         | result -> run_cleanup (); result)
+      | _ -> eval_error "try_finally(action: (_) -> a, cleanup: (_) -> _): a"))
+
   (* ── Dir I/O ───────────────────────────────────────────────────── *)
   ; ("dir_exists", VBuiltin ("dir_exists", function
       | [VString path] ->

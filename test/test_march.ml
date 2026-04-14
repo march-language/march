@@ -10999,6 +10999,30 @@ let test_file_not_found () =
   Alcotest.(check string) "not found returns Err" "err"
     (vstr (call_fn env "f" []))
 
+let test_file_with_lines_closes_on_panic () =
+  (* Regression: a panicking callback inside File.with_lines must still
+     close the file handle (via try_finally).  We verify by panicking
+     inside the callback, catching the panic at OCaml level, then
+     re-opening + re-closing the same file many times.  A leaked fd
+     would eventually exhaust the file table; this test proves the
+     close path runs. *)
+  with_temp_file "x\ny\nz" (fun path ->
+    let env = eval_with_file (Printf.sprintf {|mod T do
+      fn f() do
+        match File.with_lines("%s", fn _lines -> panic("boom")) do
+        Ok(ig) -> "ok"
+        Err(ig) -> "err"
+        end
+      end
+    end|} path) in
+    (* The callback panics, which must propagate OUT (re-raised by
+       try_finally), so the outer eval sees Eval_error.  Meanwhile, the
+       underlying fd was closed in the cleanup. *)
+    let raised = ref false in
+    (try ignore (call_fn env "f" [])
+     with March_eval.Eval.Eval_error _ -> raised := true);
+    Alcotest.(check bool) "panic in with_lines callback propagates" true !raised)
+
 let test_file_append () =
   let path = Filename.temp_file "march_append_" ".txt" in
   (try
@@ -17708,7 +17732,11 @@ let test_crypto_secure_compare () =
       let a = Crypto.secure_compare("abc", "abc")
       let b = Crypto.secure_compare("abc", "abd")
       let c = Crypto.secure_compare("abc", "ab")
-      if a && !b && !c do 1 else 0 end
+      let d = Crypto.secure_compare("ab", "abc")
+      let e = Crypto.secure_compare("", "")
+      let f = Crypto.secure_compare("", "x")
+      let g = Crypto.secure_compare("x", "")
+      if a && !b && !c && !d && e && !f && !g do 1 else 0 end
     end
   end|} in
   Alcotest.(check int) "secure_compare logic" 1
@@ -17855,6 +17883,38 @@ let test_uuid_v5_version () =
   end|} in
   Alcotest.(check int) "v5 version digit is 5" 5
     (vint (call_fn env "f" []))
+
+let test_uuid_v5_rfc_dns_vector () =
+  (* RFC 4122 DNS namespace + "www.example.com" must produce the
+     canonical v5 UUID.  Reference vector from Python uuid.uuid5:
+     uuid.uuid5(uuid.NAMESPACE_DNS, 'www.example.com')
+       = 2ed6657d-e927-568b-95e1-2665a8aea6a2 *)
+  let env = eval_with_uuid {|mod Test do
+    fn f() do
+      match UUID.parse("6ba7b810-9dad-11d1-80b4-00c04fd430c8") do
+      Ok(ns) -> UUID.to_string(UUID.v5(ns, "www.example.com"))
+      Err(_) -> "parse-err"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "v5 DNS namespace RFC vector"
+    "2ed6657d-e927-568b-95e1-2665a8aea6a2"
+    (vstr (call_fn env "f" []))
+
+let test_uuid_v5_rfc_url_vector () =
+  (* Verified against Python: uuid.uuid5(uuid.NAMESPACE_URL, 'https://example.com/')
+       = dd2c1780-811a-5296-81c5-178a0ef488bc *)
+  let env = eval_with_uuid {|mod Test do
+    fn f() do
+      match UUID.parse("6ba7b811-9dad-11d1-80b4-00c04fd430c8") do
+      Ok(ns) -> UUID.to_string(UUID.v5(ns, "https://example.com/"))
+      Err(_) -> "parse-err"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "v5 URL namespace RFC vector"
+    "dd2c1780-811a-5296-81c5-178a0ef488bc"
+    (vstr (call_fn env "f" []))
 
 (* ── Duration stdlib module tests ────────────────────────────────────────── *)
 
@@ -19601,6 +19661,7 @@ let () =
         Alcotest.test_case "write then read" `Quick test_file_write_read;
         Alcotest.test_case "exists"         `Quick test_file_exists;
         Alcotest.test_case "with_lines"     `Quick test_file_with_lines;
+        Alcotest.test_case "with_lines panic closes fd" `Quick test_file_with_lines_closes_on_panic;
         Alcotest.test_case "not found"      `Quick test_file_not_found;
         Alcotest.test_case "append"         `Quick test_file_append;
       ]);
@@ -20243,6 +20304,8 @@ let () =
         Alcotest.test_case "parse invalid"          `Quick test_uuid_parse_invalid;
         Alcotest.test_case "v5 deterministic"       `Quick test_uuid_v5_deterministic;
         Alcotest.test_case "v5 version digit"       `Quick test_uuid_v5_version;
+        Alcotest.test_case "v5 RFC DNS vector"      `Quick test_uuid_v5_rfc_dns_vector;
+        Alcotest.test_case "v5 RFC URL vector"      `Quick test_uuid_v5_rfc_url_vector;
       ]);
       ("duration stdlib", [
         Alcotest.test_case "parse"                  `Quick test_duration_parse_ok;

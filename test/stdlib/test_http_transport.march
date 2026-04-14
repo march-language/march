@@ -15,6 +15,7 @@ ptype TransportError =
   | RecvError(String)
   | ConnParseError(String)
   | Closed
+  | SchemeNotSupported(String)
 
 pfn show_error(e) do
   match e do
@@ -100,6 +101,53 @@ describe "TransportError pattern matching" do
 
   test "match Closed" do
     assert (show_error(Closed) == "closed")
+  end
+end
+
+describe "https scheme guard" do
+  test "request rejects https request with SchemeNotSupported" do
+    let req = Request(Get, SchemeHttps, "example.com", None, "/", None, Nil, "")
+    match HttpTransport.request(req) do
+    Err(SchemeNotSupported(_)) -> ()
+    Err(_) -> assert false
+    Ok(_)  -> assert false
+    end
+  end
+
+  test "simple_get rejects https URL with SchemeNotSupported" do
+    match HttpTransport.simple_get("https://example.com/") do
+    Err(SchemeNotSupported(_)) -> ()
+    Err(_) -> assert false
+    Ok(_)  -> assert false
+    end
+  end
+
+  test "request_on rejects https request with SchemeNotSupported" do
+    -- fd=-1 is invalid but we never reach tcp_send because of the early check.
+    let req = Request(Get, SchemeHttps, "example.com", None, "/", None, Nil, "")
+    match HttpTransport.request_on(-1, req) do
+    Err(SchemeNotSupported(_)) -> ()
+    Err(_) -> assert false
+    Ok(_)  -> assert false
+    end
+  end
+
+  test "stream_request_on rejects https request with SchemeNotSupported" do
+    let req = Request(Get, SchemeHttps, "example.com", None, "/", None, Nil, "")
+    match HttpTransport.stream_request_on(-1, req, fn _ -> ()) do
+    Err(SchemeNotSupported(_)) -> ()
+    Err(_) -> assert false
+    Ok(_)  -> assert false
+    end
+  end
+
+  test "connect rejects https request with SchemeNotSupported" do
+    let req = Request(Get, SchemeHttps, "example.com", None, "/", None, Nil, "")
+    match HttpTransport.connect(req) do
+    Err(SchemeNotSupported(_)) -> ()
+    Err(_) -> assert false
+    Ok(_)  -> assert false
+    end
   end
 end
 
