@@ -422,6 +422,100 @@ and lower_expr (e : Ast.expr) : Tir.expr =
   | Ast.EField (e, { txt = name; _ }, _) ->
     lower_to_atom_k e (fun a -> Tir.EField (a, name))
 
+  (* --- Session-typed channel builtins (binary) --- *)
+  | Ast.EApp (Ast.EVar { txt = "Chan.new"; _ }, [proto_arg], _) ->
+    lower_to_atom_k proto_arg (fun proto' ->
+      let fn_var : Tir.var = {
+        v_name = "chan_new"; v_ty = Tir.TFn ([Tir.TString], Tir.TTuple [Tir.TCon ("Chan", []); Tir.TCon ("Chan", [])]);
+        v_lin = Tir.Unr } in
+      Tir.EApp (fn_var, [proto']))
+
+  | Ast.EApp (Ast.EVar { txt = "Chan.send"; _ }, [ch_arg; val_arg], _) ->
+    lower_to_atom_k ch_arg (fun ch' ->
+      lower_to_atom_k val_arg (fun val' ->
+        let fn_var : Tir.var = {
+          v_name = "chan_send"; v_ty = Tir.TFn ([Tir.TCon ("Chan", []); Tir.TPtr Tir.TUnit], Tir.TCon ("Chan", []));
+          v_lin = Tir.Unr } in
+        Tir.EApp (fn_var, [ch'; val'])))
+
+  | Ast.EApp (Ast.EVar { txt = "Chan.recv"; _ }, [ch_arg], _) ->
+    lower_to_atom_k ch_arg (fun ch' ->
+      let fn_var : Tir.var = {
+        v_name = "chan_recv"; v_ty = Tir.TFn ([Tir.TCon ("Chan", [])], Tir.TTuple [Tir.TPtr Tir.TUnit; Tir.TCon ("Chan", [])]);
+        v_lin = Tir.Unr } in
+      Tir.EApp (fn_var, [ch']))
+
+  | Ast.EApp (Ast.EVar { txt = "Chan.close"; _ }, [ch_arg], _) ->
+    lower_to_atom_k ch_arg (fun ch' ->
+      let fn_var : Tir.var = {
+        v_name = "chan_close"; v_ty = Tir.TFn ([Tir.TCon ("Chan", [])], Tir.TUnit);
+        v_lin = Tir.Unr } in
+      Tir.EApp (fn_var, [ch']))
+
+  | Ast.EApp (Ast.EVar { txt = "Chan.choose"; _ }, [ch_arg; label_arg], _) ->
+    lower_to_atom_k ch_arg (fun ch' ->
+      lower_to_atom_k label_arg (fun label' ->
+        let fn_var : Tir.var = {
+          v_name = "chan_choose"; v_ty = Tir.TFn ([Tir.TCon ("Chan", []); Tir.TPtr Tir.TUnit], Tir.TCon ("Chan", []));
+          v_lin = Tir.Unr } in
+        Tir.EApp (fn_var, [ch'; label'])))
+
+  | Ast.EApp (Ast.EVar { txt = "Chan.offer"; _ }, [ch_arg], _) ->
+    lower_to_atom_k ch_arg (fun ch' ->
+      let fn_var : Tir.var = {
+        v_name = "chan_offer"; v_ty = Tir.TFn ([Tir.TCon ("Chan", [])], Tir.TTuple [Tir.TPtr Tir.TUnit; Tir.TCon ("Chan", [])]);
+        v_lin = Tir.Unr } in
+      Tir.EApp (fn_var, [ch']))
+
+  (* --- Multi-party session type builtins --- *)
+  | Ast.EApp (Ast.EVar { txt = "MPST.new"; _ }, [proto_arg], sp) ->
+    (* Derive the role count from the result type (TTuple of N TChan endpoints). *)
+    let n_roles = match ty_of_span sp with
+      | Tir.TTuple ts -> List.length ts
+      | _ -> 3  (* fallback — shouldn't happen for well-typed code *)
+    in
+    lower_to_atom_k proto_arg (fun proto' ->
+      let n_atom = Tir.ALit (March_ast.Ast.LitInt n_roles) in
+      let fn_var : Tir.var = {
+        v_name = "mpst_new"; v_ty = Tir.TFn ([Tir.TString; Tir.TInt], Tir.TPtr Tir.TUnit);
+        v_lin = Tir.Unr } in
+      Tir.EApp (fn_var, [proto'; n_atom]))
+
+  | Ast.EApp (Ast.EVar { txt = "MPST.send"; _ }, [ch_arg; role_arg; val_arg], _) ->
+    (* Lower role name to a string for the runtime's name→index lookup. *)
+    let role_name = match role_arg with
+      | Ast.ECon (n, [], _) | Ast.EVar n -> n.txt
+      | Ast.EAtom (s, [], _) | Ast.ELit (Ast.LitAtom s, _) -> s
+      | _ -> "unknown"
+    in
+    lower_to_atom_k ch_arg (fun ch' ->
+      lower_to_atom_k val_arg (fun val' ->
+        let role_str = Tir.ALit (March_ast.Ast.LitString role_name) in
+        let fn_var : Tir.var = {
+          v_name = "mpst_send"; v_ty = Tir.TFn ([Tir.TCon ("Chan", []); Tir.TString; Tir.TPtr Tir.TUnit], Tir.TCon ("Chan", []));
+          v_lin = Tir.Unr } in
+        Tir.EApp (fn_var, [ch'; role_str; val'])))
+
+  | Ast.EApp (Ast.EVar { txt = "MPST.recv"; _ }, [ch_arg; role_arg], _) ->
+    let role_name = match role_arg with
+      | Ast.ECon (n, [], _) | Ast.EVar n -> n.txt
+      | Ast.EAtom (s, [], _) | Ast.ELit (Ast.LitAtom s, _) -> s
+      | _ -> "unknown"
+    in
+    lower_to_atom_k ch_arg (fun ch' ->
+      let role_str = Tir.ALit (March_ast.Ast.LitString role_name) in
+      let fn_var : Tir.var = {
+        v_name = "mpst_recv"; v_ty = Tir.TFn ([Tir.TCon ("Chan", []); Tir.TString], Tir.TTuple [Tir.TPtr Tir.TUnit; Tir.TCon ("Chan", [])]);
+        v_lin = Tir.Unr } in
+      Tir.EApp (fn_var, [ch'; role_str]))
+
+  | Ast.EApp (Ast.EVar { txt = "MPST.close"; _ }, [ch_arg], _) ->
+    lower_to_atom_k ch_arg (fun ch' ->
+      let fn_var : Tir.var = {
+        v_name = "mpst_close"; v_ty = Tir.TFn ([Tir.TCon ("Chan", [])], Tir.TUnit);
+        v_lin = Tir.Unr } in
+      Tir.EApp (fn_var, [ch']))
+
   (* --- Function application (CPS: all args must be atoms) --- *)
   | Ast.EApp (f_expr, args, _) ->
     (* Check for default-arg dispatch: if f is a plain EVar that names a

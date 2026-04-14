@@ -959,3 +959,382 @@ void *march_get_version(void) {
     static const char *ver = "march/dev";
     return march_string_lit(ver, (int64_t)strlen(ver));
 }
+
+/* ── Session-typed channel runtime ──────────────────────────────────────── *
+ *
+ * Binary channels: two endpoints share a pair of queues.  Endpoint A sends
+ * into queue_ab and receives from queue_ba; endpoint B is the mirror.
+ *
+ * Each queue is a simple singly-linked list protected by a mutex (channels
+ * are also used across actor green threads).
+ *
+ * Endpoint layout (March heap object, tag = 0, 3 fields):
+ *   field 0 (i64): pair pointer (cast to intptr_t — opaque to March GC)
+ *   field 1 (i64): role index (0 = A, 1 = B)
+ *   field 2 (i64): closed flag (0 = open, 1 = closed)
+ *
+ * Chan.new returns a 2-tuple of endpoints.
+ * Chan.send / Chan.recv / Chan.close return new endpoint objects (linear
+ * consumption: old endpoint is freed by Perceus, new one is allocated).
+ */
+
+/* ── Queue node ────────────────────────────────────────────────── */
+
+typedef struct march_chan_qnode {
+    struct march_chan_qnode *next;
+    void *value;   /* RC-owned March value */
+} march_chan_qnode;
+
+/* ── Shared channel pair ───────────────────────────────────────── */
+
+typedef struct {
+    pthread_mutex_t lock;
+    /* queue A→B (A sends, B receives) */
+    march_chan_qnode *ab_head;
+    march_chan_qnode *ab_tail;
+    /* queue B→A */
+    march_chan_qnode *ba_head;
+    march_chan_qnode *ba_tail;
+    int64_t refcount;  /* 2 when both endpoints alive; freed at 0 */
+} march_chan_pair;
+
+static march_chan_pair *chan_pair_new(void) {
+    march_chan_pair *p = (march_chan_pair *)calloc(1, sizeof(march_chan_pair));
+    pthread_mutex_init(&p->lock, NULL);
+    p->refcount = 2;
+    return p;
+}
+
+static void chan_pair_release(march_chan_pair *p) {
+    int64_t rc = __sync_sub_and_fetch(&p->refcount, 1);
+    if (rc <= 0) {
+        /* Free any remaining queued values. */
+        for (march_chan_qnode *n = p->ab_head; n; ) {
+            march_chan_qnode *next = n->next;
+            march_decrc(n->value);
+            free(n);
+            n = next;
+        }
+        for (march_chan_qnode *n = p->ba_head; n; ) {
+            march_chan_qnode *next = n->next;
+            march_decrc(n->value);
+            free(n);
+            n = next;
+        }
+        pthread_mutex_destroy(&p->lock);
+        free(p);
+    }
+}
+
+static void chan_enqueue(march_chan_pair *p, int64_t role, void *val) {
+    march_chan_qnode *node = (march_chan_qnode *)malloc(sizeof(march_chan_qnode));
+    node->next = NULL;
+    node->value = val;
+    pthread_mutex_lock(&p->lock);
+    if (role == 0) {
+        /* A sends into ab queue */
+        if (p->ab_tail) { p->ab_tail->next = node; p->ab_tail = node; }
+        else            { p->ab_head = p->ab_tail = node; }
+    } else {
+        /* B sends into ba queue */
+        if (p->ba_tail) { p->ba_tail->next = node; p->ba_tail = node; }
+        else            { p->ba_head = p->ba_tail = node; }
+    }
+    pthread_mutex_unlock(&p->lock);
+}
+
+static void *chan_dequeue(march_chan_pair *p, int64_t role) {
+    march_chan_qnode *node = NULL;
+    pthread_mutex_lock(&p->lock);
+    if (role == 0) {
+        /* A receives from ba queue */
+        node = p->ba_head;
+        if (node) {
+            p->ba_head = node->next;
+            if (!p->ba_head) p->ba_tail = NULL;
+        }
+    } else {
+        /* B receives from ab queue */
+        node = p->ab_head;
+        if (node) {
+            p->ab_head = node->next;
+            if (!p->ab_head) p->ab_tail = NULL;
+        }
+    }
+    pthread_mutex_unlock(&p->lock);
+    if (!node) {
+        /* Protocol violation at runtime: recv on empty queue.
+         * The type checker should have prevented this; crash hard. */
+        fprintf(stderr, "march: Chan.recv on empty channel queue (role %lld)\n",
+                (long long)role);
+        abort();
+    }
+    void *val = node->value;
+    free(node);
+    return val;
+}
+
+/* ── Helpers to build / read endpoint heap objects ─────────────── */
+
+static void *chan_make_endpoint(march_chan_pair *pair, int64_t role, int64_t closed) {
+    /* 3-field heap object: (pair_ptr, role, closed) */
+    void *ep = march_alloc(16 + 3 * 8);  /* hdr(16) + 3 fields */
+    int64_t *fields = (int64_t *)((char *)ep + 16);
+    fields[0] = (int64_t)(intptr_t)pair;
+    fields[1] = role;
+    fields[2] = closed;
+    return ep;
+}
+
+#define EP_PAIR(ep)   ((march_chan_pair *)(intptr_t)(((int64_t *)((char *)(ep) + 16))[0]))
+#define EP_ROLE(ep)   (((int64_t *)((char *)(ep) + 16))[1])
+#define EP_CLOSED(ep) (((int64_t *)((char *)(ep) + 16))[2])
+
+/* ── Public API ────────────────────────────────────────────────── */
+
+/* Chan.new(proto_name_string) → (endpoint_a, endpoint_b) as 2-tuple */
+void *march_chan_new(void *proto_name) {
+    (void)proto_name;  /* protocol name is for diagnostics; unused at native runtime */
+    march_chan_pair *pair = chan_pair_new();
+    void *ep_a = chan_make_endpoint(pair, 0, 0);
+    void *ep_b = chan_make_endpoint(pair, 1, 0);
+    /* Build a 2-tuple: hdr(16) + 2 fields */
+    void *tup = march_alloc(16 + 2 * 8);
+    int64_t *tfields = (int64_t *)((char *)tup + 16);
+    tfields[0] = (int64_t)(intptr_t)ep_a;
+    tfields[1] = (int64_t)(intptr_t)ep_b;
+    return tup;
+}
+
+/* Chan.send(endpoint, value) → new_endpoint
+ * Enqueues value into the send queue; returns a fresh endpoint (linear). */
+void *march_chan_send(void *ep, void *val) {
+    march_chan_pair *pair = EP_PAIR(ep);
+    int64_t role = EP_ROLE(ep);
+    chan_enqueue(pair, role, val);
+    /* Return a new endpoint that continues the session.
+     * The pair refcount stays the same — old endpoint will be freed by Perceus,
+     * but we bump the pair refcount to account for the new endpoint. */
+    __sync_add_and_fetch(&pair->refcount, 1);
+    void *new_ep = chan_make_endpoint(pair, role, 0);
+    /* Release the old endpoint's share */
+    chan_pair_release(pair);
+    return new_ep;
+}
+
+/* Chan.recv(endpoint) → (value, new_endpoint) as 2-tuple */
+void *march_chan_recv(void *ep) {
+    march_chan_pair *pair = EP_PAIR(ep);
+    int64_t role = EP_ROLE(ep);
+    void *val = chan_dequeue(pair, role);
+    __sync_add_and_fetch(&pair->refcount, 1);
+    void *new_ep = chan_make_endpoint(pair, role, 0);
+    chan_pair_release(pair);
+    /* Build (value, new_endpoint) tuple */
+    void *tup = march_alloc(16 + 2 * 8);
+    int64_t *tfields = (int64_t *)((char *)tup + 16);
+    tfields[0] = (int64_t)(intptr_t)val;
+    tfields[1] = (int64_t)(intptr_t)new_ep;
+    return tup;
+}
+
+/* Chan.close(endpoint) → Unit (i64 0) */
+int64_t march_chan_close(void *ep) {
+    march_chan_pair *pair = EP_PAIR(ep);
+    chan_pair_release(pair);
+    return 0;  /* Unit */
+}
+
+/* Chan.choose(endpoint, label_atom) → new_endpoint
+ * Sends the label to the other side (same as send). */
+void *march_chan_choose(void *ep, void *label) {
+    return march_chan_send(ep, label);
+}
+
+/* Chan.offer(endpoint) → (label_atom, new_endpoint) as 2-tuple
+ * Receives the label from the other side (same as recv). */
+void *march_chan_offer(void *ep) {
+    return march_chan_recv(ep);
+}
+
+/* ── Multi-party session types (MPST) ──────────────────────────────────── *
+ *
+ * MPST extends binary channels to N roles.  Each role has a directed queue
+ * to every other role: role_i→role_j uses queue[i*N + j].
+ *
+ * Shared session structure holds N*N queues (only N*(N-1) used; diagonal unused).
+ *
+ * MPST endpoint layout (March heap object, tag = 0, 3 fields):
+ *   field 0 (i64): session pointer (cast to intptr_t)
+ *   field 1 (i64): role index (0..N-1)
+ *   field 2 (i64): closed flag
+ */
+
+#define MPST_MAX_ROLES 16
+
+typedef struct {
+    pthread_mutex_t lock;
+    int64_t n_roles;
+    char *role_names[MPST_MAX_ROLES];   /* role index → name (malloc'd copy) */
+    march_chan_qnode **queues;  /* n_roles * n_roles array of queue heads */
+    march_chan_qnode **tails;   /* corresponding tails */
+    int64_t refcount;          /* N when all endpoints alive */
+} march_mpst_session;
+
+static march_mpst_session *mpst_session_new(int64_t n_roles) {
+    march_mpst_session *s = (march_mpst_session *)calloc(1, sizeof(march_mpst_session));
+    pthread_mutex_init(&s->lock, NULL);
+    s->n_roles = n_roles;
+    int64_t n2 = n_roles * n_roles;
+    s->queues = (march_chan_qnode **)calloc((size_t)n2, sizeof(march_chan_qnode *));
+    s->tails  = (march_chan_qnode **)calloc((size_t)n2, sizeof(march_chan_qnode *));
+    s->refcount = n_roles;
+    return s;
+}
+
+/* Resolve a March string (march_string *) role name to an index.
+ * If the name hasn't been seen, register it at the next index. */
+static int64_t mpst_resolve_role(march_mpst_session *s, void *role_str) {
+    march_string *ms = (march_string *)role_str;
+    for (int64_t i = 0; i < s->n_roles; i++) {
+        if (s->role_names[i] &&
+            (int64_t)strlen(s->role_names[i]) == ms->len &&
+            memcmp(s->role_names[i], ms->data, (size_t)ms->len) == 0) {
+            return i;
+        }
+    }
+    /* Name not found — this shouldn't happen for well-typed programs.
+     * Search for first empty slot. */
+    for (int64_t i = 0; i < s->n_roles; i++) {
+        if (!s->role_names[i]) {
+            s->role_names[i] = (char *)malloc((size_t)(ms->len + 1));
+            memcpy(s->role_names[i], ms->data, (size_t)ms->len);
+            s->role_names[i][ms->len] = '\0';
+            return i;
+        }
+    }
+    fprintf(stderr, "march: MPST role '%.*s' not found and no slots available\n",
+            (int)ms->len, ms->data);
+    abort();
+}
+
+static void mpst_session_release(march_mpst_session *s) {
+    int64_t rc = __sync_sub_and_fetch(&s->refcount, 1);
+    if (rc <= 0) {
+        int64_t n2 = s->n_roles * s->n_roles;
+        for (int64_t i = 0; i < n2; i++) {
+            for (march_chan_qnode *n = s->queues[i]; n; ) {
+                march_chan_qnode *next = n->next;
+                march_decrc(n->value);
+                free(n);
+                n = next;
+            }
+        }
+        for (int64_t i = 0; i < s->n_roles; i++) {
+            free(s->role_names[i]);
+        }
+        free(s->queues);
+        free(s->tails);
+        pthread_mutex_destroy(&s->lock);
+        free(s);
+    }
+}
+
+static void mpst_enqueue(march_mpst_session *s, int64_t from, int64_t to, void *val) {
+    int64_t idx = from * s->n_roles + to;
+    march_chan_qnode *node = (march_chan_qnode *)malloc(sizeof(march_chan_qnode));
+    node->next = NULL;
+    node->value = val;
+    pthread_mutex_lock(&s->lock);
+    if (s->tails[idx]) { s->tails[idx]->next = node; s->tails[idx] = node; }
+    else               { s->queues[idx] = s->tails[idx] = node; }
+    pthread_mutex_unlock(&s->lock);
+}
+
+static void *mpst_dequeue(march_mpst_session *s, int64_t from, int64_t to) {
+    int64_t idx = from * s->n_roles + to;
+    march_chan_qnode *node = NULL;
+    pthread_mutex_lock(&s->lock);
+    node = s->queues[idx];
+    if (node) {
+        s->queues[idx] = node->next;
+        if (!s->queues[idx]) s->tails[idx] = NULL;
+    }
+    pthread_mutex_unlock(&s->lock);
+    if (!node) {
+        fprintf(stderr, "march: MPST.recv on empty queue (from=%lld, to=%lld)\n",
+                (long long)from, (long long)to);
+        abort();
+    }
+    void *val = node->value;
+    free(node);
+    return val;
+}
+
+static void *mpst_make_endpoint(march_mpst_session *session, int64_t role, int64_t closed) {
+    void *ep = march_alloc(16 + 3 * 8);
+    int64_t *fields = (int64_t *)((char *)ep + 16);
+    fields[0] = (int64_t)(intptr_t)session;
+    fields[1] = role;
+    fields[2] = closed;
+    return ep;
+}
+
+#define MPST_SESSION(ep) ((march_mpst_session *)(intptr_t)(((int64_t *)((char *)(ep) + 16))[0]))
+#define MPST_ROLE(ep)    (((int64_t *)((char *)(ep) + 16))[1])
+
+/* MPST.new(proto_name, n_roles) → list of endpoints (as March linked list)
+ * For N roles, returns a list [ep_0, ep_1, ..., ep_{N-1}]. */
+void *march_mpst_new(void *proto_name, int64_t n_roles) {
+    (void)proto_name;
+    march_mpst_session *session = mpst_session_new(n_roles);
+    /* Build endpoints as a March linked list (Cons = tag 1, Nil = tag 0).
+     * List is built in reverse to get [0, 1, ..., N-1] order. */
+    void *list = march_alloc(16);  /* Nil: tag=0, rc=1 */
+    for (int64_t i = n_roles - 1; i >= 0; i--) {
+        void *ep = mpst_make_endpoint(session, i, 0);
+        void *cons = march_alloc(16 + 2 * 8);
+        march_hdr *hdr = (march_hdr *)cons;
+        hdr->tag = 1;  /* Cons tag */
+        int64_t *fields = (int64_t *)((char *)cons + 16);
+        fields[0] = (int64_t)(intptr_t)ep;
+        fields[1] = (int64_t)(intptr_t)list;
+        list = cons;
+    }
+    return list;
+}
+
+/* MPST.send(endpoint, target_role_name_string, value) → new_endpoint */
+void *march_mpst_send(void *ep, void *target_role_str, void *val) {
+    march_mpst_session *session = MPST_SESSION(ep);
+    int64_t my_role = MPST_ROLE(ep);
+    int64_t target_role = mpst_resolve_role(session, target_role_str);
+    mpst_enqueue(session, my_role, target_role, val);
+    __sync_add_and_fetch(&session->refcount, 1);
+    void *new_ep = mpst_make_endpoint(session, my_role, 0);
+    mpst_session_release(session);
+    return new_ep;
+}
+
+/* MPST.recv(endpoint, source_role_name_string) → (value, new_endpoint) */
+void *march_mpst_recv(void *ep, void *source_role_str) {
+    march_mpst_session *session = MPST_SESSION(ep);
+    int64_t my_role = MPST_ROLE(ep);
+    int64_t source_role = mpst_resolve_role(session, source_role_str);
+    void *val = mpst_dequeue(session, source_role, my_role);
+    __sync_add_and_fetch(&session->refcount, 1);
+    void *new_ep = mpst_make_endpoint(session, my_role, 0);
+    mpst_session_release(session);
+    void *tup = march_alloc(16 + 2 * 8);
+    int64_t *tfields = (int64_t *)((char *)tup + 16);
+    tfields[0] = (int64_t)(intptr_t)val;
+    tfields[1] = (int64_t)(intptr_t)new_ep;
+    return tup;
+}
+
+/* MPST.close(endpoint) → Unit */
+int64_t march_mpst_close(void *ep) {
+    march_mpst_session *session = MPST_SESSION(ep);
+    mpst_session_release(session);
+    return 0;
+}

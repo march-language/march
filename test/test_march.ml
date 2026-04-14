@@ -1824,6 +1824,103 @@ let test_mpst_eval_wrong_order_error () =
        false  (* should not reach here *)
      with Failure _ | Invalid_argument _ | March_eval.Eval.Eval_error _ -> true)
 
+(* ── Session type TIR lowering / compilation tests ──────────────────────── *)
+
+(** Helper: parse, typecheck, lower + full pipeline → LLVM IR string.
+    Identical to [emit_actor_ir] but placed here for session-type tests. *)
+let emit_session_ir src =
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  March_tir.Llvm_emit.emit_module tir
+
+let session_ir_contains ir pat =
+  try ignore (Str.search_forward (Str.regexp_string pat) ir 0); true
+  with Not_found -> false
+
+(** Binary session types: Chan.new/send/recv/close lower to march_chan_* calls. *)
+let test_session_compile_chan_new () =
+  let ir = emit_session_ir {|mod Test do
+    protocol Ping do
+      Client -> Server : String
+      Server -> Client : String
+    end
+    fn main() do
+      let (ch_a, ch_b) = Chan.new(Ping)
+      let ch_a2 = Chan.send(ch_a, "hello")
+      let (msg, ch_b2) = Chan.recv(ch_b)
+      let ch_b3 = Chan.send(ch_b2, msg)
+      let (reply, ch_a3) = Chan.recv(ch_a2)
+      Chan.close(ch_a3)
+      Chan.close(ch_b3)
+      reply
+    end
+  end|} in
+  Alcotest.(check bool) "march_chan_new called" true
+    (session_ir_contains ir "march_chan_new");
+  Alcotest.(check bool) "march_chan_send called" true
+    (session_ir_contains ir "march_chan_send");
+  Alcotest.(check bool) "march_chan_recv called" true
+    (session_ir_contains ir "march_chan_recv");
+  Alcotest.(check bool) "march_chan_close called" true
+    (session_ir_contains ir "march_chan_close")
+
+(** Binary session types: Chan.choose/offer lower to march_chan_choose/offer. *)
+let test_session_compile_chan_choose_offer () =
+  let ir = emit_session_ir {|mod Test do
+    protocol Decision do
+      Client -> Server : Int
+      choose by Server:
+        ok  -> Server -> Client : Bool
+        err -> Server -> Client : Int
+      end
+    end
+    fn server_side(ch : Chan(Server, Decision)) : Unit do
+      let (_, ch2) = Chan.recv(ch)
+      let ch3 = Chan.choose(ch2, :ok)
+      let ch4 = Chan.send(ch3, true)
+      Chan.close(ch4)
+    end
+    fn client_side(ch : Chan(Client, Decision)) : Unit do
+      let ch2 = Chan.send(ch, 42)
+      let (label, ch3) = Chan.offer(ch2)
+      let (_, ch4) = Chan.recv(ch3)
+      Chan.close(ch4)
+    end
+    fn main() do
+      let (c, s) = Chan.new(Decision)
+      server_side(s)
+      client_side(c)
+    end
+  end|} in
+  Alcotest.(check bool) "march_chan_choose called" true
+    (session_ir_contains ir "march_chan_choose");
+  Alcotest.(check bool) "march_chan_offer called" true
+    (session_ir_contains ir "march_chan_offer")
+
+(** Full pipeline: session-typed code survives lower+mono+defun+perceus+emit. *)
+let test_session_compile_full_pipeline_no_crash () =
+  let _ir = emit_session_ir {|mod Test do
+    protocol Echo do
+      Sender -> Receiver : Int
+      Receiver -> Sender : Int
+    end
+    fn main() do
+      let (s, r) = Chan.new(Echo)
+      let s2 = Chan.send(s, 42)
+      let (n, r2) = Chan.recv(r)
+      let r3 = Chan.send(r2, n + 1)
+      let (result, s3) = Chan.recv(s2)
+      Chan.close(s3)
+      Chan.close(r3)
+      result
+    end
+  end|} in
+  Alcotest.(check bool) "session compile full pipeline: no crash" true true
+
 (* ── Eval tests ─────────────────────────────────────────────────────────── *)
 
 let test_eval_dotted_module () =
@@ -18990,6 +19087,11 @@ let () =
           Alcotest.test_case "MPST eval: relay 3-party"        `Quick (with_reset test_mpst_eval_two_messages_same_pair);
           Alcotest.test_case "MPST eval: 4-party chain"        `Quick (with_reset test_mpst_eval_four_party);
           Alcotest.test_case "MPST eval: recv before send error" `Quick (with_reset test_mpst_eval_wrong_order_error);
+        ] );
+      ( "session_compile", [
+          Alcotest.test_case "Chan.new/send/recv/close in IR"   `Quick test_session_compile_chan_new;
+          Alcotest.test_case "Chan.choose/offer in IR"          `Quick test_session_compile_chan_choose_offer;
+          Alcotest.test_case "full pipeline no crash"           `Quick test_session_compile_full_pipeline_no_crash;
         ] );
       ( "eval",
         [

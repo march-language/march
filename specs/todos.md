@@ -202,6 +202,7 @@ See `specs/optimizations.md` for full catalog with effort/impact/dependency deta
 - ✅ **Actor compilation tests** — 8 tests in `actor_compile` group verifying LLVM IR output for actor programs (dispatch, spawn, handlers, supervisor, monitor, link)
 - ✅ **SRec multi-turn testing** — 10 new tests: unfold, ping-pong (1+2 steps), nested SRec, finite protocol, choose-loop, dual, typecheck
 - ✅ **Supervision tree spec V2** — `specs/features/actor-system.md` documents linear type restrictions, V2 transfer protocol via session types, and future path
+- ✅ **Session type TIR lowering + native compilation** — `Chan.new/send/recv/close/choose/offer` and `MPST.new/send/recv/close` wired through the full TIR pipeline to LLVM. `lower.ml`: pattern-matched before general `EApp`. `llvm_emit.ml`: `builtin_ret_ty`, `mangle_extern`, LLVM `declare` entries. `defun.ml`: builtin names registered. `runtime/march_extras.c`: C runtime with mutex-protected queue pairs (binary) and N×N queue matrices (MPST). 3 new tests in `session_compile` group (1317 total). Session types now compile to native binaries.
 - ✅ **Stream fusion / deforestation** — `lib/tir/fusion.ml` TIR optimization pass; fuses `map+fold`, `filter+fold`, `map+filter+fold` chains into single-pass fused functions with no intermediate lists; ANF flatten step hoists lambda pre-bindings; guards for multi-use and impure ops; wired into pipeline after mono, before defun (`--opt` flag); 9 tests
 - ✅ Match syntax changed to `match expr do | pat -> body end` (was `with`)
 - ✅ String interpolation `${}` in lexer + desugar

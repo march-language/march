@@ -620,6 +620,18 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "sys_os" | "sys_arch" | "march_version" -> Some Tir.TString
   (* UUID / identity builtins *)
   | "uuid_v4" -> Some Tir.TString
+  (* Session-typed channel builtins (binary) *)
+  | "chan_new"    -> Some (Tir.TTuple [Tir.TCon ("Chan", []); Tir.TCon ("Chan", [])])
+  | "chan_send"   -> Some (Tir.TCon ("Chan", []))
+  | "chan_recv"   -> Some (Tir.TTuple [Tir.TPtr Tir.TUnit; Tir.TCon ("Chan", [])])
+  | "chan_close"  -> Some Tir.TUnit
+  | "chan_choose" -> Some (Tir.TCon ("Chan", []))
+  | "chan_offer"  -> Some (Tir.TTuple [Tir.TPtr Tir.TUnit; Tir.TCon ("Chan", [])])
+  (* Multi-party session type builtins *)
+  | "mpst_new"   -> Some (Tir.TPtr Tir.TUnit)
+  | "mpst_send"  -> Some (Tir.TCon ("Chan", []))
+  | "mpst_recv"  -> Some (Tir.TTuple [Tir.TPtr Tir.TUnit; Tir.TCon ("Chan", [])])
+  | "mpst_close" -> Some Tir.TUnit
   | _ -> None
 
 (** Mangle a March builtin name to the C runtime function name. *)
@@ -849,6 +861,18 @@ let mangle_extern : string -> string = function
   | "sys_os"           -> "march_sys_os"
   | "sys_arch"         -> "march_sys_arch"
   | "march_version"    -> "march_get_version"
+  (* Session-typed channel builtins *)
+  | "chan_new"         -> "march_chan_new"
+  | "chan_send"        -> "march_chan_send"
+  | "chan_recv"        -> "march_chan_recv"
+  | "chan_close"       -> "march_chan_close"
+  | "chan_choose"      -> "march_chan_choose"
+  | "chan_offer"       -> "march_chan_offer"
+  (* Multi-party session type builtins *)
+  | "mpst_new"        -> "march_mpst_new"
+  | "mpst_send"       -> "march_mpst_send"
+  | "mpst_recv"       -> "march_mpst_recv"
+  | "mpst_close"      -> "march_mpst_close"
   (* UUID / identity builtins *)
   | "uuid_v4"          -> "march_uuid_v4"
   (* Panic/todo/unreachable internal primitives *)
@@ -3299,6 +3323,18 @@ declare void @march_link(ptr %actor_a, ptr %actor_b)
 declare void @march_unlink(ptr %actor_a, ptr %actor_b)
 declare void @march_register_supervisor(ptr %supervisor, i64 %strategy, i64 %max_restarts, i64 %window_secs)
 declare ptr  @march_value_to_string(ptr %v)
+; Session-typed channel builtins (binary)
+declare ptr  @march_chan_new(ptr %proto_name)
+declare ptr  @march_chan_send(ptr %ep, ptr %val)
+declare ptr  @march_chan_recv(ptr %ep)
+declare i64  @march_chan_close(ptr %ep)
+declare ptr  @march_chan_choose(ptr %ep, ptr %label)
+declare ptr  @march_chan_offer(ptr %ep)
+; Multi-party session type (MPST) builtins
+declare ptr  @march_mpst_new(ptr %proto_name, i64 %n_roles)
+declare ptr  @march_mpst_send(ptr %ep, ptr %target_role, ptr %val)
+declare ptr  @march_mpst_recv(ptr %ep, ptr %source_role)
+declare i64  @march_mpst_close(ptr %ep)
 |}
   else
     (* WASM targets: plain global instead of thread_local; no-op scheduler *)

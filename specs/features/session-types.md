@@ -1,12 +1,17 @@
 # March Session Types
 
-**Last Updated:** March 22, 2026
-**Status:** Phases 1–3 complete (type system + eval). TIR lowering and LLVM codegen not yet wired.
+**Last Updated:** April 13, 2026
+**Status:** Complete — type system, eval, and compiled (TIR → LLVM) paths all working.
 
 **Implementation:**
 - `lib/typecheck/typecheck.ml` — `session_ty` type (line 92), `TChan` (line 87), `dual_session_ty` (~2680), `project_protocol` (~2693), Chan.* special cases in `infer_expr` (~1510–1600)
 - `lib/ast/ast.ml` — `session_ty`, `protocol_def`, `proto_step` AST types
 - `lib/eval/eval.ml` — `VChan`, `chan_endpoint` (~line 40), `Chan.new/send/recv/close/choose/offer` builtins (~3213)
+- `lib/tir/lower.ml` — `Chan.*` and `MPST.*` calls lowered to `chan_new`/`chan_send`/`chan_recv`/`chan_close`/`chan_choose`/`chan_offer` and `mpst_new`/`mpst_send`/`mpst_recv`/`mpst_close` TIR function calls
+- `lib/tir/llvm_emit.ml` — `builtin_ret_ty` and `mangle_extern` entries for channel builtins; LLVM `declare` for all `march_chan_*` and `march_mpst_*` functions
+- `lib/tir/defun.ml` — channel builtin names registered so defun doesn't treat them as free variables
+- `runtime/march_extras.c` — C runtime: `march_chan_new/send/recv/close/choose/offer` (binary, queue-based), `march_mpst_new/send/recv/close` (multi-party, N×N queue matrix)
+- `runtime/march_runtime.h` — declarations for all channel runtime functions
 
 ---
 
@@ -193,9 +198,25 @@ See also: `examples/session_echo.march` (if present)
 
 ---
 
-## 6. Known Limitations
+## 6. TIR Lowering and Native Compilation
 
-- **`SRec` unfolding** — Recursive protocols (`Rec(X, Send(T, X))`) are parsed and represented but the type checker doesn't yet unfold recursive steps during channel advancement. Only non-recursive protocols work end-to-end.
-- **Multi-party** — Global choreography projection for 3+ roles is deferred post-v1. Binary only.
-- **TIR lowering** — `TChan` / `VChan` are not yet lowered through the TIR pipeline to LLVM. Session types only work in the tree-walking interpreter today.
+Session-typed channels compile to native binaries via the standard TIR pipeline:
+
+1. **Lower** (`lower.ml`): `Chan.*`/`MPST.*` AST calls are pattern-matched before the general `EApp` case and lowered to `EApp(chan_new, args)` etc.
+2. **Mono** (`mono.ml`): Channel types are `TCon("Chan", [])` — already monomorphic, no specialization needed.
+3. **Defun** (`defun.ml`): Channel builtins registered in `builtin_names` so they're treated as top-level, not captured.
+4. **Perceus** (`perceus.ml`): `TCon("Chan", [])` matches `needs_rc = true`, so channel endpoints get proper RC tracking.
+5. **LLVM emit** (`llvm_emit.ml`): Channel calls map to `march_chan_*` / `march_mpst_*` C runtime functions.
+
+### Runtime representation
+
+**Binary channels:** Each endpoint is a 3-field heap object `(pair_ptr, role_index, closed)`. A shared `march_chan_pair` struct holds two directional queues (A→B and B→A) protected by a mutex. Pair refcount tracks live endpoints.
+
+**Multi-party (MPST):** Each endpoint is a 3-field heap object `(session_ptr, role_index, closed)`. A shared `march_mpst_session` struct holds N×N directed queues. Role names passed as strings are resolved to indices at runtime.
+
+---
+
+## 7. Known Limitations
+
 - **No `needs` capability** — There's no `needs Chan` or similar declaration required to use session types.
+- **Synchronous channels** — The native runtime uses blocking dequeue. If a receiver calls `Chan.recv` before the sender has sent, the program aborts. This matches the interpreter behavior. True async channels (with blocking/waking) would require scheduler integration.

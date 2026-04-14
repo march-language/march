@@ -241,6 +241,20 @@ int64_t march_sys_major_gcs(void);
 int64_t march_sys_actor_count(void);
 void   *march_get_version(void);
 
+/* Session-typed channel builtins (binary). */
+void   *march_chan_new(void *proto_name);
+void   *march_chan_send(void *ep, void *val);
+void   *march_chan_recv(void *ep);
+int64_t march_chan_close(void *ep);
+void   *march_chan_choose(void *ep, void *label);
+void   *march_chan_offer(void *ep);
+
+/* Multi-party session type (MPST) builtins. */
+void   *march_mpst_new(void *proto_name, int64_t n_roles);
+void   *march_mpst_send(void *ep, void *target_role_str, void *val);
+void   *march_mpst_recv(void *ep, void *source_role_str);
+int64_t march_mpst_close(void *ep);
+
 /* Test harness — used by --test compiled binaries. */
 extern jmp_buf  march_test_jmp_buf;
 extern int      march_test_in_test;
