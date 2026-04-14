@@ -1091,6 +1091,18 @@ let builtin_bindings : (string * scheme) list =
     ("pid_of_int",   poly1 (fun a -> TArrow (t_int, TCon ("Pid", [a]))));
     (* Phase 5: task_spawn_link — like task_spawn but links to spawner *)
     ("task_spawn_link", poly1 (fun a -> TArrow (TArrow (t_int, a), TCon ("Task", [a]))));
+    (* Phase 5B: cancellation token builtins.
+       task_cancel_token_new() is zero-arg: EApp(f,[]) → infer_app returns type
+       directly (see infer_app: | [], t -> t), so declare as Mono CancelToken,
+       not as TArrow(t_unit, CancelToken). *)
+    ("task_cancel_token_new",  Mono (TCon ("CancelToken", [])));
+    ("task_cancel",            Mono (TArrow (TCon ("CancelToken", []), t_unit)));
+    ("task_is_cancelled",      Mono (TArrow (TCon ("CancelToken", []), t_bool)));
+    ("task_spawn_with_cancel", poly1 (fun a ->
+        TArrow (TArrow (t_int, a),
+        TArrow (TCon ("CancelToken", []),
+                TCon ("Task", [a])))));
+    ("task_cancel_by_id",      poly1 (fun a -> TArrow (TCon ("Task", [a]), t_unit)));
     (* File I/O builtins *)
     ("file_exists",     Mono (TArrow (t_string, t_bool)));
     ("file_read",       poly1 (fun e -> TArrow (t_string, t_result t_string e)));

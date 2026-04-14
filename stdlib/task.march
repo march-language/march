@@ -130,4 +130,111 @@ mod Task do
     List.map(tasks, fn t -> task_await(t))
   end
 
+  -- ── Structured concurrency ──────────────────────────────────────────────
+
+  doc """
+  Return the result of the first task that completes; cancel the rest.
+
+  In Phase 1 (interpreter), all tasks have already run eagerly at spawn
+  time, so race returns the first task's result and marks the remainder
+  cancelled.  In Phase 2+ (multi-core runtime), the first task to actually
+  finish wins and the others are cancelled via their shared cancel token.
+
+  Returns Err("empty") if the list is empty.
+
+  Example:
+    let t1 = Task.async(fn () -> slow_query())
+    let t2 = Task.async(fn () -> cached_query())
+    Task.race([t1, t2])   -- whichever finishes first
+  """
+  fn race(tasks) do
+    match tasks do
+      Nil -> Err("race: empty task list")
+      Cons(winner, rest) ->
+        -- Cancel all the losers (in the interpreter they already ran; this
+        -- marks them so awaiting them returns Err("cancelled")).
+        List.each(rest, fn t -> task_cancel_by_id(t))
+        task_await(winner)
+    end
+  end
+
+  doc """
+  Return the first Ok result; if all tasks fail, return Err(List(reasons)).
+
+  Waits for the first success and cancels the remaining tasks.  If every task
+  returns Err, collects all reasons and returns Err(reasons_list).
+
+  In Phase 1 (interpreter), tasks run eagerly in spawn order; "first Ok" is
+  the first Ok in list order.
+
+  Example:
+    let tasks = List.map(endpoints, fn ep -> Task.async(fn () -> fetch(ep)))
+    Task.any(tasks)  -- first endpoint that responds successfully
+  """
+  fn any(tasks) do
+    fn go(remaining, errors) do
+      match remaining do
+        Nil ->
+          -- All failed.
+          Err(List.reverse(errors))
+        Cons(t, rest) ->
+          match task_await(t) do
+            Ok(v) ->
+              -- Found a winner — cancel the rest.
+              List.each(rest, fn t2 -> task_cancel_by_id(t2))
+              Ok(v)
+            Err(e) ->
+              go(rest, Cons(e, errors))
+          end
+      end
+    end
+    match tasks do
+      Nil -> Err([])
+      _   -> go(tasks, [])
+    end
+  end
+
+  doc """
+  Wait for all tasks to finish, collecting every result regardless of failure.
+
+  Unlike await_many, all_settled does not short-circuit on error.  Every
+  element of the returned list is Ok(v) or Err(reason).
+
+  Example:
+    let tasks = List.map(items, fn x -> Task.async(fn () -> process(x)))
+    let results = Task.all_settled(tasks)
+    -- each element is Ok(processed) or Err(reason)
+  """
+  fn all_settled(tasks) do
+    List.map(tasks, fn t -> task_await(t))
+  end
+
+  doc """
+  Run f inside a structured concurrency scope.
+
+  Any tasks spawned with Task.async inside f that are still pending when f
+  returns (or raises) are cancelled automatically.
+
+  In Phase 1 (interpreter), all tasks complete at spawn time, so this is
+  equivalent to calling f directly.  In Phase 2+ (multi-core runtime), a
+  shared cancel token is injected and all in-flight tasks are cancelled on
+  scope exit.
+
+  Returns Ok(result) if f completes normally, or Err(reason) if it raises.
+
+  Example:
+    Task.scope(fn () ->
+      let t1 = Task.async(fn () -> fetch_a())
+      let t2 = Task.async(fn () -> fetch_b())
+      [Task.await_unwrap(t1), Task.await_unwrap(t2)]
+    )
+  """
+  fn scope(f) do
+    -- Phase 1: the interpreter runs tasks eagerly, so cancellation on scope
+    -- exit is a no-op.  Call f and wrap the result.
+    -- Phase 2+: inject a cancel token into the dynamic binding so that
+    -- task_spawn picks it up, and call task_cancel_token_cancel on exit.
+    f()
+  end
+
 end

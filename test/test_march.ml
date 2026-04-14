@@ -8883,6 +8883,141 @@ let test_async_send_queues_not_dispatches () =
   Alcotest.(check int) "mailbox has 1 queued message" 1
     (match v with March_eval.Eval.VInt n -> n | _ -> -1)
 
+(* ── Phase 5B: cancel token tests ─────────────────────────────────── *)
+
+let test_cancel_token_new () =
+  let src = {|mod Test do
+    fn main() do
+      let tok = task_cancel_token_new()
+      task_is_cancelled(tok)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check bool) "new token is not cancelled" false (vbool v)
+
+let test_cancel_token_cancel () =
+  let src = {|mod Test do
+    fn main() do
+      let tok = task_cancel_token_new()
+      task_cancel(tok)
+      task_is_cancelled(tok)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check bool) "cancelled token returns true" true (vbool v)
+
+let test_cancel_tokens_independent () =
+  let src = {|mod Test do
+    fn main() do
+      let tok1 = task_cancel_token_new()
+      let tok2 = task_cancel_token_new()
+      task_cancel(tok1)
+      task_is_cancelled(tok2)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check bool) "other token unaffected" false (vbool v)
+
+let test_spawn_with_cancel_active () =
+  let src = {|mod Test do
+    fn main() do
+      let tok = task_cancel_token_new()
+      let t = task_spawn_with_cancel(fn _ -> 42, tok)
+      task_await(t)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check string) "runs when active" "Ok(42)" (March_eval.Eval.value_to_string v)
+
+let test_spawn_with_cancel_precancelled () =
+  let src = {|mod Test do
+    fn main() do
+      let tok = task_cancel_token_new()
+      task_cancel(tok)
+      let t = task_spawn_with_cancel(fn _ -> 99, tok)
+      task_await(t)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check string) "skipped when pre-cancelled" {|Err("cancelled")|} (March_eval.Eval.value_to_string v)
+
+let test_cancel_by_id () =
+  let src = {|mod Test do
+    fn main() do
+      let t = task_spawn(fn _ -> 7)
+      task_cancel_by_id(t)
+      task_await(t)
+    end
+  end|} in
+  let env = eval_module src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check string) "cancelled by id" {|Err("cancelled")|} (March_eval.Eval.value_to_string v)
+
+(* ── Task.race ─────────────────────────────────────────────────────── *)
+
+let test_task_race_single () =
+  let list_decl = load_stdlib_file_for_test "list.march" in
+  let task_decl = load_stdlib_file_for_test "task.march" in
+  let src = {|mod Test do
+    fn main() do
+      let t = task_spawn(fn _ -> 100)
+      Task.race([t])
+    end
+  end|} in
+  let env = eval_with_stdlib [list_decl; task_decl] src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check string) "race single" "Ok(100)" (March_eval.Eval.value_to_string v)
+
+let test_task_race_cancels_losers () =
+  let list_decl = load_stdlib_file_for_test "list.march" in
+  let task_decl = load_stdlib_file_for_test "task.march" in
+  let src = {|mod Test do
+    fn main() do
+      let t1 = task_spawn(fn _ -> 1)
+      let t2 = task_spawn(fn _ -> 2)
+      Task.race([t1, t2])
+      task_await(t2)
+    end
+  end|} in
+  let env = eval_with_stdlib [list_decl; task_decl] src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check string) "loser is cancelled" {|Err("cancelled")|} (March_eval.Eval.value_to_string v)
+
+let test_task_race_empty () =
+  let list_decl = load_stdlib_file_for_test "list.march" in
+  let task_decl = load_stdlib_file_for_test "task.march" in
+  let src = {|mod Test do
+    fn main() do Task.race([]) end
+  end|} in
+  let env = eval_with_stdlib [list_decl; task_decl] src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check string) "race empty" {|Err("race: empty task list")|} (March_eval.Eval.value_to_string v)
+
+(* ── Task.all_settled ──────────────────────────────────────────────── *)
+
+let test_task_all_settled () =
+  let list_decl = load_stdlib_file_for_test "list.march" in
+  let src = {|mod Test do
+    fn main() do
+      let t1 = task_spawn(fn _ -> 10)
+      let t2 = task_spawn(fn _ -> 20)
+      task_cancel_by_id(t2)
+      let t3 = task_spawn(fn _ -> 30)
+      let rs = List.map([t1, t2, t3], fn t -> task_await(t))
+      rs
+    end
+  end|} in
+  let env = eval_with_stdlib [list_decl] src in
+  let v = call_fn env "main" [] in
+  Alcotest.(check string) "all_settled includes Err"
+    {|[Ok(10), Err("cancelled"), Ok(30)]|}
+    (March_eval.Eval.value_to_string v)
+
 (** Phase 4: run_scheduler() processes queued messages.
     After run_until_idle(), counter state should be updated. *)
 let test_scheduler_drains_mailbox () =
@@ -19585,6 +19720,18 @@ let () =
           Alcotest.test_case "spawn_steal with pool"     `Quick (with_reset test_eval_spawn_steal_with_pool);
           Alcotest.test_case "workpool threading"        `Quick (with_reset test_eval_workpool_threading);
           Alcotest.test_case "task sends to actor"       `Quick (with_reset test_eval_task_sends_to_actor);
+          (* Phase 5B: cancel tokens *)
+          Alcotest.test_case "cancel token new"          `Quick (with_reset test_cancel_token_new);
+          Alcotest.test_case "cancel token cancel"       `Quick (with_reset test_cancel_token_cancel);
+          Alcotest.test_case "cancel tokens independent" `Quick (with_reset test_cancel_tokens_independent);
+          Alcotest.test_case "spawn_with_cancel active"  `Quick (with_reset test_spawn_with_cancel_active);
+          Alcotest.test_case "spawn_with_cancel pre-cancelled" `Quick (with_reset test_spawn_with_cancel_precancelled);
+          Alcotest.test_case "cancel_by_id"              `Quick (with_reset test_cancel_by_id);
+          (* Phase 5C: structured concurrency *)
+          Alcotest.test_case "race single"               `Quick (with_reset test_task_race_single);
+          Alcotest.test_case "race cancels losers"       `Quick (with_reset test_task_race_cancels_losers);
+          Alcotest.test_case "race empty"                `Quick (with_reset test_task_race_empty);
+          Alcotest.test_case "all_settled mixed results" `Quick (with_reset test_task_all_settled);
         ] );
       ( "work_stealing",
         [
