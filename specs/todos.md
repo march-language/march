@@ -72,10 +72,21 @@ finding, and convention drift.  Listed in the recommended order.
   `with_context`, `set_level` keep working unchanged.  Runtime adds
   11 new builtins.  4 new tests; `test_march` 1311 → 1315.  Spec:
   `specs/2026-04-14-logger-v2-design.md`.
-- [ ] **Structured concurrency** — `Task.race`, `Task.any`,
-  `Task.all_settled`, cancellation scopes.  Existing
-  `async/await/await_many` cover the happy path but composing async
-  ops requires hand-rolled supervision.
+- ✅ **Structured concurrency** — `Task.race`, `Task.any`,
+  `Task.all_settled`, `Task.scope`, cancellation tokens, and
+  `task_cancel_by_id`.  Runtime: signal-based preemption daemon
+  (`SIGUSR1` via `pthread_kill`, 1 ms quantum), `march_cancel_token`
+  ref-counted struct with `march_sched_spawn_with_cancel`.  Eval:
+  `VCancelToken` value variant, `te_cancelled` flag on `task_entry`,
+  five new builtins (`task_cancel_token_new`, `task_cancel`,
+  `task_is_cancelled`, `task_spawn_with_cancel`, `task_cancel_by_id`).
+  Typecheck: `CancelToken` type, `task_cancel_by_id` poly1 signature.
+  Stdlib: `Task.race` (first wins, losers cancelled), `Task.any`
+  (first Ok wins, all-Err → `Err(list)`), `Task.all_settled`
+  (no short-circuit), `Task.scope` (Phase 1 pass-through; Phase 2+
+  injects cancel token).  Tests: 24 in `test/stdlib/test_task.march`
+  (100 % pass), 10 new alcotest cases in `test_march`
+  (`test_march` 1320 → 1330).
 - ✅ **`Test.assert_eq` / `assert_ne` (generic)** — `stdlib/test.march`:
   single generic `assert_eq(expected, actual, msg)` using structural `==`
   (which falls through to OCaml equality when no `Eq` impl is present).

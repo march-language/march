@@ -31,8 +31,9 @@ type value =
   | VClosure of env * string list * expr
   | VBuiltin of string * (value list -> value)
   | VPid    of int                      (** Actor process id *)
-  | VTask   of int                      (** Task handle *)
-  | VWorkPool                           (** Work-stealing pool capability *)
+  | VTask         of int                 (** Task handle *)
+  | VCancelToken  of bool ref            (** Cancellation token (shared mutable flag) *)
+  | VWorkPool                            (** Work-stealing pool capability *)
   | VCap    of int * int                (** Epoch-stamped capability: (pid, epoch) *)
   | VActorId of int                     (** Opaque actor identity (epoch-independent) *)
   | VChan   of chan_endpoint            (** Binary session-typed channel endpoint *)
@@ -141,9 +142,10 @@ let dyn_sup_next_vpid  : int ref = ref (-1)
 
 (** Task registry — maps task IDs to their result. *)
 type task_entry = {
-  te_id     : int;
-  mutable te_result : value option;
-  te_thunk  : value;  (** The closure to execute *)
+  te_id               : int;
+  mutable te_result   : value option;
+  te_thunk            : value;    (** The closure to execute *)
+  mutable te_cancelled: bool;     (** True if the task was cancelled before await *)
 }
 
 let task_registry : (int, task_entry) Hashtbl.t = Hashtbl.create 16
@@ -627,9 +629,10 @@ let rec vault_key_of_value (v : value) : string =
     eval_error "Vault: key must be a plain value (Int/String/Bool/Atom/Tuple/Ctor), got %s"
       (match v with
        | VClosure _ | VBuiltin _ -> "a function"
-       | VPid _    -> "a Pid"
-       | VTask _   -> "a Task"
-       | _         -> "an unsupported value")
+       | VPid _         -> "a Pid"
+       | VTask _        -> "a Task"
+       | VCancelToken _ -> "a CancelToken"
+       | _              -> "an unsupported value")
 
 (** Resolve a vault handle; panics with a clear message on bad handles. *)
 let vault_lookup (id : int) : vault_table =
@@ -845,6 +848,7 @@ let rec value_to_string v =
     if is_rec then "<fn>" else "<builtin:" ^ n ^ ">"
   | VPid pid -> "Pid(" ^ string_of_int pid ^ ")"
   | VTask id -> Printf.sprintf "<task:%d>" id
+  | VCancelToken r -> Printf.sprintf "<cancel_token:%s>" (if !r then "cancelled" else "active")
   | VWorkPool -> "<work_pool>"
   | VCap (pid, epoch) -> Printf.sprintf "Cap(%d, epoch=%d)" pid epoch
   | VActorId pid -> Printf.sprintf "ActorId(%d)" pid
@@ -6401,7 +6405,11 @@ let () = run_scheduler_hook := run_scheduler
 (* App / Supervisor machinery                                          *)
 (* ------------------------------------------------------------------ *)
 
-(** Task builtins: spawn, await, await_unwrap, yield.
+(** Internal helper: create a task entry for an already-completed result. *)
+let make_task_entry tid result thunk =
+  { te_id = tid; te_result = result; te_thunk = thunk; te_cancelled = false }
+
+(** Task builtins: spawn, await, await_unwrap, yield, and cancel tokens.
     Placed after [apply] because [task_spawn] calls [apply] to eagerly
     execute the thunk (Phase 1: single-threaded cooperative scheduler). *)
 let task_builtins : env =
@@ -6410,10 +6418,10 @@ let task_builtins : env =
         let tid = !next_task_id in
         next_task_id := tid + 1;
         (* Phase 1: eagerly evaluate the thunk.
-           Phase 2 will enqueue on the run queue instead. *)
+           Phase 2+ will enqueue on the run queue instead. *)
         (* Thunks are (Int -> a) — pass dummy 0 arg. *)
         let result = apply thunk [VInt 0] in
-        let entry = { te_id = tid; te_result = Some result; te_thunk = thunk } in
+        let entry = make_task_entry tid (Some result) thunk in
         Hashtbl.add task_registry tid entry;
         VTask tid
       | _ -> eval_error "task_spawn: expected 1 argument (a function)"))
@@ -6421,6 +6429,8 @@ let task_builtins : env =
   ; ("task_await", VBuiltin ("task_await", function
       | [VTask tid] ->
         (match Hashtbl.find_opt task_registry tid with
+         | Some entry when entry.te_cancelled ->
+           VCon ("Err", [VString "cancelled"])
          | Some entry ->
            (match entry.te_result with
             | Some v -> VCon ("Ok", [v])
@@ -6431,6 +6441,8 @@ let task_builtins : env =
   ; ("task_await_unwrap", VBuiltin ("task_await_unwrap", function
       | [VTask tid] ->
         (match Hashtbl.find_opt task_registry tid with
+         | Some entry when entry.te_cancelled ->
+           eval_error "task_await!: task %d was cancelled" tid
          | Some entry ->
            (match entry.te_result with
             | Some v -> v
@@ -6457,9 +6469,8 @@ let task_builtins : env =
          but validates the capability requirement. *)
       let tid = !next_task_id in
       next_task_id := tid + 1;
-      (* Thunks are (Int -> a) — pass dummy 0 arg. *)
       let result = apply thunk [VInt 0] in
-      let entry = { te_id = tid; te_result = Some result; te_thunk = thunk } in
+      let entry = make_task_entry tid (Some result) thunk in
       Hashtbl.add task_registry tid entry;
       VTask tid
     | [_; _] ->
@@ -6469,6 +6480,51 @@ let task_builtins : env =
   ; ("task_reductions", VBuiltin ("task_reductions", function
     | [] -> VInt !last_reduction_count
     | _ -> eval_error "task_reductions: expected 0 arguments"))
+
+  (* ── Phase 5B: cancellation token builtins ───────────────────────── *)
+
+  ; ("task_cancel_token_new", VBuiltin ("task_cancel_token_new", function
+      | [] -> VCancelToken (ref false)
+      | _ -> eval_error "task_cancel_token_new: expected 0 arguments"))
+
+  ; ("task_cancel", VBuiltin ("task_cancel", function
+      | [VCancelToken r] -> r := true; VUnit
+      | _ -> eval_error "task_cancel: expected 1 argument (a CancelToken)"))
+
+  ; ("task_is_cancelled", VBuiltin ("task_is_cancelled", function
+      | [VCancelToken r] -> VBool !r
+      | _ -> eval_error "task_is_cancelled: expected 1 argument (a CancelToken)"))
+
+  (* Spawn a task with an associated cancel token.
+     In Phase 1 (interpreter): if the token is already cancelled, the task is
+     not run and its await returns Err("cancelled").  Otherwise, the task runs
+     eagerly as usual. *)
+  ; ("task_spawn_with_cancel", VBuiltin ("task_spawn_with_cancel", function
+      | [thunk; VCancelToken r] ->
+        let tid = !next_task_id in
+        next_task_id := tid + 1;
+        if !r then begin
+          (* Token already cancelled — skip execution, mark as cancelled. *)
+          let entry = { (make_task_entry tid None thunk) with te_cancelled = true } in
+          Hashtbl.add task_registry tid entry;
+          VTask tid
+        end else begin
+          let result = apply thunk [VInt 0] in
+          let entry = make_task_entry tid (Some result) thunk in
+          Hashtbl.add task_registry tid entry;
+          VTask tid
+        end
+      | _ -> eval_error "task_spawn_with_cancel: expected (thunk, CancelToken)"))
+
+  (* Cancel a task by id (marks te_cancelled on the registry entry).
+     In Phase 1, the task already ran, so this only affects future awaits. *)
+  ; ("task_cancel_by_id", VBuiltin ("task_cancel_by_id", function
+      | [VTask tid] ->
+        (match Hashtbl.find_opt task_registry tid with
+         | Some entry -> entry.te_cancelled <- true
+         | None -> ());
+        VUnit
+      | _ -> eval_error "task_cancel_by_id: expected 1 argument (a Task)"))
 
   ; ("get_work_pool", VWorkPool)
   (* Capability builtins — at runtime caps are opaque unit sentinels *)
@@ -6681,8 +6737,8 @@ let task_builtins : env =
       in
       if not linked_alive then begin
         (* Linked actor already dead — task fails immediately *)
-        let entry = { te_id = tid; te_result = Some (VCon ("Err", [VString "linked actor dead"]));
-                      te_thunk = thunk } in
+        let entry = make_task_entry tid
+                      (Some (VCon ("Err", [VString "linked actor dead"]))) thunk in
         Hashtbl.add task_registry tid entry;
         VTask tid
       end else begin
@@ -6700,7 +6756,7 @@ let task_builtins : env =
               | _ -> ());
              raise exn)
         in
-        let entry = { te_id = tid; te_result = Some result; te_thunk = thunk } in
+        let entry = make_task_entry tid (Some result) thunk in
         Hashtbl.add task_registry tid entry;
         VTask tid
       end

@@ -44,6 +44,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>     /* nanosleep */
 #include <unistd.h>   /* sysconf */
 
 /* macOS spells it MAP_ANON; Linux spells it MAP_ANONYMOUS.  Both platforms
@@ -478,20 +479,30 @@ void march_sched_run(void) {
 
     /* Single-scheduler fast path: no threads needed. */
     if (g_num_scheds <= 1) {
+        g_scheds[0].thread = pthread_self();
         sched_loop(&g_scheds[0]);
         return;
     }
+
+    /* Scheduler 0 runs on the calling thread — record its pthread_t so the
+     * preemption daemon can send SIGUSR1 to it like any other worker. */
+    g_scheds[0].thread = pthread_self();
 
     /* Spawn N-1 worker threads; scheduler 0 runs on the calling thread. */
     for (int i = 1; i < g_num_scheds; i++) {
         pthread_create(&g_scheds[i].thread, NULL, sched_thread_entry, &g_scheds[i]);
     }
 
+    /* Start the preemption daemon now that all pthread_t handles are stored. */
+    march_sched_preempt_start();
+
     sched_loop(&g_scheds[0]);
 
     for (int i = 1; i < g_num_scheds; i++) {
         pthread_join(g_scheds[i].thread, NULL);
     }
+
+    march_sched_preempt_stop();
 }
 
 void march_sched_yield(void) {
@@ -535,8 +546,9 @@ march_proc *march_sched_find(int64_t pid) {
 /* ── Phase 4: compiled-code reduction counting ────────────────────────── */
 
 /* Thread-local reduction budget for LLVM-compiled code.  Initialised to the
- * full budget so the first quantum runs immediately without an extra reset. */
-_Thread_local int64_t march_tls_reductions = MARCH_REDUCTION_BUDGET;
+ * full budget so the first quantum runs immediately without an extra reset.
+ * volatile: zeroed by the SIGUSR1 preemption handler (see Phase 5A). */
+volatile _Thread_local int64_t march_tls_reductions = MARCH_REDUCTION_BUDGET;
 
 void march_yield_from_compiled(void) {
     /* Refill the budget before yielding so the process gets a fresh quantum
@@ -633,4 +645,176 @@ void march_sched_wake(march_proc *target) {
     } else {
         march_deque_push(&g_scheds[0].local_queue, target);
     }
+}
+
+/* ── Phase 5A: signal-based preemption ───────────────────────────────── */
+
+/*
+ * Design
+ * ──────
+ * A single daemon pthread wakes every MARCH_QUANTUM_US microseconds and
+ * sends SIGUSR1 to each active scheduler thread via pthread_kill().  SIGUSR1
+ * is delivered to the target thread, so the handler runs in that thread's
+ * context and can safely write to its own march_tls_reductions (_Thread_local).
+ *
+ * The handler zeroes march_tls_reductions.  The scheduler thread's next call
+ * to march_sched_tick() (or march_yield_from_compiled()) sees the zero budget
+ * and calls march_sched_yield(), giving the green-thread scheduler a chance to
+ * run another process.
+ *
+ * Limitations / known EINTR exposure
+ * ───────────────────────────────────
+ * Delivering SIGUSR1 to a thread that is blocked in a slow syscall (read,
+ * nanosleep, etc.) will interrupt it with EINTR.  Callers of blocking syscalls
+ * inside green threads must handle EINTR (retry loop).  This is standard POSIX
+ * practice and is documented as a known trade-off of signal-based preemption.
+ *
+ * We install SIGUSR1 with SA_RESTART where the kernel supports it; this
+ * auto-restarts interruptible syscalls on Linux.  On macOS SA_RESTART does not
+ * cover all syscalls, so green-thread code that calls blocking I/O must loop
+ * on EINTR.
+ */
+
+static _Atomic int  g_preempt_active = 0;
+static pthread_t    g_preempt_thread;
+
+/* SIGUSR1 handler: zero the local reduction counter.  The handler is
+ * registered with SA_RESTART so that interruptible syscalls are retried
+ * automatically on platforms that support it. */
+static void march_preempt_signal_handler(int sig) {
+    (void)sig;
+    march_tls_reductions = 0;
+}
+
+static void *preempt_daemon(void *arg) {
+    (void)arg;
+    struct timespec ts;
+    ts.tv_sec  = 0;
+    ts.tv_nsec = (long)MARCH_QUANTUM_US * 1000L;   /* µs → ns */
+
+    while (atomic_load_explicit(&g_preempt_active, memory_order_acquire)) {
+        nanosleep(&ts, NULL);   /* sleeps until MARCH_QUANTUM_US has elapsed */
+
+        if (!atomic_load_explicit(&g_preempt_active, memory_order_acquire))
+            break;
+
+        /* Signal every active scheduler thread. */
+        for (int i = 0; i < g_num_scheds; i++) {
+            if (g_scheds[i].running && g_scheds[i].thread) {
+                pthread_kill(g_scheds[i].thread, SIGUSR1);
+            }
+        }
+    }
+    return NULL;
+}
+
+void march_sched_preempt_start(void) {
+    /* Install the SIGUSR1 handler once, process-wide. */
+    struct sigaction sa;
+    sa.sa_handler = march_preempt_signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;   /* auto-restart interruptible syscalls */
+    if (sigaction(SIGUSR1, &sa, NULL) != 0) {
+        perror("march_sched: sigaction(SIGUSR1)");
+        return;   /* preemption unavailable but scheduler still works */
+    }
+
+    atomic_store_explicit(&g_preempt_active, 1, memory_order_release);
+    if (pthread_create(&g_preempt_thread, NULL, preempt_daemon, NULL) != 0) {
+        perror("march_sched: pthread_create (preempt daemon)");
+        atomic_store_explicit(&g_preempt_active, 0, memory_order_relaxed);
+    }
+}
+
+void march_sched_preempt_stop(void) {
+    if (!atomic_load_explicit(&g_preempt_active, memory_order_acquire))
+        return;
+    atomic_store_explicit(&g_preempt_active, 0, memory_order_release);
+    /* Wake the daemon so it does not sleep through the entire remaining quantum. */
+    pthread_kill(g_preempt_thread, SIGUSR1);
+    pthread_join(g_preempt_thread, NULL);
+}
+
+/* ── Phase 5B: cancellation tokens ──────────────────────────────────── */
+
+march_cancel_token *march_cancel_token_new(void) {
+    march_cancel_token *tok = (march_cancel_token *)malloc(sizeof(march_cancel_token));
+    if (!tok) {
+        fputs("march_cancel_token: OOM\n", stderr);
+        abort();
+    }
+    atomic_init(&tok->cancelled, 0);
+    atomic_init(&tok->refcount, 1);
+    return tok;
+}
+
+void march_cancel_token_cancel(march_cancel_token *tok) {
+    if (!tok) return;
+    atomic_store_explicit(&tok->cancelled, 1, memory_order_release);
+}
+
+int march_cancel_token_is_cancelled(march_cancel_token *tok) {
+    if (!tok) return 0;
+    return atomic_load_explicit(&tok->cancelled, memory_order_acquire);
+}
+
+void march_cancel_token_ref(march_cancel_token *tok) {
+    if (!tok) return;
+    atomic_fetch_add_explicit(&tok->refcount, 1, memory_order_relaxed);
+}
+
+void march_cancel_token_unref(march_cancel_token *tok) {
+    if (!tok) return;
+    int prev = atomic_fetch_sub_explicit(&tok->refcount, 1, memory_order_acq_rel);
+    if (prev == 1) {
+        free(tok);
+    }
+}
+
+/*
+ * Cancel-aware process descriptor extension.
+ *
+ * We store the cancel token pointer in the proc's arg field is not possible
+ * (arg is already used for the user function's argument).  Instead, we use a
+ * thin wrapper: the real fn/arg are stored in a heap-allocated
+ * march_cancel_wrap, which is passed as the arg to a trampoline.
+ */
+typedef struct {
+    void               (*user_fn)(void *);
+    void                *user_arg;
+    march_cancel_token  *token;
+} march_cancel_wrap;
+
+static void cancel_trampoline(void *raw) {
+    march_cancel_wrap *w = (march_cancel_wrap *)raw;
+    void (*user_fn)(void *) = w->user_fn;
+    void  *user_arg         = w->user_arg;
+    march_cancel_token *tok = w->token;
+    free(w);   /* wrapper no longer needed after we've unpacked it */
+
+    /* Check immediately before starting — the scope may have already been
+     * cancelled between spawn time and first execution. */
+    if (tok && march_cancel_token_is_cancelled(tok)) {
+        march_cancel_token_unref(tok);
+        return;
+    }
+
+    user_fn(user_arg);
+
+    if (tok) march_cancel_token_unref(tok);
+}
+
+march_proc *march_sched_spawn_with_cancel(void (*fn)(void *), void *arg,
+                                          march_cancel_token *tok) {
+    march_cancel_wrap *w = (march_cancel_wrap *)malloc(sizeof(march_cancel_wrap));
+    if (!w) {
+        fputs("march_sched_spawn_with_cancel: OOM\n", stderr);
+        return NULL;
+    }
+    w->user_fn  = fn;
+    w->user_arg = arg;
+    w->token    = tok;
+    if (tok) march_cancel_token_ref(tok);   /* wrap holds a reference */
+
+    return march_sched_spawn(cancel_trampoline, w);
 }

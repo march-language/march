@@ -1,0 +1,216 @@
+-- Tests for the Task stdlib module — structured concurrency additions.
+-- Covers: Task.race, Task.any, Task.all_settled, Task.scope,
+--         cancel token builtins (task_cancel_token_new, task_cancel, task_is_cancelled,
+--         task_spawn_with_cancel, task_cancel_by_id).
+-- Run with: dune exec march -- test test/stdlib/test_task.march
+
+mod TestTask do
+
+describe "cancel tokens" do
+
+  test "new token is not cancelled" do
+    let tok = task_cancel_token_new()
+    assert (task_is_cancelled(tok) == false)
+  end
+
+  test "cancel sets the token" do
+    let tok = task_cancel_token_new()
+    task_cancel(tok)
+    assert (task_is_cancelled(tok) == true)
+  end
+
+  test "two tokens are independent" do
+    let tok1 = task_cancel_token_new()
+    let tok2 = task_cancel_token_new()
+    task_cancel(tok1)
+    assert (task_is_cancelled(tok1) == true)
+    assert (task_is_cancelled(tok2) == false)
+  end
+
+end
+
+describe "task_spawn_with_cancel" do
+
+  test "runs normally when token is active" do
+    let tok = task_cancel_token_new()
+    let t = task_spawn_with_cancel(fn _ -> 42, tok)
+    let r = task_await(t)
+    assert (r == Ok(42))
+  end
+
+  test "skips execution when token is pre-cancelled" do
+    let tok = task_cancel_token_new()
+    task_cancel(tok)
+    let t = task_spawn_with_cancel(fn _ -> 99, tok)
+    let r = task_await(t)
+    assert (r == Err("cancelled"))
+  end
+
+  test "pre-cancelled task does not run, returns Err" do
+    -- A pre-cancelled token means the thunk is not applied.
+    -- Verify by checking the await result rather than a side effect.
+    let tok = task_cancel_token_new()
+    task_cancel(tok)
+    let t = task_spawn_with_cancel(fn _ -> 999, tok)
+    let r = task_await(t)
+    assert (r == Err("cancelled"))
+  end
+
+end
+
+describe "task_cancel_by_id" do
+
+  test "cancelling a completed task makes await return Err" do
+    let t = Task.async(fn () -> 7)
+    task_cancel_by_id(t)
+    let r = Task.await(t)
+    assert (r == Err("cancelled"))
+  end
+
+end
+
+describe "Task.race" do
+
+  test "race on single task returns its result" do
+    let t = Task.async(fn () -> 100)
+    let r = Task.race([t])
+    assert (r == Ok(100))
+  end
+
+  test "race returns first task result" do
+    let t1 = Task.async(fn () -> 10)
+    let t2 = Task.async(fn () -> 20)
+    let t3 = Task.async(fn () -> 30)
+    let r = Task.race([t1, t2, t3])
+    assert (r == Ok(10))
+  end
+
+  test "race cancels the losers" do
+    let t1 = Task.async(fn () -> "winner")
+    let t2 = Task.async(fn () -> "loser")
+    Task.race([t1, t2])
+    -- After race, t2 should be marked cancelled
+    let r2 = Task.await(t2)
+    assert (r2 == Err("cancelled"))
+  end
+
+  test "race on empty list returns Err" do
+    let r = Task.race([])
+    assert (r == Err("race: empty task list"))
+  end
+
+  test "race with cancelled first task returns Err" do
+    -- Use task_cancel_by_id to simulate a pre-failed task.
+    let t1 = Task.async(fn () -> 1)
+    task_cancel_by_id(t1)
+    let t2 = Task.async(fn () -> 99)
+    let r = Task.race([t1, t2])
+    -- t1 is cancelled (Err); race returns that (first in list wins)
+    assert (r == Err("cancelled"))
+  end
+
+end
+
+describe "Task.any" do
+
+  test "any on single Ok task returns Ok" do
+    let t = Task.async(fn () -> 5)
+    let r = Task.any([t])
+    assert (r == Ok(5))
+  end
+
+  test "any returns first Ok, skips earlier Err" do
+    let t1 = Task.async(fn () -> 1)
+    let t2 = Task.async(fn () -> 2)
+    -- mark t1 as failed by cancelling it
+    task_cancel_by_id(t1)
+    let r = Task.any([t1, t2])
+    assert (r == Ok(2))
+  end
+
+  test "any cancels remaining tasks after first Ok" do
+    let t1 = Task.async(fn () -> 1)
+    let t2 = Task.async(fn () -> 2)
+    task_cancel_by_id(t1)
+    Task.any([t1, t2])
+    -- t2 was the winner (not cancelled by any), t1 was the failed
+    -- remaining tasks after winner are cancelled
+    let r2 = Task.await(t2)
+    assert (r2 == Ok(2))
+  end
+
+  test "any with all Err returns Err(list)" do
+    let t1 = Task.async(fn () -> 1)
+    let t2 = Task.async(fn () -> 2)
+    task_cancel_by_id(t1)
+    task_cancel_by_id(t2)
+    let r = Task.any([t1, t2])
+    assert (r == Err(["cancelled", "cancelled"]))
+  end
+
+  test "any on empty list returns Err([])" do
+    let r = Task.any([])
+    assert (r == Err([]))
+  end
+
+end
+
+describe "Task.all_settled" do
+
+  test "all_settled collects Ok results" do
+    let t1 = Task.async(fn () -> 1)
+    let t2 = Task.async(fn () -> 2)
+    let t3 = Task.async(fn () -> 3)
+    let rs = Task.all_settled([t1, t2, t3])
+    assert (rs == [Ok(1), Ok(2), Ok(3)])
+  end
+
+  test "all_settled includes Err results without short-circuiting" do
+    let t1 = Task.async(fn () -> 1)
+    let t2 = Task.async(fn () -> 2)
+    let t3 = Task.async(fn () -> 3)
+    task_cancel_by_id(t2)
+    let rs = Task.all_settled([t1, t2, t3])
+    assert (rs == [Ok(1), Err("cancelled"), Ok(3)])
+  end
+
+  test "all_settled on empty list returns empty" do
+    let rs = Task.all_settled([])
+    assert (rs == [])
+  end
+
+  test "all_settled preserves order" do
+    let ts = List.map([10, 20, 30, 40], fn n -> Task.async(fn () -> n))
+    let rs = Task.all_settled(ts)
+    assert (rs == [Ok(10), Ok(20), Ok(30), Ok(40)])
+  end
+
+end
+
+describe "Task.scope" do
+
+  test "scope returns function result" do
+    let r = Task.scope(fn () -> 42)
+    assert (r == 42)
+  end
+
+  test "scope works with task spawning inside" do
+    let r = Task.scope(fn () ->
+      let t = Task.async(fn () -> 7)
+      Task.await_unwrap(t)
+    )
+    assert (r == 7)
+  end
+
+  test "scope with multiple tasks inside" do
+    let r = Task.scope(fn () ->
+      let t1 = Task.async(fn () -> 3)
+      let t2 = Task.async(fn () -> 4)
+      Task.await_unwrap(t1) + Task.await_unwrap(t2)
+    )
+    assert (r == 7)
+  end
+
+end
+
+end

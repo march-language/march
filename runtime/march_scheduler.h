@@ -40,6 +40,14 @@
 #  define MARCH_NUM_SCHEDULERS 4
 #endif
 
+/* Preemption quantum in microseconds.  The preemption daemon sends SIGUSR1
+ * to each scheduler thread every MARCH_QUANTUM_US µs, zeroing its reduction
+ * counter and forcing a cooperative yield at the next march_sched_tick().
+ * Override at compile time with -DMARCH_QUANTUM_US=N.  Default is 1000 (1 ms). */
+#ifndef MARCH_QUANTUM_US
+#  define MARCH_QUANTUM_US 1000
+#endif
+
 /* ── Process status ───────────────────────────────────────────────────── */
 typedef enum {
     PROC_READY   = 0,  /* In run queue, waiting for a CPU turn              */
@@ -158,11 +166,64 @@ march_proc  *march_sched_find(int64_t pid);
 /* Thread-local reduction budget for LLVM-compiled code.
  * The LLVM backend emits a load/decrement/store of this variable at every
  * function prologue (or TCO loop header). Declared extern so the compiled
- * LLVM IR module can reference it as an external thread_local global. */
-extern _Thread_local int64_t march_tls_reductions;
+ * LLVM IR module can reference it as an external thread_local global.
+ *
+ * volatile: the preemption signal handler (SIGUSR1) zeroes this from within
+ * the scheduler thread's signal context.  volatile prevents the compiler
+ * from keeping the value in a register across the signal delivery point. */
+extern volatile _Thread_local int64_t march_tls_reductions;
 
 /* Called by compiled code when march_tls_reductions hits zero.
  * Resets the budget to MARCH_REDUCTION_BUDGET and cooperatively yields
  * back to the scheduler via march_sched_yield(). No-op outside a
  * scheduler context (e.g. when running without the green-thread runtime). */
 void march_yield_from_compiled(void);
+
+/* ── Phase 5A: signal-based preemption ───────────────────────────────── */
+
+/* Start/stop the preemption daemon thread.  Called from march_sched_run().
+ * The daemon sends SIGUSR1 to each active scheduler thread every
+ * MARCH_QUANTUM_US microseconds, zeroing march_tls_reductions so that the
+ * next march_sched_tick() triggers a cooperative yield.
+ *
+ * march_sched_preempt_start() must be called AFTER all scheduler pthread_t
+ * handles have been stored (i.e. after spawning worker threads).
+ * march_sched_preempt_stop() signals the daemon to exit and joins it. */
+void march_sched_preempt_start(void);
+void march_sched_preempt_stop(void);
+
+/* ── Phase 5B: cancellation tokens ──────────────────────────────────── */
+
+/* A cancellation token: a single atomic flag shared between a task group
+ * and the tasks spawned within it.  When cancelled, tasks check
+ * march_cancel_token_is_cancelled() at yield points and exit early.
+ *
+ * Tokens are heap-allocated and reference-counted (march_cancel_token_ref /
+ * march_cancel_token_unref).  The initial refcount is 1. */
+typedef struct march_cancel_token {
+    _Atomic int   cancelled;  /* 0 = active, 1 = cancelled            */
+    _Atomic int   refcount;   /* reference count                       */
+} march_cancel_token;
+
+/* Allocate a new cancel token (refcount=1, cancelled=0). */
+march_cancel_token *march_cancel_token_new(void);
+
+/* Atomically cancel the token.  All tasks holding a reference will see
+ * march_cancel_token_is_cancelled() return 1 at their next check. */
+void march_cancel_token_cancel(march_cancel_token *tok);
+
+/* Return 1 if the token has been cancelled, 0 otherwise. */
+int  march_cancel_token_is_cancelled(march_cancel_token *tok);
+
+/* Increment reference count (for task spawn that copies the token pointer). */
+void march_cancel_token_ref(march_cancel_token *tok);
+
+/* Decrement reference count; frees the token when it reaches zero. */
+void march_cancel_token_unref(march_cancel_token *tok);
+
+/* Spawn a green thread with an associated cancel token.  The process stores a
+ * reference to tok; the runtime checks the token at every yield point and
+ * calls march_sched_exit() if it has been cancelled.
+ * Returns the new process, or NULL on failure. */
+march_proc *march_sched_spawn_with_cancel(void (*fn)(void *), void *arg,
+                                          march_cancel_token *tok);
