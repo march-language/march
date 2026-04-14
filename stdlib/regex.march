@@ -298,6 +298,31 @@ mod Regex do
 
   -- ── Public API ────────────────────────────────────────────────────────────
 
+  -- Regex matching options.  Pass to the `*_opts` variants of the
+  -- public match functions.
+  --
+  -- - case_insensitive: when true, ASCII letters in both the pattern
+  --   and the input are folded to lowercase before matching.
+  -- - multiline: reserved for future use.  Currently `^` always matches
+  --   string start and `$` always matches string end; line-aware
+  --   behaviour is not yet implemented.
+  type RegexOpts = { case_insensitive : Bool, multiline : Bool }
+
+  doc "Default options: all flags disabled (case-sensitive, single-line)."
+  fn default_opts() : RegexOpts do
+    %{ case_insensitive: false, multiline: false }
+  end
+
+  -- Apply the case-insensitive transform to both pattern and input.
+  -- ASCII-only fold: non-ASCII bytes pass through unchanged.
+  pfn fold_case(opts : RegexOpts, pattern : String, string : String) : (String, String) do
+    if opts.case_insensitive do
+      (string_to_lowercase(pattern), string_to_lowercase(string))
+    else
+      (pattern, string)
+    end
+  end
+
   doc """
   Test whether `pattern` matches anywhere in `string`.
   If pattern starts with '^', the match is anchored to the start.
@@ -308,11 +333,23 @@ mod Regex do
       Regex.matches("^hello", "say hello")     -- false
   """
   fn matches(pattern, string) do
-    match compile(pattern) do
+    matches_opts(pattern, string, default_opts())
+  end
+
+  doc """
+  Like `matches`, but accepts a `RegexOpts` record for per-call flags.
+
+      Regex.matches_opts("HELLO", "hello world",
+                         %{ case_insensitive: true, multiline: false })
+      -- true
+  """
+  fn matches_opts(pattern, string, opts) do
+    let (p, s) = fold_case(opts, pattern, string)
+    match compile(p) do
     Err(_) -> false
     Ok(rpat) -> do
-      let slen = string_byte_length(string)
-      match find_match(rpat, string, slen, 0) do
+      let slen = string_byte_length(s)
+      match find_match(rpat, s, slen, 0) do
       None -> false
       Some(_) -> true
       end

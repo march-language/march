@@ -25,11 +25,14 @@ mod Result do
   doc """
   Extracts the Ok value, panicking with the given message if Err.
   Use when you are certain the result is Ok.
+
+  The panic message includes the underlying Err value so callers can
+  see *why* the assumption was violated, not just that it was.
   """
   fn expect(res : Result(a, e), msg : String) : a do
     match res do
     Ok(x)  -> x
-    Err(_) -> panic(msg)
+    Err(e) -> panic("Result.expect on Err(" ++ to_string(e) ++ "): " ++ msg)
     end
   end
 

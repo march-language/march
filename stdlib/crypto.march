@@ -213,7 +213,12 @@ mod Crypto do
   -- ── Random generation ─────────────────────────────────────────────────────
 
   doc """
-  Generate n cryptographically random bytes.
+  Generate n cryptographically secure random bytes.  The bytes come
+  from the operating system's CSPRNG (`/dev/urandom` on Unix), so the
+  output is suitable for cryptographic keys, IVs, nonces, salts, and
+  session tokens.
+
+  Panics if `n` is negative or if `/dev/urandom` cannot be opened.
 
       Crypto.random_bytes(16)  -- Bytes value with 16 random bytes
   """

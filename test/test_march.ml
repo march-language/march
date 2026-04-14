@@ -17574,8 +17574,8 @@ let test_uri_parse_ok () =
 let test_uri_parse_full () =
   let env = eval_with_uri {|mod Test do
     fn f() do
-      let u = URI.parse("https://example.com:8080/api?q=hello#top")
-      URI.scheme(u)
+      let u = Uri.parse("https://example.com:8080/api?q=hello#top")
+      Uri.scheme(u)
     end
   end|} in
   Alcotest.(check string) "scheme" "https"
@@ -17584,8 +17584,8 @@ let test_uri_parse_full () =
 let test_uri_parse_host () =
   let env = eval_with_uri {|mod Test do
     fn f() do
-      let u = URI.parse("https://example.com:8080/api?q=hello#top")
-      URI.host(u)
+      let u = Uri.parse("https://example.com:8080/api?q=hello#top")
+      Uri.host(u)
     end
   end|} in
   Alcotest.(check string) "host" "example.com"
@@ -17594,8 +17594,8 @@ let test_uri_parse_host () =
 let test_uri_parse_path () =
   let env = eval_with_uri {|mod Test do
     fn f() do
-      let u = URI.parse("https://example.com/api/users")
-      URI.path(u)
+      let u = Uri.parse("https://example.com/api/users")
+      Uri.path(u)
     end
   end|} in
   Alcotest.(check string) "path" "/api/users"
@@ -17604,8 +17604,8 @@ let test_uri_parse_path () =
 let test_uri_parse_query () =
   let env = eval_with_uri {|mod Test do
     fn f() do
-      let u = URI.parse("http://localhost/search?q=foo&page=2")
-      URI.query(u)
+      let u = Uri.parse("http://localhost/search?q=foo&page=2")
+      Uri.query(u)
     end
   end|} in
   Alcotest.(check string) "raw query" "q=foo&page=2"
@@ -17614,8 +17614,8 @@ let test_uri_parse_query () =
 let test_uri_parse_fragment () =
   let env = eval_with_uri {|mod Test do
     fn f() do
-      let u = URI.parse("http://example.com/page#section-1")
-      URI.fragment(u)
+      let u = Uri.parse("http://example.com/page#section-1")
+      Uri.fragment(u)
     end
   end|} in
   Alcotest.(check string) "fragment" "section-1"
@@ -17624,8 +17624,8 @@ let test_uri_parse_fragment () =
 let test_uri_to_string () =
   let env = eval_with_uri {|mod Test do
     fn f() do
-      let u = URI.parse("https://example.com/path?q=1")
-      URI.to_string(u)
+      let u = Uri.parse("https://example.com/path?q=1")
+      Uri.to_string(u)
     end
   end|} in
   Alcotest.(check string) "to_string round-trip" "https://example.com/path?q=1"
@@ -17633,14 +17633,14 @@ let test_uri_to_string () =
 
 let test_uri_encode () =
   let env = eval_with_uri {|mod Test do
-    fn f() do URI.encode("hello world") end
+    fn f() do Uri.encode("hello world") end
   end|} in
   Alcotest.(check string) "encode space" "hello%20world"
     (vstr (call_fn env "f" []))
 
 let test_uri_decode () =
   let env = eval_with_uri {|mod Test do
-    fn f() do URI.decode("hello%20world") end
+    fn f() do Uri.decode("hello%20world") end
   end|} in
   Alcotest.(check string) "decode %20" "hello world"
     (vstr (call_fn env "f" []))
@@ -17648,7 +17648,7 @@ let test_uri_decode () =
 let test_uri_encode_query () =
   let env = eval_with_uri {|mod Test do
     fn f() do
-      URI.encode_query([("q", "hello world"), ("page", "2")])
+      Uri.encode_query([("q", "hello world"), ("page", "2")])
     end
   end|} in
   Alcotest.(check string) "encode_query" "q=hello%20world&page=2"
@@ -17657,7 +17657,7 @@ let test_uri_encode_query () =
 let test_uri_decode_query () =
   let env = eval_with_uri {|mod Test do
     fn f() do
-      let pairs = URI.decode_query("q=hello+world&page=2")
+      let pairs = Uri.decode_query("q=hello+world&page=2")
       match pairs do
       Cons((k, v), _) -> k ++ "=" ++ v
       Nil -> "empty"

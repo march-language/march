@@ -383,6 +383,8 @@ mod Json do
   Returns Some(value) if the full path exists, or None if any step fails.
 
       Json.get_in(obj, ["a", "b", "c"]) -- equivalent to obj.a.b.c
+
+  Object-only.  For paths that include array indices, use `get_path`.
   """
   fn get_in(jv : JsonValue, keys : List(String)) : Option(JsonValue) do
     match keys do
@@ -391,6 +393,62 @@ mod Json do
       match get(jv, k) do
       None -> None
       Some(v) -> get_in(v, rest)
+      end
+    end
+    end
+  end
+
+  -- A single step in a JSON path: either an object key or an array index.
+  type JsonPath = Key(String) | Index(Int)
+
+  doc """
+  Retrieve a JSON Array element by 0-based index.
+  Returns Some(value) if in range, or None otherwise (also None if jv
+  is not an Array, or if i is negative).
+
+      Json.get_at(Array([Number(1.0), Number(2.0)]), 1)
+      -- Some(Number(2.0))
+      Json.get_at(Array([Number(1.0)]), 5)
+      -- None
+  """
+  fn get_at(jv : JsonValue, i : Int) : Option(JsonValue) do
+    match jv do
+    Array(xs) -> do
+      if i < 0 do None
+      else do
+        fn nth(lst, n) do
+          match lst do
+          Nil -> None
+          Cons(h, t) -> if n == 0 do Some(h) else nth(t, n - 1) end
+          end
+        end
+        nth(xs, i)
+      end end
+    end
+    _ -> None
+    end
+  end
+
+  doc """
+  Mixed-segment path access for JSON values nested in objects and arrays.
+  Each step is `Key("name")` for an object lookup or `Index(i)` for an
+  array index.  Returns Some(value) if the full path exists, or None
+  if any step fails.
+
+      Json.get_path(jv, [Key("items"), Index(0), Key("name")])
+      -- equivalent to jv.items[0].name
+  """
+  fn get_path(jv : JsonValue, path : List(JsonPath)) : Option(JsonValue) do
+    match path do
+    Nil -> Some(jv)
+    Cons(seg, rest) -> do
+      let next = match seg do
+        Key(k)   -> get(jv, k)
+        Index(i) -> get_at(jv, i)
+        end
+      match next do
+      None    -> None
+      Some(v) -> get_path(v, rest)
       end
     end
     end

@@ -295,7 +295,10 @@ mod Enum do
   cmp is curried: cmp(x)(y) = true means x should come before y.
   """
   fn sort_by(xs : List(a), cmp : a -> a -> Bool) : List(a) do
-    Sort.timsort_by(xs, cmp)
+    -- Delegate to the canonical Sort.sort entrypoint, which picks an
+    -- algorithm based on input size (sort_small_by < 16, insertion_sort_by
+    -- < 64, timsort_by ≥ 64).
+    Sort.sort(xs, cmp)
   end
 
   doc """

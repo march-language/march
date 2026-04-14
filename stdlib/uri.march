@@ -15,7 +15,7 @@
 -- encode_query / decode_query work with List((String, String)) association
 -- lists (not Map) so this module has no stdlib dependencies.
 
-mod URI do
+mod Uri do
 
   type URI = URI(String, String, Option(Int), String, String, String)
 
@@ -66,13 +66,13 @@ mod URI do
   doc """
   Parse a URI string into its components.
 
-      URI.parse("https://example.com:8080/api/users?q=hello#top")
+      Uri.parse("https://example.com:8080/api/users?q=hello#top")
       -- URI("https", "example.com", Some(8080), "/api/users", "q=hello", "top")
 
-      URI.parse("http://localhost/path")
+      Uri.parse("http://localhost/path")
       -- URI("http", "localhost", None, "/path", "", "")
 
-      URI.parse("/relative/path?foo=bar")
+      Uri.parse("/relative/path?foo=bar")
       -- URI("", "", None, "/relative/path", "foo=bar", "")
 
   Relative URIs (no scheme) are supported; host and port will be empty/None.
@@ -119,10 +119,10 @@ mod URI do
   doc """
   Convert a URI back to its string representation.
 
-      URI.to_string(URI("https", "example.com", None, "/path", "q=1", "top"))
+      Uri.to_string(URI("https", "example.com", None, "/path", "q=1", "top"))
       -- "https://example.com/path?q=1#top"
 
-      URI.to_string(URI("http", "localhost", Some(4000), "/", "", ""))
+      Uri.to_string(URI("http", "localhost", Some(4000), "/", "", ""))
       -- "http://localhost:4000/"
   """
   fn to_string(uri) do
@@ -151,9 +151,9 @@ mod URI do
   Unreserved characters (A–Z, a–z, 0–9, -, _, ., ~) are left unchanged;
   all other bytes are encoded as %XX (uppercase hex).
 
-      URI.encode("hello world")  -- "hello%20world"
-      URI.encode("foo=bar&baz")  -- "foo%3Dbar%26baz"
-      URI.encode("café")         -- "caf%C3%A9"
+      Uri.encode("hello world")  -- "hello%20world"
+      Uri.encode("foo=bar&baz")  -- "foo%3Dbar%26baz"
+      Uri.encode("café")         -- "caf%C3%A9"
   """
   fn encode(s) do
     let chars = string_chars(s)
@@ -177,9 +177,9 @@ mod URI do
   %XX sequences are decoded to their byte values; + is left unchanged
   (use decode_query for form-encoded values where + means space).
 
-      URI.decode("hello%20world")  -- "hello world"
-      URI.decode("caf%C3%A9")      -- "café"
-      URI.decode("no-encoding")    -- "no-encoding"
+      Uri.decode("hello%20world")  -- "hello world"
+      Uri.decode("caf%C3%A9")      -- "café"
+      Uri.decode("no-encoding")    -- "no-encoding"
   """
   fn decode(s) do
     let chars = string_chars(s)
@@ -213,10 +213,10 @@ mod URI do
 
   Keys and values are percent-encoded; pairs are joined with "&".
 
-      URI.encode_query([("q", "hello world"), ("page", "2")])
+      Uri.encode_query([("q", "hello world"), ("page", "2")])
       -- "q=hello%20world&page=2"
 
-      URI.encode_query([])  -- ""
+      Uri.encode_query([])  -- ""
   """
   fn encode_query(pairs) do
     fn encode_pair(kv) do
@@ -239,10 +239,10 @@ mod URI do
   Percent-encoded sequences are decoded; "+" is treated as a space
   (application/x-www-form-urlencoded convention).
 
-      URI.decode_query("q=hello+world&page=2")
+      Uri.decode_query("q=hello+world&page=2")
       -- [("q", "hello world"), ("page", "2")]
 
-      URI.decode_query("")  -- []
+      Uri.decode_query("")  -- []
   """
   fn decode_query(s) do
     if string_is_empty(s) do Nil
@@ -266,17 +266,28 @@ mod URI do
   end
 
   doc """
-  Merge a relative URI reference onto a base URI (RFC 3986 §5.2, simplified).
+  Merge a relative URI reference onto a base URI per RFC 3986 §5.2.
 
-  If the relative URI has a scheme, it is used as-is.
-  If it has an authority (host), the base scheme is kept.
-  Otherwise the base scheme and host are preserved, and the path is resolved.
+  - If the relative URI has a scheme, it is used as-is (absolute reference).
+  - If it has an authority (host), the base scheme is kept and the
+    rest comes from the relative.
+  - Empty relative path → keep the base path; query/fragment from
+    relative if present, else from base.
+  - Absolute relative path (starts with `/`) → replace base path.
+  - Otherwise → merge with base path's directory and remove dot segments
+    per RFC 3986 §5.2.4 ("Remove Dot Segments").
 
-      let base = URI.parse("https://example.com/a/b/c")
-      URI.to_string(URI.merge(base, URI.parse("../d")))
+  Dot segments that would resolve "above" the root are silently
+  absorbed, matching the RFC's recommendation: `Uri.merge(base,
+  Uri.parse("../../../x"))` yields a path of `x` (or `/x` for
+  authoritative base) regardless of how many `..` segments are present.
+  Use `merge_strict` if you need to *detect* such over-traversal.
+
+      let base = Uri.parse("https://example.com/a/b/c")
+      Uri.to_string(Uri.merge(base, Uri.parse("../d")))
       -- "https://example.com/a/d"
 
-      URI.to_string(URI.merge(base, URI.parse("//other.com/x")))
+      Uri.to_string(Uri.merge(base, Uri.parse("//other.com/x")))
       -- "https://other.com/x"
   """
   fn merge(base, relative) do
@@ -321,6 +332,59 @@ mod URI do
         let clean_segs = resolve(segments, Nil)
         let clean_path = string_join(clean_segs, "/")
         URI(bs, bh, bp, clean_path, rq, rf)
+      end end end end end
+    end
+  end
+
+  doc """
+  Like `merge`, but returns `Err("...")` if the resolved path would
+  escape "above" the base — that is, if the dot-segment resolver would
+  pop an empty stack.  Useful when the relative reference comes from
+  untrusted input and you want to reject directory-traversal attempts
+  rather than silently absorb them.
+
+      Uri.merge_strict(base, Uri.parse("../../../etc/passwd"))
+      -- Err("Uri.merge_strict: relative reference traverses above base")
+  """
+  fn merge_strict(base, relative) do
+    match (base, relative) do
+    (URI(bs, bh, bp, bpath, _, _), URI(rs, rh, rp, rpath, rq, rf)) ->
+      if not (string_is_empty(rs)) do Ok(relative)
+      else if not (string_is_empty(rh)) do
+        Ok(URI(bs, rh, rp, rpath, rq, rf))
+      else if string_is_empty(rpath) do
+        let new_q = if string_is_empty(rq) do "" else rq end
+        Ok(URI(bs, bh, bp, bpath, new_q, rf))
+      else if string_starts_with(rpath, "/") do
+        Ok(URI(bs, bh, bp, rpath, rq, rf))
+      else do
+        let base_dir = match string_last_index_of(bpath, "/") do
+          Some(i) -> string_slice(bpath, 0, i + 1)
+          None    -> "/"
+          end
+        let merged = base_dir ++ rpath
+        let segments = string_split(merged, "/")
+        fn resolve(segs, acc, escaped) do
+          match segs do
+          Nil -> (rev_list(acc), escaped)
+          Cons(s, rest) ->
+            if s == "." do resolve(rest, acc, escaped)
+            else if s == ".." do
+              match acc do
+              Nil -> resolve(rest, Nil, true)
+              Cons(_, prev) -> resolve(rest, prev, escaped)
+              end
+            else resolve(rest, Cons(s, acc), escaped)
+            end end
+          end
+        end
+        let (clean_segs, escaped) = resolve(segments, Nil, false)
+        if escaped do
+          Err("Uri.merge_strict: relative reference traverses above base")
+        else do
+          let clean_path = string_join(clean_segs, "/")
+          Ok(URI(bs, bh, bp, clean_path, rq, rf))
+        end end
       end end end end end
     end
   end

@@ -428,6 +428,33 @@ mod Map do
     HamtMap(HLeaf(h, k, v))
   end
 
+  -- ── Default comparators ───────────────────────────────────────────────────
+  -- Convenience comparators for the common key types so callers don't have to
+  -- write `fn a -> fn b -> a < b` at every Map.insert / Map.get / Map.from_list
+  -- call site.
+
+  doc "Curried less-than comparator for Int keys.  Pass to Map.* functions."
+  fn int_cmp(a) do fn b -> a < b end
+
+  doc "Curried less-than comparator for String keys.  Pass to Map.* functions."
+  fn str_cmp(a) do fn b -> a < b end
+
+  doc """
+  Build a `Map(String, v)` from a list of pairs using the default String
+  comparator.  Equivalent to `Map.from_list(pairs, Map.str_cmp)`.
+  """
+  fn from_list_string(pairs) do
+    from_list(pairs, str_cmp)
+  end
+
+  doc """
+  Build a `Map(Int, v)` from a list of pairs using the default Int
+  comparator.  Equivalent to `Map.from_list(pairs, Map.int_cmp)`.
+  """
+  fn from_list_int(pairs) do
+    from_list(pairs, int_cmp)
+  end
+
   -- ---- Query ----
 
   doc "Returns true if the map contains no entries."

@@ -645,4 +645,27 @@ mod Sort do
     introsort_go(xs, n, 2 * log2_floor(n), cmp)
   end
 
+  doc """
+  Canonical sort entrypoint.  Picks an algorithm appropriate for the
+  input size:
+
+  - n <  16  → `sort_small_by` (specialised straight-line sort networks
+                with an insertion-sort fallback)
+  - n <  64  → `insertion_sort_by` (in-list, low overhead for small inputs)
+  - n >= 64  → `timsort_by` (stable, adapts to runs in real-world data)
+
+  Use `introsort_by` directly when you need worst-case O(n log n) on
+  adversarial inputs; the default `by` chooses stability + adaptivity
+  over the worst-case bound.
+
+      Sort.sort([3, 1, 4, 1, 5, 9, 2, 6], fn a -> fn b -> a < b)
+      -- [1, 1, 2, 3, 4, 5, 6, 9]
+  """
+  fn sort(xs : List(a), cmp : a -> a -> Bool) : List(a) do
+    let n = list_len(xs)
+    if n < 16 do sort_small_by(xs, cmp)
+    else if n < 64 do insertion_sort_by(xs, cmp)
+    else timsort_by(xs, cmp) end end
+  end
+
 end

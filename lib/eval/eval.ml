@@ -1746,33 +1746,63 @@ let base64_encode s =
    | _ -> ());
   Buffer.contents out
 
-(** Decode a base64 string to raw bytes. Returns [Error msg] on bad input. *)
+(** Decode a base64 string to raw bytes. Strict per RFC 4648:
+    - input length MUST be a non-negative multiple of 4 (zero is OK)
+    - padding is exactly 0, 1, or 2 trailing `=` characters
+    - all non-padding characters MUST be in the base64 alphabet
+    Returns [Error msg] on bad input. *)
 let base64_decode (s : string) : (string, string) result =
   let dec = Array.make 256 (-1) in
   String.iteri (fun i c ->
     dec.(Char.code c) <- i
   ) "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  (* strip trailing padding *)
   let n = String.length s in
-  let pad = if n > 0 && s.[n-1] = '=' then (if n > 1 && s.[n-2] = '=' then 2 else 1) else 0 in
-  let out_len = (n / 4 * 3) - pad in
-  let out = Bytes.create out_len in
-  let o = ref 0 in
-  (try
-    let i = ref 0 in
-    while !i < n - pad do
-      let a = dec.(Char.code s.[!i]) in
-      let b = dec.(Char.code s.[!i+1]) in
-      if a < 0 || b < 0 then raise Exit;
-      let c = if !i+2 < n && s.[!i+2] <> '=' then dec.(Char.code s.[!i+2]) else 0 in
-      let d = if !i+3 < n && s.[!i+3] <> '=' then dec.(Char.code s.[!i+3]) else 0 in
-      if !o < out_len then begin Bytes.set out !o (Char.chr ((a lsl 2) lor (b lsr 4))); incr o end;
-      if !o < out_len then begin Bytes.set out !o (Char.chr (((b land 0xF) lsl 4) lor (c lsr 2))); incr o end;
-      if !o < out_len then begin Bytes.set out !o (Char.chr (((c land 3) lsl 6) lor d)); incr o end;
-      i := !i + 4
-    done;
-    Ok (Bytes.to_string out)
-  with Exit -> Error "base64_decode: invalid character")
+  if n mod 4 <> 0 then
+    Error (Printf.sprintf "base64_decode: input length %d is not a multiple of 4" n)
+  else if n = 0 then
+    Ok ""
+  else
+    (* Count trailing '=' padding (0, 1, or 2 only). *)
+    let pad =
+      if s.[n-1] <> '=' then 0
+      else if n >= 2 && s.[n-2] = '=' then
+        (if n >= 3 && s.[n-3] = '=' then 3 else 2)
+      else 1
+    in
+    if pad > 2 then
+      Error "base64_decode: too much padding (more than 2 '=' characters)"
+    else
+      let out_len = (n / 4 * 3) - pad in
+      let out = Bytes.create out_len in
+      let o = ref 0 in
+      let bad = ref None in
+      let i = ref 0 in
+      while !bad = None && !i < n - pad do
+        let lookup k =
+          if k >= n - pad then 0  (* impossible given the loop bound *)
+          else
+            let v = dec.(Char.code s.[k]) in
+            if v < 0 then begin
+              bad := Some (Printf.sprintf
+                "base64_decode: invalid character '%c' at offset %d"
+                s.[k] k);
+              0
+            end else v
+        in
+        let a = lookup !i in
+        let b = lookup (!i+1) in
+        let c = if !i+2 < n - pad then lookup (!i+2) else 0 in
+        let d = if !i+3 < n - pad then lookup (!i+3) else 0 in
+        if !bad = None then begin
+          if !o < out_len then begin Bytes.set out !o (Char.chr (((a lsl 2) lor (b lsr 4)) land 0xFF)); incr o end;
+          if !o < out_len then begin Bytes.set out !o (Char.chr ((((b land 0xF) lsl 4) lor (c lsr 2)) land 0xFF)); incr o end;
+          if !o < out_len then begin Bytes.set out !o (Char.chr ((((c land 3) lsl 6) lor d) land 0xFF)); incr o end
+        end;
+        i := !i + 4
+      done;
+      match !bad with
+      | Some msg -> Error msg
+      | None -> Ok (Bytes.to_string out)
 
 (** Convert an OCaml raw string to a March Bytes(List(Int)) value. *)
 let march_bytes_of_string (s : string) : value =
@@ -3778,14 +3808,24 @@ let base_env : env =
            | Ok raw -> VCon ("Ok", [march_bytes_of_string raw])
            | Error e -> VCon ("Err", [VString e]))
         | _ -> eval_error "base64_decode(s: String): Ok(Bytes) | Err(String)"))
-    (* ---- random_bytes(n): generate n random bytes ---- *)
+    (* ---- random_bytes(n): generate n cryptographically random bytes
+       by reading from the OS CSPRNG (/dev/urandom on Unix).  This is
+       the source the Crypto module documents as suitable for keys,
+       nonces, salts, and tokens — it MUST NOT be the Random.int PRNG
+       (which is fast but predictable). *)
   ; ("random_bytes", VBuiltin ("random_bytes", function
         | [VInt n] ->
-          let buf = Bytes.create n in
-          for i = 0 to n - 1 do
-            Bytes.set buf i (Char.chr (Random.int 256))
-          done;
-          march_bytes_of_string (Bytes.to_string buf)
+          if n < 0 then eval_error "random_bytes: negative length %d" n
+          else
+            let buf = Bytes.create n in
+            (if n > 0 then
+              try
+                let ic = open_in_bin "/dev/urandom" in
+                Fun.protect ~finally:(fun () -> close_in_noerr ic)
+                  (fun () -> really_input ic buf 0 n)
+              with Sys_error msg ->
+                eval_error "random_bytes: cannot read /dev/urandom: %s" msg);
+            march_bytes_of_string (Bytes.to_string buf)
         | _ -> eval_error "random_bytes(n: Int): Bytes"))
     (* ---- stdlib_* aliases: allow Crypto module to call builtins without shadowing ---- *)
   ; ("stdlib_sha256", VBuiltin ("stdlib_sha256", function
@@ -3802,11 +3842,17 @@ let base_env : env =
         | _ -> eval_error "stdlib_sha512(s: String | Bytes): String"))
   ; ("stdlib_random_bytes", VBuiltin ("stdlib_random_bytes", function
         | [VInt n] ->
-          let buf = Bytes.create n in
-          for i = 0 to n - 1 do
-            Bytes.set buf i (Char.chr (Random.int 256))
-          done;
-          march_bytes_of_string (Bytes.to_string buf)
+          if n < 0 then eval_error "stdlib_random_bytes: negative length %d" n
+          else
+            let buf = Bytes.create n in
+            (if n > 0 then
+              try
+                let ic = open_in_bin "/dev/urandom" in
+                Fun.protect ~finally:(fun () -> close_in_noerr ic)
+                  (fun () -> really_input ic buf 0 n)
+              with Sys_error msg ->
+                eval_error "stdlib_random_bytes: cannot read /dev/urandom: %s" msg);
+            march_bytes_of_string (Bytes.to_string buf)
         | _ -> eval_error "stdlib_random_bytes(n: Int): Bytes"))
   ; ("stdlib_base64_encode", VBuiltin ("stdlib_base64_encode", function
         | [v] ->

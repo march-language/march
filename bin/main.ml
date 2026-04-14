@@ -162,6 +162,11 @@ let stdlib_file_list = [
   "sorted_set.march";
   "range.march";
   "crypto.march";
+  "base64.march";
+  "native_array.march";
+  "task.march";
+  "uri.march";
+  "forge_nb.march";
 ]
 
 (** Read all stdlib source files and compute a hash of their contents.
@@ -397,7 +402,7 @@ let stdlib_module_names =
   ; "HttpServer"; "HttpTransport"; "WebSocket"; "Process"; "Logger"
   ; "Flow"; "Actor"; "Sort"; "Hamt"; "Seq"; "Iterable"; "IOList"
   ; "Random"; "Stats"; "Plot"; "Prelude"; "DataFrame"; "Test"
-  ; "Vault"
+  ; "Vault"; "URI"
   ; "Depot"; "Depot.Gate" ]
 
 (** Collect [(mod_name, span)] for each DUse/DAlias in [decls]. *)

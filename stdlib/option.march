@@ -40,11 +40,14 @@ mod Option do
   doc """
   Extracts the value from Some(x), panicking with the given message if None.
   Use when you are certain the option is Some.
+
+  The panic message is prefixed with the module name and `on None` so
+  it is clearly attributable when it shows up in a stack trace.
   """
   fn expect(opt : Option(a), msg : String) : a do
     match opt do
     Some(x) -> x
-    None    -> panic(msg)
+    None    -> panic("Option.expect on None: " ++ msg)
     end
   end
 
@@ -121,11 +124,11 @@ mod Option do
   end
 
   doc "Combines two Options into a tuple Option, returning None if either is None."
-  fn zip(a : Option(a), b : Option(b)) : Option((a, b)) do
-    match a do
+  fn zip(oa : Option(a), ob : Option(b)) : Option((a, b)) do
+    match oa do
     None    -> None
     Some(x) -> do
-      match b do
+      match ob do
       None    -> None
       Some(y) -> Some((x, y))
       end

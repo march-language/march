@@ -6,9 +6,11 @@
 --
 -- Key naming conventions:
 -- - Functions with `byte_` in their name operate on raw byte offsets (O(1)).
--- - Functions without a prefix count graphemes (human-perceived characters).
--- - Use `byte_size` for performance-critical paths; use `grapheme_count` when
---   the result must match what a user sees on screen.
+-- - `codepoint_count` counts Unicode codepoints (NOT user-perceived
+--   graphemes — combining characters and emoji clusters count as multiple
+--   codepoints).  `grapheme_count` is a legacy alias retained for
+--   backward compatibility.
+-- - Use `byte_size` for performance-critical paths.
 
 mod String do
 
@@ -267,20 +269,29 @@ mod String do
   Count the number of Unicode **codepoints** in the UTF-8 string `s`.
 
   For ASCII strings this equals the number of visible characters.
-  For strings with multi-byte UTF-8 sequences, this counts codepoints
-  (not grapheme clusters, which may span multiple codepoints).
+  For strings with multi-byte UTF-8 sequences, this counts codepoints,
+  NOT grapheme clusters — combining marks (`á` = `a` + ◌́), emoji
+  modifiers, and ZWJ sequences each count as multiple codepoints.
 
-      String.grapheme_count("hello")  -- 5
-      String.grapheme_count("é")      -- 1  (one codepoint, two bytes)
-      String.grapheme_count("")       -- 0
+      String.codepoint_count("hello")  -- 5
+      String.codepoint_count("é")      -- 1  (NFC: one codepoint, two bytes)
+      String.codepoint_count("é")      -- 2  (NFD: e + combining acute)
+      String.codepoint_count("")       -- 0
 
-  For most practical purposes (non-combining characters), codepoint count
-  equals grapheme count.  Use a dedicated Unicode library for full grapheme
-  cluster segmentation.
+  Use a dedicated Unicode library when you need true grapheme cluster
+  segmentation (for cursor-position arithmetic in a text editor, for
+  example).
 
   Cost: O(n) — scans the byte sequence.
   """
-  fn grapheme_count(s) do string_grapheme_count(s) end
+  fn codepoint_count(s) do string_grapheme_count(s) end
+
+  doc """
+  Legacy alias for `codepoint_count`.  Despite the name, this function
+  counts codepoints, not grapheme clusters; new code should call
+  `codepoint_count` directly.  Retained for backward compatibility.
+  """
+  fn grapheme_count(s) do codepoint_count(s) end
 
   doc """
   Find the byte offset of the first occurrence of `substring` in `s`.
@@ -335,7 +346,6 @@ mod String do
       String.from_int(-7)   -- "-7"
       String.from_int(0)    -- "0"
 
-  Equivalent to `\${n}` in a string interpolation.
   Cost: O(digits).
   """
   fn from_int(n) do int_to_string(n) end

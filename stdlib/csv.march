@@ -7,6 +7,14 @@
 -- Modes:
 --   :simple   -- split on delimiter only; no quoting
 --   :rfc4180  -- full RFC 4180: quoted fields, "" escapes, embedded newlines
+--                (including embedded CR / LF / CRLF inside quoted fields)
+--
+-- Line-terminator handling
+--   The parser accepts CRLF (RFC 4180), LF (Unix), and bare CR (legacy
+--   Mac) as record separators interchangeably.  The output strings have
+--   trailing CR and LF stripped.  Inside `:rfc4180` quoted fields, raw
+--   CR and LF bytes are passed through verbatim — only the closing
+--   `"` ends the field.
 --
 -- Convenience:
 --   read_csv(path)      -- comma-delimited, :rfc4180, eager
