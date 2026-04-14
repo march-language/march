@@ -454,7 +454,15 @@ end
 
 -- ---- Conversion ----
 
-doc "Converts a BigInt to its decimal string representation."
+doc """
+Converts a BigInt to its decimal string representation.
+
+The digits are stored in base 10^4 (little-endian), so each limb
+contributes 4 decimal characters (with leading zeros on all but the
+most-significant limb).  Pieces are collected into a list and
+`string_join`-ed once at the end, making the routine O(number of
+limbs) rather than the quadratic behaviour of repeated `++`.
+"""
 fn to_string(n : BigInt) : String do
   match n do
   BigInt(sign, digits) -> do
@@ -476,14 +484,16 @@ fn to_string(n : BigInt) : String do
           else "000" ++ s end end end end
         end
       end
-      fn go(ds : List(Int), is_first : Bool, acc : String) : String do
+      -- Reverse-accumulate pieces, then string_join once: O(total chars).
+      fn go(ds : List(Int), is_first : Bool, acc : List(String)) : List(String) do
         match ds do
         Nil -> acc
         Cons(d, rest) ->
-          go(rest, false, acc ++ digit_to_str(d, is_first))
+          go(rest, false, Cons(digit_to_str(d, is_first), acc))
         end
       end
-      let magnitude = go(reversed, true, "")
+      let pieces_rev = go(reversed, true, Nil)
+      let magnitude = string_join(reverse(pieces_rev), "")
       if sign do magnitude
       else "-" ++ magnitude end
     end

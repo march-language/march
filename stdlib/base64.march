@@ -49,19 +49,14 @@ pfn from_url_alphabet(s) do
 end
 
 -- Split a Base64 string into MIME lines of at most 76 chars, joined with CRLF.
+-- Uses reverse-accumulation + string_join to keep the routine O(n);
+-- the prior implementation's inner loop rebuilt the result via
+-- `result ++ "\r\n" ++ p` on each chunk, giving O(n²) overall.
 pfn to_mime_lines(s) do
   let len = string_byte_length(s)
   fn go(pos, acc) do
     if pos >= len do
-      fn join_parts(parts, result) do
-        match parts do
-        Nil -> result
-        Cons(p, rest) ->
-          if string_is_empty(result) do join_parts(rest, p)
-          else join_parts(rest, result ++ "\r\n" ++ p) end
-        end
-      end
-      join_parts(rev_list(acc), "")
+      string_join(rev_list(acc), "\r\n")
     else do
       let chunk = string_slice(s, pos, 76)
       go(pos + 76, Cons(chunk, acc))

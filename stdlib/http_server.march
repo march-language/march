@@ -193,10 +193,18 @@ mod HttpServer do
 
   -- Set response status + body and mark halted.
   -- This is the primary way to "respond".
+  --
+  -- Panics if the conn has already been sent or halted — double-response
+  -- is always a handler bug (silently overwriting the first reply would
+  -- mask the mistake and cause subtle response-mixing at the wire level).
   fn send_resp(conn, resp_status, body) do
     match conn do
-    Conn(fd, m, p, pi, qs, rh, rb, _, rhs, _, _, a, u) ->
-      Conn(fd, m, p, pi, qs, rh, rb, resp_status, rhs, body, true, a, u)
+    Conn(fd, m, p, pi, qs, rh, rb, _, rhs, _, h, a, u) ->
+      if h do
+        panic("HttpServer.send_resp: conn is already halted — cannot send twice")
+      else
+        Conn(fd, m, p, pi, qs, rh, rb, resp_status, rhs, body, true, a, u)
+      end
     end
   end
 

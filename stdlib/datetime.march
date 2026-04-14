@@ -125,6 +125,27 @@ pfn expect_prefix(s, prefix) do
   else None end
 end
 
+-- Validate calendar ranges.  Returns Ok(DateTime) if every field is in
+-- its expected range, Err(msg) otherwise.  Catches typo bugs that the
+-- pure-digits parser would otherwise accept (e.g. month 13, day 32,
+-- hour 25, second 61).
+pfn validate_datetime(y : Int, m : Int, d : Int, h : Int, mi : Int, s : Int) : Result(DateTime, String) do
+  if m < 1 || m > 12 do
+    Err("invalid month " ++ int_to_string(m) ++ " (expected 1..12)")
+  else if d < 1 || d > days_in_month(y, m) do
+    Err("invalid day " ++ int_to_string(d) ++ " for " ++ int_to_string(y) ++ "-" ++ pad_int(m, 2))
+  else if h < 0 || h > 23 do
+    Err("invalid hour " ++ int_to_string(h) ++ " (expected 0..23)")
+  else if mi < 0 || mi > 59 do
+    Err("invalid minute " ++ int_to_string(mi) ++ " (expected 0..59)")
+  else if s < 0 || s > 59 do
+    -- We don't model leap seconds; 0..59 is the valid range.
+    Err("invalid second " ++ int_to_string(s) ++ " (expected 0..59)")
+  else
+    Ok(DateTime(Date(y, m, d), Time(h, mi, s)))
+  end end end end end
+end
+
 -- ── Public API ────────────────────────────────────────────────────────────
 
 doc "Return the current Unix timestamp as an Int (seconds since 1970-01-01 UTC)."
@@ -238,9 +259,14 @@ fn format(dt, fmt) do
 end
 
 doc """
-Parse a DateTime from a string.
+Parse a DateTime from a string in UTC.
 Supports: "YYYY-MM-DD" and "YYYY-MM-DD HH:MM:SS".
-Returns Ok(DateTime) or Err(message).
+Returns Ok(DateTime) or Err(message) — rejects out-of-range fields
+(month 13, day 32, hour 25, …) rather than constructing a garbage
+calendar value.
+
+Note: this module is timezone-naive.  All DateTimes represent UTC; no
+offset parsing is supported.
 """
 fn parse(s) do
   let len = string_byte_length(s)
@@ -262,7 +288,7 @@ fn parse(s) do
             None -> Err("expected 2-digit day")
             Some((d, r5)) ->
               if string_is_empty(r5) do
-                Ok(DateTime(Date(y, m, d), Time(0, 0, 0)))
+                validate_datetime(y, m, d, 0, 0, 0)
               else
                 match expect_prefix(r5, " ") do
                 None -> Err("expected ' ' or end after date")
@@ -282,7 +308,7 @@ fn parse(s) do
                           match parse_digits(r10, 2) do
                           None -> Err("expected 2-digit second")
                           Some((sc, _)) ->
-                            Ok(DateTime(Date(y, m, d), Time(h, mi, sc)))
+                            validate_datetime(y, m, d, h, mi, sc)
                           end
                         end
                       end

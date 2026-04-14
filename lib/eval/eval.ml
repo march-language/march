@@ -1798,6 +1798,52 @@ let march_val_to_raw (v : value) : (string, string) result =
     (match go lst with Ok () -> Ok (Buffer.contents buf) | Error e -> Error e)
   | _ -> Error (Printf.sprintf "expected String or Bytes, got %s" (value_to_string v))
 
+(** Build a `File.FileError` March value from a `Unix.error`. Maps the
+    common POSIX error codes onto the named variants (NotFound /
+    Permission / IsDirectory / NotEmpty) and falls back to IoError for
+    anything else.  Preserves the path in the payload so callers can
+    report which file failed. *)
+let file_error_of_unix (path : string) (e : Unix.error) : value =
+  match e with
+  | Unix.ENOENT      -> VCon ("NotFound",   [VString path])
+  | Unix.EACCES
+  | Unix.EPERM       -> VCon ("Permission", [VString path])
+  | Unix.EISDIR      -> VCon ("IsDirectory",[VString path])
+  | Unix.ENOTEMPTY   -> VCon ("NotEmpty",   [VString path])
+  | _ ->
+    VCon ("IoError",
+          [VString (Printf.sprintf "%s: %s" path (Unix.error_message e))])
+
+(** Map a Sys_error message to a FileError variant using best-effort
+    substring matching.  OCaml's Sys module raises [Sys_error] with a
+    textual "path: reason" format that's not machine-parseable, but the
+    common cases are consistent enough to classify.  This is a fallback
+    for operations that still use the Sys API (Sys.remove, etc.); the
+    Unix_error catch above should fire first when the underlying call
+    is a Unix primitive. *)
+let file_error_of_sys (path : string) (msg : string) : value =
+  let contains s sub =
+    let ls = String.length s and lb = String.length sub in
+    if lb > ls then false
+    else
+      let rec loop i =
+        if i + lb > ls then false
+        else if String.sub s i lb = sub then true
+        else loop (i + 1)
+      in
+      loop 0
+  in
+  if contains msg "No such file" || contains msg "No such" then
+    VCon ("NotFound", [VString path])
+  else if contains msg "Permission denied" then
+    VCon ("Permission", [VString path])
+  else if contains msg "Is a directory" then
+    VCon ("IsDirectory", [VString path])
+  else if contains msg "Directory not empty" then
+    VCon ("NotEmpty", [VString path])
+  else
+    VCon ("IoError", [VString msg])
+
 (** PBKDF2-HMAC-SHA256: derive [dklen] bytes from [password] and [salt]
     using [iters] iterations of HMAC-SHA256. *)
 let pbkdf2_hmac_sha256 ~password ~salt ~iterations ~dklen : string =
@@ -3315,7 +3361,8 @@ let base_env : env =
              really_input ic s 0 n;
              VCon ("Ok", [VString (Bytes.to_string s)]))
          with
-         | Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+         | Unix.Unix_error (e, _, _) -> VCon ("Err", [file_error_of_unix path e])
+         | Sys_error msg            -> VCon ("Err", [file_error_of_sys path msg]))
       | _ -> eval_error "file_read(path)"))
 
   ; ("file_write", VBuiltin ("file_write", function
@@ -3326,7 +3373,8 @@ let base_env : env =
              output_string oc data;
              VCon ("Ok", [VAtom "ok"]))
          with
-         | Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+         | Unix.Unix_error (e, _, _) -> VCon ("Err", [file_error_of_unix path e])
+         | Sys_error msg            -> VCon ("Err", [file_error_of_sys path msg]))
       | _ -> eval_error "file_write(path, data)"))
 
   ; ("file_append", VBuiltin ("file_append", function
@@ -3337,13 +3385,16 @@ let base_env : env =
              output_string oc data;
              VCon ("Ok", [VAtom "ok"]))
          with
-         | Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+         | Unix.Unix_error (e, _, _) -> VCon ("Err", [file_error_of_unix path e])
+         | Sys_error msg            -> VCon ("Err", [file_error_of_sys path msg]))
       | _ -> eval_error "file_append(path, data)"))
 
   ; ("file_delete", VBuiltin ("file_delete", function
       | [VString path] ->
         (try Sys.remove path; VCon ("Ok", [VAtom "ok"])
-         with Sys_error msg -> VCon ("Err", [VCon ("IoError", [VString msg])]))
+         with
+         | Unix.Unix_error (e, _, _) -> VCon ("Err", [file_error_of_unix path e])
+         | Sys_error msg            -> VCon ("Err", [file_error_of_sys path msg]))
       | _ -> eval_error "file_delete(path)"))
 
   ; ("file_copy", VBuiltin ("file_copy", function

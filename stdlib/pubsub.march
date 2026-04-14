@@ -147,12 +147,20 @@ fn topic_shard(topic, num_shards) do
 end
 
 doc """
-True when `pattern` matches `topic`.
-A trailing `*` in `pattern` is a wildcard prefix match.
+True when `pattern` matches `topic`.  Segment-aware: a trailing `*`
+in `pattern` wildcards the remainder, but the character at the
+wildcard position in `topic` must be a segment separator (`:` or `.`)
+or end-of-string.  This prevents `"user*"` from matching `"users"`
+or `"user_other"` — Phoenix's pubsub convention.
+
 Examples:
-  topic_matches("room:*",   "room:lobby") -> true
-  topic_matches("room:*",   "game:42")   -> false
-  topic_matches("room:lobby", "room:lobby") -> true
+  topic_matches("room:*",   "room:lobby")  -> true
+  topic_matches("room:*",   "room:1:x")    -> true  (multi-segment ok)
+  topic_matches("room:*",   "game:42")     -> false
+  topic_matches("room:lobby","room:lobby") -> true
+  topic_matches("user*",    "user:1")      -> true  (separator follows)
+  topic_matches("user*",    "user")        -> true  (end-of-string ok)
+  topic_matches("user*",    "users")       -> false (no separator)
 """
 fn topic_matches(pattern, topic) do
   let plen = string_byte_length(pattern)
@@ -163,7 +171,23 @@ fn topic_matches(pattern, topic) do
     let last_char = string_slice(pattern, plen - 1, 1)
     if last_char == "*" do
       let prefix = string_slice(pattern, 0, plen - 1)
-      string_starts_with(topic, prefix)
+      let prefix_len = plen - 1
+      if prefix_len == 0 do
+        -- Bare wildcard `*` matches any topic, including the empty one.
+        true
+      else if not(string_starts_with(topic, prefix)) do false
+      else if tlen == prefix_len do true  -- topic == prefix, no chars beyond
+      else
+        -- Check that the first byte beyond the prefix is a segment
+        -- separator, unless the prefix itself ended with one (then
+        -- any continuation is in-segment or a new subsegment).
+        let last_prefix_char = string_slice(prefix, prefix_len - 1, 1)
+        if last_prefix_char == ":" || last_prefix_char == "." do true
+        else do
+          let boundary = string_slice(topic, prefix_len, 1)
+          boundary == ":" || boundary == "."
+        end end
+      end end end
     else
       pattern == topic
     end

@@ -468,6 +468,32 @@ fn uniq_by(xs : List(a), f : a -> k) : List(a) do
   go(xs, Nil, Nil)
 end
 
+doc """
+Remove duplicates from an ordered list in O(n log n), keeping the first
+occurrence of each value.  Requires a less-than comparator matching
+`Set`'s convention: `cmp : a -> a -> Bool` where `cmp(a)(b) == true`
+means a < b.  Output preserves insertion order.
+
+Prefer this over `uniq` when your element type has a natural ordering
+(Int, String, etc.) and the list is large enough that O(n²) is painful.
+
+    uniq_ord([3, 1, 2, 1, 3], fn a -> fn b -> a < b)
+    -- [3, 1, 2]
+"""
+fn uniq_ord(xs, cmp) do
+  -- Build an order-preserving filter: walk xs once, tracking seen
+  -- elements in a Set (O(log n) contains/insert).  Total: O(n log n).
+  fn go(lst, seen, acc) do
+    match lst do
+    Nil        -> rev(acc)
+    Cons(h, t) ->
+      if Set.contains(seen, h, cmp) do go(t, seen, acc)
+      else go(t, Set.insert(seen, h, cmp), Cons(h, acc)) end
+    end
+  end
+  go(xs, Set.empty(), Nil)
+end
+
 -- ---- Insertion and interleaving ----
 
 doc """

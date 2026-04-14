@@ -93,20 +93,49 @@ end
 
 -- ---- Spread ----
 
+-- Welford's online algorithm: single-pass computation of the sum of
+-- squared deviations from the mean.  Updates (n, mean, M2) as:
+--   n   += 1
+--   d   = x - mean
+--   mean += d / n
+--   d2  = x - mean            -- recomputed with the updated mean
+--   M2  += d * d2             -- sum of squared deviations
+-- Returns (n, M2) where M2 is the sum of squared deviations.  Numerically
+-- stable for near-constant data where the naive two-pass sum-of-squares
+-- loses precision to catastrophic cancellation.
+pfn welford(xs : List(Float)) : (Int, Float) do
+  fn go(lst : List(Float), n : Int, m : Float, m2 : Float) : (Int, Float) do
+    match lst do
+    Nil -> (n, m2)
+    Cons(x, rest) -> do
+      let n1 = n + 1
+      let d  = x -. m
+      let m1 = m +. d /. int_to_float(n1)
+      let d2 = x -. m1
+      let m2_1 = m2 +. d *. d2
+      go(rest, n1, m1, m2_1)
+    end
+    end
+  end
+  go(xs, 0, 0.0, 0.0)
+end
+
 doc """
 Sample variance (denominator n-1).
 Returns 0.0 for a single element.
 Panics on empty list.
+
+Uses Welford's online algorithm for numerical stability on inputs
+where the naive two-pass sum-of-squares would suffer catastrophic
+cancellation (near-constant data, shifted distributions).
 """
 fn variance(xs : List(Float)) : Float do
   match xs do
   Nil -> panic("Stats.variance: empty list")
   Cons(_, Nil) -> 0.0
   _ -> do
-    let m = mean(xs)
-    let n = int_to_float(List.length(xs))
-    let sq_sum = List.fold_left(0.0, xs, fn (acc, x) -> acc +. (x -. m) *. (x -. m))
-    sq_sum /. (n -. 1.0)
+    let (n, m2) = welford(xs)
+    m2 /. (int_to_float(n) -. 1.0)
   end
   end
 end
@@ -114,16 +143,16 @@ end
 doc """
 Population variance (denominator n).
 Returns 0.0 for a single element or empty list.
+
+Uses Welford's online algorithm (same stability benefit as `variance`).
 """
 fn variance_pop(xs : List(Float)) : Float do
   match xs do
   Nil -> 0.0
   Cons(_, Nil) -> 0.0
   _ -> do
-    let m = mean(xs)
-    let n = int_to_float(List.length(xs))
-    let sq_sum = List.fold_left(0.0, xs, fn (acc, x) -> acc +. (x -. m) *. (x -. m))
-    sq_sum /. n
+    let (n, m2) = welford(xs)
+    m2 /. int_to_float(n)
   end
   end
 end

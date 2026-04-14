@@ -134,8 +134,11 @@ fn mul(a : Decimal, b : Decimal) : Decimal do
 end
 
 doc """
-Divides a by b to `precision` decimal places using truncation.
-Panics if b is zero.
+Divides a by b to `precision` decimal places using truncation toward
+zero.  Panics if b is zero.
+
+For half-up rounding (e.g. money arithmetic where 0.5 should round
+away from zero), use `div_round` instead.
 """
 fn div(a : Decimal, b : Decimal, precision : Int) : Decimal do
   match a do
@@ -152,6 +155,19 @@ fn div(a : Decimal, b : Decimal, precision : Int) : Decimal do
     end
   end
   end
+end
+
+doc """
+Divides a by b to `precision` decimal places using half-up rounding:
+0.5 rounds away from zero.  Panics if b is zero.
+
+Equivalent to `round(div(a, b, precision + 1), precision)` but avoids
+the intermediate allocation and re-scaling.
+"""
+fn div_round(a : Decimal, b : Decimal, precision : Int) : Decimal do
+  -- Compute to one extra decimal place via truncating div, then
+  -- apply the existing half-up `round` to drop the guard digit.
+  round(div(a, b, precision + 1), precision)
 end
 
 doc """
