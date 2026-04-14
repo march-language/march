@@ -127,18 +127,7 @@ let all_stdlib_decls =
     "env.march";
     "config.march";
     "html.march";
-    "csrf.march";
-    "session.march";
     "correlation.march";
-    "bastion_dev.march";
-    "bastion_cookies.march";
-    "bastion_routes.march";
-    "bastion_pubsub.march";
-    "bastion_csp.march";
-    "bastion_telemetry.march";
-    "bastion_hot_deploy.march";
-    "bastion_test_sandbox.march";
-    "bastion_idempotency.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -228,10 +217,6 @@ let () =
       Alcotest.test_case "Process module"
         `Quick (run_stdlib_test "test_process.march" "TestProcess");
     ]);
-    ("bastion_dev", [
-      Alcotest.test_case "BastionDev module"
-        `Quick (run_stdlib_test "test_bastion_dev.march" "TestBastionDev");
-    ]);
     ("logger", [
       Alcotest.test_case "Logger module"
         `Quick (run_stdlib_test "test_logger.march" "TestLogger");
@@ -250,48 +235,8 @@ let () =
       Alcotest.test_case "Flow module"
         `Quick (run_stdlib_test "test_flow.march" "TestFlow");
     ]); *)
-    ("csrf", [
-      Alcotest.test_case "CSRF module"
-        `Quick (run_stdlib_test "test_csrf.march" "TestCSRF");
-    ]);
-    ("session", [
-      Alcotest.test_case "Session module"
-        `Quick (run_stdlib_test "test_session.march" "TestSession");
-    ]);
     ("correlation", [
       Alcotest.test_case "CorrelationId module"
         `Quick (run_stdlib_test "test_correlation.march" "TestCorrelationId");
-    ]);
-    ("bastion_cookies", [
-      Alcotest.test_case "BastionCookies module"
-        `Quick (run_stdlib_test "test_bastion_cookies.march" "TestBastionCookies");
-    ]);
-    ("bastion_routes", [
-      Alcotest.test_case "BastionRoutes module"
-        `Quick (run_stdlib_test "test_bastion_routes.march" "TestBastionRoutes");
-    ]);
-    ("bastion_pubsub", [
-      Alcotest.test_case "BastionPubSub module"
-        `Quick (run_stdlib_test "test_bastion_pubsub.march" "TestBastionPubSub");
-    ]);
-    ("bastion_csp", [
-      Alcotest.test_case "BastionCSP module"
-        `Quick (run_stdlib_test "test_bastion_csp.march" "TestBastionCSP");
-    ]);
-    ("bastion_telemetry", [
-      Alcotest.test_case "BastionTelemetry module"
-        `Quick (run_stdlib_test "test_bastion_telemetry.march" "TestBastionTelemetry");
-    ]);
-    ("bastion_hot_deploy", [
-      Alcotest.test_case "BastionHotDeploy module"
-        `Quick (run_stdlib_test "test_bastion_hot_deploy.march" "TestBastionHotDeploy");
-    ]);
-    ("bastion_test_sandbox", [
-      Alcotest.test_case "BastionTestSandbox module"
-        `Quick (run_stdlib_test "test_bastion_test_sandbox.march" "TestBastionTestSandbox");
-    ]);
-    ("bastion_idempotency", [
-      Alcotest.test_case "BastionIdempotency module"
-        `Quick (run_stdlib_test "test_bastion_idempotency.march" "TestBastionIdempotency");
     ]);
   ]
