@@ -137,9 +137,16 @@ let ty_of_expr (e : Ast.expr) : Tir.ty =
     Built from [DUse] declarations. E.g. [map] → [List.map]. *)
 let _use_aliases : (string, string) Hashtbl.t ref = ref (Hashtbl.create 0)
 
-(** Resolve a variable name through use-import aliases. *)
+(** Resolve a variable name through use-import aliases.
+    A name that is currently bound as a local (function parameter or
+    let-binding tracked in [_fn_param_types]) is NOT resolved through
+    aliases — local bindings shadow imports.  Without this guard, a
+    parameter named e.g. [status] would be rewritten to [HttpServer.status]
+    whenever [import HttpServer] is in scope, replacing every use of the
+    local parameter with a global function reference. *)
 let resolve_use_alias (name : string) : string =
-  match Hashtbl.find_opt !_use_aliases name with
+  if Hashtbl.mem _fn_param_types name then name
+  else match Hashtbl.find_opt !_use_aliases name with
   | Some qualified -> qualified
   | None -> name
 

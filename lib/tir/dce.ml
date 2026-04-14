@@ -75,13 +75,31 @@ let reachable_fns (m : Tir.tir_module) : StringSet.t =
   let fn_names = StringSet.of_list (List.map (fun fd -> fd.Tir.fn_name) m.Tir.tm_fns) in
   let visited = ref StringSet.empty in
   let queue = Queue.create () in
-  (* Seed with main + any explicit exports (e.g. WASM island functions);
-     if no main and no exports, seed with all functions. *)
+  (* Seed with main / *.main (module-prefixed) + any explicit exports
+     (e.g. WASM island functions) + any test functions registered in
+     tm_tests (test-mode entry points).  If no seeds found, seed with all
+     functions. *)
   let has_seeds = ref false in
-  (match List.find_opt (fun fd -> fd.Tir.fn_name = "main") m.Tir.tm_fns with
-   | Some main_fn -> Queue.push main_fn.Tir.fn_name queue; has_seeds := true
-   | None -> ());
+  let is_main_name (name : string) =
+    name = "main" ||
+    (let suf = ".main" in
+     let ln = String.length name and ls = String.length suf in
+     ln >= ls && String.sub name (ln - ls) ls = suf)
+  in
+  List.iter (fun (fd : Tir.fn_def) ->
+    if is_main_name fd.Tir.fn_name then begin
+      Queue.push fd.Tir.fn_name queue; has_seeds := true
+    end
+  ) m.Tir.tm_fns;
   List.iter (fun name -> Queue.push name queue; has_seeds := true) m.Tir.tm_exports;
+  List.iter (fun (fn_name, _) ->
+    Queue.push fn_name queue; has_seeds := true
+  ) m.Tir.tm_tests;
+  (* Test-mode setup/setup_all are called from the generated @main — seed them. *)
+  List.iter (fun (fd : Tir.fn_def) ->
+    if fd.Tir.fn_name = "__march_setup__" || fd.Tir.fn_name = "__march_setup_all__"
+    then begin Queue.push fd.Tir.fn_name queue; has_seeds := true end
+  ) m.Tir.tm_fns;
   if not !has_seeds then
     List.iter (fun fd -> Queue.push fd.Tir.fn_name queue) m.Tir.tm_fns;
   while not (Queue.is_empty queue) do
