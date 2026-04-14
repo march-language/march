@@ -184,9 +184,14 @@ and read_string buf = parse
     }
   | "\\n"         { Buffer.add_char buf '\n'; read_string buf lexbuf }
   | "\\t"         { Buffer.add_char buf '\t'; read_string buf lexbuf }
+  | "\\r"         { Buffer.add_char buf '\r'; read_string buf lexbuf }
+  | "\\b"         { Buffer.add_char buf '\b'; read_string buf lexbuf }
+  | "\\f"         { Buffer.add_char buf '\012'; read_string buf lexbuf }
+  | "\\0"         { Buffer.add_char buf '\000'; read_string buf lexbuf }
   | "\\\\"        { Buffer.add_char buf '\\'; read_string buf lexbuf }
   | "\\\""        { Buffer.add_char buf '"'; read_string buf lexbuf }
   | "\\$"         { Buffer.add_char buf '$'; read_string buf lexbuf }
+  | '\\' (_ as c) { raise (Lexer_error (Printf.sprintf "Invalid escape sequence: \\%c" c)) }
   | eof           { raise (Lexer_error "Unterminated string literal") }
   | _ as c        { Buffer.add_char buf c; read_string buf lexbuf }
 
@@ -227,8 +232,13 @@ and read_string_interp buf = parse
     }
   | "\\n"         { Buffer.add_char buf '\n'; read_string_interp buf lexbuf }
   | "\\t"         { Buffer.add_char buf '\t'; read_string_interp buf lexbuf }
+  | "\\r"         { Buffer.add_char buf '\r'; read_string_interp buf lexbuf }
+  | "\\b"         { Buffer.add_char buf '\b'; read_string_interp buf lexbuf }
+  | "\\f"         { Buffer.add_char buf '\012'; read_string_interp buf lexbuf }
+  | "\\0"         { Buffer.add_char buf '\000'; read_string_interp buf lexbuf }
   | "\\\\"        { Buffer.add_char buf '\\'; read_string_interp buf lexbuf }
   | "\\\""        { Buffer.add_char buf '"'; read_string_interp buf lexbuf }
   | "\\$"         { Buffer.add_char buf '$'; read_string_interp buf lexbuf }
+  | '\\' (_ as c) { raise (Lexer_error (Printf.sprintf "Invalid escape sequence: \\%c" c)) }
   | eof           { raise (Lexer_error "Unterminated string interpolation") }
   | _ as c        { Buffer.add_char buf c; read_string_interp buf lexbuf }

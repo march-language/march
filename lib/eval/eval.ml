@@ -2181,7 +2181,8 @@ let base_env : env =
         | _ -> eval_error "builtin /: expected two numbers"))
   ; ("%",  VBuiltin ("%", function
         | [VInt a; VInt b] when b <> 0 -> VInt (a mod b)
-        | _ -> eval_error "builtin %%: expected two non-zero ints"))
+        | [VInt _; VInt 0]             -> eval_error "modulo by zero"
+        | _ -> eval_error "builtin %%: expected two integers"))
     (* Float arithmetic *)
   ; ("+.", VBuiltin ("+.", function
         | [VFloat a; VFloat b] -> VFloat (a +. b)

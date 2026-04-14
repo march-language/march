@@ -1025,13 +1025,10 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     (* Reference to a top-level def by content hash — emit as a function pointer *)
     ("ptr", "@" ^ llvm_name (mangle_extern did.Tir.did_name))
   | Tir.AVar v when v.Tir.v_name = "root_cap" ->
-    (* root_cap is a capability constant — represented as null ptr at runtime *)
+    (* Capability token: represented as null ptr at runtime *)
     ("ptr", "null")
   | Tir.AVar v when v.Tir.v_name = "get_work_pool" ->
     (* Phase 1: work pool is a null sentinel *)
-    ("ptr", "null")
-  | Tir.AVar v when v.Tir.v_name = "root_cap" ->
-    (* Capability token: in compiled mode, capabilities are opaque null pointers *)
     ("ptr", "null")
   | Tir.AVar v when Hashtbl.mem ctx.top_fns v.Tir.v_name
                  && (match v.Tir.v_ty with Tir.TFn _ -> true | _ -> false) ->

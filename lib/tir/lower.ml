@@ -843,15 +843,22 @@ and compile_matrix
     (rows     : (Ast.pattern list * Tir.expr) list)
     (fallback : Tir.expr option)
   : Tir.expr =
+  (* Emit a runtime panic for a non-exhaustive match that the typechecker missed.
+     Returning LitInt 0 here would silently produce wrong values; a panic is correct. *)
+  let nonexhaustive_panic () =
+    let panic_var : Tir.var = {
+      Tir.v_name = "panic"; Tir.v_ty = Tir.TCon ("Never", []); Tir.v_lin = Tir.Unr } in
+    Tir.EApp (panic_var, [Tir.ALit (Ast.LitString "non-exhaustive pattern match")])
+  in
   match rows with
   | [] ->
-    (match fallback with Some f -> f | None -> Tir.EAtom (Tir.ALit (Ast.LitInt 0)))
+    (match fallback with Some f -> f | None -> nonexhaustive_panic ())
   | ([], body) :: _ -> body   (* zero scrutinees remaining → first row wins *)
   | _ ->
     match scruts with
     | [] ->
       (match rows with (_, body) :: _ -> body | [] ->
-        (match fallback with Some f -> f | None -> Tir.EAtom (Tir.ALit (Ast.LitInt 0))))
+        (match fallback with Some f -> f | None -> nonexhaustive_panic ()))
     | scrut :: rest_scruts ->
       (* Split rows into a front block of non-trivial first-column rows and
          a (possibly empty) suffix starting at the first trivial first-column

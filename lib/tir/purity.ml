@@ -1,8 +1,40 @@
 (** Shared purity oracle.
     Conservative: returns [false] when uncertain.
-    False negatives (treating pure as impure) are safe; false positives are not. *)
+    False negatives (treating pure as impure) are safe; false positives are not.
 
-let impure_builtins = ["print"; "println"; "send"; "kill"; "march_print"; "march_println"]
+    Strategy: whitelist clearly-impure builtins. Any builtin name not on this
+    list is assumed pure *for the purposes of fusion and inlining*, which only
+    operate on stdlib list/math functions anyway.  User-defined function calls
+    are conservatively treated as impure via the [ECallPtr] case. *)
+
+(** Builtins that have observable side effects: IO, randomness, network,
+    process control, actor/task creation, time. *)
+let impure_builtins = [
+  (* Console IO *)
+  "print"; "println"; "march_print"; "march_println";
+  "print_int"; "print_float"; "print_char";
+  "read_line"; "io_read_line"; "process_read_line";
+  (* File IO *)
+  "file_read_line"; "file_open"; "file_close";
+  "file_read"; "file_write"; "file_write_line";
+  (* Network / TLS *)
+  "tcp_connect"; "tcp_send_all"; "tcp_recv_all"; "tcp_recv_exact"; "tcp_close";
+  "tls_connect"; "tls_read"; "tls_write"; "tls_close";
+  (* Randomness / non-determinism *)
+  "random_bytes"; "stdlib_random_bytes";
+  "uuid_v4";
+  (* Time *)
+  "unix_time"; "sys_uptime_ms";
+  (* Actors / tasks / processes *)
+  "send"; "kill"; "spawn"; "receive";
+  "task_spawn"; "task_spawn_steal"; "task_spawn_link";
+  "actor_cast"; "actor_call"; "actor_reply";
+  (* Process control *)
+  "process_exit"; "process_spawn_sync";
+  "process_set_env";
+  (* Mutable state *)
+  "march_set_global"; "vault_set"; "vault_drop"; "vault_update";
+]
 
 let rec is_pure : Tir.expr -> bool = function
   | Tir.EAtom _                -> true

@@ -72,6 +72,9 @@ let collect_closure_fvs (fn : Tir.fn_def) : StringSet.t =
         scan rest (StringSet.add v.Tir.v_name acc)
       | Tir.ELet (_, e1, e2) ->
         scan e2 (scan e1 acc)
+      | Tir.ELetRec (fns, body) ->
+        let from_fns = List.fold_left (fun a fd -> scan fd.Tir.fn_body a) acc fns in
+        scan body from_fns
       | Tir.ESeq (e1, e2) ->
         scan e2 (scan e1 acc)
       | Tir.ECase (_, branches, default) ->

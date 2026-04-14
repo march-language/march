@@ -673,7 +673,7 @@ let instantiate level env = function
            (match List.assoc_opt id subst with
             | Some t' -> t'
             | None    -> t)
-         | Link t' -> inst t')
+         | Link _ -> assert false  (* repr always follows links; this is unreachable *))
       | TCon   (n, args)   -> TCon   (n, List.map inst args)
       | TArrow (a, b)      -> TArrow (inst a, inst b)
       | TTuple ts          -> TTuple (List.map inst ts)
