@@ -609,6 +609,7 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "pbkdf2_sha256"           -> Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]))
   | "sha256" | "stdlib_sha256"
   | "sha512" | "stdlib_sha512" -> Some Tir.TString
+  | "sha1_bytes"               -> Some (Tir.TCon ("Bytes", []))
   | "random_bytes" | "stdlib_random_bytes" -> Some (Tir.TCon ("Bytes", []))
   | "base64_encode" | "stdlib_base64_encode" -> Some Tir.TString
   | "base64_decode" | "stdlib_base64_decode"
@@ -847,6 +848,7 @@ let mangle_extern : string -> string = function
   | "pbkdf2_sha256"        -> "march_pbkdf2_sha256"
   | "sha256" | "stdlib_sha256"              -> "march_sha256"
   | "sha512" | "stdlib_sha512"              -> "march_sha512"
+  | "sha1_bytes"                             -> "march_sha1_bytes"
   | "base64_encode" | "stdlib_base64_encode" -> "march_base64_encode"
   | "base64_decode" | "stdlib_base64_decode" -> "march_base64_decode"
   | "random_bytes"  | "stdlib_random_bytes"  -> "march_random_bytes"
@@ -3171,6 +3173,7 @@ declare ptr  @march_vault_ns_drop(ptr %ns, ptr %key)
 declare ptr  @march_md5(ptr %b)
 declare ptr  @march_sha256(ptr %b)
 declare ptr  @march_sha512(ptr %b)
+declare ptr  @march_sha1_bytes(ptr %b)
 declare ptr  @march_hmac_sha256(ptr %key, ptr %msg)
 declare ptr  @march_pbkdf2_sha256(ptr %pass, ptr %salt, i64 %iters, i64 %len)
 declare ptr  @march_base64_encode(ptr %b)

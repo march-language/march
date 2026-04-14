@@ -320,6 +320,21 @@ static void bytes_to_hex(const uint8_t *b, size_t n, char *out) {
     out[2*n] = '\0';
 }
 
+/* ── march_sha1_bytes ───────────────────────────────────────────────── */
+
+/* Forward declaration from sha1.c */
+void sha1(const uint8_t *msg, size_t len, uint8_t out[20]);
+
+/* Takes a String and returns a Bytes(List(Int)) of the 20-byte SHA-1 hash. */
+void *march_sha1_bytes(void *str) {
+    size_t len;
+    uint8_t *bytes = string_to_raw(str, &len);
+    uint8_t hash[20];
+    sha1(bytes, len, hash);
+    free(bytes);
+    return bytes_from_raw(hash, 20);
+}
+
 /* ── march_sha256 ────────────────────────────────────────────────────── */
 
 /* Takes a String (or Bytes) and returns a 64-char lowercase hex String */
