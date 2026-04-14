@@ -1,14 +1,15 @@
-(** forge notebook — thin OCaml shim that runs the March notebook runner/server.
+(** forge notebook — thin OCaml shim that delegates to the Scroll tool.
 
     Two subcommands:
-      forge notebook [FILE.mnb] [-o FILE.html]   -- batch render to HTML
-      forge notebook serve [FILE.mnb] [--port N] -- live server with WebSocket UI
+      forge notebook [FILE.scrollmd] [-o FILE.html]   -- batch render to HTML
+      forge notebook serve [FILE.scrollmd] [--port N] -- live server with WebSocket UI
 
-    FILE.mnb is optional for `serve`: if omitted, a new temp notebook is created.
-    If FILE.mnb is given but does not exist, it is created with a starter template.
+    FILE.scrollmd is optional for `serve`: if omitted, a new temp notebook is created.
+    If FILE.scrollmd is given but does not exist, it is created with a starter template.
 
-    The real implementations live in forge/tasks/notebook.march and
-    forge/tasks/notebook_server.march, embedded as strings at build time. *)
+    The batch renderer lives in forge/tasks/notebook.march, embedded at build time.
+    The live server is the Scroll tool (https://github.com/march-lang/scroll).
+    Install it with: forge install scroll  *)
 
 (* ------------------------------------------------------------------ *)
 (* Stdlib / march binary discovery                                     *)
@@ -31,6 +32,14 @@ let find_march () =
   else "march"
 
 (* ------------------------------------------------------------------ *)
+(* Find the scroll archive task (installed via `forge install scroll`) *)
+(* ------------------------------------------------------------------ *)
+
+(** Return (task_file, lib_paths) for the scroll.serve archive task, or None. *)
+let find_scroll_task () =
+  Archive_store.find_task "scroll.serve"
+
+(* ------------------------------------------------------------------ *)
 (* Write embedded March source to a temp file                          *)
 (* ------------------------------------------------------------------ *)
 
@@ -51,7 +60,7 @@ let lib_path_prefix () =
   | Some d -> Printf.sprintf "MARCH_LIB_PATH=%s " (Filename.quote d)
 
 (* ------------------------------------------------------------------ *)
-(* Batch render: forge notebook FILE.mnb [-o FILE.html]                *)
+(* Batch render: forge notebook FILE.scrollmd [-o FILE.html]                *)
 (* ------------------------------------------------------------------ *)
 
 let run_render ~input ~output () =
@@ -112,15 +121,68 @@ let open_browser url =
   ignore (Sys.command cmd)
 
 (* ------------------------------------------------------------------ *)
-(* Live server: forge notebook serve [FILE.mnb] [--port N]             *)
+(* Live server: forge notebook serve [FILE.scrollmd] [--port N]             *)
 (* ------------------------------------------------------------------ *)
 
+(* ------------------------------------------------------------------ *)
+(* Notebook-local project: ensure a forge.toml exists alongside the   *)
+(* .scrollmd file so the notebook can have its own dependencies.      *)
+(* ------------------------------------------------------------------ *)
+
+(** Create a minimal forge.toml for a notebook if one doesn't exist. *)
+let ensure_notebook_toml nb_path =
+  let dir  = Filename.dirname nb_path in
+  let base = Filename.remove_extension (Filename.basename nb_path) in
+  let toml_path = Filename.concat dir "forge.toml" in
+  if not (Sys.file_exists toml_path) then begin
+    let content = Printf.sprintf
+      {|[project]
+name = "%s"
+type = "notebook"
+
+[deps]
+|} base in
+    let oc = open_out toml_path in
+    output_string oc content;
+    close_out oc;
+    Printf.printf "created: %s\n%!" toml_path
+  end;
+  toml_path
+
+(** Resolve deps from a notebook's forge.toml and return lib paths. *)
+let notebook_dep_lib_paths nb_path =
+  let dir = Filename.dirname nb_path in
+  let toml_path = Filename.concat dir "forge.toml" in
+  if not (Sys.file_exists toml_path) then []
+  else
+    match Project.load_from_dir dir with
+    | Error _ -> []
+    | Ok proj ->
+      List.filter_map (fun (dep_name, dep) ->
+        match dep with
+        | Project.PathDep rel_path ->
+          let abs = if Filename.is_relative rel_path
+            then Filename.concat proj.Project.root rel_path else rel_path in
+          let lib = Filename.concat abs "lib" in
+          if Sys.file_exists lib then Some lib else Some abs
+        | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
+          Project.git_dep_lib_path dep_name
+        | Project.RegistryDep _ -> None
+      ) proj.Project.deps
+
 let run_serve ~input ~port ~no_open () =
+  match find_scroll_task () with
+  | None ->
+    Error
+      "scroll is not installed.\n\
+       Install it with: forge install scroll@/path/to/scroll\n\
+       or: forge install scroll@https://github.com/march-lang/scroll"
+  | Some (task_file, lib_paths) ->
   (* Resolve the notebook path, creating the file if needed *)
   let (input_path, is_temp) = match input with
     | None ->
       (* No file given: create a temp notebook *)
-      let tmp = Filename.temp_file "notebook_" ".mnb" in
+      let tmp = Filename.temp_file "notebook_" ".scrollmd" in
       let oc = open_out tmp in
       output_string oc (starter_template "");
       close_out oc;
@@ -137,9 +199,17 @@ let run_serve ~input ~port ~no_open () =
       end;
       (abs, false)
   in
+  (* Ensure a notebook-local forge.toml exists and resolve its deps *)
+  if not is_temp then
+    ignore (ensure_notebook_toml input_path);
+  let nb_dep_paths = if is_temp then [] else notebook_dep_lib_paths input_path in
   let march = find_march () in
-  let runner_tmp = write_temp Notebook_server_march_src.content ".march" in
   let display_title = if is_temp then "Untitled Notebook" else Filename.basename input_path in
+  let all_lib_paths = lib_paths @ nb_dep_paths in
+  let lib_path_env = match all_lib_paths with
+    | [] -> ""
+    | ps -> Printf.sprintf "MARCH_LIB_PATH=%s " (Filename.quote (String.concat ":" ps))
+  in
   let nb_env =
     Printf.sprintf "FORGE_NB_INPUT=%s FORGE_NB_PORT=%d FORGE_NB_MARCH=%s FORGE_NB_TITLE=%s"
       (Filename.quote input_path)
@@ -147,13 +217,13 @@ let run_serve ~input ~port ~no_open () =
       (Filename.quote march)
       (Filename.quote display_title)
   in
-  let cmd = Printf.sprintf "%s %s %s"
-    nb_env (Filename.quote march) (Filename.quote runner_tmp)
+  let cmd = Printf.sprintf "%s%s %s %s"
+    lib_path_env nb_env (Filename.quote march) (Filename.quote task_file)
   in
   let url = Printf.sprintf "http://localhost:%d" port in
   if is_temp then begin
     Printf.printf "notebook:  Untitled (temp: %s)\n%!" input_path;
-    Printf.printf "tip:       use Save in the browser to download, or Save As to write a .mnb file\n%!"
+    Printf.printf "tip:       use Save in the browser to download, or Save As to write a .scrollmd file\n%!"
   end else
     Printf.printf "notebook:  %s\n%!" input_path;
   Printf.printf "open:      %s\n%!" url;
@@ -163,7 +233,6 @@ let run_serve ~input ~port ~no_open () =
     open_browser url
   end;
   let rc = Sys.command cmd in
-  (try Sys.remove runner_tmp with Sys_error _ -> ());
   (* Do NOT delete the temp notebook — user may have saved work into it *)
   if rc = 0 then Ok ()
   else Error (Printf.sprintf "forge notebook serve exited with code %d" rc)
