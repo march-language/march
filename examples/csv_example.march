@@ -24,7 +24,7 @@ end
 pfn demo_each_row(path) do
   println("--- Example 1: each_row (streaming) ---")
   match Csv.each_row(path, ",", :rfc4180, fn row -> print_row(row)) do
-  Ok(:ok) -> println("Done.")
+  Ok(_) -> println("Done.")
   Err(e) -> println("Error: " ++ to_string(e))
   end
 end
@@ -120,7 +120,7 @@ end
 
 -- ── main ──────────────────────────────────────────────────────────────
 
-pfn main() do
+fn main() do
   let csv_path = "/tmp/march_csv_demo.csv"
   let tsv_path = "/tmp/march_tsv_demo.tsv"
   write_demo_csv(csv_path)
