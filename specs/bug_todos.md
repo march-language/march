@@ -24,9 +24,9 @@ Generated from adversarial review on 2026-04-14. Each entry has a priority (P0�
 
 ## P1 — Important
 
-- [ ] **#6** `typecheck.ml` (~exhaustiveness check) — Exhaustiveness algorithm can fail to report missing constructors when non-exhaustiveness exists in the first column and the default matrix appears exhaustive. Nested constructor gaps can be silently missed.
+- [ ] **#6** `typecheck.ml` (~exhaustiveness check) — **FALSE ALARM** after deep re-read. The `is_complete = false` branch correctly returns `None` (exhaustive) when wildcard rows in the default matrix cover the missing constructors — that is the correct semantics. No fix needed.
 
-- [ ] **#7** `typecheck.ml:1777–1786` — Interface method constraint records `a_id = 0` as fallback when `a` has been unified (i.e. `!r = Link _`). The resulting `Poly([0], [CInterface(name, a)], t)` scheme will produce incorrect substitution during instantiation — the constraint ends up on the wrong type variable.
+- [ ] **#7** `typecheck.ml:1777–1786` — **FALSE ALARM** after reading `surface_ty`. That function only constructs types; it never calls `unify`, so `a` cannot be linked during the call. The `a_id = 0` fallback is dead code. No fix needed.
 
 ---
 
@@ -39,7 +39,8 @@ Generated from adversarial review on 2026-04-14. Each entry has a priority (P0�
 
 ## P3 — Performance
 
-- [ ] **#9** `mono.ml` — No depth limit on recursive monomorphic specialization. A recursive polymorphic call pattern can cause unbounded specialization depth, compilation non-termination, and code-size explosion.
+- [x] **#9** `mono.ml` — No depth limit on recursive monomorphic specialization. A recursive polymorphic call pattern can cause unbounded specialization depth, compilation non-termination, and code-size explosion.
+  - **Fixed:** added `spec_counts` tracking per original function. If any function accumulates ≥ 512 distinct specializations, `monomorphize` raises a `Failure` with a diagnostic message naming the function and explaining the likely cause (polymorphic recursion). Limit is conservative — legitimate generic code rarely needs more than a handful of specializations per function.
 
 - [x] **#10** `perceus.ml:68–84` — `collect_closure_fvs` did not recurse into `ELetRec`. If a defunctionalized apply function has a local recursive binding that loads closure fields, those names would not be in `_closure_fvs` and the RC inserter would emit spurious dec/incRC on closure-owned variables (potential double-free).
   - **Fixed:** added `ELetRec` arm to the `scan` traversal, recursing into each function body and then the continuation.
@@ -55,7 +56,7 @@ Generated from adversarial review on 2026-04-14. Each entry has a priority (P0�
 
 ## Done (moved from above)
 
-- #1, #2, #3, #4, #8, #10, #11 — fixed and all tests passing (dune runtest: green).
+- #1, #2, #3, #4, #8, #9, #10, #11 — fixed and all tests passing (dune runtest: green).
 - #5 — confirmed false alarm after reading `llvm_ret_ty`; no fix needed.
-- #6, #7 — P1 items remain open (require deeper typecheck surgery).
-- #9 — P3 item remains open (requires mono.ml depth-limit design).
+- #6 — confirmed false alarm after re-reading `find_missing_mc`; algorithm is correct.
+- #7 — confirmed false alarm after reading `surface_ty`; `a` is never linked by that function.

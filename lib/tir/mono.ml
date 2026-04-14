@@ -470,6 +470,12 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
   let done_set : (string, unit) Hashtbl.t = Hashtbl.create 32 in
   (* worklist entries: (target_name, original_fn_def, subst_to_apply) *)
   let worklist : (string * Tir.fn_def * ty_subst) Queue.t = Queue.create () in
+  (* Track specialization count per original function to detect polymorphic
+     recursion that would cause unbounded code-size growth.
+     Limit chosen conservatively: legitimate generic code rarely needs more
+     than a few dozen specializations of a single function. *)
+  let spec_counts : (string, int) Hashtbl.t = Hashtbl.create 16 in
+  let max_specs_per_fn = 512 in
 
   (* Seed: all fns that are already monomorphic (no TVar in params or ret),
      plus always seed "main" / "*.main" as entry points. *)
@@ -493,14 +499,32 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
   while not (Queue.is_empty worklist) do
     let (target_name, orig_fn, subst) = Queue.pop worklist in
     if not (Hashtbl.mem done_set target_name) then begin
-      Hashtbl.add done_set target_name ();
-      (* Apply substitution to get the specialized version *)
-      let fn' = subst_fn_def subst orig_fn in
-      let fn' = { fn' with Tir.fn_name = target_name } in
-      (* Rewrite calls in the body, enqueuing new specializations *)
-      let body' = rewrite_calls fn_table done_set worklist
-                    iface_methods record_to_typename fn'.Tir.fn_body in
-      result := { fn' with Tir.fn_body = body' } :: !result
+      (* Guard against polymorphic recursion creating unbounded specializations.
+         Each original function is allowed at most [max_specs_per_fn] distinct
+         monomorphic variants.  Exceeding this almost certainly indicates
+         polymorphic recursion (e.g. f[T] calls f[List[T]]) which would
+         otherwise cause non-termination and unbounded binary size. *)
+      let orig_name = orig_fn.Tir.fn_name in
+      let count = Option.value ~default:0 (Hashtbl.find_opt spec_counts orig_name) in
+      if count >= max_specs_per_fn then
+        failwith (Printf.sprintf
+          "Monomorphization limit reached: function '%s' has more than %d \
+           specializations. This usually indicates polymorphic recursion \
+           (e.g. a generic function that calls itself at a different type). \
+           Add explicit type annotations or restructure to avoid type-indexed \
+           recursion."
+          orig_name max_specs_per_fn)
+      else begin
+        Hashtbl.replace spec_counts orig_name (count + 1);
+        Hashtbl.add done_set target_name ();
+        (* Apply substitution to get the specialized version *)
+        let fn' = subst_fn_def subst orig_fn in
+        let fn' = { fn' with Tir.fn_name = target_name } in
+        (* Rewrite calls in the body, enqueuing new specializations *)
+        let body' = rewrite_calls fn_table done_set worklist
+                      iface_methods record_to_typename fn'.Tir.fn_body in
+        result := { fn' with Tir.fn_body = body' } :: !result
+      end
     end
   done;
 
