@@ -1078,13 +1078,27 @@ let lower_fn_def (def : Ast.fn_def) : Tir.fn_def =
     | _ -> failwith (Printf.sprintf "TIR lower: fn %s has %d clauses (expected 1 after desugaring)"
                        def.fn_name.txt (List.length def.fn_clauses))
   in
+  (* For polymorphic fn_defs, prefer the typechecker's inferred type over the
+     surface annotation.  The typechecker has already unified the source-level
+     named type variable (e.g. `a` in `fn nth(xs: List(a), n: Int) : a`) with
+     the unbound unification variable used in the body's typed expressions.
+     Using `lower_ty` on the annotation would emit `TVar "a"`, but the body
+     uses `TVar "_<id>"`.  Monomorphization's subst keys off the param TVar,
+     so the two names must match — otherwise the body's TVars never get
+     substituted and recursive calls fall back to a polymorphic specialization
+     named e.g. `List.nth$List_V__1771$Int`, causing runtime infinite recursion.
+     Only when the typechecker has no record for this span (placeholder
+     [TVar "_"]) do we fall back to the source annotation. *)
+  let ty_from_tc_or_ann (tc_ty : Tir.ty) (ann : Ast.ty option) : Tir.ty =
+    match tc_ty, ann with
+    | Tir.TVar "_", Some t -> lower_ty t
+    | Tir.TVar "_", None -> tc_ty
+    | _ -> tc_ty
+  in
   let params = List.map (fun fp ->
       match fp with
       | Ast.FPNamed p ->
-        let ty = match p.param_ty with
-          | Some t -> lower_ty t
-          | None   -> ty_of_span p.param_name.span
-        in
+        let ty = ty_from_tc_or_ann (ty_of_span p.param_name.span) p.param_ty in
         { Tir.v_name = p.param_name.txt;
           v_ty = ty;
           v_lin = lower_linearity p.param_lin }
@@ -1092,9 +1106,12 @@ let lower_fn_def (def : Ast.fn_def) : Tir.fn_def =
         { Tir.v_name = n.txt; v_ty = ty_of_span n.span; v_lin = Tir.Unr }
       | _ -> failwith "TIR lower: unexpected pattern param after desugaring"
     ) clause.fc_params in
-  let ret_ty = match def.fn_ret_ty with
-    | Some t -> lower_ty t
-    | None -> ty_of_expr clause.fc_body
+  let ret_ty =
+    (* Same rationale as params: prefer the typechecker's inferred return type,
+       falling back to the source annotation only when the typechecker has no
+       record for the body span. *)
+    let tc_ret = ty_of_expr clause.fc_body in
+    ty_from_tc_or_ann tc_ret def.fn_ret_ty
   in
   (* Populate the parameter type scope so that body variable references can
      fall back to the declared parameter type when ty_of_span gives TError.
