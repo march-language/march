@@ -7292,12 +7292,24 @@ let test_simplify_div_one () =
     (March_tir.Tir.show_expr (first_body m'))
 
 let test_simplify_zero_div () =
+  (* 0 / x where x is a variable must NOT simplify — x could be 0 *)
   let changed = ref false in
   let x = avar "x" March_tir.Tir.TInt in
-  let m = mk_module [mk_fn "f" (app "/" [ilit 0; x])] in
+  let original = app "/" [ilit 0; x] in
+  let m = mk_module [mk_fn "f" original] in
+  let m' = March_tir.Simplify.run ~changed m in
+  Alcotest.(check bool) "not changed" false !changed;
+  Alcotest.(check string) "0/x unchanged"
+    (March_tir.Tir.show_expr original)
+    (March_tir.Tir.show_expr (first_body m'))
+
+let test_simplify_zero_div_lit () =
+  (* 0 / 5 → 0 (divisor is a known non-zero literal) *)
+  let changed = ref false in
+  let m = mk_module [mk_fn "f" (app "/" [ilit 0; ilit 5])] in
   let m' = March_tir.Simplify.run ~changed m in
   Alcotest.(check bool) "changed" true !changed;
-  Alcotest.(check string) "0/x=0"
+  Alcotest.(check string) "0/5=0"
     (March_tir.Tir.show_expr (March_tir.Tir.EAtom (ilit 0)))
     (March_tir.Tir.show_expr (first_body m'))
 
@@ -19462,6 +19474,7 @@ let () =
         Alcotest.test_case "sub_different"     `Quick test_simplify_sub_different;
         Alcotest.test_case "div_one"           `Quick test_simplify_div_one;
         Alcotest.test_case "zero_div"          `Quick test_simplify_zero_div;
+        Alcotest.test_case "zero_div_lit"      `Quick test_simplify_zero_div_lit;
         Alcotest.test_case "strength_reduce"   `Quick test_simplify_strength_reduce;
         Alcotest.test_case "float_add_zero"    `Quick test_simplify_float_add_zero;
         Alcotest.test_case "bool_and_true"     `Quick test_simplify_bool_and_true;

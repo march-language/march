@@ -58,8 +58,9 @@ let rec simplify_expr ~changed : Tir.expr -> Tir.expr = function
   | Tir.EApp (f, [x; Tir.ALit (March_ast.Ast.LitInt 1)]) when f.Tir.v_name = "/" ->
     changed := true; Tir.EAtom x
 
-  (* 0 / x → 0 (atoms are always pure) *)
-  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitInt 0); _x]) when f.Tir.v_name = "/" ->
+  (* 0 / x → 0 only when x is a known non-zero literal *)
+  | Tir.EApp (f, [Tir.ALit (March_ast.Ast.LitInt 0); Tir.ALit (March_ast.Ast.LitInt d)])
+    when f.Tir.v_name = "/" && d <> 0 ->
     changed := true; Tir.EAtom (Tir.ALit (March_ast.Ast.LitInt 0))
 
   (* Float identities (IEEE 754 safe; no x -. x rule due to NaN) *)
