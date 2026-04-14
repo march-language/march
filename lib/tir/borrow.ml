@@ -254,7 +254,52 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
           | _ -> false)
        | _ -> false)
     in
-    fbip_owns ||
+    (* Field-escape: if the scrutinee IS our variable (and its type is a heap
+       constructor) and any branch uses any [br_var] in an owning position in
+       the body, the scrutinee itself is an owning use.
+       Pattern-match extraction gives the field's value without incrementing
+       its refcount — the RC stays on the parent.  If the field then escapes
+       (returned, stored, passed to an owning position), the caller receives
+       an aliased pointer without ownership: the parent still holds the same
+       rc, so the next read of the parent would double-free or
+       use-after-free the child (this is the "second read returns None" /
+       local RC underflow class of bug).
+       Note we intentionally do NOT gate on the [br_var]'s own [v_ty]:
+       [Lower] creates [br_vars] with a placeholder [TVar "_"] type even
+       when the concrete constructor field is heap-carrying (e.g.
+       [List(String)] inside [Box(...)]) and [needs_rc] returns false for
+       [TVar _].
+       We follow through simple let-aliasing ([let v = x in ...] where [x] is
+       the name we are tracking): such lets merely rename the alias without
+       escaping it.  This avoids over-promotion for the common pattern
+       [match conn do | Conn(s) -> println(s) end] which compiles to
+       [case conn of Conn($f) -> let s = $f in println(s)] — [$f] is
+       assigned to [s] but [s] is then only borrowed, so no escape
+       actually occurs. *)
+    let rec escapes_through (name : string) (e : Tir.expr) : bool =
+      match e with
+      | Tir.ELet (v, Tir.EAtom (Tir.AVar src), body)
+        when String.equal src.Tir.v_name name ->
+        (* [let v = name in body]: the alias [v] carries [name]'s rc forward.
+           Check whether [v] (or any further alias) escapes in [body]; also
+           honour shadowing of [name]. *)
+        escapes_through v.Tir.v_name body
+        || (not (String.equal v.Tir.v_name name)
+            && owned_in name bm body)
+      | _ -> owned_in name bm e
+    in
+    let field_escape_owns =
+      atom_is name scrutinee &&
+      (match scrutinee with
+       | Tir.AVar v -> needs_rc v.Tir.v_ty
+       | _ -> false) &&
+      List.exists (fun br ->
+        List.exists (fun bv ->
+          escapes_through bv.Tir.v_name br.Tir.br_body
+        ) br.Tir.br_vars
+      ) branches
+    in
+    fbip_owns || field_escape_owns ||
     (* Check branch bodies where the name might escape. *)
     List.exists (fun br ->
       let shadowed =
