@@ -1190,6 +1190,29 @@ let builtin_bindings : (string * scheme) list =
     ("logger_write",       Mono (TArrow (t_string, TArrow (t_string,
         TArrow (t_list (TTuple [t_string; t_string]),
         TArrow (t_list (TTuple [t_string; t_string]), t_unit))))));
+    (* Logger v2: structured field stack.  LogValue and LogField are
+       declared in stdlib/logger.march; the builtins are typed
+       polymorphic on those constructors and the typechecker
+       reconciles them at the call site. *)
+    ("logger_add_field",     poly1 (fun a -> TArrow (t_string, TArrow (a, t_unit))));
+    ("logger_field_count",   Mono t_int);
+    ("logger_pop_to_depth",  Mono (TArrow (t_int, t_unit)));
+    ("logger_get_fields",    poly1 (fun a -> a));
+    (* Logger v2 appender pipeline.  Polymorphic so the LogEntry /
+       Appender constructor types declared in stdlib/logger.march
+       unify at the call site. *)
+    ("logger_register_appender",
+       poly1 (fun a -> TArrow (t_string, TArrow (a, t_unit))));
+    ("logger_remove_appender",   Mono (TArrow (t_string, t_unit)));
+    ("logger_clear_appenders",   Mono t_unit);
+    ("logger_appender_names",    Mono (t_list t_string));
+    ("logger_dispatch",
+       poly1 (fun a -> TArrow (t_string, TArrow (t_string,
+              TArrow (t_string, TArrow (a, t_unit))))));
+    ("logger_set_module_level",
+       Mono (TArrow (t_string, TArrow (t_int, t_unit))));
+    ("logger_clear_module_level", Mono (TArrow (t_string, t_unit)));
+    ("logger_module_level",       Mono (TArrow (t_string, t_int)));
     (* Process builtins — 0-arg variants typed as Mono(result) *)
     ("process_env",        Mono (TArrow (t_string, t_option t_string)));
     ("process_set_env",    Mono (TArrow (t_string, TArrow (t_string, t_unit))));

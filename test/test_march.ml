@@ -15622,6 +15622,73 @@ let test_logger_set_level_filters () =
   Alcotest.(check int) "logging does not crash" 42
     (vint (call_fn env "f" []))
 
+(* ── Logger v2 ─────────────────────────────────────────────────────── *)
+
+let test_logger_with_field_typed () =
+  (* Push a typed field, then read it back from current_fields. *)
+  let env = eval_with_logger {|mod Test do
+    fn f() do
+      Logger.clear_context()
+      Logger.with_field("n", Logger.i(42))
+      Logger.with_field("s", Logger.s("hi"))
+      let fs = Logger.current_fields()
+      match fs do
+      Cons(Logger.LogField(k, _), _) -> k
+      Nil -> "empty"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "head field key (most recent push)" "s"
+    (vstr (call_fn env "f" []))
+
+let test_logger_with_scope_pops_on_normal_exit () =
+  (* with_scope pushes fields then pops them on normal return. *)
+  let env = eval_with_logger {|mod Test do
+    fn f() do
+      Logger.clear_context()
+      let _ = Logger.with_scope(
+        Cons(Logger.LogField("scoped", Logger.s("yes")), Nil),
+        fn _ -> ())
+      Logger.field_count()
+    end
+  end|} in
+  Alcotest.(check int) "scope cleaned up" 0
+    (vint (call_fn env "f" []))
+
+let test_logger_with_scope_pops_on_panic () =
+  (* with_scope must pop fields even when the thunk panics. *)
+  let env = eval_with_logger {|mod Test do
+    fn try_panic() do
+      let _ = Logger.with_scope(
+        Cons(Logger.LogField("scoped", Logger.s("yes")), Nil),
+        fn _ -> panic("boom"))
+      ()
+    end
+    fn count() do Logger.field_count() end
+  end|} in
+  let raised = ref false in
+  (try ignore (call_fn env "try_panic" [])
+   with March_eval.Eval.Eval_error _ -> raised := true);
+  Alcotest.(check bool) "panic propagated" true !raised;
+  Alcotest.(check int) "scope cleaned up after panic" 0
+    (vint (call_fn env "count" []))
+
+let test_logger_module_level_override () =
+  let env = eval_with_logger {|mod Test do
+    fn f() do
+      Logger.set_level(Logger.Info)
+      Logger.set_module_level("Quiet", Logger.Error)
+      Logger.set_module_level("Loud",  Logger.Debug)
+      let q = Logger.level_for("Quiet")
+      let l = Logger.level_for("Loud")
+      let g = Logger.level_for("Other")  -- falls back to global Info
+      Logger.level_to_int(q) * 100 + Logger.level_to_int(l) * 10 + Logger.level_to_int(g)
+    end
+  end|} in
+  (* Error=3, Debug=0, Info=1 → 3*100 + 0*10 + 1 = 301 *)
+  Alcotest.(check int) "module level overrides + global fallback" 301
+    (vint (call_fn env "f" []))
+
 (* ── Flow stdlib module tests ───────────────────────────────────────────── *)
 
 let flow_decls () =
@@ -20057,6 +20124,10 @@ let () =
         [
           Alcotest.test_case "level_to_int Info=1"         `Quick test_logger_level_to_int;
           Alcotest.test_case "set/get level round-trip"    `Quick (with_reset test_logger_level_round_trip);
+          Alcotest.test_case "v2 with_field typed"         `Quick (with_reset test_logger_with_field_typed);
+          Alcotest.test_case "v2 with_scope pops normal"   `Quick (with_reset test_logger_with_scope_pops_on_normal_exit);
+          Alcotest.test_case "v2 with_scope pops on panic" `Quick (with_reset test_logger_with_scope_pops_on_panic);
+          Alcotest.test_case "v2 module level override"    `Quick (with_reset test_logger_module_level_override);
           Alcotest.test_case "set_level filters messages"  `Quick (with_reset test_logger_set_level_filters);
         ] );
       ( "flow",

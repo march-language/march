@@ -337,11 +337,54 @@ let revocation_table : (int * int, unit) Hashtbl.t = Hashtbl.create 4
 (** Flag set when graceful shutdown has been requested (SIGTERM, App.stop). *)
 let shutdown_requested : bool ref = ref false
 
-(* ---- Logger global state ---- *)
-(* Global log level: 0=Debug, 1=Info, 2=Warn, 3=Error.  Default: Info. *)
+(* ---- Logger global state ───────────────────────────────────────────
+   Logger v2 keeps richer field values (Int, Float, Bool, Atom, String,
+   Null) so structured formatters (JSON, logfmt) can preserve types
+   instead of stringifying everything.  The v1 flat (string * string)
+   context stays accessible via shim — v1 `with_context` writes a
+   `LogStr` field; v1 `get_context` lossily reads back as strings. *)
+
+(* Numeric levels.  v1: 0=Debug 1=Info 2=Warn 3=Error.  v2 adds
+   Trace=-1 below Debug and Fatal=4 above Error.  Default: Info. *)
 let logger_level : int ref = ref 1
-(* Persistent key-value context attached to every log entry. *)
-let logger_context : (string * string) list ref = ref []
+
+(* Mirrors March's `LogValue` ADT for runtime context storage. *)
+type log_value =
+  | LogStr of string
+  | LogInt of int
+  | LogFloat of float
+  | LogBool of bool
+  | LogAtom of string  (* atom name without leading colon *)
+  | LogNull
+
+(* Field stack: most-recent push at HEAD.  `with_scope` records depth
+   on entry and truncates back to it on exit (via try_finally). *)
+let logger_fields : (string * log_value) list ref = ref []
+
+(* Appender registry: ordered list of (name, March callback).  When
+   `logger_dispatch` fires a log entry, every registered appender's
+   callback is invoked with the entry value.  Empty list ⇒ fall back
+   to direct stderr write (preserves v1 behaviour for users who
+   haven't configured appenders).
+
+   The callback is a March function value of type `LogEntry -> Unit`.
+   We invoke it via `apply_hook` (set after `apply` is defined). *)
+let logger_appenders : (string * value) list ref = ref []
+
+(* Per-module level overrides: `set_module_level("MyApp", Debug)` adds
+   an entry; `level_for("MyApp")` consults this map first, then falls
+   back to `logger_level`.  Module name "" is the default that applies
+   when no override is registered. *)
+let logger_module_levels : (string, int) Hashtbl.t = Hashtbl.create 8
+
+(* Best-effort string representation of a LogValue for v1 shim consumers. *)
+let log_value_to_string = function
+  | LogStr s   -> s
+  | LogInt n   -> string_of_int n
+  | LogFloat f -> string_of_float f
+  | LogBool b  -> if b then "true" else "false"
+  | LogAtom a  -> ":" ^ a
+  | LogNull    -> "null"
 
 (* ---- Test output capture ---- *)
 (* When Some buf, all print/log output is redirected here instead of stdout/stderr.
@@ -4912,28 +4955,97 @@ let base_env : env =
           with Unix.Unix_error _ -> VInt (-1))
         | _ -> eval_error "process_wait_proc: expected LiveProcess"))
 
-  (* ---- Logger builtins ---- *)
+  (* ---- Logger builtins ----
+     v1 (legacy): logger_add_context, logger_clear_context,
+     logger_get_context — operate on the same field stack but coerce
+     values to/from String for backward compat.
+     v2: logger_add_field, logger_get_fields, logger_pop_to_depth,
+     logger_field_count work in terms of the LogValue ADT. *)
   ; ("logger_set_level", VBuiltin ("logger_set_level", function
         | [VInt n] -> logger_level := n; VUnit
         | _ -> eval_error "logger_set_level: expected Int"))
   ; ("logger_get_level", VBuiltin ("logger_get_level", function
         | [] -> VInt !logger_level
         | _ -> eval_error "logger_get_level: no arguments"))
+
+  (* v1 shim: pushes a LogStr field. *)
   ; ("logger_add_context", VBuiltin ("logger_add_context", function
         | [VString k; VString v] ->
-          logger_context := (k, v) :: !logger_context; VUnit
+          logger_fields := (k, LogStr v) :: !logger_fields; VUnit
         | _ -> eval_error "logger_add_context: expected (String, String)"))
   ; ("logger_clear_context", VBuiltin ("logger_clear_context", function
-        | [] -> logger_context := []; VUnit
+        | [] -> logger_fields := []; VUnit
         | _ -> eval_error "logger_clear_context: no arguments"))
+  (* v1 shim: returns String values; non-String LogValues are stringified. *)
   ; ("logger_get_context", VBuiltin ("logger_get_context", function
         | [] ->
           List.fold_right (fun (k, v) acc ->
-            VCon ("Cons", [VTuple [VString k; VString v]; acc])
-          ) !logger_context (VCon ("Nil", []))
+            VCon ("Cons", [VTuple [VString k; VString (log_value_to_string v)]; acc])
+          ) !logger_fields (VCon ("Nil", []))
         | _ -> eval_error "logger_get_context: no arguments"))
+
+  (* v2: structured field stack manipulation.
+     Field values are encoded as the March `LogValue` ADT. *)
+  ; ("logger_add_field", VBuiltin ("logger_add_field", function
+        | [VString k; v] ->
+          let lv = match v with
+            | VCon ("LStr",   [VString s]) -> LogStr s
+            | VCon ("LInt",   [VInt n])    -> LogInt n
+            | VCon ("LFloat", [VFloat f])  -> LogFloat f
+            | VCon ("LBool",  [VBool b])   -> LogBool b
+            | VCon ("LAtom",  [VAtom a])   -> LogAtom a
+            | VCon ("LNull",  [])          -> LogNull
+            (* Defensive: if a v1 caller hands us a bare String, wrap it. *)
+            | VString s                    -> LogStr s
+            | VInt n                       -> LogInt n
+            | VFloat f                     -> LogFloat f
+            | VBool b                      -> LogBool b
+            | _ -> LogStr (value_to_string v)
+          in
+          logger_fields := (k, lv) :: !logger_fields; VUnit
+        | _ -> eval_error "logger_add_field(key: String, value: LogValue)"))
+  ; ("logger_field_count", VBuiltin ("logger_field_count", function
+        | [] -> VInt (List.length !logger_fields)
+        | _ -> eval_error "logger_field_count: no arguments"))
+  (* Truncate field stack so its length is exactly `depth`.  Used by
+     `with_scope` to roll back on exit / panic. *)
+  ; ("logger_pop_to_depth", VBuiltin ("logger_pop_to_depth", function
+        | [VInt depth] ->
+          let cur = !logger_fields in
+          let cur_len = List.length cur in
+          if depth >= cur_len then VUnit
+          else begin
+            let rec drop n lst =
+              if n <= 0 then lst
+              else match lst with
+                | [] -> []
+                | _ :: t -> drop (n - 1) t
+            in
+            logger_fields := drop (cur_len - depth) cur; VUnit
+          end
+        | _ -> eval_error "logger_pop_to_depth: expected Int"))
+  (* Returns the field stack as a List(LogField).  Each LogField wraps
+     (key, LogValue).  Encoded so March pattern-matches on the same
+     constructors users write. *)
+  ; ("logger_get_fields", VBuiltin ("logger_get_fields", function
+        | [] ->
+          let log_value_to_march = function
+            | LogStr s   -> VCon ("LStr",   [VString s])
+            | LogInt n   -> VCon ("LInt",   [VInt n])
+            | LogFloat f -> VCon ("LFloat", [VFloat f])
+            | LogBool b  -> VCon ("LBool",  [VBool b])
+            | LogAtom a  -> VCon ("LAtom",  [VAtom a])
+            | LogNull    -> VCon ("LNull",  [])
+          in
+          List.fold_right (fun (k, v) acc ->
+            VCon ("Cons",
+                  [VCon ("LogField", [VString k; log_value_to_march v]); acc])
+          ) !logger_fields (VCon ("Nil", []))
+        | _ -> eval_error "logger_get_fields: no arguments"))
+
   (* logger_write(level_str, msg, context_list, extra_list)
-     Writes a log entry to stderr.  Both list args are List((String,String)) tuples. *)
+     v1 entry point.  Both list args are List((String,String)) tuples.
+     For v2, prefer the appender pipeline (logger_dispatch — see below). *)
   ; ("logger_write", VBuiltin ("logger_write", function
         | [VString level; VString msg; ctx_list; extra_list] ->
           let rec pairs_of = function
@@ -4952,6 +5064,117 @@ let base_env : env =
           capture_ewriteln (Printf.sprintf "[%s] %s%s" level msg meta_str);
           VUnit
         | _ -> eval_error "logger_write: expected (String, String, List, List)"))
+
+  (* ── Logger v2 appender registry + dispatch ─────────────────────────
+     Appenders are March callbacks of type `LogEntry -> Unit`.  We
+     store them as opaque `value`s and invoke them via apply_hook.
+     Multiple appenders fire in registration order. *)
+  ; ("logger_register_appender", VBuiltin ("logger_register_appender", function
+        | [VString name; cb] ->
+          (* Replace any existing entry with the same name (idempotent). *)
+          logger_appenders :=
+            (name, cb) ::
+            (List.filter (fun (n, _) -> n <> name) !logger_appenders);
+          VUnit
+        | _ -> eval_error "logger_register_appender(name: String, cb: LogEntry -> Unit)"))
+  ; ("logger_remove_appender", VBuiltin ("logger_remove_appender", function
+        | [VString name] ->
+          logger_appenders :=
+            List.filter (fun (n, _) -> n <> name) !logger_appenders;
+          VUnit
+        | _ -> eval_error "logger_remove_appender(name: String)"))
+  ; ("logger_clear_appenders", VBuiltin ("logger_clear_appenders", function
+        | [] -> logger_appenders := []; VUnit
+        | _ -> eval_error "logger_clear_appenders: no arguments"))
+  ; ("logger_appender_names", VBuiltin ("logger_appender_names", function
+        | [] ->
+          List.fold_right (fun (n, _) acc ->
+            VCon ("Cons", [VString n; acc])
+          ) !logger_appenders (VCon ("Nil", []))
+        | _ -> eval_error "logger_appender_names: no arguments"))
+  (* logger_dispatch(level_str, msg, source, fields)
+     Builds a `LogEntry` value and fans it out to every registered
+     appender in turn.  When no appenders are registered (empty
+     registry), falls back to the v1 stderr text format so the logger
+     remains useful out of the box. *)
+  ; ("logger_dispatch", VBuiltin ("logger_dispatch", function
+        | [VString level_s; VString msg; VString source; fields_list] ->
+          (* Map the all-caps level string back to the March Level
+             constructor: "DEBUG" -> Debug, "INFO" -> Info, etc.
+             Anything unrecognised becomes Info to keep formatters
+             happy (level filtering already happened upstream). *)
+          let level_to_march s =
+            let ctor = match s with
+              | "DEBUG" -> "Debug"
+              | "INFO"  -> "Info"
+              | "WARN"  -> "Warn"
+              | "ERROR" -> "Error"
+              | _       -> "Info"
+            in
+            VCon (ctor, [])
+          in
+          let now_ms = int_of_float (Unix.gettimeofday () *. 1000.0) in
+          let entry =
+            VCon ("LogEntry",
+                  [level_to_march level_s;
+                   VString msg;
+                   VInt now_ms;
+                   VString source;
+                   fields_list])
+          in
+          if !logger_appenders = [] then begin
+            (* v1 fallback: render fields as "k=v" pairs. *)
+            let rec field_strs = function
+              | VCon ("Nil", []) -> []
+              | VCon ("Cons",
+                      [VCon ("LogField",
+                             [VString k; v]); rest]) ->
+                let vstr = match v with
+                  | VCon ("LStr",   [VString s]) -> s
+                  | VCon ("LInt",   [VInt n])    -> string_of_int n
+                  | VCon ("LFloat", [VFloat f])  -> string_of_float f
+                  | VCon ("LBool",  [VBool b])   -> if b then "true" else "false"
+                  | VCon ("LAtom",  [VAtom a])   -> ":" ^ a
+                  | VCon ("LNull",  [])          -> "null"
+                  | _                             -> value_to_string v
+                in
+                (k ^ "=" ^ vstr) :: field_strs rest
+              | VCon ("Cons", [_; rest]) -> field_strs rest
+              | _ -> []
+            in
+            let parts = field_strs fields_list in
+            let suffix =
+              if parts = [] then ""
+              else " {" ^ String.concat ", " parts ^ "}"
+            in
+            capture_ewriteln (Printf.sprintf "[%s] %s%s" level_s msg suffix);
+            VUnit
+          end else begin
+            List.iter (fun (n, cb) ->
+              try ignore (!apply_hook cb [entry])
+              with exn ->
+                Printf.eprintf "[logger] appender %S failed: %s\n%!"
+                  n (Printexc.to_string exn)
+            ) !logger_appenders;
+            VUnit
+          end
+        | _ -> eval_error "logger_dispatch(level: String, msg: String, source: String, fields: List(LogField))"))
+
+  (* Per-module level overrides. *)
+  ; ("logger_set_module_level", VBuiltin ("logger_set_module_level", function
+        | [VString m; VInt n] ->
+          Hashtbl.replace logger_module_levels m n; VUnit
+        | _ -> eval_error "logger_set_module_level(module: String, level: Int)"))
+  ; ("logger_clear_module_level", VBuiltin ("logger_clear_module_level", function
+        | [VString m] ->
+          Hashtbl.remove logger_module_levels m; VUnit
+        | _ -> eval_error "logger_clear_module_level(module: String)"))
+  ; ("logger_module_level", VBuiltin ("logger_module_level", function
+        | [VString m] ->
+          (match Hashtbl.find_opt logger_module_levels m with
+           | Some n -> VInt n
+           | None   -> VInt !logger_level)
+        | _ -> eval_error "logger_module_level(module: String): Int"))
 
   (* ── Vault builtins ──────────────────────────────────────────────────────
      Vault is an ETS-like per-node in-memory KV store backed by a sharded
@@ -6015,7 +6238,9 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear pending_replies;
   next_call_ref := 0;
   logger_level := 1;
-  logger_context := [];
+  logger_fields := [];
+  logger_appenders := [];
+  Hashtbl.clear logger_module_levels;
   Hashtbl.clear vault_registry;
   Hashtbl.clear vault_name_registry;
   vault_next_id := 0

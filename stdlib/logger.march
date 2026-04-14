@@ -1,18 +1,28 @@
--- Logger module: structured logging with levels and persistent context.
+-- Logger module: structured logging with levels, scoped context, and
+-- pluggable appenders.
 --
 -- Log levels (ascending severity): Debug < Info < Warn < Error.
 -- The global level filter is set with set_level/1; messages below the
 -- current level are silently discarded.
 --
--- with_context/2 attaches a key-value pair to every subsequent log entry.
--- clear_context/0 removes all attached context.
+-- v2 adds rich field values and scoped context:
+--
+--   Logger.with_field("user_id", Logger.i(42))
+--   Logger.with_field("ms",      Logger.f(12.5))
+--   Logger.info("request done")
+--
+-- The structured fields propagate to every subsequent log call until
+-- the field stack is popped.  Use `with_scope` for automatic cleanup:
+--
+--   Logger.with_scope([Logger.LogField("request_id", Logger.s("abc"))],
+--     fn _ -> handle_request())
 --
 -- Output goes to stderr in the format:
 --   [LEVEL] message {key=value, key2=value2}
 --
--- Usage:
+-- v1 API (still supported):
 --   Logger.set_level(Logger.Info)
---   Logger.with_context("request_id", "abc123")
+--   Logger.with_context("request_id", "abc123")   -- equivalent to with_field("...", LStr(...))
 --   Logger.info("handling request")
 --   Logger.warn("slow query")
 --   Logger.error("db connection lost")
@@ -21,6 +31,29 @@
 mod Logger do
 
   type Level = Debug | Info | Warn | Error
+
+  -- ── Structured field values (v2) ───────────────────────────────────
+  -- Rich value type so structured formatters (JSON, logfmt) preserve
+  -- the original type instead of stringifying everything.
+  type LogValue =
+      LStr(String)
+    | LInt(Int)
+    | LFloat(Float)
+    | LBool(Bool)
+    | LAtom(Atom)
+    | LNull
+
+  type LogField = LogField(String, LogValue)
+
+  -- Convenience constructors so call sites stay short:
+  --   Logger.with_field("k", Logger.s("v"))
+  --   Logger.with_field("n", Logger.i(42))
+  fn s(v : String) : LogValue do LStr(v) end
+  fn i(v : Int)    : LogValue do LInt(v) end
+  fn f(v : Float)  : LogValue do LFloat(v) end
+  fn b(v : Bool)   : LogValue do LBool(v) end
+  fn a(v : Atom)   : LogValue do LAtom(v) end
+  fn nul()         : LogValue do LNull    end
 
   -- ---- Level helpers ----
 
@@ -99,14 +132,389 @@ mod Logger do
 
   -- ---- Context management ----
 
-  doc "Add a key-value pair to the persistent log context."
+  doc """
+  v1 helper: add a `(key, String)` pair to the log context.  Equivalent
+  to `with_field(key, LStr(value))`.  Retained for backward
+  compatibility with existing callers.
+  """
   fn with_context(key, value) do
     logger_add_context(key, value)
   end
 
-  doc "Remove all persistent context key-value pairs."
+  doc "Remove all log fields (v1 + v2)."
   fn clear_context() do
     logger_clear_context()
+  end
+
+  -- ---- Structured fields (v2) ───────────────────────────────────────
+
+  doc """
+  Push a typed field onto the log context.  Subsequent log entries
+  carry it until either `clear_context` is called, or the enclosing
+  `with_scope` exits.
+
+      Logger.with_field("user_id", Logger.i(42))
+      Logger.info("login")
+      -- emits: [INFO] login {user_id=42}
+  """
+  fn with_field(key : String, value : LogValue) : Unit do
+    logger_add_field(key, value)
+  end
+
+  doc """
+  Push a list of typed fields onto the log context in one call.
+  Order is preserved: the first element of `fields` is at the BOTTOM
+  of the pushed batch (formatters render fields in stack order).
+  """
+  fn with_fields(fields : List(LogField)) : Unit do
+    fn push_each(lst) do
+      match lst do
+      Nil -> ()
+      Cons(LogField(k, v), rest) -> do
+        logger_add_field(k, v)
+        push_each(rest)
+      end
+      end
+    end
+    push_each(fields)
+  end
+
+  doc """
+  Return the current log context as a List(LogField), most-recent
+  push at the head.  Useful for inspecting state in tests or for
+  copying the current context into another actor's mailbox.
+  """
+  fn current_fields() : List(LogField) do
+    logger_get_fields()
+  end
+
+  doc "Return the current depth of the field stack.  Useful for tests."
+  fn field_count() : Int do
+    logger_field_count()
+  end
+
+  doc """
+  Run `thunk` with `fields` pushed onto the log context, and pop them
+  back off when `thunk` returns OR panics.  Use this to attach
+  request-scoped context (request_id, span_id, …) without having to
+  remember to clean it up.
+
+      Logger.with_scope([Logger.LogField("request_id", Logger.s("abc123"))],
+                        fn _ -> handle_request(req))
+  """
+  fn with_scope(fields : List(LogField), thunk : () -> a) : a do
+    let depth_before = logger_field_count()
+    with_fields(fields)
+    try_finally(thunk, fn _ -> logger_pop_to_depth(depth_before))
+  end
+
+  -- ── Per-module level overrides (v2) ────────────────────────────────
+
+  doc """
+  Override the log level for a specific module.  Messages logged via
+  `log_in(module, …)` consult this map first; messages logged via the
+  bare `info`/`debug`/etc. use the global level (set with `set_level`).
+
+      Logger.set_module_level("MyApp.NoisyWorker", Logger.Debug)
+  """
+  fn set_module_level(module : String, l : Level) : Unit do
+    logger_set_module_level(module, level_to_int(l))
+  end
+
+  doc "Remove a module-level override; the module reverts to the global level."
+  fn clear_module_level(module : String) : Unit do
+    logger_clear_module_level(module)
+  end
+
+  doc """
+  Return the effective level for `module` — the override if one is
+  set, otherwise the global default.
+  """
+  fn level_for(module : String) : Level do
+    int_to_level(logger_module_level(module))
+  end
+
+  -- ── Appenders + formatters (v2) ────────────────────────────────────
+
+  -- A log entry built and passed to every registered appender.  Fields
+  -- are in stack order — most recently pushed at the head.
+  type LogEntry = LogEntry(Level, String, Int, String, List(LogField))
+
+  -- Field accessors so users / appenders don't depend on positional layout.
+  fn entry_level(e)   do match e do LogEntry(l, _, _, _, _) -> l end end
+  fn entry_message(e) do match e do LogEntry(_, m, _, _, _) -> m end end
+  fn entry_ts_ms(e)   do match e do LogEntry(_, _, t, _, _) -> t end end
+  fn entry_source(e)  do match e do LogEntry(_, _, _, s, _) -> s end end
+  fn entry_fields(e)  do match e do LogEntry(_, _, _, _, fs) -> fs end end
+
+  -- An appender consumes log entries and writes them somewhere.  The
+  -- string is a name used by `remove_appender`.  Multiple appenders
+  -- fire in registration order.
+  type Appender = Appender(String, LogEntry -> Unit)
+
+  doc "Register an appender.  Replaces any prior appender with the same name."
+  fn add_appender(a : Appender) : Unit do
+    match a do
+    Appender(name, cb) -> logger_register_appender(name, cb)
+    end
+  end
+
+  doc "Remove a registered appender by name.  No-op if absent."
+  fn remove_appender(name : String) : Unit do
+    logger_remove_appender(name)
+  end
+
+  doc "Remove every registered appender.  Future logs will fall back to the v1 stderr text format."
+  fn clear_appenders() : Unit do
+    logger_clear_appenders()
+  end
+
+  doc "Return the names of all currently registered appenders."
+  fn list_appenders() : List(String) do
+    logger_appender_names()
+  end
+
+  -- ── Built-in formatters ────────────────────────────────────────────
+
+  pfn value_to_string_lit(v) do
+    match v do
+    LStr(s)   -> s
+    LInt(n)   -> int_to_string(n)
+    LFloat(x) -> float_to_string(x)
+    LBool(b)  -> if b do "true" else "false" end
+    LAtom(a)  -> ":" ++ to_string(a)
+    LNull     -> "null"
+    end
+  end
+
+  pfn fields_to_text(fs) do
+    fn go(lst, acc) do
+      match lst do
+      Nil -> acc
+      Cons(LogField(k, v), rest) -> do
+        let part = k ++ "=" ++ value_to_string_lit(v)
+        let acc1 = if String.is_empty(acc) do part else acc ++ ", " ++ part end
+        go(rest, acc1)
+      end
+      end
+    end
+    go(fs, "")
+  end
+
+  doc """
+  Default text formatter.  Mirrors the v1 output:
+      [LEVEL] message {key=value, key2=value2}
+  """
+  fn format_text(e : LogEntry) : String do
+    let fs = entry_fields(e)
+    let body = "[" ++ level_to_string(entry_level(e)) ++ "] " ++ entry_message(e)
+    if is_nil(fs) do body
+    else body ++ " {" ++ fields_to_text(fs) ++ "}" end
+  end
+
+  pfn fields_to_logfmt(fs) do
+    fn quote_if_needed(s) do
+      if String.contains(s, " ") || String.contains(s, "\"") do
+        "\"" ++ String.replace_all(s, "\"", "\\\"") ++ "\""
+      else s end
+    end
+    fn go(lst, acc) do
+      match lst do
+      Nil -> acc
+      Cons(LogField(k, v), rest) -> do
+        let val_str = match v do
+          LStr(s) -> quote_if_needed(s)
+          _       -> value_to_string_lit(v)
+          end
+        let part = k ++ "=" ++ val_str
+        let acc1 = if String.is_empty(acc) do part else acc ++ " " ++ part end
+        go(rest, acc1)
+      end
+      end
+    end
+    go(fs, "")
+  end
+
+  doc """
+  logfmt-style formatter (Heroku / Grafana convention):
+      level=info ts=1681400000000 msg="hello world" k=v
+  String values containing spaces or quotes are escaped.
+  """
+  fn format_logfmt(e : LogEntry) : String do
+    let header =
+      "level=" ++ String.to_lowercase(level_to_string(entry_level(e))) ++
+      " ts="    ++ int_to_string(entry_ts_ms(e)) ++
+      " msg="   ++ "\"" ++ String.replace_all(entry_message(e), "\"", "\\\"") ++ "\""
+    let src = entry_source(e)
+    let with_src = if String.is_empty(src) do header
+                   else header ++ " src=" ++ src end
+    let fs = entry_fields(e)
+    if is_nil(fs) do with_src
+    else with_src ++ " " ++ fields_to_logfmt(fs) end
+  end
+
+  pfn json_escape(s) do
+    let s1 = String.replace_all(s,  "\\", "\\\\")
+    let s2 = String.replace_all(s1, "\"", "\\\"")
+    let s3 = String.replace_all(s2, "\n", "\\n")
+    let s4 = String.replace_all(s3, "\r", "\\r")
+    String.replace_all(s4, "\t", "\\t")
+  end
+
+  pfn value_to_json(v) do
+    match v do
+    LStr(s)   -> "\"" ++ json_escape(s) ++ "\""
+    LInt(n)   -> int_to_string(n)
+    LFloat(x) -> float_to_string(x)
+    LBool(b)  -> if b do "true" else "false" end
+    LAtom(a)  -> "\"" ++ json_escape(to_string(a)) ++ "\""
+    LNull     -> "null"
+    end
+  end
+
+  -- Special field names recognised at the top level of JSON output —
+  -- map onto OpenTelemetry-friendly slots so the JSON drops in to log
+  -- shippers that already speak OTLP.
+  pfn is_special_key(k) do
+    k == "trace_id" || k == "span_id" || k == "parent_span_id"
+  end
+
+  -- Walk the field stack head-to-tail (most recent first).  For each
+  -- key, KEEP the first occurrence — most recent push wins, which is
+  -- the natural "inner scope shadows outer" semantic.  This prevents
+  -- nested `with_scope` / `with_span` from emitting duplicate keys
+  -- when their fields stack up.
+  pfn dedupe_fields(fs) do
+    fn seen(ks, k) do
+      match ks do
+      Nil -> false
+      Cons(h, t) -> if h == k do true else seen(t, k) end
+      end
+    end
+    fn go(lst, ks, acc) do
+      match lst do
+      Nil -> rev_fields(acc)
+      Cons(LogField(k, v), rest) -> do
+        if seen(ks, k) do go(rest, ks, acc)
+        else go(rest, Cons(k, ks), Cons(LogField(k, v), acc)) end
+      end
+      end
+    end
+    go(fs, Nil, Nil)
+  end
+
+  pfn rev_fields(xs) do
+    fn go(lst, acc) do
+      match lst do
+      Nil -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(xs, Nil)
+  end
+
+  pfn split_special(fs) do
+    let unique = dedupe_fields(fs)
+    fn go(lst, special, attrs) do
+      match lst do
+      Nil -> (rev_fields(special), rev_fields(attrs))
+      Cons(LogField(k, v), rest) -> do
+        if is_special_key(k) do go(rest, Cons(LogField(k, v), special), attrs)
+        else go(rest, special, Cons(LogField(k, v), attrs)) end
+      end
+      end
+    end
+    go(unique, Nil, Nil)
+  end
+
+  pfn json_obj_for_fields(fs) do
+    fn go(lst, acc) do
+      match lst do
+      Nil -> acc
+      Cons(LogField(k, v), rest) -> do
+        let part = "\"" ++ json_escape(k) ++ "\":" ++ value_to_json(v)
+        let acc1 = if String.is_empty(acc) do part else acc ++ "," ++ part end
+        go(rest, acc1)
+      end
+      end
+    end
+    "{" ++ go(fs, "") ++ "}"
+  end
+
+  doc """
+  Single-line JSON formatter, OpenTelemetry-friendly.
+
+  Example output:
+      {"ts":1681400000000,"level":"info","msg":"login","src":"MyApp",
+       "trace_id":"…","span_id":"…","attributes":{"user_id":42}}
+
+  The reserved field names `trace_id`, `span_id`, and `parent_span_id`
+  appear at the top level of the JSON object so log shippers that
+  speak OTLP can pluck them directly; everything else lands in the
+  `attributes` sub-object.
+  """
+  fn format_json(e : LogEntry) : String do
+    let fs = entry_fields(e)
+    let (special, attrs) = split_special(fs)
+    let header =
+      "{\"ts\":"     ++ int_to_string(entry_ts_ms(e)) ++
+      ",\"level\":\"" ++ String.to_lowercase(level_to_string(entry_level(e))) ++ "\"" ++
+      ",\"msg\":"    ++ value_to_json(LStr(entry_message(e)))
+    let src = entry_source(e)
+    let with_src = if String.is_empty(src) do header
+                   else header ++ ",\"src\":" ++ value_to_json(LStr(src)) end
+    -- Inline the trace context fields at the top level (not under attributes).
+    fn inline_special(lst, acc) do
+      match lst do
+      Nil -> acc
+      Cons(LogField(k, v), rest) ->
+        inline_special(rest, acc ++ ",\"" ++ json_escape(k) ++ "\":" ++ value_to_json(v))
+      end
+    end
+    let with_special = inline_special(special, with_src)
+    let with_attrs =
+      if is_nil(attrs) do with_special
+      else with_special ++ ",\"attributes\":" ++ json_obj_for_fields(attrs) end
+    with_attrs ++ "}"
+  end
+
+  -- ── Built-in appenders ─────────────────────────────────────────────
+
+  doc """
+  An appender that writes formatted entries to stderr.  Pass any
+  formatter (e.g. `Logger.format_json`) to control wire format.
+
+      Logger.add_appender(Logger.appender_stderr(Logger.format_json))
+  """
+  fn appender_stderr(format_fn : LogEntry -> String) : Appender do
+    Appender("stderr", fn entry -> print_stderr(format_fn(entry) ++ "\n"))
+  end
+
+  doc "An appender that writes formatted entries to stdout."
+  fn appender_stdout(format_fn : LogEntry -> String) : Appender do
+    Appender("stdout", fn entry -> println(format_fn(entry)))
+  end
+
+  doc """
+  An appender that appends each formatted entry as a new line to
+  `path`.  Open / write / close happens per call (slow but simple); a
+  buffered variant lives in a future commit.
+  """
+  fn appender_file(path : String, format_fn : LogEntry -> String) : Appender do
+    Appender("file:" ++ path, fn entry -> do
+      let line = format_fn(entry) ++ "\n"
+      let _ = File.append(path, line)
+      ()
+    end)
+  end
+
+  doc """
+  A custom appender that calls the user's `on_entry` callback for
+  each log entry.  Use to forward entries to OpenTelemetry exporters,
+  in-process telemetry buses, or test harnesses.
+  """
+  fn appender_callback(name : String, on_entry : LogEntry -> Unit) : Appender do
+    Appender(name, on_entry)
   end
 
   -- ---- Core logging ----
@@ -115,10 +523,42 @@ mod Logger do
     level_to_int(level) >= logger_get_level()
   end
 
+  -- Inline list helpers so logger.march doesn't depend on the List
+  -- module being loaded (test harnesses sometimes load logger.march
+  -- without List).
+  pfn map_pairs_to_fields(xs) do
+    fn go(lst, acc) do
+      match lst do
+      Nil -> rev_fields(acc)
+      Cons(pair, rest) -> do
+        match pair do
+        (k, v) -> go(rest, Cons(LogField(k, LStr(v)), acc))
+        end
+      end
+      end
+    end
+    go(xs, Nil)
+  end
+
+  pfn append_lists(xs, ys) do
+    fn go(rev_xs, acc) do
+      match rev_xs do
+      Nil -> acc
+      Cons(h, t) -> go(t, Cons(h, acc))
+      end
+    end
+    go(rev_fields(xs), ys)
+  end
+
   pfn do_log(level, msg, extra) do
     if should_log(level) do
-      let ctx = logger_get_context()
-      logger_write(level_to_string(level), msg, ctx, extra)
+      -- v2 dispatch path: build a LogEntry and fan out to appenders.
+      -- The runtime falls back to v1 stderr text when no appenders
+      -- are registered.
+      let ctx_fields = logger_get_fields()
+      let extra_fields = map_pairs_to_fields(extra)
+      let all_fields = append_lists(extra_fields, ctx_fields)
+      logger_dispatch(level_to_string(level), msg, "", all_fields)
     else ()
     end
   end
@@ -146,6 +586,132 @@ mod Logger do
   """
   fn log_with(level, msg, metadata) do
     do_log(level, msg, metadata)
+  end
+
+  -- ── Module-aware logging (v2) ──────────────────────────────────────
+
+  pfn do_log_in(module : String, level : Level, msg : String,
+                fields : List(LogField)) : Unit do
+    -- Per-module level overrides take precedence over the global level.
+    let effective = level_for(module)
+    if level_enabled(level, effective) do do
+      let ctx = logger_get_fields()
+      let all_fields = append_lists(fields, ctx)
+      logger_dispatch(level_to_string(level), msg, module, all_fields)
+    end
+    else ()
+    end
+  end
+
+  doc """
+  Log a message scoped to `module`.  The level is filtered by the
+  per-module override (set via `set_module_level`), falling back to
+  the global level if no override is registered.  The module name
+  appears as the `source` of the LogEntry — formatters that include
+  source render it as `src=…` (logfmt) or `"src": "…"` (json).
+
+      Logger.log_in("MyApp.Worker", Logger.Debug, "task done",
+                    [Logger.LogField("ms", Logger.i(42))])
+  """
+  fn log_in(module : String, level : Level, msg : String,
+            fields : List(LogField)) : Unit do
+    do_log_in(module, level, msg, fields)
+  end
+
+  -- ── Tracing helpers (v2 Phase D) ───────────────────────────────────
+  -- Three reserved field names — `trace_id`, `span_id`,
+  -- `parent_span_id` — propagate request-level tracing context
+  -- through nested log calls.  `format_json` recognises them and
+  -- pulls them up to the top of the JSON object so log shippers
+  -- mapping to OTLP can use them directly; for text/logfmt they
+  -- appear alongside other fields.
+
+  doc """
+  Push trace_id, span_id, and (optionally) parent_span_id onto the
+  log context.  Subsequent log entries carry these fields until they
+  are popped or `clear_context` is called.
+
+      Logger.with_trace_context("trace-abc", "span-xyz", Some("parent-uvw"))
+  """
+  fn with_trace_context(trace_id : String, span_id : String,
+                        parent_span_id : Option(String)) : Unit do
+    with_field("trace_id", LStr(trace_id))
+    with_field("span_id",  LStr(span_id))
+    match parent_span_id do
+    Some(p) -> with_field("parent_span_id", LStr(p))
+    None    -> ()
+    end
+  end
+
+  pfn find_field_value(fields : List(LogField), key : String) : Option(LogValue) do
+    match fields do
+    Nil -> None
+    Cons(LogField(k, v), rest) ->
+      if k == key do Some(v) else find_field_value(rest, key) end
+    end
+  end
+
+  pfn log_value_as_string(v : Option(LogValue)) : Option(String) do
+    match v do
+    Some(LStr(s)) -> Some(s)
+    _             -> None
+    end
+  end
+
+  doc "Return the current trace_id from the log context, if set."
+  fn current_trace_id() : Option(String) do
+    log_value_as_string(find_field_value(current_fields(), "trace_id"))
+  end
+
+  doc "Return the current span_id from the log context, if set."
+  fn current_span_id() : Option(String) do
+    log_value_as_string(find_field_value(current_fields(), "span_id"))
+  end
+
+  doc "Return the parent_span_id from the log context, if set."
+  fn current_parent_span_id() : Option(String) do
+    log_value_as_string(find_field_value(current_fields(), "parent_span_id"))
+  end
+
+  pfn random_hex(n : Int) : String do
+    -- 16-char span id / 32-char trace id from /dev/urandom.
+    Crypto.random_hex(n)
+  end
+
+  doc """
+  Run `thunk` inside a tracing span: pushes a fresh `span_id`,
+  promotes the current span (if any) to `parent_span_id`, and either
+  inherits the current `trace_id` or starts a new one.  Pops all
+  three fields when `thunk` returns OR panics.
+
+  Adds two extra fields for instrumentation:
+    - `span_name` : LStr(name)
+    - `span_start_ms` : LInt(now_ms())
+
+      Logger.with_span("handle_request", fn _ -> do
+        Logger.info("got request")
+        process()
+      end)
+  """
+  fn with_span(name : String, thunk : () -> a) : a do
+    let span_id = random_hex(8)             -- 16 hex chars (8 bytes)
+    let parent  = current_span_id()
+    let trace   = match current_trace_id() do
+      Some(t) -> t
+      None    -> random_hex(16)             -- 32 hex chars (16 bytes)
+      end
+    let parent_field = match parent do
+      Some(p) -> LogField("parent_span_id", LStr(p))
+      None    -> LogField("parent_span_id", LNull)
+      end
+    with_scope(
+      Cons(LogField("trace_id",      LStr(trace)),
+      Cons(LogField("span_id",       LStr(span_id)),
+      Cons(parent_field,
+      Cons(LogField("span_name",     LStr(name)),
+      Cons(LogField("span_start_ms", LInt(float_to_int(unix_time(()) *. 1000.0))),
+      Nil))))),
+      thunk)
   end
 
 end

@@ -51,6 +51,52 @@ This file tracks everything that still needs to get done. Organized by priority 
 
 ## P2 — Important / Near-Term
 
+### Stdlib hardening: Phase 5 — missing high-demand APIs
+
+Spec: `specs/2026-04-14-stdlib-phase5-plan.md`.  These are *new
+functionality* gaps left after Phase 0–4 closed every blocker, security
+finding, and convention drift.  Listed in the recommended order.
+
+- ✅ **Logger v2 — structured fields, tracing, appenders** — Replaced
+  the `println`-with-severity v1 logger with: rich `LogValue` field
+  type (Str/Int/Float/Bool/Atom/Null), pluggable
+  appenders+formatters (`format_text` / `format_logfmt` /
+  `format_json`), per-module level overrides, scoped context
+  (`with_scope` with auto-pop on panic via `try_finally`), tracing
+  helpers (`with_span`, `with_trace_context`,
+  `current_trace_id`/`current_span_id`).  JSON formatter is
+  OpenTelemetry-friendly — `trace_id`/`span_id`/`parent_span_id`
+  appear at the top level; everything else under `attributes`.
+  Field deduplication ensures nested scopes don't emit duplicate
+  keys.  Backward-compatible with v1: existing `Logger.info`,
+  `with_context`, `set_level` keep working unchanged.  Runtime adds
+  11 new builtins.  4 new tests; `test_march` 1311 → 1315.  Spec:
+  `specs/2026-04-14-logger-v2-design.md`.
+- [ ] **Structured concurrency** — `Task.race`, `Task.any`,
+  `Task.all_settled`, cancellation scopes.  Existing
+  `async/await/await_many` cover the happy path but composing async
+  ops requires hand-rolled supervision.
+- [ ] **`Test.assert_eq` (generic)** — Single small function using
+  structural equality.  Today's `assert_eq_int`/`assert_eq_str`/
+  `assert_eq_bool` force test authors to pick the right one for the
+  type; the generic version handles tuples, records, sums.
+- [ ] **`UUID.v7`** — Timestamp-ordered UUIDs.  v4/v5 exist.  Useful
+  primarily for DB primary keys (B-tree locality).  Needs a small
+  runtime builtin + ~50 lines of March.
+- [ ] **DateTime timezones** — `LocalDateTime`, `Tz` ADT,
+  `to_utc`/`from_utc`, IANA identifiers.  Today's `DateTime` is
+  UTC-only.  Decide IANA-loading vs static map first.
+- [ ] **Streams (`Seq.from_*`)** — `Seq.from_file`, `Seq.from_http`,
+  `Seq.from_channel`, `Seq.batched`, plus a back-pressure sketch.
+  Today's `Seq` is a church-encoded fold with no source constructors.
+- [ ] **`Stats.quantile` / `iqr`** — `quantile(xs, q, method)` with
+  the standard 9 methods (R/Python convention).  `iqr(xs)` is
+  `quantile(.75) - quantile(.25)`.  Today's `percentile` only
+  implements one interpolation method.
+- [ ] **`Random.normal` / `exponential`** — Box-Muller for normal,
+  inverse-CDF for exponential, plus weighted choice.  Today's
+  `Random` is uniform-only.
+
 ### Database: Depot
 
 - ✅ **Gate objects and validation (v1 + v2)** — `Depot.Gate` typed validation pipeline with `cast/validate/constraint` steps that accumulate errors without short-circuiting. v1: `cast/2` for string-pair params. v2: `cast_record/3` for record-based base+params with diff tracking — only changed fields recorded. New v2 API: `base/1`, `changed_fields/1`, `changed/2`, `apply_changes/1`. All validators (`validate_required`, `validate_length`, `validate_format`, `validate_inclusion`, `validate_exclusion`, `validate_number`, `validate_acceptance`, `validate_confirmation`, `validate_change`) work with both v1 and v2 gates. DB constraint mapping: `unique_constraint`, `foreign_key_constraint`, `no_assoc_constraint`, `check_constraint`, `apply_constraint_error`. 97 tests in `test/stdlib/test_depot_gate.march` (71 v1 + 26 v2). Spec: `specs/depot/changesets.md`, `specs/depot/integration-plan.md`.
