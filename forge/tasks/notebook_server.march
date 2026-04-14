@@ -1,0 +1,1121 @@
+-- forge notebook serve — live notebook server with WebSocket-based cell execution.
+--
+-- Serves a browser UI at GET / and a WebSocket endpoint at GET /ws.
+-- Protocol (JSON over WebSocket):
+--   Client → Server:
+--     {"type":"run","cells":[...],"index":N}     run cells 0..N, return output for cell N
+--     {"type":"load"}                             send current notebook content
+--     {"type":"save","content":"..."}             save notebook file
+--     {"type":"start_server","index":N}           spawn server cell N as background process
+--     {"type":"stop_server","index":N}            kill server cell N's background process
+--     {"type":"read_server","index":N}            poll server cell N's log output
+--   Server → Client:
+--     {"type":"output","index":N,"stdout":"...","error":null}
+--     {"type":"notebook","cells":[...],"source":"..."}
+--     {"type":"saved"}
+--     {"type":"error","message":"..."}
+--     {"type":"server_started","index":N,"pid":"..."}
+--     {"type":"server_stopped","index":N}
+--     {"type":"server_output","index":N,"content":"...","running":true/false}
+--     {"type":"server_error","index":N,"message":"..."}
+
+mod ForgeNotebookServer do
+
+-- ── String helpers ────────────────────────────────────────────────────────────
+
+pfn bs(s) do String.byte_size(s) end
+pfn sw(s, p) do String.starts_with(s, p) end
+pfn trim(s) do String.trim(s) end
+pfn html_escape(s) do
+  let s = String.replace_all(s, "&", "&amp;")
+  let s = String.replace_all(s, "<", "&lt;")
+  let s = String.replace_all(s, ">", "&gt;")
+  let s = String.replace_all(s, "\"", "&quot;")
+  s
+end
+pfn json_escape(s) do
+  let s = String.replace_all(s, "\\", "\\\\")
+  let s = String.replace_all(s, "\"", "\\\"")
+  let s = String.replace_all(s, "\n", "\\n")
+  let s = String.replace_all(s, "\r", "\\r")
+  let s = String.replace_all(s, "\t", "\\t")
+  s
+end
+
+-- ── Cell types ────────────────────────────────────────────────────────────────
+
+-- Code   = regular code cell (run in sequence, produces output)
+-- Server = long-running background process cell (HttpServer, etc.)
+type Cell = Markdown(String) | Code(String) | ServerCell(String)
+
+-- parse_cells: parse the .mnb markdown format into a list of cells.
+-- Supports three fence kinds:
+--   ```march        → Code cell
+--   ```march:server → Server cell
+--   (plain text)    → Markdown cell
+pfn parse_cells(content) do
+  let lines = String.split(content, "\n")
+  -- mode: "none" | "code" | "server"
+  fn go(lines, cells, buf, mode) do
+    match lines do
+      Nil ->
+        let text = String.join(List.reverse(buf), "\n")
+        if mode == "code" do
+          List.reverse(Cons(Code(text), cells))
+        else
+          if mode == "server" do
+            List.reverse(Cons(ServerCell(text), cells))
+          else
+            let trimmed = trim(text)
+            if String.is_empty(trimmed) do
+              List.reverse(cells)
+            else
+              List.reverse(Cons(Markdown(trimmed), cells))
+            end
+          end
+        end
+      Cons(line, rest) ->
+        let stripped = trim(line)
+        if mode == "code" do
+          if stripped == "```" do
+            let code = String.join(List.reverse(buf), "\n")
+            go(rest, Cons(Code(code), cells), Nil, "none")
+          else
+            go(rest, cells, Cons(line, buf), "code")
+          end
+        else
+          if mode == "server" do
+            if stripped == "```" do
+              let code = String.join(List.reverse(buf), "\n")
+              go(rest, Cons(ServerCell(code), cells), Nil, "none")
+            else
+              go(rest, cells, Cons(line, buf), "server")
+            end
+          else
+            if stripped == "```march" do
+              let text = trim(String.join(List.reverse(buf), "\n"))
+              let new_cells =
+                if String.is_empty(text) do cells
+                else Cons(Markdown(text), cells)
+                end
+              go(rest, new_cells, Nil, "code")
+            else
+              if stripped == "```march:server" do
+                let text = trim(String.join(List.reverse(buf), "\n"))
+                let new_cells =
+                  if String.is_empty(text) do cells
+                  else Cons(Markdown(text), cells)
+                  end
+                go(rest, new_cells, Nil, "server")
+              else
+                go(rest, cells, Cons(line, buf), "none")
+              end
+            end
+          end
+        end
+    end
+  end
+  go(lines, Nil, Nil, "none")
+end
+
+-- ── Cell lookup ───────────────────────────────────────────────────────────────
+
+pfn nth_cell(cells, idx) do
+  match cells do
+    Nil -> None
+    Cons(cell, rest) ->
+      if idx == 0 do Some(cell)
+      else nth_cell(rest, idx - 1)
+      end
+  end
+end
+
+-- ── Runner (sentinel approach) ────────────────────────────────────────────────
+
+pfn cell_start_marker(n) do "__MNB_START_" ++ String.from_int(n) ++ "__" end
+pfn cell_end_marker(n)   do "__MNB_END_"   ++ String.from_int(n) ++ "__" end
+
+-- Generate a runner for cells 0..run_through_idx (Code cells only; Server cells skipped)
+pfn generate_runner(cells, run_through_idx) do
+  fn go(cells, acc, code_n, total_n) do
+    if total_n > run_through_idx do List.reverse(acc)
+    else
+      match cells do
+        Nil -> List.reverse(acc)
+        Cons(Markdown(_), rest) -> go(rest, acc, code_n, total_n + 1)
+        Cons(ServerCell(_), rest)   -> go(rest, acc, code_n, total_n + 1)
+        Cons(Code(src), rest) ->
+          let start = "  println(\"" ++ cell_start_marker(code_n) ++ "\")\n"
+          let end_s = "  println(\"" ++ cell_end_marker(code_n) ++ "\")\n"
+          let indented = String.join(
+            List.map(String.split(src, "\n"), fn l -> "  " ++ l),
+            "\n"
+          ) ++ "\n"
+          go(rest, Cons(end_s, Cons(indented, Cons(start, acc))), code_n + 1, total_n + 1)
+      end
+    end
+  end
+  let body_parts = go(cells, Nil, 0, 0)
+  let body = String.join(body_parts, "")
+  "mod NotebookRunner do\nfn main() do\n" ++ body ++ "end\nend\n"
+end
+
+-- Generate a standalone runner for a server cell (wraps source in mod+main)
+pfn generate_server_runner(src) do
+  let indented = String.join(
+    List.map(String.split(src, "\n"), fn l -> "  " ++ l),
+    "\n"
+  ) ++ "\n"
+  "mod ServerCell do\nfn main() do\n" ++ indented ++ "end\nend\n"
+end
+
+pfn extract_cell_output(stdout, code_n) do
+  let start_marker = cell_start_marker(code_n)
+  let end_marker   = cell_end_marker(code_n)
+  match String.split_first(stdout, start_marker) do
+    None -> ""
+    Some((_, after_start)) ->
+      let after_start =
+        if sw(after_start, "\n") do
+          String.slice(after_start, 1, bs(after_start) - 1)
+        else after_start
+        end
+      match String.split_first(after_start, end_marker) do
+        None -> trim(after_start)
+        Some((between, _)) ->
+          let s = between
+          if String.ends_with(s, "\n") do
+            String.slice(s, 0, bs(s) - 1)
+          else s
+          end
+      end
+  end
+end
+
+-- Run cells 0..run_through_idx, return (stdout_for_target_code_cell, error_opt)
+pfn run_cells_to(cells, run_through_idx, march_bin) do
+  -- Count which code cell index corresponds to run_through_idx.
+  -- Server cells are skipped (they don't count as code cells).
+  fn find_code_idx(cells, target_total, code_n, total_n) do
+    match cells do
+      Nil -> code_n - 1
+      Cons(Markdown(_), rest) ->
+        if total_n == target_total do code_n - 1
+        else find_code_idx(rest, target_total, code_n, total_n + 1)
+        end
+      Cons(ServerCell(_), rest) ->
+        if total_n == target_total do code_n - 1
+        else find_code_idx(rest, target_total, code_n, total_n + 1)
+        end
+      Cons(Code(_), rest) ->
+        if total_n == target_total do code_n
+        else find_code_idx(rest, target_total, code_n + 1, total_n + 1)
+        end
+    end
+  end
+  let target_code_idx = find_code_idx(cells, run_through_idx, 0, 0)
+  let src = generate_runner(cells, run_through_idx)
+  let tmp = "/tmp/__forge_nb_server_runner__.march"
+  match File.write(tmp, src) do
+    Err(msg) -> ("", Some("failed to write temp: " ++ msg))
+    Ok(_) ->
+      match Process.run(march_bin, [tmp]) do
+        Err(msg) -> ("", Some("march invocation failed: " ++ msg))
+        Ok(result) ->
+          let code = Process.exit_code(result)
+          let out  = Process.stdout(result)
+          let err  = Process.stderr(result)
+          if code != 0 do
+            let msg = if String.is_empty(trim(err)) do
+              "march exited with code " ++ String.from_int(code)
+            else trim(err)
+            end
+            ("", Some(msg))
+          else
+            (extract_cell_output(out, target_code_idx), None)
+          end
+      end
+  end
+end
+
+-- ── Server cell process management ───────────────────────────────────────────
+
+pfn server_tmp_path(idx) do "/tmp/__forge_nb_srv_" ++ String.from_int(idx) ++ "__.march" end
+pfn server_log_path(idx) do "/tmp/__forge_nb_srv_" ++ String.from_int(idx) ++ "__.log" end
+pfn server_ns()          do "__forge_nb_servers__" end
+
+-- Spawn a server cell as a background OS process (via shell `&`).
+-- Stores the PID string in the Vault namespace. Returns Ok(pid) or Err(msg).
+pfn start_server_proc(src, idx, march_bin) do
+  let tmp = server_tmp_path(idx)
+  let log = server_log_path(idx)
+  let runner = generate_server_runner(src)
+  match File.write(tmp, runner) do
+    Err(msg) -> Err("failed to write server temp: " ++ msg)
+    Ok(_) ->
+      -- Clear old log
+      let _ = File.write(log, "")
+      -- Start background: sh -c "march /tmp/... > /tmp/...log 2>&1 & echo $!"
+      let shell_cmd = march_bin ++ " " ++ tmp ++ " > " ++ log ++ " 2>&1 & echo $!"
+      match Process.run("sh", ["-c", shell_cmd]) do
+        Err(msg) -> Err("spawn failed: " ++ msg)
+        Ok(result) ->
+          if Process.exit_code(result) != 0 do
+            Err("sh failed: " ++ trim(Process.stderr(result)))
+          else
+            let pid = trim(Process.stdout(result))
+            let _ = Vault.ns_set(server_ns(), String.from_int(idx), pid)
+            Ok(pid)
+          end
+      end
+  end
+end
+
+-- Kill a running server cell background process by index.
+pfn stop_server_proc(idx) do
+  match Vault.ns_get(server_ns(), String.from_int(idx)) do
+    None -> ()
+    Some(pid) ->
+      let _ = Process.run("sh", ["-c", "kill -TERM " ++ pid ++ " 2>/dev/null || true"])
+      let _ = Vault.ns_drop(server_ns(), String.from_int(idx))
+      ()
+  end
+end
+
+-- Read the current contents of the server log file.
+pfn read_server_log(idx) do
+  match File.read(server_log_path(idx)) do
+    Ok(content) -> content
+    Err(_) -> ""
+  end
+end
+
+-- Check if the server process for index idx is still alive (uses kill -0).
+pfn server_is_running(idx) do
+  match Vault.ns_get(server_ns(), String.from_int(idx)) do
+    None -> false
+    Some(pid) ->
+      match Process.run("sh", ["-c", "kill -0 " ++ pid ++ " 2>/dev/null && echo alive || echo dead"]) do
+        Err(_) -> false
+        Ok(result) -> trim(Process.stdout(result)) == "alive"
+      end
+  end
+end
+
+-- ── JSON helpers ──────────────────────────────────────────────────────────────
+
+pfn json_str(s) do "\"" ++ json_escape(s) ++ "\"" end
+
+pfn json_opt_str(opt) do
+  match opt do
+    None    -> "null"
+    Some(s) -> json_str(s)
+  end
+end
+
+pfn output_msg(idx, stdout_text, error_opt) do
+  "{\"type\":\"output\",\"index\":" ++ String.from_int(idx) ++
+  ",\"stdout\":" ++ json_str(stdout_text) ++
+  ",\"error\":" ++ json_opt_str(error_opt) ++ "}"
+end
+
+pfn cells_to_json(cells) do
+  fn cell_obj(cell) do
+    match cell do
+      Markdown(s) -> "{\"kind\":\"markdown\",\"source\":" ++ json_str(s) ++ "}"
+      Code(s)     -> "{\"kind\":\"code\",\"source\":" ++ json_str(s) ++ "}"
+      ServerCell(s)   -> "{\"kind\":\"server\",\"source\":" ++ json_str(s) ++ "}"
+    end
+  end
+  "[" ++ String.join(List.map(cells, cell_obj), ",") ++ "]"
+end
+
+pfn notebook_msg(content, cells) do
+  "{\"type\":\"notebook\",\"source\":" ++ json_str(content) ++
+  ",\"cells\":" ++ cells_to_json(cells) ++ "}"
+end
+
+-- ── JSON parsing helpers ──────────────────────────────────────────────────────
+
+pfn json_get_str(jv, key) do
+  match Json.get(jv, key) do
+    None -> None
+    Some(v) ->
+      let s = Json.to_string(v)
+      if bs(s) >= 2 && String.slice(s, 0, 1) == "\"" do
+        let inner = String.slice(s, 1, bs(s) - 2)
+        let inner = String.replace_all(inner, "\\n", "\n")
+        let inner = String.replace_all(inner, "\\t", "\t")
+        let inner = String.replace_all(inner, "\\r", "\r")
+        let inner = String.replace_all(inner, "\\\"", "\"")
+        let inner = String.replace_all(inner, "\\\\", "\\")
+        Some(inner)
+      else None
+      end
+  end
+end
+
+pfn json_get_int(jv, key) do
+  match Json.get(jv, key) do
+    None -> None
+    Some(v) ->
+      let s = Json.to_string(v)
+      match String.to_int(s) do
+        Ok(n)  -> Some(n)
+        Err(_) ->
+          match String.split_first(s, ".") do
+            Some((int_part, _)) -> match String.to_int(int_part) do
+              Ok(n)  -> Some(n)
+              Err(_) -> None
+            end
+            None -> None
+          end
+      end
+  end
+end
+
+
+
+-- ── WebSocket message handler ─────────────────────────────────────────────────
+
+pfn err_frame(msg) do
+  TextFrame("{\"type\":\"error\",\"message\":" ++ json_str(msg) ++ "}")
+end
+
+pfn handle_ws_msg(msg, nb_path, march_bin, socket) do
+  match Json.parse(msg) do
+    Err(_) ->
+      WebSocket.send_frame(socket, err_frame("invalid JSON"))
+    Ok(jv) ->
+      match json_get_str(jv, "type") do
+        None ->
+          WebSocket.send_frame(socket, err_frame("missing type field"))
+
+        Some("load") ->
+          match File.read(nb_path) do
+            Err(e) ->
+              WebSocket.send_frame(socket, err_frame(to_string(e)))
+            Ok(content) ->
+              let cells = parse_cells(content)
+              WebSocket.send_frame(socket, TextFrame(
+                notebook_msg(content, cells)
+              ))
+          end
+
+        Some("save") ->
+          match json_get_str(jv, "content") do
+            None ->
+              WebSocket.send_frame(socket, err_frame("missing content"))
+            Some(content) ->
+              match File.write(nb_path, content) do
+                Err(e) ->
+                  WebSocket.send_frame(socket, err_frame(to_string(e)))
+                Ok(_) ->
+                  WebSocket.send_frame(socket, TextFrame("{\"type\":\"saved\"}"))
+              end
+          end
+
+        Some("run") ->
+          let idx_opt = json_get_int(jv, "index")
+          match idx_opt do
+            None ->
+              WebSocket.send_frame(socket, err_frame("missing index"))
+            Some(idx) ->
+              match File.read(nb_path) do
+                Err(e) ->
+                  WebSocket.send_frame(socket, err_frame(to_string(e)))
+                Ok(content) ->
+                  let cells = parse_cells(content)
+                  WebSocket.send_frame(socket, TextFrame(
+                    "{\"type\":\"running\",\"index\":" ++ String.from_int(idx) ++ "}"
+                  ))
+                  let (out, err_opt) = run_cells_to(cells, idx, march_bin)
+                  WebSocket.send_frame(socket, TextFrame(
+                    output_msg(idx, out, err_opt)
+                  ))
+              end
+          end
+
+        Some("start_server") ->
+          match json_get_int(jv, "index") do
+            None ->
+              WebSocket.send_frame(socket, err_frame("missing index"))
+            Some(idx) ->
+              match File.read(nb_path) do
+                Err(e) ->
+                  WebSocket.send_frame(socket, err_frame(to_string(e)))
+                Ok(content) ->
+                  let cells = parse_cells(content)
+                  match nth_cell(cells, idx) do
+                    None ->
+                      WebSocket.send_frame(socket, err_frame("cell not found"))
+                    Some(ServerCell(src)) ->
+                      match start_server_proc(src, idx, march_bin) do
+                        Err(msg) ->
+                          WebSocket.send_frame(socket, TextFrame(
+                            "{\"type\":\"server_error\",\"index\":" ++ String.from_int(idx) ++
+                            ",\"message\":" ++ json_str(msg) ++ "}"
+                          ))
+                        Ok(pid) ->
+                          WebSocket.send_frame(socket, TextFrame(
+                            "{\"type\":\"server_started\",\"index\":" ++ String.from_int(idx) ++
+                            ",\"pid\":" ++ json_str(pid) ++ "}"
+                          ))
+                      end
+                    Some(_) ->
+                      WebSocket.send_frame(socket, err_frame("cell is not a server cell"))
+                  end
+              end
+          end
+
+        Some("stop_server") ->
+          match json_get_int(jv, "index") do
+            None ->
+              WebSocket.send_frame(socket, err_frame("missing index"))
+            Some(idx) ->
+              stop_server_proc(idx)
+              let _ = File.write(server_log_path(idx), "")
+              WebSocket.send_frame(socket, TextFrame(
+                "{\"type\":\"server_stopped\",\"index\":" ++ String.from_int(idx) ++ "}"
+              ))
+          end
+
+        Some("read_server") ->
+          match json_get_int(jv, "index") do
+            None ->
+              WebSocket.send_frame(socket, err_frame("missing index"))
+            Some(idx) ->
+              let content = read_server_log(idx)
+              let running = server_is_running(idx)
+              -- If process died, clean up vault entry
+              let _ = if running do ()
+                else Vault.ns_drop(server_ns(), String.from_int(idx))
+                end
+              WebSocket.send_frame(socket, TextFrame(
+                "{\"type\":\"server_output\",\"index\":" ++ String.from_int(idx) ++
+                ",\"content\":" ++ json_str(content) ++
+                ",\"running\":" ++ (if running do "true" else "false" end) ++ "}"
+              ))
+          end
+
+        Some(other) ->
+          WebSocket.send_frame(socket, err_frame("unknown type: " ++ json_escape(other)))
+      end
+  end
+end
+
+pfn ws_loop(socket, nb_path, march_bin) do
+  match WebSocket.recv(socket) do
+    TextFrame(msg) ->
+      handle_ws_msg(msg, nb_path, march_bin, socket)
+      ws_loop(socket, nb_path, march_bin)
+    Ping ->
+      WebSocket.send_frame(socket, Pong)
+      ws_loop(socket, nb_path, march_bin)
+    Pong ->
+      ws_loop(socket, nb_path, march_bin)
+    Close(code, reason) ->
+      WebSocket.close(socket, code, reason)
+    _ ->
+      ws_loop(socket, nb_path, march_bin)
+  end
+end
+
+-- ── UI HTML ───────────────────────────────────────────────────────────────────
+
+pfn ui_html(nb_path, port) do
+  """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>March Notebook — """ ++ html_escape(nb_path) ++ """</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0f0f17;color:#e2e8f0;height:100vh;display:flex;flex-direction:column}
+#toolbar{background:#1a1a2e;border-bottom:1px solid #2d2d4e;padding:10px 20px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+#toolbar h1{font-size:14px;font-weight:600;color:#a78bfa;margin-right:auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.btn{padding:6px 14px;border-radius:6px;border:none;cursor:pointer;font-size:13px;font-weight:500;transition:opacity .15s}
+.btn-primary{background:#7c3aed;color:#fff}
+.btn-primary:hover{opacity:.85}
+.btn-secondary{background:#2d2d4e;color:#c4b5fd;border:1px solid #4c3d8a}
+.btn-secondary:hover{background:#3d3d5e}
+.btn-server{background:#166534;color:#86efac;border:1px solid #16a34a}
+.btn-server:hover{background:#14532d}
+.btn:disabled{opacity:.4;cursor:default}
+#status{font-size:12px;color:#6b7280;padding:4px 10px;background:#111127;border-radius:4px;min-width:80px;text-align:center}
+#status.ok{color:#34d399}
+#status.err{color:#f87171}
+#status.running{color:#fbbf24}
+#notebook{flex:1;overflow-y:auto;padding:32px 0;display:flex;flex-direction:column;align-items:center;gap:0}
+.cell{width:100%;max-width:860px;margin:0 auto 4px}
+.cell-md{padding:6px 24px}
+.cell-md h1{font-size:26px;margin:20px 0 10px;font-weight:700;color:#e2e8f0}
+.cell-md h2{font-size:20px;margin:16px 0 8px;font-weight:600;color:#e2e8f0}
+.cell-md h3{font-size:16px;margin:12px 0 6px;font-weight:600;color:#c4b5fd}
+.cell-md p{margin:6px 0;color:#94a3b8;line-height:1.65}
+.cell-md ul{margin:6px 0 6px 22px;color:#94a3b8}
+.cell-md li{margin:3px 0}
+.cell-md code{font-family:'JetBrains Mono','Fira Code',monospace;font-size:12.5px;background:#1e1e2e;padding:2px 5px;border-radius:4px;color:#c4b5fd}
+.cell-md hr{border:none;border-top:1px solid #2d2d4e;margin:14px 0}
+.cell-md em{font-style:italic;color:#94a3b8}
+.cell-md strong{font-weight:600;color:#e2e8f0}
+.cell-code{background:#12121f;border:1px solid #2d2d4e;border-radius:10px;overflow:hidden;transition:border-color .15s}
+.cell-code:focus-within{border-color:#7c3aed}
+.cell-code.running{border-color:#fbbf24}
+.cell-code.has-error{border-color:#ef4444}
+.cell-server-wrap{background:#0b1a0f;border:1px solid #1a4d2a;border-radius:10px;overflow:hidden;transition:border-color .15s}
+.cell-server-wrap:focus-within{border-color:#16a34a}
+.cell-server-wrap.server-running{border-color:#22c55e}
+.cell-server-wrap.has-error{border-color:#ef4444}
+.cell-header{display:flex;align-items:center;gap:8px;padding:5px 10px 5px 14px;background:#1a1a2e;border-bottom:1px solid #2d2d4e}
+.cell-server-wrap .cell-header{background:#0d2210;border-bottom-color:#1a4d2a}
+.cell-label{font-size:11px;font-family:'JetBrains Mono',monospace;color:#6b7280;flex:1}
+.cell-label.running{color:#fbbf24}
+.cell-label.server-label{color:#4ade80}
+.cell-label.server-label.running{color:#86efac}
+.run-btn{padding:3px 10px;font-size:11px;border-radius:4px;border:none;background:#7c3aed;color:#fff;cursor:pointer;font-weight:500}
+.run-btn:hover{background:#6d28d9}
+.run-btn:disabled{opacity:.4;cursor:default}
+.start-btn{padding:3px 10px;font-size:11px;border-radius:4px;border:none;background:#16a34a;color:#fff;cursor:pointer;font-weight:500}
+.start-btn:hover{background:#15803d}
+.stop-btn{padding:3px 10px;font-size:11px;border-radius:4px;border:none;background:#dc2626;color:#fff;cursor:pointer;font-weight:500}
+.stop-btn:hover{background:#b91c1c}
+.add-btns{display:flex;gap:4px}
+.add-btn{padding:2px 8px;font-size:11px;border-radius:4px;border:1px solid #3d3d5e;background:transparent;color:#6b7280;cursor:pointer}
+.add-btn:hover{border-color:#7c3aed;color:#a78bfa}
+textarea.cell-src{display:block;width:100%;background:#12121f;color:#cdd6f4;font-family:'JetBrains Mono','Fira Code',monospace;font-size:13.5px;line-height:1.6;padding:16px 20px;border:none;resize:none;outline:none;tab-size:2;min-height:48px}
+.cell-server-wrap textarea.cell-src{background:#0b1a0f;color:#bbf7d0}
+.cell-out{border-top:1px solid #1e1e2e;padding:10px 18px;font-family:'JetBrains Mono',monospace;font-size:13px;white-space:pre-wrap;word-break:break-word;color:#94a3b8;background:#0d0d1a}
+.cell-server-out{border-top:1px solid #1a4d2a;padding:10px 18px;font-family:'JetBrains Mono',monospace;font-size:13px;white-space:pre-wrap;word-break:break-word;color:#86efac;background:#071209;max-height:300px;overflow-y:auto}
+.cell-err{border-top:2px solid #7f1d1d;padding:10px 18px;font-family:'JetBrains Mono',monospace;font-size:13px;color:#f87171;white-space:pre-wrap;background:#1a0a0a}
+.pid-badge{font-size:10px;color:#4ade80;font-family:'JetBrains Mono',monospace;padding:1px 6px;border:1px solid #166534;border-radius:3px;margin-left:4px}
+.add-cell-bar{display:flex;justify-content:center;gap:8px;padding:6px 0;opacity:0;transition:opacity .2s}
+.cell-wrap:hover .add-cell-bar{opacity:1}
+.add-cell-bar button{padding:2px 10px;font-size:11px;border-radius:4px;border:1px solid #3d3d5e;background:transparent;color:#6b7280;cursor:pointer}
+.add-cell-bar button:hover{border-color:#7c3aed;color:#a78bfa}
+#drop-hint{text-align:center;color:#4b5563;padding:40px;font-size:14px}
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <h1 id="nb-title">""" ++ html_escape(nb_path) ++ """</h1>
+  <button class="btn btn-secondary" id="btn-add-md">+ Markdown</button>
+  <button class="btn btn-secondary" id="btn-add-code">+ Code</button>
+  <button class="btn btn-server" id="btn-add-server">+ Server</button>
+  <button class="btn btn-primary" id="btn-run-all">▶ Run All</button>
+  <button class="btn btn-secondary" id="btn-save">Save</button>
+  <div id="status">connecting</div>
+</div>
+<div id="notebook"></div>
+
+<script>
+const NB_PATH = """ ++ json_str(nb_path) ++ """;
+const WS_URL  = "ws://localhost:""" ++ String.from_int(port) ++ """/ws";
+
+let cells = [];   // [{kind, source, output, error, running, server_log, pid}]
+let ws = null;
+let pendingRun = null;
+const serverPolls = {};
+
+// ── WebSocket ────────────────────────────────────────────────────────────────
+
+function connect() {
+  setStatus("connecting", "");
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => {
+    setStatus("ok", "connected");
+    ws.send(JSON.stringify({type:"load"}));
+  };
+  ws.onclose = () => {
+    setStatus("err", "disconnected");
+    setTimeout(connect, 2000);
+  };
+  ws.onerror = () => {};
+  ws.onmessage = (e) => handleMsg(JSON.parse(e.data));
+}
+
+function send(obj) { if (ws && ws.readyState===1) ws.send(JSON.stringify(obj)); }
+
+// ── Message handling ─────────────────────────────────────────────────────────
+
+function handleMsg(msg) {
+  if (msg.type === "notebook") {
+    cells = msg.cells.map(c => ({...c, output:"", error:null, running:false, server_log:"", pid:null}));
+    render();
+    setStatus("ok", "loaded");
+  } else if (msg.type === "running") {
+    const idx = msg.index;
+    if (cells[idx]) { cells[idx].running = true; updateCell(idx); }
+    setStatus("running", "running…");
+  } else if (msg.type === "output") {
+    const idx = msg.index;
+    if (cells[idx]) {
+      cells[idx].running = false;
+      cells[idx].output  = msg.stdout || "";
+      cells[idx].error   = msg.error || null;
+      updateCell(idx);
+    }
+    if (pendingRun !== null) {
+      const next = nextCodeCell(pendingRun + 1);
+      if (next !== -1) {
+        pendingRun = next;
+        runCell(next);
+      } else {
+        pendingRun = null;
+        setStatus("ok", "done");
+      }
+    } else {
+      setStatus("ok", "done");
+    }
+  } else if (msg.type === "saved") {
+    setStatus("ok", "saved");
+    setTimeout(() => setStatus("ok", "connected"), 1500);
+  } else if (msg.type === "server_started") {
+    const idx = msg.index;
+    if (cells[idx]) {
+      cells[idx].running = true;
+      cells[idx].pid = msg.pid;
+      cells[idx].server_log = "";
+      cells[idx].error = null;
+      updateCell(idx);
+      startServerPoll(idx);
+    }
+    setStatus("ok", "server started");
+  } else if (msg.type === "server_stopped") {
+    const idx = msg.index;
+    if (cells[idx]) {
+      cells[idx].running = false;
+      cells[idx].pid = null;
+      stopServerPoll(idx);
+      updateCell(idx);
+    }
+    setStatus("ok", "server stopped");
+  } else if (msg.type === "server_output") {
+    const idx = msg.index;
+    if (cells[idx]) {
+      cells[idx].server_log = msg.content;
+      if (!msg.running) {
+        cells[idx].running = false;
+        cells[idx].pid = null;
+        stopServerPoll(idx);
+      }
+      updateCell(idx);
+    }
+  } else if (msg.type === "server_error") {
+    const idx = msg.index;
+    if (cells[idx]) {
+      cells[idx].running = false;
+      cells[idx].error = msg.message;
+      stopServerPoll(idx);
+      updateCell(idx);
+    }
+    setStatus("err", msg.message);
+  } else if (msg.type === "error") {
+    setStatus("err", msg.message);
+    if (pendingRun !== null) { pendingRun = null; }
+  }
+}
+
+// ── Server process management ────────────────────────────────────────────────
+
+function startServerPoll(idx) {
+  stopServerPoll(idx);
+  // Poll immediately, then every 2s
+  send({type:"read_server", index:idx});
+  serverPolls[idx] = setInterval(() => {
+    send({type:"read_server", index:idx});
+  }, 2000);
+}
+
+function stopServerPoll(idx) {
+  if (serverPolls[idx]) {
+    clearInterval(serverPolls[idx]);
+    delete serverPolls[idx];
+  }
+}
+
+function startServer(idx) {
+  if (cells[idx] && cells[idx].kind === "server") {
+    send({type:"save", content: nbSource()});
+    send({type:"start_server", index:idx});
+    setStatus("running", "starting…");
+  }
+}
+
+function stopServer(idx) {
+  send({type:"stop_server", index:idx});
+  stopServerPoll(idx);
+  if (cells[idx]) {
+    cells[idx].running = false;
+    cells[idx].pid = null;
+    updateCell(idx);
+  }
+  setStatus("ok", "stopping…");
+}
+
+// ── Cell operations ──────────────────────────────────────────────────────────
+
+function nbSource() {
+  return cells.map(c => {
+    if (c.kind === "markdown") return c.source;
+    if (c.kind === "server")   return "```march:server\n" + c.source + "\n```";
+    return "```march\n" + c.source + "\n```";
+  }).join("\n\n");
+}
+
+function runCell(idx) {
+  if (cells[idx] && cells[idx].kind === "code") {
+    send({type:"save", content: nbSource()});
+    send({type:"run", index:idx});
+  }
+}
+
+function firstCodeCell() {
+  for (let i=0;i<cells.length;i++) if(cells[i].kind==="code") return i;
+  return -1;
+}
+
+function nextCodeCell(from) {
+  for (let i=from;i<cells.length;i++) if(cells[i].kind==="code") return i;
+  return -1;
+}
+
+function runAll() {
+  const first = firstCodeCell();
+  if (first === -1) return;
+  cells.forEach(c => { c.output=""; c.error=null; c.running=false; });
+  render();
+  pendingRun = first;
+  runCell(first);
+  setStatus("running", "running…");
+}
+
+function saveNotebook() {
+  send({type:"save", content: nbSource()});
+}
+
+function addCell(kind, afterIdx) {
+  const newCell = {kind, source:"", output:"", error:null, running:false, server_log:"", pid:null};
+  cells.splice(afterIdx+1, 0, newCell);
+  render();
+  const ta = document.querySelector(`[data-idx="\${afterIdx+1}"] textarea`);
+  if (ta) ta.focus();
+}
+
+function deleteCell(idx) {
+  if (cells.length <= 1) return;
+  if (cells[idx] && cells[idx].running) stopServer(idx);
+  cells.splice(idx, 1);
+  render();
+}
+
+function moveCell(idx, dir) {
+  const to = idx + dir;
+  if (to < 0 || to >= cells.length) return;
+  [cells[idx], cells[to]] = [cells[to], cells[idx]];
+  render();
+}
+
+// ── Markdown renderer (minimal) ──────────────────────────────────────────────
+
+function renderMd(src) {
+  let html = "";
+  const lines = src.split("\n");
+  let inUl = false, inP = false;
+  for (const line of lines) {
+    const t = line.trim();
+    if (!t) {
+      if (inUl) { html += "</ul>"; inUl = false; }
+      if (inP)  { html += "</p>";  inP  = false; }
+      continue;
+    }
+    if (t === "---" || t === "***") {
+      if (inUl) { html += "</ul>"; inUl = false; }
+      if (inP)  { html += "</p>";  inP  = false; }
+      html += "<hr>"; continue;
+    }
+    const hm = t.match(/^(#{1,3})\s+(.+)/);
+    if (hm) {
+      if (inUl) { html += "</ul>"; inUl = false; }
+      if (inP)  { html += "</p>";  inP  = false; }
+      const lvl = hm[1].length;
+      html += `<h\${lvl}>\${inline(hm[2])}</h\${lvl}>`;
+      continue;
+    }
+    if (t.startsWith("- ") || t.startsWith("* ")) {
+      if (inP)  { html += "</p>";  inP  = false; }
+      if (!inUl){ html += "<ul>";  inUl = true;  }
+      html += `<li>\${inline(t.slice(2))}</li>`;
+      continue;
+    }
+    if (inUl) { html += "</ul>"; inUl = false; }
+    if (!inP) { html += "<p>"; inP = true; } else { html += " "; }
+    html += inline(t);
+  }
+  if (inUl) html += "</ul>";
+  if (inP)  html += "</p>";
+  return html;
+}
+
+function inline(s) {
+  s = s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+  return s;
+}
+
+// ── Render ───────────────────────────────────────────────────────────────────
+
+function esc(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+function render() {
+  const nb = document.getElementById("notebook");
+  nb.innerHTML = "";
+  cells.forEach((cell, idx) => {
+    const wrap = document.createElement("div");
+    wrap.className = "cell-wrap cell";
+    wrap.dataset.idx = idx;
+
+    if (cell.kind === "markdown") {
+      wrap.innerHTML = `<div class="cell-md">\${renderMd(cell.source)}</div>`;
+      wrap.querySelector(".cell-md").addEventListener("dblclick", () => {
+        cell._editing = !cell._editing;
+        if (cell._editing) {
+          wrap.innerHTML = mdEditor(idx, cell);
+          autoResize(wrap.querySelector("textarea"));
+          attachEditorEvents(wrap, idx);
+        } else {
+          render();
+        }
+      });
+    } else if (cell.kind === "server") {
+      wrap.innerHTML = serverCell(idx, cell);
+      autoResize(wrap.querySelector("textarea"));
+      attachEditorEvents(wrap, idx);
+    } else {
+      wrap.innerHTML = codeCell(idx, cell);
+      autoResize(wrap.querySelector("textarea"));
+      attachEditorEvents(wrap, idx);
+    }
+
+    // between-cell add bar
+    const bar = document.createElement("div");
+    bar.className = "add-cell-bar";
+    bar.innerHTML = `<button onclick="addCell('markdown',\${idx})">+ md</button><button onclick="addCell('code',\${idx})">+ code</button><button onclick="addCell('server',\${idx})">+ srv</button>`;
+    wrap.appendChild(bar);
+
+    nb.appendChild(wrap);
+  });
+
+  // end add bar
+  const endBar = document.createElement("div");
+  endBar.style.cssText = "display:flex;justify-content:center;gap:8px;padding:12px 0";
+  endBar.innerHTML = `<button class="add-btn" onclick="addCell('markdown',\${cells.length-1})">+ Markdown</button><button class="add-btn" onclick="addCell('code',\${cells.length-1})">+ Code</button><button class="add-btn" onclick="addCell('server',\${cells.length-1})">+ Server</button>`;
+  nb.appendChild(endBar);
+}
+
+function mdEditor(idx, cell) {
+  return `<div style="padding:4px 20px">
+    <textarea data-cell="\${idx}" style="width:100%;background:#1a1a2e;color:#e2e8f0;border:1px solid #4c3d8a;border-radius:6px;padding:10px;font-family:inherit;font-size:13px;resize:none;outline:none;min-height:60px">\${esc(cell.source)}</textarea>
+  </div>`;
+}
+
+function codeCell(idx, cell) {
+  const cls = cell.running ? " running" : cell.error ? " has-error" : "";
+  const lbl = cell.running ? "running…" : `In [\${idx+1}]`;
+  const lblCls = cell.running ? " running" : "";
+  const outHtml = cell.error
+    ? `<div class="cell-err">\${esc(cell.error)}</div>`
+    : cell.output
+      ? `<div class="cell-out">\${esc(cell.output)}</div>`
+      : "";
+  return `<div class="cell-code\${cls}">
+    <div class="cell-header">
+      <span class="cell-label\${lblCls}">\${lbl}</span>
+      <div class="add-btns">
+        <button class="add-btn" onclick="moveCell(\${idx},-1)" title="Move up">↑</button>
+        <button class="add-btn" onclick="moveCell(\${idx},1)" title="Move down">↓</button>
+        <button class="add-btn" onclick="deleteCell(\${idx})" title="Delete">✕</button>
+      </div>
+      <button class="run-btn" onclick="runCell(\${idx})" \${cell.running?"disabled":""}>▶ Run</button>
+    </div>
+    <textarea class="cell-src" data-cell="\${idx}" spellcheck="false">\${esc(cell.source)}</textarea>
+    \${outHtml}
+  </div>`;
+}
+
+function serverCell(idx, cell) {
+  const running = !!cell.running;
+  const lbl = running ? "server · running" : "server";
+  const lblCls = running ? " server-label running" : " server-label";
+  const pidBadge = cell.pid ? `<span class="pid-badge">pid \${esc(cell.pid)}</span>` : "";
+  const actionBtn = running
+    ? `<button class="stop-btn" onclick="stopServer(\${idx})">■ Stop</button>`
+    : `<button class="start-btn" onclick="startServer(\${idx})">▶ Start</button>`;
+  const outHtml = cell.server_log
+    ? `<div class="cell-server-out" id="srv-out-\${idx}">\${esc(cell.server_log)}</div>`
+    : "";
+  const errHtml = cell.error
+    ? `<div class="cell-err">\${esc(cell.error)}</div>`
+    : "";
+  return `<div class="cell-server-wrap\${running ? " server-running" : cell.error ? " has-error" : ""}">
+    <div class="cell-header">
+      <span class="cell-label\${lblCls}">\${lbl}</span>
+      \${pidBadge}
+      <div class="add-btns">
+        <button class="add-btn" onclick="moveCell(\${idx},-1)" title="Move up">↑</button>
+        <button class="add-btn" onclick="moveCell(\${idx},1)" title="Move down">↓</button>
+        <button class="add-btn" onclick="deleteCell(\${idx})" title="Delete">✕</button>
+      </div>
+      \${actionBtn}
+    </div>
+    <textarea class="cell-src" data-cell="\${idx}" spellcheck="false">\${esc(cell.source)}</textarea>
+    \${outHtml}\${errHtml}
+  </div>`;
+}
+
+function updateCell(idx) {
+  const wrap = document.querySelector(`[data-idx="\${idx}"]`);
+  if (!wrap) return;
+  const cell = cells[idx];
+  const old = wrap.querySelector("textarea");
+  const src = old ? old.value : cell.source;
+  cell.source = src;
+  if (cell.kind === "server") {
+    wrap.innerHTML = serverCell(idx, cell);
+    autoResize(wrap.querySelector("textarea"));
+    attachEditorEvents(wrap, idx);
+    // scroll server output to bottom
+    const out = document.getElementById(`srv-out-\${idx}`);
+    if (out) out.scrollTop = out.scrollHeight;
+  } else if (cell.kind === "code") {
+    wrap.innerHTML = codeCell(idx, cell);
+    autoResize(wrap.querySelector("textarea"));
+    attachEditorEvents(wrap, idx);
+  }
+  // re-attach the add bar
+  const bar = document.createElement("div");
+  bar.className = "add-cell-bar";
+  bar.innerHTML = `<button onclick="addCell('markdown',\${idx})">+ md</button><button onclick="addCell('code',\${idx})">+ code</button><button onclick="addCell('server',\${idx})">+ srv</button>`;
+  wrap.appendChild(bar);
+}
+
+function attachEditorEvents(wrap, idx) {
+  const ta = wrap.querySelector("textarea");
+  if (!ta) return;
+  ta.addEventListener("input", () => {
+    cells[idx].source = ta.value;
+    autoResize(ta);
+  });
+  ta.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+      e.preventDefault();
+      if (cells[idx].kind === "code") runCell(idx);
+      else if (cells[idx].kind === "server") startServer(idx);
+      else { cells[idx]._editing = false; render(); }
+    }
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const s = ta.selectionStart, end = ta.selectionEnd;
+      ta.value = ta.value.slice(0,s) + "  " + ta.value.slice(end);
+      ta.selectionStart = ta.selectionEnd = s + 2;
+    }
+  });
+}
+
+function autoResize(ta) {
+  if (!ta) return;
+  ta.style.height = "auto";
+  ta.style.height = Math.max(48, ta.scrollHeight) + "px";
+}
+
+function setStatus(cls, text) {
+  const el = document.getElementById("status");
+  el.className = cls;
+  el.textContent = text;
+}
+
+// ── Toolbar buttons ──────────────────────────────────────────────────────────
+
+document.getElementById("btn-run-all").onclick    = runAll;
+document.getElementById("btn-save").onclick       = saveNotebook;
+document.getElementById("btn-add-code").onclick   = () => addCell("code",   cells.length-1);
+document.getElementById("btn-add-md").onclick     = () => addCell("markdown", cells.length-1);
+document.getElementById("btn-add-server").onclick = () => addCell("server", cells.length-1);
+
+// ── Keyboard shortcuts ───────────────────────────────────────────────────────
+
+document.addEventListener("keydown", (e) => {
+  if ((e.metaKey||e.ctrlKey) && e.shiftKey && e.key==="Enter") { e.preventDefault(); runAll(); }
+  if ((e.metaKey||e.ctrlKey) && e.key==="s") { e.preventDefault(); saveNotebook(); }
+});
+
+connect();
+</script>
+</body>
+</html>"""
+end
+
+-- ── HTTP router ───────────────────────────────────────────────────────────────
+
+pfn router(nb_path, display_title, port, march_bin, conn) do
+  match (HttpServer.method(conn), HttpServer.path_info(conn)) do
+    (:get, Nil) ->
+      conn |> HttpServer.html(200, ui_html(display_title, port))
+
+    (:get, Cons("ws", Nil)) ->
+      WebSocket.upgrade(conn, fn socket ->
+        ws_loop(socket, nb_path, march_bin)
+      )
+
+    _ ->
+      conn |> HttpServer.text(404, "Not Found")
+  end
+end
+
+-- ── Main entry point ──────────────────────────────────────────────────────────
+
+fn main() do
+  let nb_path = match System.env("FORGE_NB_INPUT") do
+    Some(p) -> p
+    None    ->
+      IO.warn("forge notebook serve: FORGE_NB_INPUT not set")
+      Process.exit(1)
+      ""
+  end
+
+  let port = match System.env("FORGE_NB_PORT") do
+    Some(p) ->
+      match String.to_int(p) do
+        Ok(n)  -> n
+        Err(_) -> 4040
+      end
+    None -> 4040
+  end
+
+  let march_bin = match System.env("FORGE_NB_MARCH") do
+    Some(b) -> b
+    None    -> "march"
+  end
+
+  -- FORGE_NB_TITLE overrides the display title (used for untitled temp notebooks)
+  let display_title = match System.env("FORGE_NB_TITLE") do
+    Some(t) -> t
+    None    -> nb_path
+  end
+
+  IO.puts("forge notebook: serving " ++ nb_path ++ " on http://localhost:" ++ String.from_int(port))
+  IO.puts("forge notebook: press Ctrl-C to stop")
+
+  let server = HttpServer.new(port)
+  let server = HttpServer.plug(server, fn req_conn ->
+    router(nb_path, display_title, port, march_bin, req_conn)
+  )
+  HttpServer.listen(server)
+end
+
+end

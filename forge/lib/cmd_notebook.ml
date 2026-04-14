@@ -124,6 +124,52 @@ let open_browser url =
 (* Live server: forge notebook serve [FILE.scrollmd] [--port N]             *)
 (* ------------------------------------------------------------------ *)
 
+(* ------------------------------------------------------------------ *)
+(* Notebook-local project: ensure a forge.toml exists alongside the   *)
+(* .scrollmd file so the notebook can have its own dependencies.      *)
+(* ------------------------------------------------------------------ *)
+
+(** Create a minimal forge.toml for a notebook if one doesn't exist. *)
+let ensure_notebook_toml nb_path =
+  let dir  = Filename.dirname nb_path in
+  let base = Filename.remove_extension (Filename.basename nb_path) in
+  let toml_path = Filename.concat dir "forge.toml" in
+  if not (Sys.file_exists toml_path) then begin
+    let content = Printf.sprintf
+      {|[project]
+name = "%s"
+type = "notebook"
+
+[deps]
+|} base in
+    let oc = open_out toml_path in
+    output_string oc content;
+    close_out oc;
+    Printf.printf "created: %s\n%!" toml_path
+  end;
+  toml_path
+
+(** Resolve deps from a notebook's forge.toml and return lib paths. *)
+let notebook_dep_lib_paths nb_path =
+  let dir = Filename.dirname nb_path in
+  let toml_path = Filename.concat dir "forge.toml" in
+  if not (Sys.file_exists toml_path) then []
+  else
+    match Project.load_from_dir dir with
+    | Error _ -> []
+    | Ok proj ->
+      List.filter_map (fun (dep_name, dep) ->
+        match dep with
+        | Project.PathDep rel_path ->
+          let abs = if Filename.is_relative rel_path
+            then Filename.concat proj.Project.root rel_path else rel_path in
+          let lib = Filename.concat abs "lib" in
+          if Sys.file_exists lib then Some lib else Some abs
+        | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
+          Project.git_dep_lib_path dep_name
+        | Project.RegistryDep _ -> None
+      ) proj.Project.deps
+
 let run_serve ~input ~port ~no_open () =
   match find_scroll_task () with
   | None ->
@@ -153,9 +199,14 @@ let run_serve ~input ~port ~no_open () =
       end;
       (abs, false)
   in
+  (* Ensure a notebook-local forge.toml exists and resolve its deps *)
+  if not is_temp then
+    ignore (ensure_notebook_toml input_path);
+  let nb_dep_paths = if is_temp then [] else notebook_dep_lib_paths input_path in
   let march = find_march () in
   let display_title = if is_temp then "Untitled Notebook" else Filename.basename input_path in
-  let lib_path_env = match lib_paths with
+  let all_lib_paths = lib_paths @ nb_dep_paths in
+  let lib_path_env = match all_lib_paths with
     | [] -> ""
     | ps -> Printf.sprintf "MARCH_LIB_PATH=%s " (Filename.quote (String.concat ":" ps))
   in

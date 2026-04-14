@@ -212,6 +212,45 @@ let deps_cmd =
     (Cmd.info "deps" ~doc:"Install and manage project dependencies")
     [deps_update_cmd]
 
+(* ------------------------------------------------------------------- forge add *)
+
+let add_cmd =
+  let name =
+    Arg.(required & pos 0 (some string) None &
+         info [] ~docv:"NAME" ~doc:"Dependency name")
+  in
+  let git =
+    Arg.(value & opt (some string) None &
+         info ["git"] ~docv:"URL" ~doc:"Git repository URL")
+  in
+  let tag =
+    Arg.(value & opt (some string) None &
+         info ["tag"] ~docv:"TAG" ~doc:"Git tag (e.g. v1.0)")
+  in
+  let branch =
+    Arg.(value & opt (some string) None &
+         info ["branch"] ~docv:"BRANCH" ~doc:"Git branch (default: main)")
+  in
+  let rev =
+    Arg.(value & opt (some string) None &
+         info ["rev"] ~docv:"REV" ~doc:"Git revision (exact commit)")
+  in
+  let path =
+    Arg.(value & opt (some string) None &
+         info ["path"] ~docv:"PATH" ~doc:"Local filesystem path")
+  in
+  let dev =
+    Arg.(value & flag & info ["dev"] ~doc:"Add as a dev dependency")
+  in
+  let force =
+    Arg.(value & flag & info ["force"] ~doc:"Overwrite if dependency already exists")
+  in
+  let run n g t b r p d f =
+    handle (Cmd_add.run ~name:n ~git:g ~tag:t ~branch:b ~rev:r ~path:p ~dev:d ~force:f ())
+  in
+  Cmd.v (Cmd.info "add" ~doc:"Add a dependency to forge.toml")
+    Term.(const run $ name $ git $ tag $ branch $ rev $ path $ dev $ force)
+
 (* ------------------------------------------------------------------ forge help *)
 
 let help_cmd =
@@ -415,7 +454,7 @@ let notebook_serve_cmd =
 let notebook_cmd =
   let input =
     Arg.(value & pos 0 (some string) None &
-         info [] ~docv:"FILE.scrollmd" ~doc:"Path to the .mnb notebook file")
+         info [] ~docv:"FILE.scrollmd" ~doc:"Path to the .scrollmd notebook file")
   in
   let output =
     Arg.(value & opt (some string) None &
@@ -472,7 +511,7 @@ let default_term =
 let () =
   let cmds =
     [ new_cmd; init_cmd; build_cmd; run_cmd; compile_cmd; test_cmd; format_cmd;
-      interactive_cmd; i_cmd; clean_cmd; deps_cmd; publish_cmd;
+      interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]
   in

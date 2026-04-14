@@ -1,0 +1,22 @@
+-- forge_nb.march — Notebook package management
+--
+-- Provides Forge.add() for use inside notebook cells.
+-- Emits a sentinel line that the notebook server intercepts to run `forge add`.
+
+mod Forge do
+
+  -- Add a dependency to the notebook's forge.toml.
+  --
+  -- spec is a string passed directly to `forge add`:
+  --   Forge.add("json --git https://github.com/march-lang/json")
+  --   Forge.add("utils --path ../my-utils")
+  --   Forge.add("mylib --git https://github.com/me/mylib --tag v1.0")
+  --
+  -- The notebook server intercepts the sentinel and runs `forge add` in the
+  -- notebook's directory. A toast notification appears when the dep is installed.
+  -- Subsequent cells can use the newly added package.
+  fn add(spec) do
+    println("__FORGE_ADD__:" ++ spec)
+  end
+
+end
