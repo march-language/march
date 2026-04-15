@@ -4415,6 +4415,164 @@ let test_perceus_needs_rc_tcon () =
   Alcotest.(check bool) "TInt no RC" false
     (March_tir.Perceus.needs_rc March_tir.Tir.TInt)
 
+(* ── Property tests for Lean theorems (in march-lean/MarchLean/) ──────
+
+   These tests exercise the invariants claimed by the Lean mechanization
+   against the real OCaml implementation. If the OCaml drifts from the
+   Lean model, these tests fail — protecting the proofs' value.
+
+   Each test is labeled with the corresponding theorem. *)
+
+(** Build a variable with a specific linearity (mk_var defaults to Unr). *)
+let mk_var_lin name ty lin =
+  { March_tir.Tir.v_name = name; v_ty = ty; v_lin = lin }
+
+(** Build a single-fn module: fn f() : Int = let <v> = 1 in 0.  The binding
+    [v] is dead in the body, so Perceus should emit a drop for it, selecting
+    EFree vs EDecRC per the rules in drop_var (perceus.ml:438-446). *)
+let perceus_dead_let v =
+  let body =
+    March_tir.Tir.ELet (v,
+      March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 1)),
+      March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 0)))
+  in
+  let fn = { March_tir.Tir.fn_name = "f"; fn_params = [];
+             fn_ret_ty = March_tir.Tir.TInt; fn_body = body } in
+  let m = { March_tir.Tir.tm_name = "test"; tm_fns = [fn];
+            tm_types = []; tm_externs = []; tm_exports = []; tm_tests = [] } in
+  let m' = March_tir.Perceus.perceus m in
+  (List.hd m'.March_tir.Tir.tm_fns).March_tir.Tir.fn_body
+
+let rec has_efree_of v_name = function
+  | March_tir.Tir.EFree (March_tir.Tir.AVar v) -> v.March_tir.Tir.v_name = v_name
+  | March_tir.Tir.ESeq (e1, e2) -> has_efree_of v_name e1 || has_efree_of v_name e2
+  | March_tir.Tir.ELet (_, e1, e2) -> has_efree_of v_name e1 || has_efree_of v_name e2
+  | March_tir.Tir.ECase (_, brs, def) ->
+    List.exists (fun b -> has_efree_of v_name b.March_tir.Tir.br_body) brs ||
+    (match def with Some e -> has_efree_of v_name e | None -> false)
+  | March_tir.Tir.ELetRec (fns, body) ->
+    List.exists (fun f -> has_efree_of v_name f.March_tir.Tir.fn_body) fns
+    || has_efree_of v_name body
+  | _ -> false
+
+let rec has_edecrc_of v_name = function
+  | March_tir.Tir.EDecRC (March_tir.Tir.AVar v)
+  | March_tir.Tir.EAtomicDecRC (March_tir.Tir.AVar v) ->
+    v.March_tir.Tir.v_name = v_name
+  | March_tir.Tir.ESeq (e1, e2) -> has_edecrc_of v_name e1 || has_edecrc_of v_name e2
+  | March_tir.Tir.ELet (_, e1, e2) -> has_edecrc_of v_name e1 || has_edecrc_of v_name e2
+  | March_tir.Tir.ECase (_, brs, def) ->
+    List.exists (fun b -> has_edecrc_of v_name b.March_tir.Tir.br_body) brs ||
+    (match def with Some e -> has_edecrc_of v_name e | None -> false)
+  | March_tir.Tir.ELetRec (fns, body) ->
+    List.exists (fun f -> has_edecrc_of v_name f.March_tir.Tir.fn_body) fns
+    || has_edecrc_of v_name body
+  | _ -> false
+
+let rec has_any_rc_op_of v_name = function
+  | March_tir.Tir.EFree (March_tir.Tir.AVar v)
+  | March_tir.Tir.EDecRC (March_tir.Tir.AVar v)
+  | March_tir.Tir.EAtomicDecRC (March_tir.Tir.AVar v)
+  | March_tir.Tir.EIncRC (March_tir.Tir.AVar v)
+  | March_tir.Tir.EAtomicIncRC (March_tir.Tir.AVar v) ->
+    v.March_tir.Tir.v_name = v_name
+  | March_tir.Tir.ESeq (e1, e2) -> has_any_rc_op_of v_name e1 || has_any_rc_op_of v_name e2
+  | March_tir.Tir.ELet (_, e1, e2) -> has_any_rc_op_of v_name e1 || has_any_rc_op_of v_name e2
+  | March_tir.Tir.ECase (_, brs, def) ->
+    List.exists (fun b -> has_any_rc_op_of v_name b.March_tir.Tir.br_body) brs ||
+    (match def with Some e -> has_any_rc_op_of v_name e | None -> false)
+  | March_tir.Tir.ELetRec (fns, body) ->
+    List.exists (fun f -> has_any_rc_op_of v_name f.March_tir.Tir.fn_body) fns
+    || has_any_rc_op_of v_name body
+  | _ -> false
+
+(** Theorem: Perceus.lin_drop_is_free — Lin + needs_rc → EFree, not EDecRC. *)
+let test_thm_lin_drop_is_free () =
+  let v = mk_var_lin "x" (March_tir.Tir.TCon ("List", [])) March_tir.Tir.Lin in
+  let e = perceus_dead_let v in
+  Alcotest.(check bool) "Lin+heap emits EFree" true (has_efree_of "x" e);
+  Alcotest.(check bool) "Lin+heap emits no EDecRC" false (has_edecrc_of "x" e)
+
+(** Theorem: Perceus.aff_drop_is_free — Aff + needs_rc → EFree, not EDecRC. *)
+let test_thm_aff_drop_is_free () =
+  let v = mk_var_lin "x" (March_tir.Tir.TCon ("List", [])) March_tir.Tir.Aff in
+  let e = perceus_dead_let v in
+  Alcotest.(check bool) "Aff+heap emits EFree" true (has_efree_of "x" e);
+  Alcotest.(check bool) "Aff+heap emits no EDecRC" false (has_edecrc_of "x" e)
+
+(** Theorem: Perceus.decrc_implies_unr (contrapositive form) —
+    Unr + needs_rc → EDecRC, never EFree. *)
+let test_thm_decrc_implies_unr () =
+  let v = mk_var_lin "x" (March_tir.Tir.TCon ("List", [])) March_tir.Tir.Unr in
+  let e = perceus_dead_let v in
+  Alcotest.(check bool) "Unr+heap emits EDecRC" true (has_edecrc_of "x" e);
+  Alcotest.(check bool) "Unr+heap emits no EFree" false (has_efree_of "x" e)
+
+(** Theorem: Perceus.drop_scalar_noop —
+    needs_rc = false → no RC ops emitted, regardless of linearity. *)
+let test_thm_drop_scalar_noop_lin () =
+  let v = mk_var_lin "x" March_tir.Tir.TInt March_tir.Tir.Lin in
+  let e = perceus_dead_let v in
+  Alcotest.(check bool) "Lin+scalar emits no RC ops" false (has_any_rc_op_of "x" e)
+
+let test_thm_drop_scalar_noop_unr () =
+  let v = mk_var_lin "x" March_tir.Tir.TInt March_tir.Tir.Unr in
+  let e = perceus_dead_let v in
+  Alcotest.(check bool) "Unr+scalar emits no RC ops" false (has_any_rc_op_of "x" e)
+
+(** Theorem: Defun.lift_preserves_linearity.
+    After defunctionalization, captured free variables retain their v_lin.
+    Directly catches regression of commit 71d1840. *)
+let collect_all_vars_in_module m =
+  let rec vs_expr acc = function
+    | March_tir.Tir.ELet (v, e1, e2) ->
+      vs_expr (vs_expr (v :: acc) e1) e2
+    | March_tir.Tir.ESeq (e1, e2) -> vs_expr (vs_expr acc e1) e2
+    | March_tir.Tir.ELetRec (fns, body) ->
+      let acc' = List.fold_left (fun a f ->
+        vs_expr (List.fold_left (fun a p -> p :: a) a f.March_tir.Tir.fn_params)
+                f.March_tir.Tir.fn_body) acc fns in
+      vs_expr acc' body
+    | March_tir.Tir.ECase (_, brs, def) ->
+      let acc' = List.fold_left (fun a b ->
+        vs_expr (List.fold_left (fun a v -> v :: a) a b.March_tir.Tir.br_vars)
+                b.March_tir.Tir.br_body) acc brs in
+      (match def with Some e -> vs_expr acc' e | None -> acc')
+    | _ -> acc
+  in
+  List.fold_left (fun acc fn ->
+    vs_expr (List.fold_left (fun a p -> p :: a) acc fn.March_tir.Tir.fn_params)
+            fn.March_tir.Tir.fn_body) [] m.March_tir.Tir.tm_fns
+
+let test_thm_defun_preserves_linearity () =
+  (* fn main() = let x:<List, Lin> = 1 in letrec lam() = x in lam
+     After defun, x must still appear with v_lin = Lin everywhere it's bound. *)
+  let x_lin = mk_var_lin "x" (March_tir.Tir.TCon ("List", [])) March_tir.Tir.Lin in
+  let lambda_body = March_tir.Tir.EAtom (March_tir.Tir.AVar x_lin) in
+  let lambda_fn = { March_tir.Tir.fn_name = "lam0"; fn_params = [];
+                    fn_ret_ty = March_tir.Tir.TCon ("List", []);
+                    fn_body = lambda_body } in
+  let lam_var = mk_var_lin "lam_ref" (March_tir.Tir.TPtr March_tir.Tir.TUnit)
+                  March_tir.Tir.Unr in
+  let inner = March_tir.Tir.ELetRec ([lambda_fn],
+    March_tir.Tir.EAtom (March_tir.Tir.AVar lam_var)) in
+  let outer = March_tir.Tir.ELet (x_lin,
+    March_tir.Tir.EAtom (March_tir.Tir.ALit (March_ast.Ast.LitInt 1)),
+    inner) in
+  let main_fn = { March_tir.Tir.fn_name = "main"; fn_params = [];
+                  fn_ret_ty = March_tir.Tir.TPtr March_tir.Tir.TUnit;
+                  fn_body = outer } in
+  let m = { March_tir.Tir.tm_name = "test"; tm_fns = [main_fn];
+            tm_types = []; tm_externs = []; tm_exports = []; tm_tests = [] } in
+  let m' = March_tir.Defun.defunctionalize m in
+  let all_vars = collect_all_vars_in_module m' in
+  let x_bindings = List.filter (fun v -> v.March_tir.Tir.v_name = "x") all_vars in
+  Alcotest.(check bool) "x appears after defun" true (List.length x_bindings > 0);
+  List.iter (fun v ->
+    Alcotest.(check bool) "x retains v_lin = Lin" true
+      (v.March_tir.Tir.v_lin = March_tir.Tir.Lin)
+  ) x_bindings
+
 (* ── Atomic RC tests ───────────────────────────────────────────────────────── *)
 
 (** Collect all EAtomicIncRC variable names in an expression. *)
@@ -5667,6 +5825,96 @@ let test_borrow_conn_middleware_pattern () =
   (* Caller: conn passed to two borrowed functions while live → no EIncRC *)
   Alcotest.(check bool) "handle: no EIncRC for conn at borrowed call sites" false
     (has_any_incrc handle_fn.March_tir.Tir.fn_body)
+
+(* ── Perceus scrutinee-escape rewrite (rc50 regression) ──────────────────── *)
+
+let test_perceus_scrut_escape_rewrite () =
+  (* Regression test for rc50: a Cons-arm whose tail position returns the
+     whole scrutinee ([match ls do ... Cons(h, rest) -> ls end]) used to
+     confuse Perceus' RC insertion:
+
+       - [name_free_in "ls" body] was true (the [-> ls] tail), so
+         [add_scrutinee_free_for] *skipped* [dec_rc ls] at arm start.
+       - But the extracted field [h] was still classified as owned and got
+         a [dec_rc h] at last use inside the body (e.g. after a [trim(h)]
+         call to a borrowed callee), so the string field's RC underflowed.
+
+     The fix [perceus.ml:preprocess_scrut_escape] rewrites the tail
+     [EAtom (AVar ls)] into [EAlloc (Cons, [h, rest])] before RC insertion.
+     After the rewrite, [ls] is no longer free in the arm body, so
+     [dec_rc ls] is emitted as usual, and [llvm_emit.strip_scrut_decrc]
+     can recognise the pattern and emit a conditional field-IncRC via
+     [march_decrc_freed] on the shared path. *)
+  let m = perceus_module {|mod Test do
+    type SList = SNil | SCons(String, SList)
+    fn echo(ls : SList) : SList do
+      match ls do
+        SNil -> SNil
+        SCons(h, rest) -> ls
+      end
+    end
+  end|} in
+  let echo_fn =
+    List.find (fun fn -> fn.March_tir.Tir.fn_name = "echo") m.March_tir.Tir.tm_fns
+  in
+  (* The Cons arm used to return [EAtom (AVar ls)].  After the rewrite the
+     arm must end in an [EAlloc] whose tag ends in ".SCons" — i.e. the
+     constructor has been reconstructed from the extracted fields.  FBIP
+     may later promote that [EAlloc] into an [EReuse] that reuses the
+     scrutinee cell; either form proves the rewrite fired. *)
+  let rec contains_recon_with_suffix suffix = function
+    | March_tir.Tir.EAlloc (March_tir.Tir.TCon (t, _), _)
+    | March_tir.Tir.EReuse (_, March_tir.Tir.TCon (t, _), _) ->
+      let n = String.length t and sn = String.length suffix in
+      n >= sn && String.equal (String.sub t (n - sn) sn) suffix
+    | March_tir.Tir.ELet (_, a, b)
+    | March_tir.Tir.ESeq (a, b) ->
+      contains_recon_with_suffix suffix a || contains_recon_with_suffix suffix b
+    | March_tir.Tir.ELetRec (fns, body) ->
+      List.exists (fun f ->
+        contains_recon_with_suffix suffix f.March_tir.Tir.fn_body) fns
+      || contains_recon_with_suffix suffix body
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun br ->
+        contains_recon_with_suffix suffix br.March_tir.Tir.br_body) brs
+      || (match def with Some d -> contains_recon_with_suffix suffix d | None -> false)
+    | _ -> false
+  in
+  Alcotest.(check bool) "Cons arm reconstructed (EAlloc/EReuse SCons)" true
+    (contains_recon_with_suffix "SCons" echo_fn.March_tir.Tir.fn_body);
+  (* And the bare-scrutinee tail reference must be gone: no tail-position
+     [EAtom (AVar sv)] in any non-empty-br_vars arm whose scrutinee is sv. *)
+  let rec any_arm_tail_is_scrut = function
+    | March_tir.Tir.ECase (March_tir.Tir.AVar sv, brs, def) ->
+      let rec tail_is_scrut = function
+        | March_tir.Tir.EAtom (March_tir.Tir.AVar v) ->
+          String.equal v.March_tir.Tir.v_name sv.March_tir.Tir.v_name
+        | March_tir.Tir.ELet (_, _, b)
+        | March_tir.Tir.ESeq (_, b) -> tail_is_scrut b
+        | March_tir.Tir.ECase (_, brs, def) ->
+          List.exists (fun br -> tail_is_scrut br.March_tir.Tir.br_body) brs
+          || (match def with Some d -> tail_is_scrut d | None -> false)
+        | _ -> false
+      in
+      List.exists (fun br ->
+        br.March_tir.Tir.br_vars <> [] && tail_is_scrut br.March_tir.Tir.br_body
+      ) brs
+      || (match def with Some d -> any_arm_tail_is_scrut d | None -> false)
+    | March_tir.Tir.ELet (_, a, b)
+    | March_tir.Tir.ESeq (a, b) ->
+      any_arm_tail_is_scrut a || any_arm_tail_is_scrut b
+    | March_tir.Tir.ELetRec (fns, body) ->
+      List.exists (fun f ->
+        any_arm_tail_is_scrut f.March_tir.Tir.fn_body) fns
+      || any_arm_tail_is_scrut body
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun br ->
+        any_arm_tail_is_scrut br.March_tir.Tir.br_body) brs
+      || (match def with Some d -> any_arm_tail_is_scrut d | None -> false)
+    | _ -> false
+  in
+  Alcotest.(check bool) "no bare scrutinee tail in any destructuring arm" false
+    (any_arm_tail_is_scrut echo_fn.March_tir.Tir.fn_body)
 
 (* --- multiline tests --- *)
 
@@ -19520,6 +19768,15 @@ let () =
           Alcotest.test_case "pipeline no crash"         `Quick test_perceus_pipeline_no_crash;
           Alcotest.test_case "needs_rc TCon/TInt"        `Quick test_perceus_needs_rc_tcon;
           Alcotest.test_case "preserves fn count"        `Quick test_perceus_preserves_fn_count;
+          Alcotest.test_case "scrut-escape rewrite (rc50)" `Quick test_perceus_scrut_escape_rewrite;
+        ] );
+      ( "lean_theorem_properties", [
+          Alcotest.test_case "lin_drop_is_free"          `Quick test_thm_lin_drop_is_free;
+          Alcotest.test_case "aff_drop_is_free"          `Quick test_thm_aff_drop_is_free;
+          Alcotest.test_case "decrc_implies_unr"         `Quick test_thm_decrc_implies_unr;
+          Alcotest.test_case "drop_scalar_noop (Lin)"    `Quick test_thm_drop_scalar_noop_lin;
+          Alcotest.test_case "drop_scalar_noop (Unr)"    `Quick test_thm_drop_scalar_noop_unr;
+          Alcotest.test_case "defun preserves linearity" `Quick test_thm_defun_preserves_linearity;
         ] );
       ( "borrow_inference", [
           Alcotest.test_case "read-only param is borrowed"           `Quick test_borrow_read_only_param_is_borrowed;
