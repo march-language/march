@@ -165,10 +165,9 @@ let rec walk_decl ~file acc_e acc_b (d : decl) : unit =
     walk_expr ~file acc_e acc_b b.bind_expr
   | DMod (_, _, decls, _) ->
     List.iter (walk_decl ~file acc_e acc_b) decls
-  | DTest (td, _) ->
-    walk_expr ~file acc_e acc_b td.test_body
-  | DSetup (body, _) | DSetupAll (body, _) ->
-    walk_expr ~file acc_e acc_b body
+  (* Skip test declarations — their bodies always execute and would inflate
+     the coverage denominator to an artificially high value. *)
+  | DTest _ | DSetup _ | DSetupAll _ -> ()
   | DImpl (impl, _) ->
     List.iter (fun (_, fn) ->
       walk_fn_clauses ~file acc_e acc_b fn
