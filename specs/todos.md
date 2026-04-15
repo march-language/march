@@ -105,9 +105,25 @@ finding, and convention drift.  Listed in the recommended order.
   and variant = `10xx` bits set correctly.  String-sort order of v7
   UUIDs matches timestamp order — that's the whole point.  5 new
   tests in `test_march` `uuid stdlib` group.  1315 → 1320.
-- [ ] **DateTime timezones** — `LocalDateTime`, `Tz` ADT,
-  `to_utc`/`from_utc`, IANA identifiers.  Today's `DateTime` is
-  UTC-only.  Decide IANA-loading vs static map first.
+- ✅ **DateTime timezones — Phase A: fixed offsets** —
+  `stdlib/datetime.march`: new `Tz(name, offset_seconds)` and
+  `LocalDateTime(civil, tz)` ADTs.  Constructors:
+  `utc_zone`, `fixed_zone(name, secs)`, `fixed_zone_hours(h)`,
+  `fixed_zone_hm(h, m)` (auto-derives ISO label).  Accessors:
+  `zone_name`, `zone_offset_seconds`, `format_offset` (`"Z"`,
+  `"+HH:MM"`, `"-HH:MM"`).  Construction:
+  `local_of`, `local_now`, `local_from_timestamp`,
+  `local_from_utc`.  Conversion: `local_to_utc`,
+  `local_to_timestamp`, `local_with_zone` (same instant, different
+  wall clock).  Format extension: `local_format` adds `%z` (compact
+  `+HHMM`), `%:z` (ISO `+HH:MM`/`Z`), `%Z` (zone name).  Parse:
+  `parse_offset` accepts `2024-01-15T10:30:45Z`,
+  `2024-01-15 10:30:45+05:30`, and the compact `±HHMM` form,
+  rejecting anything without an offset suffix.  Phase B (DST-aware
+  IANA zones) deferred — needs tzdata loading or hard-coded
+  transition rules; the fixed-offset primitive shipping now is
+  the substrate that approach will sit on top of.  11 new tests in
+  `test_march` `stdlib_datetime` group; `test_march` 1330 → 1341.
 - [ ] **Streams (`Seq.from_*`)** — `Seq.from_file`, `Seq.from_http`,
   `Seq.from_channel`, `Seq.batched`, plus a back-pressure sketch.
   Today's `Seq` is a church-encoded fold with no source constructors.

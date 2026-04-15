@@ -259,14 +259,15 @@ mod DateTime do
   end
 
   doc """
-  Parse a DateTime from a string in UTC.
-  Supports: "YYYY-MM-DD" and "YYYY-MM-DD HH:MM:SS".
-  Returns Ok(DateTime) or Err(message) — rejects out-of-range fields
-  (month 13, day 32, hour 25, …) rather than constructing a garbage
-  calendar value.
+  Parse a UTC DateTime from a string.  Accepts `"YYYY-MM-DD"` and
+  `"YYYY-MM-DD HH:MM:SS"`.  Returns `Ok(DateTime)` or `Err(message)` —
+  rejects out-of-range fields (month 13, day 32, hour 25, …) rather
+  than constructing a garbage calendar value.
 
-  Note: this module is timezone-naive.  All DateTimes represent UTC; no
-  offset parsing is supported.
+  This entry point is timezone-naive: the returned `DateTime` always
+  represents UTC.  For ISO 8601 strings with an explicit offset
+  (`Z`, `+HH:MM`, `-HHMM`, …) use `parse_offset` to get a
+  `LocalDateTime` whose zone is recovered from the suffix.
   """
   fn parse(s) do
     let len = string_byte_length(s)
@@ -323,6 +324,324 @@ mod DateTime do
       end
       end
     end
+  end
+
+  -- ---- Timezone support (Phase A: fixed offsets only) ----
+  --
+  -- `Tz(name, offset_seconds)` represents a zone with a constant offset east
+  -- of UTC.  `offset_seconds` is positive for zones east of UTC (UTC+05:30 →
+  -- +19800) and negative for zones west (UTC−08:00 → −28800).
+  --
+  -- DST-aware zones (America/New_York, Europe/London, Pacific/Auckland, …)
+  -- are deliberately out of scope for this phase — they require loading
+  -- IANA tzdata or hard-coding transition rules, and the ecosystem pattern
+  -- is to layer that on top of a fixed-offset primitive rather than bake
+  -- it in.  For now any zone you need must be modeled as a fixed offset;
+  -- a future phase can add IANA support and keep this primitive.
+  --
+  -- `LocalDateTime(civil, tz)` pairs a calendar "wall clock" DateTime with
+  -- its zone.  `local_to_utc` and `local_from_utc` convert back and forth;
+  -- `local_with_zone` shifts to another zone preserving the instant.
+  type Tz = Tz(String, Int)
+  type LocalDateTime = LocalDateTime(DateTime, Tz)
+
+  -- ---- Tz construction ----
+
+  doc "The UTC zone (offset 0, name \"UTC\").  Format renders as \"Z\"."
+  fn utc_zone() : Tz do
+    Tz("UTC", 0)
+  end
+
+  doc """
+  Build a fixed-offset zone from an explicit label and second offset.
+  `offset_seconds` is positive east of UTC, negative west.  Panics if
+  the offset is outside ±14 hours (the widest real-world legal range).
+  """
+  fn fixed_zone(name : String, offset_seconds : Int) : Tz do
+    if offset_seconds > 50400 || offset_seconds < -50400 do
+      panic("DateTime.fixed_zone: offset out of range (±14h): "
+            ++ int_to_string(offset_seconds))
+    else Tz(name, offset_seconds) end
+  end
+
+  doc """
+  Convenience constructor: fixed offset in whole hours.  The name is
+  auto-derived in ISO 8601 form (e.g. `"+05:00"`, `"-08:00"`, `"Z"`).
+  For custom labels use `fixed_zone(name, seconds)`.
+  """
+  fn fixed_zone_hours(hours : Int) : Tz do
+    let secs = hours * 3600
+    let z = Tz("", secs)
+    Tz(format_offset(z), secs)
+  end
+
+  doc """
+  Convenience constructor: fixed offset as `(hours, minutes)` with a
+  single sign applied by `hours` (per ISO convention).  For UTC+05:30
+  pass `(5, 30)`; for UTC−03:30 pass `(-3, 30)` (minutes always
+  positive, sign comes from `hours`).  Name is auto-derived.
+  """
+  fn fixed_zone_hm(hours : Int, minutes : Int) : Tz do
+    if minutes < 0 || minutes >= 60 do
+      panic("DateTime.fixed_zone_hm: minutes must be in [0, 60)")
+    else do
+      let sign = if hours < 0 do -1 else 1 end
+      let secs = sign * (int_abs(hours) * 3600 + minutes * 60)
+      let z = Tz("", secs)
+      Tz(format_offset(z), secs)
+    end end
+  end
+
+  -- ---- Tz accessors ----
+
+  doc "Return the zone's human label (e.g. \"UTC\", \"+05:30\", \"PST\")."
+  fn zone_name(tz : Tz) : String do
+    match tz do Tz(n, _) -> n end
+  end
+
+  doc "Return the zone's offset from UTC in seconds (east is positive)."
+  fn zone_offset_seconds(tz : Tz) : Int do
+    match tz do Tz(_, o) -> o end
+  end
+
+  doc """
+  Format a zone's offset as ISO 8601: \"Z\" for UTC, \"+HH:MM\" or
+  \"-HH:MM\" otherwise.  Seconds-of-offset are ignored (no real zone
+  uses sub-minute offsets since 1972).
+  """
+  fn format_offset(tz : Tz) : String do
+    match tz do
+    Tz(_, 0) -> "Z"
+    Tz(_, o) -> do
+      let sign = if o < 0 do "-" else "+" end
+      let abs_o = int_abs(o)
+      let h = int_div(abs_o, 3600)
+      let m = int_div(int_mod(abs_o, 3600), 60)
+      sign ++ pad_int(h, 2) ++ ":" ++ pad_int(m, 2)
+    end
+    end
+  end
+
+  -- ---- LocalDateTime construction ----
+
+  doc """
+  Pair a civil `DateTime` (interpreted as the wall-clock time in `tz`)
+  with its zone.  No conversion happens — `dt` is used as-is.  Use
+  `local_from_utc` if you start from a UTC instant.
+  """
+  fn local_of(dt : DateTime, tz : Tz) : LocalDateTime do
+    LocalDateTime(dt, tz)
+  end
+
+  doc "Return the current wall-clock time in zone `tz`."
+  fn local_now(tz : Tz) : LocalDateTime do
+    local_from_timestamp(now(), tz)
+  end
+
+  doc "Build a `LocalDateTime` from a UTC instant expressed as a Unix timestamp (Int seconds)."
+  fn local_from_timestamp(ts : Int, tz : Tz) : LocalDateTime do
+    let civil = from_timestamp(ts + zone_offset_seconds(tz))
+    LocalDateTime(civil, tz)
+  end
+
+  doc "Reinterpret a UTC `DateTime` as the same instant in zone `tz`."
+  fn local_from_utc(utc_dt : DateTime, tz : Tz) : LocalDateTime do
+    local_from_timestamp(to_timestamp(utc_dt), tz)
+  end
+
+  -- ---- LocalDateTime accessors ----
+
+  doc "Return the civil (wall-clock) `DateTime` component."
+  fn local_datetime(ldt : LocalDateTime) : DateTime do
+    match ldt do LocalDateTime(dt, _) -> dt end
+  end
+
+  doc "Return the zone of a `LocalDateTime`."
+  fn local_zone(ldt : LocalDateTime) : Tz do
+    match ldt do LocalDateTime(_, tz) -> tz end
+  end
+
+  -- ---- Conversions ----
+
+  doc """
+  Convert a `LocalDateTime` to the corresponding UTC `DateTime`.
+  Subtracts the zone's offset from the civil time.
+  """
+  fn local_to_utc(ldt : LocalDateTime) : DateTime do
+    match ldt do
+    LocalDateTime(dt, tz) -> add_seconds(dt, 0 - zone_offset_seconds(tz))
+    end
+  end
+
+  doc "Unix timestamp (UTC seconds) of the instant this `LocalDateTime` denotes."
+  fn local_to_timestamp(ldt : LocalDateTime) : Int do
+    to_timestamp(local_to_utc(ldt))
+  end
+
+  doc """
+  Return the same instant rendered in a different zone.
+  `local_with_zone(ldt, z)` satisfies
+  `local_to_timestamp(result) == local_to_timestamp(ldt)` (same instant,
+  different wall-clock).
+  """
+  fn local_with_zone(ldt : LocalDateTime, new_tz : Tz) : LocalDateTime do
+    local_from_timestamp(local_to_timestamp(ldt), new_tz)
+  end
+
+  -- ---- Formatting / parsing ----
+
+  doc """
+  Format a `LocalDateTime`.  All `DateTime.format` specifiers are supported
+  (`%Y %m %d %H %M %S %%`) plus:
+    `%z`  — offset without colon, e.g. `+0530`, `-0800`, `+0000`
+    `%:z` — ISO 8601 offset, e.g. `+05:30`, `-08:00`, `Z` for UTC
+    `%Z`  — zone name (whatever was passed to the Tz constructor)
+  """
+  fn local_format(ldt : LocalDateTime, fmt : String) : String do
+    match ldt do
+    LocalDateTime(dt, tz) -> do
+      let base = format(dt, fmt)
+      let iso_off = format_offset(tz)
+      let compact_off =
+        match tz do
+        Tz(_, 0) -> "+0000"
+        Tz(_, o) -> do
+          let sign = if o < 0 do "-" else "+" end
+          let abs_o = int_abs(o)
+          let h = int_div(abs_o, 3600)
+          let m = int_div(int_mod(abs_o, 3600), 60)
+          sign ++ pad_int(h, 2) ++ pad_int(m, 2)
+        end
+        end
+      -- Replace `%:z` before `%z` so the colon form wins the prefix match.
+      let s1 = string_replace_all(base, "%:z", iso_off)
+      let s2 = string_replace_all(s1, "%z",  compact_off)
+      string_replace_all(s2, "%Z", zone_name(tz))
+    end
+    end
+  end
+
+  -- Parse an offset suffix from position 0 of `s`.  Accepts `Z`, `+HH:MM`,
+  -- `-HH:MM`, `+HHMM`, `-HHMM`.  Returns `Some((tz, rest))` on success.
+  pfn parse_offset_suffix(s : String) : Option((Tz, String)) do
+    let len = string_byte_length(s)
+    if len == 0 do None
+    else do
+      let first = string_slice(s, 0, 1)
+      if first == "Z" do Some((utc_zone(), string_slice(s, 1, len - 1)))
+      else do
+        if first != "+" && first != "-" do None
+        else do
+          let sign = if first == "-" do -1 else 1 end
+          let rest = string_slice(s, 1, len - 1)
+          match parse_digits(rest, 2) do
+          None -> None
+          Some((h, r1)) ->
+            -- Accept either "HH:MM" or "HHMM" forms
+            match expect_prefix(r1, ":") do
+            Some(r2) ->
+              match parse_digits(r2, 2) do
+              None -> None
+              Some((m, r3)) -> do
+                let offset = sign * (h * 3600 + m * 60)
+                Some((fixed_zone_hm(sign * h, m), r3))
+              end
+              end
+            None ->
+              match parse_digits(r1, 2) do
+              None -> None
+              Some((m, r3)) -> do
+                let offset = sign * (h * 3600 + m * 60)
+                Some((fixed_zone_hm(sign * h, m), r3))
+              end
+              end
+            end
+          end
+        end end
+      end end
+    end end
+  end
+
+  -- Parse the civil part of a datetime followed by an offset suffix.
+  -- Accepts `YYYY-MM-DDTHH:MM:SS<off>` or `YYYY-MM-DD HH:MM:SS<off>`;
+  -- `<off>` may be `Z`, `+HH:MM`, `-HH:MM`, `+HHMM`, or `-HHMM`.
+  -- The `T` or space separator is required (unlike the UTC-only `parse`
+  -- which also accepts bare dates).
+  doc """
+  Parse an ISO 8601 datetime with explicit offset, e.g.
+  `"2024-01-15T10:30:45Z"` or `"2024-01-15 10:30:45+05:30"`.
+  Returns `Ok(LocalDateTime)` or `Err(msg)`.
+
+  Bare UTC instants (no offset suffix) parse as UTC.  The `T`/space
+  separator is required.  Offsets may use `:` (ISO form) or the compact
+  `+HHMM` form.  Civil fields are range-validated.
+  """
+  fn parse_offset(s : String) : Result(LocalDateTime, String) do
+    if string_byte_length(s) < 19 do
+      Err("string too short for ISO 8601 datetime: " ++ s)
+    else do
+      match parse_digits(s, 4) do
+      None -> Err("expected 4-digit year in: " ++ s)
+      Some((y, r1)) ->
+        match expect_prefix(r1, "-") do
+        None -> Err("expected '-' after year")
+        Some(r2) ->
+          match parse_digits(r2, 2) do
+          None -> Err("expected 2-digit month")
+          Some((m, r3)) ->
+            match expect_prefix(r3, "-") do
+            None -> Err("expected '-' after month")
+            Some(r4) ->
+              match parse_digits(r4, 2) do
+              None -> Err("expected 2-digit day")
+              Some((d, r5)) -> do
+                -- Separator: either `T` or ` `.
+                let sep_rest =
+                  match expect_prefix(r5, "T") do
+                  Some(rest) -> Some(rest)
+                  None -> expect_prefix(r5, " ")
+                  end
+                match sep_rest do
+                None -> Err("expected 'T' or ' ' after date")
+                Some(r6) ->
+                  match parse_digits(r6, 2) do
+                  None -> Err("expected 2-digit hour")
+                  Some((h, r7)) ->
+                    match expect_prefix(r7, ":") do
+                    None -> Err("expected ':' after hour")
+                    Some(r8) ->
+                      match parse_digits(r8, 2) do
+                      None -> Err("expected 2-digit minute")
+                      Some((mi, r9)) ->
+                        match expect_prefix(r9, ":") do
+                        None -> Err("expected ':' after minute")
+                        Some(r10) ->
+                          match parse_digits(r10, 2) do
+                          None -> Err("expected 2-digit second")
+                          Some((sc, r11)) ->
+                            match parse_offset_suffix(r11) do
+                            None -> Err("expected offset (Z / +HH:MM / -HH:MM) after time")
+                            Some((tz, trail)) ->
+                              if string_byte_length(trail) > 0 do
+                                Err("unexpected trailing text after offset: " ++ trail)
+                              else match validate_datetime(y, m, d, h, mi, sc) do
+                                Err(e)    -> Err(e)
+                                Ok(civil) -> Ok(LocalDateTime(civil, tz))
+                              end end
+                            end
+                          end
+                        end
+                      end
+                    end
+                  end
+                end
+              end
+              end
+            end
+          end
+        end
+      end
+    end end
   end
 
 end

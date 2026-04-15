@@ -16310,6 +16310,137 @@ let test_datetime_leap_year () =
   end|} in
   Alcotest.(check int) "1972-02-29 month=2 day=29" 229 (vint (call_fn env2 "g" []))
 
+(* ── DateTime timezone tests (Phase A: fixed offsets) ────────────────────── *)
+
+let test_datetime_utc_zone_format () =
+  let env = eval_with_datetime {|mod Test do
+    fn f() do DateTime.format_offset(DateTime.utc_zone()) end
+  end|} in
+  Alcotest.(check string) "UTC zone formats as Z" "Z" (vstr (call_fn env "f" []))
+
+let test_datetime_fixed_zone_hours_format () =
+  let env = eval_with_datetime {|mod Test do
+    fn pos() do DateTime.format_offset(DateTime.fixed_zone_hours(5))  end
+    fn neg() do DateTime.format_offset(DateTime.fixed_zone_hours(-8)) end
+  end|} in
+  Alcotest.(check string) "+05:00 format" "+05:00" (vstr (call_fn env "pos" []));
+  Alcotest.(check string) "-08:00 format" "-08:00" (vstr (call_fn env "neg" []))
+
+let test_datetime_fixed_zone_hm_format () =
+  let env = eval_with_datetime {|mod Test do
+    fn ist() do DateTime.format_offset(DateTime.fixed_zone_hm(5, 30))  end
+    fn nst() do DateTime.format_offset(DateTime.fixed_zone_hm(-3, 30)) end
+  end|} in
+  Alcotest.(check string) "+05:30 format" "+05:30" (vstr (call_fn env "ist" []));
+  Alcotest.(check string) "-03:30 format" "-03:30" (vstr (call_fn env "nst" []))
+
+let test_datetime_local_from_utc_civil () =
+  (* UTC 10:30 in IST (+5:30) → wall clock 16:00 *)
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      let utc = DateTime(Date(2024, 1, 15), Time(10, 30, 45))
+      let ist = DateTime.fixed_zone_hm(5, 30)
+      DateTime.local_format(DateTime.local_from_utc(utc, ist),
+                            "%Y-%m-%d %H:%M:%S %:z")
+    end
+  end|} in
+  Alcotest.(check string) "UTC 10:30 in IST = 16:00 +05:30"
+    "2024-01-15 16:00:45 +05:30" (vstr (call_fn env "f" []))
+
+let test_datetime_local_to_utc_roundtrip () =
+  (* civil 16:00 in IST → UTC 10:30 *)
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      let utc = DateTime(Date(2024, 1, 15), Time(10, 30, 45))
+      let ist = DateTime.fixed_zone_hm(5, 30)
+      let l = DateTime.local_from_utc(utc, ist)
+      DateTime.format(DateTime.local_to_utc(l), "%Y-%m-%d %H:%M:%S")
+    end
+  end|} in
+  Alcotest.(check string) "round-trip back to UTC"
+    "2024-01-15 10:30:45" (vstr (call_fn env "f" []))
+
+let test_datetime_local_with_zone () =
+  (* IST (+5:30) wall 16:00 → PST (-8) wall 02:30 of same day, same instant *)
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      let utc = DateTime(Date(2024, 1, 15), Time(10, 30, 45))
+      let ist = DateTime.fixed_zone_hm(5, 30)
+      let pst = DateTime.fixed_zone_hours(-8)
+      let in_ist = DateTime.local_from_utc(utc, ist)
+      DateTime.local_format(DateTime.local_with_zone(in_ist, pst),
+                            "%Y-%m-%d %H:%M:%S %:z")
+    end
+  end|} in
+  Alcotest.(check string) "shift IST→PST same instant"
+    "2024-01-15 02:30:45 -08:00" (vstr (call_fn env "f" []))
+
+let test_datetime_parse_offset_iso () =
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      match DateTime.parse_offset("2024-01-15T10:30:45+05:30") do
+      Ok(l) -> DateTime.local_format(l, "%Y-%m-%d %H:%M:%S %:z")
+      Err(e) -> "err: " ++ e
+      end
+    end
+  end|} in
+  Alcotest.(check string) "parse +05:30 ISO"
+    "2024-01-15 10:30:45 +05:30" (vstr (call_fn env "f" []))
+
+let test_datetime_parse_offset_z () =
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      match DateTime.parse_offset("2024-01-15T10:30:45Z") do
+      Ok(l) -> DateTime.local_format(l, "%Y-%m-%d %H:%M:%S %:z")
+      Err(e) -> "err: " ++ e
+      end
+    end
+  end|} in
+  Alcotest.(check string) "parse Z (UTC)"
+    "2024-01-15 10:30:45 Z" (vstr (call_fn env "f" []))
+
+let test_datetime_parse_offset_compact () =
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      match DateTime.parse_offset("2024-01-15T10:30:45-0800") do
+      Ok(l) -> DateTime.local_format(l, "%z")
+      Err(e) -> "err: " ++ e
+      end
+    end
+  end|} in
+  Alcotest.(check string) "parse -0800 compact form"
+    "-0800" (vstr (call_fn env "f" []))
+
+let test_datetime_parse_offset_invalid () =
+  (* Missing offset suffix → error *)
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      match DateTime.parse_offset("2024-01-15T10:30:45") do
+      Ok(_)  -> "ok"
+      Err(_) -> "err"
+      end
+    end
+  end|} in
+  Alcotest.(check string) "missing offset rejected"
+    "err" (vstr (call_fn env "f" []))
+
+let test_datetime_local_to_timestamp_invariant () =
+  (* Same UTC instant via two different zones → same Unix timestamp. *)
+  let env = eval_with_datetime {|mod Test do
+    fn f() do
+      let utc = DateTime(Date(2024, 6, 1), Time(12, 0, 0))
+      let ist = DateTime.fixed_zone_hm(5, 30)
+      let pst = DateTime.fixed_zone_hours(-8)
+      let a = DateTime.local_from_utc(utc, ist)
+      let b = DateTime.local_from_utc(utc, pst)
+      let ta = DateTime.local_to_timestamp(a)
+      let tb = DateTime.local_to_timestamp(b)
+      ta - tb
+    end
+  end|} in
+  Alcotest.(check int) "same instant in different zones → same ts"
+    0 (vint (call_fn env "f" []))
+
 (* ── JSON stdlib tests ───────────────────────────────────────────────────── *)
 
 let eval_with_json src =
@@ -20376,6 +20507,17 @@ let () =
         Alcotest.test_case "parse datetime"          `Quick test_datetime_parse_datetime;
         Alcotest.test_case "compare"                 `Quick test_datetime_compare;
         Alcotest.test_case "leap year 1972"          `Quick test_datetime_leap_year;
+        Alcotest.test_case "tz: utc format = Z"      `Quick test_datetime_utc_zone_format;
+        Alcotest.test_case "tz: fixed_zone_hours"    `Quick test_datetime_fixed_zone_hours_format;
+        Alcotest.test_case "tz: fixed_zone_hm"       `Quick test_datetime_fixed_zone_hm_format;
+        Alcotest.test_case "tz: local_from_utc civil" `Quick test_datetime_local_from_utc_civil;
+        Alcotest.test_case "tz: local_to_utc round-trip" `Quick test_datetime_local_to_utc_roundtrip;
+        Alcotest.test_case "tz: local_with_zone"     `Quick test_datetime_local_with_zone;
+        Alcotest.test_case "tz: parse +05:30 ISO"    `Quick test_datetime_parse_offset_iso;
+        Alcotest.test_case "tz: parse Z"             `Quick test_datetime_parse_offset_z;
+        Alcotest.test_case "tz: parse compact -0800" `Quick test_datetime_parse_offset_compact;
+        Alcotest.test_case "tz: parse rejects no offset" `Quick test_datetime_parse_offset_invalid;
+        Alcotest.test_case "tz: same instant invariant" `Quick test_datetime_local_to_timestamp_invariant;
       ]);
       ("stdlib_json", [
         Alcotest.test_case "parse null"              `Quick test_json_parse_null;
