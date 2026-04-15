@@ -1,6 +1,6 @@
 # Lean 4 Mechanization: Perceus, Linear Contexts, and FBIP Soundness
 
-> **Status: implemented.** 22 definitions + theorems, no `sorry`s, builds
+> **Status: implemented.** 28 definitions + theorems, no `sorry`s, builds
 > cleanly under `leanprover/lean4:v4.29.0`.
 
 This document records the first completed chunk of the plan in
@@ -18,11 +18,12 @@ A standalone Lean 4 project at `/Users/80197052/code/march-lean/`:
 march-lean/
 ├── lakefile.toml
 ├── lean-toolchain               leanprover/lean4:v4.29.0
-├── MarchLean.lean               root — imports the three modules below
+├── MarchLean.lean               root — imports the four modules below
 └── MarchLean/
     ├── Perceus.lean             RC-insertion decision
     ├── LinearContext.lean       Split relation + FBIP uniqueness
-    └── Heap.lean                Runtime heap model + FBIP soundness
+    ├── Heap.lean                Runtime heap model + FBIP soundness
+    └── Defun.lean               Defunctionalization preserves capture linearity
 ```
 
 No dependencies beyond core Lean 4 (no Mathlib).
@@ -125,6 +126,58 @@ have proved via `fbip_soundness` that `rc = 1` at the matched cell, and
 no other address is touched by the overwrite, then no consistency
 invariant is broken for any *other* binding.
 
+### 3.4 `MarchLean/Defun.lean`
+
+Mechanizes the invariant that the bug-fix commit `71d18400` restored:
+**closure capture must preserve `v_lin` on free variables.** Added after
+the fix for a similar-class bug in `borrow.ml` (commit `6065f30`) made it
+clear that RC-insertion bugs often live one layer upstream of Perceus,
+in the passes that prepare Perceus's input.
+
+**The pre-fix bug (from commit `71d18400`'s message):**
+> Free variables were collected as `(string * Tir.ty)` pairs, dropping
+> the `v_lin` field entirely. Every captured variable was then reconstructed
+> with `v_lin = Unr`, regardless of whether the original was Lin or Aff.
+> [...] a Lin variable captured by a closure would appear Unr inside the
+> lifted apply function [...] causing Perceus to skip the RC operations it
+> would generate for a linearly-typed binding.
+
+This is a direct violation of `Perceus.lin_drop_is_free` — a `Lin` binding
+relabeled as `Unr` reaches `drop_var` with the wrong qualifier and gets
+`EDecRC` where `EFree` was required.
+
+**Data:**
+
+| Declaration | Meaning |
+|---|---|
+| `DExpr` | Minimal expression model: `DHole` (opaque body) + `DLet v rest` |
+| `lift_body (fvs, body)` | **Correct** transformation — folds `DLet fv rest` over `fvs`, propagating each `Var` intact |
+| `lift_body_unr_stamped (fvs, body)` | **Buggy** transformation — rebinds each `fv` with `v_lin = Unr` (what 71d18400 fixed) |
+| `outerBinders` | Peel the outer `DLet` binders off a lifted expression |
+
+**Theorems:**
+
+| Theorem | Statement |
+|---|---|
+| `lift_preserves_fvs` | **Correct lift preserves free variables exactly**: `outerBinders (lift_body fvs DHole) = fvs`, including every field (name, ty, v_lin) |
+| `lift_preserves_linearity` | Corollary — `v_lin` is preserved on every captured variable |
+| `buggy_lift_loses_linearity` | **Counterexample**: given a `Lin` free variable, the buggy lifter produces a binder with `v_lin = Unr ≠ Lin` |
+| `correct_lift_preserves_lin_precondition` | Bridge to Perceus — after the correct lift, the captured `Lin` variable still satisfies the precondition of `lin_drop_is_free` |
+
+The counterexample theorem is the headline: it exhibits a *concrete* input
+on which the buggy transformation corrupts linearity. A proof this simple
+would have flagged the bug the moment the buggy code was committed —
+caught by `#check` on the theorem, not by a mysterious RC underflow weeks
+later in a downstream test suite.
+
+**Scope note.** This is a pure structural property of the transformation —
+no operational semantics required. It catches bugs at the level of "defun
+produces correct syntax," not "defun preserves semantic behavior." For
+the class of bug we mechanized (`71d18400`), syntax-level is exactly where
+the bug manifests — the `v_lin` field was being rewritten in the syntax
+tree. For semantic preservation we would need operational semantics (see
+§5 below).
+
 ---
 
 ## 4. The static-to-dynamic bridge — why it matters
@@ -224,14 +277,24 @@ grep -n 'sorry\|admit' MarchLean/*.lean   # should return nothing
 
 In descending order of value-per-effort:
 
-- **(multi-session)** Formalize the TIR operational semantics and prove
-  `RCtx.Consistent` preservation under each reduction step. This turns
-  the current *static* bridge into an operational claim about the full
-  Perceus RC discipline.
+- **(2–3 sessions)** Borrow inference soundness (`lib/tir/borrow.ml`).
+  Recent bug `6065f30` (field-escape through pattern matches) is exactly
+  the class this would catch — at the syntactic level. Catching the
+  deeper class of bug (where `Lower` feeds `TVar "_"` placeholders into
+  the analysis) would need to also model `Lower`, raising the scope to
+  4–5 sessions.
 
-- **(multi-session)** Prove subject reduction and progress for the core
-  ANF calculus. Mostly textbook; the payoff is catching interaction
-  bugs with linearity that informal proofs don't cover.
+- **(3–4 sessions)** Operational semantics for TIR. Standalone
+  investment, but unlocks:
+  - Turning `RCtx.Consistent` from hypothesis to invariant-under-reduction
+  - "Real" soundness claims for borrow inference and escape analysis
+  - Subject reduction and progress from the original plan
+  This is the highest-leverage infrastructure work.
+
+- **(4–6 sessions)** Escape analysis soundness (`lib/tir/escape.ml`).
+  Meaningful version needs operational semantics as a prerequisite —
+  without it, what you can prove reduces to "the analysis is consistent
+  with its own inductive rules," close to tautological.
 
 - **(multi-week)** Session types. Binary session duality is a one-hour
   proof; progress and subject reduction for the process calculus is
@@ -247,3 +310,11 @@ like string constant folding are semantics-preserving. The rewrites are
 obvious by inspection; the proofs teach nothing. Pick targets where
 getting it wrong has non-obvious consequences — that's where
 mechanization actually earns its keep.
+
+The `Defun.lean` result is a useful pattern: identify a real bug that
+landed + fix, write a minimal structural proof that catches its class,
+and include the *buggy* variant as a counterexample theorem. The buggy
+variant serves as a living regression check — if someone tries to
+"simplify" the defun transformation in a way that drops `v_lin`, the
+Lean file won't compile. That's worth more than a test case, because
+tests only fire when executed.
