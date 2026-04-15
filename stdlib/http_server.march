@@ -38,14 +38,29 @@ mod HttpServer do
 
   -- Conn accessors
 
+  doc "Return the request method atom (`:get`, `:post`, …) of a `Conn`."
   fn method(conn) do
     match conn do
     Conn(_, m, _, _, _, _, _, _, _, _, _, _, _) -> m
     end
   end
 
-  -- Convert a method atom to its string name (for logging, responses, etc.)
-  -- Atoms use lowercase: :get, :post, :put, :patch, :delete, :head, :options
+  doc """
+  Convert a request-method atom to its uppercase string name, suitable
+  for logging, response bodies, or rebuilding a request line.  Returns
+  `"UNKNOWN"` for any atom that is not one of the recognized HTTP verbs.
+  Atoms use lowercase by convention: `:get`, `:post`, `:put`, `:patch`,
+  `:delete`, `:head`, `:options`, `:trace`, `:connect`.
+
+  ## Examples
+
+      march> HttpServer.method_to_string(:get)
+      "GET"
+      march> HttpServer.method_to_string(:patch)
+      "PATCH"
+      march> HttpServer.method_to_string(:not_a_verb)
+      "UNKNOWN"
+  """
   fn method_to_string(m) do
     if m == :get do "GET"
     else if m == :post do "POST"

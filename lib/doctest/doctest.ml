@@ -17,9 +17,14 @@
       march> Option.unwrap(None)
       ** panic: Option.unwrap called on None
 
-    The standard indentation is 4 spaces, which is stripped before matching
-    the prompt prefixes.  Any leading whitespace beyond 4 spaces is kept
-    (relevant for multi-line continuation bodies). *)
+    Indentation is auto-detected from the doc string's minimum leading
+    whitespace across non-blank lines, then stripped uniformly before
+    matching the prompt prefixes.  This means doc strings inside `mod`
+    declarations (whose content is conventionally indented 6 spaces:
+    2 from the mod body + 4 for the code block) are handled the same
+    as top-level doc strings (4 spaces).  Any leading whitespace beyond
+    the dedent baseline is preserved (relevant for multi-line continuation
+    bodies). *)
 
 (** What a doctest example expects to happen. *)
 type expected =
@@ -47,6 +52,28 @@ let strip_indent n s =
   in
   let start = count 0 in
   String.sub s start (len - start)
+
+(** Count leading-space prefix length of [s], or [None] if [s] is blank
+    (only spaces or empty). *)
+let leading_spaces s =
+  let len = String.length s in
+  let rec count i =
+    if i >= len then None  (* All spaces or empty *)
+    else if s.[i] = ' ' then count (i + 1)
+    else Some i
+  in
+  count 0
+
+(** Auto-detect the dedent amount: the minimum leading-whitespace count
+    across all non-blank lines.  Returns 0 when there are no non-blank
+    lines. *)
+let detect_dedent lines =
+  List.fold_left (fun acc line ->
+    match leading_spaces line with
+    | None -> acc
+    | Some n -> min acc n
+  ) max_int lines
+  |> (fun n -> if n = max_int then 0 else n)
 
 (** Return [true] if [s] starts with [prefix]. *)
 let starts_with prefix s =
@@ -82,9 +109,16 @@ let extract doc =
   in
 
   let lines = String.split_on_char '\n' doc in
+  (* Auto-detect dedent so that doc strings inside `mod` declarations
+     (typically 6-space indent: 2 for mod body + 4 for code block) and
+     top-level doc strings (4-space indent) both work without per-file
+     configuration.  Then add 4 to that baseline to skip the standard
+     code-block indent that puts `march>` and continuation lines deeper
+     than the surrounding prose. *)
+  let baseline = detect_dedent lines in
+  let dedent   = baseline + 4 in
   List.iter (fun raw_line ->
-    (* Strip 4 spaces of standard doc-comment indent *)
-    let line    = strip_indent 4 raw_line in
+    let line    = strip_indent dedent raw_line in
     let trimmed = String.trim line in
     if starts_with prompt line then begin
       (* New example — flush any previous one without expected output *)

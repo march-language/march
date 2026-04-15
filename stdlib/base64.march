@@ -69,23 +69,31 @@ mod Base64 do
   -- ── Public API ────────────────────────────────────────────────────────────
 
   doc """
-  Encode a Bytes value as standard Base64 (RFC 4648 §4, with = padding).
+  Encode a Bytes value as standard Base64 (RFC 4648 §4, with `=` padding).
 
-      let b = Bytes.from_string("Hello")
-      Base64.encode(b)  -- "SGVsbG8="
+  ## Examples
+
+      march> Base64.encode(Bytes.from_string("Hello"))
+      "SGVsbG8="
+      march> Base64.encode(Bytes.from_string(""))
+      ""
   """
   fn encode(data) do
     base64_encode(data)
   end
 
   doc """
-  Decode a standard Base64 string to Bytes.
+  Decode a standard Base64 string to `Bytes`.
 
   Returns `Ok(Bytes)` on success or `Err(:invalid)` if the input is not
   valid Base64 (wrong length, bad characters, or bad padding).
 
-      Base64.decode("SGVsbG8=")   -- Ok(Bytes for "Hello")
-      Base64.decode("!!")         -- Err(:invalid)
+  ## Examples
+
+      march> Base64.decode("SGVsbG8=")
+      Ok(Bytes([72, 101, 108, 108, 111]))
+      march> Base64.decode("!!")
+      Err(:invalid)
   """
   fn decode(s) do
     match base64_decode(s) do
@@ -97,23 +105,30 @@ mod Base64 do
   doc """
   Encode a Bytes value as URL-safe Base64 (RFC 4648 §5).
 
-  Uses - and _ instead of + and /, and omits trailing = padding.
+  Uses `-` and `_` instead of `+` and `/`, and omits trailing `=` padding.
   The result is safe to embed in URLs and filenames without escaping.
 
-      let b = Bytes.from_string("Hello")
-      Base64.url_encode(b)  -- "SGVsbG8"
+  ## Examples
+
+      march> Base64.url_encode(Bytes.from_string("Hello"))
+      "SGVsbG8"
   """
   fn url_encode(data) do
     to_url_alphabet(base64_encode(data))
   end
 
   doc """
-  Decode a URL-safe Base64 string (- and _, no padding) to Bytes.
+  Decode a URL-safe Base64 string (`-`/`_`, no padding) to `Bytes`.
 
-  Padding is added automatically before decoding.
+  Padding is added automatically before decoding so callers don't have
+  to track which variant they have on hand.
 
-      Base64.url_decode("SGVsbG8")  -- Ok(Bytes for "Hello")
-      Base64.url_decode("!!")       -- Err(:invalid)
+  ## Examples
+
+      march> Base64.url_decode("SGVsbG8")
+      Ok(Bytes([72, 101, 108, 108, 111]))
+      march> Base64.url_decode("!!")
+      Err(:invalid)
   """
   fn url_decode(s) do
     match base64_decode(from_url_alphabet(s)) do
@@ -125,11 +140,13 @@ mod Base64 do
   doc """
   Encode a Bytes value as MIME Base64 (RFC 2045).
 
-  Lines are at most 76 characters long, separated by CRLF (\\r\\n).
+  Lines are at most 76 characters long, separated by CRLF (`\\r\\n`).
   Suitable for encoding binary attachments in email or multipart bodies.
 
-      Base64.mime_encode(Bytes.from_string("Hello World"))
-      -- "SGVsbG8gV29ybGQ="   (fits in one line for short inputs)
+  ## Examples
+
+      march> Base64.mime_encode(Bytes.from_string("Hello World"))
+      "SGVsbG8gV29ybGQ="
   """
   fn mime_encode(data) do
     to_mime_lines(base64_encode(data))

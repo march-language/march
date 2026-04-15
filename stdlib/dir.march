@@ -5,10 +5,30 @@
 
 mod Dir do
 
+  doc """
+  List the entries of a directory as bare names (no path prefix).
+  Returns `Ok(names)` on success or `Err(file_error)` (e.g. `NotFound`,
+  `Permission`).  Names are returned in directory order — typically not
+  sorted.
+
+  ## Examples
+
+      march> Dir.list("/this/path/does/not/exist")
+      Err(NotFound("/this/path/does/not/exist"))
+  """
   fn list(path) do
     dir_list(path)
   end
 
+  doc """
+  Like `list/1` but each returned entry is prefixed with `path/`.
+  Useful when the caller wants ready-to-open paths instead of bare names.
+
+  ## Examples
+
+      march> Dir.list_full("/this/path/does/not/exist")
+      Err(NotFound("/this/path/does/not/exist"))
+  """
   fn list_full(path) do
     match dir_list(path) do
     Err(e) -> Err(e)
@@ -28,22 +48,52 @@ mod Dir do
     end
   end
 
+  doc """
+  Create a single directory.  Fails if the parent does not exist or if
+  `path` already exists; use `mkdir_p/1` for "mkdir -p" semantics.
+  """
   fn mkdir(path) do
     dir_mkdir(path)
   end
 
+  doc """
+  Create a directory and any missing intermediate parents (POSIX
+  `mkdir -p`).  Succeeds silently if the target already exists.
+  """
   fn mkdir_p(path) do
     dir_mkdir_p(path)
   end
 
+  doc """
+  Remove an empty directory.  Use `rm_rf/1` to recursively remove a
+  populated directory tree.  Returns `Err(NotEmpty(path))` when called
+  on a non-empty directory.
+  """
   fn rmdir(path) do
     dir_rmdir(path)
   end
 
+  doc """
+  Recursively remove a directory tree.  Symlinks inside the tree are
+  removed but their targets are left intact.  Refuses to operate on
+  `"/"` or `""` and returns `Err` instead — destructive enough that an
+  accidental call deserves to fail loudly.
+  """
   fn rm_rf(path) do
     dir_rm_rf(path)
   end
 
+  doc """
+  True if the path exists and is a directory (not a regular file).
+  Use `File.exists/1` for a generic any-kind-of-entry check.
+
+  ## Examples
+
+      march> Dir.exists("/")
+      true
+      march> Dir.exists("/this/path/does/not/exist")
+      false
+  """
   fn exists(path) do
     dir_exists(path)
   end

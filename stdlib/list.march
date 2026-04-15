@@ -214,11 +214,9 @@ mod List do
   ## Examples
 
       march> List.map([1, 2, 3], fn x -> x * 2)
-      march> 
       [2, 4, 6]
 
-      march> List.map(["a", "b"], String.upper)
-      march> 
+      march> List.map(["a", "b"], String.to_uppercase)
       ["A", "B"]
   """
   fn map(xs : List(a), f : a -> b) : List(b) do

@@ -1263,7 +1263,8 @@ let builtin_bindings : (string * scheme) list =
         TArrow (t_int, TArrow (t_int,
         TCon ("Bytes", [])))))));
     ("base64_encode",   Mono (TArrow (TCon ("Bytes", []), t_string)));
-    ("base64_decode",   Mono (TArrow (t_string, TCon ("Bytes", []))));
+    ("base64_decode",   Mono (TArrow (t_string,
+        TCon ("Result", [TCon ("Bytes", []); t_string]))));
     ("random_bytes",    Mono (TArrow (t_int, TCon ("Bytes", []))));
     (* NativeArray builtins — flat OCaml arrays for fast numeric loops (P10).
        NativeIntArr / NativeFloatArr are opaque types (0-arity constructors).

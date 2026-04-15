@@ -20,8 +20,23 @@ mod Http do
 
   type Response(body) = Response(Status, List(Header), body)
 
-  -- Method helpers
+  -- ---- Method helpers ----
 
+  doc """
+  Render an HTTP method as its uppercase wire-format string.
+  `Other(s)` returns its inner string verbatim — useful for non-standard
+  extensions like `MKCOL` or `PROPFIND` (WebDAV) which an upstream
+  parser may have wrapped in `Other(...)`.
+
+  ## Examples
+
+      march> Http.method_to_string(Get)
+      "GET"
+      march> Http.method_to_string(Patch)
+      "PATCH"
+      march> Http.method_to_string(Other("MKCOL"))
+      "MKCOL"
+  """
   fn method_to_string(m : Method) : String do
     match m do
     Get     -> "GET"
@@ -37,45 +52,124 @@ mod Http do
     end
   end
 
-  -- Status helpers
+  -- ---- Status helpers ----
 
+  doc """
+  Extract the integer status code from a `Status`.
+
+  ## Examples
+
+      march> Http.status_code(Http.status_ok())
+      200
+      march> Http.status_code(Status(418))
+      418
+  """
   fn status_code(s : Status) : Int do
     match s do
     Status(n) -> n
     end
   end
 
+  doc "Status `200 OK`."
   fn status_ok() : Status do Status(200) end
+
+  doc "Status `201 Created`."
   fn status_created() : Status do Status(201) end
+
+  doc "Status `204 No Content`."
   fn status_no_content() : Status do Status(204) end
+
+  doc "Status `301 Moved Permanently`."
   fn status_moved() : Status do Status(301) end
+
+  doc "Status `302 Found`."
   fn status_found() : Status do Status(302) end
+
+  doc "Status `400 Bad Request`."
   fn status_bad_request() : Status do Status(400) end
+
+  doc "Status `401 Unauthorized`."
   fn status_unauthorized() : Status do Status(401) end
+
+  doc "Status `403 Forbidden`."
   fn status_forbidden() : Status do Status(403) end
+
+  doc "Status `404 Not Found`."
   fn status_not_found() : Status do Status(404) end
+
+  doc "Status `500 Internal Server Error`."
   fn status_server_error() : Status do Status(500) end
 
+  doc """
+  True for informational `1xx` statuses.
+
+  ## Examples
+
+      march> Http.is_informational(Status(100))
+      true
+      march> Http.is_informational(Status(200))
+      false
+  """
   fn is_informational(s : Status) : Bool do
     let c = status_code(s)
     c >= 100 && c < 200
   end
 
+  doc """
+  True for success `2xx` statuses.
+
+  ## Examples
+
+      march> Http.is_success(Http.status_ok())
+      true
+      march> Http.is_success(Http.status_not_found())
+      false
+  """
   fn is_success(s : Status) : Bool do
     let c = status_code(s)
     c >= 200 && c < 300
   end
 
+  doc """
+  True for redirect `3xx` statuses.
+
+  ## Examples
+
+      march> Http.is_redirect(Http.status_moved())
+      true
+      march> Http.is_redirect(Http.status_ok())
+      false
+  """
   fn is_redirect(s : Status) : Bool do
     let c = status_code(s)
     c >= 300 && c < 400
   end
 
+  doc """
+  True for client-error `4xx` statuses (caller's fault).
+
+  ## Examples
+
+      march> Http.is_client_error(Http.status_not_found())
+      true
+      march> Http.is_client_error(Http.status_server_error())
+      false
+  """
   fn is_client_error(s : Status) : Bool do
     let c = status_code(s)
     c >= 400 && c < 500
   end
 
+  doc """
+  True for server-error `5xx` statuses (server's fault).
+
+  ## Examples
+
+      march> Http.is_server_error(Http.status_server_error())
+      true
+      march> Http.is_server_error(Http.status_not_found())
+      false
+  """
   fn is_server_error(s : Status) : Bool do
     let c = status_code(s)
     c >= 500 && c < 600

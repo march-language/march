@@ -38,9 +38,16 @@ mod Csv do
     end
   end
 
-  -- Stream rows from path one at a time.
-  -- callback receives List(String) per row.
-  -- File is always closed after all rows or on :eof.
+  doc """
+  Stream rows from `path` one at a time, invoking `callback(fields)`
+  for each row.  `delimiter` is a one-character `String` (`","`, `"\\t"`,
+  …); `mode` is `:simple` (split-only, no quoting) or `:rfc4180`
+  (full RFC 4180 with quoted fields, `""` escapes, embedded newlines).
+
+  The file handle is closed when iteration reaches EOF or when the
+  callback panics.  Returns `Ok(:ok)` on success, `Err(file_error)`
+  if the file cannot be opened.
+  """
   fn each_row(path, delimiter, mode, callback) do
     match csv_open(path, delimiter, mode) do
     Err(e) -> Err(e)
@@ -60,8 +67,11 @@ mod Csv do
     end
   end
 
-  -- Eagerly read all rows into a List(List(String)).
-  -- Only for small files.
+  doc """
+  Eagerly read every row of `path` into a `List(List(String))`.
+  Returns `Ok(rows)` or `Err(file_error)`.  Use `each_row/4` for files
+  that don't comfortably fit in memory.
+  """
   fn read_all(path, delimiter, mode) do
     match csv_open(path, delimiter, mode) do
     Err(e) -> Err(e)
@@ -84,8 +94,12 @@ mod Csv do
     end
   end
 
-  -- Stream rows with the first row separated as a header.
-  -- callback receives (header : List(String), row : List(String)).
+  doc """
+  Stream rows treating the first row as a header.  Invokes
+  `callback(header, fields)` for every subsequent row, where `header`
+  is the parsed first row.  An empty file yields `Ok(:ok)` without
+  invoking the callback.  Closes the file on EOF or on callback panic.
+  """
   fn each_row_with_header(path, delimiter, mode, callback) do
     match csv_open(path, delimiter, mode) do
     Err(e) -> Err(e)
@@ -105,12 +119,18 @@ mod Csv do
     end
   end
 
-  -- Convenience: comma-delimited, RFC 4180, eager.
+  doc """
+  Convenience: comma-delimited, RFC 4180, eager.
+  Equivalent to `read_all(path, ",", :rfc4180)`.
+  """
   fn read_csv(path) do
     read_all(path, ",", :rfc4180)
   end
 
-  -- Convenience: comma-delimited, RFC 4180, streaming.
+  doc """
+  Convenience: comma-delimited, RFC 4180, streaming.
+  Equivalent to `each_row(path, ",", :rfc4180, callback)`.
+  """
   fn each_csv_row(path, callback) do
     each_row(path, ",", :rfc4180, callback)
   end

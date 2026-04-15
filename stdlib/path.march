@@ -3,20 +3,71 @@
 
 mod Path do
 
+  doc """
+  Join two path segments with a single separator, avoiding double slashes
+  if `a` already ends with `/`.
+
+  ## Examples
+
+      march> Path.join("/usr", "local")
+      "/usr/local"
+      march> Path.join("/usr/", "local")
+      "/usr/local"
+      march> Path.join("a", "b")
+      "a/b"
+  """
   fn join(a, b) do
     if String.ends_with(a, "/") do a ++ b
     else a ++ "/" ++ b end
   end
 
+  doc """
+  Returns true if `path` starts with `/`.
+
+  ## Examples
+
+      march> Path.is_absolute("/etc")
+      true
+      march> Path.is_absolute("etc")
+      false
+      march> Path.is_absolute("")
+      false
+  """
   fn is_absolute(path) do
     String.starts_with(path, "/")
   end
 
+  doc """
+  Split a path into its non-empty `/`-separated components.
+  Repeated separators and a leading `/` collapse to no extra entries.
+
+  ## Examples
+
+      march> Path.components("/usr/local/bin")
+      ["usr", "local", "bin"]
+      march> Path.components("a//b/")
+      ["a", "b"]
+      march> Path.components("")
+      []
+  """
   fn components(path) do
     let raw = String.split(path, "/")
     List.filter(raw, fn s -> not (String.is_empty(s)))
   end
 
+  doc """
+  Return the last component of a path, or the path itself when there are no
+  components (empty string, single segment with no `/`).
+
+  ## Examples
+
+      march> Path.basename("/usr/local/bin/march")
+      "march"
+      march> Path.basename("file.txt")
+      "file.txt"
+      march> Path.basename("/")
+      "/"
+  """
   fn basename(path) do
     let parts = components(path)
     match parts do
@@ -29,6 +80,21 @@ mod Path do
     end
   end
 
+  doc """
+  Return the directory portion of a path: everything except the last
+  component.  Returns `"/"` for an absolute path with one component and
+  `"."` for a relative path with one component, mirroring the POSIX
+  convention.
+
+  ## Examples
+
+      march> Path.dirname("/usr/local/bin/march")
+      "/usr/local/bin"
+      march> Path.dirname("/etc")
+      "/"
+      march> Path.dirname("file.txt")
+      "."
+  """
   fn dirname(path) do
     let parts = components(path)
     match List.drop_last(parts) do
@@ -40,6 +106,22 @@ mod Path do
     end
   end
 
+  doc """
+  Return the file extension (without the leading dot), or the empty
+  string if there is none.  A leading `.` does not count as an extension
+  (so `.bashrc` has no extension).
+
+  ## Examples
+
+      march> Path.extension("file.txt")
+      "txt"
+      march> Path.extension("archive.tar.gz")
+      "gz"
+      march> Path.extension(".bashrc")
+      ""
+      march> Path.extension("README")
+      ""
+  """
   fn extension(path) do
     let base = basename(path)
     match String.last_index_of(base, ".") do
@@ -53,6 +135,21 @@ mod Path do
     end
   end
 
+  doc """
+  Remove the final extension from a path, preserving the directory.
+  Files with no extension (or only a leading dot) are returned unchanged.
+
+  ## Examples
+
+      march> Path.strip_extension("file.txt")
+      "file"
+      march> Path.strip_extension("/tmp/archive.tar.gz")
+      "/tmp/archive.tar"
+      march> Path.strip_extension("README")
+      "README"
+      march> Path.strip_extension(".bashrc")
+      ".bashrc"
+  """
   fn strip_extension(path) do
     let base = basename(path)
     let dir = dirname(path)
@@ -66,6 +163,25 @@ mod Path do
     end
   end
 
+  doc """
+  Normalize a path by collapsing `.` (current dir) and `..` (parent)
+  segments.  Absolute paths cannot ascend past root; relative paths
+  preserve leading `..` components.  An empty input or a path that
+  cancels out to nothing returns `"."`.
+
+  ## Examples
+
+      march> Path.normalize("/usr/local/../bin")
+      "/usr/bin"
+      march> Path.normalize("a/./b/../c")
+      "a/c"
+      march> Path.normalize("../foo/../bar")
+      "../bar"
+      march> Path.normalize("")
+      "."
+      march> Path.normalize("/..")
+      "/"
+  """
   fn normalize(path) do
     let abs = is_absolute(path)
     let parts = components(path)
