@@ -1093,12 +1093,12 @@ let tco_check_fn (fn : Ast.fn_def) acc =
 let perf_insight_to_diag (pi : perf_insight) : Lsp.Types.Diagnostic.t =
   let range = Pos.span_to_lsp_range pi.pi_span in
   let severity, code = match pi.pi_kind with
-    | NonTailCall _    -> Lsp.Types.DiagnosticSeverity.Warning, "non_tail_call"
-    | ActorSendCopy _  -> Lsp.Types.DiagnosticSeverity.Warning, "actor_send_copy"
-    | ClosureCapture _ -> Lsp.Types.DiagnosticSeverity.Hint,    "closure_capture"
-    | StackPromoted _  -> Lsp.Types.DiagnosticSeverity.Hint,    "stack_promoted"
-    | FbipReuse _      -> Lsp.Types.DiagnosticSeverity.Hint,    "fbip_reuse"
-    | TirIndirectCall _ -> Lsp.Types.DiagnosticSeverity.Hint,   "indirect_call"
+    | NonTailCall _    -> Lsp.Types.DiagnosticSeverity.Warning, "perf/non-tail-call"
+    | ActorSendCopy _  -> Lsp.Types.DiagnosticSeverity.Warning, "perf/actor-send-copy"
+    | ClosureCapture _ -> Lsp.Types.DiagnosticSeverity.Hint,    "perf/closure-capture"
+    | StackPromoted _  -> Lsp.Types.DiagnosticSeverity.Hint,    "perf/stack-promoted"
+    | FbipReuse _      -> Lsp.Types.DiagnosticSeverity.Hint,    "perf/fbip-reuse"
+    | TirIndirectCall _ -> Lsp.Types.DiagnosticSeverity.Hint,   "perf/indirect-call"
   in
   Lsp.Types.Diagnostic.create
     ~range
@@ -1617,7 +1617,7 @@ let analyse ~filename ~src : t =
                       ~severity:Lsp.Types.DiagnosticSeverity.Warning
                       ~message:(`String "Unreachable code after diverging call")
                       ~source:"march"
-                      ~code:(`String "unreachable_code")
+                      ~code:(`String "dead-code/unreachable-after-diverge")
                       ()
                     in
                     dead_code_diags := diag :: !dead_code_diags
@@ -1664,7 +1664,7 @@ let analyse ~filename ~src : t =
                 ~message:(`String (Printf.sprintf
                     "Private function `%s` is never used" name))
                 ~source:"march"
-                ~code:(`String "unused_private_fn")
+                ~code:(`String "dead-code/unused-private-fn")
                 ())
         ) unused_fns
     in
@@ -2415,8 +2415,8 @@ let apply_fix_registry (a : t) (diags : Lsp.Types.Diagnostic.t list)
 let () =
   register_fix "non_exhaustive_match"  (fun _a _diag -> []);
   register_fix "unused_binding"        (fun _a _diag -> []);
-  register_fix "unused_private_fn"     (fun _a _diag -> []);
-  register_fix "unreachable_code"      (fun _a _diag -> []);
+  register_fix "dead-code/unused-private-fn"         (fun _a _diag -> []);
+  register_fix "dead-code/unreachable-after-diverge" (fun _a _diag -> []);
   register_fix "unused_import"         (fun _a _diag -> [])
 
 (** Generate code actions relevant to the cursor position [line, character].
