@@ -166,7 +166,7 @@ When Tier 4 lands, the compiler will:
 3. Export `march_island_render`, `march_island_update`, `march_island_init`.
 4. Generate `march_alloc` / `march_dealloc` for string passing across the WASM boundary.
 
-The `loadWasmModule` stub in `march_islands.js` has the exact integration point documented:
+The `loadWasmModule` stub in `march-islands.js` has the exact integration point documented:
 
 ```js
 // TODO (Tier 4): Replace with real loading:

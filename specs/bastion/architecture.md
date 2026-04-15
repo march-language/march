@@ -41,12 +41,12 @@ See [`wasm-islands.md`](wasm-islands.md) for the detailed design.
 - `Islands.preload_hint` — `<link rel="modulepreload">` hints for WASM files
 - `Islands.Registry` — island descriptor registry for server startup
 - `interface Island(s)` — the typeclass for island modules to implement
-- `islands/runtime/march_islands.js` — client-side actor-per-island bootstrap
+- `priv/js/march-islands.js` — client-side actor-per-island bootstrap
 - Configurable per-island hydration strategies: `Eager | Lazy | OnIdle | OnInteraction`
 
 ### WASM compilation status
 
-The WASM target is Tier 1 (code complete; awaiting wasi-sdk + wasmtime for end-to-end test). The browser target (Tier 4, `wasm32-unknown-unknown` + JS glue) is not yet available. The Islands library is architecturally complete; the WASM loading in `march_islands.js` is a well-documented stub that plugs in when Tier 4 lands.
+The WASM target is Tier 1 (code complete; awaiting wasi-sdk + wasmtime for end-to-end test). The browser target (Tier 4, `wasm32-unknown-unknown` + JS glue) is not yet available. The Islands library is architecturally complete; the WASM loading in `march-islands.js` is a well-documented stub that plugs in when Tier 4 lands.
 
 ## Request lifecycle (future)
 
@@ -71,7 +71,7 @@ HttpServer.send_resp(conn, 200, full_html)
 Browser receives HTML with hydration markers
     │
     ▼
-march_islands.js bootstraps → actor per island → WASM loaded
+march-islands.js bootstraps → actor per island → WASM loaded
 ```
 
 ## Actor model

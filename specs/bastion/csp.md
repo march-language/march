@@ -94,7 +94,7 @@ mod Islands do
   fn bootstrap_script(conn: Conn) -> Html.Safe do
     nonce = conn.assigns[:csp_nonce] |> Option.unwrap_or("")
     Html.raw("""
-    <script nonce="#{nonce}" type="module" src="/assets/march_islands.js"></script>
+    <script nonce="#{nonce}" type="module" src="/assets/march-islands.js"></script>
     """)
   end
 end

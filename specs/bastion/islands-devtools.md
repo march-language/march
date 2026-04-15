@@ -83,7 +83,7 @@ Content scripts and devtools panels live in separate execution contexts in Firef
 
 ## Runtime Instrumentation
 
-The `march-islands.js` runtime (located at `islands/runtime/march_islands.js`) must be extended with debug hooks. All instrumentation is gated behind a debug flag so production builds are unaffected.
+The `march-islands.js` runtime (located at `priv/js/march-islands.js`) must be extended with debug hooks. All instrumentation is gated behind a debug flag so production builds are unaffected.
 
 ### Enabling debug mode
 
