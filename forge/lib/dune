@@ -1,6 +1,6 @@
 (library
  (name march_forge)
- (libraries unix march_search march_format yojson digestif))
+ (libraries unix march_search march_format march_lint yojson digestif))
 
 (rule
  (target notebook_march_src.ml)

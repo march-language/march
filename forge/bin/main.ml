@@ -169,6 +169,21 @@ let test_cmd =
   Cmd.v (Cmd.info "test" ~doc:"Run the test suite")
     Term.(const run $ verbose $ coverage $ filter $ files)
 
+(* ------------------------------------------------------------------ forge lint *)
+
+let lint_cmd =
+  let strict =
+    Arg.(value & flag &
+         info ["strict"] ~doc:"Treat warnings as errors; exit 1 on any warning or error")
+  in
+  let all =
+    Arg.(value & flag &
+         info ["all"] ~doc:"Also report hint-severity findings (off by default)")
+  in
+  let run s a = handle (Cmd_lint.run ~strict:s ~all:a ()) in
+  Cmd.v (Cmd.info "lint" ~doc:"Run the coding-standard rule checker")
+    Term.(const run $ strict $ all)
+
 (* ---------------------------------------------------------------- forge format *)
 
 let format_cmd =
@@ -522,7 +537,7 @@ let default_term =
 
 let () =
   let cmds =
-    [ new_cmd; init_cmd; build_cmd; check_cmd; run_cmd; compile_cmd; test_cmd; format_cmd;
+    [ new_cmd; init_cmd; build_cmd; check_cmd; run_cmd; compile_cmd; test_cmd; lint_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]

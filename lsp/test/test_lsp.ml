@@ -1516,7 +1516,7 @@ end
 let test_fix_registry_has_known_codes () =
   (* The registry should have entries for the standard diagnostic codes *)
   let codes = ["non_exhaustive_match"; "unused_binding";
-               "unused_private_fn"; "unreachable_code"] in
+               "dead-code/unused-private-fn"; "dead-code/unreachable-after-diverge"] in
   List.iter (fun code ->
       let has_entry = Hashtbl.mem An.fix_registry code in
       Alcotest.(check bool) ("registry has " ^ code) true has_entry
@@ -1562,7 +1562,7 @@ end
   let has_unused_warning =
     List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
         (match d.code with
-         | Some (`String "unused_private_fn") -> true
+         | Some (`String "dead-code/unused-private-fn") -> true
          | _ -> false)
       ) a.diagnostics
   in
@@ -1585,7 +1585,7 @@ end
   let has_unused_warning =
     List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
         (match d.code with
-         | Some (`String "unused_private_fn") -> true
+         | Some (`String "dead-code/unused-private-fn") -> true
          | _ -> false)
       ) a.diagnostics
   in
@@ -1604,7 +1604,7 @@ end
   let has_unreachable =
     List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
         (match d.code with
-         | Some (`String "unreachable_code") -> true
+         | Some (`String "dead-code/unreachable-after-diverge") -> true
          | _ -> false)
       ) a.diagnostics
   in
@@ -2579,7 +2579,7 @@ end
   let a = analyse src in
   let has_warning = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
       match d.code with
-      | Some (`String "non_tail_call") -> true
+      | Some (`String "perf/non-tail-call") -> true
       | _ -> false
     ) a.An.diagnostics
   in
@@ -2636,7 +2636,7 @@ end
   let a = analyse src in
   let has_hint = List.exists (fun (d : Lsp.Types.Diagnostic.t) ->
       match d.code with
-      | Some (`String "closure_capture") -> true
+      | Some (`String "perf/closure-capture") -> true
       | _ -> false
     ) a.An.diagnostics
   in
