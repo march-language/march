@@ -2,8 +2,10 @@
 // Entry point for the DemoApp JS bundle.
 // Bundled by esbuild -> priv/static/assets/app.js
 
-// Import the march-islands runtime for island hydration
-import '../../../islands/runtime/march_islands.js';
+// The march-islands runtime now lives in the bastion repo
+// (bastion/priv/js/march-islands.js).  Real Bastion apps import it via
+// assets/vendor/march-islands.js, which is vendored in by `forge new`.
+// The demo here has its own inline Counter polyfill below, so no import is needed.
 
 // Log that the bundle is loaded
 console.log('[DemoApp] JS bundle loaded');
