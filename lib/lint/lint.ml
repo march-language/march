@@ -150,24 +150,40 @@ let arm_body_is_complex body =
   walk body;
   !branches || !lets > 3
 
-(** Collect every EVar call name transitively inside an expression. *)
+(** Collect every name referenced inside an expression — both direct calls
+    [f(x)] and bare references [map(f, xs)] / [x |> f].  A bare [EVar] is
+    indistinguishable from a value reference here; that's fine, since we
+    only consult these names against a known set of private function names. *)
 let collect_call_names expr =
   let acc = ref [] in
   let rec walk = function
-    | Ast.EApp (Ast.EVar n, args, _) ->
-      acc := n.Ast.txt :: !acc;
-      List.iter walk args
+    | Ast.EVar n             -> acc := n.Ast.txt :: !acc
     | Ast.EApp (fn, args, _) -> walk fn; List.iter walk args
+    | Ast.ECon (_, args, _)  -> List.iter walk args
+    | Ast.ELam (_, body, _)  -> walk body
     | Ast.EBlock (xs, _)     -> List.iter walk xs
     | Ast.ELet (b, _)        -> walk b.Ast.bind_expr
     | Ast.EMatch (s, arms, _) ->
       walk s;
       List.iter (fun a -> walk a.Ast.branch_body) arms
-    | Ast.EIf (c, t, e, _)  -> walk c; walk t; walk e
+    | Ast.EIf (c, t, e, _)   -> walk c; walk t; walk e
+    | Ast.ECond (arms, _)    ->
+      List.iter (fun (c, e) -> walk c; walk e) arms
     | Ast.EPipe (l, r, _)    -> walk l; walk r
     | Ast.ETuple (xs, _)     -> List.iter walk xs
+    | Ast.ERecord (fs, _)    -> List.iter (fun (_, e) -> walk e) fs
+    | Ast.ERecordUpdate (b, fs, _) ->
+      walk b; List.iter (fun (_, e) -> walk e) fs
     | Ast.EField (e, _, _)   -> walk e
-    | _ -> ()
+    | Ast.EAnnot (e, _, _)   -> walk e
+    | Ast.EAtom (_, args, _) -> List.iter walk args
+    | Ast.ESend (a, b, _)    -> walk a; walk b
+    | Ast.ESpawn (e, _)      -> walk e
+    | Ast.EDbg (Some e, _)   -> walk e
+    | Ast.ELetFn (_, _, _, body, _) -> walk body
+    | Ast.EAssert (e, _)     -> walk e
+    | Ast.ESigil (_, e, _)   -> walk e
+    | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> ()
   in
   walk expr;
   !acc
@@ -497,20 +513,31 @@ let check_dead_code ~config ~file ~acc ~type_map decls =
     | _                       -> ()
   in
 
-  (* unused-private-fn: collect pfns, collect reachable names, report gaps. *)
-  let private_fns   : (string, Ast.span) Hashtbl.t = Hashtbl.create 16 in
-  let public_bodies : Ast.expr list ref = ref [] in
+  (* unused-private-fn: collect pfns, collect reachable names, report gaps.
+     Reachability roots = bodies of anything that's "called from outside":
+     public fns, tests, setup blocks, actor handlers, top-level lets, app/init. *)
+  let private_fns : (string, Ast.span) Hashtbl.t = Hashtbl.create 16 in
+  let roots       : Ast.expr list ref = ref [] in
+
+  let add_root e = roots := e :: !roots in
 
   let rec collect_decl = function
     | Ast.DFn (fn, _) ->
       if fn.Ast.fn_vis = Ast.Private then
         Hashtbl.replace private_fns fn.Ast.fn_name.Ast.txt fn.Ast.fn_name.Ast.span
       else
-        List.iter (fun (cl : Ast.fn_clause) ->
-            public_bodies := cl.Ast.fc_body :: !public_bodies
-          ) fn.Ast.fn_clauses;
+        List.iter (fun (cl : Ast.fn_clause) -> add_root cl.Ast.fc_body)
+          fn.Ast.fn_clauses;
       List.iter (fun (cl : Ast.fn_clause) -> walk_expr cl.Ast.fc_body) fn.Ast.fn_clauses
-    | Ast.DMod (_, _, inner, _) -> List.iter collect_decl inner
+    | Ast.DTest (td, _)            -> add_root td.Ast.test_body
+    | Ast.DSetup (e, _)            -> add_root e
+    | Ast.DSetupAll (e, _)         -> add_root e
+    | Ast.DDescribe (_, inner, _)  -> List.iter collect_decl inner
+    | Ast.DLet (_, b, _)           -> add_root b.Ast.bind_expr
+    | Ast.DActor (_, _, adef, _)   ->
+      List.iter (fun (h : Ast.actor_handler) -> add_root h.Ast.ah_body)
+        adef.Ast.actor_handlers
+    | Ast.DMod (_, _, inner, _)    -> List.iter collect_decl inner
     | _ -> ()
   in
   List.iter collect_decl decls;
@@ -519,11 +546,11 @@ let check_dead_code ~config ~file ~acc ~type_map decls =
     (* BFS/DFS reachability: start from public function bodies, follow calls *)
     let reachable = Hashtbl.create 16 in
     let worklist  = Queue.create () in
-    (* Seed with names called directly from public bodies *)
+    (* Seed with names referenced from any reachability root *)
     List.iter (fun body ->
         List.iter (fun name -> Queue.push name worklist)
           (collect_call_names body)
-      ) !public_bodies;
+      ) !roots;
     while not (Queue.is_empty worklist) do
       let name = Queue.pop worklist in
       if not (Hashtbl.mem reachable name) then begin
