@@ -325,6 +325,7 @@ let dump_tir       = ref false
 let dump_phases    = ref false
 let emit_llvm      = ref false
 let do_compile     = ref false
+let do_check       = ref false   (* --check: typecheck only, no codegen or eval *)
 let do_test        = ref false   (* --test: compile test blocks into a test-runner binary *)
 let output_file    = ref ""
 let debug_mode     = ref false
@@ -1038,6 +1039,11 @@ let compile filename =
   (* In compile mode, abort on user-file errors only.  Stdlib errors
      (e.g. http_client) are tolerated since those modules are WIP. *)
   if has_user_errors || has_parse_errors || has_resolve_errors || has_desugar_errors then exit 1
+  (* --check: stop after typecheck.  Diagnostics above already printed; we just
+     exit 0 so tooling (forge build / forge check) can treat a clean typecheck
+     as a pass.  Warnings do not fail the exit code — consistent with eval and
+     compile modes. *)
+  else if !do_check then exit 0
   else if compile_mode then begin
     (* -dump-phases: collect per-stage JSON graphs *)
     let phases = ref [] in
@@ -1613,6 +1619,7 @@ let () =
     ("--dump-phases",  Arg.Set dump_phases,  " Serialize each IR stage to march-phases/phases.json");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
+    ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
     ("--test",       Arg.Set do_test,     " Compile test blocks into a standalone test-runner binary (use with --compile)");
     ("--target",     Arg.Set_string target_str,  "<target>  Compilation target: native, wasm64-wasi, wasm32-wasi, wasm32-unknown-unknown");
     ("-o",           Arg.Set_string output_file, "<file>  Output binary name (with --compile)");

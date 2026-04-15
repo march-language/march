@@ -1,4 +1,19 @@
-(** forge build [--release] *)
+(** forge build [--release]
+
+    Build behavior depends on [forge.toml]'s [package.type]:
+
+    - [app]: compile the entry point to a native binary.  Every other .march
+      file under lib/ is additionally typechecked via [march --check] so
+      orphan modules cannot silently rot.
+
+    - [lib]: typecheck every .march file under lib/ via [march --check].
+      No binary is produced — a library has no single entry, and consumers
+      may import any module.
+
+    - [tool]: same as [app].
+
+    In all cases [build_islands] then walks @island modules and emits their
+    WASM sidecars. *)
 
 (** Returns true for files that match test-file naming conventions.
     forge build (production binary) must never include these even if they
@@ -110,6 +125,60 @@ let build_islands ~lib_path_env ~islands_dir lib_dir =
     (!built, total)
   end
 
+(** Assemble the MARCH_LIB_PATH environment prefix used for every invocation
+    of the [march] compiler.  Contains the project's own lib/, any path-dep
+    or git-dep lib roots, and config/ when present. *)
+let lib_path_env proj =
+  let lib_dir    = Filename.concat proj.Project.root "lib" in
+  let config_dir = Filename.concat proj.Project.root "config" in
+  let dep_lib_paths = List.filter_map (fun (dep_name, dep) ->
+      match dep with
+      | Project.PathDep rel_path ->
+        let abs_path = if Filename.is_relative rel_path
+          then Filename.concat proj.Project.root rel_path
+          else rel_path
+        in
+        let d = Filename.concat abs_path "lib" in
+        if Sys.file_exists d then Some d
+        else if Sys.file_exists abs_path then Some abs_path
+        else None
+      | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
+        Project.git_dep_lib_path dep_name
+      | _ -> None
+    ) proj.Project.deps in
+  let all_lib_paths =
+    dep_lib_paths @ [lib_dir]
+    @ (if Sys.file_exists config_dir then [config_dir] else [])
+  in
+  Printf.sprintf "MARCH_LIB_PATH=%s " (String.concat ":" all_lib_paths)
+
+(** Typecheck [file] via [march --check].
+    Returns [true] on clean exit, [false] on any compiler error.
+    The compiler itself prints diagnostics to stderr — we don't intercept. *)
+let check_file ~lib_path_env file =
+  let cmd =
+    Printf.sprintf "%smarch --check %s"
+      lib_path_env (Filename.quote file)
+  in
+  Sys.command cmd = 0
+
+(** Typecheck every .march file in [files] individually.
+    Returns the number of files that failed (0 means clean). *)
+let check_all ~lib_path_env files =
+  List.fold_left (fun failed f ->
+    if check_file ~lib_path_env f then failed else failed + 1
+  ) 0 files
+
+(** Compile the entry file to a native binary at [output]. *)
+let compile_entry ~lib_path_env ~output ~release ~dump_phases entry =
+  let opt_flag  = if release then " --opt 2" else "" in
+  let dump_flag = if dump_phases then " --dump-phases" else "" in
+  let cmd =
+    Printf.sprintf "%smarch --compile -o %s%s%s %s"
+      lib_path_env (Filename.quote output) opt_flag dump_flag (Filename.quote entry)
+  in
+  Sys.command cmd
+
 let build ~release ?(dump_phases=false) () =
   match Project.load () with
   | Error msg -> Error msg
@@ -120,54 +189,52 @@ let build ~release ?(dump_phases=false) () =
         (Filename.concat ".march" (Filename.concat "build" mode))
     in
     Project.mkdir_p build_dir;
-    let lib_dir    = Filename.concat proj.Project.root "lib" in
-    let config_dir = Filename.concat proj.Project.root "config" in
-    let files = find_march_files lib_dir in
+    let lib_dir = Filename.concat proj.Project.root "lib" in
+    let files   = find_march_files lib_dir in
     if files = [] then
       Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin
-      let output    = Filename.concat build_dir proj.Project.name in
-      let opt_flag  = if release then " --opt 2" else "" in
-      let dump_flag = if dump_phases then " --dump-phases" else "" in
-      (* Collect lib directories from path dependencies *)
-      let dep_lib_paths = List.filter_map (fun (dep_name, dep) ->
-          match dep with
-          | Project.PathDep rel_path ->
-            let abs_path = if Filename.is_relative rel_path
-              then Filename.concat proj.Project.root rel_path
-              else rel_path
-            in
-            let d = Filename.concat abs_path "lib" in
-            if Sys.file_exists d then Some d
-            else if Sys.file_exists abs_path then Some abs_path
-            else None
-          | Project.GitTagDep _ | Project.GitBranchDep _ | Project.GitRevDep _ ->
-            Project.git_dep_lib_path dep_name
-          | _ -> None
-        ) proj.Project.deps in
-      (* MARCH_LIB_PATH: dep libs + lib/ + config/ (if present) *)
-      let all_lib_paths =
-        dep_lib_paths @ [lib_dir]
-        @ (if Sys.file_exists config_dir then [config_dir] else [])
-      in
-      let lib_path_env = Printf.sprintf "MARCH_LIB_PATH=%s " (String.concat ":" all_lib_paths)
-      in
-      let entry = match proj.Project.entrypoint with
+      let lib_path_env = lib_path_env proj in
+      let entry_path = match proj.Project.entrypoint with
         | Some ep -> Filename.concat proj.Project.root ep
         | None    -> Filename.concat lib_dir (proj.Project.name ^ ".march")
       in
-      let cmd =
-        Printf.sprintf "%smarch --compile -o %s%s%s %s"
-          lib_path_env (Filename.quote output) opt_flag dump_flag (Filename.quote entry)
-      in
-      let rc = Sys.command cmd in
-      if rc = 0 then begin
-        (* Compile any @island modules to WASM alongside the native binary *)
+      let do_islands () =
         let islands_dir = Filename.concat proj.Project.root "islands" in
         let (built, total) = build_islands ~lib_path_env ~islands_dir lib_dir in
         if total > 0 then
-          Printf.printf "Islands: %d/%d compiled to %s\n%!" built total islands_dir;
-        Ok output
-      end
-      else Error (Printf.sprintf "march compiler exited with code %d" rc)
+          Printf.printf "Islands: %d/%d compiled to %s\n%!" built total islands_dir
+      in
+      match proj.Project.project_type with
+      | Project.Lib ->
+        (* Library project: typecheck every lib/ module, emit no binary. *)
+        let failed = check_all ~lib_path_env files in
+        if failed > 0 then
+          Error (Printf.sprintf "%d file(s) failed to typecheck" failed)
+        else begin
+          do_islands ();
+          Ok (Printf.sprintf "checked %d file(s) in %s" (List.length files) lib_dir)
+        end
+      | Project.App | Project.Tool ->
+        (* Application / tool: check every non-entry lib file first (so orphans
+           fail fast), then compile the entry.  An orphan that doesn't build
+           is still a bug, even if [main] never imports it. *)
+        let orphans = List.filter (fun f ->
+          (* Compare absolute paths to avoid ./ vs non-./ false-negatives. *)
+          let a = try Unix.realpath f with _ -> f in
+          let b = try Unix.realpath entry_path with _ -> entry_path in
+          a <> b
+        ) files in
+        let failed = check_all ~lib_path_env orphans in
+        if failed > 0 then
+          Error (Printf.sprintf "%d file(s) failed to typecheck" failed)
+        else begin
+          let output = Filename.concat build_dir proj.Project.name in
+          let rc = compile_entry ~lib_path_env ~output ~release ~dump_phases entry_path in
+          if rc = 0 then begin
+            do_islands ();
+            Ok output
+          end
+          else Error (Printf.sprintf "march compiler exited with code %d" rc)
+        end
     end

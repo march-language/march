@@ -121,6 +121,18 @@ let build_cmd =
   Cmd.v (Cmd.info "build" ~doc:"Build the current project")
     Term.(const run $ release $ dump_phases)
 
+(* ----------------------------------------------------------------- forge check *)
+
+let check_cmd =
+  let run () =
+    match Cmd_check.check () with
+    | Ok msg  -> Printf.printf "%s\n%!" msg
+    | Error m -> Printf.eprintf "error: %s\n%!" m; exit 1
+  in
+  Cmd.v (Cmd.info "check"
+           ~doc:"Typecheck every .march file in the project without producing a binary")
+    Term.(const run $ const ())
+
 (* ------------------------------------------------------------------- forge run *)
 
 let run_cmd =
@@ -510,7 +522,7 @@ let default_term =
 
 let () =
   let cmds =
-    [ new_cmd; init_cmd; build_cmd; run_cmd; compile_cmd; test_cmd; format_cmd;
+    [ new_cmd; init_cmd; build_cmd; check_cmd; run_cmd; compile_cmd; test_cmd; format_cmd;
       interactive_cmd; i_cmd; clean_cmd; deps_cmd; add_cmd; publish_cmd;
       install_cmd; uninstall_cmd; archives_cmd; update_cmd; verify_cmd;
       search_cmd; notebook_cmd; doc_cmd; phases_cmd; help_cmd ]

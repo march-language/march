@@ -22,7 +22,7 @@ let lib_source name = function
     Printf.sprintf "mod %s do\n\n  fn main() do\n    println(\"Hello from %s!\")\n  end\n\nend\n"
       (snake_to_pascal name) name
   | Project.Lib ->
-    Printf.sprintf "mod %s do\n\n  pub fn hello(name: String) : String do\n    \"Hello, \" ++ name ++ \"!\"\n  end\n\nend\n"
+    Printf.sprintf "mod %s do\n\n  fn hello(name: String) : String do\n    \"Hello, \" ++ name ++ \"!\"\n  end\n\nend\n"
       (snake_to_pascal name)
   | Project.Tool ->
     Printf.sprintf "mod %s do\n\n  fn main() do\n    println(\"Hello from %s!\")\n  end\n\nend\n"
