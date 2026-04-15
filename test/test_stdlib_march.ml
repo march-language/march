@@ -242,6 +242,10 @@ let () =
       Alcotest.test_case "Test module (assertion helpers)"
         `Quick (run_stdlib_test "test_test.march" "TestTest");
     ]);
+    ("seq", [
+      Alcotest.test_case "Seq module"
+        `Quick (run_stdlib_test "test_seq.march" "TestSeq");
+    ]);
     (* test_flow.march tests the function-transformer Flow API (from_fn/run/then_)
        which differs from the current Seq-based flow.march implementation.
     ("flow", [

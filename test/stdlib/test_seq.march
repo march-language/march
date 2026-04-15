@@ -664,4 +664,144 @@ describe "chaining" do
 
 end
 
+-- ===== Phase 5.7: source constructors and back-pressure helpers =====
+
+describe "from_string_lines" do
+  test "splits by newline and drops trailing empty" do
+    let s = Seq.from_string_lines("a\nb\nc\n")
+    assert (Seq.to_list(s) == ["a", "b", "c"])
+  end
+
+  test "single line with no trailing newline" do
+    let s = Seq.from_string_lines("only")
+    assert (Seq.to_list(s) == ["only"])
+  end
+
+  test "empty string yields empty seq" do
+    let s = Seq.from_string_lines("")
+    assert (Seq.to_list(s) == [])
+  end
+
+  test "preserves blank lines in the middle" do
+    let s = Seq.from_string_lines("a\n\nc")
+    assert (Seq.to_list(s) == ["a", "", "c"])
+  end
+end
+
+describe "from_file_lines" do
+  test "reads all lines of a temp file" do
+    let path = "/tmp/march_seq_test_lines.txt"
+    File.write(path, "first\nsecond\nthird\n")
+    match Seq.from_file_lines(path) do
+    Err(_) -> assert false
+    Ok(s) -> assert (Seq.to_list(s) == ["first", "second", "third"])
+    end
+  end
+
+  test "missing file returns NotFound" do
+    match Seq.from_file_lines("/tmp/march_seq_does_not_exist.txt") do
+    Ok(_)  -> assert false
+    Err(_) -> assert true
+    end
+  end
+
+  test "take respects laziness (small file)" do
+    let path = "/tmp/march_seq_test_take.txt"
+    File.write(path, "1\n2\n3\n4\n5\n")
+    match Seq.from_file_lines(path) do
+    Err(_) -> assert false
+    Ok(s) -> assert (Seq.to_list(Seq.take(s, 2)) == ["1", "2"])
+    end
+  end
+end
+
+describe "from_file_chunks" do
+  test "yields fixed-size byte chunks" do
+    let path = "/tmp/march_seq_test_chunks.txt"
+    File.write(path, "abcdefgh")
+    match Seq.from_file_chunks(path, 3) do
+    Err(_) -> assert false
+    Ok(s)  -> do
+      let chunks = Seq.to_list(s)
+      -- "abc", "def", "gh" → 3 chunks
+      assert (List.length(chunks) == 3)
+    end
+    end
+  end
+end
+
+describe "repeat" do
+  test "repeat 0 times yields empty" do
+    assert (Seq.to_list(Seq.repeat(7, 0)) == [])
+  end
+
+  test "repeat 4 times yields 4 copies" do
+    assert (Seq.to_list(Seq.repeat(7, 4)) == [7, 7, 7, 7])
+  end
+
+  test "repeat composes with take" do
+    let s = Seq.take(Seq.repeat("x", 100), 3)
+    assert (Seq.to_list(s) == ["x", "x", "x"])
+  end
+end
+
+describe "iterate" do
+  test "iterate(1, double, 5) gives [1, 2, 4, 8, 16]" do
+    let s = Seq.iterate(1, fn x -> x * 2, 5)
+    assert (Seq.to_list(s) == [1, 2, 4, 8, 16])
+  end
+
+  test "iterate(0, succ, 0) is empty" do
+    let s = Seq.iterate(0, fn x -> x + 1, 0)
+    assert (Seq.to_list(s) == [])
+  end
+
+  test "iterate is lazy: take from a long iterate" do
+    let s = Seq.take(Seq.iterate(0, fn x -> x + 1, 1000), 5)
+    assert (Seq.to_list(s) == [0, 1, 2, 3, 4])
+  end
+end
+
+describe "cycle" do
+  test "cycle 0 times yields empty" do
+    let s = Seq.cycle(Seq.from_list([1, 2, 3]), 0)
+    assert (Seq.to_list(s) == [])
+  end
+
+  test "cycle 3 times duplicates the source three times" do
+    let s = Seq.cycle(Seq.from_list([1, 2]), 3)
+    assert (Seq.to_list(s) == [1, 2, 1, 2, 1, 2])
+  end
+
+  test "cycle of empty seq is empty regardless of n" do
+    let s = Seq.cycle(Seq.from_list([]), 5)
+    assert (Seq.to_list(s) == [])
+  end
+end
+
+describe "batched (alias for batch)" do
+  test "batched is an alias for batch" do
+    let xs = Seq.from_list([1, 2, 3, 4, 5])
+    assert (Seq.to_list(Seq.batched(xs, 2)) == Seq.to_list(Seq.batch(xs, 2)))
+  end
+end
+
+describe "unfold_until" do
+  test "respects the max bound" do
+    let s = Seq.unfold_until(0, fn n -> Some((n, n + 1)), 5)
+    assert (Seq.to_list(s) == [0, 1, 2, 3, 4])
+  end
+
+  test "stops early when next returns None" do
+    let next = fn n -> if n >= 3 do None else Some((n, n + 1)) end
+    let s = Seq.unfold_until(0, next, 100)
+    assert (Seq.to_list(s) == [0, 1, 2])
+  end
+
+  test "max=0 yields empty regardless of next" do
+    let s = Seq.unfold_until(0, fn n -> Some((n, n + 1)), 0)
+    assert (Seq.to_list(s) == [])
+  end
+end
+
 end

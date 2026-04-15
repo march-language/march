@@ -237,6 +237,181 @@ mod Seq do
     end
   end
 
+  -- ===== Phase 5.7: source constructors and back-pressure helpers =====
+  --
+  -- These additions give Seq the source-end primitives the existing
+  -- transform/consume API was missing.  All constructors yield a normal
+  -- `Seq(a)` so they compose with `map` / `filter` / `take` / `batch` /
+  -- `to_list` / `fold` exactly like `from_list` does.
+  --
+  -- Note on laziness: church-encoded folds drive iteration to completion
+  -- (or to the consumer-side short-circuit), so `from_file_lines` opens a
+  -- handle and reads to EOF when consumed — even when `take(s, 2)` is the
+  -- consumer.  The file IS closed on EOF, so no fd leaks unless the
+  -- caller never consumes the seq at all.  A fully back-pressure-aware
+  -- pull-stream would need a step-function representation; that is the
+  -- planned Phase B follow-up if real partial-consumption matters.
+
+  doc """
+  Build a `Seq(String)` from a string by splitting on newline.
+  A single trailing newline does not produce a final empty element
+  (so `from_string_lines("a\\nb\\n")` yields `["a", "b"]`, not
+  `["a", "b", ""]`).  Blank lines in the middle are preserved.
+  """
+  fn from_string_lines(s) do
+    let lines = string_split(s, "\n")
+    fn strip_trailing_empty(xs) do
+      match xs do
+      Nil -> Nil
+      Cons(h, t) -> do
+        match strip_trailing_empty(t) do
+        Nil -> if h == "" do Nil else Cons(h, Nil) end
+        rest -> Cons(h, rest)
+        end
+      end
+      end
+    end
+    from_list(strip_trailing_empty(lines))
+  end
+
+  doc """
+  Open `path` and return a lazy `Seq(String)` over its lines.
+  Returns `Ok(seq)` on success or `Err(file_error)` on failure.
+  The file handle is closed automatically when iteration reaches EOF;
+  consume the seq fully (or via `to_list`) to release the fd.
+
+  Each line is yielded with its trailing newline stripped.
+
+      match Seq.from_file_lines("data.txt") do
+      Ok(s) -> Seq.to_list(Seq.take(s, 10))     -- first 10 lines
+      Err(_) -> []
+      end
+  """
+  fn from_file_lines(path) do
+    match file_open(path) do
+    Err(e) -> Err(e)
+    Ok(fd) -> do
+      fn do_lines(a, f) do
+        match file_read_line(fd) do
+        None -> do
+          file_close(fd)
+          a
+        end
+        Some(line) -> do_lines(f(a, line), f)
+        end
+      end
+      Ok(Seq(fn(acc, f) -> do_lines(acc, f)))
+    end
+    end
+  end
+
+  doc """
+  Open `path` and return a lazy `Seq(Bytes)` of fixed-size chunks.
+  The final chunk may be shorter than `size` if the file does not divide
+  evenly.  Returns `Ok(seq)` or `Err(file_error)`.  The fd is closed on
+  EOF, so consume to completion (`to_list`, `fold`, etc.).
+  """
+  fn from_file_chunks(path, size) do
+    match file_open(path) do
+    Err(e) -> Err(e)
+    Ok(fd) -> do
+      fn do_chunks(a, f) do
+        match file_read_chunk(fd, size) do
+        None -> do
+          file_close(fd)
+          a
+        end
+        Some(chunk) -> do_chunks(f(a, chunk), f)
+        end
+      end
+      Ok(Seq(fn(acc, f) -> do_chunks(acc, f)))
+    end
+    end
+  end
+
+  doc """
+  A `Seq(a)` that yields `x` exactly `n` times.
+  `repeat(_, 0)` is the empty seq; negative `n` is treated as 0.
+  """
+  fn repeat(x, n) do
+    fn next_repeat(k) do
+      if k >= n do None
+      else Some((x, k + 1)) end
+    end
+    unfold(0, next_repeat)
+  end
+
+  doc """
+  Apply `step` repeatedly starting from `seed`, yielding `n` elements:
+  `[seed, step(seed), step(step(seed)), …]`.  `iterate(_, _, 0)` is empty.
+
+      Seq.iterate(1, fn x -> x * 2, 5)  -- yields [1, 2, 4, 8, 16]
+  """
+  fn iterate(seed, step, n) do
+    fn next_iter(state) do
+      let (val, k) = state
+      if k >= n do None
+      else do
+        let next_val = step(val)
+        Some((val, (next_val, k + 1)))
+      end end
+    end
+    unfold((seed, 0), next_iter)
+  end
+
+  doc """
+  Concatenate `seq` with itself `n` times.  `cycle(seq, 0)` is empty.
+
+  Because Seq is church-encoded the underlying source is re-folded once
+  per cycle; do not pass a one-shot source like `from_file_lines` (each
+  re-fold would attempt to re-read a closed fd).
+  """
+  fn cycle(seq, n) do
+    -- Bind the cycle loop at top-level fn scope (March nested fns must
+    -- live directly under a fn, not inside a match-arm `do...end`).
+    fn loop_cycle(k, a, fold, f) do
+      if k >= n do a
+      else loop_cycle(k + 1, fold(a, f), fold, f)
+      end
+    end
+    match seq do
+    Seq(fold) -> Seq(fn(acc, f) -> loop_cycle(0, acc, fold, f))
+    end
+  end
+
+  doc """
+  Alias for `batch`: groups elements into lists of size `n`.  Provided
+  for parity with the API name used by the spec/plan; `batch` remains
+  the canonical name.
+  """
+  fn batched(seq, n) do
+    batch(seq, n)
+  end
+
+  doc """
+  Like `unfold` but with an upper bound on the number of elements
+  produced.  Stops at the smaller of (a) `next` returning `None` or
+  (b) `max` elements yielded.
+
+      let s = Seq.unfold_until(0, fn n -> Some((n, n + 1)), 5)
+      -- Seq.to_list(s) == [0, 1, 2, 3, 4]
+  """
+  fn unfold_until(seed, next, max) do
+    fn step_unfold_until(state) do
+      let (s, k) = state
+      if k >= max do None
+      else match next(s) do
+        None -> None
+        Some(pair) -> do
+          let (v, s2) = pair
+          Some((v, (s2, k + 1)))
+        end
+        end
+      end
+    end
+    unfold((seed, 0), step_unfold_until)
+  end
+
   fn find(seq, pred) do
     fold_while(seq, None, fn(ig, x) -> do
       if pred(x) do Halt(Some(x))

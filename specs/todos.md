@@ -124,9 +124,31 @@ finding, and convention drift.  Listed in the recommended order.
   transition rules; the fixed-offset primitive shipping now is
   the substrate that approach will sit on top of.  11 new tests in
   `test_march` `stdlib_datetime` group; `test_march` 1330 → 1341.
-- [ ] **Streams (`Seq.from_*`)** — `Seq.from_file`, `Seq.from_http`,
-  `Seq.from_channel`, `Seq.batched`, plus a back-pressure sketch.
-  Today's `Seq` is a church-encoded fold with no source constructors.
+- ✅ **Streams (`Seq.from_*` source constructors) — Phase A** —
+  `stdlib/seq.march` gains the source-end primitives the existing
+  transform/consume API was missing, all yielding the same
+  church-encoded `Seq(a)` so they compose with `map`/`filter`/`take`/
+  `batch`/`to_list`/`fold` exactly like `from_list`.  Adds:
+  `from_string_lines(s)` (split by `"\n"`, trailing-newline-tolerant),
+  `from_file_lines(path)` (lazy pull, auto-close on EOF; returns
+  `Result(Seq, FileError)`), `from_file_chunks(path, size)` (lazy
+  fixed-size byte chunks), `repeat(x, n)` (n copies), `iterate(seed,
+  step, n)` (apply `step` n times, yielding seed first), `cycle(seq, n)`
+  (concatenate seq with itself n times — re-folds source per cycle, so
+  not safe for one-shot file/http sources), `batched(seq, n)` (alias for
+  the existing `batch` to match the API name in the spec), and
+  `unfold_until(seed, next, max)` (bounded `unfold` that stops at the
+  smaller of `next=None` or `max` elements).  Documented limitation:
+  because Seq is church-encoded, `take(seq, k)` reads the entire source
+  to EOF (the consumer-side fold doesn't truly short-circuit); a real
+  pull-stream representation (`Step(a) = Done | Yield(a, () -> Stream)`)
+  is the planned Phase B follow-up, which would also enable
+  `from_http` and `from_channel` streaming with proper back-pressure.
+  TDD: 21 new tests in `test/stdlib/test_seq.march` exercising
+  every new constructor + the lazy-take and EOF-close paths,
+  added BEFORE the implementation as red-then-green.  test_seq
+  101 → 122; test_stdlib_march 18 → 19 (now wires `test_seq.march`
+  into the runner).
 - ✅ **`Stats.quantile` / `quantiles` / `iqr` / `five_number_summary`**
   — `stdlib/stats.march`: `quantile(xs, q, method)` implements all 9
   Hyndman & Fan (1996) interpolation methods matching R's
