@@ -24,6 +24,7 @@
       since the callee will not decrement the value. *)
 
 module StringSet = Set.Make (String)
+module StringMap = Map.Make (String)
 
 (* ── Fresh variable counter for RC restructuring ─────────────────────────── *)
 
@@ -141,8 +142,12 @@ let decrc_for (v : Tir.var) (a : Tir.atom) : Tir.expr =
 let needs_rc : Tir.ty -> bool = function
   | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars, not heap-allocated *)
   | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
-  | Tir.TVar _ -> false  (* unresolved after mono: conservatively skip RC
-                            to avoid incrc on integers stored as inttoptr *)
+  | Tir.TVar "_" -> true  (* lower.ml placeholder for ECase br_vars / closure params:
+                              conservatively treat as heap-carrying.  The LLVM emit
+                              guards all RC calls with [if ty = "ptr" then …], so
+                              emitting EIncRC/EDecRC for a scalar TVar "_" is safe —
+                              the guard prevents the actual C call from firing. *)
+  | Tir.TVar _ -> false  (* unresolved user type-var after mono: skip RC *)
   | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit
   | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _ -> false
 
@@ -523,6 +528,16 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
           StringSet.empty br.Tir.br_vars
       in
       let la = StringSet.diff live_after bound in
+      (* When the scrutinee is borrowed (it lives in live_after), its branch
+         variables are borrowed references extracted from it.  They must not be
+         freed at their last use; re-add them to live_after so post_dec_var
+         does not fire for them after borrowed calls inside the branch body. *)
+      let la = match a with
+        | Tir.AVar v when StringSet.mem v.Tir.v_name live_after ->
+          List.fold_left (fun s bv -> StringSet.add bv.Tir.v_name s)
+            la br.Tir.br_vars
+        | _ -> la
+      in
       let (body', _) = insert_rc_expr br.Tir.br_body la in
       { br with Tir.br_body = add_scrutinee_free_for br.Tir.br_tag body' }
     ) branches in
@@ -618,15 +633,101 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     Used for REPL globals that persist across compilation units.
     Pre-computes the actor-sent variable set so that values sent across actor
     thread boundaries use atomic RC operations. *)
+(** Rename ELet/ECase-bound variables whose names collide with [borrowed]
+    parameters.  When [let s = f(s, …)] appears in a function whose parameter
+    [s] is borrowed, Perceus's backward liveness analysis removes "s" from
+    live_after when computing the live set for the RHS.  This causes
+    post_dec_var to fire for the borrowed parameter — a spurious dec_rc.
+    By renaming only the offending bindings, we break the aliasing without
+    disturbing unrelated variable names (which preserves test expectations). *)
+let rename_borrowed_shadows (borrowed : StringSet.t) (body : Tir.expr) : Tir.expr =
+  if StringSet.is_empty borrowed then body
+  else
+  let ctr = ref 0 in
+  let fresh n = incr ctr; Printf.sprintf "%s_b%d" n !ctr in
+  (* subst: maps old_name → new_name only for bindings we have renamed *)
+  let atom subst a = match a with
+    | Tir.AVar v -> (match StringMap.find_opt v.Tir.v_name subst with
+        | Some n -> Tir.AVar { v with Tir.v_name = n }
+        | None -> a)
+    | _ -> a
+  in
+  let var subst v = match StringMap.find_opt v.Tir.v_name subst with
+    | Some n -> { v with Tir.v_name = n }
+    | None -> v
+  in
+  let bind subst v =
+    (* Rename if this binding's name is a borrowed param OR is currently
+       being substituted (to prevent chained aliasing). *)
+    if StringSet.mem v.Tir.v_name borrowed || StringMap.mem v.Tir.v_name subst then
+      let n = fresh v.Tir.v_name in
+      ({ v with Tir.v_name = n }, StringMap.add v.Tir.v_name n subst)
+    else
+      (* Clear any outer substitution for this name: a fresh binding shadows it *)
+      (v, StringMap.remove v.Tir.v_name subst)
+  in
+  let rec go subst e =
+    match e with
+    | Tir.EAtom a -> Tir.EAtom (atom subst a)
+    | Tir.EApp (f, args) -> Tir.EApp (var subst f, List.map (atom subst) args)
+    | Tir.ECallPtr (fn_a, args) ->
+      Tir.ECallPtr (atom subst fn_a, List.map (atom subst) args)
+    | Tir.ELet (v, rhs, bdy) ->
+      let rhs' = go subst rhs in   (* rhs sees old subst — references the param, not the binding *)
+      let (v', subst') = bind subst v in
+      Tir.ELet (v', rhs', go subst' bdy)
+    | Tir.ELetRec (fns, bdy) ->
+      (* Freshen any fn names that collide with borrowed params *)
+      let (fns1, subst1) = List.fold_left (fun (fs, s) fd ->
+        let tmp = { Tir.v_name = fd.Tir.fn_name; v_ty = Tir.TUnit; v_lin = Tir.Unr } in
+        let (tmp', s') = bind s tmp in
+        ({ fd with Tir.fn_name = tmp'.Tir.v_name } :: fs, s')
+      ) ([], subst) fns in
+      let fns2 = List.rev_map (fun fd ->
+        { fd with Tir.fn_body = go subst1 fd.Tir.fn_body }) fns1 in
+      Tir.ELetRec (fns2, go subst1 bdy)
+    | Tir.ECase (a, branches, default) ->
+      let a' = atom subst a in
+      let branches' = List.map (fun br ->
+        let (br_vars', subst') = List.fold_left (fun (vs, s) bv ->
+          let (bv', s') = bind s bv in (vs @ [bv'], s')
+        ) ([], subst) br.Tir.br_vars in
+        { br with Tir.br_vars = br_vars'; Tir.br_body = go subst' br.Tir.br_body }
+      ) branches in
+      let default' = Option.map (go subst) default in
+      Tir.ECase (a', branches', default')
+    | Tir.ESeq (e1, e2) -> Tir.ESeq (go subst e1, go subst e2)
+    | Tir.ETuple atoms -> Tir.ETuple (List.map (atom subst) atoms)
+    | Tir.ERecord fields ->
+      Tir.ERecord (List.map (fun (k, a) -> (k, atom subst a)) fields)
+    | Tir.EField (a, f) -> Tir.EField (atom subst a, f)
+    | Tir.EUpdate (a, fs) ->
+      Tir.EUpdate (atom subst a, List.map (fun (k, v) -> (k, atom subst v)) fs)
+    | Tir.EAlloc (ty, args) -> Tir.EAlloc (ty, List.map (atom subst) args)
+    | Tir.EStackAlloc (ty, args) -> Tir.EStackAlloc (ty, List.map (atom subst) args)
+    | Tir.EFree a -> Tir.EFree (atom subst a)
+    | Tir.EIncRC a -> Tir.EIncRC (atom subst a)
+    | Tir.EDecRC a -> Tir.EDecRC (atom subst a)
+    | Tir.EAtomicIncRC a -> Tir.EAtomicIncRC (atom subst a)
+    | Tir.EAtomicDecRC a -> Tir.EAtomicDecRC (atom subst a)
+    | Tir.EReuse (a, ty, args) ->
+      Tir.EReuse (atom subst a, ty, List.map (atom subst) args)
+  in
+  go StringMap.empty body
+
 let insert_rc ?(borrowed = StringSet.empty) (fn : Tir.fn_def) : Tir.fn_def =
-  _actor_sent    := collect_actor_sent_vars fn.Tir.fn_body;
-  _current_fn_name := fn.Tir.fn_name;
-  _closure_fvs   := collect_closure_fvs fn;
-  let (body', _) = insert_rc_expr fn.Tir.fn_body borrowed in
+  (* Rename ELet/ECase-bound variables that shadow borrowed parameters before
+     RC insertion.  See [rename_borrowed_shadows] for the full rationale. *)
+  let body_renamed = rename_borrowed_shadows borrowed fn.Tir.fn_body in
+  let fn' = { fn with Tir.fn_body = body_renamed } in
+  _actor_sent    := collect_actor_sent_vars fn'.Tir.fn_body;
+  _current_fn_name := fn'.Tir.fn_name;
+  _closure_fvs   := collect_closure_fvs fn';
+  let (body', _) = insert_rc_expr fn'.Tir.fn_body borrowed in
   _actor_sent    := StringSet.empty;
   _current_fn_name := "";
   _closure_fvs   := StringSet.empty;
-  { fn with Tir.fn_body = body' }
+  { fn' with Tir.fn_body = body' }
 
 (* ── Phase 3: RC Elision (cancel pairs) ──────────────────────────────────── *)
 

@@ -141,6 +141,7 @@ let is_borrowed (m : borrow_map) (fn_name : string) (idx : int) : bool =
 let needs_rc : Tir.ty -> bool = function
   | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars, not heap-allocated *)
   | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
+  | Tir.TVar "_" -> true  (* lower.ml placeholder: conservatively treat as heap-carrying *)
   | Tir.TVar _ | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit
   | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _ -> false
 
@@ -269,6 +270,14 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
        when the concrete constructor field is heap-carrying (e.g.
        [List(String)] inside [Box(...)]) and [needs_rc] returns false for
        [TVar _].
+       For the same reason we also do NOT gate on the scrutinee's own type:
+       closure-generated helpers (e.g. the [go] accumulator loop inside
+       [List.map]) have their parameters typed as [TVar "_"] by Lower even
+       after monomorphisation, so [needs_rc scrutinee.v_ty] would also be
+       false for them — causing field-escape to be missed entirely. Since
+       ECase is only generated for variant/tuple types that are always
+       heap-allocated in March, any [AVar] scrutinee is conservatively safe
+       to treat as potentially RC-carrying.
        We follow through simple let-aliasing ([let v = x in ...] where [x] is
        the name we are tracking): such lets merely rename the alias without
        escaping it.  This avoids over-promotion for the common pattern
@@ -291,7 +300,7 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
     let field_escape_owns =
       atom_is name scrutinee &&
       (match scrutinee with
-       | Tir.AVar v -> needs_rc v.Tir.v_ty
+       | Tir.AVar _ -> true  (* any var scrutinee: ECase only fires for heap variants *)
        | _ -> false) &&
       List.exists (fun br ->
         List.exists (fun bv ->
