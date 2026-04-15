@@ -683,6 +683,58 @@ end
 
 ---
 
+## Tasks (structured concurrency)
+
+Spawn a task and await its result:
+
+```march
+let t = Task.async(fn () -> expensive_computation())
+Task.await(t)               -- Ok(result) or Err(reason)
+Task.await_unwrap(t)        -- unwrap, panic on Err
+```
+
+Parallel map:
+
+```march
+let results = Task.async_stream([1, 2, 3], fn n -> n * n)
+-- [Ok(1), Ok(4), Ok(9)]
+```
+
+Structured combinators:
+
+```march
+-- First to finish wins; the rest are cancelled
+Task.race([t1, t2, t3])
+
+-- First Ok wins; all-Err returns Err(list_of_reasons)
+Task.any([t1, t2, t3])
+
+-- Collect every result; never short-circuits
+Task.all_settled([t1, t2, t3])   -- [Ok(v1), Err(e2), Ok(v3)]
+
+-- Cancel any tasks still running when the scope exits
+Task.scope(fn () ->
+  let t = Task.async(fn () -> fetch_data())
+  Task.await_unwrap(t)
+)
+```
+
+Cancellation tokens:
+
+```march
+let tok = task_cancel_token_new()
+task_is_cancelled(tok)                          -- false
+
+let t = task_spawn_with_cancel(fn _ -> work(), tok)
+task_cancel(tok)                                -- mark cancelled
+Task.await(t)                                   -- Err("cancelled")
+
+-- Cancel a running task by its handle
+task_cancel_by_id(t)
+```
+
+---
+
 ## Session Type Protocols
 
 ```march

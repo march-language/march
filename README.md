@@ -48,6 +48,8 @@ end
 **Concurrency** (interpreter only for now)
 - Actor model: share-nothing message passing, `spawn`, `send`, `kill`, `is_alive`
 - Actor state updated via record spread: `{ state with count = state.count + 1 }`
+- Structured concurrency via `Task`: `Task.async`, `Task.await`, `Task.race`, `Task.any`, `Task.all_settled`, `Task.scope`
+- Cancellation tokens: `task_cancel_token_new`, `task_cancel`, `task_is_cancelled`, `task_spawn_with_cancel`, `task_cancel_by_id`
 
 ## FBIP: Functional But In-Place
 

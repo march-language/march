@@ -258,9 +258,26 @@ end)
 **`Task(a)`** — structured parallel concurrency (lighter than actors, no mailbox, no state):
 
 ```march
-let t1 = spawn_task(fn do expensive_compute(data1) end)
-let t2 = spawn_task(fn do expensive_compute(data2) end)
-let (r1, r2) = await_all(t1, t2)
+let t1 = Task.async(fn () -> expensive_compute(data1))
+let t2 = Task.async(fn () -> expensive_compute(data2))
+let [r1, r2] = Task.await_many([t1, t2])   -- [Ok(v1), Ok(v2)]
+```
+
+Structured combinators — all available today in the interpreter:
+
+```march
+Task.race([t1, t2])          -- first result wins; losers cancelled
+Task.any([t1, t2])           -- first Ok wins; all-Err → Err(reasons)
+Task.all_settled([t1, t2])   -- collect all Ok/Err without short-circuit
+Task.scope(fn () -> ...)     -- cancel leaked tasks on scope exit
+```
+
+Cancellation tokens let external code stop a task before it runs:
+
+```march
+let tok = task_cancel_token_new()
+let t   = task_spawn_with_cancel(fn _ -> heavy_work(), tok)
+task_cancel(tok)             -- marks token; t returns Err("cancelled")
 ```
 
 Tasks are scoped — they must complete before the enclosing scope exits. No leaked goroutines.
