@@ -535,8 +535,18 @@ let check_dead_code ~config ~file ~acc ~type_map decls =
     | Ast.DDescribe (_, inner, _)  -> List.iter collect_decl inner
     | Ast.DLet (_, b, _)           -> add_root b.Ast.bind_expr
     | Ast.DActor (_, _, adef, _)   ->
+      add_root adef.Ast.actor_init;
       List.iter (fun (h : Ast.actor_handler) -> add_root h.Ast.ah_body)
         adef.Ast.actor_handlers
+    | Ast.DApp (adef, _)           ->
+      add_root adef.Ast.app_body;
+      Option.iter add_root adef.Ast.app_on_start;
+      Option.iter add_root adef.Ast.app_on_stop
+    | Ast.DImpl (idef, _)          ->
+      List.iter (fun (_, fn_def) ->
+          List.iter (fun (cl : Ast.fn_clause) -> add_root cl.Ast.fc_body)
+            fn_def.Ast.fn_clauses
+        ) idef.Ast.impl_methods
     | Ast.DMod (_, _, inner, _)    -> List.iter collect_decl inner
     | _ -> ()
   in
@@ -564,7 +574,8 @@ let check_dead_code ~config ~file ~acc ~type_map decls =
                   List.iter (fun n -> Queue.push n worklist)
                     (collect_call_names cl.Ast.fc_body)
                 ) fn.Ast.fn_clauses
-            | Ast.DMod (_, _, inner, _) -> List.iter find_body inner
+            | Ast.DMod (_, _, inner, _)   -> List.iter find_body inner
+            | Ast.DDescribe (_, inner, _) -> List.iter find_body inner
             | _ -> ()
           in
           List.iter find_body decls

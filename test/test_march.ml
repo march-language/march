@@ -19328,6 +19328,184 @@ let test_tc_perf_nested_modules () =
   if elapsed > 2.0 then
     Alcotest.failf "typecheck of 20x20 nested modules took %.2fs (> 2s limit — O(n²) regression?)" elapsed
 
+(* ------------------------------------------------------------------ *)
+(* Lint tests — dead-code/unused-private-fn                           *)
+(* ------------------------------------------------------------------ *)
+
+let lint_check src =
+  let config = March_lint.Lint.default_config () in
+  March_lint.Lint.check_file ~config ~filename:"test.march" ~src
+
+let has_lint_rule rule diags =
+  List.exists (fun d -> d.March_lint.Lint.rule = rule) diags
+
+let unused_pfn_names diags =
+  diags
+  |> List.filter (fun d -> d.March_lint.Lint.rule = "dead-code/unused-private-fn")
+  |> List.map (fun d ->
+       (* message is "private function `foo` is never called" *)
+       let msg = d.March_lint.Lint.message in
+       match String.split_on_char '`' msg with
+       | _ :: name :: _ -> name
+       | _ -> msg)
+
+(** pfn called from within a lambda passed to a HOF — must NOT be flagged. *)
+let test_lint_pfn_via_hof_lambda () =
+  let src = {|mod Test do
+pfn helper(x: Int): Int do
+  x + 1
+end
+
+fn run(xs: List): List do
+  List.map(fn x -> helper(x), xs)
+end
+end|} in
+  let diags = lint_check src in
+  let flagged = unused_pfn_names diags in
+  Alcotest.(check bool) "helper not flagged via lambda" false
+    (List.mem "helper" flagged)
+
+(** pfn passed as a bare value (HOF arg, not wrapped in lambda) — must NOT be flagged. *)
+let test_lint_pfn_bare_hof_ref () =
+  let src = {|mod Test do
+pfn transform(x: Int): Int do
+  x * 2
+end
+
+fn run(xs: List): List do
+  List.map(transform, xs)
+end
+end|} in
+  let diags = lint_check src in
+  let flagged = unused_pfn_names diags in
+  Alcotest.(check bool) "transform not flagged as bare ref" false
+    (List.mem "transform" flagged)
+
+(** pfn inside a describe block called transitively from another pfn directly
+    seeded from a test body — must NOT be flagged (requires find_body to recurse
+    into DDescribe). *)
+let test_lint_pfn_describe_transitive () =
+  let src = {|mod Test do
+describe "suite" do
+
+pfn leaf(x: Int): Int do
+  x + 1
+end
+
+pfn mid(x: Int): Int do
+  leaf(x) * 2
+end
+
+pfn top(x: Int): Int do
+  mid(x)
+end
+
+test "check" do
+  assert(top(3) == 8)
+end
+
+end
+end|} in
+  let diags = lint_check src in
+  let flagged = unused_pfn_names diags in
+  Alcotest.(check bool) "leaf not flagged (transitive via describe)" false
+    (List.mem "leaf" flagged);
+  Alcotest.(check bool) "mid not flagged (transitive via describe)" false
+    (List.mem "mid" flagged)
+
+(** Same as above but top-level caller directly seeded by a test — full chain. *)
+let test_lint_pfn_describe_chain () =
+  let src = {|mod Test do
+describe "suite" do
+
+pfn write_tmp(content: String): String do
+  content
+end
+
+pfn run_march(content: String): String do
+  write_tmp(content)
+end
+
+pfn wait_for_run(content: String): Bool do
+  run_march(content) != ""
+end
+
+test "pipeline" do
+  assert(wait_for_run("x"))
+end
+
+end
+end|} in
+  let diags = lint_check src in
+  let flagged = unused_pfn_names diags in
+  Alcotest.(check bool) "write_tmp not flagged" false (List.mem "write_tmp" flagged);
+  Alcotest.(check bool) "run_march not flagged" false (List.mem "run_march" flagged)
+
+(** A genuinely unreachable pfn IS flagged — the fix must not suppress real dead code. *)
+let test_lint_pfn_truly_unused () =
+  let src = {|mod Test do
+pfn dead(x: Int): Int do
+  x + 99
+end
+
+fn public_fn(): Int do
+  42
+end
+end|} in
+  let diags = lint_check src in
+  Alcotest.(check bool) "dead pfn IS flagged" true
+    (has_lint_rule "dead-code/unused-private-fn" diags)
+
+(** pfn called from an actor's init expression — must NOT be flagged
+    (requires actor_init to be a reachability root). *)
+let test_lint_pfn_actor_init () =
+  let src = {|mod Test do
+pfn initial_count(): Int do
+  0
+end
+
+type CounterMsg = Inc
+
+actor Counter do
+  state { count: Int }
+  init do initial_count() end
+  on Inc do
+    { count = count + 1 }
+  end
+end
+end|} in
+  let diags = lint_check src in
+  let flagged = unused_pfn_names diags in
+  Alcotest.(check bool) "initial_count not flagged via actor_init" false
+    (List.mem "initial_count" flagged)
+
+(** pfn called from an interface impl method body — must NOT be flagged
+    (requires impl methods to be reachability roots). *)
+let test_lint_pfn_impl_method () =
+  let src = {|mod Test do
+type MyInt = MyInt(Int)
+
+pfn format_inner(n: Int): String do
+  Int.to_string(n)
+end
+
+interface Show(a) do
+  fn show(x: a): String
+end
+
+impl Show(MyInt) do
+  fn show(x: MyInt): String do
+    match x do
+      MyInt(n) -> format_inner(n)
+    end
+  end
+end
+end|} in
+  let diags = lint_check src in
+  let flagged = unused_pfn_names diags in
+  Alcotest.(check bool) "format_inner not flagged via impl method" false
+    (List.mem "format_inner" flagged)
+
 let () =
   Alcotest.run "march"
     [
@@ -21034,5 +21212,14 @@ let () =
         Alcotest.test_case "large env lookup O(log n)"  `Quick test_tc_perf_large_env;
         Alcotest.test_case "many ctors no quadratic"    `Quick test_tc_perf_many_ctors;
         Alcotest.test_case "deep nested modules"        `Quick test_tc_perf_nested_modules;
+      ]);
+      ("lint/dead-code/unused-private-fn", [
+        Alcotest.test_case "pfn via HOF lambda not flagged"        `Quick test_lint_pfn_via_hof_lambda;
+        Alcotest.test_case "pfn bare ref to HOF not flagged"       `Quick test_lint_pfn_bare_hof_ref;
+        Alcotest.test_case "pfn in describe transitive not flagged" `Quick test_lint_pfn_describe_transitive;
+        Alcotest.test_case "pfn in describe root+chain not flagged" `Quick test_lint_pfn_describe_chain;
+        Alcotest.test_case "truly unused pfn IS flagged"           `Quick test_lint_pfn_truly_unused;
+        Alcotest.test_case "pfn actor_init not flagged"            `Quick test_lint_pfn_actor_init;
+        Alcotest.test_case "pfn impl method body not flagged"      `Quick test_lint_pfn_impl_method;
       ]);
     ]
