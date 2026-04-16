@@ -3635,7 +3635,16 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
        (* Emit test name string constants directly to out (preamble was already
           flushed to out above, so ctx.preamble writes would be lost). *)
        List.iteri (fun i (_fn_name, display_name) ->
-         let escaped = String.concat "\\0A" (String.split_on_char '\n' display_name) in
+         (* Use the same escaper as intern_string (llvm_escape_string): percent-
+            encodes every byte outside printable ASCII and encodes " as \22 and
+            \ as \5C.  LLVM parses these three-byte forms back to one byte, so
+            String.length display_name + 1 remains the correct array size.
+            The previous ad-hoc escaper only handled '\n' → \0A, leaving literal
+            " and \ in place; LLVM's C-string parser then interpreted them as
+            escape sequences, collapsing two-byte sequences to one byte so the
+            actual payload was shorter than nbytes, and clang rejected the IR
+            with "constant expression type mismatch". *)
+         let escaped = llvm_escape_string display_name in
          let nbytes = String.length display_name + 1 in
          Printf.bprintf out
            "@.test_name_%d = private constant [%d x i8] c\"%s\\00\"\n"
