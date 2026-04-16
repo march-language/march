@@ -131,7 +131,16 @@ mod Check do
     else
       let size = scale_size(run_idx, config.num_runs, config.max_size)
       let (t, rng2) = Gen.run(g, rng, size)
-      let r = try_prop(prop, Gen.tree_root(t))
+      -- Extract the root into an explicit binding BEFORE running the
+      -- property.  Keeping the two uses of `t` (tree_root and Some((t, _)))
+      -- separated by a named intermediate makes the "used twice" liveness
+      -- pattern obvious to Perceus, so it emits the required IncRC on `t`
+      -- before `Gen.tree_root(t)` consumes it.  Without this, the nested
+      -- form `try_prop(prop, Gen.tree_root(t))` has triggered RC
+      -- underflows that free `t`'s cell and corrupt the heap in the
+      -- failing branch.
+      let root = Gen.tree_root(t)
+      let r    = try_prop(prop, root)
       if is_failing(r) do Some((t, run_idx))
       else run_loop(g, prop, rng2, run_idx + 1, config)
       end

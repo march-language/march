@@ -111,10 +111,21 @@ void *march_alloc(int64_t sz) {
 /* Polymorphic containers store scalars via inttoptr (e.g. List(Int) stores
  * integers as pointers).  When code-generated pattern-match shared-paths emit
  * march_incrc/decrc on extracted fields whose compile-time type is still a
- * type variable, the value may be a small integer, not a heap pointer.
- * Guard against this: addresses below one page (4096) are never valid heap
- * allocations on any modern platform. */
-#define IS_HEAP_PTR(p) ((uintptr_t)(p) >= 4096u)
+ * type variable, the value may be a small integer (possibly negative), not a
+ * heap pointer.
+ *
+ * Guards:
+ *   1. addresses below one page (4096) are never valid heap allocations on
+ *      any modern platform — rules out small non-negative integers.
+ *   2. values with the sign bit set (intptr_t < 0) are never valid heap
+ *      pointers on any supported 64-bit ABI: user-space mallocs live in the
+ *      lower canonical half (bit 47 clear on x86-64, bit 48 on AArch64), so
+ *      any negative intptr_t is either a kernel / non-canonical address or a
+ *      negative integer smuggled through inttoptr.  Without this, Gen.int
+ *      with a negative lower bound (e.g. Gen.int(-100, 100)) produces values
+ *      like -1 = 0xFFFF…FFFF that the page-only check mistakes for pointers,
+ *      causing SIGSEGV / heap corruption on march_incrc / march_decrc. */
+#define IS_HEAP_PTR(p) ((uintptr_t)(p) >= 4096u && (intptr_t)(p) > 0)
 
 void march_incrc(void *p) {
     if (!IS_HEAP_PTR(p)) return;
