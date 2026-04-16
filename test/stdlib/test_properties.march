@@ -185,15 +185,10 @@ mod TestProperties do
   -- BigInt properties (model: compare with Int for small values)
   -- ================================================================
 
-  -- BigInt tests skipped: BigInt.eq/compare stack-overflows on zero values
-  -- (pre-existing bug). Using to_string comparison as workaround.
-
   describe "BigInt" do
 
-    -- BigInt.add has a pre-existing bug with negative operands (match failure
-    -- on sign comparison value 1). Restrict to non-negative until fixed.
-    test "add matches Int for non-negative values" do
-      Check.all(Gen.tuple2(Gen.int(0, 500), Gen.int(0, 500)), fn pair ->
+    test "add matches Int for all values" do
+      Check.all(Gen.tuple2(Gen.int(-500, 500), Gen.int(-500, 500)), fn pair ->
         match pair do (a, b) ->
           BigInt.to_string(BigInt.add(BigInt.from_int(a), BigInt.from_int(b)))
             == int_to_string(a + b)
@@ -201,11 +196,30 @@ mod TestProperties do
       )
     end
 
-    test "add is commutative for non-negative (via to_string)" do
-      Check.all(Gen.tuple2(Gen.int(0, 500), Gen.int(0, 500)), fn pair ->
+    test "add is commutative" do
+      Check.all(Gen.tuple2(Gen.int(-500, 500), Gen.int(-500, 500)), fn pair ->
         match pair do (a, b) ->
-          BigInt.to_string(BigInt.add(BigInt.from_int(a), BigInt.from_int(b)))
-            == BigInt.to_string(BigInt.add(BigInt.from_int(b), BigInt.from_int(a)))
+          BigInt.add(BigInt.from_int(a), BigInt.from_int(b))
+            == BigInt.add(BigInt.from_int(b), BigInt.from_int(a))
+        end
+      )
+    end
+
+    test "eq matches Int equality" do
+      Check.all(Gen.tuple2(Gen.int(-200, 200), Gen.int(-200, 200)), fn pair ->
+        match pair do (a, b) ->
+          BigInt.eq(BigInt.from_int(a), BigInt.from_int(b)) == (a == b)
+        end
+      )
+    end
+
+    test "compare matches Int compare" do
+      Check.all(Gen.tuple2(Gen.int(-200, 200), Gen.int(-200, 200)), fn pair ->
+        match pair do (a, b) ->
+          let r = BigInt.compare(BigInt.from_int(a), BigInt.from_int(b))
+          if a < b do r < 0
+          else if a > b do r > 0
+          else r == 0 end end
         end
       )
     end
@@ -219,11 +233,10 @@ mod TestProperties do
       )
     end
 
-    test "negate is self-inverse (via to_string)" do
+    test "negate is self-inverse" do
       Check.all(Gen.int(-1000, 1000), fn n ->
         let bn = BigInt.from_int(n)
-        BigInt.to_string(BigInt.negate(BigInt.negate(bn)))
-          == BigInt.to_string(bn)
+        BigInt.negate(BigInt.negate(bn)) == bn
       )
     end
 
@@ -232,8 +245,6 @@ mod TestProperties do
   -- ================================================================
   -- Decimal properties
   -- ================================================================
-
-  -- Decimal.eq also stack-overflows (same pre-existing bug as BigInt.eq).
 
   describe "Decimal" do
 
