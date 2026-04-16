@@ -1,0 +1,181 @@
+-- Check module: property-test runner with integrated shrinking.
+--
+-- Runs a `Gen.Generator(a)`-produced value through a user-supplied property function
+-- a configurable number of times.  When a property fails — whether by
+-- returning `false`, raising an `assert` failure, or crashing with any
+-- other runtime exception — the runner walks the failing input's shrink
+-- tree (integrated into the generator per Hedgehog's design) to find a
+-- minimal counterexample, then panics with a report that includes the
+-- shrunk value, the number of runs, and the seed for replay.
+--
+-- The existing `test ... do ... end` runner catches the panic and reports
+-- the property as a failing test.  No compiler changes required beyond
+-- the `__try_call` builtin that catches runtime exceptions.
+--
+-- Typical use:
+--
+--     test "reverse is involution" do
+--       Check.all(Gen.list(Gen.int(-100, 100)), fn xs ->
+--         List.reverse(List.reverse(xs)) == xs
+--       )
+--     end
+--
+-- Seed sources (highest priority first):
+--   1. `CheckConfig.seed` passed to `Check.all_with`
+--   2. `MARCH_PROP_SEED` environment variable (set by `forge test --seed=N`)
+--   3. current Unix time
+
+mod Check do
+
+  -- ---- Public config ----
+
+  type CheckConfig = { num_runs : Int, seed : Option(Int),
+                        max_shrink_steps : Int, max_size : Int }
+
+  doc """
+  Sensible defaults: 100 runs, size grows to 100, up to 1000 shrink steps,
+  seed picked from env or clock.
+  """
+  fn default_config() : CheckConfig do
+    { num_runs = 100, seed = None, max_shrink_steps = 1000, max_size = 100 }
+  end
+
+  -- ---- Seed resolution ----
+
+  pfn resolve_seed(config_seed : Option(Int)) : Int do
+    match config_seed do
+    Some(n) -> n
+    None    ->
+      match process_env("MARCH_PROP_SEED") do
+      Some(s) ->
+        match string_to_int(s) do
+        Some(n) -> n
+        None    -> float_to_int(unix_time(()))
+        end
+      None    -> float_to_int(unix_time(()))
+      end
+    end
+  end
+
+  -- ---- Property execution (with exception catching) ----
+
+  doc """
+  Run a property with a value, catching any runtime failure.
+  Returns:
+    Ok(true)  — property held
+    Ok(false) — property returned false
+    Err(msg)  — property raised (assert, panic, match failure, etc.)
+  """
+  fn try_prop(prop : a -> Bool, value : a) : Result(Bool, String) do
+    __try_call(fn _ -> prop(value))
+  end
+
+  pfn is_failing(r : Result(Bool, String)) : Bool do
+    match r do
+    Ok(passed) -> not(passed)
+    Err(_)     -> true
+    end
+  end
+
+  pfn format_error(r : Result(Bool, String)) : String do
+    match r do
+    Ok(false) -> "returned false"
+    Ok(true)  -> "PASSED"  -- shouldn't happen at the call site
+    Err(msg)  -> "raised: " ++ msg
+    end
+  end
+
+  -- ---- Shrinking (greedy DFS through rose tree) ----
+
+  pfn find_failing_child(prop, kids) do
+    match kids do
+    Nil -> None
+    Cons(child, rest) ->
+      let r = try_prop(prop, Gen.tree_root(child))
+      if is_failing(r) do Some(child)
+      else find_failing_child(prop, rest)
+      end
+    end
+  end
+
+  pfn shrink_loop(prop, failing, steps_left : Int, steps_taken : Int) do
+    if steps_left <= 0 do (failing, steps_taken)
+    else
+      match find_failing_child(prop, Gen.tree_children(failing)) do
+      None           -> (failing, steps_taken)
+      Some(smaller)  -> shrink_loop(prop, smaller, steps_left - 1, steps_taken + 1)
+      end
+    end
+  end
+
+  -- ---- Run loop ----
+
+  pfn scale_size(run_idx : Int, num_runs : Int, max_size : Int) : Int do
+    -- Linearly grow size from 0 to max_size over the run range.
+    if num_runs <= 1 do max_size
+    else int_div(run_idx * max_size, num_runs - 1)
+    end
+  end
+
+  pfn run_loop(g, prop, rng, run_idx : Int, config : CheckConfig) do
+    if run_idx >= config.num_runs do None
+    else
+      let size = scale_size(run_idx, config.num_runs, config.max_size)
+      let (t, rng2) = Gen.run(g, rng, size)
+      let r = try_prop(prop, Gen.tree_root(t))
+      if is_failing(r) do Some((t, run_idx))
+      else run_loop(g, prop, rng2, run_idx + 1, config)
+      end
+    end
+  end
+
+  -- ---- Failure reporting ----
+
+  pfn render_failure(failing_tree, run_idx : Int,
+                     shrunk_tree, shrink_steps : Int,
+                     seed : Int, prop) do
+    let original = to_string(Gen.tree_root(failing_tree))
+    let minimal  = to_string(Gen.tree_root(shrunk_tree))
+    let r        = try_prop(prop, Gen.tree_root(shrunk_tree))
+    let reason   = format_error(r)
+    "property failed after " ++ int_to_string(run_idx + 1) ++ " run(s)\n" ++
+    "  counterexample: " ++ minimal ++ "\n" ++
+    "  " ++ reason ++ "\n" ++
+    "  shrunk " ++ int_to_string(shrink_steps) ++ " step(s) from: " ++ original ++ "\n" ++
+    "  reproduce with seed: " ++ int_to_string(seed)
+  end
+
+  -- ---- Public API ----
+
+  doc """
+  Run a property with default config (100 runs).  Panics with a formatted
+  counterexample on failure, which the test runner catches and reports.
+  """
+  fn all(g, prop) do
+    all_with(g, prop, default_config())
+  end
+
+  doc """
+  Run a property with explicit config.  Use to override run count, seed,
+  or shrink budget.  Example:
+
+      Check.all_with(gen, prop, { Check.default_config() with seed = Some(42) })
+  """
+  fn all_with(g, prop, config : CheckConfig) do
+    let seed = resolve_seed(config.seed)
+    let rng  = Random.seed(seed)
+    match run_loop(g, prop, rng, 0, config) do
+    None ->
+      -- All runs passed.
+      ()
+    Some(pair) ->
+      match pair do
+      (failing_tree, run_idx) ->
+        let (shrunk, steps) = shrink_loop(prop, failing_tree,
+                                          config.max_shrink_steps, 0)
+        panic(render_failure(failing_tree, run_idx, shrunk, steps, seed, prop))
+      end
+    end
+  end
+
+end

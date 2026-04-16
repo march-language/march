@@ -2358,6 +2358,27 @@ let base_env : env =
   ; ("tap", VBuiltin ("tap", function
         | [v] -> tap_push v; v
         | _ -> eval_error "tap: expected exactly one argument"))
+    (* Property-testing primitive: run a zero-arg thunk, catch any runtime
+       failure (assert, panic, match failure, division by zero, out-of-bounds,
+       etc.) and reflect it as Result(a, String).  Used by stdlib/check.march
+       to drive property tests without needing user-level try/catch. *)
+  ; ("__try_call", VBuiltin ("__try_call", function
+        | [thunk] ->
+          (* The thunk is a 1-arg lambda whose argument is ignored — this
+             is a workaround for a typechecker issue with `() -> a` types
+             in argument position. We pass VBool true, which the March-side
+             lambda `fn _ -> body` discards. *)
+          (try VCon ("Ok", [!apply_hook thunk [VBool true]])
+           with
+           | Assert_failure msg -> VCon ("Err", [VString msg])
+           | Match_failure msg  -> VCon ("Err", [VString ("match failure: " ^ msg)])
+           | Eval_error msg     -> VCon ("Err", [VString msg])
+           | Failure msg        -> VCon ("Err", [VString msg])
+           | Division_by_zero   -> VCon ("Err", [VString "division by zero"])
+           | Stack_overflow     -> VCon ("Err", [VString "stack overflow"])
+           | Invalid_argument m -> VCon ("Err", [VString ("invalid argument: " ^ m)])
+           | exn                -> VCon ("Err", [VString (Printexc.to_string exn)]))
+        | _ -> eval_error "__try_call: expected one thunk argument"))
     (* Conversions *)
   ; ("bool_to_string", VBuiltin ("bool_to_string", function
         | [VBool b] -> VString (string_of_bool b)

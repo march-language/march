@@ -161,13 +161,17 @@ let test_cmd =
     Arg.(value & opt string "" &
          info ["filter"] ~docv:"PATTERN" ~doc:"Only run tests whose name matches PATTERN")
   in
+  let seed =
+    Arg.(value & opt string "" &
+         info ["seed"] ~docv:"SEED" ~doc:"Deterministic seed for property tests (see stdlib/check.march)")
+  in
   let files =
     Arg.(value & pos_all string [] &
          info [] ~docv:"FILE" ~doc:"Test files to run (default: all test files under test/)")
   in
-  let run v c f fs = handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~files:fs ()) in
+  let run v c f s fs = handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~files:fs ()) in
   Cmd.v (Cmd.info "test" ~doc:"Run the test suite")
-    Term.(const run $ verbose $ coverage $ filter $ files)
+    Term.(const run $ verbose $ coverage $ filter $ seed $ files)
 
 (* ------------------------------------------------------------------ forge lint *)
 

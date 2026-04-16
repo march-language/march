@@ -1,0 +1,571 @@
+-- Gen module: Hedgehog-style property-test value generators with integrated shrinking.
+--
+-- Shrinking is NOT a separate step bolted onto generation.  Each generator
+-- produces a rose tree (`GenTree(a)`): a value plus a lazy list of smaller
+-- candidate values.  When a property fails, the runner walks the tree
+-- toward a minimal counterexample — no bespoke shrink function required.
+--
+-- Because shrinking is embedded in the tree, combinators like `bind` / `map`
+-- automatically propagate shrinking correctly through dependent generators.
+--
+-- Typical use (see `Check.all` in check.march):
+--
+--     Check.all(Gen.list(Gen.int(-100, 100)), fn xs ->
+--       List.reverse(List.reverse(xs)) == xs
+--     )
+--
+-- All generators are pure: they consume a `GenRng` and a size hint, and
+-- return a shrink tree plus the advanced RNG.
+
+mod Gen do
+
+  -- ---- Lazy thunk ----
+  --
+  -- The parser doesn't accept zero-arg function types (`Unit -> T`) inside
+  -- recursive ADT fields, so we wrap thunks in `Thunk(Bool -> a)` and pass
+  -- a dummy Bool when forcing.  The argument is always ignored.
+
+  type Thunk(a) = Thunk(Bool -> a)
+
+  -- ---- Rose tree ----
+  --
+  -- Children are produced lazily so shrink candidates are only materialized
+  -- on failure.  Structurally identical to Hedgehog's `Tree`.
+
+  type GenTree(a) = GenTree(a, Thunk(List(GenTree(a))))
+
+  -- ---- Generator ----
+  --
+  -- A generator is `(Rng, size) -> (GenTree(a), Rng')`.  We use a local
+  -- record alias for the RNG shape to sidestep a cross-module type issue:
+  -- `GenRng` and its structural record form aren't interchangeable
+  -- across module boundaries in the typechecker.  `GenRng` matches the
+  -- same record shape, so values from `Random.seed`/`Random.range` flow
+  -- through structurally without an explicit conversion.
+
+  type GenRng = { s0 : Int, s1 : Int, s2 : Int, s3 : Int }
+
+  type Generator(a) = Generator(GenRng -> Int -> (GenTree(a), GenRng))
+
+  -- ================================================================
+  -- Thunk helpers (internal)
+  -- ================================================================
+
+  doc "Force a thunk.  The Bool argument is a parser workaround and is ignored."
+  fn force(th : Thunk(a)) : a do
+    match th do
+    Thunk(f) -> f(true)
+    end
+  end
+
+  doc "Build a thunk that always produces an empty list."
+  pfn no_children() : Thunk(List(GenTree(a))) do
+    Thunk(fn _ -> Nil)
+  end
+
+  -- ================================================================
+  -- Tree helpers (internal)
+  -- ================================================================
+
+  doc "Extract the root value of a shrink tree."
+  fn tree_root(t : GenTree(a)) : a do
+    match t do
+    GenTree(v, _) -> v
+    end
+  end
+
+  doc "Force one level of shrink candidates."
+  fn tree_children(t : GenTree(a)) : List(GenTree(a)) do
+    match t do
+    GenTree(_, th) -> force(th)
+    end
+  end
+
+  doc "A tree with no shrink candidates."
+  fn tree_singleton(v : a) : GenTree(a) do
+    GenTree(v, no_children())
+  end
+
+  doc """
+  Map a pure function over every node in the tree.  The shape of the tree
+  (which shrinks are tried, in what order) is preserved; only the values change.
+  """
+  fn tree_map(t : GenTree(a), f : a -> b) : GenTree(b) do
+    match t do
+    GenTree(v, children_th) ->
+      GenTree(f(v), Thunk(fn _ ->
+        List.map(force(children_th), fn child -> tree_map(child, f))
+      ))
+    end
+  end
+
+  doc """
+  Monadic bind on trees.  For each value in `ta` we produce a new tree via
+  `f`; the resulting tree's children are the union of:
+    (1) shrinks inherited from `ta` (each re-threaded through `f`)
+    (2) shrinks of the `f(root)` sub-tree
+  This is how integrated shrinking preserves relationships between dependent
+  generators — shrinking the input automatically re-derives the output.
+  """
+  fn tree_bind(t : GenTree(a), f : a -> GenTree(b)) : GenTree(b) do
+    match t do
+    GenTree(v, children_a_th) ->
+      match f(v) do
+      GenTree(w, children_b_th) ->
+        GenTree(w, Thunk(fn _ ->
+          let from_a = List.map(force(children_a_th), fn child_a ->
+            tree_bind(child_a, f))
+          let from_b = force(children_b_th)
+          List.append(from_a, from_b)
+        ))
+      end
+    end
+  end
+
+  doc """
+  Filter a tree: keep only nodes whose root satisfies `pred`.  Children
+  that fail the predicate are replaced with their own filtered children,
+  so we don't lose shrinkability by pruning an intermediate layer.
+  Returns `None` if the root itself fails the predicate.
+  """
+  fn tree_filter(t : GenTree(a), pred : a -> Bool) : Option(GenTree(a)) do
+    match t do
+    GenTree(v, children_th) ->
+      if not(pred(v)) do None
+      else
+        Some(GenTree(v, Thunk(fn _ ->
+          List.filter_map(force(children_th), fn child ->
+            tree_filter(child, pred))
+        )))
+      end
+    end
+  end
+
+  -- ================================================================
+  -- Gen helpers (internal)
+  -- ================================================================
+
+  doc "Run a generator to produce (tree, rng'). Internal."
+  fn run(g : Generator(a), rng : GenRng, size : Int) : (GenTree(a), GenRng) do
+    match g do
+    Generator(f) -> f(rng, size)
+    end
+  end
+
+  -- ================================================================
+  -- Int shrinking (internal)
+  --
+  -- Shrink an integer toward a target (usually 0):
+  --   1. the target itself
+  --   2. binary-search halves between target and the value
+  -- ================================================================
+
+  pfn int_halves_go(target : Int, n : Int, current : Int, acc : List(Int)) : List(Int) do
+    let diff = n - current
+    if diff == 0 do List.reverse(acc)
+    else if diff == 1 do List.reverse(Cons(current, acc))
+    else
+      let next_val = current + int_div(diff, 2)
+      if next_val == current do List.reverse(Cons(current, acc))
+      else int_halves_go(target, n, next_val, Cons(current, acc))
+      end
+    end end
+  end
+
+  pfn int_halves(target : Int, n : Int) : List(Int) do
+    int_halves_go(target, n, target, Nil)
+  end
+
+  doc """
+  Build a shrink tree for an integer, shrinking toward `target`.
+  Each candidate shrinks recursively toward the same target.
+  """
+  fn int_tree_toward(target : Int, n : Int) : GenTree(Int) do
+    if n == target do tree_singleton(n)
+    else
+      GenTree(n, Thunk(fn _ ->
+        List.map(int_halves(target, n), fn h -> int_tree_toward(target, h))
+      ))
+    end
+  end
+
+  -- ================================================================
+  -- Primitive generators
+  -- ================================================================
+
+  doc """
+  A generator that always produces the same value.  Has no shrink candidates.
+  """
+  fn constant(x : a) : Generator(a) do
+    Generator(fn (rng, _size) -> (tree_singleton(x), rng))
+  end
+
+  pfn int_target(lo : Int, hi : Int) : Int do
+    if lo <= 0 && hi >= 0 do 0
+    else if hi < 0 do hi
+    else lo
+    end end
+  end
+
+  doc """
+  Uniform integer in `[lo, hi]` inclusive, shrinking toward 0 (or `lo` if
+  the range doesn't cross 0).
+  """
+  fn int(lo : Int, hi : Int) : Generator(Int) do
+    let target = int_target(lo, hi)
+    Generator(fn (rng, _size) ->
+      let (n, rng2) = Random.range(rng, lo, hi)
+      (int_tree_toward(target, n), rng2)
+    )
+  end
+
+  doc "Uniform integer in `[0, size]`, using the generator's size hint as the upper bound."
+  fn int_sized() : Generator(Int) do
+    Generator(fn (rng, size) ->
+      let cap = if size < 0 do 0 else size end
+      let (n, rng2) = Random.range(rng, 0, cap)
+      (int_tree_toward(0, n), rng2)
+    )
+  end
+
+  doc """
+  Uniform Bool; shrinks True -> False (a property that holds for False is
+  usually simpler to reason about than one that holds for True).
+  """
+  fn bool() : Generator(Bool) do
+    Generator(fn (rng, _size) ->
+      let (n, rng2) = Random.range(rng, 0, 1)
+      if n == 0 do (tree_singleton(false), rng2)
+      else (GenTree(true, Thunk(fn _ -> Cons(tree_singleton(false), Nil))), rng2)
+      end
+    )
+  end
+
+  pfn float_halves_go(t : Float, f : Float, cur : Float, acc : List(Float)) : List(Float) do
+    let diff = f -. cur
+    let abs_diff = if diff < 0.0 do 0.0 -. diff else diff end
+    if abs_diff < 0.0000009537 do List.reverse(acc)
+    else
+      let next_val = cur +. (diff /. 2.0)
+      if next_val == cur do List.reverse(Cons(cur, acc))
+      else float_halves_go(t, f, next_val, Cons(cur, acc))
+      end
+    end
+  end
+
+  pfn float_tree_toward(t : Float, f : Float) : GenTree(Float) do
+    if f == t do tree_singleton(f)
+    else
+      GenTree(f, Thunk(fn _ ->
+        let hs = float_halves_go(t, f, t, Nil)
+        List.map(hs, fn h -> float_tree_toward(t, h))
+      ))
+    end
+  end
+
+  pfn float_target(lo : Float, hi : Float) : Float do
+    if lo <= 0.0 && hi >= 0.0 do 0.0
+    else if hi < 0.0 do hi
+    else lo
+    end end
+  end
+
+  pfn scale_float(lo : Float, hi : Float, u : Float) : Float do
+    lo +. u *. (hi -. lo)
+  end
+
+  doc """
+  Uniform float in `[lo, hi)`; shrinks toward 0.0 (or the nearer bound)
+  by halving the distance to the target.  Terminates at `target +/- 2^-20`
+  to avoid unbounded shrink chains on floats.
+  """
+  fn float(lo : Float, hi : Float) : Generator(Float) do
+    let target = float_target(lo, hi)
+    Generator(fn (rng, _size) ->
+      let (u, rng2) = Random.next_float(rng)
+      (float_tree_toward(target, scale_float(lo, hi, u)), rng2)
+    )
+  end
+
+  doc """
+  Pick a uniform element from a non-empty list.  Shrinks toward the first
+  element (which is assumed to be the "simplest" by user convention).
+  Panics on empty input.
+  """
+  fn element(xs : List(a)) : Generator(a) do
+    match xs do
+    Nil -> panic("Gen.element: empty list")
+    Cons(first, _) -> do
+      let n = List.length(xs)
+      Generator(fn (rng, _size) ->
+        let (idx, rng2) = Random.range(rng, 0, n - 1)
+        let picked = List.nth(xs, idx)
+        let t =
+          if idx == 0 do tree_singleton(picked)
+          else GenTree(picked, Thunk(fn _ -> Cons(tree_singleton(first), Nil)))
+          end
+        (t, rng2)
+      )
+    end
+    end
+  end
+
+  -- ================================================================
+  -- Combinators
+  -- ================================================================
+
+  doc "Transform a generator's output. Shrinking is inherited from the input."
+  fn map(g : Generator(a), f : a -> b) : Generator(b) do
+    Generator(fn (rng, size) ->
+      let (t, rng2) = run(g, rng, size)
+      (tree_map(t, f), rng2)
+    )
+  end
+
+  doc """
+  Monadic composition for dependent generators.  Shrinking covers both the
+  seed value and the function's result — when the seed shrinks, `f` is
+  replayed with the same RNG so outputs remain deterministically linked.
+  """
+  fn bind(g : Generator(a), f : a -> Generator(b)) : Generator(b) do
+    Generator(fn (rng, size) ->
+      let (ta, rng2) = run(g, rng, size)
+      let combined = tree_bind(ta, fn a_val ->
+        let (tb, _ignored) = run(f(a_val), rng2, size)
+        tb
+      )
+      let (_tb_unused, rng3) = run(f(tree_root(ta)), rng2, size)
+      (combined, rng3)
+    )
+  end
+
+  pfn filter_attempt(g : Generator(a), pred : a -> Bool, r : GenRng,
+                     size : Int, tries : Int) : (GenTree(a), GenRng) do
+    if tries <= 0 do
+      panic("Gen.filter: predicate rejected 100 consecutive candidates")
+    else
+      let (t, r2) = run(g, r, size)
+      match tree_filter(t, pred) do
+      Some(t2) -> (t2, r2)
+      None     -> filter_attempt(g, pred, r2, size, tries - 1)
+      end
+    end
+  end
+
+  doc """
+  Rejection sampling: re-run the generator until it produces a value
+  satisfying `pred`, up to 100 attempts.  Shrink candidates that fail
+  the predicate are pruned.
+
+  Use sparingly — very selective predicates can hurt performance.
+  Prefer `bind` + a targeted sub-generator when possible.
+  """
+  fn filter(g : Generator(a), pred : a -> Bool) : Generator(a) do
+    Generator(fn (rng, size) -> filter_attempt(g, pred, rng, size, 100))
+  end
+
+  doc "Uniform choice among a non-empty list of generators."
+  fn one_of(gens : List(Generator(a))) : Generator(a) do
+    match gens do
+    Nil -> panic("Gen.one_of: empty list")
+    _ -> do
+      let n = List.length(gens)
+      Generator(fn (rng, size) ->
+        let (idx, rng2) = Random.range(rng, 0, n - 1)
+        let picked = List.nth(gens, idx)
+        run(picked, rng2, size)
+      )
+    end
+    end
+  end
+
+  doc """
+  Weighted choice among `(weight, gen)` pairs.  Weights must be non-negative
+  and at least one must be positive.
+  """
+  fn frequency(pairs : List((Int, Generator(a)))) : Generator(a) do
+    let float_pairs = List.map(pairs, fn p ->
+      match p do (w, g) -> (g, int_to_float(w)) end)
+    Generator(fn (rng, size) ->
+      let (picked, rng2) = Random.choice_weighted(rng, float_pairs)
+      run(picked, rng2, size)
+    )
+  end
+
+  -- ================================================================
+  -- Tuple generators
+  -- ================================================================
+
+  doc "Generator for a 2-tuple.  Shrinks each component independently."
+  fn tuple2(ga : Generator(a), gb : Generator(b)) : Generator((a, b)) do
+    bind(ga, fn a -> map(gb, fn b -> (a, b)))
+  end
+
+  doc "Generator for a 3-tuple."
+  fn tuple3(ga : Generator(a), gb : Generator(b), gc : Generator(c)) : Generator((a, b, c)) do
+    bind(ga, fn a ->
+      bind(gb, fn b ->
+        map(gc, fn c -> (a, b, c))))
+  end
+
+  -- ================================================================
+  -- Option generator
+  -- ================================================================
+
+  doc """
+  Generator that produces `None` about 1/4 of the time and `Some(x)` from
+  `g` the rest.  Shrinks `Some(x)` toward `None` first, then shrinks `x`.
+  """
+  fn option(g : Generator(a)) : Generator(Option(a)) do
+    Generator(fn (rng, size) ->
+      let (pick, rng2) = Random.range(rng, 0, 3)
+      if pick == 0 do (tree_singleton(None), rng2)
+      else
+        let (t, rng3) = run(g, rng2, size)
+        let t_some = tree_map(t, fn v -> Some(v))
+        let combined = match t_some do
+          GenTree(root_val, kids_th) ->
+            GenTree(root_val, Thunk(fn _ ->
+              Cons(tree_singleton(None), force(kids_th))
+            ))
+          end
+        (combined, rng3)
+      end
+    )
+  end
+
+  -- ================================================================
+  -- List generator
+  --
+  -- Shrinking strategy:
+  --   1. Remove prefixes of decreasing power-of-two length (drop many, then few)
+  --   2. Shrink each individual element using its own shrink tree
+  -- ================================================================
+
+  pfn list_drops_go(n : Int, xs : List(GenTree(a)),
+                    acc : List(List(GenTree(a)))) : List(List(GenTree(a))) do
+    if n <= 0 do List.reverse(acc)
+    else
+      let shorter = List.drop(xs, n)
+      list_drops_go(int_div(n, 2), xs, Cons(shorter, acc))
+    end
+  end
+
+  pfn list_drops(xs : List(GenTree(a))) : List(List(GenTree(a))) do
+    list_drops_go(List.length(xs), xs, Nil)
+  end
+
+  pfn list_shrink_one_go(prefix_rev : List(GenTree(a)), rest : List(GenTree(a)),
+                        acc : List(List(GenTree(a)))) : List(List(GenTree(a))) do
+    match rest do
+    Nil -> List.reverse(acc)
+    Cons(h, t) -> do
+      let kids = tree_children(h)
+      let variants = List.map(kids, fn k ->
+        List.append(List.reverse(prefix_rev), Cons(k, t)))
+      list_shrink_one_go(Cons(h, prefix_rev), t,
+        List.append(List.reverse(variants), acc))
+    end
+    end
+  end
+
+  pfn list_shrink_one(xs : List(GenTree(a))) : List(List(GenTree(a))) do
+    list_shrink_one_go(Nil, xs, Nil)
+  end
+
+  pfn list_tree_from_elems(elems : List(GenTree(a))) : GenTree(List(a)) do
+    GenTree(
+      List.map(elems, tree_root),
+      Thunk(fn _ ->
+        let shorter = list_drops(elems)
+        let elem_shrunk = list_shrink_one(elems)
+        List.map(List.append(shorter, elem_shrunk), list_tree_from_elems)
+      )
+    )
+  end
+
+  pfn gen_elems(g : Generator(a), n : Int, size : Int, r : GenRng,
+                acc : List(GenTree(a))) : (List(GenTree(a)), GenRng) do
+    if n <= 0 do (List.reverse(acc), r)
+    else
+      let (t, r2) = run(g, r, size)
+      gen_elems(g, n - 1, size, r2, Cons(t, acc))
+    end
+  end
+
+  doc """
+  Generator for a list.  The length is uniform in `[0, size]`, where `size`
+  is the size hint passed by the runner (grows from 0 to ~100 across runs).
+
+  Shrinking reduces both length and element values, producing genuinely
+  minimal counterexamples.
+  """
+  fn list(g : Generator(a)) : Generator(List(a)) do
+    Generator(fn (rng, size) ->
+      let cap = if size < 0 do 0 else size end
+      let (len, rng2) = Random.range(rng, 0, cap)
+      let (elems, rng3) = gen_elems(g, len, size, rng2, Nil)
+      (list_tree_from_elems(elems), rng3)
+    )
+  end
+
+  pfn list_fixed_tree(elems : List(GenTree(a))) : GenTree(List(a)) do
+    GenTree(
+      List.map(elems, tree_root),
+      Thunk(fn _ -> List.map(list_shrink_one(elems), list_tree_from_elems))
+    )
+  end
+
+  doc "Generator for a list of exactly `n` elements."
+  fn list_of_size(n : Int, g : Generator(a)) : Generator(List(a)) do
+    Generator(fn (rng, size) ->
+      let (elems, rng2) = gen_elems(g, n, size, rng, Nil)
+      (list_fixed_tree(elems), rng2)
+    )
+  end
+
+  -- ================================================================
+  -- Char / String
+  -- ================================================================
+
+  doc "Printable ASCII character in [32, 126].  Shrinks toward 'a' (97)."
+  fn ascii_char() : Generator(Int) do
+    Generator(fn (rng, _size) ->
+      let (n, rng2) = Random.range(rng, 32, 126)
+      (int_tree_toward(97, n), rng2)
+    )
+  end
+
+  doc "Lowercase ASCII letter.  Shrinks toward 'a'."
+  fn lowercase_char() : Generator(Int) do
+    Generator(fn (rng, _size) ->
+      let (n, rng2) = Random.range(rng, 97, 122)
+      (int_tree_toward(97, n), rng2)
+    )
+  end
+
+  pfn chars_to_string_go(lst : List(Int), acc : String) : String do
+    match lst do
+    Nil -> acc
+    Cons(h, t) -> chars_to_string_go(t, acc ++ char_from_int(h))
+    end
+  end
+
+  pfn chars_to_string(codes : List(Int)) : String do
+    chars_to_string_go(codes, "")
+  end
+
+  doc """
+  Generator for an ASCII string.  Length uniform in `[0, size]`; characters
+  drawn from printable ASCII.  Shrinks by reducing length and char values.
+  """
+  fn string() : Generator(String) do
+    map(list(ascii_char()), chars_to_string)
+  end
+
+  doc "Generator for a lowercase-letter string."
+  fn lowercase_string() : Generator(String) do
+    map(list(lowercase_char()), chars_to_string)
+  end
+
+end

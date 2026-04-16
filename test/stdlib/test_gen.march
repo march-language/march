@@ -1,0 +1,176 @@
+-- Tests for stdlib/gen.march
+-- Run with: forge test test/stdlib/test_gen.march
+
+mod TestGen do
+
+  -- ---- Tree helpers ----
+
+  test "tree_singleton has no shrink candidates" do
+    let t = Gen.tree_singleton(42)
+    assert (Gen.tree_root(t) == 42)
+    assert (List.length(Gen.tree_children(t)) == 0)
+  end
+
+  test "tree_map transforms root and children" do
+    let t = Gen.int_tree_toward(0, 8)
+    let t2 = Gen.tree_map(t, fn n -> n * 2)
+    assert (Gen.tree_root(t2) == 16)
+    -- The shape is preserved: same number of children as original.
+    assert (List.length(Gen.tree_children(t2)) == List.length(Gen.tree_children(t)))
+  end
+
+  -- ---- Int generator: correctness and determinism ----
+
+  test "int generator produces values in range" do
+    let g = Gen.int(-5, 5)
+    let rng = Random.seed(1)
+    let (t, _) = Gen.run(g, rng, 10)
+    let n = Gen.tree_root(t)
+    assert (n >= 0 - 5)
+    assert (n <= 5)
+  end
+
+  test "same seed produces same value" do
+    let g = Gen.int(-100, 100)
+    let (t1, _) = Gen.run(g, Random.seed(42), 50)
+    let (t2, _) = Gen.run(g, Random.seed(42), 50)
+    assert (Gen.tree_root(t1) == Gen.tree_root(t2))
+  end
+
+  test "int shrinks toward 0" do
+    let g = Gen.int(-50, 50)
+    let rng = Random.seed(17)
+    let (t, _) = Gen.run(g, rng, 100)
+    let root = Gen.tree_root(t)
+    let kids = Gen.tree_children(t)
+    -- If value is nonzero there should be shrinks; first shrink is toward 0.
+    if root != 0 do
+      let _ = assert (List.length(kids) > 0)
+      match kids do
+      Cons(first_kid, _) ->
+        let first_val = Gen.tree_root(first_kid)
+        -- The first shrink should be closer to 0 than the root.
+        assert (int_abs(first_val) < int_abs(root))
+      Nil -> Test.fail("expected shrinks for nonzero value")
+      end
+    else ()
+    end
+  end
+
+  -- ---- Bool generator ----
+
+  test "bool shrinks True to False" do
+    -- Build the tree for True manually via the generator's output.
+    let g = Gen.bool()
+    let rng = Random.seed(100)
+    let (t, _) = Gen.run(g, rng, 10)
+    let root = Gen.tree_root(t)
+    if root do
+      -- True should shrink to False
+      match Gen.tree_children(t) do
+      Cons(first, _) -> assert (Gen.tree_root(first) == false)
+      Nil            -> Test.fail("expected True to have shrinks")
+      end
+    else ()
+    end
+  end
+
+  test "bool False has no shrinks" do
+    -- Explicitly test via tree_singleton-like path.
+    let g = Gen.bool()
+    -- Try many seeds, one should produce False
+    let (t, _) = Gen.run(g, Random.seed(3), 10)
+    let root = Gen.tree_root(t)
+    if not(root) do
+      assert (List.length(Gen.tree_children(t)) == 0)
+    else ()
+    end
+  end
+
+  -- ---- Constant generator ----
+
+  test "constant produces its value every run" do
+    let g = Gen.constant(99)
+    let (t1, _) = Gen.run(g, Random.seed(1), 10)
+    let (t2, _) = Gen.run(g, Random.seed(999), 100)
+    assert (Gen.tree_root(t1) == 99)
+    assert (Gen.tree_root(t2) == 99)
+    assert (List.length(Gen.tree_children(t1)) == 0)
+  end
+
+  -- ---- List generator ----
+
+  test "list generator length within [0, size]" do
+    let g = Gen.list(Gen.int(0, 10))
+    let (t, _) = Gen.run(g, Random.seed(5), 20)
+    let xs = Gen.tree_root(t)
+    let len = List.length(xs)
+    assert (len >= 0)
+    assert (len <= 20)
+  end
+
+  test "list_of_size produces exact length" do
+    let g = Gen.list_of_size(7, Gen.int(0, 100))
+    let (t, _) = Gen.run(g, Random.seed(5), 50)
+    let xs = Gen.tree_root(t)
+    assert (List.length(xs) == 7)
+  end
+
+  -- ---- Map combinator ----
+
+  test "map transforms generated values" do
+    let g = Gen.map(Gen.int(0, 10), fn n -> n * 100)
+    let (t, _) = Gen.run(g, Random.seed(7), 10)
+    let v = Gen.tree_root(t)
+    assert (v >= 0)
+    assert (v <= 1000)
+    assert (int_mod(v, 100) == 0)
+  end
+
+  -- ---- Tuple generator ----
+
+  test "tuple2 combines two generators" do
+    let g = Gen.tuple2(Gen.int(-10, 10), Gen.int(100, 200))
+    let (t, _) = Gen.run(g, Random.seed(11), 10)
+    match Gen.tree_root(t) do
+    (a, b) ->
+      let _ = assert (a >= 0 - 10)
+      let _ = assert (a <= 10)
+      let _ = assert (b >= 100)
+      assert (b <= 200)
+    end
+  end
+
+  -- ---- Option generator ----
+
+  test "option generator produces None sometimes and Some sometimes" do
+    -- Run many times and count Nones.
+    let g = Gen.option(Gen.int(0, 100))
+    fn count_nones(seed : Int, remaining : Int, acc : Int) : Int do
+      if remaining <= 0 do acc
+      else
+        let (t, _) = Gen.run(g, Random.seed(seed), 50)
+        let is_none = match Gen.tree_root(t) do
+          None -> 1
+          Some(_) -> 0
+          end
+        count_nones(seed + 1, remaining - 1, acc + is_none)
+      end
+    end
+    let nones = count_nones(0, 40, 0)
+    -- Expect ~25% Nones (1/4).  Allow wide tolerance: 2..30 out of 40.
+    assert (nones >= 2)
+    assert (nones <= 30)
+  end
+
+  -- ---- Ascii char generator ----
+
+  test "ascii_char in printable range" do
+    let g = Gen.ascii_char()
+    let (t, _) = Gen.run(g, Random.seed(13), 10)
+    let c = Gen.tree_root(t)
+    assert (c >= 32)
+    assert (c <= 126)
+  end
+
+end

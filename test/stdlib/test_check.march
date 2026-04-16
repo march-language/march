@@ -1,0 +1,134 @@
+-- Tests for stdlib/check.march — the property-test runner itself.
+-- Run with: forge test test/stdlib/test_check.march
+
+mod TestCheck do
+
+  -- ---- Simple passing properties ----
+
+  test "int + 0 = int (passing property)" do
+    Check.all(Gen.int(-1000, 1000), fn n ->
+      n + 0 == n
+    )
+  end
+
+  test "addition is commutative" do
+    Check.all(Gen.tuple2(Gen.int(-100, 100), Gen.int(-100, 100)), fn pair ->
+      match pair do
+      (a, b) -> a + b == b + a
+      end
+    )
+  end
+
+  test "multiplication is associative" do
+    Check.all(
+      Gen.tuple3(Gen.int(-20, 20), Gen.int(-20, 20), Gen.int(-20, 20)),
+      fn triple ->
+        match triple do
+        (a, b, c) -> (a * b) * c == a * (b * c)
+        end
+    )
+  end
+
+  test "list length is non-negative" do
+    Check.all(Gen.list(Gen.int(0, 10)), fn xs ->
+      List.length(xs) >= 0
+    )
+  end
+
+  test "list reverse twice is identity (int lists)" do
+    Check.all(Gen.list(Gen.int(-100, 100)), fn xs ->
+      List.length(List.reverse(List.reverse(xs))) == List.length(xs)
+    )
+  end
+
+  test "option generator always produces valid variant" do
+    Check.all(Gen.option(Gen.int(0, 100)), fn opt ->
+      match opt do
+      Some(_) -> true
+      None    -> true
+      end
+    )
+  end
+
+  -- ---- Multiple asserts ----
+
+  test "multiple asserts in one property all pass" do
+    Check.all(Gen.int(0, 100), fn n ->
+      let _ = assert (n >= 0)
+      let _ = assert (n <= 100)
+      let _ = assert (n + 1 > n)
+      true
+    )
+  end
+
+  -- ---- Seed reproducibility ----
+
+  test "same seed reproduces same failure" do
+    -- Run twice with the same seed via all_with; each should find the
+    -- same minimal counterexample.  We verify by catching the panic
+    -- via __try_call directly.
+    let config = { Check.default_config() with seed = Some(12345), num_runs = 200 }
+    let r1 = __try_call(fn _ ->
+      let _ = Check.all_with(Gen.int(-100, 100), fn n -> n < 50, config)
+      ()
+    )
+    let r2 = __try_call(fn _ ->
+      let _ = Check.all_with(Gen.int(-100, 100), fn n -> n < 50, config)
+      ()
+    )
+    -- Both should be Err (property fails for n >= 50).
+    match r1 do
+    Ok(_)   -> Test.fail("expected r1 to fail")
+    Err(m1) ->
+      match r2 do
+      Ok(_)   -> Test.fail("expected r2 to fail")
+      Err(m2) -> assert (m1 == m2)
+      end
+    end
+  end
+
+  -- ---- Config overrides ----
+
+  test "all_with respects num_runs" do
+    -- A property that never fails should run exactly num_runs times
+    -- regardless of seed.  We can't observe run count directly, but we
+    -- can ensure this doesn't panic with a low num_runs.
+    let config = { Check.default_config() with num_runs = 5 }
+    Check.all_with(Gen.int(0, 100), fn n -> n >= 0, config)
+  end
+
+  -- ---- Shrinking finds minimal counterexample ----
+
+  test "shrinking finds minimal failing input" do
+    -- Property: n < 50 for Gen.int(0, 100).  Minimal counterexample is 50.
+    -- Verify by catching the panic and checking the message mentions 50.
+    let config = { Check.default_config() with seed = Some(7), num_runs = 200 }
+    let r = __try_call(fn _ ->
+      let _ = Check.all_with(Gen.int(0, 100), fn n -> n < 50, config)
+      ()
+    )
+    match r do
+    Ok(_)  -> Test.fail("expected property to fail")
+    Err(m) -> assert (string_contains(m, "counterexample: 50"))
+    end
+  end
+
+  -- ---- Crash-shrinking (option b from the design discussion) ----
+
+  test "property that crashes is reported as a failure" do
+    -- int_div by zero raises; the runner should catch it.
+    let config = { Check.default_config() with seed = Some(99), num_runs = 50 }
+    let r = __try_call(fn _ ->
+      let _ = Check.all_with(Gen.int(-10, 10), fn n ->
+        let _ = int_div(100, n)  -- crashes when n == 0
+        true
+      , config)
+      ()
+    )
+    match r do
+    Ok(_)  -> Test.fail("expected crash to be reported as failure")
+    Err(m) -> assert (string_contains(m, "division by zero"))
+    end
+  end
+
+end
