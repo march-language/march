@@ -528,15 +528,27 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
           StringSet.empty br.Tir.br_vars
       in
       let la = StringSet.diff live_after bound in
-      (* When the scrutinee is borrowed (it lives in live_after), its branch
+      (* When the scrutinee is borrowed (not freed in this branch), its branch
          variables are borrowed references extracted from it.  They must not be
          freed at their last use; re-add them to live_after so post_dec_var
-         does not fire for them after borrowed calls inside the branch body. *)
-      let la = match a with
-        | Tir.AVar v when StringSet.mem v.Tir.v_name live_after ->
-          List.fold_left (fun s bv -> StringSet.add bv.Tir.v_name s)
-            la br.Tir.br_vars
-        | _ -> la
+         does not fire for them after borrowed calls inside the branch body.
+         The scrutinee is borrowed in two cases:
+         1. It lives in live_after (used after the entire case).
+         2. It appears free in this branch's body (used in a different sub-path
+            within the branch, e.g. the else side of an if inside the branch).
+         Case 2 was previously unhandled, causing br_vars to be passed to owning
+         positions without IncRC — the root cause of the sort_by RC underflow. *)
+      let scrutinee_borrowed = match a with
+        | Tir.AVar v ->
+          StringSet.mem v.Tir.v_name live_after
+          || (needs_rc v.Tir.v_ty
+              && name_free_in v.Tir.v_name br.Tir.br_body)
+        | _ -> false
+      in
+      let la = if scrutinee_borrowed then
+        List.fold_left (fun s bv -> StringSet.add bv.Tir.v_name s)
+          la br.Tir.br_vars
+      else la
       in
       let (body', _) = insert_rc_expr br.Tir.br_body la in
       { br with Tir.br_body = add_scrutinee_free_for br.Tir.br_tag body' }
