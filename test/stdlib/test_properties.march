@@ -240,6 +240,54 @@ mod TestProperties do
       )
     end
 
+    test "sub is inverse of add" do
+      Check.all(Gen.tuple2(Gen.int(-200, 200), Gen.int(-200, 200)), fn pair ->
+        match pair do (a, b) ->
+          let ba = BigInt.from_int(a)
+          let bb = BigInt.from_int(b)
+          BigInt.eq(BigInt.sub(BigInt.add(ba, bb), bb), ba)
+        end
+      )
+    end
+
+    test "add is associative" do
+      Check.all(
+        Gen.tuple3(Gen.int(-50, 50), Gen.int(-50, 50), Gen.int(-50, 50)),
+        fn triple -> match triple do (a, b, c) ->
+          let ba = BigInt.from_int(a)
+          let bb = BigInt.from_int(b)
+          let bc = BigInt.from_int(c)
+          BigInt.eq(
+            BigInt.add(BigInt.add(ba, bb), bc),
+            BigInt.add(ba, BigInt.add(bb, bc))
+          )
+        end
+      )
+    end
+
+    test "mul is commutative" do
+      Check.all(Gen.tuple2(Gen.int(-100, 100), Gen.int(-100, 100)), fn pair ->
+        match pair do (a, b) ->
+          BigInt.eq(
+            BigInt.mul(BigInt.from_int(a), BigInt.from_int(b)),
+            BigInt.mul(BigInt.from_int(b), BigInt.from_int(a))
+          )
+        end
+      )
+    end
+
+    test "div/mod relationship: a == (a/b)*b + a%b" do
+      Check.all(Gen.tuple2(Gen.int(-200, 200), Gen.int(1, 50)), fn pair ->
+        match pair do (a, b) ->
+          let ba = BigInt.from_int(a)
+          let bb = BigInt.from_int(b)
+          let q = BigInt.div(ba, bb)
+          let r = BigInt.mod_(ba, bb)
+          BigInt.eq(BigInt.add(BigInt.mul(q, bb), r), ba)
+        end
+      )
+    end
+
   end
 
   -- ================================================================
@@ -248,23 +296,53 @@ mod TestProperties do
 
   describe "Decimal" do
 
-    test "add is commutative (via to_string)" do
+    test "add is commutative" do
       Check.all(Gen.tuple2(Gen.int(-1000, 1000), Gen.int(-1000, 1000)), fn pair ->
         match pair do (a, b) ->
-          let da = Decimal.from_int(a)
-          let db = Decimal.from_int(b)
-          Decimal.to_string(Decimal.add(da, db))
-            == Decimal.to_string(Decimal.add(db, da))
+          Decimal.eq(
+            Decimal.add(Decimal.from_int(a), Decimal.from_int(b)),
+            Decimal.add(Decimal.from_int(b), Decimal.from_int(a))
+          )
         end
       )
     end
 
-    test "add zero is identity (via to_string)" do
+    test "add zero is identity" do
       Check.all(Gen.int(-1000, 1000), fn n ->
-        let d = Decimal.from_int(n)
-        let zero = Decimal.from_int(0)
-        Decimal.to_string(Decimal.add(d, zero))
-          == Decimal.to_string(d)
+        Decimal.eq(Decimal.add(Decimal.from_int(n), Decimal.from_int(0)), Decimal.from_int(n))
+      )
+    end
+
+    test "sub is inverse of add" do
+      Check.all(Gen.tuple2(Gen.int(-500, 500), Gen.int(-500, 500)), fn pair ->
+        match pair do (a, b) ->
+          let da = Decimal.from_int(a)
+          let db = Decimal.from_int(b)
+          Decimal.eq(Decimal.sub(Decimal.add(da, db), db), da)
+        end
+      )
+    end
+
+    test "mul one is identity" do
+      Check.all(Gen.int(-1000, 1000), fn n ->
+        Decimal.eq(Decimal.mul(Decimal.from_int(n), Decimal.from_int(1)), Decimal.from_int(n))
+      )
+    end
+
+    test "from_int to_string matches int_to_string" do
+      Check.all(Gen.int(-10000, 10000), fn n ->
+        Decimal.to_string(Decimal.from_int(n)) == int_to_string(n)
+      )
+    end
+
+    test "compare matches Int compare" do
+      Check.all(Gen.tuple2(Gen.int(-200, 200), Gen.int(-200, 200)), fn pair ->
+        match pair do (a, b) ->
+          let r = Decimal.compare(Decimal.from_int(a), Decimal.from_int(b))
+          if a < b do r < 0
+          else if a > b do r > 0
+          else r == 0 end end
+        end
       )
     end
 
@@ -466,6 +544,200 @@ mod TestProperties do
         fn triple -> match triple do
           (a, b, c) -> a * (b + c) == a * b + a * c
         end
+      )
+    end
+
+  end
+
+  -- ================================================================
+  -- List: additional structural properties
+  -- ================================================================
+
+  describe "List (extended)" do
+
+    test "zip/unzip round-trip" do
+      Check.all(Gen.tuple2(Gen.list(Gen.int(0, 50)), Gen.list(Gen.int(0, 50))), fn pair ->
+        match pair do (xs, ys) ->
+          let len = if List.length(xs) < List.length(ys) do List.length(xs) else List.length(ys) end
+          let xt = List.take(xs, len)
+          let yt = List.take(ys, len)
+          match List.unzip(List.zip(xt, yt)) do
+          (xs_out, ys_out) ->
+            list_eq_int(xs_out, xt) && list_eq_int(ys_out, yt)
+          end
+        end
+      )
+    end
+
+    test "flat_map with repeat doubles length" do
+      Check.all(Gen.list(Gen.int(0, 10)), fn xs ->
+        let flat = List.flat_map(xs, fn x -> Cons(x, Cons(x, Nil)))
+        List.length(flat) == List.length(xs) * 2
+      )
+    end
+
+    test "enumerate preserves elements" do
+      Check.all(Gen.list(Gen.int(0, 100)), fn xs ->
+        let extracted = List.map(List.enumerate(xs), fn p ->
+          match p do (_, x) -> x end)
+        list_eq_int(extracted, xs)
+      )
+    end
+
+    test "enumerate indices are sequential from 0" do
+      Check.all(Gen.list(Gen.int(0, 50)), fn xs ->
+        let indices = List.map(List.enumerate(xs), fn p ->
+          match p do (i, _) -> i end)
+        list_eq_int(indices, List.range(0, List.length(xs)))
+      )
+    end
+
+    test "dedup is idempotent" do
+      Check.all(Gen.list(Gen.int(-10, 10)), fn xs ->
+        let once = List.dedup(xs)
+        let twice = List.dedup(once)
+        list_eq_int(once, twice)
+      )
+    end
+
+    test "partition preserves total count" do
+      Check.all(Gen.list(Gen.int(-100, 100)), fn xs ->
+        match List.partition(xs, fn x -> x > 0) do
+        (yes, no) ->
+          List.length(yes) + List.length(no) == List.length(xs)
+        end
+      )
+    end
+
+    test "partition elements satisfy predicate" do
+      Check.all(Gen.list(Gen.int(-100, 100)), fn xs ->
+        match List.partition(xs, fn x -> x > 0) do
+        (yes, no) ->
+          List.all(yes, fn x -> x > 0) && List.all(no, fn x -> not(x > 0))
+        end
+      )
+    end
+
+  end
+
+  -- ================================================================
+  -- String: additional properties
+  -- ================================================================
+
+  describe "String (extended)" do
+
+    test "contains self" do
+      Check.all(Gen.lowercase_string(), fn s ->
+        String.contains(s, s)
+      )
+    end
+
+    test "starts_with/ends_with after concat" do
+      Check.all(Gen.tuple2(Gen.lowercase_string(), Gen.lowercase_string()), fn pair ->
+        match pair do (a, b) ->
+          let combined = a ++ b
+          String.starts_with(combined, a) && String.ends_with(combined, b)
+        end
+      )
+    end
+
+    test "pad_left reaches target width" do
+      Check.all(Gen.tuple2(Gen.lowercase_string(), Gen.int(1, 50)), fn pair ->
+        match pair do (s, width) ->
+          let padded = String.pad_left(s, width, "0")
+          string_length(padded) >= width
+        end
+      )
+    end
+
+    test "pad_right reaches target width" do
+      Check.all(Gen.tuple2(Gen.lowercase_string(), Gen.int(1, 50)), fn pair ->
+        match pair do (s, width) ->
+          let padded = String.pad_right(s, width, "0")
+          string_length(padded) >= width
+        end
+      )
+    end
+
+  end
+
+  -- ================================================================
+  -- Bytes properties
+  -- ================================================================
+
+  describe "Bytes" do
+
+    test "from_string/to_string round-trip" do
+      Check.all(Gen.lowercase_string(), fn s ->
+        Bytes.to_string(Bytes.from_string(s)) == s
+      )
+    end
+
+    test "concat length is additive" do
+      Check.all(Gen.tuple2(Gen.lowercase_string(), Gen.lowercase_string()), fn pair ->
+        match pair do (a, b) ->
+          let ba = Bytes.from_string(a)
+          let bb = Bytes.from_string(b)
+          Bytes.length(Bytes.concat(ba, bb)) == Bytes.length(ba) + Bytes.length(bb)
+        end
+      )
+    end
+
+    test "to_hex/from_hex round-trip" do
+      Check.all(Gen.lowercase_string(), fn s ->
+        let b = Bytes.from_string(s)
+        let hex = Bytes.to_hex(b)
+        match Bytes.from_hex(hex) do
+        Ok(b2) -> Bytes.to_string(b2) == s
+        Err(_) -> false
+        end
+      )
+    end
+
+  end
+
+  -- ================================================================
+  -- Queue FIFO properties
+  -- ================================================================
+
+  describe "Queue" do
+
+    test "to_list after from_list is identity" do
+      Check.all(Gen.list(Gen.int(0, 100)), fn xs ->
+        list_eq_int(Queue.to_list(Queue.from_list(xs)), xs)
+      )
+    end
+
+    test "push_back then to_list appends" do
+      Check.all(Gen.tuple2(Gen.list(Gen.int(0, 50)), Gen.int(0, 100)), fn pair ->
+        match pair do (xs, x) ->
+          let q = Queue.from_list(xs)
+          let q2 = Queue.push_back(q, x)
+          list_eq_int(Queue.to_list(q2), List.append(xs, Cons(x, Nil)))
+        end
+      )
+    end
+
+    test "size matches list length" do
+      Check.all(Gen.list(Gen.int(0, 100)), fn xs ->
+        Queue.size(Queue.from_list(xs)) == List.length(xs)
+      )
+    end
+
+    test "pop_front returns first element" do
+      Check.all(
+        Gen.bind(Gen.int(0, 100), fn first ->
+          Gen.map(Gen.list(Gen.int(0, 100)), fn rest ->
+            Cons(first, rest)
+          )
+        ),
+        fn xs ->
+          let q = Queue.from_list(xs)
+          match Queue.pop_front(q) do
+          Some(pair) ->
+            match pair do (v, _) -> v == List.head(xs) end
+          None -> false
+          end
       )
     end
 
