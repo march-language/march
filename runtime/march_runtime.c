@@ -108,24 +108,25 @@ void *march_alloc(int64_t sz) {
  * _Atomic int64_t has the same size and alignment as int64_t on all targets.
  */
 
-/* Polymorphic containers store scalars via inttoptr (e.g. List(Int) stores
- * integers as pointers).  When code-generated pattern-match shared-paths emit
- * march_incrc/decrc on extracted fields whose compile-time type is still a
- * type variable, the value may be a small integer (possibly negative), not a
- * heap pointer.
+/* Polymorphic containers store scalars via tagged integers: the low bit of the
+ * pointer is set to 1 for immediate scalar values (integers, booleans, chars).
+ * Heap pointers from march_alloc (backed by calloc) are always 8-byte aligned,
+ * so their low bit is always 0.  This uniform tagging scheme lets the runtime
+ * discriminate between heap pointers and immediates without dereferencing.
  *
- * Guards:
- *   1. addresses below one page (4096) are never valid heap allocations on
- *      any modern platform — rules out small non-negative integers.
- *   2. values with the sign bit set (intptr_t < 0) are never valid heap
+ * Tag scheme:
+ *   immediate integer n  → stored as ptr = (n << 1) | 1  (low bit = 1)
+ *   heap pointer p       → stored as ptr = p             (low bit = 0)
+ *
+ * Guards (in order, short-circuit):
+ *   1. low bit == 0: any value with bit 0 set is an immediate — reject fast.
+ *   2. addresses below one page (4096) are never valid heap allocations —
+ *      defense-in-depth for uninitialised fields and NULL.
+ *   3. values with the sign bit set (intptr_t < 0) are never valid heap
  *      pointers on any supported 64-bit ABI: user-space mallocs live in the
- *      lower canonical half (bit 47 clear on x86-64, bit 48 on AArch64), so
- *      any negative intptr_t is either a kernel / non-canonical address or a
- *      negative integer smuggled through inttoptr.  Without this, Gen.int
- *      with a negative lower bound (e.g. Gen.int(-100, 100)) produces values
- *      like -1 = 0xFFFF…FFFF that the page-only check mistakes for pointers,
- *      causing SIGSEGV / heap corruption on march_incrc / march_decrc. */
-#define IS_HEAP_PTR(p) ((uintptr_t)(p) >= 4096u && (intptr_t)(p) > 0)
+ *      lower canonical half (bit 47 clear on x86-64, bit 48 on AArch64). */
+#define IS_HEAP_PTR(p) \
+    (((uintptr_t)(p) & 1u) == 0 && (uintptr_t)(p) >= 4096u && (intptr_t)(p) > 0)
 
 void march_incrc(void *p) {
     if (!IS_HEAP_PTR(p)) return;
@@ -2581,10 +2582,15 @@ void *march_get_actor_field(void *pid, void *name) {
 /* ── Value pretty-printing ───────────────────────────────────────────── */
 
 /* Format a March value as a human-readable string.
-   If v is a registered actor (Pid), prints Pid(n).
-   Otherwise prints #<tag:N> for heap objects. */
+   Handles tagged immediates (low bit == 1), actor Pids, and heap objects. */
 void *march_value_to_string(void *v) {
     if (!v) return march_string_lit("nil", 3);
+    /* Tagged immediate: low bit == 1 → extract integer value via arithmetic
+     * right-shift of the raw pointer bits (sign-preserving). */
+    if (((uintptr_t)v & 1u) != 0) {
+        int64_t n = (intptr_t)v >> 1;
+        return march_int_to_string(n);
+    }
     /* Check if this pointer is a registered actor → display as Pid(n) */
     march_actor_meta *meta = find_meta(v);
     if (meta) {
