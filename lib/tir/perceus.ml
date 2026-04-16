@@ -303,15 +303,17 @@ let wrap_incrcs (incs : Tir.var list) (inner : Tir.expr) : Tir.expr =
 
 (** Determine which AVar atoms in a list need EIncRC because they are
     Unr, needs_rc, and still live after this use.
-    Closure FVs ([_closure_fvs]) are excluded: the closure already holds
-    their reference and keeps them alive for the duration of every call. *)
+    Closure FVs are handled via the [borrowed] set in [insert_rc]: they are
+    added to [borrowed] so they are always considered live, which causes this
+    function to emit an EIncRC before any consuming (last-use) call.  That
+    keeps the closure's reference alive regardless of how many times the apply
+    function is invoked (i.e., when the closure's own RC > 1). *)
 let find_inc_vars (atoms : Tir.atom list) (live_after : live_set) : Tir.var list =
   List.filter_map (function
     | Tir.AVar v
       when v.Tir.v_lin = Tir.Unr
            && needs_rc v.Tir.v_ty
-           && StringSet.mem v.Tir.v_name live_after
-           && not (StringSet.mem v.Tir.v_name !_closure_fvs) ->
+           && StringSet.mem v.Tir.v_name live_after ->
       Some v
     | _ -> None
   ) atoms
@@ -734,8 +736,20 @@ let insert_rc ?(borrowed = StringSet.empty) (fn : Tir.fn_def) : Tir.fn_def =
   let fn' = { fn with Tir.fn_body = body_renamed } in
   _actor_sent    := collect_actor_sent_vars fn'.Tir.fn_body;
   _current_fn_name := fn'.Tir.fn_name;
-  _closure_fvs   := collect_closure_fvs fn';
-  let (body', _) = insert_rc_expr fn'.Tir.fn_body borrowed in
+  let closure_fvs = collect_closure_fvs fn' in
+  _closure_fvs   := closure_fvs;
+  (* Closure FVs are owned by the closure struct, not by the apply function.
+     The apply function merely borrows them for the duration of one call.
+     Adding them to the borrowed set makes Perceus treat them as always-live:
+     find_inc_vars then inserts EIncRC before any consuming (last-use) call,
+     so the closure's reference to each FV survives even when the closure
+     itself has RC > 1 and the apply function is invoked multiple times.
+     Without this, a single-use FV (e.g. the inner Generator in Gen.map) is
+     silently transferred to the callee on the first call, freed when the
+     callee's pattern-match decrements its RC to 0, and becomes a dangling
+     pointer on the second call → SIGSEGV. *)
+  let borrowed' = StringSet.union borrowed closure_fvs in
+  let (body', _) = insert_rc_expr fn'.Tir.fn_body borrowed' in
   _actor_sent    := StringSet.empty;
   _current_fn_name := "";
   _closure_fvs   := StringSet.empty;
