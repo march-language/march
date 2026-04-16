@@ -1995,7 +1995,23 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Tir.AVar v ->
         (match v.Tir.v_ty with
          | Tir.TFn (ps, ret) when List.length ps = nargs -> ret
-         | Tir.TFn _ -> Tir.TVar "_"   (* partial application → returns closure (ptr) *)
+         | Tir.TFn _ as ty ->
+           (* Uncurry the TFn chain: TFn([a], TFn([b], R)) with 2 args → R.
+              Defun flattens curried apply functions but keeps the original
+              curried type on the variable, so nargs > List.length ps.
+              Walk the chain consuming one param per arg until we've matched
+              all args or run out of TFn wrappers. *)
+           let rec uncurry_ret n t =
+             if n = 0 then t
+             else match t with
+               | Tir.TFn ([_], ret) -> uncurry_ret (n - 1) ret
+               | Tir.TFn (ps, ret) when n >= List.length ps ->
+                 uncurry_ret (n - List.length ps) ret
+               | _ -> Tir.TVar "_"
+           in
+           (match ty with
+            | Tir.TFn (ps, ret) -> uncurry_ret (nargs - List.length ps) ret
+            | _ -> Tir.TVar "_")
          | other -> other)
       | _ -> Tir.TVar "_"
     in
@@ -2004,6 +2020,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       | Tir.AVar v ->
         (match v.Tir.v_ty with
          | Tir.TFn (ps, _) when List.length ps = nargs -> List.map llvm_ty ps
+         | Tir.TFn _ as ty ->
+           (* Uncurry the param type chain for curried calls, collecting
+              all parameter types across nested TFn wrappers. *)
+           let rec collect_params n t acc =
+             if n = 0 then List.rev acc
+             else match t with
+               | Tir.TFn (ps, ret) ->
+                 let take = min n (List.length ps) in
+                 let taken = List.filteri (fun i _ -> i < take) ps in
+                 collect_params (n - take) ret (List.rev_append (List.map llvm_ty taken) acc)
+               | _ -> List.rev acc @ List.init n (fun _ -> "ptr")
+           in
+           collect_params nargs ty []
          | _ -> List.map (fun _ -> "ptr") args)
       | _ -> List.map (fun _ -> "ptr") args
     in
