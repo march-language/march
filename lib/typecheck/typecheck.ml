@@ -4559,8 +4559,15 @@ let rec check_decl env (d : Ast.decl) : env =
         | Ast.DNeeds (caps, _) -> List.map cap_path_of_names caps
         | _ -> []) decls in
     (* Also export record field layouts for public record types so that
-       cross-module field access (e.g. conn.fd) works correctly. *)
-    let new_records = StrMap.filter (fun k _ -> List.mem k pub_set) inner_env.records in
+       cross-module field access (e.g. conn.fd) works correctly.
+       Export both the local name ("JobRow") and the fully-qualified name
+       ("Conduit.JobRow") so that type annotations written with the module
+       prefix also resolve to a structural TRecord instead of opaque TCon. *)
+    let new_records = StrMap.fold (fun k v acc ->
+        if List.mem k pub_set then
+          StrMap.add (name.txt ^ "." ^ k) v (StrMap.add k v acc)
+        else acc
+      ) inner_env.records StrMap.empty in
     let env' = bind_vars new_names env in
     { env' with
       types   = StrMap.union (fun _k v _ -> Some v) new_types env'.types;
@@ -5429,11 +5436,24 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
                             ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
                  { acc with ctors = add_ctor qctor ci acc.ctors }
                ) e1 variants
+           | Ast.TDRecord fields ->
+             (* Register both local name and fully-qualified name in env.records
+                so cross-module type annotations like "Conduit.JobRow" resolve
+                to a structural TRecord, not an opaque TCon. *)
+             let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+             let field_pairs = List.map (fun (f : Ast.field) -> (f.fld_name.txt, f.fld_ty)) fields in
+             let e2 = { e1 with records = StrMap.add name.txt (param_names, field_pairs) e1.records } in
+             { e2 with records = StrMap.add qname (param_names, field_pairs) e2.records }
            | _ -> e1)
         | Ast.DInterface (idef, _) ->
           let iface_qname = prefix ^ "." ^ idef.iface_name.txt in
+          let iface_sname = idef.iface_name.txt in
           let e1 = if StrMap.mem iface_qname e.interfaces then e
                    else { e with interfaces = StrMap.add iface_qname idef e.interfaces } in
+          (* Also register the short name so that `impl Storage(X)` resolves from
+             any module that imports this one (e.g. `use Conduit`). *)
+          let e1 = if StrMap.mem iface_sname e1.interfaces then e1
+                   else { e1 with interfaces = StrMap.add iface_sname idef e1.interfaces } in
           (* Pre-bind each interface method with a proper Poly scheme so that
              cross-module references (e.g. "Conduit.Storage.workflow_load") resolve
              correctly even when the module containing the interface is processed
@@ -5570,6 +5590,11 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                             ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
                  { acc with ctors = add_ctor qctor ci acc.ctors }
                ) e1 variants
+           | Ast.TDRecord fields ->
+             let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
+             let field_pairs = List.map (fun (f : Ast.field) -> (f.fld_name.txt, f.fld_ty)) fields in
+             let e2 = { e1 with records = StrMap.add name.txt (param_names, field_pairs) e1.records } in
+             { e2 with records = StrMap.add qname (param_names, field_pairs) e2.records }
            | _ -> e1)
         | Ast.DMod (mname, Ast.Public, inner_decls, _) ->
           prebind_mod_members_inc (prefix ^ "." ^ mname.txt) e inner_decls
