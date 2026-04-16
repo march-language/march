@@ -545,10 +545,15 @@ URI.query_params("k=v&a=b")   -- [("k", "v"), ("a", "b")]
 | `CSV` | 100 | CSV parsing |
 | `Datetime` | — | Date and time |
 
+| `Gen` | — | Property test generators (Hedgehog-style) |
+| `Check` | — | Property test runner with shrinking |
+| `Test` | — | Test assertion helpers |
+
 ---
 
 ## Next Steps
 
+- [Property Testing](property-testing.md) — write property-based tests with `Gen` and `Check`
 - [REPL](repl.md) — explore the stdlib interactively
 - [Interfaces](interfaces.md) — how stdlib types implement interfaces
 - [Tooling](tooling.md) — `forge search` to find functions by type or name

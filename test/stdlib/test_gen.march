@@ -173,4 +173,41 @@ mod TestGen do
     assert (c <= 126)
   end
 
+  -- ---- string_of generator ----
+
+  test "string_of produces chars from given generator" do
+    let digit = Gen.int(48, 57)
+    let g = Gen.string_of(digit)
+    let (t, _) = Gen.run(g, Random.seed(77), 10)
+    let s = Gen.tree_root(t)
+    let all_digits = List.all(string_chars(s), fn c ->
+      let code = char_to_int(c)
+      code >= 48 && code <= 57
+    )
+    assert (all_digits)
+  end
+
+  -- ---- sized generator ----
+
+  test "sized receives the current size hint" do
+    let g = Gen.sized(fn s -> Gen.constant(s))
+    let (t1, _) = Gen.run(g, Random.seed(1), 0)
+    let (t2, _) = Gen.run(g, Random.seed(1), 50)
+    let (t3, _) = Gen.run(g, Random.seed(1), 100)
+    assert (Gen.tree_root(t1) == 0)
+    assert (Gen.tree_root(t2) == 50)
+    assert (Gen.tree_root(t3) == 100)
+  end
+
+  test "sized can control list length" do
+    let g = Gen.sized(fn s ->
+      let cap = if s > 5 do 5 else s end
+      Gen.list_of_size(cap, Gen.int(0, 10))
+    )
+    let (t, _) = Gen.run(g, Random.seed(9), 3)
+    assert (List.length(Gen.tree_root(t)) == 3)
+    let (t2, _) = Gen.run(g, Random.seed(9), 100)
+    assert (List.length(Gen.tree_root(t2)) == 5)
+  end
+
 end
