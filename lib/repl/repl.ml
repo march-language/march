@@ -236,9 +236,17 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
     Sys.getenv_opt "MARCH_REPL_INTERP" = None in
   let jit_ctx = if use_jit then jit_ctx else None in
   let is_debug = debug_hooks <> None in
+  let scroll_mode = Sys.getenv_opt "MARCH_SCROLL_MODE" = Some "1" in
+  (* MARCH_SCROLL_SENTINEL overrides the default sentinel so user output that
+     happens to contain "__SCROLL_DONE__" cannot corrupt the sentinel counter. *)
+  let scroll_sentinel =
+    match Sys.getenv_opt "MARCH_SCROLL_SENTINEL" with
+    | Some s when s <> "" -> s
+    | _ -> "__SCROLL_DONE__"
+  in
   if is_debug then
     Printf.printf "\n[debug] Breakpoint hit — :continue to resume, :help for commands\n%!"
-  else
+  else if not scroll_mode then
     Printf.printf "March REPL — :quit to exit, :env to list bindings\n%!";
   let type_map = Hashtbl.create 64 in
   let base_e  = March_eval.Eval.task_builtins @ March_eval.Eval.base_env in
@@ -922,7 +930,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                     | Failure msg ->
                       Printf.eprintf "jit error: %s\n%!" msg
                     | exn ->
-                      Printf.eprintf "error: %s\n%!" (Printexc.to_string exn))))
+                      Printf.eprintf "error: %s\n%!" (Printexc.to_string exn))));
+          if scroll_mode then Printf.printf "%s\n%!" scroll_sentinel;
           end;
           (* Drain any values that were tap()ed during evaluation. *)
           List.iter (fun v ->
