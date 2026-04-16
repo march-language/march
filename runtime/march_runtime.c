@@ -604,6 +604,95 @@ int32_t march_test_report(void) {
     return test_failed > 0 ? 1 : 0;
 }
 
+/* ── __try_call ──────────────────────────────────────────────────────────── */
+/*
+ * __try_call : (Bool -> a) -> Result(a, String)
+ *
+ * Invokes the compiled March closure [thunk] with a dummy Bool argument and
+ * returns Ok(result) on success or Err(msg) if the call panics (march_panic,
+ * a failing assert, division by zero, match failure, etc.).
+ *
+ * The closure is a "fn _ -> body" workaround for (Unit -> a): the argument
+ * is ignored by the lambda body, so we pass 1 (true).
+ *
+ * Used by Check.try_prop in stdlib/check.march so the property runner can
+ * shrink a failing input instead of aborting the whole binary on the first
+ * panic.  Supports nesting by save/restoring the global longjmp state used
+ * by the test harness.
+ *
+ * Closure layout (see march_thunk_trampoline):
+ *   offset  0: int64_t  rc         — reference count
+ *   offset  8: int32_t  tag        — 0 for closures
+ *   offset 12: int32_t  pad
+ *   offset 16: void    *apply_fn   — int64_t apply(void *clo, int64_t arg)
+ *   offset 24+: captured environment fields
+ *
+ * Result(a, String) layout (24 bytes):
+ *   offset  0..15: march_hdr         — tag=0 → Ok, tag=1 → Err
+ *   offset 16..23: value field       — (intptr_t)a for Ok, march_string* for Err
+ *
+ * RC contract: consumes one reference to [thunk] (march_decrc after use).
+ * Matches Perceus's ownership-transfer convention for last-use args.  If
+ * the apply panics we still decref the thunk via the cleanup path.
+ */
+void *__try_call(void *thunk) {
+    typedef int64_t (*apply_fn_t)(void *, int64_t);
+    apply_fn_t apply = *(apply_fn_t *)((char *)thunk + 16);
+
+    /* Save outer panic-handler state so nested __try_call works correctly
+       (e.g. a property runner called from within another property). */
+    jmp_buf saved_jmp;
+    char    saved_fail[sizeof(march_test_fail_buf)];
+    int     saved_in_test = march_test_in_test;
+    memcpy(&saved_jmp, &march_test_jmp_buf, sizeof(jmp_buf));
+    memcpy(saved_fail, march_test_fail_buf, sizeof(march_test_fail_buf));
+
+    march_test_fail_buf[0] = '\0';
+    march_test_in_test     = 1;
+
+    int64_t ok_result = 0;
+    int     panicked  = 0;
+
+    if (setjmp(march_test_jmp_buf) == 0) {
+        ok_result = apply(thunk, 1);   /* 1 = dummy Bool argument */
+    } else {
+        panicked = 1;
+    }
+
+    /* Capture the panic message before restoring the outer fail buffer. */
+    void *err_str = NULL;
+    if (panicked) {
+        const char *msg = march_test_fail_buf[0]
+            ? march_test_fail_buf : "property panicked";
+        err_str = march_string_lit(msg, (int64_t)strlen(msg));
+    }
+
+    /* Restore the outer panic handler. */
+    memcpy(&march_test_jmp_buf, &saved_jmp, sizeof(jmp_buf));
+    memcpy(march_test_fail_buf, saved_fail, sizeof(march_test_fail_buf));
+    march_test_in_test = saved_in_test;
+
+    /* Release our reference to the thunk.  On the success path it may have
+       RC>1 if the caller kept a reference; we only release ours.  On the
+       panic path the apply function did not return, so any RC increments it
+       would have made are skipped — that may leak captured heap values on
+       panic, which is acceptable (panics are rare and terminate the test). */
+    march_decrc(thunk);
+
+    /* Build Result(a, String): 16-byte header + 8-byte field. */
+    char      *result = (char *)march_alloc(24);
+    march_hdr *hdr    = (march_hdr *)result;
+    void     **field  = (void **)(result + 16);
+    if (!panicked) {
+        hdr->tag = 0;                              /* Ok */
+        *field   = (void *)(intptr_t)ok_result;
+    } else {
+        hdr->tag = 1;                              /* Err */
+        *field   = err_str;
+    }
+    return result;
+}
+
 /* ── Actor runtime — green thread based ──────────────────────────────────── */
 /*
  * Design overview

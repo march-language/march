@@ -1435,7 +1435,22 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
   | Tir.EApp (f, [a; b]) when is_int_cmp f.Tir.v_name ->
     let (ty_a, va) = emit_atom ctx a in
     let (ty_b, vb) = emit_atom ctx b in
-    if ty_a = "ptr" && (f.Tir.v_name = "==" || f.Tir.v_name = "!=") then begin
+    (* Only route through march_string_eq when we are sure the operand is an
+       actual String.  ty_a = "ptr" may also occur for polymorphic values
+       (TVar "_" after mono leaks) that happen to carry an Int via inttoptr —
+       calling march_string_eq on such a value dereferences it as a march_string
+       struct and crashes.  Check the TIR type of either operand instead. *)
+    let atom_is_string = function
+      | Tir.AVar v    -> (match v.Tir.v_ty with Tir.TString -> true | _ -> false)
+      | Tir.ALit (March_ast.Ast.LitString _) -> true
+      | _             -> false
+    in
+    let is_string_eq =
+      ty_a = "ptr"
+      && (f.Tir.v_name = "==" || f.Tir.v_name = "!=")
+      && (atom_is_string a || atom_is_string b)
+    in
+    if is_string_eq then begin
       (* String equality: call march_string_eq which returns i64 (0 or 1).
          Coerce both operands to ptr — vb may be an i64 literal (e.g. "0" for
          false/unit) which is invalid as a bare ptr argument in LLVM IR. *)
