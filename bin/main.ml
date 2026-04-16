@@ -427,7 +427,13 @@ let parse_march_file path src =
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = path };
-  try Ok (March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf)
+  try
+    let m = March_parser.Parser.module_ (March_parser.Token_filter.make March_lexer.Lexer.token) lexbuf in
+    let m = match March_ast.Span_remap.load_sidecar path with
+      | Some tbl -> March_ast.Span_remap.remap_module tbl m
+      | None -> m
+    in
+    Ok m
   with
   | March_errors.Errors.ParseError (msg, _hint, pos) ->
     let open Lexing in
@@ -973,6 +979,12 @@ let compile filename =
        | None -> ()
        | Some h -> Printf.eprintf "hint: %s\n" h)
     ) parse_errs;
+  (* Apply .march.spans sidecar remapping if present *)
+  let module_ast =
+    match March_ast.Span_remap.load_sidecar filename with
+    | Some tbl -> March_ast.Span_remap.remap_module tbl module_ast
+    | None -> module_ast
+  in
   (* Desugar *)
   let desugar_errors = March_errors.Errors.create () in
   let desugared = March_desugar.Desugar.desugar_module ~errors:desugar_errors module_ast in

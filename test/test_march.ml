@@ -5916,6 +5916,52 @@ let test_perceus_scrut_escape_rewrite () =
   Alcotest.(check bool) "no bare scrutinee tail in any destructuring arm" false
     (any_arm_tail_is_scrut echo_fn.March_tir.Tir.fn_body)
 
+(** Regression test: closure FV used exactly once in a consuming call (rc64 fix).
+    A captured heap value passed as the sole argument to a consuming callee
+    must receive an EIncRC inside the apply function, even though it is not
+    locally live after that call.  Without the fix, Perceus treated it as a
+    last-use ownership transfer: the callee's pattern-match decremented the
+    RC to 0 and freed the object.  On the next invocation of the same closure
+    (RC > 1, e.g. inside Check.run_loop), loading the FV from the closure
+    struct read a dangling pointer → SIGSEGV. *)
+let test_perceus_closure_fv_single_use_incrc () =
+  let m = perceus_module {|mod Test do
+    type Box = Box(Int)
+    pfn consume(b : Box) : Int do
+      match b do
+      Box(n) -> n
+      end
+    end
+    fn make_thunk(b : Box) : (Unit -> Int) do
+      fn () -> consume(b)
+    end
+  end|} in
+  (* The apply function is any fn_def whose first param is "$clo". *)
+  let apply_fns = List.filter (fun fn ->
+    match fn.March_tir.Tir.fn_params with
+    | p :: _ -> String.equal p.March_tir.Tir.v_name "$clo"
+    | [] -> false
+  ) m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool) "at least one apply function exists" true
+    (List.length apply_fns >= 1);
+  let apply_fn = List.hd apply_fns in
+  (* After the fix, the apply function body must contain an EIncRC for the
+     captured Box FV before the consuming call to consume(). *)
+  let rec has_incrc = function
+    | March_tir.Tir.EIncRC _ | March_tir.Tir.EAtomicIncRC _ -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> has_incrc e1 || has_incrc e2
+    | March_tir.Tir.ESeq (e1, e2) -> has_incrc e1 || has_incrc e2
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> has_incrc b.March_tir.Tir.br_body) brs ||
+      (match def with Some e -> has_incrc e | None -> false)
+    | March_tir.Tir.ELetRec (fns, body) ->
+      List.exists (fun f -> has_incrc f.March_tir.Tir.fn_body) fns || has_incrc body
+    | _ -> false
+  in
+  Alcotest.(check bool)
+    "apply fn EIncRC's captured FV before consuming call" true
+    (has_incrc apply_fn.March_tir.Tir.fn_body)
+
 (* --- multiline tests --- *)
 
 let test_multiline_depth_zero () =
@@ -19947,6 +19993,7 @@ let () =
           Alcotest.test_case "needs_rc TCon/TInt"        `Quick test_perceus_needs_rc_tcon;
           Alcotest.test_case "preserves fn count"        `Quick test_perceus_preserves_fn_count;
           Alcotest.test_case "scrut-escape rewrite (rc50)" `Quick test_perceus_scrut_escape_rewrite;
+          Alcotest.test_case "closure FV single-use incrc (rc64)" `Quick test_perceus_closure_fv_single_use_incrc;
         ] );
       ( "lean_theorem_properties", [
           Alcotest.test_case "lin_drop_is_free"          `Quick test_thm_lin_drop_is_free;

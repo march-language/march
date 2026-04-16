@@ -45,6 +45,7 @@ type project = {
   patches       : patch list;
   archive_tasks : archive_task list;
   archive_deps  : (string * dep) list;
+  preprocessors : (string * string) list;
 }
 
 let project_type_of_string = function
@@ -199,9 +200,17 @@ let load_from root =
   let inline_archdeps  = parse_deps_section (Toml.get_section doc "archive-deps") in
   let section_archdeps = parse_section_deps "archive-deps" doc in
   let archive_deps = inline_archdeps @ section_archdeps in
+  (* [preprocessors] section: extension → command mappings *)
+  let preprocessors =
+    List.filter_map (fun (k, v) ->
+      match v with
+      | Toml.Str cmd -> Some (k, cmd)
+      | _ -> None
+    ) (Toml.get_section doc "preprocessors")
+  in
   { name; version; project_type = project_type_of_string type_str;
     description; author; root; entrypoint; deps; dev_deps; patches;
-    archive_tasks; archive_deps }
+    archive_tasks; archive_deps; preprocessors }
 
 let load_from_dir dir =
   try Ok (load_from dir)

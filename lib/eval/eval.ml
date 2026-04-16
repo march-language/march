@@ -152,8 +152,8 @@ let task_registry : (int, task_entry) Hashtbl.t = Hashtbl.create 16
 let next_task_id : int ref = ref 0
 
 (** Live-process registry for Process.spawn (async, non-blocking).
-    Maps an opaque integer id → (in_channel, pid). *)
-let live_proc_tbl : (int, in_channel * int) Hashtbl.t = Hashtbl.create 8
+    Maps an opaque integer id → (in_channel, out_channel, pid). *)
+let live_proc_tbl : (int, in_channel * out_channel * int) Hashtbl.t = Hashtbl.create 8
 let live_proc_next_id : int ref = ref 0
 
 (** Vault: ETS-like in-memory key-value store.
@@ -5015,16 +5015,19 @@ let base_env : env =
           let args_strs = args_of_list lst in
           let args_arr  = Array.of_list (cmd :: args_strs) in
           (try
+            let (stdin_r,  stdin_w)  = Unix.pipe () in
             let (stdout_r, stdout_w) = Unix.pipe () in
             let (stderr_r, stderr_w) = Unix.pipe () in
-            let pid = Unix.create_process cmd args_arr Unix.stdin stdout_w stderr_w in
+            let pid = Unix.create_process cmd args_arr stdin_r stdout_w stderr_w in
+            Unix.close stdin_r;
             Unix.close stdout_w;
             Unix.close stderr_w;
             Unix.close stderr_r;
             let ic = Unix.in_channel_of_descr stdout_r in
+            let oc = Unix.out_channel_of_descr stdin_w in
             let id = !live_proc_next_id in
             incr live_proc_next_id;
-            Hashtbl.add live_proc_tbl id (ic, pid);
+            Hashtbl.add live_proc_tbl id (ic, oc, pid);
             VCon ("Ok", [VCon ("LiveProcess", [VInt pid; VInt id])])
           with Unix.Unix_error (err, _, _) ->
             VCon ("Err", [VString (Unix.error_message err)]))
@@ -5036,10 +5039,21 @@ let base_env : env =
         | [VCon ("LiveProcess", [VInt _pid; VInt id])] ->
           (match Hashtbl.find_opt live_proc_tbl id with
            | None -> VCon ("None", [])
-           | Some (ic, _) ->
+           | Some (ic, _, _) ->
              (try VCon ("Some", [VString (input_line ic)])
               with End_of_file -> VCon ("None", [])))
         | _ -> eval_error "process_read_line: expected LiveProcess"))
+
+  (* Write raw bytes to the process's stdin. *)
+  ; ("process_write", VBuiltin ("process_write", function
+        | [VCon ("LiveProcess", [VInt _pid; VInt id]); VString data] ->
+          (match Hashtbl.find_opt live_proc_tbl id with
+           | None -> VUnit
+           | Some (_, oc, _) ->
+             output_string oc data;
+             flush oc;
+             VUnit)
+        | _ -> eval_error "process_write: expected (LiveProcess, String)"))
 
   (* Send SIGTERM to the process. *)
   ; ("process_kill_proc", VBuiltin ("process_kill_proc", function
@@ -5052,8 +5066,9 @@ let base_env : env =
   ; ("process_wait_proc", VBuiltin ("process_wait_proc", function
         | [VCon ("LiveProcess", [VInt pid; VInt id])] ->
           (match Hashtbl.find_opt live_proc_tbl id with
-           | Some (ic, _) ->
+           | Some (ic, oc, _) ->
              (try close_in_noerr ic with _ -> ());
+             (try close_out_noerr oc with _ -> ());
              Hashtbl.remove live_proc_tbl id
            | None -> ());
           (try

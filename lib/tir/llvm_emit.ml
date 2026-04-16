@@ -304,7 +304,7 @@ let is_builtin_fn name =
                  "process_argv";
                  "process_env"; "process_set_env"; "process_cwd"; "process_exit";
                  "process_pid"; "process_spawn_sync"; "process_spawn_lines";
-                 "process_spawn_async"; "process_read_line"; "process_kill_proc"; "process_wait_proc";
+                 "process_spawn_async"; "process_read_line"; "process_write"; "process_kill_proc"; "process_wait_proc";
                  (* TCP/network builtins *)
                  "tcp_connect"; "tcp_close"; "tcp_recv_exact";
                  "tcp_recv_all"; "tcp_recv_chunk"; "tcp_recv_http_headers";
@@ -533,6 +533,7 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "process_spawn_lines"         -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]))
   | "process_spawn_async"         -> Some (Tir.TCon ("Result", [Tir.TCon ("LiveProcess", []); Tir.TString]))
   | "process_read_line"           -> Some (Tir.TCon ("Option", [Tir.TString]))
+  | "process_write"               -> Some Tir.TUnit
   | "process_kill_proc"           -> Some Tir.TUnit
   | "process_wait_proc"           -> Some Tir.TInt
   (* TCP/network builtins *)
@@ -768,6 +769,7 @@ let mangle_extern : string -> string = function
   | "process_spawn_lines"  -> "march_process_spawn_lines"
   | "process_spawn_async"  -> "march_process_spawn_async"
   | "process_read_line"    -> "march_process_read_line"
+  | "process_write"        -> "march_process_write"
   | "process_kill_proc"    -> "march_process_kill_proc"
   | "process_wait_proc"    -> "march_process_wait_proc"
   (* TCP/network builtins *)
@@ -3311,6 +3313,7 @@ declare ptr  @march_process_spawn_sync(ptr %cmd, ptr %args)
 declare ptr  @march_process_spawn_lines(ptr %cmd, ptr %args)
 declare ptr  @march_process_spawn_async(ptr %cmd, ptr %args)
 declare ptr  @march_process_read_line(ptr %proc)
+declare i64  @march_process_write(ptr %proc, ptr %data)
 declare i64  @march_process_kill_proc(ptr %proc)
 declare i64  @march_process_wait_proc(ptr %proc)
 ; TCP recv-all

@@ -1255,6 +1255,8 @@ let builtin_bindings : (string * scheme) list =
           t_result (TCon ("LiveProcess", [])) e))));
     ("process_read_line", Mono
         (TArrow (TCon ("LiveProcess", []), t_option t_string)));
+    ("process_write", Mono
+        (TArrow (TCon ("LiveProcess", []), TArrow (t_string, t_unit))));
     ("process_kill_proc", Mono
         (TArrow (TCon ("LiveProcess", []), t_unit)));
     ("process_wait_proc", Mono

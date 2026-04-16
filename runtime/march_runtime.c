@@ -2101,10 +2101,10 @@ void *march_process_spawn_lines(void *cmd_obj, void *args_list) {
 /* ── Async process management ───────────────────────────────────────── */
 
 /* Global fd-to-FILE* registry for live processes.
-   Each entry: slot → {pid, FILE*}  (FILE* wraps the stdout read-end pipe).
+   Each entry: slot → {pid, stdout FILE*, stdin FILE*}
    Keyed by the stream_id stored in LiveProcess(pid, stream_id). */
 #define LIVE_PROC_MAX 64
-static struct { int used; pid_t pid; FILE *fp; } live_proc_reg[LIVE_PROC_MAX];
+static struct { int used; pid_t pid; FILE *fp; FILE *write_fp; } live_proc_reg[LIVE_PROC_MAX];
 static int live_proc_next = 0;
 
 /* process_spawn_async(command, args) → Result(LiveProcess(pid,id), String) */
@@ -2126,27 +2126,40 @@ void *march_process_spawn_async(void *cmd_obj, void *args_list) {
         i++; tmp = MARCH_FIELD_PTR(tmp, 1);
     }
     argv[argc] = NULL;
-    /* Pipe for stdout */
-    int pfd[2];
-    if (pipe(pfd) != 0) {
+    /* Pipes for stdin (write) and stdout (read) */
+    int stdin_pfd[2], stdout_pfd[2];
+    if (pipe(stdin_pfd) != 0) {
         for (int j = 0; j < argc; j++) free(argv[j]); free(argv);
-        return mk_err_cstr("pipe failed");
+        return mk_err_cstr("pipe failed (stdin)");
+    }
+    if (pipe(stdout_pfd) != 0) {
+        close(stdin_pfd[0]); close(stdin_pfd[1]);
+        for (int j = 0; j < argc; j++) free(argv[j]); free(argv);
+        return mk_err_cstr("pipe failed (stdout)");
     }
     pid_t pid = fork();
     if (pid == 0) {
-        close(pfd[0]);
-        dup2(pfd[1], STDOUT_FILENO); close(pfd[1]);
+        close(stdin_pfd[1]);   /* child closes write end of stdin pipe */
+        close(stdout_pfd[0]);  /* child closes read end of stdout pipe */
+        dup2(stdin_pfd[0],  STDIN_FILENO);  close(stdin_pfd[0]);
+        dup2(stdout_pfd[1], STDOUT_FILENO); close(stdout_pfd[1]);
         execvp(argv[0], argv); _exit(127);
     }
-    close(pfd[1]);
+    close(stdin_pfd[0]);   /* parent closes read end of stdin pipe */
+    close(stdout_pfd[1]);  /* parent closes write end of stdout pipe */
     for (int j = 0; j < argc; j++) free(argv[j]); free(argv);
-    if (pid < 0) { close(pfd[0]); return mk_err_cstr("fork failed"); }
+    if (pid < 0) {
+        close(stdin_pfd[1]); close(stdout_pfd[0]);
+        return mk_err_cstr("fork failed");
+    }
     /* Register */
     int id = live_proc_next++ % LIVE_PROC_MAX;
-    if (live_proc_reg[id].fp) fclose(live_proc_reg[id].fp);
-    live_proc_reg[id].used = 1;
-    live_proc_reg[id].pid  = pid;
-    live_proc_reg[id].fp   = fdopen(pfd[0], "r");
+    if (live_proc_reg[id].fp)       { fclose(live_proc_reg[id].fp);       live_proc_reg[id].fp = NULL; }
+    if (live_proc_reg[id].write_fp) { fclose(live_proc_reg[id].write_fp); live_proc_reg[id].write_fp = NULL; }
+    live_proc_reg[id].used     = 1;
+    live_proc_reg[id].pid      = pid;
+    live_proc_reg[id].fp       = fdopen(stdout_pfd[0], "r");
+    live_proc_reg[id].write_fp = fdopen(stdin_pfd[1],  "w");
     /* Build LiveProcess(pid, id): tag=0, 2 int64 fields */
     void *lp = march_alloc(16 + 16);
     MARCH_FIELD(lp, 0) = (int64_t)pid;
@@ -2166,6 +2179,17 @@ void *march_process_read_line(void *lp_obj) {
     return make_some_ptr(march_string_lit(line, (int64_t)len));
 }
 
+/* process_write(lp, data) → () — write raw bytes to the process's stdin */
+int64_t march_process_write(void *lp_obj, void *data_obj) {
+    int64_t id = MARCH_FIELD(lp_obj, 1);
+    if (id < 0 || id >= LIVE_PROC_MAX || !live_proc_reg[id].used || !live_proc_reg[id].write_fp)
+        return 0;
+    march_string *s = (march_string *)data_obj;
+    fwrite(s->data, 1, (size_t)s->len, live_proc_reg[id].write_fp);
+    fflush(live_proc_reg[id].write_fp);
+    return 0;
+}
+
 /* process_kill_proc(lp) → () */
 int64_t march_process_kill_proc(void *lp_obj) {
     int64_t pid = MARCH_FIELD(lp_obj, 0);
@@ -2178,7 +2202,8 @@ int64_t march_process_wait_proc(void *lp_obj) {
     int64_t pid = MARCH_FIELD(lp_obj, 0);
     int64_t id  = MARCH_FIELD(lp_obj, 1);
     if (id >= 0 && id < LIVE_PROC_MAX && live_proc_reg[id].used) {
-        if (live_proc_reg[id].fp) { fclose(live_proc_reg[id].fp); live_proc_reg[id].fp = NULL; }
+        if (live_proc_reg[id].fp)       { fclose(live_proc_reg[id].fp);       live_proc_reg[id].fp = NULL; }
+        if (live_proc_reg[id].write_fp) { fclose(live_proc_reg[id].write_fp); live_proc_reg[id].write_fp = NULL; }
         live_proc_reg[id].used = 0;
     }
     int status = 0;

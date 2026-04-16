@@ -146,8 +146,10 @@ let lib_path_env proj =
         Project.git_dep_lib_path dep_name
       | _ -> None
     ) proj.Project.deps in
+  let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
   let all_lib_paths =
     dep_lib_paths @ [lib_dir]
+    @ (if Sys.file_exists gen_dir then [gen_dir] else [])
     @ (if Sys.file_exists config_dir then [config_dir] else [])
   in
   Printf.sprintf "MARCH_LIB_PATH=%s " (String.concat ":" all_lib_paths)
@@ -179,6 +181,71 @@ let compile_entry ~lib_path_env ~output ~release ~dump_phases entry =
   in
   Sys.command cmd
 
+(** Find files matching a given extension under [dir], recursively. *)
+let find_files_with_ext ext dir =
+  let rec walk acc d =
+    if not (Sys.file_exists d) then acc
+    else
+      Array.fold_left (fun acc name ->
+          let path = Filename.concat d name in
+          if Sys.is_directory path then walk acc path
+          else if Filename.check_suffix name ext
+          then path :: acc
+          else acc)
+        acc (Sys.readdir d)
+  in
+  walk [] dir
+
+(** Run preprocessors declared in forge.toml.
+    For each [preprocessors] entry (extension → command), find matching files
+    under [src_dir], run the command, and write output to [gen_dir].
+    Returns the number of files processed. *)
+let run_preprocessors ~proj ~src_dir ~gen_dir =
+  if proj.Project.preprocessors = [] then 0
+  else begin
+    Project.mkdir_p gen_dir;
+    let count = ref 0 in
+    List.iter (fun (ext, command) ->
+      let files = find_files_with_ext ext src_dir in
+      List.iter (fun input_path ->
+        let root_prefix = proj.Project.root ^ "/" in
+        let rlen = String.length root_prefix in
+        let rel =
+          if String.length input_path >= rlen &&
+             String.sub input_path 0 rlen = root_prefix
+          then String.sub input_path rlen (String.length input_path - rlen)
+          else input_path
+        in
+        let base = Filename.chop_suffix rel ext in
+        let output_march = Filename.concat gen_dir (base ^ ".march") in
+        let output_spans = Filename.concat gen_dir (base ^ ".march.spans") in
+        let output_dir = Filename.dirname output_march in
+        Project.mkdir_p output_dir;
+        let input_mtime =
+          try (Unix.stat input_path).Unix.st_mtime with _ -> 0.0
+        in
+        let output_mtime =
+          try (Unix.stat output_march).Unix.st_mtime with _ -> 0.0
+        in
+        if input_mtime > output_mtime then begin
+          let cmd = Printf.sprintf "%s %s %s %s"
+            command
+            (Filename.quote input_path)
+            (Filename.quote output_march)
+            (Filename.quote output_spans)
+          in
+          let rc = Sys.command cmd in
+          if rc = 0 then begin
+            Printf.printf "  [preprocess] %s\n%!" rel;
+            incr count
+          end else
+            Printf.eprintf "  [preprocess] error processing %s (exit %d)\n%!" rel rc
+        end
+      ) files
+    ) proj.Project.preprocessors;
+    !count
+  end
+
 let build ~release ?(dump_phases=false) () =
   match Project.load () with
   | Error msg -> Error msg
@@ -190,7 +257,15 @@ let build ~release ?(dump_phases=false) () =
     in
     Project.mkdir_p build_dir;
     let lib_dir = Filename.concat proj.Project.root "lib" in
-    let files   = find_march_files lib_dir in
+    let src_dir = Filename.concat proj.Project.root "src" in
+    (* Run preprocessors on src/ and lib/ *)
+    let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
+    let _pp_count = run_preprocessors ~proj ~src_dir ~gen_dir in
+    let _pp_count2 = run_preprocessors ~proj ~src_dir:lib_dir ~gen_dir in
+    let gen_files =
+      if Sys.file_exists gen_dir then find_march_files gen_dir else []
+    in
+    let files = find_march_files lib_dir @ gen_files in
     if files = [] then
       Error (Printf.sprintf "no .march files found in %s" lib_dir)
     else begin

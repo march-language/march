@@ -478,7 +478,12 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
   let max_specs_per_fn = 512 in
 
   (* Seed: all fns that are already monomorphic (no TVar in params or ret),
-     plus always seed "main" / "*.main" as entry points. *)
+     plus always seed "main" / "*.main" as entry points.
+     Polymorphic exports are NOT seeded here — they will be specialised on
+     demand when a concrete call site is found.  Seeding them with an empty
+     substitution creates "zombie" specialisations whose type-variable
+     arguments cannot be resolved by the interface-dispatch logic, causing
+     linker errors when more than one impl is registered. *)
   List.iter (fun fn ->
     let is_mono =
       (not (List.exists (fun v -> has_tvar v.Tir.v_ty) fn.Tir.fn_params)) &&
@@ -491,8 +496,8 @@ let monomorphize ?(iface_methods = Hashtbl.create 0) (m : Tir.tir_module) : Tir.
        let ln = String.length n and ls = String.length suf in
        ln >= ls && String.sub n (ln - ls) ls = suf)
     in
-    let is_export = List.mem fn.Tir.fn_name m.Tir.tm_exports in
-    if is_mono || is_main || is_export then
+    (* Only seed monomorphic exports; polymorphic ones are specialised on demand *)
+    if is_mono || is_main then
       Queue.add (fn.Tir.fn_name, fn, []) worklist
   ) m.Tir.tm_fns;
 

@@ -86,6 +86,15 @@ mod Process do
     process_read_line(p)
   end
 
+  doc """
+  Write raw bytes to the live process's stdin.
+  The data is flushed immediately so the child process sees it without delay.
+  Include a trailing newline if the child reads line-by-line.
+  """
+  fn write(p, data) do
+    process_write(p, data)
+  end
+
   doc "Send SIGTERM to the live process."
   fn kill(p) do
     process_kill_proc(p)

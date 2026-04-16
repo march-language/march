@@ -95,8 +95,10 @@ let project_env proj =
         if Sys.file_exists d then Some d else None
       | _ -> None
     ) proj.Project.deps in
+  let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
   let all_lib_paths =
     dep_lib_paths @ [lib_dir]
+    @ (if Sys.file_exists gen_dir then [gen_dir] else [])
     @ (if Sys.file_exists config_dir then [config_dir] else [])
   in
   let lib_path_env =
@@ -119,6 +121,12 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(skip_
     (* No project: fall back to interpreter for ad-hoc files. *)
     invoke_march_interp ~verbose ~filter ~coverage ~seed ~skip_properties ~lib_path_env:"" test_files
   | Ok proj ->
+    (* Run preprocessors before test compilation *)
+    let gen_dir = Filename.concat proj.Project.root ".forge/generated" in
+    let src_dir = Filename.concat proj.Project.root "src" in
+    let lib_dir_pp = Filename.concat proj.Project.root "lib" in
+    let _pp = Cmd_build.run_preprocessors ~proj ~src_dir ~gen_dir in
+    let _pp2 = Cmd_build.run_preprocessors ~proj ~src_dir:lib_dir_pp ~gen_dir in
     let (lib_path_env, output) = project_env proj in
     if use_interp then
       invoke_march_interp ~verbose ~filter ~coverage ~seed ~skip_properties ~lib_path_env test_files
