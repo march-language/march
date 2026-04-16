@@ -568,4 +568,42 @@ mod Gen do
     map(list(lowercase_char()), chars_to_string)
   end
 
+  doc """
+  Generator for a string whose characters are drawn from `char_gen`.
+  Use this to build domain-specific string generators.
+
+  Example — hex strings:
+      let hex_char = Gen.element([48, 49, 50, 51, 52, 53, 54, 55,
+                                  56, 57, 97, 98, 99, 100, 101, 102])
+      let hex_string = Gen.string_of(hex_char)
+
+  Example — digit strings:
+      let digit = Gen.int(48, 57)
+      let digit_string = Gen.string_of(digit)
+  """
+  fn string_of(char_gen : Generator(Int)) : Generator(String) do
+    map(list(char_gen), chars_to_string)
+  end
+
+  doc """
+  Access the current size hint inside a generator.  Use to build generators
+  whose structure depends on the runner's size parameter (which grows from
+  0 to `max_size` across runs).
+
+  Example — lists that grow with size:
+      let growing = Gen.sized(fn s -> Gen.list_of_size(s, Gen.int(0, 100)))
+
+  Example — nested structures bounded by size:
+      let depth_bounded = Gen.sized(fn s ->
+        if s < 2 do Gen.constant(Leaf)
+        else Gen.map(Gen.int(0, 100), fn n -> Node(n))
+      )
+  """
+  fn sized(f : Int -> Generator(a)) : Generator(a) do
+    Generator(fn (rng, size) ->
+      let inner = f(size)
+      run(inner, rng, size)
+    )
+  end
+
 end
