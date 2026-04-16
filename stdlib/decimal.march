@@ -201,27 +201,31 @@ mod Decimal do
 
   -- ---- Comparison ----
 
-  doc "Compares two Decimals. Returns -1, 0, or 1."
-  fn compare(a : Decimal, b : Decimal) : Int do
+  pfn cmp(a : Decimal, b : Decimal) : Int do
     let (ca, cb, _) = align(a, b)
     if ca < cb do 0 - 1
     else if ca > cb do 1
     else 0 end end
   end
 
+  doc "Compares two Decimals. Returns -1, 0, or 1."
+  fn compare(a : Decimal, b : Decimal) : Int do
+    cmp(a, b)
+  end
+
   doc "Returns true if two Decimals are equal."
   fn eq(a : Decimal, b : Decimal) : Bool do
-    compare(a, b) == 0
+    cmp(a, b) == 0
   end
 
   doc "Returns true if a < b."
   fn lt(a : Decimal, b : Decimal) : Bool do
-    compare(a, b) < 0
+    cmp(a, b) < 0
   end
 
   doc "Returns true if a > b."
   fn gt(a : Decimal, b : Decimal) : Bool do
-    compare(a, b) > 0
+    cmp(a, b) > 0
   end
 
   -- ---- Conversion ----
@@ -289,26 +293,16 @@ mod Decimal do
 
   -- ---- Interface implementations ----
 
-  pfn decimal_eq_impl(a, b) do eq(a, b) end
-  pfn decimal_compare_impl(a, b) do compare(a, b) end
-  pfn decimal_to_str_impl(d) do to_string(d) end
-
   impl Eq(Decimal) do
-    fn eq(a, b) do
-      decimal_eq_impl(a, b)
-    end
+    fn eq(a, b) do cmp(a, b) == 0 end
   end
 
   impl Ord(Decimal) do
-    fn compare(a, b) do
-      decimal_compare_impl(a, b)
-    end
+    fn compare(a, b) do cmp(a, b) end
   end
 
   impl Show(Decimal) do
-    fn show(d) do
-      decimal_to_str_impl(d)
-    end
+    fn show(d) do to_string(d) end
   end
 
 end
