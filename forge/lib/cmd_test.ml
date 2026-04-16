@@ -40,11 +40,14 @@ let find_test_dir () =
 
 (** Compile and run test files using the compile pipeline (march --compile --test).
     [entry] is the single test entrypoint file (the one with test blocks).
-    [lib_path_env] is the MARCH_LIB_PATH prefix (same as forge build). *)
-let invoke_compiled ?(verbose=false) ?(filter="") ~lib_path_env ~output test_entry =
+    [lib_path_env] is the MARCH_LIB_PATH prefix (same as forge build).
+    [seed] forwards to property tests via MARCH_PROP_SEED env var. *)
+let invoke_compiled ?(verbose=false) ?(filter="") ?(seed="") ~lib_path_env ~output test_entry =
   let verbose_flag = if verbose then " --verbose" else "" in
   let filter_flag  = if filter = "" then ""
                      else Printf.sprintf " --filter=%s" (Filename.quote filter) in
+  let seed_env = if seed = "" then ""
+                 else Printf.sprintf "MARCH_PROP_SEED=%s " (Filename.quote seed) in
   (* Build: compile test entry with --compile --test *)
   let build_cmd =
     Printf.sprintf "%smarch --compile --test -o %s %s"
@@ -55,7 +58,7 @@ let invoke_compiled ?(verbose=false) ?(filter="") ~lib_path_env ~output test_ent
     Error (Printf.sprintf "test compilation failed (exit %d)" build_rc)
   else begin
     (* Run the compiled test binary *)
-    let run_cmd = Printf.sprintf "%s%s%s" (Filename.quote output) verbose_flag filter_flag in
+    let run_cmd = Printf.sprintf "%s%s%s%s" seed_env (Filename.quote output) verbose_flag filter_flag in
     let run_rc = Sys.command run_cmd in
     if run_rc = 0 then Ok ()
     else Error (Printf.sprintf "tests failed (exit %d)" run_rc)
@@ -63,14 +66,16 @@ let invoke_compiled ?(verbose=false) ?(filter="") ~lib_path_env ~output test_ent
 
 (** Interpreter fallback: invoke `march test` directly.
     Used when MARCH_TEST_INTERPRETER=1. *)
-let invoke_march_interp ?(verbose=false) ?(filter="") ?(coverage=false) ~lib_path_env files =
+let invoke_march_interp ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ~lib_path_env files =
   let verbose_flag  = if verbose  then " --verbose"  else "" in
   let coverage_flag = if coverage then " --coverage" else "" in
   let filter_flag   = if filter = "" then ""
                       else Printf.sprintf " --filter=%s" (Filename.quote filter) in
+  let seed_flag     = if seed = "" then ""
+                      else Printf.sprintf " --seed=%s" (Filename.quote seed) in
   let files_str = String.concat " " (List.map Filename.quote files) in
-  let cmd = Printf.sprintf "%smarch test%s%s%s %s"
-      lib_path_env verbose_flag coverage_flag filter_flag files_str in
+  let cmd = Printf.sprintf "%smarch test%s%s%s%s %s"
+      lib_path_env verbose_flag coverage_flag filter_flag seed_flag files_str in
   let rc = Sys.command cmd in
   if rc = 0 then Ok ()
   else Error (Printf.sprintf "test run failed (exit %d)" rc)
@@ -104,17 +109,17 @@ let project_env proj =
   (lib_path_env, output)
 
 (** Run forge test for a given list of test files (after directory expansion). *)
-let run_files ?(verbose=false) ?(filter="") ?(coverage=false) test_files =
+let run_files ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") test_files =
   (* coverage is only supported on the interpreter path *)
   let use_interp = coverage || Sys.getenv_opt "MARCH_TEST_INTERPRETER" = Some "1" in
   match Project.load () with
   | Error _ ->
     (* No project: fall back to interpreter for ad-hoc files. *)
-    invoke_march_interp ~verbose ~filter ~coverage ~lib_path_env:"" test_files
+    invoke_march_interp ~verbose ~filter ~coverage ~seed ~lib_path_env:"" test_files
   | Ok proj ->
     let (lib_path_env, output) = project_env proj in
     if use_interp then
-      invoke_march_interp ~verbose ~filter ~coverage ~lib_path_env test_files
+      invoke_march_interp ~verbose ~filter ~coverage ~seed ~lib_path_env test_files
     else begin
       (* Compiled path: we need a single entry point.  When multiple test files
          are present, use the first one as entry — MARCH_LIB_PATH includes the
@@ -135,17 +140,17 @@ let run_files ?(verbose=false) ?(filter="") ?(coverage=false) test_files =
       in
       (* Use first test file as entry; MARCH_LIB_PATH provides the rest. *)
       let entry = List.hd test_files in
-      invoke_compiled ~verbose ~filter ~lib_path_env:lib_path_with_test ~output entry
+      invoke_compiled ~verbose ~filter ~seed ~lib_path_env:lib_path_with_test ~output entry
     end
 
-let run ?(verbose=false) ?(filter="") ?(coverage=false) ?(files=[]) () =
+let run ?(verbose=false) ?(filter="") ?(coverage=false) ?(seed="") ?(files=[]) () =
   if files <> [] then begin
     let expanded = expand_paths files in
     if expanded = [] then begin
       Printf.printf "no test files found\n%!";
       Ok ()
     end else
-      run_files ~verbose ~filter ~coverage expanded
+      run_files ~verbose ~filter ~coverage ~seed expanded
   end else
     match find_test_dir () with
     | None ->
@@ -159,5 +164,5 @@ let run ?(verbose=false) ?(filter="") ?(coverage=false) ?(files=[]) () =
           Printf.printf "no test files found under %s\n%!" test_dir;
           Ok ()
         end else
-          run_files ~verbose ~filter ~coverage test_files
+          run_files ~verbose ~filter ~coverage ~seed test_files
       end

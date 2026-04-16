@@ -925,6 +925,14 @@ let builtin_bindings : (string * scheme) list =
     ("print_float",    Mono (TArrow (t_float,  t_unit)));
     (* Tap bus: ∀a. a -> a  (sends value to tap bus, returns it unchanged) *)
     ("tap",            poly1 (fun a -> TArrow (a, a)));
+    (* Property-testing primitive: ∀a. (Bool -> a) -> Result(a, String).
+       Runs the thunk (a 1-arg lambda whose argument is ignored — used
+       because the typechecker doesn't handle `() -> a` well in argument
+       position), catching any runtime failure (assert, panic, match
+       failure, division by zero, etc.) and returning Err(msg) on failure
+       or Ok(result) on success. Call as `__try_call(fn _ -> body)`. *)
+    ("__try_call",     poly1 (fun a ->
+        TArrow (TArrow (t_bool, a), t_result a t_string)));
     ("int_to_string",  Mono (TArrow (t_int,    t_string)));
     ("float_to_string",Mono (TArrow (t_float,  t_string)));
     ("bool_to_string", Mono (TArrow (t_bool,   t_string)));
