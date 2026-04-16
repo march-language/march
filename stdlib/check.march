@@ -40,6 +40,15 @@ mod Check do
     { num_runs = 100, seed = None, max_shrink_steps = 1000, max_size = 100 }
   end
 
+  -- ---- Skip check ----
+
+  pfn is_skipped() : Bool do
+    match process_env("MARCH_SKIP_PROPERTIES") do
+    Some("1") -> true
+    _         -> false
+    end
+  end
+
   -- ---- Seed resolution ----
 
   pfn resolve_seed(config_seed : Option(Int)) : Int do
@@ -162,20 +171,21 @@ mod Check do
       Check.all_with(gen, prop, { Check.default_config() with seed = Some(42) })
   """
   fn all_with(g, prop, config : CheckConfig) do
-    let seed = resolve_seed(config.seed)
-    let rng  = Random.seed(seed)
-    match run_loop(g, prop, rng, 0, config) do
-    None ->
-      -- All runs passed.
-      ()
-    Some(pair) ->
-      match pair do
-      (failing_tree, run_idx) ->
-        let (shrunk, steps) = shrink_loop(prop, failing_tree,
-                                          config.max_shrink_steps, 0)
-        panic(render_failure(failing_tree, run_idx, shrunk, steps, seed, prop))
+    if is_skipped() do ()
+    else do
+      let seed = resolve_seed(config.seed)
+      let rng  = Random.seed(seed)
+      match run_loop(g, prop, rng, 0, config) do
+      None -> ()
+      Some(pair) ->
+        match pair do
+        (failing_tree, run_idx) ->
+          let (shrunk, steps) = shrink_loop(prop, failing_tree,
+                                            config.max_shrink_steps, 0)
+          panic(render_failure(failing_tree, run_idx, shrunk, steps, seed, prop))
+        end
       end
-    end
+    end end
   end
 
 end

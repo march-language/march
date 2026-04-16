@@ -683,11 +683,9 @@ let run_test_cmd args =
     else if String.length a > 9 && String.sub a 0 9 = "--filter=" then
       filter := String.sub a 9 (String.length a - 9)
     else if String.length a > 7 && String.sub a 0 7 = "--seed=" then
-      (* Property-test seed: stored in MARCH_PROP_SEED env var so that
-         stdlib/check.march:resolve_seed can pick it up.  This makes
-         failing property tests reproducible: the failure message prints
-         the seed used, and the user can re-run with --seed=N. *)
       Unix.putenv "MARCH_PROP_SEED" (String.sub a 7 (String.length a - 7))
+    else if a = "--skip-properties" then
+      Unix.putenv "MARCH_SKIP_PROPERTIES" "1"
     else
       targets := a :: !targets
   ) args;

@@ -165,13 +165,16 @@ let test_cmd =
     Arg.(value & opt string "" &
          info ["seed"] ~docv:"SEED" ~doc:"Deterministic seed for property tests (see stdlib/check.march)")
   in
+  let skip_props =
+    Arg.(value & flag & info ["skip-properties"] ~doc:"Skip property-based tests (Check.all)")
+  in
   let files =
     Arg.(value & pos_all string [] &
          info [] ~docv:"FILE" ~doc:"Test files to run (default: all test files under test/)")
   in
-  let run v c f s fs = handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~files:fs ()) in
+  let run v c f s sp fs = handle (Cmd_test.run ~verbose:v ~coverage:c ~filter:f ~seed:s ~skip_properties:sp ~files:fs ()) in
   Cmd.v (Cmd.info "test" ~doc:"Run the test suite")
-    Term.(const run $ verbose $ coverage $ filter $ seed $ files)
+    Term.(const run $ verbose $ coverage $ filter $ seed $ skip_props $ files)
 
 (* ------------------------------------------------------------------ forge lint *)
 
