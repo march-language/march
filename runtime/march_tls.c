@@ -15,7 +15,7 @@
  *   offset 12: int32_t pad
  *   offset 16+: 8-byte fields
  *
- * Result: Ok = tag 1, field0 = value;  Err = tag 0, field0 = String.
+ * Result: Ok = tag 0, field0 = value;  Err = tag 1, field0 = String.
  */
 
 #include "march_tls.h"
@@ -34,14 +34,14 @@
 
 static void *make_ok_int(int64_t v) {
     void *r = march_alloc(16 + 8);
-    *(int32_t *)((char *)r + 8) = 1;          /* tag = 1 (Ok) */
+    /* tag stays 0 = Ok */
     *(int64_t *)((char *)r + 16) = v;
     return r;
 }
 
 static void *make_ok_str(void *s) {
     void *r = march_alloc(16 + 8);
-    *(int32_t *)((char *)r + 8) = 1;
+    /* tag stays 0 = Ok */
     *(void **)((char *)r + 16) = s;
     return r;
 }
@@ -49,7 +49,7 @@ static void *make_ok_str(void *s) {
 static void *make_err(const char *msg) {
     void *s = march_string_lit(msg, (int64_t)strlen(msg));
     void *r = march_alloc(16 + 8);
-    /* tag stays 0 = Err */
+    *(int32_t *)((char *)r + 8) = 1;          /* tag = 1 (Err) */
     *(void **)((char *)r + 16) = s;
     return r;
 }

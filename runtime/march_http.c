@@ -60,19 +60,19 @@ int  base64_encode(const uint8_t *in, size_t len, char *out, size_t out_sz);
 
 /* ── Helpers ─────────────────────────────────────────────────────────── */
 
-/* Build a Result(Ok) value: tag=1, one pointer field. */
+/* Build a Result(Ok) value: tag=0, one pointer field. */
 static void *make_ok(void *value) {
     void *r = march_alloc(16 + 8);
-    *(int32_t *)((char *)r + 8) = 1;          /* tag = 1 (Ok) */
+    /* tag stays 0 = Ok */
     *(void **)((char *)r + 16) = value;
     return r;
 }
 
-/* Build a Result(Err) value: tag=0, one pointer field (string). */
+/* Build a Result(Err) value: tag=1, one pointer field (string). */
 static void *make_err(const char *msg) {
     void *s = march_string_lit(msg, (int64_t)strlen(msg));
     void *r = march_alloc(16 + 8);
-    /* tag stays 0 = Err */
+    *(int32_t *)((char *)r + 8) = 1;          /* tag = 1 (Err) */
     *(void **)((char *)r + 16) = s;
     return r;
 }
@@ -501,7 +501,7 @@ void *march_tcp_connect(void *host_ptr, int64_t port) {
  * Returns: Ok(tuple(method_str, path_str, headers_list, body_str))
  *       or Err(reason_str)
  *
- * Result tag layout:  Err=0, Ok=1  (Result = Err | Ok in declaration order)
+ * Result tag layout:  Ok=0, Err=1  (matches march_runtime.c mk_ok/mk_err)
  *
  * When MARCH_HTTP_USE_SIMD is defined (default), delegates to the SIMD-
  * accelerated parser in march_http_parse_simd.c, then converts the raw C

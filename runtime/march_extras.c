@@ -283,7 +283,7 @@ static uint8_t *string_to_raw(void *str, size_t *out_len) {
 
 static void *make_ok(void *val) {
     void *r = march_alloc(16 + 8);
-    *(int32_t *)((char *)r + 8) = 1;   /* tag = 1 = Ok */
+    /* tag stays 0 = Ok */
     *(void **)((char *)r + 16) = val;
     return r;
 }
@@ -291,7 +291,7 @@ static void *make_ok(void *val) {
 static void *make_err_str(const char *msg) {
     void *s = march_string_lit(msg, (int64_t)strlen(msg));
     void *r = march_alloc(16 + 8);
-    /* tag = 0 = Err */
+    *(int32_t *)((char *)r + 8) = 1;   /* tag = 1 = Err */
     *(void **)((char *)r + 16) = s;
     return r;
 }
