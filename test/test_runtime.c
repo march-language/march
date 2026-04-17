@@ -131,6 +131,23 @@ static void test_rc_aba(void) {
     int64_t freed2 = march_decrc_freed(o2);  /* rc → 0, freed */
     CHECK(freed2 == 1, "decrc_freed returns 1 when freed");
 
+    /* Audit C1 regression: decrc_freed on a non-pointer (NULL, scalar) must
+     * return 1 without touching memory — same behaviour as march_decrc.
+     * The sentinel return-value 1 mimics the "freed" path so callers do not
+     * proceed to the post-free incrc-children branch on a tagged scalar. */
+    CHECK(march_decrc_freed(NULL)                          == 1,
+          "decrc_freed(NULL) returns 1 (sentinel)");
+    CHECK(march_decrc_freed((void *)(uintptr_t)0x55u)      == 1,
+          "decrc_freed(small scalar) returns 1");
+    /* Tagged immediate (low bit set) is also classified as non-pointer. */
+    CHECK(march_decrc_freed((void *)((uintptr_t)0xDEADBEEFu | 1u)) == 1,
+          "decrc_freed(tagged immediate) returns 1");
+    /* Note: the new RC-underflow abort path (prev < 1) cannot be unit-tested
+     * here without forking — it intentionally aborts the process.  Coverage
+     * is achieved by inspection (mirror of march_decrc) plus the integration
+     * test examples/rc_borrowed_dup_arg.march which would have triggered
+     * the abort pre-fix-P1. */
+
     /* Test: concurrent decrc — start with rc=2, two threads each decrc once.
      * Only one thread should "free" the object.  We allocate fresh and
      * check the returned prev values sum to 2 (1+2) indicating one thread

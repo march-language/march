@@ -164,7 +164,15 @@ int64_t march_decrc_freed(void *p) {
         (_Atomic int64_t *)&((march_hdr *)p)->rc, 1, memory_order_acq_rel);
     if (gc_trace_on())
         gc_emit(prev <= 1 ? "free" : "dec_ref", p, 0, prev - 1, tag);
-    if (prev <= 1) { free(p); return 1; }
+    if (prev == 1) { free(p); return 1; }
+    if (prev < 1) {
+        /* RC underflow: decrement-on-zero (or worse) detected.  Without this
+         * guard we'd silently double-free.  Mirror march_decrc's behaviour. */
+        fprintf(stderr,
+                "march: RC underflow in march_decrc_freed (rc was %lld) at %p — aborting\n",
+                (long long)prev, p);
+        abort();
+    }
     return 0;
 }
 

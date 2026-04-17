@@ -357,8 +357,13 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     in
     let inc_vars = find_inc_vars ((Tir.AVar f) :: non_borrowed_args) live_after in
     (* 2. Borrowed args whose last use is this call: caller is responsible for Dec.
-          Closure FVs are exempt: the closure owns them and keeps them alive. *)
+          Closure FVs are exempt: the closure owns them and keeps them alive.
+          Dedup by v_name: when the same variable is passed at multiple
+          borrowed positions (e.g. [f(x, x)] both borrowed, [x] dead after),
+          the caller still owns exactly one reference and must emit exactly
+          one DecRC.  Without dedup we would underflow the RC. *)
     let post_dec_vars =
+      let seen = ref StringSet.empty in
       List.filter_map (fun (i, a) ->
         match a with
         | Tir.AVar v
@@ -366,7 +371,9 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
                && needs_rc v.Tir.v_ty
                && not (StringSet.mem v.Tir.v_name live_after)
                && Borrow.is_borrowed !_borrow_map f.Tir.v_name i
-               && not (StringSet.mem v.Tir.v_name !_closure_fvs) ->
+               && not (StringSet.mem v.Tir.v_name !_closure_fvs)
+               && not (StringSet.mem v.Tir.v_name !seen) ->
+          seen := StringSet.add v.Tir.v_name !seen;
           Some v
         | _ -> None
       ) indexed_args

@@ -1,0 +1,41 @@
+-- Regression test for Perceus P1 (audit follow-up):
+-- When the same heap-typed variable is passed at two BORROWED parameter
+-- positions and is dead after the call, Perceus must emit exactly ONE
+-- post-call DecRC, not one per position.  Without dedup the RC would
+-- underflow and the runtime would either abort (with the C1 guard) or
+-- silently double-free (without it).
+--
+-- String.starts_with maps to march_string_starts_with which is registered
+-- as borrow-borrow in extern_borrow_table; passing the same string twice
+-- exercises the bug surface.
+--
+-- Run: march examples/rc_borrowed_dup_arg.march
+-- Expected output:
+--   ok1
+--   ok2
+--   ok3
+
+mod RcBorrowedDupArg do
+
+fn main() do
+  let s = "hello"
+  -- Both positions borrowed; `s` is dead after this call.
+  -- Pre-fix: 2 EDecRC -> RC underflow -> abort.
+  -- Post-fix: 1 EDecRC -> clean drop.
+  let r1 = String.starts_with(s, s)
+  if r1 do println("ok1") else println("FAIL1") end
+
+  -- Inside a let chain to ensure the cleanup-fix interacts correctly with
+  -- fix_tail_value.
+  let t = "world"
+  let r2 = String.starts_with(t, t)
+  if r2 do println("ok2") else println("FAIL2") end
+
+  -- And once more on a dynamically-built string, to ensure the dedup is
+  -- not confined to literals.
+  let u = "ab" ++ "cd"
+  let r3 = String.starts_with(u, u)
+  if r3 do println("ok3") else println("FAIL3") end
+end
+
+end
