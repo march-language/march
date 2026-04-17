@@ -6,6 +6,18 @@ Generated from adversarial review on 2026-04-14. Each entry has a priority (P0�
 
 ## P0 — Critical
 
+- [x] **#12** `runtime/march_runtime.c:160` (audit C1) — `march_decrc_freed` was missing the RC-underflow guard that `march_decrc` has, so any `prev <= 0` path silently returned 1 (and called `free`). On a stale or double-pattern-match call the runtime would double-free instead of aborting.
+  - **Fixed:** split the `prev <= 1` branch — `prev == 1` frees normally, `prev < 1` prints a diagnostic and `abort()`s, mirroring `march_decrc`.
+
+- [x] **#13** `runtime/march_gc.c:191` (audit C2) — Pass-2 of the semi-space GC classified pointer fields with only `< 4096`, missing the low-bit-tagged-immediate and sign-bit guards that `IS_HEAP_PTR` enforces. Tagged integers from polymorphic containers were being passed to `fwd_lookup` (wasted work, latent collision risk if heap layouts ever shift).
+  - **Fixed:** added `GC_IS_HEAP_PTR` mirroring the runtime predicate; `pass2_visit` now skips tagged immediates and negative scalars. Regression test in `test/test_heap.c` (`test_gc_pass2_scalar_preservation`).
+
+- [x] **#14** `lib/tir/perceus.ml:361` (audit P1) — When the same heap variable was passed at multiple borrowed positions of a single call (e.g. `string_eq(s, s)`) and was dead after the call, Perceus emitted one post-call `EDecRC` per position, underflowing the caller's single reference and aborting via `march_decrc_local`'s own underflow guard.
+  - **Fixed:** dedup `post_dec_vars` by `v_name` using a `seen` `StringSet`. Confirmed pre-fix behaviour reproduces in `examples/rc_borrowed_dup_arg.march` (compiled binary aborts with "RC underflow") and disappears post-fix.
+
+- [x] **#15** `lib/tir/llvm_emit.ml:2206` (audit M1) — The non-`TCon` `EReuse` lowering wrote arg fields into the reused cell but never reset the constructor tag. The fresh-allocation branch (`emit_heap_alloc … 0 …`) does write tag 0, so the two branches produced differently-tagged cells from the same source expression.
+  - **Fixed:** added `emit_store_tag ctx rv 0` in the reuse branch so both branches emit cells with tag 0.
+
 - [x] **#1** `lower.ml:852,858` — Non-exhaustive match silently returns `LitInt 0` in compiled path instead of emitting a panic/unreachable. Interpreter panics correctly; compiled code produces silent wrong results.
   - **Fixed:** replaced `EAtom(ALit(LitInt 0))` with a `panic "non-exhaustive pattern match"` EApp call, consistent with how `ECond` handles it at line 394.
 
@@ -57,6 +69,7 @@ Generated from adversarial review on 2026-04-14. Each entry has a priority (P0�
 ## Done (moved from above)
 
 - #1, #2, #3, #4, #8, #9, #10, #11 — fixed and all tests passing (dune runtest: green).
+- #12, #13, #14, #15 — audit follow-ups (C1, C2, P1, M1) fixed; new regression tests (`test_gc_pass2_scalar_preservation` in `test/test_heap.c`, `examples/rc_borrowed_dup_arg.march`). dune runtest still green (1358 OCaml tests, 4176 C-runtime checks).
 - #5 — confirmed false alarm after reading `llvm_ret_ty`; no fix needed.
 - #6 — confirmed false alarm after re-reading `find_missing_mc`; algorithm is correct.
 - #7 — confirmed false alarm after reading `surface_ty`; `a` is never linked by that function.

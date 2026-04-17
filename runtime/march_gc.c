@@ -37,6 +37,16 @@
 typedef struct { int64_t rc; int32_t tag; int32_t pad; } gc_hdr;
 #define MARCH_STRING_TAG  (-1)
 
+/* Mirror of IS_HEAP_PTR in march_runtime.h.  Polymorphic containers store
+ * tagged immediates in the same fields as heap pointers: tagged integers
+ * have the low bit set ((n << 1) | 1), heap pointers (8-byte aligned) have
+ * the low bit clear.  Negative values are never valid user-space addresses
+ * on any 64-bit ABI. */
+#define GC_IS_HEAP_PTR(p) \
+    (((uintptr_t)(p) & 1u) == 0 && \
+     (uintptr_t)(p) >= 4096u    && \
+     (intptr_t)(p)  > 0)
+
 /* ── Forwarding table (open-addressing hash map, power-of-two size) ──────── */
 
 typedef struct {
@@ -190,7 +200,11 @@ static void pass2_visit(void *obj, uint32_t alloc_size, uint32_t n_fields,
     int64_t *fields = (int64_t *)((char *)obj + 16);
     for (uint32_t i = 0; i < n_fields; i++) {
         void *fv = (void *)(uintptr_t)(uint64_t)fields[i];
-        if ((uintptr_t)fv < 4096u) continue;   /* unboxed scalar */
+        /* Skip tagged immediates (low bit set), low addresses, and negative
+         * values (never valid heap addresses).  Without this guard, a tagged
+         * integer such as ((42 << 1) | 1) could match a real from-space
+         * address in fwd_lookup and be silently rewritten to a pointer. */
+        if (!GC_IS_HEAP_PTR(fv)) continue;
         void *new_fv = fwd_lookup(ctx->fwd, fv);
         if (new_fv) {
             fields[i] = (int64_t)(uintptr_t)new_fv;

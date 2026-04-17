@@ -400,6 +400,78 @@ static void test_gc(void) {
     GROUP_DONE("5");
 }
 
+/* ── 5b. GC pass-2 hardening (regression test for audit C2) ───────────── */
+
+/*
+ * Pass-2 of march_gc.c rewrites pointer fields using the forwarding table.
+ * The classification predicate must reject:
+ *   (a) tagged-immediate integers (low bit set; (n<<1)|1 scheme)
+ *   (b) negative int64 values (sign bit set — never a valid user-space
+ *       address on any 64-bit ABI)
+ * Without these guards, scalar fields whose values fall into the > 4096
+ * range could be passed to fwd_lookup, wasting work and (in adversarial
+ * memory layouts) risking collision.  This test plants such values in
+ * live object fields and verifies they are preserved verbatim across GC.
+ */
+static void test_gc_pass2_scalar_preservation(void) {
+    GROUP("5b. GC pass-2 preserves tagged immediates and negative scalars");
+
+    march_heap_t h;
+    march_heap_init(&h);
+
+    /* Allocate one dead object to populate the fwd-walk path with at least
+     * one mapping in the from-space scan, then several live objects whose
+     * fields hold "pointer-shaped" but non-pointer values. */
+    void *dead = make_obj1(&h, 99, 0);
+    ((test_hdr *)dead)->rc = 0;
+
+    /* Live carrier object: 4 fields, all "scalars that look pointerish".
+     *   field[0] = tagged immediate (n<<1)|1 for a moderately-large n
+     *   field[1] = negative int64 (-1)
+     *   field[2] = small positive scalar (< 4096)
+     *   field[3] = a real (large) value with low bit set
+     * After GC, all four should be preserved bit-for-bit. */
+    void *carrier = march_process_alloc(&h, 16 + 4*8);
+    test_hdr *ch = (test_hdr *)carrier;
+    ch->tag = 7;
+    int64_t *cf = (int64_t *)((char *)carrier + 16);
+    int64_t v0 = ((int64_t)2000000 << 1) | 1;   /* tagged immediate */
+    int64_t v1 = -1;                             /* negative */
+    int64_t v2 = 42;                             /* small */
+    int64_t v3 = (int64_t)0x4001;                /* > 4096, low bit set */
+    cf[0] = v0; cf[1] = v1; cf[2] = v2; cf[3] = v3;
+
+    march_gc_stats stats;
+    int rc = march_gc_collect(&h, &stats);
+    CHECK(rc == 0, "gc_collect succeeds");
+    CHECK(stats.objects_copied == 1, "copied 1 live object (the carrier)");
+
+    /* The original `carrier` pointer is invalid after GC; find the surviving
+     * carrier in the new heap by walking blocks. */
+    void *surv = NULL;
+    for (march_heap_block *b = h.blocks; b && !surv; b = b->next) {
+        const char *p   = b->data;
+        const char *end = b->data + b->used;
+        while (p < end) {
+            const march_alloc_meta *meta = (const march_alloc_meta *)p;
+            void *obj = (void *)(p + sizeof(march_alloc_meta));
+            if (((test_hdr *)obj)->tag == 7) { surv = obj; break; }
+            p += meta->alloc_size;
+        }
+    }
+    CHECK(surv != NULL, "surviving carrier object found");
+    if (surv) {
+        int64_t *sf = (int64_t *)((char *)surv + 16);
+        CHECK(sf[0] == v0, "tagged immediate preserved across GC");
+        CHECK(sf[1] == v1, "negative scalar preserved across GC");
+        CHECK(sf[2] == v2, "small scalar preserved across GC");
+        CHECK(sf[3] == v3, "pointer-shaped tagged scalar preserved across GC");
+    }
+
+    march_heap_destroy(&h);
+    GROUP_DONE("5b");
+}
+
 /* ── 6. MPSC mailbox + selective receive ─────────────────────────────── */
 
 #define NUM_PRODUCERS 4
@@ -569,6 +641,7 @@ int main(void) {
     test_msg_move();
     test_local_rc();
     test_gc();
+    test_gc_pass2_scalar_preservation();
     test_mailbox();
     test_throughput();
 

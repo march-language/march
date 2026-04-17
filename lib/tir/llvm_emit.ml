@@ -2221,6 +2221,11 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
                      is_unique reuse_lbl fresh_lbl);
     emit_label ctx reuse_lbl;
+    (* Write tag=0 to match the fresh-branch allocation (emit_heap_alloc below
+       passes tag_int=0).  Without this, the reused cell would carry whatever
+       tag was previously stored — semantically inconsistent with the
+       same-shape value the fresh branch produces. *)
+    emit_store_tag ctx rv 0;
     List.iteri (fun i (ty, v) ->
       emit_store_field ctx rv i ty v
     ) arg_vals;
