@@ -163,6 +163,61 @@ let build_subst (fn : Tir.fn_def) (arg_tys : Tir.ty list) : ty_subst =
   in
   List.fold_left (fun acc (poly, conc) -> match_ty poly conc acc) [] pairs
 
+(** Return the TIR type of an atom. *)
+let atom_ty : Tir.atom -> Tir.ty = function
+  | Tir.AVar v    -> v.Tir.v_ty
+  | Tir.ADefRef _ -> Tir.TPtr Tir.TUnit
+  | Tir.ALit (March_ast.Ast.LitInt _)    -> Tir.TInt
+  | Tir.ALit (March_ast.Ast.LitFloat _)  -> Tir.TFloat
+  | Tir.ALit (March_ast.Ast.LitBool _)   -> Tir.TBool
+  | Tir.ALit (March_ast.Ast.LitString _) -> Tir.TString
+  | Tir.ALit (March_ast.Ast.LitAtom _)   -> Tir.TUnit
+
+(** [find_first_call fn_name expr] scans [expr] for the first direct call
+    ([EApp] or [ECallPtr]) to a function named [fn_name] and returns the
+    argument types of that call, or [None] if no such call is found.
+
+    Used to derive a "local subst" for generalized inner functions (produced
+    by [ELetFn]) whose TVar IDs differ from the enclosing function's TVars.
+    After the outer subst has been applied by [subst_fn_def], the arg types
+    at the call site are concrete and can be matched against the inner fn's
+    param types to obtain a specialising substitution.
+
+    We do NOT recurse into nested [ELetRec] bodies, because the inner
+    function may shadow [fn_name] there.  Branching constructs ([ECase]) are
+    searched left-to-right and the first match wins. *)
+let rec find_first_call (fn_name : string) (expr : Tir.expr)
+    : Tir.ty list option =
+  match expr with
+  | Tir.EApp (fv, args) when fv.Tir.v_name = fn_name ->
+    Some (List.map atom_ty args)
+  | Tir.ECallPtr (Tir.AVar fv, args) when fv.Tir.v_name = fn_name ->
+    Some (List.map atom_ty args)
+  | Tir.EApp _ | Tir.ECallPtr _ | Tir.EAtom _
+  | Tir.ETuple _ | Tir.ERecord _ | Tir.EField _ | Tir.EUpdate _
+  | Tir.EAlloc _ | Tir.EStackAlloc _ | Tir.EFree _
+  | Tir.EIncRC _ | Tir.EDecRC _ | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _
+  | Tir.EReuse _ -> None
+  | Tir.ELet (_, e1, e2) ->
+    (match find_first_call fn_name e1 with
+     | Some _ as r -> r
+     | None -> find_first_call fn_name e2)
+  | Tir.ELetRec (_, body) ->
+    (* Don't recurse into the nested fn bodies — only scan the continuation. *)
+    find_first_call fn_name body
+  | Tir.ECase (_, brs, def) ->
+    let first_in_brs = List.fold_left (fun acc br ->
+        match acc with Some _ -> acc | None ->
+          find_first_call fn_name br.Tir.br_body
+      ) None brs in
+    (match first_in_brs with
+     | Some _ -> first_in_brs
+     | None   -> Option.bind def (find_first_call fn_name))
+  | Tir.ESeq (e1, e2) ->
+    (match find_first_call fn_name e1 with
+     | Some _ as r -> r
+     | None -> find_first_call fn_name e2)
+
 (** Ensure any function referenced as a value (atom) is enqueued for emission. *)
 let ensure_atom_fns fn_table done_set worklist atoms =
   List.iter (function
@@ -245,6 +300,14 @@ let rec rewrite_calls
                  let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
                  let key = mangle_ty (Tir.TRecord sorted) in
                  Hashtbl.find_opt record_to_typename key
+               (* TIR primitive types are distinct constructors from TCon.
+                  After subst_ty {K→TString}, arg_ty = TString, not TCon("String",[]).
+                  Without these cases, iface dispatch (e.g. hash → march_hash_string)
+                  fails and leaves a bare @hash extern that the linker cannot resolve. *)
+               | Tir.TString -> Some "String"
+               | Tir.TInt    -> Some "Int"
+               | Tir.TFloat  -> Some "Float"
+               | Tir.TBool   -> Some "Bool"
                | _ -> None
              in
              (* Fallback: if the concrete type could not be determined (type was
@@ -348,6 +411,10 @@ let rec rewrite_calls
                     let sorted = List.sort (fun (a, _) (b, _) -> String.compare a b) fs in
                     let key = mangle_ty (Tir.TRecord sorted) in
                     Hashtbl.find_opt record_to_typename key
+                  | Tir.TString -> Some "String"
+                  | Tir.TInt    -> Some "Int"
+                  | Tir.TFloat  -> Some "Float"
+                  | Tir.TBool   -> Some "Bool"
                   | _ -> None
                 in
                 (* Single-impl fallback for type-erased args (TVar or opaque
@@ -411,6 +478,66 @@ let rec rewrite_calls
             Tir.ECallPtr (Tir.AVar v', args)
           end)
      | _ -> expr)
+  | Tir.ELet (v, (Tir.ELetRec (fns, binding_body) as e1), cont)
+    when List.exists (fun fn -> has_tvar (Tir.TFn (List.map (fun p -> p.Tir.v_ty) fn.Tir.fn_params, fn.Tir.fn_ret_ty))) fns ->
+    (* Special case: a generalized local function (from ELetFn) is bound here
+       and called in the continuation [cont].  After the outer substitution has
+       been applied by [subst_fn_def], the call site in [cont] has concrete arg
+       types that can be matched against the inner fn's (still-abstract) param
+       types to produce a "local subst".  Applying it in-place ensures that
+       defun later lifts a fully-monomorphised closure instead of a generic one
+       that would leave TVar type arguments (e.g. Map.key_hash$V__4370) that
+       the linker cannot resolve.
+
+       Concretely: for
+         fn from_list(pairs: List(K, V), cmp) = let go = ... in go(pairs, empty())
+       specialised with {K→String}, the call go(pairs, empty()) has arg types
+       [List(String,String), Map(String,String)].  Matching against go's params
+       (List(K_go, V_go), Map(K_go, V_go)) gives {K_go→String, V_go→String}
+       — a subst that covers go's own generalised TVars. *)
+    (* For each inner fn: derive a local subst from its first concrete call
+       site in [cont], apply it in-place, then run rewrite_calls on the body. *)
+    let per_fn_substs : (string * ty_subst) list =
+      List.filter_map (fun fn ->
+          let fn_has_tvar = List.exists (fun p -> has_tvar p.Tir.v_ty) fn.Tir.fn_params
+                            || has_tvar fn.Tir.fn_ret_ty in
+          if not fn_has_tvar then None
+          else
+            match find_first_call fn.Tir.fn_name cont with
+            | None -> None
+            | Some call_arg_tys ->
+              let s = build_subst fn call_arg_tys in
+              if s = [] then None else Some (fn.Tir.fn_name, s)
+        ) fns
+    in
+    (* Merge all per-fn substs into one (first-wins across fns). *)
+    let merged_subst =
+      List.fold_left (fun acc (_, s) ->
+          List.fold_left (fun acc (k, v) ->
+              if List.mem_assoc k acc then acc else (k, v) :: acc)
+            acc s)
+        [] per_fn_substs
+    in
+    let updated_fns = List.map (fun fn ->
+        let local_subst = match List.assoc_opt fn.Tir.fn_name per_fn_substs with
+          | Some s -> s | None -> [] in
+        let fn' = if local_subst = [] then fn else subst_fn_def local_subst fn in
+        { fn' with Tir.fn_body =
+            rewrite_calls fn_table done_set worklist iface_methods record_to_typename
+              fn'.Tir.fn_body }
+      ) fns in
+    (* Apply the merged subst to binding_body (e.g. EAtom(AVar fn_var)) so
+       the closure-variable type inside the ELetRec stays consistent with the
+       updated fn params.  Also update the outer binding var [v]. *)
+    let binding_body' =
+      if merged_subst = [] then binding_body
+      else subst_expr merged_subst binding_body in
+    let v' = if merged_subst = [] then v else subst_var merged_subst v in
+    let _ = e1 in  (* e1 deconstructed into fns/binding_body above *)
+    Tir.ELet (v',
+      Tir.ELetRec (updated_fns,
+        rewrite_calls fn_table done_set worklist iface_methods record_to_typename binding_body'),
+      rewrite_calls fn_table done_set worklist iface_methods record_to_typename cont)
   | Tir.ELet (v, e1, e2) ->
     Tir.ELet (v,
       rewrite_calls fn_table done_set worklist iface_methods record_to_typename e1,

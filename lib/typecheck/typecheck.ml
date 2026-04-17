@@ -3476,6 +3476,16 @@ and infer_block env exprs =
     let fn_ty = fresh_var env.level in
     let env_with_self = bind_var name.txt (Mono fn_ty) env in
     let param_tys, env_inner = bind_lam_params env_with_self params in
+    (* Record each param's inferred type in the type_map at its name span.
+       check_fn does this for top-level DFn params (line ~3706), but ELetFn
+       goes through bind_lam_params which uses dummy_span and skips this.
+       Without it, lower.ml's ty_of_span(p.param_name.span) returns TVar "_"
+       for every ELetFn param, collapsing all params to a single unknown type
+       that breaks monomorphization of inner functions (e.g. Map.from_list's
+       inner `go` getting TVar "_" instead of TVar "_17776" / "_17775"). *)
+    List.iter2 (fun (p : Ast.param) pty ->
+        Hashtbl.replace env.type_map p.param_name.span (repr pty)
+      ) params param_tys;
     let body_ty = infer_block env_inner [body] in
     let ret_ty  = match ret_ann with
       | None -> body_ty

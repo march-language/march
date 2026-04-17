@@ -1787,6 +1787,15 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         types := List.rev_append new_types !types;
         fns   := List.rev_append new_fns   !fns
       | Ast.DMod (mod_name, _, inner_decls, _) ->
+        (* Register this module as already lowered BEFORE processing its declarations.
+           Without this, _ensure_module_lowered fires later when a function body
+           references e.g. "Map.insert" — it re-parses the stdlib file from disk
+           WITHOUT the type_map, producing all-TVar-"_" signatures that overwrite
+           the correctly-typed versions (added here) in fn_table via Hashtbl.replace
+           last-write-wins.  Mono then sees only unknown types and cannot specialize
+           iface dispatch (e.g. hash → march_hash_string/int/…), leaving a bare
+           @hash extern that the linker cannot resolve. *)
+        Hashtbl.replace !_lowered_modules mod_name.txt ();
         let rec lower_mod_decls prefix decls =
           let direct_fn_names = List.filter_map (function
               | Ast.DFn (def, _) -> Some def.fn_name.txt
