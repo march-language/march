@@ -75,6 +75,7 @@ int64_t march_string_byte_length(void *s);
 int64_t march_string_is_empty(void *s);
 void   *march_string_to_int(void *s);
 void   *march_string_join(void *list, void *sep);
+void   *march_codepoint_to_utf8(int64_t cp);  /* Encode codepoint as UTF-8, returns Some(string) or None */
 
 /* Actor link builtins. */
 /* link: establish a bidirectional crash-propagation link between two actors.

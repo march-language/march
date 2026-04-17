@@ -374,4 +374,38 @@ mod String do
   """
   fn last_index_of(s, sub) do string_last_index_of(s, sub) end
 
+  doc """
+  Encode a Unicode codepoint as a UTF-8 string.
+  Returns `Some(string)` if the codepoint is valid, `None` otherwise.
+
+  Valid codepoints are in the range 0x0 to 0x10FFFF, excluding surrogate pairs
+  (0xD800 to 0xDFFF).
+
+      String.from_codepoint(0x41)    -- Some("A")
+      String.from_codepoint(0xE9)    -- Some("é")
+      String.from_codepoint(0x1F600) -- Some("😀")
+      String.from_codepoint(-1)      -- None  (out of range)
+      String.from_codepoint(0xD800)  -- None  (surrogate pair)
+
+  Cost: O(1).
+  """
+  fn from_codepoint(cp) do string_from_codepoint(cp) end
+
+  doc """
+  Extract all Unicode codepoints from a string as an Int list.
+  Each codepoint is yielded as a separate integer in the range 0x0 to 0x10FFFF.
+
+  Returns a list ordered left-to-right. Invalid UTF-8 sequences are treated
+  as individual byte values (0x0 to 0xFF); well-formed March strings will not
+  encounter this case.
+
+      String.to_codepoints("A")    -- [65]
+      String.to_codepoints("é")    -- [233]
+      String.to_codepoints("AB")   -- [65, 66]
+      String.to_codepoints("😀")    -- [128512]
+
+  Cost: O(n) where n is the byte length of the string.
+  """
+  fn to_codepoints(s) do string_to_codepoints(s) end
+
 end

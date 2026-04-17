@@ -3270,6 +3270,59 @@ let base_env : env =
           in
           go lst; VString (Buffer.contents buf)
         | _ -> eval_error "string_from_chars: expected list of chars"))
+  ; ("string_to_codepoints", VBuiltin ("string_to_codepoints", function
+        | [VString s] ->
+          let codepoints = ref [] in
+          let len = String.length s in
+          let i = ref 0 in
+          while !i < len do
+            let byte = Char.code s.[!i] in
+            if byte < 0x80 then begin
+              (* 1-byte: 0xxxxxxx *)
+              codepoints := VInt byte :: !codepoints;
+              incr i
+            end else if byte < 0xE0 then begin
+              (* 2-byte: 110xxxxx 10xxxxxx *)
+              if !i + 1 < len then begin
+                let byte2 = Char.code s.[!i + 1] in
+                let cp = ((byte - 0xC0) lsl 6) lor (byte2 - 0x80) in
+                codepoints := VInt cp :: !codepoints;
+                i := !i + 2
+              end else begin
+                codepoints := VInt byte :: !codepoints;
+                incr i
+              end
+            end else if byte < 0xF0 then begin
+              (* 3-byte: 1110xxxx 10xxxxxx 10xxxxxx *)
+              if !i + 2 < len then begin
+                let byte2 = Char.code s.[!i + 1] in
+                let byte3 = Char.code s.[!i + 2] in
+                let cp = ((byte - 0xE0) lsl 12) lor ((byte2 - 0x80) lsl 6) lor (byte3 - 0x80) in
+                codepoints := VInt cp :: !codepoints;
+                i := !i + 3
+              end else begin
+                codepoints := VInt byte :: !codepoints;
+                incr i
+              end
+            end else begin
+              (* 4-byte: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx *)
+              if !i + 3 < len then begin
+                let byte2 = Char.code s.[!i + 1] in
+                let byte3 = Char.code s.[!i + 2] in
+                let byte4 = Char.code s.[!i + 3] in
+                let cp = ((byte - 0xF0) lsl 18) lor ((byte2 - 0x80) lsl 12) lor
+                         ((byte3 - 0x80) lsl 6) lor (byte4 - 0x80) in
+                codepoints := VInt cp :: !codepoints;
+                i := !i + 4
+              end else begin
+                codepoints := VInt byte :: !codepoints;
+                incr i
+              end
+            end
+          done;
+          (* Build list in order (reversed because we built with cons) *)
+          List.fold_right (fun cp acc -> VCon ("Cons", [cp; acc])) (List.rev !codepoints) (VCon ("Nil", []))
+        | _ -> eval_error "string_to_codepoints: expected string"))
   ; ("string_repeat", VBuiltin ("string_repeat", function
         | [VString s; VInt n] ->
           let buf = Buffer.create (String.length s * max 0 n) in
@@ -4759,6 +4812,46 @@ let base_env : env =
                           String.sub s (!idx + lold) (ls - !idx - lold))
           end
         | _ -> eval_error "String.replace: expected three strings"))
+  ; ("string_from_codepoint", VBuiltin ("string_from_codepoint", function
+        | [VInt cp] ->
+          (* Validate codepoint: 0x0 to 0x10FFFF, reject surrogates (0xD800-0xDFFF) *)
+          if cp < 0 || cp > 0x10FFFF then
+            VCon ("None", [])
+          else if cp >= 0xD800 && cp <= 0xDFFF then
+            VCon ("None", [])  (* Reject surrogate pairs *)
+          else
+            (* Encode as UTF-8 *)
+            let buf = Buffer.create 4 in
+            if cp <= 0x7F then
+              (* 1-byte: 0xxxxxxx *)
+              Buffer.add_char buf (Char.chr cp)
+            else if cp <= 0x7FF then begin
+              (* 2-byte: 110xxxxx 10xxxxxx *)
+              let b1 = 0xC0 lor (cp lsr 6) in
+              let b2 = 0x80 lor (cp land 0x3F) in
+              Buffer.add_char buf (Char.chr b1);
+              Buffer.add_char buf (Char.chr b2)
+            end else if cp <= 0xFFFF then begin
+              (* 3-byte: 1110xxxx 10xxxxxx 10xxxxxx *)
+              let b1 = 0xE0 lor (cp lsr 12) in
+              let b2 = 0x80 lor ((cp lsr 6) land 0x3F) in
+              let b3 = 0x80 lor (cp land 0x3F) in
+              Buffer.add_char buf (Char.chr b1);
+              Buffer.add_char buf (Char.chr b2);
+              Buffer.add_char buf (Char.chr b3)
+            end else begin
+              (* 4-byte: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx *)
+              let b1 = 0xF0 lor (cp lsr 18) in
+              let b2 = 0x80 lor ((cp lsr 12) land 0x3F) in
+              let b3 = 0x80 lor ((cp lsr 6) land 0x3F) in
+              let b4 = 0x80 lor (cp land 0x3F) in
+              Buffer.add_char buf (Char.chr b1);
+              Buffer.add_char buf (Char.chr b2);
+              Buffer.add_char buf (Char.chr b3);
+              Buffer.add_char buf (Char.chr b4)
+            end;
+            VCon ("Some", [VString (Buffer.contents buf)])
+        | _ -> eval_error "string_from_codepoint: expected int"))
 
   (* ── Session-typed channels ─────────────────────────────────────── *)
   (* Chan.new(proto_name) or Chan.new(proto_name, role_a, role_b)

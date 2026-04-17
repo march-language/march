@@ -1353,3 +1353,66 @@ int64_t march_mpst_close(void *ep) {
     mpst_session_release(session);
     return 0;
 }
+
+/* ── String.from_codepoint: encode Unicode codepoint as UTF-8 ────────── */
+
+/* Encode a Unicode codepoint as UTF-8. Returns a March string (or None tag).
+ * Validates: 0x0 ≤ cp ≤ 0x10FFFF and rejects surrogate pairs (0xD800-0xDFFF).
+ * Returns: Some(utf8_string) or None (as a March option value). */
+void *march_codepoint_to_utf8(int64_t cp) {
+    /* Validate codepoint range */
+    if (cp < 0 || cp > 0x10FFFF) {
+        return march_alloc(16);  /* None: tag = 0, rc = 1 */
+    }
+
+    /* Reject surrogate pairs */
+    if (cp >= 0xD800 && cp <= 0xDFFF) {
+        return march_alloc(16);  /* None */
+    }
+
+    unsigned char buf[4];
+    int len = 0;
+
+    if (cp <= 0x7F) {
+        /* 1-byte sequence: 0xxxxxxx */
+        buf[0] = (unsigned char)cp;
+        len = 1;
+    } else if (cp <= 0x7FF) {
+        /* 2-byte sequence: 110xxxxx 10xxxxxx */
+        buf[0] = (unsigned char)(0xC0 | (cp >> 6));
+        buf[1] = (unsigned char)(0x80 | (cp & 0x3F));
+        len = 2;
+    } else if (cp <= 0xFFFF) {
+        /* 3-byte sequence: 1110xxxx 10xxxxxx 10xxxxxx */
+        buf[0] = (unsigned char)(0xE0 | (cp >> 12));
+        buf[1] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[2] = (unsigned char)(0x80 | (cp & 0x3F));
+        len = 3;
+    } else {
+        /* 4-byte sequence: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx */
+        buf[0] = (unsigned char)(0xF0 | (cp >> 18));
+        buf[1] = (unsigned char)(0x80 | ((cp >> 12) & 0x3F));
+        buf[2] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
+        buf[3] = (unsigned char)(0x80 | (cp & 0x3F));
+        len = 4;
+    }
+
+    /* Create March string from UTF-8 bytes */
+    march_string *s = (march_string *)malloc(sizeof(march_string) + (size_t)len + 1);
+    if (!s) {
+        fputs("march: out of memory\n", stderr);
+        exit(1);
+    }
+    s->rc = 1;
+    s->len = len;
+    memcpy(s->data, buf, (size_t)len);
+    s->data[len] = '\0';
+
+    /* Wrap in Some(...) constructor: tag = 1, rc = 1, payload = string pointer */
+    void *opt = march_alloc(16 + 8);
+    march_hdr *hdr = (march_hdr *)opt;
+    hdr->tag = 1;  /* Some tag */
+    int64_t *payload = (int64_t *)((char *)opt + 16);
+    payload[0] = (int64_t)(intptr_t)s;
+    return opt;
+}
