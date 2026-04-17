@@ -438,6 +438,18 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     (e'', lb)
 
   | Tir.ECallPtr (a, args) ->
+    (* Conservative borrow treatment (audit P5): we have no borrow map for
+       the indirect callee, so every arg is treated as owning.  For args
+       still live after the call, [find_inc_vars] inserts an EIncRC so the
+       callee's consumed reference is balanced against the caller's retained
+       one.  For dead-after args, no IncRC is emitted — the caller's
+       reference transfers to the callee, which is expected to decrement it
+       (the closure-apply ABI used for ECallPtr always consumes args).
+       The perf cost is extra Inc/Dec pairs around higher-order calls whose
+       underlying apply function actually borrows.  A full fix would require
+       attaching per-call-site borrow modes to closures at EAlloc time and
+       plumbing them through the call dispatch — a sizeable architectural
+       change deferred beyond this audit pass. *)
     let all_atoms = a :: args in
     let inc_vars = find_inc_vars all_atoms live_after in
     let e' = wrap_incrcs inc_vars e in
@@ -786,35 +798,54 @@ let insert_rc ?(borrowed = StringSet.empty) (fn : Tir.fn_def) : Tir.fn_def =
     the cancelled variable (audit L5).  Perceus's [fix_tail_value]
     restructuring frequently wraps tail-position cleanup in an ELet, which
     otherwise prevents the simple adjacent-cancel detection from firing
-    even though the Inc/Dec are semantically a no-op pair. *)
+    even though the Inc/Dec are semantically a no-op pair.
+
+    Atomicity strictness (audit P4): a cancel pair is only elided when BOTH
+    halves have the same atomicity.  Mixed (atomic↔non-atomic) pairs are
+    left in place.  Rationale: [incrc_for] and [decrc_for] pick atomicity
+    from [_actor_sent] per function, so same-variable ops should always
+    match in correct code.  If a future pass ever produces a mismatch
+    (e.g. inliner copying code across actor-send boundaries), eliding would
+    silently drop the atomic op and introduce a data race.  Being strict
+    lets that class of bug surface via still-present RC operations rather
+    than turning into a memory-ordering heisenbug.  The dedicated test
+    [tir/perceus/p4_mixed_atomicity_preserved] pins the invariant. *)
 let rec elide_expr (e : Tir.expr) : Tir.expr =
   let inc_dec_match v1 v2 = String.equal v1.Tir.v_name v2.Tir.v_name in
   match e with
-  (* Cancel pair: ESeq(EIncRC v, ESeq(EDecRC v, rest)) -> rest (any atomicity mix) *)
-  | Tir.ESeq ((Tir.EIncRC (Tir.AVar v1) | Tir.EAtomicIncRC (Tir.AVar v1)),
-              Tir.ESeq ((Tir.EDecRC (Tir.AVar v2) | Tir.EAtomicDecRC (Tir.AVar v2)), rest))
-    when inc_dec_match v1 v2 ->
-    elide_expr rest
-  (* Also check the reverse *)
-  | Tir.ESeq ((Tir.EDecRC (Tir.AVar v1) | Tir.EAtomicDecRC (Tir.AVar v1)),
-              Tir.ESeq ((Tir.EIncRC (Tir.AVar v2) | Tir.EAtomicIncRC (Tir.AVar v2)), rest))
-    when inc_dec_match v1 v2 ->
-    elide_expr rest
+  (* Cancel pair, matching atomicity *)
+  | Tir.ESeq (Tir.EIncRC (Tir.AVar v1),
+              Tir.ESeq (Tir.EDecRC (Tir.AVar v2), rest))
+    when inc_dec_match v1 v2 -> elide_expr rest
+  | Tir.ESeq (Tir.EAtomicIncRC (Tir.AVar v1),
+              Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v2), rest))
+    when inc_dec_match v1 v2 -> elide_expr rest
+  | Tir.ESeq (Tir.EDecRC (Tir.AVar v1),
+              Tir.ESeq (Tir.EIncRC (Tir.AVar v2), rest))
+    when inc_dec_match v1 v2 -> elide_expr rest
+  | Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v1),
+              Tir.ESeq (Tir.EAtomicIncRC (Tir.AVar v2), rest))
+    when inc_dec_match v1 v2 -> elide_expr rest
   (* L5: cancel pair that spans an ELet whose RHS does not reference the
-     RC'd variable.
-       ESeq (Inc v, ELet (x, rhs, ESeq (Dec v, rest)))
-         when [v not free in rhs]    →    ELet (x, rhs, rest)
-     The ELet binding [x] cannot observe v's RC (rhs doesn't see v) and
-     [rest] inherits whatever liveness the cancel pair would have left
-     anyway.  Reverse direction handled symmetrically. *)
-  | Tir.ESeq ((Tir.EIncRC (Tir.AVar v1) | Tir.EAtomicIncRC (Tir.AVar v1)) as _inc,
+     RC'd variable.  Same atomicity-strictness rule as above. *)
+  | Tir.ESeq (Tir.EIncRC (Tir.AVar v1),
               Tir.ELet (x, rhs,
-                Tir.ESeq ((Tir.EDecRC (Tir.AVar v2) | Tir.EAtomicDecRC (Tir.AVar v2)), rest)))
+                Tir.ESeq (Tir.EDecRC (Tir.AVar v2), rest)))
     when inc_dec_match v1 v2 && not (name_free_in v1.Tir.v_name rhs) ->
     elide_expr (Tir.ELet (x, rhs, rest))
-  | Tir.ESeq ((Tir.EDecRC (Tir.AVar v1) | Tir.EAtomicDecRC (Tir.AVar v1)) as _dec,
+  | Tir.ESeq (Tir.EAtomicIncRC (Tir.AVar v1),
               Tir.ELet (x, rhs,
-                Tir.ESeq ((Tir.EIncRC (Tir.AVar v2) | Tir.EAtomicIncRC (Tir.AVar v2)), rest)))
+                Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v2), rest)))
+    when inc_dec_match v1 v2 && not (name_free_in v1.Tir.v_name rhs) ->
+    elide_expr (Tir.ELet (x, rhs, rest))
+  | Tir.ESeq (Tir.EDecRC (Tir.AVar v1),
+              Tir.ELet (x, rhs,
+                Tir.ESeq (Tir.EIncRC (Tir.AVar v2), rest)))
+    when inc_dec_match v1 v2 && not (name_free_in v1.Tir.v_name rhs) ->
+    elide_expr (Tir.ELet (x, rhs, rest))
+  | Tir.ESeq (Tir.EAtomicDecRC (Tir.AVar v1),
+              Tir.ELet (x, rhs,
+                Tir.ESeq (Tir.EAtomicIncRC (Tir.AVar v2), rest)))
     when inc_dec_match v1 v2 && not (name_free_in v1.Tir.v_name rhs) ->
     elide_expr (Tir.ELet (x, rhs, rest))
   (* Recurse into all sub-expressions *)

@@ -4415,6 +4415,88 @@ let test_perceus_needs_rc_tcon () =
   Alcotest.(check bool) "TInt no RC" false
     (March_tir.Perceus.needs_rc March_tir.Tir.TInt)
 
+(* Audit P4 regression: elide_expr must NOT collapse a cancel pair whose
+   halves have different atomicity (one atomic, one local).  In correct
+   Perceus output these never arise, but a future pass (e.g. an inliner
+   that crosses actor-send boundaries) could produce them; silently
+   eliding would drop the required atomic RC op and introduce a data race.
+   This test fabricates each of the four mixed-atomicity cancel shapes and
+   asserts both ops survive. *)
+let test_perceus_elide_preserves_mixed_atomicity () =
+  let open March_tir.Tir in
+  let v : var = { v_name = "x"; v_ty = TString; v_lin = Unr } in
+  let a = AVar v in
+  let tmp_v : var = { v_name = "_"; v_ty = TInt; v_lin = Unr } in
+  let leaf = EAtom (ALit (March_ast.Ast.LitInt 0)) in
+  (* Count RC ops in an expression (any flavour). *)
+  let rec count_rc_ops e =
+    match e with
+    | EIncRC _ | EDecRC _ | EAtomicIncRC _ | EAtomicDecRC _ -> 1
+    | EAtom _ | EApp _ | ECallPtr _ | ETuple _ | ERecord _
+    | EField _ | EUpdate _ | EAlloc _ | EStackAlloc _ | EFree _
+    | EReuse _ -> 0
+    | ELet (_, e1, e2) -> count_rc_ops e1 + count_rc_ops e2
+    | ELetRec (fns, body) ->
+      count_rc_ops body
+      + List.fold_left (fun n fd -> n + count_rc_ops fd.fn_body) 0 fns
+    | ECase (_, brs, def) ->
+      List.fold_left (fun n br -> n + count_rc_ops br.br_body) 0 brs
+      + (match def with Some d -> count_rc_ops d | None -> 0)
+    | ESeq (e1, e2) -> count_rc_ops e1 + count_rc_ops e2
+  in
+  (* Matching atomicity: BOTH must cancel. *)
+  let matched_cases = [
+    ("matched Inc+Dec (non-atomic)",
+     ESeq (EIncRC a, ESeq (EDecRC a, leaf)));
+    ("matched Inc+Dec (atomic)",
+     ESeq (EAtomicIncRC a, ESeq (EAtomicDecRC a, leaf)));
+    ("matched Dec+Inc (non-atomic)",
+     ESeq (EDecRC a, ESeq (EIncRC a, leaf)));
+    ("matched Dec+Inc (atomic)",
+     ESeq (EAtomicDecRC a, ESeq (EAtomicIncRC a, leaf)));
+  ] in
+  List.iter (fun (label, e) ->
+    let e' = March_tir.Perceus.elide_expr e in
+    Alcotest.(check int)
+      (Printf.sprintf "%s: elided to zero ops" label)
+      0 (count_rc_ops e')
+  ) matched_cases;
+  (* Mixed atomicity: MUST NOT cancel (both ops survive). *)
+  let mixed_cases = [
+    ("mixed Inc(local)+Dec(atomic)",
+     ESeq (EIncRC a, ESeq (EAtomicDecRC a, leaf)));
+    ("mixed Inc(atomic)+Dec(local)",
+     ESeq (EAtomicIncRC a, ESeq (EDecRC a, leaf)));
+    ("mixed Dec(local)+Inc(atomic)",
+     ESeq (EDecRC a, ESeq (EAtomicIncRC a, leaf)));
+    ("mixed Dec(atomic)+Inc(local)",
+     ESeq (EAtomicDecRC a, ESeq (EIncRC a, leaf)));
+  ] in
+  List.iter (fun (label, e) ->
+    let e' = March_tir.Perceus.elide_expr e in
+    Alcotest.(check int)
+      (Printf.sprintf "%s: both ops survive" label)
+      2 (count_rc_ops e')
+  ) mixed_cases;
+  (* L5-style elide across ELet: matching atomicity cancels, mismatched
+     atomicity survives.  RHS doesn't reference x so the binding is safe
+     to keep but the pair can elide. *)
+  let rhs_no_x = EAtom (ALit (March_ast.Ast.LitInt 1)) in
+  let across_matched =
+    ESeq (EIncRC a,
+          ELet (tmp_v, rhs_no_x, ESeq (EDecRC a, leaf))) in
+  let across_matched' = March_tir.Perceus.elide_expr across_matched in
+  Alcotest.(check int)
+    "L5 matched across ELet: elided to zero ops"
+    0 (count_rc_ops across_matched');
+  let across_mixed =
+    ESeq (EIncRC a,
+          ELet (tmp_v, rhs_no_x, ESeq (EAtomicDecRC a, leaf))) in
+  let across_mixed' = March_tir.Perceus.elide_expr across_mixed in
+  Alcotest.(check int)
+    "L5 mixed across ELet: both ops survive"
+    2 (count_rc_ops across_mixed')
+
 (* ── Property tests for Lean theorems (in march-lean/MarchLean/) ──────
 
    These tests exercise the invariants claimed by the Lean mechanization
@@ -20061,6 +20143,7 @@ let () =
           Alcotest.test_case "preserves fn count"        `Quick test_perceus_preserves_fn_count;
           Alcotest.test_case "scrut-escape rewrite (rc50)" `Quick test_perceus_scrut_escape_rewrite;
           Alcotest.test_case "closure FV single-use incrc (rc64)" `Quick test_perceus_closure_fv_single_use_incrc;
+          Alcotest.test_case "elide preserves mixed atomicity (P4)" `Quick test_perceus_elide_preserves_mixed_atomicity;
         ] );
       ( "lean_theorem_properties", [
           Alcotest.test_case "lin_drop_is_free"          `Quick test_thm_lin_drop_is_free;
