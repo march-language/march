@@ -1,0 +1,55 @@
+-- Smoke test for audit P2 (Perceus borrow-induced post-call DecRC wrap +
+-- tail-call analysis):
+--
+-- Mutual recursion (build_loop ↔ consume_loop) where each call passes a
+-- BORROWED heap value at the LAST-USE position, AND that value is a LOCAL
+-- (not a borrowed parameter of the caller).  Perceus emits the shape
+--     let tmp = consume_loop(prefix, n-1) in (decrc prefix; tmp)
+-- around the call.  The fix in lib/tir/llvm_emit.ml
+-- (is_trivial_dec_chain_returning) teaches tail_calls_in /
+-- has_non_tail_group_call / has_self_tail_call to see through that
+-- wrapper so mutual-TCO is not silently dropped at the March IR level.
+--
+-- Note: the LLVM optimizer's own tail-call elimination would also catch
+-- this for direct self-recursion at -O2, so the binary runs even without
+-- the IR-level fix; the value of the fix is keeping March's TCO analyses
+-- aligned with what Perceus actually emits, which matters for the explicit
+-- mutual-TCO loop emitter (it produces tighter code than LLVM's TCO when
+-- it engages, and engages on patterns LLVM cannot recognise).
+--
+-- Run: march examples/rc_mutual_tco_borrowed.march
+-- Expected output: 2
+
+mod RcMutualTcoBorrowed do
+
+fn build_loop(seed, n) do
+  -- seed is a borrowed parameter (only ever passed at borrowed positions
+  -- inside the recursion).  prefix is a fresh local heap value built each
+  -- iteration.
+  let prefix = String.repeat("a", 1)
+  if n == 0 do
+    String.byte_size(seed) + String.byte_size(prefix)
+  else
+    -- prefix is at consume_loop's BORROWED position 0 and is dead after
+    -- this call -> Perceus emits the post-call decrc wrap.
+    consume_loop(prefix, n - 1)
+  end
+end
+
+fn consume_loop(s, n) do
+  if n == 0 do
+    String.byte_size(s)
+  else
+    build_loop(s, n - 1)
+  end
+end
+
+fn main() do
+  let seed = "z"
+  -- 1 000 iterations: keeps the interpreter fast while still exercising
+  -- the wrapped-call code path under both interpretation and native compile.
+  let r = build_loop(seed, 1000)
+  println(int_to_string(r))
+end
+
+end

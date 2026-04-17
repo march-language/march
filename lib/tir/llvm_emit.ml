@@ -2627,11 +2627,33 @@ and emit_case ctx scrut_atom branches default_opt =
 
 (* ── Mutual TCO: call graph analysis ────────────────────────────────── *)
 
+(** True iff [body] is a "trivial cleanup chain" that performs only
+    [EDecRC] / [EAtomicDecRC] / [EFree] operations and finally returns
+    the binding named [tmp_name].
+
+    Used to recognise the
+        [ELet (tmp, EApp (f, args), ESeq (dec_v1, ESeq (dec_v2, EAtom tmp)))]
+    shape that Perceus emits in the EApp case when wrapping a borrowed-arg
+    last-use post-call DecRC around a NON-self call (see [perceus.ml] EApp
+    handling).  Without this recognition the wrapped call is invisible to
+    the tail-call analyses below — silently dropping mutual TCO and
+    producing real stack overflows on long inputs. *)
+let rec is_trivial_dec_chain_returning (tmp_name : string) (body : Tir.expr) : bool =
+  match body with
+  | Tir.EAtom (Tir.AVar v) -> String.equal v.Tir.v_name tmp_name
+  | Tir.ESeq ((Tir.EDecRC _ | Tir.EAtomicDecRC _ | Tir.EFree _), rest) ->
+    is_trivial_dec_chain_returning tmp_name rest
+  | _ -> false
+
 (** Collect all function names that are called in TAIL position in [expr].
     Only traverses tail-position sub-expressions. *)
 let rec tail_calls_in (expr : Tir.expr) : string list =
   match expr with
   | Tir.EApp (f, _) -> [f.Tir.v_name]
+  | Tir.ELet (tmp_v, Tir.EApp (f, _), body)
+    when is_trivial_dec_chain_returning tmp_v.Tir.v_name body ->
+    (* Borrow-induced post-DecRC wrapper: the EApp is semantically the tail. *)
+    [f.Tir.v_name]
   | Tir.ELet (_, _, body) -> tail_calls_in body
   | Tir.ESeq (_, e2) -> tail_calls_in e2
   | Tir.ECase (_, branches, default_opt) ->
@@ -2651,6 +2673,14 @@ let rec has_non_tail_group_call (group : string list) ~(in_tail : bool)
     (expr : Tir.expr) : bool =
   match expr with
   | Tir.EApp (f, _) -> List.mem f.Tir.v_name group && not in_tail
+  | Tir.ELet (tmp_v, Tir.EApp (_, _), body)
+    when is_trivial_dec_chain_returning tmp_v.Tir.v_name body ->
+    (* Borrow-induced post-DecRC wrapper: the EApp is the tail call.  Body
+       contains only DecRC/Free ops + the trailing EAtom — no further calls
+       that could be non-tail.  Returning false here keeps the wrapped call
+       eligible for mutual TCO; before this guard the rhs was always treated
+       as non-tail and TCO was silently dropped. *)
+    has_non_tail_group_call group ~in_tail body
   | Tir.ELet (_, rhs, body) ->
     has_non_tail_group_call group ~in_tail:false rhs
     || has_non_tail_group_call group ~in_tail body
@@ -2783,6 +2813,14 @@ let mutual_tco_combined_name (group : Tir.fn_def list) : string =
 let rec has_self_tail_call (fn_name : string) (expr : Tir.expr) : bool =
   match expr with
   | Tir.EApp (f, _) -> String.equal f.Tir.v_name fn_name
+  | Tir.ELet (tmp_v, Tir.EApp (f, _), body)
+    when String.equal f.Tir.v_name fn_name
+         && is_trivial_dec_chain_returning tmp_v.Tir.v_name body ->
+    (* Borrow-induced post-DecRC wrapper around a self call.  Recognise it
+       so TCO sees the call.  (Self calls usually keep ESeq form via the
+       is_self_call branch in perceus.ml, but the ELet form arises when the
+       call is via an indirect alias.) *)
+    true
   | Tir.ELet (_, _, body) -> has_self_tail_call fn_name body
   | Tir.ESeq (e1, e2) ->
     has_self_tail_call fn_name e2 ||

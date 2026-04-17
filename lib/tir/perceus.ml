@@ -151,10 +151,17 @@ let needs_rc : Tir.ty -> bool = function
   | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit
   | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _ -> false
 
-(** Returns the set of variable names referenced by an atom. *)
+(** Returns the set of variable names referenced by an atom.
+
+    [ADefRef] resolves to a code-segment address (the function's symbol)
+    and so contributes no local-variable liveness AND needs no RC: function
+    pointers are never heap-allocated and [march_incrc] / [march_decrc]
+    would corrupt or crash if called on them.  This is consistent with the
+    [Hashtbl.mem ctx.top_fns] guard in [llvm_emit.ml]'s RC-op cases, which
+    also short-circuits RC ops on top-level function references. *)
 let vars_of_atom : Tir.atom -> StringSet.t = function
   | Tir.AVar v    -> StringSet.singleton v.Tir.v_name
-  | Tir.ADefRef _ -> StringSet.empty  (* global/static ref, no RC needed *)
+  | Tir.ADefRef _ -> StringSet.empty
   | Tir.ALit _    -> StringSet.empty
 
 (** Union of all variable sets from a list of atoms. *)
