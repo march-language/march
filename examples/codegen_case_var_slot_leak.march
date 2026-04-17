@@ -1,0 +1,59 @@
+-- Regression test for the ECase var_slot leak codegen bug.
+--
+-- Root cause: emit_case in lib/tir/llvm_emit.ml did not snapshot
+-- ctx.var_slot around each branch.  When a branch bound a variable whose
+-- name SHADOWED an outer-scope name (typically a function parameter), the
+-- alloca_name helper rewrote var_slot[name] to the new uniquified slot
+-- name (e.g. "e_1") and left that rewrite in place for ALL subsequent
+-- branches.
+--
+-- Concrete failure: in MyBetween(e, lo, hi) the pattern binds `e`,
+-- shadowing the function's outer `e` parameter — slot becomes %e_1.addr.
+-- When the short MyParam arm is then taken, Perceus's scrutinee-free
+-- DecRC on `e` references var_slot["e"], which now points to
+-- %e_1.addr — a slot that was never written to on this path.
+-- march_decrc_local loads garbage from %e_1.addr and segfaults.
+--
+-- The fix snapshots and restores ctx.var_slot per branch (not
+-- ctx.local_names — that must stay monotonic to keep LLVM SSA names
+-- unique across sibling branches).
+--
+-- Run: march examples/codegen_case_var_slot_leak.march
+-- Expected output: 1
+
+mod CodegenCaseVarSlotLeak do
+
+type MyE =
+    MyEq(MyE, MyE)
+  | MyBetween(MyE, MyE, MyE)
+  | MyParam(Int)
+
+type MyS = MyS(Int, String)
+
+fn compile(e, st) do
+  match e do
+    MyEq(l, r) ->
+      let (ls, s1) = compile(l, st)
+      let (rs, s2) = compile(r, s1)
+      (ls ++ " = " ++ rs, s2)
+    MyBetween(e, lo, hi) ->
+      -- `e` here SHADOWS the outer function parameter `e`.
+      let (es, s1) = compile(e, st)
+      let (los, s2) = compile(lo, s1)
+      let (his, s3) = compile(hi, s2)
+      (es ++ " BETWEEN " ++ los ++ " AND " ++ his, s3)
+    MyParam(n) ->
+      -- Short arm.  Pre-fix, the scrutinee-free DecRC emitted here
+      -- loaded from %e_1.addr (the MyBetween shadow slot) instead of
+      -- %e.addr, producing SIGSEGV.
+      (int_to_string(n), st)
+  end
+end
+
+fn main() do
+  match compile(MyParam(1), MyS(0, "")) do
+    (s, _) -> println(s)
+  end
+end
+
+end

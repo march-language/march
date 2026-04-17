@@ -2534,8 +2534,32 @@ and emit_case ctx scrut_atom branches default_opt =
     | _ -> None
   in
 
+  (* Per-branch var_slot snapshot.
+
+     Each ECase branch introduces its own bindings via [alloca_name], which
+     mutates [ctx.var_slot].  Without restoring [var_slot] between branches,
+     a shadow binding introduced by an earlier branch (e.g. [Between(e,lo,hi)]
+     shadowing the function's [e] parameter) leaves [var_slot["e"]] pointing
+     at the shadow slot (%e_1.addr) for all subsequent branches — so a short
+     branch that references the OUTER [e] (typically the scrutinee-free
+     DecRC synthesised by Perceus) loads from the wrong, uninitialised slot
+     and crashes inside march_decrc_local.
+
+     Only [var_slot] is snapshotted.  [local_names] must remain monotonic
+     (it is the uniquifier for LLVM SSA names across the whole function —
+     the same shadow name in two sibling branches must get distinct suffixes
+     %e_1.addr / %e_2.addr, else LLVM rejects the duplicate definition).
+     [var_llvm_ty] is keyed by the uniquified slot name so has no aliasing
+     problem and also stays monotonic. *)
+  let snapshot_var_slot () = Hashtbl.copy ctx.var_slot in
+  let restore_var_slot snap =
+    Hashtbl.reset ctx.var_slot;
+    Hashtbl.iter (Hashtbl.add ctx.var_slot) snap
+  in
+
   (* Emit branch blocks *)
   List.iter2 (fun br lbl ->
+    let snap = snapshot_var_slot () in
     emit_label ctx lbl;
     (* Bind branch variables from scrutinee fields *)
     let heap_field_vals = ref [] in
@@ -2605,10 +2629,12 @@ and emit_case ctx scrut_atom branches default_opt =
     let (br_ty, br_val) = emit_expr ctx body_to_emit in
     let stored = coerce ctx br_ty br_val "ptr" in
     emit ctx (Printf.sprintf "store ptr %s, ptr %s" stored result_slot);
-    emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl)
+    emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
+    restore_var_slot snap
   ) branches branch_lbls;
 
   (* Default arm *)
+  let snap_default = snapshot_var_slot () in
   emit_label ctx default_lbl;
   (match default_opt with
    | None -> emit_term ctx "unreachable"
@@ -2617,6 +2643,7 @@ and emit_case ctx scrut_atom branches default_opt =
      let stored = coerce ctx d_ty d_val "ptr" in
      emit ctx (Printf.sprintf "store ptr %s, ptr %s" stored result_slot);
      emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl));
+  restore_var_slot snap_default;
 
   emit_label ctx merge_lbl;
   let r = fresh ctx "case_r" in
