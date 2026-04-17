@@ -1075,14 +1075,17 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
       (* We'll generate the wrapper function at the end.  For now, declare it.
          When the AVar's type is erased (TVar "_"), fall back to the param-count
          registered in top_fn_nparams at function-definition time. *)
-      let nparams = match v.Tir.v_ty with
-        | Tir.TFn (ps, _) -> List.length ps
+      let (ps_tirs, nparams) = match v.Tir.v_ty with
+        | Tir.TFn (ps, _) -> (ps, List.length ps)
         | _ ->
-          Option.value ~default:0 (Hashtbl.find_opt ctx.top_fn_nparams v.Tir.v_name)
+          let n = Option.value ~default:0 (Hashtbl.find_opt ctx.top_fn_nparams v.Tir.v_name) in
+          (List.init n (fun _ -> Tir.TVar "_"), n)
       in
       let ret_tir = fn_ret_tir v.Tir.v_ty in
       let target_ret = llvm_ret_ty ret_tir in
-      let param_tys = List.init nparams (fun _ -> "ptr") in
+      (* Use concrete param types so the wrapper signature matches ECallPtr's
+         call-site type annotation (which uses llvm_ty for each param). *)
+      let param_tys = List.map llvm_ty ps_tirs in
       let all_params = "ptr" :: param_tys in  (* clo + original params *)
       let arg_names = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
       let all_arg_decls = "%_clo" :: arg_names in
@@ -1092,18 +1095,12 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
         Buffer.add_string ctx.extra_fns
           (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n\n"
              wrap_name decl_str fn_name call_args)
-      else if target_ret = "i64" then
-        Buffer.add_string ctx.extra_fns
-          (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call i64 @%s(%s)\n  %%rs = shl i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  %%rp = inttoptr i64 %%rt to ptr\n  ret ptr %%rp\n}\n\n"
-             wrap_name decl_str fn_name call_args)
-      else if target_ret = "double" then
-        Buffer.add_string ctx.extra_fns
-          (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call double @%s(%s)\n  %%ri = bitcast double %%r to i64\n  %%rp = inttoptr i64 %%ri to ptr\n  ret ptr %%rp\n}\n\n"
-             wrap_name decl_str fn_name call_args)
       else
+        (* Pass the return value through unchanged — ECallPtr reads it with the
+           concrete return type (i64, double, or ptr), so no tagging is needed. *)
         Buffer.add_string ctx.extra_fns
-          (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret ptr %%r\n}\n\n"
-             wrap_name decl_str target_ret fn_name call_args)
+          (Printf.sprintf "define %s @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret %s %%r\n}\n\n"
+             target_ret wrap_name decl_str target_ret fn_name call_args target_ret)
     end;
     (* Allocate closure: header(16) + fn_ptr(8) = 24 bytes *)
     let hp = fresh ctx "cwrap" in
@@ -1169,7 +1166,7 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
          let nparams     = List.length ps in
          let ret_tir     = fn_ret_tir v.Tir.v_ty in
          let target_ret  = llvm_ret_ty ret_tir in
-         let param_tys   = List.init nparams (fun _ -> "ptr") in
+         let param_tys   = List.map llvm_ty ps in
          let all_params  = "ptr" :: param_tys in
          let arg_names   = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
          let all_decls   = "%_clo" :: arg_names in
@@ -1179,18 +1176,10 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
            Buffer.add_string ctx.extra_fns
              (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n\n"
                 wrap_name decl_str fn_name call_args)
-         else if target_ret = "i64" then
-           Buffer.add_string ctx.extra_fns
-             (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call i64 @%s(%s)\n  %%rs = shl i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  %%rp = inttoptr i64 %%rt to ptr\n  ret ptr %%rp\n}\n\n"
-                wrap_name decl_str fn_name call_args)
-         else if target_ret = "double" then
-           Buffer.add_string ctx.extra_fns
-             (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call double @%s(%s)\n  %%ri = bitcast double %%r to i64\n  %%rp = inttoptr i64 %%ri to ptr\n  ret ptr %%rp\n}\n\n"
-                wrap_name decl_str fn_name call_args)
          else
            Buffer.add_string ctx.extra_fns
-             (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret ptr %%r\n}\n\n"
-                wrap_name decl_str target_ret fn_name call_args)
+             (Printf.sprintf "define %s @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret %s %%r\n}\n\n"
+                target_ret wrap_name decl_str target_ret fn_name call_args target_ret)
        end;
        let hp  = fresh ctx "cwrap" in
        emit ctx (Printf.sprintf "%s = call ptr @march_alloc(i64 24)" hp);

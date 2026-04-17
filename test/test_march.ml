@@ -8473,8 +8473,9 @@ let test_int_tag_coerce_ir () =
     first-class value (e.g. passed to a HOF that accepts a polymorphic fn). *)
 let test_int_tag_wrapper_ir () =
   (* inc_fn is a top-level function returning i64; passing it as a value to
-     list_apply forces the codegen to emit a ptr-returning closure wrapper
-     around inc_fn.  That wrapper must tag the i64 result. *)
+     list_apply forces the codegen to emit a closure wrapper around inc_fn.
+     The wrapper must use concrete types (i64 param/return) matching ECallPtr's
+     call-site type annotation — no tagging. *)
   let src = {|mod Test do
     fn inc_fn(x : Int) : Int do x + 1 end
     fn list_apply(f : Int -> Int, xs : List(Int)) : List(Int) do
@@ -8492,10 +8493,11 @@ let test_int_tag_wrapper_ir () =
     try ignore (Str.search_forward (Str.regexp_string pat) ir 0); true
     with Not_found -> false
   in
-  (* The closure wrapper for inc_fn must tag the i64 return value.
-     "shl i64" and "or i64" must appear somewhere in the wrapper body. *)
-  Alcotest.(check bool) "wrapper: shl i64 present"  true (ir_has "shl i64 %r, 1");
-  Alcotest.(check bool) "wrapper: or i64 present"   true (ir_has "or i64 %rs, 1")
+  (* The closure wrapper must use concrete types — i64 param and i64 return —
+     and pass the value through without tagging. *)
+  Alcotest.(check bool) "wrapper: define i64 return"  true (ir_has "define i64 @inc_fn$clo_wrap");
+  Alcotest.(check bool) "wrapper: i64 param"          true (ir_has "i64 %a0");
+  Alcotest.(check bool) "wrapper: no tagging (no shl)" false (ir_has "shl i64 %r, 1")
 
 (** Regression: string_chars and string_from_chars must lower to C-runtime
     calls in the LLVM backend.  Before the fix, emit_atom fell through to the
@@ -11977,7 +11979,7 @@ let test_map_fold () =
   let env = eval_with_map (Printf.sprintf {|mod T do
     fn f() do
       let m = Map.from_list([(1, 10), (2, 20), (3, 30)], %s)
-      Map.fold(m, 0, fn(acc) -> fn(k) -> fn(v) -> acc + v)
+      Map.fold(m, 0, fn(acc, _k, v) -> acc + v)
     end
   end|} int_cmp) in
   Alcotest.(check int) "fold sums values" 60 (vint (call_fn env "f" []))
