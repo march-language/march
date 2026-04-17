@@ -2179,17 +2179,18 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let reuse_lbl = fresh_block ctx "fbip_reuse" in
     let fresh_lbl = fresh_block ctx "fbip_fresh" in
     let merge_lbl = fresh_block ctx "fbip_merge" in
-    let result_slot = fresh ctx "fbip_slot" in
-    emit ctx (Printf.sprintf "%s = alloca ptr" result_slot);
     emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
                      is_unique reuse_lbl fresh_lbl);
-    (* Reuse branch: write tag/fields to original pointer *)
+    (* Reuse branch: write tag/fields to original pointer.  Neither
+       emit_store_tag nor emit_store_field nor emit_heap_alloc emit a label,
+       so reuse_lbl / fresh_lbl ARE the immediate predecessors of merge_lbl
+       — safe to use as phi source labels.  Audit L6: phi instead of
+       alloca/store/load slot. *)
     emit_label ctx reuse_lbl;
     emit_store_tag ctx rv entry.ce_tag;
     List.iteri (fun i (field_ty, v_coerced) ->
       emit_store_field ctx rv i field_ty v_coerced
     ) arg_vals;
-    emit ctx (Printf.sprintf "store ptr %s, ptr %s" rv result_slot);
     emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
     (* Fresh branch: DecRC original, alloc fresh, write tag/fields *)
     emit_label ctx fresh_lbl;
@@ -2198,12 +2199,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     List.iteri (fun i (field_ty, v_coerced) ->
       emit_store_field ctx hp i field_ty v_coerced
     ) arg_vals;
-    emit ctx (Printf.sprintf "store ptr %s, ptr %s" hp result_slot);
     emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
-    (* Merge: load result *)
+    (* Merge via phi *)
     emit_label ctx merge_lbl;
     let result = fresh ctx "fbip_r" in
-    emit ctx (Printf.sprintf "%s = load ptr, ptr %s" result result_slot);
+    emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
+                result rv reuse_lbl hp fresh_lbl);
     ("ptr", result)
 
   | Tir.EReuse (reuse_atom, _, args) ->
@@ -2219,8 +2220,6 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let reuse_lbl = fresh_block ctx "fbip_reuse" in
     let fresh_lbl = fresh_block ctx "fbip_fresh" in
     let merge_lbl = fresh_block ctx "fbip_merge" in
-    let result_slot = fresh ctx "fbip_slot" in
-    emit ctx (Printf.sprintf "%s = alloca ptr" result_slot);
     emit_term ctx (Printf.sprintf "br i1 %s, label %%%s, label %%%s"
                      is_unique reuse_lbl fresh_lbl);
     emit_label ctx reuse_lbl;
@@ -2232,7 +2231,6 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     List.iteri (fun i (ty, v) ->
       emit_store_field ctx rv i ty v
     ) arg_vals;
-    emit ctx (Printf.sprintf "store ptr %s, ptr %s" rv result_slot);
     emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
     emit_label ctx fresh_lbl;
     emit ctx (Printf.sprintf "call void @march_decrc(ptr %s)" rv);
@@ -2240,11 +2238,11 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     List.iteri (fun i (ty, v) ->
       emit_store_field ctx hp i ty v
     ) arg_vals;
-    emit ctx (Printf.sprintf "store ptr %s, ptr %s" hp result_slot);
     emit_term ctx (Printf.sprintf "br label %%%s" merge_lbl);
     emit_label ctx merge_lbl;
     let result = fresh ctx "fbip_r" in
-    emit ctx (Printf.sprintf "%s = load ptr, ptr %s" result result_slot);
+    emit ctx (Printf.sprintf "%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]"
+                result rv reuse_lbl hp fresh_lbl);
     ("ptr", result)
 
   (* ── RC ops ────────────────────────────────────────────────────────── *)

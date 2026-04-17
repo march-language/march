@@ -184,7 +184,16 @@ void march_free(void *p) {
 
 /* Non-atomic reference counting — for values provably local to one thread.
  * These must NOT be called on values that may be concurrently accessed from
- * another actor.  The callers (Perceus-generated code) guarantee this. */
+ * another actor.  The callers (Perceus-generated code) guarantee this.
+ *
+ * Per-process arena bookkeeping (audit M4): march_alloc currently uses
+ * plain calloc, so there is no per-process march_heap_t to update.  When
+ * the per-process arena (runtime/march_heap.c) becomes the default
+ * allocator, march_decrc_local's free-on-rc=0 path needs to call
+ * march_heap_record_death(owning_heap, sizeof(*p)) so march_heap_should_gc
+ * sees the dead bytes — without that the GC trigger never fires.  Tracked
+ * by march_heap_record_death's existence; this comment is the marker for
+ * where the call needs to land. */
 void march_incrc_local(void *p) {
     if (!IS_HEAP_PTR(p)) return;
     ((march_hdr *)p)->rc++;
@@ -204,6 +213,9 @@ void march_decrc_local(void *p) {
             abort();
         }
         free(p);
+        /* TODO(audit-M4): when per-process arena becomes the default
+         * allocator, plumb the owning march_heap_t* through to here and
+         * call march_heap_record_death(heap, sz). */
     }
 }
 

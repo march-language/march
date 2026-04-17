@@ -66,6 +66,15 @@ Generated from adversarial review on 2026-04-14. Each entry has a priority (P0�
 - [x] **#26** `lib/tir/perceus.ml:155-167` (audit M5) — `vars_of_atom`'s `ADefRef` arm needed clearer documentation about why it returns the empty set: `ADefRef` resolves to a code-segment address that needs no RC, and `march_incrc`/`march_decrc` would corrupt or crash if called on it.  The behaviour is correct; the comment was insufficient.
   - **Fixed:** expanded the docstring + linked to the corresponding `top_fns` guard in `llvm_emit.ml`.
 
+- [x] **#28** `runtime/march_runtime.c:177-214` (audit M4) — `march_decrc_local` does not call `march_heap_record_death` because `march_alloc` is currently plain `calloc`.  When the per-process arena (`march_heap.c`) becomes the default allocator, the GC trigger (`march_heap_should_gc`) will never fire because `live_bytes` won't decrement.
+  - **Fixed:** added a load-bearing `TODO(audit-M4)` at the exact site where the call needs to land, plus a top-of-function comment summarising the dependency.
+
+- [x] **#29** `lib/tir/perceus.ml:782-810` (audit L5) — `elide_expr` only matched cancel pairs that were directly adjacent.  After `fix_tail_value`'s ELet restructuring, many cancel pairs end up separated by a single `let tmp = rhs in ...` where `rhs` does not reference the cancelled variable.
+  - **Fixed:** added two extra match arms that elide `ESeq (Inc/Dec v, ELet (x, rhs, ESeq (Dec/Inc v, rest)))` to `ELet (x, rhs, rest)` when `v` is not free in `rhs`.  Pure optimisation (no behavioural change), benchmarks unchanged.
+
+- [x] **#30** `lib/tir/llvm_emit.ml:2154-2249` (audit L6) — EReuse FBIP merge previously used an `alloca ptr` slot with `store` in each branch and `load` at the merge.  mem2reg eliminates this in optimisation, but it leaves a worse first-pass IR and depends on the optimiser running.
+  - **Fixed:** switched to LLVM `phi` directly.  `reuse_lbl`/`fresh_lbl` are the immediate predecessors of `merge_lbl` because the body of each branch only emits non-label-producing helpers (`emit_store_tag`, `emit_store_field`, `emit_heap_alloc`).
+
 - [x] **#27** `lib/tir/borrow.ml:288-309` (audit M6) — `escapes_through` only follows direct aliasing (`let v = src in ...`).  Indirect aliases via trivial wrapper calls (`let v = identity(src) in ...`) would not be tracked.  Not a correctness bug today (no such pass exists), but a perf foot-gun if one is added.
   - **Fixed:** documented the limitation in a load-bearing comment so the constraint is visible at the matcher.  Adding an `EApp`-recognising case for known-identity callees is the natural follow-up if a future opt pass produces such patterns.
 
