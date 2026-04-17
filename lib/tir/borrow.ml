@@ -356,6 +356,29 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
     Params whose types do not [needs_rc] are left as [false] (owned / not
     relevant); the RC pass will not attempt to increment/decrement them
     regardless. *)
+let _borrow_debug : bool Lazy.t =
+  lazy (Sys.getenv_opt "MARCH_DEBUG_BORROW" <> None)
+
+let print_borrow_map (m : Tir.tir_module) (bm : borrow_map) =
+  Printf.eprintf "[borrow] %s\n" m.Tir.tm_name;
+  List.iter (fun fn ->
+    match StringMap.find_opt fn.Tir.fn_name bm with
+    | None -> ()
+    | Some modes ->
+      let n = Array.length modes in
+      if n = 0 then ()
+      else begin
+        let param_names = List.map (fun p -> p.Tir.v_name) fn.Tir.fn_params in
+        let pairs = List.mapi (fun i p ->
+          let borrowed = i < n && modes.(i) in
+          if borrowed then Printf.sprintf "%s:borrow" p
+          else Printf.sprintf "%s:own" p
+        ) param_names in
+        Printf.eprintf "  %s(%s)\n" fn.Tir.fn_name (String.concat ", " pairs)
+      end
+  ) m.Tir.tm_fns;
+  Printf.eprintf "%!"
+
 let infer_module (m : Tir.tir_module) : borrow_map =
   (* Initialise: params that need RC start as borrowed; others are false. *)
   let init =
@@ -392,4 +415,6 @@ let infer_module (m : Tir.tir_module) : borrow_map =
     in
     if !changed then iterate bm' else bm'
   in
-  iterate init
+  let result = iterate init in
+  if Lazy.force _borrow_debug then print_borrow_map m result;
+  result
