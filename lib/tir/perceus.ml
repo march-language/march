@@ -522,12 +522,21 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
            matches the key format used by EAlloc (see lower.ml ECon case:
            ctor_key = type_name ^ "." ^ tag).  Without this, shape_matches
            compares e.g. "Leaf" vs "Tree.Leaf" and always returns false,
-           preventing FBIP from ever firing. *)
-        let qualified_tag = match v.Tir.v_ty with
-          | Tir.TCon (type_name, _) -> type_name ^ "." ^ ctor_tag
-          | _ -> ctor_tag
+           preventing FBIP from ever firing.
+           When the scrutinee's type is unknown (TVar — typical for closure-
+           internal helpers whose params are erased to TVar "_"), we cannot
+           form a qualified tag.  Falling back to the bare ctor_tag would let
+           shape_matches false-positive against any same-name ctor of a
+           different type and silently write wrong-layout fields into the
+           reused cell.  Instead, leave the var's type untouched: shape_matches
+           is total on its arguments and will simply return false, suppressing
+           FBIP for this scrutinee — the safe choice. *)
+        let ctor_v = match v.Tir.v_ty with
+          | Tir.TCon (type_name, _) ->
+            let qualified_tag = type_name ^ "." ^ ctor_tag in
+            { v with Tir.v_ty = Tir.TCon (qualified_tag, []) }
+          | _ -> v
         in
-        let ctor_v = { v with Tir.v_ty = Tir.TCon (qualified_tag, []) } in
         Tir.ESeq (decrc_for v (Tir.AVar ctor_v), body)
       | _ -> body
     in
@@ -1027,6 +1036,11 @@ let preprocess_fn (fn : Tir.fn_def) : Tir.fn_def =
       live after the call; a post-call EDecRC is emitted instead when the arg
       is the caller's last use. *)
 let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_module =
+  (* Reset the fresh-name counter per module so that compiling the same module
+     twice produces identical IR.  A monotonic counter that survives across
+     modules makes IR diffs unstable and causes spurious churn in test
+     baselines. *)
+  _rc_fresh_ctr := 0;
   (* Phase 0: borrow inference *)
   let borrow_map = Borrow.infer_module m in
   _borrow_map := borrow_map;

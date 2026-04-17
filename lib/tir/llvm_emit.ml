@@ -2168,9 +2168,12 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       let v_coerced = coerce ctx v_ty v_val field_ty in
       (field_ty, v_coerced)
     ) args in
-    (* Load RC and check if uniquely owned *)
+    (* Load RC and check if uniquely owned.  Use atomic monotonic load so
+       this is data-race-free even if borrow inference's "process-local" proof
+       is later weakened — the cost of a relaxed atomic load is negligible
+       relative to the march_decrc on the fresh-branch path. *)
     let rc = fresh ctx "rc" in
-    emit ctx (Printf.sprintf "%s = load i64, ptr %s, align 8" rc rv);
+    emit ctx (Printf.sprintf "%s = load atomic i64, ptr %s monotonic, align 8" rc rv);
     let is_unique = fresh ctx "uniq" in
     emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" is_unique rc);
     let reuse_lbl = fresh_block ctx "fbip_reuse" in
@@ -2210,7 +2213,7 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       let (ty, v) = emit_atom ctx atom in (ty, v)
     ) args in
     let rc = fresh ctx "rc" in
-    emit ctx (Printf.sprintf "%s = load i64, ptr %s, align 8" rc rv);
+    emit ctx (Printf.sprintf "%s = load atomic i64, ptr %s monotonic, align 8" rc rv);
     let is_unique = fresh ctx "uniq" in
     emit ctx (Printf.sprintf "%s = icmp eq i64 %s, 1" is_unique rc);
     let reuse_lbl = fresh_block ctx "fbip_reuse" in

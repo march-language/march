@@ -6,6 +6,18 @@ Generated from adversarial review on 2026-04-14. Each entry has a priority (P0�
 
 ## P0 — Critical
 
+- [x] **#16** `runtime/march_gc.c:138-149` (audit C4, C5) — `walk_block` only checked `total >= sizeof(meta)+16` and `total <= blk->capacity`, with a silent `break` on failure.  A corrupt object truncated the whole block from pass 1's live set, turning a localised heap-corruption bug into a process-wide use-after-free at teardown.  No bounds check on `n_fields` either.
+  - **Fixed:** `walk_block` now bounds-checks `total <= remaining`, validates `n_fields*8 <= payload`, and aborts with a diagnostic via `gc_corrupt` rather than silently breaking.  Three abort paths regression-tested via fork in `test_gc_abort_paths` (`test/test_heap.c`).
+
+- [x] **#17** `runtime/march_gc.c:190-213` (audit C3) — Pass-2 left intra-arena pointers dangling when `fwd_lookup` returned NULL; the from-space buffer was then freed at line 254, producing silent UAF.
+  - **Fixed:** snapshot from-space block address ranges before pass 2; in `pass2_visit`, distinguish missing-fwd-entry pointers that fall *inside* a from-space block (intra-arena dangling reference → abort) from those that fall *outside* (legitimate malloc'd object such as `march_string` → leave alone).
+
+- [x] **#18** `runtime/march_gc.c:180` (audit L1) — `pass1_visit` ignored `fwd_insert`'s return value.  An allocation failure inside the forwarding table produced a missing entry → C3 dangling pointer → UAF.
+  - **Fixed:** check the return; abort with a diagnostic on failure.
+
+- [x] **#19** `runtime/march_gc.c:38` (audit C6) — The `MARCH_STRING_TAG` check was unreachable: no allocation path tags strings with -1 (`march_string_lit` bypasses the arena entirely; `copy_string` overwrites the header without re-tagging).
+  - **Fixed:** kept the check (it's correct *if* a future allocator routes strings through this arena and tags them) and documented why it currently does nothing.
+
 - [x] **#12** `runtime/march_runtime.c:160` (audit C1) — `march_decrc_freed` was missing the RC-underflow guard that `march_decrc` has, so any `prev <= 0` path silently returned 1 (and called `free`). On a stale or double-pattern-match call the runtime would double-free instead of aborting.
   - **Fixed:** split the `prev <= 1` branch — `prev == 1` frees normally, `prev < 1` prints a diagnostic and `abort()`s, mirroring `march_decrc`.
 
@@ -35,6 +47,18 @@ Generated from adversarial review on 2026-04-14. Each entry has a priority (P0�
 ---
 
 ## P1 — Important
+
+- [x] **#20** `lib/tir/perceus.ml:519-533` (audit P3) — FBIP `shape_matches` could false-positive across types when the scrutinee's type was `TVar "_"` (typical for closure-internal helpers): the code unconditionally rewrote the dec'd var's type to `TCon (ctor_tag, [])` (unqualified), and a same-name ctor of an unrelated type would match by name+arity, producing wrong-layout writes into the reused cell.
+  - **Fixed:** only rewrite the var's type when the scrutinee is `TCon` (so we can form a properly qualified `Type.Ctor` tag); otherwise leave it alone.  `shape_matches` then returns false for the (TVar, TCon) case, suppressing FBIP for these scrutinees — the safe fallback.
+
+- [x] **#21** `lib/tir/llvm_emit.ml:2173,2213` (audit M2) — `EReuse` loaded the RC field with a plain `load i64`.  For values that may be actor-shared (atomic-RC contract) this is technically a data race; even though FBIP only fires for values borrow inference proved local, the load is also a TOCTOU on the `rc == 1` test.
+  - **Fixed:** changed to `load atomic i64 … monotonic`.  Negligible cost relative to the `march_decrc` call on the fresh-branch path; closes the door on a future widening of FBIP eligibility.
+
+- [x] **#22** `lib/tir/perceus.ml:31` (audit L2) — `_rc_fresh_ctr` was a process-global ref, so identical compilations of the same module produced different IR depending on what came before.  Bad for diff-based test baselines and CAS caching.
+  - **Fixed:** reset to 0 at the start of each `perceus` invocation.
+
+- [x] **#23** `lib/tir/borrow.ml:194-210, 369-443` (audit L3, L4) — Two debug instrumentations gated on `MARCH_BORROW_DEBUG` / `MARCH_BORROW_DEBUG2` env vars and string-equals against three specific function names.  Fossil from a past investigation that future readers would mistakenly assume was load-bearing.
+  - **Fixed:** removed.
 
 - [ ] **#6** `typecheck.ml` (~exhaustiveness check) — **FALSE ALARM** after deep re-read. The `is_complete = false` branch correctly returns `None` (exhaustive) when wildcard rows in the default matrix cover the missing constructors — that is the correct semantics. No fix needed.
 
