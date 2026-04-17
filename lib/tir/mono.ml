@@ -138,7 +138,19 @@ let mangle_name (base : string) (tys : Tir.ty list) : string =
 let rec match_ty (poly : Tir.ty) (conc : Tir.ty) (acc : ty_subst) : ty_subst =
   match poly, conc with
   | Tir.TVar name, t ->
-    if List.mem_assoc name acc then acc else (name, t) :: acc
+    (* Prefer concrete bindings over TVar-to-TVar bindings.  Without this,
+       first-wins merging loses information when arg types are a mix of
+       TVar-typed (e.g. a let-bound polymorphic value like [let empty =
+       Map.empty()]) and concrete (e.g. string literals) — the TVar binding
+       would win and the concrete type from a later arg would be discarded,
+       leaving the callee unmangled with TVar args. *)
+    (match List.assoc_opt name acc with
+     | None -> (name, t) :: acc
+     | Some existing ->
+       if has_tvar existing && not (has_tvar t) then
+         (name, t) :: List.remove_assoc name acc
+       else
+         acc)
   | Tir.TCon (n1, ps1), Tir.TCon (n2, ps2) when n1 = n2 && List.length ps1 = List.length ps2 ->
     List.fold_left2 (fun acc p c -> match_ty p c acc) acc ps1 ps2
   | Tir.TTuple ps1, Tir.TTuple ps2 when List.length ps1 = List.length ps2 ->
