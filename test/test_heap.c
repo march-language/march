@@ -472,6 +472,78 @@ static void test_gc_pass2_scalar_preservation(void) {
     GROUP_DONE("5b");
 }
 
+/* ── 5c. GC fail-fast on corrupt meta / dangling ptr (audit C3, C4, C5) ── */
+
+#include <sys/wait.h>
+#include <signal.h>
+#include <unistd.h>
+#include <fcntl.h>
+
+/* Run [child_fn] in a forked subprocess and assert it terminated by SIGABRT.
+ * Returns 1 on abort, 0 otherwise. */
+static int expect_abort(void (*child_fn)(void)) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        /* Silence the child's stderr so the test output stays readable. */
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) { dup2(devnull, 2); close(devnull); }
+        child_fn();
+        _exit(0);   /* if we reach here, no abort happened */
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT;
+}
+
+static void child_corrupt_alloc_size(void) {
+    march_heap_t h;
+    march_heap_init(&h);
+    void *o = make_obj1(&h, 1, 0);
+    /* Stomp the alloc_size in the hidden meta to a bogus tiny value. */
+    march_alloc_meta *m = MARCH_ALLOC_META(o);
+    m->alloc_size = 4;   /* below sizeof(meta) + 16 → must abort */
+    march_gc_collect(&h, NULL);
+}
+
+static void child_corrupt_n_fields(void) {
+    march_heap_t h;
+    march_heap_init(&h);
+    void *o = make_obj1(&h, 1, 0);   /* 24 bytes user, 1 field */
+    march_alloc_meta *m = MARCH_ALLOC_META(o);
+    /* Claim 1000 fields when the object only has space for 1.  Pass-1 walk
+     * must catch this via the bounds check and abort. */
+    m->n_fields = 1000;
+    march_gc_collect(&h, NULL);
+}
+
+static void child_dangling_intra_arena(void) {
+    march_heap_t h;
+    march_heap_init(&h);
+    /* dead: an object marked rc=0 (won't be copied → no fwd entry). */
+    void *dead = make_obj1(&h, 1, 0);
+    ((test_hdr *)dead)->rc = 0;
+    /* live: a 2-field object with field[0] pointing at `dead` — i.e. a live
+     * intra-arena reference to an object that won't be copied.  Pass 2 must
+     * detect the missing fwd entry and abort instead of leaving a dangling
+     * pointer that the from-space free would invalidate. */
+    void *live = make_obj2(&h, 2, dead, 0);
+    (void)live;
+    march_gc_collect(&h, NULL);
+}
+
+static void test_gc_abort_paths(void) {
+    GROUP("5c. GC aborts on corrupt meta / dangling intra-arena ptr");
+
+    CHECK(expect_abort(child_corrupt_alloc_size),
+          "abort on alloc_size below minimum");
+    CHECK(expect_abort(child_corrupt_n_fields),
+          "abort on n_fields exceeding payload");
+    CHECK(expect_abort(child_dangling_intra_arena),
+          "abort on intra-arena pointer with no forwarding entry");
+
+    GROUP_DONE("5c");
+}
+
 /* ── 6. MPSC mailbox + selective receive ─────────────────────────────── */
 
 #define NUM_PRODUCERS 4
@@ -642,6 +714,7 @@ int main(void) {
     test_local_rc();
     test_gc();
     test_gc_pass2_scalar_preservation();
+    test_gc_abort_paths();
     test_mailbox();
     test_throughput();
 

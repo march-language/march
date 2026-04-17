@@ -191,23 +191,6 @@ let rec has_matching_alloc (base_type : string) (e : Tir.expr) : bool =
     [bm] is the current (possibly incomplete) borrow map used for inter-
     procedural queries; it improves across fixpoint iterations. *)
 let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
-  let _fn_name = match Sys.getenv_opt "MARCH_BORROW_DEBUG2_FN" with Some s -> s | None -> "" in
-  let _dbg = Sys.getenv_opt "MARCH_BORROW_DEBUG2" <> None && String.equal name _fn_name in
-  if _dbg then (let tag = match e with
-    | Tir.EAtom(Tir.AVar v) -> "EAtom("^v.Tir.v_name^")"
-    | Tir.EAtom _ -> "EAtom(_)" | Tir.EAlloc _ -> "EAlloc"
-    | Tir.EApp(callee,args) ->
-      let arg_names = List.map (function Tir.AVar v -> v.Tir.v_name | _ -> "_") args in
-      "EApp("^callee.Tir.v_name^" ["^String.concat "," arg_names^"])"
-    | Tir.ECallPtr(Tir.AVar fn_v, args) ->
-      let arg_names = List.map (function Tir.AVar v -> v.Tir.v_name | _ -> "_") args in
-      "ECallPtr("^fn_v.Tir.v_name^" ["^String.concat "," arg_names^"])"
-    | Tir.ECallPtr _ -> "ECallPtr(?,...)"
-    | Tir.ECase(Tir.AVar v,_,_) -> "ECase(scrutinee="^v.Tir.v_name^")"
-    | Tir.ECase _ -> "ECase(?)"
-    | Tir.ELet(v,_,_) -> "ELet("^v.Tir.v_name^")"
-    | Tir.ESeq _ -> "ESeq" | _ -> "other"
-    in Printf.eprintf "[owned_in lst] checking %s\n" tag);
   match e with
 
   (* ── Atoms ────────────────────────────────────────────────────────────── *)
@@ -321,11 +304,7 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
        | _ -> false) &&
       List.exists (fun br ->
         List.exists (fun bv ->
-          let r = escapes_through bv.Tir.v_name br.Tir.br_body in
-          if _dbg then
-            Printf.eprintf "[field_escape %s] br_var=%s tag=%s escapes=%b\n"
-              name bv.Tir.v_name br.Tir.br_tag r;
-          r
+          escapes_through bv.Tir.v_name br.Tir.br_body
         ) br.Tir.br_vars
       ) branches
     in
@@ -336,9 +315,6 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
       not shadowed && owned_in name bm br.Tir.br_body
     ) branches in
     let fourth = Option.fold ~none:false ~some:(owned_in name bm) default in
-    if _dbg then
-      Printf.eprintf "[owned_in lst ECase] fbip=%b field_escape=%b third=%b fourth=%b\n"
-        fbip_owns field_escape_owns third fourth;
     fbip_owns || field_escape_owns || third || fourth
 
   (* ── Sequencing ───────────────────────────────────────────────────────── *)
@@ -391,61 +367,10 @@ let infer_module (m : Tir.tir_module) : borrow_map =
           | None   -> Array.make 0 false
         in
         List.iteri (fun i p ->
-          if modes.(i) then begin  (* currently borrowed — check for owning uses *)
-            let debug_this =
-              Sys.getenv_opt "MARCH_BORROW_DEBUG" <> None
-              && (String.equal fn.Tir.fn_name "go$apply$745"
-                  || String.equal fn.Tir.fn_name "List.map$List_Cell$Fn_Cell_String"
-                  || String.equal fn.Tir.fn_name "cells_to_json")
-            in
-            (* For go$apply$745/lst: trace the ECase scrutinee check *)
-            let result_owned =
-              if debug_this && String.equal p.Tir.v_name "lst"
-                 && String.equal fn.Tir.fn_name "go$apply$745"
-              then begin
-                Printf.eprintf "[go$apply$745.lst] checking owned_in in body\n";
-                (* Walk the body to find the ECase scrutinee and trace field_escape *)
-                let rec find_case e =
-                  match e with
-                  | Tir.ECase (scr, brs, _) ->
-                    Printf.eprintf "  ECase scrutinee: %s\n"
-                      (match scr with Tir.AVar v -> "AVar("^v.Tir.v_name^")" | _ -> "non-var");
-                    List.iter (fun br ->
-                      Printf.eprintf "  branch tag=%s br_vars=[%s]\n" br.Tir.br_tag
-                        (String.concat "," (List.map (fun bv -> bv.Tir.v_name^":"^
-                          (match bv.Tir.v_ty with Tir.TVar s -> "TVar("^s^")"
-                           | Tir.TCon(n,_) -> "TCon("^n^")" | _ -> "?")) br.Tir.br_vars));
-                      (* Check if scrutinee is 'lst' *)
-                      (match scr with
-                       | Tir.AVar sv when String.equal sv.Tir.v_name "lst" ->
-                         let ty_str = match sv.Tir.v_ty with
-                           | Tir.TCon(n,_) -> "TCon("^n^")"
-                           | Tir.TVar s -> "TVar("^s^")"
-                           | Tir.TString -> "TString"
-                           | _ -> "other"
-                         in
-                         Printf.eprintf "    scrutinee lst type=%s needs_rc=%b\n"
-                           ty_str (needs_rc sv.Tir.v_ty);
-                         List.iter (fun bv ->
-                           (* Manually check escapes_through *)
-                           let esc_result = owned_in bv.Tir.v_name acc br.Tir.br_body in
-                           Printf.eprintf "    owned_in %s = %b\n" bv.Tir.v_name esc_result
-                         ) br.Tir.br_vars
-                       | _ -> ())
-                    ) brs
-                  | Tir.ELet(_, e1, e2) -> find_case e1; find_case e2
-                  | Tir.ESeq(e1, e2) -> find_case e1; find_case e2
-                  | _ -> ()
-                in
-                find_case fn.Tir.fn_body;
-                owned_in p.Tir.v_name acc fn.Tir.fn_body
-              end else
-                owned_in p.Tir.v_name acc fn.Tir.fn_body
-            in
-            if debug_this then
-              Printf.eprintf "[borrow-iter] %s param[%d]=%s owned_in=%b\n"
-                fn.Tir.fn_name i p.Tir.v_name result_owned;
-            if result_owned then begin
+          if modes.(i) then begin
+            (* Currently borrowed — check whether any owning use exists.
+               Flip to owned if so. *)
+            if owned_in p.Tir.v_name acc fn.Tir.fn_body then begin
               modes.(i) <- false;
               changed := true
             end
@@ -456,13 +381,4 @@ let infer_module (m : Tir.tir_module) : borrow_map =
     in
     if !changed then iterate bm' else bm'
   in
-  let result = iterate init in
-  (* Debug: print borrow map for functions containing "cells_to_json" or "List.map" *)
-  if Sys.getenv_opt "MARCH_BORROW_DEBUG" <> None then begin
-    StringMap.iter (fun fn_name modes ->
-      if String.length fn_name > 4 then
-        Printf.eprintf "[borrow] %s: [%s]\n" fn_name
-          (Array.to_list modes |> List.map (fun b -> if b then "B" else "O") |> String.concat ",")
-    ) result
-  end;
-  result
+  iterate init
