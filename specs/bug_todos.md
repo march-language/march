@@ -6,6 +6,12 @@ Generated from adversarial review on 2026-04-14. Each entry has a priority (P0�
 
 ## P0 — Critical
 
+- [x] **#33** `lib/tir/llvm_emit.ml emit_case` — **ECase var_slot state leak** (user-reported codegen bug).  `alloca_name` mutates `ctx.var_slot[name]` to the uniquified slot when a branch introduces a shadow binding.  `emit_case` never restored `var_slot` between branches, so a shadow written by an earlier branch (e.g. `Between(e, lo, hi)` shadowing the function's outer `e` parameter → `var_slot["e"] = "e_1"`) remained in effect for all subsequent branches.  Short arms that referenced the OUTER `e` — typically the scrutinee-free DecRC synthesised by Perceus — then loaded from `%e_1.addr` (an uninitialised Between-branch slot) and `march_decrc_local` segfaulted.
+  - **Reproduced** with [examples/codegen_case_var_slot_leak.march](examples/codegen_case_var_slot_leak.march): pre-fix `exit=139`, post-fix `1`.  Also reproduced with the user-reported depot case (`compile_delete` with `Where(ExprParam(1))`).
+  - **Fixed:** `emit_case` now snapshots and restores `ctx.var_slot` around each branch body (and the default arm).  Only `var_slot` is restored; `local_names` and `var_llvm_ty` stay monotonic because they back LLVM SSA-name uniqueness (restoring them would cause duplicate `%x.addr = alloca` definitions when two sibling branches bind the same name).
+
+
+
 - [x] **#16** `runtime/march_gc.c:138-149` (audit C4, C5) — `walk_block` only checked `total >= sizeof(meta)+16` and `total <= blk->capacity`, with a silent `break` on failure.  A corrupt object truncated the whole block from pass 1's live set, turning a localised heap-corruption bug into a process-wide use-after-free at teardown.  No bounds check on `n_fields` either.
   - **Fixed:** `walk_block` now bounds-checks `total <= remaining`, validates `n_fields*8 <= payload`, and aborts with a diagnostic via `gc_corrupt` rather than silently breaking.  Three abort paths regression-tested via fork in `test_gc_abort_paths` (`test/test_heap.c`).
 
