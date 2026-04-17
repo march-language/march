@@ -57,6 +57,18 @@ Generated from adversarial review on 2026-04-14. Each entry has a priority (P0�
 - [x] **#22** `lib/tir/perceus.ml:31` (audit L2) — `_rc_fresh_ctr` was a process-global ref, so identical compilations of the same module produced different IR depending on what came before.  Bad for diff-based test baselines and CAS caching.
   - **Fixed:** reset to 0 at the start of each `perceus` invocation.
 
+- [x] **#24** `lib/tir/llvm_emit.ml:2632-2657, 2667-2685, 2802-2814` (audit P2) — `tail_calls_in`, `has_non_tail_group_call`, and `has_self_tail_call` couldn't see through the `ELet (tmp, EApp f, ESeq(decs..., EAtom tmp))` wrapper Perceus emits when a borrowed-arg-last-use post-call DecRC needs to run.  For mutual recursion this silently dropped TCO at the March IR level (LLVM's own TCO can mask the symptom for direct self-recursion at -O2 but not for the explicit mutual-TCO loop emitter).
+  - **Fixed:** added `is_trivial_dec_chain_returning` and an `ELet`-pattern arm in each of the three analyses to recognise the wrap as an effective tail call.  Smoke test: `examples/rc_mutual_tco_borrowed.march` exercises a mutual-recursion shape that hits the wrap path.
+
+- [x] **#25** `runtime/march_gc.c:166-176` (audit M3) — `pass1_visit` had no defensive assert that `n_fields*8` fits the payload size.  walk_block now enforces this (after #16) but a caller bypassing walk_block could re-introduce the same out-of-bounds read.
+  - **Fixed:** added a belt-and-suspenders abort with diagnostic in `pass1_visit`.
+
+- [x] **#26** `lib/tir/perceus.ml:155-167` (audit M5) — `vars_of_atom`'s `ADefRef` arm needed clearer documentation about why it returns the empty set: `ADefRef` resolves to a code-segment address that needs no RC, and `march_incrc`/`march_decrc` would corrupt or crash if called on it.  The behaviour is correct; the comment was insufficient.
+  - **Fixed:** expanded the docstring + linked to the corresponding `top_fns` guard in `llvm_emit.ml`.
+
+- [x] **#27** `lib/tir/borrow.ml:288-309` (audit M6) — `escapes_through` only follows direct aliasing (`let v = src in ...`).  Indirect aliases via trivial wrapper calls (`let v = identity(src) in ...`) would not be tracked.  Not a correctness bug today (no such pass exists), but a perf foot-gun if one is added.
+  - **Fixed:** documented the limitation in a load-bearing comment so the constraint is visible at the matcher.  Adding an `EApp`-recognising case for known-identity callees is the natural follow-up if a future opt pass produces such patterns.
+
 - [x] **#23** `lib/tir/borrow.ml:194-210, 369-443` (audit L3, L4) — Two debug instrumentations gated on `MARCH_BORROW_DEBUG` / `MARCH_BORROW_DEBUG2` env vars and string-equals against three specific function names.  Fossil from a past investigation that future readers would mistakenly assume was load-bearing.
   - **Fixed:** removed.
 

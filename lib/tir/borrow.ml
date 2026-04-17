@@ -285,6 +285,17 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
        [case conn of Conn($f) -> let s = $f in println(s)] — [$f] is
        assigned to [s] but [s] is then only borrowed, so no escape
        actually occurs. *)
+    (* Note: [escapes_through] only follows DIRECT aliasing (`let v = src
+       in ...`).  An optimisation pass that introduces an indirect alias
+       (e.g. `let v = identity(src) in ...` where [identity] returns its
+       argument unchanged) would not be tracked here.  The fallback to
+       [owned_in name bm e] keeps that case safe: [owned_in] treats the call
+       as owning iff its borrow map says so, so the worst case is a
+       parameter being conservatively marked owned (perf hit, not a
+       correctness bug).  If a future pass starts producing such patterns,
+       extend this matcher with an [EApp] case that recognises identity-like
+       wrappers (e.g. via a hard-coded set, or by inspecting the callee's
+       borrow modes + return shape). *)
     let rec escapes_through (name : string) (e : Tir.expr) : bool =
       match e with
       | Tir.ELet (v, Tir.EAtom (Tir.AVar src), body)

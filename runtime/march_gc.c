@@ -203,6 +203,16 @@ static void pass1_visit(void *obj, uint32_t alloc_size, uint32_t n_fields,
     size_t user_sz = alloc_size - (uint32_t)sizeof(march_alloc_meta);
     if (user_sz < 16u) user_sz = 16u;
 
+    /* Belt-and-suspenders: walk_block already validated this invariant.
+     * Assert it here so any future caller that bypasses walk_block can't
+     * silently corrupt n_fields → out-of-bounds reads in pass 2. */
+    if (16u + (size_t)n_fields * 8u > user_sz) {
+        fprintf(stderr,
+                "march_gc: pass1_visit: n_fields=%u exceeds payload (user_sz=%zu) at %p — aborting\n",
+                (unsigned)n_fields, user_sz, obj);
+        abort();
+    }
+
     /* Allocate in to-space and copy. */
     void *copy = march_process_alloc(ctx->to_heap, user_sz);
     memcpy(copy, obj, user_sz);
