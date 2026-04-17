@@ -780,19 +780,43 @@ let insert_rc ?(borrowed = StringSet.empty) (fn : Tir.fn_def) : Tir.fn_def =
 
 (* ── Phase 3: RC Elision (cancel pairs) ──────────────────────────────────── *)
 
-(** Remove adjacent EIncRC/EDecRC cancel pairs. *)
+(** Remove adjacent EIncRC/EDecRC cancel pairs.
+
+    Also elide pairs that span an ELet binding whose RHS does not reference
+    the cancelled variable (audit L5).  Perceus's [fix_tail_value]
+    restructuring frequently wraps tail-position cleanup in an ELet, which
+    otherwise prevents the simple adjacent-cancel detection from firing
+    even though the Inc/Dec are semantically a no-op pair. *)
 let rec elide_expr (e : Tir.expr) : Tir.expr =
+  let inc_dec_match v1 v2 = String.equal v1.Tir.v_name v2.Tir.v_name in
   match e with
   (* Cancel pair: ESeq(EIncRC v, ESeq(EDecRC v, rest)) -> rest (any atomicity mix) *)
   | Tir.ESeq ((Tir.EIncRC (Tir.AVar v1) | Tir.EAtomicIncRC (Tir.AVar v1)),
               Tir.ESeq ((Tir.EDecRC (Tir.AVar v2) | Tir.EAtomicDecRC (Tir.AVar v2)), rest))
-    when String.equal v1.Tir.v_name v2.Tir.v_name ->
+    when inc_dec_match v1 v2 ->
     elide_expr rest
   (* Also check the reverse *)
   | Tir.ESeq ((Tir.EDecRC (Tir.AVar v1) | Tir.EAtomicDecRC (Tir.AVar v1)),
               Tir.ESeq ((Tir.EIncRC (Tir.AVar v2) | Tir.EAtomicIncRC (Tir.AVar v2)), rest))
-    when String.equal v1.Tir.v_name v2.Tir.v_name ->
+    when inc_dec_match v1 v2 ->
     elide_expr rest
+  (* L5: cancel pair that spans an ELet whose RHS does not reference the
+     RC'd variable.
+       ESeq (Inc v, ELet (x, rhs, ESeq (Dec v, rest)))
+         when [v not free in rhs]    →    ELet (x, rhs, rest)
+     The ELet binding [x] cannot observe v's RC (rhs doesn't see v) and
+     [rest] inherits whatever liveness the cancel pair would have left
+     anyway.  Reverse direction handled symmetrically. *)
+  | Tir.ESeq ((Tir.EIncRC (Tir.AVar v1) | Tir.EAtomicIncRC (Tir.AVar v1)) as _inc,
+              Tir.ELet (x, rhs,
+                Tir.ESeq ((Tir.EDecRC (Tir.AVar v2) | Tir.EAtomicDecRC (Tir.AVar v2)), rest)))
+    when inc_dec_match v1 v2 && not (name_free_in v1.Tir.v_name rhs) ->
+    elide_expr (Tir.ELet (x, rhs, rest))
+  | Tir.ESeq ((Tir.EDecRC (Tir.AVar v1) | Tir.EAtomicDecRC (Tir.AVar v1)) as _dec,
+              Tir.ELet (x, rhs,
+                Tir.ESeq ((Tir.EIncRC (Tir.AVar v2) | Tir.EAtomicIncRC (Tir.AVar v2)), rest)))
+    when inc_dec_match v1 v2 && not (name_free_in v1.Tir.v_name rhs) ->
+    elide_expr (Tir.ELet (x, rhs, rest))
   (* Recurse into all sub-expressions *)
   | Tir.ESeq (e1, e2) ->
     Tir.ESeq (elide_expr e1, elide_expr e2)
