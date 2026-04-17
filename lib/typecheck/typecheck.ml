@@ -3435,18 +3435,33 @@ and infer_block env exprs =
   | [] -> t_unit
   | [ e ] -> infer_expr env e
   | Ast.ELet (b, sp) :: rest ->
-    let rhs_ty  = infer_expr env b.bind_expr in
-    let bindings, pat_ty = infer_pattern env b.bind_pat in
-    unify env ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
+    (* Use enter_level so the RHS is checked at a fresh level.  This ensures
+       that `occurs` lowers any TVars that escape into outer-scope types (e.g.
+       the return type of a curried application f(acc) where f is a parameter)
+       before generalize is called.  Without the level bump, those intermediate
+       TVars share the function-body level and get incorrectly quantified, causing
+       `let f1 = f(acc); f1(k)` to instantiate a fresh TVar for f1 rather than
+       unifying the original t_r1 that links f's curried return chain. *)
+    let env_rhs = enter_level env in
+    let rhs_ty  = infer_expr env_rhs b.bind_expr in
+    let bindings, pat_ty = infer_pattern env_rhs b.bind_pat in
+    unify env_rhs ~span:sp ~reason:(Some (RLetBind sp)) rhs_ty pat_ty;
     (* Record the binding type in type_map so LSP hover over `let x = …` shows
        the RHS type rather than the enclosing block's return type. *)
     Hashtbl.replace env.type_map sp (repr rhs_ty);
     (match b.bind_pat with
      | Ast.PatVar name -> Hashtbl.replace env.type_map name.span (repr rhs_ty)
      | _ -> ());
-    (* Generalise the binding if it's a simple variable — let-polymorphism *)
+    (* Generalise the binding if it's a simple variable — let-polymorphism.
+       Use env.level (not env.level - 1) as the generalization threshold: only
+       TVars created inside env_rhs (level env.level+1) that did NOT escape into
+       outer types via occurs-check lowering are quantified.  Lambda-bound TVars
+       created at env_rhs.level stay at that level (no outer reference lowers
+       them) and are correctly quantified; function-call result TVars that are
+       linked to outer-scope TVars get lowered to env.level and are not
+       quantified. *)
     let gen_binding bnd = match bnd with
-      | (name, Mono t) -> (name, generalize (env.level - 1) t)
+      | (name, Mono t) -> (name, generalize env.level t)
       | other          -> other
     in
     let bindings' = match b.bind_pat with

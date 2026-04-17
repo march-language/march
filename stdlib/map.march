@@ -354,24 +354,18 @@ mod Map do
     end
   end
 
-  -- Left fold over all (key, value) pairs.  f(acc)(key)(val) = new_acc
+  -- Left fold over all (key, value) pairs.  f(acc, key, val) = new_acc
   pfn node_fold(acc, node, f) do
     match node do
     HEmpty -> acc
-    HLeaf(_, k, v) -> do
-      let f1 = f(acc)
-      let f2 = f1(k)
-      f2(v)
-    end
+    HLeaf(_, k, v) -> f(acc, k, v)
     HCollision(_, pairs) -> do
       fn go(a, ps) do
         match ps do
         Nil -> a
         Cons(pair, rest) -> do
           let (k, v) = pair
-          let f1 = f(a)
-          let f2 = f1(k)
-          go(f2(v), rest)
+          go(f(a, k, v), rest)
         end
         end
       end
@@ -537,9 +531,8 @@ mod Map do
 
   doc """
   Left fold over all entries.  Argument order: collection first, init
-  second, callback last (uncurried-collection convention).  The
-  callback `f` itself is still curried as `fn acc -> fn key -> fn val
-  -> new_acc` because HAMT internals expect that shape.
+  second, callback last (uncurried-collection convention).
+  The callback `f` is called uncurried as `f(acc, key, val) = new_acc`.
   """
   fn fold(m, acc, f) do
     match m do
@@ -549,19 +542,19 @@ mod Map do
 
   doc "Returns all keys as a list (hash-traversal order)."
   fn keys(m) do
-    let pairs = fold(m, Nil, fn acc -> fn k -> fn v -> Cons(k, acc))
+    let pairs = fold(m, Nil, fn (acc, k, _v) -> Cons(k, acc))
     lst_rev(pairs)
   end
 
   doc "Returns all values as a list (hash-traversal order)."
   fn values(m) do
-    let vals = fold(m, Nil, fn acc -> fn k -> fn v -> Cons(v, acc))
+    let vals = fold(m, Nil, fn (acc, _k, v) -> Cons(v, acc))
     lst_rev(vals)
   end
 
   doc "Returns all (key, value) pairs as a list (hash-traversal order)."
   fn entries(m) do
-    let es = fold(m, Nil, fn acc -> fn k -> fn v -> Cons((k, v), acc))
+    let es = fold(m, Nil, fn (acc, k, v) -> Cons((k, v), acc))
     lst_rev(es)
   end
 
