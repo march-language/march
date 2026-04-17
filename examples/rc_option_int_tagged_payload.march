@@ -1,0 +1,32 @@
+-- Regression test for the untagged Int payload in Some(Int) returned from
+-- C runtime helpers (make_some_i64 / march_string_to_int).
+--
+-- The uniform low-bit integer tagging scheme stores scalars in polymorphic
+-- ptr-sized slots as (n << 1) | 1.  The compiler emits `ashr #1` when
+-- extracting an Int from Some(Int)'s payload.  Pre-fix, the C helpers
+-- stored the raw int64 without pre-tagging, so extraction would halve the
+-- value: 'world' at byte 6 in 'hello world' would reach March code as 3,
+-- "42" would parse to 21, and so on.
+--
+-- Pre-fix native output: "idx=3 n=21" (the halved values)
+-- Post-fix native output: "idx=6 n=42"
+--
+-- Run: march examples/rc_option_int_tagged_payload.march
+-- Expected output:
+--   idx=6
+--   n=42
+
+mod RcOptionIntTaggedPayload do
+
+fn main() do
+  match String.index_of("hello world", "world") do
+    Some(idx) -> println("idx=" ++ int_to_string(idx))
+    None      -> println("FAIL index_of returned None")
+  end
+  match String.to_int("42") do
+    Ok(n)  -> println("n=" ++ int_to_string(n))
+    Err(e) -> println("FAIL to_int returned Err: " ++ e)
+  end
+end
+
+end

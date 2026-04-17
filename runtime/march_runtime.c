@@ -374,7 +374,12 @@ int64_t march_string_is_empty(void *s) {
 
 /* Returns Option(Int): None(tag=0) on failure, Some(n)(tag=1,field=n) on success.
  * Option follows declaration order: type Option = None | Some('a)
- * Heap layout for Some(n): [rc:i64][tag=1:i32][pad:i32][n:i64] = 24 bytes. */
+ * Heap layout for Some(n): [rc:i64][tag=1:i32][pad:i32][n:i64] = 24 bytes.
+ *
+ * The payload stored in Some(Int)'s ptr-sized slot is pre-tagged with
+ * (n<<1)|1 per the uniform low-bit integer tagging scheme: the compiler
+ * emits `ashr #1` when extracting the Int, so a raw value would be halved
+ * on untag (strtoll("42") would reach the March side as 21). */
 void *march_string_to_int(void *s) {
     march_string *str = (march_string *)s;
     char *end;
@@ -388,7 +393,7 @@ void *march_string_to_int(void *s) {
     int32_t *tp = (int32_t *)((char *)some + 8);
     tp[0] = 1;                         /* tag = 1 = Some */
     int64_t *fp = (int64_t *)((char *)some + 16);
-    fp[0] = (int64_t)n;
+    fp[0] = ((int64_t)n << 1) | 1;
     return some;
 }
 
@@ -1233,13 +1238,25 @@ static void *make_none(void) {
     return march_alloc(16);
 }
 
-/* Helper: allocate Some(val) where val is an i64 stored at offset 16. */
+/* Helper: allocate Some(val) where val is an Int stored at offset 16.
+ *
+ * The payload slot of Some('a) is a polymorphic ptr-sized field that the
+ * compiler untags on extraction with `ashr #1` (uniform low-bit integer
+ * tagging — see the comment at the top of the RC section).  Raw ints
+ * would be halved on untag: storing 6 yields 3, storing 20 yields 10.
+ *
+ * Pre-tag the value here so the compiler's ashr recovers the original.
+ *
+ * Fixes: march_string_index_of / march_string_last_index_of returning
+ * half the real byte offset to March callers, visible as wrong indices
+ * in any extractor path (while substring-presence checks that only
+ * distinguish Some(_) from None continue to "work"). */
 static void *make_some_i64(int64_t val) {
     void *some = march_alloc(16 + 8);
     int32_t *tp = (int32_t *)((char *)some + 8);
     tp[0] = 1;  /* tag = Some */
     int64_t *fp = (int64_t *)((char *)some + 16);
-    fp[0] = val;
+    fp[0] = (val << 1) | 1;
     return some;
 }
 
