@@ -1,0 +1,329 @@
+-- Property and unit tests for String.from_codepoint and String.to_codepoints
+-- Tests UTF-8 encoding/decoding roundtrip, byte length, and boundary conditions.
+-- Run with: forge test test/stdlib/test_string_utf8.march
+
+mod TestStringUTF8 do
+
+  -- ─────────────────────────────────────────────────────────────────
+  -- UNIT TESTS: Basic functionality
+  -- ─────────────────────────────────────────────────────────────────
+
+  describe "String.from_codepoint basic cases" do
+
+    test "ASCII codepoint 'A' (65)" do
+      match String.from_codepoint(65) do
+      Some(s) ->
+        assert (String.byte_size(s) == 1)
+        assert (s == "A")
+      None ->
+        assert false
+      end
+    end
+
+    test "2-byte UTF-8 'é' (233)" do
+      match String.from_codepoint(233) do
+      Some(s) ->
+        assert (String.byte_size(s) == 2)
+        assert (s == "é")
+      None ->
+        assert false
+      end
+    end
+
+    test "3-byte UTF-8 '€' (8364)" do
+      match String.from_codepoint(8364) do
+      Some(s) ->
+        assert (String.byte_size(s) == 3)
+        assert (s == "€")
+      None ->
+        assert false
+      end
+    end
+
+    test "4-byte UTF-8 '😀' (128512)" do
+      match String.from_codepoint(128512) do
+      Some(s) ->
+        assert (String.byte_size(s) == 4)
+        assert (s == "😀")
+      None ->
+        assert false
+      end
+    end
+
+    test "null codepoint (0)" do
+      match String.from_codepoint(0) do
+      Some(s) ->
+        assert (String.byte_size(s) == 1)
+      None ->
+        assert false
+      end
+    end
+
+  end
+
+  describe "String.from_codepoint invalid inputs" do
+
+    test "negative codepoint rejected" do
+      match String.from_codepoint(-1) do
+      Some(_) -> assert false
+      None -> assert true
+      end
+    end
+
+    test "codepoint beyond 0x10FFFF rejected" do
+      match String.from_codepoint(1114112) do
+      Some(_) -> assert false
+      None -> assert true
+      end
+    end
+
+    test "surrogate pair 0xD800 rejected" do
+      match String.from_codepoint(55296) do
+      Some(_) -> assert false
+      None -> assert true
+      end
+    end
+
+    test "surrogate pair 0xDBFF rejected" do
+      match String.from_codepoint(56319) do
+      Some(_) -> assert false
+      None -> assert true
+      end
+    end
+
+    test "surrogate pair 0xDFFF rejected" do
+      match String.from_codepoint(57343) do
+      Some(_) -> assert false
+      None -> assert true
+      end
+    end
+
+  end
+
+  describe "String.to_codepoints basic cases" do
+
+    test "ASCII single character" do
+      let cps = String.to_codepoints("A")
+      match cps do
+      Cons(cp, Nil) -> assert (cp == 65)
+      _ -> assert false
+      end
+    end
+
+    test "ASCII multiple characters" do
+      let cps = String.to_codepoints("AB")
+      match cps do
+      Cons(cp1, Cons(cp2, Nil)) ->
+        assert (cp1 == 65)
+        assert (cp2 == 66)
+      _ -> assert false
+      end
+    end
+
+    test "2-byte UTF-8 character" do
+      let cps = String.to_codepoints("é")
+      match cps do
+      Cons(cp, Nil) -> assert (cp == 233)
+      _ -> assert false
+      end
+    end
+
+    test "empty string" do
+      let cps = String.to_codepoints("")
+      match cps do
+      Nil -> assert true
+      _ -> assert false
+      end
+    end
+
+  end
+
+  -- ─────────────────────────────────────────────────────────────────
+  -- PROPERTY TESTS: Encoding properties
+  -- ─────────────────────────────────────────────────────────────────
+
+  describe "byte length properties" do
+
+    test "1-byte UTF-8 (0-127): single byte encoding" do
+      Check.all(Gen.int(0, 127), fn cp ->
+        match String.from_codepoint(cp) do
+        Some(s) -> String.byte_size(s) == 1
+        None -> false
+        end
+      )
+    end
+
+    test "2-byte UTF-8 (128-2047): two byte encoding" do
+      Check.all(Gen.int(128, 2047), fn cp ->
+        match String.from_codepoint(cp) do
+        Some(s) -> String.byte_size(s) == 2
+        None -> false
+        end
+      )
+    end
+
+    test "3-byte UTF-8 (2048-65535, excluding surrogates): three byte encoding" do
+      Check.all(Gen.int(2048, 65535), fn cp ->
+        -- Skip surrogates
+        if cp >= 55296 && cp <= 57343 do
+          true
+        else
+          match String.from_codepoint(cp) do
+          Some(s) -> String.byte_size(s) == 3
+          None -> false
+          end
+        end
+      )
+    end
+
+    test "4-byte UTF-8 (65536-1114111): four byte encoding" do
+      Check.all(Gen.int(65536, 1114111), fn cp ->
+        match String.from_codepoint(cp) do
+        Some(s) -> String.byte_size(s) == 4
+        None -> false
+        end
+      )
+    end
+
+  end
+
+  describe "roundtrip and validation properties" do
+
+    test "valid codepoint roundtrip: encode then decode" do
+      Check.all(Gen.int(0, 1114111), fn cp ->
+        -- Skip invalid codepoints (surrogates)
+        if cp >= 55296 && cp <= 57343 do
+          true
+        else
+          match String.from_codepoint(cp) do
+          Some(encoded) ->
+            let decoded = String.to_codepoints(encoded)
+            match decoded do
+            Cons(found_cp, Nil) -> found_cp == cp
+            _ -> false
+            end
+          None -> false
+          end
+        end
+      )
+    end
+
+    test "two-codepoint concatenation roundtrip" do
+      Check.all(Gen.tuple2(
+        Gen.int(0, 127),
+        Gen.int(128, 2047)
+      ), fn pair ->
+        match pair do
+        (cp1, cp2) ->
+          match String.from_codepoint(cp1) do
+          Some(s1) ->
+            match String.from_codepoint(cp2) do
+            Some(s2) ->
+              let combined = s1 ++ s2
+              let decoded = String.to_codepoints(combined)
+              match decoded do
+              Cons(d1, Cons(d2, Nil)) ->
+                d1 == cp1 && d2 == cp2
+              _ -> false
+              end
+            None -> false
+            end
+          None -> false
+          end
+        end
+      )
+    end
+
+  end
+
+  describe "invalid input rejection properties" do
+
+    test "negative codepoints always return None" do
+      Check.all(Gen.int(-10000, -1), fn cp ->
+        match String.from_codepoint(cp) do
+        Some(_) -> false
+        None -> true
+        end
+      )
+    end
+
+    test "codepoints > 1114111 always return None" do
+      Check.all(Gen.int(1114112, 1200000), fn cp ->
+        match String.from_codepoint(cp) do
+        Some(_) -> false
+        None -> true
+        end
+      )
+    end
+
+    test "surrogates in range 55296-57343 return None" do
+      Check.all(Gen.int(55296, 57343), fn cp ->
+        match String.from_codepoint(cp) do
+        Some(_) -> false
+        None -> true
+        end
+      )
+    end
+
+  end
+
+  describe "multi-codepoint extraction" do
+
+    test "decoding extracts valid codepoints only" do
+      -- For any single valid codepoint, extracted value should be valid
+      Check.all(Gen.int(0, 1114111), fn cp ->
+        if cp >= 55296 && cp <= 57343 do
+          true  -- skip surrogates
+        else
+          match String.from_codepoint(cp) do
+          Some(s) ->
+            let decoded = String.to_codepoints(s)
+            match decoded do
+            Cons(found, Nil) ->
+              found >= 0 && found <= 1114111
+            _ -> false
+            end
+          None -> false
+          end
+        end
+      )
+    end
+
+    test "three-codepoint concatenation preserves roundtrip" do
+      Check.all(Gen.tuple3(
+        Gen.int(0, 127),
+        Gen.int(128, 2047),
+        Gen.int(2048, 65535)
+      ), fn triple ->
+        match triple do
+        (cp1, cp2, cp3) ->
+          if cp3 >= 55296 && cp3 <= 57343 do
+            true  -- skip if cp3 is a surrogate
+          else
+            match String.from_codepoint(cp1) do
+            Some(s1) ->
+              match String.from_codepoint(cp2) do
+              Some(s2) ->
+                match String.from_codepoint(cp3) do
+                Some(s3) ->
+                  let combined = s1 ++ s2 ++ s3
+                  let decoded = String.to_codepoints(combined)
+                  match decoded do
+                  Cons(d1, Cons(d2, Cons(d3, Nil))) ->
+                    d1 == cp1 && d2 == cp2 && d3 == cp3
+                  _ -> false
+                  end
+                None -> false
+                end
+              None -> false
+              end
+            None -> false
+            end
+          end
+        end
+      )
+    end
+
+  end
+
+end
