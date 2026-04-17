@@ -360,6 +360,16 @@ and lower_expr (e : Ast.expr) : Tir.expr =
           v_ty = (match p.param_ty with Some t -> lower_ty t | None -> ty_of_span p.param_name.span);
           v_lin = lower_linearity p.param_lin }
       ) params in
+    (* Install fn_name → self_ty so that both recursive self-calls inside the
+       body and uses in the block continuation get the correct TFn type.
+       Without this, ty_of_span returns TVar("_") for stdlib code that has no
+       type_map entry, causing ECallPtr to emit wrong LLVM param types (all ptr
+       instead of e.g. i64 for Int params). Save/restore to handle shadowing. *)
+    let ret_ty_pre = match ret_ty_ann with Some t -> lower_ty t | None -> unknown_ty in
+    let param_tys' = List.map (fun v -> v.Tir.v_ty) params' in
+    let self_ty_pre = Tir.TFn (param_tys', ret_ty_pre) in
+    let saved_fn = Hashtbl.find_opt _fn_param_types fn_name in
+    Hashtbl.replace _fn_param_types fn_name self_ty_pre;
     let fn_body' = lower_expr fn_body in
     let ret_ty = match ret_ty_ann with Some t -> lower_ty t | None -> ty_of_expr fn_body in
     let fn : Tir.fn_def = {
@@ -367,11 +377,16 @@ and lower_expr (e : Ast.expr) : Tir.expr =
     } in
     let fn_var : Tir.var = {
       v_name = fn_name;
-      v_ty = Tir.TFn (List.map (fun v -> v.Tir.v_ty) params', ret_ty);
+      v_ty = Tir.TFn (param_tys', ret_ty);
       v_lin = Tir.Unr
     } in
+    (* Update with final ret_ty before lowering the continuation *)
+    Hashtbl.replace _fn_param_types fn_name fn_var.v_ty;
     let fn_expr = Tir.ELetRec ([fn], Tir.EAtom (Tir.AVar fn_var)) in
     let block_body = lower_expr (Ast.EBlock (rest, sp)) in
+    (match saved_fn with
+     | Some t -> Hashtbl.replace _fn_param_types fn_name t
+     | None -> Hashtbl.remove _fn_param_types fn_name);
     Tir.ELet (fn_var, fn_expr, block_body)
   | Ast.EBlock (e :: rest, sp) ->
     let e' = lower_expr e in
@@ -760,14 +775,21 @@ and lower_expr (e : Ast.expr) : Tir.expr =
                   | None -> ty_of_span p.param_name.span);
           v_lin = lower_linearity p.param_lin }
       ) params in
+    let ret_ty_pre = match ret_ty_ann with Some t -> lower_ty t | None -> unknown_ty in
+    let param_tys' = List.map (fun v -> v.Tir.v_ty) params' in
+    let saved_fn = Hashtbl.find_opt _fn_param_types fn_name in
+    Hashtbl.replace _fn_param_types fn_name (Tir.TFn (param_tys', ret_ty_pre));
     let body' = lower_expr body in
+    (match saved_fn with
+     | Some t -> Hashtbl.replace _fn_param_types fn_name t
+     | None -> Hashtbl.remove _fn_param_types fn_name);
     let ret_ty = match ret_ty_ann with Some t -> lower_ty t | None -> ty_of_expr body in
     let fn : Tir.fn_def = {
       fn_name; fn_params = params'; fn_ret_ty = ret_ty; fn_body = body'
     } in
     let fn_var : Tir.var = {
       v_name = fn_name;
-      v_ty = Tir.TFn (List.map (fun v -> v.Tir.v_ty) params', ret_ty);
+      v_ty = Tir.TFn (param_tys', ret_ty);
       v_lin = Tir.Unr
     } in
     Tir.ELetRec ([fn], Tir.EAtom (Tir.AVar fn_var))

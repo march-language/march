@@ -319,7 +319,7 @@ mod List do
       march> List.fold_left([1, 2, 3], [], fn (acc, x) -> Cons(x * 2, acc))
       [6, 4, 2]
   """
-  fn fold_left(xs : List(a), acc : b, f : (b, a) -> b) : b do
+  fn fold_left(xs : List(a), acc : b, f : b -> a -> b) : b do
     match xs do
     Nil        -> acc
     Cons(h, t) -> fold_left(t, f(acc, h), f)
@@ -327,7 +327,7 @@ mod List do
   end
 
   doc "Right fold: reduces the list from right to left."
-  fn fold_right(xs : List(a), acc : b, f : (a, b) -> b) : b do
+  fn fold_right(xs : List(a), acc : b, f : a -> b -> b) : b do
     fold_left(reverse(xs), acc, fn (acc, h) -> f(h, acc))
   end
 
