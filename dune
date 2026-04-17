@@ -1,1 +1,5 @@
 (dirs (:standard \ .claude))
+
+(env
+ (dev
+  (c_flags (:standard -g))))

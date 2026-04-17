@@ -1080,6 +1080,70 @@ let rec preprocess_scrut_escape (e : Tir.expr) : Tir.expr =
 let preprocess_fn (fn : Tir.fn_def) : Tir.fn_def =
   { fn with Tir.fn_body = preprocess_scrut_escape fn.Tir.fn_body }
 
+(* ── Debug stats ──────────────────────────────────────────────────────────── *)
+
+let _perceus_debug : bool Lazy.t =
+  lazy (Sys.getenv_opt "MARCH_DEBUG_PERCEUS" <> None)
+
+type rc_counts = {
+  inc_rc      : int;
+  dec_rc      : int;
+  atomic_inc  : int;
+  atomic_dec  : int;
+  free        : int;
+  reuse       : int;
+}
+
+let zero_counts = { inc_rc = 0; dec_rc = 0; atomic_inc = 0; atomic_dec = 0; free = 0; reuse = 0 }
+
+let add_counts a b = {
+  inc_rc     = a.inc_rc     + b.inc_rc;
+  dec_rc     = a.dec_rc     + b.dec_rc;
+  atomic_inc = a.atomic_inc + b.atomic_inc;
+  atomic_dec = a.atomic_dec + b.atomic_dec;
+  free       = a.free       + b.free;
+  reuse      = a.reuse      + b.reuse;
+}
+
+let rec count_rc_ops_expr (e : Tir.expr) : rc_counts =
+  let recurse_fn fn = count_rc_ops_expr fn.Tir.fn_body in
+  match e with
+  | Tir.EIncRC _                                -> { zero_counts with inc_rc = 1 }
+  | Tir.EDecRC _                                -> { zero_counts with dec_rc = 1 }
+  | Tir.EAtomicIncRC _                          -> { zero_counts with atomic_inc = 1 }
+  | Tir.EAtomicDecRC _                          -> { zero_counts with atomic_dec = 1 }
+  | Tir.EFree _                                 -> { zero_counts with free = 1 }
+  | Tir.EReuse _                                -> { zero_counts with reuse = 1 }
+  | Tir.ELet (_, e1, e2)                        -> add_counts (count_rc_ops_expr e1) (count_rc_ops_expr e2)
+  | Tir.ELetRec (fns, body)                     ->
+    List.fold_left (fun acc fn -> add_counts acc (recurse_fn fn))
+      (count_rc_ops_expr body) fns
+  | Tir.ESeq (e1, e2)                           -> add_counts (count_rc_ops_expr e1) (count_rc_ops_expr e2)
+  | Tir.ECase (_, branches, default)            ->
+    let from_branches = List.fold_left (fun acc br ->
+      add_counts acc (count_rc_ops_expr br.Tir.br_body)) zero_counts branches in
+    let from_default = Option.fold ~none:zero_counts ~some:count_rc_ops_expr default in
+    add_counts from_branches from_default
+  | _ -> zero_counts
+
+let count_rc_ops_module (fns : Tir.fn_def list) : rc_counts =
+  List.fold_left (fun acc fn ->
+    add_counts acc (count_rc_ops_expr fn.Tir.fn_body)) zero_counts fns
+
+let print_perceus_stats ~(label : string) ~(before : rc_counts) ~(after : rc_counts) () =
+  let cancelled_inc = before.inc_rc     - after.inc_rc in
+  let cancelled_dec = before.dec_rc     - after.dec_rc in
+  let cancelled_a_inc = before.atomic_inc - after.atomic_inc in
+  let cancelled_a_dec = before.atomic_dec - after.atomic_dec in
+  Printf.eprintf "[perceus] %s\n" label;
+  Printf.eprintf "  inserted:  inc=%d dec=%d atomic_inc=%d atomic_dec=%d free=%d reuse=%d\n"
+    before.inc_rc before.dec_rc before.atomic_inc before.atomic_dec before.free before.reuse;
+  Printf.eprintf "  after elision+fbip: inc=%d dec=%d atomic_inc=%d atomic_dec=%d free=%d reuse=%d\n"
+    after.inc_rc after.dec_rc after.atomic_inc after.atomic_dec after.free after.reuse;
+  Printf.eprintf "  cancelled: inc=%d dec=%d atomic_inc=%d atomic_dec=%d\n"
+    cancelled_inc cancelled_dec cancelled_a_inc cancelled_a_dec;
+  Printf.eprintf "%!"
+
 (* ── Entry point ──────────────────────────────────────────────────────────── *)
 
 (** Run all four Perceus phases over every function in the module.
@@ -1109,13 +1173,10 @@ let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_modul
   let repl_set =
     List.fold_left (fun s n -> StringSet.add n s) StringSet.empty repl_vars
   in
-  let fns' =
+  let fns_after_insert =
     m.Tir.tm_fns
     |> List.map preprocess_fn
     |> List.map (fun fn ->
-         (* Build the "borrowed" live-at-exit set for this function:
-            - REPL globals (for main)
-            - Params inferred as borrowed by Phase 0 *)
          let base =
            if fn.Tir.fn_name = "main" then repl_set else StringSet.empty
          in
@@ -1127,8 +1188,16 @@ let perceus ?(repl_vars : string list = []) (m : Tir.tir_module) : Tir.tir_modul
            ) base (List.mapi (fun i p -> (i, p)) fn.Tir.fn_params)
          in
          insert_rc ~borrowed fn)
+  in
+  let fns' =
+    fns_after_insert
     |> List.map elide_cancel_pairs
     |> List.map insert_fbip
   in
+  if Lazy.force _perceus_debug then begin
+    let before = count_rc_ops_module fns_after_insert in
+    let after  = count_rc_ops_module fns' in
+    print_perceus_stats ~label:m.Tir.tm_name ~before ~after ()
+  end;
   _borrow_map := Borrow.empty;
   { m with Tir.tm_fns = fns' }

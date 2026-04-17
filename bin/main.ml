@@ -314,9 +314,13 @@ let ensure_runtime_so () =
       let evloop_c = Filename.concat runtime_dir "march_http_evloop.c" in
       if Sys.file_exists evloop_c then " -DMARCH_HTTP_USE_EVLOOP" else ""
     in
+    let so_dbg_flag = if Sys.getenv_opt "MARCH_DEBUG_RUNTIME" <> None then " -g" else "" in
+    let so_san_flag =
+      if Sys.getenv_opt "MARCH_SANITIZE" <> None then " -fsanitize=address,undefined" else ""
+    in
     let cmd = Printf.sprintf
-      "clang -shared -O2 -fPIC -msse4.2 -Wno-unused-command-line-argument%s -I%s %s%s%s -o %s 2>&1"
-      evloop_flag runtime_dir runtime_c extra_files openssl_flags so_path in
+      "clang -shared -O2 -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s -o %s 2>&1"
+      evloop_flag so_dbg_flag so_san_flag runtime_dir runtime_c extra_files openssl_flags so_path in
     let rc = Sys.command cmd in
     if rc <> 0 then
       failwith (Printf.sprintf "march: failed to compile runtime .so (clang exit %d)" rc)
@@ -1250,9 +1254,10 @@ let compile filename =
                 in
                 (wasm_clang, " -nostdlib -Wl,--no-entry -Wl,--export-dynamic")
             in
+            let wasm_dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
             let cmd = Printf.sprintf
-              "%s --target=%s%s%s -DMARCH_WASM -Wno-unused-command-line-argument %s %s -o %s"
-              clang triple sysroot_flag opt_flag wasm_runtime ll_file out_bin in
+              "%s --target=%s%s%s%s -DMARCH_WASM -Wno-unused-command-line-argument %s %s -o %s"
+              clang triple sysroot_flag opt_flag wasm_dbg_flag wasm_runtime ll_file out_bin in
             let rc = Sys.command cmd in
             if rc <> 0 then begin
               Printf.eprintf "march: WASM compilation failed (exit %d)\n  cmd: %s\n" rc cmd; exit 1
@@ -1323,9 +1328,14 @@ let compile filename =
               if Sys.file_exists evloop_c then " -DMARCH_HTTP_USE_EVLOOP" else ""
             in
             let math_flag = if Sys.unix then " -lm" else "" in
+            let dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
+            let san_flag =
+              if Sys.getenv_opt "MARCH_SANITIZE" <> None then " -fsanitize=address,undefined"
+              else ""
+            in
             let cmd = Printf.sprintf
-              "clang%s -msse4.2 -Wno-unused-command-line-argument%s %s%s%s %s -o %s%s"
-              opt_flag evloop_flag runtime extra_c_files openssl_flags2 ll_file out_bin math_flag in
+              "clang%s%s%s -msse4.2 -Wno-unused-command-line-argument%s %s%s%s %s -o %s%s"
+              opt_flag dbg_flag san_flag evloop_flag runtime extra_c_files openssl_flags2 ll_file out_bin math_flag in
             let rc = Sys.command cmd in
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
