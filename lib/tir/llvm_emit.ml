@@ -940,6 +940,24 @@ let coerce ctx from_ty v to_ty =
     emit ctx (Printf.sprintf "%s = bitcast double %s to i64" i v);
     emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" r i);
     r
+  | ("ptr", "i64") ->
+    (* Untag a low-bit-tagged integer: arithmetic right-shift restores value.
+       inttoptr stores (n<<1)|1 for integer n; ashr by 1 recovers n. *)
+    let i = fresh ctx "cv" in
+    let r = fresh ctx "cv" in
+    emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to i64" i v);
+    emit ctx (Printf.sprintf "%s = ashr i64 %s, 1" r i);
+    r
+  | ("i64", "ptr") ->
+    (* Tag an integer for polymorphic storage: (n << 1) | 1.
+       Low bit 1 marks this as an immediate; heap pointers are always even. *)
+    let s = fresh ctx "cv" in
+    let t = fresh ctx "cv" in
+    let r = fresh ctx "cv" in
+    emit ctx (Printf.sprintf "%s = shl i64 %s, 1" s v);
+    emit ctx (Printf.sprintf "%s = or i64 %s, 1" t s);
+    emit ctx (Printf.sprintf "%s = inttoptr i64 %s to ptr" r t);
+    r
   | ("ptr", scalar) ->
     let r = fresh ctx "cv" in
     emit ctx (Printf.sprintf "%s = ptrtoint ptr %s to %s" r v scalar);
@@ -1076,7 +1094,7 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
              wrap_name decl_str fn_name call_args)
       else if target_ret = "i64" then
         Buffer.add_string ctx.extra_fns
-          (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call i64 @%s(%s)\n  %%rp = inttoptr i64 %%r to ptr\n  ret ptr %%rp\n}\n\n"
+          (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call i64 @%s(%s)\n  %%rs = shl i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  %%rp = inttoptr i64 %%rt to ptr\n  ret ptr %%rp\n}\n\n"
              wrap_name decl_str fn_name call_args)
       else if target_ret = "double" then
         Buffer.add_string ctx.extra_fns
@@ -1163,7 +1181,7 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
                 wrap_name decl_str fn_name call_args)
          else if target_ret = "i64" then
            Buffer.add_string ctx.extra_fns
-             (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call i64 @%s(%s)\n  %%rp = inttoptr i64 %%r to ptr\n  ret ptr %%rp\n}\n\n"
+             (Printf.sprintf "define ptr @%s(%s) {\nentry:\n  %%r = call i64 @%s(%s)\n  %%rs = shl i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  %%rp = inttoptr i64 %%rt to ptr\n  ret ptr %%rp\n}\n\n"
                 wrap_name decl_str fn_name call_args)
          else if target_ret = "double" then
            Buffer.add_string ctx.extra_fns
@@ -3906,7 +3924,7 @@ let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
       Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n"
         wrap_name decl_str fn_llvm_name call_args
     else if target_ret = "i64" then
-      Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  %%r = call i64 @%s(%s)\n  %%rp = inttoptr i64 %%r to ptr\n  ret ptr %%rp\n}\n"
+      Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  %%r = call i64 @%s(%s)\n  %%rs = shl i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  %%rp = inttoptr i64 %%rt to ptr\n  ret ptr %%rp\n}\n"
         wrap_name decl_str fn_llvm_name call_args
     else if target_ret = "double" then
       Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  %%r = call double @%s(%s)\n  %%ri = bitcast double %%r to i64\n  %%rp = inttoptr i64 %%ri to ptr\n  ret ptr %%rp\n}\n"

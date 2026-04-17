@@ -8348,6 +8348,73 @@ let test_compiled_main_calls_march_run_scheduler () =
 
 (* ── LLVM emit regression: string_chars / string_from_chars ─────────────── *)
 
+(** Uniform integer tagging: coerce("i64","ptr") must emit shl+or+inttoptr;
+    coerce("ptr","i64") must emit ptrtoint+ashr.  This is the IR-level check
+    for the low-bit tagging scheme that prevents SIGSEGV when integers pass
+    through polymorphic (ptr-typed) ADT fields (e.g. List(Int) with n >= 4096). *)
+let test_int_tag_coerce_ir () =
+  (* A function that takes a polymorphic list and returns the head as Int forces
+     the codegen to coerce Int→ptr when constructing Cons and ptr→i64 when
+     extracting the head.  The List type is generic so fields are ptr-typed. *)
+  let src = {|mod Test do
+    fn head_int(xs : List(Int)) : Int do
+      match xs do
+        Cons(h, _) -> h
+        Nil -> 0
+      end
+    end
+    fn make_list(n : Int) : List(Int) do
+      Cons(n, Nil)
+    end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let ir = March_tir.Llvm_emit.emit_module tir in
+  let ir_has pat =
+    try ignore (Str.search_forward (Str.regexp_string pat) ir 0); true
+    with Not_found -> false
+  in
+  (* Tag: shl i64 %*, 1 and or i64 %*, 1 should appear for i64→ptr boxing *)
+  Alcotest.(check bool) "tag: shl i64 ... 1"  true (ir_has "shl i64");
+  Alcotest.(check bool) "tag: or i64 ... 1"   true (ir_has "or i64");
+  (* Untag: ashr i64 %*, 1 should appear for ptr→i64 unboxing *)
+  Alcotest.(check bool) "untag: ashr i64"      true (ir_has "ashr i64");
+  (* The old unsafe raw inttoptr of an unshifted i64 must NOT appear for the
+     Int→ptr case (would mean an integer was stored without tagging). *)
+  Alcotest.(check bool) "no raw i64 inttoptr"  false (ir_has "inttoptr i64 %r to ptr")
+
+(** Regression: i64-returning closure wrappers must tag the return value.
+    Without tagging, an Int value >= 4096 stored in a polymorphic closure
+    result would look like a heap pointer and crash march_incrc.
+    The wrapper fires when a top-level Int-returning function is used as a
+    first-class value (e.g. passed to a HOF that accepts a polymorphic fn). *)
+let test_int_tag_wrapper_ir () =
+  (* inc_fn is a top-level function returning i64; passing it as a value to
+     list_apply forces the codegen to emit a ptr-returning closure wrapper
+     around inc_fn.  That wrapper must tag the i64 result. *)
+  let src = {|mod Test do
+    fn inc_fn(x : Int) : Int do x + 1 end
+    fn list_apply(f : Int -> Int, xs : List(Int)) : List(Int) do
+      map(xs, f)
+    end
+    fn use_wrapper() : List(Int) do
+      list_apply(inc_fn, Cons(1, Nil))
+    end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let ir = March_tir.Llvm_emit.emit_module tir in
+  let ir_has pat =
+    try ignore (Str.search_forward (Str.regexp_string pat) ir 0); true
+    with Not_found -> false
+  in
+  (* The closure wrapper for inc_fn must tag the i64 return value.
+     "shl i64" and "or i64" must appear somewhere in the wrapper body. *)
+  Alcotest.(check bool) "wrapper: shl i64 present"  true (ir_has "shl i64 %r, 1");
+  Alcotest.(check bool) "wrapper: or i64 present"   true (ir_has "or i64 %rs, 1")
+
 (** Regression: string_chars and string_from_chars must lower to C-runtime
     calls in the LLVM backend.  Before the fix, emit_atom fell through to the
     default alloca-load path and generated [%string_chars.addr] which was never
@@ -20243,6 +20310,10 @@ let () =
           (with_reset test_compiled_main_calls_march_run_scheduler);
         Alcotest.test_case "string_chars llvm emit" `Quick
           test_string_chars_llvm_emit;
+        Alcotest.test_case "int tag coerce IR (shl+or+ashr)" `Quick
+          test_int_tag_coerce_ir;
+        Alcotest.test_case "int tag wrapper IR (shl+or in wrapper)" `Quick
+          test_int_tag_wrapper_ir;
       ]);
       ("string stdlib", [
         Alcotest.test_case "byte_size"           `Quick test_string_byte_size;
