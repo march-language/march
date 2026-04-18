@@ -1851,6 +1851,19 @@ let base64_decode (s : string) : (string, string) result =
       | Some msg -> Error msg
       | None -> Ok (Bytes.to_string out)
 
+(* ── Compression C stubs (compress_stubs.c) ─────────────────────────────── *
+ * Each stub returns a string on success or raises Failure(msg) on error.
+ * eval.ml wraps results into Ok(Bytes) | Err(String) March values.
+ * ──────────────────────────────────────────────────────────────────────── *)
+external caml_march_gzip_encode    : string -> int -> string = "caml_march_gzip_encode"
+external caml_march_gzip_decode    : string -> string        = "caml_march_gzip_decode"
+external caml_march_deflate_encode : string -> string        = "caml_march_deflate_encode"
+external caml_march_deflate_decode : string -> string        = "caml_march_deflate_decode"
+external caml_march_zstd_encode    : string -> int -> string = "caml_march_zstd_encode"
+external caml_march_zstd_decode    : string -> string        = "caml_march_zstd_decode"
+external caml_march_brotli_encode  : string -> int -> int -> string = "caml_march_brotli_encode"
+external caml_march_brotli_decode  : string -> string        = "caml_march_brotli_decode"
+
 (** Convert an OCaml raw string to a March Bytes(List(Int)) value. *)
 let march_bytes_of_string (s : string) : value =
   let n = String.length s in
@@ -3992,6 +4005,74 @@ let base_env : env =
            | Ok raw -> VCon ("Ok", [march_bytes_of_string raw])
            | Error e -> VCon ("Err", [VString e]))
         | _ -> eval_error "stdlib_base64_decode(s: String): Ok(Bytes) | Err(String)"))
+    (* ── Compression builtins ─────────────────────────────────────────────── *
+     * Each C stub raises Failure(msg) on error, returns string on success.
+     * We catch Failure and convert to Ok(Bytes) | Err(String) for March.
+     * ──────────────────────────────────────────────────────────────────── *)
+  ; ("stdlib_gzip_encode", VBuiltin ("stdlib_gzip_encode", function
+        | [v; VInt lvl] ->
+          (match march_val_to_raw v with
+           | Ok s ->
+             (try VCon ("Ok", [march_bytes_of_string (caml_march_gzip_encode s lvl)])
+              with Failure msg -> VCon ("Err", [VString msg]))
+           | Error e -> eval_error "stdlib_gzip_encode: %s" e)
+        | _ -> eval_error "stdlib_gzip_encode(data: Bytes, level: Int): Ok(Bytes) | Err(String)"))
+  ; ("stdlib_gzip_decode", VBuiltin ("stdlib_gzip_decode", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s ->
+             (try VCon ("Ok", [march_bytes_of_string (caml_march_gzip_decode s)])
+              with Failure msg -> VCon ("Err", [VString msg]))
+           | Error e -> eval_error "stdlib_gzip_decode: %s" e)
+        | _ -> eval_error "stdlib_gzip_decode(data: Bytes): Ok(Bytes) | Err(String)"))
+  ; ("stdlib_deflate_encode", VBuiltin ("stdlib_deflate_encode", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s ->
+             (try VCon ("Ok", [march_bytes_of_string (caml_march_deflate_encode s)])
+              with Failure msg -> VCon ("Err", [VString msg]))
+           | Error e -> eval_error "stdlib_deflate_encode: %s" e)
+        | _ -> eval_error "stdlib_deflate_encode(data: Bytes): Ok(Bytes) | Err(String)"))
+  ; ("stdlib_deflate_decode", VBuiltin ("stdlib_deflate_decode", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s ->
+             (try VCon ("Ok", [march_bytes_of_string (caml_march_deflate_decode s)])
+              with Failure msg -> VCon ("Err", [VString msg]))
+           | Error e -> eval_error "stdlib_deflate_decode: %s" e)
+        | _ -> eval_error "stdlib_deflate_decode(data: Bytes): Ok(Bytes) | Err(String)"))
+  ; ("stdlib_zstd_encode", VBuiltin ("stdlib_zstd_encode", function
+        | [v; VInt lvl] ->
+          (match march_val_to_raw v with
+           | Ok s ->
+             (try VCon ("Ok", [march_bytes_of_string (caml_march_zstd_encode s lvl)])
+              with Failure msg -> VCon ("Err", [VString msg]))
+           | Error e -> eval_error "stdlib_zstd_encode: %s" e)
+        | _ -> eval_error "stdlib_zstd_encode(data: Bytes, level: Int): Ok(Bytes) | Err(String)"))
+  ; ("stdlib_zstd_decode", VBuiltin ("stdlib_zstd_decode", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s ->
+             (try VCon ("Ok", [march_bytes_of_string (caml_march_zstd_decode s)])
+              with Failure msg -> VCon ("Err", [VString msg]))
+           | Error e -> eval_error "stdlib_zstd_decode: %s" e)
+        | _ -> eval_error "stdlib_zstd_decode(data: Bytes): Ok(Bytes) | Err(String)"))
+  ; ("stdlib_brotli_encode", VBuiltin ("stdlib_brotli_encode", function
+        | [v; VInt mode; VInt quality] ->
+          (match march_val_to_raw v with
+           | Ok s ->
+             (try VCon ("Ok", [march_bytes_of_string (caml_march_brotli_encode s mode quality)])
+              with Failure msg -> VCon ("Err", [VString msg]))
+           | Error e -> eval_error "stdlib_brotli_encode: %s" e)
+        | _ -> eval_error "stdlib_brotli_encode(data: Bytes, mode: Int, quality: Int): Ok(Bytes) | Err(String)"))
+  ; ("stdlib_brotli_decode", VBuiltin ("stdlib_brotli_decode", function
+        | [v] ->
+          (match march_val_to_raw v with
+           | Ok s ->
+             (try VCon ("Ok", [march_bytes_of_string (caml_march_brotli_decode s)])
+              with Failure msg -> VCon ("Err", [VString msg]))
+           | Error e -> eval_error "stdlib_brotli_decode: %s" e)
+        | _ -> eval_error "stdlib_brotli_decode(data: Bytes): Ok(Bytes) | Err(String)"))
     (* ---- uuid_v4(): generate a random UUID v4 string ---- *)
   ; ("uuid_v4", VBuiltin ("uuid_v4", function
         | [] ->

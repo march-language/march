@@ -1,3 +1,17 @@
 (library
  (name march_eval)
- (libraries march_ast march_modules march_scheduler march_coverage march_doctest unix digestif))
+ (libraries march_ast march_modules march_scheduler march_coverage march_doctest unix digestif)
+ (foreign_stubs
+  (language c)
+  (names compress_stubs)
+  (flags
+   (:standard
+    -DMARCH_HAVE_ZSTD
+    -DMARCH_HAVE_BROTLI
+    -I/opt/homebrew/include)))
+ (c_library_flags
+  (-lz
+   -L/opt/homebrew/lib
+   -lzstd
+   -lbrotlienc
+   -lbrotlidec)))

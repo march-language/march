@@ -1,0 +1,361 @@
+-- Compress module: gzip, deflate, zstd, and brotli compression.
+--
+-- All one-shot encode/decode functions operate on Bytes values and return
+-- Result(Bytes, Compress.Error).  Streaming variants return Seq(Bytes).
+--
+-- Sub-modules are scoped by algorithm so callers can import selectively:
+--
+--     let compressed = Compress.Gzip.encode(data)
+--     let restored   = Compress.Gzip.decode(compressed)
+--
+-- Level types let callers trade speed for ratio without magic numbers:
+--
+--     Compress.Gzip.encode_level(data, Gzip.BestCompression)
+--     Compress.Zstd.encode_level(data, Zstd.Fast(3))
+--
+-- Implementation note: the underlying work is done by zlib (gzip/deflate),
+-- libzstd (zstd), and libbrotlienc/libbrotlidec (brotli) via C FFI.  Each
+-- algorithm shim lives in runtime/march_compress.c.
+
+mod Compress do
+
+  -- Shared error type across all sub-modules.
+  type Error =
+      InvalidInput(String)
+    | InsufficientOutput
+    | Io(String)
+
+  -- ── Private helpers ───────────────────────────────────────────────────────
+
+  pfn unwrap_result(r) do
+    match r do
+    Ok(v) -> v
+    Err(msg) -> panic("Compress: " ++ msg)
+    end
+  end
+
+  -- ── Gzip ─────────────────────────────────────────────────────────────────
+
+  mod Gzip do
+
+    -- Compression level for gzip encoding.
+    type Level =
+        BestSpeed        -- zlib level 1
+      | Default          -- zlib default (~6)
+      | BestCompression  -- zlib level 9
+      | Custom(Int)      -- explicit 1–9
+
+    pfn level_int(l) do
+      match l do
+      BestSpeed       -> 1
+      Default         -> -1  -- Z_DEFAULT_COMPRESSION
+      BestCompression -> 9
+      Custom(n)       ->
+        if n < 1 || n > 9 do
+          panic("Compress.Gzip: level must be 1–9, got " ++ int_to_string(n))
+        else n end
+      end
+    end
+
+    doc """
+    Compress bytes with gzip at the default compression level.
+
+        let b = Bytes.from_string("hello, world!")
+        match Compress.Gzip.encode(b) do
+        Ok(compressed) -> compressed
+        Err(e) -> panic("encode failed")
+        end
+    """
+    fn encode(data : Bytes) : Result(Bytes, Compress.Error) do
+      stdlib_gzip_encode(data, -1)
+    end
+
+    doc """
+    Compress bytes with gzip at an explicit level.
+
+        Compress.Gzip.encode_level(data, Gzip.BestSpeed)
+        Compress.Gzip.encode_level(data, Gzip.Custom(6))
+    """
+    fn encode_level(data : Bytes, level : Level) : Result(Bytes, Compress.Error) do
+      stdlib_gzip_encode(data, level_int(level))
+    end
+
+    doc """
+    Decompress gzip-compressed bytes.
+
+        match Compress.Gzip.decode(compressed) do
+        Ok(original) -> original
+        Err(e) -> panic("decode failed")
+        end
+    """
+    fn decode(data : Bytes) : Result(Bytes, Compress.Error) do
+      stdlib_gzip_decode(data)
+    end
+
+    doc """
+    Compress a sequence of byte chunks, producing a lazy sequence of
+    compressed chunks suitable for streaming HTTP responses or log writing.
+
+        let chunks : Seq(Bytes) = ...
+        let compressed = Compress.Gzip.encode_stream(chunks)
+    """
+    fn encode_stream(input : Seq(Bytes)) : Seq(Bytes) do
+      Seq.flat_map(input, fn chunk ->
+        match stdlib_gzip_encode(chunk, -1) do
+        Ok(b)  -> Seq.singleton(b)
+        Err(_) -> Seq.empty()
+        end
+      )
+    end
+
+    doc """
+    Decompress a sequence of gzip-compressed byte chunks.
+
+        let decompressed = Compress.Gzip.decode_stream(compressed_chunks)
+    """
+    fn decode_stream(input : Seq(Bytes)) : Seq(Bytes) do
+      Seq.flat_map(input, fn chunk ->
+        match stdlib_gzip_decode(chunk) do
+        Ok(b)  -> Seq.singleton(b)
+        Err(_) -> Seq.empty()
+        end
+      )
+    end
+
+  end
+
+  -- ── Deflate ──────────────────────────────────────────────────────────────
+
+  mod Deflate do
+
+    doc """
+    Compress bytes with raw deflate (no gzip header).
+
+        match Compress.Deflate.encode(data) do
+        Ok(compressed) -> compressed
+        Err(_) -> panic("encode failed")
+        end
+    """
+    fn encode(data : Bytes) : Result(Bytes, Compress.Error) do
+      stdlib_deflate_encode(data)
+    end
+
+    doc """
+    Decompress raw deflate-compressed bytes (no gzip header expected).
+
+        match Compress.Deflate.decode(compressed) do
+        Ok(original) -> original
+        Err(_) -> panic("decode failed")
+        end
+    """
+    fn decode(data : Bytes) : Result(Bytes, Compress.Error) do
+      stdlib_deflate_decode(data)
+    end
+
+  end
+
+  -- ── Zstd ─────────────────────────────────────────────────────────────────
+
+  mod Zstd do
+
+    -- Compression level for zstd encoding.
+    type Level =
+        Fast(Int)  -- negative levels in zstd API: fast but lower ratio
+      | Default    -- zstd default (level 3)
+      | Best       -- zstd level 22 (maximum ratio, slowest)
+
+    pfn level_int(l) do
+      match l do
+      Fast(n)  -> if n < 1 do 1 else n end
+      Default  -> 3
+      Best     -> 22
+      end
+    end
+
+    doc """
+    Compress bytes with zstd at the default level (3).
+
+        match Compress.Zstd.encode(data) do
+        Ok(compressed) -> compressed
+        Err(e) -> panic("zstd encode failed: " ++ e)
+        end
+    """
+    fn encode(data : Bytes) : Result(Bytes, Compress.Error) do
+      stdlib_zstd_encode(data, 3)
+    end
+
+    doc """
+    Compress bytes with zstd at an explicit level.
+
+        Compress.Zstd.encode_level(data, Zstd.Best)
+        Compress.Zstd.encode_level(data, Zstd.Fast(1))
+    """
+    fn encode_level(data : Bytes, level : Level) : Result(Bytes, Compress.Error) do
+      stdlib_zstd_encode(data, level_int(level))
+    end
+
+    doc """
+    Decompress zstd-compressed bytes.
+
+        match Compress.Zstd.decode(compressed) do
+        Ok(original) -> original
+        Err(e) -> panic("zstd decode failed: " ++ e)
+        end
+    """
+    fn decode(data : Bytes) : Result(Bytes, Compress.Error) do
+      stdlib_zstd_decode(data)
+    end
+
+    doc """
+    Compress a sequence of byte chunks with zstd at the default level.
+    """
+    fn encode_stream(input : Seq(Bytes)) : Seq(Bytes) do
+      Seq.flat_map(input, fn chunk ->
+        match stdlib_zstd_encode(chunk, 3) do
+        Ok(b)  -> Seq.singleton(b)
+        Err(_) -> Seq.empty()
+        end
+      )
+    end
+
+    doc """
+    Decompress a sequence of zstd-compressed byte chunks.
+    """
+    fn decode_stream(input : Seq(Bytes)) : Seq(Bytes) do
+      Seq.flat_map(input, fn chunk ->
+        match stdlib_zstd_decode(chunk) do
+        Ok(b)  -> Seq.singleton(b)
+        Err(_) -> Seq.empty()
+        end
+      )
+    end
+
+  end
+
+  -- ── Brotli ───────────────────────────────────────────────────────────────
+
+  mod Brotli do
+
+    -- Encoding mode hint for brotli.
+    type Mode =
+        Generic  -- default; any data
+      | Text     -- UTF-8 text (better ratio for prose/HTML)
+      | Font     -- WOFF/WOFF2 font data
+
+    -- Compression level for brotli (0–11).
+    type Level = Level(Int)
+
+    pfn mode_int(m) do
+      match m do
+      Generic -> 0
+      Text    -> 1
+      Font    -> 2
+      end
+    end
+
+    pfn level_int(l) do
+      match l do
+      Level(n) ->
+        if n < 0 || n > 11 do
+          panic("Compress.Brotli: level must be 0–11, got " ++ int_to_string(n))
+        else n end
+      end
+    end
+
+    doc """
+    Compress bytes with brotli at the default level (6) in Generic mode.
+
+        match Compress.Brotli.encode(data) do
+        Ok(compressed) -> compressed
+        Err(e) -> panic("brotli encode failed: " ++ e)
+        end
+    """
+    fn encode(data : Bytes) : Result(Bytes, Compress.Error) do
+      stdlib_brotli_encode(data, 0, 6)
+    end
+
+    doc """
+    Compress bytes with brotli at an explicit mode and level.
+
+        Compress.Brotli.encode_mode(data, Brotli.Text, Brotli.Level(9))
+    """
+    fn encode_mode(data : Bytes, mode : Mode, level : Level) : Result(Bytes, Compress.Error) do
+      stdlib_brotli_encode(data, mode_int(mode), level_int(level))
+    end
+
+    doc """
+    Decompress brotli-compressed bytes.
+
+        match Compress.Brotli.decode(compressed) do
+        Ok(original) -> original
+        Err(e) -> panic("brotli decode failed: " ++ e)
+        end
+    """
+    fn decode(data : Bytes) : Result(Bytes, Compress.Error) do
+      stdlib_brotli_decode(data)
+    end
+
+  end
+
+  -- ── HTTP helpers ─────────────────────────────────────────────────────────
+
+  doc """
+  List the content-encoding tokens from an Accept-Encoding header value.
+
+      Compress.accept_encoding("gzip, deflate, br")
+      -- ["gzip", "deflate", "br"]
+
+  Returns an empty list if the header is absent or empty.
+  """
+  fn accept_encoding(header_value : String) : List(String) do
+    let parts = string_split(header_value, ",")
+    fn collect(xs, acc) do
+      match xs do
+      Nil -> acc
+      Cons(s, rest) ->
+        let t = string_trim(s)
+        if string_byte_length(t) > 0 do
+          collect(rest, Cons(t, acc))
+        else
+          collect(rest, acc)
+        end
+      end
+    end
+    fn rev(xs, acc) do
+      match xs do
+      Nil -> acc
+      Cons(h, t) -> rev(t, Cons(h, acc))
+      end
+    end
+    rev(collect(parts, Nil), Nil)
+  end
+
+  doc """
+  Choose the best compression encoding supported by the client, given the
+  parsed Accept-Encoding tokens.  Prefers zstd > br > gzip in that order.
+  Returns None if no supported encoding was advertised.
+
+      Compress.best_encoding(["gzip", "br"])
+      -- Some("br")
+
+      Compress.best_encoding(["identity"])
+      -- None
+  """
+  fn best_encoding(tokens : List(String)) : Option(String) do
+    fn has(tok) do
+      fn go(xs) do
+        match xs do
+        Nil -> false
+        Cons(t, rest) -> if t == tok do true else go(rest) end
+        end
+      end
+      go(tokens)
+    end
+    if has("zstd") do Some("zstd")
+    else if has("br") do Some("br")
+    else if has("gzip") do Some("gzip")
+    else None
+    end end end
+  end
+
+end
