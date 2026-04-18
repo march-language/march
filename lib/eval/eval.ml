@@ -2298,9 +2298,13 @@ let base_env : env =
   ; ("-",  arith_num ( - ) ( -. ) "-")
   ; ("*",  arith_num ( * ) ( *. ) "*")
   ; ("/",  VBuiltin ("/", function
-        | [VInt a;   VInt b]   when b <> 0 -> VInt (a / b)
-        | [VFloat a; VFloat b]             -> VFloat (a /. b)
-        | [VInt _;   VInt 0]               -> eval_error "division by zero"
+        | [VInt a;   VInt b]   when b <> 0   -> VInt (a / b)
+        | [VFloat a; VFloat b] when b <> 0.0 -> VFloat (a /. b)
+        | [VInt _;   VInt 0]                 -> eval_error "division by zero"
+        (* Float division by zero: unlike integer sdiv, OCaml/IEEE 754 silently
+           returns infinity rather than raising an exception, so we must catch it
+           explicitly.  Same guard applies to the /. operator below. *)
+        | [VFloat _; VFloat 0.0]             -> eval_error "division by zero"
         | _ -> eval_error "builtin /: expected two numbers"))
   ; ("%",  VBuiltin ("%", function
         | [VInt a; VInt b] when b <> 0 -> VInt (a mod b)
@@ -2317,7 +2321,8 @@ let base_env : env =
         | [VFloat a; VFloat b] -> VFloat (a *. b)
         | _ -> eval_error "builtin *.: expected two floats"))
   ; ("/.", VBuiltin ("/.", function
-        | [VFloat a; VFloat b] -> VFloat (a /. b)
+        | [VFloat a; VFloat b] when b <> 0.0 -> VFloat (a /. b)
+        | [VFloat _; VFloat 0.0]             -> eval_error "division by zero"
         | _ -> eval_error "builtin /.: expected two floats"))
     (* Comparisons *)
   ; ("==", cmp_op ( = )  ( = )  ( = )  ( = )  "==")

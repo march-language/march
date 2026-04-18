@@ -19814,6 +19814,122 @@ end|} in
   Alcotest.(check bool) "format_inner not flagged via impl method" false
     (List.mem "format_inner" flagged)
 
+(* ────────────────────────────────────────────────────────────────────────────
+   Adversarial-regression tests
+   Each test corresponds to a bug found by the adversarial compiler review.
+   See specs/adversarial_bugs.md for the full analysis.
+   ──────────────────────────────────────────────────────────────────────────── *)
+
+(** Bug 1a: /. (float-specific division) by 0.0 must raise, not return inf.
+    Before the fix, OCaml's /. propagated IEEE infinity silently. *)
+let test_adv_float_div_zero_dot () =
+  let raised = ref false in
+  (try
+    let env = eval_module {|mod T do
+      fn f() do 1.0 /. 0.0 end
+    end|} in
+    ignore (call_fn env "f" [])
+  with March_eval.Eval.Eval_error _ -> raised := true);
+  Alcotest.(check bool) "/. 0.0 raises Eval_error" true !raised
+
+(** Bug 1b: generic / on two floats with zero divisor must also raise. *)
+let test_adv_float_div_zero_generic () =
+  let raised = ref false in
+  (try
+    let env = eval_module {|mod T do
+      fn f() : Float do 5.0 / 0.0 end
+    end|} in
+    ignore (call_fn env "f" [])
+  with March_eval.Eval.Eval_error _ -> raised := true);
+  Alcotest.(check bool) "/ Float 0.0 raises Eval_error" true !raised
+
+(** Sanity: integer / 0 still raises (should be unchanged by the fix). *)
+let test_adv_int_div_zero () =
+  let raised = ref false in
+  (try
+    let env = eval_module {|mod T do
+      fn f() do 7 / 0 end
+    end|} in
+    ignore (call_fn env "f" [])
+  with March_eval.Eval.Eval_error _ -> raised := true);
+  Alcotest.(check bool) "int / 0 still raises Eval_error" true !raised
+
+(** Sanity: legitimate float division must continue to work after the fix. *)
+let test_adv_float_div_nonzero () =
+  let env = eval_module {|mod T do
+    fn f() : Float do 10.0 /. 4.0 end
+  end|} in
+  let v = call_fn env "f" [] in
+  (match v with
+   | March_eval.Eval.VFloat f ->
+     Alcotest.(check bool) "10.0 /. 4.0 = 2.5" true (abs_float (f -. 2.5) < 1e-9)
+   | _ -> Alcotest.fail "expected VFloat")
+
+(** Sanity: -0.0 as dividend (not divisor) must not raise. *)
+let test_adv_float_div_neg_zero_dividend () =
+  let env = eval_module {|mod T do
+    fn f() : Float do 0.0 /. 2.0 end
+  end|} in
+  let v = call_fn env "f" [] in
+  (match v with
+   | March_eval.Eval.VFloat f ->
+     Alcotest.(check bool) "0.0 /. 2.0 = 0.0" true (f = 0.0)
+   | _ -> Alcotest.fail "expected VFloat")
+
+(** Bug 8: TRecord sort invariant — records with fields declared in any order
+    must typecheck correctly.  Before the documented invariant was enforced,
+    a TRecord created without sorting would silently produce wrong mismatch
+    errors because unification compares field-name lists with structural (=).
+    This test verifies that declaring fields in non-lexicographic source order
+    still produces correct types (the type-checker sorts them internally). *)
+let test_adv_trecord_sort_invariant () =
+  (* Field order in source: z, a, b — reversed from lexicographic a, b, z.
+     Unification must succeed because both sides are sorted before comparison. *)
+  let errors = typecheck {|mod T do
+    type Point = { z: Int, a: Int, b: Int }
+    fn mk() : Point do { z = 3, a = 1, b = 2 } end
+    fn get_a(p: Point) : Int do p.a end
+    fn f() : Int do
+      let p = mk()
+      get_a(p)
+    end
+  end|} in
+  Alcotest.(check bool) "TRecord out-of-order source fields typecheck ok" false
+    (has_errors errors)
+
+(** Bug 7 (Perceus scrutinee-in-body): a pattern where the outer scrutinee is
+    used inside one branch of a nested conditional must not crash or produce
+    wrong results.  This is the sort_by-style pattern that triggered the
+    original RC underflow (commit 9930ce5) which the scrutinee_borrowed
+    case-2 fix was designed to handle.
+    We use the interpreter here; sort_by compiled tests cover the LLVM path. *)
+let test_adv_perceus_scrutinee_in_body () =
+  (* A nested match where the outer list is referenced in one inner arm. *)
+  let env = eval_module {|mod T do
+    type Tree = Leaf | Node(Int, Tree, Tree)
+
+    pfn sum_with_parent(t : Tree, parent_val : Int) : Int do
+      match t do
+        Leaf -> parent_val
+        Node(v, left, right) ->
+          match left do
+            Leaf ->
+              sum_with_parent(right, v + parent_val)
+            Node(lv, _, _) ->
+              let combined = lv + v
+              sum_with_parent(right, combined + parent_val)
+          end
+      end
+    end
+
+    fn f() : Int do
+      let tree = Node(10, Node(3, Leaf, Leaf), Node(5, Leaf, Leaf))
+      sum_with_parent(tree, 0)
+    end
+  end|} in
+  let result = vint (call_fn env "f" []) in
+  Alcotest.(check int) "scrutinee-in-body sum_with_parent = 18" 18 result
+
 let () =
   Alcotest.run "march"
     [
@@ -21544,5 +21660,22 @@ let () =
         Alcotest.test_case "truly unused pfn IS flagged"           `Quick test_lint_pfn_truly_unused;
         Alcotest.test_case "pfn actor_init not flagged"            `Quick test_lint_pfn_actor_init;
         Alcotest.test_case "pfn impl method body not flagged"      `Quick test_lint_pfn_impl_method;
+      ]);
+      (* ── Adversarial bug regression tests ─────────────────────────────── *)
+      ("adversarial-regressions", [
+        Alcotest.test_case "float /. 0.0 raises div-by-zero" `Quick
+          test_adv_float_div_zero_dot;
+        Alcotest.test_case "float / 0.0 generic raises div-by-zero" `Quick
+          test_adv_float_div_zero_generic;
+        Alcotest.test_case "int / 0 still raises (unchanged)" `Quick
+          test_adv_int_div_zero;
+        Alcotest.test_case "float /. nonzero does not raise" `Quick
+          test_adv_float_div_nonzero;
+        Alcotest.test_case "float negzero /. nonzero ok" `Quick
+          test_adv_float_div_neg_zero_dividend;
+        Alcotest.test_case "TRecord sort invariant check (MARCH_DEBUG_TC)" `Quick
+          test_adv_trecord_sort_invariant;
+        Alcotest.test_case "scrutinee-in-body: sort_by-style pattern still correct" `Quick
+          test_adv_perceus_scrutinee_in_body;
       ]);
     ]

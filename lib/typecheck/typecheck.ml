@@ -81,7 +81,14 @@ type ty =
   | TVar    of tvar ref                  (** Unification variable *)
   | TArrow  of ty * ty                   (** a -> b *)
   | TTuple  of ty list                   (** (a, b, c) — unit when empty *)
-  | TRecord of (string * ty) list        (** { x : Int, y : Float } (sorted) *)
+  | TRecord of (string * ty) list
+    (** { x : Int, y : Float }
+        INVARIANT: field list is sorted lexicographically by field name.
+        All TRecord values must be constructed via [List.sort (fun (a,_) (b,_) ->
+        String.compare a b) flds] — never by bare [TRecord flds].
+        Unification compares field-name lists with structural (=), which is
+        order-sensitive; an unsorted TRecord will produce spurious type mismatches
+        that are very hard to diagnose.  See [assert_trecord_sorted] below. *)
   | TLin    of Ast.linearity * ty        (** linear / affine wrapper *)
   | TNat    of int                       (** Type-level natural literal *)
   | TNatOp  of Ast.nat_op * ty * ty      (** n + m, n * m *)
@@ -1628,6 +1635,27 @@ let rec normalize_tnat t =
      | _                           -> TNatOp (op, a, b))
   | t -> t
 
+(** Assert that a [TRecord]'s field list satisfies the sorted-name invariant.
+    Raises [Failure] with a diagnostic if the invariant is violated.
+    Called at every TRecord unification site to catch construction-path bugs
+    early — a misordered TRecord produces confusing "type mismatch" errors
+    that look like unrelated failures.
+    Only active in debug builds (guarded by [Sys.getenv_opt]) to avoid overhead
+    in production; set [MARCH_DEBUG_TC=1] to enable. *)
+let assert_trecord_sorted flds label =
+  match Sys.getenv_opt "MARCH_DEBUG_TC" with
+  | Some _ ->
+    let names = List.map fst flds in
+    let sorted = List.sort String.compare names in
+    if names <> sorted then
+      failwith (Printf.sprintf
+        "INVARIANT VIOLATION: TRecord %s has unsorted fields [%s]; expected [%s]. \
+         All TRecord values must be constructed with List.sort."
+        label
+        (String.concat ", " names)
+        (String.concat ", " sorted))
+  | None -> ()
+
 (** Unify [t1] and [t2], reporting any mismatch to [env.errors].
     Uses [TError] as a recovery sentinel — if either side is [TError]
     the constraint is silently satisfied (the error was already reported). *)
@@ -1665,6 +1693,11 @@ let rec unify env ~span ?(reason = None) t1 t2 =
     List.iter2 (unify env ~span ~reason) ts1 ts2
 
   | TRecord f1, TRecord f2 ->
+    (* Defensive: check the sorted-name invariant when debug mode is on.
+       A TRecord with unsorted fields produces confusing mismatches here
+       because ns1 <> ns2 even if the field sets are identical. *)
+    assert_trecord_sorted f1 "lhs";
+    assert_trecord_sorted f2 "rhs";
     let ns1 = List.map fst f1 and ns2 = List.map fst f2 in
     if ns1 <> ns2 then
       report_mismatch env ~span ~reason t1 t2

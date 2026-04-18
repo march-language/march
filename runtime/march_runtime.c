@@ -289,6 +289,22 @@ void *march_float_to_string(double f) {
     return march_string_lit(buf, len);
 }
 
+/* Checked float division.  Unlike integer sdiv, LLVM's fdiv follows IEEE 754
+ * and returns ±infinity or NaN on division by zero — no hardware trap.
+ * The compiled backend calls this helper instead of emitting a raw fdiv so
+ * that `1.0 / 0.0` and `1.0 /. 0.0` behave consistently with the interpreter
+ * (which raises "division by zero").
+ *
+ * NOTE: We check for exact 0.0 (bit-for-bit), matching OCaml's `b <> 0.0`
+ * guard in eval.ml.  Subnormal divisors are allowed through intentionally. */
+double march_checked_fdiv(double a, double b) {
+    if (b == 0.0) {
+        fputs("march: runtime error: division by zero\n", stderr);
+        exit(1);
+    }
+    return a / b;
+}
+
 void *march_bool_to_string(int64_t b) {
     return b ? march_string_lit("true", 4) : march_string_lit("false", 5);
 }
@@ -296,7 +312,13 @@ void *march_bool_to_string(int64_t b) {
 void *march_string_concat(void *a, void *b) {
     march_string *sa = (march_string *)a;
     march_string *sb = (march_string *)b;
-    int64_t total = sa->len + sb->len;
+    int64_t total;
+    /* Bug fix: sa->len + sb->len can overflow int64_t for very large strings,
+     * wrapping to a small value and causing the subsequent malloc to allocate
+     * far less memory than the memcpy writes.  Abort cleanly instead. */
+    if (__builtin_add_overflow(sa->len, sb->len, &total)) {
+        fputs("march: runtime error: string too large (concat overflow)\n", stderr); exit(1);
+    }
     march_string *s = malloc(sizeof(march_string) + (size_t)total + 1);
     if (!s) { fputs("march: out of memory\n", stderr); exit(1); }
     s->rc  = 1;
@@ -1577,7 +1599,13 @@ void *march_string_trim_end(void *s) {
 void *march_string_repeat(void *s, int64_t n) {
     march_string *ss = (march_string *)s;
     if (n <= 0) return march_string_lit("", 0);
-    int64_t total = ss->len * n;
+    int64_t total;
+    /* Bug fix: ss->len * n silently overflows when both values are large,
+     * producing a tiny allocation that the memcpy loop then overflows.
+     * Example: len=500_000_000, n=5 wraps to a negative total. */
+    if (__builtin_mul_overflow(ss->len, n, &total)) {
+        fputs("march: runtime error: string too large (repeat overflow)\n", stderr); exit(1);
+    }
     march_string *r = malloc(sizeof(march_string) + (size_t)total + 1);
     if (!r) { fputs("march: out of memory\n", stderr); exit(1); }
     r->rc = 1; r->len = total;
@@ -2662,15 +2690,62 @@ double march_unix_time(void) {
 /* ── TypedArray builtins ─────────────────────────────────────────────── */
 /* TypedArray is a heap object with layout:
  *   [rc:i64][tag:i32][pad:i32][len:i64][cap:i64][elements: void*[]]
- * Each element slot is 8 bytes — can hold i64, double (bitcast), or ptr. */
+ * Each element slot is 8 bytes — can hold i64, double (bitcast), or ptr.
+ *
+ * SAFETY INVARIANTS (maintained by all functions below):
+ *   1. All index arguments must satisfy 0 <= i < len (checked at entry).
+ *   2. len*8 must not overflow int64_t (checked in typed_array_alloc).
+ *   3. Closure arguments to map/filter/fold must be non-NULL; callers are
+ *      responsible for passing a valid March closure object.
+ *
+ * Closure layout assumed by map/filter/fold:
+ *   offset  0: i64  rc / tag word
+ *   offset  8: ptr  function pointer (called as fn(closure, arg, ...))
+ *   offset 16+: captured environment fields
+ * The compiler always emits closures with this layout via lower.ml. */
 #define TYPED_ARRAY_HDR_SIZE (16 + 8 + 8)  /* hdr + len + cap */
 
 static void *typed_array_alloc(int64_t len) {
-    size_t sz = (size_t)(TYPED_ARRAY_HDR_SIZE + len * 8);
+    /* Bug fix: len * 8 can overflow int64_t for len > INT64_MAX/8, producing a
+     * tiny allocation whose writes later corrupt adjacent heap objects. */
+    int64_t body;
+    if (__builtin_mul_overflow(len, (int64_t)8, &body)) {
+        fputs("march: runtime error: array too large (allocation overflow)\n", stderr); exit(1);
+    }
+    size_t sz = (size_t)(TYPED_ARRAY_HDR_SIZE + body);
     void *arr = march_alloc((int64_t)sz);
     *(int64_t *)((char *)arr + 16) = len;   /* len field */
     *(int64_t *)((char *)arr + 24) = len;   /* cap field */
     return arr;
+}
+
+/* Index bounds check shared by get/set.  Aborts with a clear message rather
+ * than silently reading or writing adjacent heap memory. */
+static void typed_array_check_bounds(int64_t i, int64_t len) {
+    if (i < 0 || i >= len) {
+        fprintf(stderr,
+            "march: runtime error: array index out of bounds (index %lld, length %lld)\n",
+            (long long)i, (long long)len);
+        exit(1);
+    }
+}
+
+/* Dispatch a 1-argument closure stored in a March closure object.
+ * Layout: fn ptr at byte offset +8 of the closure; closure is passed as
+ * the first argument so the function can access its captured environment. */
+static inline void *call_closure_1(void *clo, void *arg) {
+    void *(*fn)(void*, void*) = *(void *(**)(void*, void*))((char *)clo + 8);
+    return fn(clo, arg);
+}
+
+static inline int64_t call_closure_1_int(void *clo, void *arg) {
+    int64_t (*fn)(void*, void*) = *(int64_t (**)(void*, void*))((char *)clo + 8);
+    return fn(clo, arg);
+}
+
+static inline void *call_closure_2(void *clo, void *a, void *b) {
+    void *(*fn)(void*, void*, void*) = *(void *(**)(void*, void*, void*))((char *)clo + 8);
+    return fn(clo, a, b);
 }
 
 void *march_typed_array_from_list(void *list) {
@@ -2707,14 +2782,15 @@ int64_t march_typed_array_length(void *arr) {
 }
 
 void *march_typed_array_get(void *arr, int64_t i) {
+    int64_t len = march_typed_array_length(arr);
+    typed_array_check_bounds(i, len);
     return *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
 }
 
 void *march_typed_array_set(void *arr, int64_t i, void *val) {
-    void *new_arr = march_alloc((int64_t)(TYPED_ARRAY_HDR_SIZE + march_typed_array_length(arr) * 8));
     int64_t len = march_typed_array_length(arr);
-    *(int64_t *)((char *)new_arr + 16) = len;
-    *(int64_t *)((char *)new_arr + 24) = len;
+    typed_array_check_bounds(i, len);
+    void *new_arr = typed_array_alloc(len);
     memcpy((char *)new_arr + TYPED_ARRAY_HDR_SIZE,
            (char *)arr + TYPED_ARRAY_HDR_SIZE,
            (size_t)(len * 8));
@@ -2733,12 +2809,8 @@ void *march_typed_array_map(void *arr, void *f) {
     int64_t len = march_typed_array_length(arr);
     void *new_arr = typed_array_alloc(len);
     for (int64_t i = 0; i < len; i++) {
-        void *elem = march_typed_array_get(arr, i);
-        /* Call closure: load fn ptr from field 0, call f(f_clo, elem) */
-        void *fn_ptr_loc = (char *)f + 8;
-        void (*fn)(void) = *(void (**)(void))fn_ptr_loc;
-        void *(*fn_typed)(void*, void*) = (void *(*)(void*, void*))fn;
-        void *result = fn_typed(f, elem);
+        void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+        void *result = call_closure_1(f, elem);
         *(void **)((char *)new_arr + TYPED_ARRAY_HDR_SIZE + i * 8) = result;
     }
     return new_arr;
@@ -2746,14 +2818,18 @@ void *march_typed_array_map(void *arr, void *f) {
 
 void *march_typed_array_filter(void *arr, void *f) {
     int64_t len = march_typed_array_length(arr);
-    void **temp = malloc((size_t)(len * 8));
+    /* Bug fix: malloc return was unchecked; also len*8 could overflow.
+     * typed_array_alloc already guards the overflow; use it for temp too. */
+    int64_t body;
+    if (__builtin_mul_overflow(len, (int64_t)8, &body)) {
+        fputs("march: runtime error: array too large (filter overflow)\n", stderr); exit(1);
+    }
+    void **temp = malloc((size_t)body);
+    if (!temp && len > 0) { fputs("march: out of memory\n", stderr); exit(1); }
     int64_t count = 0;
     for (int64_t i = 0; i < len; i++) {
-        void *elem = march_typed_array_get(arr, i);
-        void *fn_ptr_loc = (char *)f + 8;
-        void (*fn)(void) = *(void (**)(void))fn_ptr_loc;
-        int64_t (*fn_typed)(void*, void*) = (int64_t (*)(void*, void*))fn;
-        if (fn_typed(f, elem)) temp[count++] = elem;
+        void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+        if (call_closure_1_int(f, elem)) temp[count++] = elem;
     }
     void *new_arr = typed_array_alloc(count);
     memcpy((char *)new_arr + TYPED_ARRAY_HDR_SIZE, temp, (size_t)(count * 8));
@@ -2765,11 +2841,8 @@ void *march_typed_array_fold(void *arr, void *acc, void *f) {
     int64_t len = march_typed_array_length(arr);
     void *result = acc;
     for (int64_t i = 0; i < len; i++) {
-        void *elem = march_typed_array_get(arr, i);
-        void *fn_ptr_loc = (char *)f + 8;
-        void (*fn)(void) = *(void (**)(void))fn_ptr_loc;
-        void *(*fn_typed)(void*, void*, void*) = (void *(*)(void*, void*, void*))fn;
-        result = fn_typed(f, result, elem);
+        void *elem = *(void **)((char *)arr + TYPED_ARRAY_HDR_SIZE + i * 8);
+        result = call_closure_2(f, result, elem);
     }
     return result;
 }

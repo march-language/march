@@ -1443,12 +1443,19 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     if ty_a = "double" then begin
       let vb = emit_atom_as ctx "double" b in
       let r  = fresh ctx "ar" in
-      let fop = match f.Tir.v_name with
-        | "+" -> "fadd" | "-" -> "fsub" | "*" -> "fmul" | "/" -> "fdiv"
-        | _ -> "fmul"
-      in
-      let op_str = if ctx.fast_math then fop ^ " fast" else fop in
-      emit ctx (Printf.sprintf "%s = %s double %s, %s" r op_str va vb);
+      (* Division uses march_checked_fdiv so that x / 0.0 aborts with an error
+         rather than silently returning infinity (IEEE 754 default for fdiv).
+         All other float ops use native LLVM instructions directly. *)
+      if f.Tir.v_name = "/" then begin
+        emit ctx (Printf.sprintf "%s = call double @march_checked_fdiv(double %s, double %s)" r va vb)
+      end else begin
+        let fop = match f.Tir.v_name with
+          | "+" -> "fadd" | "-" -> "fsub" | "*" -> "fmul"
+          | _ -> "fmul"
+        in
+        let op_str = if ctx.fast_math then fop ^ " fast" else fop in
+        emit ctx (Printf.sprintf "%s = %s double %s, %s" r op_str va vb)
+      end;
       ("double", r)
     end else begin
       let va' = coerce ctx ty_a va "i64" in
@@ -1519,9 +1526,14 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     let va = emit_atom_as ctx "double" a in
     let vb = emit_atom_as ctx "double" b in
     let r  = fresh ctx "ar" in
-    let op = float_arith_op f.Tir.v_name in
-    let op_str = if ctx.fast_math then op ^ " fast" else op in
-    emit ctx (Printf.sprintf "%s = %s double %s, %s" r op_str va vb);
+    (* /. uses march_checked_fdiv for the same reason as / above. *)
+    if f.Tir.v_name = "/." then
+      emit ctx (Printf.sprintf "%s = call double @march_checked_fdiv(double %s, double %s)" r va vb)
+    else begin
+      let op = float_arith_op f.Tir.v_name in
+      let op_str = if ctx.fast_math then op ^ " fast" else op in
+      emit ctx (Printf.sprintf "%s = %s double %s, %s" r op_str va vb)
+    end;
     ("double", r)
 
   (* ── Boolean operators ───────────────────────────────────────────── *)
@@ -3215,8 +3227,10 @@ declare void @march_print_stderr(ptr %s)
 declare ptr  @march_io_read_line()
 declare ptr  @march_string_lit(ptr %s, i64 %len)
 declare ptr  @march_int_to_string(i64 %n)
-declare ptr  @march_float_to_string(double %f)
-declare ptr  @march_bool_to_string(i64 %b)
+declare ptr    @march_float_to_string(double %f)
+declare ptr    @march_bool_to_string(i64 %b)
+; Checked float division — aborts on divisor == 0.0 instead of returning inf/NaN
+declare double @march_checked_fdiv(double %a, double %b)
 declare ptr  @march_string_concat(ptr %a, ptr %b)
 declare i64  @march_string_eq(ptr %a, ptr %b)
 ; Ord / Hash builtins

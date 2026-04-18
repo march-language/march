@@ -621,12 +621,35 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
          variables are borrowed references extracted from it.  They must not be
          freed at their last use; re-add them to live_after so post_dec_var
          does not fire for them after borrowed calls inside the branch body.
+
          The scrutinee is borrowed in two cases:
-         1. It lives in live_after (used after the entire case).
-         2. It appears free in this branch's body (used in a different sub-path
-            within the branch, e.g. the else side of an if inside the branch).
+           1. It lives in live_after (used after the entire case).
+           2. It appears free in this branch's body (used in a different sub-path
+              within the branch, e.g. the else side of an if inside the branch).
+
          Case 2 was previously unhandled, causing br_vars to be passed to owning
-         positions without IncRC — the root cause of the sort_by RC underflow. *)
+         positions without IncRC — the root cause of the sort_by RC underflow
+         (commit 9930ce5).
+
+         KNOWN LIMITATION — conservative approximation (memory-safe, minor leak):
+         [name_free_in] returns true if the scrutinee appears on ANY path in the
+         body, including just one branch of a nested if-else.  When the scrutinee
+         appears on only SOME paths, the branch variables are conservatively kept
+         live everywhere, preventing them from being freed on paths where the
+         scrutinee is NOT used — a bounded memory leak.
+
+         Using a path-sensitive "name_free_on_every_path" check instead would
+         cause the sort_by underflow to recur: in List.sort_by's merge loop the
+         outer scrutinee (xs) appears in the Cons arm but not the Nil arm, so
+         name_free_on_every_path returns false, scrutinee_borrowed becomes false,
+         br_vars are freed, and the subsequent pass-to-owning-position reads freed
+         memory.
+
+         The correct fix requires path-sensitive analysis within the branch body —
+         adding br_vars to la only on the sub-paths where the scrutinee actually
+         escapes, and emitting EDecRC on sub-paths where it does not.  This is a
+         significant refactor of the insert_rc_expr traversal.  Until then, the
+         conservative direction (leak-not-crash) is intentional. *)
       let scrutinee_borrowed = match a with
         | Tir.AVar v ->
           StringSet.mem v.Tir.v_name live_after
