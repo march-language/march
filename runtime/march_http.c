@@ -97,7 +97,10 @@ static void *make_cons(void *head, void *tail) {
 static void *make_int_cons(int64_t n, void *tail) {
     void *c = march_alloc(16 + 16);
     *(int32_t *)((char *)c + 8)  = 1;          /* tag = 1 (Cons) */
-    *(int64_t *)((char *)c + 16) = n;
+    /* Pre-tag the Int payload with (n<<1)|1: under the uniform low-bit
+     * integer tagging scheme, the compiler emits `ashr #1` when extracting
+     * an Int field, so a raw value would be halved on untag. */
+    *(int64_t *)((char *)c + 16) = (n << 1) | 1;
     *(void **)((char *)c + 24)   = tail;
     return c;
 }
