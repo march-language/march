@@ -220,9 +220,13 @@ let rec live_before (e : Tir.expr) (live_after : live_set) : live_set =
     live_after  (* global ref — no local liveness *)
   | Tir.EAtom (Tir.ALit _) ->
     live_after
-  | Tir.EApp (f, args) ->
+  | Tir.EApp (_, args) ->
+    (* After defun, the callee in EApp is always a top-level function symbol
+       (a code-segment address), never a heap-allocated local variable.
+       Only the call arguments contribute to local variable liveness.
+       Including the callee name caused spurious liveness propagation for
+       operators like &&, || whose llvm_name produces an invalid symbol. *)
     live_after
-    |> StringSet.add f.Tir.v_name
     |> StringSet.union (vars_of_atoms args)
   | Tir.ECallPtr (a, args) ->
     live_after
@@ -393,7 +397,13 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
         else Some a
       ) indexed_args
     in
-    let inc_vars = find_inc_vars ((Tir.AVar f) :: non_borrowed_args) live_after in
+    (* Don't include (AVar f) in find_inc_vars: after defun, the EApp callee
+       is always a top-level function symbol (code address), never a
+       heap-allocated closure.  Only ECallPtr dispatch involves owned closure
+       pointers.  Including f here was harmless when needs_rc (TFn _) = false
+       but after 831e315 causes spurious EIncRC for operator names like &&, ||
+       whose llvm_name maps to @__ — an undefined symbol that fails to link. *)
+    let inc_vars = find_inc_vars non_borrowed_args live_after in
     (* 2. Borrowed args whose last use is this call: caller is responsible for Dec.
           Closure FVs are exempt: the closure owns them and keeps them alive.
           Dedup by v_name: when the same variable is passed at multiple
@@ -463,7 +473,10 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     in
     let lb =
       live_after
-      |> StringSet.add f.Tir.v_name
+      (* f.v_name is a top-level function symbol — not a heap variable.
+         Adding it to lb would propagate fake liveness for operators like
+         && / || into upstream live sets, potentially triggering spurious
+         cross-branch EDecRC for names that have no alloca slot. *)
       |> StringSet.union (vars_of_atoms args)
     in
     (e'', lb)
