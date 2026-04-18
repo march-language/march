@@ -4324,6 +4324,58 @@ let test_actor_handler_no_message_params_correct () =
   end|} in
   Alcotest.(check bool) "no-param handlers: no errors" false (has_errors ctx)
 
+(* Regression: let-generalization hole for forward-referenced pfn helpers.
+   When function A appears before helper B in source order and calls B,
+   pass-1 seeds B with Mono(TVar r) at level 1.  During A's body inference
+   the call site unifies r into the type chain.  generalize() previously
+   wrapped those shared mutable TVar refs directly in the Poly scheme.
+   When B's own body was later checked its recursive call unified the same
+   TVar (e.g. ?lst_elem → List(Int)), silently corrupting A's stored scheme
+   so a second call site with a different element type failed with a spurious
+   type mismatch.  Fix: generalize() deep-copies quantified TVar refs into
+   fresh isolated allocations so future unification of the originals cannot
+   reach the stored scheme. *)
+let test_tc_forward_ref_poly_helper_two_call_sites () =
+  (* count calls go which is defined AFTER count — the forward-reference case. *)
+  let ctx = typecheck {|mod Test do
+    pfn count(lst) do
+      go(lst, 0)
+    end
+    pfn go(lst, n) do
+      match lst do
+      Nil -> n
+      Cons(_, rest) -> go(rest, n + 1)
+      end
+    end
+    fn main() do
+      let a = count([1, 2, 3])
+      let b = count(["x", "y"])
+      a + b
+    end
+  end|} in
+  Alcotest.(check bool)
+    "forward-ref pfn called at two element types: no errors" false (has_errors ctx)
+
+let test_tc_forward_ref_poly_reverse_order () =
+  (* Same pattern but go is defined before count — should also work.
+     Verifies the fix doesn't break the already-working ordering. *)
+  let ctx = typecheck {|mod Test do
+    pfn go(lst, n) do
+      match lst do
+      Nil -> n
+      Cons(_, rest) -> go(rest, n + 1)
+      end
+    end
+    pfn count(lst) do go(lst, 0) end
+    fn main() do
+      let a = count([1, 2, 3])
+      let b = count(["x", "y"])
+      a + b
+    end
+  end|} in
+  Alcotest.(check bool)
+    "normal-order pfn called at two element types: no errors" false (has_errors ctx)
+
 (* ── Perceus RC tests ────────────────────────────────────────────────── *)
 
 (** Parse, desugar, typecheck, lower, mono, defun, then run perceus. *)
@@ -6043,6 +6095,65 @@ let test_perceus_closure_fv_single_use_incrc () =
   Alcotest.(check bool)
     "apply fn EIncRC's captured FV before consuming call" true
     (has_incrc apply_fn.March_tir.Tir.fn_body)
+
+(* Regression: commit 831e315 changed needs_rc(TFn _) to true, which caused
+   Perceus to insert EIncRC for the callee in every EApp.  After defun all
+   EApp callees are top-level function symbols (code addresses), not heap
+   closures.  For operators like && and || whose llvm_name maps to @__
+   (an undefined symbol), this produced a call to @__() that failed to link.
+   Fix: EApp callee excluded from liveness / find_inc_vars in perceus.ml.
+   This test ensures no EIncRC is inserted for the operator callee. *)
+let test_perceus_no_incrc_for_eapp_operator_callee () =
+  (* && and || are the operators most likely to trigger the bug because
+     their llvm_name is "__" — an undefined symbol when naively called. *)
+  let m = perceus_module {|mod Test do
+    fn uses_and(a : Bool, b : Bool) : Bool do a && b end
+    fn uses_or(a : Bool, b : Bool) : Bool do a || b end
+    fn uses_not(a : Bool) : Bool do !a end
+  end|} in
+  let rec has_incrc_for_builtin = function
+    | March_tir.Tir.EIncRC (March_tir.Tir.AVar v)
+      when (let n = v.March_tir.Tir.v_name in
+            n = "&&" || n = "||" || n = "not" || n = "!") -> true
+    | March_tir.Tir.ELet (_, e1, e2) ->
+      has_incrc_for_builtin e1 || has_incrc_for_builtin e2
+    | March_tir.Tir.ESeq (e1, e2) ->
+      has_incrc_for_builtin e1 || has_incrc_for_builtin e2
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> has_incrc_for_builtin b.March_tir.Tir.br_body) brs
+      || (match def with Some e -> has_incrc_for_builtin e | None -> false)
+    | March_tir.Tir.ELetRec (fns, body) ->
+      List.exists (fun f -> has_incrc_for_builtin f.March_tir.Tir.fn_body) fns
+      || has_incrc_for_builtin body
+    | _ -> false
+  in
+  List.iter (fun fn ->
+    Alcotest.(check bool)
+      (Printf.sprintf "no EIncRC for operator callee in %s" fn.March_tir.Tir.fn_name)
+      false (has_incrc_for_builtin fn.March_tir.Tir.fn_body)
+  ) m.March_tir.Tir.tm_fns
+
+(* Regression: same bug at the LLVM IR level — ensure the emitted IR for a
+   function using && contains no call to @__ (the undefined symbol produced
+   when llvm_name "&&" = "__" was naively materialized as a call). *)
+let test_llvm_no_call_to_double_underscore () =
+  let src = {|mod Test do
+    fn and_op(a : Bool, b : Bool) : Bool do a && b end
+    fn or_op(a : Bool, b : Bool)  : Bool do a || b end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map m in
+  let tir = March_tir.Mono.monomorphize tir in
+  let tir = March_tir.Defun.defunctionalize tir in
+  let tir = March_tir.Perceus.perceus tir in
+  let ir  = March_tir.Llvm_emit.emit_module tir in
+  (* The bug was that @__ was emitted as a called symbol. *)
+  let has_call_to_dunder =
+    try ignore (Str.search_forward (Str.regexp_string "call.*@__") ir 0); true
+    with Not_found -> false
+  in
+  Alcotest.(check bool) "no call to @__ in generated IR" false has_call_to_dunder
 
 (* --- multiline tests --- *)
 
@@ -19916,6 +20027,9 @@ let () =
           Alcotest.test_case "actor handler unannotated param arity err" `Quick test_actor_handler_unannotated_param_wrong_arity;
           Alcotest.test_case "actor handler state spread correct"      `Quick test_actor_handler_state_spread_correct;
           Alcotest.test_case "actor handler no-param msgs correct"      `Quick test_actor_handler_no_message_params_correct;
+          (* Regression: let-generalization hole for forward-referenced pfn helpers *)
+          Alcotest.test_case "forward-ref pfn poly two call sites"      `Quick test_tc_forward_ref_poly_helper_two_call_sites;
+          Alcotest.test_case "normal-order pfn poly two call sites"     `Quick test_tc_forward_ref_poly_reverse_order;
         ] );
       ( "mpst",
         [
@@ -20146,6 +20260,9 @@ let () =
           Alcotest.test_case "scrut-escape rewrite (rc50)" `Quick test_perceus_scrut_escape_rewrite;
           Alcotest.test_case "closure FV single-use incrc (rc64)" `Quick test_perceus_closure_fv_single_use_incrc;
           Alcotest.test_case "elide preserves mixed atomicity (P4)" `Quick test_perceus_elide_preserves_mixed_atomicity;
+          (* Regression: 831e315 needs_rc(TFn) caused spurious EIncRC for EApp
+             operator callees like && / || whose llvm_name maps to @__ *)
+          Alcotest.test_case "no EIncRC for && / || callee (831e315)" `Quick test_perceus_no_incrc_for_eapp_operator_callee;
         ] );
       ( "lean_theorem_properties", [
           Alcotest.test_case "lin_drop_is_free"          `Quick test_thm_lin_drop_is_free;
@@ -20399,6 +20516,9 @@ let () =
           test_int_tag_coerce_ir;
         Alcotest.test_case "int tag wrapper IR (shl+or in wrapper)" `Quick
           test_int_tag_wrapper_ir;
+        (* Regression: 831e315 + perceus caused @__ undefined symbol in &&/|| *)
+        Alcotest.test_case "no @__ call for && / || (831e315)" `Quick
+          test_llvm_no_call_to_double_underscore;
       ]);
       ("string stdlib", [
         Alcotest.test_case "byte_size"           `Quick test_string_byte_size;
