@@ -637,7 +637,16 @@ let bind_linear name lin ty env =
 
 (** [generalize level ty] quantifies all [Unbound] vars at a level
     strictly greater than [level].  Called after leaving a let-binding
-    level to achieve let-polymorphism. *)
+    level to achieve let-polymorphism.
+
+    The returned [Poly] scheme uses freshly-allocated [TVar] refs for
+    each quantified variable.  This breaks aliasing between the scheme
+    and any mutable [TVar] refs still held by other parts of the program
+    (e.g. forward-reference placeholders shared with mutually-recursive
+    functions processed later in pass 2).  Without the copy, a later
+    function body can unify the original TVar — silently corrupting an
+    already-stored Poly scheme and causing the second call site to see a
+    monomorphized type instead of a fresh instantiation. *)
 let generalize level ty =
   let ids = ref [] in
   let rec collect t = match repr t with
@@ -656,7 +665,31 @@ let generalize level ty =
     | TNat _ | TError    -> ()
   in
   collect ty;
-  if !ids = [] then Mono ty else Poly (!ids, [], ty)
+  if !ids = [] then Mono ty
+  else begin
+    (* Allocate fresh, isolated TVar refs for each quantified id.
+       Level 0 is used so these sentinel refs are never themselves
+       generalized or lowered by occurs-check level adjustments. *)
+    let refresh = List.map (fun id -> (id, ref (Unbound (id, 0)))) !ids in
+    let rec copy t = match repr t with
+      | TVar r ->
+        (match !r with
+         | Unbound (id, _) ->
+           (match List.assoc_opt id refresh with
+            | Some new_r -> TVar new_r
+            | None -> t)
+         | Link _ -> assert false)  (* repr always resolves links *)
+      | TCon   (n, args)   -> TCon   (n, List.map copy args)
+      | TArrow (a, b)      -> TArrow (copy a, copy b)
+      | TTuple ts          -> TTuple (List.map copy ts)
+      | TRecord flds       -> TRecord (List.map (fun (n, t) -> (n, copy t)) flds)
+      | TLin   (l, t)      -> TLin   (l, copy t)
+      | TNatOp (op, a, b)  -> TNatOp (op, copy a, copy b)
+      | TChan  _           -> t   (* session_ty has no polymorphic variables *)
+      | TNat _ | TError    -> t
+    in
+    Poly (!ids, [], copy ty)
+  end
 
 (** [instantiate level env sch] replaces each quantified variable in [sch]
     with a fresh unification variable at [level].  Any class constraints
