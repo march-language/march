@@ -488,10 +488,14 @@ void *march_tcp_connect(void *host_ptr, int64_t port) {
         return r;
     }
     freeaddrinfo(res);
-    /* Return Ok(fd) — fd stored as i64 field 0, Ok=tag0 */
+    /* Return Ok(fd) — fd stored as i64 field 0, Ok=tag0.
+     * Pre-tag the Int payload with (n<<1)|1 per the uniform low-bit
+     * integer tagging scheme (same pattern as march_string_to_int in
+     * march_runtime.c): the compiler emits `ashr #1` when extracting
+     * the Int from Ok(_), so a raw value would be halved on untag. */
     void *ok_obj = march_alloc(24);
     /* tag stays 0 = Ok */
-    *(int64_t *)((char *)ok_obj + 16) = (int64_t)fd;
+    *(int64_t *)((char *)ok_obj + 16) = ((int64_t)fd << 1) | 1;
     return ok_obj;
 }
 
