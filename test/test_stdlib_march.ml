@@ -113,6 +113,7 @@ let all_stdlib_decls =
     "bigint.march";
     "decimal.march";
     "bytes.march";
+    "msgpack.march";
     "process.march";
     "logger.march";
     "flow.march";
@@ -245,6 +246,10 @@ let () =
     ("seq", [
       Alcotest.test_case "Seq module"
         `Quick (run_stdlib_test "test_seq.march" "TestSeq");
+    ]);
+    ("msgpack", [
+      Alcotest.test_case "Msgpack module"
+        `Quick (run_stdlib_test "test_msgpack.march" "TestMsgpack");
     ]);
     (* test_flow.march tests the function-transformer Flow API (from_fn/run/then_)
        which differs from the current Seq-based flow.march implementation.

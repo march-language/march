@@ -743,4 +743,124 @@ mod TestProperties do
 
   end
 
+  -- ================================================================
+  -- Msgpack round-trip properties
+  -- ================================================================
+
+  describe "Msgpack" do
+
+    test "Null round-trips" do
+      match Msgpack.decode(Msgpack.encode(Msgpack.Null)) do
+      Ok(v) -> Test.assert_eq(v, Msgpack.Null, "null round-trip")
+      Err(e) -> panic("decode error: " ++ e)
+      end
+    end
+
+    test "Bool round-trips" do
+      Check.all(Gen.bool(), fn b ->
+        match Msgpack.decode(Msgpack.encode(Msgpack.Bool(b))) do
+        Ok(v) -> v == Msgpack.Bool(b)
+        Err(_) -> false
+        end
+      )
+    end
+
+    test "Int fixint range round-trips" do
+      Check.all(Gen.int(-32, 127), fn n ->
+        match Msgpack.decode(Msgpack.encode(Msgpack.Int(n))) do
+        Ok(v) -> v == Msgpack.Int(n)
+        Err(_) -> false
+        end
+      )
+    end
+
+    test "Int int32 range round-trips" do
+      Check.all(Gen.int(-2147483648, 2147483647), fn n ->
+        match Msgpack.decode(Msgpack.encode(Msgpack.Int(n))) do
+        Ok(v) -> v == Msgpack.Int(n)
+        Err(_) -> false
+        end
+      )
+    end
+
+    test "Int int64 range round-trips" do
+      Check.all(Gen.int(-4611686018427387903, 4611686018427387903), fn n ->
+        match Msgpack.decode(Msgpack.encode(Msgpack.Int(n))) do
+        Ok(v) -> v == Msgpack.Int(n)
+        Err(_) -> false
+        end
+      )
+    end
+
+    test "Str round-trips (lowercase ASCII)" do
+      Check.all(Gen.lowercase_string(), fn s ->
+        match Msgpack.decode(Msgpack.encode(Msgpack.Str(s))) do
+        Ok(v) -> v == Msgpack.Str(s)
+        Err(_) -> false
+        end
+      )
+    end
+
+    test "Bin round-trips" do
+      Check.all(Gen.list(Gen.int(0, 255)), fn bs ->
+        match Msgpack.decode(Msgpack.encode(Msgpack.Bin(bs))) do
+        Ok(v) -> v == Msgpack.Bin(bs)
+        Err(_) -> false
+        end
+      )
+    end
+
+    test "Array of ints round-trips" do
+      Check.all(Gen.list(Gen.int(-100, 100)), fn ns ->
+        let v = Msgpack.Array(List.map(ns, fn n -> Msgpack.Int(n)))
+        match Msgpack.decode(Msgpack.encode(v)) do
+        Ok(decoded) -> decoded == v
+        Err(_)      -> false
+        end
+      )
+    end
+
+    test "Map with string keys and int values round-trips" do
+      Check.all(
+        Gen.list(Gen.tuple2(Gen.lowercase_string(), Gen.int(-100, 100))),
+        fn pairs ->
+          let kvs = List.map(pairs, fn p ->
+            match p do (k, v) -> (Msgpack.Str(k), Msgpack.Int(v)) end)
+          let msg = Msgpack.Map(kvs)
+          match Msgpack.decode(Msgpack.encode(msg)) do
+          Ok(decoded) -> decoded == msg
+          Err(_)      -> false
+          end
+      )
+    end
+
+    test "encode always produces non-empty bytes" do
+      Check.all(Gen.int(-1000000, 1000000), fn n ->
+        let bs = Msgpack.encode(Msgpack.Int(n))
+        List.length(bs) > 0
+      )
+    end
+
+    test "fixint range encodes in 1 byte" do
+      Check.all(Gen.int(-32, 127), fn n ->
+        List.length(Msgpack.encode(Msgpack.Int(n))) == 1
+      )
+    end
+
+    test "decode_all of encoded list recovers all values" do
+      Check.all(Gen.list(Gen.int(-50, 50)), fn ns ->
+        let vals = List.map(ns, fn n -> Msgpack.Int(n))
+        let bs   = List.fold_left(vals, Nil,
+                     fn (acc, v) -> List.append(acc, Msgpack.encode(v)))
+        match Msgpack.decode_all(bs) do
+        Ok(decoded) ->
+          List.length(decoded) == List.length(vals) &&
+          List.all(List.zip(decoded, vals), fn p -> match p do (a, b) -> a == b end)
+        Err(_)      -> false
+        end
+      )
+    end
+
+  end
+
 end
