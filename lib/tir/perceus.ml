@@ -60,6 +60,25 @@ let _current_fn_name : string ref = ref ""
     [march_incrc] in the C HTTP runtime's per-request incref loop. *)
 let _closure_fvs : StringSet.t ref = ref StringSet.empty
 
+(** Variable context: maps each in-scope variable name to its [Tir.var] record,
+    giving the type needed to emit correct EDecRC/EIncRC ops.
+    - Populated in [insert_rc] with the current function's parameters.
+    - Extended in [insert_rc_expr]'s ELet case for each let-bound variable
+      (using a save/restore pattern to handle shadowing correctly).
+    Used by the ECase cross-branch dead-variable EDecRC pass: variables that
+    are in scope at a case expression and live in *some* branches but dead in
+    *others* need EDecRC in the dead branches.  Without this, owned parameters
+    whose last use is inside an ECase arm do not get decremented in arms where
+    they are unused — causing both reference leaks and (via RC imbalance in
+    complex HOF call chains) use-after-free crashes.
+
+    Example: [Map.node_fold(..., f)] where [f : TFn] is unused in the HEmpty
+    arm.  Without cross-branch EDecRC, [f] leaks in every HEmpty arm visit.
+    In deep HAMTs this accumulates enough misbalance to produce a
+    use-after-free when the go-closure's function-pointer slot is misread as
+    a Bytes payload pointer, triggering the observed march_decrc crash. *)
+let _var_ctx : Tir.var StringMap.t ref = ref StringMap.empty
+
 (** Collect the names of variables loaded directly from the closure parameter
     [$clo] via EField.  Only apply functions have [$clo] as first param. *)
 let collect_closure_fvs (fn : Tir.fn_def) : StringSet.t =
@@ -148,8 +167,20 @@ let needs_rc : Tir.ty -> bool = function
                               emitting EIncRC/EDecRC for a scalar TVar "_" is safe —
                               the guard prevents the actual C call from firing. *)
   | Tir.TVar _ -> false  (* unresolved user type-var after mono: skip RC *)
+  | Tir.TFn _ -> true
+    (* After defun, any AVar with a TFn type is a heap-allocated closure
+       struct (never a raw code pointer — those are ADefRef and never appear
+       in AVar liveness).  llvm_ty (TFn _) = "ptr" and llvm_emit already
+       guards RC ops with [if ty = "ptr" then …], so emitting EIncRC/EDecRC
+       for TFn variables is both necessary (to track the closure's lifetime)
+       and safe (no-op for non-ptr types due to the LLVM emit guard).
+       Setting this to false was the root cause of the Map.fold crash: the
+       closure parameter f in Map.node_fold was invisible to Perceus, so
+         (a) no EIncRC before storing f in the go closure,
+         (b) no EDecRC in the HEmpty branch where f is unused,
+         (c) no EIncRC in apply functions before lending f to recursive calls. *)
   | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit
-  | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _ -> false
+  | Tir.TTuple _ | Tir.TRecord _ -> false
 
 (** Returns the set of variable names referenced by an atom.
 
@@ -461,8 +492,16 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     (e', lb)
 
   | Tir.ELet (v, e1, e2) ->
-    (* Process e2 first to discover what's live going into it *)
+    (* Process e2 first to discover what's live going into it.
+       Extend _var_ctx with [v] so that nested ECase cross-branch EDecRC
+       insertion can look up [v]'s type when [v] is live in some arms and
+       dead in others.  Save/restore handles shadowing correctly. *)
+    let prev_v = StringMap.find_opt v.Tir.v_name !_var_ctx in
+    _var_ctx := StringMap.add v.Tir.v_name v !_var_ctx;
     let (e2', live_into_e2) = insert_rc_expr e2 live_after in
+    (match prev_v with
+     | None    -> _var_ctx := StringMap.remove v.Tir.v_name !_var_ctx
+     | Some pv -> _var_ctx := StringMap.add v.Tir.v_name pv !_var_ctx);
     (* Check if v is dead in e2 *)
     let e2'' =
       if not (StringSet.mem v.Tir.v_name live_into_e2)
@@ -559,7 +598,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
         Tir.ESeq (decrc_for v (Tir.AVar ctor_v), body)
       | _ -> body
     in
-    let branches' = List.map (fun br ->
+    let branches_processed = List.map (fun br ->
       let bound =
         List.fold_left (fun s v -> StringSet.add v.Tir.v_name s)
           StringSet.empty br.Tir.br_vars
@@ -587,20 +626,70 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
           la br.Tir.br_vars
       else la
       in
-      let (body', _) = insert_rc_expr br.Tir.br_body la in
-      { br with Tir.br_body = add_scrutinee_free_for br.Tir.br_tag body' }
+      let (body', live_before_br) = insert_rc_expr br.Tir.br_body la in
+      (br, body', live_before_br, bound)
     ) branches in
+    (* Cross-branch dead-variable EDecRC.
+       A variable may be live in some arms (used) but dead in others (not
+       used).  For variables that are NOT function parameters Perceus relies
+       on the ELet dead-binding detection, which only fires when the variable
+       is dead in the *entire* continuation — not just in one arm.  For
+       parameters (and ELet-bound vars that the ELet check missed because
+       they are live in at least one arm), we must emit EDecRC at the head
+       of each arm where the variable is dead.
+
+       Algorithm:
+         1. Compute union of live_before_br across all arms.
+         2. For each arm, the set of "dead here, live elsewhere" vars is
+            (union \ live_before_br_i) \ {arm-bound vars} \ live_after
+                                       \ _closure_fvs.
+         3. For each such var that has a type record in _var_ctx, emit
+            EDecRC at the head of that arm's body.
+
+       Exclusions:
+         - live_after: var is expected to survive the whole case.
+         - arm-bound vars: the arm's pattern bind these, so they are locally
+           new values, not the outer var.
+         - _closure_fvs: owned by the closure struct; the apply function
+           must not decrement them. *)
+    let union_live_br = List.fold_left (fun acc (_, _, lb, _) ->
+      StringSet.union acc lb
+    ) StringSet.empty branches_processed in
+    let add_cross_decrcs (live_before_br : live_set) (bound : StringSet.t)
+                         (body : Tir.expr) : Tir.expr =
+      let dead_here =
+        union_live_br
+        |> (fun s -> StringSet.diff s live_before_br)
+        |> (fun s -> StringSet.diff s bound)
+        |> (fun s -> StringSet.diff s live_after)
+        |> (fun s -> StringSet.diff s !_closure_fvs)
+      in
+      StringSet.fold (fun name body_acc ->
+        match StringMap.find_opt name !_var_ctx with
+        | Some v when v.Tir.v_lin = Tir.Unr && needs_rc v.Tir.v_ty ->
+          Tir.ESeq (decrc_for v (Tir.AVar v), body_acc)
+        | _ -> body_acc
+      ) dead_here body
+    in
+    let branches' = List.map (fun (br, body', live_before_br, bound) ->
+      let body_with_scrut = add_scrutinee_free_for br.Tir.br_tag body' in
+      let body_with_cross = add_cross_decrcs live_before_br bound body_with_scrut in
+      { br with Tir.br_body = body_with_cross }
+    ) branches_processed in
     let default' = Option.map (fun d ->
-      let (d_rc, _) = insert_rc_expr d live_after in
+      let (d_rc, d_lb) = insert_rc_expr d live_after in
       (* Default branch: no constructor tag known, use original type.
          Only free the scrutinee if the branch body does NOT use it directly —
          if the body uses it, ownership transfers into the body. *)
-      (match a with
+      let d_rc' = (match a with
        | Tir.AVar v when needs_rc v.Tir.v_ty
                       && not (StringSet.mem v.Tir.v_name live_after)
                       && not (name_free_in v.Tir.v_name d) ->
          Tir.ESeq (decrc_for v (Tir.AVar v), d_rc)
        | _ -> d_rc)
+      in
+      (* Cross-branch EDecRC for the default arm too *)
+      add_cross_decrcs d_lb StringSet.empty d_rc'
     ) default in
     (* Compute live_before from the original liveness *)
     let lb = live_before e live_after in
@@ -784,10 +873,18 @@ let insert_rc ?(borrowed = StringSet.empty) (fn : Tir.fn_def) : Tir.fn_def =
      callee's pattern-match decrements its RC to 0, and becomes a dangling
      pointer on the second call → SIGSEGV. *)
   let borrowed' = StringSet.union borrowed closure_fvs in
+  (* Seed the variable context with function parameters so that the ECase
+     cross-branch dead-variable pass can emit correctly-typed EDecRC ops
+     for parameters that are live in some arms but unused in others. *)
+  let prev_var_ctx = !_var_ctx in
+  _var_ctx := List.fold_left (fun ctx v ->
+    StringMap.add v.Tir.v_name v ctx
+  ) !_var_ctx fn'.Tir.fn_params;
   let (body', _) = insert_rc_expr fn'.Tir.fn_body borrowed' in
   _actor_sent    := StringSet.empty;
   _current_fn_name := "";
   _closure_fvs   := StringSet.empty;
+  _var_ctx       := prev_var_ctx;
   { fn' with Tir.fn_body = body' }
 
 (* ── Phase 3: RC Elision (cancel pairs) ──────────────────────────────────── *)
