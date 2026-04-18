@@ -91,6 +91,31 @@ static void *make_cons(void *head, void *tail) {
     return c;
 }
 
+/* Build a March List(Int) Cons node: tag=1, field0=int (raw i64), field1=tail.
+ * Monomorphized List(Int) stores ints raw (no low-bit tag), matching the
+ * layout produced by Bytes.from_list on the March side. */
+static void *make_int_cons(int64_t n, void *tail) {
+    void *c = march_alloc(16 + 16);
+    *(int32_t *)((char *)c + 8)  = 1;          /* tag = 1 (Cons) */
+    *(int64_t *)((char *)c + 16) = n;
+    *(void **)((char *)c + 24)   = tail;
+    return c;
+}
+
+/* Build a Bytes(List(Int)) wrapper value from raw bytes.  Matches the
+ * March stdlib `type Bytes = Bytes(List(Int))` layout: a 24-byte wrapper
+ * whose single field at offset 16 points to a List(Int) chain whose
+ * Cons nodes carry raw i64 byte values. */
+static void *make_bytes_from_raw(const uint8_t *data, int64_t len) {
+    void *list = march_alloc(16); /* Nil: tag=0 */
+    for (int64_t i = len - 1; i >= 0; i--)
+        list = make_int_cons((int64_t)data[i], list);
+    void *b = march_alloc(16 + 8);
+    /* tag stays 0 = Bytes ctor */
+    *(void **)((char *)b + 16) = list;
+    return b;
+}
+
 /* Build a Header(String, String) value: single constructor (tag=0),
  * two pointer fields (name, value). */
 static void *make_header(void *name, void *value) {
@@ -353,10 +378,10 @@ void *march_tcp_recv_chunk(void *fd_ptr, int64_t max_bytes, int64_t timeout_ms) 
  * Reads exactly n bytes from the socket, blocking until all are received. */
 void *march_tcp_recv_exact(int64_t fd, int64_t n) {
     if (n <= 0) {
-        void *empty = march_string_lit("", 0);
-        return make_ok(empty);
+        /* Ok(Bytes(Nil)) — empty Bytes, not empty String. */
+        return make_ok(make_bytes_from_raw(NULL, 0));
     }
-    char *buf = malloc((size_t)n);
+    uint8_t *buf = (uint8_t *)malloc((size_t)n);
     if (!buf) return make_err("tcp_recv_exact: OOM");
     size_t received = 0;
     while ((int64_t)received < n) {
@@ -367,9 +392,13 @@ void *march_tcp_recv_exact(int64_t fd, int64_t n) {
         }
         received += (size_t)r;
     }
-    void *s = march_string_lit(buf, n);
+    /* The March-side declaration is `tcp_recv_exact : Int -> Int -> Result(Bytes, String)`,
+     * where `type Bytes = Bytes(List(Int))`.  Return a proper Bytes wrapper
+     * (NOT a march_string) so that `match Ok(header) -> Bytes.get(header, 0)`
+     * reads the List(Int) chain at offset 16 rather than raw UTF-8 bytes. */
+    void *b = make_bytes_from_raw(buf, n);
     free(buf);
-    return make_ok(s);
+    return make_ok(b);
 }
 
 /* tcp_recv_chunked_frame(fd_ptr) → Result(String, String)
