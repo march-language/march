@@ -341,15 +341,22 @@ mod Xml do
 
   -- ── Skip DOCTYPE <!DOCTYPE ...> ──────────────────────────────────────────
 
-  pfn skip_doctype(st, depth) do
-    match peek(st) do
-    None -> Err(XmlError("unterminated DOCTYPE", state_line(st), state_col(st)))
-    Some(">") ->
-      if depth == 0 do Ok(advance(st))
-      else skip_doctype(advance(st), depth - 1)
+  -- max_chars guards against stack overflow from malformed DOCTYPE with
+  -- deeply nested brackets (e.g. <!DOCTYPE [[[[...); 65536 is far beyond
+  -- any legitimate DOCTYPE declaration.
+  pfn skip_doctype(st, depth, max_chars) do
+    if max_chars == 0 do
+      Err(XmlError("DOCTYPE too large", state_line(st), state_col(st)))
+    else
+      match peek(st) do
+      None -> Err(XmlError("unterminated DOCTYPE", state_line(st), state_col(st)))
+      Some(">") ->
+        if depth == 0 do Ok(advance(st))
+        else skip_doctype(advance(st), depth - 1, max_chars - 1)
+        end
+      Some("[") -> skip_doctype(advance(st), depth + 1, max_chars - 1)
+      _ -> skip_doctype(advance(st), depth, max_chars - 1)
       end
-    Some("[") -> skip_doctype(advance(st), depth + 1)
-    _ -> skip_doctype(advance(st), depth)
     end
   end
 
@@ -455,7 +462,7 @@ mod Xml do
             end
           _ ->
             -- DOCTYPE or other declaration: skip to matching '>'
-            match skip_doctype(st3, 0) do
+            match skip_doctype(st3, 0, 65536) do
             Err(e) -> Err(e)
             Ok(st4) -> xml_loop(st4, stack)
             end

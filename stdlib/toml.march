@@ -700,8 +700,19 @@ mod Toml do
     end
   end
 
+  -- Returns true if pairs is an error sentinel list from set_nested.
+  pfn is_err_marker(pairs) do
+    match pairs do
+    Cons(("__toml_dup__", _), Nil) -> true
+    Cons(("__toml_conflict__", _), Nil) -> true
+    _ -> false
+    end
+  end
+
   -- Set a nested value via key path. Creates intermediate tables as needed.
   -- When navigating through a TArray, updates the last element.
+  -- Returns a sentinel [("__toml_dup__", TNull)] or [("__toml_conflict__", TNull)]
+  -- on error; callers must check is_err_marker before wrapping the result.
   pfn set_nested(pairs, keys, val) do
     match keys do
     Nil -> pairs
@@ -715,19 +726,26 @@ mod Toml do
       match table_get(pairs, k) do
       Some(TTable(sub)) ->
         let sub2 = set_nested(sub, rest, val)
-        table_put(pairs, k, TTable(sub2))
+        if is_err_marker(sub2) do sub2
+        else table_put(pairs, k, TTable(sub2))
+        end
       Some(TArray(arr)) ->
         let rev = List.reverse(arr)
         match rev do
         Cons(TTable(last_pairs), rest_rev) ->
           let last2 = set_nested(last_pairs, rest, val)
-          let arr2 = List.reverse(Cons(TTable(last2), rest_rev))
-          table_put(pairs, k, TArray(arr2))
+          if is_err_marker(last2) do last2
+          else
+            let arr2 = List.reverse(Cons(TTable(last2), rest_rev))
+            table_put(pairs, k, TArray(arr2))
+          end
         _ -> [("__toml_conflict__", TNull)]
         end
       None ->
         let sub2 = set_nested(Nil, rest, val)
-        table_put(pairs, k, TTable(sub2))
+        if is_err_marker(sub2) do sub2
+        else table_put(pairs, k, TTable(sub2))
+        end
       _ -> [("__toml_conflict__", TNull)]
       end
     end
@@ -756,15 +774,17 @@ mod Toml do
             (v, st5) ->
               let full_path = List.append(path, key_parts)
               let new_root = set_nested(root, full_path, v)
-              -- Check for duplicate error marker
-              match new_root do
-              Cons(p3, _) ->
-                match p3 do
-                ("__toml_dup__", _) ->
+              -- Check for duplicate/conflict error sentinel from set_nested.
+              -- is_err_marker handles both __toml_dup__ and __toml_conflict__,
+              -- including when the error occurs at any nesting depth.
+              if is_err_marker(new_root) do
+                match new_root do
+                Cons(("__toml_dup__", _), _) ->
                   err(st, "duplicate key: " ++ String.join(full_path, "."))
-                _ -> Ok((new_root, st5))
+                _ ->
+                  err(st, "type conflict at key: " ++ String.join(full_path, "."))
                 end
-              _ -> Ok((new_root, st5))
+              else Ok((new_root, st5))
               end
             end
           end

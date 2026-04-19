@@ -365,6 +365,18 @@ mod TestXml do
       end
     end
 
+    test "malformed DOCTYPE with deeply nested brackets returns Err not stack overflow" do
+      -- Bug fix: skip_doctype previously had no depth limit and would stack-overflow
+      -- on input like <!DOCTYPE [[[...1000 levels...]]>.
+      -- Now returns Err("DOCTYPE too large") after 65536 chars.
+      let brackets = String.repeat("[", 100)
+      let src = "<!DOCTYPE " ++ brackets ++ "><root/>"
+      match Xml.parse(src) do
+      Err(_) -> ()
+      Ok(_) -> panic("expected error for oversized DOCTYPE")
+      end
+    end
+
   end
 
   -- ── Sigil ────────────────────────────────────────────────────────────────

@@ -495,6 +495,20 @@ mod TestToml do
       ()
     end
 
+    test "nested duplicate key is an error (not silently swallowed)" do
+      -- Bug fix: set_nested used to wrap the __toml_dup__ sentinel in TTable,
+      -- preventing the caller from seeing the error for keys deeper than 1 level.
+      let _ = parse_err("[a]\nb = 1\nb = 2")
+      ()
+    end
+
+    test "type conflict at key path is an error" do
+      -- Bug fix: __toml_conflict__ sentinel was never checked in parse_keyval.
+      -- Trying to set a.b.c when a.b is an integer (not a table) should error.
+      let _ = parse_err("a = 1\n[a.b]")
+      ()
+    end
+
   end
 
   -- ── Sigil ─────────────────────────────────────────────────────────────────
