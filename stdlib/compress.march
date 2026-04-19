@@ -94,32 +94,26 @@ mod Compress do
 
     doc """
     Compress a sequence of byte chunks, producing a lazy sequence of
-    compressed chunks suitable for streaming HTTP responses or log writing.
+    Result values.  Each chunk is compressed independently; errors are
+    surfaced per-chunk rather than silently dropped.
 
         let chunks : Seq(Bytes) = ...
-        let compressed = Compress.Gzip.encode_stream(chunks)
+        let compressed : Seq(Result(Bytes, Compress.Error)) =
+          Compress.Gzip.encode_stream(chunks)
     """
-    fn encode_stream(input : Seq(Bytes)) : Seq(Bytes) do
-      Seq.flat_map(input, fn chunk ->
-        match stdlib_gzip_encode(chunk, -1) do
-        Ok(b)  -> Seq.singleton(b)
-        Err(_) -> Seq.empty()
-        end
-      )
+    fn encode_stream(input : Seq(Bytes)) : Seq(Result(Bytes, Compress.Error)) do
+      Seq.map(input, fn chunk -> stdlib_gzip_encode(chunk, -1))
     end
 
     doc """
-    Decompress a sequence of gzip-compressed byte chunks.
+    Decompress a sequence of gzip-compressed byte chunks.  Errors are
+    surfaced per-chunk rather than silently dropped.
 
-        let decompressed = Compress.Gzip.decode_stream(compressed_chunks)
+        let decompressed : Seq(Result(Bytes, Compress.Error)) =
+          Compress.Gzip.decode_stream(compressed_chunks)
     """
-    fn decode_stream(input : Seq(Bytes)) : Seq(Bytes) do
-      Seq.flat_map(input, fn chunk ->
-        match stdlib_gzip_decode(chunk) do
-        Ok(b)  -> Seq.singleton(b)
-        Err(_) -> Seq.empty()
-        end
-      )
+    fn decode_stream(input : Seq(Bytes)) : Seq(Result(Bytes, Compress.Error)) do
+      Seq.map(input, fn chunk -> stdlib_gzip_decode(chunk))
     end
 
   end
@@ -160,13 +154,14 @@ mod Compress do
 
     -- Compression level for zstd encoding.
     type Level =
-        Fast(Int)  -- negative levels in zstd API: fast but lower ratio
+        Fast(Int)  -- zstd levels: negative (e.g. Fast(-1)) are ultra-fast,
+                   -- positive (e.g. Fast(1)) are faster than Default
       | Default    -- zstd default (level 3)
       | Best       -- zstd level 22 (maximum ratio, slowest)
 
     pfn level_int(l) do
       match l do
-      Fast(n)  -> if n < 1 do 1 else n end
+      Fast(n)  -> n  -- pass through; zstd accepts negative levels natively
       Default  -> 3
       Best     -> 22
       end
@@ -208,26 +203,18 @@ mod Compress do
 
     doc """
     Compress a sequence of byte chunks with zstd at the default level.
+    Errors are surfaced per-chunk rather than silently dropped.
     """
-    fn encode_stream(input : Seq(Bytes)) : Seq(Bytes) do
-      Seq.flat_map(input, fn chunk ->
-        match stdlib_zstd_encode(chunk, 3) do
-        Ok(b)  -> Seq.singleton(b)
-        Err(_) -> Seq.empty()
-        end
-      )
+    fn encode_stream(input : Seq(Bytes)) : Seq(Result(Bytes, Compress.Error)) do
+      Seq.map(input, fn chunk -> stdlib_zstd_encode(chunk, 3))
     end
 
     doc """
     Decompress a sequence of zstd-compressed byte chunks.
+    Errors are surfaced per-chunk rather than silently dropped.
     """
-    fn decode_stream(input : Seq(Bytes)) : Seq(Bytes) do
-      Seq.flat_map(input, fn chunk ->
-        match stdlib_zstd_decode(chunk) do
-        Ok(b)  -> Seq.singleton(b)
-        Err(_) -> Seq.empty()
-        end
-      )
+    fn decode_stream(input : Seq(Bytes)) : Seq(Result(Bytes, Compress.Error)) do
+      Seq.map(input, fn chunk -> stdlib_zstd_decode(chunk))
     end
 
   end
@@ -301,23 +288,45 @@ mod Compress do
 
   doc """
   List the content-encoding tokens from an Accept-Encoding header value.
+  Strips quality parameters (`q=`) and excludes encodings with `q=0`
+  (which the client explicitly rejects).
 
       Compress.accept_encoding("gzip, deflate, br")
       -- ["gzip", "deflate", "br"]
+
+      Compress.accept_encoding("gzip;q=0.9, br;q=0.5")
+      -- ["gzip", "br"]
+
+      Compress.accept_encoding("gzip;q=0, br")
+      -- ["br"]
 
   Returns an empty list if the header is absent or empty.
   """
   fn accept_encoding(header_value : String) : List(String) do
     let parts = string_split(header_value, ",")
+    fn is_zero_q(params) do
+      match params do
+      Nil -> false
+      Cons(p, rest) ->
+        let pt = string_trim(p)
+        if pt == "q=0" || pt == "q=0.0" || pt == "q=0.00" do true
+        else is_zero_q(rest) end
+      end
+    end
     fn collect(xs, acc) do
       match xs do
       Nil -> acc
       Cons(s, rest) ->
-        let t = string_trim(s)
-        if string_byte_length(t) > 0 do
-          collect(rest, Cons(t, acc))
-        else
-          collect(rest, acc)
+        let directives = string_split(string_trim(s), ";")
+        match directives do
+        Nil -> collect(rest, acc)
+        Cons(name, params) ->
+          let trimmed = string_trim(name)
+          if is_zero_q(params) || string_byte_length(trimmed) == 0 do
+            collect(rest, acc)
+          else
+            collect(rest, Cons(trimmed, acc))
+          end
         end
       end
     end

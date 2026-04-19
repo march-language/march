@@ -19108,6 +19108,100 @@ let test_accept_encoding_trims_spaces () =
   end|} in
   call_fn env "f" [] |> ignore
 
+(* ── Adversarial decode tests ── *)
+
+let test_deflate_decode_invalid () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      let garbage = Bytes(Cons(1, Cons(2, Cons(3, Nil))))
+      match Compress.Deflate.decode(garbage) do
+      Ok(_)  -> 0
+      Err(_) -> 1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "deflate decode invalid data returns Err" 1 (vint (call_fn env "f" []))
+
+let test_zstd_decode_invalid () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      let garbage = Bytes(Cons(1, Cons(2, Cons(3, Nil))))
+      match Compress.Zstd.decode(garbage) do
+      Ok(_)  -> 0
+      Err(_) -> 1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "zstd decode invalid data returns Err" 1 (vint (call_fn env "f" []))
+
+let test_brotli_decode_invalid () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      let garbage = Bytes(Cons(1, Cons(2, Cons(3, Nil))))
+      match Compress.Brotli.decode(garbage) do
+      Ok(_)  -> 0
+      Err(_) -> 1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "brotli decode invalid data returns Err" 1 (vint (call_fn env "f" []))
+
+let test_zstd_fast_negative_level () =
+  (* Zstd.Fast(-1) uses a zstd negative level (ultra-fast). Must round-trip. *)
+  let env = eval_with_compress {|mod Test do
+    pfn bytes_eq(a, b) do
+      match (a, b) do
+      (Bytes(xs), Bytes(ys)) ->
+        fn go(ps, qs) do
+          match (ps, qs) do
+          (Nil, Nil) -> true
+          (Cons(x, xr), Cons(y, yr)) -> x == y && go(xr, yr)
+          _ -> false
+          end
+        end
+        go(xs, ys)
+      end
+    end
+    fn f() do
+      let original = Bytes(Cons(65, Cons(66, Cons(67, Nil))))
+      match Compress.Zstd.encode_level(original, Zstd.Fast(-1)) do
+      Ok(compressed) ->
+        match Compress.Zstd.decode(compressed) do
+        Ok(restored) -> if bytes_eq(original, restored) do 1 else 0 end
+        Err(_) -> 0
+        end
+      Err(_) -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "zstd Fast(-1) negative level round-trips" 1 (vint (call_fn env "f" []))
+
+let test_accept_encoding_q_weight () =
+  (* q= parameters should be stripped; the encoding name is what matters *)
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      let tokens = Compress.accept_encoding("gzip;q=0.9, br;q=0.5")
+      match tokens do
+      Cons("gzip", Cons("br", Nil)) -> 1
+      _ -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "accept_encoding strips q= parameters" 1 (vint (call_fn env "f" []))
+
+let test_accept_encoding_q_zero () =
+  (* q=0 means the client explicitly refuses the encoding; must be excluded *)
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      let tokens = Compress.accept_encoding("gzip;q=0, br")
+      match tokens do
+      Cons("br", Nil) -> 1
+      _ -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "accept_encoding excludes q=0 tokens" 1 (vint (call_fn env "f" []))
+
 (* ── UUID stdlib module tests ─────────────────────────────────────────────── *)
 
 let eval_with_uuid src =
@@ -22051,6 +22145,12 @@ let () =
         Alcotest.test_case "prop: brotli round-trip"           `Quick test_brotli_roundtrip_property;
         Alcotest.test_case "prop: gzip shrinks repetitive"    `Quick test_gzip_compression_shrinks_repetitive;
         Alcotest.test_case "prop: accept_encoding trims"      `Quick test_accept_encoding_trims_spaces;
+        Alcotest.test_case "deflate decode invalid → Err"    `Quick test_deflate_decode_invalid;
+        Alcotest.test_case "zstd decode invalid → Err"       `Quick test_zstd_decode_invalid;
+        Alcotest.test_case "brotli decode invalid → Err"     `Quick test_brotli_decode_invalid;
+        Alcotest.test_case "zstd Fast(-1) round-trip"        `Quick test_zstd_fast_negative_level;
+        Alcotest.test_case "accept_encoding strips q="       `Quick test_accept_encoding_q_weight;
+        Alcotest.test_case "accept_encoding excludes q=0"    `Quick test_accept_encoding_q_zero;
       ]);
       ("uuid stdlib", [
         Alcotest.test_case "parse"                  `Quick test_uuid_parse_ok;
