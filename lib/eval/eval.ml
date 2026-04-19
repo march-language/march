@@ -3884,6 +3884,27 @@ let base_env : env =
           (try Unix.close (Obj.magic fd : Unix.file_descr) with _ -> ());
           VUnit
         | _ -> eval_error "tcp_close(fd)"))
+  ; ("dns_resolve", VBuiltin ("dns_resolve", function
+        | [VString host] ->
+          (try
+             let open Unix in
+             let addrs = getaddrinfo host "" [AI_FAMILY PF_INET] in
+             let ip_strings = List.filter_map (fun ai ->
+               match ai.ai_addr with
+               | ADDR_INET (addr, _) -> Some (string_of_inet_addr addr)
+               | _ -> None) addrs in
+             if ip_strings = [] then
+               VCon ("Err", [VString ("cannot resolve " ^ host)])
+             else
+               let ip_list = List.fold_right (fun s acc ->
+                 VCon ("Cons", [VString s; acc])) ip_strings (VCon ("Nil", [])) in
+               VCon ("Ok", [ip_list])
+           with
+           | Unix.Unix_error (err, _, _) ->
+             VCon ("Err", [VString (Unix.error_message err)])
+           | exn ->
+             VCon ("Err", [VString (Printexc.to_string exn)]))
+        | _ -> eval_error "dns_resolve(host: String): Result(List(String), String)"))
     (* ---- Low-level binary TCP receive ---- *)
   ; ("tcp_recv_exact", VBuiltin ("tcp_recv_exact", function
         | [VInt fd; VInt n] ->

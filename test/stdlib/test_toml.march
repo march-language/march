@@ -1,0 +1,522 @@
+-- Tests for the Toml stdlib module (TDD — written before implementation)
+-- Run with: march test test/stdlib/test_toml.march
+
+mod TestToml do
+
+  -- ── Helpers ────────────────────────────────────────────────────────────────
+
+  pfn parse_ok(src) do
+    match Toml.parse(src) do
+    Ok(v)  -> v
+    Err(e) ->
+      match e do
+      Toml.TomlError(msg, line, col) ->
+        panic("parse failed at " ++ int_to_string(line) ++ ":" ++ int_to_string(col) ++ ": " ++ msg)
+      end
+    end
+  end
+
+  pfn parse_err(src) do
+    match Toml.parse(src) do
+    Ok(_)  -> panic("expected parse error but got Ok")
+    Err(e) -> e
+    end
+  end
+
+  pfn get_str(v, key) do
+    match Toml.get_str(v, key) do
+    Some(s) -> s
+    None    -> panic("key not found or not a string: " ++ key)
+    end
+  end
+
+  pfn get_int(v, key) do
+    match Toml.get_int(v, key) do
+    Some(n) -> n
+    None    -> panic("key not found or not an int: " ++ key)
+    end
+  end
+
+  pfn get_bool(v, key) do
+    match Toml.get_bool(v, key) do
+    Some(b) -> b
+    None    -> panic("key not found or not a bool: " ++ key)
+    end
+  end
+
+  pfn get_float(v, key) do
+    match Toml.get_float(v, key) do
+    Some(f) -> f
+    None    -> panic("key not found or not a float: " ++ key)
+    end
+  end
+
+  pfn get_table(v, key) do
+    match Toml.get_table(v, key) do
+    Some(t) -> t
+    None    -> panic("key not found or not a table: " ++ key)
+    end
+  end
+
+  pfn get_array(v, key) do
+    match Toml.get_array(v, key) do
+    Some(a) -> a
+    None    -> panic("key not found or not an array: " ++ key)
+    end
+  end
+
+  -- ── Empty document ─────────────────────────────────────────────────────────
+
+  describe "Empty" do
+
+    test "empty string parses as empty table" do
+      let v = parse_ok("")
+      Test.assert_eq(Toml.get(v, "x"), None, "no key x")
+    end
+
+    test "whitespace-only parses ok" do
+      let _ = parse_ok("   \n\t\n")
+      ()
+    end
+
+    test "comment-only parses ok" do
+      let _ = parse_ok("# just a comment\n# another\n")
+      ()
+    end
+
+  end
+
+  -- ── String values ──────────────────────────────────────────────────────────
+
+  describe "Strings" do
+
+    test "basic string" do
+      let v = parse_ok("name = \"Alice\"")
+      Test.assert_eq(get_str(v, "name"), "Alice", "name")
+    end
+
+    test "empty string" do
+      let v = parse_ok("x = \"\"")
+      Test.assert_eq(get_str(v, "x"), "", "empty")
+    end
+
+    test "string with spaces" do
+      let v = parse_ok("greeting = \"hello world\"")
+      Test.assert_eq(get_str(v, "greeting"), "hello world", "spaces")
+    end
+
+    test "string with escaped quote" do
+      let v = parse_ok("q = \"say \\\"hi\\\"\"")
+      Test.assert_eq(get_str(v, "q"), "say \"hi\"", "escaped quote")
+    end
+
+    test "string with escaped backslash" do
+      let v = parse_ok("path = \"C:\\\\Users\"")
+      Test.assert_eq(get_str(v, "path"), "C:\\Users", "backslash")
+    end
+
+    test "string with escaped newline" do
+      let v = parse_ok("s = \"line1\\nline2\"")
+      Test.assert_eq(get_str(v, "s"), "line1\nline2", "newline escape")
+    end
+
+    test "string with escaped tab" do
+      let v = parse_ok("s = \"a\\tb\"")
+      Test.assert_eq(get_str(v, "s"), "a\tb", "tab escape")
+    end
+
+    test "literal string (single quotes, no escapes)" do
+      let v = parse_ok("path = 'C:\\Users\\Alice'")
+      Test.assert_eq(get_str(v, "path"), "C:\\Users\\Alice", "literal string")
+    end
+
+    test "multiline basic string" do
+      let v = parse_ok("s = \"\"\"\nhello\nworld\"\"\"")
+      Test.assert_eq(get_str(v, "s"), "hello\nworld", "multiline basic")
+    end
+
+    test "multiline literal string" do
+      let v = parse_ok("s = '''\nhello\\nworld'''")
+      Test.assert_eq(get_str(v, "s"), "hello\\nworld", "multiline literal no escape")
+    end
+
+  end
+
+  -- ── Integer values ─────────────────────────────────────────────────────────
+
+  describe "Integers" do
+
+    test "zero" do
+      let v = parse_ok("n = 0")
+      Test.assert_eq(get_int(v, "n"), 0, "zero")
+    end
+
+    test "positive" do
+      let v = parse_ok("n = 42")
+      Test.assert_eq(get_int(v, "n"), 42, "positive")
+    end
+
+    test "negative" do
+      let v = parse_ok("n = -17")
+      Test.assert_eq(get_int(v, "n"), -17, "negative")
+    end
+
+    test "explicit plus sign" do
+      let v = parse_ok("n = +99")
+      Test.assert_eq(get_int(v, "n"), 99, "plus sign")
+    end
+
+    test "underscore separators" do
+      let v = parse_ok("n = 1_000_000")
+      Test.assert_eq(get_int(v, "n"), 1000000, "underscores")
+    end
+
+    test "large integer" do
+      let v = parse_ok("n = 9007199254740992")
+      Test.assert_eq(get_int(v, "n"), 9007199254740992, "large")
+    end
+
+  end
+
+  -- ── Float values ───────────────────────────────────────────────────────────
+
+  describe "Floats" do
+
+    test "basic float" do
+      let v = parse_ok("x = 3.14")
+      let f = get_float(v, "x")
+      if f > 3.13 && f < 3.15 do ()
+      else panic("expected ~3.14, got " ++ float_to_string(f)) end
+    end
+
+    test "negative float" do
+      let v = parse_ok("x = -2.5")
+      let f = get_float(v, "x")
+      if f > -2.51 && f < -2.49 do ()
+      else panic("expected ~-2.5") end
+    end
+
+    test "float with exponent" do
+      let v = parse_ok("x = 1.0e10")
+      let f = get_float(v, "x")
+      if f > 9900000000.0 && f < 11000000000.0 do ()
+      else panic("expected ~1e10") end
+    end
+
+    test "float with negative exponent" do
+      let v = parse_ok("x = 5.0e-3")
+      let f = get_float(v, "x")
+      if f > 0.004 && f < 0.006 do ()
+      else panic("expected ~0.005") end
+    end
+
+    test "underscore in float" do
+      let v = parse_ok("x = 9_224_617.445_991_228_313")
+      let f = get_float(v, "x")
+      if f > 9224617.0 && f < 9224618.0 do ()
+      else panic("expected ~9224617") end
+    end
+
+    test "inf" do
+      let v = parse_ok("x = inf")
+      let f = get_float(v, "x")
+      if f > 1000000.0 *. 1000000.0 *. 1000000.0 do ()
+      else panic("expected inf") end
+    end
+
+    test "negative inf" do
+      let v = parse_ok("x = -inf")
+      let f = get_float(v, "x")
+      if f < 0.0 -. 1000000.0 *. 1000000.0 *. 1000000.0 do ()
+      else panic("expected -inf") end
+    end
+
+  end
+
+  -- ── Boolean values ─────────────────────────────────────────────────────────
+
+  describe "Booleans" do
+
+    test "true" do
+      let v = parse_ok("b = true")
+      Test.assert_eq(get_bool(v, "b"), true, "true")
+    end
+
+    test "false" do
+      let v = parse_ok("b = false")
+      Test.assert_eq(get_bool(v, "b"), false, "false")
+    end
+
+  end
+
+  -- ── Multiple keys ──────────────────────────────────────────────────────────
+
+  describe "Multiple keys" do
+
+    test "two string keys" do
+      let v = parse_ok("a = \"hello\"\nb = \"world\"")
+      Test.assert_eq(get_str(v, "a"), "hello", "a")
+      Test.assert_eq(get_str(v, "b"), "world", "b")
+    end
+
+    test "mixed types" do
+      let src = "name = \"Bob\"\nage = 30\nactive = true\n"
+      let v = parse_ok(src)
+      Test.assert_eq(get_str(v, "name"), "Bob", "name")
+      Test.assert_eq(get_int(v, "age"), 30, "age")
+      Test.assert_eq(get_bool(v, "active"), true, "active")
+    end
+
+    test "comment between keys" do
+      let src = "a = 1\n# this is b\nb = 2\n"
+      let v = parse_ok(src)
+      Test.assert_eq(get_int(v, "a"), 1, "a")
+      Test.assert_eq(get_int(v, "b"), 2, "b")
+    end
+
+    test "dotted key" do
+      let v = parse_ok("server.host = \"localhost\"")
+      let server = get_table(v, "server")
+      Test.assert_eq(get_str(server, "host"), "localhost", "host")
+    end
+
+    test "quoted key" do
+      let v = parse_ok("\"127.0.0.1\" = \"home\"")
+      Test.assert_eq(get_str(v, "127.0.0.1"), "home", "quoted key")
+    end
+
+  end
+
+  -- ── Tables ─────────────────────────────────────────────────────────────────
+
+  describe "Tables" do
+
+    test "simple table header" do
+      let src = "[server]\nhost = \"localhost\"\nport = 8080\n"
+      let v = parse_ok(src)
+      let server = get_table(v, "server")
+      Test.assert_eq(get_str(server, "host"), "localhost", "host")
+      Test.assert_eq(get_int(server, "port"), 8080, "port")
+    end
+
+    test "two table headers" do
+      let src = "[a]\nx = 1\n[b]\ny = 2\n"
+      let v = parse_ok(src)
+      let a = get_table(v, "a")
+      let b = get_table(v, "b")
+      Test.assert_eq(get_int(a, "x"), 1, "x")
+      Test.assert_eq(get_int(b, "y"), 2, "y")
+    end
+
+    test "nested table" do
+      let src = "[database]\n[database.connection]\nhost = \"db.example.com\"\n"
+      let v = parse_ok(src)
+      let db = get_table(v, "database")
+      let conn = get_table(db, "connection")
+      Test.assert_eq(get_str(conn, "host"), "db.example.com", "host")
+    end
+
+    test "inline table" do
+      let v = parse_ok("point = { x = 1, y = 2 }")
+      let pt = get_table(v, "point")
+      Test.assert_eq(get_int(pt, "x"), 1, "x")
+      Test.assert_eq(get_int(pt, "y"), 2, "y")
+    end
+
+    test "empty inline table" do
+      let v = parse_ok("empty = {}")
+      let t = get_table(v, "empty")
+      Test.assert_eq(Toml.get(t, "x"), None, "empty table")
+    end
+
+    test "root-level keys before table header" do
+      let src = "title = \"TOML Example\"\n[owner]\nname = \"Alice\"\n"
+      let v = parse_ok(src)
+      Test.assert_eq(get_str(v, "title"), "TOML Example", "title")
+      let owner = get_table(v, "owner")
+      Test.assert_eq(get_str(owner, "name"), "Alice", "name")
+    end
+
+  end
+
+  -- ── Arrays ─────────────────────────────────────────────────────────────────
+
+  describe "Arrays" do
+
+    test "empty array" do
+      let v = parse_ok("a = []")
+      let arr = get_array(v, "a")
+      Test.assert_eq(List.length(arr), 0, "empty array length")
+    end
+
+    test "int array" do
+      let v = parse_ok("a = [1, 2, 3]")
+      let arr = get_array(v, "a")
+      Test.assert_eq(List.length(arr), 3, "length")
+      match arr do
+      Cons(Toml.TInt(x), Cons(Toml.TInt(y), Cons(Toml.TInt(z), Nil))) ->
+        Test.assert_eq(x, 1, "x")
+        Test.assert_eq(y, 2, "y")
+        Test.assert_eq(z, 3, "z")
+      _ -> panic("wrong elements")
+      end
+    end
+
+    test "string array" do
+      let v = parse_ok("a = [\"foo\", \"bar\"]")
+      let arr = get_array(v, "a")
+      Test.assert_eq(List.length(arr), 2, "length")
+    end
+
+    test "mixed array (TOML v1.0 allows mixed-type arrays)" do
+      let v = parse_ok("a = [1, 2.0, \"three\"]")
+      let arr = get_array(v, "a")
+      Test.assert_eq(List.length(arr), 3, "mixed length")
+    end
+
+    test "multiline array" do
+      let src = "a = [\n  1,\n  2,\n  3,\n]\n"
+      let v = parse_ok(src)
+      let arr = get_array(v, "a")
+      Test.assert_eq(List.length(arr), 3, "multiline length")
+    end
+
+    test "nested array" do
+      let v = parse_ok("a = [[1, 2], [3, 4]]")
+      let arr = get_array(v, "a")
+      Test.assert_eq(List.length(arr), 2, "outer length")
+    end
+
+  end
+
+  -- ── Array of tables ────────────────────────────────────────────────────────
+
+  describe "Array of tables" do
+
+    test "basic array of tables" do
+      let src = "[[products]]\nname = \"Hammer\"\n[[products]]\nname = \"Nail\"\n"
+      let v = parse_ok(src)
+      let arr = get_array(v, "products")
+      Test.assert_eq(List.length(arr), 2, "two products")
+      match arr do
+      Cons(Toml.TTable(p1), Cons(Toml.TTable(p2), Nil)) ->
+        let t1 = Toml.TTable(p1)
+        let t2 = Toml.TTable(p2)
+        Test.assert_eq(get_str(t1, "name"), "Hammer", "first")
+        Test.assert_eq(get_str(t2, "name"), "Nail", "second")
+      _ -> panic("wrong structure")
+      end
+    end
+
+  end
+
+  -- ── Navigation API ─────────────────────────────────────────────────────────
+
+  describe "Navigation" do
+
+    test "get returns None for missing key" do
+      let v = parse_ok("a = 1")
+      Test.assert_eq(Toml.get(v, "b"), None, "missing")
+    end
+
+    test "get_in nested path" do
+      let src = "[server]\nhost = \"localhost\"\n"
+      let v = parse_ok(src)
+      Test.assert_eq(Toml.get_in(v, ["server", "host"]), Some(Toml.TStr("localhost")), "nested path")
+    end
+
+    test "get_in missing path returns None" do
+      let v = parse_ok("a = 1")
+      Test.assert_eq(Toml.get_in(v, ["x", "y"]), None, "missing path")
+    end
+
+    test "get_str on non-string returns None" do
+      let v = parse_ok("n = 42")
+      Test.assert_eq(Toml.get_str(v, "n"), None, "int is not string")
+    end
+
+    test "get_int on non-int returns None" do
+      let v = parse_ok("s = \"hello\"")
+      Test.assert_eq(Toml.get_int(v, "s"), None, "string is not int")
+    end
+
+    test "get_table on non-table returns None" do
+      let v = parse_ok("n = 42")
+      Test.assert_eq(Toml.get_table(v, "n"), None, "int is not table")
+    end
+
+    test "get_array on non-array returns None" do
+      let v = parse_ok("n = 42")
+      Test.assert_eq(Toml.get_array(v, "n"), None, "int is not array")
+    end
+
+  end
+
+  -- ── to_string round-trip ───────────────────────────────────────────────────
+
+  describe "to_string" do
+
+    test "integer serializes" do
+      let v = Toml.TInt(42)
+      Test.assert_eq(Toml.to_string(v), "42", "int")
+    end
+
+    test "bool serializes" do
+      Test.assert_eq(Toml.to_string(Toml.TBool(true)), "true", "true")
+      Test.assert_eq(Toml.to_string(Toml.TBool(false)), "false", "false")
+    end
+
+    test "string serializes with quotes" do
+      Test.assert_eq(Toml.to_string(Toml.TStr("hello")), "\"hello\"", "string")
+    end
+
+    test "null serializes" do
+      Test.assert_eq(Toml.to_string(Toml.TNull), "null", "null")
+    end
+
+  end
+
+  -- ── Error cases ────────────────────────────────────────────────────────────
+
+  describe "Errors" do
+
+    test "bare key without value is an error" do
+      let _ = parse_err("key")
+      ()
+    end
+
+    test "unclosed string is an error" do
+      let _ = parse_err("s = \"unclosed")
+      ()
+    end
+
+    test "duplicate key in same table is an error" do
+      let _ = parse_err("a = 1\na = 2")
+      ()
+    end
+
+  end
+
+  -- ── Sigil ─────────────────────────────────────────────────────────────────
+
+  describe "Sigil" do
+
+    test "~toml sigil parses TOML source" do
+      let cfg = ~toml"port = 8080"
+      Test.assert_eq(get_int(cfg, "port"), 8080, "port via sigil")
+    end
+
+    test "~toml multiline" do
+      let cfg = ~toml"""
+host = "localhost"
+port = 9000
+"""
+      Test.assert_eq(get_str(cfg, "host"), "localhost", "host")
+      Test.assert_eq(get_int(cfg, "port"), 9000, "port")
+    end
+
+  end
+
+  fn main() do () end
+
+end

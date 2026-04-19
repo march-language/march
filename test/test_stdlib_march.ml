@@ -113,6 +113,12 @@ let all_stdlib_decls =
     "bigint.march";
     "decimal.march";
     "bytes.march";
+    "msgpack.march";
+    "toml.march";
+    "xml.march";
+    "yaml.march";
+    "socket.march";
+    "dns.march";
     "process.march";
     "logger.march";
     "flow.march";
@@ -129,6 +135,7 @@ let all_stdlib_decls =
     "env.march";
     "config.march";
     "html.march";
+    "sigil.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -245,6 +252,30 @@ let () =
     ("seq", [
       Alcotest.test_case "Seq module"
         `Quick (run_stdlib_test "test_seq.march" "TestSeq");
+    ]);
+    ("msgpack", [
+      Alcotest.test_case "Msgpack module"
+        `Quick (run_stdlib_test "test_msgpack.march" "TestMsgpack");
+    ]);
+    ("toml", [
+      Alcotest.test_case "Toml module"
+        `Quick (run_stdlib_test "test_toml.march" "TestToml");
+    ]);
+    ("xml", [
+      Alcotest.test_case "Xml module"
+        `Quick (run_stdlib_test "test_xml.march" "TestXml");
+    ]);
+    ("yaml", [
+      Alcotest.test_case "Yaml module"
+        `Quick (run_stdlib_test "test_yaml.march" "TestYaml");
+    ]);
+    ("socket", [
+      Alcotest.test_case "Socket module"
+        `Quick (run_stdlib_test "test_socket.march" "TestSocket");
+    ]);
+    ("dns", [
+      Alcotest.test_case "Dns module"
+        `Quick (run_stdlib_test "test_dns.march" "TestDns");
     ]);
     (* test_flow.march tests the function-transformer Flow API (from_fn/run/then_)
        which differs from the current Seq-based flow.march implementation.

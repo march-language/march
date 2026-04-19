@@ -1,0 +1,596 @@
+-- Msgpack module: MessagePack binary serialization.
+--
+-- Encodes and decodes the MessagePack format (https://msgpack.org/).
+-- Compact binary alternative to JSON; supported by most languages.
+--
+-- Types:
+--   Value = Null
+--         | Bool(Bool)
+--         | Int(Int)         -- 63-bit signed; see plan for range details
+--         | Str(String)      -- UTF-8 bytes
+--         | Bin(List(Int))   -- raw bytes (values 0-255)
+--         | Array(List(Value))
+--         | Map(List((Value, Value)))
+--
+-- Functions:
+--   encode(Value)                  -> List(Int)
+--   decode(List(Int))              -> Result(Value, String)
+--   decode_all(List(Int))          -> Result(List(Value), String)
+--   null/bool/int/str/bin/array/map -- convenience constructors
+--
+-- Note: Float is not supported in v1 (requires float_bits builtin).
+-- Note: encode returns List(Int); wrap with Bytes.from_list if needed.
+--
+-- Format byte constants (decimal):
+--   192 = nil        194 = false    195 = true
+--   196..198 = bin8/16/32          202..203 = float32/64 (unsupported)
+--   204..207 = uint8/16/32/64      208..211 = int8/16/32/64
+--   217..219 = str8/16/32          220..221 = array16/32
+--   222..223 = map16/32
+--   128..143 = fixmap              144..159 = fixarray
+--   160..191 = fixstr              0..127 = pos fixint
+--   224..255 = neg fixint
+
+mod Msgpack do
+
+  type Value
+    = Null
+    | Bool(Bool)
+    | Int(Int)
+    | Str(String)
+    | Bin(List(Int))
+    | Array(List(Value))
+    | Map(List((Value, Value)))
+
+  -- ── Private list helpers (self-contained) ─────────────────────────────────
+
+  pfn rev(xs, acc) do
+    match xs do
+    Nil -> acc
+    Cons(h, t) -> rev(t, Cons(h, acc))
+    end
+  end
+
+  pfn list_len(xs, n) do
+    match xs do
+    Nil -> n
+    Cons(_, t) -> list_len(t, n + 1)
+    end
+  end
+
+  pfn list_append(xs, ys) do
+    match xs do
+    Nil -> ys
+    Cons(h, t) -> Cons(h, list_append(t, ys))
+    end
+  end
+
+  -- ── Private byte helpers ──────────────────────────────────────────────────
+
+  -- Mask to lowest 8 bits (handles negative two's-complement correctly).
+  pfn lo8(n) do int_and(n, 255) end
+
+  pfn uint16_bytes(n) do
+    Cons(lo8(int_shr(n, 8)), Cons(lo8(n), Nil))
+  end
+
+  pfn uint32_bytes(n) do
+    Cons(lo8(int_shr(n, 24)),
+    Cons(lo8(int_shr(n, 16)),
+    Cons(lo8(int_shr(n, 8)),
+    Cons(lo8(n), Nil))))
+  end
+
+  -- Encode an Int as 8 big-endian bytes (two's complement, 63-bit safe).
+  pfn int64_bytes(n) do
+    Cons(lo8(int_shr(n, 56)),
+    Cons(lo8(int_shr(n, 48)),
+    Cons(lo8(int_shr(n, 40)),
+    Cons(lo8(int_shr(n, 32)),
+    Cons(lo8(int_shr(n, 24)),
+    Cons(lo8(int_shr(n, 16)),
+    Cons(lo8(int_shr(n, 8)),
+    Cons(lo8(n), Nil))))))))
+  end
+
+  -- Convert a String to a list of byte ints (byte-level, preserves UTF-8).
+  pfn str_to_bytes(s) do
+    let chars = string_split(s, "")
+    fn go(cs, acc) do
+      match cs do
+      Nil -> rev(acc, Nil)
+      Cons(c, rest) -> go(rest, Cons(char_to_int(c), acc))
+      end
+    end
+    go(chars, Nil)
+  end
+
+  -- Convert a list of byte ints back to a String.
+  pfn bytes_to_str(bs) do
+    fn go(xs, acc) do
+      match xs do
+      Nil -> string_from_chars(rev(acc, Nil))
+      Cons(b, rest) -> go(rest, Cons(char_from_int(b), acc))
+      end
+    end
+    go(bs, Nil)
+  end
+
+  -- ── Encoding ──────────────────────────────────────────────────────────────
+
+  -- fixstr: 160..191 (160 = 0xa0); str8: 217; str16: 218; str32: 219
+  pfn encode_str_header(len) do
+    if len <= 31 do Cons(int_or(160, len), Nil)
+    else if len <= 255 do Cons(217, Cons(len, Nil))
+    else if len <= 65535 do Cons(218, uint16_bytes(len))
+    else Cons(219, uint32_bytes(len))
+    end end end
+  end
+
+  -- bin8: 196; bin16: 197; bin32: 198
+  pfn encode_bin_header(len) do
+    if len <= 255 do Cons(196, Cons(len, Nil))
+    else if len <= 65535 do Cons(197, uint16_bytes(len))
+    else Cons(198, uint32_bytes(len))
+    end end
+  end
+
+  -- fixarray: 144..159 (144 = 0x90); array16: 220; array32: 221
+  pfn encode_array_header(len) do
+    if len <= 15 do Cons(int_or(144, len), Nil)
+    else if len <= 65535 do Cons(220, uint16_bytes(len))
+    else Cons(221, uint32_bytes(len))
+    end end
+  end
+
+  -- fixmap: 128..143 (128 = 0x80); map16: 222; map32: 223
+  pfn encode_map_header(len) do
+    if len <= 15 do Cons(int_or(128, len), Nil)
+    else if len <= 65535 do Cons(222, uint16_bytes(len))
+    else Cons(223, uint32_bytes(len))
+    end end
+  end
+
+  pfn encode_int(n) do
+    if n >= 0 && n <= 127 do Cons(n, Nil)                        -- pos fixint
+    else if n >= -32 && n < 0 do Cons(lo8(n), Nil)              -- neg fixint
+    else if n >= -128 && n <= -33 do Cons(208, Cons(lo8(n), Nil)) -- int8 (208=0xd0)
+    else if n >= 128 && n <= 255 do Cons(204, Cons(n, Nil))     -- uint8 (204=0xcc)
+    else if n >= -32768 && n <= -129 do Cons(209, uint16_bytes(n)) -- int16 (209=0xd1)
+    else if n >= 256 && n <= 65535 do Cons(205, uint16_bytes(n)) -- uint16 (205=0xcd)
+    else if n >= -2147483648 && n <= -32769 do Cons(210, uint32_bytes(n)) -- int32 (210=0xd2)
+    else if n >= 65536 && n <= 4294967295 do Cons(206, uint32_bytes(n))  -- uint32 (206=0xce)
+    else if n >= 0 do Cons(207, int64_bytes(n))                 -- uint64 (207=0xcf)
+    else Cons(211, int64_bytes(n))                               -- int64  (211=0xd3)
+    end end end end end end end end end
+  end
+
+  pfn encode_val(v) do
+    match v do
+    Null    -> Cons(192, Nil)                                     -- 0xc0
+    Bool(b) -> Cons(if b do 195 else 194 end, Nil)               -- 0xc3 / 0xc2
+    Int(n)  -> encode_int(n)
+    Str(s)  ->
+      let raw = str_to_bytes(s)
+      let len = list_len(raw, 0)
+      list_append(encode_str_header(len), raw)
+    Bin(bs) ->
+      let len = list_len(bs, 0)
+      list_append(encode_bin_header(len), bs)
+    Array(xs) ->
+      let len = list_len(xs, 0)
+      let header = encode_array_header(len)
+      let body = encode_vals(xs)
+      list_append(header, body)
+    Map(kvs) ->
+      let len = list_len(kvs, 0)
+      let header = encode_map_header(len)
+      let body = encode_pairs(kvs)
+      list_append(header, body)
+    end
+  end
+
+  pfn encode_vals(xs) do
+    match xs do
+    Nil -> Nil
+    Cons(h, t) -> list_append(encode_val(h), encode_vals(t))
+    end
+  end
+
+  pfn encode_pairs(kvs) do
+    match kvs do
+    Nil -> Nil
+    Cons(kv, rest) ->
+      match kv do
+      (k, v) ->
+        list_append(encode_val(k), list_append(encode_val(v), encode_pairs(rest)))
+      end
+    end
+  end
+
+  -- ── Decoding ──────────────────────────────────────────────────────────────
+
+  -- Reconstruct a signed int from 2 big-endian bytes (sign-extend at bit 15).
+  pfn from_int16(b0, b1) do
+    let raw = b0 * 256 + b1
+    if raw >= 32768 do raw - 65536 else raw end
+  end
+
+  -- Reconstruct a signed int from 4 big-endian bytes (sign-extend at bit 31).
+  pfn from_int32(b0, b1, b2, b3) do
+    let raw = b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
+    if raw >= 2147483648 do raw - 4294967296 else raw end
+  end
+
+  -- Reconstruct a signed int from 8 big-endian bytes (63-bit safe).
+  pfn from_int64(b0, b1, b2, b3, b4, b5, b6, b7) do
+    let hi_s = if b0 >= 128 do b0 - 256 else b0 end
+    let hi   = hi_s * 72057594037927936   -- 2^56
+             + b1   * 281474976710656     -- 2^48
+             + b2   * 1099511627776       -- 2^40
+             + b3   * 4294967296          -- 2^32
+    let lo   = b4 * 16777216 + b5 * 65536 + b6 * 256 + b7
+    hi + lo
+  end
+
+  -- Pull n bytes from the head of bs; returns Ok((bytes, remaining)) or Err.
+  pfn take_bytes(bs, n, acc) do
+    if n <= 0 do Ok((rev(acc, Nil), bs))
+    else match bs do
+      Nil -> Err("unexpected end of input")
+      Cons(b, rest) -> take_bytes(rest, n - 1, Cons(b, acc))
+      end
+    end
+  end
+
+  -- Parse n consecutive values from bs; returns Ok((values, remaining)) or Err.
+  pfn decode_n_vals(bs, n, acc) do
+    if n <= 0 do Ok((rev(acc, Nil), bs))
+    else
+      match decode_one(bs) do
+      Err(e) -> Err(e)
+      Ok(pair) ->
+        match pair do
+        (v, rest) -> decode_n_vals(rest, n - 1, Cons(v, acc))
+        end
+      end
+    end
+  end
+
+  -- Parse n key-value pairs from bs.
+  pfn decode_n_pairs(bs, n, acc) do
+    if n <= 0 do Ok((rev(acc, Nil), bs))
+    else
+      match decode_one(bs) do
+      Err(e) -> Err(e)
+      Ok(pair_k) ->
+        match pair_k do
+        (k, rest1) ->
+          match decode_one(rest1) do
+          Err(e) -> Err(e)
+          Ok(pair_v) ->
+            match pair_v do
+            (v, rest2) -> decode_n_pairs(rest2, n - 1, Cons((k, v), acc))
+            end
+          end
+        end
+      end
+    end
+  end
+
+  pfn decode_str_body(bs, len) do
+    match take_bytes(bs, len, Nil) do
+    Err(e) -> Err(e)
+    Ok(pair) ->
+      match pair do
+      (raw, rest) -> Ok((Str(bytes_to_str(raw)), rest))
+      end
+    end
+  end
+
+  pfn decode_bin_body(bs, len) do
+    match take_bytes(bs, len, Nil) do
+    Err(e) -> Err(e)
+    Ok(pair) ->
+      match pair do
+      (raw, rest) -> Ok((Bin(raw), rest))
+      end
+    end
+  end
+
+  -- Parse exactly one value from bs; return Ok((value, remaining)) or Err.
+  -- Format byte ranges (decimal):
+  --   0..127   pos fixint
+  --   128..143 fixmap (lower 4 bits = length)
+  --   144..159 fixarray (lower 4 bits = length)
+  --   160..191 fixstr (lower 5 bits = length)
+  --   192      nil
+  --   194      false   195 true
+  --   196..198 bin8/16/32
+  --   202..203 float32/64 (unsupported)
+  --   204..207 uint8/16/32/64
+  --   208..211 int8/16/32/64
+  --   217..219 str8/16/32
+  --   220..221 array16/32
+  --   222..223 map16/32
+  --   224..255 neg fixint
+  pfn decode_one(bs) do
+    match bs do
+    Nil -> Err("unexpected end of input")
+    Cons(b, rest) ->
+      if b <= 127 do Ok((Int(b), rest))
+      else if b >= 224 do Ok((Int(b - 256), rest))
+      else if b >= 160 && b <= 191 do decode_str_body(rest, b - 160)
+      else if b >= 144 && b <= 159 do
+        let len = b - 144
+        match decode_n_vals(rest, len, Nil) do
+        Err(e) -> Err(e)
+        Ok(p) -> match p do (xs, r) -> Ok((Array(xs), r)) end
+        end
+      else if b >= 128 && b <= 143 do
+        let len = b - 128
+        match decode_n_pairs(rest, len, Nil) do
+        Err(e) -> Err(e)
+        Ok(p) -> match p do (kvs, r) -> Ok((Map(kvs), r)) end
+        end
+      else if b == 192 do Ok((Null, rest))
+      else if b == 194 do Ok((Bool(false), rest))
+      else if b == 195 do Ok((Bool(true), rest))
+      else if b == 196 do
+        match rest do
+        Nil -> Err("unexpected end of input in bin8 length")
+        Cons(len, rest2) -> decode_bin_body(rest2, len)
+        end
+      else if b == 197 do
+        match rest do
+        Cons(b0, Cons(b1, rest2)) -> decode_bin_body(rest2, b0 * 256 + b1)
+        _ -> Err("unexpected end of input in bin16 length")
+        end
+      else if b == 198 do
+        match rest do
+        Cons(b0, Cons(b1, Cons(b2, Cons(b3, rest2)))) ->
+          decode_bin_body(rest2, b0 * 16777216 + b1 * 65536 + b2 * 256 + b3)
+        _ -> Err("unexpected end of input in bin32 length")
+        end
+      else if b == 202 do Err("float32 is not supported")
+      else if b == 203 do Err("float64 is not supported")
+      else if b == 204 do
+        match rest do
+        Nil -> Err("unexpected end of input in uint8")
+        Cons(n, rest2) -> Ok((Int(n), rest2))
+        end
+      else if b == 205 do
+        match rest do
+        Cons(b0, Cons(b1, rest2)) -> Ok((Int(b0 * 256 + b1), rest2))
+        _ -> Err("unexpected end of input in uint16")
+        end
+      else if b == 206 do
+        match rest do
+        Cons(b0, Cons(b1, Cons(b2, Cons(b3, rest2)))) ->
+          Ok((Int(b0 * 16777216 + b1 * 65536 + b2 * 256 + b3), rest2))
+        _ -> Err("unexpected end of input in uint32")
+        end
+      else if b == 207 do
+        match rest do
+        Cons(b0, Cons(b1, Cons(b2, Cons(b3,
+        Cons(b4, Cons(b5, Cons(b6, Cons(b7, rest2)))))))) ->
+          Ok((Int(from_int64(b0, b1, b2, b3, b4, b5, b6, b7)), rest2))
+        _ -> Err("unexpected end of input in uint64")
+        end
+      else if b == 208 do
+        match rest do
+        Nil -> Err("unexpected end of input in int8")
+        Cons(n, rest2) -> Ok((Int(if n >= 128 do n - 256 else n end), rest2))
+        end
+      else if b == 209 do
+        match rest do
+        Cons(b0, Cons(b1, rest2)) -> Ok((Int(from_int16(b0, b1)), rest2))
+        _ -> Err("unexpected end of input in int16")
+        end
+      else if b == 210 do
+        match rest do
+        Cons(b0, Cons(b1, Cons(b2, Cons(b3, rest2)))) ->
+          Ok((Int(from_int32(b0, b1, b2, b3)), rest2))
+        _ -> Err("unexpected end of input in int32")
+        end
+      else if b == 211 do
+        match rest do
+        Cons(b0, Cons(b1, Cons(b2, Cons(b3,
+        Cons(b4, Cons(b5, Cons(b6, Cons(b7, rest2)))))))) ->
+          Ok((Int(from_int64(b0, b1, b2, b3, b4, b5, b6, b7)), rest2))
+        _ -> Err("unexpected end of input in int64")
+        end
+      else if b == 217 do
+        match rest do
+        Nil -> Err("unexpected end of input in str8 length")
+        Cons(len, rest2) -> decode_str_body(rest2, len)
+        end
+      else if b == 218 do
+        match rest do
+        Cons(b0, Cons(b1, rest2)) -> decode_str_body(rest2, b0 * 256 + b1)
+        _ -> Err("unexpected end of input in str16 length")
+        end
+      else if b == 219 do
+        match rest do
+        Cons(b0, Cons(b1, Cons(b2, Cons(b3, rest2)))) ->
+          decode_str_body(rest2, b0 * 16777216 + b1 * 65536 + b2 * 256 + b3)
+        _ -> Err("unexpected end of input in str32 length")
+        end
+      else if b == 220 do
+        match rest do
+        Cons(b0, Cons(b1, rest2)) ->
+          let len = b0 * 256 + b1
+          match decode_n_vals(rest2, len, Nil) do
+          Err(e) -> Err(e)
+          Ok(p) -> match p do (xs, r) -> Ok((Array(xs), r)) end
+          end
+        _ -> Err("unexpected end of input in array16 length")
+        end
+      else if b == 221 do
+        match rest do
+        Cons(b0, Cons(b1, Cons(b2, Cons(b3, rest2)))) ->
+          let len = b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
+          match decode_n_vals(rest2, len, Nil) do
+          Err(e) -> Err(e)
+          Ok(p) -> match p do (xs, r) -> Ok((Array(xs), r)) end
+          end
+        _ -> Err("unexpected end of input in array32 length")
+        end
+      else if b == 222 do
+        match rest do
+        Cons(b0, Cons(b1, rest2)) ->
+          let len = b0 * 256 + b1
+          match decode_n_pairs(rest2, len, Nil) do
+          Err(e) -> Err(e)
+          Ok(p) -> match p do (kvs, r) -> Ok((Map(kvs), r)) end
+          end
+        _ -> Err("unexpected end of input in map16 length")
+        end
+      else if b == 223 do
+        match rest do
+        Cons(b0, Cons(b1, Cons(b2, Cons(b3, rest2)))) ->
+          let len = b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
+          match decode_n_pairs(rest2, len, Nil) do
+          Err(e) -> Err(e)
+          Ok(p) -> match p do (kvs, r) -> Ok((Map(kvs), r)) end
+          end
+        _ -> Err("unexpected end of input in map32 length")
+        end
+      else
+        Err("unsupported format byte: " ++ int_to_string(b))
+      end end end end end end end end end end end end end end end end end end end end end end end end end end end end
+    end
+  end
+
+  -- Accumulator loop for decode_all.
+  pfn decode_all_loop(bs, acc) do
+    match bs do
+    Nil -> Ok(rev(acc, Nil))
+    Cons(_, _) ->
+      match decode_one(bs) do
+      Err(e) -> Err(e)
+      Ok(pair) ->
+        match pair do
+        (v, rest) -> decode_all_loop(rest, Cons(v, acc))
+        end
+      end
+    end
+  end
+
+  -- ── Structural equality ───────────────────────────────────────────────────
+
+  pfn list_int_eq(xs, ys) do
+    match (xs, ys) do
+    (Nil, Nil) -> true
+    (Cons(a, ar), Cons(b, br)) -> a == b && list_int_eq(ar, br)
+    _ -> false
+    end
+  end
+
+  pfn list_val_eq(xs, ys) do
+    match (xs, ys) do
+    (Nil, Nil) -> true
+    (Cons(a, ar), Cons(b, br)) -> value_eq(a, b) && list_val_eq(ar, br)
+    _ -> false
+    end
+  end
+
+  pfn list_pair_eq(xs, ys) do
+    match (xs, ys) do
+    (Nil, Nil) -> true
+    (Cons(p, pr), Cons(q, qr)) ->
+      match (p, q) do
+      ((k1, v1), (k2, v2)) -> value_eq(k1, k2) && value_eq(v1, v2) && list_pair_eq(pr, qr)
+      end
+    _ -> false
+    end
+  end
+
+  pfn value_eq(a, b) do
+    match (a, b) do
+    (Null, Null) -> true
+    (Bool(x), Bool(y)) -> x == y
+    (Int(x), Int(y)) -> x == y
+    (Str(x), Str(y)) -> x == y
+    (Bin(xs), Bin(ys)) -> list_int_eq(xs, ys)
+    (Array(xs), Array(ys)) -> list_val_eq(xs, ys)
+    (Map(ps), Map(qs)) -> list_pair_eq(ps, qs)
+    _ -> false
+    end
+  end
+
+  impl Eq(Value) do
+    fn eq(a, b) do value_eq(a, b) end
+  end
+
+  -- ── Public API ────────────────────────────────────────────────────────────
+
+  doc """
+  Encode a `Value` to a list of bytes (0-255) in MessagePack format.
+
+      Msgpack.encode(Msgpack.Null)         -- [192]
+      Msgpack.encode(Msgpack.Bool(true))   -- [195]
+      Msgpack.encode(Msgpack.Int(42))      -- [42]
+      Msgpack.encode(Msgpack.Str("hi"))    -- [162, 104, 105]
+  """
+  fn encode(v : Value) : List(Int) do
+    encode_val(v)
+  end
+
+  doc """
+  Decode a MessagePack byte list to a `Value`.
+  Returns `Err` if the input is empty, truncated, has trailing bytes,
+  or contains an unsupported format byte (float, ext).
+
+      Msgpack.decode([192])                -- Ok(Null)
+      Msgpack.decode([42])                 -- Ok(Int(42))
+      Msgpack.decode([195])                -- Ok(Bool(true))
+      Msgpack.decode([])                   -- Err("unexpected end of input")
+  """
+  fn decode(bs : List(Int)) : Result(Value, String) do
+    match decode_one(bs) do
+    Err(e) -> Err(e)
+    Ok(pair) ->
+      match pair do
+      (v, remaining) ->
+        match remaining do
+        Nil -> Ok(v)
+        Cons(_, _) -> Err("trailing bytes after value")
+        end
+      end
+    end
+  end
+
+  doc """
+  Decode zero or more concatenated MessagePack values from `bs`.
+  Returns `Ok([])` on empty input. Useful for framing protocols.
+
+      Msgpack.decode_all([195, 42, 194])
+      -- Ok([Bool(true), Int(42), Bool(false)])
+  """
+  fn decode_all(bs : List(Int)) : Result(List(Value), String) do
+    decode_all_loop(bs, Nil)
+  end
+
+  doc "Construct a MessagePack null value."
+  fn null() : Value do Null end
+
+  doc "Construct a MessagePack boolean value."
+  fn bool(b : Bool) : Value do Bool(b) end
+
+  doc "Construct a MessagePack integer value."
+  fn int(n : Int) : Value do Int(n) end
+
+  doc "Construct a MessagePack string value."
+  fn str(s : String) : Value do Str(s) end
+
+  doc "Construct a MessagePack binary value from a list of byte ints (0-255)."
+  fn bin(bs : List(Int)) : Value do Bin(bs) end
+
+  doc "Construct a MessagePack array value."
+  fn array(xs : List(Value)) : Value do Array(xs) end
+
+  doc "Construct a MessagePack map value from a list of (key, value) pairs."
+  fn map(kvs : List((Value, Value))) : Value do Map(kvs) end
+
+end

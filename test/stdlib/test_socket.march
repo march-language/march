@@ -1,0 +1,101 @@
+-- Tests for stdlib/socket.march.
+-- Tests the pure parts (error constructors, message formatting) and
+-- exercises Socket.connect with an unreachable port to verify Err wrapping.
+-- Actual I/O round-trips require a running server and are out of scope.
+
+mod TestSocket do
+
+  use Socket.*
+
+  -- ── Error type ────────────────────────────────────────────────────────────
+
+  describe "SocketError constructors" do
+
+    test "ConnectionFailed stores message" do
+      let e = ConnectionFailed("localhost:99999")
+      match e do
+      ConnectionFailed(msg) -> Test.assert_eq(msg, "localhost:99999", "msg")
+      _ -> panic("wrong variant")
+      end
+    end
+
+    test "WriteFailed stores message" do
+      let e = WriteFailed("broken pipe")
+      match e do
+      WriteFailed(msg) -> Test.assert_eq(msg, "broken pipe", "msg")
+      _ -> panic("wrong variant")
+      end
+    end
+
+    test "RecvFailed stores message" do
+      let e = RecvFailed("connection reset")
+      match e do
+      RecvFailed(msg) -> Test.assert_eq(msg, "connection reset", "msg")
+      _ -> panic("wrong variant")
+      end
+    end
+
+  end
+
+  -- ── error_message ─────────────────────────────────────────────────────────
+
+  describe "error_message" do
+
+    test "ConnectionFailed message" do
+      let msg = Socket.error_message(ConnectionFailed("refused"))
+      Test.assert_true(string_contains(msg, "connection failed"), "prefix")
+      Test.assert_true(string_contains(msg, "refused"), "detail")
+    end
+
+    test "WriteFailed message" do
+      let msg = Socket.error_message(WriteFailed("pipe"))
+      Test.assert_true(string_contains(msg, "write failed"), "prefix")
+      Test.assert_true(string_contains(msg, "pipe"), "detail")
+    end
+
+    test "RecvFailed message" do
+      let msg = Socket.error_message(RecvFailed("reset"))
+      Test.assert_true(string_contains(msg, "receive failed"), "prefix")
+      Test.assert_true(string_contains(msg, "reset"), "detail")
+    end
+
+  end
+
+  -- ── connect ───────────────────────────────────────────────────────────────
+
+  describe "connect" do
+
+    test "connection refused returns Err" do
+      -- Port 1 is almost universally not listening; ECONNREFUSED or similar.
+      match Socket.connect("127.0.0.1", 1) do
+      Err(_) -> ()
+      Ok(_)  -> panic("expected connection to fail on port 1")
+      end
+    end
+
+    test "invalid port returns Err" do
+      match Socket.connect("127.0.0.1", 99999) do
+      Err(_) -> ()
+      Ok(_)  -> panic("expected connection to fail on port 99999")
+      end
+    end
+
+  end
+
+  -- ── with_connection ───────────────────────────────────────────────────────
+
+  describe "with_connection" do
+
+    test "propagates connect error" do
+      let result = Socket.with_connection("127.0.0.1", 1, fn fd -> Ok(fd))
+      match result do
+      Err(_) -> ()
+      Ok(_)  -> panic("expected error")
+      end
+    end
+
+  end
+
+  fn main() do () end
+
+end

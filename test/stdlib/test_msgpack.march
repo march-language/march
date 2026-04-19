@@ -1,0 +1,510 @@
+-- Tests for the Msgpack stdlib module
+-- Run with: dune exec march -- test .claude/worktrees/amazing-hodgkin-4e9334/test/stdlib/test_msgpack.march
+
+mod TestMsgpack do
+
+  -- ── Helpers ───────────────────────────────────────────────────────────────
+
+  pfn round_trip(v) do
+    Msgpack.decode(Msgpack.encode(v))
+  end
+
+  pfn assert_rt(v) do
+    match round_trip(v) do
+    Err(e) -> panic("round-trip failed: " ++ e)
+    Ok(decoded) -> Test.assert_eq(decoded, v, "round-trip mismatch")
+    end
+  end
+
+  pfn enc_len(v) do
+    List.length(Msgpack.encode(v))
+  end
+
+  pfn assert_encode_len(v, expected_len) do
+    let n = enc_len(v)
+    if n == expected_len do ()
+    else panic("expected encode length " ++ int_to_string(expected_len)
+               ++ " but got " ++ int_to_string(n)) end
+  end
+
+  pfn assert_bytes(v, expected) do
+    let bs = Msgpack.encode(v)
+    Test.assert_eq(bs, expected, "wrong encoded bytes")
+  end
+
+  pfn assert_decode_ok(bs, expected) do
+    match Msgpack.decode(bs) do
+    Err(e) -> panic("decode failed: " ++ e)
+    Ok(v)  -> Test.assert_eq(v, expected, "decoded value mismatch")
+    end
+  end
+
+  pfn assert_decode_err(bs) do
+    match Msgpack.decode(bs) do
+    Ok(_)  -> panic("expected decode error but got Ok")
+    Err(_) -> ()
+    end
+  end
+
+  -- ── Null ──────────────────────────────────────────────────────────────────
+
+  describe "Null" do
+
+    test "encode null is 192 (0xc0)" do
+      assert_bytes(Msgpack.Null, Cons(192, Nil))
+    end
+
+    test "encode null is 1 byte" do
+      assert_encode_len(Msgpack.Null, 1)
+    end
+
+    test "round-trip null" do
+      assert_rt(Msgpack.Null)
+    end
+
+    test "decode 192 gives Null" do
+      assert_decode_ok(Cons(192, Nil), Msgpack.Null)
+    end
+
+  end
+
+  -- ── Bool ──────────────────────────────────────────────────────────────────
+
+  describe "Bool" do
+
+    test "encode true is 195 (0xc3)" do
+      assert_bytes(Msgpack.Bool(true), Cons(195, Nil))
+    end
+
+    test "encode false is 194 (0xc2)" do
+      assert_bytes(Msgpack.Bool(false), Cons(194, Nil))
+    end
+
+    test "bool encodes in 1 byte" do
+      assert_encode_len(Msgpack.Bool(true), 1)
+      assert_encode_len(Msgpack.Bool(false), 1)
+    end
+
+    test "round-trip true" do assert_rt(Msgpack.Bool(true)) end
+    test "round-trip false" do assert_rt(Msgpack.Bool(false)) end
+
+    test "decode 195 gives Bool(true)" do
+      assert_decode_ok(Cons(195, Nil), Msgpack.Bool(true))
+    end
+
+    test "decode 194 gives Bool(false)" do
+      assert_decode_ok(Cons(194, Nil), Msgpack.Bool(false))
+    end
+
+  end
+
+  -- ── Int: positive fixint (0-127) ─────────────────────────────────────────
+
+  describe "Int: positive fixint" do
+
+    test "zero encodes as 0 (1 byte)" do
+      assert_bytes(Msgpack.Int(0), Cons(0, Nil))
+      assert_encode_len(Msgpack.Int(0), 1)
+    end
+
+    test "127 encodes as 127 (1 byte)" do
+      assert_bytes(Msgpack.Int(127), Cons(127, Nil))
+      assert_encode_len(Msgpack.Int(127), 1)
+    end
+
+    test "round-trip 0" do assert_rt(Msgpack.Int(0)) end
+    test "round-trip 1" do assert_rt(Msgpack.Int(1)) end
+    test "round-trip 42" do assert_rt(Msgpack.Int(42)) end
+    test "round-trip 127" do assert_rt(Msgpack.Int(127)) end
+
+  end
+
+  -- ── Int: negative fixint (-32..-1) ───────────────────────────────────────
+
+  describe "Int: negative fixint" do
+
+    test "-1 encodes as 255 (0xff, 1 byte)" do
+      assert_bytes(Msgpack.Int(-1), Cons(255, Nil))
+      assert_encode_len(Msgpack.Int(-1), 1)
+    end
+
+    test "-32 encodes as 224 (0xe0, 1 byte)" do
+      assert_bytes(Msgpack.Int(-32), Cons(224, Nil))
+      assert_encode_len(Msgpack.Int(-32), 1)
+    end
+
+    test "round-trip -1" do assert_rt(Msgpack.Int(-1)) end
+    test "round-trip -32" do assert_rt(Msgpack.Int(-32)) end
+
+  end
+
+  -- ── Int: int8 / uint8 ────────────────────────────────────────────────────
+
+  describe "Int: int8 / uint8" do
+
+    test "-33 encodes as int8 (2 bytes, 208=0xd0)" do
+      -- int8 header is 208, payload is lo8(-33) = 223 (0xdf)
+      assert_bytes(Msgpack.Int(-33), Cons(208, Cons(223, Nil)))
+      assert_encode_len(Msgpack.Int(-33), 2)
+    end
+
+    test "-128 encodes as int8 (2 bytes)" do
+      assert_encode_len(Msgpack.Int(-128), 2)
+    end
+
+    test "128 encodes as uint8 (2 bytes, 204=0xcc)" do
+      assert_bytes(Msgpack.Int(128), Cons(204, Cons(128, Nil)))
+      assert_encode_len(Msgpack.Int(128), 2)
+    end
+
+    test "255 encodes as uint8 (2 bytes)" do
+      assert_bytes(Msgpack.Int(255), Cons(204, Cons(255, Nil)))
+    end
+
+    test "round-trip -33" do assert_rt(Msgpack.Int(-33)) end
+    test "round-trip -128" do assert_rt(Msgpack.Int(-128)) end
+    test "round-trip 128" do assert_rt(Msgpack.Int(128)) end
+    test "round-trip 255" do assert_rt(Msgpack.Int(255)) end
+
+  end
+
+  -- ── Int: int16 / uint16 ──────────────────────────────────────────────────
+
+  describe "Int: int16 / uint16" do
+
+    test "-129 encodes as int16 (3 bytes, 209=0xd1)" do
+      -- int16 of -129: bytes are 255, 127 (big-endian two's complement)
+      assert_bytes(Msgpack.Int(-129), Cons(209, Cons(255, Cons(127, Nil))))
+      assert_encode_len(Msgpack.Int(-129), 3)
+    end
+
+    test "-32768 encodes as int16 (3 bytes)" do
+      assert_encode_len(Msgpack.Int(-32768), 3)
+    end
+
+    test "256 encodes as uint16 (3 bytes, 205=0xcd)" do
+      assert_encode_len(Msgpack.Int(256), 3)
+    end
+
+    test "65535 encodes as uint16 (3 bytes)" do
+      assert_encode_len(Msgpack.Int(65535), 3)
+    end
+
+    test "round-trip -129" do assert_rt(Msgpack.Int(-129)) end
+    test "round-trip -32768" do assert_rt(Msgpack.Int(-32768)) end
+    test "round-trip 256" do assert_rt(Msgpack.Int(256)) end
+    test "round-trip 1000" do assert_rt(Msgpack.Int(1000)) end
+    test "round-trip 32767" do assert_rt(Msgpack.Int(32767)) end
+    test "round-trip 65535" do assert_rt(Msgpack.Int(65535)) end
+
+  end
+
+  -- ── Int: int32 / uint32 ──────────────────────────────────────────────────
+
+  describe "Int: int32 / uint32" do
+
+    test "-32769 encodes as int32 (5 bytes, 210=0xd2)" do
+      assert_encode_len(Msgpack.Int(-32769), 5)
+    end
+
+    test "-2147483648 encodes as int32 (5 bytes)" do
+      assert_encode_len(Msgpack.Int(-2147483648), 5)
+    end
+
+    test "65536 encodes as uint32 (5 bytes, 206=0xce)" do
+      assert_encode_len(Msgpack.Int(65536), 5)
+    end
+
+    test "4294967295 encodes as uint32 (5 bytes)" do
+      assert_encode_len(Msgpack.Int(4294967295), 5)
+    end
+
+    test "round-trip -32769" do assert_rt(Msgpack.Int(-32769)) end
+    test "round-trip -2147483648" do assert_rt(Msgpack.Int(-2147483648)) end
+    test "round-trip 65536" do assert_rt(Msgpack.Int(65536)) end
+    test "round-trip 1000000" do assert_rt(Msgpack.Int(1000000)) end
+    test "round-trip 2147483647" do assert_rt(Msgpack.Int(2147483647)) end
+    test "round-trip 4294967295" do assert_rt(Msgpack.Int(4294967295)) end
+
+  end
+
+  -- ── Int: int64 / uint64 ──────────────────────────────────────────────────
+
+  describe "Int: int64 / uint64" do
+
+    test "-2147483649 encodes as int64 (9 bytes, 211=0xd3)" do
+      assert_encode_len(Msgpack.Int(-2147483649), 9)
+    end
+
+    test "4294967296 encodes as uint64 (9 bytes, 207=0xcf)" do
+      assert_encode_len(Msgpack.Int(4294967296), 9)
+    end
+
+    test "round-trip -2147483649" do assert_rt(Msgpack.Int(-2147483649)) end
+    test "round-trip 4294967296" do assert_rt(Msgpack.Int(4294967296)) end
+    test "round-trip max safe 63-bit positive" do
+      assert_rt(Msgpack.Int(4611686018427387903))
+    end
+    test "round-trip min safe 63-bit negative" do
+      -- -4611686018427387904 is min_int which overflows the lexer literal;
+      -- use -4611686018427387903 (= -(2^62 - 1)) as the boundary test instead.
+      assert_rt(Msgpack.Int(-4611686018427387903))
+    end
+
+  end
+
+  -- ── Str ───────────────────────────────────────────────────────────────────
+
+  describe "Str" do
+
+    test "empty string encodes as fixstr (1 byte header, 160=0xa0)" do
+      assert_bytes(Msgpack.Str(""), Cons(160, Nil))
+      assert_encode_len(Msgpack.Str(""), 1)
+    end
+
+    test "single char A encodes as fixstr (162=0xa1 + 65)" do
+      -- fixstr header for len=1: 160 + 1 = 161
+      assert_bytes(Msgpack.Str("A"), Cons(161, Cons(65, Nil)))
+    end
+
+    test "fixstr max (31 chars) encodes in 32 bytes (1 header + 31 body)" do
+      let s = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      assert_encode_len(Msgpack.Str(s), 32)
+    end
+
+    test "round-trip empty string" do assert_rt(Msgpack.Str("")) end
+    test "round-trip hello" do assert_rt(Msgpack.Str("hello")) end
+    test "round-trip string with spaces" do assert_rt(Msgpack.Str("hello world")) end
+
+    test "round-trip longer string (str8)" do
+      let s = "this is a longer string that exceeds the fixstr limit of 31 chars"
+      assert_rt(Msgpack.Str(s))
+    end
+
+    test "round-trip string with newlines" do
+      assert_rt(Msgpack.Str("line1\nline2"))
+    end
+
+  end
+
+  -- ── Bin ───────────────────────────────────────────────────────────────────
+
+  describe "Bin" do
+
+    test "empty bin encodes as bin8 (196, len=0)" do
+      assert_bytes(Msgpack.Bin(Nil), Cons(196, Cons(0, Nil)))
+      assert_encode_len(Msgpack.Bin(Nil), 2)
+    end
+
+    test "single byte bin encodes as bin8 (196, len=1, byte)" do
+      assert_bytes(Msgpack.Bin(Cons(42, Nil)),
+                   Cons(196, Cons(1, Cons(42, Nil))))
+    end
+
+    test "round-trip empty bin" do assert_rt(Msgpack.Bin(Nil)) end
+    test "round-trip single-byte bin" do assert_rt(Msgpack.Bin(Cons(0, Nil))) end
+
+    test "round-trip bin with boundary byte values" do
+      assert_rt(Msgpack.Bin(Cons(0, Cons(127, Cons(128, Cons(255, Nil))))))
+    end
+
+    test "round-trip 10-byte bin" do
+      let bs = List.range(1, 11)
+      assert_rt(Msgpack.Bin(bs))
+    end
+
+  end
+
+  -- ── Array ─────────────────────────────────────────────────────────────────
+
+  describe "Array" do
+
+    test "empty array encodes as fixarray (144=0x90)" do
+      assert_bytes(Msgpack.Array(Nil), Cons(144, Nil))
+      assert_encode_len(Msgpack.Array(Nil), 1)
+    end
+
+    test "fixarray of 1 null: header=145, body=192" do
+      assert_bytes(Msgpack.Array(Cons(Msgpack.Null, Nil)),
+                   Cons(145, Cons(192, Nil)))
+    end
+
+    test "round-trip empty array" do assert_rt(Msgpack.Array(Nil)) end
+
+    test "round-trip array of nulls" do
+      assert_rt(Msgpack.Array(Cons(Msgpack.Null, Cons(Msgpack.Null, Nil))))
+    end
+
+    test "round-trip array of ints" do
+      let xs = Cons(Msgpack.Int(1), Cons(Msgpack.Int(-1),
+                Cons(Msgpack.Int(100), Nil)))
+      assert_rt(Msgpack.Array(xs))
+    end
+
+    test "round-trip array of strings" do
+      let xs = Cons(Msgpack.Str("a"), Cons(Msgpack.Str("bb"),
+                Cons(Msgpack.Str("ccc"), Nil)))
+      assert_rt(Msgpack.Array(xs))
+    end
+
+    test "round-trip array of mixed types" do
+      let xs = Cons(Msgpack.Null,
+                Cons(Msgpack.Bool(true),
+                Cons(Msgpack.Int(42),
+                Cons(Msgpack.Str("hi"), Nil))))
+      assert_rt(Msgpack.Array(xs))
+    end
+
+    test "round-trip nested array" do
+      let inner = Msgpack.Array(Cons(Msgpack.Int(1), Cons(Msgpack.Int(2), Nil)))
+      let outer = Msgpack.Array(Cons(inner, Cons(Msgpack.Int(3), Nil)))
+      assert_rt(outer)
+    end
+
+  end
+
+  -- ── Map ───────────────────────────────────────────────────────────────────
+
+  describe "Map" do
+
+    test "empty map encodes as fixmap (128=0x80)" do
+      assert_bytes(Msgpack.Map(Nil), Cons(128, Nil))
+      assert_encode_len(Msgpack.Map(Nil), 1)
+    end
+
+    test "round-trip empty map" do assert_rt(Msgpack.Map(Nil)) end
+
+    test "round-trip single string-key map" do
+      let m = Msgpack.Map(Cons((Msgpack.Str("x"), Msgpack.Int(1)), Nil))
+      assert_rt(m)
+    end
+
+    test "round-trip multi-entry map" do
+      let m = Msgpack.Map(Cons((Msgpack.Str("a"), Msgpack.Int(1)),
+                Cons((Msgpack.Str("b"), Msgpack.Bool(true)),
+                Cons((Msgpack.Str("c"), Msgpack.Null), Nil))))
+      assert_rt(m)
+    end
+
+    test "round-trip map with int keys" do
+      let m = Msgpack.Map(Cons((Msgpack.Int(1), Msgpack.Str("one")),
+                Cons((Msgpack.Int(2), Msgpack.Str("two")), Nil)))
+      assert_rt(m)
+    end
+
+    test "round-trip nested map" do
+      let inner = Msgpack.Map(Cons((Msgpack.Str("y"), Msgpack.Int(99)), Nil))
+      let outer = Msgpack.Map(Cons((Msgpack.Str("nested"), inner), Nil))
+      assert_rt(outer)
+    end
+
+  end
+
+  -- ── Convenience constructors ──────────────────────────────────────────────
+
+  describe "Convenience constructors" do
+
+    test "null() produces Null" do
+      assert (Msgpack.null() == Msgpack.Null)
+    end
+
+    test "bool(true) produces Bool(true)" do
+      assert (Msgpack.bool(true) == Msgpack.Bool(true))
+    end
+
+    test "int(42) produces Int(42)" do
+      assert (Msgpack.int(42) == Msgpack.Int(42))
+    end
+
+    test "str produces Str" do
+      assert (Msgpack.str("hi") == Msgpack.Str("hi"))
+    end
+
+    test "bin produces Bin" do
+      assert (Msgpack.bin(Cons(1, Cons(2, Nil))) == Msgpack.Bin(Cons(1, Cons(2, Nil))))
+    end
+
+    test "array produces Array" do
+      assert (Msgpack.array(Nil) == Msgpack.Array(Nil))
+    end
+
+    test "map produces Map" do
+      assert (Msgpack.map(Nil) == Msgpack.Map(Nil))
+    end
+
+  end
+
+  -- ── decode_all ────────────────────────────────────────────────────────────
+
+  describe "decode_all" do
+
+    test "empty bytes yields empty list" do
+      match Msgpack.decode_all(Nil) do
+      Ok(vs) -> assert (vs == Nil)
+      Err(e) -> panic("expected Ok([]) but got Err: " ++ e)
+      end
+    end
+
+    test "single value" do
+      match Msgpack.decode_all(Cons(192, Nil)) do
+      Ok(vs) -> assert (vs == Cons(Msgpack.Null, Nil))
+      Err(e) -> panic(e)
+      end
+    end
+
+    test "two concatenated values" do
+      let bs = List.append(Msgpack.encode(Msgpack.Int(1)),
+                           Msgpack.encode(Msgpack.Int(2)))
+      match Msgpack.decode_all(bs) do
+      Ok(vs) ->
+        assert (vs == Cons(Msgpack.Int(1), Cons(Msgpack.Int(2), Nil)))
+      Err(e) -> panic(e)
+      end
+    end
+
+    test "three mixed values, length is 3" do
+      let bs = List.append(Msgpack.encode(Msgpack.Null),
+               List.append(Msgpack.encode(Msgpack.Bool(true)),
+                           Msgpack.encode(Msgpack.Str("hi"))))
+      match Msgpack.decode_all(bs) do
+      Ok(vs) -> assert (List.length(vs) == 3)
+      Err(e) -> panic(e)
+      end
+    end
+
+  end
+
+  -- ── Error cases ───────────────────────────────────────────────────────────
+
+  describe "Error cases" do
+
+    test "empty input is an error" do
+      assert_decode_err(Nil)
+    end
+
+    test "truncated int16 is an error (header only)" do
+      -- 209 = int16 header, but only 1 byte follows (need 2)
+      assert_decode_err(Cons(209, Cons(0, Nil)))
+    end
+
+    test "truncated str8 body is an error" do
+      -- 217 = str8, length=5 but only 2 bytes follow
+      assert_decode_err(Cons(217, Cons(5, Cons(65, Cons(66, Nil)))))
+    end
+
+    test "trailing bytes causes error" do
+      -- two nulls: decode expects only one value
+      assert_decode_err(Cons(192, Cons(192, Nil)))
+    end
+
+    test "float32 byte (202) is unsupported" do
+      assert_decode_err(Cons(202, Cons(0, Cons(0, Cons(0, Cons(0, Nil))))))
+    end
+
+    test "float64 byte (203) is unsupported" do
+      assert_decode_err(Cons(203, Nil))
+    end
+
+  end
+
+end

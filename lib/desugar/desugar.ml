@@ -528,16 +528,16 @@ let rec desugar_expr (e : expr) : expr =
   | EAssert (e, sp) ->
     EAssert (desugar_expr e, sp)
 
-  | ESigil (c, content, sp) ->
+  | ESigil (name, content, sp) ->
     let content' = desugar_expr content in
-    if c = 'H' then
+    if name = "H" then
       (* Desugar ~H"..." → IOList.from_strings([parts...])
          Decompose the ++ chain into segments, wrap dynamic parts in
          Html.escape, and build a multi-segment IOList directly. *)
       html_interp_to_iolist content' sp
     else begin
-      (* Other sigils: ~R"..." → Sigil.r(content), etc. *)
-      let fn_name = Printf.sprintf "Sigil.%c" (Char.lowercase_ascii c) in
+      (* Other sigils: ~R"..." → Sigil.r(content), ~xml"..." → Sigil.xml(content), etc. *)
+      let fn_name = "Sigil." ^ String.lowercase_ascii name in
       EApp (EVar { txt = fn_name; span = sp }, [content'], sp)
     end
 

@@ -21,4 +21,16 @@ mod Sigil do
     IOList.from_string(content)
   end
 
+  fn toml(content : String) do
+    Toml.parse_exn(content)
+  end
+
+  fn xml(content : String) do
+    Xml.parse_exn(content)
+  end
+
+  fn yaml(content : String) do
+    Yaml.parse_exn(content)
+  end
+
 end

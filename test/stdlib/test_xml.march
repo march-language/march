@@ -1,0 +1,400 @@
+-- TDD tests for stdlib/xml.march
+-- Written before implementation (test-driven).
+
+mod TestXml do
+
+  use Xml.*
+
+  pfn parse_ok(src) do
+    match Xml.parse(src) do
+    Ok(xdoc) -> xdoc
+    Err(e) ->
+      match e do
+      Xml.XmlError(msg, line, col) ->
+        panic("parse failed at " ++ int_to_string(line) ++ ":" ++ int_to_string(col) ++ ": " ++ msg)
+      end
+    end
+  end
+
+  -- ── Empty / minimal ───────────────────────────────────────────────────────
+
+  describe "Minimal" do
+
+    test "empty element self-closing" do
+      let xdoc = parse_ok("<root/>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.tag(r), Some("root"), "tag")
+      Test.assert_eq(Xml.children(r), [], "children")
+    end
+
+    test "empty element with end tag" do
+      let xdoc = parse_ok("<root></root>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.tag(r), Some("root"), "tag")
+    end
+
+    test "root with whitespace only text" do
+      let xdoc = parse_ok("<root>   </root>")
+      let r = Xml.root(xdoc)
+      -- elements() filters to Element nodes only
+      Test.assert_eq(Xml.elements(r), [], "no element children")
+    end
+
+  end
+
+  -- ── Attributes ────────────────────────────────────────────────────────────
+
+  describe "Attributes" do
+
+    test "single attribute double-quoted" do
+      let xdoc = parse_ok("<img src=\"photo.jpg\"/>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.attr(r, "src"), Some("photo.jpg"), "src attr")
+    end
+
+    test "single attribute single-quoted" do
+      let xdoc = parse_ok("<a href='http://example.com'/>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.attr(r, "href"), Some("http://example.com"), "href attr")
+    end
+
+    test "multiple attributes" do
+      let xdoc = parse_ok("<input type=\"text\" name=\"q\" value=\"\"/>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.attr(r, "type"), Some("text"), "type")
+      Test.assert_eq(Xml.attr(r, "name"), Some("q"), "name")
+      Test.assert_eq(Xml.attr(r, "value"), Some(""), "value")
+    end
+
+    test "missing attribute returns None" do
+      let xdoc = parse_ok("<foo bar=\"1\"/>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.attr(r, "baz"), None, "missing attr")
+    end
+
+    test "attribute with entity reference" do
+      let xdoc = parse_ok("<a title=\"a &amp; b\"/>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.attr(r, "title"), Some("a & b"), "entity in attr")
+    end
+
+  end
+
+  -- ── Text content ──────────────────────────────────────────────────────────
+
+  describe "Text" do
+
+    test "simple text node" do
+      let xdoc = parse_ok("<p>Hello</p>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.text(r), Some("Hello"), "text")
+    end
+
+    test "text with entity references" do
+      let xdoc = parse_ok("<p>&lt;b&gt; &amp; &quot;</p>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.text(r), Some("<b> & \""), "entities in text")
+    end
+
+    test "text with apos entity" do
+      let xdoc = parse_ok("<p>it&apos;s</p>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.text(r), Some("it's"), "apos entity")
+    end
+
+    test "text on Element node returns None" do
+      let xdoc = parse_ok("<a><b/></a>")
+      let r = Xml.root(xdoc)
+      -- text() on an element with only element children: concatenates text nodes (none here)
+      Test.assert_eq(Xml.text(r), None, "no text")
+    end
+
+    test "mixed content text extraction" do
+      let xdoc = parse_ok("<p>Hello <b>world</b>!</p>")
+      let r = Xml.root(xdoc)
+      -- text() returns direct text content concatenated (not recursive)
+      -- (implementation: join direct Text children)
+      let t = Xml.text(r)
+      match t do
+      Some(s) -> () -- should contain "Hello " and "!" at least
+      None -> panic("expected some text")
+      end
+    end
+
+  end
+
+  -- ── Children / elements ───────────────────────────────────────────────────
+
+  describe "Children" do
+
+    test "element children" do
+      let xdoc = parse_ok("<ul><li/><li/><li/></ul>")
+      let r = Xml.root(xdoc)
+      let kids = Xml.elements(r)
+      Test.assert_eq(List.length(kids), 3, "three li children")
+    end
+
+    test "children includes text and elements" do
+      let xdoc = parse_ok("<p>text<b/>more</p>")
+      let r = Xml.root(xdoc)
+      -- children returns ALL child nodes
+      let all = Xml.children(r)
+      if List.length(all) >= 2 do ()
+      else panic("expected at least text + element children") end
+    end
+
+    test "elements filters non-element nodes" do
+      let xdoc = parse_ok("<p>text<b/></p>")
+      let r = Xml.root(xdoc)
+      let elems = Xml.elements(r)
+      Test.assert_eq(List.length(elems), 1, "one element child")
+    end
+
+  end
+
+  -- ── Nested elements ───────────────────────────────────────────────────────
+
+  describe "Nesting" do
+
+    test "two levels deep" do
+      let xdoc = parse_ok("<a><b><c/></b></a>")
+      let r = Xml.root(xdoc)
+      let b = List.head_opt(Xml.elements(r))
+      match b do
+      None -> panic("expected b")
+      Some(bnode) ->
+        let cs = Xml.elements(bnode)
+        Test.assert_eq(List.length(cs), 1, "one c")
+      end
+    end
+
+    test "siblings" do
+      let xdoc = parse_ok("<root><x/><y/><z/></root>")
+      let r = Xml.root(xdoc)
+      let kids = Xml.elements(r)
+      Test.assert_eq(List.length(kids), 3, "three siblings")
+    end
+
+  end
+
+  -- ── XML declaration (prolog) ──────────────────────────────────────────────
+
+  describe "Prolog" do
+
+    test "xml declaration ignored" do
+      let xdoc = parse_ok("<?xml version=\"1.0\"?><root/>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.tag(r), Some("root"), "tag after prolog")
+    end
+
+    test "xml declaration with encoding" do
+      let xdoc = parse_ok("<?xml version=\"1.0\" encoding=\"UTF-8\"?><root/>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.tag(r), Some("root"), "tag")
+    end
+
+    test "doctype ignored" do
+      let xdoc = parse_ok("<!DOCTYPE html><root/>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.tag(r), Some("root"), "tag after doctype")
+    end
+
+  end
+
+  -- ── Comments ─────────────────────────────────────────────────────────────
+
+  describe "Comments" do
+
+    test "comment before root" do
+      let xdoc = parse_ok("<!-- hello --><root/>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.tag(r), Some("root"), "tag after comment")
+    end
+
+    test "comment inside element" do
+      let xdoc = parse_ok("<root><!-- comment --><child/></root>")
+      let r = Xml.root(xdoc)
+      let elems = Xml.elements(r)
+      Test.assert_eq(List.length(elems), 1, "one element child")
+    end
+
+  end
+
+  -- ── CDATA ─────────────────────────────────────────────────────────────────
+
+  describe "CDATA" do
+
+    test "cdata section" do
+      let xdoc = parse_ok("<root><![CDATA[<b>not markup</b>]]></root>")
+      let r = Xml.root(xdoc)
+      -- CDATA becomes a text-like node; text() should include it
+      let kids = Xml.children(r)
+      if List.length(kids) >= 1 do ()
+      else panic("expected cdata child") end
+    end
+
+  end
+
+  -- ── Navigation ───────────────────────────────────────────────────────────
+
+  describe "Navigation" do
+
+    test "find simple path" do
+      let xdoc = parse_ok("<root><item><name>Bob</name></item></root>")
+      let r = Xml.root(xdoc)
+      let found = Xml.find(r, "item/name")
+      match found do
+      None -> panic("expected item/name")
+      Some(node) -> Test.assert_eq(Xml.text(node), Some("Bob"), "name text")
+      end
+    end
+
+    test "find missing path returns None" do
+      let xdoc = parse_ok("<root><item/></root>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.find(r, "item/name"), None, "missing path")
+    end
+
+    test "find single segment" do
+      let xdoc = parse_ok("<root><child/></root>")
+      let r = Xml.root(xdoc)
+      let found = Xml.find(r, "child")
+      match found do
+      None -> panic("expected child")
+      Some(n) -> Test.assert_eq(Xml.tag(n), Some("child"), "child tag")
+      end
+    end
+
+    test "find_all returns multiple matches" do
+      let xdoc = parse_ok("<root><item>1</item><item>2</item><item>3</item></root>")
+      let r = Xml.root(xdoc)
+      let items = Xml.find_all(r, "item")
+      Test.assert_eq(List.length(items), 3, "three items")
+    end
+
+    test "find_all empty when no match" do
+      let xdoc = parse_ok("<root><a/></root>")
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.find_all(r, "b"), [], "no b elements")
+    end
+
+    test "tag on Text node returns None" do
+      let xdoc = parse_ok("<root>hello</root>")
+      let r = Xml.root(xdoc)
+      let kids = Xml.children(r)
+      match List.head_opt(kids) do
+      None -> panic("expected text child")
+      Some(t) -> Test.assert_eq(Xml.tag(t), None, "text has no tag")
+      end
+    end
+
+  end
+
+  -- ── Construction ─────────────────────────────────────────────────────────
+
+  describe "Construction" do
+
+    test "elem builds element" do
+      let node = Xml.elem("p", [("class", "lead")], [Xml.text_node("hello")])
+      Test.assert_eq(Xml.tag(node), Some("p"), "tag")
+      Test.assert_eq(Xml.attr(node, "class"), Some("lead"), "class attr")
+      Test.assert_eq(Xml.text(node), Some("hello"), "text")
+    end
+
+    test "text_node builds Text" do
+      let node = Xml.text_node("world")
+      Test.assert_eq(Xml.text(node), Some("world"), "text_node text")
+      Test.assert_eq(Xml.tag(node), None, "text_node has no tag")
+    end
+
+  end
+
+  -- ── to_string ─────────────────────────────────────────────────────────────
+
+  describe "to_string" do
+
+    test "self-closing element" do
+      let xdoc = parse_ok("<br/>")
+      let s = Xml.to_string(xdoc)
+      -- should contain <br/>
+      if string_contains(s, "br") do ()
+      else panic("expected br in output: " ++ s) end
+    end
+
+    test "element with text" do
+      let xdoc = parse_ok("<p>Hello</p>")
+      let s = Xml.to_string(xdoc)
+      if string_contains(s, "Hello") do ()
+      else panic("expected Hello in output") end
+    end
+
+    test "round-trip parse/to_string/parse" do
+      let src = "<a><b x=\"1\"/><c>text</c></a>"
+      let xdoc = parse_ok(src)
+      let s = Xml.to_string(xdoc)
+      let xdoc2 = parse_ok(s)
+      let r = Xml.root(xdoc2)
+      Test.assert_eq(Xml.tag(r), Some("a"), "tag preserved")
+      Test.assert_eq(List.length(Xml.elements(r)), 2, "two children")
+    end
+
+  end
+
+  -- ── Errors ────────────────────────────────────────────────────────────────
+
+  describe "Errors" do
+
+    test "mismatched tags" do
+      match Xml.parse("<a></b>") do
+      Err(_) -> ()
+      Ok(_) -> panic("expected error for mismatched tags")
+      end
+    end
+
+    test "unclosed tag" do
+      match Xml.parse("<a>") do
+      Err(_) -> ()
+      Ok(_) -> panic("expected error for unclosed tag")
+      end
+    end
+
+    test "empty input" do
+      match Xml.parse("") do
+      Err(_) -> ()
+      Ok(_) -> panic("expected error for empty input")
+      end
+    end
+
+  end
+
+  -- ── Sigil ────────────────────────────────────────────────────────────────
+
+  describe "Sigil" do
+
+    test "~xml sigil parses XML" do
+      let xdoc = ~xml"<root><item>hello</item></root>"
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.tag(r), Some("root"), "root tag via sigil")
+    end
+
+    test "~xml multiline" do
+      let xdoc = ~xml"""
+        <feed>
+          <title>March</title>
+          <entry><id>1</id></entry>
+        </feed>
+      """
+      let r = Xml.root(xdoc)
+      Test.assert_eq(Xml.tag(r), Some("feed"), "feed tag")
+      let title = Xml.find(r, "title")
+      match title do
+      None -> panic("expected title")
+      Some(n) -> Test.assert_eq(Xml.text(n), Some("March"), "title text")
+      end
+    end
+
+  end
+
+  fn main() do () end
+
+end

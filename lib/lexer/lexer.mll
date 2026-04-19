@@ -151,7 +151,8 @@ rule token = parse
   | '!'           { BANG }
   | '_'           { UNDERSCORE }
   | '?'           { QUESTION }
-  | '~' (['A'-'Z'] as c) { SIGIL_PREFIX c }
+  | '~' (['A'-'Z'] as c) { SIGIL_PREFIX (String.make 1 c) }
+  | '~' (['a'-'z'] ['a'-'z' '0'-'9' '_']* as name) { SIGIL_PREFIX name }
   | ident as id   {
       match Hashtbl.find_opt keyword_table id with
       | Some tok -> tok

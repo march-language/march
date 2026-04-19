@@ -412,9 +412,9 @@ let rec expr_inline = function
     Printf.sprintf "fn %s(%s)%s do ... end"
       n.txt (String.concat ", " (List.map fmt_param ps)) ty
   | EAssert (e, _)              -> Printf.sprintf "assert %s" (expr_inline e)
-  | ESigil (c, content, _)     ->
+  | ESigil (name, content, _)     ->
     let inner = expr_inline content in
-    Printf.sprintf "~%c%s" c inner
+    Printf.sprintf "~%s%s" name inner
   | ECond _                     -> "match do ... end"
 
 (** Returns true if the expression must be rendered on multiple lines
@@ -480,8 +480,8 @@ let rec emit_stmt ctx e =
     indented ctx (fun () -> emit_body ctx body);
     line ctx "end"
 
-  | ESigil (c, content, _) when sigil_is_multiline content ->
-    emit_sigil_multiline ctx c content
+  | ESigil (name, content, _) when sigil_is_multiline content ->
+    emit_sigil_multiline ctx name content
 
   | _ ->
     line ctx (expr_inline e)
@@ -543,7 +543,7 @@ and emit_if_branch ctx e =
   | _ ->
     indented ctx (fun () -> emit_stmt ctx e)
 
-and emit_sigil_multiline ctx c content =
+and emit_sigil_multiline ctx name content =
   (* Reconstruct the raw string with interpolation preserved *)
   let raw = match content with
     | ELit (LitString s, _) -> s
@@ -562,7 +562,7 @@ and emit_sigil_multiline ctx c content =
       | None -> expr_inline content
   in
   let triple = "\"\"\"" in
-  line ctx (Printf.sprintf "~%c%s" c triple);
+  line ctx (Printf.sprintf "~%s%s" name triple);
   (* Output content lines at base_indent + 2.
      Strip common leading whitespace from the original, then re-indent. *)
   (* Strip leading newline (implicit from triple-quote on own line)
