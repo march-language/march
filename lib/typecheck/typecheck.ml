@@ -1177,6 +1177,7 @@ let builtin_bindings : (string * scheme) list =
     ("tcp_send_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_string, t_result t_unit e))));
     ("tcp_recv_all",            poly1 (fun e -> TArrow (t_int, TArrow (t_int, TArrow (t_int, t_result t_string e)))));
     ("tcp_close",               Mono (TArrow (t_int, t_unit)));
+    ("dns_resolve",             Mono (TArrow (t_string, t_result (t_list t_string) t_string)));
     (* tcp_recv_exact(fd, n): reads exactly n bytes, returns Result(Bytes, String) *)
     ("tcp_recv_exact",          Mono (TArrow (t_int, TArrow (t_int, t_result (TCon ("Bytes", [])) t_string))));
     (* md5(s): returns 32-char lowercase hex digest *)

@@ -134,6 +134,8 @@ let stdlib_file_list = [
   "toml.march";
   "xml.march";
   "yaml.march";
+  "socket.march";
+  "dns.march";
   "process.march";
   "io.march";
   "system.march";

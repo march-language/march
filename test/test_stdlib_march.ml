@@ -117,6 +117,8 @@ let all_stdlib_decls =
     "toml.march";
     "xml.march";
     "yaml.march";
+    "socket.march";
+    "dns.march";
     "process.march";
     "logger.march";
     "flow.march";
@@ -266,6 +268,14 @@ let () =
     ("yaml", [
       Alcotest.test_case "Yaml module"
         `Quick (run_stdlib_test "test_yaml.march" "TestYaml");
+    ]);
+    ("socket", [
+      Alcotest.test_case "Socket module"
+        `Quick (run_stdlib_test "test_socket.march" "TestSocket");
+    ]);
+    ("dns", [
+      Alcotest.test_case "Dns module"
+        `Quick (run_stdlib_test "test_dns.march" "TestDns");
     ]);
     (* test_flow.march tests the function-transformer Flow API (from_fn/run/then_)
        which differs from the current Seq-based flow.march implementation.

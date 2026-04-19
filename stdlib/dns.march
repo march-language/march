@@ -1,0 +1,81 @@
+-- DNS resolution module.
+--
+-- Resolves hostnames to IPv4 addresses via the platform's getaddrinfo(3).
+-- Results reflect the system's resolver configuration (e.g. /etc/hosts,
+-- /etc/resolv.conf, mDNS, and any configured search domains).
+--
+-- Public API:
+--   Dns.resolve(host)      : Result(List(String), DnsError)
+--   Dns.resolve_one(host)  : Result(String, DnsError)
+--   Dns.is_ip(s)           : Bool
+--   Dns.error_message(e)   : String
+
+mod Dns do
+
+  type DnsError
+    = NotFound(String)
+    | ResolveError(String)
+
+  doc "Return a human-readable description of a DnsError."
+  fn error_message(e : DnsError) : String do
+    match e do
+    NotFound(host)      -> "no address found for: " ++ host
+    ResolveError(msg)   -> "DNS resolution error: " ++ msg
+    end
+  end
+
+  doc """
+  Resolve hostname to a list of IPv4 address strings.
+  Returns Ok(addrs) where addrs is non-empty, or Err on failure.
+
+      match Dns.resolve("example.com") do
+      Ok(ips)  -> List.head_opt(ips)
+      Err(e)   -> panic(Dns.error_message(e))
+      end
+  """
+  fn resolve(host : String) : Result(List(String), DnsError) do
+    match dns_resolve(host) do
+    Ok(ips)  -> Ok(ips)
+    Err(msg) ->
+      if string_contains(msg, "cannot resolve") do
+        Err(NotFound(host))
+      else
+        Err(ResolveError(msg))
+      end
+    end
+  end
+
+  doc """
+  Resolve hostname to its primary IPv4 address.
+  Returns Ok(ip_string) or Err.
+
+      match Dns.resolve_one("example.com") do
+      Ok(ip) -> ip
+      Err(e) -> panic(Dns.error_message(e))
+      end
+  """
+  fn resolve_one(host : String) : Result(String, DnsError) do
+    match resolve(host) do
+    Err(e) -> Err(e)
+    Ok(ips) ->
+      match List.head_opt(ips) do
+      None    -> Err(NotFound(host))
+      Some(ip) -> Ok(ip)
+      end
+    end
+  end
+
+  doc """
+  Return true if s looks like an IPv4 address (four dot-separated octets).
+  Does not validate octet ranges.
+
+      Dns.is_ip("127.0.0.1")    -- true
+      Dns.is_ip("example.com")  -- false
+  """
+  fn is_ip(s : String) : Bool do
+    let parts = String.split(s, ".")
+    List.length(parts) == 4 &&
+    List.all(parts, fn p -> string_to_int(p) != None)
+  end
+
+end

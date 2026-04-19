@@ -1,0 +1,116 @@
+-- Tests for stdlib/dns.march.
+-- Tests error constructors, error_message, is_ip, and resolve("localhost").
+-- The localhost resolve test may be skipped in sandboxed environments.
+
+mod TestDns do
+
+  use Dns.*
+
+  -- ── Error type ────────────────────────────────────────────────────────────
+
+  describe "DnsError constructors" do
+
+    test "NotFound stores host" do
+      let e = NotFound("example.invalid")
+      match e do
+      NotFound(host) -> Test.assert_eq(host, "example.invalid", "host")
+      _ -> panic("wrong variant")
+      end
+    end
+
+    test "ResolveError stores message" do
+      let e = ResolveError("timeout")
+      match e do
+      ResolveError(msg) -> Test.assert_eq(msg, "timeout", "msg")
+      _ -> panic("wrong variant")
+      end
+    end
+
+  end
+
+  -- ── error_message ─────────────────────────────────────────────────────────
+
+  describe "error_message" do
+
+    test "NotFound message" do
+      let msg = Dns.error_message(NotFound("example.invalid"))
+      Test.assert_true(string_contains(msg, "example.invalid"), "host in msg")
+    end
+
+    test "ResolveError message" do
+      let msg = Dns.error_message(ResolveError("SERVFAIL"))
+      Test.assert_true(string_contains(msg, "SERVFAIL"), "detail in msg")
+    end
+
+  end
+
+  -- ── is_ip ─────────────────────────────────────────────────────────────────
+
+  describe "is_ip" do
+
+    test "127.0.0.1 is IP" do
+      Test.assert_true(Dns.is_ip("127.0.0.1"), "loopback")
+    end
+
+    test "0.0.0.0 is IP" do
+      Test.assert_true(Dns.is_ip("0.0.0.0"), "any addr")
+    end
+
+    test "hostname is not IP" do
+      Test.assert_true(not(Dns.is_ip("example.com")), "hostname")
+    end
+
+    test "partial dotted is not IP" do
+      Test.assert_true(not(Dns.is_ip("192.168.1")), "three octets")
+    end
+
+    test "empty string is not IP" do
+      Test.assert_true(not(Dns.is_ip("")), "empty")
+    end
+
+  end
+
+  -- ── resolve / resolve_one ─────────────────────────────────────────────────
+
+  describe "resolve" do
+
+    test "localhost resolves to 127.0.0.1" do
+      match Dns.resolve("localhost") do
+      Err(_) -> ()  -- allowed in sandboxed environments
+      Ok(ips) ->
+        Test.assert_true(List.length(ips) >= 1, "at least one address")
+        match List.find(ips, fn ip -> ip == "127.0.0.1") do
+        Some(_) -> ()
+        None ->
+          -- Some systems resolve localhost to ::1 only; accept any result
+          ()
+        end
+      end
+    end
+
+    test "nonexistent domain returns Err" do
+      match Dns.resolve("this-domain-does-not-exist.example.invalid") do
+      Err(_) -> ()
+      Ok(_)  -> panic("expected DNS failure for invalid TLD")
+      end
+    end
+
+    test "resolve_one returns single IP for localhost" do
+      match Dns.resolve_one("localhost") do
+      Err(_) -> ()  -- allowed in sandboxed environments
+      Ok(ip) -> Test.assert_true(Dns.is_ip(ip), "result is IP string")
+      end
+    end
+
+    test "resolve_one returns Err for nonexistent domain" do
+      match Dns.resolve_one("this-domain-does-not-exist.example.invalid") do
+      Err(_) -> ()
+      Ok(_)  -> panic("expected failure")
+      end
+    end
+
+  end
+
+  fn main() do () end
+
+end

@@ -1,0 +1,83 @@
+-- TCP socket module: a clean interface over the tcp_* builtins.
+--
+-- Wraps the low-level tcp_connect / tcp_send_all / tcp_recv_all /
+-- tcp_close builtins with an ergonomic Result-based API.
+-- All operations are synchronous.  For async use, wrap in task_spawn.
+--
+-- File descriptors are plain Int values.  Always call Socket.close
+-- when done, ideally via Socket.with_connection which ensures cleanup.
+--
+-- Public API:
+--   Socket.connect(host, port)             : Result(Int, SocketError)
+--   Socket.write(fd, data)                 : Result((), SocketError)
+--   Socket.recv(fd, max_bytes)             : Result(String, SocketError)
+--   Socket.recv_timeout(fd, max, ms)       : Result(String, SocketError)
+--   Socket.close(fd)                       : ()
+--   Socket.with_connection(host, port, f)  : Result(a, SocketError)
+--   Socket.error_message(e)                : String
+
+mod Socket do
+
+  type SocketError
+    = ConnectionFailed(String)
+    | WriteFailed(String)
+    | RecvFailed(String)
+
+  doc "Return a human-readable description of a SocketError."
+  fn error_message(e : SocketError) : String do
+    match e do
+    ConnectionFailed(msg) -> "connection failed: " ++ msg
+    WriteFailed(msg)      -> "write failed: " ++ msg
+    RecvFailed(msg)       -> "receive failed: " ++ msg
+    end
+  end
+
+  doc "Open a TCP connection to host:port. Returns Ok(fd) or Err."
+  fn connect(host : String, port : Int) : Result(Int, SocketError) do
+    match tcp_connect(host, port) do
+    Ok(fd)   -> Ok(fd)
+    Err(msg) -> Err(ConnectionFailed(msg))
+    end
+  end
+
+  doc "Write all bytes of data over fd. Returns Ok(()) or Err(WriteFailed(...))."
+  fn write(fd : Int, data : String) : Result((), SocketError) do
+    match tcp_send_all(fd, data) do
+    Ok(_)    -> Ok(())
+    Err(msg) -> Err(WriteFailed(msg))
+    end
+  end
+
+  doc "Receive up to max_bytes from fd (no timeout). Returns Ok(data) or Err."
+  fn recv(fd : Int, max_bytes : Int) : Result(String, SocketError) do
+    match tcp_recv_all(fd, max_bytes, 0) do
+    Ok(data) -> Ok(data)
+    Err(msg) -> Err(RecvFailed(msg))
+    end
+  end
+
+  doc "Receive up to max_bytes from fd with timeout_ms timeout (0 = no timeout)."
+  fn recv_timeout(fd : Int, max_bytes : Int, timeout_ms : Int) : Result(String, SocketError) do
+    match tcp_recv_all(fd, max_bytes, timeout_ms) do
+    Ok(data) -> Ok(data)
+    Err(msg) -> Err(RecvFailed(msg))
+    end
+  end
+
+  doc "Close fd. Silently ignores errors (already-closed fds, etc.)."
+  fn close(fd : Int) : () do
+    tcp_close(fd)
+  end
+
+  doc "Open a connection, run f(fd), then close. fd is always closed."
+  fn with_connection(host : String, port : Int, f) do
+    match connect(host, port) do
+    Err(e) -> Err(e)
+    Ok(fd) ->
+      let result = f(fd)
+      close(fd)
+      result
+    end
+  end
+
+end
