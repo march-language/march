@@ -20,6 +20,12 @@
 #include <stdint.h>
 #include <zlib.h>
 
+/* Mirror the limits from march_compress.c. Input cap ensures
+ * compressBound(in_len)+overhead fits in a 32-bit uInt.
+ * Output cap is checked in grow loops before every realloc. */
+#define MAX_INPUT_SIZE      ((size_t)(256 * 1024 * 1024))
+#define MAX_DECOMPRESS_SIZE ((size_t)(256 * 1024 * 1024))
+
 /* ── Gzip ────────────────────────────────────────────────────────────────── */
 
 /* caml_march_gzip_encode(input: string, level: int) : string
@@ -29,18 +35,25 @@ CAMLprim value caml_march_gzip_encode(value input, value level_val) {
     CAMLlocal1(result);
 
     mlsize_t in_len = caml_string_length(input);
-    const uint8_t *in_buf = (const uint8_t *)String_val(input);
     int lvl = Int_val(level_val);
+
+    if (in_len > MAX_INPUT_SIZE)
+        caml_failwith("gzip_encode: input too large");
+
+    /* Copy input before any OCaml allocation so GC cannot move String_val(input). */
+    uint8_t *in_buf = malloc(in_len > 0 ? in_len : 1);
+    if (!in_buf) caml_failwith("gzip_encode: out of memory");
+    memcpy(in_buf, String_val(input), in_len);
 
     uLong bound = compressBound((uLong)in_len) + 32;
     uint8_t *out_buf = malloc(bound);
-    if (!out_buf) caml_failwith("gzip_encode: out of memory");
+    if (!out_buf) { free(in_buf); caml_failwith("gzip_encode: out of memory"); }
 
     z_stream zs;
     memset(&zs, 0, sizeof(zs));
     /* windowBits 15+16 → gzip format */
     if (deflateInit2(&zs, lvl, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-        free(out_buf);
+        free(in_buf); free(out_buf);
         caml_failwith("gzip_encode: deflateInit2 failed");
     }
 
@@ -51,6 +64,7 @@ CAMLprim value caml_march_gzip_encode(value input, value level_val) {
 
     int rc = deflate(&zs, Z_FINISH);
     deflateEnd(&zs);
+    free(in_buf);
 
     if (rc != Z_STREAM_END) {
         free(out_buf);
@@ -70,17 +84,24 @@ CAMLprim value caml_march_gzip_decode(value input) {
     CAMLlocal1(result);
 
     mlsize_t in_len = caml_string_length(input);
-    const uint8_t *in_buf = (const uint8_t *)String_val(input);
+
+    if (in_len > MAX_INPUT_SIZE)
+        caml_failwith("gzip_decode: input too large");
+
+    uint8_t *in_buf = malloc(in_len > 0 ? in_len : 1);
+    if (!in_buf) caml_failwith("gzip_decode: out of memory");
+    memcpy(in_buf, String_val(input), in_len);
 
     size_t out_size = in_len < 64 ? 256 : in_len * 4;
+    if (out_size > MAX_DECOMPRESS_SIZE) out_size = MAX_DECOMPRESS_SIZE;
     uint8_t *out_buf = malloc(out_size);
-    if (!out_buf) caml_failwith("gzip_decode: out of memory");
+    if (!out_buf) { free(in_buf); caml_failwith("gzip_decode: out of memory"); }
 
     z_stream zs;
     memset(&zs, 0, sizeof(zs));
     /* windowBits 15+32 → auto-detect gzip/zlib */
     if (inflateInit2(&zs, 15 + 32) != Z_OK) {
-        free(out_buf);
+        free(in_buf); free(out_buf);
         caml_failwith("gzip_decode: inflateInit2 failed");
     }
 
@@ -95,16 +116,21 @@ CAMLprim value caml_march_gzip_decode(value input) {
         if (rc == Z_STREAM_END) break;
         if (rc != Z_OK && rc != Z_BUF_ERROR) {
             inflateEnd(&zs);
-            free(out_buf);
+            free(in_buf); free(out_buf);
             caml_failwith("gzip_decode: inflate failed (invalid data)");
         }
         if (zs.avail_out == 0) {
+            if (out_size >= MAX_DECOMPRESS_SIZE) {
+                inflateEnd(&zs);
+                free(in_buf); free(out_buf);
+                caml_failwith("gzip_decode: output size limit exceeded");
+            }
             size_t done = out_size;
-            out_size *= 2;
+            out_size = out_size * 2 > MAX_DECOMPRESS_SIZE ? MAX_DECOMPRESS_SIZE : out_size * 2;
             uint8_t *tmp = realloc(out_buf, out_size);
             if (!tmp) {
                 inflateEnd(&zs);
-                free(out_buf);
+                free(in_buf); free(out_buf);
                 caml_failwith("gzip_decode: out of memory");
             }
             out_buf = tmp;
@@ -115,6 +141,7 @@ CAMLprim value caml_march_gzip_decode(value input) {
 
     size_t out_len = out_size - zs.avail_out;
     inflateEnd(&zs);
+    free(in_buf);
 
     result = caml_alloc_string(out_len);
     memcpy(Bytes_val(result), out_buf, out_len);
@@ -129,16 +156,22 @@ CAMLprim value caml_march_deflate_encode(value input) {
     CAMLlocal1(result);
 
     mlsize_t in_len = caml_string_length(input);
-    const uint8_t *in_buf = (const uint8_t *)String_val(input);
+
+    if (in_len > MAX_INPUT_SIZE)
+        caml_failwith("deflate_encode: input too large");
+
+    uint8_t *in_buf = malloc(in_len > 0 ? in_len : 1);
+    if (!in_buf) caml_failwith("deflate_encode: out of memory");
+    memcpy(in_buf, String_val(input), in_len);
 
     uLong bound = compressBound((uLong)in_len);
     uint8_t *out_buf = malloc(bound);
-    if (!out_buf) caml_failwith("deflate_encode: out of memory");
+    if (!out_buf) { free(in_buf); caml_failwith("deflate_encode: out of memory"); }
 
     z_stream zs;
     memset(&zs, 0, sizeof(zs));
     if (deflateInit2(&zs, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-        free(out_buf);
+        free(in_buf); free(out_buf);
         caml_failwith("deflate_encode: deflateInit2 failed");
     }
 
@@ -149,6 +182,7 @@ CAMLprim value caml_march_deflate_encode(value input) {
 
     int rc = deflate(&zs, Z_FINISH);
     deflateEnd(&zs);
+    free(in_buf);
 
     if (rc != Z_STREAM_END) {
         free(out_buf);
@@ -167,16 +201,23 @@ CAMLprim value caml_march_deflate_decode(value input) {
     CAMLlocal1(result);
 
     mlsize_t in_len = caml_string_length(input);
-    const uint8_t *in_buf = (const uint8_t *)String_val(input);
+
+    if (in_len > MAX_INPUT_SIZE)
+        caml_failwith("deflate_decode: input too large");
+
+    uint8_t *in_buf = malloc(in_len > 0 ? in_len : 1);
+    if (!in_buf) caml_failwith("deflate_decode: out of memory");
+    memcpy(in_buf, String_val(input), in_len);
 
     size_t out_size = in_len < 64 ? 256 : in_len * 4;
+    if (out_size > MAX_DECOMPRESS_SIZE) out_size = MAX_DECOMPRESS_SIZE;
     uint8_t *out_buf = malloc(out_size);
-    if (!out_buf) caml_failwith("deflate_decode: out of memory");
+    if (!out_buf) { free(in_buf); caml_failwith("deflate_decode: out of memory"); }
 
     z_stream zs;
     memset(&zs, 0, sizeof(zs));
     if (inflateInit2(&zs, -15) != Z_OK) {
-        free(out_buf);
+        free(in_buf); free(out_buf);
         caml_failwith("deflate_decode: inflateInit2 failed");
     }
 
@@ -191,16 +232,21 @@ CAMLprim value caml_march_deflate_decode(value input) {
         if (rc == Z_STREAM_END) break;
         if (rc != Z_OK && rc != Z_BUF_ERROR) {
             inflateEnd(&zs);
-            free(out_buf);
+            free(in_buf); free(out_buf);
             caml_failwith("deflate_decode: inflate failed (invalid data)");
         }
         if (zs.avail_out == 0) {
+            if (out_size >= MAX_DECOMPRESS_SIZE) {
+                inflateEnd(&zs);
+                free(in_buf); free(out_buf);
+                caml_failwith("deflate_decode: output size limit exceeded");
+            }
             size_t done = out_size;
-            out_size *= 2;
+            out_size = out_size * 2 > MAX_DECOMPRESS_SIZE ? MAX_DECOMPRESS_SIZE : out_size * 2;
             uint8_t *tmp = realloc(out_buf, out_size);
             if (!tmp) {
                 inflateEnd(&zs);
-                free(out_buf);
+                free(in_buf); free(out_buf);
                 caml_failwith("deflate_decode: out of memory");
             }
             out_buf = tmp;
@@ -211,6 +257,7 @@ CAMLprim value caml_march_deflate_decode(value input) {
 
     size_t out_len = out_size - zs.avail_out;
     inflateEnd(&zs);
+    free(in_buf);
 
     result = caml_alloc_string(out_len);
     memcpy(Bytes_val(result), out_buf, out_len);
@@ -228,14 +275,21 @@ CAMLprim value caml_march_zstd_encode(value input, value level_val) {
     CAMLlocal1(result);
 
     mlsize_t in_len = caml_string_length(input);
-    const uint8_t *in_buf = (const uint8_t *)String_val(input);
     int lvl = Int_val(level_val);
+
+    if (in_len > MAX_INPUT_SIZE)
+        caml_failwith("zstd_encode: input too large");
+
+    uint8_t *in_buf = malloc(in_len > 0 ? in_len : 1);
+    if (!in_buf) caml_failwith("zstd_encode: out of memory");
+    memcpy(in_buf, String_val(input), in_len);
 
     size_t bound = ZSTD_compressBound(in_len);
     uint8_t *out_buf = malloc(bound);
-    if (!out_buf) caml_failwith("zstd_encode: out of memory");
+    if (!out_buf) { free(in_buf); caml_failwith("zstd_encode: out of memory"); }
 
     size_t out_len = ZSTD_compress(out_buf, bound, in_buf, in_len, lvl);
+    free(in_buf);
     if (ZSTD_isError(out_len)) {
         const char *emsg = ZSTD_getErrorName(out_len);
         free(out_buf);
@@ -253,19 +307,32 @@ CAMLprim value caml_march_zstd_decode(value input) {
     CAMLlocal1(result);
 
     mlsize_t in_len = caml_string_length(input);
-    const uint8_t *in_buf = (const uint8_t *)String_val(input);
+
+    if (in_len > MAX_INPUT_SIZE)
+        caml_failwith("zstd_decode: input too large");
+
+    uint8_t *in_buf = malloc(in_len > 0 ? in_len : 1);
+    if (!in_buf) caml_failwith("zstd_decode: out of memory");
+    memcpy(in_buf, String_val(input), in_len);
 
     unsigned long long frame_size = ZSTD_getFrameContentSize(in_buf, in_len);
     size_t out_size;
-    if (frame_size == ZSTD_CONTENTSIZE_UNKNOWN || frame_size == ZSTD_CONTENTSIZE_ERROR)
+    if (frame_size == ZSTD_CONTENTSIZE_UNKNOWN || frame_size == ZSTD_CONTENTSIZE_ERROR) {
         out_size = in_len * 4 < 4096 ? 4096 : in_len * 4;
-    else
+        if (out_size > MAX_DECOMPRESS_SIZE) out_size = MAX_DECOMPRESS_SIZE;
+    } else {
+        if (frame_size > (unsigned long long)MAX_DECOMPRESS_SIZE) {
+            free(in_buf);
+            caml_failwith("zstd_decode: frame content size exceeds limit");
+        }
         out_size = (size_t)frame_size;
+    }
 
     uint8_t *out_buf = malloc(out_size > 0 ? out_size : 1);
-    if (!out_buf) caml_failwith("zstd_decode: out of memory");
+    if (!out_buf) { free(in_buf); caml_failwith("zstd_decode: out of memory"); }
 
     size_t out_len = ZSTD_decompress(out_buf, out_size, in_buf, in_len);
+    free(in_buf);
     if (ZSTD_isError(out_len)) {
         const char *emsg = ZSTD_getErrorName(out_len);
         free(out_buf);
@@ -305,14 +372,20 @@ CAMLprim value caml_march_brotli_encode(value input, value mode_val, value quali
     CAMLlocal1(result);
 
     mlsize_t in_len = caml_string_length(input);
-    const uint8_t *in_buf = (const uint8_t *)String_val(input);
     int mode    = Int_val(mode_val);
     int quality = Int_val(quality_val);
+
+    if (in_len > MAX_INPUT_SIZE)
+        caml_failwith("brotli_encode: input too large");
+
+    uint8_t *in_buf = malloc(in_len > 0 ? in_len : 1);
+    if (!in_buf) caml_failwith("brotli_encode: out of memory");
+    memcpy(in_buf, String_val(input), in_len);
 
     size_t out_size = BrotliEncoderMaxCompressedSize(in_len);
     if (out_size == 0) out_size = in_len + 64;
     uint8_t *out_buf = malloc(out_size);
-    if (!out_buf) caml_failwith("brotli_encode: out of memory");
+    if (!out_buf) { free(in_buf); caml_failwith("brotli_encode: out of memory"); }
 
     BrotliEncoderMode bmode;
     switch (mode) {
@@ -324,6 +397,7 @@ CAMLprim value caml_march_brotli_encode(value input, value mode_val, value quali
     BROTLI_BOOL ok = BrotliEncoderCompress(
         quality, BROTLI_DEFAULT_WINDOW, bmode,
         in_len, in_buf, &out_size, out_buf);
+    free(in_buf);
 
     if (!ok) {
         free(out_buf);
@@ -341,33 +415,45 @@ CAMLprim value caml_march_brotli_decode(value input) {
     CAMLlocal1(result);
 
     mlsize_t in_len = caml_string_length(input);
-    const uint8_t *in_buf = (const uint8_t *)String_val(input);
+
+    if (in_len > MAX_INPUT_SIZE)
+        caml_failwith("brotli_decode: input too large");
+
+    uint8_t *in_buf = malloc(in_len > 0 ? in_len : 1);
+    if (!in_buf) caml_failwith("brotli_decode: out of memory");
+    memcpy(in_buf, String_val(input), in_len);
 
     size_t out_size = in_len < 64 ? 1024 : in_len * 8;
+    if (out_size > MAX_DECOMPRESS_SIZE) out_size = MAX_DECOMPRESS_SIZE;
     uint8_t *out_buf = malloc(out_size);
-    if (!out_buf) caml_failwith("brotli_decode: out of memory");
+    if (!out_buf) { free(in_buf); caml_failwith("brotli_decode: out of memory"); }
 
     BrotliDecoderResult res;
     while (1) {
         size_t decoded = out_size;
         res = BrotliDecoderDecompress(in_len, in_buf, &decoded, out_buf);
         if (res == BROTLI_DECODER_RESULT_SUCCESS) {
+            free(in_buf);
             result = caml_alloc_string(decoded);
             memcpy(Bytes_val(result), out_buf, decoded);
             free(out_buf);
             CAMLreturn(result);
         }
         if (res != BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) break;
-        out_size *= 2;
+        if (out_size >= MAX_DECOMPRESS_SIZE) {
+            free(in_buf); free(out_buf);
+            caml_failwith("brotli_decode: output size limit exceeded");
+        }
+        out_size = out_size * 2 > MAX_DECOMPRESS_SIZE ? MAX_DECOMPRESS_SIZE : out_size * 2;
         uint8_t *tmp = realloc(out_buf, out_size);
         if (!tmp) {
-            free(out_buf);
+            free(in_buf); free(out_buf);
             caml_failwith("brotli_decode: out of memory");
         }
         out_buf = tmp;
     }
 
-    free(out_buf);
+    free(in_buf); free(out_buf);
     caml_failwith("brotli_decode: decompression failed");
 }
 

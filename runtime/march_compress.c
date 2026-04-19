@@ -19,6 +19,13 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <limits.h>
+
+/* 256 MB limits guard against decompression bombs and uInt overflow.
+ * Input cap ensures compressBound(in_len)+overhead fits in a 32-bit uInt.
+ * Output cap is checked in grow loops before every realloc. */
+#define MAX_INPUT_SIZE      ((size_t)(256 * 1024 * 1024))
+#define MAX_DECOMPRESS_SIZE ((size_t)(256 * 1024 * 1024))
 
 /* ── Helpers (mirrors march_extras.c) ────────────────────────────────────── */
 
@@ -48,6 +55,7 @@ static uint8_t *compress_bytes_to_raw(void *bytes_val, size_t *out_len) {
         p = *(void **)((char *)p + 24);
     }
     uint8_t *buf = malloc(n > 0 ? n : 1);
+    if (!buf) { *out_len = 0; return NULL; }
     *out_len = n;
     p = list; size_t i = 0;
     while (p && i < n) {
@@ -82,6 +90,11 @@ static void *compress_make_err(const char *msg) {
 void *march_gzip_encode(void *bytes_val, int64_t level) {
     size_t in_len;
     uint8_t *in_buf = compress_bytes_to_raw(bytes_val, &in_len);
+    if (!in_buf) return compress_make_err("gzip_encode: out of memory");
+    if (in_len > MAX_INPUT_SIZE) {
+        free(in_buf);
+        return compress_make_err("gzip_encode: input too large");
+    }
 
     /* Bound from zlib docs: deflateBound + gzip header overhead */
     uLong bound = compressBound((uLong)in_len) + 18;
@@ -123,9 +136,15 @@ void *march_gzip_encode(void *bytes_val, int64_t level) {
 void *march_gzip_decode(void *bytes_val) {
     size_t in_len;
     uint8_t *in_buf = compress_bytes_to_raw(bytes_val, &in_len);
+    if (!in_buf) return compress_make_err("gzip_decode: out of memory");
+    if (in_len > MAX_INPUT_SIZE) {
+        free(in_buf);
+        return compress_make_err("gzip_decode: input too large");
+    }
 
     /* Start with 4× the input size, grow as needed */
     size_t out_size = in_len < 64 ? 256 : in_len * 4;
+    if (out_size > MAX_DECOMPRESS_SIZE) out_size = MAX_DECOMPRESS_SIZE;
     uint8_t *out_buf = malloc(out_size);
     if (!out_buf) { free(in_buf); return compress_make_err("gzip_decode: out of memory"); }
 
@@ -152,8 +171,13 @@ void *march_gzip_decode(void *bytes_val) {
             return compress_make_err("gzip_decode: inflate failed");
         }
         if (zs.avail_out == 0) {
+            if (out_size >= MAX_DECOMPRESS_SIZE) {
+                inflateEnd(&zs);
+                free(in_buf); free(out_buf);
+                return compress_make_err("gzip_decode: output size limit exceeded");
+            }
             size_t done = out_size;
-            out_size *= 2;
+            out_size = out_size * 2 > MAX_DECOMPRESS_SIZE ? MAX_DECOMPRESS_SIZE : out_size * 2;
             uint8_t *tmp = realloc(out_buf, out_size);
             if (!tmp) {
                 inflateEnd(&zs);
@@ -178,6 +202,11 @@ void *march_gzip_decode(void *bytes_val) {
 void *march_deflate_encode(void *bytes_val) {
     size_t in_len;
     uint8_t *in_buf = compress_bytes_to_raw(bytes_val, &in_len);
+    if (!in_buf) return compress_make_err("deflate_encode: out of memory");
+    if (in_len > MAX_INPUT_SIZE) {
+        free(in_buf);
+        return compress_make_err("deflate_encode: input too large");
+    }
 
     uLong bound = compressBound((uLong)in_len);
     uint8_t *out_buf = malloc(bound);
@@ -213,8 +242,14 @@ void *march_deflate_encode(void *bytes_val) {
 void *march_deflate_decode(void *bytes_val) {
     size_t in_len;
     uint8_t *in_buf = compress_bytes_to_raw(bytes_val, &in_len);
+    if (!in_buf) return compress_make_err("deflate_decode: out of memory");
+    if (in_len > MAX_INPUT_SIZE) {
+        free(in_buf);
+        return compress_make_err("deflate_decode: input too large");
+    }
 
     size_t out_size = in_len < 64 ? 256 : in_len * 4;
+    if (out_size > MAX_DECOMPRESS_SIZE) out_size = MAX_DECOMPRESS_SIZE;
     uint8_t *out_buf = malloc(out_size);
     if (!out_buf) { free(in_buf); return compress_make_err("deflate_decode: out of memory"); }
 
@@ -240,8 +275,13 @@ void *march_deflate_decode(void *bytes_val) {
             return compress_make_err("deflate_decode: inflate failed");
         }
         if (zs.avail_out == 0) {
+            if (out_size >= MAX_DECOMPRESS_SIZE) {
+                inflateEnd(&zs);
+                free(in_buf); free(out_buf);
+                return compress_make_err("deflate_decode: output size limit exceeded");
+            }
             size_t done = out_size;
-            out_size *= 2;
+            out_size = out_size * 2 > MAX_DECOMPRESS_SIZE ? MAX_DECOMPRESS_SIZE : out_size * 2;
             uint8_t *tmp = realloc(out_buf, out_size);
             if (!tmp) {
                 inflateEnd(&zs);
@@ -270,6 +310,11 @@ void *march_deflate_decode(void *bytes_val) {
 void *march_zstd_encode(void *bytes_val, int64_t level) {
     size_t in_len;
     uint8_t *in_buf = compress_bytes_to_raw(bytes_val, &in_len);
+    if (!in_buf) return compress_make_err("zstd_encode: out of memory");
+    if (in_len > MAX_INPUT_SIZE) {
+        free(in_buf);
+        return compress_make_err("zstd_encode: input too large");
+    }
 
     size_t bound = ZSTD_compressBound(in_len);
     uint8_t *out_buf = malloc(bound);
@@ -292,14 +337,26 @@ void *march_zstd_encode(void *bytes_val, int64_t level) {
 void *march_zstd_decode(void *bytes_val) {
     size_t in_len;
     uint8_t *in_buf = compress_bytes_to_raw(bytes_val, &in_len);
+    if (!in_buf) return compress_make_err("zstd_decode: out of memory");
+    if (in_len > MAX_INPUT_SIZE) {
+        free(in_buf);
+        return compress_make_err("zstd_decode: input too large");
+    }
 
     /* Try to get decompressed size hint from the frame */
     unsigned long long frame_size = ZSTD_getFrameContentSize(in_buf, in_len);
     size_t out_size;
-    if (frame_size == ZSTD_CONTENTSIZE_UNKNOWN || frame_size == ZSTD_CONTENTSIZE_ERROR)
+    if (frame_size == ZSTD_CONTENTSIZE_UNKNOWN || frame_size == ZSTD_CONTENTSIZE_ERROR) {
         out_size = in_len * 4 < 4096 ? 4096 : in_len * 4;
-    else
+        if (out_size > MAX_DECOMPRESS_SIZE) out_size = MAX_DECOMPRESS_SIZE;
+    } else {
+        /* Reject frames that claim to expand beyond our limit */
+        if (frame_size > (unsigned long long)MAX_DECOMPRESS_SIZE) {
+            free(in_buf);
+            return compress_make_err("zstd_decode: frame content size exceeds limit");
+        }
         out_size = (size_t)frame_size;
+    }
 
     uint8_t *out_buf = malloc(out_size > 0 ? out_size : 1);
     if (!out_buf) { free(in_buf); return compress_make_err("zstd_decode: out of memory"); }
@@ -340,6 +397,11 @@ void *march_zstd_decode(void *bytes_val) {
 void *march_brotli_encode(void *bytes_val, int64_t mode, int64_t quality) {
     size_t in_len;
     uint8_t *in_buf = compress_bytes_to_raw(bytes_val, &in_len);
+    if (!in_buf) return compress_make_err("brotli_encode: out of memory");
+    if (in_len > MAX_INPUT_SIZE) {
+        free(in_buf);
+        return compress_make_err("brotli_encode: input too large");
+    }
 
     size_t out_size = BrotliEncoderMaxCompressedSize(in_len);
     if (out_size == 0) out_size = in_len + 64;
@@ -371,9 +433,14 @@ void *march_brotli_encode(void *bytes_val, int64_t mode, int64_t quality) {
 void *march_brotli_decode(void *bytes_val) {
     size_t in_len;
     uint8_t *in_buf = compress_bytes_to_raw(bytes_val, &in_len);
+    if (!in_buf) return compress_make_err("brotli_decode: out of memory");
+    if (in_len > MAX_INPUT_SIZE) {
+        free(in_buf);
+        return compress_make_err("brotli_decode: input too large");
+    }
 
-    /* Grow buffer on Z_BUF_ERROR equivalent */
     size_t out_size = in_len < 64 ? 1024 : in_len * 8;
+    if (out_size > MAX_DECOMPRESS_SIZE) out_size = MAX_DECOMPRESS_SIZE;
     uint8_t *out_buf = malloc(out_size);
     if (!out_buf) { free(in_buf); return compress_make_err("brotli_decode: out of memory"); }
 
@@ -388,7 +455,11 @@ void *march_brotli_decode(void *bytes_val) {
             return compress_make_ok(result);
         }
         if (res != BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) break;
-        out_size *= 2;
+        if (out_size >= MAX_DECOMPRESS_SIZE) {
+            free(in_buf); free(out_buf);
+            return compress_make_err("brotli_decode: output size limit exceeded");
+        }
+        out_size = out_size * 2 > MAX_DECOMPRESS_SIZE ? MAX_DECOMPRESS_SIZE : out_size * 2;
         uint8_t *tmp = realloc(out_buf, out_size);
         if (!tmp) {
             free(in_buf); free(out_buf);
