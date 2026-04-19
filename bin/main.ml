@@ -131,6 +131,7 @@ let stdlib_file_list = [
   "duration.march";
   "bytes.march";
   "msgpack.march";
+  "toml.march";
   "process.march";
   "io.march";
   "system.march";

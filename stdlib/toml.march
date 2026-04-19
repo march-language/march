@@ -1,0 +1,1077 @@
+-- TOML v1.0 parser (pure March, no FFI)
+--
+-- Supports: strings (basic, literal, multiline), integers, floats, booleans,
+-- arrays, inline tables, table headers [x], array-of-tables [[x]],
+-- dotted keys, quoted keys, comments.
+--
+-- Public API:
+--   Toml.parse(src)           : Result(TomlValue, TomlError)
+--   Toml.parse_exn(src)       : TomlValue  (panics on error)
+--   Toml.to_string(v)         : String
+--   Toml.get(v, key)          : Option(TomlValue)
+--   Toml.get_in(v, keys)      : Option(TomlValue)
+--   Toml.get_str(v, key)      : Option(String)
+--   Toml.get_int(v, key)      : Option(Int)
+--   Toml.get_float(v, key)    : Option(Float)
+--   Toml.get_bool(v, key)     : Option(Bool)
+--   Toml.get_table(v, key)    : Option(TomlValue)
+--   Toml.get_array(v, key)    : Option(List(TomlValue))
+
+mod Toml do
+
+  type TomlValue
+    = TStr(String)
+    | TInt(Int)
+    | TFloat(Float)
+    | TBool(Bool)
+    | TNull
+    | TDatetime(String)
+    | TArray(List(TomlValue))
+    | TTable(List((String, TomlValue)))
+
+  type TomlError = TomlError(String, Int, Int)
+
+  -- ── Char utilities ────────────────────────────────────────────────────────
+
+  pfn char_code(c) do char_to_int(c) end
+
+  pfn is_digit(c) do
+    let n = char_code(c)
+    n >= 48 && n <= 57
+  end
+
+  pfn is_hex(c) do
+    let n = char_code(c)
+    (n >= 48 && n <= 57) || (n >= 65 && n <= 70) || (n >= 97 && n <= 102)
+  end
+
+  pfn is_alpha(c) do
+    let n = char_code(c)
+    (n >= 65 && n <= 90) || (n >= 97 && n <= 122)
+  end
+
+  pfn is_bare_key_char(c) do
+    let n = char_code(c)
+    (n >= 65 && n <= 90) || (n >= 97 && n <= 122) ||
+    (n >= 48 && n <= 57) || c == "-" || c == "_"
+  end
+
+  pfn is_whitespace(c) do c == " " || c == "\t" end
+
+  pfn is_newline(c) do c == "\n" || c == "\r" end
+
+  pfn digit_val(c) do char_code(c) - 48 end
+
+  pfn hex_val(c) do
+    let n = char_code(c)
+    if n >= 48 && n <= 57 do n - 48
+    else if n >= 65 && n <= 70 do n - 55
+    else n - 87
+    end end
+  end
+
+  -- ── Parser state ──────────────────────────────────────────────────────────
+
+  -- State is represented as (chars, line, col) where chars = List(String)
+  -- (each element is a single-character string from string_split)
+
+  pfn make_state(src) do
+    (string_split(src, ""), 1, 0)
+  end
+
+  pfn state_pos(st) do
+    match st do (_, line, col) -> (line, col) end
+  end
+
+  pfn state_line(st) do match st do (_, l, _) -> l end end
+  pfn state_col(st)  do match st do (_, _, c) -> c end end
+  pfn state_chars(st) do match st do (cs, _, _) -> cs end end
+
+  pfn advance(st) do
+    match st do
+    (cs, line, col) ->
+      match cs do
+      Nil -> st
+      Cons(c, rest) ->
+        if c == "\n" do (rest, line + 1, 0)
+        else (rest, line, col + 1)
+        end
+      end
+    end
+  end
+
+  pfn peek(st) do
+    match state_chars(st) do
+    Nil -> None
+    Cons(c, _) -> Some(c)
+    end
+  end
+
+  pfn peek2(st) do
+    match state_chars(st) do
+    Cons(_, Cons(c, _)) -> Some(c)
+    _ -> None
+    end
+  end
+
+  pfn peek3(st) do
+    match state_chars(st) do
+    Cons(_, Cons(_, Cons(c, _))) -> Some(c)
+    _ -> None
+    end
+  end
+
+  pfn at_end(st) do
+    match state_chars(st) do
+    Nil -> true
+    _   -> false
+    end
+  end
+
+  pfn err(st, msg) do
+    Err(TomlError(msg, state_line(st), state_col(st)))
+  end
+
+  -- ── Skip whitespace & comments ────────────────────────────────────────────
+
+  pfn skip_ws(st) do
+    match peek(st) do
+    None -> st
+    Some(c) ->
+      if is_whitespace(c) do skip_ws(advance(st))
+      else st
+      end
+    end
+  end
+
+  pfn skip_line(st) do
+    match peek(st) do
+    None -> st
+    Some(c) ->
+      match c do
+      "\n" -> advance(st)
+      "\r" ->
+        let st2 = advance(st)
+        match peek(st2) do
+        Some("\n") -> advance(st2)
+        _          -> st2
+        end
+      _ -> skip_line(advance(st))
+      end
+    end
+  end
+
+  pfn skip_ws_comments(st) do
+    let st1 = skip_ws(st)
+    match peek(st1) do
+    Some("#") -> skip_ws_comments(skip_line(st1))
+    Some("\n") -> skip_ws_comments(advance(st1))
+    Some("\r") ->
+      let st2 = advance(st1)
+      match peek(st2) do
+      Some("\n") -> skip_ws_comments(advance(st2))
+      _          -> skip_ws_comments(st2)
+      end
+    _ -> st1
+    end
+  end
+
+  pfn skip_ws_inline(st) do
+    -- Skip whitespace but not newlines
+    let st1 = skip_ws(st)
+    match peek(st1) do
+    Some("#") -> skip_line(st1)  -- comment ends line
+    _         -> st1
+    end
+  end
+
+  -- ── Expect a specific character ───────────────────────────────────────────
+
+  pfn expect_char(st, expected) do
+    match peek(st) do
+    None -> err(st, "expected '" ++ expected ++ "' but got end of input")
+    Some(c) ->
+      if c == expected do Ok(advance(st))
+      else err(st, "expected '" ++ expected ++ "' but got '" ++ c ++ "'")
+      end
+    end
+  end
+
+  -- ── Parse basic string (double-quoted) ───────────────────────────────────
+
+  pfn parse_escape(st) do
+    match peek(st) do
+    None -> err(st, "unexpected end of input in escape sequence")
+    Some(c) ->
+      let st2 = advance(st)
+      match c do
+      "\"" -> Ok(("\"", st2))
+      "\\" -> Ok(("\\", st2))
+      "n"  -> Ok(("\n", st2))
+      "t"  -> Ok(("\t", st2))
+      "r"  -> Ok(("\r", st2))
+      "b"  -> Ok(("\x08", st2))
+      "f"  -> Ok(("\x0c", st2))
+      "/"  -> Ok(("/", st2))
+      "u"  -> Ok(("\\u", st2))
+      "U"  -> Ok(("\\U", st2))
+      _    -> err(st, "unknown escape sequence: \\" ++ c)
+      end
+    end
+  end
+
+  pfn parse_basic_string_chars(st, acc) do
+    match peek(st) do
+    None -> err(st, "unterminated string")
+    Some("\"") -> Ok((acc, advance(st)))
+    Some("\\") ->
+      match parse_escape(advance(st)) do
+      Err(e) -> Err(e)
+      Ok(p) -> match p do (esc, st2) -> parse_basic_string_chars(st2, acc ++ esc) end
+      end
+    Some(c) ->
+      if is_newline(c) do err(st, "newline in basic string")
+      else parse_basic_string_chars(advance(st), acc ++ c)
+      end
+    end
+  end
+
+  -- Multiline basic string: strip leading newline, allow escaped newlines
+  pfn parse_ml_basic_chars(st, acc) do
+    match peek(st) do
+    None -> err(st, "unterminated multiline string")
+    Some("\"") ->
+      match peek2(st) do
+      Some("\"") ->
+        match peek3(st) do
+        Some("\"") -> Ok((acc, advance(advance(advance(st)))))
+        _ -> parse_ml_basic_chars(advance(st), acc ++ "\"")
+        end
+      _ -> parse_ml_basic_chars(advance(st), acc ++ "\"")
+      end
+    Some("\\") ->
+      match parse_escape(advance(st)) do
+      Err(e) -> Err(e)
+      Ok(p) -> match p do (esc, st2) -> parse_ml_basic_chars(st2, acc ++ esc) end
+      end
+    Some(c) -> parse_ml_basic_chars(advance(st), acc ++ c)
+    end
+  end
+
+  pfn parse_basic_string(st) do
+    -- Already consumed the opening "
+    match peek(st) do
+    Some("\"") ->
+      match peek2(st) do
+      Some("\"") ->
+        -- Triple-quoted multiline
+        let st2 = advance(advance(st))
+        -- Skip leading newline
+        let st3 = match peek(st2) do
+          Some("\n") -> advance(st2)
+          Some("\r") ->
+            let s = advance(st2)
+            match peek(s) do Some("\n") -> advance(s) | _ -> s end
+          _ -> st2
+          end
+        match parse_ml_basic_chars(st3, "") do
+        Err(e) -> Err(e)
+        Ok(p) -> match p do (s, st4) -> Ok((TStr(s), st4)) end
+        end
+      _ ->
+        -- Empty string ""
+        Ok((TStr(""), advance(st)))
+      end
+    _ ->
+      match parse_basic_string_chars(st, "") do
+      Err(e) -> Err(e)
+      Ok(p) -> match p do (s, st2) -> Ok((TStr(s), st2)) end
+      end
+    end
+  end
+
+  -- ── Parse literal string (single-quoted) ─────────────────────────────────
+
+  pfn parse_literal_chars(st, acc) do
+    match peek(st) do
+    None -> err(st, "unterminated literal string")
+    Some("'") -> Ok((acc, advance(st)))
+    Some(c) ->
+      if is_newline(c) do err(st, "newline in literal string")
+      else parse_literal_chars(advance(st), acc ++ c)
+      end
+    end
+  end
+
+  pfn parse_ml_literal_chars(st, acc) do
+    match peek(st) do
+    None -> err(st, "unterminated multiline literal string")
+    Some("'") ->
+      match peek2(st) do
+      Some("'") ->
+        match peek3(st) do
+        Some("'") -> Ok((acc, advance(advance(advance(st)))))
+        _ -> parse_ml_literal_chars(advance(st), acc ++ "'")
+        end
+      _ -> parse_ml_literal_chars(advance(st), acc ++ "'")
+      end
+    Some(c) -> parse_ml_literal_chars(advance(st), acc ++ c)
+    end
+  end
+
+  pfn parse_literal_string(st) do
+    match peek(st) do
+    Some("'") ->
+      match peek2(st) do
+      Some("'") ->
+        let st2 = advance(advance(st))
+        let st3 = match peek(st2) do
+          Some("\n") -> advance(st2)
+          Some("\r") ->
+            let s = advance(st2)
+            match peek(s) do Some("\n") -> advance(s) | _ -> s end
+          _ -> st2
+          end
+        match parse_ml_literal_chars(st3, "") do
+        Err(e) -> Err(e)
+        Ok(p) -> match p do (s, st4) -> Ok((TStr(s), st4)) end
+        end
+      _ -> Ok((TStr(""), advance(st)))
+      end
+    _ ->
+      match parse_literal_chars(st, "") do
+      Err(e) -> Err(e)
+      Ok(p) -> match p do (s, st2) -> Ok((TStr(s), st2)) end
+      end
+    end
+  end
+
+  -- ── Parse number (int or float) ───────────────────────────────────────────
+
+  pfn collect_digits_underscores(st, acc) do
+    match peek(st) do
+    Some(c) ->
+      if is_digit(c) do collect_digits_underscores(advance(st), acc ++ c)
+      else
+        match c do
+        "_" ->
+          match peek2(st) do
+          Some(c2) ->
+            if is_digit(c2) do collect_digits_underscores(advance(st), acc)
+            else (acc, st)
+            end
+          _ -> (acc, st)
+          end
+        _ -> (acc, st)
+        end
+      end
+    _ -> (acc, st)
+    end
+  end
+
+  pfn parse_digits(st) do collect_digits_underscores(st, "") end
+
+  pfn string_to_int_digits(s, acc) do
+    match string_split(s, "") do
+    Nil -> acc
+    Cons(c, rest) ->
+      string_to_int_digits(String.join(rest, ""), acc * 10 + digit_val(c))
+    end
+  end
+
+  -- Parse exponent part after decimal (e/E [+/-] digits). Returns ("e+NNN", st').
+  pfn parse_exp_part(st) do
+    match peek(st) do
+    Some("e") ->
+      let st2 = advance(st)
+      match peek(st2) do
+      Some("+") ->
+        let p = parse_digits(advance(st2))
+        let s = match p do (a, _) -> a end
+        let s2 = match p do (_, b) -> b end
+        ("e+" ++ s, s2)
+      Some("-") ->
+        let p = parse_digits(advance(st2))
+        let s = match p do (a, _) -> a end
+        let s2 = match p do (_, b) -> b end
+        ("e-" ++ s, s2)
+      _ ->
+        let p = parse_digits(st2)
+        let s = match p do (a, _) -> a end
+        let s2 = match p do (_, b) -> b end
+        ("e+" ++ s, s2)
+      end
+    Some("E") ->
+      let st2 = advance(st)
+      let p = parse_digits(st2)
+      let s = match p do (a, _) -> a end
+      let s2 = match p do (_, b) -> b end
+      ("e+" ++ s, s2)
+    _ -> ("", st)
+    end
+  end
+
+  pfn parse_number(st, sign) do
+    -- sign: 1 or -1
+    match peek(st) do
+    None -> err(st, "expected number")
+    Some(c) ->
+      if not (is_digit(c)) do err(st, "expected digit, got '" ++ c ++ "'")
+      else
+        let p = parse_digits(st)
+        let int_str = match p do (s, _) -> s end
+        let st2 = match p do (_, s) -> s end
+        let int_val = string_to_int_digits(int_str, 0)
+        match peek(st2) do
+        Some(".") ->
+          let st3 = advance(st2)
+          let p2 = parse_digits(st3)
+          let frac_str = match p2 do (s, _) -> s end
+          let st4 = match p2 do (_, s) -> s end
+          let exp_part = parse_exp_part(st4)
+          let exp_str = match exp_part do (s, _) -> s end
+          let st5 = match exp_part do (_, s) -> s end
+          let float_src = int_to_string(int_val) ++ "." ++ frac_str ++ exp_str
+          let f = match string_to_float(float_src) do Some(x) -> x | None -> 0.0 end
+          let f2 = if sign < 0 do 0.0 -. f else f end
+          Ok((TFloat(f2), st5))
+        Some("e") ->
+          let exp_part = parse_exp_part(st2)
+          let exp_str = match exp_part do (s, _) -> s end
+          let st5 = match exp_part do (_, s) -> s end
+          let float_src = int_to_string(int_val) ++ ".0" ++ exp_str
+          let f = match string_to_float(float_src) do Some(x) -> x | None -> 0.0 end
+          let f2 = if sign < 0 do 0.0 -. f else f end
+          Ok((TFloat(f2), st5))
+        Some("E") ->
+          let exp_part = parse_exp_part(st2)
+          let exp_str = match exp_part do (s, _) -> s end
+          let st5 = match exp_part do (_, s) -> s end
+          let float_src = int_to_string(int_val) ++ ".0" ++ exp_str
+          let f = match string_to_float(float_src) do Some(x) -> x | None -> 0.0 end
+          let f2 = if sign < 0 do 0.0 -. f else f end
+          Ok((TFloat(f2), st5))
+        _ ->
+          let n = if sign < 0 do 0 - int_val else int_val end
+          Ok((TInt(n), st2))
+        end
+      end
+    end
+  end
+
+  -- ── Parse value ───────────────────────────────────────────────────────────
+
+  pfn parse_value(st) do
+    let st1 = skip_ws(st)
+    match peek(st1) do
+    None -> err(st1, "expected value, got end of input")
+    Some("\"") -> parse_basic_string(advance(st1))
+    Some("'") -> parse_literal_string(advance(st1))
+    Some("[") -> parse_array(advance(st1))
+    Some("{") -> parse_inline_table(advance(st1))
+    Some("t") ->
+      -- true
+      match state_chars(st1) do
+      Cons(_, Cons("r", Cons("u", Cons("e", rest)))) ->
+        Ok((TBool(true), (rest, state_line(st1), state_col(st1) + 4)))
+      _ -> err(st1, "expected 'true'")
+      end
+    Some("f") ->
+      match state_chars(st1) do
+      Cons(_, Cons("a", Cons("l", Cons("s", Cons("e", rest))))) ->
+        Ok((TBool(false), (rest, state_line(st1), state_col(st1) + 5)))
+      _ -> err(st1, "expected 'false'")
+      end
+    Some("i") ->
+      -- inf
+      match state_chars(st1) do
+      Cons(_, Cons("n", Cons("f", rest))) ->
+        Ok((TFloat(match string_to_float("inf") do Some(x) -> x | None -> 0.0 end), (rest, state_line(st1), state_col(st1) + 3)))
+      _ -> err(st1, "expected 'inf'")
+      end
+    Some("n") ->
+      -- nan
+      match state_chars(st1) do
+      Cons(_, Cons("a", Cons("n", rest))) ->
+        Ok((TFloat(match string_to_float("nan") do Some(x) -> x | None -> 0.0 end), (rest, state_line(st1), state_col(st1) + 3)))
+      _ -> err(st1, "expected 'nan'")
+      end
+    Some("+") ->
+      match peek2(st1) do
+      Some("i") ->
+        -- +inf
+        let st2 = advance(advance(st1))
+        match state_chars(st2) do
+        Cons("n", Cons("f", rest)) ->
+          Ok((TFloat(match string_to_float("inf") do Some(x) -> x | None -> 0.0 end), (rest, state_line(st2), state_col(st2) + 2)))
+        _ -> err(st2, "expected 'inf'")
+        end
+      _ -> parse_number(advance(st1), 1)
+      end
+    Some("-") ->
+      match peek2(st1) do
+      Some("i") ->
+        -- -inf
+        let st2 = advance(advance(st1))
+        match state_chars(st2) do
+        Cons("n", Cons("f", rest)) ->
+          Ok((TFloat(match string_to_float("-inf") do Some(x) -> x | None -> 0.0 end), (rest, state_line(st2), state_col(st2) + 2)))
+        _ -> err(st2, "expected 'inf'")
+        end
+      Some("n") ->
+        -- -nan
+        let st2 = advance(advance(st1))
+        match state_chars(st2) do
+        Cons("a", Cons("n", rest)) ->
+          Ok((TFloat(match string_to_float("nan") do Some(x) -> x | None -> 0.0 end), (rest, state_line(st2), state_col(st2) + 2)))
+        _ -> err(st2, "expected 'nan'")
+        end
+      _ -> parse_number(advance(st1), -1)
+      end
+    Some(c) ->
+      if is_digit(c) do parse_number(st1, 1)
+      else err(st1, "unexpected character '" ++ c ++ "' in value")
+      end
+    end
+  end
+
+  -- ── Parse array ───────────────────────────────────────────────────────────
+
+  pfn parse_array_items(st, acc) do
+    let st1 = skip_ws_comments(st)
+    match peek(st1) do
+    None -> err(st1, "unterminated array")
+    Some("]") -> Ok((List.reverse(acc), advance(st1)))
+    _ ->
+      match parse_value(st1) do
+      Err(e) -> Err(e)
+      Ok(p) ->
+        match p do
+        (v, st2) ->
+          let st3 = skip_ws_comments(st2)
+          match peek(st3) do
+          Some(",") -> parse_array_items(advance(st3), Cons(v, acc))
+          Some("]") -> Ok((List.reverse(Cons(v, acc)), advance(st3)))
+          _ -> err(st3, "expected ',' or ']' in array")
+          end
+        end
+      end
+    end
+  end
+
+  pfn parse_array(st) do
+    match parse_array_items(st, Nil) do
+    Err(e) -> Err(e)
+    Ok(p) -> match p do (items, st2) -> Ok((TArray(items), st2)) end
+    end
+  end
+
+  -- ── Parse inline table ────────────────────────────────────────────────────
+
+  pfn parse_inline_table_pairs(st, acc) do
+    let st1 = skip_ws(st)
+    match peek(st1) do
+    None -> err(st1, "unterminated inline table")
+    Some("}") -> Ok((List.reverse(acc), advance(st1)))
+    _ ->
+      match parse_key(st1) do
+      Err(e) -> Err(e)
+      Ok(p) ->
+        match p do
+        (key_parts, st2) ->
+          let st3 = skip_ws(st2)
+          match expect_char(st3, "=") do
+          Err(e) -> Err(e)
+          Ok(st4) ->
+            match parse_value(skip_ws(st4)) do
+            Err(e) -> Err(e)
+            Ok(p2) ->
+              match p2 do
+              (v, st5) ->
+                let st6 = skip_ws(st5)
+                let entry = (String.join(key_parts, "."), v)
+                match peek(st6) do
+                Some(",") -> parse_inline_table_pairs(advance(st6), Cons(entry, acc))
+                Some("}") -> Ok((List.reverse(Cons(entry, acc)), advance(st6)))
+                _ -> err(st6, "expected ',' or '}' in inline table")
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  pfn parse_inline_table(st) do
+    match parse_inline_table_pairs(st, Nil) do
+    Err(e) -> Err(e)
+    Ok(p) -> match p do (pairs, st2) -> Ok((TTable(pairs), st2)) end
+    end
+  end
+
+  -- ── Parse key ─────────────────────────────────────────────────────────────
+
+  pfn parse_bare_key(st, acc) do
+    match peek(st) do
+    Some(c) ->
+      if is_bare_key_char(c) do parse_bare_key(advance(st), acc ++ c)
+      else (acc, st)
+      end
+    _ -> (acc, st)
+    end
+  end
+
+  pfn parse_key_segment(st) do
+    match peek(st) do
+    None -> err(st, "expected key")
+    Some("\"") ->
+      match parse_basic_string_chars(advance(st), "") do
+      Err(e) -> Err(e)
+      Ok(p) -> match p do (s, st2) -> Ok((s, st2)) end
+      end
+    Some("'") ->
+      match parse_literal_chars(advance(st), "") do
+      Err(e) -> Err(e)
+      Ok(p) -> match p do (s, st2) -> Ok((s, st2)) end
+      end
+    Some(c) ->
+      if is_bare_key_char(c) do
+        let p = parse_bare_key(st, "")
+        match p do
+        (k, st2) ->
+          if k == "" do err(st, "empty key")
+          else Ok((k, st2))
+          end
+        end
+      else err(st, "expected key, got '" ++ c ++ "'")
+      end
+    end
+  end
+
+  pfn parse_key(st) do
+    match parse_key_segment(st) do
+    Err(e) -> Err(e)
+    Ok(p) ->
+      match p do
+      (first, st2) ->
+        let st3 = skip_ws(st2)
+        match peek(st3) do
+        Some(".") ->
+          let st4 = skip_ws(advance(st3))
+          match parse_key(st4) do
+          Err(e) -> Err(e)
+          Ok(p2) ->
+            match p2 do
+            (rest, st5) -> Ok((Cons(first, rest), st5))
+            end
+          end
+        _ -> Ok(([first], st3))
+        end
+      end
+    end
+  end
+
+  -- ── Table helpers ─────────────────────────────────────────────────────────
+
+  pfn table_get(pairs, key) do
+    match pairs do
+    Nil -> None
+    Cons(p, rest) ->
+      match p do
+      (k, v) ->
+        if k == key do Some(v)
+        else table_get(rest, key)
+        end
+      end
+    end
+  end
+
+  pfn table_put(pairs, key, val) do
+    -- Remove existing entry with this key, then prepend
+    let filtered = List.filter(pairs, fn p -> match p do (k, _) -> k != key end)
+    Cons((key, val), filtered)
+  end
+
+  pfn table_has(pairs, key) do
+    match table_get(pairs, key) do
+    Some(_) -> true
+    None -> false
+    end
+  end
+
+  -- Set a nested value via key path. Creates intermediate tables as needed.
+  -- When navigating through a TArray, updates the last element.
+  pfn set_nested(pairs, keys, val) do
+    match keys do
+    Nil -> pairs
+    Cons(k, Nil) ->
+      if table_has(pairs, k) do
+        [("__toml_dup__", TNull)]
+      else
+        Cons((k, val), pairs)
+      end
+    Cons(k, rest) ->
+      match table_get(pairs, k) do
+      Some(TTable(sub)) ->
+        let sub2 = set_nested(sub, rest, val)
+        table_put(pairs, k, TTable(sub2))
+      Some(TArray(arr)) ->
+        let rev = List.reverse(arr)
+        match rev do
+        Cons(TTable(last_pairs), rest_rev) ->
+          let last2 = set_nested(last_pairs, rest, val)
+          let arr2 = List.reverse(Cons(TTable(last2), rest_rev))
+          table_put(pairs, k, TArray(arr2))
+        _ -> [("__toml_conflict__", TNull)]
+        end
+      None ->
+        let sub2 = set_nested(Nil, rest, val)
+        table_put(pairs, k, TTable(sub2))
+      _ -> [("__toml_conflict__", TNull)]
+      end
+    end
+  end
+
+  -- ── Parse document ────────────────────────────────────────────────────────
+
+  -- Result of parsing the document: accumulates key-value pairs and current table path
+  -- We use a simple approach: parse into a flat representation
+
+  pfn parse_keyval(st, root, path) do
+    -- Parse "key = value" and return updated root
+    match parse_key(st) do
+    Err(e) -> Err(e)
+    Ok(p) ->
+      match p do
+      (key_parts, st2) ->
+        let st3 = skip_ws(st2)
+        match expect_char(st3, "=") do
+        Err(e) -> Err(e)
+        Ok(st4) ->
+          match parse_value(skip_ws(st4)) do
+          Err(e) -> Err(e)
+          Ok(p2) ->
+            match p2 do
+            (v, st5) ->
+              let full_path = List.append(path, key_parts)
+              let new_root = set_nested(root, full_path, v)
+              -- Check for duplicate error marker
+              match new_root do
+              Cons(p3, _) ->
+                match p3 do
+                ("__toml_dup__", _) ->
+                  err(st, "duplicate key: " ++ String.join(full_path, "."))
+                _ -> Ok((new_root, st5))
+                end
+              _ -> Ok((new_root, st5))
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  pfn parse_table_header(st) do
+    -- Already consumed '['
+    match parse_key(st) do
+    Err(e) -> Err(e)
+    Ok(p) ->
+      match p do
+      (keys, st2) ->
+        let st3 = skip_ws(st2)
+        match expect_char(st3, "]") do
+        Err(e) -> Err(e)
+        Ok(st4) -> Ok((keys, st4))
+        end
+      end
+    end
+  end
+
+  pfn parse_array_table_header(st) do
+    -- Already consumed '[['
+    match parse_key(st) do
+    Err(e) -> Err(e)
+    Ok(p) ->
+      match p do
+      (keys, st2) ->
+        let st3 = skip_ws(st2)
+        match expect_char(st3, "]") do
+        Err(e) -> Err(e)
+        Ok(st4) ->
+          match expect_char(st4, "]") do
+          Err(e) -> Err(e)
+          Ok(st5) -> Ok((keys, st5))
+          end
+        end
+      end
+    end
+  end
+
+  -- Navigate to a path in root, returning the table pairs at that location
+  pfn get_at_path(root, path) do
+    match path do
+    Nil -> Some(root)
+    Cons(k, rest) ->
+      match table_get(root, k) do
+      Some(TTable(sub)) -> get_at_path(sub, rest)
+      _ -> None
+      end
+    end
+  end
+
+  -- Insert a TTable at a path, creating intermediate tables
+  pfn ensure_table_at_path(root, path) do
+    match path do
+    Nil -> root
+    Cons(k, rest) ->
+      let sub = match table_get(root, k) do
+        Some(TTable(p)) -> p
+        None -> Nil
+        _ -> Nil  -- overwrite (shouldn't happen in valid TOML)
+        end
+      let sub2 = ensure_table_at_path(sub, rest)
+      table_put(root, k, TTable(sub2))
+    end
+  end
+
+  -- Append a new table entry to an array-of-tables at path
+  pfn append_aot(root, path) do
+    match path do
+    Nil -> root  -- shouldn't happen
+    Cons(k, Nil) ->
+      let existing = match table_get(root, k) do
+        Some(TArray(a)) -> a
+        None -> Nil
+        _ -> Nil
+        end
+      table_put(root, k, TArray(List.append(existing, [TTable(Nil)])))
+    Cons(k, rest) ->
+      let sub = match table_get(root, k) do
+        Some(TTable(p)) -> p
+        None -> Nil
+        _ -> Nil
+        end
+      let sub2 = append_aot(sub, rest)
+      table_put(root, k, TTable(sub2))
+    end
+  end
+
+  -- Update the last table in an array-of-tables
+  pfn update_last_aot(root, path, new_pairs) do
+    match path do
+    Nil -> root
+    Cons(k, Nil) ->
+      match table_get(root, k) do
+      Some(TArray(arr)) ->
+        let rev = List.reverse(arr)
+        let updated = match rev do
+          Cons(_, rest) -> List.reverse(Cons(TTable(new_pairs), rest))
+          Nil -> [TTable(new_pairs)]
+          end
+        table_put(root, k, TArray(updated))
+      _ -> root
+      end
+    Cons(k, rest) ->
+      let sub = match table_get(root, k) do
+        Some(TTable(p)) -> p
+        None -> Nil
+        _ -> Nil
+        end
+      let sub2 = update_last_aot(sub, rest, new_pairs)
+      table_put(root, k, TTable(sub2))
+    end
+  end
+
+  pfn parse_document(st, root, current_path, aot_path) do
+    let st1 = skip_ws_comments(st)
+    if at_end(st1) do Ok(root)
+    else
+      match peek(st1) do
+      Some("[") ->
+        let st2 = advance(st1)
+        match peek(st2) do
+        Some("[") ->
+          -- Array of tables [[...]]
+          match parse_array_table_header(advance(st2)) do
+          Err(e) -> Err(e)
+          Ok(p) ->
+            match p do
+            (path, st3) ->
+              let root2 = append_aot(root, path)
+              parse_document(st3, root2, path, path)
+            end
+          end
+        _ ->
+          -- Regular table [...]
+          match parse_table_header(st2) do
+          Err(e) -> Err(e)
+          Ok(p) ->
+            match p do
+            (path, st3) ->
+              let root2 = ensure_table_at_path(root, path)
+              parse_document(st3, root2, path, Nil)
+            end
+          end
+        end
+      _ ->
+        -- key = value
+        match parse_keyval(st1, root, current_path) do
+        Err(e) -> Err(e)
+        Ok(p) ->
+          match p do
+          (new_root, st2) ->
+            let st3 = skip_ws_inline(st2)
+            -- Expect end of line (newline or end of input)
+            if at_end(st3) do Ok(new_root)
+            else
+              match peek(st3) do
+              Some("\n") -> parse_document(advance(st3), new_root, current_path, aot_path)
+              Some("\r") ->
+                let st4 = advance(st3)
+                match peek(st4) do
+                Some("\n") -> parse_document(advance(st4), new_root, current_path, aot_path)
+                _          -> parse_document(st4, new_root, current_path, aot_path)
+                end
+              Some("#") -> parse_document(skip_line(st3), new_root, current_path, aot_path)
+              Some(c)   -> err(st3, "unexpected '" ++ c ++ "' after value")
+              None      -> Ok(new_root)
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- ── Public API ────────────────────────────────────────────────────────────
+
+  doc """
+  Parse a TOML document string. Returns Ok(TomlValue) on success or
+  Err(TomlError(message, line, col)) on failure.
+
+      Toml.parse("port = 8080")  -- Ok(TTable([("port", TInt(8080))]))
+  """
+  fn parse(src : String) : Result(TomlValue, TomlError) do
+    let st = make_state(src)
+    match parse_document(st, Nil, Nil, Nil) do
+    Err(e) -> Err(e)
+    Ok(pairs) -> Ok(TTable(List.reverse(pairs)))
+    end
+  end
+
+  doc """
+  Parse TOML, panicking on error. Useful for compile-time literals.
+  """
+  fn parse_exn(src : String) : TomlValue do
+    match parse(src) do
+    Ok(v) -> v
+    Err(e) ->
+      match e do
+      TomlError(msg, line, col) ->
+        panic("TOML parse error at " ++ int_to_string(line) ++ ":" ++ int_to_string(col) ++ ": " ++ msg)
+      end
+    end
+  end
+
+  doc """
+  Convert a TomlValue to a string representation.
+  """
+  fn to_string(v : TomlValue) : String do
+    match v do
+    TStr(s)      -> "\"" ++ s ++ "\""
+    TInt(n)      -> int_to_string(n)
+    TFloat(f)    -> float_to_string(f)
+    TBool(true)  -> "true"
+    TBool(false) -> "false"
+    TNull        -> "null"
+    TDatetime(s) -> s
+    TArray(xs)   -> "[" ++ String.join(List.map(xs, fn x -> to_string(x)), ", ") ++ "]"
+    TTable(ps)   ->
+      let pairs = List.map(ps, fn p -> match p do (k, v2) -> k ++ " = " ++ to_string(v2) end)
+      "{ " ++ String.join(pairs, ", ") ++ " }"
+    end
+  end
+
+  doc """
+  Look up a top-level key in a TOML table value.
+
+      Toml.get(table, "port")  -- Some(TInt(8080)) or None
+  """
+  fn get(v : TomlValue, key : String) : Option(TomlValue) do
+    match v do
+    TTable(pairs) -> table_get(pairs, key)
+    _             -> None
+    end
+  end
+
+  doc """
+  Look up a nested key path.
+
+      Toml.get_in(v, ["server", "host"])
+  """
+  fn get_in(v : TomlValue, keys : List(String)) : Option(TomlValue) do
+    match keys do
+    Nil -> Some(v)
+    Cons(k, rest) ->
+      match get(v, k) do
+      None    -> None
+      Some(v2) -> get_in(v2, rest)
+      end
+    end
+  end
+
+  doc "Get a string value by key, or None if absent or wrong type."
+  fn get_str(v : TomlValue, key : String) : Option(String) do
+    match get(v, key) do
+    Some(TStr(s)) -> Some(s)
+    _             -> None
+    end
+  end
+
+  doc "Get an integer value by key, or None if absent or wrong type."
+  fn get_int(v : TomlValue, key : String) : Option(Int) do
+    match get(v, key) do
+    Some(TInt(n)) -> Some(n)
+    _             -> None
+    end
+  end
+
+  doc "Get a float value by key, or None if absent or wrong type."
+  fn get_float(v : TomlValue, key : String) : Option(Float) do
+    match get(v, key) do
+    Some(TFloat(f)) -> Some(f)
+    _               -> None
+    end
+  end
+
+  doc "Get a boolean value by key, or None if absent or wrong type."
+  fn get_bool(v : TomlValue, key : String) : Option(Bool) do
+    match get(v, key) do
+    Some(TBool(b)) -> Some(b)
+    _              -> None
+    end
+  end
+
+  doc "Get a table value by key, or None if absent or wrong type."
+  fn get_table(v : TomlValue, key : String) : Option(TomlValue) do
+    match get(v, key) do
+    Some(t) ->
+      match t do
+      TTable(_) -> Some(t)
+      _         -> None
+      end
+    _ -> None
+    end
+  end
+
+  doc "Get an array value by key, or None if absent or wrong type."
+  fn get_array(v : TomlValue, key : String) : Option(List(TomlValue)) do
+    match get(v, key) do
+    Some(TArray(xs)) -> Some(xs)
+    _                -> None
+    end
+  end
+
+end

@@ -206,6 +206,7 @@ march/
 │   ├── iterable.march       # 184 lines: map/filter/fold/take/drop/zip/enumerate/flat_map/any/all/find/count
 │   ├── bytes.march          # Raw byte manipulation: from_string/to_string, hex, base64, UTF-8
 │   ├── msgpack.march        # MessagePack binary serialization: encode/decode/decode_all, impl Eq(Value)
+│   ├── toml.march           # TOML v1.0 parser: parse/parse_exn/to_string, get/get_in/get_str/get_int/get_float/get_bool/get_table/get_array, ~toml sigil
 │   ├── process.march        # OS process interaction: run, run_stream, env, cwd, argv, pid, exit
 │   ├── logger.march         # Structured logging: Debug/Info/Warn/Error levels, context, log_with
 │   ├── actor.march          # Actor helpers: cast (fire-and-forget), call (sync request/reply), reply
@@ -275,7 +276,7 @@ march/
         └── bench_solver.exe          # performance: chain-500/diamond-20×20 benchmarks
 ```
 
-## Current State (as of 2026-04-18, Msgpack binary serialization stdlib module)
+## Current State (as of 2026-04-18, TOML v1.0 parser stdlib module)
 
 - **Adversarial compiler audit: 8 bugs found and fixed across eval, runtime C, and LLVM emit.** A systematic adversarial review found safety and correctness issues across the stack: (1) **Float division by zero** — `eval.ml` silently returned `+inf` for `x /. 0.0` (IEEE 754 `fdiv` never traps); added `b <> 0.0` guards + `eval_error` in both `/` and `/.` float branches. Runtime: new `march_checked_fdiv` in `march_runtime.c` wraps the C division with `b == 0.0` check + `exit(1)`. LLVM: `llvm_emit.ml` now emits `call double @march_checked_fdiv(...)` instead of bare `fdiv` for both `/` and `/.`. (2) **Array bounds** — `march_typed_array_get/set` had no bounds check; added `typed_array_check_bounds` static helper used by both. `set` was also bypassing `typed_array_alloc`'s overflow guard. (3) **String overflow** — `march_string_concat` and `march_string_repeat` used unchecked `sa->len + sb->len` / `ss->len * n` arithmetic; added `__builtin_add_overflow` / `__builtin_mul_overflow` guards. (4) **Malloc NULL** — `typed_array_alloc` did not check `malloc` return; added NULL check. (5) **Unsafe closure dispatch** — `march_typed_array_filter/map/fold` inlined fragile offset arithmetic (`*(void**)(base+8)`) to call callbacks; extracted to `call_closure_1` / `call_closure_2` inline helpers with documented layout assumption. (6) **Perceus scrutinee-in-body** — the `scrutinee_borrowed` conservative analysis in `perceus.ml` is intentional (uses any-path `name_free_in` rather than all-path `name_free_on_every_path` to prevent RC underflow on the sort_by pattern); added extensive documentation comment explaining the choice, the 9930ce5 history, and what a proper fix would require. (7) **TRecord sort invariant** — added `assert_trecord_sorted` debug assertion (gated on `MARCH_DEBUG_TC` env var) wired into TRecord unification; also extended the TRecord docstring to explain the `(sorted)` invariant. 7 new regression tests in `adversarial-regressions` group. 1363 → 1370 tests.
 

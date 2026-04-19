@@ -104,9 +104,9 @@ type expr =
       (** Test assertion: assert expr.
           When the inner expr is a binary comparison (==, !=, <, >, <=, >=),
           the eval pass evaluates both sides separately for rich error messages. *)
-  | ESigil of char * expr * span
-      (** Sigil expression: ~H"...", ~R"...", etc.
-          The char is the sigil letter (e.g. 'H' for HTML templates).
+  | ESigil of string * expr * span
+      (** Sigil expression: ~H"...", ~xml"...", ~toml"...", etc.
+          The string is the sigil name (e.g. "H", "xml", "toml").
           The expr is the string content (may include interpolation).
           Desugared to Sigil.x(content) call by the desugar pass. *)
 [@@deriving show]

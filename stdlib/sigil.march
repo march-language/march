@@ -21,4 +21,8 @@ mod Sigil do
     IOList.from_string(content)
   end
 
+  fn toml(content : String) do
+    Toml.parse_exn(content)
+  end
+
 end

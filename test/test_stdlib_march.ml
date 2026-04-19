@@ -114,6 +114,7 @@ let all_stdlib_decls =
     "decimal.march";
     "bytes.march";
     "msgpack.march";
+    "toml.march";
     "process.march";
     "logger.march";
     "flow.march";
@@ -130,6 +131,7 @@ let all_stdlib_decls =
     "env.march";
     "config.march";
     "html.march";
+    "sigil.march";
   ] in
   lazy (List.concat_map load_stdlib_decls files)
 
@@ -250,6 +252,10 @@ let () =
     ("msgpack", [
       Alcotest.test_case "Msgpack module"
         `Quick (run_stdlib_test "test_msgpack.march" "TestMsgpack");
+    ]);
+    ("toml", [
+      Alcotest.test_case "Toml module"
+        `Quick (run_stdlib_test "test_toml.march" "TestToml");
     ]);
     (* test_flow.march tests the function-transformer Flow API (from_fn/run/then_)
        which differs from the current Seq-based flow.march implementation.
