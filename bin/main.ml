@@ -133,6 +133,7 @@ let stdlib_file_list = [
   "msgpack.march";
   "toml.march";
   "xml.march";
+  "yaml.march";
   "process.march";
   "io.march";
   "system.march";

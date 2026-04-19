@@ -1,0 +1,842 @@
+-- Simplified YAML parser (pure March, no FFI).
+--
+-- Supports: block mappings, block sequences, flow mappings {}, flow sequences [],
+-- plain scalars (string/int/bool/null), single-quoted and double-quoted strings,
+-- comments (#), document separator (---), inline comments.
+--
+-- Does NOT support: anchors (&), aliases (*), explicit tags (!!), multi-document
+-- streams, merge keys (<<), block scalars (| and >).
+--
+-- Public API:
+--   Yaml.parse(src)          : Result(YamlValue, YamlError)
+--   Yaml.parse_exn(src)      : YamlValue  (panics on error)
+--   Yaml.to_string(v)        : String
+--   Yaml.get(v, key)         : Option(YamlValue)
+--   Yaml.get_in(v, keys)     : Option(YamlValue)
+--   Yaml.get_str(v, key)     : Option(String)
+--   Yaml.get_int(v, key)     : Option(Int)
+--   Yaml.get_bool(v, key)    : Option(Bool)
+--   Yaml.get_seq(v)          : Option(List(YamlValue))
+
+mod Yaml do
+
+  type YamlValue
+    = YStr(String)
+    | YInt(Int)
+    | YFloat(Float)
+    | YBool(Bool)
+    | YNull
+    | YSeq(List(YamlValue))
+    | YMap(List((String, YamlValue)))
+
+  type YamlError = YamlError(String, Int, Int)
+
+  -- ── Parser state: (chars, line, col) ─────────────────────────────────────
+
+  pfn make_state(src) do (string_split(src, ""), 1, 0) end
+  pfn state_line(st) do match st do (_, l, _) -> l end end
+  pfn state_col(st)  do match st do (_, _, c) -> c end end
+  pfn state_chars(st) do match st do (cs, _, _) -> cs end end
+
+  pfn advance(st) do
+    match st do
+    (cs, line, col) ->
+      match cs do
+      Nil -> st
+      Cons(c, rest) ->
+        if c == "\n" do (rest, line + 1, 0)
+        else (rest, line, col + 1)
+        end
+      end
+    end
+  end
+
+  pfn peek(st) do
+    match state_chars(st) do
+    Nil -> None
+    Cons(c, _) -> Some(c)
+    end
+  end
+
+  pfn at_end(st) do
+    match state_chars(st) do
+    Nil -> true
+    _ -> false
+    end
+  end
+
+  -- ── Char helpers ──────────────────────────────────────────────────────────
+
+  pfn is_ws_nonnl(c) do c == " " || c == "\t" end
+  pfn is_ws(c) do c == " " || c == "\t" || c == "\n" || c == "\r" end
+
+  -- ── Whitespace skipping ───────────────────────────────────────────────────
+
+  pfn skip_ws(st) do
+    match peek(st) do
+    Some(c) ->
+      if is_ws(c) do skip_ws(advance(st))
+      else st
+      end
+    _ -> st
+    end
+  end
+
+  pfn skip_inline_ws(st) do
+    match peek(st) do
+    Some(c) ->
+      if is_ws_nonnl(c) do skip_inline_ws(advance(st))
+      else st
+      end
+    _ -> st
+    end
+  end
+
+  pfn skip_to_eol(st) do
+    match peek(st) do
+    None -> st
+    Some("\n") -> advance(st)
+    _ -> skip_to_eol(advance(st))
+    end
+  end
+
+  pfn skip_blank_lines(st) do
+    let st1 = skip_inline_ws(st)
+    match peek(st1) do
+    None -> st1
+    Some("\n") -> skip_blank_lines(advance(st1))
+    Some("#") -> skip_blank_lines(skip_to_eol(st1))
+    _ -> st1
+    end
+  end
+
+  pfn skip_comment_if_any(st) do
+    let st1 = skip_inline_ws(st)
+    match peek(st1) do
+    Some("#") -> skip_to_eol(st1)
+    Some("\n") -> advance(st1)
+    None -> st1
+    _ -> st1
+    end
+  end
+
+  -- ── Advance past N chars ──────────────────────────────────────────────────
+
+  pfn advance_n(st, n) do
+    if n <= 0 do st
+    else advance_n(advance(st), n - 1)
+    end
+  end
+
+  pfn starts_with_chars(st, target) do
+    check_prefix(state_chars(st), string_split(target, ""))
+  end
+
+  pfn check_prefix(cs, target) do
+    match target do
+    Nil -> true
+    Cons(t, rest) ->
+      match cs do
+      Nil -> false
+      Cons(c, crest) ->
+        if c == t do check_prefix(crest, rest)
+        else false
+        end
+      end
+    end
+  end
+
+  -- ── Collect to end of line ────────────────────────────────────────────────
+
+  pfn collect_to_eol(st, acc) do
+    match peek(st) do
+    None -> (string_trim(acc), st)
+    Some("\n") -> (string_trim(acc), advance(st))
+    Some("#") -> (string_trim(acc), skip_to_eol(st))
+    Some(c) -> collect_to_eol(advance(st), acc ++ c)
+    end
+  end
+
+  -- ── Quoted string parsers ─────────────────────────────────────────────────
+
+  pfn parse_dq_body(st, acc) do
+    match peek(st) do
+    None -> Err(YamlError("unterminated double-quoted string", state_line(st), state_col(st)))
+    Some("\"") -> Ok((acc, advance(st)))
+    Some("\\") ->
+      let st2 = advance(st)
+      match peek(st2) do
+      None -> Err(YamlError("unterminated escape", state_line(st2), state_col(st2)))
+      Some("n")  -> parse_dq_body(advance(st2), acc ++ "\n")
+      Some("t")  -> parse_dq_body(advance(st2), acc ++ "\t")
+      Some("r")  -> parse_dq_body(advance(st2), acc ++ "\r")
+      Some("\\") -> parse_dq_body(advance(st2), acc ++ "\\")
+      Some("\"") -> parse_dq_body(advance(st2), acc ++ "\"")
+      Some("'")  -> parse_dq_body(advance(st2), acc ++ "'")
+      Some(c)    -> parse_dq_body(advance(st2), acc ++ c)
+      end
+    Some(c) -> parse_dq_body(advance(st), acc ++ c)
+    end
+  end
+
+  pfn parse_sq_body(st, acc) do
+    match peek(st) do
+    None -> Err(YamlError("unterminated single-quoted string", state_line(st), state_col(st)))
+    Some("'") ->
+      let st2 = advance(st)
+      match peek(st2) do
+      Some("'") -> parse_sq_body(advance(st2), acc ++ "'")
+      _ -> Ok((acc, st2))
+      end
+    Some(c) -> parse_sq_body(advance(st), acc ++ c)
+    end
+  end
+
+  -- ── Scalar coercion ───────────────────────────────────────────────────────
+
+  pfn coerce_scalar(s) do
+    match s do
+    "true"  -> YBool(true)
+    "True"  -> YBool(true)
+    "TRUE"  -> YBool(true)
+    "yes"   -> YBool(true)
+    "Yes"   -> YBool(true)
+    "on"    -> YBool(true)
+    "false" -> YBool(false)
+    "False" -> YBool(false)
+    "FALSE" -> YBool(false)
+    "no"    -> YBool(false)
+    "No"    -> YBool(false)
+    "off"   -> YBool(false)
+    "null"  -> YNull
+    "Null"  -> YNull
+    "NULL"  -> YNull
+    "~"     -> YNull
+    ""      -> YNull
+    _ ->
+      match string_to_int(s) do
+      Some(n) -> YInt(n)
+      None ->
+        match string_to_float(s) do
+        Some(f) -> YFloat(f)
+        None -> YStr(s)
+        end
+      end
+    end
+  end
+
+  -- ── Flow parsers ──────────────────────────────────────────────────────────
+
+  pfn collect_flow_plain(st, acc) do
+    match peek(st) do
+    None -> (string_trim(acc), st)
+    Some(",") -> (string_trim(acc), st)
+    Some("}") -> (string_trim(acc), st)
+    Some("]") -> (string_trim(acc), st)
+    Some(":") -> (string_trim(acc), st)
+    Some(c) -> collect_flow_plain(advance(st), acc ++ c)
+    end
+  end
+
+  pfn parse_flow_key(st) do
+    match peek(st) do
+    None -> Err(YamlError("expected flow key", state_line(st), state_col(st)))
+    Some("\"") ->
+      match parse_dq_body(advance(st), "") do
+      Err(e) -> Err(e)
+      Ok(p) -> match p do (s, st2) -> Ok((s, st2)) end
+      end
+    Some("'") ->
+      match parse_sq_body(advance(st), "") do
+      Err(e) -> Err(e)
+      Ok(p) -> match p do (s, st2) -> Ok((s, st2)) end
+      end
+    _ ->
+      match collect_flow_plain(st, "") do
+      (s, st2) -> Ok((s, st2))
+      end
+    end
+  end
+
+  pfn parse_flow_value(st) do
+    match peek(st) do
+    None -> Err(YamlError("expected flow value", state_line(st), state_col(st)))
+    Some("[") ->
+      match parse_flow_seq(advance(st), []) do
+      Err(e) -> Err(e)
+      Ok(p) -> match p do (xs, st2) -> Ok((YSeq(xs), st2)) end
+      end
+    Some("{") ->
+      match parse_flow_map(advance(st), []) do
+      Err(e) -> Err(e)
+      Ok(p) -> match p do (pairs, st2) -> Ok((YMap(pairs), st2)) end
+      end
+    Some("\"") ->
+      match parse_dq_body(advance(st), "") do
+      Err(e) -> Err(e)
+      Ok(p) -> match p do (s, st2) -> Ok((YStr(s), st2)) end
+      end
+    Some("'") ->
+      match parse_sq_body(advance(st), "") do
+      Err(e) -> Err(e)
+      Ok(p) -> match p do (s, st2) -> Ok((YStr(s), st2)) end
+      end
+    _ ->
+      match collect_flow_plain(st, "") do
+      (s, st2) -> Ok((coerce_scalar(s), st2))
+      end
+    end
+  end
+
+  pfn parse_flow_seq(st, acc) do
+    let st1 = skip_ws(st)
+    match peek(st1) do
+    None -> Err(YamlError("unterminated flow sequence", state_line(st1), state_col(st1)))
+    Some("]") -> Ok((List.reverse(acc), advance(st1)))
+    Some(",") -> parse_flow_seq(advance(st1), acc)
+    _ ->
+      match parse_flow_value(st1) do
+      Err(e) -> Err(e)
+      Ok(p) ->
+        match p do
+        (v, st2) ->
+          let st3 = skip_inline_ws(st2)
+          match peek(st3) do
+          Some(",") -> parse_flow_seq(advance(st3), Cons(v, acc))
+          Some("]") -> Ok((List.reverse(Cons(v, acc)), advance(st3)))
+          Some(c) ->
+            Err(YamlError("expected ',' or ']', got '" ++ c ++ "'", state_line(st3), state_col(st3)))
+          None -> Err(YamlError("unterminated flow sequence", state_line(st3), state_col(st3)))
+          end
+        end
+      end
+    end
+  end
+
+  pfn parse_flow_map(st, acc) do
+    let st1 = skip_ws(st)
+    match peek(st1) do
+    None -> Err(YamlError("unterminated flow mapping", state_line(st1), state_col(st1)))
+    Some("}") -> Ok((List.reverse(acc), advance(st1)))
+    Some(",") -> parse_flow_map(advance(st1), acc)
+    _ ->
+      match parse_flow_key(st1) do
+      Err(e) -> Err(e)
+      Ok(p) ->
+        match p do
+        (key, st2) ->
+          let st3 = skip_inline_ws(st2)
+          match peek(st3) do
+          Some(":") ->
+            let st4 = skip_inline_ws(advance(st3))
+            match parse_flow_value(st4) do
+            Err(e) -> Err(e)
+            Ok(p2) ->
+              match p2 do
+              (v, st5) ->
+                let st6 = skip_inline_ws(st5)
+                match peek(st6) do
+                Some(",") -> parse_flow_map(advance(st6), Cons((key, v), acc))
+                Some("}") -> Ok((List.reverse(Cons((key, v), acc)), advance(st6)))
+                Some(c) ->
+                  Err(YamlError("expected ',' or '}', got '" ++ c ++ "'", state_line(st6), state_col(st6)))
+                None -> Err(YamlError("unterminated flow mapping", state_line(st6), state_col(st6)))
+                end
+              end
+            end
+          Some(c) ->
+            Err(YamlError("expected ':' after key, got '" ++ c ++ "'", state_line(st3), state_col(st3)))
+          None -> Err(YamlError("expected ':' after key", state_line(st3), state_col(st3)))
+          end
+        end
+      end
+    end
+  end
+
+  -- ── Inline value (after "key: ") ─────────────────────────────────────────
+
+  pfn parse_inline_value(st) do
+    let st1 = skip_inline_ws(st)
+    match peek(st1) do
+    None -> Ok((YNull, st1))
+    Some("\n") -> Ok((YNull, advance(st1)))
+    Some("[") ->
+      match parse_flow_seq(advance(st1), []) do
+      Err(e) -> Err(e)
+      Ok(p) ->
+        match p do
+        (xs, st2) ->
+          let st3 = skip_comment_if_any(st2)
+          Ok((YSeq(xs), st3))
+        end
+      end
+    Some("{") ->
+      match parse_flow_map(advance(st1), []) do
+      Err(e) -> Err(e)
+      Ok(p) ->
+        match p do
+        (pairs, st2) ->
+          let st3 = skip_comment_if_any(st2)
+          Ok((YMap(pairs), st3))
+        end
+      end
+    Some("\"") ->
+      match parse_dq_body(advance(st1), "") do
+      Err(e) -> Err(e)
+      Ok(p) ->
+        match p do
+        (s, st2) ->
+          let st3 = skip_comment_if_any(st2)
+          Ok((YStr(s), st3))
+        end
+      end
+    Some("'") ->
+      match parse_sq_body(advance(st1), "") do
+      Err(e) -> Err(e)
+      Ok(p) ->
+        match p do
+        (s, st2) ->
+          let st3 = skip_comment_if_any(st2)
+          Ok((YStr(s), st3))
+        end
+      end
+    _ ->
+      match collect_to_eol(st1, "") do
+      (s, st2) -> Ok((coerce_scalar(s), st2))
+      end
+    end
+  end
+
+  -- ── Block key collection ──────────────────────────────────────────────────
+
+  pfn collect_key(st, acc) do
+    match peek(st) do
+    None -> (string_trim(acc), st)
+    Some(":") ->
+      match state_chars(st) do
+      Cons(_, Cons(next, _)) ->
+        if next == " " || next == "\t" || next == "\n" || next == "\r" do
+          (string_trim(acc), st)
+        else collect_key(advance(st), acc ++ ":")
+        end
+      Cons(_, Nil) -> (string_trim(acc), st)
+      _ -> (string_trim(acc), st)
+      end
+    Some("\n") -> (string_trim(acc), st)
+    Some("#") -> (string_trim(acc), st)
+    Some(c) -> collect_key(advance(st), acc ++ c)
+    end
+  end
+
+  -- ── Peek ahead for "key: " pattern ───────────────────────────────────────
+
+  pfn peek_key_colon(chars) do
+    match chars do
+    Nil -> false
+    Cons(c, rest) ->
+      match c do
+      "\n" -> false
+      ":" ->
+        match rest do
+        Cons(" ", _) -> true
+        Cons("\t", _) -> true
+        Cons("\n", _) -> true
+        Nil -> true
+        _ -> false
+        end
+      _ -> peek_key_colon(rest)
+      end
+    end
+  end
+
+  -- ── Block map: parse "key: value" pairs at a given indent column ──────────
+  -- All recursive calls are tail calls.
+
+  pfn parse_block_map(st, map_col, acc) do
+    let st1 = skip_blank_lines(st)
+    let col1 = state_col(st1)
+    if at_end(st1) || col1 != map_col do
+      Ok((YMap(List.reverse(acc)), st1))
+    else
+      match peek(st1) do
+      None -> Ok((YMap(List.reverse(acc)), st1))
+      Some("#") ->
+        parse_block_map(skip_to_eol(st1), map_col, acc)
+      Some("-") ->
+        -- Sequence item at same indent: end of mapping
+        Ok((YMap(List.reverse(acc)), st1))
+      _ ->
+        match collect_key(st1, "") do
+        (key, st2) ->
+          if key == "" do
+            parse_block_map(skip_to_eol(st2), map_col, acc)
+          else
+            -- Consume ':'
+            let st3 = advance(st2)
+            let st4 = skip_inline_ws(st3)
+            match peek(st4) do
+            Some("\n") ->
+              -- Value on next line(s)
+              let st5 = skip_blank_lines(advance(st4))
+              let col5 = state_col(st5)
+              if col5 > map_col && not(at_end(st5)) do
+                match parse_block(st5, col5) do
+                Err(e) -> Err(e)
+                Ok(p) ->
+                  match p do
+                  (v, st6) -> parse_block_map(st6, map_col, Cons((key, v), acc))
+                  end
+                end
+              else
+                parse_block_map(st5, map_col, Cons((key, YNull), acc))
+              end
+            None ->
+              parse_block_map(st4, map_col, Cons((key, YNull), acc))
+            _ ->
+              match parse_inline_value(st4) do
+              Err(e) -> Err(e)
+              Ok(p) ->
+                match p do
+                (v, st5) -> parse_block_map(st5, map_col, Cons((key, v), acc))
+                end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- ── Block seq: parse "- item" entries at a given indent column ───────────
+
+  pfn parse_block_seq(st, seq_col, acc) do
+    let st1 = skip_blank_lines(st)
+    let col1 = state_col(st1)
+    if at_end(st1) || col1 != seq_col do
+      Ok((YSeq(List.reverse(acc)), st1))
+    else
+      match peek(st1) do
+      None -> Ok((YSeq(List.reverse(acc)), st1))
+      Some("#") -> parse_block_seq(skip_to_eol(st1), seq_col, acc)
+      Some("-") ->
+        match state_chars(st1) do
+        Cons(_, Cons(next, _)) ->
+          if next == " " || next == "\t" || next == "\n" do
+            let st2 = skip_inline_ws(advance(st1))
+            match peek(st2) do
+            Some("\n") ->
+              let st3 = skip_blank_lines(advance(st2))
+              let col3 = state_col(st3)
+              if col3 > seq_col && not(at_end(st3)) do
+                match parse_block(st3, col3) do
+                Err(e) -> Err(e)
+                Ok(p) ->
+                  match p do
+                  (v, st4) -> parse_block_seq(st4, seq_col, Cons(v, acc))
+                  end
+                end
+              else
+                parse_block_seq(st3, seq_col, Cons(YNull, acc))
+              end
+            None ->
+              parse_block_seq(st2, seq_col, Cons(YNull, acc))
+            _ ->
+              -- Inline item: might be a mapping
+              let item_col = state_col(st2)
+              if peek_key_colon(state_chars(st2)) do
+                match parse_block_map(st2, item_col, []) do
+                Err(e) -> Err(e)
+                Ok(p) ->
+                  match p do
+                  (v, st3) -> parse_block_seq(st3, seq_col, Cons(v, acc))
+                  end
+                end
+              else
+                match parse_inline_value(st2) do
+                Err(e) -> Err(e)
+                Ok(p) ->
+                  match p do
+                  (v, st3) -> parse_block_seq(st3, seq_col, Cons(v, acc))
+                  end
+                end
+              end
+            end
+          else
+            -- not "- ": end of sequence
+            Ok((YSeq(List.reverse(acc)), st1))
+          end
+        _ ->
+          Ok((YSeq(List.reverse(acc)), st1))
+        end
+      _ ->
+        -- Not a sequence entry: end of sequence
+        Ok((YSeq(List.reverse(acc)), st1))
+      end
+    end
+  end
+
+  -- ── Main block dispatcher ─────────────────────────────────────────────────
+
+  pfn parse_block(st, min_col) do
+    let st1 = skip_blank_lines(st)
+    match peek(st1) do
+    None -> Err(YamlError("unexpected end of input", state_line(st1), state_col(st1)))
+    Some(c) ->
+      match c do
+      "[" ->
+        match parse_flow_seq(advance(st1), []) do
+        Err(e) -> Err(e)
+        Ok(p) ->
+          match p do
+          (xs, st2) -> Ok((YSeq(xs), skip_comment_if_any(st2)))
+          end
+        end
+      "{" ->
+        match parse_flow_map(advance(st1), []) do
+        Err(e) -> Err(e)
+        Ok(p) ->
+          match p do
+          (pairs, st2) -> Ok((YMap(pairs), skip_comment_if_any(st2)))
+          end
+        end
+      "\"" ->
+        match parse_dq_body(advance(st1), "") do
+        Err(e) -> Err(e)
+        Ok(p) ->
+          match p do
+          (s, st2) -> Ok((YStr(s), skip_comment_if_any(st2)))
+          end
+        end
+      "'" ->
+        match parse_sq_body(advance(st1), "") do
+        Err(e) -> Err(e)
+        Ok(p) ->
+          match p do
+          (s, st2) -> Ok((YStr(s), skip_comment_if_any(st2)))
+          end
+        end
+      "-" ->
+        -- Could be block sequence "- " or negative number
+        match state_chars(st1) do
+        Cons(_, Cons(next, _)) ->
+          if next == " " || next == "\t" || next == "\n" do
+            parse_block_seq(st1, state_col(st1), [])
+          else
+            match collect_to_eol(st1, "") do
+            (s, st2) -> Ok((coerce_scalar(s), st2))
+            end
+          end
+        _ ->
+          match collect_to_eol(st1, "") do
+          (s, st2) -> Ok((coerce_scalar(s), st2))
+          end
+        end
+      _ ->
+        -- Plain scalar or block mapping
+        if peek_key_colon(state_chars(st1)) do
+          parse_block_map(st1, state_col(st1), [])
+        else
+          match collect_to_eol(st1, "") do
+          (s, st2) -> Ok((coerce_scalar(s), st2))
+          end
+        end
+      end
+    end
+  end
+
+  -- ── Public parse API ──────────────────────────────────────────────────────
+
+  doc """
+  Parse a YAML string. Returns Ok(YamlValue) or Err(YamlError).
+  Supports: block mappings, block sequences, scalars, flow {}/[], comments.
+
+      Yaml.parse("name: alice\\nage: 30")
+  """
+  fn parse(src : String) : Result(YamlValue, YamlError) do
+    let st = make_state(src)
+    let st1 = skip_ws(st)
+    -- Skip optional document separator ---
+    let st2 =
+      if starts_with_chars(st1, "---") do
+        skip_blank_lines(advance_n(st1, 3))
+      else st1
+      end
+    let st3 = skip_blank_lines(st2)
+    match peek(st3) do
+    None -> Err(YamlError("empty document", 1, 0))
+    _ ->
+      match parse_block(st3, state_col(st3)) do
+      Err(e) -> Err(e)
+      Ok(p) ->
+        match p do
+        (v, _) -> Ok(v)
+        end
+      end
+    end
+  end
+
+  doc "Parse YAML, panicking on error."
+  fn parse_exn(src : String) : YamlValue do
+    match parse(src) do
+    Ok(v) -> v
+    Err(e) ->
+      match e do
+      YamlError(msg, line, col) ->
+        panic("YAML parse error at " ++ int_to_string(line) ++ ":" ++ int_to_string(col) ++ ": " ++ msg)
+      end
+    end
+  end
+
+  -- ── Navigation ────────────────────────────────────────────────────────────
+
+  doc "Get a key from a YMap value."
+  fn get(v : YamlValue, key : String) : Option(YamlValue) do
+    match v do
+    YMap(pairs) ->
+      match List.find(pairs, fn p -> match p do (k, _) -> k == key end) do
+      None -> None
+      Some(p) -> match p do (_, val) -> Some(val) end
+      end
+    _ -> None
+    end
+  end
+
+  doc "Navigate nested YMap values by a list of keys."
+  fn get_in(v : YamlValue, keys : List(String)) : Option(YamlValue) do
+    match keys do
+    Nil -> Some(v)
+    Cons(k, rest) ->
+      match get(v, k) do
+      None -> None
+      Some(child) -> get_in(child, rest)
+      end
+    end
+  end
+
+  doc "Get a string value from a YMap."
+  fn get_str(v : YamlValue, key : String) : Option(String) do
+    match get(v, key) do
+    None -> None
+    Some(YStr(s)) -> Some(s)
+    _ -> None
+    end
+  end
+
+  doc "Get an integer value from a YMap."
+  fn get_int(v : YamlValue, key : String) : Option(Int) do
+    match get(v, key) do
+    None -> None
+    Some(YInt(n)) -> Some(n)
+    _ -> None
+    end
+  end
+
+  doc "Get a boolean value from a YMap."
+  fn get_bool(v : YamlValue, key : String) : Option(Bool) do
+    match get(v, key) do
+    None -> None
+    Some(YBool(b)) -> Some(b)
+    _ -> None
+    end
+  end
+
+  doc "Get the list from a YSeq value."
+  fn get_seq(v : YamlValue) : Option(List(YamlValue)) do
+    match v do
+    YSeq(xs) -> Some(xs)
+    _ -> None
+    end
+  end
+
+  -- ── Serialization ─────────────────────────────────────────────────────────
+
+  pfn needs_quoting(s) do
+    match s do
+    "" -> true
+    "true" -> true
+    "false" -> true
+    "null" -> true
+    "~" -> true
+    "yes" -> true
+    "no" -> true
+    "on" -> true
+    "off" -> true
+    _ ->
+      match string_to_int(s) do
+      Some(_) -> true
+      None ->
+        match string_to_float(s) do
+        Some(_) -> true
+        None ->
+          string_contains(s, ":") || string_contains(s, "#") ||
+          string_contains(s, "[") || string_contains(s, "]") ||
+          string_contains(s, "{") || string_contains(s, "}") ||
+          string_contains(s, ",") || string_contains(s, "\"") ||
+          string_contains(s, "\\")
+        end
+      end
+    end
+  end
+
+  pfn yaml_str_escape(s) do
+    let chars = string_split(s, "")
+    let escaped = List.map(chars, fn c ->
+      match c do
+      "\\" -> "\\\\"
+      "\"" -> "\\\""
+      "\n" -> "\\n"
+      "\t" -> "\\t"
+      _    -> c
+      end)
+    String.join(escaped, "")
+  end
+
+  pfn quote_str(s) do
+    if needs_quoting(s) do "\"" ++ yaml_str_escape(s) ++ "\""
+    else s
+    end
+  end
+
+  pfn value_to_yaml(v, indent) do
+    let pad = String.join(List.map(List.range(0, indent), fn _ -> "  "), "")
+    match v do
+    YNull -> "null"
+    YBool(true) -> "true"
+    YBool(false) -> "false"
+    YInt(n) -> int_to_string(n)
+    YFloat(f) -> float_to_string(f)
+    YStr(s) -> quote_str(s)
+    YSeq(xs) ->
+      match xs do
+      Nil -> "[]"
+      _ ->
+        let lines = List.map(xs, fn x -> pad ++ "- " ++ value_to_yaml(x, indent + 1))
+        "\n" ++ String.join(lines, "\n")
+      end
+    YMap(pairs) ->
+      match pairs do
+      Nil -> "{}"
+      _ ->
+        let lines = List.map(pairs, fn p ->
+          match p do
+          (k, val) ->
+            let kstr = quote_str(k)
+            match val do
+            YSeq(_) -> pad ++ kstr ++ ":" ++ value_to_yaml(val, indent)
+            YMap(_) ->
+              pad ++ kstr ++ ":\n" ++ value_to_yaml(val, indent + 1)
+            _ ->
+              pad ++ kstr ++ ": " ++ value_to_yaml(val, indent + 1)
+            end
+          end)
+        String.join(lines, "\n")
+      end
+    end
+  end
+
+  doc "Serialize a YamlValue to a YAML string."
+  fn to_string(v : YamlValue) : String do
+    value_to_yaml(v, 0)
+  end
+
+end

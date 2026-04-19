@@ -29,4 +29,8 @@ mod Sigil do
     Xml.parse_exn(content)
   end
 
+  fn yaml(content : String) do
+    Yaml.parse_exn(content)
+  end
+
 end

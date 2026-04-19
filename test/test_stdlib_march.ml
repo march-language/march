@@ -116,6 +116,7 @@ let all_stdlib_decls =
     "msgpack.march";
     "toml.march";
     "xml.march";
+    "yaml.march";
     "process.march";
     "logger.march";
     "flow.march";
@@ -261,6 +262,10 @@ let () =
     ("xml", [
       Alcotest.test_case "Xml module"
         `Quick (run_stdlib_test "test_xml.march" "TestXml");
+    ]);
+    ("yaml", [
+      Alcotest.test_case "Yaml module"
+        `Quick (run_stdlib_test "test_yaml.march" "TestYaml");
     ]);
     (* test_flow.march tests the function-transformer Flow API (from_fn/run/then_)
        which differs from the current Seq-based flow.march implementation.

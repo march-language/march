@@ -1,0 +1,363 @@
+-- TDD tests for stdlib/yaml.march
+-- Written before / alongside implementation (test-driven).
+
+mod TestYaml do
+
+  use Yaml.*
+
+  pfn parse_ok(src) do
+    match Yaml.parse(src) do
+    Ok(v) -> v
+    Err(e) ->
+      match e do
+      Yaml.YamlError(msg, line, col) ->
+        panic("parse failed at " ++ int_to_string(line) ++ ":" ++ int_to_string(col) ++ ": " ++ msg)
+      end
+    end
+  end
+
+  -- ── Scalars ───────────────────────────────────────────────────────────────
+
+  describe "Scalars" do
+
+    test "plain string scalar" do
+      let v = parse_ok("hello")
+      Test.assert_eq(Yaml.to_string(v), "hello", "plain scalar")
+    end
+
+    test "integer scalar" do
+      let v = parse_ok("42")
+      Test.assert_eq(v, Yaml.YInt(42), "integer")
+    end
+
+    test "negative integer" do
+      let v = parse_ok("-7")
+      Test.assert_eq(v, Yaml.YInt(-7), "negative int")
+    end
+
+    test "bool true" do
+      let v = parse_ok("true")
+      Test.assert_eq(v, Yaml.YBool(true), "true")
+    end
+
+    test "bool false" do
+      let v = parse_ok("false")
+      Test.assert_eq(v, Yaml.YBool(false), "false")
+    end
+
+    test "null" do
+      let v = parse_ok("null")
+      Test.assert_eq(v, Yaml.YNull, "null")
+    end
+
+    test "tilde is null" do
+      let v = parse_ok("~")
+      Test.assert_eq(v, Yaml.YNull, "tilde null")
+    end
+
+    test "double-quoted string" do
+      let v = parse_ok("\"hello world\"")
+      Test.assert_eq(v, Yaml.YStr("hello world"), "dq string")
+    end
+
+    test "single-quoted string" do
+      let v = parse_ok("'hello world'")
+      Test.assert_eq(v, Yaml.YStr("hello world"), "sq string")
+    end
+
+    test "quoted numeric is string" do
+      let v = parse_ok("\"42\"")
+      Test.assert_eq(v, Yaml.YStr("42"), "quoted int is str")
+    end
+
+    test "double-quoted escape sequences" do
+      let v = parse_ok("\"line1\\nline2\"")
+      Test.assert_eq(v, Yaml.YStr("line1\nline2"), "dq escape")
+    end
+
+    test "single-quoted preserves content" do
+      let v = parse_ok("'it''s fine'")
+      Test.assert_eq(v, Yaml.YStr("it's fine"), "sq escaped apos")
+    end
+
+  end
+
+  -- ── Block sequences ───────────────────────────────────────────────────────
+
+  describe "BlockSeq" do
+
+    test "simple sequence" do
+      let v = parse_ok("- a\n- b\n- c")
+      match v do
+      Yaml.YSeq(xs) -> Test.assert_eq(List.length(xs), 3, "three items")
+      _ -> panic("expected seq")
+      end
+    end
+
+    test "sequence of integers" do
+      let v = parse_ok("- 1\n- 2\n- 3")
+      match v do
+      Yaml.YSeq(xs) ->
+        Test.assert_eq(List.length(xs), 3, "three items")
+        let first = List.head_opt(xs)
+        match first do
+        Some(Yaml.YInt(1)) -> ()
+        _ -> panic("expected YInt(1)")
+        end
+      _ -> panic("expected seq")
+      end
+    end
+
+    test "sequence of booleans" do
+      let v = parse_ok("- true\n- false")
+      match v do
+      Yaml.YSeq(Cons(Yaml.YBool(true), Cons(Yaml.YBool(false), Nil))) -> ()
+      _ -> panic("expected bool seq")
+      end
+    end
+
+  end
+
+  -- ── Block mappings ────────────────────────────────────────────────────────
+
+  describe "BlockMap" do
+
+    test "simple mapping" do
+      let v = parse_ok("name: alice\nage: 30")
+      Test.assert_eq(Yaml.get_str(v, "name"), Some("alice"), "name")
+      Test.assert_eq(Yaml.get_int(v, "age"), Some(30), "age")
+    end
+
+    test "mapping with bool value" do
+      let v = parse_ok("active: true\nverified: false")
+      Test.assert_eq(Yaml.get_bool(v, "active"), Some(true), "active")
+      Test.assert_eq(Yaml.get_bool(v, "verified"), Some(false), "verified")
+    end
+
+    test "mapping with null value" do
+      let v = parse_ok("name: alice\nnote: null")
+      match Yaml.get(v, "note") do
+      Some(Yaml.YNull) -> ()
+      _ -> panic("expected null value")
+      end
+    end
+
+    test "missing key returns None" do
+      let v = parse_ok("name: alice")
+      Test.assert_eq(Yaml.get_str(v, "missing"), None, "missing key")
+    end
+
+    test "quoted value in mapping" do
+      let v = parse_ok("msg: \"hello world\"")
+      Test.assert_eq(Yaml.get_str(v, "msg"), Some("hello world"), "quoted value")
+    end
+
+  end
+
+  -- ── Nested structures ─────────────────────────────────────────────────────
+
+  describe "Nested" do
+
+    test "nested mapping" do
+      let src = "person:\n  name: bob\n  age: 25"
+      let v = parse_ok(src)
+      let person = Yaml.get(v, "person")
+      match person do
+      None -> panic("expected person key")
+      Some(p) ->
+        Test.assert_eq(Yaml.get_str(p, "name"), Some("bob"), "name")
+        Test.assert_eq(Yaml.get_int(p, "age"), Some(25), "age")
+      end
+    end
+
+    test "get_in navigates nested keys" do
+      let src = "a:\n  b:\n    c: 42"
+      let v = parse_ok(src)
+      let result = Yaml.get_in(v, ["a", "b", "c"])
+      Test.assert_eq(result, Some(Yaml.YInt(42)), "deep get_in")
+    end
+
+    test "mapping with sequence value" do
+      let src = "items:\n  - 1\n  - 2\n  - 3"
+      let v = parse_ok(src)
+      let items = Yaml.get(v, "items")
+      match items do
+      Some(Yaml.YSeq(xs)) -> Test.assert_eq(List.length(xs), 3, "three items")
+      _ -> panic("expected seq under items")
+      end
+    end
+
+    test "sequence with mapping elements" do
+      let src = "- name: alice\n  age: 30\n- name: bob\n  age: 25"
+      let v = parse_ok(src)
+      match v do
+      Yaml.YSeq(xs) ->
+        Test.assert_eq(List.length(xs), 2, "two elements")
+        let first = List.head_opt(xs)
+        match first do
+        Some(p) -> Test.assert_eq(Yaml.get_str(p, "name"), Some("alice"), "first name")
+        None -> panic("expected first element")
+        end
+      _ -> panic("expected seq")
+      end
+    end
+
+  end
+
+  -- ── Comments ─────────────────────────────────────────────────────────────
+
+  describe "Comments" do
+
+    test "comment line ignored" do
+      let v = parse_ok("# this is a comment\nname: alice")
+      Test.assert_eq(Yaml.get_str(v, "name"), Some("alice"), "name after comment")
+    end
+
+    test "inline comment ignored" do
+      let v = parse_ok("name: alice # inline comment")
+      Test.assert_eq(Yaml.get_str(v, "name"), Some("alice"), "name with inline comment")
+    end
+
+  end
+
+  -- ── Document separator ────────────────────────────────────────────────────
+
+  describe "DocSep" do
+
+    test "--- document separator at start" do
+      let v = parse_ok("---\nname: alice")
+      Test.assert_eq(Yaml.get_str(v, "name"), Some("alice"), "after ---")
+    end
+
+  end
+
+  -- ── Flow style ────────────────────────────────────────────────────────────
+
+  describe "Flow" do
+
+    test "flow sequence" do
+      let v = parse_ok("[1, 2, 3]")
+      match v do
+      Yaml.YSeq(xs) -> Test.assert_eq(List.length(xs), 3, "three items")
+      _ -> panic("expected seq")
+      end
+    end
+
+    test "flow mapping" do
+      let v = parse_ok("{name: alice, age: 30}")
+      Test.assert_eq(Yaml.get_str(v, "name"), Some("alice"), "name")
+      Test.assert_eq(Yaml.get_int(v, "age"), Some(30), "age")
+    end
+
+    test "empty flow sequence" do
+      let v = parse_ok("[]")
+      match v do
+      Yaml.YSeq(Nil) -> ()
+      _ -> panic("expected empty seq")
+      end
+    end
+
+    test "empty flow mapping" do
+      let v = parse_ok("{}")
+      match v do
+      Yaml.YMap(Nil) -> ()
+      _ -> panic("expected empty map")
+      end
+    end
+
+  end
+
+  -- ── Navigation ────────────────────────────────────────────────────────────
+
+  describe "Navigation" do
+
+    test "get returns None on non-map" do
+      let v = parse_ok("hello")
+      Test.assert_eq(Yaml.get(v, "key"), None, "get on scalar")
+    end
+
+    test "get_int on string value is None" do
+      let v = parse_ok("name: alice")
+      Test.assert_eq(Yaml.get_int(v, "name"), None, "get_int on str value")
+    end
+
+    test "get_bool on non-bool is None" do
+      let v = parse_ok("name: alice")
+      Test.assert_eq(Yaml.get_bool(v, "name"), None, "get_bool on str")
+    end
+
+  end
+
+  -- ── to_string ─────────────────────────────────────────────────────────────
+
+  describe "to_string" do
+
+    test "scalar to_string" do
+      let v = Yaml.YStr("hello")
+      if string_contains(Yaml.to_string(v), "hello") do ()
+      else panic("expected hello in output") end
+    end
+
+    test "integer to_string" do
+      let v = Yaml.YInt(42)
+      Test.assert_eq(Yaml.to_string(v), "42", "int to_string")
+    end
+
+    test "bool to_string" do
+      Test.assert_eq(Yaml.to_string(Yaml.YBool(true)), "true", "true")
+      Test.assert_eq(Yaml.to_string(Yaml.YBool(false)), "false", "false")
+    end
+
+    test "null to_string" do
+      Test.assert_eq(Yaml.to_string(Yaml.YNull), "null", "null")
+    end
+
+    test "round-trip simple map" do
+      let src = "name: alice\nage: 30"
+      let v = parse_ok(src)
+      let s = Yaml.to_string(v)
+      let v2 = parse_ok(s)
+      Test.assert_eq(Yaml.get_str(v2, "name"), Some("alice"), "name preserved")
+      Test.assert_eq(Yaml.get_int(v2, "age"), Some(30), "age preserved")
+    end
+
+  end
+
+  -- ── Errors ────────────────────────────────────────────────────────────────
+
+  describe "Errors" do
+
+    test "empty input" do
+      match Yaml.parse("") do
+      Err(_) -> ()
+      Ok(_) -> panic("expected error for empty input")
+      end
+    end
+
+  end
+
+  -- ── Sigil ────────────────────────────────────────────────────────────────
+
+  describe "Sigil" do
+
+    test "~yaml sigil parses YAML" do
+      let v = ~yaml"name: alice\nage: 30"
+      Test.assert_eq(Yaml.get_str(v, "name"), Some("alice"), "name via sigil")
+    end
+
+    test "~yaml multiline" do
+      let v = ~yaml"""
+        name: alice
+        age: 30
+        active: true
+      """
+      Test.assert_eq(Yaml.get_str(v, "name"), Some("alice"), "name")
+      Test.assert_eq(Yaml.get_int(v, "age"), Some(30), "age")
+      Test.assert_eq(Yaml.get_bool(v, "active"), Some(true), "active")
+    end
+
+  end
+
+  fn main() do () end
+
+end
