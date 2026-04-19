@@ -40,6 +40,19 @@ int64_t march_int_pow(int64_t base, int64_t exp);
 void *march_panic_ext(void *s);
 void *march_todo_ext(void *s);
 
+/* Call-stack frame table (used by compiled binaries for backtraces).
+ * march_frame_t is stack-allocated at each March function's entry. */
+typedef struct march_frame_t {
+    const char         *fn_name;
+    const char         *file;
+    int                 line;
+    struct march_frame_t *prev;
+} march_frame_t;
+
+void march_frame_push(march_frame_t *frame);
+void march_frame_pop(void);
+void march_frame_reset(void);
+
 /* Time builtins. */
 double  march_unix_time(void);
 

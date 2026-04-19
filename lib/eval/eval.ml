@@ -561,6 +561,31 @@ exception Assert_failure of string
 (** Raised when an actor/task's reduction budget is exhausted. *)
 exception Yield
 
+(* ------------------------------------------------------------------ *)
+(* March call stack for backtraces                                     *)
+(* ------------------------------------------------------------------ *)
+
+type march_frame = {
+  mf_name : string;
+  mf_file : string;
+  mf_line : int;
+}
+
+(** Per-evaluation March call stack.  Single-threaded (cooperative scheduling
+    via Yield, no true parallelism during evaluation), so a plain ref is safe. *)
+let march_stack : march_frame list ref = ref []
+
+let march_stack_push (name : string) (sp : span) : unit =
+  march_stack := { mf_name = name; mf_file = sp.file; mf_line = sp.start_line }
+                 :: !march_stack
+
+let march_stack_pop () : unit =
+  match !march_stack with _ :: rest -> march_stack := rest | [] -> ()
+
+let get_march_stack () : march_frame list = !march_stack
+
+let clear_march_stack () : unit = march_stack := []
+
 (** Global reduction context — None means reduction counting is disabled. *)
 let reduction_ctx : March_scheduler.Scheduler.reduction_ctx option ref = ref None
 
@@ -6113,19 +6138,23 @@ and eval_expr_inner (env : env) (e : expr) : value =
     let label = match name with Some n -> "?" ^ n.txt | None -> "?" in
     eval_error "typed hole `%s` reached the evaluator — the type checker should have caught this" label
 
-  | EApp (f, args, _) ->
+  | EApp (f, args, sp) ->
     check_reductions ();
-    (if !March_coverage.Coverage.coverage_enabled then begin
-      let name = match f with
-        | EVar n -> n.txt
-        | EField (_, field, _) -> field.txt
-        | _ -> "<anon>"
-      in
-      March_coverage.Coverage.record_fn_call name
-    end);
+    let fn_name = match f with
+      | EVar n -> n.txt
+      | EField (_, field, _) -> field.txt
+      | _ -> "<anon>"
+    in
+    (if !March_coverage.Coverage.coverage_enabled then
+      March_coverage.Coverage.record_fn_call fn_name);
     let fn_val = eval_expr env f in
     let arg_vals = List.map (eval_expr env) args in
-    apply fn_val arg_vals
+    march_stack_push fn_name sp;
+    (* Pop on normal return only; on exception leave the frame live so the
+       top-level handler can read the full call stack. *)
+    let v = apply fn_val arg_vals in
+    march_stack_pop ();
+    v
 
   | ECon (name, args, _) ->
     let arg_vals = List.map (eval_expr env) args in
@@ -6411,12 +6440,13 @@ and eval_expr_inner (env : env) (e : expr) : value =
     env_ref := env';
     rec_v
 
-  | EAssert (inner, _) ->
+  | EAssert (inner, sp) ->
     (* Compiler-assisted assertion rewriting:
        If the inner expression is a binary comparison (==, !=, <, >, <=, >=),
        we evaluate both sides separately so we can show their values on failure.
        Otherwise, we just evaluate the expression and check if it's true. *)
     let comparison_ops = ["=="; "!="; "<"; ">"; "<="; ">="] in
+    let loc = Printf.sprintf "%s:%d" sp.file sp.start_line in
     (match inner with
      | EApp (EVar op_name, [lhs; rhs], _) when List.mem op_name.txt comparison_ops ->
        let lv = eval_expr env lhs in
@@ -6426,18 +6456,19 @@ and eval_expr_inner (env : env) (e : expr) : value =
         | VBool true -> VUnit
         | VBool false ->
           raise (Assert_failure (Printf.sprintf
-            "assert %s %s %s\n    left:  %s\n    right: %s"
-            (value_to_string lv) op_name.txt (value_to_string rv)
-            (value_to_string lv) (value_to_string rv)))
-        | _ -> raise (Assert_failure "assert: comparison did not return Bool"))
+            "assert failed at %s\n    left:  %s\n    right: %s"
+            loc (value_to_string lv) (value_to_string rv)))
+        | _ -> raise (Assert_failure (Printf.sprintf
+            "assert: comparison did not return Bool (at %s)" loc)))
      | _ ->
        (match eval_expr env inner with
         | VBool true  -> VUnit
         | VBool false ->
-          raise (Assert_failure "assert: condition was false")
+          raise (Assert_failure (Printf.sprintf
+            "assert: condition was false (at %s)" loc))
         | v ->
-          raise (Assert_failure (Printf.sprintf "assert: expected Bool, got %s"
-            (value_to_string v)))))
+          raise (Assert_failure (Printf.sprintf
+            "assert: expected Bool, got %s (at %s)" (value_to_string v) loc))))
 
 (** Evaluate a match expression: try each branch until one matches.
     [match_span] is the span of the [EMatch] node, used for coverage arm tracking. *)
@@ -7814,6 +7845,9 @@ let run_tests ?(verbose=false) ?(quiet=false) ?(dot_stream=false) ?(filter="") ?
                   with exn ->
                     Printf.eprintf "setup failed for \"%s\": %s\n%!" name (Printexc.to_string exn))
      | None -> ());
+    (* Clear the March call stack so a previous failing test's frames
+       don't bleed into the next test's error message. *)
+    clear_march_stack ();
     (* When capture_io is enabled, redirect print/log into a per-test buffer. *)
     let cap_buf = if capture_io then Some (Buffer.create 128) else None in
     (match cap_buf with Some b -> test_capture_buf := Some b | None -> ());
