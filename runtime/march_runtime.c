@@ -544,15 +544,22 @@ static void march_print_backtrace(void) {
     int show_full = env && strcmp(env, "full") == 0;
     march_frame_t *f = march_call_stack_top;
     if (!f) return;
-    fprintf(stderr, "\nStack trace (most recent call first):\n");
+    /* Defer header until we know at least one frame will print,
+       so a stdlib-only stack doesn't emit an empty trace block. */
+    int printed = 0;
     int i = 0;
     while (f) {
         int is_stdlib = strncmp(f->file, "stdlib/", 7) == 0;
-        if (show_full || !is_stdlib)
+        if (show_full || !is_stdlib) {
+            if (!printed) {
+                fprintf(stderr, "\nStack trace (most recent call first):\n");
+                printed = 1;
+            }
             fprintf(stderr, "  [%d] %-24s %s:%d\n", i++, f->fn_name, f->file, f->line);
+        }
         f = f->prev;
     }
-    if (!show_full)
+    if (printed && !show_full)
         fprintf(stderr, "\nnote: set MARCH_BACKTRACE=full for all frames including stdlib\n");
 }
 

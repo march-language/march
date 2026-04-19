@@ -689,14 +689,17 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                    if March_errors.Errors.has_errors input_ctx then
                      Printf.eprintf "type error\n%!"
                    else begin
-                     (try
+                     (March_eval.Eval.clear_march_stack ();
+                      try
                         let v   = March_eval.Eval.eval_expr !env e' in
                         let vs  = March_eval.Eval.value_to_string_pretty v in
                         Printf.printf "type  : %s\nvalue : %s\n%!" ty_str vs
                       with
                       | March_eval.Eval.Eval_error msg ->
+                        March_eval.Eval.clear_march_stack ();
                         Printf.eprintf "runtime error: %s\n%!" msg
                       | exn ->
+                        March_eval.Eval.clear_march_stack ();
                         Printf.eprintf "error: %s\n%!" (Printexc.to_string exn))
                    end
                  | _ -> Printf.eprintf "parse error\n%!")
@@ -844,12 +847,15 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                          | _ -> ()))
                     with
                     | March_eval.Eval.Eval_error msg ->
+                      March_eval.Eval.clear_march_stack ();
                       Printf.eprintf "runtime error: %s\n%!" msg
                     | March_eval.Eval.Match_failure msg ->
+                      March_eval.Eval.clear_march_stack ();
                       Printf.eprintf "match failure: %s\n%!" msg
                     | Failure msg ->
                       Printf.eprintf "jit error: %s\n%!" msg
                     | exn ->
+                      March_eval.Eval.clear_march_stack ();
                       Printf.eprintf "error: %s\n%!" (Printexc.to_string exn))
                | Some (March_ast.Ast.ReplExpr e) ->
                  (* Intercept h(name) before typecheck — h is a REPL-only doc lookup *)
@@ -924,12 +930,15 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         eval_via_interp ())
                     with
                     | March_eval.Eval.Eval_error msg ->
+                      March_eval.Eval.clear_march_stack ();
                       Printf.eprintf "runtime error: %s\n%!" msg
                     | March_eval.Eval.Match_failure msg ->
+                      March_eval.Eval.clear_march_stack ();
                       Printf.eprintf "match failure: %s\n%!" msg
                     | Failure msg ->
                       Printf.eprintf "jit error: %s\n%!" msg
                     | exn ->
+                      March_eval.Eval.clear_march_stack ();
                       Printf.eprintf "error: %s\n%!" (Printexc.to_string exn))));
           if scroll_mode then Printf.printf "%s\n%!" scroll_sentinel;
           end;
@@ -1308,8 +1317,10 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              if out <> "" then add_line Notty.A.empty out)
          with
          | March_eval.Eval.Eval_error msg ->
+           March_eval.Eval.clear_march_stack ();
            add_line Notty.A.(fg red) (Printf.sprintf "runtime error: %s" msg)
          | March_eval.Eval.Match_failure msg ->
+           March_eval.Eval.clear_march_stack ();
            add_line Notty.A.(fg red) (Printf.sprintf "match failure: %s" msg)
          | Failure msg ->
            add_line Notty.A.(fg red) (Printf.sprintf "jit error: %s" msg)
@@ -1387,8 +1398,10 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                           (March_typecheck.Typecheck.Mono inferred) !tc_env.vars })
          with
          | March_eval.Eval.Eval_error msg ->
+           March_eval.Eval.clear_march_stack ();
            add_line Notty.A.(fg red) (Printf.sprintf "runtime error: %s" msg)
          | March_eval.Eval.Match_failure msg ->
+           March_eval.Eval.clear_march_stack ();
            add_line Notty.A.(fg red) (Printf.sprintf "match failure: %s" msg)
          | Failure msg ->
            add_line Notty.A.(fg red) (Printf.sprintf "jit error: %s" msg)
@@ -1779,8 +1792,10 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                    add_line Notty.A.empty     (Printf.sprintf "value : %s" vs)
                  with
                  | March_eval.Eval.Eval_error msg ->
+                   March_eval.Eval.clear_march_stack ();
                    add_line Notty.A.(fg red) (Printf.sprintf "runtime error: %s" msg)
                  | exn ->
+                   March_eval.Eval.clear_march_stack ();
                    add_line Notty.A.(fg red) (Printf.sprintf "error: %s" (Printexc.to_string exn)))
               end
             | _ -> add_line Notty.A.(fg red) "parse error")

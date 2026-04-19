@@ -1429,15 +1429,22 @@ let compile filename =
     let print_march_backtrace () =
       let all = March_eval.Eval.get_march_stack () in
       let show_full = Sys.getenv_opt "MARCH_BACKTRACE" = Some "full" in
+      let is_synthetic f =
+        f.March_eval.Eval.mf_file = "<none>" || f.March_eval.Eval.mf_line = 0
+      in
+      let is_stdlib_path path =
+        String.starts_with ~prefix:"stdlib/" path
+        || (let n = String.length path and p = String.length "/stdlib/" in
+            let rec check i = i + p <= n &&
+              (String.sub path i p = "/stdlib/" || check (i + 1))
+            in check 0)
+      in
+      (* Synthetic frames (dummy spans from the desugarer) are always hidden. *)
+      let non_synthetic = List.filter (fun f -> not (is_synthetic f)) all in
       let frames =
-        if show_full then all
+        if show_full then non_synthetic
         else List.filter (fun f ->
-          let path = f.March_eval.Eval.mf_file in
-          not (String.starts_with ~prefix:"stdlib/" path
-               || (let n = String.length path and p = String.length "/stdlib/" in
-                   let rec check i = i + p <= n &&
-                     (String.sub path i p = "/stdlib/" || check (i + 1))
-                   in check 0))) all
+          not (is_stdlib_path f.March_eval.Eval.mf_file)) non_synthetic
       in
       if frames <> [] then begin
         Printf.eprintf "\nStack trace (most recent call first):\n";

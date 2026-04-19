@@ -6171,11 +6171,13 @@ and eval_expr_inner (env : env) (e : expr) : value =
     let fn_val = eval_expr env f in
     let arg_vals = List.map (eval_expr env) args in
     march_stack_push fn_name sp;
-    (* Pop on normal return only; on exception leave the frame live so the
-       top-level handler can read the full call stack. *)
-    let v = apply fn_val arg_vals in
-    march_stack_pop ();
-    v
+    (* Leave March-panic frames live for the backtrace handler.
+       Pop for all other exceptions (Yield, Stack_overflow, etc.) so they
+       don't corrupt subsequent backtraces. *)
+    (match apply fn_val arg_vals with
+     | v -> march_stack_pop (); v
+     | exception (Eval_error _ | Match_failure _ | Assert_failure _ as e) -> raise e
+     | exception e -> march_stack_pop (); raise e)
 
   | ECon (name, args, _) ->
     let arg_vals = List.map (eval_expr env) args in
@@ -6659,7 +6661,10 @@ let run_scheduler () =
                 | new_state ->
                   inst.ai_state <- new_state
                 | exception exn ->
-                  (* Handler raised an exception: crash the actor *)
+                  (* Handler raised an exception: crash the actor.
+                     Clear the march stack so leaked frames from this handler
+                     don't pollute the backtrace of the next crash. *)
+                  clear_march_stack ();
                   crash_actor pid (Printexc.to_string exn));
                current_pid := prev_pid
              end)
@@ -8009,6 +8014,7 @@ let run_doctests ?(verbose=false) ?(quiet=false) ?(filter="")
   let total    = List.length tests in
   let failures = ref [] in
   List.iter (fun (name, ex) ->
+    clear_march_stack ();
     let result =
       (try
          let expr   = parse_expr ex.March_doctest.Doctest.ex_source in
