@@ -540,19 +540,31 @@ void march_frame_reset(void) {
  * Stdlib frames (file starting with "stdlib/") are hidden unless
  * MARCH_BACKTRACE=full is set. */
 static void march_print_backtrace(void) {
-    const char *env = getenv("MARCH_BACKTRACE");
-    int show_full = env && strcmp(env, "full") == 0;
+    /* Cache getenv on first call so it is safe even if called from a
+       signal handler in future (getenv is not async-signal-safe). */
+    static int show_full = -1;
+    if (show_full < 0) {
+        const char *env = getenv("MARCH_BACKTRACE");
+        show_full = (env && strcmp(env, "full") == 0) ? 1 : 0;
+    }
     march_frame_t *f = march_call_stack_top;
     if (!f) return;
-    fprintf(stderr, "\nStack trace (most recent call first):\n");
+    /* Defer printing the header until we know at least one frame is visible,
+       so an all-stdlib stack produces no output when show_full is 0. */
+    int printed = 0;
     int i = 0;
     while (f) {
         int is_stdlib = strncmp(f->file, "stdlib/", 7) == 0;
-        if (show_full || !is_stdlib)
+        if (show_full || !is_stdlib) {
+            if (!printed) {
+                fprintf(stderr, "\nStack trace (most recent call first):\n");
+                printed = 1;
+            }
             fprintf(stderr, "  [%d] %-24s %s:%d\n", i++, f->fn_name, f->file, f->line);
+        }
         f = f->prev;
     }
-    if (!show_full)
+    if (printed && !show_full)
         fprintf(stderr, "\nnote: set MARCH_BACKTRACE=full for all frames including stdlib\n");
 }
 

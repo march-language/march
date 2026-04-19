@@ -1423,21 +1423,48 @@ let compile filename =
     let print_march_backtrace () =
       let all = March_eval.Eval.get_march_stack () in
       let show_full = Sys.getenv_opt "MARCH_BACKTRACE" = Some "full" in
+      (* Canonical stdlib prefix from the same resolver that load_stdlib uses.
+         When it matches, no false positives.  When it doesn't match (e.g. the
+         stdlib AST was cached from a different build dir), fall back to checking
+         that the immediate parent directory is literally named "stdlib" — correct
+         for all stdlib paths, both relative and absolute. *)
+      let stdlib_prefix_opt =
+        match find_stdlib_dir () with
+        | None -> None
+        | Some p -> Some (p ^ "/")
+      in
+      let is_stdlib path =
+        (match stdlib_prefix_opt with
+         | Some prefix when String.starts_with ~prefix path -> true
+         | _ -> false)
+        || Filename.basename (Filename.dirname path) = "stdlib"
+      in
+      (* Desugarer-generated EApp nodes use dummy_span (file="<none>", line=0). *)
+      let non_synthetic = List.filter (fun f ->
+        f.March_eval.Eval.mf_file <> "<none>" && f.March_eval.Eval.mf_line > 0) all
+      in
       let frames =
-        if show_full then all
-        else List.filter (fun f ->
-          let path = f.March_eval.Eval.mf_file in
-          not (String.starts_with ~prefix:"stdlib/" path
-               || (let n = String.length path and p = String.length "/stdlib/" in
-                   let rec check i = i + p <= n &&
-                     (String.sub path i p = "/stdlib/" || check (i + 1))
-                   in check 0))) all
+        if show_full then non_synthetic
+        else List.filter (fun f -> not (is_stdlib f.March_eval.Eval.mf_file)) non_synthetic
+      in
+      (* Add "()" to plain identifiers so "panic  file:3" reads as a call site,
+         not a definition site.  Operators and <anon> are left as-is. *)
+      let display_name name =
+        if name = "" || name.[0] = '<' then name
+        else
+          let is_op_char = function
+            | '+' | '-' | '*' | '/' | '=' | '<' | '>' | '!'
+            | '&' | '|' | '^' | '~' | '%' -> true
+            | _ -> false
+          in
+          if String.for_all is_op_char name then name
+          else name ^ "()"
       in
       if frames <> [] then begin
         Printf.eprintf "\nStack trace (most recent call first):\n";
         List.iteri (fun i f ->
           Printf.eprintf "  [%d] %-24s %s:%d\n"
-            i f.March_eval.Eval.mf_name
+            i (display_name f.March_eval.Eval.mf_name)
             f.March_eval.Eval.mf_file
             f.March_eval.Eval.mf_line
         ) frames;
