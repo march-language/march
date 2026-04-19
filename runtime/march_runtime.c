@@ -540,12 +540,17 @@ void march_frame_reset(void) {
  * Stdlib frames (file starting with "stdlib/") are hidden unless
  * MARCH_BACKTRACE=full is set. */
 static void march_print_backtrace(void) {
-    const char *env = getenv("MARCH_BACKTRACE");
-    int show_full = env && strcmp(env, "full") == 0;
+    /* Cache getenv on first call so it is safe even if called from a
+       signal handler in future (getenv is not async-signal-safe). */
+    static int show_full = -1;
+    if (show_full < 0) {
+        const char *env = getenv("MARCH_BACKTRACE");
+        show_full = (env && strcmp(env, "full") == 0) ? 1 : 0;
+    }
     march_frame_t *f = march_call_stack_top;
     if (!f) return;
-    /* Defer header until we know at least one frame will print,
-       so a stdlib-only stack doesn't emit an empty trace block. */
+    /* Defer printing the header until we know at least one frame is visible,
+       so an all-stdlib stack produces no output when show_full is 0. */
     int printed = 0;
     int i = 0;
     while (f) {
