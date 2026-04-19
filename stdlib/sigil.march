@@ -25,4 +25,8 @@ mod Sigil do
     Toml.parse_exn(content)
   end
 
+  fn xml(content : String) do
+    Xml.parse_exn(content)
+  end
+
 end

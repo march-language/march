@@ -1,0 +1,821 @@
+-- Non-validating XML parser (pure March, no FFI, namespace-unaware).
+--
+-- Supports: elements, attributes (double/single-quoted), text nodes,
+-- CDATA sections, comments, processing instructions, XML declaration,
+-- DOCTYPE declarations (skipped), entity references (&lt; &gt; &amp;
+-- &quot; &apos;), self-closing tags.
+--
+-- Public API:
+--   Xml.parse(src)             : Result(XmlDoc, XmlError)
+--   Xml.parse_exn(src)         : XmlDoc  (panics on error)
+--   Xml.to_string(doc)         : String
+--   Xml.to_string_pretty(doc)  : String
+--   Xml.root(doc)              : XmlNode
+--   Xml.tag(node)              : Option(String)
+--   Xml.text(node)             : Option(String)
+--   Xml.attr(node, name)       : Option(String)
+--   Xml.children(node)         : List(XmlNode)
+--   Xml.elements(node)         : List(XmlNode)
+--   Xml.find(node, path)       : Option(XmlNode)
+--   Xml.find_all(node, path)   : List(XmlNode)
+--   Xml.elem(tag, attrs, kids) : XmlNode
+--   Xml.text_node(s)           : XmlNode
+
+mod Xml do
+
+  type XmlNode
+    = Element(String, List((String, String)), List(XmlNode))
+    | Text(String)
+    | CData(String)
+    | Comment(String)
+    | ProcessingInstruction(String, String)
+
+  type XmlDoc = XmlDoc(Option(String), XmlNode)
+
+  type XmlError = XmlError(String, Int, Int)
+
+  -- Stack frame used by the iterative parser (open element being built).
+  type XmlFrame = XmlFrame(String, List((String, String)), List(XmlNode))
+
+  -- ── Parser state ─────────────────────────────────────────────────────────
+
+  pfn make_state(src) do (string_split(src, ""), 1, 0) end
+  pfn state_line(st) do match st do (_, l, _) -> l end end
+  pfn state_col(st)  do match st do (_, _, c) -> c end end
+  pfn state_chars(st) do match st do (cs, _, _) -> cs end end
+
+  pfn advance(st) do
+    match st do
+    (cs, line, col) ->
+      match cs do
+      Nil -> st
+      Cons(c, rest) ->
+        if c == "\n" do (rest, line + 1, 0)
+        else (rest, line, col + 1)
+        end
+      end
+    end
+  end
+
+  pfn peek(st) do
+    match state_chars(st) do
+    Nil -> None
+    Cons(c, _) -> Some(c)
+    end
+  end
+
+  pfn peek2(st) do
+    match state_chars(st) do
+    Cons(_, Cons(c, _)) -> Some(c)
+    _ -> None
+    end
+  end
+
+  -- ── Char utilities ────────────────────────────────────────────────────────
+
+  pfn is_ws(c) do c == " " || c == "\t" || c == "\n" || c == "\r" end
+
+  pfn is_name_start(c) do
+    let n = char_to_int(c)
+    (n >= 65 && n <= 90) || (n >= 97 && n <= 122) || c == "_" || c == ":"
+  end
+
+  pfn is_name_char(c) do
+    let n = char_to_int(c)
+    (n >= 65 && n <= 90) || (n >= 97 && n <= 122) || (n >= 48 && n <= 57) ||
+    c == "_" || c == ":" || c == "-" || c == "."
+  end
+
+  -- ── Skip whitespace ───────────────────────────────────────────────────────
+
+  pfn skip_ws(st) do
+    match peek(st) do
+    Some(c) ->
+      if is_ws(c) do skip_ws(advance(st))
+      else st
+      end
+    _ -> st
+    end
+  end
+
+  -- ── Collect name chars ────────────────────────────────────────────────────
+
+  pfn collect_name(st, acc) do
+    match peek(st) do
+    Some(c) ->
+      if is_name_char(c) do collect_name(advance(st), acc ++ c)
+      else (acc, st)
+      end
+    _ -> (acc, st)
+    end
+  end
+
+  pfn parse_name(st) do
+    match peek(st) do
+    None -> Err(XmlError("expected name but got end of input", state_line(st), state_col(st)))
+    Some(c) ->
+      if is_name_start(c) do
+        let p = collect_name(advance(st), c)
+        Ok(match p do (n, s) -> (n, s) end)
+      else Err(XmlError("expected name start char, got '" ++ c ++ "'", state_line(st), state_col(st)))
+      end
+    end
+  end
+
+  -- ── Entity reference ──────────────────────────────────────────────────────
+
+  pfn parse_entity(st) do
+    -- Already consumed '&'. Reads until ';'.
+    match peek(st) do
+    None -> Err(XmlError("unterminated entity reference", state_line(st), state_col(st)))
+    Some("l") ->
+      -- &lt;
+      match state_chars(st) do
+      Cons(_, Cons("t", Cons(";", rest))) ->
+        Ok(("<", (rest, state_line(st), state_col(st) + 3)))
+      _ -> Err(XmlError("unknown entity", state_line(st), state_col(st)))
+      end
+    Some("g") ->
+      -- &gt;
+      match state_chars(st) do
+      Cons(_, Cons("t", Cons(";", rest))) ->
+        Ok((">", (rest, state_line(st), state_col(st) + 3)))
+      _ -> Err(XmlError("unknown entity", state_line(st), state_col(st)))
+      end
+    Some("a") ->
+      -- &amp; or &apos;
+      match state_chars(st) do
+      Cons(_, Cons("m", Cons("p", Cons(";", rest)))) ->
+        Ok(("&", (rest, state_line(st), state_col(st) + 4)))
+      Cons(_, Cons("p", Cons("o", Cons("s", Cons(";", rest))))) ->
+        Ok(("'", (rest, state_line(st), state_col(st) + 5)))
+      _ -> Err(XmlError("unknown entity", state_line(st), state_col(st)))
+      end
+    Some("q") ->
+      -- &quot;
+      match state_chars(st) do
+      Cons(_, Cons("u", Cons("o", Cons("t", Cons(";", rest))))) ->
+        Ok(("\"", (rest, state_line(st), state_col(st) + 5)))
+      _ -> Err(XmlError("unknown entity", state_line(st), state_col(st)))
+      end
+    Some("#") ->
+      -- Numeric character reference: skip to ';' and return '?'
+      let st2 = advance(st)
+      match collect_until_semi(st2, "") do
+      Err(e) -> Err(e)
+      Ok(p) -> match p do (_, st3) -> Ok(("?", st3)) end
+      end
+    _ ->
+      -- Unknown entity: skip to ';'
+      match collect_until_semi(st, "") do
+      Err(e) -> Err(e)
+      Ok(p) -> match p do (_, st3) -> Ok(("?", st3)) end
+      end
+    end
+  end
+
+  pfn collect_until_semi(st, acc) do
+    match peek(st) do
+    None -> Err(XmlError("unterminated entity", state_line(st), state_col(st)))
+    Some(";") -> Ok((acc, advance(st)))
+    Some(c) -> collect_until_semi(advance(st), acc ++ c)
+    end
+  end
+
+  -- ── Collect text with entity expansion ───────────────────────────────────
+
+  pfn collect_text(st, acc, stop_at_lt) do
+    match peek(st) do
+    None -> Ok((acc, st))
+    Some("<") ->
+      if stop_at_lt do Ok((acc, st))
+      else collect_text(advance(st), acc ++ "<", stop_at_lt)
+      end
+    Some("&") ->
+      match parse_entity(advance(st)) do
+      Err(e) -> Err(e)
+      Ok(p) ->
+        match p do (ch, st2) -> collect_text(st2, acc ++ ch, stop_at_lt) end
+      end
+    Some(c) -> collect_text(advance(st), acc ++ c, stop_at_lt)
+    end
+  end
+
+  -- ── Collect attr value (stops at quote, expands entities) ────────────────
+
+  pfn collect_attr_value(st, acc, quote) do
+    match peek(st) do
+    None -> Err(XmlError("unterminated attribute value", state_line(st), state_col(st)))
+    Some(c) ->
+      if c == quote do Ok((acc, advance(st)))
+      else
+        match c do
+        "&" ->
+          match parse_entity(advance(st)) do
+          Err(e) -> Err(e)
+          Ok(p) ->
+            match p do (ch, st2) -> collect_attr_value(st2, acc ++ ch, quote) end
+          end
+        _ -> collect_attr_value(advance(st), acc ++ c, quote)
+        end
+      end
+    end
+  end
+
+  -- ── Parse attributes ─────────────────────────────────────────────────────
+
+  pfn parse_attrs(st, acc) do
+    let st1 = skip_ws(st)
+    match peek(st1) do
+    None -> Err(XmlError("unexpected EOF in attributes", state_line(st1), state_col(st1)))
+    Some("/") -> Ok((List.reverse(acc), st1))
+    Some(">") -> Ok((List.reverse(acc), st1))
+    Some(c) ->
+      if is_name_start(c) do
+        match parse_name(st1) do
+        Err(e) -> Err(e)
+        Ok(p) ->
+          match p do
+          (attr_name, st2) ->
+            let st3 = skip_ws(st2)
+            match peek(st3) do
+            Some("=") ->
+              let st4 = skip_ws(advance(st3))
+              match peek(st4) do
+              Some("\"") ->
+                match collect_attr_value(advance(st4), "", "\"") do
+                Err(e) -> Err(e)
+                Ok(p2) ->
+                  match p2 do
+                  (val, st5) -> parse_attrs(st5, Cons((attr_name, val), acc))
+                  end
+                end
+              Some("'") ->
+                match collect_attr_value(advance(st4), "", "'") do
+                Err(e) -> Err(e)
+                Ok(p2) ->
+                  match p2 do
+                  (val, st5) -> parse_attrs(st5, Cons((attr_name, val), acc))
+                  end
+                end
+              _ -> Err(XmlError("expected quote after '='", state_line(st4), state_col(st4)))
+              end
+            _ ->
+              -- Boolean attribute (no value)
+              parse_attrs(st3, Cons((attr_name, ""), acc))
+            end
+          end
+        end
+      else Err(XmlError("unexpected '" ++ c ++ "' in attributes", state_line(st1), state_col(st1)))
+      end
+    end
+  end
+
+  -- ── Advance past N chars ──────────────────────────────────────────────────
+
+  pfn advance_n(st, n) do
+    if n <= 0 do st
+    else advance_n(advance(st), n - 1)
+    end
+  end
+
+  -- ── Check if next chars match a target string ─────────────────────────────
+
+  pfn starts_with_chars(st, target) do
+    let chars = string_split(target, "")
+    check_prefix(state_chars(st), chars)
+  end
+
+  pfn check_prefix(cs, target) do
+    match target do
+    Nil -> true
+    Cons(t, rest) ->
+      match cs do
+      Nil -> false
+      Cons(c, crest) ->
+        if c == t do check_prefix(crest, rest)
+        else false
+        end
+      end
+    end
+  end
+
+  -- ── Collect comment body <!-- ... --> ────────────────────────────────────
+
+  pfn collect_comment_body(st, acc) do
+    if starts_with_chars(st, "-->") do
+      Ok((acc, advance_n(st, 3)))
+    else
+      match peek(st) do
+      None -> Err(XmlError("unterminated comment", state_line(st), state_col(st)))
+      Some(c) -> collect_comment_body(advance(st), acc ++ c)
+      end
+    end
+  end
+
+  -- ── Collect CDATA body <![CDATA[ ... ]]> ─────────────────────────────────
+
+  pfn collect_cdata_body(st, acc) do
+    if starts_with_chars(st, "]]>") do
+      Ok((acc, advance_n(st, 3)))
+    else
+      match peek(st) do
+      None -> Err(XmlError("unterminated CDATA", state_line(st), state_col(st)))
+      Some(c) -> collect_cdata_body(advance(st), acc ++ c)
+      end
+    end
+  end
+
+  -- ── Collect PI body <?target data?> ──────────────────────────────────────
+
+  pfn collect_pi_body(st, acc) do
+    if starts_with_chars(st, "?>") do
+      Ok((acc, advance_n(st, 2)))
+    else
+      match peek(st) do
+      None -> Err(XmlError("unterminated PI", state_line(st), state_col(st)))
+      Some(c) -> collect_pi_body(advance(st), acc ++ c)
+      end
+    end
+  end
+
+  -- ── Skip DOCTYPE <!DOCTYPE ...> ──────────────────────────────────────────
+
+  pfn skip_doctype(st, depth) do
+    match peek(st) do
+    None -> Err(XmlError("unterminated DOCTYPE", state_line(st), state_col(st)))
+    Some(">") ->
+      if depth == 0 do Ok(advance(st))
+      else skip_doctype(advance(st), depth - 1)
+      end
+    Some("[") -> skip_doctype(advance(st), depth + 1)
+    _ -> skip_doctype(advance(st), depth)
+    end
+  end
+
+  -- ── Iterative stack-based XML parser ─────────────────────────────────────
+  --
+  -- Uses an explicit stack of XmlFrame to avoid mutual recursion between
+  -- element and content parsing (March requires all recursive calls to be
+  -- in tail position).  Each iteration processes one "token" and tail-calls
+  -- itself with the updated state and stack.
+  --
+  -- stack = [] means we are at prolog/epilog level (before/after root).
+  -- stack = [frame, ...] means we are inside open elements.
+
+  pfn xml_loop(st, stack) do
+    let st1 = skip_ws(st)
+    match peek(st1) do
+    None ->
+      match stack do
+      Nil -> Err(XmlError("empty document: no root element", state_line(st1), state_col(st1)))
+      Cons(XmlFrame(t, _, _), _) ->
+        Err(XmlError("unexpected EOF: unclosed tag <" ++ t ++ ">", state_line(st1), state_col(st1)))
+      end
+    Some(c) ->
+      if c == "<" do
+        let st2 = advance(st1)
+        match peek(st2) do
+
+        Some("/") ->
+          -- Closing tag </name>
+          let st3 = advance(st2)
+          match parse_name(st3) do
+          Err(e) -> Err(e)
+          Ok(pname) ->
+            match pname do
+            (close_name, st4) ->
+              let st5 = skip_ws(st4)
+              match peek(st5) do
+              Some(">") ->
+                let st6 = advance(st5)
+                match stack do
+                Nil ->
+                  Err(XmlError("unexpected closing tag </" ++ close_name ++ ">", state_line(st5), state_col(st5)))
+                Cons(XmlFrame(open_name, attrs, rev_kids), parent_stack) ->
+                  if close_name != open_name do
+                    Err(XmlError("mismatched tag: </" ++ open_name ++ "> expected, got </" ++ close_name ++ ">", state_line(st5), state_col(st5)))
+                  else
+                    let element = Element(open_name, attrs, List.reverse(rev_kids))
+                    match parent_stack do
+                    Nil ->
+                      -- Root element complete; only whitespace/EOF may follow
+                      let st7 = skip_ws(st6)
+                      match peek(st7) do
+                      None -> Ok(element)
+                      _ -> Err(XmlError("trailing content after root element", state_line(st7), state_col(st7)))
+                      end
+                    Cons(XmlFrame(pt, pa, pkids), gps) ->
+                      xml_loop(st6, Cons(XmlFrame(pt, pa, Cons(element, pkids)), gps))
+                    end
+                  end
+                end
+              _ -> Err(XmlError("expected '>' after closing tag name", state_line(st5), state_col(st5)))
+              end
+            end
+          end
+
+        Some("!") ->
+          let st3 = advance(st2)
+          match peek(st3) do
+          Some("-") ->
+            -- Comment: <!--
+            match peek2(st3) do
+            Some("-") ->
+              match collect_comment_body(advance_n(st3, 2), "") do
+              Err(e) -> Err(e)
+              Ok(p) ->
+                match p do
+                (body, st4) ->
+                  match stack do
+                  Nil -> xml_loop(st4, stack)
+                  Cons(XmlFrame(t, a, kids), rest) ->
+                    xml_loop(st4, Cons(XmlFrame(t, a, Cons(Comment(body), kids)), rest))
+                  end
+                end
+              end
+            _ -> Err(XmlError("expected '--' for comment", state_line(st3), state_col(st3)))
+            end
+          Some("[") ->
+            -- CDATA: <![CDATA[
+            if starts_with_chars(st3, "[CDATA[") do
+              match collect_cdata_body(advance_n(st3, 7), "") do
+              Err(e) -> Err(e)
+              Ok(p) ->
+                match p do
+                (body, st4) ->
+                  match stack do
+                  Nil -> Err(XmlError("CDATA before root element", state_line(st3), state_col(st3)))
+                  Cons(XmlFrame(t, a, kids), rest) ->
+                    xml_loop(st4, Cons(XmlFrame(t, a, Cons(CData(body), kids)), rest))
+                  end
+                end
+              end
+            else Err(XmlError("expected CDATA section", state_line(st3), state_col(st3)))
+            end
+          _ ->
+            -- DOCTYPE or other declaration: skip to matching '>'
+            match skip_doctype(st3, 0) do
+            Err(e) -> Err(e)
+            Ok(st4) -> xml_loop(st4, stack)
+            end
+          end
+
+        Some("?") ->
+          -- Processing instruction
+          let st3 = advance(st2)
+          match parse_name(st3) do
+          Err(e) -> Err(e)
+          Ok(p) ->
+            match p do
+            (pi_target, st4) ->
+              let st5 = skip_ws(st4)
+              match collect_pi_body(st5, "") do
+              Err(e) -> Err(e)
+              Ok(p2) ->
+                match p2 do
+                (pi_data, st6) ->
+                  match stack do
+                  Nil -> xml_loop(st6, stack)
+                  Cons(XmlFrame(t, a, kids), rest) ->
+                    xml_loop(st6, Cons(XmlFrame(t, a, Cons(ProcessingInstruction(pi_target, pi_data), kids)), rest))
+                  end
+                end
+              end
+            end
+          end
+
+        _ ->
+          -- Opening element tag (or the root element)
+          match parse_name(st2) do
+          Err(e) -> Err(e)
+          Ok(p) ->
+            match p do
+            (tag_name, st3) ->
+              let st4 = skip_ws(st3)
+              match parse_attrs(st4, []) do
+              Err(e) -> Err(e)
+              Ok(p2) ->
+                match p2 do
+                (attrs, st5) ->
+                  match peek(st5) do
+                  Some("/") ->
+                    -- Self-closing <tag ... />
+                    let st6 = advance(st5)
+                    match peek(st6) do
+                    Some(">") ->
+                      let st7 = advance(st6)
+                      let self_elem = Element(tag_name, attrs, [])
+                      match stack do
+                      Nil ->
+                        let st8 = skip_ws(st7)
+                        match peek(st8) do
+                        None -> Ok(self_elem)
+                        _ -> Err(XmlError("trailing content after root element", state_line(st8), state_col(st8)))
+                        end
+                      Cons(XmlFrame(t, a, kids), rest) ->
+                        xml_loop(st7, Cons(XmlFrame(t, a, Cons(self_elem, kids)), rest))
+                      end
+                    _ -> Err(XmlError("expected '>' after '/'", state_line(st6), state_col(st6)))
+                    end
+                  Some(">") ->
+                    -- Opening tag: push new frame
+                    xml_loop(advance(st5), Cons(XmlFrame(tag_name, attrs, []), stack))
+                  Some(bad) ->
+                    Err(XmlError("unexpected '" ++ bad ++ "' in tag", state_line(st5), state_col(st5)))
+                  None ->
+                    Err(XmlError("unexpected EOF in tag", state_line(st5), state_col(st5)))
+                  end
+                end
+              end
+            end
+          end
+
+        end
+      else
+        -- Text content (including entities)
+        match stack do
+        Nil ->
+          Err(XmlError("text content before root element", state_line(st1), state_col(st1)))
+        Cons(XmlFrame(t, a, kids), rest) ->
+          match collect_text(st1, "", true) do
+          Err(e) -> Err(e)
+          Ok(p) ->
+            match p do
+            (txt, st2) ->
+              let new_kids =
+                match txt do
+                "" -> kids
+                _  -> Cons(Text(txt), kids)
+                end
+              xml_loop(st2, Cons(XmlFrame(t, a, new_kids), rest))
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- ── Public API ────────────────────────────────────────────────────────────
+
+  doc """
+  Parse an XML string. Returns Ok(XmlDoc) on success or Err(XmlError) on failure.
+  This is a non-validating parser: it does not check DTDs or enforce constraints
+  beyond well-formedness.
+
+      Xml.parse("<root><item>hello</item></root>")
+      -- Ok(XmlDoc(None, Element("root", [], [Element("item", [], [Text("hello")])])))
+  """
+  fn parse(src : String) : Result(XmlDoc, XmlError) do
+    let st = make_state(src)
+    match xml_loop(st, []) do
+    Err(e) -> Err(e)
+    Ok(root_node) -> Ok(XmlDoc(None, root_node))
+    end
+  end
+
+  doc "Parse XML, panicking on error."
+  fn parse_exn(src : String) : XmlDoc do
+    match parse(src) do
+    Ok(xdoc) -> xdoc
+    Err(e) ->
+      match e do
+      XmlError(msg, line, col) ->
+        panic("XML parse error at " ++ int_to_string(line) ++ ":" ++ int_to_string(col) ++ ": " ++ msg)
+      end
+    end
+  end
+
+  doc "Get the root element of a document."
+  fn root(xdoc : XmlDoc) : XmlNode do
+    match xdoc do XmlDoc(_, r) -> r end
+  end
+
+  doc "Get the tag name of an element node, or None for non-element nodes."
+  fn tag(node : XmlNode) : Option(String) do
+    match node do
+    Element(t, _, _) -> Some(t)
+    _                -> None
+    end
+  end
+
+  doc "Get the concatenated direct text content of a node, or None if no text children."
+  fn text(node : XmlNode) : Option(String) do
+    match node do
+    Text(s) -> Some(s)
+    CData(s) -> Some(s)
+    Element(_, _, children) ->
+      let texts = List.filter_map(children, fn child ->
+        match child do
+        Text(s) -> Some(s)
+        CData(s) -> Some(s)
+        _ -> None
+        end)
+      match texts do
+      Nil -> None
+      _   -> Some(String.join(texts, ""))
+      end
+    _ -> None
+    end
+  end
+
+  doc "Get the value of an attribute by name, or None if absent."
+  fn attr(node : XmlNode, name : String) : Option(String) do
+    match node do
+    Element(_, attrs, _) ->
+      match List.find(attrs, fn p -> match p do (k, _) -> k == name end) do
+      None -> None
+      Some(p) -> match p do (_, v) -> Some(v) end
+      end
+    _ -> None
+    end
+  end
+
+  doc "Get all child nodes of an element (text, elements, comments, etc.)."
+  fn children(node : XmlNode) : List(XmlNode) do
+    match node do
+    Element(_, _, kids) -> kids
+    _                   -> []
+    end
+  end
+
+  doc "Get only element-type children (filters out text, comments, etc.)."
+  fn elements(node : XmlNode) : List(XmlNode) do
+    match node do
+    Element(_, _, kids) ->
+      List.filter(kids, fn kid ->
+        match kid do
+        Element(_, _, _) -> true
+        _ -> false
+        end)
+    _ -> []
+    end
+  end
+
+  doc """
+  Navigate to the first node matching a slash-delimited tag path.
+
+      Xml.find(root, "item/name")  -- finds <item><name>...</name></item>
+  """
+  fn find(node : XmlNode, path : String) : Option(XmlNode) do
+    let parts = string_split(path, "/")
+    find_path(node, parts)
+  end
+
+  pfn find_path(node, parts) do
+    match parts do
+    Nil -> Some(node)
+    Cons(seg, rest) ->
+      match find_child_by_tag(node, seg) do
+      None -> None
+      Some(child) -> find_path(child, rest)
+      end
+    end
+  end
+
+  pfn find_child_by_tag(node, tag_name) do
+    find_child_by_tag_in(elements(node), tag_name)
+  end
+
+  pfn find_child_by_tag_in(kids, tag_name) do
+    match kids do
+    Nil -> None
+    Cons(e, rest) ->
+      match e do
+      Element(t, _, _) ->
+        if t == tag_name do Some(e)
+        else find_child_by_tag_in(rest, tag_name)
+        end
+      _ -> find_child_by_tag_in(rest, tag_name)
+      end
+    end
+  end
+
+  doc """
+  Find all element children at the last segment of a slash-delimited path.
+
+      Xml.find_all(root, "items/item")  -- all <item> inside <items>
+  """
+  fn find_all(node : XmlNode, path : String) : List(XmlNode) do
+    let parts = string_split(path, "/")
+    match List.reverse(parts) do
+    Nil -> []
+    Cons(last_seg, rev_prefix) ->
+      let prefix = List.reverse(rev_prefix)
+      let parent_node = find_path(node, prefix)
+      match parent_node do
+      None -> []
+      Some(parent) ->
+        List.filter(elements(parent), fn kid ->
+          match kid do
+          Element(t, _, _) -> t == last_seg
+          _ -> false
+          end)
+      end
+    end
+  end
+
+  doc "Construct an element node."
+  fn elem(tag_name : String, attrs : List((String, String)), kids : List(XmlNode)) : XmlNode do
+    Element(tag_name, attrs, kids)
+  end
+
+  doc "Construct a text node."
+  fn text_node(s : String) : XmlNode do
+    Text(s)
+  end
+
+  -- ── Serialization ─────────────────────────────────────────────────────────
+
+  pfn escape_xml_text(s) do
+    let chars = string_split(s, "")
+    let escaped = List.map(chars, fn c ->
+      match c do
+      "<" -> "&lt;"
+      ">" -> "&gt;"
+      "&" -> "&amp;"
+      _   -> c
+      end)
+    String.join(escaped, "")
+  end
+
+  pfn escape_xml_attr(s) do
+    let chars = string_split(s, "")
+    let escaped = List.map(chars, fn c ->
+      match c do
+      "<"  -> "&lt;"
+      ">"  -> "&gt;"
+      "&"  -> "&amp;"
+      "\"" -> "&quot;"
+      _    -> c
+      end)
+    String.join(escaped, "")
+  end
+
+  pfn node_to_string(node) do
+    match node do
+    Text(s) -> escape_xml_text(s)
+    CData(s) -> "<![CDATA[" ++ s ++ "]]>"
+    Comment(s) -> "<!--" ++ s ++ "-->"
+    ProcessingInstruction(target, data) ->
+      if data == "" do "<?" ++ target ++ "?>"
+      else "<?" ++ target ++ " " ++ data ++ "?>"
+      end
+    Element(t, attrs, kids) ->
+      let attr_str = String.join(
+        List.map(attrs, fn p -> match p do (k, v) -> " " ++ k ++ "=\"" ++ escape_xml_attr(v) ++ "\"" end),
+        "")
+      match kids do
+      Nil -> "<" ++ t ++ attr_str ++ "/>"
+      _   ->
+        let body = String.join(List.map(kids, fn k -> node_to_string(k)), "")
+        "<" ++ t ++ attr_str ++ ">" ++ body ++ "</" ++ t ++ ">"
+      end
+    end
+  end
+
+  doc "Serialize an XmlDoc to a compact XML string."
+  fn to_string(xdoc : XmlDoc) : String do
+    match xdoc do
+    XmlDoc(_, root_node) -> node_to_string(root_node)
+    end
+  end
+
+  pfn node_to_string_pretty(node, indent) do
+    let pad = String.join(List.map(List.range(0, indent), fn _ -> "  "), "")
+    match node do
+    Text(s) ->
+      let trimmed = string_trim(s)
+      if trimmed == "" do ""
+      else pad ++ escape_xml_text(trimmed) ++ "\n"
+      end
+    CData(s) -> pad ++ "<![CDATA[" ++ s ++ "]]>\n"
+    Comment(s) -> pad ++ "<!--" ++ s ++ "-->\n"
+    ProcessingInstruction(target, data) ->
+      if data == "" do pad ++ "<?" ++ target ++ "?>\n"
+      else pad ++ "<?" ++ target ++ " " ++ data ++ "?>\n"
+      end
+    Element(t, attrs, kids) ->
+      let attr_str = String.join(
+        List.map(attrs, fn p -> match p do (k, v) -> " " ++ k ++ "=\"" ++ escape_xml_attr(v) ++ "\"" end),
+        "")
+      match kids do
+      Nil -> pad ++ "<" ++ t ++ attr_str ++ "/>\n"
+      _   ->
+        let child_strs = List.filter(
+          List.map(kids, fn k -> node_to_string_pretty(k, indent + 1)),
+          fn s -> s != "")
+        let body = String.join(child_strs, "")
+        pad ++ "<" ++ t ++ attr_str ++ ">\n" ++ body ++ pad ++ "</" ++ t ++ ">\n"
+      end
+    end
+  end
+
+  doc "Serialize an XmlDoc to a pretty-printed XML string."
+  fn to_string_pretty(xdoc : XmlDoc) : String do
+    match xdoc do
+    XmlDoc(_, root_node) -> node_to_string_pretty(root_node, 0)
+    end
+  end
+
+end
