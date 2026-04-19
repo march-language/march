@@ -169,7 +169,7 @@ let install_from_git ~name ~url ~fragment ~force =
              let dir = Archive_store.archive_dir install_name in
              let tasks = Archive_store.list_archive_tasks dir in
              if tasks <> [] then begin
-               let cmds = List.map fst tasks in
+               let cmds = List.map (fun (cmd, _, _) -> cmd) tasks in
                Printf.printf "Tasks available: %s\n%!" (String.concat ", " cmds)
              end;
              Ok ())
@@ -206,7 +206,7 @@ let install_from_path ~name ~raw_path ~force =
            Printf.printf "Installed %s (dev) → %s\n%!" install_name abs_path;
            let tasks = Archive_store.list_archive_tasks abs_path in
            if tasks <> [] then begin
-             let cmds = List.map fst tasks in
+             let cmds = List.map (fun (cmd, _, _) -> cmd) tasks in
              Printf.printf "Tasks available: %s\n%!" (String.concat ", " cmds)
            end;
            Ok ())
@@ -269,7 +269,7 @@ let run_list () =
         in
         let tasks = Archive_store.list_archive_tasks archive_root in
         let task_str = if tasks = [] then ""
-          else "  tasks: " ^ String.concat ", " (List.map fst tasks)
+          else "  tasks: " ^ String.concat ", " (List.map (fun (cmd, _, _) -> cmd) tasks)
         in
         Printf.printf "%-*s  %s%s\n%!" max_name e.Archive_store.name source_str task_str
       ) entries

@@ -42,7 +42,7 @@ let print_archive_help name =
       Printf.printf "Tasks:   (none declared)\n%!"
     else begin
       Printf.printf "Tasks:\n%!";
-      List.iter (fun (cmd, _) ->
+      List.iter (fun (cmd, _, _) ->
           Printf.printf "  forge %-30s\n%!" cmd
         ) tasks
     end
@@ -305,7 +305,7 @@ let help_cmd =
               | _ -> Archive_store.archive_dir name
             in
             let tasks = Archive_store.list_archive_tasks root in
-            let task_names = List.map fst tasks in
+            let task_names = List.map (fun (cmd, _, _) -> cmd) tasks in
             Printf.printf "  %-12s  %s\n%!" name (String.concat ", " task_names)
           ) entries
       end;
@@ -535,6 +535,24 @@ let phases_cmd =
 
 (* --------------------------------------------------------------------- root *)
 
+let archive_man_blocks () =
+  let entries = Archive_store.load_registry () in
+  List.concat (List.map (fun (name, entry) ->
+      let root = match entry.Archive_store.source with
+        | Archive_store.Path p -> p
+        | _ -> Archive_store.archive_dir name
+      in
+      let tasks = Archive_store.list_archive_tasks root in
+      if tasks = [] then []
+      else
+        [`S (String.uppercase_ascii name ^ " TASKS")]
+        @ List.map (fun (cmd, _, doc) ->
+            let desc = if doc = "" then " " else doc in
+            `I ("$(b,forge " ^ cmd ^ ")", desc)
+          ) tasks
+        @ [`P ("See $(b,forge help " ^ name ^ ") for details.")]
+    ) entries)
+
 let default_term =
   Term.(const (fun () ->
     match Cmd_build.build ~release:false () with
@@ -552,7 +570,8 @@ let () =
   let main =
     Cmd.group ~default:default_term
       (Cmd.info "forge" ~version:"0.1.0"
-         ~doc:"The March package manager and build tool")
+         ~doc:"The March package manager and build tool"
+         ~man:(archive_man_blocks ()))
       cmds
   in
   exit (Cmd.eval main)

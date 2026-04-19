@@ -221,7 +221,8 @@ let uninstall name =
 (*  Task discovery                                                     *)
 (* ------------------------------------------------------------------ *)
 
-(** Load task declarations from a forge.toml that has [archive.task.*] sections. *)
+(** Load task declarations from a forge.toml that has [archive.task.*] sections.
+    Returns (command, module_path, doc) triples. *)
 let read_tasks_from_toml toml_path =
   if not (Sys.file_exists toml_path) then []
   else
@@ -239,8 +240,9 @@ let read_tasks_from_toml toml_path =
         then begin
           let command = Toml.get_string pairs "command" in
           let module_ = Toml.get_string pairs "module" in
+          let doc_str = Option.value ~default:"" (Toml.get_string pairs "doc") in
           match command, module_ with
-          | Some cmd, Some m -> Some (cmd, m)
+          | Some cmd, Some m -> Some (cmd, m, doc_str)
           | _ -> None
         end else None
       ) doc.Toml.sections
@@ -270,9 +272,9 @@ let find_task command =
         let dep_toml = Filename.concat dep_dir "forge.toml" in
         if Sys.file_exists dep_toml then begin
           let tasks = read_tasks_from_toml dep_toml in
-          match List.assoc_opt command tasks with
+          match List.find_opt (fun (cmd, _, _) -> cmd = command) tasks with
           | None -> None
-          | Some rel_module ->
+          | Some (_, rel_module, _) ->
             let full_path = Filename.concat dep_dir rel_module in
             if Sys.file_exists full_path then
               Some (full_path, lib_paths_for_root dep_dir)
@@ -293,21 +295,21 @@ let find_task command =
           in
           let toml_path = Filename.concat archive_root "forge.toml" in
           let tasks = read_tasks_from_toml toml_path in
-          match List.assoc_opt command tasks with
+          match List.find_opt (fun (cmd, _, _) -> cmd = command) tasks with
           | None -> None
-          | Some rel_module ->
+          | Some (_, rel_module, _) ->
             let full_path = Filename.concat archive_root rel_module in
             if Sys.file_exists full_path then
               Some (full_path, lib_paths_for_root archive_root)
             else None))
 
-(** Return all (command, module_path) pairs for an archive directory. *)
+(** Return all (command, module_path, doc) triples for an archive directory. *)
 let list_archive_tasks archive_root =
   let toml_path = Filename.concat archive_root "forge.toml" in
   let tasks = read_tasks_from_toml toml_path in
-  List.filter_map (fun (cmd, rel_m) ->
+  List.filter_map (fun (cmd, rel_m, doc) ->
       let full = Filename.concat archive_root rel_m in
-      if Sys.file_exists full then Some (cmd, full) else None
+      if Sys.file_exists full then Some (cmd, full, doc) else None
     ) tasks
 
 (** Resolve the stdlib directory using the same strategy as the compiler:
