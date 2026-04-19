@@ -18665,6 +18665,449 @@ let test_crypto_password_wrong () =
   Alcotest.(check string) "verify_password rejects wrong password" "fail"
     (vstr (call_fn env "f" []))
 
+(* ── Compress stdlib module tests ────────────────────────────────────────── *)
+
+let load_compress_decl () = load_stdlib_file_for_test "compress.march"
+
+let eval_with_compress src =
+  let decl = load_compress_decl () in
+  eval_with_stdlib [decl] src
+
+let eval_with_compress_and_check src =
+  let compress_decl = load_compress_decl () in
+  let list_decl   = load_stdlib_file_for_test "list.march" in
+  let random_decl = load_stdlib_file_for_test "random.march" in
+  let gen_decl    = load_stdlib_file_for_test "gen.march" in
+  let check_decl  = load_stdlib_file_for_test "check.march" in
+  eval_with_stdlib [list_decl; random_decl; gen_decl; check_decl; compress_decl] src
+
+let test_compress_parse_ok () =
+  let _decl = load_compress_decl () in
+  ()
+
+(* ── Gzip ── *)
+
+let test_gzip_encode_returns_bytes () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      let b = Bytes(Cons(104, Cons(101, Cons(108, Cons(108, Cons(111, Nil))))))
+      match Compress.Gzip.encode(b) do
+      Ok(compressed) -> 1
+      Err(_) -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "gzip encode returns Ok" 1 (vint (call_fn env "f" []))
+
+let test_gzip_roundtrip () =
+  let env = eval_with_compress {|mod Test do
+    pfn bytes_eq(a, b) do
+      match (a, b) do
+      (Bytes(xs), Bytes(ys)) ->
+        fn go(ps, qs) do
+          match (ps, qs) do
+          (Nil, Nil) -> true
+          (Cons(x, xr), Cons(y, yr)) -> x == y && go(xr, yr)
+          _ -> false
+          end
+        end
+        go(xs, ys)
+      end
+    end
+    fn f() do
+      let original = Bytes(Cons(104, Cons(101, Cons(108, Cons(108, Cons(111, Nil))))))
+      match Compress.Gzip.encode(original) do
+      Ok(compressed) ->
+        match Compress.Gzip.decode(compressed) do
+        Ok(restored) -> if bytes_eq(original, restored) do 1 else 0 end
+        Err(_) -> 0
+        end
+      Err(_) -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "gzip encode/decode round-trip" 1 (vint (call_fn env "f" []))
+
+let test_gzip_empty () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      let b = Bytes(Nil)
+      match Compress.Gzip.encode(b) do
+      Ok(compressed) ->
+        match Compress.Gzip.decode(compressed) do
+        Ok(Bytes(Nil)) -> 1
+        _ -> 0
+        end
+      Err(_) -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "gzip empty bytes round-trip" 1 (vint (call_fn env "f" []))
+
+let test_gzip_decode_invalid () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      let garbage = Bytes(Cons(1, Cons(2, Cons(3, Nil))))
+      match Compress.Gzip.decode(garbage) do
+      Ok(_)  -> 0
+      Err(_) -> 1
+      end
+    end
+  end|} in
+  Alcotest.(check int) "gzip decode invalid data returns Err" 1 (vint (call_fn env "f" []))
+
+let test_gzip_compressed_smaller () =
+  (* Compressible data: 100 identical bytes → should compress well *)
+  let env = eval_with_compress {|mod Test do
+    pfn make_bytes(n, val, acc) do
+      if n <= 0 do acc
+      else make_bytes(n - 1, val, Cons(val, acc)) end
+    end
+    pfn byte_length(b) do
+      match b do
+      Bytes(xs) ->
+        fn go(ys, n) do
+          match ys do
+          Nil -> n
+          Cons(_, t) -> go(t, n + 1)
+          end
+        end
+        go(xs, 0)
+      end
+    end
+    fn f() do
+      let b = Bytes(make_bytes(100, 65, Nil))
+      match Compress.Gzip.encode(b) do
+      Ok(compressed) -> byte_length(compressed)
+      Err(_) -> 999
+      end
+    end
+  end|} in
+  let compressed_len = vint (call_fn env "f" []) in
+  (* 100 identical bytes must compress to < 100 bytes *)
+  Alcotest.(check bool) "gzip compresses repetitive data" true (compressed_len < 100)
+
+let test_gzip_level_explicit () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      let b = Bytes(Cons(65, Cons(66, Cons(67, Nil))))
+      match Compress.Gzip.encode_level(b, Gzip.BestSpeed) do
+      Ok(_) -> 1
+      Err(_) -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "gzip encode_level BestSpeed" 1 (vint (call_fn env "f" []))
+
+(* ── Deflate ── *)
+
+let test_deflate_roundtrip () =
+  let env = eval_with_compress {|mod Test do
+    pfn bytes_eq(a, b) do
+      match (a, b) do
+      (Bytes(xs), Bytes(ys)) ->
+        fn go(ps, qs) do
+          match (ps, qs) do
+          (Nil, Nil) -> true
+          (Cons(x, xr), Cons(y, yr)) -> x == y && go(xr, yr)
+          _ -> false
+          end
+        end
+        go(xs, ys)
+      end
+    end
+    fn f() do
+      let original = Bytes(Cons(100, Cons(101, Cons(102, Nil))))
+      match Compress.Deflate.encode(original) do
+      Ok(compressed) ->
+        match Compress.Deflate.decode(compressed) do
+        Ok(restored) -> if bytes_eq(original, restored) do 1 else 0 end
+        Err(_) -> 0
+        end
+      Err(_) -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "deflate encode/decode round-trip" 1 (vint (call_fn env "f" []))
+
+let test_deflate_empty () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      let b = Bytes(Nil)
+      match Compress.Deflate.encode(b) do
+      Ok(compressed) ->
+        match Compress.Deflate.decode(compressed) do
+        Ok(Bytes(Nil)) -> 1
+        _ -> 0
+        end
+      Err(_) -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "deflate empty bytes round-trip" 1 (vint (call_fn env "f" []))
+
+(* ── Zstd ── *)
+
+let test_zstd_roundtrip () =
+  let env = eval_with_compress {|mod Test do
+    pfn bytes_eq(a, b) do
+      match (a, b) do
+      (Bytes(xs), Bytes(ys)) ->
+        fn go(ps, qs) do
+          match (ps, qs) do
+          (Nil, Nil) -> true
+          (Cons(x, xr), Cons(y, yr)) -> x == y && go(xr, yr)
+          _ -> false
+          end
+        end
+        go(xs, ys)
+      end
+    end
+    fn f() do
+      let original = Bytes(Cons(122, Cons(115, Cons(116, Cons(100, Nil)))))
+      match Compress.Zstd.encode(original) do
+      Ok(compressed) ->
+        match Compress.Zstd.decode(compressed) do
+        Ok(restored) -> if bytes_eq(original, restored) do 1 else 0 end
+        Err(_) -> 0
+        end
+      Err(_) -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "zstd encode/decode round-trip" 1 (vint (call_fn env "f" []))
+
+let test_zstd_level_best () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      let b = Bytes(Cons(65, Cons(66, Nil)))
+      match Compress.Zstd.encode_level(b, Zstd.Best) do
+      Ok(_) -> 1
+      Err(_) -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "zstd encode_level Best" 1 (vint (call_fn env "f" []))
+
+(* ── Brotli ── *)
+
+let test_brotli_roundtrip () =
+  let env = eval_with_compress {|mod Test do
+    pfn bytes_eq(a, b) do
+      match (a, b) do
+      (Bytes(xs), Bytes(ys)) ->
+        fn go(ps, qs) do
+          match (ps, qs) do
+          (Nil, Nil) -> true
+          (Cons(x, xr), Cons(y, yr)) -> x == y && go(xr, yr)
+          _ -> false
+          end
+        end
+        go(xs, ys)
+      end
+    end
+    fn f() do
+      let original = Bytes(Cons(98, Cons(114, Cons(111, Cons(116, Cons(108, Cons(105, Nil)))))))
+      match Compress.Brotli.encode(original) do
+      Ok(compressed) ->
+        match Compress.Brotli.decode(compressed) do
+        Ok(restored) -> if bytes_eq(original, restored) do 1 else 0 end
+        Err(_) -> 0
+        end
+      Err(_) -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "brotli encode/decode round-trip" 1 (vint (call_fn env "f" []))
+
+let test_brotli_mode_text () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      let b = Bytes(Cons(65, Cons(66, Cons(67, Nil))))
+      match Compress.Brotli.encode_mode(b, Brotli.Text, Brotli.Level(4)) do
+      Ok(_) -> 1
+      Err(_) -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "brotli encode_mode Text/Level(4)" 1 (vint (call_fn env "f" []))
+
+(* ── HTTP helpers ── *)
+
+let test_accept_encoding_parse () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      let tokens = Compress.accept_encoding("gzip, deflate, br")
+      match tokens do
+      Cons("gzip", Cons("deflate", Cons("br", Nil))) -> 1
+      _ -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "accept_encoding parses three tokens" 1 (vint (call_fn env "f" []))
+
+let test_accept_encoding_empty () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      match Compress.accept_encoding("") do
+      Nil -> 1
+      _ -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "accept_encoding empty header → Nil" 1 (vint (call_fn env "f" []))
+
+let test_best_encoding_prefers_zstd () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      match Compress.best_encoding(["gzip", "br", "zstd"]) do
+      Some("zstd") -> 1
+      _ -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "best_encoding prefers zstd" 1 (vint (call_fn env "f" []))
+
+let test_best_encoding_prefers_br_over_gzip () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      match Compress.best_encoding(["gzip", "br"]) do
+      Some("br") -> 1
+      _ -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "best_encoding prefers br over gzip" 1 (vint (call_fn env "f" []))
+
+let test_best_encoding_none () =
+  let env = eval_with_compress {|mod Test do
+    fn f() do
+      match Compress.best_encoding(["identity", "deflate"]) do
+      None -> 1
+      _ -> 0
+      end
+    end
+  end|} in
+  Alcotest.(check int) "best_encoding returns None for unknown encodings" 1 (vint (call_fn env "f" []))
+
+(* ── Property tests ── *)
+
+let test_gzip_roundtrip_property () =
+  let env = eval_with_compress_and_check {|mod Test do
+    fn f() do
+      Check.all(Gen.list(Gen.int(0, 255)), fn byte_list ->
+        let b = Bytes(byte_list)
+        match Compress.Gzip.encode(b) do
+        Ok(compressed) ->
+          match Compress.Gzip.decode(compressed) do
+          Ok(Bytes(restored)) -> restored == byte_list
+          Err(_) -> false
+          end
+        Err(_) -> false
+        end
+      )
+    end
+  end|} in
+  call_fn env "f" [] |> ignore
+
+let test_deflate_roundtrip_property () =
+  let env = eval_with_compress_and_check {|mod Test do
+    fn f() do
+      Check.all(Gen.list(Gen.int(0, 255)), fn byte_list ->
+        let b = Bytes(byte_list)
+        match Compress.Deflate.encode(b) do
+        Ok(compressed) ->
+          match Compress.Deflate.decode(compressed) do
+          Ok(Bytes(restored)) -> restored == byte_list
+          Err(_) -> false
+          end
+        Err(_) -> false
+        end
+      )
+    end
+  end|} in
+  call_fn env "f" [] |> ignore
+
+let test_zstd_roundtrip_property () =
+  let env = eval_with_compress_and_check {|mod Test do
+    fn f() do
+      Check.all(Gen.list(Gen.int(0, 255)), fn byte_list ->
+        let b = Bytes(byte_list)
+        match Compress.Zstd.encode(b) do
+        Ok(compressed) ->
+          match Compress.Zstd.decode(compressed) do
+          Ok(Bytes(restored)) -> restored == byte_list
+          Err(_) -> false
+          end
+        Err(_) -> false
+        end
+      )
+    end
+  end|} in
+  call_fn env "f" [] |> ignore
+
+let test_brotli_roundtrip_property () =
+  let env = eval_with_compress_and_check {|mod Test do
+    fn f() do
+      Check.all(Gen.list(Gen.int(0, 255)), fn byte_list ->
+        let b = Bytes(byte_list)
+        match Compress.Brotli.encode(b) do
+        Ok(compressed) ->
+          match Compress.Brotli.decode(compressed) do
+          Ok(Bytes(restored)) -> restored == byte_list
+          Err(_) -> false
+          end
+        Err(_) -> false
+        end
+      )
+    end
+  end|} in
+  call_fn env "f" [] |> ignore
+
+let test_gzip_compression_shrinks_repetitive () =
+  (* Property: encoding 200 identical bytes produces fewer bytes than input *)
+  let env = eval_with_compress_and_check {|mod Test do
+    pfn replicate(n, v) do
+      if n <= 0 do Nil
+      else Cons(v, replicate(n - 1, v)) end
+    end
+    pfn list_length(xs) do
+      fn go(ys, n) do
+        match ys do
+        Nil -> n
+        Cons(_, t) -> go(t, n + 1)
+        end
+      end
+      go(xs, 0)
+    end
+    fn f() do
+      Check.all(Gen.int(0, 255), fn v ->
+        let bytes_200 = Bytes(replicate(200, v))
+        match Compress.Gzip.encode(bytes_200) do
+        Ok(Bytes(compressed_list)) ->
+          list_length(compressed_list) < 200
+        Err(_) -> false
+        end
+      )
+    end
+  end|} in
+  call_fn env "f" [] |> ignore
+
+let test_accept_encoding_trims_spaces () =
+  let env = eval_with_compress_and_check {|mod Test do
+    fn f() do
+      Check.all(Gen.constant("gzip, br, zstd"), fn header ->
+        let tokens = Compress.accept_encoding(header)
+        match tokens do
+        Cons(t1, Cons(t2, Cons(t3, Nil))) ->
+          t1 == "gzip" && t2 == "br" && t3 == "zstd"
+        _ -> false
+        end
+      )
+    end
+  end|} in
+  call_fn env "f" [] |> ignore
+
 (* ── UUID stdlib module tests ─────────────────────────────────────────────── *)
 
 let eval_with_uuid src =
@@ -21582,6 +22025,32 @@ let () =
         Alcotest.test_case "base64 round-trip"          `Quick test_crypto_stdlib_base64_roundtrip;
         Alcotest.test_case "hash_password/verify"       `Quick test_crypto_password_hash_verify;
         Alcotest.test_case "verify rejects wrong"       `Quick test_crypto_password_wrong;
+      ]);
+      ("compress stdlib", [
+        Alcotest.test_case "parse"                              `Quick test_compress_parse_ok;
+        Alcotest.test_case "gzip encode returns Ok"             `Quick test_gzip_encode_returns_bytes;
+        Alcotest.test_case "gzip round-trip"                    `Quick test_gzip_roundtrip;
+        Alcotest.test_case "gzip empty bytes"                   `Quick test_gzip_empty;
+        Alcotest.test_case "gzip decode invalid → Err"         `Quick test_gzip_decode_invalid;
+        Alcotest.test_case "gzip compresses repetitive"        `Quick test_gzip_compressed_smaller;
+        Alcotest.test_case "gzip encode_level BestSpeed"       `Quick test_gzip_level_explicit;
+        Alcotest.test_case "deflate round-trip"                 `Quick test_deflate_roundtrip;
+        Alcotest.test_case "deflate empty bytes"                `Quick test_deflate_empty;
+        Alcotest.test_case "zstd round-trip"                    `Quick test_zstd_roundtrip;
+        Alcotest.test_case "zstd encode_level Best"            `Quick test_zstd_level_best;
+        Alcotest.test_case "brotli round-trip"                  `Quick test_brotli_roundtrip;
+        Alcotest.test_case "brotli encode_mode Text"           `Quick test_brotli_mode_text;
+        Alcotest.test_case "accept_encoding parses tokens"     `Quick test_accept_encoding_parse;
+        Alcotest.test_case "accept_encoding empty header"      `Quick test_accept_encoding_empty;
+        Alcotest.test_case "best_encoding prefers zstd"        `Quick test_best_encoding_prefers_zstd;
+        Alcotest.test_case "best_encoding prefers br"          `Quick test_best_encoding_prefers_br_over_gzip;
+        Alcotest.test_case "best_encoding returns None"        `Quick test_best_encoding_none;
+        Alcotest.test_case "prop: gzip round-trip"             `Quick test_gzip_roundtrip_property;
+        Alcotest.test_case "prop: deflate round-trip"          `Quick test_deflate_roundtrip_property;
+        Alcotest.test_case "prop: zstd round-trip"             `Quick test_zstd_roundtrip_property;
+        Alcotest.test_case "prop: brotli round-trip"           `Quick test_brotli_roundtrip_property;
+        Alcotest.test_case "prop: gzip shrinks repetitive"    `Quick test_gzip_compression_shrinks_repetitive;
+        Alcotest.test_case "prop: accept_encoding trims"      `Quick test_accept_encoding_trims_spaces;
       ]);
       ("uuid stdlib", [
         Alcotest.test_case "parse"                  `Quick test_uuid_parse_ok;

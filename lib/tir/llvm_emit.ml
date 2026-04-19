@@ -854,6 +854,15 @@ let mangle_extern : string -> string = function
   | "base64_encode" | "stdlib_base64_encode" -> "march_base64_encode"
   | "base64_decode" | "stdlib_base64_decode" -> "march_base64_decode"
   | "random_bytes"  | "stdlib_random_bytes"  -> "march_random_bytes"
+  (* Compression builtins *)
+  | "stdlib_gzip_encode"    -> "march_gzip_encode"
+  | "stdlib_gzip_decode"    -> "march_gzip_decode"
+  | "stdlib_deflate_encode" -> "march_deflate_encode"
+  | "stdlib_deflate_decode" -> "march_deflate_decode"
+  | "stdlib_zstd_encode"    -> "march_zstd_encode"
+  | "stdlib_zstd_decode"    -> "march_zstd_decode"
+  | "stdlib_brotli_encode"  -> "march_brotli_encode"
+  | "stdlib_brotli_decode"  -> "march_brotli_decode"
   (* System introspection builtins *)
   | "sys_uptime_ms"    -> "march_sys_uptime_ms"
   | "sys_heap_bytes"   -> "march_sys_heap_bytes"
@@ -3331,6 +3340,15 @@ declare ptr  @march_pbkdf2_sha256(ptr %pass, ptr %salt, i64 %iters, i64 %len)
 declare ptr  @march_base64_encode(ptr %b)
 declare ptr  @march_base64_decode(ptr %s)
 declare ptr  @march_random_bytes(i64 %n)
+; Compression builtins (runtime/march_compress.c)
+declare ptr  @march_gzip_encode(ptr %b, i64 %level)
+declare ptr  @march_gzip_decode(ptr %b)
+declare ptr  @march_deflate_encode(ptr %b)
+declare ptr  @march_deflate_decode(ptr %b)
+declare ptr  @march_zstd_encode(ptr %b, i64 %level)
+declare ptr  @march_zstd_decode(ptr %b)
+declare ptr  @march_brotli_encode(ptr %b, i64 %mode, i64 %quality)
+declare ptr  @march_brotli_decode(ptr %b)
 ; System introspection builtins
 declare i64  @march_sys_uptime_ms()
 declare i64  @march_sys_heap_bytes()

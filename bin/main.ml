@@ -264,8 +264,9 @@ let ensure_runtime_so () =
   in
   if needs_compile then begin
     (* Note: -lpthread not needed on macOS (pthreads are in libSystem). *)
-    let http_c = Filename.concat runtime_dir "march_http.c" in
-    let extras_c = Filename.concat runtime_dir "march_extras.c" in
+    let http_c     = Filename.concat runtime_dir "march_http.c" in
+    let extras_c   = Filename.concat runtime_dir "march_extras.c" in
+    let compress_c = Filename.concat runtime_dir "march_compress.c" in
     let opt_file f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
     let extra_files =
       if Sys.file_exists http_c then
@@ -277,10 +278,11 @@ let ensure_runtime_so () =
         let io_c      = Filename.concat runtime_dir "march_http_io.c" in
         let evloop_c  = Filename.concat runtime_dir "march_http_evloop.c" in
         let tls_c     = Filename.concat runtime_dir "march_tls.c" in
-        Printf.sprintf " %s %s %s%s%s%s%s%s%s%s" http_c sha1_c base64_c
+        Printf.sprintf " %s %s %s%s%s%s%s%s%s%s%s" http_c sha1_c base64_c
           (opt_file simd_c) (opt_file sched_c) (opt_file resp_c)
           (opt_file io_c) (opt_file evloop_c) (opt_file tls_c) (opt_file extras_c)
-      else (opt_file extras_c)
+          (opt_file compress_c)
+      else Printf.sprintf "%s%s" (opt_file extras_c) (opt_file compress_c)
     in
     (* OpenSSL flags: needed when march_tls.c is included. *)
     let tls_c = Filename.concat runtime_dir "march_tls.c" in
@@ -314,13 +316,34 @@ let ensure_runtime_so () =
       let evloop_c = Filename.concat runtime_dir "march_http_evloop.c" in
       if Sys.file_exists evloop_c then " -DMARCH_HTTP_USE_EVLOOP" else ""
     in
+    (* Compression flags: always link -lz (system zlib), optionally zstd/brotli *)
+    let compress_flags =
+      if not (Sys.file_exists compress_c) then ""
+      else begin
+        let zstd_flags =
+          if Sys.file_exists "/opt/homebrew/include/zstd.h" then
+            " -DMARCH_HAVE_ZSTD -I/opt/homebrew/include -L/opt/homebrew/lib -lzstd"
+          else if Sys.file_exists "/usr/include/zstd.h" then
+            " -DMARCH_HAVE_ZSTD -lzstd"
+          else ""
+        in
+        let brotli_flags =
+          if Sys.file_exists "/opt/homebrew/include/brotli/encode.h" then
+            " -DMARCH_HAVE_BROTLI -I/opt/homebrew/include -L/opt/homebrew/lib -lbrotlienc -lbrotlidec"
+          else if Sys.file_exists "/usr/include/brotli/encode.h" then
+            " -DMARCH_HAVE_BROTLI -lbrotlienc -lbrotlidec"
+          else ""
+        in
+        Printf.sprintf " -lz%s%s" zstd_flags brotli_flags
+      end
+    in
     let so_dbg_flag = if Sys.getenv_opt "MARCH_DEBUG_RUNTIME" <> None then " -g" else "" in
     let so_san_flag =
       if Sys.getenv_opt "MARCH_SANITIZE" <> None then " -fsanitize=address,undefined" else ""
     in
     let cmd = Printf.sprintf
-      "clang -shared -O2 -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s -o %s 2>&1"
-      evloop_flag so_dbg_flag so_san_flag runtime_dir runtime_c extra_files openssl_flags so_path in
+      "clang -shared -O2 -fPIC -msse4.2 -Wno-unused-command-line-argument%s%s%s -I%s %s%s%s%s -o %s 2>&1"
+      evloop_flag so_dbg_flag so_san_flag runtime_dir runtime_c extra_files openssl_flags compress_flags so_path in
     let rc = Sys.command cmd in
     if rc <> 0 then
       failwith (Printf.sprintf "march: failed to compile runtime .so (clang exit %d)" rc)
@@ -1279,8 +1302,9 @@ let compile filename =
             in
             let opt_flag = Printf.sprintf " -O%d" effective_opt in
             let runtime_dir = Filename.dirname runtime in
-            let http_c = Filename.concat runtime_dir "march_http.c" in
-            let extras_c2 = Filename.concat runtime_dir "march_extras.c" in
+            let http_c      = Filename.concat runtime_dir "march_http.c" in
+            let extras_c2   = Filename.concat runtime_dir "march_extras.c" in
+            let compress_c2 = Filename.concat runtime_dir "march_compress.c" in
             let opt_file2 f = if Sys.file_exists f then Printf.sprintf " %s" f else "" in
             let extra_c_files =
               if Sys.file_exists http_c then
@@ -1292,11 +1316,11 @@ let compile filename =
                 let io_c      = Filename.concat runtime_dir "march_http_io.c" in
                 let evloop_c  = Filename.concat runtime_dir "march_http_evloop.c" in
                 let tls_c2    = Filename.concat runtime_dir "march_tls.c" in
-                Printf.sprintf " %s %s %s%s%s%s%s%s%s%s" http_c sha1_c base64_c
+                Printf.sprintf " %s %s %s%s%s%s%s%s%s%s%s" http_c sha1_c base64_c
                   (opt_file2 simd_c) (opt_file2 sched_c) (opt_file2 resp_c)
                   (opt_file2 io_c) (opt_file2 evloop_c)
-                  (opt_file2 tls_c2) (opt_file2 extras_c2)
-              else (opt_file2 extras_c2)
+                  (opt_file2 tls_c2) (opt_file2 extras_c2) (opt_file2 compress_c2)
+              else Printf.sprintf "%s%s" (opt_file2 extras_c2) (opt_file2 compress_c2)
             in
             (* OpenSSL flags for TLS *)
             let tls_c2 = Filename.concat runtime_dir "march_tls.c" in
@@ -1327,6 +1351,26 @@ let compile filename =
               let evloop_c = Filename.concat runtime_dir "march_http_evloop.c" in
               if Sys.file_exists evloop_c then " -DMARCH_HTTP_USE_EVLOOP" else ""
             in
+            let compress_flags2 =
+              if not (Sys.file_exists compress_c2) then ""
+              else begin
+                let zstd_flags =
+                  if Sys.file_exists "/opt/homebrew/include/zstd.h" then
+                    " -DMARCH_HAVE_ZSTD -I/opt/homebrew/include -L/opt/homebrew/lib -lzstd"
+                  else if Sys.file_exists "/usr/include/zstd.h" then
+                    " -DMARCH_HAVE_ZSTD -lzstd"
+                  else ""
+                in
+                let brotli_flags =
+                  if Sys.file_exists "/opt/homebrew/include/brotli/encode.h" then
+                    " -DMARCH_HAVE_BROTLI -I/opt/homebrew/include -L/opt/homebrew/lib -lbrotlienc -lbrotlidec"
+                  else if Sys.file_exists "/usr/include/brotli/encode.h" then
+                    " -DMARCH_HAVE_BROTLI -lbrotlienc -lbrotlidec"
+                  else ""
+                in
+                Printf.sprintf " -lz%s%s" zstd_flags brotli_flags
+              end
+            in
             let math_flag = if Sys.unix then " -lm" else "" in
             let dbg_flag = if !debug_mode || !debug_tui_mode then " -g" else "" in
             let san_flag =
@@ -1334,8 +1378,8 @@ let compile filename =
               else ""
             in
             let cmd = Printf.sprintf
-              "clang%s%s%s -msse4.2 -Wno-unused-command-line-argument%s %s%s%s %s -o %s%s"
-              opt_flag dbg_flag san_flag evloop_flag runtime extra_c_files openssl_flags2 ll_file out_bin math_flag in
+              "clang%s%s%s -msse4.2 -Wno-unused-command-line-argument%s %s%s%s%s %s -o %s%s"
+              opt_flag dbg_flag san_flag evloop_flag runtime extra_c_files openssl_flags2 compress_flags2 ll_file out_bin math_flag in
             let rc = Sys.command cmd in
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
