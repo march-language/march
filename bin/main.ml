@@ -1420,12 +1420,48 @@ let compile filename =
       Printf.eprintf "[debug] Trace recording enabled (buffer: %d frames)\n%!"
         ctx.March_eval.Eval.dc_trace.March_eval.Eval.rb_cap
     end);
+    let print_march_backtrace () =
+      let all = March_eval.Eval.get_march_stack () in
+      let show_full = Sys.getenv_opt "MARCH_BACKTRACE" = Some "full" in
+      let frames =
+        if show_full then all
+        else List.filter (fun f ->
+          let path = f.March_eval.Eval.mf_file in
+          not (String.starts_with ~prefix:"stdlib/" path
+               || (let n = String.length path and p = String.length "/stdlib/" in
+                   let rec check i = i + p <= n &&
+                     (String.sub path i p = "/stdlib/" || check (i + 1))
+                   in check 0))) all
+      in
+      if frames <> [] then begin
+        Printf.eprintf "\nStack trace (most recent call first):\n";
+        List.iteri (fun i f ->
+          Printf.eprintf "  [%d] %-24s %s:%d\n"
+            i f.March_eval.Eval.mf_name
+            f.March_eval.Eval.mf_file
+            f.March_eval.Eval.mf_line
+        ) frames;
+        if not show_full then
+          Printf.eprintf "\nnote: set MARCH_BACKTRACE=full for all frames including stdlib\n"
+      end
+    in
+    March_eval.Eval.clear_march_stack ();
     (try March_eval.Eval.run_module desugared
      with
      | March_eval.Eval.Eval_error msg ->
-       Printf.eprintf "%s: runtime error: %s\n" filename msg; exit 1
+       (* panic_/todo_/unreachable_ builtins already prefix their messages with
+          "panic: " / "todo: " / "unreachable: " — print as-is. *)
+       Printf.eprintf "%s\n" msg;
+       print_march_backtrace ();
+       exit 1
      | March_eval.Eval.Match_failure msg ->
-       Printf.eprintf "%s: match failure: %s\n" filename msg; exit 1
+       Printf.eprintf "panic: match failure — %s\n" msg;
+       print_march_backtrace ();
+       exit 1
+     | March_eval.Eval.Assert_failure msg ->
+       Printf.eprintf "panic: %s\n" msg;
+       print_march_backtrace ();
+       exit 1
      | Unix.Unix_error (Unix.EINTR, syscall, _) ->
        (* SIGINT interrupted a blocking syscall (accept/select/recv) —
           print nothing if shutdown was requested, otherwise show the call *)

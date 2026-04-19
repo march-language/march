@@ -512,6 +512,50 @@ int64_t march_int_pow(int64_t base, int64_t exp) {
     return result;
 }
 
+/* ── March call stack (for backtraces) ───────────────────────────────────── */
+
+/* Thread-local pointer to the top of the current thread's March call stack.
+ * NULL when the stack is empty (program entry or after full unwind). */
+static _Thread_local march_frame_t *march_call_stack_top = NULL;
+
+/* Called at every March function entry (before the body executes).
+ * frame must be a pointer to a stack-allocated march_frame_t in the caller. */
+void march_frame_push(march_frame_t *frame) {
+    frame->prev = march_call_stack_top;
+    march_call_stack_top = frame;
+}
+
+/* Called at every March function exit (before ret). */
+void march_frame_pop(void) {
+    if (march_call_stack_top)
+        march_call_stack_top = march_call_stack_top->prev;
+}
+
+/* Reset the call stack (used in test mode between test runs). */
+void march_frame_reset(void) {
+    march_call_stack_top = NULL;
+}
+
+/* Print the current call stack to stderr.
+ * Stdlib frames (file starting with "stdlib/") are hidden unless
+ * MARCH_BACKTRACE=full is set. */
+static void march_print_backtrace(void) {
+    const char *env = getenv("MARCH_BACKTRACE");
+    int show_full = env && strcmp(env, "full") == 0;
+    march_frame_t *f = march_call_stack_top;
+    if (!f) return;
+    fprintf(stderr, "\nStack trace (most recent call first):\n");
+    int i = 0;
+    while (f) {
+        int is_stdlib = strncmp(f->file, "stdlib/", 7) == 0;
+        if (show_full || !is_stdlib)
+            fprintf(stderr, "  [%d] %-24s %s:%d\n", i++, f->fn_name, f->file, f->line);
+        f = f->prev;
+    }
+    if (!show_full)
+        fprintf(stderr, "\nnote: set MARCH_BACKTRACE=full for all frames including stdlib\n");
+}
+
 /* ── Panic ───────────────────────────────────────────────────────────────── */
 
 /* Forward declaration so march_panic_ext / march_todo_ext can call march_panic
@@ -537,6 +581,8 @@ void march_panic(void *s) {
     /* In test mode, capture the message and longjmp back to the test runner
        instead of terminating the process. */
     if (march_test_in_test) {
+        /* Reset the call stack so it doesn't bleed into the next test. */
+        march_frame_reset();
         int len = (int)ms->len < (int)sizeof(march_test_fail_buf) - 1
                   ? (int)ms->len : (int)sizeof(march_test_fail_buf) - 1;
         memcpy(march_test_fail_buf, ms->data, (size_t)len);
@@ -546,6 +592,7 @@ void march_panic(void *s) {
     fprintf(stderr, "panic: ");
     fwrite(ms->data, 1, (size_t)ms->len, stderr);
     fputc('\n', stderr);
+    march_print_backtrace();
     fflush(stderr);
     exit(1);
 }
