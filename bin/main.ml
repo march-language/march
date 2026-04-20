@@ -988,6 +988,70 @@ let compile filename =
       Printf.eprintf "formatted %s\n%!" filename
     end
   end;
+  (* Early source-hash CAS: read all input bytes, compute hash, and exit
+     before parsing if sources are unchanged since the last successful run.
+     This fires for both --check (exit 0) and --compile (copy + exit 0).
+     Moving it before the parse+resolve pipeline saves ~0.25s on cache hits. *)
+  let early_cas =
+    if not !do_compile && not !do_check then None
+    else begin
+      let buf = Buffer.create (256 * 1024) in
+      Buffer.add_string buf src;
+      (match stdlib_source_hash () with
+       | Some (_, h, _) -> Buffer.add_string buf h
+       | None -> ());
+      let lib_path = try Sys.getenv "MARCH_LIB_PATH" with Not_found -> "" in
+      if lib_path <> "" then
+        List.iter (fun dir ->
+          let files = List.sort String.compare (collect_lib_files dir) in
+          List.iter (fun fp ->
+            Buffer.add_string buf fp;
+            (try
+              let ic = open_in_bin fp in
+              let n  = in_channel_length ic in
+              let b  = Bytes.create n in
+              really_input ic b 0 n;
+              close_in ic;
+              Buffer.add_bytes buf b
+            with Sys_error _ -> ())
+          ) files
+        ) (String.split_on_char ':' lib_path);
+      let src_hash = "src:" ^ Digest.to_hex (Digest.string (Buffer.contents buf)) in
+      let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
+      if !do_check then begin
+        let ch = March_cas.Cas.compilation_hash src_hash ~target:"check" ~flags:[] in
+        (match March_cas.Cas.lookup_artifact store ch with
+         | Some _ -> exit 0
+         | None -> ());
+        Some (store, ch)
+      end else begin (* !do_compile *)
+        let target_parsed = parse_target !target_str in
+        let target_label  = match target_parsed with
+          | March_tir.Llvm_emit.Native          -> "native"
+          | March_tir.Llvm_emit.Wasm64Wasi      -> "wasm64-wasi"
+          | March_tir.Llvm_emit.Wasm32Wasi      -> "wasm32-wasi"
+          | March_tir.Llvm_emit.Wasm32Unknown   -> "wasm32-unknown-unknown"
+        in
+        let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
+        let cas_flags = [if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt"] in
+        let ch = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
+        let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
+        let basename = Filename.remove_extension filename in
+        let out_bin  =
+          if !output_file <> "" then !output_file
+          else if is_wasm then basename ^ ".wasm"
+          else basename
+        in
+        (match March_cas.Cas.lookup_artifact store ch with
+         | Some cached_bin ->
+           let _ = Sys.command (Printf.sprintf "cp %s %s" cached_bin out_bin) in
+           Printf.eprintf "compiled %s (cached)\n" out_bin;
+           exit 0
+         | None -> ());
+        Some (store, ch)
+      end
+    end
+  in
   let lexbuf = Lexing.from_string src in
   lexbuf.Lexing.lex_curr_p <-
     { lexbuf.Lexing.lex_curr_p with Lexing.pos_fname = filename };
@@ -1068,72 +1132,10 @@ let compile filename =
     { desugared with
       March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
   in
-  (* Source-content CAS: skip the entire pipeline when source hasn't changed.
-     Keys on content of entry file + all MARCH_LIB_PATH files + stdlib hash.
-     --compile: on hit, copy cached binary and exit (saves typecheck + TIR + clang).
-     --check:   on hit, exit 0 immediately (saves the full typecheck pass). *)
-  let source_cas_state =
-    if not !do_compile && not !do_check then None
-    else begin
-      let buf = Buffer.create (256 * 1024) in
-      Buffer.add_string buf src;
-      (match stdlib_source_hash () with
-       | Some (_, h, _) -> Buffer.add_string buf h
-       | None -> ());
-      let lib_path = try Sys.getenv "MARCH_LIB_PATH" with Not_found -> "" in
-      if lib_path <> "" then
-        List.iter (fun dir ->
-          let files = List.sort String.compare (collect_lib_files dir) in
-          List.iter (fun fp ->
-            Buffer.add_string buf fp;
-            (try
-              let ic = open_in_bin fp in
-              let n  = in_channel_length ic in
-              let b  = Bytes.create n in
-              really_input ic b 0 n;
-              close_in ic;
-              Buffer.add_bytes buf b
-            with Sys_error _ -> ())
-          ) files
-        ) (String.split_on_char ':' lib_path);
-      let src_hash = "src:" ^ Digest.to_hex (Digest.string (Buffer.contents buf)) in
-      let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
-      if !do_check then begin
-        (* --check CAS: keyed separately from compile so a check hit cannot mask
-           a stale binary, and vice versa. *)
-        let ch = March_cas.Cas.compilation_hash src_hash ~target:"check" ~flags:[] in
-        (match March_cas.Cas.lookup_artifact store ch with
-         | Some _ -> exit 0   (* sources unchanged; previous check was clean *)
-         | None -> ());
-        Some (store, ch)
-      end else begin
-        let target_parsed = parse_target !target_str in
-        let target_label  = match target_parsed with
-          | March_tir.Llvm_emit.Native          -> "native"
-          | March_tir.Llvm_emit.Wasm64Wasi      -> "wasm64-wasi"
-          | March_tir.Llvm_emit.Wasm32Wasi      -> "wasm32-wasi"
-          | March_tir.Llvm_emit.Wasm32Unknown   -> "wasm32-unknown-unknown"
-        in
-        let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
-        let cas_flags = [if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt"] in
-        let ch    = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
-        let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
-        let basename = Filename.remove_extension filename in
-        let out_bin  =
-          if !output_file <> "" then !output_file
-          else if is_wasm then basename ^ ".wasm"
-          else basename
-        in
-        (match March_cas.Cas.lookup_artifact store ch with
-         | Some cached_bin ->
-           let _ = Sys.command (Printf.sprintf "cp %s %s" cached_bin out_bin) in
-           Printf.eprintf "compiled %s (cached)\n" out_bin;
-           exit 0
-         | None -> ());
-        Some (store, ch)
-      end
-    end
-  in
+  (* source_cas_state = early_cas — the CAS lookup already ran before parse.
+     On a cache hit we already exited; if we reach this point it's a miss.
+     We still pass the (store, ch) pair forward so the post-clang store fires. *)
+  let source_cas_state = early_cas in
   (* Per-stage timing: stamp records wall time since process start.
      Enabled by --timings; output goes to stderr so it doesn't mix with
      the compiled binary's stdout. *)
