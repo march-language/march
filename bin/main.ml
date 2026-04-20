@@ -1070,10 +1070,10 @@ let compile filename =
   in
   (* Source-content CAS: skip the entire pipeline when source hasn't changed.
      Keys on content of entry file + all MARCH_LIB_PATH files + stdlib hash.
-     On a cache hit we copy the cached binary and exit — saving typecheck,
-     all TIR stages, LLVM emit, and clang. *)
+     --compile: on hit, copy cached binary and exit (saves typecheck + TIR + clang).
+     --check:   on hit, exit 0 immediately (saves the full typecheck pass). *)
   let source_cas_state =
-    if not !do_compile then None
+    if not !do_compile && not !do_check then None
     else begin
       let buf = Buffer.create (256 * 1024) in
       Buffer.add_string buf src;
@@ -1097,31 +1097,41 @@ let compile filename =
           ) files
         ) (String.split_on_char ':' lib_path);
       let src_hash = "src:" ^ Digest.to_hex (Digest.string (Buffer.contents buf)) in
-      let target_parsed = parse_target !target_str in
-      let target_label  = match target_parsed with
-        | March_tir.Llvm_emit.Native          -> "native"
-        | March_tir.Llvm_emit.Wasm64Wasi      -> "wasm64-wasi"
-        | March_tir.Llvm_emit.Wasm32Wasi      -> "wasm32-wasi"
-        | March_tir.Llvm_emit.Wasm32Unknown   -> "wasm32-unknown-unknown"
-      in
-      let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
-      let cas_flags = [if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt"] in
       let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
-      let ch    = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
-      let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
-      let basename = Filename.remove_extension filename in
-      let out_bin  =
-        if !output_file <> "" then !output_file
-        else if is_wasm then basename ^ ".wasm"
-        else basename
-      in
-      (match March_cas.Cas.lookup_artifact store ch with
-       | Some cached_bin ->
-         let _ = Sys.command (Printf.sprintf "cp %s %s" cached_bin out_bin) in
-         Printf.eprintf "compiled %s (cached)\n" out_bin;
-         exit 0
-       | None -> ());
-      Some (store, ch)
+      if !do_check then begin
+        (* --check CAS: keyed separately from compile so a check hit cannot mask
+           a stale binary, and vice versa. *)
+        let ch = March_cas.Cas.compilation_hash src_hash ~target:"check" ~flags:[] in
+        (match March_cas.Cas.lookup_artifact store ch with
+         | Some _ -> exit 0   (* sources unchanged; previous check was clean *)
+         | None -> ());
+        Some (store, ch)
+      end else begin
+        let target_parsed = parse_target !target_str in
+        let target_label  = match target_parsed with
+          | March_tir.Llvm_emit.Native          -> "native"
+          | March_tir.Llvm_emit.Wasm64Wasi      -> "wasm64-wasi"
+          | March_tir.Llvm_emit.Wasm32Wasi      -> "wasm32-wasi"
+          | March_tir.Llvm_emit.Wasm32Unknown   -> "wasm32-unknown-unknown"
+        in
+        let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
+        let cas_flags = [if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt"] in
+        let ch    = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
+        let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
+        let basename = Filename.remove_extension filename in
+        let out_bin  =
+          if !output_file <> "" then !output_file
+          else if is_wasm then basename ^ ".wasm"
+          else basename
+        in
+        (match March_cas.Cas.lookup_artifact store ch with
+         | Some cached_bin ->
+           let _ = Sys.command (Printf.sprintf "cp %s %s" cached_bin out_bin) in
+           Printf.eprintf "compiled %s (cached)\n" out_bin;
+           exit 0
+         | None -> ());
+        Some (store, ch)
+      end
     end
   in
   (* Per-stage timing: stamp records wall time since process start.
@@ -1162,7 +1172,15 @@ let compile filename =
      exit 0 so tooling (forge build / forge check) can treat a clean typecheck
      as a pass.  Warnings do not fail the exit code — consistent with eval and
      compile modes. *)
-  else if !do_check then exit 0
+  else if !do_check then begin
+    (* Cache successful check result so the next identical-source invocation
+       exits immediately without re-running the typecheck pipeline. *)
+    (match source_cas_state with
+     | Some (src_store, src_ch) ->
+       March_cas.Cas.store_artifact src_store src_ch filename
+     | None -> ());
+    exit 0
+  end
   else if compile_mode then begin
     (* -dump-phases: collect per-stage JSON graphs *)
     let phases = ref [] in
