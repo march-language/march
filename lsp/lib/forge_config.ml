@@ -283,3 +283,21 @@ let dep_lib_paths root =
         if Hashtbl.mem seen d then false
         else (Hashtbl.add seen d (); true)
       ) (inline_paths @ section_paths)
+
+(** All lib paths for a project root: dependency paths PLUS the project's own
+    [lib/], [.forge/generated/], and [config/] — mirroring [lib_path_env] in
+    [forge/lib/cmd_build.ml]. *)
+let project_lib_paths root =
+  let dep_paths = dep_lib_paths root in
+  let lib_dir   = Filename.concat root "lib" in
+  let gen_dir   = Filename.concat root ".forge/generated" in
+  let cfg_dir   = Filename.concat root "config" in
+  let extras =
+    List.filter_map (fun d -> if Sys.file_exists d then Some d else None)
+      [lib_dir; gen_dir; cfg_dir]
+  in
+  let seen = Hashtbl.create 8 in
+  List.filter (fun d ->
+      if Hashtbl.mem seen d then false
+      else (Hashtbl.add seen d (); true)
+    ) (dep_paths @ extras)

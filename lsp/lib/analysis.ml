@@ -1223,7 +1223,7 @@ let analyse ~filename ~src : t =
       in
       match Forge_config.find_forge_root start_dir with
       | None      -> []
-      | Some root -> Forge_config.dep_lib_paths root
+      | Some root -> Forge_config.project_lib_paths root
     in
     let (_resolve_errors, extra_decls) =
       March_resolver.Resolver.resolve_imports
