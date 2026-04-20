@@ -358,6 +358,7 @@ let ensure_runtime_so () =
 
 let dump_tir       = ref false
 let dump_phases    = ref false
+let do_timings     = ref false
 let emit_llvm      = ref false
 let do_compile     = ref false
 let do_check       = ref false   (* --check: typecheck only, no codegen or eval *)
@@ -483,6 +484,21 @@ let parse_march_file path src =
     qualified cross-module calls (e.g. MyApp.Router.dispatch) work without
     explicit [use] declarations — required for multi-file projects.
     Returns (errors, extra_dmods_to_prepend). *)
+
+(** Recursively collect all .march files under [dir]. *)
+let collect_lib_files dir =
+  let rec walk acc d =
+    if not (Sys.file_exists d && Sys.is_directory d) then acc
+    else
+      Array.fold_left (fun acc name ->
+          let p = Filename.concat d name in
+          if Sys.is_directory p then walk acc p
+          else if Filename.check_suffix p ".march" then p :: acc
+          else acc)
+        acc (Sys.readdir d)
+  in
+  walk [] dir
+
 let resolve_imports ~source_file (m : March_ast.Ast.module_) =
   let source_dir = Filename.dirname source_file in
   let extra_lib_paths =
@@ -605,19 +621,6 @@ let resolve_imports ~source_file (m : March_ast.Ast.module_) =
      Two-phase: parse all files first to learn their module names, then sort
      by module-name depth (more dot-segments = deeper namespace = fewer
      dependents = load first) so dependencies are in env before their users. *)
-  let collect_lib_files dir =
-    let rec walk acc d =
-      if not (Sys.file_exists d && Sys.is_directory d) then acc
-      else
-        Array.fold_left (fun acc name ->
-            let p = Filename.concat d name in
-            if Sys.is_directory p then walk acc p
-            else if Filename.check_suffix p ".march" then p :: acc
-            else acc)
-          acc (Sys.readdir d)
-    in
-    walk [] dir
-  in
   let dot_count s =
     String.fold_left (fun n c -> if c = '.' then n + 1 else n) 0 s
   in
@@ -1065,12 +1068,77 @@ let compile filename =
     { desugared with
       March_ast.Ast.mod_decls = stdlib_decls @ desugared.March_ast.Ast.mod_decls }
   in
+  (* Source-content CAS: skip the entire pipeline when source hasn't changed.
+     Keys on content of entry file + all MARCH_LIB_PATH files + stdlib hash.
+     On a cache hit we copy the cached binary and exit — saving typecheck,
+     all TIR stages, LLVM emit, and clang. *)
+  let source_cas_state =
+    if not !do_compile then None
+    else begin
+      let buf = Buffer.create (256 * 1024) in
+      Buffer.add_string buf src;
+      (match stdlib_source_hash () with
+       | Some (_, h, _) -> Buffer.add_string buf h
+       | None -> ());
+      let lib_path = try Sys.getenv "MARCH_LIB_PATH" with Not_found -> "" in
+      if lib_path <> "" then
+        List.iter (fun dir ->
+          let files = List.sort String.compare (collect_lib_files dir) in
+          List.iter (fun fp ->
+            Buffer.add_string buf fp;
+            (try
+              let ic = open_in_bin fp in
+              let n  = in_channel_length ic in
+              let b  = Bytes.create n in
+              really_input ic b 0 n;
+              close_in ic;
+              Buffer.add_bytes buf b
+            with Sys_error _ -> ())
+          ) files
+        ) (String.split_on_char ':' lib_path);
+      let src_hash = "src:" ^ Digest.to_hex (Digest.string (Buffer.contents buf)) in
+      let target_parsed = parse_target !target_str in
+      let target_label  = match target_parsed with
+        | March_tir.Llvm_emit.Native          -> "native"
+        | March_tir.Llvm_emit.Wasm64Wasi      -> "wasm64-wasi"
+        | March_tir.Llvm_emit.Wasm32Wasi      -> "wasm32-wasi"
+        | March_tir.Llvm_emit.Wasm32Unknown   -> "wasm32-unknown-unknown"
+      in
+      let effective_opt = if !opt_level >= 0 && !opt_level <= 3 then !opt_level else 2 in
+      let cas_flags = [if !opt_enabled then Printf.sprintf "O%d" effective_opt else "no-opt"] in
+      let store = March_cas.Cas.create ~project_root:(Sys.getcwd ()) in
+      let ch    = March_cas.Cas.compilation_hash src_hash ~target:target_label ~flags:cas_flags in
+      let is_wasm  = March_tir.Llvm_emit.is_wasm_target target_parsed in
+      let basename = Filename.remove_extension filename in
+      let out_bin  =
+        if !output_file <> "" then !output_file
+        else if is_wasm then basename ^ ".wasm"
+        else basename
+      in
+      (match March_cas.Cas.lookup_artifact store ch with
+       | Some cached_bin ->
+         let _ = Sys.command (Printf.sprintf "cp %s %s" cached_bin out_bin) in
+         Printf.eprintf "compiled %s (cached)\n" out_bin;
+         exit 0
+       | None -> ());
+      Some (store, ch)
+    end
+  in
+  (* Per-stage timing: stamp records wall time since process start.
+     Enabled by --timings; output goes to stderr so it doesn't mix with
+     the compiled binary's stdout. *)
+  let t_compile_start = Unix.gettimeofday () in
+  let stamp label =
+    if !do_timings then
+      Printf.eprintf "[timings] %6.3fs  %s\n%!" (Unix.gettimeofday () -. t_compile_start) label
+  in
   (* Typecheck + capability enforcement (applies to both eval and compile paths).
      Capability enforcement is embedded in check_module via check_module_needs:
        - transitive needs propagation across module imports
        - extern block capability gating
      See also: March_effects.Effects.check_capabilities *)
   let (errors, type_map) = March_typecheck.Typecheck.check_module desugared in
+  stamp "typecheck";
   (* Print diagnostics sorted by position, filtering stdlib-internal errors *)
   let diags = March_errors.Errors.sorted errors in
   let is_user_file (d : March_errors.Errors.diagnostic) =
@@ -1107,6 +1175,7 @@ let compile filename =
        phases := March_dump.Dump.ast_phase user_ast "parse" :: !phases);
     let tir = March_tir.Lower.lower_module ~type_map ~test_mode:!do_test desugared in
     snap_tir "tir-lower" tir;
+    stamp "lower";
     (* Capture the interface-dispatch table before it is cleared by lower_module.
        Passed to monomorphize so it can resolve interface calls in functions
        that were polymorphic during lowering but now have concrete types. *)
@@ -1131,6 +1200,7 @@ let compile filename =
     in
     let tir = March_tir.Mono.monomorphize ~iface_methods tir in
     snap_tir "tir-mono" tir;
+    stamp "mono";
     (* After mono, update tm_exports to use monomorphized names *)
     let tir =
       if tir.March_tir.Tir.tm_exports <> [] then begin
@@ -1155,8 +1225,10 @@ let compile filename =
     in
     let tir = if !opt_enabled then March_tir.Fusion.run ~changed:(ref false) tir else tir in
     snap_tir "tir-fusion" tir;
+    stamp "fusion";
     let tir = March_tir.Defun.defunctionalize tir in
     snap_tir "tir-defun" tir;
+    stamp "defun";
     (* Known-call pass: run before Perceus so apply functions are still pure
        and eligible for inlining in the subsequent Opt fixed-point loop.
        Also included in the Opt coordinator for cases revealed after Perceus. *)
@@ -1166,8 +1238,10 @@ let compile filename =
     snap_tir "tir-known-call" tir;
     let tir = March_tir.Perceus.perceus tir in
     snap_tir "tir-perceus" tir;
+    stamp "perceus";
     let tir = March_tir.Escape.escape_analysis tir in
     snap_tir "tir-escape" tir;
+    stamp "escape";
     (* Run optimizer with per-pass snapshots (Phase 3 instrumentation).
        When dump_phases is on, each individual opt pass is captured separately
        (tir-opt-1-inline, tir-opt-1-cprop, …) so the viewer shows every step.
@@ -1183,6 +1257,7 @@ let compile filename =
     in
     (* When opt is disabled there are no per-pass snaps; still emit one overall. *)
     if not !opt_enabled then snap_tir "tir-opt" tir;
+    stamp "opt";
     (* Write all collected phases to march-phases/phases.json *)
     (if !dump_phases then
        March_dump.Dump.write_phases ~source_file:filename (List.rev !phases));
@@ -1224,6 +1299,7 @@ let compile filename =
         | None ->
           (* Cache miss: emit LLVM IR, call clang, then cache the binary *)
           let ir = March_tir.Llvm_emit.emit_module ~fast_math:!fast_math ~target tir in
+          stamp "llvm-emit";
           let oc = open_out ll_file in
           output_string oc ir;
           close_out oc;
@@ -1291,7 +1367,11 @@ let compile filename =
             if rc <> 0 then begin
               Printf.eprintf "march: WASM compilation failed (exit %d)\n  cmd: %s\n" rc cmd; exit 1
             end else begin
+              stamp "clang";
               March_cas.Cas.store_artifact store ch out_bin;
+              (match source_cas_state with
+               | Some (src_store, src_ch) -> March_cas.Cas.store_artifact src_store src_ch out_bin
+               | None -> ());
               Printf.eprintf "compiled %s (%s)\n" out_bin target_label
             end
           end else begin
@@ -1390,7 +1470,11 @@ let compile filename =
             if rc <> 0 then begin
               Printf.eprintf "march: clang failed (exit %d)\n" rc; exit 1
             end else begin
+              stamp "clang";
               March_cas.Cas.store_artifact store ch out_bin;
+              (match source_cas_state with
+               | Some (src_store, src_ch) -> March_cas.Cas.store_artifact src_store src_ch out_bin
+               | None -> ());
               Printf.eprintf "compiled %s\n" out_bin
             end
           end)
@@ -1758,6 +1842,7 @@ let () =
   let specs = [
     ("--dump-tir",     Arg.Set dump_tir,     " Print TIR instead of evaluating");
     ("--dump-phases",  Arg.Set dump_phases,  " Serialize each IR stage to march-phases/phases.json");
+    ("--timings",      Arg.Set do_timings,   " Print per-stage compilation times to stderr");
     ("--emit-llvm",  Arg.Set emit_llvm,   " Emit LLVM IR to <file>.ll");
     ("--compile",    Arg.Set do_compile,  " Compile to native binary via clang");
     ("--check",      Arg.Set do_check,    " Typecheck only — parse, resolve imports, typecheck, then exit (no codegen or eval)");
