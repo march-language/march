@@ -104,18 +104,19 @@ let find_island_modules lib_dir =
 (** Compile all discovered @island modules to WASM.
     Output goes to [islands_dir]/<Name>.wasm.
     Returns (compiled_count, total_count). *)
-let build_islands ~lib_path_env ~islands_dir lib_dir =
+let build_islands ~lib_path_env ~islands_dir ~release lib_dir =
   let islands = find_island_modules lib_dir in
   if islands = [] then (0, 0)
   else begin
     Project.mkdir_p islands_dir;
     let total   = List.length islands in
     let built   = ref 0 in
+    let opt_flag = if release then " --opt 2" else " --opt 0" in
     List.iter (fun (name, src) ->
       let out = Filename.concat islands_dir (name ^ ".wasm") in
       let cmd =
-        Printf.sprintf "%smarch --compile --target wasm32-unknown-unknown -o %s %s"
-          lib_path_env (Filename.quote out) (Filename.quote src)
+        Printf.sprintf "%smarch --compile --target wasm32-unknown-unknown%s -o %s %s"
+          lib_path_env opt_flag (Filename.quote out) (Filename.quote src)
       in
       Printf.printf "  [island] %s -> %s\n%!" name (Filename.basename out);
       let rc = Sys.command cmd in
@@ -173,7 +174,7 @@ let check_all ~lib_path_env files =
 
 (** Compile the entry file to a native binary at [output]. *)
 let compile_entry ~lib_path_env ~output ~release ~dump_phases entry =
-  let opt_flag  = if release then " --opt 2" else "" in
+  let opt_flag  = if release then " --opt 2" else " --opt 0" in
   let dump_flag = if dump_phases then " --dump-phases" else "" in
   let cmd =
     Printf.sprintf "%smarch --compile -o %s%s%s %s"
@@ -276,40 +277,36 @@ let build ~release ?(dump_phases=false) () =
       in
       let do_islands () =
         let islands_dir = Filename.concat proj.Project.root "islands" in
-        let (built, total) = build_islands ~lib_path_env ~islands_dir lib_dir in
+        let (built, total) = build_islands ~lib_path_env ~islands_dir ~release lib_dir in
         if total > 0 then
           Printf.printf "Islands: %d/%d compiled to %s\n%!" built total islands_dir
       in
       match proj.Project.project_type with
       | Project.Lib ->
-        (* Library project: typecheck every lib/ module, emit no binary. *)
-        let failed = check_all ~lib_path_env files in
-        if failed > 0 then
-          Error (Printf.sprintf "%d file(s) failed to typecheck" failed)
+        (* Library project: one march --check call is enough.  march
+           auto-discovers every .march file in MARCH_LIB_PATH (which already
+           includes lib/ and gen/), so a single invocation typechecks all N
+           modules in one pass instead of spawning N processes (O(N) vs O(N²)). *)
+        let ok = match files with
+          | [] -> true
+          | first :: _ -> check_file ~lib_path_env first
+        in
+        if not ok then
+          Error "typecheck failed"
         else begin
           do_islands ();
           Ok (Printf.sprintf "checked %d file(s) in %s" (List.length files) lib_dir)
         end
       | Project.App | Project.Tool ->
-        (* Application / tool: check every non-entry lib file first (so orphans
-           fail fast), then compile the entry.  An orphan that doesn't build
-           is still a bug, even if [main] never imports it. *)
-        let orphans = List.filter (fun f ->
-          (* Compare absolute paths to avoid ./ vs non-./ false-negatives. *)
-          let a = try Unix.realpath f with _ -> f in
-          let b = try Unix.realpath entry_path with _ -> entry_path in
-          a <> b
-        ) files in
-        let failed = check_all ~lib_path_env orphans in
-        if failed > 0 then
-          Error (Printf.sprintf "%d file(s) failed to typecheck" failed)
-        else begin
-          let output = Filename.concat build_dir proj.Project.name in
-          let rc = compile_entry ~lib_path_env ~output ~release ~dump_phases entry_path in
-          if rc = 0 then begin
-            do_islands ();
-            Ok output
-          end
-          else Error (Printf.sprintf "march compiler exited with code %d" rc)
+        (* march --compile auto-loads all MARCH_LIB_PATH files (including
+           "orphans" not imported by the entry) and typechecks them as part of
+           the same pass.  A separate per-orphan check_all would be O(N²) work
+           for no extra coverage — skip it and go straight to compilation. *)
+        let output = Filename.concat build_dir proj.Project.name in
+        let rc = compile_entry ~lib_path_env ~output ~release ~dump_phases entry_path in
+        if rc = 0 then begin
+          do_islands ();
+          Ok output
         end
+        else Error (Printf.sprintf "march compiler exited with code %d" rc)
     end
