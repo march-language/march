@@ -449,16 +449,16 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "string_join"                 -> Some Tir.TString
   | "kill"                        -> Some Tir.TUnit
   | "is_alive"                    -> Some Tir.TBool
-  | "send"                        -> Some (Tir.TCon ("Option", [Tir.TUnit]))
+  | "send" | "send_linear"        -> Some (Tir.TCon ("Option", [Tir.TUnit]))
   | "spawn"                        -> Some (Tir.TPtr Tir.TUnit)
   | "actor_get_int"               -> Some Tir.TInt
   | "actor_call"                  -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TVar "e"]))
   | "actor_reply"                 -> Some Tir.TUnit
   | "actor_cast"                  -> Some (Tir.TCon ("Option", [Tir.TUnit]))
   (* Char builtins *)
-  | "char_from_int"               -> Some Tir.TString
+  | "char_from_int" | "byte_to_char" -> Some Tir.TString
   | "char_to_int"                 -> Some Tir.TInt
-  | "char_is_digit"               -> Some Tir.TBool
+  | "char_is_digit" | "char_is_alphanumeric" | "char_is_whitespace" -> Some Tir.TBool
   (* Float/Int conversion builtins *)
   | "float_to_int"                -> Some Tir.TInt
   (* Float builtins *)
@@ -537,10 +537,22 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "process_kill_proc"           -> Some Tir.TUnit
   | "process_wait_proc"           -> Some Tir.TInt
   (* TCP/network builtins *)
+  | "tcp_listen" | "tcp_accept"  -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
   | "tcp_connect"                 -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
+  | "tcp_send_all"                -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
+  | "tcp_close"                   -> Some Tir.TUnit
   | "tcp_recv_exact"              -> Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]))
   | "tcp_recv_all" | "tcp_recv_chunk" | "tcp_recv_http_headers"
-  | "tcp_recv_chunked_frame" -> Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]))
+  | "tcp_recv_http" | "tcp_recv_chunked_frame"
+                                  -> Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]))
+  (* HTTP/WS builtins *)
+  | "http_parse_request"          -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]))
+  | "http_serialize_response"     -> Some Tir.TString
+  | "http_server_listen"          -> Some Tir.TInt
+  | "ws_handshake"                -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]))
+  | "ws_recv"                     -> Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]))
+  | "ws_send"                     -> Some (Tir.TCon ("Result", [Tir.TUnit; Tir.TString]))
+  | "ws_select"                   -> Some (Tir.TCon ("Result", [Tir.TVar "a"; Tir.TString]))
   (* TLS builtins *)
   | "tls_client_ctx" | "tls_server_ctx" | "tls_connect" | "tls_accept" -> Some (Tir.TCon ("Result", [Tir.TInt; Tir.TString]))
   | "tls_read" -> Some (Tir.TCon ("Result", [Tir.TString; Tir.TString]))
@@ -617,6 +629,12 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "random_bytes" | "stdlib_random_bytes" -> Some (Tir.TCon ("Bytes", []))
   | "base64_encode" | "stdlib_base64_encode" -> Some Tir.TString
   | "base64_decode" | "stdlib_base64_decode"
+                              -> Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]))
+  (* Compression builtins — all return Result(Bytes, String) *)
+  | "stdlib_gzip_encode"    | "stdlib_gzip_decode"
+  | "stdlib_deflate_encode" | "stdlib_deflate_decode"
+  | "stdlib_zstd_encode"    | "stdlib_zstd_decode"
+  | "stdlib_brotli_encode"  | "stdlib_brotli_decode"
                               -> Some (Tir.TCon ("Result", [Tir.TCon ("Bytes", []); Tir.TString]))
   (* System introspection builtins *)
   | "sys_uptime_ms" | "sys_heap_bytes" | "sys_word_size"
