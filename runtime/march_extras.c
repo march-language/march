@@ -1416,3 +1416,27 @@ void *march_codepoint_to_utf8(int64_t cp) {
     payload[0] = (int64_t)(intptr_t)s;
     return opt;
 }
+
+/* ── REPL JIT persistent variable slot table ──────────────────────────────
+ *
+ * Each REPL variable (let x = ..., fn f = ...) is assigned a slot index at
+ * declaration time.  All slots are unified int64_t: scalars (Int/Bool/Float)
+ * are stored as raw bits, heap pointers are stored as intptr_t casts.
+ *
+ * This replaces the old "emit_prev_global_bridges" mechanism that declared
+ * REPL globals as LLVM external symbols and relied on RTLD_GLOBAL resolution
+ * across .so fragment boundaries — a design that leaked OCaml tagged-integer
+ * representations whenever the interpreter was involved.  With slots, all
+ * values live in a single persistent C array visible to every JIT fragment
+ * without any cross-.so symbol resolution.
+ */
+#define MARCH_REPL_NSLOTS 4096
+static int64_t march_repl_slots[MARCH_REPL_NSLOTS];
+
+int64_t march_repl_get(int64_t slot) {
+    return march_repl_slots[(size_t)slot];
+}
+
+void march_repl_set(int64_t slot, int64_t val) {
+    march_repl_slots[(size_t)slot] = val;
+}

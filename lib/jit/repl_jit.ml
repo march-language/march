@@ -32,7 +32,13 @@ type t = {
   tmp_dir      : string;
   undef_flag   : string;  (* "-undefined dynamic_lookup" on macOS, "" elsewhere *)
   mutable counter : int;
-  mutable globals : (string * string) list;  (* (llvm_name, llvm_ty) *)
+  (* Persistent variable slots: (bare_name, slot_idx, tir_ty).
+     Each REPL variable is assigned a unique slot index; its value is stored in
+     the C-level march_repl_slots[] table and retrieved via @march_repl_get.
+     This replaces the old LLVM external-global bridge mechanism and eliminates
+     cross-.so tagged-integer leaks. *)
+  mutable var_slots : (string * int * March_tir.Tir.ty) list;
+  mutable next_slot : int;
   mutable handles : Jit.dl_handle list;      (* open dl handles *)
   compiled_fns : (string, unit) Hashtbl.t;  (* fns already compiled in prior fragments *)
   global_tir_tys : (string, March_tir.Tir.ty) Hashtbl.t;  (* bare_name -> TIR type, for display *)
@@ -47,10 +53,16 @@ let create ~runtime_so ?(clang="clang") () =
   let rt_handle = Jit.dlopen runtime_so in
   let undef_flag = if is_macos () then " -undefined dynamic_lookup" else "" in
   { runtime_so; clang; tmp_dir; undef_flag;
-    counter = 0; globals = []; handles = [rt_handle];
+    counter = 0; var_slots = []; next_slot = 0;
+    handles = [rt_handle];
     compiled_fns = Hashtbl.create 256;
     global_tir_tys = Hashtbl.create 16;
     stdlib_decls = [] }
+
+let alloc_slot ctx =
+  let n = ctx.next_slot in
+  ctx.next_slot <- n + 1;
+  n
 
 let next_id ctx =
   let n = ctx.counter in
@@ -128,27 +140,22 @@ let mark_compiled_fns ctx (fns : March_tir.Tir.fn_def list) =
     Hashtbl.replace ctx.compiled_fns f.fn_name ()
   ) fns
 
-(** Strip the "repl_N_" prefix from a global name to recover the bare variable
-    name as it appears in TIR.  The current format is "repl_<N>_<bare>" where
-    N is the fragment number; the old "repl_<bare>" format is also accepted as
-    a fallback so cached stdlib names are still handled correctly. *)
-let bare_of_global (gname : string) : string =
-  let len = String.length gname in
-  if len > 5 && String.sub gname 0 5 = "repl_" then begin
-    let i = ref 5 in
-    while !i < len && gname.[!i] >= '0' && gname.[!i] <= '9' do incr i done;
-    if !i < len && gname.[!i] = '_' then
-      String.sub gname (!i + 1) (len - !i - 1)
-    else
-      String.sub gname 5 (len - 5)   (* fallback: old "repl_<bare>" format *)
-  end else gname
+(** Build the [repl_slot_info list] passed to LLVM emit functions from
+    the current [ctx.var_slots] list. *)
+let prev_slots_of ctx : March_tir.Llvm_emit.repl_slot_info list =
+  List.map (fun (bare, slot, ty) ->
+    { March_tir.Llvm_emit.rs_bare = bare;
+      rs_slot = slot;
+      rs_ty   = ty })
+    ctx.var_slots
 
 (** Lower a single-expression module through the TIR pipeline.
     [repl_vars] are bare variable names of REPL globals that should be
     treated as borrowed by Perceus so they are never freed mid-session. *)
 let lower_module ~type_map ?(stdlib_context : March_ast.Ast.decl list = []) ?(repl_vars : string list = []) (m : March_ast.Ast.module_) =
   let tir = March_tir.Lower.lower_module ~type_map ~stdlib_context m in
-  let tir = March_tir.Mono.monomorphize tir in
+  let iface_methods = March_tir.Lower.get_iface_methods () in
+  let tir = March_tir.Mono.monomorphize ~iface_methods tir in
   let tir = March_tir.Defun.defunctionalize tir in
   let tir = March_tir.Perceus.perceus ~repl_vars tir in
   let tir = March_tir.Escape.escape_analysis tir in
@@ -245,38 +252,34 @@ and pp_field ?(depth=0) (ty : March_tir.Tir.ty) (ptr : nativeint) (i : int) : st
 
 let run_expr ctx ~tc_env m =
   let n = next_id ctx in
-  let repl_vars = List.map (fun (gname, _) -> bare_of_global gname) ctx.globals in
+  let repl_vars = List.map (fun (bare, _, _) -> bare) ctx.var_slots in
   let errors = March_errors.Errors.create () in
   let env = { tc_env with March_typecheck.Typecheck.errors } in
   let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
   let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m in
-  (* The last function in the module is the expression wrapper.
-     Extract its body and return type. *)
   let main_fn = List.find (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name = "main") tir.March_tir.Tir.tm_fns in
   let ret_ty = main_fn.fn_ret_ty in
   let support_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
-  (* Partition into new (to define) and extern (already compiled, need declare). *)
   let (new_fns, extern_fns) = partition_fns ctx support_fns in
-  (* ~store_as:(Some "v") makes the IR store the result in @repl_N_v so that
-     later fragments that reference `v` (the magic last-result variable) can
-     load it via the global-bridge mechanism. *)
+  (* Allocate (or reuse) the "v" slot so store_as_slot writes the result there. *)
+  let v_slot = match List.find_opt (fun (b, _, _) -> b = "v") ctx.var_slots with
+    | Some (_, s, _) -> s
+    | None -> alloc_slot ctx
+  in
   let ir = March_tir.Llvm_emit.emit_repl_expr
     ~n ~ret_ty
-    ~prev_globals:ctx.globals
+    ~prev_slots:(prev_slots_of ctx)
     ~fns:new_fns
     ~extern_fns
-    ~store_as:(Some "v")
+    ~store_as_slot:(Some v_slot)
     ~types:tir.March_tir.Tir.tm_types
     main_fn.fn_body in
   let handle = compile_fragment ctx ir in
-  (* Mark new_fns as compiled only after the fragment was successfully loaded.
-     If compile_fragment raised an exception, compiled_fns stays clean. *)
   mark_compiled_fns ctx new_fns;
   let sym_name = Printf.sprintf "repl_%d" n in
   let fptr = Jit.dlsym handle sym_name in
-  (* Call based on return type *)
   let result_str = match ret_ty with
     | March_tir.Tir.TInt ->
       let v = Jit.call_void_to_int fptr in
@@ -291,15 +294,6 @@ let run_expr ctx ~tc_env m =
       Jit.call_void_to_void fptr;
       "()"
     | March_tir.Tir.TVar _ ->
-      (* Unresolved type variable — the LLVM function returns ptr, but the
-         actual value is almost always a scalar stored via inttoptr (e.g.,
-         a large integer from List.length, fold, etc.).  On ARM64/x86-64
-         both ptr and i64 occupy the same register, so call_void_to_int
-         reads the raw bits correctly regardless of the declared return type.
-         This avoids the old 4096 heuristic which broke for any integer > 4095.
-         If the body is a bare variable reference (e.g. `v`), look up the
-         TIR type we stored when it was last assigned, so booleans display
-         as "true"/"false" rather than "1"/"0". *)
       let rec find_retvar body = match body with
         | March_tir.Tir.EAtom (March_tir.Tir.AVar v) -> Some v.March_tir.Tir.v_name
         | March_tir.Tir.ESeq (_, e2) -> find_retvar e2
@@ -315,9 +309,6 @@ let run_expr ctx ~tc_env m =
        | Some March_tir.Tir.TBool -> if v = 0L then "false" else "true"
        | _ -> Int64.to_string v)
     | ty ->
-      (* Heap-allocated value: use the pointer path, then pretty-print.
-         Values below 4 GiB are almost certainly scalars stored via inttoptr
-         (small counts, flags, etc.) rather than real heap addresses. *)
       let ptr = Jit.call_void_to_ptr fptr in
       let raw = Int64.of_nativeint ptr in
       if Int64.compare raw 0x100000000L < 0 && Int64.compare raw 0L >= 0 then
@@ -325,14 +316,9 @@ let run_expr ctx ~tc_env m =
       else
         pp_heap_value ty ptr
   in
-  (* Register @repl_N_v in ctx.globals so subsequent fragments can bridge `v`
-     via emit_prev_global_bridges.  Replace any prior `v` entry.
-     Also record the TIR type so that a subsequent `v` expression with
-     TVar "_" return type can display the value correctly (e.g. bool). *)
-  let llty = March_tir.Llvm_emit.llvm_ty_of_tir ret_ty in
-  let global_name = Printf.sprintf "repl_%d_v" n in
-  ctx.globals <- (global_name, llty) ::
-    List.filter (fun (gn, _) -> bare_of_global gn <> "v") ctx.globals;
+  (* Update the "v" slot entry (type may change with each expression). *)
+  ctx.var_slots <- ("v", v_slot, ret_ty) ::
+    List.filter (fun (b, _, _) -> b <> "v") ctx.var_slots;
   Hashtbl.replace ctx.global_tir_tys "v" ret_ty;
   (ret_ty, result_str)
 
@@ -340,21 +326,15 @@ let run_expr ctx ~tc_env m =
     [is_fn_decl] is true when the original REPL input was a DFn. *)
 let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
   let n = next_id ctx in
-  let repl_vars = List.map (fun (gname, _) -> bare_of_global gname) ctx.globals in
+  let repl_vars = List.map (fun (bare, _, _) -> bare) ctx.var_slots in
   let errors = March_errors.Errors.create () in
   let env = { tc_env with March_typecheck.Typecheck.errors } in
   let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
   let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m in
   let all_support_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
-  (* Partition into new (to define) and extern (already compiled, need declare). *)
   let (user_fns, extern_fns) = partition_fns ctx all_support_fns in
   if is_fn_decl then begin
-    (* Function declaration: emit the function at top level.
-       After defunctionalization a single user-defined function may produce
-       multiple lifted functions (primary + closure helpers).  Find the primary
-       by bind_name, emit helpers first (so their symbols are available via
-       RTLD_GLOBAL), then emit the primary. *)
     let primary_fn =
       match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
         f.fn_name = bind_name) user_fns with
@@ -367,59 +347,53 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     let helper_fns = List.filter
       (fun (f : March_tir.Tir.fn_def) -> f.fn_name <> primary_fn.fn_name)
       user_fns in
-    (* Emit helpers first so the primary can reference them at link time *)
     List.iter (fun helper ->
       let hn = next_id ctx in
       let ir = March_tir.Llvm_emit.emit_repl_fn
-        ~n:hn ~prev_globals:ctx.globals ~extern_fns ~types:tir.March_tir.Tir.tm_types
+        ~n:hn ~prev_slots:(prev_slots_of ctx) ~extern_fns ~types:tir.March_tir.Tir.tm_types
         helper in
       let _h = compile_fragment ctx ir in
-      (* Mark each helper compiled only after its fragment loads successfully *)
       mark_compiled_fns ctx [helper]
     ) helper_fns;
-    (* Emit primary function WITH a closure global so later fragments can
-       reference bind_name as a first-class value via the global-bridge path. *)
+    (* Emit primary function AND store closure in a persistent slot. *)
     let pn = next_id ctx in
-    let ir = March_tir.Llvm_emit.emit_repl_fn_with_closure_global
-      ~n:pn ~bind_name ~prev_globals:ctx.globals ~extern_fns ~types:tir.March_tir.Tir.tm_types
+    let slot = alloc_slot ctx in
+    let ir = March_tir.Llvm_emit.emit_repl_fn_with_closure_slot
+      ~n:pn ~bind_name ~dest_slot:slot ~prev_slots:(prev_slots_of ctx)
+      ~extern_fns ~types:tir.March_tir.Tir.tm_types
       primary_fn in
     let handle = compile_fragment ctx ir in
-    (* Mark primary compiled only after its fragment loads successfully *)
     mark_compiled_fns ctx [primary_fn];
-    (* Call the init function to allocate the closure and fill @repl_<bind_name> *)
     let init_name = Printf.sprintf "repl_%d_init" pn in
     let fptr = Jit.dlsym handle init_name in
     Jit.call_void_to_void fptr;
-    (* Register as a global so emit_prev_global_bridges creates the bridge alloca.
-       Use the same uniquified name as emit_repl_fn_with_closure_global.
-       Replace any prior entry for this bare name so bridges don't duplicate. *)
-    let gname = Printf.sprintf "repl_%d_%s" pn bind_name in
-    ctx.globals <- (gname, "ptr") ::
-      List.filter (fun (gn, _) -> bare_of_global gn <> bind_name) ctx.globals
+    (* Register the slot so future fragments can load the closure as a value.
+       The type is TFn (closures are heap pointers), which causes emit_prev_slot_bridges
+       to emit inttoptr when loading the closure from the slot. *)
+    ctx.var_slots <- (bind_name, slot, March_tir.Tir.TFn ([], March_tir.Tir.TUnit)) ::
+      List.filter (fun (b, _, _) -> b <> bind_name) ctx.var_slots
   end else begin
-    (* Let binding: find main, extract body, store in global *)
+    (* Let binding: compute value and store in a fresh slot. *)
     let main_fn = List.find (fun (f : March_tir.Tir.fn_def) ->
       f.fn_name = "main") tir.March_tir.Tir.tm_fns in
+    let slot = alloc_slot ctx in
     let ir = March_tir.Llvm_emit.emit_repl_decl
       ~n ~name:bind_name
       ~val_ty:main_fn.fn_ret_ty
-      ~prev_globals:ctx.globals
+      ~dest_slot:slot
+      ~prev_slots:(prev_slots_of ctx)
       ~fns:user_fns
       ~extern_fns
       ~types:tir.March_tir.Tir.tm_types
       main_fn.fn_body in
     let handle = compile_fragment ctx ir in
-    (* Mark user_fns compiled only after the fragment loads successfully *)
     mark_compiled_fns ctx user_fns;
     let init_name = Printf.sprintf "repl_%d_init" n in
     let fptr = Jit.dlsym handle init_name in
     Jit.call_void_to_void fptr;
-    (* Use the same uniquified name as emit_repl_decl: "repl_N_<bind_name>".
-       Replace any prior entry for this bare name so bridges don't duplicate. *)
-    let global_name = Printf.sprintf "repl_%d_%s" n bind_name in
-    let llty = March_tir.Llvm_emit.llvm_ty_of_tir main_fn.fn_ret_ty in
-    ctx.globals <- (global_name, llty) ::
-      List.filter (fun (gn, _) -> bare_of_global gn <> bind_name) ctx.globals;
+    (* Register slot for future references to bind_name. *)
+    ctx.var_slots <- (bind_name, slot, main_fn.fn_ret_ty) ::
+      List.filter (fun (b, _, _) -> b <> bind_name) ctx.var_slots;
     Hashtbl.replace ctx.global_tir_tys bind_name main_fn.fn_ret_ty
   end
 
