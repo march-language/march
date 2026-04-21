@@ -1828,10 +1828,16 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "-9223372036854775808")
 
   (* ── EApp of a locally-bound closure variable ────────────────────── *)
-  (* If f has a var_slot alloca, it is a local closure — not a top-level fn.
-     Redirect to ECallPtr dispatch to avoid generating an undefined @f call. *)
+  (* If f has a var_slot alloca AND is not a top-level function, it is a
+     local closure — redirect to ECallPtr dispatch.
+     Top-level functions (registered in top_fns via extern_fns) must use the
+     direct-call path even when they also have a var_slot entry from the
+     REPL global bridge: the bridge closure uses a different calling convention
+     ($clo_wrap) that does not match the direct i64/ptr return the call-site
+     type expects. *)
   | Tir.EApp (f, args)
-    when Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name) ->
+    when Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name)
+      && not (Hashtbl.mem ctx.top_fns f.Tir.v_name) ->
     emit_expr ctx (Tir.ECallPtr (Tir.AVar f, args))
 
   (* ── General function call ─────────────────────────────────────────── *)
@@ -3374,6 +3380,9 @@ declare ptr  @march_logger_add_context(ptr %key, ptr %value)
 declare ptr  @march_logger_clear_context()
 declare ptr  @march_logger_get_context()
 declare ptr  @march_logger_write(ptr %level, ptr %msg, ptr %ctx, ptr %extra)
+; REPL JIT persistent variable slot table (march_extras.c)
+declare i64  @march_repl_get(i64 %slot)
+declare void @march_repl_set(i64 %slot, i64 %val)
 
 |};
   (* Native-only declarations: actors, networking, file I/O, scheduler *)
@@ -3839,6 +3848,53 @@ let emit_repl_globals_decl (buf : Buffer.t) (globals : (string * string) list) =
     Printf.bprintf buf "@%s = external global %s\n" name ty
   ) globals
 
+(** A REPL variable slot: the persistent index into [march_repl_slots].
+    [rs_bare] is the bare variable name (e.g. "x", "fib").
+    [rs_slot] is the slot index passed to @march_repl_get / @march_repl_set.
+    [rs_ty]   is the TIR type, used to pick the right bit-conversion. *)
+type repl_slot_info = { rs_bare : string; rs_slot : int; rs_ty : Tir.ty }
+
+(** Emit bridge alloca+call pairs for each prev_slot into the current function
+    entry block, and register the alloca in [ctx.var_slot].
+    Uses @march_repl_get(i64 slot) so no LLVM external globals are needed —
+    values live in a single persistent C array that survives .so reloads. *)
+let emit_prev_slot_bridges ctx (prev_slots : repl_slot_info list) =
+  List.iter (fun si ->
+    let llty = llvm_ty si.rs_ty in
+    let raw  = fresh ctx "slot" in
+    Printf.bprintf ctx.buf "  %%%s.addr = alloca %s\n" si.rs_bare llty;
+    Printf.bprintf ctx.buf "  %s = call i64 @march_repl_get(i64 %d)\n" raw si.rs_slot;
+    let converted = match si.rs_ty with
+      | Tir.TInt | Tir.TBool | Tir.TUnit -> raw
+      | Tir.TFloat ->
+        let ft = fresh ctx "fv" in
+        Printf.bprintf ctx.buf "  %s = bitcast i64 %s to double\n" ft raw;
+        ft
+      | _ ->
+        let pt = fresh ctx "pv" in
+        Printf.bprintf ctx.buf "  %s = inttoptr i64 %s to ptr\n" pt raw;
+        pt
+    in
+    Printf.bprintf ctx.buf "  store %s %s, ptr %%%s.addr\n" llty converted si.rs_bare;
+    Hashtbl.replace ctx.var_slot si.rs_bare si.rs_bare
+  ) prev_slots
+
+(** Emit a store of [result] (LLVM value of type [llty]) into slot [slot_idx]
+    via @march_repl_set.  Converts non-i64 values to i64 bits first. *)
+let emit_store_to_slot ctx (slot_idx : int) (result : string) (tir_ty : Tir.ty) =
+  let bits = match tir_ty with
+    | Tir.TInt | Tir.TBool | Tir.TUnit -> result
+    | Tir.TFloat ->
+      let bt = fresh ctx "fb" in
+      Printf.bprintf ctx.buf "  %s = bitcast double %s to i64\n" bt result;
+      bt
+    | _ ->
+      let pt = fresh ctx "pb" in
+      Printf.bprintf ctx.buf "  %s = ptrtoint ptr %s to i64\n" pt result;
+      pt
+  in
+  Printf.bprintf ctx.buf "  call void @march_repl_set(i64 %d, i64 %s)\n" slot_idx bits
+
 (** Emit bridge alloca+load+store pairs for each prev_global into the current
     function entry block, and register the slot in [ctx.var_slot].
     This lets the body refer to REPL globals via the normal alloca load path.
@@ -3868,13 +3924,15 @@ let emit_prev_global_bridges ctx (prev_globals : (string * string) list) =
 (** Emit a REPL expression as a standalone .ll fragment.
     Returns textual LLVM IR with a function [@repl_<n>] that computes
     and returns the expression result.
-    [prev_globals] are (name, llvm_ty) pairs from earlier REPL inputs.
-    [fns] are any helper functions the expression depends on. *)
+    [prev_slots] are the persistent variable slots from earlier REPL inputs.
+    [fns] are any helper functions the expression depends on.
+    [store_as_slot] if Some k, also stores the result to slot k via
+    @march_repl_set so later fragments can read it as "v". *)
 let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
-    ~(prev_globals : (string * string) list)
+    ~(prev_slots : repl_slot_info list)
     ~(fns : Tir.fn_def list)
     ?(extern_fns : Tir.fn_def list = [])
-    ?(store_as : string option = None)
+    ?(store_as_slot : int option = None)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
   let ctx = make_ctx ~fast_math () in
@@ -3894,26 +3952,17 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
   List.iter (emit_fn ctx) fns;
   let ret_llty = llvm_ty ret_ty in
   let fname = Printf.sprintf "repl_%d" n in
-  (* When store_as = Some name, emit a global to hold the result (for `v`). *)
-  (match store_as with
-   | None -> ()
-   | Some vname ->
-     let gname = Printf.sprintf "repl_%d_%s" n vname in
-     Printf.bprintf ctx.preamble "@%s = global %s zeroinitializer\n" gname ret_llty);
   Printf.bprintf ctx.buf "\ndefine %s @%s() {\nentry:\n" ret_llty fname;
-  emit_prev_global_bridges ctx prev_globals;
+  emit_prev_slot_bridges ctx prev_slots;
   let (actual_ty, result) = emit_expr ctx body in
   let result' = coerce ctx actual_ty result ret_llty in
-  (* Store to the `v` global before returning, so later fragments can read it. *)
-  (match store_as with
+  (* Store result to the persistent "v" slot so later fragments can read it. *)
+  (match store_as_slot with
    | None -> ()
-   | Some vname ->
-     let gname = Printf.sprintf "repl_%d_%s" n vname in
-     Printf.bprintf ctx.buf "  store %s %s, ptr @%s\n" ret_llty result' gname);
+   | Some k -> emit_store_to_slot ctx k result' ret_ty);
   Printf.bprintf ctx.buf "  ret %s %s\n}\n" ret_llty result';
   let out = Buffer.create 4096 in
   emit_preamble out;
-  emit_repl_globals_decl out prev_globals;
   (* Declare pre-compiled functions so LLVM IR is valid even without definitions *)
   List.iter (fun fn -> Buffer.add_string out (fn_declare_str fn ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
@@ -3923,13 +3972,19 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
 (** Emit a REPL let-binding as a .ll fragment.
     Creates a global [@repl_<name>] and an init function [@repl_<n>_init]
     that computes the value and stores it in the global. *)
+(** Emit a REPL let-binding as a .ll fragment.
+    Creates an init function [@repl_<n>_init] that computes the value and
+    stores it in slot [dest_slot] via @march_repl_set.  No LLVM global is
+    needed — the slot table in march_extras.c persists across .so reloads. *)
 let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
     ~(val_ty : Tir.ty)
-    ~(prev_globals : (string * string) list)
+    ~(dest_slot : int)
+    ~(prev_slots : repl_slot_info list)
     ~(fns : Tir.fn_def list)
     ?(extern_fns : Tir.fn_def list = [])
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
+  ignore name;
   let ctx = make_ctx ~fast_math () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
@@ -3945,18 +4000,15 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
       if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) extern_fns;
   List.iter (emit_fn ctx) fns;
   let llty = llvm_ty val_ty in
-  let global_name = Printf.sprintf "repl_%d_%s" n name in
   let init_name = Printf.sprintf "repl_%d_init" n in
-  Printf.bprintf ctx.preamble "@%s = global %s zeroinitializer\n" global_name llty;
   Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n" init_name;
-  emit_prev_global_bridges ctx prev_globals;
+  emit_prev_slot_bridges ctx prev_slots;
   let (actual_ty, result) = emit_expr ctx body in
   let result' = coerce ctx actual_ty result llty in
-  Printf.bprintf ctx.buf "  store %s %s, ptr @%s\n" llty result' global_name;
+  emit_store_to_slot ctx dest_slot result' val_ty;
   Printf.bprintf ctx.buf "  ret void\n}\n";
   let out = Buffer.create 4096 in
   emit_preamble out;
-  emit_repl_globals_decl out prev_globals;
   List.iter (fun fn -> Buffer.add_string out (fn_declare_str fn ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
@@ -3966,10 +4018,11 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
     The function is emitted at top level (callable by later fragments).
     A no-op [@repl_<n>_init] is emitted so the REPL runner can call it uniformly. *)
 let emit_repl_fn ?(fast_math=false) ~(n : int)
-    ~(prev_globals : (string * string) list)
+    ~(prev_slots : repl_slot_info list)
     ?(extern_fns : Tir.fn_def list = [])
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
+  ignore prev_slots;  (* helper fns don't reference REPL vars in their own body *)
   let ctx = make_ctx ~fast_math () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
@@ -3987,23 +4040,24 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
   Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n  ret void\n}\n" init_name;
   let out = Buffer.create 4096 in
   emit_preamble out;
-  emit_repl_globals_decl out prev_globals;
   List.iter (fun f -> Buffer.add_string out (fn_declare_str f ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
   Buffer.contents out
 
-(** Emit a REPL function declaration as a .ll fragment, and also create a
-    first-class closure value stored in a global [@repl_<bind_name>].
-    This lets later REPL fragments reference [bind_name] as a value via the
-    normal global-bridge mechanism (same as [emit_repl_decl] for data lets).
-    The init function [@repl_<n>_init] allocates the closure and fills the global. *)
-let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
+(** Emit a REPL function declaration as a .ll fragment, and also store a
+    first-class closure value in slot [dest_slot] via @march_repl_set.
+    The init function [@repl_<n>_init] allocates the closure and writes it
+    to the slot so later fragments can load it via @march_repl_get. *)
+let emit_repl_fn_with_closure_slot ?(fast_math=false) ~(n : int)
     ~(bind_name : string)
-    ~(prev_globals : (string * string) list)
+    ~(dest_slot : int)
+    ~(prev_slots : repl_slot_info list)
     ?(extern_fns : Tir.fn_def list = [])
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
+  ignore bind_name;
+  ignore prev_slots;  (* primary fn body does not reference REPL vars directly *)
   let ctx = make_ctx ~fast_math () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
@@ -4017,12 +4071,13 @@ let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
       Hashtbl.replace ctx.top_fn_nparams f.Tir.fn_name (List.length f.Tir.fn_params);
       if f.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns f.Tir.fn_name true) extern_fns;
   emit_fn ctx fn;
-  (* Build a thin closure wrapper: @<fn>$clo_wrap(ptr %_clo, ptr %a0, ...) *)
+  (* Build a thin closure wrapper: @<fn>$clo_wrap(ptr %_clo, <concrete args>)
+     Uses concrete parameter types and untagged return — matching emit_atom's wrapper. *)
   let fn_llvm_name = llvm_name (mangle_extern fn.Tir.fn_name) in
   let wrap_name = fn_llvm_name ^ "$clo_wrap" in
   let nparams = List.length fn.Tir.fn_params in
   let target_ret = llvm_ret_ty fn.Tir.fn_ret_ty in
-  let param_tys = List.init nparams (fun _ -> "ptr") in
+  let param_tys = List.map (fun v -> llvm_ty v.Tir.v_ty) fn.Tir.fn_params in
   let all_params = "ptr" :: param_tys in
   let arg_names = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
   let all_arg_decls = "%_clo" :: arg_names in
@@ -4032,21 +4087,12 @@ let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
     if target_ret = "void" then
       Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n"
         wrap_name decl_str fn_llvm_name call_args
-    else if target_ret = "i64" then
-      Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  %%r = call i64 @%s(%s)\n  %%rs = shl i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  %%rp = inttoptr i64 %%rt to ptr\n  ret ptr %%rp\n}\n"
-        wrap_name decl_str fn_llvm_name call_args
-    else if target_ret = "double" then
-      Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  %%r = call double @%s(%s)\n  %%ri = bitcast double %%r to i64\n  %%rp = inttoptr i64 %%ri to ptr\n  ret ptr %%rp\n}\n"
-        wrap_name decl_str fn_llvm_name call_args
     else
-      Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret ptr %%r\n}\n"
-        wrap_name decl_str target_ret fn_llvm_name call_args
+      Printf.sprintf "\ndefine %s @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret %s %%r\n}\n"
+        target_ret wrap_name decl_str target_ret fn_llvm_name call_args target_ret
   in
   Buffer.add_string ctx.buf wrap_body;
-  (* Global that holds the closure pointer *)
-  let global_name = Printf.sprintf "repl_%d_%s" n bind_name in
-  Printf.bprintf ctx.preamble "@%s = global ptr zeroinitializer\n" global_name;
-  (* Init function: allocate closure {header(16), fn_ptr} and store in the global *)
+  (* Init function: allocate closure {header(16), fn_ptr} and store in the slot *)
   let init_name = Printf.sprintf "repl_%d_init" n in
   Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n" init_name;
   Printf.bprintf ctx.buf "  %%hp = call ptr @march_alloc(i64 24)\n";
@@ -4054,11 +4100,11 @@ let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
   Printf.bprintf ctx.buf "  store i32 0, ptr %%tgp, align 4\n";
   Printf.bprintf ctx.buf "  %%fp = getelementptr i8, ptr %%hp, i64 16\n";
   Printf.bprintf ctx.buf "  store ptr @%s, ptr %%fp, align 8\n" wrap_name;
-  Printf.bprintf ctx.buf "  store ptr %%hp, ptr @%s\n" global_name;
+  Printf.bprintf ctx.buf "  %%cp = ptrtoint ptr %%hp to i64\n";
+  Printf.bprintf ctx.buf "  call void @march_repl_set(i64 %d, i64 %%cp)\n" dest_slot;
   Printf.bprintf ctx.buf "  ret void\n}\n";
   let out = Buffer.create 4096 in
   emit_preamble out;
-  emit_repl_globals_decl out prev_globals;
   List.iter (fun f -> Buffer.add_string out (fn_declare_str f ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
