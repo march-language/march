@@ -1828,10 +1828,17 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
     ("i64", "-9223372036854775808")
 
   (* ── EApp of a locally-bound closure variable ────────────────────── *)
-  (* If f has a var_slot alloca, it is a local closure — not a top-level fn.
-     Redirect to ECallPtr dispatch to avoid generating an undefined @f call. *)
+  (* If f has a var_slot alloca AND is not a top-level function, it is a
+     local closure — redirect to ECallPtr dispatch.
+     Top-level functions (registered in top_fns via extern_fns) must use the
+     direct-call path even when they also have a var_slot entry from the
+     REPL global bridge: the bridge closure uses a different calling convention
+     ($clo_wrap) that does not match the direct i64/ptr return the call-site
+     type expects.  Letting top_fns functions fall through to the general EApp
+     case generates the correct `call i64 @fn(...)` instruction directly. *)
   | Tir.EApp (f, args)
-    when Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name) ->
+    when Hashtbl.mem ctx.var_slot (llvm_name f.Tir.v_name)
+      && not (Hashtbl.mem ctx.top_fns f.Tir.v_name) ->
     emit_expr ctx (Tir.ECallPtr (Tir.AVar f, args))
 
   (* ── General function call ─────────────────────────────────────────── *)
@@ -4017,12 +4024,17 @@ let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
       Hashtbl.replace ctx.top_fn_nparams f.Tir.fn_name (List.length f.Tir.fn_params);
       if f.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns f.Tir.fn_name true) extern_fns;
   emit_fn ctx fn;
-  (* Build a thin closure wrapper: @<fn>$clo_wrap(ptr %_clo, ptr %a0, ...) *)
+  (* Build a thin closure wrapper: @<fn>$clo_wrap(ptr %_clo, <concrete args>)
+     Uses the same concrete parameter types and untagged return as the wrapper
+     emitted by emit_atom (lines 1095-1112).  This ensures ECallPtr call-sites
+     (which declare the concrete return type) get the raw value back, not a
+     tagged pointer.  Keeping both wrappers identical also prevents behavioural
+     disagreement when the two .so files define the same symbol name. *)
   let fn_llvm_name = llvm_name (mangle_extern fn.Tir.fn_name) in
   let wrap_name = fn_llvm_name ^ "$clo_wrap" in
   let nparams = List.length fn.Tir.fn_params in
   let target_ret = llvm_ret_ty fn.Tir.fn_ret_ty in
-  let param_tys = List.init nparams (fun _ -> "ptr") in
+  let param_tys = List.map (fun v -> llvm_ty v.Tir.v_ty) fn.Tir.fn_params in
   let all_params = "ptr" :: param_tys in
   let arg_names = List.init nparams (fun i -> Printf.sprintf "%%a%d" i) in
   let all_arg_decls = "%_clo" :: arg_names in
@@ -4032,15 +4044,9 @@ let emit_repl_fn_with_closure_global ?(fast_math=false) ~(n : int)
     if target_ret = "void" then
       Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  call void @%s(%s)\n  ret ptr null\n}\n"
         wrap_name decl_str fn_llvm_name call_args
-    else if target_ret = "i64" then
-      Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  %%r = call i64 @%s(%s)\n  %%rs = shl i64 %%r, 1\n  %%rt = or i64 %%rs, 1\n  %%rp = inttoptr i64 %%rt to ptr\n  ret ptr %%rp\n}\n"
-        wrap_name decl_str fn_llvm_name call_args
-    else if target_ret = "double" then
-      Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  %%r = call double @%s(%s)\n  %%ri = bitcast double %%r to i64\n  %%rp = inttoptr i64 %%ri to ptr\n  ret ptr %%rp\n}\n"
-        wrap_name decl_str fn_llvm_name call_args
     else
-      Printf.sprintf "\ndefine ptr @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret ptr %%r\n}\n"
-        wrap_name decl_str target_ret fn_llvm_name call_args
+      Printf.sprintf "\ndefine %s @%s(%s) {\nentry:\n  %%r = call %s @%s(%s)\n  ret %s %%r\n}\n"
+        target_ret wrap_name decl_str target_ret fn_llvm_name call_args target_ret
   in
   Buffer.add_string ctx.buf wrap_body;
   (* Global that holds the closure pointer *)
