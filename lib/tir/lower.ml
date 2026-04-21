@@ -1644,6 +1644,15 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   } in
   fns := show_str_fn :: !fns;
   reg_method "show" "String" "Show$String.show";
+  (* Show$Unit.show: always returns "()" *)
+  let unit_x = mk_var "x" Tir.TUnit in
+  let show_unit_fn : Tir.fn_def = {
+    fn_name = "Show$Unit.show"; fn_params = [unit_x];
+    fn_ret_ty = Tir.TString;
+    fn_body = Tir.EAtom (Tir.ALit (March_ast.Ast.LitString "()"));
+  } in
+  fns := show_unit_fn :: !fns;
+  reg_method "show" "Unit" "Show$Unit.show";
   (* Hash implementations: hash(x) — delegate to typed C runtime builtins *)
   let hash_specs = [
     ("Int",    Tir.TInt,    "march_hash_int");

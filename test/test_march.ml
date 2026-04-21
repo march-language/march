@@ -509,6 +509,21 @@ let test_show_user_impl () =
   end|} in
   Alcotest.(check bool) "show on user type with Show impl: no errors" false (has_errors ctx)
 
+let test_println_polymorphic_typecheck () =
+  (* Verify that a user-defined fn println(x) using show can accept any Show type,
+     matching the behaviour of the prelude's polymorphic println. *)
+  let ctx = typecheck {|mod Test do
+    fn println(x) do
+      print(show(x))
+      print("\n")
+    end
+    fn f() do
+      println(42)
+      println(true)
+    end
+  end|} in
+  Alcotest.(check bool) "polymorphic println accepts Show types" false (has_errors ctx)
+
 let test_hash_builtin_int () =
   (* hash method: ∀a:Hash. a -> Int *)
   let ctx = typecheck {|mod Test do
@@ -1189,6 +1204,54 @@ let eval_with_stdlib decls src =
 let vint = function March_eval.Eval.VInt n -> n | _ -> failwith "expected VInt"
 let vstr = function March_eval.Eval.VString s -> s | _ -> failwith "expected VString"
 let vbool = function March_eval.Eval.VBool b -> b | _ -> failwith "expected VBool"
+
+(* ── Show interface: eval tests ─────────────────────────────────────── *)
+
+let get_show_result env =
+  let f = List.assoc "main" env in
+  match March_eval.Eval.apply f [] with
+  | March_eval.Eval.VString s -> s
+  | _ -> "bad"
+
+let test_show_list_eval () =
+  let env = eval_module {|mod T do
+    fn main() do show([1, 2, 3]) end
+  end|} in
+  Alcotest.(check string) "show list" "[1, 2, 3]" (get_show_result env)
+
+let test_show_option_some_eval () =
+  let env = eval_module {|mod T do
+    fn main() do show(Some(42)) end
+  end|} in
+  Alcotest.(check string) "show Some(42)" "Some(42)" (get_show_result env)
+
+let test_show_option_none_eval () =
+  let env = eval_module {|mod T do
+    fn main() do show(None) end
+  end|} in
+  Alcotest.(check string) "show None" "None" (get_show_result env)
+
+let test_show_result_ok_eval () =
+  let env = eval_module {|mod T do
+    fn main() do show(Ok(1)) end
+  end|} in
+  Alcotest.(check string) "show Ok(1)" "Ok(1)" (get_show_result env)
+
+let test_show_result_err_eval () =
+  (* Requires prelude Show(Result) impl so Err("x") shows Err(x) without quotes *)
+  let prelude_decl = load_stdlib_file_for_test "prelude.march" in
+  let env = eval_with_stdlib [prelude_decl] {|mod T do
+    fn main() do show(Err("oops")) end
+  end|} in
+  Alcotest.(check string) "show Err no quotes" "Err(oops)" (get_show_result env)
+
+let test_show_nested_list_eval () =
+  let prelude_decl = load_stdlib_file_for_test "prelude.march" in
+  let env = eval_with_stdlib [prelude_decl] {|mod T do
+    fn main() do show([Some(1), None, Some(3)]) end
+  end|} in
+  Alcotest.(check string) "show nested list" "[Some(1), None, Some(3)]"
+    (get_show_result env)
 
 let with_reset f () =
   March_eval.Eval.reset_scheduler_state ();
@@ -20596,6 +20659,13 @@ let () =
           Alcotest.test_case "Show builtin Int"             `Quick test_show_builtin_int;
           Alcotest.test_case "Show builtin Bool"            `Quick test_show_builtin_bool;
           Alcotest.test_case "Show user impl"               `Quick test_show_user_impl;
+          Alcotest.test_case "show List eval"               `Quick (with_reset test_show_list_eval);
+          Alcotest.test_case "show Option Some eval"        `Quick (with_reset test_show_option_some_eval);
+          Alcotest.test_case "show Option None eval"        `Quick (with_reset test_show_option_none_eval);
+          Alcotest.test_case "show Result Ok eval"          `Quick (with_reset test_show_result_ok_eval);
+          Alcotest.test_case "show Result Err eval"         `Quick (with_reset test_show_result_err_eval);
+          Alcotest.test_case "show nested list eval"        `Quick (with_reset test_show_nested_list_eval);
+          Alcotest.test_case "println polymorphic typecheck" `Quick test_println_polymorphic_typecheck;
           Alcotest.test_case "Hash builtin Int"             `Quick test_hash_builtin_int;
           Alcotest.test_case "Hash builtin String"          `Quick test_hash_builtin_string;
           Alcotest.test_case "eq method callable"           `Quick test_eq_method_callable;

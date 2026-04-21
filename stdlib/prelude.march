@@ -174,16 +174,56 @@ mod Prelude do
     fn _ -> x
   end
 
+  -- ---- Show impls for generic containers ----
+
+  impl Show(List(a)) when Show(a) do
+    fn show(xs) do
+      "[" ++ string_join(map(xs, fn x -> show(x)), ", ") ++ "]"
+    end
+  end
+
+  impl Show(Option(a)) when Show(a) do
+    fn show(opt) do
+      match opt do
+      None    -> "None"
+      Some(x) -> "Some(" ++ show(x) ++ ")"
+      end
+    end
+  end
+
+  impl Show(Result(a, e)) when Show(a), Show(e) do
+    fn show(r) do
+      match r do
+      Ok(x)  -> "Ok(" ++ show(x) ++ ")"
+      Err(e) -> "Err(" ++ show(e) ++ ")"
+      end
+    end
+  end
+
+  -- ---- Polymorphic println and string conversion ----
+
+  doc """
+  Prints any Show value followed by a newline.
+  Works for Int, Float, String, Bool, List, Option, Result,
+  and any type with an explicit impl Show.
+  """
+  fn println(x) do
+    print(show(x))
+    print("\n")
+  end
+
+  doc "Short alias for to_string."
+  fn str(x) do to_string(x) end
+
   -- ---- IO convenience ----
 
   doc "Prints a value using its Show representation, with a trailing newline."
-  fn debug(x : a) : Unit do
-    println(to_string(x))
+  fn debug(x) do
+    print(to_string(x))
+    print("\n")
   end
 
   doc "Converts any value to its string representation."
-  fn inspect(x : a) : String do
-    to_string(x)
-  end
+  fn inspect(x) do to_string(x) end
 
 end

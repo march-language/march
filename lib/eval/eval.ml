@@ -2327,6 +2327,33 @@ let mpst_close me =
   VUnit
 
 (* ------------------------------------------------------------------ *)
+(* Show dispatch helper                                                *)
+(* ------------------------------------------------------------------ *)
+
+(** Call the Show impl for [v] if one is registered, else fall back to
+    value_to_string.  Used by to_string and println builtins so they
+    respect user-defined impl Show even when the prelude is not loaded. *)
+let show_dispatch (v : value) : string =
+  match v with
+  | VInt n    -> string_of_int n
+  | VFloat f  ->
+    let s = string_of_float f in
+    if String.contains s '.' || String.contains s 'e' then s else s ^ ".0"
+  | VBool b   -> string_of_bool b
+  | VString s -> s
+  | VAtom a   -> ":" ^ a
+  | _ ->
+    (match type_name_of_value v with
+     | Some tname ->
+       (match Hashtbl.find_opt impl_tbl ("Show", tname) with
+        | Some show_fn ->
+          (match !apply_hook show_fn [v] with
+           | VString s -> s
+           | other     -> value_to_string other)
+        | None -> value_to_string v)
+     | None -> value_to_string v)
+
+(* ------------------------------------------------------------------ *)
 (* Base environment                                                    *)
 (* ------------------------------------------------------------------ *)
 
@@ -2388,8 +2415,8 @@ let base_env : env =
         | [v] -> capture_write (value_display v); VUnit
         | vs  -> List.iter (fun v -> capture_write (value_display v)) vs; VUnit))
   ; ("println", VBuiltin ("println", function
-        | [v] -> capture_writeln (value_display v); VUnit
-        | vs  -> List.iter (fun v -> capture_write (value_display v)) vs;
+        | [v] -> capture_writeln (show_dispatch v); VUnit
+        | vs  -> List.iter (fun v -> capture_write (show_dispatch v)) vs;
                  capture_write "\n"; VUnit))
   ; ("print_int", VBuiltin ("print_int", function
         | [VInt n] -> capture_write (string_of_int n); VUnit
@@ -2698,7 +2725,7 @@ let base_env : env =
            | _ -> VBool true)
         | _ -> eval_error "is_cap_valid: expected Cap"))
   ; ("to_string", VBuiltin ("to_string", function
-        | [v] -> VString (value_display v)
+        | [v] -> VString (show_dispatch v)
         | _ -> eval_error "to_string: expected one argument"))
 
     (* ---- Record introspection builtins ---- *)
@@ -2872,19 +2899,7 @@ let base_env : env =
            | None -> VInt (compare a b))
         | _ -> eval_error "compare: expected two arguments"))
   ; ("show", VBuiltin ("show", function
-        | [VInt n]    -> VString (string_of_int n)
-        | [VFloat f]  ->
-          let s = string_of_float f in
-          VString (if String.contains s '.' || String.contains s 'e' then s else s ^ ".0")
-        | [VBool b]   -> VString (string_of_bool b)
-        | [VString s] -> VString s
-        | [v] ->
-          (match type_name_of_value v with
-           | Some tname ->
-             (match Hashtbl.find_opt impl_tbl ("Show", tname) with
-              | Some show_fn -> !apply_hook show_fn [v]
-              | None         -> VString (value_to_string v))
-           | None -> VString (value_to_string v))
+        | [v] -> VString (show_dispatch v)
         | _ -> eval_error "show: expected one argument"))
   ; ("hash", VBuiltin ("hash", function
         | [VInt n]    -> VInt (Hashtbl.hash n)
@@ -6578,6 +6593,11 @@ let reset_scheduler_state () : unit =
   Hashtbl.clear actor_defs_tbl;
   Hashtbl.reset impl_tbl;
   Hashtbl.reset ctor_type_tbl;
+  (* Pre-register builtin constructor → type mappings so Show dispatch works *)
+  List.iter (fun (ctor, ty) -> Hashtbl.replace ctor_type_tbl ctor ty)
+    [ "Ok", "Result"; "Err", "Result"
+    ; "Some", "Option"; "None", "Option"
+    ; "Cons", "List";  "Nil",  "List" ];
   Hashtbl.reset record_type_tbl;
   Hashtbl.reset protocol_roles_tbl;
   next_pid := 0;
@@ -7346,10 +7366,22 @@ let rec eval_decl (env : env) (d : decl) : env =
       && String.sub idef.impl_iface.txt 0 4 = "Json"
     in
     List.fold_left (fun env (mname, fn_def) ->
+        (* For Show.show: create a non-self-referential closure so that
+           recursive `show(x)` calls inside the body go through the builtin
+           dispatch (impl_tbl), not back to this impl's function. *)
+        let is_show_method =
+          idef.impl_iface.txt = "Show" && mname.txt = "show"
+        in
         let new_env = match fn_def.fn_clauses with
           | [{ fc_params = []; fc_body; _ }] ->
             let v = eval_expr env fc_body in
             (mname.txt, v) :: env
+          | _ when is_show_method ->
+            (* Plain closure: `show` in body → builtin dispatch, not self. *)
+            let clause = List.hd fn_def.fn_clauses in
+            let params = clause_params clause in
+            let clo = VClosure (env, params, clause.fc_body) in
+            (mname.txt, clo) :: env
           | _ ->
             eval_decl env (DFn (fn_def, sp))
         in
@@ -7367,8 +7399,10 @@ let rec eval_decl (env : env) (d : decl) : env =
         end;
         (* For Json derive: to_json only registers in impl_tbl (so the
            builtin dispatcher can route by value type); from_json binds in
-           env (since we can't dispatch on the target type from a JsonValue). *)
-        if is_json_iface && mname.txt = "to_json" then env
+           env (since we can't dispatch on the target type from a JsonValue).
+           Same for Show.show: the builtin `show` dispatches through impl_tbl,
+           so binding `show` in the global env would shadow the builtin. *)
+        if (is_json_iface && mname.txt = "to_json") || is_show_method then env
         else new_env
       ) env idef.impl_methods
 
@@ -7472,6 +7506,13 @@ let eval_module_env (m : module_) : env =
   Hashtbl.clear dyn_sup_registry;
   Hashtbl.clear dyn_sup_vpid_map;
   dyn_sup_next_vpid := (-1);
+  (* Pre-register builtin constructor → type mappings so Show/impl dispatch works *)
+  Hashtbl.reset impl_tbl;
+  Hashtbl.reset ctor_type_tbl;
+  List.iter (fun (ctor, ty) -> Hashtbl.replace ctor_type_tbl ctor ty)
+    [ "Ok", "Result"; "Err", "Result"
+    ; "Some", "Option"; "None", "Option"
+    ; "Cons", "List";  "Nil",  "List" ];
 
   (* Pass 1: stubs.  We use a ref cell shared across all stubs so that
      closures created in pass 2 can see the final environment. *)
@@ -7603,10 +7644,18 @@ let eval_module_env (m : module_) : env =
         && String.sub idef.impl_iface.txt 0 4 = "Json"
       in
       let env' = List.fold_left (fun acc_env (mname, fn_def) ->
+          let is_show_method =
+            idef.impl_iface.txt = "Show" && mname.txt = "show"
+          in
           let new_acc = match fn_def.fn_clauses with
             | [{ fc_params = []; fc_body; _ }] ->
               let v = eval_expr acc_env fc_body in
               (mname.txt, v) :: acc_env
+            | _ when is_show_method ->
+              let clause = List.hd fn_def.fn_clauses in
+              let params = clause_params clause in
+              let clo = VClosure (acc_env, params, clause.fc_body) in
+              (mname.txt, clo) :: acc_env
             | _ ->
               eval_decl acc_env (DFn (fn_def, sp))
           in
@@ -7623,8 +7672,9 @@ let eval_module_env (m : module_) : env =
             | None -> ()
           end;
           (* For Json derive: to_json only registers in impl_tbl;
-             from_json binds in env (can't dispatch on target type). *)
-          if is_json_iface then acc_env
+             from_json binds in env (can't dispatch on target type).
+             Show.show: plain closure above, don't rebind show globally. *)
+          if is_json_iface || is_show_method then acc_env
           else new_acc
         ) env idef.impl_methods in
       env_ref := env';
