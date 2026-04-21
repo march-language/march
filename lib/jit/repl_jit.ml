@@ -451,7 +451,7 @@ let precompile_stdlib ctx
           Hashtbl.replace ctx.compiled_fns line ()
       done with End_of_file -> ());
       close_in ic
-    with _ -> ())  (* Non-fatal: fall through to lazy JIT *)
+    with _ -> ())
   end else begin
     (* ── Cache miss: lower stdlib to TIR, compile, cache ─────────────────── *)
     let s = March_ast.Ast.dummy_span in

@@ -1587,7 +1587,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       fn_name   = name;
       fn_params = params;
       fn_ret_ty = ret_ty;
-      fn_body   = Tir.EApp (mk_var body_fn_name unknown_ty,
+      fn_body   = Tir.EApp (mk_var body_fn_name
+                               (Tir.TFn (List.map (fun v -> v.Tir.v_ty) body_params, ret_ty)),
                              List.map (fun v -> Tir.AVar v) body_params);
     } in
     fns := fn :: !fns
@@ -1602,7 +1603,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       let x = mk_var "x" tir_ty and y = mk_var "y" tir_ty in
       let fn : Tir.fn_def = {
         fn_name = mangled; fn_params = [x; y]; fn_ret_ty = Tir.TBool;
-        fn_body = Tir.EApp (mk_var "==" unknown_ty, [Tir.AVar x; Tir.AVar y]);
+        fn_body = Tir.EApp (mk_var "==" (Tir.TFn ([tir_ty; tir_ty], Tir.TBool)), [Tir.AVar x; Tir.AVar y]);
       } in
       fns := fn :: !fns;
       reg_method "eq" ty_name mangled
@@ -1618,7 +1619,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       let x = mk_var "x" tir_ty and y = mk_var "y" tir_ty in
       let fn : Tir.fn_def = {
         fn_name = mangled; fn_params = [x; y]; fn_ret_ty = Tir.TInt;
-        fn_body = Tir.EApp (mk_var c_fn unknown_ty, [Tir.AVar x; Tir.AVar y]);
+        fn_body = Tir.EApp (mk_var c_fn (Tir.TFn ([tir_ty; tir_ty], Tir.TInt)), [Tir.AVar x; Tir.AVar y]);
       } in
       fns := fn :: !fns;
       reg_method "compare" ty_name mangled
@@ -1665,7 +1666,7 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       let x = mk_var "x" tir_ty in
       let fn : Tir.fn_def = {
         fn_name = mangled; fn_params = [x]; fn_ret_ty = Tir.TInt;
-        fn_body = Tir.EApp (mk_var c_fn unknown_ty, [Tir.AVar x]);
+        fn_body = Tir.EApp (mk_var c_fn (Tir.TFn ([tir_ty], Tir.TInt)), [Tir.AVar x]);
       } in
       fns := fn :: !fns;
       reg_method "hash" ty_name mangled
@@ -1788,6 +1789,21 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
       | _ -> ()
     ) all_context_decls;
   _default_dispatch := default_dispatch;
+  (* Pre-pass: Lower top-level DFn declarations from stdlib_context so that
+     monomorphization can specialize them at user call sites.  These are
+     prelude functions (e.g. println, map) that live at global scope — they
+     have no module prefix and are therefore not discoverable by the lazy
+     _ensure_module_lowered mechanism, which only fires for qualified names.
+     DMod / DImpl entries from stdlib_context are handled lazily (DMod) or
+     via collect_iface_impls (DImpl) and must NOT be re-lowered here. *)
+  if stdlib_context <> [] then
+    List.iter (fun d ->
+      match d with
+      | Ast.DFn (def, _) ->
+        if not (Hashtbl.mem !_default_dispatch def.fn_name.txt) then
+          fns := lower_fn_def def :: !fns
+      | _ -> ()
+    ) stdlib_context;
   (* Pass 2: Lower all other declarations. *)
   List.iter (fun d ->
       match d with

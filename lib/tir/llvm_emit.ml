@@ -580,6 +580,9 @@ let builtin_ret_ty : string -> Tir.ty option = function
   | "link"                        -> Some Tir.TUnit
   | "unlink"                      -> Some Tir.TUnit
   | "register_supervisor"         -> Some Tir.TUnit
+  (* Comparison/hash runtime builtins — return i64, not ptr *)
+  | "march_compare_int" | "march_compare_float" | "march_compare_string" -> Some Tir.TInt
+  | "march_hash_int" | "march_hash_float" | "march_hash_string" | "march_hash_bool" -> Some Tir.TInt
   (* Generic to_string *)
   | "to_string"                   -> Some Tir.TString
   (* Vault (key-value store) builtins *)
