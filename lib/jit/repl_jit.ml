@@ -96,9 +96,10 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
      (try Sys.remove so_path with _ -> ());
      failwith (Printf.sprintf "clang failed: %s"
        (Buffer.contents output)));
-  (* dlopen the .so *)
+  (* dlopen the .so; remove .ll artifact now that compilation succeeded *)
   let handle = Jit.dlopen so_path in
   ctx.handles <- handle :: ctx.handles;
+  (try Sys.remove ll_path with _ -> ());
   handle
 
 (** True if a TIR function name resolves to a C runtime symbol (i.e. mangle
@@ -193,7 +194,9 @@ let field_ptr (ptr : nativeint) (i : int) : nativeint =
     Recursion is bounded to depth [max_depth] to guard against unexpected
     structures; beyond that, falls back to the raw-address display. *)
 let rec pp_heap_value ?(depth=0) (ty : March_tir.Tir.ty) (ptr : nativeint) : string =
-  if depth > 64 then Printf.sprintf "#<...>" else
+  if depth > 64 then "#<...>"
+  else if ptr = Nativeint.zero then "#<null>"
+  else
   let open March_tir.Tir in
   match ty with
   | TString ->
@@ -215,21 +218,26 @@ let rec pp_heap_value ?(depth=0) (ty : March_tir.Tir.ty) (ptr : nativeint) : str
     let fields = List.mapi (fun i ty -> pp_field ~depth ty ptr i) tys in
     Printf.sprintf "(%s)" (String.concat ", " fields)
   | _ ->
-    (* Unknown heap type: show tag for basic orientation *)
-    Printf.sprintf "#<tag:%d>" (heap_tag ptr)
+    (* Unknown heap type: show tag for basic orientation; guard null *)
+    if ptr = Nativeint.zero then "#<null>"
+    else Printf.sprintf "#<tag:%d>" (heap_tag ptr)
 
 and pp_list ?(depth=0) elem_ty (ptr : nativeint) : string =
   let buf = Buffer.create 32 in
   Buffer.add_char buf '[';
   let cur = ref ptr in
   let first = ref true in
-  (* Traverse Cons chain; stop at Nil (tag=0) or null pointer *)
-  while !cur <> Nativeint.zero && heap_tag !cur <> 0 do
+  let count = ref 0 in
+  let max_elems = 10000 in
+  (* Traverse Cons chain; stop at Nil (tag=0), null, or cap *)
+  while !cur <> Nativeint.zero && heap_tag !cur <> 0 && !count < max_elems do
     if not !first then Buffer.add_string buf ", ";
     first := false;
     Buffer.add_string buf (pp_field ~depth elem_ty !cur 0);
-    cur := field_ptr !cur 1  (* tail is field 1 of Cons *)
+    cur := field_ptr !cur 1;  (* tail is field 1 of Cons *)
+    incr count
   done;
+  if !count = max_elems then Buffer.add_string buf ", ...";
   Buffer.add_char buf ']';
   Buffer.contents buf
 
@@ -251,14 +259,17 @@ and pp_field ?(depth=0) (ty : March_tir.Tir.ty) (ptr : nativeint) (i : int) : st
 (* ── run_expr ──────────────────────────────────────────────────────── *)
 
 let run_expr ctx ~tc_env m =
-  let n = next_id ctx in
+  (* Typecheck and lower BEFORE advancing the counter so a failure leaves no gap. *)
   let repl_vars = List.map (fun (bare, _, _) -> bare) ctx.var_slots in
   let errors = March_errors.Errors.create () in
   let env = { tc_env with March_typecheck.Typecheck.errors } in
   let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
   let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m in
-  let main_fn = List.find (fun (f : March_tir.Tir.fn_def) ->
-    f.fn_name = "main") tir.March_tir.Tir.tm_fns in
+  let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
+    f.fn_name = "main") tir.March_tir.Tir.tm_fns with
+  | Some f -> f
+  | None -> failwith "run_expr: TIR pipeline produced no 'main' function"
+  in
   let ret_ty = main_fn.fn_ret_ty in
   let support_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
@@ -268,6 +279,8 @@ let run_expr ctx ~tc_env m =
     | Some (_, s, _) -> s
     | None -> alloc_slot ctx
   in
+  (* Advance counter only when we are about to emit — keeps counter in sync with artifacts. *)
+  let n = next_id ctx in
   let ir = March_tir.Llvm_emit.emit_repl_expr
     ~n ~ret_ty
     ~prev_slots:(prev_slots_of ctx)
@@ -294,6 +307,10 @@ let run_expr ctx ~tc_env m =
       Jit.call_void_to_void fptr;
       "()"
     | March_tir.Tir.TVar _ ->
+      (* Unresolved type var — try to recover the actual type from global_tir_tys
+         by inspecting the body's return variable.  If we can recover a scalar type
+         (Int/Bool), read as int.  For known heap types, call as ptr and pretty-print.
+         If completely unknown, call as ptr and display the raw address. *)
       let rec find_retvar body = match body with
         | March_tir.Tir.EAtom (March_tir.Tir.AVar v) -> Some v.March_tir.Tir.v_name
         | March_tir.Tir.ESeq (_, e2) -> find_retvar e2
@@ -304,17 +321,35 @@ let run_expr ctx ~tc_env m =
         | Some vname -> Hashtbl.find_opt ctx.global_tir_tys vname
         | None -> None
       in
-      let v = Jit.call_void_to_int fptr in
       (match stored_ty with
-       | Some March_tir.Tir.TBool -> if v = 0L then "false" else "true"
-       | _ -> Int64.to_string v)
+       | Some March_tir.Tir.TBool ->
+         let v = Jit.call_void_to_int fptr in
+         if v = 0L then "false" else "true"
+       | Some March_tir.Tir.TInt ->
+         Int64.to_string (Jit.call_void_to_int fptr)
+       | Some ty ->
+         let ptr = Jit.call_void_to_ptr fptr in
+         if ptr = Nativeint.zero then "null"
+         else pp_heap_value ty ptr
+       | None ->
+         (* No type information — call as ptr (safer than int for heap objects).
+            Small values that fit in a tagged integer are displayed as integers;
+            everything else shown as an opaque address. *)
+         let ptr = Jit.call_void_to_ptr fptr in
+         let raw = Int64.of_nativeint ptr in
+         if Int64.compare raw 0x100000000L < 0 && Int64.compare raw 0L >= 0 then
+           Int64.to_string raw
+         else
+           Printf.sprintf "#<0x%Lx>" raw)
     | ty ->
       let ptr = Jit.call_void_to_ptr fptr in
-      let raw = Int64.of_nativeint ptr in
-      if Int64.compare raw 0x100000000L < 0 && Int64.compare raw 0L >= 0 then
-        Int64.to_string raw
+      if ptr = Nativeint.zero then "null"
       else
-        pp_heap_value ty ptr
+        let raw = Int64.of_nativeint ptr in
+        if Int64.compare raw 0x100000000L < 0 && Int64.compare raw 0L >= 0 then
+          Int64.to_string raw
+        else
+          pp_heap_value ty ptr
   in
   (* Update the "v" slot entry (type may change with each expression). *)
   ctx.var_slots <- ("v", v_slot, ret_ty) ::
@@ -325,7 +360,7 @@ let run_expr ctx ~tc_env m =
 (** Distinguish fn vs let at the AST level, not TIR.
     [is_fn_decl] is true when the original REPL input was a DFn. *)
 let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
-  let n = next_id ctx in
+  (* Typecheck and lower BEFORE advancing the counter — failures leave no gap. *)
   let repl_vars = List.map (fun (bare, _, _) -> bare) ctx.var_slots in
   let errors = March_errors.Errors.create () in
   let env = { tc_env with March_typecheck.Typecheck.errors } in
@@ -347,14 +382,23 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     let helper_fns = List.filter
       (fun (f : March_tir.Tir.fn_def) -> f.fn_name <> primary_fn.fn_name)
       user_fns in
-    List.iter (fun helper ->
-      let hn = next_id ctx in
-      let ir = March_tir.Llvm_emit.emit_repl_fn
-        ~n:hn ~prev_slots:(prev_slots_of ctx) ~extern_fns ~types:tir.March_tir.Tir.tm_types
-        helper in
-      let _h = compile_fragment ctx ir in
-      mark_compiled_fns ctx [helper]
-    ) helper_fns;
+    (* Compile helper lambdas.  Track which ones succeed so we can roll back
+       compiled_fns if any subsequent helper (or the primary fn) fails — a
+       partial compile leaves compiled_fns consistent with loaded .sos. *)
+    let compiled_helpers = ref [] in
+    (try
+      List.iter (fun helper ->
+        let hn = next_id ctx in
+        let ir = March_tir.Llvm_emit.emit_repl_fn
+          ~n:hn ~prev_slots:(prev_slots_of ctx) ~extern_fns ~types:tir.March_tir.Tir.tm_types
+          helper in
+        let _h = compile_fragment ctx ir in
+        mark_compiled_fns ctx [helper];
+        compiled_helpers := helper.March_tir.Tir.fn_name :: !compiled_helpers
+      ) helper_fns
+    with exn ->
+      List.iter (Hashtbl.remove ctx.compiled_fns) !compiled_helpers;
+      raise exn);
     (* Emit primary function AND store closure in a persistent slot. *)
     let pn = next_id ctx in
     let slot = alloc_slot ctx in
@@ -374,9 +418,14 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
       List.filter (fun (b, _, _) -> b <> bind_name) ctx.var_slots
   end else begin
     (* Let binding: compute value and store in a fresh slot. *)
-    let main_fn = List.find (fun (f : March_tir.Tir.fn_def) ->
-      f.fn_name = "main") tir.March_tir.Tir.tm_fns in
+    let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
+      f.fn_name = "main") tir.March_tir.Tir.tm_fns with
+    | Some f -> f
+    | None -> failwith "run_decl: TIR pipeline produced no 'main' function"
+    in
     let slot = alloc_slot ctx in
+    (* Advance counter only when about to emit. *)
+    let n = next_id ctx in
     let ir = March_tir.Llvm_emit.emit_repl_decl
       ~n ~name:bind_name
       ~val_ty:main_fn.fn_ret_ty
@@ -440,20 +489,26 @@ let precompile_stdlib ctx
          Without this, a cache-hit run starts the counter at 0 and the REPL's
          freshly-generated go$apply$N functions get UIDs that collide with
          prelude-compiled functions, causing partition_fns to treat them as
-         already-compiled externs and link the wrong implementation. *)
+         already-compiled externs and link the wrong implementation.
+         Use Fun.protect to guarantee close_in even on malformed lines. *)
       let ic = open_in names_path in
-      (try while true do
-        let line = String.trim (input_line ic) in
-        if String.length line > 15 && String.sub line 0 15 = "lambda_counter=" then begin
-          let n = int_of_string (String.sub line 15 (String.length line - 15)) in
-          March_tir.Defun.set_lambda_counter n
-        end else if line <> "" then
-          Hashtbl.replace ctx.compiled_fns line ()
-      done with End_of_file -> ());
-      close_in ic
-    with _ -> ())
+      Fun.protect ~finally:(fun () -> close_in_noerr ic) (fun () ->
+        try while true do
+          let line = String.trim (input_line ic) in
+          if String.length line > 15 && String.sub line 0 15 = "lambda_counter=" then begin
+            let n = int_of_string (String.sub line 15 (String.length line - 15)) in
+            March_tir.Defun.set_lambda_counter n
+          end else if line <> "" then
+            Hashtbl.replace ctx.compiled_fns line ()
+        done with End_of_file -> ())
+    with exn ->
+      Printf.eprintf "march JIT: stdlib cache load failed (%s), recompiling\n%!"
+        (Printexc.to_string exn))
   end else begin
     (* ── Cache miss: lower stdlib to TIR, compile, cache ─────────────────── *)
+    (* Ensure cache directory exists — first run or non-standard XDG layout. *)
+    (try Unix.mkdir cache_dir 0o755
+     with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
     let s = March_ast.Ast.dummy_span in
     let stdlib_mod : March_ast.Ast.module_ =
       { March_ast.Ast.mod_name = { txt = "StdlibPrelude"; span = s };
@@ -483,17 +538,19 @@ let precompile_stdlib ctx
          with End_of_file -> ());
         (match Unix.close_process_in ic with
          | Unix.WEXITED 0 ->
+           (* .ll no longer needed once clang succeeded. *)
+           (try Sys.remove ll_path with _ -> ());
            (* Write companion names file: one function name per line, then
               a "lambda_counter=N" sentinel so cache-hit runs can restore
               the counter and avoid UID collisions with prelude functions. *)
            (try
              let nc = open_out names_path in
-             List.iter (fun (f : March_tir.Tir.fn_def) ->
-               output_string nc (f.fn_name ^ "\n")) stdlib_fns;
-             output_string nc
-               (Printf.sprintf "lambda_counter=%d\n"
-                  (March_tir.Defun.get_lambda_counter ()));
-             close_out nc
+             Fun.protect ~finally:(fun () -> close_out_noerr nc) (fun () ->
+               List.iter (fun (f : March_tir.Tir.fn_def) ->
+                 output_string nc (f.fn_name ^ "\n")) stdlib_fns;
+               output_string nc
+                 (Printf.sprintf "lambda_counter=%d\n"
+                    (March_tir.Defun.get_lambda_counter ())))
            with _ -> ());
            (* Only mark functions as compiled if the .so was actually loaded.
               If we mark them before dlopen, future fragments would declare them
@@ -504,12 +561,17 @@ let precompile_stdlib ctx
              List.iter (fun (f : March_tir.Tir.fn_def) ->
                Hashtbl.replace ctx.compiled_fns f.fn_name ()
              ) stdlib_fns
-           with _ -> ())
+           with exn ->
+             Printf.eprintf "march JIT: stdlib .so dlopen failed (%s)\n%!"
+               (Printexc.to_string exn))
          | _ ->
            (try Sys.remove so_path with _ -> ());
-           let _ = Buffer.contents errbuf in ())
+           Printf.eprintf "march JIT: stdlib precompile failed:\n%s\n%!"
+             (Buffer.contents errbuf))
       end
-    with _ -> ())  (* Non-fatal *)
+    with exn ->
+      Printf.eprintf "march JIT: stdlib lower/typecheck failed (%s)\n%!"
+        (Printexc.to_string exn))
   end
 
 let cleanup ctx =
