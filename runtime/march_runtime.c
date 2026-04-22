@@ -17,6 +17,8 @@
 #include <setjmp.h>
 #include <sys/wait.h>
 #include <signal.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 
 /* ── GC/RC Tracing (Phase 5) ─────────────────────────────────────────── */
 /*
@@ -473,13 +475,13 @@ void *march_string_join(void *list, void *sep) {
 
 void march_print(void *s) {
     march_string *ms = (march_string *)s;
-    fwrite(ms->data, 1, (size_t)ms->len, stdout);
+    write(1, ms->data, (size_t)ms->len);
 }
 
 void march_println(void *s) {
     march_string *ms = (march_string *)s;
-    fwrite(ms->data, 1, (size_t)ms->len, stdout);
-    putchar('\n');
+    write(1, ms->data, (size_t)ms->len);
+    write(1, "\n", 1);
 }
 
 void march_print_stderr(void *s) {
@@ -2140,6 +2142,51 @@ int64_t march_process_pid(void) {
     return (int64_t)getpid();
 }
 
+/* dns_resolve(host) → Result(List(String), String) */
+void *dns_resolve(void *host_ptr) {
+    march_string *hs = (march_string *)host_ptr;
+    char hostname[1024];
+    size_t copy_len = (size_t)hs->len < sizeof(hostname) - 1 ? (size_t)hs->len : sizeof(hostname) - 1;
+    memcpy(hostname, hs->data, copy_len);
+    hostname[copy_len] = '\0';
+
+    struct addrinfo hints, *res, *rp;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+
+    int rc = getaddrinfo(hostname, NULL, &hints, &res);
+    if (rc != 0) {
+        const char *msg = gai_strerror(rc);
+        return mk_err_cstr(msg);
+    }
+
+    /* Collect unique IP strings into a temporary array. */
+    char addrs[64][INET6_ADDRSTRLEN];
+    int n = 0;
+    for (rp = res; rp != NULL && n < 64; rp = rp->ai_next) {
+        char buf[INET6_ADDRSTRLEN];
+        void *addr_ptr;
+        if (rp->ai_family == AF_INET)
+            addr_ptr = &((struct sockaddr_in  *)rp->ai_addr)->sin_addr;
+        else if (rp->ai_family == AF_INET6)
+            addr_ptr = &((struct sockaddr_in6 *)rp->ai_addr)->sin6_addr;
+        else continue;
+        if (!inet_ntop(rp->ai_family, addr_ptr, buf, sizeof(buf))) continue;
+        /* Deduplicate */
+        int dup = 0;
+        for (int i = 0; i < n; i++) if (strcmp(addrs[i], buf) == 0) { dup = 1; break; }
+        if (!dup) { strncpy(addrs[n], buf, INET6_ADDRSTRLEN - 1); addrs[n][INET6_ADDRSTRLEN-1]='\0'; n++; }
+    }
+    freeaddrinfo(res);
+
+    /* Build List(String) in reverse (build_string_list handles it). */
+    char *ptrs[64];
+    for (int i = 0; i < n; i++) ptrs[i] = addrs[i];
+    void *list = build_string_list(ptrs, n);
+    return mk_ok(list);
+}
+
 /* process_spawn_sync(command, args) → Result(ProcessResult, String)
    ProcessResult = ProcessResult(Int, String, String) (exit_code, stdout, stderr) */
 void *march_process_spawn_sync(void *cmd_obj, void *args_list) {
@@ -2906,6 +2953,197 @@ void *march_typed_array_fold(void *arr, void *acc, void *f) {
     return result;
 }
 
+/* ── Native int/float arrays ────────────────────────────────────────── */
+/* Layout: march_hdr(16) + int64_t len(8) + elements(len*8)             */
+#define NATIVE_ARR_HDR 24
+
+static void *native_arr_alloc(int64_t len) {
+    if (len < 0) { fputs("march: native array: negative length\n", stderr); exit(1); }
+    int64_t body;
+    if (__builtin_mul_overflow(len, (int64_t)8, &body)) {
+        fputs("march: native array: array too large\n", stderr); exit(1);
+    }
+    void *arr = march_alloc(NATIVE_ARR_HDR + body);
+    *(int64_t *)((char *)arr + 16) = len;
+    return arr;
+}
+
+/* Closure calling helpers (fn_ptr at field[0] = offset 16 from object). */
+static inline int64_t clo_call_int_int(void *clo, int64_t x) {
+    int64_t (*fn)(void*, int64_t) = *(int64_t (**)(void*, int64_t))((char *)clo + 16);
+    return fn(clo, x);
+}
+static inline double clo_call_dbl_dbl(void *clo, double x) {
+    double (*fn)(void*, double) = *(double (**)(void*, double))((char *)clo + 16);
+    return fn(clo, x);
+}
+
+void *native_int_arr_make(int64_t len, int64_t def) {
+    void *arr = native_arr_alloc(len);
+    for (int64_t i = 0; i < len; i++)
+        *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8) = def;
+    return arr;
+}
+
+int64_t native_int_arr_length(void *arr) {
+    return *(int64_t *)((char *)arr + 16);
+}
+
+int64_t native_int_arr_get(void *arr, int64_t i) {
+    return *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+}
+
+void *native_int_arr_set(void *arr, int64_t i, int64_t val) {
+    int64_t len = native_int_arr_length(arr);
+    void *new_arr = native_arr_alloc(len);
+    memcpy((char *)new_arr + NATIVE_ARR_HDR, (char *)arr + NATIVE_ARR_HDR, (size_t)(len * 8));
+    *(int64_t *)((char *)new_arr + NATIVE_ARR_HDR + i * 8) = val;
+    return new_arr;
+}
+
+int64_t native_int_arr_sum(void *arr) {
+    int64_t len = native_int_arr_length(arr), s = 0;
+    for (int64_t i = 0; i < len; i++)
+        s += *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+    return s;
+}
+
+void *native_int_arr_map(void *arr, void *f) {
+    int64_t len = native_int_arr_length(arr);
+    void *new_arr = native_arr_alloc(len);
+    for (int64_t i = 0; i < len; i++) {
+        int64_t x = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+        *(int64_t *)((char *)new_arr + NATIVE_ARR_HDR + i * 8) = clo_call_int_int(f, x);
+    }
+    return new_arr;
+}
+
+void *native_int_arr_from_list(void *lst) {
+    int64_t n = 0;
+    void *tmp = lst;
+    while (*(int32_t *)((char *)tmp + 8) == 1) { n++; tmp = *(void **)((char *)tmp + 24); }
+    void *arr = native_arr_alloc(n);
+    void *cur = lst;
+    for (int64_t i = 0; i < n; i++) {
+        *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8) = *(int64_t *)((char *)cur + 16);
+        cur = *(void **)((char *)cur + 24);
+    }
+    return arr;
+}
+
+void *native_int_arr_to_list(void *arr) {
+    int64_t len = native_int_arr_length(arr);
+    void *lst = make_nil();
+    for (int64_t i = len - 1; i >= 0; i--) {
+        int64_t v = *(int64_t *)((char *)arr + NATIVE_ARR_HDR + i * 8);
+        void *cons = march_alloc(32);
+        *(int32_t *)((char *)cons + 8) = 1;
+        *(int64_t *)((char *)cons + 16) = v;
+        *(void **)((char *)cons + 24) = lst;
+        lst = cons;
+    }
+    return lst;
+}
+
+void *native_float_arr_make(int64_t len, double def) {
+    void *arr = native_arr_alloc(len);
+    for (int64_t i = 0; i < len; i++)
+        memcpy((char *)arr + NATIVE_ARR_HDR + i * 8, &def, 8);
+    return arr;
+}
+
+int64_t native_float_arr_length(void *arr) {
+    return *(int64_t *)((char *)arr + 16);
+}
+
+double native_float_arr_get(void *arr, int64_t i) {
+    double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8); return v;
+}
+
+void *native_float_arr_set(void *arr, int64_t i, double val) {
+    int64_t len = native_float_arr_length(arr);
+    void *new_arr = native_arr_alloc(len);
+    memcpy((char *)new_arr + NATIVE_ARR_HDR, (char *)arr + NATIVE_ARR_HDR, (size_t)(len * 8));
+    memcpy((char *)new_arr + NATIVE_ARR_HDR + i * 8, &val, 8);
+    return new_arr;
+}
+
+double native_float_arr_sum(void *arr) {
+    int64_t len = native_float_arr_length(arr);
+    double s = 0.0;
+    for (int64_t i = 0; i < len; i++) { double v; memcpy(&v, (char *)arr + NATIVE_ARR_HDR + i * 8, 8); s += v; }
+    return s;
+}
+
+void *native_float_arr_map(void *arr, void *f) {
+    int64_t len = native_float_arr_length(arr);
+    void *new_arr = native_arr_alloc(len);
+    for (int64_t i = 0; i < len; i++) {
+        double x; memcpy(&x, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        double r = clo_call_dbl_dbl(f, x);
+        memcpy((char *)new_arr + NATIVE_ARR_HDR + i * 8, &r, 8);
+    }
+    return new_arr;
+}
+
+void *native_float_arr_from_list(void *lst) {
+    int64_t n = 0;
+    void *tmp = lst;
+    while (*(int32_t *)((char *)tmp + 8) == 1) { n++; tmp = *(void **)((char *)tmp + 24); }
+    void *arr = native_arr_alloc(n);
+    void *cur = lst;
+    for (int64_t i = 0; i < n; i++) {
+        double v; memcpy(&v, (char *)cur + 16, 8);
+        memcpy((char *)arr + NATIVE_ARR_HDR + i * 8, &v, 8);
+        cur = *(void **)((char *)cur + 24);
+    }
+    return arr;
+}
+
+void *native_float_arr_to_list(void *arr) {
+    int64_t len = native_float_arr_length(arr);
+    void *lst = make_nil();
+    for (int64_t i = len - 1; i >= 0; i--) {
+        void *cons = march_alloc(32);
+        *(int32_t *)((char *)cons + 8) = 1;
+        memcpy((char *)cons + 16, (char *)arr + NATIVE_ARR_HDR + i * 8, 8);
+        *(void **)((char *)cons + 24) = lst;
+        lst = cons;
+    }
+    return lst;
+}
+
+/* ── UUID v7 ──────────────────────────────────────────────────────────── */
+#include <sys/time.h>
+
+static void uuid_v7_bytes(uint8_t bytes[16], int64_t ts_ms) {
+    arc4random_buf(bytes, 16);
+    bytes[0] = (uint8_t)(ts_ms >> 40);
+    bytes[1] = (uint8_t)(ts_ms >> 32);
+    bytes[2] = (uint8_t)(ts_ms >> 24);
+    bytes[3] = (uint8_t)(ts_ms >> 16);
+    bytes[4] = (uint8_t)(ts_ms >>  8);
+    bytes[5] = (uint8_t)(ts_ms      );
+    bytes[6] = (uint8_t)((bytes[6] & 0x0f) | 0x70);  /* version 7 */
+    bytes[8] = (uint8_t)((bytes[8] & 0x3f) | 0x80);  /* variant 10xx */
+}
+
+void *uuid_v7_at(int64_t ts_ms) {
+    uint8_t b[16]; uuid_v7_bytes(b, ts_ms);
+    char buf[37];
+    snprintf(buf, sizeof(buf),
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+        b[0],b[1],b[2],b[3], b[4],b[5], b[6],b[7], b[8],b[9],
+        b[10],b[11],b[12],b[13],b[14],b[15]);
+    return march_string_lit(buf, 36);
+}
+
+void *uuid_v7(void) {
+    struct timeval tv; gettimeofday(&tv, NULL);
+    int64_t ts_ms = (int64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+    return uuid_v7_at(ts_ms);
+}
+
 /* ── Logger builtins ─────────────────────────────────────────────────── */
 
 static int64_t march_logger_level_val = 0;   /* Debug=0, Info=1, Warn=2, Error=3 */
@@ -3011,3 +3249,111 @@ void *march_logger_write(void *level_str, void *msg, void *ctx, void *extra) {
     fputc('\n', stderr);
     return logger_nil();
 }
+
+/* ── Logger v2 builtins (structured fields + appenders) ──────────────── */
+
+static void *logger_v2_field_stack = NULL;  /* List(LogField), head = most recent */
+
+static int64_t logger_v2_depth(void *lst) {
+    int64_t n = 0;
+    while (*(int32_t *)((char *)lst + 8) != 0) {
+        lst = *(void **)((char *)lst + 24);
+        n++;
+    }
+    return n;
+}
+
+static void logvalue_print(void *lv) {
+    if (!lv) { fputs("null", stderr); return; }
+    int32_t tag = *(int32_t *)((char *)lv + 8);
+    switch (tag) {
+    case 0: { void *s = *(void **)((char *)lv + 16); march_string *ms = (march_string *)s;
+              fwrite(ms->data, 1, (size_t)ms->len, stderr); break; }
+    case 1: { int64_t n = *(int64_t *)((char *)lv + 16); fprintf(stderr, "%" PRId64, n); break; }
+    case 2: { double f; memcpy(&f, (char *)lv + 16, 8); fprintf(stderr, "%g", f); break; }
+    case 3: { int64_t b = *(int64_t *)((char *)lv + 16); fputs(b ? "true" : "false", stderr); break; }
+    default: fputs("null", stderr); break;
+    }
+}
+
+static void logger_v2_print_fields(void *lst) {
+    int first = 1;
+    while (*(int32_t *)((char *)lst + 8) != 0) {
+        void *field = *(void **)((char *)lst + 16);
+        lst         = *(void **)((char *)lst + 24);
+        void *k = *(void **)((char *)field + 16);
+        void *v = *(void **)((char *)field + 24);
+        if (!first) fputs(", ", stderr);
+        march_string *ks = (march_string *)k;
+        fwrite(ks->data, 1, (size_t)ks->len, stderr);
+        fputc('=', stderr);
+        logvalue_print(v);
+        first = 0;
+    }
+}
+
+void *logger_add_field(void *key, void *value) {
+    pthread_mutex_lock(&march_logger_mutex);
+    if (!logger_v2_field_stack) logger_v2_field_stack = logger_nil();
+    void *field = march_alloc(32);  /* LogField(key,value): hdr(16)+key(8)+value(8) */
+    *(void **)((char *)field + 16) = key;
+    *(void **)((char *)field + 24) = value;
+    logger_v2_field_stack = logger_cons(field, logger_v2_field_stack);
+    pthread_mutex_unlock(&march_logger_mutex);
+    return logger_nil();
+}
+
+int64_t logger_field_count(void) {
+    pthread_mutex_lock(&march_logger_mutex);
+    void *lst = logger_v2_field_stack ? logger_v2_field_stack : logger_nil();
+    int64_t n = logger_v2_depth(lst);
+    pthread_mutex_unlock(&march_logger_mutex);
+    return n;
+}
+
+void *logger_get_fields(void) {
+    pthread_mutex_lock(&march_logger_mutex);
+    void *lst = logger_v2_field_stack ? logger_v2_field_stack : logger_nil();
+    pthread_mutex_unlock(&march_logger_mutex);
+    return lst;
+}
+
+void *logger_pop_to_depth(int64_t depth) {
+    pthread_mutex_lock(&march_logger_mutex);
+    if (!logger_v2_field_stack) logger_v2_field_stack = logger_nil();
+    while (logger_v2_depth(logger_v2_field_stack) > depth)
+        logger_v2_field_stack = *(void **)((char *)logger_v2_field_stack + 24);
+    pthread_mutex_unlock(&march_logger_mutex);
+    return logger_nil();
+}
+
+void *logger_dispatch(void *level_str, void *msg, void *module_name, void *fields) {
+    (void)module_name;
+    pthread_mutex_lock(&march_logger_mutex);
+    march_string *ls = (march_string *)level_str;
+    march_string *ms = (march_string *)msg;
+    fputc('[', stderr);
+    fwrite(ls->data, 1, (size_t)ls->len, stderr);
+    fputs("] ", stderr);
+    fwrite(ms->data, 1, (size_t)ms->len, stderr);
+    int has_fields = fields && *(int32_t *)((char *)fields + 8) != 0;
+    int has_ctx    = logger_v2_field_stack && *(int32_t *)((char *)logger_v2_field_stack + 8) != 0;
+    if (has_fields || has_ctx) {
+        fputs(" {", stderr);
+        if (has_fields)  logger_v2_print_fields(fields);
+        if (has_fields && has_ctx) fputs(", ", stderr);
+        if (has_ctx)     logger_v2_print_fields(logger_v2_field_stack);
+        fputc('}', stderr);
+    }
+    fputc('\n', stderr);
+    pthread_mutex_unlock(&march_logger_mutex);
+    return logger_nil();
+}
+
+void *logger_register_appender(void *name, void *cb) { (void)name; (void)cb; return logger_nil(); }
+void *logger_remove_appender(void *name)              { (void)name; return logger_nil(); }
+void *logger_clear_appenders(void)                    { return logger_nil(); }
+void *logger_appender_names(void)                     { return logger_nil(); /* Nil list */ }
+void *logger_set_module_level(void *mod, int64_t lv)  { (void)mod; (void)lv; return logger_nil(); }
+void *logger_clear_module_level(void *mod)            { (void)mod; return logger_nil(); }
+int64_t logger_module_level(void *mod)                { (void)mod; return march_logger_level_val; }

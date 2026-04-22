@@ -6,6 +6,10 @@
 #include <dlfcn.h>
 
 /* dlopen(path, RTLD_NOW | RTLD_GLOBAL) -> handle (nativeint)
+   RTLD_NOW resolves all symbols at load time — required because JIT closure
+   structs store raw function pointers (not PLT stubs), so lazy binding would
+   yield stub addresses that segfault when called as function pointers.
+   RTLD_GLOBAL exports the .so's symbols for use by later fragments.
    Empty string "" is treated as NULL (returns main program handle). */
 CAMLprim value march_dlopen(value v_path) {
     CAMLparam1(v_path);

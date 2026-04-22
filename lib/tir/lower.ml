@@ -1800,8 +1800,10 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
     List.iter (fun d ->
       match d with
       | Ast.DFn (def, _) ->
-        if not (Hashtbl.mem !_default_dispatch def.fn_name.txt) then
-          fns := lower_fn_def def :: !fns
+        if not (Hashtbl.mem !_default_dispatch def.fn_name.txt) then begin
+          let fn = lower_fn_def def in   (* evaluate before reading !fns *)
+          fns := fn :: !fns
+        end
       | _ -> ()
     ) stdlib_context;
   (* Pass 2: Lower all other declarations. *)
@@ -1811,8 +1813,10 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
         (* Skip dispatcher DFns (original-named wrappers for default-arg functions).
            The mangled versions (foo$N) are the real implementations used by TIR.
            Dispatchers are only needed by the interpreter for VMultiarity dispatch. *)
-        if not (Hashtbl.mem !_default_dispatch def.fn_name.txt) then
-          fns := lower_fn_def def :: !fns
+        if not (Hashtbl.mem !_default_dispatch def.fn_name.txt) then begin
+          let fn = lower_fn_def def in   (* evaluate before reading !fns *)
+          fns := fn :: !fns
+        end
       | Ast.DType (_, name, params, td, _) ->
         (match lower_type_def name params td with
          | Some td' -> types := td' :: !types

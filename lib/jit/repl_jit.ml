@@ -244,10 +244,12 @@ and pp_list ?(depth=0) elem_ty (ptr : nativeint) : string =
 and pp_field ?(depth=0) (ty : March_tir.Tir.ty) (ptr : nativeint) (i : int) : string =
   let open March_tir.Tir in
   match ty with
-  | TInt  -> Int64.to_string (field_i64 ptr i)
-  | TBool -> if field_i64 ptr i = 0L then "false" else "true"
+  (* Scalar heap fields are stored tagged: (value << 1) | 1.  Untag before display. *)
+  | TInt  -> Int64.to_string (Int64.shift_right_logical (field_i64 ptr i) 1)
+  | TBool -> if Int64.shift_right_logical (field_i64 ptr i) 1 = 0L then "false" else "true"
   | TUnit -> "()"
   | TFloat ->
+    (* Floats are stored as raw double bits via bitcast — no tag bit. *)
     let bits = field_i64 ptr i in
     Printf.sprintf "%g" (Int64.float_of_bits bits)
   | _ ->
@@ -370,41 +372,42 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
   let (user_fns, extern_fns) = partition_fns ctx all_support_fns in
   if is_fn_decl then begin
+    (* JIT context persists across :reset.  When the scroll system resends prior
+       cells, the function is already compiled and its closure slot is still valid.
+       Skip recompilation entirely — helper lambdas may have new defun UIDs but
+       the compiled closure is unchanged. *)
+    if Hashtbl.mem ctx.compiled_fns bind_name then ()
+    else begin
     let primary_fn =
       match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
         f.fn_name = bind_name) user_fns with
       | Some f -> f
-      | None ->
-        (match user_fns with
-         | f :: _ -> f
-         | [] -> failwith ("run_decl: no functions produced for " ^ bind_name))
+      | None -> List.hd user_fns
     in
     let helper_fns = List.filter
       (fun (f : March_tir.Tir.fn_def) -> f.fn_name <> primary_fn.fn_name)
       user_fns in
-    (* Compile helper lambdas.  Track which ones succeed so we can roll back
-       compiled_fns if any subsequent helper (or the primary fn) fails — a
-       partial compile leaves compiled_fns consistent with loaded .sos. *)
-    let compiled_helpers = ref [] in
-    (try
-      List.iter (fun helper ->
-        let hn = next_id ctx in
-        let ir = March_tir.Llvm_emit.emit_repl_fn
-          ~n:hn ~prev_slots:(prev_slots_of ctx) ~extern_fns ~types:tir.March_tir.Tir.tm_types
-          helper in
-        let _h = compile_fragment ctx ir in
-        mark_compiled_fns ctx [helper];
-        compiled_helpers := helper.March_tir.Tir.fn_name :: !compiled_helpers
-      ) helper_fns
-    with exn ->
-      List.iter (Hashtbl.remove ctx.compiled_fns) !compiled_helpers;
-      raise exn);
+    (* Compile all helper lambdas in ONE combined fragment so they can freely
+       reference each other (e.g., outer lambda creates inner lambda's closure).
+       Compiling helpers separately caused cross-reference failures when the
+       outer lambda's IR referenced the inner lambda before it was declared. *)
+    (if helper_fns <> [] then begin
+      ignore (next_id ctx);  (* advance counter so compile_fragment uses right id *)
+      let ir = March_tir.Llvm_emit.emit_fns_fragment
+        ~types:tir.March_tir.Tir.tm_types ~fns:helper_fns ~extern_fns () in
+      (* Wrap in compile_fragment — uses counter (= hn) for the file name. *)
+      (try
+        ignore (compile_fragment ctx ir);
+        mark_compiled_fns ctx helper_fns
+      with exn ->
+        raise exn)
+    end);
     (* Emit primary function AND store closure in a persistent slot. *)
     let pn = next_id ctx in
     let slot = alloc_slot ctx in
     let ir = March_tir.Llvm_emit.emit_repl_fn_with_closure_slot
       ~n:pn ~bind_name ~dest_slot:slot ~prev_slots:(prev_slots_of ctx)
-      ~extern_fns ~types:tir.March_tir.Tir.tm_types
+      ~extern_fns:(extern_fns @ helper_fns) ~types:tir.March_tir.Tir.tm_types
       primary_fn in
     let handle = compile_fragment ctx ir in
     mark_compiled_fns ctx [primary_fn];
@@ -416,6 +419,7 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
        to emit inttoptr when loading the closure from the slot. *)
     ctx.var_slots <- (bind_name, slot, March_tir.Tir.TFn ([], March_tir.Tir.TUnit)) ::
       List.filter (fun (b, _, _) -> b <> bind_name) ctx.var_slots
+    end (* if user_fns <> [] *)
   end else begin
     (* Let binding: compute value and store in a fresh slot. *)
     let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
@@ -523,7 +527,7 @@ let precompile_stdlib ctx
         tir.March_tir.Tir.tm_fns in
       if stdlib_fns <> [] then begin
         let ir = March_tir.Llvm_emit.emit_fns_fragment
-          ~types:tir.March_tir.Tir.tm_types ~fns:stdlib_fns in
+          ~types:tir.March_tir.Tir.tm_types ~fns:stdlib_fns () in
         let n = next_id ctx in
         let ll_path = Filename.concat ctx.tmp_dir
           (Printf.sprintf "stdlib_prelude_%d.ll" n) in

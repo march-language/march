@@ -3917,6 +3917,32 @@ let emit_store_to_slot ctx (slot_idx : int) (result : string) (tir_ty : Tir.ty) 
   in
   Printf.bprintf ctx.buf "  call void @march_repl_set(i64 %d, i64 %s)\n" slot_idx bits
 
+(** Emit thin module-level loader functions for each prior REPL slot so that
+    named function bodies compiled via [emit_repl_fn] /
+    [emit_repl_fn_with_closure_slot] can reference prior let-bindings as
+    zero-arg calls "@<name>()".  Each loader calls @march_repl_get and returns
+    the value in the correct LLVM type.  [ctx.top_fn_ret_ty] is updated so the
+    AVar handler at the call site uses the matching return type.
+    Writing to [ctx.buf] (not [ctx.extra_fns]) so the definitions appear even
+    in [emit_repl_fn] which does not include extra_fns in its output. *)
+let emit_slot_loader_fns ctx (prev_slots : repl_slot_info list) =
+  List.iter (fun (si : repl_slot_info) ->
+    match si.rs_ty with
+    | Tir.TUnit -> ()  (* unit slots carry no meaningful value; skip *)
+    | ty ->
+      let fname  = llvm_name si.rs_bare in
+      let ret_ty = llvm_ret_ty ty in
+      Hashtbl.replace ctx.top_fn_ret_ty si.rs_bare ty;
+      let (conv_instr, retval) = match ty with
+        | Tir.TInt | Tir.TBool -> ("", "%raw")
+        | Tir.TFloat -> ("  %fv = bitcast i64 %raw to double\n", "%fv")
+        | _ -> ("  %pv = inttoptr i64 %raw to ptr\n", "%pv")
+      in
+      Printf.bprintf ctx.buf
+        "\ndefine %s @%s() {\nentry:\n  %%raw = call i64 @march_repl_get(i64 %d)\n%s  ret %s %s\n}\n"
+        ret_ty fname si.rs_slot conv_instr ret_ty retval
+  ) prev_slots
+
 (** Emit bridge alloca+load+store pairs for each prev_global into the current
     function entry block, and register the slot in [ctx.var_slot].
     This lets the body refer to REPL globals via the normal alloca load path.
@@ -4044,7 +4070,6 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
     ?(extern_fns : Tir.fn_def list = [])
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
-  ignore prev_slots;  (* helper fns don't reference REPL vars in their own body *)
   let ctx = make_ctx ~fast_math () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
@@ -4057,6 +4082,7 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
       Hashtbl.replace ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty;
       Hashtbl.replace ctx.top_fn_nparams f.Tir.fn_name (List.length f.Tir.fn_params);
       if f.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns f.Tir.fn_name true) extern_fns;
+  emit_slot_loader_fns ctx prev_slots;
   emit_fn ctx fn;
   let init_name = Printf.sprintf "repl_%d_init" n in
   Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n  ret void\n}\n" init_name;
@@ -4065,6 +4091,7 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
   List.iter (fun f -> Buffer.add_string out (fn_declare_str f ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
+  Buffer.add_buffer out ctx.extra_fns;
   Buffer.contents out
 
 (** Emit a REPL function declaration as a .ll fragment, and also store a
@@ -4079,7 +4106,6 @@ let emit_repl_fn_with_closure_slot ?(fast_math=false) ~(n : int)
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
   ignore bind_name;
-  ignore prev_slots;  (* primary fn body does not reference REPL vars directly *)
   let ctx = make_ctx ~fast_math () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
@@ -4092,6 +4118,7 @@ let emit_repl_fn_with_closure_slot ?(fast_math=false) ~(n : int)
       Hashtbl.replace ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty;
       Hashtbl.replace ctx.top_fn_nparams f.Tir.fn_name (List.length f.Tir.fn_params);
       if f.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns f.Tir.fn_name true) extern_fns;
+  emit_slot_loader_fns ctx prev_slots;
   emit_fn ctx fn;
   (* Build a thin closure wrapper: @<fn>$clo_wrap(ptr %_clo, <concrete args>)
      Uses the same concrete parameter types and untagged return as the wrapper
@@ -4141,11 +4168,19 @@ let emit_repl_fn_with_closure_slot ?(fast_math=false) ~(n : int)
     No expression wrapper is emitted — just the function definitions. *)
 let emit_fns_fragment
     ~(types : Tir.type_def list)
-    ~(fns : Tir.fn_def list) : string =
+    ~(fns : Tir.fn_def list)
+    ?(extern_fns : Tir.fn_def list = [])
+    () : string =
   let ctx = make_ctx () in
   let pseudo_mod : Tir.tir_module =
     { tm_name = "stdlib_prelude"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
+  (* Register externals first so intra-fragment references resolve correctly. *)
+  List.iter (fun f ->
+      Hashtbl.replace ctx.top_fns f.Tir.fn_name true;
+      Hashtbl.replace ctx.top_fn_ret_ty f.Tir.fn_name f.Tir.fn_ret_ty;
+      Hashtbl.replace ctx.top_fn_nparams f.Tir.fn_name (List.length f.Tir.fn_params);
+      if f.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns f.Tir.fn_name true) extern_fns;
   List.iter (fun fn ->
       Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
       Hashtbl.replace ctx.top_fn_ret_ty fn.Tir.fn_name fn.Tir.fn_ret_ty;
@@ -4154,6 +4189,7 @@ let emit_fns_fragment
   List.iter (emit_fn ctx) fns;
   let out = Buffer.create 8192 in
   emit_preamble out;
+  List.iter (fun f -> Buffer.add_string out (fn_declare_str f ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
   Buffer.add_buffer out ctx.extra_fns;

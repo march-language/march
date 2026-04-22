@@ -385,7 +385,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
          else Printf.sprintf "march(%d)> " !prompt_num
        in
        let cont   = String.make (String.length prompt) ' ' in
-       Printf.printf "%s%!" (if !first_line then prompt else cont);
+       if not scroll_mode then Printf.printf "%s%!" (if !first_line then prompt else cont);
        first_line := false;
        (match (try Some (input_line stdin) with End_of_file -> None) with
         | None ->
@@ -407,6 +407,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
             incr prompt_num;
             History.add hist src;
             (match String.trim src with
+             | ":scroll_done" when scroll_mode -> ()  (* emit sentinel only; no other action *)
              | ":quit" | ":q" -> if is_debug then exit 0 else running := false
              | ":continue" | ":c" when is_debug -> running := false
              | ":where" | ":w" when is_debug ->
@@ -568,13 +569,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                (* Clear terminal screen and reprint prompt on next iteration *)
                Printf.printf "\027[2J\027[H%!"
              | ":reset" when not is_debug ->
-               let base_tc' = March_typecheck.Typecheck.base_env
-                 (March_errors.Errors.create ()) type_map in
-               let tc_pre' = preregister_stdlib_types base_tc' stdlib_decls in
-               let base_e' = March_eval.Eval.task_builtins @ March_eval.Eval.base_env in
-               let (e', tc') = load_decls_into_env base_e' tc_pre' stdlib_decls in
-               env    := e';
-               tc_env := tc';
+               env    := e0;
+               tc_env := tc0;
                Printf.printf "REPL state reset.\n%!"
              | ":help" ->
                if is_debug then
@@ -628,14 +624,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                (match !loaded_file with
                 | None -> Printf.printf "Nothing to reload (use :load <file> first).\n%!"
                 | Some path ->
-                  (* Reset to stdlib baseline then reload *)
-                  let base_tc' = March_typecheck.Typecheck.base_env
-                    (March_errors.Errors.create ()) type_map in
-                  let tc_pre' = preregister_stdlib_types base_tc' stdlib_decls in
-                  let base_e' = March_eval.Eval.task_builtins @ March_eval.Eval.base_env in
-                  let (e', tc') = load_decls_into_env base_e' tc_pre' stdlib_decls in
-                  env    := e';
-                  tc_env := tc';
+                  env    := e0;
+                  tc_env := tc0;
                   do_load_file path;
                   Printf.printf "reloaded %s\n%!" path)
              | ":reload" when is_debug ->
@@ -798,7 +788,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:true ~bind_name m;
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
-                        Printf.printf "val %s = <fn>\n%!" bind_name
+                        if not scroll_mode then Printf.printf "val %s = <fn>\n%!" bind_name
                       | Some jit when (match d' with
                           | March_ast.Ast.DLet (_, b, _) ->
                             (match b.bind_pat with March_ast.Ast.PatVar _ -> true | _ -> false)
@@ -825,11 +815,12 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                           | Some v -> March_eval.Eval.value_to_string v
                           | None -> "?"
                         in
-                        Printf.printf "val %s = %s\n%!" bind_name vstr
+                        if not scroll_mode then Printf.printf "val %s = %s\n%!" bind_name vstr
                       | _ ->
                         env := March_eval.Eval.eval_decl !env d';
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
+                        if not scroll_mode then
                         (match d' with
                          | March_ast.Ast.DFn (def, _) ->
                            Printf.printf "val %s = <fn>\n%!" def.fn_name.txt
@@ -898,8 +889,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                    let eval_via_interp () =
                      let v = March_eval.Eval.eval_expr !env e' in
                      let vs = March_eval.Eval.value_to_string_pretty v in
-                     Printf.printf "= %s\n%!" vs;
-                     if !show_type then
+                     if not scroll_mode then Printf.printf "= %s\n%!" vs;
+                     if not scroll_mode && !show_type then
                        Printf.printf "- : %s\n%!" ty_str;
                      Result_vars.push result_h v ty_str;
                      env    := ("v", v)
@@ -916,7 +907,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                           let m = wrap_expr_as_module e' in
                           let (_ty, result_str) =
                             March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
-                          Printf.printf "= %s\n%!" result_str;
+                          if not scroll_mode then Printf.printf "= %s\n%!" result_str;
                           if !show_type then
                             Printf.printf "- : %s\n%!" ty_str;
                           if tc_ok then
@@ -940,7 +931,15 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                     | exn ->
                       March_eval.Eval.clear_march_stack ();
                       Printf.eprintf "error: %s\n%!" (Printexc.to_string exn))));
-          if scroll_mode then Printf.printf "%s\n%!" scroll_sentinel;
+          (* In scroll mode only :reset and :scroll_done emit the sentinel.
+             Regular form evaluation is silent so each cell produces exactly
+             one sentinel (from :scroll_done) regardless of how many top-level
+             declarations it contains. *)
+          if scroll_mode then (
+            let t = String.trim src in
+            if t = ":reset" || t = ":scroll_done" then
+              Printf.printf "%s\n%!" scroll_sentinel
+          );
           end;
           (* Drain any values that were tap()ed during evaluation. *)
           List.iter (fun v ->

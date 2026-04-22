@@ -29,6 +29,35 @@ mod Vault do
     vault_new(name)
   end
 
+  doc """
+  Open (or create) a named vault table.  Returns an existing table if one with
+  this name already exists; otherwise creates a new empty table.
+
+      let rate_table = Vault.open("rate_limits")
+  """
+  fn open(name) do
+    match vault_whereis(name) do
+    Some(t) -> t
+    None    -> vault_new(name)
+    end
+  end
+
+  doc "Insert or overwrite a key-value pair. Alias for `set`.  Removes any previous TTL."
+  fn put(table, key, value) do
+    vault_set(table, key, value)
+  end
+
+  doc "Remove a key from the table. Alias for `drop`.  No-op if the key does not exist."
+  fn delete(table, key) do
+    vault_drop(table, key)
+  end
+
+  doc "Remove all entries from the table, leaving it empty."
+  fn clear(table) do
+    let ks = vault_keys(table)
+    List.each(ks, fn k -> vault_drop(table, k))
+  end
+
   doc "Insert or overwrite a key-value pair.  Removes any previous TTL."
   fn set(table, key, value) do
     vault_set(table, key, value)
