@@ -137,24 +137,19 @@ run_test "match int" \
 echo ""
 echo "--- Cross-line variable capture (the original bug: single REPL session) ---"
 # These require multiple lines piped to ONE REPL instance.
-# KNOWN ISSUE: multi-line sessions hit the cross-fragment stdlib declare bug
-# (see issue #1 above). The first JIT compilation succeeds, but subsequent
-# fragments that call stdlib functions from the first fragment fail.
-# Only tests that do NOT require calling stdlib functions in line 2+ will pass.
 # ──────────────────────────────────────────────────────────────────────────────
 
 run_test "cross-line simple arithmetic" \
   $'let x = 10\nlet y = x + 5\ny' \
   "val y = 15"
 
-# These hit the cross-fragment issue (line 2 calls stdlib functions compiled in line 1)
 run_test "cross-line fn as HOF arg (original bug)" \
   $'let f = fn x -> x * 2\nlet l = [1,2,3]\nList.map(l, f)' \
-  "jit error.*List\|2, 4, 6" xfail
+  "2, 4, 6"
 
 run_test "cross-line fold with cross-line fn" \
   $'let add = fn (a, x) -> a + x\nList.fold_left([1,2,3,4,5], 0, add)' \
-  "15" xfail
+  "= 15$"
 
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""

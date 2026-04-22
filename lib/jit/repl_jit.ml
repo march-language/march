@@ -99,7 +99,8 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
   (* dlopen the .so; remove .ll artifact now that compilation succeeded *)
   let handle = Jit.dlopen so_path in
   ctx.handles <- handle :: ctx.handles;
-  (try Sys.remove ll_path with _ -> ());
+  if Sys.getenv_opt "MARCH_KEEP_LL" <> None then ()
+  else (try Sys.remove ll_path with _ -> ());
   handle
 
 (** True if a TIR function name resolves to a C runtime symbol (i.e. mangle
@@ -580,9 +581,12 @@ let precompile_stdlib ctx
 
 let cleanup ctx =
   List.iter (fun h -> try Jit.dlclose h with _ -> ()) ctx.handles;
-  (* Remove tmp_dir contents *)
-  let entries = Sys.readdir ctx.tmp_dir in
-  Array.iter (fun f ->
-    try Sys.remove (Filename.concat ctx.tmp_dir f) with _ -> ()
-  ) entries;
-  (try Unix.rmdir ctx.tmp_dir with _ -> ())
+  if Sys.getenv_opt "MARCH_KEEP_LL" <> None then ()
+  else begin
+    (* Remove tmp_dir contents *)
+    let entries = Sys.readdir ctx.tmp_dir in
+    Array.iter (fun f ->
+      try Sys.remove (Filename.concat ctx.tmp_dir f) with _ -> ()
+    ) entries;
+    (try Unix.rmdir ctx.tmp_dir with _ -> ())
+  end
