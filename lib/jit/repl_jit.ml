@@ -42,6 +42,7 @@ type t = {
   mutable handles : Jit.dl_handle list;      (* open dl handles *)
   compiled_fns : (string, unit) Hashtbl.t;  (* fns already compiled in prior fragments *)
   global_tir_tys : (string, March_tir.Tir.ty) Hashtbl.t;  (* bare_name -> TIR type, for display *)
+  global_type_defs : (string, March_tir.Tir.type_def) Hashtbl.t;  (* type name -> TDVariant/TDRecord for display *)
   mutable stdlib_decls : March_ast.Ast.decl list;  (* cached for incremental lowering context *)
 }
 
@@ -49,6 +50,16 @@ let create ~runtime_so ?(clang="clang") () =
   let tmp_dir = Filename.concat
     (Filename.get_temp_dir_name ()) "march_jit" in
   (try Unix.mkdir tmp_dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
+  (* Clean stale artifacts from prior sessions (SIGKILL leaves repl_*.ll/.so
+     behind because cleanup only runs on clean exit).  MARCH_KEEP_LL opts out. *)
+  if Sys.getenv_opt "MARCH_KEEP_LL" = None then begin
+    try
+      Array.iter (fun f ->
+        let full = Filename.concat tmp_dir f in
+        try Sys.remove full with _ -> ()
+      ) (Sys.readdir tmp_dir)
+    with _ -> ()
+  end;
   (* Load the runtime .so first so its symbols are globally available *)
   let rt_handle = Jit.dlopen runtime_so in
   let undef_flag = if is_macos () then " -undefined dynamic_lookup" else "" in
@@ -57,6 +68,7 @@ let create ~runtime_so ?(clang="clang") () =
     handles = [rt_handle];
     compiled_fns = Hashtbl.create 256;
     global_tir_tys = Hashtbl.create 16;
+    global_type_defs = Hashtbl.create 16;
     stdlib_decls = [] }
 
 let alloc_slot ctx =
@@ -191,10 +203,48 @@ let field_i64 (ptr : nativeint) (i : int) : int64 =
 let field_ptr (ptr : nativeint) (i : int) : nativeint =
   Jit.read_ptr_at ptr (16 + i * 8)
 
+(** Collect free TVars from a type_def's constructor payload signatures,
+    preserving first-seen order.  Used to align TCon type-args with TVars
+    in payload types for user ADT pretty-printing. *)
+let collect_tvars (td : March_tir.Tir.type_def) : string list =
+  let open March_tir.Tir in
+  let seen = Hashtbl.create 4 in
+  let order = ref [] in
+  let rec walk = function
+    | TVar s ->
+      if not (Hashtbl.mem seen s) then begin
+        Hashtbl.add seen s ();
+        order := s :: !order
+      end
+    | TCon (_, args) | TTuple args -> List.iter walk args
+    | TFn (args, r) -> List.iter walk args; walk r
+    | TPtr t -> walk t
+    | TRecord fs -> List.iter (fun (_, t) -> walk t) fs
+    | TInt | TFloat | TBool | TString | TUnit -> ()
+  in
+  (match td with
+   | TDVariant (_, ctors) ->
+     List.iter (fun (_, args) -> List.iter walk args) ctors
+   | TDRecord (_, fs) ->
+     List.iter (fun (_, t) -> walk t) fs
+   | TDClosure _ -> ());
+  List.rev !order
+
+let rec subst_ty (bindings : (string * March_tir.Tir.ty) list) (t : March_tir.Tir.ty) : March_tir.Tir.ty =
+  let open March_tir.Tir in
+  match t with
+  | TVar s -> (try List.assoc s bindings with Not_found -> TVar s)
+  | TCon (n, args) -> TCon (n, List.map (subst_ty bindings) args)
+  | TTuple args -> TTuple (List.map (subst_ty bindings) args)
+  | TFn (args, r) -> TFn (List.map (subst_ty bindings) args, subst_ty bindings r)
+  | TPtr t -> TPtr (subst_ty bindings t)
+  | TRecord fs -> TRecord (List.map (fun (n, t) -> (n, subst_ty bindings t)) fs)
+  | TInt | TFloat | TBool | TString | TUnit as t -> t
+
 (** Pretty-print a March heap value given its TIR type.
-    Recursion is bounded to depth [max_depth] to guard against unexpected
-    structures; beyond that, falls back to the raw-address display. *)
-let rec pp_heap_value ?(depth=0) (ty : March_tir.Tir.ty) (ptr : nativeint) : string =
+    [type_defs] provides user-declared TDVariant/TDRecord lookups for
+    non-builtin TCon names.  Recursion is bounded to depth 64. *)
+let rec pp_heap_value ?(depth=0) ~type_defs (ty : March_tir.Tir.ty) (ptr : nativeint) : string =
   if depth > 64 then "#<...>"
   else if ptr = Nativeint.zero then "#<null>"
   else
@@ -204,26 +254,65 @@ let rec pp_heap_value ?(depth=0) (ty : March_tir.Tir.ty) (ptr : nativeint) : str
     (* march_string layout: {rc:i64, len:i64, data:char[]} *)
     Printf.sprintf "%S" (Jit.read_march_string ptr)
   | TCon ("List", [elem_ty]) ->
-    pp_list ~depth elem_ty ptr
+    pp_list ~depth ~type_defs elem_ty ptr
   | TCon ("Option", [inner_ty]) ->
     let tag = heap_tag ptr in
     if tag = 0 then "None"
     else
-      let v = pp_field ~depth inner_ty ptr 0 in
+      let v = pp_field ~depth ~type_defs ~tagged:true inner_ty ptr 0 in
       Printf.sprintf "Some(%s)" v
   | TCon ("Result", [ok_ty; err_ty]) ->
     let tag = heap_tag ptr in
-    if tag = 0 then Printf.sprintf "Ok(%s)" (pp_field ~depth ok_ty ptr 0)
-    else         Printf.sprintf "Err(%s)" (pp_field ~depth err_ty ptr 0)
+    if tag = 0 then Printf.sprintf "Ok(%s)" (pp_field ~depth ~type_defs ~tagged:true ok_ty ptr 0)
+    else         Printf.sprintf "Err(%s)" (pp_field ~depth ~type_defs ~tagged:true err_ty ptr 0)
   | TTuple tys ->
-    let fields = List.mapi (fun i ty -> pp_field ~depth ty ptr i) tys in
+    (* Tuple fields are stored UNTAGGED (no tag bit on scalar slots). *)
+    let fields = List.mapi (fun i ty -> pp_field ~depth ~type_defs ~tagged:false ty ptr i) tys in
     Printf.sprintf "(%s)" (String.concat ", " fields)
+  | TCon (name, args) when Hashtbl.mem type_defs name ->
+    let td = Hashtbl.find type_defs name in
+    (match td with
+     | TDVariant (_, ctors) ->
+       let tag = heap_tag ptr in
+       (match List.nth_opt ctors tag with
+        | None -> Printf.sprintf "#<tag:%d>" tag
+        | Some (ctor_name, payload_tys) ->
+          let tvars = collect_tvars td in
+          let bindings =
+            try List.combine tvars args
+            with Invalid_argument _ -> []
+          in
+          let payload_tys = List.map (subst_ty bindings) payload_tys in
+          if payload_tys = [] then ctor_name
+          else
+            let fields = List.mapi (fun i t ->
+              pp_field ~depth ~type_defs ~tagged:true t ptr i
+            ) payload_tys in
+            Printf.sprintf "%s(%s)" ctor_name (String.concat ", " fields))
+     | TDRecord (_, fs) ->
+       let fields = List.mapi (fun i (fname, fty) ->
+         (* Record scalar fields are stored UNTAGGED (same layout as tuples),
+            not payload-tagged like ADT constructor args. *)
+         Printf.sprintf "%s: %s" fname
+           (pp_field ~depth ~type_defs ~tagged:false fty ptr i)
+       ) fs in
+       Printf.sprintf "{%s}" (String.concat ", " fields)
+     | TDClosure _ -> Printf.sprintf "#<tag:%d>" (heap_tag ptr))
+  | TRecord fs ->
+    (* Structural record — sorted alphabetically by Lower.convert_ty/lower_ty.
+       Scalar fields are stored UNTAGGED (like tuple slots), not as
+       payload-tagged ADT fields. *)
+    let fields = List.mapi (fun i (fname, fty) ->
+      Printf.sprintf "%s: %s" fname
+        (pp_field ~depth ~type_defs ~tagged:false fty ptr i)
+    ) fs in
+    Printf.sprintf "{%s}" (String.concat ", " fields)
   | _ ->
     (* Unknown heap type: show tag for basic orientation; guard null *)
     if ptr = Nativeint.zero then "#<null>"
     else Printf.sprintf "#<tag:%d>" (heap_tag ptr)
 
-and pp_list ?(depth=0) elem_ty (ptr : nativeint) : string =
+and pp_list ?(depth=0) ~type_defs elem_ty (ptr : nativeint) : string =
   let buf = Buffer.create 32 in
   Buffer.add_char buf '[';
   let cur = ref ptr in
@@ -234,7 +323,8 @@ and pp_list ?(depth=0) elem_ty (ptr : nativeint) : string =
   while !cur <> Nativeint.zero && heap_tag !cur <> 0 && !count < max_elems do
     if not !first then Buffer.add_string buf ", ";
     first := false;
-    Buffer.add_string buf (pp_field ~depth elem_ty !cur 0);
+    (* Cons payload scalars ARE tagged — pass tagged:true. *)
+    Buffer.add_string buf (pp_field ~depth ~type_defs ~tagged:true elem_ty !cur 0);
     cur := field_ptr !cur 1;  (* tail is field 1 of Cons *)
     incr count
   done;
@@ -242,12 +332,14 @@ and pp_list ?(depth=0) elem_ty (ptr : nativeint) : string =
   Buffer.add_char buf ']';
   Buffer.contents buf
 
-and pp_field ?(depth=0) (ty : March_tir.Tir.ty) (ptr : nativeint) (i : int) : string =
+and pp_field ?(depth=0) ~type_defs ~tagged (ty : March_tir.Tir.ty) (ptr : nativeint) (i : int) : string =
   let open March_tir.Tir in
+  (* When [tagged] is true the scalar slot holds (value<<1)|1 — shift right by 1.
+     When false (tuple fields) the raw int64 is the value. *)
+  let untag_i64 v = if tagged then Int64.shift_right_logical v 1 else v in
   match ty with
-  (* Scalar heap fields are stored tagged: (value << 1) | 1.  Untag before display. *)
-  | TInt  -> Int64.to_string (Int64.shift_right_logical (field_i64 ptr i) 1)
-  | TBool -> if Int64.shift_right_logical (field_i64 ptr i) 1 = 0L then "false" else "true"
+  | TInt  -> Int64.to_string (untag_i64 (field_i64 ptr i))
+  | TBool -> if untag_i64 (field_i64 ptr i) = 0L then "false" else "true"
   | TUnit -> "()"
   | TFloat ->
     (* Floats are stored as raw double bits via bitcast — no tag bit. *)
@@ -257,9 +349,34 @@ and pp_field ?(depth=0) (ty : March_tir.Tir.ty) (ptr : nativeint) (i : int) : st
     (* Pointer field: read the child pointer, then recurse *)
     let child = field_ptr ptr i in
     if child = Nativeint.zero then "null"
-    else pp_heap_value ~depth:(depth + 1) ty child
+    else pp_heap_value ~depth:(depth + 1) ~type_defs ty child
 
 (* ── run_expr ──────────────────────────────────────────────────────── *)
+
+(** Register user-declared types into [ctx.global_type_defs] so the heap
+    pretty-printer can render user ADTs / records as [Ctor(...)] / [{f: v}]
+    instead of [#<tag:N>]. *)
+let register_type_defs ctx (types : March_tir.Tir.type_def list) =
+  List.iter (fun td ->
+    match td with
+    | March_tir.Tir.TDVariant (name, _) ->
+      Hashtbl.replace ctx.global_type_defs name td
+    | March_tir.Tir.TDRecord (name, _) ->
+      Hashtbl.replace ctx.global_type_defs name td
+    | March_tir.Tir.TDClosure _ -> ()
+  ) types
+
+(** Register a user type declaration from the REPL so subsequent expressions
+    can pretty-print values of that type.  DType decls otherwise never reach
+    the JIT — the REPL loop evaluates them in the tree-walking interpreter
+    and sends only DFn/DLet/ReplExpr through run_decl/run_expr. *)
+let register_user_type_decl ctx (d : March_ast.Ast.decl) =
+  match d with
+  | March_ast.Ast.DType (_, name, params, td, _) ->
+    (match March_tir.Lower.lower_type_def name params td with
+     | Some td' -> register_type_defs ctx [td']
+     | None -> ())
+  | _ -> ()
 
 let run_expr ctx ~tc_env m =
   (* Typecheck and lower BEFORE advancing the counter so a failure leaves no gap. *)
@@ -268,6 +385,7 @@ let run_expr ctx ~tc_env m =
   let env = { tc_env with March_typecheck.Typecheck.errors } in
   let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
   let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m in
+  register_type_defs ctx tir.March_tir.Tir.tm_types;
   let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name = "main") tir.March_tir.Tir.tm_fns with
   | Some f -> f
@@ -310,30 +428,39 @@ let run_expr ctx ~tc_env m =
       Jit.call_void_to_void fptr;
       "()"
     | March_tir.Tir.TVar _ ->
-      (* Unresolved type var — try to recover the actual type from global_tir_tys
-         by inspecting the body's return variable.  If we can recover a scalar type
-         (Int/Bool), read as int.  For known heap types, call as ptr and pretty-print.
-         If completely unknown, call as ptr and display the raw address. *)
-      let rec find_retvar body = match body with
-        | March_tir.Tir.EAtom (March_tir.Tir.AVar v) -> Some v.March_tir.Tir.v_name
-        | March_tir.Tir.ESeq (_, e2) -> find_retvar e2
-        | March_tir.Tir.ELet (_, _, e2) -> find_retvar e2
+      (* Unresolved type var — try to recover the actual type.  Walk the fn body
+         into the tail position, recursing through ELet, ESeq, and ECase branches.
+         For an EAtom tail, prefer the variable's own v_ty (already concrete
+         post-mono); fall back to global_tir_tys by name.  For scalar types read
+         as int; for heap types call as ptr and pretty-print. *)
+      let open March_tir.Tir in
+      let rec find_retty body = match body with
+        | EAtom (AVar v) ->
+          (match v.v_ty with
+           | TVar _ -> Hashtbl.find_opt ctx.global_tir_tys v.v_name
+           | t -> Some t)
+        | ESeq (_, e2) -> find_retty e2
+        | ELet (_, _, e2) -> find_retty e2
+        | ECase (_, branches, default) ->
+          let cands = List.filter_map (fun (b : branch) -> find_retty b.br_body) branches in
+          let cands = match default with
+            | Some d -> (match find_retty d with Some t -> t :: cands | None -> cands)
+            | None -> cands
+          in
+          (match cands with t :: _ -> Some t | [] -> None)
         | _ -> None
       in
-      let stored_ty = match find_retvar main_fn.March_tir.Tir.fn_body with
-        | Some vname -> Hashtbl.find_opt ctx.global_tir_tys vname
-        | None -> None
-      in
+      let stored_ty = find_retty main_fn.fn_body in
       (match stored_ty with
-       | Some March_tir.Tir.TBool ->
+       | Some TBool ->
          let v = Jit.call_void_to_int fptr in
          if v = 0L then "false" else "true"
-       | Some March_tir.Tir.TInt ->
+       | Some TInt ->
          Int64.to_string (Jit.call_void_to_int fptr)
        | Some ty ->
          let ptr = Jit.call_void_to_ptr fptr in
          if ptr = Nativeint.zero then "null"
-         else pp_heap_value ty ptr
+         else pp_heap_value ~type_defs:ctx.global_type_defs ty ptr
        | None ->
          (* No type information — call as ptr (safer than int for heap objects).
             Small values that fit in a tagged integer are displayed as integers;
@@ -352,7 +479,7 @@ let run_expr ctx ~tc_env m =
         if Int64.compare raw 0x100000000L < 0 && Int64.compare raw 0L >= 0 then
           Int64.to_string raw
         else
-          pp_heap_value ty ptr
+          pp_heap_value ~type_defs:ctx.global_type_defs ty ptr
   in
   (* Update the "v" slot entry (type may change with each expression). *)
   ctx.var_slots <- ("v", v_slot, ret_ty) ::
@@ -369,6 +496,7 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
   let env = { tc_env with March_typecheck.Typecheck.errors } in
   let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
   let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m in
+  register_type_defs ctx tir.March_tir.Tir.tm_types;
   let all_support_fns = List.filter (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name <> "main") tir.March_tir.Tir.tm_fns in
   let (user_fns, extern_fns) = partition_fns ctx all_support_fns in
