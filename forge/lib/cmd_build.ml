@@ -283,30 +283,35 @@ let build ~release ?(dump_phases=false) () =
       in
       match proj.Project.project_type with
       | Project.Lib ->
-        (* Library project: one march --check call is enough.  march
-           auto-discovers every .march file in MARCH_LIB_PATH (which already
-           includes lib/ and gen/), so a single invocation typechecks all N
-           modules in one pass instead of spawning N processes (O(N) vs O(N²)). *)
-        let ok = match files with
-          | [] -> true
-          | first :: _ -> check_file ~lib_path_env first
-        in
-        if not ok then
+        let failed = check_all ~lib_path_env files in
+        if failed > 0 then
           Error "typecheck failed"
         else begin
           do_islands ();
           Ok (Printf.sprintf "checked %d file(s) in %s" (List.length files) lib_dir)
         end
       | Project.App | Project.Tool ->
-        (* march --compile auto-loads all MARCH_LIB_PATH files (including
-           "orphans" not imported by the entry) and typechecks them as part of
-           the same pass.  A separate per-orphan check_all would be O(N²) work
-           for no extra coverage — skip it and go straight to compilation. *)
-        let output = Filename.concat build_dir proj.Project.name in
-        let rc = compile_entry ~lib_path_env ~output ~release ~dump_phases entry_path in
-        if rc = 0 then begin
-          do_islands ();
-          Ok output
+        (* Check every lib/ file individually before compilation so that orphan
+           modules (not imported by the entry) don't silently rot.  This runs
+           before compile_entry so failures report "typecheck failed" rather
+           than a linker or runtime error. *)
+        let orphan_files =
+          let abs_entry = try Unix.realpath entry_path with _ -> entry_path in
+          List.filter (fun f ->
+            let abs_f = try Unix.realpath f with _ -> f in
+            abs_f <> abs_entry
+          ) files
+        in
+        let orphan_failed = check_all ~lib_path_env orphan_files in
+        if orphan_failed > 0 then
+          Error "typecheck failed"
+        else begin
+          let output = Filename.concat build_dir proj.Project.name in
+          let rc = compile_entry ~lib_path_env ~output ~release ~dump_phases entry_path in
+          if rc = 0 then begin
+            do_islands ();
+            Ok output
+          end
+          else Error (Printf.sprintf "march compiler exited with code %d" rc)
         end
-        else Error (Printf.sprintf "march compiler exited with code %d" rc)
     end

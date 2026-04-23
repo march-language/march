@@ -65,20 +65,14 @@
  (action  (run ./test_scheduler_mt_runner)))
 
 ; ── SIMD HTTP parser tests ───────────────────────────────────────────────
-; -msse4.2 enables SSE4.2 on x86-64; on ARM64 the flag is a no-op (warning
-; suppressed with -Wno-unused-command-line-argument) and the scalar fallback
-; is used automatically via #if defined(__SSE4_2__) guards in the source.
+; -msse4.2 is only passed on x86-64; the source guards SSE4.2 paths with
+; #if defined(__SSE4_2__) so the scalar fallback is used elsewhere.
 (rule
  (targets test_http_simd_runner)
  (deps    test_http_simd.c
           ../runtime/march_http_parse_simd.c
           ../runtime/march_http_parse_simd.h)
- (action  (run %{cc}
-               -std=gnu11 -Wall -Wextra
-               -Wno-unused-command-line-argument
-               -I../runtime -msse4.2 -O2
-               -o %{targets}
-               test_http_simd.c ../runtime/march_http_parse_simd.c)))
+ (action  (system "case $(uname -m) in x86_64) F=-msse4.2 ;; *) F= ;; esac; %{cc} -std=gnu11 -Wall -Wextra -I../runtime $F -O2 -o %{targets} test_http_simd.c ../runtime/march_http_parse_simd.c")))
 
 (rule
  (alias   runtest)
@@ -86,9 +80,6 @@
  (action  (run ./test_http_simd_runner)))
 
 ; ── Zero-copy response builder tests ────────────────────────────────────
-; Compile test_http_response.c together with march_http_response.c.
-; -msse4.2 is passed for consistency with the SIMD tests; on ARM64
-; -Wno-unused-command-line-argument suppresses the harmless warning.
 (rule
  (targets test_http_response_runner)
  (deps    test_http_response.c
@@ -96,7 +87,6 @@
           ../runtime/march_http_response.h)
  (action  (run %{cc}
                -std=gnu11 -Wall -Wextra
-               -Wno-unused-command-line-argument
                -I../runtime -O2
                -o %{targets}
                test_http_response.c ../runtime/march_http_response.c

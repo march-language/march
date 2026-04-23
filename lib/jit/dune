@@ -9,7 +9,7 @@
  (foreign_stubs
   (language c)
   (names jit_stubs jit_orc_stubs)
-  (flags (:include jit_c_flags.sexp)))
+  (flags (:standard (:include jit_c_flags.sexp))))
  (c_library_flags (:include jit_link_flags.sexp)))
 
 (rule

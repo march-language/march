@@ -140,18 +140,19 @@ CAMLprim value march_orc_add_ir(value v_J, value v_ir, value v_name) {
     mlsize_t ir_len = caml_string_length(v_ir);
     const char *name = String_val(v_name);
 
-    /* Create a plain LLVMContext, parse IR into it, then wrap it in a
-       ThreadSafeContext. This is the canonical pattern in newer LLVM
-       versions where the TSContext no longer exposes its inner context
-       directly via a getter. */
-    LLVMContextRef Ctx = LLVMContextCreate();
-
     /* Copy the IR bytes — LLVMParseIRInContext consumes the MemoryBuffer. */
     LLVMMemoryBufferRef MemBuf = LLVMCreateMemoryBufferWithMemoryRangeCopy(
         ir_str, (size_t)ir_len, name);
 
     LLVMModuleRef Mod = NULL;
     char *errmsg = NULL;
+    LLVMOrcThreadSafeContextRef TSCtx = NULL;
+
+#if defined(LLVM_MAJOR_VERSION) && LLVM_MAJOR_VERSION >= 19
+    /* LLVM 19+: LLVMOrcThreadSafeContextGetContext was removed; create the
+       LLVMContext first, parse IR into it, then wrap it in a TSCtx which
+       takes ownership. */
+    LLVMContextRef Ctx = LLVMContextCreate();
     if (LLVMParseIRInContext(Ctx, MemBuf, &Mod, &errmsg) != 0) {
         char buf[2048];
         snprintf(buf, sizeof buf, "LLVMParseIRInContext: %s",
@@ -160,11 +161,24 @@ CAMLprim value march_orc_add_ir(value v_J, value v_ir, value v_name) {
         LLVMContextDispose(Ctx);
         caml_failwith(buf);
     }
-    /* MemBuf consumed by LLVMParseIRInContext; Mod is now owned by Ctx. */
-
-    LLVMOrcThreadSafeContextRef TSCtx =
-        LLVMOrcCreateNewThreadSafeContextFromLLVMContext(Ctx);
+    TSCtx = LLVMOrcCreateNewThreadSafeContextFromLLVMContext(Ctx);
     /* TSCtx now owns Ctx; do not call LLVMContextDispose on it. */
+#else
+    /* LLVM 18 and earlier: create a ThreadSafeContext first (which allocates
+       its own inner LLVMContext), obtain that context, then parse IR into it. */
+    TSCtx = LLVMOrcCreateNewThreadSafeContext();
+    LLVMContextRef Ctx = LLVMOrcThreadSafeContextGetContext(TSCtx);
+    if (LLVMParseIRInContext(Ctx, MemBuf, &Mod, &errmsg) != 0) {
+        char buf[2048];
+        snprintf(buf, sizeof buf, "LLVMParseIRInContext: %s",
+                 errmsg ? errmsg : "(no message)");
+        if (errmsg) LLVMDisposeMessage(errmsg);
+        LLVMOrcDisposeThreadSafeContext(TSCtx);
+        caml_failwith(buf);
+    }
+    /* Ctx is owned by TSCtx; do not call LLVMContextDispose separately. */
+#endif
+    /* MemBuf consumed by LLVMParseIRInContext; Mod is now owned by Ctx. */
 
     LLVMOrcThreadSafeModuleRef TSM =
         LLVMOrcCreateNewThreadSafeModule(Mod, TSCtx);
