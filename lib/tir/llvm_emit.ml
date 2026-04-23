@@ -113,8 +113,11 @@ let is_wasm32 = function
   | Wasm32Wasi | Wasm32Unknown -> true
   | _ -> false
 
+external get_native_triple : unit -> string = "march_tir_native_triple"
+let native_triple = lazy (get_native_triple ())
+
 let target_triple = function
-  | Native          -> "arm64-apple-macosx15.0.0"  (* TODO: detect host *)
+  | Native          -> Lazy.force native_triple
   | Wasm64Wasi      -> "wasm64-wasi"
   | Wasm32Wasi      -> "wasm32-wasi"
   | Wasm32Unknown   -> "wasm32-unknown-unknown"

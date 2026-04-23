@@ -6344,6 +6344,7 @@ let setup_jit_runtime () =
         (opt_file "march_message.c") ^
         (opt_file "march_heap.c") ^
         (opt_file "march_gc.c") ^
+        (opt_file "sha1.c") ^
         (opt_file "march_extras.c") ^
         (opt_file "base64.c")
       in
