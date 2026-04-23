@@ -6387,7 +6387,7 @@ let test_repl_jit_cross_line_let () =
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        let type_map = Hashtbl.create 16 in
-       let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
+       let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
        (* Compile: let x = 21 *)
        (match parse_repl "let x = 21" with
         | March_ast.Ast.ReplDecl d ->
@@ -6401,14 +6401,18 @@ let test_repl_jit_cross_line_let () =
             | _ -> failwith "expected DLet for 'let x = 21'"
           in
           let m = make_jit_test_module bind_expr in
-          March_jit.Repl_jit.run_decl jit ~tc_env ~is_fn_decl:false ~bind_name m
+          March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m;
+          (* Update tc_env so 'x : Int' is in scope for the next expression *)
+          let new_env = March_typecheck.Typecheck.check_decl
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+          tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
         | _ -> failwith "expected ReplDecl");
        (* Compile: x + 21 — cross-line reference *)
        (match parse_repl "x + 21" with
         | March_ast.Ast.ReplExpr e ->
           let e' = March_desugar.Desugar.desugar_expr e in
           let m = make_jit_test_module e' in
-          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env m in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
           Alcotest.(check string) "cross-line let: x+21 = 42" "42" result
         | _ -> failwith "expected ReplExpr");
        March_jit.Repl_jit.cleanup jit
@@ -6424,7 +6428,7 @@ let test_repl_jit_cross_line_fn () =
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        let type_map = Hashtbl.create 16 in
-       let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
+       let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
        (* Compile: let f = fn x -> x * 2  (parsed as DLet with lambda RHS) *)
        (match parse_repl "let f = fn x -> x * 2" with
         | March_ast.Ast.ReplDecl d ->
@@ -6438,7 +6442,11 @@ let test_repl_jit_cross_line_fn () =
             | _ -> failwith "expected DLet for 'let f = fn x -> x * 2'"
           in
           let m = make_jit_test_module bind_expr in
-          March_jit.Repl_jit.run_decl jit ~tc_env ~is_fn_decl:false ~bind_name m
+          March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m;
+          (* Update tc_env so 'f : Int -> Int' is in scope for the next expression *)
+          let new_env = March_typecheck.Typecheck.check_decl
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+          tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
         | _ -> failwith "expected ReplDecl");
        (* Compile: f(21) — cross-line function reference.
           Known limitation: cross-fragment function calls require `declare` stubs
@@ -6450,7 +6458,7 @@ let test_repl_jit_cross_line_fn () =
           let e' = March_desugar.Desugar.desugar_expr e in
           let m = make_jit_test_module e' in
           (try
-            let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env m in
+            let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
             Alcotest.(check string) "cross-line fn: f(21) = 42" "42" result
           with Failure msg when
             (let m = String.lowercase_ascii msg in
