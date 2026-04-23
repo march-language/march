@@ -91,7 +91,37 @@ let time_phase name f =
     r
   end else f ()
 
-let compile_fragment ctx (ir : string) : Jit.dl_handle =
+(* Backend selector — see the plan file for the motivation. Default is
+   the clang + dlopen pipeline; set MARCH_JIT_BACKEND=orc to route through
+   the in-process LLJIT. Read once at startup so we don't stat env on the
+   hot path. *)
+let backend_is_orc = Sys.getenv_opt "MARCH_JIT_BACKEND" = Some "orc"
+
+(* Lazy-initialised LLJIT.  Only touched when backend_is_orc is true;
+   libLLVM.dylib is loaded on first create(), so non-ORC builds pay no
+   startup cost. *)
+let orc_instance : Jit_orc.t option ref = ref None
+let get_orc () =
+  match !orc_instance with
+  | Some j -> j
+  | None ->
+    let j = Jit_orc.create () in
+    orc_instance := Some j; j
+
+(* Opaque per-fragment handle used by run_expr / run_decl to look up the
+   fragment's exported init / main symbol.  Carries the clang dl_handle
+   when the clang backend emitted a fresh .so; in ORC mode there is no
+   per-fragment handle — symbols are resolved against the shared LLJIT. *)
+type fragment_handle =
+  | HClang of Jit.dl_handle
+  | HOrc
+
+let lookup_sym (fh : fragment_handle) (sym : string) : nativeint =
+  match fh with
+  | HClang h -> Jit.dlsym h sym
+  | HOrc     -> Jit_orc.lookup (get_orc ()) sym
+
+let compile_fragment_clang ctx (ir : string) : Jit.dl_handle =
   let n = ctx.counter - 1 in
   let ll_path = Filename.concat ctx.tmp_dir
     (Printf.sprintf "repl_%d.ll" n) in
@@ -147,6 +177,23 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
       ((Unix.gettimeofday () -. t_dlo0) *. 1000.);
   ctx.handles <- handle :: ctx.handles;
   handle
+
+(* Backend dispatcher. In ORC mode we parse the IR straight into the shared
+   LLJIT — no shared object, no dlopen, no per-fragment handle. The counter
+   is assumed to already have been advanced (next_id called) by the caller,
+   matching the clang path's invariant. *)
+let compile_fragment ctx (ir : string) : fragment_handle =
+  if backend_is_orc then begin
+    let n = ctx.counter - 1 in
+    let name = Printf.sprintf "repl_%d" n in
+    let t0 = if profile_enabled then Unix.gettimeofday () else 0. in
+    Jit_orc.add_ir (get_orc ()) ~ir ~name;
+    if profile_enabled then
+      Printf.eprintf "[jit-prof]   orc_add_ir         %6.1fms\n%!"
+        ((Unix.gettimeofday () -. t0) *. 1000.);
+    HOrc
+  end else
+    HClang (compile_fragment_clang ctx ir)
 
 (** True if a TIR function name resolves to a C runtime symbol (i.e. mangle
     changes its name). Such functions are already in the runtime .so and must
@@ -450,7 +497,7 @@ let run_expr ctx ~tc_env m =
     (fun () -> compile_fragment ctx ir) in
   mark_compiled_fns ctx new_fns;
   let sym_name = Printf.sprintf "repl_%d" n in
-  let fptr = Jit.dlsym handle sym_name in
+  let fptr = lookup_sym handle sym_name in
   let result_str = match ret_ty with
     | March_tir.Tir.TInt ->
       let v = Jit.call_void_to_int fptr in
@@ -578,7 +625,7 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     let handle = compile_fragment ctx ir in
     mark_compiled_fns ctx [primary_fn];
     let init_name = Printf.sprintf "repl_%d_init" pn in
-    let fptr = Jit.dlsym handle init_name in
+    let fptr = lookup_sym handle init_name in
     Jit.call_void_to_void fptr;
     (* Register the slot so future fragments can load the closure as a value.
        The type is TFn (closures are heap pointers), which causes emit_prev_slot_bridges
@@ -608,7 +655,7 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     let handle = compile_fragment ctx ir in
     mark_compiled_fns ctx user_fns;
     let init_name = Printf.sprintf "repl_%d_init" n in
-    let fptr = Jit.dlsym handle init_name in
+    let fptr = lookup_sym handle init_name in
     Jit.call_void_to_void fptr;
     (* Register slot for future references to bind_name. *)
     ctx.var_slots <- (bind_name, slot, main_fn.fn_ret_ty) ::
