@@ -30,9 +30,9 @@ jobs:
       - name: Install system dependencies
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install blake3 brotli zstd
+            brew install blake3 brotli zstd llvm
           else
-            sudo apt-get install -y libbrotli-dev libzstd-dev
+            sudo apt-get install -y libbrotli-dev libzstd-dev llvm-dev
             # libblake3-dev is not available in Ubuntu 24.04; build from source
             git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
             cd /tmp/blake3/c

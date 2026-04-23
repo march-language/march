@@ -41,10 +41,17 @@
 static int llvm_loaded = 0;
 
 static const char *default_llvm_paths[] = {
+    /* macOS (homebrew) */
     "/opt/homebrew/opt/llvm/lib/libLLVM.dylib",
     "/opt/homebrew/lib/libLLVM.dylib",
     "/usr/local/opt/llvm/lib/libLLVM.dylib",
     "libLLVM.dylib",
+    /* Linux */
+    "libLLVM.so",
+    "libLLVM-18.so",
+    "libLLVM-17.so",
+    "/usr/lib/llvm-18/lib/libLLVM.so",
+    "/usr/lib/llvm-17/lib/libLLVM.so",
     NULL,
 };
 
@@ -67,8 +74,9 @@ static void load_libllvm_once(void) {
         }
         if (!h) {
             caml_failwith(
-                "libLLVM.dylib not found — install via `brew install llvm`, "
-                "or set MARCH_LLVM_LIB to the .dylib path.");
+                "libLLVM not found — on macOS: `brew install llvm`; "
+                "on Linux: `apt-get install llvm-18`; "
+                "or set MARCH_LLVM_LIB to the library path.");
         }
     }
     llvm_loaded = 1;

@@ -1,17 +1,25 @@
 ; lib/jit/dune
-; Note: -ldl is needed on Linux but not macOS (dlopen is in libSystem).
-; This project targets macOS, so no -ldl needed. For Linux, add
-; (c_library_flags (-ldl)) later.
-;
-; jit_orc_stubs references LLVM C API functions. libLLVM is loaded at
-; runtime via dlopen (not linked), so the linker is told to leave those
-; symbols unresolved via -Wl,-undefined,dynamic_lookup. On macOS this
-; works natively; on Linux the equivalent would be a weak-linkage scheme.
+; LLVM flags (include path + linker flags) are platform-detected at build
+; time by detect_llvm.sh, which writes jit_c_flags.sexp and
+; jit_link_flags.sexp.  On macOS libLLVM is dlopened lazily; on Linux we
+; link against -lLLVM so the symbols are resolved at link time.
 (library
  (name march_jit)
  (libraries unix march_tir march_ast march_typecheck march_cas)
  (foreign_stubs
   (language c)
   (names jit_stubs jit_orc_stubs)
-  (flags -I/opt/homebrew/opt/llvm/include))
- (c_library_flags -Wl,-undefined,dynamic_lookup))
+  (flags (:include jit_c_flags.sexp)))
+ (c_library_flags (:include jit_link_flags.sexp)))
+
+(rule
+ (target jit_c_flags.sexp)
+ (action
+  (with-stdout-to %{target}
+   (run sh %{dep:detect_llvm.sh} c_flags))))
+
+(rule
+ (target jit_link_flags.sexp)
+ (action
+  (with-stdout-to %{target}
+   (run sh %{dep:detect_llvm.sh} link_flags))))
