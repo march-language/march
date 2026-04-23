@@ -148,6 +148,11 @@ typedef void (*block_visitor)(void *obj, uint32_t alloc_size, uint32_t n_fields,
  * corrupted one from pass 1's live set — turning a localised heap-corruption
  * bug into a process-wide use-after-free at teardown.  Aborting surfaces
  * the bug at the point of detection. */
+/* Crash hook: weak so tests can override it to avoid ReportCrash delays.
+ * Override with a strong definition (e.g. _exit(134)) in test binaries. */
+__attribute__((weak))
+void march_gc_crash(void) { abort(); }
+
 static void gc_corrupt(const march_heap_block *blk, const char *p,
                         const march_alloc_meta *meta, const char *why) {
     fprintf(stderr,
@@ -156,7 +161,8 @@ static void gc_corrupt(const march_heap_block *blk, const char *p,
             (const void *)p, (const void *)blk,
             (size_t)blk->used, (size_t)blk->capacity,
             (unsigned)meta->alloc_size, (unsigned)meta->n_fields, why);
-    abort();
+    march_gc_crash();
+    __builtin_unreachable();
 }
 
 static void walk_block(const march_heap_block *blk, block_visitor visit, void *ctx) {
@@ -210,7 +216,8 @@ static void pass1_visit(void *obj, uint32_t alloc_size, uint32_t n_fields,
         fprintf(stderr,
                 "march_gc: pass1_visit: n_fields=%u exceeds payload (user_sz=%zu) at %p — aborting\n",
                 (unsigned)n_fields, user_sz, obj);
-        abort();
+        march_gc_crash();
+        __builtin_unreachable();
     }
 
     /* Allocate in to-space and copy. */
@@ -228,7 +235,8 @@ static void pass1_visit(void *obj, uint32_t alloc_size, uint32_t n_fields,
          * a live object — silent use-after-free at teardown.  Surface it. */
         fputs("march_gc: forwarding table allocation failure during pass 1 — aborting\n",
               stderr);
-        abort();
+        march_gc_crash();
+        __builtin_unreachable();
     }
     ctx->stats->objects_copied++;
 }
@@ -292,7 +300,8 @@ static void pass2_visit(void *obj, uint32_t alloc_size, uint32_t n_fields,
                     "march_gc: dangling intra-arena pointer %p in object %p "
                     "(field %u): no forwarding entry — Perceus RC invariant violation\n",
                     fv, (void *)obj, (unsigned)i);
-            abort();
+            march_gc_crash();
+            __builtin_unreachable();
         }
         /* Otherwise the pointer is outside the arena (e.g. malloc'd
          * march_string) — leave it untouched. */
