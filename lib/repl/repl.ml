@@ -757,6 +757,15 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                     let (_, extra_decls) =
                       March_resolver.Resolver.resolve_imports ~source_file:dummy_src dummy_mod in
                     List.iter (fun decl ->
+                      (* Register user modules with Module_registry so qualified
+                         accesses (`MyMod.foo`) resolve. *)
+                      (match decl with
+                       | March_ast.Ast.DMod (name, _, body_decls, _) ->
+                         let exports = March_modules.Module_registry.extract_exports
+                           name.March_ast.Ast.txt body_decls in
+                         March_modules.Module_registry.register
+                           name.March_ast.Ast.txt exports
+                       | _ -> ());
                       let ictx = March_errors.Errors.create () in
                       let itc  = { !tc_env with errors = ictx } in
                       let ntc  = March_typecheck.Typecheck.check_decl itc decl in
@@ -1236,6 +1245,18 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
          let (_, extra_decls) =
            March_resolver.Resolver.resolve_imports ~source_file:dummy_src dummy_mod in
          List.iter (fun decl ->
+           (* Register user modules with Module_registry so qualified accesses
+              (`MyMod.foo`) resolve.  Without this, check_decl successfully adds
+              MyMod to tc_env.vars but Module_registry.ensure_loaded still misses
+              it (it only knows stdlib dirs), so `MyMod.foo` fails with
+              "Unknown module `MyMod`". *)
+           (match decl with
+            | March_ast.Ast.DMod (name, _, body_decls, _) ->
+              let exports = March_modules.Module_registry.extract_exports
+                name.March_ast.Ast.txt body_decls in
+              March_modules.Module_registry.register
+                name.March_ast.Ast.txt exports
+            | _ -> ());
            let ictx = March_errors.Errors.create () in
            let itc  = { !tc_env with errors = ictx } in
            let ntc  = March_typecheck.Typecheck.check_decl itc decl in

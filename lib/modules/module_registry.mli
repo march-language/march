@@ -26,6 +26,11 @@ type module_exports = {
 (** Register a module's exports in the global registry. *)
 val register : string -> module_exports -> unit
 
+(** Extract the public exports from a list of declarations (a module body).
+    Called by the REPL after loading a user module via MARCH_LIB_PATH so the
+    module's qualified accesses (`MyMod.foo`) resolve through the registry. *)
+val extract_exports : string -> March_ast.Ast.decl list -> module_exports
+
 (** Look up a module's exports by name. *)
 val lookup : string -> module_exports option
 
