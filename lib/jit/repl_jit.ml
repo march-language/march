@@ -93,8 +93,11 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
   close_out oc;
   (* Compile to .so.
      -undefined dynamic_lookup (macOS): undefined symbols resolve at dlopen time
-     from RTLD_GLOBAL, so later fragments can omit stdlib already compiled. *)
-  let cmd = Printf.sprintf "%s -shared -fPIC -O1%s -o %s %s 2>&1"
+     from RTLD_GLOBAL, so later fragments can omit stdlib already compiled.
+     -O0 -fno-lto: fragments are one-shot and don't benefit from optimization;
+     the clang driver optimization passes dominate per-fragment latency. Stdlib
+     keeps its -O1 build (compiled once, cached). *)
+  let cmd = Printf.sprintf "%s -shared -fPIC -O0 -fno-lto%s -o %s %s 2>&1"
     ctx.clang ctx.undef_flag so_path ll_path in
   let ic = Unix.open_process_in cmd in
   let output = Buffer.create 256 in
