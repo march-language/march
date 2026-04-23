@@ -6484,7 +6484,7 @@ let test_repl_jit_cross_line_hof () =
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        let type_map = Hashtbl.create 16 in
-       let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
+       let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
        (* let n = 21 *)
        (match parse_repl "let n = 21" with
         | March_ast.Ast.ReplDecl d ->
@@ -6497,7 +6497,10 @@ let test_repl_jit_cross_line_hof () =
             | _ -> failwith "expected DLet"
           in
           let m = make_jit_test_module bind_expr in
-          March_jit.Repl_jit.run_decl jit ~tc_env ~is_fn_decl:false ~bind_name m
+          March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m;
+          let new_env = March_typecheck.Typecheck.check_decl
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+          tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
         | _ -> failwith "expected ReplDecl");
        (* let double = fn x -> x * 2  (parsed as DLet with lambda RHS) *)
        (match parse_repl "let double = fn x -> x * 2" with
@@ -6512,7 +6515,10 @@ let test_repl_jit_cross_line_hof () =
             | _ -> failwith "expected DLet for 'let double = fn x -> x * 2'"
           in
           let m = make_jit_test_module bind_expr in
-          March_jit.Repl_jit.run_decl jit ~tc_env ~is_fn_decl:false ~bind_name m
+          March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m;
+          let new_env = March_typecheck.Typecheck.check_decl
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+          tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
         | _ -> failwith "expected ReplDecl");
        (* double(n) — both from previous lines.
           Known limitation: cross-fragment function call may fail if the
@@ -6523,7 +6529,7 @@ let test_repl_jit_cross_line_hof () =
           let e' = March_desugar.Desugar.desugar_expr e in
           let m = make_jit_test_module e' in
           (try
-            let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env m in
+            let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
             Alcotest.(check string) "cross-line hof: double(n) = 42" "42" result
           with Failure msg when
             (let m = String.lowercase_ascii msg in
@@ -6662,7 +6668,7 @@ let test_repl_stdlib_on_list () =
       Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
     let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
       Hashtbl.create 16 in
-    let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
+    let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        March_jit.Repl_jit.precompile_stdlib jit
@@ -6688,13 +6694,16 @@ let test_repl_stdlib_on_list () =
             | _ -> failwith "expected DLet"
           in
           let m = make_stdlib_mod bind_expr in
-          March_jit.Repl_jit.run_decl jit ~tc_env ~is_fn_decl:false ~bind_name m
+          March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m;
+          let new_env = March_typecheck.Typecheck.check_decl
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+          tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
         | _ -> failwith "expected ReplDecl");
        (match parse_repl "List.length(xs)" with
         | March_ast.Ast.ReplExpr e ->
           let e' = March_desugar.Desugar.desugar_expr e in
           let m = make_stdlib_mod e' in
-          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env m in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
           Alcotest.(check string) "List.length(xs) = 3" "3" result
         | _ -> failwith "expected ReplExpr");
        March_jit.Repl_jit.cleanup jit
@@ -6711,7 +6720,7 @@ let test_repl_var_redefinition () =
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        let type_map = Hashtbl.create 16 in
-       let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
+       let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
        (match parse_repl "let x = 1" with
         | March_ast.Ast.ReplDecl d ->
           let d' = March_desugar.Desugar.desugar_decl d in
@@ -6723,7 +6732,10 @@ let test_repl_var_redefinition () =
             | _ -> failwith "expected DLet"
           in
           let m = make_jit_test_module bind_expr in
-          March_jit.Repl_jit.run_decl jit ~tc_env ~is_fn_decl:false ~bind_name m
+          March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m;
+          let new_env = March_typecheck.Typecheck.check_decl
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+          tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
         | _ -> failwith "expected ReplDecl");
        (match parse_repl "let x = 2" with
         | March_ast.Ast.ReplDecl d ->
@@ -6736,13 +6748,16 @@ let test_repl_var_redefinition () =
             | _ -> failwith "expected DLet"
           in
           let m = make_jit_test_module bind_expr in
-          March_jit.Repl_jit.run_decl jit ~tc_env ~is_fn_decl:false ~bind_name m
+          March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m;
+          let new_env = March_typecheck.Typecheck.check_decl
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+          tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
         | _ -> failwith "expected ReplDecl");
        (match parse_repl "x" with
         | March_ast.Ast.ReplExpr e ->
           let e' = March_desugar.Desugar.desugar_expr e in
           let m = make_jit_test_module e' in
-          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env m in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
           Alcotest.(check string) "x after redef = 2" "2" result
         | _ -> failwith "expected ReplExpr");
        March_jit.Repl_jit.cleanup jit
@@ -6761,7 +6776,7 @@ let test_repl_stdlib_chain () =
       Digest.to_hex (Digest.string (Marshal.to_string stdlib_decls [])) in
     let type_map : (March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t =
       Hashtbl.create 16 in
-    let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
+    let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        March_jit.Repl_jit.precompile_stdlib jit
@@ -6787,14 +6802,17 @@ let test_repl_stdlib_chain () =
             | _ -> failwith "expected DLet"
           in
           let m = make_stdlib_mod bind_expr in
-          March_jit.Repl_jit.run_decl jit ~tc_env ~is_fn_decl:false ~bind_name m
+          March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m;
+          let new_env = March_typecheck.Typecheck.check_decl
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+          tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
         | _ -> failwith "expected ReplDecl");
        (* First call *)
        (match parse_repl "List.length(xs)" with
         | March_ast.Ast.ReplExpr e ->
           let e' = March_desugar.Desugar.desugar_expr e in
           let m = make_stdlib_mod e' in
-          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env m in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
           Alcotest.(check string) "List.length(xs) call 1 = 3" "3" result
         | _ -> failwith "expected ReplExpr");
        (* Second call — same value, different fragment *)
@@ -6802,7 +6820,7 @@ let test_repl_stdlib_chain () =
         | March_ast.Ast.ReplExpr e ->
           let e' = March_desugar.Desugar.desugar_expr e in
           let m = make_stdlib_mod e' in
-          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env m in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
           Alcotest.(check string) "List.length(xs) call 2 = 3" "3" result
         | _ -> failwith "expected ReplExpr");
        March_jit.Repl_jit.cleanup jit
@@ -6818,7 +6836,7 @@ let test_repl_expr_after_let () =
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        let type_map = Hashtbl.create 16 in
-       let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
+       let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
        (match parse_repl "let x = 42" with
         | March_ast.Ast.ReplDecl d ->
           let d' = March_desugar.Desugar.desugar_decl d in
@@ -6830,13 +6848,16 @@ let test_repl_expr_after_let () =
             | _ -> failwith "expected DLet"
           in
           let m = make_jit_test_module bind_expr in
-          March_jit.Repl_jit.run_decl jit ~tc_env ~is_fn_decl:false ~bind_name m
+          March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m;
+          let new_env = March_typecheck.Typecheck.check_decl
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+          tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
         | _ -> failwith "expected ReplDecl");
        (match parse_repl "x + 1" with
         | March_ast.Ast.ReplExpr e ->
           let e' = March_desugar.Desugar.desugar_expr e in
           let m = make_jit_test_module e' in
-          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env m in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
           Alcotest.(check string) "x + 1 = 43" "43" result
         | _ -> failwith "expected ReplExpr");
        March_jit.Repl_jit.cleanup jit
@@ -6963,8 +6984,7 @@ let test_repl_jit_general_interaction () =
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        let type_map = Hashtbl.create 16 in
-       let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
-       (* Step 1: let x = 10 *)
+       let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
        let run_decl_str src =
          match parse_repl src with
          | March_ast.Ast.ReplDecl d ->
@@ -6977,7 +6997,10 @@ let test_repl_jit_general_interaction () =
              | _ -> failwith "expected DLet"
            in
            let m = make_jit_test_module bind_expr in
-           March_jit.Repl_jit.run_decl jit ~tc_env ~is_fn_decl:false ~bind_name m
+           March_jit.Repl_jit.run_decl jit ~tc_env:!tc_env ~is_fn_decl:false ~bind_name m;
+           let new_env = March_typecheck.Typecheck.check_decl
+             { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } d' in
+           tc_env := { new_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () }
          | _ -> failwith ("expected ReplDecl for: " ^ src)
        in
        let run_expr_str src =
@@ -6985,7 +7008,7 @@ let test_repl_jit_general_interaction () =
          | March_ast.Ast.ReplExpr e ->
            let e' = March_desugar.Desugar.desugar_expr e in
            let m = make_jit_test_module e' in
-           let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env m in
+           let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
            result
          | _ -> failwith ("expected ReplExpr for: " ^ src)
        in
