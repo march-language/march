@@ -200,6 +200,18 @@ run_test "ADT with string payload" \
 
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
+echo "--- Pretty-printer: records (structural, untagged fields) ---"
+# ──────────────────────────────────────────────────────────────────────────────
+
+run_test "record literal eq" \
+  $'type P = {x: Int, y: Int}\n{x = 1, y = 2}' \
+  '= \{x: 1, y: 2\}$'
+run_test "record literal sigil" \
+  $'type P = {x: Int, y: Int}\n%{x: 3, y: 4}' \
+  '= \{x: 3, y: 4\}$'
+
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
 echo "--- Map stdlib (uses Ord interface) ---"
 # ──────────────────────────────────────────────────────────────────────────────
 

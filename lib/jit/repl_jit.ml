@@ -291,12 +291,22 @@ let rec pp_heap_value ?(depth=0) ~type_defs (ty : March_tir.Tir.ty) (ptr : nativ
             Printf.sprintf "%s(%s)" ctor_name (String.concat ", " fields))
      | TDRecord (_, fs) ->
        let fields = List.mapi (fun i (fname, fty) ->
-         (* Record fields follow the same heap layout as ADT payloads. *)
+         (* Record scalar fields are stored UNTAGGED (same layout as tuples),
+            not payload-tagged like ADT constructor args. *)
          Printf.sprintf "%s: %s" fname
-           (pp_field ~depth ~type_defs ~tagged:true fty ptr i)
+           (pp_field ~depth ~type_defs ~tagged:false fty ptr i)
        ) fs in
        Printf.sprintf "{%s}" (String.concat ", " fields)
      | TDClosure _ -> Printf.sprintf "#<tag:%d>" (heap_tag ptr))
+  | TRecord fs ->
+    (* Structural record — sorted alphabetically by Lower.convert_ty/lower_ty.
+       Scalar fields are stored UNTAGGED (like tuple slots), not as
+       payload-tagged ADT fields. *)
+    let fields = List.mapi (fun i (fname, fty) ->
+      Printf.sprintf "%s: %s" fname
+        (pp_field ~depth ~type_defs ~tagged:false fty ptr i)
+    ) fs in
+    Printf.sprintf "{%s}" (String.concat ", " fields)
   | _ ->
     (* Unknown heap type: show tag for basic orientation; guard null *)
     if ptr = Nativeint.zero then "#<null>"
