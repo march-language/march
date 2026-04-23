@@ -87,35 +87,47 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
     (Printf.sprintf "repl_%d.ll" n) in
   let so_path = Filename.concat ctx.tmp_dir
     (Printf.sprintf "repl_%d.so" n) in
-  (* Write .ll *)
-  let oc = open_out ll_path in
+  let keep_ll = Sys.getenv_opt "MARCH_KEEP_LL" <> None in
+  (* When debugging is requested, mirror the IR to disk before compilation so
+     the user can inspect the exact bytes we handed clang. The common path
+     skips the file I/O entirely and pipes IR directly to clang's stdin. *)
+  if keep_ll then begin
+    let oc = open_out ll_path in
+    output_string oc ir;
+    close_out oc
+  end;
+  (* Compile to .so via stdin.
+     -x ir -: read LLVM IR from stdin; avoids the .ll file write round-trip.
+     -undefined dynamic_lookup (macOS): undefined symbols resolve at dlopen
+     time from RTLD_GLOBAL so later fragments can omit already-compiled stdlib.
+     -O0 -fno-lto: fragments are one-shot and don't benefit from optimization. *)
+  let cmd = Printf.sprintf
+    "%s -x ir -shared -fPIC -O0 -fno-lto%s -o %s - 2>&1"
+    ctx.clang ctx.undef_flag so_path in
+  let (ic, oc) = Unix.open_process cmd in
   output_string oc ir;
   close_out oc;
-  (* Compile to .so.
-     -undefined dynamic_lookup (macOS): undefined symbols resolve at dlopen time
-     from RTLD_GLOBAL, so later fragments can omit stdlib already compiled.
-     -O0 -fno-lto: fragments are one-shot and don't benefit from optimization;
-     the clang driver optimization passes dominate per-fragment latency. Stdlib
-     keeps its -O1 build (compiled once, cached). *)
-  let cmd = Printf.sprintf "%s -shared -fPIC -O0 -fno-lto%s -o %s %s 2>&1"
-    ctx.clang ctx.undef_flag so_path ll_path in
-  let ic = Unix.open_process_in cmd in
   let output = Buffer.create 256 in
   (try while true do Buffer.add_char output (input_char ic) done
    with End_of_file -> ());
-  let status = Unix.close_process_in ic in
+  let status = Unix.close_process (ic, oc) in
   (match status with
    | Unix.WEXITED 0 -> ()
    | _ ->
-     (* Keep .ll file for debugging; remove only the .so partial artifact *)
      (try Sys.remove so_path with _ -> ());
-     failwith (Printf.sprintf "clang failed: %s"
-       (Buffer.contents output)));
-  (* dlopen the .so; remove .ll artifact now that compilation succeeded *)
+     (* On failure, dump IR to disk so the user can reproduce with clang
+        directly. We did not necessarily write it earlier (stdin path). *)
+     if not keep_ll then begin
+       try
+         let oc = open_out ll_path in
+         output_string oc ir;
+         close_out oc
+       with _ -> ()
+     end;
+     failwith (Printf.sprintf "clang failed (IR preserved at %s): %s"
+       ll_path (Buffer.contents output)));
   let handle = Jit.dlopen so_path in
   ctx.handles <- handle :: ctx.handles;
-  if Sys.getenv_opt "MARCH_KEEP_LL" <> None then ()
-  else (try Sys.remove ll_path with _ -> ());
   handle
 
 (** True if a TIR function name resolves to a C runtime symbol (i.e. mangle
