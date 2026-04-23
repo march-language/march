@@ -820,6 +820,12 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         env := March_eval.Eval.eval_decl !env d';
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
+                        (* Notify the JIT about any user-declared types so
+                           subsequent run_expr can pretty-print user ADTs. *)
+                        (match jit_ctx, d' with
+                         | Some jit, March_ast.Ast.DType _ ->
+                           March_jit.Repl_jit.register_user_type_decl jit d'
+                         | _ -> ());
                         if not scroll_mode then
                         (match d' with
                          | March_ast.Ast.DFn (def, _) ->
@@ -1297,6 +1303,10 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
              if tc_ok then
                tc_env := { new_tc with errors = March_errors.Errors.create () };
+             (match jit_ctx, d' with
+              | Some jit, March_ast.Ast.DType _ ->
+                March_jit.Repl_jit.register_user_type_decl jit d'
+              | _ -> ());
              let out = match d' with
                | March_ast.Ast.DFn (def, _) ->
                  Printf.sprintf "val %s = <fn>" def.fn_name.txt

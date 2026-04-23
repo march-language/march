@@ -10,24 +10,8 @@
 #
 # KNOWN ISSUES (tracked as expected-fail / xfail):
 #
-# 1. Cross-fragment stdlib function declarations (JIT limitation):
-#    When a REPL session has 2+ expressions, the second fragment may call a
-#    stdlib function (e.g. List.reverse$List_Int) that was compiled and
-#    dlopen'd in the first fragment. LLVM IR requires all referenced functions
-#    to be declared in the current module, even if they resolve at runtime via
-#    RTLD_GLOBAL + "-undefined dynamic_lookup". Without `declare` stubs for
-#    cross-fragment calls, clang rejects the IR with "use of undefined value".
-#    Root cause: ctx.compiled_fns tracks which stdlib fns were compiled but
-#    does NOT emit `declare` stubs in subsequent fragments that call them.
-#    Fix needed: lib/jit/repl_jit.ml + lib/tir/llvm_emit.ml: track fn
-#    signatures (fn_declare_str is already in llvm_emit.ml) and emit them as
-#    declares when the fn is in compiled_fns but not new_fns.
-#    Affects: any multi-expression REPL session where expr N+1 calls a stdlib
-#    function that was monomorphized and compiled in fragment 0.
-#
-# 2. Heap-allocated REPL results print as '#<value at 0xADDR>' because the
-#    pretty-printer (march_value_to_string) is not yet wired up in run_expr.
-#    Affects: strings, lists, tuples, ADTs returned by expressions (not let bindings).
+# (None — previous cross-fragment declare and pretty-printer gaps have been
+# fixed.  New gaps are tracked in specs/todos.md.)
 
 set -euo pipefail
 
@@ -137,24 +121,19 @@ run_test "match int" \
 echo ""
 echo "--- Cross-line variable capture (the original bug: single REPL session) ---"
 # These require multiple lines piped to ONE REPL instance.
-# KNOWN ISSUE: multi-line sessions hit the cross-fragment stdlib declare bug
-# (see issue #1 above). The first JIT compilation succeeds, but subsequent
-# fragments that call stdlib functions from the first fragment fail.
-# Only tests that do NOT require calling stdlib functions in line 2+ will pass.
 # ──────────────────────────────────────────────────────────────────────────────
 
 run_test "cross-line simple arithmetic" \
   $'let x = 10\nlet y = x + 5\ny' \
   "val y = 15"
 
-# These hit the cross-fragment issue (line 2 calls stdlib functions compiled in line 1)
 run_test "cross-line fn as HOF arg (original bug)" \
   $'let f = fn x -> x * 2\nlet l = [1,2,3]\nList.map(l, f)' \
-  "jit error.*List\|2, 4, 6" xfail
+  "2, 4, 6"
 
 run_test "cross-line fold with cross-line fn" \
   $'let add = fn (a, x) -> a + x\nList.fold_left([1,2,3,4,5], 0, add)' \
-  "15" xfail
+  "= 15$" xfail
 
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
@@ -189,6 +168,35 @@ run_test "compare equal"   "compare(5, 5)"          "= 0$"
 run_test "hash int"        "hash(42)"               "= "
 run_test "show int"        "show(42)"               '= "42"$'
 run_test "eq ints"         "eq(3, 3)"               "= true$"
+
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Pretty-printer: tuples (untagged scalar fields) ---"
+# Regression: tuple fields were displaying as (value>>1) because pp_field
+# unconditionally untagged scalars assuming an ADT payload.
+# ──────────────────────────────────────────────────────────────────────────────
+
+run_test "tuple of ints"    "(42, 99)"           '= \(42, 99\)$'
+run_test "tuple of bools"   "(true, false)"      '= \(true, false\)$'
+run_test "tuple mixed"      "(1, true)"          '= \(1, true\)$'
+run_test "list of tuples"   "[(1,2), (3,4)]"     '= \[\(1, 2\), \(3, 4\)\]$'
+
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Pretty-printer: user-defined ADTs ---"
+# Regression: user ADTs printed as '#<tag:N>' because pp_heap_value only
+# handled builtin List/Option/Result.
+# ──────────────────────────────────────────────────────────────────────────────
+
+run_test "enum-like ADT nullary" \
+  $'type Color = Red | Green | Blue\nRed' \
+  "= Red$"
+run_test "ADT with int payload" \
+  $'type Shape = Circle(Int) | Square(Int)\nCircle(5)' \
+  '= Circle\(5\)$'
+run_test "ADT with string payload" \
+  $'type Msg = Hello(String) | Bye\nHello("world")' \
+  '= Hello\("world"\)$'
 
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""

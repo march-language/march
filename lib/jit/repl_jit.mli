@@ -43,5 +43,12 @@ val precompile_stdlib :
   type_map:(March_ast.Ast.span, March_typecheck.Typecheck.ty) Hashtbl.t ->
   unit
 
+(** Register a user-declared type (DType) so that subsequent [run_expr] calls
+    can pretty-print values of that type.  Type declarations are evaluated in
+    the tree-walking interpreter and never reach the JIT via [run_decl]; this
+    function bridges the gap by lowering the AST type into TIR and storing it
+    in the JIT context's type table. *)
+val register_user_type_decl : t -> March_ast.Ast.decl -> unit
+
 (** Clean up: close all open dl handles, remove temp files. *)
 val cleanup : t -> unit
