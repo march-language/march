@@ -81,6 +81,16 @@ let next_id ctx =
   ctx.counter <- n + 1;
   n
 
+let profile_enabled = Sys.getenv_opt "MARCH_JIT_PROFILE" <> None
+let time_phase name f =
+  if profile_enabled then begin
+    let t0 = Unix.gettimeofday () in
+    let r = f () in
+    let dt = Unix.gettimeofday () -. t0 in
+    Printf.eprintf "[jit-prof] %-20s %6.1fms\n%!" name (dt *. 1000.);
+    r
+  end else f ()
+
 let compile_fragment ctx (ir : string) : Jit.dl_handle =
   let n = ctx.counter - 1 in
   let ll_path = Filename.concat ctx.tmp_dir
@@ -104,6 +114,7 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
   let cmd = Printf.sprintf
     "%s -x ir -shared -fPIC -O0 -fno-lto%s -o %s - 2>&1"
     ctx.clang ctx.undef_flag so_path in
+  let t_clang0 = if profile_enabled then Unix.gettimeofday () else 0. in
   let (ic, oc) = Unix.open_process cmd in
   output_string oc ir;
   close_out oc;
@@ -111,6 +122,9 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
   (try while true do Buffer.add_char output (input_char ic) done
    with End_of_file -> ());
   let status = Unix.close_process (ic, oc) in
+  if profile_enabled then
+    Printf.eprintf "[jit-prof]   clang              %6.1fms\n%!"
+      ((Unix.gettimeofday () -. t_clang0) *. 1000.);
   (match status with
    | Unix.WEXITED 0 -> ()
    | _ ->
@@ -126,7 +140,11 @@ let compile_fragment ctx (ir : string) : Jit.dl_handle =
      end;
      failwith (Printf.sprintf "clang failed (IR preserved at %s): %s"
        ll_path (Buffer.contents output)));
+  let t_dlo0 = if profile_enabled then Unix.gettimeofday () else 0. in
   let handle = Jit.dlopen so_path in
+  if profile_enabled then
+    Printf.eprintf "[jit-prof]   dlopen             %6.1fms\n%!"
+      ((Unix.gettimeofday () -. t_dlo0) *. 1000.);
   ctx.handles <- handle :: ctx.handles;
   handle
 
@@ -398,8 +416,10 @@ let run_expr ctx ~tc_env m =
   let repl_vars = List.map (fun (bare, _, _) -> bare) ctx.var_slots in
   let errors = March_errors.Errors.create () in
   let env = { tc_env with March_typecheck.Typecheck.errors } in
-  let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
-  let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m in
+  let (_, type_map) = time_phase "typecheck"
+    (fun () -> March_typecheck.Typecheck.check_module_with_env env m) in
+  let tir = time_phase "lower+mono+opt"
+    (fun () -> lower_module ~type_map ~stdlib_context:ctx.stdlib_decls ~repl_vars m) in
   register_type_defs ctx tir.March_tir.Tir.tm_types;
   let main_fn = match List.find_opt (fun (f : March_tir.Tir.fn_def) ->
     f.fn_name = "main") tir.March_tir.Tir.tm_fns with
@@ -417,15 +437,17 @@ let run_expr ctx ~tc_env m =
   in
   (* Advance counter only when we are about to emit — keeps counter in sync with artifacts. *)
   let n = next_id ctx in
-  let ir = March_tir.Llvm_emit.emit_repl_expr
-    ~n ~ret_ty
-    ~prev_slots:(prev_slots_of ctx)
-    ~fns:new_fns
-    ~extern_fns
-    ~store_as_slot:(Some v_slot)
-    ~types:tir.March_tir.Tir.tm_types
-    main_fn.fn_body in
-  let handle = compile_fragment ctx ir in
+  let ir = time_phase "emit_ir" (fun () ->
+    March_tir.Llvm_emit.emit_repl_expr
+      ~n ~ret_ty
+      ~prev_slots:(prev_slots_of ctx)
+      ~fns:new_fns
+      ~extern_fns
+      ~store_as_slot:(Some v_slot)
+      ~types:tir.March_tir.Tir.tm_types
+      main_fn.fn_body) in
+  let handle = time_phase "clang+dlopen"
+    (fun () -> compile_fragment ctx ir) in
   mark_compiled_fns ctx new_fns;
   let sym_name = Printf.sprintf "repl_%d" n in
   let fptr = Jit.dlsym handle sym_name in
