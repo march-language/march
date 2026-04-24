@@ -6879,29 +6879,41 @@ let test_repl_jit_v_magic_int () =
     let jit = March_jit.Repl_jit.create ~runtime_so () in
     (try
        let type_map = Hashtbl.create 16 in
-       let tc_env = March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map in
+       let tc_env = ref (March_typecheck.Typecheck.base_env (March_errors.Errors.create ()) type_map) in
        (* Evaluate `21 + 21` — result stored as @repl_N_v *)
        (match parse_repl "21 + 21" with
         | March_ast.Ast.ReplExpr e ->
           let e' = March_desugar.Desugar.desugar_expr e in
           let m = make_jit_test_module e' in
-          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env m in
-          Alcotest.(check string) "21+21 = 42" "42" result
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
+          Alcotest.(check string) "21+21 = 42" "42" result;
+          let inferred = March_typecheck.Typecheck.infer_expr
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } e' in
+          tc_env := { !tc_env with March_typecheck.Typecheck.vars =
+            March_typecheck.Typecheck.StrMap.add "v"
+              (March_typecheck.Typecheck.Mono inferred)
+              !tc_env.March_typecheck.Typecheck.vars }
         | _ -> failwith "expected ReplExpr");
        (* Now evaluate `v + 1` — references the `v` global from prior fragment *)
        (match parse_repl "v + 1" with
         | March_ast.Ast.ReplExpr e ->
           let e' = March_desugar.Desugar.desugar_expr e in
           let m = make_jit_test_module e' in
-          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env m in
-          Alcotest.(check string) "v+1 = 43" "43" result
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
+          Alcotest.(check string) "v+1 = 43" "43" result;
+          let inferred = March_typecheck.Typecheck.infer_expr
+            { !tc_env with March_typecheck.Typecheck.errors = March_errors.Errors.create () } e' in
+          tc_env := { !tc_env with March_typecheck.Typecheck.vars =
+            March_typecheck.Typecheck.StrMap.add "v"
+              (March_typecheck.Typecheck.Mono inferred)
+              !tc_env.March_typecheck.Typecheck.vars }
         | _ -> failwith "expected ReplExpr");
        (* `v` itself equals 43 now (the result of the last expression) *)
        (match parse_repl "v" with
         | March_ast.Ast.ReplExpr e ->
           let e' = March_desugar.Desugar.desugar_expr e in
           let m = make_jit_test_module e' in
-          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env m in
+          let (_, result) = March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
           Alcotest.(check string) "v = 43 (last result)" "43" result
         | _ -> failwith "expected ReplExpr");
        March_jit.Repl_jit.cleanup jit
