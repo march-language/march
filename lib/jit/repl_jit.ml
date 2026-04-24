@@ -44,6 +44,7 @@ type t = {
   global_tir_tys : (string, March_tir.Tir.ty) Hashtbl.t;  (* bare_name -> TIR type, for display *)
   global_type_defs : (string, March_tir.Tir.type_def) Hashtbl.t;  (* type name -> TDVariant/TDRecord for display *)
   mutable stdlib_decls : March_ast.Ast.decl list;  (* cached for incremental lowering context *)
+  mutable loaded_tir_types : March_tir.Tir.type_def list;  (* TIR type_defs from :load-ed modules, for ctor_info in expression fragments *)
 }
 
 let create ~runtime_so ?(clang="clang") () =
@@ -69,7 +70,8 @@ let create ~runtime_so ?(clang="clang") () =
     compiled_fns = Hashtbl.create 256;
     global_tir_tys = Hashtbl.create 16;
     global_type_defs = Hashtbl.create 16;
-    stdlib_decls = [] }
+    stdlib_decls = [];
+    loaded_tir_types = [] }
 
 let alloc_slot ctx =
   let n = ctx.next_slot in
@@ -466,6 +468,9 @@ let register_user_type_decl ctx (d : March_ast.Ast.decl) =
 let register_module_decl ctx ~tc_env (d : March_ast.Ast.decl) =
   match d with
   | March_ast.Ast.DMod _ ->
+    (* Append to stdlib_context so subsequent REPL expression lowerings can
+       find this module's type definitions and assign correct variant tags. *)
+    ctx.stdlib_decls <- ctx.stdlib_decls @ [d];
     let s = March_ast.Ast.dummy_span in
     let m : March_ast.Ast.module_ = {
       March_ast.Ast.mod_name = { txt = "Repl"; span = s };
@@ -477,11 +482,12 @@ let register_module_decl ctx ~tc_env (d : March_ast.Ast.decl) =
       let (_, type_map) = March_typecheck.Typecheck.check_module_with_env env m in
       let tir = lower_module ~type_map ~stdlib_context:ctx.stdlib_decls m in
       register_type_defs ctx tir.March_tir.Tir.tm_types;
+      ctx.loaded_tir_types <- ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types;
       let (new_fns, extern_fns) = partition_fns ctx tir.March_tir.Tir.tm_fns in
       if new_fns <> [] then begin
         ignore (next_id ctx);
         let ir = March_tir.Llvm_emit.emit_fns_fragment
-          ~types:tir.March_tir.Tir.tm_types ~fns:new_fns ~extern_fns () in
+          ~types:tir.March_tir.Tir.tm_types ~fns:new_fns ~extern_fns ~repl:true () in
         (try
           ignore (compile_fragment ctx ir);
           mark_compiled_fns ctx new_fns
@@ -525,7 +531,7 @@ let run_expr ctx ~tc_env m =
       ~fns:new_fns
       ~extern_fns
       ~store_as_slot:(Some v_slot)
-      ~types:tir.March_tir.Tir.tm_types
+      ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       main_fn.fn_body) in
   let handle = time_phase "clang+dlopen"
     (fun () -> compile_fragment ctx ir) in
@@ -641,7 +647,7 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     (if helper_fns <> [] then begin
       ignore (next_id ctx);  (* advance counter so compile_fragment uses right id *)
       let ir = March_tir.Llvm_emit.emit_fns_fragment
-        ~types:tir.March_tir.Tir.tm_types ~fns:helper_fns ~extern_fns () in
+        ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types) ~fns:helper_fns ~extern_fns ~repl:true () in
       (* Wrap in compile_fragment — uses counter (= hn) for the file name. *)
       (try
         ignore (compile_fragment ctx ir);
@@ -654,7 +660,7 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
     let slot = alloc_slot ctx in
     let ir = March_tir.Llvm_emit.emit_repl_fn_with_closure_slot
       ~n:pn ~bind_name ~dest_slot:slot ~prev_slots:(prev_slots_of ctx)
-      ~extern_fns:(extern_fns @ helper_fns) ~types:tir.March_tir.Tir.tm_types
+      ~extern_fns:(extern_fns @ helper_fns) ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       primary_fn in
     let handle = compile_fragment ctx ir in
     mark_compiled_fns ctx [primary_fn];
@@ -684,7 +690,7 @@ let run_decl ctx ~tc_env ~is_fn_decl ~bind_name m =
       ~prev_slots:(prev_slots_of ctx)
       ~fns:user_fns
       ~extern_fns
-      ~types:tir.March_tir.Tir.tm_types
+      ~types:(ctx.loaded_tir_types @ tir.March_tir.Tir.tm_types)
       main_fn.fn_body in
     let handle = compile_fragment ctx ir in
     mark_compiled_fns ctx user_fns;

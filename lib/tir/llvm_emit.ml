@@ -96,6 +96,10 @@ type ctx = {
   mutable mutual_tco_loop_label : string;
   mutable mutual_tco_fn_params  : (string * (string * string * string) list) list;
   mutable mutual_tco_fn_tags    : (string * int) list;
+  (* When true, skip the reduction-budget check (march_tls_reductions load/store).
+     ORC JIT on macOS cannot resolve TLS variables via emutls; the REPL is
+     always single-threaded so the check is unnecessary there anyway. *)
+  repl : bool;
 }
 
 (** Compilation target. *)
@@ -137,7 +141,7 @@ let target_int_ty = function
   | Native | Wasm64Wasi -> "i64"
   | Wasm32Wasi | Wasm32Unknown -> "i32"
 
-let make_ctx ?(fast_math=false) () = {
+let make_ctx ?(fast_math=false) ?(repl=false) () = {
   buf      = Buffer.create 4096;
   preamble = Buffer.create 1024;
   ctr      = 0; blk = 0; str_ctr = 0;
@@ -167,6 +171,7 @@ let make_ctx ?(fast_math=false) () = {
   mutual_tco_loop_label = "";
   mutual_tco_fn_params  = [];
   mutual_tco_fn_tags    = [];
+  repl;
 }
 
 (* ── Helpers ─────────────────────────────────────────────────────────── *)
@@ -410,6 +415,10 @@ let rec expr_has_call (e : Tir.expr) : bool =
     Leaves the IR positioned at the start of a fresh basic block so the
     caller can continue emitting the function body. *)
 let emit_reduction_check ctx =
+  (* In REPL mode, skip the reduction check: ORC JIT cannot resolve
+     march_tls_reductions (a TLS var) on macOS via emutls, and the REPL is
+     always single-threaded so the scheduler yield is a no-op anyway. *)
+  if not ctx.repl then begin
   let yield_blk = fresh_block ctx "sched_yield" in
   let cont_blk  = fresh_block ctx "sched_cont"  in
   let red       = fresh ctx "red" in
@@ -426,6 +435,7 @@ let emit_reduction_check ctx =
   emit ctx "call void @march_yield_from_compiled()";
   emit_term ctx (Printf.sprintf "br label %%%s" cont_blk);
   emit_label ctx cont_blk
+  end
 
 (** TIR return type for known builtin/extern functions, overriding type info. *)
 let builtin_ret_ty : string -> Tir.ty option = function
@@ -3243,7 +3253,7 @@ let build_ctor_info ctx (m : Tir.tir_module) =
         { ce_tag = 0; ce_fields = field_tys }
   ) m.Tir.tm_types
 
-let emit_preamble ?(target=Native) (buf : Buffer.t) =
+let emit_preamble ?(target=Native) ?(repl=false) (buf : Buffer.t) =
   Buffer.add_string buf (Printf.sprintf "; March compiler output\ntarget triple = \"%s\"\n\n" (target_triple target));
   (* Core runtime declarations — needed on all targets *)
   Buffer.add_string buf {|; Runtime declarations
@@ -3411,7 +3421,7 @@ declare void @march_repl_set(i64 %slot, i64 %val)
 
 |};
   (* Native-only declarations: actors, networking, file I/O, scheduler *)
-  if not (is_wasm_target target) then
+  if not (is_wasm_target target) then begin
     Buffer.add_string buf {|; Actor builtins
 declare void @march_kill(ptr %actor)
 declare i64  @march_is_alive(ptr %actor)
@@ -3426,8 +3436,15 @@ declare ptr  @march_actor_call(ptr %actor, ptr %msg, i64 %timeout_ms)
 declare void @march_actor_reply(ptr %ref, ptr %result)
 declare void @march_run_scheduler()
 declare ptr  @march_task_spawn_thunk(ptr %clo_ptr)
-@march_tls_reductions = external thread_local global i64
-declare void @march_yield_from_compiled()
+|};
+    (* In REPL mode the reduction check is skipped, so march_tls_reductions and
+       march_yield_from_compiled are never referenced — omitting them avoids
+       the emutls symbol-not-found error from ORC JIT on macOS. *)
+    if not repl then
+      Buffer.add_string buf
+        "@march_tls_reductions = external thread_local global i64\n\
+         declare void @march_yield_from_compiled()\n";
+    Buffer.add_string buf {|
 ; TCP/network builtins
 declare i64  @march_tcp_listen(i64 %port)
 declare i64  @march_tcp_accept(i64 %fd)
@@ -3544,7 +3561,7 @@ declare ptr  @march_mpst_send(ptr %ep, ptr %target_role, ptr %val)
 declare ptr  @march_mpst_recv(ptr %ep, ptr %source_role)
 declare i64  @march_mpst_close(ptr %ep)
 |}
-  else
+  end else
     (* WASM targets: plain global instead of thread_local; no-op scheduler *)
     Buffer.add_string buf {|; WASM: plain global (no TLS), no-op scheduler stub
 @march_tls_reductions = external global i64
@@ -3986,7 +4003,7 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
     ?(store_as_slot : int option = None)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
-  let ctx = make_ctx ~fast_math () in
+  let ctx = make_ctx ~fast_math ~repl:true () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn ->
@@ -4013,7 +4030,7 @@ let emit_repl_expr ?(fast_math=false) ~(n : int) ~(ret_ty : Tir.ty)
    | Some k -> emit_store_to_slot ctx k result' ret_ty);
   Printf.bprintf ctx.buf "  ret %s %s\n}\n" ret_llty result';
   let out = Buffer.create 4096 in
-  emit_preamble out;
+  emit_preamble ~repl:true out;
   (* Declare pre-compiled functions so LLVM IR is valid even without definitions *)
   List.iter (fun fn -> Buffer.add_string out (fn_declare_str fn ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
@@ -4036,7 +4053,7 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
     ~(types : Tir.type_def list)
     (body : Tir.expr) : string =
   ignore name;
-  let ctx = make_ctx ~fast_math () in
+  let ctx = make_ctx ~fast_math ~repl:true () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
   List.iter (fun fn ->
@@ -4059,7 +4076,7 @@ let emit_repl_decl ?(fast_math=false) ~(n : int) ~(name : string)
   emit_store_to_slot ctx dest_slot result' val_ty;
   Printf.bprintf ctx.buf "  ret void\n}\n";
   let out = Buffer.create 4096 in
-  emit_preamble out;
+  emit_preamble ~repl:true out;
   List.iter (fun fn -> Buffer.add_string out (fn_declare_str fn ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
@@ -4073,7 +4090,7 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
     ?(extern_fns : Tir.fn_def list = [])
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
-  let ctx = make_ctx ~fast_math () in
+  let ctx = make_ctx ~fast_math ~repl:true () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
@@ -4090,7 +4107,7 @@ let emit_repl_fn ?(fast_math=false) ~(n : int)
   let init_name = Printf.sprintf "repl_%d_init" n in
   Printf.bprintf ctx.buf "\ndefine void @%s() {\nentry:\n  ret void\n}\n" init_name;
   let out = Buffer.create 4096 in
-  emit_preamble out;
+  emit_preamble ~repl:true out;
   List.iter (fun f -> Buffer.add_string out (fn_declare_str f ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
@@ -4109,7 +4126,7 @@ let emit_repl_fn_with_closure_slot ?(fast_math=false) ~(n : int)
     ~(types : Tir.type_def list)
     (fn : Tir.fn_def) : string =
   ignore bind_name;
-  let ctx = make_ctx ~fast_math () in
+  let ctx = make_ctx ~fast_math ~repl:true () in
   let pseudo_mod : Tir.tir_module = { tm_name = "repl"; tm_types = types; tm_fns = [fn]; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
   Hashtbl.replace ctx.top_fns fn.Tir.fn_name true;
@@ -4160,7 +4177,7 @@ let emit_repl_fn_with_closure_slot ?(fast_math=false) ~(n : int)
   Printf.bprintf ctx.buf "  call void @march_repl_set(i64 %d, i64 %%cp)\n" dest_slot;
   Printf.bprintf ctx.buf "  ret void\n}\n";
   let out = Buffer.create 4096 in
-  emit_preamble out;
+  emit_preamble ~repl:true out;
   List.iter (fun f -> Buffer.add_string out (fn_declare_str f ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
@@ -4173,8 +4190,9 @@ let emit_fns_fragment
     ~(types : Tir.type_def list)
     ~(fns : Tir.fn_def list)
     ?(extern_fns : Tir.fn_def list = [])
+    ?(repl : bool = false)
     () : string =
-  let ctx = make_ctx () in
+  let ctx = make_ctx ~repl () in
   let pseudo_mod : Tir.tir_module =
     { tm_name = "stdlib_prelude"; tm_types = types; tm_fns = fns; tm_externs = []; tm_exports = []; tm_tests = [] } in
   build_ctor_info ctx pseudo_mod;
@@ -4191,7 +4209,7 @@ let emit_fns_fragment
       if fn.Tir.fn_params = [] then Hashtbl.replace ctx.zero_arg_fns fn.Tir.fn_name true) fns;
   List.iter (emit_fn ctx) fns;
   let out = Buffer.create 8192 in
-  emit_preamble out;
+  emit_preamble ~repl out;
   List.iter (fun f -> Buffer.add_string out (fn_declare_str f ^ "\n")) extern_fns;
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
