@@ -311,7 +311,16 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
       if not (March_errors.Errors.has_errors input_ctx) then begin
         (try
           env    := March_eval.Eval.eval_decl !env decl;
-          tc_env := { new_tc with errors = March_errors.Errors.create () }
+          tc_env := { new_tc with errors = March_errors.Errors.create () };
+          (* Register DMod functions in the JIT dylib so ORC can resolve
+             module-qualified names (Counter.create etc.) in later fragments.
+             Uses input_tc (the env before the DMod) to avoid double-definition. *)
+          (match jit_ctx, decl with
+           | Some jit, March_ast.Ast.DMod _ ->
+             (try March_jit.Repl_jit.register_module_decl jit ~tc_env:input_tc decl
+              with exn ->
+                Printf.eprintf "jit: module registration: %s\n%!" (Printexc.to_string exn))
+           | _ -> ())
         with exn ->
           Printf.eprintf "runtime error loading %s: %s\n%!" path (Printexc.to_string exn))
       end else
@@ -1099,7 +1108,12 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
       if not (March_errors.Errors.has_errors input_ctx) then begin
         (try
           env := March_eval.Eval.eval_decl !env decl;
-          tc_env := { new_tc with errors = March_errors.Errors.create () }
+          tc_env := { new_tc with errors = March_errors.Errors.create () };
+          (match jit_ctx, decl with
+           | Some jit, March_ast.Ast.DMod _ ->
+             (try March_jit.Repl_jit.register_module_decl jit ~tc_env:input_tc decl
+              with _ -> ())
+           | _ -> ())
         with _ -> ())
       end else
         List.iter (fun (d : March_errors.Errors.diagnostic) ->

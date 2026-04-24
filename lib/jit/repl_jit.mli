@@ -50,5 +50,15 @@ val precompile_stdlib :
     in the JIT context's type table. *)
 val register_user_type_decl : t -> March_ast.Ast.decl -> unit
 
+(** Compile a :load-ed DMod's functions into the JIT dylib so ORC can resolve
+    module-qualified names (e.g. Counter.create) in subsequent REPL fragments.
+    [tc_env] must be the type environment before the DMod was added.
+    Silently ignores non-DMod decls. *)
+val register_module_decl :
+  t ->
+  tc_env:March_typecheck.Typecheck.env ->
+  March_ast.Ast.decl ->
+  unit
+
 (** Clean up: close all open dl handles, remove temp files. *)
 val cleanup : t -> unit
