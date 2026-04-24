@@ -41,6 +41,17 @@ void *march_send(void *actor, void *msg) {
     (void)actor;
     return msg;   /* return msg unchanged — enough for the move test */
 }
+
+#include <unistd.h>
+
+/* ── Override march_gc_crash to avoid macOS ReportCrash delays ──────── */
+/* On macOS, abort() after fork() triggers the crash reporter which can
+ * stall for 10+ minutes per invocation.  We override the weak symbol so
+ * gc_corrupt() exits via _exit(134) — the conventional 128+SIGABRT code —
+ * instead, letting waitpid() return immediately. */
+void march_gc_crash(void) {
+    _exit(134); /* 128 + SIGABRT(6): conventional signal-killed exit code */
+}
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -484,7 +495,7 @@ static void test_gc_pass2_scalar_preservation(void) {
 static int expect_abort(void (*child_fn)(void)) {
     pid_t pid = fork();
     if (pid == 0) {
-        /* Silence the child's stderr so the test output stays readable. */
+        /* Silence child output — the GC diagnostic goes to stderr. */
         int devnull = open("/dev/null", O_WRONLY);
         if (devnull >= 0) { dup2(devnull, 2); close(devnull); }
         child_fn();
@@ -492,7 +503,11 @@ static int expect_abort(void (*child_fn)(void)) {
     }
     int status = 0;
     waitpid(pid, &status, 0);
-    return WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT;
+    /* Accept either killed-by-SIGABRT or _exit(134).
+     * On macOS, abort() after fork() triggers ReportCrash (10+ min stall),
+     * so march_gc_crash() is overridden above to use _exit(134) instead. */
+    return (WIFSIGNALED(status) && WTERMSIG(status) == SIGABRT)
+        || (WIFEXITED(status)   && WEXITSTATUS(status) == 134);
 }
 
 static void child_corrupt_alloc_size(void) {

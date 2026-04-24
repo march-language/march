@@ -1,8 +1,25 @@
 ; lib/jit/dune
-; Note: -ldl is needed on Linux but not macOS (dlopen is in libSystem).
-; This project targets macOS, so no -ldl needed. For Linux, add
-; (c_library_flags (-ldl)) later.
+; LLVM flags (include path + linker flags) are platform-detected at build
+; time by detect_llvm.sh, which writes jit_c_flags.sexp and
+; jit_link_flags.sexp.  On macOS libLLVM is dlopened lazily; on Linux we
+; link against -lLLVM so the symbols are resolved at link time.
 (library
  (name march_jit)
  (libraries unix march_tir march_ast march_typecheck march_cas)
- (foreign_stubs (language c) (names jit_stubs)))
+ (foreign_stubs
+  (language c)
+  (names jit_stubs jit_orc_stubs)
+  (flags (:standard (:include jit_c_flags.sexp))))
+ (c_library_flags (:include jit_link_flags.sexp)))
+
+(rule
+ (target jit_c_flags.sexp)
+ (action
+  (with-stdout-to %{target}
+   (run sh %{dep:detect_llvm.sh} c_flags))))
+
+(rule
+ (target jit_link_flags.sexp)
+ (action
+  (with-stdout-to %{target}
+   (run sh %{dep:detect_llvm.sh} link_flags))))

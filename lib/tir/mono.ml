@@ -147,7 +147,15 @@ let rec match_ty (poly : Tir.ty) (conc : Tir.ty) (acc : ty_subst) : ty_subst =
     (match List.assoc_opt name acc with
      | None -> (name, t) :: acc
      | Some existing ->
-       if has_tvar existing && not (has_tvar t) then
+       (* TVar "_" is the lowering fallback placeholder used when a span is
+          absent from the type_map (e.g. stdlib code lowered in a REPL
+          context).  It must be treated as "worse" than any real type so that
+          a later concrete binding like {b→Int} replaces an earlier spurious
+          {b→TVar "_"}.  Without this, fold_left$List_Int$Int$... recursively
+          calls fold_left$List_Int$V__$... instead of itself, halving results. *)
+       let is_wildcard_placeholder = function Tir.TVar "_" -> true | _ -> false in
+       if (has_tvar existing || is_wildcard_placeholder existing)
+          && not (has_tvar t || is_wildcard_placeholder t) then
          (name, t) :: List.remove_assoc name acc
        else
          acc)
@@ -349,7 +357,14 @@ let rec rewrite_calls
                    let f_var' = { f_var with Tir.v_name = mangled_name } in
                    Tir.EApp (f_var', args)))))
      | Some orig_fn
-       when not (List.exists (fun v -> has_tvar v.Tir.v_ty) orig_fn.Tir.fn_params) ->
+       when not (List.exists (fun v ->
+         has_tvar v.Tir.v_ty ||
+         (* TVar "_" is a lowering placeholder — treat it as a wildcard that
+            can still be specialized when concrete arg types are available.
+            Without this, Map.key_hash(k : TVar "_") would be emitted as-is
+            and the internal hash(k) call would stay as bare @hash, crashing. *)
+         (match v.Tir.v_ty with Tir.TVar "_" -> true | _ -> false)
+       ) orig_fn.Tir.fn_params) ->
        (* Callee params are monomorphic but it may not have been seeded
           (e.g. return type has TVar).  Ensure it's enqueued. *)
        if not (Hashtbl.mem done_set orig_name) then

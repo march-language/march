@@ -290,6 +290,11 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
   let first_line  = ref true in
   let show_type   = ref false in
   let loaded_file : string option ref = ref None in
+  (* Actor declarations live only in the interpreter's scheduler. Once a
+     DActor is seen we disable the JIT paths so spawn/send/run_until_idle
+     always go through the interpreter — otherwise JIT-compiled calls hit
+     the runtime's C scheduler, which has no actor registered. *)
+  let actors_declared = ref false in
 
   let print_diag (d : March_errors.Errors.diagnostic) =
     let src = Buffer.contents buf in
@@ -757,6 +762,15 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                     let (_, extra_decls) =
                       March_resolver.Resolver.resolve_imports ~source_file:dummy_src dummy_mod in
                     List.iter (fun decl ->
+                      (* Register user modules with Module_registry so qualified
+                         accesses (`MyMod.foo`) resolve. *)
+                      (match decl with
+                       | March_ast.Ast.DMod (name, _, body_decls, _) ->
+                         let exports = March_modules.Module_registry.extract_exports
+                           name.March_ast.Ast.txt body_decls in
+                         March_modules.Module_registry.register
+                           name.March_ast.Ast.txt exports
+                       | _ -> ());
                       let ictx = March_errors.Errors.create () in
                       let itc  = { !tc_env with errors = ictx } in
                       let ntc  = March_typecheck.Typecheck.check_decl itc decl in
@@ -779,7 +793,8 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                  if tc_ok || is_debug then
                    (try
                       (match jit_ctx with
-                      | Some jit when (match d' with March_ast.Ast.DFn _ -> true | _ -> false) ->
+                      | Some jit when (not !actors_declared)
+                                    && (match d' with March_ast.Ast.DFn _ -> true | _ -> false) ->
                         let bind_name = match d' with
                           | March_ast.Ast.DFn (def, _) -> def.fn_name.txt
                           | _ -> assert false
@@ -789,10 +804,11 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
                         if not scroll_mode then Printf.printf "val %s = <fn>\n%!" bind_name
-                      | Some jit when (match d' with
-                          | March_ast.Ast.DLet (_, b, _) ->
-                            (match b.bind_pat with March_ast.Ast.PatVar _ -> true | _ -> false)
-                          | _ -> false) ->
+                      | Some jit when (not !actors_declared)
+                                    && (match d' with
+                                        | March_ast.Ast.DLet (_, b, _) ->
+                                          (match b.bind_pat with March_ast.Ast.PatVar _ -> true | _ -> false)
+                                        | _ -> false) ->
                         (* JIT path for simple let bindings: compile value to a global
                            so later expressions can reference the name across module boundaries. *)
                         let bind_name = match d' with
@@ -820,6 +836,15 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         env := March_eval.Eval.eval_decl !env d';
                         if tc_ok then
                           tc_env := { new_tc with errors = March_errors.Errors.create () };
+                        (match d' with
+                         | March_ast.Ast.DActor _ -> actors_declared := true
+                         | _ -> ());
+                        (* Notify the JIT about any user-declared types so
+                           subsequent run_expr can pretty-print user ADTs. *)
+                        (match jit_ctx, d' with
+                         | Some jit, March_ast.Ast.DType _ ->
+                           March_jit.Repl_jit.register_user_type_decl jit d'
+                         | _ -> ());
                         if not scroll_mode then
                         (match d' with
                          | March_ast.Ast.DFn (def, _) ->
@@ -902,7 +927,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                    in
                    (try
                       (match jit_ctx with
-                      | Some jit ->
+                      | Some jit when not !actors_declared ->
                         (try
                           let m = wrap_expr_as_module e' in
                           let (_ty, result_str) =
@@ -917,7 +942,7 @@ let run_simple ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_
                         with Failure _ ->
                           (* JIT compilation failed — fall back to tree-walking interpreter *)
                           eval_via_interp ())
-                      | None ->
+                      | _ ->
                         eval_via_interp ())
                     with
                     | March_eval.Eval.Eval_error msg ->
@@ -998,6 +1023,9 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
   let watch_list   : (string * March_ast.Ast.expr) list ref = ref [] in
   (* Auto-type display: when true, print inferred type after each expression. *)
   let show_type    = ref false in
+  (* See run_simple: once a DActor is declared, disable JIT paths so the
+     interpreter's actor scheduler stays the single source of truth. *)
+  let actors_declared = ref false in
   (* scope_baseline: stdlib + preloaded names to hide from the right pane.
      Mutable so that preload can update it after loading project code. *)
   let scope_baseline = ref (if is_debug then base_e else e0) in
@@ -1230,6 +1258,18 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
          let (_, extra_decls) =
            March_resolver.Resolver.resolve_imports ~source_file:dummy_src dummy_mod in
          List.iter (fun decl ->
+           (* Register user modules with Module_registry so qualified accesses
+              (`MyMod.foo`) resolve.  Without this, check_decl successfully adds
+              MyMod to tc_env.vars but Module_registry.ensure_loaded still misses
+              it (it only knows stdlib dirs), so `MyMod.foo` fails with
+              "Unknown module `MyMod`". *)
+           (match decl with
+            | March_ast.Ast.DMod (name, _, body_decls, _) ->
+              let exports = March_modules.Module_registry.extract_exports
+                name.March_ast.Ast.txt body_decls in
+              March_modules.Module_registry.register
+                name.March_ast.Ast.txt exports
+            | _ -> ());
            let ictx = March_errors.Errors.create () in
            let itc  = { !tc_env with errors = ictx } in
            let ntc  = March_typecheck.Typecheck.check_decl itc decl in
@@ -1257,7 +1297,8 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
       if tc_ok || is_debug then
         (try
            (match jit_ctx with
-           | Some jit when (match d' with March_ast.Ast.DFn _ -> true | _ -> false) ->
+           | Some jit when (not !actors_declared)
+                        && (match d' with March_ast.Ast.DFn _ -> true | _ -> false) ->
              let bind_name = match d' with
                | March_ast.Ast.DFn (def, _) -> def.fn_name.txt
                | _ -> assert false
@@ -1268,10 +1309,11 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              if tc_ok then
                tc_env := { new_tc with errors = March_errors.Errors.create () };
              add_line Notty.A.empty (Printf.sprintf "val %s = <fn>" bind_name)
-           | Some jit when (match d' with
-               | March_ast.Ast.DLet (_, b, _) ->
-                 (match b.bind_pat with March_ast.Ast.PatVar _ -> true | _ -> false)
-               | _ -> false) ->
+           | Some jit when (not !actors_declared)
+                        && (match d' with
+                            | March_ast.Ast.DLet (_, b, _) ->
+                              (match b.bind_pat with March_ast.Ast.PatVar _ -> true | _ -> false)
+                            | _ -> false) ->
              (* JIT path for simple let bindings: compile value to a global. *)
              let bind_name = match d' with
                | March_ast.Ast.DLet (_, b, _) ->
@@ -1297,6 +1339,13 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
              env := capture_stdout (fun () -> March_eval.Eval.eval_decl !env d');
              if tc_ok then
                tc_env := { new_tc with errors = March_errors.Errors.create () };
+             (match d' with
+              | March_ast.Ast.DActor _ -> actors_declared := true
+              | _ -> ());
+             (match jit_ctx, d' with
+              | Some jit, March_ast.Ast.DType _ ->
+                March_jit.Repl_jit.register_user_type_decl jit d'
+              | _ -> ());
              let out = match d' with
                | March_ast.Ast.DFn (def, _) ->
                  Printf.sprintf "val %s = <fn>" def.fn_name.txt
@@ -1372,7 +1421,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
       else
         (try
            (match jit_ctx with
-           | Some jit ->
+           | Some jit when not !actors_declared ->
              let m = wrap_expr_as_module e' in
              let (_ty, result_str) =
                March_jit.Repl_jit.run_expr jit ~tc_env:!tc_env m in
@@ -1383,7 +1432,7 @@ let run_tui ?(stdlib_decls=[]) ?(debug_hooks=None) ?(initial_env=None) ?(jit_ctx
                tc_env := { !tc_env with
                  vars = March_typecheck.Typecheck.StrMap.add "v"
                           (March_typecheck.Typecheck.Mono inferred) !tc_env.vars }
-           | None ->
+           | _ ->
              let v = capture_stdout (fun () -> March_eval.Eval.eval_expr !env e') in
              let vs = March_eval.Eval.value_to_string_pretty v in
              add_line Notty.A.(fg green) (Printf.sprintf "= %s" vs);

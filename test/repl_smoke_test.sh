@@ -10,24 +10,8 @@
 #
 # KNOWN ISSUES (tracked as expected-fail / xfail):
 #
-# 1. Cross-fragment stdlib function declarations (JIT limitation):
-#    When a REPL session has 2+ expressions, the second fragment may call a
-#    stdlib function (e.g. List.reverse$List_Int) that was compiled and
-#    dlopen'd in the first fragment. LLVM IR requires all referenced functions
-#    to be declared in the current module, even if they resolve at runtime via
-#    RTLD_GLOBAL + "-undefined dynamic_lookup". Without `declare` stubs for
-#    cross-fragment calls, clang rejects the IR with "use of undefined value".
-#    Root cause: ctx.compiled_fns tracks which stdlib fns were compiled but
-#    does NOT emit `declare` stubs in subsequent fragments that call them.
-#    Fix needed: lib/jit/repl_jit.ml + lib/tir/llvm_emit.ml: track fn
-#    signatures (fn_declare_str is already in llvm_emit.ml) and emit them as
-#    declares when the fn is in compiled_fns but not new_fns.
-#    Affects: any multi-expression REPL session where expr N+1 calls a stdlib
-#    function that was monomorphized and compiled in fragment 0.
-#
-# 2. Heap-allocated REPL results print as '#<value at 0xADDR>' because the
-#    pretty-printer (march_value_to_string) is not yet wired up in run_expr.
-#    Affects: strings, lists, tuples, ADTs returned by expressions (not let bindings).
+# (None — previous cross-fragment declare and pretty-printer gaps have been
+# fixed.  New gaps are tracked in specs/todos.md.)
 
 set -euo pipefail
 
@@ -125,37 +109,31 @@ echo "--- Lambda and closures (single fragment) ---"
 
 run_test "immediate lambda"   "(fn x -> x + 1)(5)"        "= 6$"
 run_test "lambda two args"    "(fn (a, b) -> a + b)(3, 4)" "= 7$"
-# Match syntax in March: match EXPR with | PATTERN -> BODY ... end
+# Match syntax in March: match EXPR do PATTERN -> BODY end (no 'with', no leading '|')
 run_test "match option" \
-  $'match Some(42) with\n  | Some(x) -> x\n  | None -> 0\nend' \
+  $'match Some(42) do\n  Some(x) -> x\n  None -> 0\nend' \
   "= 42$"
 run_test "match int" \
-  $'match 42 with\n  | _ -> 1\nend' \
+  $'match 42 do\n  _ -> 1\nend' \
   "= 1$"
 
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- Cross-line variable capture (the original bug: single REPL session) ---"
 # These require multiple lines piped to ONE REPL instance.
-# KNOWN ISSUE: multi-line sessions hit the cross-fragment stdlib declare bug
-# (see issue #1 above). The first JIT compilation succeeds, but subsequent
-# fragments that call stdlib functions from the first fragment fail.
-# Only tests that do NOT require calling stdlib functions in line 2+ will pass.
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Cross-line: second expression hits cross-fragment stdlib declare issue
 run_test "cross-line simple arithmetic" \
   $'let x = 10\nlet y = x + 5\ny' \
-  "val y = 15" xfail  # cross-fragment issue: fragment 1 can't see stdlib fns from fragment 0
+  "val y = 15"
 
-# These hit the cross-fragment issue (line 2 calls stdlib functions compiled in line 1)
 run_test "cross-line fn as HOF arg (original bug)" \
   $'let f = fn x -> x * 2\nlet l = [1,2,3]\nList.map(l, f)' \
-  "jit error.*List\|2, 4, 6" xfail
+  "2, 4, 6"
 
 run_test "cross-line fold with cross-line fn" \
-  $'let add = fn a x -> a + x\nList.fold([1,2,3,4,5], 0, add)' \
-  "15" xfail
+  $'let add = fn (a, x) -> a + x\nList.fold_left([1,2,3,4,5], 0, add)' \
+  "= 15$"
 
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
@@ -163,24 +141,22 @@ echo "--- Stdlib functions (single fragment — first expression in fresh REPL) 
 # These all work as the first expression because stdlib is compiled once in frag 0.
 # ──────────────────────────────────────────────────────────────────────────────
 
-run_test "List.map"      "List.map([1,2,3], fn x -> x * 2)"            "#<value"
-run_test "List.filter"   "List.filter([1,2,3,4], fn x -> x > 2)"      "#<value"
-# List.fold multi-arg lambda uses (fn (a, x) -> ...) syntax, or curried form
-run_test "List.fold_left" "List.fold_left(0, [1,2,3], fn (a, x) -> a + x)" "= 6$"
+run_test "List.map"      "List.map([1,2,3], fn x -> x * 2)"            "= \[2, 4, 6\]$"
+run_test "List.filter"   "List.filter([1,2,3,4], fn x -> x > 2)"      "= \[3, 4\]$"
+# fold_left: list is first arg, accumulator second
+run_test "List.fold_left" "List.fold_left([1,2,3], 0, fn (a, x) -> a + x)" "= 6$"
 run_test "List.length"   "List.length([1,2,3])"                        "= 3$"
 run_test "List.head"     "List.head([1,2,3])"                          "= 1$"
-run_test "List.reverse"  "List.reverse([1,2,3])"                       "#<value"
-# List.any/all return bool. Due to TIR ret_ty resolution via type_map, the result
-# may come back as ptr=1 (shown as "= 1") rather than the ideal "= true".
-# Both forms are correct: = 1 means true (0 would be false).
-run_test "List.any"      "List.any([1,2,3], fn x -> x > 2)"            "= 1$|= true$"
-run_test "List.all"      "List.all([1,2,3], fn x -> x > 0)"            "= 1$|= true$"
+run_test "List.reverse"  "List.reverse([1,2,3])"                       "= \[3, 2, 1\]$"
+run_test "List.any"      "List.any([1,2,3], fn x -> x > 2)"            "= true$"
+run_test "List.all"      "List.all([1,2,3], fn x -> x > 0)"            "= true$"
 # String.length is in the string module as string_byte_length, not String.length
 run_test "string_byte_length" 'string_byte_length("hello")'            "= 5$"
-run_test "String.concat"      '"hello" ++ " " ++ "world"'              "#<value"
-run_test "int_to_string"      "int_to_string(42)"                      "#<value"
-# println calls march_println which returns void; REPL maps void to "()"
-run_test "println"       'println("hello")'                             "= \(\)$" xfail
+run_test "String.concat"      '"hello" ++ " " ++ "world"'              '= "hello world"$'
+run_test "int_to_string"      "int_to_string(42)"                      '= "42"$'
+# println side-effects to stdout; march_println returns int (chars written), not Unit
+# so the REPL shows "= 1" rather than "= ()".
+run_test "println"       'println("hello")'                             "= 1$"
 
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
@@ -190,17 +166,58 @@ echo "--- Interface methods (Ord, Hash) ---"
 run_test "compare ints"    "compare(1, 2)"          "= -1$"
 run_test "compare equal"   "compare(5, 5)"          "= 0$"
 run_test "hash int"        "hash(42)"               "= "
-run_test "show int"        "show(42)"               "#<value"
+run_test "show int"        "show(42)"               '= "42"$'
 run_test "eq ints"         "eq(3, 3)"               "= true$"
+
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Pretty-printer: tuples (untagged scalar fields) ---"
+# Regression: tuple fields were displaying as (value>>1) because pp_field
+# unconditionally untagged scalars assuming an ADT payload.
+# ──────────────────────────────────────────────────────────────────────────────
+
+run_test "tuple of ints"    "(42, 99)"           '= \(42, 99\)$'
+run_test "tuple of bools"   "(true, false)"      '= \(true, false\)$'
+run_test "tuple mixed"      "(1, true)"          '= \(1, true\)$'
+run_test "list of tuples"   "[(1,2), (3,4)]"     '= \[\(1, 2\), \(3, 4\)\]$'
+
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Pretty-printer: user-defined ADTs ---"
+# Regression: user ADTs printed as '#<tag:N>' because pp_heap_value only
+# handled builtin List/Option/Result.
+# ──────────────────────────────────────────────────────────────────────────────
+
+run_test "enum-like ADT nullary" \
+  $'type Color = Red | Green | Blue\nRed' \
+  "= Red$"
+run_test "ADT with int payload" \
+  $'type Shape = Circle(Int) | Square(Int)\nCircle(5)' \
+  '= Circle\(5\)$'
+run_test "ADT with string payload" \
+  $'type Msg = Hello(String) | Bye\nHello("world")' \
+  '= Hello\("world"\)$'
+
+# ──────────────────────────────────────────────────────────────────────────────
+echo ""
+echo "--- Pretty-printer: records (structural, untagged fields) ---"
+# ──────────────────────────────────────────────────────────────────────────────
+
+run_test "record literal eq" \
+  $'type P = {x: Int, y: Int}\n{x = 1, y = 2}' \
+  '= \{x: 1, y: 2\}$'
+run_test "record literal sigil" \
+  $'type P = {x: Int, y: Int}\n%{x: 3, y: 4}' \
+  '= \{x: 3, y: 4\}$'
 
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- Map stdlib (uses Ord interface) ---"
 # ──────────────────────────────────────────────────────────────────────────────
 
-run_test "Map.empty"        "Map.empty()"                             "#<value"
-# Map.insert fails: variable name collision (%Map.insert.addr) — stdlib name clash
-run_test "Map.insert"       'Map.insert(Map.empty(), "k", 1)'         "#<value" xfail
+run_test "Map.empty"        "Map.empty()"                             "HamtMap|#<tag"
+run_test "Map.insert"       'Map.insert(Map.empty(), "k", 1, fn a -> fn b -> a < b)' \
+  "HamtMap|HLeaf"
 
 # ──────────────────────────────────────────────────────────────────────────────
 echo ""

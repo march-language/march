@@ -37,13 +37,8 @@ let check ?(_quiet = false) () =
           ) files in
           if already_included then files else entry_path :: files
       in
-      (* One march --check call auto-discovers all MARCH_LIB_PATH files, so
-         a single invocation typechecks everything in O(N) instead of O(N²). *)
-      let ok = match all_files with
-        | [] -> true
-        | first :: _ -> Cmd_build.check_file ~lib_path_env first
-      in
-      if not ok then
+      let failed = Cmd_build.check_all ~lib_path_env all_files in
+      if failed > 0 then
         Error "typecheck failed"
       else
         Ok (Printf.sprintf "checked %d file(s) in %s" (List.length all_files) lib_dir)

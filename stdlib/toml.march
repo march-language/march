@@ -849,10 +849,15 @@ mod Toml do
       let sub = match table_get(root, k) do
         Some(TTable(p)) -> p
         None -> Nil
-        _ -> Nil  -- overwrite (shouldn't happen in valid TOML)
+        _ -> [("__toml_conflict__", TNull)]
         end
-      let sub2 = ensure_table_at_path(sub, rest)
-      table_put(root, k, TTable(sub2))
+      if is_err_marker(sub) do sub
+      else
+        let sub2 = ensure_table_at_path(sub, rest)
+        if is_err_marker(sub2) do sub2
+        else table_put(root, k, TTable(sub2))
+        end
+      end
     end
   end
 
@@ -931,7 +936,10 @@ mod Toml do
             match p do
             (path, st3) ->
               let root2 = ensure_table_at_path(root, path)
-              parse_document(st3, root2, path, Nil)
+              if is_err_marker(root2) do
+                err(st3, "type conflict at table header: " ++ String.join(path, "."))
+              else parse_document(st3, root2, path, Nil)
+              end
             end
           end
         end

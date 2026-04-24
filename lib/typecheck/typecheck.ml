@@ -3955,7 +3955,10 @@ let discharge_constraints env span =
             | _ ->
               Err.error env.errors ~span
                 "String does not implement Num (only Int and Float do).")
-         | TVar _ -> ()   (* Unresolved — will be polymorphic, constraint preserved *)
+         | TVar r ->
+           (match c with
+            | CNum _ -> r := Link (TCon ("Int", []))  (* numeric defaulting: unresolved Num → Int *)
+            | _ -> ())  (* COrd unresolved — leave polymorphic *)
          | _ ->
            Err.error env.errors ~span
              (Printf.sprintf "`%s` does not implement %s." (pp_ty ty) kind))
