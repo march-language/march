@@ -2198,7 +2198,12 @@ let handle_http_connection (sock : Unix.file_descr) (pipeline_fn : value) : unit
          in
          tcp_send_all sock response)
     end
-  with _ -> ()  (* swallow connection errors *)
+  with
+  | Eval_error msg ->
+    (* Application-level runtime error — log it so it's visible in the server output. *)
+    Printf.eprintf "[http handler error] %s\n%!" msg
+  | Unix.Unix_error _ -> ()  (* swallow TCP/socket errors (client disconnected, etc.) *)
+  | _ -> ()                  (* swallow other connection errors *)
 
 (* ------------------------------------------------------------------ *)
 (* Session-typed channel runtime                                       *)
@@ -3985,6 +3990,16 @@ let base_env : env =
              VCon ("Ok", [march_bytes_of_string raw])
            | Error e, _ | _, Error e -> eval_error "hmac_sha256: %s" e)
         | _ -> eval_error "hmac_sha256(key: String | Bytes, msg: String | Bytes): Ok(Bytes)"))
+    (* ---- stdlib_hmac_sha256: alias for hmac_sha256, avoids name shadowing
+       when a module defines its own fn hmac_sha256 wrapper ---- *)
+  ; ("stdlib_hmac_sha256", VBuiltin ("stdlib_hmac_sha256", function
+        | [key_v; msg_v] ->
+          (match march_val_to_raw key_v, march_val_to_raw msg_v with
+           | Ok key, Ok msg ->
+             let raw = Digestif.SHA256.(to_raw_string (hmac_string ~key msg)) in
+             VCon ("Ok", [march_bytes_of_string raw])
+           | Error e, _ | _, Error e -> eval_error "stdlib_hmac_sha256: %s" e)
+        | _ -> eval_error "stdlib_hmac_sha256(key: String | Bytes, msg: String | Bytes): Ok(Bytes)"))
     (* ---- PBKDF2-HMAC-SHA256: returns Ok(Bytes) ---- *)
   ; ("pbkdf2_sha256", VBuiltin ("pbkdf2_sha256", function
         | [pwd_v; salt_v; VInt iters; VInt dklen] ->
@@ -7474,15 +7489,25 @@ let rec eval_decl (env : env) (d : decl) : env =
        additions @ env)
 
   | DAlias (ad, _) ->
-    let orig_prefix = String.concat "." (List.map (fun (n : name) -> n.txt) ad.alias_path) ^ "." in
-    let short_name = ad.alias_name.txt in
-    let short_prefix = short_name ^ "." in
+    let mod_name    = String.concat "." (List.map (fun (n : name) -> n.txt) ad.alias_path) in
+    let orig_prefix = mod_name ^ "." in
+    let short_prefix = ad.alias_name.txt ^ "." in
     let plen = String.length orig_prefix in
-    let additions = List.filter_map (fun (k, v) ->
+    (* Ensure the target module is loaded so its entries are in module_registry. *)
+    ensure_module_loaded mod_name;
+    (* Collect aliases from the lexical env… *)
+    let env_additions = List.filter_map (fun (k, v) ->
         if String.length k > plen && String.sub k 0 plen = orig_prefix then
           Some (short_prefix ^ String.sub k plen (String.length k - plen), v)
         else None) env in
-    additions @ env
+    (* …and from module_registry (stdlib modules loaded on demand live there). *)
+    let reg_additions = Hashtbl.fold (fun k v acc ->
+        if String.length k > plen && String.sub k 0 plen = orig_prefix then
+          (short_prefix ^ String.sub k plen (String.length k - plen), v) :: acc
+        else acc) module_registry [] in
+    (* Register the alias entries so on-demand variable lookup finds them too. *)
+    List.iter (fun (k, v) -> Hashtbl.replace module_registry k v) reg_additions;
+    (env_additions @ reg_additions) @ env
 
 and eval_decls (env : env) (decls : decl list) : env =
   List.fold_left eval_decl env decls

@@ -401,10 +401,18 @@ let lookup_ctor name env =
   | _ -> None
 
 (** Add [ci] under [key] in [ctors], keeping all infos for the same name.
-    Deduplicates: if a ctor_info with the same [ci_type] already exists, no-op. *)
+    Deduplicates: if a ctor_info structurally identical (same ci_type,
+    ci_params, and ci_arg_tys) already exists, no-op.  Two types with
+    the same short name but different arity (e.g. stdlib's `Tree(a)` and
+    a user's `Tree`) are kept as distinct candidates. *)
 let add_ctor (key : string) (ci : ctor_info) (ctors : ctor_info list StrMap.t) =
   let lst = Option.value ~default:[] (StrMap.find_opt key ctors) in
-  if List.exists (fun c -> c.ci_type = ci.ci_type) lst then ctors
+  let same c =
+    c.ci_type = ci.ci_type
+    && c.ci_params = ci.ci_params
+    && c.ci_arg_tys = ci.ci_arg_tys
+  in
+  if List.exists same lst then ctors
   else StrMap.add key (ci :: lst) ctors
 
 (* ── Qualified module resolution ─────────────────────────────────────
@@ -1312,11 +1320,21 @@ let builtin_bindings : (string * scheme) list =
         TCon ("Bytes", [])))));
     ("pbkdf2_sha256",   Mono (TArrow (t_string, TArrow (TCon ("Bytes", []),
         TArrow (t_int, TArrow (t_int,
-        TCon ("Bytes", [])))))));
+        TCon ("Result", [TCon ("Bytes", []); t_string])))))));
     ("base64_encode",   Mono (TArrow (TCon ("Bytes", []), t_string)));
     ("base64_decode",   Mono (TArrow (t_string,
         TCon ("Result", [TCon ("Bytes", []); t_string]))));
     ("random_bytes",    Mono (TArrow (t_int, TCon ("Bytes", []))));
+    (* stdlib_* variants — used by module wrappers that shadow the base names.
+       stdlib_base64_encode accepts String only at the type-checker level;
+       callers should convert Bytes to String with bytes_to_string first. *)
+    ("stdlib_sha256",         Mono (TArrow (t_string, t_string)));
+    ("stdlib_random_bytes",   Mono (TArrow (t_int, TCon ("Bytes", []))));
+    ("stdlib_base64_encode",  Mono (TArrow (t_string, t_string)));
+    ("stdlib_base64_decode",  Mono (TArrow (t_string,
+        TCon ("Result", [TCon ("Bytes", []); t_string]))));
+    ("stdlib_hmac_sha256",    Mono (TArrow (t_string, TArrow (t_string,
+        TCon ("Result", [TCon ("Bytes", []); t_string])))));
     (* NativeArray builtins — flat OCaml arrays for fast numeric loops (P10).
        NativeIntArr / NativeFloatArr are opaque types (0-arity constructors).
        These builtins are interpreter-path only; compiled mode support is

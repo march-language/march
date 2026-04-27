@@ -170,6 +170,12 @@ void *march_gzip_decode(void *bytes_val) {
             free(in_buf); free(out_buf);
             return compress_make_err("gzip_decode: inflate failed");
         }
+        /* Z_BUF_ERROR with input exhausted but no Z_STREAM_END: truncated/invalid */
+        if (rc == Z_BUF_ERROR && zs.avail_in == 0 && zs.avail_out > 0) {
+            inflateEnd(&zs);
+            free(in_buf); free(out_buf);
+            return compress_make_err("gzip_decode: unexpected end of compressed data");
+        }
         if (zs.avail_out == 0) {
             if (out_size >= MAX_DECOMPRESS_SIZE) {
                 inflateEnd(&zs);
@@ -273,6 +279,12 @@ void *march_deflate_decode(void *bytes_val) {
             inflateEnd(&zs);
             free(in_buf); free(out_buf);
             return compress_make_err("deflate_decode: inflate failed");
+        }
+        /* Z_BUF_ERROR with input exhausted but no Z_STREAM_END: truncated/invalid */
+        if (rc == Z_BUF_ERROR && zs.avail_in == 0 && zs.avail_out > 0) {
+            inflateEnd(&zs);
+            free(in_buf); free(out_buf);
+            return compress_make_err("deflate_decode: unexpected end of compressed data");
         }
         if (zs.avail_out == 0) {
             if (out_size >= MAX_DECOMPRESS_SIZE) {

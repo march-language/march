@@ -163,6 +163,9 @@ let handle_key s key =
      | []     -> (s, Noop)
      | k :: _ -> (insert_at s k, Redraw))
 
+  | (`ASCII '\x03', _) -> (* Ctrl+C: quit unconditionally *)
+    (s, EOF)
+
   | (`ASCII '\x04', _) -> (* Ctrl+D: EOF if empty, else delete forward *)
     if s.buffer = "" && s.multiline_buf = []
     then (s, EOF)
