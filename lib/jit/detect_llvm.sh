@@ -16,9 +16,11 @@ if uname | grep -q Darwin; then
     esac
 else
     LLVM_CFG=$(command -v llvm-config 2>/dev/null \
+            || command -v llvm-config-19 2>/dev/null \
             || command -v llvm-config-18 2>/dev/null \
-            || command -v llvm-config-17 2>/dev/null)
-    if [ -n "$LLVM_CFG" ]; then
+            || command -v llvm-config-17 2>/dev/null \
+            || ls /usr/lib/llvm*/bin/llvm-config 2>/dev/null | sort -t'/' -k5 -rn | head -1)
+    if [ -n "$LLVM_CFG" ] && [ -x "$LLVM_CFG" ]; then
         INC=$("$LLVM_CFG" --includedir)
         LIB=$("$LLVM_CFG" --libdir)
         LLVM_VER=$("$LLVM_CFG" --version | cut -d. -f1)

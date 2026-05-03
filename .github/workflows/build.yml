@@ -62,13 +62,18 @@ jobs:
         if: matrix.cross
         uses: addnab/docker-run-action@v3
         with:
-          image: alpine:3.19
+          image: alpine:3.21
           options: >-
             --platform linux/arm64
             -v ${{ github.workspace }}:/work
             -w /work
           run: |
-            apk add --no-cache bash opam ocaml build-base git blake3-dev
+            apk add --no-cache bash opam ocaml build-base git llvm19-dev llvm19
+            # Build blake3 from source (portable C only — no x86 SIMD on aarch64)
+            git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+            gcc -O2 -shared -fPIC -o /usr/lib/libblake3.so \
+              /tmp/blake3/c/blake3.c /tmp/blake3/c/blake3_dispatch.c /tmp/blake3/c/blake3_portable.c
+            cp /tmp/blake3/c/blake3.h /usr/include/blake3.h
             opam init --disable-sandboxing --bare -y
             opam switch create 5.3.0 ocaml-base-compiler.5.3.0
             eval $(opam env)
@@ -92,21 +97,31 @@ jobs:
         if: "!matrix.cross"
         run: |
           if [ "$RUNNER_OS" = "macOS" ]; then
-            brew install blake3
+            brew install blake3 llvm
           else
             sudo apt-get update
-            sudo apt-get install -y libblake3-dev
+            sudo apt-get install -y llvm-dev
+            # libblake3-dev is not in Ubuntu 24.04; build from source
+            git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
+            cd /tmp/blake3/c
+            gcc -O2 -shared -fPIC -o libblake3.so \
+              blake3.c blake3_dispatch.c blake3_portable.c \
+              blake3_sse2_x86-64_unix.S blake3_sse41_x86-64_unix.S \
+              blake3_avx2_x86-64_unix.S blake3_avx512_x86-64_unix.S
+            sudo cp libblake3.so /usr/local/lib/libblake3.so
+            sudo cp blake3.h /usr/local/include/blake3.h
+            sudo ldconfig
           fi
 
       - name: Install dependencies (native)
         if: "!matrix.cross"
         run: opam install --deps-only -y .
 
-      - name: Build (Linux x86_64 static)
+      - name: Build (Linux x86_64)
         if: matrix.static && !matrix.cross
         run: |
           eval $(opam env)
-          OCAMLPARAM='_,ccopt=-static' dune build --force
+          dune build --force
           mkdir -p _dist/bin _dist/stdlib
           cp _build/default/bin/main.exe _dist/bin/march
           cp _build/default/forge/bin/main.exe _dist/bin/forge
