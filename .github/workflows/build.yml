@@ -21,9 +21,6 @@ jobs:
           - os: macos-14
             platform: darwin-arm64
             ocaml-compiler: 5.3.0
-          - os: macos-13
-            platform: darwin-x86_64
-            ocaml-compiler: 5.3.0
           - os: ubuntu-24.04
             platform: linux-x86_64
             ocaml-compiler: 5.3.0
