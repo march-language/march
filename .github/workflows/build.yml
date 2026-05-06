@@ -68,7 +68,7 @@ jobs:
             -v ${{ github.workspace }}:/work
             -w /work
           run: |
-            apk add --no-cache bash opam ocaml build-base git llvm19-dev llvm19
+            apk add --no-cache bash opam ocaml build-base git llvm19-dev llvm19 brotli-dev brotli-libs
             # Build blake3 from source (portable C only — no x86 SIMD on aarch64)
             git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
             gcc -O2 -shared -fPIC -o /usr/lib/libblake3.so \
@@ -83,7 +83,7 @@ jobs:
             cp _build/default/bin/main.exe _dist/bin/march
             cp _build/default/forge/bin/main.exe _dist/bin/forge
             cp stdlib/*.march _dist/stdlib/
-            cp LICENSE _dist/
+            cp LICENSE _dist/ 2>/dev/null || true
 
       # --- macOS and Linux x86_64 native builds ---
 
@@ -100,7 +100,7 @@ jobs:
             brew install blake3 llvm
           else
             sudo apt-get update
-            sudo apt-get install -y llvm-dev
+            sudo apt-get install -y llvm-dev libbrotli-dev
             # libblake3-dev is not in Ubuntu 24.04; build from source
             git clone --depth 1 https://github.com/BLAKE3-team/BLAKE3.git /tmp/blake3
             cd /tmp/blake3/c
@@ -126,7 +126,7 @@ jobs:
           cp _build/default/bin/main.exe _dist/bin/march
           cp _build/default/forge/bin/main.exe _dist/bin/forge
           cp stdlib/*.march _dist/stdlib/
-          cp LICENSE _dist/
+          cp LICENSE _dist/ 2>/dev/null || true
 
       - name: Build (macOS)
         if: "!matrix.static"
@@ -137,7 +137,7 @@ jobs:
           cp _build/default/bin/main.exe _dist/bin/march
           cp _build/default/forge/bin/main.exe _dist/bin/forge
           cp stdlib/*.march _dist/stdlib/
-          cp LICENSE _dist/
+          cp LICENSE _dist/ 2>/dev/null || true
 
       # --- Package ---
 
