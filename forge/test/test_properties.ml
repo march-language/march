@@ -66,14 +66,19 @@ let gen_entries n =
 
 let build_registry entries =
   let reg = RR.create () in
+  let seen = Hashtbl.create 16 in
   List.iter (fun e ->
-      (try
-         RR.add_version reg RR.{
-           name    = e.e_name;
-           version = V.parse_exn e.e_version;
-           deps    = e.e_deps;
-         }
-       with _ -> ())  (* ignore duplicate or malformed versions *)
+      let key = e.e_name ^ "@" ^ e.e_version in
+      if not (Hashtbl.mem seen key) then begin
+        Hashtbl.add seen key ();
+        (try
+           RR.add_version reg RR.{
+             name    = e.e_name;
+             version = V.parse_exn e.e_version;
+             deps    = e.e_deps;
+           }
+         with _ -> ())  (* ignore malformed versions *)
+      end
     ) entries;
   reg
 
@@ -188,7 +193,7 @@ let prop_no_violated_transitive_constraints =
              Array.to_list pkg_pool
              |> List.filter (fun p -> newest_ver reg p <> None)
            in
-           if existing = [] then pure (reg, [], entries)
+           if existing = [] then pure (reg, [])
            else
              let* n_root = int_range 1 (min 3 (List.length existing)) in
              let root_pkgs =
@@ -204,20 +209,13 @@ let prop_no_violated_transitive_constraints =
                    | Some v -> Some (pkg, VC.parse_exn (">= " ^ V.to_string v))
                  ) root_pkgs
              in
-             pure (reg, root_deps, entries))))
-    (fun (reg, root_deps, entries) ->
+             pure (reg, root_deps))))
+    (fun (reg, root_deps) ->
        match PG.solve reg ~root_deps ~overrides:[] with
        | Error _ -> true
        | Ok solution ->
          List.for_all (fun (pkg, solved_v) ->
-             (* Look up the deps of the exact solved version *)
-             let pkg_deps =
-               List.find_opt (fun e ->
-                   e.e_name = pkg && e.e_version = V.to_string solved_v
-                 ) entries
-               |> Option.map (fun e -> e.e_deps)
-               |> Option.value ~default:[]
-             in
+             let pkg_deps = RR.deps_of reg pkg solved_v |> Option.value ~default:[] in
              List.for_all (fun (dep_name, dep_constr) ->
                  match List.assoc_opt dep_name solution with
                  | None   -> true  (* transitive dep not in solution = fine *)
