@@ -103,7 +103,7 @@ jobs:
 
       - name: Update rolling nightly tag
         run: |
-          git tag -f nightly nightly-${{ needs.version.outputs.date }}
+          git tag -f nightly HEAD
           git push -f origin nightly
 
   prune:
