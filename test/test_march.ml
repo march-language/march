@@ -20574,6 +20574,34 @@ let test_adv_perceus_scrutinee_in_body () =
   let result = vint (call_fn env "f" []) in
   Alcotest.(check int) "scrutinee-in-body sum_with_parent = 18" 18 result
 
+(* ── Regression #35: ADT structural equality (bug_todos #35)
+   == on two heap-allocated ADT values must emit a structural-equality function
+   (__march_eq_...) rather than falling through to icmp eq ptr. *)
+let test_adt_eq_structural_fn_emitted () =
+  let ir = emit_actor_ir {|mod Test do
+    type Status = Active | Inactive
+    fn f(a : Status, b : Status) : Bool do
+      a == b
+    end
+  end|} in
+  Alcotest.(check bool) "structural eq fn __march_eq_ in IR" true
+    (ir_contains ir "__march_eq_")
+
+(* ── Regression #36: collect_tests recurses into DMod (bug_todos #36) ────
+   Tests defined inside a module loaded via MARCH_LIB_PATH arrive as DMod
+   entries in auto_decls.  collect_tests must descend into them. *)
+let test_collect_tests_recurses_into_dmod () =
+  let src = {|mod Outer do
+    mod Inner do
+      test "inner test" do () end
+    end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map ~test_mode:true m in
+  Alcotest.(check bool) "test inside DMod is collected" true
+    (List.length tir.March_tir.Tir.tm_tests > 0)
+
 let () =
   Alcotest.run "march"
     [
@@ -22360,5 +22388,9 @@ let () =
           test_adv_trecord_sort_invariant;
         Alcotest.test_case "scrutinee-in-body: sort_by-style pattern still correct" `Quick
           test_adv_perceus_scrutinee_in_body;
+        Alcotest.test_case "#35 ADT == emits structural eq fn not icmp eq ptr" `Quick
+          test_adt_eq_structural_fn_emitted;
+        Alcotest.test_case "#36 collect_tests descends into DMod" `Quick
+          test_collect_tests_recurses_into_dmod;
       ]);
     ]
