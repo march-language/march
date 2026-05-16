@@ -2047,6 +2047,8 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
             fn_body   = body';
           } in
           fns := fn :: !fns
+        | Ast.DMod (_, _, inner_decls, _) ->
+          collect_tests prefix inner_decls
         | _ -> ()
       ) decls
     in

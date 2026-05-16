@@ -64,6 +64,9 @@ type ctx = {
   emitted_wraps : (string, unit) Hashtbl.t;
   (* Buffer for extra wrapper functions emitted at the end *)
   extra_fns : Buffer.t;
+  (* Tracks which ADT structural equality functions have been generated.
+     Registered before body generation to handle recursive types (e.g. List). *)
+  emitted_eq_fns : (string, unit) Hashtbl.t;
   (* User-defined extern function name mapping: march_name → c_name *)
   extern_map : (string, string) Hashtbl.t;
   (* Tracks forward declarations emitted for unknown functions (interface dispatch
@@ -159,6 +162,7 @@ let make_ctx ?(fast_math=false) ?(repl=false) () = {
   type_params = Hashtbl.create 16;
   emitted_wraps = Hashtbl.create 8;
   extra_fns = Buffer.create 1024;
+  emitted_eq_fns = Hashtbl.create 16;
   extern_map = Hashtbl.create 8;
   unknown_decls = Hashtbl.create 8;
   unqualified_fns = Hashtbl.create 32;
@@ -1414,6 +1418,158 @@ let field_index_for ctx (ty : Tir.ty) (field_name : string) : int * Tir.ty =
   in
   find 0 fields
 
+(* ── ADT structural equality generation ─────────────────────────────── *)
+
+(** Mangle a TIR type to a valid LLVM identifier fragment for equality function names. *)
+let rec mangle_ty_for_eq : Tir.ty -> string = function
+  | Tir.TInt    -> "Int"
+  | Tir.TFloat  -> "Float"
+  | Tir.TBool   -> "Bool"
+  | Tir.TString -> "String"
+  | Tir.TUnit   -> "Unit"
+  | Tir.TCon (n, [])   -> String.concat "_" (String.split_on_char '.' n)
+  | Tir.TCon (n, args) ->
+    let n' = String.concat "_" (String.split_on_char '.' n) in
+    n' ^ "_" ^ String.concat "_" (List.map mangle_ty_for_eq args)
+  | Tir.TVar _   -> "Any"
+  | Tir.TTuple ts -> "Tup_" ^ String.concat "_x_" (List.map mangle_ty_for_eq ts)
+  | _            -> "Ptr"
+
+(** LLVM load type for an ADT field: i64 for scalar types, double for float, ptr for heap. *)
+let field_load_llty : Tir.ty -> string = function
+  | Tir.TInt | Tir.TBool | Tir.TUnit -> "i64"
+  | Tir.TFloat -> "double"
+  | _ -> "ptr"
+
+(** Ensure a structural equality function for [ty] exists in [ctx.extra_fns].
+    Returns Some llvm_fn_name (without @) or None if generation is not possible.
+    Registers the name before generating the body so recursive types (e.g. List)
+    terminate: the recursive field simply emits a call to the function being built. *)
+let rec ensure_adt_eq_fn (ctx : ctx) (ty : Tir.ty) : string option =
+  match ty with
+  | Tir.TCon ("Atom", []) -> None  (* Atoms stored as i64, not heap ptrs *)
+  | Tir.TCon (type_name, ty_args) ->
+    let fn_name = "__march_eq_" ^ mangle_ty_for_eq ty in
+    if Hashtbl.mem ctx.emitted_eq_fns fn_name then Some fn_name
+    else begin
+      Hashtbl.add ctx.emitted_eq_fns fn_name ();
+      let subst =
+        match Hashtbl.find_opt ctx.type_params type_name with
+        | Some ps when List.length ps = List.length ty_args -> List.combine ps ty_args
+        | _ -> []
+      in
+      let prefix = type_name ^ "." in
+      let ctors = Hashtbl.fold (fun key entry acc ->
+        if String.length key > String.length prefix &&
+           String.sub key 0 (String.length prefix) = prefix
+        then
+          let cn = String.sub key (String.length prefix)
+                     (String.length key - String.length prefix) in
+          (entry.ce_tag, cn, entry.ce_fields) :: acc
+        else acc
+      ) ctx.ctor_info [] in
+      if ctors = [] then None
+      else begin
+        let ctors = List.sort (fun (a,_,_) (b,_,_) -> compare a b) ctors in
+        let buf = Buffer.create 512 in
+        let ctr = ref 0 in let blk = ref 0 in
+        let frsh pfx = incr ctr; Printf.sprintf "%%%s%d" pfx !ctr in
+        let flbl pfx = incr blk; Printf.sprintf "%s%d" pfx !blk in
+        let e ln  = Buffer.add_string buf ("  " ^ ln ^ "\n") in
+        let lbl l = Buffer.add_string buf (l ^ ":\n") in
+        let lbl_eq     = flbl "is_eq" in
+        let lbl_not_eq = flbl "not_eq" in
+        let lbl_same   = flbl "same_tag" in
+        Buffer.add_string buf (Printf.sprintf "\ndefine i64 @%s(ptr %%a, ptr %%b) {\n" fn_name);
+        Buffer.add_string buf "entry:\n";
+        let tgpa = frsh "tgpa" in let tgpb = frsh "tgpb" in
+        let taga = frsh "taga" in let tagb = frsh "tagb" in
+        e (Printf.sprintf "%s = getelementptr i8, ptr %%a, i64 8" tgpa);
+        e (Printf.sprintf "%s = load i32, ptr %s, align 4" taga tgpa);
+        e (Printf.sprintf "%s = getelementptr i8, ptr %%b, i64 8" tgpb);
+        e (Printf.sprintf "%s = load i32, ptr %s, align 4" tagb tgpb);
+        let tc = frsh "tc" in
+        e (Printf.sprintf "%s = icmp eq i32 %s, %s" tc taga tagb);
+        e (Printf.sprintf "br i1 %s, label %%%s, label %%%s" tc lbl_same lbl_not_eq);
+        lbl lbl_same;
+        let tag_lbls = List.map (fun (tag, cn, _) ->
+          let l = flbl (Printf.sprintf "t%d_%s" tag
+                    (String.concat "_" (String.split_on_char '.' cn))) in
+          (tag, l)
+        ) ctors in
+        let sw_cases = List.map2 (fun (tag, tl) _ ->
+          Printf.sprintf "i32 %d, label %%%s" tag tl
+        ) tag_lbls ctors in
+        e (Printf.sprintf "switch i32 %s, label %%%s [\n    %s\n  ]"
+             taga lbl_not_eq (String.concat "\n    " sw_cases));
+        (* Per-constructor field comparison blocks *)
+        List.iter2 (fun (_, tl) (_, _, raw_flds) ->
+          lbl tl;
+          let flds = List.map (apply_ty_subst subst) raw_flds in
+          let nf = List.length flds in
+          if nf = 0 then
+            e (Printf.sprintf "br label %%%s" lbl_eq)
+          else begin
+            (* Continuation labels for fields 1..nf-1 (field 0 runs in tag block). *)
+            let cont_lbls = Array.init nf (fun i ->
+              if i = 0 then tl else flbl (Printf.sprintf "f%d" i)
+            ) in
+            List.iteri (fun fi fty ->
+              if fi > 0 then lbl cont_lbls.(fi);
+              let off = 16 + fi * 8 in
+              let llt = field_load_llty fty in
+              let fgpa = frsh "fgpa" in let fgpb = frsh "fgpb" in
+              let fva  = frsh "fva"  in let fvb  = frsh "fvb"  in
+              e (Printf.sprintf "%s = getelementptr i8, ptr %%a, i64 %d" fgpa off);
+              e (Printf.sprintf "%s = load %s, ptr %s, align 8" fva llt fgpa);
+              e (Printf.sprintf "%s = getelementptr i8, ptr %%b, i64 %d" fgpb off);
+              e (Printf.sprintf "%s = load %s, ptr %s, align 8" fvb llt fgpb);
+              let ok = frsh "ok" in
+              (match fty with
+               | Tir.TInt | Tir.TBool | Tir.TUnit ->
+                 let c = frsh "c" in
+                 e (Printf.sprintf "%s = icmp eq i64 %s, %s" c fva fvb);
+                 e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
+               | Tir.TFloat ->
+                 let c = frsh "c" in
+                 e (Printf.sprintf "%s = fcmp oeq double %s, %s" c fva fvb);
+                 e (Printf.sprintf "%s = zext i1 %s to i64" ok c)
+               | Tir.TString ->
+                 e (Printf.sprintf "%s = call i64 @march_string_eq(ptr %s, ptr %s)" ok fva fvb)
+               | Tir.TCon _ ->
+                 (match ensure_adt_eq_fn ctx fty with
+                  | Some fen ->
+                    e (Printf.sprintf "%s = call i64 @%s(ptr %s, ptr %s)" ok fen fva fvb)
+                  | None ->
+                    let pa = frsh "pa" in let pb = frsh "pb" in
+                    e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pa fva);
+                    e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pb fvb);
+                    let c = frsh "c" in
+                    e (Printf.sprintf "%s = icmp eq i64 %s, %s" c pa pb);
+                    e (Printf.sprintf "%s = zext i1 %s to i64" ok c))
+               | _ ->
+                 let pa = frsh "pa" in let pb = frsh "pb" in
+                 e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pa fva);
+                 e (Printf.sprintf "%s = ptrtoint ptr %s to i64" pb fvb);
+                 let c = frsh "c" in
+                 e (Printf.sprintf "%s = icmp eq i64 %s, %s" c pa pb);
+                 e (Printf.sprintf "%s = zext i1 %s to i64" ok c));
+              let oki = frsh "oki" in
+              e (Printf.sprintf "%s = icmp ne i64 %s, 0" oki ok);
+              let nxt = if fi = nf - 1 then lbl_eq else cont_lbls.(fi + 1) in
+              e (Printf.sprintf "br i1 %s, label %%%s, label %%%s" oki nxt lbl_not_eq)
+            ) flds
+          end
+        ) tag_lbls ctors;
+        lbl lbl_eq;     e "ret i64 1";
+        lbl lbl_not_eq; e "ret i64 0";
+        Buffer.add_string buf "}\n";
+        Buffer.add_buffer ctx.extra_fns buf;
+        Some fn_name
+      end
+    end
+  | _ -> None
+
 (* ── Core expression emitter ─────────────────────────────────────────── *)
 
 (** Emit [e] and return (llvm_type, llvm_value). Unit → ("i64","0"). *)
@@ -1541,28 +1697,63 @@ let rec emit_expr ctx (e : Tir.expr) : string * string =
       end else
         ("i64", r)
     end else begin
-      let cmp = fresh ctx "cmp" in
-      let r   = fresh ctx "ar" in
-      if ty_a = "double" || ty_b = "double" then begin
-        (* Float comparison: use fcmp ordered predicates.
-           Coerce both sides to double in case one came from a boxed ptr. *)
-        let fpred = match f.Tir.v_name with
-          | "==" -> "oeq" | "!=" -> "one"
-          | "<"  -> "olt" | "<=" -> "ole"
-          | ">"  -> "ogt" | ">=" -> "oge"
-          | s -> failwith ("unknown cmp: " ^ s)
+      (* Fallback comparison: float or i64 (pointer coercion). *)
+      let fallback_cmp () =
+        let cmp = fresh ctx "cmp" in
+        let r   = fresh ctx "ar" in
+        if ty_a = "double" || ty_b = "double" then begin
+          (* Float comparison: use fcmp ordered predicates.
+             Coerce both sides to double in case one came from a boxed ptr. *)
+          let fpred = match f.Tir.v_name with
+            | "==" -> "oeq" | "!=" -> "one"
+            | "<"  -> "olt" | "<=" -> "ole"
+            | ">"  -> "ogt" | ">=" -> "oge"
+            | s -> failwith ("unknown cmp: " ^ s)
+          in
+          let va_f = coerce ctx ty_a va "double" in
+          let vb_f = coerce ctx ty_b vb "double" in
+          emit ctx (Printf.sprintf "%s = fcmp %s double %s, %s" cmp fpred va_f vb_f);
+        end else begin
+          (* Coerce to i64 in case variables were loaded as ptr due to TVar type *)
+          let va' = coerce ctx ty_a va "i64" in
+          let vb' = coerce ctx ty_b vb "i64" in
+          emit ctx (Printf.sprintf "%s = icmp %s i64 %s, %s" cmp (int_cmp_pred f.Tir.v_name) va' vb')
+        end;
+        emit ctx (Printf.sprintf "%s = zext i1 %s to i64" r cmp);
+        ("i64", r)
+      in
+      (* ADT structural equality: when both operands are heap-allocated ADT values
+         (ty_a = "ptr", TCon type, not String) generate a structural comparison
+         instead of the pointer comparison that icmp eq i64 would produce. *)
+      let atom_adt_ty = function
+        | Tir.AVar v -> (match v.Tir.v_ty with
+          | Tir.TCon ("Atom", []) -> None
+          | Tir.TCon _ as t -> Some t
+          | _ -> None)
+        | _ -> None
+      in
+      if ty_a = "ptr" && (f.Tir.v_name = "==" || f.Tir.v_name = "!=") then
+        let adt_ty_opt = match atom_adt_ty a with
+          | Some _ as t -> t
+          | None -> atom_adt_ty b
         in
-        let va_f = coerce ctx ty_a va "double" in
-        let vb_f = coerce ctx ty_b vb "double" in
-        emit ctx (Printf.sprintf "%s = fcmp %s double %s, %s" cmp fpred va_f vb_f);
-      end else begin
-        (* Coerce to i64 in case variables were loaded as ptr due to TVar type *)
-        let va' = coerce ctx ty_a va "i64" in
-        let vb' = coerce ctx ty_b vb "i64" in
-        emit ctx (Printf.sprintf "%s = icmp %s i64 %s, %s" cmp (int_cmp_pred f.Tir.v_name) va' vb')
-      end;
-      emit ctx (Printf.sprintf "%s = zext i1 %s to i64" r cmp);
-      ("i64", r)
+        (match adt_ty_opt with
+         | Some adt_ty ->
+           (match ensure_adt_eq_fn ctx adt_ty with
+            | Some eq_fn ->
+              let r = fresh ctx "ar" in
+              let va_ptr = coerce ctx ty_a va "ptr" in
+              let vb_ptr = coerce ctx ty_b vb "ptr" in
+              emit ctx (Printf.sprintf "%s = call i64 @%s(ptr %s, ptr %s)" r eq_fn va_ptr vb_ptr);
+              if f.Tir.v_name = "!=" then begin
+                let nr = fresh ctx "nr" in
+                emit ctx (Printf.sprintf "%s = xor i64 %s, 1" nr r);
+                ("i64", nr)
+              end else
+                ("i64", r)
+            | None -> fallback_cmp ())
+         | None -> fallback_cmp ())
+      else fallback_cmp ()
     end
 
   | Tir.EApp (f, [a; b]) when is_float_arith f.Tir.v_name ->

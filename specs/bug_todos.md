@@ -127,6 +127,14 @@ Generated from adversarial review on 2026-04-14. Each entry has a priority (P0�
 
 ---
 
+- [x] **#35** `lib/tir/llvm_emit.ml` — **ADT structural equality: `==` on heap-allocated ADT values used pointer comparison** (user-reported). The `is_int_cmp` handler's fallback path emitted `icmp eq i64` for all non-string, non-float pointer values. Two separately allocated `Status` constructors had different addresses → `==` returned false even when structurally equal. The interpreter's `=` is polymorphic structural, so interpreter and compiled modes disagreed silently.
+  - **Fixed:** added `emitted_eq_fns` hashtable to emit context; added `mangle_ty_for_eq`, `field_load_llty`, and `ensure_adt_eq_fn` helpers. `ensure_adt_eq_fn` generates a per-concrete-type structural equality LLVM function using `ctor_info` for tag + field layout, applying `apply_ty_subst` for polymorphic types. The `is_int_cmp` handler now detects heap-allocated `TCon` values when `==` or `!=` is used (ptr-sized, not Atom) and emits a call to the generated function instead of `icmp eq i64`. dune runtest: 147/147 green.
+
+- [x] **#36** `lib/tir/lower.ml:collect_tests` — **Multi-module test discovery: tests inside `DMod` entries never collected** (user-reported). `collect_tests` handled `DTest`, `DDescribe`, `DSetup`, `DSetupAll` but fell through to `| _ -> ()` on `DMod`. When MARCH_LIB_PATH auto-discovers library modules, they're loaded as `DMod` wrappers inside `auto_decls`. Tests defined inside those modules were silently skipped — only tests from the entry file's direct top-level were ever run. Concretely, `forge test` with `filter_test.march` as the alphabetically-first entry point never ran any of the 11 tests from `mrk_test.march`.
+  - **Fixed:** added `| Ast.DMod (_, _, inner_decls, _) -> collect_tests prefix inner_decls` to recurse into nested module declarations. dune runtest: 147/147 green.
+
+---
+
 ## Done (moved from above)
 
 - #1, #2, #3, #4, #8, #9, #10, #11 — fixed and all tests passing (dune runtest: green).
