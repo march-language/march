@@ -860,7 +860,74 @@ and pat_tag_and_subs (pat : Ast.pattern) : (string * Ast.pattern list) option =
                  one element per scrutinee.  Rows are tried top-to-bottom; the
                  first matching row wins.
     [fallback] — optional expression used when no row matches (non-exhaustive). *)
+(** True if a fallback expression is "small enough" that inlining it
+    multiple times in the decision tree is cheap.  Currently: only [EAtom]
+    qualifies (a single variable or literal reference).  Everything else
+    is hoisted into a local 0-arg function (join point) so that fall-through
+    sites become tiny calls instead of duplicated sub-trees.
+
+    Without this, decision-tree compilation of deeply-nested patterns with
+    fallbacks (e.g. nested [Cons] / string-literal patterns in a multi-arm
+    [match]) produces TIR that grows exponentially in the number of arms,
+    because the same fallback expression gets inlined into every failing
+    branch at every nesting level. *)
+and is_atomic_fallback : Tir.expr -> bool = function
+  | Tir.EAtom _ -> true
+  | _ -> false
+
+(** Public entry point: hoist a non-trivial [fallback] into a join point
+    before invoking [compile_matrix_impl].
+
+    The join point is materialized as a 0-arg lambda whose closure is
+    bound to a fresh variable; every fall-through site in the generated
+    decision tree becomes an indirect call to that closure rather than
+    an inline copy of the fallback expression.  This makes the lifted
+    fallback shared once by [Defun.defunctionalize] (via the standard
+    "lambda creation" pattern [ELetRec([fn], EAtom(AVar fn))]) instead
+    of being duplicated 4× per nesting level, which is what produces
+    the exponential TIR blowup for nested [Cons] / string-literal
+    patterns in multi-arm matches. *)
 and compile_matrix
+    (scruts   : Tir.atom list)
+    (rows     : (Ast.pattern list * Tir.expr) list)
+    (fallback : Tir.expr option)
+  : Tir.expr =
+  match fallback with
+  | None -> compile_matrix_impl scruts rows None
+  | Some fb when is_atomic_fallback fb ->
+    compile_matrix_impl scruts rows fallback
+  | Some fb ->
+    let jp_fn_name = fresh_name "jp" in
+    let jp_fn_ty   = Tir.TFn ([], unknown_ty) in
+    (* The fn_def — body is the original fallback expression. *)
+    let jp_fn : Tir.fn_def = {
+      fn_name   = jp_fn_name;
+      fn_params = [];
+      fn_ret_ty = unknown_ty;
+      fn_body   = fb;
+    } in
+    (* The fn-name var, used in the [EAtom(AVar …)] body of the lambda-
+       creation [ELetRec]. *)
+    let jp_fn_var : Tir.var = {
+      v_name = jp_fn_name; v_ty = jp_fn_ty; v_lin = Tir.Unr;
+    } in
+    (* Lambda-creation site: [ELetRec([jp_fn], EAtom(AVar jp_fn_var))].
+       Defun recognises this and lifts [jp_fn] to a top-level fn (with
+       a closure struct for any free variables of [fb]). *)
+    let lambda_expr = Tir.ELetRec ([jp_fn], Tir.EAtom (Tir.AVar jp_fn_var)) in
+    (* Bind the closure to a fresh var so we can call it multiple times. *)
+    let clo_name = fresh_name "jp_clo" in
+    let clo_var : Tir.var = {
+      v_name = clo_name; v_ty = jp_fn_ty; v_lin = Tir.Unr;
+    } in
+    (* Every fall-through site uses [EApp(clo_var, [])].  Defun rewrites
+       this to [ECallPtr] because [clo_var] has a [TFn] type and is not
+       a top-level name. *)
+    let jp_call = Tir.EApp (clo_var, []) in
+    let body    = compile_matrix_impl scruts rows (Some jp_call) in
+    Tir.ELet (clo_var, lambda_expr, body)
+
+and compile_matrix_impl
     (scruts   : Tir.atom list)
     (rows     : (Ast.pattern list * Tir.expr) list)
     (fallback : Tir.expr option)
