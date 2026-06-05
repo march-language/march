@@ -6196,6 +6196,70 @@ let test_perceus_no_incrc_for_eapp_operator_callee () =
       false (has_incrc_for_builtin fn.March_tir.Tir.fn_body)
   ) m.March_tir.Tir.tm_fns
 
+(* Regression: record parameter used in multiple sequential calls within the
+   same match arm.  Before the fix, borrow inference did not consider TRecord
+   parameters as borrow candidates (needs_rc(TRecord) was false), so
+   use_cfg(cfg:own) caused Perceus to emit dec_rc on cfg.dir (the string field)
+   inside use_cfg.  When process(cfg, …) called use_cfg(cfg) in a loop, the
+   second iteration read a freed string — "local RC underflow".
+
+   Fix: borrow.ml needs_rc now returns true for TRecord/TTuple, making record
+   params borrow-eligible.  When only read via EField, they are inferred as
+   borrowed.  Perceus's new _borrowed_field_vars mechanism then suppresses all
+   RC ops (post_dec_vars, EAtom inc, dead-binding dec) for variables extracted
+   from a borrowed record via EField. *)
+let test_perceus_record_param_multi_call_no_rc_underflow () =
+  (* Verify that use_cfg has cfg:borrowed (no EDecRC on cfg.dir field) and
+     that the process function body has no spurious field-string dec_rc.
+
+     We check the TIR-level property: after Perceus, use_cfg (which is
+     inlined into process after optimisation) must not contain a dec_rc for
+     the extracted string field from cfg.  The _borrowed_field_vars mechanism
+     ensures that strings extracted from a borrowed record are never decremented. *)
+  let m = perceus_module {|mod Test do
+
+    type Cfg = { dir : String }
+
+    pfn use_cfg(cfg : Cfg) : Int do
+      String.byte_size(cfg.dir)
+    end
+
+    pfn process(cfg : Cfg, items : List(String), acc : Int) : Int do
+      match items do
+      Nil -> acc
+      Cons(_, rest) ->
+        let n = use_cfg(cfg)
+        process(cfg, rest, acc + n)
+      end
+    end
+
+    fn main() do
+      let cfg = { dir = "content" }
+      process(cfg, Cons("a", Cons("b", Nil)), 0)
+    end
+
+  end|} in
+  (* The key invariant: after the fix, use_cfg must have cfg inferred as
+     borrowed (it only reads cfg.dir).  With cfg:borrowed, Perceus adds cfg
+     to the borrowed' set; the _borrowed_field_vars suppression prevents
+     dec_rc for the extracted String field.  No EDecRC should appear in the
+     use_cfg body (or its inlined form inside process). *)
+  let use_cfg_fns = List.filter (fun fn ->
+    String.equal fn.March_tir.Tir.fn_name "use_cfg"
+  ) m.March_tir.Tir.tm_fns in
+  (* use_cfg may be inlined by the optimiser — if so, check process instead *)
+  let fns_to_check =
+    if use_cfg_fns = [] then
+      List.filter (fun fn ->
+        String.equal fn.March_tir.Tir.fn_name "process"
+      ) m.March_tir.Tir.tm_fns
+    else use_cfg_fns
+  in
+  Alcotest.(check bool)
+    "use_cfg (or process after inlining) has no spurious field-string EDecRC"
+    false
+    (List.exists (fun fn -> has_any_decrc fn.March_tir.Tir.fn_body) fns_to_check)
+
 (* Regression: same bug at the LLVM IR level — ensure the emitted IR for a
    function using && contains no call to @__ (the undefined symbol produced
    when llvm_name "&&" = "__" was naively materialized as a call). *)
@@ -21058,6 +21122,10 @@ let () =
           (* Regression: 831e315 needs_rc(TFn) caused spurious EIncRC for EApp
              operator callees like && / || whose llvm_name maps to @__ *)
           Alcotest.test_case "no EIncRC for && / || callee (831e315)" `Quick test_perceus_no_incrc_for_eapp_operator_callee;
+          (* Regression: record param used in two sequential calls — second
+             call read a freed field string (RC underflow).  Fix: TRecord is
+             now borrow-eligible; _borrowed_field_vars suppresses field RC ops. *)
+          Alcotest.test_case "record param multi-call no RC underflow" `Quick test_perceus_record_param_multi_call_no_rc_underflow;
         ] );
       ( "lean_theorem_properties", [
           Alcotest.test_case "lin_drop_is_free"          `Quick test_thm_lin_drop_is_free;

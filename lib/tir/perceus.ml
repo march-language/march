@@ -60,6 +60,24 @@ let _current_fn_name : string ref = ref ""
     [march_incrc] in the C HTTP runtime's per-request incref loop. *)
 let _closure_fvs : StringSet.t ref = ref StringSet.empty
 
+(** Variables that were extracted from a borrowed record/tuple parameter via
+    EField and are therefore themselves borrowed references.  Perceus must not
+    emit EDecRC, EIncRC, or post-call EDecRC for these variables:
+    - The record owner is responsible for the fields' RC — the callee only
+      reads them.
+    - Emitting post_dec_vars for such a variable would underflow the field
+      string's RC after every call inside a loop that re-uses the same record
+      (the "process + use_cfg" RC underflow pattern).
+    - Emitting EIncRC at non-last-use (the EAtom non-last-use path) would
+      inflate the RC without a matching decrement, leaking the value.
+
+    Populated dynamically in [insert_rc_expr]'s ELet case when the binding is
+    of the form [let v = src.field] where [src] is itself in [live_after] (the
+    record outlives this binding) or [src] is already in [_borrowed_field_vars]
+    (alias chain propagation: [let v = borrowed_field]).  Saved/restored on
+    each ELet scope exit so inner bindings do not contaminate outer scopes. *)
+let _borrowed_field_vars : StringSet.t ref = ref StringSet.empty
+
 (** Variable context: maps each in-scope variable name to its [Tir.var] record,
     giving the type needed to emit correct EDecRC/EIncRC ops.
     - Populated in [insert_rc] with the current function's parameters.
@@ -355,7 +373,10 @@ let find_inc_vars (atoms : Tir.atom list) (live_after : live_set) : Tir.var list
     | Tir.AVar v
       when v.Tir.v_lin = Tir.Unr
            && needs_rc v.Tir.v_ty
-           && StringSet.mem v.Tir.v_name live_after ->
+           && StringSet.mem v.Tir.v_name live_after
+           && not (StringSet.mem v.Tir.v_name !_borrowed_field_vars) ->
+      (* Borrowed field vars are excluded: the record owner manages their RC,
+         so no EIncRC should be emitted even at non-last-use call sites. *)
       Some v
     | _ -> None
   ) atoms
@@ -369,8 +390,12 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
   | Tir.EAtom (Tir.AVar v) ->
     let lb = StringSet.add v.Tir.v_name live_after in
     if v.Tir.v_lin = Tir.Unr && needs_rc v.Tir.v_ty
-       && StringSet.mem v.Tir.v_name live_after then
-      (* Non-last use of Unr heap value: inc before use *)
+       && StringSet.mem v.Tir.v_name live_after
+       && not (StringSet.mem v.Tir.v_name !_borrowed_field_vars) then
+      (* Non-last use of Unr heap value: inc before use.
+         Borrowed field vars (extracted from a borrowed record) are exempt:
+         the record owner manages the field's RC; the borrowing function must
+         not emit any EIncRC for them. *)
       (Tir.ESeq (incrc_for v (Tir.AVar v), e), lb)
     else
       (e, lb)
@@ -420,7 +445,11 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
                && not (StringSet.mem v.Tir.v_name live_after)
                && Borrow.is_borrowed !_borrow_map f.Tir.v_name i
                && not (StringSet.mem v.Tir.v_name !_closure_fvs)
+               && not (StringSet.mem v.Tir.v_name !_borrowed_field_vars)
                && not (StringSet.mem v.Tir.v_name !seen) ->
+          (* Borrowed field vars (extracted from a borrowed record parameter)
+             are exempt from post-call EDecRC: ownership stays with the record
+             owner; the function is only reading the field. *)
           seen := StringSet.add v.Tir.v_name !seen;
           Some v
         | _ -> None
@@ -505,6 +534,35 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     (e', lb)
 
   | Tir.ELet (v, e1, e2) ->
+    (* Detect borrowed-field bindings BEFORE processing e2.
+       When the RHS is a field access from a variable that is already live
+       (either because the record is a borrowed param present in live_after,
+       or because the source is already a borrowed field var), the bound
+       variable inherits the "borrowed" status: the record owner is responsible
+       for its RC and the borrowing function must not emit any RC ops for it.
+
+       We also propagate through simple aliases (let v = bfv_src):
+       if bfv_src is a borrowed field var, v is too.
+
+       Save/restore around e2 processing so inner bindings don't contaminate
+       outer scopes. *)
+    let is_borrowed_field =
+      match e1 with
+      | Tir.EField (Tir.AVar src, _)
+        when needs_rc v.Tir.v_ty
+             && (StringSet.mem src.Tir.v_name live_after
+                 || StringSet.mem src.Tir.v_name !_borrowed_field_vars) ->
+        true
+      | Tir.EAtom (Tir.AVar src)
+        when needs_rc v.Tir.v_ty
+             && StringSet.mem src.Tir.v_name !_borrowed_field_vars ->
+        (* Alias of a borrowed field var — propagate the borrowed status. *)
+        true
+      | _ -> false
+    in
+    let prev_bfv = !_borrowed_field_vars in
+    if is_borrowed_field then
+      _borrowed_field_vars := StringSet.add v.Tir.v_name !_borrowed_field_vars;
     (* Process e2 first to discover what's live going into it.
        Extend _var_ctx with [v] so that nested ECase cross-branch EDecRC
        insertion can look up [v]'s type when [v] is live in some arms and
@@ -512,17 +570,20 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     let prev_v = StringMap.find_opt v.Tir.v_name !_var_ctx in
     _var_ctx := StringMap.add v.Tir.v_name v !_var_ctx;
     let (e2', live_into_e2) = insert_rc_expr e2 live_after in
+    _borrowed_field_vars := prev_bfv;  (* restore after e2 *)
     (match prev_v with
      | None    -> _var_ctx := StringMap.remove v.Tir.v_name !_var_ctx
      | Some pv -> _var_ctx := StringMap.add v.Tir.v_name pv !_var_ctx);
     (* Check if v is dead in e2 *)
     let e2'' =
       if not (StringSet.mem v.Tir.v_name live_into_e2)
-         && not (StringSet.mem v.Tir.v_name !_closure_fvs) then
+         && not (StringSet.mem v.Tir.v_name !_closure_fvs)
+         && not is_borrowed_field then
         (* Dead binding — insert cleanup at start of e2.
            Use atomic DecRC for actor-sent values (may be concurrently accessed).
            Closure FVs are exempt: the closure holds the reference; the apply
-           function must not decrement values it does not own. *)
+           function must not decrement values it does not own.
+           Borrowed field vars are exempt: the record owner manages their RC. *)
         if v.Tir.v_lin = Tir.Unr && needs_rc v.Tir.v_ty then
           Tir.ESeq (decrc_for v (Tir.AVar v), e2')
         else if v.Tir.v_lin = Tir.Lin || v.Tir.v_lin = Tir.Aff then
@@ -699,6 +760,7 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
         |> (fun s -> StringSet.diff s bound)
         |> (fun s -> StringSet.diff s live_after)
         |> (fun s -> StringSet.diff s !_closure_fvs)
+        |> (fun s -> StringSet.diff s !_borrowed_field_vars)
       in
       StringSet.fold (fun name body_acc ->
         match StringMap.find_opt name !_var_ctx with
@@ -916,11 +978,14 @@ let insert_rc ?(borrowed = StringSet.empty) (fn : Tir.fn_def) : Tir.fn_def =
   _var_ctx := List.fold_left (fun ctx v ->
     StringMap.add v.Tir.v_name v ctx
   ) !_var_ctx fn'.Tir.fn_params;
+  let prev_bfv = !_borrowed_field_vars in
+  _borrowed_field_vars := StringSet.empty;
   let (body', _) = insert_rc_expr fn'.Tir.fn_body borrowed' in
-  _actor_sent    := StringSet.empty;
-  _current_fn_name := "";
-  _closure_fvs   := StringSet.empty;
-  _var_ctx       := prev_var_ctx;
+  _actor_sent           := StringSet.empty;
+  _current_fn_name      := "";
+  _closure_fvs          := StringSet.empty;
+  _borrowed_field_vars  := prev_bfv;
+  _var_ctx              := prev_var_ctx;
   { fn' with Tir.fn_body = body' }
 
 (* ── Phase 3: RC Elision (cancel pairs) ──────────────────────────────────── *)

@@ -142,8 +142,14 @@ let needs_rc : Tir.ty -> bool = function
   | Tir.TCon ("Atom", []) -> false  (* atoms are i64 scalars, not heap-allocated *)
   | Tir.TCon _ | Tir.TString | Tir.TPtr _ -> true
   | Tir.TVar "_" -> true  (* lower.ml placeholder: conservatively treat as heap-carrying *)
+  | Tir.TRecord _ | Tir.TTuple _ -> true
+    (* Records and tuples are heap-allocated (via march_alloc) and hold heap-carrying
+       fields (Strings, ADT values, etc.).  Making them borrow-eligible lets the
+       fixpoint infer "cfg:borrowed" for functions that only read fields via EField,
+       preventing Perceus from emitting dec_rc on the extracted field values when
+       the owning caller still holds the record across multiple calls. *)
   | Tir.TVar _ | Tir.TInt | Tir.TFloat | Tir.TBool | Tir.TUnit
-  | Tir.TTuple _ | Tir.TRecord _ | Tir.TFn _ -> false
+  | Tir.TFn _ -> false
 
 (** True iff atom [a] is a reference to the variable named [name]. *)
 let atom_is (name : string) : Tir.atom -> bool = function
