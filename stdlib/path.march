@@ -126,12 +126,13 @@ mod Path do
     let base = basename(path)
     match String.last_index_of(base, ".") do
     None -> ""
-    Some(0) -> ""          -- leading dot is not an extension (e.g. .bashrc)
-    Some(i) -> do
-      -- String.slice_bytes(s, start, len) — third arg is LENGTH not end index
-      let len = String.byte_size(base) - i - 1
-      String.slice_bytes(base, i + 1, len)
-    end
+    Some(i) ->
+      if i == 0 do ""
+      else
+        -- String.slice_bytes(s, start, len) — third arg is LENGTH not end index
+        let len = String.byte_size(base) - i - 1
+        String.slice_bytes(base, i + 1, len)
+      end
     end
   end
 
@@ -155,11 +156,12 @@ mod Path do
     let dir = dirname(path)
     match String.last_index_of(base, ".") do
     None -> path
-    Some(0) -> path          -- leading dot is not an extension (e.g. .bashrc)
-    Some(i) -> do
-      let stem = String.slice_bytes(base, 0, i)
-      if dir == "." do stem else dir ++ "/" ++ stem end
-    end
+    Some(i) ->
+      if i == 0 do path
+      else
+        let stem = String.slice_bytes(base, 0, i)
+        if dir == "." do stem else dir ++ "/" ++ stem end
+      end
     end
   end
 
