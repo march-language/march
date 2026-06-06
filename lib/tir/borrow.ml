@@ -317,7 +317,21 @@ let rec owned_in (name : string) (bm : borrow_map) (e : Tir.expr) : bool =
     let field_escape_owns =
       atom_is name scrutinee &&
       (match scrutinee with
-       | Tir.AVar _ -> true  (* any var scrutinee: ECase only fires for heap variants *)
+       | Tir.AVar v ->
+         (* TTuple and TRecord: Perceus's scrutinee_borrowed mechanism already
+            handles field escapes correctly via ECase — when the scrutinee is
+            in live_after (borrowed), br_vars are added to live_after and
+            EIncRC is emitted for any extracted field used at a non-last
+            position.  Marking tuple/record params as "owned" here causes
+            borrow inference to flip them to cfg:own, which prevents
+            scrutinee_borrowed from firing and lets Perceus emit EDecRC on
+            the extracted field string without a matching EIncRC — RC
+            underflow when the same tuple is passed to the function in a loop.
+            ADT (TCon) scrutinees keep the existing field_escape_owns check
+            because FBIP reuse and ADT-specific ownership patterns need it. *)
+         (match v.Tir.v_ty with
+          | Tir.TTuple _ | Tir.TRecord _ -> false
+          | _ -> true)
        | _ -> false) &&
       List.exists (fun br ->
         List.exists (fun bv ->

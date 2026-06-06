@@ -6294,6 +6294,66 @@ let test_perceus_list_length_then_nth_incrc () =
     true
     (List.exists (fun fn -> has_any_incrc fn.March_tir.Tir.fn_body) check_fns)
 
+(* Regression: tuple parameter used in multiple sequential pattern-match
+   destructs within the caller caused RC underflow.
+
+   Root cause: field_escape_owns in borrow.ml fired for TTuple scrutinees
+   whenever a branch variable escaped via return (EAtom).  This flipped the
+   tuple parameter to cfg:own, preventing scrutinee_borrowed from becoming
+   true in Perceus.  With scrutinee_borrowed=false, add_scrutinee_free_for
+   emitted EDecRC(pair) inside the match branch AND post_dec_vars emitted
+   EDecRC on the extracted String field (aliased through x → a) — without a
+   matching EIncRC.  On the second call from the loop the field String's RC
+   was already 0 → local RC underflow.
+
+   Fix: field_escape_owns is suppressed for TTuple/TRecord scrutinees.
+   Perceus's scrutinee_borrowed mechanism handles field escapes by emitting
+   EIncRC for branch vars when the tuple is live after the case.
+
+   We verify the TIR-level invariant: after the fix, use_first must have
+   pair inferred as borrowed, so Perceus emits at least one EIncRC inside
+   the function (for the extracted String field's non-last-use via
+   scrutinee_borrowed).  If the bug reappears, pair:own means
+   scrutinee_borrowed=false and no EIncRC is emitted — the second call in
+   the loop then reads a freed String field. *)
+let test_perceus_tuple_param_multi_destruct_no_rc_underflow () =
+  let m = perceus_module {|mod Test do
+
+    pfn use_first(pair : (String, String)) : Int do
+      let a = match pair do (x, _) -> x end
+      String.byte_size(a)
+    end
+
+    pfn process_pairs(pair : (String, String), n : Int, acc : Int) : Int do
+      match n do
+      0 -> acc
+      _ ->
+        let k = use_first(pair)
+        process_pairs(pair, n - 1, acc + k)
+      end
+    end
+
+    fn main() do
+      let pair = ("hello", "world")
+      println(process_pairs(pair, 3, 0))
+    end
+
+  end|} in
+  (* After the fix, use_first must have pair:borrow.  When pair is borrowed,
+     Perceus sets scrutinee_borrowed=true (pair is in live_after); this adds
+     the branch vars to live_after, causing EIncRC to be emitted for the
+     extracted String field at its non-last-use position inside the branch.
+     At least one EIncRC must appear in use_first's body.
+     If the bug reappears (pair:own), scrutinee_borrowed=false and no EIncRC
+     is emitted — the loop's second call then reads freed memory. *)
+  let use_first_fns = List.filter (fun fn ->
+    String.equal fn.March_tir.Tir.fn_name "use_first"
+  ) m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool)
+    "use_first has EIncRC for tuple field (pair:borrow + scrutinee_borrowed)"
+    true
+    (List.exists (fun fn -> has_any_incrc fn.March_tir.Tir.fn_body) use_first_fns)
+
 (* Regression: same bug at the LLVM IR level — ensure the emitted IR for a
    function using && contains no call to @__ (the undefined symbol produced
    when llvm_name "&&" = "__" was naively materialized as a call). *)
@@ -21189,6 +21249,11 @@ let () =
              consuming go closure decrements Cons nodes; caller must emit
              EIncRC to keep xs alive for the subsequent List.nth call. *)
           Alcotest.test_case "list length+nth EIncRC emitted" `Quick test_perceus_list_length_then_nth_incrc;
+          (* Regression: tuple param destructured in multiple sequential
+             match arms caused RC underflow — field_escape_owns was
+             incorrectly flipping TTuple params to cfg:own, bypassing the
+             scrutinee_borrowed EIncRC mechanism. *)
+          Alcotest.test_case "tuple param multi-destruct no RC underflow" `Quick test_perceus_tuple_param_multi_destruct_no_rc_underflow;
         ] );
       ( "lean_theorem_properties", [
           Alcotest.test_case "lin_drop_is_free"          `Quick test_thm_lin_drop_is_free;
