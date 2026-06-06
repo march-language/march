@@ -6354,6 +6354,56 @@ let test_perceus_tuple_param_multi_destruct_no_rc_underflow () =
     true
     (List.exists (fun fn -> has_any_incrc fn.March_tir.Tir.fn_body) use_first_fns)
 
+(** Regression: accessing a String field of a locally-owned record (returned
+    by a function call rather than passed as a borrowed parameter) caused
+    spurious post-call EDecRC for the extracted field.
+
+    Root cause: is_borrowed_field only fired when the source record was in
+    live_after (borrowed parameter) or _borrowed_field_vars.  For locally-owned
+    records the source was only in live_into_e2, not in live_after, so the field
+    was treated as independently owned.  post_dec then emitted EDecRC for the
+    field after any borrowing call, freeing meta.title while meta still held a
+    reference → dangling pointer and potential RC underflow.
+
+    Fix: is_borrowed_field now also triggers when the source is in
+    live_before(e2, live_after) (another sequential field access in the body) or
+    in _var_ctx and not a TPtr (locally in-scope heap record).
+
+    We verify the TIR invariant: render must have no EDecRC for the title field
+    extracted from the locally-owned meta record.  Before the fix, byte_size
+    borrows t at t's last-use position, triggering post_dec → EDecRC(t) → meta.title
+    freed.  After the fix, t is correctly in _borrowed_field_vars → post_dec suppressed. *)
+let test_perceus_local_record_field_no_spurious_decrc () =
+  let m = perceus_module {|mod Test do
+
+    type Meta = { draft: Bool, title: String }
+
+    pfn make_meta(s: String) : Meta do
+      { draft = false, title = s }
+    end
+
+    pfn render(s: String) : Int do
+      let meta = make_meta(s)
+      let t = meta.title
+      String.byte_size(t)
+    end
+
+    fn main() do
+      println(render("hello"))
+    end
+
+  end|} in
+  (* render extracts meta.title into t, then byte_size borrows t at last use.
+     Before the fix: post_dec fires → EDecRC(t) in render.
+     After the fix:  t is in _borrowed_field_vars → no EDecRC for t in render. *)
+  let render_fns = List.filter (fun fn ->
+    String.equal fn.March_tir.Tir.fn_name "render"
+  ) m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool)
+    "render has no spurious EDecRC for locally-owned record field"
+    false
+    (List.exists (fun fn -> has_any_decrc fn.March_tir.Tir.fn_body) render_fns)
+
 (* Regression: same bug at the LLVM IR level — ensure the emitted IR for a
    function using && contains no call to @__ (the undefined symbol produced
    when llvm_name "&&" = "__" was naively materialized as a call). *)
@@ -21254,6 +21304,11 @@ let () =
              incorrectly flipping TTuple params to cfg:own, bypassing the
              scrutinee_borrowed EIncRC mechanism. *)
           Alcotest.test_case "tuple param multi-destruct no RC underflow" `Quick test_perceus_tuple_param_multi_destruct_no_rc_underflow;
+          (* Regression: locally-owned record field (from cross-module function
+             return) treated as owned → spurious EDecRC freed meta.title while
+             meta still held a reference.  Fix: _var_ctx check in is_borrowed_field
+             extends _borrowed_field_vars suppression to locally-owned records. *)
+          Alcotest.test_case "local record field no spurious decrc" `Quick test_perceus_local_record_field_no_spurious_decrc;
         ] );
       ( "lean_theorem_properties", [
           Alcotest.test_case "lin_drop_is_free"          `Quick test_thm_lin_drop_is_free;

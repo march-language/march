@@ -551,7 +551,26 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
       | Tir.EField (Tir.AVar src, _)
         when needs_rc v.Tir.v_ty
              && (StringSet.mem src.Tir.v_name live_after
-                 || StringSet.mem src.Tir.v_name !_borrowed_field_vars) ->
+                 || StringSet.mem src.Tir.v_name !_borrowed_field_vars
+                 || StringSet.mem src.Tir.v_name (live_before e2 live_after)
+                 || (StringMap.mem src.Tir.v_name !_var_ctx
+                     && (match src.Tir.v_ty with
+                         | Tir.TPtr _ -> false
+                         | _ -> true))) ->
+        (* The record owner is responsible for the field's RC.
+           Four cases where the field must NOT be treated as independently owned:
+           1. src in live_after: record is a borrowed parameter (present in the
+              initial live-at-exit borrowed set) — the caller outlives this binding.
+           2. src in _borrowed_field_vars: src was itself extracted from a borrowed
+              record (alias chain).
+           3. src in live_before(e2): the record is used again in the body after
+              this extraction (sequential multi-field access pattern).
+           4. src in _var_ctx and src is a heap record (not TPtr): the record is
+              a locally-owned variable still in scope (e.g. returned by a
+              cross-module function call).  TPtr sources (like the closure struct
+              $clo: TPtr TUnit) are excluded — their fields (closure FVs) are
+              managed by the borrowed' set and must receive EIncRC before
+              consuming calls, which _borrowed_field_vars would suppress. *)
         true
       | Tir.EAtom (Tir.AVar src)
         when needs_rc v.Tir.v_ty
