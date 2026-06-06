@@ -1615,6 +1615,22 @@ let lower_module ?type_map ?(stdlib_context : Ast.decl list = []) ?(test_mode=fa
   _iface_methods := Hashtbl.create 16;
   _use_aliases := Hashtbl.create 16;
   _lowered_modules := Hashtbl.create 8;
+  (* Pre-register every top-level DMod name from the combined module.
+     This prevents _ensure_module_lowered from re-parsing a stdlib file with a
+     relative path (e.g. "stdlib/yaml.march") when the type_map was built from
+     the absolute path.  The file-path mismatch causes ty_of_span to return
+     TVar "_" for all expressions, producing incorrect code.
+     Pre-registering here is safe: every DMod in m.mod_decls will be visited in
+     Pass 2, which lowers the functions with the correct type_map. *)
+  let rec preregister_mods = function
+    | Ast.DMod (nm, _, inner, _) :: rest ->
+      Hashtbl.replace !_lowered_modules nm.txt ();
+      preregister_mods inner;
+      preregister_mods rest
+    | _ :: rest -> preregister_mods rest
+    | [] -> ()
+  in
+  preregister_mods m.mod_decls;
   let fns = ref [] in
   let types = ref [] in
   _fns_ref := fns;
