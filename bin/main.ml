@@ -513,8 +513,12 @@ let resolve_imports ~source_file (m : March_ast.Ast.module_) =
   let in_progress : (string, unit) Hashtbl.t = Hashtbl.create 4 in
   let errors : (string * March_ast.Ast.span * string) list ref = ref [] in
   let dummy_span = March_ast.Ast.dummy_span in
-  (* Pre-mark the entry file so auto-discovery never re-loads it *)
-  Hashtbl.add loaded_paths source_file ();
+  (* Pre-mark the entry file so auto-discovery never re-loads it.
+     Canonicalise the path so that relative and absolute references to the
+     same file are treated as identical (prevents the file being loaded a
+     second time when it also appears in MARCH_LIB_PATH as an absolute path). *)
+  let canonical_source = (try Unix.realpath source_file with Unix.Unix_error _ -> source_file) in
+  Hashtbl.add loaded_paths canonical_source ();
 
   let find_file mod_name =
     let fname = module_name_to_filename mod_name in
@@ -629,7 +633,8 @@ let resolve_imports ~source_file (m : March_ast.Ast.module_) =
         let files = collect_lib_files lib_dir in
         (* Phase 1: parse + desugar all un-loaded files to learn their mod names *)
         let parsed = List.filter_map (fun file_path ->
-            if Hashtbl.mem loaded_paths file_path then None
+            let canon_fp = (try Unix.realpath file_path with Unix.Unix_error _ -> file_path) in
+            if Hashtbl.mem loaded_paths canon_fp then None
             else
               let src = try read_file file_path with Sys_error _ -> "" in
               if src = "" then None
@@ -638,7 +643,7 @@ let resolve_imports ~source_file (m : March_ast.Ast.module_) =
                 | Error msg ->
                   Printf.eprintf "[lib] %s\n%!" msg; None
                 | Ok ast ->
-                  Some (file_path, March_desugar.Desugar.desugar_module ast)
+                  Some (canon_fp, March_desugar.Desugar.desugar_module ast)
           ) files in
         (* Sort: more dot-segments in mod name → load first (namespace leaves).
            Alphabetical tiebreak keeps things deterministic. *)
@@ -653,7 +658,7 @@ let resolve_imports ~source_file (m : March_ast.Ast.module_) =
         List.concat_map (fun (file_path, ast) ->
             if Hashtbl.mem loaded_paths file_path then []
             else begin
-              Hashtbl.add loaded_paths file_path ();
+              Hashtbl.add loaded_paths file_path ();  (* file_path already canonicalised in phase 1 *)
               let mn = ast.March_ast.Ast.mod_name.March_ast.Ast.txt in
               if Hashtbl.mem resolved mn then []
               else begin
