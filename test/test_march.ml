@@ -6260,6 +6260,40 @@ let test_perceus_record_param_multi_call_no_rc_underflow () =
     false
     (List.exists (fun fn -> has_any_decrc fn.March_tir.Tir.fn_body) fns_to_check)
 
+(* Regression: List.length(result) followed by List.nth(result, 0) — the
+   List.length call (via its internal go closure) CONSUMES the list (owned
+   parameter), so Perceus must emit EIncRC for result at the call site to
+   keep it alive for the subsequent List.nth call.  Without the fix, the
+   caller emitted no EIncRC, List.length decremented each Cons node's RC to
+   zero, and List.nth read freed memory → "local RC underflow". *)
+let test_perceus_list_length_then_nth_incrc () =
+  let m = perceus_module {|mod Test do
+
+    pfn check(xs : List(String)) : Bool do
+      let n = List.length(xs)
+      let first = List.nth(xs, 0)
+      n == 1 && first == "hello"
+    end
+
+    fn main() do
+      let xs = Cons("hello", Nil)
+      let ok = check(xs)
+      if ok do println("pass") else println("fail") end
+    end
+
+  end|} in
+  (* After Perceus, the `check` function must contain at least one EIncRC:
+     the inc for `xs` before the consuming List.length call (since `xs` is
+     still live at the subsequent List.nth call).  If the bug reappears, no
+     EIncRC would be emitted and List.nth would read a freed list node. *)
+  let check_fns = List.filter (fun fn ->
+    String.equal fn.March_tir.Tir.fn_name "check"
+  ) m.March_tir.Tir.tm_fns in
+  Alcotest.(check bool)
+    "check has EIncRC for xs before consuming List.length call"
+    true
+    (List.exists (fun fn -> has_any_incrc fn.March_tir.Tir.fn_body) check_fns)
+
 (* Regression: same bug at the LLVM IR level — ensure the emitted IR for a
    function using && contains no call to @__ (the undefined symbol produced
    when llvm_name "&&" = "__" was naively materialized as a call). *)
@@ -20666,6 +20700,31 @@ let test_collect_tests_recurses_into_dmod () =
   Alcotest.(check bool) "test inside DMod is collected" true
     (List.length tir.March_tir.Tir.tm_tests > 0)
 
+(* ── Regression: multi-DMod no double-collection ─────────────────────────
+   When m.mod_decls contains BOTH top-level tests (from the entry file) AND
+   a DMod with tests (from a MARCH_LIB_PATH auto-discovered file), each test
+   must be collected exactly once.  The bug scenario: if the same file is
+   loaded twice under different path strings (abs vs relative), two DMod
+   entries appear for the same module and every test runs twice.
+   Guard: two DMod modules with 1 test each + 1 top-level test = 3 total. *)
+let test_collect_tests_no_double_collection () =
+  (* Simulate: entry file has 1 top-level test, two other modules each have
+     1 test inside a DMod.  All three tests must be collected exactly once. *)
+  let src = {|mod Entry do
+    mod ModA do
+      test "mod-a test" do () end
+    end
+    mod ModB do
+      test "mod-b test" do () end
+    end
+    test "entry test" do () end
+  end|} in
+  let m = parse_and_desugar src in
+  let (_, type_map) = March_typecheck.Typecheck.check_module m in
+  let tir = March_tir.Lower.lower_module ~type_map ~test_mode:true m in
+  Alcotest.(check int) "3 unique tests collected, none doubled" 3
+    (List.length tir.March_tir.Tir.tm_tests)
+
 let () =
   Alcotest.run "march"
     [
@@ -21126,6 +21185,10 @@ let () =
              call read a freed field string (RC underflow).  Fix: TRecord is
              now borrow-eligible; _borrowed_field_vars suppresses field RC ops. *)
           Alcotest.test_case "record param multi-call no RC underflow" `Quick test_perceus_record_param_multi_call_no_rc_underflow;
+          (* Regression: List.length(xs) followed by List.nth(xs, 0) — the
+             consuming go closure decrements Cons nodes; caller must emit
+             EIncRC to keep xs alive for the subsequent List.nth call. *)
+          Alcotest.test_case "list length+nth EIncRC emitted" `Quick test_perceus_list_length_then_nth_incrc;
         ] );
       ( "lean_theorem_properties", [
           Alcotest.test_case "lin_drop_is_free"          `Quick test_thm_lin_drop_is_free;
@@ -22460,5 +22523,7 @@ let () =
           test_adt_eq_structural_fn_emitted;
         Alcotest.test_case "#36 collect_tests descends into DMod" `Quick
           test_collect_tests_recurses_into_dmod;
+        Alcotest.test_case "#36 collect_tests: multi-DMod no double-collection" `Quick
+          test_collect_tests_no_double_collection;
       ]);
     ]
