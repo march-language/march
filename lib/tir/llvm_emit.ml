@@ -3232,6 +3232,13 @@ let fn_declare_str (fn : Tir.fn_def) : string =
       }
 *)
 let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
+  (* Reset naming state for this combined function — same as emit_fn does at
+     the top of each function, but here we do it once for the whole group so
+     that local_names accumulates across all case bodies and never resets mid-
+     function, which would produce duplicate %name.addr alloca definitions. *)
+  Hashtbl.clear ctx.local_names;
+  Hashtbl.clear ctx.var_slot;
+  Hashtbl.clear ctx.var_llvm_ty;
   let group_names = List.map (fun fn -> fn.Tir.fn_name) group in
   let combined    = mutual_tco_combined_name group in
   let ret_ty      = llvm_ret_ty (List.hd group).Tir.fn_ret_ty in
@@ -3319,8 +3326,9 @@ let emit_mutual_tco_group ctx (group : Tir.fn_def list) =
   (* Emit each case body. *)
   List.iter (fun (fn, case_lbl) ->
     emit_label ctx case_lbl;
-    (* Set up a fresh local environment: load params from the combined slots. *)
-    Hashtbl.clear ctx.local_names;
+    (* Reset per-case variable environment but NOT local_names: all case bodies
+       live inside the same LLVM function, so alloca name uniquification must
+       persist across case bodies to prevent duplicate %name.addr definitions. *)
     Hashtbl.clear ctx.var_slot;
     Hashtbl.clear ctx.var_llvm_ty;
     let fn_slots = List.assoc fn.Tir.fn_name fn_param_slots in
