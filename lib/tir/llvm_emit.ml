@@ -3849,15 +3849,19 @@ let emit_module ?(fast_math=false) ?(target=Native) (m : Tir.tir_module) : strin
   Buffer.add_buffer out ctx.preamble;
   Buffer.add_buffer out ctx.buf;
 
-  (* Find a main function: either top-level "main" or "ModName.main" *)
-  let main_fn_name = List.find_map (fun (fn : Tir.fn_def) ->
+  (* Find a main function: either top-level "main" or "ModName.main".
+     Use fold_left (last match wins) so that when multiple modules define
+     fn main(), the entry file's module takes precedence.  The entry file's
+     declarations are injected last into mod_decls, so its functions appear
+     last in tm_fns — fold_left keeps the last match. *)
+  let main_fn_name = List.fold_left (fun acc (fn : Tir.fn_def) ->
       if fn.Tir.fn_name = "main" then Some "main"
       else if String.length fn.Tir.fn_name > 5 &&
               String.sub fn.Tir.fn_name
                 (String.length fn.Tir.fn_name - 5) 5 = ".main"
       then Some fn.Tir.fn_name
-      else None
-    ) m.Tir.tm_fns in
+      else acc
+    ) None m.Tir.tm_fns in
 
   (* Entry point: for native targets emit @main calling march_main + scheduler;
      for WASM browser target (Wasm32Unknown), emit exported island entry points
