@@ -851,6 +851,11 @@ and pat_tag_and_subs (pat : Ast.pattern) : (string * Ast.pattern list) option =
   | Ast.PatLit (Ast.LitBool b, _)   -> Some (string_of_bool b, [])
   | Ast.PatLit (Ast.LitString s, _) -> Some ("\"" ^ s ^ "\"", [])
   | Ast.PatLit (Ast.LitAtom a, _)   -> Some (":" ^ a, [])
+  (* The parser emits PatAtom for bare atom patterns (:get) and atom
+     constructor patterns (:Tag(x)).  PatLit(LitAtom) is never generated
+     by the parser; it would only appear if constructed directly in tests. *)
+  | Ast.PatAtom (a, [], _)   -> Some (":" ^ a, [])
+  | Ast.PatAtom (a, subs, _) -> Some (a, subs)
   | _ -> None
 
 (** Compile a pattern matrix to a TIR expression (decision tree).

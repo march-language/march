@@ -2656,6 +2656,34 @@ let test_tir_lower_patvar_default () =
     Alcotest.(check string) "PatVar binds scrutinee" "other" v.v_name
   | _ -> Alcotest.fail "expected ELet in default arm for PatVar"
 
+(** Regression: atom patterns (:get) must produce ECase branches, not be
+    silently dropped.  The bug was that pat_tag_and_subs only handled
+    PatLit(LitAtom) but the parser always emits PatAtom for :name patterns. *)
+let test_tir_lower_atom_pattern_match () =
+  let m = lower_module {|mod Test do
+    fn classify(m) do
+      match m do
+      :get  -> 1
+      :post -> 2
+      _     -> 0
+      end
+    end
+  end|} in
+  let f = find_fn "classify" m in
+  let rec find_case = function
+    | March_tir.Tir.ECase (_, brs, _) -> Some brs
+    | March_tir.Tir.ELet (_, _, body) -> find_case body
+    | _ -> None
+  in
+  match find_case f.fn_body with
+  | None -> Alcotest.fail "expected ECase in atom match"
+  | Some brs ->
+    (* Must have exactly 2 discriminating branches (:get and :post) *)
+    Alcotest.(check int) "atom match: 2 branches" 2 (List.length brs);
+    let tags = List.map (fun (br : March_tir.Tir.branch) -> br.br_tag) brs in
+    Alcotest.(check bool) ":get branch present" true (List.mem ":get" tags);
+    Alcotest.(check bool) ":post branch present" true (List.mem ":post" tags)
+
 let test_tir_lower_ty_int () =
   let ast_ty = March_ast.Ast.TyCon ({ txt = "Int"; span = March_ast.Ast.dummy_span }, []) in
   let tir_ty = March_tir.Lower.lower_ty ast_ty in
@@ -21142,6 +21170,7 @@ let () =
           Alcotest.test_case "lower fn params"      `Quick test_tir_lower_fn_params;
           Alcotest.test_case "ANF invariant"        `Quick test_tir_anf_invariant;
           Alcotest.test_case "PatVar default arm"   `Quick test_tir_lower_patvar_default;
+          Alcotest.test_case "atom pattern match"   `Quick test_tir_lower_atom_pattern_match;
           Alcotest.test_case "lower polymorphic"   `Quick test_tir_lower_polymorphic;
           Alcotest.test_case "lower recursive"     `Quick test_tir_lower_recursive;
           Alcotest.test_case "lower list ops"      `Quick test_tir_lower_list_ops;
