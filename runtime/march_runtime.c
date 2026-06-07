@@ -1107,14 +1107,15 @@ void *march_task_spawn_thunk(void *clo_ptr) {
         march_sched_init();
         g_sched_initialized = 1;
     }
-    march_incrc(clo_ptr);           /* keep closure alive while task runs */
+    /* Perceus treats task_spawn as a consuming call: the caller transfers its
+     * reference to the task.  No IncRC needed here; the closure's existing
+     * rc=1 is the task's reference, released by march_decrc in the trampoline. */
     march_ensure_sched_started();   /* start background scheduler if needed */
     march_proc *p = march_sched_spawn(march_thunk_trampoline, clo_ptr);
-    /* Box the process pointer as a Task handle */
+    /* Box the process pointer as a Task handle.
+     * march_alloc initialises rc=1, tag=0; only the proc pointer needs setting. */
     int64_t *task = (int64_t *)march_alloc(24);
     if (task) {
-        task[0] = 0;    /* ref count */
-        ((int32_t *)task)[2] = 0;   /* tag = 0 at offset 8 */
         task[2] = (int64_t)(uintptr_t)p;  /* field 0 at offset 16 */
     }
     return (void *)task;
