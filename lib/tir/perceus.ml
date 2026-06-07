@@ -550,6 +550,17 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
       match e1 with
       | Tir.EField (Tir.AVar src, _)
         when needs_rc v.Tir.v_ty
+             (* TPtr sources are closure structs ($clo).  Their fields are
+                closure FVs managed by the borrowed' set (d2cf09e): Perceus
+                emits EIncRC before any consuming call so the closure's own
+                reference survives repeated invocations.  Marking a closure FV
+                as is_borrowed_field would add it to _borrowed_field_vars and
+                suppress that EIncRC, causing RC underflow on the 2nd call.
+                This check must precede all four conditions below because
+                conditions 1–3 fire whenever $clo is in live_after (which
+                happens whenever $clo is a borrowed param and therefore in
+                borrowed'), and condition 4 already has this TPtr guard. *)
+             && (match src.Tir.v_ty with Tir.TPtr _ -> false | _ -> true)
              && (StringSet.mem src.Tir.v_name live_after
                  || StringSet.mem src.Tir.v_name !_borrowed_field_vars
                  || StringSet.mem src.Tir.v_name (live_before e2 live_after)

@@ -6187,6 +6187,65 @@ let test_perceus_closure_fv_single_use_incrc () =
     "apply fn EIncRC's captured FV before consuming call" true
     (has_incrc apply_fn.March_tir.Tir.fn_body)
 
+(* Regression: HttpServer-style pipeline closure — list FV consumed by callee.
+   Borrow inference marks $clo as :borrow (not :own) for apply functions that
+   take a closure they don't outlive.  When $clo is borrowed it lands in the
+   borrowed' set, which puts it in live_after.  The old is_borrowed_field check
+   fired on "let plugs = $clo.fv1" because $clo was in live_after (condition 1),
+   marking plugs as a borrowed_field_var and suppressing the EIncRC that
+   d2cf09e was supposed to emit before the consuming run_pipeline call.
+   Fix: add a global TPtr guard to is_borrowed_field so closure structs ($clo)
+   are never treated as record owners; their FVs must go through the borrowed'
+   path so find_inc_vars emits EIncRC before every consuming callee. *)
+let test_perceus_closure_fv_borrowed_clo_incrc () =
+  let m = perceus_module {|mod Test do
+    pfn run_pipeline(conn : Int, plugs : List((Int) -> Int)) : Int do
+      match plugs do
+      Nil -> conn
+      Cons(f, rest) -> run_pipeline(f(conn), rest)
+      end
+    end
+    fn make_server(plugs : List((Int) -> Int)) : (Int) -> Int do
+      fn conn -> run_pipeline(conn, plugs)
+    end
+  end|} in
+  let apply_fns = List.filter (fun fn ->
+    match fn.March_tir.Tir.fn_params with
+    | p :: _ -> String.equal p.March_tir.Tir.v_name "$clo"
+    | [] -> false
+  ) m.March_tir.Tir.tm_fns in
+  (* Find the apply function that captures plugs — its body must EIncRC the
+     FV before passing it to run_pipeline (which owns/consumes the list). *)
+  let pipeline_apply = List.find_opt (fun fn ->
+    let rec has_run_pipeline_call = function
+      | March_tir.Tir.EApp (f, _) -> String.sub f.March_tir.Tir.v_name 0
+          (min 12 (String.length f.March_tir.Tir.v_name)) = "run_pipeline"
+      | March_tir.Tir.ELet (_, e1, e2) ->
+        has_run_pipeline_call e1 || has_run_pipeline_call e2
+      | March_tir.Tir.ESeq (e1, e2) ->
+        has_run_pipeline_call e1 || has_run_pipeline_call e2
+      | _ -> false
+    in
+    has_run_pipeline_call fn.March_tir.Tir.fn_body
+  ) apply_fns in
+  Alcotest.(check bool) "pipeline apply function exists" true
+    (Option.is_some pipeline_apply);
+  let apply_fn = Option.get pipeline_apply in
+  let rec has_incrc = function
+    | March_tir.Tir.EIncRC _ | March_tir.Tir.EAtomicIncRC _ -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> has_incrc e1 || has_incrc e2
+    | March_tir.Tir.ESeq (e1, e2) -> has_incrc e1 || has_incrc e2
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> has_incrc b.March_tir.Tir.br_body) brs ||
+      (match def with Some e -> has_incrc e | None -> false)
+    | March_tir.Tir.ELetRec (fns, body) ->
+      List.exists (fun f -> has_incrc f.March_tir.Tir.fn_body) fns || has_incrc body
+    | _ -> false
+  in
+  Alcotest.(check bool)
+    "pipeline apply fn EIncRC's captured list FV before consuming run_pipeline call" true
+    (has_incrc apply_fn.March_tir.Tir.fn_body)
+
 (* Regression: commit 831e315 changed needs_rc(TFn _) to true, which caused
    Perceus to insert EIncRC for the callee in every EApp.  After defun all
    EApp callees are top-level function symbols (code addresses), not heap
@@ -9758,6 +9817,29 @@ let test_eval_task_sends_to_actor () =
   let _v = call_fn env "main" [] in
   (* If we get here without error, cross-tier messaging works *)
   ()
+
+(** Regression: task_spawn with a heap-allocating lambda must not crash with
+    "local RC underflow".  Root cause was march_task_spawn_thunk zeroing the
+    Task object's RC field (task[0]=0) after march_alloc already set it to 1,
+    so the caller's march_decrc_local on the Task result went 0→-1.
+    Secondary: march_incrc on the closure inside the runtime was spurious;
+    Perceus treats task_spawn as consuming (no DecRC on caller side). *)
+let test_compile_task_spawn_heap_alloc_no_rc_underflow () =
+  let ir = emit_actor_ir {|mod T do
+    fn go() : String do "hello" end
+    fn main() do
+      let _ = task_spawn(fn _ -> go())
+      ()
+    end
+  end|} in
+  (* march_task_spawn_thunk must be called *)
+  Alcotest.(check bool) "calls march_task_spawn_thunk" true
+    (ir_contains ir "march_task_spawn_thunk");
+  (* The Task result (let _ = ...) must be DecRC'd by the caller — Perceus
+     side of the fix; the runtime side (task[0]=0 removal) is verified by the
+     full binary tests passing without abort. *)
+  Alcotest.(check bool) "task handle is decrc'd by caller" true
+    (ir_contains ir "march_decrc_local")
 
 (** Phase 4: send() should push to mailbox, NOT dispatch inline.
     After send(), mailbox_size = 1 and state is unchanged. *)
@@ -21316,6 +21398,7 @@ let () =
           Alcotest.test_case "preserves fn count"        `Quick test_perceus_preserves_fn_count;
           Alcotest.test_case "scrut-escape rewrite (rc50)" `Quick test_perceus_scrut_escape_rewrite;
           Alcotest.test_case "closure FV single-use incrc (rc64)" `Quick test_perceus_closure_fv_single_use_incrc;
+          Alcotest.test_case "closure FV list incrc when $clo is borrowed" `Quick test_perceus_closure_fv_borrowed_clo_incrc;
           Alcotest.test_case "elide preserves mixed atomicity (P4)" `Quick test_perceus_elide_preserves_mixed_atomicity;
           (* Regression: 831e315 needs_rc(TFn) caused spurious EIncRC for EApp
              operator callees like && / || whose llvm_name maps to @__ *)
@@ -21684,6 +21767,8 @@ let () =
           Alcotest.test_case "spawn_steal with pool"     `Quick (with_reset test_eval_spawn_steal_with_pool);
           Alcotest.test_case "workpool threading"        `Quick (with_reset test_eval_workpool_threading);
           Alcotest.test_case "task sends to actor"       `Quick (with_reset test_eval_task_sends_to_actor);
+          Alcotest.test_case "task_spawn heap-alloc no RC underflow" `Quick
+            (with_reset test_compile_task_spawn_heap_alloc_no_rc_underflow);
           (* Phase 5B: cancel tokens *)
           Alcotest.test_case "cancel token new"          `Quick (with_reset test_cancel_token_new);
           Alcotest.test_case "cancel token cancel"       `Quick (with_reset test_cancel_token_cancel);
