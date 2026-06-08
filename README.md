@@ -2,7 +2,7 @@
 
 March is a statically-typed functional language in the ML/Elixir family. It compiles to native binaries via LLVM.
 
-```
+```march
 mod Greet do
 
 fn greet(name : String) : String do
@@ -45,8 +45,8 @@ end
 - Defunctionalization: closures compiled to structs + dispatch, no indirect call overhead
 - Tree-walking interpreter available for fast iteration
 
-**Concurrency** (interpreter only for now)
-- Actor model: share-nothing message passing, `spawn`, `send`, `kill`, `is_alive`
+**Concurrency**
+- Actor model: share-nothing message passing, `spawn`, `send`, `kill`, `is_alive` (interpreter only)
 - Actor state updated via record spread: `{ state with count = state.count + 1 }`
 - Structured concurrency via `Task`: `Task.async`, `Task.await`, `Task.race`, `Task.any`, `Task.all_settled`, `Task.scope`
 - Cancellation tokens: `task_cancel_token_new`, `task_cancel`, `task_is_cancelled`, `task_spawn_with_cancel`, `task_cancel_by_id`
@@ -210,7 +210,7 @@ dune runtest
 
 ### Values and bindings
 
-```
+```march
 let x = 42
 let greeting = "hello"
 let flag = true
@@ -218,7 +218,7 @@ let flag = true
 
 ### Functions
 
-```
+```march
 fn add(x : Int, y : Int) : Int do
   x + y
 end
@@ -230,7 +230,7 @@ let add = fn (x, y) -> x + y
 
 ### Algebraic data types
 
-```
+```march
 type Shape = Circle(Float) | Rect(Float, Float) | Point
 
 fn area(s : Shape) : Float do
@@ -244,7 +244,7 @@ end
 
 ### Records
 
-```
+```march
 type Point = { x : Int, y : Int }
 
 let p = { x = 3, y = 4 }
@@ -258,7 +258,7 @@ let q = { p with x = 10 }
 
 ### Pattern matching
 
-```
+```march
 fn describe(n : Int) : String do
   match n do
     0 -> "zero"
@@ -270,7 +270,7 @@ end
 
 ### Higher-order functions
 
-```
+```march
 fn map(f : Int -> Int, lst : List(Int)) : List(Int) do
   match lst do
     Nil        -> Nil
@@ -283,7 +283,7 @@ let doubled = map(fn x -> x * 2, my_list)
 
 ### Option and Result
 
-```
+```march
 fn safe_div(a : Int, b : Int) : Option(Int) do
   if b == 0 do None else Some(a / b) end
 end
@@ -296,7 +296,7 @@ end
 
 ### Actors
 
-```
+```march
 actor Counter do
   state { value : Int }
   init  { value = 0 }
@@ -321,12 +321,12 @@ end
 
 ### Pipe operator
 
-```
+```march
 let result =
-  range(1, 10)
-  |> filter(fn x -> x % 2 == 0)
-  |> map(fn x -> x * x)
-  |> sum
+  List.range(1, 10)
+  |> List.filter(fn x -> x % 2 == 0)
+  |> List.map(fn x -> x * x)
+  |> List.sum_int
 ```
 
 ## Built-in functions
@@ -352,11 +352,15 @@ lib/
   typecheck/typecheck.ml bidirectional HM type inference
   eval/eval.ml           tree-walking interpreter
   tir/
+    tir.ml               TIR type definitions
     lower.ml             AST → ANF typed IR
     mono.ml              monomorphization
     defun.ml             defunctionalization (closure lifting)
     perceus.ml           Perceus reference counting analysis
+    borrow.ml            borrow inference (Perceus companion)
     escape.ml            escape analysis (stack promotion)
+    fusion.ml            loop fusion / FBIP reuse propagation
+    opt.ml               optimization pipeline (cprop, dce, fold, inline, simplify)
     llvm_emit.ml         TIR → LLVM IR
 runtime/
   march_runtime.c        C runtime (alloc, RC, strings, I/O)
