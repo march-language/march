@@ -29,8 +29,8 @@ end
 - `fn name(x, y) do ... end` — named functions
 - `fn x -> x + 1` / `fn (x, y) -> expr` — lambdas
 - `let x = expr` — block-scoped bindings, no `in`
-- `match expr with | Pat -> body end` — pattern matching
-- `if cond then e1 else e2` — conditionals
+- `match expr do Pat -> body end` — pattern matching
+- `if cond do e1 else e2 end` — conditionals
 - `x |> f |> g` — pipe operator
 - `mod Name do ... end` — modules
 - `--` line comments, `{- -}` nested block comments
@@ -70,9 +70,9 @@ No source-level annotations are needed. The compiler derives this entirely from 
 type Tree = Leaf(Int) | Node(Tree, Tree)
 
 fn inc_leaves(t : Tree) : Tree do
-  match t with
-  | Leaf(n)    -> Leaf(n + 1)         -- rewrites the Leaf in-place when RC=1
-  | Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))  -- rewrites the Node in-place when RC=1
+  match t do
+    Leaf(n)    -> Leaf(n + 1)         -- rewrites the Leaf in-place when RC=1
+    Node(l, r) -> Node(inc_leaves(l), inc_leaves(r))  -- rewrites the Node in-place when RC=1
   end
 end
 ```
@@ -234,10 +234,10 @@ let add = fn (x, y) -> x + y
 type Shape = Circle(Float) | Rect(Float, Float) | Point
 
 fn area(s : Shape) : Float do
-  match s with
-  | Circle(r)    -> 3.14159 *. r *. r
-  | Rect(w, h)   -> w *. h
-  | Point        -> 0.0
+  match s do
+    Circle(r)    -> 3.14159 *. r *. r
+    Rect(w, h)   -> w *. h
+    Point        -> 0.0
   end
 end
 ```
@@ -260,10 +260,10 @@ let q = { p with x = 10 }
 
 ```
 fn describe(n : Int) : String do
-  match n with
-  | 0 -> "zero"
-  | 1 -> "one"
-  | _ -> "many"
+  match n do
+    0 -> "zero"
+    1 -> "one"
+    _ -> "many"
   end
 end
 ```
@@ -272,9 +272,9 @@ end
 
 ```
 fn map(f : Int -> Int, lst : List(Int)) : List(Int) do
-  match lst with
-  | Nil        -> Nil
-  | Cons(h, t) -> Cons(f(h), map(f, t))
+  match lst do
+    Nil        -> Nil
+    Cons(h, t) -> Cons(f(h), map(f, t))
   end
 end
 
@@ -285,12 +285,12 @@ let doubled = map(fn x -> x * 2, my_list)
 
 ```
 fn safe_div(a : Int, b : Int) : Option(Int) do
-  if b == 0 then None else Some(a / b)
+  if b == 0 do None else Some(a / b) end
 end
 
-match safe_div(10, 2) with
-| None    -> println("error")
-| Some(n) -> println(int_to_string(n))
+match safe_div(10, 2) do
+  None    -> println("error")
+  Some(n) -> println(int_to_string(n))
 end
 ```
 
