@@ -266,7 +266,7 @@ match expr do
 end
 ```
 
-Arms separated by newlines or `|`. Multi-statement arms need no wrapper:
+Arms separated by newlines. Multi-statement arms need no wrapper:
 
 ```march
 match result do
