@@ -1,0 +1,15 @@
+-- Regression fixture: a USER module (resolved via the source dir, like
+-- MARCH_LIB_PATH modules) whose body contains a type error.  The compiler
+-- must report it and exit 1 even though this is not the entry file.
+mod IllTypedUserMod do
+
+  fn add(a : Int, b : Int) : Int do
+    a + b
+  end
+
+  fn broken() : Int do
+    -- type error: add takes 2 arguments
+    add(1, 2, 3)
+  end
+
+end

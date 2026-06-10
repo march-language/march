@@ -1,0 +1,16 @@
+-- Regression fixture entry: imports a user module with a type error.
+-- Both `march test` and `march --check` must exit 1 — errors in imported
+-- user modules were silently swallowed by the entry-filename diagnostic
+-- filter, letting ill-typed programs compile into corrupt binaries.
+mod EntryImportsIllTyped do
+
+  use IllTypedUserMod
+
+  -- Deliberately does NOT call broken(): the failure must come from the
+  -- typechecker, not from a runtime arity check.  Pre-fix, this suite
+  -- "passes" while the program is ill-typed.
+  test "imported module must typecheck" do
+    assert (IllTypedUserMod.add(2, 4) == 6)
+  end
+
+end

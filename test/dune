@@ -147,3 +147,27 @@
        (file imports/math_utils.march))
  (action (run %{exe:../bin/main.exe} test
               imports/test_cross_import.march)))
+
+; ── Regression: type errors in imported user modules must fail the build ──
+; The diagnostic filter only matched the entry filename, so errors in
+; modules resolved from the source dir / MARCH_LIB_PATH were tolerated as
+; "stdlib-internal" — ill-typed programs compiled into corrupt binaries
+; (null fn-ptr calls, RC corruption).  Both the interpreter path
+; (march test) and the typecheck/compile path (--check) must exit 1.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (file imports/entry_imports_ill_typed.march)
+       (file imports/ill_typed_user_mod.march))
+ (action (with-accepted-exit-codes 1
+          (run %{exe:../bin/main.exe} test
+               imports/entry_imports_ill_typed.march))))
+
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (file imports/entry_imports_ill_typed.march)
+       (file imports/ill_typed_user_mod.march))
+ (action (with-accepted-exit-codes 1
+          (run %{exe:../bin/main.exe} --check
+               imports/entry_imports_ill_typed.march))))

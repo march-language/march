@@ -679,7 +679,15 @@ let resolve_imports ~source_file (m : March_ast.Ast.module_) =
       ) extra_lib_paths
   in
 
-  (!errors, explicit_decls @ auto_decls)
+  (* Every file loaded here is USER code (the entry file plus modules from
+     the source dir / MARCH_LIB_PATH).  Callers use this list to decide
+     which typecheck diagnostics are fatal: errors in any of these files
+     must abort, while stdlib-internal errors are tolerated (some stdlib
+     modules are WIP).  Membership is exact — span files carry the same
+     path strings used to open them — and is robust against stdlib files
+     whose cached spans point at a different install location. *)
+  let user_files = Hashtbl.fold (fun path () acc -> path :: acc) loaded_paths [] in
+  (!errors, explicit_decls @ auto_decls, user_files)
 
 (** Format [filename] in-place.  Returns true if the file was changed. *)
 let fmt_file filename =
@@ -806,7 +814,7 @@ let run_test_cmd args =
         ) (March_errors.Errors.sorted desugar_errors);
       exit 1
     end;
-    let (resolve_errors, extra_decls) = resolve_imports ~source_file:filename desugared in
+    let (resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
     if resolve_errors <> [] then begin
       List.iter (fun (_mod_name, span, msg) ->
           Printf.eprintf "%s:%d:%d: error: %s\n"
@@ -826,17 +834,28 @@ let run_test_cmd args =
     in
     let (errors, _type_map) = March_typecheck.Typecheck.check_module desugared in
     let diags = March_errors.Errors.sorted errors in
+    (* Fatal when the diagnostic points into any file loaded as user code:
+       the entry file or imported modules (source dir / MARCH_LIB_PATH). *)
     let is_user_file (d : March_errors.Errors.diagnostic) =
-      d.span.March_ast.Ast.file = filename
+      let f = d.span.March_ast.Ast.file in
+      f = filename || f = "" || f = "<unknown>" || List.mem f user_files
     in
     let has_user_errors = List.exists (fun (d : March_errors.Errors.diagnostic) ->
         d.severity = March_errors.Errors.Error && is_user_file d
       ) diags in
     if has_user_errors then begin
       List.iter (fun (d : March_errors.Errors.diagnostic) ->
-        if is_user_file d && d.severity = March_errors.Errors.Error then
+        if is_user_file d && d.severity = March_errors.Errors.Error then begin
+          (* Render against the file the span points into — imported-module
+             errors must not be shown with the entry file's source lines. *)
+          let f = d.span.March_ast.Ast.file in
+          let (d_src, d_file) =
+            if f = filename || f = "" || f = "<unknown>" then (src, filename)
+            else (try read_file f with Sys_error _ -> src), f
+          in
           Printf.eprintf "%s\n\n"
-            (March_errors.Errors.render_diagnostic ~src ~filename d)
+            (March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d)
+        end
       ) diags;
       exit 1
     end;
@@ -1102,7 +1121,7 @@ let compile filename =
   (* Capture user AST before stdlib injection — used by -dump-phases *)
   let user_ast = desugared in
   (* Resolve cross-file imports: find imported .march files, parse and inject *)
-  let (resolve_errors, extra_decls) = resolve_imports ~source_file:filename desugared in
+  let (resolve_errors, extra_decls, user_files) = resolve_imports ~source_file:filename desugared in
   List.iter (fun (_mod_name, span, msg) ->
       Printf.eprintf "%s:%d:%d: error: %s\n"
         span.March_ast.Ast.file span.March_ast.Ast.start_line
@@ -1156,17 +1175,27 @@ let compile filename =
      See also: March_effects.Effects.check_capabilities *)
   let (errors, type_map) = March_typecheck.Typecheck.check_module desugared in
   stamp "typecheck";
-  (* Print diagnostics sorted by position, filtering stdlib-internal errors *)
+  (* Print diagnostics sorted by position, filtering stdlib-internal errors.
+     "User" means any file loaded as user code: the entry file AND modules
+     resolved from the source dir / MARCH_LIB_PATH.  Filtering by entry
+     filename alone silently compiled ill-typed imported modules. *)
   let diags = March_errors.Errors.sorted errors in
   let is_user_file (d : March_errors.Errors.diagnostic) =
-    d.span.March_ast.Ast.file = filename ||
-    d.span.March_ast.Ast.file = "" ||
-    d.span.March_ast.Ast.file = "<unknown>"
+    let f = d.span.March_ast.Ast.file in
+    f = filename || f = "" || f = "<unknown>" || List.mem f user_files
   in
   List.iter (fun (d : March_errors.Errors.diagnostic) ->
-      if is_user_file d then
+      if is_user_file d then begin
+        (* Render against the file the span points into — imported-module
+           errors must not be shown with the entry file's source lines. *)
+        let f = d.span.March_ast.Ast.file in
+        let (d_src, d_file) =
+          if f = filename || f = "" || f = "<unknown>" then (src, filename)
+          else (try read_file f with Sys_error _ -> src), f
+        in
         Printf.eprintf "%s\n\n"
-          (March_errors.Errors.render_diagnostic ~src ~filename d)
+          (March_errors.Errors.render_diagnostic ~src:d_src ~filename:d_file d)
+      end
     ) diags;
   let compile_mode = !dump_tir || !emit_llvm || !do_compile || !dump_phases in
   let has_user_errors = List.exists (fun (d : March_errors.Errors.diagnostic) ->
@@ -1646,7 +1675,7 @@ let run_check_cmd files =
         exit 1
     in
     let desugared = March_desugar.Desugar.desugar_module module_ast in
-    let (_resolve_errors, extra_decls) = resolve_imports ~source_file:filename desugared in
+    let (_resolve_errors, extra_decls, _user_files) = resolve_imports ~source_file:filename desugared in
     let desugared =
       { desugared with
         March_ast.Ast.mod_decls = extra_decls @ desugared.March_ast.Ast.mod_decls }
