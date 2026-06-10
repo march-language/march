@@ -3741,21 +3741,28 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
      is already bound to a concrete type in the environment.  In that case we
      reuse the existing binding so the wrapper body can call the full function
      at a different arity without a self-type conflict. *)
-  let self_ty, env_rec =
+  let self_ty, env_rec, placeholder =
     match StrMap.find_opt def.fn_name.txt env'.vars with
-    | Some (Mono (TVar r)) when (match !r with Unbound _ -> true | _ -> false) ->
-      (* Still a pass-1 placeholder fresh var — use normal self-ref *)
+    | Some (Mono (TVar _ as pv)) ->
+      (* Pass-1 forward-reference placeholder.  It is a bare [Mono (TVar _)]:
+         either still Unbound, or already Linked because an EARLIER caller in
+         this module unified its use site against it.  Either way it is the
+         placeholder (a genuine concrete binding — e.g. a default-arg wrapper's
+         full-arity sibling — is always [Mono (TArrow ..)] or [Poly _], never a
+         bare [Mono (TVar _)]).  Use a fresh self-ref for recursion and keep a
+         handle on the placeholder so we can reconcile it with the inferred type
+         after generalization (see below). *)
       let sv = fresh_var env'.level in
-      (sv, bind_var def.fn_name.txt (Mono sv) env')
+      (sv, bind_var def.fn_name.txt (Mono sv) env', Some pv)
     | Some existing_sch ->
       (* Already concretely typed (e.g. full-arity default-arg fn) — keep it
          so the wrapper body resolves calls at the full arity correctly.
          Still create a self_ty for the unify at the end of check_fn. *)
       let sv = fresh_var env'.level in
-      (sv, bind_var def.fn_name.txt existing_sch env')
+      (sv, bind_var def.fn_name.txt existing_sch env', None)
     | None ->
       let sv = fresh_var env'.level in
-      (sv, bind_var def.fn_name.txt (Mono sv) env')
+      (sv, bind_var def.fn_name.txt (Mono sv) env', None)
   in
 
   let sch = match def.fn_clauses with
@@ -3913,6 +3920,25 @@ let check_fn env (def : Ast.fn_def) fn_span : scheme =
            def.fn_name.txt);
       Mono TError
   in
+
+  (* Reconcile the pass-1 forward-reference placeholder with the inferred type.
+     During pass 1 every module function is pre-bound to a single placeholder
+     var so forward references resolve.  A caller checked BEFORE this definition
+     unified its use site against that placeholder; if we now simply discard it,
+     the caller can be left with an unresolved free type var (e.g.
+     `List('_NNNN)`).  That miscompiles: a polymorphic list is RC-handled
+     differently than its concrete instance, causing a use-after-free.
+
+     We only reconcile when this function's inferred scheme is MONOMORPHIC
+     (`Mono _`, no type parameters).  A monomorphic function has exactly one
+     type, so unifying every forward use site with it is always sound.  A
+     POLYMORPHIC function must keep its per-use instantiation (a caller may use
+     it at several types — see the "forward-ref pfn called at two element
+     types" test), so we leave the placeholder alone in that case. *)
+  (match placeholder, sch with
+   | Some pv, Mono t ->
+     unify env' ~span:fn_span ~reason:None pv t
+   | _ -> ());
 
   ignore (leave_level env');
   sch
@@ -4385,6 +4411,211 @@ let project_protocol env ~span ~proto_name (pdef : Ast.protocol_def) =
    | _ -> ());  (* 0 or 1 role: already warned in caller *)
   projections
 
+(* Reorder each maximal contiguous run of top-level function declarations so a
+   function is checked AFTER the sibling functions it calls (callee-before-caller,
+   i.e. dependency order).  This lets a caller observe a callee's fully-inferred,
+   generalized type rather than a pass-1 monomorphic placeholder.  Using the
+   placeholder leaks an unresolved/over-generalized type variable into the
+   caller — and because `generalize` copies the type with fresh refs, a later
+   reconciliation can no longer reach it.  The leak miscompiles at runtime: a
+   polymorphic list is reference-counted differently than its concrete instance,
+   producing a use-after-free.
+
+   Safety: only DFn decls are moved, and only relative to one another within a
+   maximal contiguous run, so non-DFn decls (DLet, DType, …) keep their
+   positions and any dependency on a module-level value/type is preserved.
+   Runs containing duplicate function names (default-argument wrappers, which
+   the checker requires to be processed full-arity-first) are left untouched.
+   Cycles (mutual recursion) are tolerated by a DFS post-order that keeps SCC
+   members grouped and relies on the pass-1 placeholder for the cyclic edges. *)
+let dependency_order_dfn_run (run : Ast.decl list) : Ast.decl list =
+  let info =
+    List.filter_map (function
+      | Ast.DFn (d, sp) -> Some (d.Ast.fn_name.txt, (d, sp))
+      | _ -> None) run
+  in
+  let names = List.map fst info in
+  let has_dup =
+    let seen = ref StringSet.empty and dup = ref false in
+    List.iter (fun n ->
+        if StringSet.mem n !seen then dup := true else seen := StringSet.add n !seen)
+      names;
+    !dup
+  in
+  if has_dup then run
+  else begin
+    let name_set = List.fold_left (fun s n -> StringSet.add n s) StringSet.empty names in
+    let by_name : (string, Ast.fn_def * Ast.span) Hashtbl.t = Hashtbl.create 16 in
+    List.iter (fun (n, ds) -> Hashtbl.replace by_name n ds) info;
+    let deps_of (d : Ast.fn_def) =
+      List.concat_map (fun (c : Ast.fn_clause) -> free_vars_expr [] c.Ast.fc_body)
+        d.Ast.fn_clauses
+      |> List.filter (fun n -> n <> d.Ast.fn_name.txt && StringSet.mem n name_set)
+    in
+    let visited : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+    let out = ref [] in
+    let rec visit name =
+      if not (Hashtbl.mem visited name) then begin
+        Hashtbl.replace visited name ();
+        match Hashtbl.find_opt by_name name with
+        | Some (d, sp) -> List.iter visit (deps_of d); out := Ast.DFn (d, sp) :: !out
+        | None -> ()
+      end
+    in
+    List.iter (fun n -> visit n) names;
+    List.rev !out
+  end
+
+(* Collect the set of module-name prefixes referenced (qualified) anywhere in a
+   list of declarations: qualified function/value uses ("Mod.f"), qualified
+   constructors ("Mod.Ctor") and qualified type names ("Mod.T").  Used to order
+   sibling modules so a module is checked AFTER the modules it depends on. *)
+let module_refs_in_decls (decls : Ast.decl list) : StringSet.t =
+  let acc = ref StringSet.empty in
+  let add (s : string) =
+    match String.index_opt s '.' with
+    | Some i when i > 0 -> acc := StringSet.add (String.sub s 0 i) !acc
+    | _ -> ()
+  in
+  let rec ty (t : Ast.ty) =
+    match t with
+    | Ast.TyCon (n, args) -> add n.Ast.txt; List.iter ty args
+    | Ast.TyVar _ | Ast.TyNat _ -> ()
+    | Ast.TyArrow (a, b) -> ty a; ty b
+    | Ast.TyTuple ts -> List.iter ty ts
+    | Ast.TyRecord flds -> List.iter (fun (_, t) -> ty t) flds
+    | Ast.TyLinear (_, t) -> ty t
+    | Ast.TyNatOp (_, a, b) -> ty a; ty b
+    | Ast.TyChan (a, b) -> add a.Ast.txt; add b.Ast.txt
+  in
+  let oty = function Some t -> ty t | None -> () in
+  let param (p : Ast.param) = oty p.Ast.param_ty in
+  let rec ex (e : Ast.expr) =
+    match e with
+    | Ast.EVar n -> add n.Ast.txt
+    | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _ | Ast.EDbg (None, _) -> ()
+    | Ast.EDbg (Some i, _) -> ex i
+    | Ast.EApp (f, args, _) -> ex f; List.iter ex args
+    | Ast.ECon (n, args, _) -> add n.Ast.txt; List.iter ex args
+    | Ast.ELam (ps, b, _) -> List.iter param ps; ex b
+    | Ast.EBlock (es, _) -> List.iter ex es
+    | Ast.ELet (b, _) -> ex b.Ast.bind_expr
+    | Ast.EMatch (s, brs, _) ->
+      ex s;
+      List.iter (fun (br : Ast.branch) ->
+          (match br.Ast.branch_guard with Some g -> ex g | None -> ());
+          ex br.Ast.branch_body) brs
+    | Ast.ETuple (es, _) -> List.iter ex es
+    | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> ex e) fs
+    | Ast.ERecordUpdate (b, fs, _) -> ex b; List.iter (fun (_, e) -> ex e) fs
+    | Ast.EField (e, _, _) -> ex e
+    | Ast.EIf (c, t, f, _) -> ex c; ex t; ex f
+    | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> ex c; ex b) arms
+    | Ast.EAnnot (e, t, _) -> ex e; ty t
+    | Ast.EAtom (_, args, _) -> List.iter ex args
+    | Ast.ESend (a, b, _) -> ex a; ex b
+    | Ast.ESpawn (e, _) -> ex e
+    | Ast.ELetFn (_, ps, rt, b, _) -> List.iter param ps; oty rt; ex b
+    | Ast.EPipe (l, r, _) -> ex l; ex r
+    | Ast.EAssert (e, _) -> ex e
+    | Ast.ESigil (_, c, _) -> ex c
+  in
+  let fn_param (fp : Ast.fn_param) =
+    match fp with
+    | Ast.FPNamed p -> oty p.Ast.param_ty
+    | Ast.FPDefault (p, _) -> oty p.Ast.param_ty
+    | Ast.FPPat _ -> ()
+  in
+  let decl (d : Ast.decl) =
+    match d with
+    | Ast.DFn (def, _) ->
+      oty def.Ast.fn_ret_ty;
+      List.iter (fun (c : Ast.fn_clause) ->
+          List.iter fn_param c.Ast.fc_params;
+          (match c.Ast.fc_guard with Some g -> ex g | None -> ());
+          ex c.Ast.fc_body) def.Ast.fn_clauses
+    | Ast.DLet (_, b, _) -> ex b.Ast.bind_expr
+    | Ast.DType (_, _, _, td, _) ->
+      (match td with
+       | Ast.TDAlias t -> ty t
+       | Ast.TDRecord flds -> List.iter (fun (f : Ast.field) -> ty f.Ast.fld_ty) flds
+       | Ast.TDVariant vs ->
+         List.iter (fun (v : Ast.variant) -> List.iter ty v.Ast.var_args) vs)
+    | _ -> ()
+  in
+  List.iter decl decls;
+  !acc
+
+(* Reorder a maximal run of sibling module declarations so a module is checked
+   AFTER the sibling modules it references.  Same rationale as the function-level
+   ordering: a caller module that is checked before a callee module sees the
+   callee's qualified names as pass-1 placeholders, leaking an unresolved type
+   variable that later miscompiles into a use-after-free.  Auto-discovered
+   project modules are otherwise ordered by a namespace-depth heuristic that does
+   not reflect actual dependencies, so flat (single-segment) module sets end up
+   alphabetical. *)
+let dependency_order_dmod_run (run : Ast.decl list) : Ast.decl list =
+  let info =
+    List.filter_map (function
+      | Ast.DMod (n, _, decls, _) as dm -> Some (n.Ast.txt, (decls, dm))
+      | _ -> None) run
+  in
+  let names = List.map fst info in
+  let has_dup =
+    let seen = ref StringSet.empty and dup = ref false in
+    List.iter (fun n ->
+        if StringSet.mem n !seen then dup := true else seen := StringSet.add n !seen)
+      names;
+    !dup
+  in
+  if has_dup then run
+  else begin
+    let name_set = List.fold_left (fun s n -> StringSet.add n s) StringSet.empty names in
+    let by_name : (string, Ast.decl list * Ast.decl) Hashtbl.t = Hashtbl.create 16 in
+    List.iter (fun (n, ds) -> Hashtbl.replace by_name n ds) info;
+    let visited : (string, unit) Hashtbl.t = Hashtbl.create 16 in
+    let out = ref [] in
+    let rec visit name =
+      if not (Hashtbl.mem visited name) then begin
+        Hashtbl.replace visited name ();
+        match Hashtbl.find_opt by_name name with
+        | Some (decls, dm) ->
+          let deps =
+            StringSet.remove name (StringSet.inter (module_refs_in_decls decls) name_set)
+          in
+          StringSet.iter visit deps;
+          out := dm :: !out
+        | None -> ()
+      end
+    in
+    List.iter (fun n -> visit n) names;
+    List.rev !out
+  end
+
+(* Reorder both function runs (by call dependency) and module runs (by module
+   dependency) within [decls], leaving every other declaration in place. *)
+let reorder_decls (decls : Ast.decl list) : Ast.decl list =
+  let is_dfn = function Ast.DFn _ -> true | _ -> false in
+  let is_dmod = function Ast.DMod _ -> true | _ -> false in
+  let take pred ds =
+    let rec go acc = function
+      | x :: xs when pred x -> go (x :: acc) xs
+      | rest -> (List.rev acc, rest)
+    in
+    go [] ds
+  in
+  let rec go = function
+    | [] -> []
+    | d :: _ as ds when is_dfn d ->
+      let run, rest = take is_dfn ds in
+      dependency_order_dfn_run run @ go rest
+    | d :: _ as ds when is_dmod d ->
+      let run, rest = take is_dmod ds in
+      dependency_order_dmod_run run @ go rest
+    | d :: rest -> d :: go rest
+  in
+  go decls
+
 let rec check_decl env (d : Ast.decl) : env =
   match d with
   | Ast.DFn (def, sp) ->
@@ -4560,7 +4791,7 @@ let rec check_decl env (d : Ast.decl) : env =
           bind_var def.fn_name.txt (Mono (fresh_var (env.level + 1))) e
         | _ -> e
       ) env decls in
-    let inner_env = List.fold_left check_decl pre_env decls in
+    let inner_env = List.fold_left check_decl pre_env (reorder_decls decls) in
     (* Collect the names that are explicitly public within this module. *)
     let pub_set =
       List.filter_map (function
@@ -5666,7 +5897,7 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
     ) (base_env errors type_map) m.Ast.mod_decls
   in
   (* Pass 2: full checking *)
-  let final_env = List.fold_left check_decl pre_env m.Ast.mod_decls in
+  let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
   (* Validate capability declarations for the top-level module *)
   check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;
   (* Warn about any unused imports or aliases *)
@@ -5765,7 +5996,7 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
     ) env m.Ast.mod_decls
   in
   (* Pass 2: full checking of new declarations *)
-  let _final_env = List.fold_left check_decl pre_env m.Ast.mod_decls in
+  let _final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
   (* Pass 3: tail-call enforcement *)
   enforce_tail_calls_in_decls errors m.Ast.mod_decls;
   (errors, type_map)
@@ -5810,7 +6041,7 @@ let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
          | _ -> env1)
       | _ -> env
     ) (base_env errors type_map) m.Ast.mod_decls in
-  let final_env = List.fold_left check_decl pre_env m.Ast.mod_decls in
+  let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
   check_module_needs final_env m.Ast.mod_name m.Ast.mod_decls;
   warn_unused_imports final_env;
   enforce_tail_calls_in_decls errors m.Ast.mod_decls;
