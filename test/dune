@@ -171,3 +171,31 @@
  (action (with-accepted-exit-codes 1
           (run %{exe:../bin/main.exe} --check
                imports/entry_imports_ill_typed.march))))
+
+; ── Regression: whole-program assembly must not leak named-type placeholders ──
+; `forge build` typechecks each lib file individually (`march --check <file>`)
+; with the sibling modules discovered via MARCH_LIB_PATH, so any lib file can be
+; the compile *entry* (its declarations live at the top level; the siblings are
+; wrapped modules).  Two whole-program leaks made well-typed projects fail to
+; build while `forge test` (one combined entry) passed:
+;   * a record type owned by the entry module and referenced by a sibling under
+;     its qualified name (`Cfg.Site`) resolved to a nominal TCon that would not
+;     unify with the entry's own structural use of it; and
+;   * a variant type referenced UNQUALIFIED across modules (`Node`) leaked an
+;     unresolved placeholder when the using module happened to be checked before
+;     the defining one ("I cannot find `Node`").
+; Checking either entry pulls in every sibling, so both invocations must now
+; typecheck cleanly (exit 0) regardless of which file is the entry.
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files whole_program/*.march))
+ (action (setenv MARCH_LIB_PATH whole_program
+          (run %{exe:../bin/main.exe} --check whole_program/cfg.march))))
+
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files whole_program/*.march))
+ (action (setenv MARCH_LIB_PATH whole_program
+          (run %{exe:../bin/main.exe} --check whole_program/prog.march))))

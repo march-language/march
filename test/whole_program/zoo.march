@@ -1,0 +1,10 @@
+-- Owns a variant type referenced by a sibling under its UNQUALIFIED name.
+-- Named to sort AFTER its user (`Alpha`) so the discovery order alone would
+-- check the user first — the exact arrangement that leaked an unresolved
+-- placeholder ("I cannot find `Beast`") before module dependency ordering
+-- learned to follow unqualified type/constructor references.
+mod Zoo do
+  type Beast
+    = Lion
+    | Tiger(Int)
+end

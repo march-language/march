@@ -1,0 +1,4 @@
+-- A valid entry that exercises both sibling modules.
+mod Prog do
+  fn run() : Int do Alpha.beast_score(Zoo.Lion) end
+end

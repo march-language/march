@@ -1,0 +1,10 @@
+-- Uses Zoo's `Beast` type and its constructors UNQUALIFIED, and sorts before
+-- `Zoo` alphabetically.
+mod Alpha do
+  fn beast_score(b : Beast) : Int do
+    match b do
+      Lion -> 1
+      Tiger(n) -> n
+    end
+  end
+end

@@ -1,0 +1,9 @@
+-- Owns a record type referenced by a sibling under its QUALIFIED name.
+mod Cfg do
+  type Site = {
+    title : String,
+    url   : String
+  }
+  fn default() : Site do { title = "Site", url = "" } end
+  fn site_title(s : Site) : String do s.title end
+end

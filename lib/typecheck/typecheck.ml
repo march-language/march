@@ -400,6 +400,17 @@ let lookup_ctor name env =
   | Some (ci :: _) -> Some ci
   | _ -> None
 
+(** Find the constructor [name] that belongs to [type_name] among the candidates
+    registered under that bare name.  A bare constructor name can be shared by
+    several ADTs (e.g. `Text` in both `Inline` and `XmlNode`); [lookup_ctor]
+    returns only the most-recently-registered candidate, which is order- and
+    module-arrangement-dependent.  When the expected/scrutinee type is known,
+    this lets us pick the candidate that actually matches it. *)
+let lookup_ctor_in_type name type_name env =
+  match StrMap.find_opt name env.ctors with
+  | Some cis -> List.find_opt (fun (ci : ctor_info) -> ci.ci_type = type_name) cis
+  | None -> None
+
 (** Add [ci] under [key] in [ctors], keeping all infos for the same name.
     Deduplicates: if a ctor_info structurally identical (same ci_type,
     ci_params, and ci_arg_tys) already exists, no-op.  Two types with
@@ -2088,7 +2099,7 @@ let check_linear_all_consumed env ~scope_span in_scope_names =
     We don't yet resolve constructor types through a type registry —
     ADT patterns produce fresh type variables.  That will be fixed
     when [DType] declarations populate the type registry. *)
-let rec infer_pattern env (pat : Ast.pattern)
+let rec infer_pattern ?expected env (pat : Ast.pattern)
     : (string * scheme) list * ty =
   match pat with
   | Ast.PatWild _ ->
@@ -2111,11 +2122,29 @@ let rec infer_pattern env (pat : Ast.pattern)
     bindings, TTuple tys
 
   | Ast.PatCon (name, ps) ->
-    (let ci_opt = match lookup_ctor name.txt env with
+    (* When the bare constructor name is ambiguous and the scrutinee type is
+       known (threaded in from [infer_match] / nested constructor arguments),
+       prefer the candidate whose parent type matches, instead of relying on
+       [lookup_ctor]'s order-dependent "most recently registered wins". *)
+    (let ci_opt =
+       let by_expected =
+         if String.contains name.txt '.' then None
+         else
+           match expected with
+           | Some t ->
+             (match repr t with
+              | TCon (tn, _) -> lookup_ctor_in_type name.txt tn env
+              | _ -> None)
+           | None -> None
+       in
+       match by_expected with
        | Some _ as r -> r
        | None ->
-         let _, resolved = resolve_qualified_ctor name.txt env in
-         resolved
+         match lookup_ctor name.txt env with
+         | Some _ as r -> r
+         | None ->
+           let _, resolved = resolve_qualified_ctor name.txt env in
+           resolved
      in
      match ci_opt with
      | None ->
@@ -2159,7 +2188,7 @@ let rec infer_pattern env (pat : Ast.pattern)
        end else begin
          let all_bindings = ref [] in
          List.iter2 (fun pat arg_ty ->
-             let bindings, pat_ty = infer_pattern env pat in
+             let bindings, pat_ty = infer_pattern ~expected:arg_ty env pat in
              all_bindings := bindings @ !all_bindings;
              unify env ~span:name.span
                ~reason:(Some (RBuiltin
@@ -3450,7 +3479,7 @@ and check_expr env (e : Ast.expr) (expected : ty) ~reason =
   | Ast.EMatch (scrut, branches, msp), _ ->
     let scrut_ty = infer_expr env scrut in
     List.iter (fun (br : Ast.branch) ->
-        let bindings, pat_ty = infer_pattern env br.branch_pat in
+        let bindings, pat_ty = infer_pattern ~expected:scrut_ty env br.branch_pat in
         unify env ~span:msp ~reason:(Some (RMatchArm msp)) scrut_ty pat_ty;
         (* Propagate linearity from scrutinee to pattern-bound variables. *)
         let env' = bind_pattern_bindings scrut bindings env in
@@ -3499,7 +3528,7 @@ and infer_app env span f_ty args idx =
 and infer_match env span scrut scrut_ty branches =
   let result_ty = fresh_var env.level in
   List.iter (fun (br : Ast.branch) ->
-      let bindings, pat_ty = infer_pattern env br.branch_pat in
+      let bindings, pat_ty = infer_pattern ~expected:scrut_ty env br.branch_pat in
       unify env ~span ~reason:(Some (RMatchArm span)) scrut_ty pat_ty;
       (* Propagate linearity from scrutinee to pattern-bound variables. *)
       let env' = bind_pattern_bindings scrut bindings env in
@@ -4546,6 +4575,107 @@ let module_refs_in_decls (decls : Ast.decl list) : StringSet.t =
   List.iter decl decls;
   !acc
 
+(* Collect the sibling modules a module depends on through UNQUALIFIED type and
+   constructor references (`List(Block)`, `Heading(..)`, `match .. Heading(x) ->`).
+   [module_refs_in_decls] only sees qualified `Mod.x` references, so a module that
+   uses another module's variant type or constructors by their bare name records
+   no dependency and may be ordered — and therefore checked — before the defining
+   module.  At that point the bare names are not yet exported into the outer
+   scope, so the reference fails ("I cannot find `Block`").  Each bare type/ctor
+   name is resolved to its owning sibling through the supplied owner maps.  Unlike
+   pre-binding the bare names eagerly, fixing the ORDER keeps each constructor's
+   resolved type identical to the single-entry (forge test) build, so it cannot
+   perturb the constructor tags assigned during lowering. *)
+let unqualified_module_deps
+    ~(type_owner : (string, string) Hashtbl.t)
+    ~(ctor_owner : (string, string) Hashtbl.t)
+    (decls : Ast.decl list) : StringSet.t =
+  let acc = ref StringSet.empty in
+  let bare n = not (String.contains n '.') in
+  let add tbl n =
+    if bare n then
+      match Hashtbl.find_opt tbl n with
+      | Some m -> acc := StringSet.add m !acc
+      | None -> ()
+  in
+  let rec ty (t : Ast.ty) =
+    match t with
+    | Ast.TyCon (n, args) -> add type_owner n.Ast.txt; List.iter ty args
+    | Ast.TyArrow (a, b) -> ty a; ty b
+    | Ast.TyTuple ts -> List.iter ty ts
+    | Ast.TyRecord flds -> List.iter (fun (_, t) -> ty t) flds
+    | Ast.TyLinear (_, t) -> ty t
+    | Ast.TyNatOp (_, a, b) -> ty a; ty b
+    | Ast.TyVar _ | Ast.TyNat _ | Ast.TyChan _ -> ()
+  in
+  let oty = function Some t -> ty t | None -> () in
+  let rec pat (p : Ast.pattern) =
+    match p with
+    | Ast.PatCon (n, ps) -> add ctor_owner n.Ast.txt; List.iter pat ps
+    | Ast.PatAtom (_, ps, _) -> List.iter pat ps
+    | Ast.PatTuple (ps, _) -> List.iter pat ps
+    | Ast.PatRecord (fs, _) -> List.iter (fun (_, p) -> pat p) fs
+    | Ast.PatAs (p, _, _) -> pat p
+    | Ast.PatWild _ | Ast.PatVar _ | Ast.PatLit _ -> ()
+  in
+  let param (p : Ast.param) = oty p.Ast.param_ty in
+  let fn_param (fp : Ast.fn_param) =
+    match fp with
+    | Ast.FPNamed p -> param p
+    | Ast.FPDefault (p, _) -> param p
+    | Ast.FPPat pp -> pat pp
+  in
+  let rec ex (e : Ast.expr) =
+    match e with
+    | Ast.ECon (n, args, _) -> add ctor_owner n.Ast.txt; List.iter ex args
+    | Ast.EVar _ | Ast.ELit _ | Ast.EHole _ | Ast.EResultRef _
+    | Ast.EDbg (None, _) -> ()
+    | Ast.EDbg (Some i, _) -> ex i
+    | Ast.EApp (f, args, _) -> ex f; List.iter ex args
+    | Ast.ELam (ps, b, _) -> List.iter param ps; ex b
+    | Ast.EBlock (es, _) -> List.iter ex es
+    | Ast.ELet (b, _) -> pat b.Ast.bind_pat; ex b.Ast.bind_expr
+    | Ast.EMatch (s, brs, _) ->
+      ex s;
+      List.iter (fun (br : Ast.branch) ->
+          pat br.Ast.branch_pat;
+          (match br.Ast.branch_guard with Some g -> ex g | None -> ());
+          ex br.Ast.branch_body) brs
+    | Ast.ETuple (es, _) -> List.iter ex es
+    | Ast.ERecord (fs, _) -> List.iter (fun (_, e) -> ex e) fs
+    | Ast.ERecordUpdate (b, fs, _) -> ex b; List.iter (fun (_, e) -> ex e) fs
+    | Ast.EField (e, _, _) -> ex e
+    | Ast.EIf (c, t, f, _) -> ex c; ex t; ex f
+    | Ast.ECond (arms, _) -> List.iter (fun (c, b) -> ex c; ex b) arms
+    | Ast.EAnnot (e, t, _) -> ex e; ty t
+    | Ast.EAtom (_, args, _) -> List.iter ex args
+    | Ast.ESend (a, b, _) -> ex a; ex b
+    | Ast.ESpawn (e, _) -> ex e
+    | Ast.ELetFn (_, ps, rt, b, _) -> List.iter param ps; oty rt; ex b
+    | Ast.EPipe (l, r, _) -> ex l; ex r
+    | Ast.EAssert (e, _) -> ex e
+    | Ast.ESigil (_, c, _) -> ex c
+  in
+  let decl (d : Ast.decl) =
+    match d with
+    | Ast.DFn (def, _) ->
+      oty def.Ast.fn_ret_ty;
+      List.iter (fun (c : Ast.fn_clause) ->
+          List.iter fn_param c.Ast.fc_params;
+          (match c.Ast.fc_guard with Some g -> ex g | None -> ());
+          ex c.Ast.fc_body) def.Ast.fn_clauses
+    | Ast.DLet (_, b, _) -> pat b.Ast.bind_pat; ex b.Ast.bind_expr
+    | Ast.DType (_, _, _, td, _) ->
+      (match td with
+       | Ast.TDAlias t -> ty t
+       | Ast.TDRecord flds -> List.iter (fun (f : Ast.field) -> ty f.Ast.fld_ty) flds
+       | Ast.TDVariant vs ->
+         List.iter (fun (v : Ast.variant) -> List.iter ty v.Ast.var_args) vs)
+    | _ -> ()
+  in
+  List.iter decl decls;
+  !acc
+
 (* Reorder a maximal run of sibling module declarations so a module is checked
    AFTER the sibling modules it references.  Same rationale as the function-level
    ordering: a caller module that is checked before a callee module sees the
@@ -4573,6 +4703,25 @@ let dependency_order_dmod_run (run : Ast.decl list) : Ast.decl list =
     let name_set = List.fold_left (fun s n -> StringSet.add n s) StringSet.empty names in
     let by_name : (string, Ast.decl list * Ast.decl) Hashtbl.t = Hashtbl.create 16 in
     List.iter (fun (n, ds) -> Hashtbl.replace by_name n ds) info;
+    (* Map each public type / constructor name to the sibling module that defines
+       it, so a module referencing them UNQUALIFIED records a dependency on the
+       definer (see [unqualified_module_deps]). *)
+    let type_owner : (string, string) Hashtbl.t = Hashtbl.create 64 in
+    let ctor_owner : (string, string) Hashtbl.t = Hashtbl.create 64 in
+    List.iter (fun (modname, (decls, _)) ->
+        List.iter (function
+          | Ast.DType (Ast.Public, tname, _, td, _) ->
+            if not (Hashtbl.mem type_owner tname.Ast.txt) then
+              Hashtbl.replace type_owner tname.Ast.txt modname;
+            (match td with
+             | Ast.TDVariant vs ->
+               List.iter (fun (v : Ast.variant) ->
+                   if v.Ast.var_vis = Ast.Public
+                      && not (Hashtbl.mem ctor_owner v.Ast.var_name.Ast.txt) then
+                     Hashtbl.replace ctor_owner v.Ast.var_name.Ast.txt modname) vs
+             | _ -> ())
+          | _ -> ()) decls
+      ) info;
     let visited : (string, unit) Hashtbl.t = Hashtbl.create 16 in
     let out = ref [] in
     let rec visit name =
@@ -4581,7 +4730,11 @@ let dependency_order_dmod_run (run : Ast.decl list) : Ast.decl list =
         match Hashtbl.find_opt by_name name with
         | Some (decls, dm) ->
           let deps =
-            StringSet.remove name (StringSet.inter (module_refs_in_decls decls) name_set)
+            StringSet.remove name
+              (StringSet.inter name_set
+                 (StringSet.union
+                    (module_refs_in_decls decls)
+                    (unqualified_module_deps ~type_owner ~ctor_owner decls)))
           in
           StringSet.iter visit deps;
           out := dm :: !out
@@ -5780,7 +5933,21 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
                  let qctor = prefix ^ "." ^ v.var_name.txt in
                  let ci = { ci_type = qname; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
-                 { acc with ctors = add_ctor qctor ci acc.ctors }
+                 let acc = { acc with ctors = add_ctor qctor ci acc.ctors } in
+                 (* Also register the disambiguated module.type.ctor form
+                    ("Md.Inline.Text").  A wrapped sibling gets this key from the
+                    DMod export step, but the ENTRY module is unwrapped (top
+                    level) so Pass 1b is the only place it is registered — a
+                    sibling that writes `Md.Inline.Text` to disambiguate a shared
+                    constructor name would otherwise fail to resolve it.  The
+                    ci_type is the BARE type name, matching the constructor's
+                    lowering key, so it cannot perturb codegen. *)
+                 if v.var_vis <> Ast.Public then acc
+                 else
+                   let type_qctor = qname ^ "." ^ v.var_name.txt in
+                   let type_ci = { ci_type = name.txt; ci_params = param_names;
+                                   ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
+                   { acc with ctors = add_ctor type_qctor type_ci acc.ctors }
                ) e1 variants
            | Ast.TDRecord fields ->
              (* Register both local name and fully-qualified name in env.records
@@ -5896,6 +6063,22 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
       | _ -> env
     ) (base_env errors type_map) m.Ast.mod_decls
   in
+  (* Pass 1b: the entry module's own declarations live at the TOP LEVEL of the
+     combined module (only the imported sibling modules are wrapped in [DMod]).
+     They were registered under their BARE names above, but sibling modules
+     refer to the entry's types with the entry module's QUALIFIED prefix
+     (`Config.Site`).  Without a qualified binding those references fall through
+     to the module registry, which has no record-field information and so
+     resolves a record type to a NOMINAL `TCon` that will not unify with the
+     entry module's own structural use of it.  Pre-bind the entry's top-level
+     declarations under its module name exactly as a wrapped sibling would be,
+     so qualified and unqualified references resolve to the same type.  Skip
+     [DMod]s so imported modules are not double-prefixed. *)
+  let pre_env =
+    let top_level = List.filter
+      (function Ast.DMod _ -> false | _ -> true) m.Ast.mod_decls in
+    prebind_mod_members m.Ast.mod_name.txt pre_env top_level
+  in
   (* Pass 2: full checking *)
   let final_env = List.fold_left check_decl pre_env (reorder_decls m.Ast.mod_decls) in
   (* Validate capability declarations for the top-level module *)
@@ -5934,7 +6117,21 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                  let qctor = prefix ^ "." ^ v.var_name.txt in
                  let ci = { ci_type = qname; ci_params = param_names;
                             ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
-                 { acc with ctors = add_ctor qctor ci acc.ctors }
+                 let acc = { acc with ctors = add_ctor qctor ci acc.ctors } in
+                 (* Also register the disambiguated module.type.ctor form
+                    ("Md.Inline.Text").  A wrapped sibling gets this key from the
+                    DMod export step, but the ENTRY module is unwrapped (top
+                    level) so Pass 1b is the only place it is registered — a
+                    sibling that writes `Md.Inline.Text` to disambiguate a shared
+                    constructor name would otherwise fail to resolve it.  The
+                    ci_type is the BARE type name, matching the constructor's
+                    lowering key, so it cannot perturb codegen. *)
+                 if v.var_vis <> Ast.Public then acc
+                 else
+                   let type_qctor = qname ^ "." ^ v.var_name.txt in
+                   let type_ci = { ci_type = name.txt; ci_params = param_names;
+                                   ci_arg_tys = v.var_args; ci_vis = v.var_vis } in
+                   { acc with ctors = add_ctor type_qctor type_ci acc.ctors }
                ) e1 variants
            | Ast.TDRecord fields ->
              let param_names = List.map (fun (p : Ast.name) -> p.txt) params in

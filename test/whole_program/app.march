@@ -1,0 +1,5 @@
+-- References Cfg.Site (qualified) — exercises the nominal/structural record leak.
+mod App do
+  fn use_site(s : Cfg.Site) : String do Cfg.site_title(s) end
+  fn make() : Cfg.Site do Cfg.default() end
+end
