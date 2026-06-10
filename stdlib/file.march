@@ -49,6 +49,14 @@ mod File do
     file_stat(path)
   end
 
+  -- Returns Ok(mtime_int) or Err(file_error) for the given path.
+  fn mtime(path) do
+    match file_stat(path) do
+    Err(e) -> Err(e)
+    Ok(FileStat(_, _, m, _)) -> Ok(m)
+    end
+  end
+
   -- Write
 
   fn write(path, data) do file_write(path, data) end

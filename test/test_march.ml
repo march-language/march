@@ -4542,6 +4542,33 @@ let test_perceus_no_rc_for_last_use () =
   in
   Alcotest.(check bool) "last-use ownership transfer: no EDecRC" false (has_decrc f.March_tir.Tir.fn_body)
 
+(** Regression: [to_string] of a borrowed String field is the identity (see
+    llvm_emit.ml — the TString case returns the argument pointer unchanged).
+    When a function extracts a String field from a borrowed record and returns
+    [to_string(field)] (the desugaring of "${record.field}"), Perceus must NOT
+    treat the result as independently owned and emit an EDecRC: that EDecRC
+    would free the field string the record owner still references, producing a
+    heap-use-after-free when the result is compared to a literal with ==. *)
+let test_perceus_to_string_borrowed_field_no_decrc () =
+  let m = perceus_module {|mod Test do
+    type R = { content_dir : String }
+    fn acc(s : R) : String do "${s.content_dir}" end
+  end|} in
+  let f = List.find (fun fn -> fn.March_tir.Tir.fn_name = "acc") m.March_tir.Tir.tm_fns in
+  let rec has_decrc = function
+    | March_tir.Tir.EDecRC _ -> true
+    | March_tir.Tir.ELet (_, e1, e2) -> has_decrc e1 || has_decrc e2
+    | March_tir.Tir.ESeq (e1, e2) -> has_decrc e1 || has_decrc e2
+    | March_tir.Tir.ELetRec (fns, body) ->
+      List.exists (fun f -> has_decrc f.March_tir.Tir.fn_body) fns || has_decrc body
+    | March_tir.Tir.ECase (_, brs, def) ->
+      List.exists (fun b -> has_decrc b.March_tir.Tir.br_body) brs ||
+      (match def with Some e -> has_decrc e | None -> false)
+    | _ -> false
+  in
+  Alcotest.(check bool) "to_string(borrowed field) emits no EDecRC" false
+    (has_decrc f.March_tir.Tir.fn_body)
+
 let test_perceus_pipeline_no_crash () =
   (* The full pipeline including perceus runs without exception *)
   let m = perceus_module {|mod Test do
@@ -21393,6 +21420,7 @@ let () =
           Alcotest.test_case "no RC ops for primitives"  `Quick test_perceus_no_ops_for_primitives;
           Alcotest.test_case "dead binding gets EDecRC"  `Quick test_perceus_dead_binding_decrc;
           Alcotest.test_case "last use no EDecRC"        `Quick test_perceus_no_rc_for_last_use;
+          Alcotest.test_case "to_string borrowed field no EDecRC" `Quick test_perceus_to_string_borrowed_field_no_decrc;
           Alcotest.test_case "pipeline no crash"         `Quick test_perceus_pipeline_no_crash;
           Alcotest.test_case "needs_rc TCon/TInt"        `Quick test_perceus_needs_rc_tcon;
           Alcotest.test_case "preserves fn count"        `Quick test_perceus_preserves_fn_count;

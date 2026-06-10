@@ -1160,11 +1160,14 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
     emit ctx (Printf.sprintf "store ptr @%s, ptr %s, align 8" wrap_name fp);
     ("ptr", hp)
   | Tir.AVar v when Hashtbl.mem ctx.top_fns v.Tir.v_name
-                 && not (Hashtbl.mem ctx.zero_arg_fns v.Tir.v_name) ->
+                 && not (Hashtbl.mem ctx.zero_arg_fns v.Tir.v_name)
+                 && not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) ->
     (* Top-level function reference — emit its address directly (for EApp callee).
        Zero-arg functions (module-level `let` constants) are excluded here so
        they fall through to the 0-arg call path below, which calls the function
-       to materialise the value rather than returning a function pointer. *)
+       to materialise the value rather than returning a function pointer.
+       A local binding of the same name (in var_slot) shadows the top-level
+       function — fall through to the local-load path in that case. *)
     ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
   | Tir.AVar v when (let n = v.Tir.v_name in
                      String.length n >= 7 && String.sub n 0 7 = "march_") ->
@@ -1173,11 +1176,19 @@ let emit_atom ctx (atom : Tir.atom) : string * string =
        compiled_fns — so the alloca-bridge path would generate an invalid
        "%march_*.addr" load.  Emit the global address directly instead. *)
     ("ptr", "@" ^ llvm_name v.Tir.v_name)
-  | Tir.AVar v when is_builtin_fn v.Tir.v_name ->
+  | Tir.AVar v when is_builtin_fn v.Tir.v_name
+                 && not (Hashtbl.mem ctx.var_slot (llvm_name v.Tir.v_name)) ->
     (* Builtin function used as a first-class value (e.g. iolist_hash_fnv1a passed
        to a HOF).  These map to C-runtime externs via mangle_extern — never in
        var_slot or compiled_fns — so the alloca-bridge path would generate an
-       invalid "%builtin.addr" load.  Emit the mangled global address directly. *)
+       invalid "%builtin.addr" load.  Emit the mangled global address directly.
+       A LOCAL binding whose name happens to collide with a builtin (e.g. a
+       user variable named `link`, which is also the actor-linking builtin)
+       lives in var_slot and must shadow the builtin — fall through to the
+       local-load path so we load the local value instead of emitting the
+       runtime global @march_link.  (Without this guard the local `link` was
+       compiled as the global function pointer @march_link, then read as a
+       string → heap corruption / use-after-free.) *)
     ("ptr", "@" ^ llvm_name (mangle_extern v.Tir.v_name))
   (* ── AVar with no registered alloca slot ────────────────────────── *)
   (* If var_slot has no entry for this name, there is no alloca in the

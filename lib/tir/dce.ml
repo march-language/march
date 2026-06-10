@@ -118,31 +118,35 @@ let reachable_fns (m : Tir.tir_module) : StringSet.t =
   done;
   !visited
 
-let rec dce_expr ~changed : Tir.expr -> Tir.expr = function
+let rec dce_expr ~impure_fns ~changed : Tir.expr -> Tir.expr = function
   | Tir.ELet (v, rhs, body) ->
-    let rhs'  = dce_expr ~changed rhs in
-    let body' = dce_expr ~changed body in
+    let rhs'  = dce_expr ~impure_fns ~changed rhs in
+    let body' = dce_expr ~impure_fns ~changed body in
     let used  = StringSet.mem v.Tir.v_name (free_vars body') in
     if used then Tir.ELet (v, rhs', body')
-    else if Purity.is_pure rhs' then begin
+    else if Purity.is_pure_ext impure_fns rhs' then begin
       changed := true; body'
     end else begin
       changed := true; Tir.ESeq (rhs', body')
     end
   | Tir.ECase (a, branches, default) ->
     Tir.ECase (a,
-      List.map (fun b -> { b with Tir.br_body = dce_expr ~changed b.Tir.br_body }) branches,
-      Option.map (dce_expr ~changed) default)
+      List.map (fun b -> { b with Tir.br_body = dce_expr ~impure_fns ~changed b.Tir.br_body }) branches,
+      Option.map (dce_expr ~impure_fns ~changed) default)
   | Tir.ELetRec (fns, body) ->
-    Tir.ELetRec (List.map (fun fd -> { fd with Tir.fn_body = dce_expr ~changed fd.Tir.fn_body }) fns,
-                 dce_expr ~changed body)
-  | Tir.ESeq (e1, e2) -> Tir.ESeq (dce_expr ~changed e1, dce_expr ~changed e2)
+    Tir.ELetRec (List.map (fun fd -> { fd with Tir.fn_body = dce_expr ~impure_fns ~changed fd.Tir.fn_body }) fns,
+                 dce_expr ~impure_fns ~changed body)
+  | Tir.ESeq (e1, e2) -> Tir.ESeq (dce_expr ~impure_fns ~changed e1, dce_expr ~impure_fns ~changed e2)
   | other -> other
 
 let run ~changed (m : Tir.tir_module) : Tir.tir_module =
-  (* Step 1: remove dead let bindings within function bodies *)
+  (* Step 1: remove dead let bindings within function bodies.
+     Compute the transitive set of impure top-level functions first so we never
+     drop a binding whose RHS calls (directly or indirectly) an impure builtin
+     — e.g. [let _ = System.put_env(k, v)], which performs a [setenv]. *)
+  let impure_fns = Purity.impure_fns_of_module m in
   let fns' = List.map (fun fd ->
-    { fd with Tir.fn_body = dce_expr ~changed fd.Tir.fn_body }
+    { fd with Tir.fn_body = dce_expr ~impure_fns ~changed fd.Tir.fn_body }
   ) m.Tir.tm_fns in
   (* Step 2: remove unreachable top-level functions *)
   let m1 = { m with Tir.tm_fns = fns' } in

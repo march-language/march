@@ -36,7 +36,21 @@ let impure_builtins = [
   "march_set_global"; "vault_set"; "vault_drop"; "vault_update";
 ]
 
-let rec is_pure : Tir.expr -> bool = function
+module StringSet = Set.Make (String)
+
+(** Core purity check, parameterized by a set of *user-defined* function names
+    known to be impure (i.e. they transitively call an impure builtin).
+
+    [is_pure] (the unparameterized form below) passes an empty set, preserving
+    the original behavior for callers (fusion / inline) that only ask about
+    expressions built from known-pure stdlib combinators.
+
+    DCE must use [is_pure_ext] with the transitive impure-function set: it
+    inspects raw call sites such as [EApp(System.put_env, …)] whose impurity is
+    invisible at the call site — only the callee body reveals it. Treating such
+    a binding as pure would let DCE delete observable side effects (e.g. the
+    [setenv] performed by [System.put_env]). *)
+let rec is_pure_ext (impure_fns : StringSet.t) : Tir.expr -> bool = function
   | Tir.EAtom _                -> true
   | Tir.ETuple _               -> true
   | Tir.ERecord _              -> true
@@ -47,12 +61,44 @@ let rec is_pure : Tir.expr -> bool = function
   | Tir.EAtomicIncRC _ | Tir.EAtomicDecRC _ -> false
   | Tir.EApp (f, _)            ->
     not (List.mem f.Tir.v_name impure_builtins)
+    && not (StringSet.mem f.Tir.v_name impure_fns)
   | Tir.ECallPtr _             -> false  (* indirect call — unknown target *)
-  | Tir.ELet (_, rhs, body)    -> is_pure rhs && is_pure body
+  | Tir.ELet (_, rhs, body)    -> is_pure_ext impure_fns rhs && is_pure_ext impure_fns body
   | Tir.ELetRec (fns, body)    ->
-    List.for_all (fun fd -> is_pure fd.Tir.fn_body) fns && is_pure body
+    List.for_all (fun fd -> is_pure_ext impure_fns fd.Tir.fn_body) fns
+    && is_pure_ext impure_fns body
   | Tir.ECase (_, branches, default) ->
-    List.for_all (fun b -> is_pure b.Tir.br_body) branches
-    && Option.fold ~none:true ~some:is_pure default
+    List.for_all (fun b -> is_pure_ext impure_fns b.Tir.br_body) branches
+    && Option.fold ~none:true ~some:(is_pure_ext impure_fns) default
   | Tir.EUpdate _              -> true
-  | Tir.ESeq (e1, e2)          -> is_pure e1 && is_pure e2
+  | Tir.ESeq (e1, e2)          -> is_pure_ext impure_fns e1 && is_pure_ext impure_fns e2
+
+(** Backward-compatible purity check assuming no user-defined function is known
+    to be impure. Safe for callers reasoning only about builtin-based
+    expressions (fusion, inline). *)
+let is_pure (e : Tir.expr) : bool = is_pure_ext StringSet.empty e
+
+(** Compute the set of top-level function names that are *impure*: those whose
+    body either contains an [ECallPtr] / RC op, calls an impure builtin, or
+    (transitively) calls another impure top-level function. Computed as a
+    fixed point over the module's call graph. Functions whose definitions are
+    not in the module (e.g. true builtins) are handled via [impure_builtins]. *)
+let impure_fns_of_module (m : Tir.tir_module) : StringSet.t =
+  let defined =
+    List.fold_left (fun acc fd -> StringSet.add fd.Tir.fn_name acc)
+      StringSet.empty m.Tir.tm_fns in
+  let rec fixpoint impure =
+    let impure' =
+      List.fold_left (fun acc fd ->
+        if StringSet.mem fd.Tir.fn_name acc then acc
+        else if not (is_pure_ext acc fd.Tir.fn_body) then
+          StringSet.add fd.Tir.fn_name acc
+        else acc
+      ) impure m.Tir.tm_fns
+    in
+    if StringSet.cardinal impure' = StringSet.cardinal impure then impure'
+    else fixpoint impure'
+  in
+  (* Restrict the result to defined functions; builtin impurity is already
+     covered by [impure_builtins] in [is_pure_ext]. *)
+  StringSet.inter (fixpoint StringSet.empty) defined

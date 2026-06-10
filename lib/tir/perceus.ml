@@ -368,15 +368,23 @@ let wrap_incrcs (incs : Tir.var list) (inner : Tir.expr) : Tir.expr =
     function to emit an EIncRC before any consuming (last-use) call.  That
     keeps the closure's reference alive regardless of how many times the apply
     function is invoked (i.e., when the closure's own RC > 1). *)
-let find_inc_vars (atoms : Tir.atom list) (live_after : live_set) : Tir.var list =
+let find_inc_vars ?(include_borrowed_fields = true)
+    (atoms : Tir.atom list) (live_after : live_set) : Tir.var list =
   List.filter_map (function
     | Tir.AVar v
       when v.Tir.v_lin = Tir.Unr
            && needs_rc v.Tir.v_ty
            && StringSet.mem v.Tir.v_name live_after
-           && not (StringSet.mem v.Tir.v_name !_borrowed_field_vars) ->
-      (* Borrowed field vars are excluded: the record owner manages their RC,
-         so no EIncRC should be emitted even at non-last-use call sites. *)
+           && (include_borrowed_fields
+               || not (StringSet.mem v.Tir.v_name !_borrowed_field_vars)) ->
+      (* Borrowed field vars: the record owner holds their reference.  At a
+         CONSUMING position (call arg, constructor capture, return) they must
+         be dup'd (EIncRC) so the consumer's free does not invalidate the
+         owner's reference — passing them un-inc'd transfers a reference the
+         function does not own (use-after-free when the owner reads the field
+         again).  At pure BORROW reads (EField projection of a nested record)
+         the caller passes ~include_borrowed_fields:false to keep the old
+         suppression, since no ownership changes hands there. *)
       Some v
     | _ -> None
   ) atoms
@@ -390,12 +398,16 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
   | Tir.EAtom (Tir.AVar v) ->
     let lb = StringSet.add v.Tir.v_name live_after in
     if v.Tir.v_lin = Tir.Unr && needs_rc v.Tir.v_ty
-       && StringSet.mem v.Tir.v_name live_after
-       && not (StringSet.mem v.Tir.v_name !_borrowed_field_vars) then
+       && StringSet.mem v.Tir.v_name live_after then
       (* Non-last use of Unr heap value: inc before use.
-         Borrowed field vars (extracted from a borrowed record) are exempt:
-         the record owner manages the field's RC; the borrowing function must
-         not emit any EIncRC for them. *)
+         Borrowed field vars are NOT exempt here: a borrowed field is kept in
+         the live set for its whole scope (see the ELet case), so when it is
+         the result value (tail return / branch result) this inc is the
+         dup-on-escape that hands the caller an owned reference while the
+         record owner keeps its own.  Returning it un-inc'd hands the caller
+         an alias it believes it owns — the caller's consume frees the field
+         the record still references (use-after-free in sitemap/feed and
+         entry_tags reuse). *)
       (Tir.ESeq (incrc_for v (Tir.AVar v), e), lb)
     else
       (e, lb)
@@ -546,8 +558,49 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
 
        Save/restore around e2 processing so inner bindings don't contaminate
        outer scopes. *)
+    (* Does extracting a field from [src] yield a borrowed reference (i.e. the
+       record owner, not this binding, is responsible for the field's RC)?
+       Mirrors the four conditions documented on the EField case below. *)
+    let field_src_is_borrowed (src : Tir.var) : bool =
+      (match src.Tir.v_ty with Tir.TPtr _ -> false | _ -> true)
+      && (StringSet.mem src.Tir.v_name live_after
+          || StringSet.mem src.Tir.v_name !_borrowed_field_vars
+          || StringSet.mem src.Tir.v_name (live_before e2 live_after)
+          || StringMap.mem src.Tir.v_name !_var_ctx)
+    in
+    (* Look through [to_string(_)] (identity for String, see llvm_emit.ml) and
+       nested ELet chains that bind a borrowed field then convert it, e.g.
+       [let v = (let f = src.field in to_string(f))].  Returns true when the
+       result of [e] aliases a borrowed field reference. *)
+    let rec result_is_borrowed_field (e : Tir.expr) : bool =
+      match e with
+      | Tir.EApp (f, [Tir.AVar a])
+        when f.Tir.v_name = "to_string" && a.Tir.v_ty = Tir.TString ->
+        StringSet.mem a.Tir.v_name !_borrowed_field_vars
+      | Tir.ELet (iv, Tir.EField (Tir.AVar src, _), ibody)
+        when needs_rc iv.Tir.v_ty && field_src_is_borrowed src ->
+        (* [iv] is a borrowed field var inside this sub-scope; check the body
+           with that knowledge. *)
+        let saved = !_borrowed_field_vars in
+        _borrowed_field_vars := StringSet.add iv.Tir.v_name saved;
+        let r = result_is_borrowed_field ibody in
+        _borrowed_field_vars := saved;
+        r
+      | Tir.ELet (_, _, ibody) -> result_is_borrowed_field ibody
+      | _ -> false
+    in
     let is_borrowed_field =
       match e1 with
+      | _ when needs_rc v.Tir.v_ty
+               && (match e1 with
+                   | Tir.EField _ | Tir.EAtom _ -> false  (* handled below *)
+                   | _ -> result_is_borrowed_field e1) ->
+        (* RHS evaluates to a borrowed field reference (possibly via the
+           identity [to_string] and intervening field-extraction lets).  The
+           record owner manages its RC; emitting an EDecRC here would free a
+           string the owner still references — a use-after-free observed when
+           the result is compared to a literal with [==]. *)
+        true
       | Tir.EField (Tir.AVar src, _)
         when needs_rc v.Tir.v_ty
              (* TPtr sources are closure structs ($clo).  Their fields are
@@ -596,10 +649,28 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     (* Process e2 first to discover what's live going into it.
        Extend _var_ctx with [v] so that nested ECase cross-branch EDecRC
        insertion can look up [v]'s type when [v] is live in some arms and
-       dead in others.  Save/restore handles shadowing correctly. *)
+       dead in others.  Save/restore handles shadowing correctly.
+
+       A borrowed-field binding is additionally added to e2's live-at-exit
+       set.  This makes Perceus treat it exactly like a borrowed parameter /
+       closure FV for the whole scope: every CONSUMING use (call argument,
+       constructor capture, tail return) sees it live and emits an EIncRC
+       dup, so the consumer frees its own reference and the record owner's
+       reference stays valid; and it is never EDecRC'd locally (the owner
+       decrements it when the record dies).  Without the dup, a borrowed
+       field that ESCAPES (returned from an accessor like
+       [fn entry_date(e) do e.date end], or passed to a consuming callee
+       like [List.flat_map]) transfers a reference the function never owned
+       — the consumer's free leaves the record with a dangling field
+       (observed: sitemap_items freeing entry dates that feed_items then
+       read; flat_map freeing tags lists that a later filter re-read). *)
     let prev_v = StringMap.find_opt v.Tir.v_name !_var_ctx in
     _var_ctx := StringMap.add v.Tir.v_name v !_var_ctx;
-    let (e2', live_into_e2) = insert_rc_expr e2 live_after in
+    let live_after_e2 =
+      if is_borrowed_field then StringSet.add v.Tir.v_name live_after
+      else live_after
+    in
+    let (e2', live_into_e2) = insert_rc_expr e2 live_after_e2 in
     _borrowed_field_vars := prev_bfv;  (* restore after e2 *)
     (match prev_v with
      | None    -> _var_ctx := StringMap.remove v.Tir.v_name !_var_ctx
@@ -627,7 +698,20 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
         e2'
     in
     let live_for_e1 = StringSet.remove v.Tir.v_name live_into_e2 in
-    let (e1', live_before_e1) = insert_rc_expr e1 live_for_e1 in
+    let (e1', live_before_e1) =
+      match e1 with
+      | Tir.EAtom (Tir.AVar src)
+        when is_borrowed_field
+             && StringSet.mem src.Tir.v_name !_borrowed_field_vars ->
+        (* Borrowed-alias binding [let w = v] where v is itself a borrowed
+           field: w inherits borrowed status (marked above) and will receive
+           its own dup at any consuming use.  Skip RC processing of the RHS
+           atom — the generic EAtom rule would see v in the (artificially
+           extended) live set and emit a second EIncRC for the same logical
+           reference, which nothing ever decrements (a leak). *)
+        (e1, StringSet.add src.Tir.v_name live_for_e1)
+      | _ -> insert_rc_expr e1 live_for_e1
+    in
     (* Fix value-discarding ESeq patterns in the processed RHS.
        Borrow inference may produce ESeq(call, DecRC(arg)) at tail positions
        of the RHS expression (including inside nested ELet chains).  ESeq
@@ -842,7 +926,9 @@ let rec insert_rc_expr (e : Tir.expr) (live_after : live_set)
     (e', lb)
 
   | Tir.EField (a, f) ->
-    let inc_vars = find_inc_vars [a] live_after in
+    (* Field projection BORROWS the record: no ownership changes hands, so a
+       borrowed-field record var must not be dup'd here (it would leak). *)
+    let inc_vars = find_inc_vars ~include_borrowed_fields:false [a] live_after in
     let e' = wrap_incrcs inc_vars (Tir.EField (a, f)) in
     let lb = StringSet.union live_after (vars_of_atom a) in
     (e', lb)
@@ -981,11 +1067,46 @@ let rename_borrowed_shadows (borrowed : StringSet.t) (body : Tir.expr) : Tir.exp
   in
   go StringMap.empty body
 
+(* Normalize result-position bare field projections [src.f] into
+   [let $rc_N = src.f in $rc_N] before RC insertion.  A bare EField as a
+   function (or branch) RESULT escapes the record's scope: the caller receives
+   the field value believing it owns it.  Let-binding the projection routes it
+   through the ELet borrowed-field machinery, which marks the binding borrowed
+   and emits the dup-on-escape EIncRC at the tail return (see the ELet and
+   EAtom cases of [insert_rc_expr]).  Without this, single-expression
+   accessors like [fn entry_date(e) do e.date end] hand out an un-dup'd alias;
+   the caller's consume frees the field the record still owns (use-after-free
+   observed in sitemap/feed entry rendering and tags-list reuse).
+   Only projections whose field type [needs_rc] are rewritten. *)
+let rec dup_field_results (e : Tir.expr) : Tir.expr =
+  match e with
+  | Tir.EField (Tir.AVar src, f) ->
+    (match src.Tir.v_ty with
+     | Tir.TRecord fields ->
+       (match List.assoc_opt f fields with
+        | Some fty when needs_rc fty ->
+          let tmp = fresh_rc_var fty in
+          Tir.ELet (tmp, e, Tir.EAtom (Tir.AVar tmp))
+        | _ -> e)
+     | _ -> e)
+  | Tir.ELet (v, e1, e2) -> Tir.ELet (v, e1, dup_field_results e2)
+  | Tir.ESeq (e1, e2) -> Tir.ESeq (e1, dup_field_results e2)
+  | Tir.ECase (a, brs, dflt) ->
+    Tir.ECase (a,
+      List.map (fun b -> { b with Tir.br_body = dup_field_results b.Tir.br_body }) brs,
+      Option.map dup_field_results dflt)
+  | Tir.ELetRec (fns, body) ->
+    Tir.ELetRec (
+      List.map (fun fd -> { fd with Tir.fn_body = dup_field_results fd.Tir.fn_body }) fns,
+      dup_field_results body)
+  | other -> other
+
 let insert_rc ?(borrowed = StringSet.empty) (fn : Tir.fn_def) : Tir.fn_def =
   (* Rename ELet/ECase-bound variables that shadow borrowed parameters before
      RC insertion.  See [rename_borrowed_shadows] for the full rationale. *)
   let body_renamed = rename_borrowed_shadows borrowed fn.Tir.fn_body in
-  let fn' = { fn with Tir.fn_body = body_renamed } in
+  let body_normed = dup_field_results body_renamed in
+  let fn' = { fn with Tir.fn_body = body_normed } in
   _actor_sent    := collect_actor_sent_vars fn'.Tir.fn_body;
   _current_fn_name := fn'.Tir.fn_name;
   let closure_fvs = collect_closure_fvs fn' in
