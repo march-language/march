@@ -1,0 +1,22 @@
+-- Regression fixture: the ENTRY module declares a variant type, and a
+-- sibling module (auto-discovered via MARCH_LIB_PATH) disambiguates one of
+-- its constructors with the TYPE-qualified form (`TqShape.TqDot`).  Pass 1 of
+-- check_module only registered the entry's constructors under their BARE
+-- names, so the sibling — typechecked before the entry's own DType decl is
+-- reached in pass 2 — failed to resolve `TqShape.TqDot` with
+-- "I don't know a constructor called `TqShape.TqDot`".
+mod TqCtorEntry do
+
+type TqShape = TqDot(Int) | TqLine(Int, Int)
+
+fn area(s : TqShape) : Int do
+  match s do
+  TqDot(_)     -> 0
+  TqLine(a, b) -> a * b
+  end
+end
+
+fn main() : Unit do
+  println(int_to_string(area(TqLine(3, 4)) + TqCtorSibling.dot_area()))
+end
+end

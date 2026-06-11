@@ -6030,7 +6030,14 @@ let check_module ?(errors = Err.create ()) (m : Ast.module_) : Err.ctx * (Ast.sp
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
                         ; ci_vis     = v.var_vis } in
-               { e with ctors = add_ctor v.var_name.txt ci e.ctors }
+               (* Register the type-qualified key ("TypeName.CtorName") in this
+                  forward-reference pass, not just in check_decl: sibling DMods
+                  are typechecked before the entry module's own DTypes are
+                  reached, so a sibling that imports the entry and
+                  disambiguates with `Expr.Col` would otherwise fail to
+                  resolve the constructor. *)
+               let qual_key = name.txt ^ "." ^ v.var_name.txt in
+               { e with ctors = add_ctor qual_key ci (add_ctor v.var_name.txt ci e.ctors) }
              ) env1 variants
          | Ast.TDRecord fields ->
            let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
@@ -6162,7 +6169,14 @@ let check_module_with_env (env : env) (m : Ast.module_) : Err.ctx * (Ast.span, t
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
                         ; ci_vis     = v.var_vis } in
-               { e with ctors = add_ctor v.var_name.txt ci e.ctors }
+               (* Register the type-qualified key ("TypeName.CtorName") in this
+                  forward-reference pass, not just in check_decl: sibling DMods
+                  are typechecked before the entry module's own DTypes are
+                  reached, so a sibling that imports the entry and
+                  disambiguates with `Expr.Col` would otherwise fail to
+                  resolve the constructor. *)
+               let qual_key = name.txt ^ "." ^ v.var_name.txt in
+               { e with ctors = add_ctor qual_key ci (add_ctor v.var_name.txt ci e.ctors) }
              ) env1 variants
          | Ast.TDRecord fields ->
            let param_names = List.map (fun (p : Ast.name) -> p.txt) params in
@@ -6233,7 +6247,14 @@ let check_module_full ?(errors = Err.create ()) (m : Ast.module_)
                         ; ci_params  = param_names
                         ; ci_arg_tys = v.var_args
                         ; ci_vis     = v.var_vis } in
-               { e with ctors = add_ctor v.var_name.txt ci e.ctors }
+               (* Register the type-qualified key ("TypeName.CtorName") in this
+                  forward-reference pass, not just in check_decl: sibling DMods
+                  are typechecked before the entry module's own DTypes are
+                  reached, so a sibling that imports the entry and
+                  disambiguates with `Expr.Col` would otherwise fail to
+                  resolve the constructor. *)
+               let qual_key = name.txt ^ "." ^ v.var_name.txt in
+               { e with ctors = add_ctor qual_key ci (add_ctor v.var_name.txt ci e.ctors) }
              ) env1 variants
          | _ -> env1)
       | _ -> env

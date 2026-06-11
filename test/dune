@@ -199,3 +199,17 @@
        (glob_files whole_program/*.march))
  (action (setenv MARCH_LIB_PATH whole_program
           (run %{exe:../bin/main.exe} --check whole_program/prog.march))))
+
+; ── Regression: TYPE-qualified ctors of the ENTRY module used by siblings ──
+; Pass 1 of check_module registered the entry module's variant constructors
+; under their BARE names only; the "TypeName.CtorName" key was added in
+; check_decl (pass 2).  A sibling loaded via the transitive-import path
+; (dotted module name → loads first → imports a plain sibling) is checked
+; before the entry's own DType decl is reached, so its `TqShape.TqDot`
+; reference failed with "I don't know a constructor called `TqShape.TqDot`".
+(rule
+ (alias runtest)
+ (deps (file %{exe:../bin/main.exe})
+       (glob_files imports/tq_ctor/*.march))
+ (action (setenv MARCH_LIB_PATH imports/tq_ctor
+          (run %{exe:../bin/main.exe} --check imports/tq_ctor/tq_ctor_entry.march))))
